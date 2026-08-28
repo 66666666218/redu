@@ -1,0 +1,15 @@
+services:
+  hot-monitor:
+    build: .
+    container_name: hot-monitor
+    env_file: .env
+    environment:
+      - DATA_DIR=/app/data
+    volumes:
+      - ./data:/app/data
+    # 调度模式默认运行;如需暴露监控接口,取消 command 注释并映射 8080
+    command: ["python", "-m", "app.main"]
+    # command: ["python", "-m", "app.main", "--api"]
+    # ports:
+    #   - "8080:8080"
+    restart: unless-stopped

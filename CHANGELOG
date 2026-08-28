@@ -1,0 +1,12 @@
+# CHANGELOG
+
+## 未发布
+
+- [2026-08-29 10:00] FEAT: 实现真实指数源(抖音巨量算数 Playwright 拦截 XHR + 百度指数 requests/会话 Cookie),新增容错解析提取器 `_find_trend_points`(可单测);新增 `BAIDU_COOKIE` 配置(Files: app/services/index_fetcher.py, config/settings.py, .env.example, doc/dev.md)
+- [2026-08-29 10:00] TEST: 新增 6 项指数解析器单测(抖音/百度响应结构、时间格式、最大序列选取)(File: tests/test_index_parser.py)
+- [2026-08-29 10:00] FIX: 修复 SQLite 连接未释放导致 Windows 文件占用(ArchiveRepository 支持上下文管理;FastAPI 关闭时 close;run_pipeline 关闭自建连接)(Files: app/storage/repository.py, app/services/pipeline.py, app/api.py)
+- [2026-08-29 10:00] REFACTOR: 新增 ArchiveService 归档服务,作为"日志与归档"阶段统一入口(File: app/services/archive.py, app/services/pipeline.py)
+- [2026-08-29 10:00] TEST: 补充 24 项单测(清洗/趋势分析/代理/降级/端到端管道),并端到端验证通过(采集 51 条真实微博热搜)(Files: tests/*)
+- [2026-08-29 10:00] FEAT: 从零搭建"热点追踪与自动化监控系统"骨架(采集/清洗/指数/趋势分析/告警/归档/调度/API)(Files: config/settings.py, app/models.py, app/services/{collector,cleaner,index_fetcher,trend_analyzer,notifier,archive,pipeline}.py, app/storage/repository.py, app/utils/{proxy,logger,retry}.py, app/{main,api}.py, requirements.txt, .env.example, Dockerfile, docker-compose.yml, README.md)
+- [2026-08-29 10:00] DOCS: 将 doc/dev.md 由脚本形态重写为完整 Markdown 开发文档,补齐数据模型/配置/模块接口/部署/安全/风险(File: doc/dev.md)
+- [2026-08-29 10:00] DOCS: 新增接口规范 doc/API.md,定义健康检查/上涨趋势/告警/手动触发/运行状态接口(File: doc/API.md)

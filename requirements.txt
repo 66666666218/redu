@@ -1,0 +1,19 @@
+# ---- 核心 ----
+requests>=2.31,<3
+numpy>=1.26,<2
+APScheduler>=3.10,<4
+pydantic>=2.6,<3
+pydantic-settings>=2.2,<3
+python-dotenv>=1.0
+
+# ---- 监控接口(可选) ----
+fastapi>=0.110
+uvicorn[standard]>=0.29
+
+# ---- 指数源:巨量算数(可选,需 docker 内安装 chromium) ----
+# playwright>=1.42
+
+# ---- 开发/测试 ----
+pytest>=8.0
+ruff>=0.4
+mypy>=1.8

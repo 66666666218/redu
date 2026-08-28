@@ -1,0 +1,63 @@
+"""配置中心:从 `.env` 读取全部运行配置。
+
+使用 pydantic-settings 强类型解析,所有敏感项仅经环境变量注入,禁止硬编码。
+"""
+from __future__ import annotations
+
+from functools import lru_cache
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """系统运行配置(字段与 doc/dev.md §4 配置中心对应)。"""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    # ---- 采集 ----
+    weibo_cookie: str = ""          # 微博登录态
+    baidu_cookie: str = ""          # 百度指数登录态(降级源)
+    proxy_url: str = ""             # 隧道代理地址
+    proxy_user: str = ""            # 隧道代理账号
+    proxy_pass: str = ""            # 隧道代理密码
+    use_proxy: bool = False         # 是否启用代理(本地调试可关闭)
+
+    # ---- 分析阈值 ----
+    index_sources: str = "douyin,baidu"  # 指数源优先级链(逗号分隔)
+    mock_index: bool = True  # 本地/测试用合成指数源(免真实抓取)
+    growth_threshold: float = 0.30  # 环比增长率判定阈值
+    slope_threshold: float = 0.0    # 线性回归斜率判定阈值
+    min_heat: int = 200_000         # 候选词清洗下限热度
+    top_n: int = 10                 # 进入指数分析的热搜词数量
+    min_samples: int = 3            # 线性回归所需最少指数样本点
+
+    # ---- 调度 ----
+    job_cron: str = "*/30 * * * *"  # 采集与分析周期(Cron)
+
+    # ---- 邮件通知 ----
+    smtp_host: str = ""
+    smtp_port: int = 465
+    smtp_user: str = ""
+    smtp_pass: str = ""             # SMTP 授权码
+    notify_to: str = ""             # 收件人,英文逗号分隔
+    is_dev: bool = True             # 开发模式:不真正外发邮件
+
+    # ---- 服务 ----
+    app_port: int = 8080
+    data_dir: str = "data"          # 归档与快照根目录
+
+    @property
+    def notify_to_list(self) -> list[str]:
+        """将逗号分隔的收件人字符串转为列表,并去掉空项。"""
+        return [addr.strip() for addr in self.notify_to.split(",") if addr.strip()]
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """返回单例 Settings 实例。"""
+    return Settings()

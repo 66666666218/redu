@@ -1,0 +1,191 @@
+"""归档与持久化(见 doc/dev.md §5.7)。
+
+`ArchiveRepository` 用标准库 `sqlite3` 落盘运行记录、热搜条目、趋势分析、告警,
+并额外写 JSON 快照便于人工排查。
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+from datetime import datetime
+from pathlib import Path
+
+from app.models import Alert, HotItem, TrendAnalysis
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS runs (
+    run_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    items_collected INTEGER DEFAULT 0,
+    analyses_count INTEGER DEFAULT 0,
+    rising_count INTEGER DEFAULT 0,
+    error TEXT
+);
+CREATE TABLE IF NOT EXISTS hot_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    rank INTEGER,
+    title TEXT NOT NULL,
+    heat INTEGER,
+    category TEXT,
+    tag TEXT,
+    captured_at TEXT
+);
+CREATE TABLE IF NOT EXISTS trend_analysis (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    keyword TEXT NOT NULL,
+    source TEXT,
+    growth REAL,
+    slope REAL,
+    rising INTEGER,
+    decided_at TEXT
+);
+CREATE TABLE IF NOT EXISTS alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    keyword TEXT NOT NULL,
+    reason TEXT,
+    triggered_at TEXT
+);
+"""
+
+
+class ArchiveRepository:
+    """SQLite 归档仓库。线程安全,单进程内共享一个连接(加锁)。"""
+
+    def __init__(self, data_dir: str | Path) -> None:
+        self._dir = Path(data_dir)
+        self._dir.mkdir(parents=True, exist_ok=True)
+        self._db_path = self._dir / "monitor.db"
+        self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._lock = threading.Lock()
+        self._conn.executescript(_SCHEMA)
+        self._conn.commit()
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+    def __enter__(self) -> "ArchiveRepository":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:  # type: ignore[no-untyped-def]
+        self.close()
+        return None
+
+    # ---- 记录一次运行 ----
+    def save_run(self, run: dict) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO runs (run_id, status, started_at, finished_at,
+                                  items_collected, analyses_count, rising_count, error)
+                VALUES (:run_id, :status, :started_at, :finished_at,
+                        :items_collected, :analyses_count, :rising_count, :error)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    status=excluded.status,
+                    finished_at=excluded.finished_at,
+                    items_collected=excluded.items_collected,
+                    analyses_count=excluded.analyses_count,
+                    rising_count=excluded.rising_count,
+                    error=excluded.error
+                """,
+                run,
+            )
+            self._conn.commit()
+
+    def save_items(self, run_id: str, items: list[HotItem]) -> None:
+        with self._lock:
+            self._conn.executemany(
+                """
+                INSERT INTO hot_items (run_id, rank, title, heat, category, tag, captured_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        run_id,
+                        it.rank,
+                        it.title,
+                        it.heat,
+                        it.category,
+                        it.tag,
+                        it.captured_at.isoformat(),
+                    )
+                    for it in items
+                ],
+            )
+            self._conn.commit()
+
+    def save_analysis(self, run_id: str, analyses: list[TrendAnalysis]) -> None:
+        with self._lock:
+            self._conn.executemany(
+                """
+                INSERT INTO trend_analysis (run_id, keyword, source, growth, slope, rising, decided_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        run_id,
+                        a.keyword,
+                        a.source.value,
+                        a.growth,
+                        a.slope,
+                        int(a.rising),
+                        a.decided_at.isoformat(),
+                    )
+                    for a in analyses
+                ],
+            )
+            self._conn.commit()
+
+    def save_alert(self, run_id: str, alert: Alert) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO alerts (run_id, keyword, reason, triggered_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (run_id, alert.keyword, alert.reason, alert.triggered_at.isoformat()),
+            )
+            self._conn.commit()
+
+    # ---- 查询 ----
+    def latest_analysis(self, limit: int = 20) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT keyword, source, growth, slope, rising, decided_at
+                FROM trend_analysis
+                WHERE rising = 1
+                ORDER BY id DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def latest_alerts(self, limit: int = 20) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT keyword, reason, triggered_at FROM alerts ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def latest_run(self) -> dict | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM runs ORDER BY run_id DESC LIMIT 1").fetchone()
+        return dict(row) if row else None
+
+    # ---- JSON 快照 ----
+    def snapshot(self, run_id: str, payload: dict) -> Path:
+        snap_dir = self._dir / "snapshots"
+        snap_dir.mkdir(parents=True, exist_ok=True)
+        path = snap_dir / f"{run_id}.json"
+        with self._lock:
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        return path
