@@ -14,6 +14,7 @@ from enum import Enum
 class IndexSource(str, Enum):
     """指数数据源。"""
 
+    WEIBO = "weibo"     # 微博热度序列(由多轮采集累积)
     DOUYIN = "douyin"
     BAIDU = "baidu"
 

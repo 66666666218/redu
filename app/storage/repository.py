@@ -11,7 +11,17 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from app.models import Alert, HotItem, TrendAnalysis
+from app.models import Alert, HotItem, IndexPoint, TrendAnalysis
+
+
+def _parse_iso(value: str | None) -> datetime:
+    """解析存储的 ISO 时间字符串,失败时回退当前时间。"""
+    if not value:
+        return datetime.now()
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return datetime.now()
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -180,6 +190,22 @@ class ArchiveRepository:
         with self._lock:
             row = self._conn.execute("SELECT * FROM runs ORDER BY run_id DESC LIMIT 1").fetchone()
         return dict(row) if row else None
+
+    def keyword_heat_series(self, keyword: str, limit: int = 30) -> list[IndexPoint]:
+        """按采集先后返回某关键词的热度时间序列(每轮一个采样点)。
+
+        用于"微博热度序列"指数源:跨多轮调度累积,形成可供趋势分析的时间序列。
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT captured_at, heat FROM hot_items WHERE title = ? ORDER BY id ASC",
+                (keyword,),
+            ).fetchall()
+        points: list[IndexPoint] = []
+        for row in rows:
+            ts = _parse_iso(row["captured_at"])
+            points.append(IndexPoint(ts=ts, value=float(row["heat"])))
+        return points[-limit:]
 
     # ---- JSON 快照 ----
     def snapshot(self, run_id: str, payload: dict) -> Path:

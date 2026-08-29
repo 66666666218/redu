@@ -23,6 +23,7 @@ import requests
 
 from config.settings import Settings
 from app.models import IndexPoint, IndexSource as IndexSourceName, TrendSeries
+from app.storage import ArchiveRepository
 from app.utils import get_logger, get_proxies, retry
 
 logger = get_logger(__name__)
@@ -234,9 +235,27 @@ class BaiduIndexSource(IndexSource):
         return TrendSeries(keyword=keyword, source=IndexSourceName.BAIDU, points=points)
 
 
+class WeiboHeatIndexSource(IndexSource):
+    """微博热度序列指数源。
+
+    不做外部抓取:读取 ArchiveRepository 中跨多轮调度累积的热搜热度,
+    构成该关键词的时间序列,再交给趋势分析引擎判涨(见 doc/dev.md §5.4)。
+    需在采集入库后经多轮运行累积样本(样本下限见 `MIN_SAMPLES`)。
+    """
+
+    def __init__(self, repo: ArchiveRepository, limit: int = 30) -> None:
+        self._repo = repo
+        self._limit = limit
+
+    def fetch(self, keyword: str) -> TrendSeries:
+        points = self._repo.keyword_heat_series(keyword, limit=self._limit)
+        if not points:
+            raise IndexFetchError(f"暂无微博热度历史,keyword={keyword}")
+        return TrendSeries(keyword=keyword, source=IndexSourceName.WEIBO, points=points)
+
+
 class IndexFetcher:
     """按降级链获取指数序列。"""
-
     def __init__(self, chain: list[IndexSource]) -> None:
         self._chain = chain
 
@@ -261,22 +280,31 @@ class IndexFetcher:
         return series_list
 
 
-def build_index_fetcher(settings: Settings) -> IndexFetcher:
+def build_index_fetcher(settings: Settings, repo: ArchiveRepository | None = None) -> IndexFetcher:
     """依据配置构造指数获取器。
 
     - `mock_index=true`:使用 `MockIndexSource`(本地/测试可跑通)。
-    - 否则按 `INDEX_SOURCES`(逗号分隔、顺序即优先级)构建链,如 `douyin,baidu`。
+    - 否则按 `INDEX_SOURCES`(逗号分隔、顺序即优先级)构建链,可用值:
+      `weibo`(需 repo)、`douyin`、`baidu`。
     - 若配置为空或全部无效,兜底用 Mock 源,避免空链。
     """
     if settings.mock_index:
         return IndexFetcher([MockIndexSource()])
 
-    factories: dict[str, type[IndexSource]] = {
-        "douyin": DouyinIndexSource,
-        "baidu": BaiduIndexSource,
-    }
     names = [n.strip().lower() for n in settings.index_sources.split(",") if n.strip()]
-    chain = [factories[n](settings) for n in names if n in factories]
+    chain: list[IndexSource] = []
+    for name in names:
+        if name == "weibo":
+            if repo is None:
+                logger.warning("INDEX_SOURCES 含 weibo 但未提供 repo,已跳过")
+                continue
+            chain.append(WeiboHeatIndexSource(repo))
+        elif name == "douyin":
+            chain.append(DouyinIndexSource(settings))
+        elif name == "baidu":
+            chain.append(BaiduIndexSource(settings))
+        else:
+            logger.warning("未知指数源 %s,忽略", name)
 
     if not chain:
         logger.warning("INDEX_SOURCES=%s 无有效源,回退 MockIndexSource", settings.index_sources)

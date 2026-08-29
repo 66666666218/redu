@@ -43,7 +43,7 @@ def run_pipeline(
     repo = repo or ArchiveRepository(settings.data_dir)
     archive = ArchiveService(repo)
     notifier = notifier or get_notifier(settings)
-    fetcher = fetcher or build_index_fetcher(settings)
+    fetcher = fetcher or build_index_fetcher(settings, repo)
     collect_fn = collect_fn or collector.fetch_hot_search
 
     run_id = datetime.now().strftime("%Y%m%d%H%M%S")

@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     use_proxy: bool = False         # 是否启用代理(本地调试可关闭)
 
     # ---- 分析阈值 ----
-    index_sources: str = "douyin,baidu"  # 指数源优先级链(逗号分隔)
+    index_sources: str = "weibo"  # 指数源优先级链(逗号分隔):weibo/douyin/baidu
     mock_index: bool = True  # 本地/测试用合成指数源(免真实抓取)
     growth_threshold: float = 0.30  # 环比增长率判定阈值
     slope_threshold: float = 0.0    # 线性回归斜率判定阈值

@@ -209,6 +209,8 @@ redian/
 | 最小热度 | `MIN_HEAT` | `200000` | 候选词清洗下限 |
 | 候选词数量 | `TOP_N` | `10` | 进入指数分析的热搜词数量 |
 | 分析最少样本 | `MIN_SAMPLES` | `3` | 线性回归所需的最少指数点数 |
+| 指数源优先级链 | `INDEX_SOURCES` | `weibo` | 逗号分隔、顺序即优先级;可用 `weibo`/`douyin`/`baidu` |
+| 指数源模拟 | `MOCK_INDEX` | `true` | 本地/测试用合成指数,免真实抓取 |
 | 调度 Cron | `JOB_CRON` | `*/30 * * * *` | 采集与分析周期 |
 | SMTP 主机 | `SMTP_HOST` | 空 | 邮件服务器 |
 | SMTP 端口 | `SMTP_PORT` | `465` | 邮件服务器端口(SSL) |
@@ -252,7 +254,7 @@ redian/
 ### 5.4 指数数据获取 `services/index_fetcher.py`
 
 - 职责:对候选词逐一获取指数时间序列,得到 `list[TrendSeries]`。
-- 设计:定义抽象源 `IndexSource`,子类 `DouyinIndexSource`、`BaiduIndexSource`,由 `IndexFetcher` 按降级策略选用。降级链顺序由配置 `index_sources` 决定(逗号分隔、顺序即优先级,如 `douyin,baidu`)。
+- 设计:定义抽象源 `IndexSource`,子类 `WeiboHeatIndexSource`(跨轮次累积的微博热度序列)、`DouyinIndexSource`、`BaiduIndexSource`,由 `IndexFetcher` 按降级策略选用。降级链顺序由配置 `index_sources` 决定(逗号分隔、顺序即优先级,如 `weibo,douyin,baidu`)。
 - 降级策略(见 dev.md 原始设计):优先抖音(巨量算数);失败/不支持时回退百度指数。
   - `DouyinIndexSource`:用 Playwright 无头浏览器注入 Cookie,拦截 XHR 获取 JSON。为降低依赖与反爬风险,MVP 将 Playwright 封装为可插拔适配器,失败即降级。
   - `BaiduIndexSource`:请求百度指数接口(PC 网页版),返回 `list[IndexPoint]`。
