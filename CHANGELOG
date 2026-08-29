@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- [2026-08-29 10:00] CHORE: 配置本地 .env(注入微博 Cookie,该文件已被 .gitignore 忽略、不入库),实测真实采集 50 条热搜(File: .env)
 - [2026-08-29 10:00] FEAT: 实现真实指数源(抖音巨量算数 Playwright 拦截 XHR + 百度指数 requests/会话 Cookie),新增容错解析提取器 `_find_trend_points`(可单测);新增 `BAIDU_COOKIE` 配置(Files: app/services/index_fetcher.py, config/settings.py, .env.example, doc/dev.md)
 - [2026-08-29 10:00] TEST: 新增 6 项指数解析器单测(抖音/百度响应结构、时间格式、最大序列选取)(File: tests/test_index_parser.py)
 - [2026-08-29 10:00] FIX: 修复 SQLite 连接未释放导致 Windows 文件占用(ArchiveRepository 支持上下文管理;FastAPI 关闭时 close;run_pipeline 关闭自建连接)(Files: app/storage/repository.py, app/services/pipeline.py, app/api.py)
