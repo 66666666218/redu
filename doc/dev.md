@@ -204,6 +204,8 @@ redian/
 | 代理账号 | `PROXY_USER` | 空 | 隧道代理鉴权账号 |
 | 代理密码 | `PROXY_PASS` | 空 | 隧道代理鉴权密码 |
 | 是否启用代理 | `USE_PROXY` | `false` | 本地调试可关闭 |
+| 提取式代理API | `PROXY_EXTRACT_URL` | 空 | 厂商 getips 完整 URL(含 trade_no/sign);设置后优先走代理池 |
+| 提取池刷新秒数 | `PROXY_REFRESH_SECONDS` | `170` | 代理 IP 约 3 分钟有效,需周期刷新 |
 | 增长阈值 | `GROWTH_THRESHOLD` | `0.30` | 环比增长率判定阈值 |
 | 斜率阈值 | `SLOPE_THRESHOLD` | `0.0` | 线性回归斜率阈值 |
 | 最小热度 | `MIN_HEAT` | `200000` | 候选词清洗下限 |
@@ -231,9 +233,12 @@ redian/
   - `get_proxies(settings) -> dict[str, str] | None`:给 requests 的 `http`/`https` 代理。
   - `proxy_url(settings) -> str | None`:单条代理 URL(含鉴权)。
   - `playwright_proxy(settings) -> dict | None`:给 Playwright `browser.launch(proxy=...)`。
-- 规则(见 §4 配置):`USE_PROXY=false` 返回 `None` 走直连;否则构造隧道代理并携带 `PROXY_USER/PROXY_PASS`。
+  - `ProxyPool`:提取式代理池(见下)。
+- 两种模式(§4 配置):
+  - **隧道代理**:`USE_PROXY=true` + `PROXY_URL/USER/PASS`,单网关静态。
+  - **提取式代理池**:配置 `PROXY_EXTRACT_URL`(厂商 getips 完整 URL,含 `trade_no/sign`),自动拉取一批 `ip:port:user:pass`,按 `PROXY_REFRESH_SECONDS` 刷新、随机轮换;`get_proxies()` 优先走代理池。
 - 兼容:代理地址可带或不带 scheme;支持 `http/https`/`socks5`;socks5 时 Playwright 走直连并提示。
-- 部署:生产必须启用隧道代理(按流量计费、自动轮换出口、防服务器 IP 连坐);隧道入口与账号密码由服务商提供,填入 `.env` 的 `PROXY_URL/USER/PASS` 并将 `USE_PROXY=true`。
+- 部署:生产必须启用代理(防服务器 IP 连坐);若用提取式,注意 IP 约 3 分钟有效,超时需重新提取;白名单/账密按服务商方式配置。
 
 ### 5.2 微博热搜采集 `services/collector.py`
 

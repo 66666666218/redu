@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     proxy_user: str = ""            # 隧道代理账号
     proxy_pass: str = ""            # 隧道代理密码
     use_proxy: bool = False         # 是否启用代理(本地调试可关闭)
+    proxy_extract_url: str = ""     # 提取式代理 API(巨量IP getips URL,含 trade_no/sign)
+    proxy_refresh_seconds: int = 170  # 提取池刷新间隔(每个 IP 约 3 分钟)
 
     # ---- 分析阈值 ----
     index_sources: str = "weibo"  # 指数源优先级链(逗号分隔):weibo/douyin/baidu

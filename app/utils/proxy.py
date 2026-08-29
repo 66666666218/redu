@@ -1,12 +1,28 @@
 """代理 IP 封装(见 doc/dev.md §5.1)。
 
-采用隧道代理方案:全局统一出口,从配置构造 `proxies` 字典,
-避免在每个请求中硬编码代理地址。隧道代理自动轮换出口,无需维护 IP 池。
-同时提供 Playwright 浏览器所需的 `proxy` 参数字典。
+支持两种代理模式:
+1. **隧道代理**:单一网关 `host:port` + 账号密码(静态)。
+2. **提取式代理池**:调用厂商 API(如巨量IP `getips`)拉取一批 `ip:port:user:pass`,
+   每个 IP 约 3 分钟有效,自动轮换、失败换下一个。
+
+`get_proxies(settings)` 统一入口:
+- 配置了 `PROXY_EXTRACT_URL` → 走提取式代理池;
+- 否则配置了 `USE_PROXY + PROXY_URL` → 走静态隧道;
+- 否则返回 `None`(直连)。
 """
 from __future__ import annotations
 
+import random
+import threading
+import time
+
+import requests
+
 from config import Settings
+
+# 提取式代理池缓存(按提取 URL 隔离)。
+_pool_cache: dict[str, "ProxyPool"] = {}
+_pool_lock = threading.Lock()
 
 
 def _normalize_proxy_url(url: str) -> tuple[str, str]:
@@ -23,28 +39,12 @@ def _normalize_proxy_url(url: str) -> tuple[str, str]:
 
 
 def proxy_url(settings: Settings) -> str | None:
-    """返回单条代理 URL 字符串(含鉴权),未启用代理时返回 `None`。"""
+    """返回单条静态隧道代理 URL(含鉴权),未启用时返回 `None`。"""
     if not settings.use_proxy or not settings.proxy_url:
         return None
     scheme, host_port = _normalize_proxy_url(settings.proxy_url)
     auth = f"{settings.proxy_user}:{settings.proxy_pass}@" if settings.proxy_user else ""
     return f"{scheme}://{auth}{host_port}"
-
-
-def get_proxies(settings: Settings) -> dict[str, str] | None:
-    """构造作用于 requests 的 proxies 字典。
-
-    规则(见 doc/dev.md §5.1):
-    - `USE_PROXY=false` 时返回 `None`,走直连。
-    - 否则按 `http/https` 构造隧道代理,带 `PROXY_USER/PROXY_PASS` 鉴权。
-
-    返回:
-        `dict[str, str]`,可传给 `requests.Session.proxies`;未启用代理时返回 `None`。
-    """
-    url = proxy_url(settings)
-    if url is None:
-        return None
-    return {"http": url, "https": url}
 
 
 def playwright_proxy(settings: Settings) -> dict[str, str] | None:
@@ -56,3 +56,84 @@ def playwright_proxy(settings: Settings) -> dict[str, str] | None:
     if url is None or url.startswith("socks5://"):
         return None
     return {"server": url}
+
+
+class ProxyPool:
+    """提取式代理池。
+
+    调用厂商提取 API 拉取 `ip:port:user:pass` 列表,`get_proxies()` 随机取出一个;
+    超过 `refresh_seconds` 或池为空时自动刷新;拉取/解析失败的条目跳过。
+    """
+
+    def __init__(
+        self,
+        extract_url: str,
+        refresh_seconds: int = 170,
+        fetch: object | None = None,
+    ) -> None:
+        self._url = extract_url
+        self._ttl = max(30, refresh_seconds)
+        self._proxies: list[tuple[str, str, str, str]] = []
+        self._last = 0.0
+        self._lock = threading.Lock()
+        self._fetch = fetch or self._default_fetch
+
+    @staticmethod
+    def _default_fetch(url: str) -> list[str]:
+        resp = requests.get(url, timeout=20)
+        resp.raise_for_status()
+        return resp.text.splitlines()
+
+    @staticmethod
+    def parse_line(line: str) -> tuple[str, str, str, str] | None:
+        """解析 `ip:port:user:pass` 一行,非法则返回 `None`。"""
+        parts = line.strip().split(":")
+        if len(parts) < 4:
+            return None
+        return parts[0], parts[1], parts[2], parts[3]
+
+    def _refresh(self) -> None:
+        try:
+            for line in self._fetch(self._url):
+                parsed = self.parse_line(line)
+                if parsed:
+                    self._proxies.append(parsed)
+        except Exception:  # noqa: BLE001 - 拉取失败保留旧池,下次再刷新
+            return
+        self._last = time.time()
+
+    def get_proxies(self) -> dict[str, str] | None:
+        """返回一个随机代理的 requests proxies 字典;池空返回 `None`。"""
+        with self._lock:
+            if not self._proxies or time.time() - self._last > self._ttl:
+                self._proxies = []
+                self._refresh()
+            if not self._proxies:
+                return None
+            ip, port, user, pwd = random.choice(self._proxies)
+            url = f"http://{user}:{pwd}@{ip}:{port}"
+            return {"http": url, "https": url}
+
+
+def _get_pool(settings: Settings) -> ProxyPool | None:
+    """按提取 URL 取(或创建)代理池。"""
+    if not settings.proxy_extract_url:
+        return None
+    url = settings.proxy_extract_url.strip()
+    with _pool_lock:
+        pool = _pool_cache.get(url)
+        if pool is None:
+            pool = ProxyPool(url, settings.proxy_refresh_seconds)
+            _pool_cache[url] = pool
+    return pool
+
+
+def get_proxies(settings: Settings) -> dict[str, str] | None:
+    """构造作用于 requests 的 proxies 字典(见模块 docstring 规则)。"""
+    pool = _get_pool(settings)
+    if pool is not None:
+        return pool.get_proxies()
+    url = proxy_url(settings)
+    if url is None:
+        return None
+    return {"http": url, "https": url}
