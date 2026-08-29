@@ -9,12 +9,12 @@ from collections.abc import Callable
 from datetime import datetime
 
 from config.settings import Settings, get_settings
-from app.models import Alert, HotItem, RunStatus
+from app.models import Alert, HotItem, RunStatus, TrendAnalysis
 from app.services import cleaner, collector
 from app.services.archive import ArchiveService
 from app.services.index_fetcher import build_index_fetcher
 from app.services.notifier import Notifier, get_notifier
-from app.services.trend_analyzer import analyze_all
+from app.services.trend_analyzer import analyze
 from app.storage import ArchiveRepository
 from app.utils import get_logger
 
@@ -69,41 +69,58 @@ def run_pipeline(
         candidates = cleaner.clean(items, settings)
         keywords = [it.title for it in candidates]
 
-        # 3. 指数获取
-        series_list = fetcher.fetch_all(keywords)  # type: ignore[attr-defined]
+        # 3. 指数获取(并行采集所有信号源,用于交叉验证)
+        series_map = fetcher.fetch_parallel(keywords)  # type: ignore[attr-defined]
 
-        # 4. 趋势分析
-        analyses = analyze_all(series_list, settings)
-        result["analyses_count"] = len(analyses)
+        # 4. 趋势分析(逐序列)
+        analyses_by_keyword: dict[str, list[TrendAnalysis]] = {
+            kw: [analyze(s, settings) for s in series_list] for kw, series_list in series_map.items()
+        }
+        all_analyses = [a for lst in analyses_by_keyword.values() for a in lst]
+        result["analyses_count"] = len(all_analyses)
 
-        # 5. 告警
-        rising = [a for a in analyses if a.rising]
-        result["rising_count"] = len(rising)
-        for analysis in rising:
+        # 5. 告警(交叉验证: both=所有源同涨才告警; any=任一源涨即告警)
+        mode = getattr(settings, "alert_mode", "both")
+        rising_keywords: list[str] = []
+        for kw, lst in analyses_by_keyword.items():
+            rising_list = [a for a in lst if a.rising]
+            if not rising_list:
+                continue
+            if mode == "both" and len(rising_list) != len(lst):
+                continue  # 并非所有信号源都上涨
+            rising_keywords.append(kw)
+
+        result["rising_count"] = len(rising_keywords)
+        for kw in rising_keywords:
+            kw_analyses = analyses_by_keyword[kw]
             alert = Alert(
-                keyword=analysis.keyword,
-                reason=_reason_text(analysis),
-                sources=[
-                    {"source": analysis.source.value, "growth": analysis.growth, "slope": analysis.slope}
-                ],
+                keyword=kw,
+                reason=_reason_text(kw_analyses),
+                sources=[_source_metric(a) for a in kw_analyses if a.rising],
             )
             notifier.notify(alert)
             archive.record_alert(run_id, alert)
 
         # 6. 归档
         archive.record_items(run_id, items)
-        archive.record_analysis(run_id, analyses)
+        archive.record_analysis(run_id, all_analyses)
         archive.record_snapshot(
             run_id,
             {
                 "items": [item.__dict__ for item in items],
-                "analyses": [a.__dict__ for a in analyses],
+                "analyses": [a.__dict__ for a in all_analyses],
             },
         )
 
         result["finished_at"] = datetime.now().isoformat()
         archive.record_run(result)
-        logger.info("管道运行完成 run=%s 采集=%s 分析=%s 上涨=%s", run_id, len(items), len(analyses), len(rising))
+        logger.info(
+            "管道运行完成 run=%s 采集=%s 分析=%s 上涨=%s",
+            run_id,
+            len(items),
+            len(all_analyses),
+            len(rising_keywords),
+        )
         return result
 
     except Exception as exc:  # noqa: BLE001 - 捕获全部异常,记录故障并告警
@@ -126,11 +143,20 @@ def run_pipeline(
             repo.close()
 
 
-def _reason_text(analysis) -> str:
-    """将上涨分析结论转为告警原因文案。"""
-    growth = analysis.growth
-    slope = analysis.slope
-    return f"环比增长 {growth:.0%} 且斜率为正({slope:.2f})"
+def _source_metric(analysis) -> dict:
+    """单源指标摘要。"""
+    return {"source": analysis.source.value, "growth": analysis.growth, "slope": analysis.slope}
+
+
+def _reason_text(analyses: list[TrendAnalysis]) -> str:
+    """将上涨分析结论(可能多个源)转为告警原因文案。"""
+    parts = []
+    for a in analyses:
+        if a.rising:
+            growth = a.growth if a.growth is not None else 0.0
+            slope = a.slope if a.slope is not None else 0.0
+            parts.append(f"{a.source.value} 环比 {growth:.0%}/斜率 {slope:.1f}")
+    return "且".join(parts) or "上涨"
 
 
 if __name__ == "__main__":

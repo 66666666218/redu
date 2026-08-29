@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- [2026-08-29 10:00] FEAT: 增加可选交叉验证规则 `ALERT_MODE`(`both`=所有源同涨才告警 / `any`=任一源涨即告警);`IndexFetcher.fetch_parallel` 并行采集多源,管道按关键词分组聚合;预留 `IndexSource.WECHAT`;测试增至 38 项;文档 §4/§6 同步(Files: config/settings.py, .env.example, .env, app/services/{index_fetcher,pipeline}.py, app/models.py, doc/dev.md, tests/test_pipeline.py)
 - [2026-08-29 10:00] FEAT: 强化隧道代理封装:支持带/不带 scheme 与 socks5;新增 `proxy_url`/`playwright_proxy`;接入抖音源 Playwright 浏览器;测试增至 36 项;文档 §5.1 更新(Files: app/utils/proxy.py, app/utils/__init__.py, app/services/index_fetcher.py, doc/dev.md, tests/test_proxy.py)
 - [2026-08-29 10:00] CHORE: 配置 QQ 邮箱 SMTP(本地 .env,gitignored 不入库:host/port/user/授权码/收件人),`IS_DEV=false` 开启真实外发;实测发信成功,管道真实判涨链路可发邮件(File: .env)
 - [2026-08-29 10:00] FEAT: 新增「微博热度序列」指数源 `WeiboHeatIndexSource`(跨调度把热搜热度累积进 SQLite 形成时间序列),真实"采集→判涨→告警"闭环跑通(采集 52、上涨 2);新增 `IndexSource.WEIBO`、仓库 `keyword_heat_series`、`build_index_fetcher` 支持 repo;测试增至 33 项(Files: app/services/index_fetcher.py, app/storage/repository.py, app/models.py, app/services/pipeline.py, config/settings.py, .env.example, .env, doc/dev.md, README.md, tests/test_weibo_heat.py)

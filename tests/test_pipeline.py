@@ -22,6 +22,15 @@ class FakeFetcher:
             out.append(TrendSeries(keyword=kw, source=IndexSource.BAIDU, points=points))
         return out
 
+    def fetch_parallel(self, keywords: list[str]) -> dict[str, list[TrendSeries]]:
+        now = datetime.now()
+        out: dict[str, list[TrendSeries]] = {}
+        for kw in keywords:
+            values = self.RISING if kw == "明星B" else self.FLAT
+            points = [IndexPoint(ts=now + timedelta(minutes=i), value=v) for i, v in enumerate(values)]
+            out[kw] = [TrendSeries(keyword=kw, source=IndexSource.BAIDU, points=points)]
+        return out
+
 
 def _collect(settings) -> list[HotItem]:  # type: ignore[no-untyped-def]
     return [
@@ -65,3 +74,39 @@ def test_pipeline_failure_records_failed(settings, tmp_path) -> None:
     assert result["status"] == "failed"
     assert "模拟采集崩溃" in result["error"]
     assert repo.latest_run()["status"] == "failed"
+
+
+class CrossFetcher:
+    """每个关键词返回两个源:weibo 上涨、wechat 平稳(一方涨一方不涨)。"""
+
+    def fetch_parallel(self, keywords: list[str]) -> dict[str, list[TrendSeries]]:
+        now = datetime.now()
+        out: dict[str, list[TrendSeries]] = {}
+        for kw in keywords:
+            wb = [IndexPoint(ts=now + timedelta(minutes=i), value=v) for i, v in enumerate([100.0, 130.0, 170.0, 230.0])]
+            wx = [IndexPoint(ts=now + timedelta(minutes=i), value=v) for i, v in enumerate([100.0, 100.0, 100.0, 100.0])]
+            out[kw] = [
+                TrendSeries(keyword=kw, source=IndexSource.WEIBO, points=wb),
+                TrendSeries(keyword=kw, source=IndexSource.WECHAT, points=wx),
+            ]
+        return out
+
+
+def test_cross_validation_both(settings, tmp_path) -> None:
+    settings.alert_mode = "both"
+    repo = ArchiveRepository(tmp_path / "data")
+    notifier = NullNotifier()
+    result = run_pipeline(settings=settings, repo=repo, notifier=notifier, fetcher=CrossFetcher(), collect_fn=_collect)
+    # weibo 涨但 wechat 稳 → 并非所有源同涨 → 不告警
+    assert result["rising_count"] == 0
+    assert len(notifier._sent) == 0
+
+
+def test_cross_validation_any(settings, tmp_path) -> None:
+    settings.alert_mode = "any"
+    repo = ArchiveRepository(tmp_path / "data")
+    notifier = NullNotifier()
+    result = run_pipeline(settings=settings, repo=repo, notifier=notifier, fetcher=CrossFetcher(), collect_fn=_collect)
+    # 任一源涨即告警:两个候选词 weibo 均上涨
+    assert result["rising_count"] == 2
+    assert len(notifier._sent) == 2

@@ -17,6 +17,7 @@ class IndexSource(str, Enum):
     WEIBO = "weibo"     # 微博热度序列(由多轮采集累积)
     DOUYIN = "douyin"
     BAIDU = "baidu"
+    WECHAT = "wechat"   # 微信生态热度(预留)
 
 
 class RunStatus(str, Enum):

@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     # ---- 分析阈值 ----
     index_sources: str = "weibo"  # 指数源优先级链(逗号分隔):weibo/douyin/baidu
     mock_index: bool = True  # 本地/测试用合成指数源(免真实抓取)
+    alert_mode: str = "both"  # 交叉验证: both=所有信号源同涨才告警; any=任一源涨即告警
     growth_threshold: float = 0.30  # 环比增长率判定阈值
     slope_threshold: float = 0.0    # 线性回归斜率判定阈值
     min_heat: int = 200_000         # 候选词清洗下限热度

@@ -211,6 +211,7 @@ redian/
 | 分析最少样本 | `MIN_SAMPLES` | `3` | 线性回归所需的最少指数点数 |
 | 指数源优先级链 | `INDEX_SOURCES` | `weibo` | 逗号分隔、顺序即优先级;可用 `weibo`/`douyin`/`baidu` |
 | 指数源模拟 | `MOCK_INDEX` | `true` | 本地/测试用合成指数,免真实抓取 |
+| 告警模式 | `ALERT_MODE` | `both` | `both`=所有信号源同涨才告警;`any`=任一源涨即告警 |
 | 调度 Cron | `JOB_CRON` | `*/30 * * * *` | 采集与分析周期 |
 | SMTP 主机 | `SMTP_HOST` | 空 | 邮件服务器 |
 | SMTP 端口 | `SMTP_PORT` | `465` | 邮件服务器端口(SSL) |
@@ -309,16 +310,18 @@ redian/
 ```
 run_id = timestamp
 save_run(start)
-items = collector()                    # 1 采集
-candidates = cleaner(items)            # 2 清洗
-series = index_fetcher.fetch_all(candidates)  # 3 指数
-analyses = trend_analyzer.analyze_all(series) # 4 分析
-rising = [a for a in analyses if a.rising]
-if rising:
-    notifier.notify_alerts(rising)     # 5 告警
-save_items / save_analysis / snapshot   # 6 归档
+items = collector()                       # 1 采集
+candidates = cleaner(items)               # 2 清洗
+series_map = index_fetcher.fetch_parallel(candidates)  # 3 指数(并行多源)
+analyses = 逐序列 Analyze                  # 4 分析
+rising_keywords = 按 ALERT_MODE 交叉验证    # 5 告警(both/any)
+notifier.notify(keyword)                  #   5 触达
+save_items / save_analysis / snapshot     # 6 归档
 save_run(end, status)
 ```
+
+> 交叉验证:`fetch_parallel` 对每个候选词**并行采集所有信号源**(如 `weibo` + 未来 `wechat`);
+> `ALERT_MODE=both` 要求所有源同涨才告警(置信度更高),`any` 任一源涨即告警(召回更高)。
 
 错误处理:整条管道包裹在最外层 try/except;任一步失败默认执行"失败告警 + 记录 `runs.status=failed`",避免静默失败。
 

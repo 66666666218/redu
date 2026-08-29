@@ -284,6 +284,24 @@ class IndexFetcher:
                 series_list.append(series)
         return series_list
 
+    def fetch_parallel(self, keywords: list[str]) -> dict[str, list[TrendSeries]]:
+        """对每个关键词**并行采集所有成功源**的序列(非降级),用于交叉验证。
+
+        返回 `{keyword: [source1_series, source2_series, ...]}`;
+        某关键词全部源失败则不出现在结果中。
+        """
+        table: dict[str, list[TrendSeries]] = {}
+        for keyword in keywords:
+            rows: list[TrendSeries] = []
+            for source in self._chain:
+                try:
+                    rows.append(source.fetch(keyword))
+                except IndexFetchError:
+                    continue
+            if rows:
+                table[keyword] = rows
+        return table
+
 
 def build_index_fetcher(settings: Settings, repo: ArchiveRepository | None = None) -> IndexFetcher:
     """依据配置构造指数获取器。
