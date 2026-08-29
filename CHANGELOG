@@ -2,6 +2,9 @@
 
 ## 未发布
 
+- [2026-08-29 10:00] CHORE: 配置本地 .env(注入微博 + 百度指数 Cookie,该文件已被 .gitignore 忽略、不入库),实测真实采集 50+ 条热搜;百度指数 API 触发 WAF 拦截(status:10018),系统优雅降级不崩溃(File: .env)
+- [2026-08-29 10:00] FIX: build_index_fetcher 此前硬编码 [抖音,百度] 忽略 INDEX_SOURCES,现改为按配置顺序建链并空链兜底 Mock(File: app/services/index_fetcher.py)
+- [2026-08-29 10:00] DOCS: doc/dev.md 增补"百度指数 WAF 拦截"风险与降级链顺序说明(File: doc/dev.md)
 - [2026-08-29 10:00] CHORE: 配置本地 .env(注入微博 Cookie,该文件已被 .gitignore 忽略、不入库),实测真实采集 50 条热搜(File: .env)
 - [2026-08-29 10:00] FEAT: 实现真实指数源(抖音巨量算数 Playwright 拦截 XHR + 百度指数 requests/会话 Cookie),新增容错解析提取器 `_find_trend_points`(可单测);新增 `BAIDU_COOKIE` 配置(Files: app/services/index_fetcher.py, config/settings.py, .env.example, doc/dev.md)
 - [2026-08-29 10:00] TEST: 新增 6 项指数解析器单测(抖音/百度响应结构、时间格式、最大序列选取)(File: tests/test_index_parser.py)

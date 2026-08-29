@@ -265,9 +265,20 @@ def build_index_fetcher(settings: Settings) -> IndexFetcher:
     """依据配置构造指数获取器。
 
     - `mock_index=true`:使用 `MockIndexSource`(本地/测试可跑通)。
-    - 否则按优先级链 `[抖音, 百度]`,自动降级。
+    - 否则按 `INDEX_SOURCES`(逗号分隔、顺序即优先级)构建链,如 `douyin,baidu`。
+    - 若配置为空或全部无效,兜底用 Mock 源,避免空链。
     """
     if settings.mock_index:
         return IndexFetcher([MockIndexSource()])
-    chain: list[IndexSource] = [DouyinIndexSource(settings), BaiduIndexSource(settings)]
+
+    factories: dict[str, type[IndexSource]] = {
+        "douyin": DouyinIndexSource,
+        "baidu": BaiduIndexSource,
+    }
+    names = [n.strip().lower() for n in settings.index_sources.split(",") if n.strip()]
+    chain = [factories[n](settings) for n in names if n in factories]
+
+    if not chain:
+        logger.warning("INDEX_SOURCES=%s 无有效源,回退 MockIndexSource", settings.index_sources)
+        return IndexFetcher([MockIndexSource()])
     return IndexFetcher(chain)

@@ -252,7 +252,7 @@ redian/
 ### 5.4 指数数据获取 `services/index_fetcher.py`
 
 - 职责:对候选词逐一获取指数时间序列,得到 `list[TrendSeries]`。
-- 设计:定义抽象源 `IndexSource`,子类 `DouyinIndexSource`、`BaiduIndexSource`,由 `IndexFetcher` 按降级策略选用。
+- 设计:定义抽象源 `IndexSource`,子类 `DouyinIndexSource`、`BaiduIndexSource`,由 `IndexFetcher` 按降级策略选用。降级链顺序由配置 `index_sources` 决定(逗号分隔、顺序即优先级,如 `douyin,baidu`)。
 - 降级策略(见 dev.md 原始设计):优先抖音(巨量算数);失败/不支持时回退百度指数。
   - `DouyinIndexSource`:用 Playwright 无头浏览器注入 Cookie,拦截 XHR 获取 JSON。为降低依赖与反爬风险,MVP 将 Playwright 封装为可插拔适配器,失败即降级。
   - `BaiduIndexSource`:请求百度指数接口(PC 网页版),返回 `list[IndexPoint]`。
@@ -380,6 +380,7 @@ uvicorn app.api:app --host 0.0.0.0 --port 8080
 | --- | --- | --- |
 | 微博 Cookie 失效 | 监控状态码,触发系统级告警提示人工更新 | MVP |
 | 巨量算数反爬升级 | 严格住宅隧道代理 + 随机休眠 3–8s + Playwright 注入 | MVP |
+| 百度指数 WAF 拦截 | 补全 AJAX 请求头 / 走隧道代理;仍受限则改用第三方指数 API 或退回到微博自身热度序列 | MVP |
 | 邮件被判垃圾 | 企业邮箱 / 正规 SMTP 授权码,规避营销词 | MVP |
 | 指数源缺失(微信) | MVP 用百度/头条指数替代,后期接第三方 API | MVP |
 | 误报率高 | 双重校验 + 样本数下限 + 阈值可配置调参 | MVP |
