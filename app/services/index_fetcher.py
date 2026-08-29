@@ -24,7 +24,7 @@ import requests
 from config.settings import Settings
 from app.models import IndexPoint, IndexSource as IndexSourceName, TrendSeries
 from app.storage import ArchiveRepository
-from app.utils import get_logger, get_proxies, retry
+from app.utils import get_logger, get_proxies, playwright_proxy, retry
 
 logger = get_logger(__name__)
 
@@ -173,7 +173,12 @@ class DouyinIndexSource(IndexSource):
 
         try:
             with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
+                proxy_cfg = playwright_proxy(self._settings)
+                browser = (
+                    p.chromium.launch(headless=True, proxy=proxy_cfg)
+                    if proxy_cfg
+                    else p.chromium.launch(headless=True)
+                )
                 page = browser.new_page()
                 page.on("response", _on_response)
                 if self._settings.weibo_cookie:

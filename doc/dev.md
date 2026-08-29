@@ -225,10 +225,14 @@ redian/
 
 ### 5.1 代理 IP 封装 `utils/proxy.py`
 
-- 职责:统一构造作用于所有外部请求的 `proxies` 字典。
-- 接口:`get_proxies(settings) -> dict[str, str] | None`
-- 规则:`USE_PROXY=false` 返回 `None`;否则按 `http/https` 构造隧道代理,携带 `PROXY_USER/PROXY_PASS`。
-- 注意:隧道代理自动轮换出口,无需维护 IP 池。
+- 职责:统一构造作用于所有外部请求的代理配置,避免在每个请求中硬编码。
+- 接口:
+  - `get_proxies(settings) -> dict[str, str] | None`:给 requests 的 `http`/`https` 代理。
+  - `proxy_url(settings) -> str | None`:单条代理 URL(含鉴权)。
+  - `playwright_proxy(settings) -> dict | None`:给 Playwright `browser.launch(proxy=...)`。
+- 规则(见 §4 配置):`USE_PROXY=false` 返回 `None` 走直连;否则构造隧道代理并携带 `PROXY_USER/PROXY_PASS`。
+- 兼容:代理地址可带或不带 scheme;支持 `http/https`/`socks5`;socks5 时 Playwright 走直连并提示。
+- 部署:生产必须启用隧道代理(按流量计费、自动轮换出口、防服务器 IP 连坐);隧道入口与账号密码由服务商提供,填入 `.env` 的 `PROXY_URL/USER/PASS` 并将 `USE_PROXY=true`。
 
 ### 5.2 微博热搜采集 `services/collector.py`
 
