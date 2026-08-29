@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- [2026-08-29 10:00] CHORE: 配置 QQ 邮箱 SMTP(本地 .env,gitignored 不入库:host/port/user/授权码/收件人),`IS_DEV=false` 开启真实外发;实测发信成功,管道真实判涨链路可发邮件(File: .env)
 - [2026-08-29 10:00] FEAT: 新增「微博热度序列」指数源 `WeiboHeatIndexSource`(跨调度把热搜热度累积进 SQLite 形成时间序列),真实"采集→判涨→告警"闭环跑通(采集 52、上涨 2);新增 `IndexSource.WEIBO`、仓库 `keyword_heat_series`、`build_index_fetcher` 支持 repo;测试增至 33 项(Files: app/services/index_fetcher.py, app/storage/repository.py, app/models.py, app/services/pipeline.py, config/settings.py, .env.example, .env, doc/dev.md, README.md, tests/test_weibo_heat.py)
 - [2026-08-29 10:00] CHORE: 配置本地 .env(注入微博 + 百度指数 Cookie,该文件已被 .gitignore 忽略、不入库),实测真实采集 50+ 条热搜;百度指数 API 触发 WAF 拦截(status:10018),系统优雅降级不崩溃(File: .env)
 - [2026-08-29 10:00] FIX: build_index_fetcher 此前硬编码 [抖音,百度] 忽略 INDEX_SOURCES,现改为按配置顺序建链并空链兜底 Mock(File: app/services/index_fetcher.py)
