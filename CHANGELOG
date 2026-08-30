@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- [2026-08-30 10:00] CHORE: 将 `doc/js/`(微信小程序编译产物,逆向参考)加入 `.gitignore`,保留磁盘不入库(File: .gitignore)
 - [2026-08-29 10:00] FEAT: 新增提取式代理池 `ProxyPool`(巨量IP `getips` 返回 `ip:port:user:pass`,自动刷新、随机轮换),`get_proxies` 优先走代理池;新增 `PROXY_EXTRACT_URL`/`PROXY_REFRESH_SECONDS`;测试增至 41 项;文档 §4/§5.1 同步(Files: app/utils/proxy.py, config/settings.py, .env.example, .env, doc/dev.md, tests/test_proxy.py)
 - [2026-08-29 10:00] FEAT: 增加可选交叉验证规则 `ALERT_MODE`(`both`=所有源同涨才告警 / `any`=任一源涨即告警);`IndexFetcher.fetch_parallel` 并行采集多源,管道按关键词分组聚合;预留 `IndexSource.WECHAT`;测试增至 38 项;文档 §4/§6 同步(Files: config/settings.py, .env.example, .env, app/services/{index_fetcher,pipeline}.py, app/models.py, doc/dev.md, tests/test_pipeline.py)
 - [2026-08-29 10:00] FEAT: 强化隧道代理封装:支持带/不带 scheme 与 socks5;新增 `proxy_url`/`playwright_proxy`;接入抖音源 Playwright 浏览器;测试增至 36 项;文档 §5.1 更新(Files: app/utils/proxy.py, app/utils/__init__.py, app/services/index_fetcher.py, doc/dev.md, tests/test_proxy.py)

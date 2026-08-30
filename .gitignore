@@ -13,6 +13,9 @@ data/
 *.db
 .snapshots/
 
+# 微信小程序产物(逆向参考,不入库)
+doc/js/
+
 # 环境与密钥
 .env
 
