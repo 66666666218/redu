@@ -80,6 +80,19 @@ CREATE TABLE IF NOT EXISTS xianyu_summary (
     summary_json TEXT NOT NULL,
     created_at TEXT
 );
+CREATE TABLE IF NOT EXISTS douhot_words (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    title TEXT,
+    score REAL,
+    rising_ratio REAL,
+    rising_speed TEXT,
+    trend_len INTEGER,
+    latest_value REAL,
+    trend_delta REAL,
+    query_day TEXT,
+    created_at TEXT
+);
 """
 
 
@@ -94,7 +107,15 @@ class ArchiveRepository:
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """轻量迁移:对旧库补充新增列(ALTER TABLE ... ADD COLUMN,列已存在则忽略)。"""
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(douhot_words)").fetchall()}
+        if "trend_delta" not in cols:
+            self._conn.execute("ALTER TABLE douhot_words ADD COLUMN trend_delta REAL")
+            self._conn.execute("UPDATE douhot_words SET trend_delta = 0 WHERE trend_delta IS NULL")
 
     def close(self) -> None:
         with self._lock:
@@ -313,6 +334,46 @@ class ArchiveRepository:
             ts = _parse_iso(row["captured_at"])
             points.append(IndexPoint(ts=ts, value=float(row["heat"])))
         return points[-limit:]
+
+    def save_douhot_words(self, run_id: str, words: list[dict]) -> None:
+        with self._lock:
+            self._conn.executemany(
+                """
+                INSERT INTO douhot_words
+                    (run_id, title, score, rising_ratio, rising_speed, trend_len, latest_value, trend_delta, query_day, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        run_id,
+                        w["title"],
+                        w.get("score") or 0,
+                        w.get("rising_ratio") or 0,
+                        w.get("rising_speed") or "",
+                        w.get("trend_len") or 0,
+                        w.get("latest_value") or 0,
+                        w.get("trend_delta") or 0,
+                        w.get("query_day") or "",
+                        datetime.now().isoformat(),
+                    )
+                    for w in words
+                ],
+            )
+            self._conn.commit()
+
+    def latest_douhot(self, limit: int = 50, min_score: float = 0.0) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT title, score, rising_ratio, rising_speed, trend_len, latest_value, trend_delta, query_day, created_at
+                FROM douhot_words
+                WHERE run_id = (SELECT run_id FROM douhot_words ORDER BY id DESC LIMIT 1)
+                  AND score >= ?
+                ORDER BY score DESC LIMIT ?
+                """,
+                (min_score, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     # ---- JSON 快照 ----
     def snapshot(self, run_id: str, payload: dict) -> Path:

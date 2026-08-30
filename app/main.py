@@ -20,6 +20,7 @@ from apscheduler.triggers.cron import CronTrigger
 from config.settings import get_settings
 from app.services.pipeline import run_pipeline
 from app.services.xianyu import run_xianyu, run_xianyu_daily
+from app.services.douhot import run_douhot_trend
 from app.utils import get_logger, setup_logging
 
 logger = get_logger(__name__)
@@ -84,6 +85,13 @@ def run_scheduler() -> None:
         _safe(run_xianyu_daily),
         _cron_trigger(settings.daily_summary_cron, {"minute": "0", "hour": 20}),
         id="xianyu_daily_summary",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        _safe(run_douhot_trend),
+        _cron_trigger(settings.douhot_cron, {"minute": "0", "hour": "*/1"}),
+        id="douhot_content_word_trend",
         max_instances=1,
         coalesce=True,
     )

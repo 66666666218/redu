@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     goofish_cookie_file: str = "data/goofish_cookie.txt"  # 闲鱼登录 Cookie 文件(gitignored)
     xianyu_keywords: str = "ps教程,网盘资源,代充,剪映会员,软件,素材,cad,ae,pr,office,会员,课程,影视,源码"  # 虚拟商品关键词
     xianyu_top_n: int = 50          # 热榜条数
+    douhot_cookie_file: str = "data/douhot_cookie.txt"  # 抖音热点宝 Cookie 文件(gitignored)
+    douhot_top_n: int = 50          # 内容词趋势条数
     proxy_url: str = ""             # 隧道代理地址
     proxy_user: str = ""            # 隧道代理账号
     proxy_pass: str = ""            # 隧道代理密码
@@ -47,6 +49,7 @@ class Settings(BaseSettings):
     job_cron: str = "*/30 * * * *"  # 采集与分析周期(Cron)
     xianyu_cron: str = "0 */2 * * *"  # 闲鱼热榜采集周期(Cron)
     daily_summary_cron: str = "0 20 * * *"  # 每日"今日热榜"总结(Cron,默认 20:00)
+    douhot_cron: str = "0 */1 * * *"  # 抖音热点·内容词趋势采集周期(Cron,浏览器较重,约每小时)
 
     # ---- 邮件通知 ----
     smtp_host: str = ""

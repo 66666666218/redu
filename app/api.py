@@ -105,6 +105,17 @@ def create_app(data_dir: str = "data") -> FastAPI:
     def xianyu_daily() -> dict:
         return repo.latest_xianyu_summary() or {"summary_date": None, "count": 0, "items": []}
 
+    @app.get("/api/v1/douhot/trends")
+    def douhot_trends(limit: int = 30, min_score: float = 0.0) -> dict:
+        rows = repo.latest_douhot(limit, min_score)
+        return {"count": len(rows), "items": rows}
+
+    @app.post("/api/v1/douhot/runs", status_code=202)
+    def douhot_run() -> dict:
+        from app.services.douhot import run_douhot_trend
+
+        return run_douhot_trend(repo=repo)
+
     return app
 
 

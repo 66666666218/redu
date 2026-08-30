@@ -221,6 +221,9 @@ redian/
 | 调度 Cron | `JOB_CRON` | `*/30 * * * *` | 采集与分析周期 |
 | 闲鱼热榜 Cron | `XIANYU_CRON` | `0 */2 * * *` | 闲鱼热榜采集周期 |
 | 每日总结 Cron | `DAILY_SUMMARY_CRON` | `0 20 * * *` | 每日"今日热榜"总结(默认 20:00) |
+| 抖音热点 Cookie 文件 | `DOUHOT_COOKIE_FILE` | `data/douhot_cookie.txt` | 抖音热点宝 Cookie(gitignored) |
+| 抖音热词条数 | `DOUHOT_TOP_N` | `50` | 内容词趋势条数上限 |
+| 抖音热词 Cron | `DOUHOT_CRON` | `0 */1 * * *` | 内容词趋势采集(浏览器较重,约每小时) |
 | SMTP 主机 | `SMTP_HOST` | 空 | 邮件服务器 |
 | SMTP 端口 | `SMTP_PORT` | `465` | 邮件服务器端口(SSL) |
 | SMTP 账号 | `SMTP_USER` | 空 | 发件账号 |
@@ -315,16 +318,25 @@ redian/
 - 接口:`run_xianyu() -> {run_id, count, items}`;API 见 `doc/API.md` §6。
 - 说明:搜索卡片不带"已售/想要数"(`want` 为空),故热销按"综合排序"近似(快、请求少);如需精确"想要数"可再抓详情页(更慢,暂不做)。闲鱼为合规公开检索,读自己登录态下的数据,注意频率与 ToS。
 
+### 5.9 抖音热点·内容词趋势 `services/douhot.py`(独立数据源)
+
+- 职责:监控抖音「生活服务热点中心」的**内容词趋势**(词 + 飙升指数 + 热度时间序列),判涨、入库、对外提供。
+- 技术:`douhot.douyin.com/douhot/v1/dashboard/hot_word/query_list` 需抖音 `a_bogus`/`msToken` 签名,裸 `requests` 调不动(`url doesn't match`);故**用 Playwright 驱动真实浏览器**(签名由浏览器合法生成,不逆向),拦截该响应,取 `data.word_list[].{title, score(飙升指数), rising_ratio, trends[...]}`。需 `DOUHOT_COOKIE_FILE` 里的授权 Cookie(登录"生活服务热点中心")。
+- 数据为**明文 JSON**(非巨量算数那种加密),词条自带 `trends` 热度序列。
+- 入库:`douhot_words` 表(score/latest_value/trend_delta/…),每次运行一条快照;`run_douhot_trend() -> {run_id, count, items}`。
+- 说明:浏览器较重(约 15s/次),`DOUHOT_CRON` 默认每小时;读自己授权数据,注意频率与 ToS。
+
 ---
 
 ## 6. 业务流程与调度
 
 `app/main.py` 提供两种启动方式:
 
-1. **调度模式(默认)**:`APScheduler` 按各自的 Cron 触发 3 个作业——
+1. **调度模式(默认)**:`APScheduler` 按各自的 Cron 触发 4 个作业——
    - `run_pipeline`(`JOB_CRON`):微博热搜采集→判涨→告警;
    - `run_xianyu`(`XIANYU_CRON`):闲鱼虚拟商品热榜采集;
-   - `run_xianyu_daily`(`DAILY_SUMMARY_CRON`):聚合当日闲鱼热榜,生成并邮件推送"今日热榜"。
+   - `run_xianyu_daily`(`DAILY_SUMMARY_CRON`):聚合当日闲鱼热榜,生成并邮件推送"今日热榜";
+   - `run_douhot_trend`(`DOUHOT_CRON`):抖音热点·内容词趋势采集。
 2. **API 模式**:`uvicorn app.api:app`,可由 `POST /api/v1/runs`、`POST /api/v1/xianyu/runs` 手动触发。
 
 `run_pipeline()` 编排:
