@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     xianyu_top_n: int = 50          # 热榜条数
     douhot_cookie_file: str = "data/douhot_cookie.txt"  # 抖音热点宝 Cookie 文件(gitignored)
     douhot_top_n: int = 50          # 内容词趋势条数
+    douhot_alert_max: int = 5       # 单次判涨告警上限(防刷屏)
+    douhot_alert_cooldown_hours: int = 24  # 同一内容词告警冷却(小时)
     proxy_url: str = ""             # 隧道代理地址
     proxy_user: str = ""            # 隧道代理账号
     proxy_pass: str = ""            # 隧道代理密码

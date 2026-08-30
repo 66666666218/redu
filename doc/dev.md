@@ -224,6 +224,8 @@ redian/
 | 抖音热点 Cookie 文件 | `DOUHOT_COOKIE_FILE` | `data/douhot_cookie.txt` | 抖音热点宝 Cookie(gitignored) |
 | 抖音热词条数 | `DOUHOT_TOP_N` | `50` | 内容词趋势条数上限 |
 | 抖音热词 Cron | `DOUHOT_CRON` | `0 */1 * * *` | 内容词趋势采集(浏览器较重,约每小时) |
+| 抖音告警条数上限 | `DOUHOT_ALERT_MAX` | `5` | 单次判涨告警上限(防刷屏) |
+| 抖音告警冷却 | `DOUHOT_ALERT_COOLDOWN_HOURS` | `24` | 同一内容词告警冷却(小时) |
 | SMTP 主机 | `SMTP_HOST` | 空 | 邮件服务器 |
 | SMTP 端口 | `SMTP_PORT` | `465` | 邮件服务器端口(SSL) |
 | SMTP 账号 | `SMTP_USER` | 空 | 发件账号 |
@@ -325,6 +327,7 @@ redian/
 - 数据为**明文 JSON**(非巨量算数那种加密),词条自带 `trends` 热度序列。
 - 入库:`douhot_words` 表(score/latest_value/trend_delta/…),每次运行一条快照;`run_douhot_trend() -> {run_id, count, items}`。
 - 说明:浏览器较重(约 15s/次),`DOUHOT_CRON` 默认每小时;读自己授权数据,注意频率与 ToS。
+- 跨轮判涨:每轮把词条飙升指数入库,`run_douhot_trend` 末尾按词取历史序列,复用双重校验(环比涨幅 > `GROWTH_THRESHOLD` 且 斜率>0)判涨;命中则邮件告警,带冷却去重(`DOUHOT_ALERT_COOLDOWN_HOURS`)与单次上限(`DOUHOT_ALERT_MAX`),返回 `rising`。(需 ≥2 轮历史才生效。)
 
 ---
 

@@ -106,19 +106,64 @@ def fetch_content_words(cookie_file: str) -> list[dict]:
     return words
 
 
-def run_douhot_trend(settings: Settings | None = None, repo: object | None = None) -> dict:
-    """采集一次内容词趋势快照:抓取 → 入库 → 返回(按飙升指数排序)。"""
+def _detect_rising(settings: Settings, repo: object, words: list[dict], notifier: object) -> tuple[list[dict], list[str]]:
+    """跨轮判涨:按词取历史飙升指数序列,双条件(环比涨幅>阈值 且 斜率>0)命中则告警(带冷却去重)。"""
+    from app.models import Alert
+    from app.services.trend_analyzer import compute_growth, compute_slope
+
+    rising: list[dict] = []
+    for w in words:
+        series = repo.douhot_score_series(w["title"], limit=10)  # type: ignore[attr-defined]
+        values = [s["score"] for s in series]
+        if len(values) < 2:
+            continue
+        growth = compute_growth(values)
+        slope = compute_slope(values)
+        if growth is None or slope is None:
+            continue
+        if growth > settings.growth_threshold and slope > 0:
+            item = dict(w)
+            item["growth"] = growth
+            item["slope"] = slope
+            rising.append(item)
+    rising.sort(key=lambda r: r["growth"], reverse=True)
+
+    alerted: list[str] = []
+    for r in rising[: settings.douhot_alert_max]:
+        if repo.douhot_alerted_recent(r["title"], settings.douhot_alert_cooldown_hours):  # type: ignore[attr-defined]
+            continue
+        alert = Alert(
+            keyword=r["title"],
+            reason=f"抖音内容词飙升指数环比 {r['growth']:.0%}/斜率 {r['slope']:.0f}",
+        )
+        notifier.notify(alert)  # type: ignore[attr-defined]
+        repo.record_douhot_alert(r["title"])  # type: ignore[attr-defined]
+        alerted.append(r["title"])
+    return rising, alerted
+
+
+def run_douhot_trend(
+    settings: Settings | None = None,
+    repo: object | None = None,
+    notifier: object | None = None,
+) -> dict:
+    """采集一次内容词趋势快照:抓取 → 入库 → 跨轮判涨 → 告警 → 返回。"""
     from config.settings import get_settings
+    from app.services.notifier import get_notifier
     from app.storage import ArchiveRepository
 
     settings = settings or get_settings()
     repo = repo or ArchiveRepository(settings.data_dir)
+    notifier = notifier or get_notifier(settings)
     words = fetch_content_words(settings.douhot_cookie_file)
     run_id = datetime.now().strftime("%Y%m%d%H%M%S")
     repo.save_douhot_words(run_id, words)  # type: ignore[attr-defined]
     top = sorted(words, key=lambda w: w["score"], reverse=True)[: settings.douhot_top_n]
-    logger.info("抖音热词趋势完成 run=%s 条数=%s", run_id, len(words))
-    return {"run_id": run_id, "count": len(words), "items": top}
+    rising, alerted = _detect_rising(settings, repo, top, notifier)
+    logger.info(
+        "抖音热词趋势完成 run=%s 条数=%s 判涨=%s 告警=%s", run_id, len(words), len(rising), len(alerted)
+    )
+    return {"run_id": run_id, "count": len(words), "items": top, "rising": rising, "rising_count": len(rising)}
 
 
 if __name__ == "__main__":

@@ -93,6 +93,10 @@ CREATE TABLE IF NOT EXISTS douhot_words (
     query_day TEXT,
     created_at TEXT
 );
+CREATE TABLE IF NOT EXISTS douhot_alerted (
+    title TEXT PRIMARY KEY,
+    alerted_at TEXT
+);
 """
 
 
@@ -374,6 +378,36 @@ class ArchiveRepository:
                 (min_score, limit),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def douhot_score_series(self, title: str, limit: int = 30) -> list[dict]:
+        """某内容词按轮的飙升指数历史(用于跨轮判涨)。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT score, created_at FROM douhot_words WHERE title = ? ORDER BY id ASC",
+                (title,),
+            ).fetchall()
+        return [{"score": r["score"], "created_at": r["created_at"]} for r in rows][-limit:]
+
+    def douhot_alerted_recent(self, title: str, hours: int) -> bool:
+        with self._lock:
+            row = self._conn.execute("SELECT alerted_at FROM douhot_alerted WHERE title = ?", (title,)).fetchone()
+        if not row:
+            return False
+        try:
+            when = datetime.fromisoformat(row["alerted_at"])
+        except ValueError:
+            return False
+        return (datetime.now() - when).total_seconds() < hours * 3600
+
+    def record_douhot_alert(self, title: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO douhot_alerted (title, alerted_at) VALUES (?, ?) "
+                "ON CONFLICT(title) DO UPDATE SET alerted_at = excluded.alerted_at",
+                (title, datetime.now().isoformat()),
+            )
+            self._conn.commit()
+
 
     # ---- JSON 快照 ----
     def snapshot(self, run_id: str, payload: dict) -> Path:
