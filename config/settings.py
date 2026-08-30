@@ -45,6 +45,8 @@ class Settings(BaseSettings):
 
     # ---- 调度 ----
     job_cron: str = "*/30 * * * *"  # 采集与分析周期(Cron)
+    xianyu_cron: str = "0 */2 * * *"  # 闲鱼热榜采集周期(Cron)
+    daily_summary_cron: str = "0 20 * * *"  # 每日"今日热榜"总结(Cron,默认 20:00)
 
     # ---- 邮件通知 ----
     smtp_host: str = ""

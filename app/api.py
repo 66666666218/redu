@@ -94,6 +94,10 @@ def create_app(data_dir: str = "data") -> FastAPI:
 
         return run_xianyu(repo=repo)
 
+    @app.get("/api/v1/xianyu/daily")
+    def xianyu_daily() -> dict:
+        return repo.latest_xianyu_summary() or {"summary_date": None, "count": 0, "items": []}
+
     return app
 
 

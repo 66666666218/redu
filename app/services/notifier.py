@@ -1,8 +1,7 @@
-"""消息触达/告警(见 doc/dev.md §5.6)。
+"""消息触达(见 doc/dev.md §5.6)。
 
-定义抽象接口 `Notifier`;MVP 提供 `EmailNotifier`(SMTP SSL);
-开发模式(`IS_DEV=true`)使用 `NullNotifier` 仅打日志、不外发。
-发信失败必须 try/except 并返回标准化结果,不阻塞主流程。
+抽象接口 `Notifier`:既用于热点告警(`notify(alert)`),也用于每日总结等
+通用邮件(`send(subject, body)`)。开发模式(`IS_DEV=true`)用 `NullNotifier` 仅打日志。
 """
 from __future__ import annotations
 
@@ -18,10 +17,14 @@ logger = get_logger(__name__)
 
 
 class Notifier:
-    """告警通道接口。"""
+    """消息触达接口。"""
+
+    def send(self, subject: str, body: str, context: str = "") -> bool:
+        """发送一封通用邮件,返回是否成功。"""
+        raise NotImplementedError
 
     def notify(self, alert: Alert, context: str = "") -> bool:
-        """发送一条告警,返回是否成功。"""
+        """发送一条热点告警,返回是否成功。"""
         raise NotImplementedError
 
 
@@ -31,6 +34,10 @@ class NullNotifier(Notifier):
     def __init__(self) -> None:
         self._sent: list[Alert] = []
 
+    def send(self, subject: str, body: str, context: str = "") -> bool:
+        logger.info("[DEV] 跳过外发邮件 subject=%s", subject)
+        return True
+
     def notify(self, alert: Alert, context: str = "") -> bool:
         logger.info("[DEV] 跳过外发告警 keyword=%s reason=%s", alert.keyword, alert.reason)
         self._sent.append(alert)
@@ -38,34 +45,38 @@ class NullNotifier(Notifier):
 
 
 class EmailNotifier(Notifier):
-    """基于 SMTP(SSL)的邮件告警实现。"""
+    """基于 SMTP(SSL)的邮件实现。"""
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
 
-    def notify(self, alert: Alert, context: str = "") -> bool:
+    def _recipients(self) -> list[str]:
+        return self._settings.notify_to_list
+
+    def send(self, subject: str, body: str, context: str = "") -> bool:
         settings = self._settings
-        recipients = settings.notify_to_list
+        recipients = self._recipients()
         if not recipients or not settings.smtp_host:
-            logger.warning("未配置 SMTP 或收件人,告警已忽略 keyword=%s", alert.keyword)
+            logger.warning("未配置 SMTP 或收件人,邮件已忽略 subject=%s", subject)
             return False
 
-        subject = f"[热点预警] {alert.keyword} {alert.reason}"
-        body = self._build_body(alert, context)
         message = MIMEText(body, "plain", "utf-8")
         message["Subject"] = subject
         message["From"] = formataddr(("热点监控", settings.smtp_user))
         message["To"] = ", ".join(recipients)
-
         try:
             with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=15) as server:
                 server.login(settings.smtp_user, settings.smtp_pass) if settings.smtp_user else None
                 server.sendmail(settings.smtp_user, recipients, message.as_string())
-            logger.info("邮件告警已发送 keyword=%s recipients=%s", alert.keyword, recipients)
+            logger.info("邮件已发送 subject=%s recipients=%s", subject, recipients)
             return True
         except smtplib.SMTPException as exc:
-            logger.error("邮件告警发送失败:%s", exc)
+            logger.error("邮件发送失败:%s", exc)
             return False
+
+    def notify(self, alert: Alert, context: str = "") -> bool:
+        subject = f"[热点预警] {alert.keyword} {alert.reason}"
+        return self.send(subject, self._build_body(alert, context), context)
 
     @staticmethod
     def _build_body(alert: Alert, context: str) -> str:

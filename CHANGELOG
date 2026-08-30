@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- [2026-08-30 10:00] FEAT: 闲鱼纳入定时调度(调度器新增 `run_xianyu`/`XIANYU_CRON` 与 `run_xianyu_daily`/`DAILY_SUMMARY_CRON`);每日"今日热榜"总结(聚合当日多轮采集→按出现场次+综合序排序→存库+邮件推送);`notifier` 抽出通用 `send(subject,body)`;新增 `xianyu_summary` 表、`xianyu_items_between`/`save_xianyu_summary`/`latest_xianyu_summary`、API `GET /api/v1/xianyu/daily`;测试增至 47 项;文档 §4/§6/API §6 同步(Files: app/main.py, app/services/{xianyu,notifier}.py, app/storage/repository.py, app/api.py, config/settings.py, .env.example, .env, doc/dev.md, doc/API.md, tests/test_xianyu.py)
 - [2026-08-30 10:00] FEAT: 新增闲鱼虚拟商品热榜采集(`services/xianyu.py`:mtop 签名 + 登录 Cookie,`mtop.taobao.idlemtopsearch.pc.search`,`appKey=34839810`;按"综合"顺序聚合去重排名),含 `xianyu_items` 归档表、API `GET /api/v1/xianyu/hot` 与 `POST /api/v1/xianyu/runs`、配置 `GOOFISH_COOKIE_FILE`/`XIANYU_KEYWORDS`/`XIANYU_TOP_N`;实测 13 关键词→50 条真实虚拟商品;测试增至 45 项;文档 §4/§5.8/API §6 同步(Files: app/services/xianyu.py, app/storage/repository.py, app/api.py, config/settings.py, .env.example, .env, doc/dev.md, doc/API.md, tests/test_xianyu.py)
 - [2026-08-30 10:00] DOCS: 抖音指数可行性探测结论——巨量算数会重定向到抖音创作者中心登录墙(`passport/get_qrcode`),需抖音登录 Cookie 且为高防 SPA,**当前不可行**;微博已可行。新增诊断工具 `scripts/probe_douyin.py`(File: scripts/probe_douyin.py)
 - [2026-08-30 10:00] DOCS: 抖音指数用登录 Cookie 实测——可越过登录墙并命中 `creator.douyin.com/api/v2/index/*`,但趋势数据为**加密**密文(`get_multi_keyword_hot_trend` 18KB 二进制,非文本、非 gzip),需复刻抖音响应解密(违反安全边界,不做),**判定不可行**。新增 `douyin_cookie` 配置与创作者中心 URL 接入,抖音源优雅降级(File: config/settings.py, app/services/index_fetcher.py, scripts/probe_douyin.py)

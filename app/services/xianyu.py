@@ -9,7 +9,7 @@ import hashlib
 import json
 import re
 import time
-from datetime import datetime
+from datetime import datetime, time
 from pathlib import Path
 
 import requests
@@ -207,13 +207,81 @@ def run_xianyu(settings: Settings | None = None, repo: object | None = None) -> 
     return {"run_id": run_id, "count": len(items), "items": items}
 
 
+def summarize_today(items: list[dict]) -> list[dict]:
+    """把当日多条热榜条目按 item 聚合,得到"今日热榜"。
+
+    排序:当日出现场次(occurrences)降序优先,其次 best_rank(综合序)升序。
+    """
+    agg: dict[str, dict] = {}
+    for it in items:
+        iid = str(it["item_id"])
+        a = agg.setdefault(
+            iid,
+            {"item_id": iid, "title": it["title"], "price": it["price"], "occurrences": 0, "best_rank": 9999, "keywords": set()},
+        )
+        a["occurrences"] += 1
+        if int(it["best_rank"]) < a["best_rank"]:
+            a["best_rank"] = int(it["best_rank"])
+        a["title"] = it["title"]
+        a["price"] = it["price"]
+        for k in str(it.get("keywords", "")).split(","):
+            if k:
+                a["keywords"].add(k)
+    ranked = sorted(agg.values(), key=lambda a: (-a["occurrences"], a["best_rank"]))
+    for a in ranked:
+        a["keywords"] = ",".join(sorted(a["keywords"]))
+    return ranked
+
+
+def build_daily_body(summary: list[dict], date_str: str) -> str:
+    lines = [f"今日闲鱼虚拟商品热榜({date_str})", f"共上榜 {len(summary)} 个(按当日出现场次 / 综合序)", ""]
+    for i, a in enumerate(summary, start=1):
+        lines.append(
+            f"{i}. [{a['occurrences']}场/综合#{a['best_rank']}] {a['title'][:40]}  {a['price']}  ({a['keywords']})"
+        )
+    return "\n".join(lines)
+
+
+def run_xianyu_daily(
+    settings: Settings | None = None,
+    repo: object | None = None,
+    notifier: object | None = None,
+    top_n: int | None = None,
+) -> dict:
+    """生成并发送"今日闲鱼热榜"总结:聚合当日采集 → 存库 → 发邮件。"""
+    from config.settings import get_settings
+    from app.services.notifier import get_notifier
+    from app.storage import ArchiveRepository
+
+    settings = settings or get_settings()
+    repo = repo or ArchiveRepository(settings.data_dir)
+    notifier = notifier or get_notifier(settings)
+    today = datetime.now().date()
+    start_iso = datetime.combine(today, time.min).isoformat()
+    items = repo.xianyu_items_between(start_iso)
+    summary = summarize_today(items)[: (top_n or settings.xianyu_top_n)]
+    repo.save_xianyu_summary(today.isoformat(), summary)  # type: ignore[attr-defined]
+    subject = f"今日闲鱼虚拟商品热榜({today.isoformat()})"
+    body = build_daily_body(summary, today.isoformat())
+    sent = notifier.send(subject, body)  # type: ignore[attr-defined]
+    logger.info("每日闲鱼热榜总结完成 date=%s 条数=%s sent=%s", today, len(summary), sent)
+    return {"date": today.isoformat(), "count": len(summary), "items": summary, "sent": sent}
+
+
 if __name__ == "__main__":
     import json
+    import sys
 
     from app.utils import setup_logging
 
     setup_logging()
-    outcome = run_xianyu()
-    print("闲鱼热榜收集完成:", outcome["count"], "条")
-    for it in outcome["items"][:10]:
-        print(f"  [{it['hit_keywords']}kw/综合#{it['best_rank']}] {it['title'][:32]}   {it['price']}")
+    if "--daily" in sys.argv:
+        outcome = run_xianyu_daily()
+        print("每日闲鱼热榜总结完成:", outcome["date"], "条数", outcome["count"], "已发", outcome.get("sent"))
+        for it in outcome["items"][:10]:
+            print(f"  [{it['occurrences']}场/综合#{it['best_rank']}] {it['title'][:32]}  {it['price']}")
+    else:
+        outcome = run_xianyu()
+        print("闲鱼热榜收集完成:", outcome["count"], "条")
+        for it in outcome["items"][:10]:
+            print(f"  [{it['hit_keywords']}kw/综合#{it['best_rank']}] {it['title'][:32]}   {it['price']}")

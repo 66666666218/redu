@@ -1,6 +1,10 @@
 """闲鱼热榜采集:抽取/价格/去重排名单测(纯逻辑,无网络)。"""
+from datetime import datetime
+
 from config.settings import Settings
-from app.services.xianyu import _extract_items, collect_hot, item_price
+from app.services.notifier import NullNotifier
+from app.services.xianyu import _extract_items, collect_hot, item_price, run_xianyu_daily, summarize_today
+from app.storage import ArchiveRepository
 
 
 def _item(iid: int, title: str, price: object = None) -> dict:
@@ -52,3 +56,43 @@ def test_collect_hot_respects_top_n(settings: Settings) -> None:
     settings.xianyu_top_n = 3
     out = collect_hot(settings, client=fake)
     assert len(out) == 3
+
+
+def _today_item(item_id: str, title: str, best_rank: int, keywords: str, price: str = "¥1") -> dict:
+    return {
+        "item_id": item_id,
+        "title": title,
+        "price": price,
+        "seller": "",
+        "pic": "",
+        "hit_keywords": 1,
+        "best_rank": best_rank,
+        "keywords": keywords,
+        "created_at": datetime.now().isoformat(),
+    }
+
+
+def test_summarize_today_aggregates_and_ranks() -> None:
+    items = [
+        _today_item("1", "商品A", 1, "kw1"),
+        _today_item("1", "商品A", 2, "kw2", "¥2"),
+        _today_item("2", "商品B", 4, "kw1"),
+    ]
+    out = summarize_today(items)
+    assert out[0]["item_id"] == "1"
+    assert out[0]["occurrences"] == 2
+    assert out[0]["best_rank"] == 1
+    assert out[0]["price"] == "¥2"
+    assert "kw1" in out[0]["keywords"] and "kw2" in out[0]["keywords"]
+    assert out[1]["item_id"] == "2"
+
+
+def test_run_xianyu_daily(settings: Settings, tmp_path) -> None:
+    repo = ArchiveRepository(tmp_path / "data")
+    repo.save_xianyu_top("run_1", [_today_item("1", "商品A", 1, "kw1"), _today_item("2", "商品B", 2, "kw2")])
+    notifier = NullNotifier()
+    out = run_xianyu_daily(settings=settings, repo=repo, notifier=notifier)
+    assert out["count"] == 2
+    assert out["items"][0]["item_id"] == "1"
+    stored = repo.latest_xianyu_summary()
+    assert stored["items"][0]["item_id"] == "1"

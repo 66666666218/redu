@@ -74,6 +74,12 @@ CREATE TABLE IF NOT EXISTS xianyu_items (
     keywords TEXT,
     created_at TEXT
 );
+CREATE TABLE IF NOT EXISTS xianyu_summary (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    summary_date TEXT NOT NULL,
+    summary_json TEXT NOT NULL,
+    created_at TEXT
+);
 """
 
 
@@ -217,6 +223,38 @@ class ArchiveRepository:
                 (limit,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def xianyu_items_between(self, start_iso: str) -> list[dict]:
+        """返回指定起始时间之后的闲鱼热榜条目(用于当日聚合)。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT item_id, title, price, seller, hit_keywords, best_rank, keywords, created_at "
+                "FROM xianyu_items WHERE created_at >= ? ORDER BY id ASC",
+                (start_iso,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def save_xianyu_summary(self, summary_date: str, items: list[dict]) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO xianyu_summary (summary_date, summary_json, created_at) VALUES (?, ?, ?)",
+                (summary_date, json.dumps(items, ensure_ascii=False), datetime.now().isoformat()),
+            )
+            self._conn.commit()
+
+    def latest_xianyu_summary(self) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT summary_date, summary_json, created_at FROM xianyu_summary "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "summary_date": row["summary_date"],
+            "created_at": row["created_at"],
+            "items": json.loads(row["summary_json"]),
+        }
 
     def latest_analysis(self, limit: int = 20) -> list[dict]:
         with self._lock:

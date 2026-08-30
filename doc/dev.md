@@ -219,6 +219,8 @@ redian/
 | 指数源模拟 | `MOCK_INDEX` | `true` | 本地/测试用合成指数,免真实抓取 |
 | 告警模式 | `ALERT_MODE` | `both` | `both`=所有信号源同涨才告警;`any`=任一源涨即告警 |
 | 调度 Cron | `JOB_CRON` | `*/30 * * * *` | 采集与分析周期 |
+| 闲鱼热榜 Cron | `XIANYU_CRON` | `0 */2 * * *` | 闲鱼热榜采集周期 |
+| 每日总结 Cron | `DAILY_SUMMARY_CRON` | `0 20 * * *` | 每日"今日热榜"总结(默认 20:00) |
 | SMTP 主机 | `SMTP_HOST` | 空 | 邮件服务器 |
 | SMTP 端口 | `SMTP_PORT` | `465` | 邮件服务器端口(SSL) |
 | SMTP 账号 | `SMTP_USER` | 空 | 发件账号 |
@@ -319,8 +321,11 @@ redian/
 
 `app/main.py` 提供两种启动方式:
 
-1. **调度模式(默认)**:`APScheduler` 按 `JOB_CRON` 触发 `run_pipeline()`。
-2. **API 模式**:`uvicorn app.api:app`,可由 `POST /api/v1/runs` 手动触发。
+1. **调度模式(默认)**:`APScheduler` 按各自的 Cron 触发 3 个作业——
+   - `run_pipeline`(`JOB_CRON`):微博热搜采集→判涨→告警;
+   - `run_xianyu`(`XIANYU_CRON`):闲鱼虚拟商品热榜采集;
+   - `run_xianyu_daily`(`DAILY_SUMMARY_CRON`):聚合当日闲鱼热榜,生成并邮件推送"今日热榜"。
+2. **API 模式**:`uvicorn app.api:app`,可由 `POST /api/v1/runs`、`POST /api/v1/xianyu/runs` 手动触发。
 
 `run_pipeline()` 编排:
 

@@ -203,3 +203,30 @@
   "items": []
 }
 ```
+
+### 6.3 获取最近一次"今日热榜"总结
+
+- **接口名称**: 获取闲鱼每日热榜总结
+- **请求方式**: GET
+- **URL 路径**: `/api/v1/xianyu/daily`
+- **请求参数**: 无
+
+**响应示例 (200)**
+```json
+{
+  "summary_date": "2026-08-30",
+  "created_at": "2026-08-30T23:18:24",
+  "items": [
+    {
+      "item_id": "1066044260035",
+      "title": "PS零基础教程全套学习 ...",
+      "price": "¥1",
+      "occurrences": 2,
+      "best_rank": 1,
+      "keywords": "ps教程,软件"
+    }
+  ]
+}
+```
+
+> 由调度器每日按 `DAILY_SUMMARY_CRON` 生成并邮件推送(见 doc/dev.md §6)。
