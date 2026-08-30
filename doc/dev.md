@@ -201,6 +201,9 @@ redian/
 | 微博 Cookie | `WEIBO_COOKIE` | 空 | 微博登录态,失效会触发告警 |
 | 百度指数 Cookie | `BAIDU_COOKIE` | 空 | 百度指数降级源登录态 |
 | 抖音指数 Cookie | `DOUYIN_COOKIE` | 空 | 抖音创作者中心/巨量算数登录态 |
+| 闲鱼热榜关键词 | `XIANYU_KEYWORDS` | `ps教程,网盘资源,代充...` | 虚拟商品搜索关键词(逗号分隔) |
+| 闲鱼热榜条数 | `XIANYU_TOP_N` | `50` | 热榜条数上限 |
+| 闲鱼 Cookie 文件 | `GOOFISH_COOKIE_FILE` | `data/goofish_cookie.txt` | 闲鱼登录 Cookie 文件(gitignored) |
 | 代理入口 | `PROXY_URL` | 空 | 隧道代理地址(HTTP/SOCKS) |
 | 代理账号 | `PROXY_USER` | 空 | 隧道代理鉴权账号 |
 | 代理密码 | `PROXY_PASS` | 空 | 隧道代理鉴权密码 |
@@ -301,6 +304,14 @@ redian/
   - 表:`hot_items`、`trend_analysis`、`alerts`、`runs`。
   - 方法:`save_run(run)`, `save_items(items)`, `save_analysis(analysis)`, `save_alert(alert)`, `latest_analysis(limit) `。
 - 每次运行额外写一份 JSON 快照到 `data/snapshots/YYYYMMDD_HHMMSS.json`(便于人工排查)。
+
+### 5.8 闲鱼虚拟商品热榜 `services/xianyu.py`(独立数据源)
+
+- 职责:按虚拟商品关键词搜索闲鱼,以闲鱼"综合"顺序作为热度基准,跨关键词聚合、去重、排名,输出热销虚拟商品榜。
+- 技术:闲鱼 H5 的 mtop 接口(`mtop.taobao.idlemtopsearch.pc.search`,`appKey=34839810`),用 `GOOFISH_COOKIE_FILE` 里的登录 Cookie + 标准 mtop 签名(算法=md5(token&t&appKey&data)),返回真实商品;每次响应会刷新 `_m_h5_tk` 令牌。
+- 排名规则:`hit_keywords`(命中关键词数)降序优先,其次 `best_rank`(综合序最小)升序。
+- 接口:`run_xianyu() -> {run_id, count, items}`;API 见 `doc/API.md` §6。
+- 说明:搜索卡片不带"已售/想要数"(`want` 为空),故热销按"综合排序"近似(快、请求少);如需精确"想要数"可再抓详情页(更慢,暂不做)。闲鱼为合规公开检索,读自己登录态下的数据,注意频率与 ToS。
 
 ---
 

@@ -1,0 +1,137 @@
+[
+  {
+    "url": "https://g.alicdn.com/??mtb/lib-promise/3.1.3/polyfillB.js,mtb/lib-mtop/2.7.3/mtop.js,mtb/lib-login/3.5.1/login.js,idleFish-F2e/perf/lottie.js,vip/havana-login/0.4.10/js/mini-login-embedder-min.js",
+    "method": "GET",
+    "post": ""
+  },
+  {
+    "url": "https://h5api.m.goofish.com/h5/mtop.gaia.nodejs.gaia.idle.data.gw.v2.index.get/1.0/?jsv=2.7.2&appKey=34839810&t=1788087435214&sign=2b055439ed53db6520673fbae15eb3f0&v=1.0&type=originaljson&accountSite=xianyu&dataType=json&timeout=20000&api=mtop.gaia.nodejs.gaia.idle.data.gw.v2.index.get&sessionOption=AutoLoginOnly&spm_cnt=a21ybx.search.0.0",
+    "method": "POST",
+    "post": "data=%7B%22piUrl%22%3A%22https%3A%2F%2Fh5.m.goofish.com%2Fwow%2Fmoyu%2Fmoyu-project%2Fxy-site%2Fpages%2Fannouncement%22%7D"
+  },
+  {
+    "url": "https://h5api.m.goofish.com/h5/mtop.taobao.idlemessage.pc.loginuser.get/1.0/?jsv=2.7.2&appKey=34839810&t=1788087435451&sign=07cffe758103397f8d49fd76daad7837&v=1.0&type=originaljson&accountSite=xianyu&dataType=json&timeout=20000&api=mtop.taobao.idlemessage.pc.loginuser.get&sessionOption=AutoLoginOnly&spm_cnt=a21ybx.search.0.0",
+    "method": "POST",
+    "post": "data=%7B%7D"
+  },
+  {
+    "url": "https://h5api.m.goofish.com/h5/mtop.gaia.nodejs.gaia.idle.data.gw.v2.index.get/1.0/?jsv=2.7.2&appKey=34839810&t=1788087435451&sign=16bc156ec31333bd03ebb7b46deb8fe1&v=1.0&type=originaljson&accountSite=xianyu&dataType=json&timeout=20000&api=mtop.gaia.nodejs.gaia.idle.data.gw.v2.index.get&sessionOption=AutoLoginOnly&spm_cnt=a21ybx.search.0.0",
+    "method": "POST",
+    "post": "data=%7B%22piUrl%22%3A%22https%3A%2F%2Fh5.m.goofish.com%2Fwow%2Fmoyu%2Fmoyu-project%2Fxy-site%2Fpages%2FsideBar%22%7D"
+  },
+  {
+    "url": "https://h5api.m.goofish.com/h5/mtop.gaia.nodejs.gaia.idle.data.gw.v2.index.get/1.0/?jsv=2.7.2&appKey=34839810&t=1788087435451&sign=6900307b4432f7071caad039c15bdbb5&v=1.0&type=originaljson&accountSite=xianyu&dataType=json&timeout=20000&api=mtop.gaia.nodejs.gaia.idle.data.gw.v2.index.get&sessionOption=AutoLoginOnly&spm_cnt=a21ybx.search.0.0",
+    "method": "POST",
+    "post": "data=%7B%22piUrl%22%3A%22https%3A%2F%2Fh5.m.goofish.com%2Fwow%2Fmoyu%2Fmoyu-project%2Fxy-site%2Fpages%2Fcommon%22%7D"
+  },
+  {
+    "url": "https://h5api.m.goofish.com/h5/mtop.idle.web.user.page.nav/1.0/?jsv=2.7.2&appKey=34839810&t=1788087435451&sign=07cffe758103397f8d49fd76daad7837&v=1.0&type=originaljson&accountSite=xianyu&dataType=json&timeout=20000&api=mtop.idle.web.user.page.nav&sessionOption=AutoLoginOnly&spm_cnt=a21ybx.search.0.0",
+    "method": "POST",
+    "post": "data=%7B%7D"
+  },
+  {
+    "url": "https://h5api.m.goofish.com/h5/mtop.taobao.idlemessage.pc.redpoint.query/1.0/?jsv=2.7.2&appKey=34839810&t=1788087435514&sign=1570b08966d9dd0bfabe4021f67610ce&v=1.0&type=originaljson&accountSite=xianyu&dataType=json&timeout=20000&api=mtop.taobao.idlemessage.pc.redpoint.query&sessionOption=AutoLoginOnly&spm_cnt=a21ybx.search.0.0",
+    "method": "POST",
+    "post": "data=%7B%22sessionTypes%22%3A%221%2C19%2C15%2C32%2C3%2C44%2C51%2C52%2C24%22%2C%22fetch%22%3A50%7D"
+  },
+  {
+    "url": "https://img.alicdn.com/bao/uploaded/i4/O1CN01l3yuLd1aRojkIrPd6_!!4611686018427379839-0-mtopupload.jpg_110x10000Q90.jpg_.webp",
+    "method": "GET",
+    "post": ""
+  },
+  {
+    "url": "https://h5api.m.goofish.com/h5/mtop.taobao.idlemtopsearch.pc.search.shade/1.0/?jsv=2.7.2&appKey=34839810&t=1788087435552&sign=94397aeeb21ce0637964ff1f8bb0474f&v=1.0&type=originaljson&accountSite=xianyu&dataType=json&timeout=20000&api=mtop.taobao.idlemtopsearch.pc.search.shade&sessionOption=AutoLoginOnly&spm_cnt=a21ybx.search.0.0",
+    "method": "POST",
+    "post": "data=%7B%22searchReqFromPage%22%3A%22xyPchome%22%7D"
+  },
+  {
+    "url": "https://h5api.m.goofish.com/h5/mtop.taobao.idlemtopsearch.pc.item.search.activate/1.0/?jsv=2.7.2&appKey=34839810&t=1788087435552&sign=6590295b0e32d0b3349e6890f38663fc&v=1.0&type=originaljson&accountSite=xianyu&dataType=json&timeout=20000&api=mtop.taobao.idlemtopsearch.pc.item.search.activate&sessionOption=AutoLoginOnly&spm_cnt=a21ybx.search.0.0",
+    "method": "POST",
+    "post": "data=%7B%22type%22%3A0%2C%22bizFrom%22%3A%22pcHome%22%2C%22searchReqFromPage%22%3A%22xyPcHome%22%7D"
+  },
+  {
+    "url": "https://h5api.m.goofish.com/h5/mtop.taobao.idlemtopsearch.pc.search/1.0/?jsv=2.7.2&appKey=34839810&t=1788087435570&sign=471ee5d413cdbcd71f6d0bf8aed53216&v=1.0&type=originaljson&accountSite=xianyu&dataType=json&timeout=20000&api=mtop.taobao.idlemtopsearch.pc.search&sessionOption=AutoLoginOnly&spm_cnt=a21ybx.search.0.0",
+    "method": "POST",
+    "post": "data=%7B%22pageNumber%22%3A1%2C%22keyword%22%3A%22ps%E6%95%99%E7%A8%8B%22%2C%22fromFilter%22%3Afalse%2C%22rowsPerPage%22%3A30%2C%22sortValue%22%3A%22%22%2C%22sortField%22%3A%22%22%2C%22customDistance%22%3A%22%22%2C%22gps%22%3A%22%22%2C%22propValueStr%22%3A%7B%7D%2C%22customGps%22%3A%22%22%2C%22searchReqFromPage%22%3A%22pcSearch%22%2C%22extraFilterValue%22%3A%22%7B%7D%22%2C%22userPositionJson%22%3A%22%7B%7D%22%7D&bx-ua=234!kxyeKVcgeeP4tjk/GTUJIuMItRRzqIvLlMR3NmmmXdOzrvcg4D0xkY7QLsgutT5Xm952unmFiexl5x679VILeqzItRRSNqnWzVWPAloZQppvc25TaY+JQQymvUiFj7j93iTtinZZQkp/cs4Tn3o6QQyNg4+0OVmd9iMYhIoZQppvSklJuZoyQCyNhsf+Z3UT37JThIZZQks/c24HelodOQYDGsf2Z3wTd7JThb3ZCps/gsJH+PWEOQODP24++3+b9Ad7hPakQppvcsU2evjJvQdYhxpZ+kUH9AdThLZZQpsvc25JZ3odQkbZVx4sZ3wd9iJThpZZOP0TekwZZ36fQCVmhu44n3wH9idTevWZQkp/c8o9Z3oHQQymhscZASCddTExvEOvwy3jkSX7nZoHQCVmhxkZn3UHUVNTukeRyZuagnTCUP4+EwnpkTy+VEmMJFv8PTwxiJvft8rGaSmEJ6lSgVbB4Jmp/jxSpHFDOPC2Ejyh2rNc+hvyte5uOUhkO0xTpd7tRncZFCDNQPV5XPpUra/VvqfVWtLLdxlB1KgMwzF2/WnQTBVTMt66j6/Mph/Ay8hsXKhu3aJP8rmANbPfaSdVZJCidGmLl50Jp6IvW5h28jQcGlyQj/Je8DIHh38TipHYtyYMlqQ5TLScDjuyYN7WnQNLcLMQN0NexQJLdbBjx/Rd30OxCAmRTHrn+LLn1AdK7AdEG2E5wtEz75/6yctokoOoBgK3soxqiuqL4RSTr2B5BsmPL6J57a0gvapms2+vZKl41aw4We2PdRh6qYxyh2IF/hq4XIQSWIQ13gOaaLQqI+3YTXHle96umszgDDZ7UgoqR5jcH2mShi5DWRpWgqCFAejxnFSnlRPkf45AjPC0KnqfSFXKljBg2y5BavqfB56a23lL90/dm1SSI+/48c9lyfEldY3zh9S4HGKFvdGh6LDtuiGRU5qZBKBmCeEoIg7eEBAr+6NDqeeiWom6UZBW9+Fnw/mk41gEdtDf0XfCztwwcZVpUriAIo2i03XBSSncFkjjBX4jjB0Bi5KhG1BYjnGVxny5ew8UHa8VwYc9JmEVMwDjz6U4vwyKst627CdUO4Q3GXsTp9AGOiiB4UDrow8qjDdRmJtuR6LlMZtArEzgURMTn+oz67bFhviBn7LyDld/Mm87KAF0dFc05OYvUXAdQdxwRyXX2WpyCJo+b/PSp54pe2m/dQGb5GOeD0g/PT+yAYPLcZJ5MJQ+nfKA9a06E2eMyqc1w+vug+psdGWf3unWV3Woch1tQ/+lMt3syUvGAR+JVkmBCln3YPymfU/EQTzT/JX075lO3XJZP6ek/iimaoxwRlv2vw6QJpClPl4Q075Md8GJNQ1VQy3zpiwPr7PWY++6rBgNgRgvQP6QrLiTTKP+oeI2brw7EltaOf0rd+DH8Bsj&bx-umidtoken=T2gAkNINHA0BvvMCtE3NXx9_nm5BiPHOGAMR51M55xiD5xP_wG67gIg3-bxrldgYAFA=&bx_et=g5qZduZQRGIZ7T1uU8mVaxnAAMQtjm55uoGjn-2mCfcMfhO087VK1ras1KzUiW3ssf6t0qV0sSuABjGmgSw059s5VRetDmcVNgsWuryYQllDGmmtxUV_QgS5VRe9CAX7KgajhOIK3jmmSqvn-XH2iIVmnHXEnxOMohV0K9lKHEYmoh0ntAHvimm0iJXEHXDimVV0K9kxtjDLTq0yYx3GqfwEp8TmdVlupjt4Ckki7FeiTnx0YP3ZZ3GemnqEB-B0E_tPlb4-14gUtMtZ0JD4M4EfwhhizkUqru12vJ0-1cZi4ZdoZyFUeqqhZnkLLJ4juk1PY2Z3BygUJ6I7acPqrl0enteULymUum7vZb4LT830x_xqpyPTYDZGhNn_P8ZxrljwwXg-3S38c_Ktsqjz3IHntR6hKiLqSvHEN9WHPILs-JJ5IiLvkVOKLb6GIELxSvHEN9WekE369vl5IOf.."
+  },
+  {
+    "url": "https://img.alicdn.com/bao/uploaded/i1/O1CN01JWW2IZ23JgcG8vvHX_!!4611686018427383219-0-mtopupload.jpg_110x10000Q90.jpg_.webp",
+    "method": "GET",
+    "post": ""
+  },
+  {
+    "url": "https://img.alicdn.com/bao/uploaded/i4/O1CN010p6IEM1oQMBTyoOma_!!4611686018427381411-0-mtopupload.jpg_110x10000Q90.jpg_.webp",
+    "method": "GET",
+    "post": ""
+  },
+  {
+    "url": "https://img.alicdn.com/bao/uploaded/i1/O1CN01rVE6Si1QWGWhmzimk_!!4611686018427383951-0-mtopupload.jpg_110x10000Q90.jpg_.webp",
+    "method": "GET",
+    "post": ""
+  },
+  {
+    "url": "https://img.alicdn.com/bao/uploaded/i1/O1CN01wmnkAq1PbTKD8LkDq_!!4611686018427380931-0-mtopupload.jpg_110x10000Q90.jpg_.webp",
+    "method": "GET",
+    "post": ""
+  },
+  {
+    "url": "https://img.alicdn.com/bao/uploaded/i2/O1CN01Iyp53E1PVybcn0uPK_!!4611686018427383687-0-mtopupload.jpg_110x10000Q90.jpg_.webp",
+    "method": "GET",
+    "post": ""
+  },
+  {
+    "url": "https://img.alicdn.com/bao/uploaded/i1/O1CN015TYJhzm3zWJ2XrKe_!!4611686018427382939-0-mtopupload.jpg_110x10000Q90.jpg_.webp",
+    "method": "GET",
+    "post": ""
+  },
+  {
+    "url": "https://img.alicdn.com/bao/uploaded/i1/O1CN01W8KlVU1Ciih1upwj1_!!4611686018427383251-0-mtopupload.jpg_110x10000Q90.jpg_.webp",
+    "method": "GET",
+    "post": ""
+  },
+  {
+    "url": "https://img.alicdn.com/bao/uploaded/i1/O1CN015El15F1dI9BPwdsPh_!!0-mtopupload.jpg_110x10000Q90.jpg_.webp",
+    "method": "GET",
+    "post": ""
+  },
+  {
+    "url": "https://img.alicdn.com/bao/uploaded/i2/O1CN01u8ctNi1XtoDDc3V3z_!!4611686018427379750-0-mtopupload.jpg_110x10000Q90.jpg_.webp",
+    "method": "GET",
+    "post": ""
+  },
+  {
+    "url": "https://img.alicdn.com/bao/uploaded/i4/O1CN01hshvxr241CHygGfKp_!!4611686018427382530-0-mtopupload.jpg_110x10000Q90.jpg_.webp",
+    "method": "GET",
+    "post": ""
+  },
+  {
+    "url": "https://img.alicdn.com/bao/uploaded/i1/O1CN01o71rLy22puqh3x94F_!!4611686018427379874-0-mtopupload.jpg_110x10000Q90.jpg_.webp",
+    "method": "GET",
+    "post": ""
+  },
+  {
+    "url": "https://img.alicdn.com/bao/uploaded/i1/O1CN019E25tO1we6zbsB7BJ_!!4611686018427384108-0-mtopupload.jpg_110x10000Q90.jpg_.webp",
+    "method": "GET",
+    "post": ""
+  },
+  {
+    "url": "https://img.alicdn.com/bao/uploaded/i1/O1CN01uftqNV1T8Oj2JLMyi_!!4611686018427384689-0-mtopupload.jpg_110x10000Q90.jpg_.webp",
+    "method": "GET",
+    "post": ""
+  },
+  {
+    "url": "https://img.alicdn.com/bao/uploaded/i2/O1CN0132lPA52EOgmWQC7ko_!!4611686018427384831-0-mtopupload.jpg_110x10000Q90.jpg_.webp",
+    "method": "GET",
+    "post": ""
+  },
+  {
+    "url": "https://img.alicdn.com/bao/uploaded/i2/O1CN01szHKoj1ulmNbNHzwX_!!4611686018427380270-0-mtopupload.jpg_110x10000Q90.jpg_.webp",
+    "method": "GET",
+    "post": ""
+  },
+  {
+    "url": "https://img.alicdn.com/bao/uploaded/i2/O1CN01Qfsqmf1iIfeEaKrVe_!!0-mtopupload.jpg_110x10000Q90.jpg_.webp",
+    "method": "GET",
+    "post": ""
+  }
+]

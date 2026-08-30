@@ -61,6 +61,19 @@ CREATE TABLE IF NOT EXISTS alerts (
     reason TEXT,
     triggered_at TEXT
 );
+CREATE TABLE IF NOT EXISTS xianyu_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    item_id TEXT,
+    title TEXT,
+    price TEXT,
+    seller TEXT,
+    pic TEXT,
+    hit_keywords INTEGER,
+    best_rank INTEGER,
+    keywords TEXT,
+    created_at TEXT
+);
 """
 
 
@@ -164,7 +177,47 @@ class ArchiveRepository:
             )
             self._conn.commit()
 
+    def save_xianyu_top(self, run_id: str, items: list[dict]) -> None:
+        with self._lock:
+            self._conn.executemany(
+                """
+                INSERT INTO xianyu_items
+                    (run_id, item_id, title, price, seller, pic, hit_keywords, best_rank, keywords, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        run_id,
+                        it["item_id"],
+                        it["title"],
+                        it["price"],
+                        it["seller"],
+                        it["pic"],
+                        it["hit_keywords"],
+                        it["best_rank"],
+                        it["keywords"],
+                        datetime.now().isoformat(),
+                    )
+                    for it in items
+                ],
+            )
+            self._conn.commit()
+
     # ---- 查询 ----
+    def latest_xianyu(self, limit: int = 50) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT item_id, title, price, seller, pic, hit_keywords, best_rank, keywords, created_at
+                FROM xianyu_items
+                WHERE run_id = (SELECT run_id FROM xianyu_items ORDER BY id DESC LIMIT 1)
+                ORDER BY hit_keywords DESC, best_rank ASC, id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def latest_analysis(self, limit: int = 20) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(

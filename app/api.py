@@ -83,6 +83,17 @@ def create_app(data_dir: str = "data") -> FastAPI:
     def runs_latest() -> dict:
         return repo.latest_run() or {}
 
+    @app.get("/api/v1/xianyu/hot")
+    def xianyu_hot(limit: int = 50) -> dict:
+        rows = repo.latest_xianyu(limit)
+        return {"count": len(rows), "items": rows}
+
+    @app.post("/api/v1/xianyu/runs", status_code=202)
+    def xianyu_run() -> dict:
+        from app.services.xianyu import run_xianyu
+
+        return run_xianyu(repo=repo)
+
     return app
 
 
