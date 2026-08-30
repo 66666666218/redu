@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- [2026-08-30 10:00] DOCS: 抖音指数可行性探测结论——巨量算数会重定向到抖音创作者中心登录墙(`passport/get_qrcode`),需抖音登录 Cookie 且为高防 SPA,**当前不可行**;微博已可行。新增诊断工具 `scripts/probe_douyin.py`(File: scripts/probe_douyin.py)
 - [2026-08-30 10:00] CHORE: 激活提取式代理池(巨量IP `getips` 写入本地 `.env`,gitignored 不入库);实测 3 个不同代理 IP 访问微博均 200,管道经代理采集 50 条真实热搜,出口 IP 已确认走代理(File: .env)
 - [2026-08-30 10:00] CHORE: 将 `doc/js/`(微信小程序编译产物,逆向参考)加入 `.gitignore`,保留磁盘不入库(File: .gitignore)
 - [2026-08-29 10:00] FEAT: 新增提取式代理池 `ProxyPool`(巨量IP `getips` 返回 `ip:port:user:pass`,自动刷新、随机轮换),`get_proxies` 优先走代理池;新增 `PROXY_EXTRACT_URL`/`PROXY_REFRESH_SECONDS`;测试增至 41 项;文档 §4/§5.1 同步(Files: app/utils/proxy.py, config/settings.py, .env.example, .env, doc/dev.md, tests/test_proxy.py)
