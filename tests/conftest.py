@@ -17,5 +17,6 @@ def settings() -> Settings:
         min_samples=3,
         growth_threshold=0.3,
         slope_threshold=0.0,
+        request_delay_seconds=0.0,
         data_dir="data/test",
     )

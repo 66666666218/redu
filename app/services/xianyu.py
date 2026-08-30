@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 import re
 import time
-from datetime import datetime, time
+from datetime import datetime, time as dt_time
 from pathlib import Path
 
 import requests
@@ -155,19 +156,23 @@ def collect_hot(settings: Settings, client: XianyuClient | None = None) -> list[
     client = client or XianyuClient(load_cookie(settings.goofish_cookie_file))
 
     buckets: dict[str, dict] = {}
-    for kw in keywords:
+    base_delay = getattr(settings, "request_delay_seconds", 2.5)
+    for idx, kw in enumerate(keywords):
         try:
             items = client.search(kw)
         except XianyuError as exc:
             logger.warning("闲鱼关键词 %s 失败:%s", kw, exc)
-            continue
-        for pos, it in enumerate(items, start=1):
-            iid = str(it.get("itemId"))
-            if not iid:
-                continue
-            bucket = buckets.setdefault(iid, {"item": it, "keywords": [], "ranks": []})
-            bucket["keywords"].append(kw)
-            bucket["ranks"].append(pos)
+        else:
+            for pos, it in enumerate(items, start=1):
+                iid = str(it.get("itemId"))
+                if not iid:
+                    continue
+                bucket = buckets.setdefault(iid, {"item": it, "keywords": [], "ranks": []})
+                bucket["keywords"].append(kw)
+                bucket["ranks"].append(pos)
+        # 请求间隔(随机抖动),避免连续请求触发风控
+        if idx < len(keywords) - 1:
+            time.sleep(base_delay * random.uniform(0.8, 1.4))
 
     # 排名:命中关键词次数多优先,其次综合序靠前(min rank)优先
     ranked = sorted(
@@ -283,7 +288,7 @@ def run_xianyu_daily(
     repo = repo or ArchiveRepository(settings.data_dir)
     notifier = notifier or get_notifier(settings)
     today = datetime.now().date()
-    start_iso = datetime.combine(today, time.min).isoformat()
+    start_iso = datetime.combine(today, dt_time.min).isoformat()
     items = repo.xianyu_items_between(start_iso)  # type: ignore[attr-defined]
     summary = summarize_today(items)[: (top_n or settings.xianyu_top_n)]
 

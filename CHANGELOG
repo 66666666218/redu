@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- [2026-08-31 10:00] CHORE: 全站频次下调避免风控(微博每小时、闲鱼/抖音每 3 小时),新增 `REQUEST_DELAY_SECONDS` 请求随机间隔(闲鱼关键词间生效);修复 `xianyu.py` 中 `from datetime import time` 遮蔽 `time` 模块导致 `sleep` 报错的 BUG;测试 52 项(Files: config/settings.py, .env.example, .env, app/services/xianyu.py, tests/conftest.py, doc/dev.md)
 - [2026-08-31 10:00] FEAT: 抖音内容词**跨轮判涨告警**——按词取历史飙升指数序列,复用双重校验(环比涨幅>阈值且斜率>0)判涨,命中发邮件告警(带冷却去重 `DOUHOT_ALERT_COOLDOWN_HOURS` + 单次上限 `DOUHOT_ALERT_MAX`);含 `douhot_alerted` 表、仓库 `douhot_score_series/douhot_alerted_recent/record_douhot_alert`;API/调度返回 `rising`;测试增至 52 项;文档 §4/§5.9/API §7 同步(Files: app/services/douhot.py, app/storage/repository.py, config/settings.py, .env.example, .env, doc/dev.md, doc/API.md, tests/test_douhot.py)
 - [2026-08-31 10:00] FEAT: 新增抖音热点·内容词趋势监控(`services/douhot.py`:Playwright 驱动浏览器拦截 `hot_word/query_list`,取内容词+飙升指数+热度序列;该接口需 `a_bogus`/`msToken` 签名,裸调不动,浏览器签名合法生成、数据为明文本非加密);含 `douhot_words` 表 + 旧库迁移、API `GET /api/v1/douhot/trends` + `POST /api/v1/douhot/runs`、调度器第 4 作业、看板面板、配置 `DOUHOT_*`;测试增至 50 项;文档 §4/§5.9/§6/API §7 同步(Files: app/services/douhot.py, app/storage/repository.py, app/api.py, app/main.py, app/static/index.html, config/settings.py, .env.example, .env, doc/dev.md, doc/API.md, tests/test_douhot.py)
 - [2026-08-30 10:00] FEAT: 新增 Web 看板(`GET /` 自包含 HTML,渲染微博上涨趋势 + 闲鱼热榜 + 今日总结),静态页放在 `app/static/`;文档 §1.1 同步(File: app/static/index.html, app/api.py, doc/API.md)
