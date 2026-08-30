@@ -49,6 +49,16 @@
 
 ---
 
+## 1.1 Web 看板
+
+- **接口名称**: 监控仪表盘
+- **请求方式**: GET
+- **URL 路径**: `/`
+
+页面加载后自动请求 `/api/v1/trends/latest`、`/api/v1/xianyu/hot`、`/api/v1/xianyu/daily` 并渲染。
+
+---
+
 ## 2. 最近上涨趋势
 
 - **接口名称**: 获取最近一次分析出的上涨趋势列表
@@ -223,10 +233,11 @@
       "price": "¥1",
       "occurrences": 2,
       "best_rank": 1,
-      "keywords": "ps教程,软件"
+      "keywords": "ps教程,软件",
+      "is_new": true
     }
   ]
 }
 ```
 
-> 由调度器每日按 `DAILY_SUMMARY_CRON` 生成并邮件推送(见 doc/dev.md §6)。
+> 由调度器每日按 `DAILY_SUMMARY_CRON` 生成并**以 HTML 邮件**推送;`is_new=true` 表示较上次总结新上榜,`new_count` 为当天新上榜总数。看板页 `GET /` 亦展示。

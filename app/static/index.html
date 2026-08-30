@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>热点监控 · 闲鱼热榜</title>
+<style>
+  :root{--bg:#0f1420;--card:#1a2233;--line:#2a3550;--txt:#e6ecf5;--dim:#8b9bb5;--accent:#4f8cff;--up:#12b76a;--new:#ff7a59}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,"Microsoft YaHei",sans-serif;background:var(--bg);color:var(--txt)}
+  header{display:flex;justify-content:space-between;align-items:center;padding:16px 24px;border-bottom:1px solid var(--line)}
+  header h1{font-size:18px;margin:0}
+  header .sub{color:var(--dim);font-size:12px;margin-left:12px}
+  button{background:var(--accent);border:none;color:#fff;padding:8px 16px;border-radius:6px;cursor:pointer}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:16px;padding:24px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .card h2{font-size:15px;margin:0 0 12px;color:var(--dim);font-weight:600}
+  .card h2 b{color:var(--txt)}
+  .card .count{float:right;font-size:12px;color:var(--dim)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:6px 6px;border-bottom:1px solid var(--line)}
+  th{color:var(--dim);font-weight:600}
+  .up{color:var(--up)}.new{color:var(--new);font-weight:600}
+  .price{color:var(--accent)}
+  .empty{color:var(--dim);font-size:13px;padding:8px 0}
+  .badge{display:inline-block;padding:1px 7px;border-radius:10px;background:#26304a;color:var(--dim);font-size:11px;margin-left:6px}
+</style>
+</head>
+<body>
+<header>
+  <div><h1>热点监控仪表盘</h1><span class="sub" id="clock"></span></div>
+  <button onclick="loadAll()">刷新</button>
+</header>
+
+<div class="grid">
+  <div class="card" id="c-risen">
+    <h2>微博 · 上涨趋势 <span class="count" id="n-risen">-</span></h2>
+    <div id="risen"><div class="empty">加载中…</div></div>
+  </div>
+  <div class="card" id="c-hot">
+    <h2>闲鱼 · 虚拟商品热榜 <span class="count" id="n-hot">-</span></h2>
+    <div id="hot"><div class="empty">加载中…</div></div>
+  </div>
+  <div class="card" id="c-daily">
+    <h2>闲鱼 · 今日总结 <span class="count" id="n-daily">-</span></h2>
+    <div id="daily"><div class="empty">加载中…</div></div>
+  </div>
+</div>
+
+<script>
+async function j(url){const r=await fetch(url);return r.json()}
+function esc(s){return String(s??"").replace(/</g,"&lt;")}
+
+async function loadRisen(){
+  const d=await j('/api/v1/trends/latest');
+  document.getElementById('n-risen').textContent=d.count;
+  const el=document.getElementById('risen');
+  if(!d.count){el.innerHTML='<div class="empty">暂无上涨趋势</div>';return}
+  el.innerHTML='<table><tr><th>关键词</th><th>来源</th><th>增长率</th></tr>'+
+    d.items.slice(0,20).map(i=>`<tr><td>${esc(i.keyword)}</td><td>${esc(i.source)}</td><td class="up">${(i.growth*100).toFixed(1)}%</td></tr>`).join('')+'</table>';
+}
+async function loadHot(){
+  const d=await j('/api/v1/xianyu/hot?limit=30');
+  document.getElementById('n-hot').textContent=d.count;
+  const el=document.getElementById('hot');
+  if(!d.count){el.innerHTML='<div class="empty">暂无热榜,先 POST /api/v1/xianyu/runs 采集</div>';return}
+  el.innerHTML='<table><tr><th>#</th><th>标题</th><th>价格</th><th>场次</th></tr>'+
+    d.items.slice(0,30).map((i,x)=>`<tr><td>${x+1}</td><td>${esc(i.title).slice(0,46)}</td><td class="price">${esc(i.price)}</td><td>${i.hit_keywords}</td></tr>`).join('')+'</table>';
+}
+async function loadDaily(){
+  const d=await j('/api/v1/xianyu/daily');
+  document.getElementById('n-daily').textContent=(d.items||d.summary_date)?`${d.summary_date} · ${(d.items||[]).length}`:'-';
+  const el=document.getElementById('daily');
+  if(!(d.items&&d.items.length)){el.innerHTML='<div class="empty">尚无每日总结</div>';return}
+  el.innerHTML='<table><tr><th>#</th><th>标题</th><th>价格</th><th>场次</th><th>状态</th></tr>'+
+    d.items.slice(0,30).map((i,x)=>`<tr><td>${x+1}</td><td>${esc(i.title).slice(0,42)}</td><td class="price">${esc(i.price)}</td><td>${i.occurrences}</td><td>${i.is_new?'<span class="new">新上榜</span>':''}</td></tr>`).join('')+'</table>';
+}
+function loadAll(){clock();loadRisen();loadHot();loadDaily()}
+function clock(){document.getElementById('clock').textContent=new Date().toLocaleString('zh-CN')}
+loadAll();
+</script>
+</body>
+</html>

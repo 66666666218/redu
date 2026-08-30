@@ -31,8 +31,11 @@ python -m app.main
 
 # 5. 监控接口
 python -m app.main --api
-# 访问 http://localhost:8080/healthz
+# 访问 http://localhost:8080/ 看 Web 看板(微博趋势+闲鱼热榜+今日总结)
+# 接口见 doc/API.md
 ```
+
+> 调度模式会同时跑微博热点与闲鱼热榜采集,并每日(默认 20:00)发"今日热榜"HTML 邮件。
 
 ## 配置
 

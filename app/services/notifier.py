@@ -19,7 +19,7 @@ logger = get_logger(__name__)
 class Notifier:
     """消息触达接口。"""
 
-    def send(self, subject: str, body: str, context: str = "") -> bool:
+    def send(self, subject: str, body: str, context: str = "", html: bool = False) -> bool:
         """发送一封通用邮件,返回是否成功。"""
         raise NotImplementedError
 
@@ -34,7 +34,7 @@ class NullNotifier(Notifier):
     def __init__(self) -> None:
         self._sent: list[Alert] = []
 
-    def send(self, subject: str, body: str, context: str = "") -> bool:
+    def send(self, subject: str, body: str, context: str = "", html: bool = False) -> bool:
         logger.info("[DEV] 跳过外发邮件 subject=%s", subject)
         return True
 
@@ -53,14 +53,14 @@ class EmailNotifier(Notifier):
     def _recipients(self) -> list[str]:
         return self._settings.notify_to_list
 
-    def send(self, subject: str, body: str, context: str = "") -> bool:
+    def send(self, subject: str, body: str, context: str = "", html: bool = False) -> bool:
         settings = self._settings
         recipients = self._recipients()
         if not recipients or not settings.smtp_host:
             logger.warning("未配置 SMTP 或收件人,邮件已忽略 subject=%s", subject)
             return False
 
-        message = MIMEText(body, "plain", "utf-8")
+        message = MIMEText(body, "html" if html else "plain", "utf-8")
         message["Subject"] = subject
         message["From"] = formataddr(("热点监控", settings.smtp_user))
         message["To"] = ", ".join(recipients)

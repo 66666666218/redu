@@ -242,13 +242,39 @@ def build_daily_body(summary: list[dict], date_str: str) -> str:
     return "\n".join(lines)
 
 
+_HTML_CSS = (
+    "font-family:sans-serif;border-collapse:collapse;width:100%;"
+    "th,td{border:1px solid #ddd;padding:6px 8px;font-size:13px;text-align:left}"
+    "th{background:#f5f5f5}.new{color:#e44;font-weight:bold}"
+)
+
+
+def build_daily_body_html(summary: list[dict], date_str: str, new_count: int) -> str:
+    rows = []
+    for i, a in enumerate(summary, start=1):
+        status = '<span class="new">新上榜</span>' if a.get("is_new") else ""
+        rows.append(
+            f"<tr><td>{i}</td><td>{a['occurrences']}</td>"
+            f"<td>{str(a['title'])[:48]}</td><td>{a['price']}</td>"
+            f"<td>{a['keywords']}</td><td>{status}</td></tr>"
+        )
+    return (
+        f"<h2>今日闲鱼虚拟商品热榜 ({date_str})</h2>"
+        f"<p>共上榜 {len(summary)} 个 · <span class='new'>新上榜 {new_count} 个</span></p>"
+        f"<table style='{_HTML_CSS}'>"
+        "<tr><th>#</th><th>场次</th><th>标题</th><th>价格</th><th>关键词</th><th>状态</th></tr>"
+        + "".join(rows)
+        + "</table>"
+    )
+
+
 def run_xianyu_daily(
     settings: Settings | None = None,
     repo: object | None = None,
     notifier: object | None = None,
     top_n: int | None = None,
 ) -> dict:
-    """生成并发送"今日闲鱼热榜"总结:聚合当日采集 → 存库 → 发邮件。"""
+    """生成并发送"今日闲鱼热榜"总结:聚合当日采集 → 对比昨日 → 存库 → 发 HTML 邮件。"""
     from config.settings import get_settings
     from app.services.notifier import get_notifier
     from app.storage import ArchiveRepository
@@ -258,14 +284,24 @@ def run_xianyu_daily(
     notifier = notifier or get_notifier(settings)
     today = datetime.now().date()
     start_iso = datetime.combine(today, time.min).isoformat()
-    items = repo.xianyu_items_between(start_iso)
+    items = repo.xianyu_items_between(start_iso)  # type: ignore[attr-defined]
     summary = summarize_today(items)[: (top_n or settings.xianyu_top_n)]
+
+    # 对比昨日,标记新上榜
+    prev = repo.xianyu_summary_before(today.isoformat())  # type: ignore[attr-defined]
+    prev_ids = {str(it["item_id"]) for it in prev["items"]} if prev else set()
+    for a in summary:
+        a["is_new"] = str(a["item_id"]) not in prev_ids
+    new_count = sum(1 for a in summary if a["is_new"])
+
     repo.save_xianyu_summary(today.isoformat(), summary)  # type: ignore[attr-defined]
     subject = f"今日闲鱼虚拟商品热榜({today.isoformat()})"
-    body = build_daily_body(summary, today.isoformat())
-    sent = notifier.send(subject, body)  # type: ignore[attr-defined]
-    logger.info("每日闲鱼热榜总结完成 date=%s 条数=%s sent=%s", today, len(summary), sent)
-    return {"date": today.isoformat(), "count": len(summary), "items": summary, "sent": sent}
+    body = build_daily_body_html(summary, today.isoformat(), new_count)
+    sent = notifier.send(subject, body, html=True)  # type: ignore[attr-defined]
+    logger.info(
+        "每日闲鱼热榜总结完成 date=%s 条数=%s 新上榜=%s sent=%s", today, len(summary), new_count, sent
+    )
+    return {"date": today.isoformat(), "count": len(summary), "new_count": new_count, "items": summary, "sent": sent}
 
 
 if __name__ == "__main__":
@@ -277,9 +313,19 @@ if __name__ == "__main__":
     setup_logging()
     if "--daily" in sys.argv:
         outcome = run_xianyu_daily()
-        print("每日闲鱼热榜总结完成:", outcome["date"], "条数", outcome["count"], "已发", outcome.get("sent"))
+        print(
+            "每日闲鱼热榜总结完成:",
+            outcome["date"],
+            "条数",
+            outcome["count"],
+            "新上榜",
+            outcome.get("new_count"),
+            "已发",
+            outcome.get("sent"),
+        )
         for it in outcome["items"][:10]:
-            print(f"  [{it['occurrences']}场/综合#{it['best_rank']}] {it['title'][:32]}  {it['price']}")
+            mark = "★" if it.get("is_new") else " "
+            print(f"  {mark} [{it['occurrences']}场/综合#{it['best_rank']}] {it['title'][:32]}  {it['price']}")
     else:
         outcome = run_xianyu()
         print("闲鱼热榜收集完成:", outcome["count"], "条")

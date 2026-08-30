@@ -6,12 +6,15 @@ from __future__ import annotations
 
 import pydantic
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from app.services.pipeline import run_pipeline
 from app.storage import ArchiveRepository
 
 APP_VERSION = "1.0.0"
+STATIC_DIR = Path(__file__).parent / "static"
 
 
 class HealthResponse(pydantic.BaseModel):
@@ -61,6 +64,10 @@ def create_app(data_dir: str = "data") -> FastAPI:
         from datetime import datetime
 
         return HealthResponse(status="ok", version=APP_VERSION, time=datetime.now().isoformat())
+
+    @app.get("/", response_class=HTMLResponse)
+    def dashboard() -> str:
+        return (STATIC_DIR / "index.html").read_text(encoding="utf-8")
 
     @app.get("/api/v1/trends/latest", response_model=TrendListResponse)
     def trends_latest(limit: int = 20) -> TrendListResponse:

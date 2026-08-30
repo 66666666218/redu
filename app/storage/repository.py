@@ -256,6 +256,22 @@ class ArchiveRepository:
             "items": json.loads(row["summary_json"]),
         }
 
+    def xianyu_summary_before(self, date_str: str) -> dict | None:
+        """返回严格早于给定日期的最近一次总结(用于"较昨日"对比)。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT summary_date, summary_json, created_at FROM xianyu_summary "
+                "WHERE summary_date < ? ORDER BY id DESC LIMIT 1",
+                (date_str,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "summary_date": row["summary_date"],
+            "created_at": row["created_at"],
+            "items": json.loads(row["summary_json"]),
+        }
+
     def latest_analysis(self, limit: int = 20) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(
