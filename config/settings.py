@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     # ---- 采集 ----
     weibo_cookie: str = ""          # 微博登录态
     baidu_cookie: str = ""          # 百度指数登录态(降级源)
+    douyin_cookie: str = ""         # 抖音创作者中心/巨量算数登录态
     proxy_url: str = ""             # 隧道代理地址
     proxy_user: str = ""            # 隧道代理账号
     proxy_pass: str = ""            # 隧道代理密码

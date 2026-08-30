@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- [2026-08-30 10:00] DOCS: 抖音指数用登录 Cookie 实测——可越过登录墙并命中 `creator.douyin.com/api/v2/index/*`,但趋势数据为**加密**密文(`get_multi_keyword_hot_trend` 18KB 二进制,非文本、非 gzip),需复刻抖音响应解密(违反安全边界,不做),**判定不可行**。新增 `douyin_cookie` 配置与创作者中心 URL 接入,抖音源优雅降级(File: config/settings.py, app/services/index_fetcher.py, scripts/probe_douyin.py)
 - [2026-08-30 10:00] DOCS: 抖音指数可行性探测结论——巨量算数会重定向到抖音创作者中心登录墙(`passport/get_qrcode`),需抖音登录 Cookie 且为高防 SPA,**当前不可行**;微博已可行。新增诊断工具 `scripts/probe_douyin.py`(File: scripts/probe_douyin.py)
 - [2026-08-30 10:00] CHORE: 激活提取式代理池(巨量IP `getips` 写入本地 `.env`,gitignored 不入库);实测 3 个不同代理 IP 访问微博均 200,管道经代理采集 50 条真实热搜,出口 IP 已确认走代理(File: .env)
 - [2026-08-30 10:00] CHORE: 将 `doc/js/`(微信小程序编译产物,逆向参考)加入 `.gitignore`,保留磁盘不入库(File: .gitignore)

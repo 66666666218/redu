@@ -28,8 +28,8 @@ from app.utils import get_logger, get_proxies, playwright_proxy, retry
 
 logger = get_logger(__name__)
 
-# 巨量算数(抖音指数)页面与占位搜索框选择器。
-_DOUYIN_URL = "https://trendinsight.oceanengine.com/arithmetic-index/index"
+# 巨量算数(抖音指数)创作者中心算术指数页与占位搜索框选择器。
+_DOUYIN_URL = "https://creator.douyin.com/creator-micro/creator-count/arithmetic-index"
 _DOUYIN_SEARCH_SELECTOR = 'input[placeholder*="关键词"], input'
 # 百度指数接口(MVP 占位,需携带 BAIDU_COOKIE)。
 _BAIDU_URL = "https://index.baidu.com/api/SearchApi/index"
@@ -181,8 +181,8 @@ class DouyinIndexSource(IndexSource):
                 )
                 page = browser.new_page()
                 page.on("response", _on_response)
-                if self._settings.weibo_cookie:
-                    page.add_init_script(f"document.cookie='{self._settings.weibo_cookie}';")
+                if self._settings.douyin_cookie:
+                    page.add_init_script(f"document.cookie='{self._settings.douyin_cookie}';")
                 page.goto(_DOUYIN_URL, wait_until="domcontentloaded", timeout=60_000)
                 page.fill(_DOUYIN_SEARCH_SELECTOR, keyword)
                 page.press(_DOUYIN_SEARCH_SELECTOR, "Enter")
