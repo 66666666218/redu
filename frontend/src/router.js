@@ -6,6 +6,7 @@ import Forgot from './views/Forgot.vue'
 import Reset from './views/Reset.vue'
 import Dashboard from './views/Dashboard.vue'
 import Cookies from './views/Cookies.vue'
+import Alerts from './views/Alerts.vue'
 
 const routes = [
   { path: '/login', component: Login },
@@ -13,7 +14,8 @@ const routes = [
   { path: '/forgot', component: Forgot },
   { path: '/reset', component: Reset },
   { path: '/', component: Dashboard, meta: { auth: true } },
-  { path: '/cookies', component: Cookies, meta: { auth: true } }
+  { path: '/cookies', component: Cookies, meta: { auth: true } },
+  { path: '/alerts', component: Alerts, meta: { auth: true } }
 ]
 
 const router = createRouter({ history: createWebHistory(), routes })

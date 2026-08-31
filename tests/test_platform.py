@@ -123,3 +123,48 @@ def test_douhot_watch_analytics(session) -> None:
     session.commit()
     out = tenant.douhot_watch_analytics(session, 1)
     assert out[0]["keyword"] == "景甜" and out[0]["last_score"] == 700 and out[0]["points"] == 2
+
+
+def _alert_settings():
+    from config.settings import Settings
+
+    return Settings(_env_file=None, is_dev=True)  # NullNotifier,不真发邮件
+
+
+def test_alert_rules_crud(session) -> None:
+    from app.services import alert_service
+
+    r = alert_service.add_rule(session, 1, "weibo", "threshold", metric="growth", threshold=0.3)
+    assert alert_service.list_rules(session, 1)[0]["rule_type"] == "threshold"
+    assert alert_service.delete_rule(session, 1, r.id) is True
+    assert alert_service.list_rules(session, 1) == []
+
+
+def test_alert_threshold_and_cooldown(session) -> None:
+    from app.db.models import AlertRecord
+    from app.services import alert_service
+
+    alert_service.add_rule(session, 1, "weibo", "threshold", metric="growth", threshold=0.3)
+    s = _alert_settings()
+    n = alert_service.evaluate(session, 1, "weibo", [{"key": "A", "growth": 0.5}], set(), s)
+    assert n > 0
+    rec = session.scalar(select(AlertRecord).where(AlertRecord.user_id == 1))
+    assert rec and rec.keyword == "A"
+    # 冷却期内,同一规则不再重复触发
+    assert alert_service.evaluate(session, 1, "weibo", [{"key": "A", "growth": 0.5}], set(), s) == 0
+
+
+def test_alert_new(session) -> None:
+    from app.services import alert_service
+
+    alert_service.add_rule(session, 1, "douhot", "new")
+    n = alert_service.evaluate(session, 1, "douhot", [{"key": "新词", "score": 1}], {"旧词"}, _alert_settings())
+    assert n > 0
+
+
+def test_alert_keyword_filter(session) -> None:
+    from app.services import alert_service
+
+    alert_service.add_rule(session, 1, "douhot", "new", keyword="B")
+    n = alert_service.evaluate(session, 1, "douhot", [{"key": "A", "score": 1}], set(), _alert_settings())
+    assert n == 0

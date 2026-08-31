@@ -186,3 +186,27 @@ class DouhotWatchSnap(Base):
     score: Mapped[float] = mapped_column(Float, default=0)   # 该榜中的得分
     rank_now: Mapped[int] = mapped_column(Integer, default=0)  # 当前排名(0=未上榜)
     captured_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class AlertRule(Base):
+    """用户自定义预警规则(每板块)。
+
+    - rule_type=`threshold`:某指标(metric)超过 threshold 即预警;
+    - rule_type=`new`:出现"新增"项(关键词/商品/词)即告知;
+    - rule_type=`fixed_time`:按 alert_time(HH:MM)发送该板块总结。
+    - keyword 非空时只对该关键词/项的变动预警;为空则监控全部。
+    """
+
+    __tablename__ = "alert_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    section: Mapped[str] = mapped_column(String(32))          # weibo/xianyu/douhot
+    rule_type: Mapped[str] = mapped_column(String(16))         # threshold/new/fixed_time
+    metric: Mapped[str | None] = mapped_column(String(32), nullable=True)  # growth/pct/delta/score/count
+    threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    keyword: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    alert_time: Mapped[str | None] = mapped_column(String(8), nullable=True)  # HH:MM
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_alert_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)

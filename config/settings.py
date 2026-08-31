@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     douhot_top_n: int = 50          # 内容词趋势条数
     douhot_alert_max: int = 5       # 单次判涨告警上限(防刷屏)
     douhot_alert_cooldown_hours: int = 24  # 同一内容词告警冷却(小时)
+    alert_cooldown_hours: int = 6   # 预警规则冷却(小时),避免重复刷
     proxy_url: str = ""             # 隧道代理地址
     proxy_user: str = ""            # 隧道代理账号
     proxy_pass: str = ""            # 隧道代理密码

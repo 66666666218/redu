@@ -24,7 +24,7 @@ from app.db.models import (
     XianyuItem,
     XianyuSummary,
 )
-from app.services import collector, douhot, xianyu
+from app.services import alert_service, collector, douhot, xianyu
 from app.services.cookie_store import get_cookies
 from app.services.trend_analyzer import compute_growth, compute_slope
 from app.utils import get_logger
@@ -59,12 +59,16 @@ def run_weibo(session: Session, user_id: int, settings: Settings | None = None) 
     try:
         items = collector.fetch_hot_search(s)
         now = datetime.now()
+        prev_keys = set(session.scalars(select(WeiboHotItem.title).where(WeiboHotItem.user_id == user_id)).all())
         for it in items:
             session.add(
                 WeiboHotItem(user_id=user_id, title=it.title, heat=it.heat, rank=it.rank, captured_at=now)
             )
         session.commit()
         rising = _weibo_rising(session, user_id, settings, now)
+        latest = [{"key": it.title, "heat": it.heat} for it in items]
+        latest += [{"key": r["keyword"], "growth": r["growth"]} for r in rising]
+        alert_service.evaluate(session, user_id, "weibo", latest, prev_keys, settings)
         _record_run(session, user_id, "weibo", "success", f"items={len(items)}")
         session.commit()
         return {"platform": "weibo", "count": len(items), "rising": rising}
@@ -105,9 +109,12 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
     try:
         client = xianyu.XianyuClient(goofish_cookie)
         hot = xianyu.collect_hot(settings, client)
+        prev_keys = set(session.scalars(select(XianyuItem.item_id).where(XianyuItem.user_id == user_id)).all())
         for it in hot:
             session.add(XianyuItem(user_id=user_id, **it))
         session.commit()
+        latest = [{"key": it["item_id"], "hit_keywords": it["hit_keywords"], "best_rank": it["best_rank"]} for it in hot]
+        alert_service.evaluate(session, user_id, "xianyu", latest, prev_keys, settings)
         _record_run(session, user_id, "xianyu", "success", f"items={len(hot)}")
         session.commit()
         return {"platform": "xianyu", "count": len(hot)}
@@ -127,9 +134,12 @@ def run_douhot(session: Session, user_id: int, settings: Settings | None = None)
     try:
         words = douhot.fetch_content_words(douyin_cookie)
         now = datetime.now()
+        prev_keys = set(session.scalars(select(DouhotWord.title).where(DouhotWord.user_id == user_id)).all())
         for w in words:
             session.add(DouhotWord(user_id=user_id, created_at=now, **w))
         session.commit()
+        latest = [{"key": w["title"], "score": w["score"], "trend_delta": w.get("trend_delta", 0)} for w in words]
+        alert_service.evaluate(session, user_id, "douhot", latest, prev_keys, settings)
         # 按用户关注类型补拉 搜索榜/我的订阅,并记录对应快照
         watch_types = {w.list_type for w in session.scalars(select(DouhotWatch).where(DouhotWatch.user_id == user_id)).all()}
         lists: dict[str, list[dict]] = {"word": words}

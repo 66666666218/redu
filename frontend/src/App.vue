@@ -15,6 +15,7 @@ function logout() {
     <nav>
       <router-link to="/">仪表盘</router-link>
       <router-link to="/cookies">Cookie 管理</router-link>
+      <router-link to="/alerts">预警设置</router-link>
       <a href="#" @click.prevent="logout">退出</a>
     </nav>
   </div>

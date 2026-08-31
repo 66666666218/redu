@@ -46,5 +46,9 @@ export const api = {
   xianyuAnalytics: () => req('GET', '/api/xianyu/analytics'),
   douhotWatchAdd: (listType, keyword) => req('POST', '/api/douhot/watch', { list_type: listType, keyword }),
   douhotWatchList: () => req('GET', '/api/douhot/watch'),
-  douhotWatchAnalytics: () => req('GET', '/api/douhot/watch-analytics')
+  douhotWatchAnalytics: () => req('GET', '/api/douhot/watch-analytics'),
+  alertRules: () => req('GET', '/api/alerts/rules'),
+  alertRuleAdd: (rule) => req('POST', '/api/alerts/rules', rule),
+  alertRuleDel: (id) => req('DELETE', `/api/alerts/rules/${id}`),
+  alertsList: () => req('GET', '/api/alerts/list')
 }

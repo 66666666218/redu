@@ -14,6 +14,7 @@ import pydantic
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_db, init_db
@@ -46,6 +47,15 @@ class ForgotIn(pydantic.BaseModel):
 class ResetIn(pydantic.BaseModel):
     token: str
     new_password: str
+
+
+class AlertRuleIn(pydantic.BaseModel):
+    section: str
+    rule_type: str
+    metric: str | None = None
+    threshold: float | None = None
+    keyword: str | None = None
+    alert_time: str | None = None
 
 
 class TokenOut(pydantic.BaseModel):
@@ -185,6 +195,41 @@ def create_app() -> FastAPI:
     @app.get("/api/douhot/watch-analytics")
     def douhot_watch_analytics(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         return tenant.douhot_watch_analytics(db, user.id)
+
+    # ---- 预警规则(每板块) ----
+    @app.get("/api/alerts/rules")
+    def alerts_rules(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        from app.services import alert_service
+
+        return alert_service.list_rules(db, user.id)
+
+    @app.post("/api/alerts/rules")
+    def alerts_rule_add(payload: AlertRuleIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        from app.services import alert_service
+
+        try:
+            r = alert_service.add_rule(
+                db, user.id, payload.section, payload.rule_type,
+                payload.metric, payload.threshold, payload.keyword, payload.alert_time,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"id": r.id, "section": r.section, "rule_type": r.rule_type}
+
+    @app.delete("/api/alerts/rules/{rule_id}")
+    def alerts_rule_del(rule_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        from app.services import alert_service
+
+        return {"deleted": alert_service.delete_rule(db, user.id, rule_id)}
+
+    @app.get("/api/alerts/list")
+    def alerts_list(limit: int = 30, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        from app.db.models import AlertRecord
+
+        rows = db.scalars(
+            select(AlertRecord).where(AlertRecord.user_id == user.id).order_by(AlertRecord.id.desc()).limit(limit)
+        ).all()
+        return [{"keyword": r.keyword, "reason": r.reason, "time": r.triggered_at.isoformat()} for r in rows]
 
     # 托管前端构建产物(SPA)
     dist = Path(__file__).parent / "static" / "spa"
