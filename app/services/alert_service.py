@@ -157,3 +157,61 @@ def evaluate(
     session.commit()
     logger.info("预警触发 section=%s user=%s 条数=%s", section, user_id, sum(len(v) for v in per_rule.values()))
     return sum(len(v) for v in per_rule.values())
+
+
+def _build_digest(session: Session, user_id: int, section: str, settings: Settings) -> str:
+    """生成某板块的定时总结文本。"""
+    from app.db.models import DouhotWord, WeiboTrend, XianyuItem
+
+    lines = [f"【{section} 定时总结】"]
+    if section == "weibo":
+        rows = session.scalars(
+            select(WeiboTrend).where(WeiboTrend.user_id == user_id, WeiboTrend.rising.is_(True))
+            .order_by(WeiboTrend.growth.desc()).limit(10)
+        ).all()
+        lines += [f"- {r.keyword} 增长 {(r.growth or 0)*100:.1f}%" for r in rows] or ["- 暂无上涨趋势"]
+    elif section == "xianyu":
+        rows = session.scalars(
+            select(XianyuItem).where(XianyuItem.user_id == user_id)
+            .order_by(XianyuItem.hit_keywords.desc(), XianyuItem.best_rank.asc()).limit(10)
+        ).all()
+        lines += [f"- {r.title[:28]} {r.price} (x{r.hit_keywords})" for r in rows] or ["- 暂无热榜"]
+    else:
+        rows = session.scalars(
+            select(DouhotWord).where(DouhotWord.user_id == user_id)
+            .order_by(DouhotWord.score.desc()).limit(10)
+        ).all()
+        lines += [f"- {r.title} 飙升 {(r.score or 0)/1e4:.1f}万" for r in rows] or ["- 暂无内容词"]
+    return "\n".join(lines)
+
+
+def run_fixed_time_digests() -> int:
+    """定时派发:遍历所有 enabled 的 fixed_time 规则,当前 HH:MM 命中则发该板块总结。
+
+    供调度器每个分钟调用;当天同一规则只发一次。返回发送条数。
+    """
+    from app.db import get_session_local
+
+    settings = get_settings()
+    db = get_session_local()()
+    try:
+        now = datetime.now()
+        hhmm = now.strftime("%H:%M")
+        rules = db.scalars(
+            select(AlertRule).where(
+                AlertRule.enabled.is_(True), AlertRule.rule_type == "fixed_time", AlertRule.alert_time == hhmm
+            )
+        ).all()
+        notifier = get_notifier(settings)
+        sent = 0
+        for rule in rules:
+            if rule.last_alert_at and rule.last_alert_at.date() == now.date():
+                continue  # 当天已发
+            digest = _build_digest(db, rule.user_id, rule.section, settings)
+            notifier.send(f"[{rule.section}] 定时总结 {hhmm}", digest)
+            rule.last_alert_at = now
+            sent += 1
+        db.commit()
+        return sent
+    finally:
+        db.close()

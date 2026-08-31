@@ -9,9 +9,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 import pydantic
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
@@ -27,6 +28,26 @@ from app.services.cookie_store import list_cookies, set_cookie
 from app.services.notifier import get_notifier
 
 APP_VERSION = "2.0.0"
+
+# 轻量登录限速(内存滑窗,防爆破)
+_LOGIN_WINDOW = 600
+_LOGIN_MAX = 10
+_login_attempts: dict[str, list[float]] = {}
+
+
+def _login_allowed(key: str) -> bool:
+    now = time.time()
+    arr = [t for t in _login_attempts.get(key, []) if now - t < _LOGIN_WINDOW]
+    _login_attempts[key] = arr
+    return len(arr) < _LOGIN_MAX
+
+
+def _record_login(key: str) -> None:
+    _login_attempts.setdefault(key, []).append(time.time())
+
+
+def _clear_login(key: str) -> None:
+    _login_attempts.pop(key, None)
 
 
 class RegisterIn(pydantic.BaseModel):
@@ -96,10 +117,15 @@ def create_app() -> FastAPI:
         return TokenOut(token=token, username=user.username)
 
     @app.post("/api/auth/login", response_model=TokenOut)
-    def login(body: LoginIn, db: Session = Depends(get_db)) -> TokenOut:
+    def login(body: LoginIn, request: Request, db: Session = Depends(get_db)) -> TokenOut:
+        key = f"{request.client.host if request.client else '?'}:{body.login.strip().lower()}"
+        if not _login_allowed(key):
+            raise HTTPException(429, "登录尝试过多,请 10 分钟后再试")
         token = authenticate(db, body.login, body.password)
         if token is None:
+            _record_login(key)
             raise HTTPException(401, "账号或密码错误")
+        _clear_login(key)
         return TokenOut(token=token, username=body.login.strip())
 
     @app.post("/api/auth/forgot")

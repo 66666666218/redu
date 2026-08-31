@@ -21,6 +21,7 @@ from config.settings import get_settings
 from app.services.pipeline import run_pipeline
 from app.services.xianyu import run_xianyu, run_xianyu_daily
 from app.services.douhot import run_douhot_trend
+from app.services.alert_service import run_fixed_time_digests
 from app.utils import get_logger, setup_logging
 
 logger = get_logger(__name__)
@@ -92,6 +93,13 @@ def run_scheduler() -> None:
         _safe(run_douhot_trend),
         _cron_trigger(settings.douhot_cron, {"minute": "0", "hour": "*/1"}),
         id="douhot_content_word_trend",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        _safe(run_fixed_time_digests),
+        CronTrigger(minute="*"),
+        id="alert_fixed_time",
         max_instances=1,
         coalesce=True,
     )
