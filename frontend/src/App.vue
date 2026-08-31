@@ -2,6 +2,7 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, clearToken } from './api'
+import { toasts } from './toast'
 
 const router = useRouter()
 const role = ref('')
@@ -29,4 +30,7 @@ onMounted(async () => {
     </nav>
   </div>
   <router-view />
+  <div class="toasts">
+    <div v-for="t in toasts" :key="t.id" :class="['toast', t.type]">{{ t.msg }}</div>
+  </div>
 </template>

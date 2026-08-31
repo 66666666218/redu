@@ -184,3 +184,19 @@ def test_admin_dashboard_and_users(session) -> None:
     assert d["today_runs"] == 0
     # 切换启用/禁用
     assert admin_svc.toggle_user(session, u.id)["enabled"] is False
+
+
+def test_rbac_perms() -> None:
+    from app import admin as admin_svc
+
+    # admin 拥有全部
+    for perm in ("users.delete", "users.import", "config.set", "users.toggle"):
+        assert admin_svc.has_perm("admin", perm)
+    # operator:可查/启停/导出,不可删/导入/改配置
+    assert admin_svc.has_perm("operator", "users.toggle")
+    assert admin_svc.has_perm("operator", "data.export")
+    assert not admin_svc.has_perm("operator", "users.delete")
+    assert not admin_svc.has_perm("operator", "users.import")
+    assert not admin_svc.has_perm("operator", "config.set")
+    # 普通用户无任何后台权限
+    assert admin_svc.perms_for("user") == set()

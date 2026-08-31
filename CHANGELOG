@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- [2026-09-01 10:00] FEAT: **按钮/菜单级权限(RBAC)**——角色(admin/operator)→权限点集合(users.view/toggle/delete/import, data.view/export, config.view/set...),后端接口按权限点校验(403),前端按权限点**显隐按钮**;`/api/admin/me` 返回权限点;新增**全局 Toast** 提示组件;测试 42 项(Files: app/admin.py, app/platform.py, frontend/src/{api.js,toast.js,App.vue,views/Admin.vue,style.css}, tests/test_platform.py)
 - [2026-09-01 10:00] FEAT: 管理后台再补——**采集数据明细浏览**(微博/闲鱼/抖音 原始数据按用户查看)、**闲鱼类目分布**(数量+想要合计)(Files: app/admin.py, app/platform.py, frontend/src/{api.js,views/Admin.vue})
 - [2026-09-01 10:00] FEAT: 管理后台补全模块——**用户详情页**(基本信息+Cookie掩码+预警规则+最近告警)、**多维报表**(近30天运行/告警柱状图 + 待办提醒:未配Cookie用户数/近2天失败运行数)、**数据导入**(批量创建用户 email,password,role)含前端(Files: app/admin.py, app/platform.py, frontend/src/api.js + views/Admin.vue)
 - [2026-09-01 10:00] FEAT: 新增**管理后台**(规范式)——RBAＣ(`User.role` admin/operator/user + `require_admin` 守卫 + `ADMIN_EMAIL` 自动提升);工作台(business 指标+近7天趋势)、用户管理(搜索/启停/删除)、登录日志 + 操作日志审计、系统设置(键值对)、数据导出(用户/告警 CSV);前端 Admin 页(角色守卫导航);`LoginLog`/`AdminLog`/`SystemConfig` 表+users 迁移;测试 41 项(Files: app/admin.py, app/db/{models,database}.py, app/auth.py, app/platform.py, config/settings.py, frontend/src/{api.js,router.js,App.vue,views/Admin.vue}, tests/test_platform.py)

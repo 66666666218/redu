@@ -257,3 +257,31 @@ def category_dist(db: Session) -> list[dict]:
         select(XianyuDaily.category, func.count(XianyuDaily.id), func.sum(XianyuDaily.want_count)).group_by(XianyuDaily.category)
     ).all()
     return [{"name": c or "未分类", "count": n, "want": int(w or 0)} for c, n, w in rows]
+
+
+# ---------------- RBAC 按钮/菜单级权限 ----------------
+# 角色 → 权限点集合;"*" 通配全部。operator 可查/启停/导出,不可删/导入/改配置。
+PERMS: dict[str, set[str]] = {
+    "admin": {"*"},
+    "operator": {
+        "dashboard.view", "users.view", "users.toggle", "data.view", "data.export",
+        "logs.view", "config.view",
+    },
+}
+
+
+def perms_for(role: str) -> set[str]:
+    p = PERMS.get(role, set())
+    return {"*"} if "*" in p else p
+
+
+def has_perm(role: str, perm: str) -> bool:
+    p = perms_for(role)
+    return "*" in p or perm in p
+
+
+def perms_list(role: str) -> list[str]:
+    p = perms_for(role)
+    if "*" in p:
+        return sorted(PERMS.get("operator", set()) | {"users.delete", "users.import", "config.set", "dashboard.view"})
+    return sorted(p)

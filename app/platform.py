@@ -310,24 +310,32 @@ def create_app() -> FastAPI:
         db.commit()
         return {"saved": True}
 
-    # ================= 管理后台(require_admin) =================
+    # ================= 管理后台(require_admin + 按钮级权限) =================
     class ConfigIn(pydantic.BaseModel):
         value: str
 
+    def _require_perm(perm: str):
+        def dep(user: User = Depends(require_admin)) -> User:
+            if not admin_svc.has_perm(user.role, perm):
+                raise HTTPException(403, f"无权限:{perm}")
+            return user
+
+        return dep
+
     @app.get("/api/admin/me")
     def admin_me(user: User = Depends(require_admin)):
-        return {"role": user.role, "username": user.username}
+        return {"role": user.role, "username": user.username, "perms": admin_svc.perms_list(user.role)}
 
     @app.get("/api/admin/dashboard")
-    def admin_dashboard(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    def admin_dashboard(user: User = Depends(_require_perm("dashboard.view")), db: Session = Depends(get_db)):
         return admin_svc.dashboard(db)
 
     @app.get("/api/admin/users")
-    def admin_users(q: str = "", user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    def admin_users(q: str = "", user: User = Depends(_require_perm("users.view")), db: Session = Depends(get_db)):
         return admin_svc.list_users(db, q)
 
     @app.post("/api/admin/users/{user_id}/toggle")
-    def admin_users_toggle(user_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    def admin_users_toggle(user_id: int, user: User = Depends(_require_perm("users.toggle")), db: Session = Depends(get_db)):
         res = admin_svc.toggle_user(db, user_id)
         if res is None:
             raise HTTPException(404, "用户不存在")
@@ -335,7 +343,7 @@ def create_app() -> FastAPI:
         return res
 
     @app.delete("/api/admin/users/{user_id}")
-    def admin_users_del(user_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    def admin_users_del(user_id: int, user: User = Depends(_require_perm("users.delete")), db: Session = Depends(get_db)):
         if user_id == user.id:
             raise HTTPException(400, "不能删除自己")
         ok = admin_svc.delete_user(db, user_id)
@@ -345,44 +353,44 @@ def create_app() -> FastAPI:
         return {"deleted": True}
 
     @app.get("/api/admin/logins")
-    def admin_logins(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    def admin_logins(user: User = Depends(_require_perm("logs.view")), db: Session = Depends(get_db)):
         return admin_svc.list_logins(db)
 
     @app.get("/api/admin/logs")
-    def admin_logs(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    def admin_logs(user: User = Depends(_require_perm("logs.view")), db: Session = Depends(get_db)):
         return admin_svc.list_admin_logs(db)
 
     @app.get("/api/admin/config")
-    def admin_config(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    def admin_config(user: User = Depends(_require_perm("config.view")), db: Session = Depends(get_db)):
         return admin_svc.config_get(db)
 
     @app.put("/api/admin/config/{key}")
-    def admin_config_set(key: str, body: ConfigIn, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    def admin_config_set(key: str, body: ConfigIn, user: User = Depends(_require_perm("config.set")), db: Session = Depends(get_db)):
         admin_svc.config_set(db, key, body.value)
         admin_svc.log_admin(db, user, "set_config", key, body.value)
         return {"key": key, "value": body.value}
 
     @app.get("/api/admin/export/users")
-    def admin_export_users(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    def admin_export_users(user: User = Depends(_require_perm("data.export")), db: Session = Depends(get_db)):
         from fastapi.responses import PlainTextResponse
 
         return PlainTextResponse(admin_svc.export_users(db), media_type="text/csv")
 
     @app.get("/api/admin/export/alerts")
-    def admin_export_alerts(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    def admin_export_alerts(user: User = Depends(_require_perm("data.export")), db: Session = Depends(get_db)):
         from fastapi.responses import PlainTextResponse
 
         return PlainTextResponse(admin_svc.export_alerts(db), media_type="text/csv")
 
     @app.get("/api/admin/users/{user_id}")
-    def admin_user_detail(user_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    def admin_user_detail(user_id: int, user: User = Depends(_require_perm("users.view")), db: Session = Depends(get_db)):
         detail = admin_svc.user_detail(db, user_id)
         if detail is None:
             raise HTTPException(404, "用户不存在")
         return detail
 
     @app.post("/api/admin/import/users")
-    def admin_import_users(body: dict, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    def admin_import_users(body: dict, user: User = Depends(_require_perm("users.import")), db: Session = Depends(get_db)):
         text = str(body.get("text", ""))
         res = admin_svc.import_users(db, text)
         admin_svc.log_admin(db, user, "import_users", f"created={res['created']} skipped={res['skipped']}")
@@ -390,11 +398,11 @@ def create_app() -> FastAPI:
 
     @app.get("/api/admin/data/{section}")
     def admin_data(section: str, user_id: int | None = None, limit: int = 50,
-                   user: User = Depends(require_admin), db: Session = Depends(get_db)):
+                   user: User = Depends(_require_perm("data.view")), db: Session = Depends(get_db)):
         return admin_svc.data_browse(db, section, user_id, limit)
 
     @app.get("/api/admin/categories")
-    def admin_categories(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    def admin_categories(user: User = Depends(_require_perm("dashboard.view")), db: Session = Depends(get_db)):
         return admin_svc.category_dist(db)
 
     # 托管前端构建产物(SPA)

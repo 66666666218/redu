@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { api } from '../api'
+import { toastError, toastOk } from '../toast'
 
 const tab = ref('dashboard')
 const dash = ref({ counts: {}, today_runs: 0, trend: [], trend30: [], pending_users: 0, failed_runs: 0 })
@@ -15,17 +16,20 @@ const importText = ref('')
 const dataRef = ref([])
 const dataSection = ref('weibo')
 const cats = ref([])
+const perms = ref([])
+const can = (p) => perms.value.includes(p)
 
 async function load() {
   msg.value = ''
   try {
+    const me = await api.adminMe(); perms.value = me.perms || []
     dash.value = await api.adminDashboard()
     users.value = await api.adminUsers()
     logins.value = await api.adminLogins()
     adminlogs.value = await api.adminLogs()
     config.value = await api.adminConfig()
     cats.value = await api.adminCategories()
-  } catch (e) { msg.value = '加载失败:' + e.message }
+  } catch (e) { toastError('加载失败:' + e.message) }
 }
 async function toggle(u) {
   await api.adminUserToggle(u.id); await load()
@@ -101,8 +105,8 @@ onMounted(load)
         <table><tr><th>日期</th><th>运行</th><th>告警</th></tr>
           <tr v-for="t in dash.trend" :key="t.date"><td>{{ t.date }}</td><td>{{ t.runs }}</td><td>{{ t.alerts }}</td></tr>
         </table>
-        <button class="ghost" @click="download('alerts')">导出告警CSV</button>
-        <button class="ghost" @click="download('users')">导出用户CSV</button>
+        <button v-if="can('data.export')" class="ghost" @click="download('alerts')">导出告警CSV</button>
+        <button v-if="can('data.export')" class="ghost" @click="download('users')">导出用户CSV</button>
       </div>
     </template>
 
@@ -111,7 +115,7 @@ onMounted(load)
         <input v-model="q" placeholder="搜索用户名/邮箱" style="margin:0" @keyup.enter="searchUsers" />
         <button @click="searchUsers">搜索</button>
       </div>
-      <div class="card" style="margin-bottom:10px">
+      <div class="card" style="margin-bottom:10px" v-if="can('users.import')">
         <h3>批量导入用户(每行:email,password[,role])</h3>
         <textarea v-model="importText" placeholder="a@x.com,123456,admin&#10;b@y.com,123456"></textarea>
         <button @click="doImport">导入</button>
@@ -143,8 +147,8 @@ onMounted(load)
             <td :class="{ up: u.enabled }">{{ u.enabled ? '启用' : '禁用' }}</td>
             <td>
               <button class="ghost" @click="openDetail(u)">详情</button>
-              <button class="ghost" @click="toggle(u)">{{ u.enabled ? '禁用' : '启用' }}</button>
-              <button class="ghost" @click="del(u)">删除</button>
+              <button v-if="can('users.toggle')" class="ghost" @click="toggle(u)">{{ u.enabled ? '禁用' : '启用' }}</button>
+              <button v-if="can('users.delete')" class="ghost" @click="del(u)">删除</button>
             </td>
           </tr>
         </table>
@@ -185,7 +189,7 @@ onMounted(load)
     <template v-if="tab==='config'">
       <div class="card"><h3>系统设置</h3>
         <table><tr><th>键</th><th>值</th><th></th></tr>
-          <tr v-for="c in config" :key="c.key"><td>{{ c.key }}</td><td>{{ c.value }}</td><td><button class="ghost" @click="setCfg(c.key)">修改</button></td></tr>
+          <tr v-for="c in config" :key="c.key"><td>{{ c.key }}</td><td>{{ c.value }}</td><td><button v-if="can('config.set')" class="ghost" @click="setCfg(c.key)">修改</button></td></tr>
         </table>
         <div v-if="!config.length" class="empty">暂无配置项</div>
       </div>
