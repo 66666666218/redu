@@ -34,6 +34,84 @@ def _load_cookie(path: str) -> str:
     return Path(path).read_text(encoding="utf-8").strip()
 
 
+def fetch_list(cookie: str, url: str, fragment: str, title_keys: tuple[str, ...], score_keys: tuple[str, ...]) -> list[dict]:
+    """通用:驱动浏览器打开 url,拦截含 fragment 的 query_list 响应,取 [{title, score}]。
+
+    供 内容词榜 / 搜索榜 / 我的订阅 使用;解析失败返回空(不抛错)。
+    """
+    from playwright.sync_api import sync_playwright
+
+    respons: list[object] = []
+
+    def on_response(response) -> None:  # type: ignore[no-untyped-def]
+        try:
+            if fragment in response.url and "json" in (response.headers.get("content-type") or ""):
+                respons.append(response)
+        except Exception:  # noqa: BLE001
+            pass
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(user_agent=_UA, viewport={"width": 1400, "height": 900})
+            context.add_cookies(_parse_cookies(cookie))
+            page = context.new_page()
+            page.on("response", on_response)
+            page.goto(url, timeout=60_000)
+            page.wait_for_timeout(9_000)
+            words: list[dict] = []
+            for resp in respons:
+                try:
+                    obj = resp.json()  # type: ignore[attr-defined]
+                except Exception:  # noqa: BLE001
+                    continue
+                words = _extract_keywords(obj, title_keys, score_keys)
+                if words:
+                    break
+            browser.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("热点榜单 %s 加载失败:%s", fragment, exc)
+        return []
+    return words
+
+
+def _extract_keywords(obj: object, title_keys: tuple[str, ...], score_keys: tuple[str, ...]) -> list[dict]:
+    """递归找含 title/key_word + score 的条目列表,返回 [{title, score}]。"""
+    found: list[dict] = []
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            title = next((node[k] for k in title_keys if k in node and node[k]), None)
+            # 并非所有 dict 都是条目,只有同时含 title 与 score 才算
+            if title and any(k in node for k in score_keys):
+                score = next((node[k] for k in score_keys if k in node), 0)
+                found.append({"title": str(title).strip(), "score": score})
+                return
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(obj)
+    return found
+
+
+def fetch_content_words(cookie: str) -> list[dict]:
+    """内容词榜(hot_word/query_list)。"""
+    return fetch_list(cookie, URL, "/hot_word/query_list", ("title",), ("score",))
+
+
+def fetch_search_words(cookie: str) -> list[dict]:
+    """搜索榜(hot_search/query_list):key_word + search_score。"""
+    return fetch_list(cookie, URL, "/hot_search/query_list", ("key_word", "title"), ("search_score", "score"))
+
+
+def fetch_subscribe_words(cookie: str) -> list[dict]:
+    """我的订阅/榜单聚合(subscribe/query_list)。"""
+    return fetch_list(cookie, "https://douhot.douyin.com/square/hotspot?active_tab=hotspot_all", "/subscribe/query_list", ("title", "key_word"), ("score", "search_score"))
+
+
 def _parse_cookies(raw: str) -> list[dict]:
     out: list[dict] = []
     for pair in raw.split("; "):

@@ -130,7 +130,14 @@ def run_douhot(session: Session, user_id: int, settings: Settings | None = None)
         for w in words:
             session.add(DouhotWord(user_id=user_id, created_at=now, **w))
         session.commit()
-        _record_douhot_watch_snaps(session, user_id, words)
+        # 按用户关注类型补拉 搜索榜/我的订阅,并记录对应快照
+        watch_types = {w.list_type for w in session.scalars(select(DouhotWatch).where(DouhotWatch.user_id == user_id)).all()}
+        lists: dict[str, list[dict]] = {"word": words}
+        if "search" in watch_types:
+            lists["search"] = douhot.fetch_search_words(douyin_cookie)
+        if "subscribe" in watch_types:
+            lists["subscribe"] = douhot.fetch_subscribe_words(douyin_cookie)
+        _record_douhot_watch_snaps(session, user_id, lists)
         rising = _douhot_rising(session, user_id, settings, now)
         _record_run(session, user_id, "douhot", "success", f"words={len(words)} risen={len(rising)}")
         session.commit()
@@ -312,7 +319,7 @@ def xianyu_analytics(session: Session, user_id: int) -> dict:
 
 # ---------- 热点宝关键词监控 ----------
 def add_douhot_watch(session: Session, user_id: int, list_type: str, keyword: str) -> dict:
-    list_type = list_type if list_type in ("word", "search") else "word"
+    list_type = list_type if list_type in ("word", "search", "subscribe") else "word"
     keyword = keyword.strip()
     row = session.scalar(
         select(DouhotWatch).where(
@@ -330,10 +337,11 @@ def list_douhot_watch(session: Session, user_id: int) -> list[dict]:
     return [{"list_type": r.list_type, "keyword": r.keyword} for r in rows]
 
 
-def _record_douhot_watch_snaps(session: Session, user_id: int, words: list[dict]) -> None:
-    """把用户关注的词,若出现在本次榜中,记录得分与排名快照。"""
+def _record_douhot_watch_snaps(session: Session, user_id: int, lists: dict[str, list[dict]]) -> None:
+    """把用户关注的词,在对应榜单(内容词/搜索/订阅)中记录得分与排名快照。"""
     watches = session.scalars(select(DouhotWatch).where(DouhotWatch.user_id == user_id)).all()
     for w in watches:
+        words = lists.get(w.list_type, [])
         score, rank = 0, 0
         for i, word in enumerate(words, start=1):
             if word.get("title") == w.keyword:
