@@ -9,6 +9,15 @@ python-dotenv>=1.0
 # ---- 监控接口(可选) ----
 fastapi>=0.110
 uvicorn[standard]>=0.29
+# ---- 鉴权 ----
+passlib[bcrypt]>=1.7
+pyjwt>=2.8
+python-multipart>=0.0.9
+
+# ---- 数据库(MySQL) ----
+sqlalchemy>=2.0
+pymysql>=1.1
+cryptography>=42
 
 # ---- 指数源:巨量算数/抖音热点宝(需 docker 内安装 chromium) ----
 playwright>=1.42

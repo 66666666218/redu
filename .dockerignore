@@ -3,6 +3,10 @@
 data/
 doc/js/
 
+# 前端依赖/产物(Docker 多阶段会重新构建)
+frontend/node_modules/
+app/static/spa/
+
 # 版本控制 / 缓存
 .git
 .gitignore

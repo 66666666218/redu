@@ -67,6 +67,12 @@ class Settings(BaseSettings):
     app_port: int = 8080
     data_dir: str = "data"          # 归档与快照根目录
 
+    # ---- 多租户平台 ----
+    database_url: str = "mysql+pymysql://redu:redu@db:3306/redu?charset=utf8mb4"  # MySQL
+    jwt_secret: str = ""            # 生产必须设置强随机密钥
+    jwt_expire_minutes: int = 604800  # 登录有效期(默认 7 天)
+    cookie_encrypt_key: str = ""    # Cookie 加密密钥(Fernet);为空则用 jwt_secret 派生
+
     @property
     def notify_to_list(self) -> list[str]:
         """将逗号分隔的收件人字符串转为列表,并去掉空项。"""

@@ -16,6 +16,10 @@ data/
 # 微信小程序产物(逆向参考,不入库)
 doc/js/
 
+# 前端构建产物(由 Docker 多阶段构建生成,不入库)
+app/static/spa/
+node_modules/
+
 # 抓包探测产物(含请求头敏感信息)
 *_captured.json
 

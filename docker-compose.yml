@@ -1,40 +1,51 @@
-# 热点监控系统 · 容器编排
+# 热点监控平台 · 多租户容器编排
 # 服务:
-#   redu-monitor  调度器(采集/判涨/告警:微博、闲鱼、抖音 4 作业)
-#   redu-api      接口 + Web 看板(FastAPI,端口 8080)
+#   mysql      数据库(用户/Cookie/各用户监控数据,均按 user_id 隔离)
+#   redu-api   平台后端 FastAPI + 前端 SaaS(http://IP:8080/,注册登录后各管各的 Cookie)
 # 运行:
-#   cp .env.example .env   # 填入各 Cookie / SMTP / 代理
+#   cp .env.example .env   # 设 JWT_SECRET(强随机)、DATABASE_URL、SMTP 等
 #   docker compose up -d
-# 说明:镜像不含 .env 与 data/(Cookie),经 bind mount + env_file 注入。
 
 services:
-  redu-monitor:
-    # 使用已推送的镜像;本地改代码可改用 build: .
-    image: crpi-me8okzjl211xpvun.cn-hangzhou.personal.cr.aliyuncs.com/tcdhouhuayuan/redu:latest
-    # build: .
-    container_name: redu-monitor
+  mysql:
+    image: mysql:8.0
+    container_name: redu-mysql
     restart: unless-stopped
-    env_file: .env
+    environment:
+      MYSQL_DATABASE: redu
+      MYSQL_USER: redu
+      MYSQL_PASSWORD: redu
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-redu_root_change_me}
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     volumes:
-      - ./data:/app/data          # 归档/SQLite + Cookie 文件(密钥不进镜像)
-    # 默认 CMD 即调度器;不覆盖 command
-    # 调度器无 HTTP 端点,故不配健康检查(进程存活由 Docker 判定)
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   redu-api:
-    image: crpi-me8okzjl211xpvun.cn-hangzhou.personal.cr.aliyuncs.com/tcdhouhuayuan/redu:latest
+    # 新镜像(多租户平台)需重新构建/推送;此处用本地构建
+    # image: crpi-me8okzjl211xpvun.cn-hangzhou.personal.cr.aliyuncs.com/tcdhouhuayuan/redu:latest
+    build: .
     container_name: redu-api
     restart: unless-stopped
-    command: ["python", "-m", "app.main", "--api"]
+    command: ["python", "-m", "uvicorn", "app.platform:app", "--host", "0.0.0.0", "--port", "8080"]
     env_file: .env
-    volumes:
-      - ./data:/app/data
+    environment:
+      DATABASE_URL: mysql+pymysql://redu:redu@mysql:3306/redu?charset=utf8mb4
     ports:
       - "8080:8080"
     depends_on:
-      - redu-monitor
+      mysql:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz',timeout=5)"]
       interval: 1m
       timeout: 10s
       retries: 3
-      start_period: 20s
+      start_period: 30s
+
+volumes:
+  mysql_data:

@@ -1,5 +1,13 @@
-# 热点监控系统
-# 基于 python:3.11-slim
+# 热点监控平台(多租户 · 前后端分离)
+# 阶段1:构建 Vue3 前端;阶段2:Python 运行时(含 Playwright chromium)
+
+FROM node:20-slim AS frontend
+WORKDIR /build
+COPY frontend/package*.json ./
+RUN npm install --no-audit --no-fund
+COPY frontend/ ./
+RUN npx vite build --outDir dist
+
 FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -8,20 +16,19 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# 安装 Python 依赖
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 安装 Playwright(供抖音内容词浏览器采集)与 chromium + 系统依赖
+# Playwright chromium(抖音内容词浏览器采集)
 RUN playwright install --with-deps chromium
 
-# 拷贝应用代码
 COPY config ./config
 COPY app ./app
+COPY scripts ./scripts
+# 前端构建产物 → 后端托管目录
+COPY --from=frontend /build/dist ./app/static/spa
 
-# 运行数据目录(归档/快照;Cookie 等请经卷挂载注入,勿打进镜像)
 RUN mkdir -p /app/data
 
-# 默认:调度模式(微博/闲鱼/抖音 4 个作业)
-# 覆盖为 --api 可单独起监控接口/看板;建议以独立容器跑 API 以避免 SQLite 多进程竞争。
-CMD ["python", "-m", "app.main"]
+# 默认:多租户平台 API(鉴权 + 采集 + 看板);也可 --api 换成旧单机调度器(可选)
+CMD ["python", "-m", "uvicorn", "app.platform:app", "--host", "0.0.0.0", "--port", "8080"]

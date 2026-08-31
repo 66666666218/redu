@@ -62,11 +62,13 @@ def _parse_word(w: dict) -> dict:
 
 
 @retry(attempts=2, base_delay=1.0, exceptions=(DouhotError, Exception))
-def fetch_content_words(cookie_file: str) -> list[dict]:
-    """用无头浏览器打开热点趋势页,拦截内容词接口,返回趋势记录列表。"""
+def fetch_content_words(cookie: str) -> list[dict]:
+    """用无头浏览器打开热点趋势页,拦截内容词接口,返回趋势记录列表。
+
+    直接接收 Cookie 字符串(便于多用户各自注入)。签名由浏览器合法生成。
+    """
     from playwright.sync_api import sync_playwright
 
-    cookie = _load_cookie(cookie_file)
     responses: list[object] = []
 
     def on_response(response) -> None:  # type: ignore[no-untyped-def]
@@ -155,7 +157,8 @@ def run_douhot_trend(
     settings = settings or get_settings()
     repo = repo or ArchiveRepository(settings.data_dir)
     notifier = notifier or get_notifier(settings)
-    words = fetch_content_words(settings.douhot_cookie_file)
+    cookie = _load_cookie(settings.douhot_cookie_file)
+    words = fetch_content_words(cookie)
     run_id = datetime.now().strftime("%Y%m%d%H%M%S")
     repo.save_douhot_words(run_id, words)  # type: ignore[attr-defined]
     top = sorted(words, key=lambda w: w["score"], reverse=True)[: settings.douhot_top_n]

@@ -1,0 +1,27 @@
+:root { --bg:#0f1420; --card:#1a2233; --line:#2a3550; --txt:#e6ecf5; --dim:#8b9bb5; --accent:#4f8cff; --up:#12b76a }
+* { box-sizing:border-box }
+body { margin:0; font-family:system-ui,"Microsoft YaHei",sans-serif; background:var(--bg); color:var(--txt) }
+.topbar { display:flex; justify-content:space-between; align-items:center; padding:14px 24px; border-bottom:1px solid var(--line) }
+.brand { font-weight:700 }
+.topbar nav a { margin-left:18px; color:var(--dim); text-decoration:none }
+.topbar nav a.router-link-active, .topbar nav a:hover { color:var(--accent) }
+.page { padding:24px; max-width:1200px; margin:0 auto }
+.auth { max-width:360px; margin:80px auto; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:28px }
+.auth h2 { margin:0 0 16px; font-size:18px }
+input, textarea { width:100%; background:#0b101b; color:var(--txt); border:1px solid var(--line); border-radius:6px; padding:10px 12px; margin:6px 0 14px; font-size:14px }
+textarea { min-height:90px; font-family:monospace; font-size:12px }
+button { background:var(--accent); color:#fff; border:none; border-radius:6px; padding:10px 18px; cursor:pointer; font-size:14px }
+button.ghost { background:transparent; border:1px solid var(--line); color:var(--dim) }
+button:disabled { opacity:.5 }
+.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(360px,1fr)); gap:16px }
+.card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px }
+.card h3 { margin:0 0 12px; font-size:15px; color:var(--dim); font-weight:600 }
+table { width:100%; border-collapse:collapse; font-size:13px }
+th,td { text-align:left; padding:6px; border-bottom:1px solid var(--line) }
+th { color:var(--dim) }
+.up { color:var(--up) } .price { color:var(--accent) }
+.empty { color:var(--dim); font-size:13px; padding:8px 0 }
+.error { color:#ff6b6b; font-size:13px; margin-bottom:10px }
+.ok { color:var(--up); font-size:13px; margin-bottom:10px }
+.row { display:flex; gap:12px; align-items:center }
+.badge { background:#26304a; color:var(--dim); border-radius:10px; padding:2px 10px; font-size:12px }

@@ -103,8 +103,8 @@ def run_api() -> None:
 
     setup_logging()
     settings = get_settings()
-    logger.info("启动 API 模式,端口 %s", settings.app_port)
-    uvicorn.run("app.api:app", host="0.0.0.0", port=settings.app_port)
+    logger.info("启动 API 模式(多租户平台),端口 %s", settings.app_port)
+    uvicorn.run("app.platform:app", host="0.0.0.0", port=settings.app_port)
 
 
 if __name__ == "__main__":
