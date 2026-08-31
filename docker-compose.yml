@@ -1,15 +1,40 @@
+# 热点监控系统 · 容器编排
+# 服务:
+#   redu-monitor  调度器(采集/判涨/告警:微博、闲鱼、抖音 4 作业)
+#   redu-api      接口 + Web 看板(FastAPI,端口 8080)
+# 运行:
+#   cp .env.example .env   # 填入各 Cookie / SMTP / 代理
+#   docker compose up -d
+# 说明:镜像不含 .env 与 data/(Cookie),经 bind mount + env_file 注入。
+
 services:
-  hot-monitor:
-    build: .
-    container_name: hot-monitor
+  redu-monitor:
+    # 使用已推送的镜像;本地改代码可改用 build: .
+    image: crpi-me8okzjl211xpvun.cn-hangzhou.personal.cr.aliyuncs.com/tcdhouhuayuan/redu:latest
+    # build: .
+    container_name: redu-monitor
+    restart: unless-stopped
     env_file: .env
-    environment:
-      - DATA_DIR=/app/data
+    volumes:
+      - ./data:/app/data          # 归档/SQLite + Cookie 文件(密钥不进镜像)
+    # 默认 CMD 即调度器;不覆盖 command
+    # 调度器无 HTTP 端点,故不配健康检查(进程存活由 Docker 判定)
+
+  redu-api:
+    image: crpi-me8okzjl211xpvun.cn-hangzhou.personal.cr.aliyuncs.com/tcdhouhuayuan/redu:latest
+    container_name: redu-api
+    restart: unless-stopped
+    command: ["python", "-m", "app.main", "--api"]
+    env_file: .env
     volumes:
       - ./data:/app/data
-    # 调度模式默认运行;如需暴露监控接口,取消 command 注释并映射 8080
-    command: ["python", "-m", "app.main"]
-    # command: ["python", "-m", "app.main", "--api"]
-    # ports:
-    #   - "8080:8080"
-    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      - redu-monitor
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz',timeout=5)"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+      start_period: 20s
