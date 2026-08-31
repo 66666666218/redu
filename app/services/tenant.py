@@ -237,8 +237,9 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
         client = xianyu.XianyuClient(goofish)
         hot = xianyu.collect_hot(settings, client)
         today = datetime.now().date().isoformat()
+        base_delay = getattr(settings, "request_delay_seconds", 2.5)
         saved = 0
-        for it in hot[: _xy_detail_limit(settings)]:
+        for idx, it in enumerate(hot[: _xy_detail_limit(settings)]):
             detail = xianyu.fetch_detail(client, it["item_id"])
             row = session.scalar(
                 select(XianyuDaily).where(
@@ -259,6 +260,11 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
             row.view_count = detail.get("view_count", 0)
             row.seller_fans = detail.get("seller_fans", 0)
             saved += 1
+            if idx < _xy_detail_limit(settings) - 1:
+                import random
+                import time
+
+                time.sleep(base_delay * random.uniform(0.8, 1.4))
         session.commit()
         _record_run(session, user_id, "xianyu_deep", "success", f"items={saved}")
         session.commit()

@@ -33,8 +33,20 @@ class XianyuError(Exception):
     """闲鱼请求/解析失败。"""
 
 
+# mtop 令牌错误码(需刷新 _m_h5_tk 后重试;参考开源 goofish-client)
+TOKEN_ERRORS = {
+    "FAIL_SYS_TOKEN_EMPTY",
+    "FAIL_SYS_TOKEN_ILLEGAL",
+    "FAIL_SYS_SESSION_EXPIRED",
+    "FAIL_SYS_TOKEN_EXOIRED",
+    "FAIL_SYS_USER_NOT_LOGIN",
+}
+# 限流/风控码(需退避,不重试)
+RATE_ERRORS = {"FAIL_SYS_USER_VALIDATE", "FAIL_SYS_RATE_LIMIT", "FAIL_SYS_USER_LIMIT"}
+
+
 class XianyuClient:
-    """mtop 签名 + 登录态的最小客户端。"""
+    """mtop 签名 + 登录态的最小客户端(带令牌刷新/重试)。"""
 
     def __init__(self, cookie: str) -> None:
         self.cookie = cookie
@@ -45,19 +57,72 @@ class XianyuClient:
         m = re.search(r"_m_h5_tk=([0-9a-f]{32})_", cookie)
         return m.group(1) if m else ""
 
+    def _headers(self) -> dict:
+        return {
+            "User-Agent": _UA,
+            "Cookie": self.cookie,
+            "Referer": "https://www.goofish.com/",
+            "Origin": "https://www.goofish.com",
+        }
+
+    def _refresh_token_from(self, resp: requests.Response, append_cookie: bool = False) -> bool:
+        """从响应 Set-Cookie 刷新 _m_h5_tk 令牌;返回是否发生了更新。"""
+        set_cookie = resp.headers.get("set-cookie", "")
+        if not set_cookie:
+            return False
+        if append_cookie and set_cookie not in self.cookie:
+            self.cookie = f"{self.cookie}; {set_cookie}"
+        m = re.search(r"_m_h5_tk=([0-9a-f]{32})_", set_cookie)
+        if m and m.group(1) and m.group(1) != self.token:
+            self.token = m.group(1)
+            return True
+        return False
+
     def _refresh_session(self, resp: requests.Response) -> None:
-        """从响应 set-cookie 刷新 _m_h5_tk 令牌与 Cookie,避免签名过期。"""
-        if "set-cookie" in resp.headers:
-            self.cookie = f"{self.cookie}; {resp.headers['set-cookie']}"
-            m = re.search(r"_m_h5_tk=([0-9a-f]{32})_", resp.headers["set-cookie"])
-            if m:
-                new_token = m.group(1)
-                if new_token and new_token != self.token:
-                    self.token = new_token
+        """每次请求后刷新令牌(与开源库 updateFromHeaders 一致)。"""
+        self._refresh_token_from(resp, append_cookie=True)
 
     def _sign(self, t: str, data: str) -> str:
         raw = f"{self.token}&{t}&{APP_KEY}&{data}"
         return hashlib.md5(raw.encode()).hexdigest()
+
+    def _post(self, api: str, data_obj: dict) -> dict:
+        data = json.dumps(data_obj, ensure_ascii=False, separators=(",", ":"))
+        t = str(int(time.time() * 1000))
+        params = {
+            "jsv": "2.7.2",
+            "appKey": APP_KEY,
+            "t": t,
+            "sign": self._sign(t, data),
+            "v": "1.0",
+            "type": "originaljson",
+            "accountSite": "xianyu",
+            "dataType": "json",
+            "timeout": "20000",
+            "api": api,
+            "sessionOption": "AutoLoginOnly",
+            "spm_cnt": "a21ybx.search.0.0",
+        }
+        try:
+            resp = requests.post(
+                f"{H5_BASE}/{api}/1.0/", params=params, data={"data": data}, headers=self._headers(), timeout=20
+            )
+        except requests.RequestException as exc:
+            raise XianyuError(f"闲鱼请求失败:{exc}") from exc
+        self._refresh_session(resp)
+        obj = resp.json()
+        ret = obj.get("ret", [""])[0]
+        code = ret.split("::")[0]
+        if code in TOKEN_ERRORS:
+            # 刷新 token 后重试一次
+            if self._refresh_token_from(resp) and obj is not None:
+                return self._post(api, data_obj)
+            raise XianyuError(f"闲鱼令牌错误:{ret}")
+        if code in RATE_ERRORS:
+            raise XianyuError(f"闲鱼限流,请稍后再试:{ret}")
+        if code and not code.startswith("SUCCESS"):
+            raise XianyuError(f"闲鱼接口返回:{ret}")
+        return obj
 
     def search(self, keyword: str, page: int = 1, rows: int = 30) -> list[dict]:
         """按关键词搜索,返回按闲鱼"综合"顺序的商品列表。"""
@@ -76,35 +141,7 @@ class XianyuClient:
             "extraFilterValue": "{}",
             "userPositionJson": "{}",
         }
-        data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        t = str(int(time.time() * 1000))
-        params = {
-            "jsv": "2.7.2",
-            "appKey": APP_KEY,
-            "t": t,
-            "sign": self._sign(t, data),
-            "v": "1.0",
-            "type": "originaljson",
-            "accountSite": "xianyu",
-            "dataType": "json",
-            "timeout": "20000",
-            "api": API,
-            "sessionOption": "AutoLoginOnly",
-            "spm_cnt": "a21ybx.search.0.0",
-        }
-        headers = {"User-Agent": _UA, "Cookie": self.cookie, "Referer": "https://www.goofish.com/"}
-        try:
-            resp = requests.post(f"{H5_BASE}/{API}/1.0/", params=params, data={"data": data}, headers=headers, timeout=20)
-        except requests.RequestException as exc:
-            raise XianyuError(f"闲鱼请求失败:{exc}") from exc
-        self._refresh_session(resp)
-        try:
-            obj = resp.json()
-        except ValueError as exc:
-            raise XianyuError("闲鱼响应非 JSON") from exc
-        ret = obj.get("ret", [])
-        if ret and not any("SUCCESS" in r for r in ret):
-            raise XianyuError(f"闲鱼接口返回:{ret}")
+        obj = self._post(API, payload)
         items = _extract_items(obj)
         if not items:
             raise XianyuError(f"未解析到商品,keyword={keyword}")
@@ -112,34 +149,8 @@ class XianyuClient:
         return items
 
     def detail(self, item_id: str) -> dict:
-        """请求商品详情,返回 JSON。接口名/字段随版本变化(需新鲜会话验证)。"""
-        payload = {"itemId": item_id, "id": item_id}
-        data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        t = str(int(time.time() * 1000))
-        params = {
-            "jsv": "2.7.2",
-            "appKey": APP_KEY,
-            "t": t,
-            "sign": self._sign(t, data),
-            "v": "1.0",
-            "type": "originaljson",
-            "accountSite": "xianyu",
-            "dataType": "json",
-            "timeout": "20000",
-            "api": "mtop.taobao.idle.pc.detail",
-            "sessionOption": "AutoLoginOnly",
-            "spm_cnt": "a21ybx.detail.0.0",
-        }
-        headers = {"User-Agent": _UA, "Cookie": self.cookie, "Referer": "https://www.goofish.com/"}
-        try:
-            resp = requests.post(f"{H5_BASE}/mtop.taobao.idle.pc.detail/1.0/", params=params, data={"data": data}, headers=headers, timeout=20)
-        except requests.RequestException as exc:
-            raise XianyuError(f"闲鱼详情请求失败:{exc}") from exc
-        self._refresh_session(resp)
-        try:
-            return resp.json()
-        except ValueError as exc:
-            raise XianyuError("闲鱼详情响应非 JSON") from exc
+        """请求商品详情,返回 JSON。带令牌刷新与重试。"""
+        return self._post("mtop.taobao.idle.pc.detail", {"itemId": item_id, "id": item_id})
 
 
 def _extract_items(obj: object) -> list[dict]:
