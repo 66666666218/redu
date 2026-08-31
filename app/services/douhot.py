@@ -30,9 +30,6 @@ class DouhotError(Exception):
     """内容词趋势获取/解析失败。"""
 
 
-def _load_cookie(path: str) -> str:
-    return Path(path).read_text(encoding="utf-8").strip()
-
 
 def fetch_list(
     cookie: str,
@@ -109,11 +106,6 @@ def _extract_keywords(obj: object, title_keys: tuple[str, ...], score_keys: tupl
 
     walk(obj)
     return found
-
-
-def fetch_content_words(cookie: str) -> list[dict]:
-    """内容词榜(hot_word/query_list)。"""
-    return fetch_list(cookie, URL, "/hot_word/query_list", ("title",), ("score",))
 
 
 def fetch_search_words(cookie: str) -> list[dict]:
@@ -222,76 +214,3 @@ def fetch_content_words(cookie: str) -> list[dict]:
         raise DouhotError("未从热点响应中解析到内容词")
     logger.info("抖音热点·内容词采集完成,共 %s 个", len(words))
     return words
-
-
-def _detect_rising(settings: Settings, repo: object, words: list[dict], notifier: object) -> tuple[list[dict], list[str]]:
-    """跨轮判涨:按词取历史飙升指数序列,双条件(环比涨幅>阈值 且 斜率>0)命中则告警(带冷却去重)。"""
-    from app.models import Alert
-    from app.services.trend_analyzer import compute_growth, compute_slope
-
-    rising: list[dict] = []
-    for w in words:
-        series = repo.douhot_score_series(w["title"], limit=10)  # type: ignore[attr-defined]
-        values = [s["score"] for s in series]
-        if len(values) < 2:
-            continue
-        growth = compute_growth(values)
-        slope = compute_slope(values)
-        if growth is None or slope is None:
-            continue
-        if growth > settings.growth_threshold and slope > 0:
-            item = dict(w)
-            item["growth"] = growth
-            item["slope"] = slope
-            rising.append(item)
-    rising.sort(key=lambda r: r["growth"], reverse=True)
-
-    alerted: list[str] = []
-    for r in rising[: settings.douhot_alert_max]:
-        if repo.douhot_alerted_recent(r["title"], settings.douhot_alert_cooldown_hours):  # type: ignore[attr-defined]
-            continue
-        alert = Alert(
-            keyword=r["title"],
-            reason=f"抖音内容词飙升指数环比 {r['growth']:.0%}/斜率 {r['slope']:.0f}",
-        )
-        notifier.notify(alert)  # type: ignore[attr-defined]
-        repo.record_douhot_alert(r["title"])  # type: ignore[attr-defined]
-        alerted.append(r["title"])
-    return rising, alerted
-
-
-def run_douhot_trend(
-    settings: Settings | None = None,
-    repo: object | None = None,
-    notifier: object | None = None,
-) -> dict:
-    """采集一次内容词趋势快照:抓取 → 入库 → 跨轮判涨 → 告警 → 返回。"""
-    from config.settings import get_settings
-    from app.services.notifier import get_notifier
-    from app.storage import ArchiveRepository
-
-    settings = settings or get_settings()
-    repo = repo or ArchiveRepository(settings.data_dir)
-    notifier = notifier or get_notifier(settings)
-    cookie = _load_cookie(settings.douhot_cookie_file)
-    words = fetch_content_words(cookie)
-    run_id = datetime.now().strftime("%Y%m%d%H%M%S")
-    repo.save_douhot_words(run_id, words)  # type: ignore[attr-defined]
-    top = sorted(words, key=lambda w: w["score"], reverse=True)[: settings.douhot_top_n]
-    rising, alerted = _detect_rising(settings, repo, top, notifier)
-    logger.info(
-        "抖音热词趋势完成 run=%s 条数=%s 判涨=%s 告警=%s", run_id, len(words), len(rising), len(alerted)
-    )
-    return {"run_id": run_id, "count": len(words), "items": top, "rising": rising, "rising_count": len(rising)}
-
-
-if __name__ == "__main__":
-    import json
-
-    from app.utils import setup_logging
-
-    setup_logging()
-    outcome = run_douhot_trend()
-    print("抖音内容词趋势采集:", outcome["count"], "条")
-    for it in outcome["items"][:15]:
-        print(f"  飙升{it['score']/1e4:>9.1f}万  ratio={it['rising_ratio']}  {it['title'][:24]}")
