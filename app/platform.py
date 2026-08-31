@@ -374,6 +374,20 @@ def create_app() -> FastAPI:
 
         return PlainTextResponse(admin_svc.export_alerts(db), media_type="text/csv")
 
+    @app.get("/api/admin/users/{user_id}")
+    def admin_user_detail(user_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+        detail = admin_svc.user_detail(db, user_id)
+        if detail is None:
+            raise HTTPException(404, "用户不存在")
+        return detail
+
+    @app.post("/api/admin/import/users")
+    def admin_import_users(body: dict, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+        text = str(body.get("text", ""))
+        res = admin_svc.import_users(db, text)
+        admin_svc.log_admin(db, user, "import_users", f"created={res['created']} skipped={res['skipped']}")
+        return res
+
     # 托管前端构建产物(SPA)
     dist = Path(__file__).parent / "static" / "spa"
     if dist.exists():

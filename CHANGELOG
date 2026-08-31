@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- [2026-09-01 10:00] FEAT: 管理后台补全模块——**用户详情页**(基本信息+Cookie掩码+预警规则+最近告警)、**多维报表**(近30天运行/告警柱状图 + 待办提醒:未配Cookie用户数/近2天失败运行数)、**数据导入**(批量创建用户 email,password,role)含前端(Files: app/admin.py, app/platform.py, frontend/src/api.js + views/Admin.vue)
 - [2026-09-01 10:00] FEAT: 新增**管理后台**(规范式)——RBAＣ(`User.role` admin/operator/user + `require_admin` 守卫 + `ADMIN_EMAIL` 自动提升);工作台(business 指标+近7天趋势)、用户管理(搜索/启停/删除)、登录日志 + 操作日志审计、系统设置(键值对)、数据导出(用户/告警 CSV);前端 Admin 页(角色守卫导航);`LoginLog`/`AdminLog`/`SystemConfig` 表+users 迁移;测试 41 项(Files: app/admin.py, app/db/{models,database}.py, app/auth.py, app/platform.py, config/settings.py, frontend/src/{api.js,router.js,App.vue,views/Admin.vue}, tests/test_platform.py)
 - [2026-09-01 10:00] REFACTOR: **框架按优先级优化**——①清理孤儿旧单用户代码(移除 app/api.py, app/services/{pipeline,archive}.py, tests/test_pipeline.py);②预警/定时派发改用**每用户 SMTP** 发信(get_user_notifier,User 加 smtp 字段+迁移,前端 Cookie 页加告警邮箱);③启动 JWT_SECRET 缺失强烈告警;④请求日志中间件(可观测性);⑤新增 MySQL 备份脚本 scripts/backup.sh(Files: app/{api.py(删),main.py,platform.py,models.py,db/database.py}, app/services/{alert_service,notifier}.py, frontend/src/{api.js,views/Cookies.vue}, scripts/backup.sh, tests/test_pipeline.py(删))
 - [2026-09-01 10:00] REFACTOR: **框架优化**——调度器采集作业从"单机全局 Cookie"改为"**为所有用户按各自 Cookie 采集**"(`run_section_for_all_users`),移除旧单用户 weibo/闲鱼/每日作业(旧作业不符多租户);预警定时派发接通(每分钟查 fixed_time 规则);登录防爆破限速;预警规则每板块三模式(阈值/新增/定时)+关键词过滤+冷却+邮件、采集后自动检查、前端预警设置页(Files: app/main.py, app/services/{tenant,alert_service}.py, app/platform.py, config/settings.py, app/db/models.py, frontend/src/*, tests/test_platform.py)

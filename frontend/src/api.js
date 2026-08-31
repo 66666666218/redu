@@ -58,6 +58,8 @@ export const api = {
   adminUsers: (q) => req('GET', '/api/admin/users' + (q ? '?q=' + encodeURIComponent(q) : '')),
   adminUserToggle: (id) => req('POST', `/api/admin/users/${id}/toggle`),
   adminUserDel: (id) => req('DELETE', `/api/admin/users/${id}`),
+  adminUserDetail: (id) => req('GET', `/api/admin/users/${id}`),
+  adminImportUsers: (text) => req('POST', '/api/admin/import/users', { text }),
   adminLogins: () => req('GET', '/api/admin/logins'),
   adminLogs: () => req('GET', '/api/admin/logs'),
   adminConfig: () => req('GET', '/api/admin/config'),
