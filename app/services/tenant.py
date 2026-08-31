@@ -243,6 +243,8 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
             row.price = it["price"]
             row.category = detail.get("category", "")
             row.want_count = detail.get("want_count", 0)
+            row.collect_count = detail.get("collect_count", 0)
+            row.sold_count = detail.get("sold_count", 0)
             row.view_count = detail.get("view_count", 0)
             row.seller_fans = detail.get("seller_fans", 0)
             saved += 1
@@ -285,6 +287,8 @@ def xianyu_analytics(session: Session, user_id: int) -> dict:
                 "want_yesterday": y_want,
                 "delta": delta,
                 "pct": pct,
+                "collect_today": t.collect_count,
+                "sold_today": t.sold_count,
                 "view_today": t.view_count,
                 "seller_fans": t.seller_fans,
             }

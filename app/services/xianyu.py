@@ -39,7 +39,6 @@ class XianyuClient:
     def __init__(self, cookie: str) -> None:
         self.cookie = cookie
         self.token = self._extract_token(cookie)
-        self._session = requests.Session()
 
     @staticmethod
     def _extract_token(cookie: str) -> str:
@@ -95,7 +94,7 @@ class XianyuClient:
         }
         headers = {"User-Agent": _UA, "Cookie": self.cookie, "Referer": "https://www.goofish.com/"}
         try:
-            resp = self._session.post(f"{H5_BASE}/{API}/1.0/", params=params, data={"data": data}, headers=headers, timeout=20)
+            resp = requests.post(f"{H5_BASE}/{API}/1.0/", params=params, data={"data": data}, headers=headers, timeout=20)
         except requests.RequestException as exc:
             raise XianyuError(f"闲鱼请求失败:{exc}") from exc
         self._refresh_session(resp)
@@ -127,13 +126,13 @@ class XianyuClient:
             "accountSite": "xianyu",
             "dataType": "json",
             "timeout": "20000",
-            "api": "mtop.taobao.idle.ke.detail",
+            "api": "mtop.taobao.idle.pc.detail",
             "sessionOption": "AutoLoginOnly",
             "spm_cnt": "a21ybx.detail.0.0",
         }
         headers = {"User-Agent": _UA, "Cookie": self.cookie, "Referer": "https://www.goofish.com/"}
         try:
-            resp = self._session.post(f"{H5_BASE}/mtop.taobao.idle.ke.detail/1.0/", params=params, data={"data": data}, headers=headers, timeout=20)
+            resp = requests.post(f"{H5_BASE}/mtop.taobao.idle.pc.detail/1.0/", params=params, data={"data": data}, headers=headers, timeout=20)
         except requests.RequestException as exc:
             raise XianyuError(f"闲鱼详情请求失败:{exc}") from exc
         self._refresh_session(resp)
@@ -198,31 +197,25 @@ def _deep_find(node: object, field: str):
 
 
 def fetch_detail(client: XianyuClient, item_id: str) -> dict:
-    """抓取单个闲鱼商品的深度指标(想要数/类目/浏览量/卖家粉丝)。
+    """抓取单个闲鱼商品深度指标(想要数/收藏/已售/类目/卖家粉丝)。
 
-    依赖新鲜 `_m_h5_tk` 会话与详情接口;字段随版本变化,尽力解析,拿不到按 0 处理。
+    数据来自 `mtop.taobao.idle.pc.detail` 的 `data.itemDO`:
+    wantCnt(人想要)、collectCnt(收藏)、soldCnt(已售)、itemCatDTO/categoryId(类目)。
     返回可作为 XianyuDaily 快照字段的字典。
     """
-    out = {"category": "", "want_count": 0, "view_count": 0, "seller_fans": 0}
+    out = {"category": "", "want_count": 0, "collect_count": 0, "sold_count": 0, "seller_fans": 0}
     try:
         obj = client.detail(item_id) or {}
-        want = _deep_find(obj, "want") or _deep_find(obj, "collectCount") or _deep_find(obj, "wantCount")
-        category = _deep_find(obj, "category") or _deep_find(obj, "catName") or _deep_find(obj, "catId")
-        view = _deep_find(obj, "viewCount") or _deep_find(obj, "pv")
-        fans = _deep_find(obj, "sellerFans") or _deep_find(obj, "followerCount")
-        try:
-            out["want_count"] = int(want or 0)
-        except (TypeError, ValueError):
-            pass
-        try:
-            out["view_count"] = int(view or 0)
-        except (TypeError, ValueError):
-            pass
-        try:
-            out["seller_fans"] = int(fans or 0)
-        except (TypeError, ValueError):
-            pass
-        out["category"] = str(category or "")[:64]
+        item = _deep_find(obj, "itemDO") or {}
+        out["want_count"] = int(item.get("wantCnt") or 0)
+        out["collect_count"] = int(item.get("collectCnt") or 0)
+        out["sold_count"] = int(item.get("soldCnt") or 0)
+        cat = item.get("itemCatDTO") or {}
+        out["category"] = str(cat.get("catName") or item.get("categoryId") or cat.get("catId") or "")[:64]
+        seller = _deep_find(obj, "sellerDO") or {}
+        out["seller_fans"] = int(
+            seller.get("followerCount") or seller.get("fansCount") or seller.get("sellerFans") or 0
+        )
     except Exception:  # noqa: BLE001
         pass
     return out

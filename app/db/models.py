@@ -153,6 +153,8 @@ class XianyuDaily(Base):
     category: Mapped[str] = mapped_column(String(64), default="")
     price: Mapped[str] = mapped_column(String(64), default="")
     want_count: Mapped[int] = mapped_column(Integer, default=0)   # 想要数
+    collect_count: Mapped[int] = mapped_column(Integer, default=0)  # 收藏数
+    sold_count: Mapped[int] = mapped_column(Integer, default=0)   # 已售/出单量
     view_count: Mapped[int] = mapped_column(Integer, default=0)  # 浏览量
     seller_fans: Mapped[int] = mapped_column(Integer, default=0)  # 卖家粉丝
     snap_date: Mapped[str] = mapped_column(String(16))            # YYYY-MM-DD
