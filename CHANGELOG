@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- [2026-09-01 10:00] REFACTOR: **框架优化**——调度器采集作业从"单机全局 Cookie"改为"**为所有用户按各自 Cookie 采集**"(`run_section_for_all_users`),移除旧单用户 weibo/闲鱼/每日作业(旧作业不符多租户);预警定时派发接通(每分钟查 fixed_time 规则);登录防爆破限速;预警规则每板块三模式(阈值/新增/定时)+关键词过滤+冷却+邮件、采集后自动检查、前端预警设置页(Files: app/main.py, app/services/{tenant,alert_service}.py, app/platform.py, config/settings.py, app/db/models.py, frontend/src/*, tests/test_platform.py)
 - [2026-09-01 10:00] FEAT: 预警「定时派发」接通——调度器每分钟检查 `fixed_time` 规则,到 `HH:MM` 自动发该板块总结(当天只发一次);新增登录防爆破(**登录限速** 10 分钟内 10 次,超出 429)(Files: app/services/alert_service.py, app/main.py, app/platform.py)
 - [2026-09-01 10:00] FEAT: 新增**用户自定义预警**(每板块 weibo/xianyu/douhot 均支持)——`threshold`(指标超阈值)/`new`(新增项)/`fixed_time`(定时总结),关键词过滤+冷却去重+邮件触达;采集后自动检查;含 `alert_rules` 表、`alert_service.py`、API、前端「预警设置」页;测试 65 项(Files: app/db/models.py, app/services/{alert_service,tenant}.py, app/platform.py, config/settings.py, frontend/src/{api.js,router.js,App.vue,views/Alerts.vue}, tests/test_platform.py)
 - [2026-09-01 10:00] FEAT: 闲鱼只盯虚拟商品——前100榜(搜索级)+慢速Top20详情分析;强化详情采集(令牌刷新/重试/Origin/限流优雅降级);面板标注前100/Top20(Files: config/settings.py, app/services/{xianyu,tenant}.py, app/db/models.py, frontend/src/views/{Dashboard.vue,App.vue,router.js}, .env.example)

@@ -18,9 +18,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from config.settings import get_settings
-from app.services.pipeline import run_pipeline
-from app.services.xianyu import run_xianyu, run_xianyu_daily
-from app.services.douhot import run_douhot_trend
+from app.services.tenant import run_section_for_all_users
 from app.services.alert_service import run_fixed_time_digests
 from app.utils import get_logger, setup_logging
 
@@ -69,30 +67,23 @@ def run_scheduler() -> None:
 
     scheduler = BlockingScheduler(timezone="Asia/Shanghai")
     scheduler.add_job(
-        _safe(run_pipeline),
+        _safe(lambda: run_section_for_all_users("weibo")),
         _cron_trigger(settings.job_cron, {"minute": "*/30"}),
-        id="hot_monitor_pipeline",
+        id="weibo_per_user",
         max_instances=1,
         coalesce=True,
     )
     scheduler.add_job(
-        _safe(run_xianyu),
+        _safe(lambda: run_section_for_all_users("xianyu")),
         _cron_trigger(settings.xianyu_cron, {"minute": "0", "hour": "*/2"}),
-        id="xianyu_hot",
+        id="xianyu_per_user",
         max_instances=1,
         coalesce=True,
     )
     scheduler.add_job(
-        _safe(run_xianyu_daily),
-        _cron_trigger(settings.daily_summary_cron, {"minute": "0", "hour": 20}),
-        id="xianyu_daily_summary",
-        max_instances=1,
-        coalesce=True,
-    )
-    scheduler.add_job(
-        _safe(run_douhot_trend),
+        _safe(lambda: run_section_for_all_users("douhot")),
         _cron_trigger(settings.douhot_cron, {"minute": "0", "hour": "*/1"}),
-        id="douhot_content_word_trend",
+        id="douhot_per_user",
         max_instances=1,
         coalesce=True,
     )

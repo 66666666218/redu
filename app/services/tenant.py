@@ -395,3 +395,31 @@ def douhot_watch_analytics(session: Session, user_id: int) -> list[dict]:
             }
         )
     return out
+
+
+def run_section_for_all_users(section: str, settings: Settings | None = None) -> dict:
+    """定时为【所有用户】跑某个板块采集(用各人自己的 Cookie)。
+
+    供调度器调用;替换旧的单用户采集作业(旧作业用全局 Cookie,不符多租户)。
+    """
+    from app.db import get_session_local
+    from app.db.models import User
+
+    settings = settings or get_settings()
+    runners = {"weibo": run_weibo, "xianyu": run_xianyu, "douhot": run_douhot}
+    if section not in runners:
+        return {"section": section, "users": 0, "ok": 0, "failed": 0}
+    db = get_session_local()()
+    users = db.scalars(select(User).order_by(User.id)).all()
+    ok = failed = 0
+    for u in users:
+        try:
+            runners[section](db, u.id, settings)
+            ok += 1
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            logger.warning("定时采集 %s 用户 %s 失败:%s", section, u.id, exc)
+            db.rollback()
+    db.close()
+    logger.info("定时采集 %s 用户=%s 成功=%s 失败=%s", section, len(users), ok, failed)
+    return {"section": section, "users": len(users), "ok": ok, "failed": failed}
