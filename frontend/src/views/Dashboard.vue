@@ -79,9 +79,9 @@ onMounted(async () => { await load(); await loadAnalytics(); await loadWatches()
         </table>
       </div>
       <div class="card" v-if="dash.xianyu_hot.length">
-        <h3>闲鱼 · 热榜</h3>
+        <h3>闲鱼 · 前100 虚拟商品</h3>
         <table><tr><th>标题</th><th>价</th><th>场次</th></tr>
-          <tr v-for="(it,i) in dash.xianyu_hot.slice(0,15)" :key="it.item_id"><td>{{ i+1 }}. {{ it.title.slice(0,30) }}</td><td class="price">{{ it.price }}</td><td>{{ it.hit_keywords }}</td></tr>
+          <tr v-for="(it,i) in dash.xianyu_hot.slice(0,30)" :key="it.item_id"><td>{{ i+1 }}. {{ it.title.slice(0,30) }}</td><td class="price">{{ it.price }}</td><td>{{ it.hit_keywords }}</td></tr>
         </table>
       </div>
       <div class="card" v-if="dash.douhot_words.length">
@@ -92,8 +92,8 @@ onMounted(async () => { await load(); await loadAnalytics(); await loadWatches()
       </div>
 
       <div class="card">
-        <h3>闲鱼 · 深度分析(想要数)  <span class="empty">昨日→今日</span></h3>
-        <p class="empty">今日总想要 {{ analytics.total_want }} · 上榜 {{ analytics.count }}</p>
+        <h3>闲鱼 · Top20 详情分析(想要数)  <span class="empty">昨日→今日</span></h3>
+        <p class="empty">今日总想要 {{ analytics.total_want }} · 上榜 {{ analytics.count }} <span style="color:var(--dim)">(想要数受反爬限制,无则显示 0)</span></p>
         <h4 style="color:var(--dim);margin:8px 0">🔥 上升榜</h4>
         <table v-if="analytics.top_risers.length"><tr><th>标题</th><th>涨跌</th><th>涨跌%</th></tr>
           <tr v-for="it in analytics.top_risers.slice(0,8)" :key="it.item_id"><td>{{ it.title.slice(0,24) }}</td><td class="up">+{{ it.delta }}</td><td class="up">{{ pct(it.pct) }}</td></tr>

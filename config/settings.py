@@ -25,7 +25,8 @@ class Settings(BaseSettings):
     douyin_cookie: str = ""         # 抖音创作者中心/巨量算数登录态
     goofish_cookie_file: str = "data/goofish_cookie.txt"  # 闲鱼登录 Cookie 文件(gitignored)
     xianyu_keywords: str = "ps教程,网盘资源,代充,剪映会员,软件,素材,cad,ae,pr,office,会员,课程,影视,源码"  # 虚拟商品关键词
-    xianyu_top_n: int = 50          # 热榜条数
+    xianyu_top_n: int = 100         # 前 N 虚拟商品榜(搜索级,无风控)
+    xianyu_detail_limit: int = 20   # 慢速抓详情(想要数)的商品数
     douhot_cookie_file: str = "data/douhot_cookie.txt"  # 抖音热点宝 Cookie 文件(gitignored)
     douhot_top_n: int = 50          # 内容词趋势条数
     douhot_alert_max: int = 5       # 单次判涨告警上限(防刷屏)
