@@ -10,8 +10,8 @@ python-dotenv>=1.0
 fastapi>=0.110
 uvicorn[standard]>=0.29
 
-# ---- 指数源:巨量算数(可选,需 docker 内安装 chromium) ----
-# playwright>=1.42
+# ---- 指数源:巨量算数/抖音热点宝(需 docker 内安装 chromium) ----
+playwright>=1.42
 
 # ---- 开发/测试 ----
 pytest>=8.0

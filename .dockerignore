@@ -1,0 +1,22 @@
+# 机密与运行数据,绝不进镜像
+.env
+data/
+doc/js/
+
+# 版本控制 / 缓存
+.git
+.gitignore
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 非运行时需要的
+tests/
+scripts/
+doc/
+*.md
+docker-compose.yml

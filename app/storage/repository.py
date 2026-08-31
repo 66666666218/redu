@@ -109,6 +109,7 @@ class ArchiveRepository:
         self._db_path = self._dir / "monitor.db"
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA busy_timeout = 5000")  # 调度器与 API 并发写库更稳
         self._lock = threading.Lock()
         self._conn.executescript(_SCHEMA)
         self._migrate()
