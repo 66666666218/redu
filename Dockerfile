@@ -24,11 +24,10 @@ RUN playwright install --with-deps chromium
 
 COPY config ./config
 COPY app ./app
-COPY scripts ./scripts
 # 前端构建产物 → 后端托管目录
 COPY --from=frontend /build/dist ./app/static/spa
 
 RUN mkdir -p /app/data
 
-# 默认:多租户平台 API(鉴权 + 采集 + 看板);也可 --api 换成旧单机调度器(可选)
+# 默认:多租户平台 API(鉴权 + 采集 + 看板)
 CMD ["python", "-m", "uvicorn", "app.platform:app", "--host", "0.0.0.0", "--port", "8080"]

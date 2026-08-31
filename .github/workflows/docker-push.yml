@@ -1,0 +1,39 @@
+name: build-push-acr
+
+# push 到 main 时,自动构建 Docker 镜像并推送到阿里云 ACR(redu:latest)
+# 需在仓库 Settings → Secrets and variables → Actions 配置:
+#   ACR_USERNAME = 你用 docker login 的用户名(如 nick7004151347)
+#   ACR_PASSWORD = 该用户的访问密码
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 登录阿里云 ACR
+        uses: docker/login-action@v3
+        with:
+          registry: crpi-me8okzjl211xpvun.cn-hangzhou.personal.cr.aliyuncs.com
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: 启用 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 构建并推送镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            crpi-me8okzjl211xpvun.cn-hangzhou.personal.cr.aliyuncs.com/tcdhouhuayuan/redu:latest
+            crpi-me8okzjl211xpvun.cn-hangzhou.personal.cr.aliyuncs.com/tcdhouhuayuan/redu:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
