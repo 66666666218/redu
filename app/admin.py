@@ -18,6 +18,7 @@ from app.db.models import (
     SystemConfig,
     User,
     WeiboHotItem,
+    XianyuDaily,
     XianyuItem,
 )
 
@@ -224,3 +225,35 @@ def import_users(db: Session, text: str) -> dict:
         except Exception:  # noqa: BLE001
             skipped += 1
     return {"created": created, "skipped": skipped}
+
+
+_DATA_FIELDS = {
+    "weibo": ["user_id", "title", "heat", "rank", "captured_at"],
+    "xianyu": ["user_id", "item_id", "title", "price", "hit_keywords", "best_rank", "created_at"],
+    "douhot": ["user_id", "title", "score", "trend_delta", "query_day", "created_at"],
+}
+
+
+def data_browse(db: Session, section: str, user_id: int | None = None, limit: int = 50) -> list[dict]:
+    """浏览某板块原始采集数据(可按用户过滤)。"""
+    base = {"weibo": WeiboHotItem, "xianyu": XianyuItem, "douhot": DouhotWord}.get(section)
+    if base is None:
+        return []
+    stmt = select(base).order_by(base.id.desc()).limit(limit)
+    if user_id:
+        stmt = stmt.where(base.user_id == user_id)
+    fields = _DATA_FIELDS[section]
+    out = []
+    for r in db.scalars(stmt).all():
+        d = {f: getattr(r, f).isoformat() if hasattr(getattr(r, f), "isoformat") else getattr(r, f) for f in fields}
+        d["user_id"] = r.user_id
+        out.append(d)
+    return out
+
+
+def category_dist(db: Session) -> list[dict]:
+    """闲鱼类目分布(数量 + 想要数合计)。"""
+    rows = db.execute(
+        select(XianyuDaily.category, func.count(XianyuDaily.id), func.sum(XianyuDaily.want_count)).group_by(XianyuDaily.category)
+    ).all()
+    return [{"name": c or "未分类", "count": n, "want": int(w or 0)} for c, n, w in rows]

@@ -64,6 +64,8 @@ export const api = {
   adminLogs: () => req('GET', '/api/admin/logs'),
   adminConfig: () => req('GET', '/api/admin/config'),
   adminConfigSet: (key, value) => req('PUT', `/api/admin/config/${key}`, { value }),
+  adminData: (section, userId) => req('GET', `/api/admin/data/${section}` + (userId ? `?user_id=${userId}` : '')),
+  adminCategories: () => req('GET', '/api/admin/categories'),
   adminExportUsers: () => fetch('/api/admin/export/users', { headers: { Authorization: 'Bearer ' + getToken() } }),
   adminExportAlerts: () => fetch('/api/admin/export/alerts', { headers: { Authorization: 'Bearer ' + getToken() } })
 }

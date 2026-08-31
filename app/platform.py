@@ -388,6 +388,15 @@ def create_app() -> FastAPI:
         admin_svc.log_admin(db, user, "import_users", f"created={res['created']} skipped={res['skipped']}")
         return res
 
+    @app.get("/api/admin/data/{section}")
+    def admin_data(section: str, user_id: int | None = None, limit: int = 50,
+                   user: User = Depends(require_admin), db: Session = Depends(get_db)):
+        return admin_svc.data_browse(db, section, user_id, limit)
+
+    @app.get("/api/admin/categories")
+    def admin_categories(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+        return admin_svc.category_dist(db)
+
     # 托管前端构建产物(SPA)
     dist = Path(__file__).parent / "static" / "spa"
     if dist.exists():

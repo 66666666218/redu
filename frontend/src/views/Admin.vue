@@ -12,6 +12,9 @@ const msg = ref('')
 const q = ref('')
 const detail = ref(null)
 const importText = ref('')
+const dataRef = ref([])
+const dataSection = ref('weibo')
+const cats = ref([])
 
 async function load() {
   msg.value = ''
@@ -21,6 +24,7 @@ async function load() {
     logins.value = await api.adminLogins()
     adminlogs.value = await api.adminLogs()
     config.value = await api.adminConfig()
+    cats.value = await api.adminCategories()
   } catch (e) { msg.value = '加载失败:' + e.message }
 }
 async function toggle(u) {
@@ -34,6 +38,7 @@ async function setCfg(k) {
   if (v !== null) { await api.adminConfigSet(k, v); await load() }
 }
 async function searchUsers() { users.value = await api.adminUsers(q.value) }
+async function loadData() { dataRef.value = await api.adminData(dataSection.value) }
 async function openDetail(u) { detail.value = await api.adminUserDetail(u.id) }
 async function doImport() {
   if (!importText.value.trim()) return
@@ -62,6 +67,7 @@ onMounted(load)
     <div class="row" style="gap:8px;margin-bottom:14px">
       <button :class="tab==='dashboard'?'':'ghost'" @click="tab='dashboard'">工作台</button>
       <button :class="tab==='users'?'':'ghost'" @click="tab='users'">用户管理</button>
+      <button :class="tab==='data'?'':'ghost'" @click="tab='data';loadData()">数据</button>
       <button :class="tab==='logs'?'':'ghost'" @click="tab='logs'">日志审计</button>
       <button :class="tab==='config'?'':'ghost'" @click="tab='config'">系统设置</button>
     </div>
@@ -82,6 +88,13 @@ onMounted(load)
           </div>
         </div>
         <div class="empty">蓝=运行 绿=告警(近30天)</div>
+      </div>
+      <div class="card" style="margin-bottom:14px">
+        <h3>闲鱼类目分布(数量/想要)</h3>
+        <div v-if="cats.length" class="row" style="flex-wrap:wrap;gap:10px">
+          <div v-for="c in cats" :key="c.name" class="badge" style="font-size:13px">{{ c.name }} ×{{ c.count }} / 想要{{ c.want }}</div>
+        </div>
+        <div v-else class="empty">暂无类目数据(闲鱼深度采集后)</div>
       </div>
       <div class="card">
         <h3>近 7 天明细</h3>
@@ -135,6 +148,24 @@ onMounted(load)
             </td>
           </tr>
         </table>
+      </div>
+    </template>
+
+    <template v-if="tab==='data'">
+      <div class="row" style="gap:8px;margin-bottom:8px">
+        <button v-for="s in [['weibo','微博'],['xianyu','闲鱼'],['douhot','抖音']]" :key="s[0]"
+          :class="dataSection===s[0]?'':'ghost'" @click="dataSection=s[0];loadData()">{{ s[1] }}</button>
+      </div>
+      <div class="card">
+        <table><tr><th>用户</th><th>内容</th><th>指标</th><th>时间</th></tr>
+          <tr v-for="(d,i) in dataRef.slice(0,60)" :key="i">
+            <td>{{ d.user_id }}</td>
+            <td>{{ (d.title || d.keyword || '').slice(0,32) }}</td>
+            <td class="price">{{ d.heat ?? d.score ?? d.hit_keywords ?? '' }}</td>
+            <td class="empty">{{ d.captured_at || d.created_at || '' }}</td>
+          </tr>
+        </table>
+        <div v-if="!dataRef.length" class="empty">暂无数据</div>
       </div>
     </template>
 

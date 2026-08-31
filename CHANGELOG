@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- [2026-09-01 10:00] FEAT: 管理后台再补——**采集数据明细浏览**(微博/闲鱼/抖音 原始数据按用户查看)、**闲鱼类目分布**(数量+想要合计)(Files: app/admin.py, app/platform.py, frontend/src/{api.js,views/Admin.vue})
 - [2026-09-01 10:00] FEAT: 管理后台补全模块——**用户详情页**(基本信息+Cookie掩码+预警规则+最近告警)、**多维报表**(近30天运行/告警柱状图 + 待办提醒:未配Cookie用户数/近2天失败运行数)、**数据导入**(批量创建用户 email,password,role)含前端(Files: app/admin.py, app/platform.py, frontend/src/api.js + views/Admin.vue)
 - [2026-09-01 10:00] FEAT: 新增**管理后台**(规范式)——RBAＣ(`User.role` admin/operator/user + `require_admin` 守卫 + `ADMIN_EMAIL` 自动提升);工作台(business 指标+近7天趋势)、用户管理(搜索/启停/删除)、登录日志 + 操作日志审计、系统设置(键值对)、数据导出(用户/告警 CSV);前端 Admin 页(角色守卫导航);`LoginLog`/`AdminLog`/`SystemConfig` 表+users 迁移;测试 41 项(Files: app/admin.py, app/db/{models,database}.py, app/auth.py, app/platform.py, config/settings.py, frontend/src/{api.js,router.js,App.vue,views/Admin.vue}, tests/test_platform.py)
 - [2026-09-01 10:00] REFACTOR: **框架按优先级优化**——①清理孤儿旧单用户代码(移除 app/api.py, app/services/{pipeline,archive}.py, tests/test_pipeline.py);②预警/定时派发改用**每用户 SMTP** 发信(get_user_notifier,User 加 smtp 字段+迁移,前端 Cookie 页加告警邮箱);③启动 JWT_SECRET 缺失强烈告警;④请求日志中间件(可观测性);⑤新增 MySQL 备份脚本 scripts/backup.sh(Files: app/{api.py(删),main.py,platform.py,models.py,db/database.py}, app/services/{alert_service,notifier}.py, frontend/src/{api.js,views/Cookies.vue}, scripts/backup.sh, tests/test_pipeline.py(删))
