@@ -74,6 +74,8 @@ def _migrate() -> None:
     cols = {c["name"] for c in inspector.get_columns("users")}
     additions = [
         "email VARCHAR(128)",
+        "role VARCHAR(16) DEFAULT 'user'",
+        "enabled INTEGER DEFAULT 1",
         "smtp_host VARCHAR(128)",
         "smtp_port INTEGER",
         "smtp_user VARCHAR(128)",

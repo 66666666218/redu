@@ -52,5 +52,16 @@ export const api = {
   alertRuleDel: (id) => req('DELETE', `/api/alerts/rules/${id}`),
   alertsList: () => req('GET', '/api/alerts/list'),
   userSmtpGet: () => req('GET', '/api/user/smtp'),
-  userSmtpPut: (o) => req('PUT', '/api/user/smtp', o)
+  userSmtpPut: (o) => req('PUT', '/api/user/smtp', o),
+  adminMe: () => req('GET', '/api/admin/me'),
+  adminDashboard: () => req('GET', '/api/admin/dashboard'),
+  adminUsers: (q) => req('GET', '/api/admin/users' + (q ? '?q=' + encodeURIComponent(q) : '')),
+  adminUserToggle: (id) => req('POST', `/api/admin/users/${id}/toggle`),
+  adminUserDel: (id) => req('DELETE', `/api/admin/users/${id}`),
+  adminLogins: () => req('GET', '/api/admin/logins'),
+  adminLogs: () => req('GET', '/api/admin/logs'),
+  adminConfig: () => req('GET', '/api/admin/config'),
+  adminConfigSet: (key, value) => req('PUT', `/api/admin/config/${key}`, { value }),
+  adminExportUsers: () => fetch('/api/admin/export/users', { headers: { Authorization: 'Bearer ' + getToken() } }),
+  adminExportAlerts: () => fetch('/api/admin/export/alerts', { headers: { Authorization: 'Bearer ' + getToken() } })
 }

@@ -1,12 +1,20 @@
 <script setup>
+import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { clearToken } from './api'
+import { api, clearToken } from './api'
 
 const router = useRouter()
+const role = ref('')
+
 function logout() {
   clearToken()
   router.push('/login')
 }
+onMounted(async () => {
+  if (localStorage.getItem('token')) {
+    try { role.value = (await api.me()).role } catch {}
+  }
+})
 </script>
 
 <template>
@@ -16,6 +24,7 @@ function logout() {
       <router-link to="/">仪表盘</router-link>
       <router-link to="/cookies">Cookie 管理</router-link>
       <router-link to="/alerts">预警设置</router-link>
+      <router-link v-if="role==='admin' || role==='operator'" to="/admin">管理后台</router-link>
       <a href="#" @click.prevent="logout">退出</a>
     </nav>
   </div>

@@ -36,12 +36,17 @@ def _token_hash(token: str) -> str:
 
 
 def register_user(db: Session, email: str, password: str, username: str | None = None) -> User:
-    """按邮箱注册;用户名缺省取邮箱前缀。email 唯一。"""
+    """按邮箱注册;用户名缺省取邮箱前缀。email 唯一。匹配 admin_email 自动设为 admin。"""
+    from config.settings import get_settings
+
     email = email.strip().lower()
     name = (username or email.split("@")[0]).strip()
     if db.scalar(select(User).where(or_(User.email == email, User.username == name))):
         raise HTTPException(status.HTTP_409_CONFLICT, "该邮箱或用户名已注册")
+    admins = {a.strip().lower() for a in get_settings().admin_email.split(",") if a.strip()}
     user = User(username=name, email=email, password_hash=hash_password(password))
+    if email in admins:
+        user.role = "admin"
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -94,4 +99,20 @@ def get_current_user(
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户不存在")
+    if not user.enabled:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "账号已被禁用")
     return user
+
+
+def require_admin(user: User = Depends(get_current_user)) -> User:
+    """仅 admin/operator 可访问。"""
+    if user.role not in ("admin", "operator"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "无管理员权限")
+    return user
+
+
+def log_login(db: Session, user_id: int | None, username: str, ip: str, ua: str, ok: bool) -> None:
+    from app.db.models import LoginLog
+
+    db.add(LoginLog(user_id=user_id, username=username, ip=ip[:64], ua=ua[:255], ok=ok))
+    db.commit()

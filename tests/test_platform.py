@@ -168,3 +168,19 @@ def test_alert_keyword_filter(session) -> None:
     alert_service.add_rule(session, 1, "douhot", "new", keyword="B")
     n = alert_service.evaluate(session, 1, "douhot", [{"key": "A", "score": 1}], set(), _alert_settings())
     assert n == 0
+
+
+def test_admin_dashboard_and_users(session) -> None:
+    from app import admin as admin_svc
+    from app.db.models import User
+
+    register_user(session, "adm@x.com", "p", "adm")
+    u = session.scalar(select(User).where(User.email == "adm@x.com"))
+    u.role = "admin"
+    session.commit()
+    assert admin_svc.list_users(session, "")[0]["role"] == "admin"
+    d = admin_svc.dashboard(session)
+    assert d["counts"]["users"] >= 1
+    assert d["today_runs"] == 0
+    # 切换启用/禁用
+    assert admin_svc.toggle_user(session, u.id)["enabled"] is False

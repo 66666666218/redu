@@ -15,14 +15,15 @@ import pydantic
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.db import get_db, init_db
 from app.db.models import User
-from app.auth import authenticate, create_password_reset_token, get_current_user, register_user, reset_password
+from app.auth import authenticate, create_password_reset_token, get_current_user, log_login, register_user, reset_password, require_admin
 from app.security import create_access_token
 from app.services import tenant
+from app import admin as admin_svc
 from app.services.cookie_store import delete_cookie as del_cookie
 from app.services.cookie_store import list_cookies, set_cookie
 from app.services.notifier import get_notifier
@@ -95,6 +96,7 @@ class TokenOut(pydantic.BaseModel):
 class MeOut(pydantic.BaseModel):
     id: int
     username: str
+    role: str = "user"
 
 
 class CookieIn(pydantic.BaseModel):
@@ -150,12 +152,17 @@ def create_app() -> FastAPI:
     def login(body: LoginIn, request: Request, db: Session = Depends(get_db)) -> TokenOut:
         key = f"{request.client.host if request.client else '?'}:{body.login.strip().lower()}"
         if not _login_allowed(key):
+            log_login(db, None, body.login.strip(), request.client.host if request.client else "?", request.headers.get("user-agent", ""), False)
             raise HTTPException(429, "登录尝试过多,请 10 分钟后再试")
         token = authenticate(db, body.login, body.password)
+        ip = request.client.host if request.client else "?"
         if token is None:
             _record_login(key)
+            log_login(db, None, body.login.strip(), ip, request.headers.get("user-agent", ""), False)
             raise HTTPException(401, "账号或密码错误")
         _clear_login(key)
+        uid = db.scalar(select(User.id).where(or_(User.username == body.login.strip(), User.email == body.login.strip().lower())))
+        log_login(db, uid, body.login.strip(), ip, request.headers.get("user-agent", ""), True)
         return TokenOut(token=token, username=body.login.strip())
 
     @app.post("/api/auth/forgot")
@@ -188,7 +195,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/auth/me", response_model=MeOut)
     def me(user: User = Depends(get_current_user)) -> MeOut:
-        return MeOut(id=user.id, username=user.username)
+        return MeOut(id=user.id, username=user.username, role=user.role)
 
     @app.get("/api/cookies", response_model=list[CookieOut])
     def cookies_list(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[CookieOut]:
@@ -302,6 +309,70 @@ def create_app() -> FastAPI:
         user.smtp_from = body.from_name or None
         db.commit()
         return {"saved": True}
+
+    # ================= 管理后台(require_admin) =================
+    class ConfigIn(pydantic.BaseModel):
+        value: str
+
+    @app.get("/api/admin/me")
+    def admin_me(user: User = Depends(require_admin)):
+        return {"role": user.role, "username": user.username}
+
+    @app.get("/api/admin/dashboard")
+    def admin_dashboard(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+        return admin_svc.dashboard(db)
+
+    @app.get("/api/admin/users")
+    def admin_users(q: str = "", user: User = Depends(require_admin), db: Session = Depends(get_db)):
+        return admin_svc.list_users(db, q)
+
+    @app.post("/api/admin/users/{user_id}/toggle")
+    def admin_users_toggle(user_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+        res = admin_svc.toggle_user(db, user_id)
+        if res is None:
+            raise HTTPException(404, "用户不存在")
+        admin_svc.log_admin(db, user, "toggle_user", f"user#{user_id}", f"enabled={res['enabled']}")
+        return res
+
+    @app.delete("/api/admin/users/{user_id}")
+    def admin_users_del(user_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+        if user_id == user.id:
+            raise HTTPException(400, "不能删除自己")
+        ok = admin_svc.delete_user(db, user_id)
+        if not ok:
+            raise HTTPException(404, "用户不存在")
+        admin_svc.log_admin(db, user, "delete_user", f"user#{user_id}")
+        return {"deleted": True}
+
+    @app.get("/api/admin/logins")
+    def admin_logins(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+        return admin_svc.list_logins(db)
+
+    @app.get("/api/admin/logs")
+    def admin_logs(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+        return admin_svc.list_admin_logs(db)
+
+    @app.get("/api/admin/config")
+    def admin_config(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+        return admin_svc.config_get(db)
+
+    @app.put("/api/admin/config/{key}")
+    def admin_config_set(key: str, body: ConfigIn, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+        admin_svc.config_set(db, key, body.value)
+        admin_svc.log_admin(db, user, "set_config", key, body.value)
+        return {"key": key, "value": body.value}
+
+    @app.get("/api/admin/export/users")
+    def admin_export_users(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+        from fastapi.responses import PlainTextResponse
+
+        return PlainTextResponse(admin_svc.export_users(db), media_type="text/csv")
+
+    @app.get("/api/admin/export/alerts")
+    def admin_export_alerts(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+        from fastapi.responses import PlainTextResponse
+
+        return PlainTextResponse(admin_svc.export_alerts(db), media_type="text/csv")
 
     # 托管前端构建产物(SPA)
     dist = Path(__file__).parent / "static" / "spa"

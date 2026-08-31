@@ -21,6 +21,8 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     email: Mapped[str | None] = mapped_column(String(128), unique=True, index=True, nullable=True)
     password_hash: Mapped[str] = mapped_column(String(255))
+    role: Mapped[str] = mapped_column(String(16), default="user")   # admin/operator/user
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     smtp_host: Mapped[str | None] = mapped_column(String(128), nullable=True)   # 用户自定义SMTP(可选)
     smtp_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
     smtp_user: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -215,3 +217,41 @@ class AlertRule(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     last_alert_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class LoginLog(Base):
+    """登录日志(账号/IP/设备/时间)。"""
+
+    __tablename__ = "login_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    username: Mapped[str] = mapped_column(String(64), default="")
+    ip: Mapped[str] = mapped_column(String(64), default="")
+    ua: Mapped[str] = mapped_column(String(255), default="")
+    ok: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class AdminLog(Base):
+    """操作日志(谁/何时/对什么/做了什么)。"""
+
+    __tablename__ = "admin_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    admin_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    admin_name: Mapped[str] = mapped_column(String(64), default="")
+    action: Mapped[str] = mapped_column(String(128))   # 如 toggle_user/delete_user/set_config
+    target: Mapped[str] = mapped_column(String(255), default="")
+    detail: Mapped[str] = mapped_column(Text(), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class SystemConfig(Base):
+    """系统设置(键值对,管理后台可改)。"""
+
+    __tablename__ = "system_config"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text(), default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)

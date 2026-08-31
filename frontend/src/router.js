@@ -7,6 +7,7 @@ import Reset from './views/Reset.vue'
 import Dashboard from './views/Dashboard.vue'
 import Cookies from './views/Cookies.vue'
 import Alerts from './views/Alerts.vue'
+import Admin from './views/Admin.vue'
 
 const routes = [
   { path: '/login', component: Login },
@@ -15,14 +16,24 @@ const routes = [
   { path: '/reset', component: Reset },
   { path: '/', component: Dashboard, meta: { auth: true } },
   { path: '/cookies', component: Cookies, meta: { auth: true } },
-  { path: '/alerts', component: Alerts, meta: { auth: true } }
+  { path: '/alerts', component: Alerts, meta: { auth: true } },
+  { path: '/admin', component: Admin, meta: { auth: true, admin: true } }
 ]
 
 const router = createRouter({ history: createWebHistory(), routes })
 
-router.beforeEach((to) => {
-  if (to.meta.auth && !getToken()) return '/login'
-  if ((to.path === '/login' || to.path === '/register' || to.path === '/forgot') && getToken()) return '/'
+router.beforeEach(async (to) => {
+  if (!getToken()) {
+    return to.meta.auth ? '/login' : true
+  }
+  if (to.path === '/login' || to.path === '/register' || to.path === '/forgot') return '/'
+  if (to.meta.admin) {
+    try {
+      const me = await fetch('/api/auth/me', { headers: { Authorization: 'Bearer ' + getToken() } }).then(r => r.json())
+      if (me.role !== 'admin' && me.role !== 'operator') return '/'
+    } catch { return '/login' }
+  }
+  return true
 })
 
 export default router

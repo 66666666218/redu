@@ -75,6 +75,7 @@ class Settings(BaseSettings):
     jwt_secret: str = ""            # 生产必须设置强随机密钥
     jwt_expire_minutes: int = 604800  # 登录有效期(默认 7 天)
     cookie_encrypt_key: str = ""    # Cookie 加密密钥(Fernet);为空则用 jwt_secret 派生
+    admin_email: str = ""           # 注册时若邮箱匹配(逗号分隔)则自动设为 admin
     public_base_url: str = "http://localhost:8080"  # 站点对外地址(重置链接等)
 
     @property
