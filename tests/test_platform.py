@@ -6,13 +6,14 @@ os.environ.setdefault("DATABASE_URL", "sqlite://")
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from app.db.database import Base
 from app.db import models  # noqa: F401
+from app.db.models import DouhotWatchSnap, XianyuDaily
 from app.security import create_access_token, decode_token, decrypt_cookie, encrypt_cookie
-from app.services import cookie_store
+from app.services import cookie_store, tenant
 from app.auth import authenticate, create_password_reset_token, register_user, reset_password
 
 
@@ -68,3 +69,57 @@ def test_forgot_and_reset_password(session) -> None:
     assert reset_password(session, "bad", "x") is False
     assert reset_password(session, token, "newpass123") is True
     assert authenticate(session, "a@b.com", "newpass123") is not None
+
+
+def _xy(user_id, snap, iid, want, cat):
+    return XianyuDaily(user_id=user_id, snap_date=snap, item_id=iid, title=iid, want_count=want, category=cat)
+
+
+def test_xianyu_analytics(session) -> None:
+    from datetime import date, timedelta
+
+    today = date.today().isoformat()
+    yest = (date.today() - timedelta(days=1)).isoformat()
+    session.add_all([
+        _xy(1, yest, "a", 100, "教程"),
+        _xy(1, today, "a", 150, "教程"),
+        _xy(1, today, "b", 10, "软件"),
+    ])
+    session.commit()
+    a = tenant.xianyu_analytics(session, 1)
+    assert a["count"] == 2
+    assert a["total_want"] == 160
+    it = [x for x in a["items"] if x["item_id"] == "a"][0]
+    assert it["want_today"] == 150 and it["want_yesterday"] == 100 and it["delta"] == 50
+    assert abs(it["pct"] - 0.5) < 1e-6
+    cats = {c["name"]: c["count"] for c in a["categories"]}
+    assert cats == {"教程": 1, "软件": 1}
+
+
+def test_run_xianyu_deep(session, monkeypatch) -> None:
+    from config.settings import Settings
+
+    monkeypatch.setattr(
+        "app.services.xianyu.collect_hot",
+        lambda settings, client: [{"item_id": "a", "title": "A", "price": "¥1", "seller": "s", "pic": "",
+                                   "hit_keywords": 1, "best_rank": 1, "keywords": "kw"}],
+    )
+    monkeypatch.setattr(
+        "app.services.xianyu.fetch_detail",
+        lambda client, iid: {"category": "教程", "want_count": 150, "view_count": 300, "seller_fans": 99},
+    )
+    cookie_store.set_cookie(session, 1, "goofish", "fake-cookie")
+    r = tenant.run_xianyu_deep(session, 1, Settings(_env_file=None))
+    assert r["count"] == 1
+    row = session.scalar(select(XianyuDaily).where(XianyuDaily.user_id == 1))
+    assert row.want_count == 150 and row.category == "教程"
+
+
+def test_douhot_watch_analytics(session) -> None:
+    tenant.add_douhot_watch(session, 1, "word", "景甜")
+    assert len(tenant.list_douhot_watch(session, 1)) == 1
+    session.add(DouhotWatchSnap(user_id=1, list_type="word", keyword="景甜", score=500, rank_now=1))
+    session.add(DouhotWatchSnap(user_id=1, list_type="word", keyword="景甜", score=700, rank_now=1))
+    session.commit()
+    out = tenant.douhot_watch_analytics(session, 1)
+    assert out[0]["keyword"] == "景甜" and out[0]["last_score"] == 700 and out[0]["points"] == 2

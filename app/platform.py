@@ -161,6 +161,31 @@ def create_app() -> FastAPI:
     def xianyu_daily(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         return tenant.xianyu_daily(db, user.id)
 
+    @app.post("/api/xianyu/collect-deep")
+    def xianyu_collect_deep(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        try:
+            return tenant.run_xianyu_deep(db, user.id)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(500, f"采集失败:{exc}") from exc
+
+    @app.get("/api/xianyu/analytics")
+    def xianyu_analytics(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        return tenant.xianyu_analytics(db, user.id)
+
+    @app.post("/api/douhot/watch")
+    def douhot_watch_add(payload: dict, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        return tenant.add_douhot_watch(db, user.id, str(payload.get("list_type", "word")), str(payload.get("keyword", "")))
+
+    @app.get("/api/douhot/watch")
+    def douhot_watch_list(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        return tenant.list_douhot_watch(db, user.id)
+
+    @app.get("/api/douhot/watch-analytics")
+    def douhot_watch_analytics(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        return tenant.douhot_watch_analytics(db, user.id)
+
     # 托管前端构建产物(SPA)
     dist = Path(__file__).parent / "static" / "spa"
     if dist.exists():

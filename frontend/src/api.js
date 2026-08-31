@@ -41,5 +41,10 @@ export const api = {
   delCookie: (platform) => req('DELETE', `/api/cookies/${platform}`),
   collect: (platform) => req('POST', `/api/collect/${platform}`),
   dashboard: () => req('GET', '/api/dashboard'),
-  xianyuDaily: () => req('GET', '/api/xianyu/daily')
+  xianyuDaily: () => req('GET', '/api/xianyu/daily'),
+  xianyuCollectDeep: () => req('POST', '/api/xianyu/collect-deep'),
+  xianyuAnalytics: () => req('GET', '/api/xianyu/analytics'),
+  douhotWatchAdd: (listType, keyword) => req('POST', '/api/douhot/watch', { list_type: listType, keyword }),
+  douhotWatchList: () => req('GET', '/api/douhot/watch'),
+  douhotWatchAnalytics: () => req('GET', '/api/douhot/watch-analytics')
 }

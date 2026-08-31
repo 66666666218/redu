@@ -112,6 +112,36 @@ class XianyuClient:
         logger.debug("闲鱼搜索 %s → %s 条", keyword, len(items))
         return items
 
+    def detail(self, item_id: str) -> dict:
+        """请求商品详情,返回 JSON。接口名/字段随版本变化(需新鲜会话验证)。"""
+        payload = {"itemId": item_id, "id": item_id}
+        data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        t = str(int(time.time() * 1000))
+        params = {
+            "jsv": "2.7.2",
+            "appKey": APP_KEY,
+            "t": t,
+            "sign": self._sign(t, data),
+            "v": "1.0",
+            "type": "originaljson",
+            "accountSite": "xianyu",
+            "dataType": "json",
+            "timeout": "20000",
+            "api": "mtop.taobao.idle.ke.detail",
+            "sessionOption": "AutoLoginOnly",
+            "spm_cnt": "a21ybx.detail.0.0",
+        }
+        headers = {"User-Agent": _UA, "Cookie": self.cookie, "Referer": "https://www.goofish.com/"}
+        try:
+            resp = self._session.post(f"{H5_BASE}/mtop.taobao.idle.ke.detail/1.0/", params=params, data={"data": data}, headers=headers, timeout=20)
+        except requests.RequestException as exc:
+            raise XianyuError(f"闲鱼详情请求失败:{exc}") from exc
+        self._refresh_session(resp)
+        try:
+            return resp.json()
+        except ValueError as exc:
+            raise XianyuError("闲鱼详情响应非 JSON") from exc
+
 
 def _extract_items(obj: object) -> list[dict]:
     """递归找出所有含 title+itemId 的商品卡(保持 return 顺序 = 综合顺序)。"""
@@ -148,6 +178,54 @@ def item_price(it: dict) -> str:
 def load_cookie(path: str) -> str:
     """从文件读取闲鱼 Cookie 字符串。"""
     return Path(path).read_text(encoding="utf-8").strip()
+
+
+def _deep_find(node: object, field: str):
+    """递归找第一个命中的字段值。"""
+    if isinstance(node, dict):
+        if field in node:
+            return node[field]
+        for v in node.values():
+            r = _deep_find(v, field)
+            if r is not None:
+                return r
+    elif isinstance(node, list):
+        for v in node:
+            r = _deep_find(v, field)
+            if r is not None:
+                return r
+    return None
+
+
+def fetch_detail(client: XianyuClient, item_id: str) -> dict:
+    """抓取单个闲鱼商品的深度指标(想要数/类目/浏览量/卖家粉丝)。
+
+    依赖新鲜 `_m_h5_tk` 会话与详情接口;字段随版本变化,尽力解析,拿不到按 0 处理。
+    返回可作为 XianyuDaily 快照字段的字典。
+    """
+    out = {"category": "", "want_count": 0, "view_count": 0, "seller_fans": 0}
+    try:
+        obj = client.detail(item_id) or {}
+        want = _deep_find(obj, "want") or _deep_find(obj, "collectCount") or _deep_find(obj, "wantCount")
+        category = _deep_find(obj, "category") or _deep_find(obj, "catName") or _deep_find(obj, "catId")
+        view = _deep_find(obj, "viewCount") or _deep_find(obj, "pv")
+        fans = _deep_find(obj, "sellerFans") or _deep_find(obj, "followerCount")
+        try:
+            out["want_count"] = int(want or 0)
+        except (TypeError, ValueError):
+            pass
+        try:
+            out["view_count"] = int(view or 0)
+        except (TypeError, ValueError):
+            pass
+        try:
+            out["seller_fans"] = int(fans or 0)
+        except (TypeError, ValueError):
+            pass
+        out["category"] = str(category or "")[:64]
+    except Exception:  # noqa: BLE001
+        pass
+    return out
 
 
 def collect_hot(settings: Settings, client: XianyuClient | None = None) -> list[dict]:
