@@ -103,3 +103,25 @@ def get_notifier(settings: Settings) -> Notifier:
     if settings.is_dev or not settings.smtp_host:
         return NullNotifier()
     return EmailNotifier(settings)
+
+
+def get_user_notifier(user, settings: Settings) -> Notifier:
+    """返回发件给某用户的 Notifier。
+
+    - 用户配置了自己的 SMTP → 用其 SMTP、收件人为其邮箱;
+    - 否则回退全局 notifier(收件人取全局 NOTIFY_TO)。
+    """
+    if getattr(user, "smtp_user", None) and getattr(user, "smtp_host", None):
+        per = settings.model_copy(
+            update={
+                "smtp_host": user.smtp_host,
+                "smtp_port": user.smtp_port or settings.smtp_port,
+                "smtp_user": user.smtp_user,
+                "smtp_pass": user.smtp_pass or "",
+                "smtp_from": user.smtp_from or settings.smtp_from,
+                "notify_to": user.email or "",
+            }
+        )
+        if per.smtp_host and per.smtp_user:
+            return EmailNotifier(per)
+    return get_notifier(settings)

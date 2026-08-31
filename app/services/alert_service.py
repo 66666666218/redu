@@ -14,8 +14,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
-from app.db.models import AlertRecord, AlertRule
-from app.services.notifier import get_notifier
+from app.db.models import AlertRecord, AlertRule, User
+from app.services.notifier import get_notifier, get_user_notifier
 from app.utils import get_logger
 
 logger = get_logger(__name__)
@@ -99,7 +99,8 @@ def evaluate(
 ) -> int:
     """根据用户该板块的规则,对最新快照做"阈值/新增"判定并触达;返回触发条数。"""
     settings = settings or get_settings()
-    notifier = get_notifier(settings)
+    user = session.get(User, user_id)
+    notifier = get_user_notifier(user, settings) if user else get_notifier(settings)
     cooldown_hours = getattr(settings, "alert_cooldown_hours", 6)
     rules = session.scalars(
         select(AlertRule).where(
@@ -202,11 +203,12 @@ def run_fixed_time_digests() -> int:
                 AlertRule.enabled.is_(True), AlertRule.rule_type == "fixed_time", AlertRule.alert_time == hhmm
             )
         ).all()
-        notifier = get_notifier(settings)
         sent = 0
         for rule in rules:
             if rule.last_alert_at and rule.last_alert_at.date() == now.date():
                 continue  # 当天已发
+            user = db.get(User, rule.user_id)
+            notifier = get_user_notifier(user, settings) if user else get_notifier(settings)
             digest = _build_digest(db, rule.user_id, rule.section, settings)
             notifier.send(f"[{rule.section}] 定时总结 {hhmm}", digest)
             rule.last_alert_at = now

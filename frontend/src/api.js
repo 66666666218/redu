@@ -50,5 +50,7 @@ export const api = {
   alertRules: () => req('GET', '/api/alerts/rules'),
   alertRuleAdd: (rule) => req('POST', '/api/alerts/rules', rule),
   alertRuleDel: (id) => req('DELETE', `/api/alerts/rules/${id}`),
-  alertsList: () => req('GET', '/api/alerts/list')
+  alertsList: () => req('GET', '/api/alerts/list'),
+  userSmtpGet: () => req('GET', '/api/user/smtp'),
+  userSmtpPut: (o) => req('PUT', '/api/user/smtp', o)
 }

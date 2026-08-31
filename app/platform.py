@@ -79,6 +79,14 @@ class AlertRuleIn(pydantic.BaseModel):
     alert_time: str | None = None
 
 
+class UserSmtpIn(pydantic.BaseModel):
+    host: str = ""
+    port: int = 465
+    user: str = ""
+    password: str = ""
+    from_name: str = ""
+
+
 class TokenOut(pydantic.BaseModel):
     token: str
     username: str
@@ -103,6 +111,28 @@ class CookieOut(pydantic.BaseModel):
 def create_app() -> FastAPI:
     app = FastAPI(title="热点监控平台", version=APP_VERSION)
     init_db()
+
+    from config.settings import get_settings
+
+    _settings = get_settings()
+    if not _settings.jwt_secret:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "⚠️ 未配置 JWT_SECRET,已用临时密钥(生产请设置强随机 ≥32 字节,否则重启后登录态失效)"
+        )
+
+    @app.middleware("http")
+    async def log_requests(request: Request, call_next):  # type: ignore[no-untyped-def]
+        import time
+
+        t0 = time.time()
+        response = await call_next(request)
+        dur = (time.time() - t0) * 1000
+        import logging
+
+        logging.getLogger("access").info("%s %s -> %s %.0fms", request.method, request.url.path, response.status_code, dur)
+        return response
 
     @app.get("/healthz")
     def healthz() -> dict:
@@ -256,6 +286,22 @@ def create_app() -> FastAPI:
             select(AlertRecord).where(AlertRecord.user_id == user.id).order_by(AlertRecord.id.desc()).limit(limit)
         ).all()
         return [{"keyword": r.keyword, "reason": r.reason, "time": r.triggered_at.isoformat()} for r in rows]
+
+    # ---- 每用户 SMTP(发信给本人) ----
+    @app.get("/api/user/smtp")
+    def user_smtp_get(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        return {"host": user.smtp_host or "", "port": user.smtp_port or 465,
+                "user": user.smtp_user or "", "from_name": user.smtp_from or ""}
+
+    @app.put("/api/user/smtp")
+    def user_smtp_put(body: UserSmtpIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        user.smtp_host = body.host or None
+        user.smtp_port = body.port or None
+        user.smtp_user = body.user or None
+        user.smtp_pass = body.password or None
+        user.smtp_from = body.from_name or None
+        db.commit()
+        return {"saved": True}
 
     # 托管前端构建产物(SPA)
     dist = Path(__file__).parent / "static" / "spa"

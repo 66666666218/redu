@@ -72,7 +72,16 @@ def _migrate() -> None:
     if "users" not in inspector.get_table_names():
         return
     cols = {c["name"] for c in inspector.get_columns("users")}
-    additions = ["email VARCHAR(128)", "reset_token VARCHAR(128)", "reset_expires DATETIME"]
+    additions = [
+        "email VARCHAR(128)",
+        "smtp_host VARCHAR(128)",
+        "smtp_port INTEGER",
+        "smtp_user VARCHAR(128)",
+        "smtp_pass VARCHAR(255)",
+        "smtp_from VARCHAR(128)",
+        "reset_token VARCHAR(128)",
+        "reset_expires DATETIME",
+    ]
     with get_engine().begin() as conn:
         for coldef in additions:
             col = coldef.split()[0]
