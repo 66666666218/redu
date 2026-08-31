@@ -18,18 +18,34 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db, init_db
 from app.db.models import User
-from app.auth import authenticate, get_current_user, register_user
+from app.auth import authenticate, create_password_reset_token, get_current_user, register_user, reset_password
 from app.security import create_access_token
 from app.services import tenant
 from app.services.cookie_store import delete_cookie as del_cookie
 from app.services.cookie_store import list_cookies, set_cookie
+from app.services.notifier import get_notifier
 
 APP_VERSION = "2.0.0"
 
 
-class AuthIn(pydantic.BaseModel):
-    username: str
+class RegisterIn(pydantic.BaseModel):
+    email: str
     password: str
+    username: str | None = None
+
+
+class LoginIn(pydantic.BaseModel):
+    login: str
+    password: str
+
+
+class ForgotIn(pydantic.BaseModel):
+    email: str
+
+
+class ResetIn(pydantic.BaseModel):
+    token: str
+    new_password: str
 
 
 class TokenOut(pydantic.BaseModel):
@@ -64,17 +80,45 @@ def create_app() -> FastAPI:
         return {"status": "ok", "version": APP_VERSION, "time": datetime.now().isoformat()}
 
     @app.post("/api/auth/register", response_model=TokenOut)
-    def register(body: AuthIn, db: Session = Depends(get_db)) -> TokenOut:
-        user = register_user(db, body.username.strip(), body.password)
+    def register(body: RegisterIn, db: Session = Depends(get_db)) -> TokenOut:
+        user = register_user(db, body.email, body.password, body.username)
         token = create_access_token(user.id)
         return TokenOut(token=token, username=user.username)
 
     @app.post("/api/auth/login", response_model=TokenOut)
-    def login(body: AuthIn, db: Session = Depends(get_db)) -> TokenOut:
-        token = authenticate(db, body.username.strip(), body.password)
+    def login(body: LoginIn, db: Session = Depends(get_db)) -> TokenOut:
+        token = authenticate(db, body.login, body.password)
         if token is None:
-            raise HTTPException(401, "用户名或密码错误")
-        return TokenOut(token=token, username=body.username.strip())
+            raise HTTPException(401, "账号或密码错误")
+        return TokenOut(token=token, username=body.login.strip())
+
+    @app.post("/api/auth/forgot")
+    def forgot(body: ForgotIn, db: Session = Depends(get_db)):
+        from config.settings import get_settings
+
+        settings = get_settings()
+        token = create_password_reset_token(db, body.email)
+        # 不暴露邮箱是否存在,统一提示
+        if token:
+            try:
+                notifier = get_notifier(settings)
+                link = f"{settings.public_base_url}/reset?token={token}"
+                notifier.send(
+                    "重置密码",
+                    f"请点击以下链接重置密码(30 分钟内有效):\n\n{link}",
+                )
+            except Exception as exc:  # noqa: BLE001
+                import logging
+
+                logging.getLogger(__name__).warning("发送重置邮件失败:%s", exc)
+        return {"message": "如果该邮箱已注册,重置邮件已发送"}
+
+    @app.post("/api/auth/reset")
+    def reset(body: ResetIn, db: Session = Depends(get_db)):
+        ok = reset_password(db, body.token, body.new_password)
+        if not ok:
+            raise HTTPException(400, "重置链接无效或已过期")
+        return {"message": "密码已重置,请重新登录"}
 
     @app.get("/api/auth/me", response_model=MeOut)
     def me(user: User = Depends(get_current_user)) -> MeOut:

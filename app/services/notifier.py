@@ -62,7 +62,7 @@ class EmailNotifier(Notifier):
 
         message = MIMEText(body, "html" if html else "plain", "utf-8")
         message["Subject"] = subject
-        message["From"] = formataddr(("热点监控", settings.smtp_user))
+        message["From"] = formataddr((settings.smtp_from or "热点监控", settings.smtp_user))
         message["To"] = ", ".join(recipients)
         try:
             with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=15) as server:

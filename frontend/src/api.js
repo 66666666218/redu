@@ -31,8 +31,10 @@ async function req(method, path, body) {
 }
 
 export const api = {
-  register: (username, password) => req('POST', '/api/auth/register', { username, password }),
-  login: (username, password) => req('POST', '/api/auth/login', { username, password }),
+  register: (email, password, username) => req('POST', '/api/auth/register', { email, password, username }),
+  login: (login, password) => req('POST', '/api/auth/login', { login, password }),
+  forgot: (email) => req('POST', '/api/auth/forgot', { email }),
+  reset: (token, new_password) => req('POST', '/api/auth/reset', { token, new_password }),
   me: () => req('GET', '/api/auth/me'),
   cookies: () => req('GET', '/api/cookies'),
   setCookie: (platform, cookie) => req('PUT', `/api/cookies/${platform}`, { cookie }),

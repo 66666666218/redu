@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     smtp_port: int = 465
     smtp_user: str = ""
     smtp_pass: str = ""             # SMTP 授权码
+    smtp_from: str = "热点监控"      # 邮件发件人显示名
     notify_to: str = ""             # 收件人,英文逗号分隔
     is_dev: bool = True             # 开发模式:不真正外发邮件
 
@@ -72,6 +73,7 @@ class Settings(BaseSettings):
     jwt_secret: str = ""            # 生产必须设置强随机密钥
     jwt_expire_minutes: int = 604800  # 登录有效期(默认 7 天)
     cookie_encrypt_key: str = ""    # Cookie 加密密钥(Fernet);为空则用 jwt_secret 派生
+    public_base_url: str = "http://localhost:8080"  # 站点对外地址(重置链接等)
 
     @property
     def notify_to_list(self) -> list[str]:

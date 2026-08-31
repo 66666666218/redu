@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
+import secrets as _secrets
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -14,11 +16,23 @@ from cryptography.fernet import Fernet
 
 from config.settings import get_settings
 
+logger = logging.getLogger(__name__)
+_fallback_secret: str | None = None
+
 
 def _secret() -> str:
+    """返回 JWT 密钥。
+
+    - 配置了 `jwt_secret` 用配置值;
+    - 否则生成临时密钥并告警(避免注册/登录因密钥缺失而 500;生产务必备份并设置 JWT_SECRET)。
+    """
+    global _fallback_secret
     s = get_settings().jwt_secret
     if not s:
-        raise RuntimeError("未配置 JWT_SECRET,请在生产环境设置强随机密钥")
+        if _fallback_secret is None:
+            _fallback_secret = _secrets.token_urlsafe(48)
+            logger.warning("未配置 JWT_SECRET,已生成临时密钥;生产请设置 JWT_SECRET(否则重启后登录态失效)")
+        return _fallback_secret
     return s
 
 

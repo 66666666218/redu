@@ -57,7 +57,24 @@ def init_db() -> None:
 
     try:
         Base.metadata.create_all(bind=get_engine())
+        _migrate()
     except Exception as exc:  # noqa: BLE001
         import logging
 
         logging.getLogger(__name__).warning("数据库建表失败(请确认 DATABASE_URL 与 MySQL 已就绪):%s", exc)
+
+
+def _migrate() -> None:
+    """轻量迁移:为用户表补充 email/reset_token/reset_expires 列(旧库)。"""
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(get_engine())
+    if "users" not in inspector.get_table_names():
+        return
+    cols = {c["name"] for c in inspector.get_columns("users")}
+    additions = ["email VARCHAR(128)", "reset_token VARCHAR(128)", "reset_expires DATETIME"]
+    with get_engine().begin() as conn:
+        for coldef in additions:
+            col = coldef.split()[0]
+            if col not in cols:
+                conn.execute(text(f"ALTER TABLE users ADD COLUMN {coldef}"))

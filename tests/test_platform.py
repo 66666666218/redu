@@ -5,6 +5,7 @@ os.environ.setdefault("JWT_SECRET", "test_secret_0123456789abcdef0123456789abcde
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -12,6 +13,7 @@ from app.db.database import Base
 from app.db import models  # noqa: F401
 from app.security import create_access_token, decode_token, decrypt_cookie, encrypt_cookie
 from app.services import cookie_store
+from app.auth import authenticate, create_password_reset_token, register_user, reset_password
 
 
 def test_cookie_encrypt_roundtrip() -> None:
@@ -48,3 +50,21 @@ def test_cookie_store_crud(session) -> None:
 def test_cookie_store_rejects_bad_platform(session) -> None:
     with pytest.raises(ValueError):
         cookie_store.set_cookie(session, 1, "unknown", "x")
+
+
+def test_register_and_authenticate(session) -> None:
+    register_user(session, "a@b.com", "p123456")
+    assert authenticate(session, "a@b.com", "p123456") is not None
+    assert authenticate(session, "a@b.com", "wrong") is None
+    with pytest.raises(HTTPException):
+        register_user(session, "a@b.com", "p123456")
+
+
+def test_forgot_and_reset_password(session) -> None:
+    register_user(session, "a@b.com", "p123456")
+    assert create_password_reset_token(session, "no@mail.com") is None  # 不暴露存在性
+    token = create_password_reset_token(session, "a@b.com")
+    assert token
+    assert reset_password(session, "bad", "x") is False
+    assert reset_password(session, token, "newpass123") is True
+    assert authenticate(session, "a@b.com", "newpass123") is not None
