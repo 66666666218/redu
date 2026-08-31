@@ -34,10 +34,18 @@ def _load_cookie(path: str) -> str:
     return Path(path).read_text(encoding="utf-8").strip()
 
 
-def fetch_list(cookie: str, url: str, fragment: str, title_keys: tuple[str, ...], score_keys: tuple[str, ...]) -> list[dict]:
-    """通用:驱动浏览器打开 url,拦截含 fragment 的 query_list 响应,取 [{title, score}]。
+def fetch_list(
+    cookie: str,
+    url: str,
+    fragment: str,
+    title_keys: tuple[str, ...],
+    score_keys: tuple[str, ...],
+    click_label: str | None = None,
+) -> list[dict]:
+    """通用:驱动浏览器打开 url,拦截含 fragment 的响应,取 [{title, score}]。
 
-    供 内容词榜 / 搜索榜 / 我的订阅 使用;解析失败返回空(不抛错)。
+    - 若 `click_label` 给定时,先点击该子Tab(如 视频榜/话题榜)再抓对应榜单接口。
+    - 解析失败返回空(不抛错)。供 内容词/搜索/视频/话题/订阅 使用。
     """
     from playwright.sync_api import sync_playwright
 
@@ -53,12 +61,18 @@ def fetch_list(cookie: str, url: str, fragment: str, title_keys: tuple[str, ...]
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            context = browser.new_context(user_agent=_UA, viewport={"width": 1400, "height": 900})
+            context = browser.new_context(user_agent=_UA, viewport={"width": 1400, "height": 950})
             context.add_cookies(_parse_cookies(cookie))
             page = context.new_page()
             page.on("response", on_response)
             page.goto(url, timeout=60_000)
-            page.wait_for_timeout(9_000)
+            page.wait_for_timeout(4500)
+            if click_label:
+                try:
+                    page.get_by_text(click_label, exact=True).first.click(timeout=8_000)
+                except Exception:  # noqa: BLE001
+                    pass
+            page.wait_for_timeout(5_000)
             words: list[dict] = []
             for resp in respons:
                 try:
@@ -105,6 +119,30 @@ def fetch_content_words(cookie: str) -> list[dict]:
 def fetch_search_words(cookie: str) -> list[dict]:
     """搜索榜(hot_search/query_list):key_word + search_score。"""
     return fetch_list(cookie, URL, "/hot_search/query_list", ("key_word", "title"), ("search_score", "score"))
+
+
+def fetch_video_words(cookie: str) -> list[dict]:
+    """视频榜(聚合榜-子Tab):material/video_billboard,item_title + play_cnt。"""
+    return fetch_list(
+        cookie,
+        "https://douhot.douyin.com/square/hotspot?active_tab=hotspot_all",
+        "/material/video_billboard",
+        ("item_title", "title"),
+        ("play_cnt", "score"),
+        click_label="视频榜",
+    )
+
+
+def fetch_topic_words(cookie: str) -> list[dict]:
+    """话题榜(聚合榜-子Tab):material/challenge_billboard,challenge_name + score。"""
+    return fetch_list(
+        cookie,
+        "https://douhot.douyin.com/square/hotspot?active_tab=hotspot_all",
+        "/material/challenge_billboard",
+        ("challenge_name", "title"),
+        ("score", "play_cnt"),
+        click_label="话题榜",
+    )
 
 
 def fetch_subscribe_words(cookie: str) -> list[dict]:

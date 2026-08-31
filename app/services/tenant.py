@@ -137,6 +137,10 @@ def run_douhot(session: Session, user_id: int, settings: Settings | None = None)
             lists["search"] = douhot.fetch_search_words(douyin_cookie)
         if "subscribe" in watch_types:
             lists["subscribe"] = douhot.fetch_subscribe_words(douyin_cookie)
+        if "video" in watch_types:
+            lists["video"] = douhot.fetch_video_words(douyin_cookie)
+        if "topic" in watch_types:
+            lists["topic"] = douhot.fetch_topic_words(douyin_cookie)
         _record_douhot_watch_snaps(session, user_id, lists)
         rising = _douhot_rising(session, user_id, settings, now)
         _record_run(session, user_id, "douhot", "success", f"words={len(words)} risen={len(rising)}")
@@ -319,7 +323,7 @@ def xianyu_analytics(session: Session, user_id: int) -> dict:
 
 # ---------- 热点宝关键词监控 ----------
 def add_douhot_watch(session: Session, user_id: int, list_type: str, keyword: str) -> dict:
-    list_type = list_type if list_type in ("word", "search", "subscribe") else "word"
+    list_type = list_type if list_type in ("word", "search", "subscribe", "video", "topic") else "word"
     keyword = keyword.strip()
     row = session.scalar(
         select(DouhotWatch).where(

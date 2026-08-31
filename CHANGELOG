@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- [2026-09-01 10:00] FEAT: 热点宝聚合榜子功能接入——**视频榜**(`material/video_billboard`)+**话题榜**(`material/challenge_billboard`),经"点击子Tab后抓取"实现;与 内容词/搜索/我的订阅 共 **5 类监控类型**,按关注类型拉对应榜单记录快照;实测取到真实数据(视频榜播放量/话题榜热度分)(Files: app/services/{douhot,tenant}.py, frontend/src/views/Dashboard.vue)
+- [2026-08-31 10:00] FEAT: 热点宝扩展监控类型——搜索榜(hot_search/query_list)+我的订阅(subscribe/query_list)可选;视频/话题榜当时判定无独立接口,后续确认实为聚合榜子Tab(material/*_billboard)已补(Files: app/services/douhot.py, frontend/src/views/Dashboard.vue)
 - [2026-08-31 10:00] FEAT: 平台新增**热点宝关键词监控**(内容词/搜索榜选择+关键词关注+逐轮得分快照+判涨)与**闲鱼深度分析**(商品详情抓想要数/浏览量/类目/卖家粉丝→每日快照→今日vs昨日涨跌%/类目分布/上升榜);含 `xianyu_daily`、`douhot_watch(_snap)` 表、API、前端面板;主键统一改 Integer;测试 61 项(Files: app/db/models.py, app/services/{tenant,xianyu}.py, app/platform.py, frontend/src/{api.js,views/Dashboard.vue}, tests/test_platform.py)
 - [2026-08-31 10:00] fix+feat: 修复注册失败(未设JWT_SECRET时自动生成临时密钥);邮箱注册/登录/找回密码(邮件重置链接)+前端重置页;users表迁移(Files: app/security.py, app/db/{models,database}.py, app/auth.py, app/platform.py, config/settings.py, app/services/notifier.py, frontend/src/*, .env.example)
 - [2026-08-31 10:00] CHORE: 全站频次下调避免风控(微博每小时、闲鱼/抖音每 3 小时),新增 `REQUEST_DELAY_SECONDS` 请求随机间隔(闲鱼关键词间生效);修复 `xianyu.py` 中 `from datetime import time` 遮蔽 `time` 模块导致 `sleep` 报错的 BUG;测试 52 项(Files: config/settings.py, .env.example, .env, app/services/xianyu.py, tests/conftest.py, doc/dev.md)

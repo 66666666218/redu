@@ -14,7 +14,11 @@ const platforms = [
   { key: 'xianyu', label: '闲鱼' },
   { key: 'douhot', label: '抖音' }
 ]
-const listTypes = [ { key: 'word', label: '内容词榜' }, { key: 'search', label: '搜索榜' }, { key: 'subscribe', label: '我的订阅' } ]
+const listTypes = [
+  { key: 'word', label: '内容词榜' }, { key: 'search', label: '搜索榜' },
+  { key: 'video', label: '视频榜' }, { key: 'topic', label: '话题榜' },
+  { key: 'subscribe', label: '我的订阅' }
+]
 
 async function load() {
   try { dash.value = await api.dashboard() } catch (e) { msg.value = e.message }
