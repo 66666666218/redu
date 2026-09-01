@@ -2,9 +2,12 @@
 # 服务:
 #   mysql      数据库(用户/Cookie/各用户监控数据,均按 user_id 隔离)
 #   redu-api   平台后端 FastAPI + 前端 SaaS(http://IP:8080/,注册登录后各管各的 Cookie)
+#              调度器已内嵌在本进程(按各用户设置的频率采集),**不需要**单独的调度容器。
+#              早期版本另有一个 redu-monitor 调度容器,现已废弃——继续跑会重复采集,请删除。
 # 运行:
-#   cp .env.example .env   # 设 JWT_SECRET(强随机)、DATABASE_URL、SMTP 等
+#   cp .env.example .env   # 必须设 JWT_SECRET(强随机 ≥32 字节),否则重启后登录态全部失效
 #   docker compose up -d
+#   curl -s http://127.0.0.1:8080/healthz   # 看 db.connected 是否为 true
 
 services:
   mysql:
@@ -36,7 +39,11 @@ services:
     command: ["python", "-m", "uvicorn", "app.platform:app", "--host", "0.0.0.0", "--port", "8080"]
     env_file: .env
     environment:
+      # 显式注入,避免落到默认值;主机名必须与上面的服务名 mysql 一致
       DATABASE_URL: mysql+pymysql://redu:redu@mysql:3306/redu?charset=utf8mb4
+    volumes:
+      # 日志/快照与 Cookie 文件(多租户下 Cookie 存库,此处仅留兼容与归档用)
+      - ./data:/app/data
     ports:
       - "8080:8080"
     depends_on:
