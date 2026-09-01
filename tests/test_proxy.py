@@ -60,6 +60,20 @@ def test_parse_line() -> None:
     assert ProxyPool.parse_line("") is None
 
 
+def test_parse_line_rejects_vendor_error_json() -> None:
+    """厂商额度到期返回的 JSON 冒号切开也有 4 段,必须靠 ip:port 形状挡掉。"""
+    assert ProxyPool.parse_line('{"code":405,"msg":"业务已到期，请先续费","data":null}') is None
+    assert ProxyPool.parse_line("host.example:8080:u:p") is None  # 非 IP
+    assert ProxyPool.parse_line("1.2.3.4:abc:u:p") is None        # 端口非数字
+    assert ProxyPool.parse_line("1.2.3.4:99999:u:p") is None      # 端口越界
+
+
+def test_pool_empty_when_all_lines_invalid() -> None:
+    """整批都非法(如接口报错)时应退回直连,而不是给出垃圾代理。"""
+    pool = ProxyPool("http://fake/getips", fetch=lambda url: ['{"code":405,"msg":"业务已到期","data":null}'])
+    assert pool.get_proxies() is None
+
+
 def _fake_fetch(url: str) -> list[str]:  # type: ignore[no-untyped-def]
     return ["1.2.3.4:8080:u1:p1", "5.6.7.8:9090:u2:p2", "garbage"]
 

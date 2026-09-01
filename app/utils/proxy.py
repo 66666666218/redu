@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import random
+import re
 import threading
 import time
 
@@ -23,6 +24,7 @@ from config import Settings
 # 提取式代理池缓存(按提取 URL 隔离)。
 _pool_cache: dict[str, "ProxyPool"] = {}
 _pool_lock = threading.Lock()
+_IP_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
 
 def _normalize_proxy_url(url: str) -> tuple[str, str]:
@@ -86,11 +88,19 @@ class ProxyPool:
 
     @staticmethod
     def parse_line(line: str) -> tuple[str, str, str, str] | None:
-        """解析 `ip:port:user:pass` 一行,非法则返回 `None`。"""
+        """解析 `ip:port:user:pass` 一行,非法则返回 `None`。
+
+        必须校验 ip/port 形状:厂商额度到期时会返回一段 JSON
+        (`{"code":405,"msg":"业务已到期...","data":null}`),按冒号切开同样有 4 段,
+        只看段数会拼出 `http://...@...` 这种垃圾代理,把所有采集一起带崩。
+        """
         parts = line.strip().split(":")
         if len(parts) < 4:
             return None
-        return parts[0], parts[1], parts[2], parts[3]
+        ip, port = parts[0].strip(), parts[1].strip()
+        if not _IP_RE.match(ip) or not port.isdigit() or not 0 < int(port) < 65536:
+            return None
+        return ip, port, parts[2], parts[3]
 
     def _refresh(self) -> None:
         try:
