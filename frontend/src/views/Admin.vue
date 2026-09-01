@@ -18,6 +18,8 @@ const dataSection = ref('weibo')
 const cats = ref([])
 const perms = ref([])
 const failed = ref([])
+const atrend = ref([])
+const pie = ref({ alerts_section: [], watch_types: [] })
 const can = (p) => perms.value.includes(p)
 
 async function load() {
@@ -31,7 +33,21 @@ async function load() {
     config.value = await api.adminConfig()
     cats.value = await api.adminCategories()
     failed.value = await api.adminFailedRuns()
+    atrend.value = await api.adminAlertTrend(30)
+    pie.value = await api.adminCategoryPie()
   } catch (e) { toastError('加载失败:' + e.message) }
+}
+function donut(items) {
+  const total = items.reduce((s, x) => s + x.value, 0)
+  if (!total) return ''
+  const colors = ['#4f8cff', '#12b76a', '#ff7a59', '#b36bff', '#ffc94f', '#ff6b6b']
+  let acc = 0
+  const stops = items.map((x, i) => {
+    const from = (acc / total) * 360; acc += x.value
+    const to = (acc / total) * 360
+    return `${colors[i % colors.length]} ${from}deg ${to || 360}deg`
+  })
+  return `conic-gradient(${stops.join(',')})`
 }
 async function toggle(u) {
   await api.adminUserToggle(u.id); await load()
@@ -126,6 +142,30 @@ onMounted(load)
                 <div style="flex:1;background:var(--line);height:12px"><div :style="{width:(b.count/(dash.breakdown?.alerts_by_section?.[0]?.count||1)*100)+'%',background:'var(--up)',height:'12px'}"></div></div>
                 <span>{{ b.count }}</span>
               </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="row" style="gap:24px;flex-wrap:wrap">
+          <div style="flex:2;min-width:260px">
+            <h3>告警趋势(近30天)</h3>
+            <div class="row" style="align-items:flex-end;gap:2px;height:90px">
+              <div v-for="t in atrend" :key="t.date" style="flex:1;text-align:center" :title="`${t.date} 告警${t.total}`">
+                <div style="margin:0 auto;width:55%;background:var(--up);opacity:.7" :style="{height:(Math.min(t.total,10)/10*70)+'px'}"></div>
+              </div>
+            </div>
+            <div class="empty">每日告警总数(近30天)</div>
+          </div>
+          <div style="flex:1;min-width:220px">
+            <h3>分类饼图</h3>
+            <div class="row" style="gap:16px;flex-wrap:wrap">
+              <div v-if="pie.alerts_section.length" :style="{width:'90px',height:'90px',borderRadius:'50%',background:donut(pie.alerts_section)}" title="告警来源"></div>
+              <div v-if="pie.watch_types.length" :style="{width:'90px',height:'90px',borderRadius:'50%',background:donut(pie.watch_types)}" title="抖音监测类型"></div>
+            </div>
+            <div class="empty">
+              <span v-if="pie.alerts_section.length">告警来源:{{ pie.alerts_section.map(x=>x.name+':'+x.value).join(' ') }}</span>
+              <span v-if="pie.watch_types.length"> · 抖音类型:{{ pie.watch_types.map(x=>x.name+':'+x.value).join(' ') }}</span>
             </div>
           </div>
         </div>

@@ -12,6 +12,7 @@ from app.db.models import (
     AdminLog,
     AlertRecord,
     AlertRule,
+    DouhotWatch,
     DouhotWord,
     LoginLog,
     RunRecord,
@@ -258,6 +259,32 @@ def category_dist(db: Session) -> list[dict]:
         select(XianyuDaily.category, func.count(XianyuDaily.id), func.sum(XianyuDaily.want_count)).group_by(XianyuDaily.category)
     ).all()
     return [{"name": c or "未分类", "count": n, "want": int(w or 0)} for c, n, w in rows]
+
+
+def alert_trend(db: Session, days: int = 30) -> list[dict]:
+    """告警趋势:近 N 天每天各板块告警数(来自 AlertRecord,无需外部令牌)。"""
+    start = date.today() - timedelta(days=days)
+    rows = db.execute(
+        select(func.date(AlertRecord.triggered_at), AlertRecord.section, func.count(AlertRecord.id))
+        .where(AlertRecord.triggered_at >= start)
+        .group_by(func.date(AlertRecord.triggered_at), AlertRecord.section)
+    ).all()
+    days_list = [(date.today() - timedelta(days=i)).isoformat() for i in range(days - 1, -1, -1)]
+    out = {d: {"weibo": 0, "xianyu": 0, "douhot": 0} for d in days_list}
+    for d, sec, n in rows:
+        if d in out and sec in out[d]:
+            out[d][sec] += n
+    return [{"date": d, **out[d], "total": sum(out[d].values())} for d in days_list]
+
+
+def category_pie(db: Session) -> dict:
+    """分类饼图数据(全部来自本地库,无需外部令牌)。"""
+    alerts_section = dict(db.execute(select(AlertRecord.section, func.count(AlertRecord.id)).group_by(AlertRecord.section)).all())
+    watch_types = dict(db.execute(select(DouhotWatch.list_type, func.count(DouhotWatch.id)).group_by(DouhotWatch.list_type)).all())
+    return {
+        "alerts_section": [{"name": k or "?", "value": v} for k, v in alerts_section.items()],
+        "watch_types": [{"name": k, "value": v} for k, v in watch_types.items()],
+    }
 
 
 # ---------------- RBAC 按钮/菜单级权限 ----------------

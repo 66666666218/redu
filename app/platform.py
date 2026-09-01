@@ -409,6 +409,14 @@ def create_app() -> FastAPI:
     def admin_runs_failed(user: User = Depends(_require_perm("logs.view")), db: Session = Depends(get_db)):
         return admin_svc.failed_runs(db)
 
+    @app.get("/api/admin/alert-trend")
+    def admin_alert_trend(days: int = 30, user: User = Depends(_require_perm("dashboard.view")), db: Session = Depends(get_db)):
+        return admin_svc.alert_trend(db, days)
+
+    @app.get("/api/admin/category-pie")
+    def admin_category_pie(user: User = Depends(_require_perm("dashboard.view")), db: Session = Depends(get_db)):
+        return admin_svc.category_pie(db)
+
     @app.post("/api/admin/runs/{run_id}/retry")
     def admin_run_retry(run_id: str, user: User = Depends(_require_perm("users.toggle")), db: Session = Depends(get_db)):
         res = admin_svc.retry_run(db, run_id)

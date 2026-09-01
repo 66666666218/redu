@@ -66,6 +66,8 @@ export const api = {
   adminConfigSet: (key, value) => req('PUT', `/api/admin/config/${key}`, { value }),
   adminData: (section, userId) => req('GET', `/api/admin/data/${section}` + (userId ? `?user_id=${userId}` : '')),
   adminCategories: () => req('GET', '/api/admin/categories'),
+  adminAlertTrend: (days) => req('GET', '/api/admin/alert-trend' + (days ? `?days=${days}` : '')),
+  adminCategoryPie: () => req('GET', '/api/admin/category-pie'),
   adminFailedRuns: () => req('GET', '/api/admin/runs/failed'),
   adminRunRetry: (runId) => req('POST', `/api/admin/runs/${runId}/retry`),
   adminExportUsers: () => fetch('/api/admin/export/users', { headers: { Authorization: 'Bearer ' + getToken() } }),
