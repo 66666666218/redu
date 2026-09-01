@@ -26,9 +26,11 @@ services:
       retries: 10
 
   redu-api:
-    # 新镜像(多租户平台)需重新构建/推送;此处用本地构建
-    # image: crpi-me8okzjl211xpvun.cn-hangzhou.personal.cr.aliyuncs.com/tcdhouhuayuan/redu:latest
-    build: .
+    # 从阿里云 ACR 拉取镜像;pull_policy: always 保证每次 up 都重新拉取(同名 latest 也会更新)
+    image: crpi-me8okzjl211xpvun.cn-hangzhou.personal.cr.aliyuncs.com/tcdhouhuayuan/redu:latest
+    pull_policy: always
+    # 如需本地源码构建(调试),取消下面注释并把上面 image 注释掉
+    # build: .
     container_name: redu-api
     restart: unless-stopped
     command: ["python", "-m", "uvicorn", "app.platform:app", "--host", "0.0.0.0", "--port", "8080"]
