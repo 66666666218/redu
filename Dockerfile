@@ -1,5 +1,5 @@
 # 热点监控平台(多租户 · 前后端分离)
-# 阶段1:构建 Vue3 前端;阶段2:Python 运行时(含 Playwright chromium)
+# 阶段1:构建 Vue3 前端;阶段2:Python 运行时(纯 requests 采集,无需浏览器)
 
 FROM node:20-slim AS frontend
 WORKDIR /build
@@ -11,16 +11,12 @@ RUN npx vite build --outDir dist
 FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
-    TZ=Asia/Shanghai \
-    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+    TZ=Asia/Shanghai
 
 WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Playwright chromium(抖音内容词浏览器采集)
-RUN playwright install --with-deps chromium
 
 COPY config ./config
 COPY app ./app

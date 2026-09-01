@@ -132,7 +132,7 @@ def run_douhot(session: Session, user_id: int, settings: Settings | None = None)
     if not douyin_cookie:
         raise ValueError("未配置抖音(热点宝) Cookie")
     try:
-        words = douhot.fetch_content_words(douyin_cookie)
+        words = douhot.fetch_content_words(douyin_cookie, settings)
         now = datetime.now()
         prev_keys = set(session.scalars(select(DouhotWord.title).where(DouhotWord.user_id == user_id)).all())
         for w in words:
@@ -144,13 +144,13 @@ def run_douhot(session: Session, user_id: int, settings: Settings | None = None)
         watch_types = {w.list_type for w in session.scalars(select(DouhotWatch).where(DouhotWatch.user_id == user_id)).all()}
         lists: dict[str, list[dict]] = {"word": words}
         if "search" in watch_types:
-            lists["search"] = douhot.fetch_search_words(douyin_cookie)
+            lists["search"] = douhot.fetch_search_words(douyin_cookie, settings)
         if "subscribe" in watch_types:
-            lists["subscribe"] = douhot.fetch_subscribe_words(douyin_cookie)
+            lists["subscribe"] = douhot.fetch_subscribe_words(douyin_cookie, settings)
         if "video" in watch_types:
-            lists["video"] = douhot.fetch_video_words(douyin_cookie)
+            lists["video"] = douhot.fetch_video_words(douyin_cookie, settings)
         if "topic" in watch_types:
-            lists["topic"] = douhot.fetch_topic_words(douyin_cookie)
+            lists["topic"] = douhot.fetch_topic_words(douyin_cookie, settings)
         _record_douhot_watch_snaps(session, user_id, lists)
         rising = _douhot_rising(session, user_id, settings, now)
         _record_run(session, user_id, "douhot", "success", f"words={len(words)} risen={len(rising)}")

@@ -1,7 +1,7 @@
 # 热点追踪与自动化监控系统 — 开发文档
 
 > 版本: v1.0(完善版)　|　最后更新: 2026-08-29
-> 技术栈: Python 3.9+ / requests / Playwright / NumPy / APScheduler / FastAPI / SQLite
+> 技术栈: Python 3.9+ / requests / NumPy / APScheduler / FastAPI / SQLite(Playwright 仅用于 `scripts/probe_*.py` 抓包探测)
 
 ---
 
@@ -101,8 +101,8 @@
 | 模块 | 技术/工具 | 选型理由 |
 | --- | --- | --- |
 | 开发语言 | Python 3.9+ | 生态丰富,爬虫与数据处理库完善 |
-| 网络请求 | requests | 处理常规 API 请求(微博 Ajax 接口) |
-| 自动化浏览器 | Playwright | 处理巨量算数等复杂反爬、动态渲染页 |
+| 网络请求 | requests | 处理常规 API 请求(微博 Ajax、闲鱼 mtop、抖音热点宝) |
+| 自动化浏览器 | Playwright | **仅开发期**:`scripts/probe_*.py` 抓包核验接口是否仍免签名;运行时采集不依赖 |
 | 数据分析 | NumPy | 线性回归计算斜率,性能高 |
 | 任务调度 | APScheduler | 支持 Cron 表达式,优于内置 `schedule` |
 | 代理 IP | 隧道代理 | 按流量计费、自动轮换,免维护 IP 池 |
@@ -250,6 +250,7 @@ redian/
   - **隧道代理**:`USE_PROXY=true` + `PROXY_URL/USER/PASS`,单网关静态。
   - **提取式代理池**:配置 `PROXY_EXTRACT_URL`(厂商 getips 完整 URL,含 `trade_no/sign`),自动拉取一批 `ip:port:user:pass`,按 `PROXY_REFRESH_SECONDS` 刷新、随机轮换;`get_proxies()` 优先走代理池。
 - 兼容:代理地址可带或不带 scheme;支持 `http/https`/`socks5`;socks5 时 Playwright 走直连并提示。
+- 健壮性:`ProxyPool.parse_line` 会校验 `ip:port` 形状——厂商额度到期时会返回一段 JSON(`{"code":405,"msg":"业务已到期..."}`),按冒号切开同样有 4 段,只看段数会拼出垃圾代理 URL 把所有采集一起带崩;校验失败的行直接丢弃,池空则退回直连。
 - 部署:生产必须启用代理(防服务器 IP 连坐);若用提取式,注意 IP 约 3 分钟有效,超时需重新提取;白名单/账密按服务商方式配置。
 
 ### 5.2 微博热搜采集 `services/collector.py`
@@ -321,13 +322,17 @@ redian/
 - 接口:`run_xianyu() -> {run_id, count, items}`;API 见 `doc/API.md` §6。
 - 说明:搜索卡片不带"已售/想要数"(`want` 为空),故热销按"综合排序"近似(快、请求少);如需精确"想要数"可再抓详情页(更慢,暂不做)。闲鱼为合规公开检索,读自己登录态下的数据,注意频率与 ToS。
 
-### 5.9 抖音热点·内容词趋势 `services/douhot.py`(独立数据源)
+### 5.9 抖音热点·内容词趋势 `services/douhot.py` + `services/douhot_client.py`(独立数据源)
 
 - 职责:监控抖音「生活服务热点中心」的**内容词趋势**(词 + 飙升指数 + 热度时间序列),判涨、入库、对外提供。
-- 技术:`douhot.douyin.com/douhot/v1/dashboard/hot_word/query_list` 需抖音 `a_bogus`/`msToken` 签名,裸 `requests` 调不动(`url doesn't match`);故**用 Playwright 驱动真实浏览器**(签名由浏览器合法生成,不逆向),拦截该响应,取 `data.word_list[].{title, score(飙升指数), rising_ratio, trends[...]}`。需 `DOUHOT_COOKIE_FILE` 里的授权 Cookie(登录"生活服务热点中心")。
+- 分层:`douhot_client.py` 只管取数(HTTP/封装拆解/翻页),`douhot.py` 只管字段解析(统一成 `{title, score, ...}`)。
+- 技术:**纯 requests 直连,无需签名、无需浏览器**。实测(`scripts/probe_douhot_direct.py`、`scripts/probe_douhot_apis.py`)`douhot.douyin.com` 的榜单接口只校验登录 Cookie,把 `a_bogus`/`X-Bogus`/`_signature`/`msToken` 查询参数**全部剥掉仍返回真实数据**,且改 `page_num`/`date_window` 数据随之变化(服务端实算,非重放缓存)。需 `DOUHOT_COOKIE_FILE` 里的授权 Cookie(登录"生活服务热点中心")。
+- 接口约定:响应封装 `{"code":0,"data":{...}}`;Cookie 失效为 `{"code":8,"data":"用户未登录"}` → 抛 `DouhotAuthError`。内容词 `page_size` 服务端硬顶 24(要更多须翻页),搜索/视频/话题榜 `page_size` 可放大到 50。
+- 榜单:内容词 `hot_word/query_list`、搜索榜 `hot_search/query_list`、视频榜 `material/video_billboard`、话题榜 `material/challenge_billboard`、订阅 `subscribe/query_list`(后四者按用户关注类型按需拉,失败降级为空列表,不中断主采集)。
 - 数据为**明文 JSON**(非巨量算数那种加密),词条自带 `trends` 热度序列。
 - 入库:`douhot_words` 表(score/latest_value/trend_delta/…),每次运行一条快照;`run_douhot_trend() -> {run_id, count, items}`。
-- 说明:浏览器较重(约 15s/次),`DOUHOT_CRON` 默认每小时;读自己授权数据,注意频率与 ToS。
+- 性能:内容词 50 条约 1.3s(旧浏览器方案 24 条约 15s,且只能拿首屏);五个榜单全量约 8s(旧方案需开 5 次浏览器,约 60s+)。条数由 `DOUHOT_TOP_N` 控制(自动翻页,上限 200)。
+- 历史:曾用 Playwright 打开热点页拦截响应,重、吃内存、子Tab 点击常因改版失效;直连后已移除运行时浏览器依赖(Playwright 仅保留给 `scripts/probe_*.py` 抓包核验)。
 - 跨轮判涨:每轮把词条飙升指数入库,`run_douhot_trend` 末尾按词取历史序列,复用双重校验(环比涨幅 > `GROWTH_THRESHOLD` 且 斜率>0)判涨;命中则邮件告警,带冷却去重(`DOUHOT_ALERT_COOLDOWN_HOURS`)与单次上限(`DOUHOT_ALERT_MAX`),返回 `rising`。(需 ≥2 轮历史才生效。)
 
 ---
@@ -383,7 +388,7 @@ save_run(end, status)
 
 ### 8.1 Docker 容器化
 
-- `Dockerfile`:基于 `python:3.11-slim`,安装依赖 + `playwright install chromium`。
+- `Dockerfile`:多阶段——阶段1 构建 Vue3 前端,阶段2 基于 `python:3.11-slim` 安装依赖。采集全部走 HTTP 直连,**不再安装 chromium**(镜像更小、内存占用更低)。
 - `docker-compose.yml`:单容器即可运行调度器;可额外暴露 API 端口。
 - 所有外部请求必须走隧道代理,避免服务器 IP 被连坐封禁。
 

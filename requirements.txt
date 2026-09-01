@@ -19,10 +19,9 @@ sqlalchemy>=2.0
 pymysql>=1.1
 cryptography>=42
 
-# ---- 指数源:巨量算数/抖音热点宝(需 docker 内安装 chromium) ----
-playwright>=1.42
-
 # ---- 开发/测试 ----
 pytest>=8.0
 ruff>=0.4
 mypy>=1.8
+# 仅 scripts/probe_*.py 抓包探测用(核对接口是否仍免签名);运行时采集已全量直连,无需浏览器
+playwright>=1.42

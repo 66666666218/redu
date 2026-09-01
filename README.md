@@ -6,7 +6,7 @@
 > 开发文档:`doc/dev.md` · 接口规范:`doc/API.md` · 变更日志:`CHANGELOG`
 
 ## 技术栈
-- 后端:FastAPI · SQLAlchemy · MySQL · JWT · Playwright · APScheduler · SMTP
+- 后端:FastAPI · SQLAlchemy · MySQL · JWT · requests · APScheduler · SMTP
 - 前端:Vue3 + Vite(SPA,后端托管)
 - 部署:Docker Compose(mysql + api)· GitHub Actions → 阿里云 ACR 自动构建
 

@@ -246,7 +246,7 @@
 
 ## 7. 抖音热点 · 内容词趋势
 
-> 需要本地 `.env` 配置 `DOUHOT_COOKIE_FILE`(抖音热点宝授权 Cookie);采集经 Playwright 驱动浏览器(签名由浏览器合法生成)。
+> 需要本地 `.env` 配置 `DOUHOT_COOKIE_FILE`(抖音热点宝授权 Cookie);采集为**纯 requests 直连**(接口只校验登录 Cookie,不需要签名参数,也不再依赖浏览器)。Cookie 失效时采集记录为 failed,原因为「热点宝 Cookie 已失效」。
 
 ### 7.1 获取最新内容词趋势
 
