@@ -54,19 +54,37 @@ def test_cookie_store_rejects_bad_platform(session) -> None:
 
 
 def test_register_and_authenticate(session) -> None:
-    register_user(session, "a@b.com", "p123456")
-    assert authenticate(session, "a@b.com", "p123456") is not None
+    register_user(session, "a@b.com", "p1234567")
+    assert authenticate(session, "a@b.com", "p1234567") is not None
     assert authenticate(session, "a@b.com", "wrong") is None
     with pytest.raises(HTTPException):
-        register_user(session, "a@b.com", "p123456")
+        register_user(session, "a@b.com", "p1234567")
+
+
+def test_register_rejects_bad_input(session) -> None:
+    """邮箱/密码校验在后端强制(前端限制不可信),错误信息为可读中文。"""
+    for email, password in [("", "p1234567"), ("abc", "p1234567"), ("a@b.com", "short")]:
+        with pytest.raises(HTTPException) as exc:
+            register_user(session, email, password)
+        assert exc.value.status_code == 400 and isinstance(exc.value.detail, str)
+
+
+def test_register_normalizes_email(session) -> None:
+    """邮箱去空格转小写,避免同一邮箱大小写不同重复注册。"""
+    register_user(session, "  Foo@QQ.com ", "p1234567")
+    assert authenticate(session, "foo@qq.com", "p1234567") is not None
+    with pytest.raises(HTTPException):
+        register_user(session, "FOO@qq.com", "p1234567", "other")
 
 
 def test_forgot_and_reset_password(session) -> None:
-    register_user(session, "a@b.com", "p123456")
+    register_user(session, "a@b.com", "p1234567")
     assert create_password_reset_token(session, "no@mail.com") is None  # 不暴露存在性
     token = create_password_reset_token(session, "a@b.com")
     assert token
-    assert reset_password(session, "bad", "x") is False
+    assert reset_password(session, "bad", "newpass123") is False
+    with pytest.raises(HTTPException):  # 重置也要满足密码强度,不能绕过
+        reset_password(session, token, "x")
     assert reset_password(session, token, "newpass123") is True
     assert authenticate(session, "a@b.com", "newpass123") is not None
 
@@ -174,7 +192,7 @@ def test_admin_dashboard_and_users(session) -> None:
     from app import admin as admin_svc
     from app.db.models import User
 
-    register_user(session, "adm@x.com", "p", "adm")
+    register_user(session, "adm@x.com", "p1234567", "adm")
     u = session.scalar(select(User).where(User.email == "adm@x.com"))
     u.role = "admin"
     session.commit()

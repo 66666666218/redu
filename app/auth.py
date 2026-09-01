@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 from datetime import datetime, timedelta
 
@@ -21,6 +22,34 @@ from app.security import create_access_token, decode_token
 pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 RESET_TTL_MINUTES = 30
+MIN_PASSWORD_LEN = 8
+MAX_PASSWORD_LEN = 72   # bcrypt 只取前 72 字节,更长的部分会被静默截断
+MAX_USERNAME_LEN = 64   # 与 User.username 列宽一致,超长会被数据库截断/报错
+# 邮箱格式:不引入 email-validator 依赖(其未列在 requirements.txt,容器内不保证存在),
+# 用正则做够用的校验——挡掉空值与明显非邮箱,同时能返回中文提示。
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s.]+(\.[^@\s.]+)+$")
+
+
+def validate_email(email: str) -> str:
+    """校验并规范化邮箱(去空格、转小写);非法时抛 400。"""
+    value = (email or "").strip().lower()
+    if not value:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "请填写邮箱")
+    if len(value) > 128:  # 与 User.email 列宽一致
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "邮箱过长(最多 128 个字符)")
+    if not _EMAIL_RE.match(value):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "邮箱格式不正确,请填写如 name@example.com")
+    return value
+
+
+def validate_password(password: str) -> str:
+    """校验密码强度;过短/过长抛 400。"""
+    value = password or ""
+    if len(value) < MIN_PASSWORD_LEN:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"密码至少 {MIN_PASSWORD_LEN} 位")
+    if len(value.encode("utf-8")) > MAX_PASSWORD_LEN:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "密码过长(最多 72 字节)")
+    return value
 
 
 def hash_password(plain: str) -> str:
@@ -36,11 +65,19 @@ def _token_hash(token: str) -> str:
 
 
 def register_user(db: Session, email: str, password: str, username: str | None = None) -> User:
-    """按邮箱注册;用户名缺省取邮箱前缀。email 唯一。匹配 admin_email 自动设为 admin。"""
+    """按邮箱注册;用户名缺省取邮箱前缀。email 唯一。匹配 admin_email 自动设为 admin。
+
+    邮箱与密码在此统一校验(而非只靠前端),非法输入返回 400 中文提示。
+    """
     from config.settings import get_settings
 
-    email = email.strip().lower()
+    email = validate_email(email)
+    validate_password(password)
     name = (username or email.split("@")[0]).strip()
+    if not name:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "用户名不能为空")
+    if len(name) > MAX_USERNAME_LEN:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"用户名过长(最多 {MAX_USERNAME_LEN} 个字符)")
     if db.scalar(select(User).where(or_(User.email == email, User.username == name))):
         raise HTTPException(status.HTTP_409_CONFLICT, "该邮箱或用户名已注册")
     admins = {a.strip().lower() for a in get_settings().admin_email.split(",") if a.strip()}
@@ -75,7 +112,11 @@ def create_password_reset_token(db: Session, email: str) -> str | None:
 
 
 def reset_password(db: Session, token: str, new_password: str) -> bool:
-    """用重置令牌改密码;无效/过期返回 False。"""
+    """用重置令牌改密码;无效/过期返回 False。
+
+    新密码同样走 `validate_password`,否则重置流程可绕过注册时的强度要求。
+    """
+    validate_password(new_password)
     user = db.scalar(select(User).where(User.reset_token == _token_hash(token.strip())))
     if not user or not user.reset_expires or user.reset_expires < datetime.now():
         return False

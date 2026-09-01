@@ -15,19 +15,45 @@ async function req(method, path, body) {
   const headers = { 'Content-Type': 'application/json' }
   const token = getToken()
   if (token) headers['Authorization'] = 'Bearer ' + token
-  const resp = await fetch(BASE + path, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined
-  })
+  let resp
+  try {
+    resp = await fetch(BASE + path, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined
+    })
+  } catch {
+    // 断网/服务未启动时 fetch 直接抛 TypeError('Failed to fetch'),转成中文提示
+    throw new Error('无法连接服务器,请检查网络或稍后重试')
+  }
   const text = await resp.text()
   let data = null
   try { data = text ? JSON.parse(text) : null } catch { data = text }
   if (!resp.ok) {
-    const msg = data && (data.detail || data.message) ? (data.detail || data.message) : '请求失败'
-    throw new Error(msg)
+    throw new Error(errMessage(data, resp.status))
   }
   return data
+}
+
+// FastAPI 的错误体有两种形态:HTTPException 是 {detail:"文字"},
+// 而 422 参数校验是 {detail:[{loc,msg,...}]}——后者直接当字符串用会显示成 [object Object]。
+function errMessage(data, status) {
+  if (typeof data === 'string' && data.trim()) return data
+  const detail = data && (data.detail ?? data.message)
+  if (typeof detail === 'string' && detail.trim()) return detail
+  if (Array.isArray(detail) && detail.length) {
+    return detail
+      .map(d => {
+        const field = Array.isArray(d.loc) ? d.loc[d.loc.length - 1] : ''
+        return field ? `${field}: ${d.msg}` : d.msg
+      })
+      .filter(Boolean)
+      .join('; ')
+  }
+  if (status === 401) return '登录已过期,请重新登录'
+  if (status === 403) return '没有权限执行该操作'
+  if (status >= 500) return '服务器开小差了,请稍后重试'
+  return `请求失败(${status})`
 }
 
 export const api = {
