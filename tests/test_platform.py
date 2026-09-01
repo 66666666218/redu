@@ -1,5 +1,6 @@
 """多租户平台:安全(Cookie加密/JWT)与 Cookie 存取单测(SQLite 会话)。"""
 import os
+from pathlib import Path
 
 os.environ.setdefault("JWT_SECRET", "test_secret_0123456789abcdef0123456789abcdef")  # >=32字节
 os.environ.setdefault("DATABASE_URL", "sqlite://")
@@ -94,6 +95,31 @@ def test_verify_bad_hash_returns_false_not_raises() -> None:
     """
     for bad in ["", "   ", "not-a-hash", "$2b$12$short", "$2b$12$" + "x" * 52, "md5:abc"]:
         assert verify_password("pass1234", bad) is False
+
+
+# ---- SPA 路由回退 ----
+@pytest.mark.skipif(
+    not (Path(__file__).resolve().parents[1] / "app" / "static" / "spa" / "index.html").exists(),
+    reason="前端未构建(app/static/spa 由 Docker 多阶段构建生成,不入库)",
+)
+def test_spa_history_fallback() -> None:
+    """前端用 createWebHistory,直接访问/刷新 /login、/reset 必须回退到 index.html。
+
+    少了这个兜底,用户刷新页面就 404,找回密码邮件里的 /reset?token=... 也打不开;
+    同时 API 路径必须继续返回 JSON 404,而不是一篇 HTML。
+    """
+    from fastapi.testclient import TestClient
+
+    from app.platform import create_app
+
+    with TestClient(create_app()) as client:
+        for path in ("/", "/login", "/schedule", "/admin", "/reset?token=abc"):
+            resp = client.get(path)
+            assert resp.status_code == 200, path
+            assert "<!doctype html" in resp.text.lower(), path
+        for path in ("/api/nope", "/api/admin/nope"):
+            resp = client.get(path)
+            assert resp.status_code == 404 and "html" not in resp.headers.get("content-type", ""), path
 
 
 def test_register_normalizes_email(session) -> None:

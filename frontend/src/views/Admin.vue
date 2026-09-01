@@ -37,15 +37,31 @@ async function load() {
     pie.value = await api.adminCategoryPie()
   } catch (e) { toastError('加载失败:' + e.message) }
 }
-function donut(items) {
+// 图表分类色板:已通过 dataviz 的 validate_palette.js 六项检查
+// (暗色亮度带 0.48~0.67、彩度 >=0.1、色盲相邻对可分辨、对比度 >=3:1)。
+// 固定顺序使用,**不循环**——超出色板的分类合并为"其他",否则第 7 类会与第 1 类撞色,图例就骗人了。
+const PIE_COLORS = ['#12a7a7', '#c90084', '#0bb032', '#8625fe', '#da720d', '#026fd7']
+const OTHER_COLOR = '#5b6b85'
+
+// 把原始分类整理成绘图切片:降序、超出部分归并"其他",并附上颜色与占比
+function slices(items) {
   const total = items.reduce((s, x) => s + x.value, 0)
-  if (!total) return ''
-  const colors = ['#4f8cff', '#12b76a', '#ff7a59', '#b36bff', '#ffc94f', '#ff6b6b']
+  if (!total) return []
+  const sorted = [...items].sort((a, b) => b.value - a.value)
+  const out = sorted.slice(0, PIE_COLORS.length).map((x, i) => ({ ...x, color: PIE_COLORS[i] }))
+  const rest = sorted.slice(PIE_COLORS.length)
+  if (rest.length) out.push({ name: '其他', value: rest.reduce((s, x) => s + x.value, 0), color: OTHER_COLOR })
+  return out.map(x => ({ ...x, pct: Math.round((x.value / total) * 100) }))
+}
+
+function donut(items) {
+  const parts = slices(items)
+  if (!parts.length) return ''
+  const total = parts.reduce((s, x) => s + x.value, 0)
   let acc = 0
-  const stops = items.map((x, i) => {
+  const stops = parts.map((x) => {
     const from = (acc / total) * 360; acc += x.value
-    const to = (acc / total) * 360
-    return `${colors[i % colors.length]} ${from}deg ${to || 360}deg`
+    return `${x.color} ${from}deg ${(acc / total) * 360 || 360}deg`
   })
   return `conic-gradient(${stops.join(',')})`
 }
@@ -111,11 +127,15 @@ onMounted(load)
         <h3>近 30 天运行/告警(柱状·相对)</h3>
         <div class="row" style="align-items:flex-end;gap:2px;height:90px">
           <div v-for="t in dash.trend30" :key="t.date" style="flex:1;text-align:center">
-            <div :title="`${t.date} 运行${t.runs}/告警${t.alerts}`" style="margin:0 auto;width:60%;background:var(--accent);opacity:.7" :style="{height:(t.runs/tmax()*70)+'px'}"></div>
-            <div :title="`${t.date} 告警${t.alerts}`" style="margin:0 auto;width:60%;background:var(--up);opacity:.7" :style="{height:(t.alerts/tmax()*70)+'px'}"></div>
+            <div :title="`${t.date} 运行${t.runs}/告警${t.alerts}`" class="bar-v" style="background:var(--c1)" :style="{height:(t.runs/tmax()*70)+'px'}"></div>
+            <div :title="`${t.date} 告警${t.alerts}`" class="bar-v" style="background:var(--c5)" :style="{height:(t.alerts/tmax()*70)+'px'}"></div>
           </div>
         </div>
-        <div class="empty">蓝=运行 绿=告警(近30天)</div>
+        <div class="legend" style="flex-direction:row;gap:14px">
+          <span><i style="background:var(--c1)"></i>运行</span>
+          <span><i style="background:var(--c5)"></i>告警</span>
+          <span style="color:var(--dim)">近 30 天</span>
+        </div>
       </div>
       <div class="card" style="margin-bottom:14px">
         <h3>闲鱼类目分布(数量/想要)</h3>
@@ -130,7 +150,7 @@ onMounted(load)
             <h3>各板块运行</h3>
             <div v-for="b in dash.breakdown?.runs_by_kind || []" :key="b.kind" class="empty">
               <div class="row" style="gap:6px"><span style="width:48px">{{ b.kind }}</span>
-                <div style="flex:1;background:var(--line);height:12px"><div :style="{width:(b.count/(dash.breakdown?.runs_by_kind?.[0]?.count||1)*100)+'%',background:'var(--accent)',height:'12px'}"></div></div>
+                <div class="bar-track"><div :style="{width:(b.count/(dash.breakdown?.runs_by_kind?.[0]?.count||1)*100)+'%',background:'var(--c1)',height:'12px'}"></div></div>
                 <span>{{ b.count }}</span>
               </div>
             </div>
@@ -139,7 +159,7 @@ onMounted(load)
             <h3>各板块告警</h3>
             <div v-for="b in dash.breakdown?.alerts_by_section || []" :key="b.section" class="empty">
               <div class="row" style="gap:6px"><span style="width:48px">{{ b.section }}</span>
-                <div style="flex:1;background:var(--line);height:12px"><div :style="{width:(b.count/(dash.breakdown?.alerts_by_section?.[0]?.count||1)*100)+'%',background:'var(--up)',height:'12px'}"></div></div>
+                <div class="bar-track"><div :style="{width:(b.count/(dash.breakdown?.alerts_by_section?.[0]?.count||1)*100)+'%',background:'var(--c5)',height:'12px'}"></div></div>
                 <span>{{ b.count }}</span>
               </div>
             </div>
@@ -152,21 +172,32 @@ onMounted(load)
             <h3>告警趋势(近30天)</h3>
             <div class="row" style="align-items:flex-end;gap:2px;height:90px">
               <div v-for="t in atrend" :key="t.date" style="flex:1;text-align:center" :title="`${t.date} 告警${t.total}`">
-                <div style="margin:0 auto;width:55%;background:var(--up);opacity:.7" :style="{height:(Math.min(t.total,10)/10*70)+'px'}"></div>
+                <div class="bar-v" style="background:var(--c5)" :style="{height:(Math.min(t.total,10)/10*70)+'px'}"></div>
               </div>
             </div>
             <div class="empty">每日告警总数(近30天)</div>
           </div>
           <div style="flex:1;min-width:220px">
             <h3>分类饼图</h3>
-            <div class="row" style="gap:16px;flex-wrap:wrap">
-              <div v-if="pie.alerts_section.length" :style="{width:'90px',height:'90px',borderRadius:'50%',background:donut(pie.alerts_section)}" title="告警来源"></div>
-              <div v-if="pie.watch_types.length" :style="{width:'90px',height:'90px',borderRadius:'50%',background:donut(pie.watch_types)}" title="抖音监测类型"></div>
+            <div class="row" style="gap:22px;flex-wrap:wrap;align-items:flex-start">
+              <div v-if="pie.alerts_section.length">
+                <div class="donut" :style="{background:donut(pie.alerts_section)}"></div>
+                <div class="legend">
+                  <span v-for="s in slices(pie.alerts_section)" :key="s.name">
+                    <i :style="{background:s.color}"></i>{{ s.name }} <b class="num">{{ s.value }}</b>({{ s.pct }}%)
+                  </span>
+                </div>
+              </div>
+              <div v-if="pie.watch_types.length">
+                <div class="donut" :style="{background:donut(pie.watch_types)}"></div>
+                <div class="legend">
+                  <span v-for="s in slices(pie.watch_types)" :key="s.name">
+                    <i :style="{background:s.color}"></i>{{ s.name }} <b class="num">{{ s.value }}</b>({{ s.pct }}%)
+                  </span>
+                </div>
+              </div>
             </div>
-            <div class="empty">
-              <span v-if="pie.alerts_section.length">告警来源:{{ pie.alerts_section.map(x=>x.name+':'+x.value).join(' ') }}</span>
-              <span v-if="pie.watch_types.length"> · 抖音类型:{{ pie.watch_types.map(x=>x.name+':'+x.value).join(' ') }}</span>
-            </div>
+            <div class="empty">左:告警来源 · 右:抖音监测类型</div>
           </div>
         </div>
       </div>

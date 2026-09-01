@@ -2,6 +2,10 @@
 
 ## 未发布
 
+- [2026-09-02 02:10] FEAT: **前端改版「赛博霓虹」主题**——深黑底 + 网格线 + 缓慢扫描光束,青(#00f0ff)/紫(#b026ff)霓虹辉光用于 logo/边框/按钮/焦点态,卡片 hover 上浮并走一道流光,数值改等宽字体;辉光只做装饰、不承载数据。图表分类色板经 `dataviz` 的 `validate_palette.js` 六项检查全部 PASS(暗色亮度带 0.48~0.67、彩度≥0.1、相邻对色盲 ΔE 9.7、对比度≥3:1);新增 `prefers-reduced-motion` 下关闭全部动效(Files: frontend/src/style.css, frontend/src/views/Admin.vue)
+- [2026-09-02 02:10] FIX: **SPA 刷新/直达任意路由 404**——后端只把 `/` 映射到 index.html,而前端用 `createWebHistory`,直接访问或刷新 `/login`、`/schedule`、`/admin` 会真的请求服务端该路径并 404;**找回密码邮件里的 `/reset?token=...` 同样打不开**。新增 history 回退路由(放行 `api/`、`assets/`、`healthz` 等,保证 API 仍返回 JSON 404),并加回归测试(Files: app/platform.py, tests/test_platform.py)
+- [2026-09-02 02:10] FIX: 图表配色三处违规——① 分类色 `colors[i % len]` **循环取色**导致第 7 类与第 1 类撞色、图例失真,改为固定顺序 + 超出部分归并"其他";② 柱状图用状态色 `--up` 当系列色(规范禁止),改用色板 `--c5`;③ 饼图图例只有文字没有色块,扇区与名称对不上,改为色块+名称+数值+占比,并给环形图开中心孔、柱条加 4px 圆角数据端(Files: frontend/src/views/Admin.vue, frontend/src/style.css)
+- [2026-09-02 02:10] CHORE: 新增 `scripts/shoot_ui.py`(Playwright 截图核对 UI,凭据走环境变量不入库);全局链接色统一为主霓虹,避免落到浏览器默认蓝紫(Files: scripts/shoot_ui.py, frontend/src/style.css)
 - [2026-09-02 00:35] CHORE: `.gitignore` 补 `.env.*`(保留 `!.env.example`)——原规则只忽略 `.env`,`.env.bak`/`.env.local` 等副本同样含真实 Cookie、SMTP 授权码与代理密钥却会被 `git add -A` 带进仓库(Files: .gitignore)
 - [2026-09-02 00:30] CHORE: docker-compose 补 `./data:/app/data` 卷挂载(与线上旧编排一致,避免换用新 compose 后丢失归档/Cookie 目录);头部注释写明"调度器已内嵌、旧的 redu-monitor 调度容器必须删除,否则重复采集",并补上部署后自查命令(Files: docker-compose.yml)
 - [2026-09-02 00:15] FIX: **默认 DATABASE_URL 主机名写错**——默认值指向 `@db:3306`,而 docker-compose 的服务名是 `mysql`;compose 里因显式注入 DATABASE_URL 一直没暴露,但线上 redu-api 容器未注入该变量时就连向不存在的主机 `db`,导致注册/登录全部 `OperationalError` 500(本次线上故障根因之一)。默认值改为与 compose 服务名一致,并在启动时对"仍在使用默认 DATABASE_URL"打出显式 WARNING(只打主机名,不泄露账号密码),避免服务照常起、healthcheck 照常绿、直到有人点注册才暴露(Files: config/settings.py, app/platform.py)

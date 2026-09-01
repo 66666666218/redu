@@ -511,11 +511,22 @@ def create_app() -> FastAPI:
     # 托管前端构建产物(SPA)
     dist = Path(__file__).parent / "static" / "spa"
     if dist.exists():
+        app.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")
+
         @app.get("/", response_class=HTMLResponse)
         def index() -> str:
             return (dist / "index.html").read_text(encoding="utf-8")
 
-        app.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")
+        # SPA history 路由回退:前端用 createWebHistory,直接访问或刷新 /login、
+        # /schedule、/admin 时浏览器会真的向服务端请求该路径。没有这个兜底就会 404
+        # ——找回密码邮件里的 /reset?token=... 链接同样会打不开。
+        # 必须注册在所有 API 路由之后(FastAPI 按注册顺序匹配),并放过 API 前缀,
+        # 让写错的接口路径仍返回 JSON 404 而不是一篇 HTML。
+        @app.get("/{full_path:path}", response_class=HTMLResponse)
+        def spa_fallback(full_path: str) -> str:
+            if full_path.startswith(("api/", "assets/")) or full_path in {"healthz", "docs", "openapi.json"}:
+                raise HTTPException(404, "Not Found")
+            return (dist / "index.html").read_text(encoding="utf-8")
 
     return app
 
