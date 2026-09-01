@@ -52,16 +52,50 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
-    """按当前 metadata 建表(幂等)。连不上库时仅告警,不阻断(服务器上 MySQL 就绪即成功)。"""
+    """按当前 metadata 建表(幂等)。
+
+    连不上库时不阻断启动(等 MySQL 就绪后重启即可),但**必须把完整堆栈记成 ERROR**:
+    早前只打一行 WARNING,加上生产日志未初始化,结果建表失败被静默吞掉——
+    应用照常启动、`/healthz` 照常 200,一调注册就 `OperationalError`,极难定位。
+    """
     from app.db import models  # noqa: F401  确保模型已注册
 
     try:
         Base.metadata.create_all(bind=get_engine())
         _migrate()
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         import logging
 
-        logging.getLogger(__name__).warning("数据库建表失败(请确认 DATABASE_URL 与 MySQL 已就绪):%s", exc)
+        logging.getLogger(__name__).exception(
+            "数据库建表/迁移失败,服务将无法读写数据(请检查 DATABASE_URL 与 MySQL 是否就绪);"
+            "可访问 /healthz 查看数据库状态"
+        )
+
+
+def db_status() -> dict:
+    """数据库自查:连通性 + 关键表/列是否齐备。
+
+    供 `/healthz` 无鉴权暴露——数据库坏掉时登录接口本身也用不了,
+    诊断信息若放在需要鉴权的接口后面就永远看不到。
+    只返回结构信息与异常**类型**,不返回异常消息(可能含连接串/口令)。
+    """
+    from sqlalchemy import inspect, text
+
+    try:
+        engine = get_engine()
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        inspector = inspect(engine)
+        tables = set(inspector.get_table_names())
+        required = ("users", "user_cookies", "user_schedules")
+        cols = {c["name"] for c in inspector.get_columns("users")} if "users" in tables else set()
+        return {
+            "connected": True,
+            "missing_tables": [t for t in required if t not in tables],
+            "users_missing_columns": [c for c in ("email", "role", "enabled") if cols and c not in cols],
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"connected": False, "error_type": type(exc).__name__}
 
 
 def _migrate() -> None:

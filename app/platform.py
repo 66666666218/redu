@@ -169,9 +169,21 @@ def create_app() -> FastAPI:
 
     @app.get("/healthz")
     def healthz() -> dict:
+        """健康检查(含数据库自查)。
+
+        故意**始终返回 200**:容器 healthcheck 用的就是本接口,不能因为库暂时
+        不可用就把容器判成 unhealthy;数据库状况看返回体里的 `db` 字段。
+        """
         from datetime import datetime
 
-        return {"status": "ok", "version": APP_VERSION, "time": datetime.now().isoformat()}
+        from app.db.database import db_status
+
+        return {
+            "status": "ok",
+            "version": APP_VERSION,
+            "time": datetime.now().isoformat(),
+            "db": db_status(),
+        }
 
     @app.post("/api/auth/register", response_model=TokenOut)
     def register(body: RegisterIn, db: Session = Depends(get_db)) -> TokenOut:

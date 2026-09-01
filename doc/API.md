@@ -42,10 +42,18 @@
 ```json
 {
   "status": "ok",
-  "version": "1.0.0",
-  "time": "2026-08-29T10:00:00+08:00"
+  "version": "2.0.0",
+  "time": "2026-08-29T10:00:00+08:00",
+  "db": { "connected": true, "missing_tables": [], "users_missing_columns": [] }
 }
 ```
+
+> `db` 为数据库自查,用于部署后快速定位故障(建表失败/连不上库时接口会报 `OperationalError`):
+> - `connected=false` + `error_type` → 连不上数据库(检查 `DATABASE_URL`、MySQL 是否就绪、账号密码)
+> - `missing_tables` / `users_missing_columns` 非空 → 建表或迁移没跑成功
+>
+> **本接口始终返回 200**(容器 healthcheck 依赖它),数据库状况只体现在 `db` 字段;
+> 出于安全只返回结构信息与异常类型,不含异常消息。
 
 ---
 
