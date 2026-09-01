@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- [2026-09-02 00:35] CHORE: `.gitignore` 补 `.env.*`(保留 `!.env.example`)——原规则只忽略 `.env`,`.env.bak`/`.env.local` 等副本同样含真实 Cookie、SMTP 授权码与代理密钥却会被 `git add -A` 带进仓库(Files: .gitignore)
 - [2026-09-02 00:30] CHORE: docker-compose 补 `./data:/app/data` 卷挂载(与线上旧编排一致,避免换用新 compose 后丢失归档/Cookie 目录);头部注释写明"调度器已内嵌、旧的 redu-monitor 调度容器必须删除,否则重复采集",并补上部署后自查命令(Files: docker-compose.yml)
 - [2026-09-02 00:15] FIX: **默认 DATABASE_URL 主机名写错**——默认值指向 `@db:3306`,而 docker-compose 的服务名是 `mysql`;compose 里因显式注入 DATABASE_URL 一直没暴露,但线上 redu-api 容器未注入该变量时就连向不存在的主机 `db`,导致注册/登录全部 `OperationalError` 500(本次线上故障根因之一)。默认值改为与 compose 服务名一致,并在启动时对"仍在使用默认 DATABASE_URL"打出显式 WARNING(只打主机名,不泄露账号密码),避免服务照常起、healthcheck 照常绿、直到有人点注册才暴露(Files: config/settings.py, app/platform.py)
 - [2026-09-01 23:55] FEAT: **`/healthz` 增加数据库自查**——返回 `db.{connected, missing_tables, users_missing_columns}`,部署后可直接判断是"连不上库"还是"建表/迁移没跑成功";故意始终返回 200(容器 healthcheck 依赖本接口),且只返回结构信息与异常**类型**,不含异常消息(可能带连接串/口令)。无鉴权是刻意为之:数据库坏掉时登录本身就用不了(Files: app/db/database.py, app/platform.py, doc/API.md)

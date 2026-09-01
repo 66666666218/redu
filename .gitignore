@@ -24,7 +24,11 @@ node_modules/
 *_captured.json
 
 # 环境与密钥
+# 连同 .env.bak / .env.local / .env.prod 等一并忽略——这些副本同样含真实
+# Cookie、SMTP 授权码与代理密钥,只写 `.env` 会让备份文件漏网。
 .env
+.env.*
+!.env.example
 
 # 编辑器/系统
 .idea/
