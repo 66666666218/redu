@@ -218,13 +218,11 @@ redian/
 | 指数源优先级链 | `INDEX_SOURCES` | `weibo` | 逗号分隔、顺序即优先级;可用 `weibo`/`douyin`/`baidu` |
 | 指数源模拟 | `MOCK_INDEX` | `true` | 本地/测试用合成指数,免真实抓取 |
 | 告警模式 | `ALERT_MODE` | `both` | `both`=所有信号源同涨才告警;`any`=任一源涨即告警 |
-| 调度 Cron | `JOB_CRON` | `0 * * * *` | 微博采集(每小时,1 次请求,防风控) |
+| 采集频率 | — | — | 无全局 Cron:由每个用户在「采集频率」页自行设置(见 §6.1) |
+| 内嵌调度器 | `SCHEDULER_ENABLED` | `true` | 随 API 进程启动调度器;多 worker 部署须设 false 并单起调度容器 |
 | 请求随机间隔 | `REQUEST_DELAY_SECONDS` | `2.5` | 每次外部请求间的随机基础间隔(秒) |
-| 闲鱼热榜 Cron | `XIANYU_CRON` | `0 */3 * * *` | 闲鱼热榜采集(每 3 小时,约 13 次 mtop) |
-| 每日总结 Cron | `DAILY_SUMMARY_CRON` | `0 20 * * *` | 每日"今日热榜"总结(默认 20:00) |
 | 抖音热点 Cookie 文件 | `DOUHOT_COOKIE_FILE` | `data/douhot_cookie.txt` | 抖音热点宝 Cookie(gitignored) |
 | 抖音热词条数 | `DOUHOT_TOP_N` | `50` | 内容词趋势条数上限 |
-| 抖音热词 Cron | `DOUHOT_CRON` | `0 */3 * * *` | 内容词趋势采集(每 3 小时,浏览器较重) |
 | 抖音告警条数上限 | `DOUHOT_ALERT_MAX` | `5` | 单次判涨告警上限(防刷屏) |
 | 抖音告警冷却 | `DOUHOT_ALERT_COOLDOWN_HOURS` | `24` | 同一内容词告警冷却(小时) |
 | SMTP 主机 | `SMTP_HOST` | 空 | 邮件服务器 |

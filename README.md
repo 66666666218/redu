@@ -34,7 +34,8 @@ python -m app.main --api    # API/看板 模式
 | `PUBLIC_BASE_URL` | 站点对外地址(重置链接用) |
 | `SMTP_HOST/PORT/USER/PASS/FROM` | 全局发信(用户也可自配邮箱) |
 | `XIANYU_TOP_N/DETAIL_LIMIT` | 前 N 榜 / 慢速TopN详情 |
-| `JOB_CRON/XIANYU_CRON/DOUHOT_CRON/DAILY_SUMMARY_CRON` | 各板块采集/总结周期 |
+| `SCHEDULER_ENABLED` | 随 API 进程启动后台调度器(默认 true);多 worker 部署须设 false 并单起调度容器 |
+| 采集频率 | 无全局 Cron:每个用户在**平台内**「采集频率」页自行设置(10~1440 分钟,三个板块分别设) |
 | 各平台 Cookie | 用户在**平台内**自行配置,不写在 .env |
 
 ## Docker 一键部署
