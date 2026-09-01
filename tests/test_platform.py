@@ -14,7 +14,7 @@ from app.db import models  # noqa: F401
 from app.db.models import DouhotWatchSnap, XianyuDaily
 from app.security import create_access_token, decode_token, decrypt_cookie, encrypt_cookie
 from app.services import cookie_store, tenant
-from app.auth import authenticate, create_password_reset_token, register_user, reset_password
+from app.auth import authenticate, create_password_reset_token, hash_password, register_user, reset_password, verify_password
 
 
 def test_cookie_encrypt_roundtrip() -> None:
@@ -67,6 +67,33 @@ def test_register_rejects_bad_input(session) -> None:
         with pytest.raises(HTTPException) as exc:
             register_user(session, email, password)
         assert exc.value.status_code == 400 and isinstance(exc.value.detail, str)
+
+
+# ---- 密码哈希(bcrypt) ----
+def test_password_hash_roundtrip() -> None:
+    h = hash_password("pass1234")
+    assert h.startswith("$2b$") and verify_password("pass1234", h)
+    assert not verify_password("wrong", h)
+
+
+def test_verify_legacy_passlib_hash() -> None:
+    """老用户的密码是 passlib 时代写入的,换成官方 bcrypt 后必须仍能登录。
+
+    下面这条哈希由 passlib 1.7.4 + bcrypt 4.0.1 对 "pass1234" 生成。
+    """
+    legacy = "$2b$12$gSJOBrI00LYv03UPJecJGuEFgegVulkG7tgeRECeLPSfzi7BtWqJu"
+    assert verify_password("pass1234", legacy)
+    assert not verify_password("wrong", legacy)
+
+
+def test_verify_bad_hash_returns_false_not_raises() -> None:
+    """脏数据只应判为不匹配,不能抛异常把登录打成 500。
+
+    注意 `$2b$12$short`:bcrypt 的 Rust 后端对它抛 PanicException(继承
+    BaseException),`except Exception` 拦不住,所以必须靠格式预检挡在前面。
+    """
+    for bad in ["", "   ", "not-a-hash", "$2b$12$short", "$2b$12$" + "x" * 52, "md5:abc"]:
+        assert verify_password("pass1234", bad) is False
 
 
 def test_register_normalizes_email(session) -> None:

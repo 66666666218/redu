@@ -2,6 +2,9 @@
 
 ## 未发布
 
+- [2026-09-01 23:05] FIX: **注册/登录 500(Internal Server Error)根因**——`requirements.txt` 用 `passlib[bcrypt]>=1.7` 且不锁 bcrypt 版本,新构建的容器装到 bcrypt 5.0.0;passlib 1.7.4(2020 年停更)读 `bcrypt.__about__`(4.1+ 已移除)探测失败后走错分支,连 8 字节密码都报 `password cannot be longer than 72 bytes`,使注册/登录/改密码全部 500(本地旧环境 bcrypt 4.0.1 有该属性,故测不出来)。改为直接用官方 `bcrypt`(锁 `>=4.0,<6`)并移除 passlib;两者均产出标准 `$2b$` 哈希,**老用户密码无缝兼容、无需重置**(已加回归测试锁定)。干净环境 bcrypt 5.0.0 下验证注册/登录/老哈希校验全部通过(Files: app/auth.py, requirements.txt, tests/test_platform.py)
+- [2026-09-01 23:05] FIX: `verify_password` 遇畸形哈希会崩——bcrypt 的 Rust 后端对 `$2b$12$short` 这类输入抛 `PanicException`(继承 `BaseException`,`except Exception` 拦不住),一条脏数据即可把登录接口打成 500;改为先用正则预检 bcrypt 哈希格式,不合法直接判为不匹配(Files: app/auth.py, tests/test_platform.py)
+- [2026-09-01 23:05] FEAT: 新增全局未处理异常兜底——记录完整堆栈并返回中文 `detail`,不再向用户暴露裸的 `Internal Server Error`,前端也能显示可读信息(Files: app/platform.py)
 - [2026-09-01 22:10] FIX: **注册几乎不校验输入**——实测空邮箱、空密码、`abc` 这种非邮箱串都能注册成功(200);现在后端统一校验邮箱格式(正则,不引入 email-validator 依赖以免容器内缺包)、密码 ≥8 位、用户名 ≤64 字符,并规范化邮箱(去空格转小写,避免大小写重复注册);密码重置同样走强度校验,防止绕过(Files: app/auth.py, tests/test_platform.py)
 - [2026-09-01 22:10] FIX: **前端把 422 校验错误显示成"请求失败"**——FastAPI 参数校验的 `detail` 是数组,原代码直接当字符串用会渲染成 `[object Object]`;新增 `errMessage()` 兼容 `{detail:"文字"}` 与 `{detail:[{loc,msg}]}` 两种形态,并对 401/403/5xx 给出中文兜底;`fetch` 网络异常(断网/服务未起)不再抛英文 `Failed to fetch`;注册页补前端即时校验与"注册中…"状态(Files: frontend/src/api.js, frontend/src/views/Register.vue)
 - [2026-09-01 22:10] CHORE: 清理死配置 `JOB_CRON`/`XIANYU_CRON`/`DOUHOT_CRON`/`DAILY_SUMMARY_CRON`——采集频率改为每用户自设后,这四项在 Python 代码中已零引用(`extra="ignore"` 保证生产 .env 残留变量不影响启动);同时更正 `doc/API.md` 中"每日总结由调度器定时邮件推送"的不实描述(该作业从未存在,接口仅为读取)(Files: config/settings.py, .env.example, README.md, doc/API.md, doc/dev.md)

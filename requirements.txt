@@ -10,7 +10,9 @@ python-dotenv>=1.0
 fastapi>=0.110
 uvicorn[standard]>=0.29
 # ---- 鉴权 ----
-passlib[bcrypt]>=1.7
+# 直接用官方 bcrypt,不用 passlib:passlib 1.7.4(2020 年停更)会读 bcrypt.__about__,
+# 该属性在 bcrypt 4.1+ 已移除,导致 bcrypt 5.x 下注册/登录全部 500。
+bcrypt>=4.0,<6
 pyjwt>=2.8
 python-multipart>=0.0.9
 

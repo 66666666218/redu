@@ -14,7 +14,7 @@ import time
 
 import pydantic
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
@@ -249,6 +249,21 @@ def create_app() -> FastAPI:
             raise HTTPException(400, str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(500, f"采集失败:{exc}") from exc
+
+    @app.exception_handler(Exception)
+    async def _unhandled_error(request: Request, exc: Exception):  # type: ignore[no-untyped-def]
+        """兜底:未预期异常记录完整堆栈,并返回中文提示。
+
+        否则用户只看到裸的 `Internal Server Error`,前端也拿不到可读信息,
+        排查全靠猜(例如 bcrypt 版本不兼容导致的注册 500)。
+        """
+        import logging
+
+        logging.getLogger(__name__).exception("未处理异常 %s %s", request.method, request.url.path)
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "服务器内部错误,请稍后重试;若持续出现请联系管理员查看服务日志"},
+        )
 
     @app.get("/api/schedules")
     def schedules_list(user: User = Depends(get_current_user), db: Session = Depends(get_db)):

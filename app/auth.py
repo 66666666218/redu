@@ -10,16 +10,14 @@ import re
 import secrets
 from datetime import datetime, timedelta
 
+import bcrypt
 from fastapi import Depends, Header, HTTPException, status
-from passlib.context import CryptContext
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.db.models import User
 from app.security import create_access_token, decode_token
-
-pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 RESET_TTL_MINUTES = 30
 MIN_PASSWORD_LEN = 8
@@ -28,6 +26,8 @@ MAX_USERNAME_LEN = 64   # 与 User.username 列宽一致,超长会被数据库�
 # 邮箱格式:不引入 email-validator 依赖(其未列在 requirements.txt,容器内不保证存在),
 # 用正则做够用的校验——挡掉空值与明显非邮箱,同时能返回中文提示。
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s.]+(\.[^@\s.]+)+$")
+# 标准 bcrypt 哈希:$2a/2b/2x/2y$ + 两位 cost + $ + 53 位 salt&hash,共 60 字符
+_BCRYPT_HASH_RE = re.compile(r"^\$2[abxy]\$\d{2}\$[./A-Za-z0-9]{53}$")
 
 
 def validate_email(email: str) -> str:
@@ -53,11 +53,30 @@ def validate_password(password: str) -> str:
 
 
 def hash_password(plain: str) -> str:
-    return pwd.hash(plain)
+    """bcrypt 加盐哈希。
+
+    直接用官方 `bcrypt` 而非 passlib:passlib 1.7.4 停更于 2020 年,启动时会读
+    `bcrypt.__about__`(bcrypt 4.1+ 已移除),在 bcrypt 5.x 下探测失败后走错分支,
+    连 8 字节的密码都会报 "password cannot be longer than 72 bytes",
+    使注册/登录/改密码全部 500。两者产出的都是标准 `$2b$` 哈希,老密码无缝兼容。
+    """
+    return bcrypt.hashpw(plain.encode("utf-8"), bcrypt.gensalt()).decode("ascii")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd.verify(plain, hashed)
+    """校验密码;哈希损坏/为空一律判为不匹配,绝不抛异常。
+
+    必须先做格式预检:bcrypt 的 Rust 后端遇到畸形哈希(如 `$2b$12$short`)
+    会抛 `PanicException`——它继承自 `BaseException`,`except Exception`
+    根本拦不住,一条脏数据就能把登录接口打成 500。
+    """
+    value = (hashed or "").strip()
+    if not _BCRYPT_HASH_RE.match(value):
+        return False
+    try:
+        return bcrypt.checkpw(plain.encode("utf-8"), value.encode("ascii"))
+    except (ValueError, TypeError):  # 超长密码等
+        return False
 
 
 def _token_hash(token: str) -> str:
