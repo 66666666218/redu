@@ -129,6 +129,7 @@ class AlertRecord(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    section: Mapped[str] = mapped_column(String(32), default="")   # weibo/xianyu/douhot
     keyword: Mapped[str] = mapped_column(String(500))
     reason: Mapped[str] = mapped_column(Text(), default="")
     triggered_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
@@ -142,6 +143,7 @@ class RunRecord(Base):
     run_id: Mapped[str] = mapped_column(String(32))
     kind: Mapped[str] = mapped_column(String(32))      # weibo/xianyu/douhot
     status: Mapped[str] = mapped_column(String(16), default="running")
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
     started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     detail: Mapped[str] = mapped_column(Text(), default="")

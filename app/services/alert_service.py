@@ -146,7 +146,7 @@ def evaluate(
         reason = f"{key} {m}={float(val):.2f} 跨阈值 {rule.threshold}" if val is not None else f"新增 {key}"
         per_rule.setdefault(rule.id, []).append(reason)
         session.add(
-            AlertRecord(user_id=user_id, keyword=key, reason=reason, triggered_at=now)
+            AlertRecord(user_id=user_id, section=section, keyword=key, reason=reason, triggered_at=now)
         )
 
     for rule, reasons in per_rule.items():

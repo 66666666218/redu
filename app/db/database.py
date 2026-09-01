@@ -65,27 +65,26 @@ def init_db() -> None:
 
 
 def _migrate() -> None:
-    """轻量迁移:为用户表补充 email/reset_token/reset_expires 列(旧库)。"""
+    """轻量迁移:为已存在的表补充缺失列(兼容旧库)。"""
     from sqlalchemy import inspect, text
 
     inspector = inspect(get_engine())
-    if "users" not in inspector.get_table_names():
-        return
-    cols = {c["name"] for c in inspector.get_columns("users")}
-    additions = [
-        "email VARCHAR(128)",
-        "role VARCHAR(16) DEFAULT 'user'",
-        "enabled INTEGER DEFAULT 1",
-        "smtp_host VARCHAR(128)",
-        "smtp_port INTEGER",
-        "smtp_user VARCHAR(128)",
-        "smtp_pass VARCHAR(255)",
-        "smtp_from VARCHAR(128)",
-        "reset_token VARCHAR(128)",
-        "reset_expires DATETIME",
-    ]
+    existing = set(inspector.get_table_names())
+    additions = {
+        "users": [
+            "email VARCHAR(128)", "role VARCHAR(16) DEFAULT 'user'", "enabled INTEGER DEFAULT 1",
+            "smtp_host VARCHAR(128)", "smtp_port INTEGER", "smtp_user VARCHAR(128)",
+            "smtp_pass VARCHAR(255)", "smtp_from VARCHAR(128)", "reset_token VARCHAR(128)", "reset_expires DATETIME",
+        ],
+        "runs": ["retry_count INTEGER DEFAULT 0"],
+        "alerts": ["section VARCHAR(32) DEFAULT ''"],
+    }
     with get_engine().begin() as conn:
-        for coldef in additions:
-            col = coldef.split()[0]
-            if col not in cols:
-                conn.execute(text(f"ALTER TABLE users ADD COLUMN {coldef}"))
+        for table, coldefs in additions.items():
+            if table not in existing:
+                continue
+            cols = {c["name"] for c in inspector.get_columns(table)}
+            for coldef in coldefs:
+                col = coldef.split()[0]
+                if col not in cols:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {coldef}"))

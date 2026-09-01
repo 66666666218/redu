@@ -20,6 +20,7 @@ from apscheduler.triggers.cron import CronTrigger
 from config.settings import get_settings
 from app.services.tenant import run_section_for_all_users
 from app.services.alert_service import run_fixed_time_digests
+from app.admin import retry_failed_runs
 from app.utils import get_logger, setup_logging
 
 logger = get_logger(__name__)
@@ -91,6 +92,13 @@ def run_scheduler() -> None:
         _safe(run_fixed_time_digests),
         CronTrigger(minute="*"),
         id="alert_fixed_time",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        _safe(retry_failed_runs),
+        CronTrigger(minute="*/30"),
+        id="auto_retry_failed_runs",
         max_instances=1,
         coalesce=True,
     )

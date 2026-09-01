@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- [2026-09-01 10:00] FEAT: **采集失败自动重试运维面板**——`RunRecord.retry_count`+调度器每 30 分钟自动重试近24h失败(≤3次)+管理后台「运维」Tab(失败运行列表+手动重试);**数据看板更多图表**(各板块运行/告警分布条形、`AlertRecord.section` 记录来源);**部署文档更新**(README 重写部署/管理后台/GitHub Actions 说明,.env.example 补 ADMIN_EMAIL);测试 42 项(Files: app/db/{models,database}.py, app/services/alert_service.py, app/admin.py, app/platform.py, app/main.py, frontend/src/{api.js,views/Admin.vue}, .env.example, README.md)
 - [2026-09-01 10:00] FEAT: **按钮/菜单级权限(RBAC)**——角色(admin/operator)→权限点集合(users.view/toggle/delete/import, data.view/export, config.view/set...),后端接口按权限点校验(403),前端按权限点**显隐按钮**;`/api/admin/me` 返回权限点;新增**全局 Toast** 提示组件;测试 42 项(Files: app/admin.py, app/platform.py, frontend/src/{api.js,toast.js,App.vue,views/Admin.vue,style.css}, tests/test_platform.py)
 - [2026-09-01 10:00] FEAT: 管理后台再补——**采集数据明细浏览**(微博/闲鱼/抖音 原始数据按用户查看)、**闲鱼类目分布**(数量+想要合计)(Files: app/admin.py, app/platform.py, frontend/src/{api.js,views/Admin.vue})
 - [2026-09-01 10:00] FEAT: 管理后台补全模块——**用户详情页**(基本信息+Cookie掩码+预警规则+最近告警)、**多维报表**(近30天运行/告警柱状图 + 待办提醒:未配Cookie用户数/近2天失败运行数)、**数据导入**(批量创建用户 email,password,role)含前端(Files: app/admin.py, app/platform.py, frontend/src/api.js + views/Admin.vue)

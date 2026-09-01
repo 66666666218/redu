@@ -82,6 +82,7 @@ def dashboard(db: Session) -> dict:
         "today_runs": today_runs,
         "pending_users": pending_users,
         "failed_runs": failed_runs,
+        "breakdown": _kind_breakdown(db),
         "trend": [
             {"date": d, "runs": int(runs_by_day.get(d, 0)), "alerts": int(alerts_by_day.get(d, 0))}
             for d in days
@@ -285,3 +286,76 @@ def perms_list(role: str) -> list[str]:
     if "*" in p:
         return sorted(PERMS.get("operator", set()) | {"users.delete", "users.import", "config.set", "dashboard.view"})
     return sorted(p)
+
+
+def _kind_breakdown(db: Session) -> dict:
+    runs_by_kind = dict(db.execute(select(RunRecord.kind, func.count(RunRecord.id)).group_by(RunRecord.kind)).all())
+    alerts_by_section = dict(db.execute(select(AlertRecord.section, func.count(AlertRecord.id)).group_by(AlertRecord.section)).all())
+    return {
+        "runs_by_kind": [{"kind": k or "?", "count": v} for k, v in runs_by_kind.items()],
+        "alerts_by_section": [{"section": k or "?", "count": v} for k, v in alerts_by_section.items()],
+    }
+
+
+def failed_runs(db: Session, limit: int = 50) -> list[dict]:
+    rows = db.scalars(select(RunRecord).where(RunRecord.status == "failed").order_by(RunRecord.id.desc()).limit(limit)).all()
+    return [
+        {"run_id": r.run_id, "kind": r.kind, "user_id": r.user_id,
+         "detail": (r.detail or "")[:200], "time": r.started_at.isoformat(), "retry": r.retry_count}
+        for r in rows
+    ]
+
+
+def retry_run(db: Session, run_id: str, settings=None) -> dict:
+    from config.settings import get_settings
+    from app.services import tenant
+
+    settings = settings or get_settings()
+    run = db.scalar(select(RunRecord).where(RunRecord.run_id == run_id))
+    if not run or run.status != "failed":
+        return {"ok": False, "msg": "运行不存在或非失败"}
+    runner = {"weibo": tenant.run_weibo, "xianyu": tenant.run_xianyu, "douhot": tenant.run_douhot}.get(run.kind)
+    if not runner:
+        return {"ok": False, "msg": f"未知板块 {run.kind}"}
+    try:
+        runner(db, run.user_id, settings)
+        return {"ok": True}
+    except Exception as exc:  # noqa: BLE001
+        run.retry_count = (run.retry_count or 0) + 1
+        db.commit()
+        return {"ok": False, "msg": str(exc)[:200]}
+
+
+def retry_failed_runs(max_retry: int = 3) -> dict:
+    """调度器自动重试:重试近 24h 失败且重试次数 < max_retry 的运行。"""
+    from datetime import datetime, timedelta
+
+    from config.settings import get_settings
+    from app.db import get_session_local
+    from app.services import tenant
+
+    settings = get_settings()
+    db = get_session_local()()
+    runners = {"weibo": tenant.run_weibo, "xianyu": tenant.run_xianyu, "douhot": tenant.run_douhot}
+    n = 0
+    try:
+        recent = db.scalars(
+            select(RunRecord).where(
+                RunRecord.status == "failed",
+                RunRecord.retry_count < max_retry,
+                RunRecord.started_at >= datetime.now() - timedelta(hours=24),
+            ).order_by(RunRecord.id.desc()).limit(5)
+        ).all()
+        for run in recent:
+            runner = runners.get(run.kind)
+            if not runner:
+                continue
+            try:
+                runner(db, run.user_id, settings)
+                n += 1
+            except Exception:  # noqa: BLE001
+                run.retry_count = (run.retry_count or 0) + 1
+                db.commit()
+        return {"retried": n}
+    finally:
+        db.close()

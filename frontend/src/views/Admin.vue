@@ -17,6 +17,7 @@ const dataRef = ref([])
 const dataSection = ref('weibo')
 const cats = ref([])
 const perms = ref([])
+const failed = ref([])
 const can = (p) => perms.value.includes(p)
 
 async function load() {
@@ -29,6 +30,7 @@ async function load() {
     adminlogs.value = await api.adminLogs()
     config.value = await api.adminConfig()
     cats.value = await api.adminCategories()
+    failed.value = await api.adminFailedRuns()
   } catch (e) { toastError('加载失败:' + e.message) }
 }
 async function toggle(u) {
@@ -43,6 +45,11 @@ async function setCfg(k) {
 }
 async function searchUsers() { users.value = await api.adminUsers(q.value) }
 async function loadData() { dataRef.value = await api.adminData(dataSection.value) }
+async function retryRun(runId) {
+  const r = await api.adminRunRetry(runId)
+  if (r.ok) toastOk('重试成功'); else toastError('重试失败:' + (r.msg || ''))
+  await load()
+}
 async function openDetail(u) { detail.value = await api.adminUserDetail(u.id) }
 async function doImport() {
   if (!importText.value.trim()) return
@@ -72,6 +79,7 @@ onMounted(load)
       <button :class="tab==='dashboard'?'':'ghost'" @click="tab='dashboard'">工作台</button>
       <button :class="tab==='users'?'':'ghost'" @click="tab='users'">用户管理</button>
       <button :class="tab==='data'?'':'ghost'" @click="tab='data';loadData()">数据</button>
+      <button :class="tab==='ops'?'':'ghost'" @click="tab='ops'">运维</button>
       <button :class="tab==='logs'?'':'ghost'" @click="tab='logs'">日志审计</button>
       <button :class="tab==='config'?'':'ghost'" @click="tab='config'">系统设置</button>
     </div>
@@ -99,6 +107,28 @@ onMounted(load)
           <div v-for="c in cats" :key="c.name" class="badge" style="font-size:13px">{{ c.name }} ×{{ c.count }} / 想要{{ c.want }}</div>
         </div>
         <div v-else class="empty">暂无类目数据(闲鱼深度采集后)</div>
+      </div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="row" style="gap:24px;flex-wrap:wrap">
+          <div style="flex:1;min-width:220px">
+            <h3>各板块运行</h3>
+            <div v-for="b in dash.breakdown?.runs_by_kind || []" :key="b.kind" class="empty">
+              <div class="row" style="gap:6px"><span style="width:48px">{{ b.kind }}</span>
+                <div style="flex:1;background:var(--line);height:12px"><div :style="{width:(b.count/(dash.breakdown?.runs_by_kind?.[0]?.count||1)*100)+'%',background:'var(--accent)',height:'12px'}"></div></div>
+                <span>{{ b.count }}</span>
+              </div>
+            </div>
+          </div>
+          <div style="flex:1;min-width:220px">
+            <h3>各板块告警</h3>
+            <div v-for="b in dash.breakdown?.alerts_by_section || []" :key="b.section" class="empty">
+              <div class="row" style="gap:6px"><span style="width:48px">{{ b.section }}</span>
+                <div style="flex:1;background:var(--line);height:12px"><div :style="{width:(b.count/(dash.breakdown?.alerts_by_section?.[0]?.count||1)*100)+'%',background:'var(--up)',height:'12px'}"></div></div>
+                <span>{{ b.count }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
       <div class="card">
         <h3>近 7 天明细</h3>
@@ -170,6 +200,21 @@ onMounted(load)
           </tr>
         </table>
         <div v-if="!dataRef.length" class="empty">暂无数据</div>
+      </div>
+    </template>
+
+    <template v-if="tab==='ops'">
+      <div class="card">
+        <h3>采集失败运行(近24h 自动重试≤3次,可手动)</h3>
+        <table><tr><th>运行</th><th>板块</th><th>用户</th><th>错误</th><th>重试</th><th></th></tr>
+          <tr v-for="r in failed" :key="r.run_id">
+            <td>{{ r.run_id }}</td><td>{{ r.kind }}</td><td>#{{ r.user_id }}</td>
+            <td class="empty">{{ r.detail.slice(0,40) }}</td><td>{{ r.retry }}</td>
+            <td><button class="ghost" v-if="can('users.toggle')" @click="retryRun(r.run_id)">重试</button></td>
+          </tr>
+        </table>
+        <div v-if="!failed.length" class="empty">暂无失败运行</div>
+        <p class="empty">系统每 30 分钟自动重试近24h失败且重试<3次的采集</p>
       </div>
     </template>
 

@@ -1,59 +1,72 @@
-# 热点追踪与自动化监控系统
+# 热点监控平台(redian)
 
-自动采集微博热搜,跨生态(微博热度序列/抖音/百度)交叉验证热度,识别"上涨趋势"并通过邮件预警。
-7×24 无人值守,具备代理/重试/降级与归档能力。
+多租户热点监控 + 管理后台。自动采集微博热点、闲鱼虚拟商品、抖音热点宝内容/搜索/视频/话题/订阅榜,
+跨轮判涨、用户自定义预警(阈值/新增/定时+关键词过滤+冷却+邮件),后台可管理用户/角色/权限/日志/报表。
 
-> 指数源默认用 `weibo`(多轮采集累积的微博热度序列,无需百度/抖音即可跑通真实判涨);
-> 也可切换到 `douyin`/`baidu` 生态指数,本文档见 [doc/dev.md](doc/dev.md)。
+> 开发文档:`doc/dev.md` · 接口规范:`doc/API.md` · 变更日志:`CHANGELOG`
 
-> 开发文档见 [doc/dev.md](doc/dev.md),接口规范见 [doc/API.md](doc/API.md)。
+## 技术栈
+- 后端:FastAPI · SQLAlchemy · MySQL · JWT · Playwright · APScheduler · SMTP
+- 前端:Vue3 + Vite(SPA,后端托管)
+- 部署:Docker Compose(mysql + api)· GitHub Actions → 阿里云 ACR 自动构建
 
-## 架构
+## 功能
+- **多租户**:注册/登录(限速防爆破)、每用户自管各平台 Cookie(加密存储)、数据按 `user_id` 隔离、每用户告警邮箱(SMTP)
+- **监控**:微博热点(判涨)、闲鱼前100 + Top20详情分析、抖音热点宝 5 类榜单关键词监控
+- **预警**:每模块可配 `threshold`(指标超阈值)/`new`(新增)/`fixed_time`(定时总结)+ 关键词过滤 + 冷却 + 邮件/站内
+- **管理后台**:工作台(指标+30天图+类目分布+待办)、用户管理(搜索/详情/启停/删除/导入/导出)、采集数据明细、登录/操作日志、系统设置、**按钮级 RBAC 权限**
 
-```
-[定时触发] → [微博热搜采集] → [清洗过滤] → [指数获取(微博热度/抖音/百度)] → [趋势分析] → [邮件告警] → [归档]
-```
-
-## 快速开始
-
+## 快速开始(开发)
 ```bash
-# 1. 依赖
+cp .env.example .env        # 填 JWT_SECRET、DATABASE_URL、SMTP、各 Cookie 等
 pip install -r requirements.txt
-
-# 2. 配置(默认 MOCK_INDEX=true,无需真实抓取即可运行)
-cp .env.example .env
-
-# 3. 手动跑一次管道
-python -m app.services.pipeline   # 或直接调用 run_pipeline()
-
-# 4. 定时调度
-python -m app.main
-
-# 5. 监控接口
-python -m app.main --api
-# 访问 http://localhost:8080/ 看 Web 看板(微博趋势+闲鱼热榜+今日总结)
-# 接口见 doc/API.md
+python -m pytest -q
+python -m app.main          # 调度模式(采集+预警+定时)
+python -m app.main --api    # API/看板 模式
 ```
 
-> 调度模式会同时跑微博热点与闲鱼热榜采集,并每日(默认 20:00)发"今日热榜"HTML 邮件。
+## 配置(.env)
+| 键 | 说明 |
+| --- | --- |
+| `JWT_SECRET` | 登录密钥(必填,≥32字节强随机) |
+| `DATABASE_URL` | MySQL(如 `mysql+pymysql://redu:redu@mysql:3306/redu?charset=utf8mb4`) |
+| `ADMIN_EMAIL` | 该邮箱注册即自动成为管理员(逗号分隔) |
+| `PUBLIC_BASE_URL` | 站点对外地址(重置链接用) |
+| `SMTP_HOST/PORT/USER/PASS/FROM` | 全局发信(用户也可自配邮箱) |
+| `XIANYU_TOP_N/DETAIL_LIMIT` | 前 N 榜 / 慢速TopN详情 |
+| `JOB_CRON/XIANYU_CRON/DOUHOT_CRON/DAILY_SUMMARY_CRON` | 各板块采集/总结周期 |
+| 各平台 Cookie | 用户在**平台内**自行配置,不写在 .env |
 
-## 配置
-
-全部配置经 `.env` 注入,见 [doc/dev.md §4](doc/dev.md#4-配置中心)。
-关键项:`WEIBO_COOKIE`、`USE_PROXY/PROXY_*`、`SMTP_*`、`GROWTH_THRESHOLD`、`SLOPE_THRESHOLD`、`JOB_CRON`。
-
-## 测试
-
+## Docker 一键部署
 ```bash
-pytest -q
-ruff check app
-mypy app
+cp .env.example .env        # 设 JWT_SECRET/DATABASE_URL/ADMIN_EMAIL/SMTP
+docker compose up -d        # 启动 mysql + redu-api
+# 访问 http://IP:8080/
 ```
+容器编排见 `docker-compose.yml`(mysql + api,数据挂载于卷)。
 
-## Docker
+### 管理后台
+1. `.env` 设 `ADMIN_EMAIL=<你的邮箱>`。
+2. 用该邮箱在平台注册 → 自动管理员。
+3. 注册/登录后顶部出现「管理后台」;普通用户不可见、无权限。
+4. **角色权限**:`admin`(全部)/`operator`(查/启停/导出,不可删/导入/改配置)可改 `app/admin.py` 的 `PERMS`。
 
+## GitHub Actions 自动构建 + 推 ACR
+`.github/workflows/docker-push.yml`:`push main` → 构建镜像 → 推 ACR `redu:latest`。
+在仓库 `Settings → Secrets → Actions` 配置:
+- `ACR_USERNAME`、`ACR_PASSWORD`(阿里云 ACR 访问凭证)
+
+## 备份
 ```bash
-docker compose up -d
+sh scripts/backup.sh        # MySQL 导出到 ./backup/
 ```
 
-> 所有外部请求必须走隧道代理,防止服务器 IP 被连坐封禁(见 doc/dev.md §8、§11)。
+## 目录结构
+```
+config/settings.py   配置中心
+app/                 后端(FastAPI:platform=主API, auth/db/admin/services)
+frontend/            Vue3 + Vite 源码(构建后由后端托管)
+scripts/             backup.sh 等
+tests/               单测(42 项)
+doc/                 dev.md · API.md
+```

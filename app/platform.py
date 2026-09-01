@@ -405,6 +405,16 @@ def create_app() -> FastAPI:
     def admin_categories(user: User = Depends(_require_perm("dashboard.view")), db: Session = Depends(get_db)):
         return admin_svc.category_dist(db)
 
+    @app.get("/api/admin/runs/failed")
+    def admin_runs_failed(user: User = Depends(_require_perm("logs.view")), db: Session = Depends(get_db)):
+        return admin_svc.failed_runs(db)
+
+    @app.post("/api/admin/runs/{run_id}/retry")
+    def admin_run_retry(run_id: str, user: User = Depends(_require_perm("users.toggle")), db: Session = Depends(get_db)):
+        res = admin_svc.retry_run(db, run_id)
+        admin_svc.log_admin(db, user, "retry_run", run_id, "ok" if res.get("ok") else str(res.get("msg", "")))
+        return res
+
     # 托管前端构建产物(SPA)
     dist = Path(__file__).parent / "static" / "spa"
     if dist.exists():
