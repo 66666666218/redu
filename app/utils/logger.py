@@ -32,13 +32,22 @@ def _mask(text: str) -> str:
 
 
 class _MaskFilter(logging.Filter):
-    """把日志记录中的敏感片段脱敏后再输出。"""
+    """把日志记录中的敏感片段脱敏后再输出。
+
+    只对**字符串**参数脱敏:原实现把所有参数 `str()` 化,会让
+    `logger.info('... %d ...', 200)` 这类记录在格式化时抛
+    `TypeError: %d format: a real number is required`(uvicorn/httpx 的访问日志
+    大量使用 %d),日志被 logging 吞掉并往 stderr 刷内部错误。
+    """
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
-            record.msg = _mask(str(record.msg))
-            if record.args:
-                record.args = tuple(_mask(str(a)) if a is not None else a for a in record.args)
+            if isinstance(record.msg, str):
+                record.msg = _mask(record.msg)
+            if isinstance(record.args, tuple):
+                record.args = tuple(_mask(a) if isinstance(a, str) else a for a in record.args)
+            elif isinstance(record.args, dict):
+                record.args = {k: (_mask(v) if isinstance(v, str) else v) for k, v in record.args.items()}
         except Exception:  # noqa: BLE001 - 脱敏失败不影响日志输出
             pass
         return True

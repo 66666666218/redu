@@ -2,6 +2,9 @@
 
 ## 未发布
 
+- [2026-09-01 23:25] FIX: **生产日志从未初始化**——`setup_logging()` 只在 `app/main.py` 调用,而 docker-compose 直接跑 `uvicorn app.platform:app` 绕过了它,导致 root logger 无 handler:INFO 日志全丢、异常堆栈无格式,线上出错基本无法定位;改为在 `create_app()` 里初始化(Files: app/platform.py)
+- [2026-09-01 23:25] FIX: **日志脱敏过滤器破坏格式化**——`_MaskFilter` 把所有参数 `str()` 化,使 `logger.info('... %d', 200)` 抛 `TypeError`(uvicorn/httpx 访问日志大量用 `%d`),日志被吞并向 stderr 刷内部错误;改为只对字符串参数脱敏,并支持 dict 形参;新增 4 项单测(Files: app/utils/logger.py, tests/test_logger.py)
+- [2026-09-01 23:25] FEAT: 500 响应带上**异常类型名**(如 `服务器内部错误(OperationalError)`),便于在拿不到日志时快速定位;异常消息含 SQL/路径等细节,仍只写入服务日志(Files: app/platform.py)
 - [2026-09-01 23:05] FIX: **注册/登录 500(Internal Server Error)根因**——`requirements.txt` 用 `passlib[bcrypt]>=1.7` 且不锁 bcrypt 版本,新构建的容器装到 bcrypt 5.0.0;passlib 1.7.4(2020 年停更)读 `bcrypt.__about__`(4.1+ 已移除)探测失败后走错分支,连 8 字节密码都报 `password cannot be longer than 72 bytes`,使注册/登录/改密码全部 500(本地旧环境 bcrypt 4.0.1 有该属性,故测不出来)。改为直接用官方 `bcrypt`(锁 `>=4.0,<6`)并移除 passlib;两者均产出标准 `$2b$` 哈希,**老用户密码无缝兼容、无需重置**(已加回归测试锁定)。干净环境 bcrypt 5.0.0 下验证注册/登录/老哈希校验全部通过(Files: app/auth.py, requirements.txt, tests/test_platform.py)
 - [2026-09-01 23:05] FIX: `verify_password` 遇畸形哈希会崩——bcrypt 的 Rust 后端对 `$2b$12$short` 这类输入抛 `PanicException`(继承 `BaseException`,`except Exception` 拦不住),一条脏数据即可把登录接口打成 500;改为先用正则预检 bcrypt 哈希格式,不合法直接判为不匹配(Files: app/auth.py, tests/test_platform.py)
 - [2026-09-01 23:05] FEAT: 新增全局未处理异常兜底——记录完整堆栈并返回中文 `detail`,不再向用户暴露裸的 `Internal Server Error`,前端也能显示可读信息(Files: app/platform.py)

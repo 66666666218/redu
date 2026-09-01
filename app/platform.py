@@ -30,6 +30,9 @@ from app import admin as admin_svc
 from app.services.cookie_store import delete_cookie as del_cookie
 from app.services.cookie_store import list_cookies, set_cookie
 from app.services.notifier import get_notifier
+from app.utils import get_logger, setup_logging
+
+logger = get_logger(__name__)
 
 APP_VERSION = "2.0.0"
 
@@ -135,6 +138,10 @@ async def _lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
 
 
 def create_app() -> FastAPI:
+    # 生产用 `uvicorn app.platform:app` 直启,不经过 app/main.py,
+    # 若不在这里初始化,root logger 就没有 handler:INFO 日志全丢、异常堆栈也没有格式,
+    # 出问题时根本没法从容器日志定位。
+    setup_logging()
     app = FastAPI(title="热点监控平台", version=APP_VERSION, lifespan=_lifespan)
     init_db()
 
@@ -252,17 +259,16 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(Exception)
     async def _unhandled_error(request: Request, exc: Exception):  # type: ignore[no-untyped-def]
-        """兜底:未预期异常记录完整堆栈,并返回中文提示。
+        """兜底:未预期异常记录完整堆栈,并返回带异常类型的中文提示。
 
         否则用户只看到裸的 `Internal Server Error`,前端也拿不到可读信息,
-        排查全靠猜(例如 bcrypt 版本不兼容导致的注册 500)。
+        排查全靠猜。响应里只带**异常类型名**(如 OperationalError)方便定位,
+        异常消息可能含 SQL/路径等细节,只写进服务日志。
         """
-        import logging
-
-        logging.getLogger(__name__).exception("未处理异常 %s %s", request.method, request.url.path)
+        logger.exception("未处理异常 %s %s", request.method, request.url.path)
         return JSONResponse(
             status_code=500,
-            content={"detail": "服务器内部错误,请稍后重试;若持续出现请联系管理员查看服务日志"},
+            content={"detail": f"服务器内部错误({type(exc).__name__}),请稍后重试;详情见服务日志"},
         )
 
     @app.get("/api/schedules")
