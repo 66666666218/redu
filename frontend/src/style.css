@@ -8,7 +8,8 @@ body { margin:0; font-family:system-ui,"Microsoft YaHei",sans-serif; background:
 .page { padding:24px; max-width:1200px; margin:0 auto }
 .auth { max-width:360px; margin:80px auto; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:28px }
 .auth h2 { margin:0 0 16px; font-size:18px }
-input, textarea { width:100%; background:#0b101b; color:var(--txt); border:1px solid var(--line); border-radius:6px; padding:10px 12px; margin:6px 0 14px; font-size:14px }
+input, textarea, select { width:100%; background:#0b101b; color:var(--txt); border:1px solid var(--line); border-radius:6px; padding:10px 12px; margin:6px 0 14px; font-size:14px }
+select:disabled { opacity:.5; cursor:not-allowed }
 textarea { min-height:90px; font-family:monospace; font-size:12px }
 button { background:var(--accent); color:#fff; border:none; border-radius:6px; padding:10px 18px; cursor:pointer; font-size:14px }
 button.ghost { background:transparent; border:1px solid var(--line); color:var(--dim) }

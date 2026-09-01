@@ -50,7 +50,9 @@ class Settings(BaseSettings):
     min_samples: int = 3            # 线性回归所需最少指数样本点
 
     # ---- 调度 ----
-    # 频次已按"避免风控"调低;各接口间加入随机延迟(见 request_delay_seconds)。
+    # 采集频率现由**每个用户自行设置**(user_schedules 表,10~1440 分钟),调度器每分钟
+    # 检查到期任务。下面的 *_cron 仅作为旧版全局调度模式的兜底,新部署无需关心。
+    scheduler_enabled: bool = True  # 随 API 进程启动后台调度器(多 worker 部署时须关掉,另起调度容器)
     job_cron: str = "0 * * * *"  # 微博采集(每小时,1 次请求,防风控)
     xianyu_cron: str = "0 */3 * * *"  # 闲鱼热榜采集(每 3 小时,~13 次 mtop)
     daily_summary_cron: str = "0 20 * * *"  # 每日"今日热榜"总结(Cron,默认 20:00)

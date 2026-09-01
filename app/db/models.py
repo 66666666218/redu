@@ -149,6 +149,25 @@ class RunRecord(Base):
     detail: Mapped[str] = mapped_column(Text(), default="")
 
 
+class UserSchedule(Base):
+    """每用户每板块的采集频率(见 doc/dev.md §6)。
+
+    调度器每分钟扫一次:`enabled` 且距 `last_run_at` 已满 `interval_minutes` 的就跑。
+    改频率后下一分钟即生效(读的是库,不需要重建调度作业)。
+    """
+
+    __tablename__ = "user_schedules"
+    __table_args__ = (UniqueConstraint("user_id", "section", name="uq_schedule_user_section"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    section: Mapped[str] = mapped_column(String(32))   # weibo/xianyu/douhot
+    interval_minutes: Mapped[int] = mapped_column(Integer, default=30)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
 class XianyuDaily(Base):
     """闲鱼商品每日快照:想要数/浏览量/类目等,用于今日vs昨日与类目分布。"""
 

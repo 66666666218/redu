@@ -398,9 +398,11 @@ def douhot_watch_analytics(session: Session, user_id: int) -> list[dict]:
 
 
 def run_section_for_all_users(section: str, settings: Settings | None = None) -> dict:
-    """定时为【所有用户】跑某个板块采集(用各人自己的 Cookie)。
+    """为【所有用户】跑某个板块采集(用各人自己的 Cookie)。
 
-    供调度器调用;替换旧的单用户采集作业(旧作业用全局 Cookie,不符多租户)。
+    常规定时采集已改为**按每个用户自己设置的频率**执行(见
+    `app/services/scheduler.py::collect_tick`);本函数保留给"批量/全员立即采集"
+    这类运维场景使用。
     """
     from app.db import get_session_local
     from app.db.models import User

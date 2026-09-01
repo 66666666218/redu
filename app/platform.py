@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 import time
 
@@ -23,6 +24,8 @@ from app.db.models import User
 from app.auth import authenticate, create_password_reset_token, get_current_user, log_login, register_user, reset_password, require_admin
 from app.security import create_access_token
 from app.services import tenant
+from app.services import scheduler
+from app.services import schedule_service
 from app import admin as admin_svc
 from app.services.cookie_store import delete_cookie as del_cookie
 from app.services.cookie_store import list_cookies, set_cookie
@@ -110,8 +113,29 @@ class CookieOut(pydantic.BaseModel):
     updated_at: str | None = None
 
 
+class ScheduleIn(pydantic.BaseModel):
+    """采集频率设置(两个字段均可单独提交)。"""
+
+    interval_minutes: int | None = None
+    enabled: bool | None = None
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
+    """应用启停:随 API 进程启动后台调度器(按各用户设置的频率采集)。
+
+    单容器部署即可,无需额外调度容器;`SCHEDULER_ENABLED=false` 可关闭
+    (多 worker 部署时必须关掉,否则每个 worker 都会重复采集)。
+    """
+    scheduler.start()
+    try:
+        yield
+    finally:
+        scheduler.shutdown()
+
+
 def create_app() -> FastAPI:
-    app = FastAPI(title="热点监控平台", version=APP_VERSION)
+    app = FastAPI(title="热点监控平台", version=APP_VERSION, lifespan=_lifespan)
     init_db()
 
     from config.settings import get_settings
@@ -225,6 +249,24 @@ def create_app() -> FastAPI:
             raise HTTPException(400, str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(500, f"采集失败:{exc}") from exc
+
+    @app.get("/api/schedules")
+    def schedules_list(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        """当前用户三个板块的采集频率(含可选档位与下次运行时间)。"""
+        return schedule_service.list_schedules(db, user.id)
+
+    @app.put("/api/schedules/{section}")
+    def schedules_set(
+        section: str,
+        body: ScheduleIn,
+        user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        """设置某板块的采集间隔(分钟)/开关。"""
+        try:
+            return schedule_service.set_schedule(db, user.id, section, body.interval_minutes, body.enabled)
+        except schedule_service.ScheduleError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @app.get("/api/dashboard")
     def dashboard(user: User = Depends(get_current_user), db: Session = Depends(get_db)):

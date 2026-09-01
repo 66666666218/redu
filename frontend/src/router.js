@@ -6,6 +6,7 @@ import Forgot from './views/Forgot.vue'
 import Reset from './views/Reset.vue'
 import Dashboard from './views/Dashboard.vue'
 import Cookies from './views/Cookies.vue'
+import Schedule from './views/Schedule.vue'
 import Alerts from './views/Alerts.vue'
 import Admin from './views/Admin.vue'
 
@@ -16,6 +17,7 @@ const routes = [
   { path: '/reset', component: Reset },
   { path: '/', component: Dashboard, meta: { auth: true } },
   { path: '/cookies', component: Cookies, meta: { auth: true } },
+  { path: '/schedule', component: Schedule, meta: { auth: true } },
   { path: '/alerts', component: Alerts, meta: { auth: true } },
   { path: '/admin', component: Admin, meta: { auth: true, admin: true } }
 ]

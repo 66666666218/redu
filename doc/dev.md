@@ -339,14 +339,43 @@ redian/
 
 ## 6. 业务流程与调度
 
-`app/main.py` 提供两种启动方式:
+### 6.1 采集频率:每用户自定义
 
-1. **调度模式(默认)**:`APScheduler` 按各自的 Cron 触发 4 个作业——
-   - `run_pipeline`(`JOB_CRON`):微博热搜采集→判涨→告警;
-   - `run_xianyu`(`XIANYU_CRON`):闲鱼虚拟商品热榜采集;
-   - `run_xianyu_daily`(`DAILY_SUMMARY_CRON`):聚合当日闲鱼热榜,生成并邮件推送"今日热榜";
-   - `run_douhot_trend`(`DOUHOT_CRON`):抖音热点·内容词趋势采集。
-2. **API 模式**:`uvicorn app.api:app`,可由 `POST /api/v1/runs`、`POST /api/v1/xianyu/runs` 手动触发。
+采集频率由**每个用户自己设置**(不再是全局 Cron),存于 `user_schedules` 表:
+`(user_id, section, interval_minutes, enabled, last_run_at)`,三个板块(微博/闲鱼/抖音)分别设置。
+
+- **调度模型**:`app/services/scheduler.py::collect_tick()` **每分钟**跑一次,取出所有
+  "已启用 且 距 `last_run_at` 已满 `interval_minutes`"的记录逐个执行。
+  用"间隔 + 上次运行时间"而非每人一条 Cron 作业,好处是**改设置无需重建调度作业**,
+  下一分钟即按新频率生效,也天然避开"API 进程改了配置、调度进程不知道"的跨进程同步问题。
+- **下限保护**:`MIN_INTERVAL=10` 分钟,在**后端**强制(`schedule_service.normalize_interval`)。
+  三个板块都是登录态接口,过于频繁会触发平台风控或导致 Cookie 失效。
+- **自动纳入**:每轮 tick 开头调用 `ensure_all_users()`,为新注册用户(及本功能上线前的老用户)
+  补齐默认频率记录(30 分钟),不必等他们打开一次设置页。
+- **缺 Cookie 跳过**:未配置对应平台 Cookie 的板块直接跳过且**不标记** `last_run_at`——
+  既不会每轮刷一条"未配置 Cookie"的失败记录,用户配好后下一分钟也能立刻开跑。
+- **失败也标记**:采集失败照样写 `last_run_at`,否则失败任务会每分钟重试把三方接口打爆;
+  失败重试交给 `retry_failed_runs`(每 30 分钟、单条最多 3 次)。
+- 接口见 `doc/API.md` §8;前端页面 `frontend/src/views/Schedule.vue`(`/schedule`)。
+
+### 6.2 调度进程落地
+
+调度器随 **API 进程**启动(`app/platform.py` 的 lifespan → `scheduler.start()`),
+所以单容器部署只跑 `uvicorn app.platform:app` 即可,无需额外调度容器。
+
+后台共 3 个作业:
+
+| 作业 | 周期 | 说明 |
+| --- | --- | --- |
+| `collect_tick` | 每分钟 | 按各用户设置的频率采集 |
+| `alert_fixed_time` | 每分钟 | 定时告警摘要(用户设定的发送时刻) |
+| `auto_retry_failed_runs` | 每 30 分钟 | 重试近 24h 内失败的采集(≤3 次) |
+
+> ⚠️ **多 worker 部署**:若用 `uvicorn --workers N`,每个 worker 都会启动一份调度器导致重复采集。
+> 此时须设 `SCHEDULER_ENABLED=false`,并单独起一个调度容器跑 `python -m app.main`
+> (独立模式复用同一套 `build_jobs`,行为完全一致)。
+
+### 6.3 单次采集的编排
 
 `run_pipeline()` 编排:
 
