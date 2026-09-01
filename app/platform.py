@@ -143,15 +143,25 @@ def create_app() -> FastAPI:
     # 出问题时根本没法从容器日志定位。
     setup_logging()
     app = FastAPI(title="热点监控平台", version=APP_VERSION, lifespan=_lifespan)
-    init_db()
 
-    from config.settings import get_settings
+    from config.settings import Settings, get_settings
 
     _settings = get_settings()
-    if not _settings.jwt_secret:
-        import logging
+    # 漏配 DATABASE_URL 时要在启动日志里立刻说清楚:否则服务照常起、healthcheck 照常绿,
+    # 直到有人点注册才报 OperationalError,排查成本极高(线上真实踩过)。
+    if _settings.database_url == Settings.model_fields["database_url"].default:
+        from urllib.parse import urlsplit
 
-        logging.getLogger(__name__).warning(
+        logger.warning(
+            "⚠️ 未配置 DATABASE_URL,正在使用默认值(主机 %s);若该地址上没有数据库,"
+            "所有涉及读写的接口都会 OperationalError。请在 .env 或容器环境变量中设置 DATABASE_URL,"
+            "并确认数据库容器已启动;可访问 /healthz 查看 db 状态",
+            urlsplit(_settings.database_url).hostname,  # 只打主机名,不泄露账号密码
+        )
+    init_db()
+
+    if not _settings.jwt_secret:
+        logger.warning(
             "⚠️ 未配置 JWT_SECRET,已用临时密钥(生产请设置强随机 ≥32 字节,否则重启后登录态失效)"
         )
 
