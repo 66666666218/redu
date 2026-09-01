@@ -24,9 +24,25 @@ H5_BASE = "https://h5api.m.goofish.com/h5"
 API = "mtop.taobao.idlemtopsearch.pc.search"
 APP_KEY = "34839810"  # 闲鱼 mtop appKey
 _UA = (
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 "
-    "(KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
 )
+_MTOP_HEADERS = {
+    "User-Agent": _UA,
+    "Accept": "application/json",
+    "Accept-Language": "en,zh-CN;q=0.9,zh;q=0.8,zh-TW;q=0.7,ja;q=0.6",
+    "Accept-Encoding": "gzip, deflate, br, zstd",
+    "sec-ch-ua": '"Chromium";v="147", "Not.A/Brand";v="8", "Google Chrome";v="147"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "Origin": "https://www.goofish.com",
+    "Referer": "https://www.goofish.com/",
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-site",
+    "priority": "u=1, i",
+    "Content-Type": "application/x-www-form-urlencoded",
+}
 
 
 class XianyuError(Exception):
@@ -46,100 +62,73 @@ RATE_ERRORS = {"FAIL_SYS_USER_VALIDATE", "FAIL_SYS_RATE_LIMIT", "FAIL_SYS_USER_L
 
 
 class XianyuClient:
-    """mtop 签名 + 登录态的最小客户端(带令牌刷新/重试)。"""
+    """mtop 签名 + 登录态的最小客户端(参考开源 cv-cat/XianYuApis)。
+
+    用 requests.Session 的 cookie jar + 完整浏览器头;data 只传 {"itemId":X} 等,
+    带 spm_pre/log_id;令牌随响应刷新,令牌错自动重试,限流优雅报错。
+    """
+    APP_KEY = "34839810"
 
     def __init__(self, cookie: str) -> None:
-        self.cookie = cookie
-        self.token = self._extract_token(cookie)
+        self.session = requests.Session()
+        self.session.headers.update(_MTOP_HEADERS)
+        self._seed_cookies(cookie)
 
-    @staticmethod
-    def _extract_token(cookie: str) -> str:
-        m = re.search(r"_m_h5_tk=([0-9a-f]{32})_", cookie)
-        return m.group(1) if m else ""
+    def _seed_cookies(self, cookie: str) -> None:
+        from requests.cookies import RequestsCookieJar, create_cookie
 
-    def _headers(self) -> dict:
-        return {
-            "User-Agent": _UA,
-            "Cookie": self.cookie,
-            "Referer": "https://www.goofish.com/",
-            "Origin": "https://www.goofish.com",
-        }
+        jar = RequestsCookieJar()
+        for pair in cookie.split("; "):
+            if "=" not in pair:
+                continue
+            name, _, val = pair.partition("=")
+            jar.set_cookie(create_cookie(name.strip(), val.strip(), domain=".goofish.com", path="/"))
+        self.session.cookies = jar
 
-    def _refresh_token_from(self, resp: requests.Response, append_cookie: bool = False) -> bool:
-        """从响应 Set-Cookie 刷新 _m_h5_tk 令牌;返回是否发生了更新。"""
-        set_cookie = resp.headers.get("set-cookie", "")
-        if not set_cookie:
-            return False
-        if append_cookie and set_cookie not in self.cookie:
-            self.cookie = f"{self.cookie}; {set_cookie}"
-        m = re.search(r"_m_h5_tk=([0-9a-f]{32})_", set_cookie)
-        if m and m.group(1) and m.group(1) != self.token:
-            self.token = m.group(1)
+    def _token(self) -> str:
+        return (self.session.cookies.get("_m_h5_tk", "") or "").split("_")[0]
+
+    def _refresh(self, resp: requests.Response) -> bool:
+        m = re.search(r"_m_h5_tk=([0-9a-f]{32})_", resp.headers.get("set-cookie", ""))
+        if m and m.group(1):
+            self.session.cookies.set("_m_h5_tk", m.group(1), domain=".goofish.com", path="/")
             return True
         return False
 
-    def _refresh_session(self, resp: requests.Response) -> None:
-        """每次请求后刷新令牌(与开源库 updateFromHeaders 一致)。"""
-        self._refresh_token_from(resp, append_cookie=True)
-
-    def _sign(self, t: str, data: str) -> str:
-        raw = f"{self.token}&{t}&{APP_KEY}&{data}"
-        return hashlib.md5(raw.encode()).hexdigest()
+    def _sign(self, t: str, token: str, data: str) -> str:
+        return hashlib.md5(f"{token}&{t}&{self.APP_KEY}&{data}".encode()).hexdigest()
 
     def _post(self, api: str, data_obj: dict) -> dict:
-        data = json.dumps(data_obj, ensure_ascii=False, separators=(",", ":"))
+        data_val = json.dumps(data_obj, ensure_ascii=False, separators=(",", ":"))
         t = str(int(time.time() * 1000))
         params = {
-            "jsv": "2.7.2",
-            "appKey": APP_KEY,
-            "t": t,
-            "sign": self._sign(t, data),
-            "v": "1.0",
-            "type": "originaljson",
-            "accountSite": "xianyu",
-            "dataType": "json",
-            "timeout": "20000",
-            "api": api,
-            "sessionOption": "AutoLoginOnly",
-            "spm_cnt": "a21ybx.search.0.0",
+            "jsv": "2.7.2", "appKey": self.APP_KEY, "t": t, "sign": self._sign(t, self._token(), data_val),
+            "v": "1.0", "type": "originaljson", "accountSite": "xianyu", "dataType": "json",
+            "timeout": "20000", "api": api, "sessionOption": "AutoLoginOnly",
+            "spm_cnt": "a21ybx.im.0.0", "spm_pre": "a21ybx.item.want.1.14ad3da6ALVq3n", "log_id": "14ad3da6ALVq3n",
         }
         try:
-            resp = requests.post(
-                f"{H5_BASE}/{api}/1.0/", params=params, data={"data": data}, headers=self._headers(), timeout=20
-            )
+            resp = self.session.post(f"{H5_BASE}/{api}/1.0/", params=params, data={"data": data_val}, timeout=20)
         except requests.RequestException as exc:
             raise XianyuError(f"闲鱼请求失败:{exc}") from exc
-        self._refresh_session(resp)
         obj = resp.json()
         ret = obj.get("ret", [""])[0]
         code = ret.split("::")[0]
         if code in TOKEN_ERRORS:
-            # 刷新 token 后重试一次
-            if self._refresh_token_from(resp) and obj is not None:
+            if self._refresh(resp):
                 return self._post(api, data_obj)
             raise XianyuError(f"闲鱼令牌错误:{ret}")
-        if code in RATE_ERRORS:
-            raise XianyuError(f"闲鱼限流,请稍后再试:{ret}")
+        if code in RATE_ERRORS or "USER_VALIDATE" in code:
+            raise XianyuError(f"闲鱼限流,请稍后:{ret}")
         if code and not code.startswith("SUCCESS"):
             raise XianyuError(f"闲鱼接口返回:{ret}")
         return obj
 
     def search(self, keyword: str, page: int = 1, rows: int = 30) -> list[dict]:
-        """按关键词搜索,返回按闲鱼"综合"顺序的商品列表。"""
         payload = {
-            "pageNumber": page,
-            "keyword": keyword,
-            "fromFilter": False,
-            "rowsPerPage": rows,
-            "sortValue": "",
-            "sortField": "",
-            "customDistance": "",
-            "gps": "",
-            "propValueStr": {},
-            "customGps": "",
-            "searchReqFromPage": "pcSearch",
-            "extraFilterValue": "{}",
-            "userPositionJson": "{}",
+            "pageNumber": page, "keyword": keyword, "fromFilter": False, "rowsPerPage": rows,
+            "sortValue": "", "sortField": "", "customDistance": "", "gps": "", "propValueStr": {},
+            "customGps": "", "searchReqFromPage": "pcSearch", "extraFilterValue": "{}", "userPositionJson": "{}",
         }
         obj = self._post(API, payload)
         items = _extract_items(obj)
@@ -149,8 +138,7 @@ class XianyuClient:
         return items
 
     def detail(self, item_id: str) -> dict:
-        """请求商品详情,返回 JSON。带令牌刷新与重试。"""
-        return self._post("mtop.taobao.idle.pc.detail", {"itemId": item_id, "id": item_id})
+        return self._post("mtop.taobao.idle.pc.detail", {"itemId": item_id})
 
 
 def _extract_items(obj: object) -> list[dict]:
