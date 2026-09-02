@@ -351,6 +351,27 @@
 
 ---
 
+### 7.4 管理后台 · 智能体洞察(跨用户聚合)
+
+- **接口名称**: 智能体洞察聚合
+- **请求方式**: GET
+- **URL 路径**: `/api/admin/insights`(需 admin/operator,`data.view` 权限)
+- **请求参数**: 无
+
+**响应示例 (200)**
+```json
+{
+  "stats": { "users": 2, "watchers": 1, "watch_keywords": 1, "burst": 1, "rising": 2, "today_alerts": 1 },
+  "burst": [ { "keyword": "爆点", "user_id": 1, "trend_label": "上升期", "growth": 0.44, "forecast_next": 3050, "confidence": "高", "burst": true } ],
+  "rising": [ { "keyword": "世界杯", "user_id": 1, "trend_label": "上升期", "growth": 0.15 } ],
+  "hot_words": [ { "title": "黎巴嫩", "score": 5233450, "trend_delta": -1200 } ]
+}
+```
+
+> 跨用户聚合每个关注词的智能体分析:**爆发榜**(可能爆发的词,按预测热度排序)、**上升期榜**、
+> **抖音内容词 Top**。便于运维全局扫一眼哪些词值得跟进。
+
+---
 ## 8. 采集频率(每用户自定义)
 
 > 需登录(JWT)。每个用户可为 **微博 / 闲鱼 / 抖音** 三个板块**分别**设置多久采集一次。

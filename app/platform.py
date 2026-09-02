@@ -425,6 +425,10 @@ def create_app() -> FastAPI:
     def admin_dashboard(user: User = Depends(_require_perm("dashboard.view")), db: Session = Depends(get_db)):
         return admin_svc.dashboard(db)
 
+    @app.get("/api/admin/insights")
+    def admin_insights(user: User = Depends(_require_perm("data.view")), db: Session = Depends(get_db)):
+        return admin_svc.insights(db)
+
     @app.get("/api/admin/users")
     def admin_users(q: str = "", user: User = Depends(_require_perm("users.view")), db: Session = Depends(get_db)):
         return admin_svc.list_users(db, q)

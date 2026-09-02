@@ -271,3 +271,26 @@ def test_rbac_perms() -> None:
     assert not admin_svc.has_perm("operator", "config.set")
     # 普通用户无任何后台权限
     assert admin_svc.perms_for("user") == set()
+
+
+def test_admin_insights_detects_burst(session) -> None:
+    """智能体洞察:跨用户聚合,能识别"预测爆发"的关注词。"""
+    from app.db.models import DouhotWatch, DouhotWatchSnap
+    from app import admin as admin_svc
+
+    # 用户1:加速上升词 → 应被标爆发
+    session.add(DouhotWatch(user_id=1, list_type="word", keyword="爆点"))
+    for v in [1000, 1100, 1300, 1800, 2600]:
+        session.add(DouhotWatchSnap(user_id=1, list_type="word", keyword="爆点", score=v, rank_now=1))
+    # 用户2:回落词 → 不标爆发
+    session.add(DouhotWatch(user_id=2, list_type="word", keyword="退潮"))
+    for v in [2000, 1500, 1000, 500]:
+        session.add(DouhotWatchSnap(user_id=2, list_type="word", keyword="退潮", score=v, rank_now=1))
+    session.commit()
+
+    out = admin_svc.insights(session)
+    assert out["stats"]["watch_keywords"] == 2
+    assert out["stats"]["burst"] >= 1
+    burst_keywords = {b["keyword"] for b in out["burst"]}
+    assert "爆点" in burst_keywords
+    assert "退潮" not in burst_keywords  # 回落的不进爆发榜

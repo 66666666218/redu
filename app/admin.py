@@ -13,6 +13,7 @@ from app.db.models import (
     AlertRecord,
     AlertRule,
     DouhotWatch,
+    DouhotWatchSnap,
     DouhotWord,
     LoginLog,
     RunRecord,
@@ -386,3 +387,76 @@ def retry_failed_runs(max_retry: int = 3) -> dict:
         return {"retried": n}
     finally:
         db.close()
+
+
+def insights(db: Session) -> dict:
+    """智能体洞察:跨用户聚合趋势预测,便于运维全局扫一眼。
+
+    - `stats`:用户数 / 关注词数 / 爆发数 / 今日告警
+    - `burst`:跨用户的"预测可能爆发"关键词(带趋势/预测/置信度)
+    - `rising`:跨用户的上升期关键词(非爆发,但有预测价值)
+    - `hot_words`:全站抖音内容词按热度去重 Top N
+    """
+    from app.services import keyword_agent
+    from app.services.trend_analyzer import compute_growth
+
+    today = date.today().isoformat()
+    # 统计
+    users = db.scalar(select(func.count(User.id))) or 0
+    watchers = db.scalar(select(func.count(func.distinct(DouhotWatch.user_id)))) or 0
+    watch_keywords = db.scalar(select(func.count(DouhotWatch.id))) or 0
+    today_alerts = db.scalar(
+        select(func.count(AlertRecord.id)).where(func.date(AlertRecord.triggered_at) == today)
+    ) or 0
+
+    # 威胁词:对每个用户的每个关注词跑智能体
+    burst, rising, hot_words = [], [], []
+
+    # 跨用户的所有关注词
+    watch_rows = db.execute(
+        select(DouhotWatch.user_id, DouhotWatch.list_type, DouhotWatch.keyword).order_by(DouhotWatch.id)
+    ).all()
+    for user_id, list_type, keyword in watch_rows:
+        snaps = db.scalars(
+            select(DouhotWatchSnap)
+            .where(DouhotWatchSnap.user_id == user_id, DouhotWatchSnap.keyword == keyword)
+            .order_by(DouhotWatchSnap.id.asc())
+        ).all()
+        values = [s.score for s in snaps]
+        if len(values) < 2:
+            continue
+        agent = keyword_agent.analyze(keyword, values)
+        row = {
+            "keyword": keyword, "list_type": list_type, "user_id": user_id,
+            "trend_label": agent["trend_label"], "growth": agent["growth"],
+            "forecast_next": agent["forecast_next"], "confidence": agent["confidence"],
+            "points": agent["points"], "burst": agent["burst"],
+        }
+        if agent["burst"]:
+            burst.append(row)
+        elif agent["trend_label"] == "上升期":
+            rising.append(row)
+
+    burst.sort(key=lambda r: (r["forecast_next"] or 0), reverse=True)
+    rising.sort(key=lambda r: (r["growth"] or 0), reverse=True)
+
+    # 全站抖音内容词(按去重标题取热度最高的)
+    seen: dict[str, float] = {}
+    for w in db.scalars(select(DouhotWord).order_by(DouhotWord.score.desc())).all():
+        title = w.title
+        if title in seen:
+            continue
+        seen[title] = w.score
+        hot_words.append({"title": title, "score": w.score, "trend_delta": w.trend_delta})
+        if len(seen) >= 20:
+            break
+
+    return {
+        "stats": {
+            "users": users, "watchers": watchers, "watch_keywords": watch_keywords,
+            "burst": len(burst), "rising": len(rising), "today_alerts": today_alerts,
+        },
+        "burst": burst[:15],
+        "rising": rising[:10],
+        "hot_words": hot_words,
+    }

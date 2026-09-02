@@ -20,7 +20,13 @@ const perms = ref([])
 const failed = ref([])
 const atrend = ref([])
 const pie = ref({ alerts_section: [], watch_types: [] })
+const insights = ref({ stats: {}, burst: [], rising: [], hot_words: [] })
 const can = (p) => perms.value.includes(p)
+
+async function loadInsights() {
+  try { insights.value = await api.adminInsights() }
+  catch (e) { toastError('洞察加载失败:' + e.message) }
+}
 
 async function load() {
   msg.value = ''
@@ -109,6 +115,7 @@ onMounted(load)
     </div>
     <div class="row" style="gap:8px;margin-bottom:14px">
       <button :class="tab==='dashboard'?'':'ghost'" @click="tab='dashboard'">工作台</button>
+      <button :class="tab==='insights'?'':'ghost'" @click="tab='insights';loadInsights()">智能体洞察</button>
       <button :class="tab==='users'?'':'ghost'" @click="tab='users'">用户管理</button>
       <button :class="tab==='data'?'':'ghost'" @click="tab='data';loadData()">数据</button>
       <button :class="tab==='ops'?'':'ghost'" @click="tab='ops'">运维</button>
@@ -208,6 +215,47 @@ onMounted(load)
         </table>
         <button v-if="can('data.export')" class="ghost" @click="download('alerts')">导出告警CSV</button>
         <button v-if="can('data.export')" class="ghost" @click="download('users')">导出用户CSV</button>
+      </div>
+    </template>
+
+    <template v-if="tab==='insights'">
+      <div class="grid" style="margin-bottom:16px">
+        <div class="card"><h3>用户数</h3><div class="price" style="font-size:26px">{{ insights.stats.users || 0 }}</div></div>
+        <div class="card"><h3>关注词</h3><div class="price" style="font-size:26px">{{ insights.stats.watch_keywords || 0 }}</div></div>
+        <div class="card"><h3>🔥 爆发预警</h3><div class="price" style="font-size:26px;color:var(--down)">{{ insights.stats.burst || 0 }}</div></div>
+        <div class="card"><h3>上升期</h3><div class="price" style="font-size:26px;color:var(--up)">{{ insights.stats.rising || 0 }}</div></div>
+        <div class="card"><h3>今日告警</h3><div class="price" style="font-size:26px">{{ insights.stats.today_alerts || 0 }}</div></div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
+        <h3>🔥 预测爆发关键词(跨用户)</h3>
+        <table v-if="insights.burst.length"><tr><th>关键词</th><th>用户</th><th>趋势</th><th>环比</th><th>预测</th><th>置信</th></tr>
+          <tr v-for="b in insights.burst" :key="b.keyword+'-'+b.user_id">
+            <td>{{ b.keyword }}</td><td>#{{ b.user_id }}</td>
+            <td :class="b.trend_label==='上升期'?'up':''">{{ b.trend_label }}</td>
+            <td class="num" :class="{up:(b.growth||0)>0}">{{ b.growth!=null?(b.growth*100).toFixed(0)+'%':'—' }}</td>
+            <td class="num">{{ b.forecast_next!=null?Math.round(b.forecast_next):'—' }}</td>
+            <td>{{ b.confidence }}</td>
+          </tr>
+        </table>
+        <div v-else class="empty">暂无爆发关键词(需先有关注词并积累多轮采集)</div>
+      </div>
+
+      <div class="grid">
+        <div class="card">
+          <h3>📈 上升期关键词</h3>
+          <table v-if="insights.rising.length"><tr><th>关键词</th><th>环比</th><th>预测</th></tr>
+            <tr v-for="r in insights.rising" :key="r.keyword+'-'+r.user_id"><td>{{ r.keyword }}</td><td class="num up">{{ r.growth!=null?(r.growth*100).toFixed(0)+'%':'—' }}</td><td class="num">{{ r.forecast_next!=null?Math.round(r.forecast_next):'—' }}</td></tr>
+          </table>
+          <div v-else class="empty">暂无</div>
+        </div>
+        <div class="card">
+          <h3>🔥 抖音内容词 Top</h3>
+          <table v-if="insights.hot_words.length"><tr><th>词</th><th>飙升</th><th>趋势</th></tr>
+            <tr v-for="h in insights.hot_words" :key="h.title"><td>{{ h.title }}</td><td class="price num">{{ (h.score/1e4).toFixed(0) }}万</td><td :class="{up:h.trend_delta>0}">{{ h.trend_delta>0?'↑':(h.trend_delta<0?'↓':'—') }}</td></tr>
+          </table>
+          <div v-else class="empty">暂无</div>
+        </div>
       </div>
     </template>
 
