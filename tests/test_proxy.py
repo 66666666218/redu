@@ -56,8 +56,19 @@ def test_playwright_proxy_for_http() -> None:
 # ---- 提取式代理池 ----
 def test_parse_line() -> None:
     assert ProxyPool.parse_line("1.2.3.4:8080:user:pass") == ("1.2.3.4", "8080", "user", "pass")
+    assert ProxyPool.parse_line("1.2.3.4:8080:user") == ("1.2.3.4", "8080", "user", "")
+    # 无鉴权 IP 白名单型(如熊猫代理):只 ip:port
+    assert ProxyPool.parse_line("1.2.3.4:8080") == ("1.2.3.4", "8080", "", "")
     assert ProxyPool.parse_line("bad-line") is None
     assert ProxyPool.parse_line("") is None
+
+
+def test_no_auth_proxy_url_has_no_at_sign() -> None:
+    """无鉴权代理不应拼成 http://:@ip:port。"""
+    pool = ProxyPool("http://fake/getips", fetch=lambda url: ["1.2.3.4:8080"])
+    url = pool.get_proxies()["http"]
+    assert url == "http://1.2.3.4:8080"
+    assert "@" not in url
 
 
 def test_parse_line_rejects_vendor_error_json() -> None:

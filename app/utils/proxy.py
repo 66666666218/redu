@@ -88,19 +88,25 @@ class ProxyPool:
 
     @staticmethod
     def parse_line(line: str) -> tuple[str, str, str, str] | None:
-        """解析 `ip:port:user:pass` 一行,非法则返回 `None`。
+        """解析代理行,返回 (ip, port, user, pass);非法则 `None`。
 
-        必须校验 ip/port 形状:厂商额度到期时会返回一段 JSON
-        (`{"code":405,"msg":"业务已到期...","data":null}`),按冒号切开同样有 4 段,
-        只看段数会拼出 `http://...@...` 这种垃圾代理,把所有采集一起带崩。
+        兼容三种格式:
+        - `ip:port`                  → 无鉴权(IP 白名单型,如熊猫代理)
+        - `ip:port:user`             → 仅账号
+        - `ip:port:user:pass`        → 账号+密码(大多数厂商)
+        厂商额度到期时会返回一段 JSON(`{"code":405,"msg":"业务已到期..."}`),
+        按冒号切开同样有 4 段,只看段数会拼出垃圾代理 URL 把所有采集一起带崩,
+        所以必须校验 `ip` 为点分四段、`port` 为合法数字。
         """
         parts = line.strip().split(":")
-        if len(parts) < 4:
+        if len(parts) < 2:
             return None
         ip, port = parts[0].strip(), parts[1].strip()
         if not _IP_RE.match(ip) or not port.isdigit() or not 0 < int(port) < 65536:
             return None
-        return ip, port, parts[2], parts[3]
+        user = parts[2].strip() if len(parts) >= 3 else ""
+        password = parts[3].strip() if len(parts) >= 4 else ""
+        return ip, port, user, password
 
     def _refresh(self) -> None:
         try:
@@ -121,7 +127,11 @@ class ProxyPool:
             if not self._proxies:
                 return None
             ip, port, user, pwd = random.choice(self._proxies)
-            url = f"http://{user}:{pwd}@{ip}:{port}"
+            # 无鉴权(IP 白名单型)时不要拼成 http://:@ip:port
+            if user:
+                url = f"http://{user}:{pwd}@{ip}:{port}"
+            else:
+                url = f"http://{ip}:{port}"
             return {"http": url, "https": url}
 
 

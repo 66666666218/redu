@@ -101,28 +101,44 @@ class DouhotClient:
         )
         self.session.mount("https://", adapter)
         self.timeout = timeout
+        self._settings = settings
         self.proxies = get_proxies(settings) if (use_proxy and settings) else None
 
     # ---- 传输层 ----------------------------------------------------------
 
     def _call(self, method: str, path: str, referer: str, body: dict | None = None) -> dict:
-        """发一次请求并拆封装,返回 `data` 字典(非字典时返回空字典)。"""
+        """发一次请求并拆封装,返回 `data` 字典(非字典时返回空字典)。
+
+        走代理时若命中坏节点(连接/读超时),换一个新代理重试一次——
+        代理池里常有少量死节点,只用一个代理整次采集会全程失败。
+        """
         payload = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode() if body else None
-        try:
-            resp = self.session.request(
-                method,
-                f"{BASE}{path}",
-                headers={"Referer": referer},
-                data=payload,
-                proxies=self.proxies,
-                timeout=self.timeout,
-            )
-            resp.raise_for_status()
-            obj = resp.json()
-        except requests.RequestException as exc:
-            raise DouhotError(f"热点宝请求失败({path}):{exc}") from exc
-        except ValueError as exc:  # 非 JSON:多半被风控页拦了
-            raise DouhotError(f"热点宝响应非 JSON({path})") from exc
+        last_exc: Exception | None = None
+        for attempt in range(2 if self.proxies else 1):
+            # 重试时从池里重新随机取一个(可能是健康的);直连则保持不变
+            proxies = get_proxies(self._settings) if (attempt > 0 and self.proxies and self._settings) else self.proxies
+            try:
+                resp = self.session.request(
+                    method,
+                    f"{BASE}{path}",
+                    headers={"Referer": referer},
+                    data=payload,
+                    proxies=proxies,
+                    timeout=self.timeout,
+                )
+                resp.raise_for_status()
+                obj = resp.json()
+                break
+            except ValueError as exc:  # 非 JSON:多半被风控页拦了
+                raise DouhotError(f"热点宝响应非 JSON({path})") from exc
+            except requests.RequestException as exc:
+                last_exc = exc
+                if attempt == 0 and self.proxies:  # 换代理重试一次
+                    logger.warning("代理节点不可用,换新代理重试 path=%s:%s", path, exc)
+                    continue
+                raise DouhotError(f"热点宝请求失败({path}):{exc}") from exc
+        else:
+            raise DouhotError(f"热点宝请求失败({path}):{last_exc}") from last_exc
 
         code = obj.get("code", obj.get("status_code"))
         data = obj.get("data")

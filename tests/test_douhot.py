@@ -5,6 +5,7 @@
 - `douhot`:各榜单字段解析、空标题过滤、可选榜单失败降级为空列表。
 """
 import pytest
+import requests
 
 from config.settings import Settings
 from app.services import douhot
@@ -172,3 +173,27 @@ def test_douhot_honors_proxy_switch_on(monkeypatch: pytest.MonkeyPatch) -> None:
     s = Settings(_env_file=None, douhot_use_proxy=True)
     client = DouhotClient("x", s)
     assert client.proxies == {"http": "http://p:1", "https": "http://p:1"}
+
+
+def test_proxy_bad_node_retries_with_new_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """代理池里偶有死节点:首次连接失败应换新代理重试,而不是整次采集放弃。"""
+    calls = {"get_proxies": 0, "request": 0}
+
+    def fake_get_proxies(settings):
+        calls["get_proxies"] += 1
+        return {"http": f"http://p{calls['get_proxies']}:1", "https": f"http://p{calls['get_proxies']}:1"}
+
+    class _BadThenGood:
+        def request(self, method, url, **kw):
+            calls["request"] += 1
+            if calls["request"] == 1:
+                raise requests.RequestException("死节点")
+            # 一次给满 24 条,_paged 就到第 1 页为止
+            return _FakeResponse({"code": 0, "data": {"word_list": [{"title": f"w{i}", "score": i} for i in range(24)]}})
+
+    monkeypatch.setattr(douhot_client, "get_proxies", fake_get_proxies)
+    c = DouhotClient("x", Settings(_env_file=None, douhot_use_proxy=True))  # 先打桩再构造,__init__ 即走代理
+    c.session = _BadThenGood()  # type: ignore[assignment]
+    words = c.hot_words(limit=24)
+    assert calls["get_proxies"] == 2 and calls["request"] == 2
+    assert len(words) == 24 and words[0]["title"] == "w0"
