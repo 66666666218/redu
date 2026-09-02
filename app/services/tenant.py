@@ -1,11 +1,16 @@
 """多租户服务:用【该用户自己】的 Cookie 采集,结果按 user_id 隔离存 MySQL。
 
-复用现有采集器(collector / xianyu / douhot)与趋势分析(compute_growth/slope),
-仅把**数据源**换成用户 Cookie、**存储**换成 per-user 的 ORM。
+本模块 = **采集编排 + 仪表盘 + 判涨**(每个平台的运行器与大屏数据)。
+已拆分的域:
+- 闲鱼分析(每日快照/深度采集/涨跌)→ `xianyu_analytics.py`
+- 关键词监控 + 智能体预测 → `keyword_watch.py`
+- 共享 `_base`/`_record_run` → `tenant_base.py`
+
+各域模块统一 re-export 到 `tenant.xxx`,保证外部(路由/测试)引用不变。
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -15,38 +20,26 @@ from app.db.models import (
     AlertRecord,
     DouhotAlerted,
     DouhotWatch,
-    DouhotWatchSnap,
     DouhotWord,
-    RunRecord,
     WeiboHotItem,
     WeiboTrend,
-    XianyuDaily,
     XianyuItem,
-    XianyuSummary,
 )
 from app.services import alert_service, collector, douhot, xianyu
 from app.services.cookie_store import get_cookies
 from app.services.trend_analyzer import compute_growth, compute_slope
+from app.services.tenant_base import _base, _record_run  # noqa: F401  (供外部/测试引用)
+from app.services.xianyu_analytics import run_xianyu_deep, xianyu_analytics, xianyu_daily  # noqa: F401
+from app.services.keyword_watch import (  # noqa: F401
+    _record_douhot_watch_snaps,
+    add_douhot_watch,
+    douhot_watch_analytics,
+    list_douhot_watch,
+    platform_agent,
+)
 from app.utils import get_logger
 
 logger = get_logger(__name__)
-
-
-def _base(settings: Settings | None) -> Settings:
-    return settings or get_settings()
-
-
-def _record_run(session: Session, user_id: int, kind: str, status: str, detail: str = "") -> None:
-    session.add(
-        RunRecord(
-            user_id=user_id,
-            run_id=datetime.now().strftime("%Y%m%d%H%M%S"),
-            kind=kind,
-            status=status,
-            started_at=datetime.now(),
-            detail=detail,
-        )
-    )
 
 
 def run_weibo(session: Session, user_id: int, settings: Settings | None = None) -> dict:
@@ -191,46 +184,6 @@ def _douhot_rising(session, user_id: int, settings: Settings, now) -> list[dict]
     return rising[: settings.douhot_alert_max]
 
 
-def platform_agent(session: Session, user_id: int, top_n: int = 8) -> dict:
-    """多平台智能体:把微博热度 / 闲鱼想要数 的历史序列喂给 `keyword_agent`,
-    产出各平台的热点趋势 + 预测(与抖音同一套逻辑)。返回 {weibo, xianyu}。
-
-    - weibo:按 微博热搜词 的 heat 序列(多轮采集)判定趋势并预测下一轮热度
-    - xianyu:按 商品 的 want_count 序列(每日快照)判定趋势并预测
-    """
-    from app.services import keyword_agent
-
-    def run(maker: object) -> list[dict]:
-        out = []
-        for title, series in maker:  # type: ignore[attr-defined]
-            if len(series) < 2:
-                continue
-            a = keyword_agent.analyze(title, [v for _, v in series])
-            a["title"] = title
-            a["series"] = [v for _, v in series]
-            out.append(a)
-        out.sort(key=lambda x: (x["burst"], x["forecast_next"] or 0), reverse=True)
-        return out[:top_n]
-
-    # 微博:每标题 heat 序列(按采集时间)
-    weibo_series: dict[str, list] = {}
-    for r in session.scalars(
-        select(WeiboHotItem).where(WeiboHotItem.user_id == user_id).order_by(WeiboHotItem.id.asc())
-    ).all():
-        weibo_series.setdefault(r.title, []).append((r.captured_at, r.heat))
-    weibo = run(weibo_series.items())  # type: ignore[arg-type]
-
-    # 闲鱼:每商品 want_count 序列(按快照日期)
-    xy_series: dict[str, list] = {}
-    for r in session.scalars(
-        select(XianyuDaily).where(XianyuDaily.user_id == user_id).order_by(XianyuDaily.snap_date.asc())
-    ).all():
-        xy_series.setdefault(r.title or r.item_id, []).append((r.snap_date, r.want_count))
-    xianyu = run(xy_series.items())  # type: ignore[arg-type]
-
-    return {"weibo": weibo, "xianyu": xianyu}
-
-
 def dashboard(session: Session, user_id: int) -> dict:
     """用户仪表盘:微博上涨 + 闲鱼热榜 + 抖音热词(按 user 隔离)。"""
     trends = [
@@ -261,209 +214,6 @@ def dashboard(session: Session, user_id: int) -> dict:
             for r in douhot_rows
         ],
     }
-
-
-def xianyu_daily(session: Session, user_id: int) -> dict:
-    today = datetime.now().date().isoformat()
-    summary = session.scalar(
-        select(XianyuSummary).where(XianyuSummary.user_id == user_id).order_by(XianyuSummary.id.desc())
-    )
-    return {"summary_date": summary.summary_date if summary else None, "items": []}
-
-
-# ---------- 闲鱼深度分析 ----------
-def _xy_detail_limit(settings: Settings) -> int:
-    return getattr(settings, "xianyu_detail_limit", 20)
-
-
-def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = None) -> dict:
-    """采集闲鱼热榜并抓取前 N 商品详情(想要数/类目/浏览量/卖家粉丝),写入当日快照。"""
-    settings = _base(settings)
-    cookies = get_cookies(session, user_id)
-    goofish = cookies.get("goofish", "")
-    if not goofish:
-        raise ValueError("未配置闲鱼 Cookie")
-    try:
-        client = xianyu.XianyuClient(goofish)
-        hot = xianyu.collect_hot(settings, client)
-        today = datetime.now().date().isoformat()
-        base_delay = getattr(settings, "request_delay_seconds", 2.5)
-        saved = 0
-        for idx, it in enumerate(hot[: _xy_detail_limit(settings)]):
-            detail = xianyu.fetch_detail(client, it["item_id"])
-            row = session.scalar(
-                select(XianyuDaily).where(
-                    XianyuDaily.user_id == user_id,
-                    XianyuDaily.item_id == it["item_id"],
-                    XianyuDaily.snap_date == today,
-                )
-            )
-            if row is None:
-                row = XianyuDaily(user_id=user_id, snap_date=today, item_id=it["item_id"])
-                session.add(row)
-            row.title = it["title"][:500]
-            row.price = it["price"]
-            row.category = detail.get("category", "")
-            row.want_count = detail.get("want_count", 0)
-            row.collect_count = detail.get("collect_count", 0)
-            row.sold_count = detail.get("sold_count", 0)
-            row.view_count = detail.get("view_count", 0)
-            row.seller_fans = detail.get("seller_fans", 0)
-            saved += 1
-            if idx < _xy_detail_limit(settings) - 1:
-                import random
-                import time
-
-                time.sleep(base_delay * random.uniform(0.8, 1.4))
-        session.commit()
-        _record_run(session, user_id, "xianyu_deep", "success", f"items={saved}")
-        session.commit()
-        return {"platform": "xianyu_deep", "count": saved}
-    except Exception as exc:  # noqa: BLE001
-        session.rollback()
-        _record_run(session, user_id, "xianyu_deep", "failed", f"{type(exc).__name__}: {exc}")
-        session.commit()
-        raise
-
-
-def xianyu_analytics(session: Session, user_id: int) -> dict:
-    """闲鱼深度面板:今日vs昨日 想要数涨跌、类目分布、上升/下降榜。"""
-    today = datetime.now().date().isoformat()
-    yesterday = (datetime.now().date() - timedelta(days=1)).isoformat()
-    today_rows = {
-        r.item_id: r
-        for r in session.scalars(select(XianyuDaily).where(XianyuDaily.user_id == user_id, XianyuDaily.snap_date == today)).all()
-    }
-    yesterday_rows = {
-        r.item_id: r
-        for r in session.scalars(select(XianyuDaily).where(XianyuDaily.user_id == user_id, XianyuDaily.snap_date == yesterday)).all()
-    }
-    items = []
-    for iid, t in today_rows.items():
-        y = yesterday_rows.get(iid)
-        y_want = y.want_count if y else None
-        delta = (t.want_count - y_want) if y_want is not None else 0
-        pct = (delta / y_want) if y_want else (100.0 if t.want_count > 0 else 0.0)
-        items.append(
-            {
-                "item_id": iid,
-                "title": t.title[:44],
-                "category": t.category or "未分类",
-                "price": t.price,
-                "want_today": t.want_count,
-                "want_yesterday": y_want,
-                "delta": delta,
-                "pct": pct,
-                "collect_today": t.collect_count,
-                "sold_today": t.sold_count,
-                "view_today": t.view_count,
-                "seller_fans": t.seller_fans,
-            }
-        )
-    items.sort(key=lambda x: x["delta"], reverse=True)
-    cats: dict[str, int] = {}
-    total_want = 0
-    for it in items:
-        cats[it["category"]] = cats.get(it["category"], 0) + 1
-        total_want += it["want_today"]
-    return {
-        "date": today,
-        "count": len(items),
-        "total_want": total_want,
-        "top_risers": items[:10],
-        "top_fallers": sorted(items, key=lambda x: x["delta"])[:10],
-        "categories": [{"name": k, "count": v} for k, v in sorted(cats.items(), key=lambda x: -x[1])],
-        "items": items,
-    }
-
-
-# ---------- 热点宝关键词监控 ----------
-def add_douhot_watch(session: Session, user_id: int, list_type: str, keyword: str) -> dict:
-    list_type = list_type if list_type in ("word", "search", "subscribe", "video", "topic") else "word"
-    keyword = keyword.strip()
-    row = session.scalar(
-        select(DouhotWatch).where(
-            DouhotWatch.user_id == user_id, DouhotWatch.list_type == list_type, DouhotWatch.keyword == keyword
-        )
-    )
-    if row is None:
-        session.add(DouhotWatch(user_id=user_id, list_type=list_type, keyword=keyword))
-        session.commit()
-    return {"list_type": list_type, "keyword": keyword}
-
-
-def list_douhot_watch(session: Session, user_id: int) -> list[dict]:
-    rows = session.scalars(select(DouhotWatch).where(DouhotWatch.user_id == user_id)).all()
-    return [{"list_type": r.list_type, "keyword": r.keyword} for r in rows]
-
-
-def _record_douhot_watch_snaps(
-    session: Session,
-    user_id: int,
-    lists: dict[str, list[dict]],
-    douyin_cookie: str = "",
-    settings: Settings | None = None,
-) -> None:
-    """把用户关注的词,在对应榜单中记录得分与排名快照。
-
-    内容词(word):用**定向查询**取该词自身热度——不再依赖它碰巧在 top100 里,
-    这是"任意关键词监控"的核心。其他榜仍从已采集列表里找(词须在榜内才会命中)。
-    """
-    watches = session.scalars(select(DouhotWatch).where(DouhotWatch.user_id == user_id)).all()
-    for w in watches:
-        if w.list_type == "word" and douyin_cookie:
-            try:
-                heat = douhot.fetch_keyword_heat(douyin_cookie, w.keyword, settings)
-                score, rank = heat.get("score", 0), heat.get("rank_now", 0)
-            except Exception:  # noqa: BLE001 - 定向查询失败降级为 0,不中断采集
-                score, rank = 0, 0
-        else:
-            words = lists.get(w.list_type, [])
-            score, rank = 0, 0
-            for i, word in enumerate(words, start=1):
-                if word.get("title") == w.keyword:
-                    score, rank = word.get("score", 0), i
-                    break
-        session.add(
-            DouhotWatchSnap(user_id=user_id, list_type=w.list_type, keyword=w.keyword, score=score, rank_now=rank)
-        )
-    session.commit()
-
-
-def douhot_watch_analytics(session: Session, user_id: int) -> list[dict]:
-    from app.services import keyword_agent
-
-    watches = session.scalars(select(DouhotWatch).where(DouhotWatch.user_id == user_id)).all()
-    out = []
-    for w in watches:
-        snaps = session.scalars(
-            select(DouhotWatchSnap)
-            .where(DouhotWatchSnap.user_id == user_id, DouhotWatchSnap.keyword == w.keyword)
-            .order_by(DouhotWatchSnap.id.asc())
-        ).all()
-        values = [s.score for s in snaps]
-        growth = compute_growth(values) if len(values) >= 2 else None
-        agent = keyword_agent.analyze(w.keyword, values)
-        out.append(
-            {
-                "keyword": w.keyword,
-                "list_type": w.list_type,
-                "last_score": values[-1] if values else 0,
-                "rank_now": snaps[-1].rank_now if snaps else 0,
-                "points": len(values),
-                "growth": growth,
-                "trend_label": agent["trend_label"],
-                "forecast_next": agent["forecast_next"],
-                "summary": agent["summary"],
-                "series": agent["series"],
-                "slope": agent["slope"],
-                "confidence": agent["confidence"],
-                "r2": agent["r2"],
-                "accel": agent["accel"],
-                "burst": agent["burst"],
-            }
-        )
-    return out
 
 
 def run_section_for_all_users(section: str, settings: Settings | None = None) -> dict:

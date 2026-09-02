@@ -131,9 +131,10 @@ redian/
 │  │  └─ database.py            #   引擎/会话/init_db/迁移/db_status
 │  ├─ services/                 # 业务逻辑(SRP,按领域)
 │  │  ├─ collector(微博)/xianyu/douhot + douhot_client(直连)
-│  │  ├─ tenant(多租户编排)/alert_service/schedule_service/scheduler
-│  │  ├─ keyword_agent(预测)/feishu + feishu_client(飞书)
-│  │  └─ cookie_store/notifier/trend_analyzer(纯函数)
+│  │  ├─ tenant(采集编排)/tenant_base(共享)/alert_service/schedule_service/scheduler
+│  │  ├─ keyword_agent(预测)/keyword_watch(关键词监控)/feishu + feishu_client(飞书)
+│  │  ├─ xianyu_analytics(闲鱼分析)/cookie_store/notifier
+│  │  └─ trend_analyzer(纯函数)/proxy·logger·retry
 │  └─ utils/                    # proxy · logger · retry
 ├─ tests/                       # 单测(纯逻辑,无网络)
 └─ scripts/                     # probe_* 抓包探测 / shoot_ui 截图
