@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- [2026-09-03 01:30] REFACTOR: 消除 scheduler 三处重复的 cron 解析——抽 `_cron_trigger(expr, default)` helper,`build_jobs` 里 feishu 日报/洞察/周报用一个循环注册(行为不变,测试 109 项通过)(Files: app/services/scheduler.py)
 - [2026-09-03 01:20] REFACTOR: **拆分 platform.py 上帝文件 → app/api/ 路由模块(框架清理第3步)**——原 `platform.py` 553 行 / 50 个路由(auth/cookies/collect/dashboard/schedules/smtp/alerts/douhot/admin/healthz/SPA 全塞一个文件),按领域拆到 `app/api/{auth,cookies,dashboard,collect,alerts,admin,misc}.py` + `deps.py`(请求模型/依赖/登录限速/`require_perm`);`platform.py` 收缩为**薄应用工厂**(装配路由+中间件+异常兜底+静态托管). 行为不变,测试 109 项通过(Files: app/platform.py, app/api/*, doc/dev.md)
 - [2026-09-03 00:50] FEAT: **大屏实时告警滚动条 + 每周邮件总结**——`/screen` 大屏底部新增横向滚动告警条(`/api/alerts/list` 补 `section` 字段,实时显示各平台告警);新增**每周邮件"本周热点洞察"**`run_weekly_summary`(`WEEKLY_SUMMARY_CRON` 默认周日 20:00,走用户/全局 SMTP),内容含关注词爆发/上升 + 微博/闲鱼预测. 新增单测,全量 117 项通过(Files: frontend/src/views/Screen.vue, app/services/{alert_service.py,scheduler.py}, app/platform.py, config/settings.py, .env.example, tests/test_platform.py, doc/API.md)
 - [2026-09-03 00:40] FEAT: **可视化大屏(第3步)**——新增 `/screen` 全屏智能体数据墙(适合挂大屏/电视):大字统计卡(关注词/爆发/内容词/上涨)、爆发榜(带趋势+预测+迷你图)、微博/闲鱼预测、抖音内容词 Top 滚动词云;每 60s 自动刷新,赛博风深色排版,大屏路由不显示顶栏. 已在本地真机截图核对通过(Files: frontend/src/{views/Screen.vue,router.js,App.vue})
