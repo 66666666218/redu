@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     xianyu_top_n: int = 100         # 前 N 虚拟商品榜(搜索级,无风控)
     xianyu_detail_limit: int = 20   # 慢速抓详情(想要数)的商品数
     douhot_cookie_file: str = "data/douhot_cookie.txt"  # 抖音热点宝 Cookie 文件(gitignored)
-    douhot_top_n: int = 50          # 内容词趋势条数
+    douhot_top_n: int = 100         # 内容词趋势条数(抖音热点接口可到 200)
     douhot_alert_max: int = 5       # 单次判涨告警上限(防刷屏)
     douhot_alert_cooldown_hours: int = 24  # 同一内容词告警冷却(小时)
     alert_cooldown_hours: int = 6   # 预警规则冷却(小时),避免重复刷

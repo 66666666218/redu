@@ -208,7 +208,7 @@ def dashboard(session: Session, user_id: int) -> dict:
         select(XianyuItem).where(XianyuItem.user_id == user_id).order_by(XianyuItem.hit_keywords.desc(), XianyuItem.best_rank.asc()).limit(30)
     ).all()
     douhot_rows = session.scalars(
-        select(DouhotWord).where(DouhotWord.user_id == user_id).order_by(DouhotWord.score.desc()).limit(30)
+        select(DouhotWord).where(DouhotWord.user_id == user_id).order_by(DouhotWord.score.desc()).limit(100)
     ).all()
     return {
         "weibo_trends": trends,

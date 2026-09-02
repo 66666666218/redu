@@ -87,7 +87,7 @@ onMounted(async () => { await load(); await loadAnalytics(); await loadWatches()
       <div class="card" v-if="dash.douhot_words.length">
         <h3>抖音 · 内容词</h3>
         <table><tr><th>词</th><th>飙升</th><th>趋势</th></tr>
-          <tr v-for="it in dash.douhot_words.slice(0,15)" :key="it.title"><td>{{ it.title }}</td><td class="price">{{ (it.score/1e4).toFixed(0) }}万</td><td :class="{up:it.trend_delta>0}">{{ it.trend_delta>0?'↑':(it.trend_delta<0?'↓':'—') }}</td></tr>
+          <tr v-for="it in dash.douhot_words.slice(0,100)" :key="it.title"><td>{{ it.title }}</td><td class="price">{{ (it.score/1e4).toFixed(0) }}万</td><td :class="{up:it.trend_delta>0}">{{ it.trend_delta>0?'↑':(it.trend_delta<0?'↓':'—') }}</td></tr>
         </table>
       </div>
 
