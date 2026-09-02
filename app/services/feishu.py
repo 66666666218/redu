@@ -41,6 +41,11 @@ _TABLES = {"weibo": WeiboHotItem, "xianyu": XianyuItem, "douhot": DouhotWord}
 _TIMEOUT = 15
 
 
+def _agent_confidence_rank(level: str | None) -> int:
+    """置信度等级 → 数值,便于比较。高=3/中=2/低=1;未知视为 0。"""
+    return {"高": 3, "中": 2, "低": 1}.get(level or "", 0)
+
+
 def _sign(secret: str, ts: int) -> str:
     """飞书签名。
 
@@ -364,7 +369,12 @@ def run_feishu_keyword_alerts(user_id: int, settings: Settings | None = None, db
             if not values:
                 continue
             agent = keyword_agent.analyze(w["keyword"], values)
+            # 置信度分级:只有达到最低置信度的爆发才实时推送,中/低置信只进日报与洞察
             if not agent["burst"]:
+                continue
+            if agent.get("confidence") not in ("高", "中"):
+                continue
+            if _agent_confidence_rank(agent.get("confidence")) < _agent_confidence_rank(settings.feishu_burst_min_confidence):
                 continue
             if _in_cooldown(db, user_id, "keyword_burst", w["keyword"], settings):
                 continue

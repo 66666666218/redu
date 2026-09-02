@@ -85,16 +85,18 @@ def _summary(
     return " ".join(parts)
 
 
-def _confidence(values: list[float], slope: float | None, r2: float | None) -> str:
-    """预测置信度:样本数 + 拟合优度共同决定。
+def _confidence(values: list[float], slope: float | None, r2: float | None, growth: float | None, accel: float | None) -> str:
+    """预测置信度。
 
-    - 样本 <3:数据不足(参考价值低)
-    - R²>=0.8 且样本>=5:高
-    - R²>=0.5:中
-    - 否则:低(波动大/趋势不稳)
+    - 样本 <3:数据不足
+    - **强增长 + 正加速度 + 样本足 → 高**:真正的爆发常是加速上升(非线性),
+      线性 R² 反而低;但方向很确定,应视为高置信。
+    - 否则按线性拟合 R²:>=0.8 且样本足为高;>=0.5 为中;其余低。
     """
     if len(values) < 3:
         return "数据不足"
+    if growth is not None and growth >= 0.20 and (accel is None or accel > 0) and len(values) >= 4:
+        return "高"
     if r2 is None:
         return "低"
     if r2 >= 0.8 and len(values) >= 5:
@@ -179,7 +181,7 @@ def analyze(keyword: str, values: list[float]) -> dict:
     label = _label(growth, slope)
     r2 = _r2(values)
     accel = _accel(values)
-    confidence = _confidence(values, slope, r2)
+    confidence = _confidence(values, slope, r2, growth, accel)
     # 爆发预警:处于上升期 && 预测明显 && 有一定置信度 && 加速度为正
     burst = bool(
         len(values) >= 3

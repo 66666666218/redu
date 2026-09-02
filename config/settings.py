@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     feishu_daily_cron: str = "0 8 * * *"   # 每日热点日报时间(默认 08:00)
     feishu_hot_rank_jump: int = 3          # 排名跳升 ≥ 该名次即实时推送
     feishu_hot_ratio: float = 0.30         # 分值环比涨幅 ≥ 该比例即实时推送
+    feishu_burst_min_confidence: str = "高"  # 实时推送"预测爆发"所需最低置信度(高/中/低);中低置信只进日报与洞察、不实时推,减少噪音
     feishu_alert_cooldown_hours: int = 6   # 同一话题实时推送冷却(小时),防刷屏
     feishu_insight_cron: str = "0 9 * * 1"  # 每周一 09:00 推"近7天爆点回顾"(智能体洞察报告)
     # 抖音热点宝走代理池:部分服务器 IP 会被抖音风控(直接返回 502 nginx),

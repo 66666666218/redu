@@ -209,3 +209,34 @@ def test_scheduler_registers_insight_job() -> None:
     ids = [j.id for j in sched.get_jobs()]
     assert "feishu_insight" in ids
     sched.shutdown(wait=False) if sched.running else None
+
+
+def test_burst_confidence_gate(monkeypatch, session) -> None:
+    """置信度分级:FEISHU_BURST_MIN_CONFIDENCE=高 时,"中"置信的爆发不实时推(只进日报/洞察)。"""
+    from app.db.models import DouhotWatch, DouhotWatchSnap
+
+    from app.services import keyword_agent as ka
+
+    session.add(DouhotWatch(user_id=1, list_type="word", keyword="中置信词"))
+    for i in range(5):
+        session.add(DouhotWatchSnap(user_id=1, list_type="word", keyword="中置信词", score=100 + i * 50, rank_now=1))
+    session.commit()
+    # 模拟 analyze 返回"中"置信的爆发
+    monkeypatch.setattr(ka, "analyze", lambda kw, v: {
+        "keyword": kw, "burst": True, "trend_label": "上升期", "growth": 0.5,
+        "forecast_next": 100, "confidence": "中", "points": 5,
+    })
+    # min=高 → 不推
+    sent = []
+    monkeypatch.setattr(feishu, "FeishuClient", lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
+    n = feishu.run_feishu_keyword_alerts(1, _settings(feishu_burst_min_confidence="高"), db=session)
+    assert n == 0 and not sent
+    # min=中 → 推
+    n2 = feishu.run_feishu_keyword_alerts(1, _settings(feishu_burst_min_confidence="中"), db=session)
+    assert n2 == 1 and sent and "中置信词" in sent[0]
+
+
+def test_agent_confidence_rank() -> None:
+    assert feishu._agent_confidence_rank("高") > feishu._agent_confidence_rank("中")
+    assert feishu._agent_confidence_rank("中") > feishu._agent_confidence_rank("低")
+    assert feishu._agent_confidence_rank(None) == 0
