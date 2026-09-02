@@ -1,7 +1,7 @@
 """用户数据与采集频率路由:dashboard / platform-agent / xianyu / schedules。"""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user

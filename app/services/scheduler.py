@@ -97,9 +97,20 @@ def _safe(func):  # type: ignore[no-untyped-def]
 
 
 def _cron_trigger(expr: str, default: dict) -> CronTrigger:
-    """解析 5 段 Cron 为 APScheduler 触发;非法时回退到 default(避免死作业)。"""
+    """解析 5 段 Cron 为 APScheduler 触发;非法时回退到 default(避免死作业)。
+
+    ⚠️ 星期几字段必须做 **POSIX → APScheduler** 换算:标准 cron 里 0=周日,而
+    APScheduler 的 `day_of_week` 是 **0=周一**(0 周一,1 周二, …, 6 周日)。
+    不换算会把"0 9 * * 1"(想周一)跑成周二、"0 20 * * 0"(想周日)跑成周一。
+    """
     try:
         parts = expr.split()
+        if len(parts) != 5:
+            raise ValueError(f"需 5 段,收到 {len(parts)} 段")
+        # 星期几:数字按 POSIX(0=Sun..6=Sat)→ APScheduler(0=Mon..6=Sun) 换算
+        dow = parts[4]
+        if dow.isdigit() and len(dow) == 1:
+            parts[4] = str((int(dow) + 6) % 7)
         cron_kw = dict(zip(("minute", "hour", "day", "month", "day_of_week"), parts))
         return CronTrigger(**cron_kw)
     except Exception:  # noqa: BLE001

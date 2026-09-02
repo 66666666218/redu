@@ -353,3 +353,13 @@ def test_alerts_list_includes_section(session) -> None:
     # alerts_list 在 platform 路由层,这里验证 AlertRecord.section 可读
     row = session.scalar(select(AlertRecord).where(AlertRecord.user_id == 1))
     assert row.section == "douhot"
+
+
+def test_healthz_reports_app_version() -> None:
+    """/healthz 的版本应来自共享 APP_VERSION,避免与 FastAPI 元数据脱节。"""
+    from app import APP_VERSION
+    from fastapi.testclient import TestClient
+    from app.platform import create_app
+
+    with TestClient(create_app()) as c:
+        assert c.get("/healthz").json()["version"] == APP_VERSION

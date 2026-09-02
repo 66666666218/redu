@@ -12,14 +12,13 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from app import APP_VERSION
 from app.api import all_routers
 from app.db import init_db
 from app.services import scheduler
 from app.utils import get_logger, setup_logging
 
 logger = get_logger(__name__)
-
-APP_VERSION = "2.0.0"
 
 
 @asynccontextmanager
@@ -91,10 +90,11 @@ def create_app() -> FastAPI:
             return (dist / "index.html").read_text(encoding="utf-8")
 
         # SPA history 路由回退:直接访问/刷新 /login 等必须回退到 index.html。
-        # 注册在所有 API 路由之后,并放过 API 前缀,让接口路径仍返回 JSON 404。
+        # 注册在所有 API 路由之后;healthz/docs 等都是真实路由会先匹配,
+        # 这里只需放过 API 与 assets 前缀,让接口路径仍返回 JSON 404。
         @app.get("/{full_path:path}", response_class=HTMLResponse)
         def spa_fallback(full_path: str) -> str:
-            if full_path.startswith(("api/", "assets/")) or full_path in {"healthz", "docs", "openapi.json"}:
+            if full_path.startswith(("api/", "assets/")):
                 raise HTTPException(404, "Not Found")
             return (dist / "index.html").read_text(encoding="utf-8")
 

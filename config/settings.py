@@ -73,8 +73,8 @@ class Settings(BaseSettings):
     feishu_hot_ratio: float = 0.30         # 分值环比涨幅 ≥ 该比例即实时推送
     feishu_burst_min_confidence: str = "高"  # 实时推送"预测爆发"所需最低置信度(高/中/低);中低置信只进日报与洞察、不实时推,减少噪音
     feishu_alert_cooldown_hours: int = 6   # 同一话题实时推送冷却(小时),防刷屏
-    feishu_insight_cron: str = "0 9 * * 1"  # 每周一 09:00 推"近7天爆点回顾"(智能体洞察报告)
-    weekly_summary_cron: str = "0 20 * * 0"  # 每周日 20:00 给每个用户发"本周热点洞察"邮件
+    feishu_insight_cron: str = "0 9 * * 1"  # 每周一 09:00 推"近7天爆点回顾"(day_of_week 用标准 cron,0=周日)
+    weekly_summary_cron: str = "0 20 * * 0"  # 每周日 20:00 给每个用户发"本周热点洞察"邮件(day_of_week 0=周日)
     # 抖音热点宝走代理池:部分服务器 IP 会被抖音风控(直接返回 502 nginx),
     # 开这个后 douhot 采集走 PROXY_EXTRACT_URL 提取的住宅代理。生产服务器建议开启。
     douhot_use_proxy: bool = False

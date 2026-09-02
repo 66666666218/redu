@@ -181,3 +181,30 @@ def test_tick_marks_ran_even_on_failure(monkeypatch: pytest.MonkeyPatch, session
     assert svc.get_or_create(session, 7, "douhot").last_run_at is not None
     # 抖音已标记不再重跑;微博/闲鱼因缺 Cookie 被跳过、未标记,仍在待跑队列
     assert [r.section for r in svc.due_schedules(session)] == ["weibo", "xianyu"]
+
+
+def _fire_weekday(expr: str, fallback: dict) -> int:
+    """计算 cron 的下次触发是星期几(0=Mon)。用实际行为验证,而非内部字段。"""
+    import datetime as dt
+
+    from apscheduler.util import localize
+
+    from app.services.scheduler import _cron_trigger
+
+    tr = _cron_trigger(expr, fallback)
+    anchor = localize(dt.datetime(2026, 9, 7, 0, 0), tr.timezone)  # 周一 00:00
+    return tr.get_next_fire_time(None, anchor).weekday()
+
+
+def test_cron_posix_weekday_conversion() -> None:
+    """星期几 POSIX(0=Sun)→APScheduler(0=Mon):'0 9 * * 1' 应为周一而非周二。"""
+    fallback = {"day_of_week": "mon", "hour": 9, "minute": 0}
+    assert _fire_weekday("0 9 * * 1", fallback) == 0   # 周一
+    assert _fire_weekday("0 20 * * 0", {"day_of_week": "sun", "hour": 20, "minute": 0}) == 6  # 周日
+
+
+def test_cron_field_count_violation_falls_back() -> None:
+    """6 段 cron(带秒)应落到安全默认(周日 20:00),而不是静默丢掉第 6 段。"""
+    default = {"day_of_week": "sun", "hour": 20, "minute": 0}
+    assert _fire_weekday("30 * * * * *", default) == 6  # 6 段 → 回退默认(周日)
+    assert _fire_weekday("0 9 * * 1", default) == 0      # 合法 5 段 → 不被破坏(周一)
