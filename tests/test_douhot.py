@@ -156,6 +156,31 @@ def test_top_n_from_settings() -> None:
     assert douhot._top_n(Settings(_env_file=None, douhot_top_n=9999)) == 200
 
 
+def test_fetch_keyword_heat_prefers_exact_match(monkeypatch: pytest.MonkeyPatch) -> None:
+    """按关键词定向查:优先精确匹配,否则取相关结果第一名;无结果返回冷启动。"""
+    class _FakeHotWordKeyword:
+        def __init__(self, result): self.result = result
+        def __call__(self, keyword, **kw): return self.result
+
+    class _FakeClient:
+        def __init__(self, result): self.hot_word_keyword = _FakeHotWordKeyword(result)
+
+    monkeypatch.setattr(
+        douhot, "DouhotClient",
+        lambda cookie, settings=None: _FakeClient([
+            {"title": "世界杯", "score": 500, "trends": [{"value": 3}, {"value": 8}]},
+            {"title": "世界杯竞猜", "score": 100, "trends": []},
+        ]),
+    )
+    hit = douhot.fetch_keyword_heat("ck", "世界杯", Settings(_env_file=None))
+    assert hit["score"] == 500 and hit["title"] == "世界杯" and hit["trend_len"] == 2 and hit["rank_now"] == 1
+
+    # 无结果 → 冷启动零值
+    monkeypatch.setattr(douhot, "DouhotClient", lambda cookie, settings=None: _FakeClient([]))
+    miss = douhot.fetch_keyword_heat("ck", "不存在", Settings(_env_file=None))
+    assert miss["score"] == 0 and miss["rank_now"] == 0 and miss["trend_len"] == 0
+
+
 def test_douhot_honors_proxy_switch_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
     """DOUHOT_USE_PROXY 默认关闭时,即使配了代理池也不走(douhot 直连)。
 

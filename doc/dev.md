@@ -333,6 +333,22 @@ redian/
 - 历史:曾用 Playwright 打开热点页拦截响应,重、吃内存、子Tab 点击常因改版失效;直连后已移除运行时浏览器依赖(Playwright 仅保留给 `scripts/probe_*.py` 抓包核验)。
 - 跨轮判涨:每轮把词条飙升指数入库,`run_douhot_trend` 末尾按词取历史序列,复用双重校验(环比涨幅 > `GROWTH_THRESHOLD` 且 斜率>0)判涨;命中则邮件告警,带冷却去重(`DOUHOT_ALERT_COOLDOWN_HOURS`)与单次上限(`DOUHOT_ALERT_MAX`),返回 `rising`。(需 ≥2 轮历史才生效。)
 
+### 5.10.1 关键词监控智能体 `services/keyword_agent.py`(可选)
+
+用户可为**任意关键词**设置监控(不限于 top100)——采集时会**按关键词定向查询**
+`query_list`(请求体 `keyword` 字段),即使该词不在当前榜单里也能取到它的飙升指数
+与趋势(实测 "世界杯" 等榜外词可查到 score=211、trends=35)。
+
+- **定向查询**:`douhot_client.hot_word_keyword(keyword)` → 查接口;`douhot.fetch_keyword_heat`
+  优先取精确匹配,否则取相关结果第一,无结果返回冷启动零值。榜单类型(内容词/搜索/
+  视频/话题/订阅)可选,`run_douhot::_record_douhot_watch_snaps` 对 `word` 类走定向查询,
+  其余榜在已采集榜单里找(词须在榜内)。
+- **趋势分析 + 预测**:`keyword_agent.analyze(keyword, scores)` 用历史热度序列(多轮采集的
+  score 按时间排)算环比涨幅、线性回归斜率,外推**下一轮预测值**,并判定 上升期/回落期/
+  震荡/平稳,生成一段中文摘要。纯 NumPy、离线可用。
+- **展示**:仪表盘"关键词监控 · 智能体"卡片——当前分、环比、预测下一轮、迷你趋势线、
+  分析摘要。`douhot_watch_analytics` 返回 `trend_label / forecast_next / summary / series`。
+
 ### 5.11 飞书群机器人 `services/feishu.py`(可选)
 
 监控结果可推送到飞书群,分**两条通道**:

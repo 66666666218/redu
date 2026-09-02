@@ -57,6 +57,30 @@ async function addWatch() {
 }
 function pct(v) { return v == null ? '—' : (v * 100).toFixed(1) + '%' }
 
+// 分数格式化:过万显示"x.x万",否则显示原始整数(内容词分数跨度大,211 会显示成 0.0万)
+function fmtScore(v) {
+  if (v == null) return '—'
+  if (Math.abs(v) >= 10000) return (v / 1e4).toFixed(1) + '万'
+  return String(Math.round(v))
+}
+
+// 把热度序列画成迷你趋势线的 SVG points(归一化到 120×36)
+function spark(series) {
+  if (!series || series.length < 2) return ''
+  const max = Math.max(...series), min = Math.min(...series)
+  const range = (max - min) || 1
+  const W = 120, H = 36
+  const pts = series.map((v, i) => {
+    const x = (i / (series.length - 1)) * W
+    const y = H - ((v - min) / range) * (H - 4) - 2
+    return `${x.toFixed(1)},${y.toFixed(1)}`
+  })
+  return pts.join(' ')
+}
+function trendClass(label) {
+  return label === '上升期' ? 'up' : (label === '回落期' ? 'down' : '')
+}
+
 onMounted(async () => { await load(); await loadAnalytics(); await loadWatches() })
 </script>
 
@@ -104,18 +128,33 @@ onMounted(async () => { await load(); await loadAnalytics(); await loadWatches()
       </div>
 
       <div class="card">
-        <h3>热点宝 · 关键词监控</h3>
+        <h3>🤖 关键词监控 · 智能体</h3>
         <div class="row" style="gap:8px;margin-bottom:8px">
           <select v-model="watchForm.list_type" style="width:auto">
             <option v-for="t in listTypes" :key="t.key" :value="t.key">{{ t.label }}</option>
           </select>
-          <input v-model="watchForm.keyword" placeholder="输入关键词" style="margin:0;flex:1" @keyup.enter="addWatch" />
+          <input v-model="watchForm.keyword" placeholder="输入关键词(任意词,榜外也能查)" style="margin:0;flex:1" @keyup.enter="addWatch" />
           <button @click="addWatch">关注</button>
         </div>
-        <table v-if="watches.length"><tr><th>关键词</th><th>最新分</th><th>排名</th><th>涨幅</th><th>样本</th></tr>
-          <tr v-for="w in watches" :key="w.keyword"><td>{{ w.keyword }}</td><td>{{ (w.last_score/1e4).toFixed(1) }}万</td><td>{{ w.rank_now || '未上榜' }}</td><td :class="{up:(w.growth||0)>0}">{{ w.growth ? (w.growth*100).toFixed(1)+'%' : '—' }}</td><td>{{ w.points }}</td></tr>
-        </table>
-        <div v-else class="empty">关注一个关键词,采集抖音后看趋势(词须在当前榜内才会记录)</div>
+
+        <div v-if="watches.length" class="grid" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
+          <div class="watch-card" v-for="w in watches" :key="w.keyword">
+            <div class="row" style="justify-content:space-between">
+              <b>{{ w.keyword }}</b>
+              <span class="badge" :class="trendClass(w.trend_label)">{{ w.trend_label || '关注中' }}</span>
+            </div>
+            <div class="row" style="gap:14px;margin:8px 0">
+              <div><div class="empty" style="padding:0">当前分</div><b class="num">{{ fmtScore(w.last_score) }}</b></div>
+              <div><div class="empty" style="padding:0">环比</div><b class="num" :class="{up:(w.growth||0)>0, down:(w.growth||0)<0}">{{ pct(w.growth) }}</b></div>
+              <div><div class="empty" style="padding:0">预测下一轮</div><b class="num">{{ fmtScore(w.forecast_next) }}</b></div>
+            </div>
+            <svg v-if="spark(w.series)" :width="120" :height="36" class="spark">
+              <polyline :points="spark(w.series)" fill="none" stroke="var(--neon)" stroke-width="2" stroke-linejoin="round"/>
+            </svg>
+            <div class="empty" style="margin-top:6px">{{ w.summary || '再采集一次积累更多数据' }}</div>
+          </div>
+        </div>
+        <div v-else class="empty">输入任意关键词 → 关注 → 采集抖音:无论它在不在榜上都会定向查出热度,并预测走势</div>
       </div>
     </div>
   </div>

@@ -304,6 +304,50 @@
 
 > 采集完成后会做跨轮判涨:命中(环比涨幅>阈值 且 斜率>0)的内容词会发邮件告警(带冷却去重),`rising_count` 为本轮判涨数。
 
+### 7.3 关键词监控 · 智能体
+
+> 用户可为**任意关键词**设置监控(不限于 top100):采集时会**按关键词定向查询**抖音接口,
+> 榜外的词也能取到专属热度。历史热度序列经算法分析后给出**趋势判定 + 下一轮预测**。
+
+**添加关注**
+
+- **请求方式**: POST `/api/douhot/watch`
+- **请求参数 (Body)**:
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `list_type` | str | 是 | `word`(内容词)/`search`/`video`/`topic`/`subscribe` |
+| `keyword` | str | 是 | 要监控的关键词 |
+
+**移除关注**: DELETE `/api/douhot/watch`,body 同 `list_type`+`keyword`。
+
+**智能体分析**
+
+- **请求方式**: GET `/api/douhot/watch-analytics`
+
+**响应示例 (200)**
+```json
+[
+  {
+    "keyword": "世界杯",
+    "list_type": "word",
+    "last_score": 211,
+    "rank_now": 0,
+    "points": 1,
+    "growth": 0.15,
+    "trend_label": "上升期",
+    "forecast_next": 305.2,
+    "summary": "「世界杯」当前热度 211 环比 +15.0% 预测下一轮约 305 处于上升期,热度在走高,可关注",
+    "series": [150, 180, 211],
+    "slope": 35.1
+  }
+]
+```
+
+> `trend_label`:上升期/回落期/震荡/平稳;`forecast_next` 为线性外推的下一轮预测热度;
+> `series` 为历史热度序列(供前端画迷你趋势线);`summary` 为自动生成的中文分析摘要。
+> 样本 <2 时 `growth`/`forecast_next` 为 `null`(尚未积累足够数据)。
+
 
 ---
 

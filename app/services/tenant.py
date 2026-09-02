@@ -151,7 +151,7 @@ def run_douhot(session: Session, user_id: int, settings: Settings | None = None)
             lists["video"] = douhot.fetch_video_words(douyin_cookie, settings)
         if "topic" in watch_types:
             lists["topic"] = douhot.fetch_topic_words(douyin_cookie, settings)
-        _record_douhot_watch_snaps(session, user_id, lists)
+        _record_douhot_watch_snaps(session, user_id, lists, douyin_cookie, settings)
         rising = _douhot_rising(session, user_id, settings, now)
         _record_run(session, user_id, "douhot", "success", f"words={len(words)} risen={len(rising)}")
         session.commit()
@@ -357,16 +357,33 @@ def list_douhot_watch(session: Session, user_id: int) -> list[dict]:
     return [{"list_type": r.list_type, "keyword": r.keyword} for r in rows]
 
 
-def _record_douhot_watch_snaps(session: Session, user_id: int, lists: dict[str, list[dict]]) -> None:
-    """把用户关注的词,在对应榜单(内容词/搜索/订阅)中记录得分与排名快照。"""
+def _record_douhot_watch_snaps(
+    session: Session,
+    user_id: int,
+    lists: dict[str, list[dict]],
+    douyin_cookie: str = "",
+    settings: Settings | None = None,
+) -> None:
+    """把用户关注的词,在对应榜单中记录得分与排名快照。
+
+    内容词(word):用**定向查询**取该词自身热度——不再依赖它碰巧在 top100 里,
+    这是"任意关键词监控"的核心。其他榜仍从已采集列表里找(词须在榜内才会命中)。
+    """
     watches = session.scalars(select(DouhotWatch).where(DouhotWatch.user_id == user_id)).all()
     for w in watches:
-        words = lists.get(w.list_type, [])
-        score, rank = 0, 0
-        for i, word in enumerate(words, start=1):
-            if word.get("title") == w.keyword:
-                score, rank = word.get("score", 0), i
-                break
+        if w.list_type == "word" and douyin_cookie:
+            try:
+                heat = douhot.fetch_keyword_heat(douyin_cookie, w.keyword, settings)
+                score, rank = heat.get("score", 0), heat.get("rank_now", 0)
+            except Exception:  # noqa: BLE001 - 定向查询失败降级为 0,不中断采集
+                score, rank = 0, 0
+        else:
+            words = lists.get(w.list_type, [])
+            score, rank = 0, 0
+            for i, word in enumerate(words, start=1):
+                if word.get("title") == w.keyword:
+                    score, rank = word.get("score", 0), i
+                    break
         session.add(
             DouhotWatchSnap(user_id=user_id, list_type=w.list_type, keyword=w.keyword, score=score, rank_now=rank)
         )
@@ -374,6 +391,8 @@ def _record_douhot_watch_snaps(session: Session, user_id: int, lists: dict[str, 
 
 
 def douhot_watch_analytics(session: Session, user_id: int) -> list[dict]:
+    from app.services import keyword_agent
+
     watches = session.scalars(select(DouhotWatch).where(DouhotWatch.user_id == user_id)).all()
     out = []
     for w in watches:
@@ -384,6 +403,7 @@ def douhot_watch_analytics(session: Session, user_id: int) -> list[dict]:
         ).all()
         values = [s.score for s in snaps]
         growth = compute_growth(values) if len(values) >= 2 else None
+        agent = keyword_agent.analyze(w.keyword, values)
         out.append(
             {
                 "keyword": w.keyword,
@@ -392,6 +412,12 @@ def douhot_watch_analytics(session: Session, user_id: int) -> list[dict]:
                 "rank_now": snaps[-1].rank_now if snaps else 0,
                 "points": len(values),
                 "growth": growth,
+                # 智能体:趋势分析 + 下一轮预测 + 迷你序列
+                "trend_label": agent["trend_label"],
+                "forecast_next": agent["forecast_next"],
+                "summary": agent["summary"],
+                "series": agent["series"],
+                "slope": agent["slope"],
             }
         )
     return out

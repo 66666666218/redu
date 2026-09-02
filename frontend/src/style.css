@@ -183,6 +183,16 @@ td.price, .up, .down, .num { font-family:var(--mono) }
 .legend b { color:var(--txt); font-weight:600 }
 .num { font-family:var(--mono) }
 
+/* 关键词监控智能体卡片 */
+.watch-card {
+  background:rgba(3,6,12,.55); border:1px solid var(--line); border-radius:10px;
+  padding:12px; transition:border-color .2s, box-shadow .2s;
+}
+.watch-card:hover { border-color:var(--line-lit); box-shadow:0 0 16px rgba(0,240,255,.10) }
+.watch-card .badge.up { color:var(--up); border-color:rgba(46,230,168,.4); background:rgba(46,230,168,.08) }
+.watch-card .badge.down { color:var(--down); border-color:rgba(255,92,122,.4); background:rgba(255,92,122,.08) }
+.spark { display:block; margin:4px 0; background:linear-gradient(180deg,transparent,rgba(0,240,255,.03)); border-radius:6px }
+
 /* ---- Toast ---- */
 .toasts { position:fixed; top:66px; right:20px; z-index:999; display:flex; flex-direction:column; gap:8px }
 .toast {

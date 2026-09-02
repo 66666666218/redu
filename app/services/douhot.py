@@ -76,6 +76,29 @@ def fetch_content_words(cookie: str, settings: Settings | None = None) -> list[d
     return words
 
 
+def fetch_keyword_heat(cookie: str, keyword: str, settings: Settings | None = None) -> dict:
+    """按关键词定向查内容词热度:返回 {score, rank, trend_len, latest_value, …}。
+
+    与榜单采集不同:直接拿 keyword 去查接口,即使该词不在 top100 里也能取到
+    它的飙升指数与趋势。查不到精确匹配时返回冷启动空值(score=0)。
+    """
+    raw = DouhotClient(cookie, settings).hot_word_keyword(keyword.strip())
+    if not raw:
+        return {"keyword": keyword.strip(), "score": 0, "trend_len": 0, "latest_value": 0, "rank_now": 0}
+    # 优先精确匹配,否则取相关结果第一名
+    hit = next((w for w in raw if str(w.get("title", "")).strip() == keyword.strip()), raw[0])
+    return {
+        "keyword": keyword.strip(),
+        "score": hit.get("score") or 0,
+        "trend_len": len(hit.get("trends") or []),
+        "latest_value": (hit.get("trends") or [{}])[-1].get("value", 0) if hit.get("trends") else 0,
+        "rank_now": next(
+            (i + 1 for i, w in enumerate(raw) if str(w.get("title", "")).strip() == keyword.strip()), 0
+        ),
+        "title": str(hit.get("title", ""))
+    }
+
+
 def _fetch_ranked(
     cookie: str,
     settings: Settings | None,

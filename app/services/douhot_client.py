@@ -192,6 +192,26 @@ class DouhotClient:
             limit,
         )
 
+    def hot_word_keyword(self, keyword: str, date_window: int = 24, tab_type: int = 1) -> list[dict]:
+        """按关键词定向查内容词榜:返回含该(或近似)词的条目列表。
+
+        douhot 的 query_list 支持 `keyword` 过滤(榜单 topN 之外也能查到),
+        这是"任意关键词监控"的关键——不再依赖关键词碰巧在 top100 里。
+        """
+        data = self._call(
+            "POST",
+            HOT_WORD_API,
+            TREND_PAGE,
+            {
+                "page_num": 1,
+                "page_size": WORD_PAGE_SIZE,
+                "tab_type": tab_type,
+                "keyword": keyword,
+                "date_window": date_window,
+            },
+        )
+        return self._items(data, "word_list")
+
     def hot_search(self, limit: int = 20, date_window: int = 1, sub_type: int = 3001) -> list[dict]:
         """搜索榜(key_word + search_score)。"""
         data = self._call(
