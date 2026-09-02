@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from config.settings import Settings, get_settings
 from app.db import repository
 from app.db.models import DouhotWatchSnap, DouhotWord, FeishuAlert, WeiboHotItem, XianyuItem
-from app.services.feishu_client import FeishuClient, _sign  # noqa: F401  (_sign 供测试)
+from app.services.feishu_client import FeishuClient
 from app.utils import get_logger
 
 logger = get_logger(__name__)

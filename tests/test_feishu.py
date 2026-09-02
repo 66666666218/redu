@@ -20,7 +20,8 @@ from app.db.database import Base
 from app.db import models  # noqa: F401
 from app.db.models import DouhotWord, FeishuAlert, User, WeiboHotItem, XianyuItem
 from app.services import feishu, feishu_client
-from app.services.feishu import _delta, _sign, build_daily, run_feishu_keyword_alerts, run_feishu_realtime
+from app.services.feishu import _delta, build_daily, run_feishu_keyword_alerts, run_feishu_realtime
+from app.services.feishu_client import _sign
 
 SECRET = "test-sign-secret-placeholder"
 
