@@ -5,6 +5,7 @@ import { api } from '../api'
 const dash = ref({ weibo_trends: [], xianyu_hot: [], douhot_words: [] })
 const analytics = ref({ total_want: 0, top_risers: [], categories: [], top_fallers: [], items: [] })
 const watches = ref([])
+const platformAgent = ref({ weibo: [], xianyu: [] })
 const watchForm = ref({ list_type: 'word', keyword: '' })
 const msg = ref('')
 const busy = ref('')
@@ -32,6 +33,9 @@ const listTypes = [
 
 async function load() {
   try { dash.value = await api.dashboard() } catch (e) { msg.value = e.message }
+}
+async function loadAgent() {
+  try { platformAgent.value = await api.platformAgent() } catch (e) { /* 暂无 */ }
 }
 async function loadAnalytics() {
   try { analytics.value = await api.xianyuAnalytics() } catch (e) { /* 暂无数据 */ }
@@ -96,7 +100,7 @@ function trendClass(label) {
   return label === '上升期' ? 'up' : (label === '回落期' ? 'down' : '')
 }
 
-onMounted(async () => { await load(); await loadAnalytics(); await loadWatches() })
+onMounted(async () => { await load(); await loadAgent(); await loadAnalytics(); await loadWatches() })
 </script>
 
 <template>
@@ -172,6 +176,32 @@ onMounted(async () => { await load(); await loadAnalytics(); await loadWatches()
           </div>
         </div>
         <div v-else class="empty">输入任意关键词 → 关注 → 采集抖音:无论它在不在榜上都会定向查出热度,并预测走势</div>
+      </div>
+
+      <div class="card" v-if="platformAgent.weibo.length || platformAgent.xianyu.length">
+        <h3>🤖 微博 / 闲鱼 热点预测</h3>
+        <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
+          <div v-for="s in [['微博',platformAgent.weibo],['闲鱼',platformAgent.xianyu]]" :key="s[0]">
+            <template v-if="s[1].length">
+              <h4 style="color:var(--dim);margin:4px 0 8px">{{ s[0] }} · 预测</h4>
+              <div class="watch-card" v-for="w in s[1]" :key="s[0]+'-'+w.title">
+                <div class="row" style="justify-content:space-between">
+                  <b>{{ w.title.slice(0,18) }} <span v-if="w.burst" style="color:var(--down)">🔥</span></b>
+                  <span class="badge" :class="trendClass(w.trend_label)">{{ w.trend_label }}</span>
+                </div>
+                <div class="row" style="gap:14px;margin:6px 0">
+                  <div><div class="empty" style="padding:0">当前</div><b class="num">{{ fmtScore(w.last_score) }}</b></div>
+                  <div><div class="empty" style="padding:0">环比</div><b class="num" :class="{up:(w.growth||0)>0}">{{ pct(w.growth) }}</b></div>
+                  <div><div class="empty" style="padding:0">预测</div><b class="num">{{ fmtScore(w.forecast_next) }}</b></div>
+                </div>
+                <svg v-if="w.series && w.series.length >= 2" :width="132" :height="38" class="spark">
+                  <polyline :points="spark(w.series, w.forecast_next).solid" fill="none" stroke="var(--neon)" stroke-width="2" stroke-linejoin="round"/>
+                  <polyline v-if="spark(w.series, w.forecast_next).fc" :points="spark(w.series, w.forecast_next).fc" fill="none" stroke="var(--neon-2)" stroke-width="2" stroke-dasharray="4,3" stroke-linejoin="round"/>
+                </svg>
+              </div>
+            </template>
+          </div>
+        </div>
       </div>
     </div>
   </div>

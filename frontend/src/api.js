@@ -69,6 +69,7 @@ export const api = {
   schedules: () => req('GET', '/api/schedules'),
   setSchedule: (section, payload) => req('PUT', `/api/schedules/${section}`, payload),
   dashboard: () => req('GET', '/api/dashboard'),
+  platformAgent: () => req('GET', '/api/platform-agent'),
   xianyuDaily: () => req('GET', '/api/xianyu/daily'),
   xianyuCollectDeep: () => req('POST', '/api/xianyu/collect-deep'),
   xianyuAnalytics: () => req('GET', '/api/xianyu/analytics'),

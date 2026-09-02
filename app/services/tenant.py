@@ -191,6 +191,46 @@ def _douhot_rising(session, user_id: int, settings: Settings, now) -> list[dict]
     return rising[: settings.douhot_alert_max]
 
 
+def platform_agent(session: Session, user_id: int, top_n: int = 8) -> dict:
+    """多平台智能体:把微博热度 / 闲鱼想要数 的历史序列喂给 `keyword_agent`,
+    产出各平台的热点趋势 + 预测(与抖音同一套逻辑)。返回 {weibo, xianyu}。
+
+    - weibo:按 微博热搜词 的 heat 序列(多轮采集)判定趋势并预测下一轮热度
+    - xianyu:按 商品 的 want_count 序列(每日快照)判定趋势并预测
+    """
+    from app.services import keyword_agent
+
+    def run(maker: object) -> list[dict]:
+        out = []
+        for title, series in maker:  # type: ignore[attr-defined]
+            if len(series) < 2:
+                continue
+            a = keyword_agent.analyze(title, [v for _, v in series])
+            a["title"] = title
+            a["series"] = [v for _, v in series]
+            out.append(a)
+        out.sort(key=lambda x: (x["burst"], x["forecast_next"] or 0), reverse=True)
+        return out[:top_n]
+
+    # 微博:每标题 heat 序列(按采集时间)
+    weibo_series: dict[str, list] = {}
+    for r in session.scalars(
+        select(WeiboHotItem).where(WeiboHotItem.user_id == user_id).order_by(WeiboHotItem.id.asc())
+    ).all():
+        weibo_series.setdefault(r.title, []).append((r.captured_at, r.heat))
+    weibo = run(weibo_series.items())  # type: ignore[arg-type]
+
+    # 闲鱼:每商品 want_count 序列(按快照日期)
+    xy_series: dict[str, list] = {}
+    for r in session.scalars(
+        select(XianyuDaily).where(XianyuDaily.user_id == user_id).order_by(XianyuDaily.snap_date.asc())
+    ).all():
+        xy_series.setdefault(r.title or r.item_id, []).append((r.snap_date, r.want_count))
+    xianyu = run(xy_series.items())  # type: ignore[arg-type]
+
+    return {"weibo": weibo, "xianyu": xianyu}
+
+
 def dashboard(session: Session, user_id: int) -> dict:
     """用户仪表盘:微博上涨 + 闲鱼热榜 + 抖音热词(按 user 隔离)。"""
     trends = [

@@ -325,6 +325,11 @@ def create_app() -> FastAPI:
     def dashboard(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         return tenant.dashboard(db, user.id)
 
+    @app.get("/api/platform-agent")
+    def platform_agent(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        """多平台智能体预测:微博/闲鱼热点趋势 + 预测(与抖音同一套逻辑)。"""
+        return tenant.platform_agent(db, user.id)
+
     @app.get("/api/xianyu/daily")
     def xianyu_daily(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         return tenant.xianyu_daily(db, user.id)

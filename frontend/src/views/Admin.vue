@@ -260,6 +260,23 @@ onMounted(load)
           <div v-else class="empty">暂无</div>
         </div>
       </div>
+
+      <div class="grid" style="margin-top:16px">
+        <div class="card">
+          <h3>📈 微博热点预测</h3>
+          <table v-if="insights.weibo && insights.weibo.length"><tr><th>词</th><th>趋势</th><th>环比</th><th>预测</th></tr>
+            <tr v-for="w in insights.weibo" :key="w.title"><td>{{ w.title.slice(0,16) }}</td><td :class="{up:w.trend_label==='上升期'}">{{ w.trend_label }}</td><td class="num up">{{ w.growth!=null?(w.growth*100).toFixed(0)+'%':'—' }}</td><td class="num">{{ Math.round(w.forecast_next||0) }}</td></tr>
+          </table>
+          <div v-else class="empty">暂无(需采集微博积累多轮)</div>
+        </div>
+        <div class="card">
+          <h3>📈 闲鱼商品预测</h3>
+          <table v-if="insights.xianyu && insights.xianyu.length"><tr><th>商品</th><th>趋势</th><th>环比</th><th>预测</th></tr>
+            <tr v-for="x in insights.xianyu" :key="x.title"><td>{{ x.title.slice(0,16) }}</td><td :class="{up:x.trend_label==='上升期'}">{{ x.trend_label }}</td><td class="num up">{{ x.growth!=null?(x.growth*100).toFixed(0)+'%':'—' }}</td><td class="num">{{ Math.round(x.forecast_next||0) }}</td></tr>
+          </table>
+          <div v-else class="empty">暂无(需闲鱼深度采集积累每日想要数)</div>
+        </div>
+      </div>
     </template>
 
     <template v-if="tab==='users'">

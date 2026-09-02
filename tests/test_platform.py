@@ -294,3 +294,27 @@ def test_admin_insights_detects_burst(session) -> None:
     burst_keywords = {b["keyword"] for b in out["burst"]}
     assert "爆点" in burst_keywords
     assert "退潮" not in burst_keywords  # 回落的不进爆发榜
+
+
+def test_platform_agent_weibo_and_xianyu(session) -> None:
+    """多平台智能体:微博热度序列 / 闲鱼想要数序列 都能判趋势+预测。"""
+    from datetime import date, datetime, timedelta
+    from app.db.models import WeiboHotItem, XianyuDaily
+
+    # 微博:一个词热度逐步走高
+    base = date.today() - timedelta(days=1)
+    for i, h in enumerate([1000, 1200, 1600, 2400]):
+        session.add(WeiboHotItem(user_id=1, title="冲榜词", heat=h, rank=1,
+                                 captured_at=datetime.now().replace(hour=8) + timedelta(hours=i)))
+    # 闲鱼:一个商品想要数逐日走高
+    for i, w in enumerate([5, 8, 14, 22]):
+        session.add(XianyuDaily(user_id=1, item_id="it1", title="教程", snap_date=(base + timedelta(days=i)).isoformat(),
+                                want_count=w, category="教程"))
+    session.commit()
+
+    out = tenant.platform_agent(session, 1)
+    assert out["weibo"] and out["weibo"][0]["title"] == "冲榜词"
+    assert out["weibo"][0]["trend_label"] == "上升期"
+    assert out["xianyu"][0]["growth"] is not None and out["xianyu"][0]["growth"] > 0
+    # 都有预测值
+    assert out["weibo"][0]["forecast_next"] is not None

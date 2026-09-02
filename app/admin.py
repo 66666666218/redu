@@ -445,6 +445,21 @@ def insights(db: Session) -> dict:
     burst.sort(key=lambda r: (r["forecast_next"] or 0), reverse=True)
     rising.sort(key=lambda r: (r["growth"] or 0), reverse=True)
 
+    # 跨用户聚合 微博/闲鱼 的智能体预测(与抖音同一套逻辑)
+    from app.services import tenant as tenant_svc
+
+    weibo_merged: dict[str, dict] = {}
+    xy_merged: dict[str, dict] = {}
+    for uid in db.scalars(select(User.id).where(User.enabled.is_(True))).all():
+        pa = tenant_svc.platform_agent(db, uid, top_n=5)
+        for key, bucket in (("weibo", weibo_merged), ("xianyu", xy_merged)):
+            for item in pa[key]:
+                prev = bucket.get(item["title"])
+                if prev is None or (item.get("forecast_next") or 0) > (prev.get("forecast_next") or 0):
+                    bucket[item["title"]] = item
+    weibo_pred = sorted(weibo_merged.values(), key=lambda x: (x["burst"], x["forecast_next"] or 0), reverse=True)[:10]
+    xy_pred = sorted(xy_merged.values(), key=lambda x: (x["burst"], x["forecast_next"] or 0), reverse=True)[:10]
+
     # 全站抖音内容词(按去重标题取热度最高的)
     seen: dict[str, float] = {}
     for w in db.scalars(select(DouhotWord).order_by(DouhotWord.score.desc())).all():
@@ -464,4 +479,6 @@ def insights(db: Session) -> dict:
         "burst": burst[:15],
         "rising": rising[:10],
         "hot_words": hot_words,
+        "weibo": weibo_pred,
+        "xianyu": xy_pred,
     }
