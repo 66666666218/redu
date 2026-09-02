@@ -275,3 +275,21 @@ def test_collect_failures_below_threshold_no_alert(monkeypatch, session) -> None
     monkeypatch.setattr(feishu_client, "FeishuClient", lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
     assert alert_service.check_collect_failures(_settings(fail_alert_threshold=3), db=session) == 0
     assert not sent
+
+
+def test_collect_failures_no_alert_if_recovered(monkeypatch, session) -> None:
+    """失败几次后又成功 → 当前未断,不应误报"持续失败"。"""
+    from datetime import datetime, timedelta
+    from app.services import alert_service
+    from app.db.models import RunRecord
+
+    for i in range(3):  # 前 3 次失败
+        session.add(RunRecord(user_id=1, run_id=f"f{i}", kind="douhot", status="failed",
+                              started_at=datetime.now() - timedelta(hours=3, minutes=i)))
+    session.add(RunRecord(user_id=1, run_id="ok", kind="douhot", status="success",
+                          started_at=datetime.now()))  # 最近一次成功 → 已恢复
+    session.commit()
+    sent = []
+    monkeypatch.setattr(feishu_client, "FeishuClient", lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
+    assert alert_service.check_collect_failures(_settings(fail_alert_threshold=3), db=session) == 0
+    assert not sent

@@ -308,6 +308,16 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
     db = db or get_session_local()()
     sent = 0
     try:
+        # 仅当某 (用户,板块) **最近一次运行仍失败**(当前仍断)才告警;
+        # 否则中途重试成功过,不算"持续失败"(否则会误报)。
+        latest = select(RunRecord.user_id, RunRecord.kind, func.max(RunRecord.id).label("mid")).group_by(
+            RunRecord.user_id, RunRecord.kind
+        ).subquery()
+        latest_rows = db.execute(
+            select(latest.c.user_id, latest.c.kind, RunRecord.status).join(RunRecord, RunRecord.id == latest.c.mid)
+        ).all()
+        currently_broken = {(uid, kind) for uid, kind, status in latest_rows if status == "failed"}
+
         rows = db.execute(
             select(RunRecord.user_id, RunRecord.kind, func.count(RunRecord.id))
             .where(RunRecord.status == "failed", RunRecord.started_at >= since)
@@ -315,7 +325,7 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
         ).all()
         hits = []
         for uid, kind, cnt in rows:
-            if cnt < threshold:
+            if (uid, kind) not in currently_broken or cnt < threshold:
                 continue
             existing = db.scalar(
                 select(FeishuAlert).where(
