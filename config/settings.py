@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     request_delay_seconds: float = 2.5  # 每次外部请求间的随机基础间隔(秒)
     # 采集持续失败告警:某用户某板块近 24h 失败 >= 该次数,推飞书告警(防 Cookie 过期无人知)
     fail_alert_threshold: int = 3
+    # 数据保留天数:超过该天数的快照/运行/告警/日志会被清理 job 删除(控制库体积)
+    data_retention_days: int = 30
 
     # ---- 邮件通知 ----
     smtp_host: str = ""

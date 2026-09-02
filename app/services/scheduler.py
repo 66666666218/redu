@@ -132,6 +132,12 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     )
     for func, job_id in ((retry_failed_runs, "auto_retry_failed_runs"), (check_collect_failures, "collect_failed_alert")):
         scheduler.add_job(_safe(func), CronTrigger(minute="*/30"), id=job_id, max_instances=1, coalesce=True)
+    # 数据保留治理:每天 04:00 删除超过 DATA_RETENTION_DAYS 的旧快照/运行/日志
+    from app.db.maintenance import cleanup_old_data
+
+    scheduler.add_job(
+        _safe(cleanup_old_data), CronTrigger(hour=4, minute=0), id="data_cleanup", max_instances=1, coalesce=True
+    )
     jobs = [
         (run_feishu_daily, _get_settings().feishu_daily_cron, {"minute": 0, "hour": 8}, "feishu_daily"),
         (run_feishu_insight_digest, _get_settings().feishu_insight_cron, {"day_of_week": "mon", "hour": 9, "minute": 0}, "feishu_insight"),
