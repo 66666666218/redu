@@ -327,7 +327,7 @@ def _kind_breakdown(db: Session) -> dict:
 
 
 def failed_runs(db: Session, limit: int = 50) -> list[dict]:
-    rows = db.scalars(select(RunRecord).where(RunRecord.status == "failed").order_by(RunRecord.id.desc()).limit(limit)).all()
+    rows = repository.failed_runs(db, limit)
     return [
         {"run_id": r.run_id, "kind": r.kind, "user_id": r.user_id,
          "detail": (r.detail or "")[:200], "time": r.started_at.isoformat(), "retry": r.retry_count}

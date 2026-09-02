@@ -204,7 +204,7 @@ def run_feishu_daily() -> int:
     db = get_session_local()()
     sent = 0
     try:
-        for user in db.scalars(select(User).where(User.enabled.is_(True))).all():
+        for user in repository.list_enabled_users(db):
             text = build_daily(db, user.id, settings)
             if client.send(text):
                 sent += 1
@@ -247,7 +247,7 @@ def run_feishu_insight_digest(settings: Settings | None = None) -> int:
     try:
         lines = ["📅 近 7 天爆点回顾", ""]
         burst_rows, rising_rows = [], []
-        for user in db.scalars(select(User).where(User.enabled.is_(True))).all():
+        for user in repository.list_enabled_users(db):
             for w in tenant.list_douhot_watch(db, user.id):
                 snaps = repository.watch_snap_series(db, user.id, w["keyword"], since)
                 values = [s.score for s in snaps]

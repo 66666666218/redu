@@ -80,13 +80,6 @@ def douhot_top_words(db: Session, user_id: int, limit: int = 100) -> list[Douhot
     ).all()
 
 
-def douhot_score_series(db: Session, user_id: int) -> dict[str, list[tuple[datetime, float]]]:
-    series: dict[str, list[tuple[datetime, float]]] = {}
-    for r in douhot_words(db, user_id, desc=False):
-        series.setdefault(r.title, []).append((r.created_at, r.score))
-    return series
-
-
 # ---- 闲鱼 ----
 def xianyu_items(db: Session, user_id: int, limit: int = 30) -> list[XianyuItem]:
     return db.scalars(

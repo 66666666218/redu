@@ -272,7 +272,7 @@ def run_weekly_summary() -> int:
     db = get_session_local()()
     sent = 0
     try:
-        for user in db.scalars(select(User).where(User.enabled.is_(True))).all():
+        for user in repository.list_enabled_users(db):
             if not (user.email or ""):
                 continue
             notify = get_user_notifier(user, settings)

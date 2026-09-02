@@ -2,12 +2,11 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
-from app.db import get_db
-from app.db.models import AlertRecord, User
+from app.db import get_db, repository
+from app.db.models import User
 from app.services import alert_service
 from app.api.deps import AlertRuleIn
 
@@ -38,7 +37,5 @@ def alerts_rule_del(rule_id: int, user: User = Depends(get_current_user), db: Se
 
 @router.get("/api/alerts/list")
 def alerts_list(limit: int = 30, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    rows = db.scalars(
-        select(AlertRecord).where(AlertRecord.user_id == user.id).order_by(AlertRecord.id.desc()).limit(limit)
-    ).all()
+    rows = repository.recent_alerts(db, user.id, limit)
     return [{"keyword": r.keyword, "reason": r.reason, "section": r.section, "time": r.triggered_at.isoformat()} for r in rows]
