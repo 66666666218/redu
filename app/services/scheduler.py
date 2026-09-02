@@ -60,6 +60,14 @@ def collect_tick(settings: Settings | None = None, now: datetime | None = None) 
             try:
                 runner(db, row.user_id, settings)
                 ok += 1
+                # 采集成功后触发飞书实时提醒(新增/飙升话题立即推送到群里)。
+                # 异步、失败不影响本轮采集结果。
+                try:
+                    from app.services.feishu import run_feishu_realtime
+
+                    run_feishu_realtime(row.section, row.user_id, settings)
+                except Exception:  # noqa: BLE001
+                    logger.exception("飞书实时提醒失败 section=%s user=%s", row.section, row.user_id)
             except Exception as exc:  # noqa: BLE001
                 failed += 1
                 db.rollback()
@@ -87,9 +95,11 @@ def _safe(func):  # type: ignore[no-untyped-def]
 
 
 def build_jobs(scheduler: BackgroundScheduler) -> None:
-    """注册三个后台作业:按用户频率采集、定时告警摘要、失败自动重试。"""
+    """注册后台作业:按用户频率采集、定时告警摘要、失败自动重试、飞书日报。"""
     from app.admin import retry_failed_runs
     from app.services.alert_service import run_fixed_time_digests
+    from app.services.feishu import run_feishu_daily
+    from config.settings import get_settings as _get_settings
 
     scheduler.add_job(
         _safe(collect_tick), CronTrigger(minute="*"), id="collect_tick", max_instances=1, coalesce=True
@@ -103,6 +113,16 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         id="auto_retry_failed_runs",
         max_instances=1,
         coalesce=True,
+    )
+    # 飞书日报:每天固定时刻推三板块榜单对比(未配置 webhook 时函数内为 no-op)
+    try:
+        parts = _get_settings().feishu_daily_cron.split()
+        cron_kw = dict(zip(("minute", "hour", "day", "month", "day_of_week"), parts))
+        daily_trigger = CronTrigger(**cron_kw)
+    except Exception:  # noqa: BLE001 - 表达式非法时回退到每天 08:00
+        daily_trigger = CronTrigger(hour=8, minute=0)
+    scheduler.add_job(
+        _safe(run_feishu_daily), daily_trigger, id="feishu_daily", max_instances=1, coalesce=True
     )
 
 

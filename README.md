@@ -36,6 +36,7 @@ python -m app.main --api    # API/看板 模式
 | `XIANYU_TOP_N/DETAIL_LIMIT` | 前 N 榜 / 慢速TopN详情 |
 | `SCHEDULER_ENABLED` | 随 API 进程启动后台调度器(默认 true);多 worker 部署须设 false 并单起调度容器 |
 | 采集频率 | 无全局 Cron:每个用户在**平台内**「采集频率」页自行设置(10~1440 分钟,三个板块分别设) |
+| `FEISHU_WEBHOOK/SECRET` | 可选:飞书群机器人,每天发**热点日报** + **新增/飙升实时提醒**;webhook 留空即关闭 |
 | 各平台 Cookie | 用户在**平台内**自行配置,不写在 .env |
 
 ## Docker 一键部署

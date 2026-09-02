@@ -64,6 +64,15 @@ class Settings(BaseSettings):
     notify_to: str = ""             # 收件人,英文逗号分隔
     is_dev: bool = True             # 开发模式:不真正外发邮件
 
+    # ---- 飞书机器人 ----
+    # 未配置 webhook 时,飞书日报与实时提醒自动关闭(不影响其他功能)。
+    feishu_webhook: str = ""        # 群机器人 Webhook 地址
+    feishu_secret: str = ""         # 机器人签名校验密钥(为空则不签名)
+    feishu_daily_cron: str = "0 8 * * *"   # 每日热点日报时间(默认 08:00)
+    feishu_hot_rank_jump: int = 3          # 排名跳升 ≥ 该名次即实时推送
+    feishu_hot_ratio: float = 0.30         # 分值环比涨幅 ≥ 该比例即实时推送
+    feishu_alert_cooldown_hours: int = 6   # 同一话题实时推送冷却(小时),防刷屏
+
     # ---- 服务 ----
     app_port: int = 8080
     data_dir: str = "data"          # 归档与快照根目录

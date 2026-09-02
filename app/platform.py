@@ -273,7 +273,15 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "不支持的平台")
         try:
             runner = {"weibo": tenant.run_weibo, "xianyu": tenant.run_xianyu, "douhot": tenant.run_douhot}[platform]
-            return runner(db, user.id)
+            result = runner(db, user.id)
+            # 采集成功后触发飞书实时提醒;失败不影响采集结果返回
+            try:
+                from app.services.feishu import run_feishu_realtime
+
+                run_feishu_realtime(platform, user.id)
+            except Exception:  # noqa: BLE001
+                pass
+            return result
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         except Exception as exc:  # noqa: BLE001

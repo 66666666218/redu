@@ -216,6 +216,20 @@ class DouhotWatchSnap(Base):
     captured_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
+class FeishuAlert(Base):
+    """飞书实时提醒去重记录:同一 (用户, 板块, 话题) 在冷却期内只推一次,防刷屏。"""
+
+    __tablename__ = "feishu_alerts"
+    __table_args__ = (UniqueConstraint("user_id", "section", "title", name="uq_feishu_alert"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    section: Mapped[str] = mapped_column(String(32))   # weibo/xianyu/douhot
+    title: Mapped[str] = mapped_column(String(500))
+    reason: Mapped[str] = mapped_column(String(255), default="")
+    alerted_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
 class AlertRule(Base):
     """用户自定义预警规则(每板块)。
 

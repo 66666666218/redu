@@ -333,6 +333,26 @@ redian/
 - 历史:曾用 Playwright 打开热点页拦截响应,重、吃内存、子Tab 点击常因改版失效;直连后已移除运行时浏览器依赖(Playwright 仅保留给 `scripts/probe_*.py` 抓包核验)。
 - 跨轮判涨:每轮把词条飙升指数入库,`run_douhot_trend` 末尾按词取历史序列,复用双重校验(环比涨幅 > `GROWTH_THRESHOLD` 且 斜率>0)判涨;命中则邮件告警,带冷却去重(`DOUHOT_ALERT_COOLDOWN_HOURS`)与单次上限(`DOUHOT_ALERT_MAX`),返回 `rising`。(需 ≥2 轮历史才生效。)
 
+### 5.11 飞书群机器人 `services/feishu.py`(可选)
+
+监控结果可推送到飞书群,分**两条通道**:
+
+1. **每日热点日报** `run_feishu_daily()`:按 `FEISHU_DAILY_CRON`(默认每天 08:00)推送三板块
+   "最近一批 vs 上一批"榜单对比——每个话题标注排名涨跌(如 `🔥+3名`/`📉-2名`)或新增(✅新增),
+   末尾附一段趋势分析(上升最多/新增/回落最多)。`build_daily(db, uid, settings)` 生成文本。
+2. **实时提醒** `run_feishu_realtime(section, user_id)`:每次采集成功后调用,只把**当日新增**、
+   **排名跳升 ≥ `FEISHU_HOT_RANK_JUMP` 名**、或**分值环比 ≥ `FEISHU_HOT_RATIO`** 的话题立即推群,
+   并按 `FEISHU_ALERT_COOLDOWN_HOURS` 去重(表 `feishu_alerts`),防刷屏。
+
+- **签名校验**:飞书自定义机器人若开启"签名校验",请求体须带 `sign`。
+  官方算法:`string_to_sign = f"{timestamp}\\n{secret}"`,`sign = base64(HmacSHA256(string_to_sign, ""))`
+  (以 string_to_sign 为 HMAC key、空消息)。**注意不要把 secret 当 key,反之会 `sign match fail`。**
+  密钥为空则不带 `sign`(即机器人关闭签名校验)。
+- **IP 白名单**:机器人若开了 IP 白名单,须把**服务器公网 IP** 加进去,否则回报 `19022 Ip Not Allowed`。
+- **触发挂载**:实时提醒在 `app/services/scheduler.py::collect_tick` 与手动采集接口 `/api/collect/{platform}`
+  成功采集后调用;日报挂在 `scheduler.build_jobs()` 的 `feishu_daily` job。
+- 未配置 `FEISHU_WEBHOOK` 时两条通道均自动关闭(不影响其他功能)。
+
 ---
 
 ## 6. 业务流程与调度
