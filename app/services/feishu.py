@@ -1,32 +1,23 @@
 """飞书群机器人「热点日报 + 实时提醒」(见 doc/dev.md §5.11)。
 
-**为什么有签名**:飞书自定义机器人若配置了"签名校验",请求体里必须带
-`sign`,由 `secret` 求得,否则返回 `sign match fail`。算法是
-`sign = base64(HmacSHA256(secret, f"{timestamp}\\n{secret}"))`(timestamp 单位秒)。
-
-**两条推送通道**:
-- `run_feishu_daily()`:按 `FEISHU_DAILY_CRON` 每天一次,推送三板块"上一轮 vs
-  上上轮"榜单对比 + 整体趋势分析(上升最多/回落最多/新增最多)。
-- `run_feishu_realtime(section, user_id)`:每次采集成功后调用;只把**当日新增**、
-  **排名跳升 ≥ FEISHU_HOT_RANK_JUMP 名**、或**分值环比 ≥ FEISHU_HOT_RATIO** 的
-  话题立即推到群里,并按 `FEISHU_ALERT_COOLDOWN_HOURS` 去重,防刷屏。
+客户端(签名/发送)在 `app/services/feishu_client.py`;本模块负责**作业编排**:
+- `run_feishu_daily()`:按 `FEISHU_DAILY_CRON` 每天一次,推三板块榜单对比 + 趋势分析。
+- `run_feishu_realtime(section, user_id)`:采集成功后推"新增/飙升"话题(按冷却去重)。
+- `run_feishu_keyword_alerts(...)`:智能体"预测爆发"实时推送(按置信度门槛)。
+- `run_feishu_insight_digest()`:每周"近7天爆点回顾"。
 
 未配置 `FEISHU_WEBHOOK` 时全部自动关闭(不影响其他功能)。
 """
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
-import time
 from datetime import datetime, timedelta
 
-import requests
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
 from app.db.models import DouhotWatchSnap, DouhotWord, FeishuAlert, WeiboHotItem, XianyuItem
+from app.services.feishu_client import FeishuClient, _sign  # noqa: F401  (_sign 供测试)
 from app.utils import get_logger
 
 logger = get_logger(__name__)
@@ -38,53 +29,10 @@ _RANK_FIELD = {"weibo": "rank", "xianyu": "best_rank", "douhot": "score"}
 # 每板块的历史表(用于上一轮快照对比)
 _TABLES = {"weibo": WeiboHotItem, "xianyu": XianyuItem, "douhot": DouhotWord}
 
-_TIMEOUT = 15
-
 
 def _agent_confidence_rank(level: str | None) -> int:
     """置信度等级 → 数值,便于比较。高=3/中=2/低=1;未知视为 0。"""
     return {"高": 3, "中": 2, "低": 1}.get(level or "", 0)
-
-
-def _sign(secret: str, ts: int) -> str:
-    """飞书签名。
-
-    官方算法:`string_to_sign = '{timestamp}\\n{secret}'`,以它为 **HMAC key**,
-    消息体为**空字符串**,`sign = base64(HmacSHA256(string_to_sign, ""))`。
-    注意不是拿 secret 当 key——两者写反会 `sign match fail`。
-    """
-    string_to_sign = f"{ts}\n{secret}".encode("utf-8")
-    digest = hmac.new(string_to_sign, msg=b"", digestmod=hashlib.sha256).digest()
-    return base64.b64encode(digest).decode("utf-8")
-
-
-class FeishuClient:
-    """飞书自定义机器人客户端(单条文本消息)。"""
-
-    def __init__(self, webhook: str, secret: str) -> None:
-        self.webhook = webhook
-        self.secret = secret or ""
-
-    def send(self, text: str) -> bool:
-        """推送一条文本。成功返回 True;网络/签名/风控错误记日志并返回 False。"""
-        if len(text) > 18000:
-            text = text[:17000] + "\n…(内容过长已截断)"
-        ts = int(time.time())
-        body: dict = {"msg_type": "text", "content": {"text": text}}
-        if self.secret:
-            body["timestamp"] = str(ts)
-            body["sign"] = _sign(self.secret, ts)
-        try:
-            resp = requests.post(self.webhook, json=body, timeout=_TIMEOUT)
-            obj = resp.json()
-            code, msg = obj.get("code"), obj.get("msg")
-            if code == 0:
-                return True
-            logger.warning("飞书推送失败 code=%s msg=%s", code, msg)
-            return False
-        except (requests.RequestException, ValueError) as exc:  # 网络错误/非 JSON
-            logger.error("飞书推送异常:%s", exc)
-            return False
 
 
 # ---------------------------------------------------------------------------
