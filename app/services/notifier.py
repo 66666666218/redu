@@ -1,7 +1,7 @@
 """消息触达(见 doc/dev.md §5.6)。
 
-抽象接口 `Notifier`:既用于热点告警(`notify(alert)`),也用于每日总结等
-通用邮件(`send(subject, body)`)。开发模式(`IS_DEV=true`)用 `NullNotifier` 仅打日志。
+抽象接口 `Notifier`,统一走 `send(subject, body)`——用于每日总结、周报等通用外发。
+开发模式(`IS_DEV=true`)用 `NullNotifier` 仅打日志。
 """
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from email.mime.text import MIMEText
 from email.utils import formataddr
 
 from config.settings import Settings
-from app.models import Alert
 from app.utils import get_logger
 
 logger = get_logger(__name__)
@@ -23,24 +22,12 @@ class Notifier:
         """发送一封通用邮件,返回是否成功。"""
         raise NotImplementedError
 
-    def notify(self, alert: Alert, context: str = "") -> bool:
-        """发送一条热点告警,返回是否成功。"""
-        raise NotImplementedError
-
 
 class NullNotifier(Notifier):
     """开发/未配置时的空实现:只写日志,不外发。"""
 
-    def __init__(self) -> None:
-        self._sent: list[Alert] = []
-
     def send(self, subject: str, body: str, context: str = "", html: bool = False) -> bool:
         logger.info("[DEV] 跳过外发邮件 subject=%s", subject)
-        return True
-
-    def notify(self, alert: Alert, context: str = "") -> bool:
-        logger.info("[DEV] 跳过外发告警 keyword=%s reason=%s", alert.keyword, alert.reason)
-        self._sent.append(alert)
         return True
 
 
@@ -73,25 +60,6 @@ class EmailNotifier(Notifier):
         except smtplib.SMTPException as exc:
             logger.error("邮件发送失败:%s", exc)
             return False
-
-    def notify(self, alert: Alert, context: str = "") -> bool:
-        subject = f"[热点预警] {alert.keyword} {alert.reason}"
-        return self.send(subject, self._build_body(alert, context), context)
-
-    @staticmethod
-    def _build_body(alert: Alert, context: str) -> str:
-        lines = [
-            f"关键词: {alert.keyword}",
-            f"原因: {alert.reason}",
-            f"触发时间: {alert.triggered_at.isoformat()}",
-        ]
-        if alert.sources:
-            lines.append("来源指标:")
-            for src in alert.sources:
-                lines.append(f"  - {src}")
-        if context:
-            lines.append(f"备注: {context}")
-        return "\n".join(lines)
 
 
 def get_notifier(settings: Settings) -> Notifier:

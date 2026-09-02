@@ -1,17 +1,14 @@
-"""趋势分析引擎(见 doc/dev.md §5.5)。
+"""趋势分析工具(见 doc/dev.md §5.5)。
 
-双重校验机制,**两者同时满足**才认定为"上涨趋势":
-1. 环比增长率 > `growth_threshold`;
-2. 线性回归斜率 > `slope_threshold`。
+为智能体(关键词 Agent / 多平台预测)提供纯函数指标:
+- `compute_growth`: 环比增长率
+- `compute_slope`: 线性回归斜率
 
 纯函数,无网络依赖,核心逻辑可单测。
 """
 from __future__ import annotations
 
 import numpy as np
-
-from config.settings import Settings
-from app.models import IndexSource, TrendAnalysis, TrendSeries
 
 
 def compute_growth(values: list[float]) -> float | None:
@@ -45,38 +42,3 @@ def compute_slope(values: list[float]) -> float | None:
         return None
     slope = np.polyfit(x, y, 1)[0]
     return float(slope)
-
-
-def analyze(series: TrendSeries, settings: Settings) -> TrendAnalysis:
-    """对单个指数序列做双重校验,产出 `TrendAnalysis`。"""
-    growth = compute_growth(series.values)
-    slope = compute_slope(series.values)
-
-    # 样本不足,直接判定不可分析,避免过少样本误判(见 doc/dev.md §5.5)。
-    if len(series.points) < settings.min_samples:
-        return TrendAnalysis(
-            keyword=series.keyword,
-            source=series.source,
-            growth=growth,
-            slope=slope,
-            rising=False,
-        )
-
-    rising = bool(
-        growth is not None
-        and slope is not None
-        and growth > settings.growth_threshold
-        and slope > settings.slope_threshold
-    )
-    return TrendAnalysis(
-        keyword=series.keyword,
-        source=series.source,
-        growth=growth,
-        slope=slope,
-        rising=rising,
-    )
-
-
-def analyze_all(series_list: list[TrendSeries], settings: Settings) -> list[TrendAnalysis]:
-    """批量分析,返回全部结果(含未触发告警的项)。"""
-    return [analyze(s, settings) for s in series_list]

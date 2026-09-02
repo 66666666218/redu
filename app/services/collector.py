@@ -6,17 +6,29 @@
 from __future__ import annotations
 
 import random
+from dataclasses import dataclass, field
 from datetime import datetime
 
 import requests
 
 from config.settings import Settings
-from app.models import HotItem
 from app.utils import get_logger, get_proxies, retry
 
 logger = get_logger(__name__)
 
 HOT_SEARCH_URL = "https://weibo.com/ajax/side/hotSearch"
+
+
+@dataclass
+class HotItem:
+    """微博热搜条目(见 doc/dev.md §3.1)。"""
+    title: str
+    heat: int
+    rank: int = 0
+    category: str | None = None
+    url: str | None = None
+    tag: str | None = None
+    captured_at: datetime = field(default_factory=datetime.now)
 
 _USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
