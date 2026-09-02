@@ -198,8 +198,6 @@ def run_feishu_daily() -> int:
     settings = get_settings()
     if not settings.feishu_webhook:
         return 0
-    from app.db.models import User
-
     client = FeishuClient(settings.feishu_webhook, settings.feishu_secret)
     db = get_session_local()()
     sent = 0
@@ -239,8 +237,6 @@ def run_feishu_insight_digest(settings: Settings | None = None) -> int:
         return 0
     from app.services import keyword_agent, tenant
     from app.db import get_session_local
-    from app.db.models import User
-
     since = datetime.now() - timedelta(days=7)
     client = FeishuClient(settings.feishu_webhook, settings.feishu_secret)
     db = get_session_local()()
