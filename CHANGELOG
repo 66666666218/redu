@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- [2026-09-02 20:00] FIX: **抖音采集 502(服务器 IP 被抖音风控)**——部分云服务器 IP 直连 douhot.douyin.com 会被抖音边缘节点返回 502 nginx 错误(本地家庭宽带 IP 正常)。新增 `DOUHOT_USE_PROXY` 开关,开启后 douhot 采集走 `PROXY_EXTRACT_URL` 提取的住宅代理池,绕过 IP 风控;默认关闭(直连),避免代理抖动拖垮采集。新增单测 2 项,全量 95 项通过(Files: config/settings.py, app/services/douhot_client.py, tests/test_douhot.py, .env.example)
 - [2026-09-02 02:10] FEAT: **前端改版「赛博霓虹」主题**——深黑底 + 网格线 + 缓慢扫描光束,青(#00f0ff)/紫(#b026ff)霓虹辉光用于 logo/边框/按钮/焦点态,卡片 hover 上浮并走一道流光,数值改等宽字体;辉光只做装饰、不承载数据。图表分类色板经 `dataviz` 的 `validate_palette.js` 六项检查全部 PASS(暗色亮度带 0.48~0.67、彩度≥0.1、相邻对色盲 ΔE 9.7、对比度≥3:1);新增 `prefers-reduced-motion` 下关闭全部动效(Files: frontend/src/style.css, frontend/src/views/Admin.vue)
 - [2026-09-02 02:10] FIX: **SPA 刷新/直达任意路由 404**——后端只把 `/` 映射到 index.html,而前端用 `createWebHistory`,直接访问或刷新 `/login`、`/schedule`、`/admin` 会真的请求服务端该路径并 404;**找回密码邮件里的 `/reset?token=...` 同样打不开**。新增 history 回退路由(放行 `api/`、`assets/`、`healthz` 等,保证 API 仍返回 JSON 404),并加回归测试(Files: app/platform.py, tests/test_platform.py)
 - [2026-09-02 02:10] FIX: 图表配色三处违规——① 分类色 `colors[i % len]` **循环取色**导致第 7 类与第 1 类撞色、图例失真,改为固定顺序 + 超出部分归并"其他";② 柱状图用状态色 `--up` 当系列色(规范禁止),改用色板 `--c5`;③ 饼图图例只有文字没有色块,扇区与名称对不上,改为色块+名称+数值+占比,并给环形图开中心孔、柱条加 4px 圆角数据端(Files: frontend/src/views/Admin.vue, frontend/src/style.css)

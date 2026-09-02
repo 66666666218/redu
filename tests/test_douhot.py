@@ -8,6 +8,7 @@ import pytest
 
 from config.settings import Settings
 from app.services import douhot
+from app.services import douhot_client
 from app.services.douhot_client import DouhotAuthError, DouhotClient, DouhotError
 
 
@@ -152,3 +153,22 @@ def test_top_n_from_settings() -> None:
     assert douhot._top_n(None) == douhot.DEFAULT_TOP_N
     assert douhot._top_n(Settings(_env_file=None, douhot_top_n=0)) == douhot.DEFAULT_TOP_N
     assert douhot._top_n(Settings(_env_file=None, douhot_top_n=9999)) == 200
+
+
+def test_douhot_honors_proxy_switch_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DOUHOT_USE_PROXY 默认关闭时,即使配了代理池也不走(douhot 直连)。
+
+    避免代理抖动把本可成功的采集拖垮;需要时再显式开启。
+    """
+    monkeypatch.setattr(douhot_client, "get_proxies", lambda settings: {"http": "http://p:1", "https": "http://p:1"})
+    s = Settings(_env_file=None)
+    client = DouhotClient("x", s)
+    assert client.proxies is None  # douhot_use_proxy=false → 直连
+
+
+def test_douhot_honors_proxy_switch_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DOUHOT_USE_PROXY=true 时走代理池(绕过服务器 IP 被抖音风控的 502)。"""
+    monkeypatch.setattr(douhot_client, "get_proxies", lambda settings: {"http": "http://p:1", "https": "http://p:1"})
+    s = Settings(_env_file=None, douhot_use_proxy=True)
+    client = DouhotClient("x", s)
+    assert client.proxies == {"http": "http://p:1", "https": "http://p:1"}

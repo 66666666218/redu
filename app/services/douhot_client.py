@@ -75,12 +75,18 @@ class DouhotClient:
         cookie: str,
         settings: Settings | None = None,
         timeout: float = 20.0,
-        use_proxy: bool = False,
+        use_proxy: bool | None = None,
     ) -> None:
-        """`use_proxy` 显式开启才走代理:热点宝直连即可,默认不经代理池,
-        免得代理故障(如提取额度到期)把本可成功的采集拖垮。"""
+        """`douhot_use_proxy` 开启时才走代理池。
+
+        部分服务器 IP 会被抖音风控(直连返回 502 nginx),此时开代理可绕过;
+        本地/家庭宽带 IP 通常直连即可。默认读 settings.douhot_use_proxy;
+        显式传 use_proxy 则覆盖。
+        """
         if not cookie or not cookie.strip():
             raise DouhotAuthError("未配置抖音(热点宝) Cookie")
+        if use_proxy is None:
+            use_proxy = bool(getattr(settings, "douhot_use_proxy", False))
         self.session = requests.Session()
         self.session.headers.update(_HEADERS)
         self.session.headers["Cookie"] = cookie.strip()

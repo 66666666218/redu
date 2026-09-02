@@ -72,6 +72,9 @@ class Settings(BaseSettings):
     feishu_hot_rank_jump: int = 3          # 排名跳升 ≥ 该名次即实时推送
     feishu_hot_ratio: float = 0.30         # 分值环比涨幅 ≥ 该比例即实时推送
     feishu_alert_cooldown_hours: int = 6   # 同一话题实时推送冷却(小时),防刷屏
+    # 抖音热点宝走代理池:部分服务器 IP 会被抖音风控(直接返回 502 nginx),
+    # 开这个后 douhot 采集走 PROXY_EXTRACT_URL 提取的住宅代理。生产服务器建议开启。
+    douhot_use_proxy: bool = False
 
     # ---- 服务 ----
     app_port: int = 8080
