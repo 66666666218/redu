@@ -59,3 +59,24 @@ def test_burst_flag_on_accelerating_rise() -> None:
 def test_no_burst_when_falling() -> None:
     out = analyze("退潮", [2000, 1500, 1000, 500])
     assert out["burst"] is False and out["trend_label"] == "回落期"
+
+
+def test_history_backfills_rise_and_duration() -> None:
+    from datetime import datetime, timedelta
+    from app.services.keyword_agent import history
+
+    base = datetime(2026, 9, 1, 8)
+    values = [100, 100, 120, 400, 800, 2000]          # 前两轮平,第4轮起拉升
+    ts = [base + timedelta(hours=i) for i in range(len(values))]
+    h = history(values, ts)
+    assert h["current"] == 2000 and h["peak_value"] == 2000
+    assert h["duration_hours"] is not None and h["duration_hours"] > 0
+    assert h["first_rise"] is not None
+    assert h["first_seen"] == base.isoformat(sep=" ", timespec="seconds")
+    # 半程=1000,首次涨破从 index2(120<=1000 的最后一个点)之后 → first_rise 早于末点
+    assert h["first_rise"] < ts[-1].isoformat(sep=" ", timespec="seconds")
+
+
+def test_history_empty() -> None:
+    from app.services.keyword_agent import history
+    assert history([], []) == {}

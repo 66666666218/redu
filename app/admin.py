@@ -426,11 +426,16 @@ def insights(db: Session) -> dict:
         if len(values) < 2:
             continue
         agent = keyword_agent.analyze(keyword, values)
+        hist = keyword_agent.history(values, [s.captured_at for s in snaps])
         row = {
             "keyword": keyword, "list_type": list_type, "user_id": user_id,
             "trend_label": agent["trend_label"], "growth": agent["growth"],
             "forecast_next": agent["forecast_next"], "confidence": agent["confidence"],
             "points": agent["points"], "burst": agent["burst"],
+            # 爆点历史回溯
+            "first_rise": hist.get("first_rise"), "peak_value": hist.get("peak_value"),
+            "peak_at": hist.get("peak_at"), "current": hist.get("current"),
+            "duration_hours": hist.get("duration_hours"),
         }
         if agent["burst"]:
             burst.append(row)

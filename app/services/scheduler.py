@@ -100,7 +100,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     """注册后台作业:按用户频率采集、定时告警摘要、失败自动重试、飞书日报。"""
     from app.admin import retry_failed_runs
     from app.services.alert_service import run_fixed_time_digests
-    from app.services.feishu import run_feishu_daily
+    from app.services.feishu import run_feishu_daily, run_feishu_insight_digest
     from config.settings import get_settings as _get_settings
 
     scheduler.add_job(
@@ -125,6 +125,16 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         daily_trigger = CronTrigger(hour=8, minute=0)
     scheduler.add_job(
         _safe(run_feishu_daily), daily_trigger, id="feishu_daily", max_instances=1, coalesce=True
+    )
+    # 飞书周度"爆点回顾"(智能体洞察报告):默认每周一 09:00
+    try:
+        parts = _get_settings().feishu_insight_cron.split()
+        cron_kw = dict(zip(("minute", "hour", "day", "month", "day_of_week"), parts))
+        insight_trigger = CronTrigger(**cron_kw)
+    except Exception:  # noqa: BLE001 - 表达式非法时回退到每周一 09:00
+        insight_trigger = CronTrigger(day_of_week="mon", hour=9, minute=0)
+    scheduler.add_job(
+        _safe(run_feishu_insight_digest), insight_trigger, id="feishu_insight", max_instances=1, coalesce=True
     )
 
 

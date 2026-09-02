@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- [2026-09-02 23:30] FEAT: **爆点历史回溯 + 周度爆点回顾**——`keyword_agent.history()` 按快照时间算每个爆点的**首次上涨 / 峰值 / 当前 / 持续时长**(半程阈值近似爬升起点);管理后台"洞察"页爆点榜加 首次上涨/持续/峰值 列. 新增飞书**周度「近7天爆点回顾」**(`run_feishu_insight_digest`,默认每周一 09:00,`FEISHU_INSIGHT_CRON`),跨用户汇总最近 7 天爆发/上升词并附历史. 新增单测,全量 112 项通过(Files: app/services/{keyword_agent.py,feishu.py,scheduler.py,admin.py}, config/settings.py, .env.example, frontend/src/views/Admin.vue, tests/{test_keyword_agent.py,test_feishu.py})
 - [2026-09-02 23:00] FEAT: **管理后台「智能体洞察」页**——`GET /api/admin/insights`(`data.view` 权限)跨用户聚合趋势预测:统计(用户/关注词/爆发数/上升数/今日告警)+ 爆发关键词榜(带趋势/环比/预测/置信度)+ 上升期关键词 + 抖音内容词 Top. 管理后台新增"智能体洞察"Tab,运维一眼扫全局. 新增单测,全量 109 项通过(Files: app/admin.py, app/platform.py, frontend/src/{api.js,views/Admin.vue}, tests/test_platform.py, doc/API.md)
 - [2026-09-02 22:20] FEAT: **趋势预测可视化 + 日报带智能体分析**——关键词卡片把历史热度画成实线、预测下一轮用**紫色虚线**接到末尾(一眼看出走势);飞书日报(l §5.11)新增【关键词关注·智能体】段落,每个关注词带趋势标签、环比、预测、置信度,爆发词标 🔥,并按爆发→预测排序. 全量 108 项通过(Files: frontend/src/views/Dashboard.vue, app/services/feishu.py, tests/test_feishu.py)
 - [2026-09-02 22:00] FEAT: **智能体预测升级**——`keyword_agent` 加**置信度**(样本数 + 线性拟合 R² 联合判定:高/中/低/数据不足)、**加速度**(前半段 vs 后半段斜率差,>0 = 上升加速)、**爆发预警**标记(上升期 + 环比≥20% + 置信度中高 + 正加速度);摘要会提示"🔥 可能爆发"或"数据不足仅供参考";仪表盘关键词卡片按 爆发→预测→环比 **智能排序**并显示置信度. **飞书智能体预警**:关注词命中爆发信号即推送 `🔮 智能体预测·可能爆发` 到群里(复用 FeishuAlert 冷却去重),挂载在调度器 collect_tick 与手动采集之后. 新增单测,全量 107 项通过(Files: app/services/{keyword_agent.py,feishu.py,scheduler.py,tenant.py}, app/platform.py, frontend/src/views/Dashboard.vue, tests/{test_keyword_agent.py,test_feishu.py})

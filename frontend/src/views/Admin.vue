@@ -229,12 +229,15 @@ onMounted(load)
 
       <div class="card" style="margin-bottom:16px">
         <h3>🔥 预测爆发关键词(跨用户)</h3>
-        <table v-if="insights.burst.length"><tr><th>关键词</th><th>用户</th><th>趋势</th><th>环比</th><th>预测</th><th>置信</th></tr>
+        <table v-if="insights.burst.length"><tr><th>关键词</th><th>趋势</th><th>环比</th><th>预测</th><th>首次上涨</th><th>持续</th><th>峰值</th><th>置信</th></tr>
           <tr v-for="b in insights.burst" :key="b.keyword+'-'+b.user_id">
-            <td>{{ b.keyword }}</td><td>#{{ b.user_id }}</td>
+            <td>{{ b.keyword }}</td>
             <td :class="b.trend_label==='上升期'?'up':''">{{ b.trend_label }}</td>
             <td class="num" :class="{up:(b.growth||0)>0}">{{ b.growth!=null?(b.growth*100).toFixed(0)+'%':'—' }}</td>
             <td class="num">{{ b.forecast_next!=null?Math.round(b.forecast_next):'—' }}</td>
+            <td class="num">{{ b.first_rise ? b.first_rise.slice(5,16) : '—' }}</td>
+            <td class="num">{{ b.duration_hours!=null ? b.duration_hours+'h' : '—' }}</td>
+            <td class="num">{{ b.peak_value!=null?Math.round(b.peak_value):'—' }}</td>
             <td>{{ b.confidence }}</td>
           </tr>
         </table>

@@ -19,7 +19,7 @@ import base64
 import hashlib
 import hmac
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 from sqlalchemy import select
@@ -276,6 +276,59 @@ def _in_cooldown(db: Session, user_id: int, section: str, title: str, settings: 
         )
     )
     return row is not None and (now - row.alerted_at).total_seconds() < settings.feishu_alert_cooldown_hours * 3600
+
+
+def run_feishu_insight_digest(settings: Settings | None = None) -> int:
+    """每周一次"近7天爆点回顾"——跨用户聚合,推送到飞书群。
+
+    统计最近 7 天(按快照 captured_at)里关注词的爆发/上升情况,附历史回溯
+    (首次上涨/峰值/持续时长)。未配置 webhook 直接跳过。
+    """
+    settings = settings or get_settings()
+    if not settings.feishu_webhook:
+        return 0
+    from app.services import keyword_agent, tenant
+    from app.db import get_session_local
+    from app.db.models import User
+
+    since = datetime.now() - timedelta(days=7)
+    client = FeishuClient(settings.feishu_webhook, settings.feishu_secret)
+    db = get_session_local()()
+    try:
+        lines = ["📅 近 7 天爆点回顾", ""]
+        burst_rows, rising_rows = [], []
+        for user in db.scalars(select(User).where(User.enabled.is_(True))).all():
+            for w in tenant.list_douhot_watch(db, user.id):
+                snaps = db.scalars(
+                    select(DouhotWatchSnap)
+                    .where(DouhotWatchSnap.user_id == user.id, DouhotWatchSnap.keyword == w["keyword"],
+                           DouhotWatchSnap.captured_at >= since)
+                    .order_by(DouhotWatchSnap.id.asc())
+                ).all()
+                values = [s.score for s in snaps]
+                if len(values) < 2:
+                    continue
+                agent = keyword_agent.analyze(w["keyword"], values)
+                hist = keyword_agent.history(values, [s.captured_at for s in snaps])
+                row = {**agent, "duration_hours": hist.get("duration_hours"),
+                       "first_rise": hist.get("first_rise"), "peak_value": hist.get("peak_value")}
+                (burst_rows if agent["burst"] else rising_rows).append(row)
+        if not burst_rows and not rising_rows:
+            lines.append("本周暂无爆点/上升词(需先有关注词并积累多轮采集)")
+        if burst_rows:
+            burst_rows.sort(key=lambda r: r["forecast_next"] or 0, reverse=True)
+            lines.append("🔥 爆发词:")
+            for r in burst_rows[:12]:
+                hrs = f"{r['duration_hours']}h" if r.get("duration_hours") is not None else "—"
+                lines.append(f"  · {r['keyword']} 环比+{(r['growth'] or 0)*100:.0f}% "
+                             f"预测{int(r['forecast_next'] or 0)} 已涨约{hrs}")
+        if rising_rows:
+            rising_rows.sort(key=lambda r: r["growth"] or 0, reverse=True)
+            lines.append(f"📈 上升词({len(rising_rows)}):")
+            lines.append("  " + ", ".join(r["keyword"] for r in rising_rows[:10]))
+        return 1 if client.send("\n".join(lines)) else 0
+    finally:
+        db.close()
 
 
 def run_feishu_keyword_alerts(user_id: int, settings: Settings | None = None, db: Session | None = None) -> int:

@@ -133,6 +133,42 @@ def _accel(values: list[float]) -> float | None:
     return late - early
 
 
+def history(values: list[float], timestamps: list) -> dict:
+    """爆点历史回溯:首次上涨 / 峰值 / 当前 / 持续时长。
+
+    "首次上涨"以 **半程阈值** 近似:回溯到最近一次"值 ≤ 当前值一半"的点,
+    认为这之后才开始爬升到当前热度。对冲刺型爆点足够直观且可测。
+    """
+    values = [float(v) for v in values if v is not None]
+    ts = list(timestamps or [])
+    if not values:
+        return {}
+    cur = values[-1]
+    half = max(cur * 0.5, 1e-9)
+    # 最后一次低于半程的点(爬升起点);没有则回到 0
+    rise_idx = max((i for i, v in enumerate(values) if v <= half), default=0)
+    peak_idx = values.index(max(values))
+
+    def iso(dt):  # type: ignore[no-untyped-def]
+        return dt.isoformat(sep=" ", timespec="seconds") if dt else None
+
+    first_seen = iso(ts[0]) if ts else None
+    first_rise = iso(ts[rise_idx]) if ts and rise_idx < len(ts) else None
+    peak_at = iso(ts[peak_idx]) if ts and peak_idx < len(ts) else None
+    duration_hours = (
+        (ts[-1] - ts[rise_idx]).total_seconds() / 3600 if ts and rise_idx < len(ts) else None
+    )
+    return {
+        "first_seen": first_seen,
+        "first_rise": first_rise,
+        "peak_value": values[peak_idx],
+        "peak_at": peak_at,
+        "current": cur,
+        "duration_hours": round(duration_hours, 1) if duration_hours is not None else None,
+        "trajectory": values,
+    }
+
+
 def analyze(keyword: str, values: list[float]) -> dict:
     """对某关键词的热度序列做分析 + 预测。"""
     values = [float(v) for v in values if v is not None]

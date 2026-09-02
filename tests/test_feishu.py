@@ -197,3 +197,15 @@ def test_daily_includes_keyword_agent_section(session) -> None:
     assert "关键词关注 · 智能体" in text
     assert "爆点" in text
     assert "上升期" in text and "上升期" in text
+
+
+def test_scheduler_registers_insight_job() -> None:
+    """调度器应注册"爆点回顾"周报 job(feishu_insight)。"""
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from app.services.scheduler import build_jobs
+
+    sched = BackgroundScheduler(timezone="Asia/Shanghai")
+    build_jobs(sched)
+    ids = [j.id for j in sched.get_jobs()]
+    assert "feishu_insight" in ids
+    sched.shutdown(wait=False) if sched.running else None
