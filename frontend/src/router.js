@@ -9,6 +9,7 @@ import Cookies from './views/Cookies.vue'
 import Schedule from './views/Schedule.vue'
 import Alerts from './views/Alerts.vue'
 import Admin from './views/Admin.vue'
+import Screen from './views/Screen.vue'
 
 const routes = [
   { path: '/login', component: Login },
@@ -19,7 +20,8 @@ const routes = [
   { path: '/cookies', component: Cookies, meta: { auth: true } },
   { path: '/schedule', component: Schedule, meta: { auth: true } },
   { path: '/alerts', component: Alerts, meta: { auth: true } },
-  { path: '/admin', component: Admin, meta: { auth: true, admin: true } }
+  { path: '/admin', component: Admin, meta: { auth: true, admin: true } },
+  { path: '/screen', component: Screen, meta: { auth: true, screen: true } }
 ]
 
 const router = createRouter({ history: createWebHistory(), routes })

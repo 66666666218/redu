@@ -19,7 +19,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div v-if="router.currentRoute.value.meta.auth" class="topbar">
+  <div v-if="router.currentRoute.value.meta.auth && !router.currentRoute.value.meta.screen" class="topbar">
     <div class="brand">🔥 热点监控平台</div>
     <nav>
       <router-link to="/">仪表盘</router-link>
