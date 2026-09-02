@@ -74,18 +74,23 @@ function fmtScore(v) {
   return String(Math.round(v))
 }
 
-// 把热度序列画成迷你趋势线的 SVG points(归一化到 120×36)
-function spark(series) {
+// 把热度序列画成迷你趋势线(实线=实际,虚线=预测外推),返回 {solid, fc, w, h}
+function spark(series, forecast) {
   if (!series || series.length < 2) return ''
-  const max = Math.max(...series), min = Math.min(...series)
+  const W = 132, H = 38
+  // 预留一个槽位给预测点(若提供),横轴按 实际点数+预测1点 归一化
+  const totalSlots = series.length + (forecast != null ? 1 : 0)
+  const xs = i => (i / (totalSlots - 1)) * W
+  const max = Math.max(...series, forecast ?? 0), min = Math.min(...series, forecast ?? 0)
   const range = (max - min) || 1
-  const W = 120, H = 36
-  const pts = series.map((v, i) => {
-    const x = (i / (series.length - 1)) * W
-    const y = H - ((v - min) / range) * (H - 4) - 2
-    return `${x.toFixed(1)},${y.toFixed(1)}`
-  })
-  return pts.join(' ')
+  const ys = v => H - ((v - min) / range) * (H - 4) - 2
+  const solid = series.map((v, i) => `${xs(i).toFixed(1)},${ys(v).toFixed(1)}`).join(' ')
+  let fc = ''
+  if (forecast != null) {
+    const last = series[series.length - 1]
+    fc = `${xs(series.length - 1).toFixed(1)},${ys(last).toFixed(1)} ${xs(series.length).toFixed(1)},${ys(forecast).toFixed(1)}`
+  }
+  return { solid, fc, w: W, h: H }
 }
 function trendClass(label) {
   return label === '上升期' ? 'up' : (label === '回落期' ? 'down' : '')
@@ -158,8 +163,9 @@ onMounted(async () => { await load(); await loadAnalytics(); await loadWatches()
               <div><div class="empty" style="padding:0">环比</div><b class="num" :class="{up:(w.growth||0)>0, down:(w.growth||0)<0}">{{ pct(w.growth) }}</b></div>
               <div><div class="empty" style="padding:0">预测下一轮</div><b class="num">{{ fmtScore(w.forecast_next) }}</b></div>
             </div>
-            <svg v-if="spark(w.series)" :width="120" :height="36" class="spark">
-              <polyline :points="spark(w.series)" fill="none" stroke="var(--neon)" stroke-width="2" stroke-linejoin="round"/>
+            <svg v-if="w.series && w.series.length >= 2" :width="132" :height="38" class="spark">
+              <polyline :points="spark(w.series, w.forecast_next).solid" fill="none" stroke="var(--neon)" stroke-width="2" stroke-linejoin="round"/>
+              <polyline v-if="spark(w.series, w.forecast_next).fc" :points="spark(w.series, w.forecast_next).fc" fill="none" stroke="var(--neon-2)" stroke-width="2" stroke-dasharray="4,3" stroke-linejoin="round"/>
             </svg>
             <div class="empty" style="margin-top:6px;color:var(--dim)">置信度:{{ w.confidence || '—' }}</div>
             <div class="empty" style="margin-top:2px">{{ w.summary || '再采集一次积累更多数据' }}</div>

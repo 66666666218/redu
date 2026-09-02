@@ -183,3 +183,17 @@ def test_keyword_burst_skips_when_not_rising(monkeypatch, session) -> None:
     monkeypatch.setattr(feishu, "FeishuClient", lambda w, s: type("F", (), {"send": lambda self, t: (n_calls.__setitem__("n", n_calls["n"] + 1), True)[1]})())
     assert run_feishu_keyword_alerts(1, _settings(), db=session) == 0
     assert n_calls["n"] == 0  # 回落期不推
+
+
+def test_daily_includes_keyword_agent_section(session) -> None:
+    """日报应把关注词的智能体分析(趋势/预测/置信度)带进去。"""
+    from app.db.models import DouhotWatch, DouhotWatchSnap
+
+    session.add(DouhotWatch(user_id=1, list_type="word", keyword="爆点"))
+    for v in [1000, 1100, 1300, 1800, 2600]:
+        session.add(DouhotWatchSnap(user_id=1, list_type="word", keyword="爆点", score=v, rank_now=1))
+    session.commit()
+    text = build_daily(session, 1, _settings())
+    assert "关键词关注 · 智能体" in text
+    assert "爆点" in text
+    assert "上升期" in text and "上升期" in text

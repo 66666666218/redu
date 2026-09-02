@@ -202,12 +202,42 @@ def _section_lines(db: Session, user_id: int, section: str, top_n: int = 10) -> 
     return lines
 
 
+def _keyword_watch_lines(db: Session, user_id: int, top_n: int = 8) -> list[str]:
+    """日报里的"关键词关注"段落:对每个关注词跑智能体,给趋势/预测/置信度。"""
+    from app.services import keyword_agent, tenant
+
+    watches = tenant.list_douhot_watch(db, user_id)
+    if not watches:
+        return []
+    items = []
+    for w in watches:
+        snaps = db.scalars(
+            select(DouhotWatchSnap)
+            .where(DouhotWatchSnap.user_id == user_id, DouhotWatchSnap.keyword == w["keyword"])
+            .order_by(DouhotWatchSnap.id.asc())
+        ).all()
+        values = [s.score for s in snaps]
+        agent = keyword_agent.analyze(w["keyword"], values)
+        items.append(agent)
+    # 排序:爆发优先,再按预测热度
+    items.sort(key=lambda a: (a["burst"], a["forecast_next"] or 0), reverse=True)
+    lines = ["【关键词关注 · 智能体】"]
+    for a in items[:top_n]:
+        flag = "🔥" if a["burst"] else ""
+        fc = f" 预测{a['forecast_next']:.0f}" if a["forecast_next"] is not None else ""
+        conf = f" {a['confidence']}" if a["confidence"] and a["confidence"] != "数据不足" else ""
+        lines.append(f"  · {a['keyword']}  {a['trend_label']}{flag} 环比{'+' if (a['growth'] or 0) > 0 else ''}{((a['growth'] or 0) * 100 if a['growth'] is not None else 0):.0f}%{fc}{conf}")
+    lines.append("  " + ("; ".join(a["summary"] for a in items[:2]) if items else "暂无"))
+    return lines
+
+
 def build_daily(db: Session, user_id: int, settings: Settings) -> str:
     """生成三板块日报文本(供飞书推送与测试)。"""
     today = datetime.now().strftime("%m-%d")
     lines = [f"📊 热点日报 · {today}", "每个话题标注相对上一轮的涨跌或新增。"]
     for section in SECTIONS:
         lines += _section_lines(db, user_id, section)
+    lines += _keyword_watch_lines(db, user_id)
     return "\n".join(lines)
 
 
