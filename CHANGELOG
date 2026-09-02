@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- [2026-09-03 12:30] DOC: 新增 `doc/deploy-checklist.md` 服务器部署核对清单——重建镜像步骤、`.env` 必查项(含新 `XIANYU_*`/`FAIL_ALERT_THRESHOLD`/`DATA_RETENTION_DAYS`/飞书新 webhook)、多租户 Cookie 配置方式、闲鱼运维要点(直连不代理/放慢频率/详情少抓)、部署后自检;汇总近期重构+加固改动(Files: doc/deploy-checklist.md, CHANGELOG)
 - [2026-09-03 12:00] FIX: **闲鱼被风控/限流的代码层缓解**——① `XianyuClient._post` 遇 `FAIL_SYS_USER_VALIDATE`/`FAIL_SYS_RATE_LIMIT` 等风控码改为**指数退避重试**(30s/90s/180s,最多3次,仍失败抛 `XianyuRateLimit`),不再连环猛打加重风控;② 新增 `XIANYU_REQUEST_DELAY`(默认 4s)独立闲鱼限速,并应用到搜索/深度采集;③ `.env.example` 把 `XIANYU_DETAIL_LIMIT` 默认降到 10(详情抓取是触发风控的最大爆发点). 新增单测,全量 128 项通过(Files: app/services/{xianyu.py,xianyu_analytics.py}, config/settings.py, .env.example, tests/test_xianyu.py)
 - [2026-09-03 11:00] CHORE: 新增 `scripts/check_env.py` 部署配置校验——按 python-dotenv 语义解析(export 前缀/大小写不敏感/内联注释/引号),检测必填缺失或占位符(JWT_SECRET 过短、默认 DB 密码),只报键名不打印凭据;供服务器 `python scripts/check_env.py` 诊断. 应用 code-review 意见修正(内联注释剥除、占位符识别、仓库根锚定、stdout 守护),新增单测(Files: scripts/check_env.py, scripts/__init__.py, tests/test_check_env.py, CHANGELOG)
 - [2026-09-03 10:00] FEAT: **数据库增长治理**——新增 `app/db/maintenance.py::cleanup_old_data`:删除超过 `DATA_RETENTION_DAYS`(默认 30 天)的快照/运行/告警/日志(douhot_words/weibo/xianyu/关键词快照/运行/告警/登录/管理日志),每天 04:00 由调度器清理. 保留期内数据足够支撑判涨(取最近 200/500 条)与智能体预测(近 30 天序列). 新增单测,全量 121 项通过(Files: app/db/maintenance.py, app/services/scheduler.py, config/settings.py, .env.example, tests/test_maintenance.py)
