@@ -144,7 +144,6 @@ redian/
 > 已随多租户改造移除——只保留被复用的 `collector.fetch_hot_search`(微博热搜)与
 > `trend_analyzer.compute_growth/compute_slope`(智能体)。`platform.py` 原 553 行/50 路由
 > 已拆到 `app/api/`。
-```
 
 ---
 
@@ -273,6 +272,8 @@ redian/
 
 ### 5.3 数据清洗与过滤 `services/cleaner.py`
 
+> ⚠️ **已废弃**:该模块已随多租户改造移除,保留仅供理解旧架构。
+
 - 职责:剔除广告/低频词,规范化,去重,产出去噪后的候选词。
 - 接口:`clean(items: list[HotItem], settings) -> list[HotItem]`
 - 规则:
@@ -283,6 +284,8 @@ redian/
 - 纯函数,核心逻辑可单测。
 
 ### 5.4 指数数据获取 `services/index_fetcher.py`
+
+> ⚠️ **已废弃**:该模块已随多租户改造移除,保留仅供理解旧架构。
 
 - 职责:对候选词逐一获取指数时间序列,得到 `list[TrendSeries]`。
 - 设计:定义抽象源 `IndexSource`,子类 `WeiboHeatIndexSource`(跨轮次累积的微博热度序列)、`DouyinIndexSource`、`BaiduIndexSource`,由 `IndexFetcher` 按降级策略选用。降级链顺序由配置 `index_sources` 决定(逗号分隔、顺序即优先级,如 `weibo,douyin,baidu`)。
@@ -306,7 +309,7 @@ redian/
 ### 5.6 消息触达/告警 `services/notifier.py`
 
 - 职责:将告警发送到配置的通道。
-- 设计:定义抽象接口 `Notifier`:`notify(alert: Alert, context: str)`。
+- 设计:定义抽象接口 `Notifier`,统一走 `send(subject, body)`(老 `notify(alert)` 已随单用户管线移除)。
   - `EmailNotifier`:SMTP SSL 发送,正文含关键词、增长率、斜率、来源快照。
   - `DingTalkNotifier`(增强)/`WebhookNotifier`(增强):预留实现。
 - 约定:
@@ -315,6 +318,8 @@ redian/
 - 发信异常必须 try/except,返回标准化错误,不阻塞主流程。
 
 ### 5.7 日志与归档 `services/archive.py` + `storage/repository.py`
+
+> ⚠️ **已废弃**:该模块已随多租户改造移除,保留仅供理解旧架构。
 
 - 职责:持久化原始热搜、分析结果、告警记录,并提供查询。
 - `ArchiveRepository`(SQLite):
@@ -431,7 +436,7 @@ candidates = cleaner(items)               # 2 清洗
 series_map = index_fetcher.fetch_parallel(candidates)  # 3 指数(并行多源)
 analyses = 逐序列 Analyze                  # 4 分析
 rising_keywords = 按 ALERT_MODE 交叉验证    # 5 告警(both/any)
-notifier.notify(keyword)                  #   5 触达
+notifier.send(subject, body)              #   5 触达(邮件/飞书)
 save_items / save_analysis / snapshot     # 6 归档
 save_run(end, status)
 ```
