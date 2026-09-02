@@ -285,3 +285,59 @@ def run_weekly_summary() -> int:
         return sent
     finally:
         db.close()
+
+
+def check_collect_failures(settings: Settings | None = None, db: Session | None = None) -> int:
+    """采集持续失败告警:某用户某板块近 24h 失败 >= 阈值,推送飞书并去重。
+
+    解决"Cookie 过期/接口异常,只有日志没有主动提醒"的运维盲区。
+    返回本次告警条数;未配置飞书 webhook 时跳过。`db` 供测试注入。
+    """
+    settings = settings or get_settings()
+    if not settings.feishu_webhook:
+        return 0
+    from sqlalchemy import func
+
+    from app.db import get_session_local
+    from app.db.models import FeishuAlert, RunRecord
+    from app.services.feishu_client import FeishuClient
+
+    threshold = settings.fail_alert_threshold
+    since = datetime.now() - timedelta(hours=24)
+    own_session = db is None
+    db = db or get_session_local()()
+    sent = 0
+    try:
+        rows = db.execute(
+            select(RunRecord.user_id, RunRecord.kind, func.count(RunRecord.id))
+            .where(RunRecord.status == "failed", RunRecord.started_at >= since)
+            .group_by(RunRecord.user_id, RunRecord.kind)
+        ).all()
+        hits = []
+        for uid, kind, cnt in rows:
+            if cnt < threshold:
+                continue
+            existing = db.scalar(
+                select(FeishuAlert).where(
+                    FeishuAlert.section == "collect_fail", FeishuAlert.user_id == uid, FeishuAlert.title == kind
+                )
+            )
+            if existing and (datetime.now() - existing.alerted_at).total_seconds() < settings.feishu_alert_cooldown_hours * 3600:
+                continue
+            hits.append((uid, kind, cnt))
+            if existing:
+                existing.reason, existing.alerted_at = f"近24h失败{cnt}次", datetime.now()
+            else:
+                db.add(FeishuAlert(section="collect_fail", user_id=uid, title=kind, reason=f"近24h失败{cnt}次"))
+        if hits:
+            msg = "⚠️ 采集持续失败(近24h)"
+            for uid, kind, cnt in hits:
+                msg += f"\n  · 用户#{uid} 板块[{kind}] 失败 {cnt} 次"
+            FeishuClient(settings.feishu_webhook, settings.feishu_secret).send(msg)
+            db.commit()
+            sent = len(hits)
+            logger.info("采集失败告警推送,条数=%s", sent)
+        return sent
+    finally:
+        if own_session:
+            db.close()

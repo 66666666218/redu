@@ -120,7 +120,7 @@ def _cron_trigger(expr: str, default: dict) -> CronTrigger:
 def build_jobs(scheduler: BackgroundScheduler) -> None:
     """注册后台作业:按用户频率采集、定时告警摘要、失败自动重试、飞书日报/周报、邮件周报。"""
     from app.admin import retry_failed_runs
-    from app.services.alert_service import run_fixed_time_digests, run_weekly_summary
+    from app.services.alert_service import check_collect_failures, run_fixed_time_digests, run_weekly_summary
     from app.services.feishu import run_feishu_daily, run_feishu_insight_digest
     from config.settings import get_settings as _get_settings
 
@@ -130,13 +130,8 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     scheduler.add_job(
         _safe(run_fixed_time_digests), CronTrigger(minute="*"), id="alert_fixed_time", max_instances=1, coalesce=True
     )
-    scheduler.add_job(
-        _safe(retry_failed_runs),
-        CronTrigger(minute="*/30"),
-        id="auto_retry_failed_runs",
-        max_instances=1,
-        coalesce=True,
-    )
+    for func, job_id in ((retry_failed_runs, "auto_retry_failed_runs"), (check_collect_failures, "collect_failed_alert")):
+        scheduler.add_job(_safe(func), CronTrigger(minute="*/30"), id=job_id, max_instances=1, coalesce=True)
     jobs = [
         (run_feishu_daily, _get_settings().feishu_daily_cron, {"minute": 0, "hour": 8}, "feishu_daily"),
         (run_feishu_insight_digest, _get_settings().feishu_insight_cron, {"day_of_week": "mon", "hour": 9, "minute": 0}, "feishu_insight"),

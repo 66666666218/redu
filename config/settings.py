@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     # 原先的 JOB_CRON / XIANYU_CRON / DOUHOT_CRON / DAILY_SUMMARY_CRON 已无代码引用,故移除。
     scheduler_enabled: bool = True  # 随 API 进程启动后台调度器(多 worker 部署时须关掉,另起调度容器)
     request_delay_seconds: float = 2.5  # 每次外部请求间的随机基础间隔(秒)
+    # 采集持续失败告警:某用户某板块近 24h 失败 >= 该次数,推飞书告警(防 Cookie 过期无人知)
+    fail_alert_threshold: int = 3
 
     # ---- 邮件通知 ----
     smtp_host: str = ""

@@ -240,3 +240,37 @@ def test_agent_confidence_rank() -> None:
     assert feishu._agent_confidence_rank("高") > feishu._agent_confidence_rank("中")
     assert feishu._agent_confidence_rank("中") > feishu._agent_confidence_rank("低")
     assert feishu._agent_confidence_rank(None) == 0
+
+
+def test_collect_failures_alert_and_cooldown(monkeypatch, session) -> None:
+    """采集持续失败告警:近24h失败>=阈值才推,且冷却期内不重推。"""
+    from datetime import datetime, timedelta
+    from app.services import alert_service
+    from app.db.models import RunRecord
+
+    for i in range(3):  # 近24h 3 次失败
+        session.add(RunRecord(user_id=1, run_id=f"r{i}", kind="douhot", status="failed",
+                              started_at=datetime.now() - timedelta(hours=i)))
+    session.add(RunRecord(user_id=1, run_id="ok", kind="weibo", status="success", started_at=datetime.now()))
+    session.commit()
+
+    sent = []
+    monkeypatch.setattr(feishu_client, "FeishuClient", lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
+    n = alert_service.check_collect_failures(_settings(fail_alert_threshold=3), db=session)
+    assert n == 1
+    assert "douhot" in sent[0] and "失败 3 次" in sent[0]
+    # 冷却期内再跑 → 不重推
+    assert alert_service.check_collect_failures(_settings(fail_alert_threshold=3), db=session) == 0
+
+
+def test_collect_failures_below_threshold_no_alert(monkeypatch, session) -> None:
+    from datetime import datetime
+    from app.services import alert_service
+    from app.db.models import RunRecord
+
+    session.add(RunRecord(user_id=1, run_id="r", kind="douhot", status="failed", started_at=datetime.now()))
+    session.commit()
+    sent = []
+    monkeypatch.setattr(feishu_client, "FeishuClient", lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
+    assert alert_service.check_collect_failures(_settings(fail_alert_threshold=3), db=session) == 0
+    assert not sent
