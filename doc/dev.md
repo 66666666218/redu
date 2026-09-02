@@ -114,26 +114,36 @@
 
 ```
 redian/
-├─ doc/dev.md                  # 本开发文档
-├─ doc/API.md                  # 接口规范
-├─ CHANGELOG                   # 变更日志
-├─ README.md                   # 使用说明
-├─ requirements.txt
-├─ .env.example                # 配置模板
-├─ .gitignore
-├─ Dockerfile
-├─ docker-compose.yml
-├─ config/settings.py          # 强类型配置(读 .env)
+├─ doc/                         # dev.md(本开发文档) / API.md(接口规范)
+├─ CHANGELOG / README.md / requirements.txt / .env.example
+├─ Dockerfile / docker-compose.yml
+├─ config/settings.py           # 强类型配置(读 .env),含调度/飞书/代理等
 ├─ app/
-│  ├─ main.py                  # 入口(调度器 + 可选 FastAPI)
-│  ├─ models.py                # 数据模型(dataclass / pydantic)
-│  ├─ services/                # 业务逻辑:(collector / cleaner /
-│  │                           #   index_fetcher / trend_analyzer /
-│  │                           #   notifier / archive)
-│  ├─ storage/repository.py    # SQLite 归档 Repository
-│  └─ utils/                   # proxy · logger · retry
-├─ tests/                      # 单测(纯逻辑,无网络)
-└─ scripts/generate_doc.py     # (可选)从本文档生成 Word 版
+│  ├─ main.py                   # 独立调度进程入口(python -m app.main)
+│  ├─ platform.py               # 应用工厂:装配路由/中间件/静态托管(薄)
+│  ├─ auth.py  security.py      # 用户鉴权(JWT/bcrypt)与 Cookie 加密
+│  ├─ admin.py                  # 管理后台服务(工作台/用户/日志/洞察/导出)
+│  ├─ api/                      # ⭐ 按领域拆分的 APIRouter
+│  │  ├─ deps.py                #   请求模型 + 依赖 + 登录限速
+│  │  └─ auth/cookies/dashboard/collect/alerts/admin/misc.py
+│  ├─ db/                       # SQLAlchemy 数据层
+│  │  ├─ models.py              #   ORM 模型(users/cookies/douhot/...)
+│  │  └─ database.py            #   引擎/会话/init_db/迁移/db_status
+│  ├─ services/                 # 业务逻辑(SRP,按领域)
+│  │  ├─ collector(微博)/xianyu/douhot + douhot_client(直连)
+│  │  ├─ tenant(多租户编排)/alert_service/schedule_service/scheduler
+│  │  ├─ keyword_agent(预测)/feishu + feishu_client(飞书)
+│  │  └─ cookie_store/notifier/trend_analyzer(纯函数)
+│  └─ utils/                    # proxy · logger · retry
+├─ tests/                       # 单测(纯逻辑,无网络)
+└─ scripts/                     # probe_* 抓包探测 / shoot_ui 截图
+```
+
+> ⚠️ 历史清理:早期**单用户微博指数管线**(`app/models.py` dataclass、
+> `services/cleaner.py`、`services/index_fetcher.py`、`storage/repository.py`、`services/archive.py`)
+> 已随多租户改造移除——只保留被复用的 `collector.fetch_hot_search`(微博热搜)与
+> `trend_analyzer.compute_growth/compute_slope`(智能体)。`platform.py` 原 553 行/50 路由
+> 已拆到 `app/api/`。
 ```
 
 ---
