@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from config.settings import Settings
+from app.db import repository
 from app.db.models import XianyuDaily, XianyuSummary
 from app.services import xianyu
 from app.services.cookie_store import get_cookies
@@ -44,13 +45,7 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
         saved = 0
         for idx, it in enumerate(hot[: _xy_detail_limit(settings)]):
             detail = xianyu.fetch_detail(client, it["item_id"])
-            row = session.scalar(
-                select(XianyuDaily).where(
-                    XianyuDaily.user_id == user_id,
-                    XianyuDaily.item_id == it["item_id"],
-                    XianyuDaily.snap_date == today,
-                )
-            )
+            row = repository.get_xianyu_daily(session, user_id, it["item_id"], today)
             if row is None:
                 row = XianyuDaily(user_id=user_id, snap_date=today, item_id=it["item_id"])
                 session.add(row)
@@ -83,14 +78,8 @@ def xianyu_analytics(session: Session, user_id: int) -> dict:
     """闲鱼深度面板:今日vs昨日 想要数涨跌、类目分布、上升/下降榜。"""
     today = datetime.now().date().isoformat()
     yesterday = (datetime.now().date() - timedelta(days=1)).isoformat()
-    today_rows = {
-        r.item_id: r
-        for r in session.scalars(select(XianyuDaily).where(XianyuDaily.user_id == user_id, XianyuDaily.snap_date == today)).all()
-    }
-    yesterday_rows = {
-        r.item_id: r
-        for r in session.scalars(select(XianyuDaily).where(XianyuDaily.user_id == user_id, XianyuDaily.snap_date == yesterday)).all()
-    }
+    today_rows = {r.item_id: r for r in repository.xianyu_daily_by_date(session, user_id, today)}
+    yesterday_rows = {r.item_id: r for r in repository.xianyu_daily_by_date(session, user_id, yesterday)}
     items = []
     for iid, t in today_rows.items():
         y = yesterday_rows.get(iid)

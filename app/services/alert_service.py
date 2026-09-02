@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
+from app.db import repository
 from app.db.models import AlertRecord, AlertRule, User
 from app.services.notifier import get_notifier, get_user_notifier
 from app.utils import get_logger
@@ -235,12 +236,7 @@ def build_weekly_summary(db: Session, user_id: int, settings: Settings) -> str:
 
     watches = db.scalars(select(DouhotWatch).where(DouhotWatch.user_id == user_id)).all()
     for w in watches:
-        snaps = db.scalars(
-            select(DouhotWatchSnap).where(
-                DouhotWatchSnap.user_id == user_id, DouhotWatchSnap.keyword == w.keyword,
-                DouhotWatchSnap.captured_at >= since,
-            ).order_by(DouhotWatchSnap.id.asc())
-        ).all()
+        snaps = repository.watch_snap_series(db, user_id, w.keyword, since)
         values = [s.score for s in snaps]
         if len(values) >= 2:
             a = keyword_agent.analyze(w.keyword, values)

@@ -6,11 +6,11 @@
 """
 from __future__ import annotations
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from config.settings import Settings
-from app.db.models import DouhotWatch, DouhotWatchSnap, WeiboHotItem, XianyuDaily
+from app.db import repository
+from app.db.models import DouhotWatch, DouhotWatchSnap
 from app.services import douhot
 from app.services.trend_analyzer import compute_growth, compute_slope
 
@@ -18,20 +18,14 @@ from app.services.trend_analyzer import compute_growth, compute_slope
 def add_douhot_watch(session: Session, user_id: int, list_type: str, keyword: str) -> dict:
     list_type = list_type if list_type in ("word", "search", "subscribe", "video", "topic") else "word"
     keyword = keyword.strip()
-    row = session.scalar(
-        select(DouhotWatch).where(
-            DouhotWatch.user_id == user_id, DouhotWatch.list_type == list_type, DouhotWatch.keyword == keyword
-        )
-    )
-    if row is None:
+    if repository.get_watch(session, user_id, list_type, keyword) is None:
         session.add(DouhotWatch(user_id=user_id, list_type=list_type, keyword=keyword))
         session.commit()
     return {"list_type": list_type, "keyword": keyword}
 
 
 def list_douhot_watch(session: Session, user_id: int) -> list[dict]:
-    rows = session.scalars(select(DouhotWatch).where(DouhotWatch.user_id == user_id)).all()
-    return [{"list_type": r.list_type, "keyword": r.keyword} for r in rows]
+    return [{"list_type": r.list_type, "keyword": r.keyword} for r in repository.list_watches(session, user_id)]
 
 
 def _record_douhot_watch_snaps(
@@ -46,7 +40,7 @@ def _record_douhot_watch_snaps(
     内容词(word):用**定向查询**取该词自身热度——不再依赖它碰巧在 top100 里,
     这是"任意关键词监控"的核心。其他榜仍从已采集列表里找(词须在榜内才会命中)。
     """
-    watches = session.scalars(select(DouhotWatch).where(DouhotWatch.user_id == user_id)).all()
+    watches = repository.list_watches(session, user_id)
     for w in watches:
         if w.list_type == "word" and douyin_cookie:
             try:
@@ -70,14 +64,10 @@ def _record_douhot_watch_snaps(
 def douhot_watch_analytics(session: Session, user_id: int) -> list[dict]:
     from app.services import keyword_agent
 
-    watches = session.scalars(select(DouhotWatch).where(DouhotWatch.user_id == user_id)).all()
+    watches = repository.list_watches(session, user_id)
     out = []
     for w in watches:
-        snaps = session.scalars(
-            select(DouhotWatchSnap)
-            .where(DouhotWatchSnap.user_id == user_id, DouhotWatchSnap.keyword == w.keyword)
-            .order_by(DouhotWatchSnap.id.asc())
-        ).all()
+        snaps = repository.watch_snap_series(session, user_id, w.keyword)
         values = [s.score for s in snaps]
         growth = compute_growth(values) if len(values) >= 2 else None
         agent = keyword_agent.analyze(w.keyword, values)
@@ -124,18 +114,7 @@ def platform_agent(session: Session, user_id: int, top_n: int = 8) -> dict:
         out.sort(key=lambda x: (x["burst"], x["forecast_next"] or 0), reverse=True)
         return out[:top_n]
 
-    weibo_series: dict[str, list] = {}
-    for r in session.scalars(
-        select(WeiboHotItem).where(WeiboHotItem.user_id == user_id).order_by(WeiboHotItem.id.asc())
-    ).all():
-        weibo_series.setdefault(r.title, []).append((r.captured_at, r.heat))
-    weibo = run(weibo_series.items())  # type: ignore[arg-type]
-
-    xy_series: dict[str, list] = {}
-    for r in session.scalars(
-        select(XianyuDaily).where(XianyuDaily.user_id == user_id).order_by(XianyuDaily.snap_date.asc())
-    ).all():
-        xy_series.setdefault(r.title or r.item_id, []).append((r.snap_date, r.want_count))
-    xianyu = run(xy_series.items())  # type: ignore[arg-type]
+    weibo = run(repository.weibo_heat_series(session, user_id).items())  # type: ignore[arg-type]
+    xianyu = run(repository.xianyu_want_series(session, user_id).items())  # type: ignore[arg-type]
 
     return {"weibo": weibo, "xianyu": xianyu}

@@ -27,6 +27,7 @@ from app.db.models import (
 )
 from app.services import alert_service, collector, douhot, xianyu
 from app.services.cookie_store import get_cookies
+from app.db import repository
 from app.services.trend_analyzer import compute_growth, compute_slope
 from app.services.tenant_base import _base, _record_run  # noqa: F401  (供外部/测试引用)
 from app.services.xianyu_analytics import run_xianyu_deep, xianyu_analytics, xianyu_daily  # noqa: F401
@@ -74,9 +75,7 @@ def run_weibo(session: Session, user_id: int, settings: Settings | None = None) 
 
 def _weibo_rising(session, user_id: int, settings: Settings, now) -> list[dict]:
     """基于该用户的历史热搜热度,判定微博上涨词。"""
-    latest = session.scalars(
-        select(WeiboHotItem).where(WeiboHotItem.user_id == user_id).order_by(WeiboHotItem.id.desc()).limit(200)
-    ).all()
+    latest = repository.weibo_items(session, user_id, limit=200)
     by_word: dict[str, list[int]] = {}
     for it in reversed(latest):
         by_word.setdefault(it.title, []).append(it.heat)
@@ -157,9 +156,7 @@ def run_douhot(session: Session, user_id: int, settings: Settings | None = None)
 
 
 def _douhot_rising(session, user_id: int, settings: Settings, now) -> list[dict]:
-    rows = session.scalars(
-        select(DouhotWord).where(DouhotWord.user_id == user_id).order_by(DouhotWord.id.desc()).limit(500)
-    ).all()
+    rows = repository.douhot_words(session, user_id, limit=500)
     by_word: dict[str, list[float]] = {}
     for w in reversed(rows):
         by_word.setdefault(w.title, []).append(w.score)
@@ -193,16 +190,10 @@ def dashboard(session: Session, user_id: int) -> dict:
             "slope": r.slope,
             "decided_at": r.decided_at.isoformat() if r.decided_at else None,
         }
-        for r in session.scalars(
-            select(WeiboTrend).where(WeiboTrend.user_id == user_id).order_by(WeiboTrend.id.desc()).limit(20)
-        ).all()
+        for r in repository.weibo_rising(session, user_id, limit=20)
     ]
-    xianyu_rows = session.scalars(
-        select(XianyuItem).where(XianyuItem.user_id == user_id).order_by(XianyuItem.hit_keywords.desc(), XianyuItem.best_rank.asc()).limit(30)
-    ).all()
-    douhot_rows = session.scalars(
-        select(DouhotWord).where(DouhotWord.user_id == user_id).order_by(DouhotWord.score.desc()).limit(100)
-    ).all()
+    xianyu_rows = repository.xianyu_items(session, user_id, limit=30)
+    douhot_rows = repository.douhot_top_words(session, user_id, limit=100)
     return {
         "weibo_trends": trends,
         "xianyu_hot": [

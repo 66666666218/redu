@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
+from app.db import repository
 from app.db.models import DouhotWatchSnap, DouhotWord, FeishuAlert, WeiboHotItem, XianyuItem
 from app.services.feishu_client import FeishuClient, _sign  # noqa: F401  (_sign 供测试)
 from app.utils import get_logger
@@ -164,11 +165,7 @@ def _keyword_watch_lines(db: Session, user_id: int, top_n: int = 8) -> list[str]
         return []
     items = []
     for w in watches:
-        snaps = db.scalars(
-            select(DouhotWatchSnap)
-            .where(DouhotWatchSnap.user_id == user_id, DouhotWatchSnap.keyword == w["keyword"])
-            .order_by(DouhotWatchSnap.id.asc())
-        ).all()
+        snaps = repository.watch_snap_series(db, user_id, w["keyword"])
         values = [s.score for s in snaps]
         agent = keyword_agent.analyze(w["keyword"], values)
         items.append(agent)
@@ -252,12 +249,7 @@ def run_feishu_insight_digest(settings: Settings | None = None) -> int:
         burst_rows, rising_rows = [], []
         for user in db.scalars(select(User).where(User.enabled.is_(True))).all():
             for w in tenant.list_douhot_watch(db, user.id):
-                snaps = db.scalars(
-                    select(DouhotWatchSnap)
-                    .where(DouhotWatchSnap.user_id == user.id, DouhotWatchSnap.keyword == w["keyword"],
-                           DouhotWatchSnap.captured_at >= since)
-                    .order_by(DouhotWatchSnap.id.asc())
-                ).all()
+                snaps = repository.watch_snap_series(db, user.id, w["keyword"], since)
                 values = [s.score for s in snaps]
                 if len(values) < 2:
                     continue
@@ -308,11 +300,7 @@ def run_feishu_keyword_alerts(user_id: int, settings: Settings | None = None, db
         client = FeishuClient(settings.feishu_webhook, settings.feishu_secret)
         hits: list[dict] = []
         for w in watches:
-            snaps = db.scalars(
-                select(DouhotWatchSnap)
-                .where(DouhotWatchSnap.user_id == user_id, DouhotWatchSnap.keyword == w["keyword"])
-                .order_by(DouhotWatchSnap.id.asc())
-            ).all()
+            snaps = repository.watch_snap_series(db, user_id, w["keyword"])
             values = [s.score for s in snaps]
             if not values:
                 continue

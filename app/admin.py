@@ -8,6 +8,7 @@ from datetime import date, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.db import repository
 from app.db.models import (
     AdminLog,
     AlertRecord,
@@ -417,11 +418,7 @@ def insights(db: Session) -> dict:
         select(DouhotWatch.user_id, DouhotWatch.list_type, DouhotWatch.keyword).order_by(DouhotWatch.id)
     ).all()
     for user_id, list_type, keyword in watch_rows:
-        snaps = db.scalars(
-            select(DouhotWatchSnap)
-            .where(DouhotWatchSnap.user_id == user_id, DouhotWatchSnap.keyword == keyword)
-            .order_by(DouhotWatchSnap.id.asc())
-        ).all()
+        snaps = repository.watch_snap_series(db, user_id, keyword)
         values = [s.score for s in snaps]
         if len(values) < 2:
             continue

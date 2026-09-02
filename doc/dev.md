@@ -128,7 +128,8 @@ redian/
 │  │  └─ auth/cookies/dashboard/collect/alerts/admin/misc.py
 │  ├─ db/                       # SQLAlchemy 数据层
 │  │  ├─ models.py              #   ORM 模型(users/cookies/douhot/...)
-│  │  └─ database.py            #   引擎/会话/init_db/迁移/db_status
+│  │  ├─ database.py            #   引擎/会话/init_db/迁移/db_status
+│  │  └─ repository.py          #   ⭐ Repository 数据访问层(按聚合取数)
 │  ├─ services/                 # 业务逻辑(SRP,按领域)
 │  │  ├─ collector(微博)/xianyu/douhot + douhot_client(直连)
 │  │  ├─ tenant(采集编排)/tenant_base(共享)/alert_service/schedule_service/scheduler
