@@ -26,7 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
-from app.db.models import DouhotWord, FeishuAlert, WeiboHotItem, XianyuItem
+from app.db.models import DouhotWatchSnap, DouhotWord, FeishuAlert, WeiboHotItem, XianyuItem
 from app.utils import get_logger
 
 logger = get_logger(__name__)
@@ -246,6 +246,58 @@ def _in_cooldown(db: Session, user_id: int, section: str, title: str, settings: 
         )
     )
     return row is not None and (now - row.alerted_at).total_seconds() < settings.feishu_alert_cooldown_hours * 3600
+
+
+def run_feishu_keyword_alerts(user_id: int, settings: Settings | None = None, db: Session | None = None) -> int:
+    """智能体预警:把"预测可能爆发"的关注词推送到群里。
+
+    对用户每个关注词,用 `keyword_agent` 做趋势分析;命中爆发信号(上升期 + 强增长 +
+    一定置信度 + 正加速度)且不在冷却期内的,推一条"预测爆发"消息。去重表复用 FeishuAlert。
+    返回推送条数;`db` 供测试注入。
+    """
+    settings = settings or get_settings()
+    if not settings.feishu_webhook:
+        return 0
+    from app.services import keyword_agent
+    from app.services import tenant
+    from app.db import get_session_local
+
+    own_session = db is None
+    db = db or get_session_local()()
+    pushed = 0
+    try:
+        watches = tenant.list_douhot_watch(db, user_id)
+        if not watches:
+            return 0
+        client = FeishuClient(settings.feishu_webhook, settings.feishu_secret)
+        hits: list[dict] = []
+        for w in watches:
+            snaps = db.scalars(
+                select(DouhotWatchSnap)
+                .where(DouhotWatchSnap.user_id == user_id, DouhotWatchSnap.keyword == w["keyword"])
+                .order_by(DouhotWatchSnap.id.asc())
+            ).all()
+            values = [s.score for s in snaps]
+            if not values:
+                continue
+            agent = keyword_agent.analyze(w["keyword"], values)
+            if not agent["burst"]:
+                continue
+            if _in_cooldown(db, user_id, "keyword_burst", w["keyword"], settings):
+                continue
+            _mark_alerted(db, user_id, "keyword_burst", w["keyword"], "预测爆发")
+            hits.append(agent)
+        if hits:
+            lines = ["🔮 智能体预测 · 可能爆发"]
+            for a in hits:
+                lines.append(f"  · {a['keyword']} 预测 {a['forecast_next']:.0f} 环比+{a['growth']*100:.0f}%")
+            client.send("\n".join(lines))
+            pushed = len(hits)
+            logger.info("飞书智能体预警推送 user=%s 条数=%s", user_id, pushed)
+        return pushed
+    finally:
+        if own_session:
+            db.close()
 
 
 def _mark_alerted(db: Session, user_id: int, section: str, title: str, reason: str) -> None:

@@ -412,12 +412,15 @@ def douhot_watch_analytics(session: Session, user_id: int) -> list[dict]:
                 "rank_now": snaps[-1].rank_now if snaps else 0,
                 "points": len(values),
                 "growth": growth,
-                # 智能体:趋势分析 + 下一轮预测 + 迷你序列
                 "trend_label": agent["trend_label"],
                 "forecast_next": agent["forecast_next"],
                 "summary": agent["summary"],
                 "series": agent["series"],
                 "slope": agent["slope"],
+                "confidence": agent["confidence"],
+                "r2": agent["r2"],
+                "accel": agent["accel"],
+                "burst": agent["burst"],
             }
         )
     return out

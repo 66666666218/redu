@@ -20,7 +20,7 @@ from app.db.database import Base
 from app.db import models  # noqa: F401
 from app.db.models import DouhotWord, FeishuAlert, User, WeiboHotItem, XianyuItem
 from app.services import feishu
-from app.services.feishu import _delta, _sign, build_daily, run_feishu_realtime
+from app.services.feishu import _delta, _sign, build_daily, run_feishu_keyword_alerts, run_feishu_realtime
 
 SECRET = "test-sign-secret-placeholder"
 
@@ -150,3 +150,36 @@ def test_realtime_respects_cooldown(session, monkeypatch) -> None:
     second = run_feishu_realtime("weibo", 1, settings, db=session)  # 已写去重表,冷却期内应全走冷却 → 不重推
     assert first == 2 and second == 0 and n_calls["n"] == 1
     assert session.scalar(select(FeishuAlert).where(FeishuAlert.title == "D")) is not None
+
+
+def test_keyword_burst_alert(monkeypatch, session) -> None:
+    """智能体预警:关注词呈加速上升时推送"可能爆发",且进冷却去重。"""
+    from app.services import tenant
+    from app.db.models import DouhotWatch, DouhotWatchSnap
+
+    # 关注一个词,喂它一段加速上升的热度序列
+    session.add(DouhotWatch(user_id=1, list_type="word", keyword="爆点"))
+    for v in [1000, 1100, 1300, 1800, 2600]:
+        session.add(DouhotWatchSnap(user_id=1, list_type="word", keyword="爆点", score=v, rank_now=1))
+    session.commit()
+
+    sent = []
+    monkeypatch.setattr(feishu, "FeishuClient", lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
+    n = run_feishu_keyword_alerts(1, _settings(), db=session)
+    assert n == 1
+    assert "可能爆发" in sent[0] and "爆点" in sent[0]
+    # 冷却期内再跑 → 不重推
+    assert run_feishu_keyword_alerts(1, _settings(), db=session) == 0
+
+
+def test_keyword_burst_skips_when_not_rising(monkeypatch, session) -> None:
+    from app.db.models import DouhotWatch, DouhotWatchSnap
+
+    session.add(DouhotWatch(user_id=1, list_type="word", keyword="退潮"))
+    for v in [2000, 1500, 1000, 500]:
+        session.add(DouhotWatchSnap(user_id=1, list_type="word", keyword="退潮", score=v, rank_now=1))
+    session.commit()
+    n_calls = {"n": 0}
+    monkeypatch.setattr(feishu, "FeishuClient", lambda w, s: type("F", (), {"send": lambda self, t: (n_calls.__setitem__("n", n_calls["n"] + 1), True)[1]})())
+    assert run_feishu_keyword_alerts(1, _settings(), db=session) == 0
+    assert n_calls["n"] == 0  # 回落期不推

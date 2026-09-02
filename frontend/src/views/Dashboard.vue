@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { api } from '../api'
 
 const dash = ref({ weibo_trends: [], xianyu_hot: [], douhot_words: [] })
@@ -8,6 +8,16 @@ const watches = ref([])
 const watchForm = ref({ list_type: 'word', keyword: '' })
 const msg = ref('')
 const busy = ref('')
+
+// 智能排序:可能爆发的优先,其次按预测热度 / 环比涨幅,把最值得看的顶上来
+const sortedWatches = computed(() => {
+  return [...watches.value].sort((a, b) => {
+    if (!!b.burst !== !!a.burst) return b.burst ? 1 : -1
+    const fb = b.forecast_next ?? 0, fa = a.forecast_next ?? 0
+    if (fb !== fa) return fb - fa
+    return (b.growth ?? 0) - (a.growth ?? 0)
+  })
+})
 
 const platforms = [
   { key: 'weibo', label: '微博' },
@@ -138,9 +148,9 @@ onMounted(async () => { await load(); await loadAnalytics(); await loadWatches()
         </div>
 
         <div v-if="watches.length" class="grid" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
-          <div class="watch-card" v-for="w in watches" :key="w.keyword">
+          <div class="watch-card" v-for="w in sortedWatches" :key="w.keyword">
             <div class="row" style="justify-content:space-between">
-              <b>{{ w.keyword }}</b>
+              <b>{{ w.keyword }} <span v-if="w.burst" style="color:var(--down)">🔥爆发</span></b>
               <span class="badge" :class="trendClass(w.trend_label)">{{ w.trend_label || '关注中' }}</span>
             </div>
             <div class="row" style="gap:14px;margin:8px 0">
@@ -151,7 +161,8 @@ onMounted(async () => { await load(); await loadAnalytics(); await loadWatches()
             <svg v-if="spark(w.series)" :width="120" :height="36" class="spark">
               <polyline :points="spark(w.series)" fill="none" stroke="var(--neon)" stroke-width="2" stroke-linejoin="round"/>
             </svg>
-            <div class="empty" style="margin-top:6px">{{ w.summary || '再采集一次积累更多数据' }}</div>
+            <div class="empty" style="margin-top:6px;color:var(--dim)">置信度:{{ w.confidence || '—' }}</div>
+            <div class="empty" style="margin-top:2px">{{ w.summary || '再采集一次积累更多数据' }}</div>
           </div>
         </div>
         <div v-else class="empty">输入任意关键词 → 关注 → 采集抖音:无论它在不在榜上都会定向查出热度,并预测走势</div>

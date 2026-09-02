@@ -276,9 +276,11 @@ def create_app() -> FastAPI:
             result = runner(db, user.id)
             # 采集成功后触发飞书实时提醒;失败不影响采集结果返回
             try:
-                from app.services.feishu import run_feishu_realtime
+                from app.services.feishu import run_feishu_keyword_alerts, run_feishu_realtime
 
                 run_feishu_realtime(platform, user.id)
+                if platform == "douhot":
+                    run_feishu_keyword_alerts(user.id)
             except Exception:  # noqa: BLE001
                 pass
             return result

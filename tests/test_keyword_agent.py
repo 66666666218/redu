@@ -35,3 +35,27 @@ def test_forecast_next_trends_with_slope() -> None:
     assert _forecast_next([5, 5, 5]) is None
     # 样本不足 → None
     assert _forecast_next([7]) is None
+
+
+def test_confidence_and_fit() -> None:
+    # 线性上升序列:R² 高、样本足 → 置信度高
+    out = analyze("直线上升", [100, 200, 300, 400, 500, 600])
+    assert out["confidence"] == "高"
+    assert out["r2"] is not None and out["r2"] > 0.95
+    # 样本 <3 → 数据不足
+    assert analyze("刚关注", [100, 200])["confidence"] == "数据不足"
+
+
+def test_burst_flag_on_accelerating_rise() -> None:
+    # 加速上升(后段涨得更猛)→ 爆点信号
+    out = analyze("爆点", [1000, 1100, 1300, 1800, 2600])
+    assert out["trend_label"] == "上升期"
+    assert out["growth"] is not None and out["growth"] >= 0.20
+    assert out["accel"] is not None and out["accel"] > 0
+    assert out["burst"] is True
+    assert "爆发" in out["summary"]
+
+
+def test_no_burst_when_falling() -> None:
+    out = analyze("退潮", [2000, 1500, 1000, 500])
+    assert out["burst"] is False and out["trend_label"] == "回落期"
