@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     xianyu_keywords: str = "ps教程,网盘资源,代充,剪映会员,软件,素材,cad,ae,pr,office,会员,课程,影视,源码"  # 虚拟商品关键词
     xianyu_top_n: int = 100         # 前 N 虚拟商品榜(搜索级,无风控)
     xianyu_detail_limit: int = 20   # 慢速抓详情(想要数)的商品数
+    xianyu_request_delay: float = 4.0  # 闲鱼相邻请求间隔(秒,带抖动);比通用更大,防 mtop 风控
     douhot_cookie_file: str = "data/douhot_cookie.txt"  # 抖音热点宝 Cookie 文件(gitignored)
     douhot_top_n: int = 100         # 内容词趋势条数(抖音热点接口可到 200)
     douhot_alert_max: int = 5       # 单次判涨告警上限(防刷屏)

@@ -1,4 +1,6 @@
 """闲鱼热榜采集:抽取/价格/去重排名单测(纯逻辑,无网络)。"""
+import pytest
+
 from config.settings import Settings
 from app.services.xianyu import _extract_items, collect_hot, item_price
 
@@ -50,3 +52,36 @@ def test_collect_hot_respects_top_n(settings: Settings) -> None:
     settings.xianyu_top_n = 3
     out = collect_hot(settings, client=fake)
     assert len(out) == 3
+
+
+def test_post_backs_off_on_rate_limit_then_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """限流/风控码应退避重试(不连环猛打),仍失败抛 XianyuRateLimit。"""
+    from app.services import xianyu
+    from app.services.xianyu import XianyuClient, XianyuRateLimit
+
+    calls = {"n": 0}
+    monkeypatch.setattr(xianyu.time, "sleep", lambda s: None)  # 退避不真等
+
+    class _Resp:
+        def json(self): return {"ret": ["FAIL_SYS_USER_VALIDATE::需要验证"]}
+
+    client = XianyuClient("tracknick=x; ")
+    monkeypatch.setattr(client.session, "post", lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1), _Resp())[1])
+
+    with pytest.raises(XianyuRateLimit):
+        client.search("ps教程", rows=5)
+    # 1 次初始 + 3 次退避重试 = 4 次请求
+    assert calls["n"] == 4
+
+
+def test_post_returns_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """正常 SUCCESS 响应应直接返回,不触发退避。"""
+    from app.services import xianyu
+    from app.services.xianyu import XianyuClient
+
+    class _Resp:
+        def json(self): return {"ret": ["SUCCESS::调用成功"], "data": {"biz": {"list": []}}}
+
+    client = XianyuClient("tracknick=x; ")
+    monkeypatch.setattr(client.session, "post", lambda *a, **k: _Resp())
+    assert client._post("mtop.taobao.idlemtopsearch.pc.search", {"keyword": "k"})["ret"][0].startswith("SUCCESS")

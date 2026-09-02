@@ -49,6 +49,10 @@ class XianyuError(Exception):
     """闲鱼请求/解析失败。"""
 
 
+class XianyuRateLimit(XianyuError):
+    """闲鱼限流/风控(退避后仍失败)。"""
+
+
 # mtop 令牌错误码(需刷新 _m_h5_tk 后重试;参考开源 goofish-client)
 TOKEN_ERRORS = {
     "FAIL_SYS_TOKEN_EMPTY",
@@ -99,30 +103,49 @@ class XianyuClient:
         return hashlib.md5(f"{token}&{t}&{self.APP_KEY}&{data}".encode()).hexdigest()
 
     def _post(self, api: str, data_obj: dict) -> dict:
-        data_val = json.dumps(data_obj, ensure_ascii=False, separators=(",", ":"))
-        t = str(int(time.time() * 1000))
-        params = {
-            "jsv": "2.7.2", "appKey": self.APP_KEY, "t": t, "sign": self._sign(t, self._token(), data_val),
-            "v": "1.0", "type": "originaljson", "accountSite": "xianyu", "dataType": "json",
-            "timeout": "20000", "api": api, "sessionOption": "AutoLoginOnly",
-            "spm_cnt": "a21ybx.im.0.0", "spm_pre": "a21ybx.item.want.1.14ad3da6ALVq3n", "log_id": "14ad3da6ALVq3n",
-        }
-        try:
-            resp = self.session.post(f"{H5_BASE}/{api}/1.0/", params=params, data={"data": data_val}, timeout=20)
-        except requests.RequestException as exc:
-            raise XianyuError(f"闲鱼请求失败:{exc}") from exc
-        obj = resp.json()
-        ret = obj.get("ret", [""])[0]
-        code = ret.split("::")[0]
-        if code in TOKEN_ERRORS:
-            if self._refresh(resp):
-                return self._post(api, data_obj)
-            raise XianyuError(f"闲鱼令牌错误:{ret}")
-        if code in RATE_ERRORS or "USER_VALIDATE" in code:
-            raise XianyuError(f"闲鱼限流,请稍后:{ret}")
-        if code and not code.startswith("SUCCESS"):
-            raise XianyuError(f"闲鱼接口返回:{ret}")
-        return obj
+        """发一次 mtop 请求;令牌错自动刷新重试,限流/风控**指数退避**后重试。
+
+        退避策略:遇 `FAIL_SYS_USER_VALIDATE`/`FAIL_SYS_RATE_LIMIT` 等风控码,
+        按 30s/90s/180s 递增等待后重试(最多 3 次),仍失败抛 `XianyuRateLimit`。
+        关键:风控时**不能连环猛打**(会加重风控),而应拉长时间隔再试。
+        """
+        last_rate_err: str | None = None
+        backoff = [30, 90, 180]
+        for attempt in range(1 + len(backoff)):
+            data_val = json.dumps(data_obj, ensure_ascii=False, separators=(",", ":"))
+            t = str(int(time.time() * 1000))
+            params = {
+                "jsv": "2.7.2", "appKey": self.APP_KEY, "t": t, "sign": self._sign(t, self._token(), data_val),
+                "v": "1.0", "type": "originaljson", "accountSite": "xianyu", "dataType": "json",
+                "timeout": "20000", "api": api, "sessionOption": "AutoLoginOnly",
+                "spm_cnt": "a21ybx.im.0.0", "spm_pre": "a21ybx.item.want.1.14ad3da6ALVq3n", "log_id": "14ad3da6ALVq3n",
+            }
+            try:
+                resp = self.session.post(f"{H5_BASE}/{api}/1.0/", params=params, data={"data": data_val}, timeout=20)
+            except requests.RequestException as exc:
+                raise XianyuError(f"闲鱼请求失败:{exc}") from exc
+            try:
+                obj = resp.json()
+            except ValueError as exc:
+                raise XianyuError(f"闲鱼响应非 JSON:{exc}") from exc
+            ret = obj.get("ret", [""])[0]
+            code = ret.split("::")[0]
+            if code in TOKEN_ERRORS:
+                if self._refresh(resp):
+                    continue  # 令牌已刷新,重试
+                raise XianyuError(f"闲鱼令牌错误:{ret}")
+            if code in RATE_ERRORS or "USER_VALIDATE" in code:
+                last_rate_err = ret
+                if attempt < len(backoff):
+                    wait = backoff[attempt]
+                    logger.warning("闲鱼限流/风控,%.0fs 后重试:%s", wait, ret)
+                    time.sleep(wait)
+                    continue
+                raise XianyuRateLimit(f"闲鱼限流,请稍后再试:{ret}")
+            if code and not code.startswith("SUCCESS"):
+                raise XianyuError(f"闲鱼接口返回:{ret}")
+            return obj
+        raise XianyuRateLimit(f"闲鱼限流,请稍后再试:{last_rate_err}")
 
     def search(self, keyword: str, page: int = 1, rows: int = 30) -> list[dict]:
         payload = {
@@ -226,7 +249,7 @@ def collect_hot(settings: Settings, client: XianyuClient | None = None) -> list[
     client = client or XianyuClient(load_cookie(settings.goofish_cookie_file))
 
     buckets: dict[str, dict] = {}
-    base_delay = getattr(settings, "request_delay_seconds", 2.5)
+    base_delay = getattr(settings, "xianyu_request_delay", None) or getattr(settings, "request_delay_seconds", 2.5)
     for idx, kw in enumerate(keywords):
         try:
             items = client.search(kw)

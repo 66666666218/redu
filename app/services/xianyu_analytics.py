@@ -41,7 +41,7 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
         client = xianyu.XianyuClient(goofish)
         hot = xianyu.collect_hot(settings, client)
         today = datetime.now().date().isoformat()
-        base_delay = getattr(settings, "request_delay_seconds", 2.5)
+        base_delay = getattr(settings, "xianyu_request_delay", None) or getattr(settings, "request_delay_seconds", 2.5)
         saved = 0
         for idx, it in enumerate(hot[: _xy_detail_limit(settings)]):
             detail = xianyu.fetch_detail(client, it["item_id"])
