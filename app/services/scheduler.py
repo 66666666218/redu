@@ -99,7 +99,7 @@ def _safe(func):  # type: ignore[no-untyped-def]
 def build_jobs(scheduler: BackgroundScheduler) -> None:
     """注册后台作业:按用户频率采集、定时告警摘要、失败自动重试、飞书日报。"""
     from app.admin import retry_failed_runs
-    from app.services.alert_service import run_fixed_time_digests
+    from app.services.alert_service import run_fixed_time_digests, run_weekly_summary
     from app.services.feishu import run_feishu_daily, run_feishu_insight_digest
     from config.settings import get_settings as _get_settings
 
@@ -135,6 +135,16 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         insight_trigger = CronTrigger(day_of_week="mon", hour=9, minute=0)
     scheduler.add_job(
         _safe(run_feishu_insight_digest), insight_trigger, id="feishu_insight", max_instances=1, coalesce=True
+    )
+    # 每周邮件"本周热点洞察":默认周日 20:00
+    try:
+        parts = _get_settings().weekly_summary_cron.split()
+        cron_kw = dict(zip(("minute", "hour", "day", "month", "day_of_week"), parts))
+        weekly_trigger = CronTrigger(**cron_kw)
+    except Exception:  # noqa: BLE001 - 表达式非法时回退到周日 20:00
+        weekly_trigger = CronTrigger(day_of_week="sun", hour=20, minute=0)
+    scheduler.add_job(
+        _safe(run_weekly_summary), weekly_trigger, id="weekly_summary", max_instances=1, coalesce=True
     )
 
 

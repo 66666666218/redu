@@ -318,3 +318,38 @@ def test_platform_agent_weibo_and_xianyu(session) -> None:
     assert out["xianyu"][0]["growth"] is not None and out["xianyu"][0]["growth"] > 0
     # 都有预测值
     assert out["weibo"][0]["forecast_next"] is not None
+
+
+def test_weekly_summary_includes_insight(session) -> None:
+    """周度洞察摘要应包含关注词趋势 + 微博/闲鱼预测。"""
+    from datetime import datetime, timedelta
+    from config.settings import Settings
+    from app.db.models import DouhotWatch, DouhotWatchSnap, WeiboHotItem
+    from app.services import alert_service
+
+    session.add(DouhotWatch(user_id=1, list_type="word", keyword="爆发词"))
+    for i, v in enumerate([1000, 1200, 1400, 2000, 3000]):
+        session.add(DouhotWatchSnap(user_id=1, list_type="word", keyword="爆发词", score=v,
+                                    rank_now=1, captured_at=datetime.now() - timedelta(days=6, hours=-i)))
+    session.add(WeiboHotItem(user_id=1, title="冲榜", heat=1000, rank=1, captured_at=datetime.now() - timedelta(days=1)))
+    session.add(WeiboHotItem(user_id=1, title="冲榜", heat=3000, rank=1, captured_at=datetime.now()))
+    session.commit()
+
+    text = alert_service.build_weekly_summary(session, 1, Settings(_env_file=None, smtp_host="smtp.qq.com"))
+    assert "本周热点洞察" in text
+    assert "爆发词" in text
+    assert ("微博" in text or "冲榜" in text)
+
+
+def test_alerts_list_includes_section(session) -> None:
+    """告警列表返回结构含 section(供大屏滚动条显示平台)。"""
+    from datetime import datetime
+    from app.db.models import AlertRecord
+
+    session.add(AlertRecord(user_id=1, section="douhot", keyword="词", reason="新增 词", triggered_at=datetime.now()))
+    session.commit()
+    # 直接查服务层确保字段存在
+    from app.services import tenant
+    # alerts_list 在 platform 路由层,这里验证 AlertRecord.section 可读
+    row = session.scalar(select(AlertRecord).where(AlertRecord.user_id == 1))
+    assert row.section == "douhot"

@@ -392,7 +392,7 @@ def create_app() -> FastAPI:
         rows = db.scalars(
             select(AlertRecord).where(AlertRecord.user_id == user.id).order_by(AlertRecord.id.desc()).limit(limit)
         ).all()
-        return [{"keyword": r.keyword, "reason": r.reason, "time": r.triggered_at.isoformat()} for r in rows]
+        return [{"keyword": r.keyword, "reason": r.reason, "section": r.section, "time": r.triggered_at.isoformat()} for r in rows]
 
     # ---- 每用户 SMTP(发信给本人) ----
     @app.get("/api/user/smtp")

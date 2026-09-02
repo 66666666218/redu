@@ -5,6 +5,7 @@ import { api } from '../api'
 const dash = ref({ douhot_words: [], weibo_trends: [], xianyu_hot: [] })
 const agent = ref({ weibo: [], xianyu: [] })
 const watches = ref([])
+const alerts = ref([])
 const now = ref(new Date())
 let timer = null
 
@@ -13,6 +14,7 @@ async function load() {
   try { dash.value = await api.dashboard() } catch {}
   try { agent.value = await api.platformAgent() } catch {}
   try { watches.value = await api.douhotWatchAnalytics() } catch {}
+  try { alerts.value = await api.alertsList(20) } catch {}
 }
 function tick() { now.value = new Date() }
 
@@ -46,6 +48,7 @@ function spark(series, forecast) {
   return { solid, fc, W, H }
 }
 function trendClass(l) { return l === '上升期' ? 'up' : (l === '回落期' ? 'down' : '') }
+const secLabel = { weibo: '微博', xianyu: '闲鱼', douhot: '抖音' }
 
 const topWords = computed(() => dash.value.douhot_words || [])
 const stats = computed(() => {
@@ -119,6 +122,16 @@ onUnmounted(() => clearInterval(timer))
         </div>
       </section>
     </div>
+
+    <div class="alert-bar" v-if="alerts.length">
+      <span class="alert-lab">⚡ 实时告警</span>
+      <div class="alert-viewport"><div class="alert-track">
+        <span class="alert-item" v-for="a in alerts" :key="a.time+a.keyword">
+          <span class="alert-sec">{{ secLabel[a.section] || a.section || '?' }}</span> · {{ a.keyword }}
+          <span class="alert-r"> {{ a.reason }}</span>
+        </span>
+      </div></div>
+    </div>
   </div>
 </template>
 
@@ -157,6 +170,16 @@ onUnmounted(() => clearInterval(timer))
 .ticker { display:flex; flex-wrap:wrap; gap:12px }
 .ticker-item { background:rgba(3,6,12,.5); border:1px solid var(--line); border-radius:8px; padding:8px 14px; font-size:17px }
 .ticker-item b { color:var(--neon); margin-left:6px }
+
+/* 底部实时告警滚动条 */
+.alert-bar { margin-top:16px; display:flex; align-items:center; gap:16px; background:linear-gradient(160deg,var(--card),var(--card-2)); border:1px solid rgba(255,92,122,.28); border-radius:12px; padding:12px 16px; overflow:hidden }
+.alert-lab { color:var(--down); font-weight:700; white-space:nowrap }
+.alert-viewport { flex:1; overflow:hidden; white-space:nowrap }
+.alert-track { display:inline-flex; gap:32px; animation:marquee 40s linear infinite }
+.alert-item { font-size:17px; color:var(--txt) }
+.alert-sec { color:var(--neon); font-weight:600 }
+.alert-r { color:var(--dim); margin-left:4px }
+@keyframes marquee { from { transform:translateX(0) } to { transform:translateX(-50%) } }
 
 @media (max-width:1100px){ .screen-grid{grid-template-columns:1fr} .screen-stats{grid-template-columns:repeat(2,1fr)} }
 </style>

@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- [2026-09-03 00:50] FEAT: **大屏实时告警滚动条 + 每周邮件总结**——`/screen` 大屏底部新增横向滚动告警条(`/api/alerts/list` 补 `section` 字段,实时显示各平台告警);新增**每周邮件"本周热点洞察"**`run_weekly_summary`(`WEEKLY_SUMMARY_CRON` 默认周日 20:00,走用户/全局 SMTP),内容含关注词爆发/上升 + 微博/闲鱼预测. 新增单测,全量 117 项通过(Files: frontend/src/views/Screen.vue, app/services/{alert_service.py,scheduler.py}, app/platform.py, config/settings.py, .env.example, tests/test_platform.py, doc/API.md)
 - [2026-09-03 00:40] FEAT: **可视化大屏(第3步)**——新增 `/screen` 全屏智能体数据墙(适合挂大屏/电视):大字统计卡(关注词/爆发/内容词/上涨)、爆发榜(带趋势+预测+迷你图)、微博/闲鱼预测、抖音内容词 Top 滚动词云;每 60s 自动刷新,赛博风深色排版,大屏路由不显示顶栏. 已在本地真机截图核对通过(Files: frontend/src/{views/Screen.vue,router.js,App.vue})
 - [2026-09-03 00:20] FEAT: **置信度分级告警(第2步)**——飞书实时推送"预测爆发"前按最低置信度门槛过滤(`FEISHU_BURST_MIN_CONFIDENCE`,默认"高");中/低置信的爆发**只进日报与洞察、不实时推**,减少噪音. 同时修正置信度模型:真正的爆发词常是**加速上升**(非线性),原"线性 R²"会误判成中低置信→被门槛挡掉;改为"强增长(+≥20%) + 正加速 + 样本≥4"**直接判高置信**(方向确定比线性拟合更重要). 新增单测,全量 115 项通过(Files: config/settings.py, app/services/{keyword_agent.py,feishu.py}, .env.example, tests/{test_feishu.py,test_keyword_agent.py})
 - [2026-09-03 00:10] FEAT: **多平台智能体打通(第1步)**——微博/闲鱼也用同一套智能体预测:新增 `tenant.platform_agent`,拿微博热搜词的 `heat` 序列、闲鱼商品的 `want_count` 序列喂给 `keyword_agent`,产出趋势+预测+爆发标记;新增 `GET /api/platform-agent`,仪表盘新增「微博/闲鱼 热点预测」卡片(实线+虚线),管理后台「洞察」页并入 微博/闲鱼 预测. 新增单测,全量 113 项通过(Files: app/services/tenant.py, app/admin.py, app/platform.py, frontend/src/{api.js,views/{Dashboard,Admin}.vue}, tests/test_platform.py, doc/API.md)

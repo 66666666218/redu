@@ -217,3 +217,75 @@ def run_fixed_time_digests() -> int:
         return sent
     finally:
         db.close()
+
+
+def build_weekly_summary(db: Session, user_id: int, settings: Settings) -> str:
+    """生成某用户的周度洞察摘要(近 7 天):统计 + 爆发/上升词 + 预测。"""
+    from datetime import datetime, timedelta
+
+    from app.services import keyword_agent
+    from app.db.models import DouhotWatchSnap
+
+    since = datetime.now() - timedelta(days=7)
+    lines = [f"📊 本周热点洞察(近 7 天)", ""]
+
+    # 关注词智能体(近 7 天快照)
+    burst, rising = [], []
+    from app.db.models import DouhotWatch
+
+    watches = db.scalars(select(DouhotWatch).where(DouhotWatch.user_id == user_id)).all()
+    for w in watches:
+        snaps = db.scalars(
+            select(DouhotWatchSnap).where(
+                DouhotWatchSnap.user_id == user_id, DouhotWatchSnap.keyword == w.keyword,
+                DouhotWatchSnap.captured_at >= since,
+            ).order_by(DouhotWatchSnap.id.asc())
+        ).all()
+        values = [s.score for s in snaps]
+        if len(values) >= 2:
+            a = keyword_agent.analyze(w.keyword, values)
+            (burst if a["burst"] else rising).append(a)
+    if burst:
+        lines.append("🔥 可能爆发:")
+        for a in sorted(burst, key=lambda r: r["forecast_next"] or 0, reverse=True):
+            lines.append(f"  · {a['keyword']} 环比+{(a['growth'] or 0)*100:.0f}% 预测{int(a['forecast_next'] or 0)}")
+    if rising:
+        lines.append("📈 上升:")
+        lines.append("  " + ", ".join(a["keyword"] for a in rising[:8]))
+    if not burst and not rising:
+        lines.append("本周暂无爆发/上升词(需关注词并积累多轮采集)")
+
+    # 微博/闲鱼预测
+    from app.services import tenant
+
+    pa = tenant.platform_agent(db, user_id, top_n=6)
+    for label, items in (("微博", pa["weibo"]), ("闲鱼", pa["xianyu"])):
+        if items:
+            lines.append(f"📈 {label}热点预测:")
+            for it in items[:5]:
+                lines.append(f"  · {it['title'][:20]} {it['trend_label']} 环比+{(it['growth'] or 0)*100:.0f}%")
+    return "\n".join(lines)
+
+
+def run_weekly_summary() -> int:
+    """每周邮件总结:给每个启用用户发本周洞察摘要(走其 SMTP 或全局 SMTP)。"""
+    settings = get_settings()
+    from app.db import get_session_local
+    from app.services.notifier import NullNotifier
+
+    db = get_session_local()()
+    sent = 0
+    try:
+        for user in db.scalars(select(User).where(User.enabled.is_(True))).all():
+            if not (user.email or ""):
+                continue
+            notify = get_user_notifier(user, settings)
+            if isinstance(notify, NullNotifier):  # 未配置 SMTP 时不外发
+                continue
+            body = build_weekly_summary(db, user.id, settings)
+            if notify.send("本周热点洞察", body):
+                sent += 1
+        logger.info("周度邮件总结推送完成,发送=%s", sent)
+        return sent
+    finally:
+        db.close()
