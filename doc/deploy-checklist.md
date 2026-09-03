@@ -64,6 +64,7 @@ docker exec redu-api python -c "from app.platform import create_app; print('app 
 - 抖音走代理防 502
 - **四平台独立板块 + 百度采集器**(新增 `baidu_hot_items` 表,`init_db` 自动建,无需手工)
 - **跨平台共同上升 → 飞书**(≥2 板块同处上升期推送)
+- **四板块关键词监控**(`douhot_watch` 加 section,每板块页可加关注词;飞书预警/日报覆盖全部板块)
 
 ---
 
@@ -78,3 +79,5 @@ docker exec redu-api python -c "from app.platform import create_app; print('app 
 
 - 抖音 tab(内容词/搜索/视频/话题/订阅)实时拉取,页面点"采集"后才有数据。
 - **跨平台共同上升**:某词在 ≥2 个板块同处上升期即推飞书;倾向在"采集频率"给各板块设合理间隔(百度可短、闲鱼要长),攒够 ≥2 轮数据才有趋势与共同上升判断。
+- **每板块关键词监控**:各板块页都可加"关注词"(接口 `/api/watch/{section}`,见 doc/API.md §7.3.1);微博/闲鱼/百度**词须在榜内才记快照**(闲鱼的 score 是命中关键词数,量级偏小),抖音仍支持榜外定向查询。飞书智能体预警/日报已覆盖四板块全部关注词。
+- **迁移自愈**:`douhot_watch`/`douhot_watch_snap` 加了 `section` 列并去掉旧唯一索引,MySQL 由 `init_db`/迁移自动处理;旧本地 SQLite 库若有表级唯一约束需删库重建(生产不受影响)。

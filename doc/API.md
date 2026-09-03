@@ -1,6 +1,6 @@
 # 接口规范(API)
 
-> 版本: v1.0　|　最后更新: 2026-08-29
+> 版本: v1.1　|　最后更新: 2026-09-03
 > 基础地址: 调度/监控系统暴露的 HTTP 服务(默认 `http://localhost:8080`)
 > 认证: 除 `/healthz`(健康检查)外,所有接口需 **JWT Bearer** 登录态;管理接口另需 admin/operator 角色权限。
 
@@ -306,8 +306,9 @@
 
 ### 7.3 关键词监控 · 智能体
 
-> 用户可为**任意关键词**设置监控(不限于 top100):采集时会**按关键词定向查询**抖音接口,
-> 榜外的词也能取到专属热度。历史热度序列经算法分析后给出**趋势判定 + 下一轮预测**。
+> 用户可为**任意关键词**设置监控:抖音走**按关键词定向查询**(榜外的词也能取到专属热度);
+> 微博/闲鱼/百度见 §7.3.1 四板块泛化,词须出现在榜内才记录。历史热度序列经算法分析后
+> 给出**趋势判定 + 下一轮预测**。
 
 **添加关注**
 
@@ -319,7 +320,7 @@
 | `list_type` | str | 是 | `word`(内容词)/`search`/`video`/`topic`/`subscribe` |
 | `keyword` | str | 是 | 要监控的关键词 |
 
-**移除关注**: DELETE `/api/douhot/watch`,body 同 `list_type`+`keyword`。
+**移除关注**: ⚠️ 不存在该接口(文档曾误标,见 §7.3.1 说明)。
 
 **智能体分析**
 
@@ -347,6 +348,66 @@
 > `trend_label`:上升期/回落期/震荡/平稳;`forecast_next` 为线性外推的下一轮预测热度;
 > `series` 为历史热度序列(供前端画迷你趋势线);`summary` 为自动生成的中文分析摘要。
 > 样本 <2 时 `growth`/`forecast_next` 为 `null`(尚未积累足够数据)。
+> ⚠️ 旧文档曾写有 "移除关注 DELETE `/api/douhot/watch`" ——**当前代码并无该 DELETE 接口**,请勿调用。
+
+### 7.3.1 四板块关键词监控(v1.1 泛化)
+
+> **2026-09-03 变更**:关键词监控从"仅抖音"泛化到 **微博 / 闲鱼 / 抖音 / 百度** 四个板块。
+> 旧的 `/api/douhot/watch*` 三个接口保留(等价于 section=douhot),新接口按 `{section}` 寻址。
+> 同一关键词可在**多个板块同时监控**(去重按 user+section+list_type+keyword,由代码承担,不再有 DB 唯一约束)。
+
+**在某板块添加监控**
+
+- **请求方式**: POST `/api/watch/{section}`(section ∈ `weibo` / `xianyu` / `douhot` / `baidu`;需登录)
+- **请求参数 (Body)**:
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+| --- | --- | --- | --- | --- |
+| `keyword` | str | 是 | — | 要监控的关键词 |
+| `list_type` | str | 否 | `word` | 抖音可选 `word`/`search`/`video`/`topic`/`subscribe`;微博/闲鱼/百度固定 `word` |
+
+**响应示例 (200)**
+```json
+{ "section": "weibo", "list_type": "word", "keyword": "世界杯" }
+```
+
+**列出某板块的关注词**: GET `/api/watch/{section}` → `[{"section","list_type","keyword"}, ...]`
+
+**某板块的智能体分析**
+
+- **请求方式**: GET `/api/watch/{section}/analytics`(需登录)
+- **请求参数**: 无
+
+**响应示例 (200)**
+```json
+[
+  {
+    "section": "weibo",
+    "keyword": "世界杯",
+    "list_type": "word",
+    "last_score": 2400000,
+    "rank_now": 3,
+    "points": 5,
+    "growth": 0.15,
+    "trend_label": "上升期",
+    "forecast_next": 2760000,
+    "summary": "「世界杯」当前热度 2400000 环比 +15.0% 预测下一轮约 2760000 处于上升期,热度在走高,可关注",
+    "series": [1800000, 2000000, 2100000, 2200000, 2400000],
+    "slope": 120000.5,
+    "confidence": "高",
+    "r2": 0.92,
+    "accel": 30000.0,
+    "burst": false
+  }
+]
+```
+
+> **快照记录规则**(决定词会不会有数据):微博/闲鱼/百度**每次采集后**从榜单里找该词记录快照
+> (**词须在榜内才命中**,榜外记 0);抖音 `word` 类仍走**定向查询**(榜外也能查到专属热度)。
+> 闲鱼板块记录的 score 为该商品命中的关键词数(`hit_keywords`),数值量级与其他板块不同。
+> 飞书的「智能体预警(预测爆发)」与日报【关键词关注】段落也已覆盖四个板块的全部关注词。
+
+---
 
 
 ---
@@ -487,7 +548,7 @@
 
 - **接口名称**: 设置采集频率
 - **请求方式**: PUT
-- **URL 路径**: `/api/schedules/{section}`(`section` ∈ `weibo` / `xianyu` / `douhot`)
+- **URL 路径**: `/api/schedules/{section}`(`section` ∈ `weibo` / `xianyu` / `douhot` / `baidu`)
 - **请求参数 (Body)**: 两个字段均可单独提交
 
 | 参数 | 类型 | 必填 | 说明 |
