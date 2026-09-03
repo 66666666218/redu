@@ -19,6 +19,7 @@ from app.db import get_session_local
 from app.db.models import (
     AdminLog,
     AlertRecord,
+    BaiduHotItem,
     DouhotWatchSnap,
     DouhotWord,
     LoginLog,
@@ -35,6 +36,7 @@ logger = logging.getLogger(__name__)
 _TABLES = [
     (DouhotWord, "created_at", False),
     (WeiboHotItem, "captured_at", False),
+    (BaiduHotItem, "captured_at", False),
     (DouhotWatchSnap, "captured_at", False),
     (WeiboTrend, "decided_at", False),
     (XianyuItem, "created_at", False),

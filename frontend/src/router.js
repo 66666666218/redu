@@ -5,6 +5,8 @@ import Register from './views/Register.vue'
 import Forgot from './views/Forgot.vue'
 import Reset from './views/Reset.vue'
 import Dashboard from './views/Dashboard.vue'
+import Platform from './views/Platform.vue'
+import Douhot from './views/Douhot.vue'
 import Cookies from './views/Cookies.vue'
 import Schedule from './views/Schedule.vue'
 import Alerts from './views/Alerts.vue'
@@ -17,6 +19,10 @@ const routes = [
   { path: '/forgot', component: Forgot },
   { path: '/reset', component: Reset },
   { path: '/', component: Dashboard, meta: { auth: true } },
+  { path: '/weibo', component: Platform, props: { platform: 'weibo' }, meta: { auth: true } },
+  { path: '/xianyu', component: Platform, props: { platform: 'xianyu' }, meta: { auth: true } },
+  { path: '/baidu', component: Platform, props: { platform: 'baidu' }, meta: { auth: true } },
+  { path: '/douhot', component: Douhot, meta: { auth: true } },
   { path: '/cookies', component: Cookies, meta: { auth: true } },
   { path: '/schedule', component: Schedule, meta: { auth: true } },
   { path: '/alerts', component: Alerts, meta: { auth: true } },

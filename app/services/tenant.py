@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from config.settings import Settings, get_settings
 from app.db.models import (
     AlertRecord,
+    BaiduHotItem,
     DouhotAlerted,
     DouhotWatch,
     DouhotWord,
@@ -25,7 +26,7 @@ from app.db.models import (
     WeiboTrend,
     XianyuItem,
 )
-from app.services import alert_service, collector, douhot, xianyu
+from app.services import alert_service, baidu, collector, douhot, xianyu
 from app.services.cookie_store import get_cookies
 from app.db import repository
 from app.services.trend_analyzer import compute_growth, compute_slope
@@ -87,6 +88,46 @@ def _weibo_rising(session, user_id: int, settings: Settings, now) -> list[dict]:
         sl = compute_slope([float(x) for x in heats])
         if g is not None and sl is not None and g > settings.growth_threshold and sl > 0:
             session.add(WeiboTrend(user_id=user_id, keyword=title, source="weibo", growth=g, slope=sl, rising=True, decided_at=now))
+            rising.append({"keyword": title, "growth": g, "slope": sl})
+    rising.sort(key=lambda r: r["growth"], reverse=True)
+    return rising[:20]
+
+
+def run_baidu(session: Session, user_id: int, settings: Settings | None = None) -> dict:
+    """采集百度热搜(公开接口,无需登录态),按 user 存库并判涨。"""
+    settings = _base(settings)
+    try:
+        items = baidu.fetch_hot(settings)
+        now = datetime.now()
+        prev_keys = set(session.scalars(select(BaiduHotItem.title).where(BaiduHotItem.user_id == user_id)).all())
+        for it in items:
+            session.add(BaiduHotItem(user_id=user_id, title=it.title, heat=it.heat, rank=it.rank, url=it.url, captured_at=now))
+        session.commit()
+        rising = _baidu_rising(session, user_id, settings, now)
+        latest = [{"key": it.title, "heat": it.heat} for it in items]
+        latest += [{"key": r["keyword"], "growth": r["growth"]} for r in rising]
+        alert_service.evaluate(session, user_id, "baidu", latest, prev_keys, settings)
+        _record_run(session, user_id, "baidu", "success", f"items={len(items)}")
+        session.commit()
+        return {"platform": "baidu", "count": len(items), "rising": rising}
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        _record_run(session, user_id, "baidu", "failed", f"{type(exc).__name__}: {exc}")
+        session.commit()
+        raise
+
+
+def _baidu_rising(session, user_id: int, settings: Settings, now) -> list[dict]:
+    """基于该用户历史百度热搜热度,判定上涨词(与微博一致的双重校验)。"""
+    series = repository.baidu_heat_series(session, user_id)
+    rising = []
+    for title, points in series.items():
+        heats = [h for _, h in points]
+        if len(heats) < 2:
+            continue
+        g = compute_growth([float(x) for x in heats])
+        sl = compute_slope([float(x) for x in heats])
+        if g is not None and sl is not None and g > settings.growth_threshold and sl > 0:
             rising.append({"keyword": title, "growth": g, "slope": sl})
     rising.sort(key=lambda r: r["growth"], reverse=True)
     return rising[:20]
@@ -218,7 +259,7 @@ def run_section_for_all_users(section: str, settings: Settings | None = None) ->
     from app.db.models import User
 
     settings = settings or get_settings()
-    runners = {"weibo": run_weibo, "xianyu": run_xianyu, "douhot": run_douhot}
+    runners = {"weibo": run_weibo, "xianyu": run_xianyu, "douhot": run_douhot, "baidu": run_baidu}
     if section not in runners:
         return {"section": section, "users": 0, "ok": 0, "failed": 0}
     db = get_session_local()()

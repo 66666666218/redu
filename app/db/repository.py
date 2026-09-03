@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import (
     AlertRecord,
+    BaiduHotItem,
     DouhotWatch,
     DouhotWatchSnap,
     DouhotWord,
@@ -65,6 +66,21 @@ def weibo_heat_series(db: Session, user_id: int) -> dict[str, list[tuple[datetim
     return series
 
 
+def baidu_items(db: Session, user_id: int, limit: int | None = None, desc: bool = True) -> list[BaiduHotItem]:
+    stmt = select(BaiduHotItem).where(BaiduHotItem.user_id == user_id)
+    stmt = stmt.order_by(BaiduHotItem.id.desc()) if desc else stmt.order_by(BaiduHotItem.id.asc())
+    if limit:
+        stmt = stmt.limit(limit)
+    return db.scalars(stmt).all()
+
+
+def baidu_heat_series(db: Session, user_id: int) -> dict[str, list[tuple[datetime, int]]]:
+    series: dict[str, list[tuple[datetime, int]]] = {}
+    for r in baidu_items(db, user_id, desc=False):
+        series.setdefault(r.title, []).append((r.captured_at, r.heat))
+    return series
+
+
 # ---- 抖音(内容词)----
 def douhot_words(db: Session, user_id: int, limit: int | None = None, desc: bool = True) -> list[DouhotWord]:
     stmt = select(DouhotWord).where(DouhotWord.user_id == user_id)
@@ -78,6 +94,13 @@ def douhot_top_words(db: Session, user_id: int, limit: int = 100) -> list[Douhot
     return db.scalars(
         select(DouhotWord).where(DouhotWord.user_id == user_id).order_by(DouhotWord.score.desc()).limit(limit)
     ).all()
+
+
+def douhot_score_series(db: Session, user_id: int) -> dict[str, list[tuple[datetime, float]]]:
+    series: dict[str, list[tuple[datetime, float]]] = {}
+    for r in douhot_words(db, user_id, desc=False):
+        series.setdefault(r.title, []).append((r.created_at, r.score))
+    return series
 
 
 # ---- 闲鱼 ----

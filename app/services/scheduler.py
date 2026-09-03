@@ -27,9 +27,9 @@ _lock = threading.Lock()
 
 def _runners() -> dict:
     """延迟导入,避免 `tenant` ←→ 调度器的循环导入。"""
-    from app.services.tenant import run_douhot, run_weibo, run_xianyu
+    from app.services.tenant import run_baidu, run_douhot, run_weibo, run_xianyu
 
-    return {"weibo": run_weibo, "xianyu": run_xianyu, "douhot": run_douhot}
+    return {"weibo": run_weibo, "xianyu": run_xianyu, "douhot": run_douhot, "baidu": run_baidu}
 
 
 def collect_tick(settings: Settings | None = None, now: datetime | None = None) -> dict:
@@ -63,11 +63,13 @@ def collect_tick(settings: Settings | None = None, now: datetime | None = None) 
                 # 采集成功后触发飞书实时提醒(新增/飙升话题立即推送到群里)。
                 # 异步、失败不影响本轮采集结果。
                 try:
+                    from app.services.cross_platform import run_cross_platform_alert
                     from app.services.feishu import run_feishu_keyword_alerts, run_feishu_realtime
 
                     run_feishu_realtime(row.section, row.user_id, settings)
                     if row.section == "douhot":
                         run_feishu_keyword_alerts(row.user_id, settings)
+                    run_cross_platform_alert(row.user_id, settings)  # ≥2板块上升的关键词
                 except Exception:  # noqa: BLE001
                     logger.exception("飞书实时提醒失败 section=%s user=%s", row.section, row.user_id)
             except Exception as exc:  # noqa: BLE001

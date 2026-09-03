@@ -93,6 +93,50 @@ def douhot_watch_analytics(session: Session, user_id: int) -> list[dict]:
     return out
 
 
+def platform_view(session: Session, user_id: int, platform: str, top_n: int = 50) -> dict:
+    """某板块的独立页数据:最新榜单条目 + 每词智能体趋势/预测。
+
+    platform ∈ weibo/baidu(xianyu/douhot)。返回
+    {items:[{name, score, trend_label, growth, forecast_next, burst}], count}.
+    """
+    from app.services import keyword_agent
+
+    if platform == "weibo":
+        series = repository.weibo_heat_series(session, user_id)
+        latest = repository.weibo_items(session, user_id, limit=top_n)
+        name = lambda r: r.title  # noqa: E731
+        val = lambda r: r.heat  # noqa: E731
+    elif platform == "baidu":
+        series = repository.baidu_heat_series(session, user_id)
+        latest = repository.baidu_items(session, user_id, limit=top_n)
+        name = lambda r: r.title  # noqa: E731
+        val = lambda r: r.heat  # noqa: E731
+    elif platform == "douhot":
+        series = repository.douhot_score_series(session, user_id)
+        latest = repository.douhot_words(session, user_id, limit=top_n)
+        name = lambda r: r.title  # noqa: E731
+        val = lambda r: r.score  # noqa: E731
+    elif platform == "xianyu":
+        series = repository.xianyu_want_series(session, user_id)
+        latest = repository.xianyu_items(session, user_id, limit=top_n)
+        name = lambda r: r.title or r.item_id  # noqa: E731
+        val = lambda r: 0  # noqa: E731
+    else:
+        return {"platform": platform, "count": 0, "items": []}
+
+    out = []
+    for r in latest:
+        n = name(r)
+        pts = series.get(n, [])
+        a = keyword_agent.analyze(n, [v for _, v in pts])
+        out.append({
+            "name": n, "score": val(r),
+            "trend_label": a["trend_label"], "growth": a["growth"],
+            "forecast_next": a["forecast_next"], "burst": a["burst"], "points": a["points"],
+        })
+    return {"platform": platform, "count": len(out), "items": out[:top_n]}
+
+
 def platform_agent(session: Session, user_id: int, top_n: int = 8) -> dict:
     """多平台智能体:把微博热度 / 闲鱼想要数 的历史序列喂给 `keyword_agent`,
     产出各平台的热点趋势 + 预测(与抖音同一套逻辑)。返回 {weibo, xianyu}。

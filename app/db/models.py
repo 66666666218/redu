@@ -59,6 +59,20 @@ class WeiboHotItem(Base):
     captured_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
+class BaiduHotItem(Base):
+    """百度热搜条目(多租户,按 user 隔离;见 doc/dev.md §5.2b)。"""
+
+    __tablename__ = "baidu_hot_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    title: Mapped[str] = mapped_column(String(500))
+    heat: Mapped[int] = mapped_column(Integer, default=0)   # 热度值
+    rank: Mapped[int] = mapped_column(Integer, default=0)
+    url: Mapped[str] = mapped_column(String(500), default="")
+    captured_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
 class WeiboTrend(Base):
     __tablename__ = "weibo_trends"
 

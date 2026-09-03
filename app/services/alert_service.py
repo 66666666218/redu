@@ -21,7 +21,7 @@ from app.utils import get_logger
 
 logger = get_logger(__name__)
 
-SECTIONS = ("weibo", "xianyu", "douhot")
+SECTIONS = ("weibo", "xianyu", "douhot", "baidu")
 RULE_TYPES = ("threshold", "new", "fixed_time")
 
 
