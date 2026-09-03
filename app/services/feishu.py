@@ -17,18 +17,18 @@ from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
 from app.db import repository
-from app.db.models import DouhotWatchSnap, DouhotWord, FeishuAlert, WeiboHotItem, XianyuItem
+from app.db.models import BaiduHotItem, DouhotWatchSnap, DouhotWord, FeishuAlert, WeiboHotItem, XianyuItem
 from app.services.feishu_client import FeishuClient
 from app.utils import get_logger
 
 logger = get_logger(__name__)
 
-SECTIONS = ("weibo", "xianyu", "douhot")
-SECTION_LABELS = {"weibo": "微博热搜", "xianyu": "闲鱼热榜", "douhot": "抖音热点"}
+SECTIONS = ("weibo", "xianyu", "douhot", "baidu")
+SECTION_LABELS = {"weibo": "微博热搜", "xianyu": "闲鱼热榜", "douhot": "抖音热点", "baidu": "百度热搜"}
 # 每个板块如何取"标题"与"排名/分值"
-_RANK_FIELD = {"weibo": "rank", "xianyu": "best_rank", "douhot": "score"}
+_RANK_FIELD = {"weibo": "rank", "xianyu": "best_rank", "douhot": "score", "baidu": "rank"}
 # 每板块的历史表(用于上一轮快照对比)
-_TABLES = {"weibo": WeiboHotItem, "xianyu": XianyuItem, "douhot": DouhotWord}
+_TABLES = {"weibo": WeiboHotItem, "xianyu": XianyuItem, "douhot": DouhotWord, "baidu": BaiduHotItem}
 
 
 def _agent_confidence_rank(level: str | None) -> int:

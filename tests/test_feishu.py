@@ -293,3 +293,21 @@ def test_collect_failures_no_alert_if_recovered(monkeypatch, session) -> None:
     monkeypatch.setattr(feishu_client, "FeishuClient", lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
     assert alert_service.check_collect_failures(_settings(fail_alert_threshold=3), db=session) == 0
     assert not sent
+
+
+def test_realtime_baidu_no_keyerror(monkeypatch, session) -> None:
+    """baidu 接入后实时提醒不应再 KeyError(此前 _TABLES 缺 baidu)。"""
+    from datetime import datetime
+    from app.db.models import BaiduHotItem
+
+    t1, t2 = datetime(2026, 9, 1, 8), datetime(2026, 9, 2, 8)
+    for title, rank in [("A", 5), ("B", 1), ("C", 3)]:
+        session.add(BaiduHotItem(user_id=1, title=title, heat=rank * 1000, rank=rank, captured_at=t1))
+    for title, rank in [("A", 2), ("B", 4), ("D", 7)]:
+        session.add(BaiduHotItem(user_id=1, title=title, heat=rank * 1000, rank=rank, captured_at=t2))
+    session.commit()
+    sent = []
+    monkeypatch.setattr(feishu, "FeishuClient", lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
+    n = run_feishu_realtime("baidu", 1, _settings(), db=session)
+    assert n == 2          # 新增 D、A 升 3 名
+    assert "百度热搜" in sent[0] and "D" in sent[0] and "A" in sent[0]
