@@ -44,6 +44,20 @@ from app.utils import get_logger
 logger = get_logger(__name__)
 
 
+def _record_watch(session: Session, user_id: int, section: str, items: list[dict]) -> None:
+    """采集后记录该板块用户监控关键词的快照(items 为 [{"title","value"}])。"""
+
+    def _list() -> dict[str, list[dict]]:
+        return {"word": [{"title": it.get("title", ""), "value": it.get("value", it.get("score", 0))} for it in items]}
+
+    from app.services.keyword_watch import record_watch_snaps
+
+    try:
+        record_watch_snaps(section, session, user_id, _list())
+    except Exception:  # noqa: BLE001 - 记录失败不中断采集
+        session.rollback()
+
+
 def run_weibo(session: Session, user_id: int, settings: Settings | None = None) -> dict:
     settings = _base(settings)
     cookies = get_cookies(session, user_id)
@@ -64,6 +78,7 @@ def run_weibo(session: Session, user_id: int, settings: Settings | None = None) 
         latest = [{"key": it.title, "heat": it.heat} for it in items]
         latest += [{"key": r["keyword"], "growth": r["growth"]} for r in rising]
         alert_service.evaluate(session, user_id, "weibo", latest, prev_keys, settings)
+        _record_watch(session, user_id, "weibo", [{"title": it.title, "value": it.heat} for it in items])
         _record_run(session, user_id, "weibo", "success", f"items={len(items)}")
         session.commit()
         return {"platform": "weibo", "count": len(items), "rising": rising}
@@ -107,6 +122,7 @@ def run_baidu(session: Session, user_id: int, settings: Settings | None = None) 
         latest = [{"key": it.title, "heat": it.heat} for it in items]
         latest += [{"key": r["keyword"], "growth": r["growth"]} for r in rising]
         alert_service.evaluate(session, user_id, "baidu", latest, prev_keys, settings)
+        _record_watch(session, user_id, "baidu", [{"title": it.title, "value": it.heat} for it in items])
         _record_run(session, user_id, "baidu", "success", f"items={len(items)}")
         session.commit()
         return {"platform": "baidu", "count": len(items), "rising": rising}
@@ -148,6 +164,7 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
         session.commit()
         latest = [{"key": it["item_id"], "hit_keywords": it["hit_keywords"], "best_rank": it["best_rank"]} for it in hot]
         alert_service.evaluate(session, user_id, "xianyu", latest, prev_keys, settings)
+        _record_watch(session, user_id, "xianyu", [{"title": it["title"], "value": it.get("hit_keywords", 0)} for it in hot])
         _record_run(session, user_id, "xianyu", "success", f"items={len(hot)}")
         session.commit()
         return {"platform": "xianyu", "count": len(hot)}

@@ -160,12 +160,13 @@ def _keyword_watch_lines(db: Session, user_id: int, top_n: int = 8) -> list[str]
     """日报里的"关键词关注"段落:对每个关注词跑智能体,给趋势/预测/置信度。"""
     from app.services import keyword_agent, tenant
 
-    watches = tenant.list_douhot_watch(db, user_id)
+    from app.services.keyword_watch import list_watch
+    watches = list_watch(db, user_id)
     if not watches:
         return []
     items = []
     for w in watches:
-        snaps = repository.watch_snap_series(db, user_id, w["keyword"])
+        snaps = repository.watch_snap_series(db, user_id, w["keyword"], section=w.get("section"))
         values = [s.score for s in snaps]
         agent = keyword_agent.analyze(w["keyword"], values)
         items.append(agent)
@@ -244,8 +245,9 @@ def run_feishu_insight_digest(settings: Settings | None = None) -> int:
         lines = ["📅 近 7 天爆点回顾", ""]
         burst_rows, rising_rows = [], []
         for user in repository.list_enabled_users(db):
-            for w in tenant.list_douhot_watch(db, user.id):
-                snaps = repository.watch_snap_series(db, user.id, w["keyword"], since)
+            from app.services.keyword_watch import list_watch
+            for w in list_watch(db, user.id):
+                snaps = repository.watch_snap_series(db, user.id, w["keyword"], since, section=w.get("section"))
                 values = [s.score for s in snaps]
                 if len(values) < 2:
                     continue
@@ -290,13 +292,14 @@ def run_feishu_keyword_alerts(user_id: int, settings: Settings | None = None, db
     db = db or get_session_local()()
     pushed = 0
     try:
-        watches = tenant.list_douhot_watch(db, user_id)
+        from app.services.keyword_watch import list_watch
+        watches = list_watch(db, user_id)
         if not watches:
             return 0
         client = FeishuClient(settings.feishu_webhook, settings.feishu_secret)
         hits: list[dict] = []
         for w in watches:
-            snaps = repository.watch_snap_series(db, user_id, w["keyword"])
+            snaps = repository.watch_snap_series(db, user_id, w["keyword"], section=w.get("section"))
             values = [s.score for s in snaps]
             if not values:
                 continue

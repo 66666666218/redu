@@ -44,8 +44,8 @@ def test_watch_snap_series_and_get_watch() -> None:
     ])
     db.commit()
     assert len(repo.watch_snap_series(db, 1, "词")) == 2
-    assert repo.get_watch(db, 1, "word", "词") is not None
-    assert repo.get_watch(db, 1, "word", "不存在") is None
+    assert repo.get_watch(db, 1, "douhot", "word", "词") is not None
+    assert repo.get_watch(db, 1, "douhot", "word", "不存在") is None
     db.close()
 
 
@@ -71,3 +71,19 @@ def test_list_enabled_users_filters() -> None:
     db.commit()
     assert {u.username for u in repo.list_enabled_users(db)} == {"on"}
     db.close()
+
+
+def test_watch_same_keyword_across_sections() -> None:
+    """同一关键词可在多个板块监控(去重按 section,不再 UNIQUE 冲突)。"""
+    from app.services.keyword_watch import add_watch, list_watch
+
+    db = _session()
+    try:
+        add_watch(db, 1, "douhot", "word", "世界杯")
+        add_watch(db, 1, "weibo", "word", "世界杯")   # 同词跨板块 → 应允许
+        add_watch(db, 1, "weibo", "word", "世界杯")   # 同板块重复 → 去重
+        rows = list_watch(db, 1)
+        assert len(rows) == 2
+        assert {(r["section"], r["keyword"]) for r in rows} == {("douhot", "世界杯"), ("weibo", "世界杯")}
+    finally:
+        db.close()

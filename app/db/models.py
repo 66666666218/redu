@@ -204,14 +204,19 @@ class XianyuDaily(Base):
 
 
 class DouhotWatch(Base):
-    """热点宝关键词监控:用户自选榜类型 + 关键词。"""
+    """关键词监控:用户自选板块 + 榜单类型 + 关键词(微博/闲鱼/抖音/百度通用)。
+
+    不加数据库唯一约束:同一关键词可在不同板块同时监控,去重靠 `get_watch`。
+    历史表曾有 `(user_id, list_type, keyword)` 唯一约束,已在 _migrate 中去除
+    (否则跨板块同词会 UNIQUE 冲突)。
+    """
 
     __tablename__ = "douhot_watch"
-    __table_args__ = (UniqueConstraint("user_id", "list_type", "keyword", name="uq_watch"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
-    list_type: Mapped[str] = mapped_column(String(32))  # word(内容词)/search(搜索榜)
+    section: Mapped[str] = mapped_column(String(16), default="douhot")  # weibo/xianyu/douhot/baidu
+    list_type: Mapped[str] = mapped_column(String(32))  # word(内容词)/search(搜索榜);微博/闲鱼/百度固定 word
     keyword: Mapped[str] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
@@ -223,6 +228,7 @@ class DouhotWatchSnap(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    section: Mapped[str] = mapped_column(String(16), default="douhot")
     list_type: Mapped[str] = mapped_column(String(32))
     keyword: Mapped[str] = mapped_column(String(128), index=True)
     score: Mapped[float] = mapped_column(Float, default=0)   # 该榜中的得分

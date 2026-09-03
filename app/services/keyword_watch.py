@@ -15,64 +15,87 @@ from app.services import douhot
 from app.services.trend_analyzer import compute_growth, compute_slope
 
 
-def add_douhot_watch(session: Session, user_id: int, list_type: str, keyword: str) -> dict:
-    list_type = list_type if list_type in ("word", "search", "subscribe", "video", "topic") else "word"
+_WORD_TYPES = ("word", "search", "subscribe", "video", "topic")
+
+
+def add_watch(session: Session, user_id: int, section: str, list_type: str, keyword: str) -> dict:
+    list_type = list_type if list_type in _WORD_TYPES else "word"
     keyword = keyword.strip()
-    if repository.get_watch(session, user_id, list_type, keyword) is None:
-        session.add(DouhotWatch(user_id=user_id, list_type=list_type, keyword=keyword))
+    if repository.get_watch(session, user_id, section, list_type, keyword) is None:
+        session.add(DouhotWatch(user_id=user_id, section=section, list_type=list_type, keyword=keyword))
         session.commit()
-    return {"list_type": list_type, "keyword": keyword}
+    return {"section": section, "list_type": list_type, "keyword": keyword}
+
+
+def add_douhot_watch(session: Session, user_id: int, list_type: str, keyword: str) -> dict:
+    return add_watch(session, user_id, "douhot", list_type, keyword)  # 兼容旧调用
+
+
+def list_watch(session: Session, user_id: int, section: str | None = None) -> list[dict]:
+    return [
+        {"section": r.section, "list_type": r.list_type, "keyword": r.keyword}
+        for r in repository.list_watches(session, user_id, section)
+    ]
 
 
 def list_douhot_watch(session: Session, user_id: int) -> list[dict]:
-    return [{"list_type": r.list_type, "keyword": r.keyword} for r in repository.list_watches(session, user_id)]
+    return list_watch(session, user_id, "douhot")  # 兼容旧调用
 
 
-def _record_douhot_watch_snaps(
+def record_watch_snaps(
+    section: str,
     session: Session,
     user_id: int,
     lists: dict[str, list[dict]],
-    douyin_cookie: str = "",
+    cookie: str = "",
     settings: Settings | None = None,
 ) -> None:
-    """把用户关注的词,在对应榜单中记录得分与排名快照。
+    """把用户关注的词在**本板块**记录得分与排名快照。
 
-    内容词(word):用**定向查询**取该词自身热度——不再依赖它碰巧在 top100 里,
-    这是"任意关键词监控"的核心。其他榜仍从已采集列表里找(词须在榜内才会命中)。
+    douhot 内容词走**定向查询**(榜外也能查);其余板块从本次采集的 `lists` 里找
+    (词须在榜内才会命中,`lists` 由各 runner 传 `{"word": [{"title","value"}]}`)。
     """
-    watches = repository.list_watches(session, user_id)
+    watches = repository.list_watches(session, user_id, section)
     for w in watches:
-        if w.list_type == "word" and douyin_cookie:
+        if w.list_type == "word" and cookie and section == "douhot":
             try:
-                heat = douhot.fetch_keyword_heat(douyin_cookie, w.keyword, settings)
+                heat = douhot.fetch_keyword_heat(cookie, w.keyword, settings)
                 score, rank = heat.get("score", 0), heat.get("rank_now", 0)
             except Exception:  # noqa: BLE001 - 定向查询失败降级为 0,不中断采集
                 score, rank = 0, 0
         else:
-            words = lists.get(w.list_type, [])
+            words = lists.get(w.list_type) or lists.get("word") or []
             score, rank = 0, 0
             for i, word in enumerate(words, start=1):
                 if word.get("title") == w.keyword:
-                    score, rank = word.get("score", 0), i
+                    score = word.get("score") or word.get("value") or word.get("heat") or 0
+                    rank = i
                     break
         session.add(
-            DouhotWatchSnap(user_id=user_id, list_type=w.list_type, keyword=w.keyword, score=score, rank_now=rank)
+            DouhotWatchSnap(user_id=user_id, section=section, list_type=w.list_type,
+                            keyword=w.keyword, score=score, rank_now=rank)
         )
     session.commit()
 
 
-def douhot_watch_analytics(session: Session, user_id: int) -> list[dict]:
+def _record_douhot_watch_snaps(session: Session, user_id: int, lists: dict[str, list[dict]],
+                               douyin_cookie: str = "", settings: Settings | None = None) -> None:
+    record_watch_snaps("douhot", session, user_id, lists, douyin_cookie, settings)  # 兼容旧调用
+
+
+def watch_analytics(section: str, session: Session, user_id: int) -> list[dict]:
     from app.services import keyword_agent
 
-    watches = repository.list_watches(session, user_id)
+    watches = repository.list_watches(session, user_id, section)
     out = []
     for w in watches:
-        snaps = repository.watch_snap_series(session, user_id, w.keyword)
+        snaps = repository.watch_snap_series(session, user_id, w.keyword, section=section)
         values = [s.score for s in snaps]
         growth = compute_growth(values) if len(values) >= 2 else None
         agent = keyword_agent.analyze(w.keyword, values)
         out.append(
             {
+                "section": section,
                 "keyword": w.keyword,
                 "list_type": w.list_type,
                 "last_score": values[-1] if values else 0,
@@ -91,6 +114,10 @@ def douhot_watch_analytics(session: Session, user_id: int) -> list[dict]:
             }
         )
     return out
+
+
+def douhot_watch_analytics(session: Session, user_id: int) -> list[dict]:
+    return watch_analytics("douhot", session, user_id)  # 兼容旧调用
 
 
 def platform_view(session: Session, user_id: int, platform: str, top_n: int = 50) -> dict:

@@ -112,6 +112,8 @@ def _migrate() -> None:
         ],
         "runs": ["retry_count INTEGER DEFAULT 0"],
         "alerts": ["section VARCHAR(32) DEFAULT ''"],
+        "douhot_watch": ["section VARCHAR(16) DEFAULT 'douhot'"],
+        "douhot_watch_snap": ["section VARCHAR(16) DEFAULT 'douhot'"],
     }
     with get_engine().begin() as conn:
         for table, coldefs in additions.items():
@@ -122,3 +124,14 @@ def _migrate() -> None:
                 col = coldef.split()[0]
                 if col not in cols:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {coldef}"))
+        # 去除 douhot_watch 旧的 (user_id, list_type, keyword) 唯一索引:
+        # 关键词监控泛化到四个板块后,同一关键词可在多板块监控,旧约束会 UNIQUE 冲突。
+        if "douhot_watch" in existing:
+            dialect = conn.dialect.name
+            try:
+                if dialect == "mysql":
+                    conn.execute(text("DROP INDEX uq_watch ON douhot_watch"))
+                elif dialect == "sqlite":
+                    conn.execute(text("DROP INDEX IF EXISTS uq_watch"))
+            except Exception:  # noqa: BLE001 - 索引不存在/已删则忽略
+                pass

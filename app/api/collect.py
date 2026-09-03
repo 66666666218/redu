@@ -60,6 +60,31 @@ def douhot_watch_analytics(user: User = Depends(get_current_user), db: Session =
     return tenant.douhot_watch_analytics(db, user.id)
 
 
+@router.post("/api/watch/{section}")
+def watch_add(section: str, payload: dict, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """在某板块添加关键词监控(微博/闲鱼/抖音/百度通用)。"""
+    from app.services.keyword_watch import add_watch
+
+    try:
+        return add_watch(db, user.id, section, str(payload.get("list_type", "word")), str(payload.get("keyword", "")))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/api/watch/{section}")
+def watch_list(section: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from app.services.keyword_watch import list_watch
+
+    return list_watch(db, user.id, section)
+
+
+@router.get("/api/watch/{section}/analytics")
+def watch_analytics(section: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from app.services.keyword_watch import watch_analytics as _wa
+
+    return _wa(section, db, user.id)
+
+
 @router.get("/api/douhot/list/{list_type}")
 def douhot_list(list_type: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """实时拉取抖音某个子榜(内容词/搜索/视频/话题/订阅),便于热点宝式 tab 展示。"""

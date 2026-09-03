@@ -136,22 +136,30 @@ def xianyu_want_series(db: Session, user_id: int) -> dict[str, list[tuple[str, f
 
 
 # ---- 关键词监控 ----
-def list_watches(db: Session, user_id: int) -> list[DouhotWatch]:
-    return db.scalars(select(DouhotWatch).where(DouhotWatch.user_id == user_id)).all()
+def list_watches(db: Session, user_id: int, section: str | None = None) -> list[DouhotWatch]:
+    stmt = select(DouhotWatch).where(DouhotWatch.user_id == user_id)
+    if section:
+        stmt = stmt.where(DouhotWatch.section == section)
+    return db.scalars(stmt).all()
 
 
-def get_watch(db: Session, user_id: int, list_type: str, keyword: str) -> DouhotWatch | None:
+def get_watch(db: Session, user_id: int, section: str, list_type: str, keyword: str) -> DouhotWatch | None:
     return db.scalar(
         select(DouhotWatch).where(
-            DouhotWatch.user_id == user_id, DouhotWatch.list_type == list_type, DouhotWatch.keyword == keyword
+            DouhotWatch.user_id == user_id, DouhotWatch.section == section,
+            DouhotWatch.list_type == list_type, DouhotWatch.keyword == keyword,
         )
     )
 
 
-def watch_snap_series(db: Session, user_id: int, keyword: str, since: datetime | None = None) -> list[DouhotWatchSnap]:
+def watch_snap_series(
+    db: Session, user_id: int, keyword: str, since: datetime | None = None, section: str | None = None
+) -> list[DouhotWatchSnap]:
     stmt = select(DouhotWatchSnap).where(
         DouhotWatchSnap.user_id == user_id, DouhotWatchSnap.keyword == keyword
     )
+    if section:
+        stmt = stmt.where(DouhotWatchSnap.section == section)
     if since:
         stmt = stmt.where(DouhotWatchSnap.captured_at >= since)
     return db.scalars(stmt.order_by(DouhotWatchSnap.id.asc())).all()
