@@ -212,34 +212,28 @@ class DouhotClient:
         )
         return self._items(data, "word_list")
 
-    def hot_search(self, limit: int = 20, date_window: int = 1, sub_type: int = 3001) -> list[dict]:
-        """搜索榜(key_word + search_score)。"""
-        data = self._call(
-            "POST",
-            HOT_SEARCH_API,
-            TREND_PAGE,
-            {"page_num": 1, "page_size": limit, "sub_type": sub_type, "date_window": date_window},
-        )
+    def hot_search(self, limit: int = 20, date_window: int = 1, sub_type: int = 3001, keyword: str = "") -> list[dict]:
+        """搜索榜(key_word + search_score);keyword 非空时为定向过滤(榜外词也能查)。"""
+        body: dict = {"page_num": 1, "page_size": limit, "sub_type": sub_type, "date_window": date_window}
+        if keyword:
+            body["keyword"] = keyword
+        data = self._call("POST", HOT_SEARCH_API, TREND_PAGE, body)
         return self._items(data, "search_list")
 
-    def video_billboard(self, limit: int = 20, date_window: int = 24, sub_type: int = 1001) -> list[dict]:
-        """视频榜(item_title + play_cnt);服务端会过滤,实际条数常少于 limit。"""
-        data = self._call(
-            "POST",
-            VIDEO_API,
-            HOTSPOT_PAGE,
-            {"sub_type": sub_type, "date_window": date_window, "page": 1, "page_size": limit, "tag_version": "v2"},
-        )
+    def video_billboard(self, limit: int = 20, date_window: int = 24, sub_type: int = 1001, keyword: str = "") -> list[dict]:
+        """视频榜(item_title + play_cnt);keyword 非空时为定向过滤。服务端会过滤,实际条数常少于 limit。"""
+        body: dict = {"sub_type": sub_type, "date_window": date_window, "page": 1, "page_size": limit, "tag_version": "v2"}
+        if keyword:
+            body["keyword"] = keyword
+        data = self._call("POST", VIDEO_API, HOTSPOT_PAGE, body)
         return self._items(data, "objs")
 
-    def challenge_billboard(self, limit: int = 20, date_window: int = 24, sub_type: int = 2001) -> list[dict]:
-        """话题榜(challenge_name + score)。"""
-        data = self._call(
-            "POST",
-            CHALLENGE_API,
-            HOTSPOT_PAGE,
-            {"sub_type": sub_type, "date_window": date_window, "page": 1, "page_size": limit, "tag_version": "v2"},
-        )
+    def challenge_billboard(self, limit: int = 20, date_window: int = 24, sub_type: int = 2001, keyword: str = "") -> list[dict]:
+        """话题榜(challenge_name + score);keyword 非空时为定向过滤。"""
+        body: dict = {"sub_type": sub_type, "date_window": date_window, "page": 1, "page_size": limit, "tag_version": "v2"}
+        if keyword:
+            body["keyword"] = keyword
+        data = self._call("POST", CHALLENGE_API, HOTSPOT_PAGE, body)
         return self._items(data, "objs")
 
     def subscribe(self) -> list[dict]:

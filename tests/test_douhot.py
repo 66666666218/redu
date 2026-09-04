@@ -181,6 +181,67 @@ def test_fetch_keyword_heat_prefers_exact_match(monkeypatch: pytest.MonkeyPatch)
     assert miss["score"] == 0 and miss["rank_now"] == 0 and miss["trend_len"] == 0
 
 
+def _patch_list_keyword_client(monkeypatch: pytest.MonkeyPatch, methods: dict[str, list[dict]]) -> None:
+    """打桩非内容词榜单的定向查询客户端(hot_search/video_billboard/challenge_billboard)。"""
+
+    class _FakeMethod:
+        def __init__(self, result): self.result = result
+        def __call__(self, limit=20, keyword=""): return self.result
+
+    class _FakeClient:
+        def __init__(self, methods): self._methods = methods
+        def __getattr__(self, name): return _FakeMethod(self._methods.get(name, []))
+
+    monkeypatch.setattr(douhot, "DouhotClient", lambda cookie, settings=None: _FakeClient(methods))
+
+
+def test_fetch_list_keyword_heat_search_exact_match(monkeypatch: pytest.MonkeyPatch) -> None:
+    """搜索榜按 keyword 定向查询:命中精确词 → 取 score 与真实 rank。"""
+    _patch_list_keyword_client(
+        monkeypatch,
+        {"hot_search": [{"key_word": "电视剧", "search_score": 10}, {"key_word": "早春晴朗", "search_score": 200}]},
+    )
+    hit = douhot.fetch_list_keyword_heat("ck", "search", "早春晴朗", Settings(_env_file=None))
+    assert hit["score"] == 200 and hit["rank_now"] == 2 and hit["title"] == "早春晴朗"
+
+
+def test_fetch_list_keyword_heat_topic_exact_match(monkeypatch: pytest.MonkeyPatch) -> None:
+    """话题榜(challenge)字段为 challenge_name，精确命中取 score。"""
+    _patch_list_keyword_client(
+        monkeypatch,
+        {"challenge_billboard": [{"challenge_name": "续火花", "score": 157}]},
+    )
+    hit = douhot.fetch_list_keyword_heat("ck", "topic", "续火花", Settings(_env_file=None))
+    assert hit["score"] == 157 and hit["rank_now"] == 1 and hit["title"] == "续火花"
+
+
+def test_fetch_list_keyword_heat_video_fuzzy_top(monkeypatch: pytest.MonkeyPatch) -> None:
+    """视频榜为标题模糊/分词检索:无精确词命中时取顶级匹配视频的 play_cnt，rank 恒 0。"""
+    _patch_list_keyword_client(
+        monkeypatch,
+        {"video_billboard": [
+            {"item_title": "全网有和我一样的孩子吗", "play_cnt": 999},
+            {"item_title": "孩子真棒", "play_cnt": 100},
+        ]},
+    )
+    hit = douhot.fetch_list_keyword_heat("ck", "video", "孩子", Settings(_env_file=None))
+    assert hit["score"] == 999 and hit["rank_now"] == 0 and hit["title"] == "全网有和我一样的孩子吗"
+
+
+def test_fetch_list_keyword_heat_unsupported_type_cold(monkeypatch: pytest.MonkeyPatch) -> None:
+    """订阅榜无 keyword 参数(不在 _KEYWORD_SPEC)→ 冷启动零值,不发起查询。"""
+    _patch_list_keyword_client(monkeypatch, {})
+    hit = douhot.fetch_list_keyword_heat("ck", "subscribe", "任意词", Settings(_env_file=None))
+    assert hit["score"] == 0 and hit["rank_now"] == 0 and hit["keyword"] == "任意词"
+
+
+def test_fetch_list_keyword_heat_empty_result_cold(monkeypatch: pytest.MonkeyPatch) -> None:
+    """定向查询返回空 → 冷启动零值(不炸)。"""
+    _patch_list_keyword_client(monkeypatch, {"hot_search": []})
+    hit = douhot.fetch_list_keyword_heat("ck", "search", "不存在", Settings(_env_file=None))
+    assert hit["score"] == 0 and hit["rank_now"] == 0
+
+
 def test_douhot_honors_proxy_switch_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
     """DOUHOT_USE_PROXY 默认关闭时,即使配了代理池也不走(douhot 直连)。
 

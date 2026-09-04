@@ -1,6 +1,7 @@
 """热点宝关键词监控 + 智能体预测域(见 doc/dev.md §5.10)。
 
-- 关键词关注(watch)的增/查、采集时记录快照(`_record_douhot_watch_snaps`,内容词走定向查询)
+- 关键词关注(watch)的增/查、采集时记录快照(`_record_douhot_watch_snaps`,
+  抖音 内容词/搜索/视频/话题 均走定向查询)
 - 智能体分析 `douhot_watch_analytics`(趋势/预测/置信度/爆发)
 - 多平台预测 `platform_agent`(微博 heat / 闲鱼 want_count 序列喂给 keyword_agent)
 """
@@ -52,14 +53,19 @@ def record_watch_snaps(
 ) -> None:
     """把用户关注的词在**本板块**记录得分与排名快照。
 
-    douhot 内容词走**定向查询**(榜外也能查);其余板块从本次采集的 `lists` 里找
-    (词须在榜内才会命中,`lists` 由各 runner 传 `{"word": [{"title","value"}]}`)。
+    douhot 各榜单(内容词/搜索/视频/话题)走**定向查询**(榜外也能查,与热点宝
+    官网输入关键词看到的一致);订阅榜无 keyword 参数、其余板块从本次采集的
+    `lists` 里找(词须在榜内才会命中,`lists` 由各 runner 传 `{"word": [{"title","value"}]}`)。
     """
     watches = repository.list_watches(session, user_id, section)
     for w in watches:
-        if w.list_type == "word" and cookie and section == "douhot":
+        # douhot 且该榜支持 keyword 定向查询 → 不依赖全榜默认数据,榜外词也记录专属热度
+        if section == "douhot" and w.list_type in ("word", "search", "video", "topic") and cookie:
             try:
-                heat = douhot.fetch_keyword_heat(cookie, w.keyword, settings)
+                if w.list_type == "word":
+                    heat = douhot.fetch_keyword_heat(cookie, w.keyword, settings)
+                else:
+                    heat = douhot.fetch_list_keyword_heat(cookie, w.list_type, w.keyword, settings)
                 score, rank = heat.get("score", 0), heat.get("rank_now", 0)
             except Exception:  # noqa: BLE001 - 定向查询失败降级为 0,不中断采集
                 score, rank = 0, 0

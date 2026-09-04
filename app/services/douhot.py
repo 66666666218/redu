@@ -28,6 +28,8 @@ __all__ = [
     "fetch_video_words",
     "fetch_topic_words",
     "fetch_subscribe_words",
+    "fetch_keyword_heat",
+    "fetch_list_keyword_heat",
 ]
 
 DEFAULT_TOP_N = 24  # 未传 settings 时的默认条数(与原浏览器方案首屏一致)
@@ -97,6 +99,42 @@ def fetch_keyword_heat(cookie: str, keyword: str, settings: Settings | None = No
         ),
         "title": str(hit.get("title", ""))
     }
+
+
+# 各榜单定向查询的规格:client 方法 + 条目里"词"与"分"的字段优先级。
+# 实测(scripts/probe_douhot_keyword.py)搜索/视频/话题榜的 query_list/body 同样
+# 支持 keyword 过滤——这正是"监控词走定向查询而不是全榜默认数据"的关键。
+_KEYWORD_SPEC: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
+    "search": ("hot_search", ("key_word", "title"), ("search_score", "score")),
+    "video": ("video_billboard", ("item_title", "title"), ("play_cnt", "score")),
+    "topic": ("challenge_billboard", ("challenge_name", "title"), ("score", "play_cnt")),
+}
+
+
+def fetch_list_keyword_heat(cookie: str, list_type: str, keyword: str, settings: Settings | None = None) -> dict:
+    """按关键词定向查**非内容词榜单**(搜索/视频/话题)的条目热度。
+
+    与 `fetch_keyword_heat`(内容词)同一套语义:拿 keyword 过滤接口,榜外词也能取到
+    专属数据;精确匹配优先,否则取相关结果第一,查不到返回冷启动零值。
+    订阅榜(subscribe)无 keyword 参数,不支持定向查询,调用方走榜单内查找。
+    """
+    spec = _KEYWORD_SPEC.get(list_type)
+    if spec is None:
+        return {"keyword": keyword.strip(), "score": 0, "rank_now": 0}
+    method_name, title_keys, score_keys = spec
+    try:
+        raw = getattr(DouhotClient(cookie, settings), method_name)(limit=50, keyword=keyword.strip())
+    except DouhotError:
+        logger.warning("热点宝%s定向查询失败(keyword=%s)", list_type, keyword)
+        return {"keyword": keyword.strip(), "score": 0, "rank_now": 0}
+    if not raw:
+        return {"keyword": keyword.strip(), "score": 0, "rank_now": 0}
+    hit = next((it for it in raw if str(_pick(it, title_keys) or "").strip() == keyword.strip()), raw[0])
+    title = str(_pick(hit, title_keys) or "").strip()
+    rank = next(
+        (i + 1 for i, it in enumerate(raw) if str(_pick(it, title_keys) or "").strip() == keyword.strip()), 0
+    )
+    return {"keyword": keyword.strip(), "score": _pick(hit, score_keys) or 0, "rank_now": rank, "title": title}
 
 
 def _fetch_ranked(

@@ -191,6 +191,7 @@ def run_douhot(session: Session, user_id: int, settings: Settings | None = None)
         latest = [{"key": w["title"], "score": w["score"], "trend_delta": w.get("trend_delta", 0)} for w in words]
         alert_service.evaluate(session, user_id, "douhot", latest, prev_keys, settings)
         # 按用户关注类型补拉 搜索榜/我的订阅,并记录对应快照
+        # (search/video/topic 的监控词走定向查询,拉全榜仅为兜底展示)
         watch_types = {w.list_type for w in session.scalars(select(DouhotWatch).where(DouhotWatch.user_id == user_id)).all()}
         lists: dict[str, list[dict]] = {"word": words}
         if "search" in watch_types:
