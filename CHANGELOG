@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- [2026-09-05 09:00] FIX: **`/api/douhot/list` 内容词 fetcher 参数 bug**——`douhot_list` 的 `word` fetcher 写成 `lambda:`(0 参数),调用时却传 `fn(cookie, settings)`(2 参数)→ `takes 0 positional arguments but 2 were given` → 抖音页「内容词」tab 一直"获取榜单失败"。改为 `lambda cookie, settings: ...`。这是此前改造榜单搜索时引入的回归(Files: app/api/collect.py)
+
 - [2026-09-05 08:30] FEAT: **话题词"每榜一表" + 话题词实时提醒**——① 前端 Douhot.vue 改为**每个子榜 tab 单独一张表**:该榜设了逐条类关键词(话题/搜索/视频)→ 展示该词的**主题表**(排名/得分/环比/趋势/预测);没设 → 默认榜。解决了"切到话题榜却全是内容词(黎巴嫩)"的混淆。② 新增 `run_feishu_keyword_realtime`:**话题词采集后,检测到新进/上升期/预测爆发主题即推一条**(`📌 话题词监控 · 关键词`,只列个别变化主题,`kw_realtime` 冷却去重不刷屏),挂在手动采集与调度器抖音分支,与每日日报(08:00 全量)互补——**不必等每日 08:00 也能及时看到话题词波动**。`_keyword_entries_rows` 行加 `burst`。新增 1 项单测,全量 158 项通过;前端已构建。doc/dev.md §5.11 同步(Files: frontend/src/views/Douhot.vue, app/services/{feishu.py,scheduler.py}, app/api/collect.py, tests/test_feishu.py, doc/dev.md)
 
 - [2026-09-05 07:00] FIX: **闲鱼降低风控——详情限流 + 请求间隔 + 验证后冷却**——用户又踩滑块。风控主因是详情抓取(每轮 20 次 `mtop.taobao.idle.pc.detail`)+ 频率过密 + IP 被标。本次:① `XIANYU_DETAIL_LIMIT` 默认 20→**10**(详情是最大爆发点),`XIANYU_REQUEST_DELAY` 4→**6s**;② 新增**验证后冷却** `XIANYU_COOLDOWN_MINUTES`(默认 30):闲鱼触发 `XianyuVerify` 后,`run_xianyu`/`run_xianyu_deep` 在冷却期内**跳过采集**(记 `skipped/verify_cooldown`),避免反复撞滑块;`verify_cooldown_active` 复用 `RunRecord`(查最近含 `XianyuVerify` 的闲鱼运行)。新增 1 项单测,全量 157 项通过。doc/dev.md §5.8 同步(Files: config/settings.py, app/services/{tenant_base.py,tenant.py,xianyu_analytics.py}, tests/test_platform.py, doc/dev.md)

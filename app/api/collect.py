@@ -135,7 +135,7 @@ def douhot_list(list_type: str, keyword: str = "", user: User = Depends(get_curr
             return {"list_type": list_type, "keyword": kw,
                     "items": douhot.fetch_keyword_items(cookie, list_type, kw, settings)}
         fetchers = {
-            "word": lambda: [{"title": w["title"], "score": w["score"]} for w in douhot.fetch_content_words(cookie, settings)],
+            "word": lambda cookie, settings: [{"title": w["title"], "score": w["score"]} for w in douhot.fetch_content_words(cookie, settings)],
             "search": douhot.fetch_search_words,
             "video": douhot.fetch_video_words,
             "topic": douhot.fetch_topic_words,
