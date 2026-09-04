@@ -196,6 +196,39 @@ def test_douhot_watch_analytics(session) -> None:
     assert out[0]["keyword"] == "景甜" and out[0]["last_score"] == 700 and out[0]["points"] == 2
 
 
+def test_record_watch_snaps_substring_match(session) -> None:
+    """非 douhot 板块关键词监控用**子串匹配**(大小写不敏感)。
+
+    适配闲鱼这类长标题/关键词堆砌的板块:加"PS教程"能命中标题里含"ps教程"的商品
+    (此前精确相等几乎命中不了),并取命中间**排名最靠前**的那条的 score/rank。
+    """
+    from app.db.models import DouhotWatchSnap
+    from app.services.keyword_watch import add_watch, record_watch_snaps
+
+    add_watch(session, 1, "xianyu", "word", "PS教程")
+    session.commit()
+    record_watch_snaps("xianyu", session, 1, {"word": [
+        {"title": "PS教程零基础到高级全套学习【拍下秒发】", "value": 5},  # 命中(连续子串),排名最前
+        {"title": "完全无关商品", "value": 99},   # 关键词不命中,应被跳过
+        {"title": "另一款ps教程合集", "value": 8},  # 子串命中,但排名靠后
+    ]})
+    snaps = session.scalars(select(DouhotWatchSnap).where(DouhotWatchSnap.user_id == 1)).all()
+    assert len(snaps) == 1
+    assert snaps[0].score == 5 and snaps[0].rank_now == 1  # 取排名最靠前的命中项
+
+
+def test_record_watch_snaps_substring_case_insensitive(session) -> None:
+    """大小写不敏感:大写的 PS 也应命中小写 ps。"""
+    from app.db.models import DouhotWatchSnap
+    from app.services.keyword_watch import add_watch, record_watch_snaps
+
+    add_watch(session, 1, "xianyu", "word", "ps教程")
+    session.commit()
+    record_watch_snaps("xianyu", session, 1, {"word": [{"title": "PS教程 零基础到高级", "value": 7}]})
+    snap = session.scalar(select(DouhotWatchSnap).where(DouhotWatchSnap.user_id == 1))
+    assert snap and snap.score == 7 and snap.rank_now == 1
+
+
 def _alert_settings():
     from config.settings import Settings
 

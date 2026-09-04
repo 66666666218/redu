@@ -72,8 +72,13 @@ def record_watch_snaps(
         else:
             words = lists.get(w.list_type) or lists.get("word") or []
             score, rank = 0, 0
+            # 子串匹配(大小写不敏感):关键词出现在榜单条目标题里即命中。
+            # 专为闲鱼这类**长标题**板块——精确相等几乎命中不了("PS教程" vs
+            # "PS零基础教程全套学习"),子串匹配才能记到数据。
+            kw = w.keyword.strip().lower()
             for i, word in enumerate(words, start=1):
-                if word.get("title") == w.keyword:
+                title = str(word.get("title") or "").strip().lower()
+                if kw and kw in title:
                     score = word.get("score") or word.get("value") or word.get("heat") or 0
                     rank = i
                     break

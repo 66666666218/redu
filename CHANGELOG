@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- [2026-09-05 00:30] FEAT: **非 douhot 板块关键词监控改"标题包含子串"匹配**——此前微博/闲鱼/百度关键词仅当"关键词 = 榜单条目标题"精确相等才记分,闲鱼这类长标题/关键词堆砌板块几乎命中不了(加"PS教程"无法命中"PS零基础教程全套学习【拍下秒发】"),一直记 0。改为**标题包含子串匹配(大小写不敏感)**:关键词出现在某条标题里即命中,取命中间**排名最靠前**那条的 score/rank。专为适配闲鱼虚拟商品板块(用户加"ps教程"即能跟踪所有含它的虚拟商品)。新增 2 项单测(子串命中取最靠前项、大小写不敏感)。全量 144 项通过。doc/API.md §7.3.1 同步(快照记录规则:非 douhot 用标题包含子串)(Files: app/services/keyword_watch.py, tests/test_platform.py, doc/API.md)
+
 - [2026-09-04 20:30] FEAT: **闲鱼传输层升级 curl_cffi 伪 Chrome 指纹 + 失败告警带原因**——调研 GitHub 开源:无专注"闲鱼 mtop 滑块"的成熟开源项目(唯一真解滑块的是商业付费 `xianyu-pilot-pro`,需真浏览器+代理池,仅约 70% 成功率);主流开源闲鱼采集器(goofish_spider/cn-scraper-mcp)反而**不破解验证码**,而是 `curl_cffi` 伪 Chrome 指纹降风险 + 被拦时"保留部分数据稍后再试"。据此:① `xianyu.py` 传输层从裸 `requests` 换成 **`curl_cffi`(impersonate="chrome")**,模拟 Chrome TLS/HTTP2 指纹,纯协议下降低被标记概率(requirements.txt 加 `curl-cffi>=0.16.3`);② 新增 **`scripts/probe_xianyu_curl.py`** 实测对比——**结论:同一 Cookie 已被反复 `FAIL_SYS_USER_VALIDATE` 时,requests 与 curl_cffi 都被拦、均不下发新 token**,证明此时是**账号/出口 IP 已被标记**,指纹伪装救不了,须换清洁住宅 IP(勿用轮换代理池,闲鱼 token/session 绑定 IP);③ `check_collect_failures` 飞书告警带上**最近一次失败的原因**(如"XianyuVerify: 闲鱼人机验证(滑块),需人工处理"),让运维一眼知道该人工过滑块/换 IP。全量 142 项通过(新增 curl_cffi 需 pip install)。doc/dev.md §5.8、doc/API.md §6 同步(指纹与滑块实证、错误模型、告警带原因)(Files: app/services/{xianyu.py,alert_service.py}, requirements.txt, scripts/probe_xianyu_curl.py, doc/{dev.md,API.md})
 
 - [2026-09-04 19:30] FIX: **闲鱼风控错误处理重构——区分"人机验证"与"真限流"**——实测(`data/` 现场探针)闲鱼 mtop 的 `FAIL_SYS_USER_VALIDATE` 经 30/90/180s 指数退避**重试仍全部失败**:它不是限流,是网关在要**滑块人机验证**。此前代码把它当限流退避 3 次(白等约 5 分钟后误抛 `XianyuRateLimit`)。本次:
