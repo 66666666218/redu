@@ -39,6 +39,11 @@ def list_watch(session: Session, user_id: int, section: str | None = None) -> li
     ]
 
 
+def remove_watch(session: Session, user_id: int, section: str, list_type: str, keyword: str) -> bool:
+    """取消一个关键词关注(并删除其历史快照)。返回是否删除。"""
+    return repository.delete_watch(session, user_id, section, list_type, keyword)
+
+
 def list_douhot_watch(session: Session, user_id: int) -> list[dict]:
     return list_watch(session, user_id, "douhot")  # 兼容旧调用
 

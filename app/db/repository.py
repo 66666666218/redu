@@ -152,6 +152,24 @@ def get_watch(db: Session, user_id: int, section: str, list_type: str, keyword: 
     )
 
 
+def delete_watch(db: Session, user_id: int, section: str, list_type: str, keyword: str) -> bool:
+    """删除某关键词关注及其全部历史快照(避免孤儿数据)。返回是否删除了关注。"""
+    w = get_watch(db, user_id, section, list_type, keyword)
+    if w is None:
+        return False
+    snaps = db.scalars(
+        select(DouhotWatchSnap).where(
+            DouhotWatchSnap.user_id == user_id, DouhotWatchSnap.section == section,
+            DouhotWatchSnap.list_type == list_type, DouhotWatchSnap.keyword == keyword,
+        )
+    ).all()
+    for s in snaps:
+        db.delete(s)
+    db.delete(w)
+    db.commit()
+    return True
+
+
 def watch_snap_series(
     db: Session, user_id: int, keyword: str, since: datetime | None = None, section: str | None = None
 ) -> list[DouhotWatchSnap]:

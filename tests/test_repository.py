@@ -49,6 +49,21 @@ def test_watch_snap_series_and_get_watch() -> None:
     db.close()
 
 
+def test_delete_watch_removes_snaps() -> None:
+    db = _session()
+    db.add(DouhotWatch(user_id=1, section="douhot", list_type="topic", keyword="续火花"))
+    db.add_all([
+        DouhotWatchSnap(user_id=1, section="douhot", list_type="topic", keyword="续火花", score=157, rank_now=1),
+        DouhotWatchSnap(user_id=1, section="douhot", list_type="topic", keyword="续火花", score=160, rank_now=1),
+    ])
+    db.commit()
+    assert repo.delete_watch(db, 1, "douhot", "topic", "续火花") is True
+    assert repo.get_watch(db, 1, "douhot", "topic", "续火花") is None
+    assert repo.watch_snap_series(db, 1, "续火花", section="douhot") == []  # 快照一并清理
+    assert repo.delete_watch(db, 1, "douhot", "topic", "续火花") is False  # 重复删除返回 False
+    db.close()
+
+
 def test_xianyu_want_series_and_by_date() -> None:
     db = _session()
     db.add_all([

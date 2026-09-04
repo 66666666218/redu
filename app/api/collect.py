@@ -78,6 +78,31 @@ def watch_list(section: str, user: User = Depends(get_current_user), db: Session
     return list_watch(db, user.id, section)
 
 
+@router.delete("/api/watch/{section}")
+def watch_delete(section: str, payload: dict, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """取消某板块的一个关键词关注(并删历史快照)。"""
+    from app.services.keyword_watch import remove_watch
+
+    try:
+        ok = remove_watch(db, user.id, section, str(payload.get("list_type", "word")), str(payload.get("keyword", "")))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"删除关注失败:{exc}") from exc
+    if not ok:
+        raise HTTPException(404, "未找到该关注词")
+    return {"ok": True}
+
+
+@router.delete("/api/douhot/watch")
+def douhot_watch_delete(payload: dict, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """取消抖音关键词关注(等价 section=douhot 的通用删除,兼容旧调用)。"""
+    from app.services.keyword_watch import remove_watch
+
+    ok = remove_watch(db, user.id, "douhot", str(payload.get("list_type", "word")), str(payload.get("keyword", "")))
+    if not ok:
+        raise HTTPException(404, "未找到该关注词")
+    return {"ok": True}
+
+
 @router.get("/api/watch/{section}/analytics")
 def watch_analytics(section: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     from app.services.keyword_watch import watch_analytics as _wa

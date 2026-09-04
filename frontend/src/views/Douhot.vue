@@ -37,6 +37,23 @@ async function clearSearch() {
   searchKw.value = ''; appliedKw.value = ''
   await loadList(active.value)
 }
+// 把搜索框当前词一键加入底部"关键词监控"(用当前 tab 的榜单类型),采集后即记录趋势
+async function saveSearchWatch() {
+  const kw = (searchKw.value.trim() || appliedKw.value).trim()
+  if (!kw) { toastError('请先输入要关注的关键词'); return }
+  try {
+    await api.watchAdd('douhot', kw, active.value)
+    toastOk(`已关注「${kw}」(${tabs.find(x=>x.key===active.value)?.label}),采集后自动记录趋势`)
+    await loadWatches()
+  } catch (e) { toastError(e.message) }
+}
+async function removeWatch(w) {
+  try {
+    await api.watchDel(w.section || 'douhot', w.list_type || 'word', w.keyword)
+    toastOk(`已取消关注「${w.keyword}」`)
+    await loadWatches()
+  } catch (e) { toastError(e.message) }
+}
 async function loadWatches() {
   try { watches.value = await api.douhotWatchAnalytics() } catch {}
 }
@@ -82,6 +99,7 @@ onMounted(async () => { await loadList('word'); await loadWatches() })
       <div class="row" style="gap:8px;margin-bottom:10px">
         <input v-model="searchKw" placeholder="输入关键词,按词搜该榜热度(榜外也能查)" style="margin:0;flex:1" @keyup.enter="searchList" />
         <button @click="searchList">搜索</button>
+        <button @click="saveSearchWatch" title="把当前词存为长期监控,采集后记录趋势">📌 关注</button>
         <button v-if="appliedKw" class="ghost" @click="clearSearch">清除</button>
       </div>
       <h3>{{ tabs.find(x=>x.key===active)?.label }}{{ appliedKw ? ` · 「${appliedKw}」` : '' }} · {{ list.length }} 条</h3>
@@ -114,6 +132,7 @@ onMounted(async () => { await loadList('word'); await loadWatches() })
             <div><div class="empty" style="padding:0">预测</div><b class="num">{{ fmt(w.forecast_next) }}</b></div>
           </div>
           <div class="empty">{{ w.summary || '再采集一次积累数据' }}</div>
+          <button class="ghost" style="margin-top:6px;font-size:12px" @click="removeWatch(w)">取消关注</button>
         </div>
       </div>
       <div v-else class="empty">输入任意关键词关注,采集后会定向查热度并预测走势</div>
