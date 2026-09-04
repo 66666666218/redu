@@ -220,7 +220,7 @@ def test_daily_lists_topic_entries_with_new_marker(session) -> None:
     session.commit()
     text = build_daily(session, 1, _settings())
     assert "早春晴朗" in text
-    assert "共2主题" in text                 # 两个相关主题
+    assert "2主题" in text                 # 两个相关主题(标题带趋势概览)
     assert "🆕" in text and "早春晴朗·新" in text  # 新进条目标 🆕
     assert "今日vs昨日" in text              # 对比汇总段
     assert "↑" in text                       # 上升期带 ↑ 箭头(早春晴朗两轮在涨)

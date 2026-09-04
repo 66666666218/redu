@@ -257,13 +257,24 @@ def _keyword_entries_lines(db: Session, user_id: int, w: dict, snaps: list, top_
             "forecast": a.get("forecast_next"),
         })
     rows.sort(key=lambda x: x["rank"])  # 按搜索序(排名)排
+    # 趋势概览(计入全部最新主题,与仪表盘卡片一致):如 "3主题 · 升1 · 新1"
+    all_ups = sum(1 for r in rows if r["trend"] == "上升期")
+    all_downs = sum(1 for r in rows if r["trend"] == "回落期")
+    all_news = sum(1 for r in rows if r["marker"] == "🆕")
+    ov = [f"{len(rows)}主题"]
+    if all_ups:
+        ov.append(f"升{all_ups}")
+    if all_downs:
+        ov.append(f"降{all_downs}")
+    if all_news:
+        ov.append(f"新{all_news}")
     rows = rows[:top_n]
     new_count = sum(1 for r in rows if r["marker"] == "🆕")
     rose = sum(1 for r in rows if r["marker"].startswith("↑") or r["marker"].startswith("🔥↑"))
     fell = sum(1 for r in rows if r["marker"].startswith("↓") or r["marker"].startswith("🔥↓"))
     dropped = len(set(prev_map) - set(latest_map))  # 上批有、最新批无 = 跌出
     label = SECTION_LABELS.get(w.get("section", ""), w.get("section", ""))
-    lines = [f"  · {w['keyword']}({label} · 共{len(latest_map)}主题)"]
+    lines = [f"  · {w['keyword']}({label} · {' · '.join(ov)})"]
     for r in rows:
         g = f"{r['growth'] * 100:+.0f}%" if r["growth"] is not None else "—"
         fc = f" 预测{_w(r['forecast'])}" if r["forecast"] is not None else ""
