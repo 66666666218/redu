@@ -29,6 +29,15 @@ SECTION_LABELS = {"weibo": "微博热搜", "xianyu": "闲鱼热榜", "douhot": "
 _RANK_FIELD = {"weibo": "rank", "xianyu": "best_rank", "douhot": "score", "baidu": "rank"}
 # 每板块的历史表(用于上一轮快照对比)
 _TABLES = {"weibo": WeiboHotItem, "xianyu": XianyuItem, "douhot": DouhotWord, "baidu": BaiduHotItem}
+# 每板块的历史热度序列函数(用于实时预测/周对比)
+_SERIES = {
+    "weibo": repository.weibo_heat_series,
+    "baidu": repository.baidu_heat_series,
+    "douhot": repository.douhot_score_series,
+    "xianyu": repository.xianyu_want_series,
+}
+# 每板块的时间列(表字段不一)
+_TS_COL = {"weibo": "captured_at", "baidu": "captured_at", "douhot": "created_at", "xianyu": "created_at"}
 
 
 def _agent_confidence_rank(level: str | None) -> int:
@@ -275,6 +284,31 @@ def _in_cooldown(db: Session, user_id: int, section: str, title: str, settings: 
     return row is not None and (now - row.alerted_at).total_seconds() < settings.feishu_alert_cooldown_hours * 3600
 
 
+def _section_weekly_tally(db: Session, now: datetime | None = None) -> list[str]:
+    """各板块"本周(近7天) vs 上周(前7天)"活跃话题数对比,用于周报对比总结。跨用户聚合。"""
+    now = now or datetime.now()
+    since14 = now - timedelta(days=14)
+    week_start = since14 + timedelta(days=7)  # = now - 7d
+    out = []
+    for section in SECTIONS:
+        table = _TABLES[section]
+        col = getattr(table, _TS_COL[section])
+        rows = db.scalars(select(table).where(col >= since14)).all()
+        this_week, last_week = set(), set()
+        for r in rows:
+            ts = getattr(r, _TS_COL[section])
+            key = str(getattr(r, "title", "") or getattr(r, "item_id", "") or "").strip()
+            if not key:
+                continue
+            (this_week if ts >= week_start else last_week).add(key)
+        if not this_week and not last_week:
+            continue
+        d = len(this_week) - len(last_week)
+        arrow = f"+{d}" if d > 0 else (str(d) if d < 0 else "=")
+        out.append(f"{_SHORT[section]} {len(this_week)}↔{len(last_week)}({arrow})")
+    return out
+
+
 def run_feishu_insight_digest(settings: Settings | None = None) -> int:
     """每周一次"近7天爆点回顾"——跨用户聚合,推送到飞书群。
 
@@ -290,7 +324,11 @@ def run_feishu_insight_digest(settings: Settings | None = None) -> int:
     client = FeishuClient(settings.feishu_webhook, settings.feishu_secret)
     db = get_session_local()()
     try:
-        lines = ["📅 近 7 天爆点回顾", ""]
+        lines = ["📅 近 7 天爆点回顾"]
+        tally = _section_weekly_tally(db)
+        if tally:
+            lines.append(f"📊 板块活跃对比(本周↔上周):{' | '.join(tally)}")
+        lines.append("")
         burst_rows, rising_rows = [], []
         for user in repository.list_enabled_users(db):
             from app.services.keyword_watch import list_watch
@@ -409,7 +447,7 @@ def run_feishu_realtime(
         if not cur:
             return 0
         client = FeishuClient(settings.feishu_webhook, settings.feishu_secret)
-        need_push: list[str] = []
+        pushed_items: list[tuple[str, str]] = []
         for title, c in list(cur.items())[:40]:
             tag, extra = _delta(section, c, prev)
             reason = None
@@ -425,12 +463,29 @@ def run_feishu_realtime(
                     if up >= settings.feishu_hot_rank_jump:
                         reason = str(extra)
             if reason and not _in_cooldown(db, user_id, section, title, settings):
-                need_push.append(f"  · {title[:24]}  {reason}")
+                pushed_items.append((title, reason))
                 _mark_alerted(db, user_id, section, title, reason)
-        if need_push:
+        if pushed_items:
             head = f"⚡ {SECTION_LABELS[section]} 实时热点"
-            client.send(head + "\n" + "\n".join(need_push))
-            pushed = len(need_push)
+            lines = [head]
+            # 给每个推送词补一句"预测/置信度"(历史样本 ≥2 才预测)
+            from app.services import keyword_agent
+
+            series = _SERIES.get(section, lambda db, uid: {})(db, user_id)
+            for title, reason in pushed_items:
+                line = f"  · {title[:24]}  {reason}"
+                vals = [v for _, v in series.get(title, [])]
+                if len(vals) >= 2:
+                    a = keyword_agent.analyze(title, vals)
+                    if a.get("forecast_next") is not None:
+                        line += f"  预测{a['forecast_next']:.0f}"
+                    if a.get("confidence") and a["confidence"] != "数据不足":
+                        line += f" {a['confidence']}"
+                    if a.get("trend_label"):
+                        line += f" {a['trend_label']}"
+                lines.append(line)
+            client.send("\n".join(lines))
+            pushed = len(pushed_items)
             logger.info("飞书实时推送 section=%s user=%s 条数=%s", section, user_id, pushed)
         return pushed
     finally:

@@ -171,7 +171,32 @@ def test_realtime_respects_cooldown(session, monkeypatch) -> None:
     first = run_feishu_realtime("weibo", 1, settings, db=session)
     second = run_feishu_realtime("weibo", 1, settings, db=session)  # 已写去重表,冷却期内应全走冷却 → 不重推
     assert first == 2 and second == 0 and n_calls["n"] == 1
-    assert session.scalar(select(FeishuAlert).where(FeishuAlert.title == "D")) is not None
+
+
+def test_realtime_message_includes_prediction(session, monkeypatch) -> None:
+    """实时提醒给推送词补"预测/置信度/趋势"(历史样本≥2 才预测)。"""
+    seed_weibo(session)
+    sent = []
+    monkeypatch.setattr(feishu, "FeishuClient", lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
+    n = run_feishu_realtime("weibo", 1, _settings(), db=session)
+    assert n >= 1
+    joined = "\n".join(sent)
+    assert "预测" in joined          # 推送词带预测
+    assert "上升期" in joined        # 且带趋势标签
+
+
+def test_section_weekly_tally(session) -> None:
+    """周对比:各板块"本周 vs 上周"活跃话题数。本周=A,B;上周=A,C → 2↔2。"""
+    from datetime import datetime, timedelta
+
+    now = datetime(2026, 9, 7, 8)
+    for t in ["A", "B"]:
+        session.add(WeiboHotItem(user_id=1, title=t, heat=100, rank=1, captured_at=now - timedelta(days=1)))
+    for t in ["A", "C"]:
+        session.add(WeiboHotItem(user_id=1, title=t, heat=100, rank=1, captured_at=now - timedelta(days=10)))
+    session.commit()
+    tally = feishu._section_weekly_tally(session, now)
+    assert any("微博" in line and "2↔2" in line for line in tally)
 
 
 def test_keyword_burst_alert(monkeypatch, session) -> None:

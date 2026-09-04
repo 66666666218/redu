@@ -380,7 +380,13 @@ redian/
    底部【关键词关注 · 智能体】给出各关注词的**趋势/环比/预测/置信度**。
 2. **实时提醒** `run_feishu_realtime(section, user_id)`:每次采集成功后调用,只把**当日新增**、
    **排名跳升 ≥ `FEISHU_HOT_RANK_JUMP` 名**、或**分值环比 ≥ `FEISHU_HOT_RATIO`** 的话题立即推群,
-   并按 `FEISHU_ALERT_COOLDOWN_HOURS` 去重(表 `feishu_alerts`),防刷屏。
+   并按 `FEISHU_ALERT_COOLDOWN_HOURS` 去重(表 `feishu_alerts`),防刷屏。**2026-09-04 增强**:
+   对推送词在其历史序列 ≥2 样本时,追加一句 `预测<下一轮热度> <趋势标签>`(来自 `keyword_agent`),
+   让"飙升"不只是数字、还带智能体预测。
+
+3. **每周爆点回顾** `run_feishu_insight_digest()`:`FEISHU_INSIGHT_CRON`(默认周一 09:00)跨用户聚合
+   近 7 天关注词的**爆发/上升**情况,带历史回溯(首次上涨/峰值/持续时长)。**2026-09-04 增强**:
+   顶部加 `📊 板块活跃对比(本周↔上周)`——各板块本周 vs 上周活跃话题数对比(如 `抖音 120↔96(+24)`)。
 
 - **签名校验**:飞书自定义机器人若开启"签名校验",请求体须带 `sign`。
   官方算法:`string_to_sign = f"{timestamp}\\n{secret}"`,`sign = base64(HmacSHA256(string_to_sign, ""))`
