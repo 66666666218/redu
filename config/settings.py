@@ -26,8 +26,9 @@ class Settings(BaseSettings):
     goofish_cookie_file: str = "data/goofish_cookie.txt"  # 闲鱼登录 Cookie 文件(gitignored)
     xianyu_keywords: str = "ps教程,网盘资源,代充,剪映会员,软件,素材,cad,ae,pr,office,会员,课程,影视,源码"  # 虚拟商品关键词
     xianyu_top_n: int = 100         # 前 N 虚拟商品榜(搜索级,无风控)
-    xianyu_detail_limit: int = 20   # 慢速抓详情(想要数)的商品数
-    xianyu_request_delay: float = 4.0  # 闲鱼相邻请求间隔(秒,带抖动);比通用更大,防 mtop 风控
+    xianyu_detail_limit: int = 10   # 慢速抓详情(想要数)的商品数;详情是触发 mtop 风控的最大爆发点,默认降到 10
+    xianyu_request_delay: float = 6.0  # 闲鱼相邻请求间隔(秒,带抖动);比通用更大,防 mtop 风控
+    xianyu_cooldown_minutes: int = 30  # 闲鱼触发人机验证(滑块)后,暂停采集该分钟数,避免反复撞枪口
     douhot_cookie_file: str = "data/douhot_cookie.txt"  # 抖音热点宝 Cookie 文件(gitignored)
     douhot_top_n: int = 100         # 内容词趋势条数(抖音热点接口可到 200)
     douhot_watch_entry_cap: int = 100  # 榜单搜索类关注(话题/搜索/视频)每次采集最多记录的相关主题条数

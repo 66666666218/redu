@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- [2026-09-05 07:00] FIX: **闲鱼降低风控——详情限流 + 请求间隔 + 验证后冷却**——用户又踩滑块。风控主因是详情抓取(每轮 20 次 `mtop.taobao.idle.pc.detail`)+ 频率过密 + IP 被标。本次:① `XIANYU_DETAIL_LIMIT` 默认 20→**10**(详情是最大爆发点),`XIANYU_REQUEST_DELAY` 4→**6s**;② 新增**验证后冷却** `XIANYU_COOLDOWN_MINUTES`(默认 30):闲鱼触发 `XianyuVerify` 后,`run_xianyu`/`run_xianyu_deep` 在冷却期内**跳过采集**(记 `skipped/verify_cooldown`),避免反复撞滑块;`verify_cooldown_active` 复用 `RunRecord`(查最近含 `XianyuVerify` 的闲鱼运行)。新增 1 项单测,全量 157 项通过。doc/dev.md §5.8 同步(Files: config/settings.py, app/services/{tenant_base.py,tenant.py,xianyu_analytics.py}, tests/test_platform.py, doc/dev.md)
+
 - [2026-09-05 06:00] FEAT: **关键词监控改用飞书交互卡片**——调研结论:飞书自定义 webhook 机器人**发不了图表图片**(图片需 `img_key`→需企业自建应用 app_id/app_secret 的 tenant_access_token),但**能发交互卡片(msg_type=interactive)**。故按"用富文本卡片":① `FeishuClient` 加 `send_card`(重构出 `_post` 供文本/卡片复用);② 新增 `build_keyword_card` 生成关键词监控卡片(彩色标题 + 每词分块:关键词/板块/趋势概览 div + 明细 note,含 今日vs昨日 汇总);③ `_keyword_entries_lines` 拆出 `_keyword_entries_rows`/`_entry_line`/`_overview` 复用;④ `build_daily` 加 `include_keywords` 参数,`run_feishu_daily` 发"纯文本日报(不含关键词)+ 关键词卡片"两条。新增 1 项单测,全量 156 项通过。doc/dev.md §5.11 同步(含"图表需应用机器人"结论)(Files: app/services/{feishu_client.py,feishu.py}, tests/test_feishu.py, doc/dev.md)
 
 - [2026-09-05 05:30] FEAT: **关键词卡片标题更明确——加"趋势概览"徽章**——榜单搜索类关键词卡片标题从单一"上升期"改为 `trend_overview`(如 `3主题 · 升1 · 新1`,升/降/新增各多少),着色仍按 `trend_label`;前端 Douhot.vue/Dashboard.vue 卡片徽章同步。`watch_analytics` 逐条分支计算 `trend_overview` 并返回。全量 155 项通过;前端已构建。doc/dev.md §5.10.1 同步(Files: app/services/keyword_watch.py, frontend/src/{views/Douhot.vue,views/Dashboard.vue}, doc/dev.md)

@@ -256,6 +256,29 @@ def test_watch_snap_records_each_topic_entry(monkeypatch, session) -> None:
     assert "追踪2主题" in aw[0]["summary"] and "新增" in aw[0]["summary"]
 
 
+def test_xianyu_verify_cooldown(session) -> None:
+    """闲鱼触发人机验证后,冷却期内应跳过采集(避免反复撞滑块)。"""
+    from datetime import datetime, timedelta
+
+    from config.settings import Settings
+    from app.db.models import RunRecord
+    from app.services.tenant_base import verify_cooldown_active
+
+    s = Settings(_env_file=None, xianyu_cooldown_minutes=30)
+    assert verify_cooldown_active(session, 1, s) is False  # 无验证记录 → 不冷却
+    session.add(RunRecord(user_id=1, run_id="r1", kind="xianyu", status="failed",
+                          detail="XianyuVerify: 闲鱼人机验证(滑块)", started_at=datetime.now()))
+    session.commit()
+    assert verify_cooldown_active(session, 1, s) is True   # 刚验证过 → 冷却中
+    # 冷却期外的旧验证 → 不再冷却
+    session.add(RunRecord(user_id=1, run_id="r0", kind="xianyu", status="failed",
+                          detail="XianyuVerify: 闲鱼人机验证(滑块)",
+                          started_at=datetime.now() - timedelta(hours=2)))
+    session.commit()
+    # 只查最近一条(在冷却内)仍为 True;把冷却设为 0 则永不冷却
+    assert verify_cooldown_active(session, 1, Settings(_env_file=None, xianyu_cooldown_minutes=0)) is False
+
+
 def _alert_settings():
     from config.settings import Settings
 

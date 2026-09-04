@@ -15,7 +15,7 @@ from app.db import repository
 from app.db.models import XianyuDaily, XianyuSummary
 from app.services import xianyu
 from app.services.cookie_store import get_cookies
-from app.services.tenant_base import _base, _record_run
+from app.services.tenant_base import _base, _record_run, verify_cooldown_active
 from app.utils import get_logger
 
 logger = get_logger(__name__)
@@ -36,6 +36,10 @@ def _xy_detail_limit(settings: Settings) -> int:
 def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = None) -> dict:
     """采集闲鱼热榜并抓取前 N 商品详情(想要数/类目/浏览量/卖家粉丝),写入当日快照。"""
     settings = _base(settings)
+    if verify_cooldown_active(session, user_id, settings):  # 验证后冷却:避免反复撞滑块
+        _record_run(session, user_id, "xianyu_deep", "skipped", "verify_cooldown")
+        session.commit()
+        return {"platform": "xianyu_deep", "count": 0, "status": "skipped", "reason": "verify_cooldown"}
     cookies = get_cookies(session, user_id)
     goofish = cookies.get("goofish", "")
     if not goofish:

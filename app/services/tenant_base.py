@@ -5,8 +5,9 @@
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
@@ -28,3 +29,26 @@ def _record_run(session: Session, user_id: int, kind: str, status: str, detail: 
             detail=detail,
         )
     )
+
+
+def verify_cooldown_active(session: Session, user_id: int, settings: Settings) -> bool:
+    """闲鱼人机验证后冷却:最近 `xianyu_cooldown_minutes` 内触发过 `XianyuVerify` → 本轮应跳过。
+
+    防止闲鱼 Cookie/IP 被标记后仍每轮去撞滑块(反复 `FAIL_SYS_USER_VALIDATE` 会加重风控),
+    改为静默等待冷却期过后再试。
+    """
+    minutes = getattr(settings, "xianyu_cooldown_minutes", 0)
+    if not minutes:
+        return False
+    cutoff = datetime.now() - timedelta(minutes=minutes)
+    row = session.scalar(
+        select(RunRecord)
+        .where(
+            RunRecord.user_id == user_id,
+            RunRecord.kind.in_(["xianyu", "xianyu_deep"]),
+            RunRecord.detail.contains("XianyuVerify"),
+            RunRecord.started_at >= cutoff,
+        )
+        .order_by(RunRecord.id.desc())
+    )
+    return row is not None
