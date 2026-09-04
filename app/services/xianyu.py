@@ -50,7 +50,15 @@ class XianyuError(Exception):
 
 
 class XianyuRateLimit(XianyuError):
-    """闲鱼限流/风控(退避后仍失败)。"""
+    """闲鱼限流(退避后仍失败)。"""
+
+
+class XianyuVerify(XianyuError):
+    """闲鱼人机验证(滑块):需人工过滑块或换出口 IP。
+
+    与限流不同——重试/退避均无效(实测连续重试仍 `FAIL_SYS_USER_VALIDATE`),
+    应尽快抛给上层识别为"账号/出口被标记",而非干等数分钟。
+    """
 
 
 # mtop 令牌错误码(需刷新 _m_h5_tk 后重试;参考开源 goofish-client)
@@ -61,8 +69,8 @@ TOKEN_ERRORS = {
     "FAIL_SYS_TOKEN_EXOIRED",
     "FAIL_SYS_USER_NOT_LOGIN",
 }
-# 限流/风控码(需退避,不重试)
-RATE_ERRORS = {"FAIL_SYS_USER_VALIDATE", "FAIL_SYS_RATE_LIMIT", "FAIL_SYS_USER_LIMIT"}
+# 真限流码(可退避重试);注意 USER_VALIDATE 属"人机验证",归 XianyuVerify,不进此表
+RATE_ERRORS = {"FAIL_SYS_RATE_LIMIT", "FAIL_SYS_USER_LIMIT"}
 
 
 class XianyuClient:
@@ -103,11 +111,13 @@ class XianyuClient:
         return hashlib.md5(f"{token}&{t}&{self.APP_KEY}&{data}".encode()).hexdigest()
 
     def _post(self, api: str, data_obj: dict) -> dict:
-        """发一次 mtop 请求;令牌错自动刷新重试,限流/风控**指数退避**后重试。
+        """发一次 mtop 请求;令牌错自动刷新重试,限流**指数退避**,人机验证立即抛 `XianyuVerify`。
 
-        退避策略:遇 `FAIL_SYS_USER_VALIDATE`/`FAIL_SYS_RATE_LIMIT` 等风控码,
+        退避策略:遇 `FAIL_SYS_RATE_LIMIT`/`FAIL_SYS_USER_LIMIT` 等真限流码,
         按 30s/90s/180s 递增等待后重试(最多 3 次),仍失败抛 `XianyuRateLimit`。
-        关键:风控时**不能连环猛打**(会加重风控),而应拉长时间隔再试。
+        关键:限流时**不能连环猛打**(会加重风控),而应拉长时间隔再试。
+        `FAIL_SYS_USER_VALIDATE`(人机验证/滑块)不是限流——实测退避重试仍无效,
+        立即抛 `XianyuVerify`,由上层判定为"需人工过滑块或更换出口 IP"。
         """
         last_rate_err: str | None = None
         backoff = [30, 90, 180]
@@ -134,11 +144,15 @@ class XianyuClient:
                 if self._refresh(resp):
                     continue  # 令牌已刷新,重试
                 raise XianyuError(f"闲鱼令牌错误:{ret}")
-            if code in RATE_ERRORS or "USER_VALIDATE" in code:
+            if "USER_VALIDATE" in code:
+                # 人机验证(滑块):不是限流,退避无效(实测连续重试仍失败)。
+                # 立即抛 XianyuVerify,由上层识别为"需人工过滑块/换IP",避免干等数分钟。
+                raise XianyuVerify(f"闲鱼人机验证(滑块),需人工处理:{ret}")
+            if code in RATE_ERRORS:
                 last_rate_err = ret
                 if attempt < len(backoff):
                     wait = backoff[attempt]
-                    logger.warning("闲鱼限流/风控,%.0fs 后重试:%s", wait, ret)
+                    logger.warning("闲鱼限流,%.0fs 后重试:%s", wait, ret)
                     time.sleep(wait)
                     continue
                 raise XianyuRateLimit(f"闲鱼限流,请稍后再试:{ret}")
@@ -238,6 +252,8 @@ def fetch_detail(client: XianyuClient, item_id: str) -> dict:
         out["seller_fans"] = int(
             seller.get("followerCount") or seller.get("fansCount") or seller.get("sellerFans") or 0
         )
+    except (XianyuVerify, XianyuRateLimit):
+        raise  # 人机验证/限流:交给上层停止连环抓详情(避免加剧风控)
     except Exception:  # noqa: BLE001
         pass
     return out
@@ -250,12 +266,20 @@ def collect_hot(settings: Settings, client: XianyuClient | None = None) -> list[
 
     buckets: dict[str, dict] = {}
     base_delay = getattr(settings, "xianyu_request_delay", None) or getattr(settings, "request_delay_seconds", 2.5)
+    saw_verify = False
+    success = 0
     for idx, kw in enumerate(keywords):
         try:
             items = client.search(kw)
+        except XianyuVerify:
+            # 人机验证是账号/IP 级的,一旦出现后续关键词多半也会被挡——
+            # 立即停止尝试,避免连环猛打加重风控,保留已采到的部分数据。
+            saw_verify = True
+            break
         except XianyuError as exc:
             logger.warning("闲鱼关键词 %s 失败:%s", kw, exc)
         else:
+            success += 1
             for pos, it in enumerate(items, start=1):
                 iid = str(it.get("itemId"))
                 if not iid:
@@ -266,6 +290,10 @@ def collect_hot(settings: Settings, client: XianyuClient | None = None) -> list[
         # 请求间隔(随机抖动),避免连续请求触发风控
         if idx < len(keywords) - 1:
             time.sleep(base_delay * random.uniform(0.8, 1.4))
+
+    # 一个词都没采到且被验证 → 让上层识别为"需人工处理",避免误报成功 0 条
+    if success == 0 and saw_verify:
+        raise XianyuVerify("闲鱼人机验证(滑块),全部关键词均未采集")
 
     # 排名:命中关键词次数多优先,其次综合序靠前(min rank)优先
     ranked = sorted(

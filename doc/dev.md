@@ -334,8 +334,9 @@ redian/
 - 职责:按虚拟商品关键词搜索闲鱼,以闲鱼"综合"顺序作为热度基准,跨关键词聚合、去重、排名,输出热销虚拟商品榜。
 - 技术:闲鱼 H5 的 mtop 接口(`mtop.taobao.idlemtopsearch.pc.search`,`appKey=34839810`),用 `GOOFISH_COOKIE_FILE` 里的登录 Cookie + 标准 mtop 签名(算法=md5(token&t&appKey&data)),返回真实商品;每次响应会刷新 `_m_h5_tk` 令牌。
 - 排名规则:`hit_keywords`(命中关键词数)降序优先,其次 `best_rank`(综合序最小)升序。
-- 接口:`run_xianyu() -> {run_id, count, items}`;API 见 `doc/API.md` §6。
-- 说明:搜索卡片不带"已售/想要数"(`want` 为空),故热销按"综合排序"近似(快、请求少);如需精确"想要数"可再抓详情页(更慢,暂不做)。闲鱼为合规公开检索,读自己登录态下的数据,注意频率与 ToS。
+- 接口:`run_xianyu() -> {run_id, count, items}`;API 见 `doc/API.md` §6;深采 `run_xianyu_deep` 抓商品详情(`mtop.taobao.idle.pc.detail`)取想要数/收藏/已售/卖家粉丝,写 `xianyu_daily` 快照。
+- 说明:**搜索卡片不带"已售/想要数"(`want` 为空)**,故想要数必须抓详情页(`XIANYU_DETAIL_LIMIT`,默认 20 条);热榜综合序由 `hit_keywords` + `best_rank` 近似。闲鱼为合规公开检索,读自己登录态下的数据,注意频率与 ToS。
+- **风险控制错误模型**(mtop 网关):`FAIL_SYS_TOKEN_*` 令牌错误 → 刷新 `_m_h5_tk` 重试;`FAIL_SYS_RATE_LIMIT`/`FAIL_SYS_USER_LIMIT` 真限流 → 指数退避 30/90/180s 后抛 `XianyuRateLimit`;**`FAIL_SYS_USER_VALIDATE`= 人机验证(滑块),不是限流**——实测退避重试仍无效,改为**立即抛 `XianyuVerify`**,由上层识别为"需人工过滑块或更换出口 IP"。深采详情循环遇 `XianyuVerify`/`XianyuRateLimit` 即**停止抓取并保留已采部分**(状态 `partial`),不再连环猛打加剧风控;整轮被验证时 `run_xianyu_deep` 优雅返回 `status:"failed"` 而非 500。
 
 ### 5.9 抖音热点·内容词趋势 `services/douhot.py` + `services/douhot_client.py`(独立数据源)
 

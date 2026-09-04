@@ -16,6 +16,9 @@ from app.db.models import XianyuDaily, XianyuSummary
 from app.services import xianyu
 from app.services.cookie_store import get_cookies
 from app.services.tenant_base import _base, _record_run
+from app.utils import get_logger
+
+logger = get_logger(__name__)
 
 
 def xianyu_daily(session: Session, user_id: int) -> dict:
@@ -43,8 +46,18 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
         today = datetime.now().date().isoformat()
         base_delay = getattr(settings, "xianyu_request_delay", None) or getattr(settings, "request_delay_seconds", 2.5)
         saved = 0
+        stop_reason = None
         for idx, it in enumerate(hot[: _xy_detail_limit(settings)]):
-            detail = xianyu.fetch_detail(client, it["item_id"])
+            try:
+                detail = xianyu.fetch_detail(client, it["item_id"])
+            except xianyu.XianyuVerify:
+                stop_reason = "verify"
+                logger.warning("闲鱼详情触发人机验证,停止抓取;请人工过滑块或更换出口IP")
+                break
+            except xianyu.XianyuRateLimit:
+                stop_reason = "rate_limit"
+                logger.warning("闲鱼限流,停止抓取详情")
+                break
             row = repository.get_xianyu_daily(session, user_id, it["item_id"], today)
             if row is None:
                 row = XianyuDaily(user_id=user_id, snap_date=today, item_id=it["item_id"])
@@ -64,9 +77,17 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
 
                 time.sleep(base_delay * random.uniform(0.8, 1.4))
         session.commit()
-        _record_run(session, user_id, "xianyu_deep", "success", f"items={saved}")
+        status = "partial" if stop_reason else "success"
+        detail_note = f"items={saved}" + (f",{stop_reason}" if stop_reason else "")
+        _record_run(session, user_id, "xianyu_deep", status, detail_note)
         session.commit()
-        return {"platform": "xianyu_deep", "count": saved}
+        return {"platform": "xianyu_deep", "count": saved, "status": status, "reason": stop_reason}
+    except (xianyu.XianyuVerify, xianyu.XianyuRateLimit) as exc:
+        # collect_hot 整轮被滑块/限流(全部关键词失败)→ 优雅降级,不 500
+        session.rollback()
+        _record_run(session, user_id, "xianyu_deep", "failed", f"{type(exc).__name__}: {exc}")
+        session.commit()
+        return {"platform": "xianyu_deep", "count": 0, "status": "failed", "reason": type(exc).__name__}
     except Exception as exc:  # noqa: BLE001
         session.rollback()
         _record_run(session, user_id, "xianyu_deep", "failed", f"{type(exc).__name__}: {exc}")

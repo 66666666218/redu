@@ -2,6 +2,13 @@
 
 ## 未发布
 
+- [2026-09-04 19:30] FIX: **闲鱼风控错误处理重构——区分"人机验证"与"真限流"**——实测(`data/` 现场探针)闲鱼 mtop 的 `FAIL_SYS_USER_VALIDATE` 经 30/90/180s 指数退避**重试仍全部失败**:它不是限流,是网关在要**滑块人机验证**。此前代码把它当限流退避 3 次(白等约 5 分钟后误抛 `XianyuRateLimit`)。本次:
+① 新增 `XianyuVerify`(子类),`FAIL_SYS_USER_VALIDATE`/`USER_VALIDATE` **立即抛 `XianyuVerify`** 不退避,由上层识别为"需人工过滑块或更换出口 IP";`FAIL_SYS_RATE_LIMIT`/`FAIL_SYS_USER_LIMIT` 才走指数退避→`XianyuRateLimit`。
+② `collect_hot` 全关键词都被验证时上抛 `XianyuVerify`(否则被误报"搜索成功 0 条"掩盖故障),部分被验证仍保留已采数据。
+③ `run_xianyu_deep` 详情循环遇验证/限流**即停并保留已采部分**(状态 `partial`),整轮被验证时**优雅返回 200+`status:"failed"` 而非 500**,不再连环猛打加剧风控。
+④ 快速区分的意义:调度器遇 `XianyuVerify` 记 `failed`(不触发飞书实时),由既有"采集持续失败"告警提醒运维。
+**新增单测(把"USER_VALIDATE 退避"的错误测试改为真限流码 + 验证立即抛 + 全关键词被锁上抛 + 部分验证保留)。** 全量 142 项通过(补充 `xianyu_request_delay=0.0` 到测试 fixture,套件 23s→10s)。doc/dev.md §5.8、doc/API.md §6 同步(**搜索卡不带想要数,故必须抓详情;验证/限流错误模型**)(Files: app/services/{xianyu.py,xianyu_analytics.py}, tests/{test_xianyu.py,conftest.py}, doc/{dev.md,API.md})
+
 - [2026-09-04 18:30] FEAT: **抖音关键词监控定向查询扩展到 search/video/topic 榜**——此前 `record_watch_snaps` 只对 `list_type="word"` 走定向查询(`fetch_keyword_heat`),选"搜索/视频/话题"榜监控关键词时退化为在**全榜默认数据**里找词(榜外记 0),监控不到用户在热点宝官网输入关键词看到的热度。本次:① `DouhotClient` 的 `hot_search`/`video_billboard`/`challenge_billboard` 加 `keyword` 参数(非空时定向过滤);② `douhot.py` 新增 `fetch_list_keyword_heat`(`_KEYWORD_SPEC` 声明各榜"词/分"字段优先级,search/topic 精确匹配取 rank,video 为标题模糊检索取最高分;`subscribe` 无 keyword 参数保持榜内查找);③ `record_watch_snaps` 对 douhot 的 word/search/video/topic 四类均走定向查询。**新增 `scripts/probe_douhot_keyword.py`** 实测判据:search(`早春晴朗`)/topic(`续火花`)加 keyword 后仅剩该词相关结果、video 为分割搜索(短词`孩子`命中、长句`全网有和我一样的孩子吗`返回 0 属分词语义,`item_id` 不匹配);生产代码路径端到端验证通过。`rank_now` 语义与 `fetch_keyword_heat` 一致(定向查询 rank 恒 1,榜外词也有专属热度)。API.md §7.3.1 同步(快照记录规则:抖音 word/search/video/topic 四类均定向查询)(Files: app/services/{douhot.py,douhot_client.py,keyword_watch.py,tenant.py}, scripts/probe_douhot_keyword.py, doc/API.md)
 
 - [2026-09-03 16:15] DOCS: **API.md / deploy-checklist.md 补"四板块关键词监控"**——API.md 升 v1.1:新增 §7.3.1(`/api/watch/{section}`、`/api/watch/{section}/analytics` 完整参数/响应/快照记录规则,含各板块差异:微博/闲鱼/百度词须在榜内、闲鱼 score 为命中关键词数、抖音 word 仍定向查询),修正 §7.3 里"DELETE /api/douhot/watch"的错误描述(该接口不存在),§8.2 schedules 的 section 枚举补 baidu;deploy-checklist 四板块说明补关键词监控条目与迁移自愈说明(Files: doc/API.md, doc/deploy-checklist.md)
