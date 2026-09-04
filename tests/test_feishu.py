@@ -199,6 +199,39 @@ def test_section_weekly_tally(session) -> None:
     assert any("微博" in line and "2↔2" in line for line in tally)
 
 
+def test_daily_lists_topic_entries_with_new_marker(session) -> None:
+    """日报为榜单搜索类关注列出 Top 相关主题,新进条目标 🆕。"""
+    from datetime import datetime, timedelta
+
+    from app.db.models import DouhotWatch, DouhotWatchSnap
+
+    base = datetime(2026, 9, 1, 8)
+    session.add(DouhotWatch(user_id=1, section="douhot", list_type="topic", keyword="早春晴朗"))
+    session.add_all([
+        # 主题1:两轮(非新增)
+        DouhotWatchSnap(user_id=1, section="douhot", list_type="topic", keyword="早春晴朗",
+                        entry_title="早春晴朗", score=15518628, rank_now=1, captured_at=base),
+        DouhotWatchSnap(user_id=1, section="douhot", list_type="topic", keyword="早春晴朗",
+                        entry_title="早春晴朗", score=16000000, rank_now=1, captured_at=base + timedelta(days=1)),
+        # 主题2:一轮(新增)
+        DouhotWatchSnap(user_id=1, section="douhot", list_type="topic", keyword="早春晴朗",
+                        entry_title="早春晴朗·新", score=100000, rank_now=2, captured_at=base + timedelta(days=1)),
+    ])
+    session.commit()
+    text = build_daily(session, 1, _settings())
+    assert "早春晴朗" in text
+    assert "共2主题" in text                 # 两个相关主题
+    assert "🆕" in text and "早春晴朗·新" in text  # 新进条目标 🆕
+
+
+def test_split_messages_chunks_long_text() -> None:
+    text = "\n".join(f"line {i} " + "x" * 500 for i in range(100))
+    chunks = feishu._split_messages(text, max_len=3000)
+    assert len(chunks) > 1
+    assert all(len(c) <= 3000 for c in chunks)
+    assert "\n".join(chunks) == text
+
+
 def test_keyword_burst_alert(monkeypatch, session) -> None:
     """智能体预警:关注词呈加速上升时推送"可能爆发",且进冷却去重。"""
     from app.services import tenant

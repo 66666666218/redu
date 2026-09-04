@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     douhot_cookie_file: str = "data/douhot_cookie.txt"  # 抖音热点宝 Cookie 文件(gitignored)
     douhot_top_n: int = 100         # 内容词趋势条数(抖音热点接口可到 200)
     douhot_watch_entry_cap: int = 100  # 榜单搜索类关注(话题/搜索/视频)每次采集最多记录的相关主题条数
+    douhot_watch_daily_top: int = 100  # 每日日报里榜单搜索类关键词最多列出的相关主题条数
     douhot_alert_max: int = 5       # 单次判涨告警上限(防刷屏)
     douhot_alert_cooldown_hours: int = 24  # 同一内容词告警冷却(小时)
     alert_cooldown_hours: int = 6   # 预警规则冷却(小时),避免重复刷

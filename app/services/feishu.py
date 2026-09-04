@@ -206,30 +206,91 @@ def _cross_section_lines(db: Session, user_id: int, top_n: int = 4) -> list[str]
     return lines
 
 
-def _keyword_watch_lines(db: Session, user_id: int, top_n: int = 8) -> list[str]:
-    """日报里的"关键词关注"段落:对每个关注词跑智能体,给趋势/预测/置信度。"""
-    from app.services import keyword_agent, tenant
+def _keyword_entries_lines(db: Session, user_id: int, w: dict, snaps: list, top_n: int = 100) -> list[str]:
+    """榜单搜索类关注(话题/搜索/视频):列出当前 Top 相关主题,每条带得分/环比/趋势/预测 + 🆕新增标记。"""
+    from app.services import keyword_agent
+    from collections import defaultdict
 
+    by_entry: dict[str, list] = defaultdict(list)
+    for s in snaps:
+        if getattr(s, "entry_title", ""):
+            by_entry[s.entry_title].append(s)
+    if not by_entry:
+        return []
+    rows = []
+    for title, es in by_entry.items():
+        es_sorted = sorted(es, key=lambda x: x.id)
+        vals = [e.score for e in es_sorted]
+        a = keyword_agent.analyze(title, vals)
+        rows.append({
+            "title": title, "score": vals[-1], "growth": a.get("growth"),
+            "trend": a.get("trend_label"), "forecast": a.get("forecast_next"),
+            "new": len(vals) == 1, "burst": a.get("burst"),
+        })
+    rows.sort(key=lambda x: -x["score"])
+    rows = rows[:top_n]
+    new_count = sum(1 for r in rows if r["new"])
+    label = SECTION_LABELS.get(w.get("section", ""), w.get("section", ""))
+    lines = [f"  · {w['keyword']}({label} · 共{len(by_entry)}主题)"]
+    for r in rows:
+        g = f"{r['growth'] * 100:+.0f}%" if r["growth"] is not None else "—"
+        fc = f" 预测{_w(r['forecast'])}" if r["forecast"] is not None else ""
+        tag = "🆕" if r["new"] else ("🔥" if r["burst"] else "  ")
+        lines.append(f"    {tag} {r['title'][:20]}  {_w(r['score'])}  {g}  {r['trend']}{fc}")
+    if new_count:
+        lines.append(f"      ↳ 新进 {new_count} 个")
+    return lines
+
+
+def _keyword_watch_lines(db: Session, user_id: int, top_n: int = 8) -> list[str]:
+    """日报里的"关键词关注"段落。
+
+    单值词(内容词/订阅/其它板块):给趋势/环比/预测/置信度;
+    榜单搜索类(话题/搜索/视频,逐条记录):列出当前 Top 相关主题,每条带趋势 + 🆕新增。
+    """
+    from app.services import keyword_agent
     from app.services.keyword_watch import list_watch
+    from config.settings import get_settings
+
     watches = list_watch(db, user_id)
     if not watches:
         return []
-    items = []
+    entry_top = getattr(get_settings(), "douhot_watch_daily_top", None) or 100
+    lines = ["【关键词关注 · 智能体】"]
     for w in watches:
         snaps = repository.watch_snap_series(db, user_id, w["keyword"], section=w.get("section"))
+        entries = [s for s in snaps if getattr(s, "entry_title", "")]
+        if entries:
+            lines += _keyword_entries_lines(db, user_id, w, snaps, entry_top)
+            continue
         values = [s.score for s in snaps]
         agent = keyword_agent.analyze(w["keyword"], values)
-        items.append(agent)
-    # 排序:爆发优先,再按预测热度
-    items.sort(key=lambda a: (a["burst"], a["forecast_next"] or 0), reverse=True)
-    lines = ["【关键词关注 · 智能体】"]
-    for a in items[:top_n]:
-        flag = "🔥" if a["burst"] else ""
-        fc = f" 预测{a['forecast_next']:.0f}" if a["forecast_next"] is not None else ""
-        conf = f" {a['confidence']}" if a["confidence"] and a["confidence"] != "数据不足" else ""
-        lines.append(f"  · {a['keyword']}  {a['trend_label']}{flag} 环比{'+' if (a['growth'] or 0) > 0 else ''}{((a['growth'] or 0) * 100 if a['growth'] is not None else 0):.0f}%{fc}{conf}")
-    lines.append("  " + ("; ".join(a["summary"] for a in items[:2]) if items else "暂无"))
-    return lines
+        flag = "🔥" if agent.get("burst") else ""
+        fc = f" 预测{agent['forecast_next']:.0f}" if agent.get("forecast_next") is not None else ""
+        conf = f" {agent['confidence']}" if agent.get("confidence") and agent["confidence"] != "数据不足" else ""
+        g = f"环比{'+' if (agent.get('growth') or 0) > 0 else ''}{((agent.get('growth') or 0) * 100 if agent.get('growth') is not None else 0):.0f}%" if values else ""
+        lines.append(f"  · {w['keyword']}  {agent['trend_label']}{flag}  {g}{fc}{conf}")
+    return lines if len(lines) > 1 else []
+
+
+def _split_messages(text: str, max_len: int = 15000) -> list[str]:
+    """飞书文本消息有长度上限,按行拆成多条(每条 ≤max_len 字符)。"""
+    if len(text) <= max_len:
+        return [text]
+    lines = text.split("\n")
+    msgs: list[str] = []
+    cur: list[str] = []
+    cur_len = 0
+    for line in lines:
+        if cur_len + len(line) + 1 > max_len and cur:
+            msgs.append("\n".join(cur))
+            cur, cur_len = [line], len(line)
+        else:
+            cur.append(line)
+            cur_len += len(line) + 1
+    if cur:
+        msgs.append("\n".join(cur))
+    return msgs
 
 
 def build_daily(db: Session, user_id: int, settings: Settings) -> str:
@@ -262,9 +323,10 @@ def run_feishu_daily() -> int:
     try:
         for user in repository.list_enabled_users(db):
             text = build_daily(db, user.id, settings)
-            if client.send(text):
-                sent += 1
-        logger.info("飞书日报推送完成,用户数=%s", sent)
+            for chunk in _split_messages(text):  # 过长自动拆成多条飞书(关键词 Top100 等场景)
+                if client.send(chunk):
+                    sent += 1
+        logger.info("飞书日报推送完成,消息数=%s", sent)
         return sent
     finally:
         db.close()
