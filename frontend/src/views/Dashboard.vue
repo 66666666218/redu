@@ -159,7 +159,7 @@ onMounted(async () => { await load(); await loadAgent(); await loadAnalytics(); 
         <div v-if="watches.length" class="grid" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
           <div class="watch-card" v-for="w in sortedWatches" :key="w.keyword">
             <div class="row" style="justify-content:space-between">
-              <b>{{ w.keyword }} <span v-if="w.burst" style="color:var(--down)">🔥爆发</span></b>
+              <b>{{ w.keyword }} <span v-if="w.burst" style="color:var(--down)">🔴重点</span></b>
               <span class="badge" :class="trendClass(w.trend_label)">{{ (w.entries && w.entries.length) ? (w.trend_overview || w.trend_label) : (w.trend_label || '关注中') }}</span>
             </div>
             <div class="row" style="gap:14px;margin:8px 0">
@@ -174,7 +174,7 @@ onMounted(async () => { await load(); await loadAgent(); await loadAnalytics(); 
             <!-- 榜单搜索类:逐条展示各相关主题 -->
             <div v-if="w.entries && w.entries.length" style="margin:6px 0;font-size:12px;max-height:160px;overflow-y:auto">
               <div class="row" v-for="(e, ei) in w.entries" :key="e.title + ei" style="justify-content:space-between;gap:6px;padding:1px 0">
-                <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">└ {{ e.title.slice(0,18) }}</span>
+                <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">└ <span v-if="e.burst" style="color:var(--down)">🔴</span> {{ e.title.slice(0,18) }}</span>
                 <span class="num">{{ fmtScore(e.last_score) }} <span :class="trendClass(e.trend_label)">{{ pct(e.growth) }}</span></span>
               </div>
             </div>

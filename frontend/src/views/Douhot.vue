@@ -118,7 +118,7 @@ onMounted(async () => { await loadList('word'); await loadWatches() })
         <div v-if="activeWatch.entries && activeWatch.entries.length" style="max-height:420px;overflow-y:auto">
           <table><tr><th>#</th><th>主题</th><th>得分</th><th>环比</th><th>趋势</th><th>预测</th></tr>
             <tr v-for="(e, ei) in activeWatch.entries" :key="e.title + ei">
-              <td class="num">{{ e.rank_now }}</td><td>{{ e.title.slice(0,24) }}</td>
+              <td class="num">{{ e.rank_now }}</td><td><span v-if="e.burst" style="color:var(--down)">🔴</span> {{ e.title.slice(0,24) }}</td>
               <td class="num">{{ fmt(e.last_score) }}</td>
               <td class="num" :class="tclass(e.trend_label)">{{ pct(e.growth) }}</td>
               <td :class="tclass(e.trend_label)">{{ e.trend_label }}</td>
@@ -154,7 +154,7 @@ onMounted(async () => { await loadList('word'); await loadWatches() })
       </div>
       <div v-if="watches.length" class="grid" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
         <div class="watch-card" v-for="w in watches" :key="w.keyword">
-          <div class="row" style="justify-content:space-between"><b>{{ w.keyword }} <span v-if="w.burst" style="color:var(--down)">🔥</span></b>
+          <div class="row" style="justify-content:space-between"><b>{{ w.keyword }} <span v-if="w.burst" style="color:var(--down)">🔴重点</span></b>
             <span class="badge" :class="tclass(w.trend_label)">{{ (w.entries && w.entries.length) ? (w.trend_overview || w.trend_label) : w.trend_label }}</span></div>
           <div class="row" style="gap:14px;margin:8px 0">
             <div><div class="empty" style="padding:0">当前</div><b class="num">{{ fmt(w.last_score) }}</b></div>
@@ -164,7 +164,7 @@ onMounted(async () => { await loadList('word'); await loadWatches() })
           <!-- 榜单定向搜索类:逐条展示各相关主题趋势(可滚动看全部) -->
           <div v-if="w.entries && w.entries.length" style="margin:6px 0;font-size:12px;max-height:220px;overflow-y:auto">
             <div class="row" v-for="(e, ei) in w.entries" :key="e.title + ei" style="justify-content:space-between;gap:6px;padding:1px 0">
-              <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">└ {{ e.title.slice(0,20) }}<span v-if="e.points < 2" style="opacity:.5">(待积累)</span></span>
+              <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">└ <span v-if="e.burst" style="color:var(--down)">🔴</span> {{ e.title.slice(0,20) }}<span v-if="e.points < 2" style="opacity:.5">(待积累)</span></span>
               <span class="num">{{ fmt(e.last_score) }} <span :class="tclass(e.trend_label)">{{ pct(e.growth) }}</span></span>
             </div>
           </div>

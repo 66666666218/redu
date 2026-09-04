@@ -261,7 +261,8 @@ def _keyword_entries_rows(db: Session, user_id: int, w: dict, snaps: list) -> tu
 def _entry_line(r: dict) -> str:
     g = f"{r['growth'] * 100:+.0f}%" if r["growth"] is not None else "—"
     fc = f" 预测{_w(r['forecast'])}" if r["forecast"] is not None else ""
-    return f"  {r['marker']} {r['title'][:22]}  {_w(r['score'])}  {r['arrow']}{r['trend']}  {g}{fc}"
+    flag = "🔴重点 " if r.get("burst") else ""  # 吃瓜/爆炸性话题加重点标记
+    return f"  {flag}{r['marker']} {r['title'][:22]}  {_w(r['score'])}  {r['arrow']}{r['trend']}  {g}{fc}"
 
 
 def _overview(rows: list[dict]) -> str:
@@ -697,7 +698,7 @@ def run_feishu_keyword_realtime(user_id: int, settings: Settings | None = None, 
                 lines.append("  ↑ 上升:" + "、".join(
                     f"{r['title'][:12]}+{r['growth'] * 100:.0f}%(现{_w(r['score'])})" for r in risers))
             if bursts:
-                lines.append("  🔥 预测爆发:" + "、".join(
+                lines.append("  🔴重点 预测爆发:" + "、".join(
                     f"{r['title'][:12]}(现{_w(r['score'])})" for r in bursts))
             _mark_alerted(db, user_id, "kw_realtime", w["keyword"], "话题词变化")
             if client.send("\n".join(lines)):

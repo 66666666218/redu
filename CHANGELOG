@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- [2026-09-05 10:00] FEAT: **"吃瓜/爆炸性"话题加 🔴重点 标记** — 系统用 `burst`(预测爆发:上升期+强增长+加速+一定置信度)作为"爆炸性/吃瓜"信号。给这类话题在**飞书推送**(实时提醒的"预测爆发"行、日报逐条行)与**前端卡片**(关键词卡、主题行、entries列表)统一加上 **🔴重点/🔴** 标记,一眼识别值得围观的大瓜。全量测试通过;前端已构建(Files: app/services/feishu.py, frontend/src/views/{Douhot.vue,Dashboard.vue})
+
 - [2026-09-05 09:30] FEAT: **抖音子榜 tab 自动按"已监控关键词"搜索显示(热点宝式)** — Clarified:热点宝工作流是"聚合榜→点话题榜→用该榜搜索看数据"。此前切到话题榜只加载默认全榜,不显示已设关键词。改为:`loadList(t)` 切到某榜时,若该榜设了逐条类关键词(话题/搜索/视频),**自动按该词定向搜索显示**(`/api/douhot/list/{t}?keyword=X`),而非默认榜;有关键词且有逐条监控数据时仍显示监控主题表(含趋势),无数据时显示该词现状。全量 158 项通过;前端已构建(Files: frontend/src/views/Douhot.vue)
 
 - [2026-09-05 09:00] FIX: **`/api/douhot/list` 内容词 fetcher 参数 bug**——`douhot_list` 的 `word` fetcher 写成 `lambda:`(0 参数),调用时却传 `fn(cookie, settings)`(2 参数)→ `takes 0 positional arguments but 2 were given` → 抖音页「内容词」tab 一直"获取榜单失败"。改为 `lambda cookie, settings: ...`。这是此前改造榜单搜索时引入的回归(Files: app/api/collect.py)
