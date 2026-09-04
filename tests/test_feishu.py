@@ -257,6 +257,34 @@ def test_build_keyword_card_structure(session) -> None:
     assert len(str(card)) < 20000  # 未超卡片长度上限
 
 
+def test_keyword_realtime_pushes_on_new_topic(session, monkeypatch) -> None:
+    """话题词实时提醒:检测到 新进/上升 主题即推一条(冷却去重,不刷屏)。"""
+    from datetime import datetime, timedelta
+
+    from app.db.models import DouhotWatch, DouhotWatchSnap
+    from app.services.feishu import run_feishu_keyword_realtime
+
+    base = datetime(2026, 9, 1, 8)
+    session.add(DouhotWatch(user_id=1, section="douhot", list_type="topic", keyword="早春晴朗"))
+    session.add_all([
+        # 批次1:A
+        DouhotWatchSnap(user_id=1, section="douhot", list_type="topic", keyword="早春晴朗",
+                        entry_title="A", score=1000, rank_now=1, captured_at=base),
+        # 批次2:A(上升)+ B(新进)
+        DouhotWatchSnap(user_id=1, section="douhot", list_type="topic", keyword="早春晴朗",
+                        entry_title="A", score=1500, rank_now=1, captured_at=base + timedelta(days=1)),
+        DouhotWatchSnap(user_id=1, section="douhot", list_type="topic", keyword="早春晴朗",
+                        entry_title="B", score=500, rank_now=2, captured_at=base + timedelta(days=1)),
+    ])
+    session.commit()
+    sent = []
+    monkeypatch.setattr(feishu, "FeishuClient", lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
+    n = run_feishu_keyword_realtime(1, _settings(), db=session)
+    assert n == 1
+    assert "话题词监控" in sent[0] and "B" in sent[0] and "新进" in sent[0] and "上升" in sent[0]
+    assert run_feishu_keyword_realtime(1, _settings(), db=session) == 0  # 冷却期内不重推
+
+
 def test_keyword_burst_alert(monkeypatch, session) -> None:
     """智能体预警:关注词呈加速上升时推送"可能爆发",且进冷却去重。"""
     from app.services import tenant

@@ -72,6 +72,8 @@ async function addWatch() {
 }
 
 const burstCount = computed(() => watches.value.filter(w => w.burst).length)
+// 当前 tab 的"逐条类"关键词(话题/搜索/视频,有 entries)→ 有关键词就展示它的主题表;内容词单值走默认榜
+const activeWatch = computed(() => watches.value.find(w => w.list_type === active.value && w.entries && w.entries.length))
 
 function fmt(v) { return v == null ? '—' : (Math.abs(v) >= 10000 ? (v/1e4).toFixed(1)+'万' : String(Math.round(v))) }
 function pct(v) { return v == null ? '—' : (v*100).toFixed(1)+'%' }
@@ -102,13 +104,34 @@ onMounted(async () => { await loadList('word'); await loadWatches() })
         <button @click="saveSearchWatch" title="把当前词存为长期监控,采集后记录趋势">📌 关注</button>
         <button v-if="appliedKw" class="ghost" @click="clearSearch">清除</button>
       </div>
-      <h3>{{ tabs.find(x=>x.key===active)?.label }}{{ appliedKw ? ` · 「${appliedKw}」` : '' }} · {{ list.length }} 条</h3>
-      <table><tr><th>#</th><th>词</th><th>分</th></tr>
-        <tr v-for="(it, idx) in list" :key="it.title+idx">
-          <td class="num">{{ idx+1 }}</td><td>{{ it.title }}</td><td class="price num">{{ fmt(it.score) }}</td>
-        </tr>
-      </table>
-      <div v-if="!list.length" class="empty">暂无(需先采集,或该榜为空)</div>
+
+      <!-- 该榜有关键词在监控 → 展示这个词的主题表(每榜一表) -->
+      <template v-if="activeWatch">
+        <h3>📌 {{ activeWatch.keyword }}({{ tabs.find(x=>x.key===active)?.label }} · {{ activeWatch.trend_overview }})</h3>
+        <div v-if="activeWatch.entries && activeWatch.entries.length" style="max-height:420px;overflow-y:auto">
+          <table><tr><th>#</th><th>主题</th><th>得分</th><th>环比</th><th>趋势</th><th>预测</th></tr>
+            <tr v-for="(e, ei) in activeWatch.entries" :key="e.title + ei">
+              <td class="num">{{ e.rank_now }}</td><td>{{ e.title.slice(0,24) }}</td>
+              <td class="num">{{ fmt(e.last_score) }}</td>
+              <td class="num" :class="tclass(e.trend_label)">{{ pct(e.growth) }}</td>
+              <td :class="tclass(e.trend_label)">{{ e.trend_label }}</td>
+              <td class="num">{{ fmt(e.forecast_next) }}</td>
+            </tr>
+          </table>
+        </div>
+        <div v-else class="empty">关注中…… 采集后记录(每条主题需≥2轮采集才有趋势)</div>
+      </template>
+
+      <!-- 该榜无关键词在监控 → 默认榜 -->
+      <template v-else>
+        <h3>{{ tabs.find(x=>x.key===active)?.label }}{{ appliedKw ? ` · 「${appliedKw}」` : '' }} · {{ list.length }} 条</h3>
+        <table><tr><th>#</th><th>词</th><th>分</th></tr>
+          <tr v-for="(it, idx) in list" :key="it.title+idx">
+            <td class="num">{{ idx+1 }}</td><td>{{ it.title }}</td><td class="price num">{{ fmt(it.score) }}</td>
+          </tr>
+        </table>
+        <div v-if="!list.length" class="empty">暂无(需先采集,或该榜为空)</div>
+      </template>
     </div>
     <div v-else class="empty">加载中…</div>
 

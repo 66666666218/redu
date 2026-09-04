@@ -21,11 +21,12 @@ def collect(platform: str, user: User = Depends(get_current_user), db: Session =
         result = runner(db, user.id)
         # 采集成功后触发飞书实时提醒;失败不影响采集结果返回
         try:
-            from app.services.feishu import run_feishu_keyword_alerts, run_feishu_realtime
+            from app.services.feishu import run_feishu_keyword_alerts, run_feishu_keyword_realtime, run_feishu_realtime
 
             run_feishu_realtime(platform, user.id)
             if platform == "douhot":
                 run_feishu_keyword_alerts(user.id)
+                run_feishu_keyword_realtime(user.id)  # 话题词新进/上升/爆发实时提醒
         except Exception:  # noqa: BLE001
             pass
         return result

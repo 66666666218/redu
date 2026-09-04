@@ -252,7 +252,7 @@ def _keyword_entries_rows(db: Session, user_id: int, w: dict, snaps: list) -> tu
         rows.append({
             "title": title, "score": s.score, "rank": s.rank_now, "marker": marker,
             "growth": a.get("growth"), "trend": trend, "arrow": arrow,
-            "forecast": a.get("forecast_next"),
+            "forecast": a.get("forecast_next"), "burst": a.get("burst"),
         })
     rows.sort(key=lambda x: x["rank"])  # 按搜索序(排名)排
     return rows, prev_map, latest_map
@@ -651,6 +651,56 @@ def run_feishu_realtime(
             client.send("\n".join(lines))
             pushed = len(pushed_items)
             logger.info("飞书实时推送 section=%s user=%s 条数=%s", section, user_id, pushed)
+        return pushed
+    finally:
+        if own_session:
+            db.close()
+
+
+def run_feishu_keyword_realtime(user_id: int, settings: Settings | None = None, db: Session | None = None) -> int:
+    """话题词(榜单搜索类)实时提醒:检测到 新进/上升/预测爆发 主题即推一条(冷却去重,不刷屏)。
+
+    与每日日报(08:00 全量 Top100)互补——这里只推"有变化"的个别主题,让你及时看到话题词波动:
+    - 🆕 新进(最新批有、上批无);↑ 上升期(趋势转为上升);🔥 预测爆发。
+    """
+    settings = settings or get_settings()
+    if not settings.feishu_webhook:
+        return 0
+    from app.services.keyword_watch import list_watch
+    from app.db import get_session_local
+
+    own_session = db is None
+    db = db or get_session_local()()
+    pushed = 0
+    try:
+        client = FeishuClient(settings.feishu_webhook, settings.feishu_secret)
+        for w in list_watch(db, user_id):
+            if w.get("section") != "douhot" or w.get("list_type") not in ("search", "video", "topic"):
+                continue
+            snaps = repository.watch_snap_series(db, user_id, w["keyword"], section="douhot")
+            if not any(getattr(s, "entry_title", "") for s in snaps):
+                continue
+            rows, prev_map, _ = _keyword_entries_rows(db, user_id, w, snaps)
+            if not rows:
+                continue
+            news = [r for r in rows if r["marker"] == "🆕"][:5]
+            risers = [r for r in rows if r["trend"] == "上升期" and r.get("growth") is not None][:5]
+            bursts = [r for r in rows if r.get("burst")][:3]
+            if not news and not risers and not bursts:
+                continue
+            if _in_cooldown(db, user_id, "kw_realtime", w["keyword"], settings):
+                continue
+            lines = [f"📌 话题词监控 · {w['keyword']}"]
+            if news:
+                lines.append("  🆕 新进:" + "、".join(r["title"][:14] for r in news))
+            if risers:
+                lines.append("  ↑ 上升:" + "、".join(
+                    f"{r['title'][:12]}+{r['growth'] * 100:.0f}%" for r in risers))
+            if bursts:
+                lines.append("  🔥 预测爆发:" + "、".join(r["title"][:12] for r in bursts))
+            _mark_alerted(db, user_id, "kw_realtime", w["keyword"], "话题词变化")
+            if client.send("\n".join(lines)):
+                pushed += 1
         return pushed
     finally:
         if own_session:
