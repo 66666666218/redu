@@ -24,7 +24,7 @@ SECTION_LABELS = {"weibo": "微博热搜", "xianyu": "闲鱼热榜", "douhot": "
 # 板块 → 必需的 Cookie 平台(三个板块的 runner 都要求用户配好自己的 Cookie)
 SECTION_COOKIE = {"weibo": "weibo", "xianyu": "goofish", "douhot": "douyin"}
 # 可选档位(分钟);闲鱼/抖音是登录态接口,过于频繁有风控与 Cookie 失效风险
-INTERVAL_CHOICES = (10, 30, 60, 180, 360, 720, 1440)
+INTERVAL_CHOICES = (10, 30, 60, 120, 180, 360, 720, 1440)
 MIN_INTERVAL = 10
 MAX_INTERVAL = 1440
 DEFAULT_INTERVAL = 30
