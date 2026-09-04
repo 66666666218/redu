@@ -20,7 +20,14 @@ const appliedKw = ref('')
 async function loadList(t) {
   active.value = t; loading.value = true
   searchKw.value = ''; appliedKw.value = ''   // 切换 tab 时清除搜索,避免串榜
-  try { const r = await api.douhotList(t); list.value = r.items || [] }
+  await loadWatches()                          // 先刷新关注,确保拿到该榜关键词
+  // 热点宝式:该榜设了"逐条类"关键词(话题/搜索/视频)→ 自动按该词搜索显示,而非默认榜
+  const kw = watches.value.find(w => w.list_type === t && ['search', 'video', 'topic'].includes(t))?.keyword
+  try {
+    const r = await api.douhotList(t, kw || '')
+    list.value = r.items || []
+    if (kw && r.items) appliedKw.value = kw
+  }
   catch (e) { list.value = []; toastError(e.message) } finally { loading.value = false }
 }
 async function searchList() {
