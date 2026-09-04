@@ -171,6 +171,13 @@ onMounted(async () => { await load(); await loadAgent(); await loadAnalytics(); 
               <polyline :points="spark(w.series, w.forecast_next).solid" fill="none" stroke="var(--neon)" stroke-width="2" stroke-linejoin="round"/>
               <polyline v-if="spark(w.series, w.forecast_next).fc" :points="spark(w.series, w.forecast_next).fc" fill="none" stroke="var(--neon-2)" stroke-width="2" stroke-dasharray="4,3" stroke-linejoin="round"/>
             </svg>
+            <!-- 榜单搜索类:逐条展示各相关主题 -->
+            <div v-if="w.entries && w.entries.length" style="margin:6px 0;font-size:12px;max-height:160px;overflow-y:auto">
+              <div class="row" v-for="(e, ei) in w.entries" :key="e.title + ei" style="justify-content:space-between;gap:6px;padding:1px 0">
+                <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">└ {{ e.title.slice(0,18) }}</span>
+                <span class="num">{{ fmtScore(e.last_score) }} <span :class="trendClass(e.trend_label)">{{ pct(e.growth) }}</span></span>
+              </div>
+            </div>
             <div class="empty" style="margin-top:6px;color:var(--dim)">置信度:{{ w.confidence || '—' }}</div>
             <div class="empty" style="margin-top:2px">{{ w.summary || '再采集一次积累更多数据' }}</div>
           </div>
