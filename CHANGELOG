@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- [2026-09-05 06:00] FEAT: **关键词监控改用飞书交互卡片**——调研结论:飞书自定义 webhook 机器人**发不了图表图片**(图片需 `img_key`→需企业自建应用 app_id/app_secret 的 tenant_access_token),但**能发交互卡片(msg_type=interactive)**。故按"用富文本卡片":① `FeishuClient` 加 `send_card`(重构出 `_post` 供文本/卡片复用);② 新增 `build_keyword_card` 生成关键词监控卡片(彩色标题 + 每词分块:关键词/板块/趋势概览 div + 明细 note,含 今日vs昨日 汇总);③ `_keyword_entries_lines` 拆出 `_keyword_entries_rows`/`_entry_line`/`_overview` 复用;④ `build_daily` 加 `include_keywords` 参数,`run_feishu_daily` 发"纯文本日报(不含关键词)+ 关键词卡片"两条。新增 1 项单测,全量 156 项通过。doc/dev.md §5.11 同步(含"图表需应用机器人"结论)(Files: app/services/{feishu_client.py,feishu.py}, tests/test_feishu.py, doc/dev.md)
+
 - [2026-09-05 05:30] FEAT: **关键词卡片标题更明确——加"趋势概览"徽章**——榜单搜索类关键词卡片标题从单一"上升期"改为 `trend_overview`(如 `3主题 · 升1 · 新1`,升/降/新增各多少),着色仍按 `trend_label`;前端 Douhot.vue/Dashboard.vue 卡片徽章同步。`watch_analytics` 逐条分支计算 `trend_overview` 并返回。全量 155 项通过;前端已构建。doc/dev.md §5.10.1 同步(Files: app/services/keyword_watch.py, frontend/src/{views/Douhot.vue,views/Dashboard.vue}, doc/dev.md)
 
 - [2026-09-05 05:00] FIX: **榜单搜索类关键词摘要改为"点名具体上升/新增主题"**——此前 `watch_analytics` 把 top 条目的 `keyword_agent_自述`当关键词摘要,对含多个主题的词显示"「早春晴朗」...上升期...预测"这种**整体概括**,误导(词内各主题趋势各异)。改为:`trend_label` 按是否含上升主题判定,`summary` 改为**点名**——如 `追踪3主题 · 上升:早春晴朗·酷酷+80%`、或无上升时 `新增:XX`、平稳时 `走势平稳`。实测样例:`追踪3主题 · 上升:早春晴朗·酷酷+80%`。全量 155 项通过。doc/dev.md §5.10.1 同步(Files: app/services/keyword_watch.py, tests/test_platform.py, doc/dev.md)

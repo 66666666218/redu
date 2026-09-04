@@ -234,6 +234,29 @@ def test_split_messages_chunks_long_text() -> None:
     assert "\n".join(chunks) == text
 
 
+def test_build_keyword_card_structure(session) -> None:
+    """关键词监控交互卡片:含标题、各关注词的分块(关键词+主题明细)。"""
+    from datetime import datetime
+
+    from app.db.models import DouhotWatch, DouhotWatchSnap
+
+    base = datetime(2026, 9, 1, 8)
+    session.add(DouhotWatch(user_id=1, section="douhot", list_type="topic", keyword="早春晴朗"))
+    session.add_all([
+        DouhotWatchSnap(user_id=1, section="douhot", list_type="topic", keyword="早春晴朗",
+                        entry_title="早春晴朗", score=15518628, rank_now=1, captured_at=base),
+        DouhotWatchSnap(user_id=1, section="douhot", list_type="topic", keyword="早春晴朗",
+                        entry_title="早春晴朗·酷酷", score=500, rank_now=2, captured_at=base),
+    ])
+    session.commit()
+    card = feishu.build_keyword_card(session, 1, _settings())
+    assert card is not None
+    assert card["header"]["title"]["content"] == "🤖 关键词监控 · 智能体"
+    body = str(card["elements"])
+    assert "早春晴朗" in body and "🆕" in body  # 关键词 + 新进主题
+    assert len(str(card)) < 20000  # 未超卡片长度上限
+
+
 def test_keyword_burst_alert(monkeypatch, session) -> None:
     """智能体预警:关注词呈加速上升时推送"可能爆发",且进冷却去重。"""
     from app.services import tenant

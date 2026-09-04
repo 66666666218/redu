@@ -32,18 +32,14 @@ def _sign(secret: str, ts: int) -> str:
 
 
 class FeishuClient:
-    """飞书自定义机器人客户端(单条文本消息)。"""
+    """飞书自定义机器人客户端(单条文本 / 交互卡片)。"""
 
     def __init__(self, webhook: str, secret: str) -> None:
         self.webhook = webhook
         self.secret = secret or ""
 
-    def send(self, text: str) -> bool:
-        """推送一条文本。成功返回 True;网络/签名/风控错误记日志并返回 False。"""
-        if len(text) > 18000:
-            text = text[:17000] + "\n…(内容过长已截断)"
+    def _post(self, body: dict) -> bool:
         ts = int(time.time())
-        body: dict = {"msg_type": "text", "content": {"text": text}}
         if self.secret:
             body["timestamp"] = str(ts)
             body["sign"] = _sign(self.secret, ts)
@@ -58,3 +54,13 @@ class FeishuClient:
         except (requests.RequestException, ValueError) as exc:  # 网络错误/非 JSON
             logger.error("飞书推送异常:%s", exc)
             return False
+
+    def send(self, text: str) -> bool:
+        """推送一条文本。成功返回 True;网络/签名/风控错误记日志并返回 False。"""
+        if len(text) > 18000:
+            text = text[:17000] + "\n…(内容过长已截断)"
+        return self._post({"msg_type": "text", "content": {"text": text}})
+
+    def send_card(self, card: dict) -> bool:
+        """推送一张交互卡片(msg_type=interactive)。成功返回 True。"""
+        return self._post({"msg_type": "interactive", "card": card})

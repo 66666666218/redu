@@ -389,6 +389,10 @@ redian/
    `DOUHOT_WATCH_DAILY_TOP=100` 条),每条带 **趋势箭头(↑上升期/↓回落期/→平稳) + 名次变化
    (↑N名/↓N名) + 🆕新进 + 环比/预测**,末尾附"今日vs昨日"汇总(新进/上升/下滑/跌出);
    日报整条若超长(飞书文本消息上限),`run_feishu_daily` 按行自动拆成多条发送(`_split_messages`)。
+   **关键词段改为飞书交互卡片**:`build_daily` 用 `include_keywords=False` 时不含关键词,改由
+   `build_keyword_card` 生成 `msg_type=interactive` 消息卡片(彩色标题 + 每词分块:关键词/板块/趋势概览
+   + 明细 note),经 `FeishuClient.send_card` 推送。**图表图片**需企业自建应用(app_id/app_secret →
+   tenant_access_token → 上传图得 img_key),自定义 webhook 发不了图片(见 §5.11 结论)。
 2. **实时提醒** `run_feishu_realtime(section, user_id)`:每次采集成功后调用,只把**当日新增**、
    **排名跳升 ≥ `FEISHU_HOT_RANK_JUMP` 名**、或**分值环比 ≥ `FEISHU_HOT_RATIO`** 的话题立即推群,
    并按 `FEISHU_ALERT_COOLDOWN_HOURS` 去重(表 `feishu_alerts`),防刷屏。**2026-09-04 增强**:

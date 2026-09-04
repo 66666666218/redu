@@ -206,24 +206,22 @@ def _cross_section_lines(db: Session, user_id: int, top_n: int = 4) -> list[str]
     return lines
 
 
-def _keyword_entries_lines(db: Session, user_id: int, w: dict, snaps: list, top_n: int = 100) -> list[str]:
-    """榜单搜索类关注(话题/搜索/视频):列出当前 Top 相关主题,每条带趋势箭头/名次变化/预测 + 🆕新增。
+def _keyword_entries_rows(db: Session, user_id: int, w: dict, snaps: list) -> tuple[list[dict], dict, dict]:
+    """榜单搜索类关注:返回 (最新批条目 rows, prev_map, latest_map)。
 
-    按采集批次分组(captured_at 取整到秒,一次采集的多条快照归为一批),取最新一批 vs 上一批:
+    按采集批次分组(captured_at 取整到秒,一次采集的多条快照归为一批),取最新批 vs 上一批:
     - 🆕 最新批有、上批无 = 新进;↑N名/↓N名 = 名次相对上批变化;
-    - 趋势用 ↑上升期 / ↓回落期 / →平稳 箭头,并给出 环比 / 预测;
-    - 末尾附"今日vs昨日"汇总(新进/上升/下滑/跌出)。
+    - 每条带 趋势(↑上升期/↓回落期/→平稳) + 环比 + 预测。
     """
     from app.services import keyword_agent
     from collections import defaultdict
 
-    # 按采集批次分组
     batches: dict = defaultdict(list)
     for s in snaps:
         if getattr(s, "entry_title", ""):
             batches[s.captured_at.replace(microsecond=0)].append(s)
     if not batches:
-        return []
+        return [], {}, {}
     ts = sorted(batches)
     latest_ts, prev_ts = ts[-1], (ts[-2] if len(ts) >= 2 else None)
     latest, prev = batches[latest_ts], (batches[prev_ts] if prev_ts is not None else [])
@@ -232,7 +230,7 @@ def _keyword_entries_lines(db: Session, user_id: int, w: dict, snaps: list, top_
         m: dict = {}
         for s in blist:
             if s.entry_title:
-                m[s.entry_title] = s  # 同批内后者覆盖 = 取该批最后一条
+                m[s.entry_title] = s
         return m
 
     latest_map, prev_map = last_of(latest), last_of(prev)
@@ -257,34 +255,47 @@ def _keyword_entries_lines(db: Session, user_id: int, w: dict, snaps: list, top_
             "forecast": a.get("forecast_next"),
         })
     rows.sort(key=lambda x: x["rank"])  # 按搜索序(排名)排
-    # 趋势概览(计入全部最新主题,与仪表盘卡片一致):如 "3主题 · 升1 · 新1"
-    all_ups = sum(1 for r in rows if r["trend"] == "上升期")
-    all_downs = sum(1 for r in rows if r["trend"] == "回落期")
-    all_news = sum(1 for r in rows if r["marker"] == "🆕")
-    ov = [f"{len(rows)}主题"]
-    if all_ups:
-        ov.append(f"升{all_ups}")
-    if all_downs:
-        ov.append(f"降{all_downs}")
-    if all_news:
-        ov.append(f"新{all_news}")
-    rows = rows[:top_n]
-    new_count = sum(1 for r in rows if r["marker"] == "🆕")
-    rose = sum(1 for r in rows if r["marker"].startswith("↑") or r["marker"].startswith("🔥↑"))
-    fell = sum(1 for r in rows if r["marker"].startswith("↓") or r["marker"].startswith("🔥↓"))
-    dropped = len(set(prev_map) - set(latest_map))  # 上批有、最新批无 = 跌出
+    return rows, prev_map, latest_map
+
+
+def _entry_line(r: dict) -> str:
+    g = f"{r['growth'] * 100:+.0f}%" if r["growth"] is not None else "—"
+    fc = f" 预测{_w(r['forecast'])}" if r["forecast"] is not None else ""
+    return f"  {r['marker']} {r['title'][:22]}  {_w(r['score'])}  {r['arrow']}{r['trend']}  {g}{fc}"
+
+
+def _overview(rows: list[dict]) -> str:
+    ups = sum(1 for r in rows if r["trend"] == "上升期")
+    downs = sum(1 for r in rows if r["trend"] == "回落期")
+    news = sum(1 for r in rows if r["marker"] == "🆕")
+    parts = [f"{len(rows)}主题"]
+    if ups:
+        parts.append(f"升{ups}")
+    if downs:
+        parts.append(f"降{downs}")
+    if news:
+        parts.append(f"新{news}")
+    return " · ".join(parts)
+
+
+def _keyword_entries_lines(db: Session, user_id: int, w: dict, snaps: list, top_n: int = 100) -> list[str]:
+    """榜单搜索类关注 → 日报文本段(每行一条,末尾附今日vs昨日汇总)。"""
+    rows, prev_map, latest_map = _keyword_entries_rows(db, user_id, w, snaps)
+    if not rows:
+        return []
+    news = sum(1 for r in rows[:top_n] if r["marker"] == "🆕")
+    rose = sum(1 for r in rows[:top_n] if r["marker"].startswith("↑") or r["marker"].startswith("🔥↑"))
+    fell = sum(1 for r in rows[:top_n] if r["marker"].startswith("↓") or r["marker"].startswith("🔥↓"))
+    dropped = len(set(prev_map) - set(latest_map))
     label = SECTION_LABELS.get(w.get("section", ""), w.get("section", ""))
-    lines = [f"  · {w['keyword']}({label} · {' · '.join(ov)})"]
-    for r in rows:
-        g = f"{r['growth'] * 100:+.0f}%" if r["growth"] is not None else "—"
-        fc = f" 预测{_w(r['forecast'])}" if r["forecast"] is not None else ""
-        lines.append(f"    {r['marker']} {r['title'][:20]}  {_w(r['score'])}  {r['arrow']}{r['trend']}  {g}{fc}")
-    lines.append(f"      ↳ 今日vs昨日:🆕{new_count} ↑{rose} ↓{fell} 跌出{dropped}")
+    lines = [f"  · {w['keyword']}({label} · {_overview(rows)})"]
+    lines += [_entry_line(r) for r in rows[:top_n]]
+    lines.append(f"      ↳ 今日vs昨日:🆕{news} ↑{rose} ↓{fell} 跌出{dropped}")
     return lines
 
 
 def _keyword_watch_lines(db: Session, user_id: int, top_n: int = 8) -> list[str]:
-    """日报里的"关键词关注"段落。
+    """日报里的"关键词关注"段落(纯文本)。
 
     单值词(内容词/订阅/其它板块):给趋势/环比/预测/置信度;
     榜单搜索类(话题/搜索/视频,逐条记录):列出当前 Top 相关主题,每条带趋势 + 🆕新增。
@@ -314,6 +325,51 @@ def _keyword_watch_lines(db: Session, user_id: int, top_n: int = 8) -> list[str]
     return lines if len(lines) > 1 else []
 
 
+def build_keyword_card(db: Session, user_id: int, settings: Settings) -> dict | None:
+    """生成"关键词监控"飞书交互卡片(有内容才返回 dict,否则 None)。
+
+    每个关注词一块:标题(关键词 · 板块 · 趋势概览)+ 明细 note(每条 趋势/名次/新增)。
+    """
+    from app.services import keyword_agent
+    from app.services.keyword_watch import list_watch
+
+    entry_top = getattr(settings, "douhot_watch_daily_top", None) or 100
+    elements = []
+    for w in list_watch(db, user_id):
+        snaps = repository.watch_snap_series(db, user_id, w["keyword"], section=w.get("section"))
+        label = SECTION_LABELS.get(w.get("section", ""), w.get("section", ""))
+        entries = [s for s in snaps if getattr(s, "entry_title", "")]
+        if entries:
+            rows, prev_map, latest_map = _keyword_entries_rows(db, user_id, w, snaps)
+            if not rows:
+                continue
+            elements.append({"tag": "div", "text": {"tag": "lark_md",
+                            "content": f"**{w['keyword']}** · {label} · {_overview(rows)}"}})
+            news = sum(1 for r in rows if r["marker"] == "🆕")
+            rose = sum(1 for r in rows if r["marker"].startswith("↑") or r["marker"].startswith("🔥↑"))
+            fell = sum(1 for r in rows if r["marker"].startswith("↓") or r["marker"].startswith("🔥↓"))
+            dropped = len(set(prev_map) - set(latest_map))
+            body = "\n".join(_entry_line(r) for r in rows[:entry_top])
+            body += f"\n↳ 今日vs昨日:🆕{news} ↑{rose} ↓{fell} 跌出{dropped}"
+            elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": body}]})
+        else:
+            values = [s.score for s in snaps]
+            a = keyword_agent.analyze(w["keyword"], values)
+            g = f"{a['growth'] * 100:+.0f}%" if a.get("growth") is not None else "—"
+            fc = f"  预测{a['forecast_next']:.0f}" if a.get("forecast_next") is not None else ""
+            elements.append({"tag": "div", "text": {"tag": "lark_md",
+                            "content": f"**{w['keyword']}** · {label} · {a['trend_label']}{'🔥' if a.get('burst') else ''}"}})
+            elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": f"环比{g}{fc}"}]})
+        elements.append({"tag": "hr"})
+    if not elements:
+        return None
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "blue", "title": {"tag": "plain_text", "content": "🤖 关键词监控 · 智能体"}},
+        "elements": elements,
+    }
+
+
 def _split_messages(text: str, max_len: int = 15000) -> list[str]:
     """飞书文本消息有长度上限,按行拆成多条(每条 ≤max_len 字符)。"""
     if len(text) <= max_len:
@@ -334,10 +390,11 @@ def _split_messages(text: str, max_len: int = 15000) -> list[str]:
     return msgs
 
 
-def build_daily(db: Session, user_id: int, settings: Settings) -> str:
+def build_daily(db: Session, user_id: int, settings: Settings, include_keywords: bool = True) -> str:
     """生成四板块日报文本(供飞书推送与测试)。
 
     结构:今日活跃对比(各板块上升数)→ 跨板块共同上升(含各板块预测)→ 各板块榜 → 关键词智能体预测。
+    `include_keywords=False` 时不含关键词段(改用飞书交互卡片展示)。
     """
     today = datetime.now().strftime("%m-%d")
     lines = [f"📊 热点日报 · {today}", "每个话题标注相对上一轮的涨跌或新增。"]
@@ -347,7 +404,8 @@ def build_daily(db: Session, user_id: int, settings: Settings) -> str:
     lines += _cross_section_lines(db, user_id, top_n=4)
     for section in SECTIONS:
         lines += _section_lines(db, user_id, section)
-    lines += _keyword_watch_lines(db, user_id)
+    if include_keywords:
+        lines += _keyword_watch_lines(db, user_id)
     return "\n".join(lines)
 
 
@@ -363,10 +421,13 @@ def run_feishu_daily() -> int:
     sent = 0
     try:
         for user in repository.list_enabled_users(db):
-            text = build_daily(db, user.id, settings)
-            for chunk in _split_messages(text):  # 过长自动拆成多条飞书(关键词 Top100 等场景)
+            text = build_daily(db, user.id, settings, include_keywords=False)  # 关键词单独用卡片
+            for chunk in _split_messages(text):  # 过长自动拆成多条飞书
                 if client.send(chunk):
                     sent += 1
+            card = build_keyword_card(db, user.id, settings)
+            if card and client.send_card(card):
+                sent += 1
         logger.info("飞书日报推送完成,消息数=%s", sent)
         return sent
     finally:
