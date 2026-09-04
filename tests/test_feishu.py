@@ -123,6 +123,27 @@ def test_daily_lines_include_rank_tags(session) -> None:
     assert "分析:" in text
 
 
+def test_daily_includes_cross_section_and_tally(session) -> None:
+    """日报含"今日活跃对比"(各板块上升数)与"跨板块共同上升"(含各板块预测)两个对比总结段。"""
+    from datetime import datetime, timedelta
+
+    from app.db.models import DouhotWord, WeiboHotItem
+
+    base = datetime(2026, 9, 1, 8)
+    # 微博:共同词加速上升
+    for i, h in enumerate([1000, 1300, 1800, 2600]):
+        session.add(WeiboHotItem(user_id=1, title="共同词", heat=h, rank=1, captured_at=base + timedelta(hours=i)))
+    # 抖音:同一词也在上升 → 跨板块共同上升
+    for i, h in enumerate([500, 700, 1000, 1600]):
+        session.add(DouhotWord(user_id=1, title="共同词", score=h, created_at=base + timedelta(hours=i)))
+    session.commit()
+
+    text = build_daily(session, 1, _settings())
+    assert "今日活跃对比" in text
+    assert "跨板块共同上升" in text
+    assert "共同词" in text  # 跨板块段里出现该词
+
+
 # ---- 实时提醒(替换发送为假客户端)----
 def test_realtime_only_pushes_new_and_big_jump(session, monkeypatch) -> None:
     seed_weibo(session)

@@ -156,6 +156,47 @@ def _section_lines(db: Session, user_id: int, section: str, top_n: int = 10) -> 
     return lines
 
 
+def _w(v: float | None) -> str:
+    """热度数值格式化:≥1万 转"万",否则原样(取整)。"""
+    if v is None:
+        return "—"
+    v = float(v)
+    return f"{v / 1e4:.0f}万" if abs(v) >= 10000 else f"{v:.0f}"
+
+
+_SHORT = {"weibo": "微博", "xianyu": "闲鱼", "douhot": "抖音", "baidu": "百度"}
+
+
+def _riser_tally(db: Session, user_id: int) -> str:
+    """今日各板块"上升/新增"话题数,用于跨板块活跃度对比。"""
+    parts = []
+    for section in SECTIONS:
+        cur, prev = _batches(db, user_id, section)
+        if not cur:
+            continue
+        up = sum(1 for t in cur if _delta(section, cur[t], prev)[0] in ("up", "new"))
+        parts.append(f"{_SHORT.get(section, SECTION_LABELS[section])}↑{up}")
+    return " | ".join(parts)
+
+
+def _cross_section_lines(db: Session, user_id: int, top_n: int = 4) -> list[str]:
+    """今日跨板块(≥2板块)同处上升的关键词 + 各板块预测 → 对比总结。"""
+    from app.services.cross_platform import rising_across
+
+    items = rising_across(db, user_id, min_platforms=2)
+    if not items:
+        return ["  · 暂无跨板块同时上升词"]
+    lines = ["🔥 跨板块共同上升(≥2板块)"]
+    for it in items[:top_n]:
+        tag = " 💥" if it.get("burst") else ""
+        plats = "+".join(_SHORT.get(p, p) for p in it["platforms"])
+        fc = ",".join(
+            f"{_SHORT.get(p, p)}:{_w(f)}" for p, f in it["forecasts"].items() if f is not None
+        )
+        lines.append(f"  · {it['keyword']}{tag}  [{plats}]  预测→{fc}")
+    return lines
+
+
 def _keyword_watch_lines(db: Session, user_id: int, top_n: int = 8) -> list[str]:
     """日报里的"关键词关注"段落:对每个关注词跑智能体,给趋势/预测/置信度。"""
     from app.services import keyword_agent, tenant
@@ -183,9 +224,16 @@ def _keyword_watch_lines(db: Session, user_id: int, top_n: int = 8) -> list[str]
 
 
 def build_daily(db: Session, user_id: int, settings: Settings) -> str:
-    """生成三板块日报文本(供飞书推送与测试)。"""
+    """生成四板块日报文本(供飞书推送与测试)。
+
+    结构:今日活跃对比(各板块上升数)→ 跨板块共同上升(含各板块预测)→ 各板块榜 → 关键词智能体预测。
+    """
     today = datetime.now().strftime("%m-%d")
     lines = [f"📊 热点日报 · {today}", "每个话题标注相对上一轮的涨跌或新增。"]
+    tally = _riser_tally(db, user_id)
+    if tally:
+        lines.append(f"📈 今日活跃对比:{tally}")
+    lines += _cross_section_lines(db, user_id, top_n=4)
     for section in SECTIONS:
         lines += _section_lines(db, user_id, section)
     lines += _keyword_watch_lines(db, user_id)

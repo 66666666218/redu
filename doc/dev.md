@@ -372,9 +372,12 @@ redian/
 
 监控结果可推送到飞书群,分**两条通道**:
 
-1. **每日热点日报** `run_feishu_daily()`:按 `FEISHU_DAILY_CRON`(默认每天 08:00)推送三板块
+1. **每日热点日报** `run_feishu_daily()`:按 `FEISHU_DAILY_CRON`(默认每天 08:00)推送四板块
    "最近一批 vs 上一批"榜单对比——每个话题标注排名涨跌(如 `🔥+3名`/`📉-2名`)或新增(✅新增),
-   末尾附一段趋势分析(上升最多/新增/回落最多)。`build_daily(db, uid, settings)` 生成文本。
+   末尾附一段趋势分析(上升最多/新增/回落最多)。`build_daily(db, uid, settings)` 生成文本,
+   顶部含**两个对比总结段**:`📈 今日活跃对比`(各板块上升/新增话题数)、`🔥 跨板块共同上升`
+   (在 ≥2 板块同处上升的关键词,附各板块预测值与爆发标记,来自 `cross_platform.rising_across`),
+   底部【关键词关注 · 智能体】给出各关注词的**趋势/环比/预测/置信度**。
 2. **实时提醒** `run_feishu_realtime(section, user_id)`:每次采集成功后调用,只把**当日新增**、
    **排名跳升 ≥ `FEISHU_HOT_RANK_JUMP` 名**、或**分值环比 ≥ `FEISHU_HOT_RATIO`** 的话题立即推群,
    并按 `FEISHU_ALERT_COOLDOWN_HOURS` 去重(表 `feishu_alerts`),防刷屏。
