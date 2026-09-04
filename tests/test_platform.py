@@ -252,6 +252,8 @@ def test_watch_snap_records_each_topic_entry(monkeypatch, session) -> None:
     aw = watch_analytics("douhot", session, 1)
     assert aw and aw[0]["keyword"] == "续火花"
     assert [e["title"] for e in aw[0]["entries"]] == ["续火花", "续火花专用视频"]  # 按得分排序
+    # 摘要应点名具体主题(不笼统说"该词上升"),此处两个都是一点=新增
+    assert "追踪2主题" in aw[0]["summary"] and "新增" in aw[0]["summary"]
 
 
 def _alert_settings():

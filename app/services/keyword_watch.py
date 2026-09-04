@@ -133,12 +133,27 @@ def watch_analytics(section: str, session: Session, user_id: int) -> list[dict]:
                 })
             entry_agents.sort(key=lambda x: (x["burst"], x["last_score"]), reverse=True)
             top = entry_agents[0]
+            # 概括不要笼统说"该词上升",应点名具体哪个主题在涨/新进(词内含多条主题,趋势各异)
+            risers = [e for e in entry_agents if e["trend_label"] == "上升期"]
+            new_ones = [e for e in entry_agents if e["points"] == 1]
+            bits = [f"追踪{len(entry_agents)}主题"]
+            if risers:
+                bit_str = "、".join(
+                    f"{e['title'][:12]}" + (f"+{e['growth'] * 100:.0f}%" if e.get("growth") is not None else "")
+                    for e in risers[:3]
+                )
+                bits.append("上升:" + bit_str)
+            elif new_ones:
+                bits.append("新增:" + "、".join(e["title"][:12] for e in new_ones[:3]))
+            else:
+                bits.append("走势平稳")
             out.append({
                 "section": section, "keyword": w.keyword, "list_type": w.list_type,
                 "last_score": top["last_score"], "rank_now": top["rank_now"],
-                "points": top["points"], "growth": top["growth"],
-                "trend_label": top["trend_label"], "forecast_next": top["forecast_next"],
-                "summary": top["summary"], "confidence": top["confidence"],
+                "points": len(entry_agents), "growth": top["growth"],
+                "trend_label": "上升期" if risers else ("平稳" if not new_ones else "平稳"),
+                "forecast_next": top["forecast_next"],
+                "summary": " · ".join(bits), "confidence": top["confidence"],
                 "burst": top["burst"], "entries": entry_agents,  # 全部记录的相关主题(前100)
             })
             continue

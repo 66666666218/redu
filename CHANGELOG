@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- [2026-09-05 05:00] FIX: **榜单搜索类关键词摘要改为"点名具体上升/新增主题"**——此前 `watch_analytics` 把 top 条目的 `keyword_agent_自述`当关键词摘要,对含多个主题的词显示"「早春晴朗」...上升期...预测"这种**整体概括**,误导(词内各主题趋势各异)。改为:`trend_label` 按是否含上升主题判定,`summary` 改为**点名**——如 `追踪3主题 · 上升:早春晴朗·酷酷+80%`、或无上升时 `新增:XX`、平稳时 `走势平稳`。实测样例:`追踪3主题 · 上升:早春晴朗·酷酷+80%`。全量 155 项通过。doc/dev.md §5.10.1 同步(Files: app/services/keyword_watch.py, tests/test_platform.py, doc/dev.md)
+
 - [2026-09-05 04:30] FEAT: **每日日报榜单榜单搜索类关键词——趋势箭头 + "今日vs昨日"对比**——在 Top100 基础上把趋势做醒目并加对比:① 每条带**趋势箭头**(↑上升期/↓回落期/→平稳)与**名次变化**(↑N名/↓N名/🆕新进);② 末尾加**"今日vs昨日"汇总**(新进/上升/下滑/跌出);③ `_keyword_entries_lines` 改为**按采集批次分组**(captured_at 取整到秒,一次采集多条归为一批),使"最新批 vs 上一批"可靠比较。实测样例:`↑1名 早春晴朗·酷酷 900 ↑上升期 +80% 预测1300`、`↓↓1名 早春晴朗 1600 →震荡`、`今日vs昨日:🆕1 ↑1 ↓1 跌出0`。全量 155 项通过。doc/dev.md §5.11 同步(Files: app/services/feishu.py, tests/test_feishu.py, doc/dev.md)
 
 - [2026-09-05 04:00] FEAT: **每日日报列出榜单搜索类关键词 Top100 + 自动拆条**——用户要"每天定时发送话题榜关键词前100都是什么、预测趋势、新增的"。本次:① `_keyword_watch_lines` 区分单值词与逐条记录词——后者用新增 `_keyword_entries_lines` 列出当前监测到的 Top 相关主题(默认 `DOUHOT_WATCH_DAILY_TOP=100` 条),每条带 得分/环比/趋势/预测,新进前 100 标 `🆕`(新增=该主题仅有 1 个快照,即最新一批才进榜);② 日报整条超长时 `run_feishu_daily` 用新增 `_split_messages` 按行拆成多条飞书(文本消息有长度上限);③ Settings 加 `douhot_watch_daily_top`(默认 100)。实测:话题榜"早春晴朗"日报列出 100 主题(🆕 标记)。新增 2 项单测(日报列条目+🆕标记、过长拆条),全量 155 项通过。doc/dev.md §5.11 同步(Files: config/settings.py, app/services/feishu.py, tests/test_feishu.py, doc/dev.md)
