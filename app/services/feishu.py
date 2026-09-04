@@ -318,7 +318,7 @@ def _keyword_watch_lines(db: Session, user_id: int, top_n: int = 8) -> list[str]
             continue
         values = [s.score for s in snaps]
         agent = keyword_agent.analyze(w["keyword"], values)
-        flag = "🔥" if agent.get("burst") else ""
+        flag = "🔴重点" if agent.get("burst") else ""
         fc = f" 预测{agent['forecast_next']:.0f}" if agent.get("forecast_next") is not None else ""
         conf = f" {agent['confidence']}" if agent.get("confidence") and agent["confidence"] != "数据不足" else ""
         g = f"环比{'+' if (agent.get('growth') or 0) > 0 else ''}{((agent.get('growth') or 0) * 100 if agent.get('growth') is not None else 0):.0f}%" if values else ""
@@ -359,7 +359,7 @@ def build_keyword_card(db: Session, user_id: int, settings: Settings) -> dict | 
             g = f"{a['growth'] * 100:+.0f}%" if a.get("growth") is not None else "—"
             fc = f"  预测{a['forecast_next']:.0f}" if a.get("forecast_next") is not None else ""
             elements.append({"tag": "div", "text": {"tag": "lark_md",
-                            "content": f"**{w['keyword']}** · {label} · {a['trend_label']}{'🔥' if a.get('burst') else ''}"}})
+                            "content": f"**{w['keyword']}** · {label} · {a['trend_label']}{'🔴重点' if a.get('burst') else ''}"}})
             elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": f"环比{g}{fc}"}]})
         elements.append({"tag": "hr"})
     if not elements:
@@ -511,10 +511,10 @@ def run_feishu_insight_digest(settings: Settings | None = None) -> int:
             lines.append("本周暂无爆点/上升词(需先有关注词并积累多轮采集)")
         if burst_rows:
             burst_rows.sort(key=lambda r: r["forecast_next"] or 0, reverse=True)
-            lines.append("🔥 爆发词:")
+            lines.append("🔴重点 爆发词:")
             for r in burst_rows[:12]:
                 hrs = f"{r['duration_hours']}h" if r.get("duration_hours") is not None else "—"
-                lines.append(f"  · {r['keyword']} 环比+{(r['growth'] or 0)*100:.0f}% "
+                lines.append(f"  · 🔴{r['keyword']} 环比+{(r['growth'] or 0)*100:.0f}% "
                              f"预测{int(r['forecast_next'] or 0)} 已涨约{hrs}")
         if rising_rows:
             rising_rows.sort(key=lambda r: r["growth"] or 0, reverse=True)
@@ -569,7 +569,7 @@ def run_feishu_keyword_alerts(user_id: int, settings: Settings | None = None, db
         if hits:
             lines = ["🔮 智能体预测 · 可能爆发"]
             for a in hits:
-                lines.append(f"  · {a['keyword']} 预测 {a['forecast_next']:.0f} 环比+{a['growth']*100:.0f}%")
+                lines.append(f"  · 🔴重点 {a['keyword']} 预测 {a['forecast_next']:.0f} 环比+{a['growth']*100:.0f}%")
             client.send("\n".join(lines))
             pushed = len(hits)
             logger.info("飞书智能体预警推送 user=%s 条数=%s", user_id, pushed)

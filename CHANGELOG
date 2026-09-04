@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- [2026-09-05 10:30] FEAT: **🔴重点 标记推广到全部平台预测(微博/百度/抖音/闲鱼)** — 用户要求"吃瓜/爆炸"重点标记覆盖全部板块的预测。`burst` 信号本就不区分板块,现统一应用到所有预测出口:① `keyword_agent._summary` 爆发句改"🔴重点 可能爆发";② 每日日报单值词(各平台)、智能体预警(`run_feishu_keyword_alerts`)、周爆点回顾、飞书交互卡片单值词 → 全部用 🔴重点;③ 前端 Dashboard(关键词卡+微博/闲鱼预测卡)、Douhot、Admin(爆发关键词表)统一 🔴重点。全量 158 项通过;前端已构建(Files: app/services/{keyword_agent.py,feishu.py}, frontend/src/views/{Dashboard.vue,Douhot.vue,Admin.vue})
+
 - [2026-09-05 10:00] FEAT: **"吃瓜/爆炸性"话题加 🔴重点 标记** — 系统用 `burst`(预测爆发:上升期+强增长+加速+一定置信度)作为"爆炸性/吃瓜"信号。给这类话题在**飞书推送**(实时提醒的"预测爆发"行、日报逐条行)与**前端卡片**(关键词卡、主题行、entries列表)统一加上 **🔴重点/🔴** 标记,一眼识别值得围观的大瓜。全量测试通过;前端已构建(Files: app/services/feishu.py, frontend/src/views/{Douhot.vue,Dashboard.vue})
 
 - [2026-09-05 09:30] FEAT: **抖音子榜 tab 自动按"已监控关键词"搜索显示(热点宝式)** — Clarified:热点宝工作流是"聚合榜→点话题榜→用该榜搜索看数据"。此前切到话题榜只加载默认全榜,不显示已设关键词。改为:`loadList(t)` 切到某榜时,若该榜设了逐条类关键词(话题/搜索/视频),**自动按该词定向搜索显示**(`/api/douhot/list/{t}?keyword=X`),而非默认榜;有关键词且有逐条监控数据时仍显示监控主题表(含趋势),无数据时显示该词现状。全量 158 项通过;前端已构建(Files: frontend/src/views/Douhot.vue)

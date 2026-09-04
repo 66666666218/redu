@@ -193,7 +193,7 @@ onMounted(async () => { await load(); await loadAgent(); await loadAnalytics(); 
               <h4 style="color:var(--dim);margin:4px 0 8px">{{ s[0] }} · 预测</h4>
               <div class="watch-card" v-for="w in s[1]" :key="s[0]+'-'+w.title">
                 <div class="row" style="justify-content:space-between">
-                  <b>{{ w.title.slice(0,18) }} <span v-if="w.burst" style="color:var(--down)">🔥</span></b>
+                  <b>{{ w.title.slice(0,18) }} <span v-if="w.burst" style="color:var(--down)">🔴重点</span></b>
                   <span class="badge" :class="trendClass(w.trend_label)">{{ w.trend_label }}</span>
                 </div>
                 <div class="row" style="gap:14px;margin:6px 0">

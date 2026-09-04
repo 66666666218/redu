@@ -77,7 +77,7 @@ def _summary(
     if forecast is not None:
         parts.append(f"预测下一轮约 {forecast:.0f}")
     if burst:
-        parts.append("🔥 可能爆发,建议密切关注")
+        parts.append("🔴重点 可能爆发,建议密切关注")
     elif confidence == "数据不足":
         parts.append("(数据不足,仅供参考)")
     elif confidence == "低":
