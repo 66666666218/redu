@@ -692,12 +692,13 @@ def run_feishu_keyword_realtime(user_id: int, settings: Settings | None = None, 
                 continue
             lines = [f"📌 话题词监控 · {w['keyword']}"]
             if news:
-                lines.append("  🆕 新进:" + "、".join(r["title"][:14] for r in news))
+                lines.append("  🆕 新进:" + "、".join(f"{r['title'][:14]}({_w(r['score'])})" for r in news))
             if risers:
                 lines.append("  ↑ 上升:" + "、".join(
-                    f"{r['title'][:12]}+{r['growth'] * 100:.0f}%" for r in risers))
+                    f"{r['title'][:12]}+{r['growth'] * 100:.0f}%(现{_w(r['score'])})" for r in risers))
             if bursts:
-                lines.append("  🔥 预测爆发:" + "、".join(r["title"][:12] for r in bursts))
+                lines.append("  🔥 预测爆发:" + "、".join(
+                    f"{r['title'][:12]}(现{_w(r['score'])})" for r in bursts))
             _mark_alerted(db, user_id, "kw_realtime", w["keyword"], "话题词变化")
             if client.send("\n".join(lines)):
                 pushed += 1
