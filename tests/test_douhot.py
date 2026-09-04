@@ -242,6 +242,47 @@ def test_fetch_list_keyword_heat_empty_result_cold(monkeypatch: pytest.MonkeyPat
     assert hit["score"] == 0 and hit["rank_now"] == 0
 
 
+# ---- 榜 tab 按词搜索(返回过滤后的条目列表) ----
+def test_fetch_keyword_items_topic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """话题榜按词搜索:返回 (title, score) 条目列表(含同词相关条目)。"""
+    class _Fake:
+        def challenge_billboard(self, limit=20, keyword=""):
+            return [{"challenge_name": "续火花", "score": 157}, {"challenge_name": "续火花专用", "score": 46}]
+
+    monkeypatch.setattr(douhot, "DouhotClient", lambda cookie, settings=None: _Fake())
+    items = douhot.fetch_keyword_items("ck", "topic", "续火花", Settings(_env_file=None))
+    assert items == [{"title": "续火花", "score": 157}, {"title": "续火花专用", "score": 46}]
+
+
+def test_fetch_keyword_items_word(monkeypatch: pytest.MonkeyPatch) -> None:
+    """内容词按词搜索:走 hot_word_keyword。"""
+    class _Fake:
+        def hot_word_keyword(self, keyword):
+            return [{"title": "卢克", "score": 500}, {"title": "小卢克", "score": 8}]
+
+    monkeypatch.setattr(douhot, "DouhotClient", lambda cookie, settings=None: _Fake())
+    items = douhot.fetch_keyword_items("ck", "word", "卢克", Settings(_env_file=None))
+    assert items[0] == {"title": "卢克", "score": 500}
+    assert items[1] == {"title": "小卢克", "score": 8}
+
+
+def test_fetch_keyword_items_empty_or_unsupported() -> None:
+    """空关键词返回空;subscribe 不支持 keyword 搜索,返回空。"""
+    assert douhot.fetch_keyword_items("ck", "topic", "   ") == []
+    assert douhot.fetch_keyword_items("ck", "subscribe", "任意词") == []
+
+
+def test_fetch_keyword_items_drops_empty_title(monkeypatch: pytest.MonkeyPatch) -> None:
+    """过滤掉空标题条目(各榜偶有空白条目)。"""
+    class _Fake:
+        def hot_search(self, limit=20, keyword=""):
+            return [{"key_word": "", "search_score": 9}, {"key_word": "有效词", "search_score": 5}]
+
+    monkeypatch.setattr(douhot, "DouhotClient", lambda cookie, settings=None: _Fake())
+    items = douhot.fetch_keyword_items("ck", "search", "有效词", Settings(_env_file=None))
+    assert items == [{"title": "有效词", "score": 5}]
+
+
 def test_douhot_honors_proxy_switch_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
     """DOUHOT_USE_PROXY 默认关闭时,即使配了代理池也不走(douhot 直连)。
 

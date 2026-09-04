@@ -86,8 +86,12 @@ def watch_analytics(section: str, user: User = Depends(get_current_user), db: Se
 
 
 @router.get("/api/douhot/list/{list_type}")
-def douhot_list(list_type: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """实时拉取抖音某个子榜(内容词/搜索/视频/话题/订阅),便于热点宝式 tab 展示。"""
+def douhot_list(list_type: str, keyword: str = "", user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """实时拉取抖音某个子榜(内容词/搜索/视频/话题/订阅),便于热点宝式 tab 展示。
+
+    `keyword` 非空时按词**定向搜索**(榜外词也能查到),返回过滤后的目标条目列表;
+    subscribe 无 keyword 参数,不支持关键词搜索(传了会 400)。
+    """
     from app.services.cookie_store import get_cookies
     from app.services import douhot
     from config.settings import get_settings
@@ -97,17 +101,25 @@ def douhot_list(list_type: str, user: User = Depends(get_current_user), db: Sess
     if not cookie:
         raise HTTPException(400, "未配置抖音(热点宝) Cookie")
     settings = get_settings()
-    fetchers = {
-        "word": lambda: [{"title": w["title"], "score": w["score"]} for w in douhot.fetch_content_words(cookie, settings)],
-        "search": douhot.fetch_search_words,
-        "video": douhot.fetch_video_words,
-        "topic": douhot.fetch_topic_words,
-        "subscribe": douhot.fetch_subscribe_words,
-    }
-    fn = fetchers.get(list_type)
-    if fn is None:
-        raise HTTPException(400, "不支持的榜单类型")
+    kw = keyword.strip()
     try:
+        if kw:
+            if list_type not in ("word", "search", "video", "topic"):
+                raise HTTPException(400, "该榜不支持关键词搜索")
+            return {"list_type": list_type, "keyword": kw,
+                    "items": douhot.fetch_keyword_items(cookie, list_type, kw, settings)}
+        fetchers = {
+            "word": lambda: [{"title": w["title"], "score": w["score"]} for w in douhot.fetch_content_words(cookie, settings)],
+            "search": douhot.fetch_search_words,
+            "video": douhot.fetch_video_words,
+            "topic": douhot.fetch_topic_words,
+            "subscribe": douhot.fetch_subscribe_words,
+        }
+        fn = fetchers.get(list_type)
+        if fn is None:
+            raise HTTPException(400, "不支持的榜单类型")
         return {"list_type": list_type, "items": fn(cookie, settings)}
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(500, f"榜单获取失败:{exc}") from exc

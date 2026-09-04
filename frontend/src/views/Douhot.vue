@@ -14,11 +14,28 @@ const loading = ref(false)
 const busy = ref(false)
 const watches = ref([])
 const watchForm = ref({ list_type: 'word', keyword: '' })
+const searchKw = ref('')
+const appliedKw = ref('')
 
 async function loadList(t) {
   active.value = t; loading.value = true
+  searchKw.value = ''; appliedKw.value = ''   // 切换 tab 时清除搜索,避免串榜
   try { const r = await api.douhotList(t); list.value = r.items || [] }
   catch (e) { list.value = []; toastError(e.message) } finally { loading.value = false }
+}
+async function searchList() {
+  const kw = searchKw.value.trim()
+  if (!kw) return
+  loading.value = true
+  try {
+    const r = await api.douhotList(active.value, kw)
+    list.value = r.items || []
+    appliedKw.value = kw
+  } catch (e) { list.value = []; toastError(e.message) } finally { loading.value = false }
+}
+async function clearSearch() {
+  searchKw.value = ''; appliedKw.value = ''
+  await loadList(active.value)
 }
 async function loadWatches() {
   try { watches.value = await api.douhotWatchAnalytics() } catch {}
@@ -62,7 +79,12 @@ onMounted(async () => { await loadList('word'); await loadWatches() })
     </div>
 
     <div class="card" v-if="!loading">
-      <h3>{{ tabs.find(x=>x.key===active)?.label }} · {{ list.length }} 条</h3>
+      <div class="row" style="gap:8px;margin-bottom:10px">
+        <input v-model="searchKw" placeholder="输入关键词,按词搜该榜热度(榜外也能查)" style="margin:0;flex:1" @keyup.enter="searchList" />
+        <button @click="searchList">搜索</button>
+        <button v-if="appliedKw" class="ghost" @click="clearSearch">清除</button>
+      </div>
+      <h3>{{ tabs.find(x=>x.key===active)?.label }}{{ appliedKw ? ` · 「${appliedKw}」` : '' }} · {{ list.length }} 条</h3>
       <table><tr><th>#</th><th>词</th><th>分</th></tr>
         <tr v-for="(it, idx) in list" :key="it.title+idx">
           <td class="num">{{ idx+1 }}</td><td>{{ it.title }}</td><td class="price num">{{ fmt(it.score) }}</td>

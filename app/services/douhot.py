@@ -137,6 +137,34 @@ def fetch_list_keyword_heat(cookie: str, list_type: str, keyword: str, settings:
     return {"keyword": keyword.strip(), "score": _pick(hit, score_keys) or 0, "rank_now": rank, "title": title}
 
 
+def fetch_keyword_items(cookie: str, list_type: str, keyword: str, settings: Settings | None = None) -> list[dict]:
+    """按关键词查某子榜的**条目列表**(榜外词也能查到),供榜 tab 按词搜索。
+
+    与 `fetch_list_keyword_heat`(单条最优)不同,这里返回过滤后的**整表**:
+    内容词走 `hot_word_keyword`,搜索/视频/话题走带 keyword 的 query_list,
+    订阅(subscribe)无 keyword 参数,不支持(返回空)。
+    """
+    kw = keyword.strip()
+    if not kw:
+        return []
+    try:
+        client = DouhotClient(cookie, settings)
+        if list_type == "word":
+            raw = client.hot_word_keyword(kw)
+            items = [_entry(_pick(it, ("title", "key_word", "challenge_name", "word")),
+                            _pick(it, ("score", "search_score", "play_cnt"))) for it in raw]
+        elif list_type in _KEYWORD_SPEC:
+            method_name, title_keys, score_keys = _KEYWORD_SPEC[list_type]
+            raw = getattr(client, method_name)(limit=50, keyword=kw)
+            items = [_entry(_pick(it, title_keys), _pick(it, score_keys)) for it in raw]
+        else:
+            return []  # subscribe 不支持 keyword
+    except DouhotError as exc:
+        logger.warning("热点宝%s按词搜索失败(keyword=%s):%s", list_type, kw, exc)
+        return []
+    return [it for it in items if it["title"]]
+
+
 def _fetch_ranked(
     cookie: str,
     settings: Settings | None,

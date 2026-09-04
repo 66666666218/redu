@@ -72,7 +72,7 @@ export const api = {
   platformAgent: () => req('GET', '/api/platform-agent'),
   platformView: (platform) => req('GET', '/api/platform/' + platform),
   crossRising: () => req('GET', '/api/cross/rising'),
-  douhotList: (listType) => req('GET', '/api/douhot/list/' + listType),
+  douhotList: (listType, keyword) => req('GET', '/api/douhot/list/' + listType + (keyword ? '?keyword=' + encodeURIComponent(keyword) : '')),
   watchAdd: (section, keyword) => req('POST', '/api/watch/' + section, { keyword }),
   watchList: (section) => req('GET', '/api/watch/' + section),
   watchAnalytics: (section) => req('GET', '/api/watch/' + section + '/analytics'),
