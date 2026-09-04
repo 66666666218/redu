@@ -253,8 +253,8 @@
 > ⚠️ 本接口是**读取**接口(从 `xianyu_daily` 快照聚合)。目前**没有**"每日定时生成并邮件推送总结"的调度作业——
 > 早期文档描述的 `DAILY_SUMMARY_CRON` 已无任何代码引用,该配置已移除。如需定时推送需另行实现。
 
-> **风险控制(闲鱼 mtop)**:闲鱼为登录态接口,过度请求会触发网关风控。实测 `FAIL_SYS_USER_VALIDATE`(人机验证/滑块)**经退避重试仍无效**,已与真限流区分——前者立即抛 `XianyuVerify`(由运维人工过滑块/换出口 IP),后者(`FAIL_SYS_RATE_LIMIT`/`FAIL_SYS_USER_LIMIT`)才走指数退避。
-> `POST /api/xianyu/collect-deep` 在**整轮**被验证/限流时返回 **200 + `status:"failed"`**(0 条,不再 500);详情抓取**中途**被验证/限流则停止抓取并保留已采部分,**返回 `status:"partial"`**。`run_xianyu`(`/api/collect/{platform}` 或调度)遇验证则记 `failed`,由既有"采集持续失败"告警提醒运维。
+> **风险控制(闲鱼 mtop)**:闲鱼为登录态接口,过度请求会触发网关风控。实测 `FAIL_SYS_USER_VALIDATE`(人机验证/滑块)**经退避重试仍无效**,已与真限流区分——前者立即抛 `XianyuVerify`(由运维人工过滑块/换出口 IP,传输层已用 `curl_cffi` 伪 Chrome 指纹降低被标记概率,dock/dev.md §5.8),后者(`FAIL_SYS_RATE_LIMIT`/`FAIL_SYS_USER_LIMIT`)才走指数退避。
+> `POST /api/xianyu/collect-deep` 在**整轮**被验证/限流时返回 **200 + `status:"failed"`**(0 条,不再 500);详情抓取**中途**被验证/限流则停止抓取并保留已采部分,**返回 `status:"partial"`**。`run_xianyu`(`/api/collect/{platform}` 或调度)遇验证则记 `failed`,由既有"采集持续失败"告警提醒运维(告警消息含最近一次失败原因,人工可据"需人工过滑块/换出口 IP"行动)。
 
 ---
 

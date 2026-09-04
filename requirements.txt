@@ -1,5 +1,7 @@
 # ---- 核心 ----
 requests>=2.31,<3
+# 闲鱼 mtop 传输层:模拟 Chrome TLS/HTTP2 指纹,纯协议下更不易被风控标记(见 doc/dev.md §5.8)
+curl-cffi>=0.16.3
 numpy>=1.26,<2
 APScheduler>=3.10,<4
 pydantic>=2.6,<3

@@ -342,7 +342,16 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
         if hits:
             msg = "⚠️ 采集持续失败(近24h)"
             for uid, kind, cnt in hits:
-                msg += f"\n  · 用户#{uid} 板块[{kind}] 失败 {cnt} 次"
+                # 带上最近一次失败的具体原因(如"XianyuVerify: 闲鱼人机验证(滑块),需人工处理"),
+                # 让运维一眼知道该做什么(人工过滑块/换出口 IP),而非只看到"失败 N 次"。
+                detail = db.scalar(
+                    select(RunRecord.detail)
+                    .where(RunRecord.user_id == uid, RunRecord.kind == kind, RunRecord.status == "failed")
+                    .order_by(RunRecord.id.desc())
+                    .limit(1)
+                ) or ""
+                extra = f"  {detail}" if detail else ""
+                msg += f"\n  · 用户#{uid} 板块[{kind}] 失败 {cnt} 次{extra}"
             FeishuClient(settings.feishu_webhook, settings.feishu_secret).send(msg)
             db.commit()
             sent = len(hits)

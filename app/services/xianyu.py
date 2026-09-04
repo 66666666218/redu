@@ -2,6 +2,9 @@
 
 用闲鱼登录 Cookie(mtop 签名)按"虚拟商品"关键词搜索,以闲鱼"综合"顺序作为热度基准,
 跨关键词聚合、去重、排名,得到热销虚拟商品榜。数据源可行、合规(读自己登录态下的公开搜索)。
+
+传输层用 `curl_cffi`(impersonate="chrome")模拟 Chrome TLS/HTTP2 指纹,替代裸 `requests`——
+纯协议下伪浏览器指纹能降低被 mtop 风控识别为机器人的概率(见 scripts/probe_xianyu_curl.py)。
 """
 from __future__ import annotations
 
@@ -13,7 +16,7 @@ import time
 from datetime import datetime, time as dt_time
 from pathlib import Path
 
-import requests
+from curl_cffi import requests as curl
 
 from config.settings import Settings
 from app.utils import get_logger
@@ -76,31 +79,29 @@ RATE_ERRORS = {"FAIL_SYS_RATE_LIMIT", "FAIL_SYS_USER_LIMIT"}
 class XianyuClient:
     """mtop 签名 + 登录态的最小客户端(参考开源 cv-cat/XianYuApis)。
 
-    用 requests.Session 的 cookie jar + 完整浏览器头;data 只传 {"itemId":X} 等,
+    用 curl_cffi(模拟 Chrome 指纹)的 cookie jar + 完整浏览器头;data 只传 {"itemId":X} 等,
     带 spm_pre/log_id;令牌随响应刷新,令牌错自动重试,限流优雅报错。
     """
     APP_KEY = "34839810"
 
     def __init__(self, cookie: str) -> None:
-        self.session = requests.Session()
+        # 用 curl_cffi 模拟 Chrome 的 TLS/HTTP2 指纹,冒充浏览器从协议层发出,
+        # 降低被闲鱼 mtop 风控识别为机器人而触发人机验证(滑块)的概率。
+        self.session = curl.Session(impersonate="chrome")
         self.session.headers.update(_MTOP_HEADERS)
         self._seed_cookies(cookie)
 
     def _seed_cookies(self, cookie: str) -> None:
-        from requests.cookies import RequestsCookieJar, create_cookie
-
-        jar = RequestsCookieJar()
         for pair in cookie.split("; "):
             if "=" not in pair:
                 continue
             name, _, val = pair.partition("=")
-            jar.set_cookie(create_cookie(name.strip(), val.strip(), domain=".goofish.com", path="/"))
-        self.session.cookies = jar
+            self.session.cookies.set(name.strip(), val.strip(), domain=".goofish.com", path="/")
 
     def _token(self) -> str:
         return (self.session.cookies.get("_m_h5_tk", "") or "").split("_")[0]
 
-    def _refresh(self, resp: requests.Response) -> bool:
+    def _refresh(self, resp: curl.Response) -> bool:
         m = re.search(r"_m_h5_tk=([0-9a-f]{32})_", resp.headers.get("set-cookie", ""))
         if m and m.group(1):
             self.session.cookies.set("_m_h5_tk", m.group(1), domain=".goofish.com", path="/")
@@ -132,7 +133,7 @@ class XianyuClient:
             }
             try:
                 resp = self.session.post(f"{H5_BASE}/{api}/1.0/", params=params, data={"data": data_val}, timeout=20)
-            except requests.RequestException as exc:
+            except curl.RequestsError as exc:
                 raise XianyuError(f"闲鱼请求失败:{exc}") from exc
             try:
                 obj = resp.json()
