@@ -160,7 +160,7 @@ onMounted(async () => { await load(); await loadAgent(); await loadAnalytics(); 
           <div class="watch-card" v-for="w in sortedWatches" :key="w.keyword">
             <div class="row" style="justify-content:space-between">
               <b>{{ w.keyword }} <span v-if="w.burst" style="color:var(--down)">🔥爆发</span></b>
-              <span class="badge" :class="trendClass(w.trend_label)">{{ w.trend_label || '关注中' }}</span>
+              <span class="badge" :class="trendClass(w.trend_label)">{{ (w.entries && w.entries.length) ? (w.trend_overview || w.trend_label) : (w.trend_label || '关注中') }}</span>
             </div>
             <div class="row" style="gap:14px;margin:8px 0">
               <div><div class="empty" style="padding:0">当前分</div><b class="num">{{ fmtScore(w.last_score) }}</b></div>

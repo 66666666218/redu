@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- [2026-09-05 05:30] FEAT: **关键词卡片标题更明确——加"趋势概览"徽章**——榜单搜索类关键词卡片标题从单一"上升期"改为 `trend_overview`(如 `3主题 · 升1 · 新1`,升/降/新增各多少),着色仍按 `trend_label`;前端 Douhot.vue/Dashboard.vue 卡片徽章同步。`watch_analytics` 逐条分支计算 `trend_overview` 并返回。全量 155 项通过;前端已构建。doc/dev.md §5.10.1 同步(Files: app/services/keyword_watch.py, frontend/src/{views/Douhot.vue,views/Dashboard.vue}, doc/dev.md)
+
 - [2026-09-05 05:00] FIX: **榜单搜索类关键词摘要改为"点名具体上升/新增主题"**——此前 `watch_analytics` 把 top 条目的 `keyword_agent_自述`当关键词摘要,对含多个主题的词显示"「早春晴朗」...上升期...预测"这种**整体概括**,误导(词内各主题趋势各异)。改为:`trend_label` 按是否含上升主题判定,`summary` 改为**点名**——如 `追踪3主题 · 上升:早春晴朗·酷酷+80%`、或无上升时 `新增:XX`、平稳时 `走势平稳`。实测样例:`追踪3主题 · 上升:早春晴朗·酷酷+80%`。全量 155 项通过。doc/dev.md §5.10.1 同步(Files: app/services/keyword_watch.py, tests/test_platform.py, doc/dev.md)
 
 - [2026-09-05 04:30] FEAT: **每日日报榜单榜单搜索类关键词——趋势箭头 + "今日vs昨日"对比**——在 Top100 基础上把趋势做醒目并加对比:① 每条带**趋势箭头**(↑上升期/↓回落期/→平稳)与**名次变化**(↑N名/↓N名/🆕新进);② 末尾加**"今日vs昨日"汇总**(新进/上升/下滑/跌出);③ `_keyword_entries_lines` 改为**按采集批次分组**(captured_at 取整到秒,一次采集多条归为一批),使"最新批 vs 上一批"可靠比较。实测样例:`↑1名 早春晴朗·酷酷 900 ↑上升期 +80% 预测1300`、`↓↓1名 早春晴朗 1600 →震荡`、`今日vs昨日:🆕1 ↑1 ↓1 跌出0`。全量 155 项通过。doc/dev.md §5.11 同步(Files: app/services/feishu.py, tests/test_feishu.py, doc/dev.md)

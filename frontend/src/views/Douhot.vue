@@ -124,9 +124,8 @@ onMounted(async () => { await loadList('word'); await loadWatches() })
       </div>
       <div v-if="watches.length" class="grid" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
         <div class="watch-card" v-for="w in watches" :key="w.keyword">
-          <div class="row" style="justify-content:space-between"><b>{{ w.keyword }} <span v-if="w.burst" style="color:var(--down)">🔥</span>
-            <span v-if="w.entries && w.entries.length" style="opacity:.6;font-weight:400">({{ w.entries.length }}主题)</span></b>
-            <span class="badge" :class="tclass(w.trend_label)">{{ w.trend_label }}</span></div>
+          <div class="row" style="justify-content:space-between"><b>{{ w.keyword }} <span v-if="w.burst" style="color:var(--down)">🔥</span></b>
+            <span class="badge" :class="tclass(w.trend_label)">{{ (w.entries && w.entries.length) ? (w.trend_overview || w.trend_label) : w.trend_label }}</span></div>
           <div class="row" style="gap:14px;margin:8px 0">
             <div><div class="empty" style="padding:0">当前</div><b class="num">{{ fmt(w.last_score) }}</b></div>
             <div><div class="empty" style="padding:0">环比</div><b class="num" :class="tclass(w.trend_label)">{{ pct(w.growth) }}</b></div>

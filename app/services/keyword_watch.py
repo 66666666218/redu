@@ -147,11 +147,23 @@ def watch_analytics(section: str, session: Session, user_id: int) -> list[dict]:
                 bits.append("新增:" + "、".join(e["title"][:12] for e in new_ones[:3]))
             else:
                 bits.append("走势平稳")
+            # 卡片标题的"趋势概览":升/降/新增 各多少(比单一"上升期"更明确)
+            ups = sum(1 for e in entry_agents if e["trend_label"] == "上升期")
+            downs = sum(1 for e in entry_agents if e["trend_label"] == "回落期")
+            news = sum(1 for e in entry_agents if e["points"] == 1)
+            ov_parts = [f"{len(entry_agents)}主题"]
+            if ups:
+                ov_parts.append(f"升{ups}")
+            if downs:
+                ov_parts.append(f"降{downs}")
+            if news:
+                ov_parts.append(f"新{news}")
             out.append({
                 "section": section, "keyword": w.keyword, "list_type": w.list_type,
                 "last_score": top["last_score"], "rank_now": top["rank_now"],
                 "points": len(entry_agents), "growth": top["growth"],
-                "trend_label": "上升期" if risers else ("平稳" if not new_ones else "平稳"),
+                "trend_label": "上升期" if risers else ("平稳" if not news else "平稳"),
+                "trend_overview": " · ".join(ov_parts),   # 如 "3主题 · 升1 · 新1"
                 "forecast_next": top["forecast_next"],
                 "summary": " · ".join(bits), "confidence": top["confidence"],
                 "burst": top["burst"], "entries": entry_agents,  # 全部记录的相关主题(前100)
