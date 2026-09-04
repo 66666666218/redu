@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- [2026-09-05 04:30] FEAT: **每日日报榜单榜单搜索类关键词——趋势箭头 + "今日vs昨日"对比**——在 Top100 基础上把趋势做醒目并加对比:① 每条带**趋势箭头**(↑上升期/↓回落期/→平稳)与**名次变化**(↑N名/↓N名/🆕新进);② 末尾加**"今日vs昨日"汇总**(新进/上升/下滑/跌出);③ `_keyword_entries_lines` 改为**按采集批次分组**(captured_at 取整到秒,一次采集多条归为一批),使"最新批 vs 上一批"可靠比较。实测样例:`↑1名 早春晴朗·酷酷 900 ↑上升期 +80% 预测1300`、`↓↓1名 早春晴朗 1600 →震荡`、`今日vs昨日:🆕1 ↑1 ↓1 跌出0`。全量 155 项通过。doc/dev.md §5.11 同步(Files: app/services/feishu.py, tests/test_feishu.py, doc/dev.md)
+
 - [2026-09-05 04:00] FEAT: **每日日报列出榜单搜索类关键词 Top100 + 自动拆条**——用户要"每天定时发送话题榜关键词前100都是什么、预测趋势、新增的"。本次:① `_keyword_watch_lines` 区分单值词与逐条记录词——后者用新增 `_keyword_entries_lines` 列出当前监测到的 Top 相关主题(默认 `DOUHOT_WATCH_DAILY_TOP=100` 条),每条带 得分/环比/趋势/预测,新进前 100 标 `🆕`(新增=该主题仅有 1 个快照,即最新一批才进榜);② 日报整条超长时 `run_feishu_daily` 用新增 `_split_messages` 按行拆成多条飞书(文本消息有长度上限);③ Settings 加 `douhot_watch_daily_top`(默认 100)。实测:话题榜"早春晴朗"日报列出 100 主题(🆕 标记)。新增 2 项单测(日报列条目+🆕标记、过长拆条),全量 155 项通过。doc/dev.md §5.11 同步(Files: config/settings.py, app/services/feishu.py, tests/test_feishu.py, doc/dev.md)
 
 - [2026-09-05 03:00] FEAT: **榜单搜索类关注"监控前100"**——把逐条追踪的上限提到 100,并做成可配置:① Settings 加 `douhot_watch_entry_cap`(默认 100);② `fetch_keyword_items` 加 `limit` 参数(话题榜实测可取满 100,搜索/视频受服务端上限约 50);③ `record_watch_snaps` 读配置上限抓取并记录;④ `watch_analytics` 返回全部记录条目;⑤ 前端关注卡片可滚动展示全部、标题显示主题数。实测:话题榜"早春晴朗"一次采记录 **100** 个主题。全量 153 项通过;前端已构建。doc/API.md §7.3.1、doc/dev.md §5.10.1 同步(Files: config/settings.py, app/services/{douhot.py,keyword_watch.py}, frontend/src/views/Douhot.vue, tests/test_platform.py, doc/{API.md,dev.md})

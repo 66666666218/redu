@@ -207,38 +207,68 @@ def _cross_section_lines(db: Session, user_id: int, top_n: int = 4) -> list[str]
 
 
 def _keyword_entries_lines(db: Session, user_id: int, w: dict, snaps: list, top_n: int = 100) -> list[str]:
-    """榜单搜索类关注(话题/搜索/视频):列出当前 Top 相关主题,每条带得分/环比/趋势/预测 + 🆕新增标记。"""
+    """榜单搜索类关注(话题/搜索/视频):列出当前 Top 相关主题,每条带趋势箭头/名次变化/预测 + 🆕新增。
+
+    按采集批次分组(captured_at 取整到秒,一次采集的多条快照归为一批),取最新一批 vs 上一批:
+    - 🆕 最新批有、上批无 = 新进;↑N名/↓N名 = 名次相对上批变化;
+    - 趋势用 ↑上升期 / ↓回落期 / →平稳 箭头,并给出 环比 / 预测;
+    - 末尾附"今日vs昨日"汇总(新进/上升/下滑/跌出)。
+    """
     from app.services import keyword_agent
     from collections import defaultdict
 
-    by_entry: dict[str, list] = defaultdict(list)
+    # 按采集批次分组
+    batches: dict = defaultdict(list)
     for s in snaps:
         if getattr(s, "entry_title", ""):
-            by_entry[s.entry_title].append(s)
-    if not by_entry:
+            batches[s.captured_at.replace(microsecond=0)].append(s)
+    if not batches:
         return []
+    ts = sorted(batches)
+    latest_ts, prev_ts = ts[-1], (ts[-2] if len(ts) >= 2 else None)
+    latest, prev = batches[latest_ts], (batches[prev_ts] if prev_ts is not None else [])
+
+    def last_of(blist: list) -> dict:
+        m: dict = {}
+        for s in blist:
+            if s.entry_title:
+                m[s.entry_title] = s  # 同批内后者覆盖 = 取该批最后一条
+        return m
+
+    latest_map, prev_map = last_of(latest), last_of(prev)
     rows = []
-    for title, es in by_entry.items():
-        es_sorted = sorted(es, key=lambda x: x.id)
-        vals = [e.score for e in es_sorted]
+    for title, s in latest_map.items():
+        es = sorted([x for x in snaps if x.entry_title == title], key=lambda x: x.id)
+        vals = [e.score for e in es]
         a = keyword_agent.analyze(title, vals)
+        trend = a.get("trend_label") or "平稳"
+        arrow = "↑" if trend == "上升期" else ("↓" if trend == "回落期" else "→")
+        p = prev_map.get(title)
+        if p is None:
+            marker = "🆕"
+        else:
+            delta = p.rank_now - s.rank_now  # 正 = 名次更靠前(上升)
+            marker = (f"↑{delta}名" if delta > 0 else (f"↓{abs(delta)}名" if delta < 0 else "  "))
+        if a.get("burst") and p is not None:
+            marker = "🔥" + marker
         rows.append({
-            "title": title, "score": vals[-1], "growth": a.get("growth"),
-            "trend": a.get("trend_label"), "forecast": a.get("forecast_next"),
-            "new": len(vals) == 1, "burst": a.get("burst"),
+            "title": title, "score": s.score, "rank": s.rank_now, "marker": marker,
+            "growth": a.get("growth"), "trend": trend, "arrow": arrow,
+            "forecast": a.get("forecast_next"),
         })
-    rows.sort(key=lambda x: -x["score"])
+    rows.sort(key=lambda x: x["rank"])  # 按搜索序(排名)排
     rows = rows[:top_n]
-    new_count = sum(1 for r in rows if r["new"])
+    new_count = sum(1 for r in rows if r["marker"] == "🆕")
+    rose = sum(1 for r in rows if r["marker"].startswith("↑") or r["marker"].startswith("🔥↑"))
+    fell = sum(1 for r in rows if r["marker"].startswith("↓") or r["marker"].startswith("🔥↓"))
+    dropped = len(set(prev_map) - set(latest_map))  # 上批有、最新批无 = 跌出
     label = SECTION_LABELS.get(w.get("section", ""), w.get("section", ""))
-    lines = [f"  · {w['keyword']}({label} · 共{len(by_entry)}主题)"]
+    lines = [f"  · {w['keyword']}({label} · 共{len(latest_map)}主题)"]
     for r in rows:
         g = f"{r['growth'] * 100:+.0f}%" if r["growth"] is not None else "—"
         fc = f" 预测{_w(r['forecast'])}" if r["forecast"] is not None else ""
-        tag = "🆕" if r["new"] else ("🔥" if r["burst"] else "  ")
-        lines.append(f"    {tag} {r['title'][:20]}  {_w(r['score'])}  {g}  {r['trend']}{fc}")
-    if new_count:
-        lines.append(f"      ↳ 新进 {new_count} 个")
+        lines.append(f"    {r['marker']} {r['title'][:20]}  {_w(r['score'])}  {r['arrow']}{r['trend']}  {g}{fc}")
+    lines.append(f"      ↳ 今日vs昨日:🆕{new_count} ↑{rose} ↓{fell} 跌出{dropped}")
     return lines
 
 
