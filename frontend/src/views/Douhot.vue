@@ -124,17 +124,18 @@ onMounted(async () => { await loadList('word'); await loadWatches() })
       </div>
       <div v-if="watches.length" class="grid" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
         <div class="watch-card" v-for="w in watches" :key="w.keyword">
-          <div class="row" style="justify-content:space-between"><b>{{ w.keyword }} <span v-if="w.burst" style="color:var(--down)">🔥</span></b>
+          <div class="row" style="justify-content:space-between"><b>{{ w.keyword }} <span v-if="w.burst" style="color:var(--down)">🔥</span>
+            <span v-if="w.entries && w.entries.length" style="opacity:.6;font-weight:400">({{ w.entries.length }}主题)</span></b>
             <span class="badge" :class="tclass(w.trend_label)">{{ w.trend_label }}</span></div>
           <div class="row" style="gap:14px;margin:8px 0">
             <div><div class="empty" style="padding:0">当前</div><b class="num">{{ fmt(w.last_score) }}</b></div>
             <div><div class="empty" style="padding:0">环比</div><b class="num" :class="tclass(w.trend_label)">{{ pct(w.growth) }}</b></div>
             <div><div class="empty" style="padding:0">预测</div><b class="num">{{ fmt(w.forecast_next) }}</b></div>
           </div>
-          <!-- 榜单定向搜索类:逐条展示各相关主题趋势 -->
-          <div v-if="w.entries && w.entries.length" style="margin:6px 0;font-size:12px">
-            <div class="row" v-for="e in w.entries" :key="e.title" style="justify-content:space-between;gap:6px">
-              <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">└ {{ e.title.slice(0,18) }}</span>
+          <!-- 榜单定向搜索类:逐条展示各相关主题趋势(可滚动看全部) -->
+          <div v-if="w.entries && w.entries.length" style="margin:6px 0;font-size:12px;max-height:220px;overflow-y:auto">
+            <div class="row" v-for="(e, ei) in w.entries" :key="e.title + ei" style="justify-content:space-between;gap:6px;padding:1px 0">
+              <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">└ {{ e.title.slice(0,20) }}<span v-if="e.points < 2" style="opacity:.5">(待积累)</span></span>
               <span class="num">{{ fmt(e.last_score) }} <span :class="tclass(e.trend_label)">{{ pct(e.growth) }}</span></span>
             </div>
           </div>

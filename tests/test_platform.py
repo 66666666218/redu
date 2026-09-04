@@ -239,7 +239,7 @@ def test_watch_snap_records_each_topic_entry(monkeypatch, session) -> None:
     session.commit()
     monkeypatch.setattr(
         douhot, "fetch_keyword_items",
-        lambda cookie, list_type, keyword, settings=None: [
+        lambda cookie, list_type, keyword, settings=None, limit=50: [
             {"title": "续火花", "score": 15744747},
             {"title": "续火花专用视频", "score": 4595313},
         ],

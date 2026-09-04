@@ -17,7 +17,7 @@ from app.services.trend_analyzer import compute_growth, compute_slope
 
 
 _WORD_TYPES = ("word", "search", "subscribe", "video", "topic")
-_ENTRY_CAP = 20  # 榜单定向搜索类关注,每次采集最多记录的相关主题条数(防快照膨胀)
+_ENTRY_CAP = 100  # 榜单定向搜索类关注,每次采集最多记录的相关主题条数(默认 100,可用 DOUHOT_WATCH_ENTRY_CAP 覆盖)
 
 
 def add_watch(session: Session, user_id: int, section: str, list_type: str, keyword: str) -> dict:
@@ -73,11 +73,12 @@ def record_watch_snaps(
     for w in watches:
         # douhot 榜单搜索类(搜索/视频/话题):把搜出的每个相关主题各记一条 → 逐条追踪趋势
         if section == "douhot" and w.list_type in ("search", "video", "topic") and cookie:
+            cap = int(getattr(settings, "douhot_watch_entry_cap", None) or _ENTRY_CAP)
             try:
-                entries = douhot.fetch_keyword_items(cookie, w.list_type, w.keyword, settings)[:_ENTRY_CAP]
+                entries = douhot.fetch_keyword_items(cookie, w.list_type, w.keyword, settings, limit=cap)
             except Exception:  # noqa: BLE001 - 定向查询失败不中断采集
                 entries = []
-            for idx, it in enumerate(entries, start=1):
+            for idx, it in enumerate(entries[:cap], start=1):
                 add_snap(w.list_type, w.keyword, it["title"], it["score"] or 0, idx)
             continue
         # douhot 内容词:按词定向查该词的专属热度(单值)。
@@ -138,7 +139,7 @@ def watch_analytics(section: str, session: Session, user_id: int) -> list[dict]:
                 "points": top["points"], "growth": top["growth"],
                 "trend_label": top["trend_label"], "forecast_next": top["forecast_next"],
                 "summary": top["summary"], "confidence": top["confidence"],
-                "burst": top["burst"], "entries": entry_agents[:5],
+                "burst": top["burst"], "entries": entry_agents,  # 全部记录的相关主题(前100)
             })
             continue
         values = [s.score for s in snaps]
