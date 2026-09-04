@@ -229,6 +229,31 @@ def test_record_watch_snaps_substring_case_insensitive(session) -> None:
     assert snap and snap.score == 7 and snap.rank_now == 1
 
 
+def test_watch_snap_records_each_topic_entry(monkeypatch, session) -> None:
+    """榜单定向搜索类关注(话题榜):把搜出的每个相关主题各记一条 entry_title,分析按条分组。"""
+    from app.db.models import DouhotWatchSnap
+    from app.services import douhot
+    from app.services.keyword_watch import add_watch, record_watch_snaps, watch_analytics
+
+    add_watch(session, 1, "douhot", "topic", "续火花")
+    session.commit()
+    monkeypatch.setattr(
+        douhot, "fetch_keyword_items",
+        lambda cookie, list_type, keyword, settings=None: [
+            {"title": "续火花", "score": 15744747},
+            {"title": "续火花专用视频", "score": 4595313},
+        ],
+    )
+    record_watch_snaps("douhot", session, 1, {"word": []}, cookie="ck")
+    snaps = session.scalars(select(DouhotWatchSnap).where(DouhotWatchSnap.user_id == 1)).all()
+    assert len(snaps) == 2                                  # 每条相关主题各一条
+    assert {s.entry_title for s in snaps} == {"续火花", "续火花专用视频"}
+    assert {s.rank_now for s in snaps} == {1, 2}
+    aw = watch_analytics("douhot", session, 1)
+    assert aw and aw[0]["keyword"] == "续火花"
+    assert [e["title"] for e in aw[0]["entries"]] == ["续火花", "续火花专用视频"]  # 按得分排序
+
+
 def _alert_settings():
     from config.settings import Settings
 

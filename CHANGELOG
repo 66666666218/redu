@@ -2,6 +2,10 @@
 
 ## 未发布
 
+- [2026-09-05 02:00] FEAT: **抖音榜单搜索类关注改为"逐条追踪每个相关主题"**——此前话题/搜索/视频榜的关注词每次采集只记**一条**(最优单条 score/rank),用户搜"续火花"看到几十条相关主题却只监控到第一条。本次:① `DouhotWatchSnap` 加 `entry_title` 列(表迁移自动补);② `record_watch_snaps` 对 douhot `search/video/topic` 用 `fetch_keyword_items` 定向查询后把**每个相关主题各记一条**(<=`_ENTRY_CAP=20`),`word` 内容词仍单值;③ `watch_analytics` 按 `entry_title` 分组,每个主题独立算趋势/预测,关键词卡返回 `entries[]`;④ 前端关注卡片逐条展示各主题趋势。新增 2 项单测(delete_watch 删关注+清快照、逐条记录+分组分析),全量 153 项通过;前端已构建。doc/API.md §7.3.1、doc/dev.md §5.10.1 同步(Files: app/db/{models.py,database.py,repository.py}, app/services/keyword_watch.py, app/api/collect.py, frontend/src/{api.js,views/Douhot.vue}, tests/{test_repository.py,test_platform.py}, doc/{API.md,dev.md})
+
+- [2026-09-04 23:30] FEAT: **抖音关键词监控"一键关注+可取消"**——打通"搜索→长期监控"断点:顶部搜索框加「📌 关注」按钮(当前榜类型+搜索词一键加入监控),关注卡片加「取消关注」(删关注+级联清快照);后端新增 `repository.delete_watch`/`keyword_watch.remove_watch`/`DELETE /api/watch/{section}` 与 `/api/douhot/watch` 路由。新增 1 项单测,前端已构建(Files: app/db/repository.py, app/services/keyword_watch.py, app/api/collect.py, frontend/src/{api.js,views/Douhot.vue}, tests/test_repository.py)
+
 - [2026-09-04 23:00] FEAT: **飞书实时提醒带预测 + 周报加"本周vs上周"板块对比**——① 实时提醒 `run_feishu_realtime`:推送词在历史序列 ≥2 样本时追加一句 `预测<下一轮热度> <趋势标签>`(来自 `keyword_agent`),让"飙升"带智能体预测而非只有数字;② 每周爆点回顾 `run_feishu_insight_digest` 顶部加 `📊 板块活跃对比(本周↔上周)`(各板块本周 vs 上周活跃话题数,如 `抖音 120↔96(+24)`)。实测样例:实时`A +3名 预测195000 上升期`、周对比`微博 4↔0(+4)`。新增 2 项单测,全量 151 项通过。doc/dev.md §5.11 同步(Files: app/services/feishu.py, tests/test_feishu.py, doc/dev.md)
 
 - [2026-09-04 22:30] FEAT: **飞书日报增强——加"今日活跃对比" + "跨板块共同上升"对比总结段**——此前日报只有各板块榜单+一段趋势分析,缺**对比总结与预测**。本次 `build_daily` 顶部新增:① `📈 今日活跃对比`(各板块"上升/新增"话题数,一眼看谁最活跃);② `🔥 跨板块共同上升`(在 ≥2 板块同处上升的关键词,附各板块预测值与 💥爆发标记,数据来自 `cross_platform.rising_across`),与底部【关键词关注·智能体】的趋势/环比/预测/置信度形成"预测+分析+对比"完整闭环。实测样例:跨板块"世界杯💥[微博+抖音+百度] 预测→微博:300,百度:1650,抖音:2200"。新增 1 项单测,全量 149 项通过。doc/dev.md §5.11 同步(Files: app/services/feishu.py, tests/test_feishu.py, doc/dev.md)

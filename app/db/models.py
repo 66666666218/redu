@@ -222,7 +222,12 @@ class DouhotWatch(Base):
 
 
 class DouhotWatchSnap(Base):
-    """关键词监控快照(每次采集的记录)。"""
+    """关键词监控快照(每次采集的记录)。
+
+    `entry_title` 用于**榜单定向搜索**类关注(搜索/视频/话题):一次采集会把搜出的
+    多个相关主题各存一条(每条 entry_title=该主题标题),从而逐条追踪趋势;
+    内容词(word)类单值,entry_title 留空。
+    """
 
     __tablename__ = "douhot_watch_snap"
 
@@ -231,6 +236,7 @@ class DouhotWatchSnap(Base):
     section: Mapped[str] = mapped_column(String(16), default="douhot")
     list_type: Mapped[str] = mapped_column(String(32))
     keyword: Mapped[str] = mapped_column(String(128), index=True)
+    entry_title: Mapped[str] = mapped_column(String(255), default="")  # 命中条目标题(榜单搜索类每条一记录;内容词留空)
     score: Mapped[float] = mapped_column(Float, default=0)   # 该榜中的得分
     rank_now: Mapped[int] = mapped_column(Integer, default=0)  # 当前排名(0=未上榜)
     captured_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)

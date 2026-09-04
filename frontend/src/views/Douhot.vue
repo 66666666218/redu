@@ -131,7 +131,14 @@ onMounted(async () => { await loadList('word'); await loadWatches() })
             <div><div class="empty" style="padding:0">环比</div><b class="num" :class="tclass(w.trend_label)">{{ pct(w.growth) }}</b></div>
             <div><div class="empty" style="padding:0">预测</div><b class="num">{{ fmt(w.forecast_next) }}</b></div>
           </div>
-          <div class="empty">{{ w.summary || '再采集一次积累数据' }}</div>
+          <!-- 榜单定向搜索类:逐条展示各相关主题趋势 -->
+          <div v-if="w.entries && w.entries.length" style="margin:6px 0;font-size:12px">
+            <div class="row" v-for="e in w.entries" :key="e.title" style="justify-content:space-between;gap:6px">
+              <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">└ {{ e.title.slice(0,18) }}</span>
+              <span class="num">{{ fmt(e.last_score) }} <span :class="tclass(e.trend_label)">{{ pct(e.growth) }}</span></span>
+            </div>
+          </div>
+          <div v-else class="empty">{{ w.summary || '再采集一次积累数据' }}</div>
           <button class="ghost" style="margin-top:6px;font-size:12px" @click="removeWatch(w)">取消关注</button>
         </div>
       </div>

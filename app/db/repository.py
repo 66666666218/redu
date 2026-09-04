@@ -171,7 +171,8 @@ def delete_watch(db: Session, user_id: int, section: str, list_type: str, keywor
 
 
 def watch_snap_series(
-    db: Session, user_id: int, keyword: str, since: datetime | None = None, section: str | None = None
+    db: Session, user_id: int, keyword: str, since: datetime | None = None,
+    section: str | None = None, entry_title: str | None = None,
 ) -> list[DouhotWatchSnap]:
     stmt = select(DouhotWatchSnap).where(
         DouhotWatchSnap.user_id == user_id, DouhotWatchSnap.keyword == keyword
@@ -180,6 +181,8 @@ def watch_snap_series(
         stmt = stmt.where(DouhotWatchSnap.section == section)
     if since:
         stmt = stmt.where(DouhotWatchSnap.captured_at >= since)
+    if entry_title is not None:
+        stmt = stmt.where(DouhotWatchSnap.entry_title == entry_title)
     return db.scalars(stmt.order_by(DouhotWatchSnap.id.asc())).all()
 
 

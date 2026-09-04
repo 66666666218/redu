@@ -360,13 +360,16 @@ redian/
 
 - **定向查询**:`douhot_client.hot_word_keyword(keyword)` → 查接口;`douhot.fetch_keyword_heat`
   优先取精确匹配,否则取相关结果第一,无结果返回冷启动零值。榜单类型(内容词/搜索/
-  视频/话题/订阅)可选,`run_douhot::_record_douhot_watch_snaps` 对 `word` 类走定向查询,
-  其余榜在已采集榜单里找(词须在榜内)。
+  视频/话题/订阅)可选。**`record_watch_snaps` 的记法**:`word` 内容词为单值(记该词
+  热度/排名);**`search`/`video`/`topic` 用 `douhot.fetch_keyword_items` 定向查询后把
+  搜出的**每个相关主题各记一条快照**(`entry_title`=该主题标题,单次 ≤ `_ENTRY_CAP=20` 条),
+  从而**逐条追踪趋势**;`subscribe` 无 keyword,仍在榜单内查找。
 - **趋势分析 + 预测**:`keyword_agent.analyze(keyword, scores)` 用历史热度序列(多轮采集的
   score 按时间排)算环比涨幅、线性回归斜率,外推**下一轮预测值**,并判定 上升期/回落期/
   震荡/平稳,生成一段中文摘要。纯 NumPy、离线可用。进阶:对序列算**置信度**(样本数 + 拟合 R²)、**加速度**(前后半段斜率差,>0 = 上升加速)、**爆发预警**标记;并可按快照时间算**历史回溯**(首次上涨/峰值/持续时长);命中爆发信号且配置了飞书的关注词,会在采集后推送`🔮 智能体预测·可能爆发` 到群(复用 `feishu_alerts` 冷却去重)。仪表盘关键词卡片按爆发→预测→环比排序并显示置信度。
 - **展示**:仪表盘"关键词监控 · 智能体"卡片——当前分、环比、预测下一轮、迷你趋势线、
-  分析摘要。`douhot_watch_analytics` 返回 `trend_label / forecast_next / summary / series`。
+  分析摘要。`douhot_watch_analytics` 返回 `trend_label / forecast_next / summary / series`;
+  **榜单搜索类**额外返回 `entries[]`(各相关主题的 title/score/趋势/预测,逐条展示)。
 
 ### 5.11 飞书群机器人 `services/feishu.py`(可选)
 

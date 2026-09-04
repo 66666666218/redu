@@ -17,6 +17,7 @@ from app.services.trend_analyzer import compute_growth, compute_slope
 
 
 _WORD_TYPES = ("word", "search", "subscribe", "video", "topic")
+_ENTRY_CAP = 20  # 榜单定向搜索类关注,每次采集最多记录的相关主题条数(防快照膨胀)
 
 
 def add_watch(session: Session, user_id: int, section: str, list_type: str, keyword: str) -> dict:
@@ -58,39 +59,46 @@ def record_watch_snaps(
 ) -> None:
     """把用户关注的词在**本板块**记录得分与排名快照。
 
-    douhot 各榜单(内容词/搜索/视频/话题)走**定向查询**(榜外也能查,与热点宝
-    官网输入关键词看到的一致);订阅榜无 keyword 参数、其余板块从本次采集的
-    `lists` 里找(词须在榜内才会命中,`lists` 由各 runner 传 `{"word": [{"title","value"}]}`)。
+    douhot 内容词走**定向查询**(单值,榜外也能查);**搜索/视频/话题**榜定向查询后把
+    搜出的**每个相关主题各记一条**(`entry_title`=该主题标题),从而逐条追踪趋势;
+    订阅榜无 keyword 参数、其余板块从本次采集的 `lists` 里按"标题包含子串"找命中项
+    (`lists` 由各 runner 传 `{"word": [{"title","value"}]}`)。
     """
     watches = repository.list_watches(session, user_id, section)
+
+    def add_snap(list_type: str, keyword: str, title: str, score: float, rank: int) -> None:
+        session.add(DouhotWatchSnap(user_id=user_id, section=section, list_type=list_type,
+                                    keyword=keyword, entry_title=title, score=score, rank_now=rank))
+
     for w in watches:
-        # douhot 且该榜支持 keyword 定向查询 → 不依赖全榜默认数据,榜外词也记录专属热度
-        if section == "douhot" and w.list_type in ("word", "search", "video", "topic") and cookie:
+        # douhot 榜单搜索类(搜索/视频/话题):把搜出的每个相关主题各记一条 → 逐条追踪趋势
+        if section == "douhot" and w.list_type in ("search", "video", "topic") and cookie:
             try:
-                if w.list_type == "word":
-                    heat = douhot.fetch_keyword_heat(cookie, w.keyword, settings)
-                else:
-                    heat = douhot.fetch_list_keyword_heat(cookie, w.list_type, w.keyword, settings)
-                score, rank = heat.get("score", 0), heat.get("rank_now", 0)
+                entries = douhot.fetch_keyword_items(cookie, w.list_type, w.keyword, settings)[:_ENTRY_CAP]
+            except Exception:  # noqa: BLE001 - 定向查询失败不中断采集
+                entries = []
+            for idx, it in enumerate(entries, start=1):
+                add_snap(w.list_type, w.keyword, it["title"], it["score"] or 0, idx)
+            continue
+        # douhot 内容词:按词定向查该词的专属热度(单值)。
+        if section == "douhot" and w.list_type == "word" and cookie:
+            try:
+                heat = douhot.fetch_keyword_heat(cookie, w.keyword, settings)
+                add_snap(w.list_type, w.keyword, "", heat.get("score", 0), heat.get("rank_now", 0))
             except Exception:  # noqa: BLE001 - 定向查询失败降级为 0,不中断采集
-                score, rank = 0, 0
-        else:
-            words = lists.get(w.list_type) or lists.get("word") or []
-            score, rank = 0, 0
-            # 子串匹配(大小写不敏感):关键词出现在榜单条目标题里即命中。
-            # 专为闲鱼这类**长标题**板块——精确相等几乎命中不了("PS教程" vs
-            # "PS零基础教程全套学习"),子串匹配才能记到数据。
-            kw = w.keyword.strip().lower()
-            for i, word in enumerate(words, start=1):
-                title = str(word.get("title") or "").strip().lower()
-                if kw and kw in title:
-                    score = word.get("score") or word.get("value") or word.get("heat") or 0
-                    rank = i
-                    break
-        session.add(
-            DouhotWatchSnap(user_id=user_id, section=section, list_type=w.list_type,
-                            keyword=w.keyword, score=score, rank_now=rank)
-        )
+                add_snap(w.list_type, w.keyword, "", 0, 0)
+            continue
+        # 其余板块/订阅榜:从本次采集的 lists 里按"标题包含子串"找命中项。
+        words = lists.get(w.list_type) or lists.get("word") or []
+        score, rank = 0, 0
+        kw = w.keyword.strip().lower()
+        for i, word in enumerate(words, start=1):
+            title = str(word.get("title") or "").strip().lower()
+            if kw and kw in title:
+                score = word.get("score") or word.get("value") or word.get("heat") or 0
+                rank = i
+                break
+        add_snap(w.list_type, w.keyword, "", score, rank)
     session.commit()
 
 
@@ -106,6 +114,33 @@ def watch_analytics(section: str, session: Session, user_id: int) -> list[dict]:
     out = []
     for w in watches:
         snaps = repository.watch_snap_series(session, user_id, w.keyword, section=section)
+        # 榜单定向搜索类关注:按 entry_title 逐条分组,每条算独立趋势;关键词卡顶层取最佳条目。
+        entries = [s for s in snaps if getattr(s, "entry_title", "")]
+        if entries:
+            by_entry: dict[str, list] = {}
+            for s in entries:
+                by_entry.setdefault(s.entry_title, []).append(s)
+            entry_agents = []
+            for title, es in by_entry.items():
+                vals = [e.score for e in es]
+                a = keyword_agent.analyze(title, vals)
+                entry_agents.append({
+                    "title": title, "last_score": vals[-1], "rank_now": es[-1].rank_now,
+                    "growth": compute_growth(vals), "trend_label": a["trend_label"],
+                    "forecast_next": a["forecast_next"], "confidence": a["confidence"],
+                    "burst": a["burst"], "points": len(vals), "summary": a["summary"],
+                })
+            entry_agents.sort(key=lambda x: (x["burst"], x["last_score"]), reverse=True)
+            top = entry_agents[0]
+            out.append({
+                "section": section, "keyword": w.keyword, "list_type": w.list_type,
+                "last_score": top["last_score"], "rank_now": top["rank_now"],
+                "points": top["points"], "growth": top["growth"],
+                "trend_label": top["trend_label"], "forecast_next": top["forecast_next"],
+                "summary": top["summary"], "confidence": top["confidence"],
+                "burst": top["burst"], "entries": entry_agents[:5],
+            })
+            continue
         values = [s.score for s in snaps]
         growth = compute_growth(values) if len(values) >= 2 else None
         agent = keyword_agent.analyze(w.keyword, values)
