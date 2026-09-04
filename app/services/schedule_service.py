@@ -27,7 +27,8 @@ SECTION_COOKIE = {"weibo": "weibo", "xianyu": "goofish", "douhot": "douyin"}
 INTERVAL_CHOICES = (10, 30, 60, 120, 180, 360, 720, 1440)
 MIN_INTERVAL = 10
 MAX_INTERVAL = 1440
-DEFAULT_INTERVAL = 30
+# 默认采集间隔(分钟):运营商/登录态接口过于频繁易触发风控或 Cookie 失效,故默认 2 小时
+DEFAULT_INTERVAL = 120
 
 
 class ScheduleError(ValueError):
