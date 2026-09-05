@@ -88,7 +88,8 @@ def record_watch_snaps(
         if section == "douhot" and w.list_type == "word" and cookie:
             try:
                 heat = douhot.fetch_keyword_heat(cookie, w.keyword, settings)
-                add_snap(w.list_type, w.keyword, "", heat.get("score", 0), heat.get("rank_now", 0))
+                add_snap(w.list_type, w.keyword, "", heat.get("score", 0), heat.get("rank_now", 0),
+                         trend_growth=heat.get("trend_growth") or 0)
             except Exception:  # noqa: BLE001 - 定向查询失败降级为 0,不中断采集
                 add_snap(w.list_type, w.keyword, "", 0, 0)
             continue
@@ -179,8 +180,12 @@ def watch_analytics(section: str, session: Session, user_id: int) -> list[dict]:
             })
             continue
         values = [s.score for s in snaps]
-        growth = compute_growth(values) if len(values) >= 2 else None
         agent = keyword_agent.analyze(w.keyword, values)
+        tg = getattr(snaps[-1], "trend_growth", None) if snaps else None  # 用 trends 序列算出的真实趋势
+        growth = tg if tg else (compute_growth(values) if len(values) >= 2 else None)
+        label = agent["trend_label"]
+        if growth is not None:
+            label = "上升期" if growth > 0.05 else ("回落期" if growth < -0.05 else "平稳")
         out.append(
             {
                 "section": section,
@@ -190,7 +195,7 @@ def watch_analytics(section: str, session: Session, user_id: int) -> list[dict]:
                 "rank_now": snaps[-1].rank_now if snaps else 0,
                 "points": len(values),
                 "growth": growth,
-                "trend_label": agent["trend_label"],
+                "trend_label": label,
                 "forecast_next": agent["forecast_next"],
                 "summary": agent["summary"],
                 "series": agent["series"],

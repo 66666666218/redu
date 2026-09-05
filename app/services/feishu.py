@@ -325,11 +325,16 @@ def _keyword_watch_lines(db: Session, user_id: int, top_n: int = 8) -> list[str]
             continue
         values = [s.score for s in snaps]
         agent = keyword_agent.analyze(w["keyword"], values)
+        tg = getattr(snaps[-1], "trend_growth", None) if snaps else None  # 内容词趋势(trends 序列)
+        growth = tg if tg else agent.get("growth")
+        label = agent.get("trend_label") or "平稳"
+        if growth is not None:
+            label = "上升期" if growth > 0.05 else ("回落期" if growth < -0.05 else "平稳")
         flag = "🔴重点" if agent.get("burst") else ""
         fc = f" 预测{agent['forecast_next']:.0f}" if agent.get("forecast_next") is not None else ""
         conf = f" {agent['confidence']}" if agent.get("confidence") and agent["confidence"] != "数据不足" else ""
-        g = f"环比{'+' if (agent.get('growth') or 0) > 0 else ''}{((agent.get('growth') or 0) * 100 if agent.get('growth') is not None else 0):.0f}%" if values else ""
-        lines.append(f"  · {w['keyword']}  {agent['trend_label']}{flag}  {g}{fc}{conf}")
+        g = f"环比{'+' if (growth or 0) > 0 else ''}{((growth or 0) * 100 if growth is not None else 0):.0f}%" if values else ""
+        lines.append(f"  · {w['keyword']}  {label}{flag}  {g}{fc}{conf}")
     return lines if len(lines) > 1 else []
 
 

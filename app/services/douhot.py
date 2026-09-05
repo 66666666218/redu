@@ -79,21 +79,31 @@ def fetch_content_words(cookie: str, settings: Settings | None = None) -> list[d
 
 
 def fetch_keyword_heat(cookie: str, keyword: str, settings: Settings | None = None) -> dict:
-    """按关键词定向查内容词热度:返回 {score, rank, trend_len, latest_value, …}。
+    """按关键词定向查内容词**趋势**:返回 {score, trend_growth, latest_value, trend_label, rank, …}。
 
-    与榜单采集不同:直接拿 keyword 去查接口,即使该词不在 top100 里也能取到
-    它的飙升指数与趋势。查不到精确匹配时返回冷启动空值(score=0)。
+    内容词在热点宝属"内容词趋势":heat 的 `score` 字段常为 0/误导(实测"下载"score=0 但有真实
+    trends 序列),故用 `trends` 每日序列算 trend_growth/trend_label,score 取最新趋势值。
+    榜外词也能查到;查不到精确匹配时返回冷启动零值。
     """
     raw = DouhotClient(cookie, settings).hot_word_keyword(keyword.strip())
     if not raw:
-        return {"keyword": keyword.strip(), "score": 0, "trend_len": 0, "latest_value": 0, "rank_now": 0}
+        return {"keyword": keyword.strip(), "score": 0, "trend_growth": None, "trend_label": "平稳",
+                "trend_len": 0, "latest_value": 0, "rank_now": 0}
     # 优先精确匹配,否则取相关结果第一名
     hit = next((w for w in raw if str(w.get("title", "")).strip() == keyword.strip()), raw[0])
+    trends = hit.get("trends") or []
+    vals = [p.get("value") for p in trends if isinstance(p, dict) and p.get("value") is not None]
+    latest = vals[-1] if vals else 0
+    growth = ((vals[-1] - vals[0]) / vals[0]) if len(vals) >= 2 and vals[0] else None
+    label = ("上升期" if growth is not None and growth > 0.05
+             else "回落期" if growth is not None and growth < -0.05 else "平稳")
     return {
         "keyword": keyword.strip(),
-        "score": hit.get("score") or 0,
-        "trend_len": len(hit.get("trends") or []),
-        "latest_value": (hit.get("trends") or [{}])[-1].get("value", 0) if hit.get("trends") else 0,
+        "score": latest if latest else (hit.get("score") or 0),  # 用最新趋势值(score 常为0/误导)
+        "trend_growth": growth,
+        "trend_label": label,
+        "trend_len": len(vals),
+        "latest_value": latest,
         "rank_now": next(
             (i + 1 for i, w in enumerate(raw) if str(w.get("title", "")).strip() == keyword.strip()), 0
         ),

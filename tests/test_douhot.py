@@ -173,7 +173,9 @@ def test_fetch_keyword_heat_prefers_exact_match(monkeypatch: pytest.MonkeyPatch)
         ]),
     )
     hit = douhot.fetch_keyword_heat("ck", "世界杯", Settings(_env_file=None))
-    assert hit["score"] == 500 and hit["title"] == "世界杯" and hit["trend_len"] == 2 and hit["rank_now"] == 1
+    # score 取 trends 最新值(8),trend_growth 由 trends 算出;(3→8 = +167%)
+    assert hit["score"] == 8 and hit["title"] == "世界杯" and hit["trend_len"] == 2 and hit["rank_now"] == 1
+    assert hit["trend_growth"] > 1 and hit["trend_label"] == "上升期"
 
     # 无结果 → 冷启动零值
     monkeypatch.setattr(douhot, "DouhotClient", lambda cookie, settings=None: _FakeClient([]))
