@@ -173,6 +173,31 @@ def _w(v: float | None) -> str:
     return f"{v / 1e4:.0f}万" if abs(v) >= 10000 else f"{v:.0f}"
 
 
+def _dw(s: str) -> int:
+    """字符串的显示宽度:中文/全角算 2,其余算 1(用于列对齐)。"""
+    import unicodedata
+    return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in s)
+
+
+def _pad(s: str, width: int) -> str:
+    """把字符串左对齐,补齐空格到指定显示宽度;超宽则按显示宽度截断加"…"(总宽=width)。"""
+    s = str(s)
+    if _dw(s) > width:
+        out = ""
+        for c in s:
+            if _dw(out) + _dw(c) > width - 1:
+                break
+            out += c
+        return out + " " * max(0, (width - 1) - _dw(out)) + "…"
+    return s + " " * max(0, width - _dw(s))
+
+
+def _rjust(s: str, width: int) -> str:
+    """把字符串右对齐,补齐空格到指定显示宽度。"""
+    s = str(s)
+    return " " * max(0, width - _dw(s)) + s
+
+
 _SHORT = {"weibo": "微博", "xianyu": "闲鱼", "douhot": "抖音", "baidu": "百度"}
 
 
@@ -269,8 +294,8 @@ def _entry_line(r: dict) -> str:
     g = f"{r['growth'] * 100:+.0f}%" if r["growth"] is not None else "—"
     fc = f"  预测{_w(r['forecast'])}" if r["forecast"] is not None else ""
     flag = "🔴重点 " if r.get("burst") else ""
-    # 表格形式:名称丨热度值丨趋势
-    row = f"{str(r['title'])[:20]:<20}丨{_w(r['score']):>8}丨{r['arrow']}{r['trend']} {g}{fc}"
+    # 表格形式:名称丨热度值丨趋势(显示宽度对齐:中文算2)
+    row = f"{_pad(r['title'][:12], 18)}丨{_rjust(_w(r['score']), 8)}丨{r['arrow']}{r['trend']} {g}{fc}"
     return f"  {r['marker']} {flag}{row}"
 
 
@@ -735,9 +760,9 @@ def run_feishu_keyword_realtime(user_id: int, settings: Settings | None = None, 
                 continue
             items = sorted(changed.values(), key=lambda x: (x[0], -x[2]["score"]))[:12]
             lines = [f"📌 话题词监控 · {w['keyword']}(近1小时)",
-                     f"  {'名称':<14}丨{'热度值':>8}丨变化"]
+                     f"  {_pad('名称', 16)}丨{_rjust('热度值', 8)}丨变化"]
             for p, sig, r in items:
-                lines.append(f"  {str(r['title'])[:18]:<18}丨{_w(r['score']):>8}丨{sig}")
+                lines.append(f"  {_pad(r['title'][:12], 16)}丨{_rjust(_w(r['score']), 8)}丨{sig}")
             _mark_alerted(db, user_id, "kw_realtime", w["keyword"], "话题词变化")
             if client.send("\n".join(lines)):
                 pushed += 1
