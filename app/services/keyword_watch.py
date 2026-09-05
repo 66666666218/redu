@@ -66,9 +66,11 @@ def record_watch_snaps(
     """
     watches = repository.list_watches(session, user_id, section)
 
-    def add_snap(list_type: str, keyword: str, title: str, score: float, rank: int) -> None:
+    def add_snap(list_type: str, keyword: str, title: str, score: float, rank: int,
+                 trend_growth: float = 0) -> None:
         session.add(DouhotWatchSnap(user_id=user_id, section=section, list_type=list_type,
-                                    keyword=keyword, entry_title=title, score=score, rank_now=rank))
+                                    keyword=keyword, entry_title=title, score=score, rank_now=rank,
+                                    trend_growth=trend_growth))
 
     for w in watches:
         # douhot 榜单搜索类(搜索/视频/话题):把搜出的每个相关主题各记一条 → 逐条追踪趋势
@@ -79,7 +81,8 @@ def record_watch_snaps(
             except Exception:  # noqa: BLE001 - 定向查询失败不中断采集
                 entries = []
             for idx, it in enumerate(entries[:cap], start=1):
-                add_snap(w.list_type, w.keyword, it["title"], it["score"] or 0, idx)
+                add_snap(w.list_type, w.keyword, it["title"], it["score"] or 0, idx,
+                         trend_growth=it.get("trend_growth") or 0)
             continue
         # douhot 内容词:按词定向查该词的专属热度(单值)。
         if section == "douhot" and w.list_type == "word" and cookie:
@@ -125,9 +128,15 @@ def watch_analytics(section: str, session: Session, user_id: int) -> list[dict]:
             for title, es in by_entry.items():
                 vals = [e.score for e in es]
                 a = keyword_agent.analyze(title, vals)
+                tg = getattr(es[-1], "trend_growth", None)  # 用 trends 序列算出的真实趋势,而非相邻分数差
+                growth = tg if tg is not None else compute_growth(vals)
+                if growth is not None:
+                    label = "上升期" if growth > 0.05 else ("回落期" if growth < -0.05 else "平稳")
+                else:
+                    label = a["trend_label"]
                 entry_agents.append({
                     "title": title, "last_score": vals[-1], "rank_now": es[-1].rank_now,
-                    "growth": compute_growth(vals), "trend_label": a["trend_label"],
+                    "growth": growth, "trend_label": label,
                     "forecast_next": a["forecast_next"], "confidence": a["confidence"],
                     "burst": a["burst"], "points": len(vals), "summary": a["summary"],
                 })

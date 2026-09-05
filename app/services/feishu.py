@@ -239,7 +239,12 @@ def _keyword_entries_rows(db: Session, user_id: int, w: dict, snaps: list) -> tu
         es = sorted([x for x in snaps if x.entry_title == title], key=lambda x: x.id)
         vals = [e.score for e in es]
         a = keyword_agent.analyze(title, vals)
-        trend = a.get("trend_label") or "平稳"
+        tg = getattr(s, "trend_growth", None)  # 用 trends 序列算出的真实趋势
+        growth = tg if tg is not None else a.get("growth")
+        if growth is not None:
+            trend = "上升期" if growth > 0.05 else ("回落期" if growth < -0.05 else "平稳")
+        else:
+            trend = a.get("trend_label") or "平稳"
         arrow = "↑" if trend == "上升期" else ("↓" if trend == "回落期" else "→")
         p = prev_map.get(title)
         if p is None:
@@ -251,7 +256,7 @@ def _keyword_entries_rows(db: Session, user_id: int, w: dict, snaps: list) -> tu
             marker = "🔥" + marker
         rows.append({
             "title": title, "score": s.score, "rank": s.rank_now, "marker": marker,
-            "growth": a.get("growth"), "trend": trend, "arrow": arrow,
+            "growth": growth, "trend": trend, "arrow": arrow,
             "forecast": a.get("forecast_next"), "burst": a.get("burst"),
         })
     rows.sort(key=lambda x: x["rank"])  # 按搜索序(排名)排

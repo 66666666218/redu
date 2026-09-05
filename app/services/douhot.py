@@ -137,6 +137,24 @@ def fetch_list_keyword_heat(cookie: str, list_type: str, keyword: str, settings:
     return {"keyword": keyword.strip(), "score": _pick(hit, score_keys) or 0, "rank_now": rank, "title": title}
 
 
+def _trend_of(it: dict) -> tuple[float | None, str]:
+    """从话题条目的 `trends` 每日热度序列算(窗口)增长与趋势标签。
+
+    `trends` = [{date, value}, ...](近约 14 天每日热度)。增长 = (最新 - 最早) / 最早,
+    这是**一次采集即可得出**的真实趋势——否则相邻采集只拿最新日值,变化极慢会恒 0%。
+    无 trends/样本<2 返回 (None, None)。
+    """
+    t = it.get("trends") or []
+    if not isinstance(t, list):
+        return None, ""
+    vals = [p.get("value") for p in t if isinstance(p, dict) and p.get("value") is not None]
+    if len(vals) < 2 or not vals[0]:
+        return None, ""
+    growth = (vals[-1] - vals[0]) / vals[0]
+    label = "上升期" if growth > 0.05 else ("回落期" if growth < -0.05 else "平稳")
+    return growth, label
+
+
 def fetch_keyword_items(cookie: str, list_type: str, keyword: str, settings: Settings | None = None,
                         limit: int = 50) -> list[dict]:
     """按关键词查某子榜的**条目列表**(榜外词也能查到),供榜 tab 按词搜索。
@@ -144,6 +162,7 @@ def fetch_keyword_items(cookie: str, list_type: str, keyword: str, settings: Set
     与 `fetch_list_keyword_heat`(单条最优)不同,这里返回过滤后的**整表**:
     内容词走 `hot_word_keyword`,搜索/视频/话题走带 keyword 的 query_list(`limit` 条,
     话题榜可到 100+,搜索/视频受服务端上限约 50),订阅(subscribe)无 keyword 参数,不支持(返回空)。
+    每条除 `title/score` 外,附带 `trend_growth`/`trend_label`(由 `trends` 每日序列算出,真实趋势)。
     """
     kw = keyword.strip()
     if not kw:
@@ -157,7 +176,14 @@ def fetch_keyword_items(cookie: str, list_type: str, keyword: str, settings: Set
         elif list_type in _KEYWORD_SPEC:
             method_name, title_keys, score_keys = _KEYWORD_SPEC[list_type]
             raw = getattr(client, method_name)(limit=limit, keyword=kw)
-            items = [_entry(_pick(it, title_keys), _pick(it, score_keys)) for it in raw]
+            items = []
+            for it in raw:
+                title = str(_pick(it, title_keys) or "").strip()
+                if not title:
+                    continue
+                growth, label = _trend_of(it)
+                items.append({"title": title, "score": _pick(it, score_keys) or 0,
+                              "trend_growth": growth, "trend_label": label})
         else:
             return []  # subscribe 不支持 keyword
     except DouhotError as exc:

@@ -270,9 +270,10 @@ def test_keyword_realtime_pushes_on_new_topic(session, monkeypatch) -> None:
         # 批次1:A
         DouhotWatchSnap(user_id=1, section="douhot", list_type="topic", keyword="早春晴朗",
                         entry_title="A", score=1000, rank_now=1, captured_at=base),
-        # 批次2:A(上升)+ B(新进)
+        # 批次2:A(上升,trend_growth)> B(新进)
         DouhotWatchSnap(user_id=1, section="douhot", list_type="topic", keyword="早春晴朗",
-                        entry_title="A", score=1500, rank_now=1, captured_at=base + timedelta(days=1)),
+                        entry_title="A", score=1500, rank_now=1, captured_at=base + timedelta(days=1),
+                        trend_growth=0.5),
         DouhotWatchSnap(user_id=1, section="douhot", list_type="topic", keyword="早春晴朗",
                         entry_title="B", score=500, rank_now=2, captured_at=base + timedelta(days=1)),
     ])

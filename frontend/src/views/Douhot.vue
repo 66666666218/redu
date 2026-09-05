@@ -132,9 +132,10 @@ onMounted(async () => { await loadList('word'); await loadWatches() })
       <!-- 该榜无关键词在监控 → 默认榜 -->
       <template v-else>
         <h3>{{ tabs.find(x=>x.key===active)?.label }}{{ appliedKw ? ` · 「${appliedKw}」` : '' }} · {{ list.length }} 条</h3>
-        <table><tr><th>#</th><th>词</th><th>分</th></tr>
+        <table><tr><th>#</th><th>词</th><th>分</th><th>趋势</th></tr>
           <tr v-for="(it, idx) in list" :key="it.title+idx">
             <td class="num">{{ idx+1 }}</td><td>{{ it.title }}</td><td class="price num">{{ fmt(it.score) }}</td>
+            <td :class="tclass(it.trend_label)">{{ it.trend_growth != null ? (it.trend_label + ' ' + pct(it.trend_growth)) : '—' }}</td>
           </tr>
         </table>
         <div v-if="!list.length" class="empty">暂无(需先采集,或该榜为空)</div>

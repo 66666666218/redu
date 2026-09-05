@@ -244,14 +244,19 @@ def test_fetch_list_keyword_heat_empty_result_cold(monkeypatch: pytest.MonkeyPat
 
 # ---- 榜 tab 按词搜索(返回过滤后的条目列表) ----
 def test_fetch_keyword_items_topic(monkeypatch: pytest.MonkeyPatch) -> None:
-    """话题榜按词搜索:返回 (title, score) 条目列表(含同词相关条目)。"""
+    """话题榜按词搜索:返回 (title, score) 条目,并带 trends 算出的 trend_growth/trend_label。"""
     class _Fake:
         def challenge_billboard(self, limit=20, keyword=""):
-            return [{"challenge_name": "续火花", "score": 157}, {"challenge_name": "续火花专用", "score": 46}]
+            return [
+                {"challenge_name": "续火花", "score": 157, "trends": [{"date": "d1", "value": 100}, {"date": "d2", "value": 157}]},
+                {"challenge_name": "续火花专用", "score": 46, "trends": [{"date": "d1", "value": 50}, {"date": "d2", "value": 46}]},
+            ]
 
     monkeypatch.setattr(douhot, "DouhotClient", lambda cookie, settings=None: _Fake())
     items = douhot.fetch_keyword_items("ck", "topic", "续火花", Settings(_env_file=None))
-    assert items == [{"title": "续火花", "score": 157}, {"title": "续火花专用", "score": 46}]
+    assert items[0]["title"] == "续火花" and items[0]["score"] == 157
+    assert items[0]["trend_growth"] > 0 and items[0]["trend_label"] == "上升期"  # 100→157 涨
+    assert items[1]["trend_label"] == "回落期"  # 50→46 跌
 
 
 def test_fetch_keyword_items_word(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -280,7 +285,7 @@ def test_fetch_keyword_items_drops_empty_title(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(douhot, "DouhotClient", lambda cookie, settings=None: _Fake())
     items = douhot.fetch_keyword_items("ck", "search", "有效词", Settings(_env_file=None))
-    assert items == [{"title": "有效词", "score": 5}]
+    assert len(items) == 1 and items[0]["title"] == "有效词" and items[0]["score"] == 5
 
 
 def test_douhot_honors_proxy_switch_default_off(monkeypatch: pytest.MonkeyPatch) -> None:

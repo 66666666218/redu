@@ -239,6 +239,7 @@ class DouhotWatchSnap(Base):
     entry_title: Mapped[str] = mapped_column(String(255), default="")  # 命中条目标题(榜单搜索类每条一记录;内容词留空)
     score: Mapped[float] = mapped_column(Float, default=0)   # 该榜中的得分
     rank_now: Mapped[int] = mapped_column(Integer, default=0)  # 当前排名(0=未上榜)
+    trend_growth: Mapped[float] = mapped_column(Float, default=0)  # 该主题(窗口)趋势增长,由 trends 序列算出
     captured_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
