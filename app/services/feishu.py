@@ -711,23 +711,33 @@ def run_feishu_keyword_realtime(user_id: int, settings: Settings | None = None, 
             rows, prev_map, _ = _keyword_entries_rows(db, user_id, w, snaps)
             if not rows:
                 continue
-            news = [r for r in rows if r["marker"] == "🆕"][:5]
-            news_titles = {r["title"] for r in news}
-            risers = [r for r in rows if r["trend"] == "上升期" and r.get("growth") is not None
-                      and r["title"] not in news_titles][:5]  # 新进的不重复列为上升
-            bursts = [r for r in rows if r.get("burst")][:3]
-            if not news and not risers and not bursts:
+            # 汇总有变化的主题(去重:一个主题只显示一次,标最优先信号 🔴重点>↑上升>🆕新进)
+            prio = {"重点": 0, "上升": 1, "新进": 2}
+
+            def sig_of(r: dict) -> tuple[int, str] | None:
+                if r.get("burst"):
+                    g = f"+{r['growth'] * 100:.0f}%" if r.get("growth") is not None and r["growth"] > 0 else ""
+                    return (prio["重点"], f"🔴重点 {g}".rstrip())
+                if r["trend"] == "上升期" and r.get("growth") is not None and r["growth"] > 0:
+                    return (prio["上升"], f"↑上升 +{r['growth'] * 100:.0f}%")
+                if r["marker"] == "🆕":
+                    return (prio["新进"], "🆕新进")
+                return None
+
+            changed: dict[str, tuple[int, str, dict]] = {}
+            for r in rows:
+                s = sig_of(r)
+                if s:
+                    changed[r["title"]] = (s[0], s[1], r)
+            if not changed:
                 continue
             if _in_cooldown(db, user_id, "kw_realtime", w["keyword"], settings):
                 continue
-            lines = [f"📌 话题词监控 · {w['keyword']}",
-                     f"  {'名称':<16}丨{'热度值':>8}丨趋势"]
-            for r in news:
-                lines.append(f"    {r['title'][:14]:<16}丨{_w(r['score']):>8}丨🆕新进")
-            for r in risers:
-                lines.append(f"    {r['title'][:14]:<16}丨{_w(r['score']):>8}丨↑上升期 +{r['growth'] * 100:.0f}%")
-            for r in bursts:
-                lines.append(f"    {r['title'][:14]:<16}丨{_w(r['score']):>8}丨🔴预测爆发")
+            items = sorted(changed.values(), key=lambda x: (x[0], -x[2]["score"]))[:12]
+            lines = [f"📌 话题词监控 · {w['keyword']}(近1小时)",
+                     f"  {'名称':<14}丨{'热度值':>8}丨变化"]
+            for p, sig, r in items:
+                lines.append(f"  {str(r['title'])[:18]:<18}丨{_w(r['score']):>8}丨{sig}")
             _mark_alerted(db, user_id, "kw_realtime", w["keyword"], "话题词变化")
             if client.send("\n".join(lines)):
                 pushed += 1
