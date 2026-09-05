@@ -64,6 +64,8 @@ class Settings(BaseSettings):
     fail_alert_threshold: int = 3
     # 采集停摆告警:某平台已启用(配了 Cookie)但超过该小时数无新数据写入,推飞书(防后端宕机/调度停/被风控全挡却未记为失败)
     health_stall_hours: int = 24
+    # 停摆/失败升级:同一平台连续超过该天数无数据/未成功 → 标注"长期,建议人工排查",区分偶发与长期坏
+    health_escalate_days: int = 3
     # 数据保留天数:超过该天数的快照/运行/告警/日志会被清理 job 删除(控制库体积)
     data_retention_days: int = 30
 

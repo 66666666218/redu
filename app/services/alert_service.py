@@ -10,12 +10,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
 from app.db import repository
-from app.db.models import AlertRecord, AlertRule, User
+from app.db.models import AlertRecord, AlertRule, RunRecord, User
 from app.services.notifier import get_notifier, get_user_notifier
 from app.utils import get_logger
 
@@ -287,6 +287,15 @@ def run_weekly_summary() -> int:
         db.close()
 
 
+def _last_success_days(db: Session, uid: int, kind: str) -> int | None:
+    """该 (用户,平台) 距最近一次**成功**采集的天数;从未成功返回 None。用于判断"长期坏"升级。"""
+    last_ok = db.scalar(select(func.max(RunRecord.started_at)).where(
+        RunRecord.user_id == uid, RunRecord.kind == kind, RunRecord.status == "success"))
+    if last_ok is None:
+        return None
+    return int((datetime.now() - last_ok).total_seconds() // 86400)
+
+
 def check_collect_failures(settings: Settings | None = None, db: Session | None = None) -> int:
     """采集持续失败告警:某用户某板块近 24h 失败 >= 阈值,推送飞书并去重。
 
@@ -340,6 +349,8 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
             else:
                 db.add(FeishuAlert(section="collect_fail", user_id=uid, title=kind, reason=f"近24h失败{cnt}次"))
         if hits:
+            escalate_days = getattr(settings, "health_escalate_days", 3) or 3
+            any_long = False
             msg = "⚠️ 采集持续失败(近24h)"
             for uid, kind, cnt in hits:
                 # 带上最近一次失败的具体原因(如"XianyuVerify: 闲鱼人机验证(滑块),需人工处理"),
@@ -351,7 +362,15 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
                     .limit(1)
                 ) or ""
                 extra = f"  {detail}" if detail else ""
-                msg += f"\n  · 用户#{uid} 板块[{kind}] 失败 {cnt} 次{extra}"
+                # 长期坏升级:距最近一次成功超过 N 天 → 标注,区分偶发与长期
+                days = _last_success_days(db, uid, kind)
+                long_txt = ""
+                if days is not None and days >= escalate_days:
+                    any_long = True
+                    long_txt = f"  【长期】已 {days} 天未成功,建议人工处理"
+                msg += f"\n  · 用户#{uid} 板块[{kind}] 失败 {cnt} 次{extra}{long_txt}"
+            if any_long:
+                msg = "🔴 " + msg[len("⚠️ "):]  # 有长期坏的 → 前缀升级为 🔴
             FeishuClient(settings.feishu_webhook, settings.feishu_secret).send(msg)
             db.commit()
             sent = len(hits)
@@ -427,11 +446,21 @@ def check_health_stalls(settings: Settings | None = None, db: Session | None = N
             db.add(FeishuAlert(user_id=uid, section="health_stall", title=p, reason=f"无数据流入({stall_hours}h)"))
     sent = 0
     if items:
+        escalate_days = getattr(settings, "health_escalate_days", 3) or 3
+        any_long = False
         lines = [f"⚠️ 采集停摆(> {stall_hours}h 无新数据)"]
         for p, latest in items:
             when = latest.strftime("%m-%d %H:%M") if latest else "从未进数据"
-            lines.append(f"  · {labels.get(p, p)}:最近数据 {when}")
+            long_txt = ""
+            if latest:
+                days = int((now - latest).total_seconds() // 86400)
+                if days >= escalate_days:
+                    any_long = True
+                    long_txt = f"  【长期】已 {days} 天,建议人工排查"
+            lines.append(f"  · {labels.get(p, p)}:最近数据 {when}{long_txt}")
         lines.append("可能:后端宕机/调度停止/Cookie失效/被风控全挡(闲鱼常见滑块/限流)")
+        head = f"🔴 采集停摆(> {stall_hours}h 无新数据,有的已长期)" if any_long else lines[0]
+        lines[0] = head
         if FeishuClient(settings.feishu_webhook, settings.feishu_secret).send("\n".join(lines)):
             db.commit()
             sent = len(items)

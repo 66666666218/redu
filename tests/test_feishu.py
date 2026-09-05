@@ -471,6 +471,25 @@ def test_health_stalls_alert_and_cooldown(monkeypatch, session) -> None:
     assert alert_service.check_health_stalls(_settings(health_stall_hours=24), db=session) == 0
 
 
+def test_health_stalls_escalates_long_term(monkeypatch, session) -> None:
+    """停摆超过 escalate_days → 升级标注【长期】,区分偶发与长期坏。"""
+    from datetime import datetime, timedelta
+
+    from app.services import alert_service
+    from app.db.models import UserCookie, XianyuItem
+
+    session.add(UserCookie(user_id=1, platform="goofish", cookie="x"))
+    # 闲鱼数据停在 5 天前(> 3 天升级阈值)
+    session.add(XianyuItem(user_id=1, item_id="i1", title="商品", created_at=datetime.now() - timedelta(days=5)))
+    session.commit()
+
+    sent = []
+    monkeypatch.setattr(feishu_client, "FeishuClient", lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
+    n = alert_service.check_health_stalls(_settings(health_stall_hours=24, health_escalate_days=3), db=session)
+    assert n == 1
+    assert "🔴" in sent[0] and "长期" in sent[0] and "5 天" in sent[0]
+
+
 def test_realtime_baidu_no_keyerror(monkeypatch, session) -> None:
     """baidu 接入后实时提醒不应再 KeyError(此前 _TABLES 缺 baidu)。"""
     from datetime import datetime
