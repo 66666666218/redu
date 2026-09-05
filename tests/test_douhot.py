@@ -188,7 +188,7 @@ def _patch_list_keyword_client(monkeypatch: pytest.MonkeyPatch, methods: dict[st
 
     class _FakeMethod:
         def __init__(self, result): self.result = result
-        def __call__(self, limit=20, keyword=""): return self.result
+        def __call__(self, limit=20, keyword="", date_window=24): return self.result
 
     class _FakeClient:
         def __init__(self, methods): self._methods = methods
@@ -264,7 +264,7 @@ def test_fetch_keyword_items_topic(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_fetch_keyword_items_word(monkeypatch: pytest.MonkeyPatch) -> None:
     """内容词按词搜索:走 hot_word_keyword。"""
     class _Fake:
-        def hot_word_keyword(self, keyword):
+        def hot_word_keyword(self, keyword, date_window=24):
             return [{"title": "卢克", "score": 500}, {"title": "小卢克", "score": 8}]
 
     monkeypatch.setattr(douhot, "DouhotClient", lambda cookie, settings=None: _Fake())
@@ -321,6 +321,39 @@ def test_fetch_keyword_items_filter_short_drama_features(monkeypatch: pytest.Mon
     monkeypatch.setattr(douhot, "DouhotClient", lambda cookie, settings=None: _Fake())
     items = douhot.fetch_keyword_items("ck", "topic", "完整版", Settings(_env_file=None), filter_keyword="短剧")
     assert [it["title"] for it in items] == ["一口气看完80集", "全100集爽剧推荐"]
+
+
+def test_date_window_helpers() -> None:
+    """时段归一化:1/24/72/168 有效,其余回退 24;默认按榜单类型;标签映射正确。"""
+    assert douhot._normalize_date_window(1) == 1
+    assert douhot._normalize_date_window("72h") == 72
+    assert douhot._normalize_date_window("168") == 168
+    assert douhot._normalize_date_window(999) == 24
+    assert douhot._normalize_date_window("x") == 24
+    assert douhot._normalize_date_window(None) == 24
+    assert douhot._default_window("topic") == 1
+    assert douhot._default_window("search") == 1
+    assert douhot._default_window("video") == 1
+    assert douhot._default_window("word") == 24
+    assert douhot._window_label(72) == "近3天"
+    assert douhot._window_label(168) == "近7天"
+    assert douhot._window_label(999) == "近1天"
+
+
+def test_fetch_keyword_items_passes_date_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """fetch_keyword_items 透传 date_window 给客户端:话题默认近1小时,显式 168=近7天。"""
+    seen: dict[str, int] = {}
+
+    class _Fake:
+        def challenge_billboard(self, limit=20, keyword="", date_window=1):
+            seen["dw"] = date_window
+            return [{"challenge_name": "主题A", "score": 100, "trends": [{"value": 1}, {"value": 2}]}]
+
+    monkeypatch.setattr(douhot, "DouhotClient", lambda cookie, settings=None: _Fake())
+    douhot.fetch_keyword_items("ck", "topic", "主题A", Settings(_env_file=None))
+    assert seen["dw"] == 1  # 默认话题=近1小时
+    douhot.fetch_keyword_items("ck", "topic", "主题A", Settings(_env_file=None), date_window=168)
+    assert seen["dw"] == 168  # 显式近7天
 
 
 def test_douhot_honors_proxy_switch_default_off(monkeypatch: pytest.MonkeyPatch) -> None:

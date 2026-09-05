@@ -239,7 +239,7 @@ def test_watch_snap_records_each_topic_entry(monkeypatch, session) -> None:
     session.commit()
     monkeypatch.setattr(
         douhot, "fetch_keyword_items",
-        lambda cookie, list_type, keyword, settings=None, limit=50, filter_keyword="": [
+        lambda cookie, list_type, keyword, settings=None, limit=50, filter_keyword="", date_window=None: [
             {"title": "续火花", "score": 15744747},
             {"title": "续火花专用视频", "score": 4595313},
         ],
@@ -265,7 +265,7 @@ def test_record_watch_snaps_filter_only_matching(session, monkeypatch) -> None:
     add_watch(session, 1, "douhot", "topic", "完整版", "短剧")
     session.commit()
 
-    def fake_fk(cookie, list_type, keyword, settings=None, limit=50, filter_keyword=""):
+    def fake_fk(cookie, list_type, keyword, settings=None, limit=50, filter_keyword="", date_window=None):
         all_items = [{"title": "完整版短剧", "score": 100}, {"title": "完整版综艺", "score": 50}]
         return [it for it in all_items if not filter_keyword or filter_keyword in it["title"]]
 
@@ -275,6 +275,26 @@ def test_record_watch_snaps_filter_only_matching(session, monkeypatch) -> None:
     assert [s.entry_title for s in snaps] == ["完整版短剧"]  # 只记录含"短剧"的主题
     aw = watch_analytics("douhot", session, 1)
     assert aw[0].get("filter_keyword") == "短剧"  # 卡片可显示"只含短剧"
+
+
+def test_watch_date_window_stored_and_passed(session, monkeypatch) -> None:
+    """关注带 date_window:add_watch 归一化存储(默认话题=近1小时),record_watch_snaps 透传给 fetch_keyword_items。"""
+    from app.services import douhot
+    from app.services.keyword_watch import add_watch, list_watch, record_watch_snaps
+
+    add_watch(session, 1, "douhot", "topic", "某词", date_window=168)
+    session.commit()
+    assert list_watch(session, 1)[0]["date_window"] == 168
+
+    received: dict[str, int | None] = {}
+
+    def fake_fk(cookie, list_type, keyword, settings=None, limit=50, filter_keyword="", date_window=None):
+        received["dw"] = date_window
+        return [{"title": "某主题", "score": 100, "trend_growth": 0, "trend_label": "平稳"}]
+
+    monkeypatch.setattr(douhot, "fetch_keyword_items", fake_fk)
+    record_watch_snaps("douhot", session, 1, {"word": []}, cookie="ck")
+    assert received["dw"] == 168  # 快照采集把关注的时段透传给定向查询
 
 
 def test_xianyu_verify_cooldown(session) -> None:

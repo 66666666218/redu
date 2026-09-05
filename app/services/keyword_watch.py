@@ -23,27 +23,30 @@ _ENTRY_CAP = 100  # 榜单定向搜索类关注,每次采集最多记录的相�
 
 
 def add_watch(session: Session, user_id: int, section: str, list_type: str, keyword: str,
-              filter_keyword: str = "") -> dict:
+              filter_keyword: str = "", date_window: int | str | None = None) -> dict:
     list_type = list_type if list_type in _WORD_TYPES else "word"
     keyword = keyword.strip()
     filter_keyword = (filter_keyword or "").strip()
+    dw = (douhot._normalize_date_window(date_window) if date_window is not None
+          else douhot._default_window(list_type))
     if repository.get_watch(session, user_id, section, list_type, keyword, filter_keyword) is None:
         session.add(DouhotWatch(user_id=user_id, section=section, list_type=list_type, keyword=keyword,
-                                filter_keyword=filter_keyword))
+                                filter_keyword=filter_keyword, date_window=dw))
         session.commit()
     return {"section": section, "list_type": list_type, "keyword": keyword,
-            "filter_keyword": filter_keyword}
+            "filter_keyword": filter_keyword, "date_window": dw}
 
 
 def add_douhot_watch(session: Session, user_id: int, list_type: str, keyword: str,
-                     filter_keyword: str = "") -> dict:
-    return add_watch(session, user_id, "douhot", list_type, keyword, filter_keyword)  # 兼容旧调用
+                     filter_keyword: str = "", date_window: int | str | None = None) -> dict:
+    return add_watch(session, user_id, "douhot", list_type, keyword, filter_keyword, date_window)  # 兼容旧调用
 
 
 def list_watch(session: Session, user_id: int, section: str | None = None) -> list[dict]:
     return [
         {"section": r.section, "list_type": r.list_type, "keyword": r.keyword,
-         "filter_keyword": getattr(r, "filter_keyword", "") or ""}
+         "filter_keyword": getattr(r, "filter_keyword", "") or "",
+         "date_window": getattr(r, "date_window", None) or None}
         for r in repository.list_watches(session, user_id, section)
     ]
 
@@ -89,7 +92,8 @@ def record_watch_snaps(
             cap = int(getattr(settings, "douhot_watch_entry_cap", None) or _ENTRY_CAP)
             try:
                 entries = douhot.fetch_keyword_items(cookie, w.list_type, w.keyword, settings, limit=cap,
-                                                     filter_keyword=getattr(w, "filter_keyword", "") or "")
+                                                     filter_keyword=getattr(w, "filter_keyword", "") or "",
+                                                     date_window=getattr(w, "date_window", None))
             except Exception:  # noqa: BLE001 - 定向查询失败不中断采集
                 entries = []
             for idx, it in enumerate(entries[:cap], start=1):
@@ -184,6 +188,7 @@ def watch_analytics(section: str, session: Session, user_id: int) -> list[dict]:
             out.append({
                 "section": section, "keyword": w.keyword, "list_type": w.list_type,
                 "filter_keyword": getattr(w, "filter_keyword", "") or "",
+                "date_window": getattr(w, "date_window", None) or None,
                 "last_score": top["last_score"], "rank_now": top["rank_now"],
                 "points": len(entry_agents), "growth": top["growth"],
                 "trend_label": "上升期" if risers else ("平稳" if not news else "平稳"),
@@ -206,6 +211,7 @@ def watch_analytics(section: str, session: Session, user_id: int) -> list[dict]:
                 "keyword": w.keyword,
                 "list_type": w.list_type,
                 "filter_keyword": getattr(w, "filter_keyword", "") or "",
+                "date_window": getattr(w, "date_window", None) or None,
                 "last_score": values[-1] if values else 0,
                 "rank_now": snaps[-1].rank_now if snaps else 0,
                 "points": len(values),

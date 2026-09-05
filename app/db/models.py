@@ -219,6 +219,7 @@ class DouhotWatch(Base):
     list_type: Mapped[str] = mapped_column(String(32))  # word(内容词)/search(搜索榜);微博/闲鱼/百度固定 word
     keyword: Mapped[str] = mapped_column(String(128))
     filter_keyword: Mapped[str] = mapped_column(String(64), default="")  # 只监控标题含该词的主题(每个关键词独立,默认空=不过滤)
+    date_window: Mapped[int | None] = mapped_column(Integer, default=None)  # 监控时段(小时):1/24/72/168=近1h/近1天/近3天/近7天;None=按榜单默认
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 

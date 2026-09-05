@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from config.settings import Settings, get_settings
 from app.db import repository
 from app.db.models import BaiduHotItem, DouhotWatchSnap, DouhotWord, FeishuAlert, WeiboHotItem, XianyuItem
+from app.services import douhot
 from app.services.feishu_client import FeishuClient
 from app.utils import get_logger
 
@@ -816,6 +817,7 @@ def run_feishu_keyword_realtime(user_id: int, settings: Settings | None = None, 
             items = sorted(changed.values(), key=lambda x: (x[0], -x[2]["score"]))[:12]
             fk = getattr(w, "filter_keyword", "") or ""
             fks = (f"·只含「{fk}」" if fk else "")
+            dw = w.get("date_window") or douhot._default_window(w["list_type"])
             # 用 markdown 表格语法(交互卡片 lark_md),飞书自动对齐列
             table = ["| 名称 | 热度值 | 变化 |", "| --- | --- | --- |"]
             for p, sig, r in items:
@@ -823,7 +825,8 @@ def run_feishu_keyword_realtime(user_id: int, settings: Settings | None = None, 
             card = {
                 "config": {"wide_screen_mode": True},
                 "header": {"template": "blue",
-                           "title": {"tag": "plain_text", "content": f"📌 话题词监控 · {w['keyword']}(近1小时){fks}"}},
+                           "title": {"tag": "plain_text",
+                                     "content": f"📌 话题词监控 · {w['keyword']}({douhot._window_label(dw)}){fks}"}},
                 "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(table)}}],
             }
             _mark_alerted(db, user_id, "kw_realtime", w["keyword"], "话题词变化")

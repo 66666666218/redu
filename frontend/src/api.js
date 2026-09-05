@@ -72,20 +72,21 @@ export const api = {
   platformAgent: () => req('GET', '/api/platform-agent'),
   platformView: (platform) => req('GET', '/api/platform/' + platform),
   crossRising: () => req('GET', '/api/cross/rising'),
-  douhotList: (listType, keyword, filterKeyword) => {
+  douhotList: (listType, keyword, filterKeyword, dateWindow) => {
     let q = ''
     if (keyword) q += (q ? '&' : '?') + 'keyword=' + encodeURIComponent(keyword)
     if (filterKeyword) q += (q ? '&' : '?') + 'filter_keyword=' + encodeURIComponent(filterKeyword)
+    if (dateWindow) q += (q ? '&' : '?') + 'date_window=' + dateWindow
     return req('GET', '/api/douhot/list/' + listType + q)
   },
-  watchAdd: (section, keyword, listType, filterKeyword) => req('POST', '/api/watch/' + section, { keyword, list_type: listType || 'word', filter_keyword: filterKeyword || '' }),
+  watchAdd: (section, keyword, listType, filterKeyword, dateWindow) => req('POST', '/api/watch/' + section, { keyword, list_type: listType || 'word', filter_keyword: filterKeyword || '', date_window: dateWindow || null }),
   watchDel: (section, listType, keyword, filterKeyword) => req('DELETE', '/api/watch/' + section, { list_type: listType, keyword, filter_keyword: filterKeyword || '' }),
   watchList: (section) => req('GET', '/api/watch/' + section),
   watchAnalytics: (section) => req('GET', '/api/watch/' + section + '/analytics'),
   xianyuDaily: () => req('GET', '/api/xianyu/daily'),
   xianyuCollectDeep: () => req('POST', '/api/xianyu/collect-deep'),
   xianyuAnalytics: () => req('GET', '/api/xianyu/analytics'),
-  douhotWatchAdd: (listType, keyword, filterKeyword) => req('POST', '/api/douhot/watch', { list_type: listType, keyword, filter_keyword: filterKeyword || '' }),
+  douhotWatchAdd: (listType, keyword, filterKeyword, dateWindow) => req('POST', '/api/douhot/watch', { list_type: listType, keyword, filter_keyword: filterKeyword || '', date_window: dateWindow || null }),
   douhotWatchList: () => req('GET', '/api/douhot/watch'),
   douhotWatchAnalytics: () => req('GET', '/api/douhot/watch-analytics'),
   alertRules: () => req('GET', '/api/alerts/rules'),

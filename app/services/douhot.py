@@ -43,6 +43,38 @@ def _top_n(settings: Settings | None) -> int:
     return max(1, min(int(n), 200))
 
 
+# 时段选项:date_window 单位为**小时**(热点宝 UI:近1小时/近1天/近3天/近7天)。
+# 实测接口 date_window=1/24/72/168 分别对应该四档,且 trends 序列粒度随之变化。
+_DATE_WINDOW_VALUES = (1, 24, 72, 168)
+_DEFAULT_DATE_WINDOW = 24
+_DATE_WINDOW_LABELS = {1: "近1小时", 24: "近1天", 72: "近3天", 168: "近7天"}
+
+
+def _window_label(date_window: int) -> str:
+    """时段小时数(1/24/72/168)→ 中文标签;非法回退"近1天"。"""
+    return _DATE_WINDOW_LABELS.get(date_window, _DATE_WINDOW_LABELS[_DEFAULT_DATE_WINDOW])
+
+
+def _normalize_date_window(raw: int | str | None) -> int:
+    """把时段入参归一为小时数(1/24/72/168);接受 int 或 "1h"/"24h"/"1"/"168" 等;非法回退近1天=24。"""
+    if raw is None:
+        return _DEFAULT_DATE_WINDOW
+    if isinstance(raw, str):
+        s = raw.strip().lower().removesuffix("h")
+        if s in ("1", "24", "72", "168"):
+            return int(s)
+        return _DEFAULT_DATE_WINDOW
+    return raw if raw in _DATE_WINDOW_VALUES else _DEFAULT_DATE_WINDOW
+
+
+def _default_window(list_type: str) -> int:
+    """未显式设置时段时的默认:榜单逐条类(搜索/视频/话题)→ 近1小时,其余 → 近1天。
+
+    落到各接口即搜索榜=1、内容词/视频/话题=24(与客户端默认一致),保证未传时行为不回归。
+    """
+    return 1 if list_type in ("search", "video", "topic") else _DEFAULT_DATE_WINDOW
+
+
 def _entry(title: object, score: object) -> dict:
     """统一条目格式;标题为空的条目由调用方过滤。"""
     return {"title": str(title or "").strip(), "score": score or 0}
@@ -70,9 +102,11 @@ def _parse_word(w: dict) -> dict:
     }
 
 
-def fetch_content_words(cookie: str, settings: Settings | None = None) -> list[dict]:
+def fetch_content_words(cookie: str, settings: Settings | None = None,
+                        date_window: int | str | None = None) -> list[dict]:
     """内容词榜:返回趋势记录列表(无数据时抛 `DouhotError`,以便记为采集失败)。"""
-    raw = DouhotClient(cookie, settings).hot_words(limit=_top_n(settings))
+    dw = _normalize_date_window(date_window) if date_window is not None else _default_window("word")
+    raw = DouhotClient(cookie, settings).hot_words(limit=_top_n(settings), date_window=dw)
     words = [_parse_word(w) for w in raw if str(w.get("title", "")).strip()]
     if not words:
         raise DouhotError("热点宝未返回内容词(Cookie 可能失效或接口改版)")
@@ -80,14 +114,16 @@ def fetch_content_words(cookie: str, settings: Settings | None = None) -> list[d
     return words
 
 
-def fetch_keyword_heat(cookie: str, keyword: str, settings: Settings | None = None) -> dict:
+def fetch_keyword_heat(cookie: str, keyword: str, settings: Settings | None = None,
+                       date_window: int | str | None = None) -> dict:
     """按关键词定向查内容词**趋势**:返回 {score, trend_growth, latest_value, trend_label, rank, …}。
 
     内容词在热点宝属"内容词趋势":heat 的 `score` 字段常为 0/误导(实测"下载"score=0 但有真实
     trends 序列),故用 `trends` 每日序列算 trend_growth/trend_label,score 取最新趋势值。
-    榜外词也能查到;查不到精确匹配时返回冷启动零值。
+    榜外词也能查到;查不到精确匹配时返回冷启动零值。`date_window` 为时段(小时),决定趋势窗口。
     """
-    raw = DouhotClient(cookie, settings).hot_word_keyword(keyword.strip())
+    dw = _normalize_date_window(date_window) if date_window is not None else _default_window("word")
+    raw = DouhotClient(cookie, settings).hot_word_keyword(keyword.strip(), date_window=dw)
     if not raw:
         return {"keyword": keyword.strip(), "score": 0, "trend_growth": None, "trend_label": "平稳",
                 "trend_len": 0, "latest_value": 0, "rank_now": 0}
@@ -123,7 +159,8 @@ _KEYWORD_SPEC: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
 }
 
 
-def fetch_list_keyword_heat(cookie: str, list_type: str, keyword: str, settings: Settings | None = None) -> dict:
+def fetch_list_keyword_heat(cookie: str, list_type: str, keyword: str, settings: Settings | None = None,
+                            date_window: int | str | None = None) -> dict:
     """按关键词定向查**非内容词榜单**(搜索/视频/话题)的条目热度。
 
     与 `fetch_keyword_heat`(内容词)同一套语义:拿 keyword 过滤接口,榜外词也能取到
@@ -133,9 +170,11 @@ def fetch_list_keyword_heat(cookie: str, list_type: str, keyword: str, settings:
     spec = _KEYWORD_SPEC.get(list_type)
     if spec is None:
         return {"keyword": keyword.strip(), "score": 0, "rank_now": 0}
+    dw = _normalize_date_window(date_window) if date_window is not None else _default_window(list_type)
     method_name, title_keys, score_keys = spec
     try:
-        raw = getattr(DouhotClient(cookie, settings), method_name)(limit=50, keyword=keyword.strip())
+        raw = getattr(DouhotClient(cookie, settings), method_name)(limit=50, keyword=keyword.strip(),
+                                                                   date_window=dw)
     except DouhotError:
         logger.warning("热点宝%s定向查询失败(keyword=%s)", list_type, keyword)
         return {"keyword": keyword.strip(), "score": 0, "rank_now": 0}
@@ -193,7 +232,7 @@ def _title_matches(title: str, filter_keyword: str) -> bool:
 
 
 def fetch_keyword_items(cookie: str, list_type: str, keyword: str, settings: Settings | None = None,
-                        limit: int = 50, filter_keyword: str = "") -> list[dict]:
+                        limit: int = 50, filter_keyword: str = "", date_window: int | str | None = None) -> list[dict]:
     """按关键词查某子榜的**条目列表**(榜外词也能查到),供榜 tab 按词搜索。
 
     与 `fetch_list_keyword_heat`(单条最优)不同,这里返回过滤后的**整表**:
@@ -203,21 +242,22 @@ def fetch_keyword_items(cookie: str, list_type: str, keyword: str, settings: Set
     `filter_keyword` 非空时**只保留标题命中该词的主题**(子串,大小写不敏感;为"短剧"时
     额外用短剧特征词兜底,覆盖"标题不含'短剧'二字但确实是短剧"的误漏)——用于"只监控
     完整版里的短剧"这类二次过滤;每个关键词独立传各自的值,互不影响。
+    `date_window` 为时段(小时):1/24/72/168 → 近1小时/近1天/近3天/近7天,决定 trends 粒度与涨跌窗口。
     """
     kw = keyword.strip()
     if not kw:
         return []
     fk = (filter_keyword or "").strip().lower()
+    dw = _normalize_date_window(date_window) if date_window is not None else _default_window(list_type)
     try:
         client = DouhotClient(cookie, settings)
         if list_type == "word":
-            raw = client.hot_word_keyword(kw)
+            raw = client.hot_word_keyword(kw, date_window=dw)
             items = [_entry(_pick(it, ("title", "key_word", "challenge_name", "word")),
                             _pick(it, ("score", "search_score", "play_cnt"))) for it in raw]
         elif list_type in _KEYWORD_SPEC:
             method_name, title_keys, score_keys = _KEYWORD_SPEC[list_type]
-            # date_window=1 → 近1小时级(trends 为小时序列,topic/search/video 一致),监控每小时热度而非近24h
-            raw = getattr(client, method_name)(limit=limit, keyword=kw, date_window=1)
+            raw = getattr(client, method_name)(limit=limit, keyword=kw, date_window=dw)
             items = []
             for it in raw:
                 title = str(_pick(it, title_keys) or "").strip()
@@ -245,10 +285,13 @@ def _fetch_ranked(
     title_keys: tuple[str, ...],
     score_keys: tuple[str, ...],
     label: str,
+    date_window: int | str | None = None,
+    default_window: int = _DEFAULT_DATE_WINDOW,
 ) -> list[dict]:
     """通用榜单拉取+解析:失败不抛错、返回空列表(这些榜单是可选的补充数据)。"""
+    dw = _normalize_date_window(date_window) if date_window is not None else default_window
     try:
-        raw = getattr(DouhotClient(cookie, settings), method_name)(limit=_top_n(settings))
+        raw = getattr(DouhotClient(cookie, settings), method_name)(limit=_top_n(settings), date_window=dw)
     except DouhotError as exc:
         logger.warning("热点宝%s拉取失败:%s", label, exc)
         return []
@@ -256,24 +299,31 @@ def _fetch_ranked(
     return [it for it in items if it["title"]]
 
 
-def fetch_search_words(cookie: str, settings: Settings | None = None) -> list[dict]:
+def fetch_search_words(cookie: str, settings: Settings | None = None,
+                       date_window: int | str | None = None) -> list[dict]:
     """搜索榜:key_word + search_score。"""
-    return _fetch_ranked(cookie, settings, "hot_search", ("key_word", "title"), ("search_score", "score"), "搜索榜")
+    return _fetch_ranked(cookie, settings, "hot_search", ("key_word", "title"), ("search_score", "score"),
+                         "搜索榜", date_window, default_window=1)
 
 
-def fetch_video_words(cookie: str, settings: Settings | None = None) -> list[dict]:
+def fetch_video_words(cookie: str, settings: Settings | None = None,
+                      date_window: int | str | None = None) -> list[dict]:
     """视频榜:item_title + play_cnt(无标题的视频条目会被过滤掉)。"""
-    return _fetch_ranked(cookie, settings, "video_billboard", ("item_title",), ("play_cnt", "score"), "视频榜")
+    return _fetch_ranked(cookie, settings, "video_billboard", ("item_title",), ("play_cnt", "score"),
+                         "视频榜", date_window)
 
 
-def fetch_topic_words(cookie: str, settings: Settings | None = None) -> list[dict]:
+def fetch_topic_words(cookie: str, settings: Settings | None = None,
+                      date_window: int | str | None = None) -> list[dict]:
     """话题榜:challenge_name + score。"""
     return _fetch_ranked(
-        cookie, settings, "challenge_billboard", ("challenge_name", "title"), ("score", "play_cnt"), "话题榜"
+        cookie, settings, "challenge_billboard", ("challenge_name", "title"), ("score", "play_cnt"),
+        "话题榜", date_window,
     )
 
 
-def fetch_subscribe_words(cookie: str, settings: Settings | None = None) -> list[dict]:
+def fetch_subscribe_words(cookie: str, settings: Settings | None = None,
+                          date_window: int | str | None = None) -> list[dict]:
     """我的订阅:字段随订阅类型而异,按优先级兜底取标题/分值。"""
     try:
         raw = DouhotClient(cookie, settings).subscribe()
