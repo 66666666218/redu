@@ -297,6 +297,17 @@ def test_watch_date_window_stored_and_passed(session, monkeypatch) -> None:
     assert received["dw"] == 168  # 快照采集把关注的时段透传给定向查询
 
 
+def test_new_topic_watch_appears_in_analytics(session) -> None:
+    """新增一个话题榜关注(尚无快照)后,分析接口应立即返回该词——新词空序列不被丢弃/不崩。"""
+    from app.services.keyword_watch import add_watch, watch_analytics
+
+    add_watch(session, 1, "douhot", "topic", "全集")
+    session.commit()
+    aw = watch_analytics("douhot", session, 1)
+    assert any(x["keyword"] == "全集" for x in aw)  # 刚关注的词在列表里
+    assert all(x.get("points", 0) >= 0 for x in aw)  # 空序列词也在,不抛异常
+
+
 def test_xianyu_verify_cooldown(session) -> None:
     """闲鱼触发人机验证后,冷却期内应跳过采集(避免反复撞滑块)。"""
     from datetime import datetime, timedelta

@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- [2026-09-06 12:30] TEST: **新增关注不丢·回归测试** — 排查"话题榜搜词点关注没加进关键词监控"。服务层验证:新增话题榜关注(尚无快照)后,`list_watch`/`watch_analytics` 均立即返回该词,空序列不崩;含"下载(有快照)+全集(空)"两关注并存也同时返回。新增 `test_new_topic_watch_appears_in_analytics` 锁定该行为。后端无代码缺陷;若部署端仍"加不进",多半是**后端未重启(缺 `date_window` 列迁移)**或前端包未更新(Files: tests/test_platform.py, CHANGELOG)
+
 - [2026-09-06 12:00] FIX: **话题榜手动搜词被"自动跟随监控词"盖掉** — 用户反映"话题榜搜别的关键词还是一直显示下载"。根因:该 tab 存在"下载"监控(有 entries)时,模板 `v-if="activeWatch"` 恒展示 `activeWatch.entries`(下载),`searchList` 更新的是 `list` 但被盖住→搜索结果看不见。修复:新增 `searching` 状态,手动搜索(`searchList`)置 `true`、切 tab/清除置 `false`;模板条件改为 `v-if="!searching && activeWatch"`,手动搜索时走 `list`(热搜结果)。全量 165 项通过;前端已构建(Files: frontend/src/views/Douhot.vue, CHANGELOG)
 
 - [2026-09-06 11:30] FIX: **飞书推送消息左对齐,不再乱** — 用户反馈推送给"不工整"。根因:三处(实时热点/闲鱼实时卡/话题词实时卡/日报关键词卡)用 `lark_md` 塞**普通 Markdown 管道表**,但飞书卡片 `lark_md` 只认行内样式、**不支持表格**,于是 `|`/`---` 原样显示、字体非等宽 → 列对不齐;且实时热点的"预测/置信度/趋势"是**有条件追加**,列数都不一致。修复:① 新增 `_display_width`(中/全角/歧义 A/emoji=2,ASCII=1,如破折号按 2 宽)与 `_pad_cell`(用**全角空格 U+3000** 补齐到固定显示宽度)、`_aligned_row`;② 实时热点的老"条件字段"改为**固定 5 列**(名称/变化/预测/置信度/趋势),缺省填 `—`;③ 三处卡片同样转左对齐列,闲鱼/日报卡把 `🔴` 独立成「重点」列避免 emoji 破坏对齐。用数学性质验证:各列起点显示宽度在每行一致(如 `[34,42,54,60,68]`)。新增 `test_pad_cell_left_aligns_columns`;全量 165 项通过(Files: app/services/feishu.py, tests/test_feishu.py, CHANGELOG)
