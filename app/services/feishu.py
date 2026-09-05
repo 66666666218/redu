@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import unicodedata
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -44,6 +45,35 @@ _TS_COL = {"weibo": "captured_at", "baidu": "captured_at", "douhot": "created_at
 def _agent_confidence_rank(level: str | None) -> int:
     """置信度等级 → 数值,便于比较。高=3/中=2/低=1;未知视为 0。"""
     return {"高": 3, "中": 2, "低": 1}.get(level or "", 0)
+
+
+# ---------------------------------------------------------------------------
+# 文本左对齐(全角空格补齐)——用于让飞书消息的各列左端对齐
+# ---------------------------------------------------------------------------
+
+def _display_width(s: str) -> int:
+    """字符串显示宽度:中文/全角/歧义(A)/emoji 记 2,ASCII 记 1(飞书字体下 2:1 等宽)。
+
+    `A`(歧义,如 — 破折号)在中文排版中按全角渲染,故记 2——否则含破折号的行会差 1 单位。
+    """
+    return sum(2 if unicodedata.east_asian_width(c) in ("W", "F", "A") else 1 for c in s)
+
+
+def _pad_cell(s: str, width: int) -> str:
+    """把单元格左对齐补齐到指定显示宽度,不足用**全角空格 U+3000** 填充。
+
+    飞书聊天字体下中文/全角=2 个半角宽,全角空格正好补 2 的倍数的差,从而让
+    同一列的字符串左端真正对齐;余数为奇数时末尾补 1 个半角空格。
+    """
+    gap = width - _display_width(s)
+    if gap <= 0:
+        return s
+    return s + "　" * (gap // 2) + (" " if gap % 2 else "")
+
+
+def _aligned_row(prefix: str, cols: list[tuple[str, int]]) -> str:
+    """按 (文本, 列宽) 左对齐拼接成一行,`prefix` 置于行首(不作列对齐)。"""
+    return prefix + "".join(_pad_cell(t, w) for t, w in cols)
 
 
 # ---------------------------------------------------------------------------
@@ -403,13 +433,16 @@ def build_keyword_card(db: Session, user_id: int, settings: Settings) -> dict | 
             rose = sum(1 for r in rows if r["marker"].startswith("↑") or r["marker"].startswith("🔥↑"))
             fell = sum(1 for r in rows if r["marker"].startswith("↓") or r["marker"].startswith("🔥↓"))
             dropped = len(set(prev_map) - set(latest_map))
-            # markdown 表格,飞书自动对齐
-            table = ["| 名称 | 热度值 | 趋势 |", "| --- | --- | --- |"]
+            # 左对齐列(全角空格补齐),缺省填 —
+            cols = [("重点", 4), ("名称", 26), ("热度值", 12), ("趋势", 14)]
+            table = [_aligned_row("  ", cols)]
             for r in rows[:entry_top]:
                 g = f" {r['growth'] * 100:+.0f}%" if r["growth"] is not None else ""
-                mark = "🔴" if r.get("burst") else ""
-                table.append(f"| {mark}{r['title'][:12]} | {_w(r['score'])} | {r['arrow']}{r['trend']}{g} |")
-            table.append(f"| 今日vs昨日 | 🆕{news} ↑{rose} ↓{fell} 跌出{dropped} | — |")
+                mark = "🔴" if r.get("burst") else "—"
+                trend = f"{r['arrow']}{r['trend']}{g}".strip()
+                table.append(_aligned_row("  ", [(mark, 4), (r['title'][:12], 26), (_w(r['score']), 12), (trend, 14)]))
+            table.append(_aligned_row("  ", [("", 4), ("今日vs昨日", 26),
+                                             (f"🆕{news} ↑{rose} ↓{fell} 跌出{dropped}", 12), ("—", 14)]))
             elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(table)}})
         else:
             values = [s.score for s in snaps]
@@ -717,22 +750,25 @@ def run_feishu_realtime(
         if pushed_items:
             head = f"⚡ {SECTION_LABELS[section]} 实时热点"
             if section == "xianyu":
-                # 闲鱼专属:表格 名称丨价格丨想要数丨变化 + 🔴重点(想要数较昨日暴涨)
+                # 闲鱼专属:左对齐列 重点丨名称丨类目丨价格丨想要数丨变化(🔴=想要数较昨日暴涨)
                 today = datetime.now().date().isoformat()
                 yday = (datetime.now() - timedelta(days=1)).date().isoformat()
                 t_daily = {str(d.item_id): d for d in repository.xianyu_daily_by_date(db, user_id, today)}
                 y_daily = {str(d.item_id): d for d in repository.xianyu_daily_by_date(db, user_id, yday)}
-                table = ["| 名称 | 类目 | 价格 | 想要数 | 变化 |", "| --- | --- | --- | --- | --- |"]
+                cols = [("重点", 4), ("名称", 28), ("类目", 10), ("价格", 12), ("想要数", 8), ("变化", 8)]
+                table = [_aligned_row("  ", cols)]
                 for title, reason in pushed_items:
                     item = cur.get(title)
                     iid = str(getattr(item, "item_id", "")) if item else ""
                     d, y = t_daily.get(iid), y_daily.get(iid)
                     want = d.want_count if d else None
-                    price = (getattr(item, "price", "") or (d.price if d else "") or "")[:14]
+                    price = (getattr(item, "price", "") or (d.price if d else "") or "")[:12]
                     cat = (d.category or "")[:8] if d else ""
-                    mark = "🔴 " if (want is not None and y is not None and getattr(y, "want_count", 0)
-                                    and want >= getattr(y, "want_count") * 1.5) else ""
-                    table.append(f"| {mark}{title[:12]} | {cat} | {price} | {want if want is not None else '—'} | {reason} |")
+                    mark = "🔴" if (want is not None and y is not None and getattr(y, "want_count", 0)
+                                    and want >= getattr(y, "want_count") * 1.5) else "—"
+                    table.append(_aligned_row("  ", [
+                        (mark, 4), (title[:12], 28), (cat, 10), (price, 12),
+                        (str(want) if want is not None else "—", 8), (reason, 8)]))
                 client.send_card({
                     "config": {"wide_screen_mode": True},
                     "header": {"template": "blue", "title": {"tag": "plain_text", "content": head}},
@@ -741,22 +777,19 @@ def run_feishu_realtime(
                 pushed = len(pushed_items)
             else:
                 lines = [head]
-                # 给每个推送词补一句"预测/置信度"(历史样本 ≥2 才预测)
+                # 给每个推送词补一句"预测/置信度"(历史样本 ≥2 才预测);固定左对齐列,缺省填 —
                 from app.services import keyword_agent
 
                 series = _SERIES.get(section, lambda db, uid: {})(db, user_id)
+                cols = [("名称", 32), ("变化", 8), ("预测", 12), ("置信度", 8), ("趋势", 8)]
+                lines.append(_aligned_row("  ", cols))
                 for title, reason in pushed_items:
-                    line = f"  · {title[:24]}  {reason}"
                     vals = [v for _, v in series.get(title, [])]
-                    if len(vals) >= 2:
-                        a = keyword_agent.analyze(title, vals)
-                        if a.get("forecast_next") is not None:
-                            line += f"  预测{a['forecast_next']:.0f}"
-                        if a.get("confidence") and a["confidence"] != "数据不足":
-                            line += f" {a['confidence']}"
-                        if a.get("trend_label"):
-                            line += f" {a['trend_label']}"
-                    lines.append(line)
+                    a = keyword_agent.analyze(title, vals) if len(vals) >= 2 else {}
+                    fc = f"预测{a['forecast_next']:.0f}" if a.get("forecast_next") is not None else "—"
+                    conf = a.get("confidence") if a.get("confidence") and a["confidence"] != "数据不足" else "—"
+                    trend = a.get("trend_label") or "—"
+                    lines.append(_aligned_row("  ", [(title[:14], 32), (reason, 8), (fc, 12), (conf, 8), (trend, 8)]))
                 client.send("\n".join(lines))
                 pushed = len(pushed_items)
             logger.info("飞书实时推送 section=%s user=%s 条数=%s", section, user_id, pushed)
@@ -818,10 +851,11 @@ def run_feishu_keyword_realtime(user_id: int, settings: Settings | None = None, 
             fk = getattr(w, "filter_keyword", "") or ""
             fks = (f"·只含「{fk}」" if fk else "")
             dw = w.get("date_window") or douhot._default_window(w["list_type"])
-            # 用 markdown 表格语法(交互卡片 lark_md),飞书自动对齐列
-            table = ["| 名称 | 热度值 | 变化 |", "| --- | --- | --- |"]
+            # 左对齐列(全角空格补齐),缺省填 —
+            cols = [("名称", 28), ("热度值", 12), ("变化", 12)]
+            table = [_aligned_row("  ", cols)]
             for p, sig, r in items:
-                table.append(f"| {r['title'][:12]} | {_w(r['score'])} | {sig} |")
+                table.append(_aligned_row("  ", [(r['title'][:12], 28), (_w(r['score']), 12), (sig, 12)]))
             card = {
                 "config": {"wide_screen_mode": True},
                 "header": {"template": "blue",

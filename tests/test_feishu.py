@@ -234,6 +234,23 @@ def test_split_messages_chunks_long_text() -> None:
     assert "\n".join(chunks) == text
 
 
+def test_pad_cell_left_aligns_columns() -> None:
+    """全角空格补齐:把不同长度单元格补到固定显示宽度,让各列起点一致(左对齐)。"""
+    wid = [32, 8, 12, 6, 8]
+    rows = [
+        ["英国公开赛", "新增", "预测471616", "中", "震荡"],
+        ["卢克", "新增", "预测626755", "低", "震荡"],
+        ["抗战胜利纪念日", "新增", "—", "—", "震荡"],
+    ]
+    for r in rows:
+        # 每列显示宽度都被补到固定宽度
+        assert [feishu._display_width(feishu._pad_cell(t, w)) for t, w in zip(r, wid)] == wid
+    # 各列起点(=前序列宽累加)在每一行一致
+    for r in rows:
+        starts = [sum(wid[: i + 1]) for i in range(len(wid))]
+        assert starts == [sum(wid[: i + 1]) for i in range(len(wid))]
+
+
 def test_build_keyword_card_structure(session) -> None:
     """关键词监控交互卡片:含标题、各关注词的分块(关键词+主题明细)。"""
     from datetime import datetime
