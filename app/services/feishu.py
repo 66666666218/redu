@@ -697,7 +697,9 @@ def run_feishu_keyword_realtime(user_id: int, settings: Settings | None = None, 
             if not rows:
                 continue
             news = [r for r in rows if r["marker"] == "🆕"][:5]
-            risers = [r for r in rows if r["trend"] == "上升期" and r.get("growth") is not None][:5]
+            news_titles = {r["title"] for r in news}
+            risers = [r for r in rows if r["trend"] == "上升期" and r.get("growth") is not None
+                      and r["title"] not in news_titles][:5]  # 新进的不重复列为上升
             bursts = [r for r in rows if r.get("burst")][:3]
             if not news and not risers and not bursts:
                 continue
