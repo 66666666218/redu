@@ -265,9 +265,11 @@ def _keyword_entries_rows(db: Session, user_id: int, w: dict, snaps: list) -> tu
 
 def _entry_line(r: dict) -> str:
     g = f"{r['growth'] * 100:+.0f}%" if r["growth"] is not None else "—"
-    fc = f" 预测{_w(r['forecast'])}" if r["forecast"] is not None else ""
-    flag = "🔴重点 " if r.get("burst") else ""  # 吃瓜/爆炸性话题加重点标记
-    return f"  {flag}{r['marker']} {r['title'][:22]}  {_w(r['score'])}  {r['arrow']}{r['trend']}  {g}{fc}"
+    fc = f"  预测{_w(r['forecast'])}" if r["forecast"] is not None else ""
+    flag = "🔴重点 " if r.get("burst") else ""
+    # 表格形式:名称丨热度值丨趋势
+    row = f"{str(r['title'])[:20]:<20}丨{_w(r['score']):>8}丨{r['arrow']}{r['trend']} {g}{fc}"
+    return f"  {r['marker']} {flag}{row}"
 
 
 def _overview(rows: list[dict]) -> str:
@@ -696,15 +698,14 @@ def run_feishu_keyword_realtime(user_id: int, settings: Settings | None = None, 
                 continue
             if _in_cooldown(db, user_id, "kw_realtime", w["keyword"], settings):
                 continue
-            lines = [f"📌 话题词监控 · {w['keyword']}"]
-            if news:
-                lines.append("  🆕 新进:" + "、".join(f"{r['title'][:14]}({_w(r['score'])})" for r in news))
-            if risers:
-                lines.append("  ↑ 上升:" + "、".join(
-                    f"{r['title'][:12]}+{r['growth'] * 100:.0f}%(现{_w(r['score'])})" for r in risers))
-            if bursts:
-                lines.append("  🔴重点 预测爆发:" + "、".join(
-                    f"{r['title'][:12]}(现{_w(r['score'])})" for r in bursts))
+            lines = [f"📌 话题词监控 · {w['keyword']}",
+                     f"  {'名称':<16}丨{'热度值':>8}丨趋势"]
+            for r in news:
+                lines.append(f"    {r['title'][:14]:<16}丨{_w(r['score']):>8}丨🆕新进")
+            for r in risers:
+                lines.append(f"    {r['title'][:14]:<16}丨{_w(r['score']):>8}丨↑上升期 +{r['growth'] * 100:.0f}%")
+            for r in bursts:
+                lines.append(f"    {r['title'][:14]:<16}丨{_w(r['score']):>8}丨🔴预测爆发")
             _mark_alerted(db, user_id, "kw_realtime", w["keyword"], "话题词变化")
             if client.send("\n".join(lines)):
                 pushed += 1
