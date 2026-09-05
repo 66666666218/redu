@@ -360,3 +360,84 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
     finally:
         if own_session:
             db.close()
+
+
+def check_health_stalls(settings: Settings | None = None, db: Session | None = None) -> int:
+    """采集停摆告警:已配 Cookie(在用)的平台超过 `health_stall_hours` 无新数据写入 → 推飞书。
+
+    补 `check_collect_failures` 盲区——它只看"失败运行",漏掉**静默停摆**(后端宕机/调度停/
+    被风控全挡却未记为失败,如磁盘满导致整站 502)。返回告警条数;未配 webhook 返回 0。`db` 供测试注入。
+    """
+    settings = settings or get_settings()
+    if not settings.feishu_webhook:
+        return 0
+    from sqlalchemy import func
+
+    from app.db import get_session_local
+    from app.db.models import BaiduHotItem, DouhotWord, FeishuAlert, UserCookie, WeiboHotItem, XianyuItem
+    from app.services.feishu_client import FeishuClient
+
+    own_session = db is None
+    db = db or get_session_local()()
+    stall_hours = getattr(settings, "health_stall_hours", 24) or 24
+    since = datetime.now() - timedelta(hours=stall_hours)
+    labels = {"weibo": "微博", "xianyu": "闲鱼", "douhot": "抖音", "baidu": "百度"}
+    data_tables = {
+        "weibo": (WeiboHotItem, "captured_at"),
+        "baidu": (BaiduHotItem, "captured_at"),
+        "xianyu": (XianyuItem, "created_at"),
+        "douhot": (DouhotWord, "created_at"),
+    }
+    # 在用平台 = 有启用用户配了该平台 Cookie(否则该平台本就不采集,不告警)
+    # Cookie 平台名与数据平台名不同(goofish→xianyu,douyin→douhot),需映射。
+    cookie_to_data = {"weibo": "weibo", "baidu": "baidu", "douyin": "douhot", "goofish": "xianyu"}
+    data_to_cookie = {v: k for k, v in cookie_to_data.items()}
+    raw = set(db.execute(
+        select(UserCookie.platform).join(User, User.id == UserCookie.user_id).where(User.enabled.is_(True)).distinct()
+    ).scalars().all())
+    in_use = {cookie_to_data.get(c, c) for c in raw}
+    stalled = []
+    for p, (model, col) in data_tables.items():
+        if p not in in_use:
+            continue
+        latest = db.execute(select(func.max(getattr(model, col)))).scalar()
+        if latest is None or latest < since:
+            # 记一个"在用该平台的首个启用用户"作为告警归属,便于去重
+            uid = db.scalar(select(User.id).join(UserCookie, UserCookie.user_id == User.id).where(
+                User.enabled.is_(True), UserCookie.platform == data_to_cookie[p]).limit(1))
+            stalled.append((p, latest, uid))
+    stalled = [s for s in stalled if s[2] is not None]
+    if not stalled:
+        if own_session:
+            db.close()
+        return 0
+
+    cooldown = settings.feishu_alert_cooldown_hours * 3600
+    now = datetime.now()
+    items = []
+    for p, latest, uid in stalled:
+        existing = db.scalar(select(FeishuAlert).where(
+            FeishuAlert.section == "health_stall", FeishuAlert.title == p, FeishuAlert.user_id == uid))
+        if existing and (now - existing.alerted_at).total_seconds() < cooldown:
+            continue
+        items.append((p, latest))
+        if existing:
+            existing.reason, existing.alerted_at = f"无数据流入({stall_hours}h)", now
+        else:
+            db.add(FeishuAlert(user_id=uid, section="health_stall", title=p, reason=f"无数据流入({stall_hours}h)"))
+    sent = 0
+    if items:
+        lines = [f"⚠️ 采集停摆(> {stall_hours}h 无新数据)"]
+        for p, latest in items:
+            when = latest.strftime("%m-%d %H:%M") if latest else "从未进数据"
+            lines.append(f"  · {labels.get(p, p)}:最近数据 {when}")
+        lines.append("可能:后端宕机/调度停止/Cookie失效/被风控全挡(闲鱼常见滑块/限流)")
+        if FeishuClient(settings.feishu_webhook, settings.feishu_secret).send("\n".join(lines)):
+            db.commit()
+            sent = len(items)
+            logger.info("采集停摆告警推送,条数=%s", sent)
+        else:
+            db.rollback()  # 发送失败不记账,下次再试
+    if own_session:
+        db.close()
+    return sent

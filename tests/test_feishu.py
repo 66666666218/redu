@@ -450,6 +450,27 @@ def test_collect_failures_no_alert_if_recovered(monkeypatch, session) -> None:
     assert not sent
 
 
+def test_health_stalls_alert_and_cooldown(monkeypatch, session) -> None:
+    """采集停摆告警:在用平台(配了Cookie)超过 health_stall_hours 无新数据 → 推飞书;冷却期内不重推。"""
+    from datetime import datetime, timedelta
+
+    from app.services import alert_service
+    from app.db.models import UserCookie, XianyuItem
+
+    session.add(UserCookie(user_id=1, platform="goofish", cookie="x"))  # 闲鱼在用(session 已预置用户#1)
+    # 闲鱼数据停在 48h 前(> 24h 阈值)→ 停摆
+    session.add(XianyuItem(user_id=1, item_id="i1", title="商品", created_at=datetime.now() - timedelta(hours=48)))
+    session.commit()
+
+    sent = []
+    monkeypatch.setattr(feishu_client, "FeishuClient", lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
+    n = alert_service.check_health_stalls(_settings(health_stall_hours=24), db=session)
+    assert n == 1
+    assert "闲鱼" in sent[0] and "停摆" in sent[0]
+    # 冷却期内(6h)再跑 → 不重推
+    assert alert_service.check_health_stalls(_settings(health_stall_hours=24), db=session) == 0
+
+
 def test_realtime_baidu_no_keyerror(monkeypatch, session) -> None:
     """baidu 接入后实时提醒不应再 KeyError(此前 _TABLES 缺 baidu)。"""
     from datetime import datetime
