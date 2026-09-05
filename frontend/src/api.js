@@ -98,6 +98,7 @@ export const api = {
   adminMe: () => req('GET', '/api/admin/me'),
   adminDashboard: () => req('GET', '/api/admin/dashboard'),
   adminInsights: () => req('GET', '/api/admin/insights'),
+  adminHealth: () => req('GET', '/api/admin/health'),
   adminUsers: (q) => req('GET', '/api/admin/users' + (q ? '?q=' + encodeURIComponent(q) : '')),
   adminUserToggle: (id) => req('POST', `/api/admin/users/${id}/toggle`),
   adminUserDel: (id) => req('DELETE', `/api/admin/users/${id}`),

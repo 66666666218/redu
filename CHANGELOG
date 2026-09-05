@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- [2026-09-06 13:40] FEAT: **管理后台·运维 Tab 加「采集健康度」入口** — 前端接入 `/api/admin/health`:运维 tab 顶部新增健康度卡片(各平台最近采集状态/近24h成功失败/最新数据写入/飞书推送/已配Cookie 汇总),`loadHealth()` 独立加载不阻塞主数据。前端已构建(Files: frontend/src/{api.js,views/Admin.vue}, CHANGELOG)
+
 - [2026-09-06 13:30] FEAT: **新增「采集健康度」运维接口 `/api/admin/health`** — 用户要求"一键看各平台最近采集/推送状态,免手查 MySQL"。`admin.collection_health` 聚合:① 各平台(weibo/xianyu/douhot/baidu/xianyu_deep)最近一次 `RunRecord` 状态(last_run/last_status/last_detail/近24h runs/failed);② 各平台最新一条数据写入时间;③ 飞书推送计数+最近推送;④ 各平台已配 Cookie 数量。路由走 `require_perm("logs.view")`。新增 `test_collection_health_summary`;全量 168 项通过;文档同步 doc/API.md 7.4b(Files: app/{admin.py,api/admin.py}, tests/test_platform.py, doc/API.md, CHANGELOG)
 
 - [2026-09-06 13:00] FEAT: **闲鱼采集风控降频——每轮只抓少量关键词+轮转覆盖** — 用户反馈闲鱼被 goofish 风控挡(限流+滑块),方案是"人工过滑块 + 降频减负"。降频减负落地:① `collect_hot` 加 `start_offset`,每轮只处理 `xianyu_batch_keywords`(默认 5)个关键词,从 `start_offset` 起的窗口开始、绕回,多轮才覆盖全部——避免一轮把 13 个关键词瞬间连打过去触发 mtop 风控;② `run_xianyu` 按已运行 `xianyu` 次数 `prior` × batch 计算起始窗口(轮转);③ `xianyu_request_delay` 默认 6.0→**8.0** 拉大间隔。新增 `test_collect_hot_batches_and_rotates`(轮0/1/2 窗口验证);全量 167 项通过。配合"人工过滑块":`collect_hot` 遇 `XianyuVerify` 仍立即停、保留已采数据;冷却后按新窗口继续(Files: app/services/{xianyu.py,tenant.py}, config/settings.py, tests/test_xianyu.py, .env.example)
