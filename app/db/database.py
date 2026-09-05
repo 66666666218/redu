@@ -112,7 +112,7 @@ def _migrate() -> None:
         ],
         "runs": ["retry_count INTEGER DEFAULT 0"],
         "alerts": ["section VARCHAR(32) DEFAULT ''"],
-        "douhot_watch": ["section VARCHAR(16) DEFAULT 'douhot'"],
+        "douhot_watch": ["section VARCHAR(16) DEFAULT 'douhot'", "filter_keyword VARCHAR(64) DEFAULT ''"],
         "douhot_watch_snap": ["section VARCHAR(16) DEFAULT 'douhot'", "entry_title VARCHAR(255) DEFAULT ''", "trend_growth FLOAT DEFAULT 0"],
     }
     with get_engine().begin() as conn:

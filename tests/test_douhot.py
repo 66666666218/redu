@@ -290,6 +290,39 @@ def test_fetch_keyword_items_drops_empty_title(monkeypatch: pytest.MonkeyPatch) 
     assert len(items) == 1 and items[0]["title"] == "有效词" and items[0]["score"] == 5
 
 
+def test_fetch_keyword_items_filter_keyword(monkeypatch: pytest.MonkeyPatch) -> None:
+    """过滤词非空时只保留标题含该词的主题(大小写不敏感)。"""
+    class _Fake:
+        def challenge_billboard(self, limit=20, keyword="", date_window=1):
+            return [
+                {"challenge_name": "完整版短剧", "score": 100, "trends": [{"value": 1}, {"value": 2}]},
+                {"challenge_name": "完整版综艺", "score": 50, "trends": [{"value": 1}, {"value": 2}]},
+                {"challenge_name": "短剧推荐", "score": 80, "trends": [{"value": 1}, {"value": 2}]},
+            ]
+
+    monkeypatch.setattr(douhot, "DouhotClient", lambda cookie, settings=None: _Fake())
+    items = douhot.fetch_keyword_items("ck", "topic", "完整版", Settings(_env_file=None), filter_keyword="短剧")
+    assert [it["title"] for it in items] == ["完整版短剧", "短剧推荐"]  # 只留含"短剧"的
+
+
+def test_fetch_keyword_items_filter_short_drama_features(monkeypatch: pytest.MonkeyPatch) -> None:
+    """filter_keyword=短剧 时,标题不含"短剧"二字但命中短剧特征词的主题也保留(兜底误漏)。
+
+    特征词(一口气看完 / 全80集 / 爽剧等)只做高精度判定;综艺/电影等无短剧特征的主题仍被剔除。
+    """
+    class _Fake:
+        def challenge_billboard(self, limit=20, keyword="", date_window=1):
+            return [
+                {"challenge_name": "一口气看完80集", "score": 100, "trends": [{"value": 1}, {"value": 2}]},
+                {"challenge_name": "全100集爽剧推荐", "score": 90, "trends": [{"value": 1}, {"value": 2}]},
+                {"challenge_name": "全员加速中完整版", "score": 50, "trends": [{"value": 1}, {"value": 2}]},  # 综艺,无短剧特征
+            ]
+
+    monkeypatch.setattr(douhot, "DouhotClient", lambda cookie, settings=None: _Fake())
+    items = douhot.fetch_keyword_items("ck", "topic", "完整版", Settings(_env_file=None), filter_keyword="短剧")
+    assert [it["title"] for it in items] == ["一口气看完80集", "全100集爽剧推荐"]
+
+
 def test_douhot_honors_proxy_switch_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
     """DOUHOT_USE_PROXY 默认关闭时,即使配了代理池也不走(douhot 直连)。
 

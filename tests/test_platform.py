@@ -239,7 +239,7 @@ def test_watch_snap_records_each_topic_entry(monkeypatch, session) -> None:
     session.commit()
     monkeypatch.setattr(
         douhot, "fetch_keyword_items",
-        lambda cookie, list_type, keyword, settings=None, limit=50: [
+        lambda cookie, list_type, keyword, settings=None, limit=50, filter_keyword="": [
             {"title": "续火花", "score": 15744747},
             {"title": "续火花专用视频", "score": 4595313},
         ],
@@ -254,6 +254,27 @@ def test_watch_snap_records_each_topic_entry(monkeypatch, session) -> None:
     assert [e["title"] for e in aw[0]["entries"]] == ["续火花", "续火花专用视频"]  # 按得分排序
     # 摘要应点名具体主题(不笼统说"该词上升"),此处两个都是一点=新增
     assert "追踪2主题" in aw[0]["summary"] and "新增" in aw[0]["summary"]
+
+
+def test_record_watch_snaps_filter_only_matching(session, monkeypatch) -> None:
+    """带过滤词的关注:仅当某主题标题含过滤词时才被记录(每个关键词独立隔离)。"""
+    from app.db.models import DouhotWatchSnap
+    from app.services import douhot
+    from app.services.keyword_watch import add_watch, record_watch_snaps, watch_analytics
+
+    add_watch(session, 1, "douhot", "topic", "完整版", "短剧")
+    session.commit()
+
+    def fake_fk(cookie, list_type, keyword, settings=None, limit=50, filter_keyword=""):
+        all_items = [{"title": "完整版短剧", "score": 100}, {"title": "完整版综艺", "score": 50}]
+        return [it for it in all_items if not filter_keyword or filter_keyword in it["title"]]
+
+    monkeypatch.setattr(douhot, "fetch_keyword_items", fake_fk)
+    record_watch_snaps("douhot", session, 1, {"word": []}, cookie="ck")
+    snaps = session.scalars(select(DouhotWatchSnap)).all()
+    assert [s.entry_title for s in snaps] == ["完整版短剧"]  # 只记录含"短剧"的主题
+    aw = watch_analytics("douhot", session, 1)
+    assert aw[0].get("filter_keyword") == "短剧"  # 卡片可显示"只含短剧"
 
 
 def test_xianyu_verify_cooldown(session) -> None:

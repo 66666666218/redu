@@ -14,6 +14,8 @@
 """
 from __future__ import annotations
 
+import re
+
 from config.settings import Settings
 from app.services.douhot_client import DouhotAuthError, DouhotClient, DouhotError
 from app.utils import get_logger
@@ -165,18 +167,47 @@ def _trend_of(it: dict) -> tuple[float | None, str]:
     return growth, label
 
 
+# 短剧标题特征词:命中任一条即视为短剧(而非字面含"短剧")。
+# 只做**高精度**的格式/引流词判定,不穷举剧名——"我在八零年代当后妈"这类纯剧名
+# 无法仅凭标题可靠归为短剧。用于 `_title_matches` 在 filter_keyword=短剧 时兜底,
+# 覆盖"标题不含'短剧'二字但确实是短剧"(如"一口气看完 80 集")的误漏。
+_SHORT_DRAMA_PATTERNS = re.compile(
+    r"短剧|微短剧|爽剧|下饭剧|一口气.{0,6}(看完|追完|追|刷完)|全\d{2,3}集", re.IGNORECASE
+)
+
+
+def _is_short_drama(title: str) -> bool:
+    """标题是否命中短剧特征词(而非字面含"短剧")。"""
+    return bool(_SHORT_DRAMA_PATTERNS.search(title))
+
+
+def _title_matches(title: str, filter_keyword: str) -> bool:
+    """标题是否命中过滤词;`filter_keyword` 应已小写。
+
+    普通词走子串匹配(大小写不敏感);等于"短剧"时再用短剧特征词兜底,从而把
+    "标题不含'短剧'二字但确实是短剧"的主题也保留下来。
+    """
+    if filter_keyword in title.lower():
+        return True
+    return filter_keyword == "短剧" and _is_short_drama(title)
+
+
 def fetch_keyword_items(cookie: str, list_type: str, keyword: str, settings: Settings | None = None,
-                        limit: int = 50) -> list[dict]:
+                        limit: int = 50, filter_keyword: str = "") -> list[dict]:
     """按关键词查某子榜的**条目列表**(榜外词也能查到),供榜 tab 按词搜索。
 
     与 `fetch_list_keyword_heat`(单条最优)不同,这里返回过滤后的**整表**:
     内容词走 `hot_word_keyword`,搜索/视频/话题走带 keyword 的 query_list(`limit` 条,
     话题榜可到 100+,搜索/视频受服务端上限约 50),订阅(subscribe)无 keyword 参数,不支持(返回空)。
-    每条除 `title/score` 外,附带 `trend_growth`/`trend_label`(由 `trends` 每日序列算出,真实趋势)。
+    每条除 `title/score` 外,附带 `trend_growth`/`trend_label`(由 `trends` 序列算出,真实趋势)。
+    `filter_keyword` 非空时**只保留标题命中该词的主题**(子串,大小写不敏感;为"短剧"时
+    额外用短剧特征词兜底,覆盖"标题不含'短剧'二字但确实是短剧"的误漏)——用于"只监控
+    完整版里的短剧"这类二次过滤;每个关键词独立传各自的值,互不影响。
     """
     kw = keyword.strip()
     if not kw:
         return []
+    fk = (filter_keyword or "").strip().lower()
     try:
         client = DouhotClient(cookie, settings)
         if list_type == "word":
@@ -192,6 +223,8 @@ def fetch_keyword_items(cookie: str, list_type: str, keyword: str, settings: Set
                 title = str(_pick(it, title_keys) or "").strip()
                 if not title:
                     continue
+                if fk and not _title_matches(title, fk):
+                    continue  # 过滤词非空且标题不命中 → 跳过(只留含该词/短剧特征的主题)
                 growth, label = _trend_of(it)
                 items.append({"title": title, "score": _pick(it, score_keys) or 0,
                               "trend_growth": growth, "trend_label": label})
@@ -200,6 +233,8 @@ def fetch_keyword_items(cookie: str, list_type: str, keyword: str, settings: Set
     except DouhotError as exc:
         logger.warning("热点宝%s按词搜索失败(keyword=%s):%s", list_type, kw, exc)
         return []
+    if fk and list_type == "word":
+        items = [it for it in items if _title_matches(str(it.get("title", "")), fk)]
     return [it for it in items if it["title"]]
 
 

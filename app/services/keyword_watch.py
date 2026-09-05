@@ -22,29 +22,36 @@ _WORD_TYPES = ("word", "search", "subscribe", "video", "topic")
 _ENTRY_CAP = 100  # 榜单定向搜索类关注,每次采集最多记录的相关主题条数(默认 100,可用 DOUHOT_WATCH_ENTRY_CAP 覆盖)
 
 
-def add_watch(session: Session, user_id: int, section: str, list_type: str, keyword: str) -> dict:
+def add_watch(session: Session, user_id: int, section: str, list_type: str, keyword: str,
+              filter_keyword: str = "") -> dict:
     list_type = list_type if list_type in _WORD_TYPES else "word"
     keyword = keyword.strip()
-    if repository.get_watch(session, user_id, section, list_type, keyword) is None:
-        session.add(DouhotWatch(user_id=user_id, section=section, list_type=list_type, keyword=keyword))
+    filter_keyword = (filter_keyword or "").strip()
+    if repository.get_watch(session, user_id, section, list_type, keyword, filter_keyword) is None:
+        session.add(DouhotWatch(user_id=user_id, section=section, list_type=list_type, keyword=keyword,
+                                filter_keyword=filter_keyword))
         session.commit()
-    return {"section": section, "list_type": list_type, "keyword": keyword}
+    return {"section": section, "list_type": list_type, "keyword": keyword,
+            "filter_keyword": filter_keyword}
 
 
-def add_douhot_watch(session: Session, user_id: int, list_type: str, keyword: str) -> dict:
-    return add_watch(session, user_id, "douhot", list_type, keyword)  # 兼容旧调用
+def add_douhot_watch(session: Session, user_id: int, list_type: str, keyword: str,
+                     filter_keyword: str = "") -> dict:
+    return add_watch(session, user_id, "douhot", list_type, keyword, filter_keyword)  # 兼容旧调用
 
 
 def list_watch(session: Session, user_id: int, section: str | None = None) -> list[dict]:
     return [
-        {"section": r.section, "list_type": r.list_type, "keyword": r.keyword}
+        {"section": r.section, "list_type": r.list_type, "keyword": r.keyword,
+         "filter_keyword": getattr(r, "filter_keyword", "") or ""}
         for r in repository.list_watches(session, user_id, section)
     ]
 
 
-def remove_watch(session: Session, user_id: int, section: str, list_type: str, keyword: str) -> bool:
+def remove_watch(session: Session, user_id: int, section: str, list_type: str, keyword: str,
+                 filter_keyword: str = "") -> bool:
     """取消一个关键词关注(并删除其历史快照)。返回是否删除。"""
-    return repository.delete_watch(session, user_id, section, list_type, keyword)
+    return repository.delete_watch(session, user_id, section, list_type, keyword, filter_keyword)
 
 
 def list_douhot_watch(session: Session, user_id: int) -> list[dict]:
@@ -81,7 +88,8 @@ def record_watch_snaps(
         if section == "douhot" and w.list_type in ("search", "video", "topic") and cookie:
             cap = int(getattr(settings, "douhot_watch_entry_cap", None) or _ENTRY_CAP)
             try:
-                entries = douhot.fetch_keyword_items(cookie, w.list_type, w.keyword, settings, limit=cap)
+                entries = douhot.fetch_keyword_items(cookie, w.list_type, w.keyword, settings, limit=cap,
+                                                     filter_keyword=getattr(w, "filter_keyword", "") or "")
             except Exception:  # noqa: BLE001 - 定向查询失败不中断采集
                 entries = []
             for idx, it in enumerate(entries[:cap], start=1):
@@ -175,6 +183,7 @@ def watch_analytics(section: str, session: Session, user_id: int) -> list[dict]:
                 ov_parts.append(f"新{news}")
             out.append({
                 "section": section, "keyword": w.keyword, "list_type": w.list_type,
+                "filter_keyword": getattr(w, "filter_keyword", "") or "",
                 "last_score": top["last_score"], "rank_now": top["rank_now"],
                 "points": len(entry_agents), "growth": top["growth"],
                 "trend_label": "上升期" if risers else ("平稳" if not news else "平稳"),
@@ -196,6 +205,7 @@ def watch_analytics(section: str, session: Session, user_id: int) -> list[dict]:
                 "section": section,
                 "keyword": w.keyword,
                 "list_type": w.list_type,
+                "filter_keyword": getattr(w, "filter_keyword", "") or "",
                 "last_score": values[-1] if values else 0,
                 "rank_now": snaps[-1].rank_now if snaps else 0,
                 "points": len(values),

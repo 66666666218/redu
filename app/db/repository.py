@@ -143,18 +143,21 @@ def list_watches(db: Session, user_id: int, section: str | None = None) -> list[
     return db.scalars(stmt).all()
 
 
-def get_watch(db: Session, user_id: int, section: str, list_type: str, keyword: str) -> DouhotWatch | None:
+def get_watch(db: Session, user_id: int, section: str, list_type: str, keyword: str,
+              filter_keyword: str = "") -> DouhotWatch | None:
     return db.scalar(
         select(DouhotWatch).where(
             DouhotWatch.user_id == user_id, DouhotWatch.section == section,
             DouhotWatch.list_type == list_type, DouhotWatch.keyword == keyword,
+            DouhotWatch.filter_keyword == filter_keyword,
         )
     )
 
 
-def delete_watch(db: Session, user_id: int, section: str, list_type: str, keyword: str) -> bool:
+def delete_watch(db: Session, user_id: int, section: str, list_type: str, keyword: str,
+                 filter_keyword: str = "") -> bool:
     """删除某关键词关注及其全部历史快照(避免孤儿数据)。返回是否删除了关注。"""
-    w = get_watch(db, user_id, section, list_type, keyword)
+    w = get_watch(db, user_id, section, list_type, keyword, filter_keyword)
     if w is None:
         return False
     snaps = db.scalars(

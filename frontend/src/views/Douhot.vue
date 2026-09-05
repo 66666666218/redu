@@ -13,18 +13,20 @@ const list = ref([])
 const loading = ref(false)
 const busy = ref(false)
 const watches = ref([])
-const watchForm = ref({ list_type: 'word', keyword: '' })
+const watchForm = ref({ list_type: 'word', keyword: '', filter_keyword: '' })
 const searchKw = ref('')
+const searchFilter = ref('')
 const appliedKw = ref('')
 
 async function loadList(t) {
   active.value = t; loading.value = true
-  searchKw.value = ''; appliedKw.value = ''   // 切换 tab 时清除搜索,避免串榜
+  searchKw.value = ''; searchFilter.value = ''; appliedKw.value = ''   // 切换 tab 时清除搜索,避免串榜
   await loadWatches()                          // 先刷新关注,确保拿到该榜关键词
   // 热点宝式:该榜设了"逐条类"关键词(话题/搜索/视频)→ 自动按该词搜索显示,而非默认榜
-  const kw = watches.value.find(w => w.list_type === t && ['search', 'video', 'topic'].includes(t))?.keyword
+  const aw = watches.value.find(w => w.list_type === t && ['search', 'video', 'topic'].includes(t))
+  const kw = aw?.keyword, fk = aw?.filter_keyword || ''
   try {
-    const r = await api.douhotList(t, kw || '')
+    const r = await api.douhotList(t, kw || '', fk)
     list.value = r.items || []
     if (kw && r.items) appliedKw.value = kw
   }
@@ -35,28 +37,29 @@ async function searchList() {
   if (!kw) return
   loading.value = true
   try {
-    const r = await api.douhotList(active.value, kw)
+    const r = await api.douhotList(active.value, kw, searchFilter.value.trim())
     list.value = r.items || []
     appliedKw.value = kw
   } catch (e) { list.value = []; toastError(e.message) } finally { loading.value = false }
 }
 async function clearSearch() {
-  searchKw.value = ''; appliedKw.value = ''
+  searchKw.value = ''; searchFilter.value = ''; appliedKw.value = ''
   await loadList(active.value)
 }
 // 把搜索框当前词一键加入底部"关键词监控"(用当前 tab 的榜单类型),采集后即记录趋势
 async function saveSearchWatch() {
   const kw = (searchKw.value.trim() || appliedKw.value).trim()
   if (!kw) { toastError('请先输入要关注的关键词'); return }
+  const fk = searchFilter.value.trim()
   try {
-    await api.watchAdd('douhot', kw, active.value)
-    toastOk(`已关注「${kw}」(${tabs.find(x=>x.key===active.value)?.label}),采集后自动记录趋势`)
+    await api.watchAdd('douhot', kw, active.value, fk)
+    toastOk(`已关注「${kw}」(${tabs.find(x=>x.key===active.value)?.label})${fk ? `,只监控含「${fk}」的` : ''},采集后自动记录趋势`)
     await loadWatches()
   } catch (e) { toastError(e.message) }
 }
 async function removeWatch(w) {
   try {
-    await api.watchDel(w.section || 'douhot', w.list_type || 'word', w.keyword)
+    await api.watchDel(w.section || 'douhot', w.list_type || 'word', w.keyword, w.filter_keyword || '')
     toastOk(`已取消关注「${w.keyword}」`)
     await loadWatches()
   } catch (e) { toastError(e.message) }
@@ -74,7 +77,11 @@ async function collect() {
 }
 async function addWatch() {
   if (!watchForm.value.keyword.trim()) return
-  try { await api.douhotWatchAdd(watchForm.value.list_type, watchForm.value.keyword.trim()); watchForm.value.keyword=''; await loadWatches() }
+  try {
+    await api.douhotWatchAdd(watchForm.value.list_type, watchForm.value.keyword.trim(), watchForm.value.filter_keyword.trim())
+    watchForm.value.keyword = ''; watchForm.value.filter_keyword = ''
+    await loadWatches()
+  }
   catch (e) { toastError(e.message) }
 }
 
@@ -105,8 +112,9 @@ onMounted(async () => { await loadList('word'); await loadWatches() })
     </div>
 
     <div class="card" v-if="!loading">
-      <div class="row" style="gap:8px;margin-bottom:10px">
-        <input v-model="searchKw" placeholder="输入关键词,按词搜该榜热度(榜外也能查)" style="margin:0;flex:1" @keyup.enter="searchList" />
+      <div class="row" style="gap:8px;margin-bottom:10px;flex-wrap:wrap">
+        <input v-model="searchKw" placeholder="输入关键词,按词搜该榜热度(榜外也能查)" style="margin:0;flex:1;min-width:140px" @keyup.enter="searchList" />
+        <input v-model="searchFilter" placeholder="过滤词(可空,只留含该词的)" style="margin:0;flex:.6;min-width:120px" @keyup.enter="searchList" />
         <button @click="searchList">搜索</button>
         <button @click="saveSearchWatch" title="把当前词存为长期监控,采集后记录趋势">📌 关注</button>
         <button v-if="appliedKw" class="ghost" @click="clearSearch">清除</button>
@@ -151,11 +159,12 @@ onMounted(async () => { await loadList('word'); await loadWatches() })
           <option v-for="t in tabs" :key="t.key" :value="t.key">{{ t.label }}</option>
         </select>
         <input v-model="watchForm.keyword" placeholder="任意词(榜外也能查)" style="margin:0;flex:1" @keyup.enter="addWatch" />
+        <input v-model="watchForm.filter_keyword" placeholder="过滤词(可空:只监控含该词的)" style="margin:0;flex:.7;min-width:110px" @keyup.enter="addWatch" />
         <button @click="addWatch">关注</button>
       </div>
       <div v-if="watches.length" class="grid" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
-        <div class="watch-card" v-for="w in watches" :key="w.keyword">
-          <div class="row" style="justify-content:space-between"><b>{{ w.keyword }} <span v-if="w.burst" style="color:var(--down)">🔴重点</span></b>
+        <div class="watch-card" v-for="w in watches" :key="w.keyword + w.list_type + (w.filter_keyword||'')">
+          <div class="row" style="justify-content:space-between"><b>{{ w.keyword }} <span v-if="w.filter_keyword" style="opacity:.7;font-weight:400">只含「{{ w.filter_keyword }}」</span> <span v-if="w.burst" style="color:var(--down)">🔴重点</span></b>
             <span class="badge" :class="tclass(w.trend_label)">{{ (w.entries && w.entries.length) ? (w.trend_overview || w.trend_label) : w.trend_label }}</span></div>
           <div class="row" style="gap:14px;margin:8px 0">
             <div><div class="empty" style="padding:0">当前</div><b class="num">{{ fmt(w.last_score) }}</b></div>

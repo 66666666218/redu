@@ -384,7 +384,7 @@ def build_keyword_card(db: Session, user_id: int, settings: Settings) -> dict | 
             if not rows:
                 continue
             elements.append({"tag": "div", "text": {"tag": "lark_md",
-                            "content": f"**{w['keyword']}** · {label} · {_overview(rows)}"}})
+                            "content": f"**{w['keyword']}**{' · 只含「' + (getattr(w, 'filter_keyword', '') or '') + '」' if getattr(w, 'filter_keyword', '') else ''} · {label} · {_overview(rows)}"}})
             # 摘要:追踪N主题 · 上升:xx/新增:xx(与仪表盘一致,不笼统说该词上升)
             risers = [r for r in rows if r["trend"] == "上升期" and r.get("growth") is not None]
             new_ones = [r for r in rows if r["marker"] == "🆕"]
@@ -814,6 +814,8 @@ def run_feishu_keyword_realtime(user_id: int, settings: Settings | None = None, 
             if _in_cooldown(db, user_id, "kw_realtime", w["keyword"], settings):
                 continue
             items = sorted(changed.values(), key=lambda x: (x[0], -x[2]["score"]))[:12]
+            fk = getattr(w, "filter_keyword", "") or ""
+            fks = (f"·只含「{fk}」" if fk else "")
             # 用 markdown 表格语法(交互卡片 lark_md),飞书自动对齐列
             table = ["| 名称 | 热度值 | 变化 |", "| --- | --- | --- |"]
             for p, sig, r in items:
@@ -821,7 +823,7 @@ def run_feishu_keyword_realtime(user_id: int, settings: Settings | None = None, 
             card = {
                 "config": {"wide_screen_mode": True},
                 "header": {"template": "blue",
-                           "title": {"tag": "plain_text", "content": f"📌 话题词监控 · {w['keyword']}(近1小时)"}},
+                           "title": {"tag": "plain_text", "content": f"📌 话题词监控 · {w['keyword']}(近1小时){fks}"}},
                 "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(table)}}],
             }
             _mark_alerted(db, user_id, "kw_realtime", w["keyword"], "话题词变化")

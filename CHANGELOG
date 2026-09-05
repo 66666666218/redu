@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- [2026-09-06 09:30] FEAT: **filter_keyword=短剧 增加标题特征词兜底** — 用户要求"根据完整版返回的标题判断是否属于短剧再过滤"。此前 `filter_keyword` 只做纯子串匹配,标题不含"短剧"二字但确实是短剧的主题(如"一口气看完80集""全100集爽剧推荐")会被漏掉。新增 `_SHORT_DRAMA_PATTERNS`(短剧/微短剧/爽剧/下饭剧/一口气看完/全\d{2,3}集,高精度格式+引流词)与 `_is_short_drama`/`_title_matches`;`fetch_keyword_items` 两处过滤(搜索/视频/话题逐条 + 内容词整表)统一走 `_title_matches`,仅当 `filter_keyword="短剧"` 时用特征词兜底,其余词仍走子串。新增用例 `test_fetch_keyword_items_filter_short_drama_features`(一口气看完80集/全100集爽剧推荐保留、全员加速中完整版属综艺剔除);全量 61 项通过(Files: app/services/douhot.py, tests/test_douhot.py, doc/API.md)
+
 - [2026-09-05 12:00] FIX: **内容词关键词监控改用 `trends` 趋势(而非误导的 score)** — 用户指出"内容词=内容词趋势,与话题榜是两个独立板块"。实测内容词 `hot_word_keyword` 的 `score` 字段常为 0/误导("下载"score=0 但有真实 trends 序列 51→3392→75→18.6)。修复:`fetch_keyword_heat` 用 `trends` 算 `trend_growth`/`trend_label`,score 取最新趋势值;`record_watch_snaps`/`watch_analytics`/`_keyword_watch_lines` 用 trend_growth(为 0 时回退分数序列)。实测:内容词"下载"趋势=回落期环比-64%(不再恒0)。全量 158 项通过(Files: app/services/{douhot.py,keyword_watch.py,feishu.py}, tests/{test_douhot.py,test_feishu.py})
 
 - [2026-09-05 11:30] FEAT: **话题榜关键词监控改为"近1小时"粒度** — 用户要求话题榜监控近一小时。实测 `date_window=1` 时 `trends` 为**小时级**时间戳(`2026-09-04 21/22/23...`),而 `date_window=24` 是每日级。故 `fetch_keyword_items` 对**话题/搜索/视频**榜传 `date_window=1`,使关键词监控抓取**近1小时**热度(trends 小时序列 → 真实近1小时涨跌),而非近24h。实测:早春晴朗 近1小时 酷酷看早春晴朗贪麻了 -67%、逐帧酷酷看早春晴朗就对了 +111%。全量 158 项通过(Files: app/services/douhot.py, tests/test_douhot.py)

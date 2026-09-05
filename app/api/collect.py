@@ -48,7 +48,8 @@ def xianyu_collect_deep(user: User = Depends(get_current_user), db: Session = De
 
 @router.post("/api/douhot/watch")
 def douhot_watch_add(payload: dict, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return tenant.add_douhot_watch(db, user.id, str(payload.get("list_type", "word")), str(payload.get("keyword", "")))
+    return tenant.add_douhot_watch(db, user.id, str(payload.get("list_type", "word")),
+                                   str(payload.get("keyword", "")), str(payload.get("filter_keyword", "")))
 
 
 @router.get("/api/douhot/watch")
@@ -67,7 +68,8 @@ def watch_add(section: str, payload: dict, user: User = Depends(get_current_user
     from app.services.keyword_watch import add_watch
 
     try:
-        return add_watch(db, user.id, section, str(payload.get("list_type", "word")), str(payload.get("keyword", "")))
+        return add_watch(db, user.id, section, str(payload.get("list_type", "word")),
+                         str(payload.get("keyword", "")), str(payload.get("filter_keyword", "")))
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(400, str(exc)) from exc
 
@@ -85,7 +87,8 @@ def watch_delete(section: str, payload: dict, user: User = Depends(get_current_u
     from app.services.keyword_watch import remove_watch
 
     try:
-        ok = remove_watch(db, user.id, section, str(payload.get("list_type", "word")), str(payload.get("keyword", "")))
+        ok = remove_watch(db, user.id, section, str(payload.get("list_type", "word")),
+                          str(payload.get("keyword", "")), str(payload.get("filter_keyword", "")))
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(500, f"删除关注失败:{exc}") from exc
     if not ok:
@@ -98,7 +101,8 @@ def douhot_watch_delete(payload: dict, user: User = Depends(get_current_user), d
     """取消抖音关键词关注(等价 section=douhot 的通用删除,兼容旧调用)。"""
     from app.services.keyword_watch import remove_watch
 
-    ok = remove_watch(db, user.id, "douhot", str(payload.get("list_type", "word")), str(payload.get("keyword", "")))
+    ok = remove_watch(db, user.id, "douhot", str(payload.get("list_type", "word")),
+                      str(payload.get("keyword", "")), str(payload.get("filter_keyword", "")))
     if not ok:
         raise HTTPException(404, "未找到该关注词")
     return {"ok": True}
@@ -112,10 +116,12 @@ def watch_analytics(section: str, user: User = Depends(get_current_user), db: Se
 
 
 @router.get("/api/douhot/list/{list_type}")
-def douhot_list(list_type: str, keyword: str = "", user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def douhot_list(list_type: str, keyword: str = "", filter_keyword: str = "",
+                user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """实时拉取抖音某个子榜(内容词/搜索/视频/话题/订阅),便于热点宝式 tab 展示。
 
     `keyword` 非空时按词**定向搜索**(榜外词也能查到),返回过滤后的目标条目列表;
+    `filter_keyword` 非空时**只保留标题含该词的主题**(二次过滤,如"完整版"里只留短剧);
     subscribe 无 keyword 参数,不支持关键词搜索(传了会 400)。
     """
     from app.services.cookie_store import get_cookies
@@ -128,12 +134,13 @@ def douhot_list(list_type: str, keyword: str = "", user: User = Depends(get_curr
         raise HTTPException(400, "未配置抖音(热点宝) Cookie")
     settings = get_settings()
     kw = keyword.strip()
+    fk = filter_keyword.strip()
     try:
         if kw:
             if list_type not in ("word", "search", "video", "topic"):
                 raise HTTPException(400, "该榜不支持关键词搜索")
-            return {"list_type": list_type, "keyword": kw,
-                    "items": douhot.fetch_keyword_items(cookie, list_type, kw, settings)}
+            return {"list_type": list_type, "keyword": kw, "filter_keyword": fk,
+                    "items": douhot.fetch_keyword_items(cookie, list_type, kw, settings, filter_keyword=fk)}
         fetchers = {
             "word": lambda cookie, settings: [{"title": w["title"], "score": w["score"]} for w in douhot.fetch_content_words(cookie, settings)],
             "search": douhot.fetch_search_words,
