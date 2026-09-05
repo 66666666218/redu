@@ -466,7 +466,33 @@
 > 跨用户聚合每个关注词的智能体分析:**爆发榜**(可能爆发的词,按预测热度排序)、**上升期榜**、
 > **抖音内容词 Top**。便于运维全局扫一眼哪些词值得跟进。
 
-### 7.6 独立板块页(微博/闲鱼/抖音/百度)
+### 7.4b 采集健康度(运维一键看各平台状态)
+
+- **接口名称**: 采集健康度
+- **请求方式**: GET
+- **URL 路径**: `/api/admin/health`(需 admin/operator,`logs.view` 权限)
+- **请求参数**: 无
+- **用途**: 聚合各平台最近一次采集、近 24h 运行/失败、最新数据写入、飞书推送统计、Cookie 配置——免手查 MySQL。
+
+**响应示例 (200)**
+```json
+{
+  "generated_at": "2026-09-06T13:00:00",
+  "platforms": {
+    "douhot": { "last_run": "...", "last_status": "success", "last_detail": "ok", "runs_24h": 5, "failed_24h": 0 },
+    "xianyu": { "last_run": "...", "last_status": "failed", "last_detail": "闲鱼人机验证(滑块),全部关键词均未采集", "runs_24h": 2, "failed_24h": 1 },
+    "xianyu_deep": { "last_run": null, "last_status": null, "last_detail": null, "runs_24h": 0, "failed_24h": 0 },
+    "weibo": { "...": "..." }, "baidu": { "...": "..." }
+  },
+  "data": { "weibo": "...", "xianyu": null, "douhot": "...", "baidu": "..." },
+  "feishu": { "pushes_by_section": [ {"section": "douhot", "count": 106}, {"section": "weibo", "count": 976} ], "last_push": "..." },
+  "cookies": { "goofish": 1, "douyin": 1, "weibo": 1, "baidu": 1 }
+}
+```
+> `platforms` 每项为最近一次 `RunRecord`(采集运行)状态;`last_status=failed` 且 `last_detail` 含"滑块/限流"即闲鱼被风控。
+> `data` 各平台最新一条数据写入时间(为空=该平台从未进数据);`feishu` 为飞书推送计数/最近推送;`cookies` 为各平台已配 Cookie 的用户数。
+
+
 
 - **接口名称**: 某板块的独立页数据(最新榜单 + 每词智能体趋势/预测)
 - **请求方式**: GET

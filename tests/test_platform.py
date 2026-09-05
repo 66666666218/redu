@@ -308,6 +308,33 @@ def test_new_topic_watch_appears_in_analytics(session) -> None:
     assert all(x.get("points", 0) >= 0 for x in aw)  # 空序列词也在,不抛异常
 
 
+def test_collection_health_summary(session) -> None:
+    """采集健康度接口:聚合各平台最近运行、数据写入、飞书推送、Cookie 配置。"""
+    from datetime import datetime, timedelta
+
+    from app.admin import collection_health
+    from app.db.models import FeishuAlert, RunRecord, UserCookie, WeiboHotItem
+
+    now = datetime.now()
+    session.add(RunRecord(user_id=1, run_id="r1", kind="douhot", status="success", started_at=now, detail="ok"))
+    session.add(RunRecord(user_id=1, run_id="r2", kind="xianyu", status="failed", started_at=now - timedelta(hours=1),
+                          detail="闲鱼人机验证(滑块),全部关键词均未采集"))
+    session.add(WeiboHotItem(user_id=1, title="热搜", heat=100, rank=1, captured_at=now))
+    session.add(FeishuAlert(user_id=1, section="douhot", title="某主题", reason="new", alerted_at=now))
+    session.add(UserCookie(user_id=1, platform="goofish", cookie="x"))
+    session.commit()
+
+    h = collection_health(session)
+    assert h["platforms"]["douhot"]["last_status"] == "success"
+    assert h["platforms"]["xianyu"]["last_status"] == "failed"
+    assert "滑块" in h["platforms"]["xianyu"]["last_detail"]  # 一眼看出闲鱼被风控
+    assert h["platforms"]["xianyu"]["failed_24h"] >= 1
+    assert h["data"]["weibo"] is not None                        # 微博有数据写入
+    assert {"section": "douhot", "count": 1} in h["feishu"]["pushes_by_section"]
+    assert h["feishu"]["last_push"] is not None                  # 飞书推过
+    assert h["cookies"].get("goofish") == 1                      # 配了闲鱼 Cookie
+
+
 def test_xianyu_verify_cooldown(session) -> None:
     """闲鱼触发人机验证后,冷却期内应跳过采集(避免反复撞滑块)。"""
     from datetime import datetime, timedelta

@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- [2026-09-06 13:30] FEAT: **新增「采集健康度」运维接口 `/api/admin/health`** — 用户要求"一键看各平台最近采集/推送状态,免手查 MySQL"。`admin.collection_health` 聚合:① 各平台(weibo/xianyu/douhot/baidu/xianyu_deep)最近一次 `RunRecord` 状态(last_run/last_status/last_detail/近24h runs/failed);② 各平台最新一条数据写入时间;③ 飞书推送计数+最近推送;④ 各平台已配 Cookie 数量。路由走 `require_perm("logs.view")`。新增 `test_collection_health_summary`;全量 168 项通过;文档同步 doc/API.md 7.4b(Files: app/{admin.py,api/admin.py}, tests/test_platform.py, doc/API.md, CHANGELOG)
+
 - [2026-09-06 13:00] FEAT: **闲鱼采集风控降频——每轮只抓少量关键词+轮转覆盖** — 用户反馈闲鱼被 goofish 风控挡(限流+滑块),方案是"人工过滑块 + 降频减负"。降频减负落地:① `collect_hot` 加 `start_offset`,每轮只处理 `xianyu_batch_keywords`(默认 5)个关键词,从 `start_offset` 起的窗口开始、绕回,多轮才覆盖全部——避免一轮把 13 个关键词瞬间连打过去触发 mtop 风控;② `run_xianyu` 按已运行 `xianyu` 次数 `prior` × batch 计算起始窗口(轮转);③ `xianyu_request_delay` 默认 6.0→**8.0** 拉大间隔。新增 `test_collect_hot_batches_and_rotates`(轮0/1/2 窗口验证);全量 167 项通过。配合"人工过滑块":`collect_hot` 遇 `XianyuVerify` 仍立即停、保留已采数据;冷却后按新窗口继续(Files: app/services/{xianyu.py,tenant.py}, config/settings.py, tests/test_xianyu.py, .env.example)
 
 - [2026-09-06 12:30] TEST: **新增关注不丢·回归测试** — 排查"话题榜搜词点关注没加进关键词监控"。服务层验证:新增话题榜关注(尚无快照)后,`list_watch`/`watch_analytics` 均立即返回该词,空序列不崩;含"下载(有快照)+全集(空)"两关注并存也同时返回。新增 `test_new_topic_watch_appears_in_analytics` 锁定该行为。后端无代码缺陷;若部署端仍"加不进",多半是**后端未重启(缺 `date_window` 列迁移)**或前端包未更新(Files: tests/test_platform.py, CHANGELOG)

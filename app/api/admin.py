@@ -29,6 +29,12 @@ def admin_insights(user: User = Depends(require_perm("data.view")), db: Session 
     return admin_svc.insights(db)
 
 
+@router.get("/api/admin/health")
+def admin_collection_health(user: User = Depends(require_perm("logs.view")), db: Session = Depends(get_db)):
+    """采集健康度:各平台最近采集状态 + 数据写入 + 飞书推送 + Cookie 配置(运维一键看)。"""
+    return admin_svc.collection_health(db)
+
+
 @router.get("/api/admin/users")
 def admin_users(q: str = "", user: User = Depends(require_perm("users.view")), db: Session = Depends(get_db)):
     return admin_svc.list_users(db, q)

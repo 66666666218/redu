@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import csv
 import io
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -13,13 +13,16 @@ from app.db.models import (
     AdminLog,
     AlertRecord,
     AlertRule,
+    BaiduHotItem,
     DouhotWatch,
     DouhotWatchSnap,
     DouhotWord,
+    FeishuAlert,
     LoginLog,
     RunRecord,
     SystemConfig,
     User,
+    UserCookie,
     WeiboHotItem,
     XianyuDaily,
     XianyuItem,
@@ -323,6 +326,65 @@ def _kind_breakdown(db: Session) -> dict:
     return {
         "runs_by_kind": [{"kind": k or "?", "count": v} for k, v in runs_by_kind.items()],
         "alerts_by_section": [{"section": k or "?", "count": v} for k, v in alerts_by_section.items()],
+    }
+
+
+def collection_health(db: Session) -> dict:
+    """采集健康度:各平台最近一次采集状态 + 近24h运行/失败 + 数据写入 + 飞书推送 + Cookie 配置。
+
+    供运维一键看"哪些平台在采、是否失败、有没有推",无需手查 MySQL。
+    """
+    since = datetime.now() - timedelta(hours=24)
+
+    def last_of(kind: str) -> dict:
+        row = db.execute(
+            select(RunRecord).where(RunRecord.kind == kind).order_by(RunRecord.started_at.desc()).limit(1)
+        ).scalars().first()
+        return {
+            "last_run": row.started_at.isoformat() if row else None,
+            "last_status": row.status if row else None,
+            "last_detail": (row.detail or "")[:200] if row else None,
+            "runs_24h": db.scalar(select(func.count(RunRecord.id)).where(
+                RunRecord.kind == kind, RunRecord.started_at >= since)) or 0,
+            "failed_24h": db.scalar(select(func.count(RunRecord.id)).where(
+                RunRecord.kind == kind, RunRecord.started_at >= since, RunRecord.status == "failed")) or 0,
+        }
+
+    # 各平台最近采集运行(含闲鱼深采)
+    platforms = {k: last_of(k) for k in ("weibo", "baidu", "douhot", "xianyu", "xianyu_deep")}
+
+    # 各平台最近一次写入数据的时间(是否有新数据进账)
+    data_cols = {
+        "weibo": (WeiboHotItem, "captured_at"),
+        "baidu": (BaiduHotItem, "captured_at"),
+        "xianyu": (XianyuItem, "created_at"),
+        "douhot": (DouhotWord, "created_at"),
+    }
+    data_health = {}
+    for p, (model, col) in data_cols.items():
+        row = db.execute(select(model).order_by(getattr(model, col).desc()).limit(1)).scalars().first()
+        data_health[p] = getattr(row, col).isoformat() if row else None
+
+    # 飞书推送统计
+    pushes = dict(db.execute(
+        select(FeishuAlert.section, func.count(FeishuAlert.id)).group_by(FeishuAlert.section)
+    ).all())
+    last_alert = db.execute(select(FeishuAlert).order_by(FeishuAlert.alerted_at.desc()).limit(1)).scalars().first()
+
+    # Cookie 配置(各平台有用户配置 Cookie 的数量)
+    cookies = dict(db.execute(
+        select(UserCookie.platform, func.count(func.distinct(UserCookie.user_id))).group_by(UserCookie.platform)
+    ).all())
+
+    return {
+        "generated_at": datetime.now().isoformat(),
+        "platforms": platforms,
+        "data": data_health,
+        "feishu": {
+            "pushes_by_section": [{"section": s or "?", "count": c} for s, c in pushes.items()],
+            "last_push": last_alert.alerted_at.isoformat() if last_alert else None,
+        },
+        "cookies": {k: v for k, v in cookies.items()},
     }
 
 
