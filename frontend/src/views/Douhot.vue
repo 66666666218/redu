@@ -18,6 +18,7 @@ const searchKw = ref('')
 const searchFilter = ref('')
 const searchWindow = ref(1)
 const appliedKw = ref('')
+const searching = ref(false)   // 手动搜索状态:true 时显示搜索结果 list,而非"自动跟随监控词"的 activeWatch
 // 监控时段(小时):1/24/72/168 → 近1小时/近1天/近3天/近7天
 const windows = [
   { v: 1, label: '近1小时' }, { v: 24, label: '近1天' },
@@ -27,7 +28,7 @@ function winLabel(v) { return (windows.find(x => x.v === v) || windows[1]).label
 
 async function loadList(t) {
   active.value = t; loading.value = true
-  searchKw.value = ''; searchFilter.value = ''; appliedKw.value = ''   // 切换 tab 时清除搜索,避免串榜
+  searchKw.value = ''; searchFilter.value = ''; appliedKw.value = ''; searching.value = false   // 切换 tab 时清除搜索,避免串榜
   await loadWatches()                          // 先刷新关注,确保拿到该榜关键词
   // 热点宝式:该榜设了"逐条类"关键词(话题/搜索/视频)→ 自动按该词搜索显示,而非默认榜
   const aw = watches.value.find(w => w.list_type === t && ['search', 'video', 'topic'].includes(t))
@@ -43,6 +44,7 @@ async function loadList(t) {
 async function searchList() {
   const kw = searchKw.value.trim()
   if (!kw) return
+  searching.value = true   // 手动搜索优先于"自动跟随监控词"
   loading.value = true
   try {
     const r = await api.douhotList(active.value, kw, searchFilter.value.trim(), searchWindow.value)
@@ -51,7 +53,7 @@ async function searchList() {
   } catch (e) { list.value = []; toastError(e.message) } finally { loading.value = false }
 }
 async function clearSearch() {
-  searchKw.value = ''; searchFilter.value = ''; appliedKw.value = ''
+  searchKw.value = ''; searchFilter.value = ''; appliedKw.value = ''; searching.value = false
   await loadList(active.value)
 }
 // 把搜索框当前词一键加入底部"关键词监控"(用当前 tab 的榜单类型),采集后即记录趋势
@@ -132,8 +134,8 @@ onMounted(async () => { await loadList('word'); await loadWatches() })
         <button v-if="appliedKw" class="ghost" @click="clearSearch">清除</button>
       </div>
 
-      <!-- 该榜有关键词在监控 → 展示这个词的主题表(每榜一表) -->
-      <template v-if="activeWatch">
+      <!-- 该榜有关键词在监控 → 展示这个词的主题表(每榜一表);手动搜索时改用搜索结果 -->
+      <template v-if="!searching && activeWatch">
         <h3>📌 {{ activeWatch.keyword }}({{ tabs.find(x=>x.key===active)?.label }} · {{ winLabel(activeWatch.date_window || 1) }} · {{ activeWatch.trend_overview }})</h3>
         <div v-if="activeWatch.entries && activeWatch.entries.length" style="max-height:420px;overflow-y:auto">
           <table><tr><th>#</th><th>主题</th><th>得分</th><th>环比</th><th>趋势</th><th>预测</th></tr>
@@ -149,7 +151,7 @@ onMounted(async () => { await loadList('word'); await loadWatches() })
         <div v-else class="empty">关注中…… 采集后记录(每条主题需≥2轮采集才有趋势)</div>
       </template>
 
-      <!-- 该榜无关键词在监控 → 默认榜 -->
+      <!-- 非手动搜索且无监控词 → 默认榜;手动搜索 → 显示搜索到的 list -->
       <template v-else>
         <h3>{{ tabs.find(x=>x.key===active)?.label }}{{ appliedKw ? ` · 「${appliedKw}」` : '' }} · {{ list.length }} 条</h3>
         <table><tr><th>#</th><th>词</th><th>分</th><th>趋势</th></tr>
