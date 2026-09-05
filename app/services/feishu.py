@@ -252,12 +252,14 @@ def _keyword_entries_rows(db: Session, user_id: int, w: dict, snaps: list) -> tu
         else:
             delta = p.rank_now - s.rank_now  # 正 = 名次更靠前(上升)
             marker = (f"↑{delta}名" if delta > 0 else (f"↓{abs(delta)}名" if delta < 0 else "  "))
-        if a.get("burst") and p is not None:
+        # 重点/吃瓜信号:预测爆发 或 趋势暴涨(trend_growth≥100%)——一次采集即可凸显,不用等3轮
+        burst = bool(a.get("burst") or (growth is not None and growth >= 1.0))
+        if burst and p is not None:
             marker = "🔥" + marker
         rows.append({
             "title": title, "score": s.score, "rank": s.rank_now, "marker": marker,
             "growth": growth, "trend": trend, "arrow": arrow,
-            "forecast": a.get("forecast_next"), "burst": a.get("burst"),
+            "forecast": a.get("forecast_next"), "burst": burst,
         })
     rows.sort(key=lambda x: x["rank"])  # 按搜索序(排名)排
     return rows, prev_map, latest_map

@@ -7,6 +7,8 @@
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy.orm import Session
 
 from config.settings import Settings
@@ -65,12 +67,14 @@ def record_watch_snaps(
     (`lists` 由各 runner 传 `{"word": [{"title","value"}]}`)。
     """
     watches = repository.list_watches(session, user_id, section)
+    # 同一次采集的所有快照用同一 captured_at,保证"一次采集=一批",批次分组才可靠
+    collect_ts = datetime.now()
 
     def add_snap(list_type: str, keyword: str, title: str, score: float, rank: int,
                  trend_growth: float = 0) -> None:
         session.add(DouhotWatchSnap(user_id=user_id, section=section, list_type=list_type,
                                     keyword=keyword, entry_title=title, score=score, rank_now=rank,
-                                    trend_growth=trend_growth))
+                                    trend_growth=trend_growth, captured_at=collect_ts))
 
     for w in watches:
         # douhot 榜单搜索类(搜索/视频/话题):把搜出的每个相关主题各记一条 → 逐条追踪趋势
@@ -135,11 +139,12 @@ def watch_analytics(section: str, session: Session, user_id: int) -> list[dict]:
                     label = "上升期" if growth > 0.05 else ("回落期" if growth < -0.05 else "平稳")
                 else:
                     label = a["trend_label"]
+                burst = bool(a["burst"] or (growth is not None and growth >= 1.0))  # 趋势暴涨也算重点
                 entry_agents.append({
                     "title": title, "last_score": vals[-1], "rank_now": es[-1].rank_now,
                     "growth": growth, "trend_label": label,
                     "forecast_next": a["forecast_next"], "confidence": a["confidence"],
-                    "burst": a["burst"], "points": len(vals), "summary": a["summary"],
+                    "burst": burst, "points": len(vals), "summary": a["summary"],
                 })
             entry_agents.sort(key=lambda x: (x["burst"], x["last_score"]), reverse=True)
             top = entry_agents[0]
