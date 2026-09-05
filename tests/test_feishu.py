@@ -279,10 +279,15 @@ def test_keyword_realtime_pushes_on_new_topic(session, monkeypatch) -> None:
     ])
     session.commit()
     sent = []
-    monkeypatch.setattr(feishu, "FeishuClient", lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
+    monkeypatch.setattr(feishu, "FeishuClient", lambda w, s: type("F", (), {
+        "send": lambda self, t: (sent.append(t), True)[1],
+        "send_card": lambda self, c: (sent.append(c), True)[1],
+    })())
     n = run_feishu_keyword_realtime(1, _settings(), db=session)
     assert n == 1
-    assert "话题词监控" in sent[0] and "B" in sent[0] and "新进" in sent[0] and "上升" in sent[0]
+    card = sent[0]
+    body = str(card)
+    assert "话题词监控" in body and "A" in body and "新进" in body and "上升" in body
     assert run_feishu_keyword_realtime(1, _settings(), db=session) == 0  # 冷却期内不重推
 
 

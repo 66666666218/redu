@@ -402,9 +402,14 @@ def build_keyword_card(db: Session, user_id: int, settings: Settings) -> dict | 
             rose = sum(1 for r in rows if r["marker"].startswith("↑") or r["marker"].startswith("🔥↑"))
             fell = sum(1 for r in rows if r["marker"].startswith("↓") or r["marker"].startswith("🔥↓"))
             dropped = len(set(prev_map) - set(latest_map))
-            body = "\n".join(_entry_line(r) for r in rows[:entry_top])
-            body += f"\n↳ 今日vs昨日:🆕{news} ↑{rose} ↓{fell} 跌出{dropped}"
-            elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": body}]})
+            # markdown 表格,飞书自动对齐
+            table = ["| 名称 | 热度值 | 趋势 |", "| --- | --- | --- |"]
+            for r in rows[:entry_top]:
+                g = f" {r['growth'] * 100:+.0f}%" if r["growth"] is not None else ""
+                mark = "🔴" if r.get("burst") else ""
+                table.append(f"| {mark}{r['title'][:12]} | {_w(r['score'])} | {r['arrow']}{r['trend']}{g} |")
+            table.append(f"| 今日vs昨日 | 🆕{news} ↑{rose} ↓{fell} 跌出{dropped} | — |")
+            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(table)}})
         else:
             values = [s.score for s in snaps]
             a = keyword_agent.analyze(w["keyword"], values)
@@ -759,12 +764,18 @@ def run_feishu_keyword_realtime(user_id: int, settings: Settings | None = None, 
             if _in_cooldown(db, user_id, "kw_realtime", w["keyword"], settings):
                 continue
             items = sorted(changed.values(), key=lambda x: (x[0], -x[2]["score"]))[:12]
-            lines = [f"📌 话题词监控 · {w['keyword']}(近1小时)",
-                     f"  {_pad('名称', 16)}丨{_rjust('热度值', 8)}丨变化"]
+            # 用 markdown 表格语法(交互卡片 lark_md),飞书自动对齐列
+            table = ["| 名称 | 热度值 | 变化 |", "| --- | --- | --- |"]
             for p, sig, r in items:
-                lines.append(f"  {_pad(r['title'][:12], 16)}丨{_rjust(_w(r['score']), 8)}丨{sig}")
+                table.append(f"| {r['title'][:12]} | {_w(r['score'])} | {sig} |")
+            card = {
+                "config": {"wide_screen_mode": True},
+                "header": {"template": "blue",
+                           "title": {"tag": "plain_text", "content": f"📌 话题词监控 · {w['keyword']}(近1小时)"}},
+                "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(table)}}],
+            }
             _mark_alerted(db, user_id, "kw_realtime", w["keyword"], "话题词变化")
-            if client.send("\n".join(lines)):
+            if client.send_card(card):
                 pushed += 1
         return pushed
     finally:
