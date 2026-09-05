@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- [2026-09-06 13:50] FEAT: **采集健康度卡片提升到「工作台」+ 抽成复用组件** — 用户要求"一进后台就露出来"。把健康度卡片抽为独立组件 `components/HealthCard.vue`(自取数/刷新/格式化),Admin 的**工作台(dashboard)与运维(ops)** 两处用 `<HealthCard />` 复用,不再内联。前端已构建(Files: frontend/src/{components/HealthCard.vue,views/Admin.vue}, CHANGELOG)
+
 - [2026-09-06 13:40] FEAT: **管理后台·运维 Tab 加「采集健康度」入口** — 前端接入 `/api/admin/health`:运维 tab 顶部新增健康度卡片(各平台最近采集状态/近24h成功失败/最新数据写入/飞书推送/已配Cookie 汇总),`loadHealth()` 独立加载不阻塞主数据。前端已构建(Files: frontend/src/{api.js,views/Admin.vue}, CHANGELOG)
 
 - [2026-09-06 13:30] FEAT: **新增「采集健康度」运维接口 `/api/admin/health`** — 用户要求"一键看各平台最近采集/推送状态,免手查 MySQL"。`admin.collection_health` 聚合:① 各平台(weibo/xianyu/douhot/baidu/xianyu_deep)最近一次 `RunRecord` 状态(last_run/last_status/last_detail/近24h runs/failed);② 各平台最新一条数据写入时间;③ 飞书推送计数+最近推送;④ 各平台已配 Cookie 数量。路由走 `require_perm("logs.view")`。新增 `test_collection_health_summary`;全量 168 项通过;文档同步 doc/API.md 7.4b(Files: app/{admin.py,api/admin.py}, tests/test_platform.py, doc/API.md, CHANGELOG)
