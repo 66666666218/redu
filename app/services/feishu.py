@@ -608,25 +608,51 @@ def run_feishu_keyword_alerts(user_id: int, settings: Settings | None = None, db
         hits: list[dict] = []
         for w in watches:
             snaps = repository.watch_snap_series(db, user_id, w["keyword"], section=w.get("section"))
-            values = [s.score for s in snaps]
-            if not values:
-                continue
-            agent = keyword_agent.analyze(w["keyword"], values)
-            # 置信度分级:只有达到最低置信度的爆发才实时推送,中/低置信只进日报与洞察
-            if not agent["burst"]:
-                continue
-            if agent.get("confidence") not in ("高", "中"):
-                continue
-            if _agent_confidence_rank(agent.get("confidence")) < _agent_confidence_rank(settings.feishu_burst_min_confidence):
-                continue
-            if _in_cooldown(db, user_id, "keyword_burst", w["keyword"], settings):
-                continue
-            _mark_alerted(db, user_id, "keyword_burst", w["keyword"], "预测爆发")
-            hits.append(agent)
+            entries = [s for s in snaps if getattr(s, "entry_title", "")]
+            if entries:
+                # 逐条类(话题/搜索/视频):每个相关主题独立判爆发,推具体哪个主题,而非整个词聚合
+                by_entry: dict[str, list] = {}
+                for s in entries:
+                    by_entry.setdefault(s.entry_title, []).append(s)
+                for title, es in by_entry.items():
+                    vals = [e.score for e in es]
+                    if not vals:
+                        continue
+                    a = keyword_agent.analyze(title, vals)
+                    tg = getattr(es[-1], "trend_growth", None)
+                    boom = a["burst"] or (tg is not None and tg >= 1.0)  # 预测爆发 或 趋势暴涨
+                    if not boom:
+                        continue
+                    if not (tg is not None and tg >= 1.0):  # 趋势暴涨客观爆发,免置信度门槛
+                        if a.get("confidence") not in ("高", "中"):
+                            continue
+                        if _agent_confidence_rank(a.get("confidence")) < _agent_confidence_rank(settings.feishu_burst_min_confidence):
+                            continue
+                    if _in_cooldown(db, user_id, "keyword_burst", title, settings):
+                        continue
+                    _mark_alerted(db, user_id, "keyword_burst", title, "预测爆发")
+                    hits.append({"keyword": title, "forecast_next": a.get("forecast_next"),
+                                 "growth": tg if tg is not None else a.get("growth")})
+            else:
+                values = [s.score for s in snaps]
+                if not values:
+                    continue
+                agent = keyword_agent.analyze(w["keyword"], values)
+                if not agent["burst"]:
+                    continue
+                if agent.get("confidence") not in ("高", "中"):
+                    continue
+                if _agent_confidence_rank(agent.get("confidence")) < _agent_confidence_rank(settings.feishu_burst_min_confidence):
+                    continue
+                if _in_cooldown(db, user_id, "keyword_burst", w["keyword"], settings):
+                    continue
+                _mark_alerted(db, user_id, "keyword_burst", w["keyword"], "预测爆发")
+                hits.append(agent)
         if hits:
             lines = ["🔮 智能体预测 · 可能爆发"]
             for a in hits:
-                lines.append(f"  · 🔴重点 {a['keyword']} 预测 {a['forecast_next']:.0f} 环比+{a['growth']*100:.0f}%")
+                fc = f"预测 {a['forecast_next']:.0f} " if a.get("forecast_next") is not None else ""
+                lines.append(f"  · 🔴重点 {a['keyword']} {fc}环比+{(a['growth'] or 0) * 100:.0f}%")
             client.send("\n".join(lines))
             pushed = len(hits)
             logger.info("飞书智能体预警推送 user=%s 条数=%s", user_id, pushed)
