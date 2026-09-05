@@ -246,7 +246,7 @@ def test_fetch_list_keyword_heat_empty_result_cold(monkeypatch: pytest.MonkeyPat
 def test_fetch_keyword_items_topic(monkeypatch: pytest.MonkeyPatch) -> None:
     """话题榜按词搜索:返回 (title, score) 条目,并带 trends 算出的 trend_growth/trend_label。"""
     class _Fake:
-        def challenge_billboard(self, limit=20, keyword=""):
+        def challenge_billboard(self, limit=20, keyword="", date_window=1):
             return [
                 {"challenge_name": "续火花", "score": 157, "trends": [{"date": "d1", "value": 100}, {"date": "d2", "value": 157}]},
                 {"challenge_name": "续火花专用", "score": 46, "trends": [{"date": "d1", "value": 50}, {"date": "d2", "value": 46}]},
@@ -280,7 +280,7 @@ def test_fetch_keyword_items_empty_or_unsupported() -> None:
 def test_fetch_keyword_items_drops_empty_title(monkeypatch: pytest.MonkeyPatch) -> None:
     """过滤掉空标题条目(各榜偶有空白条目)。"""
     class _Fake:
-        def hot_search(self, limit=20, keyword=""):
+        def hot_search(self, limit=20, keyword="", date_window=1):
             return [{"key_word": "", "search_score": 9}, {"key_word": "有效词", "search_score": 5}]
 
     monkeypatch.setattr(douhot, "DouhotClient", lambda cookie, settings=None: _Fake())

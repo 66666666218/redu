@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- [2026-09-05 11:30] FEAT: **话题榜关键词监控改为"近1小时"粒度** — 用户要求话题榜监控近一小时。实测 `date_window=1` 时 `trends` 为**小时级**时间戳(`2026-09-04 21/22/23...`),而 `date_window=24` 是每日级。故 `fetch_keyword_items` 对**话题/搜索/视频**榜传 `date_window=1`,使关键词监控抓取**近1小时**热度(trends 小时序列 → 真实近1小时涨跌),而非近24h。实测:早春晴朗 近1小时 酷酷看早春晴朗贪麻了 -67%、逐帧酷酷看早春晴朗就对了 +111%。全量 158 项通过(Files: app/services/douhot.py, tests/test_douhot.py)
+
 - [2026-09-05 11:00] FIX: **抖音话题词趋势恒 0%——改用 `trends` 每日序列算真实趋势**——用户发现话题词监控"全是0%、没波动"。根因:话题条目带 `trends`(近14天**每日热度**序列,如"早春晴朗"8/21 177万→9/3 1550万,**实涨775%**),但 `fetch_keyword_items` 只取了单值 `score`(=最新日值),`score` 每天才更新 → 2小时采集分数不变 → 环比恒 0%。修复:① `fetch_keyword_items` 用 `_trend_of` 从 `trends` 算 `trend_growth`/`trend_label`(一次采集即得真实趋势);② `DouhotWatchSnap` 加 `trend_growth` 列(迁移);③ `record_watch_snaps` 存 trend_growth,`watch_analytics`/`_keyword_entries_rows` 用它替代"相邻分数差";④ 前端默认榜表格加"趋势"列。实测:早春晴朗 上升期+775%,趋势概览 `100主题·升63·降32`。全量 158 项通过;前端已构建(Files: app/services/{douhot.py,keyword_watch.py,feishu.py}, app/db/{models.py,database.py}, frontend/src/views/Douhot.vue, tests/{test_douhot.py,test_feishu.py}, doc/dev.md)
 
 - [2026-09-05 10:30] FEAT: **🔴重点 标记推广到全部平台预测(微博/百度/抖音/闲鱼)** — 用户要求"吃瓜/爆炸"重点标记覆盖全部板块的预测。`burst` 信号本就不区分板块,现统一应用到所有预测出口:① `keyword_agent._summary` 爆发句改"🔴重点 可能爆发";② 每日日报单值词(各平台)、智能体预警(`run_feishu_keyword_alerts`)、周爆点回顾、飞书交互卡片单值词 → 全部用 🔴重点;③ 前端 Dashboard(关键词卡+微博/闲鱼预测卡)、Douhot、Admin(爆发关键词表)统一 🔴重点。全量 158 项通过;前端已构建(Files: app/services/{keyword_agent.py,feishu.py}, frontend/src/views/{Dashboard.vue,Douhot.vue,Admin.vue})

@@ -175,7 +175,8 @@ def fetch_keyword_items(cookie: str, list_type: str, keyword: str, settings: Set
                             _pick(it, ("score", "search_score", "play_cnt"))) for it in raw]
         elif list_type in _KEYWORD_SPEC:
             method_name, title_keys, score_keys = _KEYWORD_SPEC[list_type]
-            raw = getattr(client, method_name)(limit=limit, keyword=kw)
+            # date_window=1 → 近1小时级(trends 为小时序列,topic/search/video 一致),监控每小时热度而非近24h
+            raw = getattr(client, method_name)(limit=limit, keyword=kw, date_window=1)
             items = []
             for it in raw:
                 title = str(_pick(it, title_keys) or "").strip()
