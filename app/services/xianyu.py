@@ -202,6 +202,11 @@ def item_title(it: dict) -> str:
     return str(it.get("title", "")).strip()
 
 
+def _trunc(s: object, n: int) -> str:
+    """截断字符串到 n 字符,防超列宽(闲鱼标题/关键词可能很长,MySQL String(500) 会拒绝)。"""
+    return (str(s or "").strip())[:n]
+
+
 def item_price(it: dict) -> str:
     price = it.get("price") or []
     if isinstance(price, list):
@@ -308,13 +313,13 @@ def collect_hot(settings: Settings, client: XianyuClient | None = None) -> list[
         result.append(
             {
                 "item_id": str(item.get("itemId")),
-                "title": item_title(item),
-                "price": item_price(item),
-                "seller": str(item.get("userNickName", "")),
-                "pic": str(item.get("picUrl", "")),
+                "title": _trunc(item_title(item), 500),
+                "price": _trunc(item_price(item), 64),
+                "seller": _trunc(item.get("userNickName", ""), 128),
+                "pic": _trunc(item.get("picUrl", ""), 500),
                 "hit_keywords": len(b["keywords"]),
                 "best_rank": min(b["ranks"]),
-                "keywords": ",".join(b["keywords"]),
+                "keywords": _trunc(",".join(b["keywords"]), 500),
             }
         )
     return result

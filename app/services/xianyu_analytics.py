@@ -67,8 +67,8 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
                 row = XianyuDaily(user_id=user_id, snap_date=today, item_id=it["item_id"])
                 session.add(row)
             row.title = it["title"][:500]
-            row.price = it["price"]
-            row.category = detail.get("category", "")
+            row.price = str(it["price"] or "")[:64]
+            row.category = detail.get("category", "")[:64]
             row.want_count = detail.get("want_count", 0)
             row.collect_count = detail.get("collect_count", 0)
             row.sold_count = detail.get("sold_count", 0)
