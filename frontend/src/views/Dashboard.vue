@@ -127,12 +127,8 @@ onMounted(async () => { await load(); await loadAgent(); await loadAnalytics(); 
           <tr v-for="(it,i) in dash.xianyu_hot.slice(0,30)" :key="it.item_id"><td>{{ i+1 }}. {{ it.title.slice(0,30) }}</td><td class="price">{{ it.price }}</td><td>{{ it.hit_keywords }}</td></tr>
         </table>
       </div>
-      <div class="card" v-if="dash.douhot_words.length">
-        <h3>抖音 · 内容词</h3>
-        <table><tr><th>词</th><th>飙升</th><th>趋势</th></tr>
-          <tr v-for="it in dash.douhot_words.slice(0,100)" :key="it.title"><td>{{ it.title }}</td><td class="price">{{ (it.score/1e4).toFixed(0) }}万</td><td :class="{up:it.trend_delta>0}">{{ it.trend_delta>0?'↑':(it.trend_delta<0?'↓':'—') }}</td></tr>
-        </table>
-      </div>
+      <!-- 注:原"抖音·内容词"总榜卡已移除——它显示整个内容词总榜(含随机内容词),易误以为是你加的关键词;
+           你的关键词监控在下方"关键词监控"卡片区(只显示你手动关注词)。 -->
 
       <div class="card">
         <h3>闲鱼 · Top20 详情分析(想要数)  <span class="empty">昨日→今日</span></h3>
