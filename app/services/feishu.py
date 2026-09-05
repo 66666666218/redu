@@ -715,25 +715,49 @@ def run_feishu_realtime(
                 _mark_alerted(db, user_id, section, title, reason)
         if pushed_items:
             head = f"⚡ {SECTION_LABELS[section]} 实时热点"
-            lines = [head]
-            # 给每个推送词补一句"预测/置信度"(历史样本 ≥2 才预测)
-            from app.services import keyword_agent
+            if section == "xianyu":
+                # 闲鱼专属:表格 名称丨价格丨想要数丨变化 + 🔴重点(想要数较昨日暴涨)
+                today = datetime.now().date().isoformat()
+                yday = (datetime.now() - timedelta(days=1)).date().isoformat()
+                t_daily = {str(d.item_id): d for d in repository.xianyu_daily_by_date(db, user_id, today)}
+                y_daily = {str(d.item_id): d for d in repository.xianyu_daily_by_date(db, user_id, yday)}
+                table = ["| 名称 | 类目 | 价格 | 想要数 | 变化 |", "| --- | --- | --- | --- | --- |"]
+                for title, reason in pushed_items:
+                    item = cur.get(title)
+                    iid = str(getattr(item, "item_id", "")) if item else ""
+                    d, y = t_daily.get(iid), y_daily.get(iid)
+                    want = d.want_count if d else None
+                    price = (getattr(item, "price", "") or (d.price if d else "") or "")[:14]
+                    cat = (d.category or "")[:8] if d else ""
+                    mark = "🔴 " if (want is not None and y is not None and getattr(y, "want_count", 0)
+                                    and want >= getattr(y, "want_count") * 1.5) else ""
+                    table.append(f"| {mark}{title[:12]} | {cat} | {price} | {want if want is not None else '—'} | {reason} |")
+                client.send_card({
+                    "config": {"wide_screen_mode": True},
+                    "header": {"template": "blue", "title": {"tag": "plain_text", "content": head}},
+                    "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(table)}}],
+                })
+                pushed = len(pushed_items)
+            else:
+                lines = [head]
+                # 给每个推送词补一句"预测/置信度"(历史样本 ≥2 才预测)
+                from app.services import keyword_agent
 
-            series = _SERIES.get(section, lambda db, uid: {})(db, user_id)
-            for title, reason in pushed_items:
-                line = f"  · {title[:24]}  {reason}"
-                vals = [v for _, v in series.get(title, [])]
-                if len(vals) >= 2:
-                    a = keyword_agent.analyze(title, vals)
-                    if a.get("forecast_next") is not None:
-                        line += f"  预测{a['forecast_next']:.0f}"
-                    if a.get("confidence") and a["confidence"] != "数据不足":
-                        line += f" {a['confidence']}"
-                    if a.get("trend_label"):
-                        line += f" {a['trend_label']}"
-                lines.append(line)
-            client.send("\n".join(lines))
-            pushed = len(pushed_items)
+                series = _SERIES.get(section, lambda db, uid: {})(db, user_id)
+                for title, reason in pushed_items:
+                    line = f"  · {title[:24]}  {reason}"
+                    vals = [v for _, v in series.get(title, [])]
+                    if len(vals) >= 2:
+                        a = keyword_agent.analyze(title, vals)
+                        if a.get("forecast_next") is not None:
+                            line += f"  预测{a['forecast_next']:.0f}"
+                        if a.get("confidence") and a["confidence"] != "数据不足":
+                            line += f" {a['confidence']}"
+                        if a.get("trend_label"):
+                            line += f" {a['trend_label']}"
+                    lines.append(line)
+                client.send("\n".join(lines))
+                pushed = len(pushed_items)
             logger.info("飞书实时推送 section=%s user=%s 条数=%s", section, user_id, pushed)
         return pushed
     finally:
