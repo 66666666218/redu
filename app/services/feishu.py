@@ -358,6 +358,19 @@ def build_keyword_card(db: Session, user_id: int, settings: Settings) -> dict | 
                 continue
             elements.append({"tag": "div", "text": {"tag": "lark_md",
                             "content": f"**{w['keyword']}** · {label} · {_overview(rows)}"}})
+            # 摘要:追踪N主题 · 上升:xx/新增:xx(与仪表盘一致,不笼统说该词上升)
+            risers = [r for r in rows if r["trend"] == "上升期" and r.get("growth") is not None]
+            new_ones = [r for r in rows if r["marker"] == "🆕"]
+            bits = [f"追踪{len(rows)}主题"]
+            if risers:
+                bits.append("上升:" + "、".join(
+                    f"{r['title'][:10]}+{r['growth'] * 100:.0f}%" for r in risers[:3]))
+            elif new_ones:
+                bits.append("新增:" + "、".join(r["title"][:10] for r in new_ones[:3]))
+            else:
+                bits.append("走势平稳")
+            elements.append({"tag": "div", "text": {"tag": "lark_md",
+                            "content": " · ".join(bits)}})
             news = sum(1 for r in rows if r["marker"] == "🆕")
             rose = sum(1 for r in rows if r["marker"].startswith("↑") or r["marker"].startswith("🔥↑"))
             fell = sum(1 for r in rows if r["marker"].startswith("↓") or r["marker"].startswith("🔥↓"))
