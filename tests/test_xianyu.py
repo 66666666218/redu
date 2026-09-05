@@ -54,6 +54,20 @@ def test_collect_hot_respects_top_n(settings: Settings) -> None:
     assert len(out) == 3
 
 
+def test_collect_hot_batches_and_rotates(settings: Settings) -> None:
+    """风控降频:每轮只抓 batch 个关键词,按 start_offset 轮转,多轮覆盖全部关键词。"""
+    settings.xianyu_keywords = "k0,k1,k2,k3,k4,k5"
+    settings.xianyu_batch_keywords = 3
+    settings.xianyu_top_n = 50
+    fake = FakeClient({f"k{i}": [_item(i, f"商品{i}")] for i in range(6)})
+
+    got = lambda off: {it["item_id"] for it in collect_hot(settings, client=fake, start_offset=off)}
+    assert got(0) == {"0", "1", "2"}   # 轮0:前 3 个
+    assert got(3) == {"3", "4", "5"}   # 轮1:后 3 个
+    assert got(6) == {"0", "1", "2"}   # 轮2:绕回
+    assert got(4) == {"4", "5", "0"}   # 轮3:再绕回(每轮 3 个,覆盖不同窗口)
+
+
 def test_collect_hot_raises_verify_when_all_keywords_blocked(settings: Settings) -> None:
     """全部关键词都被人机验证挡住时,collect_hot 应上抛 XianyuVerify。
 

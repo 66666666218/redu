@@ -265,16 +265,25 @@ def fetch_detail(client: XianyuClient, item_id: str) -> dict:
     return out
 
 
-def collect_hot(settings: Settings, client: XianyuClient | None = None) -> list[dict]:
-    """搜索多个虚拟商品关键词,按综合顺序聚合、去重、排名。"""
+def collect_hot(settings: Settings, client: XianyuClient | None = None, start_offset: int = 0) -> list[dict]:
+    """搜索多个虚拟商品关键词,按综合顺序聚合、去重、排名。
+
+    风控降频:`xianyu_batch_keywords` 限制**每轮只抓部分关键词**(默认 5 个,少量多次),
+    用 `start_offset`(调用方按运行次数轮转)从一个窗口开始,多轮才覆盖全部——避免把 13 个
+    关键词瞬间连打过去触发 goofish 风控/滑块。
+    """
     keywords = [k.strip() for k in settings.xianyu_keywords.split(",") if k.strip()]
     client = client or XianyuClient(load_cookie(settings.goofish_cookie_file))
+    n = len(keywords)
+    batch = max(1, int(getattr(settings, "xianyu_batch_keywords", 0) or n))
+    # 从 start_offset 起取 batch 个(绕回),构成这一轮的关键词窗口
+    picked = [keywords[(start_offset + i) % n] for i in range(min(batch, n))] if n else []
 
     buckets: dict[str, dict] = {}
     base_delay = getattr(settings, "xianyu_request_delay", None) or getattr(settings, "request_delay_seconds", 2.5)
     saw_verify = False
     success = 0
-    for idx, kw in enumerate(keywords):
+    for idx, kw in enumerate(picked):
         try:
             items = client.search(kw)
         except XianyuVerify:
@@ -294,7 +303,7 @@ def collect_hot(settings: Settings, client: XianyuClient | None = None) -> list[
                 bucket["keywords"].append(kw)
                 bucket["ranks"].append(pos)
         # 请求间隔(随机抖动),避免连续请求触发风控
-        if idx < len(keywords) - 1:
+        if idx < len(picked) - 1:
             time.sleep(base_delay * random.uniform(0.8, 1.4))
 
     # 一个词都没采到且被验证 → 让上层识别为"需人工处理",避免误报成功 0 条

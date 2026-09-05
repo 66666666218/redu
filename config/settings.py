@@ -28,7 +28,8 @@ class Settings(BaseSettings):
     xianyu_top_n: int = 100         # 前 N 虚拟商品榜(搜索级,无风控)
     xianyu_detail_limit: int = 10   # 慢速抓详情(想要数)的商品数;详情是触发 mtop 风控的最大爆发点,默认降到 10
     xianyu_deep_interval_hours: int = 6  # 闲鱼深采自动跑的最小间隔(小时):搜索接力深采时,距上次成功深采≥该值才跑,防风控
-    xianyu_request_delay: float = 6.0  # 闲鱼相邻请求间隔(秒,带抖动);比通用更大,防 mtop 风控
+    xianyu_request_delay: float = 8.0  # 闲鱼相邻请求间隔(秒,带抖动);比通用更大,防 mtop 风控
+    xianyu_batch_keywords: int = 5     # 每次采集最多处理的关键词数(风控降频:少量多次,按运行数轮转覆盖全部)
     xianyu_cooldown_minutes: int = 30  # 闲鱼触发人机验证(滑块)后,暂停采集该分钟数,避免反复撞枪口
     douhot_cookie_file: str = "data/douhot_cookie.txt"  # 抖音热点宝 Cookie 文件(gitignored)
     douhot_top_n: int = 100         # 内容词趋势条数(抖音热点接口可到 200)

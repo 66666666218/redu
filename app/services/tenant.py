@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
@@ -22,6 +22,7 @@ from app.db.models import (
     DouhotAlerted,
     DouhotWatch,
     DouhotWord,
+    RunRecord,
     WeiboHotItem,
     WeiboTrend,
     XianyuItem,
@@ -161,7 +162,13 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
         raise ValueError("未配置闲鱼 Cookie")
     try:
         client = xianyu.XianyuClient(goofish_cookie)
-        hot = xianyu.collect_hot(settings, client)
+        # 风控降频:每轮只抓 batch 个关键词,按已运行的 xianyu 次数轮转起始窗口,多轮覆盖全部
+        prior = session.scalar(select(func.count()).select_from(RunRecord).where(
+            RunRecord.user_id == user_id, RunRecord.kind == "xianyu")) or 0
+        batch = max(1, int(getattr(settings, "xianyu_batch_keywords", 0) or 5))
+        n_kw = len([k.strip() for k in settings.xianyu_keywords.split(",") if k.strip()])
+        start_offset = (prior * batch) % max(n_kw, 1)
+        hot = xianyu.collect_hot(settings, client, start_offset=start_offset)
         prev_keys = set(session.scalars(select(XianyuItem.item_id).where(XianyuItem.user_id == user_id)).all())
         for it in hot:
             session.add(XianyuItem(user_id=user_id, **it))

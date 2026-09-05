@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- [2026-09-06 13:00] FEAT: **闲鱼采集风控降频——每轮只抓少量关键词+轮转覆盖** — 用户反馈闲鱼被 goofish 风控挡(限流+滑块),方案是"人工过滑块 + 降频减负"。降频减负落地:① `collect_hot` 加 `start_offset`,每轮只处理 `xianyu_batch_keywords`(默认 5)个关键词,从 `start_offset` 起的窗口开始、绕回,多轮才覆盖全部——避免一轮把 13 个关键词瞬间连打过去触发 mtop 风控;② `run_xianyu` 按已运行 `xianyu` 次数 `prior` × batch 计算起始窗口(轮转);③ `xianyu_request_delay` 默认 6.0→**8.0** 拉大间隔。新增 `test_collect_hot_batches_and_rotates`(轮0/1/2 窗口验证);全量 167 项通过。配合"人工过滑块":`collect_hot` 遇 `XianyuVerify` 仍立即停、保留已采数据;冷却后按新窗口继续(Files: app/services/{xianyu.py,tenant.py}, config/settings.py, tests/test_xianyu.py, .env.example)
+
 - [2026-09-06 12:30] TEST: **新增关注不丢·回归测试** — 排查"话题榜搜词点关注没加进关键词监控"。服务层验证:新增话题榜关注(尚无快照)后,`list_watch`/`watch_analytics` 均立即返回该词,空序列不崩;含"下载(有快照)+全集(空)"两关注并存也同时返回。新增 `test_new_topic_watch_appears_in_analytics` 锁定该行为。后端无代码缺陷;若部署端仍"加不进",多半是**后端未重启(缺 `date_window` 列迁移)**或前端包未更新(Files: tests/test_platform.py, CHANGELOG)
 
 - [2026-09-06 12:00] FIX: **话题榜手动搜词被"自动跟随监控词"盖掉** — 用户反映"话题榜搜别的关键词还是一直显示下载"。根因:该 tab 存在"下载"监控(有 entries)时,模板 `v-if="activeWatch"` 恒展示 `activeWatch.entries`(下载),`searchList` 更新的是 `list` 但被盖住→搜索结果看不见。修复:新增 `searching` 状态,手动搜索(`searchList`)置 `true`、切 tab/清除置 `false`;模板条件改为 `v-if="!searching && activeWatch"`,手动搜索时走 `list`(热搜结果)。全量 165 项通过;前端已构建(Files: frontend/src/views/Douhot.vue, CHANGELOG)
