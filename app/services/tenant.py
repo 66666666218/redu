@@ -31,7 +31,7 @@ from app.services.cookie_store import get_cookies
 from app.db import repository
 from app.services.trend_analyzer import compute_growth, compute_slope
 from app.services.tenant_base import _base, _record_run, verify_cooldown_active  # noqa: F401  (供外部/测试引用)
-from app.services.xianyu_analytics import run_xianyu_deep, xianyu_analytics, xianyu_daily  # noqa: F401
+from app.services.xianyu_analytics import run_xianyu_deep, xianyu_analytics, xianyu_daily, xianyu_deep_due  # noqa: F401
 from app.services.keyword_watch import (  # noqa: F401
     _record_douhot_watch_snaps,
     add_douhot_watch,
@@ -171,6 +171,12 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
         _record_watch(session, user_id, "xianyu", [{"title": it["title"], "value": it.get("hit_keywords", 0)} for it in hot])
         _record_run(session, user_id, "xianyu", "success", f"items={len(hot)}")
         session.commit()
+        # 搜索接力深采(想要数/类目)——自动跑,受 验证冷却 + 详情限流 保护;按间隔控制频率防累积风控
+        if xianyu_deep_due(session, user_id, settings):
+            try:
+                run_xianyu_deep(session, user_id, settings, hot=hot)
+            except Exception:  # noqa: BLE001 - 深采失败不影响搜索结果(已提交)
+                session.rollback()
         return {"platform": "xianyu", "count": len(hot)}
     except Exception as exc:  # noqa: BLE001
         session.rollback()

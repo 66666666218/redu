@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from config.settings import Settings
 from app.db import repository
-from app.db.models import XianyuDaily, XianyuSummary
+from app.db.models import XianyuDaily, XianyuSummary, RunRecord
 from app.services import xianyu
 from app.services.cookie_store import get_cookies
 from app.services.tenant_base import _base, _record_run, verify_cooldown_active
@@ -33,8 +33,30 @@ def _xy_detail_limit(settings: Settings) -> int:
     return getattr(settings, "xianyu_detail_limit", 20)
 
 
-def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = None) -> dict:
-    """采集闲鱼热榜并抓取前 N 商品详情(想要数/类目/浏览量/卖家粉丝),写入当日快照。"""
+def xianyu_deep_due(session: Session, user_id: int, settings: Settings) -> bool:
+    """闲鱼深采是否到期:距上次成功深采 >= `xianyu_deep_interval_hours`,且当前不在验证冷却。
+
+    搜索接力深采时用——避免每次搜索(2h)都跑一次深采(10详情)累积风控;默认 6 小时一次。
+    """
+    if verify_cooldown_active(session, user_id, settings):
+        return False
+    hours = getattr(settings, "xianyu_deep_interval_hours", None) or 6
+    cutoff = datetime.now() - timedelta(hours=hours)
+    last = session.scalar(
+        select(RunRecord).where(
+            RunRecord.user_id == user_id, RunRecord.kind == "xianyu_deep",
+            RunRecord.status.in_(["success", "partial"]), RunRecord.started_at >= cutoff,
+        ).order_by(RunRecord.id.desc())
+    )
+    return last is None
+
+
+def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = None,
+                    hot: list[dict] | None = None) -> dict:
+    """采集闲鱼热榜并抓取前 N 商品详情(想要数/类目/浏览量/卖家粉丝),写入当日快照。
+
+    `hot` 可传已采集的热榜(搜索接力深采时复用,避免重复搜索);缺省则自行 collect_hot。
+    """
     settings = _base(settings)
     if verify_cooldown_active(session, user_id, settings):  # 验证后冷却:避免反复撞滑块
         _record_run(session, user_id, "xianyu_deep", "skipped", "verify_cooldown")
@@ -46,7 +68,8 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
         raise ValueError("未配置闲鱼 Cookie")
     try:
         client = xianyu.XianyuClient(goofish)
-        hot = xianyu.collect_hot(settings, client)
+        if hot is None:
+            hot = xianyu.collect_hot(settings, client)
         today = datetime.now().date().isoformat()
         base_delay = getattr(settings, "xianyu_request_delay", None) or getattr(settings, "request_delay_seconds", 2.5)
         saved = 0
