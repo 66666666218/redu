@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- [2026-09-06 17:00] FEAT: **公众号·内容选题分析智能体(先做无流量版)** — 用户要求"公众号板块能按内容/选题智能分析"。暂无第三方 API,先做**内容选题分析**版:新增 `app/services/wechat_analyzer.py`(`analyze_articles` 纯函数):按标题/内容/作者/发布时间输出**选题分布**(2字窗口词频)、**标题风格**(长度/数字/emoji/疑问/悬念词占比+高频词)、**发布时段分布与高峰**、**对标号对比**、**选题建议+总结**(规则视角,非流量归因;标注待接入带流量API后升级)。配套:`WechatArticle` 模型、`POST /api/wechat/articles`(录入)、`GET /api/wechat/analyze`(分析)。新增 `tests/test_wechat_analyzer.py`;全量 176 项通过;文档同步 doc/API.md §9(Files: app/services/wechat_analyzer.py, app/db/models.py, app/api/{wechat.py,__init__.py}, tests/test_wechat_analyzer.py, doc/API.md, CHANGELOG)
+
 - [2026-09-06 16:30] FEAT: **每日日报拆分为各平台专属群** — 用户要求"日报也按板块拆分进各专属群"。重构 `run_feishu_daily`:配了专属 webhook 的平台,其日报段(`📊{平台}日报`+该板块榜)推入该平台专属群;总群收**聚合段**(活跃对比/跨板块上升)+**未配专属群的平台段**+关键词卡。新增 `platform_webhook`(判断是否配专属,与 `webhook_for` 路由分开——避免未配专属的平台被误当主群发送而重复)。未配任何专属群时退化为原"总群一条全量日报"。新增 `test_daily_splits_to_platform_groups`;全量 173 项通过(Files: app/services/{feishu_client.py,feishu.py}, tests/test_feishu.py, CHANGELOG)
 
 - [2026-09-06 16:00] FEAT: **飞书推送按板块分流到专属群** — 用户要求"微博/抖音/闲鱼/百度 各建一个专属群,群里只推对应平台信息,总群不变"。新增 4 个平台 webhook 配置(`FEISHU_WEBHOOK_WEIBO/XIANYU/DOUHOT/BAIDU`)与 `feishu_client.webhook_for(settings, section)`(优先平台专属群,未配回落总群)。推送路由:① 各平台**实时热点**(`run_feishu_realtime`)按 section 进对应群;② **抖音关键词爆发/话题词实时**(`run_feishu_keyword_alerts/realtime`)进抖音群;③ **采集失败/停摆**运维告警按板块进对应群;④ **日报/周报/跨平台上升**(聚合类)仍走总群。新增 `test_webhook_for_routes_per_platform`;全量 172 项通过(Files: app/services/{feishu_client.py,feishu.py,alert_service.py}, config/settings.py, .env.example, tests/test_feishu.py, CHANGELOG)

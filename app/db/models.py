@@ -259,6 +259,21 @@ class FeishuAlert(Base):
     alerted_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
+class WechatArticle(Base):
+    """公众号文章(暂供内容选题分析;等接入带流量的 API 后扩展流量字段)。"""
+
+    __tablename__ = "wechat_articles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    author: Mapped[str] = mapped_column(String(128), default="")   # 公众号名(对标号)
+    title: Mapped[str] = mapped_column(String(500))
+    content: Mapped[str] = mapped_column(Text(), default="")
+    url: Mapped[str] = mapped_column(String(500), default="")
+    publish_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
 class AlertRule(Base):
     """用户自定义预警规则(每板块)。
 
