@@ -21,6 +21,7 @@ def _row_to_dict(r: WechatArticle) -> dict:
     return {"id": r.id, "author": r.author, "title": r.title, "content": r.content,
             "url": r.url, "publish_at": r.publish_at.isoformat() if r.publish_at else None,
             "source": r.source, "pan_types": r.pan_types,
+            "pan_urls": r.pan_urls, "my_pan_urls": r.my_pan_urls,
             "benchmark_id": r.benchmark_id,
             "read_num": r.read_num, "zan_num": r.zan_num, "looking_num": r.looking_num,
             "share_num": r.share_num, "collect_num": r.collect_num,

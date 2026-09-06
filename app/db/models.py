@@ -276,7 +276,8 @@ class WechatArticle(Base):
     source: Mapped[str] = mapped_column(String(16), default="manual")     # manual/listen/sync
     benchmark_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 来自哪个对标号
     pan_types: Mapped[str] = mapped_column(String(128), default="")       # 命中的网盘类型,逗号分隔
-    pan_urls: Mapped[str] = mapped_column(Text(), default="")             # 提取到的分享链接(换行分隔)
+    pan_urls: Mapped[str] = mapped_column(Text(), default="")             # 命中的分享链接(换行分隔)
+    my_pan_urls: Mapped[str] = mapped_column(Text(), default="")          # 转存后自己的分享链接(换行分隔)             # 提取到的分享链接(换行分隔)
     # ---- 流量数据(dajiala read_zan_pro 采样,¥0.06/篇/次)----
     read_num: Mapped[int] = mapped_column(Integer, default=0)
     zan_num: Mapped[int] = mapped_column(Integer, default=0)

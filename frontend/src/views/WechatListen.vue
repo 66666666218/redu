@@ -3,6 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import { api } from '../api'
 import { toastOk, toastError as toastErr } from '../toast'
 
+const chr10 = () => String.fromCharCode(10)
 const benches = ref([])
 const articles = ref([])
 const onlyPan = ref(false)
@@ -90,6 +91,11 @@ async function refreshTraffic() {
 }
 
 const fmt = (t) => t ? String(t).replace('T', ' ') : '—'
+const firstMy = (s) => {
+  const line = (s || '').split(chr10()).find(x => x.trim())
+  if (!line) return ''
+  return line.includes(' (') ? line.slice(0, line.indexOf(' (')) : line.trim()
+}
 onMounted(load)
 </script>
 
@@ -143,12 +149,13 @@ onMounted(load)
     <div class="card">
       <h3>监听到的文章({{ articles.length }})</h3>
       <table v-if="articles.length">
-        <tr><th>发现时间</th><th>公众号</th><th>标题</th><th>网盘</th><th>阅读</th><th>点赞</th><th>转发</th><th>采样</th></tr>
+        <tr><th>发现时间</th><th>公众号</th><th>标题</th><th>网盘</th><th>我的链接</th><th>阅读</th><th>点赞</th><th>转发</th><th>采样</th></tr>
         <tr v-for="a in articles" :key="a.id">
           <td class="empty">{{ fmt(a.created_at) }}</td>
           <td>{{ a.author }}</td>
           <td><a :href="a.url" target="_blank" rel="noopener">{{ a.title }}</a></td>
           <td>{{ a.pan_types ? '🔴 ' + a.pan_types : '—' }}</td>
+          <td><a v-if="firstMy(a.my_pan_urls)" :href="firstMy(a.my_pan_urls)" target="_blank" rel="noopener">打开</a><span v-else class="empty">—</span></td>
           <td>{{ a.traffic_at ? a.read_num : '—' }}</td>
           <td>{{ a.traffic_at ? a.zan_num : '—' }}</td>
           <td>{{ a.traffic_at ? a.share_num : '—' }}</td>

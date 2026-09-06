@@ -51,6 +51,8 @@ def collect_tick(settings: Settings | None = None, now: datetime | None = None) 
         schedule_service.ensure_all_users(db)
         due = schedule_service.due_schedules(db, now)
         for row in due:
+            if row.section == "wechat":
+                continue  # 公众号监听由 wechat_collect_tick 独立作业处理(长任务,勿阻塞其它板块)
             runner = runners.get(row.section)
             if runner is None:
                 continue
@@ -123,6 +125,41 @@ def _cron_trigger(expr: str, default: dict) -> CronTrigger:
         return CronTrigger(**default)
 
 
+def wechat_collect_tick(settings: Settings | None = None) -> dict:
+    """公众号监听专用 tick(每分钟,独立于 collect_tick)。
+
+    为什么独立:一轮监听(平台分页+正文抓取+采样+转存)可能持续数分钟,
+    与四个板块共用串行循环会互相阻塞。独立作业 + max_instances=1,
+    监听再慢也不拖累微博/闲鱼/抖音/百度,反之亦然。
+    """
+    from app.db import get_session_local
+    from app.services import schedule_service
+    from app.services.wechat_monitor import run_wechat_listen
+
+    settings = settings or get_settings()
+    db = get_session_local()()
+    ok = failed = skipped = 0
+    try:
+        schedule_service.ensure_all_users(db)
+        now = datetime.now()
+        due = [r for r in schedule_service.due_schedules(db, now) if r.section == "wechat"]
+        for row in due:
+            try:
+                run_wechat_listen(db, row.user_id, settings=settings)
+                ok += 1
+            except Exception as exc:  # noqa: BLE001 - 单用户失败不影响其余
+                failed += 1
+                db.rollback()
+                logger.warning("公众号监听失败 用户=%s:%s", row.user_id, exc)
+            finally:
+                schedule_service.mark_ran(db, row, now)
+    finally:
+        db.close()
+    if ok or failed:
+        logger.info("公众号监听 tick 完成:成功=%s 失败=%s", ok, failed)
+    return {"ok": ok, "failed": failed, "skipped": skipped}
+
+
 def build_jobs(scheduler: BackgroundScheduler) -> None:
     """注册后台作业:按用户频率采集、定时告警摘要、失败自动重试、飞书日报/周报、邮件周报。"""
     from app.admin import retry_failed_runs
@@ -132,6 +169,10 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
 
     scheduler.add_job(
         _safe(collect_tick), CronTrigger(minute="*"), id="collect_tick", max_instances=1, coalesce=True
+    )
+    scheduler.add_job(
+        _safe(wechat_collect_tick), CronTrigger(minute="*"), id="wechat_collect_tick",
+        max_instances=1, coalesce=True
     )
     scheduler.add_job(
         _safe(run_fixed_time_digests), CronTrigger(minute="*"), id="alert_fixed_time", max_instances=1, coalesce=True

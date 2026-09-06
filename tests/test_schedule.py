@@ -140,8 +140,8 @@ def test_tick_runs_due_sections(monkeypatch: pytest.MonkeyPatch, session) -> Non
     out = scheduler.collect_tick()
     # 只配了微博 Cookie:微博/百度跑(百度是公开接口无需 Cookie),闲鱼/抖音因缺 Cookie 被跳过;
     # 公众号监听不需要 Cookie(用 dajiala key),同样会跑
-    assert out == {"due": 3, "ok": 3, "failed": 0, "skipped": 2}
-    assert called == [(7, "weibo"), (7, "baidu"), (7, "wechat")]
+    assert out == {"due": 2, "ok": 2, "failed": 0, "skipped": 2}
+    assert called == [(7, "weibo"), (7, "baidu")]  # wechat 归独立作业
 
 
 def test_tick_enrolls_new_users(monkeypatch: pytest.MonkeyPatch, session) -> None:
@@ -158,8 +158,8 @@ def test_tick_skips_section_without_cookie(monkeypatch: pytest.MonkeyPatch, sess
     _patch_session(monkeypatch, session)
     _add_user(session, 7)
     monkeypatch.setattr(scheduler, "_runners", lambda: {s: (lambda db, uid, st: None) for s in svc.SECTIONS})
-    assert scheduler.collect_tick() == {"due": 2, "ok": 2, "failed": 0, "skipped": 3}
-    assert len(svc.due_schedules(session)) == 3  # 未被标记(微博/闲鱼/抖音缺 Cookie;百度/公众号已跑已标记)
+    assert scheduler.collect_tick() == {"due": 1, "ok": 1, "failed": 0, "skipped": 3}
+    assert len(svc.due_schedules(session)) == 4  # 未被标记(微博/闲鱼/抖音缺 Cookie;百度已跑;wechat 归独立作业)
 
     session.add(UserCookie(user_id=7, platform="douyin", cookie="x"))
     session.commit()
@@ -209,3 +209,18 @@ def test_cron_field_count_violation_falls_back() -> None:
     default = {"day_of_week": "sun", "hour": 20, "minute": 0}
     assert _fire_weekday("30 * * * * *", default) == 6  # 6 段 → 回退默认(周日)
     assert _fire_weekday("0 9 * * 1", default) == 0      # 合法 5 段 → 不被破坏(周一)
+
+
+def test_wechat_collect_tick_handles_wechat_section(monkeypatch, session) -> None:
+    """公众号监听独立作业:collect_tick 跳过 wechat(不阻塞其它板块);专用 tick 处理并标记。"""
+    _patch_session(monkeypatch, session)
+    _add_user(session, 7)
+    from app.services import wechat_monitor
+    monkeypatch.setattr(wechat_monitor, "run_wechat_listen", lambda db, uid, settings=None: None)
+
+    scheduler.collect_tick()
+    row = svc.get_or_create(session, 7, "wechat")
+    assert row.last_run_at is None  # collect_tick 已跳过 wechat,未标记
+
+    scheduler.wechat_collect_tick()
+    assert svc.get_or_create(session, 7, "wechat").last_run_at is not None  # 专用 tick 处理并标记

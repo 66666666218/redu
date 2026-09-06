@@ -352,6 +352,55 @@ def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchm
     return added
 
 
+def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
+                         rows: list[WechatArticle],
+                         client: DajialaClient | None) -> dict[int, list[tuple[str, str, str]]]:
+    """新文后处理(推送前):① 即时采样阅读量(¥0.06/篇,上限 wechat_listen_sample_limit);
+    ② 夸克转存盘链 → 换自己的分享链并持久化到 `my_pan_urls`。
+
+    返回 {article_id: [(原链, 我的链, 提取码)]} 供飞书推送;失败回落原链接,绝不阻塞监听。
+    """
+    replacements: dict[int, list[tuple[str, str, str]]] = {}
+    if not rows:
+        return replacements
+    if settings.wechat_listen_sample_new and settings.dajiala_key:
+        client = client or DajialaClient(settings.dajiala_key)
+        session.flush()  # 新文先拿自增 id(采样点外键要用)
+        sample_now = datetime.now()
+        for r in rows[: max(1, settings.wechat_listen_sample_limit)]:
+            try:
+                data = client.read_zan_pro(r.url)
+            except DajialaNoBalance:
+                logger.warning("监听即时采样余额不足(用户 %s)", user_id)
+                break
+            except DajialaError as exc:
+                logger.warning("监听即时采样失败 %s:%s", r.url, exc)
+                continue
+            _apply_sample(session, user_id, r, data, sample_now)
+    if settings.pan_transfer_enabled and settings.quark_cookie:
+        quark = QuarkTransfer(settings.quark_cookie)
+        for r in rows:
+            dead = False
+            for u in [x.strip() for x in (r.pan_urls or "").splitlines() if x.strip()][:3]:
+                try:
+                    res = quark.transfer_and_share(u, save_dir=settings.quark_save_dir,
+                                                   password=settings.quark_share_password)
+                except QuarkAuthError as exc:
+                    logger.error("夸克 Cookie 失效,本轮停止转存:%s", exc)
+                    dead = True
+                    break
+                except QuarkError as exc:
+                    logger.warning("夸克转存失败 {}:{}(推送保留原链接)", u, exc)
+                    continue
+                mine = [x for x in (r.my_pan_urls or "").splitlines() if x.strip()]
+                mine.append(res["share_url"] + (f" (提取码 {res['password']})" if res["password"] else ""))
+                r.my_pan_urls = chr(10).join(mine)[:2000]
+                replacements.setdefault(r.id, []).append((u, res["share_url"], res["password"]))
+            if dead:
+                break
+    return replacements
+
+
 def run_wechat_listen(session: Session, user_id: int, settings: Settings | None = None,
                       client: DajialaClient | None = None, weread: WereadClient | None = None,
                       platform: ReaderPlatformClient | None = None, push: bool = True) -> dict:
@@ -457,42 +506,7 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
             b.last_item_at = now
             new_rows.extend(_insert_new_articles(session, user_id, b, items, source="listen",
                                                  fetch_content=True))
-    # 新文即时采样(阅读量随推送一起发,¥0.06/篇,上限 wechat_listen_sample_limit)
-    replacements: dict[int, list[tuple[str, str, str]]] = {}
-    if new_rows and settings.wechat_listen_sample_new and settings.dajiala_key:
-        client = client or DajialaClient(settings.dajiala_key)
-        session.flush()  # 让新文先拿到自增 id(采样点外键要用)
-        sample_now = datetime.now()
-        for r in new_rows[: max(1, settings.wechat_listen_sample_limit)]:
-            try:
-                data = client.read_zan_pro(r.url)
-            except DajialaNoBalance:
-                logger.warning("监听即时采样余额不足(用户 %s)", user_id)
-                break
-            except DajialaError as exc:
-                logger.warning("监听即时采样失败 %s:%s", r.url, exc)
-                continue
-            _apply_sample(session, user_id, r, data, sample_now)
-
-    # 夸克转存:把盘链换成自己的分享链(失败回落原链接推送)
-    if new_rows and settings.pan_transfer_enabled and settings.quark_cookie:
-        quark = QuarkTransfer(settings.quark_cookie)
-        for r in new_rows:
-            quark_dead = False
-            for u in [x.strip() for x in (r.pan_urls or "").splitlines() if x.strip()][:3]:
-                try:
-                    res = quark.transfer_and_share(u, save_dir=settings.quark_save_dir,
-                                                   password=settings.quark_share_password)
-                except QuarkAuthError as exc:
-                    logger.error("夸克 Cookie 失效,本轮停止转存:%s", exc)
-                    quark_dead = True
-                    break
-                except QuarkError as exc:
-                    logger.warning("夸克转存失败 {}:{}(推送保留原链接)", u, exc)
-                    continue
-                replacements.setdefault(r.id, []).append((u, res["share_url"], res["password"]))
-            if quark_dead:
-                break
+    replacements = _enrich_new_articles(session, user_id, settings, new_rows, client)
 
     session.commit()
 
