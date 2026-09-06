@@ -20,7 +20,7 @@ from config.settings import Settings, get_settings
 from app.db import repository
 from app.db.models import BaiduHotItem, DouhotWatchSnap, DouhotWord, FeishuAlert, WeiboHotItem, XianyuItem
 from app.services import douhot
-from app.services.feishu_client import FeishuClient, webhook_for
+from app.services.feishu_client import FeishuClient, platform_webhook, webhook_for
 from app.utils import get_logger
 
 logger = get_logger(__name__)
@@ -482,18 +482,24 @@ def _split_messages(text: str, max_len: int = 15000) -> list[str]:
     return msgs
 
 
-def build_daily(db: Session, user_id: int, settings: Settings, include_keywords: bool = True) -> str:
-    """生成四板块日报文本(供飞书推送与测试)。
-
-    结构:今日活跃对比(各板块上升数)→ 跨板块共同上升(含各板块预测)→ 各板块榜 → 关键词智能体预测。
-    `include_keywords=False` 时不含关键词段(改用飞书交互卡片展示)。
-    """
+def _daily_cross_lines(db: Session, user_id: int) -> list[str]:
+    """日报的**聚合段**(标题+今日活跃对比+跨板块上升),不含具体板块榜。"""
     today = datetime.now().strftime("%m-%d")
     lines = [f"📊 热点日报 · {today}", "每个话题标注相对上一轮的涨跌或新增。"]
     tally = _riser_tally(db, user_id)
     if tally:
         lines.append(f"📈 今日活跃对比:{tally}")
     lines += _cross_section_lines(db, user_id, top_n=4)
+    return lines
+
+
+def build_daily(db: Session, user_id: int, settings: Settings, include_keywords: bool = True) -> str:
+    """生成四板块日报文本(供飞书推送与测试)。
+
+    结构:今日活跃对比(各板块上升数)→ 跨板块共同上升(含各板块预测)→ 各板块榜 → 关键词智能体预测。
+    `include_keywords=False` 时不含关键词段(改用飞书交互卡片展示)。
+    """
+    lines = _daily_cross_lines(db, user_id)
     for section in SECTIONS:
         lines += _section_lines(db, user_id, section)
     if include_keywords:
@@ -501,29 +507,55 @@ def build_daily(db: Session, user_id: int, settings: Settings, include_keywords:
     return "\n".join(lines)
 
 
-def run_feishu_daily() -> int:
-    """每日定时:给所有启用用户生成并推送日报。返回推送次数。"""
+def run_feishu_daily(settings: Settings | None = None, db: Session | None = None) -> int:
+    """每日定时:给所有启用用户生成并推送日报。返回推送次数。
+
+    分群:各平台专属群只收该平台日报段;总群收聚合段(活跃对比/跨板块上升)+
+    未配专属群的平台段 + 关键词交互卡片。未配任何专属群时退化为原"总群一条全量日报"。
+    `settings`/`db` 供测试注入。
+    """
     from app.db import get_session_local
 
-    settings = get_settings()
-    if not settings.feishu_webhook:
+    settings = settings or get_settings()
+    own_session = db is None
+    db = db or get_session_local()()
+    has_any = settings.feishu_webhook or any(webhook_for(settings, s) for s in SECTIONS)
+    if not has_any:
+        if own_session:
+            db.close()
         return 0
-    client = FeishuClient(settings.feishu_webhook, settings.feishu_secret)
-    db = get_session_local()()
     sent = 0
     try:
         for user in repository.list_enabled_users(db):
-            text = build_daily(db, user.id, settings, include_keywords=False)  # 关键词单独用卡片
-            for chunk in _split_messages(text):  # 过长自动拆成多条飞书
-                if client.send(chunk):
+            unconf = [sec for sec in SECTIONS if not platform_webhook(settings, sec)]
+            # 各平台专属群:只推该平台日报段(未配专属群 → 并入总群段)
+            for sec in SECTIONS:
+                wh = platform_webhook(settings, sec)
+                if not wh:
+                    continue
+                text = "\n".join([f"📊 {SECTION_LABELS[sec]}日报 · {datetime.now().strftime('%m-%d')}"]
+                                 + _section_lines(db, user.id, sec))
+                c = FeishuClient(wh, settings.feishu_secret)
+                for chunk in _split_messages(text):
+                    if c.send(chunk):
+                        sent += 1
+            # 总群:聚合段 + 未配专属群的平台段 + 关键词卡
+            if settings.feishu_webhook:
+                agg = _daily_cross_lines(db, user.id)
+                if unconf:
+                    agg += ["", *[line for sec in unconf for line in _section_lines(db, user.id, sec)]]
+                client = FeishuClient(settings.feishu_webhook, settings.feishu_secret)
+                for chunk in _split_messages("\n".join(agg)):
+                    if client.send(chunk):
+                        sent += 1
+                card = build_keyword_card(db, user.id, settings)
+                if card and client.send_card(card):
                     sent += 1
-            card = build_keyword_card(db, user.id, settings)
-            if card and client.send_card(card):
-                sent += 1
         logger.info("飞书日报推送完成,消息数=%s", sent)
         return sent
     finally:
-        db.close()
+        if own_session:
+            db.close()
 
 
 # ---------------------------------------------------------------------------

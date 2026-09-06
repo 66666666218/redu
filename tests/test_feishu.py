@@ -44,7 +44,7 @@ def _settings(**kw):
 
     return Settings(
         _env_file=None,
-        feishu_webhook="https://open.feishu.cn/open-apis/bot/v2/hook/test",
+        feishu_webhook=kw.pop("feishu_webhook", "https://open.feishu.cn/open-apis/bot/v2/hook/test"),
         feishu_secret=SECRET,
         feishu_hot_rank_jump=3,
         feishu_hot_ratio=0.30,
@@ -62,6 +62,36 @@ def test_webhook_for_routes_per_platform() -> None:
     assert webhook_for(s, "xianyu") == "https://open.feishu.cn/hook/xianyu"  # 闲鱼专属群优先
     assert webhook_for(s, "douhot") == s.feishu_webhook                    # 未配抖音专属 → 总群
     assert webhook_for(s, "") == s.feishu_webhook                         # 无板块 → 总群
+
+
+def test_daily_splits_to_platform_groups(monkeypatch, session) -> None:
+    """日报拆分:配了专属群的平台段进专属群;总群收聚合段+未配专属群的平台段。"""
+    from datetime import datetime
+
+    from app.db.models import WeiboHotItem, XianyuItem
+    from app.services import feishu
+
+    now = datetime.now()
+    session.add(WeiboHotItem(user_id=1, title="微博热搜A", heat=100, rank=1, captured_at=now))
+    session.add(XianyuItem(user_id=1, item_id="i1", title="闲鱼商品B", created_at=now))
+    session.commit()
+
+    sent = []  # (webhook, text)
+    def fake_client(webhook, secret):
+        class F:
+            def send(self, t): sent.append((webhook, t)); return True
+            def send_card(self, c): sent.append((webhook, c)); return True
+        return F()
+    monkeypatch.setattr(feishu, "FeishuClient", fake_client)  # 模块命名空间(顶部绑定的名字)
+
+    main_hook = "https://open.feishu.cn/hook/main"
+    xy_hook = "https://open.feishu.cn/hook/xianyu"
+    feishu.run_feishu_daily(_settings(feishu_webhook=main_hook, feishu_webhook_xianyu=xy_hook), db=session)
+
+    # 闲鱼专属群收到闲鱼日报段
+    assert any(wh == xy_hook and "闲鱼热榜日报" in t and "【闲鱼热榜】" in t for wh, t in sent)
+    # 总群收到聚合段 + 未配专属群的微博段(不含已被分流的闲鱼段)
+    assert any(wh == main_hook and "热点日报" in t and "【微博热搜】" in t and "【闲鱼热榜】" not in t for wh, t in sent)
 
 
 def test_sign_matches_feishu_algorithm() -> None:

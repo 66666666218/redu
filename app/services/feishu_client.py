@@ -37,9 +37,14 @@ _SECTION_WEBHOOK = {
 }
 
 
+def platform_webhook(settings: object, section: str = "") -> str:
+    """该板块的**专属** webhook(未配返回空串)——用于判断"是否进专属群"。"""
+    return getattr(settings, _SECTION_WEBHOOK.get(section, ""), "") or ""
+
+
 def webhook_for(settings: object, section: str = "") -> str:
     """按板块取飞书 webhook:优先板块专属群,未配则回落主群(总群)。"""
-    return getattr(settings, _SECTION_WEBHOOK.get(section, ""), "") or settings.feishu_webhook
+    return platform_webhook(settings, section) or settings.feishu_webhook
 
 
 class FeishuClient:
