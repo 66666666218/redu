@@ -34,6 +34,7 @@ def _sign(secret: str, ts: int) -> str:
 _SECTION_WEBHOOK = {
     "weibo": "feishu_webhook_weibo", "xianyu": "feishu_webhook_xianyu",
     "douhot": "feishu_webhook_douhot", "baidu": "feishu_webhook_baidu",
+    "wechat": "feishu_webhook_wechat",
 }
 
 

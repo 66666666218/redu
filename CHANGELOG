@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- [2026-09-06 17:30] FEAT: **公众号专属群配置 + 内容选题分析定时推送** — 用户提供公众号机器人 webhook。新增 `FEISHU_WEBHOOK_WECHAT`(公众号专属群)与 `FEISHU_WECHAT_CRON`(默认每天 10:00);`_SECTION_WEBHOOK` 加 "wechat" 映射;新增 `run_feishu_wechat_analysis`(`settings`/`db` 可注入):读该用户已录入文章 → `analyze_articles` → 推"内容选题分析"报告到公众号群(无文章/未配群则跳过)。调度器每日 10:00 自动跑。新增 `test_wechat_analysis_pushes_to_group`;全量 177 项通过(Files: app/services/{feishu.py,feishu_client.py,scheduler.py}, config/settings.py, .env.example, tests/test_feishu.py, CHANGELOG)
+
 - [2026-09-06 17:00] FEAT: **公众号·内容选题分析智能体(先做无流量版)** — 用户要求"公众号板块能按内容/选题智能分析"。暂无第三方 API,先做**内容选题分析**版:新增 `app/services/wechat_analyzer.py`(`analyze_articles` 纯函数):按标题/内容/作者/发布时间输出**选题分布**(2字窗口词频)、**标题风格**(长度/数字/emoji/疑问/悬念词占比+高频词)、**发布时段分布与高峰**、**对标号对比**、**选题建议+总结**(规则视角,非流量归因;标注待接入带流量API后升级)。配套:`WechatArticle` 模型、`POST /api/wechat/articles`(录入)、`GET /api/wechat/analyze`(分析)。新增 `tests/test_wechat_analyzer.py`;全量 176 项通过;文档同步 doc/API.md §9(Files: app/services/wechat_analyzer.py, app/db/models.py, app/api/{wechat.py,__init__.py}, tests/test_wechat_analyzer.py, doc/API.md, CHANGELOG)
 
 - [2026-09-06 16:30] FEAT: **每日日报拆分为各平台专属群** — 用户要求"日报也按板块拆分进各专属群"。重构 `run_feishu_daily`:配了专属 webhook 的平台,其日报段(`📊{平台}日报`+该板块榜)推入该平台专属群;总群收**聚合段**(活跃对比/跨板块上升)+**未配专属群的平台段**+关键词卡。新增 `platform_webhook`(判断是否配专属,与 `webhook_for` 路由分开——避免未配专属的平台被误当主群发送而重复)。未配任何专属群时退化为原"总群一条全量日报"。新增 `test_daily_splits_to_platform_groups`;全量 173 项通过(Files: app/services/{feishu_client.py,feishu.py}, tests/test_feishu.py, CHANGELOG)

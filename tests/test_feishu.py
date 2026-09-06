@@ -94,6 +94,30 @@ def test_daily_splits_to_platform_groups(monkeypatch, session) -> None:
     assert any(wh == main_hook and "热点日报" in t and "【微博热搜】" in t and "【闲鱼热榜】" not in t for wh, t in sent)
 
 
+def test_wechat_analysis_pushes_to_group(monkeypatch, session) -> None:
+    """公众号内容选题分析:有文章时推送到公众号专属群。"""
+    from datetime import datetime
+
+    from app.db.models import WechatArticle
+    from app.services import feishu
+
+    session.add(WechatArticle(user_id=1, title="揭秘AI副业3个方法", content="副业 AI 教程 干货",
+                              author="科技君", url="http://x", publish_at=datetime.now()))
+    session.commit()
+
+    sent = []
+    def fake_client(webhook, secret):
+        class F:
+            def send(self, t): sent.append((webhook, t)); return True
+        return F()
+    monkeypatch.setattr(feishu, "FeishuClient", fake_client)
+    wx_hook = "https://open.feishu.cn/hook/wechat"
+    n = feishu.run_feishu_wechat_analysis(_settings(feishu_webhook_wechat=wx_hook), db=session)
+    assert n == 1
+    assert sent[0][0] == wx_hook                     # 推到公众号群
+    assert "内容选题分析" in sent[0][1] and "副业" in sent[0][1]
+
+
 def test_sign_matches_feishu_algorithm() -> None:
     """用飞书官方算法独立算一遍,确认实现正确。
 

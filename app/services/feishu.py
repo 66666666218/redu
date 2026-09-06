@@ -558,6 +558,46 @@ def run_feishu_daily(settings: Settings | None = None, db: Session | None = None
             db.close()
 
 
+def run_feishu_wechat_analysis(settings: Settings | None = None, db: Session | None = None) -> int:
+    """公众号内容选题分析:把分析结论推送到公众号专属群。
+
+    无文章/未配公众号群则跳过(不推"暂无文章");`settings`/`db` 供测试注入。
+    """
+    from app.db import get_session_local
+    from app.db.models import WechatArticle
+    from app.services.wechat_analyzer import analyze_articles
+
+    settings = settings or get_settings()
+    wh = webhook_for(settings, "wechat")
+    if not wh:
+        return 0
+    own_session = db is None
+    db = db or get_session_local()()
+    sent = 0
+    try:
+        client = FeishuClient(wh, settings.feishu_secret)
+        for user in repository.list_enabled_users(db):
+            rows = db.scalars(
+                select(WechatArticle).where(WechatArticle.user_id == user.id)
+                .order_by(WechatArticle.publish_at.desc().nulls_last()).limit(200)
+            ).all()
+            if not rows:
+                continue
+            articles = [{"title": r.title, "content": r.content, "author": r.author, "publish_at": r.publish_at} for r in rows]
+            report = analyze_articles(articles)
+            if not report["count"]:
+                continue
+            lines = [f"📊 公众号 · 内容选题分析(近 {report['count']} 篇)", report["summary"]]
+            lines += [f"  · {s}" for s in report["suggestions"]]
+            if client.send("\n".join(lines)):
+                sent += 1
+        logger.info("公众号分析推送完成,条数=%s", sent)
+        return sent
+    finally:
+        if own_session:
+            db.close()
+
+
 # ---------------------------------------------------------------------------
 # 实时提醒(采集成功后调用)
 # ---------------------------------------------------------------------------
