@@ -101,6 +101,52 @@ def test_collect_hot_partial_verify_keeps_remaining(settings: Settings) -> None:
     assert len(out) == 2  # good 关键词的数据仍在
 
 
+def test_collect_hot_stops_on_rate_limit_keeps_remaining(settings: Settings) -> None:
+    """限流与滑块同语义:停止本轮(不换词逐个吃满退避),已成功关键词的数据保留。"""
+    from app.services.xianyu import XianyuRateLimit
+
+    class _HalfLimitClient:
+        def __init__(self) -> None:
+            self.tried: list[str] = []
+
+        def search(self, keyword: str) -> list[dict]:
+            self.tried.append(keyword)
+            if keyword == "bad":
+                raise XianyuRateLimit("闲鱼限流,请稍后再试")
+            return [_item(1, "A"), _item(2, "B")]
+
+    settings.xianyu_keywords = "good,bad,good2"
+    settings.xianyu_top_n = 10
+    fake = _HalfLimitClient()
+    out = collect_hot(settings, client=fake)
+    assert len(out) == 2          # good 的数据仍在
+    assert fake.tried == ["good", "bad"]  # bad 限流后停止,不再试 good2
+
+
+def test_collect_hot_raises_rate_limit_when_all_blocked(settings: Settings) -> None:
+    """全部关键词被限流时上抛 XianyuRateLimit,避免被当"成功 0 条"掩盖。"""
+    from app.services.xianyu import XianyuRateLimit
+
+    class _LimitClient:
+        def search(self, keyword: str) -> list[dict]:
+            raise XianyuRateLimit("闲鱼限流,请稍后再试")
+
+    settings.xianyu_keywords = "kw1,kw2"
+    settings.xianyu_top_n = 10
+    with pytest.raises(XianyuRateLimit):
+        collect_hot(settings, client=_LimitClient())
+
+
+def test_cookie_header_roundtrip() -> None:
+    """cookie_header 应导出会话内全部 Cookie(供运行中刷新的令牌回写持久化)。"""
+    from app.services.xianyu import XianyuClient
+
+    client = XianyuClient("tracknick=x; _m_h5_tk=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_a; ")
+    pairs = dict(p.split("=", 1) for p in client.cookie_header().split("; ") if "=" in p)
+    assert pairs["tracknick"] == "x"
+    assert pairs["_m_h5_tk"] == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_a"
+
+
 def test_post_backs_off_on_rate_limit_then_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """真限流码应退避重试(不连环猛打),仍失败抛 XianyuRateLimit。"""
     from app.services import xianyu

@@ -54,6 +54,33 @@ def test_cookie_store_rejects_bad_platform(session) -> None:
         cookie_store.set_cookie(session, 1, "unknown", "x")
 
 
+def test_persist_refreshed_cookie_updates_on_token_change(session) -> None:
+    """闲鱼运行中刷新的 _m_h5_tk 应回写存储;令牌未变/未配置则不动。"""
+    from app.services import tenant_base
+
+    class _FakeClient:
+        def __init__(self, cookie: str) -> None:
+            self._cookie = cookie
+
+        def cookie_header(self) -> str:
+            return self._cookie
+
+    # 未配置 Cookie → 跳过
+    assert tenant_base.persist_refreshed_cookie(session, 7, _FakeClient("a=b")) is False
+
+    cookie_store.set_cookie(
+        session, 7, "goofish", "tracknick=x; _m_h5_tk=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_a; "
+    )
+    refreshed = _FakeClient("tracknick=x; _m_h5_tk=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb_b; x5sec=y")
+    assert tenant_base.persist_refreshed_cookie(session, 7, refreshed) is True
+    stored = cookie_store.get_cookie(session, 7, "goofish")
+    assert "_m_h5_tk=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb_b" in stored
+    assert "x5sec=y" in stored
+
+    # 令牌没再变 → 不写(避免每轮无谓重加密)
+    assert tenant_base.persist_refreshed_cookie(session, 7, refreshed) is False
+
+
 def test_register_and_authenticate(session) -> None:
     register_user(session, "a@b.com", "p1234567")
     assert authenticate(session, "a@b.com", "p1234567") is not None

@@ -31,7 +31,7 @@ from app.services import alert_service, baidu, collector, douhot, xianyu
 from app.services.cookie_store import get_cookies
 from app.db import repository
 from app.services.trend_analyzer import compute_growth, compute_slope
-from app.services.tenant_base import _base, _record_run, verify_cooldown_active  # noqa: F401  (供外部/测试引用)
+from app.services.tenant_base import _base, _record_run, persist_refreshed_cookie, verify_cooldown_active  # noqa: F401  (供外部/测试引用)
 from app.services.xianyu_analytics import run_xianyu_deep, xianyu_analytics, xianyu_daily, xianyu_deep_due  # noqa: F401
 from app.services.keyword_watch import (  # noqa: F401
     _record_douhot_watch_snaps,
@@ -160,8 +160,9 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
     goofish_cookie = cookies.get("goofish", "")
     if not goofish_cookie:
         raise ValueError("未配置闲鱼 Cookie")
+    # 构造客户端不产生网络请求,放在 try 外:失败路径也能回写运行中刷新的令牌
+    client = xianyu.XianyuClient(goofish_cookie, proxy=settings.xianyu_proxy_url or None)
     try:
-        client = xianyu.XianyuClient(goofish_cookie)
         # 风控降频:每轮只抓 batch 个关键词,按已运行的 xianyu 次数轮转起始窗口,多轮覆盖全部
         prior = session.scalar(select(func.count()).select_from(RunRecord).where(
             RunRecord.user_id == user_id, RunRecord.kind == "xianyu")) or 0
@@ -173,6 +174,7 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
         for it in hot:
             session.add(XianyuItem(user_id=user_id, **it))
         session.commit()
+        persist_refreshed_cookie(session, user_id, client)
         latest = [{"key": it["item_id"], "hit_keywords": it["hit_keywords"], "best_rank": it["best_rank"]} for it in hot]
         alert_service.evaluate(session, user_id, "xianyu", latest, prev_keys, settings)
         _record_watch(session, user_id, "xianyu", [{"title": it["title"], "value": it.get("hit_keywords", 0)} for it in hot])
@@ -189,6 +191,7 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
         session.rollback()
         _record_run(session, user_id, "xianyu", "failed", f"{type(exc).__name__}: {exc}")
         session.commit()
+        persist_refreshed_cookie(session, user_id, client)
         raise
 
 

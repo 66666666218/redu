@@ -12,6 +12,7 @@ import hashlib
 import json
 import random
 import re
+import string
 import time
 from datetime import datetime, time as dt_time
 from pathlib import Path
@@ -56,6 +57,16 @@ class XianyuRateLimit(XianyuError):
     """闲鱼限流(退避后仍失败)。"""
 
 
+def _gen_log_id() -> str:
+    """生成与抓包同构的 mtop log_id(8 位 hex + 6 位字母数字),每个客户端实例一个。
+
+    固定复用同一抓包值会让所有请求、所有用户共享同一标识,长期是稳定的聚类特征。
+    """
+    return "".join(random.choices("0123456789abcdef", k=8)) + "".join(
+        random.choices(string.ascii_letters + string.digits, k=6)
+    )
+
+
 class XianyuVerify(XianyuError):
     """闲鱼人机验证(滑块):需人工过滑块或换出口 IP。
 
@@ -84,11 +95,15 @@ class XianyuClient:
     """
     APP_KEY = "34839810"
 
-    def __init__(self, cookie: str) -> None:
+    def __init__(self, cookie: str, proxy: str | None = None) -> None:
         # 用 curl_cffi 模拟 Chrome 的 TLS/HTTP2 指纹,冒充浏览器从协议层发出,
         # 降低被闲鱼 mtop 风控识别为机器人而触发人机验证(滑块)的概率。
         self.session = curl.Session(impersonate="chrome")
         self.session.headers.update(_MTOP_HEADERS)
+        # 可选"单一固定"出口代理(如住宅 IP)。mtop token/session 绑定出口 IP:
+        # 固定代理可用于恢复/隔离出口,但**不可接轮换代理池**(见 doc/dev.md §5.8)。
+        self._proxies = {"http": proxy, "https": proxy} if proxy else None
+        self._log_id = _gen_log_id()
         self._seed_cookies(cookie)
 
     def _seed_cookies(self, cookie: str) -> None:
@@ -100,6 +115,10 @@ class XianyuClient:
 
     def _token(self) -> str:
         return (self.session.cookies.get("_m_h5_tk", "") or "").split("_")[0]
+
+    def cookie_header(self) -> str:
+        """导出当前会话 Cookie 字符串(含运行中网关刷新的 _m_h5_tk/x5sec 等),供回写持久化。"""
+        return "; ".join(f"{c.name}={c.value}" for c in self.session.cookies.jar)
 
     def _refresh(self, resp: curl.Response) -> bool:
         m = re.search(r"_m_h5_tk=([0-9a-f]{32})_", resp.headers.get("set-cookie", ""))
@@ -129,10 +148,12 @@ class XianyuClient:
                 "jsv": "2.7.2", "appKey": self.APP_KEY, "t": t, "sign": self._sign(t, self._token(), data_val),
                 "v": "1.0", "type": "originaljson", "accountSite": "xianyu", "dataType": "json",
                 "timeout": "20000", "api": api, "sessionOption": "AutoLoginOnly",
-                "spm_cnt": "a21ybx.im.0.0", "spm_pre": "a21ybx.item.want.1.14ad3da6ALVq3n", "log_id": "14ad3da6ALVq3n",
+                "spm_cnt": "a21ybx.im.0.0", "spm_pre": f"a21ybx.item.want.1.{self._log_id}", "log_id": self._log_id,
             }
             try:
-                resp = self.session.post(f"{H5_BASE}/{api}/1.0/", params=params, data={"data": data_val}, timeout=20)
+                resp = self.session.post(
+                    f"{H5_BASE}/{api}/1.0/", params=params, data={"data": data_val}, timeout=20, proxies=self._proxies
+                )
             except curl.RequestsError as exc:
                 raise XianyuError(f"闲鱼请求失败:{exc}") from exc
             try:
@@ -271,9 +292,13 @@ def collect_hot(settings: Settings, client: XianyuClient | None = None, start_of
     风控降频:`xianyu_batch_keywords` 限制**每轮只抓部分关键词**(默认 5 个,少量多次),
     用 `start_offset`(调用方按运行次数轮转)从一个窗口开始,多轮才覆盖全部——避免把 13 个
     关键词瞬间连打过去触发 goofish 风控/滑块。
+
+    限流/滑块都是**账号/IP 级**信号:任一关键词命中即停止本轮(保留已采数据),
+    不换词继续——否则每个词都要吃满 30/90/180s 退避,既连环猛打加重风控,
+    又会把调度 tick 阻塞几十分钟。
     """
     keywords = [k.strip() for k in settings.xianyu_keywords.split(",") if k.strip()]
-    client = client or XianyuClient(load_cookie(settings.goofish_cookie_file))
+    client = client or XianyuClient(load_cookie(settings.goofish_cookie_file), proxy=settings.xianyu_proxy_url or None)
     n = len(keywords)
     batch = max(1, int(getattr(settings, "xianyu_batch_keywords", 0) or n))
     # 从 start_offset 起取 batch 个(绕回),构成这一轮的关键词窗口
@@ -282,7 +307,9 @@ def collect_hot(settings: Settings, client: XianyuClient | None = None, start_of
     buckets: dict[str, dict] = {}
     base_delay = getattr(settings, "xianyu_request_delay", None) or getattr(settings, "request_delay_seconds", 2.5)
     saw_verify = False
+    saw_rate = False
     success = 0
+    failed_kws: list[str] = []
     for idx, kw in enumerate(picked):
         try:
             items = client.search(kw)
@@ -291,7 +318,12 @@ def collect_hot(settings: Settings, client: XianyuClient | None = None, start_of
             # 立即停止尝试,避免连环猛打加重风控,保留已采到的部分数据。
             saw_verify = True
             break
+        except XianyuRateLimit:
+            # 网关限流同样是账号/IP 级:换词接着打只会逐个吃满退避(每词最长 5 分钟)。
+            saw_rate = True
+            break
         except XianyuError as exc:
+            failed_kws.append(kw)
             logger.warning("闲鱼关键词 %s 失败:%s", kw, exc)
         else:
             success += 1
@@ -306,9 +338,13 @@ def collect_hot(settings: Settings, client: XianyuClient | None = None, start_of
         if idx < len(picked) - 1:
             time.sleep(base_delay * random.uniform(0.8, 1.4))
 
-    # 一个词都没采到且被验证 → 让上层识别为"需人工处理",避免误报成功 0 条
+    # 一个词都没采到且被验证/限流 → 让上层识别为"需人工处理",避免误报成功 0 条
     if success == 0 and saw_verify:
         raise XianyuVerify("闲鱼人机验证(滑块),全部关键词均未采集")
+    if success == 0 and saw_rate:
+        raise XianyuRateLimit("闲鱼限流(退避后仍失败),全部关键词均未采集")
+    if failed_kws:
+        logger.warning("闲鱼本轮 %d 个关键词失败:%s", len(failed_kws), ",".join(failed_kws))
 
     # 排名:命中关键词次数多优先,其次综合序靠前(min rank)优先
     ranked = sorted(

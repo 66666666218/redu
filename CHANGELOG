@@ -1,5 +1,7 @@
 # CHANGELOG
 
+- [2026-09-07 00:51] FIX: **闲鱼反爬五项加固(限流停轮/固定代理/令牌回写/log_id随机化/清死字段)** — 深入审查闲鱼反爬后的修复:① `collect_hot` 遇 `XianyuRateLimit` **立即停止本轮**并保留已采数据(此前限流被当普通关键词失败、换词继续,每词吃满 30/90/180s 退避,5 词最长阻塞调度 tick 约 25 分钟且连环猛打加重风控);全部关键词被限时上抛 `XianyuRateLimit` 进失败告警;② `XianyuClient(cookie, proxy=…)` 支持 `XIANYU_PROXY_URL` **单一固定**出口代理(住宅 IP;轮换池仍禁——token/session 绑 IP),应用层即可换清洁出口;③ 新增 `tenant_base.persist_refreshed_cookie`:每轮把运行中网关下发的 `_m_h5_tk`/`x5sec` 回写 `user_cookies`(仅令牌变化才写),下轮省一次令牌往返,`run_xianyu`/`run_xianyu_deep` 成功与失败路径都回写;④ mtop `log_id`/`spm_pre` 每客户端实例随机生成(8hex+6alnum,同抓包格式),打破"所有请求共用同一抓包标识"的聚类特征;⑤ 移除 `view_count` 死链路(详情接口实测无浏览量字段、前端从未渲染 `view_today`),`XianyuDaily.view_count` 列保留不动免迁移。新增 4 项单测(限流停轮/全限上抛/cookie_header 回读/令牌回写);全量 181 项通过(Files: app/services/{xianyu.py,tenant.py,xianyu_analytics.py,tenant_base.py}, config/settings.py, .env.example, tests/{test_xianyu.py,test_platform.py}, doc/dev.md, CHANGELOG)
+
 ## 未发布
 
 - [2026-09-06 17:30] FEAT: **公众号专属群配置 + 内容选题分析定时推送** — 用户提供公众号机器人 webhook。新增 `FEISHU_WEBHOOK_WECHAT`(公众号专属群)与 `FEISHU_WECHAT_CRON`(默认每天 10:00);`_SECTION_WEBHOOK` 加 "wechat" 映射;新增 `run_feishu_wechat_analysis`(`settings`/`db` 可注入):读该用户已录入文章 → `analyze_articles` → 推"内容选题分析"报告到公众号群(无文章/未配群则跳过)。调度器每日 10:00 自动跑。新增 `test_wechat_analysis_pushes_to_group`;全量 177 项通过(Files: app/services/{feishu.py,feishu_client.py,scheduler.py}, config/settings.py, .env.example, tests/test_feishu.py, CHANGELOG)

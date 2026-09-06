@@ -15,7 +15,7 @@ from app.db import repository
 from app.db.models import XianyuDaily, XianyuSummary, RunRecord
 from app.services import xianyu
 from app.services.cookie_store import get_cookies
-from app.services.tenant_base import _base, _record_run, verify_cooldown_active
+from app.services.tenant_base import _base, _record_run, persist_refreshed_cookie, verify_cooldown_active
 from app.utils import get_logger
 
 logger = get_logger(__name__)
@@ -66,8 +66,9 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
     goofish = cookies.get("goofish", "")
     if not goofish:
         raise ValueError("未配置闲鱼 Cookie")
+    # 构造客户端不产生网络请求,放在 try 外:失败路径也能回写运行中刷新的令牌
+    client = xianyu.XianyuClient(goofish, proxy=settings.xianyu_proxy_url or None)
     try:
-        client = xianyu.XianyuClient(goofish)
         if hot is None:
             hot = xianyu.collect_hot(settings, client)
         today = datetime.now().date().isoformat()
@@ -95,7 +96,6 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
             row.want_count = detail.get("want_count", 0)
             row.collect_count = detail.get("collect_count", 0)
             row.sold_count = detail.get("sold_count", 0)
-            row.view_count = detail.get("view_count", 0)
             row.seller_fans = detail.get("seller_fans", 0)
             saved += 1
             if idx < _xy_detail_limit(settings) - 1:
@@ -108,17 +108,20 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
         detail_note = f"items={saved}" + (f",{stop_reason}" if stop_reason else "")
         _record_run(session, user_id, "xianyu_deep", status, detail_note)
         session.commit()
+        persist_refreshed_cookie(session, user_id, client)
         return {"platform": "xianyu_deep", "count": saved, "status": status, "reason": stop_reason}
     except (xianyu.XianyuVerify, xianyu.XianyuRateLimit) as exc:
         # collect_hot 整轮被滑块/限流(全部关键词失败)→ 优雅降级,不 500
         session.rollback()
         _record_run(session, user_id, "xianyu_deep", "failed", f"{type(exc).__name__}: {exc}")
         session.commit()
+        persist_refreshed_cookie(session, user_id, client)
         return {"platform": "xianyu_deep", "count": 0, "status": "failed", "reason": type(exc).__name__}
     except Exception as exc:  # noqa: BLE001
         session.rollback()
         _record_run(session, user_id, "xianyu_deep", "failed", f"{type(exc).__name__}: {exc}")
         session.commit()
+        persist_refreshed_cookie(session, user_id, client)
         raise
 
 
@@ -146,7 +149,6 @@ def xianyu_analytics(session: Session, user_id: int) -> dict:
                 "pct": pct,
                 "collect_today": t.collect_count,
                 "sold_today": t.sold_count,
-                "view_today": t.view_count,
                 "seller_fans": t.seller_fans,
             }
         )
