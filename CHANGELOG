@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- [2026-09-06 15:00] FEAT: **新增「🔥热点」实时大热标——吃瓜大瓜也能标出** — 用户反映"吃瓜类热搜没打重点"。根因:🔴重点=`burst`=预测还会暴涨,条件严(≥3点+上升+增速≥20%+加速);吃瓜大瓜多为"新上榜(1-2点)"或"已企稳",不满足→不打。新增**独立的 `hot`** 信号 = 当前榜单 top3(与预测无关),`platform_view` 输出 `hot`/`rank`,前端「微博热搜」等榜单卡片显示 `🔥热点`(与 `可能爆发` 并列)。全量 170 项通过;前端已构建(Files: app/services/keyword_watch.py, frontend/src/views/Platform.vue, CHANGELOG)
+
 - [2026-09-06 14:30] FEAT: **停摆/失败告警支持"长期坏"升级** — 用户要求"连续 N 天失败/停摆时升级提醒,区分偶发与长期坏"。新增 `health_escalate_days`(默认 3):① 失败告警 `check_collect_failures` 加 `_last_success_days`(距最近一次成功天数),≥阈值 → 条目标【长期】已 N 天未成功,有长期坏时前缀🔴;② 停摆告警 `check_health_stalls` 按停摆天数 ≥阈值 → 【长期】建议人工排查,带头🔴。新增 `test_health_stalls_escalates_long_term`;全量 170 项通过(Files: app/services/alert_service.py, config/settings.py, .env.example, tests/test_feishu.py, CHANGELOG)
 
 - [2026-09-06 14:10] FEAT: **新增「采集停摆」飞书告警 `check_health_stalls`** — 用户要求"健康度接飞书告警,被动接警"。现有 `check_collect_failures` 只盯**失败运行**,漏掉**静默停摆**(后端宕机/调度停/被风控全挡却未记为失败,如本次磁盘满 502)。新增:在用平台(有启用用户配 Cookie)超过 `health_stall_hours`(默认 24h)无新数据写入 → 推飞书,"可能:后端宕机/调度停止/Cookie失效/被风控全挡(闲鱼常见滑块/限流)";经 `FeishuAlert`(section=health_stall)去重+`feishu_alert_cooldown_hours` 冷却。调度器每 30 分钟与失败告警并列运行。新增 `test_health_stalls_alert_and_cooldown`;全量 169 项通过(Files: app/services/{alert_service.py,scheduler.py}, config/settings.py, .env.example, tests/test_feishu.py, CHANGELOG)

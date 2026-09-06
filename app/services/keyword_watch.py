@@ -266,14 +266,15 @@ def platform_view(session: Session, user_id: int, platform: str, top_n: int = 50
         return {"platform": platform, "count": 0, "items": []}
 
     out = []
-    for r in latest:
+    for idx, r in enumerate(latest, start=1):
         n = name(r)
         pts = series.get(n, [])
         a = keyword_agent.analyze(n, [v for _, v in pts])
         out.append({
-            "name": n, "score": val(r),
+            "name": n, "score": val(r), "rank": idx,
             "trend_label": a["trend_label"], "growth": a["growth"],
             "forecast_next": a["forecast_next"], "burst": a["burst"], "points": a["points"],
+            "hot": idx <= 3,   # 实时大热点:当前榜单前3(不管是否预测爆发)——吃瓜大瓜也能标出
         })
     return {"platform": platform, "count": len(out), "items": out[:top_n]}
 

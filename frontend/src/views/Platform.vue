@@ -62,7 +62,12 @@ onMounted(async () => { await load(); await loadWatches() })
             <div><div class="empty" style="padding:0">环比</div><b class="num" :class="tclass(it.trend_label)">{{ pct(it.growth) }}</b></div>
             <div><div class="empty" style="padding:0">预测</div><b class="num">{{ fmt(it.forecast_next) }}</b></div>
           </div>
-          <div class="empty" style="font-size:12px">样本 {{ it.points }} · {{ it.burst ? '🔥 可能爆发' : '未爆发' }}</div>
+          <div class="empty" style="font-size:12px">
+            <span v-if="it.hot" style="color:var(--down)">🔥热点</span>
+            <span v-if="it.burst" style="color:var(--down)">可能爆发</span>
+            <span v-if="!it.hot && !it.burst">未爆发</span>
+            <span> · 样本 {{ it.points }}</span>
+          </div>
         </div>
       </div>
       <div v-else class="empty">暂无数据,点击"采集"获取(需采集 2 轮以上才有趋势预测)</div>
