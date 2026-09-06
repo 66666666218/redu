@@ -731,6 +731,15 @@
 - 余额保护:开始前查余额(免费),低于 `DAJIALA_MIN_BALANCE` 整轮跳过(`reason:"low_balance"`)
 - **响应示例**: `{ "platform":"wechat", "status":"success", "accounts":2, "new":5, "failed":0 }`
 
+- **飞书推送格式**(每篇三要素:文章名 / 我的夸克链接 / 流量详情;未配置夸克或转存失败则无链接行):
+
+  ```
+  📡 公众号监听 · 新发文 2 篇
+  🔴夸克网盘 某资源合集
+  📦 我的夸克链接: https://pan.quark.cn/s/xxxx (提取码 abcd)
+  📊 阅读 1234 · 点赞 5 · 在看 3 · 转发 7 · 收藏 2 · 评论 9
+  ```
+
 ### 9b.6 文章列表(支持盘链过滤)
 
 - **请求方式**: GET `/api/wechat/articles?limit=100&has_pan=1&benchmark_id=1`

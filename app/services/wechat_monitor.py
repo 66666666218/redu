@@ -516,19 +516,18 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
     if not wh:
         return
     replacements = replacements or {}
-    lines = [f"📡 公众号监听 · 新发文 {len(rows)} 篇(用户#{user_id})"]
+    lines = [f"📡 公众号监听 · 新发文 {len(rows)} 篇"]
     for r in rows[:20]:
         tag = f"🔴{r.pan_types}" if r.pan_types else ""
-        stat = ""
+        lines.append(f"{tag} {r.title}")
+        for _old_url, new_url, pwd in replacements.get(r.id, []):
+            extra = f" (提取码 {pwd})" if pwd else ""
+            lines.append(f"📦 我的夸克链接: {new_url}{extra}")
         if r.traffic_at:
-            stat = f" 👁{r.read_num} ↗{r.share_num} 👍{r.zan_num} 💬{r.comment_count}"
-        lines.append(f"{tag} {r.title}{stat}")
-        for old_url, new_url, pwd in replacements.get(r.id, []):
-            extra = f"(提取码 {pwd})" if pwd else ""
-            lines.append(f"📦 已转存到自己盘: {new_url} {extra}")
-            lines.append(f"   原链: {old_url}")
-        if not replacements.get(r.id):
-            lines.append(r.url)
+            lines.append(f"📊 阅读 {r.read_num} · 点赞 {r.zan_num} · 在看 {r.looking_num}"
+                         f" · 转发 {r.share_num} · 收藏 {r.collect_num} · 评论 {r.comment_count}")
+        else:
+            lines.append("📊 流量未采样")
     if len(rows) > 20:
         lines.append(f"…另有 {len(rows) - 20} 篇,见平台文章列表")
     try:
