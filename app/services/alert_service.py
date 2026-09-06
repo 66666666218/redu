@@ -309,7 +309,7 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
 
     from app.db import get_session_local
     from app.db.models import FeishuAlert, RunRecord
-    from app.services.feishu_client import FeishuClient
+    from app.services.feishu_client import FeishuClient, webhook_for
 
     threshold = settings.fail_alert_threshold
     since = datetime.now() - timedelta(hours=24)
@@ -349,9 +349,7 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
             else:
                 db.add(FeishuAlert(section="collect_fail", user_id=uid, title=kind, reason=f"近24h失败{cnt}次"))
         if hits:
-            escalate_days = getattr(settings, "health_escalate_days", 3) or 3
-            any_long = False
-            msg = "⚠️ 采集持续失败(近24h)"
+            sent = 0
             for uid, kind, cnt in hits:
                 # 带上最近一次失败的具体原因(如"XianyuVerify: 闲鱼人机验证(滑块),需人工处理"),
                 # 让运维一眼知道该做什么(人工过滑块/换出口 IP),而非只看到"失败 N 次"。
@@ -364,16 +362,14 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
                 extra = f"  {detail}" if detail else ""
                 # 长期坏升级:距最近一次成功超过 N 天 → 标注,区分偶发与长期
                 days = _last_success_days(db, uid, kind)
-                long_txt = ""
-                if days is not None and days >= escalate_days:
-                    any_long = True
-                    long_txt = f"  【长期】已 {days} 天未成功,建议人工处理"
-                msg += f"\n  · 用户#{uid} 板块[{kind}] 失败 {cnt} 次{extra}{long_txt}"
-            if any_long:
-                msg = "🔴 " + msg[len("⚠️ "):]  # 有长期坏的 → 前缀升级为 🔴
-            FeishuClient(settings.feishu_webhook, settings.feishu_secret).send(msg)
+                long = days is not None and days >= escalate_days
+                long_txt = f"  【长期】已 {days} 天未成功,建议人工处理" if long else ""
+                head = "🔴 " if long else "⚠️ "
+                msg = f"{head}采集持续失败(近24h) · 用户#{uid} 板块[{kind}] 失败 {cnt} 次{extra}{long_txt}"
+                # 按板块路由到专属群(未配则总群)
+                if FeishuClient(webhook_for(settings, kind), settings.feishu_secret).send(msg):
+                    sent += 1
             db.commit()
-            sent = len(hits)
             logger.info("采集失败告警推送,条数=%s", sent)
         return sent
     finally:
@@ -394,7 +390,7 @@ def check_health_stalls(settings: Settings | None = None, db: Session | None = N
 
     from app.db import get_session_local
     from app.db.models import BaiduHotItem, DouhotWord, FeishuAlert, UserCookie, WeiboHotItem, XianyuItem
-    from app.services.feishu_client import FeishuClient
+    from app.services.feishu_client import FeishuClient, webhook_for
 
     own_session = db is None
     db = db or get_session_local()()
@@ -447,26 +443,30 @@ def check_health_stalls(settings: Settings | None = None, db: Session | None = N
     sent = 0
     if items:
         escalate_days = getattr(settings, "health_escalate_days", 3) or 3
-        any_long = False
-        lines = [f"⚠️ 采集停摆(> {stall_hours}h 无新数据)"]
+        ok = True
         for p, latest in items:
             when = latest.strftime("%m-%d %H:%M") if latest else "从未进数据"
             long_txt = ""
+            long = False
             if latest:
                 days = int((now - latest).total_seconds() // 86400)
                 if days >= escalate_days:
-                    any_long = True
+                    long = True
                     long_txt = f"  【长期】已 {days} 天,建议人工排查"
-            lines.append(f"  · {labels.get(p, p)}:最近数据 {when}{long_txt}")
-        lines.append("可能:后端宕机/调度停止/Cookie失效/被风控全挡(闲鱼常见滑块/限流)")
-        head = f"🔴 采集停摆(> {stall_hours}h 无新数据,有的已长期)" if any_long else lines[0]
-        lines[0] = head
-        if FeishuClient(settings.feishu_webhook, settings.feishu_secret).send("\n".join(lines)):
+            head = (f"🔴 采集停摆(> {stall_hours}h 无新数据,已长期)" if long
+                    else f"⚠️ 采集停摆(> {stall_hours}h 无新数据)")
+            lines = [head, f"  · {labels.get(p, p)}:最近数据 {when}{long_txt}",
+                     "可能:后端宕机/调度停止/Cookie失效/被风控全挡(闲鱼常见滑块/限流)"]
+            # 按板块路由到专属群
+            if FeishuClient(webhook_for(settings, p), settings.feishu_secret).send("\n".join(lines)):
+                sent += 1
+            else:
+                ok = False
+        if ok:
             db.commit()
-            sent = len(items)
             logger.info("采集停摆告警推送,条数=%s", sent)
         else:
-            db.rollback()  # 发送失败不记账,下次再试
+            db.rollback()  # 有发送失败则全部回滚,下次再试
     if own_session:
         db.close()
     return sent

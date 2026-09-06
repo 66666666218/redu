@@ -20,7 +20,7 @@ from config.settings import Settings, get_settings
 from app.db import repository
 from app.db.models import BaiduHotItem, DouhotWatchSnap, DouhotWord, FeishuAlert, WeiboHotItem, XianyuItem
 from app.services import douhot
-from app.services.feishu_client import FeishuClient
+from app.services.feishu_client import FeishuClient, webhook_for
 from app.utils import get_logger
 
 logger = get_logger(__name__)
@@ -624,7 +624,7 @@ def run_feishu_keyword_alerts(user_id: int, settings: Settings | None = None, db
     返回推送条数;`db` 供测试注入。
     """
     settings = settings or get_settings()
-    if not settings.feishu_webhook:
+    if not webhook_for(settings, "douhot"):
         return 0
     from app.services import keyword_agent
     from app.services import tenant
@@ -638,7 +638,7 @@ def run_feishu_keyword_alerts(user_id: int, settings: Settings | None = None, db
         watches = list_watch(db, user_id)
         if not watches:
             return 0
-        client = FeishuClient(settings.feishu_webhook, settings.feishu_secret)
+        client = FeishuClient(webhook_for(settings, "douhot"), settings.feishu_secret)
         hits: list[dict] = []
         for w in watches:
             snaps = repository.watch_snap_series(db, user_id, w["keyword"], section=w.get("section"))
@@ -717,7 +717,7 @@ def run_feishu_realtime(
     返回此次推送条数(0 = 未配置/无触发)。`db` 供测试注入;缺省用全局会话。
     """
     settings = settings or get_settings()
-    if not settings.feishu_webhook:
+    if not webhook_for(settings, section):   # 该板块有专属群或总群,否则不发
         return 0
     from app.db import get_session_local
 
@@ -728,7 +728,7 @@ def run_feishu_realtime(
         cur, prev = _batches(db, user_id, section)
         if not cur:
             return 0
-        client = FeishuClient(settings.feishu_webhook, settings.feishu_secret)
+        client = FeishuClient(webhook_for(settings, section), settings.feishu_secret)
         pushed_items: list[tuple[str, str]] = []
         for title, c in list(cur.items())[:40]:
             tag, extra = _delta(section, c, prev)
@@ -806,7 +806,7 @@ def run_feishu_keyword_realtime(user_id: int, settings: Settings | None = None, 
     - 🆕 新进(最新批有、上批无);↑ 上升期(趋势转为上升);🔥 预测爆发。
     """
     settings = settings or get_settings()
-    if not settings.feishu_webhook:
+    if not webhook_for(settings, "douhot"):
         return 0
     from app.services.keyword_watch import list_watch
     from app.db import get_session_local
@@ -815,7 +815,7 @@ def run_feishu_keyword_realtime(user_id: int, settings: Settings | None = None, 
     db = db or get_session_local()()
     pushed = 0
     try:
-        client = FeishuClient(settings.feishu_webhook, settings.feishu_secret)
+        client = FeishuClient(webhook_for(settings, "douhot"), settings.feishu_secret)
         for w in list_watch(db, user_id):
             if w.get("section") != "douhot" or w.get("list_type") not in ("search", "video", "topic"):
                 continue

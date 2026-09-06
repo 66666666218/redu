@@ -31,6 +31,17 @@ def _sign(secret: str, ts: int) -> str:
     return base64.b64encode(digest).decode("utf-8")
 
 
+_SECTION_WEBHOOK = {
+    "weibo": "feishu_webhook_weibo", "xianyu": "feishu_webhook_xianyu",
+    "douhot": "feishu_webhook_douhot", "baidu": "feishu_webhook_baidu",
+}
+
+
+def webhook_for(settings: object, section: str = "") -> str:
+    """按板块取飞书 webhook:优先板块专属群,未配则回落主群(总群)。"""
+    return getattr(settings, _SECTION_WEBHOOK.get(section, ""), "") or settings.feishu_webhook
+
+
 class FeishuClient:
     """飞书自定义机器人客户端(单条文本 / 交互卡片)。"""
 

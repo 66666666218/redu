@@ -80,7 +80,11 @@ class Settings(BaseSettings):
 
     # ---- 飞书机器人 ----
     # 未配置 webhook 时,飞书日报与实时提醒自动关闭(不影响其他功能)。
-    feishu_webhook: str = ""        # 群机器人 Webhook 地址
+    feishu_webhook: str = ""        # 群机器人 Webhook 地址(总群;板块推送未配专属群时回落这里)
+    feishu_webhook_weibo: str = ""  # 微博专属群 Webhook(非空则微博监控推到这里,否则推总群)
+    feishu_webhook_xianyu: str = "" # 闲鱼专属群 Webhook
+    feishu_webhook_douhot: str = "" # 抖音专属群 Webhook
+    feishu_webhook_baidu: str = ""  # 百度专属群 Webhook
     feishu_secret: str = ""         # 机器人签名校验密钥(为空则不签名)
     feishu_daily_cron: str = "0 8 * * *"   # 每日热点日报时间(默认 08:00)
     feishu_hot_rank_jump: int = 3          # 排名跳升 ≥ 该名次即实时推送

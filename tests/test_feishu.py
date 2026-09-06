@@ -54,6 +54,16 @@ def _settings(**kw):
 
 
 # ---- 签名 ----
+def test_webhook_for_routes_per_platform() -> None:
+    """webhook_for:优先平台专属群,未配回落主群(总群)。"""
+    from app.services.feishu_client import webhook_for
+
+    s = _settings(feishu_webhook_xianyu="https://open.feishu.cn/hook/xianyu")
+    assert webhook_for(s, "xianyu") == "https://open.feishu.cn/hook/xianyu"  # 闲鱼专属群优先
+    assert webhook_for(s, "douhot") == s.feishu_webhook                    # 未配抖音专属 → 总群
+    assert webhook_for(s, "") == s.feishu_webhook                         # 无板块 → 总群
+
+
 def test_sign_matches_feishu_algorithm() -> None:
     """用飞书官方算法独立算一遍,确认实现正确。
 
