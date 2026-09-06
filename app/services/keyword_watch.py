@@ -42,6 +42,26 @@ def add_douhot_watch(session: Session, user_id: int, list_type: str, keyword: st
     return add_watch(session, user_id, "douhot", list_type, keyword, filter_keyword, date_window)  # 兼容旧调用
 
 
+def update_watch(session: Session, user_id: int, section: str, list_type: str, keyword: str,
+                 filter_keyword: str = "", date_window: int | str | None = None) -> dict:
+    """修改一个已关注关键词的**观测时段**(date_window)。找不到该关注时抛 KeyError。
+
+    只更新时段,不动其它字段(关键词/过滤词/板块);`date_window` 为 None 时回落到榜单默认。
+    """
+    list_type = list_type if list_type in _WORD_TYPES else "word"
+    keyword = keyword.strip()
+    filter_keyword = (filter_keyword or "").strip()
+    w = repository.get_watch(session, user_id, section, list_type, keyword, filter_keyword)
+    if w is None:
+        raise KeyError("未找到该关注")
+    dw = (douhot._normalize_date_window(date_window) if date_window is not None
+          else douhot._default_window(list_type))
+    w.date_window = dw
+    session.commit()
+    return {"section": section, "list_type": list_type, "keyword": keyword,
+            "filter_keyword": filter_keyword, "date_window": dw}
+
+
 def list_watch(session: Session, user_id: int, section: str | None = None) -> list[dict]:
     return [
         {"section": r.section, "list_type": r.list_type, "keyword": r.keyword,

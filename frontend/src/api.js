@@ -81,6 +81,7 @@ export const api = {
   },
   watchAdd: (section, keyword, listType, filterKeyword, dateWindow) => req('POST', '/api/watch/' + section, { keyword, list_type: listType || 'word', filter_keyword: filterKeyword || '', date_window: dateWindow || null }),
   watchDel: (section, listType, keyword, filterKeyword) => req('DELETE', '/api/watch/' + section, { list_type: listType, keyword, filter_keyword: filterKeyword || '' }),
+  watchUpdate: (section, listType, keyword, filterKeyword, dateWindow) => req('PATCH', '/api/watch/' + section, { list_type: listType, keyword, filter_keyword: filterKeyword || '', date_window: dateWindow }),
   watchList: (section) => req('GET', '/api/watch/' + section),
   watchAnalytics: (section) => req('GET', '/api/watch/' + section + '/analytics'),
   xianyuDaily: () => req('GET', '/api/xianyu/daily'),

@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- [2026-09-06 15:30] FEAT: **已关注关键词可改观测时段** — 用户要求"已关注的词也能改检测时间范围(1小时/1天等)"。新增 `keyword_watch.update_watch`(只改 date_window,其余字段不变;找不到抛 KeyError→404)与 `PATCH /api/watch/{section}`;前端 Douhot 每个关注卡头的时段标签改为**下拉**,改动即调 `watchUpdate` + 刷新(`watchUpdate` 走 PATCH)。新增 `test_update_watch_changes_date_window`;全量 171 项通过;文档同步 doc/API.md(Files: app/services/keyword_watch.py, app/api/collect.py, frontend/src/{api.js,views/Douhot.vue}, tests/test_platform.py, doc/API.md, CHANGELOG)
+
 - [2026-09-06 15:00] FEAT: **新增「🔥热点」实时大热标——吃瓜大瓜也能标出** — 用户反映"吃瓜类热搜没打重点"。根因:🔴重点=`burst`=预测还会暴涨,条件严(≥3点+上升+增速≥20%+加速);吃瓜大瓜多为"新上榜(1-2点)"或"已企稳",不满足→不打。新增**独立的 `hot`** 信号 = 当前榜单 top3(与预测无关),`platform_view` 输出 `hot`/`rank`,前端「微博热搜」等榜单卡片显示 `🔥热点`(与 `可能爆发` 并列)。全量 170 项通过;前端已构建(Files: app/services/keyword_watch.py, frontend/src/views/Platform.vue, CHANGELOG)
 
 - [2026-09-06 14:30] FEAT: **停摆/失败告警支持"长期坏"升级** — 用户要求"连续 N 天失败/停摆时升级提醒,区分偶发与长期坏"。新增 `health_escalate_days`(默认 3):① 失败告警 `check_collect_failures` 加 `_last_success_days`(距最近一次成功天数),≥阈值 → 条目标【长期】已 N 天未成功,有长期坏时前缀🔴;② 停摆告警 `check_health_stalls` 按停摆天数 ≥阈值 → 【长期】建议人工排查,带头🔴。新增 `test_health_stalls_escalates_long_term`;全量 170 项通过(Files: app/services/alert_service.py, config/settings.py, .env.example, tests/test_feishu.py, CHANGELOG)

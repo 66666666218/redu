@@ -297,6 +297,24 @@ def test_watch_date_window_stored_and_passed(session, monkeypatch) -> None:
     assert received["dw"] == 168  # 快照采集把关注的时段透传给定向查询
 
 
+def test_update_watch_changes_date_window(session) -> None:
+    """修改已关注关键词的观测时段:update_watch 更新 date_window,其余字段不变;找不到抛 KeyError。"""
+    import pytest
+
+    from app.services.keyword_watch import add_watch, list_watch, update_watch
+
+    add_watch(session, 1, "douhot", "topic", "某词", date_window=1)
+    session.commit()
+    assert list_watch(session, 1)[0]["date_window"] == 1
+
+    updated = update_watch(session, 1, "douhot", "topic", "某词", date_window=168)
+    assert updated["date_window"] == 168
+    assert list_watch(session, 1)[0]["date_window"] == 168  # 时段已改
+
+    with pytest.raises(KeyError):
+        update_watch(session, 1, "douhot", "topic", "不存在的词", date_window=24)
+
+
 def test_new_topic_watch_appears_in_analytics(session) -> None:
     """新增一个话题榜关注(尚无快照)后,分析接口应立即返回该词——新词空序列不被丢弃/不崩。"""
     from app.services.keyword_watch import add_watch, watch_analytics

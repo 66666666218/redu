@@ -76,6 +76,21 @@ def watch_add(section: str, payload: dict, user: User = Depends(get_current_user
         raise HTTPException(400, str(exc)) from exc
 
 
+@router.patch("/api/watch/{section}")
+def watch_update(section: str, payload: dict, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """修改某板块已关注关键词的观测时段(date_window)。"""
+    from app.services.keyword_watch import update_watch
+
+    try:
+        return update_watch(db, user.id, section, str(payload.get("list_type", "word")),
+                            str(payload.get("keyword", "")), str(payload.get("filter_keyword", "")),
+                            payload.get("date_window"))
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, str(exc)) from exc
+
+
 @router.get("/api/watch/{section}")
 def watch_list(section: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     from app.services.keyword_watch import list_watch

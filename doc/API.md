@@ -380,6 +380,25 @@
 
 **列出某板块的关注词**: GET `/api/watch/{section}` → `[{"section","list_type","keyword"}, ...]`
 
+**修改观测时段**
+
+- **请求方式**: PATCH `/api/watch/{section}`(需登录)
+- **请求参数 (Body)**:
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `keyword` | str | 是 | 已关注的关键词 |
+| `list_type` | str | 是 | 原关注时的榜单类型 |
+| `filter_keyword` | str | 否 | 原关注时的过滤词(默认空) |
+| `date_window` | int | 是 | 新的观测时段(小时):`1`/`24`/`72`/`168` = 近1小时/近1天/近3天/近7天 |
+
+**响应示例 (200)**
+```json
+{ "section": "weibo", "list_type": "word", "keyword": "世界杯", "filter_keyword": "", "date_window": 168 }
+```
+
+> 只改观测时段 date_window,关键词/过滤词/板块不变;找不到关注返回 404。
+
 **某板块的智能体分析**
 
 - **请求方式**: GET `/api/watch/{section}/analytics`(需登录)

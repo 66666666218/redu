@@ -75,6 +75,13 @@ async function removeWatch(w) {
     await loadWatches()
   } catch (e) { toastError(e.message) }
 }
+async function changeWatchWindow(w, v) {
+  try {
+    await api.watchUpdate('douhot', w.list_type || 'word', w.keyword, w.filter_keyword || '', v)
+    toastOk(`「${w.keyword}」观测时段已改为 ${winLabel(v)}`)
+    await loadWatches()
+  } catch (e) { toastError(e.message); await loadWatches() }
+}
 async function loadWatches() {
   try { watches.value = await api.douhotWatchAnalytics() } catch {}
 }
@@ -181,8 +188,13 @@ onMounted(async () => { await loadList('word'); await loadWatches() })
       </div>
       <div v-if="watches.length" class="grid" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
         <div class="watch-card" v-for="w in watches" :key="w.keyword + w.list_type + (w.filter_keyword||'') + (w.date_window||'')">
-          <div class="row" style="justify-content:space-between"><b>{{ w.keyword }} <span v-if="w.filter_keyword" style="opacity:.7;font-weight:400">只含「{{ w.filter_keyword }}」</span> <span v-if="w.date_window" style="opacity:.6;font-weight:400">·{{ winLabel(w.date_window) }}</span> <span v-if="w.burst" style="color:var(--down)">🔴重点</span></b>
-            <span class="badge" :class="tclass(w.trend_label)">{{ (w.entries && w.entries.length) ? (w.trend_overview || w.trend_label) : w.trend_label }}</span></div>
+          <div class="row" style="justify-content:space-between">
+            <b>{{ w.keyword }} <span v-if="w.filter_keyword" style="opacity:.7;font-weight:400">只含「{{ w.filter_keyword }}」</span> <span v-if="w.burst" style="color:var(--down)">🔴重点</span></b>
+            <span class="badge" :class="tclass(w.trend_label)">{{ (w.entries && w.entries.length) ? (w.trend_overview || w.trend_label) : w.trend_label }}</span>
+            <select v-if="w.date_window" :value="w.date_window" @click.stop @change="changeWatchWindow(w, +$event.target.value)" style="width:auto;font-size:12px;padding:0 4px" title="观测时段">
+              <option v-for="op in windows" :key="op.v" :value="op.v">{{ op.label }}</option>
+            </select>
+          </div>
           <div class="row" style="gap:14px;margin:8px 0">
             <div><div class="empty" style="padding:0">当前</div><b class="num">{{ fmt(w.last_score) }}</b></div>
             <div><div class="empty" style="padding:0">环比</div><b class="num" :class="tclass(w.trend_label)">{{ pct(w.growth) }}</b></div>
