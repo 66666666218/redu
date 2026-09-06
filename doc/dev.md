@@ -339,6 +339,33 @@ redian/
 - **指纹与滑块(实测 `scripts/probe_xianyu_curl.py`)**:纯 `requests`(Python urllib3 TLS 指纹)极像机器人,易被触发滑块;`curl_cffi` 伪 Chrome 指纹是**防患于未然**层(主流闲鱼采集器 goofish_spider/cn-scraper-mcp 就这么做),能降低被标记概率。**但实测:同一 Cookie 已被反复 `FAIL_SYS_USER_VALIDATE` 时,`requests` 和 `curl_cffi` 都会被拦、且都不下发新 token**——此时是**账号/会话已被标记,指纹伪装救不了**。**恢复办法(已实测验证)**:在浏览器用该账号**手动过一次滑块**,或**换清洁出口 IP**(用单一稳定住宅 IP,别用轮换代理池——闲鱼 token/session 绑定 IP)。过滑块后 `_m_h5_tk` 刷新并带回 `x5sec` 验证 cookie,`requests`/`curl_cffi` **均恢复 `SUCCESS`**;注意过滑块**不是一劳永逸**,持续低频率 + 清洁 IP 才能减少复发(否则会再次被标记,靠既有降级 + 失败告警(含原因)兜底)。
 - **风险控制错误模型**(mtop 网关):`FAIL_SYS_TOKEN_*` 令牌错误 → 刷新 `_m_h5_tk` 重试;`FAIL_SYS_RATE_LIMIT`/`FAIL_SYS_USER_LIMIT` 真限流 → 指数退避 30/90/180s 后抛 `XianyuRateLimit`;**`FAIL_SYS_USER_VALIDATE`= 人机验证(滑块),不是限流**——实测退避重试仍无效,改为**立即抛 `XianyuVerify`**,由上层识别为"需人工过滑块或更换出口 IP"。深采详情循环遇 `XianyuVerify`/`XianyuRateLimit` 即**停止抓取并保留已采部分**(状态 `partial`),不再连环猛打加剧风控;整轮被验证时 `run_xianyu_deep` 优雅返回 `status:"failed"` 而非 500。`check_collect_failures` 的飞书告警会带上最近一次失败原因(人工可据此行动)。**2026-09-05 降低风控**:① 详情限流默认降到 **10**(`XIANYU_DETAIL_LIMIT`,详情是最大爆发点)、请求间隔默认提到 **6s**(`XIANYU_REQUEST_DELAY`);② 新增**验证后冷却** `XIANYU_COOLDOWN_MINUTES`(默认 30)：闲鱼触发 `XianyuVerify` 后,`run_xianyu`/`run_xianyu_deep` 在冷却期内**跳过采集**(记 `skipped/verify_cooldown`),避免反复撞滑块加重风控;换清洁 IP/人工过滑块仍是根因解法。**2026-09-07 反爬加固**:① `collect_hot` 遇 `XianyuRateLimit` **停止本轮**(与滑块同语义:限流是账号/IP 级,换词接着打只会逐个吃满 30/90/180s 退避——5 词最长阻塞调度 tick 约 25 分钟且连环猛打加重风控),保留已采数据,全部被限时上抛 `XianyuRateLimit`;② `XianyuClient` 新增 `XIANYU_PROXY_URL`(**单一固定**出口代理,如住宅 IP;轮换池仍禁用——token/session 绑 IP),应用层即可换清洁出口,不必改系统网络;③ 新增 `tenant_base.persist_refreshed_cookie`:每轮结束后把运行中网关下发的 `_m_h5_tk`(及 x5sec 等新 cookie)回写 `user_cookies`,下轮直接用新令牌、省一次 TOKEN 往返(仅令牌确有变化才写);④ mtop `log_id`/`spm_pre` 改为**每客户端实例随机生成**(8 位 hex+6 位字母数字,与抓包同构),不再全部请求共用同一抓包值;⑤ 移除 `view_count` 死链路(详情接口实测无浏览量字段、前端未渲染该值)。
 
+### 5.8b 公众号监听与同步 `services/wechat_monitor.py` + `services/dajiala_client.py`(2026-09-07)
+
+- 对标号:`wechat_benchmarks` 表,锚点=任意文章永久链(贴链即加,免费);ghid/昵称由 post_condition 回填。
+- 监听:`run_wechat_listen` 每号一次 `post_condition`(¥0.14)拿当天全部发文,按链接去重入
+  `wechat_articles`(source=listen);标题命中网盘词 → 免费自抓正文(js_content,遇"环境异常"返回空)→
+  四家盘链正则标 `pan_types` → 新文推公众号专属飞书群。调度走"公众号监听"板块(默认 6h);余额
+  < `DAJIALA_MIN_BALANCE` 整轮跳过。
+- 同步:`sync_wechat_account` 用 `history_by_ghid`(JSON body!ghid/url 二选一,`PagingInfo.Offset`/`IsEnd`
+  翻页)拉历史文章(source=sync),默认 `WECHAT_SYNC_MAX_PAGES=3` 页封顶。
+- dajiala 传输格式不统一(form vs JSON body vs GET,见 doc/dajiala-api.md),`dajiala_client` 统一封装
+  并内置 QPS≤2 限速;防御式解析(post_condition 的 data 项与 history 的 MsgList 字段层级未完全实测)。
+- **双数据源免费优先(2026-09-07)**:`weread_client.py` 接入微信读书(生产端点经 we-mp-rss/weread-mp-fetcher
+  实测校准)——书架 `/web/shelf/sync?userVid=`(**空**,非空 -2012)、最新一篇 `/api/mp/cover?bookId=MP_WXS_*`
+  (旧列表 `/web/mp/articles` 已废弃恒 -2041)、正文 `/web/mp/content?reviewId=`(#js_content);
+  reviewId=`MP_WXS_<bookId>_<token>` 推导 mp.weixin 原文链(token 含 `~` 原样保留)。
+  监听逐号先走微信读书(免费,书架导入 `import_benchmarks_from_shelf`),失效(-2012/-2010)自动降级
+  dajiala;正文盘链确认优先微信读书 content、其次自抓原文页。Cookie:平台内「weread」按用户配置优先,
+  全局 `WEREAD_COOKIE` 兜底;客户端内置 2s 限速(社区实测单日 30+ 次密集请求即触发风控)。
+  限制:微信读书新版只能拿"最新一篇",历史批量同步仍需 dajiala(¥0.14/页)。
+- **读书平台提供器(2026-09-07,首选)**:`reader_platform_client.py` 对接 wewe-rss v2 兼容实例
+  (`WECHAT_READER_PLATFORM_URL` + `WECHAT_READER_TOKEN/VID`,xg.djxx.club 同款架构——其前端包与
+  后端合同完全一致:认证 `Authorization: Bearer token`+`X-Weread-Token`+`xid: vid`;链接解析
+  `POST /api/v2/platform/wxs2mp`;全量分页列表 `GET /api/v2/platform/mps/{biz}/articles?page&limit`)。
+  公众号标识 = 文章页 `__biz`(`extract_article_meta` 免费直抓解析,对标号新增 `biz` 列)。
+  源优先级:**平台(免费全量)→ 微信读书 cover(免费最新一篇)→ dajiala(付费)**;同步在平台源下
+  默认 10 页封顶(免费),全 seen 即停。上游错误 WeReadError401=账号失效/429=当日小黑屋。
+
 ### 5.9 抖音热点·内容词趋势 `services/douhot.py` + `services/douhot_client.py`(独立数据源)
 
 - 职责:监控抖音「生活服务热点中心」的**内容词趋势**(词 + 飙升指数 + 热度时间序列),判涨、入库、对外提供。

@@ -28,8 +28,10 @@ _lock = threading.Lock()
 def _runners() -> dict:
     """延迟导入,避免 `tenant` ←→ 调度器的循环导入。"""
     from app.services.tenant import run_baidu, run_douhot, run_weibo, run_xianyu
+    from app.services.wechat_monitor import run_wechat_listen
 
-    return {"weibo": run_weibo, "xianyu": run_xianyu, "douhot": run_douhot, "baidu": run_baidu}
+    return {"weibo": run_weibo, "xianyu": run_xianyu, "douhot": run_douhot, "baidu": run_baidu,
+            "wechat": run_wechat_listen}
 
 
 def collect_tick(settings: Settings | None = None, now: datetime | None = None) -> dict:
@@ -62,17 +64,18 @@ def collect_tick(settings: Settings | None = None, now: datetime | None = None) 
                 ok += 1
                 # 采集成功后触发飞书实时提醒(新增/飙升话题立即推送到群里)。
                 # 异步、失败不影响本轮采集结果。
-                try:
-                    from app.services.cross_platform import run_cross_platform_alert
-                    from app.services.feishu import run_feishu_keyword_alerts, run_feishu_keyword_realtime, run_feishu_realtime
+                if row.section != "wechat":  # 公众号监听的新文推送在 run_wechat_listen 内部完成
+                    try:
+                        from app.services.cross_platform import run_cross_platform_alert
+                        from app.services.feishu import run_feishu_keyword_alerts, run_feishu_keyword_realtime, run_feishu_realtime
 
-                    run_feishu_realtime(row.section, row.user_id, settings)
-                    if row.section == "douhot":
-                        run_feishu_keyword_alerts(row.user_id, settings)
-                        run_feishu_keyword_realtime(row.user_id, settings)  # 话题词新进/上升/爆发实时提醒
-                    run_cross_platform_alert(row.user_id, settings)  # ≥2板块上升的关键词
-                except Exception:  # noqa: BLE001
-                    logger.exception("飞书实时提醒失败 section=%s user=%s", row.section, row.user_id)
+                        run_feishu_realtime(row.section, row.user_id, settings)
+                        if row.section == "douhot":
+                            run_feishu_keyword_alerts(row.user_id, settings)
+                            run_feishu_keyword_realtime(row.user_id, settings)  # 话题词新进/上升/爆发实时提醒
+                        run_cross_platform_alert(row.user_id, settings)  # ≥2板块上升的关键词
+                    except Exception:  # noqa: BLE001
+                        logger.exception("飞书实时提醒失败 section=%s user=%s", row.section, row.user_id)
             except Exception as exc:  # noqa: BLE001
                 failed += 1
                 db.rollback()
@@ -142,7 +145,10 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     scheduler.add_job(
         _safe(cleanup_old_data), CronTrigger(hour=4, minute=0), id="data_cleanup", max_instances=1, coalesce=True
     )
+    from app.services.wechat_monitor import traffic_tick
+
     jobs = [
+        (traffic_tick, _get_settings().wechat_traffic_cron, {"minute": 30, "hour": 21}, "wechat_traffic"),
         (run_feishu_daily, _get_settings().feishu_daily_cron, {"minute": 0, "hour": 8}, "feishu_daily"),
         (run_feishu_wechat_analysis, _get_settings().feishu_wechat_cron, {"minute": 0, "hour": 10}, "feishu_wechat"),
         (run_feishu_insight_digest, _get_settings().feishu_insight_cron, {"day_of_week": "mon", "hour": 9, "minute": 0}, "feishu_insight"),

@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.db.models import UserCookie
 from app.security import decrypt_cookie, encrypt_cookie
 
-PLATFORMS = ("weibo", "baidu", "douyin", "goofish")
+PLATFORMS = ("weibo", "baidu", "douyin", "goofish", "weread")
 
 
 def _mask(cookie: str) -> str:

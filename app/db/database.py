@@ -115,6 +115,12 @@ def _migrate() -> None:
         "douhot_watch": ["section VARCHAR(16) DEFAULT 'douhot'", "filter_keyword VARCHAR(64) DEFAULT ''",
                         "date_window INTEGER"],
         "douhot_watch_snap": ["section VARCHAR(16) DEFAULT 'douhot'", "entry_title VARCHAR(255) DEFAULT ''", "trend_growth FLOAT DEFAULT 0"],
+        "wechat_benchmarks": ["weread_book_id VARCHAR(64) DEFAULT ''", "biz VARCHAR(64) DEFAULT ''"],
+        "wechat_articles": ["source VARCHAR(16) DEFAULT 'manual'", "benchmark_id INTEGER",
+                            "pan_types VARCHAR(128) DEFAULT ''", "pan_urls TEXT",
+                            "read_num INTEGER DEFAULT 0", "zan_num INTEGER DEFAULT 0", "looking_num INTEGER DEFAULT 0",
+                            "share_num INTEGER DEFAULT 0", "collect_num INTEGER DEFAULT 0",
+                            "comment_count INTEGER DEFAULT 0", "traffic_at DATETIME", "pan_urls TEXT"],
     }
     with get_engine().begin() as conn:
         for table, coldefs in additions.items():

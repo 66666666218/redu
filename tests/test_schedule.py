@@ -138,9 +138,10 @@ def test_tick_runs_due_sections(monkeypatch: pytest.MonkeyPatch, session) -> Non
         scheduler, "_runners", lambda: {s: (lambda db, uid, st, s=s: called.append((uid, s))) for s in svc.SECTIONS}
     )
     out = scheduler.collect_tick()
-    # 只配了微博 Cookie:微博/百度跑(百度是公开接口无需 Cookie),闲鱼/抖音因缺 Cookie 被跳过
-    assert out == {"due": 2, "ok": 2, "failed": 0, "skipped": 2}
-    assert called == [(7, "weibo"), (7, "baidu")]
+    # 只配了微博 Cookie:微博/百度跑(百度是公开接口无需 Cookie),闲鱼/抖音因缺 Cookie 被跳过;
+    # 公众号监听不需要 Cookie(用 dajiala key),同样会跑
+    assert out == {"due": 3, "ok": 3, "failed": 0, "skipped": 2}
+    assert called == [(7, "weibo"), (7, "baidu"), (7, "wechat")]
 
 
 def test_tick_enrolls_new_users(monkeypatch: pytest.MonkeyPatch, session) -> None:
@@ -157,8 +158,8 @@ def test_tick_skips_section_without_cookie(monkeypatch: pytest.MonkeyPatch, sess
     _patch_session(monkeypatch, session)
     _add_user(session, 7)
     monkeypatch.setattr(scheduler, "_runners", lambda: {s: (lambda db, uid, st: None) for s in svc.SECTIONS})
-    assert scheduler.collect_tick() == {"due": 1, "ok": 1, "failed": 0, "skipped": 3}
-    assert len(svc.due_schedules(session)) == 3  # 未被标记(微博/闲鱼/抖音缺 Cookie;百度已跑已标记)
+    assert scheduler.collect_tick() == {"due": 2, "ok": 2, "failed": 0, "skipped": 3}
+    assert len(svc.due_schedules(session)) == 3  # 未被标记(微博/闲鱼/抖音缺 Cookie;百度/公众号已跑已标记)
 
     session.add(UserCookie(user_id=7, platform="douyin", cookie="x"))
     session.commit()
@@ -179,8 +180,8 @@ def test_tick_marks_ran_even_on_failure(monkeypatch: pytest.MonkeyPatch, session
     out = scheduler.collect_tick()
     assert out["failed"] == 1
     assert svc.get_or_create(session, 7, "douhot").last_run_at is not None
-    # 抖音已标记不再重跑;微博/闲鱼/百度因无 runner 被跳过、未标记,仍在待跑队列
-    assert [r.section for r in svc.due_schedules(session)] == ["weibo", "xianyu", "baidu"]
+    # 抖音已标记不再重跑;微博/闲鱼/百度/公众号因无 runner 被跳过、未标记,仍在待跑队列
+    assert [r.section for r in svc.due_schedules(session)] == ["weibo", "xianyu", "baidu", "wechat"]
 
 
 def _fire_weekday(expr: str, fallback: dict) -> int:

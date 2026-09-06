@@ -272,6 +272,60 @@ class WechatArticle(Base):
     url: Mapped[str] = mapped_column(String(500), default="")
     publish_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    # ---- 监听/同步扩展(2026-09-07)----
+    source: Mapped[str] = mapped_column(String(16), default="manual")     # manual/listen/sync
+    benchmark_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 来自哪个对标号
+    pan_types: Mapped[str] = mapped_column(String(128), default="")       # 命中的网盘类型,逗号分隔
+    pan_urls: Mapped[str] = mapped_column(Text(), default="")             # 提取到的分享链接(换行分隔)
+    # ---- 流量数据(dajiala read_zan_pro 采样,¥0.06/篇/次)----
+    read_num: Mapped[int] = mapped_column(Integer, default=0)
+    zan_num: Mapped[int] = mapped_column(Integer, default=0)
+    looking_num: Mapped[int] = mapped_column(Integer, default=0)
+    share_num: Mapped[int] = mapped_column(Integer, default=0)
+    collect_num: Mapped[int] = mapped_column(Integer, default=0)
+    comment_count: Mapped[int] = mapped_column(Integer, default=0)
+    traffic_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # 最近一次采样时间
+
+
+class WechatTrafficSample(Base):
+    """公众号文章流量采样点(构成单篇流量增长曲线)。"""
+
+    __tablename__ = "wechat_traffic_samples"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    article_id: Mapped[int] = mapped_column(ForeignKey("wechat_articles.id"), index=True)
+    read_num: Mapped[int] = mapped_column(Integer, default=0)
+    zan_num: Mapped[int] = mapped_column(Integer, default=0)
+    looking_num: Mapped[int] = mapped_column(Integer, default=0)
+    share_num: Mapped[int] = mapped_column(Integer, default=0)
+    collect_num: Mapped[int] = mapped_column(Integer, default=0)
+    comment_count: Mapped[int] = mapped_column(Integer, default=0)
+    sampled_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class WechatBenchmark(Base):
+    """对标公众号:监听(新文检测)与同步(全量文章)的目标账号。
+
+    `anchor_url` 存该号任意一篇**永久**文章长链:post_condition/历史接口认链接不认名字,
+    贴一条链接即可当账号锚点,加号动作本身不产生 API 调用。`ghid` 由接口返回后回填,
+    之后同步/监听优先用 ghid,锚点仅作兜底。
+    """
+
+    __tablename__ = "wechat_benchmarks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    nickname: Mapped[str] = mapped_column(String(128), default="")
+    ghid: Mapped[str] = mapped_column(String(64), default="")
+    weread_book_id: Mapped[str] = mapped_column(String(64), default="")  # 微信读书 bookId(MP_WXS_*),免费数据源
+    biz: Mapped[str] = mapped_column(String(64), default="")             # 公众号 __biz(读书平台 mp_id,免费全量列表)
+    anchor_url: Mapped[str] = mapped_column(String(500), default="")
+    note: Mapped[str] = mapped_column(String(255), default="")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    miss_count: Mapped[int] = mapped_column(Integer, default=0)   # 连续"当天没有发文"次数(≥7 视为沉睡)
+    last_item_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
 class AlertRule(Base):

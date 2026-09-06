@@ -26,6 +26,7 @@ onMounted(async () => {
       <router-link to="/weibo">微博</router-link>
       <router-link to="/xianyu">闲鱼</router-link>
       <router-link to="/douhot">抖音</router-link>
+      <router-link to="/wechat">公众号监听</router-link>
       <router-link to="/baidu">百度</router-link>
       <router-link to="/cookies">Cookie 管理</router-link>
       <router-link to="/schedule">采集频率</router-link>

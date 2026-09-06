@@ -644,7 +644,7 @@
 
 > 下限校验在**后端**强制执行(前端限制不可信),防止把三方接口打爆导致风控或 Cookie 失效。
 
-## 9. 公众号 · 内容选题分析(暂不含流量数据)
+## 9. 公众号 · 内容选题分析
 
 > 需登录(JWT)。手动录入公众号文章后,按 **标题/内容/作者/发布时间** 跑内容选题分析(选题分布、标题风格、发布时段、对标号对比 + 选题建议)。
 > 注:当前为**内容选题视角**的规则建议,非流量归因;等接入带阅读量的第三方 API 后可升级。
@@ -685,3 +685,70 @@
 
 > `topics` 为轻量中文 2 字窗口词频(选题主线);`title_style` 含标题长度/数字/emoji/疑问/悬念词占比与高频词;
 > `publish` 为发布时段分布与高峰;`authors` 为各公众号对比;`suggestions`/`summary` 为中文分析结论。
+
+---
+
+## 9b. 公众号 · 对标号监听与同步(2026-09-07,基于 dajiala API,见 doc/dajiala-api.md)
+
+> 前置:配置 `DAJIALA_KEY`(付费接口按次扣费,监听 ¥0.14/号/次,同步 ¥0.14/页,阅读量 ¥0.06/次);
+> 未配置时所有接口返回 `{"status":"skipped","reason":"no_key"}` 或 400。
+> 监听频率走「采集频率」页的**公众号监听**板块(默认 6 小时/次);新文自动推公众号专属飞书群。
+
+### 9b.1 对标号列表
+
+- **请求方式**: GET `/api/wechat/benchmarks`
+
+**响应示例 (200)**
+```json
+{ "count": 1, "items": [ { "id": 1, "nickname": "微信派", "ghid": "gh_bc5ec2ee663f",
+  "anchor_url": "https://mp.weixin.qq.com/s/xxx", "note": "", "active": true,
+  "miss_count": 0, "last_item_at": "2026-09-07 12:00:00", "has_articles": true } ] }
+```
+
+### 9b.2 加对标号(贴该号任意一篇**文章链接**即加,免费;链接即监听锚点)
+
+- **请求方式**: POST `/api/wechat/benchmarks`
+- **请求体**: `{ "url": "https://mp.weixin.qq.com/s/xxx", "nickname": "可选", "note": "可选" }`
+- 配置了 key 时自动解析昵称/ghid(key 无余额不挡加号);重复链接返回 400。
+
+### 9b.3 更新/删除对标号
+
+- PATCH `/api/wechat/benchmarks/{id}`:body `{"active": false}` 停用(暂停监听,不删数据)
+- DELETE `/api/wechat/benchmarks/{id}`:删除(已入库文章保留)
+
+### 9b.4 一键同步该号全部/近期文章
+
+- **请求方式**: POST `/api/wechat/benchmarks/{id}/sync?max_pages=3`
+- 每页约 10 次发文(¥0.14/页),`max_pages` 缺省为 `WECHAT_SYNC_MAX_PAGES`(3);翻到 `IsEnd` 提前停止
+- **响应示例**: `{ "platform":"wechat_sync", "status":"success", "pages":2, "new":17, "ghid":"gh_xxx", "nickname":"微信派" }`
+
+### 9b.5 监听(手动触发;定时走调度器"公众号监听"板块)
+
+- **请求方式**: POST `/api/wechat/listen`
+- 行为:每个启用中的对标号查一次"当天发文"(`post_condition`,¥0.14/号)→ 新文按链接去重入库
+  (`wechat_articles.source='listen'`)→ 标题含网盘词的**免费自抓正文**,按四家盘链正则
+  (pan.quark.cn / pan.baidu.com / drive.uc.cn / pan.xunlei.com)标记 `pan_types` → 新文推公众号专属飞书群
+- 余额保护:开始前查余额(免费),低于 `DAJIALA_MIN_BALANCE` 整轮跳过(`reason:"low_balance"`)
+- **响应示例**: `{ "platform":"wechat", "status":"success", "accounts":2, "new":5, "failed":0 }`
+
+### 9b.6 文章列表(支持盘链过滤)
+
+- **请求方式**: GET `/api/wechat/articles?limit=100&has_pan=1&benchmark_id=1`
+- **响应**: `{"count":N,"items":[{"id","author","title","url","content","publish_at","source"(manual/listen/sync),"pan_types","benchmark_id","created_at"}]}`
+
+> 文章来源标记:`manual` 手动录入 / `listen` 监听新文 / `sync` 历史同步;`pan_types` 为涉及的网盘类型
+> (标题=盘名疑似级,自抓正文命中链接=确认级),逗号分隔,如 `"夸克网盘,百度网盘"`。
+
+### 9b.7 微信读书免费源(2026-09-07)
+
+- **书架预览**: GET `/api/wechat/weread/shelf` → `{"count":N,"items":[{"book_id":"MP_WXS_*","name":"公众号名"}]}`
+- **书架一键导入**: POST `/api/wechat/benchmarks/import_shelf`
+  → `{"status":"success","shelf":N,"created":新增,"updated":回填bookId}`(重复导入幂等)
+- 前置:在微信读书 App 内关注目标公众号,并配置微信读书 Cookie(平台「Cookie管理」新增的
+  **weread** 平台,按用户;或 `.env` 全局 `WEREAD_COOKIE`)
+- 数据源优先级:对标号有 `weread_book_id` 且有 Cookie → 微信读书(免费,每轮拿"最新一篇");
+  否则 dajiala `post_condition`(¥0.14/号)。微信读书登录失效(-2012/-2010)自动降级 dajiala。
+- 监听/同步的其余行为不变;`sync` 无 dajiala key 时仅能同步"最新一篇"(返回 `partial`)。
+- **读书平台(wewe-rss v2 兼容,免费全量)**:配置 `.env` 的 `WECHAT_READER_PLATFORM_URL/TOKEN/VID`
+  后自动成为首选源——监听每号拿最新 20 篇、同步翻页拉全量(免费);对标号列表新增 `biz` 字段
+  (文章页 `__biz`,加号时自动解析)。优先级:平台 → 微信读书 cover → dajiala。

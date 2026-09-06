@@ -116,5 +116,17 @@ export const api = {
   adminFailedRuns: () => req('GET', '/api/admin/runs/failed'),
   adminRunRetry: (runId) => req('POST', `/api/admin/runs/${runId}/retry`),
   adminExportUsers: () => fetch('/api/admin/export/users', { headers: { Authorization: 'Bearer ' + getToken() } }),
-  adminExportAlerts: () => fetch('/api/admin/export/alerts', { headers: { Authorization: 'Bearer ' + getToken() } })
+  adminExportAlerts: () => fetch('/api/admin/export/alerts', { headers: { Authorization: 'Bearer ' + getToken() } }),
+  // 公众号监听(对标号 / 同步 / 阅读量)
+  wechatBenchmarks: () => req('GET', '/api/wechat/benchmarks'),
+  wechatBenchmarkAdd: (url, nickname = '', note = '') => req('POST', '/api/wechat/benchmarks', { url, nickname, note }),
+  wechatBenchmarkPatch: (id, o) => req('PATCH', `/api/wechat/benchmarks/${id}`, o),
+  wechatBenchmarkDel: (id) => req('DELETE', `/api/wechat/benchmarks/${id}`),
+  wechatBenchmarkSync: (id, maxPages) => req('POST', `/api/wechat/benchmarks/${id}/sync` + (maxPages ? `?max_pages=${maxPages}` : '')),
+  wechatListen: () => req('POST', '/api/wechat/listen'),
+  wechatShelf: () => req('GET', '/api/wechat/weread/shelf'),
+  wechatImportShelf: () => req('POST', '/api/wechat/benchmarks/import_shelf'),
+  wechatArticles: (q = '') => req('GET', '/api/wechat/articles' + (q ? '?' + q : '')),
+  wechatTrafficRefresh: (o = {}) => req('POST', '/api/wechat/traffic/refresh', o),
+  wechatArticleTraffic: (id) => req('GET', `/api/wechat/articles/${id}/traffic`)
 }

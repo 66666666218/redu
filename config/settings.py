@@ -32,6 +32,22 @@ class Settings(BaseSettings):
     xianyu_batch_keywords: int = 5     # 每次采集最多处理的关键词数(风控降频:少量多次,按运行数轮转覆盖全部)
     xianyu_cooldown_minutes: int = 30  # 闲鱼触发人机验证(滑块)后,暂停采集该分钟数,避免反复撞枪口
     xianyu_proxy_url: str = ""      # 闲鱼专用"单一固定"出口代理(http://user:pass@host:port,如住宅IP);留空直连。勿用轮换代理池——mtop token/session 绑定出口 IP
+    dajiala_key: str = ""           # 大家拉/极致了数据 API key(公众号监听/同步/阅读量,见 doc/dajiala-api.md)
+    weread_cookie: str = ""         # 微信读书 Cookie(免费监听数据源;优先用平台内按用户配置的「weread」Cookie)
+    wechat_reader_platform_url: str = ""  # 读书平台地址(wewe-rss v2 兼容,免费全量文章列表;如 https://weread.xxx 自建实例)
+    wechat_reader_token: str = ""   # 读书平台 token(含 vid 的 JWT)
+    wechat_reader_vid: str = ""     # 读书平台 vid(微信读书用户ID)
+    dajiala_min_balance: float = 1.0  # 余额低于该值(元)跳过付费监听,避免打穿余额(免费接口不受限)
+    wechat_sync_max_pages: int = 3  # 一键同步默认最多翻页数(history_by_ghid ¥0.14/页,每页约10次发文)
+    wechat_traffic_sample_limit: int = 30  # 每轮阅读量采样最多篇数(¥0.06/篇,控成本)
+    wechat_listen_sample_new: bool = True  # 监听到新文时立即采样阅读量(随推送一起发飞书)
+    wechat_listen_sample_limit: int = 10   # 监听一轮内"立即采样"的新文上限(控制成本)
+    quark_cookie: str = ""                 # 夸克网盘 Cookie(pan.quark.cn 登录后复制);用于转存对标文的分享
+    quark_save_dir: str = "/redian监听"     # 转存目标目录(自动逐级创建)
+    quark_share_password: str = ""         # 二次分享提取码(空=无)
+    pan_transfer_enabled: bool = True      # 是否自动转存(需 quark_cookie;失败回落原链接推送)
+    wechat_traffic_min_interval_hours: int = 24  # 同一篇文章两次采样最小间隔(小时)
+    wechat_traffic_cron: str = "30 21 * * *"  # 每日阅读量采样时间(默认 21:30)
     douhot_cookie_file: str = "data/douhot_cookie.txt"  # 抖音热点宝 Cookie 文件(gitignored)
     douhot_top_n: int = 100         # 内容词趋势条数(抖音热点接口可到 200)
     douhot_watch_entry_cap: int = 100  # 榜单搜索类关注(话题/搜索/视频)每次采集最多记录的相关主题条数

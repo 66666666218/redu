@@ -19,16 +19,23 @@ from app.utils import get_logger
 
 logger = get_logger(__name__)
 
-SECTIONS = ("weibo", "xianyu", "douhot", "baidu")
-SECTION_LABELS = {"weibo": "微博热搜", "xianyu": "闲鱼热榜", "douhot": "抖音热点", "baidu": "百度热搜"}
+SECTIONS = ("weibo", "xianyu", "douhot", "baidu", "wechat")
+SECTION_LABELS = {"weibo": "微博热搜", "xianyu": "闲鱼热榜", "douhot": "抖音热点", "baidu": "百度热搜",
+                  "wechat": "公众号监听"}
 # 板块 → 必需的 Cookie 平台(三个板块的 runner 都要求用户配好自己的 Cookie)
 SECTION_COOKIE = {"weibo": "weibo", "xianyu": "goofish", "douhot": "douyin"}
 # 可选档位(分钟);闲鱼/抖音是登录态接口,过于频繁有风控与 Cookie 失效风险
 INTERVAL_CHOICES = (10, 30, 60, 120, 180, 360, 720, 1440)
 MIN_INTERVAL = 10
 MAX_INTERVAL = 1440
-# 默认采集间隔(分钟):运营商/登录态接口过于频繁易触发风控或 Cookie 失效,故默认 2 小时
+# 默认采集间隔(分钟):运营商/登录态接口过于频繁易触发风控或 Cookie 失效,故默认 2 小时;
+# 公众号监听是付费接口(¥0.14/号/次),默认 6 小时(4 次/天)控制成本
 DEFAULT_INTERVAL = 120
+DEFAULT_INTERVALS = {"wechat": 360}
+
+
+def section_default_interval(section: str) -> int:
+    return DEFAULT_INTERVALS.get(section, DEFAULT_INTERVAL)
 
 
 class ScheduleError(ValueError):
@@ -74,7 +81,7 @@ def get_or_create(db: Session, user_id: int, section: str) -> UserSchedule:
         raise ScheduleError(f"不支持的板块:{section}")
     row = db.scalar(select(UserSchedule).where(UserSchedule.user_id == user_id, UserSchedule.section == section))
     if row is None:
-        row = UserSchedule(user_id=user_id, section=section, interval_minutes=DEFAULT_INTERVAL, enabled=True)
+        row = UserSchedule(user_id=user_id, section=section, interval_minutes=section_default_interval(section), enabled=True)
         db.add(row)
         db.commit()
     return row
@@ -119,7 +126,7 @@ def ensure_all_users(db: Session) -> int:
     for uid in user_ids:
         for section in SECTIONS:
             if (uid, section) not in existing:
-                db.add(UserSchedule(user_id=uid, section=section, interval_minutes=DEFAULT_INTERVAL, enabled=True))
+                db.add(UserSchedule(user_id=uid, section=section, interval_minutes=section_default_interval(section), enabled=True))
                 created += 1
     if created:
         db.commit()

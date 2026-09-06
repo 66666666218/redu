@@ -12,6 +12,7 @@ import Schedule from './views/Schedule.vue'
 import Alerts from './views/Alerts.vue'
 import Admin from './views/Admin.vue'
 import Screen from './views/Screen.vue'
+import WechatListen from './views/WechatListen.vue'
 
 const routes = [
   { path: '/login', component: Login },
@@ -23,6 +24,7 @@ const routes = [
   { path: '/xianyu', component: Platform, props: { platform: 'xianyu' }, meta: { auth: true } },
   { path: '/baidu', component: Platform, props: { platform: 'baidu' }, meta: { auth: true } },
   { path: '/douhot', component: Douhot, meta: { auth: true } },
+  { path: '/wechat', component: WechatListen, meta: { auth: true } },
   { path: '/cookies', component: Cookies, meta: { auth: true } },
   { path: '/schedule', component: Schedule, meta: { auth: true } },
   { path: '/alerts', component: Alerts, meta: { auth: true } },
