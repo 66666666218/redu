@@ -9,6 +9,7 @@
   ② 否则(或微信读书失效)→ dajiala `post_condition`(¥0.14/号)拿**当天全部发文**;
   标题命中网盘关键词的文,优先用微信读书正文(免费)、其次自抓原文页,做盘链确认
   (pan.quark.cn 等四家正则),新文推公众号专属飞书群;
+  dajiala 余额不足时仅禁用付费源(post_condition/即时采样),免费源照常监听。
 - 同步 `sync_wechat_account`:dajiala `history_by_ghid` 翻页(`PagingInfo.Offset`/`IsEnd`)
   拉历史文章入库,默认 `wechat_sync_max_pages` 页封顶(每页 ¥0.14);仅有微信读书源时
   只能拿最新一篇(旧列表接口已被微信读书废弃),返回 `partial`。
@@ -354,16 +355,17 @@ def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchm
 
 def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                          rows: list[WechatArticle],
-                         client: DajialaClient | None) -> dict[int, list[tuple[str, str, str]]]:
+                         client: DajialaClient | None, allow_paid: bool = True) -> dict[int, list[tuple[str, str, str]]]:
     """新文后处理(推送前):① 即时采样阅读量(¥0.06/篇,上限 wechat_listen_sample_limit);
     ② 夸克转存盘链 → 换自己的分享链并持久化到 `my_pan_urls`。
 
+    `allow_paid=False`(dajiala 余额不足)时连即时采样也跳过,只做免费的夸克转存;
     返回 {article_id: [(原链, 我的链, 提取码)]} 供飞书推送;失败回落原链接,绝不阻塞监听。
     """
     replacements: dict[int, list[tuple[str, str, str]]] = {}
     if not rows:
         return replacements
-    if settings.wechat_listen_sample_new and settings.dajiala_key:
+    if allow_paid and settings.wechat_listen_sample_new and settings.dajiala_key:
         client = client or DajialaClient(settings.dajiala_key)
         session.flush()  # 新文先拿自增 id(采样点外键要用)
         sample_now = datetime.now()
@@ -404,7 +406,11 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
 def run_wechat_listen(session: Session, user_id: int, settings: Settings | None = None,
                       client: DajialaClient | None = None, weread: WereadClient | None = None,
                       platform: ReaderPlatformClient | None = None, push: bool = True) -> dict:
-    """监听一轮:双数据源免费优先——微信读书(cover)→ dajiala(当天发文)→ 新文入库推飞书。"""
+    """监听一轮:双数据源免费优先——微信读书(cover)→ dajiala(当天发文)→ 新文入库推飞书。
+
+    余额不足(dajiala)只禁用付费源与即时采样并返回 `dajiala_skipped:"low_balance"`,
+    免费源(读书平台/微信读书)照常监听;全部数据源不可用才返回 `skipped`。
+    """
     settings = _base(settings)
     rows = session.scalars(select(WechatBenchmark).where(
         WechatBenchmark.user_id == user_id, WechatBenchmark.active.is_(True))
@@ -416,7 +422,10 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
     if not cookie and not use_dajiala:
         return {"platform": "wechat", "status": "skipped", "reason": "no_source"}
 
-    # 余额保护前置:只要有账号需要走 dajiala(无 book_id 或会话失效),先查余额(免费接口)
+    # 余额保护前置:只要有账号需要走 dajiala(无 book_id 或会话失效),先查余额(免费接口)。
+    # 余额不足只禁用付费源(微信读书等免费源照常跑),不再整轮跳过——否则空余额把书架号一起饿死。
+    dajiala_off = ""
+    balance: float | None = None
     needs_dajiala = use_dajiala and any(
         not (cookie and b.weread_book_id) and b.anchor_url for b in rows)
     if use_dajiala:
@@ -424,18 +433,15 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
     if needs_dajiala:
         try:
             balance = client.remain_money()
-            if balance < settings.dajiala_min_balance:
-                logger.warning("公众号监听跳过:余额 %.2f 低于阈值 %.2f(用户 %s)", balance,
-                               settings.dajiala_min_balance, user_id)
-                _record_run(session, user_id, "wechat_listen", "skipped",
-                            f"low_balance={balance:.2f}")
-                session.commit()
-                return {"platform": "wechat", "status": "skipped",
-                        "reason": "low_balance", "balance": balance}
         except DajialaError as exc:
             _record_run(session, user_id, "wechat_listen", "failed", f"{type(exc).__name__}: {exc}")
             session.commit()
             raise
+        if balance < settings.dajiala_min_balance:
+            dajiala_off = f"low_balance={balance:.2f}"
+            use_dajiala = False
+            logger.warning("dajiala 余额 %.2f 低于阈值 %.2f,本轮仅跑免费源(用户 %s)",
+                           balance, settings.dajiala_min_balance, user_id)
 
     plat = platform or _platform_client(settings)
     now = datetime.now()
@@ -489,6 +495,8 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
             except DajialaNoBalance:
                 logger.warning("公众号监听中途余额不足,已采 %d 篇即止(用户 %s)", len(new_rows), user_id)
                 use_dajiala = False
+                if not dajiala_off:
+                    dajiala_off = "low_balance_midway"
                 continue
             except DajialaError as exc:
                 failed += 1
@@ -506,18 +514,26 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
             b.last_item_at = now
             new_rows.extend(_insert_new_articles(session, user_id, b, items, source="listen",
                                                  fetch_content=True))
-    replacements = _enrich_new_articles(session, user_id, settings, new_rows, client)
+    replacements = _enrich_new_articles(session, user_id, settings, new_rows, client,
+                                        allow_paid=use_dajiala)
 
     session.commit()
 
     status = "success" if not failed or new_rows else ("failed" if failed == len(rows) else "partial")
-    _record_run(session, user_id, "wechat_listen", status,
-                f"accounts={len(rows)} new={len(new_rows)} failed={failed}")
+    detail = f"accounts={len(rows)} new={len(new_rows)} failed={failed}"
+    if dajiala_off:
+        detail += f" dajiala_off({dajiala_off})"
+    _record_run(session, user_id, "wechat_listen", status, detail)
     session.commit()
     if push and new_rows:
         _push_listen(session, user_id, settings, new_rows, replacements)
-    return {"platform": "wechat", "status": status, "accounts": len(rows),
-            "new": len(new_rows), "failed": failed}
+    out: dict = {"platform": "wechat", "status": status, "accounts": len(rows),
+                 "new": len(new_rows), "failed": failed}
+    if dajiala_off:
+        out["dajiala_skipped"] = "low_balance"
+        if balance is not None:
+            out["balance"] = balance
+    return out
 
 
 def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[WechatArticle],

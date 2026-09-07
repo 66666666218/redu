@@ -728,8 +728,12 @@
 - 行为:每个启用中的对标号查一次"当天发文"(`post_condition`,¥0.14/号)→ 新文按链接去重入库
   (`wechat_articles.source='listen'`)→ 标题含网盘词的**免费自抓正文**,按四家盘链正则
   (pan.quark.cn / pan.baidu.com / drive.uc.cn / pan.xunlei.com)标记 `pan_types` → 新文推公众号专属飞书群
-- 余额保护:开始前查余额(免费),低于 `DAJIALA_MIN_BALANCE` 整轮跳过(`reason:"low_balance"`)
+- 余额保护:开始前查余额(免费),低于 `DAJIALA_MIN_BALANCE` 时**仅禁用 dajiala 付费源**
+  (微信读书/读书平台等免费源照常监听,响应带 `dajiala_skipped:"low_balance"`+`balance`;
+  监听中途欠费同样只停付费,运行记录 detail 记 `dajiala_off(...)`)
 - **响应示例**: `{ "platform":"wechat", "status":"success", "accounts":2, "new":5, "failed":0 }`
+  余额不足时: `{ "platform":"wechat", "status":"success", "accounts":2, "new":1, "failed":0,
+  "dajiala_skipped":"low_balance", "balance":0.02 }`
 
 - **飞书推送格式**(每篇三要素:文章名 / 我的夸克链接 / 流量详情;未配置夸克或转存失败则无链接行):
 

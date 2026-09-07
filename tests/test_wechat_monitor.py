@@ -147,14 +147,16 @@ def test_listen_records_miss_and_skips(monkeypatch: pytest.MonkeyPatch, session)
     out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), client=fake)
     assert out["new"] == 0 and b.miss_count == 1
 
-    # 余额低于阈值 → skipped + RunRecord
+    # 余额低于阈值 → 仅禁用 dajiala(不调 post_condition),不再整轮跳过
     monkeypatch_ = pytest.MonkeyPatch()
     monkeypatch_.setattr(wechat_monitor, "fetch_article_content", lambda url, timeout=15: "")
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), client=FakeClient(remain=0.5))
+    fake = FakeClient(remain=0.5)
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), client=fake)
     monkeypatch_.undo()
-    assert out["reason"] == "low_balance"
+    assert out["new"] == 0 and all(c[0] != "pc" for c in fake.calls)
+    assert out["dajiala_skipped"] == "low_balance" and out["balance"] == 0.5
     run = session.scalars(select(RunRecord).order_by(RunRecord.id.desc())).first()
-    assert run.kind == "wechat_listen" and run.status == "skipped" and "low_balance" in run.detail
+    assert run.kind == "wechat_listen" and "dajiala_off" in run.detail
 
 
 def test_listen_pushes_pan_articles_to_feishu(monkeypatch: pytest.MonkeyPatch, session) -> None:
@@ -277,6 +279,22 @@ def test_review_to_url_preserves_tilde() -> None:
     assert review_to_url(rid, book_id="MP_WXS_2_abc") == "https://mp.weixin.qq.com/s/4OcS7~rrtk2Lwe4P0YPiGg"
     assert review_to_url(rid) == "https://mp.weixin.qq.com/s/4OcS7~rrtk2Lwe4P0YPiGg"
     assert review_to_url("") == ""
+
+
+def test_listen_low_balance_still_runs_weread(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """空余额只饿死 dajiala:书架号走微信读书免费源照常入库,且绝不调付费接口。"""
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    session.add(WechatBenchmark(user_id=1, nickname="书架号", weread_book_id="MP_WXS_1", anchor_url=""))
+    session.add(WechatBenchmark(user_id=1, nickname="手动号", anchor_url="https://mp.weixin.qq.com/s/A"))
+    session.commit()
+    fake = FakeWeread(cover={"title": "夸克网盘资源", "url": "https://mp.weixin.qq.com/s/w1",
+                             "review_id": "MP_WXS_1_w1", "digest": ""},
+                      content="正文含 https://pan.quark.cn/s/zzz")
+    monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: fake)
+    daj = FakeClient(remain=0.5)
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), client=daj, weread=fake)
+    assert out["new"] == 1 and out["dajiala_skipped"] == "low_balance"
+    assert all(c[0] != "pc" for c in daj.calls)  # 没钱也不调付费接口
 
 
 def test_listen_uses_weread_first_and_detects_pan(session, monkeypatch: pytest.MonkeyPatch) -> None:
