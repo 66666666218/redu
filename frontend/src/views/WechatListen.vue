@@ -50,6 +50,15 @@ async function importShelf() {
   } catch (e) { toastErr(e.message) } finally { busy.value = '' }
 }
 
+async function refreshWeread() {
+  busy.value = 'wrrefresh'
+  try {
+    const r = await api.wechatWereadRefresh()
+    if (r.status === 'skipped') toastErr(r.reason === 'no_cookie' ? '未配置微信读书 Cookie(Cookie 管理 → weread)' : 'Cookie 中无 wr_rt,无法自动续期,请重新复制完整 Cookie')
+    else toastOk(`微信读书 Cookie 已续期${r.verified ? ',书架验证通过 ✅' : '(书架验证未通过,可能被风控,稍后自动重试)'}`)
+  } catch (e) { toastErr(e.message) } finally { busy.value = '' }
+}
+
 async function listenAll() {
   busy.value = 'listen'
   try {
@@ -118,7 +127,8 @@ onMounted(load)
       </div>
       <div class="row" style="gap:10px;flex-wrap:wrap">
         <button class="ghost" :disabled="busy==='shelf'" @click="importShelf">{{ busy==='shelf' ? '导入中…' : '从微信读书书架导入' }}</button>
-        <span class="empty">加号免费;导入需先在微信读书 App 关注公众号,并在「Cookie 管理」配置 weread</span>
+        <button class="ghost" :disabled="busy==='wrrefresh'" @click="refreshWeread">{{ busy==='wrrefresh' ? '续期中…' : '续期微信读书 Cookie' }}</button>
+        <span class="empty">加号免费;导入需先在微信读书 App 关注公众号;Cookie 过期会自动续期(每日 07:50),无需手动更换</span>
       </div>
     </div>
 

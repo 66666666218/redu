@@ -320,6 +320,64 @@ def import_benchmarks_from_shelf(session: Session, user_id: int,
     return {"status": "success", "shelf": len(books), "created": created, "updated": updated}
 
 
+def refresh_weread_cookie(session: Session, user_id: int, settings: Settings | None = None) -> dict:
+    """微信读书 Cookie 续期:长效 wr_rt → 新短效 wr_skey,并回写 Cookie 管理。
+
+    wr_skey 短效且轮换(续期后旧 skey 很快 -2012),故续期成功**必须回写**;
+    全局 WEREAD_COOKIE(.env)无法回写文件,统一落到平台内「weread」Cookie
+    (读取优先级:平台内 > 全局,下次监听即用新值)。
+    返回 {status: success|skipped|failed, reason?, verified, cookie?}。
+    """
+    from app.services.cookie_store import get_cookie, set_cookie
+
+    settings = _base(settings)
+    cookie = (get_cookie(session, user_id, "weread") or settings.weread_cookie or "").strip()
+    if not cookie:
+        return {"status": "skipped", "reason": "no_cookie"}
+    if "wr_rt=" not in cookie:
+        return {"status": "skipped", "reason": "no_rt"}
+    new_cookie = WereadClient(cookie).refresh_skey()
+    if not new_cookie:
+        return {"status": "failed", "reason": "renewal_failed"}
+    set_cookie(session, user_id, "weread", new_cookie)
+    verified = False
+    try:
+        WereadClient(new_cookie).shelf()
+        verified = True
+    except WereadError as exc:
+        logger.warning("微信读书续期后书架验证未通过(用户 %s):%s", user_id, exc)
+    logger.info("微信读书 Cookie 已续期(用户 %s,验证%s)", user_id, "通过" if verified else "未通过")
+    return {"status": "success", "verified": verified, "cookie": new_cookie}
+
+
+def weread_refresh_tick(settings: Settings | None = None) -> int:
+    """每日定时:为所有配置了微信读书 Cookie 的用户续期(防 wr_skey 过期断免费源)。
+
+    返回续期成功的账号数;单用户失败不影响其余。
+    """
+    from app.db import get_session_local
+    from app.db.models import User
+
+    settings = settings or get_settings()
+    db = get_session_local()()
+    total = 0
+    try:
+        users = db.scalars(select(User.id).order_by(User.id)).all()
+        for uid in users:
+            try:
+                out = refresh_weread_cookie(db, uid, settings=settings)
+                if out.get("status") == "success":
+                    total += 1
+            except Exception:  # noqa: BLE001 - 单用户失败不影响其余
+                db.rollback()
+                logger.exception("微信读书续期失败 user=%s", uid)
+    finally:
+        db.close()
+    if total:
+        logger.info("微信读书 Cookie 每日续期完成:%d 个账号", total)
+    return total
+
+
 # ---------------------------------------------------------------- 监听
 def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchmark,
                          items: list[dict], source: str, fetch_content: bool = False,
@@ -403,6 +461,17 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
     return replacements
 
 
+def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
+                    session: Session) -> list[WechatArticle]:
+    """微信读书单号采集:cover 最新一篇 → 入库(正文用微信读书转存的免费内容)。"""
+    item = weread.latest_article(b.weread_book_id)
+    if not (item and item["url"]):
+        return []
+    resolver = (lambda _title, _rid=item["review_id"]: weread.mp_content(_rid))
+    return _insert_new_articles(session, user_id, b, [item], source="listen",
+                                content_resolver=resolver)
+
+
 def run_wechat_listen(session: Session, user_id: int, settings: Settings | None = None,
                       client: DajialaClient | None = None, weread: WereadClient | None = None,
                       platform: ReaderPlatformClient | None = None, push: bool = True) -> dict:
@@ -467,24 +536,34 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
                     b.miss_count = (b.miss_count or 0) + 1
             except PlatformError as exc:
                 logger.warning("读书平台监听 %s 失败,降级后续源:%s", b.nickname or b.biz, exc)
-        # ① 微信读书(免费):对标号已关联 bookId 且有 Cookie
+        # ① 微信读书(免费):对标号已关联 bookId 且有 Cookie;登录失效时自动续期重试一次
         if not used and cookie and b.weread_book_id:
             try:
                 weread = weread or WereadClient(cookie)
-                item = weread.latest_article(b.weread_book_id)
+                got = _weread_collect(user_id, b, weread, session)
                 used = True
-                if item and item["url"]:
-                    resolver = (lambda _title, _rid=item["review_id"]: weread.mp_content(_rid))
-                    got = _insert_new_articles(session, user_id, b, [item], source="listen",
-                                               content_resolver=resolver)
-                    if got:
-                        new_rows.extend(got)
-                        b.miss_count = 0
-                        b.last_item_at = now
+                if got:
+                    new_rows.extend(got)
+                    b.miss_count = 0
+                    b.last_item_at = now
             except WereadAuthError as exc:
-                logger.warning("微信读书登录态失效(用户 %s):%s;后续号降级 dajiala", user_id, exc)
-                cookie = ""  # 会话失效,本轮不再试微信读书
-                failed += 1
+                logger.warning("微信读书登录态失效(用户 %s):%s;尝试自动续期", user_id, exc)
+                refreshed = refresh_weread_cookie(session, user_id, settings)
+                if refreshed.get("status") == "success":
+                    cookie = refreshed["cookie"]
+                    try:
+                        got = _weread_collect(user_id, b, WereadClient(cookie), session)
+                        used = True  # 微信读书源已消费本号,勿再走 dajiala 重复扣费
+                        if got:
+                            new_rows.extend(got)
+                            b.miss_count = 0
+                            b.last_item_at = now
+                    except WereadError as exc2:
+                        failed += 1
+                        logger.warning("微信读书续期后仍失败 %s:%s", b.nickname or b.weread_book_id, exc2)
+                else:
+                    cookie = ""  # 续期失败:后续号降级 dajiala;本号不置 used,继续走下方 dajiala 兜底
+                    failed += 1
             except WereadError as exc:
                 failed += 1
                 logger.warning("微信读书监听 %s 失败:%s", b.nickname or b.weread_book_id, exc)

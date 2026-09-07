@@ -10,12 +10,18 @@
   的 token(token 可能含 `~`,必须原样保留,见 build_mp_url)
 
 鉴权:仅靠 Cookie(完整微信读书登录 Cookie);x-wr-ticket 已弃用。
-错误:-2012/-2010 登录失效(→ WereadAuthError,需重新扫码);-2041 接口废弃/被拦截。
+错误:-2012/-2010 登录失效(→ WereadAuthError;可用 refresh_skey 用 wr_rt 续期);-2041 接口废弃/被拦截。
 限频:内置 2s 串行间隔(社区实测单日 30+ 次密集请求即触发风控,宁慢勿封)。
+
+Cookie 续期(2026-09 实测):wr_skey 短效且**轮换制**——调 /web/login/renewal 用长效
+wr_rt 换新 wr_skey 后,旧 skey 很快失效;因此续期成功后必须把新 Cookie 回写存储
+(见 wechat_monitor.refresh_weread_cookie),且 renewal 请求必须把登录 Cookie 注入
+requests.Session 的 cookie jar(domain=weread.qq.com),否则服务端按游客处理返回 -2013。
 """
 from __future__ import annotations
 
 import html as html_mod
+import json
 import re
 import threading
 import time
@@ -147,6 +153,51 @@ class WereadClient:
         return re.sub(r"\s{2,}", " ", body).strip()[:100000]
 
     # ---- 便捷封装 ----
+    def refresh_skey(self, timeout: int = 20) -> str | None:
+        """用长效 wr_rt 调 /web/login/renewal 换新短效 wr_skey,返回更新后的完整 Cookie 串。
+
+        Cookie 中无 wr_rt 或续期失败(网络/服务端拒绝/未下发新 skey)返回 None,
+        此时只能重新扫码/复制 Cookie。调用方负责把返回的新 Cookie **回写存储**
+        (旧 skey 会被轮换失效,不回写等于丢登录态)。
+        """
+        if "wr_rt=" not in self.cookie:
+            return None
+        jar = requests.Session()
+        jar.headers.update({
+            "User-Agent": _UA,
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Origin": BASE,
+            "Referer": f"{BASE}/",
+            "Content-Type": "application/json",
+        })
+        # 关键:登录 Cookie 必须注入 cookie jar(domain=weread.qq.com),否则按游客处理 -2013
+        for kv in self.cookie.split(";"):
+            name, _, value = kv.strip().partition("=")
+            if name:
+                jar.cookies.set(name, value, domain="weread.qq.com", path="/")
+        try:
+            resp = jar.post(f"{BASE}/web/login/renewal",
+                            data=json.dumps({"rq": "%2Fweb%2Fbook%2Fread", "ql": True},
+                                            separators=(",", ":")),
+                            timeout=timeout)
+        except requests.RequestException:
+            return None
+        if resp.status_code != 200:
+            return None
+        new_skey = new_rt = ""
+        for c in jar.cookies:  # requests 已把 Set-Cookie 并入 jar
+            if c.name == "wr_skey" and c.value:
+                new_skey = c.value
+            elif c.name == "wr_rt" and c.value:
+                new_rt = c.value
+        if not new_skey:
+            return None
+        cookie = re.sub(r"wr_skey=[^;]*", f"wr_skey={new_skey}", self.cookie)
+        if new_rt:
+            cookie = re.sub(r"wr_rt=[^;]*", "wr_rt=" + quote(new_rt, safe=""), cookie)
+        return cookie
+
     def latest_article(self, book_id: str) -> dict | None:
         """{title, url, publish_at=None, content} 或 None(暂无文章)。"""
         try:

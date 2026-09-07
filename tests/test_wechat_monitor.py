@@ -317,7 +317,7 @@ def test_listen_uses_weread_first_and_detects_pan(session, monkeypatch: pytest.M
 def test_listen_falls_back_to_dajiala_on_auth_error(session, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.services.weread_client import WereadAuthError
 
-    _set_cookie(session, 1, "weread", "vid=1; skey=expired")
+    _set_cookie(session, 1, "weread", "vid=1; skey=expired")  # 无 wr_rt → 续期不可用 → 降级 dajiala
     b = WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1",
                         anchor_url="https://mp.weixin.qq.com/s/A")
     session.add(b)
@@ -331,8 +331,115 @@ def test_listen_falls_back_to_dajiala_on_auth_error(session, monkeypatch: pytest
         {"title": "UC网盘资源", "url": "https://mp.weixin.qq.com/s/d1"}]}})
     monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: _DeadWeread())
     out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), client=daj)
-    assert out["new"] == 1  # 微信读书失效 → dajiala 兜底照常入库
+    assert out["new"] == 1  # 微信读书失效且无法续期 → dajiala 兜底照常入库
     assert ("pc", "https://mp.weixin.qq.com/s/A") in daj.calls
+
+
+def test_weread_refresh_writeback_and_skips(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services.cookie_store import get_cookie
+
+    # 无 Cookie → skipped
+    out = wechat_monitor.refresh_weread_cookie(session, 1, settings=_settings(weread_cookie=""))
+    assert out["status"] == "skipped" and out["reason"] == "no_cookie"
+    # 有 Cookie 无 wr_rt → 无法续期
+    out = wechat_monitor.refresh_weread_cookie(session, 1, settings=_settings(weread_cookie="wr_vid=1; wr_skey=K"))
+    assert out["status"] == "skipped" and out["reason"] == "no_rt"
+
+    # 续期成功 → 回写 Cookie 管理 + 书架验证通过
+    class _OK:
+        def __init__(self, cookie: str) -> None:
+            self.cookie = cookie
+
+        def refresh_skey(self, timeout: int = 20) -> str:
+            return self.cookie.replace("wr_skey=OLD", "wr_skey=NEW")
+
+        def shelf(self) -> list:
+            return [{"book_id": "MP_WXS_1", "name": "号A"}]
+
+    monkeypatch.setattr(wechat_monitor, "WereadClient", _OK)
+    out = wechat_monitor.refresh_weread_cookie(
+        session, 1, settings=_settings(weread_cookie="wr_vid=1; wr_rt=R; wr_skey=OLD"))
+    assert out["status"] == "success" and out["verified"]
+    assert "wr_skey=NEW" in get_cookie(session, 1, "weread")  # 新值已回写平台内存储
+
+
+def test_listen_auto_renews_and_retries(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """监听遇 -2012:自动用 wr_rt 续期回写,再以新 Cookie 重试采集。"""
+    from app.services.cookie_store import get_cookie
+    from app.services.weread_client import WereadAuthError
+
+    _set_cookie(session, 1, "weread", "wr_vid=1; wr_rt=RT; wr_skey=OLD")
+    b = WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1")
+    session.add(b)
+    session.commit()
+
+    class _Flaky:
+        def __init__(self, cookie: str) -> None:
+            self.dead = "wr_skey=OLD" in cookie
+
+        def refresh_skey(self, timeout: int = 20) -> str:
+            return "wr_vid=1; wr_rt=RT2; wr_skey=NEW"
+
+        def shelf(self) -> list:
+            return []
+
+        def latest_article(self, book_id: str) -> dict:
+            if self.dead:
+                raise WereadAuthError("登录态失效(-2012)")
+            return {"title": "夸克网盘资源", "url": "https://mp.weixin.qq.com/s/n9",
+                    "review_id": "MP_WXS_1_t9", "digest": ""}
+
+        def mp_content(self, review_id: str) -> str:
+            return "正文"
+
+    monkeypatch.setattr(wechat_monitor, "WereadClient", _Flaky)
+    daj = FakeClient()
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), client=daj, weread=None)
+    assert out["new"] == 1  # 续期后重试成功
+    assert all(c[0] != "pc" for c in daj.calls)  # 全程未动付费接口
+    assert "wr_skey=NEW" in get_cookie(session, 1, "weread")  # 新 Cookie 已持久化
+
+
+def test_weread_refresh_skey_renewal_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """renewal 请求层:Cookie 注入 jar、POST renewal、Set-Cookie 回填(wr_rt 的 @ 重新编码、~ 保留)。"""
+    from app.services import weread_client as wc_mod
+
+    class _Cookie:
+        def __init__(self, name: str, value: str) -> None:
+            self.name, self.value = name, value
+
+    class _Jar:
+        def __init__(self) -> None:
+            self.items: list[_Cookie] = []
+
+        def set(self, name: str, value: str, domain: str = "", path: str = "") -> None:
+            self.items.append(_Cookie(name, value))
+
+        def __iter__(self):
+            return iter(self.items)
+
+    class _Resp:
+        status_code = 200
+        text = '{"succ":1}'
+
+    class _Sess:
+        def __init__(self) -> None:
+            self.headers: dict = {}
+            self.cookies = _Jar()
+
+        def post(self, url: str, data=None, timeout: int = 20) -> _Resp:
+            assert url.endswith("/web/login/renewal")
+            assert b'"ql":true' in data.replace(b" ", b"") if isinstance(data, bytes) else '"ql":true' in data
+            self.cookies.set("wr_skey", "NEWSKEY", domain="weread.qq.com", path="/")
+            self.cookies.set("wr_rt", "newrt@x~t", domain="weread.qq.com", path="/")
+            return _Resp()
+
+    monkeypatch.setattr(wc_mod.requests, "Session", _Sess)
+    out = wc_mod.WereadClient("wr_vid=9; wr_rt=old%40x~t; wr_skey=OLDSKEY").refresh_skey()
+    assert out and "wr_skey=NEWSKEY" in out
+    assert "wr_rt=newrt%40x~t" in out  # @ 重新 URL 编码;~ 属 unreserved 保留明文
+    # 无 wr_rt → 不发请求直接返回 None
+    assert wc_mod.WereadClient("wr_vid=9; wr_skey=K").refresh_skey() is None
 
 
 def test_listen_skips_without_any_source(session) -> None:

@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     pan_transfer_enabled: bool = True      # 是否自动转存(需 quark_cookie;失败回落原链接推送)
     wechat_traffic_min_interval_hours: int = 24  # 同一篇文章两次采样最小间隔(小时)
     wechat_traffic_cron: str = "30 21 * * *"  # 每日阅读量采样时间(默认 21:30)
+    weread_refresh_cron: str = "50 7 * * *"  # 微信读书 Cookie 每日自动续期(wr_rt 换新 wr_skey,默认 07:50)
     douhot_cookie_file: str = "data/douhot_cookie.txt"  # 抖音热点宝 Cookie 文件(gitignored)
     douhot_top_n: int = 100         # 内容词趋势条数(抖音热点接口可到 200)
     douhot_watch_entry_cap: int = 100  # 榜单搜索类关注(话题/搜索/视频)每次采集最多记录的相关主题条数

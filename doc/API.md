@@ -757,10 +757,16 @@
 - **书架预览**: GET `/api/wechat/weread/shelf` → `{"count":N,"items":[{"book_id":"MP_WXS_*","name":"公众号名"}]}`
 - **书架一键导入**: POST `/api/wechat/benchmarks/import_shelf`
   → `{"status":"success","shelf":N,"created":新增,"updated":回填bookId}`(重复导入幂等)
+- **Cookie 续期**: POST `/api/wechat/weread/refresh`
+  → `{"status":"success","verified":true}` / `{"status":"skipped","reason":"no_cookie|no_rt"}`;
+  失败 HTTP 502(wr_rt 已失效,需重新扫码/复制完整 Cookie)
 - 前置:在微信读书 App 内关注目标公众号,并配置微信读书 Cookie(平台「Cookie管理」新增的
   **weread** 平台,按用户;或 `.env` 全局 `WEREAD_COOKIE`)
 - 数据源优先级:对标号有 `weread_book_id` 且有 Cookie → 微信读书(免费,每轮拿"最新一篇");
-  否则 dajiala `post_condition`(¥0.14/号)。微信读书登录失效(-2012/-2010)自动降级 dajiala。
+  否则 dajiala `post_condition`(¥0.14/号)。微信读书登录失效(-2012/-2010)→ **自动续期重试一次**
+  (wr_rt 换新 wr_skey 并回写存储),续期失败才降级 dajiala。
+- **自动续期**:每日调度作业(默认 07:50,`WEREAD_REFRESH_CRON`)为全部用户续期;
+  wr_skey 短效且轮换,续期后旧值自动失效,服务端已回写新值,用户无需手动更换 Cookie。
 - 监听/同步的其余行为不变;`sync` 无 dajiala key 时仅能同步"最新一篇"(返回 `partial`)。
 - **读书平台(wewe-rss v2 兼容,免费全量)**:配置 `.env` 的 `WECHAT_READER_PLATFORM_URL/TOKEN/VID`
   后自动成为首选源——监听每号拿最新 20 篇、同步翻页拉全量(免费);对标号列表新增 `biz` 字段

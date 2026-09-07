@@ -125,6 +125,7 @@ export const api = {
   wechatBenchmarkSync: (id, maxPages) => req('POST', `/api/wechat/benchmarks/${id}/sync` + (maxPages ? `?max_pages=${maxPages}` : '')),
   wechatListen: () => req('POST', '/api/wechat/listen'),
   wechatShelf: () => req('GET', '/api/wechat/weread/shelf'),
+  wechatWereadRefresh: () => req('POST', '/api/wechat/weread/refresh'),
   wechatImportShelf: () => req('POST', '/api/wechat/benchmarks/import_shelf'),
   wechatArticles: (q = '') => req('GET', '/api/wechat/articles' + (q ? '?' + q : '')),
   wechatTrafficRefresh: (o = {}) => req('POST', '/api/wechat/traffic/refresh', o),

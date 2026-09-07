@@ -147,6 +147,19 @@ def wechat_weread_shelf(user: User = Depends(get_current_user), db: Session = De
     return {"count": len(items), "items": items}
 
 
+@router.post("/api/wechat/weread/refresh")
+def wechat_weread_refresh(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """手动续期微信读书 Cookie(长效 wr_rt → 新短效 wr_skey,回写 Cookie 管理)。
+
+    wr_skey 短效且轮换,续期成功后旧值失效——服务内部已自动回写,无需手动更新。
+    每日另有调度作业自动续期(WEREAD_REFRESH_CRON,默认 07:50);本接口用于即时修复。
+    """
+    out = wechat_monitor.refresh_weread_cookie(db, user.id)
+    if out["status"] == "failed":
+        raise HTTPException(502, "微信读书续期失败(wr_rt 可能已失效),请重新扫码/复制完整 Cookie")
+    return out
+
+
 @router.post("/api/wechat/traffic/refresh")
 def wechat_traffic_refresh(payload: dict | None = None, user: User = Depends(get_current_user),
                            db: Session = Depends(get_db)):
