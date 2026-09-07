@@ -287,6 +287,36 @@ def run_weekly_summary() -> int:
         db.close()
 
 
+def notify_incident(db: Session, user_id: int, kind: str, title: str, detail: str,
+                    settings: Settings | None = None) -> bool:
+    """事件级即时告警(如闲鱼滑块):推该板块飞书群,复用 feishu_alert_cooldown_hours 冷却去重。
+
+    与 check_collect_failures 的"聚合计数"互补——滑块这类需要人工立刻介入的事件,
+    不该等 24h 内凑满 3 次失败才响。返回是否实际推送。
+    """
+    settings = settings or get_settings()
+    from app.services.feishu_client import FeishuClient, webhook_for
+
+    webhook = webhook_for(settings, kind)
+    if not webhook:
+        return False
+    from app.db.models import FeishuAlert
+
+    section, key = f"incident_{kind}", title[:80]
+    now = datetime.now()
+    existing = db.scalar(select(FeishuAlert).where(
+        FeishuAlert.section == section, FeishuAlert.user_id == user_id, FeishuAlert.title == key))
+    if existing and (now - existing.alerted_at).total_seconds() < settings.feishu_alert_cooldown_hours * 3600:
+        return False
+    if existing:
+        existing.reason, existing.alerted_at = detail[:255], now
+    else:
+        db.add(FeishuAlert(section=section, user_id=user_id, title=key, reason=detail[:255], alerted_at=now))
+    sent = FeishuClient(webhook, settings.feishu_secret).send(f"🔴 {title}" + chr(10) + detail)
+    db.commit()
+    return bool(sent)
+
+
 def _last_success_days(db: Session, uid: int, kind: str) -> int | None:
     """该 (用户,平台) 距最近一次**成功**采集的天数;从未成功返回 None。用于判断"长期坏"升级。"""
     last_ok = db.scalar(select(func.max(RunRecord.started_at)).where(
@@ -323,9 +353,19 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
             RunRecord.user_id, RunRecord.kind
         ).subquery()
         latest_rows = db.execute(
-            select(latest.c.user_id, latest.c.kind, RunRecord.status).join(RunRecord, RunRecord.id == latest.c.mid)
+            select(latest.c.user_id, latest.c.kind, RunRecord.status, RunRecord.detail).join(
+                RunRecord, RunRecord.id == latest.c.mid)
         ).all()
-        currently_broken = {(uid, kind) for uid, kind, status in latest_rows if status == "failed"}
+
+        def _broken(status: str, detail: str) -> bool:
+            # failed 之外,verify 痕迹的 skipped/verify_cooldown 与 partial 也算"当前仍断":
+            # 闲鱼滑块后 30 分钟内的轮次记 skipped,若只认 failed 会漏掉正在发生的风控
+            if status == "failed":
+                return True
+            d = detail or ""
+            return status in ("skipped", "partial") and ("XianyuVerify" in d or "verify" in d.lower())
+
+        currently_broken = {(uid, kind) for uid, kind, status, detail in latest_rows if _broken(status, detail)}
 
         rows = db.execute(
             select(RunRecord.user_id, RunRecord.kind, func.count(RunRecord.id))

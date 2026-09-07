@@ -15,6 +15,7 @@ from app.db import repository
 from app.db.models import XianyuDaily, XianyuSummary, RunRecord
 from app.services import xianyu
 from app.services.cookie_store import get_cookies
+from app.services import alert_service
 from app.services.tenant_base import _base, _record_run, persist_refreshed_cookie, verify_cooldown_active
 from app.utils import get_logger
 
@@ -109,6 +110,13 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
         _record_run(session, user_id, "xianyu_deep", status, detail_note)
         session.commit()
         persist_refreshed_cookie(session, user_id, client)
+        if stop_reason == "verify":
+            alert_service.notify_incident(
+                session, user_id, "xianyu",
+                "⚠️ 闲鱼详情抓取触发人机验证",
+                f"深采在第 {saved + 1} 个商品处触发滑块(已采 {saved} 条,状态 partial);"
+                f"搜索采集不受影响",
+                settings=settings)
         return {"platform": "xianyu_deep", "count": saved, "status": status, "reason": stop_reason}
     except (xianyu.XianyuVerify, xianyu.XianyuRateLimit) as exc:
         # collect_hot 整轮被滑块/限流(全部关键词失败)→ 优雅降级,不 500

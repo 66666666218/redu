@@ -599,3 +599,71 @@ def test_realtime_baidu_no_keyerror(monkeypatch, session) -> None:
     n = run_feishu_realtime("baidu", 1, _settings(), db=session)
     assert n == 2          # 新增 D、A 升 3 名
     assert "百度热搜" in sent[0] and "D" in sent[0] and "A" in sent[0]
+
+
+# ---------------------------------------------------------------- 闲鱼风控即时告警
+def test_notify_incident_sends_then_cooldowns(session) -> None:
+    """事件级告警:首次推送 + FeishuAlert 冷却去重(6h 内不重发)。"""
+    from app.services import alert_service
+
+    sent: list[str] = []
+
+    class _FakeFeishu:
+        def __init__(self, webhook, secret="") -> None:
+            pass
+
+        def send(self, msg: str) -> bool:
+            sent.append(msg)
+            return True
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
+    st = _settings(feishu_webhook_xianyu="https://open.feishu.cn/hook/xianyu")
+    assert alert_service.notify_incident(session, 1, "xianyu", "🔴 闲鱼触发人机验证(滑块)",
+                                         "FAIL_SYS_USER_VALIDATE", settings=st) is True
+    assert "滑块" in sent[0]
+    assert alert_service.notify_incident(session, 1, "xianyu", "🔴 闲鱼触发人机验证(滑块)",
+                                         "FAIL_SYS_USER_VALIDATE", settings=st) is False
+    assert len(sent) == 1  # 冷却期内不重发
+
+
+def test_run_xianyu_full_block_notifies_incident(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """全关键词被滑块挡:RunRecord=failed + 即时事件告警(带原因)推闲鱼群。"""
+    from app.db.models import RunRecord, UserCookie
+    from app.services import alert_service, tenant, xianyu as xianyu_mod
+    from app.services.xianyu import XianyuVerify
+
+    from app.services import cookie_store
+
+    cookie_store.set_cookie(session, 1, "goofish", "a=1")
+
+    class _VerifyClient:
+        def __init__(self, cookie: str, proxy: str | None = None) -> None:
+            pass
+
+        def search(self, keyword: str) -> list[dict]:
+            raise XianyuVerify("闲鱼人机验证(滑块),需人工处理:FAIL_SYS_USER_VALIDATE::need verify")
+
+    sent: list[str] = []
+
+    class _FakeFeishu:
+        def __init__(self, webhook, secret="") -> None:
+            pass
+
+        def send(self, msg: str) -> bool:
+            sent.append(msg)
+            return True
+
+    monkeypatch.setattr(xianyu_mod, "XianyuClient", _VerifyClient)
+    monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
+    st = _settings(feishu_webhook_xianyu="https://open.feishu.cn/hook/xianyu")
+
+    with pytest.raises(XianyuVerify):
+        tenant.run_xianyu(session, 1, settings=st)  # 失败后照常上抛(调度器记 failed)
+    run = session.scalars(select(RunRecord).order_by(RunRecord.id.desc())).first()
+    assert run.status == "failed" and "XianyuVerify" in run.detail
+    assert any("滑块" in m for m in sent)  # 即时告警带原因
+
+    # FeishuAlert 冷却行已建
+    fa = session.scalars(select(FeishuAlert)).all()
+    assert any(f.section == "incident_xianyu" for f in fa)

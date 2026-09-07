@@ -286,7 +286,8 @@ def fetch_detail(client: XianyuClient, item_id: str) -> dict:
     return out
 
 
-def collect_hot(settings: Settings, client: XianyuClient | None = None, start_offset: int = 0) -> list[dict]:
+def collect_hot(settings: Settings, client: XianyuClient | None = None, start_offset: int = 0,
+                stats: dict | None = None) -> list[dict]:
     """搜索多个虚拟商品关键词,按综合顺序聚合、去重、排名。
 
     风控降频:`xianyu_batch_keywords` 限制**每轮只抓部分关键词**(默认 5 个,少量多次),
@@ -310,6 +311,7 @@ def collect_hot(settings: Settings, client: XianyuClient | None = None, start_of
     saw_rate = False
     success = 0
     failed_kws: list[str] = []
+    verify_kws: list[str] = []  # 被人机验证挡住的关键词(部分被风控也暴露)
     for idx, kw in enumerate(picked):
         try:
             items = client.search(kw)
@@ -317,6 +319,7 @@ def collect_hot(settings: Settings, client: XianyuClient | None = None, start_of
             # 人机验证是账号/IP 级的,一旦出现后续关键词多半也会被挡——
             # 立即停止尝试,避免连环猛打加重风控,保留已采到的部分数据。
             saw_verify = True
+            verify_kws.append(kw)
             break
         except XianyuRateLimit:
             # 网关限流同样是账号/IP 级:换词接着打只会逐个吃满退避(每词最长 5 分钟)。
@@ -339,6 +342,9 @@ def collect_hot(settings: Settings, client: XianyuClient | None = None, start_of
             time.sleep(base_delay * random.uniform(0.8, 1.4))
 
     # 一个词都没采到且被验证/限流 → 让上层识别为"需人工处理",避免误报成功 0 条
+    if stats is not None:
+        stats.update({"ok": success, "verify": verify_kws, "failed_kws": failed_kws,
+                      "rate_break": saw_rate, "verify_break": saw_verify})
     if success == 0 and saw_verify:
         raise XianyuVerify("闲鱼人机验证(滑块),全部关键词均未采集")
     if success == 0 and saw_rate:

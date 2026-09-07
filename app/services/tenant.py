@@ -169,7 +169,8 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
         batch = max(1, int(getattr(settings, "xianyu_batch_keywords", 0) or 5))
         n_kw = len([k.strip() for k in settings.xianyu_keywords.split(",") if k.strip()])
         start_offset = (prior * batch) % max(n_kw, 1)
-        hot = xianyu.collect_hot(settings, client, start_offset=start_offset)
+        stats: dict = {}
+        hot = xianyu.collect_hot(settings, client, start_offset=start_offset, stats=stats)
         prev_keys = set(session.scalars(select(XianyuItem.item_id).where(XianyuItem.user_id == user_id)).all())
         for it in hot:
             session.add(XianyuItem(user_id=user_id, **it))
@@ -178,7 +179,16 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
         latest = [{"key": it["item_id"], "hit_keywords": it["hit_keywords"], "best_rank": it["best_rank"]} for it in hot]
         alert_service.evaluate(session, user_id, "xianyu", latest, prev_keys, settings)
         _record_watch(session, user_id, "xianyu", [{"title": it["title"], "value": it.get("hit_keywords", 0)} for it in hot])
-        _record_run(session, user_id, "xianyu", "success", f"items={len(hot)}")
+        detail = f"items={len(hot)}"
+        if stats.get("verify"):
+            detail += f" partial_verify={len(stats['verify'])} blocked={','.join(stats['verify'])}"
+            alert_service.notify_incident(
+                db=session, user_id=user_id, kind="xianyu",
+                title="⚠️ 闲鱼部分关键词被风控(人机验证)",
+                detail=f"本轮 {len(stats['verify'])} 个关键词触发人机验证被挡(已采 {len(hot)} 条):"
+                       f"{', '.join(stats['verify'])}",
+                settings=settings)
+        _record_run(session, user_id, "xianyu", "success", detail)
         session.commit()
         # 搜索接力深采(想要数/类目)——自动跑,受 验证冷却 + 详情限流 保护;按间隔控制频率防累积风控
         if xianyu_deep_due(session, user_id, settings):
@@ -192,6 +202,12 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
         _record_run(session, user_id, "xianyu", "failed", f"{type(exc).__name__}: {exc}")
         session.commit()
         persist_refreshed_cookie(session, user_id, client)
+        if "XianyuVerify" in f"{type(exc).__name__}{exc}":
+            alert_service.notify_incident(
+                db=session, user_id=user_id, kind="xianyu",
+                title="🔴 闲鱼触发人机验证(滑块)",
+                detail=f"{exc}(已自动冷却 {settings.xianyu_cooldown_minutes} 分钟,期间轮次跳过)",
+                settings=settings)
         raise
 
 
