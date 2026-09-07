@@ -286,6 +286,12 @@ class WechatArticle(Base):
     collect_num: Mapped[int] = mapped_column(Integer, default=0)
     comment_count: Mapped[int] = mapped_column(Integer, default=0)
     traffic_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # 最近一次采样时间
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)         # 已采样次数
+    first_read_num: Mapped[int] = mapped_column(Integer, default=0)     # 首采样阅读数(基线对比)
+    trend_flag: Mapped[str] = mapped_column(String(16), default="")     # 爆点苗头 / 回落 / 空
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)         # 已采样次数
+    first_read_num: Mapped[int] = mapped_column(Integer, default=0)       # 首采样阅读数(账号基线对比用)
+    trend_flag: Mapped[str] = mapped_column(String(16), default="")       # 爆点苗头 / 回落 / 空
 
 
 class WechatTrafficSample(Base):

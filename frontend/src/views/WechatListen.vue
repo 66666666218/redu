@@ -206,7 +206,7 @@ onMounted(load)
           <td class="empty">{{ fmt(a.created_at) }}</td>
           <td>{{ a.author }}</td>
           <td><a :href="a.url" target="_blank" rel="noopener">{{ a.title }}</a></td>
-          <td>{{ a.pan_types ? '🔴 ' + a.pan_types : '—' }}</td>
+          <td>{{ a.pan_types ? '🔴 ' + a.pan_types : '—' }}<span v-if="a.trend_flag" :class="a.trend_flag==='回落' ? 'empty' : ''">{{ a.trend_flag==='爆点苗头' ? ' 🚀爆点苗头' : a.trend_flag==='回落' ? ' 📉回落' : '' }}</span></td>
           <td><a v-if="firstMy(a.my_pan_urls)" :href="firstMy(a.my_pan_urls)" target="_blank" rel="noopener">打开</a><span v-else class="empty">—</span></td>
           <td>{{ a.traffic_at ? a.read_num : '—' }}</td>
           <td>{{ a.traffic_at ? a.zan_num : '—' }}</td>

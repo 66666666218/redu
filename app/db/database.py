@@ -120,7 +120,10 @@ def _migrate() -> None:
                             "pan_types VARCHAR(128) DEFAULT ''", "pan_urls TEXT", "my_pan_urls TEXT",
                             "read_num INTEGER DEFAULT 0", "zan_num INTEGER DEFAULT 0", "looking_num INTEGER DEFAULT 0",
                             "share_num INTEGER DEFAULT 0", "collect_num INTEGER DEFAULT 0",
-                            "comment_count INTEGER DEFAULT 0", "traffic_at DATETIME", "pan_urls TEXT"],
+                            "comment_count INTEGER DEFAULT 0", "traffic_at DATETIME", "pan_urls TEXT",
+                            "sample_count INTEGER DEFAULT 0",
+                            "first_read_num INTEGER DEFAULT 0",
+                            "trend_flag VARCHAR(16) DEFAULT ''"],
     }
     with get_engine().begin() as conn:
         for table, coldefs in additions.items():

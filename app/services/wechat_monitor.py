@@ -21,14 +21,14 @@ from __future__ import annotations
 import html as html_mod
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
-from app.db.models import WechatArticle, WechatBenchmark, WechatCandidate, WechatTrafficSample
+from app.db.models import FeishuAlert, WechatArticle, WechatBenchmark, WechatCandidate, WechatTrafficSample
 from app.services.dajiala_client import DajialaClient, DajialaError, DajialaNoBalance
 from app.services.quark_transfer import QuarkAuthError, QuarkError, QuarkTransfer, extract_quark_urls
 from app.services.reader_platform_client import PlatformError, ReaderPlatformClient
@@ -459,6 +459,43 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                 replacements.setdefault(r.id, []).append((u, res["share_url"], res["password"]))
             if dead:
                 break
+    # 资源级共振:同一盘链在窗口期内被 ≥2 篇文章推送 → 同行网络都在发的确认级爆点资源
+    from app.services.feishu_client import FeishuClient, webhook_for
+
+    checked: set[str] = set()
+    res_hits: list[tuple[str, WechatArticle, int]] = []
+    for r in rows:
+        for u in [x.strip() for x in (r.pan_urls or "").splitlines() if x.strip()]:
+            if u in checked:
+                continue
+            checked.add(u)
+            key = "res:" + u[:120]
+            existing = session.scalar(select(FeishuAlert).where(
+                FeishuAlert.section == "focus_res", FeishuAlert.user_id == user_id, FeishuAlert.title == key))
+            if existing and (datetime.now() - existing.alerted_at) < timedelta(hours=settings.focus_cooldown_hours):
+                continue
+            cnt = session.scalar(select(func.count()).select_from(WechatArticle).where(
+                WechatArticle.pan_urls.contains(u, autoescape=True),
+                WechatArticle.created_at >= datetime.now() - timedelta(hours=settings.wechat_resonance_hours)))
+            if (cnt or 0) >= 2:
+                if existing:
+                    existing.alerted_at = datetime.now()
+                else:
+                    session.add(FeishuAlert(section="focus_res", user_id=user_id, title=key,
+                                            reason=str(cnt) + " 篇同发", alerted_at=datetime.now()))
+                res_hits.append((u, r, cnt))
+    if res_hits:
+        webhook = webhook_for(settings, "wechat")
+        if webhook:
+            elements = [_col_set_row([("**分享链**", 5), ("**同发文章数**", 2), ("**示例标题**", 5)], grey=True)]
+            for u, r, cnt in res_hits[: settings.focus_max_items]:
+                elements.append(_col_set_row([
+                    ("🔴 [" + u[:40] + "](" + u + ")", 5), (str(cnt) + " 篇", 2), (r.title[:30], 5)]))
+            card = {"config": {"wide_screen_mode": True},
+                    "header": {"template": "red", "title": {"tag": "plain_text",
+                               "content": "🔴 资源共振 · 多号同发(" + str(len(res_hits)) + " 个资源)"}},
+                    "elements": elements}
+            FeishuClient(webhook, settings.feishu_secret).send_card(card)
     return replacements
 
 
@@ -750,8 +787,11 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
 
 
 def _apply_sample(session: Session, user_id: int, r: WechatArticle, data: dict, now: datetime) -> None:
-    """把 read_zan_pro 结果写回文章 + 追加一个采样点。"""
+    """把 read_zan_pro 结果写回文章 + 追加一个采样点(首采样记 first_read_num 做账号基线)。"""
     r.read_num = int(data.get("read") or 0)
+    if not r.sample_count:
+        r.first_read_num = r.read_num
+    r.sample_count = (r.sample_count or 0) + 1
     r.zan_num = int(data.get("zan") or 0)
     r.looking_num = int(data.get("looking") or 0)
     r.share_num = int(data.get("share_num") or 0)
@@ -763,6 +803,41 @@ def _apply_sample(session: Session, user_id: int, r: WechatArticle, data: dict, 
                                     looking_num=r.looking_num, share_num=r.share_num,
                                     collect_num=r.collect_num,
                                     comment_count=r.comment_count, sampled_at=now))
+
+
+def _notify_burst(session: Session, user_id: int, settings: Settings, r: WechatArticle,
+                  growth: float | None, baseline: int | None = None) -> bool:
+    """🚀 爆点苗头即时推送(公众号群,24h 冷却)。返回是否推送。"""
+    from app.services.feishu_client import FeishuClient, webhook_for
+    from app.db.models import FeishuAlert
+
+    webhook = webhook_for(settings, "wechat")
+    if not webhook:
+        return False
+    key = str(r.id)
+    existing = session.scalar(select(FeishuAlert).where(
+        FeishuAlert.section == "focus_burst", FeishuAlert.user_id == user_id, FeishuAlert.title == key))
+    if existing and (datetime.now() - existing.alerted_at) < timedelta(hours=settings.focus_cooldown_hours):
+        return False
+    if existing:
+        existing.alerted_at = datetime.now()
+    else:
+        session.add(FeishuAlert(section="focus_burst", user_id=user_id, title=key,
+                                reason=f"增长{growth:.0f}%" if growth is not None else "首采超基线",
+                                alerted_at=datetime.now()))
+    growth_txt = f"+{growth:.0f}%" if growth is not None else "超基线"
+    base_txt = f" · 账号基线中位 {baseline}" if baseline else ""
+    mine = [x for x in (r.my_pan_urls or "").splitlines() if x.strip()]
+    lines = ["🚀 爆点苗头 · 建议立即跟进改写",
+             "🔴 " + r.title[:40],
+             "📊 阅读 " + str(r.read_num) + "(" + growth_txt + ") · 转发 " + str(r.share_num)
+             + " · 收藏 " + str(r.collect_num) + base_txt]
+    if mine:
+        lines.append("📦 我的链接: " + mine[0])
+    lines.append(r.url)
+    sent = FeishuClient(webhook, settings.feishu_secret).send(chr(10).join(lines))
+    session.commit()
+    return bool(sent)
 
 
 # ---------------------------------------------------------------- 阅读量采样(dajiala read_zan_pro)
@@ -782,18 +857,27 @@ def sample_traffic(session: Session, user_id: int, settings: Settings | None = N
     limit = max(1, int(limit or settings.wechat_traffic_sample_limit))
     cutoff = datetime.now().timestamp() - settings.wechat_traffic_min_interval_hours * 3600
 
+    now = datetime.now()
+    young_cutoff = now - timedelta(hours=48)
     q = select(WechatArticle).where(
         WechatArticle.user_id == user_id,
-        WechatArticle.url != "",
-        or_(WechatArticle.traffic_at.is_(None),
-            WechatArticle.traffic_at < datetime.fromtimestamp(cutoff)))
+        WechatArticle.url != "")
     if benchmark_id:
         q = q.where(WechatArticle.benchmark_id == benchmark_id)
-    rows = session.scalars(q.order_by(WechatArticle.created_at.desc()).limit(limit * 3)).all()
-    # 排序:没采过优先,其次最近采样更久优先,再按发现时间新→旧;截到 limit
-    rows = sorted(rows, key=lambda r: (r.traffic_at is not None,
-                                       r.traffic_at or datetime(1970, 1, 1),
-                                       -r.created_at.timestamp()))[:limit]
+    candidates = session.scalars(q.order_by(WechatArticle.created_at.desc()).limit(limit * 5)).all()
+    # 逐篇按"文章年龄"决定最小采样间隔:48h 内新文 6h(密集捕捉早期增速),其余按设置(默认 24h)
+    rows = []
+    for r in candidates:
+        fresh = bool(r.created_at and r.created_at >= young_cutoff)
+        min_i = 6 * 3600 if fresh else settings.wechat_traffic_min_interval_hours * 3600
+        if r.traffic_at is None or (now - r.traffic_at).total_seconds() >= min_i:
+            rows.append(r)
+    # 排序:48h 内新文最优先(早期增速信号最值钱),其次没采过的,再按发现时间新→旧
+    rows.sort(key=lambda r: (0 if (r.created_at and r.created_at >= young_cutoff) else 1,
+                             r.traffic_at is not None,
+                             r.traffic_at or datetime(1970, 1, 1),
+                             -r.created_at.timestamp()))
+    rows = rows[:limit]
     if not rows:
         return {"platform": "wechat_traffic", "status": "skipped", "reason": "no_targets"}
 
@@ -822,8 +906,27 @@ def sample_traffic(session: Session, user_id: int, settings: Settings | None = N
         except DajialaError as exc:
             logger.warning("阅读量采样失败 url=%s:%s", r.url, exc)
             continue
+        prev_read = r.read_num if (r.sample_count or 0) >= 1 else None
         _apply_sample(session, user_id, r, data, now)
         sampled += 1
+        # 趋势判定:相邻采样增长达标 + 绝对量达标 → 爆点苗头(即时推送);大幅下滑 → 回落
+        if prev_read is not None:
+            growth = (r.read_num - prev_read) / max(prev_read, 1) * 100
+            if growth <= -20:
+                r.trend_flag = "回落"
+            elif growth >= settings.wechat_resample_growth_pct and r.read_num >= settings.wechat_burst_min_reads:
+                r.trend_flag = "爆点苗头"
+                _notify_burst(session, user_id, settings, r, growth)
+        # 账号基线:首采样阅读 ≥ 该号历史首采中位数×3 → 早期苗头(无需等趋势)
+        if (r.sample_count or 0) == 1 and r.benchmark_id:
+            base_vals = sorted(v for v in session.scalars(select(WechatArticle.first_read_num).where(
+                WechatArticle.user_id == user_id, WechatArticle.benchmark_id == r.benchmark_id,
+                WechatArticle.id != r.id, WechatArticle.first_read_num > 0)).all() if v)
+            if len(base_vals) >= 3:
+                median = base_vals[len(base_vals) // 2]
+                if r.first_read_num >= median * 3 and r.first_read_num >= settings.wechat_burst_min_reads:
+                    r.trend_flag = "爆点苗头"
+                    _notify_burst(session, user_id, settings, r, None, baseline=median)
     session.commit()
     _record_run(session, user_id, "wechat_traffic", "success", f"sampled={sampled}")
     session.commit()
