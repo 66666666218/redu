@@ -1,5 +1,7 @@
 # CHANGELOG
 
+- [2026-09-07 09:00] FEAT: **苗头 Agent v2.1——微博/百度排名速度信号** — 各板块信号差异化收尾:微博/百度接入排名序列(近24h),排名前移 ≥3 名 +15 分——即使热度平稳也能靠排名速度捕捉起势(排名比热度对"起势"更敏感)。新增排名跳升单测(热度持平+排名10→2 = 55 分恰好触发苗头)。全量 225 项通过(Files: app/services/early_agent.py, tests/test_early_agent.py, doc/dev.md, CHANGELOG)
+
 - [2026-09-07 08:30] FEAT: **苗头 Agent v2——生命周期状态机/加速度信号/行动建议(全板块自主预测)** — 按用户授权的整夜自主优化:① 修复闲鱼"新上榜"信号失效(snap_date 字符串时间戳 vs datetime 判型,`_to_dt` 容错);② 新增**加速度**信号(增速比再升≥20个百分点,+20)——比增速更早起势的标志;③ 新增 `agent_stages` 生命周期状态机(观察→苗头→上升→爆发→回落,**仅阶段跃迁推送**,同阶段不重复,记忆跟踪时长);④ 推送卡片带**网盘推广行动建议**(苗头=准备素材/上升=立即改写发布/爆发=全力推广/回落=停止跟进)+ 阶段徽标 + 信号分解;⑤ 移除时间冷却(状态机取代)。新增 test_early_agent.py 5 项(评分/加速/生命周期四阶段/闲鱼字符串时间戳/共振推总群);真实数据干跑验证(224 项全过)。doc/dev.md §5.14 同步(Files: app/services/early_agent.py, app/db/models.py, tests/test_early_agent.py, doc/dev.md, CHANGELOG)
 
 - [2026-09-07 07:20] FEAT: **早期苗头 Agent——全板块 感知→联想→评估→决策→行动 自主预测闭环** — 用户要求:不只公众号,微博/闲鱼/抖音/百度全板块都要提早预判苗头,并 Agent 化自主运行。新增 `app/services/early_agent.py`:五步闭环(感知=各板块热度/想要/指数序列;联想=归一化+包含匹配跨板块共振;评估=多信号加权评分[增速≥50%+30/≥100%+40 · 新上榜+25 · 连续≥3轮+15 · 量级≥200+15 · 共振+30,0~100封顶];决策=总分≥agent_score_threshold(55)为苗头/≥80强苗头,12h冷却;行动=column_set 红卡推送,共振信号推总群、单板块推专属群)。与既有系统分工:focus_alert 管"出现型"、实时阈值推送管"已爆发"、本模块管"正在起势"。钩子:每 30 分钟独立 tick(agent_tick_all_users)+ 每次采集成功后即时评分。配置 AGENT_ENABLED/AGENT_SCORE_THRESHOLD/AGENT_COOLDOWN_HOURS(.env.example 同步)。新增 job 注册测试修复;全量 219 项通过(Files: app/services/early_agent.py, app/services/scheduler.py, config/settings.py, tests/, .env.example, CHANGELOG)

@@ -148,3 +148,19 @@ def test_agent_disabled(session, st) -> None:
     st_off = Settings(_env_file=None, is_dev=True, agent_enabled=False,
                       feishu_webhook="https://open.feishu.cn/hook/main")
     assert early_agent.agent_tick(session, 1, settings=st_off) == 0
+
+
+def test_rank_jump_signal_weibo(session, st) -> None:
+    """微博排名跳升 ≥3 名(+15):即使热度平稳也能靠排名速度捕捉起势。"""
+    # 两轮热度持平(无增速信号),但排名 10 → 2(跳升 8)
+    session.add(WeiboHotItem(user_id=1, title="某个突然爆火的词条", heat=5000, rank=10,
+                             captured_at=datetime.now() - timedelta(hours=2)))
+    session.add(WeiboHotItem(user_id=1, title="某个突然爆火的词条", heat=5100, rank=2,
+                             captured_at=datetime.now()))
+    session.commit()
+    signals = early_agent.detect_signals(session, 1, st)
+    s = next(x for x in signals if x["kw"] == "某个突然爆火的词条")
+    assert "排名↑8" in s["parts"]
+    # 分数:新上榜25 + 量级15 + 排名↑8(15) = 55 → 恰好到苗头线
+    assert s["score"] >= 55
+    assert early_agent.agent_tick(session, 1, settings=st) >= 1

@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
 from app.db import repository
-from app.db.models import AgentStage
+from app.db.models import AgentStage, BaiduHotItem, WeiboHotItem
 from app.services.feishu import _col_set_row
 from app.utils import get_logger
 
@@ -68,6 +68,24 @@ def _board_series(db: Session, user_id: int) -> dict[str, dict[str, list[tuple]]
 
 def _md_safe_light(text: str) -> str:
     return (text or "").replace("[", "【").replace("]", "】")
+
+
+def _rank_series(db: Session, user_id: int) -> dict[str, dict[str, list[int]]]:
+    """微博/百度近 24h 的排名序列:{norm: [rank 旧→新]}——排名比热度对"起势"更敏感。"""
+    since = datetime.now() - timedelta(hours=24)
+    out: dict[str, dict[str, list[int]]] = {"weibo": {}, "baidu": {}}
+    for r in db.scalars(select(WeiboHotItem).where(
+            WeiboHotItem.user_id == user_id, WeiboHotItem.captured_at >= since)).all():
+        n = _norm(r.title)
+        if n:
+            out["weibo"].setdefault(n, []).append(r.rank)
+    for r in db.scalars(select(BaiduHotItem).where(
+            BaiduHotItem.user_id == user_id, BaiduHotItem.captured_at >= since)).all():
+        n = _norm(r.title)
+        if n:
+            out["baidu"].setdefault(n, []).append(r.rank)
+    return {sec: {n: ranks for n, ranks in per.items() if len(ranks) >= 2}
+            for sec, per in out.items()}
 
 
 def detect_signals(db: Session, user_id: int, settings: Settings) -> list[dict]:
@@ -119,6 +137,17 @@ def detect_signals(db: Session, user_id: int, settings: Settings) -> list[dict]:
                 continue
             signals.append({"board": sec, "kw": kw, "norm": n, "score": min(score, 100),
                             "parts": parts, "latest": latest})
+
+    # ⑤b 排名速度(微博/百度):排名比热度对"起势"更敏感,跳升 ≥3 名 +15
+    rank_series = _rank_series(db, user_id)
+    for s in signals:
+        ranks = rank_series.get(s["board"], {}).get(s["norm"])
+        if not ranks:
+            continue
+        jump = ranks[-2] - ranks[-1]  # 名次前移为正
+        if jump >= 3:
+            s["parts"].append(f"排名↑{jump}")
+            s["score"] = min(100, s["score"] + 15)
 
     # ⑥ 跨板块联想:同名/包含出现在 ≥2 板块 → 共振加成 +30
     for i, s1 in enumerate(signals):
