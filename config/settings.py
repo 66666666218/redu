@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     focus_min_len: int = 4             # 跨板块匹配的最短归一化关键词长度(防误配)
     focus_cooldown_hours: int = 24     # 同一关键词的告警冷却(小时)
     focus_max_items: int = 10          # 每次推送的重点关键词上限
+    agent_enabled: bool = True             # 早期苗头 Agent(全板块自主预测)开关
+    agent_score_threshold: int = 55        # 苗头判定分数线(≥80 为强苗头)
+    agent_cooldown_hours: int = 12         # 同一(板块,关键词)的苗头冷却(小时)
     weread_refresh_cron: str = "50 7 * * *"  # 微信读书 Cookie 每日自动续期(wr_rt 换新 wr_skey,默认 07:50)
     candidate_search_terms: str = ""   # 候选发现搜索词(逗号分隔;空=仅用对标号标题画像词)
     candidate_mine_terms: int = 6      # 标题画像词上限(从已入库标题挖高频内容词)

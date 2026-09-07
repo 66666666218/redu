@@ -78,6 +78,8 @@ def collect_tick(settings: Settings | None = None, now: datetime | None = None) 
                         run_cross_platform_alert(row.user_id, settings)  # ≥2板块上升的关键词
                         from app.services.focus_alert import run_focus_alert
                         run_focus_alert(db, row.user_id, settings)  # 跨板块共振/板块内反复 → 🔴重点
+                        from app.services.early_agent import agent_tick
+                        agent_tick(db, row.user_id, settings)  # 早期苗头评分(增速/新上榜/共振融合)
                     except Exception:  # noqa: BLE001
                         logger.exception("飞书实时提醒失败 section=%s user=%s", row.section, row.user_id)
             except Exception as exc:  # noqa: BLE001
@@ -190,11 +192,13 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     scheduler.add_job(
         _safe(cleanup_old_data), CronTrigger(hour=4, minute=0), id="data_cleanup", max_instances=1, coalesce=True
     )
+    from app.services.early_agent import agent_tick_all_users
     from app.services.wechat_monitor import candidate_discover_tick, traffic_tick, weread_refresh_tick
 
     jobs = [
         (traffic_tick, _get_settings().wechat_traffic_cron, {"minute": 30, "hour": 21}, "wechat_traffic"),
         (traffic_tick, "30 9 * * *", {"minute": 30, "hour": 9}, "wechat_traffic_am"),
+        (agent_tick_all_users, "*/30 * * * *", {"minute": "*/30"}, "early_agent_tick"),
         (weread_refresh_tick, _get_settings().weread_refresh_cron, {"minute": 50, "hour": 7}, "weread_refresh"),
         (candidate_discover_tick, _get_settings().candidate_discover_cron, {"minute": 20, "hour": 8}, "wechat_candidates"),
         (run_feishu_daily, _get_settings().feishu_daily_cron, {"minute": 0, "hour": 8}, "feishu_daily"),
