@@ -1,17 +1,20 @@
-"""早期苗头 Agent:全板块 感知→联想→评估→决策→行动 的自主预测闭环。
+"""早期苗头 Agent v2:全板块 感知→联想→评估→决策→行动 自主预测闭环(带生命周期记忆)。
 
 业务目标:在热点刚起势(苗头期)就提醒用户跟进网盘推广,避开高峰/衰败期。
 
 信号(每板块按各自序列计算,加权融合为 0~100 分):
 - ① 增速:相邻两轮环比(≥50% +30 / ≥100% +40)
-- ② 新上榜:近 24h 首次出现且样本 ≤2(+25)——刚起势的标志
-- ③ 反复:连续出现 ≥3 轮(+15)——持续需求
-- ④ 量级:最新值 ≥200(+15)——过滤噪音
-- ⑤ 跨板块共振:同名/包含关键词出现在 ≥2 板块(各 +30)——全网级信号
+- ② 加速:增速比再升 ≥20 个百分点(+20)——起势最早的标志
+- ③ 新上榜:近 24h 首次出现且样本 ≤2(+25)
+- ④ 反复:连续出现 ≥3 轮(+15)
+- ⑤ 量级:最新值 ≥200(+15)
+- ⑥ 跨板块共振:同名/包含关键词出现在 ≥2 板块(各 +30)
 
-决策:总分 ≥ agent_score_threshold(默认 55)即"苗头",≥80 为"强苗头";
-每 (板块,关键词) agent_cooldown_hours(默认 12h)冷却;共振信号推总群,单板块推专属群。
-与既有系统分工:focus_alert 管"出现型",实时阈值推送管"已爆发",本模块管"正在起势"。
+决策(生命周期状态机,agent_stages 表持久化"思维记忆"):
+- 阶段映射:苗头(≥threshold)→ 上升(≥70)→ 爆发(≥85);增速 ≤-30% → 回落
+- 仅在**阶段跃迁**时推送(苗头→上升→爆发逐级升级;从上升/爆发跌入回落提醒止损)
+- 每阶段带网盘推广行动建议;卡片展示跟踪时长与信号分解
+与既有系统分工:focus_alert 管"出现型",实时阈值推送管"已爆发",本模块管"正在起势与演化"。
 """
 from __future__ import annotations
 
@@ -23,19 +26,35 @@ from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
 from app.db import repository
-from app.db.models import FeishuAlert
+from app.db.models import AgentStage
 from app.services.feishu import _col_set_row
-from app.services import keyword_agent
 from app.utils import get_logger
 
 logger = get_logger(__name__)
 
 SECTION_LABELS = {"weibo": "微博", "xianyu": "闲鱼", "douhot": "抖音", "baidu": "百度"}
 _JUNK_RE = re.compile(r"^[\d\s#.@" + chr(0x1F300) + "-" + chr(0x1FAFF) + r"\-—・·]+$")
+STAGE_ORDER = {"回落": 0, "苗头": 1, "上升": 2, "爆发": 3}
+STAGE_ADVICE = {
+    "苗头": "准备素材与标题,持续观察确认",
+    "上升": "立即改写发布,抢占流量窗口",
+    "爆发": "流量高峰,全力推广 + 多渠道分发",
+    "回落": "需求衰退,停止跟进,等待下一个苗头",
+}
 
 
 def _norm(title: str) -> str:
     return re.sub(r"\s+", "", title or "").lower()
+
+
+def _to_dt(ts) -> datetime | None:
+    """序列时间戳容错转换(微博/百度=datetime,闲鱼=snap_date 字符串)。"""
+    if isinstance(ts, datetime):
+        return ts
+    try:
+        return datetime.fromisoformat(str(ts))
+    except ValueError:
+        return None
 
 
 def _board_series(db: Session, user_id: int) -> dict[str, dict[str, list[tuple]]]:
@@ -47,46 +66,61 @@ def _board_series(db: Session, user_id: int) -> dict[str, dict[str, list[tuple]]
     }
 
 
+def _md_safe_light(text: str) -> str:
+    return (text or "").replace("[", "【").replace("]", "】")
+
+
 def detect_signals(db: Session, user_id: int, settings: Settings) -> list[dict]:
-    """全板块信号评分。返回 [{board, kw, score, parts, latest, boards}] 按分排序。"""
+    """全板块信号评分(纯函数式,可单测)。返回 [{board, kw, norm, score, parts, latest}] 按分排序。"""
     signals: list[dict] = []
     for sec, series in _board_series(db, user_id).items():
         for kw, pts in series.items():
             n = _norm(kw)
             if not n or len(n) < 4 or _JUNK_RE.match(n):
                 continue
-            values = [v for _, v in pts]
+            values = [float(v) for _, v in pts]
             if not values:
                 continue
             latest = values[-1]
             prev = values[-2] if len(values) >= 2 else None
             parts: list[str] = []
             score = 0
+            v_now = None
             if prev is not None and prev > 0:
-                v = (latest - prev) / prev * 100
-                if v >= 100:
-                    parts.append(f"增速+{v:.0f}%")
+                v_now = (latest - prev) / prev * 100
+                if v_now >= 100:
+                    parts.append(f"增速+{v_now:.0f}%")
                     score += 40
-                elif v >= 50:
-                    parts.append(f"增速+{v:.0f}%")
+                elif v_now >= 50:
+                    parts.append(f"增速+{v_now:.0f}%")
                     score += 30
-            first_ts = pts[0][0]
-            if len(values) <= 2 and isinstance(first_ts, datetime) and \
-                    datetime.now() - first_ts <= timedelta(hours=24):
+                elif v_now <= -30:
+                    parts.append(f"回落{v_now:.0f}%")
+            # ② 加速:增速比再升 ≥20 个百分点(起势最早的标志)
+            if len(values) >= 3 and values[-3] > 0:
+                v_prev = (prev - values[-3]) / values[-3] * 100 if prev is not None else 0
+                if v_now is not None and v_now - v_prev >= 20 and v_now >= 20:
+                    parts.append("加速上涨")
+                    score += 20
+            # ③ 新上榜:近 24h 首次出现且样本 ≤2(兼容 datetime/字符串时间戳)
+            first_ts = _to_dt(pts[0][0])
+            if len(values) <= 2 and first_ts and datetime.now() - first_ts <= timedelta(hours=24):
                 parts.append("新上榜")
                 score += 25
+            # ④ 反复:连续出现 ≥3 轮
             if len(values) >= 3:
                 parts.append(f"连续{len(values)}轮")
                 score += 15
+            # ⑤ 量级
             if latest >= 200:
-                parts.append(f"量级{latest}")
+                parts.append(f"量级{latest:.0f}")
                 score += 15
             if not parts:
                 continue
             signals.append({"board": sec, "kw": kw, "norm": n, "score": min(score, 100),
                             "parts": parts, "latest": latest})
 
-    # 跨板块联想:同名/包含出现在 ≥2 板块 → 共振加成 +30,并合并为一条(取最高分板块代表)
+    # ⑥ 跨板块联想:同名/包含出现在 ≥2 板块 → 共振加成 +30
     for i, s1 in enumerate(signals):
         for s2 in signals[i + 1:]:
             if s1["board"] == s2["board"]:
@@ -101,34 +135,62 @@ def detect_signals(db: Session, user_id: int, settings: Settings) -> list[dict]:
     return sorted(signals, key=lambda x: -x["score"])
 
 
+def _stage_of(score: int, parts: list[str], settings: Settings) -> str:
+    if any(p.startswith("回落") for p in parts):
+        return "回落"
+    if score >= 85:
+        return "爆发"
+    if score >= 70:
+        return "上升"
+    if score >= settings.agent_score_threshold:
+        return "苗头"
+    return "观察"
+
+
 def agent_tick(db: Session, user_id: int, settings: Settings | None = None) -> int:
-    """Agent 主循环:评分 → 阈值决策 → 冷却去重 → 推送。返回推送条数。"""
+    """Agent 主循环:评分 → 生命周期决策(仅阶段跃迁推送)→ 行动建议。返回推送条数。"""
     settings = settings or get_settings()
     if not settings.agent_enabled:
         return 0
     from app.services.feishu_client import FeishuClient, webhook_for
 
-    signals = [s for s in detect_signals(db, user_id, settings)
-               if s["score"] >= settings.agent_score_threshold]
-    if not signals:
-        return 0
-
+    signals = detect_signals(db, user_id, settings)
+    tracked = {(s.board, s.norm): s for s in db.scalars(select(AgentStage).where(
+        AgentStage.user_id == user_id)).all()}
     now = datetime.now()
-    cooldown = timedelta(hours=settings.agent_cooldown_hours)
     to_push: list[dict] = []
-    for s in signals[: settings.focus_max_items]:
-        key = f"{s['board']}:{s['norm']}"
-        existing = db.scalar(select(FeishuAlert).where(
-            FeishuAlert.section == "agent_miao", FeishuAlert.user_id == user_id, FeishuAlert.title == key))
-        if existing and (now - existing.alerted_at) < cooldown:
+    stage_rows: list[AgentStage] = []
+
+    for s in signals[: settings.focus_max_items * 2]:
+        key = (s["board"], s["norm"])
+        st = tracked.get(key)
+        new_stage = _stage_of(s["score"], s["parts"], settings)
+        old_stage = st.stage if st else None
+
+        # 决策:首次进入苗头以上、阶段跃迁(升级)、或跌入回落 → 行动
+        escalated = st is None and STAGE_ORDER.get(new_stage, 0) >= 1
+        upgraded = st is not None and STAGE_ORDER.get(new_stage, 0) > STAGE_ORDER.get(old_stage, 0)
+        crashed = st is not None and new_stage == "回落" and old_stage in ("苗头", "上升", "爆发")
+        if not (escalated or upgraded or crashed):
+            # 无阶段变化:仅刷新记忆
+            if st:
+                st.score, st.parts, st.updated_at = s["score"], " ".join(s["parts"])[:255], now
             continue
-        if existing:
-            existing.reason, existing.alerted_at = f"score={s['score']}", now
+
+        if st is None:
+            st = AgentStage(user_id=user_id, board=s["board"], norm=s["norm"], kw=s["kw"][:255],
+                            stage=new_stage, score=s["score"],
+                            parts=" ".join(s["parts"])[:255], first_seen=now, updated_at=now)
+            tracked[key] = st
+            db.add(st)
         else:
-            db.add(FeishuAlert(section="agent_miao", user_id=user_id, title=key,
-                               reason=f"score={s['score']}", alerted_at=now))
-        s["boards"] = s.get("boards") or [s["board"]]
+            st.stage, st.score, st.parts, st.kw, st.updated_at = (
+                new_stage, s["score"], " ".join(s["parts"])[:255], s["kw"][:255], now)
+        s.update({"stage": new_stage, "old_stage": old_stage, "advice": STAGE_ADVICE[new_stage],
+                  "tracked_h": int((now - st.first_seen).total_seconds() // 3600)})
         to_push.append(s)
+        stage_rows.append(st)
+
     db.commit()
     if not to_push:
         return 0
@@ -143,34 +205,40 @@ def agent_tick(db: Session, user_id: int, settings: Settings | None = None) -> i
         return client_cache[webhook]
 
     def _card(items: list[dict], title: str) -> dict:
-        elements = [_col_set_row([("**板块**", 2), ("**关键词**", 4), ("**信号分解**", 4), ("**总分**", 2)], grey=True)]
+        elements = [_col_set_row([("**板块**", 2), ("**关键词**", 4), ("**阶段·信号**", 4), ("**分**", 2)], grey=True)]
         for s in items:
             label = SECTION_LABELS.get(s["board"], s["board"])
             if len(s.get("boards", [])) >= 2:
                 label = "+".join(SECTION_LABELS.get(b, b) for b in s["boards"])
+            badge = {"苗头": "🌱", "上升": "📈", "爆发": "🚀", "回落": "📉"}.get(s["stage"], "")
+            advice = f"<br/>建议:{s['advice']}"
+            track = f" · 已跟踪 {s['tracked_h']}h" if s.get("tracked_h") else ""
             elements.append(_col_set_row([
-                (label, 2), (f"🔴 **{_md_safe_light(s['kw'])[:20]}**", 4),
-                (" · ".join(s["parts"]), 4), (f"**{s['score']}**", 2)]))
+                (label + track, 2),
+                (f"🔴 **{_md_safe_light(s['kw'])[:18]}**", 4),
+                (f"{badge}{s['stage']} · " + " · ".join(s["parts"]) + advice, 4),
+                (f"**{s['score']}**", 2)]))
         return {"config": {"wide_screen_mode": True},
                 "header": {"template": "red", "title": {"tag": "plain_text", "content": title}},
                 "elements": elements}
 
     pushed = 0
+    multi = [s for s in to_push if len(s.get("boards", [s["board"]])) >= 2]
+    single = [s for s in to_push if s not in multi]
     if multi:
         if _client(settings.feishu_webhook).send_card(
-                _card(multi, f"🧠 苗头 Agent · 跨板块强信号({len(multi)})")):
+                _card(multi, f"🧠 苗头 Agent · 跨板块({len(multi)})")):
             pushed += len(multi)
+    by_sec: dict[str, list[dict]] = {}
     for s in single:
-        webhook = webhook_for(settings, s["board"])
+        by_sec.setdefault(s["board"], []).append(s)
+    for sec, items in by_sec.items():
+        webhook = webhook_for(settings, sec)
         if not webhook:
             continue
-        if _client(webhook).send_card(_card([s], f"🧠 苗头 Agent · {SECTION_LABELS.get(s['board'], s['board'])}")):
-            pushed += 1
+        if _client(webhook).send_card(_card(items, f"🧠 苗头 Agent · {SECTION_LABELS.get(sec, sec)}({len(items)})")):
+            pushed += len(items)
     return pushed
-
-
-def _md_safe_light(text: str) -> str:
-    return (text or "").replace("[", "【").replace("]", "】")
 
 
 def agent_tick_all_users(settings: Settings | None = None) -> int:

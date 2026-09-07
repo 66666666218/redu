@@ -355,6 +355,24 @@ class WechatBenchmark(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
+class AgentStage(Base):
+    """苗头 Agent 的关键词生命周期记忆(思维状态):苗头→上升→爆发→回落。"""
+
+    __tablename__ = "agent_stages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    board: Mapped[str] = mapped_column(String(16))
+    norm: Mapped[str] = mapped_column(String(128), index=True)
+    kw: Mapped[str] = mapped_column(String(255), default="")
+    stage: Mapped[str] = mapped_column(String(16), default="苗头")
+    score: Mapped[int] = mapped_column(Integer, default=0)
+    parts: Mapped[str] = mapped_column(String(255), default="")
+    first_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    __table_args__ = (UniqueConstraint("user_id", "board", "norm"),)
+
+
 class AlertRule(Base):
     """用户自定义预警规则(每板块)。
 
