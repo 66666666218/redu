@@ -67,6 +67,10 @@ def _gen_log_id() -> str:
     )
 
 
+class XianyuCookieExpired(XianyuError):
+    """闲鱼登录态失效(SESSION_EXPIRED/USER_NOT_LOGIN 持续):无法程序化续期,需重新复制 Cookie。"""
+
+
 class XianyuVerify(XianyuError):
     """闲鱼人机验证(滑块):需人工过滑块或换出口 IP。
 
@@ -165,6 +169,9 @@ class XianyuClient:
             if code in TOKEN_ERRORS:
                 if self._refresh(resp):
                     continue  # 令牌已刷新,重试
+                if code in ("FAIL_SYS_SESSION_EXPIRED", "FAIL_SYS_USER_NOT_LOGIN"):
+                    # 刷新也救不回来 = 登录态本体过期,需要重新登录/复制 Cookie
+                    raise XianyuCookieExpired(f"闲鱼登录态已失效({ret}),请重新复制 Cookie")
                 raise XianyuError(f"闲鱼令牌错误:{ret}")
             if "USER_VALIDATE" in code:
                 # 人机验证(滑块):不是限流,退避无效(实测连续重试仍失败)。

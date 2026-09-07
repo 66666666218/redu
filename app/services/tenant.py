@@ -202,11 +202,19 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
         _record_run(session, user_id, "xianyu", "failed", f"{type(exc).__name__}: {exc}")
         session.commit()
         persist_refreshed_cookie(session, user_id, client)
-        if "XianyuVerify" in f"{type(exc).__name__}{exc}":
+        name = f"{type(exc).__name__}{exc}"
+        if "XianyuVerify" in name:
             alert_service.notify_incident(
                 db=session, user_id=user_id, kind="xianyu",
                 title="🔴 闲鱼触发人机验证(滑块)",
                 detail=f"{exc}(已自动冷却 {settings.xianyu_cooldown_minutes} 分钟,期间轮次跳过)",
+                settings=settings)
+        elif "XianyuCookieExpired" in name:
+            alert_service.notify_incident(
+                db=session, user_id=user_id, kind="xianyu",
+                title="🟠 闲鱼 Cookie 已失效(登录态过期)",
+                detail="令牌自动续期已无法恢复登录态:浏览器登录 www.goofish.com 后 F12 复制 Cookie,"
+                       "粘贴到「Cookie 管理」页的 goofish 平台即可恢复",
                 settings=settings)
         raise
 
