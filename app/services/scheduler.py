@@ -76,6 +76,8 @@ def collect_tick(settings: Settings | None = None, now: datetime | None = None) 
                             run_feishu_keyword_alerts(row.user_id, settings)
                             run_feishu_keyword_realtime(row.user_id, settings)  # 话题词新进/上升/爆发实时提醒
                         run_cross_platform_alert(row.user_id, settings)  # ≥2板块上升的关键词
+                        from app.services.focus_alert import run_focus_alert
+                        run_focus_alert(db, row.user_id, settings)  # 跨板块共振/板块内反复 → 🔴重点
                     except Exception:  # noqa: BLE001
                         logger.exception("飞书实时提醒失败 section=%s user=%s", row.section, row.user_id)
             except Exception as exc:  # noqa: BLE001
@@ -146,6 +148,8 @@ def wechat_collect_tick(settings: Settings | None = None) -> dict:
         for row in due:
             try:
                 run_wechat_listen(db, row.user_id, settings=settings)
+                from app.services.focus_alert import run_focus_alert
+                run_focus_alert(db, row.user_id, settings)  # 公众号新文参与共振/反复检测
                 ok += 1
             except Exception as exc:  # noqa: BLE001 - 单用户失败不影响其余
                 failed += 1
