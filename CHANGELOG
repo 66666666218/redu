@@ -1,5 +1,7 @@
 # CHANGELOG
 
+- [2026-09-07 06:00] FIX: **闲鱼实时推送改 column_set 网格卡片(根治格式错乱)** — 用户反馈闲鱼推送格式乱、不好观察。根因:旧卡片用"全角空格补齐宽度"模拟表格,但飞书 lark_md 是**比例字体**,空格对齐本质上无效,中英混排/emoji 一进来就错位。改用飞书卡片原生 **column_set 多列布局**(`_col_set_row` 助手,每格独立元素客户端网格对齐,与字体无关):列为 标题(权重6)/价格/想要数/变化(各2),表头灰底加粗;**标题可点开商品页**(goofish item 链接,方括号轻清洗防破坏 markdown);想要数带较昨日百分比,🔥=+50% 以上;顶部 note 说明触发规则。已向闲鱼专属群发送真实预览卡片验证。新增 `_md_safe`/`_col_set_row` 助手;weibo/baidu/douhot 文本路径未动(Files: app/services/feishu.py, CHANGELOG)
+
 - [2026-09-07 05:50] REFACTOR: **公众号监听架构优化——独立调度作业/转存链接持久化/职责拆分** — 审查发现三个结构性问题并修复:① 监听挂 collect_tick 串行循环,一轮 30 号(平台分页+抓正文+采样+转存)可阻塞微博/闲鱼/抖音/百度数分钟 → 拆出独立作业 `wechat_collect_tick`(每分钟,max_instances=1,自己开 session 自己标记),collect_tick 显式跳过 wechat;② 转存换好的"我的夸克链接"只活在推送消息里 → `wechat_articles` 新增 `my_pan_urls` 列(含迁移)持久化,API 文章列表与前端表格新增「我的链接」列(可点开);③ run_wechat_listen 职责过载 → 抽出 `_enrich_new_articles`(即时采样+转存+持久化,返回推送用替换表)。调度测试适配(wechat 行归独立作业)+ 新增独立作业标记测试。全量 203 项通过;前端已构建(Files: app/services/{scheduler.py,wechat_monitor.py}, app/api/wechat.py, app/db/{models.py,database.py}, frontend/src/views/WechatListen.vue, tests/test_schedule.py, CHANGELOG)
 
 - [2026-09-07 05:40] FIX: **监听推送精简为三要素(文章名/我的夸克链接/流量详情)** — 用户要求推送只保留文章名称、转存后的夸克链接与流量分析详情。`_push_listen` 移除原链接行与装饰性计数行:每篇 = 🔴盘型+标题 → 📦 我的夸克链接(含提取码,仅转存成功时)→ 📊 六指标流量行(未采样显示"流量未采样");头部去掉用户ID。doc/API.md §9b.5 同步推送格式示例(Files: app/services/wechat_monitor.py, doc/API.md, CHANGELOG)

@@ -76,6 +76,29 @@ def _aligned_row(prefix: str, cols: list[tuple[str, int]]) -> str:
     return prefix + "".join(_pad_cell(t, w) for t, w in cols)
 
 
+def _col_set_row(cells: list[tuple[str, int]], *, grey: bool = False) -> dict:
+    """飞书卡片 column_set 行:cells = [(lark_md 文本, 权重)]。
+
+    同一组权重连成多行 → 客户端按网格对齐,与字体宽窄无关(lark_md 是比例字体,
+    空格补齐永远对不齐——闲鱼推送"乱"的根因,这是正解)。
+    """
+    return {
+        "tag": "column_set",
+        "flex_mode": "none",
+        "background_style": "grey" if grey else "default",
+        "columns": [
+            {"tag": "column", "width": "weighted", "weight": weight,
+             "elements": [{"tag": "markdown", "content": text}]}
+            for text, weight in cells
+        ],
+    }
+
+
+def _md_safe(text: str) -> str:
+    """标题进 lark_md 前的轻清洗:方括号会破坏 markdown 链接结构。"""
+    return (text or "").replace("[", "【").replace("]", "】").replace("\n", " ")
+
+
 # ---------------------------------------------------------------------------
 # 数据读取:取该用户该板块最近两次采集批次
 # ---------------------------------------------------------------------------
@@ -822,29 +845,42 @@ def run_feishu_realtime(
         if pushed_items:
             head = f"⚡ {SECTION_LABELS[section]} 实时热点"
             if section == "xianyu":
-                # 闲鱼专属:左对齐列 重点丨名称丨类目丨价格丨想要数丨变化(🔴=想要数较昨日暴涨)
+                # 闲鱼专属:column_set 网格列(标题可点开商品页;🔥=想要数较昨日 +50% 以上)
                 today = datetime.now().date().isoformat()
                 yday = (datetime.now() - timedelta(days=1)).date().isoformat()
                 t_daily = {str(d.item_id): d for d in repository.xianyu_daily_by_date(db, user_id, today)}
                 y_daily = {str(d.item_id): d for d in repository.xianyu_daily_by_date(db, user_id, yday)}
-                cols = [("重点", 4), ("名称", 28), ("类目", 10), ("价格", 12), ("想要数", 8), ("变化", 8)]
-                table = [_aligned_row("  ", cols)]
+                elements: list[dict[str, Any]] = [
+                    {"tag": "note", "elements": [{"tag": "plain_text",
+                     "content": "触发:新增 / 排名跳升 · 🔥=想要数较昨日 +50% 以上 · 点标题看商品"}]},
+                    _col_set_row([("**标题**", 6), ("**价格**", 2), ("**想要数**", 2), ("**变化**", 2)], grey=True),
+                ]
                 for title, reason in pushed_items:
                     item = cur.get(title)
                     iid = str(getattr(item, "item_id", "")) if item else ""
                     d, y = t_daily.get(iid), y_daily.get(iid)
                     want = d.want_count if d else None
-                    price = (getattr(item, "price", "") or (d.price if d else "") or "")[:12]
-                    cat = (d.category or "")[:8] if d else ""
-                    mark = "🔴" if (want is not None and y is not None and getattr(y, "want_count", 0)
-                                    and want >= getattr(y, "want_count") * 1.5) else "—"
-                    table.append(_aligned_row("  ", [
-                        (mark, 4), (title[:12], 28), (cat, 10), (price, 12),
-                        (str(want) if want is not None else "—", 8), (reason, 8)]))
+                    price = (getattr(item, "price", "") or (d.price if d else "") or "")[:12] or "—"
+                    safe = _md_safe(title)
+                    name = safe[:22] + ("…" if len(safe) > 22 else "")
+                    if want is not None and y is not None and getattr(y, "want_count", 0):
+                        pct = (want - y.want_count) / y.want_count * 100
+                        want_txt = f"{want} ({pct:+.0f}%)"
+                        hot = pct >= 50
+                    else:
+                        want_txt = str(want) if want is not None else "—"
+                        hot = False
+                    name_md = f"**{name}**" if hot else name
+                    if iid:
+                        name_md = f"[{name_md}](https://www.goofish.com/item?id={iid})"
+                    elements.append(_col_set_row([
+                        (f"{'🔥' if hot else ''}{name_md}", 6), (price, 2),
+                        (want_txt, 2), (reason, 2),
+                    ]))
                 client.send_card({
                     "config": {"wide_screen_mode": True},
                     "header": {"template": "blue", "title": {"tag": "plain_text", "content": head}},
-                    "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(table)}}],
+                    "elements": elements,
                 })
                 pushed = len(pushed_items)
             else:
