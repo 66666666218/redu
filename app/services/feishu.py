@@ -20,7 +20,7 @@ from config.settings import Settings, get_settings
 from app.db import repository
 from app.db.models import BaiduHotItem, DouhotWatchSnap, DouhotWord, FeishuAlert, WeiboHotItem, XianyuItem
 from app.services import douhot
-from app.services.feishu_client import FeishuClient, platform_webhook, webhook_for
+from app.services.feishu_client import FeishuClient, platform_webhook, webhook_for, webhooks_for
 from app.utils import get_logger
 
 logger = get_logger(__name__)
@@ -552,8 +552,17 @@ def run_feishu_daily(settings: Settings | None = None, db: Session | None = None
     sent = 0
     try:
         for user in repository.list_enabled_users(db):
-            unconf = [sec for sec in SECTIONS if not platform_webhook(settings, sec)]
-            # 各平台专属群:只推该平台日报段(未配专属群 → 并入总群段)
+            # 主群(总群):完整日报(与原逻辑一致)+ 关键词卡 —— 主群"保持不变、不停止"
+            if settings.feishu_webhook:
+                client = FeishuClient(settings.feishu_webhook, settings.feishu_secret)
+                text = build_daily(db, user.id, settings, include_keywords=False)
+                for chunk in _split_messages(text):
+                    if client.send(chunk):
+                        sent += 1
+                card = build_keyword_card(db, user.id, settings)
+                if card and client.send_card(card):
+                    sent += 1
+            # 各平台专属群:该平台日报段(主群之外的"加料",互不替代)
             for sec in SECTIONS:
                 wh = platform_webhook(settings, sec)
                 if not wh:
@@ -564,18 +573,6 @@ def run_feishu_daily(settings: Settings | None = None, db: Session | None = None
                 for chunk in _split_messages(text):
                     if c.send(chunk):
                         sent += 1
-            # 总群:聚合段 + 未配专属群的平台段 + 关键词卡
-            if settings.feishu_webhook:
-                agg = _daily_cross_lines(db, user.id)
-                if unconf:
-                    agg += ["", *[line for sec in unconf for line in _section_lines(db, user.id, sec)]]
-                client = FeishuClient(settings.feishu_webhook, settings.feishu_secret)
-                for chunk in _split_messages("\n".join(agg)):
-                    if client.send(chunk):
-                        sent += 1
-                card = build_keyword_card(db, user.id, settings)
-                if card and client.send_card(card):
-                    sent += 1
         logger.info("飞书日报推送完成,消息数=%s", sent)
         return sent
     finally:
@@ -825,7 +822,8 @@ def run_feishu_realtime(
         cur, prev = _batches(db, user_id, section)
         if not cur:
             return 0
-        client = FeishuClient(webhook_for(settings, section), settings.feishu_secret)
+        client = None
+        whs = webhooks_for(settings, section)   # 主群 + 该板块专属群
         pushed_items: list[tuple[str, str]] = []
         for title, c in list(cur.items())[:40]:
             tag, extra = _delta(section, c, prev)
@@ -879,11 +877,12 @@ def run_feishu_realtime(
                         (f"{'🔥' if hot else ''}{name_md}", 6), (price, 2),
                         (want_txt, 2), (reason, 2),
                     ]))
-                client.send_card({
-                    "config": {"wide_screen_mode": True},
-                    "header": {"template": "blue", "title": {"tag": "plain_text", "content": head}},
-                    "elements": elements,
-                })
+                for wh in whs:
+                    FeishuClient(wh, settings.feishu_secret).send_card({
+                        "config": {"wide_screen_mode": True},
+                        "header": {"template": "blue", "title": {"tag": "plain_text", "content": head}},
+                        "elements": elements,
+                    })
                 pushed = len(pushed_items)
             else:
                 lines = [head]
@@ -900,7 +899,8 @@ def run_feishu_realtime(
                     conf = a.get("confidence") if a.get("confidence") and a["confidence"] != "数据不足" else "—"
                     trend = a.get("trend_label") or "—"
                     lines.append(_aligned_row("  ", [(title[:14], 32), (reason, 8), (fc, 12), (conf, 8), (trend, 8)]))
-                client.send("\n".join(lines))
+                for wh in whs:
+                    FeishuClient(wh, settings.feishu_secret).send("\n".join(lines))
                 pushed = len(pushed_items)
             logger.info("飞书实时推送 section=%s user=%s 条数=%s", section, user_id, pushed)
         return pushed

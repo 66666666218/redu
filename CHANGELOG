@@ -20,6 +20,8 @@
 
 ## 未发布
 
+- [2026-09-07 09:50] FIX: **主群停推 + 闲鱼失败无提醒(改为"主群+分群"加法模型)** — 用户反馈:总群停止推送、闲鱼失败没提醒。根因:上轮"按板块路由"是**替换**式(主群只收聚合、专属群收平台),导致主群内容缩水/停止;且 `check_collect_failures`/`check_health_stalls` 守卫只判 `feishu_webhook`(主群),主群为空时全拦。改为**加法模型**:① 新增 `webhooks_for(settings, section)` 返回 `[主群, 该平台专属群]`(去重),平台推送**同时发主群与专属群**——主群"不变、不停止";② `run_feishu_daily` 主群恢复**完整日报**+关键词卡,各专属群另发本平台日报段;③ `run_feishu_realtime`(卡片/文本)双发;④ 失败/停摆告警守卫改为"主群或任一平台专属有值即放行",且按 `webhooks_for` 双发。新增 `test_webhooks_for_additive_main_and_group`/`test_collect_failures_sends_when_only_platform_hook`;全量 205 项通过(Files: app/services/{feishu.py,feishu_client.py,alert_service.py}, tests/test_feishu.py, CHANGELOG)
+
 - [2026-09-07 09:30] FIX: **闲鱼 column_set 卡片列空白(想要数/价格不显示)** — 用户反馈闲鱼推送格式不符合预期、缺少想要数与价格。根因:`_col_set_row` 列内元素用了 `{"tag":"markdown", content}`——这是**卡片 schema 2.0** 的元素,自定义机器人 webhook(老 schema)不渲染 → 该列内容变空白。修复:改为老 schema 通用的 `{"tag":"div","text":{"tag":"lark_md",content}}`(自定义 bot 兼容),并注释注明勿用 `markdown`。全量 177 项通过(Files: app/services/feishu.py, CHANGELOG)
 
 - [2026-09-06 17:30] FEAT: **公众号专属群配置 + 内容选题分析定时推送** — 用户提供公众号机器人 webhook。新增 `FEISHU_WEBHOOK_WECHAT`(公众号专属群)与 `FEISHU_WECHAT_CRON`(默认每天 10:00);`_SECTION_WEBHOOK` 加 "wechat" 映射;新增 `run_feishu_wechat_analysis`(`settings`/`db` 可注入):读该用户已录入文章 → `analyze_articles` → 推"内容选题分析"报告到公众号群(无文章/未配群则跳过)。调度器每日 10:00 自动跑。新增 `test_wechat_analysis_pushes_to_group`;全量 177 项通过(Files: app/services/{feishu.py,feishu_client.py,scheduler.py}, config/settings.py, .env.example, tests/test_feishu.py, CHANGELOG)

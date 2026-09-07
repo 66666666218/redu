@@ -64,6 +64,35 @@ def test_webhook_for_routes_per_platform() -> None:
     assert webhook_for(s, "") == s.feishu_webhook                         # 无板块 → 总群
 
 
+def test_webhooks_for_additive_main_and_group() -> None:
+    """webhooks_for:主群 + 该平台专属群 都发(加法模型,主群不停止)。"""
+    from app.services.feishu_client import webhooks_for
+
+    s = _settings(feishu_webhook="main", feishu_webhook_xianyu="xy")
+    assert webhooks_for(s, "xianyu") == ["main", "xy"]   # 主群 + 专属群
+    assert webhooks_for(s, "douhot") == ["main"]         # 未配抖音专属 → 仅主群
+    assert webhooks_for(s, "") == ["main"]               # 无板块 → 主群
+
+
+def test_collect_failures_sends_when_only_platform_hook(monkeypatch, session) -> None:
+    """主群为空但闲鱼专属群已配时,闲鱼失败告警仍应发送(守卫不再只看主群)。"""
+    from datetime import datetime, timedelta
+
+    from app.services import alert_service
+    from app.db.models import RunRecord
+
+    for i in range(3):  # 近24h 3 次闲鱼失败
+        session.add(RunRecord(user_id=1, run_id=f"r{i}", kind="xianyu", status="failed",
+                              started_at=datetime.now() - timedelta(hours=i)))
+    session.commit()
+    sent = []
+    monkeypatch.setattr(feishu_client, "FeishuClient",
+                        lambda w, s: type("F", (), {"send": lambda self, t: (sent.append((w, t)), True)[1]})())
+    n = alert_service.check_collect_failures(_settings(feishu_webhook="", feishu_webhook_xianyu="xy"), db=session)
+    assert n == 1
+    assert sent[0][0] == "xy"  # 推到闲鱼专属群(主群为空也不拦)
+
+
 def test_daily_splits_to_platform_groups(monkeypatch, session) -> None:
     """日报拆分:配了专属群的平台段进专属群;总群收聚合段+未配专属群的平台段。"""
     from datetime import datetime
@@ -90,8 +119,8 @@ def test_daily_splits_to_platform_groups(monkeypatch, session) -> None:
 
     # 闲鱼专属群收到闲鱼日报段
     assert any(wh == xy_hook and "闲鱼热榜日报" in t and "【闲鱼热榜】" in t for wh, t in sent)
-    # 总群收到聚合段 + 未配专属群的微博段(不含已被分流的闲鱼段)
-    assert any(wh == main_hook and "热点日报" in t and "【微博热搜】" in t and "【闲鱼热榜】" not in t for wh, t in sent)
+    # 主群(总群)仍收到**完整日报**(含微博段+闲鱼段)—— 主群"不变、不停止"
+    assert any(wh == main_hook and "热点日报" in t and "【微博热搜】" in t and "【闲鱼热榜】" in t for wh, t in sent)
 
 
 def test_wechat_analysis_pushes_to_group(monkeypatch, session) -> None:

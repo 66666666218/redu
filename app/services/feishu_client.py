@@ -48,6 +48,20 @@ def webhook_for(settings: object, section: str = "") -> str:
     return platform_webhook(settings, section) or settings.feishu_webhook
 
 
+def webhooks_for(settings: object, section: str = "") -> list[str]:
+    """该板块消息要推送的**所有**群(主群 + 专属群,去重)。
+
+    主群"保持不变"、专属群"各收各的" → 平台推送**同时**发主群与专属群,互不替代。
+    """
+    out: list[str] = []
+    if settings.feishu_webhook:
+        out.append(settings.feishu_webhook)
+    pw = platform_webhook(settings, section)
+    if pw and pw not in out:
+        out.append(pw)
+    return out
+
+
 class FeishuClient:
     """飞书自定义机器人客户端(单条文本 / 交互卡片)。"""
 

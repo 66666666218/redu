@@ -303,13 +303,13 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
     返回本次告警条数;未配置飞书 webhook 时跳过。`db` 供测试注入。
     """
     settings = settings or get_settings()
-    if not settings.feishu_webhook:
+    from app.services.feishu_client import FeishuClient, platform_webhook, webhook_for, webhooks_for
+    if not settings.feishu_webhook and not any(platform_webhook(settings, s) for s in ("weibo", "xianyu", "douhot", "baidu")):
         return 0
     from sqlalchemy import func
 
     from app.db import get_session_local
     from app.db.models import FeishuAlert, RunRecord
-    from app.services.feishu_client import FeishuClient, webhook_for
 
     threshold = settings.fail_alert_threshold
     since = datetime.now() - timedelta(hours=24)
@@ -366,9 +366,10 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
                 long_txt = f"  【长期】已 {days} 天未成功,建议人工处理" if long else ""
                 head = "🔴 " if long else "⚠️ "
                 msg = f"{head}采集持续失败(近24h) · 用户#{uid} 板块[{kind}] 失败 {cnt} 次{extra}{long_txt}"
-                # 按板块路由到专属群(未配则总群)
-                if FeishuClient(webhook_for(settings, kind), settings.feishu_secret).send(msg):
-                    sent += 1
+                # 按板块路由:主群 + 该平台专属群 都发(互不替代)
+                for wh in webhooks_for(settings, kind):
+                    if FeishuClient(wh, settings.feishu_secret).send(msg):
+                        sent += 1
             db.commit()
             logger.info("采集失败告警推送,条数=%s", sent)
         return sent
@@ -384,13 +385,13 @@ def check_health_stalls(settings: Settings | None = None, db: Session | None = N
     被风控全挡却未记为失败,如磁盘满导致整站 502)。返回告警条数;未配 webhook 返回 0。`db` 供测试注入。
     """
     settings = settings or get_settings()
-    if not settings.feishu_webhook:
+    from app.services.feishu_client import FeishuClient, platform_webhook, webhooks_for
+    if not settings.feishu_webhook and not any(platform_webhook(settings, s) for s in ("weibo", "xianyu", "douhot", "baidu")):
         return 0
     from sqlalchemy import func
 
     from app.db import get_session_local
     from app.db.models import BaiduHotItem, DouhotWord, FeishuAlert, UserCookie, WeiboHotItem, XianyuItem
-    from app.services.feishu_client import FeishuClient, webhook_for
 
     own_session = db is None
     db = db or get_session_local()()
@@ -457,8 +458,9 @@ def check_health_stalls(settings: Settings | None = None, db: Session | None = N
                     else f"⚠️ 采集停摆(> {stall_hours}h 无新数据)")
             lines = [head, f"  · {labels.get(p, p)}:最近数据 {when}{long_txt}",
                      "可能:后端宕机/调度停止/Cookie失效/被风控全挡(闲鱼常见滑块/限流)"]
-            # 按板块路由到专属群
-            if FeishuClient(webhook_for(settings, p), settings.feishu_secret).send("\n".join(lines)):
+            # 按板块路由:主群 + 该平台专属群 都发;任一送达即算成功
+            whs = webhooks_for(settings, p)
+            if any(FeishuClient(wh, settings.feishu_secret).send("\n".join(lines)) for wh in whs):
                 sent += 1
             else:
                 ok = False
