@@ -160,6 +160,8 @@ def test_listen_records_miss_and_skips(monkeypatch: pytest.MonkeyPatch, session)
 
 
 def test_listen_pushes_pan_articles_to_feishu(monkeypatch: pytest.MonkeyPatch, session) -> None:
+    import json
+
     import app.services.feishu as feishu_mod
     import app.services.feishu_client as fc_mod
 
@@ -172,21 +174,30 @@ def test_listen_pushes_pan_articles_to_feishu(monkeypatch: pytest.MonkeyPatch, s
     monkeypatch.setattr(wechat_monitor, "fetch_article_content",
                         lambda url, timeout=15: "正文含 https://pan.quark.cn/s/qwerty")
     monkeypatch.setattr(feishu_mod, "webhook_for", lambda settings, section: "https://open.feishu.cn/hook/x")
-    sent: list[str] = []
+    sent: list[dict] = []
 
     class _FakeFeishu:
         def __init__(self, webhook, secret="") -> None:
             pass
 
         def send(self, msg: str) -> bool:
-            sent.append(msg)
+            sent.append({"text": msg})
+            return True
+
+        def send_card(self, card: dict) -> bool:
+            sent.append(card)
             return True
 
     monkeypatch.setattr(fc_mod, "FeishuClient", _FakeFeishu)
     out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), client=fake)
     assert out["new"] == 1 and sent, "应推公众号专属群"
     row = session.scalar(select(WechatArticle))
-    assert row.pan_types == "夸克网盘" and "夸克网盘" in sent[0] and row.content
+    assert row.pan_types == "夸克网盘" and row.content
+    card = sent[0]
+    text = json.dumps(card, ensure_ascii=False)
+    assert "夸克网盘" in text  # 网盘列(盘链识别)
+    assert "mp.weixin.qq.com/s/n1" in text  # 无转存时标题链接回落原文
+    assert "📡" in text  # 卡片标题
 
 
 # ---------------------------------------------------------------- 同步

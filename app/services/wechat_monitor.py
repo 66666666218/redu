@@ -618,30 +618,48 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
 
 def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[WechatArticle],
                  replacements: dict[int, list[tuple[str, str, str]]] | None = None) -> None:
-    """新文推公众号专属飞书群(未配则回落总群);带即时阅读量与转存后的自己的盘链。"""
-    from app.services.feishu import webhook_for
+    """新文推公众号专属飞书群(column_set 网格卡片:公众号/文章/网盘/阅读 四列对齐)。
+
+    标题超链接优先级:本轮转存链(带提取码)> 已持久化的我的转存链 > 原文;
+    未配专属群则回落总群;推送失败不影响采集结果。
+    """
+    from app.services.feishu import _col_set_row, _md_safe, webhook_for
     from app.services.feishu_client import FeishuClient
 
     wh = webhook_for(settings, "wechat")
     if not wh:
         return
     replacements = replacements or {}
-    lines = [f"📡 公众号监听 · 新发文 {len(rows)} 篇"]
+    elements: list[dict] = [
+        {"tag": "note", "elements": [{"tag": "plain_text",
+            "content": "点文章标题打开链接(优先你的夸克转存链) · 网盘列=识别到的盘链 · 阅读未采样为 —"}]},
+        _col_set_row([("**公众号**", 3), ("**文章**", 7), ("**网盘**", 2), ("**阅读**", 2)], grey=True),
+    ]
     for r in rows[:20]:
-        tag = f"🔴{r.pan_types}" if r.pan_types else ""
-        lines.append(f"{tag} {r.title}")
-        for _old_url, new_url, pwd in replacements.get(r.id, []):
-            extra = f" (提取码 {pwd})" if pwd else ""
-            lines.append(f"📦 我的夸克链接: {new_url}{extra}")
-        if r.traffic_at:
-            lines.append(f"📊 阅读 {r.read_num} · 点赞 {r.zan_num} · 在看 {r.looking_num}"
-                         f" · 转发 {r.share_num} · 收藏 {r.collect_num} · 评论 {r.comment_count}")
+        rep = replacements.get(r.id) or []
+        if rep:
+            link = rep[0][1] + (f" (提取码 {rep[0][2]})" if rep[0][2] else "")
         else:
-            lines.append("📊 流量未采样")
+            link = next((x.strip() for x in (r.my_pan_urls or "").splitlines() if x.strip()),
+                        "") or r.url
+        title = _md_safe(r.title)
+        shown = title[:26] + ("…" if len(title) > 26 else "")
+        article_md = f"[{shown}]({_md_safe(link)})" if link else shown
+        pan = f"🔴{_md_safe(r.pan_types)[:8]}" if r.pan_types else "—"
+        read = str(r.read_num) if r.traffic_at else "—"
+        elements.append(_col_set_row([
+            (_md_safe(r.author)[:10] or "—", 3), (article_md, 7), (pan, 2), (read, 2),
+        ]))
     if len(rows) > 20:
-        lines.append(f"…另有 {len(rows) - 20} 篇,见平台文章列表")
+        elements.append({"tag": "note", "elements": [{"tag": "plain_text",
+            "content": f"…另有 {len(rows) - 20} 篇,见平台文章列表"}]})
     try:
-        FeishuClient(wh, settings.feishu_secret).send("\n".join(lines))
+        FeishuClient(wh, settings.feishu_secret).send_card({
+            "config": {"wide_screen_mode": True},
+            "header": {"template": "blue", "title": {"tag": "plain_text",
+                "content": f"📡 公众号监听 · 新发文 {len(rows)} 篇"}},
+            "elements": elements,
+        })
     except Exception:  # noqa: BLE001 - 推送失败不影响采集结果
         logger.exception("公众号监听飞书推送失败 user=%s", user_id)
 
@@ -972,19 +990,37 @@ def discover_candidates(session: Session, user_id: int, settings: Settings | Non
 
 def _push_candidates(session: Session, user_id: int, settings: Settings,
                      rows: list[WechatCandidate]) -> None:
-    """候选清单推公众号专属飞书群(未配则跳过;失败不影响采集)。"""
-    from app.services.feishu import webhook_for
+    """候选清单推公众号专属飞书群(column_set 网格卡片:公众号/代表文章/来源词 三列对齐)。"""
+    from app.services.feishu import _col_set_row, _md_safe, webhook_for
     from app.services.feishu_client import FeishuClient
 
     wh = webhook_for(settings, "wechat")
     if not wh:
         return
-    lines = [f"🔍 候选对标号发现 · 新候选 {len(rows)} 个(微信读书搜索关注 → 监听页书架导入)"]
+    elements: list[dict] = [
+        {"tag": "note", "elements": [{"tag": "plain_text",
+            "content": "手机微信读书搜索关注该号 → 监听页「从微信读书书架导入」即自动进监听"}]},
+        _col_set_row([("**公众号**", 3), ("**代表文章**", 7), ("**来源词**", 2)], grey=True),
+    ]
     for r in rows[:20]:
+        title = _md_safe(r.title)
         ts = r.title_ts.strftime("%m-%d") if r.title_ts else ""
-        lines.append(f"· {r.name} —《{r.title[:40]}》{f' ({ts})' if ts else ''} [词:{r.term}]")
+        shown = title[:30] + ("…" if len(title) > 30 else "")
+        elements.append(_col_set_row([
+            (_md_safe(r.name)[:12] or "—", 3),
+            (f"《{shown}》{f' ({ts})' if ts else ''}", 7),
+            (_md_safe(r.term)[:8] or "—", 2),
+        ]))
+    if len(rows) > 20:
+        elements.append({"tag": "note", "elements": [{"tag": "plain_text",
+            "content": f"…另有 {len(rows) - 20} 个,见平台候选列表"}]})
     try:
-        FeishuClient(wh, settings.feishu_secret).send("\n".join(lines))
+        FeishuClient(wh, settings.feishu_secret).send_card({
+            "config": {"wide_screen_mode": True},
+            "header": {"template": "blue", "title": {"tag": "plain_text",
+                "content": f"🔍 候选对标号 · 新发现 {len(rows)} 个"}},
+            "elements": elements,
+        })
     except Exception:  # noqa: BLE001 - 推送失败不影响采集结果
         logger.exception("候选对标号飞书推送失败 user=%s", user_id)
 
