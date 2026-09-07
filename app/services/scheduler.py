@@ -186,11 +186,12 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     scheduler.add_job(
         _safe(cleanup_old_data), CronTrigger(hour=4, minute=0), id="data_cleanup", max_instances=1, coalesce=True
     )
-    from app.services.wechat_monitor import traffic_tick, weread_refresh_tick
+    from app.services.wechat_monitor import candidate_discover_tick, traffic_tick, weread_refresh_tick
 
     jobs = [
         (traffic_tick, _get_settings().wechat_traffic_cron, {"minute": 30, "hour": 21}, "wechat_traffic"),
         (weread_refresh_tick, _get_settings().weread_refresh_cron, {"minute": 50, "hour": 7}, "weread_refresh"),
+        (candidate_discover_tick, _get_settings().candidate_discover_cron, {"minute": 20, "hour": 8}, "wechat_candidates"),
         (run_feishu_daily, _get_settings().feishu_daily_cron, {"minute": 0, "hour": 8}, "feishu_daily"),
         (run_feishu_wechat_analysis, _get_settings().feishu_wechat_cron, {"minute": 0, "hour": 10}, "feishu_wechat"),
         (run_feishu_insight_digest, _get_settings().feishu_insight_cron, {"day_of_week": "mon", "hour": 9, "minute": 0}, "feishu_insight"),

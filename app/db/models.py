@@ -305,6 +305,26 @@ class WechatTrafficSample(Base):
     sampled_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
+class WechatCandidate(Base):
+    """候选对标号(自动发现):搜狗按关键词搜到的同类公众号,待人工确认。
+
+    手机微信读书关注该号 → 书架导入 → 成为正式对标号;`status`:
+    new=待处理 / dismissed=已忽略(不再推送)。已收录的候选按昵称与
+    wechat_benchmarks 匹配,列表标注"已收录"。
+    """
+
+    __tablename__ = "wechat_candidates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(String(128), default="")                # 公众号名
+    title: Mapped[str] = mapped_column(String(500), default="")               # 代表文章标题
+    title_ts: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # 代表文章发布时间
+    term: Mapped[str] = mapped_column(String(64), default="")                 # 命中的搜索词
+    status: Mapped[str] = mapped_column(String(16), default="new")            # new / dismissed
+    discovered_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
 class WechatBenchmark(Base):
     """对标公众号:监听(新文检测)与同步(全量文章)的目标账号。
 

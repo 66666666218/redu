@@ -6,6 +6,7 @@ import { toastOk, toastError as toastErr } from '../toast'
 const chr10 = () => String.fromCharCode(10)
 const benches = ref([])
 const articles = ref([])
+const candidates = ref([])
 const onlyPan = ref(false)
 const link = ref('')
 const note = ref('')
@@ -26,7 +27,27 @@ async function loadArticles() {
     articles.value = (await api.wechatArticles(q.toString())).items
   } catch (e) { msg.value = e.message }
 }
-async function load() { await Promise.all([loadBenches(), loadArticles()]) }
+async function load() { await Promise.all([loadBenches(), loadArticles(), loadCandidates()]) }
+
+async function loadCandidates() {
+  try { candidates.value = (await api.wechatCandidates()).items } catch (e) { msg.value = e.message }
+}
+
+async function discoverCandidates() {
+  busy.value = 'discover'
+  try {
+    const r = await api.wechatCandidateDiscover()
+    const note = r.blocked ? `(搜狗验证码拦截 ${r.blocked} 词)` : ''
+    if (r.new > 0) toastOk(`发现 ${r.new} 个同类候选号,已推飞书${note}`)
+    else toastErr(`本轮无新候选${note};搜索词:${(r.terms || []).join('、')}`)
+    await loadCandidates()
+  } catch (e) { toastErr(e.message) } finally { busy.value = '' }
+}
+
+async function dismissCandidate(c) {
+  await api.wechatCandidatePatch(c.id, { status: 'dismissed' })
+  await loadCandidates()
+}
 
 async function addBench() {
   msg.value = ''
@@ -128,7 +149,8 @@ onMounted(load)
       <div class="row" style="gap:10px;flex-wrap:wrap">
         <button class="ghost" :disabled="busy==='shelf'" @click="importShelf">{{ busy==='shelf' ? '导入中…' : '从微信读书书架导入' }}</button>
         <button class="ghost" :disabled="busy==='wrrefresh'" @click="refreshWeread">{{ busy==='wrrefresh' ? '续期中…' : '续期微信读书 Cookie' }}</button>
-        <span class="empty">加号免费;导入需先在微信读书 App 关注公众号;Cookie 过期会自动续期(每日 07:50),无需手动更换</span>
+        <button class="ghost" :disabled="busy==='discover'" @click="discoverCandidates">{{ busy==='discover' ? '发现中…' : '发现同类号(免费)' }}</button>
+        <span class="empty">加号免费;导入需先在微信读书 App 关注公众号;Cookie 过期会自动续期,无需手动更换</span>
       </div>
     </div>
 
@@ -139,6 +161,21 @@ onMounted(load)
         <label style="display:flex;align-items:center;gap:4px"><input type="checkbox" v-model="onlyPan" @change="loadArticles" />只看带网盘链接</label>
         <span class="empty">盘链文 {{ panCount }} 篇 · 阅读量合计 {{ totalRead }}</span>
       </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <h3>同类候选号({{ candidates.filter(c => c.status === 'new' && !c.imported).length }})</h3>
+      <table v-if="candidates.filter(c => c.status === 'new').length">
+        <tr><th>公众号</th><th>代表文章</th><th>来源词</th><th>发现时间</th><th>操作</th></tr>
+        <tr v-for="c in candidates.filter(c => c.status === 'new')" :key="c.id">
+          <td>{{ c.name }}<span v-if="c.imported" class="empty"> (已收录)</span></td>
+          <td class="empty">{{ c.title.slice(0, 40) }}{{ c.title_ts ? ' (' + c.title_ts.slice(5, 10) + ')' : '' }}</td>
+          <td class="empty">{{ c.term }}</td>
+          <td class="empty">{{ fmt(c.discovered_at) }}</td>
+          <td><button v-if="!c.imported" class="ghost" @click="dismissCandidate(c)">忽略</button></td>
+        </tr>
+      </table>
+      <div v-else class="empty">暂无候选:点「发现同类号」按标题画像词搜同类公众号(免费),也可每日 08:20 自动发现</div>
     </div>
 
     <div class="card" style="margin-bottom:16px">

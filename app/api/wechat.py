@@ -160,6 +160,33 @@ def wechat_weread_refresh(user: User = Depends(get_current_user), db: Session = 
     return out
 
 
+@router.get("/api/wechat/candidates")
+def wechat_candidate_list(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """候选对标号列表(新→旧);`imported`=该名已收录为正式对标号。"""
+    items = wechat_monitor.list_candidates(db, user.id)
+    return {"count": len(items), "items": items}
+
+
+@router.post("/api/wechat/candidates/discover")
+def wechat_candidate_discover(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """手动跑一轮候选对标号发现(标题画像词+配置词 → 搜狗搜文章 → 去重入库 + 推飞书)。"""
+    return wechat_monitor.discover_candidates(db, user.id)
+
+
+@router.patch("/api/wechat/candidates/{candidate_id}")
+def wechat_candidate_update(candidate_id: int, payload: dict,
+                            user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """更新候选状态(body: {status: "dismissed"} 忽略;或回 "new")。"""
+    try:
+        wechat_monitor.set_candidate_status(db, user.id, candidate_id,
+                                            str(payload.get("status", "dismissed")))
+    except KeyError as exc:
+        raise HTTPException(404, str(exc))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"ok": True}
+
+
 @router.post("/api/wechat/traffic/refresh")
 def wechat_traffic_refresh(payload: dict | None = None, user: User = Depends(get_current_user),
                            db: Session = Depends(get_db)):

@@ -752,6 +752,21 @@
 > 文章来源标记:`manual` 手动录入 / `listen` 监听新文 / `sync` 历史同步;`pan_types` 为涉及的网盘类型
 > (标题=盘名疑似级,自抓正文命中链接=确认级),逗号分隔,如 `"夸克网盘,百度网盘"`。
 
+### 9b.8 候选对标号自动发现(2026-09-07)
+
+- **候选列表**: GET `/api/wechat/candidates`
+  → `{"count":N,"items":[{"id","name","title","term","status"(new/dismissed),"imported","title_ts","discovered_at"}]}`
+  (`imported`=该公众号名已收录为正式对标号)
+- **手动发现一轮**: POST `/api/wechat/candidates/discover`
+  → `{"platform":"wechat","status":"success","terms":[搜索词],"new":新候选数,"blocked":被搜狗验证码拦截的词数}`
+- **更新候选状态**: PATCH `/api/wechat/candidates/{id}` body: `{"status":"dismissed"}`(忽略)或 `{"status":"new"}`
+- **原理(全免费)**:搜索词 = 标题书名号/【】实体词(《乡村晋升录》《花少2人格》等,最准)
+  + 滑窗高频内容词(兜底)+ `CANDIDATE_SEARCH_TERMS` 配置词 → 搜狗微信搜索(免账号,内置 2.5s 限频,
+  连续 2 词命中验证码即收手)→ 按**公众号名**与现有对标号/已存在候选去重入库 → 推公众号专属飞书群
+- **人工闭环**:飞书/列表里看到候选 → 手机微信读书搜索关注 → 监听页"从微信读书书架导入" → 自动进监听
+- 每日自动:调度作业(默认 08:20,`CANDIDATE_DISCOVER_CRON`);配置:`CANDIDATE_SEARCH_TERMS`(词,逗号分隔)、
+  `CANDIDATE_MAX_TERMS`(单轮词数上限,默认 8)、`CANDIDATE_MINE_TERMS`(画像词上限,默认 6)
+
 ### 9b.7 微信读书免费源(2026-09-07)
 
 - **书架预览**: GET `/api/wechat/weread/shelf` → `{"count":N,"items":[{"book_id":"MP_WXS_*","name":"公众号名"}]}`

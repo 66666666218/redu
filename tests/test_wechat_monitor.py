@@ -10,7 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db.database import Base
 from app.db import models  # noqa: F401
-from app.db.models import RunRecord, WechatArticle, WechatBenchmark
+from app.db.models import RunRecord, WechatArticle, WechatBenchmark, WechatCandidate
 from config.settings import Settings
 from app.services import wechat_monitor
 from app.services.dajiala_client import DajialaClient
@@ -448,6 +448,80 @@ def test_listen_skips_without_any_source(session) -> None:
     session.commit()
     out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""))
     assert out["reason"] == "no_source"  # 既无微信读书 Cookie 也无 dajiala key
+
+
+# ---------------------------------------------------------------- 候选对标号发现
+_SOGOU_HTML = '''
+<html><body>
+<div class="txt-box">
+<h3><a href="/link?url=xxx" uigs="article_title_0">花少2<em><!--red_beg-->人格测试<!--red_end--></em>入口</a></h3>
+<p class="txt-info" id="s1">最新<em><!--red_beg-->人格测试<!--red_end--></em>在线入口</p>
+<div class="s-p"><span class="all-time-y2">测试号甲</span>
+<span class="s2"><script>document.write(timeConvert('1699373611'))</script></span></div>
+</div>
+<div class="txt-box">
+<h3><a href="/link?url=yyy" uigs="article_title_1">乡镇晋升录攻略</a></h3>
+<div class="s-p"><span class="all-time-y2">测试号乙</span></div>
+</div>
+</body></html>'''
+
+
+def test_sogou_parse_extracts_name_title_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services import sogou_weixin
+
+    class _Resp:
+        status_code = 200
+        text = _SOGOU_HTML
+
+    monkeypatch.setattr(sogou_weixin.requests, "get",
+                        lambda url, params, timeout, headers: _Resp())
+    out = sogou_weixin.search_articles("花少2")
+    assert out["blocked"] is False
+    assert [i["name"] for i in out["items"]] == ["测试号甲", "测试号乙"]
+    first = out["items"][0]
+    assert first["title"] == "花少2人格测试入口"  # 红高亮标签已清洗
+    assert first["digest"] == "最新人格测试在线入口"
+    assert first["published_at"] and first["published_at"].year == 2023
+
+    class _Block:
+        status_code = 200
+        text = "antispider 请输入验证码"
+
+    monkeypatch.setattr(sogou_weixin.requests, "get",
+                        lambda url, params, timeout, headers: _Block())
+    assert sogou_weixin.search_articles("任意词")["blocked"] is True
+
+
+def test_mine_title_terms_extracts_content_words() -> None:
+    titles = (["花少2人格测试最新入口"] * 3 + ["花少2人格测试2026版"] * 2
+              + ["链接:https://pan.quark.cn/s/abc"])
+    terms = wechat_monitor.mine_title_terms(titles, top=5)
+    assert terms and all("入口" not in t for t in terms)  # 营销泛词剔除
+    assert any("人格测试" in t for t in terms)
+
+
+def test_discover_candidates_dedupe_and_skip_known(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.services.feishu as feishu_mod
+
+    session.add(WechatBenchmark(user_id=1, nickname="测试号甲", anchor_url=""))
+    session.add(WechatArticle(user_id=1, title="花少2人格测试入口", source="listen"))
+    session.commit()
+
+    def _fake_search(keyword: str, page: int = 1, timeout: int = 15) -> dict:
+        assert keyword  # 实际由画像词/兜底词驱动
+        return {"items": [
+            {"name": "测试号甲", "title": "旧号文章", "digest": "", "published_at": None},
+            {"name": "测试号乙", "title": "新候选文章", "digest": "", "published_at": None},
+        ], "blocked": False}
+
+    monkeypatch.setattr(wechat_monitor, "sogou_search_articles", _fake_search)
+    monkeypatch.setattr(feishu_mod, "webhook_for", lambda settings, section: "")  # 不推飞书
+    out = wechat_monitor.discover_candidates(session, 1, settings=_settings())
+    assert out["new"] == 1  # 测试号甲已是对标号被跳过
+    names = [c.name for c in session.scalars(select(WechatCandidate)).all()]
+    assert names == ["测试号乙"]
+    out2 = wechat_monitor.discover_candidates(session, 1, settings=_settings())
+    assert out2["new"] == 0  # 第二轮:new 态候选去重,不重复入库
 
 
 def test_import_benchmarks_from_shelf(session, monkeypatch: pytest.MonkeyPatch) -> None:
