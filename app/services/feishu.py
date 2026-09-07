@@ -81,6 +81,8 @@ def _col_set_row(cells: list[tuple[str, int]], *, grey: bool = False) -> dict:
 
     同一组权重连成多行 → 客户端按网格对齐,与字体宽窄无关(lark_md 是比例字体,
     空格补齐永远对不齐——闲鱼推送"乱"的根因,这是正解)。
+    列内元素用 **div/lark_md**(自定义机器人老 schema 兼容);
+    不要用 `{"tag":"markdown"}`——那是卡片 schema 2.0 元素,自定义 bot.webhook 不渲染,会变空白。
     """
     return {
         "tag": "column_set",
@@ -88,7 +90,7 @@ def _col_set_row(cells: list[tuple[str, int]], *, grey: bool = False) -> dict:
         "background_style": "grey" if grey else "default",
         "columns": [
             {"tag": "column", "width": "weighted", "weight": weight,
-             "elements": [{"tag": "markdown", "content": text}]}
+             "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": text}}]}
             for text, weight in cells
         ],
     }
