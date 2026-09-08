@@ -133,6 +133,63 @@ def _platform_client(settings: Settings) -> ReaderPlatformClient | None:
                                 token=settings.wechat_reader_token, vid=settings.wechat_reader_vid)
 
 
+# 虚假宣传/低质量信号:正文含这些词说明资源不是免费直链
+_BAIT_PATTERNS = [
+    re.compile(r"(?:加|加我|添加|私信|联系)(?:微信|微信好友|我|助手|客服)"),
+    re.compile(r"(?:付费|收费|会员|VIP|开通|解锁)[后以]?[再才]?获取"),
+    re.compile(r"(?:进群|入群|加群)获取"),
+    re.compile(r"(?:扫码|扫描)(?:二维码|关注)[后以]?[获取领取]"),
+    re.compile(r"(?:原价|限时|特价|优惠)[¥￥\d]"),
+]
+_QUALITY_PAN = 3       # 有实际盘链
+_QUALITY_RECENT = 1    # 近3天发布
+_QUALITY_MULTI = 2     # 多号同发
+
+
+def assess_quality(content: str, pan_urls: list[str], read_num: int,
+                   resonance_cnt: int = 0, days_old: int = 0) -> dict:
+    """内容质量评估:盘链确认 / 虚假宣传 / 引流话术 检测。
+
+    返回 {has_pan: bool, is_bait: bool, bait_signals: [...], quality_score: int}。
+    quality_score: 0~10,≥6 为高质量(值得跟进),≤2 为低质量(广告/虚假)。
+    """
+    score = 0
+    has_pan = bool(pan_urls)
+    bait_signals: list[str] = []
+
+    # ① 盘链确认(+3)
+    if has_pan:
+        score += _QUALITY_PAN
+
+    # ② 时效(+1)
+    if days_old <= 3:
+        score += _QUALITY_RECENT
+
+    # ③ 多号同发(+2)
+    if resonance_cnt >= 2:
+        score += _QUALITY_MULTI
+
+    # ④ 虚假宣传检测:引流话术但无实际盘链
+    if not has_pan:
+        for pat in _BAIT_PATTERNS:
+            m = pat.search(content or "")
+            if m:
+                bait_signals.append(m.group(0)[:20])
+                score = max(0, score - 1)
+    # ⑤ 阅读量加分
+    if read_num >= 500:
+        score += 2
+    elif read_num >= 100:
+        score += 1
+
+    return {
+        "has_pan": has_pan,
+        "is_bait": bool(bait_signals) and not has_pan,
+        "bait_signals": bait_signals,
+        "quality_score": min(score, 10),
+    }
+
+
 def _deep_find(node: object, key: str):  # noqa: ANN201
     """递归找第一个命中键的值(响应字段层级未完全实测,统一防御式取数)。"""
     if isinstance(node, dict):
@@ -408,12 +465,14 @@ def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchm
         pan_urls = extract_quark_urls(f'{it["title"]} {content}')
         if require_pan and not pan_urls and not types:
             continue  # 无盘链 → 不监控
+        quality = assess_quality(content, pan_urls, preset_read)
         row = WechatArticle(user_id=user_id, author=(benchmark.nickname or "未命名")[:128],
                             title=it["title"][:500], url=url[:500], content=content,
                             publish_at=it.get("publish_at"), source=source,
                             benchmark_id=benchmark.id, pan_types=",".join(types)[:128],
                             pan_urls=chr(10).join(pan_urls)[:2000],
-                            read_num=preset_read, zan_num=preset_like)
+                            read_num=preset_read, zan_num=preset_like,
+                            quality=quality["quality_score"])
         session.add(row)
         added.append(row)
     if added:
@@ -743,7 +802,16 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
                         "") or r.url
         title = _md_safe(r.title)
         shown = title[:26] + ("…" if len(title) > 26 else "")
-        article_md = f"[{shown}]({_md_safe(link)})" if link else shown
+        q_badge = ""
+        if r.read_num >= 500:
+            q_badge = "🔴爆 "
+        elif r.read_num >= 100:
+            q_badge = "⭐热 "
+        elif r.quality >= 6:
+            q_badge = "⭐优 "
+        elif r.quality <= 2 and r.pan_types:
+            q_badge = "⚠️疑 "
+        article_md = f"[{q_badge}{shown}]({_md_safe(link)})" if link else shown
         pan = f"🔴{_md_safe(r.pan_types)[:8]}" if r.pan_types else "—"
         read = str(r.read_num) if r.traffic_at else "—"
         elements.append(_col_set_row([

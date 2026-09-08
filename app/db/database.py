@@ -123,7 +123,7 @@ def _migrate() -> None:
                             "comment_count INTEGER DEFAULT 0", "traffic_at DATETIME", "pan_urls TEXT",
                             "sample_count INTEGER DEFAULT 0",
                             "first_read_num INTEGER DEFAULT 0",
-                            "trend_flag VARCHAR(16) DEFAULT ''"],
+                            "trend_flag VARCHAR(16) DEFAULT ''", "quality INTEGER DEFAULT 0"],
     }
     with get_engine().begin() as conn:
         for table, coldefs in additions.items():

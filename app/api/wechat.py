@@ -25,7 +25,7 @@ def _row_to_dict(r: WechatArticle) -> dict:
             "benchmark_id": r.benchmark_id,
             "read_num": r.read_num, "zan_num": r.zan_num, "looking_num": r.looking_num,
             "share_num": r.share_num, "collect_num": r.collect_num,
-            "comment_count": r.comment_count,
+            "comment_count": r.comment_count, "quality": r.quality,
             "traffic_at": r.traffic_at.isoformat(sep=" ", timespec="seconds") if r.traffic_at else None,
             "created_at": r.created_at.isoformat(sep=" ", timespec="seconds") if r.created_at else None}
 
