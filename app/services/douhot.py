@@ -357,41 +357,48 @@ def fetch_keyword_windows(cookie: str, keyword: str, list_type: str = "word",
                           windows: list[int] | tuple[int, ...] | None = None) -> dict[int, dict]:
     """同一关键词**多窗口**采集热度:返回 {window_hour: fetch 结果}。
 
-    word 走 `fetch_keyword_heat`(单值+trends),search/video/topic 走
-    `fetch_list_keyword_heat`(该窗口最优命中,含 rank);订阅榜无 keyword 参数,返回空。
+    ⚠️ 实测(2026-09-08):**内容词(word)无小时级口径**——`hot_word_keyword`/`hot_words` 的
+    date_window 对 content word 返回恒同序列(score/rank/trends 均窗口无关),且 date_window=1
+    的榜直接为空。**搜索/视频/话题榜**的 date_window 才真实区分近1h/近1天(score 是窗口累计)。
+    故本函数统一走 `fetch_list_keyword_heat`(word 自动用搜索榜兜底,若该词是热搜词仍可对比;
+    非热搜词得 0 → 冷启动)。
     """
+    effective = list_type if list_type in ("search", "video", "topic") else "search"
     out: dict[int, dict] = {}
     for w in (windows or _windows_of(settings)):
-        if list_type == "word":
-            h = fetch_keyword_heat(cookie, keyword, settings, date_window=w)
-        elif list_type in ("search", "video", "topic"):
-            h = fetch_list_keyword_heat(cookie, list_type, keyword, settings, date_window=w)
-        else:
-            continue
+        h = fetch_list_keyword_heat(cookie, effective, keyword, settings, date_window=w)
+        if not h or not (h.get("score") or h.get("title")):
+            h = {"keyword": keyword.strip(), "score": 0, "rank_now": 0}
         out[w] = h
     return out
 
 
-def window_contrast(h1: dict, h24: dict) -> dict:
+def window_contrast(h1: dict, h24: dict, win_h1: int = 1, win_h24: int = 24) -> dict:
     """近1小时 vs 近1天 热度对比信号(同一关键词找趋势)。
 
-    `ratio` = 近1h热度 / max(近1天热度, 1)。标签判定(尺度无关,用 1 作"冷"阈值):
-    - 🆕 新起势:近1天冷(≤1)而近1h起来 → signal=burst(起势)
-    - 🔥 爆发:近1h ≥ 近1天的 1.5 倍且近1天非冷 → signal=burst(激增)
-    - 📉 回落:近1h < 近1天的 0.5 倍(近1天高但近1h降温) → signal=fall
+    比分用**归一化热度速率**而非绝对值:1h 与 1天是不同时长累计,直接比永远 1h<<1天。
+    `avg = score / 窗口小时数`(每小时热度),`ratio = avg_h1 / avg_h24`(近1h 相对全天分钟均值的倍数):
+    - 🆕 新起势:近1天冷(≤1)而近1h起来 → signal=burst(刚起)
+    - 🔥 爆发:近1h ≥ 全天每小时均的 1.5 倍 → signal=burst(激增)
+    - 📉 回落:近1h < 全天每小时均的 0.5 倍 → signal=fall(降温/过时)
     - ➡️ 高位延续:其余 → signal=steady
-    - 冷启动:两者都冷 → signal=flat(不上榜/无数据)
+    - ❔ 近1h无数据:近1天有值而近1h=0(词的1h榜未覆盖/接口偶发)→ signal=unknown(不误判回落,不推送)
+    - 冷启动:两者都冷 → signal=flat(无数据/不上榜)
     """
     s1 = h1.get("score") or 0
     s24 = h24.get("score") or 0
-    ratio = (s1 / s24) if s24 else (s1 / 1)
+    avg1 = s1 / max(win_h1, 1)
+    avg24 = s24 / max(win_h24, 1)
+    ratio = avg1 / avg24 if avg24 else (avg1 / 1)
     if s1 <= 1 and s24 <= 1:
         label, signal = "冷启动", "flat"
     elif s24 <= 1 and s1 > 1:
         label, signal = "新起势", "burst"
-    elif s24 > 1 and ratio >= 1.5:
+    elif s1 <= 1 and s24 > 1:
+        label, signal = "近1h无数据", "unknown"  # 词的近1h榜未覆盖/接口偶发,不误判回落
+    elif avg24 > 1 and ratio >= 1.5:
         label, signal = "爆发", "burst"
-    elif s24 > 1 and s1 < s24 * 0.5:
+    elif avg24 > 1 and ratio <= 0.5:
         label, signal = "回落", "fall"
     else:
         label, signal = "高位延续", "steady"

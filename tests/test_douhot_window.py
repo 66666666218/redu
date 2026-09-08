@@ -38,31 +38,39 @@ def test_window_contrast_signals() -> None:
     # 新起势:近1天冷而近1h起来
     c = douhot.window_contrast({"score": 50}, {"score": 0})
     assert c["signal"] == "burst" and c["label"] == "新起势"
-    # 爆发:近1h ≥ 近1天 1.5 倍
-    c = douhot.window_contrast({"score": 150}, {"score": 100})
+    # 爆发:近1h 归一化速率 ≥ 近1天每小时均的 1.5 倍(1h=15, 24h/24=10 → 1.5x)
+    c = douhot.window_contrast({"score": 15}, {"score": 240})
     assert c["signal"] == "burst" and c["label"] == "爆发" and c["ratio"] == 1.5
-    # 回落:近1h 不足近1天一半
-    c = douhot.window_contrast({"score": 30}, {"score": 100})
+    # 回落:近1h 归一化速率 ≤ 0.5 倍(1h=5, 24h/24=10 → 0.5x)
+    c = douhot.window_contrast({"score": 5}, {"score": 240})
     assert c["signal"] == "fall" and c["label"] == "回落"
     # 高位延续
-    assert douhot.window_contrast({"score": 80}, {"score": 100})["signal"] == "steady"
+    assert douhot.window_contrast({"score": 12}, {"score": 240})["signal"] == "steady"
+    # 近1h无数据:近1天有值而近1h=0 → unknown(不误判回落)
+    c = douhot.window_contrast({"score": 0}, {"score": 240})
+    assert c["signal"] == "unknown" and c["label"] == "近1h无数据"
 
 
 def test_fetch_keyword_windows_calls_both_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[int] = []
+    # word 无小时级口径 → 走搜索榜兜底;两窗口各查一次
+    def _fake_list(cookie, list_type, keyword, settings=None, date_window=None):
+        calls.append((list_type, date_window))
+        return {"keyword": keyword, "score": date_window * 10, "rank_now": 1, "title": keyword}
 
-    def _fake_heat(cookie, kw, settings=None, date_window=None):
-        calls.append(date_window)
-        return {"keyword": kw, "score": date_window * 10, "trend_growth": 0.1, "trend_label": "上升期"}
-
-    monkeypatch.setattr(douhot, "fetch_keyword_heat", _fake_heat)
+    monkeypatch.setattr(douhot, "fetch_list_keyword_heat", _fake_list)
     out = douhot.fetch_keyword_windows("ck", "测试词", "word", settings=_settings())
     assert list(out.keys()) == [1, 24]
-    assert out[1]["score"] == 10 and out[24]["score"] == 240
-    assert calls == [1, 24]
+    assert calls == [("search", 1), ("search", 24)]  # word 自动用搜索榜
+    # search 榜类型用自身
+    calls.clear()
+    douhot.fetch_keyword_windows("ck", "w", "search", settings=_settings())
+    assert calls == [("search", 1), ("search", 24)]
     # 自定义窗口集
-    out2 = douhot.fetch_keyword_windows("ck", "w", "word", settings=_settings(), windows=[1, 24, 72])
+    calls.clear()
+    out2 = douhot.fetch_keyword_windows("ck", "w", "topic", settings=_settings(), windows=[1, 24, 72])
     assert sorted(out2.keys()) == [1, 24, 72]
+    assert [c[1] for c in calls] == [1, 24, 72]
 
 
 def test_collect_windows_writes_snaps(monkeypatch: pytest.MonkeyPatch, session) -> None:
@@ -96,14 +104,14 @@ def test_analytics_uses_latest_batch_and_contrast(session) -> None:
     ])
     # 最新批
     session.add_all([
-        DouhotWindowSnap(user_id=1, list_type="word", keyword="测试词", window=1, score=150, captured_at=ts1),
-        DouhotWindowSnap(user_id=1, list_type="word", keyword="测试词", window=24, score=100, captured_at=ts1),
+        DouhotWindowSnap(user_id=1, list_type="word", keyword="测试词", window=1, score=15, captured_at=ts1),
+        DouhotWindowSnap(user_id=1, list_type="word", keyword="测试词", window=24, score=240, captured_at=ts1),
     ])
     session.commit()
     rows = douhot_window.analytics(session, 1, settings=_settings())
     assert len(rows) == 1
     r = rows[0]
-    assert r["h1_score"] == 150 and r["h24_score"] == 100 and r["ratio"] == 1.5
+    assert r["h1_score"] == 15 and r["h24_score"] == 240 and r["ratio"] == 1.5
     assert r["signal"] == "burst" and r["label"] == "爆发"
 
 
