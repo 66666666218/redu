@@ -49,7 +49,12 @@ def collect_windows(session: Session, user_id: int, settings: Settings | None = 
     collect_ts = datetime.now()
     snaps = 0
     ok = 0
+    seen: set[tuple[str, str]] = set()
     for w in watches:
+        key = (w.list_type, w.keyword)
+        if key in seen:  # 同词多过滤词只采一次,避免重复打接口
+            continue
+        seen.add(key)
         try:
             heat = douhot.fetch_keyword_windows(cookie, w.keyword, w.list_type, settings, windows=windows)
         except Exception:  # noqa: BLE001 - 单词失败不中断整轮
@@ -141,18 +146,30 @@ def _contrast_of(snap: DouhotWindowSnap, settings: Settings | None = None) -> tu
 
 
 def analytics(session: Session, user_id: int, settings: Settings | None = None) -> list[dict]:
-    """各监控词的多窗口对比分析:近1h/近1天 值 + 对比标签(读最近一轮快照,不实时打接口)。"""
+    """各**监控词**的多窗口对比分析(列表与「关键词监控」一致,缺失数据的词标冷启动而非消失)。
+
+    watch 里同 keyword 多个过滤词只算一条;无快照的词(采集查不到)补 0 → window_contrast
+    判"冷启动/近1h无数据",保证对比列表始终覆盖用户关注的所有词。
+    """
     settings = settings or get_settings()
     batch = _latest_batch(session, user_id)
+    watches = session.scalars(select(DouhotWatch).where(
+        DouhotWatch.user_id == user_id, DouhotWatch.section == "douhot")).all()
+    seen: set[tuple[str, str]] = set()
     out = []
-    for (list_type, keyword), snap in batch.items():
+    for w in watches:
+        key = (w.list_type, w.keyword)
+        if key in seen:
+            continue
+        seen.add(key)
+        snap = batch.get(key, {})
         h1, h24 = _contrast_of(snap, settings)
         v1 = h1.score if h1 else 0
         v24 = h24.score if h24 else 0
         c = douhot.window_contrast({"score": v1}, {"score": v24})
         entry = (h24.entry_title or h1.entry_title) if (h24 or h1) else ""
         out.append({
-            "list_type": list_type, "keyword": keyword, "entry_title": entry,
+            "list_type": w.list_type, "keyword": w.keyword, "entry_title": entry,
             "h1_score": v1, "h24_score": v24, "ratio": c["ratio"],
             "label": c["label"], "signal": c["signal"],
             "captured_at": h24.captured_at.isoformat(sep=" ", timespec="seconds")

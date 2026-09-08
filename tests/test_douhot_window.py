@@ -95,6 +95,8 @@ def test_collect_windows_writes_snaps(monkeypatch: pytest.MonkeyPatch, session) 
 
 
 def test_analytics_uses_latest_batch_and_contrast(session) -> None:
+    session.add(DouhotWatch(user_id=1, section="douhot", list_type="word", keyword="测试词", date_window=1))
+    session.commit()
     ts1 = datetime.now()
     ts0 = ts1 - timedelta(minutes=10)
     # 旧批(不应被取)
@@ -113,6 +115,25 @@ def test_analytics_uses_latest_batch_and_contrast(session) -> None:
     r = rows[0]
     assert r["h1_score"] == 15 and r["h24_score"] == 240 and r["ratio"] == 1.5
     assert r["signal"] == "burst" and r["label"] == "爆发"
+
+
+def test_analytics_covers_watch_even_without_snap(session) -> None:
+    """监控词即使查不到数据(无快照)也出现在对比列表(标冷启动),不消失。"""
+    session.add_all([
+        DouhotWatch(user_id=1, section="douhot", list_type="video", keyword="有数据词", date_window=24),
+        DouhotWatch(user_id=1, section="douhot", list_type="word", keyword="无数据词", date_window=24),
+    ])
+    session.commit()
+    session.add(DouhotWindowSnap(user_id=1, list_type="video", keyword="有数据词",
+                                 window=1, score=15, captured_at=datetime.now()))
+    session.add(DouhotWindowSnap(user_id=1, list_type="video", keyword="有数据词",
+                                 window=24, score=240, captured_at=datetime.now()))
+    session.commit()
+    rows = douhot_window.analytics(session, 1, settings=_settings())
+    kws = {r["keyword"] for r in rows}
+    assert kws == {"有数据词", "无数据词"}  # 无快照词也在列表
+    missing = next(r for r in rows if r["keyword"] == "无数据词")
+    assert missing["signal"] == "flat" and missing["label"] == "冷启动"
 
 
 def test_collect_skips_without_watch_or_cookie(session) -> None:
