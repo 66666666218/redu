@@ -26,6 +26,9 @@ from app.db.models import (
     RunRecord,
     WeiboHotItem,
     WeiboTrend,
+    FeishuAlert,
+    WechatTrafficSample,
+    AgentStage,
     XianyuDaily,
     XianyuItem,
 )
@@ -45,6 +48,9 @@ _TABLES = [
     (AlertRecord, "triggered_at", False),
     (LoginLog, "created_at", False),
     (AdminLog, "created_at", False),
+    (WechatTrafficSample, "sampled_at", False),
+    (FeishuAlert, "alerted_at", False),      # 冷却记录本体 6~24h 有效,清理只是防无限增长
+    (AgentStage, "updated_at", False),       # Agent 阶段记忆(陈旧状态自然失效)
 ]
 
 

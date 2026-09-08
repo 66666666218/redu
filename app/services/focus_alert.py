@@ -17,8 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
-from app.db.models import (BaiduHotItem, DouhotWord, FeishuAlert, WechatArticle,
-                           WeiboHotItem, XianyuItem)
+from app.db.models import BaiduHotItem, DouhotWord, WechatArticle, WeiboHotItem, XianyuItem
 from app.services.feishu import _col_set_row
 from app.utils import get_logger
 
@@ -115,21 +114,15 @@ def run_focus_alert(db: Session, user_id: int, settings: Settings | None = None)
     latest_ts = {sec: max(v["ts"] for v in per.values()) for sec, per in boards.items()}
 
     now = datetime.now()
-    cooldown = timedelta(hours=settings.focus_cooldown_hours)
     hits_cross: list[dict] = []
     hits_repeat: list[tuple[str, dict]] = []
 
+    from app.services.alert_service import feishu_alert_gate
+
     def cooled(kind: str, norm: str) -> bool:
-        key = f"{kind}:{norm}"
-        existing = db.scalar(select(FeishuAlert).where(
-            FeishuAlert.section == "focus", FeishuAlert.user_id == user_id, FeishuAlert.title == key))
-        if existing and (now - existing.alerted_at) < cooldown:
-            return True
-        if existing:
-            existing.alerted_at = now
-        else:
-            db.add(FeishuAlert(section="focus", user_id=user_id, title=key, reason="重点关键词", alerted_at=now))
-        return False
+        """冷却门:False = 允许推送(记录已写入)。"""
+        return not feishu_alert_gate(db, user_id, "focus", f"{kind}:{norm}",
+                                     settings.focus_cooldown_hours, "重点关键词")
 
     # ① 跨板块共振(各板块最新一批中匹配)
     current = {sec: {n: v for n, v in per.items() if v["ts"] == latest_ts[sec]}

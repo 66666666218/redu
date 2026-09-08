@@ -287,6 +287,27 @@ def run_weekly_summary() -> int:
         db.close()
 
 
+def feishu_alert_gate(db: Session, user_id: int, section: str, title: str,
+                      cooldown_hours: float, reason: str = "") -> bool:
+    """飞书告警冷却门(全项目共用):冷却期内返回 False;否则写入/刷新冷却记录并返回 True。
+
+    调用方 gate 通过后再自行推送。title 建议含足够区分度(板块/链接/文章ID)。
+    """
+    from app.db.models import FeishuAlert
+
+    now = datetime.now()
+    existing = db.scalar(select(FeishuAlert).where(
+        FeishuAlert.section == section, FeishuAlert.user_id == user_id, FeishuAlert.title == title[:200]))
+    if existing and (now - existing.alerted_at) < timedelta(hours=cooldown_hours):
+        return False
+    if existing:
+        existing.reason, existing.alerted_at = (reason or existing.reason)[:255], now
+    else:
+        db.add(FeishuAlert(section=section, user_id=user_id, title=title[:200],
+                           reason=reason[:255], alerted_at=now))
+    return True
+
+
 def notify_incident(db: Session, user_id: int, kind: str, title: str, detail: str,
                     settings: Settings | None = None) -> bool:
     """事件级即时告警(如闲鱼滑块):推该板块飞书群,复用 feishu_alert_cooldown_hours 冷却去重。
@@ -300,18 +321,9 @@ def notify_incident(db: Session, user_id: int, kind: str, title: str, detail: st
     webhook = webhook_for(settings, kind)
     if not webhook:
         return False
-    from app.db.models import FeishuAlert
-
     section, key = f"incident_{kind}", title[:80]
-    now = datetime.now()
-    existing = db.scalar(select(FeishuAlert).where(
-        FeishuAlert.section == section, FeishuAlert.user_id == user_id, FeishuAlert.title == key))
-    if existing and (now - existing.alerted_at).total_seconds() < settings.feishu_alert_cooldown_hours * 3600:
+    if not feishu_alert_gate(db, user_id, section, key, settings.feishu_alert_cooldown_hours, detail):
         return False
-    if existing:
-        existing.reason, existing.alerted_at = detail[:255], now
-    else:
-        db.add(FeishuAlert(section=section, user_id=user_id, title=key, reason=detail[:255], alerted_at=now))
     sent = FeishuClient(webhook, settings.feishu_secret).send(f"🔴 {title}" + chr(10) + detail)
     db.commit()
     return bool(sent)

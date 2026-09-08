@@ -223,7 +223,13 @@ def start(settings: Settings | None = None) -> BackgroundScheduler | None:
     with _lock:
         if _scheduler is not None:
             return _scheduler
-        scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
+        from apscheduler.executors.pool import ThreadPoolExecutor
+
+        # 13+ 个作业共享默认 10 线程会互相饿死(采集/监听都是网络长任务),扩到 24
+        scheduler = BackgroundScheduler(
+            timezone="Asia/Shanghai",
+            executors={"default": ThreadPoolExecutor(24)},
+        )
         build_jobs(scheduler)
         scheduler.start()
         _scheduler = scheduler

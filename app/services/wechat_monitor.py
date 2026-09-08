@@ -461,6 +461,7 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                 break
     # 资源级共振:同一盘链在窗口期内被 ≥2 篇文章推送 → 同行网络都在发的确认级爆点资源
     from app.services.feishu_client import FeishuClient, webhook_for
+    from app.services.alert_service import feishu_alert_gate
 
     checked: set[str] = set()
     res_hits: list[tuple[str, WechatArticle, int]] = []
@@ -469,20 +470,12 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
             if u in checked:
                 continue
             checked.add(u)
-            key = "res:" + u[:120]
-            existing = session.scalar(select(FeishuAlert).where(
-                FeishuAlert.section == "focus_res", FeishuAlert.user_id == user_id, FeishuAlert.title == key))
-            if existing and (datetime.now() - existing.alerted_at) < timedelta(hours=settings.focus_cooldown_hours):
-                continue
             cnt = session.scalar(select(func.count()).select_from(WechatArticle).where(
                 WechatArticle.pan_urls.contains(u, autoescape=True),
                 WechatArticle.created_at >= datetime.now() - timedelta(hours=settings.wechat_resonance_hours)))
-            if (cnt or 0) >= 2:
-                if existing:
-                    existing.alerted_at = datetime.now()
-                else:
-                    session.add(FeishuAlert(section="focus_res", user_id=user_id, title=key,
-                                            reason=str(cnt) + " 篇同发", alerted_at=datetime.now()))
+            if (cnt or 0) >= 2 and feishu_alert_gate(
+                    session, user_id, "focus_res", "res:" + u[:120],
+                    settings.focus_cooldown_hours, f"{cnt} 篇同发"):
                 res_hits.append((u, r, cnt))
     if res_hits:
         webhook = webhook_for(settings, "wechat")
@@ -809,22 +802,15 @@ def _notify_burst(session: Session, user_id: int, settings: Settings, r: WechatA
                   growth: float | None, baseline: int | None = None) -> bool:
     """🚀 爆点苗头即时推送(公众号群,24h 冷却)。返回是否推送。"""
     from app.services.feishu_client import FeishuClient, webhook_for
-    from app.db.models import FeishuAlert
+    from app.services.alert_service import feishu_alert_gate
 
     webhook = webhook_for(settings, "wechat")
     if not webhook:
         return False
-    key = str(r.id)
-    existing = session.scalar(select(FeishuAlert).where(
-        FeishuAlert.section == "focus_burst", FeishuAlert.user_id == user_id, FeishuAlert.title == key))
-    if existing and (datetime.now() - existing.alerted_at) < timedelta(hours=settings.focus_cooldown_hours):
+    reason = f"增长{growth:.0f}%" if growth is not None else "首采超基线"
+    if not feishu_alert_gate(session, user_id, "focus_burst", str(r.id),
+                             settings.focus_cooldown_hours, reason):
         return False
-    if existing:
-        existing.alerted_at = datetime.now()
-    else:
-        session.add(FeishuAlert(section="focus_burst", user_id=user_id, title=key,
-                                reason=f"增长{growth:.0f}%" if growth is not None else "首采超基线",
-                                alerted_at=datetime.now()))
     growth_txt = f"+{growth:.0f}%" if growth is not None else "超基线"
     base_txt = f" · 账号基线中位 {baseline}" if baseline else ""
     mine = [x for x in (r.my_pan_urls or "").splitlines() if x.strip()]

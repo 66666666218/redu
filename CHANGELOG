@@ -1,5 +1,7 @@
 # CHANGELOG
 
+- [2026-09-08 05:30] REFACTOR: **整体架构审查三项优化——调度线程池/告警冷却门统一/清理覆盖新表** — 整体架构审查落地:① 调度器 13+ 作业共享默认 10 线程,采集/监听等网络长任务会互相饿死 → ThreadPoolExecutor 扩到 24;② "冷却去重+推送"模式在 notify_incident/focus_alert/_notify_burst/资源共振 **4 处重复实现**(bug 面扩散) → 抽出共享 `alert_service.feishu_alert_gate`(冷却门:写入/刷新记录并返回是否允许推送),4 处调用方统一改走该门;③ 数据清理 `_TABLES` 补新表:`wechat_traffic_samples`(采样点)/`feishu_alerts`(冷却记录)/`agent_stages`(阶段记忆)按 30 天保留期清理,防无限增长(微信文章库为累积资产,设计上不清理)。全量 225 项通过(Files: app/services/{scheduler.py,alert_service.py,wechat_monitor.py,focus_alert.py}, app/db/maintenance.py, CHANGELOG)
+
 - [2026-09-07 09:00] FEAT: **苗头 Agent v2.1——微博/百度排名速度信号** — 各板块信号差异化收尾:微博/百度接入排名序列(近24h),排名前移 ≥3 名 +15 分——即使热度平稳也能靠排名速度捕捉起势(排名比热度对"起势"更敏感)。新增排名跳升单测(热度持平+排名10→2 = 55 分恰好触发苗头)。全量 225 项通过(Files: app/services/early_agent.py, tests/test_early_agent.py, doc/dev.md, CHANGELOG)
 
 - [2026-09-07 08:30] FEAT: **苗头 Agent v2——生命周期状态机/加速度信号/行动建议(全板块自主预测)** — 按用户授权的整夜自主优化:① 修复闲鱼"新上榜"信号失效(snap_date 字符串时间戳 vs datetime 判型,`_to_dt` 容错);② 新增**加速度**信号(增速比再升≥20个百分点,+20)——比增速更早起势的标志;③ 新增 `agent_stages` 生命周期状态机(观察→苗头→上升→爆发→回落,**仅阶段跃迁推送**,同阶段不重复,记忆跟踪时长);④ 推送卡片带**网盘推广行动建议**(苗头=准备素材/上升=立即改写发布/爆发=全力推广/回落=停止跟进)+ 阶段徽标 + 信号分解;⑤ 移除时间冷却(状态机取代)。新增 test_early_agent.py 5 项(评分/加速/生命周期四阶段/闲鱼字符串时间戳/共振推总群);真实数据干跑验证(224 项全过)。doc/dev.md §5.14 同步(Files: app/services/early_agent.py, app/db/models.py, tests/test_early_agent.py, doc/dev.md, CHANGELOG)
