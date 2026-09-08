@@ -122,3 +122,18 @@ def test_collect_skips_without_watch_or_cookie(session) -> None:
     session.commit()
     out = douhot_window.collect_windows(session, 1, settings=_settings())
     assert out["status"] == "skipped" and out["reason"] == "no_cookie"
+
+
+def test_query_windows_any_keyword(monkeypatch: pytest.MonkeyPatch, session) -> None:
+    monkeypatch.setattr(douhot_window, "get_cookies", lambda db, uid: {"douyin": "ck"})
+    monkeypatch.setattr(douhot, "fetch_keyword_windows",
+                        lambda cookie, kw, lt, settings=None, windows=None: {
+                            1: {"score": 15, "rank_now": 1}, 24: {"score": 240, "rank_now": 2}})
+    r = douhot_window.query_windows(session, 1, "video", "性格测试", settings=_settings())
+    assert r["status"] == "success" and r["h1"] == 15 and r["h24"] == 240 and r["ratio"] == 1.5
+    assert r["signal"] == "burst"
+    # 无关键词 → skipped
+    assert douhot_window.query_windows(session, 1, "video", "  ", settings=_settings())["status"] == "skipped"
+    # 无 Cookie → skipped
+    monkeypatch.setattr(douhot_window, "get_cookies", lambda db, uid: {})
+    assert douhot_window.query_windows(session, 1, "video", "词", settings=_settings())["reason"] == "no_cookie"

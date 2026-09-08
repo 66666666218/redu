@@ -358,6 +358,8 @@
   → `{"count":N,"items":[{"list_type","keyword","entry_title","h1_score","h24_score","ratio","label","signal","captured_at"}]}`
 - **立即采集对比**: POST `/api/douhot/watch-windows/refresh`
   → `{"status":"success","words":N,"ok":N,"snaps":N,"pushed":M}`(skipped: `no_watch`/`no_cookie`)
+- **任意词即查(不依赖监控词)**: POST `/api/douhot/windows/query` body `{"list_type":"video","keyword":"性格测试"}`
+  → `{"status":"success","keyword","list_type","h1","h24","ratio","label","signal"}`(一次查询不落库)
 - **原理**:同一监控词每轮**同时**拉近1h + 近1天热度(`DOUHOT_WINDOW_WINDOWS` 默认 `1,24`,可改
   `1,24,72,168`),各窗口记一条 `douhot_window_snap`;`ratio`=近1h/近1天,标签:
   🆕新起势(近1天冷近1h起)· 🔥爆发(≥1.5x)· 📉回落(<0.5x)· ➡️高位延续 · 冷启动

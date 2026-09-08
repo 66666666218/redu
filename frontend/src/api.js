@@ -92,6 +92,7 @@ export const api = {
   douhotWatchAnalytics: () => req('GET', '/api/douhot/watch-analytics'),
   douhotWatchWindows: () => req('GET', '/api/douhot/watch-windows'),
   douhotWatchWindowsRefresh: () => req('POST', '/api/douhot/watch-windows/refresh'),
+  douhotWindowsQuery: (listType, keyword) => req('POST', '/api/douhot/windows/query', { list_type: listType, keyword }),
   alertRules: () => req('GET', '/api/alerts/rules'),
   alertRuleAdd: (rule) => req('POST', '/api/alerts/rules', rule),
   alertRuleDel: (id) => req('DELETE', `/api/alerts/rules/${id}`),

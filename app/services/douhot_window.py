@@ -73,6 +73,37 @@ def collect_windows(session: Session, user_id: int, settings: Settings | None = 
             "ok": ok, "snaps": snaps}
 
 
+def query_windows(session: Session, user_id: int, list_type: str, keyword: str,
+                  settings: Settings | None = None) -> dict:
+    """实时查**任意**关键词的多窗口对比(不依赖监控词,一次性查询,不落库)。
+
+    list_type 取 video/topic(有真近1h口径)效果最佳;search/word 的词近1h常为 0 →
+    返回 unknown 标记。无 Cookie 或查不到数据返回 skipped/error。
+    """
+    settings = settings or get_settings()
+    kw = (keyword or "").strip()
+    if not kw:
+        return {"status": "skipped", "reason": "no_keyword"}
+    cookie = (get_cookies(session, user_id) or {}).get("douyin", "")
+    if not cookie:
+        return {"status": "skipped", "reason": "no_cookie"}
+    if list_type not in ("search", "video", "topic", "word"):
+        list_type = "video"
+    heat = douhot.fetch_keyword_windows(cookie, kw, list_type, settings)
+    if not heat:
+        return {"status": "error", "keyword": kw, "list_type": list_type, "reason": "no_data"}
+    windows = _windows(settings)
+    small, big = windows[0], windows[-1]
+    h1, h24 = heat.get(small, {}), heat.get(big, {})
+    if not (h1.get("score") or h24.get("score")):
+        return {"status": "success", "keyword": kw, "list_type": list_type,
+                "h1": 0, "h24": 0, "ratio": 0, "label": "冷启动", "signal": "flat"}
+    c = douhot.window_contrast(h1, h24, win_h1=small, win_h24=big)
+    return {"status": "success", "keyword": kw, "list_type": list_type,
+            "h1": c["h1"], "h24": c["h24"], "ratio": c["ratio"],
+            "label": c["label"], "signal": c["signal"]}
+
+
 def _latest_batch(session: Session, user_id: int) -> dict[tuple[str, str], dict[int, DouhotWindowSnap]]:
     """读取每个监控词**最近一轮**各窗口快照:{(list_type, keyword): {window: snap}}。"""
     snaps = session.scalars(select(DouhotWindowSnap).where(

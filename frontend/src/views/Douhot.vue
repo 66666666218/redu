@@ -14,6 +14,8 @@ const loading = ref(false)
 const busy = ref(false)
 const watches = ref([])
 const windowRows = ref([])
+const qForm = ref({ list_type: 'video', keyword: '' })
+const qResult = ref(null)
 const watchForm = ref({ list_type: 'word', keyword: '', filter_keyword: '', date_window: 1 })
 const searchKw = ref('')
 const searchFilter = ref('')
@@ -96,6 +98,17 @@ async function refreshWindows() {
     if (r.status === 'skipped') toastError(r.reason === 'no_watch' ? '还没有监控词,先添加关键词监控' : r.reason === 'no_cookie' ? '未配置抖音(热点宝) Cookie' : '本轮跳过')
     else toastOk(`多窗口对比采集完成:${r.ok || 0} 词 / ${r.snaps || 0} 快照` + (r.pushed ? `,推飞书 ${r.pushed} 条异动` : ''))
     await loadWindows()
+  } catch (e) { toastError(e.message) } finally { busy.value = false }
+}
+async function queryWindows() {
+  const kw = qForm.value.keyword.trim()
+  if (!kw) { toastError('请输入要对比的关键词'); return }
+  busy.value = 'qwin'
+  try {
+    const r = await api.douhotWindowsQuery(qForm.value.list_type, kw)
+    if (r.status === 'skipped') { toastError(r.reason === 'no_cookie' ? '未配置抖音(热点宝) Cookie' : '请输入关键词'); return }
+    if (r.status === 'error') { toastError('热点宝未返回该词数据'); qResult.value = null; return }
+    qResult.value = r
   } catch (e) { toastError(e.message) } finally { busy.value = false }
 }
 function winSignalClass(signal, label) {
@@ -237,6 +250,20 @@ onMounted(async () => { await loadList('word'); await loadWatches(); await loadW
         <h3 style="margin:0">📊 多窗口趋势对比(近1h vs 近1天)</h3>
         <button class="ghost" :disabled="busy==='win'" @click="refreshWindows">{{ busy==='win' ? '采集中…' : '立即采集对比' }}</button>
         <span class="empty">同一关键词同时看近1小时与近1天热度,比值找趋势:🔥爆发/🆕新起 → 跟进 · 📉回落 → 别追过时</span>
+      </div>
+      <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:10px">
+        <select v-model="qForm.list_type" style="width:auto" title="对比榜型(视频/话题有真近1h口径)">
+          <option value="video">视频榜</option><option value="topic">话题榜</option>
+          <option value="search">搜索榜</option><option value="word">内容词</option>
+        </select>
+        <input v-model="qForm.keyword" placeholder="任意词,一查即出近1h/近1天对比" style="margin:0;flex:1" @keyup.enter="queryWindows" />
+        <button class="ghost" :disabled="busy==='qwin'" @click="queryWindows">{{ busy==='qwin' ? '查询中…' : '对比任意词' }}</button>
+      </div>
+      <div v-if="qResult" style="padding:8px 10px;border:1px solid var(--border,#ddd);border-radius:6px;margin-bottom:10px">
+        <b>{{ qResult.keyword }}</b> <span class="empty">({{ (tabs.find(x => x.key === qResult.list_type) || {}).label || qResult.list_type }})</span>
+        · 近1h <b class="num">{{ fmt(qResult.h1) }}</b> · 近1天 <b class="num">{{ fmt(qResult.h24) }}</b>
+        · 比例 <b class="num">{{ qResult.ratio }}x</b> ·
+        <b :class="winSignalClass(qResult.signal, qResult.label)">{{ qResult.signal === 'burst' ? (qResult.label === '新起势' ? '🆕' : '🔥') + qResult.label : qResult.signal === 'fall' ? '📉' + qResult.label : qResult.label }}</b>
       </div>
       <table v-if="windowRows.length">
         <tr><th>关键词</th><th>近1h</th><th>近1天</th><th>比例</th><th>趋势</th><th>榜型</th></tr>

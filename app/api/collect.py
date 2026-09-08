@@ -86,6 +86,16 @@ def douhot_watch_windows_refresh(user: User = Depends(get_current_user), db: Ses
             "snaps": out.get("snaps", 0), "pushed": pushed}
 
 
+@router.post("/api/douhot/windows/query")
+def douhot_windows_query(payload: dict, user: User = Depends(get_current_user),
+                         db: Session = Depends(get_db)):
+    """实时查**任意**关键词的多窗口对比(近1h vs 近1天),不依赖监控词,一次性不落库。"""
+    from app.services.douhot_window import query_windows
+
+    return query_windows(db, user.id, str(payload.get("list_type", "video")),
+                         str(payload.get("keyword", "")))
+
+
 @router.post("/api/watch/{section}")
 def watch_add(section: str, payload: dict, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """在某板块添加关键词监控(微博/闲鱼/抖音/百度通用)。"""
