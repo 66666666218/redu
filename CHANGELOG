@@ -1,5 +1,7 @@
 # CHANGELOG
 
+- [2026-09-08 08:10] FEAT: **文章内容交叉提取——从正文自动挖出其他公众号名,反哺候选发现** — 加强内容交叉提取:新增 `app/services/content_extract.py`,从已监控文章正文自动提取被引流的其他公众号名称(模式:关注/搜索/公众号「」/更多…关注 等,清洗+去重+排除误提)。接入 `_enrich_new_articles` 尾部:监听新文含正文时,提取文中提到的其他公众号 → 去重(已知对标号/已有候选)→ 自动入库为候选对标号(`term="content_cross"`)。实现"监听越多→发现越多"的滚雪球效应。另新增 `extract_content_keywords`(正文高频词,供搜索发现)。新增 2 项单测(提取质量/监听集成)。全量 237 项通过(Files: app/services/{content_extract.py,wechat_monitor.py}, tests/test_wechat_monitor.py, CHANGELOG)
+
 - [2026-09-08 07:30] FIX: **sync 全量路径 require_pan=False——历史同步存全部文章(改写素材库不只盘链文)** — sync_wechat_account 的三处 _insert_new_articles 调用补 require_pan=False(全量同步是改写素材库,不只盘链文;监听路径的 require_pan=True 仅过滤推送目标)。修复 test_sync_weread_latest_only/test_sync_respects_max_pages/test_sync_platform_paginates 测试适配。全量 235 项通过(Files: app/services/wechat_monitor.py, CHANGELOG)
 
 - [2026-09-08 11:00] FIX: **多窗口对比单侧窗口为0不再误判"新起势";推送显示具体话题名** — 用户反馈推送卡片"关键词=全集/下载/问卷 全是新起势,没有具体名字"。两处根因:① `window_contrast` 把"近1天=0 而近1h有值"判为"新起势"——实为近1天榜未覆盖该话题,等同之前的"近1h无数据",不该当趋势信号(否则一堆泛词全标新起势刷屏)。改成**任一侧窗口为0一律标"近1天无数据/近1h无数据"(unknown),不推送**,只有两侧都有值且 ratio≥1.5/≤0.5 才判爆发/回落;彻底移除不稳定的"新起势"标签;② 推送卡片只显示监控词(全集/下载/问卷)不显示具体话题 → 改为以 `entry_title`(具体话题)为主显示,监控词作辅助"(xx)"。前端同步:表格与快捷查询的"新起势"徽标/emoji 移除,burst 统一🔥,关键词列改话题主显示。新增/改测试(移除新起势用例,新增对称 unknown),全量 233 过、2 败(test_sync_* 为并行遗留);前端已构建 (Files: app/services/{douhot.py,douhot_window.py}, frontend/src/views/Douhot.vue, tests/test_douhot_window.py, CHANGELOG)

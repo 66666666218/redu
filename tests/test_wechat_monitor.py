@@ -767,3 +767,36 @@ def test_pan_links_backfill_legacy_articles(session, monkeypatch: pytest.MonkeyP
     wechat_monitor._weread_collect(1, b, _FakeWeread(), session)
     links = session.scalars(select(WechatPanLink)).all()
     assert len(links) == 1  # 新文入库写入归一化表
+
+
+# ---------------------------------------------------------------- 文章内容交叉提取
+def test_extract_account_refs_from_content() -> None:
+    from app.services.content_extract import extract_account_refs
+
+    text = "获取更多资源请关注公众号「资源君」\n搜索公众号:百宝箱分享\n更多网盘资源扫码关注 资源小站"
+    refs = extract_account_refs(text)
+    assert "资源君" in refs and "百宝箱分享" in refs and "资源小站" in refs
+    assert "关注" not in refs and "我们" not in refs
+
+
+def test_listen_cross_extracts_new_accounts(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """监听到的文章正文提及新公众号 → 自动入库为候选对标号。"""
+    import app.services.feishu as feishu_mod
+    from app.db.models import WechatCandidate
+    from app.services.content_extract import extract_account_refs
+
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    b = WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1", anchor_url="")
+    session.add(b)
+    session.commit()
+    fake = FakeWeread(cover_items=[
+        {"title": "某网盘资源合集 夸克网盘", "original_id": "w1", "read_num": 100, "like_num": 5},
+    ])
+    monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: fake)
+    monkeypatch.setattr(wechat_monitor, "fetch_article_content",
+                        lambda url, timeout=15: "正文含 https://pan.quark.cn/s/zzz 更多资源请关注公众号「资源君」")
+    monkeypatch.setattr(feishu_mod, "webhook_for", lambda settings, section: "")
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), client=FakeClient(remain=10.0), weread=fake)
+    assert out["new"] == 1
+    cands = session.scalars(select(WechatCandidate)).all()
+    assert any(c.name == "资源君" for c in cands), "应从正文提取新公众号并入库为候选"

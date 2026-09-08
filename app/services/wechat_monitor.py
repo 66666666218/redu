@@ -35,6 +35,7 @@ from app.services.quark_transfer import QuarkAuthError, QuarkError, QuarkTransfe
 from app.services.reader_platform_client import PlatformError, ReaderPlatformClient
 from app.services.sogou_weixin import search_articles as sogou_search_articles
 from app.services.tenant_base import _base, _record_run
+from app.services.content_extract import extract_account_refs
 from app.services.weread_client import WereadAuthError, WereadClient, WereadError, build_mp_url
 from app.utils import get_logger
 
@@ -521,6 +522,29 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                                "content": "🔴 资源共振 · 多号同发(" + str(len(res_hits)) + " 个资源)"}},
                     "elements": elements}
             FeishuClient(webhook, settings.feishu_secret).send_card(card)
+
+    # 文章内容交叉提取:从正文提取新公众号名 → 自动入库为候选对标号
+    from app.services.content_extract import extract_account_refs as _ear
+    from app.db.models import WechatCandidate
+
+    known_names = set(session.scalars(select(WechatBenchmark.nickname).where(
+        WechatBenchmark.user_id == user_id)).all())
+    seen_names = set(session.scalars(select(WechatCandidate.name).where(
+        WechatCandidate.user_id == user_id, WechatCandidate.status == "new")).all())
+    cross_new: list[WechatCandidate] = []
+    for r in rows:
+        if not r.content:
+            continue
+        for name in _ear(r.content):
+            if name in known_names or name in seen_names or name == (r.author or ""):
+                continue
+            seen_names.add(name)
+            cross_new.append(WechatCandidate(
+                user_id=user_id, name=name[:128], title=r.title[:200],
+                term="content_cross", status="new"))
+    if cross_new:
+        session.add_all(cross_new)
+        logger.info("内容交叉提取:发现 %d 个新公众号候选(用户 %s)", len(cross_new), user_id)
     return replacements
 
 
