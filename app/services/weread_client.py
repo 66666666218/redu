@@ -193,10 +193,27 @@ class WereadClient:
                 new_rt = c.value
         if not new_skey:
             return None
-        cookie = re.sub(r"wr_skey=[^;]*", f"wr_skey={new_skey}", self.cookie)
-        if new_rt:
-            cookie = re.sub(r"wr_rt=[^;]*", "wr_rt=" + quote(new_rt, safe=""), cookie)
-        return cookie
+        # 以续期响应的完整 Set-Cookie 为基础重建:服务端可能同时轮换多个字段,
+        # 只拼 skey/rt 会得到"半新半旧"的不一致 Cookie(实测 shelf -2012)。
+        # 旧 Cookie 中未被轮换的字段(设备/昵称等)原样保留。
+        jar_map = {c.name: c.value for c in jar.cookies if c.name and c.value}
+        parts: list[str] = []
+        seen: set[str] = set()
+        for kv in self.cookie.split(";"):
+            name, _, value = kv.strip().partition("=")
+            if not name:
+                continue
+            if name in jar_map:
+                out_v = quote(jar_map[name], safe="~") if name == "wr_rt" else jar_map[name]
+                parts.append(f"{name}={out_v}")
+                seen.add(name)
+            else:
+                parts.append(f"{name}={value}")
+        for name, value in jar_map.items():
+            if name not in seen:
+                out_v = quote(value, safe="~") if name == "wr_rt" else value
+                parts.append(f"{name}={out_v}")
+        return "; ".join(parts)
 
     def latest_article(self, book_id: str) -> dict | None:
         """{title, url, publish_at=None, content} 或 None(暂无文章)。"""

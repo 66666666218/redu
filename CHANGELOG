@@ -1,5 +1,7 @@
 # CHANGELOG
 
+- [2026-09-08 07:10] FEAT: **LLM 叙事层接入(DeepSeek,OpenAI 兼容)——新文推送自动附 AI 运营解读** — 用户提供 DeepSeek key(实测有效,路由 deepseek-v4-flash)。新增 `app/services/llm_client.py`:`narrate_articles(base_url, api_key, model, articles, signals)`(OpenAI 兼容 chat/completions,system prompt 注入网盘推广运营语境,输出每篇"内容/受众→值不值得追→建议推广标题",失败返回 None 永不阻塞)。接入 `_push_listen`:每轮盘链文优先取 ≤`llm_narrate_limit`(3) 篇生成 🤖AI 解读段追加到推送卡片;key/model/base_url 走 settings(`DEEPSEEK_API_KEY/DEEPSEEK_MODEL/DEEPSEEK_BASE_URL`)。真实 E2E 验证:宫崎骏动画样本输出"受众→值得跟进理由→建议推广标题"完整可用的运营解读。修复:调用参数顺序(model/key 传反致 401)。成本参考:deepseek 每篇 ≈¥0.002~0.01(Files: app/services/llm_client.py, app/services/wechat_monitor.py, config/settings.py, tests/, CHANGELOG)
+
 - [2026-09-08 06:30] PERF: **盘链归一化表 wechat_pan_links——资源共振查询去 LIKE 全表扫** — 遗留优化落地:新增归一化表(每[文章,分享链]一行,pan_url 索引),入库时同步写链接行(_insert_new_articles flush 后拆分);资源共振计数由 `pan_urls LIKE %…%` 全表扫描改为索引等值查询(语义不变:窗口内含自身的文章数 ≥2);旧数据一次性自动回填(共振检查时表空且有盘链旧文则回填,之后恒跳过)。模块拆分(wechat_monitor 按域拆包)记为**暂缓架构决策**并写入 dev.md——该文件正被并行工作流活跃演进,结构性移动合并冲突风险高,待稳定后执行。全量 227 项通过(新增归一化/共振/回填 2 项)(Files: app/db/models.py, app/services/wechat_monitor.py, tests/test_wechat_monitor.py, doc/dev.md, CHANGELOG)
 
 - [2026-09-08 06:00] FIX: **微博/抖音/百度实时推送统一 column_set 网格卡片(与闲鱼同款根治格式错乱)** — 上一轮只改了闲鱼,通用板块仍用"全角空格补齐"伪表格(lark_md 比例字体下必然错位)。`run_feishu_realtime` else 分支改 column_set 网格列:名称(6)/变化(2)/预测(2)/置信(1)/趋势(1),灰底表头+note 说明触发规则,保留智能体预测/置信度/趋势;已向微博专属群发送真实格式预览验证。相关 4 处测试 Fake 补 send_card 并适配断言(全量 225 项通过)(Files: app/services/feishu.py, tests/test_feishu.py, CHANGELOG)

@@ -710,6 +710,22 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
     if len(rows) > 20:
         elements.append({"tag": "note", "elements": [{"tag": "plain_text",
             "content": f"…另有 {len(rows) - 20} 篇,见平台文章列表"}]})
+    # LLM 叙事层:盘链文优先交给大模型解读(失败/未配 key 静默降级,不影响推送)
+    if settings.deepseek_api_key:
+        try:
+            from app.services.llm_client import narrate_articles
+
+            top = sorted(rows, key=lambda r: (not r.pan_types, -(r.read_num or 0)))[: settings.llm_narrate_limit]
+            ctx = [{"title": r.title, "summary": (r.content or "")[:200],
+                    "pan_types": r.pan_types} for r in top]
+            reading = narrate_articles(settings.deepseek_base_url, settings.deepseek_api_key,
+                                       settings.deepseek_model, ctx)
+            if reading:
+                elements.append({"tag": "hr"})
+                elements.append({"tag": "div", "text": {"tag": "lark_md",
+                    "content": "🤖 **AI 解读**" + chr(10) + reading[:1500]}})
+        except Exception:  # noqa: BLE001 - 叙事失败不影响推送
+            logger.exception("LLM 叙事失败 user=%s", user_id)
     try:
         FeishuClient(wh, settings.feishu_secret).send_card({
             "config": {"wide_screen_mode": True},

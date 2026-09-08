@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     wechat_resample_growth_pct: float = 100  # 相邻采样阅读增长≥该百分比 → 爆点苗头
     wechat_burst_min_reads: int = 200        # 爆点苗头最低绝对阅读数(滤大号基线噪音)
     wechat_resonance_hours: int = 48         # 资源共振窗口(同一盘链 N 小时内 ≥2 篇文章)
+    deepseek_api_key: str = ""               # DeepSeek API key(LLM 叙事层,OpenAI 兼容)
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_model: str = "deepseek-chat"
+    llm_narrate_limit: int = 3               # 每轮推送最多交给 LLM 解读的文章数
     focus_alert_enabled: bool = True   # 重点关键词告警(跨板块共振/板块内反复)开关
     focus_repeat_rounds: int = 3       # 板块内"反复出现"的轮数阈值(近24h同关键词出现≥N轮)
     focus_min_len: int = 4             # 跨板块匹配的最短归一化关键词长度(防误配)
