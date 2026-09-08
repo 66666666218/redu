@@ -355,6 +355,18 @@ class WechatBenchmark(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
+class WechatPanLink(Base):
+    """文章盘链归一化表:每 (文章, 分享链) 一行,资源共振查询走索引(替代 LIKE 全表扫)。"""
+
+    __tablename__ = "wechat_pan_links"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    article_id: Mapped[int] = mapped_column(ForeignKey("wechat_articles.id"), index=True)
+    pan_url: Mapped[str] = mapped_column(String(500), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
 class AgentStage(Base):
     """苗头 Agent 的关键词生命周期记忆(思维状态):苗头→上升→爆发→回落。"""
 

@@ -28,7 +28,8 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
-from app.db.models import FeishuAlert, WechatArticle, WechatBenchmark, WechatCandidate, WechatTrafficSample
+from app.db.models import (FeishuAlert, WechatArticle, WechatBenchmark, WechatCandidate,
+                           WechatPanLink, WechatTrafficSample)
 from app.services.dajiala_client import DajialaClient, DajialaError, DajialaNoBalance
 from app.services.quark_transfer import QuarkAuthError, QuarkError, QuarkTransfer, extract_quark_urls
 from app.services.reader_platform_client import PlatformError, ReaderPlatformClient
@@ -409,7 +410,29 @@ def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchm
                             pan_urls=chr(10).join(pan_urls)[:2000])
         session.add(row)
         added.append(row)
+    if added:
+        session.flush()  # 拿到自增 id,同步写盘链归一化表(资源共振走索引查询)
+        for r in added:
+            for u in [x.strip() for x in (r.pan_urls or "").splitlines() if x.strip()]:
+                session.add(WechatPanLink(user_id=user_id, article_id=r.id, pan_url=u[:500],
+                                          created_at=r.created_at or datetime.now()))
     return added
+
+
+def _backfill_pan_links(session: Session) -> None:
+    """一次性回填:归一化表建表前的旧文章,把 pan_urls 拆分写入 wechat_pan_links。
+
+    触发条件:表为空且存在带盘链的旧文章(个人规模一次回填毫秒~秒级,之后恒跳过)。
+    """
+    if session.scalar(select(func.count()).select_from(WechatPanLink)) or             not session.scalar(select(func.count()).select_from(WechatArticle).where(
+                WechatArticle.pan_urls != "")):
+        return
+    for r in session.scalars(select(WechatArticle).where(WechatArticle.pan_urls != "")).all():
+        for u in [x.strip() for x in (r.pan_urls or "").splitlines() if x.strip()]:
+            session.add(WechatPanLink(user_id=r.user_id, article_id=r.id, pan_url=u[:500],
+                                      created_at=r.created_at or datetime.now()))
+    session.commit()
+    logger.info("盘链归一化表已回填历史文章")
 
 
 def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
@@ -460,19 +483,23 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
             if dead:
                 break
     # 资源级共振:同一盘链在窗口期内被 ≥2 篇文章推送 → 同行网络都在发的确认级爆点资源
+    from app.services.feishu import _col_set_row
     from app.services.feishu_client import FeishuClient, webhook_for
     from app.services.alert_service import feishu_alert_gate
 
+    _backfill_pan_links(session)  # 一次性回填归一化表建成前的旧文章盘链
     checked: set[str] = set()
     res_hits: list[tuple[str, WechatArticle, int]] = []
+    res_window = datetime.now() - timedelta(hours=settings.wechat_resonance_hours)
     for r in rows:
         for u in [x.strip() for x in (r.pan_urls or "").splitlines() if x.strip()]:
             if u in checked:
                 continue
             checked.add(u)
-            cnt = session.scalar(select(func.count()).select_from(WechatArticle).where(
-                WechatArticle.pan_urls.contains(u, autoescape=True),
-                WechatArticle.created_at >= datetime.now() - timedelta(hours=settings.wechat_resonance_hours)))
+            cnt = session.scalar(select(func.count()).select_from(WechatPanLink).where(
+                WechatPanLink.pan_url == u,
+                WechatPanLink.created_at >= res_window,
+                WechatPanLink.article_id != r.id)) + 1  # +1 = 本篇自身
             if (cnt or 0) >= 2 and feishu_alert_gate(
                     session, user_id, "focus_res", "res:" + u[:120],
                     settings.focus_cooldown_hours, f"{cnt} 篇同发"):

@@ -1,5 +1,7 @@
 # CHANGELOG
 
+- [2026-09-08 06:30] PERF: **盘链归一化表 wechat_pan_links——资源共振查询去 LIKE 全表扫** — 遗留优化落地:新增归一化表(每[文章,分享链]一行,pan_url 索引),入库时同步写链接行(_insert_new_articles flush 后拆分);资源共振计数由 `pan_urls LIKE %…%` 全表扫描改为索引等值查询(语义不变:窗口内含自身的文章数 ≥2);旧数据一次性自动回填(共振检查时表空且有盘链旧文则回填,之后恒跳过)。模块拆分(wechat_monitor 按域拆包)记为**暂缓架构决策**并写入 dev.md——该文件正被并行工作流活跃演进,结构性移动合并冲突风险高,待稳定后执行。全量 227 项通过(新增归一化/共振/回填 2 项)(Files: app/db/models.py, app/services/wechat_monitor.py, tests/test_wechat_monitor.py, doc/dev.md, CHANGELOG)
+
 - [2026-09-08 06:00] FIX: **微博/抖音/百度实时推送统一 column_set 网格卡片(与闲鱼同款根治格式错乱)** — 上一轮只改了闲鱼,通用板块仍用"全角空格补齐"伪表格(lark_md 比例字体下必然错位)。`run_feishu_realtime` else 分支改 column_set 网格列:名称(6)/变化(2)/预测(2)/置信(1)/趋势(1),灰底表头+note 说明触发规则,保留智能体预测/置信度/趋势;已向微博专属群发送真实格式预览验证。相关 4 处测试 Fake 补 send_card 并适配断言(全量 225 项通过)(Files: app/services/feishu.py, tests/test_feishu.py, CHANGELOG)
 
 - [2026-09-08 05:30] REFACTOR: **整体架构审查三项优化——调度线程池/告警冷却门统一/清理覆盖新表** — 整体架构审查落地:① 调度器 13+ 作业共享默认 10 线程,采集/监听等网络长任务会互相饿死 → ThreadPoolExecutor 扩到 24;② "冷却去重+推送"模式在 notify_incident/focus_alert/_notify_burst/资源共振 **4 处重复实现**(bug 面扩散) → 抽出共享 `alert_service.feishu_alert_gate`(冷却门:写入/刷新记录并返回是否允许推送),4 处调用方统一改走该门;③ 数据清理 `_TABLES` 补新表:`wechat_traffic_samples`(采样点)/`feishu_alerts`(冷却记录)/`agent_stages`(阶段记忆)按 30 天保留期清理,防无限增长(微信文章库为累积资产,设计上不清理)。全量 225 项通过(Files: app/services/{scheduler.py,alert_service.py,wechat_monitor.py,focus_alert.py}, app/db/maintenance.py, CHANGELOG)

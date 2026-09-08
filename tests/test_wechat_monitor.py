@@ -5,15 +5,17 @@ os.environ.setdefault("JWT_SECRET", "test_secret_0123456789abcdef0123456789abcde
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 
 import pytest
+from datetime import datetime, timedelta
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from app.db.database import Base
 from app.db import models  # noqa: F401
-from app.db.models import RunRecord, WechatArticle, WechatBenchmark, WechatCandidate
+from app.db.models import FeishuAlert, RunRecord, WechatArticle, WechatBenchmark, WechatCandidate, WechatPanLink, WechatTrafficSample
 from config.settings import Settings
 from app.services import wechat_monitor
 from app.services.dajiala_client import DajialaClient
+from app.services import feishu_client
 
 
 def _settings(**kw) -> Settings:
@@ -673,3 +675,75 @@ def test_sample_traffic_balance_trims(session, monkeypatch: pytest.MonkeyPatch) 
     out = wechat_monitor.sample_traffic(session, 1, settings=_settings(), client=fake)
     assert out["sampled"] == 1
     assert out["balance_after"] >= 0
+
+
+# ---------------------------------------------------------------- 盘链归一化 + 资源共振
+def test_pan_links_normalized_and_resonance(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """① 入库时盘链写入归一化表;② 同一盘链被 ≥2 篇推送 → 🔴资源共振卡(冷却去重);③ 旧文自动回填。"""
+    b = WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A")
+    session.add(b)
+    session.commit()
+    st = _settings(dajiala_key="", quark_cookie="", pan_transfer_enabled=False,
+                   wechat_resonance_hours=48, focus_cooldown_hours=24,
+                   feishu_webhook_wechat="https://open.feishu.cn/hook/wechat")
+
+    items = [
+        {"title": "夸克: https://pan.quark.cn/s/abc123", "url": "https://mp.weixin.qq.com/s/x1"},
+        {"title": "另一号也推同一资源 https://pan.quark.cn/s/abc123", "url": "https://mp.weixin.qq.com/s/x2"},
+    ]
+    rows = wechat_monitor._insert_new_articles(session, 1, b, items, source="sync")
+    session.commit()
+    links = session.scalars(select(WechatPanLink)).all()
+    assert len(links) == 2 and all(l.pan_url == "https://pan.quark.cn/s/abc123" for l in links)
+
+    sent: list[str] = []
+
+    class _FakeFeishu:
+        def __init__(self, webhook, secret="") -> None:
+            pass
+
+        def send(self, msg: str) -> bool:
+            sent.append(msg)
+            return True
+
+        def send_card(self, card: dict) -> bool:
+            sent.append(str(card))
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
+    out = wechat_monitor._enrich_new_articles(session, 1, st, rows, client=None, allow_paid=False)
+    assert out == {}  # 无 dajiala 采样,仅共振
+    assert any("资源共振" in m and "abc123" in m for m in sent)
+    assert session.scalars(select(FeishuAlert).where(FeishuAlert.section == "focus_res")).all()
+
+    # 冷却期内不重推
+    out2 = wechat_monitor._enrich_new_articles(session, 1, st, rows, client=None, allow_paid=False)
+    assert out2 == {} and len(sent) == 1
+
+
+def test_pan_links_backfill_legacy_articles(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """归一化表建成前的旧文章(有 pan_urls 无链接行)→ 共振检查时自动回填。"""
+    b = WechatBenchmark(user_id=1, nickname="号A")
+    session.add(b)
+    a = WechatArticle(user_id=1, title="旧文", url="https://mp.weixin.qq.com/s/old",
+                      pan_urls="https://pan.quark.cn/s/legacy", source="listen",
+                      benchmark_id=b.id, created_at=datetime.now() - timedelta(hours=2))
+    session.add(a)
+    session.commit()
+    assert session.scalars(select(WechatPanLink)).all() == []  # 尚未回填
+
+    class _FakeWeread:
+        def latest_article(self, book_id):
+            return {"title": "某网盘资源新篇", "url": "https://mp.weixin.qq.com/s/new",
+                    "review_id": "MP_WXS_1_r1", "digest": "", "name": "号A"}
+
+        def mp_content(self, rid):
+            return "正文含 https://pan.quark.cn/s/legacy 同一资源"
+
+    from config.settings import Settings as _S
+    st_local = _S(_env_file=None, is_dev=True, dajiala_key="", wechat_resonance_hours=48,
+                  focus_cooldown_hours=24, feishu_webhook_wechat="https://open.feishu.cn/hook/wechat")
+    monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: _FakeWeread())
+    wechat_monitor._weread_collect(1, b, _FakeWeread(), session)
+    links = session.scalars(select(WechatPanLink)).all()
+    assert len(links) == 1  # 新文入库写入归一化表
