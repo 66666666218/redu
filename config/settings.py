@@ -74,6 +74,8 @@ class Settings(BaseSettings):
     douhot_watch_daily_top: int = 100  # 每日日报里榜单搜索类关键词最多列出的相关主题条数
     douhot_alert_max: int = 5       # 单次判涨告警上限(防刷屏)
     douhot_alert_cooldown_hours: int = 24  # 同一内容词告警冷却(小时)
+    douhot_window_windows: str = "1,24"  # 关键词多窗口对比的窗口集(小时,逗号分隔;默认近1h+近1天)
+    douhot_window_cron: str = "*/20 * * * *"  # 多窗口对比采集频率(默认每20分钟,与榜单采集互补)
     alert_cooldown_hours: int = 6   # 预警规则冷却(小时),避免重复刷
     proxy_url: str = ""             # 隧道代理地址
     proxy_user: str = ""            # 隧道代理账号

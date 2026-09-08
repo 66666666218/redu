@@ -335,3 +335,64 @@ def fetch_subscribe_words(cookie: str, settings: Settings | None = None,
         for it in raw
     ]
     return [it for it in items if it["title"]]
+
+
+# ---------------------------------------------------------------- 多窗口对比(近1h vs 近1天)
+_CONTRAST_WINDOWS = (1, 24)  # 默认对比窗口:近1小时 + 近1天(用户选定;可经 DOUHOT_WINDOW_WINDOWS 改)
+
+
+def _windows_of(settings: Settings | None = None) -> tuple[int, ...]:
+    """解析对比窗口集(小时),非法/空回退默认 (1, 24)。"""
+    raw = getattr(settings, "douhot_window_windows", None) or "1,24"
+    out = []
+    for part in str(raw).split(","):
+        v = _normalize_date_window(part.strip()) if part.strip() else None
+        if v and v not in out:
+            out.append(v)
+    return tuple(out) or _CONTRAST_WINDOWS
+
+
+def fetch_keyword_windows(cookie: str, keyword: str, list_type: str = "word",
+                          settings: Settings | None = None,
+                          windows: list[int] | tuple[int, ...] | None = None) -> dict[int, dict]:
+    """同一关键词**多窗口**采集热度:返回 {window_hour: fetch 结果}。
+
+    word 走 `fetch_keyword_heat`(单值+trends),search/video/topic 走
+    `fetch_list_keyword_heat`(该窗口最优命中,含 rank);订阅榜无 keyword 参数,返回空。
+    """
+    out: dict[int, dict] = {}
+    for w in (windows or _windows_of(settings)):
+        if list_type == "word":
+            h = fetch_keyword_heat(cookie, keyword, settings, date_window=w)
+        elif list_type in ("search", "video", "topic"):
+            h = fetch_list_keyword_heat(cookie, list_type, keyword, settings, date_window=w)
+        else:
+            continue
+        out[w] = h
+    return out
+
+
+def window_contrast(h1: dict, h24: dict) -> dict:
+    """近1小时 vs 近1天 热度对比信号(同一关键词找趋势)。
+
+    `ratio` = 近1h热度 / max(近1天热度, 1)。标签判定(尺度无关,用 1 作"冷"阈值):
+    - 🆕 新起势:近1天冷(≤1)而近1h起来 → signal=burst(起势)
+    - 🔥 爆发:近1h ≥ 近1天的 1.5 倍且近1天非冷 → signal=burst(激增)
+    - 📉 回落:近1h < 近1天的 0.5 倍(近1天高但近1h降温) → signal=fall
+    - ➡️ 高位延续:其余 → signal=steady
+    - 冷启动:两者都冷 → signal=flat(不上榜/无数据)
+    """
+    s1 = h1.get("score") or 0
+    s24 = h24.get("score") or 0
+    ratio = (s1 / s24) if s24 else (s1 / 1)
+    if s1 <= 1 and s24 <= 1:
+        label, signal = "冷启动", "flat"
+    elif s24 <= 1 and s1 > 1:
+        label, signal = "新起势", "burst"
+    elif s24 > 1 and ratio >= 1.5:
+        label, signal = "爆发", "burst"
+    elif s24 > 1 and s1 < s24 * 0.5:
+        label, signal = "回落", "fall"
+    else:
+        label, signal = "高位延续", "steady"
+    return {"ratio": round(ratio, 2), "h1": s1, "h24": s24, "label": label, "signal": signal}

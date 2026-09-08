@@ -129,6 +129,37 @@ def _cron_trigger(expr: str, default: dict) -> CronTrigger:
         return CronTrigger(**default)
 
 
+def douhot_window_tick(settings: Settings | None = None) -> dict:
+    """抖音关键词多窗口对比专用 tick(每 DOUHOT_WINDOW_CRON 一次)。
+
+    独立于 collect_tick:遍历全部用户 + 逐词打热点宝接口(每词 ≥2 次查询),
+    与榜单采集错峰,避免抢占;命中爆发/新起/回落 → 推飞书。
+    """
+    from app.db import get_session_local
+    from app.db.models import User
+    from app.services.douhot_window import collect_windows, run_feishu
+    from sqlalchemy import select
+
+    settings = settings or get_settings()
+    db = get_session_local()()
+    users_ok = pushed = 0
+    try:
+        for uid in db.scalars(select(User.id).order_by(User.id)).all():
+            try:
+                out = collect_windows(db, uid, settings=settings)
+                if out.get("status") == "success" and out.get("ok"):
+                    users_ok += 1
+                    pushed += run_feishu(db, uid, settings)
+            except Exception:  # noqa: BLE001 - 单用户失败不影响其余
+                db.rollback()
+                logger.exception("抖音多窗口对比失败 user=%s", uid)
+    finally:
+        db.close()
+    if users_ok or pushed:
+        logger.info("抖音多窗口对比完成:用户=%s 推送=%s", users_ok, pushed)
+    return {"users": users_ok, "pushed": pushed}
+
+
 def wechat_collect_tick(settings: Settings | None = None) -> dict:
     """公众号监听专用 tick(每分钟,独立于 collect_tick)。
 
@@ -199,6 +230,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         (traffic_tick, _get_settings().wechat_traffic_cron, {"minute": 30, "hour": 21}, "wechat_traffic"),
         (traffic_tick, "30 9 * * *", {"minute": 30, "hour": 9}, "wechat_traffic_am"),
         (agent_tick_all_users, "*/30 * * * *", {"minute": "*/30"}, "early_agent_tick"),
+        (douhot_window_tick, _get_settings().douhot_window_cron, {"minute": "*/20"}, "douhot_window_tick"),
         (weread_refresh_tick, _get_settings().weread_refresh_cron, {"minute": 50, "hour": 7}, "weread_refresh"),
         (candidate_discover_tick, _get_settings().candidate_discover_cron, {"minute": 20, "hour": 8}, "wechat_candidates"),
         (run_feishu_daily, _get_settings().feishu_daily_cron, {"minute": 0, "hour": 8}, "feishu_daily"),

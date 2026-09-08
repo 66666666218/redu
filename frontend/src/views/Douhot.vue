@@ -13,6 +13,7 @@ const list = ref([])
 const loading = ref(false)
 const busy = ref(false)
 const watches = ref([])
+const windowRows = ref([])
 const watchForm = ref({ list_type: 'word', keyword: '', filter_keyword: '', date_window: 1 })
 const searchKw = ref('')
 const searchFilter = ref('')
@@ -85,6 +86,23 @@ async function changeWatchWindow(w, v) {
 async function loadWatches() {
   try { watches.value = await api.douhotWatchAnalytics() } catch {}
 }
+async function loadWindows() {
+  try { windowRows.value = (await api.douhotWatchWindows()).items || [] } catch {}
+}
+async function refreshWindows() {
+  busy.value = 'win'
+  try {
+    const r = await api.douhotWatchWindowsRefresh()
+    if (r.status === 'skipped') toastError(r.reason === 'no_watch' ? '还没有监控词,先添加关键词监控' : r.reason === 'no_cookie' ? '未配置抖音(热点宝) Cookie' : '本轮跳过')
+    else toastOk(`多窗口对比采集完成:${r.ok || 0} 词 / ${r.snaps || 0} 快照` + (r.pushed ? `,推飞书 ${r.pushed} 条异动` : ''))
+    await loadWindows()
+  } catch (e) { toastError(e.message) } finally { busy.value = false }
+}
+function winSignalClass(signal, label) {
+  if (signal === 'burst') return label === '新起势' ? 'up' : 'down'
+  if (signal === 'fall') return 'down'
+  return ''
+}
 async function collect() {
   busy.value = true
   try {
@@ -111,7 +129,7 @@ function fmt(v) { return v == null ? '—' : (Math.abs(v) >= 10000 ? (v/1e4).toF
 function pct(v) { return v == null ? '—' : (v*100).toFixed(1)+'%' }
 function tclass(l) { return l === '上升期' ? 'up' : (l === '回落期' ? 'down' : '') }
 
-onMounted(async () => { await loadList('word'); await loadWatches() })
+onMounted(async () => { await loadList('word'); await loadWatches(); await loadWindows() })
 </script>
 
 <template>
@@ -212,6 +230,26 @@ onMounted(async () => { await loadList('word'); await loadWatches() })
         </div>
       </div>
       <div v-else class="empty">输入任意关键词关注,采集后会定向查热度并预测走势</div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <div class="row" style="gap:10px;flex-wrap:wrap;align-items:center">
+        <h3 style="margin:0">📊 多窗口趋势对比(近1h vs 近1天)</h3>
+        <button class="ghost" :disabled="busy==='win'" @click="refreshWindows">{{ busy==='win' ? '采集中…' : '立即采集对比' }}</button>
+        <span class="empty">同一关键词同时看近1小时与近1天热度,比值找趋势:🔥爆发/🆕新起 → 跟进 · 📉回落 → 别追过时</span>
+      </div>
+      <table v-if="windowRows.length">
+        <tr><th>关键词</th><th>近1h</th><th>近1天</th><th>比例</th><th>趋势</th><th>榜型</th></tr>
+        <tr v-for="r in windowRows" :key="r.list_type + r.keyword">
+          <td>{{ r.keyword }}<div v-if="r.entry_title" class="empty">{{ r.entry_title.slice(0, 20) }}</div></td>
+          <td class="num">{{ fmt(r.h1_score) }}</td>
+          <td class="num">{{ fmt(r.h24_score) }}</td>
+          <td class="num">{{ r.h1_score && r.h24_score ? r.ratio.toFixed(1) + 'x' : '—' }}</td>
+          <td :class="winSignalClass(r.signal, r.label)">{{ r.signal === 'burst' ? (r.label === '新起势' ? '🆕' : '🔥') + r.label : r.signal === 'fall' ? '📉' + r.label : r.label }}</td>
+          <td class="empty">{{ (tabs.find(x => x.key === r.list_type) || {}).label }}</td>
+        </tr>
+      </table>
+      <div v-else class="empty">暂无对比数据:添加关键词监控后点「立即采集对比」,或等待每 20 分钟自动采集</div>
     </div>
   </div>
 </template>

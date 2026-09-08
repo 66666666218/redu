@@ -63,6 +63,29 @@ def douhot_watch_analytics(user: User = Depends(get_current_user), db: Session =
     return tenant.douhot_watch_analytics(db, user.id)
 
 
+@router.get("/api/douhot/watch-windows")
+def douhot_watch_windows(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """关键词多窗口对比分析(近1h vs 近1天):各词两档值 + 比例 + 趋势标签。"""
+    from app.services.douhot_window import analytics
+
+    items = analytics(db, user.id)
+    return {"count": len(items), "items": items}
+
+
+@router.post("/api/douhot/watch-windows/refresh")
+def douhot_watch_windows_refresh(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """立即采集一轮关键词多窗口热度(近1h/近1天)并落库。"""
+    from app.services.douhot_window import collect_windows, run_feishu
+
+    out = collect_windows(db, user.id)
+    if out.get("status") == "skipped":
+        return out
+    pushed = run_feishu(db, user.id)  # 命中异动即时推
+    return {"platform": "douhot_window", "status": out.get("status"),
+            "words": out.get("words", 0), "ok": out.get("ok", 0),
+            "snaps": out.get("snaps", 0), "pushed": pushed}
+
+
 @router.post("/api/watch/{section}")
 def watch_add(section: str, payload: dict, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """在某板块添加关键词监控(微博/闲鱼/抖音/百度通用)。"""

@@ -351,6 +351,18 @@
 ```
 
 > `trend_label`:上升期/回落期/震荡/平稳;`forecast_next` 为线性外推的下一轮预测热度;
+
+### 9b.x 抖音关键词多窗口对比(2026-09-08)
+
+- **对比分析**: GET `/api/douhot/watch-windows`
+  → `{"count":N,"items":[{"list_type","keyword","entry_title","h1_score","h24_score","ratio","label","signal","captured_at"}]}`
+- **立即采集对比**: POST `/api/douhot/watch-windows/refresh`
+  → `{"status":"success","words":N,"ok":N,"snaps":N,"pushed":M}`(skipped: `no_watch`/`no_cookie`)
+- **原理**:同一监控词每轮**同时**拉近1h + 近1天热度(`DOUHOT_WINDOW_WINDOWS` 默认 `1,24`,可改
+  `1,24,72,168`),各窗口记一条 `douhot_window_snap`;`ratio`=近1h/近1天,标签:
+  🆕新起势(近1天冷近1h起)· 🔥爆发(≥1.5x)· 📉回落(<0.5x)· ➡️高位延续 · 冷启动
+- **调度**:每 20 分钟 `douhot_window_tick`(`DOUHOT_WINDOW_CRON`),命中🆕/🔥/📉自动推抖音飞书群
+- 独立 `douhot_window_snap` 表,不侵入单窗口 watch 链路
 > `series` 为历史热度序列(供前端画迷你趋势线);`summary` 为自动生成的中文分析摘要。
 > 样本 <2 时 `growth`/`forecast_next` 为 `null`(尚未积累足够数据)。
 > ⚠️ 旧文档曾写有 "移除关注 DELETE `/api/douhot/watch`" ——**当前代码并无该 DELETE 接口**,请勿调用。

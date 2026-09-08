@@ -259,6 +259,29 @@ class FeishuAlert(Base):
     alerted_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
+class DouhotWindowSnap(Base):
+    """抖音关键词**多窗口**热度快照(与 DouhotWatchSnap 单窗口互补,独立表零侵入)。
+
+    每个监控词每轮采集**同时**拉多个时间窗(默认近1h=1 + 近1天=24,见 DOUHOT_WINDOW_WINDOWS),
+    各窗一条快照 → 同一关键词跨窗口对比找趋势(1h 激增=爆发 / 1h 降温=回落 / 1天冷1h起=新起势)。
+
+    `entry_title`=该窗口命中条目标题(内容词留空);`captured_at` 同一轮共享一批时间戳。
+    """
+
+    __tablename__ = "douhot_window_snap"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    list_type: Mapped[str] = mapped_column(String(32), default="word")
+    keyword: Mapped[str] = mapped_column(String(128), index=True)
+    entry_title: Mapped[str] = mapped_column(String(255), default="")
+    window: Mapped[int] = mapped_column(Integer, default=24)   # 小时:1=近1h, 24=近1天
+    score: Mapped[float] = mapped_column(Float, default=0)
+    rank_now: Mapped[int] = mapped_column(Integer, default=0)
+    trend_growth: Mapped[float] = mapped_column(Float, default=0)  # 该窗口由 trends 序列算的增长率
+    captured_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
 class WechatArticle(Base):
     """公众号文章(暂供内容选题分析;等接入带流量的 API 后扩展流量字段)。"""
 
