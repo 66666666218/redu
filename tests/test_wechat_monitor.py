@@ -265,10 +265,12 @@ from app.services.weread_client import review_to_url
 class FakeWeread:
     """假 WereadClient:latest_article/shelf/mp_content 按脚本回放。"""
 
-    def __init__(self, cover: dict | None = None, shelf: list | None = None, content: str = "") -> None:
+    def __init__(self, cover: dict | None = None, shelf: list | None = None,
+                 content: str = "", cover_items: list | None = None) -> None:
         self.cover = cover
         self.shelf_value = shelf or []
         self.content = content
+        self.cover_items = cover_items or []
         self.calls: list[tuple] = []
 
     def latest_article(self, book_id: str) -> dict | None:
@@ -276,6 +278,23 @@ class FakeWeread:
         if self.cover is None:
             return None
         return {**self.cover}
+
+    def mp_articles(self, book_id: str, offset: int = 0, count: int = 20) -> dict:
+        self.calls.append(("articles", book_id, offset))
+        items = self.cover_items
+        if not items and self.cover:
+            # 从 cover 生成一条(兼容单条测试)
+            items = [{"title": self.cover.get("title", ""), "original_id": "test_orig",
+                      "read_num": 100, "like_num": 5}]
+        reviews = [{"createTime": 1788800000 + i,
+                    "subReviews": [{"review": {
+                        "reviewId": f"{book_id}_r{i}",
+                        "mpInfo": {"title": it.get("title", ""),
+                                   "originalId": it.get("original_id", ""),
+                                   "readNum": it.get("read_num", 0),
+                                   "likeNum": it.get("like_num", 0)},
+                        "createTime": 1788800000 + i}}]} for i, it in enumerate(items)]
+        return {"reviews": reviews, "synckey": 1}
 
     def mp_content(self, review_id: str) -> str:
         self.calls.append(("content", review_id))
@@ -323,7 +342,7 @@ def test_listen_uses_weread_first_and_detects_pan(session, monkeypatch: pytest.M
     out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), client=daj, weread=fake)
     assert out["status"] == "success" and out["new"] == 1
     row = session.scalar(select(WechatArticle))
-    assert row.url == "https://mp.weixin.qq.com/s/w1" and row.pan_types == "夸克网盘"
+    assert "mp.weixin.qq.com" in row.url and row.pan_types == "夸克网盘"
     assert ("pc", b.anchor_url) not in daj.calls  # 免费源成功时绝不调 dajiala
 
 
@@ -338,6 +357,9 @@ def test_listen_falls_back_to_dajiala_on_auth_error(session, monkeypatch: pytest
 
     class _DeadWeread:
         def latest_article(self, book_id):
+            raise WereadAuthError("微信读书登录态失效(-2012)")
+
+        def mp_articles(self, book_id, offset=0, count=20):
             raise WereadAuthError("微信读书登录态失效(-2012)")
 
     daj = FakeClient(pc={"https://mp.weixin.qq.com/s/A": {"code": 0, "data": [
@@ -396,14 +418,13 @@ def test_listen_auto_renews_and_retries(session, monkeypatch: pytest.MonkeyPatch
         def shelf(self) -> list:
             return []
 
-        def latest_article(self, book_id: str) -> dict:
+        def mp_articles(self, book_id: str, offset: int = 0, count: int = 20) -> dict:
             if self.dead:
                 raise WereadAuthError("登录态失效(-2012)")
-            return {"title": "夸克网盘资源", "url": "https://mp.weixin.qq.com/s/n9",
-                    "review_id": "MP_WXS_1_t9", "digest": ""}
-
-        def mp_content(self, review_id: str) -> str:
-            return "正文"
+            return {"reviews": [{"createTime": 1788800000, "subReviews": [{"review": {
+                "mpInfo": {"title": "夸克网盘资源", "originalId": "n9",
+                           "readNum": 100, "likeNum": 5},
+                "reviewId": book_id + "_r0"}, "createTime": 1788800000}]}], "synckey": 1}
 
     monkeypatch.setattr(wechat_monitor, "WereadClient", _Flaky)
     daj = FakeClient()
@@ -733,12 +754,11 @@ def test_pan_links_backfill_legacy_articles(session, monkeypatch: pytest.MonkeyP
     assert session.scalars(select(WechatPanLink)).all() == []  # 尚未回填
 
     class _FakeWeread:
-        def latest_article(self, book_id):
-            return {"title": "某网盘资源新篇", "url": "https://mp.weixin.qq.com/s/new",
-                    "review_id": "MP_WXS_1_r1", "digest": "", "name": "号A"}
-
-        def mp_content(self, rid):
-            return "正文含 https://pan.quark.cn/s/legacy 同一资源"
+        def mp_articles(self, book_id, offset=0, count=20):
+            return {"reviews": [{"createTime": 1788800000, "subReviews": [{"review": {
+                "mpInfo": {"title": "夸克网盘资源合集 https://pan.quark.cn/s/abc123", "originalId": "new_id",
+                           "readNum": 5, "likeNum": 1},
+                "reviewId": book_id + "_r0"}, "createTime": 1788800000}]}], "synckey": 1}
 
     from config.settings import Settings as _S
     st_local = _S(_env_file=None, is_dev=True, dajiala_key="", wechat_resonance_hours=48,

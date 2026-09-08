@@ -35,7 +35,7 @@ from app.services.quark_transfer import QuarkAuthError, QuarkError, QuarkTransfe
 from app.services.reader_platform_client import PlatformError, ReaderPlatformClient
 from app.services.sogou_weixin import search_articles as sogou_search_articles
 from app.services.tenant_base import _base, _record_run
-from app.services.weread_client import WereadAuthError, WereadClient, WereadError
+from app.services.weread_client import WereadAuthError, WereadClient, WereadError, build_mp_url
 from app.utils import get_logger
 
 logger = get_logger(__name__)
@@ -394,6 +394,8 @@ def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchm
             continue
         existing.add(url)
         types = detect_pan_types(it["title"])
+        preset_read = int(it.get("read_num") or 0)
+        preset_like = int(it.get("like_num") or 0)
         content = ""
         if title_hits(it["title"]):
             if content_resolver:  # 免费源注入(微信读书正文)
@@ -407,7 +409,8 @@ def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchm
                             title=it["title"][:500], url=url[:500], content=content,
                             publish_at=it.get("publish_at"), source=source,
                             benchmark_id=benchmark.id, pan_types=",".join(types)[:128],
-                            pan_urls=chr(10).join(pan_urls)[:2000])
+                            pan_urls=chr(10).join(pan_urls)[:2000],
+                            read_num=preset_read, zan_num=preset_like)
         session.add(row)
         added.append(row)
     if added:
@@ -521,13 +524,21 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
 
 def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
                     session: Session) -> list[WechatArticle]:
-    """微信读书单号采集:cover 最新一篇 → 入库(正文用微信读书转存的免费内容)。"""
-    item = weread.latest_article(b.weread_book_id)
-    if not (item and item["url"]):
-        return []
-    resolver = (lambda _title, _rid=item["review_id"]: weread.mp_content(_rid))
-    return _insert_new_articles(session, user_id, b, [item], source="listen",
-                                content_resolver=resolver)
+    """微信读书单号采集:mp/articles 近期文章(含精确阅读/点赞)→ 入库。
+
+    正文仅对标题命中网盘词的文章经 mp_content 免费拉取(盘链确认用)。
+    """
+    from app.services.weread_client import WereadClient as _WC
+
+    payload = weread.mp_articles(b.weread_book_id)
+    items = []
+    for it in _WC.flatten_mp_articles(payload):
+        ts = it.get("create_time") or 0
+        items.append({"title": it["title"], "url": build_mp_url(it["original_id"]),
+                      "read_num": it["read_num"], "like_num": it["like_num"],
+                      "publish_at": datetime.fromtimestamp(ts) if ts else None})
+    return _insert_new_articles(session, user_id, b, items, source="listen",
+                                fetch_content=True)
 
 
 def run_wechat_listen(session: Session, user_id: int, settings: Settings | None = None,

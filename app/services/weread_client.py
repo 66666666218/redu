@@ -152,6 +152,36 @@ class WereadClient:
         body = html_mod.unescape(body)
         return re.sub(r"\s{2,}", " ", body).strip()[:100000]
 
+    def mp_articles(self, book_id: str, offset: int = 0, count: int = 20) -> dict:
+        """公众号历史文章列表(含每篇 精确阅读/点赞)。
+
+        返回原始 {reviews:[{createTime, subReviews:[{review:{mpInfo{title,originalId,
+        readNum,likeNum}, reviewId, createTime}}]}], synckey,...},由调用方展平。
+        """
+        return self._get("/web/mp/articles", {"bookId": book_id, "offset": offset, "count": count})
+
+    @staticmethod
+    def flatten_mp_articles(payload: dict) -> list[dict]:
+        """把 mp/articles 的 reviews→subReviews 展平成文章列表(同群发多篇文章不丢)。"""
+        items: list[dict] = []
+        for group in payload.get("reviews") or []:
+            group_time = group.get("createTime")
+            for sub in group.get("subReviews") or []:
+                rev = sub.get("review") or {}
+                mp = rev.get("mpInfo") or {}
+                title = str(mp.get("title") or "").strip()
+                if not title:
+                    continue
+                items.append({
+                    "title": title,
+                    "original_id": str(mp.get("originalId") or ""),
+                    "review_id": str(rev.get("reviewId") or sub.get("reviewId") or ""),
+                    "read_num": int(mp.get("readNum") or 0),
+                    "like_num": int(mp.get("likeNum") or 0),
+                    "create_time": int(rev.get("createTime") or group_time or 0),
+                })
+        return items
+
     # ---- 便捷封装 ----
     def refresh_skey(self, timeout: int = 20) -> str | None:
         """用长效 wr_rt 调 /web/login/renewal 换新短效 wr_skey,返回更新后的完整 Cookie 串。
