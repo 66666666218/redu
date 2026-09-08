@@ -885,22 +885,29 @@ def run_feishu_realtime(
                     })
                 pushed = len(pushed_items)
             else:
-                lines = [head]
-                # 给每个推送词补一句"预测/置信度"(历史样本 ≥2 才预测);固定左对齐列,缺省填 —
+                # 通用板块:column_set 网格列(与字体无关,永远对齐);带智能体预测/置信度/趋势
                 from app.services import keyword_agent
 
                 series = _SERIES.get(section, lambda db, uid: {})(db, user_id)
-                cols = [("名称", 32), ("变化", 8), ("预测", 12), ("置信度", 8), ("趋势", 8)]
-                lines.append(_aligned_row("  ", cols))
+                elements: list[dict[str, Any]] = [
+                    {"tag": "note", "elements": [{"tag": "plain_text",
+                     "content": "触发:新增 / 排名跳升 ≥3 / 涨幅 ≥30%"}]},
+                    _col_set_row([("**名称**", 6), ("**变化**", 2), ("**预测**", 2),
+                                  ("**置信**", 1), ("**趋势**", 1)], grey=True),
+                ]
                 for title, reason in pushed_items:
                     vals = [v for _, v in series.get(title, [])]
                     a = keyword_agent.analyze(title, vals) if len(vals) >= 2 else {}
                     fc = f"预测{a['forecast_next']:.0f}" if a.get("forecast_next") is not None else "—"
                     conf = a.get("confidence") if a.get("confidence") and a["confidence"] != "数据不足" else "—"
                     trend = a.get("trend_label") or "—"
-                    lines.append(_aligned_row("  ", [(title[:14], 32), (reason, 8), (fc, 12), (conf, 8), (trend, 8)]))
+                    elements.append(_col_set_row([
+                        (_md_safe(title)[:20], 6), (reason, 2), (fc, 2), (conf, 1), (trend, 1)]))
+                card = {"config": {"wide_screen_mode": True},
+                        "header": {"template": "blue", "title": {"tag": "plain_text", "content": head}},
+                        "elements": elements}
                 for wh in whs:
-                    FeishuClient(wh, settings.feishu_secret).send("\n".join(lines))
+                    FeishuClient(wh, settings.feishu_secret).send_card(card)
                 pushed = len(pushed_items)
             logger.info("飞书实时推送 section=%s user=%s 条数=%s", section, user_id, pushed)
         return pushed

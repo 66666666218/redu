@@ -241,7 +241,14 @@ def test_daily_includes_cross_section_and_tally(session) -> None:
 def test_realtime_only_pushes_new_and_big_jump(session, monkeypatch) -> None:
     seed_weibo(session)
     sent = []
-    monkeypatch.setattr(feishu, "FeishuClient", lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
+
+    def _fake(w, s):
+        class F:
+            def send(self, t): return (sent.append(t), True)[1]
+            def send_card(self, c): return (sent.append(str(c)), True)[1]
+        return F()
+
+    monkeypatch.setattr(feishu, "FeishuClient", _fake)
     n = run_feishu_realtime("weibo", 1, _settings(), db=session)
     # 触发:新增 D(新增即推)、A 升 3 名(≥3 名);B 掉 3 名不推;C 只在上一批不推
     assert n == 2
@@ -249,6 +256,7 @@ def test_realtime_only_pushes_new_and_big_jump(session, monkeypatch) -> None:
     assert "D" in joined and "新增" in joined
     assert "A" in joined and "+3名" in joined
     assert "B" not in joined
+    assert "column_set" in joined  # 网格卡片格式
 
 
 def test_realtime_respects_cooldown(session, monkeypatch) -> None:
@@ -259,7 +267,11 @@ def test_realtime_respects_cooldown(session, monkeypatch) -> None:
         n_calls["n"] += 1
         return True
 
-    monkeypatch.setattr(feishu, "FeishuClient", lambda w, s: type("F", (), {"send": fake_send})())
+    def fake_card(self, c):
+        n_calls["n"] += 1
+        return True
+
+    monkeypatch.setattr(feishu, "FeishuClient", lambda w, s: type("F", (), {"send": fake_send, "send_card": fake_card})())
     settings = _settings()
     first = run_feishu_realtime("weibo", 1, settings, db=session)
     second = run_feishu_realtime("weibo", 1, settings, db=session)  # 已写去重表,冷却期内应全走冷却 → 不重推
@@ -270,7 +282,13 @@ def test_realtime_message_includes_prediction(session, monkeypatch) -> None:
     """实时提醒给推送词补"预测/置信度/趋势"(历史样本≥2 才预测)。"""
     seed_weibo(session)
     sent = []
-    monkeypatch.setattr(feishu, "FeishuClient", lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
+    def _fake(w, s):
+        class F:
+            def send(self, t): return (sent.append(t), True)[1]
+            def send_card(self, c): return (sent.append(str(c)), True)[1]
+        return F()
+
+    monkeypatch.setattr(feishu, "FeishuClient", _fake)
     n = run_feishu_realtime("weibo", 1, _settings(), db=session)
     assert n >= 1
     joined = "\n".join(sent)
@@ -413,7 +431,13 @@ def test_keyword_burst_alert(monkeypatch, session) -> None:
     session.commit()
 
     sent = []
-    monkeypatch.setattr(feishu, "FeishuClient", lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
+    def _fake(w, s):
+        class F:
+            def send(self, t): return (sent.append(t), True)[1]
+            def send_card(self, c): return (sent.append(str(c)), True)[1]
+        return F()
+
+    monkeypatch.setattr(feishu, "FeishuClient", _fake)
     n = run_feishu_keyword_alerts(1, _settings(), db=session)
     assert n == 1
     assert "可能爆发" in sent[0] and "爆点" in sent[0]
@@ -595,7 +619,13 @@ def test_realtime_baidu_no_keyerror(monkeypatch, session) -> None:
         session.add(BaiduHotItem(user_id=1, title=title, heat=rank * 1000, rank=rank, captured_at=t2))
     session.commit()
     sent = []
-    monkeypatch.setattr(feishu, "FeishuClient", lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
+    def _fake(w, s):
+        class F:
+            def send(self, t): return (sent.append(t), True)[1]
+            def send_card(self, c): return (sent.append(str(c)), True)[1]
+        return F()
+
+    monkeypatch.setattr(feishu, "FeishuClient", _fake)
     n = run_feishu_realtime("baidu", 1, _settings(), db=session)
     assert n == 2          # 新增 D、A 升 3 名
     assert "百度热搜" in sent[0] and "D" in sent[0] and "A" in sent[0]
