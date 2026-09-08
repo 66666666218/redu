@@ -81,15 +81,24 @@ def test_collect_windows_writes_snaps(monkeypatch: pytest.MonkeyPatch, session) 
     session.add(DouhotWatch(user_id=1, section="douhot", list_type="video", keyword="乡镇晋升录", date_window=24))
     session.commit()
     monkeypatch.setattr(dw_mod, "get_cookies", lambda db, uid: {"douyin": "ck"})
+    # word → fetch_keyword_windows 单值(2 窗口)
     monkeypatch.setattr(douhot, "fetch_keyword_windows",
                         lambda cookie, kw, lt, settings=None, windows=None: {
                             1: {"score": 150, "rank_now": 1, "title": kw + "主题"},
                             24: {"score": 100, "rank_now": 2, "title": kw + "主题"},
                         })
+    # video → fetch_keyword_items 逐相关话题,每窗口返回 2 条相关话题
+    monkeypatch.setattr(douhot, "fetch_keyword_items",
+                        lambda cookie, lt, kw, settings=None, limit=50, filter_keyword="", date_window=None: [
+                            {"title": "话题甲", "score": date_window * 10, "trend_growth": 0},
+                            {"title": "话题乙", "score": date_window * 20, "trend_growth": 0},
+                        ])
     out = dw_mod.collect_windows(session, 1, settings=_settings())
-    assert out["status"] == "success" and out["words"] == 2 and out["ok"] == 2 and out["snaps"] == 4
+    assert out["status"] == "success" and out["words"] == 2 and out["ok"] == 2
+    # word 2 快照 + video(2 话题 × 2 窗口 = 4)快照
+    assert out["snaps"] == 6
     snaps = session.scalars(select(DouhotWindowSnap)).all()
-    assert len(snaps) == 4
+    assert len(snaps) == 6
     assert {s.window for s in snaps} == {1, 24}
     assert all(s.captured_at == snaps[0].captured_at for s in snaps)  # 同一轮一批
 
@@ -134,6 +143,29 @@ def test_analytics_covers_watch_even_without_snap(session) -> None:
     assert kws == {"有数据词", "无数据词"}  # 无快照词也在列表
     missing = next(r for r in rows if r["keyword"] == "无数据词")
     assert missing["signal"] == "flat" and missing["label"] == "冷启动"
+
+
+def test_analytics_compares_each_related_topic(session) -> None:
+    """视频/话题榜词:按词搜出的**每个相关话题**分别做近1h/近1天对比,而非只给词一行。"""
+    session.add(DouhotWatch(user_id=1, section="douhot", list_type="video", keyword="乡镇晋升录", date_window=24))
+    session.commit()
+    ts = datetime.now()
+    session.add_all([
+        DouhotWindowSnap(user_id=1, list_type="video", keyword="乡镇晋升录", entry_title="话题甲",
+                         window=1, score=15, captured_at=ts),
+        DouhotWindowSnap(user_id=1, list_type="video", keyword="乡镇晋升录", entry_title="话题甲",
+                         window=24, score=240, captured_at=ts),
+        DouhotWindowSnap(user_id=1, list_type="video", keyword="乡镇晋升录", entry_title="话题乙",
+                         window=1, score=5, captured_at=ts),
+        DouhotWindowSnap(user_id=1, list_type="video", keyword="乡镇晋升录", entry_title="话题乙",
+                         window=24, score=240, captured_at=ts),
+    ])
+    session.commit()
+    rows = douhot_window.analytics(session, 1, settings=_settings())
+    assert len(rows) == 2  # 两条相关话题,各一行
+    by_title = {r["entry_title"]: r for r in rows}
+    assert by_title["话题甲"]["signal"] == "burst" and by_title["话题甲"]["ratio"] == 1.5
+    assert by_title["话题乙"]["signal"] == "fall" and by_title["话题乙"]["ratio"] == 0.5
 
 
 def test_collect_skips_without_watch_or_cookie(session) -> None:

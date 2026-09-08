@@ -56,20 +56,37 @@ def collect_windows(session: Session, user_id: int, settings: Settings | None = 
             continue
         seen.add(key)
         try:
-            heat = douhot.fetch_keyword_windows(cookie, w.keyword, w.list_type, settings, windows=windows)
+            if w.list_type in ("search", "video", "topic"):
+                # 相关话题多窗口:按词搜出**所有相关话题**,每条话题各窗口一条快照
+                # (与"关键词监控"同款语义——监控词看的是它带出的整组相关主题,不是单个词)
+                cap = int(getattr(settings, "douhot_watch_entry_cap", None) or 100)
+                for win in windows:
+                    entries = douhot.fetch_keyword_items(cookie, w.list_type, w.keyword, settings,
+                                                         limit=cap, date_window=win)
+                    for e in entries:
+                        session.add(DouhotWindowSnap(
+                            user_id=user_id, list_type=w.list_type, keyword=w.keyword,
+                            entry_title=(e.get("title") or "")[:255], window=int(win),
+                            score=e.get("score") or 0, rank_now=0,
+                            trend_growth=e.get("trend_growth") or 0, captured_at=collect_ts))
+                        snaps += 1
+                ok += 1
+            else:
+                # 内容词(word):单值,保留 fetch_keyword_windows(搜索榜兜底)
+                heat = douhot.fetch_keyword_windows(cookie, w.keyword, w.list_type, settings, windows=windows)
+                if not heat:
+                    continue
+                ok += 1
+                for win, h in heat.items():
+                    session.add(DouhotWindowSnap(
+                        user_id=user_id, list_type=w.list_type, keyword=w.keyword,
+                        entry_title="", window=int(win),
+                        score=h.get("score") or 0, rank_now=h.get("rank_now") or 0,
+                        trend_growth=h.get("trend_growth") or 0, captured_at=collect_ts))
+                    snaps += 1
         except Exception:  # noqa: BLE001 - 单词失败不中断整轮
             logger.warning("抖音多窗口采集失败 keyword=%s list_type=%s", w.keyword, w.list_type)
             continue
-        if not heat:
-            continue
-        ok += 1
-        for win, h in heat.items():
-            session.add(DouhotWindowSnap(
-                user_id=user_id, list_type=w.list_type, keyword=w.keyword,
-                entry_title=(h.get("title") or "")[:255], window=int(win),
-                score=h.get("score") or 0, rank_now=h.get("rank_now") or 0,
-                trend_growth=h.get("trend_growth") or 0, captured_at=collect_ts))
-            snaps += 1
     session.commit()
     _record_run(session, user_id, "douhot_window", "success",
                 f"words={len(watches)} ok={ok} snaps={snaps}")
@@ -109,47 +126,44 @@ def query_windows(session: Session, user_id: int, list_type: str, keyword: str,
             "label": c["label"], "signal": c["signal"]}
 
 
-def _latest_batch(session: Session, user_id: int) -> dict[tuple[str, str], dict[int, DouhotWindowSnap]]:
-    """读取每个监控词**最近一轮**各窗口快照:{(list_type, keyword): {window: snap}}。"""
+def _latest_batch(session: Session, user_id: int) -> dict[tuple[str, str, str], dict[int, DouhotWindowSnap]]:
+    """读取每条[监控词,相关话题]**最近一轮**各窗口快照:{(list_type, keyword, entry_title): {window: snap}}。
+
+    以 (list_type, keyword) 词级的最新 captured_at 为一轮批次,同一轮的相关话题快照共享该轮时间戳。
+    """
     snaps = session.scalars(select(DouhotWindowSnap).where(
         DouhotWindowSnap.user_id == user_id)).all()
-    # 每词的最大 captured_at(一轮一批)
-    batch: dict[tuple[str, str], dict[int, DouhotWindowSnap]] = {}
+    last_ts: dict[tuple[str, str], datetime] = {}
     for s in snaps:
-        key = (s.list_type, s.keyword)
-        cur = batch.get(key)
-        if cur is None:
-            batch[key] = {s.window: s}
-            continue
-        ex = next(iter(cur.values()))
-        if s.captured_at > ex.captured_at:
-            batch[key] = {s.window: s}
-        else:
-            cur.setdefault(s.window, s)
+        k = (s.list_type, s.keyword)
+        if s.captured_at > last_ts.get(k, datetime.min):
+            last_ts[k] = s.captured_at
+    batch: dict[tuple[str, str, str], dict[int, DouhotWindowSnap]] = {}
+    for s in snaps:
+        k = (s.list_type, s.keyword)
+        if s.captured_at == last_ts[k]:
+            ek = (s.list_type, s.keyword, s.entry_title)
+            batch.setdefault(ek, {})[s.window] = s
     return batch
 
 
-def _contrast_of(snap: DouhotWindowSnap, settings: Settings | None = None) -> tuple[dict, dict]:
-    """取该词对比窗口的高/近一天两档快照(缺失的档用近1天兜底),算对比标签。"""
+def _contrast_of(snap: dict[int, DouhotWindowSnap],
+                 settings: Settings | None = None) -> tuple[DouhotWindowSnap | None, DouhotWindowSnap | None]:
+    """取该[词,相关话题]最近一轮的近1h/近1天两档快照。
+
+    缺哪一档就返回 None(相关话题可能只在某一窗口上榜/查不到),由上层按 0 处理。
+    ⚠️ 绝不互相兜底:若缺失的1h被24h顶替,1h 恒等于 24h → ratio 恒 24 → 全部误判"爆发"。
+    """
     windows = _windows(settings)
-    want = {w: None for w in windows}
-    for w, s in snap.items():
-        if w in want:
-            want[w] = s
-    # 保证有主窗口(近1天)作分母;缺省用已有任一窗口
-    cur = [s for s in want.values() if s]
-    h24s = want.get(max(windows), None)
-    h24 = h24s or (cur[-1] if cur else None)
-    h1s = want.get(min(windows), None)
-    h1 = h1s or (h24 if h24 else None)
-    return h1, h24
+    return snap.get(windows[0]), snap.get(windows[-1])
 
 
 def analytics(session: Session, user_id: int, settings: Settings | None = None) -> list[dict]:
-    """各**监控词**的多窗口对比分析(列表与「关键词监控」一致,缺失数据的词标冷启动而非消失)。
+    """各**监控词带出的相关话题**的多窗口对比(与"关键词监控"同语义)。
 
-    watch 里同 keyword 多个过滤词只算一条;无快照的词(采集查不到)补 0 → window_contrast
-    判"冷启动/近1h无数据",保证对比列表始终覆盖用户关注的所有词。
+    对每个监控词,把它搜出的**每个相关话题**分别做 近1h/近1天 对比(话题词命中才有
+    双窗口;近1天有而近1h无 → 标"近1h无数据");内容词(word)是单值,词级一行。
+    列表词集=用户监控词(查不到也不消失)。
     """
     settings = settings or get_settings()
     batch = _latest_batch(session, user_id)
@@ -162,20 +176,29 @@ def analytics(session: Session, user_id: int, settings: Settings | None = None) 
         if key in seen:
             continue
         seen.add(key)
-        snap = batch.get(key, {})
-        h1, h24 = _contrast_of(snap, settings)
-        v1 = h1.score if h1 else 0
-        v24 = h24.score if h24 else 0
-        c = douhot.window_contrast({"score": v1}, {"score": v24})
-        entry = (h24.entry_title or h1.entry_title) if (h24 or h1) else ""
-        out.append({
-            "list_type": w.list_type, "keyword": w.keyword, "entry_title": entry,
-            "h1_score": v1, "h24_score": v24, "ratio": c["ratio"],
-            "label": c["label"], "signal": c["signal"],
-            "captured_at": h24.captured_at.isoformat(sep=" ", timespec="seconds")
-            if h24 else None,
-        })
-    out.sort(key=lambda d: (d["signal"] != "burst", d["signal"] != "fall", -d["ratio"]))
+        # 该词搜出的相关话题(entry_title 去重,含空=词级单值)
+        titles = sorted({et for (lt, kw, et), _ in batch.items()
+                         if lt == w.list_type and kw == w.keyword and et})
+        groups = titles if titles else [""]  # 无相关话题(内容词/空)→ 词级一行
+        for et in groups:
+            snap = batch.get((w.list_type, w.keyword, et), {})
+            h1, h24 = _contrast_of(snap, settings)
+            v1 = h1.score if h1 else 0
+            v24 = h24.score if h24 else 0
+            c = douhot.window_contrast({"score": v1}, {"score": v24})
+            entry = et or ""
+            if not entry and (h24 or h1):
+                _s = h24 or h1
+                entry = _s.entry_title or ""
+            out.append({
+                "list_type": w.list_type, "keyword": w.keyword, "entry_title": entry,
+                "h1_score": v1, "h24_score": v24, "ratio": c["ratio"],
+                "label": c["label"], "signal": c["signal"],
+                "captured_at": h24.captured_at.isoformat(sep=" ", timespec="seconds")
+                if h24 else None,
+            })
+    out.sort(key=lambda d: (d["signal"] != "burst", d["signal"] != "fall",
+                            d["signal"] == "unknown", -d["ratio"]))
     return out
 
 
