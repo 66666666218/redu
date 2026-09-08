@@ -383,7 +383,7 @@ def weread_refresh_tick(settings: Settings | None = None) -> int:
 # ---------------------------------------------------------------- 监听
 def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchmark,
                          items: list[dict], source: str, fetch_content: bool = False,
-                         content_resolver=None) -> list[WechatArticle]:
+                         content_resolver=None, require_pan: bool = True) -> list[WechatArticle]:
     """按链接去重入库;网盘类型=标题 + (可选)自抓正文 的并集。"""
     existing = set(session.scalars(select(WechatArticle.url).where(
         WechatArticle.user_id == user_id, WechatArticle.url != "")).all())
@@ -404,7 +404,9 @@ def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchm
                 content = fetch_article_content(url)
             if content:  # 自抓成功 → 用正文的链接判定覆盖标题的盘名猜测
                 types = detect_pan_types(content) or types
-        pan_urls = extract_quark_urls(f'{it["title"]} {content}')  # 目前仅夸克可自动转存
+        pan_urls = extract_quark_urls(f'{it["title"]} {content}')
+        if require_pan and not pan_urls and not types:
+            continue  # 无盘链 → 不监控
         row = WechatArticle(user_id=user_id, author=(benchmark.nickname or "未命名")[:128],
                             title=it["title"][:500], url=url[:500], content=content,
                             publish_at=it.get("publish_at"), source=source,
@@ -531,12 +533,16 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
     from app.services.weread_client import WereadClient as _WC
 
     payload = weread.mp_articles(b.weread_book_id)
+    cutoff = datetime.now() - timedelta(days=3)  # 近3天过滤
     items = []
     for it in _WC.flatten_mp_articles(payload):
         ts = it.get("create_time") or 0
+        pub = datetime.fromtimestamp(ts) if ts else None
+        if pub and pub < cutoff:
+            continue
         items.append({"title": it["title"], "url": build_mp_url(it["original_id"]),
                       "read_num": it["read_num"], "like_num": it["like_num"],
-                      "publish_at": datetime.fromtimestamp(ts) if ts else None})
+                      "publish_at": pub})
     return _insert_new_articles(session, user_id, b, items, source="listen",
                                 fetch_content=True)
 
@@ -769,7 +775,7 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
                 raw_items = plat.mp_articles(b.biz, page=pages + 1, limit=20)
                 norm = [{"title": it["title"], "url": it["url"],
                          "publish_at": _parse_time(it.get("publish_at_raw"))} for it in raw_items]
-                got = _insert_new_articles(session, user_id, b, norm, source="sync")
+                got = _insert_new_articles(session, user_id, b, norm, source="sync", require_pan=False)
                 added += len(got)
                 pages += 1
                 if not raw_items or len(got) < len(raw_items):
@@ -794,7 +800,7 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
         if item and item["url"]:
             resolver = (lambda _title, _rid=item["review_id"]: wc.mp_content(_rid))
             new = len(_insert_new_articles(session, user_id, b, [item], source="sync",
-                                           content_resolver=resolver))
+                                           content_resolver=resolver, require_pan=False))
             b.last_item_at = datetime.now()
         _record_run(session, user_id, "wechat_sync", "partial",
                     f"weread_latest_only account={b.nickname} new={new}")
@@ -816,7 +822,7 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
                 b.nickname = str(acct["NickName"])[:128]
             items = _extract_articles(_deep_find(obj, "MsgList"),
                                       url_keys=("content_url", "ContentUrl", "url"))
-            added.extend(_insert_new_articles(session, user_id, b, items, source="sync"))
+            added.extend(_insert_new_articles(session, user_id, b, items, source="sync", require_pan=False))
             pages += 1
             paging = _deep_find(obj, "PagingInfo") or {}
             if str(paging.get("IsEnd")) == "1" or not paging.get("Offset"):

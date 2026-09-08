@@ -1,5 +1,7 @@
 # CHANGELOG
 
+- [2026-09-08 07:30] FIX: **sync 全量路径 require_pan=False——历史同步存全部文章(改写素材库不只盘链文)** — sync_wechat_account 的三处 _insert_new_articles 调用补 require_pan=False(全量同步是改写素材库,不只盘链文;监听路径的 require_pan=True 仅过滤推送目标)。修复 test_sync_weread_latest_only/test_sync_respects_max_pages/test_sync_platform_paginates 测试适配。全量 235 项通过(Files: app/services/wechat_monitor.py, CHANGELOG)
+
 - [2026-09-08 11:00] FIX: **多窗口对比单侧窗口为0不再误判"新起势";推送显示具体话题名** — 用户反馈推送卡片"关键词=全集/下载/问卷 全是新起势,没有具体名字"。两处根因:① `window_contrast` 把"近1天=0 而近1h有值"判为"新起势"——实为近1天榜未覆盖该话题,等同之前的"近1h无数据",不该当趋势信号(否则一堆泛词全标新起势刷屏)。改成**任一侧窗口为0一律标"近1天无数据/近1h无数据"(unknown),不推送**,只有两侧都有值且 ratio≥1.5/≤0.5 才判爆发/回落;彻底移除不稳定的"新起势"标签;② 推送卡片只显示监控词(全集/下载/问卷)不显示具体话题 → 改为以 `entry_title`(具体话题)为主显示,监控词作辅助"(xx)"。前端同步:表格与快捷查询的"新起势"徽标/emoji 移除,burst 统一🔥,关键词列改话题主显示。新增/改测试(移除新起势用例,新增对称 unknown),全量 233 过、2 败(test_sync_* 为并行遗留);前端已构建 (Files: app/services/{douhot.py,douhot_window.py}, frontend/src/views/Douhot.vue, tests/test_douhot_window.py, CHANGELOG)
 
 - [2026-09-08 10:30] FIX: **多窗口对比按"相关话题"逐条对比(与关键词监控同语义)+ 修复缺失窗口兜底导致的全爆误判** — 用户要求趋势词对比"对比里面相关的话题而不是只对比单个词"。`collect_windows` 对话题/视频/搜索榜改用 `fetch_keyword_items` 按词搜出**每个相关话题**分别落两窗口快照(每条话题一档;内容词保持单值);`analytics` 逐相关话题对比(词-话题两级)。**修复关键 bug**:原 `_contrast_of` 对缺失的1h窗口用24h顶替 → 某话题只在近1天榜时 1h 恒等于 24h → ratio 恒 24 → 全部误判"爆发"。改为缺失窗口按 0 处理(标"近1h无数据"),绝不互相兜底。真实冒烟:话题榜"乡镇晋升录"搜出 27 条相关话题(24h)逐条对比——"乡镇晋升录游戏"1h=3265/1天160907 → 0.49x📉回落,"乡镇晋升录"(仅近1天在榜)→ 近1h无数据。新增"逐相关话题"单测,全量 233 过、2 败(test_sync_* 为并行遗留) (Files: app/services/douhot_window.py, tests/test_douhot_window.py, CHANGELOG)
