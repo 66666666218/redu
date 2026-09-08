@@ -545,6 +545,7 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
     if cross_new:
         session.add_all(cross_new)
         logger.info("内容交叉提取:发现 %d 个新公众号候选(用户 %s)", len(cross_new), user_id)
+        _push_candidates(session, user_id, settings, cross_new)
     return replacements
 
 
