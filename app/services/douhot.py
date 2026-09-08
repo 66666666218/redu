@@ -376,14 +376,14 @@ def fetch_keyword_windows(cookie: str, keyword: str, list_type: str = "word",
 def window_contrast(h1: dict, h24: dict, win_h1: int = 1, win_h24: int = 24) -> dict:
     """近1小时 vs 近1天 热度对比信号(同一关键词找趋势)。
 
-    比分用**归一化热度速率**而非绝对值:1h 与 1天是不同时长累计,直接比永远 1h<<1天。
-    `avg = score / 窗口小时数`(每小时热度),`ratio = avg_h1 / avg_h24`(近1h 相对全天分钟均值的倍数):
-    - 🆕 新起势:近1天冷(≤1)而近1h起来 → signal=burst(刚起)
+    比分用**归一化热度速率**:`avg = score / 窗口小时数`,`ratio = avg_h1 / avg_h24`。
+    ⚠️ 任一侧窗口为 0(榜未覆盖/查不到)一律标 `unknown`,不自动判趋势——
+    近1天=0 而近1h有值≠"新起势"(多半是近1天榜没该话题),近1h=0 同理。
     - 🔥 爆发:近1h ≥ 全天每小时均的 1.5 倍 → signal=burst(激增)
     - 📉 回落:近1h < 全天每小时均的 0.5 倍 → signal=fall(降温/过时)
     - ➡️ 高位延续:其余 → signal=steady
-    - ❔ 近1h无数据:近1天有值而近1h=0(词的1h榜未覆盖/接口偶发)→ signal=unknown(不误判回落,不推送)
-    - 冷启动:两者都冷 → signal=flat(无数据/不上榜)
+    - ❔ 近1h/近1天无数据:单侧窗口为 0,另一侧有值 → signal=unknown(不推送)
+    - 冷启动:两者都冷 → signal=flat
     """
     s1 = h1.get("score") or 0
     s24 = h24.get("score") or 0
@@ -393,9 +393,9 @@ def window_contrast(h1: dict, h24: dict, win_h1: int = 1, win_h24: int = 24) -> 
     if s1 <= 1 and s24 <= 1:
         label, signal = "冷启动", "flat"
     elif s24 <= 1 and s1 > 1:
-        label, signal = "新起势", "burst"
+        label, signal = "近1天无数据", "unknown"
     elif s1 <= 1 and s24 > 1:
-        label, signal = "近1h无数据", "unknown"  # 词的近1h榜未覆盖/接口偶发,不误判回落
+        label, signal = "近1h无数据", "unknown"
     elif avg24 > 1 and ratio >= 1.5:
         label, signal = "爆发", "burst"
     elif avg24 > 1 and ratio <= 0.5:

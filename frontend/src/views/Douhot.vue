@@ -112,7 +112,7 @@ async function queryWindows() {
   } catch (e) { toastError(e.message) } finally { busy.value = false }
 }
 function winSignalClass(signal, label) {
-  if (signal === 'burst') return label === '新起势' ? 'up' : 'down'
+  if (signal === 'burst') return 'up'
   if (signal === 'fall') return 'down'
   return ''
 }
@@ -263,16 +263,16 @@ onMounted(async () => { await loadList('word'); await loadWatches(); await loadW
         <b>{{ qResult.keyword }}</b> <span class="empty">({{ (tabs.find(x => x.key === qResult.list_type) || {}).label || qResult.list_type }})</span>
         · 近1h <b class="num">{{ fmt(qResult.h1) }}</b> · 近1天 <b class="num">{{ fmt(qResult.h24) }}</b>
         · 比例 <b class="num">{{ qResult.ratio }}x</b> ·
-        <b :class="winSignalClass(qResult.signal, qResult.label)">{{ qResult.signal === 'burst' ? (qResult.label === '新起势' ? '🆕' : '🔥') + qResult.label : qResult.signal === 'fall' ? '📉' + qResult.label : qResult.label }}</b>
+        <b :class="winSignalClass(qResult.signal, qResult.label)">{{ qResult.signal === 'burst' ? '🔥' + qResult.label : qResult.signal === 'fall' ? '📉' + qResult.label : qResult.label }}</b>
       </div>
       <table v-if="windowRows.length">
         <tr><th>关键词</th><th>近1h</th><th>近1天</th><th>比例</th><th>趋势</th><th>榜型</th></tr>
         <tr v-for="r in windowRows" :key="r.list_type + r.keyword">
-          <td>{{ r.keyword }}<div v-if="r.entry_title" class="empty">{{ r.entry_title.slice(0, 20) }}</div></td>
+          <td>{{ r.entry_title || r.keyword }}<div v-if="r.entry_title && r.entry_title !== r.keyword" class="empty">含「{{ r.keyword }}」</div></td>
           <td class="num">{{ fmt(r.h1_score) }}</td>
           <td class="num">{{ fmt(r.h24_score) }}</td>
           <td class="num">{{ r.h1_score && r.h24_score ? r.ratio.toFixed(1) + 'x' : '—' }}</td>
-          <td :class="winSignalClass(r.signal, r.label)">{{ r.signal === 'burst' ? (r.label === '新起势' ? '🆕' : '🔥') + r.label : r.signal === 'fall' ? '📉' + r.label : r.label }}</td>
+          <td :class="winSignalClass(r.signal, r.label)">{{ r.signal === 'burst' ? '🔥' + r.label : r.signal === 'fall' ? '📉' + r.label : r.label }}</td>
           <td class="empty">{{ (tabs.find(x => x.key === r.list_type) || {}).label }}</td>
         </tr>
       </table>

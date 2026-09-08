@@ -203,7 +203,11 @@ def analytics(session: Session, user_id: int, settings: Settings | None = None) 
 
 
 def run_feishu(session: Session, user_id: int, settings: Settings | None = None) -> int:
-    """把命中 📉持续/🆕新起/🔥爆发 的监控词推公众号飞书群(冷却去重),返回推送条数。"""
+    """把命中 🔥爆发/📉回落 的相关话题推抖音飞书群(冷却去重),返回推送条数。
+
+    只推 burst/fall(有明确方向);unknown/steady/flat 不打扰。卡片显示**具体话题名**
+    (entry_title 优先,监控词作辅助)——避免只出现"全集/下载"这种无具体名字的泛词。
+    """
     from app.services.alert_service import feishu_alert_gate
 
     settings = settings or get_settings()
@@ -217,21 +221,20 @@ def run_feishu(session: Session, user_id: int, settings: Settings | None = None)
     pushed = 0
     elements: list[dict] = [
         {"tag": "note", "elements": [{"tag": "plain_text",
-            "content": "关键词多窗口对比 · 近1h vs 近1天 · 🔥爆发/🆕新起 → 及时跟进 · 📉回落 → 别追过时"}]},
-        _col_set_row([("**关键词**", 5), ("**近1h**", 2), ("**近1天**", 2), ("**趋势**", 3)], grey=True),
+            "content": "关键词多窗口对比 · 近1h vs 近1天 · 🔥爆发 → 及时跟进 · 📉回落 → 别追过时"}]},
+        _col_set_row([("**话题**", 6), ("**近1h**", 2), ("**近1天**", 2), ("**趋势**", 2)], grey=True),
     ]
-    lines: list[str] = []
     for r in notable[:15]:
-        title = f"douhot|{r['list_type']}|{r['keyword']}"
+        name = _md_safe(r["entry_title"] or r["keyword"])[:24] or "—"
+        if r["entry_title"] and r["entry_title"] != r["keyword"]:
+            name = f"{name}({_md_safe(r['keyword'])[:10]})"
+        title = f"douhot|{r['list_type']}|{r['keyword']}|{r['entry_title'] or ''}"
         if not feishu_alert_gate(session, user_id, "douhot", title, _COOLDOWN_HOURS, r["label"]):
             continue
-        emoji = {"burst": "🔥" if r["label"] != "新起势" else "🆕", "fall": "📉"}.get(r["signal"], "")
+        emoji = "🔥" if r["signal"] == "burst" else "📉"
         label = f"{emoji}{r['label']} ({r['ratio']}x)" if r["ratio"] else emoji + r["label"]
-        kw = _md_safe(r["keyword"])[:16]
-        lines.append(f"{kw}\t{r['h1_score']}\t{r['h24_score']}\t{label}")
         elements.append(_col_set_row([
-            (_md_safe(r["keyword"])[:18] or "—", 5), (str(r["h1_score"]), 2),
-            (str(r["h24_score"]), 2), (label, 3),
+            (name, 6), (str(r["h1_score"]), 2), (str(r["h24_score"]), 2), (label, 2),
         ]))
         pushed += 1
     if not pushed:

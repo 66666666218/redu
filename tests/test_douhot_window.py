@@ -35,9 +35,9 @@ def session():
 def test_window_contrast_signals() -> None:
     # 冷启动:两窗口都冷
     assert douhot.window_contrast({"score": 0}, {"score": 0})["signal"] == "flat"
-    # 新起势:近1天冷而近1h起来
+    # 近1天无数据:近1h有值而近1天=0 → unknown(不误判"新起势",近1天榜未覆盖)
     c = douhot.window_contrast({"score": 50}, {"score": 0})
-    assert c["signal"] == "burst" and c["label"] == "新起势"
+    assert c["signal"] == "unknown" and c["label"] == "近1天无数据"
     # 爆发:近1h 归一化速率 ≥ 近1天每小时均的 1.5 倍(1h=15, 24h/24=10 → 1.5x)
     c = douhot.window_contrast({"score": 15}, {"score": 240})
     assert c["signal"] == "burst" and c["label"] == "爆发" and c["ratio"] == 1.5
