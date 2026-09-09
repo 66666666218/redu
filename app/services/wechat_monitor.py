@@ -610,23 +610,34 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
 
 def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
                     session: Session) -> list[WechatArticle]:
-    """微信读书单号采集:mp/articles 近期文章(含精确阅读/点赞)→ 入库。
+    """微信读书单号采集:**cover 最新一篇(稳定可用)→ mp/articles 列表(可选,常被限权)。
 
-    正文仅对标题命中网盘词的文章经 mp_content 免费拉取(盘链确认用)。
+    实测(2026-09):mp/articles 仅在会话建立初期可用,数小时后被服务端限权(-2041),
+    cover 始终可用——故 cover 为主路径,mp/articles 失败静默跳过不影响监听。
+    近3天过滤;阅读/点赞以 cover/mp_articles 自带值为准(免费)。
     """
     from app.services.weread_client import WereadClient as _WC
 
-    payload = weread.mp_articles(b.weread_book_id)
-    cutoff = datetime.now() - timedelta(days=3)  # 近3天过滤
+    cutoff = datetime.now() - timedelta(days=3)
     items = []
-    for it in _WC.flatten_mp_articles(payload):
-        ts = it.get("create_time") or 0
-        pub = datetime.fromtimestamp(ts) if ts else None
-        if pub and pub < cutoff:
-            continue
-        items.append({"title": it["title"], "url": build_mp_url(it["original_id"]),
-                      "read_num": it["read_num"], "like_num": it["like_num"],
-                      "publish_at": pub})
+    # 主路径:cover 最新一篇(始终可用)
+    item = weread.latest_article(b.weread_book_id)
+    if item and item["url"]:
+        items.append({"title": item["title"], "url": item["url"],
+                      "publish_at": None})
+    # 备选:mp/articles 近期列表(含精确阅读/点赞;被限权时静默跳过)
+    try:
+        payload = weread.mp_articles(b.weread_book_id)
+        for it in _WC.flatten_mp_articles(payload):
+            ts = it.get("create_time") or 0
+            pub = datetime.fromtimestamp(ts) if ts else None
+            if pub and pub < cutoff:
+                continue
+            items.append({"title": it["title"], "url": build_mp_url(it["original_id"]),
+                          "read_num": it["read_num"], "like_num": it["like_num"],
+                          "publish_at": pub})
+    except Exception as exc:  # noqa: BLE001 - 限权/废弃不影响 cover 主路径
+        logger.debug("mp/articles 不可用(%s),仅用 cover 最新一篇", exc)
     return _insert_new_articles(session, user_id, b, items, source="listen",
                                 fetch_content=True)
 
