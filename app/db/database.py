@@ -125,6 +125,19 @@ def _migrate() -> None:
                             "first_read_num INTEGER DEFAULT 0",
                             "trend_flag VARCHAR(16) DEFAULT ''", "quality INTEGER DEFAULT 0"],
     }
+    # 高频查询复合索引(文章过万后采样/去重查询需要)
+    try:
+        if "wechat_articles" in existing:
+            cols = {c["name"] for c in inspector.get_columns("wechat_articles")}
+            if "created_at" in cols:
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_wa_user_created ON wechat_articles (user_id, created_at)"))
+            if "url" in cols:
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_wa_user_url ON wechat_articles (user_id, url)"))
+    except Exception:  # noqa: BLE001 - 索引失败不阻塞启动
+        pass
+
     # 一次性迁移:公众号监听间隔 360 → 60 分钟(逼近实时,免费源扛得住)
     try:
         if "user_schedules" in existing:
