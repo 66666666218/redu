@@ -1,5 +1,7 @@
 # CHANGELOG
 
+- [2026-09-09 09:50] FIX: **公众号失败告警路由修复——wechat_listen/sync/traffic 失败推公众号专属群** — 审查告警链完整性发现:公众号的 RunRecord kind(wechat_listen/sync/traffic)不在 webhooks_for 的板块映射里 → 失败告警永远回落总群,专属群收不到。修复:`_KIND_SECTION` 归一化映射(wechat_* → wechat 板块群),check_collect_failures 入口条件补 wechat 专属群。全量 240 项通过(Files: app/services/{alert_service.py,feishu_client.py}, CHANGELOG)
+
 - [2026-09-09 09:40] FEAT: **AI 改写前端入口——公众号监听页一键改写+复制** — API `POST /api/wechat/articles/{id}/rewrite`(正文不足自动补抓原文页),前端文章表新增「AI改写」按钮:点击调用 DeepSeek 改写 → 结果区显示新标题+改写正文 → 一键复制(标题+空行+正文)到剪贴板,直接粘贴公众号后台发布。推广闭环最后一块 UI 补齐(Files: app/api/wechat.py, frontend/src/{api.js,views/WechatListen.vue}, CHANGELOG)
 
 - [2026-09-09 09:30] FEAT: **AI 改写——对标文一键转原创可发布稿(补齐推广最后一公里)** — llm_client 新增 `rewrite_article(title, content, my_link, style)`:DeepSeek 按网盘资源号写手人设改写(保留资源信息/全面重写防抄袭/输出新标题+纯文本正文),真实 E2E 验证:新高考词汇文 → 「2026新高考英语高分捷径:688个高频核心词,啃透它＝白捡20分!」+ 结构化推广正文。成本 ≈¥0.01/篇(4K tokens)。至此推广闭环完整:监听→转存→阅读量→AI解读→AI改写→人工粘贴发布(发布自动化需公众号主体授权,暂人工)(Files: app/services/llm_client.py, CHANGELOG)

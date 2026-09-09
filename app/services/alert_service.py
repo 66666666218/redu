@@ -346,7 +346,8 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
     """
     settings = settings or get_settings()
     from app.services.feishu_client import FeishuClient, platform_webhook, webhook_for, webhooks_for
-    if not settings.feishu_webhook and not any(platform_webhook(settings, s) for s in ("weibo", "xianyu", "douhot", "baidu")):
+    if not settings.feishu_webhook and not any(
+            platform_webhook(settings, s) for s in ("weibo", "xianyu", "douhot", "baidu", "wechat")):
         return 0
     from sqlalchemy import func
 
@@ -438,7 +439,8 @@ def check_health_stalls(settings: Settings | None = None, db: Session | None = N
     """
     settings = settings or get_settings()
     from app.services.feishu_client import FeishuClient, platform_webhook, webhooks_for
-    if not settings.feishu_webhook and not any(platform_webhook(settings, s) for s in ("weibo", "xianyu", "douhot", "baidu")):
+    if not settings.feishu_webhook and not any(
+            platform_webhook(settings, s) for s in ("weibo", "xianyu", "douhot", "baidu", "wechat")):
         return 0
     from sqlalchemy import func
 
