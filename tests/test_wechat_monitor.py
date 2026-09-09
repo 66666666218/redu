@@ -400,6 +400,25 @@ def test_weread_refresh_writeback_and_skips(session, monkeypatch: pytest.MonkeyP
     assert out["status"] == "success" and out["verified"]
     assert "wr_skey=NEW" in get_cookie(session, 1, "weread")  # 新值已回写平台内存储
 
+    # 续期后仍 -2012 → 登录态整体过期:报 failed 且不回写(避免把有效值覆盖成无效)
+    from app.services.weread_client import WereadAuthError
+
+    class _Expired:
+        def __init__(self, cookie: str) -> None:
+            self.cookie = cookie
+
+        def refresh_skey(self, timeout: int = 20) -> str:
+            return "wr_vid=1; wr_rt=R2; wr_skey=BOGUS"
+
+        def shelf(self) -> list:
+            raise WereadAuthError("登录态失效(-2012)")
+
+    monkeypatch.setattr(wechat_monitor, "WereadClient", _Expired)
+    out2 = wechat_monitor.refresh_weread_cookie(
+        session, 1, settings=_settings(weread_cookie="wr_vid=1; wr_rt=R; wr_skey=OLD"))
+    assert out2["status"] == "failed" and out2["reason"] == "expired"
+    assert "wr_skey=NEW" in get_cookie(session, 1, "weread")  # 仍是上次成功值,未被 BOGUS 覆盖
+
 
 def test_listen_auto_renews_and_retries(session, monkeypatch: pytest.MonkeyPatch) -> None:
     """监听遇 -2012:自动用 wr_rt 续期回写,再以新 Cookie 重试采集。"""

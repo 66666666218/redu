@@ -399,15 +399,20 @@ def refresh_weread_cookie(session: Session, user_id: int, settings: Settings | N
     new_cookie = WereadClient(cookie).refresh_skey()
     if not new_cookie:
         return {"status": "failed", "reason": "renewal_failed"}
-    set_cookie(session, user_id, "weread", new_cookie)
-    verified = False
+    # 先验证再回写:续期后仍 -2012/-2010 说明登录态整体过期(wr_rt 也失效),
+    # 此时回写的新值同样无效,不能报"已续期"误导用户——直接失败让用户重新登录。
     try:
         WereadClient(new_cookie).shelf()
-        verified = True
-    except WereadError as exc:
-        logger.warning("微信读书续期后书架验证未通过(用户 %s):%s", user_id, exc)
-    logger.info("微信读书 Cookie 已续期(用户 %s,验证%s)", user_id, "通过" if verified else "未通过")
-    return {"status": "success", "verified": verified, "cookie": new_cookie}
+    except WereadAuthError as exc:
+        logger.warning("微信读书续期后仍登录失效(用户 %s):%s", user_id, exc)
+        return {"status": "failed", "reason": "expired"}
+    except WereadError as exc:  # 非登录问题(风控/接口异常):保留续期结果但标注未验证
+        logger.warning("微信读书续期后书架验证异常(非登录问题,用户 %s):%s", user_id, exc)
+        set_cookie(session, user_id, "weread", new_cookie)
+        return {"status": "success", "verified": False, "cookie": new_cookie}
+    set_cookie(session, user_id, "weread", new_cookie)
+    logger.info("微信读书 Cookie 已续期并验证通过(用户 %s)", user_id)
+    return {"status": "success", "verified": True, "cookie": new_cookie}
 
 
 def weread_refresh_tick(settings: Settings | None = None) -> int:

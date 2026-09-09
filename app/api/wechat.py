@@ -132,7 +132,14 @@ def wechat_benchmark_sync(benchmark_id: int, max_pages: int | None = None,
 @router.post("/api/wechat/benchmarks/import_shelf")
 def wechat_benchmark_import_shelf(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """从微信读书书架一键导入对标号(免费):需在微信读书内先关注目标号 + 配置「weread」Cookie。"""
-    return wechat_monitor.import_benchmarks_from_shelf(db, user.id)
+    from app.services.weread_client import WereadAuthError, WereadError
+
+    try:
+        return wechat_monitor.import_benchmarks_from_shelf(db, user.id)
+    except WereadAuthError as exc:
+        raise HTTPException(502, f"微信读书登录态已失效,请在「Cookie 管理」更新 weread Cookie 后重试({exc})")
+    except WereadError as exc:
+        raise HTTPException(502, f"微信读书请求失败:{exc}")
 
 
 @router.get("/api/wechat/weread/shelf")
