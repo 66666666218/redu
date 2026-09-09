@@ -27,6 +27,7 @@ from app.db.models import (
     WeiboHotItem,
     WeiboTrend,
     FeishuAlert,
+    WechatCandidate,
     WechatTrafficSample,
     AgentStage,
     XianyuDaily,
