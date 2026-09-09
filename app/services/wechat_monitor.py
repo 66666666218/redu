@@ -1288,6 +1288,24 @@ def discover_candidates(session: Session, user_id: int, settings: Settings | Non
     if new_rows:
         session.add_all(new_rows)
         session.commit()
+        # LLM 评级:判定"资源号/营销号/无关"+优先级,写入候选 note 供人工参考
+        if settings.deepseek_api_key:
+            try:
+                from app.services.llm_client import rank_candidates
+                payload = [{"name": c.name, "title": c.title} for c in new_rows]
+                ranked = rank_candidates(settings.deepseek_base_url, settings.deepseek_api_key,
+                                         settings.deepseek_model, payload[:15])
+                if ranked:
+                    by_name = {r["name"]: r for r in ranked}
+                    for c in new_rows:
+                        r = by_name.get(c.name)
+                        if r:
+                            c.term = (f"{c.term}|LLM:{r['verdict']}({r['priority']})")[:64]
+                    session.commit()
+                    kept = sum(1 for r in ranked if r.get("verdict") == "资源号")
+                    logger.info("LLM 候选评级:%d/%d 判定为资源号", kept, len(ranked))
+            except Exception:  # noqa: BLE001 - 评级失败不影响候选入库
+                logger.exception("LLM 候选评级失败")
         _push_candidates(session, user_id, settings, new_rows)
     _record_run(session, user_id, "wechat_candidates", "success",
                 f"terms={len(terms)} new={len(new_rows)} blocked={blocked}")

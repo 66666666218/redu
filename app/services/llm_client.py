@@ -66,3 +66,69 @@ def narrate_articles(base_url: str, api_key: str, model: str,
         return None
     except (KeyError, IndexError, TypeError):
         return None
+
+
+def rank_candidates(base_url: str, api_key: str, model: str,
+                    candidates: list[dict], timeout: int = 60) -> list[dict] | None:
+    """对候选对标号批量评级:是否网盘资源号、监控优先级。
+
+    candidates: [{name, title}](≤15 个)。返回 [{name, verdict: 资源号|营销号|无关,
+    priority: 高|中|低, reason}],失败返回 None。
+    """
+    if not api_key or not candidates:
+        return None
+    lines = [f"{i}. 公众号名:{c.get('name', '')} | 代表文章:{c.get('title', '')}"
+             for i, c in enumerate(candidates, 1)]
+    user_prompt = (
+        "以下是自动发现微信公众号候选(网盘资源推广业务,想找同类资源号做对标):"
+        + chr(10).join(lines)
+        + chr(10) + chr(10)
+        + "请逐个判断,每行格式:序号|判定(资源号/营销号/无关)|优先级(高/中/低)|一句话理由"
+    )
+    try:
+        resp = requests.post(
+            base_url.rstrip("/") + "/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": model,
+                  "messages": [{"role": "system",
+                                "content": "你是网盘资源推广运营助手。判断公众号候选是否为同类"
+                                           "资源号(发网盘链接的资源分享号),回答紧凑务实。"},
+                               {"role": "user", "content": user_prompt}],
+                  "temperature": 0.3, "max_tokens": 800},
+            timeout=timeout,
+        )
+        if resp.status_code >= 400:
+            logger.warning("LLM 候选评级失败 HTTP %s", resp.status_code)
+            return None
+        content = resp.json().get("choices", [{}])[0].get("message", {}).get("content")
+        # 解析为结构化:LLM 输出 "序号|判定|优先级|理由" 或 "名称|判定|…"
+        out = []
+        for line in (content or "").splitlines():
+            line = line.strip().lstrip("*- ")
+            if not line or "|" not in line:
+                continue
+            segs = [x.strip() for x in line.split("|")]
+            if len(segs) < 2:
+                continue
+            # 定位候选:序号(行首数字)优先,其次名称匹配
+            idx = None
+            head = segs[0]
+            if head.isdigit():
+                n = int(head)
+                if 1 <= n <= len(candidates):
+                    idx = n - 1
+            if idx is None:
+                for i, c in enumerate(candidates):
+                    if c.get("name", "") and c["name"] in head:
+                        idx = i
+                        break
+            if idx is None:
+                continue
+            out.append({"name": candidates[idx].get("name", ""),
+                        "verdict": segs[1] if len(segs) > 1 else "",
+                        "priority": segs[2] if len(segs) > 2 else "中",
+                        "reason": segs[3] if len(segs) > 3 else ""})
+        return out or None
+    except requests.RequestException as exc:
+        logger.warning("LLM 候选评级异常:%s", exc)
+        return None
