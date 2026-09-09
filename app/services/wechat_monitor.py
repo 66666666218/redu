@@ -723,6 +723,14 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
                 else:
                     cookie = ""  # 续期失败:后续号降级 dajiala;本号不置 used,继续走下方 dajiala 兜底
                     failed += 1
+                    # 即时提醒用户更新 Cookie(6h 冷却,不刷屏)
+                    from app.services.alert_service import notify_incident
+                    notify_incident(
+                        session, user_id, "wechat",
+                        "🟠 微信读书 Cookie 已过期,请更新",
+                        "自动续期失败。请在浏览器登录 weread.qq.com 后 F12 复制 Cookie,"
+                        "粘贴到「Cookie 管理」页 weread 平台(或发给我更新)",
+                        settings=settings)
             except WereadError as exc:
                 failed += 1
                 logger.warning("微信读书监听 %s 失败:%s", b.nickname or b.weread_book_id, exc)
