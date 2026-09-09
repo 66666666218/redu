@@ -1,5 +1,7 @@
 # CHANGELOG
 
+- [2026-09-09 08:50] PERF: **公众号监听间隔 6h→60min(逼近微信读书 App 的实时同步)** — 用户反馈"检测不到微信读书里的新文章":根因是监听默认间隔 6h(轮询式 vs App 的推送式秒级同步,差距=轮询间隔)。微信读书免费源(cover 稳定+2s 内置限速)扛得住小时级轮询 → 默认间隔降为 60 分钟(最坏延迟 1h/平均 30min),启动时一次性迁移老用户 360→60。doc/dev.md 实时性说明同步(Files: app/services/schedule_service.py, app/db/database.py, doc/dev.md, CHANGELOG)
+
 - [2026-09-09 11:00] FIX: **书架导入 500 黑盒修复 + 续期"仍失效"判定** — 用户点「从微信读书书架导入」报"服务器内部错误"。实测根因:微信读书 Cookie 登录态**整体过期**(-2012,连长效 wr_rt 也失效,续期救不回,需重新登录)。两处修复:① `/api/wechat/benchmarks/import_shelf` 原无异常处理 → 任何 WereadError 都变 500"服务器内部错误";补 `WereadAuthError/WereadError` → HTTP 502 + 明确文案("登录态已失效,请在 Cookie 管理更新 weread Cookie");② `refresh_weread_cookie` 改**先验证再回写**:续期后仍 -2012/-2010 → 报 `failed(expired)` 且**不回写**(避免把有效值覆盖成无效),不再误报"已续期(验证未通过)"。新增 1 项测试,全量 240 项通过 (Files: app/api/wechat.py, app/services/wechat_monitor.py, tests/test_wechat_monitor.py, CHANGELOG)
 
 - [2026-09-09 10:30] PERF: **闲鱼风控优化(无代理 IP 条件下靠"减请求 + 长冷却"降险)** — 用户暂无代理资源。两处机制改动:① **详情当天去重**——`run_xianyu_deep` 跳过当天已抓过详情的商品(详情请求是 mtop 风控最大爆发点),额度只给当天未抓的新商品;全部已抓则整轮跳过(不再空打详情接口);② **冷却指数退避**——`verify_cooldown_active` 按近 24h 触发验证次数退避(30→60→120→240 分钟封顶),避免"冷却一过又去撞滑块"的循环。新增 2 项单测(退避/去重),全量 240 项通过。无代理时建议参数更保守:`XIANYU_REQUEST_DELAY=12~15`、`XIANYU_DETAIL_LIMIT=5`、`XIANYU_BATCH_KEYWORDS=3`(少量多次、轮转覆盖) (Files: app/services/{tenant_base.py,xianyu_analytics.py}, tests/test_xianyu_risk.py, CHANGELOG)

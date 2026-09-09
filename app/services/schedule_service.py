@@ -29,9 +29,10 @@ INTERVAL_CHOICES = (10, 30, 60, 120, 180, 360, 720, 1440)
 MIN_INTERVAL = 10
 MAX_INTERVAL = 1440
 # 默认采集间隔(分钟):运营商/登录态接口过于频繁易触发风控或 Cookie 失效,故默认 2 小时;
-# 公众号监听是付费接口(¥0.14/号/次),默认 6 小时(4 次/天)控制成本
+# 公众号监听走微信读书免费源(cover 稳定,2s 限速已内置),默认 60 分钟逼近实时
+# (App 端是推送式秒级同步,轮询 60 分钟 = 最坏延迟 1h、平均 30min,对网盘推广足够)
 DEFAULT_INTERVAL = 120
-DEFAULT_INTERVALS = {"wechat": 360}
+DEFAULT_INTERVALS = {"wechat": 60}
 
 
 def section_default_interval(section: str) -> int:

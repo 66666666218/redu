@@ -125,6 +125,15 @@ def _migrate() -> None:
                             "first_read_num INTEGER DEFAULT 0",
                             "trend_flag VARCHAR(16) DEFAULT ''", "quality INTEGER DEFAULT 0"],
     }
+    # 一次性迁移:公众号监听间隔 360 → 60 分钟(逼近实时,免费源扛得住)
+    try:
+        if "user_schedules" in existing:
+            conn.execute(text(
+                "UPDATE user_schedules SET interval_minutes = 60 "
+                "WHERE section = 'wechat' AND interval_minutes = 360"))
+    except Exception:  # noqa: BLE001 - 迁移失败不阻塞启动
+        pass
+
     with get_engine().begin() as conn:
         for table, coldefs in additions.items():
             if table not in existing:
