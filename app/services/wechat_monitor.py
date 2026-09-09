@@ -1,26 +1,11 @@
-"""公众号监听/同步(见 doc/dajiala-api.md 与 doc/dev.md §5.12)。
+"""公众号监听公共工具:盘链识别/正文抓取/元信息解析/质量评估/响应解析。
 
-三个用户入口:
-- 对标号管理:`add_benchmark`(贴任意文章链即加号,免费)/`list_benchmarks`/`remove_benchmark`;
-  也可从微信读书书架一键导入(`import_benchmarks_from_shelf`,免费);
-- 监听 `run_wechat_listen`:**双数据源,免费优先**——
-  ① 对标号有 `weread_book_id` 且配了微信读书 Cookie → `WereadClient.latest_article`
-  (`/api/mp/cover`,免费)拿最新一篇,新文按链接去重入库;
-  ② 否则(或微信读书失效)→ dajiala `post_condition`(¥0.14/号)拿**当天全部发文**;
-  标题命中网盘关键词的文,优先用微信读书正文(免费)、其次自抓原文页,做盘链确认
-  (pan.quark.cn 等四家正则),新文推公众号专属飞书群;
-  dajiala 余额不足时仅禁用付费源(post_condition/即时采样),免费源照常监听。
-- 同步 `sync_wechat_account`:dajiala `history_by_ghid` 翻页(`PagingInfo.Offset`/`IsEnd`)
-  拉历史文章入库,默认 `wechat_sync_max_pages` 页封顶(每页 ¥0.14);仅有微信读书源时
-  只能拿最新一篇(旧列表接口已被微信读书废弃),返回 `partial`。
-
-设计原则"免费优先":微信读书正文与原文页自抓都免费,dajiala 仅作兜底与阅读量采样。
+从 wechat_monitor.py(1300+ 行)按域拆分而来;域间共享的工具函数集中于此。
 """
 from __future__ import annotations
 
 import html as html_mod
 import re
-import time
 from datetime import datetime, timedelta
 
 import requests
@@ -42,6 +27,7 @@ from app.utils import get_logger
 logger = get_logger(__name__)
 
 # 四家网盘的分享链接特征(判定"带盘链"的唯一标准:比标题关键词可靠)
+
 PAN_PATTERNS = {
     "夸克网盘": re.compile(r"pan\.quark\.cn/s/[0-9a-zA-Z]+"),
     "百度网盘": re.compile(r"pan\.baidu\.com/s/[0-9a-zA-Z_\-]+"),
@@ -300,7 +286,6 @@ def add_benchmark(session: Session, user_id: int, url: str, nickname: str = "",
     return {"id": row.id, "nickname": row.nickname, "ghid": row.ghid,
             "biz": row.biz, "anchor_url": row.anchor_url}
 
-
 def list_benchmarks(session: Session, user_id: int) -> list[dict]:
     rows = session.scalars(select(WechatBenchmark).where(
         WechatBenchmark.user_id == user_id).order_by(WechatBenchmark.id.desc())).all()
@@ -318,7 +303,6 @@ def list_benchmarks(session: Session, user_id: int) -> list[dict]:
         })
     return out
 
-
 def remove_benchmark(session: Session, user_id: int, benchmark_id: int) -> None:
     row = session.scalar(select(WechatBenchmark).where(
         WechatBenchmark.user_id == user_id, WechatBenchmark.id == benchmark_id))
@@ -326,7 +310,6 @@ def remove_benchmark(session: Session, user_id: int, benchmark_id: int) -> None:
         raise KeyError("对标账号不存在")
     session.delete(row)
     session.commit()
-
 
 def set_benchmark_active(session: Session, user_id: int, benchmark_id: int, active: bool) -> None:
     row = session.scalar(select(WechatBenchmark).where(
@@ -347,13 +330,11 @@ def _dajiala_key(session: Session, user_id: int, settings: Settings) -> str:
 
     return (get_cookie(session, user_id, "dajiala") or settings.dajiala_key or "").strip()
 
-
 def _weread_cookie(session: Session, user_id: int, settings: Settings) -> str:
     """微信读书 Cookie:优先用户在平台内配置的「weread」,其次全局 WEREAD_COOKIE。"""
     from app.services.cookie_store import get_cookie
 
     return (get_cookie(session, user_id, "weread") or settings.weread_cookie or "").strip()
-
 
 def weread_shelf(session: Session, user_id: int, settings: Settings | None = None) -> list[dict]:
     """列出微信读书书架上的公众号(导入预览;需先在微信读书 App 内关注目标号)。"""
@@ -362,7 +343,6 @@ def weread_shelf(session: Session, user_id: int, settings: Settings | None = Non
     if not cookie:
         raise ValueError("未配置微信读书 Cookie(平台 Cookie「weread」或 WEREAD_COOKIE)")
     return WereadClient(cookie).shelf()
-
 
 def import_benchmarks_from_shelf(session: Session, user_id: int,
                                  settings: Settings | None = None) -> dict:
@@ -388,7 +368,6 @@ def import_benchmarks_from_shelf(session: Session, user_id: int,
             updated += 1
     session.commit()
     return {"status": "success", "shelf": len(books), "created": created, "updated": updated}
-
 
 def refresh_weread_cookie(session: Session, user_id: int, settings: Settings | None = None) -> dict:
     """微信读书 Cookie 续期:长效 wr_rt → 新短效 wr_skey,并回写 Cookie 管理。
@@ -423,7 +402,6 @@ def refresh_weread_cookie(session: Session, user_id: int, settings: Settings | N
     set_cookie(session, user_id, "weread", new_cookie)
     logger.info("微信读书 Cookie 已续期并验证通过(用户 %s)", user_id)
     return {"status": "success", "verified": True, "cookie": new_cookie}
-
 
 def weread_refresh_tick(settings: Settings | None = None) -> int:
     """每日定时:为所有配置了微信读书 Cookie 的用户续期(防 wr_skey 过期断免费源)。
@@ -498,7 +476,6 @@ def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchm
                                           created_at=r.created_at or datetime.now()))
     return added
 
-
 def _backfill_pan_links(session: Session) -> None:
     """一次性回填:归一化表建表前的旧文章,把 pan_urls 拆分写入 wechat_pan_links。
 
@@ -513,7 +490,6 @@ def _backfill_pan_links(session: Session) -> None:
                                       created_at=r.created_at or datetime.now()))
     session.commit()
     logger.info("盘链归一化表已回填历史文章")
-
 
 def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                          rows: list[WechatArticle],
@@ -622,7 +598,6 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
         _push_candidates(session, user_id, settings, cross_new)
     return replacements
 
-
 def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
                     session: Session) -> list[WechatArticle]:
     """微信读书单号采集:**cover 最新一篇(稳定可用)→ mp/articles 列表(可选,常被限权)。
@@ -655,7 +630,6 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
         logger.debug("mp/articles 不可用(%s),仅用 cover 最新一篇", exc)
     return _insert_new_articles(session, user_id, b, items, source="listen",
                                 fetch_content=True)
-
 
 def run_wechat_listen(session: Session, user_id: int, settings: Settings | None = None,
                       client: DajialaClient | None = None, weread: WereadClient | None = None,
@@ -813,7 +787,6 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
         if balance is not None:
             out["balance"] = balance
     return out
-
 
 def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[WechatArticle],
                  replacements: dict[int, list[tuple[str, str, str]]] | None = None) -> None:
@@ -975,7 +948,6 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
     return {"platform": "wechat_sync", "status": status, "pages": pages, "new": len(added),
             "ghid": b.ghid, "nickname": b.nickname}
 
-
 def _apply_sample(session: Session, user_id: int, r: WechatArticle, data: dict, now: datetime) -> None:
     """把 read_zan_pro 结果写回文章 + 追加一个采样点(首采样记 first_read_num 做账号基线)。"""
     r.read_num = int(data.get("read") or 0)
@@ -993,7 +965,6 @@ def _apply_sample(session: Session, user_id: int, r: WechatArticle, data: dict, 
                                     looking_num=r.looking_num, share_num=r.share_num,
                                     collect_num=r.collect_num,
                                     comment_count=r.comment_count, sampled_at=now))
-
 
 def _notify_burst(session: Session, user_id: int, settings: Settings, r: WechatArticle,
                   growth: float | None, baseline: int | None = None) -> bool:
@@ -1117,7 +1088,6 @@ def sample_traffic(session: Session, user_id: int, settings: Settings | None = N
     return {"platform": "wechat_traffic", "status": "success", "sampled": sampled,
             "balance_after": client.remain_money() if sampled else balance}
 
-
 def quark_keepalive_tick(settings: Settings | None = None) -> int:
     """每日定时:夸克 Cookie 保活(轻量列目录,滚动延长 __puus);失效即时告警。返回1=健康 0=异常/未配。"""
     from app.services.alert_service import notify_incident
@@ -1149,7 +1119,6 @@ def quark_keepalive_tick(settings: Settings | None = None) -> int:
             return 0
     finally:
         db.close()
-
 
 def traffic_tick(settings: Settings | None = None) -> int:
     """每日定时:给所有(有对标号的)用户采样一轮阅读量。返回采样总篇数。"""
@@ -1189,7 +1158,6 @@ _TERM_STOPWORDS = ("链接", "入口", "获取", "教程", "分享", "合集", "
 _PUNCT_RE = re.compile(r"[^\w]+")     # 标点→空格(分段用,\w 含中文/字母/数字)
 _HAS_CJK = re.compile(r"[一-鿿]")     # 片段需含 ≥2 个汉字,滤掉纯数字/英文碎片
 
-
 def _overlap(a: str, b: str) -> int:
     """两片段最长公共子串长度(去重叠冗余用,串长 ≤6,暴力可)。"""
     best = 0
@@ -1201,9 +1169,7 @@ def _overlap(a: str, b: str) -> int:
             best = max(best, k)
     return best
 
-
 _ENTITY_RE = re.compile(r"[《【](.*?)[》】]")
-
 
 def mine_title_entities(titles: list[str], top: int = 6) -> list[str]:
     """从标题的书名号《》/【】标记中提取实体名(游戏/测试/资料名),作为首选搜索词。
@@ -1221,7 +1187,6 @@ def mine_title_entities(titles: list[str], top: int = 6) -> list[str]:
                     and not any(stop in name for stop in _TERM_STOPWORDS)):
                 counter[name] += 1
     return [name for name, _n in sorted(counter.items(), key=lambda x: -x[1])][:top]
-
 
 def mine_title_terms(titles: list[str], top: int = 6) -> list[str]:
     """从已入库文章标题挖高频内容词(段内 4~6 字滑窗,剔除营销泛词),供候选发现当搜索词。
@@ -1257,7 +1222,6 @@ def mine_title_terms(titles: list[str], top: int = 6) -> list[str]:
         if len(picked) >= top:
             break
     return picked
-
 
 def discover_candidates(session: Session, user_id: int, settings: Settings | None = None) -> dict:
     """一轮候选对标号发现:标题画像词+配置词 → 搜狗搜文章 → 按公众号名去重入库 → 推飞书。
@@ -1329,7 +1293,6 @@ def discover_candidates(session: Session, user_id: int, settings: Settings | Non
     return {"platform": "wechat", "status": "success", "terms": terms,
             "new": len(new_rows), "blocked": blocked}
 
-
 def _push_candidates(session: Session, user_id: int, settings: Settings,
                      rows: list[WechatCandidate]) -> None:
     """候选清单推公众号专属飞书群(column_set 网格卡片:公众号/代表文章/来源词 三列对齐)。"""
@@ -1373,7 +1336,6 @@ def _push_candidates(session: Session, user_id: int, settings: Settings,
     except Exception:  # noqa: BLE001 - 推送失败不影响采集结果
         logger.exception("候选对标号飞书推送失败 user=%s", user_id)
 
-
 def candidate_discover_tick(settings: Settings | None = None) -> int:
     """每日定时:为所有(有对标号的)用户发现一轮同类候选号。返回新增候选数。"""
     from app.db import get_session_local
@@ -1402,7 +1364,6 @@ def candidate_discover_tick(settings: Settings | None = None) -> int:
         logger.info("候选对标号发现完成:新增 %d 个", total)
     return total
 
-
 def list_candidates(session: Session, user_id: int) -> list[dict]:
     """候选列表(新→旧);`imported`=该名已是正式对标号(书架导入后自然闭环)。"""
     rows = session.scalars(select(WechatCandidate).where(
@@ -1414,7 +1375,6 @@ def list_candidates(session: Session, user_id: int) -> list[dict]:
              "title_ts": r.title_ts.isoformat(sep=" ", timespec="seconds") if r.title_ts else None,
              "discovered_at": r.discovered_at.isoformat(sep=" ", timespec="seconds")}
             for r in rows]
-
 
 def set_candidate_status(session: Session, user_id: int, candidate_id: int, status: str) -> None:
     """更新候选状态(仅 new/dismissed);dismissed 后不再进入去重表,允许未来重新发现。"""
