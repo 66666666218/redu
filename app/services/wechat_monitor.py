@@ -1303,6 +1303,10 @@ def discover_candidates(session: Session, user_id: int, settings: Settings | Non
                             c.term = (f"{c.term}|LLM:{r['verdict']}({r['priority']})")[:64]
                     session.commit()
                     kept = sum(1 for r in ranked if r.get("verdict") == "资源号")
+                    # 资源号排前,并按优先级排序 → 推送时用户先看到值得关注的
+                    new_rows.sort(key=lambda c: (
+                        0 if "资源号" in (c.term or "") and "高" in (c.term or "") else
+                        1 if "资源号" in (c.term or "") else 2, c.id))
                     logger.info("LLM 候选评级:%d/%d 判定为资源号", kept, len(ranked))
             except Exception:  # noqa: BLE001 - 评级失败不影响候选入库
                 logger.exception("LLM 候选评级失败")
@@ -1334,8 +1338,13 @@ def _push_candidates(session: Session, user_id: int, settings: Settings,
         title = _md_safe(r.title)
         ts = r.title_ts.strftime("%m-%d") if r.title_ts else ""
         shown = title[:30] + ("…" if len(title) > 30 else "")
+        llm_tag = ""
+        if "LLM:资源号(高)" in (r.term or ""):
+            llm_tag = "🔴高优先 "
+        elif "资源号" in (r.term or ""):
+            llm_tag = "🟢资源号 "
         elements.append(_col_set_row([
-            (_md_safe(r.name)[:12] or "—", 3),
+            ((llm_tag + _md_safe(r.name))[:14] or "—", 3),
             (f"《{shown}》{f' ({ts})' if ts else ''}", 7),
             (_md_safe(r.term)[:8] or "—", 2),
         ]))
