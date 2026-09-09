@@ -111,6 +111,28 @@ def wechat_analyze(limit: int = 200, user: User = Depends(get_current_user), db:
 
 
 # ---------------------------------------------------------------- 对标号:监听/同步
+@router.get("/api/wechat/status")
+def wechat_status(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """运行状态条:在监号数/近24h新文/盘链文/候选数(前端顶部一览)。"""
+    from datetime import datetime, timedelta
+    from sqlalchemy import func
+    from app.db.models import WechatCandidate, WechatPanLink
+
+    since = datetime.now() - timedelta(hours=24)
+    bm = db.scalar(select(func.count()).select_from(WechatBenchmark).where(
+        WechatBenchmark.user_id == user.id, WechatBenchmark.active.is_(True))) or 0
+    new_art = db.scalar(select(func.count()).select_from(WechatArticle).where(
+        WechatArticle.user_id == user.id, WechatArticle.created_at >= since)) or 0
+    pan = db.scalar(select(func.count()).select_from(WechatArticle).where(
+        WechatArticle.user_id == user.id, WechatArticle.pan_types != "")) or 0
+    cand = db.scalar(select(func.count()).select_from(WechatCandidate).where(
+        WechatCandidate.user_id == user.id, WechatCandidate.status == "new")) or 0
+    burst = db.scalar(select(func.count()).select_from(WechatArticle).where(
+        WechatArticle.user_id == user.id, WechatArticle.trend_flag == "爆点苗头")) or 0
+    return {"benchmarks": bm, "new_24h": new_art, "pan_articles": pan,
+            "candidates": cand, "burst": burst}
+
+
 @router.get("/api/wechat/benchmarks")
 def wechat_benchmark_list(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """对标账号列表(含活跃度/是否有文章)。"""

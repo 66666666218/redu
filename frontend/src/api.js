@@ -123,6 +123,7 @@ export const api = {
   adminExportAlerts: () => fetch('/api/admin/export/alerts', { headers: { Authorization: 'Bearer ' + getToken() } }),
   // 公众号监听(对标号 / 同步 / 阅读量)
   wechatBenchmarks: () => req('GET', '/api/wechat/benchmarks'),
+  wechatStatus: () => req('GET', '/api/wechat/status'),
   wechatBenchmarkAdd: (url, nickname = '', note = '') => req('POST', '/api/wechat/benchmarks', { url, nickname, note }),
   wechatBenchmarkPatch: (id, o) => req('PATCH', `/api/wechat/benchmarks/${id}`, o),
   wechatBenchmarkDel: (id) => req('DELETE', `/api/wechat/benchmarks/${id}`),

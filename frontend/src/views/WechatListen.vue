@@ -154,6 +154,13 @@ onMounted(load)
 <template>
   <div class="page">
     <h2 style="margin:0 0 12px">公众号监听(对标号 · 新发文 · 盘链识别)</h2>
+    <div class="card" style="margin-bottom:16px;padding:10px 16px">
+      <span style="margin-right:16px">🎧 在监 <b>{{ status.benchmarks || 0 }}</b> 号</span>
+      <span style="margin-right:16px">🆕 近24h <b>{{ status.new_24h || 0 }}</b> 篇</span>
+      <span style="margin-right:16px">🔴 盘链 <b>{{ status.pan_articles || 0 }}</b></span>
+      <span style="margin-right:16px">🚀 爆点 <b>{{ status.burst || 0 }}</b></span>
+      <span>🔍 候选 <b>{{ status.candidates || 0 }}</b></span>
+    </div>
     <span v-if="msg" class="error">{{ msg }}</span>
 
     <div class="card" style="margin-bottom:16px">
