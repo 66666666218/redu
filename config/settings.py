@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     agent_enabled: bool = True             # 早期苗头 Agent(全板块自主预测)开关
     agent_score_threshold: int = 55        # 苗头判定分数线(≥80 为强苗头)
     agent_cooldown_hours: int = 12         # 同一(板块,关键词)的苗头冷却(小时)
-    weread_refresh_cron: str = "50 7 * * *"  # 微信读书 Cookie 每日自动续期(wr_rt 换新 wr_skey,默认 07:50)
+    weread_refresh_cron: str = "50 7,15,23 * * *"  # 微信读书 Cookie 自动续期(每8小时,保证 skey 永不过期)
     candidate_search_terms: str = ""   # 候选发现搜索词(逗号分隔;空=仅用对标号标题画像词)
     candidate_mine_terms: int = 6      # 标题画像词上限(从已入库标题挖高频内容词)
     candidate_max_terms: int = 8       # 单轮候选发现的搜索词总数上限(搜狗限频,宁少勿封)

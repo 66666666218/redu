@@ -253,7 +253,8 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         (_agent_learn_all, "0 6 * * *", {"minute": 0, "hour": 6}, "agent_learning"),
         (agent_tick_all_users, "*/30 * * * *", {"minute": "*/30"}, "early_agent_tick"),
         (douhot_window_tick, _get_settings().douhot_window_cron, {"minute": "*/20"}, "douhot_window_tick"),
-        (weread_refresh_tick, _get_settings().weread_refresh_cron, {"minute": 50, "hour": 7}, "weread_refresh"),
+        # wr_skey 短效(约12~24h):每 8 小时续期一次,保证永不过期
+        (weread_refresh_tick, "50 7,15,23 * * *", {"minute": 50, "hour": 7}, "weread_refresh"),
         (candidate_discover_tick, _get_settings().candidate_discover_cron, {"minute": 20, "hour": 8}, "wechat_candidates"),
         (run_feishu_daily, _get_settings().feishu_daily_cron, {"minute": 0, "hour": 8}, "feishu_daily"),
         (run_feishu_wechat_analysis, _get_settings().feishu_wechat_cron, {"minute": 0, "hour": 10}, "feishu_wechat"),
