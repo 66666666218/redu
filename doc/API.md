@@ -763,6 +763,12 @@
 - **请求方式**: GET `/api/wechat/articles?limit=100&has_pan=1&benchmark_id=1`
 - **响应**: `{"count":N,"items":[{"id","author","title","url","content","publish_at","source"(manual/listen/sync),"pan_types","benchmark_id","created_at"}]}`
 
+### 9b.8 AI 改写 / 运行状态(2026-09-09)
+
+- **AI 改写**: POST `/api/wechat/articles/{id}/rewrite` → `{title, content, my_link}`(DeepSeek 改写为原创可发布稿,≈¥0.01/篇;正文不足自动补抓)
+- **运行状态**: GET `/api/wechat/status` → `{benchmarks, new_24h, pan_articles, burst, candidates}`
+- `articles` 列表新增字段:`quality`(质量分 0~10)、`my_pan_urls`(转存后的自己的链接)、`read_num` 等流量字段
+
 > 文章来源标记:`manual` 手动录入 / `listen` 监听新文 / `sync` 历史同步;`pan_types` 为涉及的网盘类型
 > (标题=盘名疑似级,自抓正文命中链接=确认级),逗号分隔,如 `"夸克网盘,百度网盘"`。
 
