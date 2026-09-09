@@ -126,6 +126,23 @@ async function refreshTraffic() {
 }
 
 const fmt = (t) => t ? String(t).replace('T', ' ') : '—'
+const rewriting = ref(0)
+const rewriteText = ref('')
+const rewriteTitle = ref('')
+async function rewrite(a) {
+  rewriting.value = a.id
+  rewriteText.value = ''
+  try {
+    const r = await api.wechatArticleRewrite(a.id)
+    rewriteTitle.value = r.title
+    rewriteText.value = r.content
+    toastOk('AI 改写完成,请在下方复制')
+  } catch (e) { toastErr(e.message) } finally { rewriting.value = 0 }
+}
+async function copyRewrite() {
+  const full = rewriteTitle.value + String.fromCharCode(10) + String.fromCharCode(10) + rewriteText.value
+  try { await navigator.clipboard.writeText(full); toastOk('已复制到剪贴板') } catch { toastErr('复制失败,请手动选择复制') }
+}
 const firstMy = (s) => {
   const line = (s || '').split(chr10()).find(x => x.trim())
   if (!line) return ''
@@ -201,13 +218,14 @@ onMounted(load)
     <div class="card">
       <h3>监听到的文章({{ articles.length }})</h3>
       <table v-if="articles.length">
-        <tr><th>发现时间</th><th>公众号</th><th>标题</th><th>网盘</th><th>我的链接</th><th>阅读</th><th>点赞</th><th>转发</th><th>采样</th></tr>
+        <tr><th>发现时间</th><th>公众号</th><th>标题</th><th>网盘</th><th>我的链接</th><th>阅读</th><th>点赞</th><th>转发</th><th>操作</th></tr>
         <tr v-for="a in articles" :key="a.id">
           <td class="empty">{{ fmt(a.created_at) }}</td>
           <td>{{ a.author }}</td>
           <td><a :href="a.url" target="_blank" rel="noopener">{{ a.title }}</a></td>
           <td>{{ a.pan_types ? '🔴 ' + a.pan_types : '—' }}<span v-if="a.trend_flag" :class="a.trend_flag==='回落' ? 'empty' : ''">{{ a.trend_flag==='爆点苗头' ? ' 🚀爆点苗头' : a.trend_flag==='回落' ? ' 📉回落' : '' }}</span></td>
           <td><a v-if="firstMy(a.my_pan_urls)" :href="firstMy(a.my_pan_urls)" target="_blank" rel="noopener">打开</a><span v-else class="empty">—</span></td>
+          <td><button class="ghost" :disabled="rewriting===a.id" @click="rewrite(a)">{{ rewriting===a.id ? '…' : 'AI改写' }}</button></td>
           <td>{{ a.traffic_at ? a.read_num : '—' }}</td>
           <td>{{ a.traffic_at ? a.zan_num : '—' }}</td>
           <td>{{ a.traffic_at ? a.share_num : '—' }}</td>
@@ -216,6 +234,11 @@ onMounted(load)
       </table>
       <div v-else class="empty">暂无文章:添加对标号后点「立即监听一轮」</div>
       <div class="empty" style="margin-top:8px">阅读列"—"=尚未采样;「刷新阅读量」按 ¥0.06/篇 调用 dajiala,每轮最多 30 篇(可在 .env 调整)</div>
+    <div v-if="rewriteText" class="card" style="margin-top:16px">
+      <h3>AI 改写稿:{{ rewriteTitle }}</h3>
+      <textarea readonly style="width:100%;min-height:300px;font-size:13px">{{ rewriteText }}</textarea>
+      <button style="margin-top:8px" @click="copyRewrite">复制全文</button>
+    </div>
     </div>
   </div>
 </template>

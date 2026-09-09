@@ -136,5 +136,6 @@ export const api = {
   wechatImportShelf: () => req('POST', '/api/wechat/benchmarks/import_shelf'),
   wechatArticles: (q = '') => req('GET', '/api/wechat/articles' + (q ? '?' + q : '')),
   wechatTrafficRefresh: (o = {}) => req('POST', '/api/wechat/traffic/refresh', o),
-  wechatArticleTraffic: (id) => req('GET', `/api/wechat/articles/${id}/traffic`)
+  wechatArticleTraffic: (id) => req('GET', `/api/wechat/articles/${id}/traffic`),
+  wechatArticleRewrite: (id) => req('POST', `/api/wechat/articles/${id}/rewrite`)
 }

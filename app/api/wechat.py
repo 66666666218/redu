@@ -227,6 +227,49 @@ def wechat_article_traffic(article_id: int, user: User = Depends(get_current_use
          "sampled_at": s.sampled_at.isoformat(sep=" ", timespec="seconds")} for s in samples]}
 
 
+@router.post("/api/wechat/articles/{article_id}/rewrite")
+def wechat_article_rewrite(article_id: int, user: User = Depends(get_current_user),
+                           db: Session = Depends(get_db)):
+    """AI 改写:把监控文章改写为原创可发布稿(DeepSeek,≈¥0.01/篇)。
+
+    返回 {title(新标题), content(纯文本正文)},可直接粘贴到公众号后台发布。
+    """
+    from config.settings import get_settings
+
+    st = get_settings()
+    if not st.deepseek_api_key:
+        raise HTTPException(400, "未配置 DEEPSEEK_API_KEY,无法 AI 改写")
+    from app.services.llm_client import rewrite_article
+
+    row = db.scalar(select(WechatArticle).where(WechatArticle.id == article_id,
+                                                WechatArticle.user_id == user.id))
+    if row is None:
+        raise HTTPException(404, "文章不存在")
+    if not row.content or len(row.content) < 100:
+        # 正文不足:尝试从微信读书补拉
+        cookie = wechat_monitor._weread_cookie(db, user.id, st)
+        bid = (db.scalar(select(WechatBenchmark).where(
+            WechatBenchmark.id == row.benchmark_id)) if row.benchmark_id else None)
+        if cookie and bid and bid.weread_book_id:
+            try:
+                from app.services.weread_client import WereadClient
+                wc = WereadClient(cookie)
+                # 从文章 URL 反查 reviewId 不易,直接抓原文页
+                row.content = wechat_monitor.fetch_article_content(row.url) or row.content
+            except Exception:  # noqa: BLE001
+                pass
+    if not row.content or len(row.content) < 100:
+        raise HTTPException(400, "文章正文不足(未抓到),暂不能 AI 改写")
+    # 我的转存链优先
+    my_link = next((x.strip() for x in (row.my_pan_urls or "").splitlines() if x.strip()), "")
+    out = rewrite_article(st.deepseek_base_url, st.deepseek_api_key, st.deepseek_model,
+                          row.title, row.content, my_link=my_link)
+    if out is None:
+        raise HTTPException(502, "AI 改写失败,请稍后重试")
+    return {"ok": True, "article_id": article_id, "title": out["title"],
+            "content": out["content"], "my_link": my_link or None}
+
+
 @router.post("/api/wechat/listen")
 def wechat_listen(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """手动触发一轮监听(全部启用中的对标号各查一次"当天发文",新文入库+推公众号群)。"""
