@@ -81,7 +81,7 @@ def test_velocity_and_acceleration_scoring(session, st) -> None:
     session.commit()
     signals = early_agent.detect_signals(session, 1, st)
     s = next(x for x in signals if x["kw"] == "某游戏新版本")
-    assert s["score"] == 90 and "加速上涨" in s["parts"] and "增速+167%" in s["parts"]
+    assert s["score"] == 90 and "加速上涨" in s["parts"] and "150→400(+167%)" in s["parts"]
     pushed = early_agent.agent_tick(session, 1, settings=st)
     assert pushed == 1
     stage = session.scalar(select(AgentStage))

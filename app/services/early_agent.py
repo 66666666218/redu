@@ -107,13 +107,13 @@ def detect_signals(db: Session, user_id: int, settings: Settings) -> list[dict]:
             if prev is not None and prev > 0:
                 v_now = (latest - prev) / prev * 100
                 if v_now >= 100:
-                    parts.append(f"增速+{v_now:.0f}%")
+                    parts.append(f"{prev:.0f}→{latest:.0f}(+{v_now:.0f}%)")
                     score += 40
                 elif v_now >= 50:
-                    parts.append(f"增速+{v_now:.0f}%")
+                    parts.append(f"{prev:.0f}→{latest:.0f}(+{v_now:.0f}%)")
                     score += 30
                 elif v_now <= -30:
-                    parts.append(f"回落{v_now:.0f}%")
+                    parts.append(f"回落{v_now:.0f}%({prev:.0f}→{latest:.0f})")
             # ② 加速:增速比再升 ≥20 个百分点(起势最早的标志)
             if len(values) >= 3 and values[-3] > 0:
                 v_prev = (prev - values[-3]) / values[-3] * 100 if prev is not None else 0

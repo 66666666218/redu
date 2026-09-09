@@ -1,5 +1,7 @@
 # CHANGELOG
 
+- [2026-09-09 10:30] PERF: **苗头信号带绝对数值证据** — 信号分解从"增速+167%"升级为"150→400(+167%)"(起始量→当前量),用户一眼判断绝对量级是否值得跟进。测试断言适配。全量 240 项通过(Files: app/services/early_agent.py, tests/test_early_agent.py, CHANGELOG)
+
 - [2026-09-09 10:20] FIX: **SQLite 备份补齐(本地部署数据安全)** — 单点故障审查发现 backup.sh 只备 MySQL,SQLite 用户(本地部署)无备份,数据损坏=全部丢失。修复:① scripts/backup.sh 按 DATABASE_URL 追加 SQLite 备份(WAL checkpoint 后 gzip);② 每日数据清理作业(data_cleanup 04:00)顺带做 SQLite 快照到 data/backups/platform_YYYYMMDD.db(保留最近 7 份,SQLAlchemy backup API 保证一致性)。全量 240 项通过(Files: scripts/backup.sh, app/db/maintenance.py, CHANGELOG)
 
 - [2026-09-09 10:10] FEAT: **dajiala key 多租户化——按用户隔离余额(平台 Cookie 管理「dajiala」)** — 循环10产品化审查:全局共享 key 下多用户采样会烧同一个人的余额。改为按用户优先:平台「Cookie 管理」新增 **dajiala** 平台(加密存储,每人自己的 key),未配置回落全局 `DAJIALA_KEY`。`run_wechat_listen`/`sample_traffic` 均按用户取 key。单人使用无感知,多用户各自计费(Files: app/services/{wechat_monitor.py,cookie_store.py}, CHANGELOG)
