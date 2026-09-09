@@ -1106,6 +1106,39 @@ def sample_traffic(session: Session, user_id: int, settings: Settings | None = N
             "balance_after": client.remain_money() if sampled else balance}
 
 
+def quark_keepalive_tick(settings: Settings | None = None) -> int:
+    """每日定时:夸克 Cookie 保活(轻量列目录,滚动延长 __puus);失效即时告警。返回1=健康 0=异常/未配。"""
+    from app.services.alert_service import notify_incident
+
+    settings = settings or get_settings()
+    if not settings.quark_cookie:
+        return 0
+    from app.services.quark_transfer import QuarkAuthError, QuarkError, QuarkTransfer
+    from app.db import get_session_local
+    from app.db.models import User
+
+    db = get_session_local()()
+    try:
+        uid = db.scalar(select(User.id).order_by(User.id))
+        if uid is None:
+            return 0
+        try:
+            QuarkTransfer(settings.quark_cookie).keepalive()
+            return 1
+        except QuarkAuthError as exc:
+            notify_incident(db, uid, "xianyu",
+                            "🟠 夸克 Cookie 已失效,转存功能停用",
+                            f"{exc}。请浏览器登录 pan.quark.cn 后 F12 复制 Cookie,"
+                            "更新到 .env 的 QUARK_COOKIE(监听不受影响,仅转存暂停)",
+                            settings=settings)
+            return 0
+        except QuarkError as exc:
+            logger.warning("夸克保活异常:%s", exc)
+            return 0
+    finally:
+        db.close()
+
+
 def traffic_tick(settings: Settings | None = None) -> int:
     """每日定时:给所有(有对标号的)用户采样一轮阅读量。返回采样总篇数。"""
     from app.db import get_session_local

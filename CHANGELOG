@@ -1,5 +1,7 @@
 # CHANGELOG
 
+- [2026-09-09 09:00] FIX: **微信读书续期 -2012 根因修复——续期请求缺 platform-id 等完整浏览器头** — 受控实验定位根因:renewal 请求缺 `platform-id: 10`(网页版标识)和正确的 shelf Referer 时,服务端"成功"下发新 skey 但该 skey 与会话上下文不匹配 → shelf 仍 -2012。修复 refresh_skey 请求头(platform-id/完整 Chrome UA/shelf Referer/charset),rq 上下文改为 shelf;真实环境验证续期→shelf errCode 0 全链通过并回写 .env。另:夸克 Cookie 每日保活(quark_keepalive_tick,轻量列目录滚动延长 __puus,失效即时告警);判爆阈值校准(微信读书 readNum 为站内口径,wechat_burst_min_reads 200→100)。全量 240 项通过(Files: app/services/{weread_client.py,quark_transfer.py,wechat_monitor.py,scheduler.py}, config/settings.py, CHANGELOG)
+
 - [2026-09-09 08:50] PERF: **公众号监听间隔 6h→60min(逼近微信读书 App 的实时同步)** — 用户反馈"检测不到微信读书里的新文章":根因是监听默认间隔 6h(轮询式 vs App 的推送式秒级同步,差距=轮询间隔)。微信读书免费源(cover 稳定+2s 内置限速)扛得住小时级轮询 → 默认间隔降为 60 分钟(最坏延迟 1h/平均 30min),启动时一次性迁移老用户 360→60。doc/dev.md 实时性说明同步(Files: app/services/schedule_service.py, app/db/database.py, doc/dev.md, CHANGELOG)
 
 - [2026-09-09 11:00] FIX: **书架导入 500 黑盒修复 + 续期"仍失效"判定** — 用户点「从微信读书书架导入」报"服务器内部错误"。实测根因:微信读书 Cookie 登录态**整体过期**(-2012,连长效 wr_rt 也失效,续期救不回,需重新登录)。两处修复:① `/api/wechat/benchmarks/import_shelf` 原无异常处理 → 任何 WereadError 都变 500"服务器内部错误";补 `WereadAuthError/WereadError` → HTTP 502 + 明确文案("登录态已失效,请在 Cookie 管理更新 weread Cookie");② `refresh_weread_cookie` 改**先验证再回写**:续期后仍 -2012/-2010 → 报 `failed(expired)` 且**不回写**(避免把有效值覆盖成无效),不再误报"已续期(验证未通过)"。新增 1 项测试,全量 240 项通过 (Files: app/api/wechat.py, app/services/wechat_monitor.py, tests/test_wechat_monitor.py, CHANGELOG)

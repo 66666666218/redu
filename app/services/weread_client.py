@@ -194,12 +194,15 @@ class WereadClient:
             return None
         jar = requests.Session()
         jar.headers.update({
-            "User-Agent": _UA,
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "Origin": BASE,
-            "Referer": f"{BASE}/",
-            "Content-Type": "application/json",
+            "Referer": f"{BASE}/web/shelf",
+            "Content-Type": "application/json;charset=UTF-8",
+            "platform-id": "10",  # 微信读书网页版标识;缺失会导致续期后仍 -2012(实测)
+            "Cache-Control": "no-cache",
         })
         # 关键:登录 Cookie 必须注入 cookie jar(domain=weread.qq.com),否则按游客处理 -2013
         for kv in self.cookie.split(";"):
@@ -208,7 +211,7 @@ class WereadClient:
                 jar.cookies.set(name, value, domain="weread.qq.com", path="/")
         try:
             resp = jar.post(f"{BASE}/web/login/renewal",
-                            data=json.dumps({"rq": "%2Fweb%2Fbook%2Fread", "ql": True},
+                            data=json.dumps({"rq": "%2Fweb%2Fshelf", "ql": True},
                                             separators=(",", ":")),
                             timeout=timeout)
         except requests.RequestException:

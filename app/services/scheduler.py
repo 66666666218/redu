@@ -224,11 +224,12 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         _safe(cleanup_old_data), CronTrigger(hour=4, minute=0), id="data_cleanup", max_instances=1, coalesce=True
     )
     from app.services.early_agent import agent_tick_all_users
-    from app.services.wechat_monitor import candidate_discover_tick, traffic_tick, weread_refresh_tick
+    from app.services.wechat_monitor import candidate_discover_tick, quark_keepalive_tick, traffic_tick, weread_refresh_tick
 
     jobs = [
         (traffic_tick, _get_settings().wechat_traffic_cron, {"minute": 30, "hour": 21}, "wechat_traffic"),
         (traffic_tick, "30 9 * * *", {"minute": 30, "hour": 9}, "wechat_traffic_am"),
+        (quark_keepalive_tick, "0 7 * * *", {"minute": 0, "hour": 7}, "quark_keepalive"),
         (agent_tick_all_users, "*/30 * * * *", {"minute": "*/30"}, "early_agent_tick"),
         (douhot_window_tick, _get_settings().douhot_window_cron, {"minute": "*/20"}, "douhot_window_tick"),
         (weread_refresh_tick, _get_settings().weread_refresh_cron, {"minute": 50, "hour": 7}, "weread_refresh"),

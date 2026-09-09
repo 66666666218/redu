@@ -236,6 +236,14 @@ class QuarkTransfer:
                     return found
         return ""
 
+    def keepalive(self) -> bool:
+        """每日保活:轻量列根目录,让服务端滚动延长 __puus 有效期(防闲置过期)。
+
+        认证失败抛 QuarkAuthError,由调用方告警;成功返回 True。
+        """
+        self._list_dir("0")
+        return True
+
     def transfer_and_share(self, share_url: str, save_dir: str = "/来自监听",
                            password: str = "", expire_days: int = 0) -> dict:
         """转存分享到自己网盘并创建二次分享,返回 {share_url, password, files}。"""
