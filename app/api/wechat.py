@@ -64,15 +64,50 @@ def wechat_article_list(limit: int = 100, has_pan: int | None = None, benchmark_
     return {"count": len(rows), "items": [_row_to_dict(r) for r in rows]}
 
 
+def _traffic_insights(rows: list) -> dict:
+    """数据洞察:盘链偏好 / 类目×阅读 / 发布时段×阅读(纯聚合,零成本)。"""
+    from collections import Counter, defaultdict
+    pan_counter: Counter = Counter()
+    cat_read: dict[str, list[int]] = defaultdict(list)
+    hour_read: dict[int, list[int]] = defaultdict(list)
+    for r in rows:
+        for pt in (r.pan_types or "").split(","):
+            if pt.strip():
+                pan_counter[pt.strip()] += 1
+        # 类目粗分(标题关键词)
+        title = r.title or ""
+        for cat, kws in (("教育学习", ("课程", "教辅", "PPT", "教案", "词汇", "试卷", "老师", "开学")),
+                          ("软件工具", ("软件", "激活", "会员", "Office", "PS", "PR", "剪映")),
+                          ("影视动漫", ("影视", "动漫", "纪录片", "电影", "剧集"))):
+            if any(k in title for k in kws):
+                cat_read[cat].append(r.read_num or 0)
+                break
+        else:
+            cat_read["其他"].append(r.read_num or 0)
+        h = r.publish_at.hour if r.publish_at else (r.created_at.hour if r.created_at else None)
+        if h is not None:
+            hour_read[h].append(r.read_num or 0)
+    top_pan = [{"type": k, "count": v} for k, v in pan_counter.most_common(4)]
+    cats = [{"category": k, "count": len(v), "avg_read": sum(v) // max(len(v), 1)}
+            for k, v in cat_read.items() if v]
+    cats.sort(key=lambda x: -x["avg_read"])
+    best_hours = sorted(((h, sum(v) // max(len(v), 1)) for h, v in hour_read.items()),
+                        key=lambda x: -x[1])[:3]
+    return {"pan_preference": top_pan,
+            "categories_by_read": cats,
+            "best_publish_hours": [{"hour": h, "avg_read": a} for h, a in best_hours]}
+
+
 @router.get("/api/wechat/analyze")
 def wechat_analyze(limit: int = 200, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """对已录入的公众号文章跑内容选题分析,返回报告。"""
+    """对已录入的公众号文章跑内容选题分析,返回报告(含盘链偏好/类目阅读/最佳时段洞察)。"""
     rows = db.scalars(
         select(WechatArticle).where(WechatArticle.user_id == user.id)
         .order_by(WechatArticle.publish_at.desc().nulls_last()).limit(min(int(limit), 500))
     ).all()
     articles = [{"title": r.title, "content": r.content, "author": r.author, "publish_at": r.publish_at} for r in rows]
-    return {"articles": len(articles), **analyze_articles(articles)}
+    return {"articles": len(articles), "insights": _traffic_insights(rows),
+            **analyze_articles(articles)}
 
 
 # ---------------------------------------------------------------- 对标号:监听/同步
