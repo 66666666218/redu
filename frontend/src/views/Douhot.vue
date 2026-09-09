@@ -88,6 +88,15 @@ async function changeWatchWindow(w, v) {
 async function loadWatches() {
   try { watches.value = await api.douhotWatchAnalytics() } catch {}
 }
+async function pushDigest() {
+  busy.value = 'digest'
+  try {
+    const r = await api.watchDigest('douhot')
+    if (r.status === 'skipped') toastError(r.reason === 'no_watch' ? '还没有监控词,先添加关键词监控' : '抖音未配置飞书群(设置里配 Webhook)')
+    else if (r.status === 'failed') toastError('飞书推送失败,请检查 Webhook')
+    else toastOk('关键词监控已推送飞书(含名次变化 ↑N名/↓N名)')
+  } catch (e) { toastError(e.message) } finally { busy.value = false }
+}
 async function loadWindows() {
   try { windowRows.value = (await api.douhotWatchWindows()).items || [] } catch {}
 }
@@ -205,7 +214,9 @@ onMounted(async () => { await loadList('word'); await loadWatches(); await loadW
 
     <!-- 关键词监控智能体 -->
     <div class="card" style="margin-top:16px">
-      <h3>🤖 关键词监控(爆点 {{ burstCount }})</h3>
+      <h3>🤖 关键词监控(爆点 {{ burstCount }})
+        <button class="ghost" style="font-size:12px" :disabled="busy==='digest'" @click="pushDigest">{{ busy==='digest' ? '推送中…' : '推送关键词监控到飞书' }}</button>
+      </h3>
       <div class="row" style="gap:8px;margin-bottom:8px">
         <select v-model="watchForm.list_type" style="width:auto">
           <option v-for="t in tabs" :key="t.key" :value="t.key">{{ t.label }}</option>

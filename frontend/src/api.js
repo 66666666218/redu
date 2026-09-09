@@ -84,6 +84,7 @@ export const api = {
   watchUpdate: (section, listType, keyword, filterKeyword, dateWindow) => req('PATCH', '/api/watch/' + section, { list_type: listType, keyword, filter_keyword: filterKeyword || '', date_window: dateWindow }),
   watchList: (section) => req('GET', '/api/watch/' + section),
   watchAnalytics: (section) => req('GET', '/api/watch/' + section + '/analytics'),
+  watchDigest: (section) => req('POST', '/api/watch/' + section + '/digest'),
   xianyuDaily: () => req('GET', '/api/xianyu/daily'),
   xianyuCollectDeep: () => req('POST', '/api/xianyu/collect-deep'),
   xianyuAnalytics: () => req('GET', '/api/xianyu/analytics'),

@@ -1,5 +1,7 @@
 # CHANGELOG
 
+- [2026-09-09 09:00] FEAT: **关键词监控卡片加"名次"列(↑N名/↓N名)+ 按板块推专属群 + 手动推送** — 用户要"关键词监控列表也推飞书,带上升多少排名"。排查:关键词监控卡 `build_keyword_card` 本已存在且随每日 08:00 日报推总群,但 ① 表格列只有 重点/名称/热度值/趋势,**名次变化只用于汇总统计没进表格**;② 只推总群,不推各板块专属群。修复/增强:① 表格新增「名次」列显示 `↑3名/↓2名/🆕`(复用 `_keyword_entries_rows` 已算好的 marker);② `build_keyword_card` 加 `section` 参数,日报里各板块专属群补推该板块的关键词卡(总群保持全量);③ 新增 POST `/api/watch/{section}/digest` 手动即时推送 + Douhot 页「推送关键词监控到飞书」按钮。渲染验证:话题甲 5→2 显示 ↑3名、话题乙 2→4 显示 ↓2名。新增 1 项单测(卡片按板块过滤),全量 238 项通过;前端已构建 (Files: app/services/feishu.py, app/api/collect.py, frontend/src/{api.js,views/Douhot.vue}, tests/test_feishu.py, CHANGELOG)
+
 - [2026-09-08 08:20] FEAT: **内容质量评分+虚假宣传检测+推送重点标记** — ① 新增 `assess_quality` 函数:盘链确认+3/时效+1/多号同发+2/阅读量加分,引流话术(加微信/付费获取/进群获取/扫码领取)检测为虚假宣传扣分;② `wechat_articles` 新增 `quality` 列(0~10 分,含迁移);③ `_insert_new_articles` 入库时自动评估质量分;④ `_push_listen` 推送标题加质量标记:🔴爆(阅读≥500)/⭐热(≥100)/⭐优(quality≥6)/⚠️疑(疑似引流);⑤ 测试数据标题加盘名适配 require_pan 过滤。全量 237 项通过(Files: app/services/wechat_monitor.py, app/db/{models.py,database.py}, app/api/wechat.py, tests/test_wechat_monitor.py, CHANGELOG)
 
 - [2026-09-08 08:10] FEAT: **文章内容交叉提取——从正文自动挖出其他公众号名,反哺候选发现** — 加强内容交叉提取:新增 `app/services/content_extract.py`,从已监控文章正文自动提取被引流的其他公众号名称(模式:关注/搜索/公众号「」/更多…关注 等,清洗+去重+排除误提)。接入 `_enrich_new_articles` 尾部:监听新文含正文时,提取文中提到的其他公众号 → 去重(已知对标号/已有候选)→ 自动入库为候选对标号(`term="content_cross"`)。实现"监听越多→发现越多"的滚雪球效应。另新增 `extract_content_keywords`(正文高频词,供搜索发现)。新增 2 项单测(提取质量/监听集成)。全量 237 项通过(Files: app/services/{content_extract.py,wechat_monitor.py}, tests/test_wechat_monitor.py, CHANGELOG)

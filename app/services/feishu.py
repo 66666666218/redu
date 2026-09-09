@@ -421,10 +421,13 @@ def _keyword_watch_lines(db: Session, user_id: int, top_n: int = 8) -> list[str]
     return lines if len(lines) > 1 else []
 
 
-def build_keyword_card(db: Session, user_id: int, settings: Settings) -> dict | None:
+def build_keyword_card(db: Session, user_id: int, settings: Settings,
+                       section: str | None = None) -> dict | None:
     """生成"关键词监控"飞书交互卡片(有内容才返回 dict,否则 None)。
 
-    每个关注词一块:标题(关键词 · 板块 · 趋势概览)+ 明细 note(每条 趋势/名次/新增)。
+    每个关注词一块:标题(关键词 · 板块 · 趋势概览)+ 明细表(重点/名称/热度值/趋势,
+    榜单搜索类带 `↑N名/↓N名` 名次变化)+ 今日vs昨日汇总。
+    `section` 非空时只出该板块的词(供推送到板块专属群;None=全部,推总群)。
     """
     from app.services import keyword_agent
     from app.services.keyword_watch import list_watch
@@ -432,6 +435,8 @@ def build_keyword_card(db: Session, user_id: int, settings: Settings) -> dict | 
     entry_top = getattr(settings, "douhot_watch_daily_top", None) or 100
     elements = []
     for w in list_watch(db, user_id):
+        if section and w.get("section") != section:
+            continue
         snaps = repository.watch_snap_series(db, user_id, w["keyword"], section=w.get("section"))
         label = SECTION_LABELS.get(w.get("section", ""), w.get("section", ""))
         entries = [s for s in snaps if getattr(s, "entry_title", "")]
@@ -458,16 +463,17 @@ def build_keyword_card(db: Session, user_id: int, settings: Settings) -> dict | 
             rose = sum(1 for r in rows if r["marker"].startswith("↑") or r["marker"].startswith("🔥↑"))
             fell = sum(1 for r in rows if r["marker"].startswith("↓") or r["marker"].startswith("🔥↓"))
             dropped = len(set(prev_map) - set(latest_map))
-            # 左对齐列(全角空格补齐),缺省填 —
-            cols = [("重点", 4), ("名称", 26), ("热度值", 12), ("趋势", 14)]
+            # 左对齐列(全角空格补齐),缺省填 —;名次列显示 ↑N名/↓N名/🆕
+            cols = [("重点", 4), ("名次", 8), ("名称", 22), ("热度值", 10), ("趋势", 12)]
             table = [_aligned_row("  ", cols)]
             for r in rows[:entry_top]:
                 g = f" {r['growth'] * 100:+.0f}%" if r["growth"] is not None else ""
                 mark = "🔴" if r.get("burst") else "—"
                 trend = f"{r['arrow']}{r['trend']}{g}".strip()
-                table.append(_aligned_row("  ", [(mark, 4), (r['title'][:12], 26), (_w(r['score']), 12), (trend, 14)]))
-            table.append(_aligned_row("  ", [("", 4), ("今日vs昨日", 26),
-                                             (f"🆕{news} ↑{rose} ↓{fell} 跌出{dropped}", 12), ("—", 14)]))
+                table.append(_aligned_row("  ", [(mark, 4), (r["marker"].strip() or "—", 8),
+                                                 (r['title'][:12], 22), (_w(r['score']), 10), (trend, 12)]))
+            table.append(_aligned_row("  ", [("", 4), ("", 8), ("今日vs昨日", 22),
+                                             (f"🆕{news} ↑{rose} ↓{fell} 跌出{dropped}", 10), ("—", 12)]))
             elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(table)}})
         else:
             values = [s.score for s in snaps]
@@ -573,6 +579,10 @@ def run_feishu_daily(settings: Settings | None = None, db: Session | None = None
                 for chunk in _split_messages(text):
                     if c.send(chunk):
                         sent += 1
+                # 该板块的关键词监控卡(含名次变化 ↑N名/↓N名)推专属群
+                kcard = build_keyword_card(db, user.id, settings, section=sec)
+                if kcard and c.send_card(kcard):
+                    sent += 1
         logger.info("飞书日报推送完成,消息数=%s", sent)
         return sent
     finally:

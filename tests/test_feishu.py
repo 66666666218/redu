@@ -697,3 +697,31 @@ def test_run_xianyu_full_block_notifies_incident(session, monkeypatch: pytest.Mo
     # FeishuAlert 冷却行已建
     fa = session.scalars(select(FeishuAlert)).all()
     assert any(f.section == "incident_xianyu" for f in fa)
+
+
+def test_build_keyword_card_filters_by_section(session) -> None:
+    """关键词监控卡按板块过滤:总群全量、板块专属群只含该板块词(含名次变化)。"""
+    import json
+
+    from app.db.models import DouhotWatch, DouhotWatchSnap
+    from app.services.feishu import build_keyword_card
+
+    session.add_all([
+        DouhotWatch(user_id=1, section="douhot", list_type="word", keyword="抖音词"),
+        DouhotWatch(user_id=1, section="weibo", list_type="word", keyword="微博词"),
+    ])
+    session.commit()
+    ts = datetime.now()
+    session.add_all([
+        DouhotWatchSnap(user_id=1, section="douhot", list_type="word", keyword="抖音词",
+                        score=100, captured_at=ts),
+        DouhotWatchSnap(user_id=1, section="weibo", list_type="word", keyword="微博词",
+                        score=50, captured_at=ts),
+    ])
+    session.commit()
+    st = _settings()
+    full = json.dumps(build_keyword_card(session, 1, st), ensure_ascii=False)
+    assert "抖音词" in full and "微博词" in full  # 总群=全量
+    only = json.dumps(build_keyword_card(session, 1, st, section="douhot"), ensure_ascii=False)
+    assert "抖音词" in only and "微博词" not in only  # 板块群=只含该板块
+    assert build_keyword_card(session, 1, st, section="baidu") is None  # 无该板块词

@@ -165,6 +165,27 @@ def watch_analytics(section: str, user: User = Depends(get_current_user), db: Se
     return _wa(section, db, user.id)
 
 
+@router.post("/api/watch/{section}/digest")
+def watch_digest(section: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """立即把该板块的「关键词监控」卡片推送到飞书(含名次变化 ↑N名/↓N名)。
+
+    平时每日日报(08:00)自动推总群 + 各板块专属群;此接口用于即时手动推送。
+    """
+    from config.settings import get_settings
+    from app.services.feishu import build_keyword_card, webhook_for
+    from app.services.feishu_client import FeishuClient
+
+    settings = get_settings()
+    card = build_keyword_card(db, user.id, settings, section=section)
+    if not card:
+        return {"status": "skipped", "reason": "no_watch"}
+    wh = webhook_for(settings, section)
+    if not wh:
+        return {"status": "skipped", "reason": "no_webhook"}
+    ok = FeishuClient(wh, settings.feishu_secret).send_card(card)
+    return {"status": "success" if ok else "failed"}
+
+
 @router.get("/api/douhot/list/{list_type}")
 def douhot_list(list_type: str, keyword: str = "", filter_keyword: str = "", date_window: int | None = None,
                 user: User = Depends(get_current_user), db: Session = Depends(get_db)):
