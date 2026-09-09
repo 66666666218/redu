@@ -1,5 +1,7 @@
 # CHANGELOG
 
+- [2026-09-09 10:10] FEAT: **dajiala key 多租户化——按用户隔离余额(平台 Cookie 管理「dajiala」)** — 循环10产品化审查:全局共享 key 下多用户采样会烧同一个人的余额。改为按用户优先:平台「Cookie 管理」新增 **dajiala** 平台(加密存储,每人自己的 key),未配置回落全局 `DAJIALA_KEY`。`run_wechat_listen`/`sample_traffic` 均按用户取 key。单人使用无感知,多用户各自计费(Files: app/services/{wechat_monitor.py,cookie_store.py}, CHANGELOG)
+
 - [2026-09-09 10:00] TEST/FIX: **agent_learning 适配 SystemConfig 实际列名(key/value)+ 权重读写/回测单测** — 并行会话的 SystemConfig 模型用 key/value 列,agent_learning 引用 config_key/config_value 会运行时报错 → 修正并加单测(默认加载/自定义保存/空数据回测安全)。全量 240 项通过(Files: app/services/agent_learning.py, tests/test_early_agent.py, CHANGELOG)
 
 - [2026-09-09 10:00] FEAT: **公众号监听页运行状态条** — 新增 `GET /api/wechat/status`(在监号/近24h新文/盘链文/爆点/候选数),监听页顶部状态条一览系统运行情况(此前 Agent 每天自动运转但用户看不到全局状态)。前端已构建(Files: app/api/wechat.py, frontend/src/{api.js,views/WechatListen.vue}, CHANGELOG)

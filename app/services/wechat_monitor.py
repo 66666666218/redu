@@ -338,6 +338,16 @@ def set_benchmark_active(session: Session, user_id: int, benchmark_id: int, acti
 
 
 # ---------------------------------------------------------------- 微信读书(免费源)
+def _dajiala_key(session: Session, user_id: int, settings: Settings) -> str:
+    """dajiala key:平台内按用户配置(「dajiala」)优先,其次全局 DAJIALA_KEY。
+
+    多租户余额隔离:每个用户用自己的 key,采样消耗各自的余额。
+    """
+    from app.services.cookie_store import get_cookie
+
+    return (get_cookie(session, user_id, "dajiala") or settings.dajiala_key or "").strip()
+
+
 def _weread_cookie(session: Session, user_id: int, settings: Settings) -> str:
     """微信读书 Cookie:优先用户在平台内配置的「weread」,其次全局 WEREAD_COOKIE。"""
     from app.services.cookie_store import get_cookie
@@ -665,7 +675,8 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
         session.commit()
         return {"platform": "wechat", "status": "skipped", "reason": "no_benchmarks"}
     cookie = _weread_cookie(session, user_id, settings)
-    use_dajiala = bool(settings.dajiala_key)
+    daj_key = _dajiala_key(session, user_id, settings)
+    use_dajiala = bool(daj_key)
     if not cookie and not use_dajiala:
         _record_run(session, user_id, "wechat_listen", "skipped",
                     "no_source(无微信读书 Cookie 且无 dajiala key)")
@@ -679,7 +690,7 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
     needs_dajiala = use_dajiala and any(
         not (cookie and b.weread_book_id) and b.anchor_url for b in rows)
     if use_dajiala:
-        client = client or DajialaClient(settings.dajiala_key)
+        client = client or DajialaClient(daj_key)
     if needs_dajiala:
         try:
             balance = client.remain_money()
@@ -1023,9 +1034,10 @@ def sample_traffic(session: Session, user_id: int, settings: Settings | None = N
     余额保护:先查余额(免费),按 0.06/篇 裁剪到买得起的数量。
     """
     settings = _base(settings)
-    if not settings.dajiala_key:
+    daj_key = _dajiala_key(session, user_id, settings)
+    if not daj_key:
         return {"platform": "wechat_traffic", "status": "skipped", "reason": "no_key"}
-    client = client or DajialaClient(settings.dajiala_key)
+    client = client or DajialaClient(daj_key)
     limit = max(1, int(limit or settings.wechat_traffic_sample_limit))
     cutoff = datetime.now().timestamp() - settings.wechat_traffic_min_interval_hours * 3600
 

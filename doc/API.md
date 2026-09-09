@@ -766,6 +766,7 @@
 ### 9b.8 AI 改写 / 运行状态(2026-09-09)
 
 - **AI 改写**: POST `/api/wechat/articles/{id}/rewrite` → `{title, content, my_link}`(DeepSeek 改写为原创可发布稿,≈¥0.01/篇;正文不足自动补抓)
+- **key 多租户**:dajiala key 可在「Cookie 管理」按用户配置(dajiala 平台),未配置回落全局 `DAJIALA_KEY`——多用户余额隔离
 - **运行状态**: GET `/api/wechat/status` → `{benchmarks, new_24h, pan_articles, burst, candidates}`
 - `articles` 列表新增字段:`quality`(质量分 0~10)、`my_pan_urls`(转存后的自己的链接)、`read_num` 等流量字段
 
