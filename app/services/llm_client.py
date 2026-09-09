@@ -12,6 +12,28 @@ from app.utils import get_logger
 
 logger = get_logger(__name__)
 
+# 内存成本计数器(进程级;重启清零,日报读取后重置)
+_llm_usage = {"calls": 0, "failures": 0, "total_tokens": 0}
+
+
+def llm_usage_snapshot(reset: bool = False) -> dict:
+    """LLM 用量快照(calls/failures/total_tokens);reset=True 时读取后清零(供日报)。"""
+    snap = dict(_llm_usage)
+    if reset:
+        _llm_usage.update(calls=0, failures=0, total_tokens=0)
+    return snap
+
+
+def _record_usage(payload: dict | None, ok: bool) -> None:
+    _llm_usage["calls"] += 1
+    if not ok:
+        _llm_usage["failures"] += 1
+        return
+    usage = (payload or {}).get("usage") or {}
+    _llm_usage["total_tokens"] += int(usage.get("total_tokens") or 0)
+    logger.info("LLM 调用完成:tokens=%s(累计 %s)", usage.get("total_tokens"),
+                _llm_usage["total_tokens"])
+
 DEFAULT_BASE = "https://api.deepseek.com"
 _SYSTEM_PROMPT = (
     "你是网盘资源推广运营助手。用户经营夸克/百度/UC/迅雷网盘资源的公众号矩阵,"
@@ -57,9 +79,11 @@ def narrate_articles(base_url: str, api_key: str, model: str,
             timeout=timeout,
         )
         if resp.status_code >= 400:
+            _record_usage(None, ok=False)
             logger.warning("LLM 叙事失败 HTTP %s:%s", resp.status_code, resp.text[:200])
             return None
         payload = resp.json()
+        _record_usage(payload, ok=True)
         return (payload.get("choices", [{}])[0].get("message", {}) or {}).get("content")
     except requests.RequestException as exc:
         logger.warning("LLM 叙事请求异常:%s", exc)
@@ -98,9 +122,12 @@ def rank_candidates(base_url: str, api_key: str, model: str,
             timeout=timeout,
         )
         if resp.status_code >= 400:
+            _record_usage(None, ok=False)
             logger.warning("LLM 候选评级失败 HTTP %s", resp.status_code)
             return None
-        content = resp.json().get("choices", [{}])[0].get("message", {}).get("content")
+        payload = resp.json()
+        _record_usage(payload, ok=True)
+        content = payload.get("choices", [{}])[0].get("message", {}).get("content")
         # 解析为结构化:LLM 输出 "序号|判定|优先级|理由" 或 "名称|判定|…"
         out = []
         for line in (content or "").splitlines():
@@ -166,9 +193,12 @@ def rewrite_article(base_url: str, api_key: str, model: str,
             timeout=timeout,
         )
         if resp.status_code >= 400:
+            _record_usage(None, ok=False)
             logger.warning("AI 改写失败 HTTP %s", resp.status_code)
             return None
-        text = resp.json().get("choices", [{}])[0].get("message", {}).get("content") or ""
+        payload = resp.json()
+        _record_usage(payload, ok=True)
+        text = payload.get("choices", [{}])[0].get("message", {}).get("content") or ""
         text = text.strip()
         if not text:
             return None
