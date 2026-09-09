@@ -197,6 +197,25 @@ def wechat_collect_tick(settings: Settings | None = None) -> dict:
     return {"ok": ok, "failed": failed, "skipped": skipped}
 
 
+def _agent_learn_all() -> None:
+    """苗头回测+权重自适应(全用户)。"""
+    from app.db import get_session_local
+    from app.services.agent_learning import backtest_and_learn
+    from config.settings import get_settings as _gs
+
+    settings = _gs()
+    db = get_session_local()()
+    try:
+        from app.db.models import User
+        for uid in db.scalars(select(User.id)).all():
+            try:
+                backtest_and_learn(db, uid, settings)
+            except Exception:  # noqa: BLE001
+                db.rollback()
+    finally:
+        db.close()
+
+
 def build_jobs(scheduler: BackgroundScheduler) -> None:
     """注册后台作业:按用户频率采集、定时告警摘要、失败自动重试、飞书日报/周报、邮件周报。"""
     from app.admin import retry_failed_runs
@@ -223,6 +242,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     scheduler.add_job(
         _safe(cleanup_old_data), CronTrigger(hour=4, minute=0), id="data_cleanup", max_instances=1, coalesce=True
     )
+    from app.services.agent_learning import backtest_and_learn
     from app.services.early_agent import agent_tick_all_users
     from app.services.wechat_monitor import candidate_discover_tick, quark_keepalive_tick, traffic_tick, weread_refresh_tick
 
@@ -230,6 +250,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         (traffic_tick, _get_settings().wechat_traffic_cron, {"minute": 30, "hour": 21}, "wechat_traffic"),
         (traffic_tick, "30 9 * * *", {"minute": 30, "hour": 9}, "wechat_traffic_am"),
         (quark_keepalive_tick, "0 7 * * *", {"minute": 0, "hour": 7}, "quark_keepalive"),
+        (_agent_learn_all, "0 6 * * *", {"minute": 0, "hour": 6}, "agent_learning"),
         (agent_tick_all_users, "*/30 * * * *", {"minute": "*/30"}, "early_agent_tick"),
         (douhot_window_tick, _get_settings().douhot_window_cron, {"minute": "*/20"}, "douhot_window_tick"),
         (weread_refresh_tick, _get_settings().weread_refresh_cron, {"minute": 50, "hour": 7}, "weread_refresh"),

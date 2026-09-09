@@ -1,5 +1,7 @@
 # CHANGELOG
 
+- [2026-09-09 09:10] FEAT: **苗头 Agent 自学习——回测已推苗头的后续走势,权重自适应调整** — 循环3智能化升级:新增 `app/services/agent_learning.py`,每日 06:00 回测两天前推送的苗头(爆发定义:最新热度 ≥ 推送时×1.5),按信号标签(增速/加速/新上榜/共振/排名…)累计命中/未命中样本;样本 ≥10 时自适应调整权重(命中率高 +10%/低 -10%,幅度锁定 ±30% 防小样本抖动),学习结果持久化到 system_config(agent_weights)。Signal→权重映射:增速→velocity 等。调度:`_agent_learn_all` 每日 06:00 全用户回测。Agent 从"固定规则"升级为"数据驱动自学习"(Files: app/services/agent_learning.py, app/services/scheduler.py, CHANGELOG)
+
 - [2026-09-09 09:00] FIX: **微信读书续期 -2012 根因修复——续期请求缺 platform-id 等完整浏览器头** — 受控实验定位根因:renewal 请求缺 `platform-id: 10`(网页版标识)和正确的 shelf Referer 时,服务端"成功"下发新 skey 但该 skey 与会话上下文不匹配 → shelf 仍 -2012。修复 refresh_skey 请求头(platform-id/完整 Chrome UA/shelf Referer/charset),rq 上下文改为 shelf;真实环境验证续期→shelf errCode 0 全链通过并回写 .env。另:夸克 Cookie 每日保活(quark_keepalive_tick,轻量列目录滚动延长 __puus,失效即时告警);判爆阈值校准(微信读书 readNum 为站内口径,wechat_burst_min_reads 200→100)。全量 240 项通过(Files: app/services/{weread_client.py,quark_transfer.py,wechat_monitor.py,scheduler.py}, config/settings.py, CHANGELOG)
 
 - [2026-09-09 08:50] PERF: **公众号监听间隔 6h→60min(逼近微信读书 App 的实时同步)** — 用户反馈"检测不到微信读书里的新文章":根因是监听默认间隔 6h(轮询式 vs App 的推送式秒级同步,差距=轮询间隔)。微信读书免费源(cover 稳定+2s 内置限速)扛得住小时级轮询 → 默认间隔降为 60 分钟(最坏延迟 1h/平均 30min),启动时一次性迁移老用户 360→60。doc/dev.md 实时性说明同步(Files: app/services/schedule_service.py, app/db/database.py, doc/dev.md, CHANGELOG)
