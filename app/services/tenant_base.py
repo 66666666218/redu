@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
@@ -36,15 +36,26 @@ def _record_run(session: Session, user_id: int, kind: str, status: str, detail: 
 
 
 def verify_cooldown_active(session: Session, user_id: int, settings: Settings) -> bool:
-    """闲鱼人机验证后冷却:最近 `xianyu_cooldown_minutes` 内触发过 `XianyuVerify` → 本轮应跳过。
+    """闲鱼人机验证后冷却:最近触发过 `XianyuVerify` → 本轮应跳过。
 
-    防止闲鱼 Cookie/IP 被标记后仍每轮去撞滑块(反复 `FAIL_SYS_USER_VALIDATE` 会加重风控),
-    改为静默等待冷却期过后再试。
+    防闲鱼 Cookie/IP 被标记后仍每轮去撞滑块(反复 `FAIL_SYS_USER_VALIDATE` 会加重风控),
+    改为静默等待冷却期过后再试。**指数退避**:近 24h 内触发次数越多冷却越久
+    (base→2x→4x,封顶 240 分钟)——没有代理可换 IP 时,避免"冷却一过又去撞枪口"的循环。
     """
     minutes = getattr(settings, "xianyu_cooldown_minutes", 0)
     if not minutes:
         return False
-    cutoff = datetime.now() - timedelta(minutes=minutes)
+    day_cutoff = datetime.now() - timedelta(hours=24)
+    hits = session.scalar(
+        select(func.count()).select_from(RunRecord).where(
+            RunRecord.user_id == user_id,
+            RunRecord.kind.in_(["xianyu", "xianyu_deep"]),
+            RunRecord.detail.contains("XianyuVerify"),
+            RunRecord.started_at >= day_cutoff,
+        )
+    ) or 0
+    backoff = min(minutes * (2 ** max(0, min(hits, 3) - 1)), 240) if hits else minutes
+    cutoff = datetime.now() - timedelta(minutes=backoff)
     row = session.scalar(
         select(RunRecord)
         .where(

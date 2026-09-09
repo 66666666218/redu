@@ -73,10 +73,20 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
         if hot is None:
             hot = xianyu.collect_hot(settings, client)
         today = datetime.now().date().isoformat()
+        limit = _xy_detail_limit(settings)
+        # 当天已抓过详情的商品不再重复请求:详情是 mtop 风控最大爆发点,额度优先留给
+        # 当天尚未抓取的商品——无代理换 IP 时,靠"减少请求总量"降低风控概率。
+        done_today = {r.item_id for r in repository.xianyu_daily_by_date(session, user_id, today)}
+        todo = [it for it in hot if str(it.get("item_id") or "") not in done_today][:limit]
+        if not todo:
+            _record_run(session, user_id, "xianyu_deep", "skipped",
+                        f"cached_today({len(done_today)} 条已抓,跳过重复详情)")
+            session.commit()
+            return {"platform": "xianyu_deep", "count": 0, "status": "skipped", "reason": "cached_today"}
         base_delay = getattr(settings, "xianyu_request_delay", None) or getattr(settings, "request_delay_seconds", 2.5)
         saved = 0
         stop_reason = None
-        for idx, it in enumerate(hot[: _xy_detail_limit(settings)]):
+        for idx, it in enumerate(todo):
             try:
                 detail = xianyu.fetch_detail(client, it["item_id"])
             except xianyu.XianyuVerify:
@@ -99,7 +109,7 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
             row.sold_count = detail.get("sold_count", 0)
             row.seller_fans = detail.get("seller_fans", 0)
             saved += 1
-            if idx < _xy_detail_limit(settings) - 1:
+            if idx < len(todo) - 1:
                 import random
                 import time
 
