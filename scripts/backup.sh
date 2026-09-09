@@ -13,6 +13,16 @@ DB_NAME="${DB_NAME:-redu}"
 
 FILE="$BACKUP_DIR/${DB_NAME}_${STAMP}.sql.gz"
 echo "备份 ${DB_NAME} → ${FILE}"
+
+# ---- SQLite 备份(本地部署,DATABASE_URL 为 sqlite:/// 时) ----
+SQLITE_DB="${SQLITE_DB:-./data/platform.db}"
+if echo "${DATABASE_URL:-}" | grep -q "sqlite"; then
+  SQLITE_FILE="$BACKUP_DIR/platform_${STAMP}.db.gz"
+  echo "备份 SQLite → $SQLITE_FILE"
+  # WAL 模式下先 checkpoint 保证一致性
+  sqlite3 "$SQLITE_DB" "PRAGMA wal_checkpoint(TRUNCATE);" 2>/dev/null || true
+  gzip -c "$SQLITE_DB" > "$SQLITE_FILE"
+fi
 if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' | grep -q redu-mysql; then
   docker exec redu-mysql sh -c "mysqldump -u'$DB_USER' -p'$DB_PASS' '$DB_NAME' | gzip" > "$FILE"
 else

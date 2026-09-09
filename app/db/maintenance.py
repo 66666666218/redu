@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timedelta
 
 from sqlalchemy import delete
@@ -73,6 +74,32 @@ def cleanup_old_data(settings: Settings | None = None, db: Session | None = None
         total = sum(result.values())
         if total:
             logger.info("数据清理:保留 %s 天,删除 %s 条(%s)", days, total, result)
+        # SQLite 快照备份(每日一次,保留最近 7 份;MySQL 部署由 backup.sh 负责)
+        try:
+            import shutil
+            from config.settings import get_settings as _gs
+            url = _gs().database_url
+            if url.startswith("sqlite"):
+                db_path = url.split("sqlite:///")[-1]
+                if os.path.exists(db_path):
+                    import glob as _glob
+                    bak_dir = os.path.join(os.path.dirname(db_path) or ".", "backups")
+                    os.makedirs(bak_dir, exist_ok=True)
+                    stamp = datetime.now().strftime("%Y%m%d")
+                    snap = os.path.join(bak_dir, f"platform_{stamp}.db")
+                    src = _gs().database_url.split("sqlite:///")[-1]
+                    src_engine = __import__("sqlalchemy").create_engine(url)
+                    src_conn = src_engine.raw_connection()
+                    dst = __import__("sqlalchemy").create_engine(f"sqlite:///{snap}")
+                    src_conn.backup(dst.raw_connection())
+                    dst.dispose()
+                    src_conn.close()
+                    old_baks = sorted(_glob.glob(os.path.join(bak_dir, "platform_*.db")))[:-7]
+                    for ob in old_baks:
+                        os.remove(ob)
+                    logger.info("SQLite 快照备份完成:%s", snap)
+        except Exception:  # noqa: BLE001 - 备份失败不阻塞清理
+            logger.exception("SQLite 快照备份失败")
         result["retention_days"] = days
         return result
     finally:
