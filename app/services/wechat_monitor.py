@@ -655,10 +655,16 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
         WechatBenchmark.user_id == user_id, WechatBenchmark.active.is_(True))
         .order_by(WechatBenchmark.id)).all()
     if not rows:
+        # 跳过也记运维记录:否则后台"没有公众号情况",无从判断是没加号还是没跑
+        _record_run(session, user_id, "wechat_listen", "skipped", "no_benchmarks(未添加对标号)")
+        session.commit()
         return {"platform": "wechat", "status": "skipped", "reason": "no_benchmarks"}
     cookie = _weread_cookie(session, user_id, settings)
     use_dajiala = bool(settings.dajiala_key)
     if not cookie and not use_dajiala:
+        _record_run(session, user_id, "wechat_listen", "skipped",
+                    "no_source(无微信读书 Cookie 且无 dajiala key)")
+        session.commit()
         return {"platform": "wechat", "status": "skipped", "reason": "no_source"}
 
     # 余额保护前置:只要有账号需要走 dajiala(无 book_id 或会话失效),先查余额(免费接口)。

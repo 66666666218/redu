@@ -1,5 +1,7 @@
 # CHANGELOG
 
+- [2026-09-09 10:00] FIX: **公众号监听"跳过"也写运维记录——排查"没有推送也没有后台记录"** — 用户反馈公众号监控无推送、后台运维看不到公众号情况。排查:`run_wechat_listen` 在 `no_benchmarks`(未添加对标号)/`no_source`(无 Cookie 且无 dajiala)时**直接 return 不写 RunRecord**,导致后台运维一片空白、无从判断是"没加号"还是"没跑"。改为两种跳过都 `_record_run(status="skipped", detail="no_benchmarks(未添加对标号)")` / `"no_source(...)"`,后台运行记录可见。注:监听触发本身正常(wechat schedule 默认 360 分钟、SECTIONS 含 wechat、ensure_all_users 自动建);生产库若无对标号则每轮静默跳过——需在平台点「从微信读书书架导入」或在手机关注后导入。测试断言适配,全量 238 项通过 (Files: app/services/wechat_monitor.py, tests/test_wechat_monitor.py, CHANGELOG)
+
 - [2026-09-09 08:40] FIX: **微信读书采集路径修正——cover 主路径(稳定)+ mp/articles 备选(会话级限权)** — 真实环境验证发现:mp/articles 仅在会话建立初期可用,数小时后被服务端限权(-2041),而 cover 始终可用(与社区"接口废弃"结论不同,实为会话级限权)。`_weread_collect` 改为 cover 主路径 + mp/articles 备选(失败静默跳过),近3天过滤保留。另:① 生产库手动补齐 quality 等缺失列(迁移此前只在测试库跑过);② Cookie 过期即时推飞书提醒(6h 冷却);③ 新 Cookie 验证通过写入平台 Cookie 管理;④ 测试假客户端统一补 latest_article/mp_articles 双方法适配双路径。全量 238 项通过(Files: app/services/wechat_monitor.py, tests/test_wechat_monitor.py, CHANGELOG)
 
 - [2026-09-09 08:30] FIX: **抖音 DataError 修复 + 闲鱼同商品去重 + 风控成因定量分析** — ① 抖音 pymysql DataError 根因:DouhotWord.title 列宽 128 但写入未截断(闲鱼有 _trunc 抖音漏了)→ `_parse_word`/`_entry`/`rising_speed`/快照 entry_title(255)/keyword(128) 全部截断,超长标题不再炸库;② 闲鱼同商品多 item_id(重新上架/多链接,仅价格不同)→ 同轮按归一化标题归并(合并关键词命中/保留最低价代表),跨轮入库按 item_id+24h内标题去重,不再刷重复条目;③ 风控定量分析结论:非高并发(全串行),是累计频率(搜索60+详情80=140次/天,持续数周账号渐进标记)+固定IP会话指纹;建议保持 batch=5/interval 8s/详情10/冷却30min,风控时优先换 IP 而非降频。全量 238 项通过(Files: app/services/{douhot.py,keyword_watch.py,xianyu.py,tenant.py}, CHANGELOG)

@@ -136,10 +136,11 @@ def test_listen_inserts_new_and_dedupes(session) -> None:
 
 
 def test_listen_records_miss_and_skips(monkeypatch: pytest.MonkeyPatch, session) -> None:
-    # 无对标号 → skipped,不写 RunRecord
+    # 无对标号 → skipped,并写运维记录(否则后台看不到"公众号情况")
     out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), client=FakeClient())
     assert out["reason"] == "no_benchmarks"
-    assert session.scalars(select(RunRecord)).all() == []
+    runs = session.scalars(select(RunRecord)).all()
+    assert len(runs) == 1 and runs[0].status == "skipped" and "no_benchmarks" in runs[0].detail
 
     # 当天没有发文 → miss_count 累积
     b = WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A")
