@@ -524,6 +524,32 @@ def _daily_cross_lines(db: Session, user_id: int) -> list[str]:
     return lines
 
 
+def _wechat_ops_lines(db, user_id: int) -> list:
+    """公众号运营段:近24h 监听/盘链/采样 统计(从文章表聚合,失败不阻塞日报)。"""
+    from datetime import datetime, timedelta
+    from sqlalchemy import func
+    from app.db.models import WechatArticle, WechatBenchmark
+    lines = ["📡 公众号运营(近24h)"]
+    try:
+        since = datetime.now() - timedelta(hours=24)
+        new_art = db.scalar(select(func.count()).select_from(WechatArticle).where(
+            WechatArticle.user_id == user_id, WechatArticle.created_at >= since)) or 0
+        pan_arts = db.scalar(select(func.count()).select_from(WechatArticle).where(
+            WechatArticle.user_id == user_id, WechatArticle.pan_types != "",
+            WechatArticle.created_at >= since)) or 0
+        sampled = db.scalar(select(func.count()).select_from(WechatArticle).where(
+            WechatArticle.user_id == user_id, WechatArticle.traffic_at.is_not(None),
+            WechatArticle.created_at >= since)) or 0
+        bm = db.scalar(select(func.count()).select_from(WechatBenchmark).where(
+            WechatBenchmark.user_id == user_id, WechatBenchmark.active.is_(True))) or 0
+        lines.append(f"  · 在监对标号 {bm} 个 · 新文章 {new_art} 篇(带盘链 {pan_arts})")
+        lines.append(f"  · 已采样阅读 {sampled} 篇")
+    except Exception:  # noqa: BLE001 - 统计失败不阻塞日报
+        lines.append("  · 统计暂不可用")
+    return lines
+
+
+
 def build_daily(db: Session, user_id: int, settings: Settings, include_keywords: bool = True) -> str:
     """生成四板块日报文本(供飞书推送与测试)。
 
@@ -535,6 +561,7 @@ def build_daily(db: Session, user_id: int, settings: Settings, include_keywords:
         lines += _section_lines(db, user_id, section)
     if include_keywords:
         lines += _keyword_watch_lines(db, user_id)
+    lines += _wechat_ops_lines(db, user_id)
     return "\n".join(lines)
 
 
