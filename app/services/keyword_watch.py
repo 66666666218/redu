@@ -103,7 +103,8 @@ def record_watch_snaps(
     def add_snap(list_type: str, keyword: str, title: str, score: float, rank: int,
                  trend_growth: float = 0) -> None:
         session.add(DouhotWatchSnap(user_id=user_id, section=section, list_type=list_type,
-                                    keyword=keyword, entry_title=title, score=score, rank_now=rank,
+                                    keyword=(keyword or "")[:128], entry_title=(title or "")[:255],
+                                    score=score, rank_now=rank,
                                     trend_growth=trend_growth, captured_at=collect_ts))
 
     for w in watches:

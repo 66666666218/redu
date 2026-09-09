@@ -75,9 +75,14 @@ def _default_window(list_type: str) -> int:
     return 1 if list_type in ("search", "video", "topic") else _DEFAULT_DATE_WINDOW
 
 
+def _trunc(s: object, n: int) -> str:
+    """截断到 n 字符,防超 MySQL 列宽(DataError;抖音标题偶发超 128)。"""
+    return (str(s or "").strip())[:n]
+
+
 def _entry(title: object, score: object) -> dict:
     """统一条目格式;标题为空的条目由调用方过滤。"""
-    return {"title": str(title or "").strip(), "score": score or 0}
+    return {"title": _trunc(title, 128), "score": score or 0}
 
 
 def _pick(item: dict, keys: tuple[str, ...]) -> object:
@@ -91,7 +96,7 @@ def _parse_word(w: dict) -> dict:
     latest = trends[-1]["value"] if trends else 0
     first = trends[0]["value"] if trends else 0
     return {
-        "title": str(w.get("title", "")).strip(),
+        "title": _trunc(w.get("title", ""), 128),   # DouhotWord.title 列宽 128
         "score": w.get("score") or 0,                # 飙升指数
         "rising_ratio": w.get("rising_ratio") or 0,  # 平台飙升倍率
         "rising_speed": w.get("rising_speed") or "",

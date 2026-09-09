@@ -230,6 +230,14 @@ def item_title(it: dict) -> str:
     return str(it.get("title", "")).strip()
 
 
+def _price_num(price: str) -> float:
+    """'¥12.5'→12.5;解析失败返回无穷大(排序时靠后)。"""
+    try:
+        return float(re.sub(r"[^\d.]", "", str(price)) or "inf")
+    except ValueError:
+        return float("inf")
+
+
 def _trunc(s: object, n: int) -> str:
     """截断字符串到 n 字符,防超列宽(闲鱼标题/关键词可能很长,MySQL String(500) 会拒绝)。"""
     return (str(s or "").strip())[:n]
@@ -359,9 +367,25 @@ def collect_hot(settings: Settings, client: XianyuClient | None = None, start_of
     if failed_kws:
         logger.warning("闲鱼本轮 %d 个关键词失败:%s", len(failed_kws), ",".join(failed_kws))
 
+    # 标题级归并:闲鱼同一商品会因"重新上架/多链接"出现多个 item_id(仅价格不同),
+    # 按归一化标题(去空白/大小写)合并,保留信息最全的一桶,价格取最低,避免同商品刷屏。
+    by_title: dict[str, dict] = {}
+    for b in buckets.values():
+        key = re.sub(r"\s+", "", item_title(b["item"])).lower()
+        cur = by_title.get(key)
+        if cur is None:
+            by_title[key] = b
+            continue
+        cur["keywords"] = list({*cur["keywords"], *b["keywords"]})
+        cur["ranks"] = list({*cur["ranks"], *b["ranks"]})
+        # 保留价格更低的一桶作为代表(同品比价场景,低价更有信息量)
+        if item_price(b["item"]) and (not item_price(cur["item"])
+                                      or _price_num(item_price(b["item"])) < _price_num(item_price(cur["item"]))):
+            cur["item"] = b["item"]
+
     # 排名:命中关键词次数多优先,其次综合序靠前(min rank)优先
     ranked = sorted(
-        buckets.values(),
+        by_title.values(),
         key=lambda b: (-len(b["keywords"]), min(b["ranks"]), item_title(b["item"])),
     )
     top = ranked[: settings.xianyu_top_n]

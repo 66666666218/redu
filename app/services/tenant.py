@@ -172,7 +172,14 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
         stats: dict = {}
         hot = xianyu.collect_hot(settings, client, start_offset=start_offset, stats=stats)
         prev_keys = set(session.scalars(select(XianyuItem.item_id).where(XianyuItem.user_id == user_id)).all())
+        prev_titles = set(session.scalars(select(XianyuItem.title).where(
+            XianyuItem.user_id == user_id,
+            XianyuItem.created_at >= datetime.now() - timedelta(hours=24))).all())
         for it in hot:
+            # 跨轮去重:同 item_id 或 24h 内同标题(重上架换ID)只插一次,不刷重复条目
+            if it["item_id"] in prev_keys or it["title"] in prev_titles:
+                continue
+            prev_keys.add(it["item_id"])
             session.add(XianyuItem(user_id=user_id, **it))
         session.commit()
         persist_refreshed_cookie(session, user_id, client)

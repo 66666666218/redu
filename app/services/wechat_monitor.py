@@ -793,7 +793,9 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
     from app.services.feishu_client import FeishuClient
 
     wh = webhook_for(settings, "wechat")
-    if not wh:
+    main_wh = settings.feishu_webhook
+    targets = list(dict.fromkeys(filter(None, [wh, main_wh])))  # 去重保序
+    if not targets:
         return
     replacements = replacements or {}
     elements: list[dict] = [
@@ -844,15 +846,16 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
                     "content": "🤖 **AI 解读**" + chr(10) + reading[:1500]}})
         except Exception:  # noqa: BLE001 - 叙事失败不影响推送
             logger.exception("LLM 叙事失败 user=%s", user_id)
-    try:
-        FeishuClient(wh, settings.feishu_secret).send_card({
-            "config": {"wide_screen_mode": True},
-            "header": {"template": "blue", "title": {"tag": "plain_text",
-                "content": f"📡 公众号监听 · 新发文 {len(rows)} 篇"}},
-            "elements": elements,
-        })
-    except Exception:  # noqa: BLE001 - 推送失败不影响采集结果
-        logger.exception("公众号监听飞书推送失败 user=%s", user_id)
+    for target in targets:
+        try:
+            FeishuClient(target, settings.feishu_secret).send_card({
+                "config": {"wide_screen_mode": True},
+                "header": {"template": "blue", "title": {"tag": "plain_text",
+                    "content": f"📡 公众号监听 · 新发文 {len(rows)} 篇"}},
+                "elements": elements,
+            })
+        except Exception:  # noqa: BLE001 - 推送失败不影响采集结果
+            logger.exception("公众号监听飞书推送失败 user=%s", user_id)
 
 
 # ---------------------------------------------------------------- 全量同步
@@ -1245,7 +1248,9 @@ def _push_candidates(session: Session, user_id: int, settings: Settings,
     from app.services.feishu_client import FeishuClient
 
     wh = webhook_for(settings, "wechat")
-    if not wh:
+    main_wh = settings.feishu_webhook
+    targets = list(dict.fromkeys(filter(None, [wh, main_wh])))  # 去重保序
+    if not targets:
         return
     elements: list[dict] = [
         {"tag": "note", "elements": [{"tag": "plain_text",
