@@ -132,3 +132,52 @@ def rank_candidates(base_url: str, api_key: str, model: str,
     except requests.RequestException as exc:
         logger.warning("LLM 候选评级异常:%s", exc)
         return None
+
+
+def rewrite_article(base_url: str, api_key: str, model: str,
+                    title: str, content: str, my_link: str = "",
+                    style: str = "实用资源分享", timeout: int = 120) -> dict | None:
+    """AI 改写:对标文 → 自己的可发布稿(保留资源信息,替换推广角度)。
+
+    返回 {title, content},失败返回 None。content 为空或过短时返回 None。
+    """
+    nl = chr(10)
+    if not api_key or not content or len(content) < 100:
+        return None
+    link_line = f"我的网盘链接(必须原样保留在文中,并自然引导读者保存):{my_link}" if my_link else "文中如无网盘链接则不虚构,以资源收集攻略角度改写"
+    user_prompt = (
+        f"请把以下公众号文章改写为原创可发布稿。{nl}"
+        + f"原文标题:{title}{nl}"
+        + (f"我的网盘链接(必须原样保留在文中,并自然引导读者保存):{my_link}{nl}" if my_link else "文中如无网盘链接则不虚构,以资源收集攻略角度改写" + nl)
+        + f"风格:{style}{nl}"
+        + "要求:① 保留全部资源信息与获取方式 ② 结构/用词/表达全面重写(防抄袭判定) ③ 输出格式:第一行=新标题,空一行,之后=正文(纯文本,分段清晰,适合公众号)"
+        + nl + nl
+        + f"原文正文:{content[:6000]}"
+    )
+    try:
+        resp = requests.post(
+            base_url.rstrip("/") + "/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": model,
+                  "messages": [{"role": "system",
+                                "content": "你是网盘资源类公众号的资深写手,产出高质量原创资源推荐文章。"},
+                               {"role": "user", "content": user_prompt}],
+                  "temperature": 0.8, "max_tokens": 3000},
+            timeout=timeout,
+        )
+        if resp.status_code >= 400:
+            logger.warning("AI 改写失败 HTTP %s", resp.status_code)
+            return None
+        text = resp.json().get("choices", [{}])[0].get("message", {}).get("content") or ""
+        text = text.strip()
+        if not text:
+            return None
+        parts = text.split(chr(10) + chr(10), 1)
+        new_title = parts[0].lstrip("# ").strip()[:64]
+        new_content = parts[1].strip() if len(parts) > 1 else text
+        return {"title": new_title, "content": new_content}
+    except requests.RequestException as exc:
+        logger.warning("AI 改写请求异常:%s", exc)
+        return None
+    except (KeyError, IndexError, TypeError):
+        return None

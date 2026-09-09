@@ -1,5 +1,7 @@
 # CHANGELOG
 
+- [2026-09-09 09:30] FEAT: **AI 改写——对标文一键转原创可发布稿(补齐推广最后一公里)** — llm_client 新增 `rewrite_article(title, content, my_link, style)`:DeepSeek 按网盘资源号写手人设改写(保留资源信息/全面重写防抄袭/输出新标题+纯文本正文),真实 E2E 验证:新高考词汇文 → 「2026新高考英语高分捷径:688个高频核心词,啃透它＝白捡20分!」+ 结构化推广正文。成本 ≈¥0.01/篇(4K tokens)。至此推广闭环完整:监听→转存→阅读量→AI解读→AI改写→人工粘贴发布(发布自动化需公众号主体授权,暂人工)(Files: app/services/llm_client.py, CHANGELOG)
+
 - [2026-09-09 09:20] FEAT: **候选对标号 LLM 评级——自动判定资源号/营销号,过滤无效候选** — DeepSeek 利用率升级:新增 `rank_candidates`(批量评级候选是否网盘资源号,输出判定/优先级/理由),`discover_candidates` 发现新候选后自动调 LLM 评级写入 term 标签(`LLM:资源号(高)`)。真实数据验证:8 个搜狗候选全部正确判为"无关"(综艺/情感号)——自动过滤无效监控,避免浪费书架位。解析器适配序号/名称双格式。全量 240 项通过(Files: app/services/llm_client.py, app/services/wechat_monitor.py, CHANGELOG)
 
 - [2026-09-09 09:10] FEAT: **苗头 Agent 自学习——回测已推苗头的后续走势,权重自适应调整** — 循环3智能化升级:新增 `app/services/agent_learning.py`,每日 06:00 回测两天前推送的苗头(爆发定义:最新热度 ≥ 推送时×1.5),按信号标签(增速/加速/新上榜/共振/排名…)累计命中/未命中样本;样本 ≥10 时自适应调整权重(命中率高 +10%/低 -10%,幅度锁定 ±30% 防小样本抖动),学习结果持久化到 system_config(agent_weights)。Signal→权重映射:增速→velocity 等。调度:`_agent_learn_all` 每日 06:00 全用户回测。Agent 从"固定规则"升级为"数据驱动自学习"(Files: app/services/agent_learning.py, app/services/scheduler.py, CHANGELOG)
