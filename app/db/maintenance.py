@@ -51,6 +51,7 @@ _TABLES = [
     (WechatTrafficSample, "sampled_at", False),
     (FeishuAlert, "alerted_at", False),      # 冷却记录本体 6~24h 有效,清理只是防无限增长
     (AgentStage, "updated_at", False),       # Agent 阶段记忆(陈旧状态自然失效)
+    (WechatCandidate, "discovered_at", False),  # 候选号(dismissed 的也清理,防无限增长)
 ]
 
 
