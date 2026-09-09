@@ -40,11 +40,11 @@ DEFAULT_WEIGHTS = {
 
 def load_weights(db: Session) -> dict[str, int]:
     """读取学习后的权重(无记录用默认值;键缺失补默认)。"""
-    row = db.scalar(select(SystemConfig).where(SystemConfig.config_key == _WEIGHTS_KEY))
+    row = db.scalar(select(SystemConfig).where(SystemConfig.key == _WEIGHTS_KEY))
     weights = dict(DEFAULT_WEIGHTS)
-    if row and row.config_value:
+    if row and row.value:
         try:
-            saved = json.loads(row.config_value)
+            saved = json.loads(row.value)
             for k, v in saved.items():
                 if k in weights and isinstance(v, (int, float)):
                     weights[k] = int(v)
@@ -54,12 +54,12 @@ def load_weights(db: Session) -> dict[str, int]:
 
 
 def save_weights(db: Session, weights: dict[str, int]) -> None:
-    row = db.scalar(select(SystemConfig).where(SystemConfig.config_key == _WEIGHTS_KEY))
+    row = db.scalar(select(SystemConfig).where(SystemConfig.key == _WEIGHTS_KEY))
     payload = json.dumps(weights, ensure_ascii=False)
     if row:
-        row.config_value = payload
+        row.value = payload
     else:
-        db.add(SystemConfig(config_key=_WEIGHTS_KEY, config_value=payload))
+        db.add(SystemConfig(key=_WEIGHTS_KEY, value=payload))
     db.commit()
 
 
@@ -90,11 +90,11 @@ def backtest_and_learn(db: Session, user_id: int, settings=None) -> dict:
     }
     # 信号 → 命中样本累计(存 parts 文本,回测时解析)
     stats_key = "agent_signal_stats"
-    row = db.scalar(select(SystemConfig).where(SystemConfig.config_key == stats_key))
+    row = db.scalar(select(SystemConfig).where(SystemConfig.key == stats_key))
     signal_stats: dict[str, dict] = {}
-    if row and row.config_value:
+    if row and row.value:
         try:
-            signal_stats = json.loads(row.config_value)
+            signal_stats = json.loads(row.value)
         except (ValueError, TypeError):
             signal_stats = {}
 

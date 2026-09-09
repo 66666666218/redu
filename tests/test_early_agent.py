@@ -164,3 +164,18 @@ def test_rank_jump_signal_weibo(session, st) -> None:
     # 分数:新上榜25 + 量级15 + 排名↑8(15) = 55 → 恰好到苗头线
     assert s["score"] >= 55
     assert early_agent.agent_tick(session, 1, settings=st) >= 1
+
+
+def test_agent_learning_roundtrip_and_backtest(session, st) -> None:
+    """自学习:权重持久化 + 空数据回测安全。"""
+    from app.services.agent_learning import load_weights, save_weights, backtest_and_learn
+
+    w = load_weights(session)
+    assert set(DEFAULT_W_KEYS := w.keys()) == {"velocity", "new_entry", "repeat", "volume",
+                                                "resonance", "rank_jump", "accel"}
+    w["resonance"] = 35
+    save_weights(session, w)
+    assert load_weights(session)["resonance"] == 35
+
+    out = backtest_and_learn(session, 1, settings=st)
+    assert out["backtested"] == 0 and out["weights"]["resonance"] == 35

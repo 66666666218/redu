@@ -1,5 +1,7 @@
 # CHANGELOG
 
+- [2026-09-09 10:00] TEST/FIX: **agent_learning 适配 SystemConfig 实际列名(key/value)+ 权重读写/回测单测** — 并行会话的 SystemConfig 模型用 key/value 列,agent_learning 引用 config_key/config_value 会运行时报错 → 修正并加单测(默认加载/自定义保存/空数据回测安全)。全量 240 项通过(Files: app/services/agent_learning.py, tests/test_early_agent.py, CHANGELOG)
+
 - [2026-09-09 10:00] FEAT: **公众号监听页运行状态条** — 新增 `GET /api/wechat/status`(在监号/近24h新文/盘链文/爆点/候选数),监听页顶部状态条一览系统运行情况(此前 Agent 每天自动运转但用户看不到全局状态)。前端已构建(Files: app/api/wechat.py, frontend/src/{api.js,views/WechatListen.vue}, CHANGELOG)
 
 - [2026-09-09 09:50] FIX: **公众号失败告警路由修复——wechat_listen/sync/traffic 失败推公众号专属群** — 审查告警链完整性发现:公众号的 RunRecord kind(wechat_listen/sync/traffic)不在 webhooks_for 的板块映射里 → 失败告警永远回落总群,专属群收不到。修复:`_KIND_SECTION` 归一化映射(wechat_* → wechat 板块群),check_collect_failures 入口条件补 wechat 专属群。全量 240 项通过(Files: app/services/{alert_service.py,feishu_client.py}, CHANGELOG)
