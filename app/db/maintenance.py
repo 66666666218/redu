@@ -70,6 +70,19 @@ def cleanup_old_data(settings: Settings | None = None, db: Session | None = None
             col_attr = getattr(model, col)
             threshold: object = cutoff.date().isoformat() if is_date else cutoff
             result[model.__tablename__] = db.execute(delete(model).where(col_attr < threshold)).rowcount
+        # 公众号文章分级清理:无盘链且超 60 天的删(选题时效已过),带盘链的保留 180 天(改写素材库)
+        try:
+            cutoff60 = datetime.now() - timedelta(days=60)
+            cutoff180 = datetime.now() - timedelta(days=180)
+            n60 = db.execute(delete(WechatArticle).where(
+                WechatArticle.pan_urls == "", WechatArticle.created_at < cutoff60)).rowcount
+            n180 = db.execute(delete(WechatArticle).where(
+                WechatArticle.pan_urls != "", WechatArticle.created_at < cutoff180)).rowcount
+            if n60 or n180:
+                result["wechat_articles_tiered"] = n60 + n180
+        except Exception:  # noqa: BLE001 - 分级清理失败不阻塞
+            logger.exception("公众号文章分级清理失败")
+
         db.commit()
         total = sum(result.values())
         if total:
