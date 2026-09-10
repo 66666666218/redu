@@ -1,5 +1,7 @@
 # CHANGELOG
 
+- [2026-09-09 11:10] FEAT: **AI 改写稿持久化 + 历史查询** — 改写结果此前只在前端临时展示(刷新丢失)。新增 `wechat_rewrites` 表,rewrite API 自动保存每份改写稿;`GET /api/wechat/articles/{id}/rewrites` 查询历史(支持多次改写对比)。(Files: app/api/wechat.py, app/db/models.py, CHANGELOG)
+
 - [2026-09-09 11:00] FEAT: **文章列表排序切换——按阅读量排序(sort=reads)** — articles 接口新增 `sort=reads`(阅读量高→低,未采样排后;case 表达式)参数;监听页状态条加排序下拉(发现时间/阅读量)。用户一眼定位"已采样的高阅读盘链文"(Files: app/api/wechat.py, frontend/src/views/WechatListen.vue, CHANGELOG)
 
 - [2026-09-09 10:50] FIX: **删除对标号级联清理关联数据(防孤儿行)** — 数据一致性审查:remove_benchmark 只删对标号行,其 wechat_articles(benchmark_id 外键)/wechat_pan_links/traffic_samples 成为孤儿(SQLite foreign_keys 默认关闭)。修复:级联删除三张关联表数据(API 文案同步更新)。新增级联测试。全量 241 项通过(Files: app/services/wechat_monitor.py, tests/test_wechat_monitor.py, CHANGELOG)

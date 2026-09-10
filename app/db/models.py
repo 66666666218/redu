@@ -409,6 +409,19 @@ class AgentStage(Base):
     __table_args__ = (UniqueConstraint("user_id", "board", "norm"),)
 
 
+class WechatRewrite(Base):
+    """AI 改写稿:对标文 → 原创可发布稿(持久化防丢失,支持多次改写对比)。"""
+
+    __tablename__ = "wechat_rewrites"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    article_id: Mapped[int] = mapped_column(ForeignKey("wechat_articles.id"), index=True)
+    title: Mapped[str] = mapped_column(String(255), default="")
+    content: Mapped[str] = mapped_column(Text(), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
 class AlertRule(Base):
     """用户自定义预警规则(每板块)。
 

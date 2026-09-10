@@ -331,8 +331,25 @@ def wechat_article_rewrite(article_id: int, user: User = Depends(get_current_use
                           row.title, row.content, my_link=my_link)
     if out is None:
         raise HTTPException(502, "AI 改写失败,请稍后重试")
+    from app.db.models import WechatRewrite
+    db.add(WechatRewrite(user_id=user.id, article_id=article_id,
+                         title=out["title"][:255], content=out["content"]))
+    db.commit()
     return {"ok": True, "article_id": article_id, "title": out["title"],
             "content": out["content"], "my_link": my_link or None}
+
+
+@router.get("/api/wechat/articles/{article_id}/rewrites")
+def wechat_rewrites_list(article_id: int, user: User = Depends(get_current_user),
+                         db: Session = Depends(get_db)):
+    """该文章的历史改写稿(新→旧)。"""
+    from app.db.models import WechatRewrite
+    rows = db.scalars(select(WechatRewrite).where(
+        WechatRewrite.user_id == user.id, WechatRewrite.article_id == article_id)
+        .order_by(WechatRewrite.id.desc())).all()
+    return {"count": len(rows), "items": [{"id": r.id, "title": r.title,
+            "content": r.content,
+            "created_at": r.created_at.isoformat(sep=" ", timespec="seconds")} for r in rows]}
 
 
 @router.post("/api/wechat/listen")
