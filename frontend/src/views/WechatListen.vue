@@ -159,7 +159,13 @@ onMounted(load)
       <span style="margin-right:16px">🆕 近24h <b>{{ status.new_24h || 0 }}</b> 篇</span>
       <span style="margin-right:16px">🔴 盘链 <b>{{ status.pan_articles || 0 }}</b></span>
       <span style="margin-right:16px">🚀 爆点 <b>{{ status.burst || 0 }}</b></span>
-      <span>🔍 候选 <b>{{ status.candidates || 0 }}</b></span>
+      <span>🔍 候选 <b>{{ status.candidates || 0 }}</b> 个</span>
+      <span style="margin-left:auto">排序:
+        <select v-model="sortBy" style="margin:0 4px" @change="loadArticles">
+          <option value="time">发现时间</option>
+          <option value="reads">阅读量</option>
+        </select>
+      </span>
     </div>
     <span v-if="msg" class="error">{{ msg }}</span>
 
