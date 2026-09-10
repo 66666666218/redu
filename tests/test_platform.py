@@ -588,6 +588,11 @@ def test_retry_failed_runs_covers_wechat(session, monkeypatch: pytest.MonkeyPatc
     from app.services import wechat_monitor
     monkeypatch.setattr(wechat_monitor, "run_wechat_listen",
                         lambda db, uid, settings=None: called.append(uid))
+    # retry_failed_runs 内部用 get_session_local() 拿自己的会话 → 指向测试 session
+    # retry_failed_runs 用 get_session_local() 自建会话——让它指向本测试的内存库
+    import app.db as appdb
+    test_engine = sessionmaker(bind=session.get_bind())
+    monkeypatch.setattr(appdb, "get_session_local", lambda: test_engine)
     monkeypatch.setattr(tenant, "run_weibo", lambda db, uid, settings=None: None)
     monkeypatch.setattr(tenant, "run_xianyu", lambda db, uid, settings=None: None)
     monkeypatch.setattr(tenant, "run_douhot", lambda db, uid, settings=None: None)
