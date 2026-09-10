@@ -585,7 +585,8 @@ def test_retry_failed_runs_covers_wechat(session, monkeypatch: pytest.MonkeyPatc
     session.commit()
 
     called = []
-    monkeypatch.setattr(tenant, "run_wechat_listen",
+    from app.services import wechat_monitor
+    monkeypatch.setattr(wechat_monitor, "run_wechat_listen",
                         lambda db, uid, settings=None: called.append(uid))
     monkeypatch.setattr(tenant, "run_weibo", lambda db, uid, settings=None: None)
     monkeypatch.setattr(tenant, "run_xianyu", lambda db, uid, settings=None: None)
