@@ -633,21 +633,28 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
 
 def run_wechat_listen(session: Session, user_id: int, settings: Settings | None = None,
                       client: DajialaClient | None = None, weread: WereadClient | None = None,
-                      platform: ReaderPlatformClient | None = None, push: bool = True) -> dict:
+                      platform: ReaderPlatformClient | None = None, push: bool = True,
+                      batch_index: int | None = None, batch_size: int | None = None) -> dict:
     """监听一轮:双数据源免费优先——微信读书(cover)→ dajiala(当天发文)→ 新文入库推飞书。
 
     余额不足(dajiala)只禁用付费源与即时采样并返回 `dajiala_skipped:"low_balance"`,
     免费源(读书平台/微信读书)照常监听;全部数据源不可用才返回 `skipped`。
     """
     settings = _base(settings)
-    rows = session.scalars(select(WechatBenchmark).where(
+    all_rows = session.scalars(select(WechatBenchmark).where(
         WechatBenchmark.user_id == user_id, WechatBenchmark.active.is_(True))
         .order_by(WechatBenchmark.id)).all()
-    if not rows:
+    if not all_rows:
         # 跳过也记运维记录:否则后台"没有公众号情况",无从判断是没加号还是没跑
         _record_run(session, user_id, "wechat_listen", "skipped", "no_benchmarks(未添加对标号)")
         session.commit()
         return {"platform": "wechat", "status": "skipped", "reason": "no_benchmarks"}
+    # 错峰分批:微信读书源按批次轮转(每轮只查 1/N 的号,降低瞬时密度防风控);
+    # 批次大小默认 7(号级延迟 ≤ N×间隔,21 号 3h 全覆盖)
+    rows = all_rows
+    if batch_size and batch_size > 0 and len(all_rows) > batch_size:
+        start = (batch_index or 0) % (len(all_rows) // batch_size + (1 if len(all_rows) % batch_size else 0))
+        rows = all_rows[start * batch_size:(start + 1) * batch_size]
     cookie = _weread_cookie(session, user_id, settings)
     daj_key = _dajiala_key(session, user_id, settings)
     use_dajiala = bool(daj_key)

@@ -359,6 +359,9 @@ def test_listen_falls_back_to_dajiala_on_auth_error(session, monkeypatch: pytest
     class _DeadWeread:
         def latest_article(self, book_id):
             raise WereadAuthError("微信读书登录态失效(-2012)")
+        def latest_article(self, book_id):
+            raise WereadAuthError("微信读书登录态失效(-2012)")
+
         def mp_articles(self, book_id, offset=0, count=20):
             raise WereadAuthError("微信读书登录态失效(-2012)")
 
@@ -445,6 +448,7 @@ def test_listen_auto_renews_and_retries(session, monkeypatch: pytest.MonkeyPatch
                 raise WereadAuthError("登录态失效(-2012)")
             return {"title": "夸克网盘资源(cover)", "url": "https://mp.weixin.qq.com/s/c9",
                     "review_id": "MP_WXS_1_c9", "digest": ""}
+
         def mp_articles(self, book_id: str, offset: int = 0, count: int = 20) -> dict:
             if self.dead:
                 raise WereadAuthError("登录态失效(-2012)")
@@ -785,6 +789,10 @@ def test_pan_links_backfill_legacy_articles(session, monkeypatch: pytest.MonkeyP
             return {"title": "夸克网盘资源合集(cover)", "url": "https://mp.weixin.qq.com/s/new",
                     "review_id": "MP_WXS_1_r1", "digest": "", "name": "号A"}
 
+        def latest_article(self, book_id):
+            return {"title": "夸克网盘资源(cover)", "url": "https://mp.weixin.qq.com/s/cover",
+                    "review_id": book_id + "_cover", "digest": ""}
+
         def mp_articles(self, book_id, offset=0, count=20):
             return {"reviews": [{"createTime": 1788800000, "subReviews": [{"review": {
                 "mpInfo": {"title": "夸克网盘资源合集 https://pan.quark.cn/s/abc123", "originalId": "new_id",
@@ -831,3 +839,40 @@ def test_listen_cross_extracts_new_accounts(session, monkeypatch: pytest.MonkeyP
     assert out["new"] == 1
     cands = session.scalars(select(WechatCandidate)).all()
     assert any(c.name == "资源君" for c in cands), "应从正文提取新公众号并入库为候选"
+
+
+def test_listen_batch_rotation(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """错峰批次:batch_index/batch_size 切片生效,号级延迟可控(防风控)。"""
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    # 造 5 个号,batch_size=2 → 每轮只查 2 个
+    for i in range(5):
+        session.add(WechatBenchmark(user_id=1, nickname=f"号{i}",
+                                    weread_book_id=f"MP_WXS_{i}", anchor_url=""))
+    session.commit()
+    class _BatchFake(FakeWeread):
+        """按 book_id 返回不同文章(验证批次切片真的换了号)。"""
+        def latest_article(self, book_id):
+            self.calls.append(("cover", book_id))
+            return {"title": f"夸克网盘资源 {book_id}", "url": f"https://mp.weixin.qq.com/s/{book_id[-1]}",
+                    "review_id": book_id + "_r", "digest": ""}
+
+        def mp_articles(self, book_id, offset=0, count=20):
+            self.calls.append(("articles", book_id, offset))
+            return {"reviews": [{"createTime": 1788800000, "subReviews": [{"review": {
+                "mpInfo": {"title": f"夸克网盘资源 {book_id}", "originalId": f"o{book_id[-1]}",
+                           "readNum": 10, "likeNum": 1},
+                "reviewId": book_id + "_r"}, "createTime": 1788800000}]}], "synckey": 1}
+    monkeypatch.setattr(wechat_monitor, "fetch_article_content", lambda url, timeout=15: "")
+    fake = _BatchFake()
+    fake.calls = []  # 清掉类级继承的记录,只看本实例
+
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+                                           weread=fake, batch_index=0, batch_size=2)
+    arts_calls = [c for c in fake.calls if c[0] == "articles"]
+    assert {c[1] for c in arts_calls} == {"MP_WXS_0", "MP_WXS_1"}  # 只查了批次的 2 个号
+    assert out["accounts"] == 2
+
+    out2 = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+                                            weread=fake, batch_index=1, batch_size=2)
+    # 下一批(MP_WXS_2/3):每号 cover 1 篇 + mp_articles 1 篇 = 2 篇/号 → 4 篇
+    assert out2["accounts"] == 2 and out2["new"] == 4

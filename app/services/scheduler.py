@@ -160,6 +160,13 @@ def douhot_window_tick(settings: Settings | None = None) -> dict:
     return {"users": users_ok, "pushed": pushed}
 
 
+def _wechat_rows_for(db, user_id: int) -> int:
+    from sqlalchemy import select, func
+    from app.db.models import WechatBenchmark
+    return db.scalar(select(func.count()).select_from(WechatBenchmark).where(
+        WechatBenchmark.user_id == user_id, WechatBenchmark.active.is_(True))) or 0
+
+
 def wechat_collect_tick(settings: Settings | None = None) -> dict:
     """公众号监听专用 tick(每分钟,独立于 collect_tick)。
 
@@ -180,7 +187,10 @@ def wechat_collect_tick(settings: Settings | None = None) -> dict:
         due = [r for r in schedule_service.due_schedules(db, now) if r.section == "wechat"]
         for row in due:
             try:
-                run_wechat_listen(db, row.user_id, settings=settings)
+                # 错峰批次:按当前小时轮转,每批约 7 个号(号级延迟 ≤3h,瞬时密度降 2/3)
+                batch = (now.hour % 3) if _wechat_rows_for(db, row.user_id) > 14 else None
+                run_wechat_listen(db, row.user_id, settings=settings,
+                                  batch_index=batch, batch_size=7)
                 from app.services.focus_alert import run_focus_alert
                 run_focus_alert(db, row.user_id, settings)  # 公众号新文参与共振/反复检测
                 ok += 1

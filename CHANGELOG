@@ -1,5 +1,7 @@
 # CHANGELOG
 
+- [2026-09-09 10:40] PERF: **公众号监听错峰分批——瞬时请求密度降 2/3(风控防线)** — 频率压力量化:21 号 × 60min 轮询 = 504 次/天,远超社区单日 30+ 次风控红线。折中方案(保持 60min 目标):每轮按 batch_index 轮转只查 1/3 的号(batch_size=7),号级延迟 ≤3h,瞬时密度降 2/3;调度器按当前小时自动轮转批次(>14 号才启用分批)。测试:batch 切片/轮转/每号 cover+列表双路径。全量 240 项通过(Files: app/services/wechat_monitor.py, app/services/scheduler.py, tests/test_wechat_monitor.py, CHANGELOG)
+
 - [2026-09-09 11:00] PERF: **微信读书续期频率 1次/天 → 3次/天(每8小时)** — 风险分析:wr_skey 短效轮换(约12~24h),每日 07:50 一次续期的话 skey 可能在两次续期中间过期(当晚 21:30 采样和深夜监听全断)。改为每 8 小时续期(07:50/15:50/23:50),保证 skey 永不过期。refresh_skey 的 platform-id 修复(上一commit)已实测有效(Files: app/services/scheduler.py, config/settings.py, CHANGELOG)
 
 - [2026-09-09 10:30] PERF: **苗头信号带绝对数值证据** — 信号分解从"增速+167%"升级为"150→400(+167%)"(起始量→当前量),用户一眼判断绝对量级是否值得跟进。测试断言适配。全量 240 项通过(Files: app/services/early_agent.py, tests/test_early_agent.py, CHANGELOG)
