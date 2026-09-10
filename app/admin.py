@@ -427,16 +427,26 @@ def retry_failed_runs(max_retry: int = 3) -> dict:
 
     settings = get_settings()
     db = get_session_local()()
-    runners = {"weibo": tenant.run_weibo, "xianyu": tenant.run_xianyu, "douhot": tenant.run_douhot}
+    from app.services.wechat_monitor import run_wechat_listen as _run_wechat_listen
+    runners = {"weibo": tenant.run_weibo, "xianyu": tenant.run_xianyu, "douhot": tenant.run_douhot,
+               "wechat_listen": _run_wechat_listen, "wechat_sync": _run_wechat_listen}
     n = 0
     try:
+        # 保底不永久放弃:retry_count 越大要求等待越久(指数退避:2^count 小时),
+        # 但只要"距上次失败已等够"就再次重试——网络/Cookie 恢复后自动续上
         recent = db.scalars(
             select(RunRecord).where(
                 RunRecord.status == "failed",
-                RunRecord.retry_count < max_retry,
                 RunRecord.started_at >= datetime.now() - timedelta(hours=24),
-            ).order_by(RunRecord.id.desc()).limit(5)
+            ).order_by(RunRecord.id.desc()).limit(20)
         ).all()
+        # 过滤:retry_count 超限的,要求"距该次失败已过 2^retry_count 小时"才再试
+        eligible = []
+        for run in recent:
+            wait_h = min(2 ** min(run.retry_count or 0, 6), 24)  # 1h/2h/4h...上限24h
+            if datetime.now() - run.started_at >= timedelta(hours=wait_h) or (run.retry_count or 0) < max_retry:
+                eligible.append(run)
+        recent = eligible
         for run in recent:
             runner = runners.get(run.kind)
             if not runner:

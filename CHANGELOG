@@ -1,5 +1,7 @@
 # CHANGELOG
 
+- [2026-09-09 11:20] FIX: **保底重试不永久停止——wechat runner 纳入 + 指数退避替代硬上限** — 用户要求"定时任务当保底没有出现中断时不要停止"。审查 retry_failed_runs 发现两缺陷:① runners 字典缺 wechat_listen/sync/traffic——公众号失败**永远不会被自动重试**;② retry_count≥3 后**永久放弃**。修复:① runners 补 wechat_listen/wechat_sync(指向 wechat_monitor.run_wechat_listen);② 硬上限改为**指数退避**(2^retry_count 小时,上限 24h)——失败次数越多等越久,但**永不永久放弃**,网络/Cookie 恢复后自动续上。新增单测(wechat_listen 失败被重试)。全量 241 项通过(Files: app/admin.py, tests/test_platform.py, CHANGELOG)
+
 - [2026-09-09 11:10] FEAT: **AI 改写稿持久化 + 历史查询** — 改写结果此前只在前端临时展示(刷新丢失)。新增 `wechat_rewrites` 表,rewrite API 自动保存每份改写稿;`GET /api/wechat/articles/{id}/rewrites` 查询历史(支持多次改写对比)。(Files: app/api/wechat.py, app/db/models.py, CHANGELOG)
 
 - [2026-09-09 11:00] FEAT: **文章列表排序切换——按阅读量排序(sort=reads)** — articles 接口新增 `sort=reads`(阅读量高→低,未采样排后;case 表达式)参数;监听页状态条加排序下拉(发现时间/阅读量)。用户一眼定位"已采样的高阅读盘链文"(Files: app/api/wechat.py, frontend/src/views/WechatListen.vue, CHANGELOG)

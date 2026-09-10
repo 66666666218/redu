@@ -570,3 +570,26 @@ def test_healthz_reports_app_version() -> None:
 
     with TestClient(create_app()) as c:
         assert c.get("/healthz").json()["version"] == APP_VERSION
+
+
+def test_retry_failed_runs_covers_wechat(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """保底重试:wechat_listen 失败也要被自动重试(此前 runners 缺失直接跳过)。"""
+    from datetime import datetime, timedelta
+    from app.db.models import RunRecord
+    from app.services import tenant
+    from app.admin import retry_failed_runs
+
+    session.add(RunRecord(user_id=1, run_id="test001", kind="wechat_listen", status="failed",
+                          detail="test failure", retry_count=0,
+                          started_at=datetime.now() - timedelta(hours=2)))
+    session.commit()
+
+    called = []
+    monkeypatch.setattr(tenant, "run_wechat_listen",
+                        lambda db, uid, settings=None: called.append(uid))
+    monkeypatch.setattr(tenant, "run_weibo", lambda db, uid, settings=None: None)
+    monkeypatch.setattr(tenant, "run_xianyu", lambda db, uid, settings=None: None)
+    monkeypatch.setattr(tenant, "run_douhot", lambda db, uid, settings=None: None)
+
+    retry_failed_runs(max_retry=3)
+    assert called == [1]  # wechat_listen 失败被重试了
