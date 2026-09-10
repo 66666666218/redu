@@ -304,6 +304,22 @@ def dashboard(session: Session, user_id: int) -> dict:
     ]
     xianyu_rows = repository.xianyu_items(session, user_id, limit=30)
     douhot_rows = repository.douhot_top_words(session, user_id, limit=100)
+    # 公众号概览:盘链文 Top5(按阅读)+爆点/苗头计数
+    from app.db.models import WechatArticle
+    wechat_rows = session.scalars(select(WechatArticle).where(
+        WechatArticle.user_id == user_id).order_by(
+        WechatArticle.created_at.desc()).limit(60)).all()
+    wechat_pan = [r for r in wechat_rows if r.pan_types]
+    wechat_top = sorted(wechat_pan, key=lambda r: -(r.read_num or 0))[:5]
+    wechat_overview = {
+        "benchmarks": session.scalar(select(func.count()).select_from(WechatBenchmark).where(
+            WechatBenchmark.user_id == user_id, WechatBenchmark.active.is_(True))) or 0,
+        "burst": sum(1 for r in wechat_rows if r.trend_flag == "爆点苗头"),
+        "pan_articles": len(wechat_pan),
+        "top_pan": [{"title": r.title, "pan_types": r.pan_types, "read_num": r.read_num,
+                     "my_link": next((x.strip() for x in (r.my_pan_urls or "").splitlines() if x.strip()), ""),
+                     "trend_flag": r.trend_flag or ""} for r in wechat_top],
+    }
     return {
         "weibo_trends": trends,
         "xianyu_hot": [
@@ -314,6 +330,7 @@ def dashboard(session: Session, user_id: int) -> dict:
             {"title": r.title, "score": r.score, "trend_delta": r.trend_delta}
             for r in douhot_rows
         ],
+        "wechat_overview": wechat_overview,
     }
 
 

@@ -2,7 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { api } from '../api'
 
-const dash = ref({ weibo_trends: [], xianyu_hot: [], douhot_words: [] })
+const dash = ref({ weibo_trends: [], xianyu_hot: [], douhot_words: [], wechat_overview: null })
 const analytics = ref({ total_want: 0, top_risers: [], categories: [], top_fallers: [], items: [] })
 const watches = ref([])
 const platformAgent = ref({ weibo: [], xianyu: [] })
@@ -115,6 +115,21 @@ onMounted(async () => { await load(); await loadAgent(); await loadAnalytics(); 
     </div>
 
     <div class="grid">
+      <div class="card" v-if="dash.wechat_overview && dash.wechat_overview.benchmarks">
+        <h3>公众号 · 网盘资源监控
+          <router-link to="/wechat" style="float:right;font-size:12px;color:var(--dim)">进入监听 →</router-link>
+        </h3>
+        <p class="empty">在监 {{ dash.wechat_overview.benchmarks }} 号 · 盘链文 {{ dash.wechat_overview.pan_articles }} · 🚀爆点 {{ dash.wechat_overview.burst }}</p>
+        <table v-if="dash.wechat_overview.top_pan.length">
+          <tr><th>标题</th><th>网盘</th><th>阅读</th></tr>
+          <tr v-for="r in dash.wechat_overview.top_pan" :key="r.title">
+            <td>{{ (r.trend_flag === '爆点苗头' ? '🚀' : '') + r.title.slice(0, 24) }}</td>
+            <td>{{ r.pan_types }}</td>
+            <td class="num">{{ r.read_num }}</td>
+          </tr>
+        </table>
+        <div v-else class="empty">暂无带盘链文章</div>
+      </div>
       <div class="card" v-if="dash.weibo_trends.length">
         <h3>微博 · 上涨趋势</h3>
         <table><tr><th>关键词</th><th>增长率</th></tr>
