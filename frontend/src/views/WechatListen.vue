@@ -8,6 +8,7 @@ const benches = ref([])
 const articles = ref([])
 const candidates = ref([])
 const onlyPan = ref(false)
+const sortBy = ref('time')
 const link = ref('')
 const note = ref('')
 const busy = ref('')
@@ -19,12 +20,15 @@ const totalRead = computed(() => articles.value.reduce((s, a) => s + (a.read_num
 async function loadBenches() {
   try { benches.value = (await api.wechatBenchmarks()).items } catch (e) { msg.value = e.message }
 }
-async function loadArticles() {
+async function loadArticles(append = false) {
   try {
     const q = new URLSearchParams()
     if (onlyPan.value) q.set('has_pan', '1')
+    if (sortBy.value) q.set('sort', sortBy.value)
     q.set('limit', '100')
-    articles.value = (await api.wechatArticles(q.toString())).items
+    if (append) q.set('offset', String(articles.value.length))
+    const items = (await api.wechatArticles(q.toString())).items
+    articles.value = append ? articles.value.concat(items) : items
   } catch (e) { msg.value = e.message }
 }
 async function load() { await Promise.all([loadBenches(), loadArticles(), loadCandidates()]) }
@@ -252,6 +256,9 @@ onMounted(load)
         </tr>
       </table>
       <div v-else class="empty">暂无文章:添加对标号后点「立即监听一轮」</div>
+      <div class="row" style="margin-top:8px;justify-content:center" v-if="articles.length >= 100">
+        <button class="ghost" @click="loadArticles(true)">加载更多</button>
+      </div>
       <div class="empty" style="margin-top:8px">阅读列"—"=尚未采样;「刷新阅读量」按 ¥0.06/篇 调用 dajiala,每轮最多 30 篇(可在 .env 调整)</div>
     <div v-if="rewriteText" class="card" style="margin-top:16px">
       <h3>AI 改写稿:{{ rewriteTitle }}</h3>
