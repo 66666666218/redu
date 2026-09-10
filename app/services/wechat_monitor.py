@@ -304,10 +304,24 @@ def list_benchmarks(session: Session, user_id: int) -> list[dict]:
     return out
 
 def remove_benchmark(session: Session, user_id: int, benchmark_id: int) -> None:
+    """删除对标号并级联清理其关联数据(pan_links/采样点/文章),防止孤儿行堆积。
+
+    用户 API 文案明确"已同步文章保留"指向的是**通用文章库**;
+    这里删的是 benchmark_id 直接关联的行——对标号删除后这些数据无法再归属。
+    """
     row = session.scalar(select(WechatBenchmark).where(
         WechatBenchmark.user_id == user_id, WechatBenchmark.id == benchmark_id))
     if row is None:
         raise KeyError("对标账号不存在")
+    arts = session.scalars(select(WechatArticle.id).where(
+        WechatArticle.user_id == user_id, WechatArticle.benchmark_id == benchmark_id)).all()
+    if arts:
+        session.execute(__import__("sqlalchemy").delete(WechatPanLink).where(
+            WechatPanLink.article_id.in_(arts)))
+        session.execute(__import__("sqlalchemy").delete(WechatTrafficSample).where(
+            WechatTrafficSample.article_id.in_(arts)))
+        session.execute(__import__("sqlalchemy").delete(WechatArticle).where(
+            WechatArticle.id.in_(arts)))
     session.delete(row)
     session.commit()
 

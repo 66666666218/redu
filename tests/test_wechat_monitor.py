@@ -876,3 +876,22 @@ def test_listen_batch_rotation(session, monkeypatch: pytest.MonkeyPatch) -> None
                                             weread=fake, batch_index=1, batch_size=2)
     # 下一批(MP_WXS_2/3):每号 cover 1 篇 + mp_articles 1 篇 = 2 篇/号 → 4 篇
     assert out2["accounts"] == 2 and out2["new"] == 4
+
+
+def test_remove_benchmark_cascades(session) -> None:
+    """删除对标号级联清理其文章/盘链/采样点(防孤儿行)。"""
+    from app.db.models import WechatPanLink, WechatTrafficSample
+    b = WechatBenchmark(user_id=1, nickname="号A")
+    session.add(b)
+    session.commit()
+    a = WechatArticle(user_id=1, title="文", url="https://mp.weixin.qq.com/s/x",
+                      source="listen", benchmark_id=b.id, pan_urls="https://pan.quark.cn/s/z")
+    session.add(a)
+    session.commit()
+    session.add(WechatPanLink(user_id=1, article_id=a.id, pan_url="https://pan.quark.cn/s/z"))
+    session.add(WechatTrafficSample(user_id=1, article_id=a.id))
+    session.commit()
+    wechat_monitor.remove_benchmark(session, 1, b.id)
+    assert session.scalars(select(WechatArticle)).all() == []
+    assert session.scalars(select(WechatPanLink)).all() == []
+    assert session.scalars(select(WechatTrafficSample)).all() == []
