@@ -225,7 +225,13 @@ onMounted(load)
           </td>
         </tr>
       </table>
-      <div v-else class="empty">还没有对标号:粘贴文章链接添加,或从微信读书书架导入</div>
+      <div v-else class="empty">
+        还没有对标号。<b>三步开始:</b><br/>
+        ① 「Cookie 管理」配置微信读书 Cookie(或 dajiala key)<br/>
+        ② 手机微信读书 App 搜索并<b>关注</b>你的对标公众号<br/>
+        ③ 点上方「从微信读书书架导入」→ 「立即监听一轮」<br/>
+        也可以直接粘贴某篇公众号文章的链接快速添加。
+      </div>
     </div>
 
     <div class="card">
