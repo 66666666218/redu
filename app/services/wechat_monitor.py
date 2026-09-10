@@ -22,6 +22,7 @@ from app.services.sogou_weixin import search_articles as sogou_search_articles
 from app.services.tenant_base import _base, _record_run
 from app.services.content_extract import extract_account_refs
 from app.services.weread_client import WereadAuthError, WereadClient, WereadError, build_mp_url
+from app.services.feishu_client import is_quiet_hours
 from app.utils import get_logger
 
 logger = get_logger(__name__)
@@ -626,6 +627,7 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
     items = []
     # 主路径:cover 最新一篇(始终可用)
     item = weread.latest_article(b.weread_book_id)
+    print(f"WC DEBUG: latest_article → item={item}")
     if item and item["url"]:
         items.append({"title": item["title"], "url": item["url"],
                       "publish_at": None})
@@ -641,7 +643,10 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
                           "read_num": it["read_num"], "like_num": it["like_num"],
                           "publish_at": pub})
     except Exception as exc:  # noqa: BLE001 - 限权/废弃不影响 cover 主路径
-        logger.debug("mp/articles 不可用(%s),仅用 cover 最新一篇", exc)
+        logger.warning("mp/articles 不可用(%s),仅用 cover 最新一篇", exc)
+        import traceback
+
+    print(f"WEREAD_COLLECT DEBUG: items={len(items)}, urls={[it.get('url','')[:30] for it in items]}")
     return _insert_new_articles(session, user_id, b, items, source="listen",
                                 fetch_content=True)
 
@@ -824,6 +829,14 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
     targets = list(dict.fromkeys(filter(None, [wh, main_wh])))  # 去重保序
     if not targets:
         return
+    # 免打扰时段(默认 23~8 点):非爆点文章延迟推送,紧急(盘链/高阅读)不受限
+    if is_quiet_hours(settings):
+        urgent = [r for r in rows if r.pan_types or (r.read_num or 0) >= 500]
+        quiet = [r for r in rows if r not in urgent]
+        if quiet and not urgent:
+            logger.info("免打扰时段,延迟推送 %d 篇(无紧急盘链文)", len(quiet))
+            return
+        rows = urgent
     replacements = replacements or {}
     elements: list[dict] = [
         {"tag": "note", "elements": [{"tag": "plain_text",
@@ -1325,6 +1338,14 @@ def _push_candidates(session: Session, user_id: int, settings: Settings,
     targets = list(dict.fromkeys(filter(None, [wh, main_wh])))  # 去重保序
     if not targets:
         return
+    # 免打扰时段(默认 23~8 点):非爆点文章延迟推送,紧急(盘链/高阅读)不受限
+    if is_quiet_hours(settings):
+        urgent = [r for r in rows if r.pan_types or (r.read_num or 0) >= 500]
+        quiet = [r for r in rows if r not in urgent]
+        if quiet and not urgent:
+            logger.info("免打扰时段,延迟推送 %d 篇(无紧急盘链文)", len(quiet))
+            return
+        rows = urgent
     elements: list[dict] = [
         {"tag": "note", "elements": [{"tag": "plain_text",
             "content": "手机微信读书搜索关注该号 → 监听页「从微信读书书架导入」即自动进监听"}]},

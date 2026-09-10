@@ -60,6 +60,8 @@ class Settings(BaseSettings):
     focus_min_len: int = 4             # 跨板块匹配的最短归一化关键词长度(防误配)
     focus_cooldown_hours: int = 24     # 同一关键词的告警冷却(小时)
     focus_max_items: int = 10          # 每次推送的重点关键词上限
+    quiet_hours_start: int = 23           # 免打扰开始(小时,23=晚11点);非紧急推送延到免打扰结束
+    quiet_hours_end: int = 8              # 免打扰结束(小时,8=早8点);实时热点等紧急推送不受限
     agent_enabled: bool = True             # 早期苗头 Agent(全板块自主预测)开关
     agent_score_threshold: int = 55        # 苗头判定分数线(≥80 为强苗头)
     agent_cooldown_hours: int = 12         # 同一(板块,关键词)的苗头冷却(小时)

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from datetime import datetime
 import hmac
 import time
 
@@ -41,6 +42,18 @@ _SECTION_WEBHOOK = {
 def platform_webhook(settings: object, section: str = "") -> str:
     """该板块的**专属** webhook(未配返回空串)——用于判断"是否进专属群"。"""
     return getattr(settings, _SECTION_WEBHOOK.get(section, ""), "") or ""
+
+
+def is_quiet_hours(settings: object, now: datetime | None = None) -> bool:
+    """当前是否处于免打扰时段(quiet_hours_start ~ end,跨午夜)。"""
+    start = getattr(settings, "quiet_hours_start", None)
+    end = getattr(settings, "quiet_hours_end", None)
+    if start is None or end is None or start == end:
+        return False
+    h = (now or datetime.now()).hour
+    if start < end:
+        return start <= h < end
+    return h >= start or h < end  # 跨午夜(如 23~8)
 
 
 def webhook_for(settings: object, section: str = "") -> str:

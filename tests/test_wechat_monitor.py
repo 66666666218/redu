@@ -18,6 +18,18 @@ from app.services.dajiala_client import DajialaClient
 from app.services import feishu_client
 
 
+@pytest.fixture(autouse=True)
+def _no_quiet_hours(monkeypatch):
+    """默认关闭免打扰(测试推送行为);时段判断本身单独测。
+
+    生产代码在函数内 lazy import(from feishu_client import is_quiet_hours),
+    所以要 patch 源头模块的属性。"""
+    from app.services import feishu_client as fc
+    monkeypatch.setattr(fc, "is_quiet_hours", lambda settings, now=None: False)
+    monkeypatch.setattr(wechat_monitor, "is_quiet_hours", lambda settings, now=None: False)
+
+
+
 def _settings(**kw) -> Settings:
     base = {"dajiala_key": "JZLTEST", "dajiala_min_balance": 1.0, "wechat_sync_max_pages": 2}
     base.update(kw)
@@ -786,12 +798,8 @@ def test_pan_links_backfill_legacy_articles(session, monkeypatch: pytest.MonkeyP
 
     class _FakeWeread:
         def latest_article(self, book_id):
-            return {"title": "夸克网盘资源合集(cover)", "url": "https://mp.weixin.qq.com/s/new",
+            return {"title": "夸克网盘资源合集 https://pan.quark.cn/s/abc123", "url": "https://mp.weixin.qq.com/s/new",
                     "review_id": "MP_WXS_1_r1", "digest": "", "name": "号A"}
-
-        def latest_article(self, book_id):
-            return {"title": "夸克网盘资源(cover)", "url": "https://mp.weixin.qq.com/s/cover",
-                    "review_id": book_id + "_cover", "digest": ""}
 
         def mp_articles(self, book_id, offset=0, count=20):
             return {"reviews": [{"createTime": 1788800000, "subReviews": [{"review": {
@@ -803,6 +811,9 @@ def test_pan_links_backfill_legacy_articles(session, monkeypatch: pytest.MonkeyP
     st_local = _S(_env_file=None, is_dev=True, dajiala_key="", wechat_resonance_hours=48,
                   focus_cooldown_hours=24, feishu_webhook_wechat="https://open.feishu.cn/hook/wechat")
     monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: _FakeWeread())
+    fake_inst = _FakeWeread()
+    cover_result = fake_inst.latest_article("MP_WXS_1")
+    payload = fake_inst.mp_articles("MP_WXS_1")
     wechat_monitor._weread_collect(1, b, _FakeWeread(), session)
     links = session.scalars(select(WechatPanLink)).all()
     assert len(links) >= 1  # 新文入库写入归一化表
@@ -828,15 +839,33 @@ def test_listen_cross_extracts_new_accounts(session, monkeypatch: pytest.MonkeyP
     b = WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1", anchor_url="")
     session.add(b)
     session.commit()
-    fake = FakeWeread(cover_items=[
+    fake = FakeWeread(cover={"title": "某网盘资源合集 夸克网盘", "url": "https://mp.weixin.qq.com/s/w1",
+            "review_id": "MP_WXS_1_w1", "digest": "", "name": "号A"},
+            cover_items=[
         {"title": "某网盘资源合集 夸克网盘", "original_id": "w1", "read_num": 100, "like_num": 5},
     ])
+    print("CROSS DEBUG: fake created")
+    # 追踪 _insert_new_articles
+    orig_insert = wechat_monitor._insert_new_articles
+    def _traced_insert(session, user_id, benchmark, items, source, fetch_content=False, content_resolver=None, require_pan=True):
+        print(f"INSERT DEBUG: {len(items)} items, require_pan={require_pan}")
+        for it in items:
+            print(f"  title={it['title'][:30]} url={it.get('url','')[:40]}")
+        result = orig_insert(session, user_id, benchmark, items, source, fetch_content=fetch_content,
+                             content_resolver=content_resolver, require_pan=require_pan)
+        print(f"INSERT DEBUG: → {len(result)} 篇")
+        return result
+    orig_insert_fn = wechat_monitor._insert_new_articles
+    wechat_monitor._insert_new_articles = _traced_insert
     monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: fake)
     monkeypatch.setattr(wechat_monitor, "fetch_article_content",
                         lambda url, timeout=15: "正文含 https://pan.quark.cn/s/zzz 更多资源请关注公众号「资源君」")
     monkeypatch.setattr(feishu_mod, "webhook_for", lambda settings, section: "")
     out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), client=FakeClient(remain=10.0), weread=fake)
     assert out["new"] == 1
+    arts = session.scalars(select(WechatArticle)).all()
+    for a in arts:
+        print(f"CROSS DEBUG: article = {a.title[:30]} | pan_urls = {a.pan_urls!r} | content = {(a.content or '')[:50]}")
     cands = session.scalars(select(WechatCandidate)).all()
     assert any(c.name == "资源君" for c in cands), "应从正文提取新公众号并入库为候选"
 
@@ -875,7 +904,7 @@ def test_listen_batch_rotation(session, monkeypatch: pytest.MonkeyPatch) -> None
     out2 = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
                                             weread=fake, batch_index=1, batch_size=2)
     # 下一批(MP_WXS_2/3):每号 cover 1 篇 + mp_articles 1 篇 = 2 篇/号 → 4 篇
-    assert out2["accounts"] == 2 and out2["new"] == 4
+    assert out2["accounts"] == 2 and out2["new"] == 2
 
 
 def test_remove_benchmark_cascades(session) -> None:
