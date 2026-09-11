@@ -924,3 +924,17 @@ def test_remove_benchmark_cascades(session) -> None:
     assert session.scalars(select(WechatArticle)).all() == []
     assert session.scalars(select(WechatPanLink)).all() == []
     assert session.scalars(select(WechatTrafficSample)).all() == []
+
+
+def test_insert_filters_empty_title_and_url_case(session) -> None:
+    """空标题不入库;URL 尾部斜杠归一化去重。"""
+    b = WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1")
+    session.add(b)
+    session.commit()
+    items = [
+        {"title": "", "url": "https://mp.weixin.qq.com/s/empty"},
+        {"title": "文A 夸克网盘", "url": "https://mp.weixin.qq.com/s/dup"},
+        {"title": "文B 夸克网盘", "url": "https://mp.weixin.qq.com/s/dup"},  # 同 URL 去重
+    ]
+    out = wechat_monitor._insert_new_articles(session, 1, b, items, source="listen", require_pan=False)
+    assert len(out) == 1  # 空标题过滤 + 同 URL 去重 → 只剩文A

@@ -451,31 +451,36 @@ def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchm
                          items: list[dict], source: str, fetch_content: bool = False,
                          content_resolver=None, require_pan: bool = True) -> list[WechatArticle]:
     """按链接去重入库;网盘类型=标题 + (可选)自抓正文 的并集。"""
-    existing = set(session.scalars(select(WechatArticle.url).where(
-        WechatArticle.user_id == user_id, WechatArticle.url != "")).all())
+    existing = {u.rstrip("/").strip() for u in session.scalars(
+        select(WechatArticle.url).where(
+            WechatArticle.user_id == user_id, WechatArticle.url != "")).all()}
     added: list[WechatArticle] = []
     for it in items:
         url = it["url"]
-        if url in existing:
+        title = (it.get("title") or "").strip()
+        url_norm = url.rstrip("/").strip()
+        if url_norm in existing:
             continue
-        existing.add(url)
-        types = detect_pan_types(it["title"])
+        if not title:
+            continue  # 空标题无价值(无法展示/分析/搜索)
+        existing.add(url_norm)
+        types = detect_pan_types(title)
         preset_read = int(it.get("read_num") or 0)
         preset_like = int(it.get("like_num") or 0)
         content = ""
-        if title_hits(it["title"]):
+        if title_hits(title):
             if content_resolver:  # 免费源注入(微信读书正文)
                 content = content_resolver(it["title"]) or ""
             elif fetch_content:
                 content = fetch_article_content(url)
             if content:  # 自抓成功 → 用正文的链接判定覆盖标题的盘名猜测
                 types = detect_pan_types(content) or types
-        pan_urls = extract_quark_urls(f'{it["title"]} {content}')
+        pan_urls = extract_quark_urls(f'{title} {content}')
         if require_pan and not pan_urls and not types:
             continue  # 无盘链 → 不监控
         quality = assess_quality(content, pan_urls, preset_read)
         row = WechatArticle(user_id=user_id, author=(benchmark.nickname or "未命名")[:128],
-                            title=it["title"][:500], url=url[:500], content=content,
+                            title=title[:500], url=url[:500], content=content,
                             publish_at=it.get("publish_at"), source=source,
                             benchmark_id=benchmark.id, pan_types=",".join(types)[:128],
                             pan_urls=chr(10).join(pan_urls)[:2000],
