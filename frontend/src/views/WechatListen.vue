@@ -9,6 +9,12 @@ const articles = ref([])
 const candidates = ref([])
 const onlyPan = ref(false)
 const sortBy = ref('time')
+const searchKw = ref('')
+let searchTimer = null
+function searchDebounce() {
+  clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => loadArticles(), 300)
+}
 const link = ref('')
 const note = ref('')
 const busy = ref('')
@@ -25,6 +31,7 @@ async function loadArticles(append = false) {
     const q = new URLSearchParams()
     if (onlyPan.value) q.set('has_pan', '1')
     if (sortBy.value) q.set('sort', sortBy.value)
+    if (searchKw.value.trim()) q.set('keyword', searchKw.value.trim())
     q.set('limit', '100')
     if (append) q.set('offset', String(articles.value.length))
     const items = (await api.wechatArticles(q.toString())).items
