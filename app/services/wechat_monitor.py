@@ -564,19 +564,26 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
     from app.services.alert_service import feishu_alert_gate
 
     _backfill_pan_links(session)  # 一次性回填归一化表建成前的旧文章盘链
-    checked: set[str] = set()
     res_hits: list[tuple[str, WechatArticle, int]] = []
     res_window = datetime.now() - timedelta(hours=settings.wechat_resonance_hours)
+    # 批量收集本轮全部盘链 → 一次 GROUP BY 查询各链接的窗口内文章数(替代循环内 N 次 COUNT)
+    all_links: list[tuple[str, WechatArticle]] = []
+    seen_links: set[str] = set()
     for r in rows:
         for u in [x.strip() for x in (r.pan_urls or "").splitlines() if x.strip()]:
-            if u in checked:
-                continue
-            checked.add(u)
-            cnt = session.scalar(select(func.count()).select_from(WechatPanLink).where(
-                WechatPanLink.pan_url == u,
+            if u not in seen_links:
+                seen_links.add(u)
+                all_links.append((u, r))
+    if all_links:
+        url_list = [u for u, _ in all_links]
+        counts = dict(session.execute(
+            select(WechatPanLink.pan_url, func.count(WechatPanLink.id)).where(
+                WechatPanLink.pan_url.in_(url_list),
                 WechatPanLink.created_at >= res_window,
-                WechatPanLink.article_id != r.id)) + 1  # +1 = 本篇自身
-            if (cnt or 0) >= 2 and feishu_alert_gate(
+            ).group_by(WechatPanLink.pan_url)).all())
+        for u, r in all_links:
+            cnt = int(counts.get(u, 0)) + 1  # +1 = 本篇自身
+            if cnt >= 2 and feishu_alert_gate(
                     session, user_id, "focus_res", "res:" + u[:120],
                     settings.focus_cooldown_hours, f"{cnt} 篇同发"):
                 res_hits.append((u, r, cnt))
