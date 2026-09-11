@@ -20,7 +20,8 @@ from app.services.quark_transfer import QuarkAuthError, QuarkError, QuarkTransfe
 from app.services.reader_platform_client import PlatformError, ReaderPlatformClient
 from app.services.sogou_weixin import search_articles as sogou_search_articles
 from app.services.tenant_base import _base, _record_run
-from app.services.content_extract import extract_account_refs
+from app.services.content_extract import extract_account_refs as _ear
+from app.services.early_agent import _md_safe_light
 from app.services.weread_client import WereadAuthError, WereadClient, WereadError, build_mp_url
 from app.services.feishu_client import is_quiet_hours
 from app.utils import get_logger
@@ -1389,6 +1390,71 @@ def _push_candidates(session: Session, user_id: int, settings: Settings,
         })
     except Exception:  # noqa: BLE001 - 推送失败不影响采集结果
         logger.exception("候选对标号飞书推送失败 user=%s", user_id)
+
+def keyword_article_tick(session: Session, user_id: int, settings: Settings | None = None) -> int:
+    """关键词文章监控:按用户配置的关键词(candidate_search_terms)搜最新文章,
+    盘链文即时推飞书——补齐"对标号没发但全网已有人发"的盲区。
+
+    数据源:搜狗微信文章搜索(免费);每词限 1 页,验证码连续 2 词即收手。
+    返回推送条数。"""
+    settings = settings or get_settings()
+    terms = [x.strip() for x in (settings.candidate_search_terms or "").split(",") if x.strip()]
+    if not terms:
+        return 0
+    from app.services.sogou_weixin import search_articles
+    from app.services.alert_service import feishu_alert_gate
+    from app.services.feishu import _col_set_row
+    from app.services.feishu_client import FeishuClient, webhook_for
+
+    webhook = webhook_for(settings, "wechat")
+    if not webhook:
+        return 0
+
+    hits: list[dict] = []
+    blocked = 0
+    known_titles = set()
+    for term in terms[:5]:  # 最多 5 个词/轮,防搜狗验证码
+        res = search_articles(term)
+        if res["blocked"]:
+            blocked += 1
+            if blocked >= 2:
+                break
+            continue
+        for it in res["items"][:10]:
+            title = (it.get("title") or "").strip()
+            if not title or title in known_titles:
+                continue
+            known_titles.add(title)
+            if title_hits(title):
+                hits.append({"title": title, "name": it.get("name", ""),
+                             "digest": it.get("digest", ""), "term": term})
+        if len(hits) >= settings.focus_max_items:
+            break
+    if not hits:
+        return 0
+
+    # 冷却去重:同标题 24h 一次
+    fresh = []
+    for h in hits:
+        if feishu_alert_gate(session, user_id, "kw_article", h["title"][:120],
+                             settings.focus_cooldown_hours, f"关键词:{h['term']}"):
+            fresh.append(h)
+    if not fresh:
+        return 0
+
+    elements = [_col_set_row([("**标题**", 6), ("**公众号**", 3), ("**关键词**", 3)], grey=True)]
+    for h in fresh[: settings.focus_max_items]:
+        elements.append(_col_set_row([
+            (f"🔴 {_md_safe_light(h['title'])[:30]}", 6),
+            (_md_safe_light(h["name"])[:12], 3),
+            (h["term"][:12], 3)]))
+    card = {"config": {"wide_screen_mode": True},
+            "header": {"template": "orange", "title": {"tag": "plain_text",
+                       "content": f"🔑 关键词文章 · {len(fresh)} 篇(全网,不限对标号)"}},
+            "elements": elements}
+    FeishuClient(webhook, settings.feishu_secret).send_card(card)
+    return len(fresh)
+
 
 def candidate_discover_tick(settings: Settings | None = None) -> int:
     """每日定时:为所有(有对标号的)用户发现一轮同类候选号。返回新增候选数。"""

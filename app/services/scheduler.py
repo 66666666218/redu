@@ -254,7 +254,8 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     )
     from app.services.agent_learning import backtest_and_learn
     from app.services.early_agent import agent_tick_all_users
-    from app.services.wechat_monitor import candidate_discover_tick, quark_keepalive_tick, traffic_tick, weread_refresh_tick
+    from app.services.wechat_monitor import (candidate_discover_tick, keyword_article_tick,
+                                              quark_keepalive_tick, traffic_tick, weread_refresh_tick)
 
     jobs = [
         (traffic_tick, _get_settings().wechat_traffic_cron, {"minute": 30, "hour": 21}, "wechat_traffic"),
@@ -265,6 +266,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         (douhot_window_tick, _get_settings().douhot_window_cron, {"minute": "*/20"}, "douhot_window_tick"),
         # wr_skey 短效(约12~24h):每 8 小时续期一次,保证永不过期
         (weread_refresh_tick, "50 7,15,23 * * *", {"minute": 50, "hour": 7}, "weread_refresh"),
+        (keyword_article_tick, "40 */2 * * *", {"minute": 40}, "keyword_article"),
         (candidate_discover_tick, _get_settings().candidate_discover_cron, {"minute": 20, "hour": 8}, "wechat_candidates"),
         (run_feishu_daily, _get_settings().feishu_daily_cron, {"minute": 0, "hour": 8}, "feishu_daily"),
         (run_feishu_wechat_analysis, _get_settings().feishu_wechat_cron, {"minute": 0, "hour": 10}, "feishu_wechat"),
