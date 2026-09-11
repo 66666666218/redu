@@ -297,6 +297,11 @@ def start(settings: Settings | None = None) -> BackgroundScheduler | None:
         scheduler = BackgroundScheduler(
             timezone="Asia/Shanghai",
             executors={"default": ThreadPoolExecutor(24)},
+            job_defaults={
+                "coalesce": True,           # 错过多次合并为一次
+                "max_instances": 1,
+                "misfire_grace_time": 300,  # 错过 5 分钟内仍执行(每日作业防重启跳过)
+            },
         )
         build_jobs(scheduler)
         scheduler.start()
