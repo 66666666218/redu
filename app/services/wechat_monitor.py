@@ -1398,7 +1398,7 @@ def keyword_article_tick(session: Session, user_id: int, settings: Settings | No
     数据源:搜狗微信文章搜索(免费);每词限 1 页,验证码连续 2 词即收手。
     返回推送条数。"""
     settings = settings or get_settings()
-    terms = [x.strip() for x in (settings.candidate_search_terms or "").split(",") if x.strip()]
+    terms = [x.strip() for x in (settings.keyword_search_terms or "").split(",") if x.strip()]
     if not terms:
         return 0
     from app.services.sogou_weixin import search_articles

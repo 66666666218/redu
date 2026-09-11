@@ -67,6 +67,7 @@ class Settings(BaseSettings):
     agent_cooldown_hours: int = 12         # 同一(板块,关键词)的苗头冷却(小时)
     weread_refresh_cron: str = "50 7,15,23 * * *"  # 微信读书 Cookie 自动续期(每8小时,保证 skey 永不过期)
     candidate_search_terms: str = ""   # 候选发现搜索词(逗号分隔;空=仅用对标号标题画像词)
+    keyword_search_terms: str = "夸克网盘资源,百度网盘资源,Switch模拟器,PS5游戏资源,剪映模板"  # 关键词文章监控搜索词(逗号分隔,每4h一轮)
     candidate_mine_terms: int = 6      # 标题画像词上限(从已入库标题挖高频内容词)
     candidate_max_terms: int = 8       # 单轮候选发现的搜索词总数上限(搜狗限频,宁少勿封)
     candidate_discover_cron: str = "20 8 * * *"  # 每日候选对标号发现时间(默认 08:20)
