@@ -122,6 +122,20 @@ def wechat_analyze(limit: int = 200, user: User = Depends(get_current_user), db:
 
 
 # ---------------------------------------------------------------- 对标号:监听/同步
+@router.get("/api/wechat/keywords")
+def wechat_keywords_get(user: User = Depends(get_current_user)):
+    """获取关键词文章监控搜索词。"""
+    from config.settings import get_settings
+    terms = get_settings().keyword_search_terms or ""
+    return {"terms": [x.strip() for x in terms.split(",") if x.strip()]}
+
+
+@router.put("/api/wechat/keywords")
+def wechat_keywords_put(payload: dict, user: User = Depends(get_current_user)):
+    """更新关键词文章监控搜索词(需要修改 .env 或环境变量,此处仅返回当前值提示)。"""
+    raise HTTPException(400, "关键词搜索词请在服务器 .env 的 KEYWORD_SEARCH_TERMS 中配置(重启生效)")
+
+
 @router.get("/api/wechat/status")
 def wechat_status(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """运行状态条:在监号数/近24h新文/盘链文/候选数(前端顶部一览)。"""
