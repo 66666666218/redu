@@ -140,9 +140,11 @@ const fmt = (t) => t ? String(t).replace('T', ' ') : '—'
 const rewriting = ref(0)
 const rewriteText = ref('')
 const rewriteTitle = ref('')
+const rewriteArticleId = ref(0)
 async function rewrite(a) {
   rewriting.value = a.id
   rewriteText.value = ''
+  rewriteArticleId.value = a.id
   try {
     const r = await api.wechatArticleRewrite(a.id)
     rewriteTitle.value = r.title
