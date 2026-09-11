@@ -30,6 +30,8 @@ def get_engine():
             get_settings().database_url,
             pool_pre_ping=True,
             pool_recycle=3600,
+            pool_size=10,       # 基础连接数(调度 13+ 作业 + API 并发)
+            max_overflow=15,    # 突发溢出连接数
             future=True,
         )
     return _engine
