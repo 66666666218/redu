@@ -266,7 +266,8 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         (douhot_window_tick, _get_settings().douhot_window_cron, {"minute": "*/20"}, "douhot_window_tick"),
         # wr_skey 短效(约12~24h):每 8 小时续期一次,保证永不过期
         (weread_refresh_tick, "50 7,15,23 * * *", {"minute": 50, "hour": 7}, "weread_refresh"),
-        (keyword_article_tick, "40 */2 * * *", {"minute": 40}, "keyword_article"),
+        # 搜狗验证码红线约 30~50 次/天:每 4 小时一轮 × 每轮最多 5 词 = 30 次/天(安全区)
+        (keyword_article_tick, "40 */4 * * *", {"minute": 40}, "keyword_article"),
         (candidate_discover_tick, _get_settings().candidate_discover_cron, {"minute": 20, "hour": 8}, "wechat_candidates"),
         (run_feishu_daily, _get_settings().feishu_daily_cron, {"minute": 0, "hour": 8}, "feishu_daily"),
         (run_feishu_wechat_analysis, _get_settings().feishu_wechat_cron, {"minute": 0, "hour": 10}, "feishu_wechat"),
