@@ -10,10 +10,10 @@
 WEREAD_COOKIE=wr_vid=439862397; wr_skey=<最新值>; ...
 
 # 夸克 Cookie(自动转存换链;缺失则推送回落原链接)
-QUARK_COOKIE=b-user-id=<值>; __puus=<值>; ...
+QUARK_COOKIE=b-user-id=<值>; __puus=<已泄露,重新登录复制> ...
 
 # dajiala key(阅读量采样+兜底监听;不充值则采样自动跳过)
-DAJIALA_KEY=JZL5ff26c1a706e72b0
+DAJIALA_KEY=JZL<已泄露,请联系服务商轮换>
 ```
 
 ## 推荐配置
