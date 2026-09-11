@@ -54,13 +54,16 @@ def wechat_article_add(payload: dict, user: User = Depends(get_current_user), db
 @router.get("/api/wechat/articles")
 def wechat_article_list(limit: int = 100, offset: int = 0, has_pan: int | None = None,
                         benchmark_id: int | None = None, sort: str = "time",
-                        user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+                        keyword: str = "", user: User = Depends(get_current_user),
+                        db: Session = Depends(get_db)):
     """文章列表(新→旧);has_pan=1 只看带网盘链接的,benchmark_id 过滤某对标号。"""
     q = select(WechatArticle).where(WechatArticle.user_id == user.id)
     if benchmark_id:
         q = q.where(WechatArticle.benchmark_id == benchmark_id)
     if has_pan:
         q = q.where(WechatArticle.pan_types != "")
+    if keyword.strip():
+        q = q.where(WechatArticle.title.contains(keyword.strip()))
     # 排序:time=发现时间新→旧(默认);reads=阅读量高→低(未采样的排后)
     from sqlalchemy import case, desc as sdesc
     if sort == "reads":
