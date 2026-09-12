@@ -12,8 +12,8 @@ const items = ref([])
 const msg = ref('')
 
 async function load() {
-  try { rules.value = await api.alertRules() } catch {}
-  try { items.value = await api.alertsList() } catch {}
+  try { rules.value = await api.alertRules() } catch (e) { msg.value = msg.value || '规则加载失败:' + e.message }
+  try { items.value = await api.alertsList() } catch (e) { msg.value = msg.value || '告警加载失败:' + e.message }
 }
 async function add() {
   msg.value = ''
@@ -23,7 +23,9 @@ async function add() {
   if (form.value.rule_type === 'fixed_time') body.alert_time = form.value.alert_time
   try { await api.alertRuleAdd(body); await load(); form.value.keyword = '' } catch (e) { msg.value = e.message }
 }
-async function del(id) { await api.alertRuleDel(id); await load() }
+async function del(id) {
+  try { await api.alertRuleDel(id); await load() } catch (e) { msg.value = '删除失败:' + e.message }
+}
 const sl = (k) => (sections.find(x => x.key === k)?.label || k)
 const tl = (k) => (ruleTypes.find(x => x.key === k)?.label || k)
 

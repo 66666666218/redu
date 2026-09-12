@@ -117,13 +117,17 @@ async function syncOne(b) {
 }
 
 async function toggleBench(b) {
-  await api.wechatBenchmarkPatch(b.id, { active: !b.active })
-  await loadBenches()
+  try {
+    await api.wechatBenchmarkPatch(b.id, { active: !b.active })
+    await loadBenches()
+  } catch (e) { toastErr(e.message) }
 }
 async function delBench(b) {
   if (!confirm(`删除对标号「${b.nickname}」?(已入库文章保留)`)) return
-  await api.wechatBenchmarkDel(b.id)
-  await loadBenches()
+  try {
+    await api.wechatBenchmarkDel(b.id)
+    await loadBenches()
+  } catch (e) { toastErr(e.message) }
 }
 
 async function refreshTraffic() {

@@ -16,7 +16,7 @@ async function load() {
   try { view.value = await api.platformView(platform) } catch (e) { toastError(e.message) }
 }
 async function loadWatches() {
-  try { watches.value = await api.watchAnalytics(platform) } catch { /* 暂无 */ }
+  try { watches.value = await api.watchAnalytics(platform) } catch (e) { console.debug('关注词分析暂无数据', e) }
 }
 async function addWatch() {
   if (!watchKeyword.value.trim()) return

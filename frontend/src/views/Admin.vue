@@ -73,16 +73,19 @@ function donut(items) {
   return `conic-gradient(${stops.join(',')})`
 }
 async function toggle(u) {
-  await api.adminUserToggle(u.id); await load()
+  try { await api.adminUserToggle(u.id); await load() } catch (e) { toastError(e.message) }
 }
 async function del(u) {
-  if (confirm('确认删除用户 ' + u.username + '?')) { await api.adminUserDel(u.id); await load() }
+  if (!confirm('确认删除用户 ' + u.username + '?')) return
+  try { await api.adminUserDel(u.id); await load() } catch (e) { toastError(e.message) }
 }
 async function setCfg(k) {
   const v = prompt('设置 ' + k, config.value.find(c => c.key === k)?.value ?? '')
-  if (v !== null) { await api.adminConfigSet(k, v); await load() }
+  if (v !== null) { try { await api.adminConfigSet(k, v); await load() } catch (e) { toastError(e.message) } }
 }
-async function searchUsers() { users.value = await api.adminUsers(q.value) }
+async function searchUsers() {
+  try { users.value = await api.adminUsers(q.value) } catch (e) { toastError(e.message) }
+}
 async function loadData() { dataRef.value = await api.adminData(dataSection.value) }
 async function retryRun(runId) {
   const r = await api.adminRunRetry(runId)

@@ -35,13 +35,13 @@ async function load() {
   try { dash.value = await api.dashboard() } catch (e) { msg.value = e.message }
 }
 async function loadAgent() {
-  try { platformAgent.value = await api.platformAgent() } catch (e) { /* 暂无 */ }
+  try { platformAgent.value = await api.platformAgent() } catch (e) { console.debug('板块智能体暂无数据', e) }
 }
 async function loadAnalytics() {
-  try { analytics.value = await api.xianyuAnalytics() } catch (e) { /* 暂无数据 */ }
+  try { analytics.value = await api.xianyuAnalytics() } catch (e) { console.debug('闲鱼分析暂无数据', e) }
 }
 async function loadWatches() {
-  try { watches.value = await api.douhotWatchAnalytics() } catch (e) { /* */ }
+  try { watches.value = await api.douhotWatchAnalytics() } catch (e) { console.debug('关注词分析暂无数据', e) }
 }
 async function collect(key, label) {
   busy.value = key

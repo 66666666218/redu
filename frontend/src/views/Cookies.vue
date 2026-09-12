@@ -10,8 +10,10 @@ const smtp = ref({ host: '', port: 465, user: '', password: '', from_name: '' })
 const labels = { weibo: '微博', baidu: '百度', douyin: '抖音(热点宝)', goofish: '闲鱼' }
 
 async function load() {
-  items.value = await api.cookies()
-  try { smtp.value = await api.userSmtpGet() } catch {}
+  try {
+    items.value = await api.cookies()
+  } catch (e) { msg.value = 'Cookie 状态加载失败:' + e.message }
+  try { smtp.value = await api.userSmtpGet() } catch (e) { console.debug('SMTP 未配置', e) }
 }
 function setDraft(p, v) { drafts.value[p] = v }
 async function save(p) {
@@ -22,7 +24,12 @@ async function save(p) {
     await load()
   } catch (e) { msg.value = e.message }
 }
-async function remove(p) { await api.delCookie(p); drafts.value[p] = ''; msg.value = `${labels[p]} Cookie 已删除`; await load() }
+async function remove(p) {
+  msg.value = ''
+  try {
+    await api.delCookie(p); drafts.value[p] = ''; msg.value = `${labels[p]} Cookie 已删除`; await load()
+  } catch (e) { msg.value = '删除失败:' + e.message }
+}
 async function saveSmtp() {
   msg.value = ''
   try { await api.userSmtpPut(smtp.value); msg.value = '告警邮箱已保存(预警发到该邮箱)' } catch (e) { msg.value = e.message }
