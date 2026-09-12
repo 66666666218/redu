@@ -13,6 +13,9 @@ from app.db.models import User, WechatArticle
 from app.services.dajiala_client import DajialaError
 from app.services.wechat_analyzer import analyze_articles
 from app.services import wechat_monitor
+from app.utils import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter()
 
@@ -338,8 +341,8 @@ def wechat_article_rewrite(article_id: int, user: User = Depends(get_current_use
                 wc = WereadClient(cookie)
                 # 从文章 URL 反查 reviewId 不易,直接抓原文页
                 row.content = wechat_monitor.fetch_article_content(row.url) or row.content
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:  # noqa: BLE001  补拉失败走下方统一的"正文不足"报错
+                logger.warning("改写前微信读书补拉正文失败 article=%s url=%s", article_id, row.url, exc_info=True)
     if not row.content or len(row.content) < 100:
         raise HTTPException(400, "文章正文不足(未抓到),暂不能 AI 改写")
     # 我的转存链优先

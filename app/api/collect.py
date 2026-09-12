@@ -8,6 +8,9 @@ from app.auth import get_current_user
 from app.db import get_db
 from app.db.models import User
 from app.services import tenant
+from app.utils import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter()
 
@@ -27,8 +30,8 @@ def collect(platform: str, user: User = Depends(get_current_user), db: Session =
             if platform == "douhot":
                 run_feishu_keyword_alerts(user.id)
                 run_feishu_keyword_realtime(user.id)  # 话题词新进/上升/爆发实时提醒
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:  # noqa: BLE001  采集成功后推送失败不影响返回,但要留痕
+            logger.exception("采集后飞书实时提醒失败(平台=%s, 用户=%s)", platform, user.id)
         return result
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
