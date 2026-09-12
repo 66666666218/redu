@@ -93,17 +93,29 @@ class QuarkTransfer:
     def _request(self, method: str, path: str, *, api: str = QUARK_SHARE_API,
                  params: Mapping[str, Any] | None = None,
                  json: Mapping[str, Any] | None = None, timeout: float | None = None) -> dict[str, Any]:
-        resp = requests.request(method, api + path, params=self._params(params),
-                                json=json, timeout=timeout or self.timeout, headers=self._headers())
-        try:
-            data = resp.json()
-        except ValueError as e:
-            raise QuarkError(f"夸克接口返回非 JSON: {resp.text[:300]}") from e
-        if resp.status_code >= 400:
-            self._raise(data, resp.text[:300])
-            raise QuarkError(f"夸克接口 HTTP {resp.status_code}: {resp.text[:300]}")
-        self._raise(data, resp.text[:300])
-        return data
+        # 66010(query fail)是间歇性限流,自动重试 2 次
+        last_err = None
+        for attempt in range(3):
+            if attempt:
+                time.sleep(2 * attempt)  # 2s / 4s
+            resp = requests.request(method, api + path, params=self._params(params),
+                                    json=json, timeout=timeout or self.timeout, headers=self._headers())
+            try:
+                data = resp.json()
+            except ValueError as e:
+                last_err = QuarkError(f"夸克接口返回非 JSON: {resp.text[:300]}")
+                continue
+            code = data.get("code")
+            if code in (None, 0, 200):
+                return data
+            msg = str(data.get("message") or data.get("msg") or resp.text[:200])
+            if code == 401 or data.get("status") == 401:
+                raise QuarkAuthError("夸克 Cookie 已失效,请重新复制 pan.quark.cn 的 Cookie")
+            if "capacity limit" in msg.lower():
+                raise QuarkError("夸克网盘容量不足,请清理空间或更换账号")
+            # 66010 = 间歇性 query fail,重试
+            last_err = QuarkError(f"夸克接口失败({code}): {msg}")
+        raise last_err or QuarkError("夸克接口连续失败")
 
     # ---- 业务 ----
     def _parse_share(self, url: str):
@@ -146,13 +158,38 @@ class QuarkTransfer:
         return entries
 
     def _create_dir(self, parent_fid: str, name: str) -> str:
-        created = self._request("POST", "/1/clouddrive/file", api=QUARK_FILE_API,
-                                json={"pdir_fid": parent_fid, "file_name": name,
-                                      "dir_path": "", "dir_init_lock": False})
-        fid = created.get("data", {}).get("fid")
-        if not fid:
-            raise QuarkError(f"夸克创建目录失败: {name}")
-        return str(fid)
+        """创建目录;同名冲突(23008)时抛出特定错误让调用方重扫。"""
+        try:
+            created = self._request("POST", "/1/clouddrive/file", api=QUARK_FILE_API,
+                                    json={"pdir_fid": parent_fid, "file_name": name,
+                                          "dir_path": "", "dir_init_lock": False})
+            fid = created.get("data", {}).get("fid")
+            if fid:
+                return str(fid)
+        except QuarkError as exc:
+            if "23008" not in str(exc) and "同名冲突" not in str(exc):
+                raise
+        # 同名冲突或创建失败:重扫目录找已有的 fid
+        for page in range(1, 51):
+            data = self._request("GET", "/1/clouddrive/file/sort", api=QUARK_FILE_API,
+                                 params={"pdir_fid": parent_fid, "_page": page,
+                                         "_size": 200, "_sort": "file_name:asc"})
+            items = data.get("data", {}).get("list", []) or []
+            hit = next((x for x in items if x.get("dir") and x.get("file_name") == name), None)
+            if hit:
+                return str(hit["fid"])
+            if len(items) < 200:
+                break
+        raise QuarkError(f"夸克创建目录失败: {name}")
+
+    def set_dir_fid(self, path: str, fid: str) -> None:
+        """预设目录 fid(跳过扫描,大盘必备)。调用方通过 API/配置获取 fid 后注入。"""
+        path = path.strip("/") or "/"
+        parts = [x.strip() for x in path.split("/") if x.strip()]
+        walked = ""
+        for part in parts:
+            walked += "/" + part
+        self._dir_cache[walked.rstrip("/")] = fid
 
     def _ensure_dir(self, path: str) -> str:
         """确保目录存在并返回末级 fid。
