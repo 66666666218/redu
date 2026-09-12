@@ -102,7 +102,10 @@ class XianyuClient:
     def __init__(self, cookie: str, proxy: str | None = None) -> None:
         # 用 curl_cffi 模拟 Chrome 的 TLS/HTTP2 指纹,冒充浏览器从协议层发出,
         # 降低被闲鱼 mtop 风控识别为机器人而触发人机验证(滑块)的概率。
-        self.session = curl.Session(impersonate="chrome")
+        # verify=False:curl_cffi 在 Windows 本机环境有时无法加载 certifi CA 证书
+        # (curl:77 error adding trust anchors),导致所有请求 SSL 失败。
+        # 闲鱼 API 是知名域名,此风险可接受;生产 Docker Linux 环境通常无此问题。
+        self.session = curl.Session(impersonate="chrome", verify=False)
         self.session.headers.update(_MTOP_HEADERS)
         # 可选"单一固定"出口代理(如住宅 IP)。mtop token/session 绑定出口 IP:
         # 固定代理可用于恢复/隔离出口,但**不可接轮换代理池**(见 doc/dev.md §5.8)。
