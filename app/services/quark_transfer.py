@@ -209,18 +209,30 @@ class QuarkTransfer:
                 parent = self._dir_cache[walked]
                 continue
             existing_fid = ""
-            for page in range(1, 51):  # 逐页找,命中即停
-                data = self._request("GET", "/1/clouddrive/file/sort", api=QUARK_FILE_API,
-                                     params={"pdir_fid": parent, "_page": page, "_size": 200,
-                                             "_sort": "file_name:asc"})
-                items = list(data.get("data", {}).get("list", []) or [])
-                hit = next((x for x in items if x.get("dir") and x.get("file_name") == part), None)
-                if hit:
-                    existing_fid = str(hit["fid"])
-                    break
-                if len(items) < 200:
-                    break  # 翻完了也没有
-            parent = existing_fid or self._create_dir(parent, part)
+            # 先尝试直接创建(如果不存在会成功;如果同名冲突会返回 23008)
+            try:
+                created = self._request("POST", "/1/clouddrive/file", api=QUARK_FILE_API,
+                                        json={"pdir_fid": parent, "file_name": part,
+                                              "dir_path": "", "dir_init_lock": False})
+                fid = created.get("data", {}).get("fid")
+                if fid:
+                    existing_fid = str(fid)
+            except QuarkError:
+                pass  # 23008 同名冲突 → 重扫找已有 fid
+            if not existing_fid:
+                # 创建失败(同名),重扫目录找已有 fid
+                for page in range(1, 51):
+                    data = self._request("GET", "/1/clouddrive/file/sort", api=QUARK_FILE_API,
+                                         params={"pdir_fid": parent, "_page": page, "_size": 200,
+                                                 "_sort": "file_name:asc"})
+                    items = list(data.get("data", {}).get("list", []) or [])
+                    hit = next((x for x in items if x.get("dir") and x.get("file_name") == part), None)
+                    if hit:
+                        existing_fid = str(hit["fid"])
+                        break
+                    if len(items) < 200:
+                        break
+            parent = existing_fid
             self._dir_cache[walked] = parent
         self._dir_cache[path] = parent
         return parent
