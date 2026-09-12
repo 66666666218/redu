@@ -539,7 +539,7 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                 continue
             _apply_sample(session, user_id, r, data, sample_now)
     if settings.pan_transfer_enabled and settings.quark_cookie:
-        quark = QuarkTransfer(settings.quark_cookie)
+        quark = QuarkTransfer(settings.quark_cookie, fid_store=settings.quark_fid_store)
         for r in rows:
             dead = False
             for u in [x.strip() for x in (r.pan_urls or "").splitlines() if x.strip()][:3]:
@@ -640,7 +640,6 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
     items = []
     # 主路径:cover 最新一篇(始终可用)
     item = weread.latest_article(b.weread_book_id)
-    print(f"WC DEBUG: latest_article → item={item}")
     if item and item["url"]:
         items.append({"title": item["title"], "url": item["url"],
                       "publish_at": None})
@@ -656,10 +655,10 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
                           "read_num": it["read_num"], "like_num": it["like_num"],
                           "publish_at": pub})
     except Exception as exc:  # noqa: BLE001 - 限权/废弃不影响 cover 主路径
-        logger.warning("mp/articles 不可用(%s),仅用 cover 最新一篇", exc)
-        import traceback
-
-    print(f"WEREAD_COLLECT DEBUG: items={len(items)}, urls={[it.get('url','')[:30] for it in items]}")
+        # -2041 是新版微信读书对该接口的永久限权,每进程只记一次,避免每账号刷屏
+        if not getattr(_weread_collect, "_mp_articles_warned", False):
+            _weread_collect._mp_articles_warned = True
+            logger.warning("mp/articles 不可用(%s),全部账号仅用 cover 最新一篇", exc)
     return _insert_new_articles(session, user_id, b, items, source="listen",
                                 fetch_content=True)
 

@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     wechat_listen_sample_limit: int = 10   # 监听一轮内"立即采样"的新文上限(控制成本)
     quark_cookie: str = ""                 # 夸克网盘 Cookie(pan.quark.cn 登录后复制);用于转存对标文的分享
     quark_save_dir: str = "/redian监听"     # 转存目标目录(自动逐级创建)
+    quark_fid_store: str = "data/quark_fid_cache.json"  # 目录 fid 持久缓存(大盘免重扫;幽灵同名复用)
     quark_share_password: str = ""         # 二次分享提取码(空=无)
     pan_transfer_enabled: bool = True      # 是否自动转存(需 quark_cookie;失败回落原链接推送)
     wechat_traffic_min_interval_hours: int = 24  # 同一篇文章两次采样最小间隔(小时)

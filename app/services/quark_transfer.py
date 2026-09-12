@@ -11,8 +11,11 @@
 """
 from __future__ import annotations
 
+import json
+import os
 import re
 import time
+from datetime import datetime
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import quote
@@ -59,10 +62,40 @@ def extract_quark_urls(text: str) -> list[str]:
 class QuarkTransfer:
     """夸克转存 + 二次分享最小客户端(同步)。"""
 
-    def __init__(self, cookie: str, timeout: float = 30.0) -> None:
+    def __init__(self, cookie: str, timeout: float = 30.0,
+                 fid_store: str = "") -> None:
         self.cookie = str(cookie or "").strip()
         self.timeout = timeout
-        self._dir_cache: dict[str, str] = {}  # path -> fid(一轮监听多次转存复用,免重复扫描)
+        self._dir_cache: dict[str, str] = {}  # path -> fid(一轮监听多次转存复用,免重复解析)
+        self._used_store: set[str] = set()    # 本次从 fid_store 复用的路径(保存失败时自愈回重建)
+        self._fid_store_path = str(fid_store or "")
+        self._persisted: dict[str, str] = {}
+        if self._fid_store_path and os.path.isfile(self._fid_store_path):
+            try:
+                with open(self._fid_store_path, encoding="utf-8") as f:
+                    self._persisted = {str(k): str(v) for k, v in (json.load(f) or {}).items()}
+            except (OSError, ValueError):
+                self._persisted = {}
+
+    def _persist_fids(self) -> None:
+        if not self._fid_store_path:
+            return
+        try:
+            os.makedirs(os.path.dirname(self._fid_store_path) or ".", exist_ok=True)
+            tmp = self._fid_store_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self._persisted, f, ensure_ascii=False)
+            os.replace(tmp, self._fid_store_path)
+        except OSError:
+            logger.warning("夸克 fid 缓存写入失败: %s", self._fid_store_path)
+
+    def invalidate_dir(self, path: str) -> None:
+        """清除目录缓存(目录被删/fid 失效时),下次 _ensure_dir 会重新创建。"""
+        path = path.strip("/") or "/来自监听"
+        self._dir_cache.pop(path, None)
+        self._used_store.discard(path)
+        self._persisted.pop(path, None)
+        self._persist_fids()
 
     # ---- HTTP ----
     def _headers(self) -> dict:
@@ -157,33 +190,18 @@ class QuarkTransfer:
                 break
         return entries
 
-    def _create_dir(self, parent_fid: str, name: str) -> str:
-        """创建目录;同名冲突(23008)时抛出特定错误让调用方重扫。"""
-        try:
-            created = self._request("POST", "/1/clouddrive/file", api=QUARK_FILE_API,
-                                    json={"pdir_fid": parent_fid, "file_name": name,
-                                          "dir_path": "", "dir_init_lock": False})
-            fid = created.get("data", {}).get("fid")
-            if fid:
-                return str(fid)
-        except QuarkError as exc:
-            if "23008" not in str(exc) and "同名冲突" not in str(exc):
-                raise
-        # 同名冲突或创建失败:重扫目录找已有的 fid
-        for page in range(1, 51):
-            data = self._request("GET", "/1/clouddrive/file/sort", api=QUARK_FILE_API,
-                                 params={"pdir_fid": parent_fid, "_page": page,
-                                         "_size": 200, "_sort": "file_name:asc"})
-            items = data.get("data", {}).get("list", []) or []
-            hit = next((x for x in items if x.get("dir") and x.get("file_name") == name), None)
-            if hit:
-                return str(hit["fid"])
-            if len(items) < 200:
-                break
-        raise QuarkError(f"夸克创建目录失败: {name}")
+    def _mk_dir(self, parent_fid: str, name: str) -> str:
+        """创建目录;成功返回 fid,撞名/幽灵占用(23008)抛 QuarkError。"""
+        created = self._request("POST", "/1/clouddrive/file", api=QUARK_FILE_API,
+                                json={"pdir_fid": parent_fid, "file_name": name,
+                                      "dir_path": "", "dir_init_lock": False})
+        fid = created.get("data", {}).get("fid")
+        if not fid:
+            raise QuarkError(f"夸克创建目录未返回 fid: {name}")
+        return str(fid)
 
     def set_dir_fid(self, path: str, fid: str) -> None:
-        """预设目录 fid(跳过扫描,大盘必备)。调用方通过 API/配置获取 fid 后注入。"""
+        """预设目录 fid(跳过解析,大盘必备)。调用方通过 API/配置获取 fid 后注入。"""
         path = path.strip("/") or "/"
         parts = [x.strip() for x in path.split("/") if x.strip()]
         walked = ""
@@ -194,12 +212,21 @@ class QuarkTransfer:
     def _ensure_dir(self, path: str) -> str:
         """确保目录存在并返回末级 fid。
 
-        大盘优化:① 实例级缓存(一轮监听多次转存只解析一次);② 查找改"逐页早停"——
-        根目录上万文件时全量扫要 50 个请求,目标目录名往往前几页就能命中。
+        大盘实测:根目录 10000+ 文件时按名分页重扫一次要几十个慢请求(一次补偿转存拖到
+        半小时),故**完全不做重扫**——创建接口的成功/23008 就是存在性判定,撞名时沿
+        "原名→_MMDD→_MMDD_2→_MMDD_3"候选梯继续建。23008 还包含"幽灵占用"(目录实际
+        不存在却报同名,旧转存任务残留,线上案例"redian监听"),梯子同样兜得住。
+        解析出的 fid 持久化到 fid_store,下轮直接复用,避免幽灵场景每轮新堆目录;
+        fid 失效(目录被删)时保存会报错,调用方经 invalidate_dir() 清除后自动重建。
         """
         path = path.strip("/") or "/来自监听"
         if path in self._dir_cache:
             return self._dir_cache[path]
+        cached = self._persisted.get(path, "")
+        if cached:
+            self._dir_cache[path] = cached
+            self._used_store.add(path)
+            return cached
         parts = [x.strip() for x in path.split("/") if x.strip()]
         parent = "0"
         walked = ""
@@ -208,34 +235,22 @@ class QuarkTransfer:
             if walked in self._dir_cache:
                 parent = self._dir_cache[walked]
                 continue
-            existing_fid = ""
-            # 先尝试直接创建(如果不存在会成功;如果同名冲突会返回 23008)
-            try:
-                created = self._request("POST", "/1/clouddrive/file", api=QUARK_FILE_API,
-                                        json={"pdir_fid": parent, "file_name": part,
-                                              "dir_path": "", "dir_init_lock": False})
-                fid = created.get("data", {}).get("fid")
-                if fid:
-                    existing_fid = str(fid)
-            except QuarkError:
-                pass  # 23008 同名冲突 → 重扫找已有 fid
-            if not existing_fid:
-                # 创建失败(同名),重扫目录找已有 fid
-                for page in range(1, 51):
-                    data = self._request("GET", "/1/clouddrive/file/sort", api=QUARK_FILE_API,
-                                         params={"pdir_fid": parent, "_page": page, "_size": 200,
-                                                 "_sort": "file_name:asc"})
-                    items = list(data.get("data", {}).get("list", []) or [])
-                    hit = next((x for x in items if x.get("dir") and x.get("file_name") == part), None)
-                    if hit:
-                        existing_fid = str(hit["fid"])
-                        break
-                    if len(items) < 200:
-                        break
-            parent = existing_fid
-            self._dir_cache[walked] = parent
+            parent = self._dir_cache[walked] = self._create_with_fallback(parent, part)
         self._dir_cache[path] = parent
+        self._persisted[path] = parent
+        self._persist_fids()
         return parent
+
+    def _create_with_fallback(self, parent_fid: str, name: str) -> str:
+        """逐个候选名尝试创建,全部撞名才抛错(无重扫,最多 4 个请求)。"""
+        last = ""
+        for cand in (name, f"{name}_{datetime.now():%m%d}",
+                     f"{name}_{datetime.now():%m%d}_2", f"{name}_{datetime.now():%m%d}_3"):
+            try:
+                return self._mk_dir(parent_fid, cand)
+            except QuarkError as exc:
+                last = str(exc)
+        raise QuarkError(f"夸克目录创建失败(含后缀候选均撞名): {name}; 最后错误: {last}")
 
     def _wait_task_fids(self, task_id: str) -> list[str]:
         if not task_id:
@@ -307,8 +322,19 @@ class QuarkTransfer:
                    "fid_token_list": [f.get("share_fid_token", "") for f in files],
                    "to_pdir_fid": target_fid, "pwd_id": share_id, "stoken": stoken,
                    "pdir_fid": "0", "scene": "link"}
-        data = self._request("POST", "/1/clouddrive/share/sharepage/save",
-                             json=payload, timeout=60.0)
+        norm_dir = save_dir.strip("/") or "/来自监听"
+        try:
+            data = self._request("POST", "/1/clouddrive/share/sharepage/save",
+                                 json=payload, timeout=60.0)
+        except QuarkError:
+            # 复用持久化 fid 时目录可能已被用户删/移动:清缓存重建后重试一次
+            if norm_dir not in self._used_store:
+                raise
+            logger.warning("夸克缓存 fid 已失效({}),重建目录后重试", norm_dir)
+            self.invalidate_dir(norm_dir)
+            payload["to_pdir_fid"] = self._ensure_dir(save_dir)
+            data = self._request("POST", "/1/clouddrive/share/sharepage/save",
+                                 json=payload, timeout=60.0)
         task_data = data.get("data", {})
         new_ids = (task_data.get("save_as", {}) or {}).get("save_as_top_fids", []) or []
         task_id = str(task_data.get("task_id") or task_data.get("taskId") or "")

@@ -122,33 +122,11 @@ def _migrate() -> None:
                             "pan_types VARCHAR(128) DEFAULT ''", "pan_urls TEXT", "my_pan_urls TEXT",
                             "read_num INTEGER DEFAULT 0", "zan_num INTEGER DEFAULT 0", "looking_num INTEGER DEFAULT 0",
                             "share_num INTEGER DEFAULT 0", "collect_num INTEGER DEFAULT 0",
-                            "comment_count INTEGER DEFAULT 0", "traffic_at DATETIME", "pan_urls TEXT",
+                            "comment_count INTEGER DEFAULT 0", "traffic_at DATETIME",
                             "sample_count INTEGER DEFAULT 0",
                             "first_read_num INTEGER DEFAULT 0",
                             "trend_flag VARCHAR(16) DEFAULT ''", "quality INTEGER DEFAULT 0"],
     }
-    # 高频查询复合索引(文章过万后采样/去重查询需要)
-    try:
-        if "wechat_articles" in existing:
-            cols = {c["name"] for c in inspector.get_columns("wechat_articles")}
-            if "created_at" in cols:
-                conn.execute(text(
-                    "CREATE INDEX IF NOT EXISTS ix_wa_user_created ON wechat_articles (user_id, created_at)"))
-            if "url" in cols:
-                conn.execute(text(
-                    "CREATE INDEX IF NOT EXISTS ix_wa_user_url ON wechat_articles (user_id, url)"))
-    except Exception:  # noqa: BLE001 - 索引失败不阻塞启动
-        pass
-
-    # 一次性迁移:公众号监听间隔 360 → 60 分钟(逼近实时,免费源扛得住)
-    try:
-        if "user_schedules" in existing:
-            conn.execute(text(
-                "UPDATE user_schedules SET interval_minutes = 60 "
-                "WHERE section = 'wechat' AND interval_minutes = 360"))
-    except Exception:  # noqa: BLE001 - 迁移失败不阻塞启动
-        pass
-
     with get_engine().begin() as conn:
         for table, coldefs in additions.items():
             if table not in existing:
@@ -158,6 +136,22 @@ def _migrate() -> None:
                 col = coldef.split()[0]
                 if col not in cols:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {coldef}"))
+        # 高频查询复合索引(文章过万后采样/去重查询需要)。
+        # 注意:CREATE INDEX IF NOT EXISTS 是 SQLite 方言,MySQL 不支持,
+        # 且 conn 必须先绑定再使用(早前版本引用了尚未定义的 conn,整个块被静默吞掉)。
+        if "wechat_articles" in existing:
+            cols = {c["name"] for c in inspector.get_columns("wechat_articles")}
+            idx = {i["name"] for i in inspector.get_indexes("wechat_articles")}
+            for name, needed in (("ix_wa_user_created", ("user_id", "created_at")),
+                                 ("ix_wa_user_url", ("user_id", "url"))):
+                if name in idx or not set(needed).issubset(cols):
+                    continue
+                conn.execute(text(f"CREATE INDEX {name} ON wechat_articles ({', '.join(needed)})"))
+        # 一次性迁移:公众号监听间隔 360 → 60 分钟(逼近实时,免费源扛得住)
+        if "user_schedules" in existing:
+            conn.execute(text(
+                "UPDATE user_schedules SET interval_minutes = 60 "
+                "WHERE section = 'wechat' AND interval_minutes = 360"))
         # 去除 douhot_watch 旧的 (user_id, list_type, keyword) 唯一索引:
         # 关键词监控泛化到四个板块后,同一关键词可在多板块监控,旧约束会 UNIQUE 冲突。
         if "douhot_watch" in existing:
