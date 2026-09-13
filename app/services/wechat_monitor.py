@@ -1371,14 +1371,12 @@ def _push_candidates(session: Session, user_id: int, settings: Settings,
     targets = list(dict.fromkeys(filter(None, [wh, main_wh])))  # 去重保序
     if not targets:
         return
-    # 免打扰时段(默认 23~8 点):非爆点文章延迟推送,紧急(盘链/高阅读)不受限
+    # 免打扰时段(默认 23~8 点):候选号没有盘链/阅读量概念(那两字段属于文章),
+    # 不存在"紧急",一律延后到白天推——此前误用了文章的 pan_types/read_num 过滤,
+    # 直接 AttributeError 炸掉整轮监听的候选推送(2026-09-14 实测)。
     if is_quiet_hours(settings):
-        urgent = [r for r in rows if r.pan_types or (r.read_num or 0) >= 500]
-        quiet = [r for r in rows if r not in urgent]
-        if quiet and not urgent:
-            logger.info("免打扰时段,延迟推送 %d 篇(无紧急盘链文)", len(quiet))
-            return
-        rows = urgent
+        logger.info("免打扰时段,延迟推送 %d 条候选号", len(rows))
+        return
     elements: list[dict] = [
         {"tag": "note", "elements": [{"tag": "plain_text",
             "content": "手机微信读书搜索关注该号 → 监听页「从微信读书书架导入」即自动进监听"}]},
