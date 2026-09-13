@@ -7,6 +7,7 @@ const chr10 = () => String.fromCharCode(10)
 const benches = ref([])
 const articles = ref([])
 const candidates = ref([])
+const status = ref({})
 const onlyPan = ref(false)
 const sortBy = ref('time')
 const searchKw = ref('')
@@ -38,10 +39,13 @@ async function loadArticles(append = false) {
     articles.value = append ? articles.value.concat(items) : items
   } catch (e) { msg.value = e.message }
 }
-async function load() { await Promise.all([loadBenches(), loadArticles(), loadCandidates()]) }
+async function load() { await Promise.all([loadBenches(), loadArticles(), loadCandidates(), loadStatus()]) }
 
 async function loadCandidates() {
   try { candidates.value = (await api.wechatCandidates()).items } catch (e) { msg.value = e.message }
+}
+async function loadStatus() {
+  try { status.value = await api.wechatStatus() } catch (e) { msg.value = e.message }
 }
 
 async function discoverCandidates() {
