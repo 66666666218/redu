@@ -95,7 +95,7 @@ def test_collect_failures_sends_when_only_platform_hook(monkeypatch, session) ->
 
 def test_daily_splits_to_platform_groups(monkeypatch, session) -> None:
     """日报拆分:配了专属群的平台段进专属群;总群收聚合段+未配专属群的平台段。"""
-    from datetime import datetime
+    from datetime import datetime, timedelta
 
     from app.db.models import WeiboHotItem, XianyuItem
     from app.services import feishu
@@ -125,7 +125,7 @@ def test_daily_splits_to_platform_groups(monkeypatch, session) -> None:
 
 def test_wechat_analysis_pushes_to_group(monkeypatch, session) -> None:
     """公众号内容选题分析:有文章时推送到公众号专属群。"""
-    from datetime import datetime
+    from datetime import datetime, timedelta
 
     from app.db.models import WechatArticle
     from app.services import feishu
@@ -188,7 +188,7 @@ def test_delta_douhot_uses_score_ratio(session) -> None:
 
 # ---- 批次切分与日报 ----
 def seed_weibo(session, user_id=1):
-    t1, t2 = datetime(2026, 9, 1, 8), datetime(2026, 9, 2, 8)
+    t1, t2 = datetime.now() - timedelta(days=1), datetime.now()
     # 上一批(9-1):A 第 5 名,B 第 1 名,C 第 3 名
     for title, rank in [("A", 5), ("B", 1), ("C", 3)]:
         session.add(WeiboHotItem(user_id=user_id, title=title, rank=rank, heat=rank * 1000, captured_at=t1))
@@ -222,7 +222,7 @@ def test_daily_includes_cross_section_and_tally(session) -> None:
 
     from app.db.models import DouhotWord, WeiboHotItem
 
-    base = datetime(2026, 9, 1, 8)
+    base = datetime.now() - timedelta(hours=4)  # 采样点落在 7 天趋势窗口内
     # 微博:共同词加速上升
     for i, h in enumerate([1000, 1300, 1800, 2600]):
         session.add(WeiboHotItem(user_id=1, title="共同词", heat=h, rank=1, captured_at=base + timedelta(hours=i)))
@@ -364,7 +364,7 @@ def test_pad_cell_left_aligns_columns() -> None:
 
 def test_build_keyword_card_structure(session) -> None:
     """关键词监控交互卡片:含标题、各关注词的分块(关键词+主题明细)。"""
-    from datetime import datetime
+    from datetime import datetime, timedelta
 
     from app.db.models import DouhotWatch, DouhotWatchSnap
 
@@ -537,7 +537,7 @@ def test_collect_failures_alert_and_cooldown(monkeypatch, session) -> None:
 
 
 def test_collect_failures_below_threshold_no_alert(monkeypatch, session) -> None:
-    from datetime import datetime
+    from datetime import datetime, timedelta
     from app.services import alert_service
     from app.db.models import RunRecord
 
@@ -609,10 +609,10 @@ def test_health_stalls_escalates_long_term(monkeypatch, session) -> None:
 
 def test_realtime_baidu_no_keyerror(monkeypatch, session) -> None:
     """baidu 接入后实时提醒不应再 KeyError(此前 _TABLES 缺 baidu)。"""
-    from datetime import datetime
+    from datetime import datetime, timedelta
     from app.db.models import BaiduHotItem
 
-    t1, t2 = datetime(2026, 9, 1, 8), datetime(2026, 9, 2, 8)
+    t1, t2 = datetime.now() - timedelta(days=1), datetime.now()
     for title, rank in [("A", 5), ("B", 1), ("C", 3)]:
         session.add(BaiduHotItem(user_id=1, title=title, heat=rank * 1000, rank=rank, captured_at=t1))
     for title, rank in [("A", 2), ("B", 4), ("D", 7)]:

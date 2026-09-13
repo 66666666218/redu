@@ -853,7 +853,15 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
 
     session.commit()
 
-    status = "success" if not failed or new_rows else ("failed" if failed == len(rows) else "partial")
+    # 判定:全部账号失败=failed;部分失败=partial(即便采到新文,故障也要暴露)。
+    # 此前 `not failed or new_rows` 优先级等于 `(not failed) or new_rows`,
+    # 只要采到 1 篇新文就把"全部账号挂了"也记成 success 掩盖故障
+    if failed == len(rows):
+        status = "failed"
+    elif failed:
+        status = "partial"
+    else:
+        status = "success"
     detail = f"accounts={len(rows)} new={len(new_rows)} failed={failed}"
     if dajiala_off:
         detail += f" dajiala_off({dajiala_off})"

@@ -21,6 +21,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timedelta
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -220,7 +221,19 @@ def agent_tick(db: Session, user_id: int, settings: Settings | None = None) -> i
         to_push.append(s)
         stage_rows.append(st)
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # 并发的另一条调度路径(collect_tick 内联/每 30min 独立作业)已建过同键阶段行:
+        # 回滚后按已有记忆刷新,不丢本次评分
+        db.rollback()
+        for st in stage_rows:
+            merged = db.scalar(select(AgentStage).where(
+                AgentStage.user_id == user_id, AgentStage.board == st.board,
+                AgentStage.norm == st.norm))
+            if merged is not None:
+                merged.stage, merged.score, merged.updated_at = st.stage, st.score, now
+        db.commit()
     if not to_push:
         return 0
 

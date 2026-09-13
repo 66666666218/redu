@@ -4,7 +4,7 @@ import os
 os.environ.setdefault("JWT_SECRET", "test_secret_0123456789abcdef0123456789abcdef")
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -24,9 +24,9 @@ def _session():
 def test_weibo_heat_series() -> None:
     db = _session()
     db.add_all([
-        WeiboHotItem(user_id=1, title="A", heat=100, rank=1, captured_at=datetime(2026, 9, 1, 8)),
-        WeiboHotItem(user_id=1, title="A", heat=200, rank=1, captured_at=datetime(2026, 9, 2, 8)),
-        WeiboHotItem(user_id=1, title="B", heat=50, rank=2, captured_at=datetime(2026, 9, 1, 8)),
+        WeiboHotItem(user_id=1, title="A", heat=100, rank=1, captured_at=datetime.now() - timedelta(days=1)),
+        WeiboHotItem(user_id=1, title="A", heat=200, rank=1, captured_at=datetime.now()),
+        WeiboHotItem(user_id=1, title="B", heat=50, rank=2, captured_at=datetime.now() - timedelta(days=1)),
     ])
     db.commit()
     s = repo.weibo_heat_series(db, 1)

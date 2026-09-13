@@ -6,7 +6,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -58,10 +58,17 @@ def weibo_rising(db: Session, user_id: int, limit: int = 20) -> list[WeiboTrend]
     ).all()
 
 
-def weibo_heat_series(db: Session, user_id: int) -> dict[str, list[tuple[datetime, int]]]:
-    """每热搜词的 (captured_at, heat) 序列,按采集时间升序。"""
+def weibo_heat_series(db: Session, user_id: int, days: int = 7) -> dict[str, list[tuple[datetime, int]]]:
+    """每热搜词的 (captured_at, heat) 序列,按采集时间升序。
+
+    只取近 `days` 天:趋势/Agent 只需近几轮,全量加载随库龄线性劣化(旧库拖慢每轮告警)。
+    """
+    cutoff = datetime.now() - timedelta(days=days)
+    rows = db.scalars(select(WeiboHotItem).where(
+        WeiboHotItem.user_id == user_id, WeiboHotItem.captured_at >= cutoff
+    ).order_by(WeiboHotItem.id.asc())).all()
     series: dict[str, list[tuple[datetime, int]]] = {}
-    for r in weibo_items(db, user_id, desc=False):
+    for r in rows:
         series.setdefault(r.title, []).append((r.captured_at, r.heat))
     return series
 
@@ -74,9 +81,13 @@ def baidu_items(db: Session, user_id: int, limit: int | None = None, desc: bool 
     return db.scalars(stmt).all()
 
 
-def baidu_heat_series(db: Session, user_id: int) -> dict[str, list[tuple[datetime, int]]]:
+def baidu_heat_series(db: Session, user_id: int, days: int = 7) -> dict[str, list[tuple[datetime, int]]]:
+    cutoff = datetime.now() - timedelta(days=days)
+    rows = db.scalars(select(BaiduHotItem).where(
+        BaiduHotItem.user_id == user_id, BaiduHotItem.captured_at >= cutoff
+    ).order_by(BaiduHotItem.id.asc())).all()
     series: dict[str, list[tuple[datetime, int]]] = {}
-    for r in baidu_items(db, user_id, desc=False):
+    for r in rows:
         series.setdefault(r.title, []).append((r.captured_at, r.heat))
     return series
 
@@ -96,9 +107,13 @@ def douhot_top_words(db: Session, user_id: int, limit: int = 100) -> list[Douhot
     ).all()
 
 
-def douhot_score_series(db: Session, user_id: int) -> dict[str, list[tuple[datetime, float]]]:
+def douhot_score_series(db: Session, user_id: int, days: int = 7) -> dict[str, list[tuple[datetime, float]]]:
+    cutoff = datetime.now() - timedelta(days=days)
+    rows = db.scalars(select(DouhotWord).where(
+        DouhotWord.user_id == user_id, DouhotWord.created_at >= cutoff
+    ).order_by(DouhotWord.id.asc())).all()
     series: dict[str, list[tuple[datetime, float]]] = {}
-    for r in douhot_words(db, user_id, desc=False):
+    for r in rows:
         series.setdefault(r.title, []).append((r.created_at, r.score))
     return series
 

@@ -281,6 +281,25 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         scheduler.add_job(_safe(func), _cron_trigger(expr, default), id=job_id, max_instances=1, coalesce=True)
 
 
+def _scheduler_kwargs() -> dict:
+    """内嵌(API)与独立(python -m app.main)两种模式的调度器公共参数。
+
+    13+ 个作业共享默认 10 线程会互相饿死(采集/监听都是网络长任务),扩到 24;
+    misfire_grace_time=300:每日作业在重启/卡顿后 5 分钟内仍补跑(否则直接跳过)。
+    """
+    from apscheduler.executors.pool import ThreadPoolExecutor
+
+    return {
+        "timezone": "Asia/Shanghai",
+        "executors": {"default": ThreadPoolExecutor(24)},
+        "job_defaults": {
+            "coalesce": True,
+            "max_instances": 1,
+            "misfire_grace_time": 300,
+        },
+    }
+
+
 def start(settings: Settings | None = None) -> BackgroundScheduler | None:
     """启动后台调度器(幂等:重复调用只会启动一次)。
 
@@ -294,18 +313,7 @@ def start(settings: Settings | None = None) -> BackgroundScheduler | None:
     with _lock:
         if _scheduler is not None:
             return _scheduler
-        from apscheduler.executors.pool import ThreadPoolExecutor
-
-        # 13+ 个作业共享默认 10 线程会互相饿死(采集/监听都是网络长任务),扩到 24
-        scheduler = BackgroundScheduler(
-            timezone="Asia/Shanghai",
-            executors={"default": ThreadPoolExecutor(24)},
-            job_defaults={
-                "coalesce": True,           # 错过多次合并为一次
-                "max_instances": 1,
-                "misfire_grace_time": 300,  # 错过 5 分钟内仍执行(每日作业防重启跳过)
-            },
-        )
+        scheduler = BackgroundScheduler(**_scheduler_kwargs())
         build_jobs(scheduler)
         scheduler.start()
         _scheduler = scheduler

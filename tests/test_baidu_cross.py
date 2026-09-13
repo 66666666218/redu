@@ -4,7 +4,7 @@ import os
 os.environ.setdefault("JWT_SECRET", "test_secret_0123456789abcdef0123456789abcdef")
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -49,7 +49,7 @@ def test_to_int_formats() -> None:
 def test_rising_across_common_keyword() -> None:
     """关键词在微博+百度都在上升期 → 判定为跨平台共同上升(≥2板块)。"""
     db = _session()
-    base = datetime(2026, 9, 1, 8)
+    base = datetime.now() - timedelta(hours=2)  # 4 个采样点都在 7 天窗口内
     # 微博:某词加速上升
     for i, h in enumerate([1000, 1300, 1800, 2600]):
         db.add(WeiboHotItem(user_id=1, title="共同词", heat=h, rank=1, captured_at=base))

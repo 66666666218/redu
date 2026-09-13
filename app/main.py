@@ -30,7 +30,10 @@ def run_scheduler() -> None:
     setup_logging()
     logger.info("启动独立调度模式:按各用户设置的采集频率(每分钟检查到期任务)")
 
-    scheduler = BlockingScheduler(timezone="Asia/Shanghai")
+    from app.services.scheduler import _scheduler_kwargs
+
+    # 参数与 API 内嵌调度器完全一致(线程池 24/合并/5min 补跑),两模式行为不漂移
+    scheduler = BlockingScheduler(**_scheduler_kwargs())
     build_jobs(scheduler)
     scheduler.start()
 

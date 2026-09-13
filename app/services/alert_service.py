@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -306,6 +307,14 @@ def feishu_alert_gate(db: Session, user_id: int, section: str, title: str,
     else:
         db.add(FeishuAlert(section=section, user_id=user_id, title=title[:200],
                            reason=reason[:255], alerted_at=now))
+    try:
+        db.flush()  # 立即落库试探:并发双门同时 INSERT 会在此撞唯一约束
+    except IntegrityError:
+        db.rollback()
+        row = db.scalar(select(FeishuAlert).where(
+            FeishuAlert.section == section, FeishuAlert.user_id == user_id, FeishuAlert.title == title[:200]))
+        # 并发方已抢到门(其 alerted_at 即为准):按冷却逻辑判定
+        return not (row and (now - row.alerted_at) < timedelta(hours=cooldown_hours))
     return True
 
 

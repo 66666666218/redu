@@ -124,22 +124,21 @@ class XianyuClient:
         self._seed_cookies(self._cookie_seed, into=session)
         return session
 
-    def _downgrade_tls(self) -> None:
-        """本机 CA 加载损坏时降级为不校验证书(闲鱼是知名域名,只告警一次)。
+    def _downgrade_tls(self, reason: str) -> None:
+        """仅"本机 CA 加载失败"(curl:77 trust anchors,环境缺陷)允许降级为不校验。
 
-        仅开发模式允许降级:生产若连证书都验不过,大概率是中间人——
-        静默裸奔等于 goofish Cookie 可被劫持,直接报错让人查环境。
+        中间人攻击无法伪造这种本地 CA 装载错误,故放行是安全的;其余证书错误
+        (验证失败/握手异常,可能是真 MITM)一律拒绝降级——静默裸奔等于
+        goofish Cookie 可被劫持。
         """
-        from config.settings import get_settings
-
-        if not get_settings().is_dev:
+        if "trust anchors" not in reason:
             raise XianyuError(
-                "闲鱼 TLS 证书校验失败(生产环境不允许降级为不校验),请检查容器 CA 证书/出口网络")
+                f"闲鱼 TLS 证书校验失败(疑似中间人/出口网络问题,不允许降级):{reason[:120]}")
         self._verify = False
         self.session = self._make_session()
         if not self._tls_warned:
             self._tls_warned = True
-            logger.warning("闲鱼 TLS 证书校验失败(本机 CA 加载问题?),已降级为不校验;生产环境不应出现")
+            logger.warning("本机 CA 加载失败(curl:77 trust anchors),闲鱼请求已降级为不校验证书")
 
     def _seed_cookies(self, cookie: str, into: curl.Session | None = None) -> None:
         target = into or self.session
@@ -177,7 +176,9 @@ class XianyuClient:
         """
         last_rate_err: str | None = None
         last_token_err: str | None = None
-        backoff = [30, 90, 180]
+        # 退避总和控制在 ~1 分钟内:采集在 max_instances=1 的全局 tick 里串行跑,
+        # 长退避(旧值 30/90/180,单词最长 5 分钟)会把其它板块全部用户一起阻塞
+        backoff = [5, 15, 45]
         for attempt in range(1 + len(backoff)):
             data_val = json.dumps(data_obj, ensure_ascii=False, separators=(",", ":"))
             t = str(int(time.time() * 1000))
@@ -194,9 +195,8 @@ class XianyuClient:
             except curl.RequestsError as exc:
                 # 证书校验失败(curl:77,本机 CA 加载损坏)→ 降级重建会话后重试;
                 # 其余网络错误照常抛出
-                if self._verify and ("certificate" in str(exc).lower()
-                                     or "(77)" in str(exc) or "77 " in str(exc)):
-                    self._downgrade_tls()
+                if self._verify and "(77)" in str(exc) and "trust anchors" in str(exc):
+                    self._downgrade_tls(str(exc))
                     continue
                 raise XianyuError(f"闲鱼请求失败:{exc}") from exc
             try:
@@ -327,12 +327,13 @@ def _deep_find(node: object, field: str):
     return None
 
 
-def fetch_detail(client: XianyuClient, item_id: str) -> dict:
+def fetch_detail(client: XianyuClient, item_id: str) -> dict | None:
     """抓取单个闲鱼商品深度指标(想要数/收藏/已售/类目/卖家粉丝)。
 
     数据来自 `mtop.taobao.idle.pc.detail` 的 `data.itemDO`:
     wantCnt(人想要)、collectCnt(收藏)、soldCnt(已售)、itemCatDTO/categoryId(类目)。
-    返回可作为 XianyuDaily 快照字段的字典。
+    返回快照字段字典;**普通失败返回 None**(上层跳过该商品,不得把当日快照
+    覆盖成假 0——否则分析层会把"抓取失败"当成"-100% 暴跌")。
     """
     out = {"category": "", "want_count": 0, "collect_count": 0, "sold_count": 0, "seller_fans": 0}
     try:
@@ -349,8 +350,8 @@ def fetch_detail(client: XianyuClient, item_id: str) -> dict:
         )
     except (XianyuVerify, XianyuRateLimit, XianyuWafBlock):
         raise  # 人机验证/限流/WAF 拦截:交给上层停止连环抓详情(避免加剧风控)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:  # noqa: BLE001 - 单品失败返回 None,上层跳过(勿写假 0 快照)
+        return None
     return out
 
 
