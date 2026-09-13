@@ -30,7 +30,7 @@ from app.db.models import (
 from app.services import alert_service, baidu, collector, douhot, xianyu
 from app.services.cookie_store import get_cookies
 from app.db import repository
-from app.services.trend_analyzer import compute_growth, compute_slope
+from app.services.trend_analyzer import compute_growth, compute_slope, recent_growth
 from app.services.tenant_base import _base, _record_run, persist_refreshed_cookie, verify_cooldown_active  # noqa: F401  (供外部/测试引用)
 from app.services.xianyu_analytics import run_xianyu_deep, xianyu_analytics, xianyu_daily, xianyu_deep_due  # noqa: F401
 from app.services.keyword_watch import (  # noqa: F401
@@ -93,15 +93,15 @@ def run_weibo(session: Session, user_id: int, settings: Settings | None = None) 
 def _weibo_rising(session, user_id: int, settings: Settings, now) -> list[dict]:
     """基于该用户的历史热搜热度,判定微博上涨词。"""
     latest = repository.weibo_items(session, user_id, limit=200)
-    by_word: dict[str, list[int]] = {}
+    by_word: dict[str, list[tuple]] = {}
     for it in reversed(latest):
-        by_word.setdefault(it.title, []).append(it.heat)
+        by_word.setdefault(it.title, []).append((it.captured_at, float(it.heat)))
     rising = []
-    for title, heats in by_word.items():
-        if len(heats) < 2:
+    for title, points in by_word.items():
+        if len(points) < 2:
             continue
-        g = compute_growth([float(x) for x in heats])
-        sl = compute_slope([float(x) for x in heats])
+        g = recent_growth(points)  # 时间感知:掉榜数轮后回榜不算"环比"
+        sl = compute_slope([float(h) for _, h in points])
         if g is not None and sl is not None and g > settings.growth_threshold and sl > 0:
             session.add(WeiboTrend(user_id=user_id, keyword=title, source="weibo", growth=g, slope=sl, rising=True, decided_at=now))
             rising.append({"keyword": title, "growth": g, "slope": sl})
@@ -139,11 +139,10 @@ def _baidu_rising(session, user_id: int, settings: Settings, now) -> list[dict]:
     series = repository.baidu_heat_series(session, user_id)
     rising = []
     for title, points in series.items():
-        heats = [h for _, h in points]
-        if len(heats) < 2:
+        if len(points) < 2:
             continue
-        g = compute_growth([float(x) for x in heats])
-        sl = compute_slope([float(x) for x in heats])
+        g = recent_growth([(t, float(h)) for t, h in points])
+        sl = compute_slope([float(h) for _, h in points])
         if g is not None and sl is not None and g > settings.growth_threshold and sl > 0:
             rising.append({"keyword": title, "growth": g, "slope": sl})
     rising.sort(key=lambda r: r["growth"], reverse=True)
@@ -273,15 +272,15 @@ def run_douhot(session: Session, user_id: int, settings: Settings | None = None)
 
 def _douhot_rising(session, user_id: int, settings: Settings, now) -> list[dict]:
     rows = repository.douhot_words(session, user_id, limit=500)
-    by_word: dict[str, list[float]] = {}
+    by_word: dict[str, list[tuple]] = {}
     for w in reversed(rows):
-        by_word.setdefault(w.title, []).append(w.score)
+        by_word.setdefault(w.title, []).append((w.created_at, float(w.score)))
     rising = []
-    for title, scores in by_word.items():
-        if len(scores) < 2:
+    for title, points in by_word.items():
+        if len(points) < 2:
             continue
-        g = compute_growth(scores)
-        sl = compute_slope(scores)
+        g = recent_growth(points)  # 时间感知:掉榜数轮后回榜不算"环比"
+        sl = compute_slope([float(v) for _, v in points])
         if g is not None and sl is not None and g > settings.growth_threshold and sl > 0:
             # 冷却去重
             alerted = session.scalar(
