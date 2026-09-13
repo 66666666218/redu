@@ -35,11 +35,14 @@ def create_app() -> FastAPI:
     # 生产用 `uvicorn app.platform:app` 直启,不经 app/main.py;须先初始化日志,
     # 否则 root logger 无 handler:INFO 全丢、异常堆栈无格式,线上难排查。
     setup_logging()
-    app = FastAPI(title="热点监控平台", version=APP_VERSION, lifespan=_lifespan)
-
     from config.settings import Settings, get_settings
 
     _settings = get_settings()
+    # 生产隐藏 /docs /openapi(完整接口清单不对外暴露);IS_DEV=true 时保留便于调试
+    _docs = None if not _settings.is_dev else "docs"
+    app = FastAPI(title="热点监控平台", version=APP_VERSION, lifespan=_lifespan,
+                  docs_url=_docs, redoc_url=None,
+                  openapi_url=("openapi.json" if _settings.is_dev else None))
     # 漏配 DATABASE_URL 时到启动日志说清楚,避免服务照常起、直到有人点注册才 500。
     if _settings.database_url == Settings.model_fields["database_url"].default:
         from urllib.parse import urlsplit

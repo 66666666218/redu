@@ -17,8 +17,8 @@ services:
     environment:
       MYSQL_DATABASE: redu
       MYSQL_USER: redu
-      MYSQL_PASSWORD: redu
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-redu_root_change_me}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请在 .env 设置 MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请在 .env 设置 MYSQL_ROOT_PASSWORD}
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     volumes:
       - mysql_data:/var/lib/mysql
@@ -40,7 +40,7 @@ services:
     env_file: .env
     environment:
       # 显式注入,避免落到默认值;主机名必须与上面的服务名 mysql 一致
-      DATABASE_URL: mysql+pymysql://redu:redu@mysql:3306/redu?charset=utf8mb4
+      DATABASE_URL: mysql+pymysql://redu:${MYSQL_PASSWORD}@mysql:3306/redu?charset=utf8mb4
     volumes:
       # 日志/快照与 Cookie 文件(多租户下 Cookie 存库,此处仅留兼容与归档用)
       - ./data:/app/data

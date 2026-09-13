@@ -46,12 +46,22 @@ DB_USER="${DB_USER:-redu}"
 DB_PASS="${DB_PASS:-redu}"
 DB_NAME="${DB_NAME:-redu}"
 
-FILE="$BACKUP_DIR/${DB_NAME}_${STAMP}.sql.gz"
-echo "备份 ${DB_NAME} → ${FILE}"
+FILE="$BACKUP_DIR/${DB_NAME}_${STAMP}.sql"
+GZ="$FILE.gz"
+echo "备份 ${DB_NAME} → ${GZ}"
 
+# POSIX sh 管道取最后一个命令的退出码:mysqldump 失败 | gzip 成功 → 假"完成"。
+# 先落 .sql、验证退出码与"Dump completed"尾标,再 gzip——不合格即删并报错。
 if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' | grep -q redu-mysql; then
-  docker exec redu-mysql sh -c "mysqldump -u'$DB_USER' -p'$DB_PASS' '$DB_NAME' | gzip" > "$FILE"
+  # 密码走环境变量,不出现在 docker exec 的进程参数里(ps 可见)
+  docker exec -e MYSQL_PWD="$DB_PASS" redu-mysql sh -c "mysqldump -u'$DB_USER' '$DB_NAME'" > "$FILE"
 else
-  mysqldump -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" | gzip > "$FILE"
+  MYSQL_PWD="$DB_PASS" mysqldump -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" "$DB_NAME" > "$FILE"
 fi
-echo "✅ 完成: $(du -h "$FILE" | cut -f1)"
+if ! tail -c 200 "$FILE" | grep -q "Dump completed"; then
+  rm -f "$FILE"
+  echo "❌ mysqldump 失败或输出不完整(缺少 Dump completed 尾标),已删除半截文件" >&2
+  exit 1
+fi
+gzip -f "$FILE"
+echo "✅ 完成: $(du -h "$GZ" | cut -f1)"

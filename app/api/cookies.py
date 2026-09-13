@@ -45,7 +45,13 @@ def user_smtp_put(body: UserSmtpIn, user: User = Depends(get_current_user), db: 
     user.smtp_host = body.host or None
     user.smtp_port = body.port or None
     user.smtp_user = body.user or None
-    user.smtp_pass = body.password or None
+    # SMTP 密码加密存储(gAAAAAB 前缀标识密文;历史明文在下次保存时自然替换)
+    if body.password:
+        from app.security import encrypt_cookie
+
+        user.smtp_pass = "enc:" + encrypt_cookie(body.password)
+    else:
+        user.smtp_pass = None
     user.smtp_from = body.from_name or None
     db.commit()
     return {"saved": True}

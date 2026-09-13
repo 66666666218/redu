@@ -82,5 +82,7 @@ def fetch_hot(settings: Settings, session: requests.Session | None = None) -> li
     seen: set[str] = set()
     _collect(data, items, seen)
     if not items:
-        logger.warning("百度热搜未解析到条目(接口可能改版)")
+        # 200 但解析 0 条 = 接口改版/软拦截:抛错走 retry 与"failed"记录,
+        # 不能当"热搜全消失"记 success(跨轮判涨会失真)
+        raise requests.RequestException("百度热搜返回空数据(解析 0 条,接口可能改版)")
     return items[:30]

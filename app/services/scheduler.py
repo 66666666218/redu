@@ -81,6 +81,7 @@ def collect_tick(settings: Settings | None = None, now: datetime | None = None) 
                         from app.services.early_agent import agent_tick
                         agent_tick(db, row.user_id, settings)  # 早期苗头评分(增速/新上榜/共振融合)
                     except Exception:  # noqa: BLE001
+                        db.rollback()  # 半提交的告警冷却/Agent状态行一并丢弃,勿带脏session进 mark_ran
                         logger.exception("飞书实时提醒失败 section=%s user=%s", row.section, row.user_id)
             except Exception as exc:  # noqa: BLE001
                 failed += 1
@@ -256,7 +257,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     )
     from app.services.agent_learning import backtest_and_learn
     from app.services.early_agent import agent_tick_all_users
-    from app.services.wechat_monitor import (candidate_discover_tick, keyword_article_tick,
+    from app.services.wechat_monitor import (candidate_discover_tick, keyword_article_all_users,
                                               quark_keepalive_tick, traffic_tick, weread_refresh_tick)
 
     jobs = [
@@ -269,7 +270,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # wr_skey 短效(约12~24h)且轮换:每 6 小时主动换新,永不过期;失败即时推飞书
         (weread_refresh_tick, "50 */6 * * *", {"minute": 50, "hour": "*/6"}, "weread_refresh"),
         # 搜狗验证码红线约 30~50 次/天:每 4 小时一轮 × 每轮最多 5 词 = 30 次/天(安全区)
-        (keyword_article_tick, "40 */4 * * *", {"minute": 40}, "keyword_article"),
+        (keyword_article_all_users, "40 */4 * * *", {"minute": 40}, "keyword_article"),
         (candidate_discover_tick, _get_settings().candidate_discover_cron, {"minute": 20, "hour": 8}, "wechat_candidates"),
         (run_feishu_daily, _get_settings().feishu_daily_cron, {"minute": 0, "hour": 8}, "feishu_daily"),
         (run_feishu_wechat_analysis, _get_settings().feishu_wechat_cron, {"minute": 0, "hour": 10}, "feishu_wechat"),

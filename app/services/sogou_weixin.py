@@ -53,7 +53,8 @@ def search_articles(keyword: str, page: int = 1, timeout: int = 15) -> dict:
                                      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"})
     except requests.RequestException as exc:
         logger.warning("搜狗微信搜索请求失败 %s:%s", keyword, exc)
-        return {"items": [], "blocked": False}
+        # 网络失败也按 blocked 处理:连续失败会触发熔断,避免断网时逐词硬撞
+        return {"items": [], "blocked": True}
     text = resp.text or ""
     if resp.status_code != 200 or any(mark in text for mark in _BLOCK_MARKS):
         logger.warning("搜狗微信搜索命中验证码/异常(HTTP %s),跳过关键词 %s", resp.status_code, keyword)

@@ -144,6 +144,7 @@ def run_focus_alert(db: Session, user_id: int, settings: Settings | None = None)
             hits_repeat.append((sec, v))
 
     pushed = 0
+    sent_any = False
     client_cache: dict[str, FeishuClient] = {}
 
     def _client(webhook: str) -> FeishuClient:
@@ -164,6 +165,7 @@ def run_focus_alert(db: Session, user_id: int, settings: Settings | None = None)
                            "content": f"🔴 重点 · 跨板块共振(新增 {len(hits_cross)} 个)"}},
                 "elements": elements}
         if settings.feishu_webhook and _client(settings.feishu_webhook).send_card(card):
+            sent_any = True
             pushed += len(hits_cross)
 
     repeat_by_sec: dict[str, list[dict]] = {}
@@ -183,9 +185,14 @@ def run_focus_alert(db: Session, user_id: int, settings: Settings | None = None)
                            "content": f"🔴 重点 · {SECTION_LABELS[sec]}反复出现(新增 {len(items)} 个)"}},
                 "elements": elements}
         if _client(webhook).send_card(card):
+            sent_any = True
             pushed += len(items)
 
-    db.commit()
+    # 冷却行只有发送成功才落库;全部失败则丢弃,下轮还能再推(否则冷却期内告警被静默吞掉)
+    if sent_any:
+        db.commit()
+    else:
+        db.rollback()
     if pushed:
         logger.info("重点关键词推送 user=%s 跨板块=%s 反复=%s", user_id,
                     len(hits_cross), len(hits_repeat))

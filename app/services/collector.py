@@ -98,7 +98,7 @@ def fetch_hot_search(settings: Settings, session: requests.Session | None = None
         if owned:
             session.close()
 
-    realtime = data.get("data", {}).get("realtime", [])
+    realtime = (data.get("data") or {}).get("realtime") or []
     items: list[HotItem] = []
     for idx, item in enumerate(realtime, start=1):
         title = item.get("word") or item.get("note") or ""
@@ -116,6 +116,10 @@ def fetch_hot_search(settings: Settings, session: requests.Session | None = None
                 captured_at=datetime.now(),
             )
         )
+    if not items:
+        # HTTP 200 但解析 0 条 = 接口改版/被软拦,必须报错走重试,
+        # 不能当"热搜全消失"记 success(否则跨轮判涨/回落全部失真)
+        raise CollectionError("微博热搜返回空数据(realtime 为空,接口可能改版/被拦截)")
 
     logger.info("微博热搜采集完成,共 %s 条", len(items))
     return items

@@ -796,7 +796,6 @@ def run_feishu_keyword_alerts(user_id: int, settings: Settings | None = None, db
                             continue
                     if _in_cooldown(db, user_id, "keyword_burst", title, settings):
                         continue
-                    _mark_alerted(db, user_id, "keyword_burst", title, "预测爆发")
                     hits.append({"keyword": title, "forecast_next": a.get("forecast_next"),
                                  "growth": tg if tg is not None else a.get("growth")})
             else:
@@ -812,15 +811,16 @@ def run_feishu_keyword_alerts(user_id: int, settings: Settings | None = None, db
                     continue
                 if _in_cooldown(db, user_id, "keyword_burst", w["keyword"], settings):
                     continue
-                _mark_alerted(db, user_id, "keyword_burst", w["keyword"], "预测爆发")
                 hits.append(agent)
         if hits:
             lines = ["🔮 智能体预测 · 可能爆发"]
             for a in hits:
                 fc = f"预测 {a['forecast_next']:.0f} " if a.get("forecast_next") is not None else ""
                 lines.append(f"  · 🔴重点 {a['keyword']} {fc}环比+{(a['growth'] or 0) * 100:.0f}%")
-            client.send("\n".join(lines))
-            pushed = len(hits)
+            if client.send("\n".join(lines)):
+                for a in hits:  # 发送成功才落冷却,失败下次还能再推
+                    _mark_alerted(db, user_id, "keyword_burst", a["keyword"], "预测爆发")
+                pushed = len(hits)
             logger.info("飞书智能体预警推送 user=%s 条数=%s", user_id, pushed)
         return pushed
     finally:
@@ -878,8 +878,7 @@ def run_feishu_realtime(
                     if up >= settings.feishu_hot_rank_jump:
                         reason = str(extra)
             if reason and not _in_cooldown(db, user_id, section, title, settings):
-                pushed_items.append((title, reason))
-                _mark_alerted(db, user_id, section, title, reason)
+                pushed_items.append((title, reason))  # 冷却标记移到发送成功后(发送失败不烧冷却)
         if pushed_items:
             head = f"⚡ {SECTION_LABELS[section]} 实时热点"
             if section == "xianyu":
@@ -915,13 +914,15 @@ def run_feishu_realtime(
                         (f"{'🔥' if hot else ''}{name_md}", 6), (price, 2),
                         (want_txt, 2), (reason, 2),
                     ]))
-                for wh in whs:
-                    FeishuClient(wh, settings.feishu_secret).send_card({
+                sent_ok = any(FeishuClient(wh, settings.feishu_secret).send_card({
                         "config": {"wide_screen_mode": True},
                         "header": {"template": "blue", "title": {"tag": "plain_text", "content": head}},
                         "elements": elements,
-                    })
-                pushed = len(pushed_items)
+                    }) for wh in whs)
+                if sent_ok:
+                    for t, rsn in pushed_items:
+                        _mark_alerted(db, user_id, section, t, rsn)  # 发送成功才落冷却
+                    pushed = len(pushed_items)
             else:
                 # 通用板块:column_set 网格列(与字体无关,永远对齐);带智能体预测/置信度/趋势
                 from app.services import keyword_agent
@@ -944,9 +945,11 @@ def run_feishu_realtime(
                 card = {"config": {"wide_screen_mode": True},
                         "header": {"template": "blue", "title": {"tag": "plain_text", "content": head}},
                         "elements": elements}
-                for wh in whs:
-                    FeishuClient(wh, settings.feishu_secret).send_card(card)
-                pushed = len(pushed_items)
+                sent_ok = any(FeishuClient(wh, settings.feishu_secret).send_card(card) for wh in whs)
+                if sent_ok:
+                    for t, rsn in pushed_items:
+                        _mark_alerted(db, user_id, section, t, rsn)
+                    pushed = len(pushed_items)
             logger.info("飞书实时推送 section=%s user=%s 条数=%s", section, user_id, pushed)
         return pushed
     finally:
@@ -1018,8 +1021,8 @@ def run_feishu_keyword_realtime(user_id: int, settings: Settings | None = None, 
                                      "content": f"📌 话题词监控 · {w['keyword']}({douhot._window_label(dw)}){fks}"}},
                 "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(table)}}],
             }
-            _mark_alerted(db, user_id, "kw_realtime", w["keyword"], "话题词变化")
             if client.send_card(card):
+                _mark_alerted(db, user_id, "kw_realtime", w["keyword"], "话题词变化")
                 pushed += 1
         return pushed
     finally:

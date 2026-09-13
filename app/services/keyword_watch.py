@@ -127,8 +127,8 @@ def record_watch_snaps(
                 heat = douhot.fetch_keyword_heat(cookie, w.keyword, settings)
                 add_snap(w.list_type, w.keyword, "", heat.get("score", 0), heat.get("rank_now", 0),
                          trend_growth=heat.get("trend_growth") or 0)
-            except Exception:  # noqa: BLE001 - 定向查询失败降级为 0,不中断采集
-                add_snap(w.list_type, w.keyword, "", 0, 0)
+            except Exception:  # noqa: BLE001 - 定向查询失败不落快照:假 0 分会污染
+                continue      # 趋势/爆发判定(0→恢复值会被算成 +∞ 误报爆发)
             continue
         # 其余板块/订阅榜:从本次采集的 lists 里按"标题包含子串"找命中项。
         words = lists.get(w.list_type) or lists.get("word") or []

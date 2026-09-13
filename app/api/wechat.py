@@ -249,6 +249,7 @@ def wechat_weread_refresh(user: User = Depends(get_current_user), db: Session = 
     out = wechat_monitor.refresh_weread_cookie(db, user.id)
     if out["status"] == "failed":
         raise HTTPException(502, "微信读书续期失败(wr_rt 可能已失效),请重新扫码/复制完整 Cookie")
+    out.pop("cookie", None)  # 完整 Cookie 不下发浏览器(服务端已回写存储)
     return out
 
 
@@ -334,7 +335,8 @@ def wechat_article_rewrite(article_id: int, user: User = Depends(get_current_use
         # 正文不足:尝试从微信读书补拉
         cookie = wechat_monitor._weread_cookie(db, user.id, st)
         bid = (db.scalar(select(WechatBenchmark).where(
-            WechatBenchmark.id == row.benchmark_id)) if row.benchmark_id else None)
+            WechatBenchmark.user_id == user.id, WechatBenchmark.id == row.benchmark_id))
+            if row.benchmark_id else None)
         if cookie and bid and bid.weread_book_id:
             try:
                 from app.services.weread_client import WereadClient

@@ -224,8 +224,6 @@ def agent_tick(db: Session, user_id: int, settings: Settings | None = None) -> i
     if not to_push:
         return 0
 
-    multi = [s for s in to_push if len(s.get("boards", [s["board"]])) >= 2]
-    single = [s for s in to_push if s not in multi]
     client_cache: dict[str, FeishuClient] = {}
 
     def _client(webhook: str) -> FeishuClient:

@@ -57,7 +57,9 @@ class EmailNotifier(Notifier):
                 server.sendmail(settings.smtp_user, recipients, message.as_string())
             logger.info("邮件已发送 subject=%s recipients=%s", subject, recipients)
             return True
-        except smtplib.SMTPException as exc:
+        except (smtplib.SMTPException, OSError) as exc:
+            # ConnectionRefusedError/TimeoutError 是 OSError 子类,不接住会把
+            # 采集任务错标 failed、定时摘要整批回滚重发
             logger.error("邮件发送失败:%s", exc)
             return False
 
@@ -73,6 +75,20 @@ def get_notifier(settings: Settings) -> Notifier:
     return EmailNotifier(settings)
 
 
+def _decrypt_secret(value: str | None) -> str:
+    """SMTP 密码兼容读:enc: 前缀 = Fernet 密文;无前缀 = 历史明文原样返回。"""
+    if not value:
+        return ""
+    if not value.startswith("enc:"):
+        return value
+    from app.security import decrypt_cookie
+
+    try:
+        return decrypt_cookie(value[4:])
+    except Exception:  # noqa: BLE001 - 密钥轮换后解不开按空处理(登录会失败,可重新保存)
+        return ""
+
+
 def get_user_notifier(user, settings: Settings) -> Notifier:
     """返回发件给某用户的 Notifier。
 
@@ -85,7 +101,7 @@ def get_user_notifier(user, settings: Settings) -> Notifier:
                 "smtp_host": user.smtp_host,
                 "smtp_port": user.smtp_port or settings.smtp_port,
                 "smtp_user": user.smtp_user,
-                "smtp_pass": user.smtp_pass or "",
+                "smtp_pass": _decrypt_secret(user.smtp_pass),
                 "smtp_from": user.smtp_from or settings.smtp_from,
                 "notify_to": user.email or "",
             }

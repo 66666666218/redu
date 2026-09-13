@@ -13,7 +13,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
-from app.db.models import (FeishuAlert, WechatArticle, WechatBenchmark, WechatCandidate,
+from app.db.models import (FeishuAlert, User, WechatArticle, WechatBenchmark, WechatCandidate,
                            WechatPanLink, WechatTrafficSample)
 from app.services.dajiala_client import DajialaClient, DajialaError, DajialaNoBalance
 from app.services.quark_transfer import QuarkAuthError, QuarkError, QuarkTransfer, extract_quark_urls
@@ -68,6 +68,13 @@ def fetch_article_content(url: str, timeout: int = 15) -> str:
     """
     if not url:
         return ""
+    from app.utils.net import UnsafeUrlError, assert_public_url
+
+    try:
+        assert_public_url(url)  # SSRF 守卫:URL 可能来自用户输入
+    except UnsafeUrlError as exc:
+        logger.warning("拒绝抓取非公网外链:%s", exc)
+        return ""
     try:
         resp = requests.get(url, timeout=timeout, headers={"User-Agent": _UA})
         text = resp.text or ""
@@ -84,6 +91,13 @@ def fetch_article_content(url: str, timeout: int = 15) -> str:
 
 def extract_article_meta(url: str, timeout: int = 15) -> dict:
     """免费解析文章页元信息:{biz, name, title}(与 xg 同款正则);失败/风控页返回 {}。"""
+    from app.utils.net import UnsafeUrlError, assert_public_url
+
+    try:
+        assert_public_url(url)  # SSRF 守卫:add_benchmark 的 URL 来自用户输入
+    except UnsafeUrlError as exc:
+        logger.warning("拒绝解析非公网外链:%s", exc)
+        return {}
     try:
         resp = requests.get(url, timeout=timeout, headers={"User-Agent": _UA})
         text = resp.text or ""
@@ -341,10 +355,18 @@ def _dajiala_key(session: Session, user_id: int, settings: Settings) -> str:
     """dajiala key:平台内按用户配置(「dajiala」)优先,其次全局 DAJIALA_KEY。
 
     多租户余额隔离:每个用户用自己的 key,采样消耗各自的余额。
+    全局 key 仅 admin 可用——付费接口普通用户可反复触发,回退全局 key 等于
+    把运营者余额暴露给任意注册用户刷(2026-09-14 审计)。
     """
     from app.services.cookie_store import get_cookie
 
-    return (get_cookie(session, user_id, "dajiala") or settings.dajiala_key or "").strip()
+    own = (get_cookie(session, user_id, "dajiala") or "").strip()
+    if own:
+        return own
+    user = session.get(User, user_id)
+    if user is not None and user.role != "admin":
+        return ""  # 普通用户不回退全局 key(防任意注册用户刷运营者余额)
+    return (settings.dajiala_key or "").strip()
 
 def _weread_cookie(session: Session, user_id: int, settings: Settings) -> str:
     """微信读书 Cookie:优先用户在平台内配置的「weread」,其次全局 WEREAD_COOKIE。"""
@@ -943,7 +965,8 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
     if b is None:
         raise KeyError("对标账号不存在")
     plat = platform or _platform_client(settings)
-    limit = max(1, int(max_pages or (10 if plat and b.biz else settings.wechat_sync_max_pages)))
+    # 服务端钳制:query 参数无上限时恶意调用可烧余额(¥0.14/页)
+    limit = max(1, min(int(max_pages or (10 if plat and b.biz else settings.wechat_sync_max_pages)), 20))
     if plat and b.biz:
         added = 0
         pages = 0
@@ -1057,8 +1080,11 @@ def _notify_burst(session: Session, user_id: int, settings: Settings, r: WechatA
         lines.append("📦 我的链接: " + mine[0])
     lines.append(r.url)
     sent = FeishuClient(webhook, settings.feishu_secret).send(chr(10).join(lines))
-    session.commit()
-    return bool(sent)
+    if sent:
+        session.commit()  # 发送成功才落冷却门
+        return True
+    session.rollback()  # 发送失败不烧冷却门
+    return False
 
 
 # ---------------------------------------------------------------- 阅读量采样(dajiala read_zan_pro)
@@ -1470,8 +1496,37 @@ def keyword_article_tick(session: Session, user_id: int, settings: Settings | No
             "header": {"template": "orange", "title": {"tag": "plain_text",
                        "content": f"🔑 关键词文章 · {len(fresh)} 篇(全网,不限对标号)"}},
             "elements": elements}
-    FeishuClient(webhook, settings.feishu_secret).send_card(card)
+    sent = FeishuClient(webhook, settings.feishu_secret).send_card(card)
+    if not sent:
+        session.rollback()  # 发送失败不烧冷却门,下次还能再推
+        return 0
+    session.commit()  # 冷却门随发送成功落库
     return len(fresh)
+
+
+def keyword_article_all_users(settings: Settings | None = None) -> int:
+    """调度入口(无参):keyword_article_tick 需要 per-user session,由此遍历用户。
+
+    此前调度表直接注册了带 (session, user_id) 的函数,每次触发 TypeError 被
+    _safe 吞掉——关键词文章监控从未真正运行过(2026-09-14 审计发现)。
+    """
+    from app.db import get_session_local
+    from app.db.models import User
+
+    settings = settings or get_settings()
+    db = get_session_local()()
+    total = 0
+    try:
+        for uid in db.scalars(select(User.id).order_by(User.id)).all():
+            try:
+                total += keyword_article_tick(db, uid, settings)
+            except Exception:  # noqa: BLE001 - 单用户失败不影响其余
+                db.rollback()
+                logger.exception("关键词文章监控失败 user=%s", uid)
+        db.commit()
+    finally:
+        db.close()
+    return total
 
 
 def candidate_discover_tick(settings: Settings | None = None) -> int:

@@ -152,7 +152,7 @@ class Settings(BaseSettings):
     # 主机 `db`,表现为所有接口 OperationalError(注册/登录全 500)且极难定位。
     database_url: str = "mysql+pymysql://redu:redu@mysql:3306/redu?charset=utf8mb4"
     jwt_secret: str = ""            # 生产必须设置强随机密钥
-    jwt_expire_minutes: int = 604800  # 登录有效期(默认 7 天)
+    jwt_expire_minutes: int = 10080  # 登录有效期(分钟,默认 7 天;勿按秒填——604800 会变成 420 天)
     cookie_encrypt_key: str = ""    # Cookie 加密密钥(Fernet);为空则用 jwt_secret 派生
     admin_email: str = ""           # 注册时若邮箱匹配(逗号分隔)则自动设为 admin
     public_base_url: str = "http://localhost:8080"  # 站点对外地址(重置链接等)

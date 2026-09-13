@@ -80,6 +80,6 @@ config/settings.py   配置中心
 app/                 后端(FastAPI:platform=主API, auth/db/admin/services)
 frontend/            Vue3 + Vite 源码(构建后由后端托管)
 scripts/             backup.sh 等
-tests/               单测(42 项)
+tests/               单测(290+ 项)
 doc/                 dev.md · API.md
 ```

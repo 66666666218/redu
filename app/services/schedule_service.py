@@ -136,13 +136,28 @@ def ensure_all_users(db: Session) -> int:
 
 
 def missing_cookie(db: Session, user_id: int, section: str) -> bool:
-    """该板块是否因缺少 Cookie 而跑不了(跑了只会刷一堆失败记录)。"""
+    """该板块是否因缺少 Cookie 而跑不了(跑了只会刷一堆失败记录)。
+
+    行不存在 → 缺;行存在但明文为空串 → 缺(空 Cookie 每轮撞 ValueError);
+    行存在但解密失败(密钥轮换) → 不算缺,让采集报出真实错误而非静默跳过。
+    """
     platform = SECTION_COOKIE.get(section)
     if not platform:
         return False
-    return db.scalar(
-        select(UserCookie.id).where(UserCookie.user_id == user_id, UserCookie.platform == platform)
-    ) is None
+    from app.db.models import UserCookie
+    from app.security import decrypt_cookie
+
+    rows = db.scalars(select(UserCookie.cookie).where(
+        UserCookie.user_id == user_id, UserCookie.platform == platform)).all()
+    if not rows:
+        return True
+    for cipher in rows:
+        try:
+            if (decrypt_cookie(cipher) or "").strip():
+                return False
+        except Exception:  # noqa: BLE001 - 坏行不算缺,交给采集路径暴露问题
+            return False
+    return True  # 全是空串
 
 
 def due_schedules(db: Session, now: datetime | None = None) -> list[UserSchedule]:

@@ -40,8 +40,11 @@ def _fallback_plain(platform: str, settings: object) -> str:
 
 
 def _mask(cookie: str) -> str:
-    """返回前缀用于界面展示,不暴露完整密钥。"""
-    return cookie[:24] + "…" if len(cookie) > 24 else cookie
+    """返回前缀用于界面展示,不暴露完整密钥。
+
+    只留 8 字符:wr_skey=xxxx 这类 Cookie 前 24 字符往往已覆盖有效凭据本体。
+    """
+    return cookie[:8] + "…" if len(cookie) > 8 else cookie
 
 
 def get_cookie(db: Session, user_id: int, platform: str) -> str | None:

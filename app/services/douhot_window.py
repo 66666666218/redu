@@ -239,13 +239,16 @@ def run_feishu(session: Session, user_id: int, settings: Settings | None = None)
         pushed += 1
     if not pushed:
         return 0
-    try:
-        FeishuClient(wh, settings.feishu_secret).send_card({
-            "config": {"wide_screen_mode": True},
-            "header": {"template": "orange", "title": {"tag": "plain_text",
-                "content": f"📊 抖音关键词趋势对比 · {pushed} 个异动"}},
-            "elements": elements,
-        })
-    except Exception:  # noqa: BLE001 - 推送失败不影响采集
-        logger.exception("抖音多窗口对比飞书推送失败 user=%s", user_id)
+    # 冷却门行此前从不 commit:最后一个用户的行随 session 关闭被回滚,
+    # 导致爆发话题每 20 分钟重复推送。改为发送成功才提交,失败丢弃下轮再推。
+    sent = FeishuClient(wh, settings.feishu_secret).send_card({
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "orange", "title": {"tag": "plain_text",
+            "content": f"📊 抖音关键词趋势对比 · {pushed} 个异动"}},
+        "elements": elements,
+    })
+    if sent:
+        session.commit()
+    else:
+        session.rollback()
     return pushed

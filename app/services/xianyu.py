@@ -125,7 +125,16 @@ class XianyuClient:
         return session
 
     def _downgrade_tls(self) -> None:
-        """本机 CA 加载损坏时降级为不校验证书(闲鱼是知名域名,风险可接受,只告警一次)。"""
+        """本机 CA 加载损坏时降级为不校验证书(闲鱼是知名域名,只告警一次)。
+
+        仅开发模式允许降级:生产若连证书都验不过,大概率是中间人——
+        静默裸奔等于 goofish Cookie 可被劫持,直接报错让人查环境。
+        """
+        from config.settings import get_settings
+
+        if not get_settings().is_dev:
+            raise XianyuError(
+                "闲鱼 TLS 证书校验失败(生产环境不允许降级为不校验),请检查容器 CA 证书/出口网络")
         self._verify = False
         self.session = self._make_session()
         if not self._tls_warned:
@@ -416,6 +425,10 @@ def collect_hot(settings: Settings, client: XianyuClient | None = None, start_of
         raise XianyuWafBlock("闲鱼 WAF 拦截(网关空响应),全部关键词均未采集")
     if success == 0 and saw_rate:
         raise XianyuRateLimit("闲鱼限流(退避后仍失败),全部关键词均未采集")
+    if success == 0 and not buckets:
+        # 全部关键词都因普通错误(网络/非JSON/未解析到商品)失败:
+        # 不能当"无数据"记 success items=0(热点假消失),必须报错
+        raise XianyuError("闲鱼本轮全部关键词均未返回数据(网络/接口异常)")
     if failed_kws:
         logger.warning("闲鱼本轮 %d 个关键词失败:%s", len(failed_kws), ",".join(failed_kws))
 

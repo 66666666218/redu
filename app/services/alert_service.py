@@ -152,7 +152,8 @@ def evaluate(
 
     for rule, reasons in per_rule.items():
         subject = f"[预警] {section} · 触发 {len(reasons)} 条"
-        notifier.send(subject, "\n".join(reasons))
+        if not notifier.send(subject, "\n".join(reasons)):
+            continue  # 发送失败不更新 last_alert_at,冷却不生效化
         r = session.get(AlertRule, rule)
         if r:
             r.last_alert_at = now
@@ -325,8 +326,11 @@ def notify_incident(db: Session, user_id: int, kind: str, title: str, detail: st
     if not feishu_alert_gate(db, user_id, section, key, settings.feishu_alert_cooldown_hours, detail):
         return False
     sent = FeishuClient(webhook, settings.feishu_secret).send(f"🔴 {title}" + chr(10) + detail)
-    db.commit()
-    return bool(sent)
+    if sent:
+        db.commit()  # 发送成功才落冷却门
+        return True
+    db.rollback()  # 发送失败不烧冷却期,否则冷却窗口内该事件永久静默
+    return False
 
 
 def _last_success_days(db: Session, uid: int, kind: str) -> int | None:

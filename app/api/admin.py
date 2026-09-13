@@ -42,7 +42,10 @@ def admin_users(q: str = "", user: User = Depends(require_perm("users.view")), d
 
 @router.post("/api/admin/users/{user_id}/toggle")
 def admin_users_toggle(user_id: int, user: User = Depends(require_perm("users.toggle")), db: Session = Depends(get_db)):
-    res = admin_svc.toggle_user(db, user_id)
+    try:
+        res = admin_svc.toggle_user(db, user_id, operator=user)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc))
     if res is None:
         raise HTTPException(404, "用户不存在")
     admin_svc.log_admin(db, user, "toggle_user", f"user#{user_id}", f"enabled={res['enabled']}")

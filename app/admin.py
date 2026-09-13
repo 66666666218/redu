@@ -113,10 +113,16 @@ def list_users(db: Session, q: str = "") -> list[dict]:
     ]
 
 
-def toggle_user(db: Session, user_id: int) -> dict | None:
+def toggle_user(db: Session, user_id: int, operator: "User | None" = None) -> dict | None:
     u = db.get(User, user_id)
     if not u:
         return None
+    # 目标保护:operator(非 admin)不得禁用 admin;任何人都不能禁用自己(防误锁)
+    if operator is not None:
+        if u.id == operator.id:
+            raise PermissionError("不能禁用自己的账号")
+        if u.role == "admin" and operator.role != "admin":
+            raise PermissionError("operator 无权禁用管理员账号")
     u.enabled = not u.enabled
     db.commit()
     return {"id": u.id, "enabled": u.enabled}
@@ -402,7 +408,11 @@ def retry_run(db: Session, run_id: str, settings=None) -> dict:
     from app.services import tenant
 
     settings = settings or get_settings()
-    run = db.scalar(select(RunRecord).where(RunRecord.run_id == run_id))
+    # run_id(秒级时间戳)非唯一,优先用自增 id 精确定位,避免同秒撞到其它记录
+    run = None
+    if str(run_id).isdigit():
+        run = db.get(RunRecord, int(run_id))
+    run = run or db.scalar(select(RunRecord).where(RunRecord.run_id == str(run_id)))
     if not run or run.status != "failed":
         return {"ok": False, "msg": "运行不存在或非失败"}
     runner = {"weibo": tenant.run_weibo, "xianyu": tenant.run_xianyu, "douhot": tenant.run_douhot}.get(run.kind)
@@ -433,18 +443,23 @@ def retry_failed_runs(max_retry: int = 3) -> dict:
     n = 0
     try:
         # 保底不永久放弃:retry_count 越大要求等待越久(指数退避:2^count 小时),
-        # 但只要"距上次失败已等够"就再次重试——网络/Cookie 恢复后自动续上
+        # 但只要"距上次失败已等够"就再次重试——网络/Cookie 恢复后自动续上。
+        # 注意:重试成功后必须关闭旧 failed 记录(recovered),否则 24h 窗口内
+        # 每 30 分钟都会对同一次失败重复采集(2026-09-14 审计:单次抖动放大 ~48 次)。
         recent = db.scalars(
             select(RunRecord).where(
                 RunRecord.status == "failed",
                 RunRecord.started_at >= datetime.now() - timedelta(hours=24),
             ).order_by(RunRecord.id.desc()).limit(20)
         ).all()
-        # 过滤:retry_count 超限的,要求"距该次失败已过 2^retry_count 小时"才再试
+        # 过滤:一律要求"距该次失败已过 2^retry_count 小时"的指数退避,
+        # retry_count 达上限的不再重试(防同次失败被无限重放)
         eligible = []
         for run in recent:
+            if (run.retry_count or 0) >= max_retry:
+                continue
             wait_h = min(2 ** min(run.retry_count or 0, 6), 24)  # 1h/2h/4h...上限24h
-            if datetime.now() - run.started_at >= timedelta(hours=wait_h) or (run.retry_count or 0) < max_retry:
+            if datetime.now() - run.started_at >= timedelta(hours=wait_h):
                 eligible.append(run)
         recent = eligible
         for run in recent:
@@ -453,8 +468,13 @@ def retry_failed_runs(max_retry: int = 3) -> dict:
                 continue
             try:
                 runner(db, run.user_id, settings)
+                # 采集成功:关闭旧失败记录,阻止同一失败被反复重试
+                run.status = "recovered"
+                run.detail = f"{run.detail} → retry_ok"
+                db.commit()
                 n += 1
             except Exception:  # noqa: BLE001
+                db.rollback()
                 run.retry_count = (run.retry_count or 0) + 1
                 db.commit()
         return {"retried": n}

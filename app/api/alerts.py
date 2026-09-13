@@ -37,5 +37,6 @@ def alerts_rule_del(rule_id: int, user: User = Depends(get_current_user), db: Se
 
 @router.get("/api/alerts/list")
 def alerts_list(limit: int = 30, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    limit = min(max(int(limit or 30), 1), 200)  # 负数在 SQLite 是"不限",统一钳制
     rows = repository.recent_alerts(db, user.id, limit)
     return [{"keyword": r.keyword, "reason": r.reason, "section": r.section, "time": r.triggered_at.isoformat()} for r in rows]

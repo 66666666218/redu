@@ -158,7 +158,8 @@ def xianyu_analytics(session: Session, user_id: int) -> dict:
         y = yesterday_rows.get(iid)
         y_want = y.want_count if y else None
         delta = (t.want_count - y_want) if y_want is not None else 0
-        pct = (delta / y_want) if y_want else (100.0 if t.want_count > 0 else 0.0)
+        # 昨日无基线 → pct=None(显示"—"),不给"无基线"强算 +100% 误报暴涨
+        pct = (delta / y_want) if y_want else (None if y_want is None else 0.0)
         items.append(
             {
                 "item_id": iid,
