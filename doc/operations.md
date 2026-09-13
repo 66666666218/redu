@@ -62,3 +62,35 @@
 | `data/platform.db` | SQLite 数据库(本地部署) |
 | `doc/dajiala-api.md` | dajiala 接口规格(含坑位说明) |
 | `doc/dev.md` §5.8b/§5.14 | 公众号监听/苗头 Agent 架构 |
+
+## 9. 微信读书 Cookie:为什么"过期快",怎么免维护
+
+- **机制**:wr_skey 短效(约 12~24h)且**轮换制**——浏览器和服务端谁调续期,旧 skey 都会失效。
+  长效兜底是 `wr_rt`(约 30 天)。
+- **自动续期**:调度每 6 小时跑 `weread_refresh_tick`(50 */6 * * *),用 wr_rt 换新 wr_skey
+  并回写平台内「weread」Cookie,**有效期内主动轮换 = 永不过期**。
+- **失败即报**:续期失败(wr_rt 也死了)会即时推公众号飞书群(带冷却),不等监听断掉才发现。
+- **⚠️ 换 Cookie 后的关键动作**:复制 Cookie 后**尽量别再在原浏览器使用微信读书**——
+  浏览器会自己轮换 wr_skey,把服务端这份顶失效。这是"Cookie 过期好快"的最常见主因。
+  另外 wr_rt 也可能因在别处重新扫码登录被顶掉。
+- 手动续期:前端「微信读书」页有续期按钮(POST /api/wechat/weread/refresh)。
+
+## 10. 闲鱼风控体系(现状)
+
+- 传输层 curl_cffi 模拟 Chrome TLS 指纹;证书校验默认开启,本机 CA 损坏(curl:77)自动降级并告警一次。
+- 每轮只抓 `XIANYU_BATCH_KEYWORDS`(默认 5)个关键词,按运行次数轮转窗口;请求间隔
+  `XIANYU_REQUEST_DELAY`(默认 8s)带 ±20% 抖动。
+- 限流(FAIL_SYS_RATE_LIMIT)指数退避 30/90/180s;滑块(FAIL_SYS_USER_VALIDATE)立即停止本轮。
+- 滑块后自动冷却:`XIANYU_COOLDOWN_MINUTES`(默认 30)起,**24h 内每再触发一次翻倍**,封顶 240 分钟,
+  期间调度轮次自动跳过(run 记录 `verify_cooldown`),并即时推闲鱼飞书群。
+- 深采(详情)限 `XIANYU_DETAIL_LIMIT`(默认 10)个/轮、`XIANYU_DEEP_INTERVAL_HOURS`(默认 6h)一轮,
+  当天已抓过的商品不重复请求;网关空响应(WAF 静默拦截)会报"疑似 WAF 风控拦截"并带响应片段。
+- 治本手段是**固定住宅出口代理**(`XIANYU_PROXY_URL`);轮换代理池不可用(token 绑定出口 IP)。
+
+## 11. Cookie 加密密钥事故(2026-09-13)
+
+- 现象:重启后闲鱼/微博/抖音采集报"未配置 Cookie",但界面看明明配置过。
+- 根因:`JWT_SECRET` 未配置的时期,进程用**随机临时密钥**加密 Cookie,重启即全部失读;
+  且旧进程带旧密钥持续回写坏行,新进程读不了。`get_cookies` 此前静默跳过坏行,故障被掩盖。
+- 修复:① `get_cookies` 对"行存在但解不开"自动用该平台全局配置/Cookie 文件以当前密钥回写(自愈);
+  无兜底源的告警提示重贴。② `.env` 必须固定 `JWT_SECRET`(生产),否则每次重启丢所有登录态和 Cookie。

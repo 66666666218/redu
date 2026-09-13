@@ -420,16 +420,20 @@ def refresh_weread_cookie(session: Session, user_id: int, settings: Settings | N
     return {"status": "success", "verified": True, "cookie": new_cookie}
 
 def weread_refresh_tick(settings: Settings | None = None) -> int:
-    """每日定时:为所有配置了微信读书 Cookie 的用户续期(防 wr_skey 过期断免费源)。
+    """定时续期:wr_skey 短效且轮换制,有效期内主动换新则永不过期(兜底是 wr_rt,约 30 天)。
 
+    失败(wr_rt 整体过期/续期被拒)必须即时推飞书——否则要等监听断掉才发现,
+    用户感知就是"Cookie 过期好快"。提醒自带冷却,不刷屏。
     返回续期成功的账号数;单用户失败不影响其余。
     """
     from app.db import get_session_local
     from app.db.models import User
+    from app.services.alert_service import notify_incident
 
     settings = settings or get_settings()
     db = get_session_local()()
     total = 0
+    failed: list[tuple[int, str]] = []
     try:
         users = db.scalars(select(User.id).order_by(User.id)).all()
         for uid in users:
@@ -437,13 +441,30 @@ def weread_refresh_tick(settings: Settings | None = None) -> int:
                 out = refresh_weread_cookie(db, uid, settings=settings)
                 if out.get("status") == "success":
                     total += 1
+                elif out.get("status") == "failed":
+                    failed.append((uid, str(out.get("reason") or "")))
             except Exception:  # noqa: BLE001 - 单用户失败不影响其余
                 db.rollback()
                 logger.exception("微信读书续期失败 user=%s", uid)
+                failed.append((uid, "exception"))
     finally:
+        if failed:
+            try:
+                detail = "; ".join(f"用户{u}:{r or '未知原因'}" for u, r in failed)
+                notify_incident(
+                    db, failed[0][0], "wechat",
+                    "🟠 微信读书 Cookie 自动续期失败,请重新复制",
+                    f"wr_rt 已整体失效({detail}),监听即将断源。"
+                    "请在浏览器登录 weread.qq.com → F12 → 网络 复制完整 Cookie,"
+                    "更新到「Cookie 管理」页 weread 平台。"
+                    "复制后尽量不要再在该浏览器使用微信读书——浏览器会自己轮换 wr_skey,"
+                    "把服务端这份顶失效(这是 Cookie『过期快』的主因)。",
+                    settings=settings)
+            except Exception:  # noqa: BLE001 - 提醒失败不影响续期结果
+                logger.exception("微信读书续期失败提醒推送异常")
         db.close()
     if total:
-        logger.info("微信读书 Cookie 每日续期完成:%d 个账号", total)
+        logger.info("微信读书 Cookie 定时续期完成:%d 个账号", total)
     return total
 
 

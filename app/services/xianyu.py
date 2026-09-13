@@ -102,23 +102,36 @@ class XianyuClient:
     def __init__(self, cookie: str, proxy: str | None = None) -> None:
         # 用 curl_cffi 模拟 Chrome 的 TLS/HTTP2 指纹,冒充浏览器从协议层发出,
         # 降低被闲鱼 mtop 风控识别为机器人而触发人机验证(滑块)的概率。
-        # verify=False:curl_cffi 在 Windows 本机环境有时无法加载 certifi CA 证书
-        # (curl:77 error adding trust anchors),导致所有请求 SSL 失败。
-        # 闲鱼 API 是知名域名,此风险可接受;生产 Docker Linux 环境通常无此问题。
-        self.session = curl.Session(impersonate="chrome", verify=False)
-        self.session.headers.update(_MTOP_HEADERS)
-        # 可选"单一固定"出口代理(如住宅 IP)。mtop token/session 绑定出口 IP:
-        # 固定代理可用于恢复/隔离出口,但**不可接轮换代理池**(见 doc/dev.md §5.8)。
+        # 证书校验默认开启(生产 Linux 正常);Windows 本机 curl_cffi 偶发加载不了
+        # certifi CA(curl:77),首次请求失败时自动降级为不校验并告警一次(见 _post)。
+        self._cookie_seed = cookie
         self._proxies = {"http": proxy, "https": proxy} if proxy else None
+        self._verify = True
+        self._tls_warned = False
         self._log_id = _gen_log_id()
-        self._seed_cookies(cookie)
+        self.session = self._make_session()
 
-    def _seed_cookies(self, cookie: str) -> None:
+    def _make_session(self) -> curl.Session:
+        session = curl.Session(impersonate="chrome", verify=self._verify)
+        session.headers.update(_MTOP_HEADERS)
+        self._seed_cookies(self._cookie_seed, into=session)
+        return session
+
+    def _downgrade_tls(self) -> None:
+        """本机 CA 加载损坏时降级为不校验证书(闲鱼是知名域名,风险可接受,只告警一次)。"""
+        self._verify = False
+        self.session = self._make_session()
+        if not self._tls_warned:
+            self._tls_warned = True
+            logger.warning("闲鱼 TLS 证书校验失败(本机 CA 加载问题?),已降级为不校验;生产环境不应出现")
+
+    def _seed_cookies(self, cookie: str, into: curl.Session | None = None) -> None:
+        target = into or self.session
         for pair in cookie.split("; "):
             if "=" not in pair:
                 continue
             name, _, val = pair.partition("=")
-            self.session.cookies.set(name.strip(), val.strip(), domain=".goofish.com", path="/")
+            target.cookies.set(name.strip(), val.strip(), domain=".goofish.com", path="/")
 
     def _token(self) -> str:
         return (self.session.cookies.get("_m_h5_tk", "") or "").split("_")[0]
@@ -162,6 +175,12 @@ class XianyuClient:
                     f"{H5_BASE}/{api}/1.0/", params=params, data={"data": data_val}, timeout=20, proxies=self._proxies
                 )
             except curl.RequestsError as exc:
+                # 证书校验失败(curl:77,本机 CA 加载损坏)→ 降级重建会话后重试;
+                # 其余网络错误照常抛出
+                if self._verify and ("certificate" in str(exc).lower()
+                                     or "(77)" in str(exc) or "77 " in str(exc)):
+                    self._downgrade_tls()
+                    continue
                 raise XianyuError(f"闲鱼请求失败:{exc}") from exc
             try:
                 obj = resp.json()
@@ -190,6 +209,10 @@ class XianyuClient:
                 raise XianyuRateLimit(f"闲鱼限流,请稍后再试:{ret}")
             if code and not code.startswith("SUCCESS"):
                 raise XianyuError(f"闲鱼接口返回:{ret}")
+            if not code:
+                # 空 ret:网关静默拦截(WAF)的典型形态,不进限流退避(退避无效),
+                # 直接报"疑似风控拦截"并带响应片段,便于区分限流/滑块/登录态问题。
+                raise XianyuError(f"闲鱼网关空响应(疑似 WAF 风控拦截),body={resp.text[:120]!r}")
             return obj
         raise XianyuRateLimit(f"闲鱼限流,请稍后再试:{last_rate_err}")
 
