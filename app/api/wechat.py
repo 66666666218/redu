@@ -339,9 +339,7 @@ def wechat_article_rewrite(article_id: int, user: User = Depends(get_current_use
             if row.benchmark_id else None)
         if cookie and bid and bid.weread_book_id:
             try:
-                from app.services.weread_client import WereadClient
-                wc = WereadClient(cookie)
-                # 从文章 URL 反查 reviewId 不易,直接抓原文页
+                # 从文章 URL 直接抓原文页(正文提取不依赖微信读书客户端)
                 row.content = wechat_monitor.fetch_article_content(row.url) or row.content
             except Exception:  # noqa: BLE001  补拉失败走下方统一的"正文不足"报错
                 logger.warning("改写前微信读书补拉正文失败 article=%s url=%s", article_id, row.url, exc_info=True)

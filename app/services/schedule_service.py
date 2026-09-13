@@ -144,7 +144,6 @@ def missing_cookie(db: Session, user_id: int, section: str) -> bool:
     platform = SECTION_COOKIE.get(section)
     if not platform:
         return False
-    from app.db.models import UserCookie
     from app.security import decrypt_cookie
 
     rows = db.scalars(select(UserCookie.cookie).where(

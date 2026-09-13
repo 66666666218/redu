@@ -230,7 +230,7 @@ def build_weekly_summary(db: Session, user_id: int, settings: Settings) -> str:
     from app.db.models import DouhotWatchSnap
 
     since = datetime.now() - timedelta(days=7)
-    lines = [f"📊 本周热点洞察(近 7 天)", ""]
+    lines = ["📊 本周热点洞察(近 7 天)", ""]
 
     # 关注词智能体(近 7 天快照)
     burst, rising = [], []

@@ -645,7 +645,6 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
             FeishuClient(webhook, settings.feishu_secret).send_card(card)
 
     # 文章内容交叉提取:从正文提取新公众号名 → 自动入库为候选对标号
-    from app.services.content_extract import extract_account_refs as _ear
     from app.db.models import WechatCandidate
 
     known_names = set(session.scalars(select(WechatBenchmark.nickname).where(
