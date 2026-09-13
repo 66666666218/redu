@@ -46,9 +46,13 @@
 
 ## 7. 数据备份
 
-- MySQL 部署:`sh scripts/backup.sh`
-- SQLite 本地部署:每日 04:00 自动快照到 `data/backups/`(保留 7 份)
-- 手动备份:直接复制 `data/platform.db`(先停服务或接受轻微不一致)
+- **自动**(SQLite 本地部署):每日 04:00 快照到 `data/backups/platform_YYYYMMDD.db`,保留最近 7 份。
+  走 SQLite 在线备份 API,库正被写入时也一致;快照产出后会校验非空 + `PRAGMA quick_check`,
+  不合格的直接删掉——**宁可没有,也不留 0 字节的假备份**。
+- **手动**:`sh scripts/backup.sh`(按 `DATABASE_URL` 自动选 SQLite / MySQL;SQLite 与自动快照同一实现)
+- 检查备份是否健康:`ls -la data/backups/` —— **任何 0 字节文件都说明备份失败**,别当成"有备份"。
+  备份失败会在服务日志里记 `SQLite 快照备份失败`(stdout,`docker logs` 可见)。
+- ⚠️ 不要直接 `cp`/`gzip` 库文件当备份:写入过程中拷贝可能得到撕裂的中间状态,恢复时才发现坏。
 
 ## 8. 关键文件位置
 
