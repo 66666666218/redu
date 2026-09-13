@@ -582,6 +582,11 @@ uvicorn app.api:app --host 0.0.0.0 --port 8080
 
 - **单元测试**:`tests/`,覆盖 `cleaner`、`trend_analyzer`、`proxy` 等纯逻辑(勿依赖网络)。
 - **静态检查**:`mypy`(类型)、`ruff`(lint/format)。
+- **未定义名称防线**:`tests/test_undefined_names.py` 用 `pyflakes` 静态扫 `app/`+`config/`,
+  任何"引用了没 import 的模型/函数"在 `pytest` 阶段即失败。这类 Bug 只在特定分支触发
+  (如"持续失败且久未成功""正文不足补拉"),平时测不到,一旦命中就是线上
+  `服务器内部错误(NameError)`;被 `try/except` 包住时更会**静默失效**
+  (公众号文章分级清理曾因此从未真正执行)。
 - **CI**(增强):push 后执行 `ruff check` + `mypy app` + `pytest -q`。
 
 ---

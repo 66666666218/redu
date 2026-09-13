@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.db import get_db
-from app.db.models import User, WechatArticle
+from app.db.models import User, WechatArticle, WechatBenchmark
 from app.services.dajiala_client import DajialaError
 from app.services.wechat_analyzer import analyze_articles
 from app.services import wechat_monitor

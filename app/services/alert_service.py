@@ -355,6 +355,8 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
     from app.db.models import FeishuAlert, RunRecord
 
     threshold = settings.fail_alert_threshold
+    # 长期坏升级阈值(与 check_health_stalls 同源):超过 N 天未成功 → 标注【长期】
+    escalate_days = getattr(settings, "health_escalate_days", 3) or 3
     since = datetime.now() - timedelta(hours=24)
     own_session = db is None
     db = db or get_session_local()()

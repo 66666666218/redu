@@ -305,7 +305,7 @@ def dashboard(session: Session, user_id: int) -> dict:
     xianyu_rows = repository.xianyu_items(session, user_id, limit=30)
     douhot_rows = repository.douhot_top_words(session, user_id, limit=100)
     # 公众号概览:盘链文 Top5(按阅读)+爆点/苗头计数
-    from app.db.models import WechatArticle
+    from app.db.models import WechatArticle, WechatBenchmark
     wechat_rows = session.scalars(select(WechatArticle).where(
         WechatArticle.user_id == user_id).order_by(
         WechatArticle.created_at.desc()).limit(60)).all()

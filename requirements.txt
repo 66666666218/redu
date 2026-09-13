@@ -27,5 +27,7 @@ cryptography>=42
 pytest>=8.0
 ruff>=0.4
 mypy>=1.8
+# tests/test_undefined_names.py 用它静态扫描未定义名称(漏 import → 线上 NameError 500)
+pyflakes>=3.2
 # 仅 scripts/probe_*.py 抓包探测用(核对接口是否仍免签名);运行时采集已全量直连,无需浏览器
 playwright>=1.42

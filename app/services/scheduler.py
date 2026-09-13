@@ -209,6 +209,8 @@ def wechat_collect_tick(settings: Settings | None = None) -> dict:
 
 def _agent_learn_all() -> None:
     """苗头回测+权重自适应(全用户)。"""
+    from sqlalchemy import select
+
     from app.db import get_session_local
     from app.services.agent_learning import backtest_and_learn
     from config.settings import get_settings as _gs
