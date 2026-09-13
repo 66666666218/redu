@@ -100,9 +100,12 @@ def run_cross_platform_alert(user_id: int, settings: Settings | None = None, db:
                 tag = "🔥" if it["burst"] else ""
                 fc = ",".join(f"{SECTION_LABELS[p]}{int(f) if f is not None else '?'}" for p, f in it["forecasts"].items() if p in SECTION_LABELS)
                 lines.append(f"  · {it['keyword']}{tag}  [{'+'.join(SECTION_LABELS.get(p, p) for p in it['platforms'])}]  预测→{fc}")
-            FeishuClient(settings.feishu_webhook, settings.feishu_secret).send("\n".join(lines))
-            db.commit()
-            pushed = len(hits)
+            # 发送成功才落冷却门(与全项目告警门语义一致,失败下轮再推)
+            if FeishuClient(settings.feishu_webhook, settings.feishu_secret).send("\n".join(lines)):
+                db.commit()
+                pushed = len(hits)
+            else:
+                db.rollback()
         return pushed
     finally:
         if own_session:
