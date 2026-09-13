@@ -79,6 +79,13 @@ class XianyuVerify(XianyuError):
     """
 
 
+class XianyuWafBlock(XianyuError):
+    """网关空响应(WAF 静默拦截):账号/IP 级压制,无滑块可过,退避也无效。
+
+    与滑块同级处理:立即停止本轮并进入冷却,反复出现只能更换固定住宅出口 IP。
+    """
+
+
 # mtop 令牌错误码(需刷新 _m_h5_tk 后重试;参考开源 goofish-client)
 TOKEN_ERRORS = {
     "FAIL_SYS_TOKEN_EMPTY",
@@ -160,6 +167,7 @@ class XianyuClient:
         立即抛 `XianyuVerify`,由上层判定为"需人工过滑块或更换出口 IP"。
         """
         last_rate_err: str | None = None
+        last_token_err: str | None = None
         backoff = [30, 90, 180]
         for attempt in range(1 + len(backoff)):
             data_val = json.dumps(data_obj, ensure_ascii=False, separators=(",", ":"))
@@ -186,10 +194,12 @@ class XianyuClient:
                 obj = resp.json()
             except ValueError as exc:
                 raise XianyuError(f"闲鱼响应非 JSON:{exc}") from exc
-            ret = obj.get("ret", [""])[0]
+            # ret 可能缺省/为 null/为空列表,统一兜成 [""] 再取首元素(空列表直接[0]会 IndexError)
+            ret = (obj.get("ret") or [""])[0] or ""
             code = ret.split("::")[0]
             if code in TOKEN_ERRORS:
                 if self._refresh(resp):
+                    last_token_err = ret
                     continue  # 令牌已刷新,重试
                 if code in ("FAIL_SYS_SESSION_EXPIRED", "FAIL_SYS_USER_NOT_LOGIN"):
                     # 刷新也救不回来 = 登录态本体过期,需要重新登录/复制 Cookie
@@ -211,9 +221,17 @@ class XianyuClient:
                 raise XianyuError(f"闲鱼接口返回:{ret}")
             if not code:
                 # 空 ret:网关静默拦截(WAF)的典型形态,不进限流退避(退避无效),
-                # 直接报"疑似风控拦截"并带响应片段,便于区分限流/滑块/登录态问题。
-                raise XianyuError(f"闲鱼网关空响应(疑似 WAF 风控拦截),body={resp.text[:120]!r}")
+                # 按账号/IP 级压制处理(冷却),带响应片段便于区分限流/滑块/登录态问题。
+                raise XianyuWafBlock(f"闲鱼网关空响应(疑似 WAF 风控拦截),body={resp.text[:120]!r}")
             return obj
+        if last_token_err and not last_rate_err:
+            # 整轮都在"令牌过期→刷新→再过期"里打转(2026-09-13 实测:网关持续回
+            # FAIL_SYS_TOKEN_EXOIRED 且有下发新令牌,但新令牌一用即过期)——
+            # 这是登录态/风控状态已坏,不是限流。归 CookieExpired 让用户重新复制,
+            # 误报成"限流:None"会让人无从下手。
+            raise XianyuCookieExpired(
+                f"闲鱼令牌循环过期且刷新无效({last_token_err}),登录态/风控状态异常,"
+                "请浏览器登录 www.goofish.com 后重新复制 Cookie(或更换出口 IP)")
         raise XianyuRateLimit(f"闲鱼限流,请稍后再试:{last_rate_err}")
 
     def search(self, keyword: str, page: int = 1, rows: int = 30) -> list[dict]:
@@ -320,8 +338,8 @@ def fetch_detail(client: XianyuClient, item_id: str) -> dict:
         out["seller_fans"] = int(
             seller.get("followerCount") or seller.get("fansCount") or seller.get("sellerFans") or 0
         )
-    except (XianyuVerify, XianyuRateLimit):
-        raise  # 人机验证/限流:交给上层停止连环抓详情(避免加剧风控)
+    except (XianyuVerify, XianyuRateLimit, XianyuWafBlock):
+        raise  # 人机验证/限流/WAF 拦截:交给上层停止连环抓详情(避免加剧风控)
     except Exception:  # noqa: BLE001
         pass
     return out
@@ -350,6 +368,7 @@ def collect_hot(settings: Settings, client: XianyuClient | None = None, start_of
     base_delay = getattr(settings, "xianyu_request_delay", None) or getattr(settings, "request_delay_seconds", 2.5)
     saw_verify = False
     saw_rate = False
+    saw_waf = False
     success = 0
     failed_kws: list[str] = []
     verify_kws: list[str] = []  # 被人机验证挡住的关键词(部分被风控也暴露)
@@ -361,6 +380,11 @@ def collect_hot(settings: Settings, client: XianyuClient | None = None, start_of
             # 立即停止尝试,避免连环猛打加重风控,保留已采到的部分数据。
             saw_verify = True
             verify_kws.append(kw)
+            break
+        except XianyuWafBlock:
+            # WAF 静默拦截同为账号/IP 级:换词接着打只会逐个吃拦截,立即停止本轮。
+            saw_waf = True
+            verify_kws.append(kw)  # 暴露被挡关键词,复用部分被挡的上报链路
             break
         except XianyuRateLimit:
             # 网关限流同样是账号/IP 级:换词接着打只会逐个吃满退避(每词最长 5 分钟)。
@@ -385,9 +409,11 @@ def collect_hot(settings: Settings, client: XianyuClient | None = None, start_of
     # 一个词都没采到且被验证/限流 → 让上层识别为"需人工处理",避免误报成功 0 条
     if stats is not None:
         stats.update({"ok": success, "verify": verify_kws, "failed_kws": failed_kws,
-                      "rate_break": saw_rate, "verify_break": saw_verify})
+                      "rate_break": saw_rate, "verify_break": saw_verify, "waf_break": saw_waf})
     if success == 0 and saw_verify:
         raise XianyuVerify("闲鱼人机验证(滑块),全部关键词均未采集")
+    if success == 0 and saw_waf:
+        raise XianyuWafBlock("闲鱼 WAF 拦截(网关空响应),全部关键词均未采集")
     if success == 0 and saw_rate:
         raise XianyuRateLimit("闲鱼限流(退避后仍失败),全部关键词均未采集")
     if failed_kws:

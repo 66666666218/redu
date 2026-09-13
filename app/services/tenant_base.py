@@ -36,35 +36,35 @@ def _record_run(session: Session, user_id: int, kind: str, status: str, detail: 
 
 
 def verify_cooldown_active(session: Session, user_id: int, settings: Settings) -> bool:
-    """闲鱼人机验证后冷却:最近触发过 `XianyuVerify` → 本轮应跳过。
+    """闲鱼人机验证/WAF 拦截后冷却:最近触发过 → 本轮应跳过。
 
     防闲鱼 Cookie/IP 被标记后仍每轮去撞滑块(反复 `FAIL_SYS_USER_VALIDATE` 会加重风控),
     改为静默等待冷却期过后再试。**指数退避**:近 24h 内触发次数越多冷却越久
     (base→2x→4x,封顶 240 分钟)——没有代理可换 IP 时,避免"冷却一过又去撞枪口"的循环。
+    WAF 空响应(`XianyuWafBlock`)与滑块同级:同为账号/IP 级压制,退避无效只能等。
     """
     minutes = getattr(settings, "xianyu_cooldown_minutes", 0)
     if not minutes:
         return False
     day_cutoff = datetime.now() - timedelta(hours=24)
+    blocked = select(RunRecord).where(
+        RunRecord.user_id == user_id,
+        RunRecord.kind.in_(["xianyu", "xianyu_deep"]),
+        RunRecord.started_at >= day_cutoff,
+    )
     hits = session.scalar(
-        select(func.count()).select_from(RunRecord).where(
-            RunRecord.user_id == user_id,
-            RunRecord.kind.in_(["xianyu", "xianyu_deep"]),
-            RunRecord.detail.contains("XianyuVerify"),
-            RunRecord.started_at >= day_cutoff,
+        select(func.count()).select_from(
+            blocked.filter(RunRecord.detail.contains("XianyuVerify")
+                           | RunRecord.detail.contains("XianyuWafBlock")).subquery()
         )
     ) or 0
     backoff = min(minutes * (2 ** max(0, min(hits, 3) - 1)), 240) if hits else minutes
     cutoff = datetime.now() - timedelta(minutes=backoff)
     row = session.scalar(
-        select(RunRecord)
-        .where(
-            RunRecord.user_id == user_id,
-            RunRecord.kind.in_(["xianyu", "xianyu_deep"]),
-            RunRecord.detail.contains("XianyuVerify"),
+        blocked.filter(
+            RunRecord.detail.contains("XianyuVerify") | RunRecord.detail.contains("XianyuWafBlock"),
             RunRecord.started_at >= cutoff,
-        )
-        .order_by(RunRecord.id.desc())
+        ).order_by(RunRecord.id.desc())
     )
     return row is not None
 

@@ -82,3 +82,75 @@ def test_xianyu_deep_skips_items_already_cached_today(monkeypatch, session) -> N
         session, 1, settings=_settings(), hot=[{"item_id": "i2", "title": "新商品", "price": "2"}])
     assert out2["status"] == "skipped" and out2["reason"] == "cached_today"
     assert calls == ["i2"]  # 没有新的详情请求
+
+
+def test_waf_block_triggers_same_cooldown(session) -> None:
+    """WAF 空响应(XianyuWafBlock)与滑块同级:计入冷却、指数退避。"""
+    st = _settings()
+    _record_run(session, 2, "xianyu", "failed", "XianyuWafBlock: 闲鱼网关空响应(疑似 WAF 风控拦截)")
+    session.commit()
+    assert verify_cooldown_active(session, 2, st) is True  # 刚触发 → 冷却中
+
+    # 挪出默认冷却窗口(30min)后,单次 WAF 不再冷却
+    row = session.scalars(select(RunRecord).where(RunRecord.user_id == 2)).first()
+    row.started_at = datetime.now() - timedelta(minutes=40)
+    session.commit()
+    assert verify_cooldown_active(session, 2, st) is False
+
+    # 24h 内第 2 次 → 退避翻倍(60min),40 分钟前的那次仍在窗口内
+    _record_run(session, 2, "xianyu_deep", "failed", "XianyuWafBlock: 网关空响应")
+    session.commit()
+    latest = session.scalars(
+        select(RunRecord).where(RunRecord.user_id == 2).order_by(RunRecord.id.desc())).first()
+    latest.started_at = datetime.now() - timedelta(minutes=40)
+    session.commit()
+    assert verify_cooldown_active(session, 2, st) is True
+
+
+def test_post_empty_ret_raises_waf_block(monkeypatch) -> None:
+    """_post 遇网关空 ret → XianyuWafBlock(不再误报'限流:None')。"""
+    from app.services import xianyu as xy
+
+    class _Resp:
+        status_code = 200
+        text = '{"api":"mtop.taobao.idle.pc.search"}'
+        headers = {}
+
+        def json(self):
+            return {"api": "mtop.taobao.idle.pc.search", "ret": [], "data": {}}
+
+    qt = xy.XianyuClient("cookie=x")
+    monkeypatch.setattr(qt.session, "post", lambda *a, **kw: _Resp())
+    try:
+        qt._post("mtop.taobao.idle.pc.search", {"keyword": "x"})
+        raised = ""
+    except xy.XianyuWafBlock as exc:
+        raised = str(exc)
+    except Exception as exc:  # noqa: BLE001
+        raised = f"wrong-type:{type(exc).__name__}"
+    assert "WAF" in raised, raised
+
+
+def test_token_loop_exhaustion_raises_cookie_expired(monkeypatch) -> None:
+    """令牌循环过期(刷新成功但新令牌一用即过期)→ CookieExpired,不再误报'限流:None'。"""
+    import re
+    from app.services import xianyu as xy
+
+    class _Resp:
+        status_code = 200
+        text = "{}"
+        headers = {"set-cookie": "_m_h5_tk=abcdef0123456789abcdef0123456789_1760000000; Path=/; Domain=.goofish.com"}
+
+        def json(self):
+            return {"ret": ["FAIL_SYS_TOKEN_EXOIRED::令牌过期"], "data": {}}
+
+    qt = xy.XianyuClient("cookie=x")
+    monkeypatch.setattr(qt.session, "post", lambda *a, **kw: _Resp())
+    try:
+        qt._post("mtop.taobao.idle.pc.search", {"keyword": "x"})
+        raised = ""
+    except xy.XianyuCookieExpired as exc:
+        raised = str(exc)
+    except Exception as exc:  # noqa: BLE001
+        raised = f"wrong-type:{type(exc).__name__}: {exc}"
+    assert "令牌循环过期" in raised, raised

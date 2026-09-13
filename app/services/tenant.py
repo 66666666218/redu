@@ -216,6 +216,12 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
                 title="🔴 闲鱼触发人机验证(滑块)",
                 detail=f"{exc}(已自动冷却 {settings.xianyu_cooldown_minutes} 分钟,期间轮次跳过)",
                 settings=settings)
+        elif "XianyuWafBlock" in name:
+            alert_service.notify_incident(
+                db=session, user_id=user_id, kind="xianyu",
+                title="🟠 闲鱼网关 WAF 拦截(账号/IP 被压制)",
+                detail=f"{exc}(已自动冷却,期间轮次跳过;反复出现请更换固定住宅出口 IP)",
+                settings=settings)
         elif "XianyuCookieExpired" in name:
             alert_service.notify_incident(
                 db=session, user_id=user_id, kind="xianyu",

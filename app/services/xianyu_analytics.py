@@ -93,6 +93,10 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
                 stop_reason = "verify"
                 logger.warning("闲鱼详情触发人机验证,停止抓取;请人工过滑块或更换出口IP")
                 break
+            except xianyu.XianyuWafBlock:
+                stop_reason = "waf_block"
+                logger.warning("闲鱼详情触发 WAF 拦截(网关空响应),停止抓取;建议更换出口IP")
+                break
             except xianyu.XianyuRateLimit:
                 stop_reason = "rate_limit"
                 logger.warning("闲鱼限流,停止抓取详情")
@@ -128,7 +132,7 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
                 f"搜索采集不受影响",
                 settings=settings)
         return {"platform": "xianyu_deep", "count": saved, "status": status, "reason": stop_reason}
-    except (xianyu.XianyuVerify, xianyu.XianyuRateLimit) as exc:
+    except (xianyu.XianyuVerify, xianyu.XianyuRateLimit, xianyu.XianyuWafBlock) as exc:
         # collect_hot 整轮被滑块/限流(全部关键词失败)→ 优雅降级,不 500
         session.rollback()
         _record_run(session, user_id, "xianyu_deep", "failed", f"{type(exc).__name__}: {exc}")
