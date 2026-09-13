@@ -30,6 +30,11 @@ async function req(method, path, body) {
   let data = null
   try { data = text ? JSON.parse(text) : null } catch { data = text }
   if (!resp.ok) {
+    // 401 = 令牌过期/无效:清除本地残留并回登录页,避免每个请求都报"登录已过期"却停在原地
+    if (resp.status === 401 && !path.startsWith('/api/auth/')) {
+      clearToken()
+      if (location.pathname !== '/login') location.href = '/login'
+    }
     throw new Error(errMessage(data, resp.status))
   }
   return data
