@@ -61,6 +61,10 @@ def collect_tick(settings: Settings | None = None, now: datetime | None = None) 
             if schedule_service.missing_cookie(db, row.user_id, row.section):
                 skipped += 1
                 continue
+            # 原子抢占(执行前置标记):多进程/双模式部署时防止同一到期任务被重复执行
+            if not schedule_service.claim_schedule(db, row, now):
+                skipped += 1
+                continue
             try:
                 runner(db, row.user_id, settings)
                 ok += 1
@@ -87,8 +91,6 @@ def collect_tick(settings: Settings | None = None, now: datetime | None = None) 
                 failed += 1
                 db.rollback()
                 logger.warning("定时采集失败 用户=%s 板块=%s:%s", row.user_id, row.section, exc)
-            finally:
-                schedule_service.mark_ran(db, row, now)
     finally:
         db.close()
     if ok or failed:
@@ -187,6 +189,10 @@ def wechat_collect_tick(settings: Settings | None = None) -> dict:
         now = datetime.now()
         due = [r for r in schedule_service.due_schedules(db, now) if r.section == "wechat"]
         for row in due:
+            # 原子抢占:API 内嵌调度器与独立调度进程双跑时防重复监听
+            if not schedule_service.claim_schedule(db, row, now):
+                skipped += 1
+                continue
             try:
                 # 错峰批次:按当前小时轮转,每批约 7 个号(号级延迟 ≤3h,瞬时密度降 2/3)
                 batch = (now.hour % 3) if _wechat_rows_for(db, row.user_id) > 14 else None
@@ -199,8 +205,6 @@ def wechat_collect_tick(settings: Settings | None = None) -> dict:
                 failed += 1
                 db.rollback()
                 logger.warning("公众号监听失败 用户=%s:%s", row.user_id, exc)
-            finally:
-                schedule_service.mark_ran(db, row, now)
     finally:
         db.close()
     if ok or failed:

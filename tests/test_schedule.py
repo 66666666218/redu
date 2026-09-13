@@ -224,3 +224,26 @@ def test_wechat_collect_tick_handles_wechat_section(monkeypatch, session) -> Non
 
     scheduler.wechat_collect_tick()
     assert svc.get_or_create(session, 7, "wechat").last_run_at is not None  # 专用 tick 处理并标记
+
+
+def test_claim_schedule_race_second_claimant_loses(session) -> None:
+    """原子抢占:第二个进程对同一到期任务的 claim 必须失败(防双跑,审计 S2-7)。"""
+    from datetime import datetime, timedelta
+
+    from app.services import schedule_service as svc
+
+    _add_user(session, 9)
+    row = UserSchedule(user_id=9, section="weibo", interval_minutes=10, enabled=True,
+                       last_run_at=datetime.now() - timedelta(minutes=30))
+    session.add(row)
+    session.commit()
+
+    now = datetime.now()
+    assert svc.claim_schedule(session, row, now) is True   # 第一个进程抢到
+    assert svc.claim_schedule(session, row, now) is False  # 第二个进程(哪怕同一秒)必须抢不到
+    # 未到期(间隔内)的行同样抢不到
+    row2 = UserSchedule(user_id=9, section="baidu", interval_minutes=10, enabled=True,
+                        last_run_at=datetime.now() - timedelta(minutes=1))
+    session.add(row2)
+    session.commit()
+    assert svc.claim_schedule(session, row2, now) is False

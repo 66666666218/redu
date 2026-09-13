@@ -167,6 +167,32 @@ def due_schedules(db: Session, now: datetime | None = None) -> list[UserSchedule
     return [r for r in rows if r.last_run_at is None or now - r.last_run_at >= timedelta(minutes=r.interval_minutes)]
 
 
+def claim_schedule(db: Session, row: UserSchedule, now: datetime | None = None) -> bool:
+    """原子抢占:仅当该设置仍处于"到期未跑"状态时,把 last_run_at 置为 now。
+
+    条件 UPDATE:SELECT 到执行完成的间隙里,另一个进程可能已抢跑同一任务并
+    刷新了 last_run_at——以 `last_run_at <= now - interval`(与 due_schedules
+    同一到期判定)为条件即可把竞态挡住:对方抢跑后 last_run_at≈now,必然 > now-interval。
+    rowcount=0 = 已被抢占,调用方必须跳过。执行前抢占同时天然实现 mark_ran 的
+    "无论成败都标记"(失败重试仍由 retry_failed_runs 负责)。
+    """
+    from datetime import timedelta
+    from sqlalchemy import update
+
+    now = now or datetime.now()
+    expiry = now - timedelta(minutes=row.interval_minutes or 1)
+    result = db.execute(
+        update(UserSchedule)
+        .where(
+            UserSchedule.id == row.id,
+            (UserSchedule.last_run_at.is_(None)) | (UserSchedule.last_run_at <= expiry),
+        )
+        .values(last_run_at=now)
+    )
+    db.commit()
+    return result.rowcount > 0
+
+
 def mark_ran(db: Session, row: UserSchedule, now: datetime | None = None) -> None:
     """标记本轮已执行。
 
