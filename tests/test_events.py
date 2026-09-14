@@ -103,3 +103,41 @@ class TestAssignTick:
         rows = session.scalars(select(HotspotEvent)).all()
         assert len(rows) == 1
         assert rows[0].sample_count == first               # 样本数不涨(本轮无新快照)
+
+
+def test_reignition_reactivates_ended_event(session):
+    """复燃:已终结事件(7 天内)重现 → 重激活+复燃计数,而非新建事件。"""
+    from app.services import events
+
+    now = datetime.now()
+    db = session
+    db.add(WeiboHotItem(user_id=1, title="某综艺陷争议风波", heat=500, rank=2,
+                        captured_at=now - timedelta(hours=20)))  # 24h 扫描窗口内
+    db.commit()
+    events.assign_tick(session, 1)
+    ev = session.scalar(select(HotspotEvent))
+    assert ev.status == "active"
+    ev.status, ev.ended_at = "ended", now - timedelta(hours=20)  # 已终结 20h(7 天内)
+    ev.last_seen = now - timedelta(hours=74)
+    session.commit()
+
+    self2 = events.assign_tick(session, 1)
+    ev = session.scalar(select(HotspotEvent))
+    assert ev.status == "active" and ev.reappear_count == 1  # 复燃
+    assert self2["created"] == 0                              # 没有新建重复事件
+
+
+def test_last_growth_recorded(session):
+    """增长率事实:同一词两次快照 → last_growth = 环比。"""
+    from app.services import events
+
+    now = datetime.now()
+    db = session
+    db.add(WeiboHotItem(user_id=1, title="某新能源车大定破纪录", heat=1000, rank=1,
+                        captured_at=now - timedelta(hours=2)))
+    db.add(WeiboHotItem(user_id=1, title="某新能源车大定破纪录", heat=1600, rank=1,
+                        captured_at=now - timedelta(hours=1)))
+    db.commit()
+    events.assign_tick(session, 1)
+    ev = session.scalar(select(HotspotEvent))
+    assert ev.last_growth == pytest.approx(0.6)

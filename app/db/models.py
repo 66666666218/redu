@@ -533,6 +533,8 @@ class HotspotEvent(Base):
     sample_count: Mapped[int] = mapped_column(Integer, default=0)         # 归并的快照条数
     status: Mapped[str] = mapped_column(String(16), default="active")     # active/ended
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    reappear_count: Mapped[int] = mapped_column(Integer, default=0)       # 复燃次数(ended 后再现)
+    last_growth: Mapped[float | None] = mapped_column(Float, nullable=True)  # 最近一次样本增长率
 
 
 class EventMembership(Base):
@@ -547,3 +549,19 @@ class EventMembership(Base):
     event_id: Mapped[int] = mapped_column(ForeignKey("hotspot_events.id"), index=True)
     latest_value: Mapped[float] = mapped_column(Float, default=0)
     last_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class NotificationLog(Base):
+    """通知送达日志:关键告警(事件级 notify_incident)的投递记录与重试审计。"""
+
+    __tablename__ = "notification_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    channel: Mapped[str] = mapped_column(String(32), default="feishu")  # feishu/email/webhook
+    section: Mapped[str] = mapped_column(String(32), default="")        # 业务板块/事件类型
+    title: Mapped[str] = mapped_column(String(255), default="")
+    ok: Mapped[bool] = mapped_column(Boolean, default=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=1)           # 重试次数
+    error: Mapped[str] = mapped_column(String(255), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)

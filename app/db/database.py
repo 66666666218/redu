@@ -118,6 +118,7 @@ def _migrate() -> None:
                         "date_window INTEGER"],
         "douhot_watch_snap": ["section VARCHAR(16) DEFAULT 'douhot'", "entry_title VARCHAR(255) DEFAULT ''", "trend_growth FLOAT DEFAULT 0"],
         "wechat_benchmarks": ["weread_book_id VARCHAR(64) DEFAULT ''", "biz VARCHAR(64) DEFAULT ''"],
+        "hotspot_events": ["reappear_count INTEGER DEFAULT 0", "last_growth FLOAT"],
         "wechat_articles": ["source VARCHAR(16) DEFAULT 'manual'", "benchmark_id INTEGER",
                             "pan_types VARCHAR(128) DEFAULT ''", "pan_urls TEXT", "my_pan_urls TEXT",
                             "read_num INTEGER DEFAULT 0", "zan_num INTEGER DEFAULT 0", "looking_num INTEGER DEFAULT 0",

@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta
 
 from sqlalchemy.exc import IntegrityError
@@ -334,11 +335,27 @@ def notify_incident(db: Session, user_id: int, kind: str, title: str, detail: st
     section, key = f"incident_{kind}", title[:80]
     if not feishu_alert_gate(db, user_id, section, key, settings.feishu_alert_cooldown_hours, detail):
         return False
-    sent = FeishuClient(webhook, settings.feishu_secret).send(f"🔴 {title}" + chr(10) + detail)
+    message = f"🔴 {title}" + chr(10) + detail
+    # 送达日志+一次重试(关键事件告警不应因瞬时抖动丢失;送达结果可审计)
+    sent, attempts, last_err = False, 0, ""
+    for attempt in range(2):
+        attempts = attempt + 1
+        try:
+            sent = FeishuClient(webhook, settings.feishu_secret).send(message)
+            last_err = "" if sent else "send 返回 False"
+        except Exception as exc:  # noqa: BLE001 - FeishuClient 常规不抛,防御性兜住
+            last_err = f"{type(exc).__name__}: {exc}"[:250]
+            sent = False
+        if sent:
+            break
+        time.sleep(1.5)
+    from app.db.models import NotificationLog
+    db.add(NotificationLog(user_id=user_id, channel="feishu", section=kind,
+                           title=title[:255], ok=sent, attempts=attempts, error=last_err[:255]))
     if sent:
         db.commit()  # 发送成功才落冷却门
         return True
-    db.rollback()  # 发送失败不烧冷却期,否则冷却窗口内该事件永久静默
+    db.rollback()  # 发送失败不烧冷却期(日志行一并回滚,避免半提交)
     return False
 
 

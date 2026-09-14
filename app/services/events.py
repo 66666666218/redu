@@ -97,9 +97,14 @@ def assign_tick(db: Session, user_id: int, settings=None) -> dict:
     )).all()
     # 事件指纹:规范化标题 → 事件(优先精确命中,再做相似度)
     by_exact: dict[str, HotspotEvent] = {e.norm_title: e for e in events}
+    # 复燃索引:近 7 天终结的事件(词二次起势时重激活,生命周期含"复燃"态)
+    ended_recent = db.scalars(select(HotspotEvent).where(
+        HotspotEvent.user_id == user_id, HotspotEvent.status == "ended",
+        HotspotEvent.last_seen >= now - timedelta(days=7))).all()
+    by_exact_ended: dict[str, HotspotEvent] = {e.norm_title: e for e in ended_recent}
 
     created = merged = ended = 0
-    seen_pairs: set[tuple[int, str, str]] = set()  # 本轮已归属 (event_id, board, norm)
+    seen_pairs: set[tuple[int, str, str, datetime]] = set()  # (event_id, board, norm, ts)——同批同 norm 不同时刻的快照行都要计
 
     for board, (model, ts_col, title_col, value_col) in _TABLES.items():
         rows = db.scalars(select(model).where(
@@ -116,6 +121,14 @@ def assign_tick(db: Session, user_id: int, settings=None) -> dict:
             value = float(getattr(r, value_col, 0) or 0) if value_col else 1.0
 
             ev = by_exact.get(norm)
+            if ev is None and norm in by_exact_ended:
+                # 复燃:已终结事件重现 → 重激活并计数(生命周期: …→ENDED→复燃)
+                ev = by_exact_ended.pop(norm)
+                ev.status, ev.ended_at = "active", None
+                ev.reappear_count = (ev.reappear_count or 0) + 1
+                events.append(ev)
+                by_exact[norm] = ev
+                logger.info("事件复燃(#%s):%s", ev.id, ev.primary_title[:40])
             if ev is None:  # 相似度匹配
                 for e in events:
                     if similarity(norm, e.norm_title) >= SIM_THRESHOLD:
@@ -148,7 +161,7 @@ def assign_tick(db: Session, user_id: int, settings=None) -> dict:
                 if changed:
                     merged += 1
 
-            pair = (ev.id, board, norm)
+            pair = (ev.id, board, norm, ts)
             if pair in seen_pairs:
                 continue
             seen_pairs.add(pair)
@@ -160,6 +173,9 @@ def assign_tick(db: Session, user_id: int, settings=None) -> dict:
                                        event_id=ev.id, latest_value=value, last_seen=ts))
                 ev.sample_count = (ev.sample_count or 0) + 1
             elif ts > m.last_seen:
+                # 增长率:最近两次样本环比(事件级"当前增速"事实)
+                if m.latest_value:
+                    ev.last_growth = (value - m.latest_value) / m.latest_value
                 m.latest_value, m.last_seen = value, ts
                 ev.sample_count = (ev.sample_count or 0) + 1
             else:
@@ -199,6 +215,8 @@ def list_events(db: Session, user_id: int, limit: int = 50,
             "last_seen": e.last_seen.isoformat(sep=" ", timespec="seconds"),
             "duration_hours": round(duration_h, 1), "sample_count": e.sample_count,
             "status": e.status,
+            "reappear_count": e.reappear_count or 0,
+            "last_growth": round(e.last_growth, 3) if e.last_growth is not None else None,
             # 简易阶段:最近 2h 有 seen 且平台≥2 → 扩散;仅单平台 → 潜伏/爆发由 Agent 层细化
             "stage": ("扩散" if e.platform_count >= 2 else "单平台")
                      + ("·活跃" if (now - e.last_seen).total_seconds() < 7200 else ""),

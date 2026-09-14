@@ -150,8 +150,9 @@ export const api = {
   memberAdd: (o) => req('POST', '/api/members', o),
   memberRenew: (id) => req('POST', `/api/members/${id}/renew`),
   memberStatus: (id, status) => req('POST', `/api/members/${id}/status`, { status }),
-  memberDel: (id) => req('DELETE', `/api/members/${id}`)
-  ,
+  memberDel: (id) => req('DELETE', `/api/members/${id}`),
   events: (q = '') => req('GET', '/api/events' + (q ? '?' + q : '')),
-  eventsAssign: () => req('POST', '/api/events/assign')
+  eventsAssign: () => req('POST', '/api/events/assign'),
+  sourceHealth: () => req('GET', '/api/source-health'),
+  trending: () => req('GET', '/api/trending')
 }
