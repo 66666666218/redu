@@ -151,4 +151,7 @@ export const api = {
   memberRenew: (id) => req('POST', `/api/members/${id}/renew`),
   memberStatus: (id, status) => req('POST', `/api/members/${id}/status`, { status }),
   memberDel: (id) => req('DELETE', `/api/members/${id}`)
+  ,
+  events: (q = '') => req('GET', '/api/events' + (q ? '?' + q : '')),
+  eventsAssign: () => req('POST', '/api/events/assign')
 }

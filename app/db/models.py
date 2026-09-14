@@ -508,3 +508,42 @@ class GroupMember(Base):
     status: Mapped[str] = mapped_column(String(16), default="active")         # active/kicked/exempt
     note: Mapped[str] = mapped_column(String(255), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class HotspotEvent(Base):
+    """热点事件:跨平台/跨变体标题的同一真实事件归并后的上层实体。
+
+    Hotspot(单平台单标题快照) → 归一化 + bigram 相似度聚类 → Event。
+    事件层回答"这个事件现在什么阶段/在几个平台/峰值多少",是跨平台共振
+    与生命周期分析的基础。归并算法纯本地(字符 bigram Jaccard,无外部依赖)。
+    """
+
+    __tablename__ = "hotspot_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    primary_title: Mapped[str] = mapped_column(String(255), default="")   # 首次出现的标题
+    norm_title: Mapped[str] = mapped_column(String(255), index=True)      # 规范化主键词
+    platforms: Mapped[str] = mapped_column(String(255), default="")       # JSON ["weibo","baidu",...]
+    platform_count: Mapped[int] = mapped_column(Integer, default=1)
+    first_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    peak_value: Mapped[float] = mapped_column(Float, default=0)           # 峰值热度
+    peak_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)         # 归并的快照条数
+    status: Mapped[str] = mapped_column(String(16), default="active")     # active/ended
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class EventMembership(Base):
+    """事件成员映射:(板块, 规范化标题) → 事件。不改五张平台老表结构。"""
+
+    __tablename__ = "event_memberships"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    board: Mapped[str] = mapped_column(String(16))                        # weibo/xianyu/douhot/baidu
+    norm_title: Mapped[str] = mapped_column(String(255))
+    event_id: Mapped[int] = mapped_column(ForeignKey("hotspot_events.id"), index=True)
+    latest_value: Mapped[float] = mapped_column(Float, default=0)
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)

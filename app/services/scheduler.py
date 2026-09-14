@@ -212,6 +212,13 @@ def wechat_collect_tick(settings: Settings | None = None) -> dict:
     return {"ok": ok, "failed": failed, "skipped": skipped}
 
 
+def _event_assign() -> None:
+    """事件归属(全用户):Hotspot → Event 聚类。"""
+    from app.services import events as events_svc
+
+    events_svc.event_assign_all_users()
+
+
 def _member_renewal() -> None:
     """会员续费检查(全用户):到期该收/超期该踢 → 飞书提醒运营者。"""
     from app.db import get_session_local
@@ -285,6 +292,8 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         (quark_keepalive_tick, "0 7 * * *", {"minute": 0, "hour": 7}, "quark_keepalive"),
         # 会员续费检查:每日 10:05(到期该收续费/超 24h 该踢名单 → 飞书)
         (_member_renewal, "5 10 * * *", {"minute": 5, "hour": 10}, "member_renewal"),
+        # 事件归属:每 15 分钟把近 24h 快照归并为事件(跨平台共振/生命周期的基础层)
+        (_event_assign, "*/15 * * * *", {"minute": "*/15"}, "event_assign"),
         (_agent_learn_all, "0 6 * * *", {"minute": 0, "hour": 6}, "agent_learning"),
         (agent_tick_all_users, "*/30 * * * *", {"minute": "*/30"}, "early_agent_tick"),
         (douhot_window_tick, _get_settings().douhot_window_cron, {"minute": "*/20"}, "douhot_window_tick"),

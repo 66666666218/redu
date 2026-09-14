@@ -14,6 +14,7 @@ import Admin from './views/Admin.vue'
 import Screen from './views/Screen.vue'
 import WechatListen from './views/WechatListen.vue'
 import Members from './views/Members.vue'
+import Events from './views/Events.vue'
 
 const routes = [
   { path: '/login', component: Login },
@@ -30,6 +31,7 @@ const routes = [
   { path: '/schedule', component: Schedule, meta: { auth: true } },
   { path: '/alerts', component: Alerts, meta: { auth: true } },
   { path: '/members', component: Members, meta: { auth: true } },
+  { path: '/events', component: Events, meta: { auth: true } },
   { path: '/admin', component: Admin, meta: { auth: true, admin: true } },
   { path: '/screen', component: Screen, meta: { auth: true, screen: true } }
 ]

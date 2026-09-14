@@ -1,5 +1,5 @@
 """平台 API 路由包:按领域拆分的 APIRouter 模块。"""
-from app.api import admin, alerts, auth, collect, cookies, dashboard, members, misc, wechat
+from app.api import admin, alerts, auth, collect, cookies, dashboard, events_api, members, misc, wechat
 
 all_routers = [
     auth.router,
@@ -8,9 +8,10 @@ all_routers = [
     collect.router,
     alerts.router,
     members.router,
+    events_api.router,
     admin.router,
     misc.router,
     wechat.router,
 ]
 
-__all__ = ["all_routers", "auth", "cookies", "dashboard", "collect", "alerts", "members", "admin", "misc", "wechat"]
+__all__ = ["all_routers", "auth", "cookies", "dashboard", "collect", "alerts", "members", "events_api", "admin", "misc", "wechat"]
