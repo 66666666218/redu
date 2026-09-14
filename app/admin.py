@@ -549,16 +549,15 @@ def insights(db: Session) -> dict:
     weibo_pred = sorted(weibo_merged.values(), key=lambda x: (x["burst"], x["forecast_next"] or 0), reverse=True)[:10]
     xy_pred = sorted(xy_merged.values(), key=lambda x: (x["burst"], x["forecast_next"] or 0), reverse=True)[:10]
 
-    # 全站抖音内容词(按去重标题取热度最高的)
-    seen: dict[str, float] = {}
-    for w in db.scalars(select(DouhotWord).order_by(DouhotWord.score.desc())).all():
-        title = w.title
-        if title in seen:
-            continue
-        seen[title] = w.score
-        hot_words.append({"title": title, "score": w.score, "trend_delta": w.trend_delta})
-        if len(seen) >= 20:
-            break
+    # 全站抖音内容词(按去重标题取热度最高的):数据库层 GROUP BY,
+    # 不再全表实例化(30 天旧库 ~86 万行,原写法打开洞察页即拖垮)
+    for title, score, delta in db.execute(
+        select(DouhotWord.title, func.max(DouhotWord.score), func.max(DouhotWord.trend_delta))
+        .group_by(DouhotWord.title)
+        .order_by(func.max(DouhotWord.score).desc())
+        .limit(20)
+    ).all():
+        hot_words.append({"title": title, "score": float(score or 0), "trend_delta": float(delta or 0)})
 
     return {
         "stats": {

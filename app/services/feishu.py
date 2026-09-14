@@ -113,14 +113,18 @@ def _batches(db: Session, user_id: int, section: str) -> tuple[dict[str, object]
     同一标题在不同批各自出现 → 才能做"排名涨跌";只在当前批出现 → 判为新增。
     每批内若同标题出现多次(极少数),取该批最后一次。
     """
-    import time as _t
-
     table = _TABLES[section]
-    rows = db.scalars(
-        select(table).where(table.user_id == user_id).order_by(table.id.asc())
-    ).all()
-    if not rows:
+    # 只取最近两个采集时间点 + 这两批的行,不再整表加载
+    # (旧库 20 万行/用户时,每次采集成功后的实时推送都会全量扫一遍,线性劣化)
+    ts_col = getattr(table, "captured_at", None) or getattr(table, "created_at")
+    recent_ts = db.execute(
+        select(ts_col).where(table.user_id == user_id)
+        .distinct().order_by(ts_col.desc()).limit(2)
+    ).scalars().all()
+    if not recent_ts:
         return {}, {}
+    cur_ts = recent_ts[0]
+    prev_ts = recent_ts[1] if len(recent_ts) >= 2 else None
 
     def key_of(r) -> str:
         return str(getattr(r, "title", "") or getattr(r, "item_id", "") or "").strip()
@@ -129,17 +133,13 @@ def _batches(db: Session, user_id: int, section: str) -> tuple[dict[str, object]
         ts = getattr(r, "captured_at", None) or getattr(r, "created_at")
         return ts if isinstance(ts, datetime) else datetime.min
 
-    # 收集全局所有出现过的采集时间点,取最近两个
-    all_ts = {ts_of(r) for r in rows}
-    sorted_ts = sorted(all_ts)
-    cur_ts = sorted_ts[-1]
-    prev_ts = sorted_ts[-2] if len(sorted_ts) >= 2 else None
-
     def build(ts: datetime) -> dict[str, object]:
+        rows = db.scalars(
+            select(table).where(table.user_id == user_id, ts_col == ts).order_by(table.id.asc())
+        ).all()
         out: dict[str, object] = {}
         for r in rows:
-            if ts_of(r) == ts:
-                out[key_of(r)] = r  # id 升序遍历,同批内后者覆盖 = 取该批最后一条
+            out[key_of(r)] = r  # id 升序遍历,同批内后者覆盖 = 取该批最后一条
         return {k: v for k, v in out.items() if k}
 
     return build(cur_ts), build(prev_ts) if prev_ts is not None else {}
