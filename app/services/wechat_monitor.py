@@ -583,23 +583,64 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
             _apply_sample(session, user_id, r, data, sample_now)
     if settings.pan_transfer_enabled and settings.quark_cookie:
         quark = QuarkTransfer(settings.quark_cookie, fid_store=settings.quark_fid_store)
-        for r in rows:
+        # 盘链级转存去重:同一资源(相同夸克分享链)只转存一次,后续文章复用首篇的
+        # 我方分享链——多个对标号发同一资源时,旧逻辑每篇各存一份(浪费空间+成倍风控暴露)。
+        reused: dict[str, tuple[str, str]] = {}  # pan_url -> (my_share_url, 提取码)
+        # 补转存兜底:历史转存失败(有原链无我链)的文章每轮最多补 3 篇,
+        # 让"推送带我的夸克链接"的覆盖率逐渐收敛到 100%
+        try:
+            backfill = session.scalars(select(WechatArticle).where(
+                WechatArticle.user_id == user_id, WechatArticle.pan_urls != "",
+                or_(WechatArticle.my_pan_urls.is_(None), WechatArticle.my_pan_urls == "")
+            ).order_by(WechatArticle.id).limit(3)).all()
+        except Exception:  # noqa: BLE001 - 兜底失败不影响本轮新文
+            backfill = []
+        transfer_rows = list(rows) + [x for x in backfill if x not in rows]
+        for r in transfer_rows:
             dead = False
             for u in [x.strip() for x in (r.pan_urls or "").splitlines() if x.strip()][:3]:
-                try:
-                    res = quark.transfer_and_share(u, save_dir=settings.quark_save_dir,
-                                                   password=settings.quark_share_password)
-                except QuarkAuthError as exc:
-                    logger.error("夸克 Cookie 失效,本轮停止转存:%s", exc)
-                    dead = True
-                    break
-                except QuarkError as exc:
-                    logger.warning("夸克转存失败 {}:{}(推送保留原链接)", u, exc)
-                    continue
+                # ① 批内复用:本轮已转存过该盘链
+                if u in reused:
+                    share_url, pwd = reused[u]
+                else:
+                    # ② 历史复用:库中任意文章已把该盘链转存过
+                    hist = session.execute(
+                        select(WechatArticle.my_pan_urls).join(
+                            WechatPanLink, WechatPanLink.article_id == WechatArticle.id)
+                        .where(WechatPanLink.pan_url == u,
+                               WechatArticle.my_pan_urls.isnot(None),
+                               WechatArticle.my_pan_urls != "",
+                               WechatArticle.id != r.id)
+                        .limit(1)).scalar()
+                    picked = ""
+                    for line in (hist or "").splitlines():
+                        line = line.strip()
+                        if line.startswith("https://pan.quark.cn/"):
+                            picked = line
+                            break
+                    if picked:
+                        m = re.search(r"(?:提取码\s*([0-9A-Za-z]{4}))", picked)
+                        reused[u] = (picked.split(" (提取码")[0].strip(), m.group(1) if m else "")
+                        logger.info("盘链复用(免重复转存): %s", u[:60])
+                        share_url, pwd = reused[u]
+                    else:
+                        # ③ 真正首次见到该资源:转存
+                        try:
+                            res = quark.transfer_and_share(u, save_dir=settings.quark_save_dir,
+                                                           password=settings.quark_share_password)
+                        except QuarkAuthError as exc:
+                            logger.error("夸克 Cookie 失效,本轮停止转存:%s", exc)
+                            dead = True
+                            break
+                        except QuarkError as exc:
+                            logger.warning("夸克转存失败 {}:{}(推送保留原链接)", u, exc)
+                            continue
+                        reused[u] = (res["share_url"], res["password"])
+                        share_url, pwd = res["share_url"], res["password"]
                 mine = [x for x in (r.my_pan_urls or "").splitlines() if x.strip()]
-                mine.append(res["share_url"] + (f" (提取码 {res['password']})" if res["password"] else ""))
+                mine.append(share_url + (f" (提取码 {pwd})" if pwd else ""))
                 r.my_pan_urls = chr(10).join(mine)[:2000]
-                replacements.setdefault(r.id, []).append((u, res["share_url"], res["password"]))
+                replacements.setdefault(r.id, []).append((u, share_url, pwd))
             if dead:
                 break
     # 资源级共振:同一盘链在窗口期内被 ≥2 篇文章推送 → 同行网络都在发的确认级爆点资源

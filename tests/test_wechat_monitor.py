@@ -938,3 +938,62 @@ def test_insert_filters_empty_title_and_url_case(session) -> None:
     ]
     out = wechat_monitor._insert_new_articles(session, 1, b, items, source="listen", require_pan=False)
     assert len(out) == 1  # 空标题过滤 + 同 URL 去重 → 只剩文A
+
+
+def test_pan_reuse_skips_duplicate_transfer(session, monkeypatch) -> None:
+    """同盘链只转存一次:历史文章已有我方链接 → 新文章复用,不再调 transfer_and_share。
+
+    (用户反馈:相同资源被多个对标号转发时每篇各存一份,浪费夸克空间+成倍风控暴露)
+    """
+    from app.db.models import WechatPanLink
+    from app.services.quark_transfer import QuarkError, QuarkTransfer
+
+    # 历史:文章 A 已把盘链 X 转存过
+    a = WechatArticle(user_id=1, title="首发文", url="https://mp.weixin.qq.com/s/first",
+                      source="listen", benchmark_id=None,
+                      pan_urls="https://pan.quark.cn/s/reuseX",
+                      my_pan_urls="https://pan.quark.cn/s/OLD (提取码 ab12)")
+    session.add(a)
+    session.commit()
+    session.add(WechatPanLink(user_id=1, article_id=a.id, pan_url="https://pan.quark.cn/s/reuseX"))
+    session.commit()
+    # 新文 B:同一盘链
+    b = WechatArticle(user_id=1, title="转载文", url="https://mp.weixin.qq.com/s/second",
+                      source="listen", benchmark_id=None,
+                      pan_urls="https://pan.quark.cn/s/reuseX")
+    session.add(b)
+    session.commit()
+
+    def _no_transfer(self, *a, **kw):
+        raise AssertionError("同盘链不应重复转存")
+
+    monkeypatch.setattr(QuarkTransfer, "transfer_and_share", _no_transfer)
+    st = _settings(quark_cookie="ck=x", pan_transfer_enabled=True,
+                   wechat_listen_sample_new=False)
+    reps = wechat_monitor._enrich_new_articles(session, 1, st, [b], client=None)
+    assert reps[b.id] == [("https://pan.quark.cn/s/reuseX", "https://pan.quark.cn/s/OLD", "ab12")]
+    assert "https://pan.quark.cn/s/OLD" in b.my_pan_urls
+
+
+def test_pan_first_transfer_records_replacement(session, monkeypatch) -> None:
+    """首次见到的盘链照常转存并记 replacements(转存路径未被复用逻辑破坏)。"""
+    from app.services.quark_transfer import QuarkTransfer
+
+    b = WechatArticle(user_id=1, title="新资源文", url="https://mp.weixin.qq.com/s/fresh",
+                      source="listen", benchmark_id=None,
+                      pan_urls="https://pan.quark.cn/s/freshY")
+    session.add(b)
+    session.commit()
+
+    class _FakeQuark:
+        def transfer_and_share(self, url, save_dir="", password=""):
+            assert url == "https://pan.quark.cn/s/freshY"
+            return {"share_url": "https://pan.quark.cn/s/NEW", "password": "zz99"}
+
+    monkeypatch.setattr(QuarkTransfer, "__init__", lambda self, *a, **kw: None)
+    monkeypatch.setattr(QuarkTransfer, "transfer_and_share", _FakeQuark.transfer_and_share)
+    st = _settings(quark_cookie="ck=x", pan_transfer_enabled=True,
+                   wechat_listen_sample_new=False)
+    reps = wechat_monitor._enrich_new_articles(session, 1, st, [b], client=None)
+    assert reps[b.id] == [("https://pan.quark.cn/s/freshY", "https://pan.quark.cn/s/NEW", "zz99")]
+    assert "https://pan.quark.cn/s/NEW" in b.my_pan_urls
