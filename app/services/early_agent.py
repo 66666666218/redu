@@ -102,6 +102,18 @@ def detect_signals(db: Session, user_id: int, settings: Settings) -> list[dict]:
                 continue
             latest = values[-1]
             prev = values[-2] if len(values) >= 2 else None
+            # 掉榜回榜防护:末拍间隔远超序列自身的中位间隔时,[-2] 不能当"上期"
+            # (与 tenant.recent_growth 同型问题——隔三天的两拍环比会造出假苗头推飞书)
+            if prev is not None and len(pts) >= 3:
+                _ts = [_to_dt(p[0]) for p in pts]
+                if all(_ts):
+                    _gaps = sorted(
+                        (_ts[i] - _ts[i - 1]).total_seconds()
+                        for i in range(1, len(_ts)) if _ts[i] > _ts[i - 1])
+                    if _gaps:
+                        _med = _gaps[len(_gaps) // 2]
+                        if (_ts[-1] - _ts[-2]).total_seconds() > _med * 2.5:
+                            prev = None  # 间隔异常:不算增速/加速,只看量级/新上榜/共振
             parts: list[str] = []
             score = 0
             v_now = None
@@ -188,6 +200,14 @@ def agent_tick(db: Session, user_id: int, settings: Settings | None = None) -> i
     tracked = {(s.board, s.norm): s for s in db.scalars(select(AgentStage).where(
         AgentStage.user_id == user_id)).all()}
     now = datetime.now()
+    # 陈旧记忆清理:记忆行超 72h 未更新(期间未被无跃迁分支刷新=词掉榜/被静默)
+    # 即退场,日后二次起势走 escalated(首次进入)重新提醒——否则 old_stage 停留在
+    # "爆发",老词再涨到苗头时 upgraded(1>3)=False 恰好被静默,而老词二次起势
+    # 恰恰最值得关注。在榜词每轮都刷新 updated_at,永不误删。
+    stale_cutoff = now - timedelta(hours=72)
+    for key in [k for k, st in tracked.items()
+                if st.updated_at and st.updated_at < stale_cutoff]:
+        db.delete(tracked.pop(key))
     to_push: list[dict] = []
     stage_rows: list[AgentStage] = []
 

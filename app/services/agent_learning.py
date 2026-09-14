@@ -105,18 +105,36 @@ def backtest_and_learn(db: Session, user_id: int, settings=None) -> dict:
         AgentStage.stage.in_(("苗头", "上升")),
         AgentStage.updated_at <= two_days_ago)).all()
 
+    # 已回测游标:同一阶段行(updated_at 未变)只回测一次,防止静止行每日重复记账
+    # (旧实现把同一行天天计入 stats,total 虚胖且同一行"昨天 miss 今天 hit"自相矛盾)
+    seen_key = "agent_backtest_seen"
+    seen_row = db.scalar(select(SystemConfig).where(SystemConfig.key == seen_key))
+    seen: dict[str, str] = {}
+    if seen_row and seen_row.value:
+        try:
+            seen = json.loads(seen_row.value)
+        except (ValueError, TypeError):
+            seen = {}
+
     for st in stages:
+        row_sig = f"{st.board}|{st.norm or st.kw}|{st.updated_at.isoformat() if st.updated_at else ''}"
+        if seen.get(row_sig):
+            continue
         series = series_map.get(st.board, {}).get(st.norm or st.kw)
         if not series or len(series) < 2:
             continue
-        values = [float(v) for _, v in series]
-        # 推送时热度:没有精确记录,用 updated_at 时刻附近的值近似(取倒数第2个样本)
-        base = values[-2] if len(values) >= 2 else values[0]
-        now_v = values[-1]
+        # 推送时基线:取 updated_at(推送时刻)**之前**的最后一个样本。
+        # 旧实现取 values[-2](=昨天的值),系统性低估增长率 → 命中率虚低 → 权重漂移。
+        base_pts = [v for t, v in series if t <= (st.updated_at or dt.now() - timedelta(days=2))]
+        if not base_pts:
+            continue
+        base = float(base_pts[-1])
+        now_v = float(series[-1][1])
         if base <= 0:
             continue
         growth = (now_v - base) / base
         hit = growth >= 0.5
+        seen[row_sig] = "1"
         backtested += 1
         if hit:
             hits += 1
@@ -149,5 +167,14 @@ def backtest_and_learn(db: Session, user_id: int, settings=None) -> dict:
                             sig, wkey, rate * 100, weights[wkey], new_w)
                 weights[wkey] = new_w
         save_weights(db, weights)
+
+    # 游标持久化(无论是否动权重都要写,否则静止行明天又被回测一遍)
+    if backtested:
+        payload = json.dumps(seen, ensure_ascii=False)
+        if seen_row:
+            seen_row.value = payload
+        else:
+            db.add(SystemConfig(key=seen_key, value=payload))
+        db.commit()
 
     return {"backtested": backtested, "hits": hits, "weights": weights}

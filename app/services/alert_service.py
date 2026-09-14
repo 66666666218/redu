@@ -438,7 +438,11 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
                 for wh in webhooks_for(settings, kind):
                     if FeishuClient(wh, settings.feishu_secret).send(msg):
                         sent += 1
-            db.commit()
+            # 全部发送失败 → 丢弃冷却门(否则飞书故障期"持续失败"告警被静默一个冷却窗)
+            if sent:
+                db.commit()
+            else:
+                db.rollback()
             logger.info("采集失败告警推送,条数=%s", sent)
         return sent
     finally:

@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     quiet_hours_start: int = 23           # 免打扰开始(小时,23=晚11点);非紧急推送延到免打扰结束
     quiet_hours_end: int = 8              # 免打扰结束(小时,8=早8点);实时热点等紧急推送不受限
     agent_enabled: bool = True             # 早期苗头 Agent(全板块自主预测)开关
-    agent_score_threshold: int = 55        # 苗头判定分数线(≥80 为强苗头)
+    agent_score_threshold: int = 55        # 苗头判定分数线(≥70 上升,≥85 爆发)
     agent_cooldown_hours: int = 12         # 同一(板块,关键词)的苗头冷却(小时)
     weread_refresh_cron: str = "50 7,15,23 * * *"  # 微信读书 Cookie 自动续期(每8小时,保证 skey 永不过期)
     candidate_search_terms: str = ""   # 候选发现搜索词(逗号分隔;空=仅用对标号标题画像词)

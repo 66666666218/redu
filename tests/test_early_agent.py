@@ -179,3 +179,21 @@ def test_agent_learning_roundtrip_and_backtest(session, st) -> None:
 
     out = backtest_and_learn(session, 1, settings=st)
     assert out["backtested"] == 0 and out["weights"]["resonance"] == 35
+
+
+def test_stale_memory_cleared_for_reignition(session, st, monkeypatch) -> None:
+    """老词掉榜超 72h 后记忆退场;二次起势必须重新首推(而非被旧'爆发'记忆静默)。"""
+    _weibo(session, "去年爆过的老词", 900, hours_ago=100)
+    session.add(AgentStage(user_id=1, board="weibo", norm=early_agent._norm("去年爆过的老词"),
+                           kw="去年爆过的老词", stage="爆发", score=90,
+                           parts="增速+120% 量级900", first_seen=datetime.now() - timedelta(hours=100),
+                           updated_at=datetime.now() - timedelta(hours=100)))
+    session.commit()
+
+    # 二次起势:900→2000(+122% → +40) + 量级(+15) = 55 → 苗头。
+    # 若旧"爆发"记忆还在,upgraded(苗头1>爆发3)=False 会静默
+    _weibo(session, "去年爆过的老词", 2000, hours_ago=1)
+    session.commit()
+    assert early_agent.agent_tick(session, 1, settings=st) == 1  # 老词重新首推
+    row = session.scalar(select(AgentStage))
+    assert row is not None and row.stage == "苗头"
