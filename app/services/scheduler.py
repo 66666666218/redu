@@ -212,6 +212,21 @@ def wechat_collect_tick(settings: Settings | None = None) -> dict:
     return {"ok": ok, "failed": failed, "skipped": skipped}
 
 
+def _member_renewal() -> None:
+    """会员续费检查(全用户):到期该收/超期该踢 → 飞书提醒运营者。"""
+    from app.db import get_session_local
+    from app.services import members as members_svc
+
+    db = get_session_local()()
+    try:
+        members_svc.renewal_tick(db=db)
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        logger.exception("会员续费检查失败")
+    finally:
+        db.close()
+
+
 def _agent_learn_all() -> None:
     """苗头回测+权重自适应(全用户)。"""
     from sqlalchemy import select
@@ -268,6 +283,8 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         (traffic_tick, _get_settings().wechat_traffic_cron, {"minute": 30, "hour": 21}, "wechat_traffic"),
         (traffic_tick, "30 9 * * *", {"minute": 30, "hour": 9}, "wechat_traffic_am"),
         (quark_keepalive_tick, "0 7 * * *", {"minute": 0, "hour": 7}, "quark_keepalive"),
+        # 会员续费检查:每日 10:05(到期该收续费/超 24h 该踢名单 → 飞书)
+        (_member_renewal, "5 10 * * *", {"minute": 5, "hour": 10}, "member_renewal"),
         (_agent_learn_all, "0 6 * * *", {"minute": 0, "hour": 6}, "agent_learning"),
         (agent_tick_all_users, "*/30 * * * *", {"minute": "*/30"}, "early_agent_tick"),
         (douhot_window_tick, _get_settings().douhot_window_cron, {"minute": "*/20"}, "douhot_window_tick"),

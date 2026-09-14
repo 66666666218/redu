@@ -145,4 +145,10 @@ export const api = {
   wechatArticleTraffic: (id) => req('GET', `/api/wechat/articles/${id}/traffic`),
   wechatArticleRewrite: (id) => req('POST', `/api/wechat/articles/${id}/rewrite`),
   wechatArticleRewrites: (id) => req('GET', `/api/wechat/articles/${id}/rewrites`)
+  ,
+  members: () => req('GET', '/api/members'),
+  memberAdd: (o) => req('POST', '/api/members', o),
+  memberRenew: (id) => req('POST', `/api/members/${id}/renew`),
+  memberStatus: (id, status) => req('POST', `/api/members/${id}/status`, { status }),
+  memberDel: (id) => req('DELETE', `/api/members/${id}`)
 }

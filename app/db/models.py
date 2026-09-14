@@ -482,3 +482,29 @@ class SystemConfig(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str] = mapped_column(Text(), default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
+class GroupMember(Base):
+    """付费群会员:按入群时间+周期自动生成续费提醒与超期踢人名单。
+
+    状态机(每日 tick 自动流转,仅供展示;自动私信/踢人需接微信机器人,预留 status 字段):
+    - active: 未到期
+    - due:     到期后 24h 内(该私信收续费)
+    - overdue: 到期超 24h(该踢出群聊)
+    - renewed: 已续费(last_renewed_at 刷新后回到 active)
+    - kicked / exempt: 人工标记
+    """
+
+    __tablename__ = "group_members"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)  # 归属平台账号
+    group_name: Mapped[str] = mapped_column(String(128), default="")          # 哪个群
+    nickname: Mapped[str] = mapped_column(String(128), default="")            # 群昵称
+    wechat_id: Mapped[str] = mapped_column(String(128), default="")           # 微信号(可选,私信用)
+    joined_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    cycle_days: Mapped[int] = mapped_column(Integer, default=30)              # 续费周期(天)
+    last_renewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="active")         # active/kicked/exempt
+    note: Mapped[str] = mapped_column(String(255), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
