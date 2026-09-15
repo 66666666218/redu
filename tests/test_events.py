@@ -58,9 +58,11 @@ class TestAssignTick:
     def test_variants_merge_into_one_event(self, session):
         from app.services import events
 
-        self._seed(session, "某明星官宣结婚", 1000, hours_ago=3)
-        self._seed(session, "某明星宣布结婚", 1500, hours_ago=2)
-        self._seed(session, "某明星官宣婚讯", 2200, hours_ago=1)
+        # 增量扫描语义:快照都是"刚采集"的(分钟级),不能构造小时级历史时间戳
+        # 最旧的先处理(决定事件主标题);都在增量窗口内(分钟级"刚采集")
+        self._seed(session, "某明星官宣结婚", 1000, hours_ago=3 / 12)
+        self._seed(session, "某明星宣布结婚", 1500, hours_ago=2 / 12)
+        self._seed(session, "某明星官宣婚讯", 2200, hours_ago=1 / 12)
         out = events.assign_tick(session, 1)
         assert out["created"] == 1 and out["merged"] >= 2
         ev = session.scalar(select(HotspotEvent))
@@ -112,7 +114,7 @@ def test_reignition_reactivates_ended_event(session):
     now = datetime.now()
     db = session
     db.add(WeiboHotItem(user_id=1, title="某综艺陷争议风波", heat=500, rank=2,
-                        captured_at=now - timedelta(hours=20)))  # 24h 扫描窗口内
+                        captured_at=now - timedelta(minutes=1)))  # 刚采集(增量扫描语义)
     db.commit()
     events.assign_tick(session, 1)
     ev = session.scalar(select(HotspotEvent))

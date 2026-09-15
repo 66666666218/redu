@@ -83,11 +83,31 @@ def similarity(a: str, b: str) -> float:
     return dice_similarity(a, b)
 
 
+def _dice(grams_a: set[str], grams_b: set[str]) -> float:
+    """已切好 bigram 的 Dice(热路径:归属循环里避免重复切分)。"""
+    if not grams_a or not grams_b:
+        return 0.0
+    return 2 * len(grams_a & grams_b) / (len(grams_a) + len(grams_b))
+
+
 def assign_tick(db: Session, user_id: int, settings=None) -> dict:
     """归属一轮:扫近 24h 快照 → 归并到活跃事件/新建事件 → 刷新生命周期字段。"""
     settings = settings or get_settings()
     now = datetime.now()
+    # 增量扫描:只扫上次归属之后的新快照(带 10min 重叠缓冲防写入延迟漏扫)。
+    # 旧实现每轮重扫 24h 全部快照(幂等保证正确但纯重复计算,139 次归属全是白跑);
+    # 游标持久化到 system_config,进程重启不丢。首次运行(无游标)退回全窗扫描。
+    from app.db.models import SystemConfig
+
+    cursor_row = db.scalar(select(SystemConfig).where(
+        SystemConfig.key == f"event_cursor_{user_id}"))
     scan_since = now - timedelta(hours=SCAN_HOURS)
+    if cursor_row and cursor_row.value:
+        try:
+            last = datetime.fromisoformat(cursor_row.value)
+            scan_since = max(scan_since, last - timedelta(minutes=10))
+        except ValueError:
+            pass
     active_cutoff = now - timedelta(hours=ACTIVE_WINDOW_H)
 
     events = db.scalars(select(HotspotEvent).where(
@@ -95,6 +115,9 @@ def assign_tick(db: Session, user_id: int, settings=None) -> dict:
         HotspotEvent.status == "active",
         HotspotEvent.last_seen >= active_cutoff,
     )).all()
+    # 事件 bigram 预计算:相似度匹配的分母是全部活跃事件(数百个),
+    # 每轮每个新条目都重切一遍事件 bigram 是 O(N×M×L) 的纯浪费
+    ev_grams: dict[int, set[str]] = {e.id: _bigrams(e.norm_title) for e in events}
     # 事件指纹:规范化标题 → 事件(优先精确命中,再做相似度)
     by_exact: dict[str, HotspotEvent] = {e.norm_title: e for e in events}
     # 复燃索引:近 7 天终结的事件(词二次起势时重激活,生命周期含"复燃"态)
@@ -129,9 +152,11 @@ def assign_tick(db: Session, user_id: int, settings=None) -> dict:
                 events.append(ev)
                 by_exact[norm] = ev
                 logger.info("事件复燃(#%s):%s", ev.id, ev.primary_title[:40])
-            if ev is None:  # 相似度匹配
+            if ev is None:  # 相似度匹配(bigram 预计算,只对当前新条目切一次)
+                grams = _bigrams(norm)
                 for e in events:
-                    if similarity(norm, e.norm_title) >= SIM_THRESHOLD:
+                    ge = ev_grams.get(e.id)
+                    if ge and _dice(grams, ge) >= SIM_THRESHOLD:
                         ev = e
                         break
             if ev is None:  # 新事件
@@ -143,6 +168,7 @@ def assign_tick(db: Session, user_id: int, settings=None) -> dict:
                 db.flush()
                 by_exact[norm] = ev
                 events.append(ev)
+                ev_grams[ev.id] = _bigrams(norm)  # 新事件同步登记指纹,后续变体才能匹配到
                 created += 1
             else:
                 changed = False
@@ -190,6 +216,13 @@ def assign_tick(db: Session, user_id: int, settings=None) -> dict:
         e.status, e.ended_at = "ended", now
         ended += 1
 
+    db.commit()
+    # 游标推进到本轮扫描起点+缓冲(用 commit 前的 now,保证严格单调)
+    payload = now.isoformat()
+    if cursor_row:
+        cursor_row.value = payload
+    else:
+        db.add(SystemConfig(key=f"event_cursor_{user_id}", value=payload))
     db.commit()
     if created or merged or ended:
         logger.info("事件归属完成:新建=%s 归并=%s 终结=%s", created, merged, ended)
