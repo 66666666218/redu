@@ -18,9 +18,15 @@ def _mask(text: str) -> str:
     lower = text.lower()
     for field in _SENSITIVE_FIELDS:
         # 命中形如 "field=..." 或 "field:..." 的片段,仅保留前 4 位。
+        # 分隔符校验:field 后必须紧跟 =/: 才算键值对——否则会把
+        # "Cookie 定时续期完成:%d" 这类普通语句误判,吞掉 %d 占位符引发 Logging error
         marker = field
         idx = lower.find(marker)
         while idx != -1:
+            sep = lower[idx + len(marker): idx + len(marker) + 1]
+            if sep not in ("=", ":"):
+                idx = lower.find(marker, idx + len(marker))
+                continue
             val_start = idx + len(marker) + 1
             val_end = text.find(" ", val_start)
             if val_end == -1:
