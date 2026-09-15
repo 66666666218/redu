@@ -194,10 +194,10 @@ def wechat_collect_tick(settings: Settings | None = None) -> dict:
                 skipped += 1
                 continue
             try:
-                # 错峰批次:按当前小时轮转,每批约 7 个号(号级延迟 ≤3h,瞬时密度降 2/3)
-                batch = (now.hour % 3) if _wechat_rows_for(db, row.user_id) > 14 else None
+                # 不限数量:每轮监控全部对标号(用户决策:发现时效优先;
+                # 微信读书客户端内置 2s 限速,32 号约 100s/轮,由 max_instances=1 串行防重叠)
                 run_wechat_listen(db, row.user_id, settings=settings,
-                                  batch_index=batch, batch_size=7)
+                                  batch_index=None, batch_size=None)
                 from app.services.focus_alert import run_focus_alert
                 run_focus_alert(db, row.user_id, settings)  # 公众号新文参与共振/反复检测
                 ok += 1
@@ -210,6 +210,46 @@ def wechat_collect_tick(settings: Settings | None = None) -> dict:
     if ok or failed:
         logger.info("公众号监听 tick 完成:成功=%s 失败=%s", ok, failed)
     return {"ok": ok, "failed": failed, "skipped": skipped}
+
+
+def _wechat_forced() -> None:
+    """公众号固定时点加跑:立即监听一轮(与每分钟 tick 用同一套原子抢占防重复)。"""
+    from datetime import datetime as _dt
+
+    from sqlalchemy import select
+
+    from app.db import get_session_local
+    from app.db.models import User, UserSchedule
+    from app.services import schedule_service
+    from app.services.wechat_monitor import run_wechat_listen
+
+    settings = get_settings()
+    db = get_session_local()()
+    ok = skipped = 0
+    try:
+        now = _dt.now()
+        for (uid,) in db.execute(
+                select(User.id).where(User.enabled.is_(True)).order_by(User.id)).all():
+            row = db.scalar(select(UserSchedule).where(
+                UserSchedule.user_id == uid, UserSchedule.section == "wechat",
+                UserSchedule.enabled.is_(True)))
+            if row is None:
+                continue
+            if not schedule_service.claim_schedule(db, row, now):
+                skipped += 1  # 刚被每分钟 tick 抢占过 → 本轮已监听过,跳过
+                continue
+            try:
+                run_wechat_listen(db, uid, settings=settings, batch_index=None, batch_size=None)
+                from app.services.focus_alert import run_focus_alert
+                run_focus_alert(db, uid, settings)
+                ok += 1
+            except Exception:  # noqa: BLE001 - 单用户失败不影响其余
+                db.rollback()
+                logger.exception("公众号固定加跑失败 user=%s", uid)
+    finally:
+        db.close()
+    if ok or skipped:
+        logger.info("公众号固定加跑完成:执行=%s 跳过=%s", ok, skipped)
 
 
 def _event_assign() -> None:
@@ -294,6 +334,11 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         (_member_renewal, "5 10 * * *", {"minute": 5, "hour": 10}, "member_renewal"),
         # 事件归属:每 15 分钟把近 24h 快照归并为事件(跨平台共振/生命周期的基础层)
         (_event_assign, "*/15 * * * *", {"minute": "*/15"}, "event_assign"),
+        # 公众号固定加跑时点(用户要求:9:30/10:30/16:00 额外监控最新文章;
+        # 原子抢占使紧随其后的每分钟 tick 自动跳过,不会重复监听)
+        (_wechat_forced, "30 9 * * *", {"minute": 30, "hour": 9}, "wechat_forced_0930"),
+        (_wechat_forced, "30 10 * * *", {"minute": 30, "hour": 10}, "wechat_forced_1030"),
+        (_wechat_forced, "0 16 * * *", {"minute": 0, "hour": 16}, "wechat_forced_1600"),
         (_agent_learn_all, "0 6 * * *", {"minute": 0, "hour": 6}, "agent_learning"),
         (agent_tick_all_users, "*/30 * * * *", {"minute": "*/30"}, "early_agent_tick"),
         (douhot_window_tick, _get_settings().douhot_window_cron, {"minute": "*/20"}, "douhot_window_tick"),
