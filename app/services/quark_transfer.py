@@ -267,7 +267,7 @@ class QuarkTransfer:
             status = data.get("status") or data.get("task_status")
             if status in (-1, 3, 4, "fail", "failed", "error"):
                 raise QuarkError(f"夸克保存任务失败: {resp.get('message') or str(resp)[:200]}")
-        logger.warning("夸克保存任务未返回文件ID task_id={}", task_id)
+        logger.warning("夸克保存任务未返回文件ID task_id=%s", task_id)
         return []
 
     def _wait_share_task(self, task_id: str) -> dict:
@@ -330,7 +330,7 @@ class QuarkTransfer:
             # 复用持久化 fid 时目录可能已被用户删/移动:清缓存重建后重试一次
             if norm_dir not in self._used_store:
                 raise
-            logger.warning("夸克缓存 fid 已失效({}),重建目录后重试", norm_dir)
+            logger.warning("夸克缓存 fid 已失效(%s),重建目录后重试", norm_dir)
             self.invalidate_dir(norm_dir)
             payload["to_pdir_fid"] = self._ensure_dir(save_dir)
             data = self._request("POST", "/1/clouddrive/share/sharepage/save",
@@ -371,7 +371,7 @@ class QuarkTransfer:
             if share_data.get("share_url") else None
         new_url = url_m.group(0) if url_m else f"https://pan.quark.cn/s/{new_share_id}"
         out_password = str(share_data.get("passcode") or password or "")
-        logger.info("夸克转存+分享完成: {} 个文件 → {} ({} 个文件)", len(new_ids), new_url, len(new_ids))
+        logger.info("夸克转存+分享完成: %s 个文件 → %s (%s 个文件)", len(new_ids), new_url, len(new_ids))
         return {"share_url": new_url, "password": out_password, "files": len(new_ids)}
 
     @staticmethod

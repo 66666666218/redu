@@ -633,7 +633,10 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                             dead = True
                             break
                         except QuarkError as exc:
-                            logger.warning("夸克转存失败 {}:{}(推送保留原链接)", u, exc)
+                            # 41017=资源本来就在自己盘里(同行搬运我们的链),41031=对方分享被封:
+                            # 都是预期内失败,info 级简记,避免刷屏
+                            level = logger.info if ("41017" in str(exc) or "41031" in str(exc)) else logger.warning
+                            level("夸克转存失败 %s:%s(推送保留原链接)", u, str(exc)[:80])
                             continue
                         reused[u] = (res["share_url"], res["password"])
                         share_url, pwd = res["share_url"], res["password"]
