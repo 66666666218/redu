@@ -407,6 +407,14 @@ def import_benchmarks_from_shelf(session: Session, user_id: int,
     session.commit()
     return {"status": "success", "shelf": len(books), "created": created, "updated": updated}
 
+def _cookie_fingerprint(cookie: str) -> str:
+    """Cookie 短指纹(前 6 位 md5):告警 key 携带它,换新 Cookie 后冷却自动重置——
+    否则新 Cookie 的第一次死亡会被旧 Cookie 时期的同标题告警冷却拦住(2026-09-16 实测)。"""
+    import hashlib
+
+    return hashlib.md5(str(cookie or "").encode()).hexdigest()[:6]
+
+
 def refresh_weread_cookie(session: Session, user_id: int, settings: Settings | None = None) -> dict:
     """微信读书 Cookie 续期:长效 wr_rt → 新短效 wr_skey,并回写 Cookie 管理。
 
@@ -473,9 +481,12 @@ def weread_refresh_tick(settings: Settings | None = None) -> int:
         if failed:
             try:
                 detail = "; ".join(f"用户{u}:{r or '未知原因'}" for u, r in failed)
+                from app.services.cookie_store import get_cookie
+
+                fp = _cookie_fingerprint(get_cookie(db, failed[0][0], "weread") or "")
                 notify_incident(
                     db, failed[0][0], "wechat",
-                    "🟠 微信读书 Cookie 自动续期失败,请重新复制",
+                    f"🟠 微信读书 Cookie 自动续期失败,请重新复制[{fp}]",
                     f"wr_rt 已整体失效({detail}),监听即将断源。"
                     "请在浏览器登录 weread.qq.com → F12 → 网络 复制完整 Cookie,"
                     "更新到「Cookie 管理」页 weread 平台。"
@@ -867,7 +878,7 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
                     from app.services.alert_service import notify_incident
                     notify_incident(
                         session, user_id, "wechat",
-                        "🟠 微信读书 Cookie 已过期,请更新",
+                        f"🟠 微信读书 Cookie 已过期,请更新[{_cookie_fingerprint(cookie)}]",
                         "自动续期失败。请在浏览器登录 weread.qq.com 后 F12 复制 Cookie,"
                         "粘贴到「Cookie 管理」页 weread 平台(或发给我更新)",
                         settings=settings)
