@@ -633,9 +633,18 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                             dead = True
                             break
                         except QuarkError as exc:
-                            # 41017=资源本来就在自己盘里(同行搬运我们的链),41031=对方分享被封:
-                            # 都是预期内失败,info 级简记,避免刷屏
-                            level = logger.info if ("41017" in str(exc) or "41031" in str(exc)) else logger.warning
+                            if "41017" in str(exc):
+                                # 资源本来就是我们分享出去的(同行搬运我们的链):
+                                # 原链即我方链接,直接收录,推送可点开自己的资源;
+                                # my_pan_urls 落值后补转存兜底也不再重试
+                                mine = [x for x in (r.my_pan_urls or "").splitlines() if x.strip()]
+                                mine.append(u + "(自分享)")
+                                r.my_pan_urls = chr(10).join(mine)[:2000]
+                                replacements.setdefault(r.id, []).append((u, u, ""))
+                                logger.info("盘链为自己分享,直接采用: %s", u[:60])
+                                continue
+                            # 41031=对方分享被封(源失效,推送回落原文);其余为真失败
+                            level = logger.info if "41031" in str(exc) else logger.warning
                             level("夸克转存失败 %s:%s(推送保留原链接)", u, str(exc)[:80])
                             continue
                         reused[u] = (res["share_url"], res["password"])

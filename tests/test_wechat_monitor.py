@@ -997,3 +997,25 @@ def test_pan_first_transfer_records_replacement(session, monkeypatch) -> None:
     reps = wechat_monitor._enrich_new_articles(session, 1, st, [b], client=None)
     assert reps[b.id] == [("https://pan.quark.cn/s/freshY", "https://pan.quark.cn/s/NEW", "zz99")]
     assert "https://pan.quark.cn/s/NEW" in b.my_pan_urls
+
+
+def test_pan_selfshare_41017_adopted_as_own_link(session, monkeypatch) -> None:
+    """41017(转存自己的分享)=同行搬运了我们的链:原链直接收录为我方链接,不再重试。"""
+    from app.services.quark_transfer import QuarkError, QuarkTransfer
+
+    b = WechatArticle(user_id=1, title="搬运我们资源的文", url="https://mp.weixin.qq.com/s/repost",
+                      source="listen", benchmark_id=None,
+                      pan_urls="https://pan.quark.cn/s/ourshare")
+    session.add(b)
+    session.commit()
+
+    def _fail(self, url, **kw):
+        raise QuarkError("夸克接口失败(41017): 用户禁止转存自己的分享")
+
+    monkeypatch.setattr(QuarkTransfer, "__init__", lambda self, *a, **kw: None)
+    monkeypatch.setattr(QuarkTransfer, "transfer_and_share", _fail)
+    st = _settings(quark_cookie="ck=x", pan_transfer_enabled=True,
+                   wechat_listen_sample_new=False)
+    reps = wechat_monitor._enrich_new_articles(session, 1, st, [b], client=None)
+    assert reps[b.id] == [("https://pan.quark.cn/s/ourshare", "https://pan.quark.cn/s/ourshare", "")]
+    assert "https://pan.quark.cn/s/ourshare" in b.my_pan_urls  # 已落值 → 补转存不再重试
