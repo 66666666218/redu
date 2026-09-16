@@ -474,7 +474,18 @@ def refresh_weread_cookie(session: Session, user_id: int, settings: Settings | N
     try:
         WereadClient(new_cookie).shelf()
     except WereadAuthError as exc:
-        logger.warning("微信读书续期后仍登录失效(用户 %s):%s", user_id, exc)
+        # 能换出 skey 但验证即死 → renewal 接口正处于频控期(换出的即刻作废),
+        # 与换不出同样需要冷却,否则每分钟监听自救继续撞,延长封锁
+        logger.warning("微信读书续期后仍登录失效(用户 %s):%s;进入续期冷却", user_id, exc)
+        row = session.scalar(select(SystemConfig).where(
+            SystemConfig.key == _RENEWAL_COOLDOWN_KEY.format(uid=user_id)))
+        until = datetime.now() + timedelta(minutes=_RENEWAL_COOLDOWN_MIN)
+        if row:
+            row.value = until.isoformat()
+        else:
+            session.add(SystemConfig(key=_RENEWAL_COOLDOWN_KEY.format(uid=user_id),
+                                     value=until.isoformat()))
+        session.commit()
         return {"status": "failed", "reason": "expired"}
     except WereadError as exc:  # 非登录问题(风控/接口异常):保留续期结果但标注未验证
         logger.warning("微信读书续期后书架验证异常(非登录问题,用户 %s):%s", user_id, exc)
