@@ -415,17 +415,42 @@ def _cookie_fingerprint(cookie: str) -> str:
     return hashlib.md5(str(cookie or "").encode()).hexdigest()[:6]
 
 
+_RENEWAL_COOLDOWN_KEY = "weread_renewal_cooldown_{uid}"
+_RENEWAL_COOLDOWN_MIN = 120  # renewal 失败后的冷却:实测连续撞会触发微信读书 renewal 频控,
+                             # 锁定期内换出的 skey 即刻无效(2026-09-16 凌晨连续失败 3h 的根因)
+
+
+def _renewal_cooldown_until(session: Session, user_id: int) -> datetime | None:
+    from app.db.models import SystemConfig
+
+    row = session.scalar(select(SystemConfig).where(
+        SystemConfig.key == _RENEWAL_COOLDOWN_KEY.format(uid=user_id)))
+    if row and row.value:
+        try:
+            return datetime.fromisoformat(row.value)
+        except ValueError:
+            return None
+    return None
+
+
 def refresh_weread_cookie(session: Session, user_id: int, settings: Settings | None = None) -> dict:
     """微信读书 Cookie 续期:长效 wr_rt → 新短效 wr_skey,并回写 Cookie 管理。
 
     wr_skey 短效且轮换(续期后旧 skey 很快 -2012),故续期成功**必须回写**;
     全局 WEREAD_COOKIE(.env)无法回写文件,统一落到平台内「weread」Cookie
     (读取优先级:平台内 > 全局,下次监听即用新值)。
+    renewal 失败后进入 2h 冷却(频控风控锁定期内反复撞只会延长封锁)。
     返回 {status: success|skipped|failed, reason?, verified, cookie?}。
     """
+    from app.db.models import SystemConfig
     from app.services.cookie_store import get_cookie, set_cookie
 
     settings = _base(settings)
+    # 冷却优先于 Cookie 检查:锁定期内连解析都不做(避免每分钟监听自救反复撞频控)
+    cooldown_until = _renewal_cooldown_until(session, user_id)
+    if cooldown_until and datetime.now() < cooldown_until:
+        return {"status": "skipped", "reason": "renewal_cooldown",
+                "retry_after": cooldown_until.isoformat(sep=" ", timespec="seconds")}
     cookie = (get_cookie(session, user_id, "weread") or settings.weread_cookie or "").strip()
     if not cookie:
         return {"status": "skipped", "reason": "no_cookie"}
@@ -433,6 +458,16 @@ def refresh_weread_cookie(session: Session, user_id: int, settings: Settings | N
         return {"status": "skipped", "reason": "no_rt"}
     new_cookie = WereadClient(cookie).refresh_skey()
     if not new_cookie:
+        # 失败:进入冷却,停止风控锁定期内的反复撞(每分钟监听自救 × 6h tick 会加剧封锁)
+        row = session.scalar(select(SystemConfig).where(
+            SystemConfig.key == _RENEWAL_COOLDOWN_KEY.format(uid=user_id)))
+        until = datetime.now() + timedelta(minutes=_RENEWAL_COOLDOWN_MIN)
+        if row:
+            row.value = until.isoformat()
+        else:
+            session.add(SystemConfig(key=_RENEWAL_COOLDOWN_KEY.format(uid=user_id),
+                                     value=until.isoformat()))
+        session.commit()
         return {"status": "failed", "reason": "renewal_failed"}
     # 先验证再回写:续期后仍 -2012/-2010 说明登录态整体过期(wr_rt 也失效),
     # 此时回写的新值同样无效,不能报"已续期"误导用户——直接失败让用户重新登录。
@@ -446,6 +481,11 @@ def refresh_weread_cookie(session: Session, user_id: int, settings: Settings | N
         set_cookie(session, user_id, "weread", new_cookie)
         return {"status": "success", "verified": False, "cookie": new_cookie}
     set_cookie(session, user_id, "weread", new_cookie)
+    row = session.scalar(select(SystemConfig).where(
+        SystemConfig.key == _RENEWAL_COOLDOWN_KEY.format(uid=user_id)))
+    if row:
+        session.delete(row)
+        session.commit()
     logger.info("微信读书 Cookie 已续期并验证通过(用户 %s)", user_id)
     return {"status": "success", "verified": True, "cookie": new_cookie}
 

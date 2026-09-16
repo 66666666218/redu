@@ -1019,3 +1019,27 @@ def test_pan_selfshare_41017_adopted_as_own_link(session, monkeypatch) -> None:
     reps = wechat_monitor._enrich_new_articles(session, 1, st, [b], client=None)
     assert reps[b.id] == [("https://pan.quark.cn/s/ourshare", "https://pan.quark.cn/s/ourshare", "")]
     assert "https://pan.quark.cn/s/ourshare" in b.my_pan_urls  # 已落值 → 补转存不再重试
+
+
+def test_renewal_cooldown_blocks_repeated_attempts(session) -> None:
+    """renewal 失败后 2h 冷却:频控锁定期内不再反复撞(2026-09-16 凌晨连续失败 3h 根因)。"""
+    from datetime import datetime
+
+    from app.db.models import SystemConfig
+    from app.services import wechat_monitor as wm
+
+    # 预置:冷却期内
+    session.add(SystemConfig(
+        key="weread_renewal_cooldown_1",
+        value=(datetime.now().replace(microsecond=0) + __import__("datetime").timedelta(hours=1)).isoformat()))
+    session.commit()
+    out = wm.refresh_weread_cookie(session, 1, settings=_settings())
+    assert out["status"] == "skipped" and out["reason"] == "renewal_cooldown"
+    assert "retry_after" in out
+
+    # 冷却过期 → 恢复尝试(走到 no_cookie 的正常路径)
+    row = session.scalar(select(SystemConfig).where(SystemConfig.key == "weread_renewal_cooldown_1"))
+    row.value = (datetime.now() - __import__("datetime").timedelta(minutes=1)).isoformat()
+    session.commit()
+    out2 = wm.refresh_weread_cookie(session, 1, settings=_settings())
+    assert out2["status"] == "skipped" and out2["reason"] == "no_cookie"  # 不再被冷却拦
