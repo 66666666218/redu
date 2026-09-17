@@ -664,6 +664,7 @@ def run_feishu_wechat_analysis(settings: Settings | None = None, db: Session | N
 
 def _in_cooldown(db: Session, user_id: int, section: str, title: str, settings: Settings) -> bool:
     now = datetime.now()
+    title = title[:200]  # 与 gate/mark 的截断口径一致
     row = db.scalar(
         select(FeishuAlert).where(
             FeishuAlert.user_id == user_id, FeishuAlert.section == section, FeishuAlert.title == title
@@ -829,6 +830,7 @@ def run_feishu_keyword_alerts(user_id: int, settings: Settings | None = None, db
 
 
 def _mark_alerted(db: Session, user_id: int, section: str, title: str, reason: str) -> None:
+    title = title[:200]  # 与 feishu_alert_gate 的 title[:200] 截断一致,否则冷却查不到
     row = db.scalar(
         select(FeishuAlert).where(
             FeishuAlert.user_id == user_id, FeishuAlert.section == section, FeishuAlert.title == title
