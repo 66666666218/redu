@@ -499,6 +499,10 @@ def test_weread_refresh_skey_renewal_request(monkeypatch: pytest.MonkeyPatch) ->
         status_code = 200
         text = '{"succ":1}'
 
+        @staticmethod
+        def json():
+            return {"succ": 1}
+
     class _Sess:
         def __init__(self) -> None:
             self.headers: dict = {}

@@ -218,6 +218,17 @@ class WereadClient:
             return None
         if resp.status_code != 200:
             return None
+        # renewal 的业务错误(如 -2013 鉴权失败=wr_rt 被吊销)必须显式失败:
+        # 此前只看 HTTP 200 + jar 里有 wr_skey——而旧 skey 仍在 jar 中未被清除,
+        # 被误当"新 skey"返回,调用方以为续期成功实际什么都没换到(2026-09-18 定位)
+        try:
+            body = resp.json()
+        except (ValueError, AttributeError):
+            return None
+        if body.get("succ") != 1 and int(body.get("errCode", 0) or 0) != 0:
+            logger.warning("renewal 被拒:errCode=%s %s",
+                           body.get("errCode"), str(body.get("errMsg") or "")[:60])
+            return None
         new_skey = new_rt = ""
         for c in jar.cookies:  # requests 已把 Set-Cookie 并入 jar
             if c.name == "wr_skey" and c.value:
