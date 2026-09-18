@@ -1035,6 +1035,16 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
         _col_set_row([("**公众号**", 3), ("**文章**", 7), ("**网盘**", 2), ("**阅读**", 2)], grey=True),
     ]
     from app.db.models import WechatPanLink
+    # 重复资源计数:一次 GROUP BY 批量查(循环内逐篇 COUNT 是 N+1)
+    dup_counts: dict[str, int] = {}
+    pan_of = {r.id: next((x.strip() for x in (r.pan_urls or "").splitlines() if x.strip()), "")
+              for r in rows[:20] if r.pan_urls}
+    if pan_of:
+        for pan_url, cnt in session.execute(
+                select(WechatPanLink.pan_url, func.count()).where(
+                    WechatPanLink.pan_url.in_(set(pan_of.values()))
+                ).group_by(WechatPanLink.pan_url)).all():
+            dup_counts[pan_url] = int(cnt)
     for r in rows[:20]:
         rep = replacements.get(r.id) or []
         if rep:
@@ -1044,13 +1054,11 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
                         "") or r.url
         # 重复资源标记: 同盘链已被其他文章推过 → 🔥N(同行都在发的确认级资源)
         hot = ""
-        if r.pan_urls:
-            first_pan = next((x.strip() for x in (r.pan_urls or "").splitlines() if x.strip()), "")
-            if first_pan:
-                dup = session.scalar(select(func.count()).select_from(WechatPanLink).where(
-                    WechatPanLink.pan_url == first_pan, WechatPanLink.article_id != r.id)) or 0
-                if dup:
-                    hot = f"🔥x{dup + 1} "
+        first_pan = pan_of.get(r.id, "")
+        if first_pan:
+            dup = max(0, dup_counts.get(first_pan, 0) - (1 if first_pan in pan_of.values() else 0))
+            if dup:
+                hot = f"🔥x{dup + 1} "
         title = _md_safe(r.title)
         shown = title[:26] + ("…" if len(title) > 26 else "")
         q_badge = ""
