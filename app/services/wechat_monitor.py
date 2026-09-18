@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import html as html_mod
 import re
+import time
 from datetime import datetime, timedelta
 
 import requests
@@ -496,8 +497,17 @@ def refresh_weread_cookie(session: Session, user_id: int, settings: Settings | N
         SystemConfig.key == _RENEWAL_COOLDOWN_KEY.format(uid=user_id)))
     if row:
         session.delete(row)
-        session.commit()
-    logger.info("微信读书 Cookie 已续期并验证通过(用户 %s)", user_id)
+    # 打"会话初期"标记:新 Cookie 的 mp/articles 列表接口仅在会话初期可用,
+    # 此时自动触发一轮全量 sync 把各对标号停更期间的历史文章补齐
+    # ( cover 只出最新一篇,停更号的历史列表平时拿不到——2026-09-18 诊断)
+    flag_key = f"weread_fullsync_pending_{user_id}"
+    flag = session.scalar(select(SystemConfig).where(SystemConfig.key == flag_key))
+    if flag:
+        flag.value = datetime.now().isoformat()
+    else:
+        session.add(SystemConfig(key=flag_key, value=datetime.now().isoformat()))
+    session.commit()
+    logger.info("微信读书 Cookie 已续期并验证通过(用户 %s),已标记全量补采", user_id)
     return {"status": "success", "verified": True, "cookie": new_cookie}
 
 def weread_refresh_tick(settings: Settings | None = None) -> int:
@@ -1556,6 +1566,49 @@ def _push_candidates(session: Session, user_id: int, settings: Settings,
         })
     except Exception:  # noqa: BLE001 - 推送失败不影响采集结果
         logger.exception("候选对标号飞书推送失败 user=%s", user_id)
+
+def run_full_sync_if_pending(session: Session, user_id: int,
+                             settings: Settings | None = None) -> dict:
+    """若 renewal 刚换出可用 Cookie(会话初期),对全部对标号跑一轮全量补采。
+
+    背景:cover 只返回"最新一篇",部分号的书架快照冻结在关注时点,此后新文全部
+    看不见;mp/articles(历史列表)仅在 Cookie 会话初期可用——正好在 renewal 成功
+    (必然伴随新会话)后的窗口里把停更文章一次性补齐。
+    每号独立容错,单号失败不阻断;完成后清除标记。
+    """
+    from app.db.models import SystemConfig
+
+    settings = settings or get_settings()
+    flag_key = f"weread_fullsync_pending_{user_id}"
+    flag = session.scalar(select(SystemConfig).where(SystemConfig.key == flag_key))
+    if not flag:
+        return {"status": "not_pending"}
+    cookie = _weread_cookie(session, user_id, settings)
+    if not cookie:
+        return {"status": "skipped", "reason": "no_cookie"}
+    rows = session.scalars(select(WechatBenchmark).where(
+        WechatBenchmark.user_id == user_id, WechatBenchmark.active.is_(True),
+        WechatBenchmark.weread_book_id != "")).all()
+    synced = articles_new = failed = 0
+    client = WereadClient(cookie)
+    for b in rows:
+        try:
+            out = sync_wechat_account(session, user_id, b.id, settings=settings)
+            if out.get("status") == "success":
+                synced += 1
+                articles_new += int(out.get("new_articles") or 0)
+            else:
+                failed += 1
+        except Exception:  # noqa: BLE001 - 单号失败不阻断全量
+            session.rollback()
+            failed += 1
+        time.sleep(2.5)  # mp/articles 会话初期窗口有限,克制使用
+    session.delete(flag)
+    session.commit()
+    logger.info("全量补采完成(用户 %s):同步 %s 号,新增 %s 篇,失败 %s",
+                user_id, synced, articles_new, failed)
+    return {"status": "done", "synced": synced, "new_articles": articles_new, "failed": failed}
+
 
 def keyword_article_tick(session: Session, user_id: int, settings: Settings | None = None) -> int:
     """关键词文章监控:按用户配置的关键词(candidate_search_terms)搜最新文章,

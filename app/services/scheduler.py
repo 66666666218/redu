@@ -194,6 +194,9 @@ def wechat_collect_tick(settings: Settings | None = None) -> dict:
                 skipped += 1
                 continue
             try:
+                # renewal 换出可用 Cookie 后的会话初期窗口:全量补采停更文章
+                from app.services.wechat_monitor import run_full_sync_if_pending
+                run_full_sync_if_pending(db, row.user_id, settings)
                 # 不限数量:每轮监控全部对标号(用户决策:发现时效优先;
                 # 微信读书客户端内置 2s 限速,32 号约 100s/轮,由 max_instances=1 串行防重叠)
                 run_wechat_listen(db, row.user_id, settings=settings,
