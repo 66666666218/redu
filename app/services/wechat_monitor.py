@@ -1591,7 +1591,10 @@ def run_full_sync_if_pending(session: Session, user_id: int,
         WechatBenchmark.weread_book_id != "")).all()
     synced = articles_new = failed = 0
     client = WereadClient(cookie)
+    aborted = False
     for b in rows:
+        if aborted:
+            break  # mp/articles 预算被 -2041 拒绝后立即停,不再空转其余号
         try:
             out = sync_wechat_account(session, user_id, b.id, settings=settings)
             if out.get("status") == "success":
@@ -1599,6 +1602,15 @@ def run_full_sync_if_pending(session: Session, user_id: int,
                 articles_new += int(out.get("new_articles") or 0)
             else:
                 failed += 1
+        except WereadError as exc:
+            # -2041 = 该 skey 的列表接口预算已耗尽:全局放弃本轮(标记保留,
+            # 下个新 skey 会话再补),否则其余 80 号每号白撞一次
+            session.rollback()
+            if "-2041" in str(exc):
+                logger.warning("mp/articles 预算耗尽(-2041),本轮补采中止;下次新会话窗口再补")
+                return {"status": "aborted", "reason": "rate_limited",
+                        "synced": synced, "new_articles": articles_new}
+            failed += 1
         except Exception:  # noqa: BLE001 - 单号失败不阻断全量
             session.rollback()
             failed += 1
