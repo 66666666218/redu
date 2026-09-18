@@ -1027,6 +1027,8 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
             return
         rows = urgent
     replacements = replacements or {}
+    # 盘链文优先展示(闸门修复后非盘文大量入库,价值排序避免淹没资源文)
+    rows = sorted(rows, key=lambda r: (not r.pan_types, -(r.read_num or 0)))
     elements: list[dict] = [
         {"tag": "note", "elements": [{"tag": "plain_text",
             "content": "点文章标题打开链接(优先你的夸克转存链) · 网盘列=识别到的盘链 · 阅读未采样为 —"}]},
