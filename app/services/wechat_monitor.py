@@ -1034,6 +1034,7 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
             "content": "点文章标题打开链接(优先你的夸克转存链) · 网盘列=识别到的盘链 · 阅读未采样为 —"}]},
         _col_set_row([("**公众号**", 3), ("**文章**", 7), ("**网盘**", 2), ("**阅读**", 2)], grey=True),
     ]
+    from app.db.models import WechatPanLink
     for r in rows[:20]:
         rep = replacements.get(r.id) or []
         if rep:
@@ -1041,6 +1042,15 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
         else:
             link = next((x.strip() for x in (r.my_pan_urls or "").splitlines() if x.strip()),
                         "") or r.url
+        # 重复资源标记: 同盘链已被其他文章推过 → 🔥N(同行都在发的确认级资源)
+        hot = ""
+        if r.pan_urls:
+            first_pan = next((x.strip() for x in (r.pan_urls or "").splitlines() if x.strip()), "")
+            if first_pan:
+                dup = session.scalar(select(func.count()).select_from(WechatPanLink).where(
+                    WechatPanLink.pan_url == first_pan, WechatPanLink.article_id != r.id)) or 0
+                if dup:
+                    hot = f"🔥x{dup + 1} "
         title = _md_safe(r.title)
         shown = title[:26] + ("…" if len(title) > 26 else "")
         q_badge = ""
@@ -1052,7 +1062,7 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
             q_badge = "⭐优 "
         elif r.quality <= 2 and r.pan_types:
             q_badge = "⚠️疑 "
-        article_md = f"[{q_badge}{shown}]({_md_safe(link)})" if link else shown
+        article_md = f"[{hot}{q_badge}{shown}]({_md_safe(link)})" if link else shown
         pan = f"🔴{_md_safe(r.pan_types)[:8]}" if r.pan_types else "—"
         read = str(r.read_num) if r.traffic_at else "—"
         elements.append(_col_set_row([

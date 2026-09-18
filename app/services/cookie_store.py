@@ -18,7 +18,7 @@ from app.utils import get_logger
 
 logger = get_logger(__name__)
 
-PLATFORMS = ("weibo", "baidu", "douyin", "goofish", "weread", "dajiala")
+PLATFORMS = ("weibo", "baidu", "douyin", "goofish", "weread", "dajiala", "baidupan")
 
 # 平台 → 兜底源:env 全局 Cookie / 本机 Cookie 文件(settings 属性名)
 _FILE_FALLBACKS = {"goofish": "goofish_cookie_file", "douyin": "douhot_cookie_file"}
