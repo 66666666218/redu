@@ -826,8 +826,10 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
         if not getattr(_weread_collect, "_mp_articles_warned", False):
             _weread_collect._mp_articles_warned = True
             logger.warning("mp/articles 不可用(%s),全部账号仅用 cover 最新一篇", exc)
+    # require_pan=False:不再丢弃无盘链文——"标题不含网盘词"≠"没价值",
+    # 此前这道闸把 15 个对标号 10 天的新文全部静默丢弃(用户看到"停更在 9.7"的根因)
     return _insert_new_articles(session, user_id, b, items, source="listen",
-                                fetch_content=True)
+                                fetch_content=True, require_pan=False)
 
 def run_wechat_listen(session: Session, user_id: int, settings: Settings | None = None,
                       client: DajialaClient | None = None, weread: WereadClient | None = None,
