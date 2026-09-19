@@ -26,14 +26,32 @@ def get_engine():
     """延迟创建并缓存 SQLAlchemy 引擎。"""
     global _engine
     if _engine is None:
-        _engine = create_engine(
-            get_settings().database_url,
+        url = get_settings().database_url
+        engine_kwargs = dict(
             pool_pre_ping=True,
             pool_recycle=3600,
             pool_size=25,       # ≥ 调度线程池 24(每线程可各持一个长事务 session)
             max_overflow=10,    # 突发溢出(API 并发峰值)
             future=True,
         )
+        if url.startswith("sqlite"):
+            # SQLite 本地部署:开启 WAL(读写不互斥)+ busy_timeout(写锁冲突时等待
+            # 而非立即抛 database is locked——白天高峰 collect_tick 连续 4 分钟
+            # 撞锁的 2026-09-19 实战)。MySQL 无此问题(行锁)。
+            from sqlalchemy import event
+
+            engine_kwargs["connect_args"] = {"timeout": 30}  # sqlite3 busy_timeout 秒
+            _engine = create_engine(url, **engine_kwargs)
+
+            @event.listens_for(_engine, "connect")
+            def _sqlite_pragma(dbapi_conn, _record):
+                cur = dbapi_conn.cursor()
+                cur.execute("PRAGMA journal_mode=WAL")
+                cur.execute("PRAGMA busy_timeout=30000")
+                cur.execute("PRAGMA synchronous=NORMAL")
+                cur.close()
+        else:
+            _engine = create_engine(url, **engine_kwargs)
     return _engine
 
 
