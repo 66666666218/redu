@@ -190,7 +190,8 @@ def wechat_collect_tick(settings: Settings | None = None) -> dict:
         due = [r for r in schedule_service.due_schedules(db, now) if r.section == "wechat"]
         for row in due:
             # 原子抢占:API 内嵌调度器与独立调度进程双跑时防重复监听
-            if not schedule_service.claim_schedule(db, row, now):
+            # force=True: 四定点作业自身即调度,不受用户间隔约束
+            if not schedule_service.claim_schedule(db, row, now, force=True):
                 skipped += 1
                 continue
             try:
@@ -308,9 +309,14 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     scheduler.add_job(
         _safe(collect_tick), CronTrigger(minute="*"), id="collect_tick", max_instances=1, coalesce=True
     )
+    # 公众号监听四定点(用户决策 2026-09-20):8:00/14:00/18:00/2:00。
+    # 原"每分钟检查+用户频率调度"改为纯定点——每轮全量 81 号约 3 分钟,
+    # 每天仅 4 次主动请求,最大限度降低微信读书风控压力(Cookie 生命周期优先)。
+    # misfire_grace_time=3600:定点错过后 1 小时内仍补跑(防止休眠/重启错过窗口)。
     scheduler.add_job(
-        _safe(wechat_collect_tick), CronTrigger(minute="*"), id="wechat_collect_tick",
-        max_instances=1, coalesce=True
+        _safe(wechat_collect_tick), CronTrigger(hour="8,14,18,2", minute="0"),
+        id="wechat_collect_tick", max_instances=1, coalesce=True,
+        misfire_grace_time=3600,
     )
     scheduler.add_job(
         _safe(run_fixed_time_digests), CronTrigger(minute="*"), id="alert_fixed_time", max_instances=1, coalesce=True
@@ -337,11 +343,6 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         (_member_renewal, "5 10 * * *", {"minute": 5, "hour": 10}, "member_renewal"),
         # 事件归属:每 15 分钟把近 24h 快照归并为事件(跨平台共振/生命周期的基础层)
         (_event_assign, "*/15 * * * *", {"minute": "*/15"}, "event_assign"),
-        # 公众号固定加跑时点(用户要求:9:30/10:30/16:00 额外监控最新文章;
-        # 原子抢占使紧随其后的每分钟 tick 自动跳过,不会重复监听)
-        (_wechat_forced, "30 9 * * *", {"minute": 30, "hour": 9}, "wechat_forced_0930"),
-        (_wechat_forced, "30 10 * * *", {"minute": 30, "hour": 10}, "wechat_forced_1030"),
-        (_wechat_forced, "0 16 * * *", {"minute": 0, "hour": 16}, "wechat_forced_1600"),
         (_agent_learn_all, "0 6 * * *", {"minute": 0, "hour": 6}, "agent_learning"),
         (agent_tick_all_users, "*/30 * * * *", {"minute": "*/30"}, "early_agent_tick"),
         (douhot_window_tick, _get_settings().douhot_window_cron, {"minute": "*/20"}, "douhot_window_tick"),

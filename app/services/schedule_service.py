@@ -166,7 +166,8 @@ def due_schedules(db: Session, now: datetime | None = None) -> list[UserSchedule
     return [r for r in rows if r.last_run_at is None or now - r.last_run_at >= timedelta(minutes=r.interval_minutes)]
 
 
-def claim_schedule(db: Session, row: UserSchedule, now: datetime | None = None) -> bool:
+def claim_schedule(db: Session, row: UserSchedule, now: datetime | None = None,
+                   force: bool = False) -> bool:
     """原子抢占:仅当该设置仍处于"到期未跑"状态时,把 last_run_at 置为 now。
 
     条件 UPDATE:SELECT 到执行完成的间隙里,另一个进程可能已抢跑同一任务并
@@ -180,11 +181,12 @@ def claim_schedule(db: Session, row: UserSchedule, now: datetime | None = None) 
 
     now = now or datetime.now()
     expiry = now - timedelta(minutes=row.interval_minutes or 1)
+    # force=True: 定点作业(公众号四定点)无视间隔,仅防并发双跑
     result = db.execute(
         update(UserSchedule)
         .where(
             UserSchedule.id == row.id,
-            (UserSchedule.last_run_at.is_(None)) | (UserSchedule.last_run_at <= expiry),
+            (UserSchedule.last_run_at.is_(None)) | (UserSchedule.last_run_at <= expiry) | force,
         )
         .values(last_run_at=now)
     )
