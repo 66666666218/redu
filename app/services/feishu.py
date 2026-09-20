@@ -446,8 +446,10 @@ def build_keyword_card(db: Session, user_id: int, settings: Settings,
             rows, prev_map, latest_map = _keyword_entries_rows(db, user_id, w, snaps)
             if not rows:
                 continue
+            fk = (w.get('filter_keyword') or '')
+            fk_label = f" · 只含「{fk}」" if fk else ''
             elements.append({"tag": "div", "text": {"tag": "lark_md",
-                            "content": f"**{w['keyword']}**{' · 只含「' + (getattr(w, 'filter_keyword', '') or '') + '」' if getattr(w, 'filter_keyword', '') else ''} · {label} · {_overview(rows)}"}})
+                            "content": f"**{w['keyword']}**{fk_label} · {label} · {_overview(rows)}"}})
             # 摘要:追踪N主题 · 上升:xx/新增:xx(与仪表盘一致,不笼统说该词上升)
             risers = [r for r in rows if r["trend"] == "上升期" and r.get("growth") is not None]
             new_ones = [r for r in rows if r["marker"] == "🆕"]
@@ -1019,7 +1021,7 @@ def run_feishu_keyword_realtime(user_id: int, settings: Settings | None = None, 
             if _in_cooldown(db, user_id, "kw_realtime", w["keyword"], settings):
                 continue
             items = sorted(changed.values(), key=lambda x: (x[0], -x[2]["score"]))[:12]
-            fk = getattr(w, "filter_keyword", "") or ""
+            fk = w.get("filter_keyword") or ""
             fks = (f"·只含「{fk}」" if fk else "")
             dw = w.get("date_window") or douhot._default_window(w["list_type"])
             # 左对齐列(全角空格补齐),缺省填 —
