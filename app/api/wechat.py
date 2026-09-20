@@ -47,7 +47,7 @@ def wechat_article_add(payload: dict, user: User = Depends(get_current_user), db
         except ValueError:
             pub_dt = None
     db.add(WechatArticle(user_id=user.id, author=str(payload.get("author", "")).strip()[:128],
-                         title=title, content=str(payload.get("content", ""))[:100000],
+                         title=title[:500], content=str(payload.get("content", ""))[:100000],
                          url=str(payload.get("url", "")).strip()[:500], publish_at=pub_dt,
                          source="manual"))
     db.commit()

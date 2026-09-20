@@ -25,8 +25,8 @@ _ENTRY_CAP = 100  # 榜单定向搜索类关注,每次采集最多记录的相�
 def add_watch(session: Session, user_id: int, section: str, list_type: str, keyword: str,
               filter_keyword: str = "", date_window: int | str | None = None) -> dict:
     list_type = list_type if list_type in _WORD_TYPES else "word"
-    keyword = keyword.strip()
-    filter_keyword = (filter_keyword or "").strip()
+    keyword = keyword.strip()[:128]
+    filter_keyword = (filter_keyword or "").strip()[:64]
     dw = (douhot._normalize_date_window(date_window) if date_window is not None
           else douhot._default_window(list_type))
     if repository.get_watch(session, user_id, section, list_type, keyword, filter_keyword) is None:
