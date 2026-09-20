@@ -2,6 +2,36 @@
 from app.services.wechat_analyzer import analyze_articles, _parse_time
 
 
+def test_content_only_articles_still_yield_topics() -> None:
+    """仅有正文、无标题的文章也要参与主题分析。
+
+    回归:旧实现用 zip(articles, titles) 构造 contents,而 titles 过滤掉了无标题文章;
+    当一篇文章都没标题时 titles 为空,zip 直接产出空 contents → 主题/摘要全部丢失。
+    """
+    articles = [
+        {"content": "考研 考研 考研 复习计划", "author": "学长"},
+        {"content": "考研 数学 英语 真题", "author": "学长"},
+    ]
+    r = analyze_articles(articles)
+    assert r["count"] == 2
+    assert r["topics"], "无标题文章仍应提取到主题词"
+    assert r["topics"][0]["word"] == "考研"
+
+
+def test_title_misalignment_not_propagated() -> None:
+    """zip(articles, titles) 错位:中间文章有标题会让尾部无标题文章整篇被丢弃。"""
+    articles = [
+        {"content": "咖啡 咖啡"},                # 无标题
+        {"title": "茶叶", "content": "茶叶"},      # 唯一标题 → 旧 zip 长度=1
+        {"content": "红酒 红酒 红酒"},              # 无标题:旧 zip 只迭代到第 1 篇,此篇被丢弃
+    ]
+    r = analyze_articles(articles)
+    words = {t["word"] for t in r["topics"]}
+    assert "红酒" in words, "尾部无标题文章的正文不应被丢弃"
+    assert "咖啡" in words and "茶叶" in words
+
+
+
 def test_analyze_empty() -> None:
     r = analyze_articles([])
     assert r["count"] == 0 and r["topics"] == [] and "暂无" in r["suggestions"][0]

@@ -98,7 +98,14 @@ def analyze_articles(articles: list[dict]) -> dict:
         return {"count": 0, "topics": [], "title_style": {}, "publish": {}, "authors": [], "suggestions": ["暂无文章可分析"]}
 
     titles = [str(a.get("title", "")).strip() for a in articles if a.get("title")]
-    contents = [str(a.get("content", "")) + " " + t for a, t in zip(articles, titles) if a.get("content") or t]
+    # 逐篇自取标题配对正文:不能用 zip(articles, titles)——titles 已过滤掉无标题文章,
+    # 一旦中间有文章缺标题,zip 会把后一篇的标题错位拼到前一篇正文上,并丢弃尾部文章。
+    contents = []
+    for a in articles:
+        t = str(a.get("title", "")).strip()
+        c = str(a.get("content", "") or "")
+        if c or t:
+            contents.append(c + " " + t)
 
     # 选题分布
     topics = _bigram_topics(contents, top_n=10)
