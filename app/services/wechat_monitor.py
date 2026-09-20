@@ -681,6 +681,8 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                         select(WechatArticle.my_pan_urls).join(
                             WechatPanLink, WechatPanLink.article_id == WechatArticle.id)
                         .where(WechatPanLink.pan_url == u,
+                               WechatArticle.user_id == user_id,  # 只复用本租户自己转存的链,
+                               # 否则会把他人的我网盘分享链当"我方链接"推出去(违背 7610cbe 初衷)
                                WechatArticle.my_pan_urls.isnot(None),
                                WechatArticle.my_pan_urls != "",
                                WechatArticle.id != r.id)
@@ -728,8 +730,10 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                 replacements.setdefault(r.id, []).append((u, share_url, pwd))
             if dead:
                 break
-    # 百度网盘链接: 同样转存+换链(协议与夸克并列;41031 类源失效回落原文推送)
-    if settings.pan_transfer_enabled and settings.quark_cookie:
+    # 百度网盘链接: 同样转存+换链(协议与夸克并列;失败回落原文推送)。
+    # 独立门控:只看 pan_transfer_enabled + 用户是否配了百度 Cookie(块内 743 判定),
+    # 不再借用 quark_cookie——此前复制粘贴导致"只配百度未配夸克"时百度链永不转存。
+    if settings.pan_transfer_enabled:
         baidu_urls = {}  # article_id -> [(原百度链, 我方百度链, 提取码)]
         baidu_client = None
         for r in rows:
@@ -743,11 +747,12 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                         if not bck:
                             break  # 未配百度网盘 Cookie,跳过全部百度链
                         baidu_client = BaiduPanClient(bck)
-                    # 历史复用: 该百度链已换过则跳过转存
+                    # 历史复用: 该百度链本租户已换过则跳过转存(加 user_id 过滤,绝不用别人的链)
                     hist = session.execute(
                         select(WechatArticle.my_pan_urls).join(
                             WechatPanLink, WechatPanLink.article_id == WechatArticle.id)
                         .where(WechatPanLink.pan_url == u,
+                               WechatArticle.user_id == user_id,
                                WechatArticle.my_pan_urls.isnot(None),
                                WechatArticle.my_pan_urls.like("%[百度]%"),
                                WechatArticle.id != r.id).limit(1)).scalar()
@@ -755,15 +760,19 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                                    if "[百度]" in x and "pan.baidu.com" in x), "")
                     if picked:
                         mine_b = picked
+                        share_url_b = picked.split(" (提取码")[0].strip()
+                        m = re.search(r"(?:提取码\s*([0-9A-Za-z]{4}))", picked)
+                        code_b = m.group(1) if m else ""
                     else:
                         pwd_b = extract_pwd(getattr(r, "content", "") or "", u) or extract_pwd(r.title or "", u)
                         res_b = baidu_client.transfer_and_share(u, password=pwd_b)
-                        mine_b = f"{res_b['share_url']} (提取码 {res_b['password']}) [百度]"
+                        share_url_b = res_b["share_url"]
+                        code_b = res_b.get("password", "") or ""
+                        mine_b = f"{share_url_b} (提取码 {code_b}) [百度]" if code_b else f"{share_url_b} [百度]"
                     mine = [x for x in (r.my_pan_urls or "").splitlines() if x.strip()]
                     mine.append(mine_b)
                     r.my_pan_urls = chr(10).join(mine)[:2000]
-                    replacements.setdefault(r.id, []).append((u, mine_b.split(" (提取码")[0],
-                                                              res_b.get("password", "") if "res_b" in dir() else "8888"))
+                    replacements.setdefault(r.id, []).append((u, share_url_b, code_b))
                 except Exception as exc:  # noqa: BLE001 - 百度链失败不阻断,不触发夸克链路
                     logger.info("百度链转存跳过 %s: %s", u[:50], str(exc)[:70])
     # 资源级共振:同一盘链在窗口期内被 ≥2 篇文章推送 → 同行网络都在发的确认级爆点资源
@@ -787,6 +796,7 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
         counts = dict(session.execute(
             select(WechatPanLink.pan_url, func.count(WechatPanLink.id)).where(
                 WechatPanLink.pan_url.in_(url_list),
+                WechatPanLink.user_id == user_id,  # 只统计本租户监听,冷却门按 user_id 才一致
                 WechatPanLink.created_at >= res_window,
             ).group_by(WechatPanLink.pan_url)).all())
         for u, r in all_links:
@@ -942,7 +952,7 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
                     b.miss_count = 0
                     b.last_item_at = now
                     got = _insert_new_articles(session, user_id, b, norm, source="listen",
-                                               fetch_content=True)
+                                               fetch_content=True, require_pan=False)
                     if got:
                         new_rows.extend(got)
                 else:
@@ -1013,7 +1023,7 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
             b.miss_count = 0
             b.last_item_at = now
             new_rows.extend(_insert_new_articles(session, user_id, b, items, source="listen",
-                                                 fetch_content=True))
+                                                 fetch_content=True, require_pan=False))
     replacements = _enrich_new_articles(session, user_id, settings, new_rows, client,
                                         allow_paid=use_dajiala)
 
@@ -1085,7 +1095,8 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
     if pan_of:
         for pan_url, cnt in session.execute(
                 select(WechatPanLink.pan_url, func.count()).where(
-                    WechatPanLink.pan_url.in_(set(pan_of.values()))
+                    WechatPanLink.pan_url.in_(set(pan_of.values())),
+                    WechatPanLink.user_id == user_id,  # 🔥xN 只数本租户监听,别把他号的重复算进来
                 ).group_by(WechatPanLink.pan_url)).all():
             dup_counts[pan_url] = int(cnt)
     for r in rows[:20]:
