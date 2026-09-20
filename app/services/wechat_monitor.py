@@ -591,7 +591,8 @@ def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchm
                 content = fetch_article_content(url)
             if content:  # 自抓成功 → 用正文的链接判定覆盖标题的盘名猜测
                 types = detect_pan_types(content) or types
-        pan_urls = extract_quark_urls(f'{title} {content}')
+        from app.services.baidupan_transfer import extract_baidu_urls
+        pan_urls = extract_quark_urls(f'{title} {content}') + extract_baidu_urls(content or "")
         if require_pan and not pan_urls and not types:
             continue  # 无盘链 → 不监控
         quality = assess_quality(content, pan_urls, preset_read)
@@ -727,6 +728,44 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                 replacements.setdefault(r.id, []).append((u, share_url, pwd))
             if dead:
                 break
+    # 百度网盘链接: 同样转存+换链(协议与夸克并列;41031 类源失效回落原文推送)
+    if settings.pan_transfer_enabled and settings.quark_cookie:
+        baidu_urls = {}  # article_id -> [(原百度链, 我方百度链, 提取码)]
+        baidu_client = None
+        for r in rows:
+            for u in [x.strip() for x in (r.pan_urls or "").splitlines()
+                      if x.strip().startswith("https://pan.baidu.com/s/")][:2]:
+                try:
+                    if baidu_client is None:
+                        from app.services.baidupan_transfer import BaiduPanClient, extract_pwd
+                        from app.services.cookie_store import get_cookie
+                        bck = get_cookie(session, user_id, "baidupan")
+                        if not bck:
+                            break  # 未配百度网盘 Cookie,跳过全部百度链
+                        baidu_client = BaiduPanClient(bck)
+                    # 历史复用: 该百度链已换过则跳过转存
+                    hist = session.execute(
+                        select(WechatArticle.my_pan_urls).join(
+                            WechatPanLink, WechatPanLink.article_id == WechatArticle.id)
+                        .where(WechatPanLink.pan_url == u,
+                               WechatArticle.my_pan_urls.isnot(None),
+                               WechatArticle.my_pan_urls.like("%[百度]%"),
+                               WechatArticle.id != r.id).limit(1)).scalar()
+                    picked = next((x.strip() for x in (hist or "").splitlines()
+                                   if "[百度]" in x and "pan.baidu.com" in x), "")
+                    if picked:
+                        mine_b = picked
+                    else:
+                        pwd_b = extract_pwd(getattr(r, "content", "") or "", u) or extract_pwd(r.title or "", u)
+                        res_b = baidu_client.transfer_and_share(u, password=pwd_b)
+                        mine_b = f"{res_b['share_url']} (提取码 {res_b['password']}) [百度]"
+                    mine = [x for x in (r.my_pan_urls or "").splitlines() if x.strip()]
+                    mine.append(mine_b)
+                    r.my_pan_urls = chr(10).join(mine)[:2000]
+                    replacements.setdefault(r.id, []).append((u, mine_b.split(" (提取码")[0],
+                                                              res_b.get("password", "") if "res_b" in dir() else "8888"))
+                except Exception as exc:  # noqa: BLE001 - 百度链失败不阻断,不触发夸克链路
+                    logger.info("百度链转存跳过 %s: %s", u[:50], str(exc)[:70])
     # 资源级共振:同一盘链在窗口期内被 ≥2 篇文章推送 → 同行网络都在发的确认级爆点资源
     from app.services.feishu import _col_set_row
     from app.services.feishu_client import FeishuClient, webhook_for
