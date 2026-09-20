@@ -94,13 +94,13 @@ def test_fetch_article_content_strips_html_and_detects_antibot(monkeypatch: pyte
 
     html_ok = '<html><div id="js_content"><p>链接 https://pan.quark.cn/s/aa </p></div><script>x</script></html>'
     monkeypatch.setattr(wechat_monitor.requests, "get",
-                        lambda url, timeout, headers: _Resp(200, html_ok))
+                        lambda url, timeout, headers, allow_redirects=True: _Resp(200, html_ok))
     out = wechat_monitor.fetch_article_content("https://mp.weixin.qq.com/s/x")
     assert "pan.quark.cn/s/aa" in out and "<p>" not in out
     assert wechat_monitor.detect_pan_types(out) == ["夸克网盘"]
 
     monkeypatch.setattr(wechat_monitor.requests, "get",
-                        lambda url, timeout, headers: _Resp(200, "环境异常 请完成验证"))
+                        lambda url, timeout, headers, allow_redirects=True: _Resp(200, "环境异常 请完成验证"))
     assert wechat_monitor.fetch_article_content("https://mp.weixin.qq.com/s/x") == ""
 
 

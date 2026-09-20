@@ -61,6 +61,30 @@ def title_hits(title: str) -> bool:
     return any(h in (title or "") for h in TITLE_HINTS)
 
 
+def _public_get(url: str, timeout: int):
+    """GET 用户外链并逐跳重校验公网性,堵住重定向 SSRF。
+
+    `assert_public_url` 只校验首个 URL;而 `requests` 默认 `allow_redirects=True`,
+    公开域可用 302 把服务器引到 `http://169.254.169.254/` 等内网。故关掉自动重定向,
+    手动逐跳再验。跳内网时抛 UnsafeUrlError,调用方按"拒绝外链"处理。
+    """
+    from urllib.parse import urljoin
+
+    from app.utils.net import assert_public_url
+
+    current = url
+    for _ in range(6):  # 最多跟随 5 跳,防重定向环
+        assert_public_url(current)
+        resp = requests.get(current, timeout=timeout, headers={"User-Agent": _UA},
+                            allow_redirects=False)
+        if resp.status_code in (301, 302, 303, 307, 308) and resp.headers.get("Location"):
+            current = urljoin(current, resp.headers["Location"])
+            continue
+        return resp
+    from app.utils.net import UnsafeUrlError
+    raise UnsafeUrlError("重定向次数过多")
+
+
 def fetch_article_content(url: str, timeout: int = 15) -> str:
     """免费自抓微信文章正文(纯文本)。命中风控("环境异常"验证页)返回空串。
 
@@ -69,17 +93,13 @@ def fetch_article_content(url: str, timeout: int = 15) -> str:
     """
     if not url:
         return ""
-    from app.utils.net import UnsafeUrlError, assert_public_url
+    from app.utils.net import UnsafeUrlError
 
     try:
-        assert_public_url(url)  # SSRF 守卫:URL 可能来自用户输入
-    except UnsafeUrlError as exc:
-        logger.warning("拒绝抓取非公网外链:%s", exc)
-        return ""
-    try:
-        resp = requests.get(url, timeout=timeout, headers={"User-Agent": _UA})
+        resp = _public_get(url, timeout=timeout)
         text = resp.text or ""
-    except requests.RequestException:
+    except (requests.RequestException, UnsafeUrlError) as exc:
+        logger.warning("拒绝抓取非公网外链:%s", exc)
         return ""
     if resp.status_code != 200 or "环境异常" in text:
         return ""
@@ -92,17 +112,13 @@ def fetch_article_content(url: str, timeout: int = 15) -> str:
 
 def extract_article_meta(url: str, timeout: int = 15) -> dict:
     """免费解析文章页元信息:{biz, name, title}(与 xg 同款正则);失败/风控页返回 {}。"""
-    from app.utils.net import UnsafeUrlError, assert_public_url
+    from app.utils.net import UnsafeUrlError
 
     try:
-        assert_public_url(url)  # SSRF 守卫:add_benchmark 的 URL 来自用户输入
-    except UnsafeUrlError as exc:
-        logger.warning("拒绝解析非公网外链:%s", exc)
-        return {}
-    try:
-        resp = requests.get(url, timeout=timeout, headers={"User-Agent": _UA})
+        resp = _public_get(url, timeout=timeout)
         text = resp.text or ""
-    except requests.RequestException:
+    except (requests.RequestException, UnsafeUrlError) as exc:
+        logger.warning("拒绝解析非公网外链:%s", exc)
         return {}
     if resp.status_code != 200 or "环境异常" in text:
         return {}

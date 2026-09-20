@@ -48,6 +48,33 @@ class TestSsrfGuard:
         assert wm.extract_article_meta("http://127.0.0.1:8080/") == {}
         assert called["n"] == 0
 
+    def test_redirect_to_internal_refused(self, monkeypatch):
+        """公开首跳 302 跳到内网元数据端点:逐跳重校验须拦下,绝不向内网发起第二次请求。"""
+        from app.services import wechat_monitor as wm
+        from app.utils import net
+
+        def fake_assert(u):
+            if any(x in u for x in ("169.254", "127.0.0.1", "10.0.0", "192.168")):
+                raise net.UnsafeUrlError(u)
+
+        monkeypatch.setattr(net, "assert_public_url", fake_assert)
+
+        state = {"n": 0}
+
+        class _R:
+            def __init__(self, status, headers=None, text=""):
+                self.status_code, self.headers, self.text = status, headers or {}, text
+
+        def fake_get(url, timeout, headers, allow_redirects=True):
+            state["n"] += 1
+            assert "169.254" not in url, "向内网发起了请求(逐跳守卫未生效)"
+            return _R(302, {"Location": "http://169.254.169.254/latest/meta-data/"})
+
+        monkeypatch.setattr(wm.requests, "get", fake_get)
+        assert wm.fetch_article_content("http://evil.example/s") == ""
+        assert wm.extract_article_meta("http://evil.example/s") == {}
+        assert state["n"] == 2  # 两函数各发一次首跳;302 内网目标被守卫拒,无第三跳
+
 
 class TestEmptyParseNotSuccess:
     def test_weibo_empty_realtime_raises(self, monkeypatch):
