@@ -1025,6 +1025,93 @@ def test_pan_selfshare_41017_adopted_as_own_link(session, monkeypatch) -> None:
     assert "https://pan.quark.cn/s/ourshare" in b.my_pan_urls  # 已落值 → 补转存不再重试
 
 
+# ---- 百度网盘转存/换链(门控独立 + 提取码解析 + 租户隔离) ----
+
+def _baidu_cookie_only(monkeypatch):
+    """只配百度 Cookie、不配夸克:cookie_store 对 baidupan 返回非空,其余为空。"""
+    from app.services import cookie_store
+    monkeypatch.setattr(cookie_store, "get_cookie",
+                        lambda db, uid, plat: "BDUSS=fake" if plat == "baidupan" else "")
+
+
+def test_baidu_transfer_independent_of_quark_cookie(session, monkeypatch) -> None:
+    """quark_cookie 为空时,百度链仍应转存(修掉误抄的 quark_cookie 门控)。"""
+    from app.services.baidupan_transfer import BaiduPanClient
+
+    b = WechatArticle(user_id=1, title="百度新资源", url="https://mp.weixin.qq.com/s/bd1",
+                      source="listen", benchmark_id=None,
+                      pan_urls="https://pan.baidu.com/s/1FRESH")
+    session.add(b)
+    session.commit()
+    _baidu_cookie_only(monkeypatch)
+    monkeypatch.setattr(BaiduPanClient, "__init__", lambda self, *a, **kw: None)
+    monkeypatch.setattr(BaiduPanClient, "transfer_and_share",
+                        lambda self, url, password="", **kw: {
+                            "share_url": "https://pan.baidu.com/s/1MINE", "password": "4321"})
+    st = _settings(quark_cookie="", pan_transfer_enabled=True, wechat_listen_sample_new=False)
+    reps = wechat_monitor._enrich_new_articles(session, 1, st, [b], client=None)
+    assert reps[b.id] == [("https://pan.baidu.com/s/1FRESH", "https://pan.baidu.com/s/1MINE", "4321")]
+    assert "https://pan.baidu.com/s/1MINE" in b.my_pan_urls
+    assert "[百度]" in b.my_pan_urls  # 复用检测依赖该标记
+
+
+def test_baidu_reuse_parses_extraction_code_from_history(session, monkeypatch) -> None:
+    """历史复用百度链:replacements 必须带真实提取码(而非魔法 8888),且不再转存。"""
+    from app.db.models import WechatPanLink
+    from app.services.baidupan_transfer import BaiduPanClient
+
+    orig = "https://pan.baidu.com/s/1SAME"
+    a = WechatArticle(user_id=1, title="首发百度文", url="https://mp.weixin.qq.com/s/bd_first",
+                      source="listen", benchmark_id=None, pan_urls=orig,
+                      my_pan_urls="https://pan.baidu.com/s/1OLD (提取码 cd56) [百度]")
+    session.add(a)
+    session.commit()
+    session.add(WechatPanLink(user_id=1, article_id=a.id, pan_url=orig))
+    session.commit()
+    b = WechatArticle(user_id=1, title="转载百度文", url="https://mp.weixin.qq.com/s/bd_second",
+                      source="listen", benchmark_id=None, pan_urls=orig)
+    session.add(b)
+    session.commit()
+    _baidu_cookie_only(monkeypatch)
+    monkeypatch.setattr(BaiduPanClient, "__init__", lambda self, *a, **kw: None)
+
+    def _no_transfer(self, *a, **kw):
+        raise AssertionError("历史已转存的百度链不应重复转存")
+
+    monkeypatch.setattr(BaiduPanClient, "transfer_and_share", _no_transfer)
+    st = _settings(quark_cookie="", pan_transfer_enabled=True, wechat_listen_sample_new=False)
+    reps = wechat_monitor._enrich_new_articles(session, 1, st, [b], client=None)
+    assert reps[b.id] == [(orig, "https://pan.baidu.com/s/1OLD", "cd56")]
+
+
+def test_baidu_reuse_does_not_leak_other_tenant_link(session, monkeypatch) -> None:
+    """别的租户转存过同一盘链:本租户不复用其链接,而是各自转存(租户隔离)。"""
+    from app.db.models import WechatPanLink
+    from app.services.baidupan_transfer import BaiduPanClient
+
+    orig = "https://pan.baidu.com/s/1HOT"
+    other = WechatArticle(user_id=2, title="他租户首发", url="https://mp.weixin.qq.com/s/o1",
+                          source="listen", benchmark_id=None, pan_urls=orig,
+                          my_pan_urls="https://pan.baidu.com/s/1OTHER (提取码 zz99) [百度]")
+    session.add(other)
+    session.commit()
+    session.add(WechatPanLink(user_id=2, article_id=other.id, pan_url=orig))
+    session.commit()
+    b = WechatArticle(user_id=1, title="本租户新文", url="https://mp.weixin.qq.com/s/m1",
+                      source="listen", benchmark_id=None, pan_urls=orig)
+    session.add(b)
+    session.commit()
+    _baidu_cookie_only(monkeypatch)
+    monkeypatch.setattr(BaiduPanClient, "__init__", lambda self, *a, **kw: None)
+    monkeypatch.setattr(BaiduPanClient, "transfer_and_share",
+                        lambda self, url, password="", **kw: {
+                            "share_url": "https://pan.baidu.com/s/1MYOWN", "password": "f0de"})
+    st = _settings(quark_cookie="", pan_transfer_enabled=True, wechat_listen_sample_new=False)
+    reps = wechat_monitor._enrich_new_articles(session, 1, st, [b], client=None)
+    assert reps[b.id] == [(orig, "https://pan.baidu.com/s/1MYOWN", "f0de")]  # 自己的链,非 1OTHER/zz99
+
+
+
 def test_renewal_cooldown_blocks_repeated_attempts(session) -> None:
     """renewal 失败后 2h 冷却:频控锁定期内不再反复撞(2026-09-16 凌晨连续失败 3h 根因)。"""
     from datetime import datetime
