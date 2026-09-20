@@ -105,6 +105,37 @@ def test_disabled_never_due(session) -> None:
     assert svc.due_schedules(session) == []
 
 
+def test_schedule_of_admin_disabled_user_not_due(session) -> None:
+    """管理员停用用户(User.enabled=False)后,其仍启用的板块频率不再到期:
+    否则 collect_tick 会继续为被封禁账号采集并向飞书推实时提醒(审计,与 scheduler 的
+    douhot_window_tick/agent_tick_all_users 的 User.enabled 过滤同源)。
+    """
+    _add_user(session, 7)
+    _add_user(session, 8)
+    session.get(User, 8).enabled = False  # 停用用户 8
+    session.commit()
+    svc.get_or_create(session, 7, "weibo")  # 启用用户
+    svc.get_or_create(session, 8, "weibo")  # 被停用用户:UserSchedule.enabled 仍为 True
+    due = svc.due_schedules(session)
+    assert {r.user_id for r in due} == {7}  # 只剩启用用户
+
+
+def test_tick_skips_admin_disabled_user(monkeypatch: pytest.MonkeyPatch, session) -> None:
+    """collect_tick 端到端:被停用用户即便频率到期也不跑、不推送。"""
+    _patch_session(monkeypatch, session)
+    _add_user(session, 7)
+    _add_user(session, 8)
+    session.get(User, 8).enabled = False
+    session.add(UserCookie(user_id=8, platform="weibo", cookie="x"))  # 停用用户配了 Cookie,否则会被缺 Cookie 逻辑跳过
+    session.commit()
+    called: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        scheduler, "_runners", lambda: {s: (lambda db, uid, st, s=s: called.append((uid, s))) for s in svc.SECTIONS}
+    )
+    scheduler.collect_tick()
+    assert [uid for uid, _ in called] and all(uid == 7 for uid, _ in called)  # 只跑启用用户 7
+
+
 def test_ten_minute_interval_runs_six_times_an_hour(session) -> None:
     """10 分钟档:模拟一小时内逐分钟 tick,应恰好到期 6 次。"""
     row = svc.get_or_create(session, 1, "douhot")

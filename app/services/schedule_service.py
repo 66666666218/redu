@@ -160,9 +160,21 @@ def missing_cookie(db: Session, user_id: int, section: str) -> bool:
 
 
 def due_schedules(db: Session, now: datetime | None = None) -> list[UserSchedule]:
-    """扫描所有到期(该跑)的设置:已启用,且距上次运行已满间隔(或从未跑过)。"""
+    """扫描所有到期(该跑)的设置:该板块已启用、所属用户未被停用,且距上次运行已满间隔(或从未跑过)。
+
+    必须排除被管理员停用(`User.enabled=False`)的用户:停用时其 `UserSchedule.enabled` 仍为 True,
+    若不剔除,collect_tick/wechat_collect_tick 会继续每分钟为其采集并向飞书推实时提醒——
+    与 scheduler 里 douhot_window_tick/_agent_learn_all/agent_tick_all_users 的 User.enabled 过滤一致。
+    用"不在停用用户集合"而非内联 User JOIN:无对应 User 行的孤儿频率记录维持旧行为(仍到期),
+    只精确剔除显式停用者,避免依赖 FK 也便于既有单测(以 user_id 建频率、不建 User 行)。
+    """
     now = now or datetime.now()
-    rows = db.scalars(select(UserSchedule).where(UserSchedule.enabled.is_(True)).order_by(UserSchedule.id)).all()
+    disabled_ids = select(User.id).where(User.enabled.is_(False))
+    rows = db.scalars(
+        select(UserSchedule)
+        .where(UserSchedule.enabled.is_(True), UserSchedule.user_id.notin_(disabled_ids))
+        .order_by(UserSchedule.id)
+    ).all()
     return [r for r in rows if r.last_run_at is None or now - r.last_run_at >= timedelta(minutes=r.interval_minutes)]
 
 
