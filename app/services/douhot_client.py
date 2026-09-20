@@ -133,12 +133,15 @@ class DouhotClient:
                 raise DouhotError(f"热点宝响应非 JSON({path})") from exc
             except requests.RequestException as exc:
                 last_exc = exc
+                # exc 文本可能内嵌代理 URL(http://user:pass@host)——只进服务端日志,
+                # 绝不拼进异常消息:该消息经 run_douhot 落 RunRecord.detail,会流到
+                # 各租户健康页(last_fail_detail)与飞书运维群(同 124c089 修的 urllib3 URL 回显)。
+                logger.warning("热点宝请求异常 path=%s:%s", path, exc)
                 if attempt == 0 and self.proxies:  # 换代理重试一次
-                    logger.warning("代理节点不可用,换新代理重试 path=%s:%s", path, exc)
                     continue
-                raise DouhotError(f"热点宝请求失败({path}):{exc}") from exc
+                raise DouhotError(f"热点宝请求失败({path}):{type(exc).__name__}") from exc
         else:
-            raise DouhotError(f"热点宝请求失败({path}):{last_exc}") from last_exc
+            raise DouhotError(f"热点宝请求失败({path}):{type(last_exc).__name__}") from last_exc
 
         code = obj.get("code", obj.get("status_code"))
         data = obj.get("data")

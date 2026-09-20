@@ -215,3 +215,53 @@ class TestFixedTimeDigestHonest:
         monkeypatch.setattr(alert_service, "get_user_notifier", lambda user, settings: _Send())
         # 仅启用用户(uid=1)派发,禁用用户(uid=2)跳过
         assert alert_service.run_fixed_time_digests(db=session, settings=object()) == 1
+
+
+class TestProxyCredRedaction:
+    """带鉴权代理的连接异常 repr 含 http://user:pass@host,不得经 RunRecord.detail 泄露。"""
+
+    def test_redact_masks_userinfo_keeps_host(self):
+        from app.services.tenant_base import _redact_proxy_creds
+
+        out = _redact_proxy_creds("请求失败: ProxyError at http://u1:secret@1.2.3.4:8080 reset")
+        assert "secret" not in out and "u1:" not in out
+        assert "1.2.3.4:8080" in out  # 出口 IP/端口保留给运维定位
+
+    def test_redact_leaves_plain_detail(self):
+        from app.services.tenant_base import _redact_proxy_creds
+
+        s = "XianyuVerify: 闲鱼人机验证(滑块),需人工处理:FAIL_SYS_USER_VALIDATE"
+        assert _redact_proxy_creds(s) == s  # 无 ://user@ 段,原样(冷却匹配依赖此文案)
+
+    def test_record_run_stores_masked_detail(self, session):
+        from app.services.tenant_base import _record_run
+
+        _record_run(session, 1, "weibo", "failed",
+                    "ConnectionError: Cannot connect to proxy http://proxyuser:proxypass@9.9.9.9:3128")
+        session.commit()
+        row = session.scalar(select(RunRecord).where(RunRecord.kind == "weibo"))
+        assert "proxypass" not in row.detail and "proxyuser:" not in row.detail
+        assert "9.9.9.9:3128" in row.detail
+
+    def test_douhot_network_error_message_no_creds(self, monkeypatch):
+        """douhot_client:代理连接异常只把 exc 送日志,DouhotError 消息仅带类型名。"""
+        import requests as rq
+
+        from app.services import douhot_client as dc
+
+        client = dc.DouhotClient.__new__(dc.DouhotClient)
+        client.proxies = {"http": "http://u:p@1.1.1.1:80", "https": "http://u:p@1.1.1.1:80"}
+        client._settings = None  # 重试分支不自建代理(避免触碰 get_proxies),沿用上面的 proxies
+        client.timeout = 1
+
+        def boom(*a, **kw):
+            raise rq.ConnectionError("Cannot connect to proxy http://u:p@1.1.1.1:80")
+
+        class _Sess:
+            def request(self, *a, **kw):
+                return boom()
+
+        client.session = _Sess()
+        with pytest.raises(dc.DouhotError) as ei:
+            client._call("POST", "/x", "ref", {})
+        assert ":p@" not in str(ei.value) and "ConnectionError" in str(ei.value)

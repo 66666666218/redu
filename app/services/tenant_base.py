@@ -17,6 +17,16 @@ from app.utils import get_logger
 
 logger = get_logger(__name__)
 
+# 代理凭证掩码:采集走带鉴权代理(http://user:pass@host)时,底层 urllib3/curl_cffi 的
+# 连接异常 repr 会把整条含账密的代理 URL 写进异常文本;各 runner 用
+# f"{type(exc).__name__}: {exc}" 落进 RunRecord.detail,再经健康页(全体租户)与
+# 采集失败告警(飞书群)流出。此处统一在唯一闸口抹掉 ://user:pass@ 段,防代理账密泄露。
+_PROXY_CRED_RE = re.compile(r"://[^/@\s]+@")
+
+
+def _redact_proxy_creds(text: str) -> str:
+    return _PROXY_CRED_RE.sub("://***@", text or "")
+
 
 def _base(settings: Settings | None) -> Settings:
     return settings or get_settings()
@@ -30,7 +40,7 @@ def _record_run(session: Session, user_id: int, kind: str, status: str, detail: 
             kind=kind,
             status=status,
             started_at=datetime.now(),
-            detail=detail,
+            detail=_redact_proxy_creds(detail),
         )
     )
 
