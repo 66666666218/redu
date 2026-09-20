@@ -136,7 +136,7 @@ def assign_tick(db: Session, user_id: int, settings=None) -> dict:
         ).order_by(getattr(model, ts_col).asc())).all()
         for r in rows:
             raw_title = str(getattr(r, title_col, "") or "").strip()
-            norm = normalize_title(raw_title)
+            norm = normalize_title(raw_title)[:255]
             if len(norm) < 4:   # 过短(单字/词)无聚类价值
                 continue
             ts = getattr(r, ts_col, None) or now
