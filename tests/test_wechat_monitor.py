@@ -825,6 +825,56 @@ def test_pan_links_normalized_and_resonance(session, monkeypatch: pytest.MonkeyP
     assert out2 == {} and len(sent) == 1
 
 
+def test_resonance_backlog_rotates_not_silently_cooled(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """focus_max_items=1 时,第二共振资源不应在首轮被静默烧冷却:
+    首轮推 A(仅烧 A 冷却),次轮 B 顶替推出,第三轮 A/B 各自已冷却 → 归零。
+
+    回归:共振收集阶段曾对每个候选即调 feishu_alert_gate 烧冷却,卡片只渲染前 N 个,
+    且 webhook 缺失时更是全量烧冷却却一条都没发——越限/无群资源永无出头之日。
+    """
+    b = WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A")
+    session.add(b)
+    session.commit()
+    st = _settings(dajiala_key="", quark_cookie="", pan_transfer_enabled=False,
+                   wechat_resonance_hours=48, focus_cooldown_hours=24, focus_max_items=1,
+                   feishu_webhook_wechat="https://open.feishu.cn/hook/wechat")
+    items = [
+        {"title": "资源甲 https://pan.quark.cn/s/aaa111", "url": "https://mp.weixin.qq.com/s/x1"},
+        {"title": "资源乙 https://pan.quark.cn/s/bbb222", "url": "https://mp.weixin.qq.com/s/x2"},
+    ]
+    rows = wechat_monitor._insert_new_articles(session, 1, b, items, source="sync")
+    session.commit()
+
+    sent: list[str] = []
+
+    class _FakeFeishu:
+        def __init__(self, webhook, secret="") -> None:
+            pass
+
+        def send(self, msg: str) -> bool:
+            sent.append(msg)
+            return True
+
+        def send_card(self, card: dict) -> bool:
+            sent.append(str(card))
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
+    # 首轮:两个共振资源都新鲜,只推 A(前 1 个),B 不得被烧冷却
+    wechat_monitor._enrich_new_articles(session, 1, st, rows, client=None, allow_paid=False)
+    assert any("aaa111" in m for m in sent) and not any("bbb222" in m for m in sent)
+    cooled = {r.title for r in session.scalars(select(FeishuAlert).where(FeishuAlert.section == "focus_res")).all()}
+    assert cooled and all("aaa111" in t for t in cooled)  # 仅 A 进了冷却
+    # 次轮:A 在冷却里被跳过,B 顶替推出(证明首轮没把 B 静默烧进冷却)
+    sent.clear()
+    wechat_monitor._enrich_new_articles(session, 1, st, rows, client=None, allow_paid=False)
+    assert any("bbb222" in m for m in sent)
+    # 第三轮:两者各自已推送并冷却 → 无新共振卡
+    sent.clear()
+    wechat_monitor._enrich_new_articles(session, 1, st, rows, client=None, allow_paid=False)
+    assert not any("资源共振" in m for m in sent)
+
+
 def test_pan_links_backfill_legacy_articles(session, monkeypatch: pytest.MonkeyPatch) -> None:
     """归一化表建成前的旧文章(有 pan_urls 无链接行)→ 共振检查时自动回填。"""
     b = WechatBenchmark(user_id=1, nickname="号A")

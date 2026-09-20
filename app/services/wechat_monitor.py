@@ -797,7 +797,6 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
     from app.services.alert_service import feishu_alert_gate
 
     _backfill_pan_links(session)  # 一次性回填归一化表建成前的旧文章盘链
-    res_hits: list[tuple[str, WechatArticle, int]] = []
     res_window = datetime.now() - timedelta(hours=settings.wechat_resonance_hours)
     # 批量收集本轮全部盘链 → 一次 GROUP BY 查询各链接的窗口内文章数(替代循环内 N 次 COUNT)
     all_links: list[tuple[str, WechatArticle]] = []
@@ -807,6 +806,7 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
             if u not in seen_links:
                 seen_links.add(u)
                 all_links.append((u, r))
+    res_candidates: list[tuple[str, WechatArticle, int]] = []
     if all_links:
         url_list = [u for u, _ in all_links]
         counts = dict(session.execute(
@@ -815,24 +815,39 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                 WechatPanLink.user_id == user_id,  # 只统计本租户监听,冷却门按 user_id 才一致
                 WechatPanLink.created_at >= res_window,
             ).group_by(WechatPanLink.pan_url)).all())
+        now_res = datetime.now()
+        res_cooldown = timedelta(hours=settings.focus_cooldown_hours)
         for u, r in all_links:
             cnt = int(counts.get(u, 0)) + 1  # +1 = 本篇自身
-            if cnt >= 2 and feishu_alert_gate(
-                    session, user_id, "focus_res", "res:" + u[:120],
-                    settings.focus_cooldown_hours, f"{cnt} 篇同发"):
-                res_hits.append((u, r, cnt))
+            if cnt < 2:
+                continue
+            # 只读探测冷却(不烧):冷却期内跳过,否则列为候选。
+            # 不能在这一步就 feishu_alert_gate——那会在 webhook 未配置(本轮不发送)
+            # 或条目落在 focus_max_items 之后(不进卡片)时,把冷却白白烧掉、
+            # 该资源下轮又被自身冷却排除而永无出头之日。烧冷却推迟到发送成功后、仅入选项。
+            row = session.scalar(select(FeishuAlert).where(
+                FeishuAlert.user_id == user_id, FeishuAlert.section == "focus_res",
+                FeishuAlert.title == ("res:" + u[:120])[:200]))
+            if row and (now_res - row.alerted_at) < res_cooldown:
+                continue
+            res_candidates.append((u, r, cnt))
+    res_hits = res_candidates[: settings.focus_max_items]
     if res_hits:
         webhook = webhook_for(settings, "wechat")
         if webhook:
             elements = [_col_set_row([("**分享链**", 5), ("**同发文章数**", 2), ("**示例标题**", 5)], grey=True)]
-            for u, r, cnt in res_hits[: settings.focus_max_items]:
+            for u, r, cnt in res_hits:
                 elements.append(_col_set_row([
                     ("🔴 [" + u[:40] + "](" + u + ")", 5), (str(cnt) + " 篇", 2), (r.title[:30], 5)]))
             card = {"config": {"wide_screen_mode": True},
                     "header": {"template": "red", "title": {"tag": "plain_text",
                                "content": "🔴 资源共振 · 多号同发(" + str(len(res_hits)) + " 个资源)"}},
                     "elements": elements}
-            FeishuClient(webhook, settings.feishu_secret).send_card(card)
+            if FeishuClient(webhook, settings.feishu_secret).send_card(card):
+                # 发送成功才烧冷却,且仅对入卡的 res_hits:越限项保留冷却位,下轮可轮候进入
+                for u, r, cnt in res_hits:
+                    feishu_alert_gate(session, user_id, "focus_res", "res:" + u[:120],
+                                      settings.focus_cooldown_hours, f"{cnt} 篇同发")
 
     # 文章内容交叉提取:从正文提取新公众号名 → 自动入库为候选对标号
     from app.db.models import WechatCandidate
