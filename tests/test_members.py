@@ -62,6 +62,15 @@ def test_renew_resets_cycle(session):
     assert svc.renew(session, 99, m.id) is False
 
 
+def test_add_member_clamps_cycle_days(session):
+    # 防 joined_at + timedelta(days=cycle_days) 在读取时 OverflowError 打崩 list 路由
+    huge = svc.add_member(session, 1, "巨", datetime.now(), cycle_days=999999999)
+    assert huge.cycle_days == 3650
+    neg = svc.add_member(session, 1, "负", datetime.now(), cycle_days=-5)
+    assert neg.cycle_days == 1
+    assert len(svc.list_members(session, 1)) == 2
+
+
 def test_renewal_tick_lists_due_and_overdue(session, monkeypatch):
     import app.services.feishu_client as fc
 

@@ -65,7 +65,7 @@ def add_member(db: Session, user_id: int, nickname: str, joined_at: datetime,
     m = GroupMember(user_id=user_id, nickname=(nickname or "").strip()[:128],
                     joined_at=joined_at, group_name=(group_name or "").strip()[:128],
                     wechat_id=(wechat_id or "").strip()[:128],
-                    cycle_days=max(1, int(cycle_days or 30)), note=(note or "")[:255])
+                    cycle_days=max(1, min(int(cycle_days or 30), 3650)), note=(note or "")[:255])
     db.add(m)
     db.commit()
     return m
