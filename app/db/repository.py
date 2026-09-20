@@ -140,10 +140,13 @@ def get_xianyu_daily(db: Session, user_id: int, item_id: str, snap_date: str) ->
     )
 
 
-def xianyu_want_series(db: Session, user_id: int) -> dict[str, list[tuple[str, float]]]:
+def xianyu_want_series(db: Session, user_id: int, days: int = 30) -> dict[str, list[tuple[str, float]]]:
+    cutoff = (datetime.now() - timedelta(days=days)).date().isoformat()
     series: dict[str, list[tuple[str, float]]] = {}
     rows = db.scalars(
-        select(XianyuDaily).where(XianyuDaily.user_id == user_id).order_by(XianyuDaily.snap_date.asc())
+        select(XianyuDaily).where(
+            XianyuDaily.user_id == user_id, XianyuDaily.snap_date >= cutoff
+        ).order_by(XianyuDaily.snap_date.asc())
     ).all()
     for r in rows:
         series.setdefault(r.title or r.item_id, []).append((r.snap_date, r.want_count))

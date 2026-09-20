@@ -66,14 +66,19 @@ def test_delete_watch_removes_snaps() -> None:
 
 def test_xianyu_want_series_and_by_date() -> None:
     db = _session()
+    from datetime import date as _date
+    d1 = (_date.today() - timedelta(days=2)).isoformat()
+    d2 = (_date.today() - timedelta(days=1)).isoformat()
     db.add_all([
-        XianyuDaily(user_id=1, item_id="a", title="教程", snap_date="2026-09-01", want_count=5),
-        XianyuDaily(user_id=1, item_id="a", title="教程", snap_date="2026-09-02", want_count=9),
+        XianyuDaily(user_id=1, item_id="a", title="教程", snap_date=d1, want_count=5),
+        XianyuDaily(user_id=1, item_id="a", title="教程", snap_date=d2, want_count=9),
+        XianyuDaily(user_id=1, item_id="a", title="教程", snap_date="2020-01-01", want_count=999),
     ])
     db.commit()
     s = repo.xianyu_want_series(db, 1)
     assert [v for _, v in s["教程"]] == [5, 9]
-    assert len(repo.xianyu_daily_by_date(db, 1, "2026-09-02")) == 1
+    assert 999 not in [v for _, v in s["教程"]]
+    assert len(repo.xianyu_daily_by_date(db, 1, d2)) == 1
     db.close()
 
 
