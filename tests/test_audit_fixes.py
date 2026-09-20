@@ -290,3 +290,24 @@ class TestProxyCredRedaction:
         assert "psecret" not in detail and "pu:" not in detail
         assert "9.9.9.9:3128" in detail  # 出口 IP/端口保留便于排障
 
+    def test_retry_run_msg_masks_proxy_creds(self, session, monkeypatch):
+        """admin.retry_run:采集异常含代理凭证时,msg(回管理端 + 落 AdminLog)须遮蔽。"""
+        import requests as rq
+
+        from app import admin as admin_svc
+        from app.services import tenant
+
+        run = RunRecord(user_id=1, kind="xianyu", status="failed", run_id="r1")
+        session.add(run)
+        session.commit()
+
+        def boom(*a, **kw):
+            raise rq.ConnectionError("Cannot connect to proxy http://pu:psecret@9.9.9.9:3128")
+
+        monkeypatch.setattr(tenant, "run_xianyu", boom)
+        res = admin_svc.retry_run(session, str(run.id), settings=object())
+        assert res["ok"] is False
+        assert "psecret" not in res["msg"] and "pu:" not in res["msg"]
+        assert "9.9.9.9:3128" in res["msg"]
+
+

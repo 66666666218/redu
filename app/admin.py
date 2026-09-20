@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.db import repository
+from app.utils.net import redact_proxy_creds
 from app.db.models import (
     AdminLog,
     AlertRecord,
@@ -424,7 +425,9 @@ def retry_run(db: Session, run_id: str, settings=None) -> dict:
     except Exception as exc:  # noqa: BLE001
         run.retry_count = (run.retry_count or 0) + 1
         db.commit()
-        return {"ok": False, "msg": str(exc)[:200]}
+        # 代理链(xianyu/weibo)异常文本内嵌 http://user:pass@host,msg 会回给
+        # 管理端并经 log_admin 落 AdminLog——源头遮蔽(同 collect HTTP 面)
+        return {"ok": False, "msg": redact_proxy_creds(str(exc))[:200]}
 
 
 def retry_failed_runs(max_retry: int = 3) -> dict:
