@@ -197,3 +197,59 @@ def test_stale_memory_cleared_for_reignition(session, st, monkeypatch) -> None:
     assert early_agent.agent_tick(session, 1, settings=st) == 1  # 老词重新首推
     row = session.scalar(select(AgentStage))
     assert row is not None and row.stage == "苗头"
+
+
+def test_push_failure_reverts_new_stage_for_retry(session, st, monkeypatch) -> None:
+    """推送失败(send_card 返回 False)时回退阶段记忆:新建行删除,下轮重新首推,消除永久沉默。"""
+    for i, h in enumerate([100, 150, 400]):
+        _weibo(session, "推送失败要重试的词", h, hours_ago=(3 - i) * 2)
+    session.commit()
+
+    class _Failing:
+        def __init__(self, webhook, secret="") -> None:
+            pass
+
+        def send(self, msg):
+            return False
+
+        def send_card(self, card):
+            return False
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _Failing)
+    assert early_agent.agent_tick(session, 1, settings=st) == 0  # 未送达
+    assert session.scalar(select(AgentStage)) is None  # 新建行已回退删除
+
+    # 恢复推送:同数据再跑一轮应重新 escalated 首推(而非被旧"爆发"记忆静默)
+    monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
+    assert early_agent.agent_tick(session, 1, settings=st) == 1
+    assert session.scalar(select(AgentStage)).stage == "爆发"
+
+
+def test_push_failure_restores_old_stage_for_upgrade(session, st, monkeypatch) -> None:
+    """已有行升级(上升→爆发)推送失败:阶段回退为 old_stage,下轮重新判为升级再推。"""
+    for i, h in enumerate([120, 400, 900]):  # 上升
+        _weibo(session, "升级推送失败要回退的词", h, hours_ago=(4 - i) * 2)
+    session.commit()
+    assert early_agent.agent_tick(session, 1, settings=st) == 1
+    assert session.scalar(select(AgentStage)).stage == "上升"
+
+    _weibo(session, "升级推送失败要回退的词", 2500, hours_ago=0.5)  # → 爆发(升级)
+    session.commit()
+
+    class _Failing:
+        def __init__(self, webhook, secret="") -> None:
+            pass
+
+        def send(self, msg):
+            return False
+
+        def send_card(self, card):
+            return False
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _Failing)
+    assert early_agent.agent_tick(session, 1, settings=st) == 0  # 升级推送失败
+    assert session.scalar(select(AgentStage)).stage == "上升"  # 回退到 old_stage
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
+    assert early_agent.agent_tick(session, 1, settings=st) == 1  # 重新判为升级再推
+    assert session.scalar(select(AgentStage)).stage == "爆发"

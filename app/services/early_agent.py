@@ -237,7 +237,7 @@ def agent_tick(db: Session, user_id: int, settings: Settings | None = None) -> i
             st.stage, st.score, st.parts, st.kw, st.updated_at = (
                 new_stage, s["score"], " ".join(s["parts"])[:255], s["kw"][:255], now)
         s.update({"stage": new_stage, "old_stage": old_stage, "advice": STAGE_ADVICE[new_stage],
-                  "tracked_h": int((now - st.first_seen).total_seconds() // 3600)})
+                  "tracked_h": int((now - st.first_seen).total_seconds() // 3600), "_st": st})
         to_push.append(s)
         stage_rows.append(st)
 
@@ -289,6 +289,8 @@ def agent_tick(db: Session, user_id: int, settings: Settings | None = None) -> i
         if _client(settings.feishu_webhook).send_card(
                 _card(multi, f"🧠 苗头 Agent · 跨板块({len(multi)})")):
             pushed += len(multi)
+            for s in multi:
+                s["_sent"] = True
     by_sec: dict[str, list[dict]] = {}
     for s in single:
         by_sec.setdefault(s["board"], []).append(s)
@@ -298,6 +300,26 @@ def agent_tick(db: Session, user_id: int, settings: Settings | None = None) -> i
             continue
         if _client(webhook).send_card(_card(items, f"🧠 苗头 Agent · {SECTION_LABELS.get(sec, sec)}({len(items)})")):
             pushed += len(items)
+            for s in items:
+                s["_sent"] = True
+
+    # 推送补偿:阶段跃迁已在上面提交,若某条没送达飞书(send_card 失败/该板块无 webhook),
+    # 下一轮 upgraded(新阶段>回退前旧阶段)=False 会永久沉默。回退未送达项的阶段记忆,
+    # 让下一轮重新判为"待提醒":新建行直接删除(下轮重新 escalated),老行还原 old_stage。
+    reverted = False
+    for s in to_push:
+        if s.get("_sent"):
+            continue
+        st = s.get("_st")
+        if st is None:
+            continue
+        if s["old_stage"] is None:
+            db.delete(st)
+        else:
+            st.stage = s["old_stage"]
+        reverted = True
+    if reverted:
+        db.commit()
     return pushed
 
 
