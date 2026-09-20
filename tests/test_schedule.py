@@ -247,3 +247,23 @@ def test_claim_schedule_race_second_claimant_loses(session) -> None:
     session.add(row2)
     session.commit()
     assert svc.claim_schedule(session, row2, now) is False
+
+
+def test_claim_schedule_force_race_second_claimant_loses(session) -> None:
+    """定点作业 force=True:无视间隔,但同刻双进程只有一个能抢到(乐观锁防双跑)。"""
+    from datetime import datetime, timedelta
+
+    from app.db.models import UserSchedule
+    from app.services import schedule_service as svc
+
+    _add_user(session, 9)
+    row = UserSchedule(user_id=9, section="wechat", interval_minutes=120, enabled=True,
+                       last_run_at=datetime.now() - timedelta(days=1))
+    session.add(row)
+    session.commit()
+    now = datetime.now()
+    # 模拟第二个进程:独立加载同一行,持有与抢占前一致的旧 last_run_at
+    second = UserSchedule(id=row.id, user_id=9, section="wechat",
+                          interval_minutes=120, enabled=True, last_run_at=row.last_run_at)
+    assert svc.claim_schedule(session, row, now, force=True) is True   # 第一个抢到并刷新
+    assert svc.claim_schedule(session, second, now, force=True) is False  # 旧值已不匹配→抢不到

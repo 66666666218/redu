@@ -180,14 +180,19 @@ def claim_schedule(db: Session, row: UserSchedule, now: datetime | None = None,
     from sqlalchemy import update
 
     now = now or datetime.now()
-    expiry = now - timedelta(minutes=row.interval_minutes or 1)
-    # force=True: 定点作业(公众号四定点)无视间隔,仅防并发双跑
+    # force=True: 定点作业(公众号四定点)无视用户间隔,但仍须防并发双跑。
+    # 旧写法 `... | force` 让 WHERE 恒真→两进程都判"抢到",抢占形同虚设。
+    # 改为对"本次读到的 last_run_at"做乐观锁:库里已被他进程刷新则 rowcount=0。
+    if force:
+        observed = row.last_run_at
+        guard = (UserSchedule.last_run_at.is_(None) if observed is None
+                 else UserSchedule.last_run_at == observed)
+    else:
+        expiry = now - timedelta(minutes=row.interval_minutes or 1)
+        guard = (UserSchedule.last_run_at.is_(None)) | (UserSchedule.last_run_at <= expiry)
     result = db.execute(
         update(UserSchedule)
-        .where(
-            UserSchedule.id == row.id,
-            (UserSchedule.last_run_at.is_(None)) | (UserSchedule.last_run_at <= expiry) | force,
-        )
+        .where(UserSchedule.id == row.id, guard)
         .values(last_run_at=now)
     )
     db.commit()
