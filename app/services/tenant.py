@@ -171,6 +171,9 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
         stats: dict = {}
         hot = xianyu.collect_hot(settings, client, start_offset=start_offset, stats=stats)
         prev_keys = set(session.scalars(select(XianyuItem.item_id).where(XianyuItem.user_id == user_id)).all())
+        # 快照:入库循环会把本轮 item_id 就地 add 进 prev_keys,而 evaluate 的 "new" 规则
+        # 靠 `key not in prev_keys` 判定——必须在变异前取旧集合,否则闲鱼"新上榜"永不触发。
+        prev_keys_before = set(prev_keys)
         prev_titles = set(session.scalars(select(XianyuItem.title).where(
             XianyuItem.user_id == user_id,
             XianyuItem.created_at >= datetime.now() - timedelta(hours=24))).all())
@@ -183,7 +186,7 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
         session.commit()
         persist_refreshed_cookie(session, user_id, client)
         latest = [{"key": it["item_id"], "hit_keywords": it["hit_keywords"], "best_rank": it["best_rank"]} for it in hot]
-        alert_service.evaluate(session, user_id, "xianyu", latest, prev_keys, settings)
+        alert_service.evaluate(session, user_id, "xianyu", latest, prev_keys_before, settings)
         _record_watch(session, user_id, "xianyu", [{"title": it["title"], "value": it.get("hit_keywords", 0)} for it in hot])
         detail = f"items={len(hot)}"
         if stats.get("verify"):

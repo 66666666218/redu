@@ -68,7 +68,9 @@ class DajialaClient:
         try:
             resp = requests.request(method, url, data=form, json=json_body, params=params, timeout=self.timeout)
         except requests.RequestException as exc:
-            raise DajialaError(f"dajiala 请求失败:{exc}") from exc
+            # 只保留异常类型名,绝不带 exc 文本:GET 请求(如 article_detail)的 key 在
+            # query 里,urllib3 会把 "?key=..." 整条 URL 写进异常,再经 HTTPException 回前端即泄露付费密钥
+            raise DajialaError(f"dajiala 请求失败:{type(exc).__name__}") from exc
         try:
             obj = resp.json()
         except ValueError as exc:
