@@ -674,3 +674,38 @@ def test_retry_failed_runs_covers_wechat(session, monkeypatch: pytest.MonkeyPatc
 
     retry_failed_runs(max_retry=3)
     assert called == [1]  # wechat_listen 失败被重试了
+
+
+def test_retry_failed_runs_skips_disabled_user(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """禁用用户的失败记录不被自动重试:封禁即停推——retry→run_*→alert_service.evaluate
+    会按用户启用的 AlertRule 复活其推送链路。同时验证 enabled 用户仍重试、
+    无对应 User 行的孤儿记录维持旧行为(仍重试),与 due_schedules 的 notin_ 口径一致。"""
+    from datetime import datetime, timedelta
+    from app.db.models import RunRecord, User
+    from app.services import tenant, wechat_monitor
+    from app.admin import retry_failed_runs
+
+    session.add_all([
+        User(id=1, username="u1", password_hash="x", enabled=True),
+        User(id=2, username="u2", password_hash="x", enabled=False),
+    ])
+    now = datetime.now() - timedelta(hours=2)
+    for uid in (1, 2, 99):  # 1=启用 2=禁用 99=孤儿(无 User 行)
+        session.add(RunRecord(user_id=uid, run_id=f"r{uid}", kind="wechat_listen",
+                              status="failed", detail="x", retry_count=0, started_at=now))
+    session.commit()
+
+    called: list[int] = []
+    monkeypatch.setattr(wechat_monitor, "run_wechat_listen",
+                        lambda db, uid, settings=None: called.append(uid))
+    monkeypatch.setattr(tenant, "run_weibo", lambda db, uid, settings=None: None)
+    monkeypatch.setattr(tenant, "run_xianyu", lambda db, uid, settings=None: None)
+    monkeypatch.setattr(tenant, "run_douhot", lambda db, uid, settings=None: None)
+    import app.db as appdb
+    monkeypatch.setattr(appdb, "get_session_local",
+                        lambda: sessionmaker(bind=session.get_bind()))
+
+    retry_failed_runs(max_retry=3)
+    assert 2 not in called  # 禁用用户不重试
+    assert 1 in called      # 启用用户仍重试
+    assert 99 in called     # 孤儿记录维持旧行为

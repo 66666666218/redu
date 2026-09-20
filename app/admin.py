@@ -450,6 +450,12 @@ def retry_failed_runs(max_retry: int = 3) -> dict:
             select(RunRecord).where(
                 RunRecord.status == "failed",
                 RunRecord.started_at >= datetime.now() - timedelta(hours=24),
+                # 排除被管理员禁用用户的失败记录:封禁即停推。run_* → alert_service.evaluate
+                # 按用户启用的 AlertRule 发实时提醒,并可能 notify_incident 推飞书;若不剔除,
+                # 用户被禁用前遗留的 failed 记录会在 24h 窗口内被自动重试而复活其推送链路
+                # (常规定时采集已靠 due_schedules 的 notin_ 过滤停推,重试路径需保持一致)。
+                # 用 notin_(禁用 id) 而非内联 JOIN:无对应 User 行的孤儿记录维持旧行为。
+                RunRecord.user_id.notin_(select(User.id).where(User.enabled.is_(False))),
             ).order_by(RunRecord.id.desc()).limit(20)
         ).all()
         # 过滤:一律要求"距该次失败已过 2^retry_count 小时"的指数退避,
