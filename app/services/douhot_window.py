@@ -6,7 +6,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -135,7 +135,9 @@ def _latest_batch(session: Session, user_id: int) -> dict[tuple[str, str, str], 
     以 (list_type, keyword) 词级的最新 captured_at 为一轮批次,同一轮的相关话题快照共享该轮时间戳。
     """
     snaps = session.scalars(select(DouhotWindowSnap).where(
-        DouhotWindowSnap.user_id == user_id)).all()
+        DouhotWindowSnap.user_id == user_id,
+        DouhotWindowSnap.captured_at >= datetime.now() - timedelta(hours=48)
+    )).all()
     last_ts: dict[tuple[str, str], datetime] = {}
     for s in snaps:
         k = (s.list_type, s.keyword)
