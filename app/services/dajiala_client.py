@@ -74,7 +74,11 @@ class DajialaClient:
         try:
             obj = resp.json()
         except ValueError as exc:
-            raise DajialaError(f"dajiala 响应非 JSON(HTTP {resp.status_code}):{resp.text[:200]}") from exc
+            # 响应体只写服务端日志,不进异常消息:DajialaError 会被路由层 HTTPException(502, str(exc))
+            # 原样透传到前端。GET(article_detail)的付费 key 在请求 URL 里,网关/门户错误页常回显
+            # 被请求的完整 URL,resp.text 即可能含 ?key=…,与 124c089 修的 urllib3 异常泄露同源。
+            logger.error("dajiala 响应非 JSON(HTTP %s) body[:200]=%r", resp.status_code, resp.text[:200])
+            raise DajialaError(f"dajiala 响应非 JSON(HTTP {resp.status_code})") from exc
         return self._check(obj)
 
     def _check(self, obj: dict) -> dict:

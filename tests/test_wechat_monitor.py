@@ -1191,3 +1191,24 @@ def test_keyword_article_all_users_skips_disabled(monkeypatch, session) -> None:
     wechat_monitor.keyword_article_all_users(_settings())
     assert seen == [1]  # 停用用户 2 不被遍历
 
+
+
+def test_dajiala_non_json_error_does_not_leak_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """非 JSON 响应严禁带 key:网关/门户错误页常回显含 ?key= 的请求 URL,
+    而该异常会经路由 HTTPException(502, str(exc)) 原样透传到前端。响应体只入服务端日志。"""
+    import app.services.dajiala_client as dc
+
+    key = "SECRETKEY123"
+
+    class _Resp:
+        status_code = 502
+        text = f"<html>502 upstream for /article_detail?key={key}&url=x</html>"
+
+        def json(self):
+            raise ValueError("not json")
+
+    monkeypatch.setattr(dc.requests, "request", lambda *a, **k: _Resp())
+    client = dc.DajialaClient(key)
+    with pytest.raises(dc.DajialaError) as ei:
+        client.article_detail("https://mp.weixin.qq.com/s/abc")
+    assert key not in str(ei.value)
