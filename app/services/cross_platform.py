@@ -86,7 +86,7 @@ def run_cross_platform_alert(user_id: int, settings: Settings | None = None, db:
         # 落冷却门,第 13 条起会被烧掉冷却却从未展示 → 整个冷却窗口静默丢失。
         hits = []
         for it in items:
-            title = f"up:{it['keyword']}"
+            title = f"up:{it['keyword']}"[:200]
             existing = db.scalar(select(FeishuAlert).where(
                 FeishuAlert.section == "cross_up", FeishuAlert.user_id == user_id, FeishuAlert.title == title))
             if existing and (now - existing.alerted_at).total_seconds() < settings.feishu_alert_cooldown_hours * 3600:
@@ -104,7 +104,7 @@ def run_cross_platform_alert(user_id: int, settings: Settings | None = None, db:
         # 未入卡的候选下轮仍可再推,发送失败则全部保留待下轮)
         if FeishuClient(settings.feishu_webhook, settings.feishu_secret).send("\n".join(lines)):
             for it, existing in kept:
-                title = f"up:{it['keyword']}"
+                title = f"up:{it['keyword']}"[:200]
                 if existing:
                     existing.reason, existing.alerted_at = "跨平台共同上升", now
                 else:
