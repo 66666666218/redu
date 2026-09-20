@@ -19,11 +19,14 @@ from app.services.trend_analyzer import compute_growth, compute_slope
 
 
 _WORD_TYPES = ("word", "search", "subscribe", "video", "topic")
+_SECTIONS = ("weibo", "xianyu", "douhot", "baidu")
 _ENTRY_CAP = 100  # 榜单定向搜索类关注,每次采集最多记录的相关主题条数(默认 100,可用 DOUHOT_WATCH_ENTRY_CAP 覆盖)
 
 
 def add_watch(session: Session, user_id: int, section: str, list_type: str, keyword: str,
               filter_keyword: str = "", date_window: int | str | None = None) -> dict:
+    if section not in _SECTIONS:
+        raise ValueError(f"未知板块:{section}")
     list_type = list_type if list_type in _WORD_TYPES else "word"
     keyword = keyword.strip()[:128]
     filter_keyword = (filter_keyword or "").strip()[:64]
