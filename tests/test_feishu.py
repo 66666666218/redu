@@ -259,6 +259,28 @@ def test_realtime_only_pushes_new_and_big_jump(session, monkeypatch) -> None:
     assert "column_set" in joined  # 网格卡片格式
 
 
+def test_realtime_fans_out_to_main_and_section_group(session, monkeypatch) -> None:
+    """主群 + 板块专属群都要收到实时卡片(加法模型,不因先送达主群而短路专属群)。
+
+    回归:any(FeishuClient(...).send_card(c) for wh in whs) 在第一个 True 即短路,
+    导致专属群永远收不到——即使冷却已落、pushed 计数正常。
+    """
+    seed_weibo(session)
+    called: list[str] = []
+
+    def _fake(w, s):
+        class F:
+            def send_card(self, c):
+                called.append(w)
+                return True
+        return F()
+
+    monkeypatch.setattr(feishu, "FeishuClient", _fake)
+    n = run_feishu_realtime("weibo", 1, _settings(feishu_webhook="main", feishu_webhook_weibo="wb"), db=session)
+    assert n == 2
+    assert called == ["main", "wb"]  # 两个群各收到一次,主群成功不短路专属群
+
+
 def test_realtime_respects_cooldown(session, monkeypatch) -> None:
     seed_weibo(session)
     n_calls = {"n": 0}
@@ -586,6 +608,27 @@ def test_health_stalls_alert_and_cooldown(monkeypatch, session) -> None:
     assert "闲鱼" in sent[0] and "停摆" in sent[0]
     # 冷却期内(6h)再跑 → 不重推
     assert alert_service.check_health_stalls(_settings(health_stall_hours=24), db=session) == 0
+
+
+def test_health_stalls_fans_out_to_main_and_section_group(monkeypatch, session) -> None:
+    """停摆告警也要主群 + 专属群都发:回归 any(... for wh in whs) 短路漏发专属群。"""
+    from datetime import datetime, timedelta
+
+    from app.services import alert_service
+    from app.db.models import UserCookie, XianyuItem
+
+    session.add(UserCookie(user_id=1, platform="goofish", cookie="x"))
+    session.add(XianyuItem(user_id=1, item_id="i1", title="商品", created_at=datetime.now() - timedelta(hours=48)))
+    session.commit()
+
+    called: list[str] = []
+    monkeypatch.setattr(
+        feishu_client, "FeishuClient",
+        lambda w, s: type("F", (), {"send": lambda self, t: (called.append(w), True)[1]})())
+    n = alert_service.check_health_stalls(
+        _settings(health_stall_hours=24, feishu_webhook="main", feishu_webhook_xianyu="xy"), db=session)
+    assert n == 1
+    assert called == ["main", "xy"]  # 主群送达后仍继续发专属群
 
 
 def test_health_stalls_escalates_long_term(monkeypatch, session) -> None:

@@ -921,11 +921,14 @@ def run_feishu_realtime(
                         (f"{'🔥' if hot else ''}{name_md}", 6), (price, 2),
                         (want_txt, 2), (reason, 2),
                     ]))
-                sent_ok = any(FeishuClient(wh, settings.feishu_secret).send_card({
-                        "config": {"wide_screen_mode": True},
+                card = {"config": {"wide_screen_mode": True},
                         "header": {"template": "blue", "title": {"tag": "plain_text", "content": head}},
-                        "elements": elements,
-                    }) for wh in whs)
+                        "elements": elements}
+                # 主群 + 专属群都要收到(互不替代):逐个 webhook 都发,不因先成功而短路
+                sent_ok = False
+                for wh in whs:
+                    if FeishuClient(wh, settings.feishu_secret).send_card(card):
+                        sent_ok = True
                 if sent_ok:
                     for t, rsn in pushed_items:
                         _mark_alerted(db, user_id, section, t, rsn)  # 发送成功才落冷却
@@ -952,7 +955,10 @@ def run_feishu_realtime(
                 card = {"config": {"wide_screen_mode": True},
                         "header": {"template": "blue", "title": {"tag": "plain_text", "content": head}},
                         "elements": elements}
-                sent_ok = any(FeishuClient(wh, settings.feishu_secret).send_card(card) for wh in whs)
+                sent_ok = False
+                for wh in whs:
+                    if FeishuClient(wh, settings.feishu_secret).send_card(card):
+                        sent_ok = True
                 if sent_ok:
                     for t, rsn in pushed_items:
                         _mark_alerted(db, user_id, section, t, rsn)

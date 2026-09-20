@@ -580,9 +580,14 @@ def check_health_stalls(settings: Settings | None = None, db: Session | None = N
                     else f"⚠️ 采集停摆(> {stall_hours}h 无新数据)")
             lines = [head, f"  · {labels.get(p, p)}:最近数据 {when}{long_txt}",
                      "可能:后端宕机/调度停止/Cookie失效/被风控全挡(闲鱼常见滑块/限流)"]
-            # 按板块路由:主群 + 该平台专属群 都发;任一送达即算成功
+            # 按板块路由:主群 + 该平台专属群 都发(互不替代),任一送达即算成功
             whs = webhooks_for(settings, p)
-            if any(FeishuClient(wh, settings.feishu_secret).send("\n".join(lines)) for wh in whs):
+            msg = "\n".join(lines)
+            delivered = False
+            for wh in whs:
+                if FeishuClient(wh, settings.feishu_secret).send(msg):
+                    delivered = True
+            if delivered:
                 sent += 1
             else:
                 ok = False
