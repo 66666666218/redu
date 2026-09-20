@@ -185,13 +185,19 @@ def backtest_and_learn(db: Session, user_id: int, settings=None) -> dict:
                 weights[wkey] = new_w
         save_weights(db, weights)
 
-    # 游标持久化(无论是否动权重都要写,否则静止行明天又被回测一遍)
+    # 命中率样本 + 回测游标持久化(无论是否动权重都要写):
+    # - signal_stats 必须写回,否则每次调用都从空重建,"累计≥10样本"永远凑不齐,自学习断裂;
+    # - seen 游标不写的话静止行明天又被回测一遍。
     if backtested:
-        payload = json.dumps(seen, ensure_ascii=False)
-        if seen_row:
-            seen_row.value = payload
+        if row:
+            row.value = json.dumps(signal_stats, ensure_ascii=False)
         else:
-            db.add(SystemConfig(key=seen_key, value=payload))
+            db.add(SystemConfig(key=stats_key, value=json.dumps(signal_stats, ensure_ascii=False)))
+        seen_payload = json.dumps(seen, ensure_ascii=False)
+        if seen_row:
+            seen_row.value = seen_payload
+        else:
+            db.add(SystemConfig(key=seen_key, value=seen_payload))
         db.commit()
 
     return {"backtested": backtested, "hits": hits, "weights": weights}
