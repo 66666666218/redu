@@ -31,6 +31,23 @@ def _key(item: dict) -> str:
     return str(item.get("key") or item.get("item_id") or item.get("keyword") or item.get("title") or "")
 
 
+def _normalize_alert_time(raw: str | None) -> str:
+    """校验并归一化定时时间为 "HH:MM"(零填充 24 小时制)。
+
+    调度器用 `AlertRule.alert_time == now.strftime("%H:%M")` 精确匹配,任何偏差
+    ("9:00" 缺前导零、"0900"、全角冒号、越界)都会让规则**永不触发且无任何报错**。
+    因此在写入边界统一归一化;无法解析则拒绝,交由 API 返回 400。
+    """
+    s = (raw or "").strip().replace("：", ":")
+    parts = s.split(":")
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        raise ValueError("定时时间需为 HH:MM(24 小时制),如 09:00")
+    hh, mm = int(parts[0]), int(parts[1])
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        raise ValueError("定时时间越界:小时 0-23、分钟 0-59")
+    return f"{hh:02d}:{mm:02d}"
+
+
 def add_rule(
     session: Session,
     user_id: int,
@@ -45,6 +62,10 @@ def add_rule(
         raise ValueError("未知板块")
     if rule_type not in RULE_TYPES:
         raise ValueError("未知规则类型")
+    if rule_type == "fixed_time":
+        alert_time = _normalize_alert_time(alert_time)
+    else:
+        alert_time = None  # 非定时规则不存时间,避免残留脏值
     rule = AlertRule(
         user_id=user_id, section=section, rule_type=rule_type,
         metric=metric, threshold=threshold, keyword=(keyword or None),

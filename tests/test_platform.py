@@ -448,6 +448,28 @@ def test_alert_keyword_filter(session) -> None:
     assert n == 0
 
 
+def test_alert_fixed_time_normalizes_and_validates(session) -> None:
+    """fixed_time 的 alert_time 在写入边界归一为零填充 HH:MM;非法/缺失拒绝(否则永不触发)。"""
+    from app.services import alert_service
+
+    # 缺前导零 → 归一为 09:00,与调度器 now.strftime("%H:%M") 可精确匹配
+    r = alert_service.add_rule(session, 1, "weibo", "fixed_time", alert_time="9:00")
+    assert r.alert_time == "09:00"
+    # 全角冒号同样归一
+    assert alert_service.add_rule(session, 1, "weibo", "fixed_time",
+                                  alert_time="18：05").alert_time == "18:05"
+    # 缺失 → 拒绝(定时规则无时间必永不触发)
+    with pytest.raises(ValueError):
+        alert_service.add_rule(session, 1, "weibo", "fixed_time", alert_time=None)
+    # 无分隔/越界 → 拒绝
+    for bad in ("0900", "25:00", "09:60", "abc"):
+        with pytest.raises(ValueError):
+            alert_service.add_rule(session, 1, "weibo", "fixed_time", alert_time=bad)
+    # 非定时规则忽略 alert_time,不残留脏值
+    assert alert_service.add_rule(session, 1, "weibo", "threshold",
+                                  metric="growth", threshold=0.3, alert_time="9:00").alert_time is None
+
+
 def test_admin_dashboard_and_users(session) -> None:
     from app import admin as admin_svc
     from app.db.models import User
