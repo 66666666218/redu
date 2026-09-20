@@ -69,6 +69,47 @@ def test_cleanup_bounds_snap_date_string(session) -> None:
     assert session.scalar(select(XianyuDaily).where(XianyuDaily.title == "旧")) is None
 
 
+def test_cleanup_deletes_old_window_snap(session) -> None:
+    """多窗口快照 douhot_window_snap 纳入清理(此前漏加会无限膨胀)。"""
+    from app.db.models import DouhotWindowSnap
+
+    old = datetime.now() - timedelta(days=40)
+    recent = datetime.now()
+    session.add_all([
+        DouhotWindowSnap(user_id=1, keyword="旧窗", window=24, captured_at=old),
+        DouhotWindowSnap(user_id=1, keyword="新窗", window=24, captured_at=recent),
+    ])
+    session.commit()
+    res = cleanup_old_data(_settings(), db=session)
+    assert res["douhot_window_snap"] == 1
+    assert session.scalar(select(DouhotWindowSnap).where(DouhotWindowSnap.keyword == "新窗")) is not None
+
+
+def test_cleanup_reclaims_orphan_pan_links(session) -> None:
+    """删掉旧文章后,指向已不存在文章的盘链孤儿行被回收;存活文章的链原样保留。"""
+    from app.db.models import WechatArticle, WechatPanLink
+
+    old_no_pan = WechatArticle(user_id=1, title="超60天无盘链旧文", pan_urls="",
+                               created_at=datetime.now() - timedelta(days=90))
+    live = WechatArticle(user_id=1, title="在架文章", pan_urls="https://pan/x",
+                         created_at=datetime.now())
+    session.add_all([old_no_pan, live])
+    session.commit()
+    session.add_all([
+        WechatPanLink(user_id=1, article_id=old_no_pan.id, pan_url="https://pan/dead"),
+        WechatPanLink(user_id=1, article_id=live.id, pan_url="https://pan/live"),
+    ])
+    session.commit()
+
+    res = cleanup_old_data(_settings(), db=session)
+    assert res.get("wechat_articles_tiered", 0) >= 1  # 旧文已删
+    assert session.scalar(select(WechatArticle).where(WechatArticle.title == "在架文章")) is not None
+    # 孤儿链(指向已删文章)被回收,存活链保留
+    assert session.scalar(select(WechatPanLink).where(WechatPanLink.pan_url == "https://pan/live")) is not None
+    assert session.scalar(select(WechatPanLink).where(WechatPanLink.pan_url == "https://pan/dead")) is None
+    assert res.get("wechat_pan_links_orphan", 0) == 1
+
+
 def test_scheduler_registers_data_cleanup_job() -> None:
     from apscheduler.schedulers.background import BackgroundScheduler
     from app.services.scheduler import build_jobs

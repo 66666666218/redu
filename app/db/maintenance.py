@@ -14,7 +14,7 @@ import os
 import sqlite3
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
@@ -24,6 +24,7 @@ from app.db.models import (
     AlertRecord,
     BaiduHotItem,
     DouhotWatchSnap,
+    DouhotWindowSnap,
     DouhotWord,
     LoginLog,
     RunRecord,
@@ -32,6 +33,7 @@ from app.db.models import (
     FeishuAlert,
     WechatArticle,
     WechatCandidate,
+    WechatPanLink,
     WechatTrafficSample,
     AgentStage,
     XianyuDaily,
@@ -46,6 +48,7 @@ _TABLES = [
     (WeiboHotItem, "captured_at", False),
     (BaiduHotItem, "captured_at", False),
     (DouhotWatchSnap, "captured_at", False),
+    (DouhotWindowSnap, "captured_at", False),  # 多窗口快照:与单窗口同类的时间序列,漏加会无限膨胀
     (WeiboTrend, "decided_at", False),
     (XianyuItem, "created_at", False),
     (XianyuDaily, "snap_date", True),      # YYYY-MM-DD 字符串
@@ -158,6 +161,19 @@ def cleanup_old_data(settings: Settings | None = None, db: Session | None = None
                 result["wechat_articles_tiered"] = n60 + n180
         except Exception:  # noqa: BLE001 - 分级清理失败不阻塞
             logger.exception("公众号文章分级清理失败")
+
+        # 盘链归一化表孤儿行回收:wechat_pan_links 以 article_id 指向文章,分级清理删掉
+        # 旧文章后这些行会指向已不存在的文章,永久堆积(且共振查询命中幽灵链)。只删 article
+        # 已不存在的行——仍在保留期内的文章其链原样保留,不按 created_at 一刀切。
+        try:
+            live = select(WechatArticle.id).scalar_subquery()
+            n_orphan = db.execute(
+                delete(WechatPanLink).where(WechatPanLink.article_id.not_in(live))
+            ).rowcount
+            if n_orphan:
+                result["wechat_pan_links_orphan"] = n_orphan
+        except Exception:  # noqa: BLE001 - 孤儿回收失败不阻塞
+            logger.exception("盘链孤儿行回收失败")
 
         db.commit()
         total = sum(result.values())
