@@ -291,16 +291,22 @@ def _douhot_rising(session, user_id: int, settings: Settings, now) -> list[dict]
             )
             if alerted and (now - alerted.alerted_at).total_seconds() < settings.douhot_alert_cooldown_hours * 3600:
                 continue
-            if alerted is None:
-                session.add(DouhotAlerted(user_id=user_id, title=title, alerted_at=now))
-            else:
-                # 冷却到期后再次告警:必须把 alerted_at 刷新到本次,否则时间戳永远停在首次,
-                # 292 的冷却判断用陈旧值 → 持续飙升的词每轮都重复告警(冷却形同虚设)
-                alerted.alerted_at = now
-            session.add(AlertRecord(user_id=user_id, keyword=title, reason=f"抖音内容词飙升指数环比 {g:.0%}", triggered_at=now))
-            rising.append({"title": title, "growth": g, "slope": sl})
+            rising.append({"title": title, "growth": g, "slope": sl, "_alerted": alerted})
     rising.sort(key=lambda r: r["growth"], reverse=True)
-    return rising[: settings.douhot_alert_max]
+    kept = rising[: settings.douhot_alert_max]
+    # DB 副作用(冷却标记 + 告警行)只对真正入选推送的前 max 条落库。此前对所有飙升词
+    # 都写:排在 max 之后的词从没被推给用户却进入冷却、并污染 AlertRecord → 真正该提醒
+    # 的词被静默丢失。延后到截断之后按 kept 写。
+    for r in kept:
+        alerted = r.pop("_alerted")
+        if alerted is None:
+            session.add(DouhotAlerted(user_id=user_id, title=r["title"], alerted_at=now))
+        else:
+            # 冷却到期后再次告警:刷新 alerted_at,否则判断停在首次时间戳,持续飙升词每轮重复告警
+            alerted.alerted_at = now
+        session.add(AlertRecord(user_id=user_id, keyword=r["title"],
+                                reason=f"抖音内容词飙升指数环比 {r['growth']:.0%}", triggered_at=now))
+    return kept
 
 
 def dashboard(session: Session, user_id: int) -> dict:

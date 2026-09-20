@@ -190,3 +190,29 @@ def test_query_windows_any_keyword(monkeypatch: pytest.MonkeyPatch, session) -> 
     # 无 Cookie → skipped
     monkeypatch.setattr(douhot_window, "get_cookies", lambda db, uid: {})
     assert douhot_window.query_windows(session, 1, "video", "词", settings=_settings())["reason"] == "no_cookie"
+
+
+def test_douhot_rising_marks_cooldown_only_for_pushed(session) -> None:
+    """截断到 max 之后才落冷却/告警:排在 max 之后的飙升词不得被静默标记。"""
+    from app.db.models import AlertRecord, DouhotAlerted, DouhotWord
+    from app.services import tenant
+
+    base = datetime(2026, 9, 1, 0, 0, 0)
+    # 词A 强升(10→50→200,环比 300%),词B 弱升(100→110→130,环比 ~18%)。
+    for title, seq in (("词A", [10, 50, 200]), ("词B", [100, 110, 130])):
+        for i, sc in enumerate(seq):
+            session.add(DouhotWord(user_id=1, title=title, score=sc,
+                                   created_at=base + timedelta(hours=i)))
+    session.commit()
+
+    st = _settings(growth_threshold=0.05, douhot_alert_max=1)
+    now = datetime(2026, 9, 1, 3, 0, 0)
+    out = tenant._douhot_rising(session, 1, st, now)
+    session.commit()
+
+    assert len(out) == 1 and out[0]["title"] == "词A"  # 只留增速最高的 1 条
+    assert "_alerted" not in out[0]  # 内部键不外泄
+    # 冷却表:只有被推送的词A入库,词B 不被误标
+    assert {a.title for a in session.scalars(select(DouhotAlerted)).all()} == {"词A"}
+    # 告警历史同理只记词A
+    assert {r.keyword for r in session.scalars(select(AlertRecord)).all()} == {"词A"}
