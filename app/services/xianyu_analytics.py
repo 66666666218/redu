@@ -101,6 +101,12 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
                 stop_reason = "rate_limit"
                 logger.warning("闲鱼限流,停止抓取详情")
                 break
+            if detail is None:
+                # fetch_detail 对单品普通失败返回 None(契约:不写假 0 快照)。此处必须跳过:
+                # 直接 detail.get(...) 会抛 AttributeError → 外层 except → rollback 丢掉本轮全部
+                # 已采 saved 行并 raise,一条坏详情毁掉整轮深采。
+                logger.warning("闲鱼详情抓取失败,跳过该商品 item_id=%s", it["item_id"])
+                continue
             row = repository.get_xianyu_daily(session, user_id, it["item_id"], today)
             if row is None:
                 row = XianyuDaily(user_id=user_id, snap_date=today, item_id=it["item_id"])

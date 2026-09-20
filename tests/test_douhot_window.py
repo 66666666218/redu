@@ -103,6 +103,25 @@ def test_collect_windows_writes_snaps(monkeypatch: pytest.MonkeyPatch, session) 
     assert all(s.captured_at == snaps[0].captured_at for s in snaps)  # 同一轮一批
 
 
+def test_collect_windows_all_fail_marks_failed(monkeypatch: pytest.MonkeyPatch, session) -> None:
+    """有监控词却每个都异常:必须记 failed(而非 success),否则失败告警链路失明。"""
+    import app.services.douhot_window as dw_mod
+    from app.db.models import RunRecord
+
+    session.add(DouhotWatch(user_id=1, section="douhot", list_type="video", keyword="改版炸词", date_window=24))
+    session.commit()
+    monkeypatch.setattr(dw_mod, "get_cookies", lambda db, uid: {"douyin": "ck"})
+
+    def _boom(*a, **k):
+        raise RuntimeError("接口改版/Cookie 失效")
+
+    monkeypatch.setattr(douhot, "fetch_keyword_items", _boom)
+    out = dw_mod.collect_windows(session, 1, settings=_settings())
+    assert out["status"] == "failed" and out["ok"] == 0
+    rec = session.scalars(select(RunRecord).where(RunRecord.kind == "douhot_window")).first()
+    assert rec.status == "failed"
+
+
 def test_analytics_uses_latest_batch_and_contrast(session) -> None:
     session.add(DouhotWatch(user_id=1, section="douhot", list_type="word", keyword="测试词", date_window=1))
     session.commit()

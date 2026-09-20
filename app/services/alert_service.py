@@ -190,15 +190,17 @@ def _build_digest(session: Session, user_id: int, section: str, settings: Settin
     return "\n".join(lines)
 
 
-def run_fixed_time_digests() -> int:
+def run_fixed_time_digests(db: Session | None = None, settings: Settings | None = None) -> int:
     """定时派发:遍历所有 enabled 的 fixed_time 规则,当前 HH:MM 命中则发该板块总结。
 
     供调度器每个分钟调用;当天同一规则只发一次。返回发送条数。
+    `db`/`settings` 供测试注入(缺省各自建会话/读全局配置,行为不变)。
     """
     from app.db import get_session_local
 
-    settings = get_settings()
-    db = get_session_local()()
+    own_db = db is None
+    settings = settings or get_settings()
+    db = db or get_session_local()()
     try:
         now = datetime.now()
         hhmm = now.strftime("%H:%M")
@@ -214,13 +216,15 @@ def run_fixed_time_digests() -> int:
             user = db.get(User, rule.user_id)
             notifier = get_user_notifier(user, settings) if user else get_notifier(settings)
             digest = _build_digest(db, rule.user_id, rule.section, settings)
-            notifier.send(f"[{rule.section}] 定时总结 {hhmm}", digest)
+            if not notifier.send(f"[{rule.section}] 定时总结 {hhmm}", digest):
+                continue  # 发送失败不置 last_alert_at、不计数:与 evaluate 同款,避免静默丢当日总结
             rule.last_alert_at = now
             sent += 1
         db.commit()
         return sent
     finally:
-        db.close()
+        if own_db:
+            db.close()
 
 
 def build_weekly_summary(db: Session, user_id: int, settings: Settings) -> str:

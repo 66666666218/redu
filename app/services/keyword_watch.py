@@ -213,7 +213,7 @@ def watch_analytics(section: str, session: Session, user_id: int) -> list[dict]:
                 "date_window": getattr(w, "date_window", None) or None,
                 "last_score": top["last_score"], "rank_now": top["rank_now"],
                 "points": len(entry_agents), "growth": top["growth"],
-                "trend_label": "上升期" if risers else ("平稳" if not news else "平稳"),
+                "trend_label": "上升期" if risers else ("平稳" if not news else "新增"),
                 "trend_overview": " · ".join(ov_parts),   # 如 "3主题 · 升1 · 新1"
                 "forecast_next": top["forecast_next"],
                 "summary": " · ".join(bits), "confidence": top["confidence"],

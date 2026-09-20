@@ -88,10 +88,13 @@ def collect_windows(session: Session, user_id: int, settings: Settings | None = 
             logger.warning("抖音多窗口采集失败 keyword=%s list_type=%s", w.keyword, w.list_type)
             continue
     session.commit()
-    _record_run(session, user_id, "douhot_window", "success",
+    # 有监控词却一个都没采到(ok=0)= Cookie 失效/接口改版,不能记 "success":
+    # check_collect_failures 只数 failed,记成功会让多窗口链路无限静默停摆而不告警。
+    status = "failed" if ok == 0 else "success"
+    _record_run(session, user_id, "douhot_window", status,
                 f"words={len(watches)} ok={ok} snaps={snaps}")
     session.commit()
-    return {"platform": "douhot_window", "status": "success", "words": len(watches),
+    return {"platform": "douhot_window", "status": status, "words": len(watches),
             "ok": ok, "snaps": snaps}
 
 

@@ -84,6 +84,26 @@ def test_xianyu_deep_skips_items_already_cached_today(monkeypatch, session) -> N
     assert calls == ["i2"]  # 没有新的详情请求
 
 
+def test_xianyu_deep_tolerates_none_detail_without_losing_round(monkeypatch, session) -> None:
+    """单品详情普通失败(返回 None)只跳过该商品:不得崩成整轮 rollback 丢掉已采数据。"""
+    session.add(User(id=1, username="u", password_hash="x"))
+    session.commit()
+    set_cookie(session, 1, "goofish", "ck")
+
+    monkeypatch.setattr(xianyu_analytics.xianyu, "XianyuClient", lambda ck, proxy=None: object())
+    # i1 → None(普通失败),i2 → 正常。修复前:None.get() 抛错 → 外层 rollback 丢 i2 + raise。
+    monkeypatch.setattr(xianyu_analytics.xianyu, "fetch_detail",
+                        lambda client, iid: None if iid == "i1" else {"want_count": 7, "category": "C"})
+    out = xianyu_analytics.run_xianyu_deep(
+        session, 1, settings=_settings(),
+        hot=[{"item_id": "i1", "title": "坏详情", "price": "1"},
+             {"item_id": "i2", "title": "正常", "price": "2"}])
+    assert out["status"] == "success" and out["count"] == 1  # i1 跳过、i2 保住
+    today = datetime.now().date().isoformat()
+    ids = {r.item_id for r in session.scalars(select(XianyuDaily).where(XianyuDaily.snap_date == today))}
+    assert ids == {"i2"}  # 坏详情不落成假 0 快照
+
+
 def test_waf_block_triggers_same_cooldown(session) -> None:
     """WAF 空响应(XianyuWafBlock)与滑块同级:计入冷却、指数退避。"""
     st = _settings()

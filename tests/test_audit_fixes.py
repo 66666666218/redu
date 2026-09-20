@@ -158,3 +158,35 @@ class TestRetryConvergence:
         assert run.status == "recovered"  # 旧失败记录已关闭,30 分钟后不会再被重复重试
         # 第二轮:不再有 eligible failed 记录
         assert admin_svc.retry_failed_runs(max_retry=3)["retried"] == 0
+
+
+class TestFixedTimeDigestHonest:
+    def test_send_failure_does_not_burn_daily_flag(self, session, monkeypatch):
+        """定时总结发送失败必须诚实:不置 last_alert_at、不计 sent(与 evaluate 同款)。"""
+        from app.db.models import AlertRule
+        from app.services import alert_service
+
+        session.add(User(id=1, username="u", password_hash="x"))
+        rule = AlertRule(user_id=1, section="weibo", rule_type="fixed_time",
+                         alert_time=datetime.now().strftime("%H:%M"), enabled=True, last_alert_at=None)
+        session.add(rule)
+        session.commit()
+
+        monkeypatch.setattr(alert_service, "_build_digest", lambda db, uid, sec, settings: "digest")
+
+        class _N:
+            def __init__(self, ok):
+                self.ok = ok
+
+            def send(self, subject, body):
+                return self.ok
+
+        # 发送失败:sent=0 且 last_alert_at 仍为空(当天不被静默标记为"已发")
+        monkeypatch.setattr(alert_service, "get_user_notifier", lambda user, settings: _N(False))
+        assert alert_service.run_fixed_time_digests(db=session, settings=object()) == 0
+        assert session.get(AlertRule, rule.id).last_alert_at is None
+
+        # 发送成功:计 1 并落 last_alert_at
+        monkeypatch.setattr(alert_service, "get_user_notifier", lambda user, settings: _N(True))
+        assert alert_service.run_fixed_time_digests(db=session, settings=object()) == 1
+        assert session.get(AlertRule, rule.id).last_alert_at is not None
