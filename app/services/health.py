@@ -23,6 +23,13 @@ logger = get_logger(__name__)
 
 _LABELS = {"weibo": "微博", "xianyu": "闲鱼", "douhot": "抖音", "baidu": "百度", "wechat": "公众号"}
 _SECTIONS = ("weibo", "xianyu", "douhot", "baidu", "wechat")
+# wechat 板块的运行记录按细粒度 kind 落库(wechat_listen/wechat_sync),
+# 而 section 名是 "wechat"——直接用 section 查恒不命中,健康度里公众号恒显示"从未运行"。
+_KINDS = {"wechat": ("wechat_listen", "wechat_sync", "wechat")}
+
+
+def _kinds(section: str) -> tuple[str, ...]:
+    return _KINDS.get(section, (section,))
 
 
 def _last_data_age(db: Session, user_id: int, section: str) -> float | None:
@@ -56,13 +63,13 @@ def source_health(db: Session, user_id: int, settings=None) -> list[dict]:
             UserSchedule.user_id == user_id, UserSchedule.section == section)) or 60) / 60
 
         last_ok = db.scalar(select(func.max(RunRecord.started_at)).where(
-            RunRecord.user_id == user_id, RunRecord.kind == section,
+            RunRecord.user_id == user_id, RunRecord.kind.in_(_kinds(section)),
             RunRecord.status.in_(("success", "partial"))))
         fails_24h = db.scalar(select(func.count()).select_from(RunRecord).where(
-            RunRecord.user_id == user_id, RunRecord.kind == section,
+            RunRecord.user_id == user_id, RunRecord.kind.in_(_kinds(section)),
             RunRecord.status == "failed", RunRecord.started_at >= day_ago)) or 0
         last_fail = db.scalar(select(RunRecord.detail).where(
-            RunRecord.user_id == user_id, RunRecord.kind == section,
+            RunRecord.user_id == user_id, RunRecord.kind.in_(_kinds(section)),
             RunRecord.status == "failed").order_by(RunRecord.id.desc()).limit(1)) or ""
 
         from app.services.cookie_store import get_cookie

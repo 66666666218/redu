@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db.database import Base
-from app.db.models import GroupMember, RunRecord, User, UserCookie, UserSchedule, WeiboHotItem
+from app.db.models import GroupMember, RunRecord, User, UserCookie, UserSchedule, WeiboHotItem, WechatArticle
 from app.services import health
 
 
@@ -75,3 +75,22 @@ def test_circuit_open_on_xianyu_cooldown(session):
     session.commit()
     xy = next(r for r in health.source_health(session, 1, _settings()) if r["section"] == "xianyu")
     assert xy["health"] == "CIRCUIT_OPEN" and any("冷却" in p for p in xy["problems"])
+
+
+def test_wechat_stats_use_listen_sync_kinds(session):
+    """公众号监听按 wechat_listen/wechat_sync 落库,健康度须按细粒度 kind 统计而非 section。
+
+    (修前 source_health 用 kind=="wechat" 查 → 最后成功/失败次数恒空,公众号板块假装"从未运行")
+    """
+    now = datetime.now()
+    session.add(UserSchedule(user_id=1, section="wechat", interval_minutes=120, enabled=True))
+    session.add(UserCookie(user_id=1, platform="weread",
+                           cookie=__import__("app.security", fromlist=["encrypt_cookie"]).encrypt_cookie("ck=1")))
+    session.add(WechatArticle(user_id=1, title="盘文 夸克", url="https://mp.weixin.qq.com/s/x",
+                              source="listen", created_at=now))
+    session.add(RunRecord(run_id="1", user_id=1, kind="wechat_listen", status="success", started_at=now))
+    session.add(RunRecord(run_id="2", user_id=1, kind="wechat_sync", status="failed", started_at=now))
+    session.commit()
+    wx = next(r for r in health.source_health(session, 1, _settings()) if r["section"] == "wechat")
+    assert wx["last_success_at"] is not None   # 命中 wechat_listen 成功记录
+    assert wx["fails_24h"] == 1                # 命中 wechat_sync 失败记录
