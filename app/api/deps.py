@@ -67,18 +67,18 @@ class ResetIn(pydantic.BaseModel):
 class AlertRuleIn(pydantic.BaseModel):
     section: str
     rule_type: str
-    metric: str | None = None
+    metric: str | None = pydantic.Field(default=None, max_length=32)
     threshold: float | None = None
-    keyword: str | None = None
-    alert_time: str | None = None
+    keyword: str | None = pydantic.Field(default=None, max_length=128)
+    alert_time: str | None = pydantic.Field(default=None, max_length=8)
 
 
 class UserSmtpIn(pydantic.BaseModel):
-    host: str = ""
-    port: int = 465
-    user: str = ""
-    password: str = ""
-    from_name: str = ""
+    host: str = pydantic.Field(default="", max_length=128)
+    port: int = pydantic.Field(default=465, ge=1, le=65535)
+    user: str = pydantic.Field(default="", max_length=128)
+    password: str = pydantic.Field(default="", max_length=255)
+    from_name: str = pydantic.Field(default="", max_length=128)
 
 
 class TokenOut(pydantic.BaseModel):
