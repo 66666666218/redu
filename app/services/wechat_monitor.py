@@ -1636,15 +1636,16 @@ def _push_candidates(session: Session, user_id: int, settings: Settings,
     if len(rows) > 20:
         elements.append({"tag": "note", "elements": [{"tag": "plain_text",
             "content": f"…另有 {len(rows) - 20} 个,见平台候选列表"}]})
-    try:
-        FeishuClient(wh, settings.feishu_secret).send_card({
-            "config": {"wide_screen_mode": True},
-            "header": {"template": "blue", "title": {"tag": "plain_text",
-                "content": f"🔍 候选对标号 · 新发现 {len(rows)} 个"}},
-            "elements": elements,
-        })
-    except Exception:  # noqa: BLE001 - 推送失败不影响采集结果
-        logger.exception("候选对标号飞书推送失败 user=%s", user_id)
+    for target in targets:  # 主群 + 专属群都推(此前只发 wh,主群永远收不到候选)
+        try:
+            FeishuClient(target, settings.feishu_secret).send_card({
+                "config": {"wide_screen_mode": True},
+                "header": {"template": "blue", "title": {"tag": "plain_text",
+                    "content": f"🔍 候选对标号 · 新发现 {len(rows)} 个"}},
+                "elements": elements,
+            })
+        except Exception:  # noqa: BLE001 - 推送失败不影响采集结果
+            logger.exception("候选对标号飞书推送失败 user=%s", user_id)
 
 def run_full_sync_if_pending(session: Session, user_id: int,
                              settings: Settings | None = None) -> dict:
