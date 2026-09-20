@@ -156,7 +156,8 @@ def watch_analytics(section: str, session: Session, user_id: int) -> list[dict]:
     watches = repository.list_watches(session, user_id, section)
     out = []
     for w in watches:
-        snaps = repository.watch_snap_series(session, user_id, w.keyword, section=section)
+        snaps = repository.watch_snap_series(session, user_id, w.keyword, section=section,
+                                             list_type=w.list_type)
         # 榜单定向搜索类关注:按 entry_title 逐条分组,每条算独立趋势;关键词卡顶层取最佳条目。
         entries = [s for s in snaps if getattr(s, "entry_title", "")]
         if entries:

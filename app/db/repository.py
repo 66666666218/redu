@@ -191,12 +191,17 @@ def delete_watch(db: Session, user_id: int, section: str, list_type: str, keywor
 def watch_snap_series(
     db: Session, user_id: int, keyword: str, since: datetime | None = None,
     section: str | None = None, entry_title: str | None = None,
+    list_type: str | None = None,
 ) -> list[DouhotWatchSnap]:
     stmt = select(DouhotWatchSnap).where(
         DouhotWatchSnap.user_id == user_id, DouhotWatchSnap.keyword == keyword
     )
     if section:
         stmt = stmt.where(DouhotWatchSnap.section == section)
+    if list_type:
+        # 同一关键词可被以 word 与 search/video/topic 分别关注;不区分会把两类快照混算,
+        # 令 word 关注的趋势里混进搜索主题(反之亦然)。按关注的 list_type 收口。
+        stmt = stmt.where(DouhotWatchSnap.list_type == list_type)
     if since:
         stmt = stmt.where(DouhotWatchSnap.captured_at >= since)
     if entry_title is not None:

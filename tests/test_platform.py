@@ -223,6 +223,31 @@ def test_douhot_watch_analytics(session) -> None:
     assert out[0]["keyword"] == "景甜" and out[0]["last_score"] == 700 and out[0]["points"] == 2
 
 
+def test_watch_analytics_isolates_list_type(session) -> None:
+    """同词分别按 word 与 topic 关注时,word 关注的趋势不得混入 topic 的主题快照。
+
+    关注以 (section,list_type,keyword,filter_keyword) 唯一,但快照查询旧版只按
+    keyword+section 过滤,导致 word 关注被 topic 的 entry 快照拉进多主题分支。
+    """
+    from app.services.keyword_watch import add_watch, watch_analytics
+
+    add_watch(session, 1, "douhot", "word", "热点词")
+    add_watch(session, 1, "douhot", "topic", "热点词")
+    for v in (500, 700):  # word 快照:entry_title 留空
+        session.add(DouhotWatchSnap(user_id=1, section="douhot", list_type="word",
+                                    keyword="热点词", entry_title="", score=v, rank_now=1))
+    for t in ("主题甲", "主题乙"):  # topic 快照:带 entry_title
+        session.add(DouhotWatchSnap(user_id=1, section="douhot", list_type="topic",
+                                    keyword="热点词", entry_title=t, score=300, rank_now=1))
+    session.commit()
+
+    by_type = {w["list_type"]: w for w in watch_analytics("douhot", session, 1)}
+    word = by_type["word"]
+    assert "entries" not in word  # 未被 topic 主题快照污染 → 仍走单值分支
+    assert word["points"] == 2 and word["last_score"] == 700
+    assert {e["title"] for e in by_type["topic"]["entries"]} == {"主题甲", "主题乙"}
+
+
 def test_record_watch_snaps_substring_match(session) -> None:
     """非 douhot 板块关键词监控用**子串匹配**(大小写不敏感)。
 

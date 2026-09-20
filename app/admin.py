@@ -510,7 +510,7 @@ def insights(db: Session) -> dict:
         select(DouhotWatch.user_id, DouhotWatch.list_type, DouhotWatch.keyword).order_by(DouhotWatch.id)
     ).all()
     for user_id, list_type, keyword in watch_rows:
-        snaps = repository.watch_snap_series(db, user_id, keyword)
+        snaps = repository.watch_snap_series(db, user_id, keyword, list_type=list_type)
         values = [s.score for s in snaps]
         if len(values) < 2:
             continue
