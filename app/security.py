@@ -18,6 +18,7 @@ from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 _fallback_secret: str | None = None
+_fernet_weak_warned = False
 
 
 def _secret() -> str:
@@ -39,6 +40,16 @@ def _secret() -> str:
 def _fernet_key() -> bytes:
     settings = get_settings()
     source = settings.cookie_encrypt_key or settings.jwt_secret
+    if not source:
+        # 两者皆空 → 派生自 sha256(b""):一个公开可计算的固定密钥,等于对用户三方 Cookie 明文裸奔。
+        # 任何忘记设置 JWT_SECRET / COOKIE_ENCRYPT_KEY 的部署都会落入此路径(settings 默认均空且无校验)。
+        # 保持"仅告警不改派生"以免锁死既有以该固定密钥加密的历史 Cookie(属运维/迁移取舍)。
+        global _fernet_weak_warned
+        if not _fernet_weak_warned:
+            _fernet_weak_warned = True
+            logger.critical(
+                "COOKIE_ENCRYPT_KEY 与 JWT_SECRET 均为空:Cookie 加密密钥退化为公开的固定值,"
+                "请立刻在生产设置强随机密钥(否则数据库泄露即等于三方账号 Cookie 泄露)")
     return base64.urlsafe_b64encode(hashlib.sha256(source.encode()).digest())
 
 
