@@ -81,31 +81,38 @@ def run_cross_platform_alert(user_id: int, settings: Settings | None = None, db:
     pushed = 0
     try:
         items = rising_across(db, user_id, min_platforms=2)
-        hits = []
         now = datetime.now()
+        # 只读探测未冷却候选,先不写库:卡片只渲染前 12 条,若在收集时对全部候选
+        # 落冷却门,第 13 条起会被烧掉冷却却从未展示 → 整个冷却窗口静默丢失。
+        hits = []
         for it in items:
             title = f"up:{it['keyword']}"
             existing = db.scalar(select(FeishuAlert).where(
                 FeishuAlert.section == "cross_up", FeishuAlert.user_id == user_id, FeishuAlert.title == title))
             if existing and (now - existing.alerted_at).total_seconds() < settings.feishu_alert_cooldown_hours * 3600:
                 continue
-            hits.append(it)
-            if existing:
-                existing.reason, existing.alerted_at = "跨平台共同上升", now
-            else:
-                db.add(FeishuAlert(section="cross_up", user_id=user_id, title=title, reason="跨平台共同上升"))
-        if hits:
-            lines = ["🌐 跨平台共同上升(≥2板块)"]
-            for it in hits[:12]:
-                tag = "🔥" if it["burst"] else ""
-                fc = ",".join(f"{SECTION_LABELS[p]}{int(f) if f is not None else '?'}" for p, f in it["forecasts"].items() if p in SECTION_LABELS)
-                lines.append(f"  · {it['keyword']}{tag}  [{'+'.join(SECTION_LABELS.get(p, p) for p in it['platforms'])}]  预测→{fc}")
-            # 发送成功才落冷却门(与全项目告警门语义一致,失败下轮再推)
-            if FeishuClient(settings.feishu_webhook, settings.feishu_secret).send("\n".join(lines)):
-                db.commit()
-                pushed = len(hits)
-            else:
-                db.rollback()
+            hits.append((it, existing))
+        if not hits:
+            return 0
+        kept = hits[:12]
+        lines = ["🌐 跨平台共同上升(≥2板块)"]
+        for it, _ in kept:
+            tag = "🔥" if it["burst"] else ""
+            fc = ",".join(f"{SECTION_LABELS[p]}{int(f) if f is not None else '?'}" for p, f in it["forecasts"].items() if p in SECTION_LABELS)
+            lines.append(f"  · {it['keyword']}{tag}  [{'+'.join(SECTION_LABELS.get(p, p) for p in it['platforms'])}]  预测→{fc}")
+        # 发送成功才落冷却门,且只对入卡的 kept 落(与全项目"mark after send"告警门语义一致:
+        # 未入卡的候选下轮仍可再推,发送失败则全部保留待下轮)
+        if FeishuClient(settings.feishu_webhook, settings.feishu_secret).send("\n".join(lines)):
+            for it, existing in kept:
+                title = f"up:{it['keyword']}"
+                if existing:
+                    existing.reason, existing.alerted_at = "跨平台共同上升", now
+                else:
+                    db.add(FeishuAlert(section="cross_up", user_id=user_id, title=title, reason="跨平台共同上升"))
+            db.commit()
+            pushed = len(kept)
+        else:
+            db.rollback()
         return pushed
     finally:
         if own_session:
