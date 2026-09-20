@@ -71,11 +71,16 @@ def review_to_url(review_id: str, book_id: str = "") -> str:
 class WereadClient:
     """最小客户端:Cookie 鉴权 + 2s 限速;`_get` 可注入供测试。"""
 
+    # 限速状态放在**类级**:单进程部署(uvicorn 无 --workers + APScheduler 同进程)里
+    # 调用方大量临时 `WereadClient(cookie)` 新建实例(见 wechat_monitor),若 `_last/_lock`
+    # 是实例级,不同实例各自计时 → 最小间隔形同虚设,突发请求打爆微信读书触发风控。
+    # 类级共享后,进程内所有实例串行于同一起跑线。跨进程需 DB 令牌桶,当前无此部署。
+    _throttle_lock = threading.Lock()
+    _last_request = 0.0
+
     def __init__(self, cookie: str, timeout: int = 15, min_gap: float = 2.0) -> None:
         self.cookie = cookie.strip()
         self.timeout = timeout
-        self._last = 0.0
-        self._lock = threading.Lock()
         self._min_gap = min_gap
 
     def _headers(self, accept: str = "application/json, text/plain, */*") -> dict:
@@ -90,11 +95,12 @@ class WereadClient:
 
     def _get(self, path: str, params: dict | None = None,
              accept: str = "application/json, text/plain, */*") -> dict:
-        with self._lock:
-            gap = time.time() - self._last
+        cls = type(self)
+        with cls._throttle_lock:
+            gap = time.time() - cls._last_request
             if gap < self._min_gap:
                 time.sleep(self._min_gap - gap)
-            self._last = time.time()
+            cls._last_request = time.time()
         try:
             resp = requests.get(f"{BASE}{path}", params=params, timeout=self.timeout,
                                 headers=self._headers(accept))

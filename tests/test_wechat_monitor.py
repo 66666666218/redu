@@ -523,6 +523,42 @@ def test_weread_refresh_skey_renewal_request(monkeypatch: pytest.MonkeyPatch) ->
     assert wc_mod.WereadClient("wr_vid=9; wr_skey=K").refresh_skey() is None
 
 
+def test_weread_throttle_shared_across_instances(monkeypatch) -> None:
+    """限速状态类级共享:临时新建的多个实例之间仍守最小间隔(否则跨实例突发打爆风控)。"""
+    from app.services import weread_client as wc
+
+    cls = wc.WereadClient
+    saved = cls._last_request
+    cls._last_request = 0.0
+
+    clock = {"now": 1000.0}
+    slept: list[float] = []
+
+    class _T:
+        def time(self):
+            return clock["now"]
+
+        def sleep(self, s):
+            slept.append(s)
+
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"errCode": 0, "data": {}}
+
+    monkeypatch.setattr(wc, "time", _T())
+    monkeypatch.setattr(wc.requests, "get", lambda *a, **k: _Resp())
+    try:
+        cls("c", min_gap=2.0)._get("/x")     # 首跳:_last=0,gap 巨大 → 不 sleep,last→1000
+        assert slept == []
+        cls("c", min_gap=2.0)._get("/y")     # 换实例、时间未推进:应共享 last=1000 → 补足间隔
+        assert len(slept) == 1 and slept[0] == 2.0
+    finally:
+        cls._last_request = saved
+
+
 def test_listen_skips_without_any_source(session) -> None:
     WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A")
     session.add(WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A"))
