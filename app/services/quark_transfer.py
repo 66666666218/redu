@@ -248,6 +248,8 @@ class QuarkTransfer:
                      f"{name}_{datetime.now():%m%d}_2", f"{name}_{datetime.now():%m%d}_3"):
             try:
                 return self._mk_dir(parent_fid, cand)
+            except QuarkAuthError:
+                raise  # Cookie 失效不是撞名:直接上抛让调用方告警重登,别再空转候选名
             except QuarkError as exc:
                 last = str(exc)
         raise QuarkError(f"夸克目录创建失败(含后缀候选均撞名): {name}; 最后错误: {last}")

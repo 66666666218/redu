@@ -137,6 +137,24 @@ class TestEnsureDirFallback:
         with pytest.raises(QuarkError, match="含后缀候选均撞名"):
             qt._ensure_dir("/redian监听")
 
+    def test_auth_error_propagates_not_masked_as_conflict(self, tmp_path):
+        """Cookie 失效(QuarkAuthError 是 QuarkError 子类)不得被候选梯吞成"撞名"。
+
+        旧写法 except QuarkError 会把它当撞名、连试 4 个候选名、最后抛误导性的
+        "含后缀候选均撞名",令上层 except QuarkAuthError 的重登告警分支永不命中。
+        """
+        qt = self._mk_qt(tmp_path)
+        calls: list[str] = []
+
+        def fake_mk(parent, name):
+            calls.append(name)
+            raise QuarkAuthError("夸克 Cookie 已失效")
+
+        qt._mk_dir = fake_mk
+        with pytest.raises(QuarkAuthError):
+            qt._ensure_dir("/redian监听")
+        assert calls == ["redian监听"]  # 首个候选即上抛,不再空转其余候选名
+
     def test_fid_store_persists_across_instances(self, tmp_path):
         """幽灵场景跨运行复用:第二轮直接用持久化 fid,不再撞名新堆目录。"""
         store = tmp_path / "fids.json"
