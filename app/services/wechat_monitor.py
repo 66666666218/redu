@@ -1050,8 +1050,11 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
         if rep:
             link = rep[0][1] + (f" (提取码 {rep[0][2]})" if rep[0][2] else "")
         else:
-            link = next((x.strip() for x in (r.my_pan_urls or "").splitlines() if x.strip()),
-                        "") or r.url
+            # 只展示我方网盘链接(本轮转存链 > 历史我方链);
+            # 绝不回落到别人的盘链——转存失败时点标题打开公众号原文
+            link = next((x.strip().split(" (提取码")[0]
+                         for x in (r.my_pan_urls or "").splitlines()
+                         if x.strip().startswith("https://pan.quark.cn/s/")), "") or r.url
         # 重复资源标记: 同盘链已被其他文章推过 → 🔥N(同行都在发的确认级资源)
         hot = ""
         first_pan = pan_of.get(r.id, "")
