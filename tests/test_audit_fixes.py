@@ -265,3 +265,28 @@ class TestProxyCredRedaction:
         with pytest.raises(dc.DouhotError) as ei:
             client._call("POST", "/x", "ref", {})
         assert ":p@" not in str(ei.value) and "ConnectionError" in str(ei.value)
+
+    def test_collect_http_500_masks_proxy_creds(self, monkeypatch):
+        """采集 HTTP 500 响应面:requests 代理连接异常含 http://user:pass@host,
+        经 collect() 回给浏览器前必须遮蔽(RunRecord 咽喉点只护 DB 面,不覆盖此面)。"""
+        import requests as rq
+        from fastapi import HTTPException
+
+        from app.api import collect as collect_api
+        from app.services import tenant
+
+        def boom(*a, **kw):
+            raise rq.ConnectionError(
+                "Cannot connect to proxy http://pu:psecret@9.9.9.9:3128")
+
+        monkeypatch.setattr(tenant, "run_xianyu", boom)
+
+        class _User:
+            id = 1
+
+        with pytest.raises(HTTPException) as ei:
+            collect_api.collect("xianyu", _User(), db=None)  # type: ignore[arg-type]
+        detail = ei.value.detail
+        assert "psecret" not in detail and "pu:" not in detail
+        assert "9.9.9.9:3128" in detail  # 出口 IP/端口保留便于排障
+

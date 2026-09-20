@@ -14,18 +14,13 @@ from sqlalchemy.orm import Session
 from config.settings import Settings, get_settings
 from app.db.models import RunRecord
 from app.utils import get_logger
+from app.utils.net import redact_proxy_creds
 
 logger = get_logger(__name__)
 
-# 代理凭证掩码:采集走带鉴权代理(http://user:pass@host)时,底层 urllib3/curl_cffi 的
-# 连接异常 repr 会把整条含账密的代理 URL 写进异常文本;各 runner 用
-# f"{type(exc).__name__}: {exc}" 落进 RunRecord.detail,再经健康页(全体租户)与
-# 采集失败告警(飞书群)流出。此处统一在唯一闸口抹掉 ://user:pass@ 段,防代理账密泄露。
-_PROXY_CRED_RE = re.compile(r"://[^/@\s]+@")
-
-
-def _redact_proxy_creds(text: str) -> str:
-    return _PROXY_CRED_RE.sub("://***@", text or "")
+# 代理凭证掩码统一在 app.utils.net.redact_proxy_creds(与采集 HTTP 500 响应面共用一个实现);
+# 此处保留旧私有名作为别名:RunRecord.detail 是唯一持久化闸口,历史测试也按此名导入。
+_redact_proxy_creds = redact_proxy_creds
 
 
 def _base(settings: Settings | None) -> Settings:

@@ -9,8 +9,21 @@ DNS 重绑定(TOCTOU)未覆盖——要彻底防需连接级钳制,超出本项�
 from __future__ import annotations
 
 import ipaddress
+import re
 import socket
 from urllib.parse import urlparse
+
+
+# 代理凭证掩码:走带鉴权代理(http://user:pass@host)时,底层 urllib3/curl_cffi 的
+# 连接异常 repr 会把整条含账密的代理 URL 写进异常文本。这些文本会流向两处闸口:
+# 1) RunRecord.detail(健康页全体租户可见 + 飞书采集失败告警);2) 采集/榜单 HTTP 500 响应。
+# 统一用本函数抹掉 ://user:pass@ 段,保留主机端口便于排障。
+_PROXY_CRED_RE = re.compile(r"://[^/@\s]+@")
+
+
+def redact_proxy_creds(text: str) -> str:
+    """把文本中 `://user:pass@host` 的用户名/密码段替换为 `://***@`。"""
+    return _PROXY_CRED_RE.sub("://***@", text or "")
 
 
 class UnsafeUrlError(ValueError):

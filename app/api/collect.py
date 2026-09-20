@@ -9,6 +9,7 @@ from app.db import get_db
 from app.db.models import User
 from app.services import tenant
 from app.utils import get_logger
+from app.utils.net import redact_proxy_creds
 
 logger = get_logger(__name__)
 
@@ -36,7 +37,8 @@ def collect(platform: str, user: User = Depends(get_current_user), db: Session =
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(500, f"采集失败:{exc}") from exc
+        # 走带鉴权代理时 requests 异常文本含 http://user:pass@host,勿原样回给浏览器
+        raise HTTPException(500, f"采集失败:{redact_proxy_creds(str(exc))}") from exc
 
 
 @router.post("/api/xianyu/collect-deep")
@@ -46,7 +48,7 @@ def xianyu_collect_deep(user: User = Depends(get_current_user), db: Session = De
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(500, f"采集失败:{exc}") from exc
+        raise HTTPException(500, f"采集失败:{redact_proxy_creds(str(exc))}") from exc
 
 
 @router.post("/api/douhot/watch")
@@ -231,4 +233,4 @@ def douhot_list(list_type: str, keyword: str = "", filter_keyword: str = "", dat
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(500, f"榜单获取失败:{exc}") from exc
+        raise HTTPException(500, f"榜单获取失败:{redact_proxy_creds(str(exc))}") from exc
