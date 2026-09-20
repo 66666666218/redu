@@ -181,6 +181,26 @@ def test_agent_learning_roundtrip_and_backtest(session, st) -> None:
     assert out["backtested"] == 0 and out["weights"]["resonance"] == 35
 
 
+def test_backtest_handles_xianyu_string_timestamps(session, st) -> None:
+    """闲鱼回测:snap_date 是日期字符串,不得因 `str <= datetime` 抛 TypeError 中断整轮回测。
+
+    旧实现里只要用户存在一条 xianyu 苗头/上升阶段,base_pts 过滤会崩,连带
+    weibo/douhot/baidu 本轮回测一起被调度器的 per-user except+rollback 吞掉。
+    """
+    from app.services.agent_learning import backtest_and_learn
+
+    _xianyu_daily(session, "某闲鱼待爆词", 200, days_ago=3)
+    _xianyu_daily(session, "某闲鱼待爆词", 500, days_ago=1)  # 增长 150% → 命中
+    push_ts = datetime.now() - timedelta(days=2)
+    session.add(AgentStage(user_id=1, board="xianyu", norm="某闲鱼待爆词",
+                           kw="某闲鱼待爆词", stage="苗头", score=70,
+                           parts="增速+150% 量级500", first_seen=push_ts, updated_at=push_ts))
+    session.commit()
+
+    out = backtest_and_learn(session, 1, settings=st)  # 不应抛异常
+    assert out["backtested"] == 1 and out["hits"] == 1
+
+
 def test_stale_memory_cleared_for_reignition(session, st, monkeypatch) -> None:
     """老词掉榜超 72h 后记忆退场;二次起势必须重新首推(而非被旧'爆发'记忆静默)。"""
     _weibo(session, "去年爆过的老词", 900, hours_ago=100)

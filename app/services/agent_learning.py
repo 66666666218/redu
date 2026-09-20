@@ -70,6 +70,20 @@ def _hit_rate(samples: list[tuple[bool, ...]]) -> float:
     return sum(1 for s in samples if s) / len(samples)
 
 
+def _to_dt(ts) -> datetime | None:
+    """序列时间戳容错转换(微博/百度/抖音=datetime,闲鱼 snap_date=日期字符串)。
+
+    与 early_agent._to_dt 同款:闲鱼 xianyu_want_series 的 t 是 "YYYY-MM-DD" 字符串,
+    直接和 AgentStage.updated_at(datetime)比较会抛 TypeError,回测整个用户当轮回测中断。
+    """
+    if isinstance(ts, datetime):
+        return ts
+    try:
+        return datetime.fromisoformat(str(ts))
+    except (ValueError, TypeError):
+        return None
+
+
 def backtest_and_learn(db: Session, user_id: int, settings=None) -> dict:
     """每日回测:检查 N 天前 AgentStage 里"苗头/上升"阶段的关键词,后续是否真的爆发。
 
@@ -125,7 +139,10 @@ def backtest_and_learn(db: Session, user_id: int, settings=None) -> dict:
             continue
         # 推送时基线:取 updated_at(推送时刻)**之前**的最后一个样本。
         # 旧实现取 values[-2](=昨天的值),系统性低估增长率 → 命中率虚低 → 权重漂移。
-        base_pts = [v for t, v in series if t <= (st.updated_at or dt.now() - timedelta(days=2))]
+        cutoff = st.updated_at or (dt.now() - timedelta(days=2))
+        # 时间戳可能是 datetime(微博/百度/抖音)或日期字符串(闲鱼):先归一,
+        # 否则闲鱼行会让 `t <= cutoff` 抛 TypeError,连带打断该用户本轮全部板块回测。
+        base_pts = [v for t, v in series if (td := _to_dt(t)) is not None and td <= cutoff]
         if not base_pts:
             continue
         base = float(base_pts[-1])
