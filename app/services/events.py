@@ -265,7 +265,7 @@ def event_assign_all_users(settings=None) -> None:
     settings = settings or get_settings()
     db = get_session_local()()
     try:
-        for (uid,) in db.execute(select(User.id).order_by(User.id)).all():
+        for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True)).order_by(User.id)).all():
             try:
                 assign_tick(db, uid, settings)
             except Exception:  # noqa: BLE001 - 单用户失败不影响其余

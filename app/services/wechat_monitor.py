@@ -542,7 +542,7 @@ def weread_refresh_tick(settings: Settings | None = None) -> int:
     total = 0
     failed: list[tuple[int, str]] = []
     try:
-        users = db.scalars(select(User.id).order_by(User.id)).all()
+        users = db.scalars(select(User.id).where(User.enabled.is_(True)).order_by(User.id)).all()
         for uid in users:
             try:
                 out = refresh_weread_cookie(db, uid, settings=settings)
@@ -1452,7 +1452,7 @@ def traffic_tick(settings: Settings | None = None) -> int:
     db = get_session_local()()
     total = 0
     try:
-        users = db.scalars(select(User.id).order_by(User.id)).all()
+        users = db.scalars(select(User.id).where(User.enabled.is_(True)).order_by(User.id)).all()
         for uid in users:
             active = db.scalar(select(sa_func.count()).select_from(WechatBenchmark).where(
                 WechatBenchmark.user_id == uid, WechatBenchmark.active.is_(True)))
@@ -1800,7 +1800,7 @@ def keyword_article_all_users(settings: Settings | None = None) -> int:
     db = get_session_local()()
     total = 0
     try:
-        for uid in db.scalars(select(User.id).order_by(User.id)).all():
+        for uid in db.scalars(select(User.id).where(User.enabled.is_(True)).order_by(User.id)).all():
             try:
                 total += keyword_article_tick(db, uid, settings)
             except Exception:  # noqa: BLE001 - 单用户失败不影响其余
@@ -1822,7 +1822,7 @@ def candidate_discover_tick(settings: Settings | None = None) -> int:
     db = get_session_local()()
     total = 0
     try:
-        users = db.scalars(select(User.id).order_by(User.id)).all()
+        users = db.scalars(select(User.id).where(User.enabled.is_(True)).order_by(User.id)).all()
         for uid in users:
             has_bm = db.scalar(select(sa_func.count()).select_from(WechatBenchmark).where(
                 WechatBenchmark.user_id == uid, WechatBenchmark.active.is_(True)))

@@ -1170,3 +1170,24 @@ def test_renewal_cooldown_blocks_repeated_attempts(session) -> None:
     session.commit()
     out2 = wm.refresh_weread_cookie(session, 1, settings=_settings())
     assert out2["status"] == "skipped" and out2["reason"] == "no_cookie"  # 不再被冷却拦
+
+
+def test_keyword_article_all_users_skips_disabled(monkeypatch, session) -> None:
+    """per-user 调度入口只处理启用用户:被管理员停用的账号不再消耗 dajiala 配额、不再推飞书。
+
+    与 collect_tick/due_schedules 的 User.enabled 过滤同源(审计)。
+    """
+    from app.db.models import User
+    import app.db
+
+    session.add(User(id=1, username="a", password_hash="x"))               # 启用
+    session.add(User(id=2, username="b", password_hash="x", enabled=False))  # 停用
+    session.commit()
+    seen: list[int] = []
+    monkeypatch.setattr(app.db, "get_session_local", lambda: (lambda: session))
+    monkeypatch.setattr(session, "close", lambda: None)
+    monkeypatch.setattr(wechat_monitor, "keyword_article_tick",
+                        lambda db, uid, settings=None: seen.append(uid))
+    wechat_monitor.keyword_article_all_users(_settings())
+    assert seen == [1]  # 停用用户 2 不被遍历
+
