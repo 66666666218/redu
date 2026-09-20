@@ -113,3 +113,29 @@ def test_unrelated_boards_no_false_match(session, st) -> None:
     session.add(BaiduHotItem(user_id=1, title="股市行情", heat=1, rank=1, captured_at=_now()))
     session.commit()
     assert focus_alert.run_focus_alert(session, 1, settings=st) == 0
+
+
+def test_repeat_backlog_rotates_instead_of_silently_cooled(session) -> None:
+    """越限的反复词不应被静默烧 24h 冷却:focus_max_items=1 时首轮推 1 个,
+    次轮另一个应能顶替推送(而非卡在冷却里被永久丢失)。"""
+    from config.settings import Settings
+    st = Settings(_env_file=None, is_dev=True,
+                  feishu_webhook="https://open.feishu.cn/hook/main",
+                  feishu_webhook_xianyu="https://open.feishu.cn/hook/xianyu",
+                  focus_repeat_rounds=3, focus_min_len=4,
+                  focus_cooldown_hours=24, focus_max_items=1)
+    now = _now()
+    for title in ("资源甲合集", "资源乙合集"):
+        for i, dt in enumerate([now, now - timedelta(hours=2), now - timedelta(hours=4)]):
+            session.add(XianyuItem(user_id=1, item_id=f"{title}{i}", title=title, price="¥1",
+                                   hit_keywords=1, best_rank=1, created_at=dt))
+    session.commit()
+    # 首轮:两个词都满足"≥3 轮反复",但只推 focus_max_items=1 个
+    assert focus_alert.run_focus_alert(session, 1, settings=st) == 1
+    # 次轮:已推的那个在冷却里被跳过,另一个顶替推出(证明它没在首轮被静默烧冷却)
+    _FakeFeishu.sent = []
+    assert focus_alert.run_focus_alert(session, 1, settings=st) == 1
+    assert "资源" in _FakeFeishu.sent[-1]
+    # 第三轮:两个词都已各自推送并冷却 → 无新推送
+    _FakeFeishu.sent = []
+    assert focus_alert.run_focus_alert(session, 1, settings=st) == 0

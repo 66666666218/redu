@@ -114,37 +114,51 @@ def run_focus_alert(db: Session, user_id: int, settings: Settings | None = None)
     latest_ts = {sec: max(v["ts"] for v in per.values()) for sec, per in boards.items()}
 
     now = datetime.now()
-    hits_cross: list[dict] = []
-    hits_repeat: list[tuple[str, dict]] = []
-
+    cd = settings.focus_cooldown_hours
+    from app.db.models import FeishuAlert
     from app.services.alert_service import feishu_alert_gate
 
-    def cooled(kind: str, norm: str) -> bool:
-        """冷却门:False = 允许推送(记录已写入)。"""
-        return not feishu_alert_gate(db, user_id, "focus", f"{kind}:{norm}",
-                                     settings.focus_cooldown_hours, "重点关键词")
+    def in_cooldown(key: str) -> bool:
+        """只读探测:该 focus 告警键是否仍在冷却期。不写库——供候选筛选,冷却只在推送成功后烧。"""
+        row = db.scalar(select(FeishuAlert).where(
+            FeishuAlert.section == "focus", FeishuAlert.user_id == user_id,
+            FeishuAlert.title == key[:200]))
+        return bool(row) and (now - row.alerted_at) < timedelta(hours=cd)
 
     # ① 跨板块共振(各板块最新一批中匹配)
     current = {sec: {n: v for n, v in per.items() if v["ts"] == latest_ts[sec]}
                for sec, per in boards.items()}
+    cross_cands: list[dict] = []
     for cluster in _clusters(current, settings.focus_min_len):
         norm = min((n for _, n, _ in cluster), key=len)
-        if cooled("cross", norm):
+        key = f"cross:{norm}"
+        if in_cooldown(key):
             continue
-        hits_cross.append({"norm": norm, "members": cluster})
+        cross_cands.append({"norm": norm, "key": key, "members": cluster})
+    # 冷却门只对真正入卡的前 N 条烧:此前对所有共振词都调 cooled() 落冷却,排在
+    # focus_max_items 之后的词从没推给用户却进入 24h 冷却、下轮被静默丢失(冷启动首轮
+    # 尤其严重——一次可共振数十词)。先按成员数排序截断,再发,发成功后才烧入选者。
+    cross_cands.sort(key=lambda h: -len(h["members"]))
+    hits_cross = cross_cands[: settings.focus_max_items]
 
     # ② 板块内反复(近 24h 出现轮数 ≥ 阈值 且 仍在榜;公众号为累积发文,无轮次概念,跳过)
+    repeat_by_sec: dict[str, list[dict]] = {}
+    pushed_repeat = 0
     for sec in ("weibo", "xianyu", "douhot", "baidu"):
         per = boards.get(sec, {})
+        cands: list[dict] = []
         for n, v in per.items():
             if n not in current.get(sec, {}) or len(v["rounds"]) < settings.focus_repeat_rounds:
                 continue
-            if cooled("repeat", f"{sec}:{n}"):
+            key = f"repeat:{sec}:{n}"
+            if in_cooldown(key):
                 continue
-            hits_repeat.append((sec, v))
+            cands.append({**v, "key": key})
+        cands.sort(key=lambda v: -len(v["rounds"]))
+        kept = cands[: settings.focus_max_items]
+        if kept:
+            repeat_by_sec[sec] = kept
 
-    pushed = 0
-    sent_any = False
     client_cache: dict[str, FeishuClient] = {}
 
     def _client(webhook: str) -> FeishuClient:
@@ -152,10 +166,11 @@ def run_focus_alert(db: Session, user_id: int, settings: Settings | None = None)
             client_cache[webhook] = FeishuClient(webhook, settings.feishu_secret)
         return client_cache[webhook]
 
+    sent_any = False
+    pushed = 0
     if hits_cross:
-        hits_cross.sort(key=lambda h: -len(h["members"]))
         elements = [_col_set_row([("**关键词**", 4), ("**出现板块**", 3), ("**详情**", 5)], grey=True)]
-        for h in hits_cross[: settings.focus_max_items]:
+        for h in hits_cross:
             orig = h["members"][0][2]["orig"][:24]
             secs = " · ".join(SECTION_LABELS.get(s, s) for s, _, _ in h["members"])
             details = " | ".join(f"{SECTION_LABELS.get(s, s)}:{v['detail']}" for s, _, v in h["members"])
@@ -167,17 +182,15 @@ def run_focus_alert(db: Session, user_id: int, settings: Settings | None = None)
         if settings.feishu_webhook and _client(settings.feishu_webhook).send_card(card):
             sent_any = True
             pushed += len(hits_cross)
+            for h in hits_cross:  # 送达成功才烧入选词冷却
+                feishu_alert_gate(db, user_id, "focus", h["key"], cd, "重点关键词")
 
-    repeat_by_sec: dict[str, list[dict]] = {}
-    for sec, v in hits_repeat:
-        repeat_by_sec.setdefault(sec, []).append(v)
     for sec, items in repeat_by_sec.items():
         webhook = webhook_for(settings, sec)
         if not webhook:
             continue
-        items.sort(key=lambda v: -len(v["rounds"]))
         elements = [_col_set_row([("**标题**", 6), ("**近24h轮数**", 2), ("**最新**", 4)], grey=True)]
-        for v in items[: settings.focus_max_items]:
+        for v in items:
             elements.append(_col_set_row([(f"🔴 **{v['orig'][:24]}**", 6),
                                           (f"{len(v['rounds'])} 轮", 2), (v["detail"], 4)]))
         card = {"config": {"wide_screen_mode": True},
@@ -187,13 +200,16 @@ def run_focus_alert(db: Session, user_id: int, settings: Settings | None = None)
         if _client(webhook).send_card(card):
             sent_any = True
             pushed += len(items)
+            pushed_repeat += len(items)
+            for v in items:  # 送达成功才烧入选词冷却
+                feishu_alert_gate(db, user_id, "focus", v["key"], cd, "重点关键词")
 
-    # 冷却行只有发送成功才落库;全部失败则丢弃,下轮还能再推(否则冷却期内告警被静默吞掉)
+    # 冷却行只有推送成功后才写;全部发送失败则丢弃(未 burn 任何门),下轮还能再推
     if sent_any:
         db.commit()
     else:
         db.rollback()
     if pushed:
         logger.info("重点关键词推送 user=%s 跨板块=%s 反复=%s", user_id,
-                    len(hits_cross), len(hits_repeat))
+                    len(hits_cross), pushed_repeat)
     return pushed
