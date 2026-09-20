@@ -140,7 +140,8 @@ def record_watch_snaps(
                 score = word.get("score") or word.get("value") or word.get("heat") or 0
                 rank = i
                 break
-        add_snap(w.list_type, w.keyword, "", score, rank)
+        if rank:  # 命中才落快照:未命中记 0 会污染趋势/爆发(掉榜→回榜被算成暴涨),与 douhot 分支同口径
+            add_snap(w.list_type, w.keyword, "", score, rank)
     session.commit()
 
 
@@ -222,7 +223,7 @@ def watch_analytics(section: str, session: Session, user_id: int) -> list[dict]:
         values = [s.score for s in snaps]
         agent = keyword_agent.analyze(w.keyword, values)
         tg = getattr(snaps[-1], "trend_growth", None) if snaps else None  # 用 trends 序列算出的真实趋势
-        growth = tg if tg else (compute_growth(values) if len(values) >= 2 else None)
+        growth = tg if tg is not None else (compute_growth(values) if len(values) >= 2 else None)
         label = agent["trend_label"]
         if growth is not None:
             label = "上升期" if growth > 0.05 else ("回落期" if growth < -0.05 else "平稳")

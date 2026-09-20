@@ -293,6 +293,10 @@ def _douhot_rising(session, user_id: int, settings: Settings, now) -> list[dict]
                 continue
             if alerted is None:
                 session.add(DouhotAlerted(user_id=user_id, title=title, alerted_at=now))
+            else:
+                # 冷却到期后再次告警:必须把 alerted_at 刷新到本次,否则时间戳永远停在首次,
+                # 292 的冷却判断用陈旧值 → 持续飙升的词每轮都重复告警(冷却形同虚设)
+                alerted.alerted_at = now
             session.add(AlertRecord(user_id=user_id, keyword=title, reason=f"抖音内容词飙升指数环比 {g:.0%}", triggered_at=now))
             rising.append({"title": title, "growth": g, "slope": sl})
     rising.sort(key=lambda r: r["growth"], reverse=True)
