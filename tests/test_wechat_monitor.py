@@ -1212,3 +1212,47 @@ def test_dajiala_non_json_error_does_not_leak_key(monkeypatch: pytest.MonkeyPatc
     with pytest.raises(dc.DajialaError) as ei:
         client.article_detail("https://mp.weixin.qq.com/s/abc")
     assert key not in str(ei.value)
+
+
+def test_keyword_article_backlog_rotates_not_silently_cooled(
+        session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """越限的新文不应被静默烧冷却:focus_max_items=1 时首轮推 1 篇,
+    次轮另一篇要能顶替推送(证明它没在首轮 gate 评估时被顺手烧掉冷却)。
+
+    回归:keyword_article_tick 曾对全部 hits 逐条过冷却门(边查边烧)再截断推前 N,
+    导致第 N+1 篇被烧冷却却从未进卡片、下轮又被自身冷却排除而永无出头之日。
+    """
+    import json
+    from app.services import sogou_weixin, feishu_client as fc
+
+    st = _settings(keyword_search_terms="夸克网盘资源", focus_max_items=1,
+                   focus_cooldown_hours=24, feishu_webhook="https://open.feishu.cn/hook/main")
+
+    sent: list[dict] = []
+
+    class _FakeFeishu:
+        def __init__(self, webhook, secret="") -> None:
+            pass
+
+        def send_card(self, card: dict) -> bool:
+            sent.append(card)
+            return True
+
+    monkeypatch.setattr(fc, "FeishuClient", _FakeFeishu)
+    monkeypatch.setattr(fc, "webhook_for", lambda settings, section: "https://open.feishu.cn/hook/wechat")
+    monkeypatch.setattr(wechat_monitor, "title_hits", lambda title: True)
+    titles = ["甲资源合集12345", "乙资源合集67890"]
+    monkeypatch.setattr(
+        sogou_weixin, "search_articles",
+        lambda keyword, page=1, timeout=15: {
+            "items": [{"title": t, "name": "某公众号", "digest": "", "published_at": None} for t in titles],
+            "blocked": False})
+
+    # 首轮:两篇都新鲜,但只推 1 篇
+    assert wechat_monitor.keyword_article_tick(session, 1, settings=st) == 1
+    assert titles[0] in json.dumps(sent[-1], ensure_ascii=False)
+    # 次轮:首篇已冷却被跳过,另一篇顶替推出(证明它没在首轮被静默烧冷却)
+    assert wechat_monitor.keyword_article_tick(session, 1, settings=st) == 1
+    assert titles[1] in json.dumps(sent[-1], ensure_ascii=False)
+    # 第三轮:两篇各自已推送并冷却 → 无新推送
+    assert wechat_monitor.keyword_article_tick(session, 1, settings=st) == 0

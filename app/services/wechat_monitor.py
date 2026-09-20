@@ -1760,31 +1760,44 @@ def keyword_article_tick(session: Session, user_id: int, settings: Settings | No
     if not hits:
         return 0
 
-    # 冷却去重:同标题 24h 一次
+    # 冷却去重:同标题 24h 一次。先"只读探测"筛出未冷却的候选(不发冷却门),
+    # 截断到 focus_max_items 后发送;发送成功仅对入卡展示的条目烧冷却。
+    # 否则越限条目会在这里被 feishu_alert_gate 烧掉冷却却从未进卡片(下轮又因
+    # 自身冷却被排除,永无出头之日)——与 focus_alert 同源的"门烧全部、只推前 N"缺陷。
+    now = datetime.now()
+    cooldown = timedelta(hours=settings.focus_cooldown_hours)
     fresh = []
     for h in hits:
-        if feishu_alert_gate(session, user_id, "kw_article", h["title"][:120],
-                             settings.focus_cooldown_hours, f"关键词:{h['term']}"):
-            fresh.append(h)
+        row = session.scalar(select(FeishuAlert).where(
+            FeishuAlert.user_id == user_id, FeishuAlert.section == "kw_article",
+            FeishuAlert.title == h["title"][:120]))
+        if row and (now - row.alerted_at) < cooldown:
+            continue
+        fresh.append(h)
     if not fresh:
         return 0
+    kept = fresh[: settings.focus_max_items]
 
     elements = [_col_set_row([("**标题**", 6), ("**公众号**", 3), ("**关键词**", 3)], grey=True)]
-    for h in fresh[: settings.focus_max_items]:
+    for h in kept:
         elements.append(_col_set_row([
             (f"🔴 {_md_safe_light(h['title'])[:30]}", 6),
             (_md_safe_light(h["name"])[:12], 3),
             (h["term"][:12], 3)]))
     card = {"config": {"wide_screen_mode": True},
             "header": {"template": "orange", "title": {"tag": "plain_text",
-                       "content": f"🔑 关键词文章 · {len(fresh)} 篇(全网,不限对标号)"}},
+                       "content": f"🔑 关键词文章 · {len(kept)} 篇(全网,不限对标号)"}},
             "elements": elements}
     sent = FeishuClient(webhook, settings.feishu_secret).send_card(card)
     if not sent:
-        session.rollback()  # 发送失败不烧冷却门,下次还能再推
+        session.rollback()  # 发送失败不烧冷却门,下次还能再推(探测阶段未写库,回滚为空操作)
         return 0
-    session.commit()  # 冷却门随发送成功落库
-    return len(fresh)
+    # 发送成功:仅对入卡展示的 kept 烧冷却,越限项保留冷却位下轮可轮候进入
+    for h in kept:
+        feishu_alert_gate(session, user_id, "kw_article", h["title"][:120],
+                          settings.focus_cooldown_hours, f"关键词:{h['term']}")
+    session.commit()
+    return len(kept)
 
 
 def keyword_article_all_users(settings: Settings | None = None) -> int:
