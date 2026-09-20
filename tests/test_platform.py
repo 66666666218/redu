@@ -432,6 +432,34 @@ def test_alert_threshold_and_cooldown(session) -> None:
     assert alert_service.evaluate(session, 1, "weibo", [{"key": "A", "growth": 0.5}], set(), s) == 0
 
 
+def test_alert_send_failure_writes_no_phantom_record(session, monkeypatch) -> None:
+    """发送失败不得落 AlertRecord,也不计入返回条数;成功后才落一条,避免幻影历史+重复堆积。"""
+    from app.db.models import AlertRecord
+    from app.services import alert_service
+
+    class _N:
+        ok = False
+
+        def send(self, subject, body, context="", html=False):
+            return _N.ok
+
+    fake = _N()
+    monkeypatch.setattr(alert_service, "get_user_notifier", lambda u, s: fake)
+    monkeypatch.setattr(alert_service, "get_notifier", lambda s: fake)
+
+    alert_service.add_rule(session, 1, "weibo", "threshold", metric="growth", threshold=0.3)
+    s = _alert_settings()
+    items = [{"key": "A", "growth": 0.5}]
+
+    _N.ok = False  # 发送失败:无记录、返回 0、冷却不生效(下轮可干净重试)
+    assert alert_service.evaluate(session, 1, "weibo", items, set(), s) == 0
+    assert len(session.scalars(select(AlertRecord)).all()) == 0
+
+    _N.ok = True  # 发送成功:落且仅落一条,返回 1
+    assert alert_service.evaluate(session, 1, "weibo", items, set(), s) == 1
+    assert len(session.scalars(select(AlertRecord)).all()) == 1
+
+
 def test_alert_new(session) -> None:
     from app.services import alert_service
 

@@ -161,28 +161,35 @@ def evaluate(
     if not triggered:
         return 0
 
-    # 同一规则下的多条合并为一条,避免刷屏
-    per_rule: dict[int, list[str]] = {}
+    # 同一规则下的多条合并为一条消息,避免刷屏。
+    # AlertRecord 仅在发送成功后落库:与 last_alert_at 同款门控——发送失败既不
+    # 留"幻影"历史(否则 /api/alerts/list 显示已预警却没收到),也不会在每轮重试
+    # 时把同一预警重复堆进历史(冷却未生效,下轮仍会再触发)。
+    per_rule: dict[int, list[tuple[str, str]]] = {}
     for rule, item in triggered:
         key = _key(item)
         m = (rule.metric or "growth")
         val = item.get(m)
         reason = f"{key} {m}={float(val):.2f} 跨阈值 {rule.threshold}" if val is not None else f"新增 {key}"
-        per_rule.setdefault(rule.id, []).append(reason)
-        session.add(
-            AlertRecord(user_id=user_id, section=section, keyword=key, reason=reason, triggered_at=now)
-        )
+        per_rule.setdefault(rule.id, []).append((key, reason))
 
-    for rule, reasons in per_rule.items():
-        subject = f"[预警] {section} · 触发 {len(reasons)} 条"
-        if not notifier.send(subject, "\n".join(reasons)):
-            continue  # 发送失败不更新 last_alert_at,冷却不生效化
-        r = session.get(AlertRule, rule)
+    delivered = 0
+    for rule_id, pairs in per_rule.items():
+        subject = f"[预警] {section} · 触发 {len(pairs)} 条"
+        if not notifier.send(subject, "\n".join(reason for _, reason in pairs)):
+            continue  # 发送失败:不落记录、不置 last_alert_at → 冷却不生效,下轮干净重试
+        for key, reason in pairs:
+            session.add(
+                AlertRecord(user_id=user_id, section=section, keyword=key, reason=reason, triggered_at=now)
+            )
+        r = session.get(AlertRule, rule_id)
         if r:
             r.last_alert_at = now
+        delivered += len(pairs)
     session.commit()
-    logger.info("预警触发 section=%s user=%s 条数=%s", section, user_id, sum(len(v) for v in per_rule.values()))
-    return sum(len(v) for v in per_rule.values())
+    if delivered:
+        logger.info("预警触发 section=%s user=%s 条数=%s", section, user_id, delivered)
+    return delivered
 
 
 def _build_digest(session: Session, user_id: int, section: str, settings: Settings) -> str:
