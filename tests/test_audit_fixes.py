@@ -190,3 +190,28 @@ class TestFixedTimeDigestHonest:
         monkeypatch.setattr(alert_service, "get_user_notifier", lambda user, settings: _N(True))
         assert alert_service.run_fixed_time_digests(db=session, settings=object()) == 1
         assert session.get(AlertRule, rule.id).last_alert_at is not None
+
+    def test_disabled_user_digest_skipped(self, session, monkeypatch):
+        """管理员禁用用户后,其 fixed_time 定时总结不再派发(封禁即停推)。"""
+        from app.db.models import AlertRule
+        from app.services import alert_service
+
+        hhmm = datetime.now().strftime("%H:%M")
+        session.add(User(id=1, username="on", password_hash="x"))
+        session.add(User(id=2, username="off", password_hash="x"))
+        session.add(AlertRule(user_id=1, section="weibo", rule_type="fixed_time",
+                              alert_time=hhmm, enabled=True))
+        session.add(AlertRule(user_id=2, section="weibo", rule_type="fixed_time",
+                              alert_time=hhmm, enabled=True))
+        session.get(User, 2).enabled = False
+        session.commit()
+
+        monkeypatch.setattr(alert_service, "_build_digest", lambda db, uid, sec, settings: "digest")
+
+        class _Send:
+            def send(self, subject, body):
+                return True
+
+        monkeypatch.setattr(alert_service, "get_user_notifier", lambda user, settings: _Send())
+        # 仅启用用户(uid=1)派发,禁用用户(uid=2)跳过
+        assert alert_service.run_fixed_time_digests(db=session, settings=object()) == 1

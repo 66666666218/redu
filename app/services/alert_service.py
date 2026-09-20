@@ -232,9 +232,15 @@ def run_fixed_time_digests(db: Session | None = None, settings: Settings | None 
     try:
         now = datetime.now()
         hhmm = now.strftime("%H:%M")
+        # 排除被管理员禁用(User.enabled=False)的用户:封禁即停推,与 due_schedules /
+        # 周总结 / get_current_user 的处理一致。此前该作业直接扫 AlertRule,漏掉了这层门控,
+        # 导致禁用用户的定时总结仍每天发出。用 notin_(禁用 id) 而非 INNER JOIN User,
+        # 保留无主孤儿规则(其 user_id 不在 User 表中,不应被误伤)。
+        disabled_ids = select(User.id).where(User.enabled.is_(False))
         rules = db.scalars(
             select(AlertRule).where(
-                AlertRule.enabled.is_(True), AlertRule.rule_type == "fixed_time", AlertRule.alert_time == hhmm
+                AlertRule.enabled.is_(True), AlertRule.rule_type == "fixed_time",
+                AlertRule.alert_time == hhmm, AlertRule.user_id.notin_(disabled_ids)
             )
         ).all()
         sent = 0
