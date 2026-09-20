@@ -75,6 +75,51 @@ class TestQuarkAuthError:
             qt._request("GET", "/test")
 
 
+class TestQuarkNetworkError:
+    """瞬时网络故障(连接/超时)纳入重试,耗尽后归一为 QuarkError 而非裸抛。
+
+    锁住回归:此前 requests.RequestException 绕过 per-URL 的 except QuarkError,
+    一个抖动的夸克链会掀翻整轮监听(连带百度转存与共振推送全被跳过)。
+    """
+
+    def test_network_error_retries_then_raises_quark_error(self, monkeypatch):
+        import requests as _rq
+        qt = QuarkTransfer("cookie=test")
+        monkeypatch.setattr("app.services.quark_transfer.time.sleep", lambda *_a, **_k: None)
+        calls = {"n": 0}
+
+        def boom(*a, **kw):
+            calls["n"] += 1
+            raise _rq.ConnectionError("connection reset")
+
+        monkeypatch.setattr("app.services.quark_transfer.requests.request", boom)
+        with pytest.raises(QuarkError, match="网络异常"):
+            qt._request("GET", "/test")
+        assert calls["n"] == 3  # 走了完整重试预算后才上抛
+
+    def test_transient_network_error_recovers(self, monkeypatch):
+        qt = QuarkTransfer("cookie=test")
+        monkeypatch.setattr("app.services.quark_transfer.time.sleep", lambda *_a, **_k: None)
+
+        class _Resp:
+            text = ""
+
+            def json(self):
+                return {"code": 0, "data": {"ok": True}}
+
+        import requests as _rq
+        seq = {"n": 0}
+
+        def flaky(*a, **kw):
+            seq["n"] += 1
+            if seq["n"] == 1:
+                raise _rq.Timeout("read timed out")
+            return _Resp()
+
+        monkeypatch.setattr("app.services.quark_transfer.requests.request", flaky)
+        assert qt._request("GET", "/test")["data"]["ok"] is True
+
+
 class TestQuarkKeepalive:
     def test_keepalive_calls_list_dir(self, monkeypatch):
         qt = QuarkTransfer("cookie=test")

@@ -131,8 +131,15 @@ class QuarkTransfer:
         for attempt in range(3):
             if attempt:
                 time.sleep(2 * attempt)  # 2s / 4s
-            resp = requests.request(method, api + path, params=self._params(params),
-                                    json=json, timeout=timeout or self.timeout, headers=self._headers())
+            try:
+                resp = requests.request(method, api + path, params=self._params(params),
+                                        json=json, timeout=timeout or self.timeout, headers=self._headers())
+            except requests.RequestException as exc:
+                # 连接/超时等瞬时网络故障纳入同一重试:耗尽后归一为 QuarkError 抛出。
+                # 否则它会绕过 per-URL 的 except QuarkError 直接掀翻整轮监听(连带百度转存
+                # 与共振推送全被跳过),与百度侧宽兜底不对称。只取类型名,比照 urllib3 防 URL 回显。
+                last_err = QuarkError(f"夸克网络异常:{type(exc).__name__}")
+                continue
             try:
                 data = resp.json()
             except ValueError as e:
