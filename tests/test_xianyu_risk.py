@@ -174,3 +174,27 @@ def test_token_loop_exhaustion_raises_cookie_expired(monkeypatch) -> None:
     except Exception as exc:  # noqa: BLE001
         raised = f"wrong-type:{type(exc).__name__}: {exc}"
     assert "令牌循环过期" in raised, raised
+
+
+def test_post_proxy_network_error_masks_creds(monkeypatch) -> None:
+    """_post 走带鉴权代理时 curl 连接异常含 http://user:pass@host,
+    XianyuError 消息须源头遮蔽(出口 IP/端口保留)。"""
+    from curl_cffi import requests as curl
+
+    from app.services import xianyu as xy
+
+    def boom(*a, **kw):
+        raise curl.RequestsError(
+            "Failed to connect via proxy http://pu:psecret@9.9.9.9:3128")
+
+    qt = xy.XianyuClient("cookie=x")
+    qt._verify = False  # 避开证书降级分支
+    monkeypatch.setattr(qt.session, "post", boom)
+    try:
+        qt._post("mtop.taobao.idlemtopsearch.pc.search", {"keyword": "x"})
+        raised = ""
+    except xy.XianyuError as exc:
+        raised = str(exc)
+    assert raised, "应抛 XianyuError"
+    assert "psecret" not in raised and "pu:" not in raised
+    assert "9.9.9.9:3128" in raised

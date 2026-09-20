@@ -21,6 +21,7 @@ from curl_cffi import requests as curl
 
 from config.settings import Settings
 from app.utils import get_logger
+from app.utils.net import redact_proxy_creds
 
 logger = get_logger(__name__)
 
@@ -198,7 +199,10 @@ class XianyuClient:
                 if self._verify and "(77)" in str(exc) and "trust anchors" in str(exc):
                     self._downgrade_tls(str(exc))
                     continue
-                raise XianyuError(f"闲鱼请求失败:{exc}") from exc
+                # 走带鉴权代理时 curl_cffi 异常含 http://user:pass@host:完整 exc 只进
+                # 服务端日志,异常消息一律遮蔽后再抛(源头去凭证,勿依赖下游咽喉点;同 douhot 61b98d6)
+                logger.warning("闲鱼请求异常:%s", exc)
+                raise XianyuError(f"闲鱼请求失败:{redact_proxy_creds(str(exc))}") from exc
             try:
                 obj = resp.json()
             except ValueError as exc:
