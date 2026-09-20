@@ -147,7 +147,9 @@ def douhot_window_tick(settings: Settings | None = None) -> dict:
     db = get_session_local()()
     users_ok = pushed = 0
     try:
-        for uid in db.scalars(select(User.id).order_by(User.id)).all():
+        for uid in db.scalars(
+            select(User.id).where(User.enabled.is_(True)).order_by(User.id)
+        ).all():
             try:
                 out = collect_windows(db, uid, settings=settings)
                 if out.get("status") == "success" and out.get("ok"):
@@ -290,7 +292,7 @@ def _agent_learn_all() -> None:
     db = get_session_local()()
     try:
         from app.db.models import User
-        for uid in db.scalars(select(User.id)).all():
+        for uid in db.scalars(select(User.id).where(User.enabled.is_(True))).all():
             try:
                 backtest_and_learn(db, uid, settings)
             except Exception:  # noqa: BLE001

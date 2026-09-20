@@ -334,7 +334,9 @@ def agent_tick_all_users(settings: Settings | None = None) -> int:
     db = get_session_local()()
     pushed = 0
     try:
-        for uid in db.scalars(select(User.id).order_by(User.id)).all():
+        for uid in db.scalars(
+            select(User.id).where(User.enabled.is_(True)).order_by(User.id)
+        ).all():
             try:
                 pushed += agent_tick(db, uid, settings)
             except Exception:  # noqa: BLE001

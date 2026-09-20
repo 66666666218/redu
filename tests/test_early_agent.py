@@ -253,3 +253,22 @@ def test_push_failure_restores_old_stage_for_upgrade(session, st, monkeypatch) -
     monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
     assert early_agent.agent_tick(session, 1, settings=st) == 1  # 重新判为升级再推
     assert session.scalar(select(AgentStage)).stage == "爆发"
+
+
+def test_tick_all_users_skips_disabled(session, st, monkeypatch) -> None:
+    """禁用/过期账号不得被枚举进苗头 Agent(否则会照常采集并向飞书推送)。"""
+    session.add(User(id=2, username="d", password_hash="x", enabled=False))
+    session.commit()
+
+    seen: list[int] = []
+
+    def _record(db, uid, settings):
+        seen.append(uid)
+        return 0
+
+    import app.db as db_mod
+    monkeypatch.setattr(db_mod, "get_session_local", lambda: lambda: session)
+    monkeypatch.setattr(early_agent, "agent_tick", _record)
+    stub = type("S", (), {"agent_enabled": True})()
+    assert early_agent.agent_tick_all_users(settings=stub) == 0
+    assert seen == [1]  # user2 已禁用 → 不进入枚举
