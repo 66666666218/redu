@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta
 from typing import Any
 import unicodedata
@@ -591,6 +592,7 @@ def run_feishu_daily(settings: Settings | None = None, db: Session | None = None
                 client = FeishuClient(settings.feishu_webhook, settings.feishu_secret)
                 text = build_daily(db, user.id, settings, include_keywords=False)
                 for chunk in _split_messages(text):
+                    time.sleep(1.0)  # 飞书应用级频控(11232)防护:相邻消息 ≥1s
                     if client.send(chunk):
                         sent += 1
                 card = build_keyword_card(db, user.id, settings)
@@ -605,6 +607,7 @@ def run_feishu_daily(settings: Settings | None = None, db: Session | None = None
                                  + _section_lines(db, user.id, sec))
                 c = FeishuClient(wh, settings.feishu_secret)
                 for chunk in _split_messages(text):
+                    time.sleep(1.0)  # 飞书应用级频控防护
                     if c.send(chunk):
                         sent += 1
                 # 该板块的关键词监控卡(含名次变化 ↑N名/↓N名)推专属群
