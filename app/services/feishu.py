@@ -725,7 +725,8 @@ def run_feishu_insight_digest(settings: Settings | None = None) -> int:
         for user in repository.list_enabled_users(db):
             from app.services.keyword_watch import list_watch
             for w in list_watch(db, user.id):
-                snaps = repository.watch_snap_series(db, user.id, w["keyword"], since, section=w.get("section"))
+                snaps = repository.watch_snap_series(db, user.id, w["keyword"], since,
+                                                     section=w.get("section"), list_type=w.get("list_type"))
                 values = [s.score for s in snaps]
                 if len(values) < 2:
                     continue
@@ -777,7 +778,8 @@ def run_feishu_keyword_alerts(user_id: int, settings: Settings | None = None, db
         client = FeishuClient(webhook_for(settings, "douhot"), settings.feishu_secret)
         hits: list[dict] = []
         for w in watches:
-            snaps = repository.watch_snap_series(db, user_id, w["keyword"], section=w.get("section"))
+            snaps = repository.watch_snap_series(db, user_id, w["keyword"], section=w.get("section"),
+                                                 list_type=w.get("list_type"))
             entries = [s for s in snaps if getattr(s, "entry_title", "")]
             if entries:
                 # 逐条类(话题/搜索/视频):每个相关主题独立判爆发,推具体哪个主题,而非整个词聚合
