@@ -304,9 +304,13 @@ def add_benchmark(session: Session, user_id: int, url: str, nickname: str = "",
         meta = extract_article_meta(url)
         biz = biz or meta.get("biz", "")
         nickname = nickname or meta.get("name", "")
-    if settings.dajiala_key and (not ghid or not nickname):
+    # 付费解析昵称/ghid:走 _dajiala_key 而非全局 settings.dajiala_key。
+    # 否则普通用户反复调 add_benchmark 会绕过 2026-09-14 审计确立的"全局 key 仅 admin
+    # 可用"隔离,把运营者余额暴露给任意注册用户刷。
+    add_key = _dajiala_key(session, user_id, settings)
+    if add_key and (not ghid or not nickname):
         try:
-            obj = DajialaClient(settings.dajiala_key).post_condition(url)
+            obj = DajialaClient(add_key).post_condition(url)
             ghid = ghid or str(obj.get("ghid") or "")
             nickname = nickname or str(obj.get("nickname") or "")
         except DajialaError as exc:  # noqa: BLE001 - 解析失败不挡加号(key 没余额也允许加)
@@ -656,8 +660,12 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
     replacements: dict[int, list[tuple[str, str, str]]] = {}
     if not rows:
         return replacements
-    if allow_paid and settings.wechat_listen_sample_new and settings.dajiala_key:
-        client = client or DajialaClient(settings.dajiala_key)
+    # 采样兜底:调用方(listen 主循环)通常已备好 client;若为空,必须走 _dajiala_key
+    # 而非 settings.dajiala_key 直取——同 2026-09-14 审计确立的租户隔离原则,
+    # 否则普通用户的监听仍会白刷运营者余额。
+    own_key = "" if client else _dajiala_key(session, user_id, settings)
+    if allow_paid and settings.wechat_listen_sample_new and (client or own_key):
+        client = client or DajialaClient(own_key)
         session.flush()  # 新文先拿自增 id(采样点外键要用)
         sample_now = datetime.now()
         for r in rows[: max(1, settings.wechat_listen_sample_limit)]:
@@ -1231,7 +1239,10 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
             session.commit()
             return {"platform": "wechat_sync", "status": "success", "pages": pages,
                     "new": added, "ghid": b.ghid, "nickname": b.nickname}
-    if not settings.dajiala_key:
+    # 走 _dajiala_key 而非全局 settings.dajiala_key:POST /api/wechat/benchmarks/{id}/sync
+    # 是普通用户可控入口,¥0.14/页 × 无限次调用可打穿运营者余额(2026-09-14 隔离原则的漏网路径)。
+    sync_key = _dajiala_key(session, user_id, settings)
+    if not sync_key:
         # 无 dajiala:微信读书源只能拿"最新一篇"(列表接口已被微信读书废弃)
         cookie = _weread_cookie(session, user_id, settings)
         if not cookie or not b.weread_book_id:
@@ -1249,7 +1260,7 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
         session.commit()
         return {"platform": "wechat_sync", "status": "partial", "reason": "weread_latest_only",
                 "pages": 1 if item else 0, "new": new, "ghid": b.ghid, "nickname": b.nickname}
-    client = client or DajialaClient(settings.dajiala_key)
+    client = client or DajialaClient(sync_key)
     added: list[WechatArticle] = []
     offset = ""
     pages = 0
@@ -1462,8 +1473,8 @@ def traffic_tick(settings: Settings | None = None) -> int:
     from sqlalchemy import func as sa_func
 
     settings = settings or get_settings()
-    if not settings.dajiala_key:
-        return 0
+    # 不再基于全局 settings.dajiala_key 早退:sample_traffic 内部按用户走 _dajiala_key
+    # 隔离,普通用户在平台内配了自己的 key 但全局 key 空时,整轮采样不应被跳过。
     db = get_session_local()()
     total = 0
     try:
