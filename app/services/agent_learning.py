@@ -188,10 +188,26 @@ def backtest_and_learn(db: Session, user_id: int, settings=None) -> dict:
     # 命中率样本 + 回测游标持久化(无论是否动权重都要写):
     # - signal_stats 必须写回,否则每次调用都从空重建,"累计≥10样本"永远凑不齐,自学习断裂;
     # - seen 游标不写的话静止行明天又被回测一遍。
-    if backtested:
+    # seen 剪枝(无条件跑):键尾是 `st.updated_at.isoformat()`,对应 AgentStage 行
+    # 超过 data_retention_days 会被维护 job 删掉,游标键成为孤儿并单调增长——
+    # 每天 06:00 全量 json.loads/写回,体积与耗时线性劣化。按时间戳剪掉超出
+    # 保留期 + 缓冲的键,与主表生命周期对齐。
+    retention_cut = dt.now() - timedelta(days=int(getattr(settings, "data_retention_days", 30)) + 5)
+    pruned: dict[str, str] = {}
+    for k, v in seen.items():
+        ts_iso = k.rsplit("|", 1)[-1]
+        try:
+            if dt.fromisoformat(ts_iso) < retention_cut:
+                continue
+        except (ValueError, TypeError):
+            pass  # 解析失败保留,宁可多留一天也别误删导致静止行被重复计入
+        pruned[k] = v
+    seen_changed = len(pruned) != len(seen)
+    seen = pruned
+    if backtested or seen_changed:
         if row:
             row.value = json.dumps(signal_stats, ensure_ascii=False)
-        else:
+        elif backtested:
             db.add(SystemConfig(key=stats_key, value=json.dumps(signal_stats, ensure_ascii=False)))
         seen_payload = json.dumps(seen, ensure_ascii=False)
         if seen_row:
