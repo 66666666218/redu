@@ -69,7 +69,12 @@ def run_weibo(session: Session, user_id: int, settings: Settings | None = None) 
     try:
         items = collector.fetch_hot_search(s)
         now = datetime.now()
-        prev_keys = set(session.scalars(select(WeiboHotItem.title).where(WeiboHotItem.user_id == user_id)).all())
+        # 72h 窗口:与 xianyu prev_titles/_latest_batch 同类"无界加载"修复。
+        # 高频档 10min × 30d 保留期下 WeiboHotItem 单用户可 20 万行,每轮全量拉
+        # 会打爆内存。评估"新上榜"只需近 3 天基线,更早的历史不改变当下判定。
+        prev_keys = set(session.scalars(select(WeiboHotItem.title).where(
+            WeiboHotItem.user_id == user_id,
+            WeiboHotItem.captured_at >= now - timedelta(hours=72))).all())
         for it in items:
             session.add(
                 WeiboHotItem(user_id=user_id, title=it.title, heat=it.heat, rank=it.rank, captured_at=now)
@@ -115,7 +120,10 @@ def run_baidu(session: Session, user_id: int, settings: Settings | None = None) 
     try:
         items = baidu.fetch_hot(settings)
         now = datetime.now()
-        prev_keys = set(session.scalars(select(BaiduHotItem.title).where(BaiduHotItem.user_id == user_id)).all())
+        # 72h 窗口:同 run_weibo prev_keys 类无界加载修复
+        prev_keys = set(session.scalars(select(BaiduHotItem.title).where(
+            BaiduHotItem.user_id == user_id,
+            BaiduHotItem.captured_at >= now - timedelta(hours=72))).all())
         for it in items:
             session.add(BaiduHotItem(user_id=user_id, title=it.title, heat=it.heat, rank=it.rank, url=it.url, captured_at=now))
         session.commit()
