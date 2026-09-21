@@ -838,9 +838,13 @@ def test_resonance_backlog_rotates_not_silently_cooled(session, monkeypatch: pyt
     st = _settings(dajiala_key="", quark_cookie="", pan_transfer_enabled=False,
                    wechat_resonance_hours=48, focus_cooldown_hours=24, focus_max_items=1,
                    feishu_webhook_wechat="https://open.feishu.cn/hook/wechat")
+    # 共振 = 同一盘链被 ≥2 篇引用;每链各插 2 篇,让 cnt 真正达阈
+    # (旧用例每链只 1 篇,靠"本篇 +1"双计 bug 才凑够 cnt=2 触发共振)
     items = [
         {"title": "资源甲 https://pan.quark.cn/s/aaa111", "url": "https://mp.weixin.qq.com/s/x1"},
+        {"title": "资源甲·另号 https://pan.quark.cn/s/aaa111", "url": "https://mp.weixin.qq.com/s/x1b"},
         {"title": "资源乙 https://pan.quark.cn/s/bbb222", "url": "https://mp.weixin.qq.com/s/x2"},
+        {"title": "资源乙·另号 https://pan.quark.cn/s/bbb222", "url": "https://mp.weixin.qq.com/s/x2b"},
     ]
     rows = wechat_monitor._insert_new_articles(session, 1, b, items, source="sync")
     session.commit()

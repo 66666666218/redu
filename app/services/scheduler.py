@@ -122,10 +122,35 @@ def _cron_trigger(expr: str, default: dict) -> CronTrigger:
         parts = expr.split()
         if len(parts) != 5:
             raise ValueError(f"需 5 段,收到 {len(parts)} 段")
-        # 星期几:数字按 POSIX(0=Sun..6=Sat)→ APScheduler(0=Mon..6=Sun) 换算
-        dow = parts[4]
-        if dow.isdigit() and len(dow) == 1:
-            parts[4] = str((int(dow) + 6) % 7)
+        # 星期几:数字按 POSIX(0=Sun..6=Sat)→ APScheduler(0=Mon..6=Sun) 换算。
+        # 单字符之外的 `1,5` / `1-5` / `1-5/2` 也要换算——否则整体错位一天却无报错
+        # (POSIX 1=Mon,APScheduler 1=Tue;`0 20 * * 1,5` 想周一/周五,实跑周二/周六)。
+        # 只处理纯数字端点(名称 mon/tue 等保持原样);步进 /N 与步长段保留。
+        def _conv_dow_field(token: str) -> str:
+            def _conv_num(s: str) -> str | None:
+                if s.isdigit() and len(s) == 1:
+                    return str((int(s) + 6) % 7)
+                return None
+
+            out_parts = []
+            for piece in token.split(","):
+                step = ""
+                if "/" in piece:
+                    piece, _, step_str = piece.partition("/")
+                    step = "/" + step_str
+                if "-" in piece:
+                    lo, _, hi = piece.partition("-")
+                    nlo, nhi = _conv_num(lo), _conv_num(hi)
+                    if nlo is not None and nhi is not None:
+                        out_parts.append(f"{nlo}-{nhi}{step}")
+                    else:
+                        out_parts.append(piece + step)
+                else:
+                    n = _conv_num(piece)
+                    out_parts.append((n if n is not None else piece) + step)
+            return ",".join(out_parts)
+
+        parts[4] = _conv_dow_field(parts[4])
         cron_kw = dict(zip(("minute", "hour", "day", "month", "day_of_week"), parts))
         return CronTrigger(**cron_kw)
     except Exception:  # noqa: BLE001

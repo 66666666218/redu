@@ -826,7 +826,10 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
         now_res = datetime.now()
         res_cooldown = timedelta(hours=settings.focus_cooldown_hours)
         for u, r in all_links:
-            cnt = int(counts.get(u, 0)) + 1  # +1 = 本篇自身
+            # 本篇的盘链在 `_insert_new_articles` 已同步写入 WechatPanLink(626-633),
+            # counts 已经含本篇自身——旧实现又"+1 = 本篇自身" → 双计,每篇新盘链文
+            # cnt=2 ≥ 阈值,轮轮误报共振。直接读 DB 计数即可。
+            cnt = int(counts.get(u, 0))
             if cnt < 2:
                 continue
             # 只读探测冷却(不烧):冷却期内跳过,否则列为候选。
@@ -1024,13 +1027,17 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
                         failed += 1
                         logger.warning("微信读书续期后仍失败 %s:%s", b.nickname or b.weread_book_id, exc2)
                 else:
-                    cookie = ""  # 续期失败:后续号降级 dajiala;本号不置 used,继续走下方 dajiala 兜底
+                    # 续期失败:后续号降级 dajiala;本号不置 used,继续走下方 dajiala 兜底
+                    # 指纹必须在清空 cookie 前算——否则 md5("")[:6]="d41d8c" 恒定,
+                    # 冷却键永远撞同一个假指纹,通知无法随用户换新 Cookie 而重置。
+                    fp = _cookie_fingerprint(cookie)
+                    cookie = ""
                     failed += 1
                     # 即时提醒用户更新 Cookie(6h 冷却,不刷屏)
                     from app.services.alert_service import notify_incident
                     notify_incident(
                         session, user_id, "wechat",
-                        f"🟠 微信读书 Cookie 已过期,请更新[{_cookie_fingerprint(cookie)}]",
+                        f"🟠 微信读书 Cookie 已过期,请更新[{fp}]",
                         "自动续期失败。请在浏览器登录 weread.qq.com 后 F12 复制 Cookie,"
                         "粘贴到「Cookie 管理」页 weread 平台(或发给我更新)",
                         settings=settings)
