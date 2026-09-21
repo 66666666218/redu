@@ -687,11 +687,19 @@ def _section_weekly_tally(db: Session, now: datetime | None = None) -> list[str]
     for section in SECTIONS:
         table = _TABLES[section]
         col = getattr(table, _TS_COL[section])
-        rows = db.scalars(select(table).where(col >= since14)).all()
+        # 只取 (title, item_id, ts) 三列,不加载 ORM 实体:旧写法 `db.scalars(select(table)).all()`
+        # 会把 4 张表 14 天跨用户全部行拉成 Python 对象,weibo/douhot 高频档下单次
+        # 周报可达数十万实体 → 内存峰值失控(同 _latest_batch 类修复的漏网路径)。
+        title_col = getattr(table, "title", None)
+        item_id_col = getattr(table, "item_id", None)
+        cols = [col] + [c for c in (title_col, item_id_col) if c is not None]
+        rows = db.execute(select(*cols).where(col >= since14)).all()
         this_week, last_week = set(), set()
-        for r in rows:
-            ts = getattr(r, _TS_COL[section])
-            key = str(getattr(r, "title", "") or getattr(r, "item_id", "") or "").strip()
+        for row in rows:
+            ts = row[0]
+            key = (str(row[1] or "") if title_col is not None else "") \
+                or (str(row[2 if title_col is not None else 1] or "") if item_id_col is not None else "")
+            key = key.strip()
             if not key:
                 continue
             (this_week if ts >= week_start else last_week).add(key)
