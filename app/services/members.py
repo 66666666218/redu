@@ -27,7 +27,13 @@ def _cycle_anchor(m: GroupMember) -> datetime:
 def member_state(m: GroupMember, now: datetime | None = None) -> dict:
     """计算单成员的到期信息:due_date / 剩余天数 / 当前应处状态(due|overdue|ok)。"""
     now = now or datetime.now()
-    due = _cycle_anchor(m) + timedelta(days=m.cycle_days or 30)
+    # 防御性钳制:即便 API 层已限制 joined_at 区间,历史脏数据仍可能撞 datetime
+    # 上限(joined_at + timedelta(days=cycle_days) → OverflowError);单成员异常
+    # 会连带击穿 GET /api/members 与每日 renewal_tick(后者跨租户全表遍历)。
+    try:
+        due = _cycle_anchor(m) + timedelta(days=m.cycle_days or 30)
+    except OverflowError:
+        due = datetime.max
     remaining = (due - now).total_seconds() / 86400
     if m.status in ("kicked", "exempt"):
         state = m.status
@@ -126,7 +132,14 @@ def renewal_tick(settings: Settings | None = None, db: Session | None = None) ->
         now = datetime.now()
         rows = db.scalars(select(GroupMember).where(GroupMember.status == "active")).all()
         for m in rows:
-            st = member_state(m, now)
+            # 单成员兜底 try:joined_at/cycle_days 组合触发 OverflowError 或其它异常时
+            # 只跳过该成员并记日志,不让整条每日续费提醒作业被一行脏数据打断
+            # (renewal_tick 跨租户全表遍历,历史上任一行炸掉=所有租户都收不到提醒)。
+            try:
+                st = member_state(m, now)
+            except Exception:  # noqa: BLE001
+                logger.exception("会员状态计算失败,已跳过 member_id=%s user_id=%s", m.id, m.user_id)
+                continue
             if st["state"] == "due":
                 due_list.append(m)
             elif st["state"] == "overdue":

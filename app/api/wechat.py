@@ -41,13 +41,17 @@ def wechat_article_add(payload: dict, user: User = Depends(get_current_user), db
         raise HTTPException(400, "文章标题不能为空")
     pub = payload.get("publish_at")
     pub_dt = None
-    if pub:
+    if isinstance(pub, datetime):
+        pub_dt = pub
+    elif pub:
         try:
-            pub_dt = datetime.fromisoformat(str(pub).replace("Z", "+00:00")) if isinstance(pub, str) else pub
+            pub_dt = datetime.fromisoformat(str(pub).replace("Z", "+00:00"))
         except ValueError:
             pub_dt = None
+    # content 列是 SQLAlchemy Text()/MySQL TEXT(65535 字节);utf8mb4 中文最坏 3 字节/字符,
+    # 旧 [:100000] 会打爆列宽 → DataError 1406。按 20000 字符封顶(≤ 60000 字节,留安全边界)。
     db.add(WechatArticle(user_id=user.id, author=str(payload.get("author", "")).strip()[:128],
-                         title=title[:500], content=str(payload.get("content", ""))[:100000],
+                         title=title[:500], content=str(payload.get("content", ""))[:20000],
                          url=str(payload.get("url", "")).strip()[:500], publish_at=pub_dt,
                          source="manual"))
     db.commit()
@@ -74,7 +78,10 @@ def wechat_article_list(limit: int = 100, offset: int = 0, has_pan: int | None =
             sdesc(case((WechatArticle.traffic_at.is_(None), -1), else_=WechatArticle.read_num)))
     else:
         q = q.order_by(WechatArticle.created_at.desc())
-    rows = db.scalars(q.limit(min(int(limit), 500)).offset(max(int(offset), 0))).all()
+    # 与 app/api/alerts.py 同款钳制:旧 min(int(limit), 500) 遇 limit<0 会把负数
+    # 透传给 SQL LIMIT,MySQL 8 报 "Incorrect arguments to LIMIT" → 500;
+    # MySQL 5.7/SQLite 把负 LIMIT 当"不限" → 整表连 Text 字段一并载入打爆内存。
+    rows = db.scalars(q.limit(min(max(int(limit or 100), 1), 500)).offset(max(int(offset), 0))).all()
     return {"count": len(rows), "items": [_row_to_dict(r) for r in rows]}
 
 
@@ -117,7 +124,7 @@ def wechat_analyze(limit: int = 200, user: User = Depends(get_current_user), db:
     """对已录入的公众号文章跑内容选题分析,返回报告(含盘链偏好/类目阅读/最佳时段洞察)。"""
     rows = db.scalars(
         select(WechatArticle).where(WechatArticle.user_id == user.id)
-        .order_by(WechatArticle.publish_at.desc().nulls_last()).limit(min(int(limit), 500))
+        .order_by(WechatArticle.publish_at.desc().nulls_last()).limit(min(max(int(limit or 200), 1), 500))
     ).all()
     articles = [{"title": r.title, "content": r.content, "author": r.author, "publish_at": r.publish_at} for r in rows]
     return {"articles": len(articles), "insights": _traffic_insights(rows),
@@ -352,8 +359,10 @@ def wechat_article_rewrite(article_id: int, user: User = Depends(get_current_use
     if out is None:
         raise HTTPException(502, "AI 改写失败,请稍后重试")
     from app.db.models import WechatRewrite
+    # out["content"] 是 LLM 生成的整段改写稿;Text 列 utf8mb4 上限 ≈ 65535 字节,
+    # 中文 3 字节/字符 → 20000 字符封顶与 WechatArticle.content 同一咽喉。
     db.add(WechatRewrite(user_id=user.id, article_id=article_id,
-                         title=out["title"][:255], content=out["content"]))
+                         title=out["title"][:255], content=out["content"][:20000]))
     db.commit()
     return {"ok": True, "article_id": article_id, "title": out["title"],
             "content": out["content"], "my_link": my_link or None}

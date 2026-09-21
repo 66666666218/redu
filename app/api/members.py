@@ -37,6 +37,11 @@ def members_add(body: MemberIn, user: User = Depends(get_current_user), db: Sess
         joined = datetime.fromisoformat(body.joined_at.strip())
     except ValueError as exc:
         raise HTTPException(400, "入群时间格式应为 YYYY-MM-DD") from exc
+    # 上限 9000-01-01:MySQL DATETIME 允许到 9999,但 `joined_at + timedelta(days=cycle_days)`
+    # 会 OverflowError,一行脏数据即永久毒化 GET /api/members 与每日 renewal_tick
+    # (后者遍历全平台 active 成员,单成员异常会让所有租户的续费提醒作业天天中断)。
+    if not (datetime(1970, 1, 1) <= joined < datetime(9000, 1, 1)):
+        raise HTTPException(400, "入群时间超出合理范围")
     m = members.add_member(db, user.id, body.nickname, joined,
                            group_name=body.group_name, wechat_id=body.wechat_id,
                            cycle_days=body.cycle_days, note=body.note)

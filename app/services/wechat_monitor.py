@@ -107,7 +107,10 @@ def fetch_article_content(url: str, timeout: int = 15) -> str:
     body = m.group(1) if m else text
     body = re.sub(r"<[^>]+>", " ", body)
     body = html_mod.unescape(body)
-    return re.sub(r"\s{2,}", " ", body).strip()[:100000]
+    # 20000 字符 ≈ 60KB utf8mb4,落在 MySQL TEXT(65535 字节)列上限内。
+    # 旧 [:100000] 会在监听/同步/改写落库时打爆 WechatArticle.content TEXT → DataError 1406;
+    # 尤其是 AI 改写端点写回 row.content 时,已在 DeepSeek 计费之后才 500、改写稿一并回滚丢失。
+    return re.sub(r"\s{2,}", " ", body).strip()[:20000]
 
 
 def extract_article_meta(url: str, timeout: int = 15) -> dict:
@@ -1362,7 +1365,12 @@ def sample_traffic(session: Session, user_id: int, settings: Settings | None = N
     if not daj_key:
         return {"platform": "wechat_traffic", "status": "skipped", "reason": "no_key"}
     client = client or DajialaClient(daj_key)
-    limit = max(1, int(limit or settings.wechat_traffic_sample_limit))
+    # 用户传入 limit 只允许调小、不允许放大:旧 `max(1, int(limit or default))`
+    # 遇 POST body {"limit": 1000000} → `LIMIT 5,000,000` 把该用户全部候选 Text 文章
+    # 一次性载入 Python,再逐篇串行调 dajiala 付费接口;虽被余额 affordable 截断
+    # 花钱,但单请求在同步 worker 里可跑几十分钟,几个并发即占满 FastAPI 线程池拖死全站。
+    cap = max(1, int(settings.wechat_traffic_sample_limit or 30))
+    limit = max(1, min(int(limit or cap), cap))
     cutoff = datetime.now().timestamp() - settings.wechat_traffic_min_interval_hours * 3600
 
     now = datetime.now()
