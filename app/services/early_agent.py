@@ -45,7 +45,10 @@ STAGE_ADVICE = {
 
 
 def _norm(title: str) -> str:
-    return re.sub(r"\s+", "", title or "").lower()
+    # AgentStage.norm 列宽 String(128);闲鱼 XianyuDaily.title 常是关键词堆长
+    # (150-400 字),不截断在 MySQL 8 STRICT_TRANS_TABLES 下抛 1406 且会连带
+    # rollback 打断整轮 run_feishu_realtime/cross_platform/focus_alert 链路。
+    return re.sub(r"\s+", "", title or "").lower()[:128]
 
 
 def _to_dt(ts) -> datetime | None:

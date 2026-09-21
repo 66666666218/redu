@@ -49,8 +49,10 @@ def _collect(node: object, out: list[BaiduItem], seen: set[str]) -> None:
         word = (node.get("word") or node.get("query") or "").strip()
         if word and word not in seen and ("hotTag" in node or "url" in node or "hotScore" in node):
             seen.add(word)
-            out.append(BaiduItem(title=word, heat=_to_int(node.get("hotTag") or node.get("hotScore")),
-                                 rank=len(out) + 1, url=node.get("url", "")))
+            # 500 与 BaiduHotItem.title/url 列宽对齐。百度跳转 URL 常含 `word=<中文>`
+            # query 参数,长度极易越界 → 整批 commit 抛 1406 打断该轮采集。
+            out.append(BaiduItem(title=word[:500], heat=_to_int(node.get("hotTag") or node.get("hotScore")),
+                                 rank=len(out) + 1, url=str(node.get("url", ""))[:500]))
             return
         for v in node.values():
             _collect(v, out, seen)

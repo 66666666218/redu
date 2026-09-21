@@ -108,7 +108,10 @@ def fetch_hot_search(settings: Settings, session: requests.Session | None = None
         items.append(
             HotItem(
                 rank=idx,
-                title=title.strip(),
+                # 500 与 WeiboHotItem.title / WeiboTrend.keyword / AlertRecord.keyword 列宽
+                # 对齐;接口偶发长标签时若不在此截,整批 commit 抛 1406 让该轮 0 数据 +
+                # 触发 check_collect_failures 误报"Cookie 过期"。
+                title=title.strip()[:500],
                 heat=heat,
                 category=item.get("category"),
                 url=item.get("url"),

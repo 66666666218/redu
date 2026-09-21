@@ -28,7 +28,10 @@ RULE_TYPES = ("threshold", "new", "fixed_time")
 
 
 def _key(item: dict) -> str:
-    return str(item.get("key") or item.get("item_id") or item.get("keyword") or item.get("title") or "")
+    # 500 与 AlertRecord.keyword String(500) 对齐:热搜标题/关键词可能越界,
+    # 若不截断,一批 pairs 中任一越界会让整批 AlertRecord 提交抛 1406,
+    # 该轮所有已发出去的信都回滚不落表 → 冷却失效 → 下轮重复轰炸。
+    return str(item.get("key") or item.get("item_id") or item.get("keyword") or item.get("title") or "")[:500]
 
 
 def _normalize_alert_time(raw: str | None) -> str:
