@@ -55,6 +55,16 @@ def create_app() -> FastAPI:
         )
     init_db()
 
+    # 非 dev 却仍用默认 public_base_url(含 localhost):重置密码/日报里的链接
+    # 全指向用户自己机器,忘记密码即锁死、批量推送不可点。DATABASE_URL 有同类
+    # 默认值守卫,这里补齐,避免"服务正常、邮件却全废"的静默生产故障。
+    if not _settings.is_dev and "localhost" in (_settings.public_base_url or "").lower():
+        logger.warning(
+            "⚠️ PUBLIC_BASE_URL 仍是默认值 %s(含 localhost),重置密码与推送邮件里的链接"
+            "在用户侧打不开。请在 .env / 容器环境变量设为对外可访问的域名",
+            _settings.public_base_url,
+        )
+
     if not _settings.jwt_secret:
         logger.warning("⚠️ 未配置 JWT_SECRET,已用临时密钥(生产请设置强随机 ≥32 字节,否则重启后登录态失效)")
 
