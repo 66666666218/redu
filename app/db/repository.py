@@ -174,18 +174,33 @@ def get_watch(db: Session, user_id: int, section: str, list_type: str, keyword: 
 
 def delete_watch(db: Session, user_id: int, section: str, list_type: str, keyword: str,
                  filter_keyword: str = "") -> bool:
-    """删除某关键词关注及其全部历史快照(避免孤儿数据)。返回是否删除了关注。"""
+    """删除某关键词关注及其全部历史快照(避免孤儿数据)。返回是否删除了关注。
+
+    快照表 DouhotWatchSnap 没有 filter_keyword 列,只能按
+    (user,section,list_type,keyword) 归集。若同关键词还挂着**不同过滤词的兄弟关注**,
+    这些关注共用同一份快照序列,删其一时若连带删快照会把兄弟关注的历史一起清空
+    (趋势/预测从第 1 个点重开、误报"新增/爆发")。故仅在确认没有其它兄弟关注时才删快照。
+    (彻底修法需给快照表加 filter_keyword 列并三处带上——属 DB 迁移,暂缓。)
+    """
     w = get_watch(db, user_id, section, list_type, keyword, filter_keyword)
     if w is None:
         return False
-    snaps = db.scalars(
-        select(DouhotWatchSnap).where(
-            DouhotWatchSnap.user_id == user_id, DouhotWatchSnap.section == section,
-            DouhotWatchSnap.list_type == list_type, DouhotWatchSnap.keyword == keyword,
+    sibling = db.scalar(
+        select(DouhotWatch).where(
+            DouhotWatch.user_id == user_id, DouhotWatch.section == section,
+            DouhotWatch.list_type == list_type, DouhotWatch.keyword == keyword,
+            DouhotWatch.filter_keyword != filter_keyword,
         )
-    ).all()
-    for s in snaps:
-        db.delete(s)
+    )
+    if sibling is None:  # 没有兄弟关注共享这份快照序列,才连带清历史
+        snaps = db.scalars(
+            select(DouhotWatchSnap).where(
+                DouhotWatchSnap.user_id == user_id, DouhotWatchSnap.section == section,
+                DouhotWatchSnap.list_type == list_type, DouhotWatchSnap.keyword == keyword,
+            )
+        ).all()
+        for s in snaps:
+            db.delete(s)
     db.delete(w)
     db.commit()
     return True

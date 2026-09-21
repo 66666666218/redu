@@ -23,10 +23,14 @@ from app.db.models import (
     AdminLog,
     AlertRecord,
     BaiduHotItem,
+    DouhotAlerted,
     DouhotWatchSnap,
     DouhotWindowSnap,
     DouhotWord,
+    EventMembership,
+    HotspotEvent,
     LoginLog,
+    NotificationLog,
     RunRecord,
     WeiboHotItem,
     WeiboTrend,
@@ -34,6 +38,7 @@ from app.db.models import (
     WechatArticle,
     WechatCandidate,
     WechatPanLink,
+    WechatRewrite,
     WechatTrafficSample,
     AgentStage,
     XianyuDaily,
@@ -60,6 +65,12 @@ _TABLES = [
     (FeishuAlert, "alerted_at", False),      # 冷却记录本体 6~24h 有效,清理只是防无限增长
     (AgentStage, "updated_at", False),       # Agent 阶段记忆(陈旧状态自然失效)
     (WechatCandidate, "discovered_at", False),  # 候选号(dismissed 的也清理,防无限增长)
+    # 以下 5 类此前不在清理清单,均"只增不删"→ 线性膨胀(2026-09-22 审计):
+    (NotificationLog, "created_at", False),   # 每次事件告警一行
+    (DouhotAlerted, "alerted_at", False),     # 每个飙升词一行,tenant 只更新不删
+    (HotspotEvent, "last_seen", False),       # 每 15 分钟归并只增;按最后活跃时间滚动
+    (EventMembership, "last_seen", False),
+    (WechatRewrite, "created_at", False),     # 每次改写插一行,单篇最多 2 万字符 Text
 ]
 
 
@@ -174,6 +185,19 @@ def cleanup_old_data(settings: Settings | None = None, db: Session | None = None
                 result["wechat_pan_links_orphan"] = n_orphan
         except Exception:  # noqa: BLE001 - 孤儿回收失败不阻塞
             logger.exception("盘链孤儿行回收失败")
+
+        # 改写稿孤儿行:上面分级清理删掉旧 WechatArticle 后,其 WechatRewrite(大 Text)
+        # 若 article 已不存在就成了指向空文章的孤儿(_TABLES 的 created_at 清理只兜住
+        # 超保留期的,近期被删文章的改写稿仍会堆积)。按 article_id 是否仍存活回收。
+        try:
+            live_articles = select(WechatArticle.id).scalar_subquery()
+            n_rw_orphan = db.execute(
+                delete(WechatRewrite).where(WechatRewrite.article_id.not_in(live_articles))
+            ).rowcount
+            if n_rw_orphan:
+                result["wechat_rewrites_orphan"] = n_rw_orphan
+        except Exception:  # noqa: BLE001 - 孤儿回收失败不阻塞
+            logger.exception("改写稿孤儿行回收失败")
 
         db.commit()
         total = sum(result.values())

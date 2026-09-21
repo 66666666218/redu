@@ -90,12 +90,15 @@ class DouhotClient:
         self.session = requests.Session()
         self.session.headers.update(_HEADERS)
         self.session.headers["Cookie"] = cookie.strip()
-        # 只对网络抖动/5xx 退避重试;Cookie 失效是 HTTP 200 + code=8,不会被重试
+        # 只对网络抖动/5xx 退避重试;Cookie 失效是 HTTP 200 + code=8,不会被重试。
+        # 429 **不重试**:热点宝的 429 是账号/IP 级"请求频繁"信号(同族接口在
+        # reader_platform_client 里注明当日小黑屋),退避重打只会把量叠乘、
+        # 把"暂时限频"升级成封号(2026-09-22 审计)。交由上层本轮放弃。
         adapter = HTTPAdapter(
             max_retries=Retry(
                 total=2,
                 backoff_factor=0.8,
-                status_forcelist=(429, 500, 502, 503, 504),
+                status_forcelist=(500, 502, 503, 504),
                 allowed_methods=frozenset(("GET", "POST")),
             )
         )
