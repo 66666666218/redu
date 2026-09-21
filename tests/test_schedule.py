@@ -257,6 +257,33 @@ def test_wechat_collect_tick_handles_wechat_section(monkeypatch, session) -> Non
     assert svc.get_or_create(session, 7, "wechat").last_run_at is not None  # 专用 tick 处理并标记
 
 
+def test_wechat_fixed_point_ignores_user_interval(monkeypatch, session) -> None:
+    """公众号四定点候选集无视用户间隔:间隔 720min 且 4h 前刚跑过的用户,
+    在下一个定点(如 14:00→18:00)仍应被选入并监听,不再静默丢轮(2026-09-22 审计)。
+    旧实现用 due_schedules(按间隔过滤)取候选,该用户根本进不了循环。"""
+    _patch_session(monkeypatch, session)
+    from datetime import datetime, timedelta
+    from app.services import wechat_monitor
+
+    _add_user(session, 7)
+    # 用户设 720min 间隔,4 小时前跑过一次 → due_schedules 判"未到期"
+    row = svc.get_or_create(session, 7, "wechat")
+    row.interval_minutes = 720
+    row.last_run_at = datetime.now() - timedelta(hours=4)
+    session.commit()
+    assert row not in svc.due_schedules(session, datetime.now())  # 旧口径会被间隔筛掉
+
+    ran: list[int] = []
+    monkeypatch.setattr(wechat_monitor, "run_wechat_listen",
+                        lambda db, uid, settings=None, **kw: ran.append(uid))
+    monkeypatch.setattr(wechat_monitor, "run_full_sync_if_pending", lambda db, uid, settings=None: None)
+    from app.services.focus_alert import run_focus_alert
+    monkeypatch.setattr("app.services.focus_alert.run_focus_alert", lambda db, uid, settings=None: None)
+
+    scheduler.wechat_collect_tick()
+    assert ran == [7]  # 定点作业无视间隔,仍监听
+
+
 def test_claim_schedule_race_second_claimant_loses(session) -> None:
     """原子抢占:第二个进程对同一到期任务的 claim 必须失败(防双跑,审计 S2-7)。"""
     from datetime import datetime, timedelta

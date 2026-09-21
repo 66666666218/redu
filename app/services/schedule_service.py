@@ -178,6 +178,25 @@ def due_schedules(db: Session, now: datetime | None = None) -> list[UserSchedule
     return [r for r in rows if r.last_run_at is None or now - r.last_run_at >= timedelta(minutes=r.interval_minutes)]
 
 
+def enabled_section_schedules(db: Session, section: str) -> list[UserSchedule]:
+    """某板块所有"已启用 + 用户未停用"的采集设置,**无视用户间隔**。
+
+    供公众号"四定点"作业用:这类作业的触发时刻由 CronTrigger 决定(8/14/18/2 点),
+    本身就代表调度意图;若复用 due_schedules 的间隔判定,设了 ≥360 分钟间隔的用户
+    会在某些定点(如 14:00→18:00 仅隔 4h)永久不被选入候选,静默丢轮且无失败记录。
+    并发防重交给调用方的 claim_schedule(force=True)乐观锁,不靠这里的间隔。
+    与 due_schedules 同口径用 `notin_(停用 id)` 精确剔除显式停用者(孤儿频率记录维持旧行为)。
+    """
+    disabled_ids = select(User.id).where(User.enabled.is_(False))
+    return list(db.scalars(
+        select(UserSchedule)
+        .where(UserSchedule.enabled.is_(True),
+               UserSchedule.section == section,
+               UserSchedule.user_id.notin_(disabled_ids))
+        .order_by(UserSchedule.id)
+    ).all())
+
+
 def claim_schedule(db: Session, row: UserSchedule, now: datetime | None = None,
                    force: bool = False) -> bool:
     """原子抢占:仅当该设置仍处于"到期未跑"状态时,把 last_run_at 置为 now。

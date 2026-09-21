@@ -214,7 +214,10 @@ def wechat_collect_tick(settings: Settings | None = None) -> dict:
     try:
         schedule_service.ensure_all_users(db)
         now = datetime.now()
-        due = [r for r in schedule_service.due_schedules(db, now) if r.section == "wechat"]
+        # 四定点作业:候选集必须无视用户间隔直接取所有启用的 wechat 设置。
+        # 早期用 due_schedules(按 interval_minutes 过滤)导致间隔 ≥360min 的用户
+        # 在 18:00 等"距上次不足间隔"的定点静默丢轮(2026-09-22 审计)。
+        due = schedule_service.enabled_section_schedules(db, "wechat")
         for row in due:
             # 原子抢占:API 内嵌调度器与独立调度进程双跑时防重复监听
             # force=True: 四定点作业自身即调度,不受用户间隔约束
@@ -241,46 +244,6 @@ def wechat_collect_tick(settings: Settings | None = None) -> dict:
     if ok or failed:
         logger.info("公众号监听 tick 完成:成功=%s 失败=%s", ok, failed)
     return {"ok": ok, "failed": failed, "skipped": skipped}
-
-
-def _wechat_forced() -> None:
-    """公众号固定时点加跑:立即监听一轮(与每分钟 tick 用同一套原子抢占防重复)。"""
-    from datetime import datetime as _dt
-
-    from sqlalchemy import select
-
-    from app.db import get_session_local
-    from app.db.models import User, UserSchedule
-    from app.services import schedule_service
-    from app.services.wechat_monitor import run_wechat_listen
-
-    settings = get_settings()
-    db = get_session_local()()
-    ok = skipped = 0
-    try:
-        now = _dt.now()
-        for (uid,) in db.execute(
-                select(User.id).where(User.enabled.is_(True)).order_by(User.id)).all():
-            row = db.scalar(select(UserSchedule).where(
-                UserSchedule.user_id == uid, UserSchedule.section == "wechat",
-                UserSchedule.enabled.is_(True)))
-            if row is None:
-                continue
-            if not schedule_service.claim_schedule(db, row, now):
-                skipped += 1  # 刚被每分钟 tick 抢占过 → 本轮已监听过,跳过
-                continue
-            try:
-                run_wechat_listen(db, uid, settings=settings, batch_index=None, batch_size=None)
-                from app.services.focus_alert import run_focus_alert
-                run_focus_alert(db, uid, settings)
-                ok += 1
-            except Exception:  # noqa: BLE001 - 单用户失败不影响其余
-                db.rollback()
-                logger.exception("公众号固定加跑失败 user=%s", uid)
-    finally:
-        db.close()
-    if ok or skipped:
-        logger.info("公众号固定加跑完成:执行=%s 跳过=%s", ok, skipped)
 
 
 def _event_assign() -> None:
