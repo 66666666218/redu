@@ -36,10 +36,27 @@ def assert_public_url(url: str) -> None:
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise UnsafeUrlError(f"仅允许 http/https 外链: {str(url)[:80]}")
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    _assert_public_host(parsed.hostname, port)
+
+
+def assert_public_host(host: str, port: int) -> None:
+    """校验 SMTP 等"非 URL 但由服务器主动外连"的目标主机可公开访问。
+
+    与 `assert_public_url` 同一判定,只是入口是 (host, port) 二元组——用户可控的
+    SMTP host 若原样喂给 smtplib.SMTP_SSL,容器即可被当作内网端口探测跳板
+    (`host=mysql:3306`、`host=169.254.169.254:80` 等),连接失败的 banner/errno
+    还会经 ERROR 日志形成弱读回通道。
+    """
+    return _assert_public_host(host, port)
+
+
+def _assert_public_host(host: str | None, port: int) -> None:
+    if not host:
+        raise UnsafeUrlError("主机名为空")
     try:
-        infos = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
-    except socket.gaierror as exc:  # 域名不存在/本地 DNS 异常
-        raise UnsafeUrlError(f"域名解析失败: {parsed.hostname}") from exc
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise UnsafeUrlError(f"域名解析失败: {host}") from exc
     for info in infos:
         try:
             ip = ipaddress.ip_address(info[4][0])

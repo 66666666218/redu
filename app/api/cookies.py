@@ -42,6 +42,16 @@ def user_smtp_get(user: User = Depends(get_current_user), db: Session = Depends(
 
 @router.put("/api/user/smtp")
 def user_smtp_put(body: UserSmtpIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # 用户可填 host 若原样入库,notifier.get_user_notifier 会 smtplib.SMTP_SSL(host,port)
+    # 直连,容器即被当作内网端口探测跳板(`host=mysql`/`169.254.169.254` 等);
+    # 与 assert_public_url 同一咽喉,只是入口是 (host,port)。清空 host(=None) 允许。
+    if body.host:
+        from app.utils.net import UnsafeUrlError, assert_public_host
+
+        try:
+            assert_public_host(body.host, body.port or 465)
+        except UnsafeUrlError as exc:
+            raise HTTPException(400, f"SMTP 主机不合法:{exc}") from exc
     user.smtp_host = body.host or None
     user.smtp_port = body.port or None
     user.smtp_user = body.user or None
