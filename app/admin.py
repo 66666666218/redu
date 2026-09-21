@@ -267,6 +267,9 @@ def data_browse(db: Session, section: str, user_id: int | None = None, limit: in
     base = {"weibo": WeiboHotItem, "xianyu": XianyuItem, "douhot": DouhotWord}.get(section)
     if base is None:
         return []
+    # limit 钳制:超大值一次载入全部租户原始行进 Python 内存可打挂单进程 worker,
+    # 负数在 MySQL 8 报 Incorrect arguments to LIMIT(500)、SQLite 等于不限。
+    limit = min(max(int(limit or 50), 1), 500)
     stmt = select(base).order_by(base.id.desc()).limit(limit)
     if user_id:
         stmt = stmt.where(base.user_id == user_id)
@@ -289,6 +292,9 @@ def category_dist(db: Session) -> list[dict]:
 
 def alert_trend(db: Session, days: int = 30) -> list[dict]:
     """告警趋势:近 N 天每天各板块告警数(来自 AlertRecord,无需外部令牌)。"""
+    # days 钳制:days=700000 会建同规模 days_list 与 dict、响应数十 MB 撑爆内存;
+    # days=10**9 则 date.today()-timedelta 直接 OverflowError → 500。
+    days = min(max(int(days or 30), 1), 365)
     start = date.today() - timedelta(days=days)
     rows = db.execute(
         select(func.date(AlertRecord.triggered_at), AlertRecord.section, func.count(AlertRecord.id))

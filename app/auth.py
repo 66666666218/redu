@@ -20,6 +20,7 @@ from app.db.models import User
 from app.security import create_access_token, decode_token
 
 RESET_TTL_MINUTES = 30
+FORGOT_COOLDOWN_SECONDS = 60   # 同一邮箱两次重置邮件最短间隔(库内冷却)
 MIN_PASSWORD_LEN = 8
 MAX_PASSWORD_LEN = 72   # bcrypt 只取前 72 字节,更长的部分会被静默截断
 MAX_USERNAME_LEN = 64   # 与 User.username 列宽一致,超长会被数据库截断/报错
@@ -119,13 +120,25 @@ def authenticate(db: Session, login: str, password: str) -> str | None:
 
 
 def create_password_reset_token(db: Session, email: str) -> str | None:
-    """为某邮箱生成一次性重置令牌;邮箱不存在返回 None(不暴露是否存在)。"""
+    """为某邮箱生成一次性重置令牌;邮箱不存在返回 None(不暴露是否存在)。
+
+    库内冷却 /api/auth/forgot 无限速门(2026-09-22 审计):否则单 IP 可对已注册
+    邮箱无限循环触发 SMTP 发信(轰炸受害者、打满授权码日上限致全站外发通道静默
+    失败),并每次覆盖 reset_token 顶掉用户正在用的合法链接。用 reset_expires 判定
+    "距上次签发是否已过 FORGOT_COOLDOWN_SECONDS",无需新列——签发时
+    reset_expires=now+TTL,冷却期内该值与 now 的差仍 >TTL-冷却。
+    """
     user = db.scalar(select(User).where(User.email == email.strip().lower()))
     if not user:
         return None
+    now = datetime.now()
+    if user.reset_expires and user.reset_expires > now + timedelta(
+        minutes=RESET_TTL_MINUTES, seconds=-FORGOT_COOLDOWN_SECONDS
+    ):
+        return None  # 冷却期内重复请求:静默当作"已发送",不重发也不覆盖旧令牌
     token = secrets.token_urlsafe(32)
     user.reset_token = _token_hash(token)
-    user.reset_expires = datetime.now() + timedelta(minutes=RESET_TTL_MINUTES)
+    user.reset_expires = now + timedelta(minutes=RESET_TTL_MINUTES)
     db.commit()
     return token
 

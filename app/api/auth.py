@@ -58,10 +58,17 @@ def login(body: LoginIn, request: Request, db: Session = Depends(get_db)) -> Tok
 
 
 @router.post("/api/auth/forgot")
-def forgot(body: ForgotIn, db: Session = Depends(get_db)):
+def forgot(body: ForgotIn, request: Request, db: Session = Depends(get_db)):
     from config.settings import get_settings
 
     settings = get_settings()
+    # 按 IP+邮箱 滑窗限速(同 login):挡住单 IP 对某已注册邮箱的无限刷发信。
+    # create_password_reset_token 内还有库内 60s 冷却兜底,两道闸叠加。
+    ip = request.client.host if request.client else "?"
+    key = f"forgot:{ip}:{body.email.strip().lower()}"
+    if not _login_allowed(key):
+        raise HTTPException(429, "请求过于频繁,请稍后再试")
+    _record_login(key)
     token = create_password_reset_token(db, body.email)
     if token:
         try:

@@ -169,6 +169,39 @@ def test_forgot_and_reset_password(session) -> None:
     assert authenticate(session, "a@b.com", "newpass123") is not None
 
 
+def test_forgot_cooldown_blocks_repeat(session) -> None:
+    """forgot 无限速门下的库内冷却:同邮箱 60s 内二次请求返回 None,
+    既不重复发信、也不覆盖用户正在用的合法重置链接。"""
+    register_user(session, "c@d.com", "p1234567")
+    first = create_password_reset_token(session, "c@d.com")
+    assert first
+    second = create_password_reset_token(session, "c@d.com")  # 冷却期内
+    assert second is None
+    # 首次签发的令牌仍有效(未被覆盖顶掉)
+    assert reset_password(session, first, "brandnew123") is True
+
+
+def test_forgot_route_rate_limited(session, monkeypatch) -> None:
+    """/api/auth/forgot 走 _login_allowed 滑窗:超阈值返回 429。"""
+    from fastapi import HTTPException
+    from app.api import auth as auth_api
+    from app.api.deps import ForgotIn
+    import app.api.deps as deps
+
+    # auth_api 用 `from deps import _login_allowed` 直接绑定了名字,须 patch auth 侧引用
+    deps._login_attempts.clear()
+    monkeypatch.setattr(auth_api, "_login_allowed", lambda key: False)
+    class _Client:
+        host = "1.2.3.4"
+    class _Req:
+        client = _Client()
+        headers = {}
+    with pytest.raises(HTTPException) as ei:
+        auth_api.forgot(ForgotIn(email="x@y.com"), _Req(), session)
+    assert ei.value.status_code == 429
+    deps._login_attempts.clear()
+
+
 def _xy(user_id, snap, iid, want, cat):
     return XianyuDaily(user_id=user_id, snap_date=snap, item_id=iid, title=iid, want_count=want, category=cat)
 
@@ -785,3 +818,38 @@ def test_retry_run_supports_baidu(session, monkeypatch: pytest.MonkeyPatch) -> N
 
     res = retry_run(session, str(run.id), settings=object())
     assert res["ok"] is True
+
+
+def test_admin_data_browse_and_alert_trend_clamp_bounds(session) -> None:
+    """管理台 days/limit 整数入参钳制:超大值不再一次性把全表载入内存/建超大数组,
+    负数不再触发 MySQL `Incorrect arguments to LIMIT`。"""
+    from app.admin import alert_trend, data_browse
+
+    # limit 极大 → 实际下推被钳到 500;负数/0 → 至少 1(不报错、不"不限")
+    assert data_browse(session, "weibo", limit=9_999_999) == []
+    assert data_browse(session, "weibo", limit=-1) == []
+    assert data_browse(session, "weibo", limit=0) == []
+    # days 极大 → 钳到 365 条;非法 → 落到下限不抛 OverflowError
+    assert len(alert_trend(session, days=700000)) == 365
+    assert len(alert_trend(session, days=-5)) == 1
+
+
+def test_admin_csv_export_neutralizes_formula_injection(session) -> None:
+    """导出 CSV 对以 = + - @ 开头的用户可控单元格前置单引号,防 Excel/WPS 打开时公式/DDE 执行。"""
+    from datetime import datetime
+
+    from app.db.models import AlertRecord, User
+    from app.admin import export_alerts, export_users
+
+    session.add(User(id=1, username="=cmd|'/c calc'!A0", email="+evil@x.com",
+                     password_hash="x", role="user"))
+    session.add(AlertRecord(user_id=1, section="weibo", keyword="@SUM(1+1)",
+                            reason="-1+1", triggered_at=datetime.now()))
+    session.commit()
+    users_csv = export_users(session)
+    alerts_csv = export_alerts(session)
+    assert "'=cmd" in users_csv           # = 前缀被中和
+    assert "'+evil@x.com" in users_csv    # + 前缀被中和
+    assert "'@SUM(1+1)" in alerts_csv     # @ 前缀被中和
+    assert "'-1+1" in alerts_csv          # - 前缀被中和
+
