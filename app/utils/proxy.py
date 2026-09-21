@@ -109,21 +109,27 @@ class ProxyPool:
         return ip, port, user, password
 
     def _refresh(self) -> None:
+        # 先拉到本地新池再原子替换:旧写法假定调用方已 `self._proxies = []`,
+        # 一旦厂商 getips 返 5xx/timeout/额度到期 JSON → except 分支 return,
+        # 池已被清空 → 采集按"未启用代理"直连出口 IP,把服务器真身 IP 打进
+        # 抖音/闲鱼风控(.env.example 里 DOUHOT_USE_PROXY 就是为这个开的)。
+        new_list: list[tuple[str, str, str, str]] = []
         try:
             for line in self._fetch(self._url):
                 parsed = self.parse_line(line)
                 if parsed:
-                    self._proxies.append(parsed)
+                    new_list.append(parsed)
         except Exception:  # noqa: BLE001 - 拉取失败保留旧池,下次再刷新
             return
-        self._last = time.time()
+        if new_list:
+            self._proxies = new_list
+            self._last = time.time()
 
     def get_proxies(self) -> dict[str, str] | None:
         """返回一个随机代理的 requests proxies 字典;池空返回 `None`。"""
         with self._lock:
             if not self._proxies or time.time() - self._last > self._ttl:
-                self._proxies = []
-                self._refresh()
+                self._refresh()  # 不再预先 self._proxies = [] —— _refresh 内部原子替换
             if not self._proxies:
                 return None
             ip, port, user, pwd = random.choice(self._proxies)
