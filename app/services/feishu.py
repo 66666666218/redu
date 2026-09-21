@@ -99,8 +99,21 @@ def _col_set_row(cells: list[tuple[str, int]], *, grey: bool = False) -> dict:
 
 
 def _md_safe(text: str) -> str:
-    """标题进 lark_md 前的轻清洗:方括号会破坏 markdown 链接结构。"""
-    return (text or "").replace("[", "【").replace("]", "】").replace("\n", " ")
+    """标题/关键词进 lark_md 前的清洗。
+
+    lark_md 支持 `[文字](链接)`、`<at user_id="all">`、行内 `` `code` ``;
+    任何用户可控字段(公众号昵称、监控关键词、筛选词、商品标题…)原样拼进去
+    就是一个跨用户注入面——总群推送里能 @所有人、塞钓鱼链接。
+    - `[ ]` → 全角,破坏链接结构;
+    - `< >` → 全角,禁 `<at>` 与内联标签;
+    - 反引号 → 移除,防 code span 逃逸;
+    - 换行 → 空格,保证一条一行。
+    """
+    return ((text or "")
+            .replace("[", "【").replace("]", "】")
+            .replace("<", "＜").replace(">", "＞")
+            .replace("`", "")
+            .replace("\n", " ").replace("\r", " "))
 
 
 # ---------------------------------------------------------------------------
@@ -447,18 +460,18 @@ def build_keyword_card(db: Session, user_id: int, settings: Settings,
             if not rows:
                 continue
             fk = (w.get('filter_keyword') or '')
-            fk_label = f" · 只含「{fk}」" if fk else ''
+            fk_label = f" · 只含「{_md_safe(fk)}」" if fk else ''
             elements.append({"tag": "div", "text": {"tag": "lark_md",
-                            "content": f"**{w['keyword']}**{fk_label} · {label} · {_overview(rows)}"}})
+                            "content": f"**{_md_safe(w['keyword'])}**{fk_label} · {label} · {_overview(rows)}"}})
             # 摘要:追踪N主题 · 上升:xx/新增:xx(与仪表盘一致,不笼统说该词上升)
             risers = [r for r in rows if r["trend"] == "上升期" and r.get("growth") is not None]
             new_ones = [r for r in rows if r["marker"] == "🆕"]
             bits = [f"追踪{len(rows)}主题"]
             if risers:
                 bits.append("上升:" + "、".join(
-                    f"{r['title'][:10]}+{r['growth'] * 100:.0f}%" for r in risers[:3]))
+                    f"{_md_safe(r['title'])[:10]}+{r['growth'] * 100:.0f}%" for r in risers[:3]))
             elif new_ones:
-                bits.append("新增:" + "、".join(r["title"][:10] for r in new_ones[:3]))
+                bits.append("新增:" + "、".join(_md_safe(r["title"])[:10] for r in new_ones[:3]))
             else:
                 bits.append("走势平稳")
             elements.append({"tag": "div", "text": {"tag": "lark_md",
@@ -475,7 +488,7 @@ def build_keyword_card(db: Session, user_id: int, settings: Settings,
                 mark = "🔴" if r.get("burst") else "—"
                 trend = f"{r['arrow']}{r['trend']}{g}".strip()
                 table.append(_aligned_row("  ", [(mark, 4), (r["marker"].strip() or "—", 8),
-                                                 (r['title'][:12], 22), (_w(r['score']), 10), (trend, 12)]))
+                                                 (_md_safe(r['title'])[:12], 22), (_w(r['score']), 10), (trend, 12)]))
             table.append(_aligned_row("  ", [("", 4), ("", 8), ("今日vs昨日", 22),
                                              (f"🆕{news} ↑{rose} ↓{fell} 跌出{dropped}", 10), ("—", 12)]))
             elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(table)}})
@@ -485,7 +498,7 @@ def build_keyword_card(db: Session, user_id: int, settings: Settings,
             g = f"{a['growth'] * 100:+.0f}%" if a.get("growth") is not None else "—"
             fc = f"  预测{a['forecast_next']:.0f}" if a.get("forecast_next") is not None else ""
             elements.append({"tag": "div", "text": {"tag": "lark_md",
-                            "content": f"**{w['keyword']}** · {label} · {a['trend_label']}{'🔴重点' if a.get('burst') else ''}"}})
+                            "content": f"**{_md_safe(w['keyword'])}** · {label} · {a['trend_label']}{'🔴重点' if a.get('burst') else ''}"}})
             elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": f"环比{g}{fc}"}]})
         elements.append({"tag": "hr"})
     if not elements:
