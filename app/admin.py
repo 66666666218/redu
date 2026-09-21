@@ -6,7 +6,7 @@ import io
 from datetime import date, datetime, timedelta
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app.db import repository
 from app.utils.net import redact_proxy_creds
@@ -168,12 +168,25 @@ def config_set(db: Session, key: str, value: str) -> None:
     db.commit()
 
 
+def _csv_cell(value: object) -> str:
+    """CSV 公式注入防护:以 = + - @ 或制表/回车开头的单元格前置单引号。
+
+    用户名/邮箱/监控关键词都是用户可控,导出后管理员用 Excel/WPS 打开时,
+    `=cmd|'/c calc'!A0`、`@SUM(...)`、`+...` 会被当公式/DDE 执行。
+    """
+    s = str(value)
+    if s[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + s
+    return s
+
+
 def export_users(db: Session) -> str:
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["id", "username", "email", "role", "enabled", "created"])
     for u in db.scalars(select(User).order_by(User.id)).all():
-        w.writerow([u.id, u.username, u.email or "", u.role, u.enabled, u.created_at.isoformat()])
+        w.writerow([u.id, _csv_cell(u.username), _csv_cell(u.email or ""),
+                    _csv_cell(u.role), u.enabled, u.created_at.isoformat()])
     return buf.getvalue()
 
 
@@ -182,7 +195,8 @@ def export_alerts(db: Session) -> str:
     w = csv.writer(buf)
     w.writerow(["user_id", "keyword", "reason", "time"])
     for r in db.scalars(select(AlertRecord).order_by(AlertRecord.id.desc())).all():
-        w.writerow([r.user_id, r.keyword, r.reason, r.triggered_at.isoformat()])
+        w.writerow([r.user_id, _csv_cell(r.keyword), _csv_cell(r.reason),
+                    r.triggered_at.isoformat()])
     return buf.getvalue()
 
 
@@ -404,9 +418,28 @@ def failed_runs(db: Session, limit: int = 50) -> list[dict]:
     ]
 
 
+def _retry_runners() -> dict:
+    """kind → 重跑函数。手动 retry_run 与自动 retry_failed_runs 共用同一张表,
+    避免两套映射不一致(历史上手动只有 weibo/xianyu/douhot,重试 baidu/wechat_* 直接
+    报"未知板块",而自动路径反而支持)。"""
+    from app.services import tenant
+    from app.services.wechat_monitor import run_wechat_listen, sample_traffic as _run_wechat_traffic
+    from app.services.xianyu_analytics import run_xianyu_deep
+
+    return {
+        "weibo": tenant.run_weibo,
+        "baidu": tenant.run_baidu,
+        "xianyu": tenant.run_xianyu,
+        "xianyu_deep": run_xianyu_deep,
+        "douhot": tenant.run_douhot,
+        "wechat_listen": run_wechat_listen,
+        "wechat_sync": run_wechat_listen,
+        "wechat_traffic": _run_wechat_traffic,
+    }
+
+
 def retry_run(db: Session, run_id: str, settings=None) -> dict:
     from config.settings import get_settings
-    from app.services import tenant
 
     settings = settings or get_settings()
     # run_id(秒级时间戳)非唯一,优先用自增 id 精确定位,避免同秒撞到其它记录
@@ -416,11 +449,16 @@ def retry_run(db: Session, run_id: str, settings=None) -> dict:
     run = run or db.scalar(select(RunRecord).where(RunRecord.run_id == str(run_id)))
     if not run or run.status != "failed":
         return {"ok": False, "msg": "运行不存在或非失败"}
-    runner = {"weibo": tenant.run_weibo, "xianyu": tenant.run_xianyu, "douhot": tenant.run_douhot}.get(run.kind)
+    runner = _retry_runners().get(run.kind)
     if not runner:
         return {"ok": False, "msg": f"未知板块 {run.kind}"}
     try:
         runner(db, run.user_id, settings)
+        # 成功后必须关闭该失败记录,否则它仍是 status='failed',会被
+        # retry_failed_runs 在 24h 窗口内再次自动重跑一遍(重复采集)。
+        run.status = "recovered"
+        run.detail = f"{run.detail} → manual_retry_ok"
+        db.commit()
         return {"ok": True}
     except Exception as exc:  # noqa: BLE001
         run.retry_count = (run.retry_count or 0) + 1
@@ -436,30 +474,45 @@ def retry_failed_runs(max_retry: int = 3) -> dict:
 
     from config.settings import get_settings
     from app.db import get_session_local
-    from app.services import tenant
 
     settings = get_settings()
     db = get_session_local()()
-    from app.services.wechat_monitor import run_wechat_listen as _run_wechat_listen
-    runners = {"weibo": tenant.run_weibo, "xianyu": tenant.run_xianyu, "douhot": tenant.run_douhot,
-               "wechat_listen": _run_wechat_listen, "wechat_sync": _run_wechat_listen}
+    runners = _retry_runners()
     n = 0
     try:
         # 保底不永久放弃:retry_count 越大要求等待越久(指数退避:2^count 小时),
         # 但只要"距上次失败已等够"就再次重试——网络/Cookie 恢复后自动续上。
         # 注意:重试成功后必须关闭旧 failed 记录(recovered),否则 24h 窗口内
         # 每 30 分钟都会对同一次失败重复采集(2026-09-14 审计:单次抖动放大 ~48 次)。
+        #
+        # 每个 (user_id, kind) 只取**最新一条** failed 作重试候选:run_* 内部在重试
+        # 失败时会 _record_run 落一条 retry_count=0 的新 failed 子记录,若按全局
+        # `id desc limit(20)` 取,不断重生的最新子记录会长期霸占 20 行窗口,把其它
+        # 租户更早的失败挤出重试队列(单用户抖动 → 饿死全部租户的失败恢复)。
+        # 用相关子查询锁定"同 user+kind 里 id 最大"的那条,天然去重、且不再被行数截断。
+        inner = aliased(RunRecord)
+        latest_id = (
+            select(func.max(inner.id))
+            .where(
+                inner.user_id == RunRecord.user_id,
+                inner.kind == RunRecord.kind,
+                inner.status == "failed",
+            )
+            .correlate(RunRecord)
+            .scalar_subquery()
+        )
         recent = db.scalars(
             select(RunRecord).where(
                 RunRecord.status == "failed",
                 RunRecord.started_at >= datetime.now() - timedelta(hours=24),
+                RunRecord.id == latest_id,
                 # 排除被管理员禁用用户的失败记录:封禁即停推。run_* → alert_service.evaluate
                 # 按用户启用的 AlertRule 发实时提醒,并可能 notify_incident 推飞书;若不剔除,
                 # 用户被禁用前遗留的 failed 记录会在 24h 窗口内被自动重试而复活其推送链路
                 # (常规定时采集已靠 due_schedules 的 notin_ 过滤停推,重试路径需保持一致)。
                 # 用 notin_(禁用 id) 而非内联 JOIN:无对应 User 行的孤儿记录维持旧行为。
                 RunRecord.user_id.notin_(select(User.id).where(User.enabled.is_(False))),
-            ).order_by(RunRecord.id.desc()).limit(20)
+            ).order_by(RunRecord.id.desc()).limit(50)
         ).all()
         # 过滤:一律要求"距该次失败已过 2^retry_count 小时"的指数退避,
         # retry_count 达上限的不再重试(防同次失败被无限重放)

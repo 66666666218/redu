@@ -709,3 +709,79 @@ def test_retry_failed_runs_skips_disabled_user(session, monkeypatch: pytest.Monk
     assert 2 not in called  # 禁用用户不重试
     assert 1 in called      # 启用用户仍重试
     assert 99 in called     # 孤儿记录维持旧行为
+
+
+def test_retry_failed_runs_dedups_per_user_kind(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """重试候选按 (user_id, kind) 去重取最新一条:同用户同板块的多条 failed
+    (run_* 重试失败会再落一条 retry_count=0 的新子记录)只重跑最新那条,
+    避免子记录长期霸占 limit 窗口把其它租户挤出重试队列。"""
+    from datetime import datetime, timedelta
+    from app.db.models import RunRecord
+    from app.services import tenant, wechat_monitor
+    from app.admin import retry_failed_runs
+
+    base = datetime.now() - timedelta(hours=2)
+    # 用户1 wechat_listen 有 3 条 failed(旧中新),用户2 douhot 有 1 条
+    session.add_all([
+        RunRecord(user_id=1, run_id="old", kind="wechat_listen", status="failed",
+                  detail="old", retry_count=0, started_at=base),
+        RunRecord(user_id=1, run_id="mid", kind="wechat_listen", status="failed",
+                  detail="mid", retry_count=0, started_at=base + timedelta(minutes=1)),
+        RunRecord(user_id=1, run_id="new", kind="wechat_listen", status="failed",
+                  detail="new", retry_count=0, started_at=base + timedelta(minutes=2)),
+        RunRecord(user_id=2, run_id="d1", kind="douhot", status="failed",
+                  detail="x", retry_count=0, started_at=base),
+    ])
+    session.commit()
+
+    listen_calls: list[int] = []
+    monkeypatch.setattr(wechat_monitor, "run_wechat_listen",
+                        lambda db, uid, settings=None: listen_calls.append(uid))
+    monkeypatch.setattr(tenant, "run_douhot", lambda db, uid, settings=None: None)
+    import app.db as appdb
+    monkeypatch.setattr(appdb, "get_session_local",
+                        lambda: sessionmaker(bind=session.get_bind()))
+
+    retry_failed_runs(max_retry=3)
+    # 用户1 的 3 条同板块记录合并为一次重试(仅最新那条入选);用户2 douhot 一次
+    assert listen_calls == [1]
+    # 旧/中两条仍保持 failed(未被误重试也不被误关闭)
+    from sqlalchemy import select as _select
+    old = session.scalar(_select(RunRecord).where(RunRecord.run_id == "old"))
+    assert old.status == "failed"
+
+
+def test_retry_run_marks_recovered(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """手动 retry_run 成功后必须把该记录置 recovered,否则会被自动重试再跑一遍。"""
+    from datetime import datetime, timedelta
+    from app.db.models import RunRecord
+    from app.services import tenant
+    from app.admin import retry_run
+
+    run = RunRecord(user_id=1, run_id="m1", kind="weibo", status="failed",
+                    detail="boom", retry_count=0, started_at=datetime.now())
+    session.add(run)
+    session.commit()
+    monkeypatch.setattr(tenant, "run_weibo", lambda db, uid, settings=None: None)
+
+    res = retry_run(session, str(run.id), settings=object())
+    assert res["ok"] is True
+    session.refresh(run)
+    assert run.status == "recovered"
+
+
+def test_retry_run_supports_baidu(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """手动 retry_run 与自动重试共用同一张 runners 表:baidu 不再报"未知板块"。"""
+    from datetime import datetime
+    from app.db.models import RunRecord
+    from app.services import tenant
+    from app.admin import retry_run
+
+    run = RunRecord(user_id=1, run_id="b1", kind="baidu", status="failed",
+                    detail="boom", retry_count=0, started_at=datetime.now())
+    session.add(run)
+    session.commit()
+    monkeypatch.setattr(tenant, "run_baidu", lambda db, uid, settings=None: None)
+
+    res = retry_run(session, str(run.id), settings=object())
+    assert res["ok"] is True
