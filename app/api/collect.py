@@ -110,8 +110,14 @@ def watch_add(section: str, payload: dict, user: User = Depends(get_current_user
         return add_watch(db, user.id, section, str(payload.get("list_type", "word")),
                          str(payload.get("keyword", "")), str(payload.get("filter_keyword", "")),
                          payload.get("date_window"))
-    except Exception as exc:  # noqa: BLE001
+    except ValueError as exc:
+        # 只回业务校验的中文提示。DB/驱动异常 str(exc) 是 SQLAlchemy 完整 repr,
+        # 含 [SQL: INSERT ...]、[parameters: ...]、OperationalError 还带 DB 主机:端口,
+        # 任何登录用户构造一次并发/异常即可看到内网 DB 拓扑。
         raise HTTPException(400, str(exc)) from exc
+    except Exception:  # noqa: BLE001
+        logger.exception("添加关注失败 user=%s section=%s", user.id, section)
+        raise HTTPException(500, "操作失败,请稍后重试")
 
 
 @router.patch("/api/watch/{section}")
@@ -125,8 +131,12 @@ def watch_update(section: str, payload: dict, user: User = Depends(get_current_u
                             payload.get("date_window"))
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
+    except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    except Exception:  # noqa: BLE001
+        # 同 watch_add:屏蔽 SQLAlchemy 异常文本对客户端的暴露
+        logger.exception("更新关注失败 user=%s section=%s", user.id, section)
+        raise HTTPException(500, "操作失败,请稍后重试")
 
 
 @router.get("/api/watch/{section}")
@@ -144,8 +154,12 @@ def watch_delete(section: str, payload: dict, user: User = Depends(get_current_u
     try:
         ok = remove_watch(db, user.id, section, str(payload.get("list_type", "word")),
                           str(payload.get("keyword", "")), str(payload.get("filter_keyword", "")))
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(500, f"删除关注失败:{exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception:  # noqa: BLE001
+        # 同 watch_add:DB 异常原文含 SQL/host/参数,勿回客户端
+        logger.exception("删除关注失败 user=%s section=%s", user.id, section)
+        raise HTTPException(500, "操作失败,请稍后重试")
     if not ok:
         raise HTTPException(404, "未找到该关注词")
     return {"ok": True}
