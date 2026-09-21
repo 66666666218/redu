@@ -215,6 +215,56 @@ def test_listen_pushes_pan_articles_to_feishu(monkeypatch: pytest.MonkeyPatch, s
     assert "📡" in text  # 卡片标题
 
 
+def test_push_listen_sends_all_articles_grouped_by_account(session, monkeypatch) -> None:
+    """飞书是员工唯一能看到内容的地方:全量新发文都要推,按账号分组,
+    不再截断到 20 篇并把剩下的甩给"见平台文章列表"(平台只有运营者能看到)。
+
+    回归:旧实现 `for r in rows[:20]` + 末尾"…另有 N 篇,见平台文章列表"。"""
+    import json
+
+    import app.services.feishu as feishu_mod
+
+    rows = []
+    for i in range(25):  # 号A 25 篇
+        rows.append(WechatArticle(user_id=1, title=f"A文{i}", author="号A",
+                                  url=f"https://mp.weixin.qq.com/s/a{i}", source="listen",
+                                  read_num=0))
+    for i in range(3):  # 号B 3 篇
+        rows.append(WechatArticle(user_id=1, title=f"B文{i}", author="号B",
+                                  url=f"https://mp.weixin.qq.com/s/b{i}", source="listen",
+                                  read_num=0))
+    session.add_all(rows)
+    session.commit()
+
+    monkeypatch.setattr(feishu_mod, "webhook_for", lambda settings, section: "https://open.feishu.cn/hook/x")
+    cards: list[dict] = []
+
+    class _FakeFeishu:
+        def __init__(self, webhook, secret="") -> None:
+            pass
+
+        def send(self, msg: str) -> bool:
+            return True
+
+        def send_card(self, card: dict) -> bool:
+            cards.append(card)
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
+    wechat_monitor._push_listen(session, 1, _settings(), rows)
+
+    blob = json.dumps(cards, ensure_ascii=False)
+    # ① 全部 28 篇都出现在卡片里(一篇都不能丢)
+    for r in rows:
+        assert r.title in blob, f"{r.title} 未推送"
+    # ② 不再有"见平台列表"的截断提示
+    assert "见平台" not in blob and "另有" not in blob
+    # ③ 28 篇 > 每卡 20 篇 → 分成多张卡
+    assert len(cards) >= 2
+    # ④ 按账号分组:两个账号都有分组标题
+    assert "📢 号A" in blob and "📢 号B" in blob
+
+
 # ---------------------------------------------------------------- 同步
 def test_sync_pages_until_isend_and_backfills_ghid(monkeypatch: pytest.MonkeyPatch, session) -> None:
     b = WechatBenchmark(user_id=1, nickname="未命名", anchor_url="https://mp.weixin.qq.com/s/A")

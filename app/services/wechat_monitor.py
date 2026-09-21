@@ -1161,18 +1161,17 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
             return
         rows = urgent
     replacements = replacements or {}
-    # 盘链文优先展示(闸门修复后非盘文大量入库,价值排序避免淹没资源文)
-    rows = sorted(rows, key=lambda r: (not r.pan_types, -(r.read_num or 0)))
-    elements: list[dict] = [
-        {"tag": "note", "elements": [{"tag": "plain_text",
-            "content": "点文章标题打开链接(优先你的夸克转存链) · 网盘列=识别到的盘链 · 阅读未采样为 —"}]},
-        _col_set_row([("**公众号**", 3), ("**文章**", 7), ("**网盘**", 2), ("**阅读**", 2)], grey=True),
-    ]
+    # 免打扰过滤后可能清空(理论上上面已 return,这里再兜一层,避免推空卡)
+    if not rows:
+        return
+    from collections import OrderedDict
+
     from app.db.models import WechatPanLink
-    # 重复资源计数:一次 GROUP BY 批量查(循环内逐篇 COUNT 是 N+1)
+    # 重复资源计数:一次 GROUP BY 批量查本轮全部文章(循环内逐篇 COUNT 是 N+1)。
+    # 不再只算 rows[:20]——全量推送下每篇都要有 🔥xN 标记。
     dup_counts: dict[str, int] = {}
     pan_of = {r.id: next((x.strip() for x in (r.pan_urls or "").splitlines() if x.strip()), "")
-              for r in rows[:20] if r.pan_urls}
+              for r in rows if r.pan_urls}
     if pan_of:
         for pan_url, cnt in session.execute(
                 select(WechatPanLink.pan_url, func.count()).where(
@@ -1180,7 +1179,8 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
                     WechatPanLink.user_id == user_id,  # 🔥xN 只数本租户监听,别把他号的重复算进来
                 ).group_by(WechatPanLink.pan_url)).all():
             dup_counts[pan_url] = int(cnt)
-    for r in rows[:20]:
+
+    def _render_article(r: WechatArticle) -> dict:
         rep = replacements.get(r.id) or []
         if rep:
             link = rep[0][1] + (f" (提取码 {rep[0][2]})" if rep[0][2] else "")
@@ -1211,13 +1211,21 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
         article_md = f"[{hot}{q_badge}{shown}]({_md_safe(link)})" if link else shown
         pan = f"🔴{_md_safe(r.pan_types)[:8]}" if r.pan_types else "—"
         read = str(r.read_num) if r.traffic_at else "—"
-        elements.append(_col_set_row([
+        return _col_set_row([
             (_md_safe(r.author)[:10] or "—", 3), (article_md, 7), (pan, 2), (read, 2),
-        ]))
-    if len(rows) > 20:
-        elements.append({"tag": "note", "elements": [{"tag": "plain_text",
-            "content": f"…另有 {len(rows) - 20} 篇,见平台文章列表"}]})
+        ])
+
+    # 按账号分组(员工视角要一眼看清"哪个号发了哪些"),同号内资源文/高阅读优先。
+    groups: "OrderedDict[str, list[WechatArticle]]" = OrderedDict()
+    for r in sorted(rows, key=lambda r: (r.author or "", not r.pan_types, -(r.read_num or 0))):
+        groups.setdefault(r.author or "未知账号", []).append(r)
+    # 展开成 (账号, 文章) 序列,分页时按账号标题切段
+    seq: list[tuple[str, WechatArticle]] = [
+        (author, r) for author, arts in groups.items() for r in arts
+    ]
+
     # LLM 叙事层:盘链文优先交给大模型解读(失败/未配 key 静默降级,不影响推送)
+    ai_elements: list[dict] = []
     if settings.deepseek_api_key:
         try:
             from app.services.llm_client import narrate_articles
@@ -1228,21 +1236,50 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
             reading = narrate_articles(settings.deepseek_base_url, settings.deepseek_api_key,
                                        settings.deepseek_model, ctx)
             if reading:
-                elements.append({"tag": "hr"})
-                elements.append({"tag": "div", "text": {"tag": "lark_md",
-                    "content": "🤖 **AI 解读**" + chr(10) + reading[:1500]}})
+                ai_elements = [
+                    {"tag": "hr"},
+                    {"tag": "div", "text": {"tag": "lark_md",
+                        "content": "🤖 **AI 解读**" + chr(10) + reading[:1500]}},
+                ]
         except Exception:  # noqa: BLE001 - 叙事失败不影响推送
             logger.exception("LLM 叙事失败 user=%s", user_id)
-    for target in targets:
-        try:
-            FeishuClient(target, settings.feishu_secret).send_card({
-                "config": {"wide_screen_mode": True},
-                "header": {"template": "blue", "title": {"tag": "plain_text",
-                    "content": f"📡 公众号监听 · 新发文 {len(rows)} 篇"}},
-                "elements": elements,
-            })
-        except Exception:  # noqa: BLE001 - 推送失败不影响采集结果
-            logger.exception("公众号监听飞书推送失败 user=%s", user_id)
+
+    # 全量分页:每卡最多 20 篇(飞书卡片有体积上限),超出部分继续发卡而非"见平台列表"。
+    per_card = 20
+    chunks = [seq[i:i + per_card] for i in range(0, len(seq), per_card)]
+    total_pages = len(chunks)
+    for page_idx, chunk in enumerate(chunks):
+        elements: list[dict] = [
+            {"tag": "note", "elements": [{"tag": "plain_text",
+                "content": "点文章标题打开链接(优先你的夸克转存链) · 网盘列=识别到的盘链 · 阅读未采样为 —"}]},
+        ]
+        if page_idx == 0:
+            elements.append({"tag": "note", "elements": [{"tag": "plain_text",
+                "content": f"本轮共 {len(rows)} 篇新发文,来自 {len(groups)} 个公众号(按账号分组,全量推送)"}]})
+        elements.append(_col_set_row(
+            [("**公众号**", 3), ("**文章**", 7), ("**网盘**", 2), ("**阅读**", 2)], grey=True))
+        last_author: str | None = None
+        for author, r in chunk:
+            if author != last_author:  # 换账号插入一行账号标题;账号跨卡时下一页重出标题
+                elements.append({"tag": "div", "text": {"tag": "lark_md",
+                    "content": f"**📢 {_md_safe(author)}**"}})
+                last_author = author
+            elements.append(_render_article(r))
+        if page_idx == 0 and ai_elements:
+            elements.extend(ai_elements)
+        card_title = f"📡 公众号监听 · 新发文 {len(rows)} 篇"
+        if total_pages > 1:
+            card_title += f" · {page_idx + 1}/{total_pages}"
+        for target in targets:
+            try:
+                FeishuClient(target, settings.feishu_secret).send_card({
+                    "config": {"wide_screen_mode": True},
+                    "header": {"template": "blue", "title": {"tag": "plain_text",
+                        "content": card_title}},
+                    "elements": elements,
+                })
+            except Exception:  # noqa: BLE001 - 推送失败不影响采集结果
+                logger.exception("公众号监听飞书推送失败 user=%s page=%s", user_id, page_idx)
 
 
 # ---------------------------------------------------------------- 全量同步
