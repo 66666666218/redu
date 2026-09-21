@@ -86,25 +86,42 @@ async function setCfg(k) {
 async function searchUsers() {
   try { users.value = await api.adminUsers(q.value) } catch (e) { toastError(e.message) }
 }
-async function loadData() { dataRef.value = await api.adminData(dataSection.value) }
-async function retryRun(runId) {
-  const r = await api.adminRunRetry(runId)
-  if (r.ok) toastOk('重试成功'); else toastError('重试失败:' + (r.msg || ''))
-  await load()
+async function loadData() {
+  try { dataRef.value = await api.adminData(dataSection.value) }
+  catch (e) { toastError('数据加载失败:' + e.message) }
 }
-async function openDetail(u) { detail.value = await api.adminUserDetail(u.id) }
+async function retryRun(runId) {
+  try {
+    const r = await api.adminRunRetry(runId)
+    if (r.ok) toastOk('重试成功'); else toastError('重试失败:' + (r.msg || ''))
+    await load()
+  } catch (e) { toastError('重试请求失败:' + e.message) }
+}
+async function openDetail(u) {
+  try { detail.value = await api.adminUserDetail(u.id) }
+  catch (e) { toastError('用户详情加载失败:' + e.message) }
+}
 async function doImport() {
   if (!importText.value.trim()) return
-  const r = await api.adminImportUsers(importText.value)
-  msg.value = `导入完成:新增 ${r.created},跳过 ${r.skipped}`
-  importText.value = ''
-  await load()
+  try {
+    const r = await api.adminImportUsers(importText.value)
+    msg.value = `导入完成:新增 ${r.created},跳过 ${r.skipped}`
+    importText.value = ''
+    await load()
+  } catch (e) { toastError('导入失败:' + e.message) }
 }
 async function download(kind) {
-  const r = await (kind === 'users' ? api.adminExportUsers() : api.adminExportAlerts())
-  const blob = await r.blob()
-  const a = document.createElement('a')
-  a.href = URL.createObjectURL(blob); a.download = kind + '.csv'; a.click()
+  try {
+    const r = await (kind === 'users' ? api.adminExportUsers() : api.adminExportAlerts())
+    // 未判 r.ok 时,401/500 的 JSON 错误体也会被当作 CSV 下载,
+    // 用户拿到一个内容为 `{"detail":"..."}` 的 csv 文件,以为导出成功。
+    if (!r.ok) { toastError('导出失败:HTTP ' + r.status); return }
+    const blob = await r.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url; a.download = kind + '.csv'; a.click()
+    URL.revokeObjectURL(url)
+  } catch (e) { toastError('导出失败:' + e.message) }
 }
 const c = (k) => dash.value.counts[k] || 0
 const tmax = () => Math.max(1, ...dash.value.trend30.map(t => Math.max(t.runs, t.alerts)))

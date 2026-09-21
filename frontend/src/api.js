@@ -26,38 +26,54 @@ async function req(method, path, body) {
     // 断网/服务未启动时 fetch 直接抛 TypeError('Failed to fetch'),转成中文提示
     throw new Error('无法连接服务器,请检查网络或稍后重试')
   }
-  const text = await resp.text()
+  const contentType = resp.headers.get('content-type') || ''
+  const raw = await resp.text()
   let data = null
-  try { data = text ? JSON.parse(text) : null } catch { data = text }
+  if (raw) {
+    if (contentType.includes('application/json')) {
+      try { data = JSON.parse(raw) } catch { data = null }
+    } else {
+      // 非 JSON(网关 502/504 HTML、CDN 纯文本、反代错误页)不要塞进 data,
+      // 否则下面 `typeof data === 'string'` 分支会把整段 HTML 当错误文案 toast 出来。
+      data = null
+    }
+  }
   if (!resp.ok) {
     // 401 = 令牌过期/无效:清除本地残留并回登录页,避免每个请求都报"登录已过期"却停在原地
     if (resp.status === 401 && !path.startsWith('/api/auth/')) {
       clearToken()
       if (location.pathname !== '/login') location.href = '/login'
     }
-    throw new Error(errMessage(data, resp.status))
+    throw new Error(errMessage(data, raw, resp.status))
   }
   return data
 }
 
 // FastAPI 的错误体有两种形态:HTTPException 是 {detail:"文字"},
 // 而 422 参数校验是 {detail:[{loc,msg,...}]}——后者直接当字符串用会显示成 [object Object]。
-function errMessage(data, status) {
-  if (typeof data === 'string' && data.trim()) return data
-  const detail = data && (data.detail ?? data.message)
-  if (typeof detail === 'string' && detail.trim()) return detail
-  if (Array.isArray(detail) && detail.length) {
-    return detail
-      .map(d => {
-        const field = Array.isArray(d.loc) ? d.loc[d.loc.length - 1] : ''
-        return field ? `${field}: ${d.msg}` : d.msg
-      })
-      .filter(Boolean)
-      .join('; ')
+// 5xx 一律走固定文案:上游 body 可能带堆栈/SQL/文件路径,直接展示等于泄露内部拓扑。
+function errMessage(data, raw, status) {
+  if (status >= 500) return '服务器开小差了,请稍后重试'
+  if (data && typeof data === 'object') {
+    const detail = data.detail ?? data.message
+    if (typeof detail === 'string' && detail.trim()) return detail.slice(0, 200)
+    if (Array.isArray(detail) && detail.length) {
+      return detail
+        .map(d => {
+          const field = Array.isArray(d.loc) ? d.loc[d.loc.length - 1] : ''
+          const msg = typeof d?.msg === 'string' ? d.msg : ''
+          return field ? `${field}: ${msg}` : msg
+        })
+        .filter(Boolean)
+        .join('; ')
+        .slice(0, 200)
+    }
   }
+  if (typeof data === 'string' && data.trim()) return data.slice(0, 200)
+  // 只有 JSON 解析失败/非 JSON 时才落到这里;raw 已在上面被判过,不再重复塞进 UI
   if (status === 401) return '登录已过期,请重新登录'
   if (status === 403) return '没有权限执行该操作'
-  if (status >= 500) return '服务器开小差了,请稍后重试'
+  if (status === 404) return '请求的资源不存在'
   return `请求失败(${status})`
 }
 
