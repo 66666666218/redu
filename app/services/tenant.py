@@ -23,6 +23,7 @@ from app.db.models import (
     DouhotWatch,
     DouhotWord,
     RunRecord,
+    SystemConfig,
     WeiboHotItem,
     WeiboTrend,
     XianyuItem,
@@ -170,12 +171,20 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
     # 构造客户端不产生网络请求,放在 try 外:失败路径也能回写运行中刷新的令牌
     client = xianyu.XianyuClient(goofish_cookie, proxy=settings.xianyu_proxy_url or None)
     try:
-        # 风控降频:每轮只抓 batch 个关键词,按已运行的 xianyu 次数轮转起始窗口,多轮覆盖全部
-        prior = session.scalar(select(func.count()).select_from(RunRecord).where(
-            RunRecord.user_id == user_id, RunRecord.kind == "xianyu")) or 0
+        # 风控降频:每轮只抓 batch 个关键词,轮转起始窗口,多轮覆盖全部。
+        # 轮转游标用 SystemConfig 持久化的单调计数,**不再**寄生在"数 xianyu RunRecord 条数"上:
+        # RunRecord 会被 DATA_RETENTION_DAYS 清理,保留期跑满后每天新增≈删除,prior 进入饱和常量,
+        # start_offset 恒定 → 永远只抓同一批关键词,其余词的商品/日快照/深采永久停更(2026-09-22 审计)。
         batch = max(1, int(getattr(settings, "xianyu_batch_keywords", 0) or 5))
         n_kw = len([k.strip() for k in settings.xianyu_keywords.split(",") if k.strip()])
+        rot_key = f"xianyu_rot_{user_id}"
+        rot_row = session.scalar(select(SystemConfig).where(SystemConfig.key == rot_key))
+        prior = int(rot_row.value) if (rot_row and rot_row.value.isdigit()) else 0
         start_offset = (prior * batch) % max(n_kw, 1)
+        if rot_row is None:
+            session.add(SystemConfig(key=rot_key, value=str(prior + 1)))
+        else:
+            rot_row.value = str(prior + 1)
         stats: dict = {}
         hot = xianyu.collect_hot(settings, client, start_offset=start_offset, stats=stats)
         prev_keys = set(session.scalars(select(XianyuItem.item_id).where(XianyuItem.user_id == user_id)).all())
