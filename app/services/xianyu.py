@@ -410,9 +410,13 @@ def collect_hot(settings: Settings, client: XianyuClient | None = None, start_of
         else:
             success += 1
             for pos, it in enumerate(items, start=1):
-                iid = str(it.get("itemId"))
-                if not iid:
+                raw_id = it.get("itemId")
+                if raw_id is None or raw_id == "":
+                    # 风控/降级响应里 mtop 会返回 "itemId": null;str(None)="None"
+                    # 是真值会绕过下面的 `if not iid` 死守,把幽灵 id "None" 落进
+                    # XianyuItem 并永久占去重桶 → 名称为空的假商品。
                     continue
+                iid = str(raw_id)
                 bucket = buckets.setdefault(iid, {"item": it, "keywords": [], "ranks": []})
                 bucket["keywords"].append(kw)
                 bucket["ranks"].append(pos)
