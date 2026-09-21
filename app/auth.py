@@ -174,5 +174,7 @@ def require_admin(user: User = Depends(get_current_user)) -> User:
 def log_login(db: Session, user_id: int | None, username: str, ip: str, ua: str, ok: bool) -> None:
     from app.db.models import LoginLog
 
-    db.add(LoginLog(user_id=user_id, username=username, ip=ip[:64], ua=ua[:255], ok=ok))
+    # username 列宽 String(64):即便 LoginIn.login 已 max_length=128(邮箱登录路径),
+    # 邮箱仍可占满 128 打爆该列;此处按列宽截断,与 ip/ua 截断同一咽喉。
+    db.add(LoginLog(user_id=user_id, username=username[:64], ip=ip[:64], ua=ua[:255], ok=ok))
     db.commit()

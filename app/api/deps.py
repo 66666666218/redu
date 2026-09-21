@@ -56,7 +56,8 @@ class RegisterIn(pydantic.BaseModel):
 
 
 class LoginIn(pydantic.BaseModel):
-    login: str
+    # 登录既可是用户名(String(64))也可是邮箱(String(128)),按宽者封顶防越界。
+    login: str = pydantic.Field(max_length=128)
     password: str
 
 
