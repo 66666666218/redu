@@ -59,6 +59,29 @@ def create_app() -> FastAPI:
         logger.warning("⚠️ 未配置 JWT_SECRET,已用临时密钥(生产请设置强随机 ≥32 字节,否则重启后登录态失效)")
 
     @app.middleware("http")
+    async def security_headers(request: Request, call_next):  # type: ignore[no-untyped-def]
+        """统一给所有响应(含 API JSON 与 SPA HTML)打安全基线头。
+
+        - CSP:托管的是同源 SPA,不允许第三方脚本/iframe;`unsafe-inline` 因
+          Vue 构建会向 `<head>` 注入内联样式;`data:` 因图标/占位图用 data URI。
+        - nosniff:禁 IE/MIME 混淆。
+        - frame-ancestors 'none' + X-Frame-Options:DENY 双写(老浏览器只认后者),
+          防点击劫持。
+        - Referrer-Policy no-referrer:跨源跳转不带 Referer,防令牌/邮箱泄漏。
+        """
+        response = await call_next(request)
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; font-src 'self' data:; connect-src 'self'; "
+            "object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'",
+        )
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        return response
+
+    @app.middleware("http")
     async def log_requests(request: Request, call_next):  # type: ignore[no-untyped-def]
         import time
 

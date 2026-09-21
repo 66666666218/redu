@@ -10,11 +10,20 @@ const msg = ref('')
 const ok = ref(false)
 const loading = ref(false)
 
+// 重置令牌优先从 location.hash 读(新邮件用 #token=,不进 Referer/日志);
+// 兼容历史邮件的 ?token=,查询参数走 route.query。
+function readToken() {
+  const hash = (typeof location !== 'undefined' && location.hash) || ''
+  const m = hash.match(/[#&]token=([^&]+)/)
+  if (m) { try { return decodeURIComponent(m[1]) } catch { return m[1] } }
+  return String(route.query.token || '')
+}
+
 async function submit() {
   loading.value = true
   msg.value = ''
   try {
-    const res = await api.reset(String(route.query.token || ''), password.value)
+    const res = await api.reset(readToken(), password.value)
     ok.value = true
     msg.value = res.message || '密码已重置'
   } catch (e) {

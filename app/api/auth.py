@@ -66,7 +66,10 @@ def forgot(body: ForgotIn, db: Session = Depends(get_db)):
     if token:
         try:
             notifier = get_notifier(settings)
-            link = f"{settings.public_base_url}/reset?token={token}"
+            # 用 #token= 而不是 ?token= 传重置令牌:query 会进 Referer 头发给
+            # 邮件客户端加载的任何外链、反代 access_log、浏览器历史;hash 片段
+            # 浏览器不会随请求发出,也不落服务端日志。
+            link = f"{settings.public_base_url}/reset#token={token}"
             notifier.send("重置密码", f"请点击以下链接重置密码(30 分钟内有效):\n\n{link}")
         except Exception as exc:  # noqa: BLE001
             import logging
