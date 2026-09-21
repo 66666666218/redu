@@ -95,6 +95,11 @@ def get_user_notifier(user, settings: Settings) -> Notifier:
     - 用户配置了自己的 SMTP → 用其 SMTP、收件人为其邮箱;
     - 否则回退全局 notifier(收件人取全局 NOTIFY_TO)。
     """
+    # is_dev 门控同样适用用户自建 SMTP:全局走 NullNotifier 时,若用户分支绕过该门
+    # 会得到"dev 环境不发全局邮件,但配了自建 SMTP 的用户仍收预警/日报"的自相矛盾
+    # 语义(alert_service.evaluate / run_fixed_time_digests 都走这条)。
+    if settings.is_dev:
+        return NullNotifier()
     if getattr(user, "smtp_user", None) and getattr(user, "smtp_host", None):
         per = settings.model_copy(
             update={
