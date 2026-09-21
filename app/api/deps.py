@@ -20,7 +20,12 @@ _login_attempts: dict[str, list[float]] = {}
 def _login_allowed(key: str) -> bool:
     now = time.time()
     arr = [t for t in _login_attempts.get(key, []) if now - t < _LOGIN_WINDOW]
-    _login_attempts[key] = arr
+    # 剪空后即删键:否则攻击者用不重复用户名探测会把 ip:username 组合永久留在
+    # dict 里,每次访问只是重写空 list,键基数随探测数线性增长且永不回落(重启前)。
+    if arr:
+        _login_attempts[key] = arr
+    else:
+        _login_attempts.pop(key, None)
     return len(arr) < _LOGIN_MAX
 
 
