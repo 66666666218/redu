@@ -10,12 +10,12 @@ import time
 from datetime import datetime, timedelta
 
 import requests
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
 from app.db.models import (FeishuAlert, User, WechatArticle, WechatBenchmark, WechatCandidate,
-                           WechatPanLink, WechatTrafficSample)
+                           WechatPanLink, WechatRewrite, WechatTrafficSample)
 from app.services.dajiala_client import DajialaClient, DajialaError, DajialaNoBalance
 from app.services.quark_transfer import QuarkAuthError, QuarkError, QuarkTransfer, extract_quark_urls
 from app.services.reader_platform_client import PlatformError, ReaderPlatformClient
@@ -356,12 +356,11 @@ def remove_benchmark(session: Session, user_id: int, benchmark_id: int) -> None:
     arts = session.scalars(select(WechatArticle.id).where(
         WechatArticle.user_id == user_id, WechatArticle.benchmark_id == benchmark_id)).all()
     if arts:
-        session.execute(__import__("sqlalchemy").delete(WechatPanLink).where(
-            WechatPanLink.article_id.in_(arts)))
-        session.execute(__import__("sqlalchemy").delete(WechatTrafficSample).where(
-            WechatTrafficSample.article_id.in_(arts)))
-        session.execute(__import__("sqlalchemy").delete(WechatArticle).where(
-            WechatArticle.id.in_(arts)))
+        session.execute(delete(WechatPanLink).where(WechatPanLink.article_id.in_(arts)))
+        session.execute(delete(WechatTrafficSample).where(WechatTrafficSample.article_id.in_(arts)))
+        # 改写稿挂在文章下,文章删了不留行就是指向空文章的孤儿(大 Text 永久堆积)
+        session.execute(delete(WechatRewrite).where(WechatRewrite.article_id.in_(arts)))
+        session.execute(delete(WechatArticle).where(WechatArticle.id.in_(arts)))
     session.delete(row)
     session.commit()
 
@@ -392,16 +391,47 @@ def _dajiala_key(session: Session, user_id: int, settings: Settings) -> str:
         return ""  # 普通用户不回退全局 key(防任意注册用户刷运营者余额)
     return (settings.dajiala_key or "").strip()
 
+def _is_privileged(session: Session, user_id: int) -> bool:
+    """是否可回退到运营者全局资源(weread Cookie 等)。与 _dajiala_key 同一门控口径。"""
+    user = session.get(User, user_id)
+    return user is not None and user.role == "admin"
+
 def _weread_cookie(session: Session, user_id: int, settings: Settings) -> str:
-    """微信读书 Cookie:优先用户在平台内配置的「weread」,其次全局 WEREAD_COOKIE。"""
+    """微信读书 Cookie:优先用户在平台内配置的「weread」,其次全局 WEREAD_COOKIE。
+
+    这是**监听取数**通道:微信读书账号可查任意公开公众号的文章列表,全局运营者
+    Cookie 作为共享抓取凭据是所有租户监听正常工作的基础,故此处允许普通用户回退
+    全局。暴露"运营者关注了哪些号"的书架类操作另用 _weread_cookie_for_shelf 收口。
+    """
     from app.services.cookie_store import get_cookie
 
     return (get_cookie(session, user_id, "weread") or settings.weread_cookie or "").strip()
 
+def _weread_cookie_for_shelf(session: Session, user_id: int, settings: Settings) -> str:
+    """书架/导入/续期通道用的 Cookie:普通用户**只能用自己的**「weread」。
+
+    与监听通道分开(2026-09-22 审计):
+    - `weread_shelf`/`import_benchmarks_from_shelf` 走全局 Cookie 会把运营者账号
+      "关注的全部公众号 + bookId"整份返回给任意注册用户(横向信息泄露),import 还会
+      把它批量写进调用者的对标号库;
+    - `refresh_weread_cookie` 走全局 Cookie 续期后,轮换出的新 skey 经 set_cookie 落到
+      调用者自己的 UserCookie 行,而 .env 里的全局旧值被微信读书作废 → 一击打穿运营者
+      共享凭据,连带所有依赖全局兜底的租户监听集体失效。
+    故这三处不得回退全局,普通用户未自配即视为无 Cookie。
+    """
+    from app.services.cookie_store import get_cookie
+
+    own = (get_cookie(session, user_id, "weread") or "").strip()
+    if own:
+        return own
+    if not _is_privileged(session, user_id):
+        return ""
+    return (settings.weread_cookie or "").strip()
+
 def weread_shelf(session: Session, user_id: int, settings: Settings | None = None) -> list[dict]:
     """列出微信读书书架上的公众号(导入预览;需先在微信读书 App 内关注目标号)。"""
     settings = _base(settings)
-    cookie = _weread_cookie(session, user_id, settings)
+    cookie = _weread_cookie_for_shelf(session, user_id, settings)
     if not cookie:
         raise ValueError("未配置微信读书 Cookie(平台 Cookie「weread」或 WEREAD_COOKIE)")
     return WereadClient(cookie).shelf()
@@ -410,7 +440,7 @@ def import_benchmarks_from_shelf(session: Session, user_id: int,
                                  settings: Settings | None = None) -> dict:
     """微信读书书架一键导入:MP_WXS_* 条目 → 对标号(免费,自动关联 weread_book_id)。"""
     settings = _base(settings)
-    cookie = _weread_cookie(session, user_id, settings)
+    cookie = _weread_cookie_for_shelf(session, user_id, settings)
     if not cookie:
         return {"status": "skipped", "reason": "no_cookie"}
     books = WereadClient(cookie).shelf()
@@ -475,7 +505,9 @@ def refresh_weread_cookie(session: Session, user_id: int, settings: Settings | N
     if cooldown_until and datetime.now() < cooldown_until:
         return {"status": "skipped", "reason": "renewal_cooldown",
                 "retry_after": cooldown_until.isoformat(sep=" ", timespec="seconds")}
-    cookie = (get_cookie(session, user_id, "weread") or settings.weread_cookie or "").strip()
+    # 续期只作用于"调用者自己的 Cookie":走全局续期会把轮换出的新 skey 落到调用者
+    # 自己行、作废 .env 里的全局值,一击打穿运营者共享凭据(见 _weread_cookie_for_shelf)。
+    cookie = _weread_cookie_for_shelf(session, user_id, settings)
     if not cookie:
         return {"status": "skipped", "reason": "no_cookie"}
     if "wr_rt=" not in cookie:

@@ -390,6 +390,12 @@ def test_listen_falls_back_to_dajiala_on_auth_error(session, monkeypatch: pytest
 
 def test_weread_refresh_writeback_and_skips(session, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.services.cookie_store import get_cookie
+    from app.db.models import User
+
+    # 续期走全局 WEREAD_COOKIE 是运营者(admin)专属通道(普通用户不得回退全局续期,
+    # 否则会把轮换的新 skey 落到自己行、作废 .env 全局值)→ 本测试用 admin 用户。
+    session.add(User(id=1, username="op", password_hash="x", role="admin"))
+    session.commit()
 
     # 无 Cookie → skipped
     out = wechat_monitor.refresh_weread_cookie(session, 1, settings=_settings(weread_cookie=""))
@@ -433,6 +439,24 @@ def test_weread_refresh_writeback_and_skips(session, monkeypatch: pytest.MonkeyP
         session, 1, settings=_settings(weread_cookie="wr_vid=1; wr_rt=R; wr_skey=OLD"))
     assert out2["status"] == "failed" and out2["reason"] == "expired"
     assert "wr_skey=NEW" in get_cookie(session, 1, "weread")  # 仍是上次成功值,未被 BOGUS 覆盖
+
+
+def test_weread_shelf_and_refresh_block_global_for_non_admin(session) -> None:
+    """书架/续期不得回退运营者全局 Cookie:普通用户未自配即视为无 Cookie(横向泄露防护)。
+    但监听抓取通道 _weread_cookie 仍允许共享全局凭据(所有租户监听依赖它)。"""
+    from app.db.models import User
+
+    session.add(User(id=1, username="normal", password_hash="x", role="user"))
+    session.commit()
+    g = _settings(weread_cookie="wr_vid=1; wr_rt=R; wr_skey=G")
+
+    # 续期:普通用户拿到全局值会作废 .env → 必须拒绝
+    out = wechat_monitor.refresh_weread_cookie(session, 1, settings=g)
+    assert out["status"] == "skipped" and out["reason"] == "no_cookie"
+    # 书架导入同理
+    assert wechat_monitor.import_benchmarks_from_shelf(session, 1, settings=g)["reason"] == "no_cookie"
+    # 但监听通道的 Cookie 解析仍回退全局(不泄露书架,仅取数)
+    assert wechat_monitor._weread_cookie(session, 1, g) == "wr_vid=1; wr_rt=R; wr_skey=G"
 
 
 def test_listen_auto_renews_and_retries(session, monkeypatch: pytest.MonkeyPatch) -> None:
