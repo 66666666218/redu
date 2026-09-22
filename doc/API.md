@@ -619,7 +619,8 @@
       "enabled": true,
       "cookie_ready": true,
       "last_run_at": "2026-09-01 21:10:35",
-      "next_run_at": "2026-09-01 21:20:35"
+      "next_run_at": "2026-09-01 21:20:35",
+      "fixed_hours": ""
     }
   ]
 }
@@ -631,6 +632,7 @@
 | `min_interval` | 最小间隔(分钟),默认 10;低于该值返回 400 |
 | `cookie_ready` | 该板块是否已配好 Cookie;为 `false` 时不会采集 |
 | `enabled` | 是否启用该板块的定时采集;停用时 `next_run_at` 为 `null` |
+| `fixed_hours` | **定点作业板块**(公众号监听)的触发时刻,如 `"4:00 / 8:00 / 14:00 / 20:00"`。此时 `interval_minutes` **不参与调度**(抢占走 `force=True`),`next_run_at` 也按下一个定点而非"上次+间隔"计算;其它板块恒为 `""` |
 
 ### 8.2 设置某板块的采集频率
 

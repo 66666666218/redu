@@ -299,12 +299,15 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     scheduler.add_job(
         _safe(collect_tick), CronTrigger(minute="*"), id="collect_tick", max_instances=1, coalesce=True
     )
-    # 公众号监听四定点(用户决策 2026-09-20):8:00/14:00/18:00/2:00。
+    # 公众号监听四定点(用户决策 2026-09-22 调整):4:00/8:00/14:00/20:00——
+    # 白天工作时段与夜间各覆盖一次,相邻间隔 4~6h 更均匀。
     # 原"每分钟检查+用户频率调度"改为纯定点——每轮全量 81 号约 3 分钟,
     # 每天仅 4 次主动请求,最大限度降低微信读书风控压力(Cookie 生命周期优先)。
     # misfire_grace_time=3600:定点错过后 1 小时内仍补跑(防止休眠/重启错过窗口)。
+    from app.services.schedule_service import WECHAT_LISTEN_HOURS
     scheduler.add_job(
-        _safe(wechat_collect_tick), CronTrigger(hour="8,14,18,2", minute="0"),
+        _safe(wechat_collect_tick),
+        CronTrigger(hour=",".join(str(h) for h in sorted(WECHAT_LISTEN_HOURS)), minute="0"),
         id="wechat_collect_tick", max_instances=1, coalesce=True,
         misfire_grace_time=3600,
     )

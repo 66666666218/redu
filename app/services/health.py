@@ -61,6 +61,11 @@ def source_health(db: Session, user_id: int, settings=None) -> list[dict]:
         # 用户采集间隔(判"新鲜度超标"的基准)
         interval_h = (db.scalar(select(UserSchedule.interval_minutes).where(
             UserSchedule.user_id == user_id, UserSchedule.section == section)) or 60) / 60
+        if section == "wechat":
+            # 监听是定点作业,用户间隔不参与调度(claim_schedule force=True);
+            # 拿 interval 当基准会把夜间空档(20:00→4:00)误判成数据停滞。
+            from app.services.schedule_service import wechat_listen_gap_hours
+            interval_h = wechat_listen_gap_hours()
 
         last_ok = db.scalar(select(func.max(RunRecord.started_at)).where(
             RunRecord.user_id == user_id, RunRecord.kind.in_(_kinds(section)),

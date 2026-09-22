@@ -67,6 +67,10 @@ onMounted(load)
           <router-link to="/cookies">去配置</router-link>
         </p>
 
+        <p v-if="s.fixed_hours" class="empty" style="margin:8px 0 0;color:#8a94a6">
+          按每天 4 个定点运行:{{ s.fixed_hours }},下面的间隔不影响它的触发时刻
+        </p>
+
         <label class="empty" style="display:block;margin:10px 0 4px">采集间隔</label>
         <select
           :value="s.interval_minutes"

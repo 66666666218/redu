@@ -34,6 +34,31 @@ MAX_INTERVAL = 1440
 # (App 端是推送式秒级同步,轮询 60 分钟 = 最坏延迟 1h、平均 30min,对网盘推广足够)
 DEFAULT_INTERVAL = 120
 DEFAULT_INTERVALS = {"wechat": 60}
+# 公众号监听的定点时刻(服务器本地时区小时):用户决策 2026-09-22 = 4:00/8:00/14:00/20:00。
+# 单一事实源:scheduler 的 CronTrigger 与界面"下次预计"都读它,免得改一处漏一处。
+WECHAT_LISTEN_HOURS = (4, 8, 14, 20)
+
+
+def next_wechat_listen_at(now: datetime | None = None) -> datetime:
+    """下一个监听定点:今天尚未到的最早定点,都没有则明天最早那个。"""
+    now = now or datetime.now()
+    for hour in sorted(WECHAT_LISTEN_HOURS):
+        cand = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+        if cand > now:
+            return cand
+    first = min(WECHAT_LISTEN_HOURS)
+    return (now + timedelta(days=1)).replace(hour=first, minute=0, second=0, microsecond=0)
+
+
+def wechat_listen_gap_hours() -> float:
+    """定点之间最大的空档(小时)——健康页判"数据停滞"的基准。
+
+    4 个定点是不均匀分布的(20:00→次日 4:00 空 8h),用用户 interval_minutes(默认 60)
+    会把正常的夜间空档算成"停滞 8.8h"而误标 DEGRADED。
+    """
+    hours = sorted(WECHAT_LISTEN_HOURS)
+    gaps = [b - a for a, b in zip(hours, hours[1:])] + [24 - hours[-1] + hours[0]]
+    return float(max(gaps))
 
 
 def section_default_interval(section: str) -> int:
@@ -67,11 +92,20 @@ def _to_dict(db: Session, row: UserSchedule) -> dict:
         "cookie_ready": not missing_cookie(db, row.user_id, row.section),
         "last_run_at": row.last_run_at.isoformat(sep=" ", timespec="seconds") if row.last_run_at else None,
         "next_run_at": _next_run(row).isoformat(sep=" ", timespec="seconds") if row.enabled else None,
+        # 定点板块(公众号)不理会 interval:前端据此说明"改间隔不影响它"
+        "fixed_hours": " / ".join(f"{h}:00" for h in sorted(WECHAT_LISTEN_HOURS)) \
+            if row.section == "wechat" else "",
     }
 
 
 def _next_run(row: UserSchedule) -> datetime:
-    """下次预计运行时间;从未跑过则视为立即。"""
+    """下次预计运行时间;从未跑过则视为立即。
+
+    公众号监听是定点作业(interval 被 claim_schedule(force=True)无视),
+    按"上次 + 间隔"估会把人骗到"还要等 60 分钟",这里直接报下一个定点。
+    """
+    if row.section == "wechat":
+        return next_wechat_listen_at()
     if row.last_run_at is None:
         return datetime.now()
     return row.last_run_at + timedelta(minutes=row.interval_minutes)
@@ -188,9 +222,9 @@ def due_schedules(db: Session, now: datetime | None = None) -> list[UserSchedule
 def enabled_section_schedules(db: Session, section: str) -> list[UserSchedule]:
     """某板块所有"已启用 + 用户未停用"的采集设置,**无视用户间隔**。
 
-    供公众号"四定点"作业用:这类作业的触发时刻由 CronTrigger 决定(8/14/18/2 点),
+    供公众号"四定点"作业用:这类作业的触发时刻由 CronTrigger 决定(4/8/14/20 点),
     本身就代表调度意图;若复用 due_schedules 的间隔判定,设了 ≥360 分钟间隔的用户
-    会在某些定点(如 14:00→18:00 仅隔 4h)永久不被选入候选,静默丢轮且无失败记录。
+    会在某些定点(如 4:00→8:00 仅隔 4h)永久不被选入候选,静默丢轮且无失败记录。
     并发防重交给调用方的 claim_schedule(force=True)乐观锁,不靠这里的间隔。
     与 due_schedules 同口径用 `notin_(停用 id)` 精确剔除显式停用者(孤儿频率记录维持旧行为)。
     """

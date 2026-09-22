@@ -284,6 +284,34 @@ def test_wechat_fixed_point_ignores_user_interval(monkeypatch, session) -> None:
     assert ran == [7]  # 定点作业无视间隔,仍监听
 
 
+def test_next_wechat_listen_at() -> None:
+    """定点作业"下次预计"取最近的未过定点,跨天回绕到 4:00。"""
+    at = datetime(2026, 9, 22, 9, 5)
+    assert svc.next_wechat_listen_at(at) == datetime(2026, 9, 22, 14, 0)
+    assert svc.next_wechat_listen_at(datetime(2026, 9, 22, 21, 0)) == datetime(2026, 9, 23, 4, 0)
+    # 正点当刻:已过的定点不再算"下次",直接报下一个(界面不会显示倒退)
+    assert svc.next_wechat_listen_at(datetime(2026, 9, 22, 4, 0)) == datetime(2026, 9, 22, 8, 0)
+
+
+def test_wechat_listen_gap_hours_covers_night_gap() -> None:
+    """健康基准用最大空档(20:00→次日 4:00 = 8h),不是用户间隔。"""
+    assert svc.wechat_listen_gap_hours() == 8.0
+
+
+def test_wechat_schedule_row_reports_fixed_hours(session) -> None:
+    """公众号行:next_run_at 按定点算(旧口径=上次+interval,定点作业下必然报错)。"""
+    _add_user(session, 7)
+    row = svc.get_or_create(session, 7, "wechat")
+    row.interval_minutes = 720
+    row.last_run_at = datetime.now().replace(microsecond=0) - timedelta(days=2)
+    session.commit()
+    out = svc._to_dict(session, row)
+    assert out["fixed_hours"].startswith("4:00") and "20:00" in out["fixed_hours"]
+    assert out["next_run_at"] == svc.next_wechat_listen_at().isoformat(sep=" ", timespec="seconds")
+    wb = svc._to_dict(session, svc.get_or_create(session, 7, "weibo"))
+    assert wb["fixed_hours"] == ""  # 其它板块仍按间隔估
+
+
 def test_claim_schedule_race_second_claimant_loses(session) -> None:
     """原子抢占:第二个进程对同一到期任务的 claim 必须失败(防双跑,审计 S2-7)。"""
     from datetime import datetime, timedelta
