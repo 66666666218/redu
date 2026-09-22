@@ -18,7 +18,8 @@
 - 浏览器登录 weread.qq.com → F12 → Network → 刷新 → 复制任意请求的 Cookie 整行
 - **确认含 `wr_skey=` 和 `wr_vid=`**(只复制 weread.qq.com 的,不是 mp.weixin.qq.com 的)
 - **想"长期"必须含 `wr_rt=`**:自动续期只认它(约 30 天),缺 wr_rt 的 Cookie 十几小时就死
-- 粘贴到「Cookie 管理」页 weread 平台 → 保存(不用重启)
+- 粘贴到「Cookie 管理」页 weread 平台 → 保存(不用重启);**保存即解除续期冷却**
+  (`weread_renewal_cooldown_{uid}`,2026-09-22 起;旧版本需手动删该 `system_config` 行)
 - 系统有自动续期(wr_rt 换新 skey),正常情况几周才需要手动更新一次
 
 ## 3. 闲鱼触发人机验证(收到 🔴 提醒)

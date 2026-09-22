@@ -111,8 +111,26 @@ def set_cookie(db: Session, user_id: int, platform: str, cookie: str) -> UserCoo
     else:
         row.cookie = encrypt_cookie(cookie)
         db.commit()
+    if platform == "weread":
+        _reset_weread_renewal_cooldown(db, user_id)
     db.refresh(row)
     return row
+
+
+def _reset_weread_renewal_cooldown(db: Session, user_id: int) -> None:
+    """换微信读书 Cookie 即解除续期冷却(`weread_renewal_cooldown_{uid}`)。
+
+    冷却是为"同一份废凭据反复撞 renewal 会延长风控"设的;用户刚粘新 Cookie,旧冷却
+    对它不成立,而续期门排在 Cookie 解析**之前**(wechat_monitor._renewal_cooldown_until),
+    不清就留下"新 Cookie 已就位但 2h 内不续期"的窗口。
+    """
+    from app.db.models import SystemConfig
+
+    row = db.scalar(select(SystemConfig).where(
+        SystemConfig.key == f"weread_renewal_cooldown_{user_id}"))
+    if row:
+        db.delete(row)
+        db.commit()
 
 
 def delete_cookie(db: Session, user_id: int, platform: str) -> None:

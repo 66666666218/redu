@@ -1516,6 +1516,41 @@ def test_renewal_cooldown_blocks_repeated_attempts(session) -> None:
     assert out2["status"] == "skipped" and out2["reason"] == "no_cookie"  # 不再被冷却拦
 
 
+def test_new_weread_cookie_clears_renewal_cooldown(session) -> None:
+    """保存新微信读书 Cookie 解除续期冷却;冷却是为旧废凭据设的,不该绑住新会话。
+
+    只清本人那行——别人的 uid 行不得被连带删除(租户隔离)。
+    """
+    from datetime import datetime, timedelta
+
+    from app.db.models import SystemConfig
+    from app.services import wechat_monitor as wm
+
+    for uid in (1, 2):
+        session.add(SystemConfig(key=f"weread_renewal_cooldown_{uid}",
+                                 value=(datetime.now() + timedelta(hours=1)).isoformat()))
+    session.commit()
+
+    _set_cookie(session, 1, "weread", "wr_vid=1; wr_skey=NEW")
+    assert session.scalar(select(SystemConfig).where(
+        SystemConfig.key == "weread_renewal_cooldown_1")) is None
+    assert session.scalar(select(SystemConfig).where(
+        SystemConfig.key == "weread_renewal_cooldown_2")) is not None
+
+    # 冷却已解除:续期逻辑真正被执行(不再返回 renewal_cooldown 提前退出)
+    # 该 Cookie 无 wr_rt → no_rt;若是 renewal_cooldown 则说明新 Cookie 仍被旧冷却绑住
+    out = wm.refresh_weread_cookie(session, 1, settings=_settings())
+    assert out["status"] == "skipped" and out["reason"] == "no_rt"
+
+    # 非 weread 平台不碰冷却行
+    session.add(SystemConfig(key="weread_renewal_cooldown_1",
+                             value=(datetime.now() + timedelta(hours=1)).isoformat()))
+    session.commit()
+    _set_cookie(session, 1, "quark", "ck=x")
+    assert session.scalar(select(SystemConfig).where(
+        SystemConfig.key == "weread_renewal_cooldown_1")) is not None
+
+
 def test_keyword_article_all_users_skips_disabled(monkeypatch, session) -> None:
     """per-user 调度入口只处理启用用户:被管理员停用的账号不再消耗 dajiala 配额、不再推飞书。
 
