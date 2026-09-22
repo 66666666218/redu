@@ -17,6 +17,7 @@
 
 - 浏览器登录 weread.qq.com → F12 → Network → 刷新 → 复制任意请求的 Cookie 整行
 - **确认含 `wr_skey=` 和 `wr_vid=`**(只复制 weread.qq.com 的,不是 mp.weixin.qq.com 的)
+- **想"长期"必须含 `wr_rt=`**:自动续期只认它(约 30 天),缺 wr_rt 的 Cookie 十几小时就死
 - 粘贴到「Cookie 管理」页 weread 平台 → 保存(不用重启)
 - 系统有自动续期(wr_rt 换新 skey),正常情况几周才需要手动更新一次
 
@@ -92,6 +93,17 @@
 - 唯一恢复路径:**重新扫码复制新 Cookie**(新登录会话重置风控状态)。
 - 预防:① 复制后绝不再在该浏览器使用微信读书;② 监控频率保持克制(81 号×每小时
   已属激进,频繁被锁可放宽到 2h);③ 系统侧冷却+指纹告警保证失效可见、不恶性循环。
+
+### 9.2 `-2014 请求频率过高` 曾被读成"该号暂无文章"(2026-09-22)
+
+- `/api/mp/cover` 的错误**不在顶层 `errCode`**,而是 HTTP 499 信封里的 `data.errcode`
+  (`{"statusCode":499,"data":{"errcode":-2014,"errmsg":"请求频率过高"}}`)。
+- 旧 `_get` 只看顶层 → code=0 当成功 → `mp_cover` 判"未返回 reviewId"→ `latest_article`
+  返回 None → 监听把整轮限流算成"这些号今天没发文",**`status=success new=0`,无任何告警**。
+- 现状:嵌套 `data.errcode` 一并解码,-2012/-2010 仍升 `WereadAuthError`(触发 wr_rt 续期),
+  其余非零抛 `WereadError` → 计入 `failed` 并写日志,限流不再伪装成"没发文"。
+- 排障口径:`runs.detail` 里 `failed` 接近账号总数、日志刷屏 `code=-2014` = 被打限速了,
+  放慢监听排程(2h)而不是换 Cookie;换 Cookie 救不了限流,只会把新会话一起拖进风控。
 
 ## 9. 微信读书 Cookie:为什么"过期快",怎么免维护
 

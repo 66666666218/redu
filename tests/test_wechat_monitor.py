@@ -716,6 +716,41 @@ def test_weread_throttle_shared_across_instances(monkeypatch) -> None:
         cls._last_request = saved
 
 
+def test_weread_get_decodes_nested_errcode(monkeypatch) -> None:
+    """错误码包在 `data.errcode`(statusCode 499 信封)里时也必须识别,否则限流被当成功。
+
+    旧判定只看顶层 errCode → -2014「请求频率过高」漏判,mp_cover 读成"暂无文章",
+    整轮监听静默 new=0(2026-09-22 实测)。
+    """
+    from app.services import weread_client as wc
+
+    def _resp(body):
+        class _R:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return body
+        return _R()
+
+    monkeypatch.setattr(
+        wc.requests, "get",
+        lambda *a, **k: _resp({"statusCode": 499, "data": {"errcode": -2014, "errmsg": "请求频率过高"}}))
+    with pytest.raises(wc.WereadError) as ei:
+        wc.WereadClient("c", min_gap=0).mp_cover("MP_WXS_1")
+    assert "-2014" in str(ei.value) and "请求频率过高" in str(ei.value)
+
+    # 嵌套 -2012 要升级为认证失败,否则 wr_rt 自动续期永远不会被触发
+    monkeypatch.setattr(wc.requests, "get", lambda *a, **k: _resp({"data": {"errcode": -2012}}))
+    with pytest.raises(wc.WereadAuthError):
+        wc.WereadClient("c", min_gap=0).mp_cover("MP_WXS_1")
+
+    # 成功信封带 data.errcode=0 不得误伤
+    monkeypatch.setattr(wc.requests, "get", lambda *a, **k: _resp(
+        {"reviewId": "MP_WXS_1_abc", "title": "T", "data": {"errcode": 0}}))
+    assert wc.WereadClient("c", min_gap=0).mp_cover("MP_WXS_1")["reviewId"] == "MP_WXS_1_abc"
+
+
 def test_listen_skips_without_any_source(session) -> None:
     WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A")
     session.add(WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A"))

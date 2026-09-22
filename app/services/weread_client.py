@@ -10,7 +10,9 @@
   的 token(token 可能含 `~`,必须原样保留,见 build_mp_url)
 
 鉴权:仅靠 Cookie(完整微信读书登录 Cookie);x-wr-ticket 已弃用。
-错误:-2012/-2010 登录失效(→ WereadAuthError;可用 refresh_skey 用 wr_rt 续期);-2041 接口废弃/被拦截。
+错误:-2012/-2010 登录失效(→ WereadAuthError;可用 refresh_skey 用 wr_rt 续期);-2041 接口废弃/被拦截;
+      -2014 请求频率过高(限流)。⚠️ cover 把错误码包在 HTTP 499 的 `data.errcode` 里而非顶层
+      `errCode`,顶层-only 的判定会把限流当成"成功但无文章",整轮静默 new=0(2026-09-22 实测)。
 限频:内置 2s 串行间隔(社区实测单日 30+ 次密集请求即触发风控,宁慢勿封)。
 
 Cookie 续期(2026-09 实测):wr_skey 短效且**轮换制**——调 /web/login/renewal 用长效
@@ -112,13 +114,16 @@ class WereadClient:
             payload = resp.json()
         except ValueError as exc:
             raise WereadError(f"微信读书响应非 JSON(HTTP {resp.status_code})") from exc
-        code = int(payload.get("errCode", payload.get("errcode", 0)) or 0)
+        err = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        code = int(payload.get("errCode", payload.get("errcode", 0)) or 0) or int(
+            err.get("errcode", err.get("errCode", 0)) or 0)
+        msg = payload.get("errmsg") or payload.get("errlog") or err.get("errmsg") or ""
         if code in _AUTH_CODES:
-            raise WereadAuthError(f"微信读书登录态失效({code}):{payload.get('errmsg') or '请重新扫码'}")
+            raise WereadAuthError(f"微信读书登录态失效({code}):{msg or '请重新扫码'}")
         if code == -2041:
-            raise WereadError(f"微信读书接口不可用/被拦截(-2041):{payload.get('errmsg') or ''}")
+            raise WereadError(f"微信读书接口不可用/被拦截(-2041):{msg}")
         if code not in (0,):
-            raise WereadError(f"微信读书错误 code={code}:{payload.get('errmsg') or payload.get('errlog') or ''}")
+            raise WereadError(f"微信读书错误 code={code}:{msg or payload.get('errlog') or ''}")
         return payload
 
     # ---- 三个业务端点 ----
