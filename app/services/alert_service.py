@@ -549,9 +549,11 @@ def check_health_stalls(settings: Settings | None = None, db: Session | None = N
             continue
         latest = db.execute(select(func.max(getattr(model, col)))).scalar()
         if latest is None or latest < since:
-            # 记一个"在用该平台的首个启用用户"作为告警归属,便于去重
+            # 记一个"在用该平台的首个启用用户"作为告警归属,便于去重。
+            # 必须 order_by:该 uid 同时是 FeishuAlert 去重键,无确定序时 limit(1)
+            # 在不同作业间可能返回不同行 → uid 漂移,同一停摆事件重复推给操作员。
             uid = db.scalar(select(User.id).join(UserCookie, UserCookie.user_id == User.id).where(
-                User.enabled.is_(True), UserCookie.platform == data_to_cookie[p]).limit(1))
+                User.enabled.is_(True), UserCookie.platform == data_to_cookie[p]).order_by(User.id).limit(1))
             stalled.append((p, latest, uid))
     stalled = [s for s in stalled if s[2] is not None]
     if not stalled:

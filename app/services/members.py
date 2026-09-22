@@ -130,7 +130,8 @@ def renewal_tick(settings: Settings | None = None, db: Session | None = None) ->
     overdue_list: list[GroupMember] = []
     try:
         now = datetime.now()
-        rows = db.scalars(select(GroupMember).where(GroupMember.status == "active")).all()
+        rows = db.scalars(select(GroupMember).where(GroupMember.status == "active")
+                          .order_by(GroupMember.id)).all()
         for m in rows:
             # 单成员兜底 try:joined_at/cycle_days 组合触发 OverflowError 或其它异常时
             # 只跳过该成员并记日志,不让整条每日续费提醒作业被一行脏数据打断
