@@ -300,6 +300,17 @@ def test_push_listen_ignores_quiet_hours(session, monkeypatch) -> None:
     assert "夜间普通文" in json.dumps(cards, ensure_ascii=False)
 
 
+def test_parse_time_converts_utc_iso_to_local_naive() -> None:
+    """带 Z/偏移的 UTC ISO 串须转"服务器本地 naive"(与全库 datetime.now() 同域),
+    而非直接抹掉 tzinfo(那等于把 UTC 墙钟当本地存,发布时段/近 N 天统计偏移一整时区)。"""
+    aware = datetime.fromisoformat("2026-09-22T18:00:00+00:00")
+    out = wechat_monitor._parse_time("2026-09-22T18:00:00Z")
+    assert out.tzinfo is None
+    assert out == aware.astimezone().replace(tzinfo=None)  # 先转本地再脱 tzinfo
+    # naive ISO 按本地解释,值原样不变
+    assert wechat_monitor._parse_time("2026-09-22T18:00:00") == datetime(2026, 9, 22, 18, 0, 0)
+
+
 # ---------------------------------------------------------------- 同步
 def test_sync_pages_until_isend_and_backfills_ghid(monkeypatch: pytest.MonkeyPatch, session) -> None:
     b = WechatBenchmark(user_id=1, nickname="未命名", anchor_url="https://mp.weixin.qq.com/s/A")

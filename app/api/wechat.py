@@ -41,13 +41,15 @@ def wechat_article_add(payload: dict, user: User = Depends(get_current_user), db
         raise HTTPException(400, "文章标题不能为空")
     pub = payload.get("publish_at")
     pub_dt = None
-    if isinstance(pub, datetime):
-        pub_dt = pub
-    elif pub:
+    if pub and not isinstance(pub, datetime):
         try:
-            pub_dt = datetime.fromisoformat(str(pub).replace("Z", "+00:00"))
+            pub = datetime.fromisoformat(str(pub).replace("Z", "+00:00"))
         except ValueError:
-            pub_dt = None
+            pub = None
+    if isinstance(pub, datetime):
+        # 统一到全库的"服务器本地 naive":aware 输入(含 ...Z)先转本地再去 tzinfo,
+        # 否则 naive 列按 UTC 墙钟存,发布时段/近 N 天统计偏移一整时区。
+        pub_dt = pub.astimezone().replace(tzinfo=None) if pub.tzinfo else pub
     # content 列是 SQLAlchemy Text()/MySQL TEXT(65535 字节);utf8mb4 中文最坏 3 字节/字符,
     # 旧 [:100000] 会打爆列宽 → DataError 1406。按 20000 字符封顶(≤ 60000 字节,留安全边界)。
     db.add(WechatArticle(user_id=user.id, author=str(payload.get("author", "")).strip()[:128],
@@ -74,8 +76,11 @@ def wechat_article_list(limit: int = 100, offset: int = 0, has_pan: int | None =
     # 排序:time=发现时间新→旧(默认);reads=阅读量高→低(未采样的排后)
     from sqlalchemy import case, desc as sdesc
     if sort == "reads":
+        # 加 id 次级键:阅读量相同/未采样(归 -1)的行众多,单键排序下 offset 翻页
+        # 同序行两页间顺序不保证 → 重复或漏显。
         q = q.order_by(
-            sdesc(case((WechatArticle.traffic_at.is_(None), -1), else_=WechatArticle.read_num)))
+            sdesc(case((WechatArticle.traffic_at.is_(None), -1), else_=WechatArticle.read_num)),
+            WechatArticle.id.desc())
     else:
         q = q.order_by(WechatArticle.created_at.desc())
     # 与 app/api/alerts.py 同款钳制:旧 min(int(limit), 500) 遇 limit<0 会把负数

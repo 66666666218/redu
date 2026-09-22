@@ -243,7 +243,11 @@ def _parse_time(value: object) -> datetime | None:
         s = str(value).strip()
         if s.isdigit():
             return datetime.fromtimestamp(int(s))
-        return datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
+        # 带 Z/偏移的 ISO 串是 UTC 墙钟,而全库时间戳统一为"服务器本地 naive"
+        # (datetime.now());必须先 astimezone() 转本地再抹 tzinfo,否则会把 UTC
+        # 当本地存,发布时段×阅读、近 N 天过滤整体偏移一个时区。naive 串 astimezone()
+        # 按本地解释、值不变,安全。
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
     except (ValueError, OSError, TypeError):
         return None
 
