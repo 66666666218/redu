@@ -960,7 +960,6 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
 def run_wechat_listen(session: Session, user_id: int, settings: Settings | None = None,
                       client: DajialaClient | None = None, weread: WereadClient | None = None,
                       platform: ReaderPlatformClient | None = None, push: bool = True,
-                      ignore_quiet: bool = False,
                       batch_index: int | None = None, batch_size: int | None = None) -> dict:
     """监听一轮:双数据源免费优先——微信读书(cover)→ dajiala(当天发文)→ 新文入库推飞书。
 
@@ -1125,7 +1124,7 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
     _record_run(session, user_id, "wechat_listen", status, detail)
     session.commit()
     if push and new_rows:
-        _push_listen(session, user_id, settings, new_rows, replacements, ignore_quiet=ignore_quiet)
+        _push_listen(session, user_id, settings, new_rows, replacements)
     out: dict = {"platform": "wechat", "status": status, "accounts": len(rows),
                  "new": len(new_rows), "failed": failed}
     if dajiala_off:
@@ -1135,13 +1134,13 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
     return out
 
 def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[WechatArticle],
-                 replacements: dict[int, list[tuple[str, str, str]]] | None = None,
-                 ignore_quiet: bool = False) -> None:
+                 replacements: dict[int, list[tuple[str, str, str]]] | None = None) -> None:
     """新文推公众号专属飞书群(column_set 网格卡片:公众号/文章/网盘/阅读 四列对齐)。
 
     标题超链接优先级:本轮转存链(带提取码)> 已持久化的我的转存链 > 原文;
     未配专属群则回落总群;推送失败不影响采集结果。
-    `ignore_quiet=True`(手动"立即监听"点击)时跳过免打扰时段拦截,点了就一定推。
+    不设免打扰窗口:飞书是员工查看新发文的唯一入口(平台只有运营者可见),
+    任何时段采到的文章都照常全量推送。
     """
     from app.services.feishu import _col_set_row, _md_safe, webhook_for
     from app.services.feishu_client import FeishuClient
@@ -1151,15 +1150,6 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
     targets = list(dict.fromkeys(filter(None, [wh, main_wh])))  # 去重保序
     if not targets:
         return
-    # 免打扰时段(默认 23~8 点):非爆点文章延迟推送,紧急(盘链/高阅读)不受限;
-    # ignore_quiet=True(手动"立即监听")时点了就要看到结果,整段跳过
-    if is_quiet_hours(settings) and not ignore_quiet:
-        urgent = [r for r in rows if r.pan_types or (r.read_num or 0) >= 500]
-        quiet = [r for r in rows if r not in urgent]
-        if quiet and not urgent:
-            logger.info("免打扰时段,延迟推送 %d 篇(无紧急盘链文)", len(quiet))
-            return
-        rows = urgent
     replacements = replacements or {}
     # 免打扰过滤后可能清空(理论上上面已 return,这里再兜一层,避免推空卡)
     if not rows:

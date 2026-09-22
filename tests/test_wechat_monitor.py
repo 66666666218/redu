@@ -265,6 +265,41 @@ def test_push_listen_sends_all_articles_grouped_by_account(session, monkeypatch)
     assert "📢 号A" in blob and "📢 号B" in blob
 
 
+def test_push_listen_ignores_quiet_hours(session, monkeypatch) -> None:
+    """免打扰时段(默认23~8点)不再丢弃普通新发文:飞书是员工查看入口,任何时段全推。
+
+    回归:旧实现 is_quiet_hours 时只推盘链/阅读≥500 的紧急文,其余整批 return。"""
+    import json
+
+    import app.services.feishu as feishu_mod
+
+    monkeypatch.setattr(wechat_monitor, "is_quiet_hours", lambda settings, now=None: True)
+    # 一篇普通文:无盘链、阅读 0 → 旧逻辑会在夜间被丢弃
+    rows = [WechatArticle(user_id=1, title="夜间普通文", author="号A",
+                          url="https://mp.weixin.qq.com/s/night", source="listen", read_num=0)]
+    session.add_all(rows)
+    session.commit()
+
+    monkeypatch.setattr(feishu_mod, "webhook_for", lambda settings, section: "https://open.feishu.cn/hook/x")
+    cards: list[dict] = []
+
+    class _FakeFeishu:
+        def __init__(self, webhook, secret="") -> None:
+            pass
+
+        def send(self, msg: str) -> bool:
+            return True
+
+        def send_card(self, card: dict) -> bool:
+            cards.append(card)
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
+    wechat_monitor._push_listen(session, 1, _settings(), rows)
+    assert cards, "免打扰时段也应推送普通新发文"
+    assert "夜间普通文" in json.dumps(cards, ensure_ascii=False)
+
+
 # ---------------------------------------------------------------- 同步
 def test_sync_pages_until_isend_and_backfills_ghid(monkeypatch: pytest.MonkeyPatch, session) -> None:
     b = WechatBenchmark(user_id=1, nickname="未命名", anchor_url="https://mp.weixin.qq.com/s/A")

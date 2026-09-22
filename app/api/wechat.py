@@ -385,9 +385,9 @@ def wechat_rewrites_list(article_id: int, user: User = Depends(get_current_user)
 def wechat_listen(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """手动触发一轮监听(全部启用中的对标号各查一次"当天发文",新文入库+推公众号群)。
 
-    ignore_quiet=True:用户主动点击,免打扰时段也立即出结果(定时任务仍受免打扰约束)。
+    新发文始终全量推飞书(不受免打扰时段限制,飞书是员工查看入口)。
     """
     try:
-        return wechat_monitor.run_wechat_listen(db, user.id, ignore_quiet=True)
+        return wechat_monitor.run_wechat_listen(db, user.id)
     except DajialaError as exc:
         raise HTTPException(502, str(exc))
