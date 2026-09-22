@@ -246,6 +246,50 @@ def test_run_xianyu_deep(session, monkeypatch) -> None:
     assert row.want_count == 150 and row.category == "教程"
 
 
+def test_run_xianyu_cross_round_dedupe_by_resource(session, monkeypatch) -> None:
+    """跨轮去重按"资源键"而非精确标题:换 item_id + 换发货话术的同一商品不再重复入库。
+
+    闲鱼卖家常把同一虚拟商品下架后换个链接重发(标题只差【自动发货】这类话术),
+    旧逻辑按精确标题比对,24h 内照样插一条重复资源。
+    """
+    from config.settings import Settings
+
+    from app.db.models import XianyuItem
+    from app.services import xianyu as xianyu_mod
+
+    class _Client:
+        def __init__(self, cookie: str, proxy: str | None = None) -> None:
+            pass
+
+        def cookie_header(self) -> str:
+            return "a=1"
+
+    rounds = [
+        [{"item_id": "1", "title": "【自动发货】4K电影合集完整版", "price": "¥5", "seller": "s",
+          "pic": "", "hit_keywords": 1, "best_rank": 1, "keywords": "kw"}],
+        [{"item_id": "2", "title": "4K电影合集完整版 秒发", "price": "¥6", "seller": "s",
+          "pic": "", "hit_keywords": 1, "best_rank": 3, "keywords": "kw"}],
+    ]
+    calls = {"n": 0}
+
+    def _hot(settings, client, start_offset=0, stats=None):
+        out = rounds[min(calls["n"], len(rounds) - 1)]
+        calls["n"] += 1
+        return out
+
+    cookie_store.set_cookie(session, 1, "goofish", "fake-cookie")
+    monkeypatch.setattr(xianyu_mod, "XianyuClient", _Client)
+    monkeypatch.setattr(xianyu_mod, "collect_hot", _hot)
+    monkeypatch.setattr(tenant, "xianyu_deep_due", lambda *a, **k: False)
+
+    st = Settings(_env_file=None)
+    tenant.run_xianyu(session, 1, settings=st)
+    tenant.run_xianyu(session, 1, settings=st)
+
+    rows = session.scalars(select(XianyuItem).where(XianyuItem.user_id == 1)).all()
+    assert [r.item_id for r in rows] == ["1"], "同一资源换个 ID 重发不应再插一条"
+
+
 def test_douhot_watch_analytics(session) -> None:
     tenant.add_douhot_watch(session, 1, "word", "景甜")
     assert len(tenant.list_douhot_watch(session, 1)) == 1

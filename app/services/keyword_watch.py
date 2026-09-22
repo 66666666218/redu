@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from config.settings import Settings
 from app.db import repository
 from app.db.models import DouhotWatch, DouhotWatchSnap
-from app.services import douhot
+from app.services import douhot, xianyu
 from app.services.trend_analyzer import compute_growth, compute_slope
 
 
@@ -285,7 +285,9 @@ def platform_view(session: Session, user_id: int, platform: str, top_n: int = 50
         val = lambda r: r.score  # noqa: E731
     elif platform == "xianyu":
         series = repository.xianyu_want_series(session, user_id)
-        latest = repository.xianyu_items(session, user_id, limit=top_n)
+        # 多取 4 倍再按资源键折叠:同一商品重上架换 ID 会有多行,榜单只留一条
+        latest = xianyu.dedupe_resources(
+            repository.xianyu_items(session, user_id, limit=top_n * 4), top_n)
         name = lambda r: r.title or r.item_id  # noqa: E731
         val = lambda r: 0  # noqa: E731
     else:
@@ -327,6 +329,6 @@ def platform_agent(session: Session, user_id: int, top_n: int = 8) -> dict:
         return out[:top_n]
 
     weibo = run(repository.weibo_heat_series(session, user_id).items())  # type: ignore[arg-type]
-    xianyu = run(repository.xianyu_want_series(session, user_id).items())  # type: ignore[arg-type]
+    xy = run(repository.xianyu_want_series(session, user_id).items())  # type: ignore[arg-type]
 
-    return {"weibo": weibo, "xianyu": xianyu}
+    return {"weibo": weibo, "xianyu": xy}

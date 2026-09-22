@@ -191,12 +191,13 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
         # 快照:入库循环会把本轮 item_id 就地 add 进 prev_keys,而 evaluate 的 "new" 规则
         # 靠 `key not in prev_keys` 判定——必须在变异前取旧集合,否则闲鱼"新上榜"永不触发。
         prev_keys_before = set(prev_keys)
-        prev_titles = set(session.scalars(select(XianyuItem.title).where(
+        prev_titles = {xianyu.resource_key(t) for t in session.scalars(select(XianyuItem.title).where(
             XianyuItem.user_id == user_id,
-            XianyuItem.created_at >= datetime.now() - timedelta(hours=24))).all())
+            XianyuItem.created_at >= datetime.now() - timedelta(hours=24))).all()}
         for it in hot:
-            # 跨轮去重:同 item_id 或 24h 内同标题(重上架换ID)只插一次,不刷重复条目
-            if it["item_id"] in prev_keys or it["title"] in prev_titles:
+            # 跨轮去重:同 item_id 或 24h 内同资源键(重上架换ID/换发货话术)只插一次,不刷重复条目
+            rk = xianyu.resource_key(it["title"])
+            if it["item_id"] in prev_keys or (rk and rk in prev_titles):
                 continue
             prev_keys.add(it["item_id"])
             session.add(XianyuItem(user_id=user_id, **it))
@@ -337,7 +338,9 @@ def dashboard(session: Session, user_id: int) -> dict:
         }
         for r in repository.weibo_rising(session, user_id, limit=20)
     ]
-    xianyu_rows = repository.xianyu_items(session, user_id, limit=30)
+    # 多取 4 倍再按资源键折叠:同一商品在 24h 去重窗口外重上架会留下多行,大盘只留一条
+    xianyu_rows = xianyu.dedupe_resources(
+        repository.xianyu_items(session, user_id, limit=120), 30)
     douhot_rows = repository.douhot_top_words(session, user_id, limit=100)
     # 公众号概览:盘链文 Top5(按阅读)+爆点/苗头计数
     from app.db.models import WechatArticle, WechatBenchmark

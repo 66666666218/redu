@@ -54,6 +54,67 @@ def test_collect_hot_respects_top_n(settings: Settings) -> None:
     assert len(out) == 3
 
 
+def test_resource_key_strips_delivery_boilerplate() -> None:
+    """同一资源换发货话术/换分隔符重发时归并键要一致,否则去重形同虚设。"""
+    from app.services.xianyu import resource_key
+
+    a = resource_key("【自动发货】4K电影合集完整版")
+    b = resource_key("4K电影合集完整版  秒发")
+    c = resource_key("4K电影合集完整版（拍下即发）")
+    assert a == b == c == "4k电影合集完整版"
+    # 真不同的商品不能被合并
+    assert resource_key("4K电影合集完整版") != resource_key("4K电视剧合集完整版")
+
+
+def test_resource_key_keeps_short_titles_as_is() -> None:
+    """剥完不足 4 字的短标题退回原键:两字键会把不同商品错并成一个。"""
+    from app.services.xianyu import resource_key
+
+    assert resource_key("PS") == "ps"
+    assert resource_key("【自动发货】PS") == "ps"  # 剥话术前长度达标,照常剥
+    assert resource_key("") == ""
+
+
+def test_collect_hot_merges_same_resource_across_item_ids(settings: Settings) -> None:
+    """不同 item_id + 只差发货话术的同一商品,应在单轮内并成一条(命中词/排名合并)。"""
+    fake = FakeClient({
+        "kw1": [_item(1, "【自动发货】4K电影合集完整版"), _item(2, "无关商品X")],
+        "kw2": [_item(3, "4K电影合集完整版 秒发")],
+    })
+    settings.xianyu_keywords = "kw1,kw2"
+    settings.xianyu_top_n = 10
+    out = collect_hot(settings, client=fake)
+    assert len(out) == 2
+    assert out[0]["hit_keywords"] == 2  # 两条链接合并后命中 2 个关键词
+
+
+def test_dedupe_resources_collapses_relistings() -> None:
+    """读侧折叠:24h 窗口外重上架留下的同资源多行,榜单只保留排序靠前的一条。"""
+    from app.services.xianyu import dedupe_resources
+
+    class Row:
+        def __init__(self, iid: str, title: str) -> None:
+            self.item_id, self.title = iid, title
+
+    rows = [Row("1", "【自动发货】4K电影合集完整版"), Row("2", "4K电影合集完整版 秒发"),
+            Row("3", "网盘教程大礼包"), Row("4", "网盘教程大礼包 包邮")]
+    kept = dedupe_resources(rows, limit=10)
+    assert [r.item_id for r in kept] == ["1", "3"]
+    assert [r.item_id for r in dedupe_resources(rows, limit=1)] == ["1"]
+
+
+def test_dedupe_resources_keeps_distinct_short_titles() -> None:
+    """空标题/超短标题不能因键相同被吞掉(退回 item_id 兜底)。"""
+    from app.services.xianyu import dedupe_resources
+
+    class Row:
+        def __init__(self, iid: str, title: str) -> None:
+            self.item_id, self.title = iid, title
+
+    kept = dedupe_resources([Row("1", ""), Row("2", "")], limit=5)
+    assert [r.item_id for r in kept] == ["1", "2"]
+
+
 def test_collect_hot_batches_and_rotates(settings: Settings) -> None:
     """风控降频:每轮只抓 batch 个关键词,按 start_offset 轮转,多轮覆盖全部关键词。"""
     settings.xianyu_keywords = "k0,k1,k2,k3,k4,k5"

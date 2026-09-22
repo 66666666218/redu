@@ -287,6 +287,54 @@ def item_title(it: dict) -> str:
     return str(it.get("title", "")).strip()
 
 
+# 闲鱼虚拟商品的"发货话术":同一资源换个链接/换个前缀重发时,这些词是唯一差别。
+# 长词在前——"自动发货"要先于"自动发"被剥掉,否则留下半截"货"。
+_NOISE_WORDS = (
+    "24小时自动发货", "全天自动发货", "拍下自动发货", "下单自动发货",
+    "自动发货", "自动秒发", "秒发货", "拍下即发", "下单即发", "付款即发",
+    "立即发货", "网盘发货", "自动发", "秒发", "包邮",
+)
+# 只留汉字/字母/数字:【】()·、,!!~—_+/ 等分隔符和 emoji 不参与归并
+_KEY_CHAR = re.compile(r"[^0-9a-z\u4e00-\u9fff]+")
+
+
+def resource_key(title: str) -> str:
+    """商品标题的归并键:去发货话术与符号,让"同一资源换皮重发"能被认成一条。
+
+    入库前的去重键只按"去空白+小写"精确匹配,而闲鱼卖家常用
+    `【自动发货】PS教程` / `PS教程 秒发` 这类同资源多链接,漏判后榜单与告警重复刷屏。
+    短标题(剥完不足 4 字,如"PS")退回不剥话术的键——两字键会把不同商品并成一个,
+    宁可漏合并也不能错合并。
+    """
+    stripped = _KEY_CHAR.sub("", (title or "").lower())
+    if len(stripped) < 4:
+        return stripped
+    with_noise = stripped
+    for w in _NOISE_WORDS:
+        with_noise = with_noise.replace(w, "")
+    with_noise = _KEY_CHAR.sub("", with_noise)
+    return with_noise or stripped
+
+
+def dedupe_resources(rows: list, limit: int) -> list:
+    """把"同一资源重上架换 ID"留下的多行折叠成一行(按资源键,保留排序靠前者)。
+
+    入库侧只按 item_id + 24h 资源键去重,窗口外的重上架仍会新增一行,而热榜读的是
+    累计表(无时间窗)——不去重同一个虚拟商品会在榜单/大盘里霸屏。
+    """
+    out: list = []
+    seen: set[str] = set()
+    for r in rows:
+        key = resource_key(getattr(r, "title", "") or "") or str(getattr(r, "item_id", ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _price_num(price: str) -> float:
     """'¥12.5'→12.5;解析失败返回无穷大(排序时靠后)。"""
     try:
@@ -442,10 +490,10 @@ def collect_hot(settings: Settings, client: XianyuClient | None = None, start_of
         logger.warning("闲鱼本轮 %d 个关键词失败:%s", len(failed_kws), ",".join(failed_kws))
 
     # 标题级归并:闲鱼同一商品会因"重新上架/多链接"出现多个 item_id(仅价格不同),
-    # 按归一化标题(去空白/大小写)合并,保留信息最全的一桶,价格取最低,避免同商品刷屏。
+    # 按资源键(去空白/大小写 + 去发货话术)合并,保留信息最全的一桶,价格取最低,避免同商品刷屏。
     by_title: dict[str, dict] = {}
     for b in buckets.values():
-        key = re.sub(r"\s+", "", item_title(b["item"])).lower()
+        key = resource_key(item_title(b["item"])) or item_title(b["item"]).lower()
         cur = by_title.get(key)
         if cur is None:
             by_title[key] = b
