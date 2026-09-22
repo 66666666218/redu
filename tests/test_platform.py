@@ -290,6 +290,57 @@ def test_run_xianyu_cross_round_dedupe_by_resource(session, monkeypatch) -> None
     assert [r.item_id for r in rows] == ["1"], "同一资源换个 ID 重发不应再插一条"
 
 
+def test_run_xianyu_prev_keys_scoped_to_round(session, monkeypatch) -> None:
+    """去重/告警用的旧键集合只反查"本轮采到的 ID",不再全历史加载进内存。
+
+    闲鱼表随保留期累积到几十万行,全量 SELECT 每轮都跑一遍;evaluate 的 "new"
+    判定只看 latest 里的键是否在旧集合中,故按本轮键收敛语义等价。
+    """
+    from config.settings import Settings
+
+    from app.db.models import XianyuItem
+    from app.services import alert_service as alert_mod
+    from app.services import xianyu as xianyu_mod
+
+    def _xy_item(iid: str) -> XianyuItem:
+        return XianyuItem(user_id=1, item_id=iid, title=f"T{iid}", price="¥1", seller="s",
+                          pic="", hit_keywords=1, best_rank=1, keywords="kw")
+
+    session.add_all([_xy_item("a"), _xy_item("hist-1"), _xy_item("hist-2")])
+    session.commit()
+
+    class _Client:
+        def __init__(self, cookie: str, proxy: str | None = None) -> None:
+            pass
+
+        def cookie_header(self) -> str:
+            return "a=1"
+
+    hot = [{"item_id": "a", "title": "TA", "price": "¥1", "seller": "s", "pic": "",
+            "hit_keywords": 2, "best_rank": 1, "keywords": "kw"},
+           {"item_id": "b", "title": "TB", "price": "¥1", "seller": "s", "pic": "",
+            "hit_keywords": 1, "best_rank": 3, "keywords": "kw"}]
+    seen: dict = {}
+
+    def _evaluate(session_, user_id, section, latest, prev_keys, settings=None):
+        seen["latest"] = {x["key"] for x in latest}
+        seen["prev"] = set(prev_keys)
+        return 0
+
+    cookie_store.set_cookie(session, 1, "goofish", "fake-cookie")
+    monkeypatch.setattr(xianyu_mod, "XianyuClient", _Client)
+    monkeypatch.setattr(xianyu_mod, "collect_hot", lambda settings, client, start_offset=0, stats=None: list(hot))
+    monkeypatch.setattr(alert_mod, "evaluate", _evaluate)
+    monkeypatch.setattr(tenant, "xianyu_deep_due", lambda *a, **k: False)
+
+    tenant.run_xianyu(session, 1, settings=Settings(_env_file=None))
+
+    assert seen["prev"] == {"a"}                      # 本轮已入库的键被认出,新键 b 不在旧集合
+    assert "hist-1" not in seen["prev"]               # 与本轮无关的历史键不再载入
+    ids = sorted(r.item_id for r in session.scalars(select(XianyuItem).where(XianyuItem.user_id == 1)).all())
+    assert ids == ["a", "b", "hist-1", "hist-2"]      # b 正常入库,a 不重复插
+
+
 def test_douhot_watch_analytics(session) -> None:
     tenant.add_douhot_watch(session, 1, "word", "景甜")
     assert len(tenant.list_douhot_watch(session, 1)) == 1

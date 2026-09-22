@@ -579,6 +579,14 @@ def refresh_weread_cookie(session: Session, user_id: int, settings: Settings | N
     logger.info("微信读书 Cookie 已续期并验证通过(用户 %s),已标记全量补采", user_id)
     return {"status": "success", "verified": True, "cookie": new_cookie}
 
+_RENEWAL_FAIL_TEXT = {
+    "renewal_failed": "renewal 换不出新 wr_skey(wr_rt 已失效,或正处于频控锁定期)",
+    "expired": "换出了新 wr_skey 但书架验证仍报登录失效(登录态整体过期,需重新扫码)",
+    "no_rt": "Cookie 里根本没有 wr_rt,自动续期无从下手(这份 Cookie 十几小时必过期)",
+    "exception": "续期流程抛异常(见服务端日志)",
+}
+
+
 def weread_refresh_tick(settings: Settings | None = None) -> int:
     """定时续期:wr_skey 短效且轮换制,有效期内主动换新则永不过期(兜底是 wr_rt,约 30 天)。
 
@@ -603,6 +611,10 @@ def weread_refresh_tick(settings: Settings | None = None) -> int:
                     total += 1
                 elif out.get("status") == "failed":
                     failed.append((uid, str(out.get("reason") or "")))
+                elif out.get("reason") == "no_rt":
+                    # 缺 wr_rt 是"续期根本没起跑",旧逻辑当 skipped 静默放过 → 运营者以为
+                    # 自动续期在守着,实际这份 Cookie 十几小时必死(监听随后断源)。
+                    failed.append((uid, "no_rt"))
             except Exception:  # noqa: BLE001 - 单用户失败不影响其余
                 db.rollback()
                 logger.exception("微信读书续期失败 user=%s", uid)
@@ -610,16 +622,17 @@ def weread_refresh_tick(settings: Settings | None = None) -> int:
     finally:
         if failed:
             try:
-                detail = "; ".join(f"用户{u}:{r or '未知原因'}" for u, r in failed)
+                detail = "; ".join(f"用户{u}:{_RENEWAL_FAIL_TEXT.get(r, r) or '未知原因'}" for u, r in failed)
                 from app.services.cookie_store import get_cookie
 
                 fp = _cookie_fingerprint(get_cookie(db, failed[0][0], "weread") or "")
                 notify_incident(
                     db, failed[0][0], "wechat",
                     f"🟠 微信读书 Cookie 自动续期失败,请重新复制[{fp}]",
-                    f"wr_rt 已整体失效({detail}),监听即将断源。"
+                    f"{detail}。监听即将断源。"
                     "请在浏览器登录 weread.qq.com → F12 → 网络 复制完整 Cookie,"
                     "更新到「Cookie 管理」页 weread 平台。"
+                    "粘贴前先确认串里有「wr_rt=」(约 30 天,自动续期只认它;缺它十几小时就死)。"
                     "复制后尽量不要再在该浏览器使用微信读书——浏览器会自己轮换 wr_skey,"
                     "把服务端这份顶失效(这是 Cookie『过期快』的主因)。",
                     settings=settings)

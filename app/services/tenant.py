@@ -187,7 +187,12 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
             rot_row.value = str(prior + 1)
         stats: dict = {}
         hot = xianyu.collect_hot(settings, client, start_offset=start_offset, stats=stats)
-        prev_keys = set(session.scalars(select(XianyuItem.item_id).where(XianyuItem.user_id == user_id)).all())
+        # 只反查"本轮采到的 item_id 里哪些库里已有",不再全历史加载:
+        # 闲鱼表随 DATA_RETENTION 长期累积,全量 SELECT 每轮把租户全部历史 ID 拉进 Python 内存,
+        # 而 prev_keys 的用途(去重 + 告警 new 判定)只需要本轮这批 key 的存在性,语义等价。
+        keys_now = {it["item_id"] for it in hot if it.get("item_id")}
+        prev_keys = set(session.scalars(select(XianyuItem.item_id).where(
+            XianyuItem.user_id == user_id, XianyuItem.item_id.in_(keys_now))).all()) if keys_now else set()
         # 快照:入库循环会把本轮 item_id 就地 add 进 prev_keys,而 evaluate 的 "new" 规则
         # 靠 `key not in prev_keys` 判定——必须在变异前取旧集合,否则闲鱼"新上榜"永不触发。
         prev_keys_before = set(prev_keys)

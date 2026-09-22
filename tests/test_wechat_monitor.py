@@ -1635,3 +1635,71 @@ def test_keyword_article_backlog_rotates_not_silently_cooled(
     assert titles[1] in json.dumps(sent[-1], ensure_ascii=False)
     # 第三轮:两篇各自已推送并冷却 → 无新推送
     assert wechat_monitor.keyword_article_tick(session, 1, settings=st) == 0
+
+
+def test_weread_refresh_tick_names_failure_reason(session, monkeypatch) -> None:
+    """续期失败的飞书提醒必须点名原因:旧文案一律写"wr_rt 已整体失效",
+    而"换出新 skey 但书架验证仍 -2012"(需重新扫码)与"renewal 被频控"处理动作不同。"""
+    from app.db import models as _m
+    from app.services import alert_service
+
+    session.add(_m.User(id=1, username="u1", email="u1@b.c", password_hash="x", enabled=True))
+    session.commit()
+
+    captured: list[tuple] = []
+    monkeypatch.setattr(alert_service, "notify_incident",
+                        lambda db, uid, kind, title, detail, settings=None, **kw:
+                        captured.append((uid, kind, title, detail)))
+    monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+    monkeypatch.setattr("app.services.cookie_store.get_cookie", lambda db, uid, p: "wr_vid=1; wr_skey=x")
+    monkeypatch.setattr(wechat_monitor, "refresh_weread_cookie",
+                        lambda db, uid, settings=None: {"status": "failed", "reason": "expired"})
+
+    assert wechat_monitor.weread_refresh_tick(settings=Settings(_env_file=None)) == 0
+    uid, kind, title, detail = captured[0]
+    assert (uid, kind) == (1, "wechat")
+    assert "书架验证仍报登录失效" in detail          # 说清是"登录态整体过期",不是频控
+    assert "wr_rt 已整体失效" not in detail
+    assert "wr_rt=" in detail                        # 顺带提醒粘贴前先确认含 wr_rt
+
+
+def test_weread_refresh_tick_alerts_on_missing_wr_rt(session, monkeypatch) -> None:
+    """Cookie 缺 wr_rt(续期根本没起跑)必须提醒:旧逻辑当 skipped 静默放过,
+    运营者以为自动续期在守着,实际这份 Cookie 十几小时必死、监听随后断源。"""
+    from app.db import models as _m
+    from app.services import alert_service
+
+    session.add(_m.User(id=1, username="u1", email="u1@b.c", password_hash="x", enabled=True))
+    session.commit()
+
+    captured: list[tuple] = []
+    monkeypatch.setattr(alert_service, "notify_incident",
+                        lambda db, uid, kind, title, detail, settings=None, **kw:
+                        captured.append((uid, title, detail)))
+    monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+    monkeypatch.setattr("app.services.cookie_store.get_cookie", lambda db, uid, p: "wr_vid=1; wr_skey=x")
+    monkeypatch.setattr(wechat_monitor, "refresh_weread_cookie",
+                        lambda db, uid, settings=None: {"status": "skipped", "reason": "no_rt"})
+
+    assert wechat_monitor.weread_refresh_tick(settings=Settings(_env_file=None)) == 0
+    assert len(captured) == 1
+    assert "根本没有 wr_rt" in captured[0][2]
+
+
+def test_weread_refresh_tick_stays_quiet_for_cooldown(session, monkeypatch) -> None:
+    """冷却期内的 skipped 不重复提醒(前一轮已推过,否则每 6h 撞一次刷屏)。"""
+    from app.db import models as _m
+    from app.services import alert_service
+
+    session.add(_m.User(id=1, username="u1", email="u1@b.c", password_hash="x", enabled=True))
+    session.commit()
+
+    captured: list[tuple] = []
+    monkeypatch.setattr(alert_service, "notify_incident",
+                        lambda *a, **kw: captured.append(a))
+    monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+    monkeypatch.setattr(wechat_monitor, "refresh_weread_cookie",
+                        lambda db, uid, settings=None: {"status": "skipped", "reason": "renewal_cooldown"})
+
+    assert wechat_monitor.weread_refresh_tick(settings=Settings(_env_file=None)) == 0
+    assert captured == []
