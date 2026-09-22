@@ -106,6 +106,17 @@ def test_parse_word_without_trends() -> None:
     assert parsed["trend_len"] == 0 and parsed["trend_delta"] == 0 and parsed["score"] == 0
 
 
+def test_parse_word_survives_malformed_trend_points() -> None:
+    """趋势点缺 value 键 / 非 dict / 非数值:旧代码 trends[-1]["value"] 直接抛错,
+    会让该用户整轮采集失败(外层 try 兜住)。现降级为 0 且不抛。"""
+    parsed = douhot._parse_word(
+        {"title": "词", "score": 5, "trends": [{"value": 10}, {}, "bad", {"value": "x"}]}
+    )
+    assert parsed["trend_len"] == 4
+    assert parsed["latest_value"] == 0      # 末点 value 非数值 → 0
+    assert parsed["trend_delta"] == 0 - 10  # first=10, latest=0
+
+
 def _patch_client(monkeypatch: pytest.MonkeyPatch, payloads: list[dict]) -> None:
     monkeypatch.setattr(douhot, "DouhotClient", lambda cookie, settings=None: _client(payloads))
 

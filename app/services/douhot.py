@@ -93,8 +93,18 @@ def _pick(item: dict, keys: tuple[str, ...]) -> object:
 def _parse_word(w: dict) -> dict:
     """把内容词卡片整理为一条趋势记录(字段对应 `DouhotWord` 模型列)。"""
     trends = w.get("trends") or []
-    latest = trends[-1]["value"] if trends else 0
-    first = trends[0]["value"] if trends else 0
+
+    def _tval(p: object) -> float | int:
+        # 趋势点缺 value 键/非 dict/非数值时降级为 0,别因单点畸形让整轮该用户采集抛错。
+        v = p.get("value") if isinstance(p, dict) else None
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return 0
+        return int(f) if f.is_integer() else f
+
+    latest = _tval(trends[-1]) if trends else 0
+    first = _tval(trends[0]) if trends else 0
     return {
         "title": _trunc(w.get("title", ""), 128),   # DouhotWord.title 列宽 128
         "score": w.get("score") or 0,                # 飙升指数
