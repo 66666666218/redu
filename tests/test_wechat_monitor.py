@@ -1294,6 +1294,60 @@ def test_pan_first_transfer_records_replacement(session, monkeypatch) -> None:
     assert "https://pan.quark.cn/s/NEW" in b.my_pan_urls
 
 
+def test_quark_cookie_per_user_wins_over_global(session, monkeypatch) -> None:
+    """转存用用户在「Cookie 管理」配的 quark,不回退全局(全局仅为用户未配时兜底)。"""
+    from app.services import cookie_store
+    from app.services.quark_transfer import QuarkTransfer
+
+    b = WechatArticle(user_id=1, title="新资源文", url="https://mp.weixin.qq.com/s/own",
+                      source="listen", benchmark_id=None,
+                      pan_urls="https://pan.quark.cn/s/ownZ")
+    session.add(b)
+    session.commit()
+    cookie_store.set_cookie(session, 1, "quark", "ck=mine")
+
+    seen: list[str] = []
+    monkeypatch.setattr(QuarkTransfer, "__init__",
+                        lambda self, cookie, fid_store="": seen.append(cookie))
+    monkeypatch.setattr(QuarkTransfer, "transfer_and_share",
+                        lambda self, url, **kw: {"share_url": "https://pan.quark.cn/s/MINE",
+                                                 "password": "cd01"})
+    st = _settings(quark_cookie="ck=global", pan_transfer_enabled=True,
+                   wechat_listen_sample_new=False)
+    reps = wechat_monitor._enrich_new_articles(session, 1, st, [b], client=None)
+    assert seen == ["ck=mine"]
+    assert reps[b.id][0][1] == "https://pan.quark.cn/s/MINE"
+
+
+def test_quark_transfer_without_any_cookie_alerts_once(session, monkeypatch) -> None:
+    """识别到夸克盘链却无任何可用 Cookie:告警指明配置入口,而不是静默推"未转存"。"""
+    from app.services import alert_service, cookie_store
+
+    monkeypatch.setattr(cookie_store, "get_cookie", lambda db, uid, plat: "")
+    calls: list[tuple] = []
+    monkeypatch.setattr(alert_service, "notify_incident",
+                        lambda *a, **kw: calls.append(a))
+    b = WechatArticle(user_id=1, title="资源文", url="https://mp.weixin.qq.com/s/nocookie",
+                      source="listen", benchmark_id=None,
+                      pan_urls="https://pan.quark.cn/s/noc")
+    session.add(b)
+    session.commit()
+    st = _settings(quark_cookie="", pan_transfer_enabled=True,
+                   wechat_listen_sample_new=False)
+    assert wechat_monitor._enrich_new_articles(session, 1, st, [b], client=None) == {}
+    assert calls and "缺夸克 Cookie" in calls[0][3]
+
+    # 没有夸克盘链时不该告警(百度链走自己的门控)
+    calls.clear()
+    c = WechatArticle(user_id=1, title="百度资源文", url="https://mp.weixin.qq.com/s/baidu",
+                      source="listen", benchmark_id=None,
+                      pan_urls="https://pan.baidu.com/s/baiduonly")
+    session.add(c)
+    session.commit()
+    wechat_monitor._enrich_new_articles(session, 1, st, [c], client=None)
+    assert calls == []
+
+
 def test_pan_selfshare_41017_adopted_as_own_link(session, monkeypatch) -> None:
     """41017(转存自己的分享)=同行搬运了我们的链:原链直接收录为我方链接,不再重试。"""
     from app.services.quark_transfer import QuarkError, QuarkTransfer

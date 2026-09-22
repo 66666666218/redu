@@ -467,6 +467,12 @@ redian/
 - **实时性说明**:微信读书 App 端是推送式秒级同步(书架红点);我们走轮询(cover 接口),默认间隔已降至 60 分钟(最坏延迟 1h/平均 30min),免费源扛得住。老用户的 360 分钟间隔由启动迁移自动降为 60。
 - **盘链归一化**:`wechat_pan_links` 表(每[文章,分享链]一行,pan_url 索引)——资源共振查询从
   pan_urls LIKE 全表扫改为索引等值查询;入库即写链接行;建表前旧文在共振检查时一次性自动回填。
+- **转存凭据按用户(2026-09-22)**:网盘 Cookie 是"往谁的盘里写"的个人凭据,故夸克(`quark`)
+  与百度(`baidupan`)都走「Cookie 管理」按用户配置优先、全局 `QUARK_COOKIE` 兜底(`_quark_cookie`,
+  与 weread/dajiala 同款口径;注:全局兜底对普通用户仍开放,是否收敛为 admin-only 待产品决策)。
+  两种"静默不转存"已补即时告警(冷却去重):识别到夸克盘链却无任何可用 Cookie → 提示去配;
+  转存中 `QuarkAuthError` → 提示 Cookie 失效需重贴(每日保活只探全局值,按用户配的靠此发现)。
+  自愈侧:`cookie_store._ENV_FALLBACKS` **故意不含**网盘/dajiala,避免把运营者凭据复制进普通用户名下。
 - **架构决策(保持单文件,已实验验证)**:曾实际执行拆分为包(_common/_benchmarks/_listen/_sync/
   _traffic/_candidates + __init__ re-export),但回退。原因:① 跨域私有函数引用(_weread_cookie/
   _insert_new_articles 等)需要全量显式导出链;② 测试 monkeypatch 以 `wechat_monitor.X` 为目标,

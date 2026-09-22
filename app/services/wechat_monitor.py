@@ -400,6 +400,16 @@ def _is_privileged(session: Session, user_id: int) -> bool:
     user = session.get(User, user_id)
     return user is not None and user.role == "admin"
 
+def _quark_cookie(session: Session, user_id: int, settings: Settings) -> str:
+    """夸克 Cookie:优先用户在平台内配置的「quark」,其次全局 QUARK_COOKIE。
+
+    与 baidupan 对齐(网盘转存是"往 Cookie 主人的盘里写"的个人动作):
+    只挂 .env 全局值时,运营者改一次要重启容器,多用户也没法各用自己的盘。
+    """
+    from app.services.cookie_store import get_cookie
+
+    return (get_cookie(session, user_id, "quark") or settings.quark_cookie or "").strip()
+
 def _weread_cookie(session: Session, user_id: int, settings: Settings) -> str:
     """微信读书 Cookie:优先用户在平台内配置的「weread」,其次全局 WEREAD_COOKIE。
 
@@ -717,8 +727,19 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                 logger.warning("监听即时采样失败 %s:%s", r.url, exc)
                 continue
             _apply_sample(session, user_id, r, data, sample_now)
-    if settings.pan_transfer_enabled and settings.quark_cookie:
-        quark = QuarkTransfer(settings.quark_cookie, fid_store=settings.quark_fid_store)
+    quark_ck = _quark_cookie(session, user_id, settings) if settings.pan_transfer_enabled else ""
+    if settings.pan_transfer_enabled and not quark_ck and any(
+            "pan.quark.cn" in (r.pan_urls or "") for r in rows):
+        # 有夸克盘链却没有任何可用 Cookie:不然是整块静默跳过,推送只会一直显示"未转存",
+        # 运营者无从知道差哪一步。冷却去重后告警一次,指明配置入口。
+        from app.services.alert_service import notify_incident
+        notify_incident(session, user_id, "wechat", "夸克盘链未转存(缺夸克 Cookie)",
+                        "本轮识别到夸克分享链但无可用 Cookie,故只推原文。转存在"
+                        "「Cookie 管理」页配 quark 平台即可(或 .env 的 QUARK_COOKIE),"
+                        "保存后下一轮自动生效",
+                        settings=settings)
+    if settings.pan_transfer_enabled and quark_ck:
+        quark = QuarkTransfer(quark_ck, fid_store=settings.quark_fid_store)
         # 盘链级转存去重:同一资源(相同夸克分享链)只转存一次,后续文章复用首篇的
         # 我方分享链——多个对标号发同一资源时,旧逻辑每篇各存一份(浪费空间+成倍风控暴露)。
         reused: dict[str, tuple[str, str]] = {}  # pan_url -> (my_share_url, 提取码)
@@ -769,6 +790,14 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                         except QuarkAuthError as exc:
                             logger.error("夸克 Cookie 失效,本轮停止转存:%s", exc)
                             dead = True
+                            # 每日保活只探全局 Cookie;按用户配的「quark」死亡此前只有日志,
+                            # 运营者看到的是永久的"未转存"。冷却去重后即时告警。
+                            from app.services.alert_service import notify_incident
+                            notify_incident(session, user_id, "wechat", "夸克 Cookie 已失效,转存停用",
+                                            f"{exc}。请浏览器登录 pan.quark.cn 后 F12 复制 Cookie,"
+                                            "更新到「Cookie 管理」页的 quark 平台(或 .env 的 QUARK_COOKIE);"
+                                            "监听不受影响,仅转存暂停",
+                                            settings=settings)
                             break
                         except QuarkError as exc:
                             if "41017" in str(exc):

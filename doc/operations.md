@@ -30,7 +30,8 @@
 
 ## 4. 夸克转存失败(推送回落原链接)
 
-- 收到「夸克 Cookie 已失效」告警 → pan.quark.cn 重新登录复制 Cookie → 更新 .env 的 QUARK_COOKIE
+- 收到「夸克 Cookie 已失效」告警 → pan.quark.cn 重新登录复制 Cookie → 更新到「Cookie 管理」页的 **quark**(本人未配则用 .env 的 QUARK_COOKIE;改界面值不需重启)
+- 收到「夸克盘链未转存(缺夸克 Cookie)」告警 → 同上,配上即可,下一轮监听自动开始转存
 - 「容量不足」→ 清理网盘空间
 - 转存失败不影响监听和推送,只是推送里没有你的链接
 

@@ -7,7 +7,7 @@ const drafts = ref({})
 const msg = ref('')
 const smtp = ref({ host: '', port: 465, user: '', password: '', from_name: '' })
 
-const labels = { weibo: '微博', baidu: '百度', douyin: '抖音(热点宝)', goofish: '闲鱼', baidupan: '百度网盘' }
+const labels = { weibo: '微博', baidu: '百度', douyin: '抖音(热点宝)', goofish: '闲鱼', baidupan: '百度网盘', quark: '夸克网盘', weread: '微信读书', dajiala: 'dajiala(付费接口)' }
 
 async function load() {
   try {

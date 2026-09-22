@@ -19,9 +19,12 @@ from app.utils import get_logger
 
 logger = get_logger(__name__)
 
-PLATFORMS = ("weibo", "baidu", "douyin", "goofish", "weread", "dajiala", "baidupan")
+PLATFORMS = ("weibo", "baidu", "douyin", "goofish", "weread", "dajiala", "baidupan", "quark")
 
-# 平台 → 兜底源:env 全局 Cookie / 本机 Cookie 文件(settings 属性名)
+# 平台 → 兜底源:env 全局 Cookie / 本机 Cookie 文件(settings 属性名)。
+# 网盘类(baidupan/quark)与 dajiala 故意不在内:自愈会把运营者的全局凭据明文写进
+# 普通用户的 UserCookie 行,等于把他的盘/余额划到别人名下;这类回退只发生在读取时
+# (见 wechat_monitor._quark_cookie),且用户自己配了就用他自己的。
 _FILE_FALLBACKS = {"goofish": "goofish_cookie_file", "douyin": "douhot_cookie_file"}
 _ENV_FALLBACKS = {"weibo": "weibo_cookie", "weread": "weread_cookie"}
 
