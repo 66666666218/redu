@@ -11,6 +11,7 @@ from app.auth import get_current_user
 from app.db import get_db
 from app.db.models import User, WechatArticle, WechatBenchmark
 from app.services.dajiala_client import DajialaError
+from app.services.weread_client import WereadAuthError, WereadError
 from app.services.wechat_analyzer import analyze_articles
 from app.services import wechat_monitor
 from app.utils import get_logger
@@ -224,6 +225,13 @@ def wechat_benchmark_sync(benchmark_id: int, max_pages: int | None = None,
         raise HTTPException(404, str(exc))
     except DajialaError as exc:
         raise HTTPException(502, str(exc))
+    except WereadAuthError as exc:
+        # 无 dajiala key 时同步走微信读书免费源(只能拿最新一篇),Cookie 一失效就从这里冒出来;
+        # 不接住就是裸 500,前端只报"服务器开小差了",用户完全不知道该去换 Cookie。
+        raise HTTPException(502, f"微信读书登录态已失效,同步取不到文章。请到「Cookie 管理」更新 weread Cookie"
+                                f"(粘贴前确认含 wr_rt=),或在「公众号监听」页点续期后重试。({exc})")
+    except WereadError as exc:
+        raise HTTPException(502, f"微信读书请求失败,同步中断:{exc}")
 
 
 @router.post("/api/wechat/benchmarks/import_shelf")

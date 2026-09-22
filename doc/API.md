@@ -741,6 +741,11 @@
 - **请求方式**: POST `/api/wechat/benchmarks/{id}/sync?max_pages=3`
 - 每页约 10 次发文(¥0.14/页),`max_pages` 缺省为 `WECHAT_SYNC_MAX_PAGES`(3);翻到 `IsEnd` 提前停止
 - **响应示例**: `{ "platform":"wechat_sync", "status":"success", "pages":2, "new":17, "ghid":"gh_xxx", "nickname":"微信派" }`
+- 无 dajiala key 时走微信读书免费源(只能拿最新一篇,`status:"partial"`+`reason:"weread_latest_only"`);
+  `wr_skey` 过期会**先自动续期一次**再重试
+- **错误**:404 对标号不存在;502 上游失效——detail 是可执行文案(微信读书登录态失效→去「Cookie 管理」换含
+  `wr_rt=` 的 Cookie;dajiala 欠费/风控原文)。前端只把 **502 的 detail 展示给用户**,500 仍显示统一
+  "服务器开小差了"(500 的 detail 可能夹带异常堆栈,不外露)
 
 ### 9b.5 监听(手动触发;定时走调度器"公众号监听"板块)
 

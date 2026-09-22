@@ -1703,3 +1703,91 @@ def test_weread_refresh_tick_stays_quiet_for_cooldown(session, monkeypatch) -> N
 
     assert wechat_monitor.weread_refresh_tick(settings=Settings(_env_file=None)) == 0
     assert captured == []
+
+
+def test_sync_endpoint_translates_weread_auth_error(session, monkeypatch) -> None:
+    """「同步文章」在 Cookie 失效时必须是 502+可执行文案,不是裸 500。
+
+    实测(2026-09-22):无 dajiala key 的同步走微信读书最新一篇,wr_skey 一过期就抛
+    WereadAuthError,而 sync 路由只接 KeyError/DajialaError → 500 → 前端统一显示
+    "服务器开小差了,请稍后重试",用户完全不知道要去换 Cookie。
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api import wechat as wechat_api
+    from app.auth import get_current_user
+    from app.db import get_db
+    from app.db.models import User
+    from app.services.weread_client import WereadAuthError
+
+    user = User(username="t", password_hash="x")
+    session.expire_on_commit = False   # 请求跑在线程池里,惰性属性会回查内存 sqlite(跨线程报错)
+    session.add(user)
+    session.commit()
+    b = WechatBenchmark(user_id=user.id, nickname="某号", weread_book_id="MP_WXS_1", active=True)
+    session.add(b)
+    session.commit()
+
+    def _boom(*a, **kw):
+        raise WereadAuthError("微信读书登录态失效(-2012):Cookie 过期?")
+
+    monkeypatch.setattr(wechat_api.wechat_monitor, "sync_wechat_account", _boom)
+    app = FastAPI()
+    app.include_router(wechat_api.router)
+    app.dependency_overrides[get_db] = lambda: session
+    app.dependency_overrides[get_current_user] = lambda: user
+    with TestClient(app, raise_server_exceptions=False) as c:
+        r = c.post(f"/api/wechat/benchmarks/{b.id}/sync")
+    assert r.status_code == 502, r.text
+    assert "Cookie 管理" in r.json()["detail"] and "wr_rt" in r.json()["detail"]
+
+
+class _SyncWeread:
+    """假微信读书客户端:旧 skey 报登录失效,续期后的新 skey 能拿到最新一篇。"""
+
+    def __init__(self, cookie: str) -> None:
+        self.cookie = cookie
+
+    def latest_article(self, book_id: str) -> dict | None:
+        if self.cookie.endswith("old"):
+            raise wechat_monitor.WereadAuthError("微信读书登录态失效(-2012):Cookie 过期?")
+        return {"url": "https://mp.weixin.qq.com/s/new1", "title": "新文章 夸克网盘",
+                "review_id": "rid", "publish_at": None}
+
+    def mp_content(self, review_id: str) -> str:
+        return "正文 https://pan.quark.cn/s/abc123"
+
+
+def _sync_setup(session, monkeypatch) -> WechatBenchmark:
+    from app.services.cookie_store import set_cookie as _set
+
+    _set(session, 1, "weread", "wr_vid=1; wr_skey=old")
+    b = WechatBenchmark(user_id=1, nickname="某号", weread_book_id="MP_WXS_1", active=True)
+    session.add(b)
+    session.commit()
+    monkeypatch.setattr(wechat_monitor, "WereadClient", _SyncWeread)
+    monkeypatch.setattr(wechat_monitor, "_dajiala_key", lambda s, u, st: "")
+    return b
+
+
+def test_sync_renews_weread_cookie_before_giving_up(session, monkeypatch) -> None:
+    """无 dajiala 的同步遇到 skey 过期,应先自动续期一次再重试(监听早已这么做)。"""
+    b = _sync_setup(session, monkeypatch)
+    monkeypatch.setattr(wechat_monitor, "refresh_weread_cookie",
+                        lambda s, u, settings=None: {"status": "success", "cookie": "wr_vid=1; wr_skey=new"})
+
+    out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=Settings(_env_file=None))
+    assert out["status"] == "partial" and out["new"] == 1
+    assert session.scalar(select(WechatArticle).where(WechatArticle.user_id == 1)) is not None
+
+
+def test_sync_reraises_when_renewal_also_fails(session, monkeypatch) -> None:
+    """续期也救不回来(wr_rt 死了)时原样上抛,交给路由出 502 文案——不能假装同步成功。"""
+    import pytest
+
+    b = _sync_setup(session, monkeypatch)
+    monkeypatch.setattr(wechat_monitor, "refresh_weread_cookie",
+                        lambda s, u, settings=None: {"status": "failed", "reason": "renewal_failed"})
+    with pytest.raises(wechat_monitor.WereadAuthError):
+        wechat_monitor.sync_wechat_account(session, 1, b.id, settings=Settings(_env_file=None))

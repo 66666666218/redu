@@ -51,9 +51,18 @@ async function req(method, path, body) {
 
 // FastAPI 的错误体有两种形态:HTTPException 是 {detail:"文字"},
 // 而 422 参数校验是 {detail:[{loc,msg,...}]}——后者直接当字符串用会显示成 [object Object]。
-// 5xx 一律走固定文案:上游 body 可能带堆栈/SQL/文件路径,直接展示等于泄露内部拓扑。
+// 5xx 分两档:
+// - 502/503/504(上游失效)的 detail 是我们自己写的、**用户唯一能照着做**的文案
+//   (微信读书 Cookie 过期、闲鱼滑块、dajiala 余额不足),吞成"服务器开小差"等于把故障变成哑谜;
+// - 500 不展示 body:既有 `HTTPException(500, f"采集失败:{...str(exc)}")` 这类把任意异常文本
+//   塞进 detail 的出口,未捕获异常也可能是 SQLAlchemy 报错(含 SQL/连接串),一律走固定文案。
 function errMessage(data, raw, status) {
-  if (status >= 500) return '服务器开小差了,请稍后重试'
+  if (status >= 500) {
+    const d = data && typeof data === 'object' ? (data.detail ?? data.message) : null
+    if (status !== 500 && typeof d === 'string' && d.trim() && d.trim().toLowerCase() !== 'internal server error')
+      return d.slice(0, 200)
+    return '服务器开小差了,请稍后重试'
+  }
   if (data && typeof data === 'object') {
     const detail = data.detail ?? data.message
     if (typeof detail === 'string' && detail.trim()) return detail.slice(0, 200)

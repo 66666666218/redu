@@ -1158,7 +1158,8 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
                         session, user_id, "wechat",
                         f"🟠 微信读书 Cookie 已过期,请更新[{fp}]",
                         "自动续期失败。请在浏览器登录 weread.qq.com 后 F12 复制 Cookie,"
-                        "粘贴到「Cookie 管理」页 weread 平台(或发给我更新)",
+                        "粘贴到「Cookie 管理」页 weread 平台(或发给我更新)。"
+                        "粘贴前确认串里有「wr_rt=」——缺它自动续期无从下手,十几小时必过期",
                         settings=settings)
             except WereadError as exc:
                 failed += 1
@@ -1410,7 +1411,17 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
         if not cookie or not b.weread_book_id:
             return {"platform": "wechat_sync", "status": "skipped", "reason": "no_dajiala_key"}
         wc = weread or WereadClient(cookie)
-        item = wc.latest_article(b.weread_book_id)
+        try:
+            item = wc.latest_article(b.weread_book_id)
+        except WereadAuthError:
+            # wr_skey 十几小时必过期,而用户点「同步文章」走的正是这条路。
+            # wr_rt 还活着时先像监听那样自救续期一次再重试;续期不成才把异常抛给上层
+            # (路由翻成 502 可执行文案,此前这里是裸 500 → 前端只报"服务器开小差了")。
+            refreshed = refresh_weread_cookie(session, user_id, settings)
+            if refreshed.get("status") != "success":
+                raise
+            wc = WereadClient(refreshed["cookie"])
+            item = wc.latest_article(b.weread_book_id)
         new = 0
         if item and item["url"]:
             resolver = (lambda _title, _rid=item["review_id"]: wc.mp_content(_rid))
