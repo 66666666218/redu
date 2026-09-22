@@ -839,7 +839,7 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                 except Exception as exc:  # noqa: BLE001 - 百度链失败不阻断,不触发夸克链路
                     logger.info("百度链转存跳过 %s: %s", u[:50], str(exc)[:70])
     # 资源级共振:同一盘链在窗口期内被 ≥2 篇文章推送 → 同行网络都在发的确认级爆点资源
-    from app.services.feishu import _col_set_row
+    from app.services.feishu import _col_set_row, _md_safe
     from app.services.feishu_client import FeishuClient, webhook_for
     from app.services.alert_service import feishu_alert_gate
 
@@ -885,10 +885,49 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
     if res_hits:
         webhook = webhook_for(settings, "wechat")
         if webhook:
-            elements = [_col_set_row([("**分享链**", 5), ("**同发文章数**", 2), ("**示例标题**", 5)], grey=True)]
+            # 飞书是给员工看的,推的网盘链必须是"我方转存链",绝不把同行/他人的原始盘链推出去。
+            # 本轮 replacements 已含大部分(原链→我的链);缺失者回落历史复用查询,再缺则回落原文。
+            my_of_raw: dict[str, tuple[str, str]] = {}
+            for reps in replacements.values():
+                for orig, share, code in reps:
+                    if share:
+                        my_of_raw.setdefault(orig, (share, code))
+
+            def _my_pan(raw_u: str) -> tuple[str, str] | None:
+                hit = my_of_raw.get(raw_u)
+                if hit:
+                    return hit
+                blobs = session.execute(
+                    select(WechatArticle.my_pan_urls).join(
+                        WechatPanLink, WechatPanLink.article_id == WechatArticle.id)
+                    .where(WechatPanLink.pan_url == raw_u,
+                           WechatArticle.user_id == user_id,  # 只认本租户自己转存的链
+                           WechatArticle.my_pan_urls.isnot(None),
+                           WechatArticle.my_pan_urls != "").limit(5)).scalars().all()
+                for blob in blobs:
+                    for line in blob.splitlines():
+                        line = line.strip()
+                        if line.startswith("https://pan.quark.cn/") or "[百度]" in line:
+                            m = re.search(r"(?:提取码\s*([0-9A-Za-z]{4}))", line)
+                            link = line.split(" (提取码")[0].split(" [百度]")[0].strip()
+                            pair = (link, m.group(1) if m else "")
+                            my_of_raw[raw_u] = pair
+                            return pair
+                return None
+
+            elements = [_col_set_row([("**我的分享链**", 5), ("**同发文章数**", 2), ("**示例标题**", 5)], grey=True)]
             for u, r, cnt in res_hits:
+                mine = _my_pan(u)
+                if mine:
+                    link, code = mine
+                    kind = "百度" if "pan.baidu.com" in link else "夸克"
+                    # 提取码是员工打开资源的关键,单独明文展示,不做长度截断;链接一律我方转存链
+                    cell = f"🔴 [{kind}·我的转存]({_md_safe(link)})" + (f" 提取码 {code}" if code else "")
+                else:
+                    # 本轮没转出我方链(未开转存/转存失败):宁可指向公众号原文,也不推他人盘链
+                    cell = "🔴 [未转存·看原文](" + _md_safe(r.url) + ")"
                 elements.append(_col_set_row([
-                    ("🔴 [" + u[:40] + "](" + u + ")", 5), (str(cnt) + " 篇", 2), (r.title[:30], 5)]))
+                    (cell, 5), (str(cnt) + " 篇", 2), (_md_safe(r.title)[:30], 5)]))
             card = {"config": {"wide_screen_mode": True},
                     "header": {"template": "red", "title": {"tag": "plain_text",
                                "content": "🔴 资源共振 · 多号同发(" + str(len(res_hits)) + " 个资源)"}},
@@ -1176,14 +1215,20 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
 
     def _render_article(r: WechatArticle) -> dict:
         rep = replacements.get(r.id) or []
+        code = ""
         if rep:
-            link = rep[0][1] + (f" (提取码 {rep[0][2]})" if rep[0][2] else "")
+            link, code = rep[0][1], rep[0][2]
         else:
-            # 只展示我方网盘链接(本轮转存链 > 历史我方链);
-            # 绝不回落到别人的盘链——转存失败时点标题打开公众号原文
-            link = next((x.strip().split(" (提取码")[0]
-                         for x in (r.my_pan_urls or "").splitlines()
-                         if x.strip().startswith("https://pan.quark.cn/s/")), "") or r.url
+            # 只展示我方网盘链接(本轮转存链 > 历史我方链);绝不回落到别人的盘链——
+            # 未转存时点标题打开公众号原文。历史 my_pan_urls 常自带提取码,拆出来明文显示。
+            cand = next((x.strip() for x in (r.my_pan_urls or "").splitlines()
+                         if x.strip().startswith("https://pan.quark.cn/s/")), "")
+            if cand:
+                m = re.search(r"(?:提取码\s*([0-9A-Za-z]{4}))", cand)
+                link = cand.split(" (提取码")[0].strip()
+                code = m.group(1) if m else ""
+            else:
+                link = r.url
         # 重复资源标记: 同盘链已被其他文章推过 → 🔥N(同行都在发的确认级资源)
         hot = ""
         first_pan = pan_of.get(r.id, "")
@@ -1202,7 +1247,9 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
             q_badge = "⭐优 "
         elif r.quality <= 2 and r.pan_types:
             q_badge = "⚠️疑 "
-        article_md = f"[{hot}{q_badge}{shown}]({_md_safe(link)})" if link else shown
+        # href 只放干净链接(旧实现把" (提取码 xxxx)"拼进 URL → 链接点不开),提取码明文附后
+        article_md = (f"[{hot}{q_badge}{shown}]({_md_safe(link)})" if link else shown) \
+            + (f" 🔑{code}" if code else "")
         pan = f"🔴{_md_safe(r.pan_types)[:8]}" if r.pan_types else "—"
         read = str(r.read_num) if r.traffic_at else "—"
         return _col_set_row([

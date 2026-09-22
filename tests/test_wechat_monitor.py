@@ -265,6 +265,43 @@ def test_push_listen_sends_all_articles_grouped_by_account(session, monkeypatch)
     assert "📢 号A" in blob and "📢 号B" in blob
 
 
+def test_push_listen_renders_my_link_with_clean_href(session, monkeypatch) -> None:
+    """监听卡的网盘链接:href 必须是干净的我方转存链,提取码明文附后。
+
+    回归:旧实现把" (提取码 xxxx)"拼进 markdown 链接目标 → URL 含空格/中文,点不开。"""
+    import json
+
+    import app.services.feishu as feishu_mod
+
+    r = WechatArticle(user_id=1, title="资源文", author="号A", read_num=0,
+                      url="https://mp.weixin.qq.com/s/x", source="listen",
+                      pan_urls="https://pan.quark.cn/s/RAW")
+    session.add(r)
+    session.commit()
+    monkeypatch.setattr(feishu_mod, "webhook_for", lambda settings, section: "https://open.feishu.cn/hook/x")
+    cards: list[dict] = []
+
+    class _FakeFeishu:
+        def __init__(self, webhook, secret="") -> None:
+            pass
+
+        def send(self, msg: str) -> bool:
+            return True
+
+        def send_card(self, card: dict) -> bool:
+            cards.append(card)
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
+    wechat_monitor._push_listen(session, 1, _settings(), [r], replacements={
+        r.id: [("https://pan.quark.cn/s/RAW", "https://pan.quark.cn/s/MINE", "ab12")]})
+    blob = json.dumps(cards, ensure_ascii=False)
+    assert "pan.quark.cn/s/MINE)" in blob   # href 是我方干净链
+    assert "🔑ab12" in blob                  # 提取码明文
+    assert "提取码" not in blob              # 不再被拼进 URL
+    assert "s/RAW" not in blob               # 他人原始盘链不外泄
+
+
 def test_push_listen_ignores_quiet_hours(session, monkeypatch) -> None:
     """免打扰时段(默认23~8点)不再丢弃普通新发文:飞书是员工查看入口,任何时段全推。
 
@@ -937,12 +974,55 @@ def test_pan_links_normalized_and_resonance(session, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
     out = wechat_monitor._enrich_new_articles(session, 1, st, rows, client=None, allow_paid=False)
     assert out == {}  # 无 dajiala 采样,仅共振
-    assert any("资源共振" in m and "abc123" in m for m in sent)
+    # 转存关闭(未转出我方链)时,共振卡不再推他人原始盘链,回落公众号原文;
+    # 但仍识别到"同链 ≥2 篇"并出共振卡。
+    assert any("资源共振" in m for m in sent)
     assert session.scalars(select(FeishuAlert).where(FeishuAlert.section == "focus_res")).all()
 
     # 冷却期内不重推
     out2 = wechat_monitor._enrich_new_articles(session, 1, st, rows, client=None, allow_paid=False)
     assert out2 == {} and len(sent) == 1
+
+
+def test_resonance_card_pushes_my_pan_link_not_original(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """资源共振卡一律推"我方转存链"(含提取码),绝不把同行/他人的原始盘链推给员工。"""
+    b = WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A")
+    session.add(b)
+    session.commit()
+    st = _settings(dajiala_key="", quark_cookie="", pan_transfer_enabled=False,
+                   wechat_resonance_hours=48, focus_cooldown_hours=24,
+                   feishu_webhook_wechat="https://open.feishu.cn/hook/wechat")
+    raw = "https://pan.quark.cn/s/aaa111"
+    items = [
+        {"title": f"资源甲 {raw}", "url": "https://mp.weixin.qq.com/s/x1"},
+        {"title": f"资源甲另号 {raw}", "url": "https://mp.weixin.qq.com/s/x1b"},
+    ]
+    rows = wechat_monitor._insert_new_articles(session, 1, b, items, source="sync")
+    # 模拟该盘链此前已转存为我方链(持久化在 my_pan_urls);本轮转存虽关闭,
+    # 共振卡仍应回查历史、用我方链。
+    rows[0].my_pan_urls = "https://pan.quark.cn/s/MINE9999 (提取码 ab12)"
+    session.commit()
+
+    sent: list[str] = []
+
+    class _FakeFeishu:
+        def __init__(self, webhook, secret="") -> None:
+            pass
+
+        def send(self, msg: str) -> bool:
+            return True
+
+        def send_card(self, card: dict) -> bool:
+            sent.append(str(card))
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
+    wechat_monitor._enrich_new_articles(session, 1, st, rows, client=None, allow_paid=False)
+    blob = " ".join(sent)
+    assert "资源共振" in blob
+    assert "MINE9999" in blob and "ab12" in blob   # 推的是我方链 + 提取码
+    assert raw not in blob                          # 原始他人盘链不外泄
+
 
 
 def test_resonance_backlog_rotates_not_silently_cooled(session, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -986,13 +1066,14 @@ def test_resonance_backlog_rotates_not_silently_cooled(session, monkeypatch: pyt
     monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
     # 首轮:两个共振资源都新鲜,只推 A(前 1 个),B 不得被烧冷却
     wechat_monitor._enrich_new_articles(session, 1, st, rows, client=None, allow_paid=False)
-    assert any("aaa111" in m for m in sent) and not any("bbb222" in m for m in sent)
+    # 转存关闭 → 卡里用示例文章标题(资源甲/乙)区分,而非原始盘链
+    assert any("资源甲" in m for m in sent) and not any("资源乙" in m for m in sent)
     cooled = {r.title for r in session.scalars(select(FeishuAlert).where(FeishuAlert.section == "focus_res")).all()}
     assert cooled and all("aaa111" in t for t in cooled)  # 仅 A 进了冷却
     # 次轮:A 在冷却里被跳过,B 顶替推出(证明首轮没把 B 静默烧进冷却)
     sent.clear()
     wechat_monitor._enrich_new_articles(session, 1, st, rows, client=None, allow_paid=False)
-    assert any("bbb222" in m for m in sent)
+    assert any("资源乙" in m for m in sent)
     # 第三轮:两者各自已推送并冷却 → 无新共振卡
     sent.clear()
     wechat_monitor._enrich_new_articles(session, 1, st, rows, client=None, allow_paid=False)
