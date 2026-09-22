@@ -149,7 +149,8 @@ onMounted(load)
       <div class="grid" style="margin-bottom:14px">
         <div class="card"><h3>用户</h3><div class="price" style="font-size:26px">{{ c('users') }}</div><span class="empty">启用 {{ c('enabled_users') }} · 管理员 {{ c('admins') }}</span></div>
         <div class="card"><h3>今日运行</h3><div class="up" style="font-size:26px">{{ dash.today_runs }}</div><span class="empty">累计 {{ c('runs') }} · 近2天失败 {{ dash.failed_runs }}</span></div>
-        <div class="card"><h3>告警</h3><div class="price" style="font-size:26px">{{ c('alerts') }}</div><span class="empty">微博{{ c('weibo_items') }}/闲鱼{{ c('xianyu_items') }}/抖音{{ c('douhot_words') }}</span></div>
+        <div class="card"><h3>告警</h3><div class="price" style="font-size:26px">{{ c('alerts') }}</div><span class="empty">微博{{ c('weibo_items') }}/闲鱼{{ c('xianyu_items') }}/抖音{{ c('douhot_words') }}/百度{{ c('baidu_items') }}</span></div>
+        <div class="card"><h3>公众号</h3><div class="price" style="font-size:26px">{{ c('wechat_articles') }}</div><span class="empty">在监对标号 {{ c('wechat_benchmarks') }} · 定点 4/8/14/20 点</span></div>
         <div class="card"><h3>待办</h3><div class="price" style="font-size:26px">{{ dash.pending_users }}</div><span class="empty">未配闲鱼Cookie用户 · 需引导</span></div>
       </div>
       <div class="card" style="margin-bottom:14px">
@@ -348,7 +349,7 @@ onMounted(load)
 
     <template v-if="tab==='data'">
       <div class="row" style="gap:8px;margin-bottom:8px">
-        <button v-for="s in [['weibo','微博'],['xianyu','闲鱼'],['douhot','抖音']]" :key="s[0]"
+        <button v-for="s in [['weibo','微博'],['baidu','百度'],['xianyu','闲鱼'],['douhot','抖音'],['wechat','公众号']]" :key="s[0]"
           :class="dataSection===s[0]?'':'ghost'" @click="dataSection=s[0];loadData()">{{ s[1] }}</button>
       </div>
       <div class="card">
@@ -356,8 +357,8 @@ onMounted(load)
           <tr v-for="(d,i) in dataRef.slice(0,60)" :key="i">
             <td>{{ d.user_id }}</td>
             <td>{{ (d.title || d.keyword || '').slice(0,32) }}</td>
-            <td class="price">{{ d.heat ?? d.score ?? d.hit_keywords ?? '' }}</td>
-            <td class="empty">{{ d.captured_at || d.created_at || '' }}</td>
+            <td class="price">{{ d.heat ?? d.score ?? d.hit_keywords ?? (d.read_num != null ? '读' + d.read_num : '') }}{{ d.pan_types ? ' · ' + d.pan_types : '' }}</td>
+            <td class="empty">{{ d.captured_at || d.created_at || d.publish_at || '' }}</td>
           </tr>
         </table>
         <div v-if="!dataRef.length" class="empty">暂无数据</div>

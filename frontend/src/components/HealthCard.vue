@@ -9,7 +9,15 @@ async function loadHealth() {
   try { health.value = await api.adminHealth() }
   catch (e) { health.value = null; toastError('健康度加载失败:' + e.message) }
 }
-function pname(k) { return { weibo: '微博', xianyu: '闲鱼', douhot: '抖音', baidu: '百度', xianyu_deep: '闲鱼深采' }[k] || k }
+function pname(k) {
+  return { weibo: '微博', xianyu: '闲鱼', douhot: '抖音', baidu: '百度', xianyu_deep: '闲鱼深采',
+    wechat: '公众号', wechat_listen: '公众号监听' }[k] || k
+}
+// Cookie 的平台名与板块名不同一套(goofish=闲鱼、weread=微信读书…),原样吐出运维看不懂
+function cname(k) {
+  return { weibo: '微博', baidu: '百度', goofish: '闲鱼', douyin: '抖音', weread: '微信读书',
+    quark: '夸克网盘', baidupan: '百度网盘', dajiala: 'dajiala(付费接口)' }[k] || k
+}
 function fmtTime(iso) {
   if (!iso) return '—'
   const d = new Date(iso); const p = n => String(n).padStart(2, '0')
@@ -33,6 +41,12 @@ onMounted(loadHealth)
           <td class="empty">{{ (p.last_detail || '—').slice(0, 32) }}</td>
         </tr>
       </table>
+      <p class="empty" v-if="health.wechat_monitor" style="margin:8px 0 0">
+        公众号监听:在监对标号 <b>{{ health.wechat_monitor.benchmarks }}</b> 个
+        ({{ health.wechat_monitor.users }} 个用户) · 近 24h 新收文章
+        <b :class="{ error: !health.wechat_monitor.articles_24h }">{{ health.wechat_monitor.articles_24h }}</b> 篇
+        · 定点 {{ health.wechat_monitor.fixed_hours }} · 下轮 {{ fmtTime(health.wechat_monitor.next_point) }}
+      </p>
       <div class="grid" style="margin-top:10px">
         <div>
           <h4 style="color:var(--dim);margin:6px 0">最新数据写入</h4>
@@ -48,7 +62,7 @@ onMounted(loadHealth)
         </div>
         <div>
           <h4 style="color:var(--dim);margin:6px 0">已配 Cookie</h4>
-          <div v-for="(n, pl) in health.cookies" :key="pl" class="empty">{{ pl }}: {{ n }}</div>
+          <div v-for="(n, pl) in health.cookies" :key="pl" class="empty">{{ cname(pl) }}: {{ n }}</div>
         </div>
       </div>
     </template>

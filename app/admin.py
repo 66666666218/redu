@@ -26,6 +26,8 @@ from app.db.models import (
     SystemConfig,
     User,
     UserCookie,
+    WechatArticle,
+    WechatBenchmark,
     WeiboHotItem,
     XianyuDaily,
     XianyuItem,
@@ -46,6 +48,11 @@ def dashboard(db: Session) -> dict:
         "weibo_items": db.scalar(select(func.count(WeiboHotItem.id))) or 0,
         "xianyu_items": db.scalar(select(func.count(XianyuItem.id))) or 0,
         "douhot_words": db.scalar(select(func.count(DouhotWord.id))) or 0,
+        # 工作台卡片原只列这三类,百度与公众号(在监号/新文)在首页完全不可见
+        "baidu_items": db.scalar(select(func.count(BaiduHotItem.id))) or 0,
+        "wechat_articles": db.scalar(select(func.count(WechatArticle.id))) or 0,
+        "wechat_benchmarks": db.scalar(select(func.count(WechatBenchmark.id)).where(
+            WechatBenchmark.active.is_(True))) or 0,
     }
     # 每日运行/告警(近 7 天)
     days = [(date.today() - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
@@ -268,14 +275,18 @@ def import_users(db: Session, text: str) -> dict:
 
 _DATA_FIELDS = {
     "weibo": ["user_id", "title", "heat", "rank", "captured_at"],
+    "baidu": ["user_id", "title", "heat", "rank", "captured_at"],
     "xianyu": ["user_id", "item_id", "title", "price", "hit_keywords", "best_rank", "created_at"],
     "douhot": ["user_id", "title", "score", "trend_delta", "query_day", "created_at"],
+    # 公众号:没有"热度"概念,指标列看盘链类型与来源(手动/监听/同步)
+    "wechat": ["user_id", "title", "author", "source", "pan_types", "read_num", "publish_at", "created_at"],
 }
 
 
 def data_browse(db: Session, section: str, user_id: int | None = None, limit: int = 50) -> list[dict]:
     """浏览某板块原始采集数据(可按用户过滤)。"""
-    base = {"weibo": WeiboHotItem, "xianyu": XianyuItem, "douhot": DouhotWord}.get(section)
+    base = {"weibo": WeiboHotItem, "baidu": BaiduHotItem, "xianyu": XianyuItem,
+            "douhot": DouhotWord, "wechat": WechatArticle}.get(section)
     if base is None:
         return []
     # limit 钳制:超大值一次载入全部租户原始行进 Python 内存可打挂单进程 worker,
@@ -313,11 +324,13 @@ def alert_trend(db: Session, days: int = 30) -> list[dict]:
         .group_by(func.date(AlertRecord.triggered_at), AlertRecord.section)
     ).all()
     days_list = [(date.today() - timedelta(days=i)).isoformat() for i in range(days - 1, -1, -1)]
-    out = {d: {"weibo": 0, "xianyu": 0, "douhot": 0} for d in days_list}
+    # 板块键取自告警本身:原来硬编码 {weibo,xianyu,douhot},百度/公众号的告警被
+    # `if sec in out[d]` 静默丢弃 → 工作台"近30天告警"里这两类永久为 0(2026-09-22)。
+    seen: dict[str, dict[str, int]] = {}
     for d, sec, n in rows:
-        if d in out and sec in out[d]:
-            out[d][sec] += n
-    return [{"date": d, **out[d], "total": sum(out[d].values())} for d in days_list]
+        if d in days_list and n:
+            seen.setdefault(d, {})[sec or "?"] = n
+    return [{"date": d, **seen.get(d, {}), "total": sum(seen.get(d, {}).values())} for d in days_list]
 
 
 def category_pie(db: Session) -> dict:
@@ -388,8 +401,8 @@ def collection_health(db: Session) -> dict:
                 RunRecord.kind == kind, RunRecord.started_at >= since, RunRecord.status == "failed")) or 0,
         }
 
-    # 各平台最近采集运行(含闲鱼深采)
-    platforms = {k: last_of(k) for k in ("weibo", "baidu", "douhot", "xianyu", "xianyu_deep")}
+    # 各平台最近采集运行(含闲鱼深采);公众号监听 kind 是细粒度的 wechat_listen
+    platforms = {k: last_of(k) for k in ("weibo", "baidu", "douhot", "xianyu", "xianyu_deep", "wechat_listen")}
 
     # 各平台最近一次写入数据的时间(是否有新数据进账)
     data_cols = {
@@ -397,6 +410,7 @@ def collection_health(db: Session) -> dict:
         "baidu": (BaiduHotItem, "captured_at"),
         "xianyu": (XianyuItem, "created_at"),
         "douhot": (DouhotWord, "created_at"),
+        "wechat": (WechatArticle, "created_at"),
     }
     data_health = {}
     for p, (model, col) in data_cols.items():
@@ -414,10 +428,26 @@ def collection_health(db: Session) -> dict:
         select(UserCookie.platform, func.count(func.distinct(UserCookie.user_id))).group_by(UserCookie.platform)
     ).all())
 
+    # 公众号监听的专属指标:它不是"每轮采一批"的热榜,运维要看在监面(对标号)、
+    # 进账(新文)和下一定点——这几项在 platforms/data 两栏里都体现不出来。
+    from app.services.schedule_service import WECHAT_LISTEN_HOURS, next_wechat_listen_at
+
+    wechat_monitor = {
+        "benchmarks": db.scalar(select(func.count(WechatBenchmark.id)).where(
+            WechatBenchmark.active.is_(True))) or 0,
+        "users": db.scalar(select(func.count(func.distinct(WechatBenchmark.user_id))).where(
+            WechatBenchmark.active.is_(True))) or 0,
+        "articles_24h": db.scalar(select(func.count(WechatArticle.id)).where(
+            WechatArticle.created_at >= since)) or 0,
+        "fixed_hours": " / ".join(f"{h}:00" for h in sorted(WECHAT_LISTEN_HOURS)),
+        "next_point": next_wechat_listen_at().isoformat(timespec="minutes"),
+    }
+
     return {
         "generated_at": datetime.now().isoformat(),
         "platforms": platforms,
         "data": data_health,
+        "wechat_monitor": wechat_monitor,
         "feishu": {
             "pushes_by_section": [{"section": s or "?", "count": c} for s, c in pushes.items()],
             "last_push": last_alert.alerted_at.isoformat() if last_alert else None,

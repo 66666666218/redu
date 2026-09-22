@@ -460,13 +460,20 @@ def test_collection_health_summary(session) -> None:
     from datetime import datetime, timedelta
 
     from app.admin import collection_health
-    from app.db.models import FeishuAlert, RunRecord, UserCookie, WeiboHotItem
+    from app.db.models import (FeishuAlert, RunRecord, UserCookie, WechatArticle, WechatBenchmark,
+                               WeiboHotItem)
 
     now = datetime.now()
     session.add(RunRecord(user_id=1, run_id="r1", kind="douhot", status="success", started_at=now, detail="ok"))
     session.add(RunRecord(user_id=1, run_id="r2", kind="xianyu", status="failed", started_at=now - timedelta(hours=1),
                           detail="闲鱼人机验证(滑块),全部关键词均未采集"))
+    session.add(RunRecord(user_id=1, run_id="r9", kind="wechat_listen", status="partial", started_at=now,
+                          detail="accounts=81 new=0 failed=1"))
     session.add(WeiboHotItem(user_id=1, title="热搜", heat=100, rank=1, captured_at=now))
+    session.add(WechatArticle(user_id=1, title="新资源文", url="https://mp.weixin.qq.com/s/x",
+                              source="listen", created_at=now))
+    session.add(WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A",
+                                weread_book_id="MP_WXS_1", active=True))
     session.add(FeishuAlert(user_id=1, section="douhot", title="某主题", reason="new", alerted_at=now))
     session.add(UserCookie(user_id=1, platform="goofish", cookie="x"))
     session.commit()
@@ -477,9 +484,43 @@ def test_collection_health_summary(session) -> None:
     assert "滑块" in h["platforms"]["xianyu"]["last_detail"]  # 一眼看出闲鱼被风控
     assert h["platforms"]["xianyu"]["failed_24h"] >= 1
     assert h["data"]["weibo"] is not None                        # 微博有数据写入
+    # 公众号板块此前在运维健康度里完全缺席
+    assert h["platforms"]["wechat_listen"]["last_status"] == "partial"
+    assert "accounts=81" in h["platforms"]["wechat_listen"]["last_detail"]
+    assert h["data"]["wechat"] is not None
+    assert h["wechat_monitor"]["benchmarks"] == 1
+    assert h["wechat_monitor"]["users"] == 1
+    assert h["wechat_monitor"]["articles_24h"] == 1
+    assert h["wechat_monitor"]["fixed_hours"] == "4:00 / 8:00 / 14:00 / 20:00"
     assert {"section": "douhot", "count": 1} in h["feishu"]["pushes_by_section"]
     assert h["feishu"]["last_push"] is not None                  # 飞书推过
     assert h["cookies"].get("goofish") == 1                      # 配了闲鱼 Cookie
+
+
+def test_admin_wechat_visible_in_trend_and_browse(session) -> None:
+    """告警趋势与数据浏览都要认得公众号(历史上只列微博/闲鱼/抖音)。"""
+    from datetime import datetime
+
+    from app.admin import alert_trend, data_browse
+    from app.db.models import AlertRecord, WechatArticle
+
+    session.add(AlertRecord(user_id=1, section="wechat", keyword="号A", reason="pan",
+                            triggered_at=datetime.now()))
+    session.add(AlertRecord(user_id=1, section="baidu", keyword="某词", reason="heat",
+                            triggered_at=datetime.now()))
+    session.add(WechatArticle(user_id=1, title="夸克资源文", url="https://mp.weixin.qq.com/s/y",
+                              source="listen", pan_types="夸克网盘", author="号A"))
+    session.commit()
+
+    today = alert_trend(session, days=2)[-1]
+    assert today["wechat"] == 1 and today["baidu"] == 1  # 旧实现只认三板块,这两类被静默丢弃
+    assert today["total"] == 2
+
+    rows = data_browse(session, "wechat")
+    assert rows[0]["title"] == "夸克资源文" and rows[0]["pan_types"] == "夸克网盘"
+    assert rows[0]["source"] == "listen"
+    assert data_browse(session, "baidu") == []           # 百度已接入,本用例无数据
+    assert data_browse(session, "nosuch") == []          # 未知板块仍安全返回空
 
 
 def test_xianyu_verify_cooldown(session) -> None:

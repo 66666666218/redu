@@ -505,7 +505,7 @@
 - **请求方式**: GET
 - **URL 路径**: `/api/admin/health`(需 admin/operator,`logs.view` 权限)
 - **请求参数**: 无
-- **用途**: 聚合各平台最近一次采集、近 24h 运行/失败、最新数据写入、飞书推送统计、Cookie 配置——免手查 MySQL。
+- **用途**: 聚合各平台最近一次采集、近 24h 运行/失败、最新数据写入、飞书推送统计、公众号监听在监面、Cookie 配置——免手查 MySQL。
 
 **响应示例 (200)**
 ```json
@@ -515,15 +515,19 @@
     "douhot": { "last_run": "...", "last_status": "success", "last_detail": "ok", "runs_24h": 5, "failed_24h": 0 },
     "xianyu": { "last_run": "...", "last_status": "failed", "last_detail": "闲鱼人机验证(滑块),全部关键词均未采集", "runs_24h": 2, "failed_24h": 1 },
     "xianyu_deep": { "last_run": null, "last_status": null, "last_detail": null, "runs_24h": 0, "failed_24h": 0 },
+    "wechat_listen": { "last_run": "...", "last_status": "partial", "last_detail": "accounts=81 new=0 failed=1", "runs_24h": 4, "failed_24h": 0 },
     "weibo": { "...": "..." }, "baidu": { "...": "..." }
   },
-  "data": { "weibo": "...", "xianyu": null, "douhot": "...", "baidu": "..." },
-  "feishu": { "pushes_by_section": [ {"section": "douhot", "count": 106}, {"section": "weibo", "count": 976} ], "last_push": "..." },
-  "cookies": { "goofish": 1, "douyin": 1, "weibo": 1, "baidu": 1 }
+  "data": { "weibo": "...", "xianyu": null, "douhot": "...", "baidu": "...", "wechat": "..." },
+  "wechat_monitor": { "benchmarks": 81, "users": 2, "articles_24h": 20,
+                      "fixed_hours": "4:00 / 8:00 / 14:00 / 20:00", "next_point": "2026-09-22T14:00" },
+  "feishu": { "pushes_by_section": [ {"section": "douhot", "count": 106}, {"section": "wechat", "count": 40} ], "last_push": "..." },
+  "cookies": { "goofish": 1, "weread": 2, "quark": 1, "baidupan": 1 }
 }
 ```
-> `platforms` 每项为最近一次 `RunRecord`(采集运行)状态;`last_status=failed` 且 `last_detail` 含"滑块/限流"即闲鱼被风控。
-> `data` 各平台最新一条数据写入时间(为空=该平台从未进数据);`feishu` 为飞书推送计数/最近推送;`cookies` 为各平台已配 Cookie 的用户数。
+> `platforms` 每项为最近一次 `RunRecord`(采集运行)状态;`last_status=failed` 且 `last_detail` 含"滑块/限流"即闲鱼被风控。公众号的 kind 是 `wechat_listen`(定点作业,`runs_24h` 恒 ≤4 属正常)。
+> `data` 各平台最新一条数据写入时间(为空=该平台从未进数据);`feishu` 为飞书推送计数/最近推送;`cookies` 为各平台已配 Cookie 的用户数(平台名含 `weread`/`quark`/`baidupan`/`dajiala` 等)。
+> `wechat_monitor` 是公众号专属指标:`benchmarks` 全站在监对标号数、`users` 有在监号的用戶数、`articles_24h` 近 24h 新收文章、`fixed_hours` 定点时刻、`next_point` 下一轮。
 
 
 
