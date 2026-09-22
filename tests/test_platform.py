@@ -853,3 +853,22 @@ def test_admin_csv_export_neutralizes_formula_injection(session) -> None:
     assert "'@SUM(1+1)" in alerts_csv     # @ 前缀被中和
     assert "'-1+1" in alerts_csv          # - 前缀被中和
 
+
+def test_admin_import_users_role_not_written_as_username(session) -> None:
+    """批量导入 email,pwd,role:role 不能当成 username 传入 register_user。
+
+    回归:旧代码 `register_user(db, email, pwd, role)` 把角色串写进 username,
+    第二个同角色用户因 username 唯一校验撞 409 被静默跳过。"""
+    from sqlalchemy import select
+
+    from app.db.models import User
+    from app.admin import import_users
+
+    res = import_users(session, "u1@x.com,Passw0rd!x,editor\nu2@x.com,Passw0rd!x,editor")
+    assert res == {"created": 2, "skipped": 0}
+    users = {u.email: u for u in session.scalars(select(User)).all()}
+    assert users["u1@x.com"].username == "u1"       # 用户名回落邮箱前缀,非"editor"
+    assert users["u2@x.com"].username == "u2"
+    assert users["u1@x.com"].role == "editor" and users["u2@x.com"].role == "editor"
+
+

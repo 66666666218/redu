@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
 from datetime import date, datetime, timedelta
 
+from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, aliased
 
@@ -28,6 +30,8 @@ from app.db.models import (
     XianyuDaily,
     XianyuItem,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def dashboard(db: Session) -> dict:
@@ -246,12 +250,19 @@ def import_users(db: Session, text: str) -> dict:
             skipped += 1
             continue
         try:
-            u = register_user(db, email, pwd, role)
-            u.role = role or u.role
-            db.commit()
+            # register_user 第 4 位置参是 username(非 role);此前把 role 串直接传入
+            # 会污染用户名(第二个同角色用户还因 username 唯一校验撞 409)。角色在创建后单设。
+            u = register_user(db, email, pwd)
+            if role:
+                u.role = role
+                db.commit()
             created += 1
-        except Exception:  # noqa: BLE001
+        except HTTPException as exc:  # 邮箱/用户名冲突、校验失败等,记原因便于排查
             skipped += 1
+            logger.warning("导入用户跳过 %s:%s", email, exc.detail)
+        except Exception:  # noqa: BLE001 - 单行脏数据不阻断整批
+            skipped += 1
+            logger.exception("导入用户失败 %s", email)
     return {"created": created, "skipped": skipped}
 
 
