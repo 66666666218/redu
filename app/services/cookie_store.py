@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.models import UserCookie
@@ -94,9 +95,19 @@ def set_cookie(db: Session, user_id: int, platform: str, cookie: str) -> UserCoo
     if row is None:
         row = UserCookie(user_id=user_id, platform=platform, cookie=encrypt_cookie(cookie))
         db.add(row)
+        try:
+            db.commit()
+        except IntegrityError:
+            # 判空与写入非原子:多 worker 同一(用户,平台)首次并发保存会撞
+            # UniqueConstraint → 500。回滚后改走"更新已存在行"。
+            db.rollback()
+            row = db.scalar(select(UserCookie).where(
+                UserCookie.user_id == user_id, UserCookie.platform == platform))
+            row.cookie = encrypt_cookie(cookie)
+            db.commit()
     else:
         row.cookie = encrypt_cookie(cookie)
-    db.commit()
+        db.commit()
     db.refresh(row)
     return row
 

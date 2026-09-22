@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.models import User, UserCookie, UserSchedule
@@ -84,7 +85,13 @@ def get_or_create(db: Session, user_id: int, section: str) -> UserSchedule:
     if row is None:
         row = UserSchedule(user_id=user_id, section=section, interval_minutes=section_default_interval(section), enabled=True)
         db.add(row)
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError:
+            # 判空与写入非原子:并发首次访问同一 (用户,板块) 撞唯一约束 → 回滚后取已存在行。
+            db.rollback()
+            row = db.scalar(select(UserSchedule).where(
+                UserSchedule.user_id == user_id, UserSchedule.section == section))
     return row
 
 
