@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     wechat_reader_vid: str = ""     # 读书平台 vid(微信读书用户ID)
     dajiala_min_balance: float = 1.0  # 余额低于该值(元)跳过付费监听,避免打穿余额(免费接口不受限)
     wechat_sync_max_pages: int = 3  # 一键同步默认最多翻页数(history_by_ghid ¥0.14/页,每页约10次发文)
+    wechat_sync_push_limit: int = 20  # 一次「同步文章」转存+推飞书的篇数上限(资源文优先;同盘链去重后仍超量才截断)
     wechat_traffic_sample_limit: int = 30  # 每轮阅读量采样最多篇数(¥0.06/篇,控成本)
     wechat_listen_sample_new: bool = True  # 监听到新文时立即采样阅读量(随推送一起发飞书)
     wechat_listen_sample_limit: int = 10   # 监听一轮内"立即采样"的新文上限(控制成本)
@@ -48,7 +49,7 @@ class Settings(BaseSettings):
     quark_share_password: str = ""         # 二次分享提取码(空=无)
     pan_transfer_enabled: bool = True      # 是否自动转存(需 quark_cookie;失败回落原链接推送)
     pan_transfer_backfill_limit: int = 8   # 每轮监听额外补转存的历史文章数
-                                           # (同步入库的历史文章不走实时转存,只靠这个队列慢慢补)
+                                           # (同步当场转存失败/早于该逻辑入库的旧文,靠这个队列慢慢补)
     wechat_traffic_min_interval_hours: int = 24  # 同一篇文章两次采样最小间隔(小时)
     wechat_traffic_cron: str = "30 21 * * *"  # 每日阅读量采样时间(默认 21:30)
     wechat_resample_growth_pct: float = 100  # 相邻采样阅读增长≥该百分比 → 爆点苗头

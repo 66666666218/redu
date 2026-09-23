@@ -743,7 +743,14 @@
 
 - **请求方式**: POST `/api/wechat/benchmarks/{id}/sync?max_pages=3`
 - 每页约 10 次发文(¥0.14/页),`max_pages` 缺省为 `WECHAT_SYNC_MAX_PAGES`(3);翻到 `IsEnd` 提前停止
-- **响应示例**: `{ "platform":"wechat_sync", "status":"success", "pages":2, "new":17, "ghid":"gh_xxx", "nickname":"微信派" }`
+- **入库之后当场"转存 → 推送"**(2026-09-23):新入库文章先按盘链去重(同一资源只留一篇,
+  更早入库过的链也不再推),再走夸克/百度转存换我方分享链,最后推飞书卡片 → 点文章名直接进我的盘。
+  同步在 HTTP 请求里,故 ① 不做即时采样(`allow_paid=False`,阅读量交给采样作业);
+  ② 单轮窗口 `WECHAT_SYNC_PUSH_LIMIT`(默认 20)篇,资源文优先,超出的留给定点监听的补转存队列;
+  ③ 不叠加补转存队列(`run_backfill=False`),避免一次点击多打几十次夸克接口
+- **响应示例**: `{ "platform":"wechat_sync", "status":"success", "pages":2, "new":17, "ghid":"gh_xxx",
+  "nickname":"微信派", "pushed":12, "transferred":9, "deduped":3, "truncated":2 }`
+  (`deduped`=同链接被并掉的篇数,`truncated`=超出单轮窗口未推的篇数;运行记录 detail 同样带这三个数)
 - 无 dajiala key 时走微信读书免费源(只能拿最新一篇,`status:"partial"`+`reason:"weread_latest_only"`);
   `wr_skey` 过期会**先自动续期一次**再重试
 - **错误**:404 对标号不存在;502 上游失效——detail 是可执行文案(微信读书登录态失效→去「Cookie 管理」换含
@@ -763,14 +770,11 @@
   余额不足时: `{ "platform":"wechat", "status":"success", "accounts":2, "new":1, "failed":0,
   "dajiala_skipped":"low_balance", "balance":0.02 }`
 
-- **飞书推送格式**(每篇三要素:文章名 / 我的夸克链接 / 流量详情;未配置夸克或转存失败则无链接行):
-
-  ```
-  📡 公众号监听 · 新发文 2 篇
-  🔴夸克网盘 某资源合集
-  📦 我的夸克链接: https://pan.quark.cn/s/xxxx (提取码 abcd)
-  📊 阅读 1234 · 点赞 5 · 在看 3 · 转发 7 · 收藏 2 · 评论 9
-  ```
+- **飞书推送格式**(wide_screen 网格卡,四列对齐:**公众号 / 文章 / 网盘 / 阅读**):
+  文章标题即超链接,优先级 **本轮转存链(附 `🔑提取码`)> 历史我方链 > 公众号原文**;
+  网盘列用图标交代点进去是谁的链:`🔴`=我方转存链、`⏳待转存`=有源链还没转好(点开是原文)、
+  `⛔源失效`=对方分享已被封(41031,永久转不了)、`—`=不带盘链。同盘链已被别的文章带过 → `🔥xN`。
+  监听与「同步文章」共用这一张卡(见 9b.4)。每卡 20 篇,超出继续发卡,不截断。
 
 ### 9b.6 文章列表(支持盘链过滤)
 

@@ -114,8 +114,15 @@ async function syncOne(b) {
   busy.value = 'sync' + b.id
   try {
     const r = await api.wechatBenchmarkSync(b.id)
-    if (r.status === 'partial' && r.reason === 'weread_latest_only') toastOk('同步完成:微信读书源仅能拿最新一篇(历史需 dajiala)')
-    else toastOk(`同步完成:翻 ${r.pages} 页,新增 ${r.new} 篇`)
+    if (r.status === 'skipped') {
+      toastErr('同步未执行:没有可用数据源(需 dajiala key,或微信读书 Cookie + 书架导入)')
+    } else {
+      const pushTxt = `已转存并推送 ${r.pushed ?? 0} 篇`
+        + (r.deduped ? `(相同链接去重 ${r.deduped} 篇)` : '')
+        + (r.truncated ? `(超出单轮上限,剩余 ${r.truncated} 篇留给监听补转存)` : '')
+      if (r.reason === 'weread_latest_only') toastOk(`同步完成:微信读书源仅能拿最新一篇(历史需 dajiala),${pushTxt}`)
+      else toastOk(`同步完成:翻 ${r.pages} 页,新增 ${r.new} 篇,${pushTxt}`)
+    }
     await loadArticles()
   } catch (e) { toastErr(e.message) } finally { busy.value = '' }
 }

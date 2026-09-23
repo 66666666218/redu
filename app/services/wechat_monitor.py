@@ -712,11 +712,14 @@ def _backfill_pan_links(session: Session) -> None:
 
 def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                          rows: list[WechatArticle],
-                         client: DajialaClient | None, allow_paid: bool = True) -> dict[int, list[tuple[str, str, str]]]:
+                         client: DajialaClient | None, allow_paid: bool = True,
+                         run_backfill: bool = True) -> dict[int, list[tuple[str, str, str]]]:
     """新文后处理(推送前):① 即时采样阅读量(¥0.06/篇,上限 wechat_listen_sample_limit);
     ② 夸克转存盘链 → 换自己的分享链并持久化到 `my_pan_urls`。
 
     `allow_paid=False`(dajiala 余额不足)时连即时采样也跳过,只做免费的夸克转存;
+    `run_backfill=False`(同步收尾)跳过历史补转存队列——同步在 HTTP 请求里,自带窗口已经
+    限死了本次转存篇数,再叠加队列会让一次点击多打 N 次夸克接口;队列留给定点监听。
     返回 {article_id: [(原链, 我的链, 提取码)]} 供飞书推送;失败回落原链接,绝不阻塞监听。
     """
     replacements: dict[int, list[tuple[str, str, str]]] = {}
@@ -757,19 +760,23 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
         # 我方分享链——多个对标号发同一资源时,旧逻辑每篇各存一份(浪费空间+成倍风控暴露)。
         reused: dict[str, tuple[str, str]] = {}  # pan_url -> (my_share_url, 提取码)
         # 补转存兜底:历史转存失败(有原链无我链)的文章每轮补 `pan_transfer_backfill_limit` 篇,
-        # 让"推送带我的夸克链接"的覆盖率逐渐收敛(同步入库的历史文章只能靠这条队列补)。
+        # 让"推送带我的夸克链接"的覆盖率逐渐收敛(同步入库时走的是实时转存,这里补的是当场失败
+        # 与该逻辑上线前的旧文)。
         # 排序按 id 升序=队头优先,所以**永久失败的必须当场出队**,否则几篇源已被封的死链
         # 年年霸占配额,后面真正能转的文章永远轮不到(2026-09-22 本机库实测:24 篇 09-15
         # 的文章卡在队头,一周没动过)。
         try:
-            backfill = session.scalars(select(WechatArticle).where(
+            backfill = [] if not run_backfill else session.scalars(select(WechatArticle).where(
                 WechatArticle.user_id == user_id, WechatArticle.pan_urls != "",
                 or_(WechatArticle.my_pan_urls.is_(None), WechatArticle.my_pan_urls == "")
             ).order_by(WechatArticle.id).limit(
                 max(1, int(getattr(settings, "pan_transfer_backfill_limit", 8) or 8)))).all()
         except Exception:  # noqa: BLE001 - 兜底失败不影响本轮新文
             backfill = []
-        transfer_rows = list(rows) + [x for x in backfill if x not in rows]
+        # 按对象身份(而非 `x not in rows`)排除重复:SQLAlchemy 实体的 == 会生成 SQL 表达式
+        # 而不是布尔值,放进 in 的判断里语义含混。
+        row_ids = {id(x) for x in rows}
+        transfer_rows = list(rows) + [x for x in backfill if id(x) not in row_ids]
         for r in transfer_rows:
             dead = False
             for u in [x.strip() for x in (r.pan_urls or "").splitlines() if x.strip()][:3]:
@@ -1390,12 +1397,87 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
                 logger.exception("公众号监听飞书推送失败 user=%s page=%s", user_id, page_idx)
 
 
+def _dedupe_sync_push_rows(session: Session, user_id: int,
+                           rows: list[WechatArticle]) -> list[WechatArticle]:
+    """同一资源(相同网盘分享链)只推一篇:本轮内保留首见者,更早入库过的盘链不再推。
+
+    这是"相同链接不需要重复保存"的推送侧配套——转存侧由 `_enrich_new_articles` 的盘链级
+    复用保证。无盘链的文章按 URL 天然唯一(`_insert_new_articles` 已按 URL 去重),原样保留。
+    """
+    if not rows:
+        return []
+    ids = [r.id for r in rows]
+    first_pan = {r.id: next((x.strip() for x in (r.pan_urls or "").splitlines() if x.strip()), "")
+                 for r in rows}
+    pans = {p for p in first_pan.values() if p}
+    already: set[str] = set()
+    if pans:
+        # 本轮之外的文章(更早入库、早已随监听/同步进过飞书群)带过这个资源 → 再推就是刷屏
+        already = {p for (p,) in session.execute(
+            select(WechatPanLink.pan_url).where(
+                WechatPanLink.user_id == user_id,
+                WechatPanLink.pan_url.in_(pans),
+                WechatPanLink.article_id.notin_(ids)).distinct()).all()}
+    seen: set[str] = set()
+    kept: list[WechatArticle] = []
+    for r in sorted(rows, key=lambda x: x.id):  # 入库顺序即新→旧,保留首见者
+        p = first_pan.get(r.id, "")
+        if p and (p in already or p in seen):
+            continue
+        if p:
+            seen.add(p)
+        kept.append(r)
+    return kept
+
+
+def _sync_push_after_transfer(session: Session, user_id: int, settings: Settings,
+                              new_rows: list[WechatArticle]) -> dict:
+    """同步收尾:按资源去重 → 先转存夸克链 → 再推飞书(文章名点进去就是"我的盘")。
+
+    三条约束决定了这里的形状:
+    ① 去重:同一盘链只留一篇(本轮内 + 更早入库过的都不再推),转存侧由
+       `_enrich_new_articles` 的盘链级复用保证"相同链接不重复保存";
+    ② 不采样:一次同步可入库上百篇历史文,逐篇 ¥0.06 即时采样会打穿余额,
+       所以 `allow_paid=False`,历史文阅读量交给采样作业;
+    ③ 封顶 `wechat_sync_push_limit` 篇(资源文优先):转存是同步网络调用,
+       不设窗口会让一次 HTTP 请求跑几十分钟占死线程池。窗口外的旧文本轮不推也不转,
+       留给监听的补转存队列(`run_backfill=False` 就是不再叠加这条队列),
+       数量写进运行记录与返回值,不静默丢。
+    """
+    if not new_rows:
+        return {"pushed": 0, "transferred": 0, "deduped": 0, "truncated": 0}
+    session.commit()  # 新入库的行先落库:下面转存若炸,回滚不能把这次同步的成果一起带走
+    kept = _dedupe_sync_push_rows(session, user_id, new_rows)
+
+    def _ts(r: WechatArticle) -> int:
+        return int(r.publish_at.timestamp()) if r.publish_at else 0
+
+    ordered = sorted(kept, key=lambda r: (not r.pan_types, -_ts(r)))
+    cap = max(1, int(settings.wechat_sync_push_limit or 20))
+    to_push = ordered[:cap]
+    try:
+        replacements = _enrich_new_articles(session, user_id, settings, to_push,
+                                            client=None, allow_paid=False, run_backfill=False)
+        session.commit()
+    except Exception:  # noqa: BLE001 - 转存炸了也要推(标题回落原文),不能让同步整个报错
+        logger.exception("同步后转存失败 user=%s", user_id)
+        session.rollback()
+        replacements = {}
+    _push_listen(session, user_id, settings, to_push, replacements)
+    return {"pushed": len(to_push), "transferred": len(replacements),
+            "deduped": len(new_rows) - len(kept), "truncated": max(0, len(ordered) - cap)}
+
+
 # ---------------------------------------------------------------- 全量同步
 def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
                         settings: Settings | None = None, client: DajialaClient | None = None,
                         max_pages: int | None = None, weread: WereadClient | None = None,
                         platform: ReaderPlatformClient | None = None) -> dict:
-    """一键同步:history_by_ghid 翻页拉历史文章入库(¥0.14/页,默认 WECHAT_SYNC_MAX_PAGES 封顶)。"""
+    """一键同步:history_by_ghid 翻页拉历史文章入库(¥0.14/页,默认 WECHAT_SYNC_MAX_PAGES 封顶)。
+
+    入库后统一走 `_sync_push_after_transfer`:同盘链去重 → 夸克转存换成我方链 → 再推飞书,
+    所以卡片里点文章名直接进"我的夸克链",不会重复保存/重复推送。
+    """
     settings = _base(settings)
     b = session.scalar(select(WechatBenchmark).where(
         WechatBenchmark.user_id == user_id, WechatBenchmark.id == benchmark_id))
@@ -1405,7 +1487,7 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
     # 服务端钳制:query 参数无上限时恶意调用可烧余额(¥0.14/页)
     limit = max(1, min(int(max_pages or (10 if plat and b.biz else settings.wechat_sync_max_pages)), 20))
     if plat and b.biz:
-        added = 0
+        new_rows: list[WechatArticle] = []
         pages = 0
         try:
             while pages < limit:
@@ -1413,7 +1495,7 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
                 norm = [{"title": it["title"], "url": it["url"],
                          "publish_at": _parse_time(it.get("publish_at_raw"))} for it in raw_items]
                 got = _insert_new_articles(session, user_id, b, norm, source="sync", require_pan=False)
-                added += len(got)
+                new_rows.extend(got)
                 pages += 1
                 if not raw_items or len(got) < len(raw_items):
                     break  # 本页为空或全部已入库 → 更旧的页也必然已见
@@ -1421,11 +1503,13 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
             logger.warning("读书平台同步失败,转 dajiala/微信读书:%s", exc)
         if pages:
             b.last_item_at = datetime.now()
+            push = _sync_push_after_transfer(session, user_id, settings, new_rows)
             _record_run(session, user_id, "wechat_sync", "success",
-                        f"platform account={b.nickname} pages={pages} new={added}")
+                        f"platform account={b.nickname} pages={pages} new={len(new_rows)} "
+                        f"pushed={push['pushed']} deduped={push['deduped']} truncated={push['truncated']}")
             session.commit()
             return {"platform": "wechat_sync", "status": "success", "pages": pages,
-                    "new": added, "ghid": b.ghid, "nickname": b.nickname}
+                    "new": len(new_rows), "ghid": b.ghid, "nickname": b.nickname, **push}
     # 走 _dajiala_key 而非全局 settings.dajiala_key:POST /api/wechat/benchmarks/{id}/sync
     # 是普通用户可控入口,¥0.14/页 × 无限次调用可打穿运营者余额(2026-09-14 隔离原则的漏网路径)。
     sync_key = _dajiala_key(session, user_id, settings)
@@ -1446,17 +1530,20 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
                 raise
             wc = WereadClient(refreshed["cookie"])
             item = wc.latest_article(b.weread_book_id)
-        new = 0
+        new_rows = []
         if item and item["url"]:
             resolver = (lambda _title, _rid=item["review_id"]: wc.mp_content(_rid))
-            new = len(_insert_new_articles(session, user_id, b, [item], source="sync",
-                                           content_resolver=resolver, require_pan=False))
+            new_rows = _insert_new_articles(session, user_id, b, [item], source="sync",
+                                            content_resolver=resolver, require_pan=False)
             b.last_item_at = datetime.now()
+        push = _sync_push_after_transfer(session, user_id, settings, new_rows)
         _record_run(session, user_id, "wechat_sync", "partial",
-                    f"weread_latest_only account={b.nickname} new={new}")
+                    f"weread_latest_only account={b.nickname} new={len(new_rows)} "
+                    f"pushed={push['pushed']} deduped={push['deduped']} truncated={push['truncated']}")
         session.commit()
         return {"platform": "wechat_sync", "status": "partial", "reason": "weread_latest_only",
-                "pages": 1 if item else 0, "new": new, "ghid": b.ghid, "nickname": b.nickname}
+                "pages": 1 if item else 0, "new": len(new_rows), "ghid": b.ghid,
+                "nickname": b.nickname, **push}
     client = client or DajialaClient(sync_key)
     added: list[WechatArticle] = []
     offset = ""
@@ -1481,12 +1568,14 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
     except DajialaNoBalance:
         logger.warning("同步中途余额不足(用户 %s 账号 %s,已入库 %d 篇)", user_id, b.nickname, len(added))
     b.last_item_at = datetime.now()
+    push = _sync_push_after_transfer(session, user_id, settings, added)
     status = "partial" if added and pages >= limit else "success"
     _record_run(session, user_id, "wechat_sync", status if added or pages else "success",
-                f"pages={pages} new={len(added)} account={b.nickname}")
+                f"pages={pages} new={len(added)} pushed={push['pushed']} "
+                f"deduped={push['deduped']} truncated={push['truncated']} account={b.nickname}")
     session.commit()
     return {"platform": "wechat_sync", "status": status, "pages": pages, "new": len(added),
-            "ghid": b.ghid, "nickname": b.nickname}
+            "ghid": b.ghid, "nickname": b.nickname, **push}
 
 def _apply_sample(session: Session, user_id: int, r: WechatArticle, data: dict, now: datetime) -> None:
     """把 read_zan_pro 结果写回文章 + 追加一个采样点(首采样记 first_read_num 做账号基线)。"""

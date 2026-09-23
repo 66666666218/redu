@@ -1897,3 +1897,143 @@ def test_admin_health_reports_transfer_coverage(session) -> None:
     m = h["wechat_monitor"]
     assert m["pan_30d"] == 2 and m["transferred_30d"] == 1
     assert m["pending_30d"] == 1 and m["quark_cookie_users"] == 1
+
+
+# ---------------------------------------------------------------- 同步 → 转存 → 推送
+def _fake_feishu(monkeypatch, cards: list) -> None:
+    import app.services.feishu as feishu_mod
+
+    monkeypatch.setattr(feishu_mod, "webhook_for",
+                        lambda settings, section: "https://open.feishu.cn/hook/x")
+
+    class _FakeFeishu:
+        def __init__(self, webhook, secret="") -> None:
+            pass
+
+        def send(self, msg: str) -> bool:
+            return True
+
+        def send_card(self, card: dict) -> bool:
+            cards.append(card)
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
+
+
+def _fake_quark(monkeypatch, out_map: dict[str, str], calls: list) -> None:
+    from app.services.quark_transfer import QuarkTransfer
+
+    monkeypatch.setattr(QuarkTransfer, "__init__", lambda self, *a, **kw: None)
+
+    def _transfer(self, url, save_dir="", password=""):
+        calls.append(url)
+        return {"share_url": out_map[url], "password": "ab12"}
+
+    monkeypatch.setattr(QuarkTransfer, "transfer_and_share", _transfer)
+
+
+def test_sync_transfers_then_pushes_my_link(session, monkeypatch) -> None:
+    """同步入库 → 先夸克转存 → 再推飞书;相同盘链只保存一次、只推一篇。
+
+    回归:旧实现同步只入库,卡片永远等监听的下一轮才带上我的链,
+    且同资源被搬运两次就会推两张卡、转存两次。"""
+    import json
+
+    from app.services.feishu import _md_safe
+
+    b = WechatBenchmark(user_id=1, nickname="号A", biz="bizABC")
+    session.add(b)
+    session.commit()
+    plat = FakePlatform(pages=[[
+        {"id": "r1", "title": "资源文一 https://pan.quark.cn/s/RAW1",
+         "url": "https://mp.weixin.qq.com/s/r1"},
+        {"id": "r2", "title": "资源文二 https://pan.quark.cn/s/RAW1",
+         "url": "https://mp.weixin.qq.com/s/r2"},
+    ]])
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
+    calls: list[str] = []
+    _fake_quark(monkeypatch, {"https://pan.quark.cn/s/RAW1": "https://pan.quark.cn/s/MINE1"}, calls)
+    cards: list[dict] = []
+    _fake_feishu(monkeypatch, cards)
+
+    st = _settings(quark_cookie="ck=x", pan_transfer_enabled=True, wechat_sync_push_limit=20)
+    out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=st, platform=plat)
+    assert out["new"] == 2 and out["deduped"] == 1 and out["pushed"] == 1
+    assert calls == ["https://pan.quark.cn/s/RAW1"]      # 相同链接不再重复转存
+    blob = json.dumps(cards, ensure_ascii=False)
+    assert "pan.quark.cn/s/MINE1" in blob and "🔑ab12" in blob   # 点文章名进我的盘
+    assert f"]({_md_safe('https://pan.quark.cn/s/RAW1')}" not in blob  # 不把他人原链做成链接
+
+
+def test_sync_push_skips_resource_already_announced(session, monkeypatch) -> None:
+    """更早入库的文章已经带着这条盘链进过飞书群 → 同步到的搬运文不再重推。"""
+    b = WechatBenchmark(user_id=1, nickname="号A", biz="bizABC")
+    session.add(b)
+    session.commit()
+    old = WechatArticle(user_id=1, title="首发文", url="https://mp.weixin.qq.com/s/old",
+                        source="listen", pan_urls="https://pan.quark.cn/s/RAW1")
+    session.add(old)
+    session.commit()
+    session.add(WechatPanLink(user_id=1, article_id=old.id, pan_url="https://pan.quark.cn/s/RAW1"))
+    session.commit()
+
+    plat = FakePlatform(pages=[[{"id": "r1", "title": "搬运文 https://pan.quark.cn/s/RAW1",
+                                 "url": "https://mp.weixin.qq.com/s/r1"}]])
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
+    calls: list[str] = []
+    _fake_quark(monkeypatch, {}, calls)
+    cards: list[dict] = []
+    _fake_feishu(monkeypatch, cards)
+
+    st = _settings(quark_cookie="ck=x", pan_transfer_enabled=True, wechat_sync_push_limit=20)
+    out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=st, platform=plat)
+    assert out["new"] == 1 and out["deduped"] == 1 and out["pushed"] == 0
+    assert calls == [] and cards == []   # 已推过的资源连转存都不必再做
+
+
+def test_sync_push_window_caps_transfer_calls(session, monkeypatch) -> None:
+    """一次同步入库很多资源文时按 `wechat_sync_push_limit` 截断:转存调用同步受限,
+    同步请求不会被几十次夸克调用拖成十几分钟;截断数量写进返回值。"""
+    b = WechatBenchmark(user_id=1, nickname="号A", biz="bizABC")
+    session.add(b)
+    session.commit()
+    items = [{"id": f"i{n}", "title": f"资源文{n} https://pan.quark.cn/s/raw{n}",
+              "url": f"https://mp.weixin.qq.com/s/i{n}"} for n in range(5)]
+    plat = FakePlatform(pages=[items])
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
+    calls: list[str] = []
+    _fake_quark(monkeypatch, {f"https://pan.quark.cn/s/raw{n}": f"https://pan.quark.cn/s/m{n}"
+                              for n in range(5)}, calls)
+    _fake_feishu(monkeypatch, [])
+
+    st = _settings(quark_cookie="ck=x", pan_transfer_enabled=True, wechat_sync_push_limit=2)
+    out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=st, platform=plat)
+    assert out["pushed"] == 2 and out["truncated"] == 3 and out["deduped"] == 0
+    assert len(calls) == 2
+
+
+def test_sync_still_pushes_when_transfer_blows_up(session, monkeypatch) -> None:
+    """转存环节抛异常不能把同步整个搞失败:照旧推卡,标题回落公众号原文。"""
+    import json
+
+    from app.services.quark_transfer import QuarkTransfer
+
+    b = WechatBenchmark(user_id=1, nickname="号A", biz="bizABC")
+    session.add(b)
+    session.commit()
+    plat = FakePlatform(pages=[[{"id": "r1", "title": "资源文 https://pan.quark.cn/s/RAW9",
+                                 "url": "https://mp.weixin.qq.com/s/r1"}]])
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
+    monkeypatch.setattr(QuarkTransfer, "__init__", lambda self, *a, **kw: None)
+
+    def _boom(self, url, **kw):
+        raise RuntimeError("夸克接口 500")
+
+    monkeypatch.setattr(QuarkTransfer, "transfer_and_share", _boom)
+    cards: list[dict] = []
+    _fake_feishu(monkeypatch, cards)
+
+    st = _settings(quark_cookie="ck=x", pan_transfer_enabled=True, wechat_sync_push_limit=20)
+    out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=st, platform=plat)
+    assert out["pushed"] == 1
+    assert "mp.weixin.qq.com/s/r1" in json.dumps(cards, ensure_ascii=False)
