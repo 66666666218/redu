@@ -47,6 +47,13 @@ onMounted(loadHealth)
         <b :class="{ error: !health.wechat_monitor.articles_24h }">{{ health.wechat_monitor.articles_24h }}</b> 篇
         · 定点 {{ health.wechat_monitor.fixed_hours }} · 下轮 {{ fmtTime(health.wechat_monitor.next_point) }}
       </p>
+      <p class="empty" v-if="health.wechat_monitor" style="margin:6px 0 0">
+        夸克转存(近30天带盘链文章):已转我方链
+        <b>{{ health.wechat_monitor.transferred_30d }}</b>/{{ health.wechat_monitor.pan_30d }} 篇
+        · 待转存 <b :class="{ error: health.wechat_monitor.pending_30d }">{{ health.wechat_monitor.pending_30d }}</b>
+        · 源已失效 {{ health.wechat_monitor.dead_source_30d }}
+        · 配了 quark Cookie 的用户 <b :class="{ error: !health.wechat_monitor.quark_cookie_users }">{{ health.wechat_monitor.quark_cookie_users }}</b>
+      </p>
       <div class="grid" style="margin-top:10px">
         <div>
           <h4 style="color:var(--dim);margin:6px 0">最新数据写入</h4>

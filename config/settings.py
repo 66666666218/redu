@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     quark_fid_store: str = "data/quark_fid_cache.json"  # 目录 fid 持久缓存(大盘免重扫;幽灵同名复用)
     quark_share_password: str = ""         # 二次分享提取码(空=无)
     pan_transfer_enabled: bool = True      # 是否自动转存(需 quark_cookie;失败回落原链接推送)
+    pan_transfer_backfill_limit: int = 8   # 每轮监听额外补转存的历史文章数
+                                           # (同步入库的历史文章不走实时转存,只靠这个队列慢慢补)
     wechat_traffic_min_interval_hours: int = 24  # 同一篇文章两次采样最小间隔(小时)
     wechat_traffic_cron: str = "30 21 * * *"  # 每日阅读量采样时间(默认 21:30)
     wechat_resample_growth_pct: float = 100  # 相邻采样阅读增长≥该百分比 → 爆点苗头

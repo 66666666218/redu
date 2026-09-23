@@ -520,14 +520,17 @@
   },
   "data": { "weibo": "...", "xianyu": null, "douhot": "...", "baidu": "...", "wechat": "..." },
   "wechat_monitor": { "benchmarks": 81, "users": 2, "articles_24h": 20,
-                      "fixed_hours": "4:00 / 8:00 / 14:00 / 20:00", "next_point": "2026-09-22T14:00" },
+                      "fixed_hours": "4:00 / 8:00 / 14:00 / 20:00", "next_point": "2026-09-22T14:00",
+                      "pan_30d": 226, "transferred_30d": 202, "pending_30d": 0,
+                      "dead_source_30d": 24, "quark_cookie_users": 1 },
   "feishu": { "pushes_by_section": [ {"section": "douhot", "count": 106}, {"section": "wechat", "count": 40} ], "last_push": "..." },
   "cookies": { "goofish": 1, "weread": 2, "quark": 1, "baidupan": 1 }
 }
 ```
 > `platforms` 每项为最近一次 `RunRecord`(采集运行)状态;`last_status=failed` 且 `last_detail` 含"滑块/限流"即闲鱼被风控。公众号的 kind 是 `wechat_listen`(定点作业,`runs_24h` 恒 ≤4 属正常)。
 > `data` 各平台最新一条数据写入时间(为空=该平台从未进数据);`feishu` 为飞书推送计数/最近推送;`cookies` 为各平台已配 Cookie 的用户数(平台名含 `weread`/`quark`/`baidupan`/`dajiala` 等)。
-> `wechat_monitor` 是公众号专属指标:`benchmarks` 全站在监对标号数、`users` 有在监号的用戶数、`articles_24h` 近 24h 新收文章、`fixed_hours` 定点时刻、`next_point` 下一轮。
+> `wechat_monitor` 是公众号专属指标:`benchmarks` 全站在监对标号数、`users` 有在监号的用户数、`articles_24h` 近 24h 新收文章、`fixed_hours` 定点时刻、`next_point` 下一轮。
+> 转存覆盖率(近 30 天带盘链文章,决定飞书标题点进去是"我方夸克链"还是公众号原文):`pan_30d` 带盘链文章数、`transferred_30d` 已换成我方夸克链、`pending_30d` 仍在补转存队列、`dead_source_30d` 源分享被封(41031)永久转不了、`quark_cookie_users` 配了夸克 Cookie 的用户数(为 0 时 `pending` 只增不减)。
 
 
 

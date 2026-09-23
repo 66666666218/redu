@@ -756,13 +756,17 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
         # 盘链级转存去重:同一资源(相同夸克分享链)只转存一次,后续文章复用首篇的
         # 我方分享链——多个对标号发同一资源时,旧逻辑每篇各存一份(浪费空间+成倍风控暴露)。
         reused: dict[str, tuple[str, str]] = {}  # pan_url -> (my_share_url, 提取码)
-        # 补转存兜底:历史转存失败(有原链无我链)的文章每轮最多补 3 篇,
-        # 让"推送带我的夸克链接"的覆盖率逐渐收敛到 100%
+        # 补转存兜底:历史转存失败(有原链无我链)的文章每轮补 `pan_transfer_backfill_limit` 篇,
+        # 让"推送带我的夸克链接"的覆盖率逐渐收敛(同步入库的历史文章只能靠这条队列补)。
+        # 排序按 id 升序=队头优先,所以**永久失败的必须当场出队**,否则几篇源已被封的死链
+        # 年年霸占配额,后面真正能转的文章永远轮不到(2026-09-22 本机库实测:24 篇 09-15
+        # 的文章卡在队头,一周没动过)。
         try:
             backfill = session.scalars(select(WechatArticle).where(
                 WechatArticle.user_id == user_id, WechatArticle.pan_urls != "",
                 or_(WechatArticle.my_pan_urls.is_(None), WechatArticle.my_pan_urls == "")
-            ).order_by(WechatArticle.id).limit(3)).all()
+            ).order_by(WechatArticle.id).limit(
+                max(1, int(getattr(settings, "pan_transfer_backfill_limit", 8) or 8)))).all()
         except Exception:  # noqa: BLE001 - 兜底失败不影响本轮新文
             backfill = []
         transfer_rows = list(rows) + [x for x in backfill if x not in rows]
@@ -823,9 +827,16 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                                 replacements.setdefault(r.id, []).append((u, u, ""))
                                 logger.info("盘链为自己分享,直接采用: %s", u[:60])
                                 continue
-                            # 41031=对方分享被封(源失效,推送回落原文);其余为真失败
-                            level = logger.info if "41031" in str(exc) else logger.warning
-                            level("夸克转存失败 %s:%s(推送保留原链接)", u, str(exc)[:80])
+                            # 41031=对方分享被封(源永久失效,重试不可能成功)→ 落一条标记
+                            # 让它离开补转存队列;推送仍回落原文,网盘列显示"源失效"。
+                            # 其余为真失败(网络/风控),保留空 my_pan_urls 下轮重试。
+                            if "41031" in str(exc):
+                                mine = [x for x in (r.my_pan_urls or "").splitlines() if x.strip()]
+                                mine.append("⚠️源分享已被封(41031),未转存")
+                                r.my_pan_urls = chr(10).join(mine)[:2000]
+                                logger.info("夸克源分享已失效,出队补转存队列 %s:%s", u, str(exc)[:80])
+                                continue
+                            logger.warning("夸克转存失败 %s:%s(推送保留原链接)", u, str(exc)[:80])
                             continue
                         reused[u] = (res["share_url"], res["password"])
                         share_url, pwd = res["share_url"], res["password"]
@@ -1259,14 +1270,17 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
     def _render_article(r: WechatArticle) -> dict:
         rep = replacements.get(r.id) or []
         code = ""
+        my_link = False          # 标题链接是否指向"我方转存链"(False=点进去是公众号原文)
         if rep:
             link, code = rep[0][1], rep[0][2]
+            my_link = True
         else:
             # 只展示我方网盘链接(本轮转存链 > 历史我方链);绝不回落到别人的盘链——
             # 未转存时点标题打开公众号原文。历史 my_pan_urls 常自带提取码,拆出来明文显示。
             cand = next((x.strip() for x in (r.my_pan_urls or "").splitlines()
                          if x.strip().startswith("https://pan.quark.cn/s/")), "")
             if cand:
+                my_link = True
                 m = re.search(r"(?:提取码\s*([0-9A-Za-z]{4}))", cand)
                 link = cand.split(" (提取码")[0].strip()
                 code = m.group(1) if m else ""
@@ -1293,7 +1307,17 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
         # href 只放干净链接(旧实现把" (提取码 xxxx)"拼进 URL → 链接点不开),提取码明文附后
         article_md = (f"[{hot}{q_badge}{shown}]({_md_safe(link)})" if link else shown) \
             + (f" 🔑{code}" if code else "")
-        pan = f"🔴{_md_safe(r.pan_types)[:8]}" if r.pan_types else "—"
+        # 网盘列同时交代"点标题会去哪":🔴=我方转存链;⏳=有源链但还没转好(点进去是原文);
+        # ⛔=对方分享已被封,永远转不了。员工不必点开才发现进的是公众号文章。
+        types = _md_safe(r.pan_types)[:8] if r.pan_types else ""
+        if my_link:
+            pan = f"🔴{types}" if types else "🔴我方链"
+        elif "41031" in (r.my_pan_urls or ""):
+            pan = f"⛔源失效{types}"
+        elif (r.pan_urls or "").strip():
+            pan = f"⏳待转存{types}"
+        else:
+            pan = types or "—"
         read = str(r.read_num) if r.traffic_at else "—"
         return _col_set_row([
             (_md_safe(r.author)[:10] or "—", 3), (article_md, 7), (pan, 2), (read, 2),

@@ -1791,3 +1791,109 @@ def test_sync_reraises_when_renewal_also_fails(session, monkeypatch) -> None:
                         lambda s, u, settings=None: {"status": "failed", "reason": "renewal_failed"})
     with pytest.raises(wechat_monitor.WereadAuthError):
         wechat_monitor.sync_wechat_account(session, 1, b.id, settings=Settings(_env_file=None))
+
+
+def test_quark_dead_source_leaves_backfill_queue(session, monkeypatch) -> None:
+    """源分享已被封(41031)的历史文章必须出队:补转存按 id 升序取队头,
+    永久失败的死链若不落值会年年霸占配额,后面能转的永远轮不到
+    (2026-09-22 本机库实测 24 篇 09-15 的文章卡在一周没动)。"""
+    from app.services.quark_transfer import QuarkError, QuarkTransfer
+
+    DEAD = "https://pan.quark.cn/s/deadshare"
+    FRESH = "https://pan.quark.cn/s/freshshare"
+    old = WechatArticle(user_id=1, title="死链文", url="https://mp.weixin.qq.com/s/old",
+                        source="listen", pan_urls=DEAD)
+    new = WechatArticle(user_id=1, title="新文", url="https://mp.weixin.qq.com/s/new",
+                        source="listen", pan_urls=FRESH)
+    session.add_all([old, new])
+    session.commit()
+
+    tried: list[str] = []
+
+    def _transfer(self, url, **kw):
+        tried.append(url)
+        if url == DEAD:
+            raise QuarkError("夸克接口失败(41031): 分享已被取消")
+        return {"share_url": "https://pan.quark.cn/s/MINE", "password": ""}
+
+    monkeypatch.setattr(QuarkTransfer, "__init__", lambda self, *a, **kw: None)
+    monkeypatch.setattr(QuarkTransfer, "transfer_and_share", _transfer)
+    st = _settings(quark_cookie="ck=x", pan_transfer_enabled=True, wechat_listen_sample_new=False)
+
+    wechat_monitor._enrich_new_articles(session, 1, st, [new], client=None)
+    session.commit()
+    assert "41031" in (old.my_pan_urls or "")        # 落标记 → 不再算"待转存"
+    assert "pan.quark.cn/s/MINE" in new.my_pan_urls
+
+    tried.clear()
+    wechat_monitor._enrich_new_articles(session, 1, st, [new], client=None)
+    assert DEAD not in tried                          # 第二轮起不再撞死链
+
+
+def test_push_listen_marks_transfer_status(session, monkeypatch) -> None:
+    """卡片要当场说清点标题会去哪:🔴=我方转存链,⏳=有源链还没转好(点进去是原文),
+    ⛔=对方分享已封永远转不了。"""
+    import json
+
+    import app.services.feishu as feishu_mod
+
+    mine = WechatArticle(user_id=1, title="已转存文", author="号A", read_num=0,
+                         url="https://mp.weixin.qq.com/s/m", source="listen",
+                         pan_urls="https://pan.quark.cn/s/M", pan_types="夸克",
+                         my_pan_urls="https://pan.quark.cn/s/MINE")
+    pending = WechatArticle(user_id=1, title="待转存文", author="号A", read_num=0,
+                            url="https://mp.weixin.qq.com/s/p", source="listen",
+                            pan_urls="https://pan.quark.cn/s/P", pan_types="夸克")
+    dead = WechatArticle(user_id=1, title="死链文", author="号A", read_num=0,
+                         url="https://mp.weixin.qq.com/s/d", source="listen",
+                         pan_urls="https://pan.quark.cn/s/D", pan_types="夸克",
+                         my_pan_urls="⚠️源分享已被封(41031),未转存")
+    session.add_all([mine, pending, dead])
+    session.commit()
+
+    monkeypatch.setattr(feishu_mod, "webhook_for", lambda settings, section: "https://open.feishu.cn/hook/x")
+    cards: list[dict] = []
+
+    class _FakeFeishu:
+        def __init__(self, webhook, secret="") -> None:
+            pass
+
+        def send(self, msg: str) -> bool:
+            return True
+
+        def send_card(self, card: dict) -> bool:
+            cards.append(card)
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
+    # mine 走"本轮转存链";另外两篇无 replacements → 回落历史我方链/原文
+    wechat_monitor._push_listen(session, 1, _settings(), [mine, pending, dead],
+                                replacements={mine.id: [("https://pan.quark.cn/s/M",
+                                                         "https://pan.quark.cn/s/MINE", "")]})
+    blob = json.dumps(cards, ensure_ascii=False)
+    assert "⏳待转存" in blob and "⛔源失效" in blob
+    assert "mp.weixin.qq.com/s/p" in blob            # 待转存的仍指原文(有标记说明,不骗人)
+
+
+def test_admin_health_reports_transfer_coverage(session) -> None:
+    """运维页要看得见转存覆盖率:多少篇换成我方链、多少还在队列里、几个用户配了夸克 Cookie。"""
+    from datetime import datetime
+
+    from app.admin import collection_health
+    from app.db.models import UserCookie
+
+    session.add(WechatArticle(user_id=1, title="有链已转", url="u1", source="listen",
+                              pan_urls="https://pan.quark.cn/s/a",
+                              my_pan_urls="https://pan.quark.cn/s/mine", created_at=datetime.now()))
+    session.add(WechatArticle(user_id=1, title="有链未转", url="u2", source="listen",
+                              pan_urls="https://pan.quark.cn/s/b",
+                              my_pan_urls="", created_at=datetime.now()))
+    session.add(WechatArticle(user_id=1, title="无链", url="u3", source="listen",
+                              pan_urls="", created_at=datetime.now()))
+    session.add(UserCookie(user_id=1, platform="quark", cookie="x"))
+    session.commit()
+
+    h = collection_health(session)
+    m = h["wechat_monitor"]
+    assert m["pan_30d"] == 2 and m["transferred_30d"] == 1
+    assert m["pending_30d"] == 1 and m["quark_cookie_users"] == 1

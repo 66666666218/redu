@@ -443,6 +443,27 @@ def collection_health(db: Session) -> dict:
         "next_point": next_wechat_listen_at().isoformat(timespec="minutes"),
     }
 
+    # 夸克转存覆盖率(近 30 天带盘链的文章):飞书是给员工看的,标题必须点得进"我们自己的
+    # 转存链",落在 pending 里的那些点进去是公众号原文。运维据此判断是否缺 quark Cookie、
+    # 补转存队列是否在追。coalesce 是为了让 NULL 与 "" 在 MySQL/SQLite 上同一语义。
+    win30 = datetime.now() - timedelta(days=30)
+    empty_mine = func.coalesce(WechatArticle.my_pan_urls, "") == ""
+
+    def _pan_count(*conds) -> int:
+        return db.scalar(select(func.count(WechatArticle.id)).where(
+            WechatArticle.created_at >= win30, WechatArticle.pan_urls != "", *conds)) or 0
+
+    wechat_monitor.update({
+        "pan_30d": _pan_count(),
+        "transferred_30d": _pan_count(
+            func.coalesce(WechatArticle.my_pan_urls, "").like("%pan.quark.cn%")),
+        "pending_30d": _pan_count(empty_mine),
+        "dead_source_30d": _pan_count(
+            func.coalesce(WechatArticle.my_pan_urls, "").like("%41031%")),
+        "quark_cookie_users": db.scalar(select(func.count(func.distinct(UserCookie.user_id))).where(
+            UserCookie.platform == "quark")) or 0,
+    })
+
     return {
         "generated_at": datetime.now().isoformat(),
         "platforms": platforms,
