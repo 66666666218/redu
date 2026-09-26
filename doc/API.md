@@ -746,13 +746,17 @@
 - **入库之后当场"转存 → 推送"**(2026-09-23):新入库文章先按盘链去重(同一资源只留一篇,
   更早入库过的链也不再推),再走夸克/百度转存换我方分享链,最后推飞书卡片 → 点文章名直接进我的盘。
   同步在 HTTP 请求里,故 ① 不做即时采样(`allow_paid=False`,阅读量交给采样作业);
-  ② 单轮窗口 `WECHAT_SYNC_PUSH_LIMIT`(默认 20)篇,资源文优先,超出的留给定点监听的补转存队列;
+  ② 单轮窗口 `WECHAT_SYNC_PUSH_LIMIT`(默认 20)篇,资源文优先,**但近 24h 内发的文章一律先占满窗口、
+  不受封顶限制**(封顶只砍 24h 之前的历史补采文,见"近24h全推"铁律);
   ③ 不叠加补转存队列(`run_backfill=False`),避免一次点击多打几十次夸克接口
 - **响应示例**: `{ "platform":"wechat_sync", "status":"success", "pages":2, "new":17, "ghid":"gh_xxx",
   "nickname":"微信派", "pushed":12, "transferred":9, "deduped":3, "truncated":2 }`
   (`deduped`=同链接被并掉的篇数,`truncated`=超出单轮窗口未推的篇数;运行记录 detail 同样带这三个数)
-- 无 dajiala key 时走微信读书免费源(只能拿最新一篇,`status:"partial"`+`reason:"weread_latest_only"`);
-  `wr_skey` 过期会**先自动续期一次**再重试
+- 无 dajiala key 时走微信读书免费源:**先枚举 `mp/articles`(近 3 天,含同一天群发的第 2、3 篇),
+  列表被服务端限权(-2041)才退化到 cover 最新一篇** → `status:"partial"` +
+  `reason:"weread_list_limited_latest_only"`(或 `weread_list_error_latest_only`),响应带
+  `weread_list`(ok/limited/error)与 `items`(本次枚举到的篇数)。
+  `wr_skey` 过期会**先自动续期一次**再重试(续期后的新会话正是列表可用窗口)
 - **错误**:404 对标号不存在;502 上游失效——detail 是可执行文案(微信读书登录态失效→去「Cookie 管理」换含
   `wr_rt=` 的 Cookie;dajiala 欠费/风控原文)。前端只把 **502 的 detail 展示给用户**,500 仍显示统一
   "服务器开小差了"(500 的 detail 可能夹带异常堆栈,不外露)
@@ -769,6 +773,15 @@
 - **响应示例**: `{ "platform":"wechat", "status":"success", "accounts":2, "new":5, "failed":0 }`
   余额不足时: `{ "platform":"wechat", "status":"success", "accounts":2, "new":1, "failed":0,
   "dajiala_skipped":"low_balance", "balance":0.02 }`
+- **近 24h 全推(2026-09-26 定的铁律)**:被监控号近 24 小时发的文章必须**一篇不落**推到飞书
+  (飞书是员工看新发文的唯一入口)。监听侧本来就没有截断——采到的新文全推;唯一能不能兑现取决于
+  **微信读书"近期列表"这一轮是否可枚举**:可枚举时同一天群发的第 2、3 篇一起进来;被限权(-2041)时
+  只剩 cover 最新一篇,同日其它篇属**未知丢失**。为此每轮把可枚举性写进运行记录
+  (`detail` 里的 `weread_list(ok=可枚举数 off=列不出且无新文 off_with_new=列不出却有新文)`),
+  响应同步返回 `weread_list` 计数;只要 `off_with_new>0` 就推一条
+  `⚠️ 微信读书只能拿到最新一篇,同日其它篇可能漏推`(标题不带数字以便冷却去重,本轮计数写在正文),
+  并给出两条根治路径:① 部署 wewe-rss 并给对标号回填 `biz`(免费全量列表);② dajiala 充值走
+  `history_by_ghid`(付费)。临时缓解:对高产号多点「同步文章」(它在列表可用时会补同日兄弟篇)
 
 - **飞书推送格式**(wide_screen 网格卡,四列对齐:**公众号 / 文章 / 网盘 / 阅读**):
   文章标题即超链接,优先级 **本轮转存链(附 `🔑提取码`)> 历史我方链 > 公众号原文**;
@@ -835,12 +848,16 @@
   失败 HTTP 502(wr_rt 已失效,需重新扫码/复制完整 Cookie)
 - 前置:在微信读书 App 内关注目标公众号,并配置微信读书 Cookie(平台「Cookie管理」新增的
   **weread** 平台,按用户;或 `.env` 全局 `WEREAD_COOKIE`)
-- 数据源优先级:对标号有 `weread_book_id` 且有 Cookie → 微信读书(免费,每轮拿"最新一篇");
-  否则 dajiala `post_condition`(¥0.14/号)。微信读书登录失效(-2012/-2010)→ **自动续期重试一次**
+- 数据源优先级:对标号有 `weread_book_id` 且有 Cookie → 微信读书(免费,每轮拿"最新一篇"+ **会话初期可用时
+  枚举近 3 天列表**);否则 dajiala `post_condition`(¥0.14/号)。微信读书登录失效(-2012/-2010)→ **自动续期重试一次**
   (wr_rt 换新 wr_skey 并回写存储),续期失败才降级 dajiala。
+- **补采窗口**:`renewal` 换出新会话后 `mp/articles`(历史列表)才可用,调度作业 `run_full_sync_if_pending`
+  趁这个窗口对各号做一轮全量补采;一旦列表返回 -2041(该会话预算耗尽)就**立即中止本轮**——其余号只会各撞一次
+  并退化成"最新一篇",白烧调用密度;pending 标记保留,下个新会话再补。
 - **自动续期**:每日调度作业(默认 07:50,`WEREAD_REFRESH_CRON`)为全部用户续期;
   wr_skey 短效且轮换,续期后旧值自动失效,服务端已回写新值,用户无需手动更换 Cookie。
-- 监听/同步的其余行为不变;`sync` 无 dajiala key 时仅能同步"最新一篇"(返回 `partial`)。
+- 监听/同步的其余行为不变;`sync` 无 dajiala key 时优先枚举 `mp/articles`,只有列表被限权才退化为"最新一篇"
+  (返回 `partial` + `weread_list`)。
 - **读书平台(wewe-rss v2 兼容,免费全量)**:配置 `.env` 的 `WECHAT_READER_PLATFORM_URL/TOKEN/VID`
   后自动成为首选源——监听每号拿最新 20 篇、同步翻页拉全量(免费);对标号列表新增 `biz` 字段
   (文章页 `__biz`,加号时自动解析)。优先级:平台 → 微信读书 cover → dajiala。

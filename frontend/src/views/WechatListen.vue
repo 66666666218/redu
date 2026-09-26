@@ -120,7 +120,7 @@ async function syncOne(b) {
       const pushTxt = `已转存并推送 ${r.pushed ?? 0} 篇`
         + (r.deduped ? `(相同链接去重 ${r.deduped} 篇)` : '')
         + (r.truncated ? `(超出单轮上限,剩余 ${r.truncated} 篇留给监听补转存)` : '')
-      if (r.reason === 'weread_latest_only') toastOk(`同步完成:微信读书源仅能拿最新一篇(历史需 dajiala),${pushTxt}`)
+      if (String(r.reason || '').startsWith('weread_list_')) toastOk(`同步完成:微信读书近期列表不可用,本次只拿到最新一篇(同日其它篇需 wewe-rss 或 dajiala),${pushTxt}`)
       else toastOk(`同步完成:翻 ${r.pages} 页,新增 ${r.new} 篇,${pushTxt}`)
     }
     await loadArticles()

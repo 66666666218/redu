@@ -493,11 +493,14 @@ class FakeWeread:
     """假 WereadClient:latest_article/shelf/mp_content 按脚本回放。"""
 
     def __init__(self, cover: dict | None = None, shelf: list | None = None,
-                 content: str = "", cover_items: list | None = None) -> None:
+                 content: str = "", cover_items: list | None = None,
+                 list_error: Exception | None = None, ts: int = 1788800000) -> None:
         self.cover = cover
         self.shelf_value = shelf or []
         self.content = content
         self.cover_items = cover_items or []
+        self.list_error = list_error
+        self.ts = ts
         self.calls: list[tuple] = []
 
     def latest_article(self, book_id: str) -> dict | None:
@@ -508,19 +511,21 @@ class FakeWeread:
 
     def mp_articles(self, book_id: str, offset: int = 0, count: int = 20) -> dict:
         self.calls.append(("articles", book_id, offset))
+        if self.list_error:
+            raise self.list_error
         items = self.cover_items
         if not items and self.cover:
             # 从 cover 生成一条(兼容单条测试)
             items = [{"title": self.cover.get("title", ""), "original_id": "test_orig",
                       "read_num": 100, "like_num": 5}]
-        reviews = [{"createTime": 1788800000 + i,
+        reviews = [{"createTime": self.ts + i,
                     "subReviews": [{"review": {
                         "reviewId": f"{book_id}_r{i}",
                         "mpInfo": {"title": it.get("title", ""),
                                    "originalId": it.get("original_id", ""),
                                    "readNum": it.get("read_num", 0),
                                    "likeNum": it.get("like_num", 0)},
-                        "createTime": 1788800000 + i}}]} for i, it in enumerate(items)]
+                        "createTime": self.ts + i}}]} for i, it in enumerate(items)]
         return {"reviews": reviews, "synckey": 1}
 
     def mp_content(self, review_id: str) -> str:
@@ -930,17 +935,49 @@ def test_import_benchmarks_from_shelf(session, monkeypatch: pytest.MonkeyPatch) 
     assert again["created"] == 0 and again["updated"] == 0  # 重复导入幂等
 
 
+def test_sync_weread_enumerates_same_day_articles(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """列表可用时「同步文章」不再只拿 cover 最新一篇:同日兄弟篇一起入库(近24h全推的前提)。
+
+    每篇正文必须用**它自己**的 reviewId 取——用错会把 A 篇的盘链挂到 B 篇上。
+    """
+    import time as _time
+
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    b = WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1", anchor_url="")
+    session.add(b)
+    session.commit()
+    fake = FakeWeread(cover={"title": "最新一篇 夸克网盘", "url": "https://mp.weixin.qq.com/s/latest",
+                             "review_id": "MP_WXS_1_latest", "digest": ""},
+                      cover_items=[{"title": "同日第二篇 夸克网盘", "original_id": "d2"},
+                                   {"title": "同日第三篇 夸克网盘", "original_id": "d3"}],
+                      content="正文 https://pan.quark.cn/s/abc123",
+                      ts=int(_time.time()) - 3600)
+    monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: fake)
+    out = wechat_monitor.sync_wechat_account(session, 1, b.id,
+                                             settings=_settings(dajiala_key="", pan_transfer_enabled=False),
+                                             weread=fake)
+    assert out["status"] == "success" and out["weread_list"] == "ok" and out["new"] == 3
+    titles = {r.title for r in session.scalars(select(WechatArticle).where(
+        WechatArticle.user_id == 1)).all()}
+    assert titles == {"最新一篇 夸克网盘", "同日第二篇 夸克网盘", "同日第三篇 夸克网盘"}
+    assert [c[1] for c in fake.calls if c[0] == "content"] == [
+        "MP_WXS_1_latest", "MP_WXS_1_r0", "MP_WXS_1_r1"]
+
+
 def test_sync_weread_latest_only(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """列表被服务端限权(-2041)时只能拿到最新一篇:如实报 partial + 原因,不假装补全。"""
     _set_cookie(session, 1, "weread", "vid=1; skey=x")
     b = WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1", anchor_url="")
     session.add(b)
     session.commit()
     fake = FakeWeread(cover={"title": "最新一篇", "url": "https://mp.weixin.qq.com/s/latest",
-                             "review_id": "MP_WXS_1_latest", "digest": ""})
+                             "review_id": "MP_WXS_1_latest", "digest": ""},
+                      list_error=wechat_monitor.WereadError("微信读书接口返回错误(-2041):请求频率过高"))
     monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: fake)
     out = wechat_monitor.sync_wechat_account(session, 1, b.id,
                                              settings=_settings(dajiala_key=""), weread=fake)
-    assert out["status"] == "partial" and out["reason"] == "weread_latest_only" and out["new"] == 1
+    assert out["status"] == "partial" and out["new"] == 1
+    assert out["reason"] == "weread_list_limited_latest_only" and out["weread_list"] == "limited"
 
 
 # ---------------------------------------------------------------- 读书平台(wewe-rss v2 兼容,免费全量)
@@ -1251,32 +1288,14 @@ def test_listen_cross_extracts_new_accounts(session, monkeypatch: pytest.MonkeyP
     session.add(b)
     session.commit()
     fake = FakeWeread(cover={"title": "某网盘资源合集 夸克网盘", "url": "https://mp.weixin.qq.com/s/w1",
-            "review_id": "MP_WXS_1_w1", "digest": "", "name": "号A"},
-            cover_items=[
-        {"title": "某网盘资源合集 夸克网盘", "original_id": "w1", "read_num": 100, "like_num": 5},
-    ])
-    print("CROSS DEBUG: fake created")
-    # 追踪 _insert_new_articles
-    orig_insert = wechat_monitor._insert_new_articles
-    def _traced_insert(session, user_id, benchmark, items, source, fetch_content=False, content_resolver=None, require_pan=True):
-        print(f"INSERT DEBUG: {len(items)} items, require_pan={require_pan}")
-        for it in items:
-            print(f"  title={it['title'][:30]} url={it.get('url','')[:40]}")
-        result = orig_insert(session, user_id, benchmark, items, source, fetch_content=fetch_content,
-                             content_resolver=content_resolver, require_pan=require_pan)
-        print(f"INSERT DEBUG: → {len(result)} 篇")
-        return result
-    orig_insert_fn = wechat_monitor._insert_new_articles
-    wechat_monitor._insert_new_articles = _traced_insert
+                             "review_id": "MP_WXS_1_w1", "digest": ""})
     monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: fake)
     monkeypatch.setattr(wechat_monitor, "fetch_article_content",
                         lambda url, timeout=15: "正文含 https://pan.quark.cn/s/zzz 更多资源请关注公众号「资源君」")
     monkeypatch.setattr(feishu_mod, "webhook_for", lambda settings, section: "")
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), client=FakeClient(remain=10.0), weread=fake)
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(),
+                                           client=FakeClient(remain=10.0), weread=fake)
     assert out["new"] == 1
-    arts = session.scalars(select(WechatArticle)).all()
-    for a in arts:
-        print(f"CROSS DEBUG: article = {a.title[:30]} | pan_urls = {a.pan_urls!r} | content = {(a.content or '')[:50]}")
     cands = session.scalars(select(WechatCandidate)).all()
     assert any(c.name == "资源君" for c in cands), "应从正文提取新公众号并入库为候选"
 
@@ -1973,6 +1992,10 @@ class _SyncWeread:
         return {"url": "https://mp.weixin.qq.com/s/new1", "title": "新文章 夸克网盘",
                 "review_id": "rid", "publish_at": None}
 
+    def mp_articles(self, book_id: str, offset: int = 0, count: int = 20) -> dict:
+        # 真实账号上列表常被服务端限权(-2041),这里固定复现"只能拿最新一篇"的背景
+        raise wechat_monitor.WereadError("微信读书接口返回错误(-2041):请求频率过高")
+
     def mp_content(self, review_id: str) -> str:
         return "正文 https://pan.quark.cn/s/abc123"
 
@@ -2210,13 +2233,14 @@ def test_sync_push_skips_resource_already_announced(session, monkeypatch) -> Non
 
 
 def test_sync_push_window_caps_transfer_calls(session, monkeypatch) -> None:
-    """一次同步入库很多资源文时按 `wechat_sync_push_limit` 截断:转存调用同步受限,
-    同步请求不会被几十次夸克调用拖成十几分钟;截断数量写进返回值。"""
+    """一次同步入库很多**24h 之前**的资源文时按 `wechat_sync_push_limit` 截断:
+    转存调用同步受限,同步请求不会被几十次夸克调用拖成十几分钟;截断数量写进返回值。"""
     b = WechatBenchmark(user_id=1, nickname="号A", biz="bizABC")
     session.add(b)
     session.commit()
+    old = int(datetime.now().timestamp()) - 3 * 86400  # 3 天前:属历史补采,受封顶管
     items = [{"id": f"i{n}", "title": f"资源文{n} https://pan.quark.cn/s/raw{n}",
-              "url": f"https://mp.weixin.qq.com/s/i{n}"} for n in range(5)]
+              "url": f"https://mp.weixin.qq.com/s/i{n}", "publish_at_raw": old} for n in range(5)]
     plat = FakePlatform(pages=[items])
     monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
     calls: list[str] = []
@@ -2228,6 +2252,34 @@ def test_sync_push_window_caps_transfer_calls(session, monkeypatch) -> None:
     out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=st, platform=plat)
     assert out["pushed"] == 2 and out["truncated"] == 3 and out["deduped"] == 0
     assert len(calls) == 2
+
+
+def test_sync_pushes_every_article_within_24h_regardless_of_cap(session, monkeypatch) -> None:
+    """近 24h 发的文章必须一篇不落全推到飞书(用户 2026-09-26 定的硬要求):
+    封顶只砍 24h 之前的历史补采文,砍不到当天/昨天的新文。"""
+    b = WechatBenchmark(user_id=1, nickname="号A", biz="bizABC")
+    session.add(b)
+    session.commit()
+    fresh = int(datetime.now().timestamp()) - 3600      # 1 小时前
+    old = int(datetime.now().timestamp()) - 3 * 86400   # 3 天前
+    items = ([{"id": f"f{n}", "title": f"新发资源文{n} https://pan.quark.cn/s/fresh{n}",
+               "url": f"https://mp.weixin.qq.com/s/f{n}", "publish_at_raw": fresh} for n in range(4)]
+             + [{"id": f"o{n}", "title": f"历史资源文{n} https://pan.quark.cn/s/old{n}",
+                 "url": f"https://mp.weixin.qq.com/s/o{n}", "publish_at_raw": old} for n in range(4)])
+    plat = FakePlatform(pages=[items])
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
+    calls: list[str] = []
+    _fake_quark(monkeypatch, {f"https://pan.quark.cn/s/fresh{n}": f"https://pan.quark.cn/s/m{n}"
+                              for n in range(4)}, calls)
+    cards: list[dict] = []
+    _fake_feishu(monkeypatch, cards)
+
+    st = _settings(quark_cookie="ck=x", pan_transfer_enabled=True, wechat_sync_push_limit=2)
+    out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=st, platform=plat)
+    assert out["pushed"] == 4 and out["truncated"] == 4  # 近24h 4 篇全推;历史 4 篇让给窗口外
+    blob = str(cards)
+    assert all(f"新发资源文{n}" in blob for n in range(4))
+    assert "历史资源文" not in blob
 
 
 def test_sync_still_pushes_when_transfer_blows_up(session, monkeypatch) -> None:
@@ -2255,3 +2307,102 @@ def test_sync_still_pushes_when_transfer_blows_up(session, monkeypatch) -> None:
     out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=st, platform=plat)
     assert out["pushed"] == 1
     assert "mp.weixin.qq.com/s/r1" in json.dumps(cards, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------- 近24h 全推的可观测性
+class _NoListWeread:
+    """微信读书"列表被限权"的现实形态:cover 始终可用,mp/articles 恒返 -2041。"""
+
+    def __init__(self, cookie: str) -> None:
+        self.cookie = cookie
+
+    def latest_article(self, book_id: str) -> dict | None:
+        return {"title": f"新发文 夸克网盘 {book_id}", "url": f"https://mp.weixin.qq.com/s/{book_id}",
+                "review_id": f"{book_id}_r0", "publish_at": None, "digest": ""}
+
+    def mp_articles(self, book_id: str, offset: int = 0, count: int = 20) -> dict:
+        raise wechat_monitor.WereadError("微信读书接口返回错误(-2041):请求频率过高")
+
+    def mp_content(self, review_id: str) -> str:
+        return "正文 https://pan.quark.cn/s/abc123"
+
+
+def test_listen_exposes_unenumerable_accounts_and_alerts(session, monkeypatch) -> None:
+    """列表整轮都列不出来时,"未知丢失"必须点名:运维记录写 weread_list 计数 + 飞书告警给根治路径。
+
+    否则监听看起来"success/new=2",而同日第 2、3 篇其实被 cover 顶掉了、永远漏推
+    ——与"-2014 假象""全败标 success"是同一族缺陷。
+    """
+    from app.services import alert_service
+
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    session.add_all([
+        WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1", anchor_url=""),
+        WechatBenchmark(user_id=1, nickname="号B", weread_book_id="MP_WXS_2", anchor_url=""),
+    ])
+    session.commit()
+    monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: _NoListWeread(cookie))
+    alerts: list[tuple] = []
+    monkeypatch.setattr(alert_service, "notify_incident",
+                        lambda db, uid, kind, title, detail, settings=None, **kw:
+                        alerts.append((uid, kind, title, detail)) or False)
+
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""), push=True)
+    assert out["new"] == 2 and out["weread_list"] == {"weread_list_off_new": 2}
+    run = session.scalars(select(RunRecord).where(RunRecord.kind == "wechat_listen")).first()
+    assert "weread_list(ok=0 off=0 off_with_new=2)" in run.detail
+    assert len(alerts) == 1 and alerts[0][2] == "⚠️ 微信读书只能拿到最新一篇,同日其它篇可能漏推"
+    assert "列不出却采到新文的号:2" in alerts[0][3]  # 数字放正文,标题稳定才冷却去重有效
+    assert "wewe-rss" in alerts[0][3] and "biz" in alerts[0][3]  # 给出可执行的根治路径
+
+
+def test_listen_silent_when_list_enumerable(session, monkeypatch) -> None:
+    """列表可用时同日兄弟篇一起采到,不该再弹"可能漏推"告警。"""
+    import time as _time
+
+    from app.services import alert_service
+
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    session.add(WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1", anchor_url=""))
+    session.commit()
+    fake = FakeWeread(cover={"title": "最新一篇", "url": "https://mp.weixin.qq.com/s/latest",
+                             "review_id": "MP_WXS_1_latest", "digest": ""},
+                      cover_items=[{"title": "同日第二篇", "original_id": "d2"}],
+                      ts=int(_time.time()) - 3600)
+    monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: fake)
+    alerts: list[tuple] = []
+    monkeypatch.setattr(alert_service, "notify_incident",
+                        lambda *a, **kw: alerts.append(a) or False)
+
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""), push=True)
+    assert out["new"] == 2 and out["weread_list"] == {"weread_list_ok": 1}
+    assert alerts == []
+
+
+def test_full_sync_aborts_on_rate_limit_and_counts_new(session, monkeypatch) -> None:
+    """补采窗口遇到 -2041(列表耗尽)立即中止并把标记留下:其余号等下个新会话,
+    同时新增篇数要真取到 sync 的 `new` 字段(取错键会永远汇报 0 篇)。"""
+    from app.db.models import SystemConfig
+
+    monkeypatch.setattr(wechat_monitor, "_weread_cookie", lambda s, u, st: "vid=1; skey=x")
+    session.add(SystemConfig(key="weread_fullsync_pending_1", value="1"))
+    session.add_all([
+        WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1", active=True),
+        WechatBenchmark(user_id=1, nickname="号B", weread_book_id="MP_WXS_2", active=True),
+    ])
+    session.commit()
+    seen: list[int] = []
+
+    def _sync(s, uid, bid, settings=None):
+        seen.append(bid)
+        if len(seen) == 1:
+            return {"status": "success", "new": 3, "weread_list": "ok"}
+        return {"status": "partial", "new": 1, "weread_list": "limited"}
+
+    monkeypatch.setattr(wechat_monitor, "sync_wechat_account", _sync)
+    out = wechat_monitor.run_full_sync_if_pending(session, 1, settings=_settings())
+    assert out["status"] == "aborted" and out["reason"] == "rate_limited"
+    assert out["synced"] == 1 and out["new_articles"] == 3
+    assert len(seen) == 2  # 第二个号确认耗尽后立即停
+    assert session.scalar(select(SystemConfig).where(
+        SystemConfig.key == "weread_fullsync_pending_1")) is not None  # 标记保留,下个会话再补

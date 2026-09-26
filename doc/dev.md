@@ -358,13 +358,18 @@ redian/
   监听逐号先走微信读书(免费,书架导入 `import_benchmarks_from_shelf`),失效(-2012/-2010)自动降级
   dajiala;正文盘链确认优先微信读书 content、其次自抓原文页。Cookie:平台内「weread」按用户配置优先,
   全局 `WEREAD_COOKIE` 兜底;客户端内置 2s 限速(社区实测单日 30+ 次密集请求即触发风控)。
-  限制:微信读书新版只能拿"最新一篇",历史批量同步仍需 dajiala(¥0.14/页)。
+  限制:微信读书的"近期列表" `/web/mp/articles` **只在 Cookie 会话初期可用**,数小时后被服务端限权
+  (`-2041`,对本账号是永久性的);cover 始终可用但**只有最新一篇**。所以监听/同步的形态是
+  "cover 打底 + 列表可用时枚举近 3 天"——列表被限权的那些号,同一天群发的第 2、3 篇属**未知丢失**,
+  每轮会把可枚举性写进 `wechat_listen` 的 detail 并在漏采时点名(见 operations.md §4e)。
+  补采只在 renewal 后的新会话窗口做(`run_full_sync_if_pending`),撞 `-2041` 立即中止、pending 标记保留;
+  历史批量翻页同步仍需 dajiala(¥0.14/页)或自建 wewe-rss(免费全量)。
 - **读书平台提供器(2026-09-07,首选)**:`reader_platform_client.py` 对接 wewe-rss v2 兼容实例
   (`WECHAT_READER_PLATFORM_URL` + `WECHAT_READER_TOKEN/VID`,xg.djxx.club 同款架构——其前端包与
   后端合同完全一致:认证 `Authorization: Bearer token`+`X-Weread-Token`+`xid: vid`;链接解析
   `POST /api/v2/platform/wxs2mp`;全量分页列表 `GET /api/v2/platform/mps/{biz}/articles?page&limit`)。
   公众号标识 = 文章页 `__biz`(`extract_article_meta` 免费直抓解析,对标号新增 `biz` 列)。
-  源优先级:**平台(免费全量)→ 微信读书 cover(免费最新一篇)→ dajiala(付费)**;同步在平台源下
+  源优先级:**平台(免费全量)→ 微信读书(cover 最新一篇 + 会话初期枚举近 3 天列表)→ dajiala(付费)**;同步在平台源下
   默认 10 页封顶(免费),全 seen 即停。上游错误 WeReadError401=账号失效/429=当日小黑屋。
 
 ### 5.9 抖音热点·内容词趋势 `services/douhot.py` + `services/douhot_client.py`(独立数据源)

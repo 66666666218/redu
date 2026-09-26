@@ -724,8 +724,8 @@ def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchm
         preset_like = int(it.get("like_num") or 0)
         content = ""
         if title_hits(title):
-            if content_resolver:  # 免费源注入(微信读书正文)
-                content = content_resolver(it["title"]) or ""
+            if content_resolver:  # 免费源注入(微信读书正文);传 url 让实现方能对上本篇 reviewId
+                content = content_resolver(it["title"], url) or ""
             elif fetch_content:
                 content = fetch_article_content(url)
             if content:  # 自抓成功 → 用正文的链接判定覆盖标题的盘名猜测
@@ -1117,11 +1117,14 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
     return replacements
 
 def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
-                    session: Session) -> list[WechatArticle]:
+                    session: Session, stats: dict | None = None) -> list[WechatArticle]:
     """微信读书单号采集:**cover 最新一篇(稳定可用)→ mp/articles 列表(可选,常被限权)。
 
     实测(2026-09):mp/articles 仅在会话建立初期可用,数小时后被服务端限权(-2041),
     cover 始终可用——故 cover 为主路径,mp/articles 失败静默跳过不影响监听。
+    **但"只有 cover"就意味着同一天发第 2、3 篇会被最新一篇顶掉、永久漏采**(两轮之间最长 8h),
+    这正是"近 24h 必须全推"的唯一真实缺口;列表可用时该缺口不存在。
+    `stats` 记账可枚举性(见调用方),不可枚举又采到新文时必须暴露给运维,不能假装全覆盖。
     近3天过滤;阅读/点赞以 cover/mp_articles 自带值为准(免费)。
     """
     from app.services.weread_client import WereadClient as _WC
@@ -1134,6 +1137,7 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
         items.append({"title": item["title"], "url": item["url"],
                       "publish_at": None})
     # 备选:mp/articles 近期列表(含精确阅读/点赞;被限权时静默跳过)
+    listed = False
     try:
         payload = weread.mp_articles(b.weread_book_id)
         for it in _WC.flatten_mp_articles(payload):
@@ -1144,6 +1148,7 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
             items.append({"title": it["title"], "url": build_mp_url(it["original_id"]),
                           "read_num": it["read_num"], "like_num": it["like_num"],
                           "publish_at": pub})
+        listed = True
     except Exception as exc:  # noqa: BLE001 - 限权/废弃不影响 cover 主路径
         # -2041 是新版微信读书对该接口的永久限权,每进程只记一次,避免每账号刷屏
         if not getattr(_weread_collect, "_mp_articles_warned", False):
@@ -1151,8 +1156,13 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
             logger.warning("mp/articles 不可用(%s),全部账号仅用 cover 最新一篇", exc)
     # require_pan=False:不再丢弃无盘链文——"标题不含网盘词"≠"没价值",
     # 此前这道闸把 15 个对标号 10 天的新文全部静默丢弃(用户看到"停更在 9.7"的根因)
-    return _insert_new_articles(session, user_id, b, items, source="listen",
-                                fetch_content=True, require_pan=False)
+    got = _insert_new_articles(session, user_id, b, items, source="listen",
+                               fetch_content=True, require_pan=False)
+    if stats is not None:
+        key = "weread_list_ok" if listed else ("weread_list_off_new" if got else "weread_list_off")
+        stats[key] = stats.get(key, 0) + 1
+    return got
+
 
 def run_wechat_listen(session: Session, user_id: int, settings: Settings | None = None,
                       client: DajialaClient | None = None, weread: WereadClient | None = None,
@@ -1212,6 +1222,8 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
     now = datetime.now()
     new_rows: list[WechatArticle] = []
     failed = 0
+    # 微信读书"近期列表"可枚举性统计:决定"近24h全推"能不能兑现(见 _weread_collect)
+    wr_stats: dict = {}
     for b in rows:
         used = False
         # ⓪ 读书平台(wewe-rss 兼容,免费,分页全量列表):有 biz 且平台已配置 → 首选
@@ -1236,7 +1248,7 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
         if not used and cookie and b.weread_book_id:
             try:
                 weread = weread or WereadClient(cookie)
-                got = _weread_collect(user_id, b, weread, session)
+                got = _weread_collect(user_id, b, weread, session, stats=wr_stats)
                 used = True
                 if got:
                     new_rows.extend(got)
@@ -1248,7 +1260,8 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
                 if refreshed.get("status") == "success":
                     cookie = refreshed["cookie"]
                     try:
-                        got = _weread_collect(user_id, b, WereadClient(cookie), session)
+                        got = _weread_collect(user_id, b, WereadClient(cookie), session,
+                                              stats=wr_stats)
                         used = True  # 微信读书源已消费本号,勿再走 dajiala 重复扣费
                         if got:
                             new_rows.extend(got)
@@ -1317,14 +1330,35 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
     else:
         status = "success"
     detail = f"accounts={len(rows)} new={len(new_rows)} failed={failed}"
+    enumerable = wr_stats.get("weread_list_ok", 0)
+    off_new = wr_stats.get("weread_list_off_new", 0)
+    if wr_stats:
+        # list_off 必须写进运维记录:"只采到 cover 最新一篇"时同日其它篇是**未知丢失**,
+        # 不能让它和"该号今天真的只发了一篇"长得一样(与 -2014 假象、全败标 success 同族)。
+        detail += (f" weread_list(ok={enumerable} off={wr_stats.get('weread_list_off', 0)}"
+                   f" off_with_new={off_new})")
     if dajiala_off:
         detail += f" dajiala_off({dajiala_off})"
     _record_run(session, user_id, "wechat_listen", status, detail)
     session.commit()
     if push and new_rows:
         _push_listen(session, user_id, settings, new_rows, replacements)
+    if off_new and push:
+        # 兑现"近24h全部推送"要靠列表枚举;只要还有号列不出来又采到了新文,就必须点名而不是安静少推
+        from app.services.alert_service import notify_incident
+        notify_incident(
+            session, user_id, "wechat",
+            "⚠️ 微信读书只能拿到最新一篇,同日其它篇可能漏推",
+            f"本轮列不出却采到新文的号:{off_new}(可枚举 {enumerable} / 共 {len(rows)})。"
+            "微信读书 mp/articles(近期列表)对本会话不可用(-2041 限权),监听退化为"
+            "cover 最新一篇:两轮之间(最长 8h)同一号发多篇时,前面的那几篇顶不掉也补不回来。"
+            "要真正兑现『近24h全推』只有两条路:① 部署 wewe-rss 并给对标号回填 biz(免费全量列表);"
+            "② dajiala 充值走 history_by_ghid(付费)。临时缓解:对高产号多点「同步文章」",
+            settings=settings)
     out: dict = {"platform": "wechat", "status": status, "accounts": len(rows),
                  "new": len(new_rows), "failed": failed}
+    if wr_stats:
+        out["weread_list"] = {k: v for k, v in wr_stats.items()}
     if dajiala_off:
         out["dajiala_skipped"] = "low_balance"
         if balance is not None:
@@ -1537,6 +1571,8 @@ def _sync_push_after_transfer(session: Session, user_id: int, settings: Settings
        不设窗口会让一次 HTTP 请求跑几十分钟占死线程池。窗口外的旧文本轮不推也不转,
        留给监听的补转存队列(`run_backfill=False` 就是不再叠加这条队列),
        数量写进运行记录与返回值,不静默丢。
+       **例外:近 24h 内发的文章(以及发布时间未知的刚发文)一律推,不受封顶限制**
+       ——"监控号近 24h 的新发文必须全部到飞书"是硬要求,封顶只管 24h 之前的历史补采文。
     """
     if not new_rows:
         return {"pushed": 0, "transferred": 0, "deduped": 0, "truncated": 0}
@@ -1547,8 +1583,12 @@ def _sync_push_after_transfer(session: Session, user_id: int, settings: Settings
         return int(r.publish_at.timestamp()) if r.publish_at else 0
 
     ordered = sorted(kept, key=lambda r: (not r.pan_types, -_ts(r)))
+    ref = datetime.now() - timedelta(hours=24)
+    must = [r for r in ordered if r.publish_at is None or r.publish_at >= ref]
+    history = [r for r in ordered if r.publish_at is not None and r.publish_at < ref]
     cap = max(1, int(settings.wechat_sync_push_limit or 20))
-    to_push = ordered[:cap]
+    extra = max(0, cap - len(must))          # 近24h 的文章先占满窗口,剩下的名额才给历史文
+    to_push = must + history[:extra]
     try:
         replacements = _enrich_new_articles(session, user_id, settings, to_push,
                                             client=None, allow_paid=False, run_backfill=False)
@@ -1559,7 +1599,7 @@ def _sync_push_after_transfer(session: Session, user_id: int, settings: Settings
         replacements = {}
     _push_listen(session, user_id, settings, to_push, replacements)
     return {"pushed": len(to_push), "transferred": len(replacements),
-            "deduped": len(new_rows) - len(kept), "truncated": max(0, len(ordered) - cap)}
+            "deduped": len(new_rows) - len(kept), "truncated": len(history) - extra}
 
 
 # ---------------------------------------------------------------- 全量同步
@@ -1608,35 +1648,79 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
     # 是普通用户可控入口,¥0.14/页 × 无限次调用可打穿运营者余额(2026-09-14 隔离原则的漏网路径)。
     sync_key = _dajiala_key(session, user_id, settings)
     if not sync_key:
-        # 无 dajiala:微信读书源只能拿"最新一篇"(列表接口已被微信读书废弃)
+        # 无 dajiala:微信读书 cover 只给"最新一篇",mp/articles 列表可用时才谈得上补全
         cookie = _weread_cookie(session, user_id, settings)
         if not cookie or not b.weread_book_id:
             return {"platform": "wechat_sync", "status": "skipped", "reason": "no_dajiala_key"}
+
+        def _fetch(client: WereadClient) -> tuple[list[dict], "object | None", str]:
+            """(近期列表, cover 那篇, 列表状态 ok|limited|error)。"""
+            from app.services.weread_client import WereadClient as _WC
+
+            listed, out = "error", []
+            try:
+                for it in _WC.flatten_mp_articles(client.mp_articles(b.weread_book_id)):
+                    ts = it.get("create_time") or 0
+                    pub = datetime.fromtimestamp(ts) if ts else None
+                    if pub and pub < datetime.now() - timedelta(days=3):
+                        continue
+                    out.append({"title": it["title"], "url": build_mp_url(it["original_id"]),
+                                "read_num": it["read_num"], "like_num": it["like_num"],
+                                "publish_at": pub, "review_id": it.get("review_id") or ""})
+                listed = "ok"
+            except WereadError as exc:
+                # -2041 = 本会话列表预算耗尽(可预期,别当故障);其余按异常归类
+                listed = "limited" if "-2041" in str(exc) else "error"
+                logger.info("微信读书近期列表不可用(%s),%s 退到最新一篇", str(exc)[:60], b.nickname)
+            cover = None
+            try:
+                cover = client.latest_article(b.weread_book_id)
+            except WereadError as exc:
+                if listed != "ok":
+                    raise          # 两条路都没有 → 交给上层(监听/路由决定降级或续期)
+                logger.warning("cover 也失败(%s),本次只同步列表内容", str(exc)[:60])
+            return out, cover, listed
+
         wc = weread or WereadClient(cookie)
         try:
-            item = wc.latest_article(b.weread_book_id)
+            items, cover, listed = _fetch(wc)
         except WereadAuthError:
             # wr_skey 十几小时必过期,而用户点「同步文章」走的正是这条路。
             # wr_rt 还活着时先像监听那样自救续期一次再重试;续期不成才把异常抛给上层
             # (路由翻成 502 可执行文案,此前这里是裸 500 → 前端只报"服务器开小差了")。
+            # 续期会换出新会话——正是 mp/articles 可用的窗口,列表这次能补回同日漏掉的篇。
             refreshed = refresh_weread_cookie(session, user_id, settings)
             if refreshed.get("status") != "success":
                 raise
             wc = WereadClient(refreshed["cookie"])
-            item = wc.latest_article(b.weread_book_id)
+            items, cover, listed = _fetch(wc)
+        if cover and cover["url"] and not any(it["url"] == cover["url"] for it in items):
+            items = [cover] + items       # 列表里没这篇(刚发/翻页边界)也要带上
+        # cover 的正文用它的 reviewId 走转发页;列表项各自的 reviewId 由 content_resolver 复用
+        rid_of = {it["url"]: it.get("review_id") or "" for it in items}
+        if cover:
+            rid_of.setdefault(cover["url"], cover.get("review_id") or "")
+
+        def _resolve(title: str, url: str = "") -> str:
+            rid = rid_of.get(url) or ""
+            return wc.mp_content(rid) if rid else ""
+
         new_rows = []
-        if item and item["url"]:
-            resolver = (lambda _title, _rid=item["review_id"]: wc.mp_content(_rid))
-            new_rows = _insert_new_articles(session, user_id, b, [item], source="sync",
-                                            content_resolver=resolver, require_pan=False)
+        if items:
+            new_rows = _insert_new_articles(session, user_id, b, items, source="sync",
+                                            content_resolver=_resolve, require_pan=False)
             b.last_item_at = datetime.now()
         push = _sync_push_after_transfer(session, user_id, settings, new_rows)
-        _record_run(session, user_id, "wechat_sync", "partial",
-                    f"weread_latest_only account={b.nickname} new={len(new_rows)} "
+        _record_run(session, user_id, "wechat_sync",
+                    "success" if listed == "ok" else "partial",
+                    f"weread({listed},items={len(items)}) account={b.nickname} new={len(new_rows)} "
                     f"pushed={push['pushed']} deduped={push['deduped']} truncated={push['truncated']}")
         session.commit()
-        return {"platform": "wechat_sync", "status": "partial", "reason": "weread_latest_only",
-                "pages": 1 if item else 0, "new": len(new_rows), "ghid": b.ghid,
+        return {"platform": "wechat_sync",
+                "status": "success" if listed == "ok" else "partial",
+                "reason": "" if listed == "ok" else f"weread_list_{listed}_latest_only",
+                "weread_list": listed, "items": len(items),
+                "pages": 1 if items else 0, "new": len(new_rows), "ghid": b.ghid,
                 "nickname": b.nickname, **push}
     client = client or DajialaClient(sync_key)
     added: list[WechatArticle] = []
@@ -2133,16 +2217,19 @@ def run_full_sync_if_pending(session: Session, user_id: int,
         WechatBenchmark.user_id == user_id, WechatBenchmark.active.is_(True),
         WechatBenchmark.weread_book_id != "")).all()
     synced = articles_new = failed = 0
-    client = WereadClient(cookie)
-    aborted = False
     for b in rows:
-        if aborted:
-            break  # mp/articles 预算被 -2041 拒绝后立即停,不再空转其余号
         try:
             out = sync_wechat_account(session, user_id, b.id, settings=settings)
+            if out.get("weread_list") == "limited":
+                # 列表接口对本会话已耗尽:后面 80 个号也只会各撞一次并退化成"最新一篇",
+                # 白烧微信读书调用密度。标记保留,等下个新 skey 会话窗口再补。
+                logger.warning("mp/articles 预算耗尽(-2041),本轮补采中止;"
+                               "下次新会话窗口再补(已补 %s 号 %s 篇)", synced, articles_new)
+                return {"status": "aborted", "reason": "rate_limited",
+                        "synced": synced, "new_articles": articles_new}
             if out.get("status") == "success":
                 synced += 1
-                articles_new += int(out.get("new_articles") or 0)
+                articles_new += int(out.get("new") or 0)  # sync 的计数字段就叫 new
             else:
                 failed += 1
         except WereadError as exc:
