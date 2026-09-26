@@ -2406,3 +2406,54 @@ def test_full_sync_aborts_on_rate_limit_and_counts_new(session, monkeypatch) -> 
     assert len(seen) == 2  # 第二个号确认耗尽后立即停
     assert session.scalar(select(SystemConfig).where(
         SystemConfig.key == "weread_fullsync_pending_1")) is not None  # 标记保留,下个会话再补
+
+
+def test_listen_pushes_articles_without_pan_links(session, monkeypatch) -> None:
+    """没认出网盘链接的文章照样推(标题点进公众号原文、网盘列 `—`):
+    "不是资源"不等于"不用告诉员工"——监听近 24h 全推包含这些篇。"""
+    import time as _time
+
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    session.add(WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1", anchor_url=""))
+    session.commit()
+    fake = FakeWeread(cover={"title": "本周更新说明", "url": "https://mp.weixin.qq.com/s/plain1",
+                             "review_id": "MP_WXS_1_p1", "digest": ""},
+                      cover_items=[{"title": "资源篇 夸克网盘", "original_id": "res1"},
+                                   {"title": "另一篇纯资讯", "original_id": "plain2"}],
+                      content="", ts=int(_time.time()) - 600)
+    monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: fake)
+    monkeypatch.setattr(wechat_monitor, "fetch_article_content",
+                        lambda url, timeout=15: "https://pan.quark.cn/s/zzz" if "res1" in url else "")
+    cards: list[dict] = []
+    _fake_feishu(monkeypatch, cards)
+
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""))
+    assert out["new"] == 3
+    blob = str(cards)
+    assert "本周更新说明" in blob and "另一篇纯资讯" in blob  # 无链的两篇都在卡上
+    assert "资源篇" in blob
+
+
+def test_sync_push_window_keeps_link_less_articles(session, monkeypatch) -> None:
+    """同步窗口按"资源文优先"排序,但近 24h 的无链文不能被资源文挤出卡片——
+    窗口只砍 24h 之前的历史文,优先级不改变"24h 内一律推"。"""
+    b = WechatBenchmark(user_id=1, nickname="号A", biz="bizABC")
+    session.add(b)
+    session.commit()
+    fresh = int(datetime.now().timestamp()) - 600
+    items = ([{"id": "p1", "title": "纯资讯公告", "url": "https://mp.weixin.qq.com/s/p1",
+               "publish_at_raw": fresh}]
+             + [{"id": f"r{n}", "title": f"资源文{n} https://pan.quark.cn/s/raw{n}",
+                 "url": f"https://mp.weixin.qq.com/s/r{n}", "publish_at_raw": fresh}
+                for n in range(3)])
+    plat = FakePlatform(pages=[items])
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
+    _fake_quark(monkeypatch, {f"https://pan.quark.cn/s/raw{n}": f"https://pan.quark.cn/s/m{n}"
+                              for n in range(3)}, [])
+    cards: list[dict] = []
+    _fake_feishu(monkeypatch, cards)
+
+    st = _settings(quark_cookie="ck=x", pan_transfer_enabled=True, wechat_sync_push_limit=2)
+    out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=st, platform=plat)
+    assert out["pushed"] == 4 and out["truncated"] == 0
+    assert "纯资讯公告" in str(cards)

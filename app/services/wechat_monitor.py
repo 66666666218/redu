@@ -1494,7 +1494,8 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
     for page_idx, chunk in enumerate(chunks):
         elements: list[dict] = [
             {"tag": "note", "elements": [{"tag": "plain_text",
-                "content": "点文章标题打开链接(优先你的夸克转存链) · 网盘列=识别到的盘链 · 阅读未采样为 —"}]},
+                "content": "点文章标题打开链接(优先你的夸克转存链) · 网盘列=识别到的盘链,"
+                           "—=这篇没带网盘链(仍照常推) · 阅读未采样为 —"}]},
         ]
         if page_idx == 0:
             elements.append({"tag": "note", "elements": [{"tag": "plain_text",
