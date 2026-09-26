@@ -144,8 +144,11 @@ def _migrate() -> None:
                             "comment_count INTEGER DEFAULT 0", "traffic_at DATETIME",
                             "sample_count INTEGER DEFAULT 0",
                             "first_read_num INTEGER DEFAULT 0",
-                            "trend_flag VARCHAR(16) DEFAULT ''", "quality INTEGER DEFAULT 0"],
+                            "trend_flag VARCHAR(16) DEFAULT ''", "quality INTEGER DEFAULT 0",
+                            # 进过飞书卡片的时间;NULL=从未推出去,由监听开头的补推扫回
+                            "pushed_at DATETIME"],
     }
+    added_pushed_at = False
     with get_engine().begin() as conn:
         for table, coldefs in additions.items():
             if table not in existing:
@@ -155,14 +158,27 @@ def _migrate() -> None:
                 col = coldef.split()[0]
                 if col not in cols:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {coldef}"))
+                    if table == "wechat_articles" and col == "pushed_at":
+                        added_pushed_at = True
+        # 加列那一次:存量行一律视为"已推过"。否则新机制上线后的第一轮,补推会把库里
+        # 积压的历史文章全当成"从未推过"重新灌进员工群(刷屏事故)。代价是"上线前 24h 内
+        # 真没推出去的文"这一次补不回来——一次性、有界,而从此以后新增的行都受补推保护。
+        if added_pushed_at and "wechat_articles" in existing:
+            conn.execute(text("UPDATE wechat_articles SET pushed_at = created_at "
+                              "WHERE pushed_at IS NULL"))
         # 高频查询复合索引(文章过万后采样/去重查询需要)。
         # 注意:CREATE INDEX IF NOT EXISTS 是 SQLite 方言,MySQL 不支持,
         # 且 conn 必须先绑定再使用(早前版本引用了尚未定义的 conn,整个块被静默吞掉)。
         if "wechat_articles" in existing:
-            cols = {c["name"] for c in inspector.get_columns("wechat_articles")}
-            idx = {i["name"] for i in inspector.get_indexes("wechat_articles")}
+            # 重新反射:函数开头那个 inspector 缓存里没有本轮刚 ALTER 出的列,沿用会让
+            # `ix_wa_user_pushed` 在首次迁移那一趟被静默跳过(得等下次启动才建上)。
+            fresh = inspect(get_engine())
+            cols = {c["name"] for c in fresh.get_columns("wechat_articles")}
+            idx = {i["name"] for i in fresh.get_indexes("wechat_articles")}
             for name, needed in (("ix_wa_user_created", ("user_id", "created_at")),
-                                 ("ix_wa_user_url", ("user_id", "url"))):
+                                 ("ix_wa_user_url", ("user_id", "url")),
+                                 # 补推每轮都要扫"pushed_at IS NULL",没索引就是全表扫
+                                 ("ix_wa_user_pushed", ("user_id", "pushed_at"))):
                 if name in idx or not set(needed).issubset(cols):
                     continue
                 conn.execute(text(f"CREATE INDEX {name} ON wechat_articles ({', '.join(needed)})"))

@@ -2812,3 +2812,261 @@ def test_push_listen_sanitizes_llm_narrative(session, monkeypatch) -> None:
     assert "<at" not in blob                   # @所有人 不生效
     assert "\\n第二行" in blob                 # 逐行处理,换行排版保留(json 里是真换行)
     assert "evil.example" in blob              # 只中和排版符,不改写内容本身
+
+
+# ---------------------------------------------------------------- 欠推补偿(pushed_at)
+def _flaky_feishu(monkeypatch, cards: list, ok: list[bool]) -> None:
+    """可开关的假飞书:`ok[0]=False` 时 send_card 返回 False,模拟 webhook 抖动/被移出群。"""
+    import app.services.feishu as feishu_mod
+
+    monkeypatch.setattr(feishu_mod, "webhook_for",
+                        lambda settings, section: "https://open.feishu.cn/hook/x")
+
+    class _Flaky:
+        def __init__(self, webhook, secret="") -> None:
+            pass
+
+        def send(self, msg: str) -> bool:
+            return ok[0]
+
+        def send_card(self, card: dict) -> bool:
+            if ok[0]:
+                cards.append(card)
+            return ok[0]
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _Flaky)
+
+
+def _listen_one_article_setup(session, monkeypatch) -> FakeWeread:
+    """配好"微信读书只拿到 cover 一篇"的监听现场(list 被限权 -2041)。"""
+    import time as _time
+
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    session.add(WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1", anchor_url=""))
+    session.commit()
+    fake = FakeWeread(cover={"title": "资源文 夸克网盘", "url": "https://mp.weixin.qq.com/s/late1",
+                             "review_id": "MP_WXS_1_late1", "digest": ""},
+                      content="点此保存 https://pan.quark.cn/s/late1",
+                      list_error=wechat_monitor.WereadError("微信读书接口返回错误(-2041):请求频率过高"),
+                      ts=int(_time.time()) - 600)
+    monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: fake)
+    return fake
+
+
+def test_listen_repushes_articles_that_never_reached_feishu(session, monkeypatch) -> None:
+    """采到了、卡却没发出去 → 下一轮监听开头自动补推,并盖 pushed_at 结案。
+
+    回归:旧实现先 commit 新文再发卡,发卡失败只留一行 exception 日志,那批文章永久躺在
+    库里,和"这个号今天没发文"在数据上一模一样——而飞书是员工看新发文的唯一入口(铁律)。
+    """
+    fake = _listen_one_article_setup(session, monkeypatch)
+    cards: list[dict] = []
+    ok = [False]
+    _flaky_feishu(monkeypatch, cards, ok)
+    st = _settings(dajiala_key="")
+
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=st)
+    assert out["status"] == "success" and out["new"] == 1
+    art = session.scalars(select(WechatArticle)).one()
+    assert art.pushed_at is None and cards == []   # 没送达就不许记账
+
+    ok[0] = True
+    out2 = wechat_monitor.run_wechat_listen(session, 1, settings=st)
+    assert out2["new"] == 0                        # 同一篇不重复入库
+    assert out2["repushed"] == 1
+    assert len(cards) == 1 and "⏰ 补推" in str(cards[0]["header"])
+    assert "资源文 夸克网盘" in str(cards[0])
+    session.refresh(art)
+    assert art.pushed_at is not None
+
+    wechat_monitor.run_wechat_listen(session, 1, settings=st)
+    assert len(cards) == 1                         # 已结案的不再翻出来刷屏
+
+
+def test_repush_window_excludes_by_design_rows(session, monkeypatch) -> None:
+    """补推的筛选边界:只补"近窗口内入库且发布也在窗口内、从未送达"的监听/同步文。
+
+    四种该排除的:已推过、超窗口的历史补采文(同步封顶砍掉的那批,设计上留给补转存)、
+    超窗口入库的老文、人工导入来源。把它们翻出来补推就是反向破坏铁律(刷屏 + 翻旧账)。
+    """
+    now = datetime.now()
+    due = WechatArticle(user_id=1, title="该补", author="号A", url="u_due", source="listen",
+                        pan_urls="https://pan.quark.cn/s/due", created_at=now, publish_at=now)
+    pushed = WechatArticle(user_id=1, title="已推过", author="号A", url="u_pushed", source="listen",
+                           created_at=now, publish_at=now, pushed_at=now)
+    stale_pub = WechatArticle(user_id=1, title="历史补采", author="号A", url="u_stale_pub",
+                              source="sync", pan_urls="https://pan.quark.cn/s/stale",
+                              created_at=now, publish_at=now - timedelta(days=3))
+    stale_ins = WechatArticle(user_id=1, title="入库超窗", author="号A", url="u_stale_ins",
+                              source="listen", created_at=now - timedelta(days=2),
+                              publish_at=now - timedelta(days=2))
+    manual = WechatArticle(user_id=1, title="人工导入", author="号A", url="u_manual",
+                           source="manual", created_at=now, publish_at=now)
+    session.add_all([due, pushed, stale_pub, stale_ins, manual])
+    session.commit()
+
+    cards: list[dict] = []
+    _fake_feishu(monkeypatch, cards)
+    assert wechat_monitor.repush_unpushed(session, 1, _settings()) == 1
+    titles = str(cards)
+    assert "该补" in titles
+    for t in ("已推过", "历史补采", "入库超窗", "人工导入"):
+        assert t not in titles                     # 越界的都不许出现在卡上
+    session.refresh(due); session.refresh(stale_pub)
+    assert due.pushed_at is not None and stale_pub.pushed_at is None
+
+
+def test_repush_alerts_when_still_undelivered(session, monkeypatch) -> None:
+    """补推又没推完 = 飞书侧持续故障,必须点名告警,不能安静少推。"""
+    now = datetime.now()
+    session.add(WechatArticle(user_id=1, title="欠推文", author="号A", url="u1", source="listen",
+                              created_at=now, publish_at=now))
+    session.commit()
+    cards: list[dict] = []
+    ok = [False]
+    _flaky_feishu(monkeypatch, cards, ok)
+    incidents: list[str] = []
+    monkeypatch.setattr("app.services.alert_service.notify_incident",
+                        lambda session_, user_id, section, title, detail, **kw:
+                        incidents.append(f"{title}|{detail}"))
+
+    assert wechat_monitor.repush_unpushed(session, 1, _settings()) == 0
+    assert len(incidents) == 1
+    assert "补推仍未送达" in incidents[0] and "1 篇" in incidents[0]
+
+
+def test_sync_dedupe_drops_are_stamped_as_pushed(session, monkeypatch) -> None:
+    """同步里被"同链只推一篇"有意跳过的文章要盖 pushed_at。
+
+    否则 `repush_unpushed` 把它们的 NULL 当成"从没推过"重新发卡,补偿机制反而把去重铁律破掉。
+    """
+    b = WechatBenchmark(user_id=1, nickname="号A", biz="bizABC")
+    session.add(b)
+    session.commit()
+    fresh = datetime.now()
+    first = WechatArticle(user_id=1, title="首发文", author="号A", url="https://mp.weixin.qq.com/s/a",
+                          source="sync", pan_urls="https://pan.quark.cn/s/SAME",
+                          created_at=fresh, publish_at=fresh)
+    dup = WechatArticle(user_id=1, title="搬运文", author="号A", url="https://mp.weixin.qq.com/s/b",
+                        source="sync", pan_urls="https://pan.quark.cn/s/SAME",
+                        created_at=fresh, publish_at=fresh)
+    session.add_all([first, dup])
+    session.commit()
+
+    kept = wechat_monitor._dedupe_sync_push_rows(session, 1, [first, dup])
+    assert [r.id for r in kept] == [first.id]
+    session.refresh(dup)
+    assert dup.pushed_at is not None               # 有意跳过的也算"处理过了"
+
+
+# ---------------------------------------------------------------- 监听并发防重(在跑锁)
+def _lock_row(session):
+    from app.db.models import SystemConfig
+
+    return session.scalar(select(SystemConfig).where(
+        SystemConfig.key == wechat_monitor._listen_lock_key(1)))
+
+
+def test_listen_refuses_to_run_two_rounds_at_once(session, monkeypatch) -> None:
+    """另一轮在跑时这轮直接跳过:不采集、不发卡、不花钱。
+
+    回归:`claim_schedule` 的乐观锁只管"抢占那一刻",挡不住一轮几分钟的作业——手动点
+    「立即监听」撞上定时轮,或管理端失败重试撞上下一次定时轮,两轮就并行扫同一批号:
+    重复扣 dajiala 费、同一篇新文发两张卡、微信读书请求密度翻倍招风控。
+    """
+    fake = _listen_one_article_setup(session, monkeypatch)
+    _fake_feishu(monkeypatch, [])
+    from app.db.models import SystemConfig
+
+    session.add(SystemConfig(key=wechat_monitor._listen_lock_key(1), value="别的进程的令牌",
+                             updated_at=datetime.now()))
+    session.commit()
+
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""))
+    assert out["status"] == "skipped" and out["reason"] == "running"
+    assert fake.calls == []                        # 一次数据源请求都没发
+    assert len(session.scalars(select(WechatArticle)).all()) == 0
+    runs = session.scalars(select(RunRecord).where(RunRecord.kind == "wechat_listen")).all()
+    assert [r.status for r in runs] == ["skipped"]  # 运维看得见"这轮被挡了"
+    assert _lock_row(session) is not None           # 别人的锁不许被顺手解开
+
+
+def test_listen_lock_takeover_after_ttl_and_release_after_round(session, monkeypatch) -> None:
+    """锁只在"这一轮还活着"时有效:超过 TTL 视为进程被杀可接管,跑完必须解锁。
+
+    两者缺一都是事故:不接管 → 一次崩溃把该用户监听锁死到人工删行为止;
+    不解锁 → 每轮都被自己上一次的残留挡住,监听永久停摆且日志只写"skipped"。
+    """
+    from app.db.models import SystemConfig
+
+    fake = _listen_one_article_setup(session, monkeypatch)
+    _fake_feishu(monkeypatch, [])
+    stale = datetime.now() - timedelta(hours=1)   # 远超默认 TTL(20 分钟)
+    session.add(SystemConfig(key=wechat_monitor._listen_lock_key(1), value="崩掉的进程",
+                             updated_at=stale))
+    session.commit()
+
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""))
+    assert out["status"] == "success" and out["new"] == 1
+    assert _lock_row(session) is None               # 收尾删的是自己那把令牌
+    assert len(session.scalars(select(WechatArticle)).all()) == 1
+
+
+def test_listen_lock_released_even_when_round_raises(session, monkeypatch) -> None:
+    """本轮抛异常也必须解锁:否则一次抖动之后的所有轮次都被自己的残留挡住。"""
+    _listen_one_article_setup(session, monkeypatch)
+    _fake_feishu(monkeypatch, [])
+
+    def _boom(*a, **kw):
+        raise RuntimeError("采集炸了")
+
+    monkeypatch.setattr(wechat_monitor, "_listen_round", _boom)
+    with pytest.raises(RuntimeError):
+        wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""))
+    assert _lock_row(session) is None
+
+
+# ---------------------------------------------------------------- 沉睡号计数(miss_count)
+def test_listen_counts_quiet_rounds_on_weread_path(session, monkeypatch) -> None:
+    """微信读书是 81 个号唯一的源:它确认"当天没有新发文"时也要 +1,否则前端
+    「连续 N 轮未发文」对绝大多数号永远是空的,号停更和从没判过沉睡长得一样。
+
+    cover 报得出最新一篇、而库里已有这篇 → 当天确实没有新的 → 计数往上走。
+    """
+    fake = _listen_one_article_setup(session, monkeypatch)
+    _fake_feishu(monkeypatch, [])
+    st = _settings(dajiala_key="")
+
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=st)
+    assert out["new"] == 1
+    b = session.scalars(select(WechatBenchmark)).one()
+    assert b.miss_count == 0                       # 采到新文 → 归零
+    assert len(fake.calls) > 0
+
+    wechat_monitor.run_wechat_listen(session, 1, settings=st)
+    session.refresh(b)
+    assert b.miss_count == 1
+    wechat_monitor.run_wechat_listen(session, 1, settings=st)
+    session.refresh(b)
+    assert b.miss_count == 2                       # 连续沉睡要能累加
+
+
+def test_listen_does_not_mark_quiet_when_source_cannot_answer(session, monkeypatch) -> None:
+    """cover 空响应 + 列表被限权 = 这一轮什么都不知道,不能算"当天没发文"。
+
+    否则微信读书一被风控(-2014/-2041 一起中),全部正常号会被刷成沉睡号,
+    运营照着那份名单去删本来在发的号。
+    """
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    session.add(WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1",
+                                anchor_url="", miss_count=3))
+    session.commit()
+    fake = FakeWeread(cover=None,
+                      list_error=wechat_monitor.WereadError("微信读书接口返回错误(-2014):请求频率过高"))
+    monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: fake)
+    _fake_feishu(monkeypatch, [])
+
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""))
+    assert out["new"] == 0
+    b = session.scalars(select(WechatBenchmark)).one()
+    assert b.miss_count == 3                       # 原样不动:既不加也不清零

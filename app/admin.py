@@ -506,6 +506,14 @@ def _retry_runners() -> dict:
     }
 
 
+def _retry_blocked(res: object) -> bool:
+    """重跑被"上一轮还在跑"挡下时不算成功:旧失败记录必须留着,下一轮重试再试。
+
+    否则一次撞车就把真实的失败标成 recovered,那次采集的债没人还了。
+    """
+    return isinstance(res, dict) and res.get("status") == "skipped" and res.get("reason") == "running"
+
+
 def retry_run(db: Session, run_id: str, settings=None) -> dict:
     from config.settings import get_settings
 
@@ -521,7 +529,11 @@ def retry_run(db: Session, run_id: str, settings=None) -> dict:
     if not runner:
         return {"ok": False, "msg": f"未知板块 {run.kind}"}
     try:
-        runner(db, run.user_id, settings)
+        res = runner(db, run.user_id, settings)
+        if _retry_blocked(res):
+            # 撞上了在跑的那一轮(run_wechat_listen 自己已落 skipped 记录):
+            # 原失败记录保持 failed,交给下一次重试扫描。
+            return {"ok": False, "msg": "该用户上一轮采集仍在执行中,请稍后再试"}
         # 成功后必须关闭该失败记录,否则它仍是 status='failed',会被
         # retry_failed_runs 在 24h 窗口内再次自动重跑一遍(重复采集)。
         run.status = "recovered"
@@ -597,7 +609,9 @@ def retry_failed_runs(max_retry: int = 3) -> dict:
             if not runner:
                 continue
             try:
-                runner(db, run.user_id, settings)
+                res = runner(db, run.user_id, settings)
+                if _retry_blocked(res):
+                    continue    # 撞上在跑的一轮:保持 failed,等下一次扫描再试,不关闭记录
                 # 采集成功:关闭旧失败记录,阻止同一失败被反复重试
                 run.status = "recovered"
                 run.detail = f"{run.detail} → retry_ok"

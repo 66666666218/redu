@@ -776,7 +776,14 @@
   监听中途欠费同样只停付费,运行记录 detail 记 `dajiala_off(...)`)
 - **响应示例**: `{ "platform":"wechat", "status":"success", "accounts":2, "new":5, "failed":0 }`
   余额不足时: `{ "platform":"wechat", "status":"success", "accounts":2, "new":1, "failed":0,
-  "dajiala_skipped":"low_balance", "balance":0.02 }`
+  "dajiala_skipped":"low_balance", "balance":0.02 }`;本轮开头补推了上一轮欠推的文章时多一个 `repushed:N`
+- **并发防重(2026-09-26)**: 同一用户同时只跑一轮(在跑标记落 `system_config` 的
+  `wechat_listen_running_<uid>`),手动点击撞上定时轮/失败重试时返回
+  `{ "platform":"wechat", "status":"skipped", "reason":"running" }`,零采集副作用;
+  标记超过 `WECHAT_LISTEN_LOCK_TTL_MINUTES`(默认 20 分钟)视为持有进程已被杀,可被下一轮接管
+- **欠推补偿(2026-09-26)**: `wechat_articles.pushed_at` 只在文章**真的**进过飞书卡片时盖上,
+  窗口内(`WECHAT_REPUSH_WINDOW_HOURS`)为 NULL 的 listen/sync 文章由下一轮监听开头补发一张
+  `⏰ 补推 · 公众号监听 …` 卡;补推仍未送达 → `notify_incident` 点名飞书侧故障
 - **近 24h 全推(2026-09-26 定的铁律)**:被监控号近 24 小时发的文章必须**一篇不落**推到飞书
   (飞书是员工看新发文的唯一入口)。监听侧本来就没有截断——采到的新文全推;唯一能不能兑现取决于
   **微信读书"近期列表"这一轮是否可枚举**:可枚举时同一天群发的第 2、3 篇一起进来;被限权(-2041)时

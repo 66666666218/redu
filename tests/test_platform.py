@@ -979,6 +979,31 @@ def test_retry_run_marks_recovered(session, monkeypatch: pytest.MonkeyPatch) -> 
     assert run.status == "recovered"
 
 
+def test_retry_run_keeps_record_failed_when_previous_round_still_running(
+        session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """重跑撞上"上一轮监听还在跑"不算成功:旧 failed 记录必须保持原样等下次重试。
+
+    回归:`retry_run` 以前只要 runner 不抛异常就把记录标 recovered,于是被并发挡下的
+    那次重跑等于什么都没做,却把真实的失败债一起销掉了。
+    """
+    from datetime import datetime
+    from app.db.models import RunRecord
+    from app.services import wechat_monitor
+    from app.admin import retry_run
+
+    run = RunRecord(user_id=1, run_id="w1", kind="wechat_listen", status="failed",
+                    detail="boom", retry_count=0, started_at=datetime.now())
+    session.add(run)
+    session.commit()
+    monkeypatch.setattr(wechat_monitor, "run_wechat_listen",
+                        lambda db, uid, settings=None: {"status": "skipped", "reason": "running"})
+
+    res = retry_run(session, str(run.id), settings=object())
+    assert res["ok"] is False and "执行中" in res["msg"]
+    session.refresh(run)
+    assert run.status == "failed" and (run.retry_count or 0) == 0
+
+
 def test_retry_run_supports_baidu(session, monkeypatch: pytest.MonkeyPatch) -> None:
     """手动 retry_run 与自动重试共用同一张 runners 表:baidu 不再报"未知板块"。"""
     from datetime import datetime

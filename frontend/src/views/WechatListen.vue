@@ -110,9 +110,14 @@ async function listenAll() {
   busy.value = 'listen'
   try {
     const r = await api.wechatListen()
-    if (r.status === 'skipped') toastErr(`监听跳过:${r.reason === 'no_benchmarks' ? '还没有对标号' : r.reason === 'no_source' ? '未配置微信读书/dajiala' : r.reason}`)
+    if (r.status === 'skipped') {
+      const why = { no_benchmarks: '还没有对标号', no_source: '未配置微信读书/dajiala',
+                    running: '上一轮还在跑(一轮要几分钟),这轮不再重复触发' }
+      toastErr(`监听跳过:${why[r.reason] || r.reason}`)
+    }
     else {
       const text = `监听完成:检查 ${r.accounts} 个号,新文 ${r.new} 篇`
+        + (r.repushed ? ` · 已补推上轮欠推 ${r.repushed} 篇` : '')
         + (r.dajiala_skipped === 'low_balance'
           ? ` · dajiala 余额不足(¥${Number(r.balance ?? 0).toFixed(2)}),本轮仅免费源,请充值恢复付费监听` : '')
       r.dajiala_skipped === 'low_balance' ? toastErr(text) : toastOk(text)

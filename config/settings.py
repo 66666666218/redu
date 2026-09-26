@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     wechat_resample_growth_pct: float = 100  # 相邻采样阅读增长≥该百分比 → 爆点苗头
     wechat_burst_min_reads: int = 100  # 爆点苗头最低阅读(微信读书站内口径,比全网阅读小一个量级)        # 爆点苗头最低绝对阅读数(滤大号基线噪音)
     wechat_resonance_hours: int = 48         # 资源共振窗口(同一盘链 N 小时内 ≥2 篇文章)
+    wechat_repush_window_hours: int = 24     # 补推窗口:入库 N 小时内未送达飞书的文章还要补
+    wechat_repush_limit: int = 100           # 单轮补推篇数上限(超出留给下一轮,不一次刷屏)
+    wechat_listen_lock_ttl_minutes: int = 20 # 监听"在跑"标记的有效期(超过视为进程被杀,允许后来者接管)
     deepseek_api_key: str = ""               # DeepSeek API key(LLM 叙事层,OpenAI 兼容)
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"

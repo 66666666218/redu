@@ -381,7 +381,7 @@ redian/
   撤销的是**整个外层事务**,所以一次转存异常会连带 `_record_run`/`_push_listen` 全部跳过:本轮
   已采到的新文既不落库也不推飞书(员工端等于什么都没发生)。现在它炸了只撤销自己那半截写,
   新文照常 commit + 推卡(标题回落原文)。**不要**用"提前 commit 新文"来救——那会造出
-  "已入库却从未推送"的新静默丢失路径(修复要加 `pushed_at` 列 = DB 迁移,留人工)。
+  "已入库却从未推送"的新静默丢失路径(该路径已于第九轮用 `pushed_at` + 补推闭环收口,见下)。
 - **飞书告警的冷却门也攥在 SAVEPOINT 里**:同理,`notify_incident` / `_notify_burst` /
   `feishu_alert_gate` 旧写法在"发送失败"或"并发撞唯一约束"时 `rollback()`,会把同事务里
   尚未提交的业务数据(监听轮已付费采到的 ¥0.06/篇读数)一起抹掉。现在用
@@ -391,6 +391,38 @@ redian/
   员工群卡片 → 它是**外部可控文本**(提示注入可让模型回一个 `[点我领取](钓鱼站)` 或
   `<at user_id="all">`)。此前只有采集来的标题/摘要过 `feishu._md_safe`,`reading` 漏了;
   现按行过 `_md_safe`(打散 `[]<>` 与反引号,保留换行排版)。
+
+#### 5.8.1 监听第 9 轮:欠推补偿 / 在跑锁 / 沉睡号计数(2026-09-26)
+
+- **`wechat_articles.pushed_at` = "这篇进过飞书卡片"的唯一事实**。`_push_listen` 以前只返回
+  `pushed` 布尔、发卡失败仅留一行 `logger.exception`,于是"采到了却从没推出去"的文章和
+  "这个号今天没发文"在库里长得一模一样(全推铁律的最后一格静默面)。现在:
+  ① 只有**真的送达**的那一页才盖 `pushed_at`(双推时任一目标群收下即算);
+  ② 每轮监听**开头**跑 `repush_unpushed`——把窗口内(`WECHAT_REPUSH_WINDOW_HOURS`,默认 24h)
+  `pushed_at IS NULL` 的 listen/sync 文章重发一次,卡标题带 `⏰ 补推`;
+  ③ 补推仍未送达 → `notify_incident` 点名(飞书 webhook 被移除/关键词拦截/单轮上限不够);
+  ④ 同步里被"同盘链只推一篇"**有意跳过**的文章也盖章,否则补偿机制会把去重铁律反向破坏;
+  ⑤ 筛选同时要求 `publish_at` 在窗口内,免得把同步封顶砍掉的 24h 前历史补采文翻出来刷屏。
+  不新增定时作业,不进 cron;列由 `app/db/database.py::_migrate()` 的 ALTER 落到已有库
+  (含一次性回填 `pushed_at = created_at`,避免上线即补推全库旧文)。
+- **同一用户不并发跑两轮监听(`run_wechat_listen` 外层时长锁)**。`claim_schedule` 的乐观锁只保护
+  **抢占那一刻**(比较 `last_run_at`),而一轮监听要跑几分钟——期间手动「立即监听」、管理端
+  `retry_run`/`retry_failed_runs` 都能与定时轮撞车,后果是重复扫同一批号、重复扣 dajiala、
+  同一篇新文两张卡、微信读书密度翻倍招风控。现在标记落在 `system_config`(`wechat_listen_running_<uid>`,
+  整库/跨 worker 可见),抢到给令牌、跑完 `finally` 按令牌解锁,超过
+  `WECHAT_LISTEN_LOCK_TTL_MINUTES`(默认 20)视为进程被杀允许接管;被挡住的一轮返回
+  `{"status":"skipped","reason":"running"}` 并落 skipped 运维记录,前端据此提示"上一轮还在跑"。
+  管理端两条重试路径遇到 `running` **不**把原失败记录标 `recovered`(等于没重跑,不能销债)。
+- **`miss_count` 在微信读书路径也要 +1**。它是 81 个对标号唯一的源,但 `+1` 只写在读书平台
+  与 dajiala 两个分支里 → 前端的「连续 N 轮未发文」对绝大多数号永远空着,分不清"号停更"和
+  "我这源没判出来"。现在 `_weread_collect` 返回 `(got, answered)`,`answered` = cover 给得出
+  最新一篇 / 列表枚举成功,只有**源正面回答过且没有新文**才 +1;cover 空响应且列表被限权
+  (-2014/-2041 同中)时原样不动,避免一次风控把正常号刷成沉睡号。
+- **`_migrate()` 建索引段要重新反射**:函数开头那个 `inspector` 缓存里没有**本轮刚 ALTER 出来**的列,
+  所以 `issubset(cols)` 恒 False → 新索引在首次迁移那一趟被静默跳过(要等下次启动才建,
+  而那一轮补推已经在全表扫)。同一趟既要补列又要据此建索引的迁移,必须在建索引前重新 `inspect()`。
+  旧库形状只能在真文件库 + 手写 `CREATE TABLE` 上测(`Base.metadata.create_all` 直接是新形状),
+  见 `tests/test_db_migrate.py`。
 
 ### 5.9 抖音热点·内容词趋势 `services/douhot.py` + `services/douhot_client.py`(独立数据源)
 

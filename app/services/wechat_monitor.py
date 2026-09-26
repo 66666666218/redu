@@ -7,10 +7,12 @@ from __future__ import annotations
 import html as html_mod
 import re
 import time
+import uuid
 from datetime import datetime, timedelta
 
 import requests
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
@@ -1125,7 +1127,8 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
     return replacements
 
 def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
-                    session: Session, stats: dict | None = None) -> list[WechatArticle]:
+                    session: Session, stats: dict | None = None
+                    ) -> tuple[list[WechatArticle], bool]:
     """微信读书单号采集:**cover 最新一篇(稳定可用)→ mp/articles 列表(可选,常被限权)。
 
     实测(2026-09):mp/articles 仅在会话建立初期可用,数小时后被服务端限权(-2041),
@@ -1134,6 +1137,11 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
     这正是"近 24h 必须全推"的唯一真实缺口;列表可用时该缺口不存在。
     `stats` 记账可枚举性(见调用方),不可枚举又采到新文时必须暴露给运维,不能假装全覆盖。
     近3天过滤;阅读/点赞以 cover/mp_articles 自带值为准(免费)。
+
+    第二个返回值 = **源这一轮有没有正面回答过这个号**(cover 给出一篇可看的文 / 列表枚举成功)。
+    调用方据此决定 `miss_count` 加不加:+1 的含义是"确认当天没发文",
+    cover 空响应且列表又挂了的"什么都不知道"不能算进去——否则一次风控就把正常号
+    刷成"连续 N 轮未发文"的沉睡号,运营会去删本来在发的号。
     """
     from app.services.weread_client import WereadClient as _WC
 
@@ -1141,7 +1149,8 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
     items = []
     # 主路径:cover 最新一篇(始终可用)
     item = weread.latest_article(b.weread_book_id)
-    if item and item["url"]:
+    cover_ok = bool(item and item.get("url"))
+    if cover_ok:
         items.append({"title": item["title"], "url": item["url"],
                       "publish_at": None})
     # 备选:mp/articles 近期列表(含精确阅读/点赞;被限权时静默跳过)
@@ -1169,19 +1178,104 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
     if stats is not None:
         key = "weread_list_ok" if listed else ("weread_list_off_new" if got else "weread_list_off")
         stats[key] = stats.get(key, 0) + 1
-    return got
+    return got, (cover_ok or listed)
+
+
+def _listen_lock_key(user_id: int) -> str:
+    return f"wechat_listen_running_{user_id}"
+
+
+def _acquire_listen_slot(session: Session, user_id: int, settings: Settings) -> str | None:
+    """抢占"这一用户的一轮监听"执行权(跨进程/跨 worker 的时长锁)。抢到给令牌,抢不到给 None。
+
+    `claim_schedule` 的乐观锁只保护**抢占那一刻**(比较 last_run_at),而一轮监听要跑几分钟:
+    期间用户再点一次「立即监听」、或后台 `retry_failed_runs` 撞上在跑的定时轮,两轮就会并行
+    扫同一批号——重复扣 dajiala 费用、同一篇新文发两张卡、微信读书密度翻倍招风控
+    (2026-09-26 第九轮审计)。标记落在 `system_config`(整库可见),超过 TTL 视为持有进程已死,
+    允许后来者接管:宁可重跑一轮,也不能因没解锁而把该用户的监听永久锁死。
+    """
+    from app.db.models import SystemConfig
+
+    key = _listen_lock_key(user_id)
+    now = datetime.now()
+    stale_before = now - timedelta(minutes=max(1, int(settings.wechat_listen_lock_ttl_minutes or 20)))
+    token = uuid.uuid4().hex
+    if session.get(SystemConfig, key) is None:
+        try:
+            with savepoint(session):     # 插入冲突=别人刚抢到,只撤销这一段
+                session.add(SystemConfig(key=key, value=token, updated_at=now))
+                session.flush()
+        except IntegrityError:
+            return None
+        session.commit()
+        return token
+    res = session.execute(
+        update(SystemConfig).where(
+            SystemConfig.key == key,
+            or_(SystemConfig.value == "", SystemConfig.updated_at.is_(None),
+                SystemConfig.updated_at < stale_before),
+        ).values(value=token, updated_at=now))
+    session.commit()
+    return token if res.rowcount else None
+
+
+def _release_listen_slot(session: Session, user_id: int, token: str) -> None:
+    """解锁:只删自己那把令牌(接管过的后来者令牌不同,不会被误删)。"""
+    from app.db.models import SystemConfig
+
+    try:
+        with savepoint(session):
+            session.execute(delete(SystemConfig).where(
+                SystemConfig.key == _listen_lock_key(user_id), SystemConfig.value == token))
+            session.flush()
+        session.commit()
+    except Exception:  # noqa: BLE001 - 解锁失败只能等 TTL 过期,不能盖掉本轮结果
+        logger.exception("释放监听在跑标记失败 user=%s(该用户在标记过期前不能再起一轮)", user_id)
 
 
 def run_wechat_listen(session: Session, user_id: int, settings: Settings | None = None,
                       client: DajialaClient | None = None, weread: WereadClient | None = None,
                       platform: ReaderPlatformClient | None = None, push: bool = True,
                       batch_index: int | None = None, batch_size: int | None = None) -> dict:
+    """监听一轮(外层是"同一用户不并发"的时长锁,内层 `_listen_round` 才是采集本体)。
+
+    所有入口——手动「立即监听」、调度器定时轮、管理端失败重试——都走这里,所以防重只需要
+    在这一处做实。被挡住的一轮返回 `skipped/running`,不产生采集副作用。
+    """
+    st = _base(settings)
+    token = _acquire_listen_slot(session, user_id, st)
+    if token is None:
+        _record_run(session, user_id, "wechat_listen", "skipped",
+                    "running(上一轮监听尚未结束)")
+        session.commit()
+        logger.warning("公众号监听跳过 user=%s:上一轮仍在执行", user_id)
+        return {"platform": "wechat", "status": "skipped", "reason": "running"}
+    try:
+        return _listen_round(session, user_id, settings=settings, client=client, weread=weread,
+                             platform=platform, push=push, batch_index=batch_index,
+                             batch_size=batch_size)
+    finally:
+        _release_listen_slot(session, user_id, token)
+
+
+def _listen_round(session: Session, user_id: int, settings: Settings | None = None,
+                  client: DajialaClient | None = None, weread: WereadClient | None = None,
+                  platform: ReaderPlatformClient | None = None, push: bool = True,
+                  batch_index: int | None = None, batch_size: int | None = None) -> dict:
     """监听一轮:双数据源免费优先——微信读书(cover)→ dajiala(当天发文)→ 新文入库推飞书。
 
     余额不足(dajiala)只禁用付费源与即时采样并返回 `dajiala_skipped:"low_balance"`,
     免费源(读书平台/微信读书)照常监听;全部数据源不可用才返回 `skipped`。
     """
     settings = _base(settings)
+    # 开工先补上一轮的欠推:飞书抖动/超时/进程被杀留下的"已入库未推送"文章在这一轮补上。
+    # 关在保存点里——补推本身炸了不能伤到本轮采集(与后处理同一条原则)。
+    repushed = 0
+    try:
+        with savepoint(session):
+            repushed = repush_unpushed(session, user_id, settings)
+    except Exception:  # noqa: BLE001 - 补推失败不影响本轮监听
+        logger.exception("补推上轮欠推失败 user=%s", user_id)
     all_rows = session.scalars(select(WechatBenchmark).where(
         WechatBenchmark.user_id == user_id, WechatBenchmark.active.is_(True))
         .order_by(WechatBenchmark.id)).all()
@@ -1256,25 +1350,32 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
         if not used and cookie and b.weread_book_id:
             try:
                 weread = weread or WereadClient(cookie)
-                got = _weread_collect(user_id, b, weread, session, stats=wr_stats)
+                got, answered = _weread_collect(user_id, b, weread, session, stats=wr_stats)
                 used = True
                 if got:
                     new_rows.extend(got)
                     b.miss_count = 0
                     b.last_item_at = now
+                elif answered:
+                    # cover 报得出"最新一篇是哪篇",库里也确有这篇 → 当天确实没发文。
+                    # 此前微信读书路径从不 +1(只有平台/dajiala 分支加),而它是 81 个号
+                    # 唯一的源 → 前端"连续 N 轮未发文"永远空着,号停更和源挂了分不清。
+                    b.miss_count = (b.miss_count or 0) + 1
             except WereadAuthError as exc:
                 logger.warning("微信读书登录态失效(用户 %s):%s;尝试自动续期", user_id, exc)
                 refreshed = refresh_weread_cookie(session, user_id, settings)
                 if refreshed.get("status") == "success":
                     cookie = refreshed["cookie"]
                     try:
-                        got = _weread_collect(user_id, b, WereadClient(cookie), session,
-                                              stats=wr_stats)
+                        got, answered = _weread_collect(user_id, b, WereadClient(cookie), session,
+                                                        stats=wr_stats)
                         used = True  # 微信读书源已消费本号,勿再走 dajiala 重复扣费
                         if got:
                             new_rows.extend(got)
                             b.miss_count = 0
                             b.last_item_at = now
+                        elif answered:
+                            b.miss_count = (b.miss_count or 0) + 1
                     except WereadError as exc2:
                         failed += 1
                         logger.warning("微信读书续期后仍失败 %s:%s", b.nickname or b.weread_book_id, exc2)
@@ -1347,6 +1448,8 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
     else:
         status = "success"
     detail = f"accounts={len(rows)} new={len(new_rows)} failed={failed}"
+    if repushed:
+        detail += f" repushed={repushed}"   # 补推的上一轮欠推数,写进运维记录而非只进日志
     enumerable = wr_stats.get("weread_list_ok", 0)
     off_new = wr_stats.get("weread_list_off_new", 0)
     if wr_stats:
@@ -1374,6 +1477,8 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
             settings=settings)
     out: dict = {"platform": "wechat", "status": status, "accounts": len(rows),
                  "new": len(new_rows), "failed": failed}
+    if repushed:
+        out["repushed"] = repushed
     if wr_stats:
         out["weread_list"] = {k: v for k, v in wr_stats.items()}
     if dajiala_off:
@@ -1382,14 +1487,64 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
             out["balance"] = balance
     return out
 
+def repush_unpushed(session: Session, user_id: int, settings: Settings | None = None) -> int:
+    """补推:近 N 小时入库、却从未成功推上飞书的文章(铁律的最后一道兜底)。
+
+    "监控号近 24h 发的文章必须全部到飞书"是产品铁律,但推送从来没有事实记录:
+    `run_wechat_listen` 先 commit 新文、再发卡,卡片发送失败只留一行 exception 日志,
+    那批文章就永久停在库里,而且和"根本没发文"长得一模一样(第八轮审计遗留的最后一格)。
+    现在 `_push_listen` 只在**真的送达**时才落 `pushed_at`,这里把 `pushed_at IS NULL`
+    的窗口内文章重新走一次发卡(标题带 ⏰补推,员工能分辨这是迟到的卡)。
+
+    每轮监听开头先补上一轮的欠账,所以不需要额外的定时作业;窗口外的文章不再补
+    (与铁律同界,免得翻旧账刷屏)。
+    """
+    settings = _base(settings)
+    cutoff = datetime.now() - timedelta(hours=max(1, int(settings.wechat_repush_window_hours or 24)))
+    limit = max(1, int(settings.wechat_repush_limit or 100))
+    rows = list(session.scalars(select(WechatArticle).where(
+        WechatArticle.user_id == user_id,
+        WechatArticle.pushed_at.is_(None),
+        WechatArticle.source.in_(("listen", "sync")),
+        WechatArticle.created_at >= cutoff,
+        # 发布时间也要在窗口内:「同步文章」被封顶窗口砍掉的 24h 之前的历史补采文
+        # 按设计是"留给补转存队列、不再补推"的,只按入库时间筛会把它们翻出来刷屏。
+        or_(WechatArticle.publish_at.is_(None), WechatArticle.publish_at >= cutoff),
+    ).order_by(WechatArticle.id).limit(limit)).all())
+    if not rows:
+        return 0
+    pushed = _push_listen(session, user_id, settings, rows, None, repush=True)
+    if pushed:
+        logger.warning("补推完成 user=%s:窗口内欠推 %d 篇,本次送达 %d 篇", user_id, len(rows), pushed)
+    if pushed < len(rows):
+        # 补推又没推完 = 飞书侧持续故障或积压超过单轮上限——必须点名,不能安静少推
+        from app.services.alert_service import notify_incident
+
+        notify_incident(
+            session, user_id, "wechat",
+            "⚠️ 公众号文章补推仍未送达,飞书推送可能持续故障",
+            f"近 {settings.wechat_repush_window_hours} 小时内有 {len(rows)} 篇从未成功推送,"
+            f"本轮补推只送达 {pushed} 篇(单轮上限 {limit} 篇)。"
+            "请检查飞书机器人 webhook 是否被移除/关键词/IP 白名单拦截,或被封禁群。"
+            "剩余欠推会在下一轮监听继续补,超过窗口后不再补。",
+            settings=settings)
+    return pushed
+
+
 def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[WechatArticle],
-                 replacements: dict[int, list[tuple[str, str, str]]] | None = None) -> None:
+                 replacements: dict[int, list[tuple[str, str, str]]] | None = None,
+                 repush: bool = False) -> int:
     """新文推公众号专属飞书群(column_set 网格卡片:公众号/文章/网盘/阅读 四列对齐)。
 
     标题超链接优先级:本轮转存链(带提取码)> 已持久化的我的转存链 > 原文;
     未配专属群则回落总群;推送失败不影响采集结果。
     不设免打扰窗口:飞书是员工查看新发文的唯一入口(平台只有运营者可见),
     任何时段采到的文章都照常全量推送。
+
+    返回值=成功送达的篇数。**送达的卡片里那些文章会盖上 `pushed_at`**,没盖上的
+    (整卡发送失败/异常)就是"采到了却从没到过飞书",由 `repush_unpushed` 下一轮补推
+    ——此前这类文章只留下一行 logger.exception,静默永久丢失(2026-09-26 第八轮审计)。
+    `repush=True` 时卡标题带 ⏰补推,让员工/运营分得清这是迟到的那批。
     """
     from app.services.feishu import _col_set_row, _md_safe, webhook_for
     from app.services.feishu_client import FeishuClient
@@ -1398,11 +1553,11 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
     main_wh = settings.feishu_webhook
     targets = list(dict.fromkeys(filter(None, [wh, main_wh])))  # 去重保序
     if not targets:
-        return
+        return 0
     replacements = replacements or {}
     # 免打扰过滤后可能清空(理论上上面已 return,这里再兜一层,避免推空卡)
     if not rows:
-        return
+        return 0
     from collections import OrderedDict
 
     from app.db.models import WechatPanLink
@@ -1511,6 +1666,7 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
     per_card = 20
     chunks = [seq[i:i + per_card] for i in range(0, len(seq), per_card)]
     total_pages = len(chunks)
+    delivered: list[int] = []   # 成功送达那一页所盖的 article id → 收尾统一落 pushed_at
     for page_idx, chunk in enumerate(chunks):
         elements: list[dict] = [
             {"tag": "note", "elements": [{"tag": "plain_text",
@@ -1532,18 +1688,32 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
         if page_idx == 0 and ai_elements:
             elements.extend(ai_elements)
         card_title = f"📡 公众号监听 · 新发文 {len(rows)} 篇"
+        if repush:
+            # 补推卡必须自报身份:员工看到的是一张迟到的卡,不是"这轮又发了新的"
+            card_title = "⏰ 补推 · " + card_title
         if total_pages > 1:
             card_title += f" · {page_idx + 1}/{total_pages}"
+        sent_any = False
         for target in targets:
             try:
-                FeishuClient(target, settings.feishu_secret).send_card({
+                if FeishuClient(target, settings.feishu_secret).send_card({
                     "config": {"wide_screen_mode": True},
                     "header": {"template": "blue", "title": {"tag": "plain_text",
                         "content": card_title}},
                     "elements": elements,
-                })
+                }):
+                    sent_any = True
             except Exception:  # noqa: BLE001 - 推送失败不影响采集结果
                 logger.exception("公众号监听飞书推送失败 user=%s page=%s", user_id, page_idx)
+        # 任一目标群收下即算这一页送达(专属群+总群双推是设计如此;补推时会整批重发,
+        # 好的那个群可能再收一次——重复一张卡远好于员工永远没看到这篇)。
+        if sent_any:
+            delivered.extend(r.id for _, r in chunk)
+    if delivered:
+        session.execute(update(WechatArticle).where(WechatArticle.id.in_(delivered))
+                        .values(pushed_at=datetime.now()))
+        session.commit()
+    return len(delivered)
 
 
 def _dedupe_sync_push_rows(session: Session, user_id: int,
@@ -1569,13 +1739,20 @@ def _dedupe_sync_push_rows(session: Session, user_id: int,
                 WechatPanLink.article_id.notin_(ids)).distinct()).all()}
     seen: set[str] = set()
     kept: list[WechatArticle] = []
+    dropped: list[int] = []
     for r in sorted(rows, key=lambda x: x.id):  # 入库顺序即新→旧,保留首见者
         p = first_pan.get(r.id, "")
         if p and (p in already or p in seen):
+            dropped.append(r.id)
             continue
         if p:
             seen.add(p)
         kept.append(r)
+    # 被有意跳过的重复资源也要盖 pushed_at:否则 `repush_unpushed` 下一轮把它们当成
+    # "从没推过"重新发卡,把"同链只推一篇"的铁律反过来破坏了。
+    if dropped:
+        session.execute(update(WechatArticle).where(WechatArticle.id.in_(dropped))
+                        .values(pushed_at=datetime.now()))
     return kept
 
 

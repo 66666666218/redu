@@ -313,6 +313,9 @@ class WechatArticle(Base):
     first_read_num: Mapped[int] = mapped_column(Integer, default=0)     # 首采样阅读数(基线对比)
     trend_flag: Mapped[str] = mapped_column(String(16), default="")     # 爆点苗头 / 回落 / 空
     quality: Mapped[int] = mapped_column(Integer, default=0)            # 内容质量分 0~10
+    # 成功进过飞书卡片的时间。NULL = 采到却从未推出去(飞书抖动/超时/进程被杀),
+    # 由 `repush_unpushed` 在下一轮监听开头补推——"近24h全推"是铁律,静默少推不能存在。
+    pushed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class WechatTrafficSample(Base):

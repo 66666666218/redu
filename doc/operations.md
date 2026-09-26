@@ -13,7 +13,11 @@
    - 手动点「立即监听一轮」,看返回的 `new` 值
 3. `status=skipped reason=no_source` → .env 缺 WEREAD_COOKIE 且缺 DAJIALA_KEY
 4. `reason=low_balance` → dajiala 余额不足,充值或忽略(免费源不受影响)
-5. **"推送了但比该号实际发的少"** → 不是推送截断,是采集只看见最新一篇,按 §4e 判定与处置
+5. `reason=running` → **上一轮监听还在跑**(详情页会写 `running(上一轮监听尚未结束)`),
+   这一轮按设计不重复触发(防两轮并发扣费/重复发卡)。偶尔出现是正常的(手动点击撞上定点轮);
+   持续出现才要查:一轮跑完必须解锁,若进程被 kill 在轮中,标记最多滞留
+   `WECHAT_LISTEN_LOCK_TTL_MINUTES`(默认 20 分钟)后自动被下一轮接管
+6. **"推送了但比该号实际发的少"** → 不是推送截断,是采集只看见最新一篇,按 §4e 判定与处置
 
 ## 1b. 公众号在管理后台的哪一处(2026-09-22 补齐)
 
@@ -139,11 +143,19 @@ UC / 迅雷只有 `pan_types` 标签、没有我方链(卡片上是 `—`),要�
 - 能枚举同日兄弟篇的是 `mp/articles`(近 3 天列表),但它**只在 Cookie 会话初期可用**,数小时后被服务端
   限权 `-2041`,对本账号是永久性的
 
-看两处就知道本轮有没有兑现(不要把"success + new=2"当成"全推到了"):
+看三处就知道本轮有没有兑现(不要把"success + new=2"当成"全推到了"):
 
 1. `wechat_listen` 运行记录 detail 的 `weread_list(ok=A off=B off_with_new=C)`:
    **C>0 就意味着有 C 个号"采到了新文却列不出它的同日兄弟篇"**,属未知丢失
 2. 飞书里有没有 `⚠️ 微信读书只能拿到最新一篇,同日其它篇可能漏推`(标题固定、数字写在正文,冷却去重才有效)
+3. **有没有"卡压根没发出去"**(2026-09-26 起有事实可查):`wechat_articles.pushed_at` 只在卡片真的
+   送达时盖上,所以
+   `select count(*) from wechat_articles where pushed_at is null and source in ('listen','sync')
+    and created_at > now() - interval 24 hour`
+   非 0 = 有文章入库却欠飞书一条卡。下一轮监听开头会自动补推(卡标题 `⏰ 补推 · 公众号监听 …`),
+   运行记录 detail 里带 `repushed=N`;补推仍未送达会收到
+   `⚠️ 公众号文章补推仍未送达,飞书推送可能持续故障` —— 那基本是 webhook 被移出群/被关键词或
+   IP 白名单拦截,不是采集问题
 
 处置(按代价排序):
 
