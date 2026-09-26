@@ -1453,7 +1453,7 @@ def test_quark_transfer_without_any_cookie_alerts_once(session, monkeypatch) -> 
     assert wechat_monitor._enrich_new_articles(session, 1, st, [b], client=None) == {}
     assert calls and "缺夸克 Cookie" in calls[0][3]
 
-    # 没有夸克盘链时不该告警(百度链走自己的门控)
+    # 百度链有自己的门控:缺百度 Cookie 同样要点名(2026-09-26 起,原先静默 break 只留 info 日志)
     calls.clear()
     c = WechatArticle(user_id=1, title="百度资源文", url="https://mp.weixin.qq.com/s/baidu",
                       source="listen", benchmark_id=None,
@@ -1461,7 +1461,7 @@ def test_quark_transfer_without_any_cookie_alerts_once(session, monkeypatch) -> 
     session.add(c)
     session.commit()
     wechat_monitor._enrich_new_articles(session, 1, st, [c], client=None)
-    assert calls == []
+    assert [x[3] for x in calls] == ["百度盘链未转存(缺百度网盘 Cookie)"]
 
 
 def test_pan_selfshare_41017_adopted_as_own_link(session, monkeypatch) -> None:
@@ -1570,6 +1570,143 @@ def test_baidu_reuse_does_not_leak_other_tenant_link(session, monkeypatch) -> No
     st = _settings(quark_cookie="", pan_transfer_enabled=True, wechat_listen_sample_new=False)
     reps = wechat_monitor._enrich_new_articles(session, 1, st, [b], client=None)
     assert reps[b.id] == [(orig, "https://pan.baidu.com/s/1MYOWN", "f0de")]  # 自己的链,非 1OTHER/zz99
+
+
+def test_baidu_dead_cookie_alerts_after_first_failure(session, monkeypatch) -> None:
+    """百度 Cookie 死了时转存只报"errno 失败"(看着像对方链接失效)→ 本轮首次失败后
+    探一次登录态定性,确认是 Cookie 就点名告警并停块,否则运营者只看到永久的"—"。"""
+    from app.services import alert_service, cookie_store
+    from app.services.baidupan_transfer import BaiduPanAuthError, BaiduPanClient, BaiduPanError
+
+    monkeypatch.setattr(cookie_store, "get_cookie",
+                        lambda db, uid, plat: "BDUSS=fake" if plat == "baidupan" else "")
+    captured: list[tuple] = []
+    monkeypatch.setattr(alert_service, "notify_incident",
+                        lambda db, uid, kind, title, detail, settings=None, **kw:
+                        captured.append((uid, kind, title, detail)) or False)
+
+    arts = [WechatArticle(user_id=1, title=f"百度资源文{i}", url=f"https://mp.weixin.qq.com/s/b{i}",
+                          source="listen", benchmark_id=None,
+                          pan_urls=f"https://pan.baidu.com/s/1FAIL{i}") for i in range(3)]
+    session.add_all(arts)
+    session.commit()
+
+    monkeypatch.setattr(BaiduPanClient, "__init__", lambda self, *a, **kw: None)
+    probes: list[int] = []
+
+    def _fail_transfer(self, url, password="", **kw):
+        raise BaiduPanError("转存失败(errno=-6)")
+
+    def _dead_keepalive(self):
+        probes.append(1)
+        raise BaiduPanAuthError("百度网盘 Cookie 已失效,请重新复制")
+
+    monkeypatch.setattr(BaiduPanClient, "transfer_and_share", _fail_transfer)
+    monkeypatch.setattr(BaiduPanClient, "keepalive", _dead_keepalive)
+    st = _settings(quark_cookie="", pan_transfer_enabled=True, wechat_listen_sample_new=False)
+    assert wechat_monitor._enrich_new_articles(session, 1, st, list(arts), client=None) == {}
+    assert len(probes) == 1                                   # 只定性一次,不逐条撞接口
+    assert [c[2] for c in captured] == ["百度网盘 Cookie 已失效,转存停用"]
+    assert captured[0][1] == "wechat" and captured[0][0] == 1
+    assert "BDUSS" in captured[0][3]                           # 说清去哪换、要含什么
+
+
+def test_baidu_transient_failure_does_not_claim_cookie_dead(session, monkeypatch) -> None:
+    """反向门:登录态仍健康(网络/对方链接问题)时不得报"Cookie 失效",
+    否则运营者会白重贴一份好 Cookie。"""
+    from app.services import alert_service, cookie_store
+    from app.services.baidupan_transfer import BaiduPanClient, BaiduPanError
+
+    monkeypatch.setattr(cookie_store, "get_cookie",
+                        lambda db, uid, plat: "BDUSS=fake" if plat == "baidupan" else "")
+    captured: list[tuple] = []
+    monkeypatch.setattr(alert_service, "notify_incident",
+                        lambda db, uid, kind, title, detail, settings=None, **kw:
+                        captured.append(title) or False)
+    b = WechatArticle(user_id=1, title="百度资源文", url="https://mp.weixin.qq.com/s/bt",
+                      source="listen", benchmark_id=None, pan_urls="https://pan.baidu.com/s/1NET")
+    session.add(b)
+    session.commit()
+    monkeypatch.setattr(BaiduPanClient, "__init__", lambda self, *a, **kw: None)
+    monkeypatch.setattr(BaiduPanClient, "transfer_and_share",
+                        lambda self, url, password="", **kw: (_ for _ in ()).throw(
+                            BaiduPanError("转存被限制(errno=105),稍后重试")))
+    monkeypatch.setattr(BaiduPanClient, "keepalive", lambda self: True)
+    st = _settings(quark_cookie="", pan_transfer_enabled=True, wechat_listen_sample_new=False)
+    wechat_monitor._enrich_new_articles(session, 1, st, [b], client=None)
+    assert captured == []
+
+
+def test_pan_cookie_keepalive_tick_covers_per_user_both_pans(session, monkeypatch) -> None:
+    """每日巡检必须覆盖"按用户配的"夸克 + 百度 Cookie。
+
+    回归:旧 `quark_keepalive_tick` 一上来 `if not settings.quark_cookie: return 0`——
+    只在 Cookie 管理里配了凭据的人从未被巡检,百度盘更是完全没有保活这一问。
+    """
+    from app.db import models as _m
+    from app.services import alert_service, cookie_store
+    from app.services.baidupan_transfer import BaiduPanAuthError, BaiduPanClient
+    from app.services.quark_transfer import QuarkAuthError, QuarkTransfer
+
+    for uid, enabled in ((1, True), (2, True), (3, False)):
+        session.add(_m.User(id=uid, username=f"u{uid}", email=f"u{uid}@b.c",
+                            password_hash="x", enabled=enabled))
+    # uid1 与 uid2 共用同一份夸克 Cookie(值相同)→ 只探一次、只告警一次
+    cookies = {(1, "quark"): "QUARK-SHARED", (2, "quark"): "QUARK-SHARED",
+               (1, "baidupan"): "BDUSS-dead", (3, "quark"): "QUARK-DISABLED"}
+    monkeypatch.setattr(cookie_store, "get_cookie",
+                        lambda db, uid, plat: cookies.get((uid, plat)) or "")
+    captured: list[tuple] = []
+    monkeypatch.setattr(alert_service, "notify_incident",
+                        lambda db, uid, kind, title, detail, settings=None, **kw:
+                        captured.append((uid, kind, title)) or False)
+    monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+    probed: list[str] = []
+
+    def _dead_quark_init(self, cookie, *a, **kw):
+        probed.append(f"quark:{cookie}")
+
+    def _dead_quark(self):
+        raise QuarkAuthError("夸克登录态失效(__puus 过期)")
+
+    monkeypatch.setattr(QuarkTransfer, "__init__", _dead_quark_init)
+    monkeypatch.setattr(QuarkTransfer, "keepalive", _dead_quark)
+
+    def _dead_baidu_init(self, cookie, *a, **kw):
+        probed.append(f"baidupan:{cookie}")
+
+    def _dead_baidu(self):
+        raise BaiduPanAuthError("百度网盘 Cookie 已失效,请重新复制")
+
+    monkeypatch.setattr(BaiduPanClient, "__init__", _dead_baidu_init)
+    monkeypatch.setattr(BaiduPanClient, "keepalive", _dead_baidu)
+
+    st = _settings(quark_cookie="", pan_transfer_enabled=True)
+    assert wechat_monitor.pan_cookie_keepalive_tick(settings=st) == 0
+    assert probed == ["quark:QUARK-SHARED", "baidupan:BDUSS-dead"]   # 同凭据不重复撞;禁用用户不探
+    assert captured == [(1, "wechat", "🟠 夸克 Cookie 已失效,转存功能停用"),
+                        (1, "wechat", "🟠 百度网盘 Cookie 已失效,转存功能停用")]
+
+
+def test_pan_cookie_keepalive_tick_silent_on_network_wobble(session, monkeypatch) -> None:
+    """保活因网络/风控异常失败时不得报"Cookie 失效"(留到下轮),否则天天误报。"""
+    from app.db import models as _m
+    from app.services import alert_service, cookie_store
+    from app.services.quark_transfer import QuarkError, QuarkTransfer
+
+    session.add(_m.User(id=1, username="u1", email="u1@b.c", password_hash="x", enabled=True))
+    session.commit()
+    monkeypatch.setattr(cookie_store, "get_cookie", lambda db, uid, plat: "ck" if plat == "quark" else "")
+    captured: list[tuple] = []
+    monkeypatch.setattr(alert_service, "notify_incident",
+                        lambda *a, **kw: captured.append(a))
+    monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+    monkeypatch.setattr(QuarkTransfer, "__init__", lambda self, *a, **kw: None)
+    monkeypatch.setattr(QuarkTransfer, "keepalive",
+                        lambda self: (_ for _ in ()).throw(QuarkError("夸克接口超时")))
+    assert wechat_monitor.pan_cookie_keepalive_tick(
+        settings=_settings(quark_cookie="", pan_transfer_enabled=True)) == 0
+    assert captured == []
 
 
 

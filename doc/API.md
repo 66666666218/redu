@@ -799,8 +799,11 @@
 - **AI 改写**: POST `/api/wechat/articles/{id}/rewrite` → `{title, content, my_link}`(DeepSeek 改写为原创可发布稿,≈¥0.01/篇;正文不足自动补抓)
 - **key 多租户**:dajiala key 可在「Cookie 管理」按用户配置(dajiala 平台),未配置回落全局 `DAJIALA_KEY`——多用户余额隔离
 - **网盘 Cookie 多租户**:夸克(`quark`)、百度网盘(`baidupan`)同样在「Cookie 管理」按用户配置,
-  夸克未配置时回落全局 `QUARK_COOKIE`;识别到盘链却无可用 Cookie、或 Cookie 中途失效时,
-  各推一条冷却去重的飞书告警(不再静默显示"未转存")
+  夸克未配置时回落全局 `QUARK_COOKIE`(百度盘无全局默认值);识别到盘链却无可用 Cookie、或 Cookie 中途失效时,
+  各推一条冷却去重的飞书告警(不再静默显示"未转存")。**夸克与百度两套告警对等**:缺 Cookie、鉴权失败即时点名,
+  另有每日 07:00 `pan_cookie_keepalive_tick` 逐用户主动巡检(同一份 Cookie 只探一次)
+- **转存覆盖面**:盘链**识别**四家(夸克/百度/UC/迅雷),**自动转存换链**只有夸克 + 百度;
+  UC/迅雷只落 `pan_types` 标签,卡片上仍是 `—`
 - **运行状态**: GET `/api/wechat/status` → `{benchmarks, new_24h, pan_articles, burst, candidates}`
 - `articles` 列表新增字段:`quality`(质量分 0~10)、`my_pan_urls`(转存后的自己的链接)、`read_num` 等流量字段
 

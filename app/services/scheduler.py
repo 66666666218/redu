@@ -326,12 +326,12 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.agent_learning import backtest_and_learn
     from app.services.early_agent import agent_tick_all_users
     from app.services.wechat_monitor import (candidate_discover_tick, keyword_article_all_users,
-                                              quark_keepalive_tick, traffic_tick, weread_refresh_tick)
+                                              pan_cookie_keepalive_tick, traffic_tick, weread_refresh_tick)
 
     jobs = [
         (traffic_tick, _get_settings().wechat_traffic_cron, {"minute": 30, "hour": 21}, "wechat_traffic"),
         (traffic_tick, "30 9 * * *", {"minute": 30, "hour": 9}, "wechat_traffic_am"),
-        (quark_keepalive_tick, "0 7 * * *", {"minute": 0, "hour": 7}, "quark_keepalive"),
+        (pan_cookie_keepalive_tick, "0 7 * * *", {"minute": 0, "hour": 7}, "pan_cookie_keepalive"),
         # 会员续费检查:每日 10:05(到期该收续费/超 24h 该踢名单 → 飞书)
         (_member_renewal, "5 10 * * *", {"minute": 5, "hour": 10}, "member_renewal"),
         # 事件归属:每 15 分钟把近 24h 快照归并为事件(跨平台共振/生命周期的基础层)

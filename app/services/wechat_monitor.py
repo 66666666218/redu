@@ -915,50 +915,83 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
             if dead:
                 break
     # 百度网盘链接: 同样转存+换链(协议与夸克并列;失败回落原文推送)。
-    # 独立门控:只看 pan_transfer_enabled + 用户是否配了百度 Cookie(块内 743 判定),
+    # 独立门控:只看 pan_transfer_enabled + 用户是否配了百度 Cookie,
     # 不再借用 quark_cookie——此前复制粘贴导致"只配百度未配夸克"时百度链永不转存。
-    if settings.pan_transfer_enabled:
-        baidu_urls = {}  # article_id -> [(原百度链, 我方百度链, 提取码)]
-        baidu_client = None
-        for r in rows:
-            for u in [x.strip() for x in (r.pan_urls or "").splitlines()
-                      if x.strip().startswith("https://pan.baidu.com/s/")][:2]:
-                try:
-                    if baidu_client is None:
-                        from app.services.baidupan_transfer import BaiduPanClient, extract_pwd
-                        from app.services.cookie_store import get_cookie
-                        bck = get_cookie(session, user_id, "baidupan")
-                        if not bck:
-                            break  # 未配百度网盘 Cookie,跳过全部百度链
-                        baidu_client = BaiduPanClient(bck)
-                    # 历史复用: 该百度链本租户已换过则跳过转存(加 user_id 过滤,绝不用别人的链)
-                    hist = session.execute(
-                        select(WechatArticle.my_pan_urls).join(
-                            WechatPanLink, WechatPanLink.article_id == WechatArticle.id)
-                        .where(WechatPanLink.pan_url == u,
-                               WechatArticle.user_id == user_id,
-                               WechatArticle.my_pan_urls.isnot(None),
-                               WechatArticle.my_pan_urls.like("%[百度]%"),
-                               WechatArticle.id != r.id).limit(1)).scalar()
-                    picked = next((x.strip() for x in (hist or "").splitlines()
-                                   if "[百度]" in x and "pan.baidu.com" in x), "")
-                    if picked:
-                        mine_b = picked
-                        share_url_b = picked.split(" (提取码")[0].strip()
-                        m = re.search(r"(?:提取码\s*([0-9A-Za-z]{4}))", picked)
-                        code_b = m.group(1) if m else ""
-                    else:
-                        pwd_b = extract_pwd(getattr(r, "content", "") or "", u) or extract_pwd(r.title or "", u)
-                        res_b = baidu_client.transfer_and_share(u, password=pwd_b)
-                        share_url_b = res_b["share_url"]
-                        code_b = res_b.get("password", "") or ""
-                        mine_b = f"{share_url_b} (提取码 {code_b}) [百度]" if code_b else f"{share_url_b} [百度]"
-                    mine = [x for x in (r.my_pan_urls or "").splitlines() if x.strip()]
-                    mine.append(mine_b)
-                    r.my_pan_urls = chr(10).join(mine)[:2000]
-                    replacements.setdefault(r.id, []).append((u, share_url_b, code_b))
-                except Exception as exc:  # noqa: BLE001 - 百度链失败不阻断,不触发夸克链路
-                    logger.info("百度链转存跳过 %s: %s", u[:50], str(exc)[:70])
+    # 2026-09-26 补提醒:缺 Cookie / Cookie 失效此前都只有一行 info 日志(或静默 break),
+    # 运营者看到的是永久的"—",与夸克那套"点名告警"不对等。
+    if settings.pan_transfer_enabled and any(
+            "pan.baidu.com/s/" in (r.pan_urls or "") for r in rows):
+        from app.services.alert_service import notify_incident
+        from app.services.baidupan_transfer import (BaiduPanAuthError, BaiduPanClient,
+                                                    extract_pwd)
+        from app.services.cookie_store import get_cookie
+
+        def _baidu_dead_alert(why: str) -> None:
+            notify_incident(session, user_id, "wechat", "百度网盘 Cookie 已失效,转存停用",
+                            f"{why}。请浏览器登录 pan.baidu.com 后复制含 BDUSS 的 Cookie,"
+                            "更新到「Cookie 管理」页的 baidupan 平台(监听不受影响,仅转存暂停)",
+                            settings=settings)
+
+        bck = get_cookie(session, user_id, "baidupan") or ""
+        if not bck:
+            notify_incident(session, user_id, "wechat", "百度盘链未转存(缺百度网盘 Cookie)",
+                            "本轮识别到百度分享链但无可用 Cookie,故只推原文。转存在"
+                            "「Cookie 管理」页配 baidupan 平台即可(需含 BDUSS),"
+                            "保存后下一轮自动生效",
+                            settings=settings)
+        else:
+            baidu_client = BaiduPanClient(bck)
+            login_checked = False   # 每轮最多一次 loginStatus 定性,不额外刷接口
+            baidu_dead = False
+            for r in rows:
+                for u in [x.strip() for x in (r.pan_urls or "").splitlines()
+                          if x.strip().startswith("https://pan.baidu.com/s/")][:2]:
+                    try:
+                        # 历史复用: 该百度链本租户已换过则跳过转存(加 user_id 过滤,绝不用别人的链)
+                        hist = session.execute(
+                            select(WechatArticle.my_pan_urls).join(
+                                WechatPanLink, WechatPanLink.article_id == WechatArticle.id)
+                            .where(WechatPanLink.pan_url == u,
+                                   WechatArticle.user_id == user_id,
+                                   WechatArticle.my_pan_urls.isnot(None),
+                                   WechatArticle.my_pan_urls.like("%[百度]%"),
+                                   WechatArticle.id != r.id).limit(1)).scalar()
+                        picked = next((x.strip() for x in (hist or "").splitlines()
+                                       if "[百度]" in x and "pan.baidu.com" in x), "")
+                        if picked:
+                            mine_b = picked
+                            share_url_b = picked.split(" (提取码")[0].strip()
+                            m = re.search(r"(?:提取码\s*([0-9A-Za-z]{4}))", picked)
+                            code_b = m.group(1) if m else ""
+                        else:
+                            pwd_b = extract_pwd(getattr(r, "content", "") or "", u) or extract_pwd(r.title or "", u)
+                            res_b = baidu_client.transfer_and_share(u, password=pwd_b)
+                            share_url_b = res_b["share_url"]
+                            code_b = res_b.get("password", "") or ""
+                            mine_b = f"{share_url_b} (提取码 {code_b}) [百度]" if code_b else f"{share_url_b} [百度]"
+                        mine = [x for x in (r.my_pan_urls or "").splitlines() if x.strip()]
+                        mine.append(mine_b)
+                        r.my_pan_urls = chr(10).join(mine)[:2000]
+                        replacements.setdefault(r.id, []).append((u, share_url_b, code_b))
+                    except BaiduPanAuthError as exc:
+                        logger.error("百度网盘 Cookie 失效,本轮停止百度链转存:%s", exc)
+                        _baidu_dead_alert(str(exc))
+                        baidu_dead = True
+                        break
+                    except Exception as exc:  # noqa: BLE001 - 百度链失败不阻断,不触发夸克链路
+                        # 转存失败(errno)分不清是"对方链接失效"还是"我方 Cookie 已死",
+                        # 而只有 Cookie 死了才需要人介入 → 本轮第一次失败时探一次登录态定性。
+                        if not login_checked:
+                            login_checked = True
+                            try:
+                                baidu_client.keepalive()
+                            except BaiduPanAuthError as exc2:
+                                logger.error("百度网盘 Cookie 失效(转存失败后探出),停止百度链转存:%s", exc2)
+                                _baidu_dead_alert("转存连续失败,登录态检查确认 Cookie 已失效")
+                                baidu_dead = True
+                        logger.info("百度链转存跳过 %s: %s", u[:50], str(exc)[:70])
+                if baidu_dead:
+                    break
     # 资源级共振:同一盘链在窗口期内被 ≥2 篇文章推送 → 同行网络都在发的确认级爆点资源
     from app.services.feishu import _col_set_row, _md_safe
     from app.services.feishu_client import FeishuClient, webhook_for
@@ -1786,37 +1819,73 @@ def sample_traffic(session: Session, user_id: int, settings: Settings | None = N
     return {"platform": "wechat_traffic", "status": "success", "sampled": sampled,
             "balance_after": client.remain_money() if sampled else balance}
 
-def quark_keepalive_tick(settings: Settings | None = None) -> int:
-    """每日定时:夸克 Cookie 保活(轻量列目录,滚动延长 __puus);失效即时告警。返回1=健康 0=异常/未配。"""
-    from app.services.alert_service import notify_incident
+def pan_cookie_keepalive_tick(settings: Settings | None = None) -> int:
+    """每日定时巡检网盘转存 Cookie(夸克 + 百度网盘),失效即时告警。返回健康的 (用户,平台) 数。
 
-    settings = settings or get_settings()
-    if not settings.quark_cookie:
-        return 0
-    from app.services.quark_transfer import QuarkAuthError, QuarkError, QuarkTransfer
+    旧版三处不对等:① `if not settings.quark_cookie: return 0` —— 只在「Cookie 管理」按用户配了
+    凭据的人**根本没被巡检过**,于是"失效"只能等到监听里转存炸了才报;② 百度盘完全没有保活,
+    而它的失败(errno)长得像"对方链接失效",没人会怀疑是自己 Cookie 死了;③ 告警挂到 id 最小的
+    用户、板块写成 xianyu(发到闲鱼群)。夸克保活仍是轻量列目录(顺带滚动延长 __puus)。
+    同一份 Cookie 只探一次、只告警一次:多用户共用全局凭据时不重复撞接口也不刷屏。
+    """
+    from app.services.alert_service import notify_incident
     from app.db import get_session_local
     from app.db.models import User
+    from app.services.baidupan_transfer import BaiduPanAuthError, BaiduPanClient
+    from app.services.cookie_store import get_cookie
+    from app.services.quark_transfer import QuarkAuthError, QuarkTransfer
+
+    settings = settings or get_settings()
+    if not settings.pan_transfer_enabled:
+        return 0
+    _NICK = {"quark": "夸克", "baidupan": "百度网盘"}
+    _FIX = {"quark": "请浏览器登录 pan.quark.cn 后 F12 复制 Cookie,更新到「Cookie 管理」页的 "
+                      "quark 平台(或 .env 的 QUARK_COOKIE)",
+            "baidupan": "请浏览器登录 pan.baidu.com 后复制含 BDUSS 的 Cookie,更新到"
+                        "「Cookie 管理」页的 baidupan 平台(百度盘没有全局默认值,只能按用户配)"}
+
+    def _probe(platform: str, cookie: str) -> str:
+        """ok / auth(凭据已死,要人工换) / error(网络或风控,不该报"Cookie 失效")。"""
+        try:
+            if platform == "quark":
+                QuarkTransfer(cookie).keepalive()
+            else:
+                BaiduPanClient(cookie).keepalive()
+            return "ok"
+        except (QuarkAuthError, BaiduPanAuthError) as exc:
+            logger.error("%s Cookie 已失效:%s", _NICK[platform], exc)
+            return f"auth:{exc}"
+        except Exception as exc:  # noqa: BLE001 - 瞬时故障留到下轮,不惊动运营者
+            logger.warning("%s 保活异常:%s", _NICK[platform], exc)
+            return "error"
 
     db = get_session_local()()
+    healthy = 0
+    results: dict[tuple[str, str], str] = {}   # (平台, Cookie) → 探测结论,同凭据只探一次
+    warned: set[tuple[str, str]] = set()
     try:
-        uid = db.scalar(select(User.id).order_by(User.id))
-        if uid is None:
-            return 0
-        try:
-            QuarkTransfer(settings.quark_cookie).keepalive()
-            return 1
-        except QuarkAuthError as exc:
-            notify_incident(db, uid, "xianyu",
-                            "🟠 夸克 Cookie 已失效,转存功能停用",
-                            f"{exc}。请浏览器登录 pan.quark.cn 后 F12 复制 Cookie,"
-                            "更新到 .env 的 QUARK_COOKIE(监听不受影响,仅转存暂停)",
-                            settings=settings)
-            return 0
-        except QuarkError as exc:
-            logger.warning("夸克保活异常:%s", exc)
-            return 0
+        users = db.scalars(select(User.id).where(User.enabled.is_(True)).order_by(User.id)).all()
+        for uid in users:
+            for platform in ("quark", "baidupan"):
+                fallback = settings.quark_cookie if platform == "quark" else ""
+                ck = (get_cookie(db, uid, platform) or fallback or "").strip()
+                if not ck:
+                    continue
+                key = (platform, ck)
+                if key not in results:
+                    results[key] = _probe(platform, ck)
+                if results[key] == "ok":
+                    healthy += 1
+                elif results[key].startswith("auth:") and key not in warned:
+                    warned.add(key)
+                    notify_incident(db, uid, "wechat",
+                                    f"🟠 {_NICK[platform]} Cookie 已失效,转存功能停用",
+                                    f"{results[key][5:]}。{_FIX[platform]};监听不受影响,仅转存暂停",
+                                    settings=settings)
     finally:
         db.close()
+    return healthy
+
 
 def traffic_tick(settings: Settings | None = None) -> int:
     """每日定时:给所有(有对标号的)用户采样一轮阅读量。返回采样总篇数。"""
