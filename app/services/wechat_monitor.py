@@ -1486,7 +1486,9 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     if push and new_rows:
         _push_listen(session, user_id, settings, new_rows, replacements)
     if off_new and push:
-        # 兑现"近24h全部推送"要靠列表枚举;只要还有号列不出来又采到了新文,就必须点名而不是安静少推
+        # 兑现"近24h全部推送"要靠列表枚举;只要还有号列不出来又采到了新文,就必须点名而不是安静少推。
+        # 但点名落在**站内告警**:这是"要不要部署 wewe-rss/要不要充值"的长期决策,不是员工群里
+        # 该刷的东西——用户 2026-09-26 定的口径:飞书只推文章与 Cookie 提醒。
         from app.services.alert_service import notify_incident
         notify_incident(
             session, user_id, "wechat",
@@ -1496,7 +1498,7 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
             "cover 最新一篇:两轮之间(最长 8h)同一号发多篇时,前面的那几篇顶不掉也补不回来。"
             "要真正兑现『近24h全推』只有两条路:① 部署 wewe-rss 并给对标号回填 biz(免费全量列表);"
             "② dajiala 充值走 history_by_ghid(付费)。临时缓解:对高产号多点「同步文章」",
-            settings=settings)
+            settings=settings, push_feishu=False)
     out: dict = {"platform": "wechat", "status": status, "accounts": len(rows),
                  "new": len(new_rows), "failed": failed}
     if repushed:
@@ -1539,7 +1541,8 @@ def repush_unpushed(session: Session, user_id: int, settings: Settings | None = 
     if pushed:
         logger.warning("补推完成 user=%s:窗口内欠推 %d 篇,本次送达 %d 篇", user_id, len(rows), pushed)
     if pushed < len(rows):
-        # 补推又没推完 = 飞书侧持续故障或积压超过单轮上限——必须点名,不能安静少推
+        # 补推又没推完 = 飞书侧持续故障或积压超过单轮上限——必须点名,不能安静少推。
+        # 而这种"飞书本身坏了"的告警发飞书更是发不出去(或被同一故障吞掉),只落站内。
         from app.services.alert_service import notify_incident
 
         notify_incident(
@@ -1549,7 +1552,7 @@ def repush_unpushed(session: Session, user_id: int, settings: Settings | None = 
             f"本轮补推只送达 {pushed} 篇(单轮上限 {limit} 篇)。"
             "请检查飞书机器人 webhook 是否被移除/关键词/IP 白名单拦截,或被封禁群。"
             "剩余欠推会在下一轮监听继续补,超过窗口后不再补。",
-            settings=settings)
+            settings=settings, push_feishu=False)
     return pushed
 
 

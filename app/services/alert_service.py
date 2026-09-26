@@ -364,17 +364,23 @@ def feishu_alert_gate(db: Session, user_id: int, section: str, title: str,
 
 
 def notify_incident(db: Session, user_id: int, kind: str, title: str, detail: str,
-                    settings: Settings | None = None) -> bool:
-    """事件级即时告警(如闲鱼滑块):推该板块飞书群,复用 feishu_alert_cooldown_hours 冷却去重。
+                    settings: Settings | None = None, push_feishu: bool = True) -> bool:
+    """事件级即时告警:默认推该板块飞书群,复用 feishu_alert_cooldown_hours 冷却去重。
 
     与 check_collect_failures 的"聚合计数"互补——滑块这类需要人工立刻介入的事件,
     不该等 24h 内凑满 3 次失败才响。返回是否实际推送。
+
+    `push_feishu=False` 给的是**不需要人当场动手的运维诊断**(例:"微信读书只能拿到最新一篇"
+    的漏推风险、"补推仍未送达"这种飞书自身故障):飞书群是员工看文章和 Cookie 提醒的入口,
+    这类"要不要部署 wewe-rss / 要不要充值"的长期决策项丢进来只是噪音。它们改落**站内告警**
+    (`alerts` 表 → 预警页 `/api/alerts/list`、管理端用户详情、告警导出 CSV 都读它),
+    冷却门照旧走,所以每 `FEISHU_ALERT_COOLDOWN_HOURS` 最多记一条,不会堆垃圾。
     """
     settings = settings or get_settings()
     from app.services.feishu_client import FeishuClient, webhook_for
 
-    webhook = webhook_for(settings, kind)
-    if not webhook:
+    webhook = webhook_for(settings, kind) if push_feishu else ""
+    if push_feishu and not webhook:
         return False
     section, key = f"incident_{kind}", title[:80]
     # 冷却门写在 SAVEPOINT 里:发送失败要"不烧冷却期"时只撤销这一行。
@@ -390,6 +396,12 @@ def notify_incident(db: Session, user_id: int, kind: str, title: str, detail: st
         return False
     if not passed:
         gate.close(keep=False)
+        return False
+    if not push_feishu:
+        db.add(AlertRecord(user_id=user_id, section=f"incident_{kind}"[:32],
+                           keyword=title[:500], reason=detail))
+        gate.close(keep=True)
+        db.commit()
         return False
     message = f"🔴 {title}" + chr(10) + detail
     # 送达日志+一次重试(关键事件告警不应因瞬时抖动丢失;送达结果可审计)

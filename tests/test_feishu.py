@@ -700,6 +700,50 @@ def test_notify_incident_sends_then_cooldowns(session) -> None:
     assert len(sent) == 1  # 冷却期内不重发
 
 
+def test_notify_incident_admin_only_records_alert_without_feishu(session) -> None:
+    """运维诊断型告警(push_feishu=False)只进站内 `alerts` 表:飞书群只放文章与 Cookie 提醒。
+
+    用户 2026-09-26 口径:像"微信读书只能拿到最新一篇,同日其它篇可能漏推"这种
+    "要不要部署 wewe-rss / 要不要充值"的长期决策项,不该刷进员工群,但也不能没人看见。
+    """
+    from app.db.models import AlertRecord
+    from app.services import alert_service
+
+    sent: list[str] = []
+
+    class _FakeFeishu:
+        def __init__(self, webhook, secret="") -> None:
+            pass
+
+        def send(self, msg: str) -> bool:
+            sent.append(msg)
+            return True
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
+    st = _settings(feishu_webhook_wechat="https://open.feishu.cn/hook/wechat")
+
+    def notify(title="⚠️ 微信读书只能拿到最新一篇,同日其它篇可能漏推", **kw):
+        a = dict(kw)
+        a.setdefault("settings", st)
+        a.setdefault("push_feishu", False)
+        return alert_service.notify_incident(session, 1, "wechat", title, "本轮列不出的号:10", **a)
+
+    assert notify() is False and sent == []           # 一次飞书都不该发
+    row = session.scalars(select(AlertRecord)).one()
+    assert row.section == "incident_wechat" and "只能拿到最新一篇" in row.keyword
+    assert "列不出的号:10" in row.reason
+    assert notify() is False                          # 冷却门照旧:不逐轮堆同一条
+    assert len(session.scalars(select(AlertRecord)).all()) == 1
+    # 站内型不依赖飞书配置:没配 webhook 也照样记账(否则诊断项彻底没人看得见)
+    assert notify(title="⚠️ 同日其它篇漏推风险(无 webhook 场景)", settings=_settings()) is False
+    assert len(session.scalars(select(AlertRecord)).all()) == 2
+    # 默认仍是发飞书的(Cookie 过期那类要立刻提醒用户);换标题绕开上面那条的冷却门
+    assert alert_service.notify_incident(session, 1, "wechat", "🟠 微信读书 Cookie 已过期",
+                                         "请重新复制", settings=st) is True
+    assert len(sent) == 1 and "Cookie 已过期" in sent[0]
+
+
 def test_run_xianyu_full_block_notifies_incident(session, monkeypatch: pytest.MonkeyPatch) -> None:
     """全关键词被滑块挡:RunRecord=failed + 即时事件告警(带原因)推闲鱼群。"""
     from app.db.models import RunRecord, UserCookie

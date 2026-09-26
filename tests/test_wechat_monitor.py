@@ -2388,7 +2388,7 @@ def test_listen_exposes_unenumerable_accounts_and_alerts(session, monkeypatch) -
     alerts: list[tuple] = []
     monkeypatch.setattr(alert_service, "notify_incident",
                         lambda db, uid, kind, title, detail, settings=None, **kw:
-                        alerts.append((uid, kind, title, detail)) or False)
+                        alerts.append((uid, kind, title, detail, kw.get("push_feishu", True))) or False)
 
     out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""), push=True)
     assert out["new"] == 2 and out["weread_list"] == {"weread_list_off_new": 2}
@@ -2401,6 +2401,10 @@ def test_listen_exposes_unenumerable_accounts_and_alerts(session, monkeypatch) -
     # cover 的正文兜住了 → 盘链被认出,于是"有链却没 Cookie 转存"也必须点名(修 1 之后这两篇
     # 不再是卡片上的一根"—");没转存可解释,静默不可接受。
     assert any("缺夸克 Cookie" in a[2] for a in alerts)
+    # 「漏推风险」是长期决策项(要不要部署 wewe-rss/充值),只落站内;
+    # 「缺 Cookie 未转存」是用户当场能修的,照旧刷飞书——用户 2026-09-26 口径。
+    assert alert[4] is False
+    assert any("缺夸克 Cookie" in a[2] and a[4] is True for a in alerts)
 
 
 def test_listen_silent_when_list_enumerable(session, monkeypatch) -> None:
@@ -2938,14 +2942,16 @@ def test_repush_alerts_when_still_undelivered(session, monkeypatch) -> None:
     cards: list[dict] = []
     ok = [False]
     _flaky_feishu(monkeypatch, cards, ok)
-    incidents: list[str] = []
+    incidents: list[tuple] = []
     monkeypatch.setattr("app.services.alert_service.notify_incident",
                         lambda session_, user_id, section, title, detail, **kw:
-                        incidents.append(f"{title}|{detail}"))
+                        incidents.append((f"{title}|{detail}", kw.get("push_feishu", True))))
 
     assert wechat_monitor.repush_unpushed(session, 1, _settings()) == 0
     assert len(incidents) == 1
-    assert "补推仍未送达" in incidents[0] and "1 篇" in incidents[0]
+    assert "补推仍未送达" in incidents[0][0] and "1 篇" in incidents[0][0]
+    # 「飞书本身坏了」的告警发飞书更是发不出去;用户 2026-09-26 定的口径:飞书只推文章与 Cookie 提醒
+    assert incidents[0][1] is False
 
 
 def test_sync_dedupe_drops_are_stamped_as_pushed(session, monkeypatch) -> None:
