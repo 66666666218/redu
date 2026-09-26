@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -182,7 +182,8 @@ def wechat_benchmark_list(user: User = Depends(get_current_user), db: Session = 
 
 
 @router.post("/api/wechat/benchmarks")
-def wechat_benchmark_add(payload: dict, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def wechat_benchmark_add(payload: dict, background: BackgroundTasks,
+                         user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """贴该号任意一篇**文章链接**即加号(body: {url, nickname?, note?});链接同时是监听锚点。"""
     try:
         row = wechat_monitor.add_benchmark(db, user.id, str(payload.get("url", "")),
@@ -190,6 +191,10 @@ def wechat_benchmark_add(payload: dict, user: User = Depends(get_current_user), 
                                            note=str(payload.get("note", "")))
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+    if row.get("biz"):
+        # WeRSS 里刚建的订阅要等它自己的定时才有文章;响应后催一次,新号当轮就能全推。
+        # 放后台是因为那是同步抓取(十几秒),不能挂在用户的「添加」请求上。
+        background.add_task(wechat_monitor.nudge_werss, row["biz"])
     return {"ok": True, **row}
 
 

@@ -219,7 +219,10 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
                 title="⚠️ 闲鱼部分关键词被风控(人机验证)",
                 detail=f"本轮 {len(stats['verify'])} 个关键词触发人机验证被挡(已采 {len(hot)} 条):"
                        f"{', '.join(stats['verify'])}",
-                settings=settings)
+                settings=settings,
+                # 只是命中率下降,其它关键词照常 → 属"不修也能继续跑"的降级,按用户
+                # 2026-09-27 口径只进站内(飞书留给人不修就整块停摆的滑块与 Cookie 失效)
+                push_feishu=False)
         _record_run(session, user_id, "xianyu", "success", detail)
         session.commit()
         # 搜索接力深采(想要数/类目)——自动跑,受 验证冷却 + 详情限流 保护;按间隔控制频率防累积风控
@@ -246,7 +249,10 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
                 db=session, user_id=user_id, kind="xianyu",
                 title="🟠 闲鱼网关 WAF 拦截(账号/IP 被压制)",
                 detail=f"{exc}(已自动冷却,期间轮次跳过;反复出现请更换固定住宅出口 IP)",
-                settings=settings)
+                settings=settings,
+                # 自动冷却期间轮次跳过、解禁即自愈,按 2026-09-27 口径只进站内;
+                # 若运营认为"要换出口 IP 所以必须当场看到",把这一行删掉即可
+                push_feishu=False)
         elif "XianyuCookieExpired" in name:
             alert_service.notify_incident(
                 db=session, user_id=user_id, kind="xianyu",

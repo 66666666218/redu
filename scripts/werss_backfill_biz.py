@@ -4,6 +4,7 @@
     python scripts/werss_backfill_biz.py              # 只看计划,不写库
     python scripts/werss_backfill_biz.py --apply      # 确认后写入
     python scripts/werss_backfill_biz.py --apply --user 3
+    python scripts/werss_backfill_biz.py --apply --nudge 3   # 写完顺带催 WeRSS 立刻抓 3 个
 
 前提:.env 里配好 WECHAT_WERSS_URL / WECHAT_WERSS_AK / WECHAT_WERSS_SK,并且这些公众号
 已经在 WeRSS 后台添加为订阅。已有 biz 的行不动;重名与找不到的都只报告不猜。
@@ -25,6 +26,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="按名称回填 WeRSS 订阅 id 到 biz 列")
     parser.add_argument("--apply", action="store_true", help="真正写库(默认只打印计划)")
     parser.add_argument("--user", type=int, default=None, help="只处理指定用户 id(默认全部有对标号的用户)")
+    parser.add_argument("--nudge", type=int, default=0, metavar="N",
+                        help="写库后立刻催 WeRSS 抓 N 个刚回填的订阅(不等它自己的定时);"
+                             "WeRSS 是同步抓取且全局 60s 节流,别开大")
     args = parser.parse_args()
 
     db = get_session_local()()
@@ -42,13 +46,21 @@ def main() -> int:
                 print(f"user={uid} {tag}: 匹配 {out['matched']} / 已有 biz {out['already']} "
                       f"/ 重名 {len(out['ambiguous'])} / 未订阅 {len(out['missing'])}")
                 for item in out["detail"]:
-                    print(f"    + {item['nickname']} -> {item['biz']}")
+                    print(f"    + {item['nickname']} -> {item['biz']}"
+                          + (f"(纠正原值 {item['was']})" if item.get("was") else ""))
                 for item in out["ambiguous"]:
                     print(f"    ! 重名 {item['nickname']}:候选 {item['candidates']}"
                           "(请在 WeRSS 后台把订阅名改得可区分,或手工 UPDATE biz)")
                 for name in out["missing"]:
                     print(f"    ? 未找到订阅:{name}(确认它已加进 WeRSS 且名称一致)")
                 need_human += len(out["ambiguous"]) + len(out["missing"])
+                if args.apply and args.nudge:
+                    print(f"    催抓前 {min(args.nudge, len(out['detail']))} 个"
+                          f"(同步抓取,每个十几秒;被 60s 节流挡住会显示 False,交给 WeRSS 自己的定时):")
+                    for item in out["detail"][:args.nudge]:
+                        res = wechat_monitor.nudge_werss(item["biz"])
+                        print(f"      {'已催' if res['nudged'] else '未执行'} {item['nickname']} -> {item['biz']}"
+                              + (f" {res['reason']}" if res["reason"] else ""))
         except ValueError as exc:      # WeRSS 没配置:给一句人话,别甩 traceback
             print(f"无法回填:{exc}")
             return 1

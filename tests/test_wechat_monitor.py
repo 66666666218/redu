@@ -1036,7 +1036,7 @@ class FakePlatform:
 def test_listen_prefers_platform_full_list(session, monkeypatch: pytest.MonkeyPatch) -> None:
     """平台(免费全量列表)优先于微信读书与 dajiala。"""
     _set_cookie(session, 1, "weread", "vid=1")
-    session.add(WechatBenchmark(user_id=1, nickname="号A", biz="bizABC",
+    session.add(WechatBenchmark(user_id=1, nickname="号A", biz="MP_WXS_9001",
                                 weread_book_id="MP_WXS_1"))
     session.commit()
     plat = FakePlatform(pages=[[{"id": "p1", "title": "平台文1(夸克网盘)", "url": "https://mp.weixin.qq.com/s/p1"},
@@ -1053,7 +1053,7 @@ def test_listen_prefers_platform_full_list(session, monkeypatch: pytest.MonkeyPa
 
 def test_sync_platform_paginates(session, monkeypatch: pytest.MonkeyPatch) -> None:
     """平台同步翻页拉全量,后续页全部已入库即停。"""
-    b = WechatBenchmark(user_id=1, nickname="号A", biz="bizABC")
+    b = WechatBenchmark(user_id=1, nickname="号A", biz="MP_WXS_9001")
     session.add(b)
     session.commit()
     plat = FakePlatform(pages=[
@@ -1104,9 +1104,13 @@ class FakeWerss:
         self.calls: list[tuple] = []
 
     def list_feeds(self, kw: str = "", limit: int = 100, offset: int = 0) -> list[dict]:
-        self.calls.append((limit, offset))
+        self.calls.append((kw, limit, offset))
         idx = offset // limit if limit else 0
         return self.pages[idx] if idx < len(self.pages) else []
+
+    def resolve_mp(self, article_url: str) -> dict:
+        # 真 WeRSS 就是这个行为:没有"链接→公众号"接口(见 WerssClient.resolve_mp)
+        raise wechat_monitor.PlatformError("WeRSS 不支持按文章链接解析公众号")
 
 
 def test_werss_feed_index_pages_to_end_and_keeps_duplicates() -> None:
@@ -1167,6 +1171,173 @@ def test_match_biz_from_werss_requires_werss_config(
     monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: FakePlatform())
     with pytest.raises(ValueError, match="未配置 WeRSS"):
         wechat_monitor.match_biz_from_werss(session, 1, settings=_settings())
+
+
+# ---------------------------------------------------------------- biz 形态:源只认 MP_WXS_*
+_LEGACY_BIZ = "MjM5MDA4OTI1Mw=="   # 历史上 add_benchmark 从文章页 __biz 写进去的形态
+
+
+def test_feed_biz_only_accepts_provider_shape() -> None:
+    assert wechat_monitor.feed_biz(WechatBenchmark(biz="MP_WXS_3902714095")) == "MP_WXS_3902714095"
+    assert wechat_monitor.feed_biz(WechatBenchmark(biz=_LEGACY_BIZ)) == ""
+    assert wechat_monitor.feed_biz(WechatBenchmark(biz="  ")) == ""
+    assert wechat_monitor.feed_biz(WechatBenchmark(biz=None)) == ""
+
+
+def test_listen_ignores_legacy_biz_and_still_covers(
+        session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """形态不对的 biz 一律当"没配免费列表源":既不拿它去撞空列表,也不因此挤掉微信读书 cover。"""
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    session.add(WechatBenchmark(user_id=1, nickname="号A", biz=_LEGACY_BIZ,
+                                weread_book_id="MP_WXS_1", miss_count=2))
+    session.commit()
+    plat = FakePlatform(pages=[[{"id": "x", "title": "不该出现", "url": "https://mp.weixin.qq.com/s/x"}]])
+    fake = FakeWeread(cover={"title": "封面文", "url": "https://mp.weixin.qq.com/s/c",
+                             "review_id": "MP_WXS_1_c"})
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+                                           weread=fake, platform=plat)
+    assert plat.calls == []                                   # 压根没问源
+    assert ("cover", "MP_WXS_1") in fake.calls                # cover 照常采
+    assert out["new"] == 1 and "不该出现" not in [r.title for r in session.scalars(
+        select(WechatArticle)).all()]
+    assert out["biz_bad_shape"] == ["号A"]                     # 点名到运维记录,否则查不到为什么没全推
+    b = session.scalars(select(WechatBenchmark)).one()
+    assert b.miss_count == 0                                  # 采到新文 → 归零,而不是被当成空列表 +1
+
+
+def test_listen_empty_platform_list_does_not_blind_account(
+        session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """列表源正常返回**空页**(订阅不存在/WeRSS 还没抓到)不能算采集成功。
+
+    旧行为是 `used=True` + `miss_count+=1`:① 的 cover 被挤掉,该号整轮一条都不采,
+    还在前端表现成"连续 N 轮未发文"的沉睡号——比不接这个源更糟。
+    """
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    session.add(WechatBenchmark(user_id=1, nickname="号A", biz="MP_WXS_9001",
+                                weread_book_id="MP_WXS_1", miss_count=2))
+    session.commit()
+    plat = FakePlatform(pages=[[]])
+    fake = FakeWeread(cover={"title": "封面文", "url": "https://mp.weixin.qq.com/s/c",
+                             "review_id": "MP_WXS_1_c"})
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+                                           weread=fake, platform=plat)
+    assert [c[1] for c in plat.calls] == ["MP_WXS_9001"]      # 问过
+    assert ("cover", "MP_WXS_1") in fake.calls                # 问过是空的 → 仍交给后续源
+    assert out["new"] == 1
+    # 空列表既没把号采瞎,也没被误记成"这个号今天没发文"
+    assert session.scalars(select(WechatBenchmark)).one().miss_count == 0
+
+
+def test_sync_empty_platform_first_page_falls_back(
+        session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """「同步文章」首页就空不能报 success:否则 dajiala/微信读书两条兜底路永远走不到。"""
+    b = WechatBenchmark(user_id=1, nickname="号A", biz="MP_WXS_9001", weread_book_id="")
+    session.add(b)
+    session.commit()
+    plat = FakePlatform(pages=[[]])
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
+    out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=_settings(dajiala_key=""))
+    assert plat.calls == [("articles", "MP_WXS_9001", 1, 20)]
+    assert out.get("pages") is None and out["status"] != "success"
+
+
+def test_add_benchmark_never_stores_legacy_base64_biz(
+        session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """文章页解出的 `__biz` 是 base64,不是订阅 id:昵称照收,biz 不落地(落地就会让 ⓪ 分支撞空列表)。"""
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: None)
+    monkeypatch.setattr(wechat_monitor, "extract_article_meta",
+                        lambda url, timeout=15: {"biz": _LEGACY_BIZ, "name": "文章页号",
+                                                 "title": "T"})
+    row = wechat_monitor.add_benchmark(session, 1, "https://mp.weixin.qq.com/s/legacy",
+                                       settings=_settings(dajiala_key=""))
+    assert row["biz"] == "" and row["nickname"] == "文章页号"
+
+
+def test_find_feed_biz_by_name_only_accepts_unique_hit() -> None:
+    """按名查订阅:唯一同名才用;0 个、重名、id 形态不对都返回空(猜错的代价是把 A 的文章推给 B 的人)。"""
+    plat = FakeWerss([[{"id": "MP_WXS_1", "mp_name": "资源号甲"},
+                       {"id": "MP_WXS_2", "mp_name": "资源号甲"},
+                       {"id": "MP_WXS_3", "mp_name": "资源号甲 官方"},
+                       {"id": "weird", "mp_name": "只有一个但 id 不对"}]])
+    assert wechat_monitor.find_feed_biz_by_name(plat, "资源号甲") == ""
+    assert wechat_monitor.find_feed_biz_by_name(plat, "只有一个但 id 不对") == ""
+    assert wechat_monitor.find_feed_biz_by_name(plat, "查无此号") == ""
+    assert wechat_monitor.find_feed_biz_by_name(plat, "  ") == ""
+    solo = FakeWerss([[{"id": "MP_WXS_7", "mp_name": "号 乙"}]])   # 名称比对要规范化(空白/大小写)
+    assert wechat_monitor.find_feed_biz_by_name(solo, "号乙") == "MP_WXS_7"
+
+
+def test_find_feed_biz_by_name_swallows_upstream_error(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """加号是交互式请求:查订阅失败绝不能把加号变红,返回空当没配上。"""
+
+    class Boom:
+        def list_feeds(self, kw: str = "", limit: int = 100, offset: int = 0) -> list[dict]:
+            raise RuntimeError("上游 502")
+
+    assert wechat_monitor.find_feed_biz_by_name(Boom(), "任意号") == ""
+
+
+def test_add_benchmark_wires_up_existing_werss_subscription(
+        session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """WeRSS 里已加过订阅时,贴文章链接加号就该顺手接上 biz(否则还得为一个新号跑脚本)。"""
+    plat = FakeWerss([[{"id": "MP_WXS_55", "mp_name": "资源号丙"}]])
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
+    monkeypatch.setattr(wechat_monitor, "extract_article_meta",
+                        lambda url, timeout=15: {"biz": _LEGACY_BIZ, "name": "资源号丙",
+                                                 "title": "T"})
+    row = wechat_monitor.add_benchmark(session, 1, "https://mp.weixin.qq.com/s/new3",
+                                       settings=_settings(dajiala_key=""))
+    assert row["biz"] == "MP_WXS_55"
+
+
+def test_match_biz_from_werss_repairs_legacy_shape(
+        session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """旧值形态不对时按"待纠正"处理:唯一命中就覆盖,并把原值报出来;WeRSS 里不是 MP_WXS_ 的 id 不回填。"""
+    session.add_all([
+        WechatBenchmark(user_id=1, nickname="号0", biz=_LEGACY_BIZ),
+        WechatBenchmark(user_id=1, nickname="怪id号", biz=""),
+    ])
+    session.commit()
+    fake = FakeWerss([[{"id": "MP_WXS_0", "mp_name": "号0"},
+                       {"id": "weird-not-mp", "mp_name": "怪id号"}]])
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: fake)
+    st = _settings(wechat_werss_url="https://werss.test", wechat_werss_ak="WK", wechat_werss_sk="SK")
+    plan = wechat_monitor.match_biz_from_werss(session, 1, settings=st)
+    assert plan["already"] == 0                                  # 旧形态不再算"已配过"
+    assert plan["detail"] == [{"id": session.scalars(select(WechatBenchmark).where(
+        WechatBenchmark.nickname == "号0")).first().id,
+        "nickname": "号0", "biz": "MP_WXS_0", "was": _LEGACY_BIZ}]
+    assert plan["missing"] == ["怪id号"]                          # 源里的 id 我们这边用不了,如实点名
+    assert wechat_monitor.match_biz_from_werss(session, 1, settings=st, apply=True)["applied"] is True
+    row = session.scalars(select(WechatBenchmark).where(
+        WechatBenchmark.nickname == "号0")).first()
+    assert row.biz == "MP_WXS_0"
+
+
+# ---------------------------------------------------------------- WeRSS 手动催抓
+def test_nudge_werss_requires_werss_and_good_shape(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """只对 WeRSS(有 refresh_mp)生效、只认 MP_WXS_*:读书平台没这个接口,怪形态不值得去催。"""
+    calls: list[str] = []
+
+    class Plat:
+        def refresh_mp(self, mp_id: str, end_page: int = 1) -> bool:
+            calls.append(mp_id)
+            return True
+
+    st = _settings()
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: Plat())
+    assert wechat_monitor.nudge_werss("MP_WXS_9001", settings=st) == {"nudged": True, "reason": ""}
+    assert calls == ["MP_WXS_9001"]
+    assert wechat_monitor.nudge_werss(_LEGACY_BIZ, settings=st)["reason"] == "not_werss_or_bad_biz"
+    assert calls == ["MP_WXS_9001"]                             # 怪形态没去催
+    calls.clear()
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: FakePlatform())
+    assert wechat_monitor.nudge_werss("MP_WXS_9001", settings=st)["nudged"] is False
+    assert calls == []
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: None)
+    assert wechat_monitor.nudge_werss("MP_WXS_9001", settings=st)["nudged"] is False
 
 
 # ---------------------------------------------------------------- 阅读量采样
@@ -2319,7 +2490,7 @@ def test_sync_transfers_then_pushes_my_link(session, monkeypatch) -> None:
 
     from app.services.feishu import _md_safe
 
-    b = WechatBenchmark(user_id=1, nickname="号A", biz="bizABC")
+    b = WechatBenchmark(user_id=1, nickname="号A", biz="MP_WXS_9001")
     session.add(b)
     session.commit()
     plat = FakePlatform(pages=[[
@@ -2345,7 +2516,7 @@ def test_sync_transfers_then_pushes_my_link(session, monkeypatch) -> None:
 
 def test_sync_push_skips_resource_already_announced(session, monkeypatch) -> None:
     """更早入库的文章已经带着这条盘链进过飞书群 → 同步到的搬运文不再重推。"""
-    b = WechatBenchmark(user_id=1, nickname="号A", biz="bizABC")
+    b = WechatBenchmark(user_id=1, nickname="号A", biz="MP_WXS_9001")
     session.add(b)
     session.commit()
     old = WechatArticle(user_id=1, title="首发文", url="https://mp.weixin.qq.com/s/old",
@@ -2372,7 +2543,7 @@ def test_sync_push_skips_resource_already_announced(session, monkeypatch) -> Non
 def test_sync_push_window_caps_transfer_calls(session, monkeypatch) -> None:
     """一次同步入库很多**24h 之前**的资源文时按 `wechat_sync_push_limit` 截断:
     转存调用同步受限,同步请求不会被几十次夸克调用拖成十几分钟;截断数量写进返回值。"""
-    b = WechatBenchmark(user_id=1, nickname="号A", biz="bizABC")
+    b = WechatBenchmark(user_id=1, nickname="号A", biz="MP_WXS_9001")
     session.add(b)
     session.commit()
     old = int(datetime.now().timestamp()) - 3 * 86400  # 3 天前:属历史补采,受封顶管
@@ -2394,7 +2565,7 @@ def test_sync_push_window_caps_transfer_calls(session, monkeypatch) -> None:
 def test_sync_pushes_every_article_within_24h_regardless_of_cap(session, monkeypatch) -> None:
     """近 24h 发的文章必须一篇不落全推到飞书(用户 2026-09-26 定的硬要求):
     封顶只砍 24h 之前的历史补采文,砍不到当天/昨天的新文。"""
-    b = WechatBenchmark(user_id=1, nickname="号A", biz="bizABC")
+    b = WechatBenchmark(user_id=1, nickname="号A", biz="MP_WXS_9001")
     session.add(b)
     session.commit()
     fresh = int(datetime.now().timestamp()) - 3600      # 1 小时前
@@ -2425,7 +2596,7 @@ def test_sync_still_pushes_when_transfer_blows_up(session, monkeypatch) -> None:
 
     from app.services.quark_transfer import QuarkTransfer
 
-    b = WechatBenchmark(user_id=1, nickname="号A", biz="bizABC")
+    b = WechatBenchmark(user_id=1, nickname="号A", biz="MP_WXS_9001")
     session.add(b)
     session.commit()
     plat = FakePlatform(pages=[[{"id": "r1", "title": "资源文 https://pan.quark.cn/s/RAW9",
@@ -2582,7 +2753,7 @@ def test_listen_pushes_articles_without_pan_links(session, monkeypatch) -> None:
 def test_sync_push_window_keeps_link_less_articles(session, monkeypatch) -> None:
     """同步窗口按"资源文优先"排序,但近 24h 的无链文不能被资源文挤出卡片——
     窗口只砍 24h 之前的历史文,优先级不改变"24h 内一律推"。"""
-    b = WechatBenchmark(user_id=1, nickname="号A", biz="bizABC")
+    b = WechatBenchmark(user_id=1, nickname="号A", biz="MP_WXS_9001")
     session.add(b)
     session.commit()
     fresh = int(datetime.now().timestamp()) - 600
@@ -2667,7 +2838,7 @@ def test_sync_weread_cover_review_id_fills_blank_list_review(session, monkeypatc
 def test_sync_push_truncated_never_negative(session, monkeypatch) -> None:
     """窗口没排满时 truncated 必须是 0:旧公式 `len(history)-extra` 会算出 -17,
     前端 toast 直接印成"剩余 -17 篇留给监听"。"""
-    b = WechatBenchmark(user_id=1, nickname="号A", biz="bizABC")
+    b = WechatBenchmark(user_id=1, nickname="号A", biz="MP_WXS_9001")
     session.add(b)
     session.commit()
     old_ts = int((datetime.now() - timedelta(days=3)).timestamp())
@@ -3053,7 +3224,7 @@ def test_sync_dedupe_drops_are_stamped_as_pushed(session, monkeypatch) -> None:
 
     否则 `repush_unpushed` 把它们的 NULL 当成"从没推过"重新发卡,补偿机制反而把去重铁律破掉。
     """
-    b = WechatBenchmark(user_id=1, nickname="号A", biz="bizABC")
+    b = WechatBenchmark(user_id=1, nickname="号A", biz="MP_WXS_9001")
     session.add(b)
     session.commit()
     fresh = datetime.now()

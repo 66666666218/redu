@@ -136,7 +136,9 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
                 "⚠️ 闲鱼详情抓取触发人机验证",
                 f"深采在第 {saved + 1} 个商品处触发滑块(已采 {saved} 条,状态 partial);"
                 f"搜索采集不受影响",
-                settings=settings)
+                settings=settings,
+                # 已采到的部分保住了、搜索照常,只是深采提前停 → 属可自愈的降级,只进站内
+                push_feishu=False)
         return {"platform": "xianyu_deep", "count": saved, "status": status, "reason": stop_reason}
     except (xianyu.XianyuVerify, xianyu.XianyuRateLimit, xianyu.XianyuWafBlock) as exc:
         # collect_hot 整轮被滑块/限流(全部关键词失败)→ 优雅降级,不 500

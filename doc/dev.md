@@ -339,6 +339,11 @@ redian/
 - 说明:**搜索卡片不带"已售/想要数"(`want` 为空)**,故想要数必须抓详情页(`XIANYU_DETAIL_LIMIT`,默认 20 条);热榜综合序由 `hit_keywords` + `best_rank` 近似。**"只留虚拟商品"靠 `XIANYU_KEYWORDS` 虚拟词采集保证**——榜本身就没有实物,故**未做类目过滤**:类目仅在详情(`itemCatDTO`),按类目过滤需给候选逐个抓详情、会重新引入大量 mtop 请求加剧风控(与降风控目标冲突),且需一份易碎的类目ID白名单。闲鱼为合规公开检索,读自己登录态下的数据,注意频率与 ToS。
 - **指纹与滑块(实测 `scripts/probe_xianyu_curl.py`)**:纯 `requests`(Python urllib3 TLS 指纹)极像机器人,易被触发滑块;`curl_cffi` 伪 Chrome 指纹是**防患于未然**层(主流闲鱼采集器 goofish_spider/cn-scraper-mcp 就这么做),能降低被标记概率。**但实测:同一 Cookie 已被反复 `FAIL_SYS_USER_VALIDATE` 时,`requests` 和 `curl_cffi` 都会被拦、且都不下发新 token**——此时是**账号/会话已被标记,指纹伪装救不了**。**恢复办法(已实测验证)**:在浏览器用该账号**手动过一次滑块**,或**换清洁出口 IP**(用单一稳定住宅 IP,别用轮换代理池——闲鱼 token/session 绑定 IP)。过滑块后 `_m_h5_tk` 刷新并带回 `x5sec` 验证 cookie,`requests`/`curl_cffi` **均恢复 `SUCCESS`**;注意过滑块**不是一劳永逸**,持续低频率 + 清洁 IP 才能减少复发(否则会再次被标记,靠既有降级 + 失败告警(含原因)兜底)。
 - **风险控制错误模型**(mtop 网关):`FAIL_SYS_TOKEN_*` 令牌错误 → 刷新 `_m_h5_tk` 重试;`FAIL_SYS_RATE_LIMIT`/`FAIL_SYS_USER_LIMIT` 真限流 → 指数退避 30/90/180s 后抛 `XianyuRateLimit`;**`FAIL_SYS_USER_VALIDATE`= 人机验证(滑块),不是限流**——实测退避重试仍无效,改为**立即抛 `XianyuVerify`**,由上层识别为"需人工过滑块或更换出口 IP"。深采详情循环遇 `XianyuVerify`/`XianyuRateLimit` 即**停止抓取并保留已采部分**(状态 `partial`),不再连环猛打加剧风控;整轮被验证时 `run_xianyu_deep` 优雅返回 `status:"failed"` 而非 500。`check_collect_failures` 的飞书告警会带上最近一次失败原因(人工可据此行动)。**2026-09-05 降低风控**:① 详情限流默认降到 **10**(`XIANYU_DETAIL_LIMIT`,详情是最大爆发点)、请求间隔默认提到 **6s**(`XIANYU_REQUEST_DELAY`);② 新增**验证后冷却** `XIANYU_COOLDOWN_MINUTES`(默认 30)：闲鱼触发 `XianyuVerify` 后,`run_xianyu`/`run_xianyu_deep` 在冷却期内**跳过采集**(记 `skipped/verify_cooldown`),避免反复撞滑块加重风控;换清洁 IP/人工过滑块仍是根因解法。**2026-09-07 反爬加固**:① `collect_hot` 遇 `XianyuRateLimit` **停止本轮**(与滑块同语义:限流是账号/IP 级,换词接着打只会逐个吃满 30/90/180s 退避——5 词最长阻塞调度 tick 约 25 分钟且连环猛打加重风控),保留已采数据,全部被限时上抛 `XianyuRateLimit`;② `XianyuClient` 新增 `XIANYU_PROXY_URL`(**单一固定**出口代理,如住宅 IP;轮换池仍禁用——token/session 绑 IP),应用层即可换清洁出口,不必改系统网络;③ 新增 `tenant_base.persist_refreshed_cookie`:每轮结束后把运行中网关下发的 `_m_h5_tk`(及 x5sec 等新 cookie)回写 `user_cookies`,下轮直接用新令牌、省一次 TOKEN 往返(仅令牌确有变化才写);④ mtop `log_id`/`spm_pre` 改为**每客户端实例随机生成**(8 位 hex+6 位字母数字,与抓包同构),不再全部请求共用同一抓包值;⑤ 移除 `view_count` 死链路(详情接口实测无浏览量字段、前端未渲染该值)。
+- **闲鱼告警按"能不能当场修"分流(2026-09-27,按用户拍板)**:停摆级——整轮被滑块(`XianyuVerify`)、
+  Cookie 失效——仍发飞书(收到的人现在就能动手);降级级——**部分**关键词被风控、网关 WAF 空响应
+  (`XianyuWafBlock`)、深采 partial 遇滑块——改 `notify_incident(..., push_feishu=False)` 只落站内
+  (口径同 `doc/operations.md` §4f:飞书群只放文章卡和 Cookie 提醒)。回归钉在
+  `tests/test_feishu.py` 的 `test_xianyu_*_is_admin_only` / `test_xianyu_block_alert_routing_by_actionability`。
 
 ### 5.8b 公众号监听与同步 `services/wechat_monitor.py` + `services/dajiala_client.py`(2026-09-07)
 
@@ -373,6 +378,7 @@ redian/
   后端合同完全一致:认证 `Authorization: Bearer token`+`X-Weread-Token`+`xid: vid`;链接解析
   `POST /api/v2/platform/wxs2mp`;全量分页列表 `GET /api/v2/platform/mps/{biz}/articles?page&limit`)。
   公众号标识 = 文章页 `__biz`(`extract_article_meta` 免费直抓解析,对标号新增 `biz` 列)。
+  ⚠️ 这家的"订阅 id"与 WeRSS 的 `MP_WXS_*` **不是同一个形态**,详见下方 `feed_biz` 形态守卫。
   ⚠️ **2026-09-27 实测:这条路的公共实例已死**——它依赖的转发服务随 Deno Deploy Classic
   于 2026-07-20 退役而消失(`weread.111965.xyz` 502 / `weread.965111.xyz` DEPLOYMENT_NOT_FOUND),
   wewe-rss 仓库也已归档。保留该客户端只为兼容自建同构实例;现役的免费全量源是下面这条。
@@ -392,6 +398,24 @@ redian/
   共同信息是**公众号名称** → `match_biz_from_werss`(按名称规范化后匹配,重名/找不到一律不猜只报告,
   `apply=False` 默认只出计划)+ `scripts/werss_backfill_biz.py`。`resolve_mp` 显式抛"不支持",
   因为 WeRSS 没有"文章链接→公众号"的解析接口,留着方法是为了让 `add_benchmark` 得到人话而不是 AttributeError。
+- **`biz` 形态守卫 + 空列表降级(2026-09-27,按用户拍板落地,零 DB 迁移)**:`biz` 列历史上混了两种
+  形态——免费列表源认识的订阅 id(`MP_WXS_*`)和 `extract_article_meta` 从文章页 URL 解出的 base64
+  `__biz`(如 `MjM5MDA4OTI1Mw==`)。后者**没有任何消费者**,但过去会满足 ⓪ 分支的 `if b.biz` 门槛,
+  于是"看起来配了、实际源根本不认识",每号白跑一次列表请求。现在:
+  ① `feed_biz(b)` 是唯一读 `biz` 的入口,只认 `MP_WXS_*` 形态,认不出当空(监听 ⓪ 分支、`sync_wechat_account`
+  都改走它),旧值自然回落 cover,不再白打;② `add_benchmark` **不再**从文章页元数据写 `biz`
+  (只取昵称);③ `match_biz_from_werss` 把形态不对的旧值按空处理并**就地纠正**(计划里打印 `纠正原值`);
+  ④ 监听轮收尾把这类号写进 detail 的 `biz_bad_shape(N)` 并在漏推预警里点名(不再静默)。
+  同时修掉一个真会丢整轮的耦合:**免费列表返回空列表**过去也算"这一轮这个号用过了",直接跳过
+  cover → 列表侧一抖动就整号失明。现在只有拿到条目才算用过,空列表记 warning 并继续走后续源;
+  `sync_wechat_account` 同理——**首页就空**不再报 success,否则 dajiala/微信读书的兜底永远走不到。
+- **加号/回填后自动催 WeRSS 抓一次(`nudge_werss`)**:新加的订阅要等 WeRSS 自己的定时才出现在列表里,
+  这是"加了号却一整天没多推"的直接原因。现在 `POST /api/v1/wechat/benchmark/add` 成功后用
+  `BackgroundTasks` 后台调一次 `refresh_mp`(同步抓取十几秒,不能挂在用户请求上);批量场景用
+  `python scripts/werss_backfill_biz.py --apply --nudge 5`。只在 WeRSS  configured 且 biz 形态对时生效,
+  失败(60s 节流/上游)只记日志——**监听轮内仍不逐号调用**:81 个号串起来打的是别人的上游。
+  另注意 WeRSS 的 `GATHER_UPDATE_LIMIT` 默认 90(每轮只刷最近 90 个订阅),号数超过它,队尾会
+  **永不自动刷新**、又是一次静默漏推;我们在 81 个号附近,加号前先看 §4g。
   源优先级:**WeRSS → 读书平台 → 微信读书(cover 最新一篇 + 会话初期枚举近 3 天)→ dajiala(付费)**。
   部署与凭据配置见 `doc/operations.md` §4g。
 - **监听后处理在 SAVEPOINT 里(2026-09-26 第八轮审计)**:`run_wechat_listen` 的

@@ -168,6 +168,54 @@ def extract_article_meta(url: str, timeout: int = 15) -> dict:
     return out
 
 
+_FEED_BIZ_PREFIX = "MP_WXS_"
+
+
+def feed_biz(b: WechatBenchmark) -> str:
+    """`biz` 列里**免费列表源真认得**的那个形态;认不出就当没配。
+
+    同一列历史上被两种值写过:`add_benchmark` 从文章页 `__biz` 解出的 base64(`MjM5...==`),
+    和平台/WeRSS 返回的订阅 id(`MP_WXS_*`)。只有后者能被 `mp_articles` 用。
+    这不是洁癖:⓪ 分支拿错形态去调,源会**正常返回空列表而不是报错**,于是 `used` 被置真、
+    ① 微信读书 cover 也被跳过,该号整轮静默失明并在前端表现成"连续 N 轮未发文"。
+    """
+    value = (b.biz or "").strip()
+    return value if value.startswith(_FEED_BIZ_PREFIX) else ""
+
+
+def find_feed_biz_by_name(plat: object, nickname: str) -> str:
+    """按公众号名在 WeRSS 里找一个订阅 id;拿不准(0 或 >1)一律返回空串,不猜。
+
+    用上游的 `kw` 搜索而不是翻全量索引:加号是交互式请求,翻 20 页不值。重名如果都来自
+    同一个号,规范化名相等后仍会是多个 → 交给 `scripts/werss_backfill_biz.py` 让人去改订阅名。
+    """
+    name = _norm_mp_name(nickname)
+    if not name or not hasattr(plat, "list_feeds"):
+        return ""
+    try:
+        feeds = plat.list_feeds(kw=nickname, limit=100)  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001 - 加号不因查订阅失败而变红
+        logger.info("加号时查 WeRSS 订阅失败(忽略):%s", exc)
+        return ""
+    hits = [str(f.get("id") or "").strip() for f in feeds
+            if _norm_mp_name(f.get("mp_name", "")) == name]
+    hits = [h for h in hits if h.startswith(_FEED_BIZ_PREFIX)]
+    return hits[0] if len(hits) == 1 else ""
+
+
+def nudge_werss(biz: str, settings: Settings | None = None) -> dict:
+    """催 WeRSS 立刻去上游抓一次这个订阅(加号/回填后的最后一公里,别等它自己的定时)。
+
+    只对 WeRSS 生效(读书平台没有对应接口),且**只认 `MP_WXS_*`**。不抛异常:
+    WeRSS 的 60s 节流或上游失败都只记日志——它自己的抓取任务迟早补上。
+    """
+    plat = _platform_client(settings or get_settings())
+    value = (biz or "").strip()
+    if not hasattr(plat, "refresh_mp") or not value.startswith(_FEED_BIZ_PREFIX):
+        return {"nudged": False, "reason": "not_werss_or_bad_biz"}
+    return {"nudged": plat.refresh_mp(value), "reason": ""}
+
+
 def _platform_client(settings: Settings) -> ReaderPlatformClient | WerssClient | None:
     """免费全量列表的数据源客户端;两家合同一致(都提供 `mp_articles`),按配置择一。
 
@@ -325,7 +373,7 @@ def add_benchmark(session: Session, user_id: int, url: str, nickname: str = "",
         raise ValueError("该文章链接对应的对标号已存在")
     ghid = ""
     biz = ""
-    # 解析优先级:读书平台(免费)→ 文章页直抓(免费)→ dajiala(付费兜底);失败不挡加号
+    # 解析优先级:读书平台/WeRSS(免费)→ 文章页直抓(免费)→ dajiala(付费兜底);失败不挡加号
     plat = _platform_client(settings)
     if plat:
         try:
@@ -336,7 +384,8 @@ def add_benchmark(session: Session, user_id: int, url: str, nickname: str = "",
             logger.info("读书平台解析公众号失败:%s", exc)
     if not biz or not nickname:
         meta = extract_article_meta(url)
-        biz = biz or meta.get("biz", "")
+        # 文章页解出的是 base64 `__biz`,**不是**列表源认识的订阅 id,写进 biz 只会让 ⓪ 分支
+        # 拿着它去撞空列表并挤掉微信读书 cover(见 feed_biz)。昵称照取,biz 不落地。
         nickname = nickname or meta.get("name", "")
     # 付费解析昵称/ghid:走 _dajiala_key 而非全局 settings.dajiala_key。
     # 否则普通用户反复调 add_benchmark 会绕过 2026-09-14 审计确立的"全局 key 仅 admin
@@ -349,6 +398,10 @@ def add_benchmark(session: Session, user_id: int, url: str, nickname: str = "",
             nickname = nickname or str(obj.get("nickname") or "")
         except DajialaError as exc:  # noqa: BLE001 - 解析失败不挡加号(key 没余额也允许加)
             logger.info("加号解析昵称/ghid 失败(不影响使用):%s", exc)
+    # WeRSS 没有"链接→公众号"接口,所以昵称是它那边唯一的线索:同名订阅已存在就直接接上列表源,
+    # 免得运营者为一个新号再跑一遍回填脚本(接上后由接口在后台催 WeRSS 抓一次)。
+    if not biz and nickname:
+        biz = find_feed_biz_by_name(plat, nickname)
     row = WechatBenchmark(user_id=user_id, nickname=(nickname or "未命名").strip()[:128],
                           ghid=ghid, biz=biz[:64], anchor_url=url[:500],
                           note=(note or "").strip()[:255])
@@ -408,7 +461,9 @@ def match_biz_from_werss(session: Session, user_id: int,
     两边唯一共同的信息是**号的名字**,所以只能按名称匹配,并且必须把"重名/找不到"如实报出来:
     猜一个填上去,后果下一整轮监听都在把别人的文章当这个号的推给员工。
 
-    `apply=False` 只出计划不落库(默认),`apply=True` 才写。已有 `biz` 的行不动。
+    `apply=False` 只出计划不落库(默认),`apply=True` 才写。已是可用形态的 `biz` 不动,
+    但**源认不出的旧值**(历史上写进去的 base64 `__biz`)按空处理并就地纠正——它没有任何消费者,
+    留着只会让 ⓪ 分支永远跳过这个号。
     """
     settings = settings or get_settings()
     plat = _platform_client(settings)
@@ -422,12 +477,14 @@ def match_biz_from_werss(session: Session, user_id: int,
     missing: list[str] = []
     already = 0
     for r in rows:
-        if r.biz:
+        if feed_biz(r):
             already += 1
             continue
-        hits = index.get(_norm_mp_name(r.nickname), [])
+        stale = (r.biz or "").strip()   # 非空但形态不对 = 待纠正的旧值
+        hits = [h for h in index.get(_norm_mp_name(r.nickname), []) if h.startswith(_FEED_BIZ_PREFIX)]
         if len(hits) == 1:
-            matched.append({"id": r.id, "nickname": r.nickname, "biz": hits[0]})
+            matched.append({"id": r.id, "nickname": r.nickname, "biz": hits[0],
+                            **({"was": stale} if stale else {})})
             if apply:
                 r.biz = hits[0][:64]
         elif len(hits) > 1:
@@ -1424,14 +1481,15 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     wr_stats: dict = {}
     for b in rows:
         used = False
-        # ⓪ 免费全量列表(自建 WeRSS 或 wewe-rss 兼容的读书平台):有 biz 且源已配置 → 首选
-        if plat and b.biz:
+        # ⓪ 免费全量列表(自建 WeRSS 或 wewe-rss 兼容的读书平台):biz 是源认识的形态才首选
+        feed_id = feed_biz(b)
+        if plat and feed_id:
             try:
-                raw_items = plat.mp_articles(b.biz, page=1, limit=20)
-                used = True
+                raw_items = plat.mp_articles(feed_id, page=1, limit=20)
                 norm = [{"title": it["title"], "url": it["url"],
                          "publish_at": _parse_time(it.get("publish_at_raw"))} for it in raw_items]
                 if norm:
+                    used = True
                     b.miss_count = 0
                     b.last_item_at = now
                     got = _insert_new_articles(session, user_id, b, norm, source="listen",
@@ -1439,7 +1497,10 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                     if got:
                         new_rows.extend(got)
                 else:
-                    b.miss_count = (b.miss_count or 0) + 1
+                    # 首页就空 ≠ 这个号今天没发文:更可能是这个订阅在源里不存在/还没抓到
+                    # (WeRSS 里没加、或它的 weread 模式被限权)。不能当采集成功——否则 ① 的 cover
+                    # 也被挤掉,该号整轮失明还表现为"连续 N 轮未发文"。留给后续源回答。
+                    logger.warning("免费列表 %s 返回空(biz=%s),本轮交由后续源", b.nickname, feed_id)
             except PlatformError as exc:
                 logger.warning("读书平台监听 %s 失败,降级后续源:%s", b.nickname or b.biz, exc)
         # ① 微信读书(免费):对标号已关联 bookId 且有 Cookie;登录失效时自动续期重试一次
@@ -1544,6 +1605,11 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     else:
         status = "success"
     detail = f"accounts={len(rows)} new={len(new_rows)} failed={failed}"
+    # biz 里躺着源认不出的形态(历史上 add_benchmark 写过 base64 __biz):⓪ 分支按"没配"处理
+    # 所以号不会失明,但免费全量列表也就没接上。不点名出来,运维只会以为"配了 WeRSS 就该全推"。
+    miskeyed = [str(b.nickname or b.id) for b in rows if (b.biz or "").strip() and not feed_biz(b)]
+    if miskeyed:
+        detail += f" biz_bad_shape({len(miskeyed)})"
     if repushed:
         detail += f" repushed={repushed}"   # 补推的上一轮欠推数,写进运维记录而非只进日志
     enumerable = wr_stats.get("weread_list_ok", 0)
@@ -1568,11 +1634,15 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
             session, user_id, "wechat",
             "⚠️ 微信读书只能拿到最新一篇,同日其它篇可能漏推",
             f"本轮列不出却采到新文的号:{off_new}(可枚举 {enumerable} / 共 {len(rows)})。"
-            "微信读书 mp/articles(近期列表)对本会话不可用(-2041 限权),监听退化为"
+            "微信读书 mp/articles(近期列表)对本会话不可用(服务端回 -2041;2026-09 实测像账号级"
+            "限权,但 GitHub 上有项目指出同一接口换调用上下文/Referer 就能用,可用 "
+            "scripts/probe_weread_list.py 在线上花一次请求分辨),监听退化为"
             "cover 最新一篇:两轮之间(最长 8h)同一号发多篇时,前面的那几篇顶不掉也补不回来。"
             "要真正兑现『近24h全推』只有两条路:① 自建 WeRSS(we-mp-rss)并把订阅 id 回填进对标号的 biz"
             "(免费全量列表,部署办法见 doc/operations.md §4g);"
-            "② dajiala 充值走 history_by_ghid(付费)。临时缓解:对高产号多点「同步文章」",
+            "② dajiala 充值走 history_by_ghid(付费)。临时缓解:对高产号多点「同步文章」"
+            + (f";另有 {len(miskeyed)} 个号的 biz 不是源认识的形态:{('、'.join(miskeyed[:5]))}"
+               if miskeyed else ""),
             settings=settings, push_feishu=False)
     out: dict = {"platform": "wechat", "status": status, "accounts": len(rows),
                  "new": len(new_rows), "failed": failed}
@@ -1580,6 +1650,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
         out["repushed"] = repushed
     if wr_stats:
         out["weread_list"] = {k: v for k, v in wr_stats.items()}
+    if miskeyed:
+        out["biz_bad_shape"] = miskeyed[:10]
     if dajiala_off:
         out["dajiala_skipped"] = "low_balance"
         if balance is not None:
@@ -1932,14 +2004,20 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
     if b is None:
         raise KeyError("对标账号不存在")
     plat = platform or _platform_client(settings)
+    feed_id = feed_biz(b)
     # 服务端钳制:query 参数无上限时恶意调用可烧余额(¥0.14/页)
-    limit = max(1, min(int(max_pages or (10 if plat and b.biz else settings.wechat_sync_max_pages)), 20))
-    if plat and b.biz:
+    limit = max(1, min(int(max_pages or (10 if plat and feed_id else settings.wechat_sync_max_pages)), 20))
+    if plat and feed_id:
         new_rows: list[WechatArticle] = []
         pages = 0
         try:
             while pages < limit:
-                raw_items = plat.mp_articles(b.biz, page=pages + 1, limit=20)
+                raw_items = plat.mp_articles(feed_id, page=pages + 1, limit=20)
+                if pages == 0 and not raw_items:
+                    # 首页就空 = 这个订阅在源里不存在/没抓到,不能算同步成功(否则下面直接 return,
+                    # dajiala 与微信读书两条兜底路都不会走,用户点「同步文章」永远 0 篇还显示成功)
+                    logger.warning("免费列表 %s 首页为空(biz=%s),同步交由后续源", b.nickname, feed_id)
+                    break
                 norm = [{"title": it["title"], "url": it["url"],
                          "publish_at": _parse_time(it.get("publish_at_raw"))} for it in raw_items]
                 got = _insert_new_articles(session, user_id, b, norm, source="sync", require_pan=False)

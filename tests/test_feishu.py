@@ -786,6 +786,94 @@ def test_run_xianyu_full_block_notifies_incident(session, monkeypatch: pytest.Mo
     assert any(f.section == "incident_xianyu" for f in fa)
 
 
+@pytest.mark.parametrize("exc_name,expect_feishu", [
+    ("XianyuVerify", True),          # 整轮滑块:不人工过验证就一直停摆 → 该当场看到
+    ("XianyuCookieExpired", True),   # 登录态过期:同上,且属"Cookie 提醒"口径
+    ("XianyuWafBlock", False),       # 网关压制:自动冷却到点自愈 → 只进站内
+])
+def test_xianyu_block_alert_routing_by_actionability(session, monkeypatch: pytest.MonkeyPatch,
+                                                     exc_name: str, expect_feishu: bool) -> None:
+    """用户 2026-09-27 口径:飞书只留"人不动手就一直坏"的,能自愈的降级只进站内。"""
+    from app.services import alert_service, tenant, xianyu as xianyu_mod
+    from app.services import cookie_store
+
+    captured: list[tuple] = []
+    monkeypatch.setattr(alert_service, "notify_incident",
+                        lambda *a, **kw: captured.append((a, kw)) or False)
+    monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishuClient)
+
+    exc_cls = getattr(xianyu_mod, exc_name)
+
+    def _collect(settings, client, start_offset=0, stats=None):
+        raise exc_cls("整轮被挡")
+
+    cookie_store.set_cookie(session, 1, "goofish", "a=1")
+    monkeypatch.setattr(xianyu_mod, "XianyuClient", lambda ck, proxy=None: object())
+    monkeypatch.setattr(xianyu_mod, "collect_hot", _collect)
+    with pytest.raises(exc_cls):
+        tenant.run_xianyu(session, 1, settings=_settings())
+    assert captured, f"{exc_name} 应当产生事件告警"
+    # 没写 push_feishu 就等于默认发飞书
+    assert captured[0][1].get("push_feishu", True) is expect_feishu, captured[0][1]
+
+
+def test_xianyu_partial_verify_is_admin_only(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """只有部分关键词被挡、其余照常采到 → 命中率下降而已,不修也能跑,别刷群。"""
+    from app.services import alert_service, tenant, xianyu as xianyu_mod
+    from app.services import cookie_store
+
+    captured: list[tuple] = []
+    monkeypatch.setattr(alert_service, "notify_incident",
+                        lambda *a, **kw: captured.append((a, kw)) or False)
+    monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishuClient)
+
+    def _collect(settings, client, start_offset=0, stats=None):
+        stats["verify"] = ["坏词"]
+        return [{"item_id": "i-ok", "title": "好词 商品", "hit_keywords": 1, "keywords": "好词",
+                 "best_rank": 1}]
+
+    cookie_store.set_cookie(session, 1, "goofish", "a=1")
+    monkeypatch.setattr(xianyu_mod, "XianyuClient", lambda ck, proxy=None: object())
+    monkeypatch.setattr(xianyu_mod, "collect_hot", _collect)
+    tenant.run_xianyu(session, 1, settings=_settings())
+    hit = [c for c in captured if "部分关键词" in str(c)]
+    assert hit and hit[0][1]["push_feishu"] is False
+
+
+def test_xianyu_deep_partial_verify_is_admin_only(
+        session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """深采中途撞滑块但已采到部分:搜索照常,只进站内(同一口径)。"""
+    from app.services import alert_service, cookie_store, xianyu_analytics
+    from app.services.xianyu import XianyuVerify
+
+    captured: list[tuple] = []
+    monkeypatch.setattr(alert_service, "notify_incident",
+                        lambda *a, **kw: captured.append((a, kw)) or False)
+    monkeypatch.setattr(xianyu_analytics.xianyu, "XianyuClient",
+                        lambda ck, proxy=None: object())
+
+    def _detail(client, iid):
+        if iid == "i2":
+            raise XianyuVerify("滑块")
+        return {"want_count": 3}
+
+    monkeypatch.setattr(xianyu_analytics.xianyu, "fetch_detail", _detail)
+    cookie_store.set_cookie(session, 1, "goofish", "ck")
+    xianyu_analytics.run_xianyu_deep(session, 1, settings=_settings(), hot=[
+        {"item_id": "i1", "title": "商品一", "price": "1"},
+        {"item_id": "i2", "title": "商品二", "price": "2"}])
+    hit = [c for c in captured if "详情抓取触发人机验证" in str(c)]
+    assert hit and hit[0][1]["push_feishu"] is False
+
+
+class _FakeFeishuClient:
+    def __init__(self, webhook, secret="") -> None:
+        pass
+
+    def send(self, msg: str) -> bool:
+        return True
+
+
 def test_build_keyword_card_filters_by_section(session) -> None:
     """关键词监控卡按板块过滤:总群全量、板块专属群只含该板块词(含名次变化)。"""
     import json
