@@ -22,6 +22,7 @@ const searchFilter = ref('')
 const searchWindow = ref(1)
 const appliedKw = ref('')
 const searching = ref(false)   // 手动搜索状态:true 时显示搜索结果 list,而非"自动跟随监控词"的 activeWatch
+let listReq = 0   // 榜单请求序号:上游实时打抖音接口,连点 tab/刷新会让旧响应覆盖新榜
 // 监控时段(小时):1/24/72/168 → 近1小时/近1天/近3天/近7天
 const windows = [
   { v: 1, label: '近1小时' }, { v: 24, label: '近1天' },
@@ -30,6 +31,7 @@ const windows = [
 function winLabel(v) { return (windows.find(x => x.v === v) || windows[1]).label }
 
 async function loadList(t) {
+  const seq = ++listReq
   active.value = t; loading.value = true
   searchKw.value = ''; searchFilter.value = ''; appliedKw.value = ''; searching.value = false   // 切换 tab 时清除搜索,避免串榜
   await loadWatches()                          // 先刷新关注,确保拿到该榜关键词
@@ -39,21 +41,26 @@ async function loadList(t) {
   const dw = kw ? (aw?.date_window || 1) : searchWindow.value   // 有关键词用它的时段,否则用搜索框时段
   try {
     const r = await api.douhotList(t, kw || '', fk, dw)
+    if (seq !== listReq) return   // 已经切去别的榜:迟到的旧响应不得把 A 榜数据盖到 B 榜页面上
     list.value = r.items || []
     if (kw && r.items) appliedKw.value = kw
   }
-  catch (e) { list.value = []; toastError(e.message) } finally { loading.value = false }
+  catch (e) { if (seq !== listReq) return; list.value = []; toastError(e.message) }
+  finally { if (seq === listReq) loading.value = false }
 }
 async function searchList() {
   const kw = searchKw.value.trim()
   if (!kw) return
+  const seq = ++listReq
   searching.value = true   // 手动搜索优先于"自动跟随监控词"
   loading.value = true
   try {
     const r = await api.douhotList(active.value, kw, searchFilter.value.trim(), searchWindow.value)
+    if (seq !== listReq) return
     list.value = r.items || []
     appliedKw.value = kw
-  } catch (e) { list.value = []; toastError(e.message) } finally { loading.value = false }
+  } catch (e) { if (seq !== listReq) return; list.value = []; toastError(e.message) }
+  finally { if (seq === listReq) loading.value = false }
 }
 async function clearSearch() {
   searchKw.value = ''; searchFilter.value = ''; appliedKw.value = ''; searching.value = false
@@ -160,13 +167,13 @@ onMounted(async () => { await loadList('word'); await loadWatches(); await loadW
       <h2 style="margin:0">抖音热点 · 智能体</h2>
       <div class="row" style="gap:8px">
         <button :disabled="busy" @click="collect">{{ busy ? '采集中…' : '采集' }}</button>
-        <button class="ghost" @click="loadList(active);loadWatches()">刷新</button>
+        <button class="ghost" :disabled="loading" @click="loadList(active)">刷新</button>
       </div>
     </div>
 
     <!-- 热点宝式 tab -->
     <div class="row" style="gap:6px;margin-bottom:14px;flex-wrap:wrap">
-      <button v-for="t in tabs" :key="t.key" :class="active===t.key ? '' : 'ghost'" @click="loadList(t.key)">{{ t.label }}</button>
+      <button v-for="t in tabs" :key="t.key" :disabled="loading" :class="active===t.key ? '' : 'ghost'" @click="loadList(t.key)">{{ t.label }}</button>
     </div>
 
     <div class="card" v-if="!loading">

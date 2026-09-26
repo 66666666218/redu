@@ -14,7 +14,7 @@ import os
 import sqlite3
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
@@ -43,6 +43,7 @@ from app.db.models import (
     AgentStage,
     XianyuDaily,
     XianyuItem,
+    XianyuSummary,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,7 @@ _TABLES = [
     (DouhotWindowSnap, "captured_at", False),  # 多窗口快照:与单窗口同类的时间序列,漏加会无限膨胀
     (WeiboTrend, "decided_at", False),
     (XianyuItem, "created_at", False),
+    (XianyuSummary, "created_at", False),   # 每天一行的深采摘要(大 Text),漏加会无限膨胀
     (XianyuDaily, "snap_date", True),      # YYYY-MM-DD 字符串
     (RunRecord, "started_at", False),
     (AlertRecord, "triggered_at", False),
@@ -164,10 +166,15 @@ def cleanup_old_data(settings: Settings | None = None, db: Session | None = None
         try:
             cutoff60 = datetime.now() - timedelta(days=60)
             cutoff180 = datetime.now() - timedelta(days=180)
+            # pan_urls 早期建的表/历史行的这一列是 NULL(SQL 里 `"" = NULL` 与 `"" != NULL`
+            # 都不成立),两条谓词必须把 NULL 显式归到"无链"一侧,否则这批行**两张网都漏掉**、
+            # wechat_articles 无限增长。
+            no_pan = or_(WechatArticle.pan_urls.is_(None), WechatArticle.pan_urls == "")
+            with_pan = and_(WechatArticle.pan_urls.isnot(None), WechatArticle.pan_urls != "")
             n60 = db.execute(delete(WechatArticle).where(
-                WechatArticle.pan_urls == "", WechatArticle.created_at < cutoff60)).rowcount
+                no_pan, WechatArticle.created_at < cutoff60)).rowcount
             n180 = db.execute(delete(WechatArticle).where(
-                WechatArticle.pan_urls != "", WechatArticle.created_at < cutoff180)).rowcount
+                with_pan, WechatArticle.created_at < cutoff180)).rowcount
             if n60 or n180:
                 result["wechat_articles_tiered"] = n60 + n180
         except Exception:  # noqa: BLE001 - 分级清理失败不阻塞

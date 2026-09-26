@@ -266,7 +266,11 @@ def run_douhot(session: Session, user_id: int, settings: Settings | None = None)
     try:
         words = douhot.fetch_content_words(douyin_cookie, settings)
         now = datetime.now()
-        prev_keys = set(session.scalars(select(DouhotWord.title).where(DouhotWord.user_id == user_id)).all())
+        # 72h 窗口:与 weibo/baidu 同款(见上方注释),否则该表只增不减,
+        # 每轮把用户全部历史词名载入内存。
+        prev_keys = set(session.scalars(select(DouhotWord.title).where(
+            DouhotWord.user_id == user_id,
+            DouhotWord.created_at >= datetime.now() - timedelta(hours=72))).all())
         for w in words:
             session.add(DouhotWord(user_id=user_id, created_at=now, **w))
         session.commit()

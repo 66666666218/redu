@@ -185,9 +185,43 @@ def test_weread_mp_content_extracts_links_from_forwarded_page(monkeypatch) -> No
     assert "msg_source_url" not in out   # 脚本不再混进正文
 
 
+def test_weread_mp_content_shares_the_class_throttle(monkeypatch) -> None:
+    """正文抓取必须走 `_get` 同款类级 2s 限速。
+
+    它此前用裸 `requests.get` 绕过节流:"同步文章"对每篇新文各调一次 → 一次点击
+    上百个请求裸奔(社区实测单日 30+ 次密集请求即触发风控),而限速是全局唯一的护身符。
+    """
+    import time as _t
+
+    from app.services import weread_client as wc
+
+    class _Resp:
+        status_code = 200
+        text = '<div id="js_content">x</div>'
+
+    slept: list[float] = []
+    monkeypatch.setattr(wc.requests, "get", lambda *a, **kw: _Resp())
+    monkeypatch.setattr(wc.WereadClient, "_last_request", _t.time())  # 刚刚请求过一次
+    monkeypatch.setattr(wc.time, "sleep", lambda s: slept.append(s))
+    wc.WereadClient("ck=1", min_gap=2.0).mp_content("rev1")
+    assert slept and slept[0] > 0
+
+
+def test_weread_flatten_tolerates_non_numeric_counts() -> None:
+    """上游流量字段形状不稳("1.2万"/None):裸 int() 会 ValueError 打断整轮同步。"""
+    from app.services.weread_client import WereadClient
+
+    payload = {"reviews": [{"createTime": 1, "subReviews": [{"review": {
+        "reviewId": "MP_WXS_1_r", "createTime": 1780000000,
+        "mpInfo": {"title": "文A", "originalId": "tok", "readNum": "1.2万",
+                   "likeNum": None}}}]}]}
+    items = WereadClient.flatten_mp_articles(payload)
+    assert items[0]["read_num"] == 12000 and items[0]["like_num"] == 0
+    assert items[0]["create_time"] == 1780000000
+
+
 # ---------------------------------------------------------------- 加号
 def test_add_benchmark_free_and_dedupe(session, settings: Settings) -> None:
-    st = _settings(dajiala_key="")  # 未配 key 也允许加号
     row = wechat_monitor.add_benchmark(session, 1, "https://mp.weixin.qq.com/s/abc", nickname="资源号甲")
     assert row["nickname"] == "资源号甲"
     with pytest.raises(ValueError):  # 同链接重复加
@@ -2457,3 +2491,128 @@ def test_sync_push_window_keeps_link_less_articles(session, monkeypatch) -> None
     out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=st, platform=plat)
     assert out["pushed"] == 4 and out["truncated"] == 0
     assert "纯资讯公告" in str(cards)
+
+
+def test_sync_weread_auth_error_in_list_triggers_renewal(session, monkeypatch) -> None:
+    """列表分支必须把 WereadAuthError 抛出去,不能吞成 listed="error"。
+
+    -2012 是登录态死了:被吞掉后这次同步只拿到"最新一篇"、上层还以为只是接口不可用,
+    既不续期也不报警,运营者看到的永远是"能同步但只有一篇"。
+    """
+    from app.services.weread_client import WereadAuthError
+
+    b = WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1")
+    session.add(b)
+    session.commit()
+    monkeypatch.setattr(wechat_monitor, "_weread_cookie", lambda s, u, st: "vid=1; skey=x")
+    bad = FakeWeread(list_error=WereadAuthError("微信读书登录态失效(-2012)"))
+    good = FakeWeread(cover={"title": "资源文 夸克网盘", "url": "https://mp.weixin.qq.com/s/ok1",
+                             "review_id": "MP_WXS_1_ok1", "digest": ""},
+                      content="https://pan.quark.cn/s/ok1")
+    monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: good)
+    refreshed: list[int] = []
+    monkeypatch.setattr(wechat_monitor, "refresh_weread_cookie",
+                        lambda s, u, st=None: (refreshed.append(u),
+                                               {"status": "success", "cookie": "vid=1; skey=y"})[1])
+
+    out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=_settings(dajiala_key=""),
+                                             weread=bad)
+    assert refreshed == [1]                       # 撞到登录失效 → 先自救续期
+    assert out["status"] == "success" and out["new"] == 1
+    assert [c[0] for c in bad.calls] == ["articles"]   # 坏 Cookie 只试了列表,没继续走 cover
+    assert session.scalar(select(WechatArticle).where(WechatArticle.title.like("资源文%"))) is not None
+
+
+def test_sync_weread_cover_review_id_fills_blank_list_review(session, monkeypatch) -> None:
+    """列表条目缺 reviewId 时要用 cover 的 reviewId 兜底取正文。
+
+    否则该篇正文永远为空 → 抽不到盘链 → 飞书卡片一根 `—`(而链其实就在正文里)。
+    `rid_of` 用 setdefault 且早期写法把空串也占住键,兜底就永远不生效。
+    """
+    from app.services.weread_client import build_mp_url
+
+    class _BlankRidWeread(FakeWeread):
+        def mp_articles(self, book_id, offset=0, count=20):
+            self.calls.append(("articles", book_id, offset))
+            return {"reviews": [{"createTime": self.ts, "subReviews": [{"review": {
+                "mpInfo": {"title": "资源文 夸克网盘", "originalId": "blank1",
+                           "readNum": 10, "likeNum": 1},
+                "createTime": self.ts}}]}]}
+
+    b = WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1")
+    session.add(b)
+    session.commit()
+    monkeypatch.setattr(wechat_monitor, "_weread_cookie", lambda s, u, st: "vid=1; skey=x")
+    fake = _BlankRidWeread(cover={"title": "资源文 夸克网盘", "url": build_mp_url("blank1"),
+                                  "review_id": "MP_WXS_1_blank1", "digest": ""},
+                           content="点此保存 https://pan.quark.cn/s/blank1", ts=1788800000)
+    out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=_settings(dajiala_key=""),
+                                             weread=fake)
+    assert ("content", "MP_WXS_1_blank1") in fake.calls      # 用 cover 的 reviewId 取到正文
+    row = session.scalars(select(WechatArticle)).one()
+    assert "pan.quark.cn/s/blank1" in row.pan_urls
+
+
+def test_sync_push_truncated_never_negative(session, monkeypatch) -> None:
+    """窗口没排满时 truncated 必须是 0:旧公式 `len(history)-extra` 会算出 -17,
+    前端 toast 直接印成"剩余 -17 篇留给监听"。"""
+    b = WechatBenchmark(user_id=1, nickname="号A", biz="bizABC")
+    session.add(b)
+    session.commit()
+    old_ts = int((datetime.now() - timedelta(days=3)).timestamp())
+    items = [{"id": f"h{n}", "title": f"历史资源文{n} https://pan.quark.cn/s/h{n}",
+              "url": f"https://mp.weixin.qq.com/s/h{n}", "publish_at_raw": old_ts}
+             for n in range(2)]
+    plat = FakePlatform(pages=[items])
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
+    _fake_quark(monkeypatch, {f"https://pan.quark.cn/s/h{n}": f"https://pan.quark.cn/s/m{n}"
+                              for n in range(2)}, [])
+    cards: list[dict] = []
+    _fake_feishu(monkeypatch, cards)
+
+    st = _settings(quark_cookie="ck=x", pan_transfer_enabled=True, wechat_sync_push_limit=20)
+    out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=st, platform=plat)
+    assert out["pushed"] == 2 and out["truncated"] == 0
+
+
+def test_full_sync_resumes_after_rate_limit_cursor(session, monkeypatch) -> None:
+    """-2041 中止要把"已尝试到哪个号"记进标记,下个定点从游标之后续跑。
+
+    补采只在四个定点各跑一次:没有游标则每轮都从队头第一个号重来,
+    排在 -2041 之后的号永远补不到,标记也永不清除(每轮白撞)。
+    """
+    from app.db.models import SystemConfig
+
+    monkeypatch.setattr(wechat_monitor, "_weread_cookie", lambda s, u, st: "vid=1; skey=x")
+    session.add(SystemConfig(key="weread_fullsync_pending_1", value="2026-09-26T10:00:00"))
+    session.add_all([
+        WechatBenchmark(user_id=1, nickname=f"号{i}", weread_book_id=f"MP_WXS_{i}", active=True)
+        for i in (1, 2, 3)
+    ])
+    session.commit()
+    ids = sorted(session.scalars(select(WechatBenchmark.id)).all())
+    seen: list[int] = []
+
+    def _sync(s, uid, bid, settings=None):
+        seen.append(bid)
+        return {"status": "partial", "new": 0, "weread_list": "limited"}   # 每个号都耗尽
+
+    monkeypatch.setattr(wechat_monitor, "sync_wechat_account", _sync)
+    first = wechat_monitor.run_full_sync_if_pending(session, 1, settings=_settings())
+    assert first["status"] == "aborted" and seen == [ids[0]]
+    assert session.scalar(select(SystemConfig).where(
+        SystemConfig.key == "weread_fullsync_pending_1")).value == f"cursor:{ids[0]}"
+
+    seen.clear()
+    second = wechat_monitor.run_full_sync_if_pending(session, 1, settings=_settings())
+    assert seen == [ids[1]]                    # 从游标之后接着跑,不重来
+    assert second["status"] == "aborted"
+    seen.clear()
+    third = wechat_monitor.run_full_sync_if_pending(session, 1, settings=_settings())
+    assert seen == [ids[2]] and third["status"] == "aborted"
+    last_cursor = session.scalar(select(SystemConfig).where(
+        SystemConfig.key == "weread_fullsync_pending_1")).value
+    assert last_cursor == f"cursor:{ids[2]}"
+    seen.clear()
+    assert wechat_monitor.run_full_sync_if_pending(session, 1, settings=_settings())["status"] == "done"
+    assert seen == []  # 全部号轮完 → 标记清除,不再空转

@@ -751,12 +751,16 @@
   ③ 不叠加补转存队列(`run_backfill=False`),避免一次点击多打几十次夸克接口
 - **响应示例**: `{ "platform":"wechat_sync", "status":"success", "pages":2, "new":17, "ghid":"gh_xxx",
   "nickname":"微信派", "pushed":12, "transferred":9, "deduped":3, "truncated":2 }`
-  (`deduped`=同链接被并掉的篇数,`truncated`=超出单轮窗口未推的篇数;运行记录 detail 同样带这三个数)
+  (`deduped`=同链接被并掉的篇数,`truncated`=超出单轮窗口未推的篇数,**窗口没排满时是 0 而不是负数**;
+  运行记录 detail 同样带这三个数)
 - 无 dajiala key 时走微信读书免费源:**先枚举 `mp/articles`(近 3 天,含同一天群发的第 2、3 篇),
   列表被服务端限权(-2041)才退化到 cover 最新一篇** → `status:"partial"` +
   `reason:"weread_list_limited_latest_only"`(或 `weread_list_error_latest_only`),响应带
   `weread_list`(ok/limited/error)与 `items`(本次枚举到的篇数)。
-  `wr_skey` 过期会**先自动续期一次**再重试(续期后的新会话正是列表可用窗口)
+  `wr_skey` 过期会**先自动续期一次**再重试(续期后的新会话正是列表可用窗口)——列不出来的那条分支
+  也一样:撞 `-2012/-2010` 必须抛给上层触发续期,不能记成"列表接口异常"继续走单篇(那样 Cookie 死了
+  既不续期也不报警)。列表条目没带 `reviewId` 时回落用 cover 的 `reviewId` 取正文,否则该篇正文为空、
+  链抽不到(卡片上就是一根 `—`)
 - **错误**:404 对标号不存在;502 上游失效——detail 是可执行文案(微信读书登录态失效→去「Cookie 管理」换含
   `wr_rt=` 的 Cookie;dajiala 欠费/风控原文)。前端只把 **502 的 detail 展示给用户**,500 仍显示统一
   "服务器开小差了"(500 的 detail 可能夹带异常堆栈,不外露)

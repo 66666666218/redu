@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { api } from '../api'
 import { toastOk, toastError as toastErr } from '../toast'
 
@@ -12,10 +12,12 @@ const onlyPan = ref(false)
 const sortBy = ref('time')
 const searchKw = ref('')
 let searchTimer = null
+let articleReq = 0
 function searchDebounce() {
   clearTimeout(searchTimer)
   searchTimer = setTimeout(() => loadArticles(), 300)
 }
+onUnmounted(() => clearTimeout(searchTimer))
 const link = ref('')
 const note = ref('')
 const busy = ref('')
@@ -28,6 +30,7 @@ async function loadBenches() {
   try { benches.value = (await api.wechatBenchmarks()).items } catch (e) { msg.value = e.message }
 }
 async function loadArticles(append = false) {
+  const seq = ++articleReq
   try {
     const q = new URLSearchParams()
     if (onlyPan.value) q.set('has_pan', '1')
@@ -36,6 +39,8 @@ async function loadArticles(append = false) {
     q.set('limit', '100')
     if (append) q.set('offset', String(articles.value.length))
     const items = (await api.wechatArticles(q.toString())).items
+    // 换排序/改关键词会连发多请求,慢的那个后到不能覆盖新结果(搜索防抖挡不住上游耗时)
+    if (!append && seq !== articleReq) return
     articles.value = append ? articles.value.concat(items) : items
   } catch (e) { msg.value = e.message }
 }
@@ -90,7 +95,13 @@ async function refreshWeread() {
   busy.value = 'wrrefresh'
   try {
     const r = await api.wechatWereadRefresh()
-    if (r.status === 'skipped') toastErr(r.reason === 'no_cookie' ? '未配置微信读书 Cookie(Cookie 管理 → weread)' : 'Cookie 中无 wr_rt,无法自动续期,请重新复制完整 Cookie')
+    if (r.status === 'skipped') {
+      // 三种跳过原因各说各的话:把 renewal_cooldown 说成"无 wr_rt"会让人白去重贴 Cookie
+      const why = { no_cookie: '未配置微信读书 Cookie(Cookie 管理 → weread)',
+                   no_rt: 'Cookie 中无 wr_rt,无法自动续期,请重新复制完整 Cookie',
+                   renewal_cooldown: `刚续期失败过,处于冷却期(${fmt(r.retry_after)} 前不再重试),请稍后再点` }
+      toastErr(why[r.reason] || `续期未执行:${r.reason}`)
+    }
     else toastOk(`微信读书 Cookie 已续期${r.verified ? ',书架验证通过 ✅' : '(书架验证未通过,可能被风控,稍后自动重试)'}`)
   } catch (e) { toastErr(e.message) } finally { busy.value = '' }
 }
@@ -189,7 +200,7 @@ onMounted(load)
       <span style="margin-right:16px">🚀 爆点 <b>{{ status.burst || 0 }}</b></span>
       <span>🔍 候选 <b>{{ status.candidates || 0 }}</b> 个</span>
       <span style="margin-left:auto">排序:
-        <select v-model="sortBy" style="margin:0 4px" @change="loadArticles">
+        <select v-model="sortBy" style="margin:0 4px" @change="loadArticles()">
           <option value="time">发现时间</option>
           <option value="reads">阅读量</option>
         </select>
@@ -216,7 +227,7 @@ onMounted(load)
       <div class="row" style="gap:10px;flex-wrap:wrap;align-items:center">
         <button :disabled="busy==='listen'" @click="listenAll">{{ busy==='listen' ? '监听中…' : '立即监听一轮' }}</button>
         <button class="ghost" :disabled="busy==='traffic'" @click="refreshTraffic">{{ busy==='traffic' ? '采样中…' : '刷新阅读量(¥0.06/篇)' }}</button>
-        <label style="display:flex;align-items:center;gap:4px"><input type="checkbox" v-model="onlyPan" @change="loadArticles" />只看带网盘链接</label>
+        <label style="display:flex;align-items:center;gap:4px"><input type="checkbox" v-model="onlyPan" @change="loadArticles()" />只看带网盘链接</label>
         <span class="empty">盘链文 {{ panCount }} 篇 · 阅读量合计 {{ totalRead }}</span>
       </div>
     </div>
@@ -265,7 +276,10 @@ onMounted(load)
     <div class="card">
       <h3>监听到的文章({{ articles.length }})</h3>
       <table v-if="articles.length">
-        <tr><th>发现时间</th><th>公众号</th><th>标题</th><th>网盘</th><th>我的链接</th><th>阅读</th><th>点赞</th><th>转发</th><th>操作</th></tr>
+        <tr>
+          <th>发现时间</th><th>公众号</th><th>标题</th><th>网盘</th><th>我的链接</th>
+          <th>操作</th><th>阅读</th><th>点赞</th><th>转发</th><th>采样时间</th>
+        </tr>
         <tr v-for="a in articles" :key="a.id">
           <td class="empty">{{ fmt(a.created_at) }}</td>
           <td>{{ a.author }}</td>

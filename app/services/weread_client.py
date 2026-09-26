@@ -4,7 +4,8 @@
 - 书架:  GET /web/shelf/sync?userVid=&synckey=0&lectureSynckey=0  → 订阅的公众号(MP_WXS_* bookId)
           ⚠️ userVid 必须传**空字符串**,非空会 -2012「登录超时」
 - 最新一篇: GET /api/mp/cover?bookId=MP_WXS_XXX  → {name,title,pic,reviewId,digest}
-          旧列表接口 /web/mp/articles 已废弃(恒 -2041),新版只能拿"最新一篇"
+          列表接口 /web/mp/articles **仅在会话续期后初期可用**,之后服务端恒 -2041
+          (故调用方按"能列就列、列不出只取 cover 最新一篇"处理,见 wechat_monitor)
 - 正文:  GET /web/mp/content?reviewId=MP_WXS_...  → HTML(#js_content)
 - reviewId 形如 `MP_WXS_<bookId>_<articleToken>`,末段即 mp.weixin.qq.com/s/ 原文短链
   的 token(token 可能含 `~`,必须原样保留,见 build_mp_url)
@@ -23,6 +24,7 @@ requests.Session 的 cookie jar(domain=weread.qq.com),否则服务端按游客�
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from urllib.parse import quote
@@ -45,6 +47,24 @@ class WereadError(Exception):
 
 class WereadAuthError(WereadError):
     """登录态失效(-2012/-2010):Cookie 过期,需重新扫码。"""
+
+
+def to_count(value) -> int:
+    """流量字段容错:上游偶尔回 "1.2万"/None/空串,裸 int() 会 ValueError 打穿整轮。"""
+    s = str(value if value is not None else "").strip()
+    if not s:
+        return 0
+    try:
+        return int(float(s))
+    except ValueError:
+        pass
+    m = re.match(r"^([\d.]+)\s*([万亿])", s)
+    if m:
+        try:
+            return int(float(m.group(1)) * (10000 if m.group(2) == "万" else 100000000))
+        except ValueError:
+            return 0
+    return 0
 
 
 def build_mp_url(original_id: str) -> str:
@@ -93,14 +113,18 @@ class WereadClient:
             "Referer": f"{BASE}/",
         }
 
-    def _get(self, path: str, params: dict | None = None,
-             accept: str = "application/json, text/plain, */*") -> dict:
+    def _throttle(self) -> None:
+        """类级 2s 限速:所有实例共享同一起跑线。"""
         cls = type(self)
         with cls._throttle_lock:
             gap = time.time() - cls._last_request
             if gap < self._min_gap:
                 time.sleep(self._min_gap - gap)
             cls._last_request = time.time()
+
+    def _get(self, path: str, params: dict | None = None,
+             accept: str = "application/json, text/plain, */*") -> dict:
+        self._throttle()
         try:
             resp = requests.get(f"{BASE}{path}", params=params, timeout=self.timeout,
                                 headers=self._headers(accept))
@@ -150,7 +174,11 @@ class WereadClient:
 
         失败/拿不到正文容器返回空串(旧实现回落到"整页去标签",把十几 KB 的 JS 当正文入库,
         还把被风控伪装成"抓到了")。上限 20000 字符刻意压在 MySQL TEXT 列内。
+
+        限速必须走 `_throttle`:这里曾直接 `requests.get` 绕过类级节流,
+        而"同步文章"会对每篇新文章各调一次(上百次),等于把风控留给正文抓取环节。
         """
+        self._throttle()
         try:
             resp = requests.get(f"{BASE}/web/mp/content", params={"reviewId": review_id},
                                 timeout=self.timeout,
@@ -194,9 +222,9 @@ class WereadClient:
                     "title": title,
                     "original_id": str(mp.get("originalId") or ""),
                     "review_id": str(rev.get("reviewId") or sub.get("reviewId") or ""),
-                    "read_num": int(mp.get("readNum") or 0),
-                    "like_num": int(mp.get("likeNum") or 0),
-                    "create_time": int(rev.get("createTime") or group_time or 0),
+                    "read_num": to_count(mp.get("readNum")),
+                    "like_num": to_count(mp.get("likeNum")),
+                    "create_time": to_count(rev.get("createTime") or group_time),
                 })
         return items
 

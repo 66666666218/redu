@@ -341,6 +341,46 @@ def test_run_xianyu_prev_keys_scoped_to_round(session, monkeypatch) -> None:
     assert ids == ["a", "b", "hist-1", "hist-2"]      # b 正常入库,a 不重复插
 
 
+def test_run_douhot_prev_keys_scoped_to_72h(session, monkeypatch) -> None:
+    """内容词"是否见过"只查近 72h:全历史 SELECT 会随 douhot_words 只增而线性吃内存。
+
+    与 weibo/baidu 同款窗口(2026-09-22 修它俩时漏了 douhot)。副作用是掉榜 3 天以上的
+    词回榜会重新算"新上榜"——这正是 weibo/baidu 的既定语义。
+    """
+    from datetime import datetime, timedelta
+
+    from config.settings import Settings
+
+    from app.db.models import DouhotWord
+    from app.services import alert_service as alert_mod
+    from app.services import douhot as douhot_mod
+
+    session.add_all([
+        DouhotWord(user_id=1, title="老词", score=1, created_at=datetime.now() - timedelta(days=100)),
+        DouhotWord(user_id=1, title="近词", score=1, created_at=datetime.now() - timedelta(hours=1)),
+    ])
+    session.commit()
+
+    seen: dict = {}
+
+    def _evaluate(session_, user_id, section, latest, prev_keys, settings=None):
+        seen["prev"] = set(prev_keys)
+        return 0
+
+    cookie_store.set_cookie(session, 1, "douyin", "fake-cookie")
+    monkeypatch.setattr(douhot_mod, "fetch_content_words",
+                        lambda cookie, settings: [{"title": "老词", "score": 5.0},
+                                                  {"title": "新词", "score": 3.0}])
+    monkeypatch.setattr(alert_mod, "evaluate", _evaluate)
+    monkeypatch.setattr(tenant, "_record_douhot_watch_snaps", lambda *a, **k: None)
+
+    out = tenant.run_douhot(session, 1, settings=Settings(_env_file=None))
+
+    assert out["platform"] == "douhot"
+    assert seen["prev"] == {"近词"}            # 100 天前的"老词"不再算已见过
+    assert {r.title for r in session.scalars(select(DouhotWord)).all()} == {"老词", "近词", "新词"}
+
+
 def test_douhot_watch_analytics(session) -> None:
     tenant.add_douhot_watch(session, 1, "word", "景甜")
     assert len(tenant.list_douhot_watch(session, 1)) == 1

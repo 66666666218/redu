@@ -1600,7 +1600,11 @@ def _sync_push_after_transfer(session: Session, user_id: int, settings: Settings
         replacements = {}
     _push_listen(session, user_id, settings, to_push, replacements)
     return {"pushed": len(to_push), "transferred": len(replacements),
-            "deduped": len(new_rows) - len(kept), "truncated": len(history) - extra}
+            "deduped": len(new_rows) - len(kept),
+            # 截断数=历史文里没进窗口的那些。直接 `len(history)-extra` 在
+            # 本轮入库不足封顶数时会算出**负数**(extra 可大于 history 长度),
+            # 前端 toast 就成了"剩余 -17 篇"。
+            "truncated": len(history) - len(history[:extra])}
 
 
 # ---------------------------------------------------------------- 全量同步
@@ -1669,13 +1673,17 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
                                 "read_num": it["read_num"], "like_num": it["like_num"],
                                 "publish_at": pub, "review_id": it.get("review_id") or ""})
                 listed = "ok"
-            except WereadError as exc:
+            except WereadAuthError:
+                raise  # Cookie 失效必须往上抛(上层据此续期);吞成 error 会让 80 个号白撞
+            except Exception as exc:  # noqa: BLE001 - 列表是"锦上添花",任何形状问题都不该打断同步
                 # -2041 = 本会话列表预算耗尽(可预期,别当故障);其余按异常归类
                 listed = "limited" if "-2041" in str(exc) else "error"
-                logger.info("微信读书近期列表不可用(%s),%s 退到最新一篇", str(exc)[:60], b.nickname)
+                logger.warning("微信读书近期列表不可用(%s),%s 退到最新一篇", str(exc)[:60], b.nickname)
             cover = None
             try:
                 cover = client.latest_article(b.weread_book_id)
+            except WereadAuthError:
+                raise  # 登录态刚死:必须让上层续期重试,不能当成"这次没 cover"继续
             except WereadError as exc:
                 if listed != "ok":
                     raise          # 两条路都没有 → 交给上层(监听/路由决定降级或续期)
@@ -1697,10 +1705,12 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
             items, cover, listed = _fetch(wc)
         if cover and cover["url"] and not any(it["url"] == cover["url"] for it in items):
             items = [cover] + items       # 列表里没这篇(刚发/翻页边界)也要带上
-        # cover 的正文用它的 reviewId 走转发页;列表项各自的 reviewId 由 content_resolver 复用
-        rid_of = {it["url"]: it.get("review_id") or "" for it in items}
-        if cover:
-            rid_of.setdefault(cover["url"], cover.get("review_id") or "")
+        # cover 的正文用它的 reviewId 走转发页;列表项各自的 reviewId 由 content_resolver 复用。
+        # 空 reviewId 不能占键:`{it["url"]: it.get("review_id") or ""}` 会让 cover 那条
+        # 有效的 reviewId 被 setdefault 跳过(同篇既在列表里又缺 reviewId 时正文直接为空)。
+        rid_of = {it["url"]: it["review_id"] for it in items if it.get("review_id")}
+        if cover and cover.get("url") and cover.get("review_id"):
+            rid_of.setdefault(cover["url"], cover["review_id"])
 
         def _resolve(title: str, url: str = "") -> str:
             rid = rid_of.get(url) or ""
@@ -2203,6 +2213,10 @@ def run_full_sync_if_pending(session: Session, user_id: int,
     看不见;mp/articles(历史列表)仅在 Cookie 会话初期可用——正好在 renewal 成功
     (必然伴随新会话)后的窗口里把停更文章一次性补齐。
     每号独立容错,单号失败不阻断;完成后清除标记。
+
+    `SystemConfig.value` 兼作**续采游标**:首轮是打标时间戳,遇 -2041 中止时改写成
+    `cursor:<最后一个已尝试的 benchmark_id>`。补采只在四个定点各跑一次,没有游标的话
+    每轮都从队头第一个号重新开始,-2041 之后的号**永远轮不到补采**(标记也永不清除)。
     """
     from app.db.models import SystemConfig
 
@@ -2214,20 +2228,34 @@ def run_full_sync_if_pending(session: Session, user_id: int,
     cookie = _weread_cookie(session, user_id, settings)
     if not cookie:
         return {"status": "skipped", "reason": "no_cookie"}
+    m = re.match(r"^cursor:(\d+)$", str(flag.value or "").strip())
+    start_after = int(m.group(1)) if m else 0
     rows = session.scalars(select(WechatBenchmark).where(
         WechatBenchmark.user_id == user_id, WechatBenchmark.active.is_(True),
-        WechatBenchmark.weread_book_id != "")).all()
+        WechatBenchmark.weread_book_id != "", WechatBenchmark.id > start_after
+    ).order_by(WechatBenchmark.id)).all()
+    if not rows:  # 游标已到尾(号后来被删完等):标记清掉,别每轮空转
+        session.delete(flag)
+        session.commit()
+        return {"status": "done", "synced": 0, "new_articles": 0, "failed": 0}
     synced = articles_new = failed = 0
+
+    def _abandon(last_id: int) -> dict:
+        """把队尾留给下个会话窗口:推进游标后提交,标记保留。"""
+        flag.value = f"cursor:{last_id}"
+        session.commit()
+        return {"status": "aborted", "reason": "rate_limited",
+                "synced": synced, "new_articles": articles_new}
+
     for b in rows:
         try:
             out = sync_wechat_account(session, user_id, b.id, settings=settings)
             if out.get("weread_list") == "limited":
-                # 列表接口对本会话已耗尽:后面 80 个号也只会各撞一次并退化成"最新一篇",
+                # 列表接口对本会话已耗尽:后面几十个号也只会各撞一次并退化成"最新一篇",
                 # 白烧微信读书调用密度。标记保留,等下个新 skey 会话窗口再补。
                 logger.warning("mp/articles 预算耗尽(-2041),本轮补采中止;"
-                               "下次新会话窗口再补(已补 %s 号 %s 篇)", synced, articles_new)
-                return {"status": "aborted", "reason": "rate_limited",
-                        "synced": synced, "new_articles": articles_new}
+                               "下次从号 %s 之后续(已补 %s 号 %s 篇)", b.id, synced, articles_new)
+                return _abandon(b.id)
             if out.get("status") == "success":
                 synced += 1
                 articles_new += int(out.get("new") or 0)  # sync 的计数字段就叫 new
@@ -2235,12 +2263,11 @@ def run_full_sync_if_pending(session: Session, user_id: int,
                 failed += 1
         except WereadError as exc:
             # -2041 = 该 skey 的列表接口预算已耗尽:全局放弃本轮(标记保留,
-            # 下个新 skey 会话再补),否则其余 80 号每号白撞一次
+            # 下个新 skey 会话再补),否则其余号每号白撞一次
             session.rollback()
             if "-2041" in str(exc):
-                logger.warning("mp/articles 预算耗尽(-2041),本轮补采中止;下次新会话窗口再补")
-                return {"status": "aborted", "reason": "rate_limited",
-                        "synced": synced, "new_articles": articles_new}
+                logger.warning("mp/articles 预算耗尽(-2041),本轮补采中止;下次从号 %s 之后续", b.id)
+                return _abandon(b.id)
             failed += 1
         except Exception:  # noqa: BLE001 - 单号失败不阻断全量
             session.rollback()

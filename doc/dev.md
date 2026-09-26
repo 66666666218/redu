@@ -353,16 +353,20 @@ redian/
   并内置 QPS≤2 限速;防御式解析(post_condition 的 data 项与 history 的 MsgList 字段层级未完全实测)。
 - **双数据源免费优先(2026-09-07)**:`weread_client.py` 接入微信读书(生产端点经 we-mp-rss/weread-mp-fetcher
   实测校准)——书架 `/web/shelf/sync?userVid=`(**空**,非空 -2012)、最新一篇 `/api/mp/cover?bookId=MP_WXS_*`
-  (旧列表 `/web/mp/articles` 已废弃恒 -2041)、正文 `/web/mp/content?reviewId=`(#js_content);
+  (旧列表 `/web/mp/articles` 仅会话初期可用,之后恒 -2041)、正文 `/web/mp/content?reviewId=`(#js_content);
   reviewId=`MP_WXS_<bookId>_<token>` 推导 mp.weixin 原文链(token 含 `~` 原样保留)。
   监听逐号先走微信读书(免费,书架导入 `import_benchmarks_from_shelf`),失效(-2012/-2010)自动降级
   dajiala;正文盘链确认优先微信读书 content、其次自抓原文页。Cookie:平台内「weread」按用户配置优先,
-  全局 `WEREAD_COOKIE` 兜底;客户端内置 2s 限速(社区实测单日 30+ 次密集请求即触发风控)。
+  全局 `WEREAD_COOKIE` 兜底;客户端内置 2s 限速(社区实测单日 30+ 次密集请求即触发风控)——
+  限速挂在类级 `_throttle()` 上,**`_get` 与 `mp_content` 都必须走它**(正文抓取曾用裸
+  `requests.get` 绕过,而"同步文章"逐篇取正文,一次点击就是上百个不限速的请求)。
   限制:微信读书的"近期列表" `/web/mp/articles` **只在 Cookie 会话初期可用**,数小时后被服务端限权
   (`-2041`,对本账号是永久性的);cover 始终可用但**只有最新一篇**。所以监听/同步的形态是
   "cover 打底 + 列表可用时枚举近 3 天"——列表被限权的那些号,同一天群发的第 2、3 篇属**未知丢失**,
   每轮会把可枚举性写进 `wechat_listen` 的 detail 并在漏采时点名(见 operations.md §4e)。
-  补采只在 renewal 后的新会话窗口做(`run_full_sync_if_pending`),撞 `-2041` 立即中止、pending 标记保留;
+  补采只在 renewal 后的新会话窗口做(`run_full_sync_if_pending`),撞 `-2041` 立即中止;补采一天只有
+  四次机会(跟随四定点),所以 pending 标记的 value 兼作**续采游标** `cursor:<benchmark_id>`,
+  下个定点从游标之后接着跑,轮到队尾才清标记——否则每次都从第一个号重来,靠后的号永远补不到;
   历史批量翻页同步仍需 dajiala(¥0.14/页)或自建 wewe-rss(免费全量)。
 - **读书平台提供器(2026-09-07,首选)**:`reader_platform_client.py` 对接 wewe-rss v2 兼容实例
   (`WECHAT_READER_PLATFORM_URL` + `WECHAT_READER_TOKEN/VID`,xg.djxx.club 同款架构——其前端包与
