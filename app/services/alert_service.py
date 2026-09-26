@@ -372,7 +372,7 @@ def notify_incident(db: Session, user_id: int, kind: str, title: str, detail: st
 
     `push_feishu=False` 给的是**不需要人当场动手的运维诊断**(例:"微信读书只能拿到最新一篇"
     的漏推风险、"补推仍未送达"这种飞书自身故障):飞书群是员工看文章和 Cookie 提醒的入口,
-    这类"要不要部署 wewe-rss / 要不要充值"的长期决策项丢进来只是噪音。它们改落**站内告警**
+    这类"要不要自建 WeRSS / 要不要充值"的长期决策项丢进来只是噪音。它们改落**站内告警**
     (`alerts` 表 → 预警页 `/api/alerts/list`、管理端用户详情、告警导出 CSV 都读它),
     冷却门照旧走,所以每 `FEISHU_ALERT_COOLDOWN_HOURS` 最多记一条,不会堆垃圾。
     """

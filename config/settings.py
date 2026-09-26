@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     wechat_reader_platform_url: str = ""  # 读书平台地址(wewe-rss v2 兼容,免费全量文章列表;如 https://weread.xxx 自建实例)
     wechat_reader_token: str = ""   # 读书平台 token(含 vid 的 JWT)
     wechat_reader_vid: str = ""     # 读书平台 vid(微信读书用户ID)
+    wechat_werss_url: str = ""      # 自建 WeRSS(rachelos/we-mp-rss)地址,免费全量列表首选源;配了它就优先于上面的读书平台
+    wechat_werss_ak: str = ""       # WeRSS Access Key(管理界面「Access Key 管理」创建)
+    wechat_werss_sk: str = ""       # WeRSS Secret Key(创建时只显示一次)
     dajiala_min_balance: float = 1.0  # 余额低于该值(元)跳过付费监听,避免打穿余额(免费接口不受限)
     wechat_sync_max_pages: int = 3  # 一键同步默认最多翻页数(history_by_ghid ¥0.14/页,每页约10次发文)
     wechat_sync_push_limit: int = 20  # 一次「同步文章」转存+推飞书的篇数上限(资源文优先;同盘链去重后仍超量才截断)

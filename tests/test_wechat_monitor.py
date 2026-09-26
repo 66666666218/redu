@@ -1075,6 +1075,100 @@ def test_add_benchmark_resolves_biz_via_platform(session, monkeypatch: pytest.Mo
     assert row["biz"] == "bizXYZ" and row["nickname"] == "真名号"
 
 
+# ---------------------------------------------------------------- WeRSS(自建免费全量列表)
+def test_platform_client_selects_provider_by_config() -> None:
+    """两家合同一致,按配置择一:WeRSS 优先(凭据在自己手里),其次读书平台,都没配 → None。"""
+    from app.services.reader_platform_client import ReaderPlatformClient
+    from app.services.werss_client import WerssClient
+
+    both = _settings(wechat_werss_url="https://werss.test", wechat_werss_ak="WK", wechat_werss_sk="SK",
+                     wechat_reader_platform_url="https://plat.test", wechat_reader_token="T")
+    assert isinstance(wechat_monitor._platform_client(both), WerssClient)
+    only_werss = _settings(wechat_werss_url="https://werss.test", wechat_werss_ak="WK",
+                           wechat_werss_sk="SK")
+    assert isinstance(wechat_monitor._platform_client(only_werss), WerssClient)
+    only_plat = _settings(wechat_reader_platform_url="https://plat.test", wechat_reader_token="T")
+    assert isinstance(wechat_monitor._platform_client(only_plat), ReaderPlatformClient)
+    # 半套配置不算配置:WeRSS 缺 SK 就回落到读书平台,而不是拿半个凭据去撞 401
+    half = _settings(wechat_werss_url="https://werss.test", wechat_werss_ak="WK",
+                     wechat_reader_platform_url="https://plat.test", wechat_reader_token="T")
+    assert isinstance(wechat_monitor._platform_client(half), ReaderPlatformClient)
+    assert wechat_monitor._platform_client(_settings()) is None
+
+
+class FakeWerss:
+    """假 WeRSS:按 offset 返回预置分页,记录调用。"""
+
+    def __init__(self, pages: list[list[dict]]) -> None:
+        self.pages = pages
+        self.calls: list[tuple] = []
+
+    def list_feeds(self, kw: str = "", limit: int = 100, offset: int = 0) -> list[dict]:
+        self.calls.append((limit, offset))
+        idx = offset // limit if limit else 0
+        return self.pages[idx] if idx < len(self.pages) else []
+
+
+def test_werss_feed_index_pages_to_end_and_keeps_duplicates() -> None:
+    """名称归组要保留重名的全部候选(后面据此判歧义),翻页到"不满一页"即停。"""
+    full = [{"id": f"MP_WXS_{i}", "mp_name": f"号{i}"} for i in range(100)]
+    fake = FakeWerss([full, [{"id": "MP_WXS_D1", "mp_name": "同名号"},
+                             {"id": "MP_WXS_D2", "mp_name": " 同名 号 "},
+                             {"id": "", "mp_name": "无 id"}]])
+    index = wechat_monitor.werss_feed_index(fake)
+    assert len(fake.calls) == 2                      # 第二页不满即到底
+    assert index["号0"] == ["MP_WXS_0"]
+    assert index["同名号"] == ["MP_WXS_D1", "MP_WXS_D2"]   # 空格/大小写规范化后算同一个名字
+    assert "" not in index and len(index) == 101
+
+
+def test_match_biz_from_werss_never_guesses_and_only_writes_on_apply(
+        session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """回填只认"名称唯一命中":重名、没订阅的都报告不猜;`apply=False` 一个字都不写。"""
+    session.add_all([
+        WechatBenchmark(user_id=1, nickname=" 号0 ", biz=""),          # 唯一命中(名称带空格)
+        WechatBenchmark(user_id=1, nickname="同名号", biz=""),          # 两个订阅同名 → 歧义
+        WechatBenchmark(user_id=1, nickname="没订阅的号", biz=""),       # WeRSS 里没有
+        WechatBenchmark(user_id=1, nickname="已配过", biz="MP_WXS_old"),  # 不覆盖
+        WechatBenchmark(user_id=2, nickname="号0", biz=""),            # 别的用户不参与
+    ])
+    session.commit()
+    fake = FakeWerss([[{"id": "MP_WXS_0", "mp_name": "号0"},
+                       {"id": "MP_WXS_D1", "mp_name": "同名号"},
+                       {"id": "MP_WXS_D2", "mp_name": "同名号"}]])
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: fake)
+    st = _settings(wechat_werss_url="https://werss.test", wechat_werss_ak="WK", wechat_werss_sk="SK")
+
+    plan = wechat_monitor.match_biz_from_werss(session, 1, settings=st)
+    assert plan["matched"] == 1 and plan["applied"] is False and plan["already"] == 1
+    assert plan["detail"] == [{"id": session.scalars(
+        select(WechatBenchmark).where(WechatBenchmark.nickname == " 号0 ")).first().id,
+        "nickname": " 号0 ", "biz": "MP_WXS_0"}]
+    assert [a["nickname"] for a in plan["ambiguous"]] == ["同名号"]
+    assert plan["missing"] == ["没订阅的号"]
+    assert all(r.biz == "" for r in session.scalars(
+        select(WechatBenchmark).where(WechatBenchmark.user_id == 1,
+                                      WechatBenchmark.nickname != "已配过")).all())
+
+    out = wechat_monitor.match_biz_from_werss(session, 1, settings=st, apply=True)
+    assert out["matched"] == 1 and out["applied"] is True
+    row = session.scalars(select(WechatBenchmark).where(
+        WechatBenchmark.nickname == " 号0 ")).first()
+    assert row.biz == "MP_WXS_0"
+    assert session.scalars(select(WechatBenchmark).where(
+        WechatBenchmark.nickname == "同名号")).first().biz == ""      # 歧义的不写
+    assert session.scalars(select(WechatBenchmark).where(
+        WechatBenchmark.user_id == 2)).first().biz == ""             # 不越租户
+
+
+def test_match_biz_from_werss_requires_werss_config(
+        session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """配的是读书平台(没有 list_feeds)时要一句人话,而不是 AttributeError。"""
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: FakePlatform())
+    with pytest.raises(ValueError, match="未配置 WeRSS"):
+        wechat_monitor.match_biz_from_werss(session, 1, settings=_settings())
+
+
 # ---------------------------------------------------------------- 阅读量采样
 def test_sample_traffic_updates_and_records(session, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.db.models import WechatTrafficSample
@@ -2397,11 +2491,11 @@ def test_listen_exposes_unenumerable_accounts_and_alerts(session, monkeypatch) -
     alert = next((a for a in alerts if a[2].startswith("⚠️ 微信读书")), None)
     assert alert is not None and alert[2] == "⚠️ 微信读书只能拿到最新一篇,同日其它篇可能漏推"
     assert "列不出却采到新文的号:2" in alert[3]  # 数字放正文,标题稳定才冷却去重有效
-    assert "wewe-rss" in alert[3] and "biz" in alert[3]  # 给出可执行的根治路径
+    assert "WeRSS" in alert[3] and "biz" in alert[3]  # 给出可执行的根治路径(名字要与 §4g 一致)
     # cover 的正文兜住了 → 盘链被认出,于是"有链却没 Cookie 转存"也必须点名(修 1 之后这两篇
     # 不再是卡片上的一根"—");没转存可解释,静默不可接受。
     assert any("缺夸克 Cookie" in a[2] for a in alerts)
-    # 「漏推风险」是长期决策项(要不要部署 wewe-rss/充值),只落站内;
+    # 「漏推风险」是长期决策项(要不要自建 WeRSS/充值),只落站内;
     # 「缺 Cookie 未转存」是用户当场能修的,照旧刷飞书——用户 2026-09-26 口径。
     assert alert[4] is False
     assert any("缺夸克 Cookie" in a[2] and a[4] is True for a in alerts)

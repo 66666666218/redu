@@ -704,7 +704,7 @@ def test_notify_incident_admin_only_records_alert_without_feishu(session) -> Non
     """运维诊断型告警(push_feishu=False)只进站内 `alerts` 表:飞书群只放文章与 Cookie 提醒。
 
     用户 2026-09-26 口径:像"微信读书只能拿到最新一篇,同日其它篇可能漏推"这种
-    "要不要部署 wewe-rss / 要不要充值"的长期决策项,不该刷进员工群,但也不能没人看见。
+    "要不要自建 WeRSS / 要不要充值"的长期决策项,不该刷进员工群,但也不能没人看见。
     """
     from app.db.models import AlertRecord
     from app.services import alert_service

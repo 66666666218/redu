@@ -797,7 +797,8 @@
   响应同步返回 `weread_list` 计数;只要 `off_with_new>0` 就记一条
   `⚠️ 微信读书只能拿到最新一篇,同日其它篇可能漏推`(**只进站内告警,不发飞书**,
   见 `doc/operations.md` §4f;标题不带数字以便冷却去重,本轮计数写在正文),
-  并给出两条根治路径:① 部署 wewe-rss 并给对标号回填 `biz`(免费全量列表);② dajiala 充值走
+  并给出两条根治路径:① 自建 WeRSS 并把订阅 id 回填进对标号 `biz`(免费全量列表,见 §9b.6 与
+  `doc/operations.md` §4g);② dajiala 充值走
   `history_by_ghid`(付费)。临时缓解:对高产号多点「同步文章」(它在列表可用时会补同日兄弟篇)
 
 - **飞书推送格式**(wide_screen 网格卡,四列对齐:**公众号 / 文章 / 网盘 / 阅读**):
@@ -878,6 +879,14 @@
   wr_skey 短效且轮换,续期后旧值自动失效,服务端已回写新值,用户无需手动更换 Cookie。
 - 监听/同步的其余行为不变;`sync` 无 dajiala key 时优先枚举 `mp/articles`,只有列表被限权才退化为"最新一篇"
   (返回 `partial` + `weread_list`)。
-- **读书平台(wewe-rss v2 兼容,免费全量)**:配置 `.env` 的 `WECHAT_READER_PLATFORM_URL/TOKEN/VID`
-  后自动成为首选源——监听每号拿最新 20 篇、同步翻页拉全量(免费);对标号列表新增 `biz` 字段
-  (文章页 `__biz`,加号时自动解析)。优先级:平台 → 微信读书 cover → dajiala。
+- **免费全量列表源(两家可择一,凭据都在 `.env`)**:
+  - **WeRSS(自建,2026-09-27 起现役首选)**:配 `WECHAT_WERSS_URL/AK/SK`(AK 在 WeRSS 后台
+    「Access Key 管理」创建,Secret 只显示一次)即启用,`app/services/werss_client.py`。
+    它的订阅 id 与我们书架导入的号没有共同标识体系,故要跑一次
+    `python scripts/werss_backfill_biz.py [--apply]` **按公众号名称**把 id 回填进 `biz`
+    (重名/找不到的只报告不猜)。部署步骤见 `doc/operations.md` §4g。
+  - **读书平台(wewe-rss v2 兼容)**:配 `WECHAT_READER_PLATFORM_URL/TOKEN/VID` 即启用;
+    ⚠️ 其公共实例已于 2026-07 停服,除非自建同构实例否则留空。
+  两者都提供"每号最新一页(≤100 篇)"的全量列表,同步可翻页拉历史(免费)。
+  优先级:**WeRSS → 读书平台 → 微信读书 cover(只最新一篇)→ dajiala(付费)**;
+  对标号列表的 `biz` 字段就是喂给这两个源的公众号标识。

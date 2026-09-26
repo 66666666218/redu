@@ -367,14 +367,33 @@ redian/
   补采只在 renewal 后的新会话窗口做(`run_full_sync_if_pending`),撞 `-2041` 立即中止;补采一天只有
   四次机会(跟随四定点),所以 pending 标记的 value 兼作**续采游标** `cursor:<benchmark_id>`,
   下个定点从游标之后接着跑,轮到队尾才清标记——否则每次都从第一个号重来,靠后的号永远补不到;
-  历史批量翻页同步仍需 dajiala(¥0.14/页)或自建 wewe-rss(免费全量)。
-- **读书平台提供器(2026-09-07,首选)**:`reader_platform_client.py` 对接 wewe-rss v2 兼容实例
+  历史批量翻页同步仍需 dajiala(¥0.14/页)或自建订阅源(免费全量,见下两条)。
+- **读书平台提供器(2026-09-07)**:`reader_platform_client.py` 对接 wewe-rss v2 兼容实例
   (`WECHAT_READER_PLATFORM_URL` + `WECHAT_READER_TOKEN/VID`,xg.djxx.club 同款架构——其前端包与
   后端合同完全一致:认证 `Authorization: Bearer token`+`X-Weread-Token`+`xid: vid`;链接解析
   `POST /api/v2/platform/wxs2mp`;全量分页列表 `GET /api/v2/platform/mps/{biz}/articles?page&limit`)。
   公众号标识 = 文章页 `__biz`(`extract_article_meta` 免费直抓解析,对标号新增 `biz` 列)。
-  源优先级:**平台(免费全量)→ 微信读书(cover 最新一篇 + 会话初期枚举近 3 天列表)→ dajiala(付费)**;同步在平台源下
-  默认 10 页封顶(免费),全 seen 即停。上游错误 WeReadError401=账号失效/429=当日小黑屋。
+  ⚠️ **2026-09-27 实测:这条路的公共实例已死**——它依赖的转发服务随 Deno Deploy Classic
+  于 2026-07-20 退役而消失(`weread.111965.xyz` 502 / `weread.965111.xyz` DEPLOYMENT_NOT_FOUND),
+  wewe-rss 仓库也已归档。保留该客户端只为兼容自建同构实例;现役的免费全量源是下面这条。
+- **WeRSS 提供器(2026-09-27,免费全量列表现役首选)**:`werss_client.py` 对接自建的
+  [rachelos/we-mp-rss](https://github.com/rachelos/we-mp-rss)(Python/FastAPI,仍在维护)。
+  合同**逐行取自其 main 源码**(版本 1.5.3):认证 `Authorization: AK-SK {ak}:{sk}`(后台创建,
+  Secret 只显示一次);订阅列表 `GET /api/v1/wx/mps?limit(≤100)&offset&kw` → `data.list[].{id,mp_name}`;
+  文章列表 `GET /api/v1/wx/articles?mp_id&limit(≤100)&offset` → `data.list[].{id,mp_id,title,url,
+  description,publish_time(Unix 秒)}`,**按 publish_time 降序**、视图不含正文;
+  手动刷新 `POST /api/v1/wx/mps/update/{id}`(同步抓、60s 节流)。统一封装 `{"code":0,...}`,
+  而它有个别错误分支挂在 HTTP 201 上,**判成败只看 `code`**。
+  `WerssClient` 与 `ReaderPlatformClient` 方法名/返回结构刻意保持一致,所以监听 ⓪ 分支、同步、
+  `_platform_client` 的调用方一行没改;`WerssError` 是 `PlatformError` 的子类 —— 否则 WeRSS 一挂
+  就是整轮监听抛异常,而不是降级回微信读书。`_platform_client` 的选择:WeRSS(URL+AK+SK 三项齐)优先,
+  半个凭据不算配置(否则会拿残缺的 AK 去撞 401)。
+  **biz 从哪来**:WeRSS 的订阅 id 在它后台生成,和我们的 `weread_book_id` 不是一个标识体系,两边唯一的
+  共同信息是**公众号名称** → `match_biz_from_werss`(按名称规范化后匹配,重名/找不到一律不猜只报告,
+  `apply=False` 默认只出计划)+ `scripts/werss_backfill_biz.py`。`resolve_mp` 显式抛"不支持",
+  因为 WeRSS 没有"文章链接→公众号"的解析接口,留着方法是为了让 `add_benchmark` 得到人话而不是 AttributeError。
+  源优先级:**WeRSS → 读书平台 → 微信读书(cover 最新一篇 + 会话初期枚举近 3 天)→ dajiala(付费)**。
+  部署与凭据配置见 `doc/operations.md` §4g。
 - **监听后处理在 SAVEPOINT 里(2026-09-26 第八轮审计)**:`run_wechat_listen` 的
   `_enrich_new_articles`(回填盘链 → 即时采样 → 夸克/百度转存 → 共振 → 候选提取)整段包进
   `app/db/tx.savepoint()`。它此前是裸调用,而内部多处兜底写 `session.rollback()`——`Session.rollback()`
@@ -457,7 +476,7 @@ redian/
 管理端用户详情、告警导出 CSV 三处同源可见;返回 `False`(语义是"没发飞书"),门照旧烧,
 所以每 `FEISHU_ALERT_COOLDOWN_HOURS` 最多一行,不会因监听逐轮跑而堆成山。
 两个已迁过去的调用点:① `off_new and push` 的"微信读书只能拿到最新一篇,同日其它篇可能漏推"
-(根治要部署 wewe-rss 或充值,群里没人能当场修);② `repush_unpushed` 的"补推仍未送达"
+(根治要么自建 WeRSS 要么充值,群里没人能当场修);② `repush_unpushed` 的"补推仍未送达"
 (飞书本身坏了,用它发告警更是发不出去)。站内型**不要求配 webhook**——否则没接飞书的租户连诊断都没人看得见。
 新增告警前先问:收到的人现在能动手修吗?只有运营者看得懂吗?(见 `doc/operations.md` §4f 的分类表)
 

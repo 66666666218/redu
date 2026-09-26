@@ -26,6 +26,7 @@ optional = {
     "DAJIALA_KEY": "dajiala(阅读量采样,不充可跳过)",
     "FEISHU_WEBHOOK_WECHAT": "公众号专属群(空则推总群)",
     "XIANYU_PROXY_URL": "闲鱼固定代理(风控时配置)",
+    "WECHAT_WERSS_URL": "自建 WeRSS(免费全量文章列表;漏推风险的根治源,配了还要跑 scripts/werss_backfill_biz.py)",
 }
 NL = chr(10)
 print("== 1. 配置 ==")
@@ -45,7 +46,7 @@ print(NL + "== 2. 模块 ==")
 mods = ["app.services.weread_client", "app.services.dajiala_client", "app.services.quark_transfer",
         "app.services.llm_client", "app.services.content_extract", "app.services.wechat_monitor",
         "app.services.early_agent", "app.services.focus_alert", "app.services.agent_learning",
-        "app.services.reader_platform_client"]
+        "app.services.reader_platform_client", "app.services.werss_client"]
 for mod in mods:
     try:
         __import__(mod)

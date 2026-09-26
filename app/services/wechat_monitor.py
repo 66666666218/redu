@@ -22,6 +22,7 @@ from app.db.tx import HeldSavepoint, savepoint
 from app.services.dajiala_client import DajialaClient, DajialaError, DajialaNoBalance
 from app.services.quark_transfer import QuarkAuthError, QuarkError, QuarkTransfer, extract_quark_urls
 from app.services.reader_platform_client import PlatformError, ReaderPlatformClient
+from app.services.werss_client import WerssClient
 from app.services.sogou_weixin import search_articles as sogou_search_articles
 from app.services.tenant_base import _base, _record_run
 from app.services.content_extract import extract_account_refs as _ear
@@ -167,8 +168,14 @@ def extract_article_meta(url: str, timeout: int = 15) -> dict:
     return out
 
 
-def _platform_client(settings: Settings) -> ReaderPlatformClient | None:
-    """读书平台客户端(wewe-rss v2 兼容,免费全量列表);URL/token 未配置返回 None。"""
+def _platform_client(settings: Settings) -> ReaderPlatformClient | WerssClient | None:
+    """免费全量列表的数据源客户端;两家合同一致(都提供 `mp_articles`),按配置择一。
+
+    优先 WeRSS(自建、凭据在自己手里),其次 wewe-rss 兼容的"读书平台"。都没配返回 None。
+    """
+    if settings.wechat_werss_url and settings.wechat_werss_ak and settings.wechat_werss_sk:
+        return WerssClient(settings.wechat_werss_url,
+                           access_key=settings.wechat_werss_ak, secret_key=settings.wechat_werss_sk)
     if not settings.wechat_reader_platform_url or not settings.wechat_reader_token:
         return None
     return ReaderPlatformClient(settings.wechat_reader_platform_url,
@@ -366,6 +373,73 @@ def list_benchmarks(session: Session, user_id: int) -> list[dict]:
             "has_articles": art_count is not None,
         })
     return out
+
+
+def _norm_mp_name(value: str) -> str:
+    return re.sub(r"\s+", "", (value or "")).strip().lower()
+
+
+def werss_feed_index(plat: object) -> dict[str, list[str]]:
+    """WeRSS 订阅按名称归组:{规范化名称: [feed_id, ...]}(重名的都留着,好让调用方判定歧义)。
+
+    每页 ≤100(上游 `le=100`),翻页上限 20 页 = 2000 个订阅——远超我们的用量,
+    真到上限也宁可少翻页也别把监听拖成几分钟。
+    """
+    index: dict[str, list[str]] = {}
+    page, size = 0, 100
+    while page < 20:
+        feeds = plat.list_feeds(limit=size, offset=page * size)  # type: ignore[attr-defined]
+        for f in feeds:
+            key = _norm_mp_name(f.get("mp_name", ""))
+            if key and f.get("id"):
+                index.setdefault(key, []).append(str(f["id"]))
+        if len(feeds) < size:
+            break
+        page += 1
+    return index
+
+
+def match_biz_from_werss(session: Session, user_id: int,
+                         settings: Settings | None = None, apply: bool = False) -> dict:
+    """按公众号名称把 WeRSS 的订阅 id 回填进 `biz` 列(接上免费全量列表的最后一公里)。
+
+    现有对标号绝大多数是从微信读书书架导入的:只有 `weread_book_id`,没有 `biz`,
+    而监听 ⓪ 分支的门槛正是 `plat and b.biz`——不回填就一行也不会多推。
+    两边唯一共同的信息是**号的名字**,所以只能按名称匹配,并且必须把"重名/找不到"如实报出来:
+    猜一个填上去,后果下一整轮监听都在把别人的文章当这个号的推给员工。
+
+    `apply=False` 只出计划不落库(默认),`apply=True` 才写。已有 `biz` 的行不动。
+    """
+    settings = settings or get_settings()
+    plat = _platform_client(settings)
+    if plat is None or not hasattr(plat, "list_feeds"):
+        raise ValueError("未配置 WeRSS(WECHAT_WERSS_URL/AK/SK),无法按名称回填订阅 id")
+    index = werss_feed_index(plat)
+    rows = session.scalars(select(WechatBenchmark).where(
+        WechatBenchmark.user_id == user_id).order_by(WechatBenchmark.id)).all()
+    matched: list[dict] = []
+    ambiguous: list[dict] = []
+    missing: list[str] = []
+    already = 0
+    for r in rows:
+        if r.biz:
+            already += 1
+            continue
+        hits = index.get(_norm_mp_name(r.nickname), [])
+        if len(hits) == 1:
+            matched.append({"id": r.id, "nickname": r.nickname, "biz": hits[0]})
+            if apply:
+                r.biz = hits[0][:64]
+        elif len(hits) > 1:
+            # 重名:让运营者在 WeRSS 后台把订阅名改成可区分的(如加后缀),或人工指定 biz
+            ambiguous.append({"id": r.id, "nickname": r.nickname, "candidates": hits})
+        else:
+            missing.append(r.nickname)
+    if apply and matched:
+        session.commit()
+    return {"matched": len(matched), "applied": bool(apply and matched),
+            "already": already, "ambiguous": ambiguous, "missing": missing,
+            "detail": matched}
 
 def remove_benchmark(session: Session, user_id: int, benchmark_id: int) -> None:
     """删除对标号并级联清理其关联数据(pan_links/采样点/文章),防止孤儿行堆积。
@@ -1257,7 +1331,7 @@ def _release_listen_slot(session: Session, user_id: int, token: str) -> None:
 
 def run_wechat_listen(session: Session, user_id: int, settings: Settings | None = None,
                       client: DajialaClient | None = None, weread: WereadClient | None = None,
-                      platform: ReaderPlatformClient | None = None, push: bool = True,
+                      platform: ReaderPlatformClient | WerssClient | None = None, push: bool = True,
                       batch_index: int | None = None, batch_size: int | None = None) -> dict:
     """监听一轮(外层是"同一用户不并发"的时长锁,内层 `_listen_round` 才是采集本体)。
 
@@ -1282,7 +1356,7 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
 
 def _listen_round(session: Session, user_id: int, settings: Settings | None = None,
                   client: DajialaClient | None = None, weread: WereadClient | None = None,
-                  platform: ReaderPlatformClient | None = None, push: bool = True,
+                  platform: ReaderPlatformClient | WerssClient | None = None, push: bool = True,
                   batch_index: int | None = None, batch_size: int | None = None) -> dict:
     """监听一轮:双数据源免费优先——微信读书(cover)→ dajiala(当天发文)→ 新文入库推飞书。
 
@@ -1350,7 +1424,7 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     wr_stats: dict = {}
     for b in rows:
         used = False
-        # ⓪ 读书平台(wewe-rss 兼容,免费,分页全量列表):有 biz 且平台已配置 → 首选
+        # ⓪ 免费全量列表(自建 WeRSS 或 wewe-rss 兼容的读书平台):有 biz 且源已配置 → 首选
         if plat and b.biz:
             try:
                 raw_items = plat.mp_articles(b.biz, page=1, limit=20)
@@ -1487,7 +1561,7 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
         _push_listen(session, user_id, settings, new_rows, replacements)
     if off_new and push:
         # 兑现"近24h全部推送"要靠列表枚举;只要还有号列不出来又采到了新文,就必须点名而不是安静少推。
-        # 但点名落在**站内告警**:这是"要不要部署 wewe-rss/要不要充值"的长期决策,不是员工群里
+        # 但点名落在**站内告警**:这是"要不要自建 WeRSS/要不要充值"的长期决策,不是员工群里
         # 该刷的东西——用户 2026-09-26 定的口径:飞书只推文章与 Cookie 提醒。
         from app.services.alert_service import notify_incident
         notify_incident(
@@ -1496,7 +1570,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
             f"本轮列不出却采到新文的号:{off_new}(可枚举 {enumerable} / 共 {len(rows)})。"
             "微信读书 mp/articles(近期列表)对本会话不可用(-2041 限权),监听退化为"
             "cover 最新一篇:两轮之间(最长 8h)同一号发多篇时,前面的那几篇顶不掉也补不回来。"
-            "要真正兑现『近24h全推』只有两条路:① 部署 wewe-rss 并给对标号回填 biz(免费全量列表);"
+            "要真正兑现『近24h全推』只有两条路:① 自建 WeRSS(we-mp-rss)并把订阅 id 回填进对标号的 biz"
+            "(免费全量列表,部署办法见 doc/operations.md §4g);"
             "② dajiala 充值走 history_by_ghid(付费)。临时缓解:对高产号多点「同步文章」",
             settings=settings, push_feishu=False)
     out: dict = {"platform": "wechat", "status": status, "accounts": len(rows),
@@ -1845,7 +1920,7 @@ def _sync_push_after_transfer(session: Session, user_id: int, settings: Settings
 def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
                         settings: Settings | None = None, client: DajialaClient | None = None,
                         max_pages: int | None = None, weread: WereadClient | None = None,
-                        platform: ReaderPlatformClient | None = None) -> dict:
+                        platform: ReaderPlatformClient | WerssClient | None = None) -> dict:
     """一键同步:history_by_ghid 翻页拉历史文章入库(¥0.14/页,默认 WECHAT_SYNC_MAX_PAGES 封顶)。
 
     入库后统一走 `_sync_push_after_transfer`:同盘链去重 → 夸克转存换成我方链 → 再推飞书,
