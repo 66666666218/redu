@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from config.settings import Settings, get_settings
 from app.db import repository
 from app.db.models import AlertRecord, AlertRule, RunRecord, User
+from app.db.tx import HeldSavepoint, savepoint
 from app.services.notifier import get_notifier, get_user_notifier
 from app.utils import get_logger
 
@@ -344,15 +345,17 @@ def feishu_alert_gate(db: Session, user_id: int, section: str, title: str,
         FeishuAlert.section == section, FeishuAlert.user_id == user_id, FeishuAlert.title == title[:200]))
     if existing and (now - existing.alerted_at) < timedelta(hours=cooldown_hours):
         return False
-    if existing:
-        existing.reason, existing.alerted_at = (reason or existing.reason)[:255], now
-    else:
-        db.add(FeishuAlert(section=section, user_id=user_id, title=title[:200],
-                           reason=reason[:255], alerted_at=now))
+    # 冷却行写进 SAVEPOINT:并发撞唯一约束时只撤销这一行。原来是整段 db.rollback(),
+    # 会把调用方尚未提交的业务数据一起抹掉(监听轮的中途告警正踩这条)。
     try:
-        db.flush()  # 立即落库试探:并发双门同时 INSERT 会在此撞唯一约束
+        with savepoint(db):
+            if existing:
+                existing.reason, existing.alerted_at = (reason or existing.reason)[:255], now
+            else:
+                db.add(FeishuAlert(section=section, user_id=user_id, title=title[:200],
+                                   reason=reason[:255], alerted_at=now))
+            db.flush()  # 立即落库试探:并发双门同时 INSERT 会在此撞唯一约束
     except IntegrityError:
-        db.rollback()
         row = db.scalar(select(FeishuAlert).where(
             FeishuAlert.section == section, FeishuAlert.user_id == user_id, FeishuAlert.title == title[:200]))
         # 并发方已抢到门(其 alerted_at 即为准):按冷却逻辑判定
@@ -374,7 +377,19 @@ def notify_incident(db: Session, user_id: int, kind: str, title: str, detail: st
     if not webhook:
         return False
     section, key = f"incident_{kind}", title[:80]
-    if not feishu_alert_gate(db, user_id, section, key, settings.feishu_alert_cooldown_hours, detail):
+    # 冷却门写在 SAVEPOINT 里:发送失败要"不烧冷却期"时只撤销这一行。
+    # 旧写法是整段 db.rollback()——监听轮第一条 commit 在收尾,一次飞书抖动
+    # 就能把本轮已采到的新文章全部抹掉(2026-09-26 第八轮审计 High)。
+    gate = HeldSavepoint(db)
+    try:
+        passed = feishu_alert_gate(db, user_id, section, key,
+                                   settings.feishu_alert_cooldown_hours, detail)
+    except Exception as exc:  # noqa: BLE001 - 冷却门写不进也不能伤及调用方数据
+        logger.warning("告警冷却门写入失败,跳过本次告警 %s:%s", key, exc)
+        gate.close(keep=False)
+        return False
+    if not passed:
+        gate.close(keep=False)
         return False
     message = f"🔴 {title}" + chr(10) + detail
     # 送达日志+一次重试(关键事件告警不应因瞬时抖动丢失;送达结果可审计)
@@ -390,14 +405,16 @@ def notify_incident(db: Session, user_id: int, kind: str, title: str, detail: st
         if sent:
             break
         time.sleep(1.5)
+    if not sent:
+        # 失败不烧冷却期(送达日志一并不写,与旧行为一致)
+        gate.close(keep=False)
+        return False
     from app.db.models import NotificationLog
+    gate.close(keep=True)
     db.add(NotificationLog(user_id=user_id, channel="feishu", section=kind,
-                           title=title[:255], ok=sent, attempts=attempts, error=last_err[:255]))
-    if sent:
-        db.commit()  # 发送成功才落冷却门
-        return True
-    db.rollback()  # 发送失败不烧冷却期(日志行一并回滚,避免半提交)
-    return False
+                           title=title[:255], ok=True, attempts=attempts, error=""))
+    db.commit()  # 发送成功才落冷却门
+    return True
 
 
 def _last_success_days(db: Session, uid: int, kind: str) -> int | None:

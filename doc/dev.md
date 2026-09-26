@@ -375,6 +375,22 @@ redian/
   公众号标识 = 文章页 `__biz`(`extract_article_meta` 免费直抓解析,对标号新增 `biz` 列)。
   源优先级:**平台(免费全量)→ 微信读书(cover 最新一篇 + 会话初期枚举近 3 天列表)→ dajiala(付费)**;同步在平台源下
   默认 10 页封顶(免费),全 seen 即停。上游错误 WeReadError401=账号失效/429=当日小黑屋。
+- **监听后处理在 SAVEPOINT 里(2026-09-26 第八轮审计)**:`run_wechat_listen` 的
+  `_enrich_new_articles`(回填盘链 → 即时采样 → 夸克/百度转存 → 共振 → 候选提取)整段包进
+  `app/db/tx.savepoint()`。它此前是裸调用,而内部多处兜底写 `session.rollback()`——`Session.rollback()`
+  撤销的是**整个外层事务**,所以一次转存异常会连带 `_record_run`/`_push_listen` 全部跳过:本轮
+  已采到的新文既不落库也不推飞书(员工端等于什么都没发生)。现在它炸了只撤销自己那半截写,
+  新文照常 commit + 推卡(标题回落原文)。**不要**用"提前 commit 新文"来救——那会造出
+  "已入库却从未推送"的新静默丢失路径(修复要加 `pushed_at` 列 = DB 迁移,留人工)。
+- **飞书告警的冷却门也攥在 SAVEPOINT 里**:同理,`notify_incident` / `_notify_burst` /
+  `feishu_alert_gate` 旧写法在"发送失败"或"并发撞唯一约束"时 `rollback()`,会把同事务里
+  尚未提交的业务数据(监听轮已付费采到的 ¥0.06/篇读数)一起抹掉。现在用
+  `HeldSavepoint` 两段式收尾:抢门→发送→成功 `close(keep=True)`+commit,失败只 `close(keep=False)`
+  撤掉那一行冷却门。`app/db/tx.py` 是这套包装的单一事实源。
+- **AI 解读也要过 `_md_safe`(2026-09-26)**:`_push_listen` 把文章标题/摘要喂给大模型,输出直接进
+  员工群卡片 → 它是**外部可控文本**(提示注入可让模型回一个 `[点我领取](钓鱼站)` 或
+  `<at user_id="all">`)。此前只有采集来的标题/摘要过 `feishu._md_safe`,`reading` 漏了;
+  现按行过 `_md_safe`(打散 `[]<>` 与反引号,保留换行排版)。
 
 ### 5.9 抖音热点·内容词趋势 `services/douhot.py` + `services/douhot_client.py`(独立数据源)
 

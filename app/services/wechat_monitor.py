@@ -10,12 +10,13 @@ import time
 from datetime import datetime, timedelta
 
 import requests
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
 from app.db.models import (FeishuAlert, User, WechatArticle, WechatBenchmark, WechatCandidate,
                            WechatPanLink, WechatRewrite, WechatTrafficSample)
+from app.db.tx import HeldSavepoint, savepoint
 from app.services.dajiala_client import DajialaClient, DajialaError, DajialaNoBalance
 from app.services.quark_transfer import QuarkAuthError, QuarkError, QuarkTransfer, extract_quark_urls
 from app.services.reader_platform_client import PlatformError, ReaderPlatformClient
@@ -782,10 +783,10 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
     if not rows:
         return replacements
     try:  # 先修"正文有链却抽不到"的历史行,让它们进得了下面的补转存队列
-        _backfill_pan_urls(session, user_id)
+        with savepoint(session):  # 失败只撤销这段回填,不能连累本轮已采的新文
+            _backfill_pan_urls(session, user_id)
     except Exception:  # noqa: BLE001 - 回填是锦上添花,不能拖垮本轮监听
         logger.exception("盘链列回填失败 user=%s", user_id)
-        session.rollback()
     # 采样兜底:调用方(listen 主循环)通常已备好 client;若为空,必须走 _dajiala_key
     # 而非 settings.dajiala_key 直取——同 2026-09-14 审计确立的租户隔离原则,
     # 否则普通用户的监听仍会白刷运营者余额。
@@ -826,9 +827,13 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
         # 排序按 id 升序=队头优先,所以**永久失败的必须当场出队**,否则几篇源已被封的死链
         # 年年霸占配额,后面真正能转的文章永远轮不到(2026-09-22 本机库实测:24 篇 09-15
         # 的文章卡在队头,一周没动过)。
+        # 入队还要再加一条"含夸克链":队列里只有夸克转存会消费(百度走自己的门控),
+        # 只带百度/UC/迅雷链的历史行既转不动也不落 my_pan_urls,等于**永久霸占队头**,
+        # 把每轮 8 个名额吃光,真正待转的夸克文再也轮不到(2026-09-26 第八轮审计 High)。
         try:
             backfill = [] if not run_backfill else session.scalars(select(WechatArticle).where(
                 WechatArticle.user_id == user_id, WechatArticle.pan_urls != "",
+                WechatArticle.pan_urls.like("%pan.quark.cn%"),
                 or_(WechatArticle.my_pan_urls.is_(None), WechatArticle.my_pan_urls == "")
             ).order_by(WechatArticle.id).limit(
                 max(1, int(getattr(settings, "pan_transfer_backfill_limit", 8) or 8)))).all()
@@ -840,7 +845,10 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
         transfer_rows = list(rows) + [x for x in backfill if id(x) not in row_ids]
         for r in transfer_rows:
             dead = False
-            for u in [x.strip() for x in (r.pan_urls or "").splitlines() if x.strip()][:3]:
+            # 只把夸克链交给夸克:UC/迅雷/百度链走识别与各自的转存门控,
+            # 送进 _parse_share 只会得到"无法解析夸克分享链接"的假失败日志。
+            for u in [x.strip() for x in (r.pan_urls or "").splitlines()
+                      if "pan.quark.cn" in x][:3]:
                 # ① 批内复用:本轮已转存过该盘链
                 if u in reused:
                     share_url, pwd = reused[u]
@@ -1315,8 +1323,17 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
             b.last_item_at = now
             new_rows.extend(_insert_new_articles(session, user_id, b, items, source="listen",
                                                  fetch_content=True, require_pan=False))
-    replacements = _enrich_new_articles(session, user_id, settings, new_rows, client,
-                                        allow_paid=use_dajiala)
+    # 后处理(回填/采样/转存/共振)整段关在保存点里:它炸了只撤销自己那半截写,
+    # 本轮已采到的新文照样 commit + 推飞书(回落原文)。此前它是裸调用,
+    # 一次转存异常会连带 `_record_run`/`_push_listen` 全部跳过(第八轮审计)。
+    replacements: dict[int, list[tuple[str, str, str]]] = {}
+    try:
+        with savepoint(session):
+            replacements = _enrich_new_articles(session, user_id, settings, new_rows, client,
+                                                allow_paid=use_dajiala)
+    except Exception:  # noqa: BLE001 - 转存炸了也要推(标题回落原文)
+        logger.exception("监听后处理失败 user=%s(本轮推送回落原文)", user_id)
+        replacements = {}
 
     session.commit()
 
@@ -1479,10 +1496,13 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
             reading = narrate_articles(settings.deepseek_base_url, settings.deepseek_api_key,
                                        settings.deepseek_model, ctx)
             if reading:
+                # LLM 输出同样是"外部可控文本":员工群卡片里不能原样塞 markdown 链接/
+                # `<at>`(提示注入 → 钓鱼链、@所有人)。逐行走 _md_safe,保留换行排版。
+                safe_reading = chr(10).join(_md_safe(line) for line in reading.splitlines())
                 ai_elements = [
                     {"tag": "hr"},
                     {"tag": "div", "text": {"tag": "lark_md",
-                        "content": "🤖 **AI 解读**" + chr(10) + reading[:1500]}},
+                        "content": "🤖 **AI 解读**" + chr(10) + safe_reading[:1500]}},
                 ]
         except Exception:  # noqa: BLE001 - 叙事失败不影响推送
             logger.exception("LLM 叙事失败 user=%s", user_id)
@@ -1794,8 +1814,12 @@ def _notify_burst(session: Session, user_id: int, settings: Settings, r: WechatA
     if not webhook:
         return False
     reason = f"增长{growth:.0f}%" if growth is not None else "首采超基线"
+    # 冷却门攥在 SAVEPOINT 里:发送失败只撤销这一行。旧写法 session.rollback()
+    # 会把本轮已付费采到的采样读数(¥0.06/篇,收尾才 commit)一起丢掉。
+    gate = HeldSavepoint(session)
     if not feishu_alert_gate(session, user_id, "focus_burst", str(r.id),
                              settings.focus_cooldown_hours, reason):
+        gate.close(keep=False)
         return False
     growth_txt = f"+{growth:.0f}%" if growth is not None else "超基线"
     base_txt = f" · 账号基线中位 {baseline}" if baseline else ""
@@ -1809,9 +1833,10 @@ def _notify_burst(session: Session, user_id: int, settings: Settings, r: WechatA
     lines.append(r.url)
     sent = FeishuClient(webhook, settings.feishu_secret).send(chr(10).join(lines))
     if sent:
+        gate.close(keep=True)
         session.commit()  # 发送成功才落冷却门
         return True
-    session.rollback()  # 发送失败不烧冷却门
+    gate.close(keep=False)  # 发送失败不烧冷却门(只撤这一行,采样读数留下)
     return False
 
 
@@ -1836,7 +1861,6 @@ def sample_traffic(session: Session, user_id: int, settings: Settings | None = N
     # 花钱,但单请求在同步 worker 里可跑几十分钟,几个并发即占满 FastAPI 线程池拖死全站。
     cap = max(1, int(settings.wechat_traffic_sample_limit or 30))
     limit = max(1, min(int(limit or cap), cap))
-    cutoff = datetime.now().timestamp() - settings.wechat_traffic_min_interval_hours * 3600
 
     now = datetime.now()
     young_cutoff = now - timedelta(hours=48)
@@ -1845,14 +1869,20 @@ def sample_traffic(session: Session, user_id: int, settings: Settings | None = N
         WechatArticle.url != "")
     if benchmark_id:
         q = q.where(WechatArticle.benchmark_id == benchmark_id)
-    candidates = session.scalars(q.order_by(WechatArticle.created_at.desc()).limit(limit * 5)).all()
-    # 逐篇按"文章年龄"决定最小采样间隔:48h 内新文 6h(密集捕捉早期增速),其余按设置(默认 24h)
-    rows = []
-    for r in candidates:
-        fresh = bool(r.created_at and r.created_at >= young_cutoff)
-        min_i = 6 * 3600 if fresh else settings.wechat_traffic_min_interval_hours * 3600
-        if r.traffic_at is None or (now - r.traffic_at).total_seconds() >= min_i:
-            rows.append(r)
+    # "轮不到"的旧文必须在 SQL 里筛掉:窗口只取 `created_at desc` 的前 limit*5 篇,
+    # 若冷却判定留在 Python 里做,81 号一次监听就能灌满这 150 篇的位置 →
+    # 窗口内全是"刚采过"的,再往下的旧文永远进不了候选,付费采样配额原地空转。
+    # 规则同旧逻辑:48h 内新文 6h 最小间隔,其余按 `wechat_traffic_min_interval_hours`。
+    fresh_due = now - timedelta(hours=6)
+    old_due = now - timedelta(hours=settings.wechat_traffic_min_interval_hours)
+    young = and_(WechatArticle.created_at.isnot(None), WechatArticle.created_at >= young_cutoff)
+    q = q.where(or_(WechatArticle.traffic_at.is_(None),
+                    and_(young, WechatArticle.traffic_at <= fresh_due),
+                    and_(or_(WechatArticle.created_at.is_(None),
+                             WechatArticle.created_at < young_cutoff),
+                         WechatArticle.traffic_at <= old_due)))
+    rows = list(session.scalars(
+        q.order_by(WechatArticle.created_at.desc()).limit(limit * 5)).all())
     # 排序:48h 内新文最优先(早期增速信号最值钱),其次没采过的,再按发现时间新→旧
     rows.sort(key=lambda r: (0 if (r.created_at and r.created_at >= young_cutoff) else 1,
                              r.traffic_at is not None,
