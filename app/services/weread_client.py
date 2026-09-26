@@ -22,9 +22,7 @@ requests.Session 的 cookie jar(domain=weread.qq.com),否则服务端按游客�
 """
 from __future__ import annotations
 
-import html as html_mod
 import json
-import re
 import threading
 import time
 from urllib.parse import quote
@@ -148,7 +146,11 @@ class WereadClient:
         return payload
 
     def mp_content(self, review_id: str) -> str:
-        """文章正文纯文本(微信读书转发的 HTML,#js_content 抽取)。失败返回空串。"""
+        """文章正文纯文本(微信读书转发的 HTML,#js_content 抽取),含正文超链接与「阅读原文」目标 URL。
+
+        失败/拿不到正文容器返回空串(旧实现回落到"整页去标签",把十几 KB 的 JS 当正文入库,
+        还把被风控伪装成"抓到了")。上限 20000 字符刻意压在 MySQL TEXT 列内。
+        """
         try:
             resp = requests.get(f"{BASE}/web/mp/content", params={"reviewId": review_id},
                                 timeout=self.timeout,
@@ -157,11 +159,16 @@ class WereadClient:
             return ""
         if resp.status_code != 200:
             return ""
-        m = re.search(r'<div[^>]*id="js_content"[^>]*>(.*)', resp.text or "", re.S)
-        body = m.group(1) if m else (resp.text or "")
-        body = re.sub(r"<[^>]+>", " ", body)
-        body = html_mod.unescape(body)
-        return re.sub(r"\s{2,}", " ", body).strip()[:100000]
+        from app.utils.html_text import article_body, html_to_text, original_link_url
+
+        page = resp.text or ""
+        body = article_body(page)
+        if not body:  # 转发页偶有非 js_content 版式:退到"去脚本 + 保留链接"的整页文本
+            body = html_to_text(page)
+        orig = original_link_url(page)
+        if orig and orig not in body:
+            body = (body + " " + orig).strip()
+        return body[:20000]
 
     def mp_articles(self, book_id: str, offset: int = 0, count: int = 20) -> dict:
         """公众号历史文章列表(含每篇 精确阅读/点赞)。

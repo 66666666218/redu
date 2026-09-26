@@ -104,6 +104,87 @@ def test_fetch_article_content_strips_html_and_detects_antibot(monkeypatch: pyte
     assert wechat_monitor.fetch_article_content("https://mp.weixin.qq.com/s/x") == ""
 
 
+# ---------------------------------------------------------------- 正文里的链抽取
+def test_fetch_article_content_keeps_anchor_href_and_original_link(monkeypatch) -> None:
+    """资源号把夸克链做成超链接锚文本("点此保存")或只放在「阅读原文」里时也要抽得到。
+
+    回归:旧实现 `re.sub(r"<[^>]+>", " ", html)` 把 <a href> 连同 URL 一起删了,
+    msg_source_url 也从来没解析 → 正文有链却永远识别不到,飞书卡上一片"—"。"""
+    class _Resp:
+        def __init__(self, status: int, text: str) -> None:
+            self.status_code, self.text = status, text
+
+    page = ('<html><script>var msg_source_url = "https://pan.quark.cn/s/OnlyInReadOrig";'
+            'document.title=""</script>'
+            '<div id="js_content"><p>复制下面链接保存</p>'
+            '<a href="https://pan.quark.cn/s/Anchored">点此保存</a></div><script>x</script></html>')
+    monkeypatch.setattr(wechat_monitor.requests, "get",
+                        lambda url, timeout, headers, allow_redirects=True: _Resp(200, page))
+    out = wechat_monitor.fetch_article_content("https://mp.weixin.qq.com/s/y")
+    assert "https://pan.quark.cn/s/Anchored" in out      # 锚文本后面的真链保住了
+    assert "https://pan.quark.cn/s/OnlyInReadOrig" in out  # 阅读原文目标
+    assert "document.title" not in out                   # 脚本整块丢掉,不再当正文
+    assert wechat_monitor._extract_pan_urls("", out) == ["https://pan.quark.cn/s/Anchored",
+                                                          "https://pan.quark.cn/s/OnlyInReadOrig"]
+
+
+def test_fetch_article_content_rejects_js_shell_page(monkeypatch) -> None:
+    """出口 IP 被微信挡时返回的是没有 #js_content 的 JS 壳页:判失败,不把十几 KB 脚本入库。"""
+    class _Resp:
+        def __init__(self, status: int, text: str) -> None:
+            self.status_code, self.text = status, text
+
+    shell = ("<html><script>(() => { const ua = navigator.userAgent;"
+             "document.title = '微信公众平台'; })(); var PAGE_JS = 1</script></html>")
+    monkeypatch.setattr(wechat_monitor.requests, "get",
+                        lambda url, timeout, headers, allow_redirects=True: _Resp(200, shell))
+    assert wechat_monitor.fetch_article_content("https://mp.weixin.qq.com/s/z") == ""
+
+
+def test_backfill_pan_urls_repairs_body_links_missed_at_insert(session) -> None:
+    """早于百度提取上线入库的文章:正文里 42 条百度链,`pan_urls` 却为空 → 永远不进补转存队列。
+
+    回填后必须:补上 pan_urls/pan_types、写归一化表,才会被每轮补转存队列捞到换我方链。"""
+    had = WechatArticle(user_id=1, title="网盘资料分享(可自取)", author="号A",
+                        url="https://mp.weixin.qq.com/s/had", source="listen", pan_types="百度网盘",
+                        content="链接：https://pan.baidu.com/s/1TgLPOEpzMg4neKwOsg8lUQ?pwd=6666 "
+                                "链接：https://pan.quark.cn/s/abc123")
+    blank = WechatArticle(user_id=1, title="纯资讯文", author="号B",
+                          url="https://mp.weixin.qq.com/s/blank", source="listen",
+                          content="北京骑手注意了,白牌电动车开始换外卖绿牌。")
+    other = WechatArticle(user_id=2, title="别租户", author="号C",
+                          url="https://mp.weixin.qq.com/s/other", source="listen",
+                          content="链接:https://pan.baidu.com/s/1zzzzzzzzzzzzzzzzzzzzzzz")
+    session.add_all([had, blank, other])
+    session.commit()
+
+    assert wechat_monitor._backfill_pan_urls(session, 1) == 1
+    assert "pan.baidu.com/s/1TgLPOEpzMg4neKwOsg8lUQ" in had.pan_urls
+    assert "pan.quark.cn/s/abc123" in had.pan_urls
+    assert set(had.pan_types.split(",")) == {"百度网盘", "夸克网盘"}
+    assert {p.pan_url for p in session.scalars(select(WechatPanLink)).all()} == {
+        "https://pan.baidu.com/s/1TgLPOEpzMg4neKwOsg8lUQ",   # 归一化表按"文章×链接"建行
+        "https://pan.quark.cn/s/abc123"}
+    assert blank.pan_urls == "" and other.pan_urls == ""    # 无链行不动、跨租户不动
+    assert wechat_monitor._backfill_pan_urls(session, 1) == 0  # 幂等:第二轮不再重复回填
+
+
+def test_weread_mp_content_extracts_links_from_forwarded_page(monkeypatch) -> None:
+    """微信读书转发页同样要保住 <a href> 与「阅读原文」,否则免费源的链永远抽不到。"""
+    from app.services.weread_client import WereadClient
+
+    class _Resp:
+        status_code = 200
+        text = ('<html><script>var msg_source_url = "https://pan.quark.cn/s/ORIG"</script>'
+                '<div id="js_content"><a href="https://pan.quark.cn/s/ANCH">点这里</a></div>'
+                '</body></html>')
+
+    monkeypatch.setattr("app.services.weread_client.requests.get", lambda *a, **kw: _Resp())
+    out = WereadClient("ck=1").mp_content("rev1")
+    assert "https://pan.quark.cn/s/ANCH" in out and "https://pan.quark.cn/s/ORIG" in out
+    assert "msg_source_url" not in out   # 脚本不再混进正文
+
+
 # ---------------------------------------------------------------- 加号
 def test_add_benchmark_free_and_dedupe(session, settings: Settings) -> None:
     st = _settings(dajiala_key="")  # 未配 key 也允许加号

@@ -38,8 +38,13 @@ PAN_PATTERNS = {
     "迅雷云盘": re.compile(r"pan\.xunlei\.com/s/[0-9a-zA-Z]+"),
 }
 # 标题粗筛词:命中才值得花一次正文自抓(标题几乎必带盘商词/资源词)
+# 2026-09-26 补齐"引流词":飞书卡上一片"—"的根因是这些号把链放在正文/阅读原文里,
+# 而标题写的是"入口/地址/自取/模板"而不是"网盘",旧词表直接把它们挡在抓取之外。
 TITLE_HINTS = ("夸克", "百度网盘", "百度云", "UC网盘", "UC盘", "迅雷", "阿里云盘",
-               "网盘", "资源", "全套", "合集", "分享", "链接", "更新")
+               "网盘", "资源", "全套", "合集", "分享", "链接", "更新",
+               "入口", "地址", "下载", "获取", "自取", "领取", "复制", "保存", "直达",
+               "素材", "模板", "线稿", "电子版", "答案", "真题", "教程", "壁纸", "表情包",
+               "pdf", "PDF")
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36")
 
@@ -86,9 +91,9 @@ def _public_get(url: str, timeout: int):
 
 
 def fetch_article_content(url: str, timeout: int = 15) -> str:
-    """免费自抓微信文章正文(纯文本)。命中风控("环境异常"验证页)返回空串。
+    """免费自抓微信文章正文(纯文本,含正文超链接与「阅读原文」的目标 URL)。
 
-    文章页是公开网页;数据中心 IP 可能被"环境异常"拦截——调用方应容忍空结果,
+    命中风控("环境异常"验证页)或拿不到正文容器时返回空串——调用方应容忍空结果,
     需要兜底时才走 dajiala article_detail(¥0.01/次)。
     """
     if not url:
@@ -103,14 +108,23 @@ def fetch_article_content(url: str, timeout: int = 15) -> str:
         return ""
     if resp.status_code != 200 or "环境异常" in text:
         return ""
-    m = re.search(r'<div[^>]*id="js_content"[^>]*>(.*?)</div>\s*<script', text, re.S)
-    body = m.group(1) if m else text
-    body = re.sub(r"<[^>]+>", " ", body)
-    body = html_mod.unescape(body)
-    # 20000 字符 ≈ 60KB utf8mb4,落在 MySQL TEXT(65535 字节)列上限内。
-    # 旧 [:100000] 会在监听/同步/改写落库时打爆 WechatArticle.content TEXT → DataError 1406;
-    # 尤其是 AI 改写端点写回 row.content 时,已在 DeepSeek 计费之后才 500、改写稿一并回滚丢失。
-    return re.sub(r"\s{2,}", " ", body).strip()[:20000]
+    body = _article_text_with_links(text)
+    if not body:
+        logger.info("正文容器缺失(疑似风控壳页),不入库整页脚本:%s", url[:80])
+    return body
+
+
+def _article_text_with_links(page_html: str, limit: int = 20000) -> str:
+    """正文文本 + 「阅读原文」外链;容器缺失返回空串。"""
+    from app.utils.html_text import article_body, original_link_url
+
+    body = article_body(page_html, limit=limit)
+    if not body:
+        return ""
+    orig = original_link_url(page_html)
+    if orig and orig not in body:
+        body = (body + " " + orig).strip()[:limit]
+    return body
 
 
 def extract_article_meta(url: str, timeout: int = 15) -> dict:
@@ -645,6 +659,49 @@ def weread_refresh_tick(settings: Settings | None = None) -> int:
 
 
 # ---------------------------------------------------------------- 监听
+def _extract_pan_urls(title: str, content: str) -> list[str]:
+    """标题+正文里的夸克/百度分享链(单一事实源:入库时抽一次,历史回填也用同一套)。"""
+    from app.services.baidupan_transfer import extract_baidu_urls
+
+    blob = f"{title or ''} {content or ''}"
+    return extract_quark_urls(blob) + extract_baidu_urls(blob)
+
+
+def _backfill_pan_urls(session: Session, user_id: int, limit: int = 100) -> int:
+    """回填盘链列:正文里明明有链、`pan_urls` 却是空的文章。
+
+    成因是"百度链提取"晚于这些文章入库(那时只抽夸克),于是它们**永远不进补转存队列**
+    (`pan_urls != ""` 是入队条件),飞书卡片上就永远是一根"—"。
+    只扫正文含盘链特征的行(纯 SQL 谓词,真没链的文章不会被反复载入),按租户隔离,
+    重算 pan_urls/pan_types 并补归一化表;下一轮补转存队列自然接手。返回修复篇数。
+    """
+    cand = session.scalars(select(WechatArticle).where(
+        WechatArticle.user_id == user_id,
+        or_(WechatArticle.pan_urls.is_(None), WechatArticle.pan_urls == ""),
+        or_(WechatArticle.content.like("%pan.quark.cn/s/%"),
+            WechatArticle.content.like("%pan.baidu.com/s/%"))
+    ).order_by(WechatArticle.id).limit(max(1, int(limit)))).all()
+    fixed = 0
+    for r in cand:
+        urls = _extract_pan_urls(r.title, r.content or "")
+        have = [x.strip() for x in (r.pan_urls or "").splitlines() if x.strip()]
+        new = [u for u in urls if u not in have]
+        if not new:
+            continue
+        r.pan_urls = chr(10).join(have + new)[:2000]
+        merged = detect_pan_types(f"{r.title} {r.content or ''}")
+        types = [t for t in (r.pan_types or "").split(",") if t.strip()]
+        r.pan_types = ",".join(types + [t for t in merged if t not in types])[:128]
+        for u in new:  # 归一化表按"文章×链接"建行,与 _insert_new_articles 一致
+            session.add(WechatPanLink(user_id=r.user_id, article_id=r.id, pan_url=u[:500],
+                                      created_at=r.created_at or datetime.now()))
+        fixed += 1
+    if fixed:
+        session.commit()
+        logger.info("回填盘链列 %d 篇(正文有链但过去没抽到)", fixed)
+    return fixed
+
+
 def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchmark,
                          items: list[dict], source: str, fetch_content: bool = False,
                          content_resolver=None, require_pan: bool = True) -> list[WechatArticle]:
@@ -673,8 +730,7 @@ def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchm
                 content = fetch_article_content(url)
             if content:  # 自抓成功 → 用正文的链接判定覆盖标题的盘名猜测
                 types = detect_pan_types(content) or types
-        from app.services.baidupan_transfer import extract_baidu_urls
-        pan_urls = extract_quark_urls(f'{title} {content}') + extract_baidu_urls(content or "")
+        pan_urls = _extract_pan_urls(title, content)
         if require_pan and not pan_urls and not types:
             continue  # 无盘链 → 不监控
         quality = assess_quality(content, pan_urls, preset_read)
@@ -725,6 +781,11 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
     replacements: dict[int, list[tuple[str, str, str]]] = {}
     if not rows:
         return replacements
+    try:  # 先修"正文有链却抽不到"的历史行,让它们进得了下面的补转存队列
+        _backfill_pan_urls(session, user_id)
+    except Exception:  # noqa: BLE001 - 回填是锦上添花,不能拖垮本轮监听
+        logger.exception("盘链列回填失败 user=%s", user_id)
+        session.rollback()
     # 采样兜底:调用方(listen 主循环)通常已备好 client;若为空,必须走 _dajiala_key
     # 而非 settings.dajiala_key 直取——同 2026-09-14 审计确立的租户隔离原则,
     # 否则普通用户的监听仍会白刷运营者余额。
