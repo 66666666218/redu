@@ -771,6 +771,10 @@
 - 行为:每个启用中的对标号查一次"当天发文"(`post_condition`,¥0.14/号)→ 新文按链接去重入库
   (`wechat_articles.source='listen'`)→ 标题含网盘词的**免费自抓正文**,按四家盘链正则
   (pan.quark.cn / pan.baidu.com / drive.uc.cn / pan.xunlei.com)标记 `pan_types` → 新文推公众号专属飞书群
+- **正文取哪一路**(决定网盘列是不是 `—`):微信读书的 cover/列表条目**自带 `reviewId`**,监听先直抓
+  `mp.weixin.qq.com`,**返回空(风控/JS 壳页)时改用本篇 `reviewId` 走微信读书转发页** `mp_content`
+  (与「同步文章」同源,每次过一次 2s 类级节流);直抓成功则不追打。两路都拿不到正文 → 认不出盘链 →
+  卡片 `—`(文章照样推,见 §4d 运维排查)
 - 余额保护:开始前查余额(免费),低于 `DAJIALA_MIN_BALANCE` 时**仅禁用 dajiala 付费源**
   (微信读书/读书平台等免费源照常监听,响应带 `dajiala_skipped:"low_balance"`+`balance`;
   监听中途欠费同样只停付费,运行记录 detail 记 `dajiala_off(...)`)

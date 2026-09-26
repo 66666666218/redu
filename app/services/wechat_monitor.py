@@ -40,6 +40,9 @@ PAN_PATTERNS = {
     "UC网盘": re.compile(r"drive\.uc\.cn/s/[0-9a-zA-Z]+"),
     "迅雷云盘": re.compile(r"pan\.xunlei\.com/s/[0-9a-zA-Z]+"),
 }
+# 我方转存成功后写进 `my_pan_urls` 的链:只有夸克和百度会转(UC/迅雷仅识别)。
+# 行内还常跟着 " (提取码 xxxx)"、" [百度]"、" (自分享)" 这类人看的标记,取链接时要切掉。
+_MY_LINK_RE = re.compile(r"https?://pan\.quark\.cn/s/[0-9A-Za-z]+|https?://pan\.baidu\.com/s/[0-9A-Za-z_\-]+")
 # 标题粗筛词:命中才值得花一次正文自抓(标题几乎必带盘商词/资源词)
 # 2026-09-26 补齐"引流词":飞书卡上一片"—"的根因是这些号把链放在正文/阅读原文里,
 # 而标题写的是"入口/地址/自取/模板"而不是"网盘",旧词表直接把它们挡在抓取之外。
@@ -782,13 +785,17 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
     返回 {article_id: [(原链, 我的链, 提取码)]} 供飞书推送;失败回落原链接,绝不阻塞监听。
     """
     replacements: dict[int, list[tuple[str, str, str]]] = {}
-    if not rows:
-        return replacements
     try:  # 先修"正文有链却抽不到"的历史行,让它们进得了下面的补转存队列
+        # 回填不能挂在"本轮采到了新文"上:一轮没新文就整段早退,存量死账(本机库实测 27 篇
+        # 正文里明明写着百度链、pan_urls 却空着)永远等不到修,飞书卡片上就永远是一根"—"。
         with savepoint(session):  # 失败只撤销这段回填,不能连累本轮已采的新文
             _backfill_pan_urls(session, user_id)
     except Exception:  # noqa: BLE001 - 回填是锦上添花,不能拖垮本轮监听
         logger.exception("盘链列回填失败 user=%s", user_id)
+    if not rows:
+        # 空轮回填完就走:补转存队列要打的外呼接口留给有新文的轮次,免得长期没新文的号
+        # 也把每轮的 pan_transfer_backfill_limit 个名额平白用掉。
+        return replacements
     # 采样兜底:调用方(listen 主循环)通常已备好 client;若为空,必须走 _dajiala_key
     # 而非 settings.dajiala_key 直取——同 2026-09-14 审计确立的租户隔离原则,
     # 否则普通用户的监听仍会白刷运营者余额。
@@ -900,7 +907,9 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                                 # 原链即我方链接,直接收录,推送可点开自己的资源;
                                 # my_pan_urls 落值后补转存兜底也不再重试
                                 mine = [x for x in (r.my_pan_urls or "").splitlines() if x.strip()]
-                                mine.append(u + "(自分享)")
+                                # 标记与链接之间必须留空格:回落解析按"链接本体"取串,
+                                # 粘着写会把 `(自分享)` 一起当成 URL 的一部分,链接点开即坏。
+                                mine.append(u + " (自分享)")
                                 r.my_pan_urls = chr(10).join(mine)[:2000]
                                 replacements.setdefault(r.id, []).append((u, u, ""))
                                 logger.info("盘链为自己分享,直接采用: %s", u[:60])
@@ -1151,8 +1160,8 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
     item = weread.latest_article(b.weread_book_id)
     cover_ok = bool(item and item.get("url"))
     if cover_ok:
-        items.append({"title": item["title"], "url": item["url"],
-                      "publish_at": None})
+        items.append({"title": item["title"], "url": item["url"], "publish_at": None,
+                      "review_id": str(item.get("review_id") or "")})
     # 备选:mp/articles 近期列表(含精确阅读/点赞;被限权时静默跳过)
     listed = False
     try:
@@ -1164,17 +1173,30 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
                 continue
             items.append({"title": it["title"], "url": build_mp_url(it["original_id"]),
                           "read_num": it["read_num"], "like_num": it["like_num"],
-                          "publish_at": pub})
+                          "publish_at": pub, "review_id": str(it.get("review_id") or "")})
         listed = True
     except Exception as exc:  # noqa: BLE001 - 限权/废弃不影响 cover 主路径
         # -2041 是新版微信读书对该接口的永久限权,每进程只记一次,避免每账号刷屏
         if not getattr(_weread_collect, "_mp_articles_warned", False):
             _weread_collect._mp_articles_warned = True
             logger.warning("mp/articles 不可用(%s),全部账号仅用 cover 最新一篇", exc)
+    # 正文:先直抓 mp.weixin.qq.com(不占微信读书配额),**抓空了再用这篇的 reviewId
+    # 走微信读书转发页**。此前这里只传 fetch_content=True,把 cover/列表白拿的 reviewId 丢了,
+    # 于是直抓被风控的那 26% 正文永远为空 → 盘链认不出 → 飞书卡片整片"—"而员工以为号没发资源
+    # (本机库实测 369 篇里 97 篇正文空、97 篇全部无盘链;「同步文章」走 mp_content 就没这问题)。
+    rid_of = {it["url"]: it["review_id"] for it in items if it.get("review_id")}
+
+    def _resolve(title: str, url: str = "") -> str:
+        body = fetch_article_content(url)
+        if body:
+            return body
+        rid = rid_of.get(url) or ""
+        return weread.mp_content(rid) if rid else ""
+
     # require_pan=False:不再丢弃无盘链文——"标题不含网盘词"≠"没价值",
     # 此前这道闸把 15 个对标号 10 天的新文全部静默丢弃(用户看到"停更在 9.7"的根因)
     got = _insert_new_articles(session, user_id, b, items, source="listen",
-                               fetch_content=True, require_pan=False)
+                               content_resolver=_resolve, require_pan=False)
     if stats is not None:
         key = "weread_list_ok" if listed else ("weread_list_off_new" if got else "weread_list_off")
         stats[key] = stats.get(key, 0) + 1
@@ -1531,6 +1553,22 @@ def repush_unpushed(session: Session, user_id: int, settings: Settings | None = 
     return pushed
 
 
+def _my_pan_link_from_history(my_pan_urls: str) -> tuple[str, str]:
+    """从已持久化的 `my_pan_urls` 里取第一条可用我方链 → (干净 URL, 提取码),没有给 ("", "")。
+
+    过去这里写死 `startswith("https://pan.quark.cn/s/")`,只认夸克;而百度转存成功落库的是
+    `https://pan.baidu.com/s/xxx (提取码 abcd) [百度]` —— 于是**非本轮的卡片**(⏰补推、
+    同步重推)上百度文一律退回公众号原文,网盘列却还标着盘商名,员工点开才发现是文章。
+    用盘链正则取 URL 本体,顺带把 `(自分享)`/`[百度]`/提取码这些附属标记留在外面。
+    """
+    for line in (my_pan_urls or "").splitlines():
+        m = _MY_LINK_RE.search(line)
+        if m:
+            c = re.search(r"提取码\s*([0-9A-Za-z]{4})", line)
+            return m.group(0), (c.group(1) if c else "")
+    return "", ""
+
+
 def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[WechatArticle],
                  replacements: dict[int, list[tuple[str, str, str]]] | None = None,
                  repush: bool = False) -> int:
@@ -1584,13 +1622,9 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
         else:
             # 只展示我方网盘链接(本轮转存链 > 历史我方链);绝不回落到别人的盘链——
             # 未转存时点标题打开公众号原文。历史 my_pan_urls 常自带提取码,拆出来明文显示。
-            cand = next((x.strip() for x in (r.my_pan_urls or "").splitlines()
-                         if x.strip().startswith("https://pan.quark.cn/s/")), "")
-            if cand:
+            link, code = _my_pan_link_from_history(r.my_pan_urls)
+            if link:
                 my_link = True
-                m = re.search(r"(?:提取码\s*([0-9A-Za-z]{4}))", cand)
-                link = cand.split(" (提取码")[0].strip()
-                code = m.group(1) if m else ""
             else:
                 link = r.url
         # 重复资源标记: 同盘链已被其他文章推过 → 🔥N(同行都在发的确认级资源)

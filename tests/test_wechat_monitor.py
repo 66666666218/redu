@@ -746,6 +746,9 @@ def test_listen_auto_renews_and_retries(session, monkeypatch: pytest.MonkeyPatch
                            "readNum": 100, "likeNum": 5},
                 "reviewId": book_id + "_r0"}, "createTime": 1788800000}]}], "synckey": 1}
 
+        def mp_content(self, review_id: str) -> str:
+            return ""
+
     monkeypatch.setattr(wechat_monitor, "WereadClient", _Flaky)
     daj = FakeClient()
     out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), client=daj, weread=None)
@@ -1283,6 +1286,9 @@ def test_pan_links_backfill_legacy_articles(session, monkeypatch: pytest.MonkeyP
             return {"title": "夸克网盘资源合集 https://pan.quark.cn/s/abc123", "url": "https://mp.weixin.qq.com/s/new",
                     "review_id": "MP_WXS_1_r1", "digest": "", "name": "号A"}
 
+        def mp_content(self, review_id: str) -> str:
+            return ""
+
         def mp_articles(self, book_id, offset=0, count=20):
             return {"reviews": [{"createTime": 1788800000, "subReviews": [{"review": {
                 "mpInfo": {"title": "夸克网盘资源合集 https://pan.quark.cn/s/abc123", "originalId": "new_id",
@@ -1537,6 +1543,9 @@ def test_pan_selfshare_41017_adopted_as_own_link(session, monkeypatch) -> None:
     reps = wechat_monitor._enrich_new_articles(session, 1, st, [b], client=None)
     assert reps[b.id] == [("https://pan.quark.cn/s/ourshare", "https://pan.quark.cn/s/ourshare", "")]
     assert "https://pan.quark.cn/s/ourshare" in b.my_pan_urls  # 已落值 → 补转存不再重试
+    # 标记与链接之间必须有空格:回落解析按"链接本体"取串,粘着写会把标记当成 URL 的一部分
+    assert b.my_pan_urls.strip() == "https://pan.quark.cn/s/ourshare (自分享)"
+    assert wechat_monitor._my_pan_link_from_history(b.my_pan_urls)[0] == "https://pan.quark.cn/s/ourshare"
 
 
 # ---- 百度网盘转存/换链(门控独立 + 提取码解析 + 租户隔离) ----
@@ -2385,9 +2394,13 @@ def test_listen_exposes_unenumerable_accounts_and_alerts(session, monkeypatch) -
     assert out["new"] == 2 and out["weread_list"] == {"weread_list_off_new": 2}
     run = session.scalars(select(RunRecord).where(RunRecord.kind == "wechat_listen")).first()
     assert "weread_list(ok=0 off=0 off_with_new=2)" in run.detail
-    assert len(alerts) == 1 and alerts[0][2] == "⚠️ 微信读书只能拿到最新一篇,同日其它篇可能漏推"
-    assert "列不出却采到新文的号:2" in alerts[0][3]  # 数字放正文,标题稳定才冷却去重有效
-    assert "wewe-rss" in alerts[0][3] and "biz" in alerts[0][3]  # 给出可执行的根治路径
+    alert = next((a for a in alerts if a[2].startswith("⚠️ 微信读书")), None)
+    assert alert is not None and alert[2] == "⚠️ 微信读书只能拿到最新一篇,同日其它篇可能漏推"
+    assert "列不出却采到新文的号:2" in alert[3]  # 数字放正文,标题稳定才冷却去重有效
+    assert "wewe-rss" in alert[3] and "biz" in alert[3]  # 给出可执行的根治路径
+    # cover 的正文兜住了 → 盘链被认出,于是"有链却没 Cookie 转存"也必须点名(修 1 之后这两篇
+    # 不再是卡片上的一根"—");没转存可解释,静默不可接受。
+    assert any("缺夸克 Cookie" in a[2] for a in alerts)
 
 
 def test_listen_silent_when_list_enumerable(session, monkeypatch) -> None:
@@ -3070,3 +3083,125 @@ def test_listen_does_not_mark_quiet_when_source_cannot_answer(session, monkeypat
     assert out["new"] == 0
     b = session.scalars(select(WechatBenchmark)).one()
     assert b.miss_count == 3                       # 原样不动:既不加也不清零
+
+
+# ------------------------------------------------------- 盘链识别:正文兜底 / 回填 / 卡片回落
+
+_LIST_OFF = wechat_monitor.WereadError("微信读书接口返回错误(-2041):请求频率过高")
+
+
+def _cover(title: str, url: str) -> dict:
+    """微信读书 cover 的现实形状(reviewId 是这篇的正文入口)。"""
+    rid = f"MP_WXS_1_{url.rsplit('/', 1)[-1]}"
+    return {"title": title, "url": url, "review_id": rid, "digest": ""}
+
+
+def _weread_listen_scene(session, monkeypatch, fake, direct_content=None) -> list[dict]:
+    """搭好"单个微信读书对标号"的监听现场(可选:直抓正文的固定返回),返回收到的卡片列表。"""
+    monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: fake)
+    if direct_content is not None:
+        monkeypatch.setattr(wechat_monitor, "fetch_article_content",
+                            lambda url, timeout=15: direct_content)
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    session.add(WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1", anchor_url=""))
+    session.commit()
+    cards: list[dict] = []
+    _fake_feishu(monkeypatch, cards)
+    return cards
+
+
+def test_listen_falls_back_to_weread_content_when_direct_fetch_blocked(session, monkeypatch) -> None:
+    """直抓被风控(正文空)时,用这篇白拿的 reviewId 走微信读书转发页,盘链照样认出来。
+
+    回归:监听曾把 cover/mp_articles 返回的 reviewId 丢掉,只靠 mp.weixin.qq.com 直抓;
+    本机库实测 369 篇里 97 篇正文为空、97 篇全部无盘链 → 飞书卡片整片"—",员工以为号没发资源。
+    """
+    fake = FakeWeread(cover=_cover("驾考500题(电子版)", "https://mp.weixin.qq.com/s/b1"),
+                      content="链接:https://pan.quark.cn/s/deadbeef01 提取码:1234",
+                      list_error=_LIST_OFF)
+    cards = _weread_listen_scene(session, monkeypatch, fake, direct_content="")
+
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""))
+    assert out["new"] == 1
+    art = session.scalars(select(WechatArticle)).one()
+    assert "pan.quark.cn/s/deadbeef01" in art.content
+    assert art.pan_urls.strip() == "https://pan.quark.cn/s/deadbeef01"
+    assert art.pan_types == "夸克网盘"
+    assert ("content", "MP_WXS_1_b1") in fake.calls
+    blob = str(cards)
+    assert "⏳待转存夸克网盘" in blob        # 网盘列说清"这是资源、只是还没转存",不再一根"—"
+
+
+def test_listen_skips_weread_content_when_direct_fetch_works(session, monkeypatch) -> None:
+    """直抓成功就不追打转发页:每条正文都要过一次微信读书 2s 节流,白送的风控暴露不要。"""
+    fake = FakeWeread(cover=_cover("资源文", "https://mp.weixin.qq.com/s/b2"),
+                      content="https://pan.quark.cn/s/neverused", list_error=_LIST_OFF)
+    _weread_listen_scene(session, monkeypatch, fake,
+                         direct_content="直抓到的 https://pan.quark.cn/s/direct1")
+
+    assert wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""))["new"] == 1
+    art = session.scalars(select(WechatArticle)).one()
+    assert art.pan_urls.strip() == "https://pan.quark.cn/s/direct1"
+    assert not [c for c in fake.calls if c[0] == "content"]
+
+
+def test_quiet_listen_round_still_backfills_pan_urls(session, monkeypatch) -> None:
+    """一轮没采到新文也要做盘链回填:否则存量死账等不到有新文的那天。
+
+    回归:`if not rows: return` 曾挡在回填前面,本机库 27 篇"正文里明明有百度链、pan_urls
+    却空着"的文章因此永远进不了补转存队列,卡片上永远是"—"。
+    """
+    legacy = WechatArticle(user_id=1, title="网盘资料分享", author="号A", read_num=0,
+                           url="https://mp.weixin.qq.com/s/legacy", source="listen",
+                           content="链接:https://pan.baidu.com/s/1AbCdEf 提取码:9999",
+                           pan_types="百度网盘", pan_urls="")
+    session.add(legacy)
+    _weread_listen_scene(session, monkeypatch, FakeWeread(cover=None, list_error=_LIST_OFF))
+
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""))
+    assert out["new"] == 0                              # 空轮
+    session.refresh(legacy)
+    assert legacy.pan_urls.strip() == "https://pan.baidu.com/s/1AbCdEf"
+    assert legacy.my_pan_urls in (None, "")             # 空轮回填完就走,转存留给有新文的轮次
+
+
+def test_repush_card_uses_history_baidu_link(session, monkeypatch) -> None:
+    """补推/重推的卡片也要用历史我方百度链:过去只认夸克,百度文白退回公众号原文。"""
+    import json
+
+    art = WechatArticle(user_id=1, title="考公资料合集", author="号A", read_num=0,
+                        url="https://mp.weixin.qq.com/s/bd", source="listen",
+                        pan_urls="https://pan.baidu.com/s/1Src", pan_types="百度网盘",
+                        my_pan_urls="https://pan.baidu.com/s/1MineDoc (提取码 8888) [百度]")
+    session.add(art)
+    session.commit()
+    cards: list[dict] = []
+    _fake_feishu(monkeypatch, cards)
+
+    wechat_monitor._push_listen(session, 1, _settings(), [art], replacements={})
+    blob = json.dumps(cards, ensure_ascii=False)
+    assert "pan.baidu.com/s/1MineDoc" in blob          # 点进去是我方链
+    assert "🔑8888" in blob
+    assert "🔴百度网盘" in blob
+    assert "mp.weixin.qq.com/s/bd" not in blob         # 不再回落原文
+
+
+def test_self_share_marker_stays_out_of_href(session, monkeypatch) -> None:
+    """`my_pan_urls` 里的 (自分享) 标记不能进了链接:粘着写会让链接点不开。"""
+    art = WechatArticle(user_id=1, title="搬运我们的资源文", author="号A", read_num=0,
+                        url="https://mp.weixin.qq.com/s/ss", source="listen",
+                        pan_urls="https://pan.quark.cn/s/SELF", pan_types="夸克网盘",
+                        my_pan_urls="https://pan.quark.cn/s/SELF (自分享)")
+    link, code = wechat_monitor._my_pan_link_from_history(art.my_pan_urls)
+    assert link == "https://pan.quark.cn/s/SELF" and code == ""
+
+    cards: list[dict] = []
+    _fake_feishu(monkeypatch, cards)
+    session.add(art)
+    session.commit()
+    wechat_monitor._push_listen(session, 1, _settings(), [art], replacements={})
+    blob = str(cards)
+    # markdown 里 `[标题](URL)` 的 URL 到 `)` 为止:旧实现把标记留在串里 → 点开创盘打不开
+    assert "https://pan.quark.cn/s/SELF)" in blob
+    assert "自分享)" not in blob
+    assert "🔴夸克网盘" in blob
