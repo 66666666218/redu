@@ -1282,7 +1282,7 @@ def _is_weread_quota_error(exc: BaseException) -> bool:
 
 def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
                     session: Session, stats: dict | None = None,
-                    breaker: dict | None = None
+                    breaker: dict | None = None, shelf_ts: str | int | None = None
                     ) -> tuple[list[WechatArticle], bool]:
     """微信读书单号采集:**cover 最新一篇(稳定可用)→ mp/articles 列表(可选,常被限权)。
 
@@ -1292,6 +1292,9 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
     这正是"近 24h 必须全推"的唯一真实缺口;列表可用时该缺口不存在。
     `stats` 记账可枚举性(见调用方),不可枚举又采到新文时必须暴露给运维,不能假装全覆盖。
     近3天过滤;阅读/点赞以 cover/mp_articles 自带值为准(免费)。
+    `shelf_ts` = 书架粗筛拿到的 lastChapterCreateTime:cover 文章就是该号最新一篇,
+    书架时间戳即它的发布时间——此前 cover 路径 publish_at 恒空,卡片时效/补推窗口/
+    采样窗口全都吃不到,现在每轮监听顺手补上(2026-09-27)。
 
     第二个返回值 = **源这一轮有没有正面回答过这个号**(cover 给出一篇可看的文 / 列表枚举成功)。
     调用方据此决定 `miss_count` 加不加:+1 的含义是"确认当天没发文",
@@ -1302,11 +1305,12 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
 
     cutoff = datetime.now() - timedelta(days=3)
     items = []
-    # 主路径:cover 最新一篇(始终可用)
+    # 主路径:cover 最新一篇(始终可用);发布时间用书架时间戳盖(封面文=最新一篇)
     item = weread.latest_article(b.weread_book_id)
     cover_ok = bool(item and item.get("url"))
     if cover_ok:
-        items.append({"title": item["title"], "url": item["url"], "publish_at": None,
+        items.append({"title": item["title"], "url": item["url"],
+                      "publish_at": _shelf_ts_to_dt(shelf_ts),
                       "review_id": str(item.get("review_id") or "")})
     # 备选:mp/articles 近期列表(含精确阅读/点赞;被限权时静默跳过)
     # ⚠️ 这个接口是**稀缺额度**:一轮 81 个号各问一次就是 81 次,微信读书按会话/IP 记账,
@@ -1436,6 +1440,17 @@ def _save_shelf_marks(session: Session, user_id: int, updates: dict[str, str]) -
         row.value = val
         row.updated_at = datetime.now()
     return len(updates)
+
+
+def _shelf_ts_to_dt(value) -> datetime | None:
+    """书架 lastChapterCreateTime(unix 秒)→ 发布时间;离谱值一律 None(宁缺勿错)。"""
+    try:
+        n = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    if not 1_500_000_000 <= n <= 4_000_000_000:
+        return None
+    return datetime.fromtimestamp(n)
 
 
 def _shelf_gate_plan(session: Session, user_id: int, rows: list[WechatBenchmark],
@@ -1717,7 +1732,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
             try:
                 weread = weread or WereadClient(cookie)
                 got, answered = _weread_collect(user_id, b, weread, session,
-                                                stats=wr_stats, breaker=breaker)
+                                                stats=wr_stats, breaker=breaker,
+                                                shelf_ts=gate["signals"].get(b.weread_book_id))
                 # 只有免费源真答了才算"本号已被消费":cover 空响应+列表挂了的"什么都不知道"
                 # 必须留给 ② 的付费兜底,否则 81 号里恰好在风控期的那批两头落空。
                 used = answered
@@ -1743,7 +1759,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                     breaker.update(list_off=False, cover_quota_fails=0, off=False)
                     try:
                         got, answered = _weread_collect(user_id, b, WereadClient(cookie), session,
-                                                        stats=wr_stats, breaker=breaker)
+                                                        stats=wr_stats, breaker=breaker,
+                                                        shelf_ts=gate["signals"].get(b.weread_book_id))
                         used = answered  # 答上了就消费掉,勿再走 dajiala 重复扣费;没答上留给付费兜底
                         if answered and gate["signals"].get(b.weread_book_id):
                             marks_advance[b.weread_book_id] = gate["signals"][b.weread_book_id]
@@ -2058,6 +2075,10 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
                 hot = f"🔥x{dup + 1} "
         title = _md_safe(r.title)
         shown = title[:26] + ("…" if len(title) > 26 else "")
+        # 时效标注:发布日=今天不标(监听主打就是刚发的);带发布时间的旧文(补采/同步/
+        # 迟到补推)标上日期——盘链时效短,员工该对"点开可能已失效"有预期
+        if r.publish_at and r.publish_at.date() < datetime.now().date():
+            shown += f" ·{r.publish_at:%m-%d}"
         q_badge = ""
         if r.read_num >= 500:
             q_badge = "🔴爆 "
@@ -2127,18 +2148,21 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
         elements: list[dict] = [
             {"tag": "note", "elements": [{"tag": "plain_text",
                 "content": "点文章标题打开链接(优先你的夸克转存链) · 网盘列=识别到的盘链,"
-                           "—=这篇没带网盘链(仍照常推) · 阅读未采样为 —"}]},
+                           "—=这篇没带网盘链(仍照常推) · 阅读未采样为 —"
+                           " · 标题后 ·MM-DD=那天发的(旧文/补采,盘链可能已失效)"}]},
         ]
         if page_idx == 0:
+            n_pan = sum(1 for r in rows if (r.pan_urls or "").strip())
             elements.append({"tag": "note", "elements": [{"tag": "plain_text",
-                "content": f"本轮共 {len(rows)} 篇新发文,来自 {len(groups)} 个公众号(按账号分组,全量推送)"}]})
+                "content": f"本轮共 {len(rows)} 篇新发文,来自 {len(groups)} 个公众号"
+                           f"(按账号分组,全量推送),其中 {n_pan} 篇带网盘资源"}]})
         elements.append(_col_set_row(
             [("**公众号**", 3), ("**文章**", 7), ("**网盘**", 2), ("**阅读**", 2)], grey=True))
         last_author: str | None = None
         for author, r in chunk:
             if author != last_author:  # 换账号插入一行账号标题;账号跨卡时下一页重出标题
                 elements.append({"tag": "div", "text": {"tag": "lark_md",
-                    "content": f"**📢 {_md_safe(author)}**"}})
+                    "content": f"**📢 {_md_safe(author)} · {len(groups[author])} 篇**"}})
                 last_author = author
             elements.append(_render_article(r))
         if page_idx == 0 and ai_elements:

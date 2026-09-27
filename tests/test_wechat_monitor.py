@@ -3928,3 +3928,51 @@ def test_listen_shelf_marks_never_advance_without_answer(session, monkeypatch) -
     assert _load_marks(session) == {"MP_WXS_1": "1001",                # 答上 → 前移(值未变)
                                     "MP_WXS_2": "2002"}                # 没答上 → 停在旧值
     assert out["status"] == "partial"                                  # 号2 失败要暴露
+
+
+def test_listen_cover_article_gets_publish_time_from_shelf(session, monkeypatch) -> None:
+    """cover 文章的 publish_at 来自书架 lastChapterCreateTime:封面文=该号最新一篇,
+    书架时间戳即其发布时间——监听主力路从此有时效数据(卡片时效标注/补推窗口都吃它)。"""
+    from datetime import datetime as _dt
+
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    _add_benchmarks(session, 3)
+    _seed_marks(session, {"MP_WXS_1": "1001"})          # 号1 水位相等 → 会被跳过(无 cover)
+    monkeypatch.setattr(wechat_monitor, "fetch_article_content", lambda url, timeout=15: "")
+    monkeypatch.setattr(wechat_monitor, "_shelf_slot", lambda bid, every: 1)
+    ts = 1758960000
+    fake = _ShelfWeread(entries=[_shelf_entry("MP_WXS_1", 1001),
+                                 _shelf_entry("MP_WXS_2", ts),        # 正常 → 盖发布时间
+                                 _shelf_entry("MP_WXS_3", 7)])        # 离谱值 → 宁缺勿错
+
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+                                           weread=fake)
+    arts = {r.benchmark_id: r for r in session.scalars(select(WechatArticle)).all()}
+    assert arts[2].publish_at == _dt.fromtimestamp(ts)   # 书架时间戳=最新一篇的发布时间
+    assert arts[3].publish_at is None                    # 解析不出就别瞎盖
+    assert 1 not in arts                                 # 号1 被跳过,本来就没有新文
+    assert out["status"] == "success"
+
+
+def test_push_card_shows_freshness_account_counts_and_pan_summary(session, monkeypatch) -> None:
+    """卡片内容升级:①旧文标题带 ·MM-DD(今天的文不标);②账号行带篇数;③卡头汇总带资源数。"""
+    import json as _json
+    from datetime import datetime as _dt, timedelta as _td
+
+    old = _dt.now() - _td(days=3)
+    rows = [WechatArticle(user_id=1, title="今天的资源文", author="号A", source="listen",
+                          url="https://mp.weixin.qq.com/s/t1",
+                          pan_urls="https://pan.quark.cn/s/Q1", pan_types="夸克网盘"),
+            WechatArticle(user_id=1, title="三天前的资源文", author="号A", source="listen",
+                          url="https://mp.weixin.qq.com/s/t2", publish_at=old,
+                          pan_urls="https://pan.quark.cn/s/Q2", pan_types="夸克网盘")]
+    session.add_all(rows)
+    session.commit()
+    cards: list[dict] = []
+    _fake_feishu(monkeypatch, cards)
+
+    wechat_monitor._push_listen(session, 1, _settings(), rows, replacements={})
+    blob = _json.dumps(cards, ensure_ascii=False, default=str)
+    assert f" ·{old:%m-%d}" in blob                   # 旧文带日期标注
+    assert "📢 号A · 2 篇" in blob                     # 账号行带篇数
+    assert "其中 2 篇带网盘资源" in blob               # 卡头资源概览

@@ -401,6 +401,9 @@ WeRSS 挂了会怎样:它的异常是 `PlatformError` 的子类,监听会**降�
   → 整门停用逐号照旧(代价只是白付 1 次书架请求)。配套:号序重排(有更新/无水位的号排队头、
   强制问询殿后,熔断真触发时稀缺额度先花在最可能吐新文的号上);运行记录记
   `shelf(signals=N skip=N force=N adv=M)`,停用记 `shelf(off=原因)`。
+  书架时间戳还有个**顺手收益**:cover 文章就是该号最新一篇,书架时间即其发布时间——
+  监听主力路此前 `publish_at` 恒空,现在每轮盖到文章上,卡片时效标注(`·MM-DD`)、
+  补推窗口、采样窗口全都开始吃到发布时间。
   Cookie 交接:`python scripts/probe_weread_shelf.py --user 1 --cookie-file <gitignored 文件>`,
   Cookie 不经对话、不落库、跑完即删;必须复制自与运行机器**同一出口 IP** 的浏览器(会话与
   出口 IP 绑定,换网络当场 -2012)。脚本以 **publish_at 为主基线**自证字段含义——入库时间

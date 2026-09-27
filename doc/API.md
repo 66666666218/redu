@@ -796,6 +796,10 @@
   `"weread_shelf": {"signals":81, "skip":60, "force":3, "advanced":5}`
   (signals=认出信号字段的号数 / skip=本轮跳过 / force=强制问询 / advanced=水位前移号数),
   停用时不出现该键,运行记录 detail 以 `shelf(off=原因)` 记录停用原因
+- **卡片内容(2026-09-27 升级)**:① cover 文章的 `publish_at` 用书架时间戳补齐(封面文=
+  该号最新一篇,书架时间即其发布时间;此前恒空);② 卡头汇总带资源概览
+  ("其中 X 篇带网盘资源");③ 账号标题行带篇数(`📢 号名 · N 篇`);④ 旧文标题带
+  `·MM-DD` 时效标注(发布日=今天不标;补采/同步/迟到补推的旧文一眼可辨,盘链可能已失效)
 - **并发防重(2026-09-26)**: 同一用户同时只跑一轮(在跑标记落 `system_config` 的
   `wechat_listen_running_<uid>`),手动点击撞上定时轮/失败重试时返回
   `{ "platform":"wechat", "status":"skipped", "reason":"running" }`,零采集副作用;
