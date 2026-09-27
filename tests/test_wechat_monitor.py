@@ -3770,10 +3770,11 @@ def test_listen_free_source_that_never_answers_leaves_the_account_to_paid(sessio
 
 # ------------------------------------------------ 第 14 轮:书架粗筛(降频主刀)
 # 一轮 81 次 cover 里只有 4~20 个号真吐新文(doc/operations.md §9.2 的量化依据),
-# 白问烧光会话额度才是漏推元凶。书架门用"可证安全"的水位判据:书架 reviewId ==
-# 库里最新一篇的 URL token → cover 只会吐这篇已入库的旧文,跳过零风险。
+# 白问烧光会话额度才是漏推元凶。线上实勘:书架不带 reviewId,但 lastChapterCreateTime
+# = 最新文章发布时间(publish_at 基线自证 31/31 不旧于库内最新发布)→ 以它为水位,
+# 相等 = cover 只会吐已入库旧文,跳过零风险。
 class _ShelfWeread(_QuotaWeread):
-    """带书架的假微信读书:可编排每号条目带的 reviewId 类字段(书架粗筛的判据源)。"""
+    """带书架的假微信读书:可编排每号条目带的 lastChapterCreateTime(书架粗筛的判据源)。"""
 
     def __init__(self, entries=(), **kw) -> None:
         super().__init__(**kw)
@@ -3785,23 +3786,39 @@ class _ShelfWeread(_QuotaWeread):
         return self._entries
 
 
-def _shelf_entry(bid: str, rid: str) -> dict:
-    return {"bookId": bid, "reviewId": rid}
+def _shelf_entry(bid: str, ts: int) -> dict:
+    return {"bookId": bid, "lastChapterCreateTime": ts}
 
 
-def test_listen_shelf_gate_skips_accounts_with_unchanged_review(session, monkeypatch) -> None:
-    """书架 reviewId == 库里最新一篇的 token → cover 不问(省的是纯白问,不是盲区)。"""
+def _seed_marks(session, marks: dict) -> None:
+    import json as _json
+    from datetime import datetime as _dt
+
+    from app.db.models import SystemConfig
+    session.add(SystemConfig(key="weread_shelf_marks_1",
+                             value=_json.dumps(marks), updated_at=_dt.now()))
+    session.commit()
+
+
+def _load_marks(session) -> dict:
+    import json as _json
+
+    from app.db.models import SystemConfig
+    row = session.get(SystemConfig, "weread_shelf_marks_1")
+    return _json.loads(row.value) if row and row.value else {}
+
+
+def test_listen_shelf_gate_skips_accounts_with_unchanged_signal(session, monkeypatch) -> None:
+    """书架 lastChapterCreateTime == 水位 → cover 不问(省的是纯白问,不是盲区);
+    水位只在「问过且答上」时前移:答上的号落水位,跳过的号一字不动。"""
     _set_cookie(session, 1, "weread", "vid=1; skey=x")
     _add_benchmarks(session, 3)
-    # 号1:库里已有一篇,书架 reviewId(全形 MP_WXS_1_r1)与 URL 裸 token(r1)按末段对上
-    session.add(WechatArticle(user_id=1, benchmark_id=1, title="号1 旧文", source="listen",
-                              url="https://mp.weixin.qq.com/s/r1"))
-    session.commit()
+    _seed_marks(session, {"MP_WXS_1": "1700000001"})
     monkeypatch.setattr(wechat_monitor, "fetch_article_content", lambda url, timeout=15: "")
-    monkeypatch.setattr(wechat_monitor, "_shelf_slot", lambda bid, every: 1)  # 首轮不触发强制问询
-    fake = _ShelfWeread(entries=[_shelf_entry("MP_WXS_1", "MP_WXS_1_r1"),
-                                 _shelf_entry("MP_WXS_2", "MP_WXS_2_new"),
-                                 _shelf_entry("MP_WXS_3", "MP_WXS_3_x")])
+    monkeypatch.setattr(wechat_monitor, "_shelf_slot", lambda bid, every: 1)  # 不触发强制问询
+    fake = _ShelfWeread(entries=[_shelf_entry("MP_WXS_1", 1700000001),   # 与水位相等 → 跳过
+                                 _shelf_entry("MP_WXS_2", 1790393639),   # 变了 → 问
+                                 _shelf_entry("MP_WXS_3", 1790393640)])  # 首轮无水位 → 问
 
     out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
                                            weread=fake)
@@ -3809,13 +3826,16 @@ def test_listen_shelf_gate_skips_accounts_with_unchanged_review(session, monkeyp
     assert asked == ["MP_WXS_2", "MP_WXS_3"]          # 号1 被书架门跳过,只问有变化的号
     assert fake.shelf_calls == 1                       # 全轮只多付 1 次书架请求
     assert out["weread_list"]["weread_cover_shelf_skipped"] == 1
-    assert out["weread_shelf"] == {"reviews": 3, "skip": 1, "force": 0}
+    assert out["weread_shelf"] == {"signals": 3, "skip": 1, "force": 0, "advanced": 2}
     assert out["status"] == "success"                  # 跳过是正面回答,不是 partial 类故障
     b1 = session.scalars(select(WechatBenchmark).where(
         WechatBenchmark.weread_book_id == "MP_WXS_1")).one()
     assert b1.miss_count == 1     # 语义 = "确认当天没发文"(同 cover 答了但没新文),不是盲区
+    assert _load_marks(session) == {"MP_WXS_1": "1700000001",   # 跳过的号水位不动
+                                    "MP_WXS_2": "1790393639",   # 答上的号才前移
+                                    "MP_WXS_3": "1790393640"}
     run = session.scalars(select(RunRecord).where(RunRecord.kind == "wechat_listen")).first()
-    assert "shelf(reviews=3 skip=1 force=0)" in run.detail
+    assert "shelf(signals=3 skip=1 force=0 adv=2)" in run.detail
 
 
 def test_listen_shelf_gate_force_ask_and_tier_order(session, monkeypatch) -> None:
@@ -3823,33 +3843,30 @@ def test_listen_shelf_gate_force_ask_and_tier_order(session, monkeypatch) -> Non
     熔断真触发时稀缺额度先花在最可能吐新文的号上。"""
     _set_cookie(session, 1, "weread", "vid=1; skey=x")
     _add_benchmarks(session, 4)
-    for i in (1, 2, 3):     # 号1/2/3 书架说没更新;号4 没水位(从未采到过)→ 视作可能有更新
-        session.add(WechatArticle(user_id=1, benchmark_id=i, title=f"号{i} 旧文",
-                                  source="listen",
-                                  url=f"https://mp.weixin.qq.com/s/r{i}"))
-    session.commit()
+    _seed_marks(session, {"MP_WXS_1": "1001", "MP_WXS_2": "1002", "MP_WXS_3": "1003"})
     monkeypatch.setattr(wechat_monitor, "fetch_article_content", lambda url, timeout=15: "")
     monkeypatch.setattr(wechat_monitor, "_shelf_slot",
                         lambda bid, every: 0 if bid == "MP_WXS_2" else 1)
-    fake = _ShelfWeread(entries=[_shelf_entry("MP_WXS_1", "MP_WXS_1_r1"),
-                                 _shelf_entry("MP_WXS_2", "MP_WXS_2_r2"),
-                                 _shelf_entry("MP_WXS_3", "MP_WXS_3_r3"),
-                                 _shelf_entry("MP_WXS_4", "MP_WXS_4_y")])
+    fake = _ShelfWeread(entries=[_shelf_entry("MP_WXS_1", 1001),   # 相等,不在强制期 → 跳过
+                                 _shelf_entry("MP_WXS_2", 1002),   # 相等但强制期到 → 真问
+                                 _shelf_entry("MP_WXS_3", 1003),   # 相等 → 跳过
+                                 _shelf_entry("MP_WXS_4", 1004)])  # 无水位 → 可能更新
 
     out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
                                            weread=fake)
     asked = [c[1] for c in fake.calls if c[0] == "cover"]
     # 号4(可能更新)排队头 → 号2(强制问询期到)殿后;号1/3 跳过
     assert asked == ["MP_WXS_4", "MP_WXS_2"]
-    assert out["weread_shelf"] == {"reviews": 4, "skip": 2, "force": 1}
+    assert out["weread_shelf"] == {"signals": 4, "skip": 2, "force": 1, "advanced": 2}
 
 
 def test_listen_shelf_gate_failure_degrades_to_per_account(session, monkeypatch) -> None:
-    """书架请求挂了(-2014 也好、超时也好)只停用粗筛本身,逐号问的老路一步不少。"""
+    """书架请求挂了(-2014 也好、超时也好)只停用粗筛本身,逐号问的老路一步不少,
+    且不留任何水位(问都没问成,什么都没"见过")。"""
     _set_cookie(session, 1, "weread", "vid=1; skey=x")
     _add_benchmarks(session, 2)
     monkeypatch.setattr(wechat_monitor, "fetch_article_content", lambda url, timeout=15: "")
-    fake = _ShelfWeread(entries=[_shelf_entry("MP_WXS_1", "MP_WXS_1_r1")])
+    fake = _ShelfWeread(entries=[_shelf_entry("MP_WXS_1", 1001)])
 
     def boom():
         raise wechat_monitor.WereadError("微信读书错误 code=-2014:")
@@ -3860,12 +3877,13 @@ def test_listen_shelf_gate_failure_degrades_to_per_account(session, monkeypatch)
     asked = [c[1] for c in fake.calls if c[0] == "cover"]
     assert asked == ["MP_WXS_1", "MP_WXS_2"]           # 每个号照旧被问
     assert "weread_shelf" not in out
+    assert _load_marks(session) == {}                  # 水位一字未动
     run = session.scalars(select(RunRecord).where(RunRecord.kind == "wechat_listen")).first()
     assert "shelf(off=WereadError)" in run.detail
 
 
-def test_listen_shelf_without_review_field_changes_nothing(session, monkeypatch) -> None:
-    """书架条目认不出 reviewId 类字段(线上原始形状未验证)→ 整门停用,谁也不跳。"""
+def test_listen_shelf_without_signal_field_changes_nothing(session, monkeypatch) -> None:
+    """书架条目认不出信号字段(服务端改版)→ 整门停用,谁也不跳。"""
     _set_cookie(session, 1, "weread", "vid=1; skey=x")
     _add_benchmarks(session, 2)
     monkeypatch.setattr(wechat_monitor, "fetch_article_content", lambda url, timeout=15: "")
@@ -3878,4 +3896,35 @@ def test_listen_shelf_without_review_field_changes_nothing(session, monkeypatch)
     assert asked == ["MP_WXS_1", "MP_WXS_2"]
     assert "weread_shelf" not in out
     run = session.scalars(select(RunRecord).where(RunRecord.kind == "wechat_listen")).first()
-    assert "shelf(off=no_review_field)" in run.detail
+    assert "shelf(off=no_signal_field)" in run.detail
+
+
+def test_listen_shelf_marks_never_advance_without_answer(session, monkeypatch) -> None:
+    """问都没问成就不许前移水位——否则没采到的那篇被永久记成"见过",漏推再也补不回。
+
+    号1 水位相等但强制期到 → 真问、答上 → 水位可前移;号2 信号变了(要问)但 cover
+    被额度挡回(没答上)→ 水位必须停在旧值,下轮还要再问它。
+    """
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    _add_benchmarks(session, 2)
+    _seed_marks(session, {"MP_WXS_1": "1001", "MP_WXS_2": "2002"})
+    monkeypatch.setattr(wechat_monitor, "fetch_article_content", lambda url, timeout=15: "")
+    monkeypatch.setattr(wechat_monitor, "_shelf_slot",
+                        lambda bid, every: 0 if bid == "MP_WXS_1" else 1)
+    fake = _ShelfWeread(entries=[_shelf_entry("MP_WXS_1", 1001),   # 相等+强制期 → 问,答上
+                                 _shelf_entry("MP_WXS_2", 9999)])  # 变了 → 问,但 cover 挂
+
+    def cover_second_fails(book_id):
+        fake.calls.append(("cover", book_id))   # 覆写也要记账:断言数的就是这份记录
+        if book_id == "MP_WXS_2":
+            raise wechat_monitor.WereadError("微信读书错误 code=-2014:")
+        return {"title": f"文 {book_id}", "url": f"https://mp.weixin.qq.com/s/{book_id}",
+                "review_id": f"{book_id}_r"}
+    monkeypatch.setattr(fake, "latest_article", cover_second_fails)
+
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+                                           weread=fake)
+    assert len([c for c in fake.calls if c[0] == "cover"]) == 2        # 两个号都被问了
+    assert _load_marks(session) == {"MP_WXS_1": "1001",                # 答上 → 前移(值未变)
+                                    "MP_WXS_2": "2002"}                # 没答上 → 停在旧值
+    assert out["status"] == "partial"                                  # 号2 失败要暴露

@@ -15,15 +15,27 @@
 
     python scripts/probe_weread_shelf.py --user 1
 
+Cookie 交接(2026-09-27 增):Cookie 也可以不经对话/不落库——把整串 Cookie 存进一个
+**已被 gitignore 的文件**(如 `data/weread_cookie.tmp.txt`,一行纯文本),然后:
+
+    python scripts/probe_weread_shelf.py --user 1 --cookie-file data/weread_cookie.tmp.txt
+
+脚本只读该文件、不回显内容、不写库;跑完由调用方立即删除。注意 Cookie 必须复制自
+**与运行脚本的机器同一网络出口**的浏览器(会话与出口 IP 绑定,换网络当场 -2012)。
+
 判定口径(脚本自己会说):
 - 出现形如 `updateTime`/`lastReviewId`/`unreadCnt` 且**跨号取值不同**、时间戳落在近几天
   → 书架可当"谁更新了"的粗筛,值得改造监听轮;
 - 只有 `addTime`/`createTime` 这类**加书架时间**(全部停在关注那天)→ 书架不能降频,
   这条路到此为止,别再猜。
 
-字段含义不靠第二次探测自证:脚本同时读本地库"每个号最近一次出现新文"的入库时间,与候选
-时间戳逐号对照(滞后中位数、近 1 天重合度)。真若是最新文章时间,书架不该比我们上次看到的
-还旧、且"书架说近 1 天有文"要盖住"本地近 1 天真入库过"的号;对不上则退出码 3,
+字段含义不靠第二次探测自证:脚本读本地库两套基线与候选时间戳逐号对照——
+**主基线 = 文章自带 publish_at(库里最新一篇的发布时间,dajiala/列表路才有)**,
+与候选字段同为"发布时刻"语义,不受断采、补采干扰:字段若真是最新文章发布时间,
+它只会等于或晚于我们存过的最新一篇,旧超 1 天的号超出噪声即"字段跟不上发文"。
+入库时间基线(created_at)只作背景:断采让它整体过期、补采让它晚于发布,
+两个方向都会制造假不符(2026-09-27 首跑即栽在这里:基线停在 9.20,差点把
+真信号 `lastChapterCreateTime` 误判成"加书架时间")。对不上则退出码 3,
 意思是"字段有名无实,别拿它筛号"——用错判据的代价是漏推,比现在的限流严重。
 """
 from __future__ import annotations
@@ -77,9 +89,19 @@ def _as_epoch(value) -> dt.datetime | None:
     return None
 
 
+def _read_cookie_file(path: str) -> str:
+    """读 Cookie 文件(一行纯文本);不回显内容,读不到/为空都只说结果不说原因细节。"""
+    from pathlib import Path
+
+    text = Path(path).read_text(encoding="utf-8", errors="replace").strip()
+    return text
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="探测书架 /web/shelf/sync 每号条目带不带更新信号")
     parser.add_argument("--user", type=int, default=1, help="租户 id(取其微信读书 Cookie)")
+    parser.add_argument("--cookie-file", default="",
+                        help="从该文件读 Cookie(一行纯文本,须在 gitignore 内)代替本地库;用完即删")
     parser.add_argument("--samples", type=int, default=4,
                         help="打印几个号的信号字段取值(以 bookId 标识,不打印标题)")
     args = parser.parse_args()
@@ -87,14 +109,17 @@ def main() -> int:
     settings = get_settings()
     db = get_session_local()()
     try:
-        cookie = wechat_monitor._weread_cookie(db, args.user, settings)
+        cookie = (_read_cookie_file(args.cookie_file) if args.cookie_file
+                  else wechat_monitor._weread_cookie(db, args.user, settings))
         last_seen = _last_new_article_by_book(db, args.user)
+        last_pub = _last_publish_by_book(db, args.user)
     finally:
         db.close()
     if not cookie:
         print("取不到微信读书 Cookie(weread):线上没配就先别探")
         return 1
-    print(f"本地对照基线:该租户 {len(last_seen)} 个号有已入库新文(用于自证字段含义,不需第二次探测)")
+    print(f"本地对照基线:发布时间基线(publish_at){len(last_pub)} 号 / "
+          f"入库时间基线(参考){len(last_seen)} 号 —— 用于自证字段含义,不需第二次探测")
 
     try:
         # 走生产的 _get(同参数、同请求头):探的就是线上实际收到的那份返回
@@ -168,27 +193,39 @@ def main() -> int:
         return "review" in k.lower()
 
     usable = [k for k in signal_keys if _decisive(k)]
-    # 自证:把候选时间戳与本地"该号上次出现新文"的日期并排看。字段若真是最新文章时间,
-    # 它不该比我们上次看到的那篇更旧(滞后中位数应 ≈ 0),且"字段落在近 1 天"的号应与
-    # "近 1 天入过库"的号高度重合。两条都不成立 → 它是加书架/同步时间,拿它粗筛会漏推。
-    corr = _correlate(mp, [k for k in usable if stats[k]["epochs"]], last_seen, args.samples)
+    dated = [k for k in usable if stats[k]["epochs"]]
+    reviewish = [k for k in stats if "review" in k.lower() and stats[k]["present"]]
+    if not reviewish:
+        print("\n书架每号条目**不带 reviewId 类字段**(原设想的『reviewId 水位比对』没有比对对象)。"
+              "粗筛要走时间戳水位:按号存「上次见到的最新发布时间」,发文才变、问过才前移;"
+              "⚠️ 时间戳不含标题,命中的号仍要各调一次 cover 拿文章本体。")
+    # 存原始 payload 供离线分析(data/ 已 gitignore;含标题,勿外传/勿提交)
+    try:
+        with open(os.path.join("data", "weread_shelf_payload.json"), "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False)
+        print("原始 payload 已存 data/weread_shelf_payload.json(本地/gitignored,含标题勿外传)")
+    except OSError:
+        pass
+    # 自证:主基线 = 库里最新发布时间(publish_at,与字段同为发布时刻,不受断采/补采干扰);
+    # 入库时间基线只作背景——断采让它过期、补采让它晚于发布,两个方向都制造假不符。
+    corr = _correlate(mp, dated, last_pub, last_seen, args.samples)
     if usable:
-        dated = [k for k in usable if stats[k]["epochs"]]
-        print(f"结论:**可用** —— {usable}"
-              f"{'(时间戳落在今天)' if dated else '(reviewId 类:要跟上次见到的值比对新旧)'},"
+        ok_keys = [k for k, v in corr.items() if v["ok"]]
+        print(f"\n结论:**可用** —— {usable}"
+              f"({('「' + '、'.join(ok_keys) + '」通过 publish_at 基线自证') if ok_keys else '形状像但自证未通过,先别接入门'})。"
               "监听轮可改成「1 次书架筛出有更新的号 → 只问这些号」,一轮密度从 162 降到 1+2N。")
         if not dated:
             print("注意:只有 reviewId 类字段时**不能只看它** —— 书架不含文章标题,命中的号仍要各调一次 cover"
                   "(省的是「没发文的那些号的白问」,不是省掉 cover),"
                   "且落地要按号存「上次见到的 reviewId」当水位。")
-        if corr and not any(v["ok"] for v in corr.values()):
-            print("对照校验:**不通过** —— 字段日期与「这个号上次出现新文」对不上,"
+        if corr and not ok_keys:
+            print("对照校验:**不通过** —— 字段与「库里最新发布时间」对不上(旧超 1 天的号过多),"
                   "它多半是加书架/笔记同步时间。**先别改监听轮**,把上面这张表带回来重新判。")
             return 3
         if corr:
-            print("对照校验:**通过** —— 见上表,该字段确实跟着发文走(仍以近 1 天重合度为准)。")
+            print("对照校验:**通过** —— 见上表。")
         else:
-            print("对照校验:**本轮没做成**(没有可对照的号,或本地没有入库基线) → "
+            print("对照校验:**本轮没做成**(没有带 publish_at 的文章可对照) → "
                   "结论只是「字段长得像」,别直接照它改监听轮。")
         return 0
     if signal_keys:
@@ -202,10 +239,11 @@ def main() -> int:
 
 
 def _last_new_article_by_book(db, user_id: int) -> dict[str, dt.datetime]:
-    """每个 weread_book_id → 该号最近一次「我们看见它发了新文」的时间(本地入库时间)。
+    """每个 weread_book_id → 该号最近一次「我们看见它发文」的入库时间(参考基线)。
 
-    用入库时间而不是发布时间:cover 路径的 `publish_at` 恒空,这正是本次要找的廉价判据
-    缺失的东西,不能假设它已经存在。
+    ⚠️ 它只能当**参考**:① 监听断采期间基线整体过期;② dajiala/同步会把**历史旧文**
+    补采入库,入库时间天然晚于发布时间——拿它当真基线会把"字段=发布时间"误判成
+    "书架比我们旧"。精确基线是 `_last_publish_by_book`(文章自带 publish_at)。
     """
     from sqlalchemy import func, select
 
@@ -224,13 +262,44 @@ def _last_new_article_by_book(db, user_id: int) -> dict[str, dt.datetime]:
     return out
 
 
-def _correlate(mp: list[dict], keys: list[str], last_seen: dict[str, dt.datetime],
-               samples: int) -> dict[str, dict]:
-    """候选时间戳字段与本地入库基线的吻合度,顺带打印对照表(一次请求自证字段含义)。"""
+def _last_publish_by_book(db, user_id: int) -> dict[str, dt.datetime]:
+    """每个 weread_book_id → 库里最新一篇的**发布时间**(publish_at,dajiala/列表路自带)。
+
+    这是判定"字段是不是发布时间"的**主基线**:两边的语义都是发布时刻,不受断采、
+    不受补采时点干扰——字段若是真的,它只会等于或晚于我们存过的最新一篇,
+    (差 = 断采窗口里漏掉的新文),旧超 1 天才算"字段跟不上发文"。
+    """
+    from sqlalchemy import func, select
+
+    from app.db.models import WechatArticle, WechatBenchmark
+
+    rows = db.execute(
+        select(WechatBenchmark.weread_book_id, func.max(WechatArticle.publish_at))
+        .join(WechatArticle, WechatArticle.benchmark_id == WechatBenchmark.id)
+        .where(WechatBenchmark.user_id == user_id, WechatBenchmark.weread_book_id != "",
+               WechatArticle.publish_at.is_not(None))
+        .group_by(WechatBenchmark.weread_book_id)).all()
+    out: dict[str, dt.datetime] = {}
+    for book_id, when in rows:
+        if not book_id or not when:
+            continue
+        out[str(book_id)] = when if isinstance(when, dt.datetime) else dt.datetime.fromisoformat(str(when))
+    return out
+
+
+def _correlate(mp: list[dict], keys: list[str], last_pub: dict[str, dt.datetime],
+               last_seen: dict[str, dt.datetime], samples: int) -> dict[str, dict]:
+    """候选时间戳字段与本地「最新发布时间」基线的吻合度,顺带打印对照表。
+
+    判定(主基线 = publish_at):真若是"最新文章发布时间",字段只会 **等于或晚于**
+    我们存过的最新一篇(晚出的部分 = 断采窗口里漏掉的新文),旧超 1 天的号超出
+    少量噪声即"字段跟不上发文",不能当粗筛。入库时间(created_at)基线只作参考:
+    监听断采会让它整体过期、补采会让它晚于发布,两个方向都会制造假不符。
+    """
     if not keys:
         return {}
-    if not last_seen:
-        print("\n(本地没有该租户已入库的新文,对照校验做不成 → 结论只能算「字段长得像」,不算验过)")
+    if not last_pub:
+        print("\n(本地没有带 publish_at 的文章,主基线做不成 → 结论只能算「字段长得像」,不算验过)")
         return {}
     report: dict[str, dict] = {}
     for k in keys:
@@ -239,36 +308,39 @@ def _correlate(mp: list[dict], keys: list[str], last_seen: dict[str, dt.datetime
             bid = str(item.get("bookId") or "")
             raw = item.get(k)
             field = _as_epoch(raw) if not isinstance(raw, str) else _as_epoch(_num(raw))
-            seen = last_seen.get(bid)
-            if field and seen:
-                pairs.append((bid, field, seen))
+            pub = last_pub.get(bid)
+            if field and pub:
+                pairs.append((bid, field, pub))
         if not pairs:
-            print(f"\n[{k}] 与本地基线没有重叠的号(书架 bookId 与库里 weread_book_id 对不上?)→ 无法对照")
+            print(f"\n[{k}] 与 publish_at 基线没有重叠的号(书架 bookId 与库里对不上?)→ 无法对照")
             continue
-        # 真若是"最新文章时间",它必然紧贴我们上次看到的那篇:差 = 这几小时里漏掉的新文,
-        # 正常应在一个监听间隔(≤8h)内;停更号则 ≈ 0。差得远(比如整批号都显示"刚刚")
-        # 说明它是同步时间戳/收藏时间,拿它筛号会把粗筛变成"每号都得问"。
-        lags = sorted((seen - field).total_seconds() / 86400 for _, field, seen in pairs)
+        # 字段若 = 最新文章发布时间:lag = 存过的最新发布 - 字段,正常 ≤ 0(字段更新)
+        # 或 ≈ 0(没发新文);正得离谱(书架比我们还旧超 1 天)的号超出噪声就不是发布时间。
+        lags = sorted((pub - field).total_seconds() / 86400 for _, field, pub in pairs)
         diffs = sorted(abs(x) for x in lags)
         median_diff = diffs[len(diffs) // 2]
-        staler = sum(1 for x in lags if x > 1)   # 书架比我们还旧 = 字段跟不上发文
-        fresh_field = {b for b, f, _ in pairs if f.date() >= dt.date.today() - dt.timedelta(days=1)}
-        fresh_seen = {b for b, _, s in pairs
-                      if s >= dt.datetime.now() - dt.timedelta(days=1)}
-        overlap = len(fresh_field & fresh_seen)
-        # "书架说近 1 天有文"要盖住"本地近 1 天真入库过新文"的号——少一个就是漏推。
-        covered = not fresh_seen or overlap / len(fresh_seen) >= 0.6
-        # 旧超 1 天的号允许 5% 噪声(别的源刚补采过、书架字段刷新滞后),再多就不是最新文章时间。
-        ok = median_diff <= 1 and staler <= max(0, len(pairs) // 20) and covered
+        staler = sum(1 for x in lags if x > 1)   # 书架比"存过的最新发布"还旧超 1 天
+        fresher = sum(1 for x in lags if x < -0.02)  # 书架比我们新(断采窗口漏掉的新文,合理)
+        # 能证伪「字段=发布时间」的只有"书架比我们还旧"这一个方向:监听断采期间漏掉的
+        # 发文会让字段**整体比库里新**(中位数被它抬到好几天,方向合理,不是不符)——
+        # 2026-09-27 首跑把这点当成不符,差点枪毙真信号,所以中位数只展示、不判生死。
+        ok = staler <= max(2, len(pairs) // 20)
         report[k] = {"ok": ok, "n": len(pairs), "median_diff": median_diff,
-                     "staler": staler, "overlap": overlap, "fresh_seen": len(fresh_seen)}
-        print(f"\n[{k}] 可对照 {len(pairs)} 个号 | 书架与「上次见新文」相差中位数 = {median_diff:.2f} 天"
-              f" | 书架比我们旧超 1 天的号 = {staler}"
-              f" | 书架近1天有文 {len(fresh_field)} 号 / 本地近1天入库 {len(fresh_seen)} 号 / 重合 {overlap}")
-        print("  样本(号 / 书架字段日期 / 本地最近入库): "
-              + "  ".join(f"{b[-6:]}:{f:%m-%d %H:%M}/{s:%m-%d}"
-                          for b, f, s in sorted(pairs, key=lambda x: x[1], reverse=True)[:samples]))
-        print(f"  → {'吻合:该字段跟着发文走' if ok else '不吻合:别拿它当粗筛判据'}")
+                     "staler": staler, "fresher": fresher}
+        print(f"\n[{k}] 可对照 {len(pairs)} 个号 | 相差中位数 = {median_diff:.2f} 天(断采漏文会抬高,仅展示)"
+              f" | 书架比我们旧超 1 天 = {staler}(唯一可证伪方向,超出即不可用)"
+              f" | 书架比我们新 = {fresher}")
+        print("  样本(号 / 书架字段 / 本地最新发布): "
+              + "  ".join(f"{b[-6:]}:{f:%m-%d %H:%M}/{p:%m-%d %H:%M}"
+                          for b, f, p in sorted(pairs, key=lambda x: x[1], reverse=True)[:samples]))
+        print(f"  → {'吻合:该字段就是/跟着最新文章发布时间走' if ok else '不吻合:别拿它当粗筛判据'}")
+        # 参考基线(入库时间)的旧口径,只打印不判:断采/补采都会制造假不符
+        pairs_seen = [(b, f, last_seen[b]) for b, f, _ in pairs if b in last_seen]
+        if pairs_seen and last_seen:
+            lags_seen = sorted((s - f).total_seconds() / 86400 for _, f, s in pairs_seen)
+            stale_seen = sum(1 for x in lags_seen if x < -1)  # 书架比入库旧超 1 天(旧口径的 staler)
+            print(f"  (参考:入库时间基线 {len(pairs_seen)} 号,书架旧超 1 天 = {stale_seen}"
+                  "——含补采旧文/断采过期,只作背景不参与判定)")
     return report
 
 

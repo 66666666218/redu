@@ -5,12 +5,12 @@
 from __future__ import annotations
 
 import html as html_mod
+import json
 import re
 import time
 import uuid
 import zlib
 from datetime import datetime, timedelta
-from urllib.parse import unquote
 
 import requests
 from sqlalchemy import and_, delete, func, or_, select, update
@@ -1370,16 +1370,13 @@ def _listen_lock_key(user_id: int) -> str:
     return f"wechat_listen_running_{user_id}"
 
 
-# ---- 书架粗筛(2026-09-27 落地,判据与失效边界的量化依据见 doc/operations.md §9.2)----
-# 书架条目里"最新文章 reviewId"可能叫什么,线上原始形状未验证过,只能按名单探测:
-# 都认不出就整门停用(退化为逐号问),绝不拿不明字段当判据——用错判据的代价是漏推。
+# ---- 书架粗筛(2026-09-27 落地;线上实勘与判据自证见 doc/operations.md §9.2)----
+# 书架条目没有 reviewId 类字段(142 号全量实勘),但带 lastChapterCreateTime(最新文章
+# 发布时间;publish_at 基线自证:31/31 号不旧于库内最新发布、8 号字段早于加书架日期,
+# "加书架时间"假说被证伪;updateTime 135/142 与它完全镜像,作兜底)。留 reviewId 名单:
+# 未来服务端若补回文章身份字段,优先用(身份比时间戳强)。
 _SHELF_REVIEW_KEYS = ("reviewId", "review_id", "lastReviewId", "latestReviewId", "mpReviewId")
-
-
-def _mp_token(url: str) -> str:
-    """mp.weixin 短链 → 文章 token(即 reviewId 末段;token 可含 `~`,入库时未被编码变换)。"""
-    tail = str(url or "").strip().rstrip("/").rsplit("/", 1)[-1]
-    return unquote(tail)
+_SHELF_TS_KEYS = ("lastChapterCreateTime", "updateTime")
 
 
 def _shelf_slot(book_id: str, every: int) -> int:
@@ -1406,27 +1403,67 @@ def _bump_shelf_round(session: Session, user_id: int) -> int:
     return cur
 
 
+def _load_shelf_marks(session: Session, user_id: int) -> dict[str, str]:
+    """书架水位(JSON 落 system_config):每号上次「问过且答上」时看到的信号值。"""
+    from app.db.models import SystemConfig
+
+    row = session.get(SystemConfig, f"weread_shelf_marks_{user_id}")
+    try:
+        data = json.loads(row.value) if row and row.value else {}
+    except ValueError:
+        data = {}
+    return {str(k): str(v) for k, v in data.items()}
+
+
+def _save_shelf_marks(session: Session, user_id: int, updates: dict[str, str]) -> int:
+    """水位前移(写入 system_config JSON),返回前移的号数。
+
+    只收「问过且答上了」的号是水位机制的安全底线:问都没问成(额度熔断/请求失败)
+    就前移,等于把没采到的那篇永久记成"见过"——下一轮书架值不变就跳过,漏推再也补不回来。
+    """
+    from app.db.models import SystemConfig
+
+    if not updates:
+        return 0
+    key = f"weread_shelf_marks_{user_id}"
+    marks = _load_shelf_marks(session, user_id)
+    marks.update(updates)
+    val = json.dumps(marks, ensure_ascii=False)
+    row = session.get(SystemConfig, key)
+    if row is None:
+        session.add(SystemConfig(key=key, value=val, updated_at=datetime.now()))
+    else:
+        row.value = val
+        row.updated_at = datetime.now()
+    return len(updates)
+
+
 def _shelf_gate_plan(session: Session, user_id: int, rows: list[WechatBenchmark],
                      weread: WereadClient | None, settings: Settings) -> dict:
-    """书架粗筛(降频主刀):1 次书架请求回答「哪些号自上次见到后没有更新」。
+    """书架粗筛(降频主刀):1 次书架请求回答「哪些号自上次问到之后没有更新」。
 
-    判据用的是**可证安全**的那一种:书架条目的 reviewId 类字段 == 该号库里最新一篇
-    文章 URL 的 token(reviewId 不落库但 URL 可反解)→ cover 只会吐这篇已入库的旧文,
-    问它纯属白问。量化收益(2026-09-27,本机 9.22 快照):每轮 81 次 cover 只有 4~20 个号
-    真吐新文,其余 60~77 次白问正是烧光会话额度、让真有文的号被 -2014 挡掉的元凶。
+    判据(2026-09-27 线上实勘后定稿):书架条目的 lastChapterCreateTime == 该号水位
+    (上次「问过且答上」时看到的同一字段值,JSON 落 system_config)→ 服务端没更新过
+    这个号的最新章节,cover 只会吐我们已入库的那篇旧文,问它纯属白问。量化收益
+    (本机 9.22 快照):每轮 81 次 cover 只有 4~20 个号真吐新文,其余 60~77 次白问
+    正是烧光会话额度、让真有文的号被 -2014 挡掉的元凶。
 
-    三重失效保护,任何一环不确定都整门停用(代价只是白付 1 次书架请求):
+    与首版(reviewId 比对文章 URL)的差异:线上实勘证明书架**不带 reviewId**,
+    时间戳没有"可从库里反解"的对应物,水位必须自己持久化;由此多出一条铁律——
+    **水位只对问过且答上的号前移**(_save_shelf_marks),问都没问成就前移等于把
+    没采到的那篇永久记成"见过",那是本机制唯一会造永久漏推的错。
+
+    失效保护,任何一环不确定都整门停用(代价只是白付 1 次书架请求):
     - 配置关停 / 客户端没有 shelf_entries(测试假件)/ 书架请求失败 → 逐号照旧;
-    - 条目里认不出 reviewId 类字段 → 跳过集为空(字段名名单见 _SHELF_REVIEW_KEYS,
-      线上用 scripts/probe_weread_shelf.py 验明真名后往名单里加一行即可);
+    - 条目里认不出信号字段(名单见 _SHELF_REVIEW_KEYS/_SHELF_TS_KEYS)→ 跳过集为空;
     - 水位匹配不搞永久豁免:每号每 `weread_shelf_gate_every` 轮强制真问一次 cover,
       "书架字段滞后"这种最坏错判的盲区被压到 ≤K 轮(K=4 → 每号每天至少被真问一次)。
 
-    返回:{ok, skip(本轮可跳过的 bookId 集), force(到期必须真问的), tier(按号排序权重,
-    0=有更新/无水位优先问,1=强制问询,2=证实没更新), reviews(认出字段的号数), reason}。
+    返回:{ok, skip(本轮可跳过的 bookId 集), force(到期必须真问的), tier(排序权重:
+    0=有更新/无水位优先问,1=强制问询,2=证实没更新), signals(每号本轮信号值), reason}。
     """
     plan: dict = {"ok": False, "skip": set(), "force": set(), "tier": {},
-                  "reviews": 0, "reason": ""}
+                  "signals": {}, "reason": ""}
     if not getattr(settings, "weread_shelf_gate", True) or weread is None:
         plan["reason"] = "disabled"
         return plan
@@ -1440,37 +1477,35 @@ def _shelf_gate_plan(session: Session, user_id: int, rows: list[WechatBenchmark]
         plan["reason"] = type(exc).__name__
         logger.warning("书架粗筛请求失败,本轮退化为逐号问(%s)", exc)
         return plan
-    reviews: dict[str, str] = {}
+    signals: dict[str, str] = {}
     for it in entries or []:
         bid = str(it.get("bookId") or "")
-        for k in _SHELF_REVIEW_KEYS:
+        if not bid:
+            continue
+        sig = ""
+        for k in _SHELF_REVIEW_KEYS:      # reviewId 优先:文章身份,判据最强
             v = str(it.get(k) or "").strip()
             if v:
-                reviews[bid] = v
+                sig = v
                 break
-    plan["reviews"] = len(reviews)
-    if not reviews:
-        plan["reason"] = "no_review_field"
+        if not sig:
+            for k in _SHELF_TS_KEYS:      # 实勘:线上只有时间戳可用(已自证)
+                if it.get(k) not in (None, ""):
+                    sig = str(it[k])
+                    break
+        if sig:
+            signals[bid] = sig
+    plan["signals"] = signals
+    if not signals:
+        plan["reason"] = "no_signal_field"
         return plan
-    # 水位 = 库里该号最新一篇 mp.weixin 文章的 token(不新增列、不迁移:URL 即可反解)。
-    # 任何来源(cover/列表/dajiala/同步)入库的都算——它们认同一套 mp.weixin 短链。
-    ids = [b.id for b in rows]
-    marks: dict[int, str] = {}
-    if ids:
-        for bid_, url in session.execute(
-                select(WechatArticle.benchmark_id, WechatArticle.url)
-                .where(WechatArticle.benchmark_id.in_(ids),
-                       WechatArticle.url.like("%mp.weixin.qq.com/s/%"))
-                .order_by(WechatArticle.created_at.desc())).all():
-            marks.setdefault(bid_, _mp_token(url))
+    marks = _load_shelf_marks(session, user_id)
     every = max(1, int(getattr(settings, "weread_shelf_gate_every", 4) or 4))
     rnd = _bump_shelf_round(session, user_id)
     for b in rows:
-        rid = reviews.get(b.weread_book_id)
-        mark = marks.get(b.id)
-        if rid and mark and (rid == mark or rid.endswith("_" + mark)):
-            # 相等才算"证实没更新":reviewId 全形(MP_WXS_<bookId>_<token>)或裸 token 都收,
-            # 前缀对不上只是少省一次白问,不会多漏一篇
+        sig = signals.get(b.weread_book_id)
+        mark = marks.get(b.weread_book_id)
+        if sig and mark and (sig == mark or sig.endswith("_" + mark)):
             if (rnd + _shelf_slot(b.weread_book_id, every)) % every == 0:
                 plan["force"].add(b.weread_book_id)
                 plan["tier"][b.id] = 1     # 保险单:排在"可能有更新"的号后面问
@@ -1478,7 +1513,7 @@ def _shelf_gate_plan(session: Session, user_id: int, rows: list[WechatBenchmark]
                 plan["skip"].add(b.weread_book_id)
                 plan["tier"][b.id] = 2
         else:
-            plan["tier"][b.id] = 0         # 有更新/没水位/书架没这号:优先问
+            plan["tier"][b.id] = 0         # 有更新/首轮无水位/书架没这号:优先问
     plan["ok"] = True
     return plan
 
@@ -1638,6 +1673,7 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     # 所以这里合闸:列表先停,连续 _COVER_QUOTA_TRIP 个号 cover 也挡不下就整源停。
     breaker: dict = {"list_off": False, "cover_quota_fails": 0, "off": False}
     quota_skipped = 0
+    marks_advance: dict[str, str] = {}   # 本轮「问过且答上」的号 → 书架信号值(轮末前移水位)
     for b in rows:
         used = False
         # ⓪ 免费全量列表(自建 WeRSS 或 wewe-rss 兼容的读书平台):biz 是源认识的形态才首选
@@ -1685,6 +1721,9 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                 # 只有免费源真答了才算"本号已被消费":cover 空响应+列表挂了的"什么都不知道"
                 # 必须留给 ② 的付费兜底,否则 81 号里恰好在风控期的那批两头落空。
                 used = answered
+                if answered and gate["signals"].get(b.weread_book_id):
+                    # 答上了才准前移水位(问都没问成就前移=把没采到的篇永久记成"见过")
+                    marks_advance[b.weread_book_id] = gate["signals"][b.weread_book_id]
                 if got:
                     new_rows.extend(got)
                     b.miss_count = 0
@@ -1706,6 +1745,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                         got, answered = _weread_collect(user_id, b, WereadClient(cookie), session,
                                                         stats=wr_stats, breaker=breaker)
                         used = answered  # 答上了就消费掉,勿再走 dajiala 重复扣费;没答上留给付费兜底
+                        if answered and gate["signals"].get(b.weread_book_id):
+                            marks_advance[b.weread_book_id] = gate["signals"][b.weread_book_id]
                         if got:
                             new_rows.extend(got)
                             b.miss_count = 0
@@ -1773,6 +1814,12 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                                                  fetch_content=True, require_pan=False))
         if wr_skipped_this and used:
             quota_skipped -= 1   # 付费源把它兜住了 → 这个号这一轮并没瞎,别虚报盲区
+    # 水位前移(只收问过且答上的号,铁律见 _save_shelf_marks):写丢=下轮重问一遍,无害
+    try:
+        advanced = _save_shelf_marks(session, user_id, marks_advance)
+    except Exception:  # noqa: BLE001 - 水位回写失败不能连累本轮采集与推送
+        logger.exception("书架水位回写失败 user=%s", user_id)
+        advanced = 0
     # 后处理(回填/采样/转存/共振)整段关在保存点里:它炸了只撤销自己那半截写,
     # 本轮已采到的新文照样 commit + 推飞书(回落原文)。此前它是裸调用,
     # 一次转存异常会连带 `_record_run`/`_push_listen` 全部跳过(第八轮审计)。
@@ -1817,10 +1864,10 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
         detail += (f" weread_list(ok={enumerable} off={wr_stats.get('weread_list_off', 0)}"
                    f" off_with_new={off_new} skipped={wr_stats.get('weread_list_skipped', 0)})")
     if gate["ok"]:
-        detail += (f" shelf(reviews={gate['reviews']} skip={len(gate['skip'])}"
-                   f" force={len(gate['force'])})")
+        detail += (f" shelf(signals={len(gate['signals'])} skip={len(gate['skip'])}"
+                   f" force={len(gate['force'])} adv={advanced})")
     elif gate["reason"] not in ("", "disabled", "no_shelf_entries"):
-        # 试过但没用上:no_review_field=字段名单该补了(拿 probe 的字段表回来加一行),
+        # 试过但没用上:no_signal_field=条目认不出信号字段(拿 probe 的字段表回来对名单),
         # 异常类名=书架请求本身挂了(本轮已自动退化为逐号问)
         detail += f" shelf(off={gate['reason']})"
     if dajiala_off:
@@ -1873,8 +1920,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     if wr_stats:
         out["weread_list"] = {k: v for k, v in wr_stats.items()}
     if gate["ok"]:
-        out["weread_shelf"] = {"reviews": gate["reviews"], "skip": len(gate["skip"]),
-                               "force": len(gate["force"])}
+        out["weread_shelf"] = {"signals": len(gate["signals"]), "skip": len(gate["skip"]),
+                               "force": len(gate["force"]), "advanced": advanced}
     if miskeyed:
         out["biz_bad_shape"] = miskeyed[:10]
     if dajiala_off:
