@@ -1593,10 +1593,13 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                     from app.services.alert_service import notify_incident
                     notify_incident(
                         session, user_id, "wechat",
-                        f"🟠 微信读书 Cookie 已过期,请更新[{fp}]",
+                        "🟠 微信读书 Cookie 已过期,请更新[" + fp + "]",
                         "自动续期失败。请在浏览器登录 weread.qq.com 后 F12 复制 Cookie,"
                         "粘贴到「Cookie 管理」页 weread 平台(或发给我更新)。"
-                        "粘贴前确认串里有「wr_rt=」——缺它自动续期无从下手,十几小时必过期",
+                        "粘贴前确认串里有「wr_rt=」——缺它自动续期无从下手,十几小时必过期。"
+                        "⚠️ 若服务器出口 IP 刚变过(容器重建/加了代理/换网络),同一把 Cookie 也会立刻被判"
+                        "登录超时(会话与出口 IP 绑定,2026-09-27 实测)——那就先固定出口再重扫,"
+                        "否则新 Cookie 一样当场死",
                         settings=settings)
             except WereadError as exc:
                 failed += 1
