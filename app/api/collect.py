@@ -233,17 +233,32 @@ def douhot_list(list_type: str, keyword: str = "", filter_keyword: str = "", dat
             return {"list_type": list_type, "keyword": kw, "filter_keyword": fk, "date_window": date_window,
                     "items": douhot.fetch_keyword_items(cookie, list_type, kw, settings, filter_keyword=fk,
                                                         date_window=date_window)}
+        errs: list[str] = []
+
+        def _ranked(fn):
+            """副榜统一带上 failures 出参(失败原因),date_window 语义照旧。"""
+            def inner(cookie, settings):
+                return fn(cookie, settings, date_window=date_window, failures=errs)
+            return inner
+
         fetchers = {
             "word": lambda cookie, settings: [{"title": w["title"], "score": w["score"]} for w in douhot.fetch_content_words(cookie, settings, date_window=date_window)],
-            "search": lambda cookie, settings: douhot.fetch_search_words(cookie, settings, date_window=date_window),
-            "video": lambda cookie, settings: douhot.fetch_video_words(cookie, settings, date_window=date_window),
-            "topic": lambda cookie, settings: douhot.fetch_topic_words(cookie, settings, date_window=date_window),
-            "subscribe": douhot.fetch_subscribe_words,
+            "search": _ranked(douhot.fetch_search_words),
+            "video": _ranked(douhot.fetch_video_words),
+            "topic": _ranked(douhot.fetch_topic_words),
+            "subscribe": _ranked(douhot.fetch_subscribe_words),
         }
         fn = fetchers.get(list_type)
         if fn is None:
             raise HTTPException(400, "不支持的榜单类型")
-        return {"list_type": list_type, "items": fn(cookie, settings)}
+        items = fn(cookie, settings)
+        if not items and errs:
+            # 副榜失败返回的是空列表,和"这个榜今天真是空的"一模一样;不报错就是前端
+            # tab 显示"暂无数据"、用户以为热点冷掉了(实际是接口/风控问题)
+            hint = ("(热点宝 Cookie 已失效,请到「Cookie 管理」更新抖音)" if "Auth" in errs[0]
+                    else "(热点宝接口异常或被风控)")
+            raise HTTPException(502, f"热点宝{redact_proxy_creds(errs[0])}{hint}")
+        return {"list_type": list_type, "items": items}
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001

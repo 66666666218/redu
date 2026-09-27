@@ -302,48 +302,63 @@ def _fetch_ranked(
     label: str,
     date_window: int | str | None = None,
     default_window: int = _DEFAULT_DATE_WINDOW,
+    failures: list[str] | None = None,
 ) -> list[dict]:
-    """通用榜单拉取+解析:失败不抛错、返回空列表(这些榜单是可选的补充数据)。"""
+    """通用榜单拉取+解析:失败不抛错、返回空列表(这些榜单是可选的补充数据)。
+
+    `failures`:调用方给一个列表,失败时往里塞一句原因。**"这个榜今天真是空的"和
+    "这个榜没拉下来"都返回 `[]`,不看第二个返回值就分不开**——调用方据此把整轮记成
+    partial 而不是 success(见 `tenant.run_douhot`)。塞的是「榜名 + 异常类型」而不是
+    异常消息:消息会经 RunRecord.detail 上健康页/飞书,而带鉴权代理的 URL 就藏在里面。
+    """
     dw = _normalize_date_window(date_window) if date_window is not None else default_window
     try:
         raw = getattr(DouhotClient(cookie, settings), method_name)(limit=_top_n(settings), date_window=dw)
     except DouhotError as exc:
         logger.warning("热点宝%s拉取失败:%s", label, exc)
+        if failures is not None:
+            failures.append(f"{label}:{type(exc).__name__}")
         return []
     items = [_entry(_pick(it, title_keys), _pick(it, score_keys)) for it in raw]
     return [it for it in items if it["title"]]
 
 
 def fetch_search_words(cookie: str, settings: Settings | None = None,
-                       date_window: int | str | None = None) -> list[dict]:
+                       date_window: int | str | None = None,
+                       failures: list[str] | None = None) -> list[dict]:
     """搜索榜:key_word + search_score。"""
     return _fetch_ranked(cookie, settings, "hot_search", ("key_word", "title"), ("search_score", "score"),
-                         "搜索榜", date_window, default_window=1)
+                         "搜索榜", date_window, default_window=1, failures=failures)
 
 
 def fetch_video_words(cookie: str, settings: Settings | None = None,
-                      date_window: int | str | None = None) -> list[dict]:
+                      date_window: int | str | None = None,
+                      failures: list[str] | None = None) -> list[dict]:
     """视频榜:item_title + play_cnt(无标题的视频条目会被过滤掉)。"""
     return _fetch_ranked(cookie, settings, "video_billboard", ("item_title",), ("play_cnt", "score"),
-                         "视频榜", date_window)
+                         "视频榜", date_window, failures=failures)
 
 
 def fetch_topic_words(cookie: str, settings: Settings | None = None,
-                      date_window: int | str | None = None) -> list[dict]:
+                      date_window: int | str | None = None,
+                      failures: list[str] | None = None) -> list[dict]:
     """话题榜:challenge_name + score。"""
     return _fetch_ranked(
         cookie, settings, "challenge_billboard", ("challenge_name", "title"), ("score", "play_cnt"),
-        "话题榜", date_window,
+        "话题榜", date_window, failures=failures,
     )
 
 
 def fetch_subscribe_words(cookie: str, settings: Settings | None = None,
-                          date_window: int | str | None = None) -> list[dict]:
+                          date_window: int | str | None = None,
+                          failures: list[str] | None = None) -> list[dict]:
     """我的订阅:字段随订阅类型而异,按优先级兜底取标题/分值。"""
     try:
         raw = DouhotClient(cookie, settings).subscribe()
     except DouhotError as exc:
         logger.warning("热点宝订阅拉取失败:%s", exc)
+        if failures is not None:
+            failures.append(f"订阅榜:{type(exc).__name__}")
         return []
     items = [
         _entry(_pick(it, ("title", "key_word", "challenge_name", "word")), _pick(it, ("score", "search_score", "play_cnt")))

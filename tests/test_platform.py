@@ -381,6 +381,77 @@ def test_run_douhot_prev_keys_scoped_to_72h(session, monkeypatch) -> None:
     assert {r.title for r in session.scalars(select(DouhotWord)).all()} == {"老词", "近词", "新词"}
 
 
+def test_run_douhot_marks_degraded_secondary_list(session, monkeypatch) -> None:
+    """用户关注了 search 榜、而该榜这次没拉下来(返回空列表)→ 整轮记 partial 不是 success。
+
+    旧写法把 `DouhotError` 在 fetcher 内部吞成 `[]`,`run_douhot` 无从分辨"今天真是空的",
+    于是 `_record_douhot_watch_snaps` 写进空快照、定向监控词静默断供,健康页却是一片绿。
+    """
+    from config.settings import Settings
+
+    from app.db.models import RunRecord
+    from app.services import alert_service as alert_mod
+    from app.services import douhot as douhot_mod
+
+    cookie_store.set_cookie(session, 1, "douyin", "fake-cookie")
+    tenant.add_douhot_watch(session, 1, "search", "关键词甲")
+    monkeypatch.setattr(douhot_mod, "fetch_content_words",
+                        lambda cookie, settings: [{"title": "词A", "score": 5.0}])
+
+    def _fail(cookie, settings, date_window=None, failures=None):
+        if failures is not None:
+            failures.append("搜索榜:DouhotError")
+        return []
+
+    monkeypatch.setattr(douhot_mod, "fetch_search_words", _fail)
+    monkeypatch.setattr(alert_mod, "evaluate", lambda *a, **k: 0)
+    monkeypatch.setattr(tenant, "_record_douhot_watch_snaps", lambda *a, **k: None)
+
+    def _last_run() -> RunRecord:
+        return session.scalars(select(RunRecord).where(
+            RunRecord.kind == "douhot").order_by(RunRecord.id.desc())).first()
+
+    out = tenant.run_douhot(session, 1, settings=Settings(_env_file=None))
+    assert out["lists_degraded"] == ["search"]
+    assert _last_run().status == "partial" and "lists_degraded=search" in _last_run().detail
+
+    # 副榜真拉到东西 → 仍是 success,detail 里不带降级字段
+    monkeypatch.setattr(douhot_mod, "fetch_search_words",
+                        lambda cookie, settings, date_window=None, failures=None: [{"title": "榜上有词", "score": 2}])
+    out2 = tenant.run_douhot(session, 1, settings=Settings(_env_file=None))
+    assert out2["lists_degraded"] == []
+    assert _last_run().status == "success" and "lists_degraded" not in _last_run().detail
+
+
+def test_douhot_list_endpoint_errors_when_board_fails(session, monkeypatch) -> None:
+    """实时拉榜的 HTTP 面同理:榜没拉下来要报错,不能回 `items: []`。
+
+    前端 tab 把空列表渲染成"暂无数据",用户读成"热点今天冷掉了",而真相是接口/风控挂了
+    ——这一层没人报错,就永远没人去查。
+    """
+    from types import SimpleNamespace
+
+    from app.api import collect as collect_api
+    from app.services import douhot as douhot_mod
+
+    cookie_store.set_cookie(session, 1, "douyin", "fake-cookie")
+
+    def _fail(cookie, settings, date_window=None, failures=None):
+        if failures is not None:
+            failures.append("搜索榜:DouhotError")
+        return []
+
+    monkeypatch.setattr(douhot_mod, "fetch_search_words", _fail)
+    with pytest.raises(HTTPException) as ei:
+        collect_api.douhot_list("search", user=SimpleNamespace(id=1), db=session)  # type: ignore[arg-type]
+    assert ei.value.status_code == 502 and "搜索榜" in str(ei.value.detail)
+
+    monkeypatch.setattr(douhot_mod, "fetch_search_words",
+                        lambda cookie, settings, date_window=None, failures=None: [{"title": "词甲", "score": 1}])
+    out = collect_api.douhot_list("search", user=SimpleNamespace(id=1), db=session)  # type: ignore[arg-type]
+    assert out["items"] == [{"title": "词甲", "score": 1}]
+
+
 def test_douhot_watch_analytics(session) -> None:
     tenant.add_douhot_watch(session, 1, "word", "景甜")
     assert len(tenant.list_douhot_watch(session, 1)) == 1

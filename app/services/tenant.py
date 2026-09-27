@@ -286,19 +286,30 @@ def run_douhot(session: Session, user_id: int, settings: Settings | None = None)
         # (search/video/topic 的监控词走定向查询,拉全榜仅为兜底展示)
         watch_types = {w.list_type for w in session.scalars(select(DouhotWatch).where(DouhotWatch.user_id == user_id)).all()}
         lists: dict[str, list[dict]] = {"word": words}
-        if "search" in watch_types:
-            lists["search"] = douhot.fetch_search_words(douyin_cookie, settings)
-        if "subscribe" in watch_types:
-            lists["subscribe"] = douhot.fetch_subscribe_words(douyin_cookie, settings)
-        if "video" in watch_types:
-            lists["video"] = douhot.fetch_video_words(douyin_cookie, settings)
-        if "topic" in watch_types:
-            lists["topic"] = douhot.fetch_topic_words(douyin_cookie, settings)
+        # 副榜(search/subscribe/video/topic)失败时返回空列表,而"今天真是空的"和
+        # "没拉下来"同形:空列表会照样写进 watch 快照,定向监控就此静默断供却记 success。
+        # 所以逐个榜收失败原因,有降级就把整轮记 partial(不记 failed:主榜已经到手)。
+        degraded: dict[str, str] = {}
+        _fetchers = {
+            "search": douhot.fetch_search_words,
+            "subscribe": douhot.fetch_subscribe_words,
+            "video": douhot.fetch_video_words,
+            "topic": douhot.fetch_topic_words,
+        }
+        for lt, fetch in _fetchers.items():
+            if lt in watch_types:
+                errs: list[str] = []
+                lists[lt] = fetch(douyin_cookie, settings, failures=errs)
+                if errs:
+                    degraded[lt] = errs[0]
         _record_douhot_watch_snaps(session, user_id, lists, douyin_cookie, settings)
         rising = _douhot_rising(session, user_id, settings, now)
-        _record_run(session, user_id, "douhot", "success", f"words={len(words)} risen={len(rising)}")
+        _record_run(session, user_id, "douhot", "partial" if degraded else "success",
+                    f"words={len(words)} risen={len(rising)}"
+                    + (f" lists_degraded={','.join(sorted(degraded))}" if degraded else ""))
         session.commit()
-        return {"platform": "douhot", "count": len(words), "rising": rising}
+        return {"platform": "douhot", "count": len(words), "rising": rising,
+                "lists_degraded": sorted(degraded)}
     except Exception as exc:  # noqa: BLE001
         session.rollback()
         _record_run(session, user_id, "douhot", "failed", f"{type(exc).__name__}: {exc}")

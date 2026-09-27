@@ -159,6 +159,29 @@ def test_optional_list_swallows_error(monkeypatch: pytest.MonkeyPatch) -> None:
     assert douhot.fetch_subscribe_words("ck") == []
 
 
+def test_optional_list_reports_why_it_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """但"空列表"必须能被调用方区分出来:`failures` 出参记下失败榜与异常类型。
+
+    "这个榜今天真是空的"和"这个榜没拉下来"都返回 `[]`,不告诉调用方就只能整轮记 success
+    (定向监控词从此静默断供)。记的是类型不是消息——消息会带上含账密的代理 URL 流出到
+    RunRecord/前端。
+    """
+    _patch_client(monkeypatch, [{"code": 500, "data": None}])
+    errs: list[str] = []
+    assert douhot.fetch_search_words("ck", failures=errs) == []
+    assert errs == ["搜索榜:DouhotError"]
+
+    errs2: list[str] = []
+    assert douhot.fetch_subscribe_words("ck", failures=errs2) == []
+    assert errs2 == ["订阅榜:DouhotError"]
+
+    # 成功时不出声
+    _patch_client(monkeypatch, [_ok({"search_list": [{"key_word": "词甲", "search_score": 1}]})])
+    errs3: list[str] = []
+    assert len(douhot.fetch_search_words("ck", failures=errs3)) == 1
+    assert errs3 == []
+
+
 # ---- 条数配置 ----
 def test_top_n_from_settings() -> None:
     assert douhot._top_n(Settings(_env_file=None, douhot_top_n=50)) == 50
