@@ -506,10 +506,12 @@ WeRSS 挂了会怎样:它的异常是 `PlatformError` 的子类,监听会**降�
 - 启动方式:`scripts/win/app_watchdog.bat` —— 先探 `http://127.0.0.1:8080/healthz`,
   通了就退出(幂等);不通才拉起 uvicorn(隐藏窗口,日志追加到 `data/app.log`)。
   `scripts/win/start_hidden.vbs` 是无窗口包装,给计划任务用。
-- 计划任务(需手动注册,两条):
-  `schtasks /create /tn RedianMonitor_AutoStart /tr "wscript.exe D:\code\redian\scripts\win\start_hidden.vbs" /sc onlogon /delay 0001:00 /f`
-  `schtasks /create /tn RedianMonitor_Watchdog /tr "wscript.exe D:\code\redian\scripts\win\start_hidden.vbs" /sc hourly /mo 1 /f`
-  前者开机登录后 1 分钟自启,后者每小时巡检:进程不在就拉起(应用被杀/重启后自愈)。
+- 计划任务(2026-09-28 实装):**`scripts/win/install_tasks.bat` 一键注册**——
+  ① 每小时看门狗 `RedianMonitor_Watchdog`(用户级 schtasks,免管理员,实测可建);
+  ② 登录自启走**启动文件夹**(`%APPDATA%\...\Startup\RedianMonitor_AutoStart.vbs`)。
+  ⚠️ `schtasks /sc onlogon` 需要管理员,非管理员终端实测报「拒绝访问」——所以自启不用它,
+  启动文件夹效果相同(每次登录自动跑 start_hidden.vbs → 看门狗幂等拉起)。
+  进程被杀 ≤1h 自愈,重启后登录即自启。
 - 端口绑定 127.0.0.1:只能本机浏览器访问,不暴露局域网;要手机访问再改 0.0.0.0 并自担风险。
 - 日志只进 `data/app.log`(追加,无轮转)——排查先看它;库内有 `runs` 表的逐轮记录。
 - 由此顺带定论:闲鱼采集出口 = 家宽住宅 IP,**无需配代理**;滑块靠密度旋钮 + 手机 App
