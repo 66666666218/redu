@@ -7,14 +7,14 @@
 -2041(`Pengyf04/weread-mp-fetcher` 的 HOW-IT-WORKS),也有项目纯 requests + 首页 Referer
 就能列(`rachelos/we-mp-rss` PR#462)。所以这条判断只能在**线上那枚活 Cookie**上分辨。
 
-用法(在生产容器里跑,零副作用:只发 2~4 个只读 GET,不写库、不换 Cookie、不打轮换接口):
+用法(在**有活 Cookie 的机器**上跑,零副作用:只发 3~4 个只读 GET,不写库、不换 Cookie、不打轮换接口):
 
     python scripts/probe_weread_list.py --user 1 [--book-id MP_WXS_xxx]
-    # 带上阅读器页 URL 才算探到 GitHub 说"可用"的那一种上下文:
-    python scripts/probe_weread_list.py --user 1 --reader-url https://weread.qq.com/web/reader/xxxx
 
+三种上下文依次是:首页 Referer(现在的写法)/ 不带 Origin+Referer / 阅读器页
+(`https://weread.qq.com/web/mp/reader/<weread_book_id>`,自动拼,`--reader-url` 可换一种形态试)。
 只打印 errCode 和条数,绝不输出 Cookie。判定:
-- 试过的上下文全 -2041 → 先按账号级限权处理,漏推走"公众号后台身份 + WeRSS"或 dajiala 充值;
+- 三种上下文全失败 → 确实是账号级限权,漏推只能走付费(dajiala)或现成的公众号后台身份;
 - 某一种能出文章 → 把 `app/services/weread_client.py` 的 `_headers` 按那个改,免费全量列表当场复活。
 """
 from __future__ import annotations
@@ -30,12 +30,18 @@ import requests  # noqa: E402
 
 from app.db.database import get_session_local  # noqa: E402
 from app.services import wechat_monitor  # noqa: E402
-from app.services.weread_client import BASE, _UA  # noqa: E402
+from app.services.weread_client import BASE, _AUTH_CODES, _UA  # noqa: E402
 from config.settings import get_settings  # noqa: E402
 
 
-def _call(cookie: str, book_id: str, referer: str | None, offset: int = 0) -> str:
-    """返回一句结论(不含任何凭据):errCode/errmap 或成功时的条数。"""
+# 会话/登录态错误码:这些说明"根本没走到上下文判定",探测结果不成立,不能拿来下结论。
+# -2012/-2010 是本仓库既有的 WereadAuthError 口径,-2013 是按游客处理(缺 cookie jar)。
+_SESSION_CODES = (*_AUTH_CODES, -2013)
+
+
+def _call(cookie: str, book_id: str, referer: str | None,
+          offset: int = 0) -> tuple[str, int | None]:
+    """返回 (一句结论, errCode 或 None)。结论里不含任何凭据。"""
     headers = {"Cookie": cookie, "User-Agent": _UA,
                "Accept": "application/json, text/plain, */*",
                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"}
@@ -47,19 +53,21 @@ def _call(cookie: str, book_id: str, referer: str | None, offset: int = 0) -> st
                             params={"bookId": book_id, "offset": offset, "count": 20},
                             timeout=15, headers=headers)
     except requests.RequestException as exc:
-        return f"请求失败:{type(exc).__name__}"
+        return f"请求失败:{type(exc).__name__}", None
     if resp.status_code != 200:
-        return f"HTTP {resp.status_code}"
+        return f"HTTP {resp.status_code}", None
     try:
         payload = resp.json()
     except ValueError:
-        return "响应非 JSON(大概率被踢到验证页)"
+        return "响应非 JSON(大概率被踢到验证页)", None
     code = payload.get("errCode", payload.get("errcode", 0))
     if code:
-        return f"errCode={code} errmsg={payload.get('errmsg') or payload.get('errlog') or ''}"
+        code = int(code)
+        return (f"errCode={code} errmsg={payload.get('errmsg') or payload.get('errlog') or ''}",
+                code)
     reviews = payload.get("reviews") or []
     subs = sum(len(r.get("subReviews") or []) for r in reviews)
-    return f"OK:群发 {len(reviews)} 组 / 展开 {subs} 篇"
+    return f"OK:群发 {len(reviews)} 组 / 展开 {subs} 篇", None
 
 
 def main() -> int:
@@ -67,8 +75,8 @@ def main() -> int:
     parser.add_argument("--user", type=int, default=1, help="租户 id(取其微信读书 Cookie)")
     parser.add_argument("--book-id", default="", help="要试的 weread_book_id(默认取该租户第一个)")
     parser.add_argument("--reader-url", default="",
-                        help="该号在微信读书的阅读器页完整 URL(浏览器打开后复制);"
-                             "不传就只探首页 Referer 与无 Referer 两种上下文")
+                        help="覆盖阅读器页 Referer(默认按 weread_book_id 自动拼 "
+                             "https://weread.qq.com/web/mp/reader/<bookId>)")
     args = parser.parse_args()
 
     settings = get_settings()
@@ -97,30 +105,35 @@ def main() -> int:
         db.close()
 
     print(f"book={book_id} 号={nickname}")
-    # 阅读器页上下文只能由操作者提供:shelf() 只回 {book_id, name},拿不到 deepLink,
-    # 而我们也没有从 MP_WXS_* 换算阅读器 id 的可靠办法——去微信读书网页打开这个号,复制地址栏。
+    # 阅读器页 URL 可由 weread_book_id 直接拼出(实测 /web/mp/reader/MP_WXS_xxx 是回 200 的 SPA 壳),
+    # 所以不需要人去浏览器里复制;--reader-url 只用于试别的上下文形态。
+    reader = args.reader_url or f"{BASE}/web/mp/reader/{book_id}"
     variants = [("首页 Referer(现在的写法)", f"{BASE}/"),
-                ("不带 Origin/Referer", None)]
-    if args.reader_url:
-        variants.append((f"阅读器页上下文 {args.reader_url[:48]}", args.reader_url))
-    else:
-        print("  (未带 --reader-url:没探阅读器页上下文,而 GitHub 说可用的正是这一种——"
-              "浏览器打开该号的微信读书阅读页,把完整 URL 传进来再跑一次)")
-    results = {}
+                ("不带 Origin/Referer", None),
+                (f"阅读器页 {reader[len(BASE):][:44]}", reader)]
+    results: dict[str, str] = {}
+    codes: list[int | None] = []
     for label, referer in variants:
-        out = _call(cookie, book_id, referer)
+        out, code = _call(cookie, book_id, referer)
         print(f"  [{label}] → {out}")
         results[label] = out
+        codes.append(code)
     # offset 翻页只在至少一种上下文可用时才有意义(全量补采靠它)
     ok = next((k for k, v in results.items() if v.startswith("OK")), None)
     if ok:
-        print(f"  翻页试探({ok} offset=20)→ {_call(cookie, book_id, dict(variants)[ok], offset=20)}")
+        deeper, _ = _call(cookie, book_id, dict(variants)[ok], offset=20)
+        print(f"  翻页试探({ok} offset=20)→ {deeper}")
         print("结论:列表接口可用 → 把 weread_client._headers 改成上面那条上下文,免费全量列表即可复活")
-    else:
-        tried = "、".join(k for k, _ in variants)
-        extra = "" if args.reader_url else "(还没探阅读器页,这一轮不能定论为账号级)"
-        print(f"结论:已试的 {len(variants)} 种上下文({tried})都失败{extra};"
-              f"若阅读器页也试过,就按账号级限权处理,根治走 WeRSS 公众号后台身份或 dajiala 充值")
+        return 0
+    if all(c in _SESSION_CODES for c in codes):
+        # 服务端在鉴权阶段就把会话打回,压根没到"哪种上下文"那一步——这次探测没有结论可言
+        print(f"结论:本轮**不作数**(全部回的是登录态错误码 {sorted(set(codes))}=-2012/-2010/-2013,"
+              "服务端在鉴权阶段就拒了,与 Referer 无关)。"
+              "要分辨 -2041 的成因,必须在**微信读书 Cookie 还活着**的机器上跑;"
+              "线上 Cookie 一失效(本机就是这种),这条探测只能等续期后再做。")
+        return 2
+    print("结论:三种上下文(首页/无 Referer/阅读器页)都拿不到列表 → 按账号级限权处理,"
+          "免费全量列表这条路到此为止,根治只能换凭据(dajiala 付费,或有现成公众号身份走 WeRSS)")
     return 0
 
 
