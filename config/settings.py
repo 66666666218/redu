@@ -77,7 +77,10 @@ class Settings(BaseSettings):
     agent_enabled: bool = True             # 早期苗头 Agent(全板块自主预测)开关
     agent_score_threshold: int = 55        # 苗头判定分数线(≥70 上升,≥85 爆发)
     agent_cooldown_hours: int = 12         # 同一(板块,关键词)的苗头冷却(小时)
-    weread_refresh_cron: str = "50 7,15,23 * * *"  # 微信读书 Cookie 自动续期(每8小时,保证 skey 永不过期)
+    weread_refresh_cron: str = "50 3,7,13,19 * * *"  # 微信读书 Cookie 续期:对齐到 4 个监听定点(4/8/14/20 点)前 10 分钟
+                                     # ——① skey 恒新,轮内 auth 兜底几乎不用出手;② renewal=换新会话,
+                                     # mp/articles 列表只在会话初期可用,每轮都跑在窗口 freshly 重开的会话上,
+                                     # 同日多篇枚举机会最大化(2026-09-28 定稿)
     candidate_search_terms: str = ""   # 候选发现搜索词(逗号分隔;空=仅用对标号标题画像词)
     keyword_search_terms: str = "夸克网盘资源,百度网盘资源,Switch模拟器,PS5游戏资源,剪映模板"  # 关键词文章监控搜索词(逗号分隔,每4h一轮)
     candidate_mine_terms: int = 6      # 标题画像词上限(从已入库标题挖高频内容词)
