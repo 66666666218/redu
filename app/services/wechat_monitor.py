@@ -1280,9 +1280,31 @@ def _is_weread_quota_error(exc: BaseException) -> bool:
     return any(mark in text for mark in _WEREAD_QUOTA_MARKS)
 
 
+_BAN_MARKERS = (("此账号已被屏蔽", "账号封禁"), ("该内容已被发布者删除", "作者删除"),
+                ("此内容因违规无法查看", "违规处理"))
+
+
+def _detect_ban_reason(page_text: str) -> str:
+    """识别微信封文/封号页并提取违规类别;正常页面返回 ''。
+
+    微信公开页**不区分投诉人**——只给「由用户投诉并经平台审核」+ 违规类别;
+    但类别含「版权/商标/专利」即走了知识产权通道,普通用户很少走,批量出现
+    就是版权方清扫的典型特征(2026-09-28 霸王茶姬杯贴文实测:同类资源多号
+    接连被封,盘商分享链同步被批量投诉 41031)。
+    """
+    if not page_text:
+        return ""
+    for marker, note in _BAN_MARKERS:
+        if marker in page_text:
+            ip = ("版权" in page_text or "商标" in page_text or "专利" in page_text)
+            return f"{note}·{'侵权投诉(版权/商标/专利)' if ip else '平台规范'}"
+    return ""
+
+
 def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
                     session: Session, stats: dict | None = None,
-                    breaker: dict | None = None, shelf_ts: str | int | None = None
+                    breaker: dict | None = None, shelf_ts: str | int | None = None,
+                    banned_out: dict[str, str] | None = None
                     ) -> tuple[list[WechatArticle], bool]:
     """微信读书单号采集:**cover 最新一篇(稳定可用)→ mp/articles 列表(可选,常被限权)。
 
@@ -1346,15 +1368,33 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
 
     def _resolve(title: str, url: str = "") -> str:
         body = fetch_article_content(url)
-        if body:
+        reason = _detect_ban_reason(body)
+        if reason:
+            # 封文/封号页不当正文入库(污染检索与分析),状态带出去给卡片标 ⛔
+            if banned_out is not None and url:
+                banned_out[url] = f"{title[:24]}·{reason}"
+        elif body:
             return body
         rid = rid_of.get(url) or ""
-        return weread.mp_content(rid) if rid else ""
+        if not rid:
+            return ""
+        alt = weread.mp_content(rid)   # 惰性回退:直抓成功就绝不追打转发页(2s 节流=风控暴露)
+        reason = _detect_ban_reason(alt)
+        if reason:
+            if banned_out is not None and url:
+                banned_out[url] = f"{title[:24]}·{reason}"
+            return ""
+        return alt
 
     # require_pan=False:不再丢弃无盘链文——"标题不含网盘词"≠"没价值",
     # 此前这道闸把 15 个对标号 10 天的新文全部静默丢弃(用户看到"停更在 9.7"的根因)
     got = _insert_new_articles(session, user_id, b, items, source="listen",
                                content_resolver=_resolve, require_pan=False)
+    if banned_out and got:
+        for r in got:
+            if r.url in banned_out:
+                # 沿用 41031 的标记位语义:卡片网盘列认「原文失效」显示 ⛔,免得员工白点尸体链
+                r.my_pan_urls = f"⚠️原文失效({banned_out[r.url]}),未转存"
     if stats is not None:
         if listed:
             key = "weread_list_ok"
@@ -1689,6 +1729,7 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     breaker: dict = {"list_off": False, "cover_quota_fails": 0, "off": False}
     quota_skipped = 0
     marks_advance: dict[str, str] = {}   # 本轮「问过且答上」的号 → 书架信号值(轮末前移水位)
+    banned: dict[str, str] = {}          # 本轮被封/被删的文章 url → 标题·违规类别(清扫预警用)
     for b in rows:
         used = False
         # ⓪ 免费全量列表(自建 WeRSS 或 wewe-rss 兼容的读书平台):biz 是源认识的形态才首选
@@ -1733,7 +1774,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                 weread = weread or WereadClient(cookie)
                 got, answered = _weread_collect(user_id, b, weread, session,
                                                 stats=wr_stats, breaker=breaker,
-                                                shelf_ts=gate["signals"].get(b.weread_book_id))
+                                                shelf_ts=gate["signals"].get(b.weread_book_id),
+                                                banned_out=banned)
                 # 只有免费源真答了才算"本号已被消费":cover 空响应+列表挂了的"什么都不知道"
                 # 必须留给 ② 的付费兜底,否则 81 号里恰好在风控期的那批两头落空。
                 used = answered
@@ -1760,7 +1802,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                     try:
                         got, answered = _weread_collect(user_id, b, WereadClient(cookie), session,
                                                         stats=wr_stats, breaker=breaker,
-                                                        shelf_ts=gate["signals"].get(b.weread_book_id))
+                                                        shelf_ts=gate["signals"].get(b.weread_book_id),
+                                                        banned_out=banned)
                         used = answered  # 答上了就消费掉,勿再走 dajiala 重复扣费;没答上留给付费兜底
                         if answered and gate["signals"].get(b.weread_book_id):
                             marks_advance[b.weread_book_id] = gate["signals"][b.weread_book_id]
@@ -1837,6 +1880,29 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     except Exception:  # noqa: BLE001 - 水位回写失败不能连累本轮采集与推送
         logger.exception("书架水位回写失败 user=%s", user_id)
         advanced = 0
+    if banned:
+        # 版权清扫预警(2026-09-28 霸王茶姬杯贴文实测引出):同轮 ≥2 篇被投诉下架 = 批量
+        # 维权特征,值得让群里知道(同类资源盘链可能连带失效);单篇只落站内不刷群。
+        # 微信封禁页不区分投诉人,但类别「版权/商标/专利」即知识产权通道——普通用户
+        # 很少走,批量出现即为版权方清扫的典型特征,文案里如实写「疑似」。
+        from app.services.alert_service import notify_incident
+
+        cats = "、".join(sorted({v.split("·")[-1] for v in banned.values()}))
+        if len(banned) >= 2:
+            notify_incident(
+                session, user_id, "wechat",
+                f"⚠️ 疑似版权清扫:本轮 {len(banned)} 篇文章被投诉下架",
+                f"违规类别:{cats}。微信封禁页只标『由用户投诉并经平台审核』,不区分投诉人,"
+                "但知识产权类别的批量投诉基本是版权方维权。同类资源的盘链可能被连带投诉、"
+                "陆续失效——群里看到可用的 🔴 转存链尽快保存,别等卡变 ⛔。"
+                "命中:" + "; ".join(list(banned.values())[:5]),
+                settings=settings, push_feishu=True)
+        else:
+            notify_incident(
+                session, user_id, "wechat",
+                "⚠️ 1 篇文章被投诉下架(仅站内记录)",
+                f"违规类别:{cats}。命中:{list(banned.values())[0]}",
+                settings=settings, push_feishu=False)
     # 后处理(回填/采样/转存/共振)整段关在保存点里:它炸了只撤销自己那半截写,
     # 本轮已采到的新文照样 commit + 推飞书(回落原文)。此前它是裸调用,
     # 一次转存异常会连带 `_record_run`/`_push_listen` 全部跳过(第八轮审计)。
@@ -1889,6 +1955,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
         detail += f" shelf(off={gate['reason']})"
     if dajiala_off:
         detail += f" dajiala_off({dajiala_off})"
+    if banned:
+        detail += f" banned={len(banned)}"
     _record_run(session, user_id, "wechat_listen", status, detail)
     session.commit()
     if push and new_rows:
@@ -1939,6 +2007,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     if gate["ok"]:
         out["weread_shelf"] = {"signals": len(gate["signals"]), "skip": len(gate["skip"]),
                                "force": len(gate["force"]), "advanced": advanced}
+    if banned:
+        out["banned"] = len(banned)
     if miskeyed:
         out["biz_bad_shape"] = miskeyed[:10]
     if dajiala_off:
@@ -2098,6 +2168,8 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
             pan = f"🔴{types}" if types else "🔴我方链"
         elif "41031" in (r.my_pan_urls or ""):
             pan = f"⛔源失效{types}"
+        elif "原文失效" in (r.my_pan_urls or ""):
+            pan = "⛔原文失效"   # 原文被投诉下架(账号封禁/作者删除),链接是尸体别点
         elif (r.pan_urls or "").strip():
             pan = f"⏳待转存{types}"
         else:
@@ -2149,7 +2221,8 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
             {"tag": "note", "elements": [{"tag": "plain_text",
                 "content": "点文章标题打开链接(优先你的夸克转存链) · 网盘列=识别到的盘链,"
                            "—=这篇没带网盘链(仍照常推) · 阅读未采样为 —"
-                           " · 标题后 ·MM-DD=那天发的(旧文/补采,盘链可能已失效)"}]},
+                           " · 标题后 ·MM-DD=那天发的(旧文/补采,盘链可能已失效)"
+                           " · ⛔=原文被投诉下架,别点"}]},
         ]
         if page_idx == 0:
             n_pan = sum(1 for r in rows if (r.pan_urls or "").strip())

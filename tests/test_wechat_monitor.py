@@ -3976,3 +3976,88 @@ def test_push_card_shows_freshness_account_counts_and_pan_summary(session, monke
     assert f" ·{old:%m-%d}" in blob                   # 旧文带日期标注
     assert "📢 号A · 2 篇" in blob                     # 账号行带篇数
     assert "其中 2 篇带网盘资源" in blob               # 卡头资源概览
+
+
+# -------------------------------------------- 第 15 轮:封文识别与版权清扫预警
+def test_detect_ban_reason_categories() -> None:
+    """封禁页类别提取:知识产权通道标记「侵权投诉」,普通页返回空。"""
+    ban = "此账号已被屏蔽, 内容无法查看 由用户投诉并经平台审核，侵犯他人的版权/商标/专利等知识产权"
+    r = wechat_monitor._detect_ban_reason(ban)
+    assert "账号封禁" in r and "侵权投诉" in r
+    assert wechat_monitor._detect_ban_reason("正文正常内容 下载链接见原文") == ""
+    assert "平台规范" in wechat_monitor._detect_ban_reason("此账号已被屏蔽 违反微信公众平台运营规范")
+    assert "作者删除" in wechat_monitor._detect_ban_reason("该内容已被发布者删除")
+
+
+def test_listen_marks_banned_article_and_alerts_inapp(session, monkeypatch) -> None:
+    """封文页不当正文入库、行上落「原文失效」标记;单篇只站内记录不刷群。"""
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    _add_benchmarks(session, 1)
+    monkeypatch.setattr(wechat_monitor, "fetch_article_content", lambda url, timeout=15: "")
+    monkeypatch.setattr(wechat_monitor, "_shelf_slot", lambda bid, every: 1)
+    fake = _ShelfWeread(entries=[_shelf_entry("MP_WXS_1", 1001)])
+    # 标题必须含网盘词(title_hits),否则正文抓取连同封禁检测都不会触发(与生产行为一致)
+    monkeypatch.setattr(fake, "latest_article",
+                        lambda bid: {"title": f"夸克网盘资源 {bid}",
+                                     "url": f"https://mp.weixin.qq.com/s/{bid}",
+                                     "review_id": f"{bid}_r"})
+    BAN = "此账号已被屏蔽, 内容无法查看 由用户投诉并经平台审核，侵犯他人的版权/商标/专利等知识产权"
+    monkeypatch.setattr(fake, "mp_content", lambda rid: BAN)
+    alerts: list[tuple] = []
+    from app.services import alert_service
+    monkeypatch.setattr(alert_service, "notify_incident",
+                        lambda db, uid, kind, title, detail, settings=None, **kw:
+                        alerts.append((title, kw.get("push_feishu", True))) or False)
+
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+                                           weread=fake)
+    art = session.scalars(select(WechatArticle)).one()
+    assert art.content == ""                            # 封禁页不当正文入库
+    assert art.my_pan_urls.startswith("⚠️原文失效")      # 行上标记,卡片据此显示 ⛔
+    assert out["banned"] == 1
+    run = session.scalars(select(RunRecord).where(RunRecord.kind == "wechat_listen")).first()
+    assert "banned=1" in run.detail
+    assert len(alerts) == 1 and alerts[0][1] is False   # 单篇 → 站内,不刷飞书群
+
+
+def test_listen_sweep_alert_two_bans_goes_to_feishu(session, monkeypatch) -> None:
+    """同轮 ≥2 篇被投诉下架 = 批量维权特征 → 飞书群版权清扫预警。"""
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    _add_benchmarks(session, 2)
+    monkeypatch.setattr(wechat_monitor, "fetch_article_content", lambda url, timeout=15: "")
+    monkeypatch.setattr(wechat_monitor, "_shelf_slot", lambda bid, every: 1)
+    fake = _ShelfWeread(entries=[_shelf_entry("MP_WXS_1", 1001),
+                                 _shelf_entry("MP_WXS_2", 1002)])
+    monkeypatch.setattr(fake, "latest_article",
+                        lambda bid: {"title": f"夸克网盘资源 {bid}",
+                                     "url": f"https://mp.weixin.qq.com/s/{bid}",
+                                     "review_id": f"{bid}_r"})
+    BAN = "此账号已被屏蔽 由用户投诉并经平台审核，侵犯他人的版权/商标/专利等知识产权"
+    monkeypatch.setattr(fake, "mp_content", lambda rid: BAN)
+    alerts: list[tuple] = []
+    from app.services import alert_service
+    monkeypatch.setattr(alert_service, "notify_incident",
+                        lambda db, uid, kind, title, detail, settings=None, **kw:
+                        alerts.append((title, detail, kw.get("push_feishu", True))) or False)
+
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+                                           weread=fake)
+    assert out["banned"] == 2
+    sweep = next(a for a in alerts if "版权清扫" in a[0])
+    assert sweep[2] is True                              # 清扫预警发飞书群
+    assert "2 篇" in sweep[0] and "侵权" in sweep[1]
+
+
+def test_push_card_shows_banned_marker(session, monkeypatch) -> None:
+    """卡片网盘列对「原文失效」行显示 ⛔原文失效,员工不再白点尸体链。"""
+    import json as _json
+
+    art = WechatArticle(user_id=1, title="被封的资源文", author="号A", source="listen",
+                        url="https://mp.weixin.qq.com/s/dead",
+                        my_pan_urls="⚠️原文失效(标题·账号封禁·侵权投诉),未转存")
+    session.add(art)
+    session.commit()
+    cards: list[dict] = []
+    _fake_feishu(monkeypatch, cards)
+    wechat_monitor._push_listen(session, 1, _settings(), [art], replacements={})
+    assert "⛔原文失效" in _json.dumps(cards, ensure_ascii=False, default=str)
