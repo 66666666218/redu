@@ -327,36 +327,63 @@ class QuarkTransfer:
             raise QuarkError("分享内无可转存文件")
 
         target_fid = self._ensure_dir(save_dir)
-        payload = {"fid_list": [f["fid"] for f in files],
-                   "fid_token_list": [f.get("share_fid_token", "") for f in files],
-                   "to_pdir_fid": target_fid, "pwd_id": share_id, "stoken": stoken,
-                   "pdir_fid": "0", "scene": "link"}
-        norm_dir = save_dir.strip("/") or "/来自监听"
-        try:
-            data = self._request("POST", "/1/clouddrive/share/sharepage/save",
-                                 json=payload, timeout=60.0)
-        except QuarkError:
-            # 复用持久化 fid 时目录可能已被用户删/移动:清缓存重建后重试一次
-            if norm_dir not in self._used_store:
-                raise
-            logger.warning("夸克缓存 fid 已失效(%s),重建目录后重试", norm_dir)
-            self.invalidate_dir(norm_dir)
-            payload["to_pdir_fid"] = self._ensure_dir(save_dir)
-            data = self._request("POST", "/1/clouddrive/share/sharepage/save",
-                                 json=payload, timeout=60.0)
-        task_data = data.get("data", {})
-        new_ids = (task_data.get("save_as", {}) or {}).get("save_as_top_fids", []) or []
-        task_id = str(task_data.get("task_id") or task_data.get("taskId") or "")
-        if not new_ids:
-            new_ids = self._wait_task_fids(task_id)
-        if not new_ids:
-            names = [f.get("file_name") for f in files if f.get("file_name")]
-            new_ids = [e["fid"] for e in self._list_dir(target_fid) if e.get("file_name") in names]
-        if not new_ids:
-            raise QuarkError(f"夸克保存任务未返回新文件 ID task_id={task_id or '空'}")
+        # 文件级去重:盘商"同一资源换条分享链再发"是常态,wechat_monitor 的链接级复用
+        # (批内/历史两层)管不住这种。同名+同大小视为同一文件已存过:跳过保存、直接把
+        # 已有文件并入分享——避免同资源重复占空间;大小任一侧缺失不参与匹配
+        # (宁多存一份,不冒领错文件)。
+        by_name: dict[str, list[dict]] = {}
+        for e in self._list_dir(target_fid):
+            if e.get("file_name"):
+                by_name.setdefault(e["file_name"], []).append(e)
+        fresh: list[dict] = []
+        matched_ids: list[str] = []
+        for f in files:
+            cands = [e for e in by_name.get(f.get("file_name") or "", [])
+                     if f.get("size") is not None and e.get("size") == f.get("size")]
+            if cands:
+                matched_ids.append(str(cands[0]["fid"]))
+            else:
+                fresh.append(f)
+        if matched_ids and not fresh:
+            logger.info("夸克文件级复用:分享内文件均已存在,免保存直接分享(%d 个)",
+                        len(matched_ids))
+        if fresh:
+            payload = {"fid_list": [f["fid"] for f in fresh],
+                       "fid_token_list": [f.get("share_fid_token", "") for f in fresh],
+                       "to_pdir_fid": target_fid, "pwd_id": share_id, "stoken": stoken,
+                       "pdir_fid": "0", "scene": "link"}
+            norm_dir = save_dir.strip("/") or "/来自监听"
+            try:
+                data = self._request("POST", "/1/clouddrive/share/sharepage/save",
+                                     json=payload, timeout=60.0)
+            except QuarkError:
+                # 复用持久化 fid 时目录可能已被用户删/移动:清缓存重建后重试一次
+                if norm_dir not in self._used_store:
+                    raise
+                logger.warning("夸克缓存 fid 已失效(%s),重建目录后重试", norm_dir)
+                self.invalidate_dir(norm_dir)
+                payload["to_pdir_fid"] = self._ensure_dir(save_dir)
+                data = self._request("POST", "/1/clouddrive/share/sharepage/save",
+                                     json=payload, timeout=60.0)
+            task_data = data.get("data", {})
+            new_ids = (task_data.get("save_as", {}) or {}).get("save_as_top_fids", []) or []
+            task_id = str(task_data.get("task_id") or task_data.get("taskId") or "")
+            if not new_ids:
+                new_ids = self._wait_task_fids(task_id)
+            if not new_ids:
+                names = [f.get("file_name") for f in fresh if f.get("file_name")]
+                new_ids = [e["fid"] for e in self._list_dir(target_fid) if e.get("file_name") in names]
+            if not new_ids and not matched_ids:
+                raise QuarkError(f"夸克保存任务未返回新文件 ID task_id={task_id or '空'}")
+        else:
+            new_ids = []
+        # 分享清单 = 新存文件 + 已存在的同名同大小文件(部分命中时资源完整)
+        share_ids = [str(x) for x in (list(new_ids) + matched_ids)]
+        if not share_ids:
+            raise QuarkError("无可分享文件(保存未返回且目录无匹配)")
 
         expired_type = 1 if expire_days <= 0 else 2
-        share_payload: dict[str, Any] = {"fid_list": new_ids, "title": "监听转存",
+        share_payload: dict[str, Any] = {"fid_list": share_ids, "title": "监听转存",
                                          "url_type": 1, "expired_type": expired_type}
         if expire_days > 0:
             share_payload["expire_time"] = expire_days * 86400
@@ -380,8 +407,9 @@ class QuarkTransfer:
             if share_data.get("share_url") else None
         new_url = url_m.group(0) if url_m else f"https://pan.quark.cn/s/{new_share_id}"
         out_password = str(share_data.get("passcode") or password or "")
-        logger.info("夸克转存+分享完成: %s 个文件 → %s (%s 个文件)", len(new_ids), new_url, len(new_ids))
-        return {"share_url": new_url, "password": out_password, "files": len(new_ids)}
+        logger.info("夸克转存+分享完成: %s 个文件(含复用 %s 个)→ %s",
+                    len(share_ids), len(matched_ids), new_url)
+        return {"share_url": new_url, "password": out_password, "files": len(share_ids)}
 
     @staticmethod
     def _find_first(data: Any, keys: set[str]) -> Any:

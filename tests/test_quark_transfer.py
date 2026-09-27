@@ -223,3 +223,64 @@ class TestEnsureDirFallback:
         qt2._mk_dir = lambda p, n: calls.append(n) or "fidE"
         assert qt2._ensure_dir("/redian监听") == "fidE"
         assert calls  # 失效后重新走了创建
+
+
+class TestTransferFileDedup:
+    """文件级去重:同名+同大小的文件不重复保存,直接把已有文件并入分享。
+
+    盘商"同一资源换条分享链再发"是常态,链接级复用(wechat_monitor 批内/历史两层)
+    管不住这种;去重发生在 transfer_and_share 内部,对调用方透明。
+    """
+
+    @staticmethod
+    def _qt(monkeypatch, dir_entries, save_calls):
+        qt = QuarkTransfer("cookie=test")
+        monkeypatch.setattr(qt, "_parse_share", lambda u: ("sidX", ""))
+        monkeypatch.setattr(qt, "_get_stoken", lambda s, p: "stok")
+        monkeypatch.setattr(qt, "_list_share_files", lambda s, t: [
+            {"fid": "sf1", "share_fid_token": "t1", "file_name": "资源.mp4", "size": 100}])
+        monkeypatch.setattr(qt, "_ensure_dir", lambda d: "dirFID")
+        monkeypatch.setattr(qt, "_list_dir", lambda fid="0": dir_entries)
+
+        def fake_request(method, path, api="", params=None, json=None, timeout=30.0):
+            if path.endswith("/save"):
+                save_calls.append(json["fid_list"])
+                return {"data": {"save_as": {"save_as_top_fids": ["newFID"]}}}
+            if path == "/1/clouddrive/share":
+                return {"data": {"share_id": "ns1"}}
+            return {"data": {"share_url": "https://pan.quark.cn/s/ns1", "passcode": "ab12"}}
+        monkeypatch.setattr(qt, "_request", fake_request)
+        return qt
+
+    def test_identical_file_not_saved_again(self, monkeypatch):
+        """同名+同大小已存在 → 不调保存接口,直接分享已有文件。"""
+        save_calls = []
+        qt = self._qt(monkeypatch, [{"fid": "oldFID", "file_name": "资源.mp4", "size": 100}],
+                      save_calls)
+        out = qt.transfer_and_share("https://pan.quark.cn/s/abc123", save_dir="/x")
+        assert save_calls == []                    # 一次保存都没发生
+        assert out["share_url"] == "https://pan.quark.cn/s/ns1"
+
+    def test_new_file_still_saved(self, monkeypatch):
+        """目录里没有同名同大小 → 照常保存(去重不能误伤新资源)。"""
+        save_calls = []
+        qt = self._qt(monkeypatch, [{"fid": "other", "file_name": "别的.mp4", "size": 100}],
+                      save_calls)
+        out = qt.transfer_and_share("https://pan.quark.cn/s/abc123", save_dir="/x")
+        assert save_calls == [["sf1"]]             # 保存的是分享内那份
+        assert out["files"] == 1
+
+    def test_same_name_diff_size_saved(self, monkeypatch):
+        """同名但大小不同(换了内容)→ 不算同一文件,照常保存。"""
+        save_calls = []
+        qt = self._qt(monkeypatch, [{"fid": "oldFID", "file_name": "资源.mp4", "size": 999}],
+                      save_calls)
+        qt.transfer_and_share("https://pan.quark.cn/s/abc123", save_dir="/x")
+        assert save_calls == [["sf1"]]
+
+    def test_size_missing_never_matches(self, monkeypatch):
+        """大小缺失(目录项或分享项任一侧)不参与匹配:宁多存一份,不冒领错文件。"""
+        save_calls = []
+        qt = self._qt(monkeypatch, [{"fid": "oldFID", "file_name": "资源.mp4"}], save_calls)
+        qt.transfer_and_share("https://pan.quark.cn/s/abc123", save_dir="/x")
+        assert save_calls == [["sf1"]]
