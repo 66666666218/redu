@@ -496,3 +496,21 @@ WeRSS 挂了会怎样:它的异常是 `PlatformError` 的子类,监听会**降�
   且旧进程带旧密钥持续回写坏行,新进程读不了。`get_cookies` 此前静默跳过坏行,故障被掩盖。
 - 修复:① `get_cookies` 对"行存在但解不开"自动用该平台全局配置/Cookie 文件以当前密钥回写(自愈);
   无兜底源的告警提示重贴。② `.env` 必须固定 `JWT_SECRET`(生产),否则每次重启丢所有登录态和 Cookie。
+
+## 12. Windows 常驻部署(生产 = 本机,2026-09-28 确认)
+
+生产环境就是本机 Windows:sqlite(`data/platform.db`)+ uvicorn(`app.platform:app`,127.0.0.1:8080),
+无第二台服务器。**2026-09-20 22:34 应用被关闭后静默停机 7 天无人发现**——所有告警都跑在应用内部,
+应用死了告警也死,这是本节要根治的问题。
+
+- 启动方式:`scripts/win/app_watchdog.bat` —— 先探 `http://127.0.0.1:8080/healthz`,
+  通了就退出(幂等);不通才拉起 uvicorn(隐藏窗口,日志追加到 `data/app.log`)。
+  `scripts/win/start_hidden.vbs` 是无窗口包装,给计划任务用。
+- 计划任务(需手动注册,两条):
+  `schtasks /create /tn RedianMonitor_AutoStart /tr "wscript.exe D:\code\redian\scripts\win\start_hidden.vbs" /sc onlogon /delay 0001:00 /f`
+  `schtasks /create /tn RedianMonitor_Watchdog /tr "wscript.exe D:\code\redian\scripts\win\start_hidden.vbs" /sc hourly /mo 1 /f`
+  前者开机登录后 1 分钟自启,后者每小时巡检:进程不在就拉起(应用被杀/重启后自愈)。
+- 端口绑定 127.0.0.1:只能本机浏览器访问,不暴露局域网;要手机访问再改 0.0.0.0 并自担风险。
+- 日志只进 `data/app.log`(追加,无轮转)——排查先看它;库内有 `runs` 表的逐轮记录。
+- 由此顺带定论:闲鱼采集出口 = 家宽住宅 IP,**无需配代理**;滑块靠密度旋钮 + 手机 App
+  过滑块的一分钟闭环(§10)。笔记本带出家门 = 出口变更,微信读书 Cookie 会当场 -2012(§9)。
