@@ -1551,7 +1551,9 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                 weread = weread or WereadClient(cookie)
                 got, answered = _weread_collect(user_id, b, weread, session,
                                                 stats=wr_stats, breaker=breaker)
-                used = True
+                # 只有免费源真答了才算"本号已被消费":cover 空响应+列表挂了的"什么都不知道"
+                # 必须留给 ② 的付费兜底,否则 81 号里恰好在风控期的那批两头落空。
+                used = answered
                 if got:
                     new_rows.extend(got)
                     b.miss_count = 0
@@ -1572,7 +1574,7 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                     try:
                         got, answered = _weread_collect(user_id, b, WereadClient(cookie), session,
                                                         stats=wr_stats, breaker=breaker)
-                        used = True  # 微信读书源已消费本号,勿再走 dajiala 重复扣费
+                        used = answered  # 答上了就消费掉,勿再走 dajiala 重复扣费;没答上留给付费兜底
                         if got:
                             new_rows.extend(got)
                             b.miss_count = 0
@@ -2206,6 +2208,8 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
     added: list[WechatArticle] = []
     offset = ""
     pages = 0
+    no_balance = False
+    saw_items = False
     try:
         while pages < limit:
             obj = client.history_by_ghid(ghid=b.ghid, article_url="" if b.ghid else b.anchor_url,
@@ -2217,6 +2221,8 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
                 b.nickname = str(acct["NickName"])[:128]
             items = _extract_articles(_deep_find(obj, "MsgList"),
                                       url_keys=("content_url", "ContentUrl", "url"))
+            if items:
+                saw_items = True
             added.extend(_insert_new_articles(session, user_id, b, items, source="sync", require_pan=False))
             pages += 1
             paging = _deep_find(obj, "PagingInfo") or {}
@@ -2224,16 +2230,31 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
                 break
             offset = str(paging.get("Offset"))
     except DajialaNoBalance:
+        no_balance = True
         logger.warning("同步中途余额不足(用户 %s 账号 %s,已入库 %d 篇)", user_id, b.nickname, len(added))
-    b.last_item_at = datetime.now()
+    # last_item_at 只在源真给了文章时前移:余额在首页就被拒也把它刷成"刚刚",
+    # 前端「最后发文」就永远显示新鲜,停更的号看不出停更
+    if saw_items:
+        b.last_item_at = datetime.now()
     push = _sync_push_after_transfer(session, user_id, settings, added)
-    status = "partial" if added and pages >= limit else "success"
-    _record_run(session, user_id, "wechat_sync", status if added or pages else "success",
+    # 一页都没拉到绝不能记 success:run_full_sync_if_pending 按 status==success 累加 synced,
+    # 走完一轮就删掉「全量补采」标记——虚报成功等于在历史文章一篇没补的情况下销毁这个
+    # 一次性窗口(标记只在 Cookie 续期时打上)。落库不用 "failed":retry_failed_runs 会把
+    # wechat_sync 的 failed 当"再跑一轮监听"重试(admin._retry_runners),而缺的是余额不是
+    # 网络,重试修不好它,反而白烧一轮微信读书额度(2026-09-27)。
+    if no_balance:
+        status = "failed" if pages == 0 else "partial"
+    elif added and pages >= limit:
+        status = "partial"
+    else:
+        status = "success"
+    _record_run(session, user_id, "wechat_sync", "partial" if status == "failed" else status,
                 f"pages={pages} new={len(added)} pushed={push['pushed']} "
-                f"deduped={push['deduped']} truncated={push['truncated']} account={b.nickname}")
+                f"deduped={push['deduped']} truncated={push['truncated']} account={b.nickname}"
+                + (" reason=low_balance_midway" if no_balance else ""))
     session.commit()
     return {"platform": "wechat_sync", "status": status, "pages": pages, "new": len(added),
-            "ghid": b.ghid, "nickname": b.nickname, **push}
+            "no_balance": no_balance, "ghid": b.ghid, "nickname": b.nickname, **push}
 
 def _apply_sample(session: Session, user_id: int, r: WechatArticle, data: dict, now: datetime) -> None:
     """把 read_zan_pro 结果写回文章 + 追加一个采样点(首采样记 first_read_num 做账号基线)。"""
@@ -2340,6 +2361,7 @@ def sample_traffic(session: Session, user_id: int, settings: Settings | None = N
     rows = rows[:limit]
     if not rows:
         return {"platform": "wechat_traffic", "status": "skipped", "reason": "no_targets"}
+    targets = len(rows)
 
     try:
         balance = client.remain_money()
@@ -2352,18 +2374,22 @@ def sample_traffic(session: Session, user_id: int, settings: Settings | None = N
         _record_run(session, user_id, "wechat_traffic", "skipped", f"low_balance={balance:.2f}")
         session.commit()
         return {"platform": "wechat_traffic", "status": "skipped", "reason": "low_balance",
-                "balance": balance, "targets": len(rows)}
+                "balance": balance, "targets": targets}
     rows = rows[:affordable]
 
     sampled = 0
+    errored = 0
+    ran_out = False
     now = datetime.now()
     for r in rows:
         try:
             data = client.read_zan_pro(r.url)
         except DajialaNoBalance:
+            ran_out = True
             logger.warning("阅读量采样中途余额不足(用户 %s),已采 %d 篇", user_id, sampled)
             break
         except DajialaError as exc:
+            errored += 1
             logger.warning("阅读量采样失败 url=%s:%s", r.url, exc)
             continue
         prev_read = r.read_num if (r.sample_count or 0) >= 1 else None
@@ -2388,9 +2414,22 @@ def sample_traffic(session: Session, user_id: int, settings: Settings | None = N
                     r.trend_flag = "爆点苗头"
                     _notify_burst(session, user_id, settings, r, None, baseline=median)
     session.commit()
-    _record_run(session, user_id, "wechat_traffic", "success", f"sampled={sampled}")
+    # 采样是付费的:付费轮次只写"sampled=1"而看不出"20 个目标里 19 个报错"或
+    # "余额在半路耗尽",运维就会把烧了钱的失败轮当成功轮。
+    by_budget = targets - len(rows)
+    if sampled and not errored and not ran_out:
+        status = "success"
+    elif sampled:
+        status = "partial"
+    else:
+        status = "failed"
+    _record_run(session, user_id, "wechat_traffic", status,
+                f"sampled={sampled} failed={errored} targets={targets}"
+                + (f" by_budget={by_budget}" if by_budget > 0 else "")
+                + (" low_balance_midway" if ran_out else ""))
     session.commit()
-    return {"platform": "wechat_traffic", "status": "success", "sampled": sampled,
+    return {"platform": "wechat_traffic", "status": status, "sampled": sampled,
+            "failed": errored, "targets": targets, "ran_out": ran_out,
             "balance_after": client.remain_money() if sampled else balance}
 
 def pan_cookie_keepalive_tick(settings: Settings | None = None) -> int:

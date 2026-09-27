@@ -518,6 +518,64 @@ def test_sync_respects_max_pages(monkeypatch: pytest.MonkeyPatch, session) -> No
     assert sum(1 for c in fake.calls if c[0] == "hist") == 2
 
 
+def _page_of(items, offset, is_end):
+    return {"code": 0, "data": {
+        "MsgList": {"Msg": [{"AppMsg": {"DetailInfo": items}}]},
+        "PagingInfo": {"Offset": offset, "IsEnd": is_end},
+    }}
+
+
+def test_sync_dajiala_no_balance_at_first_page_is_not_success(session) -> None:
+    """余额在首页就被拒 → 这次同步一篇历史都没拉到,绝不能记 success。
+
+    `run_full_sync_if_pending` 按 `status == "success"` 累加 synced 并在全轮走完后删掉
+    「全量补采」标记:虚报成功等于在历史文章一篇没补的情况下把标记销毁,而它是
+    会话初期(唯一能拿到列表的窗口)一次性资源。
+    """
+    from app.services.dajiala_client import DajialaNoBalance
+
+    b = WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A")
+    session.add(b)
+    session.commit()
+
+    class _Broke(FakeClient):
+        def history_by_ghid(self, ghid="", article_url="", offset=""):
+            self.calls.append(("hist", ghid, article_url, offset))
+            raise DajialaNoBalance("余额不足")
+
+    out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=_settings(), client=_Broke())
+    assert out["status"] == "failed" and out["pages"] == 0 and out["no_balance"] is True
+    # 没见到任何文章就不该把「最后发文」刷成刚刚
+    assert b.last_item_at is None
+    run = session.scalars(select(RunRecord).where(RunRecord.kind == "wechat_sync")).one()
+    # 落库是 partial 而非 failed:failed 的 wechat_sync 会被 retry_failed_runs 重试成
+    # 一整轮监听,缺余额这种事重试修不好,只会白烧微信读书额度
+    assert run.status == "partial" and "low_balance_midway" in run.detail
+
+
+def test_sync_dajiala_no_balance_midway_is_partial_and_keeps_seen_items(session) -> None:
+    """第一页拿到了文章、第二页余额见底 → partial(历史被截断),但 last_item_at 可以前移。"""
+    from app.services.dajiala_client import DajialaNoBalance
+
+    b = WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A")
+    session.add(b)
+    session.commit()
+
+    class _HalfBroke(FakeClient):
+        def history_by_ghid(self, ghid="", article_url="", offset=""):
+            self.calls.append(("hist", ghid, article_url, offset))
+            if offset:
+                raise DajialaNoBalance("余额不足")
+            return _page_of([{"Title": "历史文1 百度网盘",
+                              "ContentUrl": "https://mp.weixin.qq.com/s/h1"}], "OFF1", 0)
+
+    out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=_settings(), client=_HalfBroke())
+    assert out["status"] == "partial" and out["pages"] == 1 and out["new"] == 1
+    assert b.last_item_at is not None
+    run = session.scalars(select(RunRecord).where(RunRecord.kind == "wechat_sync")).one()
+    assert run.status == "partial" and "low_balance_midway" in run.detail
+
+
 # ---------------------------------------------------------------- 微信读书(免费源)
 from app.services.cookie_store import set_cookie as _set_cookie
 from app.services.weread_client import review_to_url
@@ -1391,6 +1449,54 @@ def test_sample_traffic_balance_trims(session, monkeypatch: pytest.MonkeyPatch) 
     out = wechat_monitor.sample_traffic(session, 1, settings=_settings(), client=fake)
     assert out["sampled"] == 1
     assert out["balance_after"] >= 0
+
+
+def test_sample_traffic_reports_failures_instead_of_blank_success(session) -> None:
+    """付费采样轮次必须把"几个目标、几个报错、是不是半路没钱"写进运行记录。
+
+    旧实现只记 `sampled=N` 并一律 success:3 个目标里 2 个报错也长得像一轮好轮,
+    运维既看不出钱白花在哪,也看不出余额半路耗尽导致的截断。
+    """
+    from app.services.dajiala_client import DajialaError
+
+    b = WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A")
+    session.add(b)
+    session.add_all([
+        WechatArticle(user_id=1, title=f"文{i}", url=f"https://mp.weixin.qq.com/s/n{i}",
+                      source="listen", benchmark_id=b.id) for i in (1, 2, 3)
+    ])
+    session.commit()
+
+    class _Flaky(FakeClient):
+        def read_zan_pro(self, url):
+            self.calls.append(("zan", url))
+            if url.endswith("n2"):
+                raise DajialaError("接口异常")
+            return {"read": 10, "zan": 1, "looking": 1, "share_num": 1,
+                    "collect_num": 1, "comment_count": 1}
+
+    out = wechat_monitor.sample_traffic(session, 1, settings=_settings(), client=_Flaky(remain=10.0))
+    assert out["status"] == "partial" and out["sampled"] == 2 and out["failed"] == 1
+    run = session.scalars(select(RunRecord).where(
+        RunRecord.kind == "wechat_traffic").order_by(RunRecord.id.desc())).first()
+    assert "sampled=2" in run.detail and "failed=1" in run.detail and "targets=3" in run.detail
+
+
+def test_sample_traffic_all_targets_fail_is_not_success(session) -> None:
+    from app.services.dajiala_client import DajialaError
+
+    b = WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A")
+    session.add(b)
+    session.add(WechatArticle(user_id=1, title="文1", url="https://mp.weixin.qq.com/s/n1",
+                              source="listen", benchmark_id=b.id))
+    session.commit()
+
+    class _AllFail(FakeClient):
+        def read_zan_pro(self, url):
+            raise DajialaError("接口异常")
+
+    out = wechat_monitor.sample_traffic(session, 1, settings=_settings(), client=_AllFail(remain=10.0))
+    assert out["status"] == "failed" and out["sampled"] == 0
 
 
 # ---------------------------------------------------------------- 盘链归一化 + 资源共振
@@ -3612,3 +3718,30 @@ def test_listen_quota_skip_covered_by_paid_source_is_not_blind(session, monkeypa
     assert out["weread_quota_skipped"] == 1
     titles = {r.title for r in session.scalars(select(WechatArticle)).all()}
     assert {"付费源补回 1", "付费源补回 2", "付费源补回 3"} <= titles
+
+
+def test_listen_free_source_that_never_answers_leaves_the_account_to_paid(session, monkeypatch) -> None:
+    """免费源"跑过但没答上"(cover 空响应 + 列表挂)不等于"这个号今天没发文"。
+
+    旧实现只要没抛异常就置 `used = True`,于是 ② 的付费兜底再也不会为这个号点火:
+    恰好在风控期的那批号两头落空,而运行记录长得像"全都问过了"。
+    """
+    from app.services.weread_client import WereadError
+
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    _add_benchmarks(session, 1)
+    b = session.scalars(select(WechatBenchmark)).one()
+    b.anchor_url = "https://mp.weixin.qq.com/s/A1"
+    session.commit()
+    monkeypatch.setattr(wechat_monitor, "fetch_article_content", lambda url, timeout=15: "")
+    pc = {b.anchor_url: {"code": 0, "data": [
+        {"title": "付费源补回", "url": "https://mp.weixin.qq.com/s/paid1"}]}}
+    fake = FakeWeread(cover=None, list_error=WereadError("mp/articles 其它异常"))
+
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(),
+                                          client=FakeClient(pc=pc), weread=fake)
+    assert out["new"] == 1
+    assert {r.title for r in session.scalars(select(WechatArticle)).all()} == {"付费源补回"}
+    # 免费源没答上 → miss_count 也不该被推成"确认停更"
+    session.refresh(b)
+    assert b.miss_count == 0
