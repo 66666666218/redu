@@ -149,17 +149,24 @@ class WereadClient:
         return payload
 
     # ---- 三个业务端点 ----
-    def shelf(self) -> list[dict]:
-        """书架(=微信读书内关注的公众号):[{book_id, name}, ...],只保留 MP_WXS_* 条目。"""
+    def shelf_entries(self) -> list[dict]:
+        """书架原始条目(仅 MP_WXS_*):[{"bookId":..., "title":..., <服务端附带字段>}, ...]。
+
+        与 shelf() 的区别:保留服务端原样字段(可能含 reviewId 类"最新文章"信号),
+        供书架粗筛(wechat_monitor._shelf_gate_plan)逐字段探测。原始返回形状尚未在
+        线上验证过,调用方必须容得下"字段不存在"——缺信号就退化为不筛,不得猜。
+        """
         # userVid 必须传空字符串(非空会 -2012,社区实测结论)
         data = self._get("/web/shelf/sync", {"userVid": "", "synckey": 0, "lectureSynckey": 0})
+        return [item for item in (data.get("books") or [])
+                if str(item.get("bookId") or "").startswith("MP_WXS_")]
+
+    def shelf(self) -> list[dict]:
+        """书架(=微信读书内关注的公众号):[{book_id, name}, ...],只保留 MP_WXS_* 条目。"""
         books = []
-        for item in (data.get("books") or []):
-            book_id = str(item.get("bookId") or "")
-            if not book_id.startswith("MP_WXS_"):
-                continue
+        for item in self.shelf_entries():
             name = str(item.get("title") or item.get("bookName") or item.get("name") or "").strip()
-            books.append({"book_id": book_id, "name": name})
+            books.append({"book_id": item["bookId"], "name": name})
         return books
 
     def mp_cover(self, book_id: str) -> dict:

@@ -61,6 +61,8 @@ class Settings(BaseSettings):
     wechat_repush_window_hours: int = 24     # 补推窗口:入库 N 小时内未送达飞书的文章还要补
     wechat_repush_limit: int = 100           # 单轮补推篇数上限(超出留给下一轮,不一次刷屏)
     wechat_listen_lock_ttl_minutes: int = 20 # 监听"在跑"标记的有效期(超过视为进程被杀,允许后来者接管)
+    weread_shelf_gate: bool = True    # 监听轮书架粗筛:1 次书架先分"谁没更新",cover 只问有变化的号(判据可证安全,任何不确定自动停用)
+    weread_shelf_gate_every: int = 4  # 书架说"没更新"的号每 N 轮仍强制问一次 cover(错判盲区上界=N 轮;4 轮/天 → 每号每天至少真问一次)
     deepseek_api_key: str = ""               # DeepSeek API key(LLM 叙事层,OpenAI 兼容)
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"

@@ -790,6 +790,11 @@
 - **响应示例**: `{ "platform":"wechat", "status":"success", "accounts":2, "new":5, "failed":0 }`
   余额不足时: `{ "platform":"wechat", "status":"success", "accounts":2, "new":1, "failed":0,
   "dajiala_skipped":"low_balance", "balance":0.02 }`;本轮开头补推了上一轮欠推的文章时多一个 `repushed:N`
+- **书架粗筛(2026-09-27)**:微信读书源问 cover 前先发 1 次 `/web/shelf/sync`,书架 reviewId 与
+  该号库里最新一篇对得上的号直接跳过(省白问,判据与失效保护见 doc/operations.md §9.2)。
+  粗筛生效时响应多一个键: `"weread_shelf": {"reviews":81, "skip":60, "force":3}`
+  (reviews=认出 reviewId 字段的号数 / skip=本轮跳过 / force=强制问询),停用时不出现该键,
+  运行记录 detail 以 `shelf(off=原因)` 记录停用原因
 - **并发防重(2026-09-26)**: 同一用户同时只跑一轮(在跑标记落 `system_config` 的
   `wechat_listen_running_<uid>`),手动点击撞上定时轮/失败重试时返回
   `{ "platform":"wechat", "status":"skipped", "reason":"running" }`,零采集副作用;
