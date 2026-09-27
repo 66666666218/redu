@@ -2658,13 +2658,13 @@ def test_listen_exposes_unenumerable_accounts_and_alerts(session, monkeypatch) -
     out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""), push=True)
     assert out["new"] == 2 and out["weread_list"] == {"weread_list_off_new": 2}
     run = session.scalars(select(RunRecord).where(RunRecord.kind == "wechat_listen")).first()
-    assert "weread_list(ok=0 off=0 off_with_new=2)" in run.detail
+    assert "weread_list(ok=0 off=0 off_with_new=2 skipped=0)" in run.detail
     alert = next((a for a in alerts if a[2].startswith("⚠️ 微信读书")), None)
     assert alert is not None and alert[2] == "⚠️ 微信读书只能拿到最新一篇,同日其它篇可能漏推"
     assert "列不出却采到新文的号:2" in alert[3]  # 数字放正文,标题稳定才冷却去重有效
     # 2026-09-27 实测三种上下文全 -2041 后,文案不再承诺"换 Referer 能复活",改给两条真能走的路
     assert "dajiala" in alert[3] and "公众号后台身份" in alert[3]
-    assert "-2041" in alert[3] and "救不回来" in alert[3]
+    assert "-2041" in alert[3] and "-2014" in alert[3]   # 额度类两个码都点名,才说得出"密度"这个根因
     # cover 的正文兜住了 → 盘链被认出,于是"有链却没 Cookie 转存"也必须点名(修 1 之后这两篇
     # 不再是卡片上的一根"—");没转存可解释,静默不可接受。
     assert any("缺夸克 Cookie" in a[2] for a in alerts)
@@ -3478,3 +3478,137 @@ def test_self_share_marker_stays_out_of_href(session, monkeypatch) -> None:
     assert "https://pan.quark.cn/s/SELF)" in blob
     assert "自分享)" not in blob
     assert "🔴夸克网盘" in blob
+
+
+# ------------------------------------------------ 第 11 轮:微信读书额度熔断
+# 81 个号全靠这一把 Cookie,而一轮要发 ~162 次请求(每号 cover + 列表各一次)。
+# 微信读书按会话/IP 记额度:队头十几个号吃光之后,后面的号连 cover 都被 -2014 挡回,
+# 于是"监控全部账号"实际退化成"只监控到 id 最小的那几个"。
+class _QuotaWeread:
+    """假微信读书:可编排"哪些号的列表被额度挡回""从第几个号起 cover 也被挡回"。"""
+
+    def __init__(self, list_quota_books=(), no_cover_books=(),
+                 cover_quota_from=None, cover_hard_from=None) -> None:
+        self.calls: list[tuple] = []
+        self.list_quota_books = set(list_quota_books)
+        self.no_cover_books = set(no_cover_books)
+        self.cover_quota_from = cover_quota_from
+        self.cover_hard_from = cover_hard_from
+
+    def latest_article(self, book_id):
+        self.calls.append(("cover", book_id))
+        n = sum(1 for c in self.calls if c[0] == "cover")
+        if self.cover_quota_from and n >= self.cover_quota_from:
+            raise wechat_monitor.WereadError("微信读书错误 code=-2014:")
+        if self.cover_hard_from and n >= self.cover_hard_from:
+            raise wechat_monitor.WereadError("微信读书请求失败:timeout")
+        if book_id in self.no_cover_books:
+            return None
+        return {"title": f"文 {book_id}", "url": f"https://mp.weixin.qq.com/s/{book_id}",
+                "review_id": f"{book_id}_r"}
+
+    def mp_articles(self, book_id, offset=0, count=20):
+        self.calls.append(("articles", book_id))
+        if book_id in self.list_quota_books:
+            raise wechat_monitor.WereadError("微信读书错误 code=-2014:")
+        return {"reviews": []}
+
+    def mp_content(self, review_id):
+        return ""
+
+
+def _add_benchmarks(session, n: int) -> None:
+    session.add_all([WechatBenchmark(user_id=1, nickname=f"号{i}",
+                                     weread_book_id=f"MP_WXS_{i}", anchor_url="")
+                     for i in range(1, n + 1)])
+    session.commit()
+
+
+def test_listen_breaks_weread_list_after_quota_error(session, monkeypatch) -> None:
+    """列表第一次回 -2014 就合闸:本轮剩余号不再问列表,但 cover 一个都不能少问。"""
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    _add_benchmarks(session, 4)
+    monkeypatch.setattr(wechat_monitor, "fetch_article_content", lambda url, timeout=15: "")
+    fake = _QuotaWeread(list_quota_books={"MP_WXS_2"}, no_cover_books={"MP_WXS_4"})
+
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+                                           weread=fake)
+    asked = [c for c in fake.calls if c[0] == "articles"]
+    assert asked == [("articles", "MP_WXS_1"), ("articles", "MP_WXS_2")]   # 号 3/4 没再去撞
+    assert sum(1 for c in fake.calls if c[0] == "cover") == 4               # cover 照常全覆盖
+    assert out["new"] == 3
+    # 号1 列得出 / 号2、3 列不出却有新文(同日其它篇未知丢失)/ 号4 熔断没问且没 cover
+    assert out["weread_list"] == {"weread_list_ok": 1, "weread_list_off_new": 2,
+                                  "weread_list_skipped": 1}
+    run = session.scalars(select(RunRecord).where(RunRecord.kind == "wechat_listen")).first()
+    assert "skipped=1" in run.detail
+
+
+def test_listen_stops_weread_entirely_after_repeated_quota_errors(session, monkeypatch) -> None:
+    """cover 也连续被额度挡回 → 本轮剩余号停采(别再加深风控),但要 partial + 站内点名。"""
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    _add_benchmarks(session, 6)
+    monkeypatch.setattr(wechat_monitor, "fetch_article_content", lambda url, timeout=15: "")
+    alerts: list[tuple] = []
+    from app.services import alert_service
+    monkeypatch.setattr(alert_service, "notify_incident",
+                        lambda db, uid, kind, title, detail, settings=None, **kw:
+                        alerts.append((uid, kind, title, detail, kw.get("push_feishu", True))) or False)
+    fake = _QuotaWeread(cover_quota_from=3)     # 号 3/4/5 的 cover 回 -2014 → 第 3 次合闸
+
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+                                           weread=fake)
+    assert sum(1 for c in fake.calls if c[0] == "cover") == 5        # 号 6 这一轮没再去撞
+    assert out["weread_quota_skipped"] == 1
+    assert out["status"] == "partial"
+    run = session.scalars(select(RunRecord).where(RunRecord.kind == "wechat_listen")).first()
+    assert "quota_skipped=1" in run.detail
+    alert = next((a for a in alerts if a[2].startswith("🟠 微信读书额度耗尽")), None)
+    assert alert is not None and "1 个号未采到" in alert[2]
+    assert alert[4] is False                                          # 运维诊断不刷飞书
+    assert "batch_size" in alert[3]                                   # 给得出可执行的缓解动作
+    b6 = session.scalars(select(WechatBenchmark).where(
+        WechatBenchmark.weread_book_id == "MP_WXS_6")).one()
+    assert b6.miss_count == 0     # "没问到"≠"确认没发文",不能把它刷成沉睡号
+
+
+def test_listen_does_not_break_on_non_quota_weread_errors(session, monkeypatch) -> None:
+    """超时/形状类错误不能熔断:那是一次异常,不是"源说没额度了"。"""
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    _add_benchmarks(session, 4)
+    monkeypatch.setattr(wechat_monitor, "fetch_article_content", lambda url, timeout=15: "")
+    fake = _QuotaWeread(cover_hard_from=1)
+
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+                                           weread=fake)
+    assert sum(1 for c in fake.calls if c[0] == "cover") == 4         # 每个号都仍被尝试
+    assert "weread_quota_skipped" not in out
+    assert out["failed"] == 4 and out["status"] == "failed"
+
+
+def test_listen_quota_skip_covered_by_paid_source_is_not_blind(session, monkeypatch) -> None:
+    """熔断后被付费源兜住的号要从盲区计数里扣掉——否则 quota_skipped 会虚报漏采面。
+
+    前提是这个号有 `anchor_url`:② 这条路对"只有微信读书 bookId"的号结构性不可达
+    (线上 81 个号 anchor_url 全空),所以测试里显式把链补上。
+    """
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    _add_benchmarks(session, 4)
+    pc = {}
+    for i, b in enumerate(session.scalars(select(WechatBenchmark)).all(), start=1):
+        if i > 3:
+            continue                            # 号 4 留作"没有付费兜底"的真盲区
+        b.anchor_url = f"https://mp.weixin.qq.com/s/A{i}"
+        pc[b.anchor_url] = {"code": 0, "data": [
+            {"title": f"付费源补回 {i}", "url": f"https://mp.weixin.qq.com/s/n{i}"}]}
+    session.commit()
+    monkeypatch.setattr(wechat_monitor, "fetch_article_content", lambda url, timeout=15: "")
+    client = FakeClient(pc=pc)
+    fake = _QuotaWeread(cover_quota_from=1)     # 每个号的 cover 都被额度挡回
+
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(),
+                                           client=client, weread=fake)
+    assert out["new"] == 3                      # 3 个号由付费源兜住,第 4 个没链 → 真盲区
+    assert out["weread_quota_skipped"] == 1
+    titles = {r.title for r in session.scalars(select(WechatArticle)).all()}
+    assert {"付费源补回 1", "付费源补回 2", "付费源补回 3"} <= titles

@@ -1266,8 +1266,21 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
         _push_candidates(session, user_id, settings, cross_new)
     return replacements
 
+_WEREAD_QUOTA_MARKS = ("-2014", "-2041")
+# cover 连续几个号回额度类错误就认定"本会话/本 IP 的额度已耗尽":1 次可能是单号异常,
+# 3 次才收手是"少撞 70 次"与"少漏 70 个号"之间的折中。
+_COVER_QUOTA_TRIP = 3
+
+
+def _is_weread_quota_error(exc: BaseException) -> bool:
+    """-2014(频率额度)/ -2041(会话列表预算耗尽):同属"再问也不给,还会把风控加深"。"""
+    text = str(exc)
+    return any(mark in text for mark in _WEREAD_QUOTA_MARKS)
+
+
 def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
-                    session: Session, stats: dict | None = None
+                    session: Session, stats: dict | None = None,
+                    breaker: dict | None = None
                     ) -> tuple[list[WechatArticle], bool]:
     """微信读书单号采集:**cover 最新一篇(稳定可用)→ mp/articles 列表(可选,常被限权)。
 
@@ -1294,23 +1307,31 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
         items.append({"title": item["title"], "url": item["url"], "publish_at": None,
                       "review_id": str(item.get("review_id") or "")})
     # 备选:mp/articles 近期列表(含精确阅读/点赞;被限权时静默跳过)
+    # ⚠️ 这个接口是**稀缺额度**:一轮 81 个号各问一次就是 81 次,微信读书按会话/IP 记账,
+    # 队头那十几个号把额度吃光后,后面的号必然连 cover 一起被 -2014 挡掉(2026-09-27 实测:
+    # 同 IP 连打 7 次 cover 即回 -2014)。所以一旦本轮被额度类错误挡下,`breaker` 就合闸,
+    # 剩余号不再问列表——省下来的额度留给"每个号至少问得动 cover"。
     listed = False
-    try:
-        payload = weread.mp_articles(b.weread_book_id)
-        for it in _WC.flatten_mp_articles(payload):
-            ts = it.get("create_time") or 0
-            pub = datetime.fromtimestamp(ts) if ts else None
-            if pub and pub < cutoff:
-                continue
-            items.append({"title": it["title"], "url": build_mp_url(it["original_id"]),
-                          "read_num": it["read_num"], "like_num": it["like_num"],
-                          "publish_at": pub, "review_id": str(it.get("review_id") or "")})
-        listed = True
-    except Exception as exc:  # noqa: BLE001 - 限权/废弃不影响 cover 主路径
-        # -2041 是新版微信读书对该接口的永久限权,每进程只记一次,避免每账号刷屏
-        if not getattr(_weread_collect, "_mp_articles_warned", False):
-            _weread_collect._mp_articles_warned = True
-            logger.warning("mp/articles 不可用(%s),全部账号仅用 cover 最新一篇", exc)
+    list_skipped = bool(breaker is not None and breaker.get("list_off"))
+    if not list_skipped:
+        try:
+            payload = weread.mp_articles(b.weread_book_id)
+            for it in _WC.flatten_mp_articles(payload):
+                ts = it.get("create_time") or 0
+                pub = datetime.fromtimestamp(ts) if ts else None
+                if pub and pub < cutoff:
+                    continue
+                items.append({"title": it["title"], "url": build_mp_url(it["original_id"]),
+                              "read_num": it["read_num"], "like_num": it["like_num"],
+                              "publish_at": pub, "review_id": str(it.get("review_id") or "")})
+            listed = True
+        except Exception as exc:  # noqa: BLE001 - 限权/废弃不影响 cover 主路径
+            # -2041 是新版微信读书对该接口的永久限权,每进程只记一次,避免每账号刷屏
+            if not getattr(_weread_collect, "_mp_articles_warned", False):
+                _weread_collect._mp_articles_warned = True
+                logger.warning("mp/articles 不可用(%s),全部账号仅用 cover 最新一篇", exc)
+            if breaker is not None and _is_weread_quota_error(exc):
+                breaker["list_off"] = True
     # 正文:先直抓 mp.weixin.qq.com(不占微信读书配额),**抓空了再用这篇的 reviewId
     # 走微信读书转发页**。此前这里只传 fetch_content=True,把 cover/列表白拿的 reviewId 丢了,
     # 于是直抓被风控的那 26% 正文永远为空 → 盘链认不出 → 飞书卡片整片"—"而员工以为号没发资源
@@ -1329,7 +1350,16 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
     got = _insert_new_articles(session, user_id, b, items, source="listen",
                                content_resolver=_resolve, require_pan=False)
     if stats is not None:
-        key = "weread_list_ok" if listed else ("weread_list_off_new" if got else "weread_list_off")
+        if listed:
+            key = "weread_list_ok"
+        elif got:
+            # 列不出却采到新文 = 同日其它篇**未知丢失**,必须进铁律告警,不能因为
+            # "本轮被熔断没问列表"就把它记成无害的 off
+            key = "weread_list_off_new"
+        elif list_skipped:
+            key = "weread_list_skipped"
+        else:
+            key = "weread_list_off"
         stats[key] = stats.get(key, 0) + 1
     return got, (cover_ok or listed)
 
@@ -1479,6 +1509,11 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     failed = 0
     # 微信读书"近期列表"可枚举性统计:决定"近24h全推"能不能兑现(见 _weread_collect)
     wr_stats: dict = {}
+    # 额度熔断:微信读书按会话/IP 给请求记账,一轮 162 次(81 号 × cover+列表)远超它的容忍线。
+    # 被额度类错误(-2014/-2041)挡下后继续让剩余号逐个去撞,只会把风控加深、让队尾整轮挨饿,
+    # 所以这里合闸:列表先停,连续 _COVER_QUOTA_TRIP 个号 cover 也挡不下就整源停。
+    breaker: dict = {"list_off": False, "cover_quota_fails": 0, "off": False}
+    quota_skipped = 0
     for b in rows:
         used = False
         # ⓪ 免费全量列表(自建 WeRSS 或 wewe-rss 兼容的读书平台):biz 是源认识的形态才首选
@@ -1504,10 +1539,18 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
             except PlatformError as exc:
                 logger.warning("读书平台监听 %s 失败,降级后续源:%s", b.nickname or b.biz, exc)
         # ① 微信读书(免费):对标号已关联 bookId 且有 Cookie;登录失效时自动续期重试一次
-        if not used and cookie and b.weread_book_id:
+        wr_eligible = (not used) and bool(cookie) and bool(b.weread_book_id)
+        wr_skipped_this = False
+        if wr_eligible and breaker["off"]:
+            # 整源已停:本号这一轮"什么都不知道",不能算 answered(故不动 miss_count),
+            # 但必须计数暴露——否则运维记录会长得跟"81 个号都问过了、只是没新文"一样。
+            quota_skipped += 1
+            wr_skipped_this = True
+        elif wr_eligible:
             try:
                 weread = weread or WereadClient(cookie)
-                got, answered = _weread_collect(user_id, b, weread, session, stats=wr_stats)
+                got, answered = _weread_collect(user_id, b, weread, session,
+                                                stats=wr_stats, breaker=breaker)
                 used = True
                 if got:
                     new_rows.extend(got)
@@ -1523,9 +1566,12 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                 refreshed = refresh_weread_cookie(session, user_id, settings)
                 if refreshed.get("status") == "success":
                     cookie = refreshed["cookie"]
+                    # 续期=换了一把新会话,列表额度按新会话重新计(见 weread_client 头注释:
+                    # mp/articles 仅在会话建立/续期后初期可用)→ 熔断重新合上再试
+                    breaker.update(list_off=False, cover_quota_fails=0, off=False)
                     try:
                         got, answered = _weread_collect(user_id, b, WereadClient(cookie), session,
-                                                        stats=wr_stats)
+                                                        stats=wr_stats, breaker=breaker)
                         used = True  # 微信读书源已消费本号,勿再走 dajiala 重复扣费
                         if got:
                             new_rows.extend(got)
@@ -1555,6 +1601,14 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
             except WereadError as exc:
                 failed += 1
                 logger.warning("微信读书监听 %s 失败:%s", b.nickname or b.weread_book_id, exc)
+                if _is_weread_quota_error(exc):
+                    breaker["cover_quota_fails"] += 1
+                    if breaker["cover_quota_fails"] >= _COVER_QUOTA_TRIP:
+                        breaker["off"] = True
+                        logger.warning("微信读书连续 %d 个号回额度类错误,本轮剩余号停采(别再加深风控)",
+                                       breaker["cover_quota_fails"])
+                else:
+                    breaker["cover_quota_fails"] = 0
         # ② dajiala(付费兜底)
         if not used and b.anchor_url and use_dajiala:
             try:
@@ -1581,6 +1635,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
             b.last_item_at = now
             new_rows.extend(_insert_new_articles(session, user_id, b, items, source="listen",
                                                  fetch_content=True, require_pan=False))
+        if wr_skipped_this and used:
+            quota_skipped -= 1   # 付费源把它兜住了 → 这个号这一轮并没瞎,别虚报盲区
     # 后处理(回填/采样/转存/共振)整段关在保存点里:它炸了只撤销自己那半截写,
     # 本轮已采到的新文照样 commit + 推飞书(回落原文)。此前它是裸调用,
     # 一次转存异常会连带 `_record_run`/`_push_listen` 全部跳过(第八轮审计)。
@@ -1598,13 +1654,17 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     # 判定:全部账号失败=failed;部分失败=partial(即便采到新文,故障也要暴露)。
     # 此前 `not failed or new_rows` 优先级等于 `(not failed) or new_rows`,
     # 只要采到 1 篇新文就把"全部账号挂了"也记成 success 掩盖故障
+    # quota_skipped(整源熔断后根本没问过的号)同样是"没监控到",不能记 success:
+    # 否则 81 号只问了 12 个的一轮会长得跟"81 号都问过了、只是没新文"一模一样。
     if failed == len(rows):
         status = "failed"
-    elif failed:
+    elif failed or quota_skipped:
         status = "partial"
     else:
         status = "success"
     detail = f"accounts={len(rows)} new={len(new_rows)} failed={failed}"
+    if quota_skipped:
+        detail += f" quota_skipped={quota_skipped}"
     # biz 里躺着源认不出的形态(历史上 add_benchmark 写过 base64 __biz):⓪ 分支按"没配"处理
     # 所以号不会失明,但免费全量列表也就没接上。不点名出来,运维只会以为"配了 WeRSS 就该全推"。
     miskeyed = [str(b.nickname or b.id) for b in rows if (b.biz or "").strip() and not feed_biz(b)]
@@ -1617,8 +1677,9 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     if wr_stats:
         # list_off 必须写进运维记录:"只采到 cover 最新一篇"时同日其它篇是**未知丢失**,
         # 不能让它和"该号今天真的只发了一篇"长得一样(与 -2014 假象、全败标 success 同族)。
+        # list_skipped = 本轮列表已被额度熔断挡下、这些号根本没被问过(见 breaker)。
         detail += (f" weread_list(ok={enumerable} off={wr_stats.get('weread_list_off', 0)}"
-                   f" off_with_new={off_new})")
+                   f" off_with_new={off_new} skipped={wr_stats.get('weread_list_skipped', 0)})")
     if dajiala_off:
         detail += f" dajiala_off({dajiala_off})"
     _record_run(session, user_id, "wechat_listen", status, detail)
@@ -1634,17 +1695,36 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
             session, user_id, "wechat",
             "⚠️ 微信读书只能拿到最新一篇,同日其它篇可能漏推",
             f"本轮列不出却采到新文的号:{off_new}(可枚举 {enumerable} / 共 {len(rows)})。"
-            "微信读书 mp/articles(近期列表)对本账号不可用(服务端回 -2041;2026-09-27 用活 Cookie"
-            "实测三种请求上下文全部 -2041,换 Referer 也救不回来),监听退化为"
-            "cover 最新一篇:两轮之间(最长 8h)同一号发多篇时,前面的那几篇顶不掉也补不回来。"
-            "要真正兑现『近24h全推』只剩两条路:① dajiala 充值走 history_by_ghid(付费,"
-            "建议只对高产号开);② 自建 WeRSS 的 web/app 模式(要求你有一个自己的公众号后台身份,"
-            "没有就不能用——它的 weread_mp 模式会原样继承 -2041)。详见 doc/operations.md §4g/§9.2"
+            "微信读书 mp/articles 是**按会话/IP 记额度**的稀缺接口:一把刚建立的会话能列"
+            "(2026-09-27 实测:刚续期的会话回 -2014『额度』而非会话老化后的 -2041『不下发』),"
+            "被 81 个号 × 每轮 2 次的密度耗尽后就整轮列不出。监听因此退化为 cover 最新一篇:"
+            "两轮之间(最长 8h)同一号发多篇时,前面的那几篇顶不掉也补不回来。"
+            "要真正兑现『近24h全推』:① 把列表额度花在少数号上(错峰分批/按号轮转枚举,"
+            "见 §9.2 密度账);② dajiala 充值走 history_by_ghid(付费,建议只对高产号开);"
+            "③ 自建 WeRSS 的 web/app 模式(要求你有一个自己的公众号后台身份,没有就不能用——"
+            "它的 weread_mp 模式会原样继承本接口的额度限制)。详见 doc/operations.md §4g/§9.2"
             + (f";另有 {len(miskeyed)} 个号的 biz 不是源认识的形态:{('、'.join(miskeyed[:5]))}"
                if miskeyed else ""),
             settings=settings, push_feishu=False)
+    if quota_skipped:
+        # "本轮根本没问到"是密度问题,不是"号没发文"——必须单独点名(按口径落站内,不刷飞书)。
+        # 不点名的话,运营看到的只有"今天怎么又只有几个号推",而事实是"其余号被源挡在门外"。
+        from app.services.alert_service import notify_incident
+        notify_incident(
+            session, user_id, "wechat",
+            f"🟠 微信读书额度耗尽,本轮 {quota_skipped} 个号未采到",
+            f"连续 {breaker['cover_quota_fails']} 个号被 -2014/-2041 挡回后本轮熔断,"
+            f"剩余 {quota_skipped} 个号(共 {len(rows)})这一轮没有数据,下一轮会重新尝试。"
+            f"根因是单轮请求密度({len(rows)} 号 × cover+列表 ≈ {len(rows) * 2} 次/轮、"
+            "4 轮/天)超出该会话的容忍线。可选缓解:调度器启用错峰分批"
+            "(_listen_round 的 batch_size/batch_index,目前 scheduler 传 None 即不分批)、"
+            "拉长 WereadClient.min_gap(现 2s)、或只对高产号开付费源(dajiala)。"
+            "详见 doc/operations.md §9.2",
+            settings=settings, push_feishu=False)
     out: dict = {"platform": "wechat", "status": status, "accounts": len(rows),
                  "new": len(new_rows), "failed": failed}
+    if quota_skipped:
+        out["weread_quota_skipped"] = quota_skipped
     if repushed:
         out["repushed"] = repushed
     if wr_stats:
