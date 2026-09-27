@@ -1634,13 +1634,12 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
             session, user_id, "wechat",
             "⚠️ 微信读书只能拿到最新一篇,同日其它篇可能漏推",
             f"本轮列不出却采到新文的号:{off_new}(可枚举 {enumerable} / 共 {len(rows)})。"
-            "微信读书 mp/articles(近期列表)对本会话不可用(服务端回 -2041;2026-09 实测像账号级"
-            "限权,但 GitHub 上有项目指出同一接口换调用上下文/Referer 就能用,可用 "
-            "scripts/probe_weread_list.py 在线上花一次请求分辨),监听退化为"
+            "微信读书 mp/articles(近期列表)对本账号不可用(服务端回 -2041;2026-09-27 用活 Cookie"
+            "实测三种请求上下文全部 -2041,换 Referer 也救不回来),监听退化为"
             "cover 最新一篇:两轮之间(最长 8h)同一号发多篇时,前面的那几篇顶不掉也补不回来。"
-            "要真正兑现『近24h全推』只有两条路:① 自建 WeRSS(we-mp-rss)并把订阅 id 回填进对标号的 biz"
-            "(免费全量列表,部署办法见 doc/operations.md §4g);"
-            "② dajiala 充值走 history_by_ghid(付费)。临时缓解:对高产号多点「同步文章」"
+            "要真正兑现『近24h全推』只剩两条路:① dajiala 充值走 history_by_ghid(付费,"
+            "建议只对高产号开);② 自建 WeRSS 的 web/app 模式(要求你有一个自己的公众号后台身份,"
+            "没有就不能用——它的 weread_mp 模式会原样继承 -2041)。详见 doc/operations.md §4g/§9.2"
             + (f";另有 {len(miskeyed)} 个号的 biz 不是源认识的形态:{('、'.join(miskeyed[:5]))}"
                if miskeyed else ""),
             settings=settings, push_feishu=False)

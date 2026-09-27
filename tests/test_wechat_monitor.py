@@ -2662,7 +2662,9 @@ def test_listen_exposes_unenumerable_accounts_and_alerts(session, monkeypatch) -
     alert = next((a for a in alerts if a[2].startswith("⚠️ 微信读书")), None)
     assert alert is not None and alert[2] == "⚠️ 微信读书只能拿到最新一篇,同日其它篇可能漏推"
     assert "列不出却采到新文的号:2" in alert[3]  # 数字放正文,标题稳定才冷却去重有效
-    assert "WeRSS" in alert[3] and "biz" in alert[3]  # 给出可执行的根治路径(名字要与 §4g 一致)
+    # 2026-09-27 实测三种上下文全 -2041 后,文案不再承诺"换 Referer 能复活",改给两条真能走的路
+    assert "dajiala" in alert[3] and "公众号后台身份" in alert[3]
+    assert "-2041" in alert[3] and "救不回来" in alert[3]
     # cover 的正文兜住了 → 盘链被认出,于是"有链却没 Cookie 转存"也必须点名(修 1 之后这两篇
     # 不再是卡片上的一根"—");没转存可解释,静默不可接受。
     assert any("缺夸克 Cookie" in a[2] for a in alerts)
