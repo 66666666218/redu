@@ -2114,11 +2114,15 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
         if pages:
             b.last_item_at = datetime.now()
             push = _sync_push_after_transfer(session, user_id, settings, new_rows)
-            _record_run(session, user_id, "wechat_sync", "success",
+            # 翻满 limit 页且最后一页还是"整页新文" = 历史被页数上限截断,
+            # 和 dajiala 路一样不能记 success:用户以为"这个号就这些文章",实际是没翻完
+            status = "partial" if pages >= limit else "success"
+            _record_run(session, user_id, "wechat_sync", status,
                         f"platform account={b.nickname} pages={pages} new={len(new_rows)} "
-                        f"pushed={push['pushed']} deduped={push['deduped']} truncated={push['truncated']}")
+                        f"pushed={push['pushed']} deduped={push['deduped']} truncated={push['truncated']}"
+                        + (" history_limit_hit" if status == "partial" else ""))
             session.commit()
-            return {"platform": "wechat_sync", "status": "success", "pages": pages,
+            return {"platform": "wechat_sync", "status": status, "pages": pages,
                     "new": len(new_rows), "ghid": b.ghid, "nickname": b.nickname, **push}
     # 走 _dajiala_key 而非全局 settings.dajiala_key:POST /api/wechat/benchmarks/{id}/sync
     # 是普通用户可控入口,¥0.14/页 × 无限次调用可打穿运营者余额(2026-09-14 隔离原则的漏网路径)。

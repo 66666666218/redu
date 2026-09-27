@@ -1126,6 +1126,27 @@ def test_sync_platform_paginates(session, monkeypatch: pytest.MonkeyPatch) -> No
     assert out["pages"] == 4  # 3 页数据 + 1 次空页确认到底
 
 
+def test_sync_platform_truncated_by_page_limit_is_not_success(session) -> None:
+    """翻满上限页且最后一页仍是全新文 = 历史没翻完,不能记 success。
+
+    否则前端显示"同步完成:翻 2 页",用户以为这个号只有 2 篇历史,
+    实际是 `max_pages` 把剩下的剪掉了(与 dajiala 路 `pages>=limit` 同一条规则)。
+    """
+    b = WechatBenchmark(user_id=1, nickname="号A", biz="MP_WXS_9001")
+    session.add(b)
+    session.commit()
+    plat = FakePlatform(pages=[
+        [{"id": f"a{i}", "title": f"文{i} 夸克网盘", "url": f"https://mp.weixin.qq.com/s/a{i}"}]
+        for i in (1, 2, 3)
+    ])
+    out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=_settings(),
+                                             platform=plat, max_pages=2)
+    assert out["status"] == "partial" and out["pages"] == 2 and out["new"] == 2
+    run = session.scalars(select(RunRecord).where(
+        RunRecord.kind == "wechat_sync").order_by(RunRecord.id.desc())).first()
+    assert run.status == "partial" and "history_limit_hit" in run.detail
+
+
 def test_add_benchmark_resolves_biz_via_platform(session, monkeypatch: pytest.MonkeyPatch) -> None:
     plat = FakePlatform(resolve={"mp_id": "bizXYZ", "name": "真名号", "article_title": "T"})
     monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
