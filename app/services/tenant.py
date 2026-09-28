@@ -223,7 +223,22 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
                 # 只是命中率下降,其它关键词照常 → 属"不修也能继续跑"的降级,按用户
                 # 2026-09-27 口径只进站内(飞书留给人不修就整块停摆的滑块与 Cookie 失效)
                 push_feishu=False)
+        # 从失败中恢复:上一轮 xianyu 是 failed(滑块/整轮空返回)而本轮成功 → 发 ✅ 确认。
+        # 失败时发过飞书的(滑块级)恢复也回飞书,让群里的「死了」有对应的「活了」
+        prev_failed = session.scalar(
+            select(RunRecord).where(
+                RunRecord.user_id == user_id, RunRecord.kind == "xianyu",
+                RunRecord.status == "failed",
+            ).order_by(RunRecord.started_at.desc()).limit(1))
         _record_run(session, user_id, "xianyu", "success", detail)
+        if prev_failed is not None and prev_failed.detail:
+            to_feishu = "XianyuVerify" in prev_failed.detail
+            alert_service.notify_incident(
+                db=session, user_id=user_id, kind="xianyu",
+                title="✅ 闲鱼采集已恢复",
+                detail=f"上一轮失败({prev_failed.detail[:80]})后本轮成功采集 {len(hot)} 条。"
+                       "如之前过过滑块,无需其它操作,系统已回到正常节奏。",
+                settings=settings, push_feishu=to_feishu)
         session.commit()
         # 搜索接力深采(想要数/类目)——自动跑,受 验证冷却 + 详情限流 保护;按间隔控制频率防累积风控
         if xianyu_deep_due(session, user_id, settings):
@@ -242,7 +257,9 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
             alert_service.notify_incident(
                 db=session, user_id=user_id, kind="xianyu",
                 title="🔴 闲鱼触发人机验证(滑块)",
-                detail=f"{exc}(已自动冷却 {settings.xianyu_cooldown_minutes} 分钟,期间轮次跳过)",
+                detail=f"{exc}(已自动冷却 {settings.xianyu_cooldown_minutes} 分钟,期间轮次跳过。"
+                       f"恢复方式:手机闲鱼 App 过一次人机验证即可,冷却结束后下一轮自动恢复采集,"
+                       f"无需更新 Cookie——恢复后会有一条 ✅ 站内确认)",
                 settings=settings)
         elif "XianyuWafBlock" in name:
             alert_service.notify_incident(

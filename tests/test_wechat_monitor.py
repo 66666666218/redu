@@ -2879,7 +2879,7 @@ def test_full_sync_aborts_on_rate_limit_and_counts_new(session, monkeypatch) -> 
         return {"status": "partial", "new": 1, "weread_list": "limited"}
 
     monkeypatch.setattr(wechat_monitor, "sync_wechat_account", _sync)
-    out = wechat_monitor.run_full_sync_if_pending(session, 1, settings=_settings())
+    out = wechat_monitor.run_full_sync_if_pending(session, 1, settings=_settings(weread_fullsync_on_renewal=True))
     assert out["status"] == "aborted" and out["reason"] == "rate_limited"
     assert out["synced"] == 1 and out["new_articles"] == 3
     assert len(seen) == 2  # 第二个号确认耗尽后立即停
@@ -3043,23 +3043,23 @@ def test_full_sync_resumes_after_rate_limit_cursor(session, monkeypatch) -> None
         return {"status": "partial", "new": 0, "weread_list": "limited"}   # 每个号都耗尽
 
     monkeypatch.setattr(wechat_monitor, "sync_wechat_account", _sync)
-    first = wechat_monitor.run_full_sync_if_pending(session, 1, settings=_settings())
+    first = wechat_monitor.run_full_sync_if_pending(session, 1, settings=_settings(weread_fullsync_on_renewal=True))
     assert first["status"] == "aborted" and seen == [ids[0]]
     assert session.scalar(select(SystemConfig).where(
         SystemConfig.key == "weread_fullsync_pending_1")).value == f"cursor:{ids[0]}"
 
     seen.clear()
-    second = wechat_monitor.run_full_sync_if_pending(session, 1, settings=_settings())
+    second = wechat_monitor.run_full_sync_if_pending(session, 1, settings=_settings(weread_fullsync_on_renewal=True))
     assert seen == [ids[1]]                    # 从游标之后接着跑,不重来
     assert second["status"] == "aborted"
     seen.clear()
-    third = wechat_monitor.run_full_sync_if_pending(session, 1, settings=_settings())
+    third = wechat_monitor.run_full_sync_if_pending(session, 1, settings=_settings(weread_fullsync_on_renewal=True))
     assert seen == [ids[2]] and third["status"] == "aborted"
     last_cursor = session.scalar(select(SystemConfig).where(
         SystemConfig.key == "weread_fullsync_pending_1")).value
     assert last_cursor == f"cursor:{ids[2]}"
     seen.clear()
-    assert wechat_monitor.run_full_sync_if_pending(session, 1, settings=_settings())["status"] == "done"
+    assert wechat_monitor.run_full_sync_if_pending(session, 1, settings=_settings(weread_fullsync_on_renewal=True))["status"] == "done"
     assert seen == []  # 全部号轮完 → 标记清除,不再空转
 
 

@@ -3028,6 +3028,10 @@ def run_full_sync_if_pending(session: Session, user_id: int,
     from app.db.models import SystemConfig
 
     settings = settings or get_settings()
+    if not getattr(settings, "weread_fullsync_on_renewal", False):
+        # 2026-09-28 实测:renewal 后新会话上打 81×2 的补采炸弹会数小时内打穿全部额度
+        # (书架门轻量监听与它抢同一份会话额度),默认关停;需要补采时手动开启
+        return {"status": "disabled"}
     flag_key = f"weread_fullsync_pending_{user_id}"
     flag = session.scalar(select(SystemConfig).where(SystemConfig.key == flag_key))
     if not flag:

@@ -77,6 +77,11 @@ class Settings(BaseSettings):
     agent_enabled: bool = True             # 早期苗头 Agent(全板块自主预测)开关
     agent_score_threshold: int = 55        # 苗头判定分数线(≥70 上升,≥85 爆发)
     agent_cooldown_hours: int = 12         # 同一(板块,关键词)的苗头冷却(小时)
+    weread_fullsync_on_renewal: bool = False  # renewal 后的全量补采开关(默认关!)
+                                     # 2026-09-28 实测:81 号×cover+列表 ≈162 次的补采炸弹会在
+                                     # renewal 后的新会话上一次性打穿全部额度,会话数小时内即死,
+                                     # 与书架门轻量监听抢同一份额度;需要补采历史时手动开+手动设
+                                     # weread_fullsync_pending_<uid> 标记
     weread_refresh_cron: str = "50 3,7,13,19 * * *"  # 微信读书 Cookie 续期:对齐到 4 个监听定点(4/8/14/20 点)前 10 分钟
                                      # ——① skey 恒新,轮内 auth 兜底几乎不用出手;② renewal=换新会话,
                                      # mp/articles 列表只在会话初期可用,每轮都跑在窗口 freshly 重开的会话上,
