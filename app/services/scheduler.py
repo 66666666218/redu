@@ -165,7 +165,7 @@ def douhot_window_tick(settings: Settings | None = None) -> dict:
     """
     from app.db import get_session_local
     from app.db.models import User
-    from app.services.douhot_window import collect_windows, run_feishu
+    from app.services.douhot_window import analytics, collect_windows, run_feishu
     from sqlalchemy import select
 
     settings = settings or get_settings()
@@ -180,6 +180,24 @@ def douhot_window_tick(settings: Settings | None = None) -> dict:
                 if out.get("status") == "success" and out.get("ok"):
                     users_ok += 1
                     pushed += run_feishu(db, uid, settings)
+                    # 爆发 → 即时联动拉新方案(不必等 9:10/15:10/21:10 的定时 Agent):
+                    # 多窗口对比检出 burst 的话题,立刻给「发什么货/标题/人群/转存钩子」,
+                    # 站内推送(爆发卡片已在飞书,方案落站内,口径 2026-09-27)
+                    burst_rows = [r for r in analytics(db, uid, settings=settings)
+                      if r.get("signal") == "burst"]
+                    topics = [(r.get("entry_title") or r.get("keyword") or "").strip()
+                              for r in burst_rows]
+                    topics = [t for t in topics if t][:3]
+                    if topics:
+                        from app.services import alert_service
+                        from app.services.hotspot_agent import burst_plan
+                        plan = burst_plan(db, uid, topics, settings)
+                        if plan:
+                            alert_service.notify_incident(
+                                db=db, user_id=uid, kind="agent",
+                                title=f"⚡ 爆发话题拉新方案:{topics[0][:24]}"
+                                      + (f" 等{len(topics)}个" if len(topics) > 1 else ""),
+                                detail=plan, settings=settings, push_feishu=False)
             except Exception:  # noqa: BLE001 - 单用户失败不影响其余
                 db.rollback()
                 logger.exception("抖音多窗口对比失败 user=%s", uid)

@@ -183,6 +183,109 @@ def _copy_block(article: WechatArticle) -> str:
     return f"「{article.title}」\n{link.group(0) if link else line}" + (f" 提取码:{code}" if code else "")
 
 
+_RISK_HIGH = ("全集", "影视", "电影", "电视剧", "网剧", "4k", "蓝光", "付费课程", "网课", "破解")
+_RISK_LOW = ("真题", "课件", "模板", "壁纸", "笔记", "汇总", "攻略", "素材", "赛程", "题库")
+
+
+def resource_risk(title: str) -> tuple[str, str]:
+    """资源侵权风险粗筛:版权方清扫(霸王茶姬事件实测)主要打影视/课程类。
+
+    返回 (等级, 说明):high=高危短命(发布投入产出比低,慎投时效),
+    low=低危长尾(自制整理类安全),mid=介于其间。纯词表粗筛,供时效决策参考。
+    """
+    n = _norm(title)
+    if any(m in n for m in _RISK_HIGH):
+        return "high", "影视/课程类,版权清扫高危"
+    if any(m in n for m in _RISK_LOW):
+        return "low", "整理/自制类,长尾安全"
+    return "mid", ""
+
+
+def supplier_scores(db: Session, user_id: int, days: int = 30) -> list[dict]:
+    """供应商评分:近 N 天 产出资源数 × 盘链被全网转载次数(越多=需求被反复验证)。
+
+    用于「优质号加密监控/劣质号降权」的运营决策,也可在 Agent 建议里标注货源质量。
+    """
+    from app.db.models import WechatPanLink
+
+    cutoff = datetime.now() - timedelta(days=days)
+    rows = db.execute(
+        select(WechatArticle.author,
+               func.count(func.distinct(WechatArticle.id)),
+               func.count(WechatPanLink.id))
+        .outerjoin(WechatPanLink, WechatPanLink.article_id == WechatArticle.id)
+        .where(WechatArticle.user_id == user_id,
+               WechatArticle.created_at >= cutoff,
+               WechatArticle.pan_urls != "")
+        .group_by(WechatArticle.author)
+        .order_by(func.count(WechatPanLink.id).desc())
+        .limit(10)).all()
+    return [{"author": a or "未知", "articles": int(ar or 0), "reposts": int(rp or 0),
+             "score": int(ar or 0) * 2 + int(rp or 0) * 3} for a, ar, rp in rows]
+
+
+def burst_plan(db: Session, user_id: int, topics: list[str],
+               settings: Settings | None = None) -> str | None:
+    """爆发话题的即时拉新方案(douhot_window 检出 burst 时调用);每话题 24h 一次。
+
+    与定时 Agent 的区别:不定点、不求全——爆发话题本身就是最高优先级热点,
+    立刻给「发什么货 + 标题 + 人群 + 转存钩子」,顺带匹配近 72h 是否已有现成资源。
+    """
+    settings = settings or get_settings()
+    if not getattr(settings, "hotspot_agent_enabled", True) or not topics:
+        return None
+    mem_key = f"hotspot_agent_burst_{user_id}"
+    mem_row = db.get(SystemConfig, mem_key)
+    now = datetime.now()
+    memory: dict[str, str] = {}
+    try:
+        raw = json.loads(mem_row.value) if mem_row and mem_row.value else {}
+    except ValueError:
+        raw = {}
+    memory = {_norm(str(k)): str(v) for k, v in raw.items()}
+    topics = [t for t in topics
+              if not (memory.get(_norm(t))
+                      and (now - datetime.fromisoformat(memory[_norm(t)])).total_seconds() < 86400)]
+    if not topics:
+        return None
+    hotspots = [{"keyword": t, "growth": 0} for t in topics[: max(1, int(getattr(settings, "hotspot_agent_llm_top", 3) or 3))]]
+    proven = _proven_titles(db, user_id)
+    llm = _llm_plan(settings, hotspots, _supply_articles(db, user_id), proven)
+    lines: list[str] = []
+    for t in topics:
+        m = (llm.get("matches") or {}).get(t) or {}
+        aid = m.get("article_id")
+        if isinstance(aid, int):
+            art = db.get(WechatArticle, aid)
+            if art:
+                my = next((x.strip() for x in (art.my_pan_urls or "").splitlines() if x.strip()), "")
+                src = next((x.strip() for x in (art.pan_urls or "").splitlines() if x.strip()), "")
+                link = my or src
+                lines.append(f"⚡《{t}》爆发 → 已有现成资源:「{art.title[:40]}」"
+                             + (f" → 点这:{link}" if link else ""))
+                db.add(HotspotSuggestion(user_id=user_id, keyword=t, growth=0, kind="match",
+                                         resource_title=art.title[:255],
+                                         link=link, plan=m.get("why") or "爆发语义匹配"))
+                continue
+        p = (llm.get("plans") or {}).get(t)
+        if p:
+            lines.append(f"⚡《{t}》爆发 → {p}")
+            db.add(HotspotSuggestion(user_id=user_id, keyword=t, growth=0, kind="llm",
+                                     plan=p[:500]))
+    if not lines:
+        return None
+    for t in topics:
+        memory[_norm(t)] = now.isoformat(timespec="seconds")
+    val = json.dumps(memory, ensure_ascii=False)
+    if mem_row is None:
+        db.add(SystemConfig(key=mem_key, value=val, updated_at=now))
+    else:
+        mem_row.value = val
+        mem_row.updated_at = now
+    db.commit()
+    return "\n".join(lines)[:1800]
+
+
 def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = None) -> dict:
     """跑一轮热点选题建议;返回统计。站内通知,24h 内同热点不重复推。"""
     settings = settings or get_settings()
@@ -270,9 +373,12 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
         my = next((x.strip() for x in (art.my_pan_urls or "").splitlines() if x.strip()), "")
         src = next((x.strip() for x in (art.pan_urls or "").splitlines() if x.strip()), "")
         link = my or src
+        level, why_risk = resource_risk(art.title)
+        risk_tag = f" ⚠️{why_risk},慎投时效" if level == "high" else ""
         lines.append(f"🔥《{h['keyword']}》热度 +{h['growth']:.0f}% → 已有现成资源:"
                      f"「{art.title[:40]}」({art.author})"
                      + (f" [{why}]" if why and why != "标题字面命中" else "")
+                     + risk_tag
                      + (f" → 点这:{link}" if link else ""))
         copy_blocks.append(f"【{art.title}】\n{link}")
     for kw, plan in plan_by_kw.items():
