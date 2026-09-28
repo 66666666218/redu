@@ -134,7 +134,7 @@ def _llm_plan(settings: Settings, hotspots: list[dict],
                          ' "why": "一句话说明相关性"}],\n'
                          ' "plans": [{"hotspot": "热点词", "resource": "具体到文件内容的资料清单",'
                          ' "title": "1条发布标题(带时效词/人群词)", "audience": "谁非要不可",'
-                         ' "hook": "为什么必须转存(拉新点)"}]}\n'
+                         ' "hook": "为什么必须转存(拉新点)",' ' "keywords": ["用户会搜索的资源词1", "词2", "词3"]}]}\n'
                          "规则:matches 只收语义真正相关的资源(没有就空数组);"
                          "matches 里没有对应资源的热点必须给 plan;禁止编造不存在的 article_id。"}],
                   "temperature": 0.5, "max_tokens": 1200},
@@ -159,14 +159,15 @@ def _llm_plan(settings: Settings, hotspots: list[dict],
     matches = {str(m.get("hotspot") or "").strip(): {"article_id": m.get("article_id"),
                                                      "why": str(m.get("why") or "")}
                for m in data.get("matches", []) if m.get("hotspot")}
-    plans: dict[str, str] = {}
+    plans: dict[str, dict] = {}
     for p in data.get("plans", []):
         kw = str(p.get("hotspot") or "").strip()
         if not kw:
             continue
+        kws = [str(x).strip() for x in (p.get("keywords") or []) if str(x).strip()]
         parts = [f"资源:{p.get('resource') or '?'}", f"标题:{p.get('title') or '?'}",
                  f"人群:{p.get('audience') or '?'}", f"拉新点:{p.get('hook') or '?'}"]
-        plans[kw] = " | ".join(parts)
+        plans[kw] = {"text": " | ".join(parts), "keywords": kws}
     return {"matches": matches, "plans": plans}
 
 
@@ -286,6 +287,51 @@ def burst_plan(db: Session, user_id: int, topics: list[str],
     return "\n".join(lines)[:1800]
 
 
+def _auto_watch_keywords(db: Session, user_id: int, plan_by_kw: dict[str, dict],
+                         cap: int = 3) -> list[str]:
+    """把 LLM 选题的资源搜索词自动加入抖音热度监控(外部需求传感器)。
+
+    为什么是它:个人转化数据有「小样本+幸存者偏差」的局限,能预测拉新的主力是
+    **外部需求曲线**——资源词进监控后,第二天就有该词的真实热度,下一轮建议的
+    排序即有外部数据支撑(个人夸克后台只做类型校准,非阻塞)。
+    每日最多加 cap 个防污染;已在监控列表的词跳过。
+    """
+    from app.db.models import DouhotWatch
+
+    existing = {w.keyword for w in db.scalars(select(DouhotWatch).where(
+        DouhotWatch.user_id == user_id, DouhotWatch.section == "douhot")).all()}
+    day_key = f"hotspot_agent_watchday_{user_id}"
+    row = db.get(SystemConfig, day_key)
+    today = datetime.now().date().isoformat()
+    used = 0
+    if row and row.value:
+        try:
+            d, n = str(row.value).split("|", 1)
+            used = int(n) if d == today else 0
+        except ValueError:
+            used = 0
+    added: list[str] = []
+    for kw, info in plan_by_kw.items():
+        if len(added) + used >= cap:
+            break
+        for kw2 in info.get("keywords") or []:
+            k = str(kw2).strip()
+            if not k or k in existing or k in added:
+                continue
+            db.add(DouhotWatch(user_id=user_id, section="douhot", list_type="word",
+                               keyword=k[:128]))
+            added.append(k)
+            break   # 每个选题只加第一个词
+    if added:
+        val = f"{today}|{len(added) + used}"
+        if row is None:
+            db.add(SystemConfig(key=day_key, value=val, updated_at=datetime.now()))
+        else:
+            row.value = val
+            row.updated_at = datetime.now()
+    return added
+
+
 def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = None) -> dict:
     """跑一轮热点选题建议;返回统计。站内通知,24h 内同热点不重复推。"""
     settings = settings or get_settings()
@@ -329,7 +375,7 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
             rest.append(h)
 
     # 第二层:LLM 语义匹配 + 拉新选题(一次调用;没配 key 自动跳过)
-    llm_plans: dict[str, str] = {}
+    llm_plans: dict[str, dict] = {}
     llm_matches: dict[str, tuple[WechatArticle, str]] = {}
     llm_top = max(0, int(getattr(settings, "hotspot_agent_llm_top", 3) or 3))
     llm_hotspots = rest[:llm_top]
@@ -353,7 +399,6 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
         return {"status": "no_suggestions", "hotspots": len(fresh)}
 
     # 落库:建议进 hotspot_suggestions(回看 + 未来效果回填)
-    by_kw_article = {h["keyword"]: (a, why) for h, a, why in matched}
     plan_by_kw = dict(llm_plans)
     for h, art, why in matched:
         db.add(HotspotSuggestion(
@@ -364,7 +409,7 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
         h = next((x for x in fresh if x["keyword"] == kw), {"growth": 0})
         db.add(HotspotSuggestion(
             user_id=user_id, keyword=kw, growth=h["growth"], kind="llm",
-            resource_title="", link="", plan=plan[:500]))
+            resource_title="", link="", plan=plan["text"][:500]))
 
     # 输出行
     lines: list[str] = []
@@ -382,10 +427,14 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
                      + (f" → 点这:{link}" if link else ""))
         copy_blocks.append(f"【{art.title}】\n{link}")
     for kw, plan in plan_by_kw.items():
-        lines.append(f"💡 {kw} → {plan}")
+        lines.append(f"💡 {kw} → {plan['text']}")
     if copy_blocks:
         lines.append("──── 复制即用 ────")
         lines.extend(copy_blocks)
+    watched = _auto_watch_keywords(db, user_id, plan_by_kw)
+    if watched:
+        lines.append("📡 已自动把资源词加入热度监控:" + "、".join(watched)
+                     + "(明天这条建议会附上真实需求曲线)")
 
     for h in fresh:
         memory[_norm(h["keyword"])] = now.isoformat(timespec="seconds")
