@@ -318,6 +318,26 @@ class WechatArticle(Base):
     pushed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+class HotspotSuggestion(Base):
+    """热点→网盘拉新建议(hotspot_agent 产出):落表以便回看与效果回填。
+
+    kind: match=热点已有现成资源(供应商已发) / llm=无资源由 LLM 生成选题。
+    效果回填(P3):后续按 keyword+created_at 关联「用户是否发文/转存增长」即可闭环。
+    """
+
+    __tablename__ = "hotspot_suggestions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    keyword: Mapped[str] = mapped_column(String(128), index=True)
+    growth: Mapped[float] = mapped_column(Float, default=0)
+    kind: Mapped[str] = mapped_column(String(16), default="llm")  # match / llm
+    resource_title: Mapped[str] = mapped_column(String(255), default="")
+    link: Mapped[str] = mapped_column(String(500), default="")
+    plan: Mapped[str] = mapped_column(String(500), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
 class WechatTrafficSample(Base):
     """公众号文章流量采样点(构成单篇流量增长曲线)。"""
 

@@ -1,10 +1,11 @@
-"""热点→网盘选题 Agent:把「监控词热度」与「供应商新发资源」对上,给运营者可执行的发货建议。
+"""热点→网盘拉新 Agent:把「监控词热度」与「供应商新发资源」对上,产出可执行的发货建议。
 
-两层(2026-09-28 v1):
-- 规则层(零成本):监控词趋势(DouhotWatchSnap,本机每 20-40 分钟一拍)涨幅 ≥ 阈值,
-  且近 72h 公众号采集到标题命中该词的资源文 → 提示「热点已有人供货」,附我方/源链;
-- LLM 层(可选,配了 deepseek 才跑,最多 hotspot_agent_llm_top 个热点控成本):
-  没现成资源的热点让 LLM 给网盘选题建议(资源类型/标题模板/关键词)。
+三层(2026-09-28 v3):
+- 精确匹配(零成本):热点词与资源文标题归一化子串命中 → 「热点已有人供货」,附我方/源链;
+- 语义匹配 + 拉新选题(一次 LLM 调用,配了 deepseek 才跑):
+  ① 标题不含字面热点词但语义相关的资源文也能匹配(如热点「世界杯」↔ 资源「足球赛程表」);
+  ② 无现成资源的热点给拉新方案(资源清单/发布标题/人群/转存钩子);
+- 落库:每条建议写 hotspot_suggestions 表(回看 + 未来效果回填闭环)。
 
 节流:同一热点词 24h 内只推一次(记忆落 system_config);输出按 2026-09-27 口径走
 站内告警(push_feishu=False,飞书群只推文章与 Cookie 提醒)。
@@ -13,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta
 
 import requests
@@ -20,7 +22,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
-from app.db.models import (DouhotWatchSnap, SystemConfig, WechatArticle)
+from app.db.models import (DouhotWatchSnap, HotspotSuggestion, SystemConfig,
+                           WechatArticle)
 from app.services import alert_service
 from app.utils import get_logger
 
@@ -63,7 +66,7 @@ def _supply_articles(db: Session, user_id: int, hours: int = 72) -> list[WechatA
 
 
 def _match_supply(keyword: str, articles: list[WechatArticle]) -> WechatArticle | None:
-    """标题命中(归一化子串)即视为「热点已有现成资源」。"""
+    """标题命中(归一化子串)即视为「热点已有现成资源」——零成本,字面命中绝不漏。"""
     n = _norm(keyword)
     if len(n) < 2:
         return None
@@ -95,13 +98,18 @@ def _proven_titles(db: Session, user_id: int, limit: int = 12) -> list[str]:
     return seen
 
 
-def _llm_suggest(settings: Settings, hotspots: list[dict],
-                 proven: list[str]) -> dict[str, str]:
-    """对没现成资源的热点,以网盘拉新为目标生成选题方案;失败/未配 key 返回 {}。"""
+def _llm_plan(settings: Settings, hotspots: list[dict],
+              supply: list[WechatArticle], proven: list[str]) -> dict:
+    """一次 LLM 调用同时完成:①热点↔资源语义匹配 ②无资源热点的拉新选题。
+
+    返回 {"matches": {热点词: {"article_id": id, "why": 一句话}},
+          "plans": {热点词: "资源:… | 标题:… | 人群:… | 拉新点:…"}};失败/未配 key 返回 {}。
+    """
     if not settings.deepseek_api_key or not hotspots:
         return {}
     hs = [f"{i}. 《{h['keyword']}》热度增长 +{h['growth']:.0f}%"
           for i, h in enumerate(hotspots, 1)]
+    sup = [f"{a.id}. {a.title}" for a in supply[:60]]
     proven_block = "\n".join(f"- {t}" for t in proven) if proven else "- (暂无历史数据)"
     try:
         resp = requests.post(
@@ -117,35 +125,62 @@ def _llm_suggest(settings: Settings, hotspots: list[dict],
                        "人群决定他们非要不可的那份资料;宁要一个急用人群,不要十个围观者。"},
                       {"role": "user", "content":
                        "rising 热点如下:\n" + "\n".join(hs)
-                       + "\n\n我们自己验证过能带来转存的资源文标题(参考其选题套路与话术):\n"
+                       + "\n\n我们近 72h 已采集到的资源文(id. 标题;语义相关即可匹配,"
+                         "标题不必字面含热点词):\n" + ("\n".join(sup) if sup else "(无)")
+                       + "\n\n我们自己验证过能带来转存的资源文标题(参考选题套路):\n"
                          + proven_block
-                       + "\n\n对每个热点给出一套拉新方案,每套严格两行:\n"
-                         "《热点》→ 资源:具体到文件内容的清单(如「近3年真题+答题模板」)\n"
-                         "《热点》→ 标题:1条发布标题(带时效词/人群词) + 人群:谁非要不可 + 拉新点:为什么必须转存"}],
-                  "temperature": 0.7, "max_tokens": 900},
+                       + "\n\n严格只输出一个 JSON 对象(无多余文字/无代码围栏):\n"
+                         '{"matches": [{"hotspot": "热点词", "article_id": 资源文id,'
+                         ' "why": "一句话说明相关性"}],\n'
+                         ' "plans": [{"hotspot": "热点词", "resource": "具体到文件内容的资料清单",'
+                         ' "title": "1条发布标题(带时效词/人群词)", "audience": "谁非要不可",'
+                         ' "hook": "为什么必须转存(拉新点)"}]}\n'
+                         "规则:matches 只收语义真正相关的资源(没有就空数组);"
+                         "matches 里没有对应资源的热点必须给 plan;禁止编造不存在的 article_id。"}],
+                  "temperature": 0.5, "max_tokens": 1200},
             timeout=60)
         if resp.status_code >= 400:
-            logger.warning("热点 LLM 建议失败 HTTP %s", resp.status_code)
+            logger.warning("热点 LLM 规划失败 HTTP %s", resp.status_code)
             return {}
         text = (resp.json().get("choices", [{}])[0].get("message", {}) or {}).get("content") or ""
     except requests.RequestException as exc:
-        logger.warning("热点 LLM 建议请求异常:%s", exc)
+        logger.warning("热点 LLM 规划请求异常:%s", exc)
         return {}
-    out: dict[str, str] = {}
-    cur: str | None = None
-    for line in text.splitlines():
-        line = line.strip().lstrip("0123456789.、-• ")
-        if "《" not in line:
+    text = text.strip()
+    if text.startswith("```"):   # 剥掉可能的代码围栏
+        text = text.split("```", 2)[1]
+        if text.startswith("json"):
+            text = text[4:]
+    try:
+        data = json.loads(text.strip())
+    except ValueError:
+        logger.warning("热点 LLM 返回非 JSON,丢弃(%s...)", text[:80])
+        return {}
+    matches = {str(m.get("hotspot") or "").strip(): {"article_id": m.get("article_id"),
+                                                     "why": str(m.get("why") or "")}
+               for m in data.get("matches", []) if m.get("hotspot")}
+    plans: dict[str, str] = {}
+    for p in data.get("plans", []):
+        kw = str(p.get("hotspot") or "").strip()
+        if not kw:
             continue
-        kw = line.split("《", 1)[1].split("》", 1)[0]
-        if "→" in line:
-            cur = kw
-            out[kw] = line
-        elif cur:
-            out[cur] += " | " + line   # 第二行(标题/人群/拉新点)并入同一热点
-    for h in hotspots:  # LLM 漏掉的热点不硬造,标个占位让列表完整
-        out.setdefault(h["keyword"], f"《{h['keyword']}》→ (LLM 未给出,自行判断)")
-    return out
+        parts = [f"资源:{p.get('resource') or '?'}", f"标题:{p.get('title') or '?'}",
+                 f"人群:{p.get('audience') or '?'}", f"拉新点:{p.get('hook') or '?'}"]
+        plans[kw] = " | ".join(parts)
+    return {"matches": matches, "plans": plans}
+
+
+def _copy_block(article: WechatArticle) -> str:
+    """从资源文行里拼「复制即用」发货块:标题 + 我方/源链 + 提取码。"""
+    my = next((x.strip() for x in (article.my_pan_urls or "").splitlines() if x.strip()), "")
+    src = next((x.strip() for x in (article.pan_urls or "").splitlines() if x.strip()), "")
+    line = my or src
+    if not line:
+        return article.title
+    m = re.search(r"提取码\s*([0-9A-Za-z]{4})", line)
+    code = m.group(1) if m else ""
+    link = re.match(r"https?://\S+?(?=\s|\(|$)", line)
+    return f"「{article.title}」\n{link.group(0) if link else line}" + (f" 提取码:{code}" if code else "")
 
 
 def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = None) -> dict:
@@ -176,30 +211,75 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
     if not fresh:
         return {"status": "all_duplicated", "hotspots": len(hotspots)}
 
+    top_n = max(1, int(getattr(settings, "hotspot_agent_top_n", 8) or 8))
+    fresh = fresh[:top_n]
     supply = _supply_articles(db, user_id)
-    matched: list[tuple[dict, WechatArticle]] = []
-    unmatched: list[dict] = []
-    for h in fresh[: max(1, int(getattr(settings, "hotspot_agent_top_n", 8) or 8))]:
-        art = _match_supply(h["keyword"], supply)
-        (matched if art else unmatched).append((h, art) if art else h)
-    llm_top = max(0, int(getattr(settings, "hotspot_agent_llm_top", 3) or 3))
-    proven = _proven_titles(db, user_id)
-    llm_map = _llm_suggest(settings, unmatched[:llm_top], proven) if unmatched else {}
 
+    # 第一层:标题子串精确匹配(零成本,字面命中绝不漏)
+    matched: list[tuple[dict, WechatArticle, str]] = []
+    rest: list[dict] = []
+    for h in fresh:
+        art = _match_supply(h["keyword"], supply)
+        if art:
+            matched.append((h, art, "标题字面命中"))
+        else:
+            rest.append(h)
+
+    # 第二层:LLM 语义匹配 + 拉新选题(一次调用;没配 key 自动跳过)
+    llm_plans: dict[str, str] = {}
+    llm_matches: dict[str, tuple[WechatArticle, str]] = {}
+    llm_top = max(0, int(getattr(settings, "hotspot_agent_llm_top", 3) or 3))
+    llm_hotspots = rest[:llm_top]
+    if llm_hotspots:
+        proven = _proven_titles(db, user_id)
+        llm_out = _llm_plan(settings, llm_hotspots, supply, proven)
+        by_id = {a.id: a for a in supply}
+        for h in llm_hotspots:
+            m = (llm_out.get("matches") or {}).get(h["keyword"]) or {}
+            aid = m.get("article_id")
+            if isinstance(aid, int) and aid in by_id:
+                art = by_id[aid]
+                matched.append((h, art, m.get("why") or "语义匹配"))
+                llm_matches[h["keyword"]] = (art, m.get("why") or "")
+            else:
+                plan = (llm_out.get("plans") or {}).get(h["keyword"])
+                if plan:
+                    llm_plans[h["keyword"]] = plan
+
+    if not matched and not llm_plans:
+        return {"status": "no_suggestions", "hotspots": len(fresh)}
+
+    # 落库:建议进 hotspot_suggestions(回看 + 未来效果回填)
+    by_kw_article = {h["keyword"]: (a, why) for h, a, why in matched}
+    plan_by_kw = dict(llm_plans)
+    for h, art, why in matched:
+        db.add(HotspotSuggestion(
+            user_id=user_id, keyword=h["keyword"], growth=h["growth"], kind="match",
+            resource_title=art.title[:255], link=art.my_pan_urls or art.pan_urls or "",
+            plan=f"{why}·匹配自 {art.author}"))
+    for kw, plan in plan_by_kw.items():
+        h = next((x for x in fresh if x["keyword"] == kw), {"growth": 0})
+        db.add(HotspotSuggestion(
+            user_id=user_id, keyword=kw, growth=h["growth"], kind="llm",
+            resource_title="", link="", plan=plan[:500]))
+
+    # 输出行
     lines: list[str] = []
-    for h, art in matched:
+    copy_blocks: list[str] = []
+    for h, art, why in matched:
         my = next((x.strip() for x in (art.my_pan_urls or "").splitlines() if x.strip()), "")
         src = next((x.strip() for x in (art.pan_urls or "").splitlines() if x.strip()), "")
         link = my or src
         lines.append(f"🔥《{h['keyword']}》热度 +{h['growth']:.0f}% → 已有现成资源:"
                      f"「{art.title[:40]}」({art.author})"
+                     + (f" [{why}]" if why and why != "标题字面命中" else "")
                      + (f" → 点这:{link}" if link else ""))
-    for h in unmatched:
-        s = llm_map.get(h["keyword"], "")
-        if s:
-            lines.append(f"💡 {s}")
-    if not lines:
-        return {"status": "no_suggestions", "hotspots": len(fresh)}
+        copy_blocks.append(f"【{art.title}】\n{link}")
+    for kw, plan in plan_by_kw.items():
+        lines.append(f"💡 {kw} → {plan}")
+    if copy_blocks:
+        lines.append("──── 复制即用 ────")
+        lines.extend(copy_blocks)
 
     for h in fresh:
         memory[_norm(h["keyword"])] = now.isoformat(timespec="seconds")
@@ -214,11 +294,11 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
 
     alert_service.notify_incident(
         db=db, user_id=user_id, kind="agent",
-        title=f"🤖 热点选题建议:{len(lines)} 条(现成资源 {len(matched)} / LLM 选题 {len(unmatched)})",
-        detail="近 24h 监控词热度达标,对应可执行动作如下:\n" + "\n".join(lines)[:1800],
+        title=f"🤖 热点选题建议:{len(matched)} 条现成资源 / {len(plan_by_kw)} 条拉新选题",
+        detail="近 24h 监控词热度达标,可执行动作:\n" + "\n".join(lines)[:2000],
         settings=settings, push_feishu=False)
     return {"status": "ok", "hotspots": len(fresh), "matched": len(matched),
-            "llm": len(unmatched), "notified": len(lines)}
+            "llm": len(plan_by_kw), "notified": len(matched) + len(plan_by_kw)}
 
 
 def hotspot_agent_tick_all_users(settings: Settings | None = None) -> int:
