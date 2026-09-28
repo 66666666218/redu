@@ -460,6 +460,13 @@ WeRSS 挂了会怎样:它的异常是 `PlatformError` 的子类,监听会**降�
 - 排障口径:`runs.detail` 里 `failed` 接近账号总数、日志刷屏 `code=-2014` = 被打限速了,
   放慢监听排程(2h)而不是换 Cookie;换 Cookie 救不了限流,只会把新会话一起拖进风控。
 
+
+- **2026-09-28 续期接口收紧实锤**:`/web/login/renewal` 的 body 校验收紧——旧形态
+  `{"rq": "%2Fweb%2Fshelf", "ql": true}` 一律 `-2013 鉴权失败`(哪怕 wr_rt 是刚登录的
+  新票,skey/书架全正常);改为社区现行形态 `{"rq": "%2Fweb%2Fbook%2Fread", "ql": false}`
+  即成功(三形态轮试,成功判定 = 响应 Set-Cookie 含 wr_skey)。当日实装并实测:
+  renewal success、轮换后 142 号可读。若未来再次全线 -2013,优先怀疑接口又收紧,
+  去 findmover/wxread 等活跃项目抄最新 body 形态,别再怀疑自己的 Cookie。
 ## 9. 微信读书 Cookie:为什么"过期快",怎么免维护
 
 - **机制**:wr_skey 短效(约 12~24h)且**轮换制**——浏览器和服务端谁调续期,旧 skey 都会失效。

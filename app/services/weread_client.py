@@ -242,6 +242,12 @@ class WereadClient:
         Cookie 中无 wr_rt 或续期失败(网络/服务端拒绝/未下发新 skey)返回 None,
         此时只能重新扫码/复制 Cookie。调用方负责把返回的新 Cookie **回写存储**
         (旧 skey 会被轮换失效,不回写等于丢登录态)。
+
+        ⚠️ 2026-09-28 实测:renewal 的 body 校验收紧——旧形态
+        `{"rq": "%2Fweb%2Fshelf", "ql": true}` 被服务端以 **-2013 鉴权失败** 拒绝
+        (rt 明明有效),改为社区(wxread)现行形态 `{"rq": "%2Fweb%2Fbook%2Fread", "ql": false}`
+        即成功;三种形态轮试,成功判定 = **响应 Set-Cookie 里出现 wr_skey**
+        (不看 body.succ,服务端成功时 succ 字段可能缺省)。
         """
         if "wr_rt=" not in self.cookie:
             return None
@@ -262,33 +268,22 @@ class WereadClient:
             name, _, value = kv.strip().partition("=")
             if name:
                 jar.cookies.set(name, value, domain="weread.qq.com", path="/")
-        try:
-            resp = jar.post(f"{BASE}/web/login/renewal",
-                            data=json.dumps({"rq": "%2Fweb%2Fshelf", "ql": True},
-                                            separators=(",", ":")),
-                            timeout=timeout)
-        except requests.RequestException:
-            return None
-        if resp.status_code != 200:
-            return None
-        # renewal 的业务错误(如 -2013 鉴权失败=wr_rt 被吊销)必须显式失败:
-        # 此前只看 HTTP 200 + jar 里有 wr_skey——而旧 skey 仍在 jar 中未被清除,
-        # 被误当"新 skey"返回,调用方以为续期成功实际什么都没换到(2026-09-18 定位)
-        try:
-            body = resp.json()
-        except (ValueError, AttributeError):
-            return None
-        if body.get("succ") != 1 and int(body.get("errCode", 0) or 0) != 0:
-            logger.warning("renewal 被拒:errCode=%s %s",
-                           body.get("errCode"), str(body.get("errMsg") or "")[:60])
-            return None
-        new_skey = new_rt = ""
-        for c in jar.cookies:  # requests 已把 Set-Cookie 并入 jar
-            if c.name == "wr_skey" and c.value:
-                new_skey = c.value
-            elif c.name == "wr_rt" and c.value:
-                new_rt = c.value
-        if not new_skey:
+        variants = ({"rq": "%2Fweb%2Fbook%2Fread", "ql": False},
+                    {"rq": "%2Fweb%2Fbook%2Fread", "ql": True},
+                    {"rq": "%2Fweb%2Fbook%2Fread"})
+        resp = None
+        for body in variants:
+            try:
+                resp = jar.post(f"{BASE}/web/login/renewal",
+                                data=json.dumps(body, separators=(",", ":")), timeout=timeout)
+            except requests.RequestException:
+                return None
+            if resp.status_code == 200 and "wr_skey" in resp.cookies:
+                break  # 该形态成功;Set-Cookie 已并入 jar
+            resp = None
+        if resp is None:
+            # 全部形态被拒:服务端接口/校验又变了(参考本函数 2026-09-28 的教训)
+            logger.warning("renewal 三种形态均未换出新 skey(接口或校验可能又变了)")
             return None
         # 以续期响应的完整 Set-Cookie 为基础重建:服务端可能同时轮换多个字段,
         # 只拼 skey/rt 会得到"半新半旧"的不一致 Cookie(实测 shelf -2012)。

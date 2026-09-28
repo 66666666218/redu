@@ -816,7 +816,11 @@ def test_listen_auto_renews_and_retries(session, monkeypatch: pytest.MonkeyPatch
 
 
 def test_weread_refresh_skey_renewal_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    """renewal 请求层:Cookie 注入 jar、POST renewal、Set-Cookie 回填(wr_rt 的 @ 重新编码、~ 保留)。"""
+    """renewal 请求层:三种 body 形态轮试、Cookie 注入 jar、Set-Cookie 回填(@ 重编码、~ 保留)。
+
+    2026-09-28 实测:旧形态 {"rq":"%2Fweb%2Fshelf","ql":true} 被服务端 -2013 拒绝,
+    现行形态 {"rq":"%2Fweb%2Fbook%2Fread","ql":false} 一次成功。
+    """
     from app.services import weread_client as wc_mod
 
     class _Cookie:
@@ -833,13 +837,16 @@ def test_weread_refresh_skey_renewal_request(monkeypatch: pytest.MonkeyPatch) ->
         def __iter__(self):
             return iter(self.items)
 
-    class _Resp:
-        status_code = 200
-        text = '{"succ":1}'
+        def __contains__(self, name: str) -> bool:
+            return any(c.name == name for c in self.items)
 
-        @staticmethod
-        def json():
-            return {"succ": 1}
+    posts: list[str] = []
+
+    class _Resp:
+        def __init__(self, ok: bool) -> None:
+            self.status_code = 200
+            self.cookies = _Jar()
+            self._ok = ok
 
     class _Sess:
         def __init__(self) -> None:
@@ -847,18 +854,45 @@ def test_weread_refresh_skey_renewal_request(monkeypatch: pytest.MonkeyPatch) ->
             self.cookies = _Jar()
 
         def post(self, url: str, data=None, timeout: int = 20) -> _Resp:
-            assert url.endswith("/web/login/renewal")
-            assert b'"ql":true' in data.replace(b" ", b"") if isinstance(data, bytes) else '"ql":true' in data
-            self.cookies.set("wr_skey", "NEWSKEY", domain="weread.qq.com", path="/")
-            self.cookies.set("wr_rt", "newrt@x~t", domain="weread.qq.com", path="/")
-            return _Resp()
+            body = str(data)
+            posts.append(body)
+            resp = _Resp(ok='"ql":false' in body)   # 第一种形态成功,第二种被拒(无 Set-Cookie)
+            if resp._ok:
+                # 真实 requests 语义:Set-Cookie 会自动并回 Session jar
+                for kv in (("wr_skey", "NEWSKEY"), ("wr_rt", "newrt@x~t")):
+                    resp.cookies.set(*kv, domain="weread.qq.com", path="/")
+                    self.cookies.set(*kv, domain="weread.qq.com", path="/")
+            return resp
 
     monkeypatch.setattr(wc_mod.requests, "Session", _Sess)
     out = wc_mod.WereadClient("wr_vid=9; wr_rt=old%40x~t; wr_skey=OLDSKEY").refresh_skey()
     assert out and "wr_skey=NEWSKEY" in out
     assert "wr_rt=newrt%40x~t" in out  # @ 重新 URL 编码;~ 属 unreserved 保留明文
-    # 无 wr_rt → 不发请求直接返回 None
-    assert wc_mod.WereadClient("wr_vid=9; wr_skey=K").refresh_skey() is None
+    assert posts and '"ql":false' in posts[0]            # 首选现行形态
+    assert wc_mod.WereadClient("wr_vid=9; wr_skey=K").refresh_skey() is None  # 无 wr_rt 不发请求
+
+
+def test_weread_refresh_skey_all_variants_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """三种形态全被拒(响应均不带 wr_skey Set-Cookie)→ 返回 None,调用方走失败告警。"""
+    from app.services import weread_client as wc_mod
+
+    class _JarDict(dict):
+        def set(self, name: str, value: str, domain: str = "", path: str = "") -> None:
+            self[name] = value
+
+    class _Resp:
+        status_code = 200
+        cookies = _JarDict()
+
+    class _Sess:
+        headers: dict = {}
+        cookies = _JarDict()
+
+        def post(self, url: str, data=None, timeout: int = 20) -> _Resp:
+            return _Resp()
+
+    monkeypatch.setattr(wc_mod.requests, "Session", _Sess)
+    assert wc_mod.WereadClient("wr_vid=9; wr_rt=rt").refresh_skey() is None
 
 
 def test_weread_throttle_shared_across_instances(monkeypatch) -> None:
