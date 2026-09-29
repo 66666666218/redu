@@ -335,7 +335,38 @@ class HotspotSuggestion(Base):
     resource_title: Mapped[str] = mapped_column(String(255), default="")
     link: Mapped[str] = mapped_column(String(500), default="")
     plan: Mapped[str] = mapped_column(String(500), default="")
+    saves: Mapped[int] = mapped_column(Integer, default=0)     # 夸克 App 分享页读到的保存人数(人工回填)
+    saves_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # 最近一次回填时间
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class QuarkShareStat(Base):
+    """夸克「我的分享」统计快照(share/update_list 接口采集)。
+
+    每条分享链接一行(user_id+share_id 唯一),采集时覆盖更新统计字段,
+    captured_at 记录最近一次采集时间;保存数喂给拉新效果回填闭环。
+    """
+
+    __tablename__ = "quark_share_stats"
+    __table_args__ = (UniqueConstraint("user_id", "share_id", name="uq_qss_user_share"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    share_id: Mapped[str] = mapped_column(String(64), index=True)
+    pwd_id: Mapped[str] = mapped_column(String(32), default="")
+    title: Mapped[str] = mapped_column(String(255), default="")
+    share_url: Mapped[str] = mapped_column(String(255), default="")
+    save_pv: Mapped[int] = mapped_column(Integer, default=0)        # 保存次数(-1=平台未给出)
+    click_pv: Mapped[int] = mapped_column(Integer, default=0)       # 浏览次数(-1=平台未给出)
+    download_pv: Mapped[int] = mapped_column(Integer, default=0)    # 下载次数
+    visit_user_count: Mapped[int] = mapped_column(Integer, default=0)  # 访问人数
+    file_num: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[int] = mapped_column(Integer, default=0)
+    audit_status: Mapped[int] = mapped_column(Integer, default=0)
+    path_info: Mapped[str] = mapped_column(String(255), default="")   # 分享源目录
+    share_created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    share_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
 class WechatTrafficSample(Base):

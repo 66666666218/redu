@@ -1,6 +1,6 @@
 # 接口规范(API)
 
-> 版本: v1.1　|　最后更新: 2026-09-03
+> 版本: v1.2　|　最后更新: 2026-09-29
 > 基础地址: 调度/监控系统暴露的 HTTP 服务(默认 `http://localhost:8080`)
 > 认证: 除 `/healthz`(健康检查)外,所有接口需 **JWT Bearer** 登录态;管理接口另需 admin/operator 角色权限。
 
@@ -914,3 +914,69 @@
   两者都提供"每号最新一页(≤100 篇)"的全量列表,同步可翻页拉历史(免费)。
   优先级:**WeRSS → 读书平台 → 微信读书 cover(只最新一篇)→ dajiala(付费)**;
   对标号列表的 `biz` 字段就是喂给这两个源的公众号标识。
+
+---
+
+## 10. 夸克 · 分享统计(2026-09-29,拉新效果回填)
+
+> 采集夸克「我的分享」每条链接的保存/浏览数据(`share/update_list` 接口,免签名直连),
+> 落 `quark_share_stats` 表;并把保存数**精确回填**到热点建议表(`hotspot_suggestions`,
+> 按分享链接与建议 `link` 精确匹配,只回填人工未干预的行)。
+> 前置:「Cookie 管理」里配置 **quark** 平台 Cookie。
+
+### 10.1 触发一次分享统计采集
+
+- **接口名称**: 夸克分享统计采集
+- **请求方式**: POST
+- **URL 路径**: `/api/quark/shares/collect`
+- **请求参数**: 无(Cookie 取当前用户已配置的 quark Cookie)
+
+**响应示例 (200)**
+```json
+{
+  "total": 45,
+  "saved": 45,
+  "suggestions_backfilled": 0,
+  "top_saves": [
+    { "title": "四级真题及答案(2015.6-2025.12)", "save_pv": 12, "share_url": "https://pan.quark.cn/s/xxxx" }
+  ]
+}
+```
+
+> - `total`=接口返回条数;`saved`=落库条数(按 user_id+share_id 覆盖更新,幂等)
+> - `suggestions_backfilled`=本次回填热点建议行数
+> - 夸克 Cookie 失效 → HTTP 400(`夸克 Cookie 已失效…`);未配置 Cookie → HTTP 400
+
+### 10.2 查询分享统计
+
+- **接口名称**: 分享统计列表
+- **请求方式**: GET
+- **URL 路径**: `/api/quark/shares`
+- **请求参数**: 无(按当前用户隔离,按保存数降序)
+
+**响应示例 (200)**
+```json
+{
+  "total": 45,
+  "list": [
+    {
+      "share_id": "153f4345320848f6aef7e6999c2324da",
+      "title": "奶蛙快跑(先保存后使用)",
+      "share_url": "https://pan.quark.cn/s/45b1cfe8cc4c",
+      "save_pv": 0,
+      "click_pv": -1,
+      "download_pv": 0,
+      "visit_user_count": 0,
+      "file_num": 1,
+      "status": 1,
+      "audit_status": 4,
+      "path_info": "/资源测试库",
+      "share_created_at": "2026-09-26T16:11:01",
+      "captured_at": "2026-09-29T13:01:50"
+    }
+  ]
+}
+```
+
+> `click_pv=-1` 表示平台未给出该字段(语义待与 App 端人工对照确认);
+> `save_pv/click_pv/download_pv/visit_user_count` 为夸克侧原始计数。
