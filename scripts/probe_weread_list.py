@@ -14,7 +14,7 @@
 三种上下文依次是:首页 Referer(现在的写法)/ 不带 Origin+Referer / 阅读器页
 (`https://weread.qq.com/web/mp/reader/<weread_book_id>`,自动拼,`--reader-url` 可换一种形态试)。
 只打印 errCode 和条数,绝不输出 Cookie。判定:
-- 三种上下文全失败 → 确实是账号级限权,漏推只能走付费(dajiala)或现成的公众号后台身份;
+- 三种上下文全失败 → 确实是账号级限权,根治只能用现成的公众号后台身份走 WeRSS;
 - 某一种能出文章 → 把 `app/services/weread_client.py` 的 `_headers` 按那个改,免费全量列表当场复活。
 """
 from __future__ import annotations
@@ -133,7 +133,7 @@ def main() -> int:
               "线上 Cookie 一失效(本机就是这种),这条探测只能等续期后再做。")
         return 2
     print("结论:三种上下文(首页/无 Referer/阅读器页)都拿不到列表 → 按账号级限权处理,"
-          "免费全量列表这条路到此为止,根治只能换凭据(dajiala 付费,或有现成公众号身份走 WeRSS)")
+          "免费全量列表这条路到此为止,根治只能用现成公众号身份走 WeRSS")
     return 0
 
 

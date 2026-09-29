@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session
 from app.auth import get_current_user
 from app.db import get_db
 from app.db.models import User, WechatArticle, WechatBenchmark
-from app.services.dajiala_client import DajialaError
 from app.services.weread_client import WereadAuthError, WereadError
 from app.services.wechat_analyzer import analyze_articles
 from app.services import wechat_monitor
@@ -228,10 +227,8 @@ def wechat_benchmark_sync(benchmark_id: int, max_pages: int | None = None,
         return wechat_monitor.sync_wechat_account(db, user.id, benchmark_id, max_pages=max_pages)
     except KeyError as exc:
         raise HTTPException(404, str(exc))
-    except DajialaError as exc:
-        raise HTTPException(502, str(exc))
     except WereadAuthError as exc:
-        # 无 dajiala key 时同步走微信读书免费源(只能拿最新一篇),Cookie 一失效就从这里冒出来;
+        # 同步兜底走微信读书免费源(只能拿最新一篇),Cookie 一失效就从这里冒出来;
         # 不接住就是裸 500,前端只报"服务器开小差了",用户完全不知道该去换 Cookie。
         raise HTTPException(502, f"微信读书登录态已失效,同步取不到文章。请到「Cookie 管理」更新 weread Cookie"
                                 f"(粘贴前确认含 wr_rt=),或在「公众号监听」页点续期后重试。({exc})")
@@ -303,19 +300,6 @@ def wechat_candidate_update(candidate_id: int, payload: dict,
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     return {"ok": True}
-
-
-@router.post("/api/wechat/traffic/refresh")
-def wechat_traffic_refresh(payload: dict | None = None, user: User = Depends(get_current_user),
-                           db: Session = Depends(get_db)):
-    """刷新阅读量(dajiala read_zan_pro,¥0.06/篇)。body 可选: {benchmark_id?, limit?}。"""
-    payload = payload or {}
-    try:
-        return wechat_monitor.sample_traffic(db, user.id,
-                                             benchmark_id=payload.get("benchmark_id"),
-                                             limit=payload.get("limit"))
-    except DajialaError as exc:
-        raise HTTPException(502, str(exc))
 
 
 @router.get("/api/wechat/articles/{article_id}/traffic")
@@ -405,7 +389,4 @@ def wechat_listen(user: User = Depends(get_current_user), db: Session = Depends(
 
     新发文始终全量推飞书(不受免打扰时段限制,飞书是员工查看入口)。
     """
-    try:
-        return wechat_monitor.run_wechat_listen(db, user.id)
-    except DajialaError as exc:
-        raise HTTPException(502, str(exc))
+    return wechat_monitor.run_wechat_listen(db, user.id)

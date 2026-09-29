@@ -80,7 +80,7 @@ def source_health(db: Session, user_id: int, settings=None) -> list[dict]:
         from app.services.cookie_store import get_cookie
         cookie_ready = bool((get_cookie(db, user_id, "weibo" if section != "wechat" else "weread")
                              or "").strip())
-        if section == "wechat":  # 公众号:书架号+dajiala 也算数据源在位
+        if section == "wechat":  # 公众号:书架号也算数据源在位
             cookie_ready = cookie_ready or bool(db.scalar(
                 select(func.count()).select_from(UserCookie).where(
                     UserCookie.user_id == user_id, UserCookie.platform == "weread")))

@@ -32,7 +32,6 @@ class Settings(BaseSettings):
     xianyu_batch_keywords: int = 5     # 每次采集最多处理的关键词数(风控降频:少量多次,按运行数轮转覆盖全部)
     xianyu_cooldown_minutes: int = 30  # 闲鱼触发人机验证(滑块)后,暂停采集该分钟数,避免反复撞枪口
     xianyu_proxy_url: str = ""      # 闲鱼专用"单一固定"出口代理(http://user:pass@host:port,如住宅IP);留空直连。勿用轮换代理池——mtop token/session 绑定出口 IP
-    dajiala_key: str = ""           # 大家拉/极致了数据 API key(公众号监听/同步/阅读量,见 doc/dajiala-api.md)
     weread_cookie: str = ""         # 微信读书 Cookie(免费监听数据源;优先用平台内按用户配置的「weread」Cookie)
     wechat_reader_platform_url: str = ""  # 读书平台地址(wewe-rss v2 兼容,免费全量文章列表;如 https://weread.xxx 自建实例)
     wechat_reader_token: str = ""   # 读书平台 token(含 vid 的 JWT)
@@ -40,7 +39,6 @@ class Settings(BaseSettings):
     wechat_werss_url: str = ""      # 自建 WeRSS(rachelos/we-mp-rss)地址,免费全量列表首选源;配了它就优先于上面的读书平台
     wechat_werss_ak: str = ""       # WeRSS Access Key(管理界面「Access Key 管理」创建)
     wechat_werss_sk: str = ""       # WeRSS Secret Key(创建时只显示一次)
-    dajiala_min_balance: float = 1.0  # 余额低于该值(元)跳过付费监听,避免打穿余额(免费接口不受限)
     wechat_sync_max_pages: int = 3  # 一键同步默认最多翻页数(history_by_ghid ¥0.14/页,每页约10次发文)
     wechat_sync_push_limit: int = 20  # 一次「同步文章」转存+推飞书的篇数上限(资源文优先;同盘链去重后仍超量才截断)
     wechat_traffic_sample_limit: int = 30  # 每轮阅读量采样最多篇数(¥0.06/篇,控成本)

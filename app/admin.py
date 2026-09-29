@@ -491,7 +491,7 @@ def _retry_runners() -> dict:
     避免两套映射不一致(历史上手动只有 weibo/xianyu/douhot,重试 baidu/wechat_* 直接
     报"未知板块",而自动路径反而支持)。"""
     from app.services import tenant
-    from app.services.wechat_monitor import run_wechat_listen, sample_traffic as _run_wechat_traffic
+    from app.services.wechat_monitor import run_wechat_listen
     from app.services.xianyu_analytics import run_xianyu_deep
 
     return {
@@ -502,7 +502,6 @@ def _retry_runners() -> dict:
         "douhot": tenant.run_douhot,
         "wechat_listen": run_wechat_listen,
         "wechat_sync": run_wechat_listen,
-        "wechat_traffic": _run_wechat_traffic,
     }
 
 

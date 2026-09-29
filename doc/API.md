@@ -1297,8 +1297,7 @@ GET `/api/admin/health`(perm `logs.view`)→ 各平台最近采集状态 + 数�
 ### 17.3 文章 · 阅读量采样与 AI 改写
 | 动作 | 方式 | 路径 | 说明 |
 |---|---|---|---|
-| 批量刷新阅读量 | POST | `/api/wechat/traffic/refresh` | Body 可选 `{"benchmark_id":N,"limit":10}`;dajiala read_zan_pro(¥0.06/篇),无 key 返回 skipped/no_key,上游失败 502 |
-| 单篇采样历史 | GET | `/api/wechat/articles/{article_id}/traffic` | `{"article_id","count","items":[{"read_num","sampled_at","..."}]}`;404=文章不存在 |
+| 单篇采样历史 | GET | `/api/wechat/articles/{article_id}/traffic` | `{"article_id","count","items":[{"read_num","sampled_at","..."}]}`;404=文章不存在。**只读历史**:dajiala 收费采样已于 2026-09-29 整体摘除,新数据不再产生采样点 |
 | AI 改写 | POST | `/api/wechat/articles/{article_id}/rewrite` | 需配 DEEPSEEK_API_KEY(400);正文未抓到 400;成功 `{"ok":true,"article_id","title","..."}` |
 | 改写历史 | GET | `/api/wechat/articles/{article_id}/rewrites` | `{"count":N,"items":[{"id","title","..."}]}` |
 

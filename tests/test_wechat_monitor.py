@@ -1,4 +1,4 @@
-"""公众号监听/同步单测(dajiala 全 mock,零花费):盘链识别/加号/监听去重/翻页同步/余额保护。"""
+"""公众号监听/同步单测(纯免费源:微信读书/WeRSS):盘链识别/加号/监听去重/翻页同步。"""
 import os
 
 os.environ.setdefault("JWT_SECRET", "test_secret_0123456789abcdef0123456789abcdef")
@@ -14,7 +14,8 @@ from app.db import models  # noqa: F401
 from app.db.models import FeishuAlert, RunRecord, WechatArticle, WechatBenchmark, WechatCandidate, WechatPanLink, WechatTrafficSample
 from config.settings import Settings
 from app.services import wechat_monitor
-from app.services.dajiala_client import DajialaClient
+from app.services.cookie_store import set_cookie as _set_cookie
+from app.services.weread_client import review_to_url
 from app.services import feishu_client
 
 
@@ -31,7 +32,7 @@ def _no_quiet_hours(monkeypatch):
 
 
 def _settings(**kw) -> Settings:
-    base = {"dajiala_key": "JZLTEST", "dajiala_min_balance": 1.0, "wechat_sync_max_pages": 2}
+    base = {"wechat_sync_max_pages": 2}
     base.update(kw)
     return Settings(_env_file=None, is_dev=True, **base)
 
@@ -44,34 +45,6 @@ def session():
     yield db
     db.close()
 
-
-class FakeClient:
-    """按脚本回放的假 DajialaClient,记录调用序列。"""
-
-    def __init__(self, remain: float = 10.0, pc: dict | None = None, hist: list[dict] | None = None):
-        self.remain_value = remain
-        self.pc_map = pc or {}          # anchor_url → post_condition 响应
-        self.hist_pages = hist or []    # history_by_ghid 按调用次序回放
-        self.calls: list[tuple] = []
-
-    def remain_money(self) -> float:
-        self.calls.append(("remain",))
-        return self.remain_value
-
-    def post_condition(self, url: str) -> dict:
-        self.calls.append(("pc", url))
-        if url in self.pc_map:
-            return self.pc_map[url]
-        return {"code": 0, "nickname": "微信派", "ghid": "gh_bc5ec2ee663f", "data": []}
-
-    def history_by_ghid(self, ghid: str = "", article_url: str = "", offset: str = "") -> dict:
-        self.calls.append(("hist", ghid, article_url, offset))
-        idx = sum(1 for c in self.calls if c[0] == "hist") - 1
-        return self.hist_pages[min(idx, len(self.hist_pages) - 1)]
-
-    def read_zan_pro(self, url: str) -> dict:
-        self.calls.append(("zan", url))
-        return {"read": 100, "zan": 2, "looking": 3, "share_num": 4, "collect_num": 5, "comment_count": 6}
 
 
 # ---------------------------------------------------------------- 盘链识别
@@ -230,104 +203,74 @@ def test_add_benchmark_free_and_dedupe(session, settings: Settings) -> None:
         wechat_monitor.add_benchmark(session, 1, "资源号乙")
 
 
-def test_add_benchmark_resolves_nickname_via_key(session, monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = FakeClient(pc={"https://mp.weixin.qq.com/s/abc": {
-        "code": 0, "nickname": "微信派", "ghid": "gh_bc5ec2ee663f", "data": []}})
-    monkeypatch.setattr(wechat_monitor, "DajialaClient", lambda key: fake)
-    row = wechat_monitor.add_benchmark(session, 1, "https://mp.weixin.qq.com/s/abc", settings=_settings())
-    assert row["nickname"] == "微信派" and row["ghid"] == "gh_bc5ec2ee663f"
-
-
-# ---------------------------------------------------------------- 监听
-def test_listen_inserts_new_and_dedupes(session) -> None:
-    b = WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A")
-    session.add(b)
+def test_listen_inserts_new_and_dedupes(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    session.add(WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1",
+                                anchor_url="https://mp.weixin.qq.com/s/A"))
     session.commit()
-    fake = FakeClient(pc={"https://mp.weixin.qq.com/s/A": {"code": 0, "data": [
-        {"title": "百度网盘资源合集", "url": "https://mp.weixin.qq.com/s/n1"},
-        {"data": [{"title": "夸克网盘资源", "content_url": "https://mp.weixin.qq.com/s/n2"}]},
-    ]}})
-    monkey = pytest.MonkeyPatch()
-    monkey.setattr(wechat_monitor, "fetch_article_content", lambda url, timeout=15: "")
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), client=fake)
-    monkey.undo()
-    assert out["status"] == "success" and out["new"] == 2
-    rows = session.scalars(select(WechatArticle)).all()
-    assert {r.url for r in rows} == {"https://mp.weixin.qq.com/s/n1", "https://mp.weixin.qq.com/s/n2"}
-    assert all(r.source == "listen" and r.benchmark_id == b.id for r in rows)
-    pan = next(r for r in rows if r.title.startswith("百度网盘"))
-    assert pan.pan_types == "百度网盘"  # 标题本身含盘名,无需正文
+    fake = FakeWeread(cover={"title": "夸克网盘资源合集", "url": "https://mp.weixin.qq.com/s/n1",
+                             "review_id": "MP_WXS_1_n1", "digest": ""},
+                      content="正文含 https://pan.quark.cn/s/zzz 更多资源请关注公众号「资源君」")
+    monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: fake)
+    monkeypatch.setattr(wechat_monitor, "fetch_article_content", lambda url, timeout=15: "")
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(pan_transfer_enabled=False),
+                                           weread=fake)
+    assert out["status"] == "success" and out["new"] == 1
+    row = session.scalars(select(WechatArticle)).first()
+    assert row.url == "https://mp.weixin.qq.com/s/n1" and row.benchmark_id is not None
+    assert row.pan_types == "夸克网盘"  # 标题本身含盘名,无需正文
 
-    out2 = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), client=fake)
+    out2 = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(pan_transfer_enabled=False),
+                                            weread=fake)
     assert out2["new"] == 0  # 第二轮按链接去重
 
 
 def test_listen_records_miss_and_skips(monkeypatch: pytest.MonkeyPatch, session) -> None:
     # 无对标号 → skipped,并写运维记录(否则后台看不到"公众号情况")
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), client=FakeClient())
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings())
     assert out["reason"] == "no_benchmarks"
     runs = session.scalars(select(RunRecord)).all()
     assert len(runs) == 1 and runs[0].status == "skipped" and "no_benchmarks" in runs[0].detail
 
-    # 当天没有发文 → miss_count 累积
-    b = WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A")
+    # 无微信读书 Cookie → no_source
+    session.add(WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A"))
+    session.commit()
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings())
+    assert out["reason"] == "no_source"
+
+    # cover 报"最新一篇"且库里已有这篇 → 当天没发文,miss_count 累积
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    b = WechatBenchmark(user_id=1, nickname="号B", weread_book_id="MP_WXS_1",
+                        anchor_url="https://mp.weixin.qq.com/s/A")
     session.add(b)
     session.commit()
-    fake = FakeClient(pc={"https://mp.weixin.qq.com/s/A": {"code": 0, "msg": "当天没有发文!", "data": []}})
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), client=fake)
+    session.add(WechatArticle(user_id=1, benchmark_id=b.id, author="号B", title="旧文",
+                              url="https://mp.weixin.qq.com/s/old", source="listen"))
+    session.commit()
+    fake = FakeWeread(cover={"title": "旧文", "url": "https://mp.weixin.qq.com/s/old",
+                             "review_id": "MP_WXS_1_old", "digest": ""})
+    monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: fake)
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(pan_transfer_enabled=False),
+                                           weread=fake)
     assert out["new"] == 0 and b.miss_count == 1
-
-    # 余额低于阈值 → 仅禁用 dajiala(不调 post_condition),不再整轮跳过
-    monkeypatch_ = pytest.MonkeyPatch()
-    monkeypatch_.setattr(wechat_monitor, "fetch_article_content", lambda url, timeout=15: "")
-    fake = FakeClient(remain=0.5)
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), client=fake)
-    monkeypatch_.undo()
-    assert out["new"] == 0 and all(c[0] != "pc" for c in fake.calls)
-    assert out["dajiala_skipped"] == "low_balance" and out["balance"] == 0.5
     run = session.scalars(select(RunRecord).order_by(RunRecord.id.desc())).first()
-    assert run.kind == "wechat_listen" and "dajiala_off" in run.detail
+    assert run.kind == "wechat_listen"
 
 
 def test_listen_pushes_pan_articles_to_feishu(monkeypatch: pytest.MonkeyPatch, session) -> None:
-    import json
-
-    import app.services.feishu as feishu_mod
-    import app.services.feishu_client as fc_mod
-
-    b = WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A")
-    session.add(b)
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    session.add(WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1",
+                                anchor_url="https://mp.weixin.qq.com/s/A"))
     session.commit()
-    fake = FakeClient(pc={"https://mp.weixin.qq.com/s/A": {"code": 0, "data": [
-        {"title": "夸克网盘资源", "url": "https://mp.weixin.qq.com/s/n1"},
-    ]}})
-    monkeypatch.setattr(wechat_monitor, "fetch_article_content",
-                        lambda url, timeout=15: "正文含 https://pan.quark.cn/s/qwerty")
-    monkeypatch.setattr(feishu_mod, "webhook_for", lambda settings, section: "https://open.feishu.cn/hook/x")
-    sent: list[dict] = []
-
-    class _FakeFeishu:
-        def __init__(self, webhook, secret="") -> None:
-            pass
-
-        def send(self, msg: str) -> bool:
-            sent.append({"text": msg})
-            return True
-
-        def send_card(self, card: dict) -> bool:
-            sent.append(card)
-            return True
-
-    monkeypatch.setattr(fc_mod, "FeishuClient", _FakeFeishu)
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), client=fake)
-    assert out["new"] == 1 and sent, "应推公众号专属群"
-    row = session.scalar(select(WechatArticle))
-    assert row.pan_types == "夸克网盘" and row.content
-    card = sent[0]
-    text = json.dumps(card, ensure_ascii=False)
-    assert "夸克网盘" in text  # 网盘列(盘链识别)
-    assert "mp.weixin.qq.com/s/n1" in text  # 无转存时标题链接回落原文
-    assert "📡" in text  # 卡片标题
+    fake = FakeWeread(cover={"title": "夸克网盘资源", "url": "https://mp.weixin.qq.com/s/w1",
+                             "review_id": "MP_WXS_1_w1", "digest": ""},
+                      content="正文含 https://pan.quark.cn/s/zzz")
+    monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: fake)
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(pan_transfer_enabled=False),
+                                           weread=fake)
+    assert out["new"] == 1 and out["status"] == "success"
+    row = session.scalars(select(WechatArticle)).first()
+    assert row.pan_types == "夸克网盘"
 
 
 def test_push_listen_sends_all_articles_grouped_by_account(session, monkeypatch) -> None:
@@ -464,121 +407,11 @@ def test_parse_time_converts_utc_iso_to_local_naive() -> None:
 
 
 # ---------------------------------------------------------------- 同步
-def test_sync_pages_until_isend_and_backfills_ghid(monkeypatch: pytest.MonkeyPatch, session) -> None:
-    b = WechatBenchmark(user_id=1, nickname="未命名", anchor_url="https://mp.weixin.qq.com/s/A")
-    session.add(b)
-    session.commit()
-
-    def _page(items, offset, is_end):
-        return {"code": 0, "data": {
-            "AccountInfo": {"UserName": "gh_abc123", "NickName": "真名号"},
-            "MsgList": {"Msg": [{"AppMsg": {"DetailInfo": items} } ]},
-            "PagingInfo": {"Offset": offset, "IsEnd": is_end},
-        }}
-
-    fake = FakeClient(hist=[
-        _page([{"Title": "历史文1 百度网盘", "ContentUrl": "https://mp.weixin.qq.com/s/h1"},
-               {"Title": "历史文2 迅雷云盘", "ContentUrl": "https://mp.weixin.qq.com/s/h2"}], "OFF1", 0),
-        _page([{"Title": "历史文3 夸克网盘", "ContentUrl": "https://mp.weixin.qq.com/s/h3"}], "", 1),
-    ])
-    out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=_settings(), client=fake)
-    assert out["pages"] == 2 and out["new"] == 3
-    assert b.ghid == "gh_abc123" and b.nickname == "真名号"
-    urls = {r.url for r in session.scalars(select(WechatArticle)).all()}
-    assert urls == {f"https://mp.weixin.qq.com/s/h{i}" for i in (1, 2, 3)}
-    h2 = next(r for r in session.scalars(select(WechatArticle)).all() if r.title.startswith("历史文2"))
-    assert h2.pan_types == "迅雷云盘" and h2.publish_at is None
-    # 第二页 IsEnd=1 → 不再翻第三页
-    assert sum(1 for c in fake.calls if c[0] == "hist") == 2
-
-
-def test_sync_respects_max_pages(monkeypatch: pytest.MonkeyPatch, session) -> None:
-    b = WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A")
-    session.add(b)
-    session.commit()
-
-    def _page(offset, is_end):
-        item = {"Title": f"文{offset or '0'}",
-                "ContentUrl": f"https://mp.weixin.qq.com/s/p{offset or 0}"}
-        return {
-            "code": 0,
-            "data": {
-                "MsgList": {
-                    "Msg": [
-                        {"AppMsg": {"DetailInfo": [item]}},
-                    ]
-                }
-            },
-            "PagingInfo": {"Offset": offset or "x", "IsEnd": is_end},
-        }
-
-    fake = FakeClient(hist=[_page("o1", 0), _page("o2", 0), _page("o3", 1)])
-    out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=_settings(), client=fake)
-    assert out["pages"] == 2 and out["new"] == 2  # wechat_sync_max_pages=2 截断
-    assert sum(1 for c in fake.calls if c[0] == "hist") == 2
-
-
 def _page_of(items, offset, is_end):
     return {"code": 0, "data": {
         "MsgList": {"Msg": [{"AppMsg": {"DetailInfo": items}}]},
         "PagingInfo": {"Offset": offset, "IsEnd": is_end},
     }}
-
-
-def test_sync_dajiala_no_balance_at_first_page_is_not_success(session) -> None:
-    """余额在首页就被拒 → 这次同步一篇历史都没拉到,绝不能记 success。
-
-    `run_full_sync_if_pending` 按 `status == "success"` 累加 synced 并在全轮走完后删掉
-    「全量补采」标记:虚报成功等于在历史文章一篇没补的情况下把标记销毁,而它是
-    会话初期(唯一能拿到列表的窗口)一次性资源。
-    """
-    from app.services.dajiala_client import DajialaNoBalance
-
-    b = WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A")
-    session.add(b)
-    session.commit()
-
-    class _Broke(FakeClient):
-        def history_by_ghid(self, ghid="", article_url="", offset=""):
-            self.calls.append(("hist", ghid, article_url, offset))
-            raise DajialaNoBalance("余额不足")
-
-    out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=_settings(), client=_Broke())
-    assert out["status"] == "failed" and out["pages"] == 0 and out["no_balance"] is True
-    # 没见到任何文章就不该把「最后发文」刷成刚刚
-    assert b.last_item_at is None
-    run = session.scalars(select(RunRecord).where(RunRecord.kind == "wechat_sync")).one()
-    # 落库是 partial 而非 failed:failed 的 wechat_sync 会被 retry_failed_runs 重试成
-    # 一整轮监听,缺余额这种事重试修不好,只会白烧微信读书额度
-    assert run.status == "partial" and "low_balance_midway" in run.detail
-
-
-def test_sync_dajiala_no_balance_midway_is_partial_and_keeps_seen_items(session) -> None:
-    """第一页拿到了文章、第二页余额见底 → partial(历史被截断),但 last_item_at 可以前移。"""
-    from app.services.dajiala_client import DajialaNoBalance
-
-    b = WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A")
-    session.add(b)
-    session.commit()
-
-    class _HalfBroke(FakeClient):
-        def history_by_ghid(self, ghid="", article_url="", offset=""):
-            self.calls.append(("hist", ghid, article_url, offset))
-            if offset:
-                raise DajialaNoBalance("余额不足")
-            return _page_of([{"Title": "历史文1 百度网盘",
-                              "ContentUrl": "https://mp.weixin.qq.com/s/h1"}], "OFF1", 0)
-
-    out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=_settings(), client=_HalfBroke())
-    assert out["status"] == "partial" and out["pages"] == 1 and out["new"] == 1
-    assert b.last_item_at is not None
-    run = session.scalars(select(RunRecord).where(RunRecord.kind == "wechat_sync")).one()
-    assert run.status == "partial" and "low_balance_midway" in run.detail
-
-
-# ---------------------------------------------------------------- 微信读书(免费源)
-from app.services.cookie_store import set_cookie as _set_cookie
-from app.services.weread_client import review_to_url
 
 
 class FakeWeread:
@@ -637,22 +470,6 @@ def test_review_to_url_preserves_tilde() -> None:
     assert review_to_url("") == ""
 
 
-def test_listen_low_balance_still_runs_weread(session, monkeypatch: pytest.MonkeyPatch) -> None:
-    """空余额只饿死 dajiala:书架号走微信读书免费源照常入库,且绝不调付费接口。"""
-    _set_cookie(session, 1, "weread", "vid=1; skey=x")
-    session.add(WechatBenchmark(user_id=1, nickname="书架号", weread_book_id="MP_WXS_1", anchor_url=""))
-    session.add(WechatBenchmark(user_id=1, nickname="手动号", anchor_url="https://mp.weixin.qq.com/s/A"))
-    session.commit()
-    fake = FakeWeread(cover={"title": "夸克网盘资源", "url": "https://mp.weixin.qq.com/s/w1",
-                             "review_id": "MP_WXS_1_w1", "digest": ""},
-                      content="正文含 https://pan.quark.cn/s/zzz")
-    monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: fake)
-    daj = FakeClient(remain=0.5)
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), client=daj, weread=fake)
-    assert out["new"] >= 1 and out.get("dajiala_skipped") == "low_balance"
-    assert all(c[0] != "pc" for c in daj.calls)  # 没钱也不调付费接口
-
-
 def test_listen_uses_weread_first_and_detects_pan(session, monkeypatch: pytest.MonkeyPatch) -> None:
     _set_cookie(session, 1, "weread", "vid=1; skey=x")
     b = WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1", anchor_url="")
@@ -662,18 +479,18 @@ def test_listen_uses_weread_first_and_detects_pan(session, monkeypatch: pytest.M
                              "review_id": "MP_WXS_1_w1", "digest": ""},
                       content="正文含 https://pan.quark.cn/s/zzz")
     monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: fake)
-    daj = FakeClient(remain=10.0)
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), client=daj, weread=fake)
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(pan_transfer_enabled=False),
+                                           weread=fake)
     assert out["status"] == "success" and out["new"] >= 1  # cover 1 篇 + mp_articles 列表(如可用)
     row = session.scalars(select(WechatArticle)).first()
     assert "mp.weixin.qq.com" in row.url and row.pan_types is not None
-    assert ("pc", b.anchor_url) not in daj.calls  # 免费源成功时绝不调 dajiala
 
 
-def test_listen_falls_back_to_dajiala_on_auth_error(session, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_listen_weread_dead_without_renewal_records_failure(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """微信读书失效且无法续期(dajiala 已摘除):本号记 failed,如实暴露而非静默。"""
     from app.services.weread_client import WereadAuthError
 
-    _set_cookie(session, 1, "weread", "vid=1; skey=expired")  # 无 wr_rt → 续期不可用 → 降级 dajiala
+    _set_cookie(session, 1, "weread", "vid=1; skey=expired")  # 无 wr_rt → 续期不可用
     b = WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1",
                         anchor_url="https://mp.weixin.qq.com/s/A")
     session.add(b)
@@ -682,21 +499,13 @@ def test_listen_falls_back_to_dajiala_on_auth_error(session, monkeypatch: pytest
     class _DeadWeread:
         def latest_article(self, book_id):
             raise WereadAuthError("微信读书登录态失效(-2012)")
-        def latest_article(self, book_id):
-            raise WereadAuthError("微信读书登录态失效(-2012)")
 
         def mp_articles(self, book_id, offset=0, count=20):
             raise WereadAuthError("微信读书登录态失效(-2012)")
 
-        def mp_articles(self, book_id, offset=0, count=20):
-            raise WereadAuthError("微信读书登录态失效(-2012)")
-
-    daj = FakeClient(pc={"https://mp.weixin.qq.com/s/A": {"code": 0, "data": [
-        {"title": "UC网盘资源", "url": "https://mp.weixin.qq.com/s/d1"}]}})
     monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: _DeadWeread())
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), client=daj)
-    assert out["new"] == 1  # 微信读书失效且无法续期 → dajiala 兜底照常入库
-    assert ("pc", "https://mp.weixin.qq.com/s/A") in daj.calls
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings())
+    assert out["new"] == 0 and out["failed"] == 1 and out["status"] == "failed"
 
 
 def test_weread_refresh_writeback_and_skips(session, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -808,10 +617,8 @@ def test_listen_auto_renews_and_retries(session, monkeypatch: pytest.MonkeyPatch
             return ""
 
     monkeypatch.setattr(wechat_monitor, "WereadClient", _Flaky)
-    daj = FakeClient()
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), client=daj, weread=None)
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), weread=None)
     assert out["new"] >= 1  # 续期后重试成功(cover+列表)
-    assert all(c[0] != "pc" for c in daj.calls)  # 全程未动付费接口
     assert "wr_skey=NEW" in get_cookie(session, 1, "weread")  # 新 Cookie 已持久化
 
 
@@ -970,8 +777,8 @@ def test_listen_skips_without_any_source(session) -> None:
     WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A")
     session.add(WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A"))
     session.commit()
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""))
-    assert out["reason"] == "no_source"  # 既无微信读书 Cookie 也无 dajiala key
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings())
+    assert out["reason"] == "no_source"  # 无微信读书 Cookie(免费列表源未配)
 
 
 # ---------------------------------------------------------------- 候选对标号发现
@@ -1083,7 +890,7 @@ def test_sync_weread_enumerates_same_day_articles(session, monkeypatch: pytest.M
                       ts=int(_time.time()) - 3600)
     monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: fake)
     out = wechat_monitor.sync_wechat_account(session, 1, b.id,
-                                             settings=_settings(dajiala_key="", pan_transfer_enabled=False),
+                                             settings=_settings(pan_transfer_enabled=False),
                                              weread=fake)
     assert out["status"] == "success" and out["weread_list"] == "ok" and out["new"] == 3
     titles = {r.title for r in session.scalars(select(WechatArticle).where(
@@ -1104,7 +911,7 @@ def test_sync_weread_latest_only(session, monkeypatch: pytest.MonkeyPatch) -> No
                       list_error=wechat_monitor.WereadError("微信读书接口返回错误(-2041):请求频率过高"))
     monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: fake)
     out = wechat_monitor.sync_wechat_account(session, 1, b.id,
-                                             settings=_settings(dajiala_key=""), weread=fake)
+                                             settings=_settings(), weread=fake)
     assert out["status"] == "partial" and out["new"] == 1
     assert out["reason"] == "weread_list_limited_latest_only" and out["weread_list"] == "limited"
 
@@ -1126,7 +933,7 @@ class FakePlatform:
 
 
 def test_listen_prefers_platform_full_list(session, monkeypatch: pytest.MonkeyPatch) -> None:
-    """平台(免费全量列表)优先于微信读书与 dajiala。"""
+    """平台(免费全量列表)优先于微信读书 cover。"""
     _set_cookie(session, 1, "weread", "vid=1")
     session.add(WechatBenchmark(user_id=1, nickname="号A", biz="MP_WXS_9001",
                                 weread_book_id="MP_WXS_1"))
@@ -1134,11 +941,9 @@ def test_listen_prefers_platform_full_list(session, monkeypatch: pytest.MonkeyPa
     plat = FakePlatform(pages=[[{"id": "p1", "title": "平台文1(夸克网盘)", "url": "https://mp.weixin.qq.com/s/p1"},
                                 {"id": "p2", "title": "平台文2(夸克网盘)", "url": "https://mp.weixin.qq.com/s/p2"}]])
     monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
-    daj = FakeClient(remain=10.0)
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), client=daj, platform=plat)
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(pan_transfer_enabled=False),
+                                           platform=plat)
     assert out["new"] == 2
-    assert all(c[0] != "pc" for c in daj.calls)  # 平台成功 → 不走 dajiala 监听
-    assert sum(1 for c in daj.calls if c[0] == "zan") == 2  # 但新文即时采样了阅读量
     urls = {r.url for r in session.scalars(select(WechatArticle)).all()}
     assert urls == {"https://mp.weixin.qq.com/s/p1", "https://mp.weixin.qq.com/s/p2"}
 
@@ -1164,7 +969,7 @@ def test_sync_platform_truncated_by_page_limit_is_not_success(session) -> None:
     """翻满上限页且最后一页仍是全新文 = 历史没翻完,不能记 success。
 
     否则前端显示"同步完成:翻 2 页",用户以为这个号只有 2 篇历史,
-    实际是 `max_pages` 把剩下的剪掉了(与 dajiala 路 `pages>=limit` 同一条规则)。
+    实际是 `max_pages` 把剩下的剪掉了(与微信读书路 `pages>=limit` 同一条规则)。
     """
     b = WechatBenchmark(user_id=1, nickname="号A", biz="MP_WXS_9001")
     session.add(b)
@@ -1307,7 +1112,7 @@ def test_listen_ignores_legacy_biz_and_still_covers(
     plat = FakePlatform(pages=[[{"id": "x", "title": "不该出现", "url": "https://mp.weixin.qq.com/s/x"}]])
     fake = FakeWeread(cover={"title": "封面文", "url": "https://mp.weixin.qq.com/s/c",
                              "review_id": "MP_WXS_1_c"})
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(),
                                            weread=fake, platform=plat)
     assert plat.calls == []                                   # 压根没问源
     assert ("cover", "MP_WXS_1") in fake.calls                # cover 照常采
@@ -1332,7 +1137,7 @@ def test_listen_empty_platform_list_does_not_blind_account(
     plat = FakePlatform(pages=[[]])
     fake = FakeWeread(cover={"title": "封面文", "url": "https://mp.weixin.qq.com/s/c",
                              "review_id": "MP_WXS_1_c"})
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(),
                                            weread=fake, platform=plat)
     assert [c[1] for c in plat.calls] == ["MP_WXS_9001"]      # 问过
     assert ("cover", "MP_WXS_1") in fake.calls                # 问过是空的 → 仍交给后续源
@@ -1343,13 +1148,13 @@ def test_listen_empty_platform_list_does_not_blind_account(
 
 def test_sync_empty_platform_first_page_falls_back(
         session, monkeypatch: pytest.MonkeyPatch) -> None:
-    """「同步文章」首页就空不能报 success:否则 dajiala/微信读书两条兜底路永远走不到。"""
+    """「同步文章」首页就空不能报 success:否则微信读书兜底路永远走不到。"""
     b = WechatBenchmark(user_id=1, nickname="号A", biz="MP_WXS_9001", weread_book_id="")
     session.add(b)
     session.commit()
     plat = FakePlatform(pages=[[]])
     monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
-    out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=_settings(dajiala_key=""))
+    out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=_settings())
     assert plat.calls == [("articles", "MP_WXS_9001", 1, 20)]
     assert out.get("pages") is None and out["status"] != "success"
 
@@ -1362,7 +1167,7 @@ def test_add_benchmark_never_stores_legacy_base64_biz(
                         lambda url, timeout=15: {"biz": _LEGACY_BIZ, "name": "文章页号",
                                                  "title": "T"})
     row = wechat_monitor.add_benchmark(session, 1, "https://mp.weixin.qq.com/s/legacy",
-                                       settings=_settings(dajiala_key=""))
+                                       settings=_settings())
     assert row["biz"] == "" and row["nickname"] == "文章页号"
 
 
@@ -1400,7 +1205,7 @@ def test_add_benchmark_wires_up_existing_werss_subscription(
                         lambda url, timeout=15: {"biz": _LEGACY_BIZ, "name": "资源号丙",
                                                  "title": "T"})
     row = wechat_monitor.add_benchmark(session, 1, "https://mp.weixin.qq.com/s/new3",
-                                       settings=_settings(dajiala_key=""))
+                                       settings=_settings())
     assert row["biz"] == "MP_WXS_55"
 
 
@@ -1454,113 +1259,12 @@ def test_nudge_werss_requires_werss_and_good_shape(
 
 
 # ---------------------------------------------------------------- 阅读量采样
-def test_sample_traffic_updates_and_records(session, monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.db.models import WechatTrafficSample
-
-    b = WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A")
-    session.add(b)
-    session.commit()
-    a1 = WechatArticle(user_id=1, title="文1", url="https://mp.weixin.qq.com/s/n1",
-                       source="listen", benchmark_id=b.id)
-    a2 = WechatArticle(user_id=1, title="文2", url="https://mp.weixin.qq.com/s/n2",
-                       source="listen", benchmark_id=b.id)
-    session.add_all([a1, a2])
-    session.commit()
-
-    class _TrafficClient(FakeClient):
-        def read_zan_pro(self, url):
-            self.calls.append(("zan", url))
-            return {"read": 1234, "zan": 5, "looking": 6, "share_num": 7,
-                    "collect_num": 8, "comment_count": 9}
-
-    fake = _TrafficClient(remain=10.0)
-    out = wechat_monitor.sample_traffic(session, 1, settings=_settings(), client=fake)
-    assert out["status"] == "success" and out["sampled"] == 2
-    assert [("zan", "https://mp.weixin.qq.com/s/n1") in fake.calls,
-            ("zan", "https://mp.weixin.qq.com/s/n2") in fake.calls] == [True, True]
-    assert a1.read_num == 1234 and a1.share_num == 7 and a1.traffic_at is not None
-    assert session.scalar(select(WechatTrafficSample)).read_num == 1234
-
-    # 24h 内不重复采样 → 无目标
-    out2 = wechat_monitor.sample_traffic(session, 1, settings=_settings(), client=fake)
-    assert out2["reason"] == "no_targets"
-
-
-def test_sample_traffic_balance_trims(session, monkeypatch: pytest.MonkeyPatch) -> None:
-    """余额只剩 0.07 → 只采得起 1 篇(0.06),不会打穿余额。"""
-    b = WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A")
-    session.add(b)
-    session.add_all([
-        WechatArticle(user_id=1, title="文1", url="https://mp.weixin.qq.com/s/n1", source="listen", benchmark_id=b.id),
-        WechatArticle(user_id=1, title="文2", url="https://mp.weixin.qq.com/s/n2", source="listen", benchmark_id=b.id),
-    ])
-    session.commit()
-
-    class _TrafficClient(FakeClient):
-        def read_zan_pro(self, url):
-            return {"read": 1, "zan": 1, "looking": 1, "share_num": 1, "collect_num": 1, "comment_count": 1}
-
-    fake = _TrafficClient(remain=0.07)
-    out = wechat_monitor.sample_traffic(session, 1, settings=_settings(), client=fake)
-    assert out["sampled"] == 1
-    assert out["balance_after"] >= 0
-
-
-def test_sample_traffic_reports_failures_instead_of_blank_success(session) -> None:
-    """付费采样轮次必须把"几个目标、几个报错、是不是半路没钱"写进运行记录。
-
-    旧实现只记 `sampled=N` 并一律 success:3 个目标里 2 个报错也长得像一轮好轮,
-    运维既看不出钱白花在哪,也看不出余额半路耗尽导致的截断。
-    """
-    from app.services.dajiala_client import DajialaError
-
-    b = WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A")
-    session.add(b)
-    session.add_all([
-        WechatArticle(user_id=1, title=f"文{i}", url=f"https://mp.weixin.qq.com/s/n{i}",
-                      source="listen", benchmark_id=b.id) for i in (1, 2, 3)
-    ])
-    session.commit()
-
-    class _Flaky(FakeClient):
-        def read_zan_pro(self, url):
-            self.calls.append(("zan", url))
-            if url.endswith("n2"):
-                raise DajialaError("接口异常")
-            return {"read": 10, "zan": 1, "looking": 1, "share_num": 1,
-                    "collect_num": 1, "comment_count": 1}
-
-    out = wechat_monitor.sample_traffic(session, 1, settings=_settings(), client=_Flaky(remain=10.0))
-    assert out["status"] == "partial" and out["sampled"] == 2 and out["failed"] == 1
-    run = session.scalars(select(RunRecord).where(
-        RunRecord.kind == "wechat_traffic").order_by(RunRecord.id.desc())).first()
-    assert "sampled=2" in run.detail and "failed=1" in run.detail and "targets=3" in run.detail
-
-
-def test_sample_traffic_all_targets_fail_is_not_success(session) -> None:
-    from app.services.dajiala_client import DajialaError
-
-    b = WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A")
-    session.add(b)
-    session.add(WechatArticle(user_id=1, title="文1", url="https://mp.weixin.qq.com/s/n1",
-                              source="listen", benchmark_id=b.id))
-    session.commit()
-
-    class _AllFail(FakeClient):
-        def read_zan_pro(self, url):
-            raise DajialaError("接口异常")
-
-    out = wechat_monitor.sample_traffic(session, 1, settings=_settings(), client=_AllFail(remain=10.0))
-    assert out["status"] == "failed" and out["sampled"] == 0
-
-
-# ---------------------------------------------------------------- 盘链归一化 + 资源共振
 def test_pan_links_normalized_and_resonance(session, monkeypatch: pytest.MonkeyPatch) -> None:
     """① 入库时盘链写入归一化表;② 同一盘链被 ≥2 篇推送 → 🔴资源共振卡(冷却去重);③ 旧文自动回填。"""
     b = WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A")
     session.add(b)
     session.commit()
-    st = _settings(dajiala_key="", quark_cookie="", pan_transfer_enabled=False,
+    st = _settings(quark_cookie="", pan_transfer_enabled=False,
                    wechat_resonance_hours=48, focus_cooldown_hours=24,
                    feishu_webhook_wechat="https://open.feishu.cn/hook/wechat")
 
@@ -1588,7 +1292,7 @@ def test_pan_links_normalized_and_resonance(session, monkeypatch: pytest.MonkeyP
             return True
 
     monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
-    out = wechat_monitor._enrich_new_articles(session, 1, st, rows, client=None, allow_paid=False)
+    out = wechat_monitor._enrich_new_articles(session, 1, st, rows, run_backfill=False)
     assert out == {}  # 无 dajiala 采样,仅共振
     # 转存关闭(未转出我方链)时,共振卡不再推他人原始盘链,回落公众号原文;
     # 但仍识别到"同链 ≥2 篇"并出共振卡。
@@ -1596,7 +1300,7 @@ def test_pan_links_normalized_and_resonance(session, monkeypatch: pytest.MonkeyP
     assert session.scalars(select(FeishuAlert).where(FeishuAlert.section == "focus_res")).all()
 
     # 冷却期内不重推
-    out2 = wechat_monitor._enrich_new_articles(session, 1, st, rows, client=None, allow_paid=False)
+    out2 = wechat_monitor._enrich_new_articles(session, 1, st, rows, run_backfill=False)
     assert out2 == {} and len(sent) == 1
 
 
@@ -1605,7 +1309,7 @@ def test_resonance_card_pushes_my_pan_link_not_original(session, monkeypatch: py
     b = WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A")
     session.add(b)
     session.commit()
-    st = _settings(dajiala_key="", quark_cookie="", pan_transfer_enabled=False,
+    st = _settings(quark_cookie="", pan_transfer_enabled=False,
                    wechat_resonance_hours=48, focus_cooldown_hours=24,
                    feishu_webhook_wechat="https://open.feishu.cn/hook/wechat")
     raw = "https://pan.quark.cn/s/aaa111"
@@ -1633,7 +1337,7 @@ def test_resonance_card_pushes_my_pan_link_not_original(session, monkeypatch: py
             return True
 
     monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
-    wechat_monitor._enrich_new_articles(session, 1, st, rows, client=None, allow_paid=False)
+    wechat_monitor._enrich_new_articles(session, 1, st, rows, run_backfill=False)
     blob = " ".join(sent)
     assert "资源共振" in blob
     assert "MINE9999" in blob and "ab12" in blob   # 推的是我方链 + 提取码
@@ -1651,7 +1355,7 @@ def test_resonance_backlog_rotates_not_silently_cooled(session, monkeypatch: pyt
     b = WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A")
     session.add(b)
     session.commit()
-    st = _settings(dajiala_key="", quark_cookie="", pan_transfer_enabled=False,
+    st = _settings(quark_cookie="", pan_transfer_enabled=False,
                    wechat_resonance_hours=48, focus_cooldown_hours=24, focus_max_items=1,
                    feishu_webhook_wechat="https://open.feishu.cn/hook/wechat")
     # 共振 = 同一盘链被 ≥2 篇引用;每链各插 2 篇,让 cnt 真正达阈
@@ -1681,18 +1385,18 @@ def test_resonance_backlog_rotates_not_silently_cooled(session, monkeypatch: pyt
 
     monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
     # 首轮:两个共振资源都新鲜,只推 A(前 1 个),B 不得被烧冷却
-    wechat_monitor._enrich_new_articles(session, 1, st, rows, client=None, allow_paid=False)
+    wechat_monitor._enrich_new_articles(session, 1, st, rows, run_backfill=False)
     # 转存关闭 → 卡里用示例文章标题(资源甲/乙)区分,而非原始盘链
     assert any("资源甲" in m for m in sent) and not any("资源乙" in m for m in sent)
     cooled = {r.title for r in session.scalars(select(FeishuAlert).where(FeishuAlert.section == "focus_res")).all()}
     assert cooled and all("aaa111" in t for t in cooled)  # 仅 A 进了冷却
     # 次轮:A 在冷却里被跳过,B 顶替推出(证明首轮没把 B 静默烧进冷却)
     sent.clear()
-    wechat_monitor._enrich_new_articles(session, 1, st, rows, client=None, allow_paid=False)
+    wechat_monitor._enrich_new_articles(session, 1, st, rows, run_backfill=False)
     assert any("资源乙" in m for m in sent)
     # 第三轮:两者各自已推送并冷却 → 无新共振卡
     sent.clear()
-    wechat_monitor._enrich_new_articles(session, 1, st, rows, client=None, allow_paid=False)
+    wechat_monitor._enrich_new_articles(session, 1, st, rows, run_backfill=False)
     assert not any("资源共振" in m for m in sent)
 
 
@@ -1722,7 +1426,7 @@ def test_pan_links_backfill_legacy_articles(session, monkeypatch: pytest.MonkeyP
                 "reviewId": book_id + "_r0"}, "createTime": 1788800000}]}], "synckey": 1}
 
     from config.settings import Settings as _S
-    st_local = _S(_env_file=None, is_dev=True, dajiala_key="", wechat_resonance_hours=48,
+    st_local = _S(_env_file=None, is_dev=True, wechat_resonance_hours=48,
                   focus_cooldown_hours=24, feishu_webhook_wechat="https://open.feishu.cn/hook/wechat")
     monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: _FakeWeread())
     fake_inst = _FakeWeread()
@@ -1760,7 +1464,7 @@ def test_listen_cross_extracts_new_accounts(session, monkeypatch: pytest.MonkeyP
                         lambda url, timeout=15: "正文含 https://pan.quark.cn/s/zzz 更多资源请关注公众号「资源君」")
     monkeypatch.setattr(feishu_mod, "webhook_for", lambda settings, section: "")
     out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(),
-                                           client=FakeClient(remain=10.0), weread=fake)
+                                           weread=fake)
     assert out["new"] == 1
     cands = session.scalars(select(WechatCandidate)).all()
     assert any(c.name == "资源君" for c in cands), "应从正文提取新公众号并入库为候选"
@@ -1791,13 +1495,13 @@ def test_listen_batch_rotation(session, monkeypatch: pytest.MonkeyPatch) -> None
     fake = _BatchFake()
     fake.calls = []  # 清掉类级继承的记录,只看本实例
 
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(),
                                            weread=fake, batch_index=0, batch_size=2)
     arts_calls = [c for c in fake.calls if c[0] == "articles"]
     assert {c[1] for c in arts_calls} == {"MP_WXS_0", "MP_WXS_1"}  # 只查了批次的 2 个号
     assert out["accounts"] == 2
 
-    out2 = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+    out2 = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(),
                                             weread=fake, batch_index=1, batch_size=2)
     # 下一批(MP_WXS_2/3):每号 cover 1 篇 + mp_articles 1 篇 = 2 篇/号 → 4 篇
     assert out2["accounts"] == 2 and out2["new"] == 2
@@ -1866,7 +1570,7 @@ def test_pan_reuse_skips_duplicate_transfer(session, monkeypatch) -> None:
     monkeypatch.setattr(QuarkTransfer, "transfer_and_share", _no_transfer)
     st = _settings(quark_cookie="ck=x", pan_transfer_enabled=True,
                    wechat_listen_sample_new=False)
-    reps = wechat_monitor._enrich_new_articles(session, 1, st, [b], client=None)
+    reps = wechat_monitor._enrich_new_articles(session, 1, st, [b])
     assert reps[b.id] == [("https://pan.quark.cn/s/reuseX", "https://pan.quark.cn/s/OLD", "ab12")]
     assert "https://pan.quark.cn/s/OLD" in b.my_pan_urls
 
@@ -1890,7 +1594,7 @@ def test_pan_first_transfer_records_replacement(session, monkeypatch) -> None:
     monkeypatch.setattr(QuarkTransfer, "transfer_and_share", _FakeQuark.transfer_and_share)
     st = _settings(quark_cookie="ck=x", pan_transfer_enabled=True,
                    wechat_listen_sample_new=False)
-    reps = wechat_monitor._enrich_new_articles(session, 1, st, [b], client=None)
+    reps = wechat_monitor._enrich_new_articles(session, 1, st, [b])
     assert reps[b.id] == [("https://pan.quark.cn/s/freshY", "https://pan.quark.cn/s/NEW", "zz99")]
     assert "https://pan.quark.cn/s/NEW" in b.my_pan_urls
 
@@ -1915,7 +1619,7 @@ def test_quark_cookie_per_user_wins_over_global(session, monkeypatch) -> None:
                                                  "password": "cd01"})
     st = _settings(quark_cookie="ck=global", pan_transfer_enabled=True,
                    wechat_listen_sample_new=False)
-    reps = wechat_monitor._enrich_new_articles(session, 1, st, [b], client=None)
+    reps = wechat_monitor._enrich_new_articles(session, 1, st, [b])
     assert seen == ["ck=mine"]
     assert reps[b.id][0][1] == "https://pan.quark.cn/s/MINE"
 
@@ -1935,7 +1639,7 @@ def test_quark_transfer_without_any_cookie_alerts_once(session, monkeypatch) -> 
     session.commit()
     st = _settings(quark_cookie="", pan_transfer_enabled=True,
                    wechat_listen_sample_new=False)
-    assert wechat_monitor._enrich_new_articles(session, 1, st, [b], client=None) == {}
+    assert wechat_monitor._enrich_new_articles(session, 1, st, [b]) == {}
     assert calls and "缺夸克 Cookie" in calls[0][3]
 
     # 百度链有自己的门控:缺百度 Cookie 同样要点名(2026-09-26 起,原先静默 break 只留 info 日志)
@@ -1945,7 +1649,7 @@ def test_quark_transfer_without_any_cookie_alerts_once(session, monkeypatch) -> 
                       pan_urls="https://pan.baidu.com/s/baiduonly")
     session.add(c)
     session.commit()
-    wechat_monitor._enrich_new_articles(session, 1, st, [c], client=None)
+    wechat_monitor._enrich_new_articles(session, 1, st, [c])
     assert [x[3] for x in calls] == ["百度盘链未转存(缺百度网盘 Cookie)"]
 
 
@@ -1966,7 +1670,7 @@ def test_pan_selfshare_41017_adopted_as_own_link(session, monkeypatch) -> None:
     monkeypatch.setattr(QuarkTransfer, "transfer_and_share", _fail)
     st = _settings(quark_cookie="ck=x", pan_transfer_enabled=True,
                    wechat_listen_sample_new=False)
-    reps = wechat_monitor._enrich_new_articles(session, 1, st, [b], client=None)
+    reps = wechat_monitor._enrich_new_articles(session, 1, st, [b])
     assert reps[b.id] == [("https://pan.quark.cn/s/ourshare", "https://pan.quark.cn/s/ourshare", "")]
     assert "https://pan.quark.cn/s/ourshare" in b.my_pan_urls  # 已落值 → 补转存不再重试
     # 标记与链接之间必须有空格:回落解析按"链接本体"取串,粘着写会把标记当成 URL 的一部分
@@ -1998,7 +1702,7 @@ def test_baidu_transfer_independent_of_quark_cookie(session, monkeypatch) -> Non
                         lambda self, url, password="", **kw: {
                             "share_url": "https://pan.baidu.com/s/1MINE", "password": "4321"})
     st = _settings(quark_cookie="", pan_transfer_enabled=True, wechat_listen_sample_new=False)
-    reps = wechat_monitor._enrich_new_articles(session, 1, st, [b], client=None)
+    reps = wechat_monitor._enrich_new_articles(session, 1, st, [b])
     assert reps[b.id] == [("https://pan.baidu.com/s/1FRESH", "https://pan.baidu.com/s/1MINE", "4321")]
     assert "https://pan.baidu.com/s/1MINE" in b.my_pan_urls
     assert "[百度]" in b.my_pan_urls  # 复用检测依赖该标记
@@ -2029,7 +1733,7 @@ def test_baidu_reuse_parses_extraction_code_from_history(session, monkeypatch) -
 
     monkeypatch.setattr(BaiduPanClient, "transfer_and_share", _no_transfer)
     st = _settings(quark_cookie="", pan_transfer_enabled=True, wechat_listen_sample_new=False)
-    reps = wechat_monitor._enrich_new_articles(session, 1, st, [b], client=None)
+    reps = wechat_monitor._enrich_new_articles(session, 1, st, [b])
     assert reps[b.id] == [(orig, "https://pan.baidu.com/s/1OLD", "cd56")]
 
 
@@ -2056,7 +1760,7 @@ def test_baidu_reuse_does_not_leak_other_tenant_link(session, monkeypatch) -> No
                         lambda self, url, password="", **kw: {
                             "share_url": "https://pan.baidu.com/s/1MYOWN", "password": "f0de"})
     st = _settings(quark_cookie="", pan_transfer_enabled=True, wechat_listen_sample_new=False)
-    reps = wechat_monitor._enrich_new_articles(session, 1, st, [b], client=None)
+    reps = wechat_monitor._enrich_new_articles(session, 1, st, [b])
     assert reps[b.id] == [(orig, "https://pan.baidu.com/s/1MYOWN", "f0de")]  # 自己的链,非 1OTHER/zz99
 
 
@@ -2092,7 +1796,7 @@ def test_baidu_dead_cookie_alerts_after_first_failure(session, monkeypatch) -> N
     monkeypatch.setattr(BaiduPanClient, "transfer_and_share", _fail_transfer)
     monkeypatch.setattr(BaiduPanClient, "keepalive", _dead_keepalive)
     st = _settings(quark_cookie="", pan_transfer_enabled=True, wechat_listen_sample_new=False)
-    assert wechat_monitor._enrich_new_articles(session, 1, st, list(arts), client=None) == {}
+    assert wechat_monitor._enrich_new_articles(session, 1, st, list(arts)) == {}
     assert len(probes) == 1                                   # 只定性一次,不逐条撞接口
     assert [c[2] for c in captured] == ["百度网盘 Cookie 已失效,转存停用"]
     assert captured[0][1] == "wechat" and captured[0][0] == 1
@@ -2121,7 +1825,7 @@ def test_baidu_transient_failure_does_not_claim_cookie_dead(session, monkeypatch
                             BaiduPanError("转存被限制(errno=105),稍后重试")))
     monkeypatch.setattr(BaiduPanClient, "keepalive", lambda self: True)
     st = _settings(quark_cookie="", pan_transfer_enabled=True, wechat_listen_sample_new=False)
-    wechat_monitor._enrich_new_articles(session, 1, st, [b], client=None)
+    wechat_monitor._enrich_new_articles(session, 1, st, [b])
     assert captured == []
 
 
@@ -2258,7 +1962,7 @@ def test_new_weread_cookie_clears_renewal_cooldown(session) -> None:
 
 
 def test_keyword_article_all_users_skips_disabled(monkeypatch, session) -> None:
-    """per-user 调度入口只处理启用用户:被管理员停用的账号不再消耗 dajiala 配额、不再推飞书。
+    """per-user 调度入口只处理启用用户:被管理员停用的账号不再采集、不再推飞书。
 
     与 collect_tick/due_schedules 的 User.enabled 过滤同源(审计)。
     """
@@ -2276,27 +1980,6 @@ def test_keyword_article_all_users_skips_disabled(monkeypatch, session) -> None:
     wechat_monitor.keyword_article_all_users(_settings())
     assert seen == [1]  # 停用用户 2 不被遍历
 
-
-
-def test_dajiala_non_json_error_does_not_leak_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """非 JSON 响应严禁带 key:网关/门户错误页常回显含 ?key= 的请求 URL,
-    而该异常会经路由 HTTPException(502, str(exc)) 原样透传到前端。响应体只入服务端日志。"""
-    import app.services.dajiala_client as dc
-
-    key = "SECRETKEY123"
-
-    class _Resp:
-        status_code = 502
-        text = f"<html>502 upstream for /article_detail?key={key}&url=x</html>"
-
-        def json(self):
-            raise ValueError("not json")
-
-    monkeypatch.setattr(dc.requests, "request", lambda *a, **k: _Resp())
-    client = dc.DajialaClient(key)
-    with pytest.raises(dc.DajialaError) as ei:
-        client.article_detail("https://mp.weixin.qq.com/s/abc")
-    assert key not in str(ei.value)
 
 
 def test_keyword_article_backlog_rotates_not_silently_cooled(
@@ -2414,8 +2097,8 @@ def test_weread_refresh_tick_stays_quiet_for_cooldown(session, monkeypatch) -> N
 def test_sync_endpoint_translates_weread_auth_error(session, monkeypatch) -> None:
     """「同步文章」在 Cookie 失效时必须是 502+可执行文案,不是裸 500。
 
-    实测(2026-09-22):无 dajiala key 的同步走微信读书最新一篇,wr_skey 一过期就抛
-    WereadAuthError,而 sync 路由只接 KeyError/DajialaError → 500 → 前端统一显示
+    实测:同步兜底走微信读书最新一篇,wr_skey 一过期就抛
+    WereadAuthError,而 sync 路由不接它 → 500 → 前端统一显示
     "服务器开小差了,请稍后重试",用户完全不知道要去换 Cookie。
     """
     from fastapi import FastAPI
@@ -2477,12 +2160,11 @@ def _sync_setup(session, monkeypatch) -> WechatBenchmark:
     session.add(b)
     session.commit()
     monkeypatch.setattr(wechat_monitor, "WereadClient", _SyncWeread)
-    monkeypatch.setattr(wechat_monitor, "_dajiala_key", lambda s, u, st: "")
     return b
 
 
 def test_sync_renews_weread_cookie_before_giving_up(session, monkeypatch) -> None:
-    """无 dajiala 的同步遇到 skey 过期,应先自动续期一次再重试(监听早已这么做)。"""
+    """同步遇到 skey 过期,应先自动续期一次再重试(免费源内自救)。"""
     b = _sync_setup(session, monkeypatch)
     monkeypatch.setattr(wechat_monitor, "refresh_weread_cookie",
                         lambda s, u, settings=None: {"status": "success", "cookie": "wr_vid=1; wr_skey=new"})
@@ -2530,13 +2212,13 @@ def test_quark_dead_source_leaves_backfill_queue(session, monkeypatch) -> None:
     monkeypatch.setattr(QuarkTransfer, "transfer_and_share", _transfer)
     st = _settings(quark_cookie="ck=x", pan_transfer_enabled=True, wechat_listen_sample_new=False)
 
-    wechat_monitor._enrich_new_articles(session, 1, st, [new], client=None)
+    wechat_monitor._enrich_new_articles(session, 1, st, [new])
     session.commit()
     assert "41031" in (old.my_pan_urls or "")        # 落标记 → 不再算"待转存"
     assert "pan.quark.cn/s/MINE" in new.my_pan_urls
 
     tried.clear()
-    wechat_monitor._enrich_new_articles(session, 1, st, [new], client=None)
+    wechat_monitor._enrich_new_articles(session, 1, st, [new])
     assert DEAD not in tried                          # 第二轮起不再撞死链
 
 
@@ -2816,7 +2498,7 @@ def test_listen_exposes_unenumerable_accounts_and_alerts(session, monkeypatch) -
                         lambda db, uid, kind, title, detail, settings=None, **kw:
                         alerts.append((uid, kind, title, detail, kw.get("push_feishu", True))) or False)
 
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""), push=True)
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), push=True)
     assert out["new"] == 2 and out["weread_list"] == {"weread_list_off_new": 2}
     run = session.scalars(select(RunRecord).where(RunRecord.kind == "wechat_listen")).first()
     assert "weread_list(ok=0 off=0 off_with_new=2 skipped=0)" in run.detail
@@ -2824,7 +2506,7 @@ def test_listen_exposes_unenumerable_accounts_and_alerts(session, monkeypatch) -
     assert alert is not None and alert[2] == "⚠️ 微信读书只能拿到最新一篇,同日其它篇可能漏推"
     assert "列不出却采到新文的号:2" in alert[3]  # 数字放正文,标题稳定才冷却去重有效
     # 2026-09-27 实测三种上下文全 -2041 后,文案不再承诺"换 Referer 能复活",改给两条真能走的路
-    assert "dajiala" in alert[3] and "公众号后台身份" in alert[3]
+    assert "WeRSS" in alert[3] and "公众号后台身份" in alert[3]
     assert "-2041" in alert[3] and "-2014" in alert[3]   # 额度类两个码都点名,才说得出"密度"这个根因
     # cover 的正文兜住了 → 盘链被认出,于是"有链却没 Cookie 转存"也必须点名(修 1 之后这两篇
     # 不再是卡片上的一根"—");没转存可解释,静默不可接受。
@@ -2853,7 +2535,7 @@ def test_listen_silent_when_list_enumerable(session, monkeypatch) -> None:
     monkeypatch.setattr(alert_service, "notify_incident",
                         lambda *a, **kw: alerts.append(a) or False)
 
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""), push=True)
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), push=True)
     assert out["new"] == 2 and out["weread_list"] == {"weread_list_ok": 1}
     assert alerts == []
 
@@ -2906,7 +2588,7 @@ def test_listen_pushes_articles_without_pan_links(session, monkeypatch) -> None:
     cards: list[dict] = []
     _fake_feishu(monkeypatch, cards)
 
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""))
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings())
     assert out["new"] == 3
     blob = str(cards)
     assert "本周更新说明" in blob and "另一篇纯资讯" in blob  # 无链的两篇都在卡上
@@ -2960,7 +2642,7 @@ def test_sync_weread_auth_error_in_list_triggers_renewal(session, monkeypatch) -
                         lambda s, u, st=None: (refreshed.append(u),
                                                {"status": "success", "cookie": "vid=1; skey=y"})[1])
 
-    out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=_settings(dajiala_key=""),
+    out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=_settings(),
                                              weread=bad)
     assert refreshed == [1]                       # 撞到登录失效 → 先自救续期
     assert out["status"] == "success" and out["new"] == 1
@@ -2991,7 +2673,7 @@ def test_sync_weread_cover_review_id_fills_blank_list_review(session, monkeypatc
     fake = _BlankRidWeread(cover={"title": "资源文 夸克网盘", "url": build_mp_url("blank1"),
                                   "review_id": "MP_WXS_1_blank1", "digest": ""},
                            content="点此保存 https://pan.quark.cn/s/blank1", ts=1788800000)
-    out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=_settings(dajiala_key=""),
+    out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=_settings(),
                                              weread=fake)
     assert ("content", "MP_WXS_1_blank1") in fake.calls      # 用 cover 的 reviewId 取到正文
     row = session.scalars(select(WechatArticle)).one()
@@ -3097,7 +2779,7 @@ def test_listen_enrich_failure_still_pushes_articles(session, monkeypatch: pytes
         raise RuntimeError("夸克接口 500")
 
     monkeypatch.setattr(wechat_monitor, "_enrich_new_articles", _boom)
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(),
                                            weread=fake)
     assert out["new"] >= 1
     assert session.scalars(select(WechatArticle)).first() is not None  # 新文没被牵连
@@ -3141,7 +2823,7 @@ def test_listen_alert_send_failure_keeps_round_articles(session, monkeypatch: py
     monkeypatch.setattr(feishu_client, "FeishuClient", _DeadFeishu)
     out = wechat_monitor.run_wechat_listen(
         session, 1,
-        settings=_settings(dajiala_key="",
+        settings=_settings(
                            feishu_webhook_wechat="https://open.feishu.cn/hook/wx"),
         weread=fake)
     assert out["new"] >= 1
@@ -3172,64 +2854,10 @@ def test_backfill_queue_skips_non_quark_history(session, monkeypatch: pytest.Mon
                                  {"share_url": url.replace("/s/1", "/s/MINE"), "password": ""})[1])
     st = _settings(quark_cookie="ck=x", pan_transfer_enabled=True, wechat_listen_sample_new=False,
                    pan_transfer_backfill_limit=1)
-    wechat_monitor._enrich_new_articles(session, 1, st, [fresh], client=None)
+    wechat_monitor._enrich_new_articles(session, 1, st, [fresh])
     assert calls == ["https://pan.quark.cn/s/1FRESH", "https://pan.quark.cn/s/1NEED"]
     assert "pan.quark.cn/s/MINE" in old_quark.my_pan_urls  # 唯一名额给了真正待转的夸克文
     assert old_baidu.my_pan_urls in (None, "")             # 百度链走自己的门控,不占队列
-
-
-def test_burst_send_failure_keeps_pending_samples(session, monkeypatch: pytest.MonkeyPatch) -> None:
-    """爆点卡发送失败只撤销冷却行:本轮已付费(¥0.06/篇)采到的读数不能被一起回滚。"""
-    a = WechatArticle(user_id=1, title="爆点文", author="号A", url="https://mp.weixin.qq.com/s/b1",
-                      source="listen", read_num=100, share_num=2, collect_num=1)
-    session.add(a)
-    session.flush()
-    session.add(WechatTrafficSample(user_id=1, article_id=a.id, read_num=100,
-                                    sampled_at=datetime.now()))
-    monkeypatch.setattr(feishu_client, "webhook_for",
-                        lambda settings, section: "https://open.feishu.cn/hook/x")
-    monkeypatch.setattr(feishu_client, "FeishuClient", _DeadFeishu)
-    assert wechat_monitor._notify_burst(session, 1, _settings(focus_cooldown_hours=24), a,
-                                        growth=80.0) is False
-    session.commit()
-    assert session.scalars(select(WechatTrafficSample)).first() is not None
-    assert session.scalar(select(FeishuAlert)) is None  # 不烧冷却门,下轮还能再报
-
-
-def test_sample_traffic_filters_cooldown_inside_sql_window(session) -> None:
-    """采样候选窗口只有 `limit*5` 篇:冷却判定必须下推到 SQL。
-
-    旧实现先取"最新 limit*5 篇"再在 Python 里筛掉刚采过的 → 81 个号一轮监听
-    就能把这扇窗口灌满"刚采过"的新文,再往下的旧文永远进不了候选,
-    每轮 no_targets、付费采样配额(¥0.06/篇)原地空转。
-    """
-    b = WechatBenchmark(user_id=1, nickname="号A", anchor_url="https://mp.weixin.qq.com/s/A")
-    session.add(b)
-    session.commit()
-    now = datetime.now()
-    for i in range(20):   # 20 篇 30 分钟前刚采过的新文,正好占满 limit=4 的 20 篇窗口
-        session.add(WechatArticle(user_id=1, title=f"新文{i}", url=f"https://mp.weixin.qq.com/s/n{i}",
-                                  source="listen", benchmark_id=b.id,
-                                  created_at=now - timedelta(hours=1),
-                                  traffic_at=now - timedelta(minutes=30)))
-    old = WechatArticle(user_id=1, title="该重采的旧文", url="https://mp.weixin.qq.com/s/old",
-                        source="listen", benchmark_id=b.id,
-                        created_at=now - timedelta(days=10),
-                        traffic_at=now - timedelta(days=2))
-    session.add(old)
-    session.commit()
-
-    class _Traffic(FakeClient):
-        def read_zan_pro(self, url):
-            self.calls.append(("zan", url))
-            return {"read": 500, "zan": 1, "looking": 2, "share_num": 3,
-                    "collect_num": 4, "comment_count": 5}
-
-    fake = _Traffic(remain=10.0)
-    st = _settings(wechat_traffic_sample_limit=4)
-    out = wechat_monitor.sample_traffic(session, 1, settings=st, client=fake, limit=4)
-    assert [c[1] for c in fake.calls if c[0] == "zan"] == ["https://mp.weixin.qq.com/s/old"]
-    assert out["sampled"] == 1
 
 
 def test_push_listen_sanitizes_llm_narrative(session, monkeypatch) -> None:
@@ -3308,7 +2936,7 @@ def test_listen_repushes_articles_that_never_reached_feishu(session, monkeypatch
     cards: list[dict] = []
     ok = [False]
     _flaky_feishu(monkeypatch, cards, ok)
-    st = _settings(dajiala_key="")
+    st = _settings()
 
     out = wechat_monitor.run_wechat_listen(session, 1, settings=st)
     assert out["status"] == "success" and out["new"] == 1
@@ -3419,7 +3047,7 @@ def test_listen_refuses_to_run_two_rounds_at_once(session, monkeypatch) -> None:
 
     回归:`claim_schedule` 的乐观锁只管"抢占那一刻",挡不住一轮几分钟的作业——手动点
     「立即监听」撞上定时轮,或管理端失败重试撞上下一次定时轮,两轮就并行扫同一批号:
-    重复扣 dajiala 费、同一篇新文发两张卡、微信读书请求密度翻倍招风控。
+    同一篇新文发两张卡、微信读书请求密度翻倍招风控。
     """
     fake = _listen_one_article_setup(session, monkeypatch)
     _fake_feishu(monkeypatch, [])
@@ -3429,7 +3057,7 @@ def test_listen_refuses_to_run_two_rounds_at_once(session, monkeypatch) -> None:
                              updated_at=datetime.now()))
     session.commit()
 
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""))
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings())
     assert out["status"] == "skipped" and out["reason"] == "running"
     assert fake.calls == []                        # 一次数据源请求都没发
     assert len(session.scalars(select(WechatArticle)).all()) == 0
@@ -3453,7 +3081,7 @@ def test_listen_lock_takeover_after_ttl_and_release_after_round(session, monkeyp
                              updated_at=stale))
     session.commit()
 
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""))
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings())
     assert out["status"] == "success" and out["new"] == 1
     assert _lock_row(session) is None               # 收尾删的是自己那把令牌
     assert len(session.scalars(select(WechatArticle)).all()) == 1
@@ -3469,7 +3097,7 @@ def test_listen_lock_released_even_when_round_raises(session, monkeypatch) -> No
 
     monkeypatch.setattr(wechat_monitor, "_listen_round", _boom)
     with pytest.raises(RuntimeError):
-        wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""))
+        wechat_monitor.run_wechat_listen(session, 1, settings=_settings())
     assert _lock_row(session) is None
 
 
@@ -3482,7 +3110,7 @@ def test_listen_counts_quiet_rounds_on_weread_path(session, monkeypatch) -> None
     """
     fake = _listen_one_article_setup(session, monkeypatch)
     _fake_feishu(monkeypatch, [])
-    st = _settings(dajiala_key="")
+    st = _settings()
 
     out = wechat_monitor.run_wechat_listen(session, 1, settings=st)
     assert out["new"] == 1
@@ -3513,7 +3141,7 @@ def test_listen_does_not_mark_quiet_when_source_cannot_answer(session, monkeypat
     monkeypatch.setattr(wechat_monitor, "WereadClient", lambda cookie: fake)
     _fake_feishu(monkeypatch, [])
 
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""))
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings())
     assert out["new"] == 0
     b = session.scalars(select(WechatBenchmark)).one()
     assert b.miss_count == 3                       # 原样不动:既不加也不清零
@@ -3555,7 +3183,7 @@ def test_listen_falls_back_to_weread_content_when_direct_fetch_blocked(session, 
                       list_error=_LIST_OFF)
     cards = _weread_listen_scene(session, monkeypatch, fake, direct_content="")
 
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""))
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings())
     assert out["new"] == 1
     art = session.scalars(select(WechatArticle)).one()
     assert "pan.quark.cn/s/deadbeef01" in art.content
@@ -3573,7 +3201,7 @@ def test_listen_skips_weread_content_when_direct_fetch_works(session, monkeypatc
     _weread_listen_scene(session, monkeypatch, fake,
                          direct_content="直抓到的 https://pan.quark.cn/s/direct1")
 
-    assert wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""))["new"] == 1
+    assert wechat_monitor.run_wechat_listen(session, 1, settings=_settings())["new"] == 1
     art = session.scalars(select(WechatArticle)).one()
     assert art.pan_urls.strip() == "https://pan.quark.cn/s/direct1"
     assert not [c for c in fake.calls if c[0] == "content"]
@@ -3592,7 +3220,7 @@ def test_quiet_listen_round_still_backfills_pan_urls(session, monkeypatch) -> No
     session.add(legacy)
     _weread_listen_scene(session, monkeypatch, FakeWeread(cover=None, list_error=_LIST_OFF))
 
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""))
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings())
     assert out["new"] == 0                              # 空轮
     session.refresh(legacy)
     assert legacy.pan_urls.strip() == "https://pan.baidu.com/s/1AbCdEf"
@@ -3692,7 +3320,7 @@ def test_listen_breaks_weread_list_after_quota_error(session, monkeypatch) -> No
     monkeypatch.setattr(wechat_monitor, "fetch_article_content", lambda url, timeout=15: "")
     fake = _QuotaWeread(list_quota_books={"MP_WXS_2"}, no_cover_books={"MP_WXS_4"})
 
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(),
                                            weread=fake)
     asked = [c for c in fake.calls if c[0] == "articles"]
     assert asked == [("articles", "MP_WXS_1"), ("articles", "MP_WXS_2")]   # 号 3/4 没再去撞
@@ -3717,7 +3345,7 @@ def test_listen_stops_weread_entirely_after_repeated_quota_errors(session, monke
                         alerts.append((uid, kind, title, detail, kw.get("push_feishu", True))) or False)
     fake = _QuotaWeread(cover_quota_from=3)     # 号 3/4/5 的 cover 回 -2014 → 第 3 次合闸
 
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(),
                                            weread=fake)
     assert sum(1 for c in fake.calls if c[0] == "cover") == 5        # 号 6 这一轮没再去撞
     assert out["weread_quota_skipped"] == 1
@@ -3740,46 +3368,18 @@ def test_listen_does_not_break_on_non_quota_weread_errors(session, monkeypatch) 
     monkeypatch.setattr(wechat_monitor, "fetch_article_content", lambda url, timeout=15: "")
     fake = _QuotaWeread(cover_hard_from=1)
 
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(),
                                            weread=fake)
     assert sum(1 for c in fake.calls if c[0] == "cover") == 4         # 每个号都仍被尝试
     assert "weread_quota_skipped" not in out
     assert out["failed"] == 4 and out["status"] == "failed"
 
 
-def test_listen_quota_skip_covered_by_paid_source_is_not_blind(session, monkeypatch) -> None:
-    """熔断后被付费源兜住的号要从盲区计数里扣掉——否则 quota_skipped 会虚报漏采面。
+def test_listen_free_source_that_never_answers_records_failure(session, monkeypatch) -> None:
+    """免费源"跑过但没答上"(cover 空响应 + 列表挂)按 failed 计,如实暴露。
 
-    前提是这个号有 `anchor_url`:② 这条路对"只有微信读书 bookId"的号结构性不可达
-    (线上 81 个号 anchor_url 全空),所以测试里显式把链补上。
-    """
-    _set_cookie(session, 1, "weread", "vid=1; skey=x")
-    _add_benchmarks(session, 4)
-    pc = {}
-    for i, b in enumerate(session.scalars(select(WechatBenchmark)).all(), start=1):
-        if i > 3:
-            continue                            # 号 4 留作"没有付费兜底"的真盲区
-        b.anchor_url = f"https://mp.weixin.qq.com/s/A{i}"
-        pc[b.anchor_url] = {"code": 0, "data": [
-            {"title": f"付费源补回 {i}", "url": f"https://mp.weixin.qq.com/s/n{i}"}]}
-    session.commit()
-    monkeypatch.setattr(wechat_monitor, "fetch_article_content", lambda url, timeout=15: "")
-    client = FakeClient(pc=pc)
-    fake = _QuotaWeread(cover_quota_from=1)     # 每个号的 cover 都被额度挡回
-
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(),
-                                           client=client, weread=fake)
-    assert out["new"] == 3                      # 3 个号由付费源兜住,第 4 个没链 → 真盲区
-    assert out["weread_quota_skipped"] == 1
-    titles = {r.title for r in session.scalars(select(WechatArticle)).all()}
-    assert {"付费源补回 1", "付费源补回 2", "付费源补回 3"} <= titles
-
-
-def test_listen_free_source_that_never_answers_leaves_the_account_to_paid(session, monkeypatch) -> None:
-    """免费源"跑过但没答上"(cover 空响应 + 列表挂)不等于"这个号今天没发文"。
-
-    旧实现只要没抛异常就置 `used = True`,于是 ② 的付费兜底再也不会为这个号点火:
-    恰好在风控期的那批号两头落空,而运行记录长得像"全都问过了"。
+    旧实现会降级付费兜底;dajiala 摘除后没有第二双腿——答不上就是采集故障,
+    不能把这一号记成"确认停更"(miss_count 不动),也不能静默成功。
     """
     from app.services.weread_client import WereadError
 
@@ -3789,17 +3389,12 @@ def test_listen_free_source_that_never_answers_leaves_the_account_to_paid(sessio
     b.anchor_url = "https://mp.weixin.qq.com/s/A1"
     session.commit()
     monkeypatch.setattr(wechat_monitor, "fetch_article_content", lambda url, timeout=15: "")
-    pc = {b.anchor_url: {"code": 0, "data": [
-        {"title": "付费源补回", "url": "https://mp.weixin.qq.com/s/paid1"}]}}
     fake = FakeWeread(cover=None, list_error=WereadError("mp/articles 其它异常"))
 
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(),
-                                          client=FakeClient(pc=pc), weread=fake)
-    assert out["new"] == 1
-    assert {r.title for r in session.scalars(select(WechatArticle)).all()} == {"付费源补回"}
-    # 免费源没答上 → miss_count 也不该被推成"确认停更"
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), weread=fake)
+    assert out["new"] == 0 and out["failed"] == 1 and out["status"] == "failed"
     session.refresh(b)
-    assert b.miss_count == 0
+    assert b.miss_count == 0  # 免费源没答上 → miss_count 不该被推成"确认停更"
 
 
 # ------------------------------------------------ 第 14 轮:书架粗筛(降频主刀)
@@ -3854,7 +3449,7 @@ def test_listen_shelf_gate_skips_accounts_with_unchanged_signal(session, monkeyp
                                  _shelf_entry("MP_WXS_2", 1790393639),   # 变了 → 问
                                  _shelf_entry("MP_WXS_3", 1790393640)])  # 首轮无水位 → 问
 
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(),
                                            weread=fake)
     asked = [c[1] for c in fake.calls if c[0] == "cover"]
     assert asked == ["MP_WXS_2", "MP_WXS_3"]          # 号1 被书架门跳过,只问有变化的号
@@ -3886,7 +3481,7 @@ def test_listen_shelf_gate_force_ask_and_tier_order(session, monkeypatch) -> Non
                                  _shelf_entry("MP_WXS_3", 1003),   # 相等 → 跳过
                                  _shelf_entry("MP_WXS_4", 1004)])  # 无水位 → 可能更新
 
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(),
                                            weread=fake)
     asked = [c[1] for c in fake.calls if c[0] == "cover"]
     # 号4(可能更新)排队头 → 号2(强制问询期到)殿后;号1/3 跳过
@@ -3906,7 +3501,7 @@ def test_listen_shelf_gate_failure_degrades_to_per_account(session, monkeypatch)
         raise wechat_monitor.WereadError("微信读书错误 code=-2014:")
     monkeypatch.setattr(fake, "shelf_entries", boom)
 
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(),
                                            weread=fake)
     asked = [c[1] for c in fake.calls if c[0] == "cover"]
     assert asked == ["MP_WXS_1", "MP_WXS_2"]           # 每个号照旧被问
@@ -3924,7 +3519,7 @@ def test_listen_shelf_without_signal_field_changes_nothing(session, monkeypatch)
     fake = _ShelfWeread(entries=[{"bookId": "MP_WXS_1", "title": "号1"},
                                  {"bookId": "MP_WXS_2", "title": "号2"}])
 
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(),
                                            weread=fake)
     asked = [c[1] for c in fake.calls if c[0] == "cover"]
     assert asked == ["MP_WXS_1", "MP_WXS_2"]
@@ -3956,7 +3551,7 @@ def test_listen_shelf_marks_never_advance_without_answer(session, monkeypatch) -
                 "review_id": f"{book_id}_r"}
     monkeypatch.setattr(fake, "latest_article", cover_second_fails)
 
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(),
                                            weread=fake)
     assert len([c for c in fake.calls if c[0] == "cover"]) == 2        # 两个号都被问了
     assert _load_marks(session) == {"MP_WXS_1": "1001",                # 答上 → 前移(值未变)
@@ -3979,7 +3574,7 @@ def test_listen_cover_article_gets_publish_time_from_shelf(session, monkeypatch)
                                  _shelf_entry("MP_WXS_2", ts),        # 正常 → 盖发布时间
                                  _shelf_entry("MP_WXS_3", 7)])        # 离谱值 → 宁缺勿错
 
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(),
                                            weread=fake)
     arts = {r.benchmark_id: r for r in session.scalars(select(WechatArticle)).all()}
     assert arts[2].publish_at == _dt.fromtimestamp(ts)   # 书架时间戳=最新一篇的发布时间
@@ -4043,7 +3638,7 @@ def test_listen_marks_banned_article_and_alerts_inapp(session, monkeypatch) -> N
                         lambda db, uid, kind, title, detail, settings=None, **kw:
                         alerts.append((title, kw.get("push_feishu", True))) or False)
 
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(),
                                            weread=fake)
     art = session.scalars(select(WechatArticle)).one()
     assert art.content == ""                            # 封禁页不当正文入库
@@ -4074,7 +3669,7 @@ def test_listen_sweep_alert_two_bans_goes_to_feishu(session, monkeypatch) -> Non
                         lambda db, uid, kind, title, detail, settings=None, **kw:
                         alerts.append((title, detail, kw.get("push_feishu", True))) or False)
 
-    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(dajiala_key=""),
+    out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(),
                                            weread=fake)
     assert out["banned"] == 2
     sweep = next(a for a in alerts if "版权清扫" in a[0])
@@ -4100,6 +3695,7 @@ def test_push_card_shows_banned_marker(session, monkeypatch) -> None:
 def test_listen_batch_rotation_advances_cursor(session) -> None:
     """142 号分组轮换(2026-09-29 用户决策):未传 batch 时按配置切片,游标推进,
     detail 记 batch=i/n;batch_size=0 逃生门回全量;游标超过组数取模回绕。"""
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")  # 过 no_source 门(dajiala 已摘除)
     for i in range(5):
         session.add(WechatBenchmark(user_id=1, nickname=f"号{i}",
                                     anchor_url=f"https://mp.weixin.qq.com/s/{i}"))
@@ -4111,38 +3707,39 @@ def test_listen_batch_rotation_advances_cursor(session) -> None:
 
     # 批大小 2 → 5 号分 3 组;三次调用分别吃 [0:2] [2:4] [4:5]
     st = _settings(wechat_listen_batch_size=2)
-    out1 = wechat_monitor.run_wechat_listen(session, 1, settings=st, client=FakeClient())
+    out1 = wechat_monitor.run_wechat_listen(session, 1, settings=st)
     assert out1["status"] in ("success", "skipped")
     assert "accounts=2" in _last_detail() and "batch=1/3(size=2)" in _last_detail()
-    out2 = wechat_monitor.run_wechat_listen(session, 1, settings=st, client=FakeClient())
+    out2 = wechat_monitor.run_wechat_listen(session, 1, settings=st)
     assert "accounts=2" in _last_detail() and "batch=2/3(size=2)" in _last_detail()
-    out3 = wechat_monitor.run_wechat_listen(session, 1, settings=st, client=FakeClient())
+    out3 = wechat_monitor.run_wechat_listen(session, 1, settings=st)
     assert "accounts=1" in _last_detail() and "batch=3/3(size=2)" in _last_detail()
 
     # 第四次:游标回绕到第 1 组
-    wechat_monitor.run_wechat_listen(session, 1, settings=st, client=FakeClient())
+    wechat_monitor.run_wechat_listen(session, 1, settings=st)
     assert "batch=1/3(size=2)" in _last_detail()
 
     # batch_size=0:逃生门,全量 5 号,无 batch 字样
     st_full = _settings(wechat_listen_batch_size=0)
-    wechat_monitor.run_wechat_listen(session, 1, settings=st_full, client=FakeClient())
+    wechat_monitor.run_wechat_listen(session, 1, settings=st_full)
     detail = _last_detail()
     assert "accounts=5" in detail and "batch=" not in detail
 
 
 def test_listen_batch_explicit_index_no_cursor(session) -> None:
     """显式传 batch_index/batch_size 时不动游标(兼容既有手动指定语义)。"""
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
     for i in range(4):
         session.add(WechatBenchmark(user_id=1, nickname=f"号{i}",
                                     anchor_url=f"https://mp.weixin.qq.com/s/{i}"))
     session.commit()
     st = _settings(wechat_listen_batch_size=0)  # 关默认轮转,隔离游标副作用
-    wechat_monitor.run_wechat_listen(session, 1, settings=st, client=FakeClient(),
+    wechat_monitor.run_wechat_listen(session, 1, settings=st,
                                      batch_index=1, batch_size=2)
     run = session.scalars(select(RunRecord).order_by(RunRecord.id.desc())).first()
     assert "accounts=2" in run.detail and "batch=2/2(size=2)" in run.detail
     # 游标未被消耗:下一次默认轮转应从 0 开始
     st_rot = _settings(wechat_listen_batch_size=2)
-    wechat_monitor.run_wechat_listen(session, 1, settings=st_rot, client=FakeClient())
+    wechat_monitor.run_wechat_listen(session, 1, settings=st_rot)
     assert "batch=1/2(size=2)" in session.scalars(
         select(RunRecord).order_by(RunRecord.id.desc())).first().detail

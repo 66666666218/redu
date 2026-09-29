@@ -21,7 +21,6 @@ from config.settings import Settings, get_settings
 from app.db.models import (FeishuAlert, User, WechatArticle, WechatBenchmark, WechatCandidate,
                            WechatPanLink, WechatRewrite, WechatTrafficSample)
 from app.db.tx import HeldSavepoint, savepoint
-from app.services.dajiala_client import DajialaClient, DajialaError, DajialaNoBalance
 from app.services.quark_transfer import QuarkAuthError, QuarkError, QuarkTransfer, extract_quark_urls
 from app.services.reader_platform_client import PlatformError, ReaderPlatformClient
 from app.services.werss_client import WerssClient
@@ -103,7 +102,7 @@ def fetch_article_content(url: str, timeout: int = 15) -> str:
     """免费自抓微信文章正文(纯文本,含正文超链接与「阅读原文」的目标 URL)。
 
     命中风控("环境异常"验证页)或拿不到正文容器时返回空串——调用方应容忍空结果,
-    需要兜底时才走 dajiala article_detail(¥0.01/次)。
+    (2026-09-29 起 dajiala 收费链已整体摘除,免费源不可用即如实记失败。)
     """
     if not url:
         return ""
@@ -375,7 +374,7 @@ def add_benchmark(session: Session, user_id: int, url: str, nickname: str = "",
         raise ValueError("该文章链接对应的对标号已存在")
     ghid = ""
     biz = ""
-    # 解析优先级:读书平台/WeRSS(免费)→ 文章页直抓(免费)→ dajiala(付费兜底);失败不挡加号
+    # 解析优先级:读书平台/WeRSS(免费)→ 文章页直抓(免费);失败不挡加号
     plat = _platform_client(settings)
     if plat:
         try:
@@ -389,17 +388,6 @@ def add_benchmark(session: Session, user_id: int, url: str, nickname: str = "",
         # 文章页解出的是 base64 `__biz`,**不是**列表源认识的订阅 id,写进 biz 只会让 ⓪ 分支
         # 拿着它去撞空列表并挤掉微信读书 cover(见 feed_biz)。昵称照取,biz 不落地。
         nickname = nickname or meta.get("name", "")
-    # 付费解析昵称/ghid:走 _dajiala_key 而非全局 settings.dajiala_key。
-    # 否则普通用户反复调 add_benchmark 会绕过 2026-09-14 审计确立的"全局 key 仅 admin
-    # 可用"隔离,把运营者余额暴露给任意注册用户刷。
-    add_key = _dajiala_key(session, user_id, settings)
-    if add_key and (not ghid or not nickname):
-        try:
-            obj = DajialaClient(add_key).post_condition(url)
-            ghid = ghid or str(obj.get("ghid") or "")
-            nickname = nickname or str(obj.get("nickname") or "")
-        except DajialaError as exc:  # noqa: BLE001 - 解析失败不挡加号(key 没余额也允许加)
-            logger.info("加号解析昵称/ghid 失败(不影响使用):%s", exc)
     # WeRSS 没有"链接→公众号"接口,所以昵称是它那边唯一的线索:同名订阅已存在就直接接上列表源,
     # 免得运营者为一个新号再跑一遍回填脚本(接上后由接口在后台催 WeRSS 抓一次)。
     if not biz and nickname:
@@ -530,26 +518,8 @@ def set_benchmark_active(session: Session, user_id: int, benchmark_id: int, acti
     session.commit()
 
 
-# ---------------------------------------------------------------- 微信读书(免费源)
-def _dajiala_key(session: Session, user_id: int, settings: Settings) -> str:
-    """dajiala key:平台内按用户配置(「dajiala」)优先,其次全局 DAJIALA_KEY。
-
-    多租户余额隔离:每个用户用自己的 key,采样消耗各自的余额。
-    全局 key 仅 admin 可用——付费接口普通用户可反复触发,回退全局 key 等于
-    把运营者余额暴露给任意注册用户刷(2026-09-14 审计)。
-    """
-    from app.services.cookie_store import get_cookie
-
-    own = (get_cookie(session, user_id, "dajiala") or "").strip()
-    if own:
-        return own
-    user = session.get(User, user_id)
-    if user is not None and user.role != "admin":
-        return ""  # 普通用户不回退全局 key(防任意注册用户刷运营者余额)
-    return (settings.dajiala_key or "").strip()
-
 def _is_privileged(session: Session, user_id: int) -> bool:
-    """是否可回退到运营者全局资源(weread Cookie 等)。与 _dajiala_key 同一门控口径。"""
+    """是否可回退到运营者全局资源(weread Cookie 等,admin 专属)。"""
     user = session.get(User, user_id)
     return user is not None and user.role == "admin"
 
@@ -930,12 +900,11 @@ def _backfill_pan_links(session: Session) -> None:
 
 def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                          rows: list[WechatArticle],
-                         client: DajialaClient | None, allow_paid: bool = True,
                          run_backfill: bool = True) -> dict[int, list[tuple[str, str, str]]]:
-    """新文后处理(推送前):① 即时采样阅读量(¥0.06/篇,上限 wechat_listen_sample_limit);
-    ② 夸克转存盘链 → 换自己的分享链并持久化到 `my_pan_urls`。
+    """新文后处理(推送前):夸克转存盘链 → 换自己的分享链并持久化到 `my_pan_urls`。
 
-    `allow_paid=False`(dajiala 余额不足)时连即时采样也跳过,只做免费的夸克转存;
+    (2026-09-29 摘除 dajiala 后,原"① 即时采样阅读量"随付费链一并移除;阅读数相关
+    字段保留在库表里兼容历史数据,新数据一律无采样。)
     `run_backfill=False`(同步收尾)跳过历史补转存队列——同步在 HTTP 请求里,自带窗口已经
     限死了本次转存篇数,再叠加队列会让一次点击多打 N 次夸克接口;队列留给定点监听。
     返回 {article_id: [(原链, 我的链, 提取码)]} 供飞书推送;失败回落原链接,绝不阻塞监听。
@@ -952,24 +921,6 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
         # 空轮回填完就走:补转存队列要打的外呼接口留给有新文的轮次,免得长期没新文的号
         # 也把每轮的 pan_transfer_backfill_limit 个名额平白用掉。
         return replacements
-    # 采样兜底:调用方(listen 主循环)通常已备好 client;若为空,必须走 _dajiala_key
-    # 而非 settings.dajiala_key 直取——同 2026-09-14 审计确立的租户隔离原则,
-    # 否则普通用户的监听仍会白刷运营者余额。
-    own_key = "" if client else _dajiala_key(session, user_id, settings)
-    if allow_paid and settings.wechat_listen_sample_new and (client or own_key):
-        client = client or DajialaClient(own_key)
-        session.flush()  # 新文先拿自增 id(采样点外键要用)
-        sample_now = datetime.now()
-        for r in rows[: max(1, settings.wechat_listen_sample_limit)]:
-            try:
-                data = client.read_zan_pro(r.url)
-            except DajialaNoBalance:
-                logger.warning("监听即时采样余额不足(用户 %s)", user_id)
-                break
-            except DajialaError as exc:
-                logger.warning("监听即时采样失败 %s:%s", r.url, exc)
-                continue
-            _apply_sample(session, user_id, r, data, sample_now)
     quark_ck = _quark_cookie(session, user_id, settings) if settings.pan_transfer_enabled else ""
     if settings.pan_transfer_enabled and not quark_ck and any(
             "pan.quark.cn" in (r.pan_urls or "") for r in rows):
@@ -1601,7 +1552,7 @@ def _acquire_listen_slot(session: Session, user_id: int, settings: Settings) -> 
 
     `claim_schedule` 的乐观锁只保护**抢占那一刻**(比较 last_run_at),而一轮监听要跑几分钟:
     期间用户再点一次「立即监听」、或后台 `retry_failed_runs` 撞上在跑的定时轮,两轮就会并行
-    扫同一批号——重复扣 dajiala 费用、同一篇新文发两张卡、微信读书密度翻倍招风控
+    扫同一批号——同一篇新文发两张卡、微信读书密度翻倍招风控
     (2026-09-26 第九轮审计)。标记落在 `system_config`(整库可见),超过 TTL 视为持有进程已死,
     允许后来者接管:宁可重跑一轮,也不能因没解锁而把该用户的监听永久锁死。
     """
@@ -1645,7 +1596,7 @@ def _release_listen_slot(session: Session, user_id: int, token: str) -> None:
 
 
 def run_wechat_listen(session: Session, user_id: int, settings: Settings | None = None,
-                      client: DajialaClient | None = None, weread: WereadClient | None = None,
+                      weread: WereadClient | None = None,
                       platform: ReaderPlatformClient | WerssClient | None = None, push: bool = True,
                       batch_index: int | None = None, batch_size: int | None = None) -> dict:
     """监听一轮(外层是"同一用户不并发"的时长锁,内层 `_listen_round` 才是采集本体)。
@@ -1662,7 +1613,7 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
         logger.warning("公众号监听跳过 user=%s:上一轮仍在执行", user_id)
         return {"platform": "wechat", "status": "skipped", "reason": "running"}
     try:
-        return _listen_round(session, user_id, settings=settings, client=client, weread=weread,
+        return _listen_round(session, user_id, settings=settings, weread=weread,
                              platform=platform, push=push, batch_index=batch_index,
                              batch_size=batch_size)
     finally:
@@ -1670,13 +1621,13 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
 
 
 def _listen_round(session: Session, user_id: int, settings: Settings | None = None,
-                  client: DajialaClient | None = None, weread: WereadClient | None = None,
+                  weread: WereadClient | None = None,
                   platform: ReaderPlatformClient | WerssClient | None = None, push: bool = True,
                   batch_index: int | None = None, batch_size: int | None = None) -> dict:
-    """监听一轮:双数据源免费优先——微信读书(cover)→ dajiala(当天发文)→ 新文入库推飞书。
+    """监听一轮:纯免费源——免费列表(WeRSS/读书平台)→ 微信读书(cover/列表)→ 新文入库推飞书。
 
-    余额不足(dajiala)只禁用付费源与即时采样并返回 `dajiala_skipped:"low_balance"`,
-    免费源(读书平台/微信读书)照常监听;全部数据源不可用才返回 `skipped`。
+    (2026-09-29 用户决策:dajiala 收费链整体摘除,免费源不可用即如实记 failed/partial。)
+    全部数据源不可用才返回 `skipped`。
     """
     settings = _base(settings)
     # 开工先补上一轮的欠推:飞书抖动/超时/进程被杀留下的"已入库未推送"文章在这一轮补上。
@@ -1711,34 +1662,11 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
         rows = all_rows[start * effective_bs:(start + 1) * effective_bs]
         batch_pos = f" batch={start + 1}/{n_groups}(size={effective_bs})"
     cookie = _weread_cookie(session, user_id, settings)
-    daj_key = _dajiala_key(session, user_id, settings)
-    use_dajiala = bool(daj_key)
-    if not cookie and not use_dajiala:
+    if not cookie:
         _record_run(session, user_id, "wechat_listen", "skipped",
-                    "no_source(无微信读书 Cookie 且无 dajiala key)")
+                    "no_source(无微信读书 Cookie,免费列表源未配置或不可用)")
         session.commit()
         return {"platform": "wechat", "status": "skipped", "reason": "no_source"}
-
-    # 余额保护前置:只要有账号需要走 dajiala(无 book_id 或会话失效),先查余额(免费接口)。
-    # 余额不足只禁用付费源(微信读书等免费源照常跑),不再整轮跳过——否则空余额把书架号一起饿死。
-    dajiala_off = ""
-    balance: float | None = None
-    needs_dajiala = use_dajiala and any(
-        not (cookie and b.weread_book_id) and b.anchor_url for b in rows)
-    if use_dajiala:
-        client = client or DajialaClient(daj_key)
-    if needs_dajiala:
-        try:
-            balance = client.remain_money()
-        except DajialaError as exc:
-            _record_run(session, user_id, "wechat_listen", "failed", f"{type(exc).__name__}: {exc}")
-            session.commit()
-            raise
-        if balance < settings.dajiala_min_balance:
-            dajiala_off = f"low_balance={balance:.2f}"
-            use_dajiala = False
-            logger.warning("dajiala 余额 %.2f 低于阈值 %.2f,本轮仅跑免费源(用户 %s)",
-                           balance, settings.dajiala_min_balance, user_id)
 
     plat = platform or _platform_client(settings)
     # 书架粗筛(1 次书架请求换"谁没更新"的答案):把每轮 60~77 次白问省下来。
@@ -1796,7 +1724,7 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
             wr_skipped_this = True
         elif wr_eligible and b.weread_book_id in gate["skip"]:
             # 书架水位未变:cover 只会吐库里已有的那篇旧文,这一跳省的是纯白问、不是盲区。
-            # 语义与"cover 答了但没新文"对齐(miss_count+1、置 used 挡住付费兜底重复扣费);
+            # 语义与"cover 答了但没新文"对齐(miss_count+1、置 used 视为本号已有答案);
             # 书架字段若滞后,强制问询轮(每号每 K 轮)会把错判纠回来。
             wr_stats["weread_cover_shelf_skipped"] = wr_stats.get("weread_cover_shelf_skipped", 0) + 1
             used = True
@@ -1808,8 +1736,7 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                                                 stats=wr_stats, breaker=breaker,
                                                 shelf_ts=gate["signals"].get(b.weread_book_id),
                                                 banned_out=banned)
-                # 只有免费源真答了才算"本号已被消费":cover 空响应+列表挂了的"什么都不知道"
-                # 必须留给 ② 的付费兜底,否则 81 号里恰好在风控期的那批两头落空。
+                # 只有免费源真答了才算"本号已被消费":答不上按 failed 计,如实暴露。
                 used = answered
                 if answered and gate["signals"].get(b.weread_book_id):
                     # 答上了才准前移水位(问都没问成就前移=把没采到的篇永久记成"见过")
@@ -1820,9 +1747,13 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                     b.last_item_at = now
                 elif answered:
                     # cover 报得出"最新一篇是哪篇",库里也确有这篇 → 当天确实没发文。
-                    # 此前微信读书路径从不 +1(只有平台/dajiala 分支加),而它是 81 个号
+                    # 此前微信读书路径从不 +1(只有平台分支加),而它是 81 个号
                     # 唯一的源 → 前端"连续 N 轮未发文"永远空着,号停更和源挂了分不清。
                     b.miss_count = (b.miss_count or 0) + 1
+                else:
+                    # 免费源没答上(cover 空 + 列表挂):dajiala 摘除后没有第二双腿,
+                    # 必须计 failed 如实暴露——旧版此处静默留给付费兜底,兜底没了就是纯盲区。
+                    failed += 1
             except WereadAuthError as exc:
                 logger.warning("微信读书登录态失效(用户 %s):%s;尝试自动续期", user_id, exc)
                 refreshed = refresh_weread_cookie(session, user_id, settings)
@@ -1836,7 +1767,7 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                                                         stats=wr_stats, breaker=breaker,
                                                         shelf_ts=gate["signals"].get(b.weread_book_id),
                                                         banned_out=banned)
-                        used = answered  # 答上了就消费掉,勿再走 dajiala 重复扣费;没答上留给付费兜底
+                        used = answered  # 答上了就消费掉本号(答不上按 failed 计,如实暴露)
                         if answered and gate["signals"].get(b.weread_book_id):
                             marks_advance[b.weread_book_id] = gate["signals"][b.weread_book_id]
                         if got:
@@ -1845,11 +1776,13 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                             b.last_item_at = now
                         elif answered:
                             b.miss_count = (b.miss_count or 0) + 1
+                        else:
+                            failed += 1  # 续期后仍没答上:无兜底,如实计失败
                     except WereadError as exc2:
                         failed += 1
                         logger.warning("微信读书续期后仍失败 %s:%s", b.nickname or b.weread_book_id, exc2)
                 else:
-                    # 续期失败:后续号降级 dajiala;本号不置 used,继续走下方 dajiala 兜底
+                    # 续期失败:本号本轮记失败,如实暴露(无付费兜底可降级)
                     # 指纹必须在清空 cookie 前算——否则 md5("")[:6]="d41d8c" 恒定,
                     # 冷却键永远撞同一个假指纹,通知无法随用户换新 Cookie 而重置。
                     fp = _cookie_fingerprint(cookie)
@@ -1878,34 +1811,6 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                                        breaker["cover_quota_fails"])
                 else:
                     breaker["cover_quota_fails"] = 0
-        # ② dajiala(付费兜底)
-        if not used and b.anchor_url and use_dajiala:
-            try:
-                obj = client.post_condition(b.anchor_url)
-            except DajialaNoBalance:
-                logger.warning("公众号监听中途余额不足,已采 %d 篇即止(用户 %s)", len(new_rows), user_id)
-                use_dajiala = False
-                if not dajiala_off:
-                    dajiala_off = "low_balance_midway"
-                continue
-            except DajialaError as exc:
-                failed += 1
-                logger.warning("公众号监听 %s 失败:%s", b.nickname or b.anchor_url, exc)
-                continue
-            used = True
-            for key, val in (("nickname", obj.get("nickname")), ("ghid", obj.get("ghid"))):
-                if val and not getattr(b, key):
-                    setattr(b, key, str(val)[:128 if key == "nickname" else 64])
-            items = _extract_articles(obj.get("data"))
-            if not items:
-                b.miss_count = (b.miss_count or 0) + 1  # 连续多轮"当天没有发文"→ 沉睡号
-                continue
-            b.miss_count = 0
-            b.last_item_at = now
-            new_rows.extend(_insert_new_articles(session, user_id, b, items, source="listen",
-                                                 fetch_content=True, require_pan=False))
-        if wr_skipped_this and used:
-            quota_skipped -= 1   # 付费源把它兜住了 → 这个号这一轮并没瞎,别虚报盲区
     # 水位前移(只收问过且答上的号,铁律见 _save_shelf_marks):写丢=下轮重问一遍,无害
     try:
         advanced = _save_shelf_marks(session, user_id, marks_advance)
@@ -1941,8 +1846,7 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     replacements: dict[int, list[tuple[str, str, str]]] = {}
     try:
         with savepoint(session):
-            replacements = _enrich_new_articles(session, user_id, settings, new_rows, client,
-                                                allow_paid=use_dajiala)
+            replacements = _enrich_new_articles(session, user_id, settings, new_rows)
     except Exception:  # noqa: BLE001 - 转存炸了也要推(标题回落原文)
         logger.exception("监听后处理失败 user=%s(本轮推送回落原文)", user_id)
         replacements = {}
@@ -1985,8 +1889,6 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
         # 试过但没用上:no_signal_field=条目认不出信号字段(拿 probe 的字段表回来对名单),
         # 异常类名=书架请求本身挂了(本轮已自动退化为逐号问)
         detail += f" shelf(off={gate['reason']})"
-    if dajiala_off:
-        detail += f" dajiala_off({dajiala_off})"
     if banned:
         detail += f" banned={len(banned)}"
     _record_run(session, user_id, "wechat_listen", status, detail)
@@ -2007,8 +1909,7 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
             "被 81 个号 × 每轮 2 次的密度耗尽后就整轮列不出。监听因此退化为 cover 最新一篇:"
             "两轮之间(最长 8h)同一号发多篇时,前面的那几篇顶不掉也补不回来。"
             "要真正兑现『近24h全推』:① 把列表额度花在少数号上(错峰分批/按号轮转枚举,"
-            "见 §9.2 密度账);② dajiala 充值走 history_by_ghid(付费,建议只对高产号开);"
-            "③ 自建 WeRSS 的 web/app 模式(要求你有一个自己的公众号后台身份,没有就不能用——"
+            "见 §9.2 密度账);② 自建 WeRSS 的 web/app 模式(要求你有一个自己的公众号后台身份,没有就不能用——"
             "它的 weread_mp 模式会原样继承本接口的额度限制)。详见 doc/operations.md §4g/§9.2"
             + (f";另有 {len(miskeyed)} 个号的 biz 不是源认识的形态:{('、'.join(miskeyed[:5]))}"
                if miskeyed else ""),
@@ -2024,9 +1925,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
             f"剩余 {quota_skipped} 个号(共 {len(rows)})这一轮没有数据,下一轮会重新尝试。"
             f"根因是单轮请求密度({len(rows)} 号 × cover+列表 ≈ {len(rows) * 2} 次/轮、"
             "4 轮/天)超出该会话的容忍线。可选缓解:调度器启用错峰分批"
-            "(_listen_round 的 batch_size/batch_index,目前 scheduler 传 None 即不分批)、"
-            "拉长 WereadClient.min_gap(现 2s)、或只对高产号开付费源(dajiala)。"
-            "详见 doc/operations.md §9.2",
+            "(2026-09-29 起已默认启用:每批 wechat_listen_batch_size=36)、"
+            "拉长 WereadClient.min_gap(现 2s)。详见 doc/operations.md §9.2",
             settings=settings, push_feishu=False)
     out: dict = {"platform": "wechat", "status": status, "accounts": len(rows),
                  "new": len(new_rows), "failed": failed}
@@ -2043,10 +1943,6 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
         out["banned"] = len(banned)
     if miskeyed:
         out["biz_bad_shape"] = miskeyed[:10]
-    if dajiala_off:
-        out["dajiala_skipped"] = "low_balance"
-        if balance is not None:
-            out["balance"] = balance
     return out
 
 def repush_unpushed(session: Session, user_id: int, settings: Settings | None = None) -> int:
@@ -2374,7 +2270,7 @@ def _sync_push_after_transfer(session: Session, user_id: int, settings: Settings
     to_push = must + history[:extra]
     try:
         replacements = _enrich_new_articles(session, user_id, settings, to_push,
-                                            client=None, allow_paid=False, run_backfill=False)
+                                            run_backfill=False)
         session.commit()
     except Exception:  # noqa: BLE001 - 转存炸了也要推(标题回落原文),不能让同步整个报错
         logger.exception("同步后转存失败 user=%s", user_id)
@@ -2391,10 +2287,10 @@ def _sync_push_after_transfer(session: Session, user_id: int, settings: Settings
 
 # ---------------------------------------------------------------- 全量同步
 def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
-                        settings: Settings | None = None, client: DajialaClient | None = None,
+                        settings: Settings | None = None,
                         max_pages: int | None = None, weread: WereadClient | None = None,
                         platform: ReaderPlatformClient | WerssClient | None = None) -> dict:
-    """一键同步:history_by_ghid 翻页拉历史文章入库(¥0.14/页,默认 WECHAT_SYNC_MAX_PAGES 封顶)。
+    """一键同步:免费列表(WeRSS/读书平台)翻页拉历史文章入库,微信读书兜底。
 
     入库后统一走 `_sync_push_after_transfer`:同盘链去重 → 夸克转存换成我方链 → 再推飞书,
     所以卡片里点文章名直接进"我的夸克链",不会重复保存/重复推送。
@@ -2406,7 +2302,7 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
         raise KeyError("对标账号不存在")
     plat = platform or _platform_client(settings)
     feed_id = feed_biz(b)
-    # 服务端钳制:query 参数无上限时恶意调用可烧余额(¥0.14/页)
+    # 服务端钳制:query 页数无上限会被恶意调用当免费 API 刷(拖死同步 worker)
     limit = max(1, min(int(max_pages or (10 if plat and feed_id else settings.wechat_sync_max_pages)), 20))
     if plat and feed_id:
         new_rows: list[WechatArticle] = []
@@ -2416,7 +2312,7 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
                 raw_items = plat.mp_articles(feed_id, page=pages + 1, limit=20)
                 if pages == 0 and not raw_items:
                     # 首页就空 = 这个订阅在源里不存在/没抓到,不能算同步成功(否则下面直接 return,
-                    # dajiala 与微信读书两条兜底路都不会走,用户点「同步文章」永远 0 篇还显示成功)
+                    # 微信读书兜底路也不会走,用户点「同步文章」永远 0 篇还显示成功)
                     logger.warning("免费列表 %s 首页为空(biz=%s),同步交由后续源", b.nickname, feed_id)
                     break
                 norm = [{"title": it["title"], "url": it["url"],
@@ -2427,12 +2323,12 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
                 if not raw_items or len(got) < len(raw_items):
                     break  # 本页为空或全部已入库 → 更旧的页也必然已见
         except PlatformError as exc:
-            logger.warning("读书平台同步失败,转 dajiala/微信读书:%s", exc)
+            logger.warning("读书平台同步失败,转微信读书兜底:%s", exc)
         if pages:
             b.last_item_at = datetime.now()
             push = _sync_push_after_transfer(session, user_id, settings, new_rows)
             # 翻满 limit 页且最后一页还是"整页新文" = 历史被页数上限截断,
-            # 和 dajiala 路一样不能记 success:用户以为"这个号就这些文章",实际是没翻完
+            # 和微信读书路一样不能记 success:用户以为"这个号就这些文章",实际是没翻完
             status = "partial" if pages >= limit else "success"
             _record_run(session, user_id, "wechat_sync", status,
                         f"platform account={b.nickname} pages={pages} new={len(new_rows)} "
@@ -2441,15 +2337,14 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
             session.commit()
             return {"platform": "wechat_sync", "status": status, "pages": pages,
                     "new": len(new_rows), "ghid": b.ghid, "nickname": b.nickname, **push}
-    # 走 _dajiala_key 而非全局 settings.dajiala_key:POST /api/wechat/benchmarks/{id}/sync
-    # 是普通用户可控入口,¥0.14/页 × 无限次调用可打穿运营者余额(2026-09-14 隔离原则的漏网路径)。
-    sync_key = _dajiala_key(session, user_id, settings)
-    if not sync_key:
-        # 无 dajiala:微信读书 cover 只给"最新一篇",mp/articles 列表可用时才谈得上补全
-        cookie = _weread_cookie(session, user_id, settings)
-        if not cookie or not b.weread_book_id:
-            return {"platform": "wechat_sync", "status": "skipped", "reason": "no_dajiala_key"}
+    # 微信读书兜底(2026-09-29 dajiala 摘除后为唯一兜底):cover 只给"最新一篇",
+    # mp/articles 列表可用时才谈得上补全同日漏掉的篇
+    cookie = _weread_cookie(session, user_id, settings)
+    if not cookie or not b.weread_book_id:
+        return {"platform": "wechat_sync", "status": "skipped",
+                "reason": "no_source(无微信读书 Cookie 且无免费列表源)"}
 
+    if True:  # noqa: SIM108 - 原付费分支已摘除;保留块结构使下方缩进/补丁最小化
         def _fetch(client: WereadClient) -> tuple[list[dict], "object | None", str]:
             """(近期列表, cover 那篇, 列表状态 ok|limited|error)。"""
             from app.services.weread_client import WereadClient as _WC
@@ -2525,234 +2420,6 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
                 "weread_list": listed, "items": len(items),
                 "pages": 1 if items else 0, "new": len(new_rows), "ghid": b.ghid,
                 "nickname": b.nickname, **push}
-    client = client or DajialaClient(sync_key)
-    added: list[WechatArticle] = []
-    offset = ""
-    pages = 0
-    no_balance = False
-    saw_items = False
-    try:
-        while pages < limit:
-            obj = client.history_by_ghid(ghid=b.ghid, article_url="" if b.ghid else b.anchor_url,
-                                         offset=offset)
-            acct = _deep_find(obj, "AccountInfo") or {}
-            if not b.ghid and acct.get("UserName"):
-                b.ghid = str(acct["UserName"])[:64]
-            if acct.get("NickName") and (not b.nickname or b.nickname == "未命名"):
-                b.nickname = str(acct["NickName"])[:128]
-            items = _extract_articles(_deep_find(obj, "MsgList"),
-                                      url_keys=("content_url", "ContentUrl", "url"))
-            if items:
-                saw_items = True
-            added.extend(_insert_new_articles(session, user_id, b, items, source="sync", require_pan=False))
-            pages += 1
-            paging = _deep_find(obj, "PagingInfo") or {}
-            if str(paging.get("IsEnd")) == "1" or not paging.get("Offset"):
-                break
-            offset = str(paging.get("Offset"))
-    except DajialaNoBalance:
-        no_balance = True
-        logger.warning("同步中途余额不足(用户 %s 账号 %s,已入库 %d 篇)", user_id, b.nickname, len(added))
-    # last_item_at 只在源真给了文章时前移:余额在首页就被拒也把它刷成"刚刚",
-    # 前端「最后发文」就永远显示新鲜,停更的号看不出停更
-    if saw_items:
-        b.last_item_at = datetime.now()
-    push = _sync_push_after_transfer(session, user_id, settings, added)
-    # 一页都没拉到绝不能记 success:run_full_sync_if_pending 按 status==success 累加 synced,
-    # 走完一轮就删掉「全量补采」标记——虚报成功等于在历史文章一篇没补的情况下销毁这个
-    # 一次性窗口(标记只在 Cookie 续期时打上)。落库不用 "failed":retry_failed_runs 会把
-    # wechat_sync 的 failed 当"再跑一轮监听"重试(admin._retry_runners),而缺的是余额不是
-    # 网络,重试修不好它,反而白烧一轮微信读书额度(2026-09-27)。
-    if no_balance:
-        status = "failed" if pages == 0 else "partial"
-    elif added and pages >= limit:
-        status = "partial"
-    else:
-        status = "success"
-    _record_run(session, user_id, "wechat_sync", "partial" if status == "failed" else status,
-                f"pages={pages} new={len(added)} pushed={push['pushed']} "
-                f"deduped={push['deduped']} truncated={push['truncated']} account={b.nickname}"
-                + (" reason=low_balance_midway" if no_balance else ""))
-    session.commit()
-    return {"platform": "wechat_sync", "status": status, "pages": pages, "new": len(added),
-            "no_balance": no_balance, "ghid": b.ghid, "nickname": b.nickname, **push}
-
-def _apply_sample(session: Session, user_id: int, r: WechatArticle, data: dict, now: datetime) -> None:
-    """把 read_zan_pro 结果写回文章 + 追加一个采样点(首采样记 first_read_num 做账号基线)。"""
-    r.read_num = int(data.get("read") or 0)
-    if not r.sample_count:
-        r.first_read_num = r.read_num
-    r.sample_count = (r.sample_count or 0) + 1
-    r.zan_num = int(data.get("zan") or 0)
-    r.looking_num = int(data.get("looking") or 0)
-    r.share_num = int(data.get("share_num") or 0)
-    r.collect_num = int(data.get("collect_num") or 0)
-    r.comment_count = int(data.get("comment_count") or 0)
-    r.traffic_at = now
-    session.add(WechatTrafficSample(user_id=user_id, article_id=r.id,
-                                    read_num=r.read_num, zan_num=r.zan_num,
-                                    looking_num=r.looking_num, share_num=r.share_num,
-                                    collect_num=r.collect_num,
-                                    comment_count=r.comment_count, sampled_at=now))
-
-def _notify_burst(session: Session, user_id: int, settings: Settings, r: WechatArticle,
-                  growth: float | None, baseline: int | None = None) -> bool:
-    """🚀 爆点苗头即时推送(公众号群,24h 冷却)。返回是否推送。"""
-    from app.services.feishu_client import FeishuClient, webhook_for
-    from app.services.alert_service import feishu_alert_gate
-
-    webhook = webhook_for(settings, "wechat")
-    if not webhook:
-        return False
-    reason = f"增长{growth:.0f}%" if growth is not None else "首采超基线"
-    # 冷却门攥在 SAVEPOINT 里:发送失败只撤销这一行。旧写法 session.rollback()
-    # 会把本轮已付费采到的采样读数(¥0.06/篇,收尾才 commit)一起丢掉。
-    gate = HeldSavepoint(session)
-    if not feishu_alert_gate(session, user_id, "focus_burst", str(r.id),
-                             settings.focus_cooldown_hours, reason):
-        gate.close(keep=False)
-        return False
-    growth_txt = f"+{growth:.0f}%" if growth is not None else "超基线"
-    base_txt = f" · 账号基线中位 {baseline}" if baseline else ""
-    mine = [x for x in (r.my_pan_urls or "").splitlines() if x.strip()]
-    lines = ["🚀 爆点苗头 · 建议立即跟进改写",
-             "🔴 " + r.title[:40],
-             "📊 阅读 " + str(r.read_num) + "(" + growth_txt + ") · 转发 " + str(r.share_num)
-             + " · 收藏 " + str(r.collect_num) + base_txt]
-    if mine:
-        lines.append("📦 我的链接: " + mine[0])
-    lines.append(r.url)
-    sent = FeishuClient(webhook, settings.feishu_secret).send(chr(10).join(lines))
-    if sent:
-        gate.close(keep=True)
-        session.commit()  # 发送成功才落冷却门
-        return True
-    gate.close(keep=False)  # 发送失败不烧冷却门(只撤这一行,采样读数留下)
-    return False
-
-
-# ---------------------------------------------------------------- 阅读量采样(dajiala read_zan_pro)
-def sample_traffic(session: Session, user_id: int, settings: Settings | None = None,
-                   client: DajialaClient | None = None, benchmark_id: int | None = None,
-                   limit: int | None = None) -> dict:
-    """给"最近未采样"的文章拉一次流量六指标(dajiala read_zan_pro,¥0.06/篇)。
-
-    选样规则:有链接、距上次采样 ≥ `wechat_traffic_min_interval_hours`(没采过的优先),
-    按发现时间新→旧,最多 `wechat_traffic_sample_limit` 篇(可用 limit 覆盖)。
-    余额保护:先查余额(免费),按 0.06/篇 裁剪到买得起的数量。
-    """
-    settings = _base(settings)
-    daj_key = _dajiala_key(session, user_id, settings)
-    if not daj_key:
-        return {"platform": "wechat_traffic", "status": "skipped", "reason": "no_key"}
-    client = client or DajialaClient(daj_key)
-    # 用户传入 limit 只允许调小、不允许放大:旧 `max(1, int(limit or default))`
-    # 遇 POST body {"limit": 1000000} → `LIMIT 5,000,000` 把该用户全部候选 Text 文章
-    # 一次性载入 Python,再逐篇串行调 dajiala 付费接口;虽被余额 affordable 截断
-    # 花钱,但单请求在同步 worker 里可跑几十分钟,几个并发即占满 FastAPI 线程池拖死全站。
-    cap = max(1, int(settings.wechat_traffic_sample_limit or 30))
-    limit = max(1, min(int(limit or cap), cap))
-
-    now = datetime.now()
-    young_cutoff = now - timedelta(hours=48)
-    q = select(WechatArticle).where(
-        WechatArticle.user_id == user_id,
-        WechatArticle.url != "")
-    if benchmark_id:
-        q = q.where(WechatArticle.benchmark_id == benchmark_id)
-    # "轮不到"的旧文必须在 SQL 里筛掉:窗口只取 `created_at desc` 的前 limit*5 篇,
-    # 若冷却判定留在 Python 里做,81 号一次监听就能灌满这 150 篇的位置 →
-    # 窗口内全是"刚采过"的,再往下的旧文永远进不了候选,付费采样配额原地空转。
-    # 规则同旧逻辑:48h 内新文 6h 最小间隔,其余按 `wechat_traffic_min_interval_hours`。
-    fresh_due = now - timedelta(hours=6)
-    old_due = now - timedelta(hours=settings.wechat_traffic_min_interval_hours)
-    young = and_(WechatArticle.created_at.isnot(None), WechatArticle.created_at >= young_cutoff)
-    q = q.where(or_(WechatArticle.traffic_at.is_(None),
-                    and_(young, WechatArticle.traffic_at <= fresh_due),
-                    and_(or_(WechatArticle.created_at.is_(None),
-                             WechatArticle.created_at < young_cutoff),
-                         WechatArticle.traffic_at <= old_due)))
-    rows = list(session.scalars(
-        q.order_by(WechatArticle.created_at.desc()).limit(limit * 5)).all())
-    # 排序:48h 内新文最优先(早期增速信号最值钱),其次没采过的,再按发现时间新→旧
-    rows.sort(key=lambda r: (0 if (r.created_at and r.created_at >= young_cutoff) else 1,
-                             r.traffic_at is not None,
-                             r.traffic_at or datetime(1970, 1, 1),
-                             -r.created_at.timestamp()))
-    rows = rows[:limit]
-    if not rows:
-        return {"platform": "wechat_traffic", "status": "skipped", "reason": "no_targets"}
-    targets = len(rows)
-
-    try:
-        balance = client.remain_money()
-    except DajialaError as exc:
-        _record_run(session, user_id, "wechat_traffic", "failed", f"{type(exc).__name__}: {exc}")
-        session.commit()
-        raise
-    affordable = int(balance / 0.06)
-    if affordable <= 0:
-        _record_run(session, user_id, "wechat_traffic", "skipped", f"low_balance={balance:.2f}")
-        session.commit()
-        return {"platform": "wechat_traffic", "status": "skipped", "reason": "low_balance",
-                "balance": balance, "targets": targets}
-    rows = rows[:affordable]
-
-    sampled = 0
-    errored = 0
-    ran_out = False
-    now = datetime.now()
-    for r in rows:
-        try:
-            data = client.read_zan_pro(r.url)
-        except DajialaNoBalance:
-            ran_out = True
-            logger.warning("阅读量采样中途余额不足(用户 %s),已采 %d 篇", user_id, sampled)
-            break
-        except DajialaError as exc:
-            errored += 1
-            logger.warning("阅读量采样失败 url=%s:%s", r.url, exc)
-            continue
-        prev_read = r.read_num if (r.sample_count or 0) >= 1 else None
-        _apply_sample(session, user_id, r, data, now)
-        sampled += 1
-        # 趋势判定:相邻采样增长达标 + 绝对量达标 → 爆点苗头(即时推送);大幅下滑 → 回落
-        if prev_read is not None:
-            growth = (r.read_num - prev_read) / max(prev_read, 1) * 100
-            if growth <= -20:
-                r.trend_flag = "回落"
-            elif growth >= settings.wechat_resample_growth_pct and r.read_num >= settings.wechat_burst_min_reads:
-                r.trend_flag = "爆点苗头"
-                _notify_burst(session, user_id, settings, r, growth)
-        # 账号基线:首采样阅读 ≥ 该号历史首采中位数×3 → 早期苗头(无需等趋势)
-        if (r.sample_count or 0) == 1 and r.benchmark_id:
-            base_vals = sorted(v for v in session.scalars(select(WechatArticle.first_read_num).where(
-                WechatArticle.user_id == user_id, WechatArticle.benchmark_id == r.benchmark_id,
-                WechatArticle.id != r.id, WechatArticle.first_read_num > 0)).all() if v)
-            if len(base_vals) >= 3:
-                median = base_vals[len(base_vals) // 2]
-                if r.first_read_num >= median * 3 and r.first_read_num >= settings.wechat_burst_min_reads:
-                    r.trend_flag = "爆点苗头"
-                    _notify_burst(session, user_id, settings, r, None, baseline=median)
-    session.commit()
-    # 采样是付费的:付费轮次只写"sampled=1"而看不出"20 个目标里 19 个报错"或
-    # "余额在半路耗尽",运维就会把烧了钱的失败轮当成功轮。
-    by_budget = targets - len(rows)
-    if sampled and not errored and not ran_out:
-        status = "success"
-    elif sampled:
-        status = "partial"
-    else:
-        status = "failed"
-    _record_run(session, user_id, "wechat_traffic", status,
-                f"sampled={sampled} failed={errored} targets={targets}"
-                + (f" by_budget={by_budget}" if by_budget > 0 else "")
-                + (" low_balance_midway" if ran_out else ""))
-    session.commit()
-    return {"platform": "wechat_traffic", "status": status, "sampled": sampled,
-            "failed": errored, "targets": targets, "ran_out": ran_out,
-            "balance_after": client.remain_money() if sampled else balance}
-
 def pan_cookie_keepalive_tick(settings: Settings | None = None) -> int:
     """每日定时巡检网盘转存 Cookie(夸克 + 百度网盘),失效即时告警。返回健康的 (用户,平台) 数。
 
@@ -2819,38 +2486,6 @@ def pan_cookie_keepalive_tick(settings: Settings | None = None) -> int:
     finally:
         db.close()
     return healthy
-
-
-def traffic_tick(settings: Settings | None = None) -> int:
-    """每日定时:给所有(有对标号的)用户采样一轮阅读量。返回采样总篇数。"""
-    from app.db import get_session_local
-    from app.db.models import User
-    from sqlalchemy import func as sa_func
-
-    settings = settings or get_settings()
-    # 不再基于全局 settings.dajiala_key 早退:sample_traffic 内部按用户走 _dajiala_key
-    # 隔离,普通用户在平台内配了自己的 key 但全局 key 空时,整轮采样不应被跳过。
-    db = get_session_local()()
-    total = 0
-    try:
-        users = db.scalars(select(User.id).where(User.enabled.is_(True)).order_by(User.id)).all()
-        for uid in users:
-            active = db.scalar(select(sa_func.count()).select_from(WechatBenchmark).where(
-                WechatBenchmark.user_id == uid, WechatBenchmark.active.is_(True)))
-            if not active:
-                continue
-            try:
-                out = sample_traffic(db, uid, settings=settings)
-                if out.get("sampled"):
-                    total += out["sampled"]
-            except Exception:  # noqa: BLE001 - 单用户失败不影响其余
-                db.rollback()
-                logger.exception("阅读量采样失败 user=%s", uid)
-    finally:
-        db.close()
-    if total:
-        logger.info("每日阅读量采样完成:共 %d 篇", total)
-    return total
 
 
 # ---------------------------------------------------------------- 候选对标号发现
