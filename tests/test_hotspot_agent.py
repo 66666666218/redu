@@ -1,4 +1,4 @@
-"""热点→网盘拉新 Agent 测试:精确匹配 / LLM 语义匹配+选题 / 24h 去重 / 开关 / 建议落表。"""
+"""热点→网盘拉新 Agent 测试:精确匹配 / LLM 语义匹配+选题 / 24h 去重 / 开关 / 建议落表 / 多平台共振。"""
 import datetime as dt
 import json
 
@@ -6,8 +6,8 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import (Base, DouhotWatchSnap, HotspotSuggestion, SystemConfig,
-                           User, WechatArticle)
+from app.db.models import (BaiduHotItem, Base, DouhotWatchSnap, HotspotSuggestion,
+                           SystemConfig, User, WechatArticle, WeiboHotItem)
 from app.services import alert_service, hotspot_agent
 
 
@@ -142,3 +142,63 @@ def test_hotspot_agent_disabled(session, monkeypatch, agent_env) -> None:
     _snap(session, "Switch模拟器", growth=180)
     out = _run(session, monkeypatch, hotspot_agent_enabled=False)
     assert out["status"] == "disabled"
+
+
+def _weibo(session, title: str, rank: int = 1, heat: int = 900_000,
+           hours_ago: float = 1.0) -> None:
+    session.add(WeiboHotItem(user_id=1, title=title, heat=heat, rank=rank,
+                             captured_at=dt.datetime.now() - dt.timedelta(hours=hours_ago)))
+    session.commit()
+
+
+def _baidu(session, title: str, rank: int = 2, heat: int = 8,
+           hours_ago: float = 1.0) -> None:
+    session.add(BaiduHotItem(user_id=1, title=title, heat=heat, rank=rank,
+                             captured_at=dt.datetime.now() - dt.timedelta(hours=hours_ago)))
+    session.commit()
+
+
+def test_resonance_tag_and_platforms(session, monkeypatch, agent_env) -> None:
+    """抖音词在微博/百度同话题新上榜 → 输出带共振标记,platforms 落表(多平台证据)。"""
+    _snap(session, "王楚钦", growth=150)
+    _weibo(session, "王楚钦 男单夺冠", rank=1)
+    _baidu(session, "王楚钦男单夺冠", rank=2)
+    _supply(session, 31, "王楚钦比赛视频合集(持续更新)")
+    alerts = agent_env
+
+    out = _run(session, monkeypatch, dajiala_key="")
+    assert out["matched"] == 1 and out["status"] == "ok"
+    _, detail, _ = alerts[0]
+    assert "共振" in detail and "微博榜第1名" in detail and "百度榜第2名" in detail
+    row = session.scalars(select(HotspotSuggestion)).one()
+    assert row.platforms == "douyin+weibo+baidu"
+
+
+def test_resonance_boost_reorders(session, monkeypatch, agent_env) -> None:
+    """共振加权:effective_growth = growth×1.3 → 涨幅较低的共振热点排序上浮。"""
+    _snap(session, "单平台热点", growth=100)
+    _snap(session, "共振热点", growth=80)
+    _weibo(session, "共振热点全网刷屏", rank=3)
+    _supply(session, 41, "单平台热点资源包")
+    _supply(session, 42, "共振热点资源包")
+    alerts = agent_env
+
+    out = _run(session, monkeypatch, dajiala_key="")
+    assert out["matched"] == 2
+    _, detail, _ = alerts[0]
+    assert detail.index("共振热点") < detail.index("单平台热点")   # 共振加权后上浮
+    rows = {r.keyword: r.platforms for r in session.scalars(select(HotspotSuggestion)).all()}
+    assert rows["共振热点"] == "douyin+weibo" and rows["单平台热点"] == "douyin"
+
+
+def test_resonance_requires_newcomer(session, monkeypatch, agent_env) -> None:
+    """微博条目 12h 前就上榜(超出 6h 新上榜窗口)→ 不算共振,不虚标多平台。"""
+    _snap(session, "老热点", growth=150)
+    _weibo(session, "老热点持续霸榜", hours_ago=12)
+    _supply(session, 51, "老热点资源包")
+    out = _run(session, monkeypatch, dajiala_key="")
+    assert out["matched"] == 1
+    _, detail, _ = agent_env[0]
+    assert "共振" not in detail
+    row = session.scalars(select(HotspotSuggestion)).one()
+    assert row.platforms == "douyin"

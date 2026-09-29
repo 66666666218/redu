@@ -7,6 +7,10 @@
   ② 无现成资源的热点给拉新方案(资源清单/发布标题/人群/转存钩子);
 - 落库:每条建议写 hotspot_suggestions 表(回看 + 未来效果回填闭环)。
 
+多平台共振(v4, 2026-09-29):抖音监控词仍是热点入口(唯一带量化涨幅的源),
+微博/百度热搜的「新上榜」条目做交叉验证——共振热点加权排序,并在 LLM 输入与
+建议输出中标注平台证据,破"单平台+个人样本"的输入单一性(用户 2026-09-29 指出)。
+
 节流:同一热点词 24h 内只推一次(记忆落 system_config);输出按 2026-09-27 口径走
 站内告警(push_feishu=False,飞书群只推文章与 Cookie 提醒)。
 计划任务:hotspot_agent_cron(默认 9:10/15:10/21:10,跟在三个白天定点监听后面,数据最鲜)。
@@ -22,8 +26,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
-from app.db.models import (DouhotWatchSnap, HotspotSuggestion, SystemConfig,
-                           WechatArticle)
+from app.db.models import (BaiduHotItem, DouhotWatchSnap, HotspotSuggestion,
+                           SystemConfig, WechatArticle, WeiboHotItem)
 from app.services import alert_service
 from app.utils import get_logger
 
@@ -53,6 +57,76 @@ def _hotspots(db: Session, user_id: int, min_growth: float,
                         "rank": int(rank or 0), "score": float(score or 0)})
     out.sort(key=lambda h: h["growth"], reverse=True)
     return out
+
+
+def _platform_newcomers(db: Session, user_id: int, model,
+                        hours: int = 24, fresh_hours: int = 6,
+                        limit: int = 60) -> dict[str, dict]:
+    """某热搜平台近 N 小时的「新上榜」条目(首次出现在近 fresh_hours 内)。
+
+    新上榜 = 上升信号最干净的代理指标:整张榜全塞给 Agent 会淹没真正的增量。
+    返回 {归一化标题: {"title", "heat", "rank"}}。
+    """
+    cutoff = datetime.now() - timedelta(hours=hours)
+    fresh = datetime.now() - timedelta(hours=fresh_hours)
+    rows = db.execute(
+        select(model.title, func.min(model.captured_at),
+               func.max(model.heat), func.min(model.rank))
+        .where(model.user_id == user_id, model.captured_at >= cutoff)
+        .group_by(model.title)).all()
+    out: dict[str, dict] = {}
+    for title, first, heat, rank in rows:
+        if first and first >= fresh:
+            n = _norm(title)
+            if n:
+                out[n] = {"title": str(title or ""), "heat": int(heat or 0),
+                          "rank": int(rank or 0)}
+    # 榜单可能极长(微博一天上百条新上榜),取 rank 最靠前的 limit 条
+    ranked = sorted(out.items(), key=lambda kv: kv[1]["rank"])
+    return dict(ranked[:limit])
+
+
+def _match_newcomer(kw_norm: str, newcomers: dict[str, dict]) -> dict | None:
+    """抖音词 ↔ 热搜标题共振匹配(归一化双向包含;短词也能命中长标题同话题)。"""
+    if len(kw_norm) < 2:
+        return None
+    for tnorm, sig in newcomers.items():
+        if kw_norm in tnorm or tnorm in kw_norm:
+            return sig
+    return None
+
+
+def _resonance(db: Session, user_id: int, hotspots: list[dict],
+               hours: int = 24, fresh_hours: int = 6) -> None:
+    """原地给抖音热点附加微博/百度交叉证据。
+
+    每个热点新增:weibo/baidu(命中详情或 None)、platforms("douyin+weibo" 等)、
+    effective_growth(共振加权:每多一个平台 ×1.3,排序用;growth 仍是主导)。
+    """
+    weibo = _platform_newcomers(db, user_id, WeiboHotItem, hours, fresh_hours)
+    baidu = _platform_newcomers(db, user_id, BaiduHotItem, hours, fresh_hours)
+    for h in hotspots:
+        kw = _norm(h["keyword"])
+        w = _match_newcomer(kw, weibo)
+        b = _match_newcomer(kw, baidu)
+        h["weibo"] = w
+        h["baidu"] = b
+        platforms = ["douyin"] + (["weibo"] if w else []) + (["baidu"] if b else [])
+        h["platforms"] = "+".join(platforms)
+        h["effective_growth"] = h["growth"] * (1 + 0.3 * (len(platforms) - 1))
+    hotspots.sort(key=lambda x: x["effective_growth"], reverse=True)
+
+
+def _resonance_tag(h: dict) -> str:
+    """人读共振标记:🌐抖音+微博+百度三榜共振 / 空串(仅抖音)。"""
+    parts = []
+    if h.get("weibo"):
+        parts.append(f"微博榜第{h['weibo']['rank']}名")
+    if h.get("baidu"):
+        parts.append(f"百度榜第{h['baidu']['rank']}名")
+    if not parts:
+        return ""
+    return f" 🌐共振({' + '.join(['抖音'] + parts)})"
 
 
 def _supply_articles(db: Session, user_id: int, hours: int = 72) -> list[WechatArticle]:
@@ -107,8 +181,19 @@ def _llm_plan(settings: Settings, hotspots: list[dict],
     """
     if not settings.deepseek_api_key or not hotspots:
         return {}
-    hs = [f"{i}. 《{h['keyword']}》热度增长 +{h['growth']:.0f}%"
-          for i, h in enumerate(hotspots, 1)]
+
+    def _hline(i: int, h: dict) -> str:
+        """热点输入行:带多平台证据(共振 = 全网真实需求,单平台 = 待观察)。"""
+        line = f"{i}. 《{h['keyword']}》抖音热度增长 +{h['growth']:.0f}%"
+        if h.get("weibo"):
+            line += f" [微博热搜第{h['weibo']['rank']}名·热度{h['weibo']['heat']}]"
+        if h.get("baidu"):
+            line += f" [百度热搜第{h['baidu']['rank']}名]"
+        if h.get("platforms") and h["platforms"] != "douyin":
+            line += f" → {len(h['platforms'].split('+'))}平台共振(全网级需求)"
+        return line
+
+    hs = [_hline(i, h) for i, h in enumerate(hotspots, 1)]
     sup = [f"{a.id}. {a.title}" for a in supply[:60]]
     proven_block = "\n".join(f"- {t}" for t in proven) if proven else "- (暂无历史数据)"
     try:
@@ -126,12 +211,15 @@ def _llm_plan(settings: Settings, hotspots: list[dict],
                        "宁要一个急用人群,不要十个围观者;"
                        "②热点可以来自任何领域(体育/影视/节日/社会事件),但变现方案"
                        "必须能落到网盘资源上——问自己「这群人此刻会搜什么、要什么文件」;"
-                       "③该资源若已被同行大量跟发(竞争密度高),给出差异化角度而不是放弃。"},
+                       "③该资源若已被同行大量跟发(竞争密度高),给出差异化角度而不是放弃。"
+                       "④多平台共振(抖音+微博/百度同现)的热点是全网级真实需求,优先出方案;"
+                       "单平台热点仅供参考,方案要更保守。"},
                       {"role": "user", "content":
-                       "rising 热点如下:\n" + "\n".join(hs)
+                       "rising 热点如下(平台证据已标注):\n" + "\n".join(hs)
                        + "\n\n我们近 72h 已采集到的资源文(id. 标题;语义相关即可匹配,"
                          "标题不必字面含热点词):\n" + ("\n".join(sup) if sup else "(无)")
-                       + "\n\n我们自己验证过能带来转存的资源文标题(参考选题套路):\n"
+                       + "\n\n历史高转载资源文标题(个人+对标号混合样本,仅参考选题套路,"
+                         "不代表当前需求,勿直接照抄):\n"
                          + proven_block
                        + "\n\n严格只输出一个 JSON 对象(无多余文字/无代码围栏):\n"
                          '{"matches": [{"hotspot": "热点词", "article_id": 资源文id,'
@@ -254,10 +342,14 @@ def burst_plan(db: Session, user_id: int, topics: list[str],
     if not topics:
         return None
     hotspots = [{"keyword": t, "growth": 0} for t in topics[: max(1, int(getattr(settings, "hotspot_agent_llm_top", 3) or 3))]]
+    # 爆发话题同样做多平台共振验证(爆发=最需要确认是全网级需求的时刻)
+    _resonance(db, user_id, hotspots)
+    by_topic = {h["keyword"]: h for h in hotspots}
     proven = _proven_titles(db, user_id)
     llm = _llm_plan(settings, hotspots, _supply_articles(db, user_id), proven)
     lines: list[str] = []
     for t in topics:
+        h = by_topic.get(t, {})
         m = (llm.get("matches") or {}).get(t) or {}
         aid = m.get("article_id")
         if isinstance(aid, int):
@@ -266,17 +358,19 @@ def burst_plan(db: Session, user_id: int, topics: list[str],
                 my = next((x.strip() for x in (art.my_pan_urls or "").splitlines() if x.strip()), "")
                 src = next((x.strip() for x in (art.pan_urls or "").splitlines() if x.strip()), "")
                 link = my or src
-                lines.append(f"⚡《{t}》爆发 → 已有现成资源:「{art.title[:40]}」"
+                lines.append(f"⚡《{t}》爆发{_resonance_tag(h)} → 已有现成资源:「{art.title[:40]}」"
                              + (f" → 点这:{link}" if link else ""))
                 db.add(HotspotSuggestion(user_id=user_id, keyword=t, growth=0, kind="match",
                                          resource_title=art.title[:255],
-                                         link=link, plan=m.get("why") or "爆发语义匹配"))
+                                         link=link, plan=m.get("why") or "爆发语义匹配",
+                                         platforms=str(h.get("platforms") or "douyin")))
                 continue
         p = (llm.get("plans") or {}).get(t)
         if p:
-            lines.append(f"⚡《{t}》爆发 → {p}")
+            lines.append(f"⚡《{t}》爆发{_resonance_tag(h)} → {p}")
             db.add(HotspotSuggestion(user_id=user_id, keyword=t, growth=0, kind="llm",
-                                     plan=p[:500]))
+                                     plan=p[:500],
+                                     platforms=str(h.get("platforms") or "douyin")))
     if not lines:
         return None
     for t in topics:
@@ -345,6 +439,8 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
     hotspots = _hotspots(db, user_id, min_growth)
     if not hotspots:
         return {"status": "no_hotspots"}
+    # 多平台共振:微博/百度新上榜交叉验证,共振热点加权上浮(输入去单一化)
+    _resonance(db, user_id, hotspots)
 
     mem_key = f"hotspot_agent_last_{user_id}"
     mem_row = db.get(SystemConfig, mem_key)
@@ -402,18 +498,19 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
     if not matched and not llm_plans:
         return {"status": "no_suggestions", "hotspots": len(fresh)}
 
-    # 落库:建议进 hotspot_suggestions(回看 + 未来效果回填)
+    # 落库:建议进 hotspot_suggestions(回看 + 未来效果回填;platforms 记录共振来源)
     plan_by_kw = dict(llm_plans)
     for h, art, why in matched:
         db.add(HotspotSuggestion(
             user_id=user_id, keyword=h["keyword"], growth=h["growth"], kind="match",
             resource_title=art.title[:255], link=art.my_pan_urls or art.pan_urls or "",
-            plan=f"{why}·匹配自 {art.author}"))
+            plan=f"{why}·匹配自 {art.author}", platforms=str(h.get("platforms") or "douyin")))
     for kw, plan in plan_by_kw.items():
-        h = next((x for x in fresh if x["keyword"] == kw), {"growth": 0})
+        h = next((x for x in fresh if x["keyword"] == kw), {"growth": 0, "platforms": "douyin"})
         db.add(HotspotSuggestion(
             user_id=user_id, keyword=kw, growth=h["growth"], kind="llm",
-            resource_title="", link="", plan=plan["text"][:500]))
+            resource_title="", link="", plan=plan["text"][:500],
+            platforms=str(h.get("platforms") or "douyin")))
 
     # 输出行
     lines: list[str] = []
@@ -424,14 +521,15 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
         link = my or src
         level, why_risk = resource_risk(art.title)
         risk_tag = f" ⚠️{why_risk},慎投时效" if level == "high" else ""
-        lines.append(f"🔥《{h['keyword']}》热度 +{h['growth']:.0f}% → 已有现成资源:"
+        lines.append(f"🔥《{h['keyword']}》热度 +{h['growth']:.0f}%{_resonance_tag(h)} → 已有现成资源:"
                      f"「{art.title[:40]}」({art.author})"
                      + (f" [{why}]" if why and why != "标题字面命中" else "")
                      + risk_tag
                      + (f" → 点这:{link}" if link else ""))
         copy_blocks.append(f"【{art.title}】\n{link}")
     for kw, plan in plan_by_kw.items():
-        lines.append(f"💡 {kw} → {plan['text']}")
+        h = next((x for x in fresh if x["keyword"] == kw), {})
+        lines.append(f"💡 {kw}{_resonance_tag(h)} → {plan['text']}")
     if copy_blocks:
         lines.append("──── 复制即用 ────")
         lines.extend(copy_blocks)
