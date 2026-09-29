@@ -179,5 +179,13 @@ export const api = {
   events: (q = '') => req('GET', '/api/events' + (q ? '?' + q : '')),
   eventsAssign: () => req('POST', '/api/events/assign'),
   sourceHealth: () => req('GET', '/api/source-health'),
-  trending: () => req('GET', '/api/trending')
+  trending: () => req('GET', '/api/trending'),
+  // 热点建议(预测→下注→结算闭环,2026-09-29 v5)
+  suggestions: (q = '') => req('GET', '/api/hotspot/suggestions' + (q ? '?' + q : '')),
+  suggestionActed: (id, acted = true) => req('POST', `/api/hotspot/suggestions/${id}/acted`, { acted }),
+  suggestionSettle: () => req('POST', '/api/hotspot/settle'),
+  recruits: (limit = 12) => req('GET', '/api/hotspot/recruits' + `?limit=${limit}`),
+  recruitUpsert: (week_start, recruits, note = '') => req('POST', '/api/hotspot/recruits', { week_start, recruits, note }),
+  quarkShareCollect: () => req('POST', '/api/quark/shares/collect'),
+  quarkShares: () => req('GET', '/api/quark/shares')
 }

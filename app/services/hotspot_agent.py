@@ -713,14 +713,17 @@ def _article_covers_link(art: WechatArticle, link: str) -> bool:
 
 
 def settle_suggestions(db: Session, user_id: int) -> dict:
-    """结算已发建议的发文阅读增量(v5 结算端,方案A)。
+    """结算已发建议的效果(v5 结算端,2026-09-29 去 dajiala 版)。
 
-    夸克链接级转存统计不开放(2026-09-29 定案),替代信号 = 发文阅读采样增量:
-    acted 建议 → 按盘链精确归因到发文(宁可少样本不要脏样本,不做标题模糊匹配)
-    → wechat_traffic_samples 首拍→最新拍 read_num 差值写入 reads_gain。
-    可重复结算:基线固定为首拍,gain 随最新采样刷新。
+    信号体系(全部免费/自有):
+    - 归因: acted 建议 → 按盘链精确匹配发文(不做标题模糊,宁少样本不脏样本);
+    - repost_gain = 发文后(acted_at 起)全网新增的该文盘链记录数(wechat_pan_links
+      随时间增长 = 资源被疯转 = 需求被反复验证)——**结算主信号**;
+    - reads_gain 已停用(dajiala 阅读采样放弃后无免费阅读数源),字段留存兼容;
+    - 总账对账: pan_recruit_weekly(拉新周录,人工)。
+    可重复结算: repost_gain 随盘链扩散刷新。
     """
-    from app.db.models import WechatTrafficSample
+    from app.db.models import WechatPanLink
 
     rows = db.scalars(select(HotspotSuggestion).where(
         HotspotSuggestion.user_id == user_id,
@@ -729,26 +732,25 @@ def settle_suggestions(db: Session, user_id: int) -> dict:
     articles = db.scalars(select(WechatArticle).where(
         WechatArticle.user_id == user_id,
         WechatArticle.created_at >= datetime.now() - timedelta(days=30))).all()
-    settled, pending = 0, 0
+    settled, attributed = 0, 0
     now = datetime.now()
     for sug in rows:
         art = next((a for a in articles if _article_covers_link(a, sug.link)), None)
         if art is None:
             continue          # 还没归因到发文,等下一轮(发文后录入即自动接上)
         sug.article_id = art.id
-        samples = db.scalars(select(WechatTrafficSample).where(
-            WechatTrafficSample.article_id == art.id,
-            WechatTrafficSample.user_id == user_id).order_by(
-            WechatTrafficSample.sampled_at)).all()
-        if not samples:
-            pending += 1
-            continue          # 发文已归因但尚无采样点,标记归因、gain 下轮填
-        sug.reads_gain = int(samples[-1].read_num or 0) - int(samples[0].read_num or 0)
+        baseline = sug.acted_at or sug.created_at
+        repost = db.scalar(select(func.count(WechatPanLink.id)).where(
+            WechatPanLink.user_id == user_id,
+            WechatPanLink.article_id == art.id,
+            WechatPanLink.created_at >= baseline)) or 0
+        sug.repost_gain = int(repost)
         sug.settled_at = now
         settled += 1
+        attributed += 1
     db.commit()
     return {"status": "ok", "acted_with_link": len(rows), "settled": settled,
-            "attributed_no_sample": pending}
+            "attributed": attributed}
 
 
 def settle_suggestions_all_users(settings: Settings | None = None) -> int:

@@ -60,6 +60,7 @@ def list_suggestions(limit: int = 50, acted: bool | None = None,
         "saves": r.saves, "saves_at": r.saves_at.isoformat() if r.saves_at else None,
         "acted": r.acted, "acted_at": r.acted_at.isoformat() if r.acted_at else None,
         "article_id": r.article_id, "reads_gain": r.reads_gain,
+        "repost_gain": r.repost_gain,
         "settled_at": r.settled_at.isoformat() if r.settled_at else None,
         "created_at": r.created_at.isoformat() if r.created_at else None,
     } for r in rows]}
@@ -67,7 +68,7 @@ def list_suggestions(limit: int = 50, acted: bool | None = None,
 
 @router.post("/api/hotspot/settle")
 def settle(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """结算已发建议的发文阅读增量(自动跑在每日采样后,此接口供手动补跑)。"""
+    """结算已发建议的盘链扩散增量(自动跑在每日 22:00,此接口供手动补跑)。"""
     try:
         return hotspot_agent.settle_suggestions(db, user.id)
     except Exception as exc:  # noqa: BLE001

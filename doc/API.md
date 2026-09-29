@@ -1046,13 +1046,14 @@
 
 **响应示例 (200)**
 ```json
-{ "status": "ok", "acted_with_link": 5, "settled": 3, "attributed_no_sample": 1 }
+{ "status": "ok", "acted_with_link": 5, "settled": 3, "attributed": 5 }
 ```
 
-> 结算逻辑(v5,方案A):夸克链接级转存统计不开放(2026-09-29 定案),改用发文阅读增量——
-> acted 建议 → 按盘链精确归因到发文 → `wechat_traffic_samples` 首拍→最新拍 `read_num` 差值
-> 写入 `reads_gain`。自动跑在每日 22:00(21:30 晚间采样后),此接口供手动补跑;
-> 可重复结算(基线固定首拍,gain 随最新采样刷新)。调度作业 id:`suggestion_settle`。
+> 结算逻辑(2026-09-29 去 dajiala 版):dajiala 阅读采样已放弃(用户决策,无免费阅读数源),
+> 结算主信号改为**盘链全网扩散增量**——acted 建议 → 按盘链精确归因到发文 →
+> `wechat_pan_links` 中发文后(acted_at 起)新增的该文盘链记录数写入 `repost_gain`
+> (被疯转=需求被反复验证,免费自动)。可重复结算(随扩散刷新);总账对账走拉新周录(11.4)。
+> 调度作业 id:`suggestion_settle`(每日 22:00)。`reads_gain` 字段留存兼容,不再更新。
 
 ### 11.4 拉新周录(方案B 总账)
 

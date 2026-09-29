@@ -342,7 +342,8 @@ class HotspotSuggestion(Base):
     acted: Mapped[bool] = mapped_column(Boolean, default=False)   # 已发货标记(下注):只有 acted 的建议才构成"预测→结算"学习样本
     acted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # 标记已发时间
     article_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 结算归因的发文(按盘链精确匹配)
-    reads_gain: Mapped[int] = mapped_column(Integer, default=0)   # 结算:发文阅读增量(首拍→最新拍,夸克链接级转存统计不开放后的替代信号)
+    reads_gain: Mapped[int] = mapped_column(Integer, default=0)   # 阅读增量(已停用:dajiala 放弃后无免费采样源,字段留存兼容)
+    repost_gain: Mapped[int] = mapped_column(Integer, default=0)  # 盘链扩散增量:发文后全网新增的该文盘链记录数(免费自动,2026-09-29 起=结算主信号)
     settled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # 最近一次结算时间
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 

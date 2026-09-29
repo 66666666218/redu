@@ -273,34 +273,45 @@ def test_mark_acted_api(session) -> None:
         mark_acted(999, None, user=user, db=session)
 
 
-def test_settle_suggestions_reads_gain(session) -> None:
-    """结算(方案A):acted 建议按盘链归因到发文,reads_gain=首拍→最新拍阅读增量。"""
-    from app.db.models import WechatArticle, WechatTrafficSample
+def test_settle_suggestions_repost_gain(session) -> None:
+    """结算(去 dajiala 版):acted 建议按盘链归因到发文,repost_gain=发文后新增盘链记录数。"""
+    from app.db.models import WechatArticle, WechatPanLink
     from app.services.hotspot_agent import settle_suggestions
 
     link = "https://pan.quark.cn/s/settle1"
-    session.add(WechatArticle(id=71, user_id=1, title="测试发文", author="我",
-                              source="manual", url="https://mp.weixin.qq.com/s/z1",
-                              my_pan_urls=link,
-                              created_at=dt.datetime.now() - dt.timedelta(days=1)))
-    for i, (rn, hrs) in enumerate([(100, 20.0), (260, 4.0)]):
-        session.add(WechatTrafficSample(user_id=1, article_id=71, read_num=rn,
-                                        sampled_at=dt.datetime.now() - dt.timedelta(hours=hrs)))
+    now = dt.datetime.now()
+    art = WechatArticle(id=71, user_id=1, title="测试发文", author="我",
+                        source="manual", url="https://mp.weixin.qq.com/s/z1",
+                        my_pan_urls=link, created_at=now - dt.timedelta(days=1))
+    session.add(art)
+    session.commit()
     session.add(HotspotSuggestion(user_id=1, keyword="结算热点", kind="match",
-                                  link=link, acted=True))
+                                  link=link, acted=True, acted_at=now - dt.timedelta(hours=2)))
+    session.commit()
+
+    # acted 之后全网出现 3 条该文盘链记录(被转载/扩散)
+    for i in range(3):
+        session.add(WechatPanLink(user_id=1, article_id=71,
+                                  pan_url=f"https://pan.quark.cn/s/spread{i}",
+                                  created_at=now - dt.timedelta(hours=1)))
+    # acted 之前的 1 条不计入(基线=acted_at)
+    session.add(WechatPanLink(user_id=1, article_id=71,
+                              pan_url="https://pan.quark.cn/s/base",
+                              created_at=now - dt.timedelta(days=1)))
     session.commit()
 
     out = settle_suggestions(session, 1)
     assert out["settled"] == 1
     row = session.scalars(select(HotspotSuggestion)).one()
-    assert row.article_id == 71 and row.reads_gain == 160 and row.settled_at is not None
+    assert row.article_id == 71 and row.repost_gain == 3 and row.settled_at is not None
 
-    # 重复结算:gain 刷新到最新采样,基线仍为首拍
-    session.add(WechatTrafficSample(user_id=1, article_id=71, read_num=400,
-                                    sampled_at=dt.datetime.now()))
+    # 重复结算:扩散继续增长则 gain 刷新
+    session.add(WechatPanLink(user_id=1, article_id=71,
+                              pan_url="https://pan.quark.cn/s/more",
+                              created_at=now))
     session.commit()
     settle_suggestions(session, 1)
-    assert session.scalars(select(HotspotSuggestion)).one().reads_gain == 300
+    assert session.scalars(select(HotspotSuggestion)).one().repost_gain == 4
 
 
 def test_settle_skips_unacted_or_unattributed(session) -> None:

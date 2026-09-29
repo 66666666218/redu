@@ -346,11 +346,14 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.hotspot_agent import (hotspot_agent_tick_all_users,
                                             settle_suggestions_all_users)
     from app.services.wechat_monitor import (candidate_discover_tick, keyword_article_all_users,
-                                              pan_cookie_keepalive_tick, traffic_tick, weread_refresh_tick)
+                                              pan_cookie_keepalive_tick, weread_refresh_tick)
 
     jobs = [
-        (traffic_tick, _get_settings().wechat_traffic_cron, {"minute": 30, "hour": 21}, "wechat_traffic"),
-        (traffic_tick, "30 9 * * *", {"minute": 30, "hour": 9}, "wechat_traffic_am"),
+        # 阅读量采样(traffic_tick)已停用:2026-09-29 用户决策放弃 dajiala(不充值),
+        # read_zan_pro 为其付费接口,免费源(微信读书/WeRSS)无阅读数字段。
+        # 方案A结算的采样端随之停用,归因(article_id)保留,效果评估走方案B拉新周录。
+        # (traffic_tick, _get_settings().wechat_traffic_cron, {"minute": 30, "hour": 21}, "wechat_traffic"),
+        # (traffic_tick, "30 9 * * *", {"minute": 30, "hour": 9}, "wechat_traffic_am"),
         (pan_cookie_keepalive_tick, "0 7 * * *", {"minute": 0, "hour": 7}, "pan_cookie_keepalive"),
         # 会员续费检查:每日 10:05(到期该收续费/超 24h 该踢名单 → 飞书)
         (_member_renewal, "5 10 * * *", {"minute": 5, "hour": 10}, "member_renewal"),
