@@ -897,7 +897,7 @@ def test_weekly_summary_includes_insight(session) -> None:
     session.add(WeiboHotItem(user_id=1, title="冲榜", heat=3000, rank=1, captured_at=datetime.now()))
     session.commit()
 
-    text = alert_service.build_weekly_summary(session, 1, Settings(_env_file=None, smtp_host="smtp.qq.com"))
+    text = tenant.build_weekly_summary(session, 1, Settings(_env_file=None, smtp_host="smtp.qq.com"))
     assert "本周热点洞察" in text
     assert "爆发词" in text
     assert ("微博" in text or "冲榜" in text)
