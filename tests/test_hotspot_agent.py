@@ -175,10 +175,14 @@ def test_resonance_tag_and_platforms(session, monkeypatch, agent_env) -> None:
 
 
 def test_resonance_boost_reorders(session, monkeypatch, agent_env) -> None:
-    """共振加权:effective_growth = growth×1.3 → 涨幅较低的共振热点排序上浮。"""
+    """共振分级加权(v5):百度证据 ×1.5 → 涨幅较低的百度共振热点排序上浮。
+
+    对照:仅微博共振 ×1.2 翻不了盘(微博证据弱,80×1.2=96 < 100)——
+    这正是证据分级的语义,百度(真实搜索)>微博(可运营话题)。
+    """
     _snap(session, "单平台热点", growth=100)
     _snap(session, "共振热点", growth=80)
-    _weibo(session, "共振热点全网刷屏", rank=3)
+    _baidu(session, "共振热点全网刷屏", rank=3)
     _supply(session, 41, "单平台热点资源包")
     _supply(session, 42, "共振热点资源包")
     alerts = agent_env
@@ -186,9 +190,48 @@ def test_resonance_boost_reorders(session, monkeypatch, agent_env) -> None:
     out = _run(session, monkeypatch, dajiala_key="")
     assert out["matched"] == 2
     _, detail, _ = alerts[0]
-    assert detail.index("共振热点") < detail.index("单平台热点")   # 共振加权后上浮
+    assert detail.index("共振热点") < detail.index("单平台热点")   # 百度共振加权后上浮
     rows = {r.keyword: r.platforms for r in session.scalars(select(HotspotSuggestion)).all()}
-    assert rows["共振热点"] == "douyin+weibo" and rows["单平台热点"] == "douyin"
+    assert rows["共振热点"] == "douyin+baidu" and rows["单平台热点"] == "douyin"
+
+
+def test_opportunity_prefers_blue_ocean(session, monkeypatch, agent_env) -> None:
+    """机会分排序(v5):高涨幅红海(多家供货)让位低涨幅蓝海(竞争空白)。"""
+    _snap(session, "红海热点", growth=150)
+    _snap(session, "蓝海热点", growth=90)
+    for i in range(41, 46):     # 红海:5 家已供货 → 稀疏度 1/6
+        _supply(session, i, f"红海热点资源包{i}")
+    _supply(session, 50, "蓝海热点资源包")   # 蓝海:1 家 → 稀疏度 1/2
+    alerts = agent_env
+
+    out = _run(session, monkeypatch, dajiala_key="")
+    assert out["matched"] == 2
+    _, detail, _ = alerts[0]
+    # 机会分:蓝海 90×(1/2)=45 > 红海 150×(1/6)=25 → 蓝海排前(红海虽热但挤满供货)
+    assert detail.index("蓝海热点") < detail.index("红海热点")
+    assert "竞争" in detail
+    rows = {r.keyword: r.opportunity for r in session.scalars(select(HotspotSuggestion)).all()}
+    assert set(rows) == {"红海热点", "蓝海热点"}
+    assert all(v > 0 for v in rows.values())
+
+
+def test_window_factor_by_momentum(session, monkeypatch, agent_env) -> None:
+    """窗口因子(v5):score 动量转跌 → 输出带「窗口将关闭」,机会分被压低。"""
+    now = dt.datetime.now()
+    for i, (s, hrs) in enumerate([(1000.0, 1.0), (500.0, 0.3)]):   # 两拍,环比 -50%
+        session.add(DouhotWatchSnap(user_id=1, section="douhot", list_type="word",
+                                    keyword="退烧热点", trend_growth=120, rank_now=2,
+                                    score=s, captured_at=now - dt.timedelta(hours=hrs)))
+    session.commit()
+    _supply(session, 61, "退烧热点资源包")
+    alerts = agent_env
+
+    out = _run(session, monkeypatch, dajiala_key="")
+    assert out["matched"] == 1
+    _, detail, _ = alerts[0]
+    assert "窗口将关闭" in detail and "2h" in detail
+    row = session.scalars(select(HotspotSuggestion)).one()
+    assert row.opportunity > 0    # 窗口因子 0.3 已折进机会分
 
 
 def test_resonance_requires_newcomer(session, monkeypatch, agent_env) -> None:
@@ -202,3 +245,29 @@ def test_resonance_requires_newcomer(session, monkeypatch, agent_env) -> None:
     assert "共振" not in detail
     row = session.scalars(select(HotspotSuggestion)).one()
     assert row.platforms == "douyin"
+
+
+def test_mark_acted_api(session) -> None:
+    """一键标记已发(v5 下注环节):只有 acted 建议 + save_pv 才构成预测→结算样本。"""
+    from app.api.hotspot import list_suggestions, mark_acted
+
+    session.add(User(id=2, email="u@test.com", username="u2", password_hash="x"))
+    session.add(HotspotSuggestion(user_id=2, keyword="测试热点", kind="llm", plan="x"))
+    session.commit()
+    user = session.get(User, 2)
+
+    out = mark_acted(1, None, user=user, db=session)
+    assert out["acted"] is True and out["keyword"] == "测试热点"
+    row = session.get(HotspotSuggestion, 1)
+    assert row.acted is True and row.acted_at is not None
+
+    listing = list_suggestions(limit=50, acted=True, user=user, db=session)
+    assert listing["total"] == 1 and listing["list"][0]["saves"] == 0
+
+    # 取消标记 / 越权 404
+    mark_acted(1, type("P", (), {"acted": False})(), user=user, db=session)
+    assert session.get(HotspotSuggestion, 1).acted is False
+    import pytest as _pytest
+    from fastapi import HTTPException
+    with _pytest.raises(HTTPException):
+        mark_acted(999, None, user=user, db=session)

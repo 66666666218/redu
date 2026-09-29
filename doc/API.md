@@ -1,6 +1,6 @@
 # 接口规范(API)
 
-> 版本: v1.2　|　最后更新: 2026-09-29
+> 版本: v1.3　|　最后更新: 2026-09-29(v5 机会分决策)
 > 基础地址: 调度/监控系统暴露的 HTTP 服务(默认 `http://localhost:8080`)
 > 认证: 除 `/healthz`(健康检查)外,所有接口需 **JWT Bearer** 登录态;管理接口另需 admin/operator 角色权限。
 
@@ -980,3 +980,58 @@
 
 > `click_pv=-1` 表示平台未给出该字段(语义待与 App 端人工对照确认);
 > `save_pv/click_pv/download_pv/visit_user_count` 为夸克侧原始计数。
+
+---
+
+## 11. 热点建议 · 已发标记与回看(2026-09-29,Agent v5「预测→下注→结算」闭环)
+
+> 建议推送行带 `[# 建议ID]`;运营发货后一键标记「已发」——只有 acted 的建议 +
+> 夸克 save_pv 结算才构成 Agent 学习样本(没执行的建议不进样本,避免把"没发"误学成"发了没效果")。
+
+### 11.1 标记已发/取消
+
+- **接口名称**: 建议标记 acted
+- **请求方式**: POST
+- **URL 路径**: `/api/hotspot/suggestions/{sid}/acted`
+- **请求参数 (Body)**:
+
+```json
+{ "acted": true }
+```
+
+**响应示例 (200)**
+```json
+{ "status": "ok", "id": 12, "keyword": "兰香如故", "acted": true }
+```
+
+> 失败:404(建议不存在或非本人);不传 body 默认 acted=true。
+
+### 11.2 建议回看列表
+
+- **接口名称**: 热点建议列表
+- **请求方式**: GET
+- **URL 路径**: `/api/hotspot/suggestions`
+- **请求参数 (Query)**:
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| limit | int | 条数上限,默认 50,封顶 200 |
+| acted | bool | 可选;`true` 只看已发(供效果结算分析) |
+
+**响应示例 (200)**
+```json
+{
+  "total": 1,
+  "list": [
+    {
+      "id": 12, "keyword": "兰香如故", "kind": "match", "growth": 150.0,
+      "platforms": "douyin+baidu", "opportunity": 96.4,
+      "resource_title": "兰香如故全集资源", "link": "https://pan.quark.cn/s/xx", "plan": "标题字面命中·匹配自 xx",
+      "saves": 0, "saves_at": null, "acted": true, "acted_at": "2026-09-29T15:00:00",
+      "created_at": "2026-09-29T15:10:00"
+    }
+  ]
+}
+```
+
+> Agent v5 决策口径(输出内标注):`opportunity = 涨幅 × 共振分级(百度×1.5/微博×1.2) × 竞争稀疏度(1/(1+同话题供给)) × 窗口因子(score 动量 12h/6h/2h)`;推送分「🎯 优先发货(机会分 top3)」与「📋 备选」两组。

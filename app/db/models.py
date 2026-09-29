@@ -338,6 +338,9 @@ class HotspotSuggestion(Base):
     saves: Mapped[int] = mapped_column(Integer, default=0)     # 夸克 App 分享页读到的保存人数(人工回填)
     saves_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # 最近一次回填时间
     platforms: Mapped[str] = mapped_column(String(64), default="")  # 热点来源平台(douyin/weibo/baidu,+号连接);共振热点=多平台同现
+    opportunity: Mapped[float] = mapped_column(Float, default=0)  # 机会分=需求×竞争稀疏度×窗口因子;排序与取舍依据(2026-09-29 v5)
+    acted: Mapped[bool] = mapped_column(Boolean, default=False)   # 已发货标记(下注):只有 acted 的建议才构成"预测→结算"学习样本
+    acted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # 标记已发时间
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 

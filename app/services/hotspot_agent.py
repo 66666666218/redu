@@ -11,6 +11,13 @@
 微博/百度热搜的「新上榜」条目做交叉验证——共振热点加权排序,并在 LLM 输入与
 建议输出中标注平台证据,破"单平台+个人样本"的输入单一性(用户 2026-09-29 指出)。
 
+机会分决策(v5, 2026-09-29):排序与推送取舍用确定性公式
+  机会分 = 需求(共振分级加权涨幅:百度×1.5/微博×1.2) × 竞争稀疏度(1/(1+同话题供给))
+         × 窗口因子(score 动量分档 12h/6h/2h);
+LLM 只负责选题发散,不参与排序——可解释、可回测、可调权重。
+推送带建议 [#id],运营一键标记「已发」(acted)后,该建议 + 夸克 save_pv
+才构成"预测→下注→结算"学习样本;每天推送额度默认 top3,其余落库备选。
+
 节流:同一热点词 24h 内只推一次(记忆落 system_config);输出按 2026-09-27 口径走
 站内告警(push_feishu=False,飞书群只推文章与 Cookie 提醒)。
 计划任务:hotspot_agent_cron(默认 9:10/15:10/21:10,跟在三个白天定点监听后面,数据最鲜)。
@@ -101,7 +108,11 @@ def _resonance(db: Session, user_id: int, hotspots: list[dict],
     """原地给抖音热点附加微博/百度交叉证据。
 
     每个热点新增:weibo/baidu(命中详情或 None)、platforms("douyin+weibo" 等)、
-    effective_growth(共振加权:每多一个平台 ×1.3,排序用;growth 仍是主导)。
+    effective_growth(证据分级加权,排序用;growth 仍是主导)。
+
+    证据分级(v5, 2026-09-29):对网盘拉新(搜索→转存行为)而言,百度榜≈真实搜索
+    意图 > 微博榜≈社会话题(可被运营) > 抖音热度≈内容消费。共振加权按证据
+    可信度分级:百度 ×1.5 / 微博 ×1.2(此前统一 ×1.3 过粗)。
     """
     weibo = _platform_newcomers(db, user_id, WeiboHotItem, hours, fresh_hours)
     baidu = _platform_newcomers(db, user_id, BaiduHotItem, hours, fresh_hours)
@@ -113,8 +124,12 @@ def _resonance(db: Session, user_id: int, hotspots: list[dict],
         h["baidu"] = b
         platforms = ["douyin"] + (["weibo"] if w else []) + (["baidu"] if b else [])
         h["platforms"] = "+".join(platforms)
-        h["effective_growth"] = h["growth"] * (1 + 0.3 * (len(platforms) - 1))
-    hotspots.sort(key=lambda x: x["effective_growth"], reverse=True)
+        boost = 1.0
+        if b:
+            boost *= 1.5
+        if w:
+            boost *= 1.2
+        h["effective_growth"] = h["growth"] * boost
 
 
 def _resonance_tag(h: dict) -> str:
@@ -127,6 +142,72 @@ def _resonance_tag(h: dict) -> str:
     if not parts:
         return ""
     return f" 🌐共振({' + '.join(['抖音'] + parts)})"
+
+
+def _window_factor(db: Session, user_id: int, hotspots: list[dict],
+                   hours: int = 24) -> None:
+    """热度动量 → 剩余窗口估计(v5)。
+
+    用该词最近两拍 score 环比(30 分钟一拍)分级:动量 >0.2 上升期(12h,充足)/
+    >0 平台期(6h,收紧)/ 否则衰退(2h,将关闭)。首拍无对比按充足处理
+    (新词刚进监控,与其猜不如给观察机会)。
+    """
+    if not hotspots:
+        return
+    cutoff = datetime.now() - timedelta(hours=hours)
+    rows = db.execute(
+        select(DouhotWatchSnap.keyword, DouhotWatchSnap.score)
+        .where(DouhotWatchSnap.user_id == user_id,
+               DouhotWatchSnap.section == "douhot",
+               DouhotWatchSnap.captured_at >= cutoff,
+               DouhotWatchSnap.keyword.in_([h["keyword"] for h in hotspots]))
+        .order_by(DouhotWatchSnap.keyword, DouhotWatchSnap.captured_at)).all()
+    seqs: dict[str, list[float]] = {}
+    for kw, score in rows:
+        seqs.setdefault(str(kw), []).append(float(score or 0))
+    for h in hotspots:
+        seq = seqs.get(h["keyword"]) or []
+        momentum = (seq[-1] / seq[-2] - 1) if len(seq) >= 2 and seq[-2] > 0 else 1.0
+        if momentum > 0.2:
+            h["window_hours"], h["window_factor"], h["window_tag"] = 12, 1.0, "窗口充足"
+        elif momentum > 0:
+            h["window_hours"], h["window_factor"], h["window_tag"] = 6, 0.6, "窗口收紧"
+        else:
+            h["window_hours"], h["window_factor"], h["window_tag"] = 2, 0.3, "窗口将关闭"
+
+
+def _competition_factor(supply: list[WechatArticle], keyword: str) -> float:
+    """竞争稀疏度 = 1/(1+72h 内同话题供给数):已有 N 家供货,机会按稀疏度衰减。
+
+    判定同 _match_supply 的归一化子串口径(红海/蓝海的一等公民量化,
+    不再只靠 LLM prompt 里的一句提醒)。
+    """
+    n = _norm(keyword)
+    if len(n) < 2:
+        return 1.0
+    hits = sum(1 for a in supply if n in _norm(a.title))
+    return 1.0 / (1 + hits)
+
+
+def _opportunity(db: Session, user_id: int, hotspots: list[dict],
+                 supply: list[WechatArticle]) -> None:
+    """机会分 = 需求(共振加权涨幅) × 竞争稀疏度 × 窗口因子;原地写 h["opportunity"] 并按其排序。
+
+    排序与「每天推哪几条」的取舍用确定性公式——可解释、可回测、可调权重;
+    LLM 只负责选题发散(资源/人群/钩子),不参与排序(v5, 2026-09-29)。
+    """
+    _window_factor(db, user_id, hotspots)
+    for h in hotspots:
+        h["competition"] = _competition_factor(supply, h["keyword"])
+        h["opportunity"] = h["effective_growth"] * h["competition"] * h["window_factor"]
+    hotspots.sort(key=lambda x: x["opportunity"], reverse=True)
+
+
+def _window_tag(h: dict) -> str:
+    """人读窗口标记:⏳窗口充足(12h) / 空串(无窗口数据)。"""
+    if not h.get("window_tag"):
+        return ""
+    return f" ⏳{h['window_tag']}(~{h.get('window_hours', '?')}h)"
 
 
 def _supply_articles(db: Session, user_id: int, hours: int = 72) -> list[WechatArticle]:
@@ -460,9 +541,12 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
     if not fresh:
         return {"status": "all_duplicated", "hotspots": len(hotspots)}
 
+    supply = _supply_articles(db, user_id)
+    # 机会分排序(v5):需求(共振分级)×竞争稀疏度×窗口,确定性公式取代纯涨幅排序
+    _opportunity(db, user_id, fresh, supply)
+
     top_n = max(1, int(getattr(settings, "hotspot_agent_top_n", 8) or 8))
     fresh = fresh[:top_n]
-    supply = _supply_articles(db, user_id)
 
     # 第一层:标题子串精确匹配(零成本,字面命中绝不漏)
     matched: list[tuple[dict, WechatArticle, str]] = []
@@ -498,38 +582,63 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
     if not matched and not llm_plans:
         return {"status": "no_suggestions", "hotspots": len(fresh)}
 
-    # 落库:建议进 hotspot_suggestions(回看 + 未来效果回填;platforms 记录共振来源)
+    # 落库:建议进 hotspot_suggestions(回看 + 未来效果回填)。
+    # flush 取 id:推送行带 [#id],运营一键标记「已发」构成预测→结算闭环。
+    by_kw = {h["keyword"]: h for h in fresh}
     plan_by_kw = dict(llm_plans)
+    row_ids: dict[str, int] = {}
     for h, art, why in matched:
-        db.add(HotspotSuggestion(
+        row = HotspotSuggestion(
             user_id=user_id, keyword=h["keyword"], growth=h["growth"], kind="match",
             resource_title=art.title[:255], link=art.my_pan_urls or art.pan_urls or "",
-            plan=f"{why}·匹配自 {art.author}", platforms=str(h.get("platforms") or "douyin")))
+            plan=f"{why}·匹配自 {art.author}", platforms=str(h.get("platforms") or "douyin"),
+            opportunity=float(h.get("opportunity") or 0))
+        db.add(row)
+        db.flush()
+        row_ids[h["keyword"]] = row.id
     for kw, plan in plan_by_kw.items():
-        h = next((x for x in fresh if x["keyword"] == kw), {"growth": 0, "platforms": "douyin"})
-        db.add(HotspotSuggestion(
-            user_id=user_id, keyword=kw, growth=h["growth"], kind="llm",
+        h = by_kw.get(kw, {"growth": 0, "platforms": "douyin"})
+        row = HotspotSuggestion(
+            user_id=user_id, keyword=kw, growth=h.get("growth", 0), kind="llm",
             resource_title="", link="", plan=plan["text"][:500],
-            platforms=str(h.get("platforms") or "douyin")))
+            platforms=str(h.get("platforms") or "douyin"),
+            opportunity=float(h.get("opportunity") or 0))
+        db.add(row)
+        db.flush()
+        row_ids[kw] = row.id
 
-    # 输出行
-    lines: list[str] = []
-    copy_blocks: list[str] = []
+    # 输出行,按机会分分组:优先发货(top push_top)在前,备选落库可回看。
+    # 注意力是稀缺资源:全推等于没推,推送额度用确定性公式取舍。
+    push_top = max(1, int(getattr(settings, "hotspot_agent_push_top", 3) or 3))
+    entries: list[tuple[float, str, str]] = []   # (opportunity, 展示行, 复制块或空)
     for h, art, why in matched:
         my = next((x.strip() for x in (art.my_pan_urls or "").splitlines() if x.strip()), "")
         src = next((x.strip() for x in (art.pan_urls or "").splitlines() if x.strip()), "")
         link = my or src
         level, why_risk = resource_risk(art.title)
         risk_tag = f" ⚠️{why_risk},慎投时效" if level == "high" else ""
-        lines.append(f"🔥《{h['keyword']}》热度 +{h['growth']:.0f}%{_resonance_tag(h)} → 已有现成资源:"
-                     f"「{art.title[:40]}」({art.author})"
-                     + (f" [{why}]" if why and why != "标题字面命中" else "")
-                     + risk_tag
-                     + (f" → 点这:{link}" if link else ""))
-        copy_blocks.append(f"【{art.title}】\n{link}")
+        comp = h.get("competition")
+        comp_tag = f" 竞争{round(1 / comp - 1)}家" if comp is not None and comp < 1 else " 竞争空白"
+        line = (f"🔥[# {row_ids.get(h['keyword'], '?')}]《{h['keyword']}》热度 +{h['growth']:.0f}%"
+                f"{_resonance_tag(h)}{_window_tag(h)}{comp_tag} → 已有现成资源:"
+                f"「{art.title[:40]}」({art.author})"
+                + (f" [{why}]" if why and why != "标题字面命中" else "")
+                + risk_tag
+                + (f" → 点这:{link}" if link else ""))
+        entries.append((float(h.get("opportunity") or 0), line,
+                        f"【{art.title}】\n{link}" if link else ""))
     for kw, plan in plan_by_kw.items():
-        h = next((x for x in fresh if x["keyword"] == kw), {})
-        lines.append(f"💡 {kw}{_resonance_tag(h)} → {plan['text']}")
+        h = by_kw.get(kw, {})
+        entries.append((float(h.get("opportunity") or 0),
+                        f"💡[# {row_ids.get(kw, '?')}] {kw}{_resonance_tag(h)}{_window_tag(h)} → {plan['text']}",
+                        ""))
+    entries.sort(key=lambda x: -x[0])
+    lines = ["🎯 优先发货(机会分 top):"]
+    lines.extend(e[1] for e in entries[:push_top])
+    if len(entries) > push_top:
+        lines.append("📋 备选(已落库,机会分靠后):")
+        lines.extend(e[1] for e in entries[push_top:])
+    copy_blocks = [e[2] for e in entries[:push_top] if e[2]]
     if copy_blocks:
         lines.append("──── 复制即用 ────")
         lines.extend(copy_blocks)
