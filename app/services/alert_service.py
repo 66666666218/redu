@@ -16,7 +16,6 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
-from app.db import repository
 from app.db.models import AlertRecord, AlertRule, RunRecord, User
 from app.db.tx import HeldSavepoint, savepoint
 from app.services.notifier import get_notifier, get_user_notifier

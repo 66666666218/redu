@@ -156,7 +156,7 @@ def wechat_status(user: User = Depends(get_current_user), db: Session = Depends(
     """运行状态条:在监号数/近24h新文/盘链文/候选数(前端顶部一览)。"""
     from datetime import datetime, timedelta
     from sqlalchemy import func
-    from app.db.models import WechatCandidate, WechatPanLink
+    from app.db.models import WechatCandidate
 
     since = datetime.now() - timedelta(hours=24)
     bm = db.scalar(select(func.count()).select_from(WechatBenchmark).where(

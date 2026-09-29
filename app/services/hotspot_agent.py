@@ -25,7 +25,6 @@ LLM 只负责选题发散,不参与排序——可解释、可回测、可调权
 from __future__ import annotations
 
 import json
-import re
 from datetime import datetime, timedelta
 
 import requests
