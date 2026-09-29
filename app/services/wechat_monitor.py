@@ -636,6 +636,29 @@ def _cookie_fingerprint(cookie: str) -> str:
     return hashlib.md5(str(cookie or "").encode()).hexdigest()[:6]
 
 
+_LISTEN_CURSOR_KEY = "wechat_listen_cursor_{uid}"
+
+
+def _advance_listen_cursor(session: Session, user_id: int) -> int:
+    """读并推进监听批次游标(存 system_config,所有入口共享同一轮转序列)。
+
+    返回本次应使用的 batch_index;副作用是游标 +1(先取后增,从 0 起)。
+    并发场景:监听轮自身有"同一用户不并发"的时长锁(见 run_wechat_listen),
+    游标读写实际串行,无需额外加锁。
+    """
+    from app.db.models import SystemConfig
+
+    key = _LISTEN_CURSOR_KEY.format(uid=user_id)
+    row = session.scalar(select(SystemConfig).where(SystemConfig.key == key))
+    current = int(row.value) if row and str(row.value).isdigit() else 0
+    if row is None:
+        session.add(SystemConfig(key=key, value=str(current + 1)))
+    else:
+        row.value = str(current + 1)
+    session.commit()
+    return current
+
+
 _RENEWAL_COOLDOWN_KEY = "weread_renewal_cooldown_{uid}"
 _RENEWAL_COOLDOWN_MIN = 120  # renewal 失败后的冷却:实测连续撞会触发微信读书 renewal 频控,
                              # 锁定期内换出的 skey 即刻无效(2026-09-16 凌晨连续失败 3h 的根因)
@@ -1672,12 +1695,21 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
         _record_run(session, user_id, "wechat_listen", "skipped", "no_benchmarks(未添加对标号)")
         session.commit()
         return {"platform": "wechat", "status": "skipped", "reason": "no_benchmarks"}
-    # 错峰分批:微信读书源按批次轮转(每轮只查 1/N 的号,降低瞬时密度防风控);
-    # 批次大小默认 7(号级延迟 ≤ N×间隔,21 号 3h 全覆盖)
+    # 错峰分批(2026-09-29 用户决策:142 号分组轮换,一轮只测少数):
+    # 未显式传 batch_size 时按 settings.wechat_listen_batch_size(默认 36)轮转——
+    # 4/8/14/20 四定点 × 36 号 = 144 ≥ 142,每天恰好全覆盖一遍;
+    # batch_index 未传时用 system_config 游标(wechat_listen_cursor_{uid})自动推进,
+    # 调度/手动/重试三入口零改动即共享同一轮转序列。batch_size=0 关闭轮转回全量。
     rows = all_rows
-    if batch_size and batch_size > 0 and len(all_rows) > batch_size:
-        start = (batch_index or 0) % (len(all_rows) // batch_size + (1 if len(all_rows) % batch_size else 0))
-        rows = all_rows[start * batch_size:(start + 1) * batch_size]
+    batch_pos = ""
+    effective_bs = batch_size if (batch_size and batch_size > 0) else settings.wechat_listen_batch_size
+    if effective_bs > 0 and len(all_rows) > effective_bs:
+        n_groups = len(all_rows) // effective_bs + (1 if len(all_rows) % effective_bs else 0)
+        if batch_index is None:
+            batch_index = _advance_listen_cursor(session, user_id)
+        start = batch_index % n_groups
+        rows = all_rows[start * effective_bs:(start + 1) * effective_bs]
+        batch_pos = f" batch={start + 1}/{n_groups}(size={effective_bs})"
     cookie = _weread_cookie(session, user_id, settings)
     daj_key = _dajiala_key(session, user_id, settings)
     use_dajiala = bool(daj_key)
@@ -1928,7 +1960,7 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
         status = "partial"
     else:
         status = "success"
-    detail = f"accounts={len(rows)} new={len(new_rows)} failed={failed}"
+    detail = f"accounts={len(rows)} new={len(new_rows)} failed={failed}{batch_pos}"
     if quota_skipped:
         detail += f" quota_skipped={quota_skipped}"
     # biz 里躺着源认不出的形态(历史上 add_benchmark 写过 base64 __biz):⓪ 分支按"没配"处理

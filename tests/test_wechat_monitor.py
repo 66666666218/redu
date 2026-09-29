@@ -4095,3 +4095,54 @@ def test_push_card_shows_banned_marker(session, monkeypatch) -> None:
     _fake_feishu(monkeypatch, cards)
     wechat_monitor._push_listen(session, 1, _settings(), [art], replacements={})
     assert "⛔原文失效" in _json.dumps(cards, ensure_ascii=False, default=str)
+
+
+def test_listen_batch_rotation_advances_cursor(session) -> None:
+    """142 号分组轮换(2026-09-29 用户决策):未传 batch 时按配置切片,游标推进,
+    detail 记 batch=i/n;batch_size=0 逃生门回全量;游标超过组数取模回绕。"""
+    for i in range(5):
+        session.add(WechatBenchmark(user_id=1, nickname=f"号{i}",
+                                    anchor_url=f"https://mp.weixin.qq.com/s/{i}"))
+    session.commit()
+
+    def _last_detail() -> str:
+        run = session.scalars(select(RunRecord).order_by(RunRecord.id.desc())).first()
+        return run.detail
+
+    # 批大小 2 → 5 号分 3 组;三次调用分别吃 [0:2] [2:4] [4:5]
+    st = _settings(wechat_listen_batch_size=2)
+    out1 = wechat_monitor.run_wechat_listen(session, 1, settings=st, client=FakeClient())
+    assert out1["status"] in ("success", "skipped")
+    assert "accounts=2" in _last_detail() and "batch=1/3(size=2)" in _last_detail()
+    out2 = wechat_monitor.run_wechat_listen(session, 1, settings=st, client=FakeClient())
+    assert "accounts=2" in _last_detail() and "batch=2/3(size=2)" in _last_detail()
+    out3 = wechat_monitor.run_wechat_listen(session, 1, settings=st, client=FakeClient())
+    assert "accounts=1" in _last_detail() and "batch=3/3(size=2)" in _last_detail()
+
+    # 第四次:游标回绕到第 1 组
+    wechat_monitor.run_wechat_listen(session, 1, settings=st, client=FakeClient())
+    assert "batch=1/3(size=2)" in _last_detail()
+
+    # batch_size=0:逃生门,全量 5 号,无 batch 字样
+    st_full = _settings(wechat_listen_batch_size=0)
+    wechat_monitor.run_wechat_listen(session, 1, settings=st_full, client=FakeClient())
+    detail = _last_detail()
+    assert "accounts=5" in detail and "batch=" not in detail
+
+
+def test_listen_batch_explicit_index_no_cursor(session) -> None:
+    """显式传 batch_index/batch_size 时不动游标(兼容既有手动指定语义)。"""
+    for i in range(4):
+        session.add(WechatBenchmark(user_id=1, nickname=f"号{i}",
+                                    anchor_url=f"https://mp.weixin.qq.com/s/{i}"))
+    session.commit()
+    st = _settings(wechat_listen_batch_size=0)  # 关默认轮转,隔离游标副作用
+    wechat_monitor.run_wechat_listen(session, 1, settings=st, client=FakeClient(),
+                                     batch_index=1, batch_size=2)
+    run = session.scalars(select(RunRecord).order_by(RunRecord.id.desc())).first()
+    assert "accounts=2" in run.detail and "batch=2/2(size=2)" in run.detail
+    # 游标未被消耗:下一次默认轮转应从 0 开始
+    st_rot = _settings(wechat_listen_batch_size=2)
+    wechat_monitor.run_wechat_listen(session, 1, settings=st_rot, client=FakeClient())
+    assert "batch=1/2(size=2)" in session.scalars(
+        select(RunRecord).order_by(RunRecord.id.desc())).first().detail
