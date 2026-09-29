@@ -1,6 +1,6 @@
 # 接口规范(API)
 
-> 版本: v1.3　|　最后更新: 2026-09-29(v5 机会分决策)
+> 版本: v1.4　|　最后更新: 2026-09-29(混合结算)
 > 基础地址: 调度/监控系统暴露的 HTTP 服务(默认 `http://localhost:8080`)
 > 认证: 除 `/healthz`(健康检查)外,所有接口需 **JWT Bearer** 登录态;管理接口另需 admin/operator 角色权限。
 
@@ -1028,6 +1028,7 @@
       "platforms": "douyin+baidu", "opportunity": 96.4,
       "resource_title": "兰香如故全集资源", "link": "https://pan.quark.cn/s/xx", "plan": "标题字面命中·匹配自 xx",
       "saves": 0, "saves_at": null, "acted": true, "acted_at": "2026-09-29T15:00:00",
+      "article_id": 71, "reads_gain": 300, "settled_at": "2026-09-29T22:00:00",
       "created_at": "2026-09-29T15:10:00"
     }
   ]
@@ -1035,3 +1036,40 @@
 ```
 
 > Agent v5 决策口径(输出内标注):`opportunity = 涨幅 × 共振分级(百度×1.5/微博×1.2) × 竞争稀疏度(1/(1+同话题供给)) × 窗口因子(score 动量 12h/6h/2h)`;推送分「🎯 优先发货(机会分 top3)」与「📋 备选」两组。
+
+### 11.3 触发结算(手动补跑)
+
+- **接口名称**: 建议结算
+- **请求方式**: POST
+- **URL 路径**: `/api/hotspot/settle`
+- **请求参数**: 无
+
+**响应示例 (200)**
+```json
+{ "status": "ok", "acted_with_link": 5, "settled": 3, "attributed_no_sample": 1 }
+```
+
+> 结算逻辑(v5,方案A):夸克链接级转存统计不开放(2026-09-29 定案),改用发文阅读增量——
+> acted 建议 → 按盘链精确归因到发文 → `wechat_traffic_samples` 首拍→最新拍 `read_num` 差值
+> 写入 `reads_gain`。自动跑在每日 22:00(21:30 晚间采样后),此接口供手动补跑;
+> 可重复结算(基线固定首拍,gain 随最新采样刷新)。调度作业 id:`suggestion_settle`。
+
+### 11.4 拉新周录(方案B 总账)
+
+- **接口名称**: 录入/更新周度拉新总数
+- **请求方式**: POST
+- **URL 路径**: `/api/hotspot/recruits`
+- **请求参数 (Body)**:
+
+```json
+{ "week_start": "2026-09-22", "recruits": 12, "note": "含国庆活动" }
+```
+
+**响应示例 (200)**
+```json
+{ "status": "ok", "id": 1, "week_start": "2026-09-22", "recruits": 12 }
+```
+
+- **查询**: GET `/api/hotspot/recruits?limit=12` → `{"total":N,"list":[{"week_start","recruits","note","created_at"}]}`(最近在前)
+- 同 `week_start` 重录 = 覆盖更新;`pan_recruit_weekly` 表按 user_id 隔离。
+- 命令行入口:`python scripts/record_recruits.py 2026-09-22=12 2026-09-29=7 [--note 备注]`

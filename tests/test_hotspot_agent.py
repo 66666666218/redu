@@ -271,3 +271,74 @@ def test_mark_acted_api(session) -> None:
     from fastapi import HTTPException
     with _pytest.raises(HTTPException):
         mark_acted(999, None, user=user, db=session)
+
+
+def test_settle_suggestions_reads_gain(session) -> None:
+    """结算(方案A):acted 建议按盘链归因到发文,reads_gain=首拍→最新拍阅读增量。"""
+    from app.db.models import WechatArticle, WechatTrafficSample
+    from app.services.hotspot_agent import settle_suggestions
+
+    link = "https://pan.quark.cn/s/settle1"
+    session.add(WechatArticle(id=71, user_id=1, title="测试发文", author="我",
+                              source="manual", url="https://mp.weixin.qq.com/s/z1",
+                              my_pan_urls=link,
+                              created_at=dt.datetime.now() - dt.timedelta(days=1)))
+    for i, (rn, hrs) in enumerate([(100, 20.0), (260, 4.0)]):
+        session.add(WechatTrafficSample(user_id=1, article_id=71, read_num=rn,
+                                        sampled_at=dt.datetime.now() - dt.timedelta(hours=hrs)))
+    session.add(HotspotSuggestion(user_id=1, keyword="结算热点", kind="match",
+                                  link=link, acted=True))
+    session.commit()
+
+    out = settle_suggestions(session, 1)
+    assert out["settled"] == 1
+    row = session.scalars(select(HotspotSuggestion)).one()
+    assert row.article_id == 71 and row.reads_gain == 160 and row.settled_at is not None
+
+    # 重复结算:gain 刷新到最新采样,基线仍为首拍
+    session.add(WechatTrafficSample(user_id=1, article_id=71, read_num=400,
+                                    sampled_at=dt.datetime.now()))
+    session.commit()
+    settle_suggestions(session, 1)
+    assert session.scalars(select(HotspotSuggestion)).one().reads_gain == 300
+
+
+def test_settle_skips_unacted_or_unattributed(session) -> None:
+    """结算纪律:未 acted 或盘链对不上发文的不结算(宁少样本不脏样本)。"""
+    from app.services.hotspot_agent import settle_suggestions
+
+    session.add(WechatArticle(id=81, user_id=1, title="别的文", author="我",
+                              source="manual", url="https://mp.weixin.qq.com/s/z2",
+                              my_pan_urls="https://pan.quark.cn/s/other",
+                              created_at=dt.datetime.now()))
+    session.add(HotspotSuggestion(user_id=1, keyword="没发过的", kind="llm", link="",
+                                  acted=False, plan="x"))
+    session.add(HotspotSuggestion(user_id=1, keyword="发了但盘链陌生", kind="match",
+                                  link="https://pan.quark.cn/s/unknown", acted=True))
+    session.commit()
+
+    out = settle_suggestions(session, 1)
+    assert out["settled"] == 0
+    for row in session.scalars(select(HotspotSuggestion)).all():
+        assert row.article_id is None and row.settled_at is None
+
+
+def test_recruits_upsert_and_list(session) -> None:
+    """方案B:拉新周录 upsert(同周覆盖)+ 列表倒序。"""
+    from app.api.hotspot import list_recruits, upsert_recruit
+
+    session.add(User(id=1, email="op@test.com", username="op", password_hash="x"))
+    session.commit()
+    user = session.get(User, 1)
+    p = type("P", (), {"week_start": "2026-09-22", "recruits": 12, "note": "首周"})
+    out = upsert_recruit(p, user=user, db=session)
+    assert out["recruits"] == 12
+    p2 = type("P", (), {"week_start": "2026-09-22", "recruits": 15, "note": ""})
+    upsert_recruit(p2, user=user, db=session)          # 同周重录=覆盖
+    p3 = type("P", (), {"week_start": "2026-09-29", "recruits": 7, "note": ""})
+    upsert_recruit(p3, user=user, db=session)
+    listing = list_recruits(limit=12, user=user, db=session)
+    assert listing["total"] == 2
+    assert listing["list"][0]["week_start"] == "2026-09-29"
+    weeks = {r["week_start"]: r["recruits"] for r in listing["list"]}
+    assert weeks["2026-09-22"] == 15 and weeks["2026-09-29"] == 7

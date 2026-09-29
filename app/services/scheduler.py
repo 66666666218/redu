@@ -343,7 +343,8 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     )
     from app.services.agent_learning import backtest_and_learn
     from app.services.early_agent import agent_tick_all_users
-    from app.services.hotspot_agent import hotspot_agent_tick_all_users
+    from app.services.hotspot_agent import (hotspot_agent_tick_all_users,
+                                            settle_suggestions_all_users)
     from app.services.wechat_monitor import (candidate_discover_tick, keyword_article_all_users,
                                               pan_cookie_keepalive_tick, traffic_tick, weread_refresh_tick)
 
@@ -365,6 +366,8 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         (weread_refresh_tick, _get_settings().weread_refresh_cron, {"minute": 50, "hour": "*/6"}, "weread_refresh"),
         (hotspot_agent_tick_all_users, _get_settings().hotspot_agent_cron,
          {"minute": 10, "hour": "9,15,21"}, "hotspot_agent"),
+        # 建议结算:每日 22:00(跟在 21:30 晚间阅读采样后,把当日最新采样点折进 reads_gain)
+        (settle_suggestions_all_users, "0 22 * * *", {"minute": 0, "hour": 22}, "suggestion_settle"),
         # 搜狗验证码红线约 30~50 次/天:每 4 小时一轮 × 每轮最多 5 词 = 30 次/天(安全区)
         (keyword_article_all_users, "40 */4 * * *", {"minute": 40}, "keyword_article"),
         (candidate_discover_tick, _get_settings().candidate_discover_cron, {"minute": 20, "hour": 8}, "wechat_candidates"),

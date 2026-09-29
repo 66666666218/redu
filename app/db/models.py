@@ -341,6 +341,27 @@ class HotspotSuggestion(Base):
     opportunity: Mapped[float] = mapped_column(Float, default=0)  # 机会分=需求×竞争稀疏度×窗口因子;排序与取舍依据(2026-09-29 v5)
     acted: Mapped[bool] = mapped_column(Boolean, default=False)   # 已发货标记(下注):只有 acted 的建议才构成"预测→结算"学习样本
     acted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # 标记已发时间
+    article_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 结算归因的发文(按盘链精确匹配)
+    reads_gain: Mapped[int] = mapped_column(Integer, default=0)   # 结算:发文阅读增量(首拍→最新拍,夸克链接级转存统计不开放后的替代信号)
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # 最近一次结算时间
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class PanRecruitWeekly(Base):
+    """夸克官方拉新后台的周度拉新总数(人工录入,总账校准用)。
+
+    链接级转存统计夸克不开放(2026-09-29 确认),逐条建议走发文阅读增量结算;
+    本表是人工粗颗粒兜底:每周从拉新活动后台抄一次总数,与建议侧信号对账。
+    """
+
+    __tablename__ = "pan_recruit_weekly"
+    __table_args__ = (UniqueConstraint("user_id", "week_start", name="uq_prw_user_week"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    week_start: Mapped[datetime] = mapped_column(DateTime)   # 统计周期起始日(默认周一)
+    recruits: Mapped[int] = mapped_column(Integer, default=0)
+    note: Mapped[str] = mapped_column(String(255), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 

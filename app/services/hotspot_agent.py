@@ -688,3 +688,75 @@ def hotspot_agent_tick_all_users(settings: Settings | None = None) -> int:
     finally:
         db.close()
     return total
+
+
+# ---------------------------------------------------------------- 建议结算(v5, 2026-09-29)
+
+def _article_covers_link(art: WechatArticle, link: str) -> bool:
+    """发文是否包含该盘链(my_pan_urls/pan_urls 按行拆分精确匹配)。"""
+    if not link:
+        return False
+    links = {x.strip() for x in
+             ((art.my_pan_urls or "") + "\n" + (art.pan_urls or "")).splitlines() if x.strip()}
+    return link in links
+
+
+def settle_suggestions(db: Session, user_id: int) -> dict:
+    """结算已发建议的发文阅读增量(v5 结算端,方案A)。
+
+    夸克链接级转存统计不开放(2026-09-29 定案),替代信号 = 发文阅读采样增量:
+    acted 建议 → 按盘链精确归因到发文(宁可少样本不要脏样本,不做标题模糊匹配)
+    → wechat_traffic_samples 首拍→最新拍 read_num 差值写入 reads_gain。
+    可重复结算:基线固定为首拍,gain 随最新采样刷新。
+    """
+    from app.db.models import WechatTrafficSample
+
+    rows = db.scalars(select(HotspotSuggestion).where(
+        HotspotSuggestion.user_id == user_id,
+        HotspotSuggestion.acted.is_(True),
+        HotspotSuggestion.link != "")).all()
+    articles = db.scalars(select(WechatArticle).where(
+        WechatArticle.user_id == user_id,
+        WechatArticle.created_at >= datetime.now() - timedelta(days=30))).all()
+    settled, pending = 0, 0
+    now = datetime.now()
+    for sug in rows:
+        art = next((a for a in articles if _article_covers_link(a, sug.link)), None)
+        if art is None:
+            continue          # 还没归因到发文,等下一轮(发文后录入即自动接上)
+        sug.article_id = art.id
+        samples = db.scalars(select(WechatTrafficSample).where(
+            WechatTrafficSample.article_id == art.id,
+            WechatTrafficSample.user_id == user_id).order_by(
+            WechatTrafficSample.sampled_at)).all()
+        if not samples:
+            pending += 1
+            continue          # 发文已归因但尚无采样点,标记归因、gain 下轮填
+        sug.reads_gain = int(samples[-1].read_num or 0) - int(samples[0].read_num or 0)
+        sug.settled_at = now
+        settled += 1
+    db.commit()
+    return {"status": "ok", "acted_with_link": len(rows), "settled": settled,
+            "attributed_no_sample": pending}
+
+
+def settle_suggestions_all_users(settings: Settings | None = None) -> int:
+    """计划任务入口:对全部启用用户各结算一轮。"""
+    from app.db.database import get_session_local
+    from app.db.models import User
+
+    db = get_session_local()()
+    total = 0
+    try:
+        for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
+            try:
+                out = settle_suggestions(db, uid)
+                if out.get("settled"):
+                    total += out["settled"]
+                db.commit()
+            except Exception:  # noqa: BLE001 - 单用户失败不影响其余
+                db.rollback()
+                logger.exception("建议结算失败 user=%s", uid)
+    finally:
+        db.close()
+    return total
