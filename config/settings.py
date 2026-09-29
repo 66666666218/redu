@@ -41,10 +41,7 @@ class Settings(BaseSettings):
     wechat_werss_sk: str = ""       # WeRSS Secret Key(创建时只显示一次)
     wechat_sync_max_pages: int = 3  # 一键同步默认最多翻页数(history_by_ghid ¥0.14/页,每页约10次发文)
     wechat_sync_push_limit: int = 20  # 一次「同步文章」转存+推飞书的篇数上限(资源文优先;同盘链去重后仍超量才截断)
-    wechat_traffic_sample_limit: int = 30  # 每轮阅读量采样最多篇数(¥0.06/篇,控成本)
     wechat_listen_batch_size: int = 36  # 监听轮每批号数(2026-09-29 用户决策:142 号分组轮换,4 定点×36=144 每天轮一遍;每批≈72 请求远低于会话额度红线;0=回退全量)
-    wechat_listen_sample_new: bool = True  # 监听到新文时立即采样阅读量(随推送一起发飞书)
-    wechat_listen_sample_limit: int = 10   # 监听一轮内"立即采样"的新文上限(控制成本)
     quark_cookie: str = ""                 # 夸克网盘 Cookie(pan.quark.cn 登录后复制);用于转存对标文的分享
     quark_save_dir: str = "/redian监听"     # 转存目标目录(自动逐级创建)
     quark_fid_store: str = "data/quark_fid_cache.json"  # 目录 fid 持久缓存(大盘免重扫;幽灵同名复用)
@@ -52,10 +49,7 @@ class Settings(BaseSettings):
     pan_transfer_enabled: bool = True      # 是否自动转存(需 quark_cookie;失败回落原链接推送)
     pan_transfer_backfill_limit: int = 8   # 每轮监听额外补转存的历史文章数
                                            # (同步当场转存失败/早于该逻辑入库的旧文,靠这个队列慢慢补)
-    wechat_traffic_min_interval_hours: int = 24  # 同一篇文章两次采样最小间隔(小时)
     wechat_traffic_cron: str = "30 21 * * *"  # 每日阅读量采样时间(默认 21:30)
-    wechat_resample_growth_pct: float = 100  # 相邻采样阅读增长≥该百分比 → 爆点苗头
-    wechat_burst_min_reads: int = 100  # 爆点苗头最低阅读(微信读书站内口径,比全网阅读小一个量级)        # 爆点苗头最低绝对阅读数(滤大号基线噪音)
     wechat_resonance_hours: int = 48         # 资源共振窗口(同一盘链 N 小时内 ≥2 篇文章)
     wechat_repush_window_hours: int = 24     # 补推窗口:入库 N 小时内未送达飞书的文章还要补
     wechat_repush_limit: int = 100           # 单轮补推篇数上限(超出留给下一轮,不一次刷屏)

@@ -144,6 +144,35 @@ _BAIT_PATTERNS = [
 _QUALITY_PAN = 3       # 有实际盘链
 _QUALITY_RECENT = 1    # 近3天发布
 _QUALITY_MULTI = 2     # 多号同发
+
+
+def _parse_time(value: object) -> datetime | None:
+    """发文字段容错解析:epoch 秒(数字/数字串)或 ISO 字符串。"""
+    if value is None:
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            return datetime.fromtimestamp(value)
+        s = str(value).strip()
+        if s.isdigit():
+            return datetime.fromtimestamp(int(s))
+        # 带 Z/偏移的 ISO 串是 UTC 墙钟,而全库时间戳统一为"服务器本地 naive"
+        # (datetime.now());必须先 astimezone() 转本地再抹 tzinfo,否则会把 UTC
+        # 当本地存,发布时段×阅读、近 N 天过滤整体偏移一个时区。naive 串 astimezone()
+        # 按本地解释、值不变,安全。
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
+    except (ValueError, OSError, TypeError):
+        return None
+
+
+def _extract_pan_urls(title: str, content: str) -> list[str]:
+    """标题+正文里的夸克/百度分享链(单一事实源:入库时抽一次,历史回填也用同一套)。"""
+    from app.services.baidupan_transfer import extract_baidu_urls
+
+    blob = f"{title or ''} {content or ''}"
+    return extract_quark_urls(blob) + extract_baidu_urls(blob)
+
+
 def assess_quality(content: str, pan_urls: list[str], read_num: int,
                    resonance_cnt: int = 0, days_old: int = 0) -> dict:
     """内容质量评估:盘链确认 / 虚假宣传 / 引流话术 检测。
@@ -186,73 +215,3 @@ def assess_quality(content: str, pan_urls: list[str], read_num: int,
         "bait_signals": bait_signals,
         "quality_score": min(score, 10),
     }
-def _deep_find(node: object, key: str):  # noqa: ANN201
-    """递归找第一个命中键的值(响应字段层级未完全实测,统一防御式取数)。"""
-    if isinstance(node, dict):
-        if key in node:
-            return node[key]
-        for v in node.values():
-            r = _deep_find(v, key)
-            if r is not None:
-                return r
-    elif isinstance(node, list):
-        for v in node:
-            r = _deep_find(v, key)
-            if r is not None:
-                return r
-    return None
-_URL_KEYS = ("content_url", "url", "link", "surl")
-_TIME_KEYS = ("send_time", "timestamp", "publish_time", "datetime")
-def _parse_time(value: object) -> datetime | None:
-    """发文字段容错解析:epoch 秒(数字/数字串)或 ISO 字符串。"""
-    if value is None:
-        return None
-    try:
-        if isinstance(value, (int, float)):
-            return datetime.fromtimestamp(value)
-        s = str(value).strip()
-        if s.isdigit():
-            return datetime.fromtimestamp(int(s))
-        # 带 Z/偏移的 ISO 串是 UTC 墙钟,而全库时间戳统一为"服务器本地 naive"
-        # (datetime.now());必须先 astimezone() 转本地再抹 tzinfo,否则会把 UTC
-        # 当本地存,发布时段×阅读、近 N 天过滤整体偏移一个时区。naive 串 astimezone()
-        # 按本地解释、值不变,安全。
-        return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
-    except (ValueError, OSError, TypeError):
-        return None
-def _extract_articles(node: object, url_keys: tuple[str, ...] = _URL_KEYS) -> list[dict]:
-    """防御式抽取文章条目:递归找"带 title + 链接字段"的字典,保持原顺序。"""
-    found: list[dict] = []
-
-    def walk(n: object) -> None:
-        if isinstance(n, dict):
-            title = str(n.get("title") or n.get("Title") or "").strip()
-            link = ""
-            for k in url_keys:
-                v = n.get(k) or n.get(k.capitalize())
-                if v:
-                    link = str(v).strip()
-                    break
-            if title and link:
-                ts = None
-                for k in _TIME_KEYS:
-                    if n.get(k) is not None:
-                        ts = _parse_time(n[k])
-                        if ts:
-                            break
-                found.append({"title": title, "url": link, "publish_at": ts})
-                return
-            for v in n.values():
-                walk(v)
-        elif isinstance(n, list):
-            for v in n:
-                walk(v)
-
-    walk(node)
-    return found
-def _extract_pan_urls(title: str, content: str) -> list[str]:
-    """标题+正文里的夸克/百度分享链(单一事实源:入库时抽一次,历史回填也用同一套)。"""
-    from app.services.baidupan_transfer import extract_baidu_urls
-
-    blob = f"{title or ''} {content or ''}"
-    return extract_quark_urls(blob) + extract_baidu_urls(blob)

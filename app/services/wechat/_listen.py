@@ -467,6 +467,7 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     # 所以这里合闸:列表先停,连续 _COVER_QUOTA_TRIP 个号 cover 也挡不下就整源停。
     breaker: dict = {"list_off": False, "cover_quota_fails": 0, "off": False}
     quota_skipped = 0
+    no_free_source = 0
     marks_advance: dict[str, str] = {}   # 本轮「问过且答上」的号 → 书架信号值(轮末前移水位)
     banned: dict[str, str] = {}          # 本轮被封/被删的文章 url → 标题·违规类别(清扫预警用)
     for b in rows:
@@ -496,6 +497,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
         # ① 微信读书(免费):对标号已关联 bookId 且有 Cookie;登录失效时自动续期重试一次
         wr_eligible = (not used) and bool(cookie) and bool(b.weread_book_id)
         wr_skipped_this = False
+        if not used and not wr_eligible and not plat:
+            no_free_source += 1  # 免费列表源缺失+无 bookId 的手动号:本轮结构性失明,计入运维记录
         if wr_eligible and breaker["off"]:
             # 整源已停:本号这一轮"什么都不知道",不能算 answered(故不动 miss_count),
             # 但必须计数暴露——否则运维记录会长得跟"81 个号都问过了、只是没新文"一样。
@@ -646,6 +649,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     detail = f"accounts={len(rows)} new={len(new_rows)} failed={failed}{batch_pos}"
     if quota_skipped:
         detail += f" quota_skipped={quota_skipped}"
+    if no_free_source:
+        detail += f" no_free_source={no_free_source}"
     # biz 里躺着源认不出的形态(历史上 add_benchmark 写过 base64 __biz):⓪ 分支按"没配"处理
     # 所以号不会失明,但免费全量列表也就没接上。不点名出来,运维只会以为"配了 WeRSS 就该全推"。
     miskeyed = [str(b.nickname or b.id) for b in rows if (b.biz or "").strip() and not feed_biz(b)]
