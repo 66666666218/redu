@@ -5,7 +5,10 @@
 - body(实测必需): page_size/page/fetch_total/share_read_statues=[0] 必带,
   空数组报 400、fr=android 报 401(fr 参与鉴权)、未知参数被静默忽略。
 - 返回 data.list + data.metadata(_total 总数);统计字段 save_pv/click_pv/
-  download_pv/visit_user_count(click_pv=-1 语义待与 App 人工对照确认)。
+  download_pv/visit_user_count。**2026-09-29 定案**:夸克官方「分享管理」
+  只能看链接是否失效,不提供转存统计(运营者确认)——这些字段就是数据全集,
+  -1/0 = 平台不对外,并非"有开关未打开";链接级转存数当前不可得,
+  本采集的价值在库存清单/失效/违规监控与将来若开放的统计回填。
 - 纪律: 只读采集、Cookie 复用 user_cookies 配置、失败抛语义化异常。
 """
 from __future__ import annotations
