@@ -112,3 +112,25 @@ def test_pool_refreshes_when_expired() -> None:
     pool._last = 0  # 强制过期,下一次 get_proxies 应触发刷新
     pool.get_proxies()
     assert calls["n"] == 2
+
+
+def test_disable_env_proxies_blocks_env_proxy(monkeypatch) -> None:
+    """patch 后即使环境变量声明代理,get_environ_proxies 也返回空;显式 proxies 不受影响。"""
+    import requests.utils
+
+    from app.utils.proxy import disable_env_proxies
+
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    original = requests.utils.getproxies
+    try:
+        disable_env_proxies()
+        # 类属性级 patch:get_environ_proxies 走模块全局 getproxies → 恒空
+        assert requests.utils.get_environ_proxies("https://weread.qq.com") == {}
+        assert requests.utils.getproxies() == {}
+        # 显式 proxies 语义不变:它不经 getproxies,由 session.proxies 直接生效
+        s = requests.Session()
+        s.proxies.update({"http": "http://explicit.example:9"})
+        assert s.proxies["http"] == "http://explicit.example:9"
+    finally:
+        requests.utils.getproxies = original  # 不泄漏到其他测试

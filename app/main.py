@@ -20,7 +20,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 
 from config.settings import get_settings
 from app.services.scheduler import build_jobs
-from app.utils import get_logger, setup_logging
+from app.utils import disable_env_proxies, get_logger, setup_logging
 
 logger = get_logger(__name__)
 
@@ -28,6 +28,7 @@ logger = get_logger(__name__)
 def run_scheduler() -> None:
     """独立调度进程:与 API 内嵌调度器完全同一套作业。"""
     setup_logging()
+    disable_env_proxies()  # 忽略系统代理(2026-09-29 事故加固)
     logger.info("启动独立调度模式:按各用户设置的采集频率(每分钟检查到期任务)")
 
     from app.services.scheduler import _scheduler_kwargs
@@ -42,6 +43,7 @@ def run_api() -> None:
     import uvicorn
 
     setup_logging()
+    disable_env_proxies()  # 忽略系统代理(2026-09-29 事故加固)
     settings = get_settings()
     logger.info("启动 API 模式(多租户平台),端口 %s", settings.app_port)
     uvicorn.run("app.platform:app", host="0.0.0.0", port=settings.app_port)

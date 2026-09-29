@@ -553,3 +553,47 @@ WeRSS 挂了会怎样:它的异常是 `PlatformError` 的子类,监听会**降�
 注意事项:① 电源设置勾「接通电源不休眠」(睡眠断网=监控停);② 手机热点完全可用(IP 是
 手机的,但浏览器与采集器仍同机同 IP);③ 只有换地点后的第一次需要人工 2 分钟。
 ⚠️ 换网络后旧 Cookie 必死(会话绑出口 IP),这是设计不是故障——告警响了就照上表换新。
+
+## 13. 系统代理事故(2026-09-29)——代理软件退出毒杀全部采集
+
+### 现象
+
+9-29 20:02 起 `wechat_listen` 一轮 **81 个对标号全部失败**(错误 `WereadError`,
+非 AuthError),baidu 采集连接失败、闲鱼两轮"全部关键词未返回数据"、微信读书
+自动续期失败进冷却。白天(04:00-14:00)一切正常,20:00 突然全灭。
+
+### 根因
+
+本机代理软件(Clash 类,监听 `127.0.0.1:7892`)退出时**没有还原 Windows 系统代理
+注册表项**——`HKCU\...\Internet Settings` 残留 `ProxyEnable=1, ProxyServer=127.0.0.1:7892`,
+而 7892 已无进程监听。Python `requests` 默认 `trust_env=True`,在 Windows 上会读
+这张注册表(`urllib.request.getproxies()`),于是**所有未显式指定 proxies 的请求**
+(weread/百度/闲鱼/续期……)全撞死代理。`ProxyOverride` 里只有 zhihu/jd 等白名单,
+不含本项目任何采集域名,保护不了。
+
+判定方法:请求异常里出现 `ProxyError('Unable to connect to proxy',
+... 127.0.0.1:7892 ...)` 即此因;`netstat -ano | findstr 7892` 无 LISTENING +
+`reg query ... /v ProxyEnable` 为 1 即坐实。
+
+### 修复(两层,均已落地)
+
+1. **应急**:关闭死系统代理
+   `reg add "HKCU\...\Internet Settings" /v ProxyEnable /t REG_DWORD /d 0 /f`
+   现有进程下一次请求即恢复(requests 每次请求实时读注册表),无需重启。
+2. **防再犯(代码免疫)**:`app/utils/proxy.py::disable_env_proxies()`,
+   patch `requests.utils.getproxies` 恒返 `{}`,在三个入口调用
+   (`app/main.py` 独立调度/API 模式 + `app/platform.py::create_app`)。
+   进程内 requests 从此对系统代理**免疫**,代理软件再怎么开/关/崩都不影响采集。
+   注意:不能用 `Session.trust_env=False` 类属性 patch——requests ≥2.33 已把
+   trust_env 改为实例属性,类属性会被 `__init__` 覆盖(实测 2.34.2)。
+
+显式代理不受影响:闲鱼专用代理(`xianyu_proxy_url`)、隧道/提取式代理池
+(`get_proxies()`)都走显式 `proxies=` 参数,与本开关无关。
+
+### 事故时间线备注
+
+- 19:50 自动续期"成功"存疑:user_cookies 的 Cookie `updated_at` 停在 14:58,
+  说明 19:50 那次可能只是校验通过而非换新——当晚 21:31 手动 `refresh_skey`
+  才真正换到新 Cookie(1311 字符,书架 142 本复验通过)。
+- wechat_listen 为 4/8/14/20 定点作业,20:02 失败后**当晚无自动重试**,
+  下一轮次日 04:00——事故发现窗口就在当晚,别等告警堆积。

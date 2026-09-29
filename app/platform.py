@@ -16,7 +16,7 @@ from app import APP_VERSION
 from app.api import all_routers
 from app.db import init_db
 from app.services import scheduler
-from app.utils import get_logger, setup_logging
+from app.utils import disable_env_proxies, get_logger, setup_logging
 
 logger = get_logger(__name__)
 
@@ -35,6 +35,8 @@ def create_app() -> FastAPI:
     # 生产用 `uvicorn app.platform:app` 直启,不经 app/main.py;须先初始化日志,
     # 否则 root logger 无 handler:INFO 全丢、异常堆栈无格式,线上难排查。
     setup_logging()
+    # 忽略系统代理(2026-09-29 事故加固,详见 proxy.disable_env_proxies docstring)
+    disable_env_proxies()
     from config.settings import Settings, get_settings
 
     _settings = get_settings()

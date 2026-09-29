@@ -163,3 +163,26 @@ def get_proxies(settings: Settings) -> dict[str, str] | None:
     if url is None:
         return None
     return {"http": url, "https": url}
+
+
+def disable_env_proxies() -> None:
+    """全局禁用 requests 读取环境变量/系统代理。
+
+    Why: Windows 上代理软件(Clash 等)退出时可能不还原系统代理注册表项,
+    ProxyEnable=1 指向已死端口;requests 默认 trust_env=True 会读到它,
+    毒杀全部未显式指定 proxies 的请求(2026-09-29 事故:weread 81 号全失败,
+    baidu/xianyu/续期同因,根因 127.0.0.1:7892 死代理)。
+    本项目采集目标(weread/微博/百度/抖音/闲鱼/飞书/LLM)全部国内直连可达,
+    且 wr Cookie 绑家宽出口 IP,系统代理本就有害。
+
+    实现:patch `requests.utils.getproxies`(get_environ_proxies 的代理来源,
+    Windows 上会读注册表 ProxyServer)恒返 `{}`。不用 `Session.trust_env=False`
+    ——requests ≥2.33 已把 trust_env 改为**实例属性**(__init__ 里置 True),
+    类属性 patch 会被覆盖(实测 2.34.2)。
+
+    显式代理不受影响:get_proxies()/xianyu_proxy_url 走显式 proxies 参数,
+    本函数只断"环境/注册表"这一条路,不改变显式传参的语义。
+    """
+    import requests.utils
+
+    requests.utils.getproxies = lambda: {}
