@@ -1074,3 +1074,268 @@
 - **查询**: GET `/api/hotspot/recruits?limit=12` → `{"total":N,"list":[{"week_start","recruits","note","created_at"}]}`(最近在前)
 - 同 `week_start` 重录 = 覆盖更新;`pan_recruit_weekly` 表按 user_id 隔离。
 - 命令行入口:`python scripts/record_recruits.py 2026-09-22=12 2026-09-29=7 [--note 备注]`
+
+## 12. 鉴权与账户(/api/auth/*)
+
+> 无需登录;除 register/login/forgot/reset 外的所有业务接口都需要 `Authorization: Bearer <token>`。
+> 登录按 IP+账号滑窗限速,连续失败 5 次锁 10 分钟(HTTP 429)。
+
+### 12.1 注册
+- **接口名称**: 用户注册
+- **请求方式**: POST
+- **URL 路径**: `/api/auth/register`
+
+**请求参数 (Body)**
+```json
+{ "email": "a@b.com", "password": "******", "username": "可选,缺省取邮箱前缀" }
+```
+
+**响应示例 (200)**
+```json
+{ "token": "eyJhbGciOi...", "username": "a" }
+```
+
+### 12.2 登录
+- **接口名称**: 登录(用户名或邮箱)
+- **请求方式**: POST
+- **URL 路径**: `/api/auth/login`
+
+**请求参数 (Body)**
+```json
+{ "login": "admin 或 a@b.com", "password": "******" }
+```
+
+**响应示例 (200)**:同 12.1 `{ "token": "...", "username": "admin" }`;失败 401 `{"detail":"账号或密码错误"}`。
+
+### 12.3 忘记密码
+- **接口名称**: 发送重置邮件
+- **请求方式**: POST
+- **URL 路径**: `/api/auth/forgot`
+
+**请求参数 (Body)**: `{ "email": "a@b.com" }`
+
+**响应示例 (200)**: `{ "message": "如果该邮箱已注册,重置邮件已发送" }`(无论邮箱是否存在都返回同一句,防枚举;IP+邮箱滑窗限速,超频 429)
+
+### 12.4 重置密码
+- **接口名称**: 重置密码
+- **请求方式**: POST
+- **URL 路径**: `/api/auth/reset`
+
+**请求参数 (Body)**: `{ "token": "邮件链接 #token= 片段", "new_password": "******" }`
+
+**响应示例 (200)**: `{ "message": "密码已重置,请重新登录" }`;token 无效/过期 400。
+
+### 12.5 当前用户
+- **接口名称**: 我的信息
+- **请求方式**: GET
+- **URL 路径**: `/api/auth/me`
+
+**响应示例 (200)**
+```json
+{ "id": 1, "username": "admin", "role": "admin" }
+```
+
+---
+
+## 13. 管理后台(/api/admin/*)
+
+> 全部要求 `role ∈ {admin, operator}`,且按**按钮级权限**二次校验(`require_perm`,权限不足 403)。
+
+### 13.1 我的后台身份
+GET `/api/admin/me` → `{ "role": "admin", "username": "admin", "perms": ["dashboard.view", "..."] }`
+
+### 13.2 平台总览
+GET `/api/admin/dashboard`(perm `dashboard.view`)
+```json
+{ "users": 2, "enabled_users": 1, "admins": 1, "...": "各板块今日采集/告警计数" }
+```
+
+### 13.3 智能洞察
+GET `/api/admin/insights`(perm `data.view`)→ 跨用户关键词趋势/预测汇总,含 `burst`(可能爆发词,带置信度)。
+
+### 13.4 采集健康度
+GET `/api/admin/health`(perm `logs.view`)→ 各平台最近采集状态 + 数据写入 + 飞书推送 + Cookie 配置,运维一键看。
+
+### 13.5 用户管理
+| 动作 | 方式 | 路径 | 说明 |
+|---|---|---|---|
+| 列表/搜索 | GET | `/api/admin/users?q=` | `[{"id","username","email","role","enabled",...}]` |
+| 详情 | GET | `/api/admin/users/{user_id}` | 404=不存在 |
+| 启停 | POST | `/api/admin/users/{user_id}/toggle` | 返回 `{"enabled": false, ...}`;不能停自己(403/400) |
+| 删除 | DELETE | `/api/admin/users/{user_id}` | 不能删自己;`{"deleted": true}` |
+| 批量导入 | POST | `/api/admin/import/users` | Body `{"text": "每行一个用户"}` → `{"created":N,"skipped":N}` |
+| 导出 | GET | `/api/admin/export/users` | CSV 纯文本(id,username,email,role,enabled,created) |
+
+### 13.6 日志
+| 动作 | 方式 | 路径 | 说明 |
+|---|---|---|---|
+| 登录日志 | GET | `/api/admin/logins` | `[{"username","ip","ua","ok","time"}]` |
+| 管理操作日志 | GET | `/api/admin/logs` | `[{"admin","action","target","time"}]` |
+| 失败采集 | GET | `/api/admin/runs/failed` | `[{"run_id","kind","user_id","detail","time","retry"}]` |
+| 重试失败采集 | POST | `/api/admin/runs/{run_id}/retry` | `{"ok": true}` 或 `{"ok": false, "msg": "..."}` |
+
+### 13.7 运行配置
+| 动作 | 方式 | 路径 | 说明 |
+|---|---|---|---|
+| 读全部 | GET | `/api/admin/config` | `[{"key","value"}]` |
+| 写单项 | PUT | `/api/admin/config/{key}` | Body `{"value": "..."}` → `{"key","value"}` |
+
+### 13.8 数据浏览与图表
+| 动作 | 方式 | 路径 | 说明 |
+|---|---|---|---|
+| 数据表浏览 | GET | `/api/admin/data/{section}?user_id=&limit=50` | section ∈ weibo/baidu/xianyu/douhot/wechat |
+| 告警类目分布 | GET | `/api/admin/categories` | `[{"name","count","want"}]` |
+| 告警趋势 | GET | `/api/admin/alert-trend?days=30` | 按日聚合序列 |
+| 类目饼图 | GET | `/api/admin/category-pie` | `{"alerts_section":[{"name","value"}],"watch_types":[...]}` |
+| 告警导出 | GET | `/api/admin/export/alerts` | CSV 纯文本 |
+
+---
+
+## 14. 告警规则(/api/alerts/*)
+
+> 登录用户,数据按 user_id 隔离。
+
+### 14.1 规则列表 / 新增
+- GET `/api/alerts/rules` → `[{"id","section","rule_type","metric","threshold","keyword","alert_time",...}]`
+- POST `/api/alerts/rules`
+```json
+{ "section": "weibo", "rule_type": "threshold", "metric": "heat", "threshold": 1000,
+  "keyword": "网盘", "alert_time": "08:00" }
+```
+→ `{"id": 3, "section": "weibo", "rule_type": "threshold"}`;非法参数 400。
+
+### 14.2 删除规则
+- DELETE `/api/alerts/rules/{rule_id}` → `{"deleted": true}`
+
+### 14.3 最近告警
+- GET `/api/alerts/list?limit=30`(1–200 钳制)
+```json
+[ { "keyword": "网盘", "reason": "涨幅+120%", "section": "weibo", "time": "2026-09-29T08:00:03" } ]
+```
+
+---
+
+## 15. 付费群会员(/api/members)
+
+> 登录用户;按入群时间 + 周期自动算到期,每日 renewal_tick 提醒续费/踢人。
+
+### 15.1 列表 / 新增
+- GET `/api/members` → `[{"id","group_name","nickname","wechat_id","joined_at","cycle_days","last_renewed_at","state"(正常/临期/过期),...}]`
+- POST `/api/members`
+```json
+{ "nickname": "群友A", "joined_at": "2026-09-01", "group_name": "资源群",
+  "wechat_id": "wx_abc", "cycle_days": 30, "note": "" }
+```
+→ `{"id": 5, "saved": true}`;昵称空/时间非法(超出 1970–9000)400。
+
+### 15.2 续期
+- POST `/api/members/{member_id}/renew` → `{"renewed": true}`;404=不存在。
+
+### 15.3 改状态
+- POST `/api/members/{member_id}/status`,Body `{"status": "left"}` → `{"status": "left"}`;无效状态 400。
+
+### 15.4 删除
+- DELETE `/api/members/{member_id}` → `{"deleted": true}`;404=不存在。
+
+---
+
+## 16. 热点事件 · 数据源健康 · 通用看板
+
+> 登录用户。
+
+### 16.1 热点事件列表
+- GET `/api/events?status=active&limit=50`(limit 1–200)
+```json
+[ { "id": 7, "title": "世界杯", "platforms": ["weibo","douhot","baidu"], "platform_count": 3,
+    "peak_value": 2920000, "peak_at": "2026-09-29 12:00:00",
+    "first_seen": "...", "last_seen": "...", "duration_h": 36.5 } ]
+```
+> Hotspot → Event 归并结果:跨平台共振/生命周期视图,按平台数与峰值排序。
+
+### 16.2 手动触发事件归属
+- POST `/api/events/assign` → 本轮归属结果(调度每 15 分钟自动跑;此接口即时刷新)。
+
+### 16.3 数据源健康
+- GET `/api/source-health` → 每采集源 `HEALTHY / DEGRADED / CIRCUIT_OPEN` 三态 + 问题明细。
+
+### 16.4 统一标准化快照
+- GET `/api/trending` → 近 6h 四平台(weibo/baidu/douhot/xianyu)同构字段:
+```json
+{ "count": 120, "items": [ { "source": "baidu", "source_id": "123", "title": "...",
+  "url": null, "rank": 1, "hot_value": 2915321.0, "captured_at": "2026-09-29 22:00:00" } ] }
+```
+
+### 16.5 用户仪表盘
+- GET `/api/dashboard` → 微博上涨 + 闲鱼热榜(24h 资源去重) + 抖音热词,按 user 隔离。
+
+### 16.6 用户 SMTP(邮件通知自配)
+- GET `/api/user/smtp` → `{"host","port","user","from_name"}`(**不含密码**)
+- PUT `/api/user/smtp`,Body:
+```json
+{ "host": "smtp.qq.com", "port": 465, "user": "a@qq.com",
+  "password": "******", "from_name": "热点监控" }
+```
+→ `{"saved": true}`;密码加密存储(enc: 前缀);host 走公网校验(内网/元数据地址 400,防 SSRF)。
+
+---
+
+## 17. 公众号 · 补充接口(/api/wechat/*)
+
+> 登录用户;§9b 已列 listen/sync 主链路,此处补缺口。
+
+### 17.1 关键词搜索词
+- GET `/api/wechat/keywords` → `{"terms": ["网盘","问卷", "..."]}`
+- PUT `/api/wechat/keywords` → 恒 400(提示到服务器 .env 的 KEYWORD_SEARCH_TERMS 改,重启生效;占位接口)
+
+### 17.2 对标号 · 单个修改/删除/同步
+| 动作 | 方式 | 路径 | 说明 |
+|---|---|---|---|
+| 改备注/停用 | PATCH | `/api/wechat/benchmarks/{benchmark_id}` | Body `{"note": "...", "active": false}` |
+| 删除 | DELETE | `/api/wechat/benchmarks/{benchmark_id}` | `{"deleted": true}` |
+| 同步历史文章 | POST | `/api/wechat/benchmarks/{benchmark_id}/sync?max_pages=3` | 免费源优先,付费兜底;返回入库与推送计数 |
+
+### 17.3 文章 · 阅读量采样与 AI 改写
+| 动作 | 方式 | 路径 | 说明 |
+|---|---|---|---|
+| 批量刷新阅读量 | POST | `/api/wechat/traffic/refresh` | Body 可选 `{"benchmark_id":N,"limit":10}`;dajiala read_zan_pro(¥0.06/篇),无 key 返回 skipped/no_key,上游失败 502 |
+| 单篇采样历史 | GET | `/api/wechat/articles/{article_id}/traffic` | `{"article_id","count","items":[{"read_num","sampled_at","..."}]}`;404=文章不存在 |
+| AI 改写 | POST | `/api/wechat/articles/{article_id}/rewrite` | 需配 DEEPSEEK_API_KEY(400);正文未抓到 400;成功 `{"ok":true,"article_id","title","..."}` |
+| 改写历史 | GET | `/api/wechat/articles/{article_id}/rewrites` | `{"count":N,"items":[{"id","title","..."}]}` |
+
+---
+
+## 18. 闲鱼 · 补充接口
+
+> 登录用户;§6 已列热榜,此处补日结与深度分析。
+
+- GET `/api/xianyu/daily` → 按日汇总(命中词数/新增商品/最佳名次序列)。
+- GET `/api/xianyu/analytics` → 深度分析(资源类目分布、词效对比、趋势)。
+
+---
+
+## 19. 关键词监控 · 手动推卡
+
+- POST `/api/watch/{section}/digest`(section ∈ weibo/baidu/douhot/xianyu/...)
+  立即把该板块「关键词监控」卡片推到飞书(含名次变化 ↑N/↓N);平时每日 08:00 日报自动推。
+  → `{"ok": true, "pushed": true}`(未配飞书 webhook 时 pushed 为 false)。
+
+## 16b. Cookie 管理(/api/cookies)
+
+> 登录用户,凭据按 user_id 隔离;明文只写不读(GET 不回传 Cookie 本体)。
+
+### 16b.1 已配置列表
+- **接口名称**: Cookie 配置一览
+- **请求方式**: GET
+- **URL 路径**: `/api/cookies`
+
+**响应示例 (200)**
+```json
+[ { "platform": "weread", "configured": true, "preview": "wr_vid=4398...", "updated_at": "2026-09-29 14:58:29" },
+  { "platform": "goofish", "configured": false, "preview": "", "updated_at": null } ]
+```
+
+### 16b.2 设置 / 删除
+- **设置**: PUT `/api/cookies/{platform}`,Body `{"cookie": "完整 Cookie 串"}` → `{"platform": "weread", "configured": true}`(Fernet 加密落库;platform ∈ weibo/baidu/douyin/goofish/weread/baidupan/quark)
+- **删除**: DELETE `/api/cookies/{platform}` → `{"platform": "goofish", "deleted": true}`
+
+> 网盘类(baidupan/quark)与 dajiala 故意不走自愈:运营者全局凭据不进普通用户可见面。
