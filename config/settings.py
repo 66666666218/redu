@@ -153,6 +153,7 @@ class Settings(BaseSettings):
     feishu_webhook_baidu: str = ""  # 百度专属群 Webhook
     feishu_webhook_wechat: str = "" # 公众号专属群 Webhook
     feishu_secret: str = ""         # 机器人签名校验密钥(为空则不签名)
+    own_account_names: str = "天一项目拆解"  # 自营号名单(逗号分隔):飞书推送一律脱敏为「内部号」,防自营身份暴露(2026-09-29)
     feishu_daily_cron: str = "0 8 * * *"   # 每日热点日报时间(默认 08:00)
     feishu_wechat_cron: str = "0 10 * * *"  # 公众号内容选题分析推送时间(默认 10:00)
     feishu_hot_rank_jump: int = 3          # 排名跳升 ≥ 该名次即实时推送

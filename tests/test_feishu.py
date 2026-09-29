@@ -147,6 +147,47 @@ def test_wechat_analysis_pushes_to_group(monkeypatch, session) -> None:
     assert "内容选题分析" in sent[0][1] and "副业" in sent[0][1]
 
 
+def test_wechat_analysis_masks_own_account(monkeypatch, session) -> None:
+    """自营号脱敏(2026-09-29):分析推送点名"篇数最多的对标号"时,自营号名不得出现在飞书文本。"""
+    from datetime import datetime
+
+    from app.db.models import WechatArticle
+    from app.services import feishu
+
+    # 自营号文章数最多 → 旧逻辑会点名;脱敏后必须显示「内部号」
+    for i in range(3):
+        session.add(WechatArticle(user_id=1, title=f"天一项目拆解 揭秘副业{i}", content="副业 教程",
+                                  author="天一项目拆解", url=f"http://own{i}", publish_at=datetime.now()))
+    session.add(WechatArticle(user_id=1, title="科技快讯合集", content="科技 资讯",
+                              author="科技君", url="http://x", publish_at=datetime.now()))
+    session.commit()
+
+    sent = []
+
+    def fake_client(webhook, secret):
+        class F:
+            def send(self, t):
+                sent.append((webhook, t))
+                return True
+        return F()
+    monkeypatch.setattr(feishu, "FeishuClient", fake_client)
+    wx_hook = "https://open.feishu.cn/hook/wechat"
+    n = feishu.run_feishu_wechat_analysis(_settings(feishu_webhook_wechat=wx_hook), db=session)
+    assert n == 1
+    text = sent[0][1]
+    assert "天一项目拆解" not in text, "自营号名泄漏到飞书推送"
+    assert "内部号" in text
+
+
+def test_mask_own_util() -> None:
+    """mask_own:名单内替换为「内部号」,多号逗号分隔,无名单原样返回。"""
+    s = _settings(own_account_names="天一项目拆解, 另一个号")
+    assert feishu.mask_own("「天一项目拆解」篇数最多", s) == "「内部号」篇数最多"
+    assert feishu.mask_own("另一个号也活跃", s) == "内部号也活跃"
+    assert feishu.mask_own("普通对标号不受影响", s) == "普通对标号不受影响"
+    assert feishu.mask_own("天一项目拆解", _settings(own_account_names="")) == "天一项目拆解"
+
+
 def test_sign_matches_feishu_algorithm() -> None:
     """用飞书官方算法独立算一遍,确认实现正确。
 

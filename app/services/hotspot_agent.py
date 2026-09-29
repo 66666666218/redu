@@ -210,6 +210,17 @@ def _window_tag(h: dict) -> str:
     return f" ⏳{h['window_tag']}(~{h.get('window_hours', '?')}h)"
 
 
+def _safe_author(name: str, settings: Settings | None = None) -> str:
+    """自营号名在建议输出文本中显示为「内部资源」(防推送外泄自营身份)。
+
+    落库 plan 仍存真名(运营者自己的数据分析需要);此函数只用于组装对外的
+    展示行——push_feishu 目前为 False,开飞书后也不漏(2026-09-29 防御性脱敏)。
+    """
+    settings = settings or get_settings()
+    names = [n.strip() for n in (getattr(settings, "own_account_names", "") or "").split(",") if n.strip()]
+    return "内部资源" if str(name or "").strip() in names else str(name or "")
+
+
 def _supply_articles(db: Session, user_id: int, hours: int = 72) -> list[WechatArticle]:
     cutoff = datetime.now() - timedelta(hours=hours)
     return list(db.scalars(select(WechatArticle).where(
@@ -621,7 +632,7 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
         comp_tag = f" 竞争{round(1 / comp - 1)}家" if comp is not None and comp < 1 else " 竞争空白"
         line = (f"🔥[# {row_ids.get(h['keyword'], '?')}]《{h['keyword']}》热度 +{h['growth']:.0f}%"
                 f"{_resonance_tag(h)}{_window_tag(h)}{comp_tag} → 已有现成资源:"
-                f"「{art.title[:40]}」({art.author})"
+                f"「{art.title[:40]}」({_safe_author(art.author, settings)})"
                 + (f" [{why}]" if why and why != "标题字面命中" else "")
                 + risk_tag
                 + (f" → 点这:{link}" if link else ""))

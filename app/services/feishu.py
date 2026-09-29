@@ -49,6 +49,20 @@ def _agent_confidence_rank(level: str | None) -> int:
     return {"高": 3, "中": 2, "低": 1}.get(level or "", 0)
 
 
+def mask_own(text: str, settings: Settings | None = None) -> str:
+    """飞书推送脱敏:自营号名一律替换为「内部号」(2026-09-29 用户要求)。
+
+    名单 = settings.own_account_names(逗号分隔)。原则:推到群里的是给
+    员工/协作方看的热点情报,自营身份(自己在运营哪个号)绝不能出现。
+    无名单/空文本原样返回。
+    """
+    settings = settings or get_settings()
+    names = [n.strip() for n in (getattr(settings, "own_account_names", "") or "").split(",") if n.strip()]
+    for n in names:
+        text = text.replace(n, "内部号")
+    return text
+
+
 # ---------------------------------------------------------------------------
 # 文本左对齐(全角空格补齐)——用于让飞书消息的各列左端对齐
 # ---------------------------------------------------------------------------
@@ -579,7 +593,7 @@ def build_daily(db: Session, user_id: int, settings: Settings, include_keywords:
     if include_keywords:
         lines += _keyword_watch_lines(db, user_id)
     lines += _wechat_ops_lines(db, user_id)
-    return "\n".join(lines)
+    return mask_own("\n".join(lines), settings)
 
 
 def run_feishu_daily(settings: Settings | None = None, db: Session | None = None) -> int:
@@ -665,8 +679,10 @@ def run_feishu_wechat_analysis(settings: Settings | None = None, db: Session | N
             report = analyze_articles(articles)
             if not report["count"]:
                 continue
-            lines = [f"📊 公众号 · 内容选题分析(近 {report['count']} 篇)", report["summary"]]
-            lines += [f"  · {s}" for s in report["suggestions"]]
+            # 自营号脱敏:分析结论(含"最活跃对标号"点名)推群前把自营号名替换掉
+            lines = [f"📊 公众号 · 内容选题分析(近 {report['count']} 篇)",
+                     mask_own(report["summary"], settings)]
+            lines += [f"  · {mask_own(s, settings)}" for s in report["suggestions"]]
             if client.send("\n".join(lines)):
                 sent += 1
         logger.info("公众号分析推送完成,条数=%s", sent)
