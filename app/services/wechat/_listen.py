@@ -679,6 +679,12 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     session.commit()
     if push and new_rows:
         _push_listen(session, user_id, settings, new_rows, replacements)
+        try:
+            with savepoint(session):
+                _burst_scan(session, user_id, settings, new_rows)
+        except Exception:  # noqa: BLE001 - 爆点扫描失败不伤主流程
+            session.rollback()
+            logger.exception("爆点扫描失败 user=%s", user_id)
     if off_new and push:
         # 兑现"近24h全部推送"要靠列表枚举;只要还有号列不出来又采到了新文,就必须点名而不是安静少推。
         # 但点名落在**站内告警**:这是"要不要自建 WeRSS/要不要充值"的长期决策,不是员工群里
@@ -728,6 +734,55 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     if miskeyed:
         out["biz_bad_shape"] = miskeyed[:10]
     return out
+def _burst_scan(session: Session, user_id: int, settings: Settings,
+                rows: list[WechatArticle]) -> int:
+    """免费爆点检测(2026-09-30,dajiala 付费采样摘除后的轻量替代)。
+
+    数据源:微信读书 cover/列表自带的**站内阅读数**(免费,随监听一并入库,零额外请求)。
+    判定:新文阅读数 ≥ 同号近 14 天文章阅读中位数 × `wechat_burst_median_mult`
+    且 ≥ `wechat_burst_min_reads` → 🔥 爆点卡推公众号群(建议员工立即跟进)。
+    每篇只报一次(冷却键=article_id,7 天);基线不足 3 篇宁缺毋滥。返回发送篇数。
+    """
+    if not rows or not settings.wechat_burst_min_reads:
+        return 0
+    from app.services.alert_service import feishu_alert_gate
+    from app.services.feishu_client import FeishuClient
+    from app.services.feishu import webhook_for
+
+    webhook = webhook_for(settings, "wechat")
+    if not webhook:
+        return 0
+    now = datetime.now()
+    client = FeishuClient(webhook, settings.feishu_secret)
+    sent = 0
+    for r in rows:
+        if not r.benchmark_id or (r.read_num or 0) < settings.wechat_burst_min_reads:
+            continue
+        if not feishu_alert_gate(session, user_id, "burst_free", f"burst:{r.id}",
+                                 24 * 7, f"站内阅读{r.read_num}"):
+            continue  # 这篇 7 天内已报过
+        vals = sorted(v for v in session.scalars(select(WechatArticle.read_num).where(
+            WechatArticle.user_id == user_id, WechatArticle.benchmark_id == r.benchmark_id,
+            WechatArticle.id != r.id, WechatArticle.read_num > 0,
+            WechatArticle.created_at >= now - timedelta(days=14))).all() if v)
+        if len(vals) < 3:
+            continue  # 基线不足,宁缺毋滥
+        median = vals[len(vals) // 2]
+        if r.read_num < median * settings.wechat_burst_median_mult:
+            continue
+        mine = [x for x in (r.my_pan_urls or "").splitlines() if x.strip()]
+        lines = ["🔥 爆点苗头 · 建议立即跟进改写",
+                 "🔴 " + r.title[:40],
+                 f"📊 站内阅读 {r.read_num}(同号中位数 {median} 的 "
+                 f"{r.read_num / max(median, 1):.0f} 倍)"]
+        if mine:
+            lines.append("📦 我的链接: " + mine[0])
+        lines.append(r.url)
+        if client.send(chr(10).join(lines)):
+            sent += 1
+    return sent
+
+
 def repush_unpushed(session: Session, user_id: int, settings: Settings | None = None) -> int:
     """补推:近 N 小时入库、却从未成功推上飞书的文章(铁律的最后一道兜底)。
 
@@ -881,7 +936,11 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
             pan = f"⏳待转存{types}"
         else:
             pan = types or "—"
-        read = str(r.read_num) if r.traffic_at else "—"
+        # 阅读数来源:微信读书 cover/列表自带站内阅读(免费,2026-09-30 起);
+        # dajiala 采样摘除后 traffic_at 恒空,不能再当显示条件(否则永远显示"—")
+        read = str(r.read_num) if r.read_num else "—"
+        if r.traffic_at:
+            read += "*"  # 有采样点的历史文章:标注为采样口径
         return _col_set_row([
             (_md_safe(r.author)[:10] or "—", 3), (article_md, 7), (pan, 2), (read, 2),
         ])

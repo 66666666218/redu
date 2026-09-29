@@ -3743,3 +3743,74 @@ def test_listen_batch_explicit_index_no_cursor(session) -> None:
     wechat_monitor.run_wechat_listen(session, 1, settings=st_rot)
     assert "batch=1/2(size=2)" in session.scalars(
         select(RunRecord).order_by(RunRecord.id.desc())).first().detail
+
+
+def test_burst_scan_free_readnum_baseline(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """免费爆点检测:新文站内阅读 ≥ 同号近14天中位数×倍数 且 ≥ 绝对下限 → 发卡(每篇一次)。"""
+    from datetime import datetime as dt
+
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    b = WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1")
+    session.add(b)
+    session.commit()
+    # 基线 3 篇(中位数 120) + 爆点新文 500(≥100 且 ≥360)
+    for i, rn in enumerate((100, 120, 140, 500)):
+        session.add(WechatArticle(user_id=1, benchmark_id=b.id, title=f"文{i}", author="号A",
+                                  url=f"https://mp.weixin.qq.com/s/b{i}",
+                                  read_num=rn if i < 3 else 0,  # 新文 read_num 由 cover 写入前为 0
+                                  created_at=dt.now() - timedelta(hours=i + 1)))
+    session.commit()
+    new_row = session.scalars(select(WechatArticle).order_by(
+        WechatArticle.id.desc())).first()
+    new_row.read_num = 500
+    session.commit()
+
+    calls: list[str] = []
+
+    class _FakeClient:
+        def __init__(self, webhook, secret=None):
+            pass
+        def send(self, text):
+            calls.append(text)
+            return True
+
+    import app.services.feishu as feishu_pkg
+    import app.services.feishu_client as fc_mod
+    monkeypatch.setattr(feishu_pkg, "webhook_for", lambda settings, section: "https://hook/x")
+    monkeypatch.setattr(fc_mod, "FeishuClient", _FakeClient)
+
+    from app.services.wechat import _listen as listen_mod
+    sent = listen_mod._burst_scan(session, 1, _settings(pan_transfer_enabled=False), [new_row])
+    assert sent == 1 and len(calls) == 1
+    assert "爆点苗头" in calls[0] and "500" in calls[0]
+
+    # 同一篇再扫:7 天冷却 → 不再发
+    sent2 = listen_mod._burst_scan(session, 1, _settings(pan_transfer_enabled=False), [new_row])
+    assert sent2 == 0 and len(calls) == 1
+
+    # 基线不足(<3 篇有阅读)的号宁缺毋滥
+    b2 = WechatBenchmark(user_id=1, nickname="号B", weread_book_id="MP_WXS_2")
+    session.add(b2)
+    session.commit()
+    r2 = WechatArticle(user_id=1, benchmark_id=b2.id, title="孤文", author="号B",
+                       url="https://mp.weixin.qq.com/s/x1", read_num=9000,
+                       created_at=dt.now() - timedelta(hours=1))
+    session.add(r2)
+    session.commit()
+    sent3 = listen_mod._burst_scan(session, 1, _settings(pan_transfer_enabled=False), [r2])
+    assert sent3 == 0
+
+
+def test_burst_scan_disabled_without_webhook(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """未配飞书 webhook → 静默 0(不报错不写冷却)。"""
+    import app.services.feishu as feishu_pkg
+    monkeypatch.setattr(feishu_pkg, "webhook_for", lambda settings, section: "")
+    from app.services.wechat import _listen as listen_mod
+    b = WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1")
+    session.add(b)
+    session.commit()
+    r = WechatArticle(user_id=1, benchmark_id=b.id, title="文", author="号A",
+                      url="https://mp.weixin.qq.com/s/y", read_num=500)
+    session.add(r)
+    session.commit()
+    assert listen_mod._burst_scan(session, 1, _settings(), [r]) == 0

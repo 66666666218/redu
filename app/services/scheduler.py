@@ -208,13 +208,6 @@ def douhot_window_tick(settings: Settings | None = None) -> dict:
     return {"users": users_ok, "pushed": pushed}
 
 
-def _wechat_rows_for(db, user_id: int) -> int:
-    from sqlalchemy import select, func
-    from app.db.models import WechatBenchmark
-    return db.scalar(select(func.count()).select_from(WechatBenchmark).where(
-        WechatBenchmark.user_id == user_id, WechatBenchmark.active.is_(True))) or 0
-
-
 def wechat_collect_tick(settings: Settings | None = None) -> dict:
     """公众号监听专用 tick(每分钟,独立于 collect_tick)。
 

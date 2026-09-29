@@ -109,14 +109,6 @@ def delete_rule(session: Session, user_id: int, rule_id: int) -> bool:
     return True
 
 
-def _alert_reason(section: str, item: dict) -> str:
-    metric = item.get("metric")
-    val = item.get("value")
-    if metric and val is not None:
-        return f"{section}项 {item.get('name')} {metric}={val:.2f} 超过阈值"
-    return f"{section}项新增: {item.get('name')}"
-
-
 def evaluate(
     session: Session,
     user_id: int,

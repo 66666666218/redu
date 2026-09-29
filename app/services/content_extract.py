@@ -64,15 +64,3 @@ def extract_account_refs(content: str) -> set[str]:
                 refs.add(name)
     return refs
 
-
-def extract_content_keywords(content: str, top: int = 5) -> list[str]:
-    """从正文提取高频内容词(用于搜索发现更多同类文章)。"""
-    if not content:
-        return []
-    clean = re.sub(r"https?://\S+", " ", content)
-    clean = re.sub(r"[^\w\u4e00-\u9fff]+", " ", clean)
-    counter: Counter = Counter()
-    for w in clean.split():
-        if 4 <= len(w) <= 12 and len(_HAS_CJK.findall(w)) >= 2:
-            counter[w] += 1
-    return [w for w, n in counter.most_common(top) if n >= 2]

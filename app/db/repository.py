@@ -27,10 +27,6 @@ from app.db.models import (
 
 
 # ---- 用户 ----
-def get_user(db: Session, user_id: int) -> User | None:
-    return db.get(User, user_id)
-
-
 def list_users(db: Session, q: str = "") -> list[User]:
     stmt = select(User).order_by(User.id)
     if q:

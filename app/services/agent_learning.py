@@ -63,13 +63,6 @@ def save_weights(db: Session, weights: dict[str, int]) -> None:
     db.commit()
 
 
-def _hit_rate(samples: list[tuple[bool, ...]]) -> float:
-    """命中样本占比;无样本返回 -1(未知)。"""
-    if not samples:
-        return -1.0
-    return sum(1 for s in samples if s) / len(samples)
-
-
 def _to_dt(ts) -> datetime | None:
     """序列时间戳容错转换(微博/百度/抖音=datetime,闲鱼 snap_date=日期字符串)。
 

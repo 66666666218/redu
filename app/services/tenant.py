@@ -416,37 +416,6 @@ def dashboard(session: Session, user_id: int) -> dict:
     }
 
 
-def run_section_for_all_users(section: str, settings: Settings | None = None) -> dict:
-    """为【所有用户】跑某个板块采集(用各人自己的 Cookie)。
-
-    常规定时采集已改为**按每个用户自己设置的频率**执行(见
-    `app/services/scheduler.py::collect_tick`);本函数保留给"批量/全员立即采集"
-    这类运维场景使用。
-    """
-    from app.db import get_session_local
-    from app.db.models import User
-
-    settings = settings or get_settings()
-    runners = {"weibo": run_weibo, "xianyu": run_xianyu, "douhot": run_douhot, "baidu": run_baidu}
-    if section not in runners:
-        return {"section": section, "users": 0, "ok": 0, "failed": 0}
-    db = get_session_local()()
-    users = db.scalars(select(User).order_by(User.id)).all()
-    ok = failed = 0
-    for u in users:
-        try:
-            runners[section](db, u.id, settings)
-            ok += 1
-        except Exception as exc:  # noqa: BLE001
-            failed += 1
-            logger.warning("定时采集 %s 用户 %s 失败:%s", section, u.id, exc)
-            db.rollback()
-    db.close()
-    logger.info("定时采集 %s 用户=%s 成功=%s 失败=%s", section, len(users), ok, failed)
-    return {"section": section, "users": len(users), "ok": ok, "failed": failed}
-
-
-# ---- 周度洞察摘要(2026-09-30 自 alert_service 迁入,解 alert_service↔tenant 环) ----
 def build_weekly_summary(db: Session, user_id: int, settings: Settings) -> str:
     """生成某用户的周度洞察摘要(近 7 天):统计 + 爆发/上升词 + 预测。"""
     from datetime import datetime, timedelta

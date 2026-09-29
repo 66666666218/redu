@@ -355,19 +355,6 @@ def _llm_plan(settings: Settings, hotspots: list[dict],
     return {"matches": matches, "plans": plans}
 
 
-def _copy_block(article: WechatArticle) -> str:
-    """从资源文行里拼「复制即用」发货块:标题 + 我方/源链 + 提取码。"""
-    my = next((x.strip() for x in (article.my_pan_urls or "").splitlines() if x.strip()), "")
-    src = next((x.strip() for x in (article.pan_urls or "").splitlines() if x.strip()), "")
-    line = my or src
-    if not line:
-        return article.title
-    m = re.search(r"提取码\s*([0-9A-Za-z]{4})", line)
-    code = m.group(1) if m else ""
-    link = re.match(r"https?://\S+?(?=\s|\(|$)", line)
-    return f"「{article.title}」\n{link.group(0) if link else line}" + (f" 提取码:{code}" if code else "")
-
-
 _RISK_HIGH = ("全集", "影视", "电影", "电视剧", "网剧", "4k", "蓝光", "付费课程", "网课", "破解")
 _RISK_LOW = ("真题", "课件", "模板", "壁纸", "笔记", "汇总", "攻略", "素材", "赛程", "题库")
 

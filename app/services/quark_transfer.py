@@ -428,6 +428,3 @@ class QuarkTransfer:
                     return found
         return None
 
-
-def quote_share_token(token: str) -> str:
-    return quote(token, safe="~")
