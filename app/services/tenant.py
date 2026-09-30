@@ -29,7 +29,11 @@ from app.db.models import (
     XianyuItem,
 )
 from app.services import alert_service, baidu, collector, douhot, xianyu
-from app.services.cookie_store import get_cookies
+from app.services.cookie_store import get_cookies, set_cookie
+
+# 闲鱼同会话互斥锁:mtop 会话不耐受并发(双 client 同 token 并发 → 服务端风控作废会话,
+# 2026-09-30 11:06 后全 ILLEGAL 的诱因之一)。进程内非阻塞,拿不到即跳过本轮。
+_XIANYU_ROUND_LOCK = __import__('threading').Lock()
 from app.services.notifier import get_user_notifier
 from app.db import repository
 from app.services.trend_analyzer import compute_growth, compute_slope, recent_growth
@@ -171,6 +175,11 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
         raise ValueError("未配置闲鱼 Cookie")
     # 构造客户端不产生网络请求,放在 try 外:失败路径也能回写运行中刷新的令牌
     client = xianyu.XianyuClient(goofish_cookie, proxy=settings.xianyu_proxy_url or None)
+    if not _XIANYU_ROUND_LOCK.acquire(blocking=False):
+        _record_run(session, user_id, "xianyu", "skipped",
+                    "running(上一轮闲鱼采集尚未结束,防同会话并发)")
+        session.commit()
+        return {"platform": "xianyu", "count": 0, "status": "skipped", "reason": "running"}
     try:
         # 风控降频:每轮只抓 batch 个关键词,轮转起始窗口,多轮覆盖全部。
         # 轮转游标用 SystemConfig 持久化的单调计数,**不再**寄生在"数 xianyu RunRecord 条数"上:
@@ -224,6 +233,15 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
                 # 只是命中率下降,其它关键词照常 → 属"不修也能继续跑"的降级,按用户
                 # 2026-09-27 口径只进站内(飞书留给人不修就整块停摆的滑块与 Cookie 失效)
                 push_feishu=False)
+        # token 轮换持久化(2026-09-30 事故修复):mtop 网关运行中会刷新 _m_h5_tk/x5sec,
+        # export_cookie() 为此而设——但回写调用从未接线,每轮都从存储里的**旧 token** 起步;
+        # 服务端轮换/作废该 token 后(11:06 后全 ILLEGAL),永远起不来。成功即回写,下轮无缝续用。
+        try:
+            fresh = client.export_cookie()
+            if fresh and len(fresh) > 50:
+                set_cookie(session, user_id, "goofish", fresh)
+        except Exception:  # noqa: BLE001 - 回写失败不影响本轮采集
+            logger.warning("闲鱼 Cookie 回写失败(不影响本轮)", exc_info=True)
         # 从失败中恢复:上一轮 xianyu 是 failed(滑块/整轮空返回)而本轮成功 → 发 ✅ 确认。
         # 失败时发过飞书的(滑块级)恢复也回飞书,让群里的「死了」有对应的「活了」
         prev_failed = session.scalar(
@@ -279,6 +297,8 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
                        "粘贴到「Cookie 管理」页的 goofish 平台即可恢复",
                 settings=settings)
         raise
+    finally:
+        _XIANYU_ROUND_LOCK.release()
 
 
 def run_douhot(session: Session, user_id: int, settings: Settings | None = None) -> dict:
