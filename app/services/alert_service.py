@@ -510,14 +510,22 @@ def check_health_stalls(settings: Settings | None = None, db: Session | None = N
         "xianyu": (XianyuItem, "created_at"),
         "douhot": (DouhotWord, "created_at"),
     }
-    # 在用平台 = 有启用用户配了该平台 Cookie(否则该平台本就不采集,不告警)
+    # 在用平台 = 有启用用户配了该平台 Cookie **且该板块有启用中的调度**(否则不告警)。
     # Cookie 平台名与数据平台名不同(goofish→xianyu,douyin→douhot),需映射。
+    # 2026-09-30 补调度开关:双部署分工后本机关闭的板块(如 douhot 归远程)没有新数据
+    # 是**预期行为**——只按"配了 Cookie"判定,归远程的板块会被误报停摆(实测)。
+    from app.db.models import UserSchedule
+
     cookie_to_data = {"weibo": "weibo", "baidu": "baidu", "douyin": "douhot", "goofish": "xianyu"}
     data_to_cookie = {v: k for k, v in cookie_to_data.items()}
     raw = set(db.execute(
         select(UserCookie.platform).join(User, User.id == UserCookie.user_id).where(User.enabled.is_(True)).distinct()
     ).scalars().all())
-    in_use = {cookie_to_data.get(c, c) for c in raw}
+    sched_on = set(db.execute(
+        select(UserSchedule.section).join(User, User.id == UserSchedule.user_id)
+        .where(User.enabled.is_(True), UserSchedule.enabled.is_(True)).distinct()
+    ).scalars().all())
+    in_use = {cookie_to_data.get(c, c) for c in raw} & sched_on
     stalled = []
     for p, (model, col) in data_tables.items():
         if p not in in_use:

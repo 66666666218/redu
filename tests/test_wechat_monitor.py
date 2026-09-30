@@ -3832,6 +3832,7 @@ def test_burst_scan_free_readnum_baseline(session, monkeypatch: pytest.MonkeyPat
 
     import app.services.feishu as feishu_pkg
     import app.services.feishu_client as fc_mod
+    monkeypatch.setattr(fc_mod, "webhook_for", lambda settings, section: "https://hook/x")
     monkeypatch.setattr(feishu_pkg, "webhook_for", lambda settings, section: "https://hook/x")
     monkeypatch.setattr(fc_mod, "FeishuClient", _FakeClient)
 
@@ -3870,3 +3871,56 @@ def test_burst_scan_disabled_without_webhook(session, monkeypatch: pytest.Monkey
     session.add(r)
     session.commit()
     assert listen_mod._burst_scan(session, 1, _settings(), [r]) == 0
+
+
+def test_relink_notify_after_late_transfer(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """补链机制(2026-09-30):已推送过的文章后来百度转存成功 → 补发轻量链接消息;
+    未推送过的新文不补(整卡自带);同篇×盘种 7 天冷却不重发。"""
+    from datetime import datetime as dt
+
+    from app.db.models import WechatArticle
+    from app.services.wechat import _enrich as enrich_mod
+
+    b = WechatBenchmark(user_id=1, nickname="号A")
+    session.add(b)
+    session.commit()
+    # 已推送过的文章(百度链未转出)
+    r = WechatArticle(user_id=1, benchmark_id=b.id, title="旧资源文 百度网盘", author="号A",
+                      url="https://mp.weixin.qq.com/s/old", pan_urls="https://pan.baidu.com/s/xyz",
+                      pushed_at=dt.now())
+    session.add(r)
+    session.commit()
+
+    sent: list[str] = []
+
+    class _FakeClient:
+        def __init__(self, webhook, secret=None):
+            pass
+        def send(self, text):
+            sent.append(text)
+            return True
+
+    import app.services.feishu as feishu_pkg
+    import app.services.feishu_client as fc_mod
+    monkeypatch.setattr(fc_mod, "webhook_for", lambda settings, section: "https://hook/x")
+    monkeypatch.setattr(fc_mod, "FeishuClient", _FakeClient)
+    from app.services import alert_service
+    monkeypatch.setattr(alert_service, "feishu_alert_gate", lambda *a, **kw: True)
+
+    ok = enrich_mod._relink_notify(session, 1, _settings(pan_transfer_enabled=False),
+                                   r, "百度", "https://pan.baidu.com/s/mine1", "8k2m")
+    assert ok is True and len(sent) == 1
+    assert "补链" in sent[0] and "pan.baidu.com/s/mine1" in sent[0] and "8k2m" in sent[0]
+
+    # 未推送过的新文 → 不补(整卡自带我方链)
+    r2 = WechatArticle(user_id=1, benchmark_id=b.id, title="新文", author="号A",
+                       url="https://mp.weixin.qq.com/s/n2", pushed_at=None)
+    session.add(r2)
+    session.commit()
+    ok2 = enrich_mod._relink_notify(session, 1, _settings(), r2, "百度", "https://pan.baidu.com/s/m2", "")
+    assert ok2 is False and len(sent) == 1
+
+    # 冷却:gate 拦下(False) → 不发
+    monkeypatch.setattr(alert_service, "feishu_alert_gate", lambda *a, **kw: False)
+    ok3 = enrich_mod._relink_notify(session, 1, _settings(), r, "百度", "https://pan.baidu.com/s/mine1", "8k2m")
+    assert ok3 is False and len(sent) == 1

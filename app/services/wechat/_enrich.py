@@ -124,6 +124,37 @@ def _backfill_pan_links(session: Session) -> None:
                                       created_at=r.created_at or datetime.now()))
     session.commit()
     logger.info("盘链归一化表已回填历史文章")
+
+
+def _relink_notify(session, user_id: int, settings, r, kind: str,
+                   link: str, code: str) -> bool:
+    """已推送过的文章,后续转存成功 → 补一条轻量"🔗链接已转存"消息(2026-09-30)。
+
+    场景:文章带着盘链入库但转存失败/未配 Cookie → 推的是原文(⏳待转存);
+    之后 Cookie 配好/转存恢复 → my_pan_urls 有了我方链,但**没有任何机制再告诉员工**。
+    这里补一条轻量消息(标题+我方链+提取码+该文全部我方链),不重发整卡防刷屏。
+    冷却:每篇×盘种一次(7 天,feishu_alert_gate)。返回是否实际发送。
+    """
+    if not getattr(r, "pushed_at", None):
+        return False  # 还没推送过的新文,本轮整卡自然带我方链,无需补推
+    from app.services.alert_service import feishu_alert_gate
+    from app.services.feishu_client import FeishuClient, webhook_for
+
+    webhook = webhook_for(settings, "wechat")
+    if not webhook:
+        return False
+    if not feishu_alert_gate(session, user_id, "relink", f"{r.id}:{kind}", 24 * 7, "转存补链"):
+        return False  # 这篇×这个盘种 7 天内已补过
+    mine = [x.strip() for x in (r.my_pan_urls or "").splitlines() if x.strip()]
+    lines = [f"🔗 链接已转存·补链({kind})",
+             "🔴 " + (r.title or "")[:40],
+             "🟠 " + link + (f"(提取码 {code})" if code else "")]
+    if mine:
+        lines.append("📦 该文全部我方链接:")
+        lines.extend("  " + x for x in mine[:5])
+    return FeishuClient(webhook, settings.feishu_secret).send("\n".join(lines))
+
+
 def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                          rows: list[WechatArticle],
                          run_backfill: bool = True) -> dict[int, list[tuple[str, str, str]]]:
@@ -264,6 +295,11 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                 mine.append(share_url + (f" (提取码 {pwd})" if pwd else ""))
                 r.my_pan_urls = chr(10).join(mine)[:2000]
                 replacements.setdefault(r.id, []).append((u, share_url, pwd))
+                # 已推送过的历史行(backfill 队列救回的):补一条轻量链接消息,员工拿得到我方链
+                try:
+                    _relink_notify(session, user_id, settings, r, "夸克", share_url, pwd)
+                except Exception:  # noqa: BLE001 - 补链失败不影响转存结果
+                    logger.debug("夸克补链消息失败", exc_info=True)
             if dead:
                 break
     # 百度网盘链接: 同样转存+换链(协议与夸克并列;失败回落原文推送)。
@@ -325,6 +361,11 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                         mine.append(mine_b)
                         r.my_pan_urls = chr(10).join(mine)[:2000]
                         replacements.setdefault(r.id, []).append((u, share_url_b, code_b))
+                        # 已推送过的历史行:补一条轻量链接消息(百度转存常晚于推送)
+                        try:
+                            _relink_notify(session, user_id, settings, r, "百度", share_url_b, code_b)
+                        except Exception:  # noqa: BLE001 - 补链失败不影响转存结果
+                            logger.debug("百度补链消息失败", exc_info=True)
                     except BaiduPanAuthError as exc:
                         logger.error("百度网盘 Cookie 失效,本轮停止百度链转存:%s", exc)
                         _baidu_dead_alert(str(exc))

@@ -761,16 +761,16 @@ def _burst_scan(session: Session, user_id: int, settings: Settings,
             continue
         if not feishu_alert_gate(session, user_id, "burst_free", f"burst:{r.id}",
                                  24 * 7, f"站内阅读{r.read_num}"):
-            continue  # 这篇 7 天内已报过
+                continue  # 这篇 7 天内已报过
         vals = sorted(v for v in session.scalars(select(WechatArticle.read_num).where(
             WechatArticle.user_id == user_id, WechatArticle.benchmark_id == r.benchmark_id,
             WechatArticle.id != r.id, WechatArticle.read_num > 0,
             WechatArticle.created_at >= now - timedelta(days=14))).all() if v)
         if len(vals) < 3:
-            continue  # 基线不足,宁缺毋滥
+                continue  # 基线不足,宁缺毋滥
         median = vals[len(vals) // 2]
         if r.read_num < median * settings.wechat_burst_median_mult:
-            continue
+                continue
         mine = [x for x in (r.my_pan_urls or "").splitlines() if x.strip()]
         lines = ["🔥 爆点苗头 · 建议立即跟进改写",
                  "🔴 " + r.title[:40],

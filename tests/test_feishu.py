@@ -635,8 +635,9 @@ def test_health_stalls_alert_and_cooldown(monkeypatch, session) -> None:
     from datetime import datetime, timedelta
 
     from app.services import alert_service
-    from app.db.models import UserCookie, XianyuItem
+    from app.db.models import UserCookie, UserSchedule, XianyuItem
 
+    session.add(UserSchedule(user_id=1, section="xianyu", interval_minutes=30, enabled=True))
     session.add(UserCookie(user_id=1, platform="goofish", cookie="x"))  # 闲鱼在用(session 已预置用户#1)
     # 闲鱼数据停在 48h 前(> 24h 阈值)→ 停摆
     session.add(XianyuItem(user_id=1, item_id="i1", title="商品", created_at=datetime.now() - timedelta(hours=48)))
@@ -656,8 +657,9 @@ def test_health_stalls_fans_out_to_main_and_section_group(monkeypatch, session) 
     from datetime import datetime, timedelta
 
     from app.services import alert_service
-    from app.db.models import UserCookie, XianyuItem
+    from app.db.models import UserCookie, UserSchedule, XianyuItem
 
+    session.add(UserSchedule(user_id=1, section="xianyu", interval_minutes=30, enabled=True))
     session.add(UserCookie(user_id=1, platform="goofish", cookie="x"))
     session.add(XianyuItem(user_id=1, item_id="i1", title="商品", created_at=datetime.now() - timedelta(hours=48)))
     session.commit()
@@ -677,8 +679,9 @@ def test_health_stalls_escalates_long_term(monkeypatch, session) -> None:
     from datetime import datetime, timedelta
 
     from app.services import alert_service
-    from app.db.models import UserCookie, XianyuItem
+    from app.db.models import UserCookie, UserSchedule, XianyuItem
 
+    session.add(UserSchedule(user_id=1, section="xianyu", interval_minutes=30, enabled=True))
     session.add(UserCookie(user_id=1, platform="goofish", cookie="x"))
     # 闲鱼数据停在 5 天前(> 3 天升级阈值)
     session.add(XianyuItem(user_id=1, item_id="i1", title="商品", created_at=datetime.now() - timedelta(days=5)))
