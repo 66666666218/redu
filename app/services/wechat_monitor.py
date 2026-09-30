@@ -67,6 +67,7 @@ from app.services.wechat._source import (  # noqa: F401
     _is_privileged,
     _norm_mp_name,
     _platform_client,
+    _wemp_client,
     _quark_cookie,
     _renewal_cooldown_until,
     _weread_cookie,

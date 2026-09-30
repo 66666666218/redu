@@ -996,7 +996,7 @@ def test_listen_prefers_platform_full_list(session, monkeypatch: pytest.MonkeyPa
     session.commit()
     plat = FakePlatform(pages=[[{"id": "p1", "title": "平台文1(夸克网盘)", "url": "https://mp.weixin.qq.com/s/p1"},
                                 {"id": "p2", "title": "平台文2(夸克网盘)", "url": "https://mp.weixin.qq.com/s/p2"}]])
-    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings, **kw: plat)
     out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(pan_transfer_enabled=False),
                                            platform=plat)
     assert out["new"] == 2
@@ -1014,7 +1014,7 @@ def test_sync_platform_paginates(session, monkeypatch: pytest.MonkeyPatch) -> No
         [{"id": "b", "title": "文B 百度网盘", "url": "https://mp.weixin.qq.com/s/b"}],
         [{"id": "c", "title": "文C UC网盘", "url": "https://mp.weixin.qq.com/s/c"}],
     ])
-    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings, **kw: plat)
     out = wechat_monitor.sync_wechat_account(session, 1, b.id,
                                              settings=_settings(), platform=plat)
     assert out["status"] == "success" and out["new"] == 3
@@ -1044,7 +1044,7 @@ def test_sync_platform_truncated_by_page_limit_is_not_success(session) -> None:
 
 def test_add_benchmark_resolves_biz_via_platform(session, monkeypatch: pytest.MonkeyPatch) -> None:
     plat = FakePlatform(resolve={"mp_id": "bizXYZ", "name": "真名号", "article_title": "T"})
-    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings, **kw: plat)
     row = wechat_monitor.add_benchmark(session, 1, "https://mp.weixin.qq.com/s/new1", settings=_settings())
     assert row["biz"] == "bizXYZ" and row["nickname"] == "真名号"
 
@@ -1114,7 +1114,7 @@ def test_match_biz_from_werss_never_guesses_and_only_writes_on_apply(
     fake = FakeWerss([[{"id": "MP_WXS_0", "mp_name": "号0"},
                        {"id": "MP_WXS_D1", "mp_name": "同名号"},
                        {"id": "MP_WXS_D2", "mp_name": "同名号"}]])
-    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: fake)
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings, **kw: fake)
     st = _settings(wechat_werss_url="https://werss.test", wechat_werss_ak="WK", wechat_werss_sk="SK")
 
     plan = wechat_monitor.match_biz_from_werss(session, 1, settings=st)
@@ -1142,7 +1142,7 @@ def test_match_biz_from_werss_never_guesses_and_only_writes_on_apply(
 def test_match_biz_from_werss_requires_werss_config(
         session, monkeypatch: pytest.MonkeyPatch) -> None:
     """配的是读书平台(没有 list_feeds)时要一句人话,而不是 AttributeError。"""
-    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: FakePlatform())
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings, **kw: FakePlatform())
     with pytest.raises(ValueError, match="未配置 WeRSS"):
         wechat_monitor.match_biz_from_werss(session, 1, settings=_settings())
 
@@ -1209,7 +1209,7 @@ def test_sync_empty_platform_first_page_falls_back(
     session.add(b)
     session.commit()
     plat = FakePlatform(pages=[[]])
-    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings, **kw: plat)
     out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=_settings())
     assert plat.calls == [("articles", "MP_WXS_9001", 1, 20)]
     assert out.get("pages") is None and out["status"] != "success"
@@ -1218,7 +1218,7 @@ def test_sync_empty_platform_first_page_falls_back(
 def test_add_benchmark_never_stores_legacy_base64_biz(
         session, monkeypatch: pytest.MonkeyPatch) -> None:
     """文章页解出的 `__biz` 是 base64,不是订阅 id:昵称照收,biz 不落地(落地就会让 ⓪ 分支撞空列表)。"""
-    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: None)
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings, **kw: None)
     monkeypatch.setattr(wechat_monitor, "extract_article_meta",
                         lambda url, timeout=15: {"biz": _LEGACY_BIZ, "name": "文章页号",
                                                  "title": "T"})
@@ -1256,7 +1256,7 @@ def test_add_benchmark_wires_up_existing_werss_subscription(
         session, monkeypatch: pytest.MonkeyPatch) -> None:
     """WeRSS 里已加过订阅时,贴文章链接加号就该顺手接上 biz(否则还得为一个新号跑脚本)。"""
     plat = FakeWerss([[{"id": "MP_WXS_55", "mp_name": "资源号丙"}]])
-    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings, **kw: plat)
     monkeypatch.setattr(wechat_monitor, "extract_article_meta",
                         lambda url, timeout=15: {"biz": _LEGACY_BIZ, "name": "资源号丙",
                                                  "title": "T"})
@@ -1275,7 +1275,7 @@ def test_match_biz_from_werss_repairs_legacy_shape(
     session.commit()
     fake = FakeWerss([[{"id": "MP_WXS_0", "mp_name": "号0"},
                        {"id": "weird-not-mp", "mp_name": "怪id号"}]])
-    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: fake)
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings, **kw: fake)
     st = _settings(wechat_werss_url="https://werss.test", wechat_werss_ak="WK", wechat_werss_sk="SK")
     plan = wechat_monitor.match_biz_from_werss(session, 1, settings=st)
     assert plan["already"] == 0                                  # 旧形态不再算"已配过"
@@ -1301,16 +1301,16 @@ def test_nudge_werss_requires_werss_and_good_shape(
             return True
 
     st = _settings()
-    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: Plat())
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings, **kw: Plat())
     assert wechat_monitor.nudge_werss("MP_WXS_9001", settings=st) == {"nudged": True, "reason": ""}
     assert calls == ["MP_WXS_9001"]
     assert wechat_monitor.nudge_werss(_LEGACY_BIZ, settings=st)["reason"] == "not_werss_or_bad_biz"
     assert calls == ["MP_WXS_9001"]                             # 怪形态没去催
     calls.clear()
-    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: FakePlatform())
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings, **kw: FakePlatform())
     assert wechat_monitor.nudge_werss("MP_WXS_9001", settings=st)["nudged"] is False
     assert calls == []
-    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: None)
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings, **kw: None)
     assert wechat_monitor.nudge_werss("MP_WXS_9001", settings=st)["nudged"] is False
 
 
@@ -2398,7 +2398,7 @@ def test_sync_transfers_then_pushes_my_link(session, monkeypatch) -> None:
         {"id": "r2", "title": "资源文二 https://pan.quark.cn/s/RAW1",
          "url": "https://mp.weixin.qq.com/s/r2"},
     ]])
-    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings, **kw: plat)
     calls: list[str] = []
     _fake_quark(monkeypatch, {"https://pan.quark.cn/s/RAW1": "https://pan.quark.cn/s/MINE1"}, calls)
     cards: list[dict] = []
@@ -2427,7 +2427,7 @@ def test_sync_push_skips_resource_already_announced(session, monkeypatch) -> Non
 
     plat = FakePlatform(pages=[[{"id": "r1", "title": "搬运文 https://pan.quark.cn/s/RAW1",
                                  "url": "https://mp.weixin.qq.com/s/r1"}]])
-    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings, **kw: plat)
     calls: list[str] = []
     _fake_quark(monkeypatch, {}, calls)
     cards: list[dict] = []
@@ -2449,7 +2449,7 @@ def test_sync_push_window_caps_transfer_calls(session, monkeypatch) -> None:
     items = [{"id": f"i{n}", "title": f"资源文{n} https://pan.quark.cn/s/raw{n}",
               "url": f"https://mp.weixin.qq.com/s/i{n}", "publish_at_raw": old} for n in range(5)]
     plat = FakePlatform(pages=[items])
-    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings, **kw: plat)
     calls: list[str] = []
     _fake_quark(monkeypatch, {f"https://pan.quark.cn/s/raw{n}": f"https://pan.quark.cn/s/m{n}"
                               for n in range(5)}, calls)
@@ -2474,7 +2474,7 @@ def test_sync_pushes_every_article_within_24h_regardless_of_cap(session, monkeyp
              + [{"id": f"o{n}", "title": f"历史资源文{n} https://pan.quark.cn/s/old{n}",
                  "url": f"https://mp.weixin.qq.com/s/o{n}", "publish_at_raw": old} for n in range(4)])
     plat = FakePlatform(pages=[items])
-    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings, **kw: plat)
     calls: list[str] = []
     _fake_quark(monkeypatch, {f"https://pan.quark.cn/s/fresh{n}": f"https://pan.quark.cn/s/m{n}"
                               for n in range(4)}, calls)
@@ -2500,7 +2500,7 @@ def test_sync_still_pushes_when_transfer_blows_up(session, monkeypatch) -> None:
     session.commit()
     plat = FakePlatform(pages=[[{"id": "r1", "title": "资源文 https://pan.quark.cn/s/RAW9",
                                  "url": "https://mp.weixin.qq.com/s/r1"}]])
-    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings, **kw: plat)
     monkeypatch.setattr(QuarkTransfer, "__init__", lambda self, *a, **kw: None)
 
     def _boom(self, url, **kw):
@@ -2664,7 +2664,7 @@ def test_sync_push_window_keeps_link_less_articles(session, monkeypatch) -> None
                  "url": f"https://mp.weixin.qq.com/s/r{n}", "publish_at_raw": fresh}
                 for n in range(3)])
     plat = FakePlatform(pages=[items])
-    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings, **kw: plat)
     _fake_quark(monkeypatch, {f"https://pan.quark.cn/s/raw{n}": f"https://pan.quark.cn/s/m{n}"
                               for n in range(3)}, [])
     cards: list[dict] = []
@@ -2747,7 +2747,7 @@ def test_sync_push_truncated_never_negative(session, monkeypatch) -> None:
               "url": f"https://mp.weixin.qq.com/s/h{n}", "publish_at_raw": old_ts}
              for n in range(2)]
     plat = FakePlatform(pages=[items])
-    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings, **kw: plat)
     _fake_quark(monkeypatch, {f"https://pan.quark.cn/s/h{n}": f"https://pan.quark.cn/s/m{n}"
                               for n in range(2)}, [])
     cards: list[dict] = []
@@ -3924,3 +3924,55 @@ def test_relink_notify_after_late_transfer(session, monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(alert_service, "feishu_alert_gate", lambda *a, **kw: False)
     ok3 = enrich_mod._relink_notify(session, 1, _settings(), r, "百度", "https://pan.baidu.com/s/mine1", "8k2m")
     assert ok3 is False and len(sent) == 1
+
+
+def test_wemp_client_parses_appmsgpublish(monkeypatch: pytest.MonkeyPatch) -> None:
+    """自研 appmsgpublish 客户端(2026-09-30):fakeid 编码/publish_page 解析/错误映射。"""
+    import json as _json
+
+    from app.services.wechat import wemp_client as wc
+
+    # fakeid 编码:MP_WXS_{数字} → base64(数字)
+    assert wc.mp_id_to_fakeid("MP_WXS_3703303206") == "MzcwMzMwMzIwNg=="
+
+    # 正常响应解析
+    publish_page = _json.dumps({"publish_list": [
+        {"publish_info": _json.dumps({"appmsgex": [
+            {"aid": "1_1", "title": "文一 夸克网盘", "link": "https://mp.weixin.qq.com/s/a1",
+             "create_time": 1788800000, "digest": "摘要"}]})},
+        {"publish_info": _json.dumps({"appmsgex": [
+            {"aid": "1_2", "title": "", "link": "https://mp.weixin.qq.com/s/a2"}]})},  # 无标题→丢弃
+    ]})
+
+    class _Resp:
+        def __init__(self, payload):
+            self._p = payload
+        def json(self):
+            return self._p
+
+    monkeypatch.setattr(wc.requests, "get",
+                        lambda *a, **kw: _Resp({"base_resp": {"ret": 0}, "publish_page": publish_page}))
+    items = wc.WempClient("ck=x", "123456789").mp_articles("MP_WXS_3703303206", page=1, limit=20)
+    assert len(items) == 1
+    assert items[0]["title"] == "文一 夸克网盘"
+    assert items[0]["url"] == "https://mp.weixin.qq.com/s/a1"
+    assert items[0]["publish_at_raw"] == 1788800000
+
+    # 频率限制 → WempRateLimited(且属 PlatformError,监听降级自动衔接)
+    from app.services.reader_platform_client import PlatformError
+    monkeypatch.setattr(wc.requests, "get",
+                        lambda *a, **kw: _Resp({"base_resp": {"ret": 200013}}))
+    with pytest.raises(wc.WempRateLimited):
+        wc.WempClient("ck=x", "t").mp_articles("MP_WXS_1")
+    assert issubclass(wc.WempRateLimited, PlatformError)
+
+    # 会话失效 → WempAuthError
+    monkeypatch.setattr(wc.requests, "get",
+                        lambda *a, **kw: _Resp({"base_resp": {"ret": 200003}}))
+    with pytest.raises(wc.WempAuthError):
+        wc.WempClient("ck=x", "t").mp_articles("MP_WXS_1")
+
+    # 无 publish_page → 翻页终止(空列表,不报错)
+    monkeypatch.setattr(wc.requests, "get",
+                        lambda *a, **kw: _Resp({"base_resp": {"ret": 0}}))
+    assert wc.WempClient("ck=x", "t").mp_articles("MP_WXS_1") == []

@@ -69,14 +69,44 @@ def nudge_werss(biz: str, settings: Settings | None = None) -> dict:
     if not hasattr(plat, "refresh_mp") or not value.startswith(_FEED_BIZ_PREFIX):
         return {"nudged": False, "reason": "not_werss_or_bad_biz"}
     return {"nudged": plat.refresh_mp(value), "reason": ""}
-def _platform_client(settings: Settings) -> ReaderPlatformClient | WerssClient | None:
-    """免费全量列表的数据源客户端;两家合同一致(都提供 `mp_articles`),按配置择一。
+def _wemp_client(session, user_id: int):
+    """自研 appmsgpublish 客户端(凭据自持 system_config[wemp_cred_{uid}])。
 
-    优先 WeRSS(自建、凭据在自己手里),其次 wewe-rss 兼容的"读书平台"。都没配返回 None。
+    2026-09-30:WeRSS 同类项目有停维前科,列表源不能赌单一开源项目存活——
+    该客户端按公开接口合同独立实现,与 WeRSS 互备。无凭据返回 None。
+    """
+    import json as _json
+
+    from app.db.models import SystemConfig
+    from app.services.wechat.wemp_client import WempClient
+
+    row = session.scalar(select(SystemConfig).where(
+        SystemConfig.key == f"wemp_cred_{user_id}"))
+    if not row or not row.value:
+        return None
+    try:
+        cred = _json.loads(row.value)
+    except ValueError:
+        return None
+    if not cred.get("cookie") or not cred.get("token"):
+        return None
+    return WempClient(cred["cookie"], cred["token"])
+
+
+def _platform_client(settings: Settings, session=None, user_id: int | None = None):
+    """免费全量列表的数据源客户端;各家合同一致(都提供 `mp_articles`),按配置择一。
+
+    优先级:WeRSS(自建成熟,含 free_publish 降级) → **自研 WempClient(兜底,凭据自持)**
+    → wewe-rss 兼容"读书平台"。都没配返回 None。
+    传了 session+user_id 才会考虑自研兜底(凭据存 system_config,与用户绑定)。
     """
     if settings.wechat_werss_url and settings.wechat_werss_ak and settings.wechat_werss_sk:
         return WerssClient(settings.wechat_werss_url,
                            access_key=settings.wechat_werss_ak, secret_key=settings.wechat_werss_sk)
+    if session is not None and user_id is not None:
+        wc = _wemp_client(session, user_id)
+        if wc is not None:
+            return wc
     if not settings.wechat_reader_platform_url or not settings.wechat_reader_token:
         return None
     return ReaderPlatformClient(settings.wechat_reader_platform_url,

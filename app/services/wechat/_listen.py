@@ -448,7 +448,7 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
         session.commit()
         return {"platform": "wechat", "status": "skipped", "reason": "no_source"}
 
-    plat = platform or _root._platform_client(settings)
+    plat = platform or _root._platform_client(settings, session=session, user_id=user_id)
     # 书架粗筛(1 次书架请求换"谁没更新"的答案):把每轮 60~77 次白问省下来。
     # 任何不确定(字段认不出/书架挂了/配置关停)都整门停用,退化为逐号问
     # (判据与三重失效保护见 _shelf_gate_plan;量化依据见 doc/operations.md §9.2)。

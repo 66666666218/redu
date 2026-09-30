@@ -128,7 +128,7 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
         WechatBenchmark.user_id == user_id, WechatBenchmark.id == benchmark_id))
     if b is None:
         raise KeyError("对标账号不存在")
-    plat = platform or _root._platform_client(settings)
+    plat = platform or _root._platform_client(settings, session=session, user_id=user_id)
     feed_id = feed_biz(b)
     # 服务端钳制:query 页数无上限会被恶意调用当免费 API 刷(拖死同步 worker)
     limit = max(1, min(int(max_pages or (10 if plat and feed_id else settings.wechat_sync_max_pages)), 20))
