@@ -251,6 +251,10 @@ class WereadClient:
         """
         if "wr_rt=" not in self.cookie:
             return None
+        # wr_rt 形态兼容(2026-09-30 事故修复):renewal 回写时 rt 会做 quote(),
+        # 历史存储里可能存在"二次编码"形态(如 web%2540..,服务端要的是 web%40..),
+        # 直接注入会被拒,造成"续期一次成功、之后永失败"。注入前先 unquote 还原。
+        from urllib.parse import unquote as _unquote
         jar = requests.Session()
         jar.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -267,6 +271,8 @@ class WereadClient:
         for kv in self.cookie.split(";"):
             name, _, value = kv.strip().partition("=")
             if name:
+                if name == "wr_rt":
+                    value = _unquote(value)
                 jar.cookies.set(name, value, domain="weread.qq.com", path="/")
         variants = ({"rq": "%2Fweb%2Fbook%2Fread", "ql": False},
                     {"rq": "%2Fweb%2Fbook%2Fread", "ql": True},
@@ -296,14 +302,15 @@ class WereadClient:
             if not name:
                 continue
             if name in jar_map:
-                out_v = quote(jar_map[name], safe="~") if name == "wr_rt" else jar_map[name]
+                # safe 含 %:rt 服务端下发的就是 %XX 编码形态,quote 不得再动 %(%→%25 即二次编码事故)
+                out_v = quote(jar_map[name], safe="~%") if name == "wr_rt" else jar_map[name]
                 parts.append(f"{name}={out_v}")
                 seen.add(name)
             else:
                 parts.append(f"{name}={value}")
         for name, value in jar_map.items():
             if name not in seen:
-                out_v = quote(value, safe="~") if name == "wr_rt" else value
+                out_v = quote(value, safe="~%") if name == "wr_rt" else value
                 parts.append(f"{name}={out_v}")
         return "; ".join(parts)
 

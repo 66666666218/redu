@@ -679,6 +679,62 @@ def test_weread_refresh_skey_renewal_request(monkeypatch: pytest.MonkeyPatch) ->
     assert wc_mod.WereadClient("wr_vid=9; wr_skey=K").refresh_skey() is None  # 无 wr_rt 不发请求
 
 
+def test_weread_refresh_skey_double_encoded_rt_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
+    """rt 编码链回归(2026-09-30 事故):存储二次编码的 %25 注入前须解码;回写 % 不得再编码。
+
+    事故链:renewal 回写 quote(rt) 把服务端下发的 web%40.. 再编码成 web%2540.. 存储,
+    下次续期注入二次编码值被服务端拒绝 → "续期一次成功、之后永失败"。
+    """
+    from app.services import weread_client as wc_mod
+
+    class _Cookie:
+        def __init__(self, name: str, value: str) -> None:
+            self.name, self.value = name, value
+
+    class _Jar:
+        def __init__(self) -> None:
+            self.items: list[_Cookie] = []
+
+        def set(self, name: str, value: str, domain: str = "", path: str = "") -> None:
+            self.items.append(_Cookie(name, value))
+
+        def __iter__(self):
+            return iter(self.items)
+
+        def __contains__(self, name: str) -> bool:
+            return any(c.name == name for c in self.items)
+
+    injected: list[str] = []
+
+    class _Resp:
+        status_code = 200
+        cookies = _Jar()
+
+    class _Sess:
+        headers: dict = {}
+
+        def __init__(self) -> None:
+            self.cookies = _Jar()
+
+        def post(self, url: str, data=None, timeout: int = 20) -> _Resp:
+            rt = next((c.value for c in self.cookies.items if c.name == "wr_rt"), "")
+            injected.append(rt)
+            resp = _Resp()
+            resp.cookies.set("wr_skey", "NEWSKEY", domain="weread.qq.com", path="/")
+            resp.cookies.set("wr_rt", "web%40NEW", domain="weread.qq.com", path="/")
+            self.cookies.set("wr_skey", "NEWSKEY", domain="weread.qq.com", path="/")
+            self.cookies.set("wr_rt", "web%40NEW", domain="weread.qq.com", path="/")
+            return resp
+
+    sess = _Sess()
+    monkeypatch.setattr(wc_mod.requests, "Session", lambda: sess)
+    # 存储形态为二次编码(web%2540 = web%40 的再编码)
+    out = wc_mod.WereadClient("wr_vid=9; wr_rt=web%254026abc~_AL; wr_skey=OLD").refresh_skey()
+    assert injected == ["web%4026abc~_AL"]  # 注入前解码一次(服务端认单次编码)
+    assert out and "wr_rt=web%40NEW" in out   # 回写保留 %(不得二次编码成 %2540)
+    assert "%2540" not in out
+
+
 def test_weread_refresh_skey_all_variants_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     """三种形态全被拒(响应均不带 wr_skey Set-Cookie)→ 返回 None,调用方走失败告警。"""
     from app.services import weread_client as wc_mod
