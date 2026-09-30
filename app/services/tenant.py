@@ -237,7 +237,7 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
         # export_cookie() 为此而设——但回写调用从未接线,每轮都从存储里的**旧 token** 起步;
         # 服务端轮换/作废该 token 后(11:06 后全 ILLEGAL),永远起不来。成功即回写,下轮无缝续用。
         try:
-            fresh = client.export_cookie()
+            fresh = client.cookie_header()
             if fresh and len(fresh) > 50:
                 set_cookie(session, user_id, "goofish", fresh)
         except Exception:  # noqa: BLE001 - 回写失败不影响本轮采集
