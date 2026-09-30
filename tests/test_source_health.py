@@ -94,3 +94,34 @@ def test_wechat_stats_use_listen_sync_kinds(session):
     wx = next(r for r in health.source_health(session, 1, _settings()) if r["section"] == "wechat")
     assert wx["last_success_at"] is not None   # 命中 wechat_listen 成功记录
     assert wx["fails_24h"] == 1                # 命中 wechat_sync 失败记录
+
+
+def test_check_optional_containers(monkeypatch) -> None:
+    """可选容器探活(v2.8.0):在线返回空;挂了列出名字;不含未配置的 WeRSS。"""
+    from app.services import health as h
+
+    class _Resp:
+        def __init__(self, code):
+            self.status_code = code
+
+    # 都在线
+    monkeypatch.setattr(h, "__name__", h.__name__)
+    import curl_cffi.requests as creq
+    monkeypatch.setattr(creq, "get", lambda *a, **kw: _Resp(200))
+    from config.settings import Settings
+    st = Settings(_env_file=None, wechat_werss_url="http://127.0.0.1:8001")
+    assert h.check_optional_containers(st) == []
+
+    # newsnow 挂(连接异常)
+    def _boom(base, **kw):
+        if "4444" in base:
+            raise ConnectionError("refused")
+        return _Resp(200)
+    monkeypatch.setattr(creq, "get", _boom)
+    down = h.check_optional_containers(st)
+    assert down == ["newsnow 热榜源"]
+
+    # 未配 WeRSS → 不探它
+    st2 = Settings(_env_file=None, wechat_werss_url="")
+    down2 = h.check_optional_containers(st2)
+    assert down2 == ["newsnow 热榜源"]

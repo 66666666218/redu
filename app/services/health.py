@@ -149,3 +149,28 @@ def source_health(db: Session, user_id: int, settings=None) -> list[dict]:
             "cookie_ready": cookie_ready,
         })
     return out
+
+
+def check_optional_containers(settings=None) -> list[str]:
+    """可选容器探活(v2.8.0):WeRSS / newsnow 挂了要有人知道(此前静默)。
+
+    两者都是列表源/热榜源的可替换实现——挂了业务降级不断(链路会退到自研/cover),
+    但"静默降级"会让运营以为源还在,影响扩容决策(如热榜卡没数据)。返回异常容器名。
+    """
+    from config.settings import get_settings
+    from curl_cffi import requests as creq
+
+    st = settings or get_settings()
+    targets = []
+    if getattr(st, "wechat_werss_url", ""):
+        targets.append(("WeRSS 列表源", st.wechat_werss_url.rstrip("/")))
+    targets.append(("newsnow 热榜源", "http://127.0.0.1:4444"))
+    down = []
+    for name, base in targets:
+        try:
+            r = creq.get(base, impersonate="chrome", timeout=5)
+            if r.status_code >= 500:
+                down.append(name)
+        except Exception:  # noqa: BLE001 - 连不上即视为挂
+            down.append(name)
+    return down

@@ -217,6 +217,22 @@ def hot_source_tick_all_users(settings=None) -> int:
                     out["viral"] = push_viral_alerts(db, uid, settings)
                 except Exception:  # noqa: BLE001 - 预警失败不挡采集
                     logger.exception("爆款预警失败 user=%s", uid)
+                # 可选容器探活(每小时顺手):WeRSS/newsnow 挂了要有人知道
+                try:
+                    from app.services.health import check_optional_containers
+                    from app.services.alert_service import notify_incident
+
+                    down = check_optional_containers(settings)
+                    if down:
+                        notify_incident(db, uid, "wechat",
+                                        "🟠 可选源容器不可用:" + "、".join(down),
+                                        "列表源/热榜源已自动降级(业务不断),但该容器需人工重启:\n",
+                                        "  docker start we-mp-rss   /   docker start newsnow\n",
+                                        "(本机 Docker Desktop 开机自启时两种都会自动拉起)",
+                                        settings=settings, push_feishu=True)
+                        db.commit()
+                except Exception:  # noqa: BLE001 - 探活失败不影响采集
+                    logger.debug("容器探活失败", exc_info=True)
                 _record_run(db, uid, "hot_source",
                             "success" if not out["failed"] else "partial",
                             f"ok={out['ok']} failed={out['failed']} items={out['items']}"
