@@ -126,6 +126,7 @@ def discover_candidates(session: Session, user_id: int, settings: Settings | Non
                 continue
             seen.add(name)
             new_rows.append(WechatCandidate(user_id=user_id, name=name, title=it["title"],
+                                            url=str(it.get("url") or "")[:600],
                                             title_ts=it.get("published_at"), term=term[:64]))
     if new_rows:
         session.add_all(new_rows)
@@ -255,3 +256,46 @@ def set_candidate_status(session: Session, user_id: int, candidate_id: int, stat
         raise KeyError("候选不存在")
     row.status = status
     session.commit()
+
+
+def import_candidate(session, user_id: int, candidate_id: int, settings=None) -> dict:
+    """一键收录候选为对标号(v2.6.0,用户审核流转:自动发现→人工确认→直接收录)。
+
+    用候选的代表文章链接走 add_benchmark(与手动贴链同链路):能解析出
+    biz(WeRSS 有该订阅)即可直接监听;解析不到时仍建号(锚点留着),
+    并提示"还需在微信读书关注后导入"才能走 book_id 链路。
+    返回 {"status", "benchmark_id", "nickname", "listenable", "hint"}。
+    """
+    from app.services import wechat_monitor as _wm
+
+    cand = session.get(WechatCandidate, candidate_id)
+    if cand is None or cand.user_id != user_id:
+        return {"status": "not_found"}
+    if not cand.url:
+        return {"status": "no_url", "hint": "该候选缺文章链接(旧数据),请在「添加对标号」粘贴其文章链接"}
+    try:
+        row = _wm.add_benchmark(session, user_id, cand.url, nickname=cand.name,
+                                note=f"候选收录({cand.term})", settings=settings)
+    except ValueError:
+        # 已存在(同名/同链接):按昵称找到并存为收录态
+        from sqlalchemy import select as _sel
+
+        from app.db.models import WechatBenchmark as _WB
+
+        ex = session.scalar(_sel(_WB).where(_WB.user_id == user_id, _WB.nickname == cand.name))
+        if ex is None:
+            return {"status": "failed", "hint": "该链接已存在但昵称对不上,请人工核对"}
+        cand.status = "imported"
+        session.commit()
+        return {"status": "ok", "benchmark_id": ex.id, "nickname": ex.nickname,
+                "listenable": bool(ex.weread_book_id or ex.biz),
+                "hint": "" if (ex.weread_book_id or ex.biz) else "还需在微信读书关注后导入,才能走书架监听"}
+    cand.status = "imported"
+    session.commit()
+    from app.db.models import WechatBenchmark as _WB2
+
+    row2 = session.get(_WB2, row["id"])
+    listenable = bool(row2 and (row2.weread_book_id or row2.biz))
+    return {"status": "ok", "benchmark_id": row["id"], "nickname": row["nickname"],
+            "listenable": listenable,
+            "hint": "" if listenable else "已建号,但暂无可监听标识——请在微信读书关注该号后点「从书架导入」补齐"}

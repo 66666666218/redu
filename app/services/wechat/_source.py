@@ -584,3 +584,76 @@ def weread_refresh_tick(settings: Settings | None = None) -> int:
     if total:
         logger.info("微信读书 Cookie 定时续期完成:%d 个账号", total)
     return total
+
+
+def retire_dormant_benchmarks(session, user_id: int, settings=None) -> list[str]:
+    """死号清理(v2.6.0,用户口径:一星期没发文就取消监控)。返回被停用号昵称。
+
+    **安全阀(关键)**:先确认近期监听链路是活的(近 N 天有 wechat_listen 成功记录)——
+    否则 Cookie 故障期间所有号的 last_item_at 都不动,会被整体误判成"死号"一起停掉。
+    停用即 active=False(不监听);号复活需人工恢复(前端可见"已停用"状态)。
+    """
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import and_, func, or_
+
+    from app.db.models import RunRecord, WechatBenchmark
+
+    st = settings or get_settings()
+    days = int(getattr(st, "wechat_dormant_retire_days", 7) or 0)
+    if days <= 0:
+        return []
+    cutoff = datetime.now() - timedelta(days=days)
+    # 安全阀:链路不活不清理
+    alive = session.scalar(select(func.count()).select_from(RunRecord).where(
+        RunRecord.user_id == user_id, RunRecord.kind == "wechat_listen",
+        RunRecord.status.in_(("success", "partial")),
+        RunRecord.started_at >= cutoff)) or 0
+    if not alive:
+        logger.warning("死号清理跳过 user=%s:近 %s 天无成功监听(疑似链路故障,防误杀)", user_id, days)
+        return []
+    rows = session.scalars(select(WechatBenchmark).where(
+        WechatBenchmark.user_id == user_id, WechatBenchmark.active.is_(True),
+        or_(WechatBenchmark.last_item_at < cutoff,
+            and_(WechatBenchmark.last_item_at.is_(None),
+                 WechatBenchmark.created_at < cutoff)))).all()
+    names = []
+    for b in rows:
+        b.active = False
+        names.append(str(b.nickname or b.id))
+    if names:
+        session.commit()
+    return names
+
+
+def retire_dormant_tick_all_users(settings=None) -> int:
+    """每日死号清理入口(05:30,在 4 点定点监听之后判断);停用则站内汇总通知。"""
+    from config.settings import get_settings as _gs
+    from app.db import get_session_local
+    from app.db.models import User
+
+    st = settings or _gs()
+    db = get_session_local()()
+    total = 0
+    try:
+        for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
+            try:
+                names = retire_dormant_benchmarks(db, uid, st)
+                if names:
+                    from app.services.alert_service import notify_incident
+
+                    days = int(getattr(st, "wechat_dormant_retire_days", 7) or 7)
+                    notify_incident(db, uid, "wechat",
+                                    f"🧹 死号清理:{len(names)} 个对标号连续 {days} 天无发文,已停监控",
+                                    "停用名单:" + "、".join(names[:12])
+                                    + ("…" if len(names) > 12 else "")
+                                    + "。号若复活,可在「公众号监听」页手动重新启用。",
+                                    settings=st, push_feishu=False)
+                    db.commit()
+                    total += len(names)
+            except Exception:  # noqa: BLE001 - 单用户失败不影响其余
+                db.rollback()
+                logger.exception("死号清理失败 user=%s", uid)
+    finally:
+        db.close()
+    return total

@@ -445,6 +445,7 @@ class WechatCandidate(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     name: Mapped[str] = mapped_column(String(128), default="")                # 公众号名
     title: Mapped[str] = mapped_column(String(500), default="")               # 代表文章标题
+    url: Mapped[str] = mapped_column(String(600), default="")                 # 代表文章链接(收录用,v2.6.0)
     title_ts: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # 代表文章发布时间
     term: Mapped[str] = mapped_column(String(64), default="")                 # 命中的搜索词
     status: Mapped[str] = mapped_column(String(16), default="new")            # new / dismissed

@@ -65,7 +65,21 @@ async function discoverCandidates() {
 }
 
 async function dismissCandidate(c) {
-  await api.wechatCandidatePatch(c.id, { status: 'dismissed' })
+  await api.wechatCandidatePatch(c.id, { status: 'dismissed' }
+
+async function importCandidate(c) {
+  busy.value = 'imp' + c.id
+  try {
+    const r = await api.post(`/api/wechat/candidates/${c.id}/import`)
+    if (r.data.listenable) toastOk(`已收录「${r.data.nickname}」,可直接监听 ✅`)
+    else toastOk(`已收录「${r.data.nickname}」——${r.data.hint || '还需书架导入补齐标识'}`)
+    await load()
+  } catch (e) {
+    toastErr('收录失败:' + (e?.response?.data?.detail || e.message || e))
+  } finally {
+    busy.value = ''
+  }
+})
   await loadCandidates()
 }
 
@@ -249,7 +263,11 @@ onMounted(load)
           <td class="empty">{{ c.title.slice(0, 40) }}{{ c.title_ts ? ' (' + c.title_ts.slice(5, 10) + ')' : '' }}</td>
           <td class="empty">{{ c.term }}</td>
           <td class="empty">{{ fmt(c.discovered_at) }}</td>
-          <td><button v-if="!c.imported" class="ghost" @click="dismissCandidate(c)">忽略</button></td>
+          <td>
+            <button v-if="!c.imported" :disabled="busy === 'imp' + c.id" @click="importCandidate(c)">
+              {{ busy === 'imp' + c.id ? '收录中…' : '收录' }}</button>
+            <button v-if="!c.imported" class="ghost" @click="dismissCandidate(c)" style="margin-left:6px">忽略</button>
+          </td>
         </tr>
       </table>
       <div v-else class="empty">暂无候选:点「发现同类号」按标题画像词搜同类公众号(免费),也可每日 08:20 自动发现</div>

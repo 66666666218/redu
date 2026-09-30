@@ -288,6 +288,20 @@ def wechat_candidate_discover(user: User = Depends(get_current_user), db: Sessio
     return wechat_monitor.discover_candidates(db, user.id)
 
 
+@router.post("/api/wechat/candidates/{candidate_id}/import")
+def wechat_candidate_import(candidate_id: int, user: User = Depends(get_current_user),
+                            db: Session = Depends(get_db)):
+    """一键收录候选为对标号(v2.6.0):自动发现→人工审核→直接收录。"""
+    from app.services.wechat._candidates import import_candidate
+
+    out = import_candidate(db, user.id, candidate_id)
+    if out.get("status") == "not_found":
+        raise HTTPException(404, "候选不存在")
+    if out.get("status") in ("no_url", "failed"):
+        raise HTTPException(400, out.get("hint") or "收录失败")
+    return out
+
+
 @router.patch("/api/wechat/candidates/{candidate_id}")
 def wechat_candidate_update(candidate_id: int, payload: dict,
                             user: User = Depends(get_current_user), db: Session = Depends(get_db)):

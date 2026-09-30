@@ -68,6 +68,8 @@ from app.services.wechat._source import (  # noqa: F401
     _norm_mp_name,
     _platform_client,
     _wemp_client,
+    retire_dormant_benchmarks,
+    retire_dormant_tick_all_users,
     _quark_cookie,
     _renewal_cooldown_until,
     _weread_cookie,

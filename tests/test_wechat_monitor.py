@@ -4055,3 +4055,38 @@ def test_adaptive_batch_scales_with_pool_size(session) -> None:
     rows3, pos3 = _select_listen_batch(None, 1, mk(50), _settings(wechat_listen_batch_size=-1),
                                        batch_index=0)
     assert len(rows3) == 50 and pos3 == ""
+
+
+def test_retire_dormant_benchmarks_with_safety_valve(session) -> None:
+    """死号清理(v2.6.0):7 天无发文停用;**监听链路不活时整体跳过**(防误杀)。"""
+    from datetime import datetime as dt, timedelta
+
+    from app.services.wechat._source import retire_dormant_benchmarks
+
+    old = dt.now() - timedelta(days=10)
+    fresh = dt.now() - timedelta(days=1)
+    b_dead = WechatBenchmark(user_id=1, nickname="沉睡号", anchor_url="", last_item_at=old)
+    b_alive = WechatBenchmark(user_id=1, nickname="活跃号", anchor_url="", last_item_at=fresh)
+    b_never = WechatBenchmark(user_id=1, nickname="从无文号", anchor_url="", last_item_at=None,
+                              created_at=old)
+    session.add_all([b_dead, b_alive, b_never])
+    session.commit()
+
+    # 安全阀:近 7 天无成功监听 → 一个都不停(防 Cookie 故障期误杀)
+    names0 = retire_dormant_benchmarks(session, 1, _settings())
+    assert names0 == [] and b_dead.active is True
+
+    # 有成功监听记录 → 正常清理(沉睡 + 从未有文的都停;活跃不动)
+    session.add(RunRecord(user_id=1, run_id="r1", kind="wechat_listen", status="success",
+                          started_at=dt.now() - timedelta(hours=2)))
+    session.commit()
+    names = retire_dormant_benchmarks(session, 1, _settings())
+    assert set(names) == {"沉睡号", "从无文号"}
+    session.refresh(b_dead)
+    session.refresh(b_alive)
+    assert b_dead.active is False and b_alive.active is True
+
+    # 配置 0 = 关闭
+    b_dead.active = True
+    session.commit()
+    assert retire_dormant_benchmarks(session, 1, _settings(wechat_dormant_retire_days=0)) == []
