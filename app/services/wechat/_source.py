@@ -396,6 +396,20 @@ def refresh_weread_cookie(session: Session, user_id: int, settings: Settings | N
         session.add(SystemConfig(key=flag_key, value=datetime.now().isoformat()))
     session.commit()
     logger.info("微信读书 Cookie 已续期并验证通过(用户 %s),已标记全量补采", user_id)
+    # 恢复确认(对齐闲鱼"✅采集已恢复",2026-09-30):失败告警发过,恢复也得说一声——
+    # 否则群里"续期失败"的旧告警变成孤魂,用户看到旧告警+新推送并存会误判(实测困惑)
+    try:
+        from app.services.alert_service import feishu_alert_gate
+        from app.services.feishu_client import FeishuClient, webhook_for as _wf
+
+        _st = settings or get_settings()
+        _hook = _wf(_st, "wechat")
+        if _hook and feishu_alert_gate(session, user_id, "weread_renewal_ok",
+                                       f"renewal_ok:{user_id}", 6, "续期成功,监听恢复"):
+            FeishuClient(_hook, _st.feishu_secret).send(
+                "✅ 微信读书 Cookie 已自动续期,监听恢复正常——此前如有「续期失败」告警,以本条为准")
+    except Exception:  # noqa: BLE001 - 恢复确认是锦上添花,失败不影响续期结果
+        logger.debug("续期恢复确认推送失败(不影响续期)", exc_info=True)
     return {"status": "success", "verified": True, "cookie": new_cookie}
 _RENEWAL_FAIL_TEXT = {
     "renewal_failed": "renewal 换不出新 wr_skey(wr_rt 已失效,或正处于频控锁定期)",
