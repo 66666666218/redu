@@ -60,6 +60,34 @@ def suggestion_draft(sid: int, user: User = Depends(get_current_user), db: Sessi
     return out
 
 
+@router.get("/api/hotspot/hot-rank")
+def hot_rank(per: int = 10, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """多平台热榜(v2.10.0 前端入口):各源最新一轮 top N(B站/豆瓣自研 + newsnow 长尾)。"""
+    from sqlalchemy import func, select
+
+    from app.db.models import HotSourceItem
+    from app.services.hot_sources import _PLAT_LABEL
+
+    per = max(1, min(int(per or 10), 30))
+    latest = db.execute(
+        select(HotSourceItem.source, func.max(HotSourceItem.captured_at))
+        .where(HotSourceItem.user_id == user.id)
+        .group_by(HotSourceItem.source)).all()
+    out = []
+    for src, ts in latest:
+        rows = db.scalars(select(HotSourceItem).where(
+            HotSourceItem.user_id == user.id, HotSourceItem.source == src,
+            HotSourceItem.captured_at == ts).order_by(HotSourceItem.rank).limit(per)).all()
+        out.append({
+            "source": str(src), "label": _PLAT_LABEL.get(str(src), str(src)),
+            "captured_at": ts.isoformat(sep=" ", timespec="seconds") if ts else "",
+            "items": [{"rank": r.rank, "title": r.title, "url": r.url, "extra": r.extra} for r in rows],
+        })
+    # 自研优先(B站/豆瓣)在前,其余按平台名
+    out.sort(key=lambda p: (p["source"] not in ("bilibili", "douban"), p["source"]))
+    return {"platforms": out, "count": len(out)}
+
+
 @router.get("/api/hotspot/suggestions")
 def list_suggestions(limit: int = 50, acted: bool | None = None,
                      user: User = Depends(get_current_user), db: Session = Depends(get_db)):

@@ -18,6 +18,7 @@ import Events from './views/Events.vue'
 import Health from './views/Health.vue'
 import Suggestions from './views/Suggestions.vue'
 import Resources from './views/Resources.vue'
+import HotRank from './views/HotRank.vue'
 
 const routes = [
   { path: '/login', component: Login },
@@ -37,6 +38,7 @@ const routes = [
   { path: '/events', component: Events, meta: { auth: true } },
   { path: '/suggestions', component: Suggestions, meta: { auth: true } },
   { path: '/resources', component: Resources, meta: { auth: true } },
+  { path: '/hotrank', component: HotRank, meta: { auth: true } },
   { path: '/health', component: Health, meta: { auth: true } },
   { path: '/admin', component: Admin, meta: { auth: true, admin: true } },
   { path: '/screen', component: Screen, meta: { auth: true, screen: true } }

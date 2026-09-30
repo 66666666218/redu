@@ -1075,6 +1075,26 @@
 - 同 `week_start` 重录 = 覆盖更新;`pan_recruit_weekly` 表按 user_id 隔离。
 - 命令行入口:`python scripts/record_recruits.py 2026-09-22=12 2026-09-29=7 [--note 备注]`
 
+## 11d. 多平台热榜(2026-10-01,15 源雷达)
+
+- **接口名称**: 多平台热榜总览
+- **请求方式**: GET
+- **URL 路径**: `/api/hotspot/hot-rank?per=10`
+- **权限**: 登录用户
+
+**响应示例 (200)**
+```json
+{
+  "count": 11,
+  "platforms": [
+    { "source": "bilibili", "label": "B站", "captured_at": "2026-10-01 03:05:06",
+      "items": [ { "rank": 1, "title": "…", "url": "https://…", "extra": "手机游戏 · 播放123" } ] },
+    { "source": "zhihu", "label": "知乎", "captured_at": "…", "items": [ … ] }
+  ]
+}
+```
+> 各源**最新一轮** top N(B站/豆瓣自研直连优先在前,其余 newsnow 长尾);前端入口:导航「多平台热榜」。
+
 ## 11c. 资源库(2026-10-01,现成资源检索)
 
 ### 11c.1 资源检索 / 高共振榜
