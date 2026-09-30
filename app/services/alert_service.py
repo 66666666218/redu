@@ -427,6 +427,28 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
                 existing.reason, existing.alerted_at = f"近24h失败{cnt}次", datetime.now()
             else:
                 db.add(FeishuAlert(section="collect_fail", user_id=uid, title=kind, reason=f"近24h失败{cnt}次"))
+        # 恢复确认(2026-09-30,对齐闲鱼"✅已恢复"惯例):之前告过警、现在已不在
+        # "仍断"名单的 (用户,板块) → 发 ✅ 并清冷却。否则"失败 N 次"的旧告警
+        # 挂在群里成孤魂,恢复后用户看到旧告警+新数据并存会误判还在坏(实测困惑×2)。
+        recovered = []
+        for (uid, kind) in sorted(currently_broken ^ {(u, k) for u, k, _ in rows}):
+            row = db.scalar(select(FeishuAlert).where(
+                FeishuAlert.section == "collect_fail", FeishuAlert.user_id == uid,
+                FeishuAlert.title == kind))
+            if row:
+                recovered.append((uid, kind))
+        if recovered and not hits:
+            _ok = 0
+            for uid, kind in recovered:
+                for wh in webhooks_for(settings, kind):
+                    if FeishuClient(wh, settings.feishu_secret).send(
+                            f"✅ 采集已恢复 · 用户#{uid} 板块[{kind}]——此前「持续失败」告警作废,以本条为准"):
+                        _ok += 1
+                db.delete(row)
+            if _ok:
+                db.commit()
+                logger.info("采集恢复确认推送,条数=%s", _ok)
+
         if hits:
             sent = 0
             for uid, kind, cnt in hits:
