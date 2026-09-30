@@ -445,9 +445,13 @@ def burst_plan(db: Session, user_id: int, topics: list[str],
                 continue
         p = (llm.get("plans") or {}).get(t)
         if p:
-            lines.append(f"⚡《{t}》爆发{_resonance_tag(h)} → {p}")
+            # p 是 _llm_plan 返回的四件套 dict(resource/title/audience/hook),
+            # 拼成文本入库——旧代码 p[:500] 对 dict 切片,KeyError: slice 必炸(2026-09-30 修复)
+            plan_text = ("资源:" + str(p.get("resource") or "?") + " | 标题:" + str(p.get("title") or "?")
+                         + " | 人群:" + str(p.get("audience") or "?") + " | 拉新点:" + str(p.get("hook") or "?"))
+            lines.append(f"⚡《{t}》爆发{_resonance_tag(h)} → {plan_text}")
             db.add(HotspotSuggestion(user_id=user_id, keyword=t, growth=0, kind="llm",
-                                     plan=p[:500],
+                                     plan=plan_text[:500],
                                      platforms=str(h.get("platforms") or "douyin")))
     if not lines:
         return None
@@ -516,7 +520,32 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
     min_growth = float(getattr(settings, "hotspot_min_growth", 50) or 50)
     hotspots = _hotspots(db, user_id, min_growth)
     if not hotspots:
-        return {"status": "no_hotspots"}
+        # 晨间/冷却期兜底(2026-09-30):涨幅>=50% 的口径在热点冷却时段会空手——
+        # 一级:微博/百度"新上榜"(上升信号最干净的代理);二级:douhot 降阈值取正增长词。
+        # 弱信号也交给 LLM 判可做性,好过定点空手(可做性判断本就是 LLM 的活)。
+        from app.db.models import BaiduHotItem, WeiboHotItem
+
+        newcom: dict[str, dict] = {}
+        for model, plat in ((WeiboHotItem, "weibo"), (BaiduHotItem, "baidu")):
+            for norm, it in _platform_newcomers(db, user_id, model).items():
+                newcom.setdefault(norm, {"title": it["title"], "plats": set()})
+                newcom[norm]["plats"].add(plat)
+        hotspots = [{"keyword": v["title"], "growth": 0.0,
+                     "platforms": "+".join(sorted(v["plats"]))}
+                    for v in newcom.values()][:5]
+        if not hotspots:
+            rows2 = db.execute(
+                select(DouhotWatchSnap.keyword, func.max(DouhotWatchSnap.trend_growth))
+                .where(DouhotWatchSnap.user_id == user_id,
+                       DouhotWatchSnap.section == "douhot",
+                       DouhotWatchSnap.captured_at >= datetime.now() - timedelta(hours=24))
+                .group_by(DouhotWatchSnap.keyword)
+                .having(func.max(DouhotWatchSnap.trend_growth) >= 15)
+                .order_by(func.max(DouhotWatchSnap.trend_growth).desc())
+                .limit(5)).all()
+            hotspots = [{"keyword": str(kw), "growth": float(g or 0)} for kw, g in rows2]
+            if not hotspots:
+                return {"status": "no_hotspots"}
     # 多平台共振:微博/百度新上榜交叉验证,共振热点加权上浮(输入去单一化)
     _resonance(db, user_id, hotspots)
 
@@ -658,7 +687,8 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
     alert_service.notify_incident(
         db=db, user_id=user_id, kind="agent",
         title=f"🤖 热点选题建议:{len(matched)} 条现成资源 / {len(plan_by_kw)} 条拉新选题",
-        detail="近 24h 监控词热度达标,可执行动作:\n" + "\n".join(lines)[:2000],
+        detail="近 24h 监控词热度达标,可执行动作:\n" + "\n".join(lines)[:2000]
+        + "\n💡 做完记得回「热点建议」页点【标记已发】——结算会告诉你这条带了多少拉新",
         settings=settings, push_feishu=False)
     return {"status": "ok", "hotspots": len(fresh), "matched": len(matched),
             "llm": len(plan_by_kw), "notified": len(matched) + len(plan_by_kw)}
