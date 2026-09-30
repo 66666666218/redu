@@ -34,6 +34,7 @@ onMounted(async () => {
       <router-link to="/members">群会员</router-link>
       <router-link to="/events">热点事件</router-link>
       <router-link to="/suggestions">热点建议</router-link>
+      <router-link to="/resources">资源库</router-link>
       <router-link to="/health">数据源健康</router-link>
       <router-link v-if="role==='admin' || role==='operator'" to="/admin">管理后台</router-link>
       <a href="#" @click.prevent="logout">退出</a>

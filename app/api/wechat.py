@@ -288,6 +288,32 @@ def wechat_candidate_discover(user: User = Depends(get_current_user), db: Sessio
     return wechat_monitor.discover_candidates(db, user.id)
 
 
+@router.get("/api/wechat/resources")
+def wechat_resources(q: str = "", days: int = 90, limit: int = 30,
+                     user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """资源库(v2.6.0 前端入口):q 空=高共振榜(需求被反复验证);有 q=关键词检索。"""
+    from app.services.resource_library import library_summary, resonance_resources, search_resources
+
+    days = max(1, min(int(days or 90), 365))
+    limit = max(1, min(int(limit or 30), 100))
+    summary = library_summary(db, user.id, days=days)
+    if q.strip():
+        items = search_resources(db, user.id, q.strip(), days=days, limit=limit)
+    else:
+        items = resonance_resources(db, user.id, days=days, min_accounts=2, limit=limit)
+    return {"summary": summary, "query": q.strip(), "items": items}
+
+
+@router.get("/api/wechat/resources/viral")
+def wechat_viral_resources(hours: int = 24, user: User = Depends(get_current_user),
+                           db: Session = Depends(get_db)):
+    """爆款资源榜:近 N 小时被 ≥3 号新同发的盘链(爆款苗头,越早跟扩散越强)。"""
+    from app.services.resource_library import detect_viral_resources
+
+    hours = max(1, min(int(hours or 24), 24 * 30))
+    return {"hours": hours, "items": detect_viral_resources(db, user.id, hours=hours)}
+
+
 @router.post("/api/wechat/candidates/{candidate_id}/import")
 def wechat_candidate_import(candidate_id: int, user: User = Depends(get_current_user),
                             db: Session = Depends(get_db)):

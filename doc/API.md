@@ -1075,6 +1075,37 @@
 - 同 `week_start` 重录 = 覆盖更新;`pan_recruit_weekly` 表按 user_id 隔离。
 - 命令行入口:`python scripts/record_recruits.py 2026-09-22=12 2026-09-29=7 [--note 备注]`
 
+## 11c. 资源库(2026-10-01,现成资源检索)
+
+### 11c.1 资源检索 / 高共振榜
+- **接口名称**: 资源库查询
+- **请求方式**: GET
+- **URL 路径**: `/api/wechat/resources?q=&days=90&limit=30`
+- **权限**: 登录用户
+
+**参数**: `q` 空 = 高共振榜(同链被 ≥2 号同发);有值 = 关键词检索(标题子串,<2 字不检索)。`days` 1-365;`limit` 1-100。
+
+**响应示例 (200)**
+```json
+{
+  "summary": { "total_links": 542, "multi_account": 10, "days": 90 },
+  "query": "花少",
+  "items": [ { "pan_url": "https://pan.quark.cn/s/…", "pan_type": "夸克",
+               "accounts": 4, "titles": ["花少2人格测试直达入口｜最新测试"],
+               "first_seen": "2026-09-15 12:00:00", "last_seen": "2026-09-18 20:00:00",
+               "my_link": "https://pan.quark.cn/s/mine…" } ]
+}
+```
+
+### 11c.2 爆款资源榜
+- **接口名称**: 资源级爆款(近 N 小时 ≥3 号新同发)
+- **请求方式**: GET
+- **URL 路径**: `/api/wechat/resources/viral?hours=24`
+
+**响应示例 (200)**: `{"hours": 24, "items": [{...同 11c.1 结构...}]}`
+
+> 前端入口:导航「资源库」页(检索/共振榜/爆款榜三合一)。
+
 ## 11b. 热点建议 · AI 发布文案(2026-10-01,发布最后一公里)
 
 - **接口名称**: 按建议生成可发布文案
