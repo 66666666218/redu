@@ -796,7 +796,7 @@ def test_run_xianyu_full_block_notifies_incident(session, monkeypatch: pytest.Mo
 
     from app.services import cookie_store
 
-    cookie_store.set_cookie(session, 1, "goofish", "a=1")
+    cookie_store.set_cookie(session, 1, "goofish", "_m_h5_tk=tk_1_1; unb=1; cookie2=c2")
 
     class _VerifyClient:
         def __init__(self, cookie: str, proxy: str | None = None) -> None:
@@ -851,7 +851,7 @@ def test_xianyu_block_alert_routing_by_actionability(session, monkeypatch: pytes
     def _collect(settings, client, start_offset=0, stats=None):
         raise exc_cls("整轮被挡")
 
-    cookie_store.set_cookie(session, 1, "goofish", "a=1")
+    cookie_store.set_cookie(session, 1, "goofish", "_m_h5_tk=tk_1_1; unb=1; cookie2=c2")
     monkeypatch.setattr(xianyu_mod, "XianyuClient", lambda ck, proxy=None: object())
     monkeypatch.setattr(xianyu_mod, "collect_hot", _collect)
     with pytest.raises(exc_cls):
@@ -876,7 +876,7 @@ def test_xianyu_partial_verify_is_admin_only(session, monkeypatch: pytest.Monkey
         return [{"item_id": "i-ok", "title": "好词 商品", "hit_keywords": 1, "keywords": "好词",
                  "best_rank": 1}]
 
-    cookie_store.set_cookie(session, 1, "goofish", "a=1")
+    cookie_store.set_cookie(session, 1, "goofish", "_m_h5_tk=tk_1_1; unb=1; cookie2=c2")
     monkeypatch.setattr(xianyu_mod, "XianyuClient", lambda ck, proxy=None: object())
     monkeypatch.setattr(xianyu_mod, "collect_hot", _collect)
     tenant.run_xianyu(session, 1, settings=_settings())
@@ -902,7 +902,7 @@ def test_xianyu_deep_partial_verify_is_admin_only(
         return {"want_count": 3}
 
     monkeypatch.setattr(xianyu_analytics.xianyu, "fetch_detail", _detail)
-    cookie_store.set_cookie(session, 1, "goofish", "ck")
+    cookie_store.set_cookie(session, 1, "goofish", "_m_h5_tk=tk_1_1; unb=1; cookie2=c2")
     xianyu_analytics.run_xianyu_deep(session, 1, settings=_settings(), hot=[
         {"item_id": "i1", "title": "商品一", "price": "1"},
         {"item_id": "i2", "title": "商品二", "price": "2"}])

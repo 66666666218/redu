@@ -173,6 +173,19 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
     goofish_cookie = cookies.get("goofish", "")
     if not goofish_cookie:
         raise ValueError("未配置闲鱼 Cookie")
+    # Cookie 完整性三件套校验(2026-10-01,借鉴开源实现判定标准):
+    # 官方登录态必须集齐 `_m_h5_tk`+`unb`+`cookie2`——缺任一必 TOKEN_ILLEGAL。
+    # 早退不跑采集:省一轮无谓请求,也让用户贴的"只有设备标识字段"的残缺 Cookie
+    # 立刻得到明确提示,而不是先烧一轮全失败再报"网络/接口异常"(实测踩过)。
+    _names = {kv.split("=", 1)[0].strip() for kv in goofish_cookie.split(";") if kv.strip()}
+    _missing = [n for n in ("_m_h5_tk", "unb", "cookie2") if n not in _names]
+    if _missing:
+        _record_run(session, user_id, "xianyu", "skipped",
+                    f"cookie_incomplete(缺 {'/'.join(_missing)};请重新导出完整 Cookie)")
+        session.commit()
+        return {"platform": "xianyu", "count": 0, "status": "skipped",
+                "reason": f"cookie_incomplete: 缺 {'、'.join(_missing)}——请在浏览器登录 "
+                          "www.goofish.com 后从 Network 请求头整串复制 Cookie"}
     # 构造客户端不产生网络请求,放在 try 外:失败路径也能回写运行中刷新的令牌
     client = xianyu.XianyuClient(goofish_cookie, proxy=settings.xianyu_proxy_url or None)
     if not _XIANYU_ROUND_LOCK.acquire(blocking=False):

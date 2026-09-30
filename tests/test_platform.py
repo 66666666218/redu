@@ -239,7 +239,7 @@ def test_run_xianyu_deep(session, monkeypatch) -> None:
         "app.services.xianyu.fetch_detail",
         lambda client, iid: {"category": "教程", "want_count": 150, "view_count": 300, "seller_fans": 99},
     )
-    cookie_store.set_cookie(session, 1, "goofish", "fake-cookie")
+    cookie_store.set_cookie(session, 1, "goofish", "_m_h5_tk=tk_1_1; unb=1; cookie2=c2")
     r = tenant.run_xianyu_deep(session, 1, Settings(_env_file=None))
     assert r["count"] == 1
     row = session.scalar(select(XianyuDaily).where(XianyuDaily.user_id == 1))
@@ -277,7 +277,7 @@ def test_run_xianyu_cross_round_dedupe_by_resource(session, monkeypatch) -> None
         calls["n"] += 1
         return out
 
-    cookie_store.set_cookie(session, 1, "goofish", "fake-cookie")
+    cookie_store.set_cookie(session, 1, "goofish", "_m_h5_tk=tk_1_1; unb=1; cookie2=c2")
     monkeypatch.setattr(xianyu_mod, "XianyuClient", _Client)
     monkeypatch.setattr(xianyu_mod, "collect_hot", _hot)
     monkeypatch.setattr(tenant, "xianyu_deep_due", lambda *a, **k: False)
@@ -327,7 +327,7 @@ def test_run_xianyu_prev_keys_scoped_to_round(session, monkeypatch) -> None:
         seen["prev"] = set(prev_keys)
         return 0
 
-    cookie_store.set_cookie(session, 1, "goofish", "fake-cookie")
+    cookie_store.set_cookie(session, 1, "goofish", "_m_h5_tk=tk_1_1; unb=1; cookie2=c2")
     monkeypatch.setattr(xianyu_mod, "XianyuClient", _Client)
     monkeypatch.setattr(xianyu_mod, "collect_hot", lambda settings, client, start_offset=0, stats=None: list(hot))
     monkeypatch.setattr(alert_mod, "evaluate", _evaluate)
