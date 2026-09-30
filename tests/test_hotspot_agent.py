@@ -353,3 +353,46 @@ def test_recruits_upsert_and_list(session) -> None:
     assert listing["list"][0]["week_start"] == "2026-09-29"
     weeks = {r["week_start"]: r["recruits"] for r in listing["list"]}
     assert weeks["2026-09-22"] == 15 and weeks["2026-09-29"] == 7
+
+
+def test_auto_mark_acted_from_pan_link_and_title(session, monkeypatch) -> None:
+    """自动归因(2026-09-30):运营者不知道员工发没发——从发文数据反推 acted。
+    match 类按盘链精确匹配;llm 类按建议后入库文章的标题命中;建议之前的发文不算。"""
+    from datetime import datetime, timedelta
+
+    from app.db.models import HotspotSuggestion, WechatArticle
+    from app.services.hotspot_agent import settle_suggestions
+
+    now = datetime.now()
+    # match 类:建议带盘链 link
+    sug_link = HotspotSuggestion(
+        user_id=1, keyword="世界杯", kind="match", growth=0,
+        resource_title="赛程表", link="https://pan.quark.cn/s/match1",
+        created_at=now - timedelta(days=2))
+    # llm 类:无链接,靠标题命中
+    sug_kw = HotspotSuggestion(
+        user_id=1, keyword="亚运电竞", kind="llm", growth=0,
+        created_at=now - timedelta(days=2))
+    # 员工发文:一篇覆盖同盘链、一篇标题命中热点词——都在建议之后入库
+    art1 = WechatArticle(user_id=1, title="世界杯赛程表合集", author="号A",
+                         url="https://mp.weixin.qq.com/s/a1",
+                         pan_urls="https://pan.quark.cn/s/match1",
+                         created_at=now - timedelta(days=1))
+    art2 = WechatArticle(user_id=1, title="亚运电竞观赛指南", author="号A",
+                         url="https://mp.weixin.qq.com/s/a2",
+                         created_at=now - timedelta(days=1))
+    # 干扰项:建议**之前**就入库的同标题文章——不算执行
+    art_old = WechatArticle(user_id=1, title="亚运电竞旧闻", author="号A",
+                            url="https://mp.weixin.qq.com/s/old",
+                            created_at=now - timedelta(days=3))
+    session.add_all([sug_link, sug_kw, art1, art2, art_old])
+    session.commit()
+
+    out = settle_suggestions(session, 1)
+    session.refresh(sug_link)
+    session.refresh(sug_kw)
+    assert sug_link.acted is True and sug_link.acted_at is not None  # 盘链反推
+    assert sug_kw.acted is True                                      # 标题命中反推
+    assert sug_link.article_id == art1.id                            # 归因到具体发文
+    assert sug_link.repost_gain == 0                                 # 暂无盘链扩散,基线已立
+    assert out["auto_acted"] == 2

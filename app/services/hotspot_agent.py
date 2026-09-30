@@ -688,7 +688,7 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
         db=db, user_id=user_id, kind="agent",
         title=f"🤖 热点选题建议:{len(matched)} 条现成资源 / {len(plan_by_kw)} 条拉新选题",
         detail="近 24h 监控词热度达标,可执行动作:\n" + "\n".join(lines)[:2000]
-        + "\n💡 做完记得回「热点建议」页点【标记已发】——结算会告诉你这条带了多少拉新",
+        + "\n💡 做完之后什么都不用做——系统会自动识别发文并结算这条建议带了多少拉新",
         settings=settings, push_feishu=False)
     return {"status": "ok", "hotspots": len(fresh), "matched": len(matched),
             "llm": len(plan_by_kw), "notified": len(matched) + len(plan_by_kw)}
@@ -728,6 +728,44 @@ def _article_covers_link(art: WechatArticle, link: str) -> bool:
     return link in links
 
 
+def _auto_mark_acted(db: Session, user_id: int) -> int:
+    """从监听数据自动推断"建议已被执行",替代人工标记(2026-09-30)。
+
+    运营者把建议下发后,实际发文的是员工——运营者不知道员工发没发,人工 acted
+    标记必然断链(2026-09-30 用户明确)。发文会留下客观数据,据此反推:
+    - match 类(带盘链):新文章覆盖同一条盘链 = 有人用它发了文 → acted;
+    - llm 类(拉新选题,无链接):建议之后入库的文章标题命中热点词 → acted(标题级宽松)。
+    acted_at 取命中文章的入库时间,即结算的扩散基线。只回看近 14 天,返回自动标记数。
+    """
+    cutoff = datetime.now() - timedelta(days=14)
+    pending = db.scalars(select(HotspotSuggestion).where(
+        HotspotSuggestion.user_id == user_id,
+        HotspotSuggestion.acted.is_(False),
+        HotspotSuggestion.created_at >= cutoff)).all()
+    if not pending:
+        return 0
+    articles = db.scalars(select(WechatArticle).where(
+        WechatArticle.user_id == user_id,
+        WechatArticle.created_at >= cutoff)).all()
+    marked = 0
+    for sug in pending:
+        made_at = sug.created_at
+        hit = None
+        if sug.link:
+            hit = next((a for a in articles if a.created_at and made_at
+                        and a.created_at >= made_at
+                        and _article_covers_link(a, sug.link)), None)
+        elif sug.keyword and sug.keyword.strip():
+            kw = sug.keyword.strip()
+            hit = next((a for a in articles if a.created_at and made_at
+                        and a.created_at >= made_at
+                        and kw in (a.title or "")), None)
+        if hit:
+            sug.acted, sug.acted_at = True, hit.created_at
+            marked += 1
+    return marked
+
+
 def settle_suggestions(db: Session, user_id: int) -> dict:
     """结算已发建议的效果(v5 结算端,2026-09-29 去 dajiala 版)。
 
@@ -740,6 +778,10 @@ def settle_suggestions(db: Session, user_id: int) -> dict:
     可重复结算: repost_gain 随盘链扩散刷新。
     """
     from app.db.models import WechatPanLink
+
+    auto = _auto_mark_acted(db, user_id)
+    if auto:
+        logger.info("建议执行自动归因 user=%s:新增 acted=%s(发文数据反推,无需人工标记)", user_id, auto)
 
     rows = db.scalars(select(HotspotSuggestion).where(
         HotspotSuggestion.user_id == user_id,
@@ -766,7 +808,7 @@ def settle_suggestions(db: Session, user_id: int) -> dict:
         attributed += 1
     db.commit()
     return {"status": "ok", "acted_with_link": len(rows), "settled": settled,
-            "attributed": attributed}
+            "attributed": attributed, "auto_acted": auto}
 
 
 def settle_suggestions_all_users(settings: Settings | None = None) -> int:
