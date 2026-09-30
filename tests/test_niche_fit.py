@@ -34,3 +34,20 @@ def test_entity_words_and_risk_downgrade() -> None:
     # 同平台无风险词基线的对比:风险必须体现在分数上
     r3 = assess("某电视剧新剧开播", source="douban")
     assert r2.score < r3.score
+
+
+def test_proven_categories_from_business_facts() -> None:
+    """验证品类层(用户一线业务事实):资料/影视/漫剧/问卷/大瓜 命中即强信号。"""
+    from app.services.niche_fit import assess
+
+    # 五类验证品类全部可做
+    for title, src in (("2026考研英语真题答案解析", "weibo"),
+                       ("某剧全集在线看中字", "douban"),
+                       ("十月新番漫剧推荐合集", "bilibili"),
+                       ("花少2人格测试最新入口直达（可自取）", "weibo"),   # 回灌实证:共振×13
+                       ("某明星聊天记录截图曝光", "weibo")):
+        r = assess(title, source=src)
+        assert r.doable, f"{title} 应可做,got {r.level}"
+    # 验证品类的理由要可解释
+    r = assess("十月新番漫剧推荐合集", source="bilibili")
+    assert any(("验证品类" in x) or ("平台人群" in x) for x in r.reasons)
