@@ -131,3 +131,55 @@ def library_summary(session: Session, user_id: int, days: int = 90) -> dict:
         WechatPanLink.user_id == user_id)) or 0
     verified = len(resonance_resources(session, user_id, days=days, min_accounts=2, limit=10000))
     return {"total_links": int(total), "multi_account": int(verified), "days": days}
+
+
+def detect_viral_resources(session: Session, user_id: int, hours: int = 24,
+                           min_accounts: int = 3, limit: int = 5) -> list[dict]:
+    """资源级爆款检测(2026-10-01):近 N 小时被 ≥min_accounts 个号**新同发**的盘链。
+
+    与资源库(全历史沉淀)的区别:只看**近期新增**——多号突然同发同一资源是爆款苗头
+    (回灌实证:花少2人格测试被 13 个号同发),人还没反应过来时跟进去,转存扩散最强。
+    返回按号数降序的资源列表(含我方链状态)。
+    """
+    cutoff = datetime.now() - timedelta(hours=hours)
+    rows = session.execute(
+        select(WechatPanLink.pan_url,
+               func.count(func.distinct(WechatArticle.author)),
+               func.min(WechatArticle.created_at), func.max(WechatArticle.created_at))
+        .join(WechatArticle, WechatArticle.id == WechatPanLink.article_id)
+        .where(WechatPanLink.user_id == user_id, WechatArticle.created_at >= cutoff)
+        .group_by(WechatPanLink.pan_url)
+        .having(func.count(func.distinct(WechatArticle.author)) >= min_accounts)
+        .order_by(func.count(func.distinct(WechatArticle.author)).desc())
+        .limit(limit)).all()
+    return _rows_to_resources(session, user_id, rows)
+
+
+def push_viral_alerts(session: Session, user_id: int, settings=None) -> int:
+    """爆款资源预警 → 飞书(每小时 tick 调用;每链 48h 冷却;已转存/未转存分别提示)。"""
+    from config.settings import get_settings
+
+    settings = settings or get_settings()
+    from app.services.alert_service import feishu_alert_gate
+    from app.services.feishu_client import FeishuClient, webhook_for
+
+    hook = webhook_for(settings, "")
+    if not hook:
+        return 0
+    sent = 0
+    for r in detect_viral_resources(session, user_id):
+        if not feishu_alert_gate(session, user_id, "viral_res",
+                                 f"viral:{r['pan_url']}", 48, "爆款资源预警"):
+            continue
+        title = r["titles"][0] if r["titles"] else "(无标题)"
+        lines = [f"🔥 爆款资源在疯传(近24h 已被 {r['accounts']} 个号同发)",
+                 f"📄 {title}",
+                 f"🧭 {r['pan_type']} · 最近 {r['last_seen'][:10]}"]
+        if r["my_link"]:
+            lines.append("📦 我方链接(已转存,点开即用):")
+            lines.append(r["my_link"])
+        else:
+            lines.append("⏳ 尚未转存——建议尽快转存跟上,这种多号同发的需求扩散最强")
+        if FeishuClient(hook, settings.feishu_secret).send(chr(10).join(lines)):
+            sent += 1
+    return sent

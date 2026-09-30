@@ -210,9 +210,17 @@ def hot_source_tick_all_users(settings=None) -> int:
             try:
                 from app.services.tenant_base import _record_run
                 out = collect_hot_sources(db, uid)
+                # 资源级爆款检测(2026-10-01):多号突然同发某链 → 即时预警"赶紧跟"
+                try:
+                    from app.services.resource_library import push_viral_alerts
+
+                    out["viral"] = push_viral_alerts(db, uid, settings)
+                except Exception:  # noqa: BLE001 - 预警失败不挡采集
+                    logger.exception("爆款预警失败 user=%s", uid)
                 _record_run(db, uid, "hot_source",
                             "success" if not out["failed"] else "partial",
-                            f"ok={out['ok']} failed={out['failed']} items={out['items']}")
+                            f"ok={out['ok']} failed={out['failed']} items={out['items']}"
+                            + (f" viral={out['viral']}" if out.get("viral") else ""))
                 db.commit()
                 total += out["items"]
             except Exception:  # noqa: BLE001 - 单用户失败不影响其余

@@ -32,6 +32,7 @@ from app.db.models import (
     LoginLog,
     NotificationLog,
     RunRecord,
+    HotSourceItem,
     WeiboHotItem,
     WeiboTrend,
     FeishuAlert,
@@ -55,6 +56,7 @@ _TABLES = [
     (BaiduHotItem, "captured_at", False),
     (DouhotWatchSnap, "captured_at", False),
     (DouhotWindowSnap, "captured_at", False),  # 多窗口快照:与单窗口同类的时间序列,漏加会无限膨胀
+    (HotSourceItem, "captured_at", False),   # 多平台热榜(2026-10-01):290 条/小时,漏加 30 天膨胀 20 万条
     (WeiboTrend, "decided_at", False),
     (XianyuItem, "created_at", False),
     (XianyuSummary, "created_at", False),   # 每天一行的深采摘要(大 Text),漏加会无限膨胀

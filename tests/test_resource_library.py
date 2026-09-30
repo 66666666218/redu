@@ -62,3 +62,22 @@ def test_resource_profile_and_summary(session) -> None:
     assert resource_profile(session, 1, "https://pan.quark.cn/s/none") is None
     s = library_summary(session, 1)
     assert s["total_links"] == 1
+
+
+def test_detect_viral_resources(session) -> None:
+    """资源级爆款检测:近窗口内多号新同发的链才算(全历史老共振不算);号数排序。"""
+    from app.services.resource_library import detect_viral_resources
+
+    # 近 24h 三号同发(爆款) + 30 天前的三号同发(老共振,窗口外)
+    _mk(session, "花少2人格测试入口", "号A", "https://pan.quark.cn/s/viral", days_ago=0)
+    _mk(session, "花少2测试最新", "号B", "https://pan.quark.cn/s/viral", days_ago=0)
+    _mk(session, "花少2测试直达", "号C", "https://pan.quark.cn/s/viral", days_ago=0)
+    _mk(session, "老资源", "号A", "https://pan.quark.cn/s/old", days_ago=30)
+    _mk(session, "老资源2", "号B", "https://pan.quark.cn/s/old", days_ago=30)
+    _mk(session, "老资源3", "号C", "https://pan.quark.cn/s/old", days_ago=30)
+
+    v = detect_viral_resources(session, 1, hours=24, min_accounts=3)
+    assert len(v) == 1 and v[0]["accounts"] == 3 and "viral" in v[0]["pan_url"]
+    # 窗口对齐:全历史视角(90 天)两条都算
+    v2 = detect_viral_resources(session, 1, hours=24 * 90, min_accounts=3)
+    assert len(v2) == 2
