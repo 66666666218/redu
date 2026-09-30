@@ -56,5 +56,20 @@ services:
       retries: 3
       start_period: 30s
 
+  # ---- 可选:WeRSS 公众号列表源(v2.1.0 抗停维体系的一环) ----
+  # 默认不启动;启用: docker compose --profile werss up -d
+  # 不启用时,监听走 自研Wemp(凭据自持)→ 读书平台 → 微信读书cover 的降级链,功能不受影响。
+  # 只绑 127.0.0.1(带管理界面,不进公网);首次需浏览器授权(见 doc/operations.md §4g)。
+  we-mp-rss:
+    image: docker.1ms.run/rachelos/we-mp-rss:latest
+    profiles: ["werss"]
+    container_name: we-mp-rss
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8001:8001"
+    volumes:
+      - werss_data:/app/data
+
 volumes:
   mysql_data:
+  werss_data:

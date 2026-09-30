@@ -1,89 +1,98 @@
-# redian 架构:热点数据基础设施 + 事件检测 + AI 分析 + 分发
+# 项目架构（v2.1.0，2026-10-01）
 
-> 定位:**基于统一 Hotspot→Event 模型,对多平台热点进行采集、标准化、去重聚类、
-> 跨平台关联、趋势计算、生命周期识别,再通过规则引擎和 Agent 做预测与智能分发的
-> 多租户实时热点监控平台。**
+> 本文是项目的**整体说明**：分层、数据流、部署拓扑、外部依赖与作业矩阵。
+> 快速上手见 README；接口规范见 doc/API.md；运维手册见 doc/operations.md。
 
-## 数据流总览
+## 1. 总体形态：单体应用 + 可选外部容器
 
-```text
-  用户(JWT/RBAC)
-      │
-  FastAPI API ──── Vue3 SPA(后端托管)
-      │
-  ┌───┴────────────────┬───────────────────┐
-  │ 采集层(APScheduler │ 分析层             │ 分发层
-  │ 原子抢占/每源独立作业)│                    │
-  ├─ 微博  ─┐          ├─ 跨轮判涨(recent_growth│ ├─ 飞书六群分流
-  ├─ 百度  ─┤ 快照入库  │   时间感知环比)      │ ├─ 邮件(送达日志/重试)
-  ├─ 抖音  ─┤ (时序快照)├─ 五信号加权评分     │ └─ 站内/告警记录
-  ├─ 闲鱼  ─┘ 每轮带    │   生命周期状态机     │
-  └─ 公众号(读书源)     │   (观察→苗头→上升    │
-      │                │    →爆发→回落)      │
-      ▼                ├─ 规则引擎(确定性)   │
-  事件层 Hotspot→Event │ ├─ 熔断/冷却/退避   │
-  规范化+Dice聚类      │ └─ LLM 只做叙事/评级 │
-  (bigram+对立词防护)  └───────────────────┘
-      │
-  Event Store(hotspot_events + memberships)
-  首见/最近seen/峰值/平台数/复燃计数/增长率
+本项目是**一个 Python 单体应用**（`app/` 包），不是微服务：
+
+```
+D:\code\redian
+├── app/                 # 应用本体（FastAPI + APScheduler 内嵌调度器）
+│   ├── api/             # 路由层：14 文件 1533 行（auth/cookies/wechat/collect/admin/...）
+│   ├── services/        # 业务层：50 文件 13623 行
+│   │   ├── wechat/      #   公众号域包（v2.1.0 自 2917 行上帝模块拆分）
+│   │   ├── feishu/      #   飞书域包（_cards 排版 / _jobs 推送）
+│   │   ├── hotspot_agent / agent_learning / early_agent   # 热点选题 Agent 家族
+│   │   └── ...          #   采集器（weibo/xianyu/douhot/baidu/quark/weread）
+│   ├── db/              # 数据层：models/repository/database/maintenance
+│   └── utils/           # 基础设施：logger/proxy(代理免疫)/retry
+├── frontend/            # Vue SPA 源码 → 构建到 app/static/spa（后端挂载）
+├── config/              # pydantic-settings 配置（.env 驱动）
+├── scripts/             # 运维剧本（回填/探测/看门狗/一键脚本）
+├── tests/               # 544 项测试（含未定义名守卫 test_undefined_names）
+├── data/                # SQLite 数据（platform.db + archive/ 归档）
+└── docker-compose.yml   # 远程 VPS 部署（MySQL 方言）
 ```
 
-## 分层说明
+**外部可选容器**（不合并进代码，见 §4）：`we-mp-rss`（WeRSS 列表源，127.0.0.1:8001）。
 
-### 采集层(每源独立、失败不互相拖死)
-- 每平台独立采集器 + 独立调度作业;公众号监听独立 tick(长任务不阻塞其它板块)。
-- 调度为 **执行前原子抢占**(`claim_schedule`,条件 UPDATE),多进程部署不会双跑。
-- **熔断/冷却**:闲鱼滑块/WAF → 指数退避冷却(30→240 分钟);搜狗验证码 ≥2 词熔断;
-  空数据 ≠ 成功(解析 0 条抛错走 retry);网关空响应单独识别为 WAF 拦截。
-- 采集失败一律记 RunRecord(failed),与"正常无数据"严格区分。
+## 2. 分层与数据流
 
-### 事件层(Hotspot → Event)
-- 标题规范化(去话题符/标点/热搜后缀)→ 字符 bigram **Dice** 相似度(对语序变化
-  比 Jaccard 宽容)→ **强对立词对防护**(结婚/离婚相似度再高也不归并)。
-- 生命周期事实:首见/最近 seen/峰值(值+时刻)/平台数/样本数/复燃计数/最近增长率;
-  超 72h 无新快照自动 `ended`;7 天内重现 → 重激活并计复燃。
-- 每 15 分钟归属一轮(membership 时间戳前进才计数,重跑幂等)。
-- 查询出口:`GET /api/events`(聚类结果)、`GET /api/trending`(跨平台标准化快照,
-  新数据源零改库接入)。
+```
+                          ┌─────────────── 采集层（调度器驱动）────────────────┐
+  微博/百度/抖音/闲鱼  ──▶  collector(douhot/window) / tenant(run_*) ──▶ SQLite
+  公众号(微信读书/WeRSS/自研Wemp) ──▶ wechat/_listen 分组轮换监听 ──▶ SQLite
+                          └──────────────────────┬───────────────────────────┘
+                                                 ▼
+                    分析层: keyword_agent(涨跌) → hotspot_agent(选题建议+机会分)
+                            → 结算(盘链扩散 repost_gain) → agent_learning(回测权重)
+                                                 ▼
+                    推送层: feishu/_jobs(日报/洞察/实时/资源共振卡) + notifier(邮件)
+                            + alerts(站内告警) + 飞书告警(失败/恢复确认/停摆)
+                                                 ▼
+                    接口层: app/api/*（82 路由，见 API.md）──▶ Vue SPA（挂载 /spa）
+```
 
-### 分析层(规则负责稳定,AI 负责理解)
-- **确定性规则**:跨轮判涨(时间感知环比,掉榜回榜不算环比)、五信号加权评分
-  (增速/新上榜/连续/量级/共振/排名/加速,权重自学习 ±30%)、生命周期状态机。
-- **AI**:LLM 仅做叙事/评级,输出经防御式解析,不直接写业务表;失败静默降级。
-- **自学习回测**:每日对 2 天前苗头检查后续走势(基线取推送时刻前样本),
-  命中率驱动权重自适应,样本去重防重复记账。
+**多租户**：所有业务表带 `user_id`；调度按用户 `user_schedules` 开关；凭据经 `cookie_store` 加密隔离。
 
-### 分发层
-- 飞书六群分流(总群+各板块专属群)、邮件(SMTP,密码加密存储)。
-- 告警冷却门全局统一:**发送成功才落冷却,失败回滚下轮再推**;关键事件
-  (notify_incident)带送达日志+一次重试(NotificationLog 可审计)。
-- 免打扰时段:非紧急内容延后,紧急(盘链/爆点)不受限。
+## 3. 部署拓扑（双环境分工，operations.md §12）
 
-### 可观测性
-- `/healthz`(公开)、生产自检脚本、密钥泄露扫描。
-- **数据源健康中心**:`GET /api/source-health` + 前端页——每源
-  HEALTHY/DEGRADED/CIRCUIT_OPEN 三态,聚合新鲜度/24h 失败数/熔断状态/Cookie 在位。
-- RunRecord 全量留痕;自动备份(SQLite 在线备份+完整性校验,非 0 字节假备份)。
+| 环境 | 承载 | 原因 |
+|---|---|---|
+| **本机（家庭 Windows）** | 公众号监听 + 闲鱼 + 全部推送/Agent/前端 | 微信读书 Cookie 绑家宽出口 IP；闲鱼住宅 IP 过滑块 |
+| **远程 VPS（redu.tian1she.xyz）** | 微博/百度/抖音热点采集 | 这些 Cookie 在 VPS 有效；MySQL 部署 |
+| **本机容器** | WeRSS（可选列表源） | 只绑 127.0.0.1，不进公网 |
 
-## 多租户
-- 业务查询全部按 JWT `user_id` 隔离(审计核对过全部 {id} 端点,无 IDOR)。
-- Cookie 按用户 Fernet 加密存储;全局 key(如 dajiala)收敛为 admin-only。
-- 告警规则/监控词/会员/事件均按用户隔离。
+本机进程：`pythonw -m uvicorn app.platform:app`（看门狗 `scripts/win/app_watchdog.bat` 每小时自愈）。
 
-## 规模触发项(当前单机自用阶段不做,避免过度设计)
-| 触发条件 | 动作 |
-|---|---|
-| 单表 > 5000 万行 / 查询 p95 > 1s | 快照迁 ClickHouse/TimescaleDB(现有表结构即时序,平移即可) |
-| 多机部署 / 单平台采集成为 CPU 瓶颈 | 采集改任务队列(Redis + Worker);调度已支持分布式抢占 |
-| 对外商业化 | Tenant 配额(关键词数/数据源数/AI 次数)+ Billing;多租户骨架已就绪 |
+## 4. 列表源体系（v2.1.0 抗停维设计）
 
-## 面试叙事(30 秒版)
-"这是一个多租户热点监控平台:五个平台(微博/闲鱼/抖音/百度/微信公众号)的采集器
-各自带熔断冷却与失败隔离,快照统一入库后,通过规范化加字符 bigram Dice 相似度
-(带对立词防护)把跨平台同主题标题聚合成事件,事件层维护首见/峰值/平台数/复燃等
-生命周期事实;其上是确定性规则引擎(时间感知环比、五信号加权评分、状态机)做苗头
-识别,权重由每日回测自学习;LLM 只做叙事与评级且输出经过校验。分发侧飞书六群
-分流,告警有统一冷却门——发送成功才落冷却,失败自动重试并记送达日志。调度用
-执行前原子抢占防多进程双跑;数据侧是加窗口的时序快照查询,自动化备份带完整性
-校验。"
+公众号"免费全量列表"按**四级降级链**取数，任一环失效链路照常工作：
+
+```
+WeRSS(容器,成熟实现,含free_publish降级)
+  → 自研 WempClient(wemp_client.py,协议自持,凭据在 system_config[wemp_cred_uid])
+  → 读书平台(第三方托管,可配)
+  → 微信读书 cover(终极兜底,只保最新一篇)
+```
+
+- **运行时切换**：`MultiSourceClient` 依次尝试，异常切下一源 + 进程内熔断 10 分钟；
+- **可观测**：`GET /api/admin/health` → `list_sources` 字段；
+- **不赌单一开源项目**：WeRSS 同类有停维前科（wewe-rss 归档 / wechat-article-exporter 停维）；
+  自研实现 + 凭据自持 + 镜像固化（`D:\werss\we-mp-rss-image-*.tar`）三层防御。
+
+## 5. 调度作业矩阵（内嵌 APScheduler，24 线程）
+
+| 作业 | 频率 | 职责 |
+|---|---|---|
+| collect_tick | 每分钟 | 四板块按用户间隔采集（微博/百度/抖音/闲鱼） |
+| wechat_collect_tick | 4/8/14/20 点 | 公众号监听（142 号**分组轮换**，36 号/轮） |
+| weread_refresh_tick | 每 6 小时 :50 | 微信读书 Cookie 主动续期（rt 单次编码自洽） |
+| douhot_window_tick | 20 分钟 | 抖音多窗口对比 |
+| hotspot_agent_tick | 9/15/21 点 | 热点选题建议（LLM 教学式输出） |
+| settle_suggestions | 22:00 | 建议结算（盘链扩散增量）+ acted 自动归因 |
+| event_assign | 15 分钟 | 跨平台事件归并 |
+| run_feishu_* | 定点 | 日报/洞察/实时推送 |
+| pan_cookie_keepalive | 7:00 | 网盘 Cookie 保活 |
+| check_collect_failures / health_stalls | 30 分钟 | 失败聚合告警（含 ✅ 恢复确认）/ 停摆告警 |
+| cleanup_old_data | 4:00 | 数据保留治理 |
+
+## 6. 关键工程约束（踩坑沉淀）
+
+1. **采集器会话资产**：微信读书/闲鱼/WeRSS 均"会话敏感"——禁并发同会话（互斥锁）、禁运行中直写其 SQLite（WAL）、换 Cookie 用 Network 请求头整串。
+2. **wechat/ 子模块不可直接 import**：经 `app.services.wechat_monitor` 门面（子模块头部依赖门面）。
+3. **系统代理免疫**：`disable_env_proxies()` 三入口生效，代理软件崩溃不再毒杀采集。
+4. **告警必须有下文**：失败告警带评估时间戳，恢复必发 ✅ 确认（新旧消息可辨）。
+5. **手术脚本纪律**：AST 切割/基线对比验证，正则边界含 `class/Assign`，防吞常量。
