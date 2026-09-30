@@ -494,6 +494,13 @@ WeRSS 挂了会怎样:它的异常是 `PlatformError` 的子类,监听会**降�
 
 ## 10. 闲鱼风控体系(现状)
 
+> **换 Cookie 用扫码脚本(2026-10-01 起)**:`python scripts/xianyu_login.py`——
+> 终端显示二维码 → 手机闲鱼 App 扫码确认 → Cookie **自动加密入库**(三件套校验后),
+> 不再需要 F12 手工复制(手工复制最易漏 `_m_h5_tk`/`unb`/`cookie2` 导致 TOKEN_ILLEGAL)。
+> 协议按公开实现调研后独立实现(passport.goofish.com 二维码流程),curl_cffi TLS 指纹同采集侧。
+> 采集侧另有**三件套完整性前置校验**:残缺 Cookie 直接 skipped 并给出指引,不再空转一轮。
+> ⚠️ 仍适用:扫码后尽量别再用浏览器开闲鱼(会话互顶);连续失败先观察 1-2 个调度周期(间歇风控会自愈)。
+
 - 传输层 curl_cffi 模拟 Chrome TLS 指纹;证书校验默认开启,本机 CA 损坏(curl:77)自动降级并告警一次。
 - 每轮只抓 `XIANYU_BATCH_KEYWORDS`(默认 5)个关键词,按运行次数轮转窗口;请求间隔
   `XIANYU_REQUEST_DELAY`(默认 8s)带 ±20% 抖动。
