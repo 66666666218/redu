@@ -2,7 +2,7 @@
 
 本文件只做**兼容 re-export**:历史调用方(`from app.services.wechat_monitor import X`)
 与测试引用的私有名、以及 monkeypatch 目标(requests/WereadError 等外部名)全部保持可用;
-新代码请直接 import 子模块。
+新代码请经本门面引用(直接 import 子模块会触发循环导入:子模块头部依赖门面)。
 """
 # ---- 原 wechat_monitor.py 的完整 import 区(门面兼容:monkeypatch 目标与测试可见名) ----
 from __future__ import annotations
