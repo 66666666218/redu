@@ -263,12 +263,37 @@ def _proven_titles(db: Session, user_id: int, limit: int = 12) -> list[str]:
     return seen
 
 
+def _plan_text(p: dict) -> str:
+    """LLM 建议字段 → 教学式文本(≤500,入库 plan 列与飞书卡通用)。
+
+    2026-09-30 方法论化(用户要求):从"罗列四件套"升级为
+    「为什么能做→做什么→给谁→时机→三步走」——每条建议自带可照做的利用路径,
+    而不是只报"哪个热点高就去发"。
+    """
+    seg: list[str] = []
+    if p.get("why_doable"):
+        seg.append("【为什么能做】" + str(p["why_doable"]))
+    res = "【做什么】" + (str(p.get("resource")) or "?")
+    if p.get("title"):
+        res += " | 标题:" + str(p["title"])
+    seg.append(res)
+    seg.append("【给谁】" + (str(p.get("audience")) or "?")
+               + (f" | 钩子:{p.get('hook')}" if p.get("hook") else ""))
+    if p.get("timing"):
+        seg.append("【时机】" + str(p["timing"]))
+    if p.get("steps"):
+        seg.append("【三步走】" + str(p["steps"]))
+    return "\n".join(seg)[:500]
+
+
 def _llm_plan(settings: Settings, hotspots: list[dict],
               supply: list[WechatArticle], proven: list[str]) -> dict:
     """一次 LLM 调用同时完成:①热点↔资源语义匹配 ②无资源热点的拉新选题。
 
-    返回 {"matches": {热点词: {"article_id": id, "why": 一句话}},
-          "plans": {热点词: "资源:… | 标题:… | 人群:… | 拉新点:…"}};失败/未配 key 返回 {}。
+    2026-09-30 方法论化:输出从"四件套"升级为教学式(为什么能做/做什么/给谁/时机/三步走),
+    plans[kw] 为字段 dict,展示用 _plan_text() 组装。
+    返回 {"matches": {热点词: {"article_id": id, "why": 教怎么盘活旧资源}},
+          "plans": {热点词: 字段dict}};失败/未配 key 返回 {}。
     """
     if not settings.deepseek_api_key or not hotspots:
         return {}
@@ -295,9 +320,12 @@ def _llm_plan(settings: Settings, hotspots: list[dict],
             json={"model": settings.deepseek_model,
                   "messages": [
                       {"role": "system", "content":
-                       "你是网盘拉新运营专家,专注「项目拆解/网盘资源」赛道。商业模式:"
+                       "你是网盘拉新运营教练,专注「项目拆解/网盘资源」赛道。商业模式:"
                        "借社会热点制作/整理「配套资料」(课件/真题/模板/安装包/壁纸/攻略),"
                        "用夸克网盘分享链发布,用户为拿资料必须转存 → 完成拉新。"
+                       "你的任务不是报告哪个热点火,而是**教会运营怎么利用这个热点**:"
+                       "每条建议都要讲清「为什么这个热点的人群会非要一份文件不可(需求缺口)"
+                       "→ 做什么资料 → 发什么标题 → 给谁 → 什么时机发 → 新手三步怎么落地」。"
                        "选题铁律:①热点事件决定人群,人群决定他们非要不可的那份资料;"
                        "宁要一个急用人群,不要十个围观者;"
                        "②热点可以来自任何领域(体育/影视/节日/社会事件),但变现方案"
@@ -314,13 +342,20 @@ def _llm_plan(settings: Settings, hotspots: list[dict],
                          + proven_block
                        + "\n\n严格只输出一个 JSON 对象(无多余文字/无代码围栏):\n"
                          '{"matches": [{"hotspot": "热点词", "article_id": 资源文id,'
-                         ' "why": "一句话说明相关性"}],\n'
-                         ' "plans": [{"hotspot": "热点词", "resource": "具体到文件内容的资料清单",'
+                         ' "why": "一句话教运营怎么借这个热点盘活这份旧资源(切入角度/标题怎么改/怎么组合)"}],\n'
+                         ' "plans": [{"hotspot": "热点词",'
+                         ' "why_doable": "一句话讲透需求缺口:这个热点的人群此刻会搜什么/缺什么文件",'
+                         ' "resource": "具体到文件内容的资料清单",'
                          ' "title": "1条发布标题(带时效词/人群词)", "audience": "谁非要不可",'
-                         ' "hook": "为什么必须转存(拉新点)",' ' "keywords": ["用户会搜索的资源词1", "词2", "词3"]}]}\n'
+                         ' "hook": "为什么必须转存(拉新点)",'
+                         ' "timing": "发布时机:热点发酵窗口(几小时内动手/热度还能持续几天)",'
+                         ' "steps": "三步执行清单:①… ②… ③…(每步一个具体动作,教新手落地)",'
+                         ' "keywords": ["用户会搜索的资源词1", "词2", "词3"]}]}\n'
                          "规则:matches 只收语义真正相关的资源(没有就空数组);"
-                         "matches 里没有对应资源的热点必须给 plan;禁止编造不存在的 article_id。"}],
-                  "temperature": 0.5, "max_tokens": 1200},
+                         "matches 里没有对应资源的热点必须给 plan;禁止编造不存在的 article_id。"
+                         "你的输出是教一个新手「怎么利用这条热点」,不是报告热度——"
+                         "每条建议都要给到能照着做的程度。"}],
+                  "temperature": 0.5, "max_tokens": 1600},
             timeout=60)
         if resp.status_code >= 400:
             logger.warning("热点 LLM 规划失败 HTTP %s", resp.status_code)
@@ -348,9 +383,11 @@ def _llm_plan(settings: Settings, hotspots: list[dict],
         if not kw:
             continue
         kws = [str(x).strip() for x in (p.get("keywords") or []) if str(x).strip()]
-        parts = [f"资源:{p.get('resource') or '?'}", f"标题:{p.get('title') or '?'}",
-                 f"人群:{p.get('audience') or '?'}", f"拉新点:{p.get('hook') or '?'}"]
-        plans[kw] = {"text": " | ".join(parts), "keywords": kws}
+        plans[kw] = {"why_doable": str(p.get("why_doable") or ""),
+                     "resource": str(p.get("resource") or ""), "title": str(p.get("title") or ""),
+                     "audience": str(p.get("audience") or ""), "hook": str(p.get("hook") or ""),
+                     "timing": str(p.get("timing") or ""), "steps": str(p.get("steps") or ""),
+                     "keywords": kws}
     return {"matches": matches, "plans": plans}
 
 
@@ -445,10 +482,7 @@ def burst_plan(db: Session, user_id: int, topics: list[str],
                 continue
         p = (llm.get("plans") or {}).get(t)
         if p:
-            # p 是 _llm_plan 返回的四件套 dict(resource/title/audience/hook),
-            # 拼成文本入库——旧代码 p[:500] 对 dict 切片,KeyError: slice 必炸(2026-09-30 修复)
-            plan_text = ("资源:" + str(p.get("resource") or "?") + " | 标题:" + str(p.get("title") or "?")
-                         + " | 人群:" + str(p.get("audience") or "?") + " | 拉新点:" + str(p.get("hook") or "?"))
+            plan_text = _plan_text(p)
             lines.append(f"⚡《{t}》爆发{_resonance_tag(h)} → {plan_text}")
             db.add(HotspotSuggestion(user_id=user_id, keyword=t, growth=0, kind="llm",
                                      plan=plan_text[:500],
@@ -626,7 +660,7 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
         h = by_kw.get(kw, {"growth": 0, "platforms": "douyin"})
         row = HotspotSuggestion(
             user_id=user_id, keyword=kw, growth=h.get("growth", 0), kind="llm",
-            resource_title="", link="", plan=plan["text"][:500],
+            resource_title="", link="", plan=_plan_text(plan),
             platforms=str(h.get("platforms") or "douyin"),
             opportunity=float(h.get("opportunity") or 0))
         db.add(row)
@@ -656,7 +690,7 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
     for kw, plan in plan_by_kw.items():
         h = by_kw.get(kw, {})
         entries.append((float(h.get("opportunity") or 0),
-                        f"💡[# {row_ids.get(kw, '?')}] {kw}{_resonance_tag(h)}{_window_tag(h)} → {plan['text']}",
+            f"💡[# {row_ids[kw]}] {kw}{_resonance_tag(h)}{_window_tag(h)}\n{_plan_text(plan)}",
                         ""))
     entries.sort(key=lambda x: -x[0])
     lines = ["🎯 优先发货(机会分 top):"]

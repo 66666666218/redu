@@ -100,7 +100,7 @@ onMounted(load)
           <td style="max-width:300px;font-size:12px">
             <div v-if="s.resource_title">{{ s.resource_title }}</div>
             <a v-if="s.link" :href="s.link" target="_blank" class="muted">{{ s.link.slice(0, 32) }}…</a>
-            <div class="muted" v-if="s.plan" style="white-space:pre-wrap">{{ s.plan.slice(0, 120) }}</div>
+            <div class="muted" v-if="s.plan" style="white-space:pre-wrap">{{ s.plan }}</div>
           </td>
           <td>
             <button :style="{ background: s.acted ? '#0a0' : '' }" @click="toggleActed(s)">
