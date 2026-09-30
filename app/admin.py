@@ -527,8 +527,16 @@ def retry_run(db: Session, run_id: str, settings=None) -> dict:
     runner = _retry_runners().get(run.kind)
     if not runner:
         return {"ok": False, "msg": f"未知板块 {run.kind}"}
+    kwargs: dict = {}
+    if run.kind == "wechat_listen":
+        # 分组轮换:重跑失败轮所在的同一组(cursor 语义见 retry_failed_runs)
+        import re as _re
+
+        m = _re.search(r"cursor=(\d+)", run.detail or "")
+        if m:
+            kwargs["batch_index"] = int(m.group(1))
     try:
-        res = runner(db, run.user_id, settings)
+        res = runner(db, run.user_id, settings, **kwargs)
         if _retry_blocked(res):
             # 撞上了在跑的那一轮(run_wechat_listen 自己已落 skipped 记录):
             # 原失败记录保持 failed,交给下一次重试扫描。
@@ -607,8 +615,18 @@ def retry_failed_runs(max_retry: int = 3) -> dict:
             runner = runners.get(run.kind)
             if not runner:
                 continue
+            kwargs: dict = {}
+            if run.kind == "wechat_listen":
+                # 分组轮换(2026-09-30):失败轮的 detail 带 cursor=原始游标值,
+                # 重试必须重跑**同一个失败组**——默认推进会查下一组,失败组的号
+                # 就要等完整循环(最长 24h)才被再次覆盖。
+                import re as _re
+
+                m = _re.search(r"cursor=(\d+)", run.detail or "")
+                if m:
+                    kwargs["batch_index"] = int(m.group(1))
             try:
-                res = runner(db, run.user_id, settings)
+                res = runner(db, run.user_id, settings, **kwargs)
                 if _retry_blocked(res):
                     continue    # 撞上在跑的一轮:保持 failed,等下一次扫描再试,不关闭记录
                 # 采集成功:关闭旧失败记录,阻止同一失败被反复重试

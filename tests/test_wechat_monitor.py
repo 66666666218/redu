@@ -3765,15 +3765,15 @@ def test_listen_batch_rotation_advances_cursor(session) -> None:
     st = _settings(wechat_listen_batch_size=2)
     out1 = wechat_monitor.run_wechat_listen(session, 1, settings=st)
     assert out1["status"] in ("success", "skipped")
-    assert "accounts=2" in _last_detail() and "batch=1/3(size=2)" in _last_detail()
+    assert "accounts=2" in _last_detail() and "batch=1/3(size=2,cursor=" in _last_detail()
     out2 = wechat_monitor.run_wechat_listen(session, 1, settings=st)
-    assert "accounts=2" in _last_detail() and "batch=2/3(size=2)" in _last_detail()
+    assert "accounts=2" in _last_detail() and "batch=2/3(size=2,cursor=" in _last_detail()
     out3 = wechat_monitor.run_wechat_listen(session, 1, settings=st)
-    assert "accounts=1" in _last_detail() and "batch=3/3(size=2)" in _last_detail()
+    assert "accounts=1" in _last_detail() and "batch=3/3(size=2,cursor=" in _last_detail()
 
     # 第四次:游标回绕到第 1 组
     wechat_monitor.run_wechat_listen(session, 1, settings=st)
-    assert "batch=1/3(size=2)" in _last_detail()
+    assert "batch=1/3(size=2,cursor=" in _last_detail()
 
     # batch_size=0:逃生门,全量 5 号,无 batch 字样
     st_full = _settings(wechat_listen_batch_size=0)
@@ -3793,11 +3793,11 @@ def test_listen_batch_explicit_index_no_cursor(session) -> None:
     wechat_monitor.run_wechat_listen(session, 1, settings=st,
                                      batch_index=1, batch_size=2)
     run = session.scalars(select(RunRecord).order_by(RunRecord.id.desc())).first()
-    assert "accounts=2" in run.detail and "batch=2/2(size=2)" in run.detail
+    assert "accounts=2" in run.detail and "batch=2/2(size=2,cursor=" in run.detail
     # 游标未被消耗:下一次默认轮转应从 0 开始
     st_rot = _settings(wechat_listen_batch_size=2)
     wechat_monitor.run_wechat_listen(session, 1, settings=st_rot)
-    assert "batch=1/2(size=2)" in session.scalars(
+    assert "batch=1/2(size=2,cursor=" in session.scalars(
         select(RunRecord).order_by(RunRecord.id.desc())).first().detail
 
 

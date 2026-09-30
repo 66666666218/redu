@@ -439,7 +439,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
             batch_index = _advance_listen_cursor(session, user_id)
         start = batch_index % n_groups
         rows = all_rows[start * effective_bs:(start + 1) * effective_bs]
-        batch_pos = f" batch={start + 1}/{n_groups}(size={effective_bs})"
+        # cursor=原始游标值(未取模):重试路径据此重跑**同一个失败组**,而不是推进到下一组
+        batch_pos = f" batch={start + 1}/{n_groups}(size={effective_bs},cursor={batch_index})"
     cookie = _root._weread_cookie(session, user_id, settings)
     if not cookie:
         _record_run(session, user_id, "wechat_listen", "skipped",
