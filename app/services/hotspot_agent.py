@@ -88,7 +88,8 @@ def _platform_hot_candidates(db: Session, user_id: int, top_rank: int = 10,
         e["plats"].add(str(src))
         e["best_rank"] = min(e["best_rank"], int(rank or 99))
     out = [{"keyword": e["title"], "growth": 0.0,
-            "platforms": "+".join(sorted(e["plats"])), "rank": e["best_rank"]}
+            "platforms": "+".join(sorted(e["plats"])), "rank": e["best_rank"],
+            "auto": True}  # 自动发现型:需过适配度;用户自选监控词(growth 型)不拦
            for e in agg.values()]
     out.sort(key=lambda h: (-len(h["platforms"].split("+")), h["rank"]))
     return out[:15]
@@ -227,7 +228,10 @@ def _opportunity(db: Session, user_id: int, hotspots: list[dict],
     _window_factor(db, user_id, hotspots)
     for h in hotspots:
         h["competition"] = _competition_factor(supply, h["keyword"])
-        h["opportunity"] = h["effective_growth"] * h["competition"] * h["window_factor"]
+        _fit = h.get("fit")
+        _fit_score = _fit.score if _fit is not None else 1.0  # burst 路径无 fit,不惩罚
+        h["opportunity"] = (h["effective_growth"] * h["competition"] * h["window_factor"]
+                            * max(_fit_score, 0.3))  # 适配度是乘数但设下限:弱适配不清零需求
     hotspots.sort(key=lambda x: x["opportunity"], reverse=True)
 
 
@@ -290,6 +294,17 @@ def _proven_titles(db: Session, user_id: int, limit: int = 12) -> list[str]:
         if len(seen) >= limit:
             break
     return seen
+
+
+def _fit_line(h: dict) -> str:
+    """适配度一行(给运营的"为什么值得做";v2.3.0 用户命题:利用路径要可见)。"""
+    fit = h.get("fit")
+    if fit is None:
+        return ""
+    tag = {"strong": "🎯强适配", "mid": "🟡可做", "weak": "⚪弱"}.get(fit.level, "")
+    why = fit.reasons[0] if fit.reasons else ""
+    win = {"longtail": " · 长尾常青", "instant": " · 抢时效"}.get(fit.window, "")
+    return f"   {tag} {why}{win}\n"
 
 
 def _plan_text(p: dict) -> str:
@@ -616,6 +631,18 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
             hotspots = [{"keyword": str(kw), "growth": float(g or 0)} for kw, g in rows2]
             if not hotspots:
                 return {"status": "no_hotspots"}
+    # v2.3.0 网盘拉新适配度(用户命题):监控热点的唯一目的是拉新——
+    # 先把"不能资料化"的热点(纯新闻围观/无文件交付物)挡在 LLM 之前,
+    # 省 token、降噪,且每条进 LLM 的候选都自带"为什么值得做"的可解释理由。
+    from app.services.niche_fit import assess_many
+
+    # 只拦自动发现型的弱适配热点;用户自选监控词(douhot,已表达跟随意向)直通,
+    # fit 仍会计算——仅用于机会分权重与卡片展示("为什么值得做")
+    hotspots = [h for h in assess_many(hotspots)
+                if h["fit"].doable or not h.get("auto")]
+    if not hotspots:
+        return {"status": "no_doable_hotspots"}  # 有热点但都不适配网盘拉新
+
     # 多平台共振:微博/百度新上榜交叉验证,共振热点加权上浮(输入去单一化)
     _resonance(db, user_id, hotspots)
 
@@ -726,7 +753,7 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
     for kw, plan in plan_by_kw.items():
         h = by_kw.get(kw, {})
         entries.append((float(h.get("opportunity") or 0),
-            f"💡[# {row_ids[kw]}] {kw}{_resonance_tag(h)}{_window_tag(h)}\n{_plan_text(plan)}",
+            f"💡[# {row_ids[kw]}] {kw}{_resonance_tag(h)}{_window_tag(h)}\n{_fit_line(h)}{_plan_text(plan)}",
                         ""))
     entries.sort(key=lambda x: -x[0])
     lines = ["🎯 优先发货(机会分 top):"]
