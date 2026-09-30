@@ -466,7 +466,10 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
                 long = days is not None and days >= escalate_days
                 long_txt = f"  【长期】已 {days} 天未成功,建议人工处理" if long else ""
                 head = "🔴 " if long else "⚠️ "
-                msg = f"{head}采集持续失败(近24h) · 用户#{uid} 板块[{kind}] 失败 {cnt} 次{extra}{long_txt}"
+                # 带评估时间戳(2026-09-30):历史消息与新消息并存时,一眼分清新旧——
+                # 用户三次把凌晨/上午的旧告警当成新告警发回来问(误判恢复状态)
+                msg = (f"{head}采集持续失败(近24h) · 评估于 {datetime.now():%m-%d %H:%M} · "
+                       f"用户#{uid} 板块[{kind}] 失败 {cnt} 次{extra}{long_txt}")
                 # 按板块路由:主群 + 该平台专属群 都发(互不替代)
                 for wh in webhooks_for(settings, kind):
                     if FeishuClient(wh, settings.feishu_secret).send(msg):
