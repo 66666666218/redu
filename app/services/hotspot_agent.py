@@ -32,7 +32,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
-from app.db.models import (BaiduHotItem, DouhotWatchSnap, HotspotSuggestion,
+from app.db.models import (WechatPanLink, BaiduHotItem, DouhotWatchSnap, HotspotSuggestion,
                            SystemConfig, WechatArticle, WeiboHotItem)
 from app.services import alert_service
 from app.utils import get_logger
@@ -254,13 +254,38 @@ def _safe_author(name: str, settings: Settings | None = None) -> str:
 
 
 def _supply_articles(db: Session, user_id: int, hours: int = 72) -> list[WechatArticle]:
+    """资源候选:近 72h 对标资源文 + **资源库全历史高共振资源**(v2.4.0)。
+
+    资源库实证:高共振资源(同链被多号同发)是验证过的金矿,却常沉在 72h 窗口外
+    (如"霸王茶姬教程 ×5 号"横跨数周)。把它们的文章排到候选前面,
+    LLM 输入(取前 60)自然优先看到验证过的资源;不改标题(字面匹配逻辑依赖)。
+    """
     cutoff = datetime.now() - timedelta(hours=hours)
-    return list(db.scalars(select(WechatArticle).where(
+    near = list(db.scalars(select(WechatArticle).where(
         WechatArticle.user_id == user_id,
         WechatArticle.created_at >= cutoff,
         WechatArticle.pan_urls.isnot(None),
         WechatArticle.pan_urls != "",
     ).order_by(WechatArticle.created_at.desc()).limit(300)).all())
+    try:
+        from app.services.resource_library import resonance_resources
+
+        hot = resonance_resources(db, user_id, days=90, min_accounts=2, limit=20)
+        if hot:
+            have = {a.id for a in near}
+            ids = db.scalars(select(WechatPanLink.article_id).where(
+                WechatPanLink.user_id == user_id,
+                WechatPanLink.pan_url.in_([r["pan_url"] for r in hot]))).all()
+            extra = list(db.scalars(select(WechatArticle).where(
+                WechatArticle.user_id == user_id,
+                WechatArticle.id.in_(ids),
+                WechatArticle.pan_urls.isnot(None), WechatArticle.pan_urls != "",
+            ).order_by(WechatArticle.created_at.desc()).limit(60)).all())
+            # 验证过的排最前(去重)
+            near = [a for a in extra if a.id not in have] + near
+    except Exception:  # noqa: BLE001 - 资源库增强失败不挡选题
+        logger.debug("资源库候选增强失败", exc_info=True)
+    return near[:360]
 
 
 def _match_supply(keyword: str, articles: list[WechatArticle]) -> WechatArticle | None:

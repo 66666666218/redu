@@ -100,6 +100,20 @@ ewsnow-image-20261001.tar（51MB，docker load 可恢复）
   （与命中新平台热点时的 Agent 选题卡互补：本卡是雷达，选题卡是弹药）。
 关联调研：TrendRadar（62k★，GPL-仅学设计）/ newsnow（22k★，MIT）。
 
+## 4c. 资源库（v2.4.0）
+
+对标号**全历史盘链**的可检索化（`app/services/resource_library.py`，底料是已有
+`wechat_pan_links` 表）——解决"选题只匹配近 72h、大量历史资源被浪费"：
+
+- `search_resources`：关键词（热点词/品类）检索，聚合到盘链级、按**验证强度**（多少号同发）排序；
+- `resonance_resources`：高共振榜（同链被 ≥N 号同发 = 需求被反复验证的金矿）；
+- `resource_profile` / `library_summary`：单资源画像 / 库概览；
+- **Agent 集成**：`_supply_articles` 把高共振资源的文章排进 LLM 候选前列（不改标题，字面匹配逻辑不受影响）；
+- CLI：`python scripts/search_resources.py 花少`（含 `--resonance` / `--profile`）。实测：
+  库 542 链/10 条多号验证；检索"花少"→5 条资源且**我方链全部已转存可直接复用**。
+
+全部数据来自已采集的对标信息——**不碰第三方资源聚合**（规避版权风险面）。
+
 ## 5. 调度作业矩阵（内嵌 APScheduler，24 线程）
 
 | 作业 | 频率 | 职责 |
