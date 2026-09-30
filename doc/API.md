@@ -1075,6 +1075,27 @@
 - 同 `week_start` 重录 = 覆盖更新;`pan_recruit_weekly` 表按 user_id 隔离。
 - 命令行入口:`python scripts/record_recruits.py 2026-09-22=12 2026-09-29=7 [--note 备注]`
 
+## 11e. 账号健康趋势(2026-10-01)
+
+- **接口名称**: 采集源按天趋势 + 关键信号频次
+- **请求方式**: GET
+- **URL 路径**: `/api/source-health/trend?days=14`
+- **权限**: 登录用户
+
+**响应示例 (200)**
+```json
+{
+  "days": 14,
+  "by_day": [ { "date": "2026-10-01", "kinds": { "wechat_listen": { "success": 3, "partial": 1, "failed": 0, "skipped": 0 },
+                                                 "xianyu": { "success": 10, "failed": 2, "partial": 0, "skipped": 0 } } } ],
+  "signals": { "wechat_quota": { "2026-09-30": 2 },
+               "cookie_expired": { "2026-09-30": 5 },
+               "xianyu_verify": { "2026-09-28": 1 } }
+}
+```
+> 关键信号从 runs.detail 提取:微信读书额度耗尽(quota_skipped)/Cookie 失效(-2012|WereadAuthError)/闲鱼滑块(XianyuVerify)。
+> 前端入口:「数据源健康」页的「近 14 天账号健康趋势」区。
+
 ## 11d. 多平台热榜(2026-10-01,15 源雷达)
 
 - **接口名称**: 多平台热榜总览

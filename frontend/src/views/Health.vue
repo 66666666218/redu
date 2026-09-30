@@ -10,7 +10,19 @@ async function load() {
   msg.value = ''
   try { items.value = await api.sourceHealth() } catch (e) { msg.value = e.message }
 }
-onMounted(load)
+const trend = ref(null)
+const sigLabels = { wechat_quota: '微信读书额度耗尽', cookie_expired: 'Cookie 失效', xianyu_verify: '闲鱼滑块' }
+async function loadTrend() {
+  try {
+    trend.value = (await api.get('/api/source-health/trend', { params: { days: 14 } })).data
+  } catch { trend.value = null }
+}
+function dayFail(row) {
+  let n = 0
+  for (const k of Object.values(row.kinds || {})) n += (k.failed || 0)
+  return n
+}
+onMounted(async () => { await load(); await loadTrend() })
 </script>
 
 <template>
@@ -37,5 +49,20 @@ onMounted(load)
         <tr v-if="!items.length"><td colspan="7" class="muted">加载中…</td></tr>
       </tbody>
     </table>
+
+    <div class="card" style="margin-top:14px" v-if="trend">
+      <h3>近 14 天账号健康趋势</h3>
+      <p>
+        <span v-for="(v, k) in trend.signals" :key="k" style="margin-right:16px">
+          {{ sigLabels[k] || k }} <b>{{ Object.values(v).reduce((a, b) => a + b, 0) }}</b> 次</span>
+      </p>
+      <table>
+        <tr><th>日期</th><th>失败次数(全源)</th></tr>
+        <tr v-for="row in trend.by_day" :key="row.date">
+          <td>{{ row.date }}</td><td>{{ dayFail(row) }}</td>
+        </tr>
+      </table>
+      <p class="empty">额度耗尽/滑块/Cookie 失效的历史频次——用于判断"该充值/该换 Cookie/该降频"的时机</p>
+    </div>
   </div>
 </template>

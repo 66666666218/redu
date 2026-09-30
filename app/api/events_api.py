@@ -74,3 +74,50 @@ def trending_normalized(user: User = Depends(get_current_user), db: Session = De
         })
     out.sort(key=lambda x: x["captured_at"], reverse=True)
     return {"count": len(out), "items": out[:200]}
+
+
+@router.get("/api/source-health/trend")
+def source_health_trend(days: int = 14, user: User = Depends(get_current_user),
+                        db: Session = Depends(get_db)):
+    """账号健康趋势(v2.11.0):近 N 天各采集源按天聚合的成功/失败/关键信号。
+
+    关键信号(从 runs.detail 提取):微信读书额度耗尽(count/off)、Cookie 失效(-2012)、
+    闲鱼滑块(XianyuVerify)——把"今天怎么又失败了"变成"这个月额度用了几次"。
+    """
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import func, select
+
+    from app.db.models import RunRecord
+
+    days = max(1, min(int(days or 14), 90))
+    cutoff = datetime.now() - timedelta(days=days)
+    rows = db.execute(
+        select(func.date(RunRecord.started_at).label("d"), RunRecord.kind, RunRecord.status,
+               func.count(RunRecord.id))
+        .where(RunRecord.user_id == user.id, RunRecord.started_at >= cutoff,
+               RunRecord.kind.notlike("hot_source%"))
+        .group_by("d", RunRecord.kind, RunRecord.status)).all()
+    by_day: dict[str, dict] = {}
+    for d, kind, status, n in rows:
+        e = by_day.setdefault(str(d), {"date": str(d), "kinds": {}})
+        k = e["kinds"].setdefault(str(kind), {"success": 0, "partial": 0, "failed": 0, "skipped": 0})
+        if str(status) in k:
+            k[str(status)] += int(n)
+    # 关键信号(按天计数)
+    from sqlalchemy import or_ as _or
+
+    sig_spec = (("wechat_quota", "wechat_listen", ("quota_skipped",)),
+                ("cookie_expired", "wechat_listen", ("-2012", "WereadAuthError")),
+                ("xianyu_verify", "xianyu", ("XianyuVerify",)))
+    signals: dict[str, dict] = {}
+    for name, kind, needles in sig_spec:
+        cond = _or(*[RunRecord.detail.like(f"%{n}%") for n in needles])
+        srows = db.execute(
+            select(func.date(RunRecord.started_at).label("d"), func.count(RunRecord.id))
+            .where(RunRecord.user_id == user.id, RunRecord.started_at >= cutoff,
+                   RunRecord.kind == kind, cond)
+            .group_by("d")).all()
+        signals[name] = {str(d): int(n) for d, n in srows}
+    out = sorted(by_day.values(), key=lambda e: e["date"])
+    return {"days": days, "by_day": out, "signals": signals}
