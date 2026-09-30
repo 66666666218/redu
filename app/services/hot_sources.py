@@ -17,6 +17,8 @@ import json
 
 from curl_cffi import requests as creq
 
+from sqlalchemy import func, select
+
 from app.utils import get_logger
 
 logger = get_logger(__name__)
@@ -118,7 +120,9 @@ class NewsnowSource(HotSource):
             body = r.json()
         except Exception as exc:  # noqa: BLE001
             raise HotSourceError(f"newsnow[{self.id}] 请求失败:{type(exc).__name__}") from exc
-        if body.get("status") != "success":
+        # status: success=实时抓取;cache=容器缓存(数据同为上游真实条目,直接可用);
+        # 两者之外才是真异常(2026-10-01 实测:未刷新平台回 cache,判"success only"会误杀)
+        if body.get("status") not in ("success", "cache"):
             raise HotSourceError(f"newsnow[{self.id}] 返回异常:{json.dumps(body)[:120]}")
         out = []
         for i, it in enumerate((body.get("items") or [])[:limit], 1):
@@ -160,3 +164,111 @@ def fetch_hot(source_id: str, limit: int = 30) -> list[dict]:
     if src is None:
         raise HotSourceError(f"未知热榜源:{source_id}(可选:{','.join(sorted(SOURCES))})")
     return src.fetch(limit=limit)
+
+
+def collect_hot_sources(session, user_id: int, sources: list[str] | None = None,
+                        limit: int = 30) -> dict:
+    """一轮热榜采集:遍历源取数入库(hot_source_items);单源失败不阻断其余。
+
+    返回 {"ok": n, "failed": n, "items": n}(供 runs detail)。
+    """
+    from app.db.models import HotSourceItem
+
+    ok = failed = items = 0
+    for sid in (sources or list(SOURCES)):
+        try:
+            rows = fetch_hot(sid, limit=limit)
+        except HotSourceError as exc:
+            failed += 1
+            logger.warning("热榜源[%s]采集失败:%s", sid, str(exc)[:100])
+            continue
+        for it in rows:
+            session.add(HotSourceItem(user_id=user_id, source=sid, rank=int(it.get("rank") or 0),
+                                      title=str(it.get("title") or "")[:500],
+                                      url=str(it.get("url") or "")[:700],
+                                      extra=str(it.get("extra") or "")[:200]))
+        ok += 1
+        items += len(rows)
+    return {"ok": ok, "failed": failed, "items": items}
+
+
+def hot_source_tick_all_users(settings=None) -> int:
+    """计划任务入口:对全部启用用户跑一轮多平台热榜采集。返回总条目数。
+
+    调度:每小时 05 分(2026-10-01 定档)——热榜条目存活数小时级,每小时一轮
+    足够覆盖新上榜;比 douhot_window 的 20 分钟低频,对 newsnow 容器与上游更温和。
+    """
+    from config.settings import get_settings
+    from app.db import get_session_local
+    from app.db.models import User
+
+    settings = settings or get_settings()
+    db = get_session_local()()
+    total = 0
+    try:
+        for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
+            try:
+                from app.services.tenant_base import _record_run
+                out = collect_hot_sources(db, uid)
+                _record_run(db, uid, "hot_source",
+                            "success" if not out["failed"] else "partial",
+                            f"ok={out['ok']} failed={out['failed']} items={out['items']}")
+                db.commit()
+                total += out["items"]
+            except Exception:  # noqa: BLE001 - 单用户失败不影响其余
+                db.rollback()
+                logger.exception("热榜采集失败 user=%s", uid)
+    finally:
+        db.close()
+    return total
+
+
+_PLAT_LABEL = {"bilibili": "B站", "douban": "豆瓣", "zhihu": "知乎", "weibo": "微博",
+               "kuaishou": "快手", "iqiyi": "爱奇艺", "36kr": "36氪", "juejin": "掘金",
+               "ithome": "IT之家", "hupu": "虎扑", "dongqiudi": "懂球帝"}
+
+
+def push_hot_rank_card_all_users(settings=None, top_n: int = 5) -> int:
+    """多平台热榜速览卡 → 飞书总群(2026-10-01 v2.2.0「新平台接入总群」)。
+
+    每日 09:30/21:30 两次(定时),每平台取最新一轮 top N 拼接文本卡;
+    与 Agent 选题卡(命中新平台热点时另行推送)互补——本卡是「雷达」,选题卡是「弹药」。
+    返回成功发送的群数。
+    """
+    from config.settings import get_settings
+
+    settings = settings or get_settings()
+    from app.services.feishu_client import FeishuClient, webhook_for
+
+    hook = webhook_for(settings, "")  # 总群
+    if not hook:
+        return 0
+    from app.db import get_session_local
+    from app.db.models import HotSourceItem, User
+
+    db = get_session_local()()
+    lines = ["🔥 多平台热榜速览"]
+    try:
+        for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
+            latest = db.scalar(select(func.max(HotSourceItem.captured_at)).where(
+                HotSourceItem.user_id == uid))
+            if latest is None:
+                continue
+            rows = db.execute(
+                select(HotSourceItem.source, HotSourceItem.title, HotSourceItem.rank, HotSourceItem.extra)
+                .where(HotSourceItem.user_id == uid, HotSourceItem.captured_at == latest,
+                       HotSourceItem.rank <= top_n)
+                .order_by(HotSourceItem.source, HotSourceItem.rank)).all()
+            by_src: dict[str, list] = {}
+            for src, title, rank, extra in rows:
+                by_src.setdefault(str(src), []).append((rank, title, extra))
+            for src in sorted(by_src, key=lambda s: s not in ("bilibili", "douban")):
+                label = _PLAT_LABEL.get(src, src)
+                lines.append(f"\n【{label}】")
+                for rank, title, extra in by_src[src]:
+                    tail = f"({extra[:18]})" if extra else ""
+                    lines.append(f"  {rank}. {title[:38]}{tail}")
+    finally:
+        db.close()
+    text = "".join(lines)[:3000]
+    return 1 if FeishuClient(hook, settings.feishu_secret).send(text) else 0

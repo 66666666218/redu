@@ -340,6 +340,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
                                             settle_suggestions_all_users)
     from app.services.wechat_monitor import (candidate_discover_tick, keyword_article_all_users,
                                               pan_cookie_keepalive_tick, weread_refresh_tick)
+    from app.services.hot_sources import hot_source_tick_all_users, push_hot_rank_card_all_users
 
     jobs = [
         # 阅读量采样(traffic_tick)已停用:2026-09-29 用户决策放弃 dajiala(不充值),
@@ -348,6 +349,10 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # (traffic_tick, _get_settings().wechat_traffic_cron, {"minute": 30, "hour": 21}, "wechat_traffic"),
         # (traffic_tick, "30 9 * * *", {"minute": 30, "hour": 9}, "wechat_traffic_am"),
         (pan_cookie_keepalive_tick, "0 7 * * *", {"minute": 0, "hour": 7}, "pan_cookie_keepalive"),
+        # 多平台热榜采集(v2.2.0):每小时 05 分——bilibili/douban 自研 + newsnow 长尾
+        (hot_source_tick_all_users, "5 * * * *", {"minute": 5}, "hot_source"),
+        # 多平台热榜速览卡 → 总群(每日 09:30/21:30,与选题卡互补)
+        (push_hot_rank_card_all_users, "30 9,21 * * *", {"minute": 30, "hour": "9,21"}, "hot_rank_card"),
         # 会员续费检查:每日 10:05(到期该收续费/超 24h 该踢名单 → 飞书)
         (_member_renewal, "5 10 * * *", {"minute": 5, "hour": 10}, "member_renewal"),
         # 事件归属:每 15 分钟把近 24h 快照归并为事件(跨平台共振/生命周期的基础层)

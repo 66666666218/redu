@@ -90,6 +90,14 @@ ewsnow-image-20261001.tar（51MB，docker load 可恢复）
 ```
 
 **实测（2026-10-01）**：12 源 11 通（B站/豆瓣直连 ✓ + newsnow 9 源 ✓；知乎 401 故走 newsnow）。
+
+**已接入现有体系（2026-10-01）**：
+- **库表** `hot_source_items`（每轮全量快照，retention 治理覆盖）；
+- **调度** `hot_source`：每小时 05 分采集（`hot_source_tick_all_users`，290 条/轮）；
+- **全进 Agent 选题**：`_platform_hot_candidates`——近 24h 各平台 top10 并入热点池
+  （跨平台同现=全网级信号，排序按平台数+名次；与 douhot 同词去重保留涨幅版）；
+- **总群速览卡** `hot_rank_card`：每日 09:30/21:30 推「🔥 多平台热榜速览」到总群
+  （与命中新平台热点时的 Agent 选题卡互补：本卡是雷达，选题卡是弹药）。
 关联调研：TrendRadar（62k★，GPL-仅学设计）/ newsnow（22k★，MIT）。
 
 ## 5. 调度作业矩阵（内嵌 APScheduler，24 线程）

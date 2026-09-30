@@ -48,6 +48,24 @@ class UserCookie(Base):
     user: Mapped[User] = relationship(back_populates="cookies")
 
 
+class HotSourceItem(Base):
+    """多平台热榜统一表(v2.2.0 命门自持热榜源体系;bilibili/douban 自研 + newsnow 长尾)。
+
+    每轮全量快照(同 weibo_hot_items 模式),retention 治理(cleanup_old_data)覆盖。
+    """
+
+    __tablename__ = "hot_source_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    source: Mapped[str] = mapped_column(String(32), index=True)   # bilibili/douban/zhihu/...
+    rank: Mapped[int] = mapped_column(Integer, default=0)
+    title: Mapped[str] = mapped_column(String(500))
+    url: Mapped[str] = mapped_column(String(700), default="")
+    extra: Mapped[str] = mapped_column(String(200), default="")
+    captured_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+
+
 class WeiboHotItem(Base):
     __tablename__ = "weibo_hot_items"
 

@@ -65,6 +65,35 @@ def _hotspots(db: Session, user_id: int, min_growth: float,
     return out
 
 
+def _platform_hot_candidates(db: Session, user_id: int, top_rank: int = 10,
+                             hours: int = 24) -> list[dict]:
+    """多平台热榜候选(v2.2.0):hot_source_items 近 N 小时 top 条目全量进入选题池。
+
+    跨平台同现(标题归一化相同 ≥2 平台)是全网级真实信号;单平台 top 交给 LLM 判可做性。
+    growth 为 0(热榜条目无 douhot 式历史涨幅)——排序按平台数与名次,LLM 侧自带判断。
+    """
+    from app.db.models import HotSourceItem
+
+    cutoff = datetime.now() - timedelta(hours=hours)
+    rows = db.execute(select(HotSourceItem.source, HotSourceItem.title, HotSourceItem.rank)
+                      .where(HotSourceItem.user_id == user_id,
+                             HotSourceItem.captured_at >= cutoff,
+                             HotSourceItem.rank <= top_rank)).all()
+    agg: dict[str, dict] = {}
+    for src, title, rank in rows:
+        k = _norm(str(title or ""))
+        if not k:
+            continue
+        e = agg.setdefault(k, {"title": str(title), "plats": set(), "best_rank": 99})
+        e["plats"].add(str(src))
+        e["best_rank"] = min(e["best_rank"], int(rank or 99))
+    out = [{"keyword": e["title"], "growth": 0.0,
+            "platforms": "+".join(sorted(e["plats"])), "rank": e["best_rank"]}
+           for e in agg.values()]
+    out.sort(key=lambda h: (-len(h["platforms"].split("+")), h["rank"]))
+    return out[:15]
+
+
 def _platform_newcomers(db: Session, user_id: int, model,
                         hours: int = 24, fresh_hours: int = 6,
                         limit: int = 60) -> dict[str, dict]:
@@ -553,6 +582,13 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
         return {"status": "disabled"}
     min_growth = float(getattr(settings, "hotspot_min_growth", 50) or 50)
     hotspots = _hotspots(db, user_id, min_growth)
+    # v2.2.0:多平台热榜候选并入(全部进入 Agent 选题;与 douhot 同词去重,保留涨幅版)
+    _seen = {_norm(h["keyword"]) for h in hotspots}
+    for _c in _platform_hot_candidates(db, user_id):
+        _k = _norm(_c["keyword"])
+        if _k and _k not in _seen:
+            hotspots.append(_c)
+            _seen.add(_k)
     if not hotspots:
         # 晨间/冷却期兜底(2026-09-30):涨幅>=50% 的口径在热点冷却时段会空手——
         # 一级:微博/百度"新上榜"(上升信号最干净的代理);二级:douhot 降阈值取正增长词。

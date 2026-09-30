@@ -2,6 +2,21 @@
 import pytest
 
 
+@pytest.fixture
+def session():
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db.database import Base
+    from app.db import models  # noqa: F401 - 注册全部表
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    yield db
+    db.close()
+
+
 def test_bilibili_douban_direct_parse(monkeypatch) -> None:
     from app.services import hot_sources as hs
 
@@ -58,3 +73,34 @@ def test_fetch_hot_registry_and_unknown() -> None:
     assert isinstance(hs.SOURCES["bilibili"], hs.BilibiliSource)
     with pytest.raises(hs.HotSourceError):
         hs.fetch_hot("not_exist")
+
+
+def test_platform_hot_candidates_aggregates_by_platform(session) -> None:
+    """多平台候选(全进 Agent 选题):跨平台同现聚合、平台数与名次排序。"""
+    from datetime import datetime, timedelta
+
+    from app.db.models import HotSourceItem
+    from app.services.hotspot_agent import _platform_hot_candidates
+
+    now = datetime.now()
+    rows = [
+        # 跨 2 平台同现(归一化后相同)
+        HotSourceItem(user_id=1, source="bilibili", rank=1, title="迪拜航空客机事故", captured_at=now),
+        HotSourceItem(user_id=1, source="zhihu", rank=2, title="迪拜航空客机事故", captured_at=now),
+        # 单平台
+        HotSourceItem(user_id=1, source="douban", rank=1, title="年会不能停2", captured_at=now),
+        # 名次超界(>10)不进候选
+        HotSourceItem(user_id=1, source="hupu", rank=11, title="低名次条目", captured_at=now),
+        # 过期(24h 外)
+        HotSourceItem(user_id=1, source="weibo", rank=1, title="过期条目",
+                      captured_at=now - timedelta(hours=30)),
+    ]
+    session.add_all(rows)
+    session.commit()
+    cands = _platform_hot_candidates(session, 1)
+    titles = [c["keyword"] for c in cands]
+    assert "迪拜航空客机事故" in titles and "年会不能停2" in titles
+    assert "低名次条目" not in titles and "过期条目" not in titles
+    # 跨平台同现排在单平台之前(平台数降序)
+    assert titles[0] == "迪拜航空客机事故"
+    assert cands[0]["platforms"] in ("bilibili+zhihu", "zhihu+bilibili")
