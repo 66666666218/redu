@@ -242,6 +242,20 @@ UC / 迅雷只有 `pan_types` 标签、没有我方链(卡片上是 `—`),要�
 > ⚠️ 抓取侧:142 订阅批量导入触发上游 `appmsgpublish` 频率限制(200013,runbook 预告场景),
 > 待自行恢复后验证;必要时调大 WeRSS sync_interval。
 
+**抗停维三层防御(v2.1.0,2026-10-01)**——WeRSS 同类项目有停维前科(wewe-rss 归档、
+wechat-article-exporter 2026-07-30 停维),列表源不赌任何单一开源项目存活:
+1. **自研客户端** `app/services/wechat/wemp_client.py`:按公开接口合同独立实现
+   appmsgpublish 直连(fakeid=base64(数字) + 后台 token + Cookie → publish_page 解析链),
+   异常继承 PlatformError 与监听降级自动衔接;
+2. **凭据自持**:公众号后台凭据存 `system_config[wemp_cred_{uid}]`(从 WeRSS `data/wx.lic`
+   取出,运营者级不进用户面)——WeRSS 容器被删也不影响自研路径;
+3. **镜像固化**:`D:\werss\we-mp-rss-image-20260930.tar`(1.7G,`docker load` 可恢复)——防仓库/镜像下架。
+
+**多源故障切换(v2.1.0)**:`_platform_client` 组装 `MultiSourceClient`,按
+**WeRSS → 自研 Wemp → 读书平台** 依次尝试,异常即切下一源并进程内熔断 10 分钟
+(空列表不算失败,继续问下一源);源链在位状态可在 `GET /api/admin/health` 的
+`list_sources` 字段查看。全链失效时监听轮照旧退回微信读书 cover(终极兜底)。
+
 > **先判可行性(2026-09-27 补):这一节只有 `web`/`app` 模式才算新增一条数据源腿,而它要求你**
 > 自己有一个微信公众号后台身份**(订阅号即可)。运营者明确"注册不了新号"时这条路是关的:WeRSS 剩下的
 > `weread_mp` 模式打的是**同一批微信读书接口 + 同一份 Cookie**,我们的 `-2041` 会原样继承,

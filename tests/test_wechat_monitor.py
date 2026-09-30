@@ -1051,13 +1051,17 @@ def test_add_benchmark_resolves_biz_via_platform(session, monkeypatch: pytest.Mo
 
 # ---------------------------------------------------------------- WeRSS(自建免费全量列表)
 def test_platform_client_selects_provider_by_config() -> None:
-    """两家合同一致,按配置择一:WeRSS 优先(凭据在自己手里),其次读书平台,都没配 → None。"""
+    """按配置择源(2026-10-01 多源升级):多源并存→MultiSourceClient 故障切换链;
+    单源直接返回;半套配置不算配置;都没配 → None。"""
     from app.services.reader_platform_client import ReaderPlatformClient
+    from app.services.wechat._source import MultiSourceClient
     from app.services.werss_client import WerssClient
 
     both = _settings(wechat_werss_url="https://werss.test", wechat_werss_ak="WK", wechat_werss_sk="SK",
                      wechat_reader_platform_url="https://plat.test", wechat_reader_token="T")
-    assert isinstance(wechat_monitor._platform_client(both), WerssClient)
+    combo = wechat_monitor._platform_client(both)
+    assert isinstance(combo, MultiSourceClient)  # 多源并存 → 切换链(WeRSS 优先,读书平台备)
+    assert combo.names == ["werss", "reader_platform"]
     only_werss = _settings(wechat_werss_url="https://werss.test", wechat_werss_ak="WK",
                            wechat_werss_sk="SK")
     assert isinstance(wechat_monitor._platform_client(only_werss), WerssClient)
@@ -3976,3 +3980,48 @@ def test_wemp_client_parses_appmsgpublish(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(wc.requests, "get",
                         lambda *a, **kw: _Resp({"base_resp": {"ret": 0}}))
     assert wc.WempClient("ck=x", "t").mp_articles("MP_WXS_1") == []
+
+
+def test_multi_source_failover_and_breaker() -> None:
+    """多源故障切换(2026-10-01):异常切下一源并熔断;空列表问下一源;全失败抛最后异常。"""
+    from app.services.reader_platform_client import PlatformError
+    from app.services.wechat._source import MultiSourceClient
+
+    class _BE:
+        def __init__(self, name, behavior):
+            self.name, self.behavior, self.calls = name, behavior, 0
+
+        def mp_articles(self, mp_id, page=1, limit=20):
+            self.calls += 1
+            b = self.behavior
+            if isinstance(b, Exception):
+                raise b
+            return b
+
+    ok_items = [{"id": "1", "title": "文", "url": "https://mp.weixin.qq.com/s/a", "publish_at_raw": 1}]
+    a = _BE("a", PlatformError("限流"))
+    b = _BE("b", ok_items)
+    m = MultiSourceClient([("a", a), ("b", b)])
+    assert m.mp_articles("MP_WXS_1") == ok_items
+    assert a.calls == 1 and b.calls == 1
+    # a 已熔断:再调用只问 b(不撞死源)
+    assert m.mp_articles("MP_WXS_2") == ok_items
+    assert a.calls == 1 and b.calls == 2
+
+    # 空列表语义:b 答"空" → 继续问 c;c 有数据用 c
+    b2 = _BE("b", [])
+    c = _BE("c", ok_items)
+    m2 = MultiSourceClient([("b", b2), ("c", c)])
+    assert m2.mp_articles("MP_WXS_1") == ok_items
+    assert b2.calls == 1 and c.calls == 1
+
+    # 全失败:抛最后异常
+    x = _BE("x", PlatformError("x 限流"))
+    y = _BE("y", PlatformError("y 会话失效"))
+    m3 = MultiSourceClient([("x", x), ("y", y)])
+    with pytest.raises(PlatformError):
+        m3.mp_articles("MP_WXS_1")
+
+    # 全空:返回空列表(正常)
+    m4 = MultiSourceClient([("b", _BE("b", [])), ("c", _BE("c", []))])
+    assert m4.mp_articles("MP_WXS_1") == []

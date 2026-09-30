@@ -97,6 +97,21 @@ def source_health(db: Session, user_id: int, settings=None) -> list[dict]:
             if recent:
                 circuit = "微信读书 Cookie 失效(续期失败)"
 
+        list_sources = ""
+        if section == "wechat":
+            # 列表源链状态(2026-10-01 抗停维升级):运维一眼看到源链在位情况与降级位
+            from app.db.models import SystemConfig as _SC
+            g = getattr
+            srcs = []
+            if g(settings, "wechat_werss_url", "") and g(settings, "wechat_werss_ak", ""):
+                srcs.append("WeRSS")
+            _wrow = db.scalar(select(_SC).where(_SC.key == f"wemp_cred_{user_id}"))
+            if _wrow and _wrow.value:
+                srcs.append("自研Wemp")
+            if g(settings, "wechat_reader_platform_url", "") and g(settings, "wechat_reader_token", ""):
+                srcs.append("读书平台")
+            list_sources = " → ".join(srcs) if srcs else "无(仅微信读书cover兜底)"
+
         data_age_h = _last_data_age(db, user_id, section)
         ok_age_h = last_ok and (now - last_ok).total_seconds() / 3600
 
@@ -128,6 +143,7 @@ def source_health(db: Session, user_id: int, settings=None) -> list[dict]:
             "last_success_age_h": round(ok_age_h, 1) if ok_age_h is not None else None,
             "fails_24h": int(fails_24h),
             "last_fail_detail": last_fail[:120],
+            **({"list_sources": list_sources} if list_sources else {}),
             "data_age_h": round(data_age_h, 1) if data_age_h is not None else None,
             "interval_h": round(interval_h, 1),
             "cookie_ready": cookie_ready,

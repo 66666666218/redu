@@ -69,6 +69,79 @@ def nudge_werss(biz: str, settings: Settings | None = None) -> dict:
     if not hasattr(plat, "refresh_mp") or not value.startswith(_FEED_BIZ_PREFIX):
         return {"nudged": False, "reason": "not_werss_or_bad_biz"}
     return {"nudged": plat.refresh_mp(value), "reason": ""}
+class MultiSourceClient:
+    """免费列表源的多后端故障切换组合器(2026-10-01 抗停维升级)。
+
+    按优先级排列后端(WeRSS → 自研 Wemp → 读书平台),`mp_articles` 依次尝试:
+    某后端抛 PlatformError(限流/会话/网络)即切下一个,并**进程内短期熔断**
+    (同源失败后 10 分钟内跳过,避免每号每页都撞一遍已死的源)。
+    空列表不算失败(正常"没有更多文章");全失败抛最后一个异常——
+    监听轮 ⓪ 分支的 `except PlatformError` 降级逻辑照常衔接。
+    """
+
+    _COOLDOWN_SEC = 600
+
+    def __init__(self, backends: list[tuple[str, object]]) -> None:
+        self._backends = [(n, b) for n, b in backends if b is not None]
+        self._fail_until: dict[str, float] = {}
+
+    @property
+    def names(self) -> list[str]:
+        return [n for n, _ in self._backends]
+
+    def _cooling(self, name: str) -> bool:
+        import time as _time
+        return self._fail_until.get(name, 0) > _time.time()
+
+    def _trip(self, name: str) -> None:
+        import time as _time
+        self._fail_until[name] = _time.time() + self._COOLDOWN_SEC
+
+    def mp_articles(self, mp_id: str, page: int = 1, limit: int = 20) -> list[dict]:
+        last_exc: Exception | None = None
+        for name, be in self._backends:
+            if self._cooling(name):
+                continue
+            try:
+                items = be.mp_articles(mp_id, page=page, limit=limit)
+                if items:
+                    return items
+                # 空列表:该源正常答"没有"——但可能它没订阅这个号而别家订阅了,
+                # 继续问下一源,谁有数据用谁(都不问"空"就直接返回会漏)
+                last_exc = last_exc or None
+            except PlatformError as exc:
+                self._trip(name)
+                logger.warning("列表源[%s]失败,切换下一源:%s", name, str(exc)[:120])
+                last_exc = exc
+        if last_exc is not None:
+            raise last_exc
+        return []
+
+    def list_feeds(self, kw: str = "", limit: int = 100) -> list[dict]:
+        """订阅搜索转发:任一后端有该能力即可用(WeRSS 的 `kw` 搜索在加号路径要用)。"""
+        for name, be in self._backends:
+            fn = getattr(be, "list_feeds", None)
+            if fn is None or self._cooling(name):
+                continue
+            try:
+                return fn(kw=kw, limit=limit)
+            except PlatformError:
+                self._trip(name)
+        return []
+
+    def refresh_mp(self, mp_id: str, end_page: int = 1) -> bool:
+        """催抓取逐个后端尝试(有该方法的);全无返回 False。"""
+        for name, be in self._backends:
+            fn = getattr(be, "refresh_mp", None)
+            if fn is None or self._cooling(name):
+                continue
+            try:
+                return bool(fn(mp_id, end_page=end_page))
+            except PlatformError:
+                self._trip(name)
+        return False
+
+
 def _wemp_client(session, user_id: int):
     """自研 appmsgpublish 客户端(凭据自持 system_config[wemp_cred_{uid}])。
 
@@ -100,17 +173,24 @@ def _platform_client(settings: Settings, session=None, user_id: int | None = Non
     → wewe-rss 兼容"读书平台"。都没配返回 None。
     传了 session+user_id 才会考虑自研兜底(凭据存 system_config,与用户绑定)。
     """
+    backends: list[tuple[str, object]] = []
     if settings.wechat_werss_url and settings.wechat_werss_ak and settings.wechat_werss_sk:
-        return WerssClient(settings.wechat_werss_url,
-                           access_key=settings.wechat_werss_ak, secret_key=settings.wechat_werss_sk)
+        backends.append(("werss", WerssClient(settings.wechat_werss_url,
+                                              access_key=settings.wechat_werss_ak,
+                                              secret_key=settings.wechat_werss_sk)))
     if session is not None and user_id is not None:
         wc = _wemp_client(session, user_id)
         if wc is not None:
-            return wc
-    if not settings.wechat_reader_platform_url or not settings.wechat_reader_token:
+            backends.append(("wemp", wc))
+    if settings.wechat_reader_platform_url and settings.wechat_reader_token:
+        backends.append(("reader_platform", ReaderPlatformClient(
+            settings.wechat_reader_platform_url,
+            token=settings.wechat_reader_token, vid=settings.wechat_reader_vid)))
+    if not backends:
         return None
-    return ReaderPlatformClient(settings.wechat_reader_platform_url,
-                                token=settings.wechat_reader_token, vid=settings.wechat_reader_vid)
+    if len(backends) == 1:
+        return backends[0][1]  # 单源直接返回(保持既有行为与 mock 友好)
+    return MultiSourceClient(backends)
 def add_benchmark(session: Session, user_id: int, url: str, nickname: str = "",
                   note: str = "", settings: Settings | None = None) -> dict:
     """贴一篇文章长链即加号(不产生 API 调用);配了 key 时顺手解析昵称/ghid。"""
@@ -128,7 +208,9 @@ def add_benchmark(session: Session, user_id: int, url: str, nickname: str = "",
     plat = _root._platform_client(settings)
     if plat:
         try:
-            mp = plat.resolve_mp(url)
+            mp = plat.resolve_mp(url) if hasattr(plat, "resolve_mp") else None
+            if mp is None:
+                raise PlatformError("当前列表源不支持链接解析")
             biz = mp["mp_id"]
             nickname = nickname or mp["name"]
         except PlatformError as exc:
