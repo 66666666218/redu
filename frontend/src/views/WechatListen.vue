@@ -65,7 +65,9 @@ async function discoverCandidates() {
 }
 
 async function dismissCandidate(c) {
-  await api.wechatCandidatePatch(c.id, { status: 'dismissed' }
+  await api.wechatCandidatePatch(c.id, { status: 'dismissed' })
+  await loadCandidates()
+}
 
 async function importCandidate(c) {
   busy.value = 'imp' + c.id
@@ -79,8 +81,6 @@ async function importCandidate(c) {
   } finally {
     busy.value = ''
   }
-})
-  await loadCandidates()
 }
 
 async function addBench() {
