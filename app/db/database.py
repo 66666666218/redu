@@ -141,7 +141,8 @@ def _migrate() -> None:
                                 "opportunity FLOAT DEFAULT 0",
                                 "acted INTEGER DEFAULT 0", "acted_at DATETIME",
                                 "article_id INTEGER", "reads_gain INTEGER DEFAULT 0",
-                                "settled_at DATETIME", "repost_gain INTEGER DEFAULT 0"],
+                                "settled_at DATETIME", "repost_gain INTEGER DEFAULT 0",
+                                "draft TEXT DEFAULT ''"],  # AI 发布文案(v2.5.0 按需生成)
         "hotspot_events": ["reappear_count INTEGER DEFAULT 0", "last_growth FLOAT"],
         "wechat_articles": ["source VARCHAR(16) DEFAULT 'manual'", "benchmark_id INTEGER",
                             "pan_types VARCHAR(128) DEFAULT ''", "pan_urls TEXT", "my_pan_urls TEXT",

@@ -396,3 +396,51 @@ def test_auto_mark_acted_from_pan_link_and_title(session, monkeypatch) -> None:
     assert sug_link.article_id == art1.id                            # 归因到具体发文
     assert sug_link.repost_gain == 0                                 # 暂无盘链扩散,基线已立
     assert out["auto_acted"] == 2
+
+
+def test_generate_draft_with_library_link(session, monkeypatch) -> None:
+    """文案生成(v2.5.0):建议→LLM→落库;资源库有现成我方链自动带上;失败状态可辨。"""
+    from datetime import datetime as dt
+
+    from app.db.models import HotspotSuggestion, WechatArticle, WechatPanLink
+    from app.services import hotspot_agent as ha
+
+    sug = HotspotSuggestion(user_id=1, keyword="花少2人格测试", kind="llm", growth=0,
+                            plan="【做什么】测试入口整理", created_at=dt.now())
+    session.add(sug)
+    session.commit()
+    # 资源库里有现成我方链
+    art = WechatArticle(user_id=1, title="花少2人格测试入口", author="号A",
+                        url="https://mp.weixin.qq.com/s/x",
+                        pan_urls="https://pan.quark.cn/s/gold", my_pan_urls="https://pan.quark.cn/s/mine1")
+    session.add(art)
+    session.flush()
+    session.add(WechatPanLink(user_id=1, article_id=art.id, pan_url="https://pan.quark.cn/s/gold"))
+    session.commit()
+
+    captured = {}
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content":
+                "标题甲|标题乙|标题丙" + chr(10) + chr(10) + "正文草稿内容"}}]}
+
+    monkeypatch.setattr(ha, "_draft_llm_check", None, raising=False)  # noqa: ARG005
+    import app.services.llm_client as llm
+    monkeypatch.setattr(llm.requests, "post", lambda *a, **k: _Resp())
+    monkeypatch.setattr(llm, "_record_usage", lambda *a, **k: None)
+
+    out = ha.generate_draft(session, 1, sug.id, settings=_agent_settings(deepseek_api_key="sk-x"))
+    assert out["status"] == "ok"
+    assert out["titles"] == ["标题甲", "标题乙", "标题丙"]
+    assert "mine1" in out["my_link"]          # 资源库我方链自动带上
+    assert "mine1" in out["content"]          # 文中含链(复制即用)
+    session.refresh(sug)
+    assert "标题甲" in sug.draft
+
+    # 未配 key → 明确状态
+    assert ha.generate_draft(session, 1, sug.id, settings=_agent_settings())["status"] == "no_llm_key"
+    # 归属校验
+    assert ha.generate_draft(session, 99, sug.id, settings=_agent_settings())["status"] == "not_found"

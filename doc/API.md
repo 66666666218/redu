@@ -1075,6 +1075,29 @@
 - 同 `week_start` 重录 = 覆盖更新;`pan_recruit_weekly` 表按 user_id 隔离。
 - 命令行入口:`python scripts/record_recruits.py 2026-09-22=12 2026-09-29=7 [--note 备注]`
 
+## 11b. 热点建议 · AI 发布文案(2026-10-01,发布最后一公里)
+
+- **接口名称**: 按建议生成可发布文案
+- **请求方式**: POST
+- **URL 路径**: `/api/hotspot/suggestions/{sid}/draft`
+- **权限**: 登录用户(建议归属校验,非本用户 404)
+
+**请求参数**: 无 body。
+
+**响应示例 (200)**
+```json
+{
+  "status": "ok",
+  "titles": ["亚运电竞开赛了！赛程表+游戏安装包+报考指南一份打包自取",
+             "看完亚运电竞想上手同款？游戏安装包+外设清单整理好了",
+             "家里孩子想走电竞路？资料合集:报考指南+训练计划"],
+  "content": "最近亚运电竞项目开赛……(400~800 字正文,可直接发布)",
+  "my_link": "https://pan.quark.cn/s/xxx (提取码 abcd)"
+}
+```
+> 生成逻辑:取建议的 keyword/plan;若**资源库**中该关键词已有我方转存链,自动带上(文末附链,员工复制即用);
+> 结果落 `hotspot_suggestions.draft` 供复用(**按需生成**省 LLM 成本)。未配 DEEPSEEK_API_KEY → 400;生成失败 → 502。
+
 ## 12. 鉴权与账户(/api/auth/*)
 
 > 无需登录;除 register/login/forgot/reset 外的所有业务接口都需要 `Authorization: Bearer <token>`。

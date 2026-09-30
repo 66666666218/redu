@@ -45,6 +45,21 @@ def mark_acted(sid: int, payload: ActedIn | None = None,
     return {"status": "ok", "id": row.id, "keyword": row.keyword, "acted": row.acted}
 
 
+@router.post("/api/hotspot/suggestions/{sid}/draft")
+def suggestion_draft(sid: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """按建议生成可发布文案(标题×3+正文;资源库有现成我方链会自动带上)。"""
+    from app.services import hotspot_agent as _ha
+
+    out = _ha.generate_draft(db, user.id, sid)
+    if out.get("status") == "not_found":
+        raise HTTPException(404, "建议不存在")
+    if out.get("status") == "no_llm_key":
+        raise HTTPException(400, "未配置 DEEPSEEK_API_KEY,无法生成文案")
+    if out.get("status") == "failed":
+        raise HTTPException(502, "AI 文案生成失败,请稍后重试")
+    return out
+
+
 @router.get("/api/hotspot/suggestions")
 def list_suggestions(limit: int = 50, acted: bool | None = None,
                      user: User = Depends(get_current_user), db: Session = Depends(get_db)):

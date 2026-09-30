@@ -353,6 +353,7 @@ class HotspotSuggestion(Base):
     resource_title: Mapped[str] = mapped_column(String(255), default="")
     link: Mapped[str] = mapped_column(String(500), default="")
     plan: Mapped[str] = mapped_column(String(500), default="")
+    draft: Mapped[str] = mapped_column(Text, default="")  # AI 生成的发布文案(v2.5.0,按需生成)
     saves: Mapped[int] = mapped_column(Integer, default=0)     # 夸克 App 分享页读到的保存人数(人工回填)
     saves_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # 最近一次回填时间
     platforms: Mapped[str] = mapped_column(String(64), default="")  # 热点来源平台(douyin/weibo/baidu,+号连接);共振热点=多平台同现

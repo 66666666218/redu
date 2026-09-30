@@ -211,3 +211,65 @@ def rewrite_article(base_url: str, api_key: str, model: str,
         return None
     except (KeyError, IndexError, TypeError):
         return None
+
+
+def draft_article(base_url: str, api_key: str, model: str, *,
+                  hotspot: str, resource: str = "", title_hint: str = "",
+                  audience: str = "", hook: str = "", my_link: str = "",
+                  timeout: int = 150) -> dict | None:
+    """选题建议 → 可直接发布的公众号文案(v2.5.0,发布最后一公里)。
+
+    与 rewrite_article 的区别:改写是"有原文改",本函数是"无原文创作"——
+    输入是建议的教学字段(资源/人群/钩子),让 LLM 直接写一篇配套资源的推广文。
+    返回 {"titles": [3 个备选标题], "content": "正文草稿"};失败返回 None。
+    """
+    nl = chr(10)
+    if not api_key or not hotspot:
+        return None
+    link_line = (f"我的网盘链接(必须原样出现在正文里,并自然引导读者保存/转存):{my_link}"
+                 if my_link else
+                 "如没有现成链接则不虚构,正文末尾引导读者'回复关键词'或以资源整理攻略角度收尾")
+    user_prompt = (
+        f"请为公众号写一篇【网盘资源推广】可发布文案。{nl}"
+        + f"热点:{hotspot}{nl}"
+        + (f"要交付的资源:{resource}{nl}" if resource else "")
+        + (f"标题方向参考:{title_hint}{nl}" if title_hint else "")
+        + (f"目标人群:{audience}{nl}" if audience else "")
+        + (f"转存钩子:{hook}{nl}" if hook else "")
+        + link_line + nl
+        + "要求:① 标题给 3 个备选(不同角度:时效/人群/利益点),严格一行一个、不要编号;"
+        + "② 正文 400~800 字:开头蹭热点 2~3 句→点出资料价值→引导获取→结尾轻量催存;"
+        + "③ 风格口语自然、像真人分享,不要营销腔和违禁词;④ 输出格式:第一行=3 个标题用 | 分隔,"
+        + "空一行,之后=正文(纯文本,分段清晰)"
+    )
+    try:
+        resp = requests.post(
+            base_url.rstrip("/") + "/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": model,
+                  "messages": [{"role": "system",
+                                "content": "你是网盘资源类公众号的资深写手,擅长把热点写成"
+                                           "让人忍不住转存的资料分享文;绝不夸大承诺、不用违禁词。"},
+                               {"role": "user", "content": user_prompt}],
+                  "temperature": 0.8, "max_tokens": 2500},
+            timeout=timeout,
+        )
+        if resp.status_code >= 400:
+            _record_usage(None, ok=False)
+            logger.warning("AI 文案生成失败 HTTP %s", resp.status_code)
+            return None
+        payload = resp.json()
+        _record_usage(payload, ok=True)
+        text = (payload.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+        if not text:
+            return None
+        parts = text.split(nl + nl, 1)
+        titles = [x.strip().lstrip("# ").strip()[:64] for x in parts[0].split("|") if x.strip()][:3]
+        content = parts[1].strip() if len(parts) > 1 else text
+        if not titles or not content:
+            return None
+        return {"titles": titles, "content": content}
+    except Exception as exc:  # noqa: BLE001
+        _record_usage(None, ok=False)
+        logger.warning("AI 文案生成异常:%s", exc)
+        return None

@@ -14,6 +14,21 @@ const recruitNote = ref('')
 
 const shown = computed(() => onlyActed.value ? items.value.filter(x => x.acted) : items.value)
 
+// 文案生成(v2.5.0):按需生成,省 LLM 成本
+const drafting = ref(0)
+async function genDraft(s) {
+  drafting.value = s.id
+  try {
+    await api.post(`/api/hotspot/suggestions/${s.id}/draft`)
+    msg.value = '文案已生成'
+    await load()
+  } catch (e) {
+    msg.value = '生成失败:' + (e?.response?.data?.detail || e.message || e)
+  } finally {
+    drafting.value = 0
+  }
+}
+
 async function load() {
   loading.value = true
   msg.value = ''
@@ -87,7 +102,7 @@ onMounted(load)
     <table style="margin-top:8px">
       <thead><tr>
         <th>#</th><th>热点</th><th>类型</th><th>涨幅</th><th>平台</th><th>机会分</th>
-        <th>资源/方案</th><th>已发</th><th>盘链扩散</th><th>建议时间</th>
+        <th>资源/方案</th><th>文案</th><th>已发</th><th>盘链扩散</th><th>建议时间</th>
       </tr></thead>
       <tbody>
         <tr v-for="s in shown" :key="s.id">
@@ -101,6 +116,12 @@ onMounted(load)
             <div v-if="s.resource_title">{{ s.resource_title }}</div>
             <a v-if="s.link" :href="s.link" target="_blank" class="muted">{{ s.link.slice(0, 32) }}…</a>
             <div class="muted" v-if="s.plan" style="white-space:pre-wrap">{{ s.plan }}</div>
+          </td>
+          <td style="font-size:12px;max-width:220px">
+            <button v-if="!s.draft" @click="genDraft(s)" :disabled="drafting === s.id">
+              {{ drafting === s.id ? '生成中…' : '生成文案' }}
+            </button>
+            <div v-else style="white-space:pre-wrap;max-height:160px;overflow:auto">{{ s.draft }}</div>
           </td>
           <td>
             <button :style="{ background: s.acted ? '#0a0' : '' }" @click="toggleActed(s)">

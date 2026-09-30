@@ -663,8 +663,12 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
 
     # 只拦自动发现型的弱适配热点;用户自选监控词(douhot,已表达跟随意向)直通,
     # fit 仍会计算——仅用于机会分权重与卡片展示("为什么值得做")
-    hotspots = [h for h in assess_many(hotspots)
-                if h["fit"].doable or not h.get("auto")]
+    # 用户口径(2026-10-01):"能拉新的都不要放过"——weak 不再直接挡,改为
+    # **降权进备选**(机会分乘 0.3 下限已体现),仍交给 LLM 判;挡掉只针对"完全无从下手"
+    # (适配度 < 0.1 且无平台分——纯围观类,如股票行情,进 LLM 也是浪费 token)
+    _scored = assess_many(hotspots)
+    hotspots = [h for h in _scored
+                if not h.get("auto") or h["fit"].score >= 0.1]
     if not hotspots:
         return {"status": "no_doable_hotspots"}  # 有热点但都不适配网盘拉新
 
@@ -953,3 +957,47 @@ def settle_suggestions_all_users(settings: Settings | None = None) -> int:
     finally:
         db.close()
     return total
+
+
+def generate_draft(session, user_id: int, suggestion_id: int, settings=None) -> dict:
+    """按建议生成可直接发布的公众号文案(v2.5.0 发布最后一公里,按需调用省成本)。
+
+    输入取建议的教学字段(keyword/plan/link);若建议资源在资源库已有我方转存链,
+    自动带上(文案里可直接挂链)。结果落 HotspotSuggestion.draft 供复用。
+    返回 {"status", "titles", "content"};LLM 未配/失败返回 {"status": "failed"}。
+    """
+    from config.settings import get_settings
+
+    settings = settings or get_settings()
+    from app.services import llm_client
+
+    sug = session.get(HotspotSuggestion, suggestion_id)
+    if sug is None or sug.user_id != user_id:
+        return {"status": "not_found"}
+    if not getattr(settings, "deepseek_api_key", ""):
+        return {"status": "no_llm_key"}
+
+    # 我方链:建议自带 link 优先;否则按关键词去资源库找现成转存(可直接复用)
+    my_link = ""
+    try:
+        from app.services.resource_library import search_resources
+
+        for r in search_resources(session, user_id, sug.keyword, limit=3):
+            if r.get("my_link"):
+                my_link = r["my_link"]
+                break
+    except Exception:  # noqa: BLE001 - 资源库查询失败不挡文案生成
+        logger.debug("文案生成查资源库失败", exc_info=True)
+
+    out = llm_client.draft_article(
+        settings.deepseek_base_url, settings.deepseek_api_key, settings.deepseek_model,
+        hotspot=sug.keyword or "", resource=(sug.plan or "")[:400], my_link=my_link)
+    if not out:
+        return {"status": "failed"}
+    titles, content = out["titles"], out["content"]
+    # 文案里若已有我方链则不再重复追加;否则文末附上(员工复制即用)
+    if my_link and my_link not in content:
+        content = content.rstrip() + chr(10) + chr(10) + "📦 资源链接:" + chr(10) + my_link
+    sug.draft = (chr(10).join(titles) + chr(10) + chr(10) + content)[:8000]
+    session.commit()
+    return {"status": "ok", "titles": titles, "content": content, "my_link": my_link}
