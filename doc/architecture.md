@@ -105,7 +105,7 @@ ewsnow-image-20261001.tar（51MB，docker load 可恢复）
 | 作业 | 频率 | 职责 |
 |---|---|---|
 | collect_tick | 每分钟 | 四板块按用户间隔采集（微博/百度/抖音/闲鱼） |
-| wechat_collect_tick | 4/8/14/20 点 | 公众号监听（142 号**分组轮换**，36 号/轮） |
+| wechat_collect_tick | 4/8/14/20 点 | 公众号监听(**自适应分批**:批=ceil(池/4)夹[8,75];沉睡号(miss≥7)每3轮1次;扩建无需手调) |
 | weread_refresh_tick | 每 6 小时 :50 | 微信读书 Cookie 主动续期（rt 单次编码自洽） |
 | douhot_window_tick | 20 分钟 | 抖音多窗口对比 |
 | hotspot_agent_tick | 9/15/21 点 | 热点选题建议（LLM 教学式输出） |

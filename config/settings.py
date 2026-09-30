@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     wechat_sync_push_limit: int = 20  # 一次「同步文章」转存+推飞书的篇数上限(资源文优先;同盘链去重后仍超量才截断)
     wechat_burst_min_reads: int = 100  # 爆点检测最低站内阅读(微信读书口径,免费数据)
     wechat_burst_median_mult: float = 3.0  # 爆点判定:新文阅读 ≥ 同号近14天中位数×该倍数
-    wechat_listen_batch_size: int = 36  # 监听轮每批号数(2026-09-29 用户决策:142 号分组轮换,4 定点×36=144 每天轮一遍;每批≈72 请求远低于会话额度红线;0=回退全量)
+    wechat_listen_batch_size: int = 0  # 监听轮每批号数:0=自适应(2026-10-01,按池子规模自动分批+沉睡号降频,扩建无需手调);非 0=固定批(旧行为);负数=回全量
     quark_cookie: str = ""                 # 夸克网盘 Cookie(pan.quark.cn 登录后复制);用于转存对标文的分享
     quark_save_dir: str = "/redian监听"     # 转存目标目录(自动逐级创建)
     quark_fid_store: str = "data/quark_fid_cache.json"  # 目录 fid 持久缓存(大盘免重扫;幽灵同名复用)

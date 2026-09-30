@@ -4025,3 +4025,33 @@ def test_multi_source_failover_and_breaker() -> None:
     # 全空:返回空列表(正常)
     m4 = MultiSourceClient([("b", _BE("b", [])), ("c", _BE("c", []))])
     assert m4.mp_articles("MP_WXS_1") == []
+
+
+def test_adaptive_batch_scales_with_pool_size(session) -> None:
+    """自适应分批(2026-10-01 扩建准备):批大小=ceil(池/4) 夹 [8,75];沉睡降频;显式参数兼容。"""
+    from types import SimpleNamespace
+
+    from app.services.wechat._listen import _select_listen_batch
+
+    def mk(n, miss=0):
+        return [SimpleNamespace(id=i, miss_count=miss) for i in range(n)]
+
+    st = _settings()
+    # 池规模 → 批大小(4 定点;超 75 时天然多日轮转)
+    for n, expect in ((100, 25), (142, 36), (200, 50), (280, 70), (400, 75)):
+        rows, _pos = _select_listen_batch(None, 1, mk(n), st, batch_index=0)
+        assert len(rows) == expect, f"池{n} 应 {expect},得 {len(rows)}"
+
+    # 沉睡降频:沉睡号每 3 轮参与 1 轮(30 活跃 + 20 沉睡 → 本轮约 (30 + 20/3)/4)
+    rows, pos = _select_listen_batch(None, 1, mk(30) + mk(20, miss=7), st, batch_index=0)
+    assert "dormant=20/3轮" in pos and len(rows) <= 12
+
+    # 显式 batch_size:旧语义(全量池顺序切,不叠分层)
+    rows2, pos2 = _select_listen_batch(None, 1, mk(30) + mk(20, miss=7), st,
+                                       batch_index=1, batch_size=10)
+    assert len(rows2) == 10 and "batch=2/5(size=10,cursor=1)" in pos2
+
+    # 负数逃生门:全量
+    rows3, pos3 = _select_listen_batch(None, 1, mk(50), _settings(wechat_listen_batch_size=-1),
+                                       batch_index=0)
+    assert len(rows3) == 50 and pos3 == ""
