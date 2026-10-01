@@ -194,6 +194,7 @@ SOURCES: dict[str, HotSource] = {
     # -- world 国际 --
     "cankaoxiaoxi": NewsnowSource("cankaoxiaoxi"),
     "sputniknewscn": NewsnowSource("sputniknewscn"),
+    "steam": NewsnowSource("steam"),
     # -- sports 体育 --
     "hupu": NewsnowSource("hupu"),
     "dongqiudi": NewsnowSource("dongqiudi"),
@@ -311,7 +312,7 @@ _PLAT_LABEL = {
     "jin10": "金十数据", "gelonghui": "格隆汇",
     "fastbull-express": "法布财经快讯", "fastbull-news": "法布财经",
     # world 国际 / sports 体育
-    "cankaoxiaoxi": "参考消息", "sputniknewscn": "卫星通讯社",
+    "cankaoxiaoxi": "参考消息", "sputniknewscn": "卫星通讯社", "steam": "Steam",
     "hupu": "虎扑", "dongqiudi": "懂球帝",
 }
 
