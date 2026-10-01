@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import SystemConfig
 from app.utils import get_logger
+from config.settings import get_settings
 
 logger = get_logger(__name__)
 
@@ -33,17 +34,29 @@ _MAX_BACKFILL_MIN = 10                       # 补跑窗口上限(分钟)
 _TIME_RE = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
 
 # 推送类型定义:times=每天推送时刻(HH:MM),days=生效星期(**POSIX 口径:0=周日 … 6=周六**,
-# 与 settings 里的 cron 一致,换算见 doc/dev.md)。这些是**默认值**,用户在「推送时段」页
-# 改过的以库里为准(见 load/_merge)。
+# 与 settings 里的 cron 一致,换算见 doc/dev.md),role=**由哪个实例发**(见 settings.scheduler_role)——
+# 分体部署时两端的库不同(本机有公众号+闲鱼、远程有热点),推送必须各归各的,
+# 否则同一个飞书群会收到两份标题相同、内容各异的卡。单实例(all)时照常全推。
 PUSH_KINDS: dict[str, dict] = {
-    "daily":    {"label": "热点日报",       "times": ["08:00"],                  "days": [0, 1, 2, 3, 4, 5, 6]},
-    "hotrank":  {"label": "多平台热榜速览", "times": ["09:30", "21:30"],         "days": [0, 1, 2, 3, 4, 5, 6]},
-    "analysis": {"label": "公众号选题分析", "times": ["10:00"],                  "days": [0, 1, 2, 3, 4, 5, 6]},
-    "agent":    {"label": "选题 Agent",     "times": ["09:10", "15:10", "21:10"], "days": [0, 1, 2, 3, 4, 5, 6]},
-    "insight":  {"label": "爆点回顾",       "times": ["09:00"],                  "days": [1]},
-    "review":   {"label": "选题复盘周报",   "times": ["10:00"],                  "days": [1]},
-    "weekly":   {"label": "本周热点洞察",   "times": ["20:00"],                  "days": [0]},
+    "daily":    {"label": "热点日报",       "times": ["08:00"],                  "days": [0, 1, 2, 3, 4, 5, 6], "role": "hotspot"},
+    "hotrank":  {"label": "多平台热榜速览", "times": ["09:30", "21:30"],         "days": [0, 1, 2, 3, 4, 5, 6], "role": "hotspot"},
+    "agent":    {"label": "选题 Agent",     "times": ["09:10", "15:10", "21:10"], "days": [0, 1, 2, 3, 4, 5, 6], "role": "hotspot"},
+    "insight":  {"label": "爆点回顾",       "times": ["09:00"],                  "days": [1],                   "role": "hotspot"},
+    "review":   {"label": "选题复盘周报",   "times": ["10:00"],                  "days": [1],                   "role": "hotspot"},
+    "weekly":   {"label": "本周热点洞察",   "times": ["20:00"],                  "days": [0],                   "role": "hotspot"},
+    "analysis": {"label": "公众号选题分析", "times": ["10:00"],                  "days": [0, 1, 2, 3, 4, 5, 6], "role": "wechat"},
 }
+
+
+def _instance_role() -> str:
+    """当前实例角色(模块级引用 `get_settings`,便于测试 monkeypatch)。"""
+    return (getattr(get_settings(), "scheduler_role", "all") or "all").strip().lower()
+
+
+def _role_allows(kind_role: str) -> bool:
+    """本实例该不该发这一类。`all`(单实例)全发;`both` 的类别两边都发。"""
+    cur = _instance_role()
+    return cur == "all" or kind_role in ("both", cur)
 
 
 def _posix_dow(when: datetime) -> int:
@@ -97,7 +110,8 @@ def _merge(raw: dict | None) -> dict:
                  if _TIME_RE.match(str(t).strip())]
         days = [int(d) for d in (cur.get("days") if cur.get("days") is not None else spec["days"])
                 if str(d).lstrip("-").isdigit() and 0 <= int(d) <= 6]
-        kinds[kind] = {"label": spec["label"], "times": times, "days": days,
+        kinds[kind] = {"label": spec["label"], "role": spec.get("role", "both"),
+                       "times": times, "days": days,
                        "enabled": bool(cur.get("enabled", True)) and bool(times)}
     return {"kinds": kinds}
 
@@ -127,13 +141,19 @@ def save(db: Session, payload: dict | None) -> dict:
     return cfg
 
 
-def due_kinds(when: datetime, cfg: dict) -> list[str]:
-    """某一分钟该跑的推送类型(时刻精确到分钟 + 星期匹配 + 已启用)。"""
+def due_kinds(when: datetime, cfg: dict, role: str | None = None) -> list[str]:
+    """某一分钟该跑的推送类型(时刻 + 星期 + 已启用 + **本实例角色**)。
+
+    `role` 留空则取当前实例角色(`settings.scheduler_role`)——分体部署时热点类归远程、
+    公众号类归本机,各自只发自己那份,同一个群不会收到两份标题相同内容各异的卡。
+    """
+    cur = (role or _instance_role()).strip().lower()
     hhmm = when.strftime("%H:%M")
     dow = _posix_dow(when)
     return [kind for kind, spec in (cfg.get("kinds") or {}).items()
             if spec.get("enabled") and hhmm in (spec.get("times") or [])
-            and dow in (spec.get("days") or [])]
+            and dow in (spec.get("days") or [])
+            and (cur == "all" or spec.get("role", "both") in ("both", cur))]
 
 
 def _read_last_tick(session: Session, now: datetime) -> datetime:

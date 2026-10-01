@@ -353,3 +353,32 @@ def test_claim_schedule_force_race_second_claimant_loses(session) -> None:
                           interval_minutes=120, enabled=True, last_run_at=row.last_run_at)
     assert svc.claim_schedule(session, row, now, force=True) is True   # 第一个抢到并刷新
     assert svc.claim_schedule(session, second, now, force=True) is False  # 旧值已不匹配→抢不到
+
+
+def test_instance_role_filters_jobs(monkeypatch) -> None:
+    """分体部署:角色决定登记哪些作业。
+
+    两端各跑一套完整调度器的话,同一批作业会重复执行 —— 重复推飞书、重复打上游,
+    而本机的热点数据源早已停用(见 user_schedules),跑热点作业纯属拿旧数据空转。
+    """
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from app.services import scheduler as sch
+
+    def _ids(role: str) -> set:
+        monkeypatch.setattr(sch, "get_settings",
+                            lambda: type("S", (), {"scheduler_role": role})())
+        s = BackgroundScheduler(timezone="Asia/Shanghai")
+        sch.build_jobs(s)
+        return {j.id for j in s.get_jobs()}
+
+    all_ids = _ids("all")
+    wechat, hotspot = _ids("wechat"), _ids("hotspot")
+
+    assert {"hot_source", "douhot_window_tick", "early_agent_tick"} <= hotspot
+    assert not ({"hot_source", "douhot_window_tick", "early_agent_tick"} & wechat)
+    assert {"wechat_collect_tick", "wechat_candidates", "weread_refresh"} <= wechat
+    assert not ({"wechat_collect_tick", "wechat_candidates", "weread_refresh"} & hotspot)
+    # 中性作业两边都跑:它们各按自己库里的数据行事(采集调度/告警/清理)
+    assert "collect_tick" in wechat and "collect_tick" in hotspot
+    # 两端的并集必须等于全集 —— 漏掉谁都是"某个作业永远不会被登记"
+    assert wechat | hotspot == all_ids

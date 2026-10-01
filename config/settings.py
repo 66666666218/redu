@@ -106,6 +106,14 @@ class Settings(BaseSettings):
     tg_proxy: str = ""              # 出口代理(http://host:port);留空直连
     tg_limit: int = 30              # 单频道每轮取最近几条
     tg_cron: str = "*/30 * * * *"   # 采集频率(默认每 30 分钟;频道更新密度远低于热点榜)
+    # ---- 实例角色(2026-10-01):分体部署时避免两端重复跑同一批作业 ----
+    # 本项目有两套部署:本机(公众号 + 闲鱼)与远程 VPS(热点四路),**各自的数据库是独立的**,
+    # 但推的是同一个飞书群。不加约束的话两边会各跑一套完整调度器 —— 重复推飞书、重复打上游,
+    # 而且本机的热点数据源早已停用(见 user_schedules),跑热点作业纯属拿 3 天前的旧数据空转。
+    #   all     = 单实例/开发,全跑(默认)
+    #   wechat  = 只跑公众号 + 闲鱼侧(本机)
+    #   hotspot = 只跑热点侧(远程)
+    scheduler_role: str = "all"
     douhot_cookie_file: str = "data/douhot_cookie.txt"  # 抖音热点宝 Cookie 文件(gitignored)
     douhot_top_n: int = 100         # 内容词趋势条数(抖音热点接口可到 200)
     douhot_watch_entry_cap: int = 100  # 榜单搜索类关注(话题/搜索/视频)每次采集最多记录的相关主题条数

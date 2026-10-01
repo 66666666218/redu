@@ -300,6 +300,34 @@ def _agent_learn_all() -> None:
         db.close()
 
 
+def _role_allows(job_role: str) -> bool:
+    """本实例该不该跑这一类作业(见 `settings.scheduler_role`)。
+
+    分体部署时:本机设 `wechat`(公众号 + 闲鱼侧)、远程设 `hotspot`(热点侧),各自只跑
+    自己那一侧 —— 否则两边都推飞书、都打采集,既重复又互抢额度;本机的热点数据源早已
+    停用,跑热点作业纯属拿旧数据空转。
+
+    `both` 标记的是**中性作业**:它们各按自己库里的数据行事(采集调度、告警、清理),
+    两边跑不会互相干扰,反而是各自实例该做的事。
+    """
+    cur = (getattr(get_settings(), "scheduler_role", "all") or "all").strip().lower()
+    return cur == "all" or job_role == "both" or cur == job_role
+
+
+def _add_job(scheduler: BackgroundScheduler, func, trigger, job_id: str,
+             role: str = "both", **kw) -> bool:
+    """按角色登记作业;被角色挡下的**不登记也不报错**(这是预期行为,不是失败)。
+
+    返回是否真的登记了,方便调用方/测试断言。
+    """
+    if not _role_allows(role):
+        logger.info("实例角色 %s 跳过作业 %s(%s 侧)",
+                    getattr(get_settings(), "scheduler_role", "all"), job_id, role)
+        return False
+    scheduler.add_job(_safe(func), trigger, id=job_id, max_instances=1, coalesce=True, **kw)
+    return True
+
+
 def build_jobs(scheduler: BackgroundScheduler) -> None:
     """注册后台作业:按用户频率采集、定时告警摘要、失败自动重试、飞书日报/周报、邮件周报。"""
     from app.admin import retry_failed_runs
@@ -308,33 +336,24 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.feishu import run_feishu_daily, run_feishu_insight_digest, run_feishu_wechat_analysis
     from config.settings import get_settings as _get_settings
 
-    scheduler.add_job(
-        _safe(collect_tick), CronTrigger(minute="*"), id="collect_tick", max_instances=1, coalesce=True
-    )
+    _add_job(scheduler, collect_tick, CronTrigger(minute="*"), "collect_tick", "both")
     # 公众号监听四定点(用户决策 2026-09-22 调整):4:00/8:00/14:00/20:00——
     # 白天工作时段与夜间各覆盖一次,相邻间隔 4~6h 更均匀。
     # 原"每分钟检查+用户频率调度"改为纯定点——每轮全量 81 号约 3 分钟,
     # 每天仅 4 次主动请求,最大限度降低微信读书风控压力(Cookie 生命周期优先)。
     # misfire_grace_time=3600:定点错过后 1 小时内仍补跑(防止休眠/重启错过窗口)。
     from app.services.schedule_service import WECHAT_LISTEN_HOURS
-    scheduler.add_job(
-        _safe(wechat_collect_tick),
-        CronTrigger(hour=",".join(str(h) for h in sorted(WECHAT_LISTEN_HOURS)), minute="0"),
-        id="wechat_collect_tick", max_instances=1, coalesce=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        _safe(run_fixed_time_digests), CronTrigger(minute="*"), id="alert_fixed_time", max_instances=1, coalesce=True
-    )
+    _add_job(scheduler, wechat_collect_tick,
+             CronTrigger(hour=",".join(str(h) for h in sorted(WECHAT_LISTEN_HOURS)), minute="0"),
+             "wechat_collect_tick", "wechat", misfire_grace_time=3600)
+    _add_job(scheduler, run_fixed_time_digests, CronTrigger(minute="*"), "alert_fixed_time", "both")
     for func, job_id in ((retry_failed_runs, "auto_retry_failed_runs"), (check_collect_failures, "collect_failed_alert"),
                          (check_health_stalls, "health_stall_alert")):
-        scheduler.add_job(_safe(func), CronTrigger(minute="*/30"), id=job_id, max_instances=1, coalesce=True)
+        _add_job(scheduler, func, CronTrigger(minute="*/30"), job_id, "both")
     # 数据保留治理:每天 04:00 删除超过 DATA_RETENTION_DAYS 的旧快照/运行/日志
     from app.db.maintenance import cleanup_old_data
 
-    scheduler.add_job(
-        _safe(cleanup_old_data), CronTrigger(hour=4, minute=0), id="data_cleanup", max_instances=1, coalesce=True
-    )
+    _add_job(scheduler, cleanup_old_data, CronTrigger(hour=4, minute=0), "data_cleanup", "both")
     from app.services.early_agent import agent_tick_all_users
     from app.services.hotspot_agent import settle_suggestions_all_users
     from app.services.wechat_monitor import (candidate_discover_tick, candidate_import_tick,
@@ -351,43 +370,47 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # 方案A结算的采样端随之停用,归因(article_id)保留,效果评估走方案B拉新周录。
         # (traffic_tick, _get_settings().wechat_traffic_cron, {"minute": 30, "hour": 21}, "wechat_traffic"),
         # (traffic_tick, "30 9 * * *", {"minute": 30, "hour": 9}, "wechat_traffic_am"),
-        (pan_cookie_keepalive_tick, "0 7 * * *", {"minute": 0, "hour": 7}, "pan_cookie_keepalive"),
+        # 元组末位是**实例角色**(见 _role_allows):wechat=公众号+闲鱼侧 / hotspot=热点侧 /
+        # both=中性(各按自己库里的数据跑)。分体部署时本机设 wechat、远程设 hotspot。
+        (pan_cookie_keepalive_tick, "0 7 * * *", {"minute": 0, "hour": 7}, "pan_cookie_keepalive", "wechat"),
         # 多平台热榜采集(v2.2.0):每小时 05 分——bilibili/douban 自研 + newsnow 长尾
-        (hot_source_tick_all_users, "5 * * * *", {"minute": 5}, "hot_source"),
+        (hot_source_tick_all_users, "5 * * * *", {"minute": 5}, "hot_source", "hotspot"),
         # 死号清理(v2.6.0):每日 05:30——7 天无发文的对标号自动停监控(带链路安全阀)
-        (retire_dormant_tick_all_users, "30 5 * * *", {"minute": 30, "hour": 5}, "bench_retire"),
+        (retire_dormant_tick_all_users, "30 5 * * *", {"minute": 30, "hour": 5}, "bench_retire", "wechat"),
         # 选题复盘周报已并入推送时段表(默认周一 10:00)
         # 多平台热榜速览卡已并入推送时段表(默认 09:30/21:30)
-        # 会员续费检查:每日 10:05(到期该收续费/超 24h 该踢名单 → 飞书)
-        (_member_renewal, "5 10 * * *", {"minute": 5, "hour": 10}, "member_renewal"),
+        # 会员续费检查:每日 10:05(到期该收续费/超 24h 该踢名单 → 飞书);业务运营,归主实例
+        (_member_renewal, "5 10 * * *", {"minute": 5, "hour": 10}, "member_renewal", "wechat"),
         # 事件归属:每 15 分钟把近 24h 快照归并为事件(跨平台共振/生命周期的基础层)
-        (_event_assign, "*/15 * * * *", {"minute": "*/15"}, "event_assign"),
-        (_agent_learn_all, "0 6 * * *", {"minute": 0, "hour": 6}, "agent_learning"),
-        (agent_tick_all_users, "*/30 * * * *", {"minute": "*/30"}, "early_agent_tick"),
-        (douhot_window_tick, _get_settings().douhot_window_cron, {"minute": "*/20"}, "douhot_window_tick"),
+        (_event_assign, "*/15 * * * *", {"minute": "*/15"}, "event_assign", "hotspot"),
+        (_agent_learn_all, "0 6 * * *", {"minute": 0, "hour": 6}, "agent_learning", "hotspot"),
+        (agent_tick_all_users, "*/30 * * * *", {"minute": "*/30"}, "early_agent_tick", "hotspot"),
+        (douhot_window_tick, _get_settings().douhot_window_cron, {"minute": "*/20"}, "douhot_window_tick", "hotspot"),
         # wr_skey 短效且轮换:主动换新则永不过期;失败即时推飞书。
         # 计划读 settings.weread_refresh_cron(默认对齐 4 个监听定点前 10 分钟:
         # renewal=换新会话,mp/articles 列表只在会话初期可用,每轮赶上窗口)。
         # ⚠️ 此前这里硬编码 "50 */6 * * *",settings 的对齐改动从未生效(2026-09-28 修复)
-        (weread_refresh_tick, _get_settings().weread_refresh_cron, {"minute": 50, "hour": "*/6"}, "weread_refresh"),
+        (weread_refresh_tick, _get_settings().weread_refresh_cron, {"minute": 50, "hour": "*/6"}, "weread_refresh", "wechat"),
         # 选题 Agent 已并入推送时段表(默认 09:10/15:10/21:10)
         # 建议结算:每日 22:00(v5 结算端:盘链全网扩散增量 repost_gain,2026-09-30 起 reads_gain 采样已废)
-        (settle_suggestions_all_users, "0 22 * * *", {"minute": 0, "hour": 22}, "suggestion_settle"),
+        (settle_suggestions_all_users, "0 22 * * *", {"minute": 0, "hour": 22}, "suggestion_settle", "hotspot"),
         # 搜狗验证码红线约 30~50 次/天:每 4 小时一轮 × 每轮最多 5 词 = 30 次/天(安全区)
-        (keyword_article_all_users, "40 */4 * * *", {"minute": 40}, "keyword_article"),
-        (candidate_discover_tick, _get_settings().candidate_discover_cron, {"minute": 20, "hour": 8}, "wechat_candidates"),
+        (keyword_article_all_users, "40 */4 * * *", {"minute": 40}, "keyword_article", "wechat"),
+        (candidate_discover_tick, _get_settings().candidate_discover_cron, {"minute": 20, "hour": 8}, "wechat_candidates", "wechat"),
         # 候选自动收录:紧随发现之后,按标准挑号补进 WeRSS 订阅池(带数量闸门,见 settings)
-        (candidate_import_tick, _get_settings().candidate_auto_import_cron, {"minute": 30, "hour": 8}, "wechat_candidate_import"),
+        (candidate_import_tick, _get_settings().candidate_auto_import_cron, {"minute": 30, "hour": 8}, "wechat_candidate_import", "wechat"),
         # Telegram 频道资源源(2026-10-01):公众号之外的第二路盘链 feed。
         # 默认关闭——本机直连 t.me 不通;能出网的机器把 TG_ENABLED 打开即可(见 settings)。
-        (tg_collect_tick, _get_settings().tg_cron, {"minute": "*/30"}, "tg_collect"),
+        (tg_collect_tick, _get_settings().tg_cron, {"minute": "*/30"}, "tg_collect", "both"),
         # 推送时段表(2026-10-01):日报/热榜速览/选题分析/Agent/爆点回顾/复盘周报/洞察周报
         # 共 7 类推送不再各占一条 Cron,改由这一个每分钟 tick 按库里的时段配置判定
         # (见 app/services/push_timeline.py)。改时间即刻生效,不必重启或重建作业。
-        (push_timeline_tick, "* * * * *", {"minute": "*"}, "push_timeline"),
+        # 角色标 both:tick 本身两边都跑,但**推哪些类**由 push_timeline 按角色过滤
+        # (热点类归远程发、公众号类归本机发),否则同一个群会收到两份。
+        (push_timeline_tick, "* * * * *", {"minute": "*"}, "push_timeline", "both"),
     ]
-    for func, expr, default, job_id in jobs:
-        scheduler.add_job(_safe(func), _cron_trigger(expr, default), id=job_id, max_instances=1, coalesce=True)
+    for func, expr, default, job_id, role in jobs:
+        _add_job(scheduler, func, _cron_trigger(expr, default), job_id, role)
 
 
 def _scheduler_kwargs() -> dict:

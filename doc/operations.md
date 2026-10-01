@@ -421,6 +421,37 @@ python scripts/wemp_cred.py --check          # 以后想确认还能不能用
 > 📌 **WeRSS 可以退休了**:它与自研 Wemp 取的是同一套后台接口,而源码不归我们、还有停维前科
 > (见 §4g 抗停维三层防御)。有了自持凭据后,`_platform_client` 的择源链会自然走到自研 Wemp。
 
+### 4j. 双实例分工:谁跑什么、怎么隔离(2026-10-01)
+
+**背景**:项目有两套部署 —— 本机(Windows,`D:\code\redian`)与远程 VPS(`https://redu.tian1she.xyz`)。
+**两边的数据库是独立的**(本机 sqlite `data/platform.db`、远程 MySQL),但**推的是同一个飞书群**。
+
+**问题**:不加约束时两套实例各跑一份完整调度器 —— 同一个作业执行两次,重复推飞书、重复打上游;
+更糟的是**本机的热点数据源早已停用**(`user_schedules` 里 douhot/baidu/weibo 全停),跑热点作业
+纯属拿 3 天前的旧数据空转并推送(2026-10-01 审查发现 `hotspot_suggestions` 当天还在用 9-29 的数据更新)。
+
+**机制**:`SCHEDULER_ROLE`(`config/settings.py` → `scheduler._role_allows`)
+
+| 取值 | 含义 | 用于 |
+| --- | --- | --- |
+| `all` | 全跑(默认) | 单实例/开发 |
+| `wechat` | 只跑**公众号 + 闲鱼**侧 | **本机** |
+| `hotspot` | 只跑**热点**侧 | **远程** |
+
+- 每个作业在 `build_jobs` 里都标了归属(`wechat`/`hotspot`/`both`);`both` 是中性作业
+  (采集调度、告警、清理),两边各按自己库里的数据行事,不冲突。
+- **推送单独再分一层**:`push_timeline.PUSH_KINDS` 的每一类也带 role ——
+  日报/热榜速览/选题 Agent/爆点回顾/复盘周报/洞察周报 = `hotspot`,
+  公众号选题分析 = `wechat`。所以同一个群不会收到两份标题相同、内容各异的卡。
+- **两侧合起来必须等于全集**,有测试锁定(`test_instance_role_filters_jobs` 断言
+  `wechat | hotspot == all_ids`)——以后新增作业忘了标归属,测试会直接红。
+
+**当前配置**:
+- 本机 `.env`:`SCHEDULER_ROLE=wechat` ✅ 已设(2026-10-01)
+- 远程:需在其 `.env` 里设 `SCHEDULER_ROLE=hotspot` 并重启容器 ⚠️ **待办**
+
+**验证**:重启后 `data/app.log` 会打 `实例角色 wechat 跳过作业 hot_source(hotspot 侧)`。
+
 ## 5. 阅读量显示 "—"
 
 **2026-09-29 起 dajiala 收费采样链已整体摘除**(read_zan_pro ¥0.06/篇,用户决策不再充值),

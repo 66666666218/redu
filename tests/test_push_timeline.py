@@ -136,3 +136,24 @@ def test_tick_first_run_still_checks_current_minute(session, monkeypatch) -> Non
     ran: list[str] = []
     monkeypatch.setattr(pt, "_run", lambda kind, settings: ran.append(kind) or 1)
     assert pt.tick(db=session, when=datetime(2026, 10, 5, 8, 0))["ran"] == ["daily"]
+
+
+def test_due_kinds_respects_instance_role(session) -> None:
+    """分体部署:热点类归远程发、公众号类归本机发 —— 否则同一个飞书群收到两份。"""
+    cfg = pt.load(session)
+    at_8 = datetime(2026, 10, 5, 8, 0)      # 周一 08:00 → daily(热点)
+    assert pt.due_kinds(at_8, cfg, role="all") == ["daily"]
+    assert pt.due_kinds(at_8, cfg, role="hotspot") == ["daily"]
+    assert pt.due_kinds(at_8, cfg, role="wechat") == []
+
+    at_10 = datetime(2026, 10, 5, 10, 0)    # 周一 10:00 → analysis(公众号) + review(热点)
+    assert pt.due_kinds(at_10, cfg, role="wechat") == ["analysis"]
+    assert pt.due_kinds(at_10, cfg, role="hotspot") == ["review"]
+    assert sorted(pt.due_kinds(at_10, cfg, role="all")) == ["analysis", "review"]
+
+
+def test_kinds_carry_role_through_save(session) -> None:
+    """role 是定义的一部分,不能被 _merge/save 洗掉(否则隔离静默失效)。"""
+    cfg = pt.save(session, {"kinds": {"daily": {"times": ["08:00"]}}})
+    assert cfg["kinds"]["daily"]["role"] == "hotspot"
+    assert cfg["kinds"]["analysis"]["role"] == "wechat"
