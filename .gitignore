@@ -35,3 +35,9 @@ node_modules/
 .vscode/
 .DS_Store
 *.tar
+
+# 临时交付物(给用户复制到远程用,含各自环境的凭据说明)
+远程env追加.txt
+
+# 本地工具(如 sing-box 代理客户端,31MB 二进制,不该进仓库)
+tools/
