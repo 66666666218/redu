@@ -140,6 +140,7 @@ def _migrate() -> None:
                               "import_tries INTEGER DEFAULT 0"],  # 自动收录失败重试计数(v2.13.0)
         "hotspot_suggestions": ["saves INTEGER DEFAULT 0", "saves_at DATETIME",
                                 "platforms VARCHAR(64) DEFAULT ''",
+                                "category VARCHAR(16) DEFAULT ''",   # 验证品类(结算归因聚合键,2026-10-01)
                                 "opportunity FLOAT DEFAULT 0",
                                 "acted INTEGER DEFAULT 0", "acted_at DATETIME",
                                 "article_id INTEGER", "reads_gain INTEGER DEFAULT 0",

@@ -772,6 +772,7 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
             user_id=user_id, keyword=h["keyword"], growth=h["growth"], kind="match",
             resource_title=art.title[:255], link=art.my_pan_urls or art.pan_urls or "",
             plan=f"{why}·匹配自 {art.author}", platforms=str(h.get("platforms") or "douyin"),
+            category=str(h.get("category") or "")[:16],
             opportunity=float(h.get("opportunity") or 0))
         db.add(row)
         db.flush()
@@ -782,6 +783,7 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
             user_id=user_id, keyword=kw, growth=h.get("growth", 0), kind="llm",
             resource_title="", link="", plan=_plan_text(plan),
             platforms=str(h.get("platforms") or "douyin"),
+            category=str(h.get("category") or "")[:16],
             opportunity=float(h.get("opportunity") or 0))
         db.add(row)
         db.flush()
@@ -961,8 +963,18 @@ def settle_suggestions(db: Session, user_id: int) -> dict:
         settled += 1
         attributed += 1
     db.commit()
+    # 按品类聚合"哪类真赚"(P1 转化回流,2026-10-01):repost_gain 是盘链扩散的代理指标,
+    # 聚合后给运营看"该往哪个品类加码",也是未来自动调 PROVEN_CATEGORIES 权重的数据源。
+    by_cat: dict[str, dict] = {}
+    for sug in rows:
+        if sug.article_id is None:
+            continue
+        cat = (sug.category or "未分类")[:16]
+        e = by_cat.setdefault(cat, {"n": 0, "repost_gain": 0})
+        e["n"] += 1
+        e["repost_gain"] += int(sug.repost_gain or 0)
     return {"status": "ok", "acted_with_link": len(rows), "settled": settled,
-            "attributed": attributed, "auto_acted": auto}
+            "attributed": attributed, "auto_acted": auto, "by_category": by_cat}
 
 
 def settle_suggestions_all_users(settings: Settings | None = None) -> int:
@@ -1023,6 +1035,13 @@ def generate_draft(session, user_id: int, suggestion_id: int, settings=None) -> 
     if not out:
         return {"status": "failed"}
     titles, content, keyword = out["titles"], out["content"], out.get("keyword", "")
+    # 合规前置(P2,2026-10-01):盗版影视/付费课程是唯一会"账号说没就没"的红线——
+    # resource_risk 词表原本只在选题侧用,这里在**文案落地后**再过一遍:
+    # 高危内容当场标警示,让运营决定要不要发/怎么改,而不是发出去被平台清了才知道。
+    risk_level, risk_why = resource_risk(" | ".join(titles) + " " + content[:400])
+    if risk_level == "high":
+        content = (f"⚠️ 合规提醒:命中盗版高危信号({risk_why}),发布前请确认授权状态,"
+                   "或改以「教程/清单」形式规避。\n\n") + content
     # 公众号 SEO 模式(2026-10-01 依调研改,见 doc/pan-promotion-channels.md):
     # **正文不挂链**——公众号带外链会影响微信收录与排名;链接与自动回复关键词另起一段
     # 交给运营,由他在后台配「关键词回复」。老行为(文末直接附链接)已废。

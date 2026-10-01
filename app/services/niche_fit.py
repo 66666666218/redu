@@ -134,6 +134,7 @@ class FitResult:
     reasons: list[str] = field(default_factory=list)   # 给运营看的人话理由
     window: str = "unknown"      # instant(即时型) / longtail(长尾型)
     risk: str = "low"            # low / mid / high
+    category: str = ""           # 验证品类(资料/影视/漫剧/问卷/大瓜/软件…;结算归因按它聚合)
 
     @property
     def doable(self) -> bool:
@@ -162,10 +163,13 @@ def assess(title: str, extra: str = "", source: str = "") -> FitResult:
         reasons.append(f"热点类型可衍生({'/'.join(ent_hits[:3])})")
 
     # 〇 验证品类(业务事实强信号):命中任一品类词 +0.35
+    # category 随 FitResult 返回——结算归因按它聚合("哪类热点真赚"的统计键,2026-10-01)
+    category = ""
     for cat, words in PROVEN_CATEGORIES.items():
         if any(w in blob for w in words):
             score += 0.35
             reasons.append(f"验证品类·{cat}(实际赚过该品类)")
+            category = cat
             break  # 一档品类即可,不叠加
 
     # ① 资料形态(独立证据):命中越多越强,封顶 0.55
@@ -201,7 +205,8 @@ def assess(title: str, extra: str = "", source: str = "") -> FitResult:
     level = "strong" if score >= 0.6 else ("mid" if score >= 0.35 else "weak")
     if not reasons:
         reasons.append("未识别到资料形态/搜索意图——更像新闻围观,转存动机弱")
-    return FitResult(score=round(score, 2), level=level, reasons=reasons, window=window, risk=risk)
+    return FitResult(score=round(score, 2), level=level, reasons=reasons, window=window,
+                     risk=risk, category=category)
 
 
 def assess_many(hotspots: list[dict]) -> list[dict]:
@@ -214,6 +219,7 @@ def assess_many(hotspots: list[dict]) -> list[dict]:
         fit = assess(str(h.get("keyword") or ""), str(h.get("extra") or ""),
                      source=str(h.get("platforms") or ""))
         h["fit"] = fit
+        h["category"] = fit.category   # 平铺一份:创建建议行时直接取,不用挖 fit 对象
         out.append(h)
     out.sort(key=lambda x: (-x["fit"].score, -(x.get("growth") or 0)))
     return out
