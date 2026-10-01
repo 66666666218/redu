@@ -444,3 +444,18 @@ def test_generate_draft_with_library_link(session, monkeypatch) -> None:
     assert ha.generate_draft(session, 1, sug.id, settings=_agent_settings())["status"] == "no_llm_key"
     # 归属校验
     assert ha.generate_draft(session, 99, sug.id, settings=_agent_settings())["status"] == "not_found"
+
+
+def test_platform_family_normalizes_multi_listing_ids() -> None:
+    """同平台的多个榜单算一个平台。
+
+    36氪有 quick/renqi/主榜三条、财联社有 hot/depth/telegraph —— 标题常常一模一样,
+    不归一的话"同一个 36氪内容挂三个 id"会被当成"3 平台共振"霸榜,把真正跨平台的
+    热点(如豆瓣+爱奇艺同现的剧)挤下去。2026-10-01 平台扩容后实测踩到这个。
+    """
+    from app.services.hotspot_agent import _family
+
+    assert _family("36kr-quick") == _family("36kr-renqi") == _family("36kr") == "36kr"
+    assert _family("cls-hot") == _family("cls-depth") == "cls"
+    assert _family("douban") == "douban"      # 不在映射表里的原样返回
+    assert _family("") == ""

@@ -65,14 +65,38 @@ def _hotspots(db: Session, user_id: int, min_growth: float,
     return out
 
 
+# 同平台的多个榜单算**一个平台**:36氪有 quick/renqi/主榜三条、财联社有 hot/depth/telegraph……
+# 它们的标题常常一模一样,若不归一,"同一个 36氪内容挂三个 id"会被当成"3 平台共振"而霸榜,
+# 把真正跨平台的热点(如"豆瓣+爱奇艺同现的剧")挤到后面去(2026-10-01 扩容后实测踩到)。
+_PLAT_FAMILY = {
+    "36kr-quick": "36kr", "36kr-renqi": "36kr",
+    "cls-hot": "cls", "cls-depth": "cls", "cls-telegraph": "cls",
+    "wallstreetcn-hot": "wallstreetcn", "wallstreetcn-news": "wallstreetcn",
+    "wallstreetcn-quick": "wallstreetcn",
+    "fastbull-express": "fastbull", "fastbull-news": "fastbull",
+    "chongbuluo-hot": "chongbuluo", "chongbuluo-latest": "chongbuluo",
+}
+
+
+def _family(src: str) -> str:
+    """榜单 id → 平台族(用于"真·跨平台数"统计)。"""
+    return _PLAT_FAMILY.get(str(src or ""), str(src or ""))
+
+
 def _platform_hot_candidates(db: Session, user_id: int, top_rank: int = 10,
-                             hours: int = 24) -> list[dict]:
-    """多平台热榜候选(v2.2.0):hot_source_items 近 N 小时 top 条目全量进入选题池。
+                             hours: int = 24, cap: int = 60) -> list[dict]:
+    """多平台热榜候选(v2.2.0):hot_source_items 近 N 小时 top 条目进入选题池。
 
     跨平台同现(标题归一化相同 ≥2 平台)是全网级真实信号;单平台 top 交给 LLM 判可做性。
-    growth 为 0(热榜条目无 douhot 式历史涨幅)——排序按平台数与名次,LLM 侧自带判断。
+    growth 为 0(热榜条目无 douhot 式历史涨幅)——排序按 **跨平台数 → 平台拉新权重 → 名次**。
+
+    `cap` 默认 60(2026-10-01 由 15 上调):平台已扩到 43 个,而原来无论多少平台都只留
+    15 条 —— 实测 430 条候选里 415 条被砍在 LLM 之前,**热点利用率不足 4%**。
+    按权重排序而非单纯截断,是为了让"豆瓣热剧/酷安软件"这类真能出素材的排在
+    "雪球热股/财联社快讯"前面(权重表见 `niche_fit.SOURCE_FIT`)。
     """
     from app.db.models import HotSourceItem
+    from app.services.niche_fit import SOURCE_FIT
 
     cutoff = datetime.now() - timedelta(hours=hours)
     rows = db.execute(select(HotSourceItem.source, HotSourceItem.title, HotSourceItem.rank)
@@ -91,8 +115,12 @@ def _platform_hot_candidates(db: Session, user_id: int, top_rank: int = 10,
             "platforms": "+".join(sorted(e["plats"])), "rank": e["best_rank"],
             "auto": True}  # 自动发现型:需过适配度;用户自选监控词(growth 型)不拦
            for e in agg.values()]
-    out.sort(key=lambda h: (-len(h["platforms"].split("+")), h["rank"]))
-    return out[:15]
+    out.sort(key=lambda h: (
+        -len({_family(p) for p in h["platforms"].split("+")}),               # 真·跨平台数(同平台多榜算一个)
+        -max(SOURCE_FIT.get(p, 0.0) for p in h["platforms"].split("+")),     # 再看平台拉新权重
+        h["rank"],                                                           # 最后看名次
+    ))
+    return out[:cap]
 
 
 def _platform_newcomers(db: Session, user_id: int, model,

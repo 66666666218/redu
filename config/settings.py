@@ -76,7 +76,10 @@ class Settings(BaseSettings):
     hotspot_agent_enabled: bool = True   # 热点→网盘选题 Agent(监控词热度 × 供应商新资源 → 发货建议,站内推送)
     hotspot_agent_cron: str = "10 9,15,21 * * *"  # Agent 运行时刻(跟在白天三个定点监听后面,数据最鲜)
     hotspot_min_growth: float = 50.0     # 热点词 24h 涨幅达标线(低于此值不生成建议)
-    hotspot_agent_llm_top: int = 3       # 没现成资源的热点里,最多几个交给 LLM 生成选题(控 token 成本)
+    hotspot_agent_top_n: int = 15        # 单轮最多产出几条选题建议(2026-10-01 由 8 上调)
+    hotspot_agent_llm_top: int = 10      # 没现成资源的热点里,最多几个交给 LLM 生成选题
+                                         # (2026-10-01 由 3 上调:实测 430 条候选里只有 3 条能进
+                                         #  LLM,热点利用率不足 4%;DeepSeek 单价低,提到 10)
     weread_fullsync_on_renewal: bool = False  # renewal 后的全量补采开关(默认关!)
                                      # 2026-09-28 实测:81 号×cover+列表 ≈162 次的补采炸弹会在
                                      # renewal 后的新会话上一次性打穿全部额度,会话数小时内即死,
