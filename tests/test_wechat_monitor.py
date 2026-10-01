@@ -4128,8 +4128,12 @@ def test_add_benchmark_by_name_subscribes_and_backfills_biz(session, monkeypatch
     assert out["created"] is True and out["listenable"] is True
     assert out["biz"].startswith("MP_WXS_")
     assert plat.added == [("兔耳软游社", "MzY5OTE5NDE0Mg==")]
-    assert session.scalar(select(WechatBenchmark).where(
-        WechatBenchmark.nickname == "兔耳软游社")).biz == out["biz"]
+    row = session.scalar(select(WechatBenchmark).where(
+        WechatBenchmark.nickname == "兔耳软游社"))
+    assert row.biz == out["biz"]
+    # WeRSS 订阅 id 与微信读书 bookId 同编号(均 MP_WXS_<微信 fakeid>),必须一并填上:
+    # 光有 biz 而 WeRSS 抓不到东西时(biz 上游限流中)该号就是哑号,2026-10-01 实测踩过。
+    assert row.weread_book_id == row.biz
 
 
 def test_add_benchmark_by_name_uses_existing_subscription_without_adding(

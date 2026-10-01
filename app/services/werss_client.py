@@ -16,7 +16,8 @@
   {id, mp_id, mp_name, title, url, pic_url, description, publish_time, ...}`,
   **按 `publish_time` 降序**(`apis/article.py` 的 `order_by(Article.publish_time.desc())`),
   该视图不含正文(`ArticleBase`)。
-- 手动刷新:`POST /api/v1/wx/mps/update/{mp_id}?start_page&end_page`,**同步**抓取,
+- 手动刷新:`GET /api/v1/wx/mps/update/{mp_id}?start_page&end_page`(**GET**,上游
+  `@router.get`;写成 POST 会 405——2026-10-01 更正,operations.md 同步),**同步**抓取,
   自带 60s 节流(过快返回业务码 40402)。
 - 搜索公众号:`GET /api/v1/wx/mps/search/{kw}?limit` → `data.list[] =
   {fakeid(base64), nickname, round_head_img, signature}`(`apis/mps.py` 的 `search_mp`)。
@@ -186,13 +187,17 @@ class WerssClient:
     def refresh_mp(self, mp_id: str, end_page: int = 1) -> bool:
         """触发 WeRSS 立刻去上游抓一次(同步接口,自带 60s 节流)。
 
+        **是 GET 不是 POST**(2026-10-01 实测):上游源码是 `@router.get("/update/{mp_id}")`,
+        我们此前照 operations.md 的笔误实现成 POST,每次都吃 405——`nudge_werss` 因此
+        一直是空转,新加的号只能等 WeRSS 自己的定时。operations.md 已同步更正。
+
         返回 False 表示"这次没刷成"(被节流/上游失败),调用方不应当失败处理——
         WeRSS 自己的定时任务迟早会补上。默认不在监听里调用:一次同步抓取会让
         WeRSS 逐页打上游,81 个号串起来就是给别人做DDoS了。
         """
         try:
-            self._request("POST", f"/mps/update/{mp_id}", params={"start_page": "0",
-                                                                  "end_page": str(end_page)})
+            self._request("GET", f"/mps/update/{mp_id}", params={"start_page": "0",
+                                                                 "end_page": str(end_page)})
             return True
         except WerssError as exc:
             logger.info("WeRSS 手动刷新未执行 mp=%s:%s", mp_id, exc)

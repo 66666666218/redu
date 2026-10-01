@@ -288,6 +288,12 @@ def add_benchmark_by_name(session: Session, user_id: int, nickname: str, note: s
         if not biz and not hint:
             hint = "WeRSS 未搜到该号或重名歧义,已建号但暂无监听能力"
     row = WechatBenchmark(user_id=user_id, nickname=name[:128], ghid="", biz=biz[:64],
+                          # WeRSS 的订阅 id 是 `MP_WXS_<base64解码(fakeid)>`,与微信读书的
+                          # bookId **同一编号**(老号 142 个当初就是拿 book_id 当 feed id 导进去的,
+                          # 2026-10-01 又用 mp_cover 在未关注的号上验过:返回号名/头像/最新一篇)。
+                          # 填上它,该号立刻能走微信读书链路被监听——否则光有 biz 而 WeRSS 抓不到东西
+                          # (上游限流中)时,这个号就是个哑号。
+                          weread_book_id=biz[:64],
                           anchor_url="", note=(note or "").strip()[:255])
     session.add(row)
     session.commit()

@@ -142,9 +142,13 @@ def test_resolve_mp_is_explicitly_unsupported(monkeypatch) -> None:
 
 
 def test_refresh_mp_swallows_throttle(monkeypatch) -> None:
-    """手动刷新是锦上添花:被节流/上游失败只返回 False,不能把监听轮带崩。"""
+    """手动刷新是锦上添花:被节流/上游失败只返回 False,不能把监听轮带崩。
+
+    方法必须是 **GET**:上游源码是 `@router.get("/update/{mp_id}")`,写成 POST 会 405
+    (2026-10-01 实测,operations.md 原先那行是笔误,我们跟着错到那天)。
+    """
     client, calls = _client(monkeypatch, [_ok({"started": True}),
                                           _Resp(200, {"code": 40402, "message": "操作过于频繁"})])
     assert client.refresh_mp("MP_WXS_9") is True
     assert client.refresh_mp("MP_WXS_9") is False
-    assert calls[0]["method"] == "POST" and calls[0]["url"].endswith("/api/v1/wx/mps/update/MP_WXS_9")
+    assert calls[0]["method"] == "GET" and calls[0]["url"].endswith("/api/v1/wx/mps/update/MP_WXS_9")
