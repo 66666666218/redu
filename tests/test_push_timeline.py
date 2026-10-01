@@ -40,20 +40,20 @@ def test_defaults_cover_all_kinds_and_match_old_crons(session) -> None:
     """默认值必须与原先写死在 settings 里的那几条 cron 等价,否则迁移当天就悄悄改了点。"""
     cfg = pt.load(session)
     assert set(cfg["kinds"]) == set(pt.PUSH_KINDS)
-    assert cfg["kinds"]["daily"]["times"] == ["08:00"]            # 原 "0 8 * * *"
-    assert cfg["kinds"]["hotrank"]["times"] == ["09:30", "21:30"]  # 原 "30 9,21 * * *"
-    assert cfg["kinds"]["agent"]["times"] == ["09:10", "15:10", "21:10"]  # 原 "10 9,15,21 * * *"
+    assert cfg["kinds"]["daily"]["times"] == ["07:30"]            # 原 "0 8 * * *"
+    assert cfg["kinds"]["hotrank"]["times"] == ["10:30", "21:30"]  # 原 "30 9,21 * * *"
+    assert cfg["kinds"]["agent"]["times"] == ["09:10", "14:10", "20:40"]  # 原 "10 9,15,21 * * *"
     assert cfg["kinds"]["insight"]["days"] == [1]                 # 原 "0 9 * * 1"(周一)
     assert cfg["kinds"]["weekly"]["days"] == [0]                  # 原 "0 20 * * 0"(周日)
 
 
 def test_due_kinds_matches_time_and_weekday(session) -> None:
     cfg = pt.load(session)
-    assert pt.due_kinds(datetime(2026, 10, 5, 8, 0), cfg) == ["daily"]     # 周一 08:00
-    assert pt.due_kinds(datetime(2026, 10, 5, 8, 1), cfg) == []            # 差一分钟不触发
+    assert pt.due_kinds(datetime(2026, 10, 5, 7, 30), cfg) == ["daily"]     # 周一 08:00
+    assert pt.due_kinds(datetime(2026, 10, 5, 7, 31), cfg) == []            # 差一分钟不触发
     assert pt.due_kinds(datetime(2026, 10, 4, 9, 0), cfg) == []            # 周日不跑周一的爆点回顾
-    assert pt.due_kinds(datetime(2026, 10, 5, 9, 0), cfg) == ["insight"]   # 周一 09:00
-    assert pt.due_kinds(datetime(2026, 10, 4, 20, 0), cfg) == ["weekly"]   # 周日 20:00
+    assert pt.due_kinds(datetime(2026, 10, 5, 13, 30), cfg) == ["insight"]  # 周一 13:30(错峰)
+    assert pt.due_kinds(datetime(2026, 10, 4, 19, 0), cfg) == ["weekly"]   # 周日 19:00(错峰)
 
 
 def test_save_drops_invalid_times_and_days(session) -> None:
@@ -62,28 +62,28 @@ def test_save_drops_invalid_times_and_days(session) -> None:
     assert cfg["kinds"]["daily"]["times"] == ["08:00"]
     assert cfg["kinds"]["daily"]["days"] == [1]
     assert pt.load(session)["kinds"]["daily"]["times"] == ["08:00"]   # 确实落库
-    assert pt.load(session)["kinds"]["hotrank"]["times"] == ["09:30", "21:30"]  # 没被牵连
+    assert pt.load(session)["kinds"]["hotrank"]["times"] == ["10:30", "21:30"]  # 没被牵连
 
 
 def test_empty_times_disables_kind(session) -> None:
     """清空时刻 = 关掉它:界面不该显示成"开着"却永不触发。"""
     cfg = pt.save(session, {"kinds": {"daily": {"times": []}}})
     assert cfg["kinds"]["daily"]["enabled"] is False
-    assert pt.due_kinds(datetime(2026, 10, 5, 8, 0), cfg) == []
+    assert pt.due_kinds(datetime(2026, 10, 5, 7, 30), cfg) == []
 
 
 def test_weekend_silence(session) -> None:
     """去掉周六周日 = 周末静默(最实际的诉求:工作日报别在周末响)。"""
-    cfg = pt.save(session, {"kinds": {"daily": {"times": ["08:00"], "days": [1, 2, 3, 4, 5]}}})
-    assert pt.due_kinds(datetime(2026, 10, 5, 8, 0), cfg) == ["daily"]   # 周一
-    assert pt.due_kinds(datetime(2026, 10, 3, 8, 0), cfg) == []          # 周六
-    assert pt.due_kinds(datetime(2026, 10, 4, 8, 0), cfg) == []          # 周日
+    cfg = pt.save(session, {"kinds": {"daily": {"times": ["07:30"], "days": [1, 2, 3, 4, 5]}}})
+    assert pt.due_kinds(datetime(2026, 10, 5, 7, 30), cfg) == ["daily"]   # 周一
+    assert pt.due_kinds(datetime(2026, 10, 3, 7, 30), cfg) == []          # 周六
+    assert pt.due_kinds(datetime(2026, 10, 4, 7, 30), cfg) == []          # 周日
 
 
 def test_tick_runs_only_due_kinds(session, monkeypatch) -> None:
     ran: list[str] = []
     monkeypatch.setattr(pt, "_run", lambda kind, settings: ran.append(kind) or 1)
-    out = pt.tick(db=session, when=datetime(2026, 10, 5, 8, 0))
+    out = pt.tick(db=session, when=datetime(2026, 10, 5, 7, 30))
     assert out["ran"] == ["daily"] and ran == ["daily"] and out["failed"] == []
 
 
@@ -96,8 +96,8 @@ def test_tick_swallows_single_failure(session, monkeypatch) -> None:
 
     monkeypatch.setattr(pt, "_run", boom)
     # 让两类撞在同一分钟(monkeypatch 会自动还原,不留副作用)
-    monkeypatch.setitem(pt.PUSH_KINDS["hotrank"], "times", ["08:00"])
-    out = pt.tick(db=session, when=datetime(2026, 10, 5, 8, 0))
+    monkeypatch.setitem(pt.PUSH_KINDS["hotrank"], "times", ["07:30"])
+    out = pt.tick(db=session, when=datetime(2026, 10, 5, 7, 30))
     assert out["failed"] == ["daily"] and out["ran"] == ["hotrank"]
 
 
@@ -113,8 +113,8 @@ def test_minutes_since_covers_skipped_minutes() -> None:
 
 def test_minutes_since_caps_backfill_window() -> None:
     """服务停了一夜后重启,不该把攒了一晚上的推送全倒出来。"""
-    last = datetime(2026, 10, 4, 8, 0)
-    now = datetime(2026, 10, 5, 8, 0)
+    last = datetime(2026, 10, 4, 7, 30)
+    now = datetime(2026, 10, 5, 7, 30)
     got = pt.minutes_since(last, now, cap=10)
     assert len(got) == 10
     assert got[-1] == now.replace(second=0, microsecond=0)
@@ -130,16 +130,16 @@ def test_tick_backfills_skipped_minute(session, monkeypatch) -> None:
     """核心回归:08:00 那一刻被调度器跳过,08:01 的 tick 必须把它补上。"""
     ran: list[str] = []
     monkeypatch.setattr(pt, "_run", lambda kind, settings: ran.append(kind) or 1)
-    assert pt.tick(db=session, when=datetime(2026, 10, 5, 7, 59))["ran"] == []  # 先建好水位
-    out = pt.tick(db=session, when=datetime(2026, 10, 5, 8, 1))                 # 跳过 08:00
+    assert pt.tick(db=session, when=datetime(2026, 10, 5, 7, 29))["ran"] == []  # 先建好水位
+    out = pt.tick(db=session, when=datetime(2026, 10, 5, 7, 31))                 # 跳过 08:00
     assert out["ran"] == ["daily"] and ran == ["daily"]
 
 
 def test_tick_does_not_repeat_within_same_minute(session, monkeypatch) -> None:
     ran: list[str] = []
     monkeypatch.setattr(pt, "_run", lambda kind, settings: ran.append(kind) or 1)
-    assert pt.tick(db=session, when=datetime(2026, 10, 5, 8, 0, 10))["ran"] == ["daily"]
-    assert pt.tick(db=session, when=datetime(2026, 10, 5, 8, 0, 50))["ran"] == []
+    assert pt.tick(db=session, when=datetime(2026, 10, 5, 7, 30, 10))["ran"] == ["daily"]
+    assert pt.tick(db=session, when=datetime(2026, 10, 5, 7, 30, 50))["ran"] == []
     assert ran == ["daily"]        # 只推了一次
 
 
@@ -147,25 +147,28 @@ def test_tick_first_run_still_checks_current_minute(session, monkeypatch) -> Non
     """首次部署(没有水位记录)时,当前这一分钟必须照常检查,不能空转。"""
     ran: list[str] = []
     monkeypatch.setattr(pt, "_run", lambda kind, settings: ran.append(kind) or 1)
-    assert pt.tick(db=session, when=datetime(2026, 10, 5, 8, 0))["ran"] == ["daily"]
+    assert pt.tick(db=session, when=datetime(2026, 10, 5, 7, 30))["ran"] == ["daily"]
 
 
 def test_due_kinds_respects_instance_role(session) -> None:
     """分体部署:热点类归远程发、公众号类归本机发 —— 否则同一个飞书群收到两份。"""
     cfg = pt.load(session)
-    at_8 = datetime(2026, 10, 5, 8, 0)      # 周一 08:00 → daily(热点)
+    at_8 = datetime(2026, 10, 5, 7, 30)      # 周一 07:30 → daily(热点)
     assert pt.due_kinds(at_8, cfg, role="all") == ["daily"]
     assert pt.due_kinds(at_8, cfg, role="hotspot") == ["daily"]
     assert pt.due_kinds(at_8, cfg, role="wechat") == []
 
-    at_10 = datetime(2026, 10, 5, 10, 0)    # 周一 10:00 → analysis(公众号) + review(热点)
-    assert pt.due_kinds(at_10, cfg, role="wechat") == ["analysis"]
-    assert pt.due_kinds(at_10, cfg, role="hotspot") == ["review"]
-    assert sorted(pt.due_kinds(at_10, cfg, role="all")) == ["analysis", "review"]
+    at_1130 = datetime(2026, 10, 5, 11, 30)  # 周一 11:30 → analysis(公众号)
+    assert pt.due_kinds(at_1130, cfg, role="wechat") == ["analysis"]
+    assert pt.due_kinds(at_1130, cfg, role="hotspot") == []
+
+    at_1630 = datetime(2026, 10, 5, 16, 30)  # 周一 16:30 → review(热点)
+    assert pt.due_kinds(at_1630, cfg, role="hotspot") == ["review"]
+    assert pt.due_kinds(at_1630, cfg, role="wechat") == []
 
 
 def test_kinds_carry_role_through_save(session) -> None:
     """role 是定义的一部分,不能被 _merge/save 洗掉(否则隔离静默失效)。"""
-    cfg = pt.save(session, {"kinds": {"daily": {"times": ["08:00"]}}})
+    cfg = pt.save(session, {"kinds": {"daily": {"times": ["07:30"]}}})
     assert cfg["kinds"]["daily"]["role"] == "hotspot"
     assert cfg["kinds"]["analysis"]["role"] == "wechat"

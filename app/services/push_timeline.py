@@ -37,14 +37,17 @@ _TIME_RE = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
 # 与 settings 里的 cron 一致,换算见 doc/dev.md),role=**由哪个实例发**(见 settings.scheduler_role)——
 # 分体部署时两端的库不同(本机有公众号+闲鱼、远程有热点),推送必须各归各的,
 # 否则同一个飞书群会收到两份标题相同、内容各异的卡。单实例(all)时照常全推。
+# 时刻表(2026-10-01 错峰版):用户要求"不要堆在一个时间点推送"——
+# 旧默认里 09:10(agent)/09:30(hotrank) 只差 20 分,周一 10:00 是 insight/review/analysis
+# **三箭齐发**。新表按"起床/午前/午后/晚间"拉开,同一时刻至多一类推送。
 PUSH_KINDS: dict[str, dict] = {
-    "daily":    {"label": "热点日报",       "times": ["08:00"],                  "days": [0, 1, 2, 3, 4, 5, 6], "role": "hotspot"},
-    "hotrank":  {"label": "多平台热榜速览", "times": ["09:30", "21:30"],         "days": [0, 1, 2, 3, 4, 5, 6], "role": "hotspot"},
-    "agent":    {"label": "选题 Agent",     "times": ["09:10", "15:10", "21:10"], "days": [0, 1, 2, 3, 4, 5, 6], "role": "hotspot"},
-    "insight":  {"label": "爆点回顾",       "times": ["09:00"],                  "days": [1],                   "role": "hotspot"},
-    "review":   {"label": "选题复盘周报",   "times": ["10:00"],                  "days": [1],                   "role": "hotspot"},
-    "weekly":   {"label": "本周热点洞察",   "times": ["20:00"],                  "days": [0],                   "role": "hotspot"},
-    "analysis": {"label": "公众号选题分析", "times": ["10:00"],                  "days": [0, 1, 2, 3, 4, 5, 6], "role": "wechat"},
+    "daily":    {"label": "热点日报",       "times": ["07:30"],                  "days": [0, 1, 2, 3, 4, 5, 6], "role": "hotspot"},
+    "agent":    {"label": "选题 Agent",     "times": ["09:10", "14:10", "20:40"], "days": [0, 1, 2, 3, 4, 5, 6], "role": "hotspot"},
+    "hotrank":  {"label": "多平台热榜速览", "times": ["10:30", "21:30"],         "days": [0, 1, 2, 3, 4, 5, 6], "role": "hotspot"},
+    "analysis": {"label": "公众号选题分析", "times": ["11:30"],                  "days": [0, 1, 2, 3, 4, 5, 6], "role": "wechat"},
+    "insight":  {"label": "爆点回顾",       "times": ["13:30"],                  "days": [1],                   "role": "hotspot"},
+    "review":   {"label": "选题复盘周报",   "times": ["16:30"],                  "days": [1],                   "role": "hotspot"},
+    "weekly":   {"label": "本周热点洞察",   "times": ["19:00"],                  "days": [0],                   "role": "hotspot"},
 }
 
 

@@ -550,7 +550,7 @@ def test_scheduler_registers_insight_job() -> None:
     ids = [j.id for j in sched.get_jobs()]
     assert "push_timeline" in ids
     assert "feishu_insight" not in ids            # 老的独立 job 已撤
-    assert PUSH_KINDS["insight"]["times"] == ["09:00"]
+    assert PUSH_KINDS["insight"]["times"] == ["13:30"]   # 错峰版(2026-10-01)
     assert PUSH_KINDS["insight"]["days"] == [1]   # 周一
     sched.shutdown(wait=False) if sched.running else None
 
