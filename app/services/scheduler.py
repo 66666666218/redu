@@ -336,14 +336,13 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         _safe(cleanup_old_data), CronTrigger(hour=4, minute=0), id="data_cleanup", max_instances=1, coalesce=True
     )
     from app.services.early_agent import agent_tick_all_users
-    from app.services.hotspot_agent import (hotspot_agent_tick_all_users,
-                                            settle_suggestions_all_users)
+    from app.services.hotspot_agent import settle_suggestions_all_users
     from app.services.wechat_monitor import (candidate_discover_tick, candidate_import_tick,
                                               keyword_article_all_users,
                                               pan_cookie_keepalive_tick, weread_refresh_tick)
-    from app.services.hot_sources import hot_source_tick_all_users, push_hot_rank_card_all_users
+    from app.services.hot_sources import hot_source_tick_all_users
     from app.services.wechat_monitor import retire_dormant_tick_all_users
-    from app.services.weekly_review import run_weekly_review_all_users
+    from app.services.push_timeline import tick as push_timeline_tick
 
     jobs = [
         # 阅读量采样(traffic_tick)已停用:2026-09-29 用户决策放弃 dajiala(不充值),
@@ -356,10 +355,8 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         (hot_source_tick_all_users, "5 * * * *", {"minute": 5}, "hot_source"),
         # 死号清理(v2.6.0):每日 05:30——7 天无发文的对标号自动停监控(带链路安全阀)
         (retire_dormant_tick_all_users, "30 5 * * *", {"minute": 30, "hour": 5}, "bench_retire"),
-        # 选题复盘周报(v2.9.0):每周一 10:00(避开 9 点的洞察摘要),推总群
-        (run_weekly_review_all_users, "0 10 * * 1", {"day_of_week": "mon", "hour": 10, "minute": 0}, "weekly_review"),
-        # 多平台热榜速览卡 → 总群(每日 09:30/21:30,与选题卡互补)
-        (push_hot_rank_card_all_users, "30 9,21 * * *", {"minute": 30, "hour": "9,21"}, "hot_rank_card"),
+        # 选题复盘周报已并入推送时段表(默认周一 10:00)
+        # 多平台热榜速览卡已并入推送时段表(默认 09:30/21:30)
         # 会员续费检查:每日 10:05(到期该收续费/超 24h 该踢名单 → 飞书)
         (_member_renewal, "5 10 * * *", {"minute": 5, "hour": 10}, "member_renewal"),
         # 事件归属:每 15 分钟把近 24h 快照归并为事件(跨平台共振/生命周期的基础层)
@@ -372,8 +369,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # renewal=换新会话,mp/articles 列表只在会话初期可用,每轮赶上窗口)。
         # ⚠️ 此前这里硬编码 "50 */6 * * *",settings 的对齐改动从未生效(2026-09-28 修复)
         (weread_refresh_tick, _get_settings().weread_refresh_cron, {"minute": 50, "hour": "*/6"}, "weread_refresh"),
-        (hotspot_agent_tick_all_users, _get_settings().hotspot_agent_cron,
-         {"minute": 10, "hour": "9,15,21"}, "hotspot_agent"),
+        # 选题 Agent 已并入推送时段表(默认 09:10/15:10/21:10)
         # 建议结算:每日 22:00(v5 结算端:盘链全网扩散增量 repost_gain,2026-09-30 起 reads_gain 采样已废)
         (settle_suggestions_all_users, "0 22 * * *", {"minute": 0, "hour": 22}, "suggestion_settle"),
         # 搜狗验证码红线约 30~50 次/天:每 4 小时一轮 × 每轮最多 5 词 = 30 次/天(安全区)
@@ -381,10 +377,10 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         (candidate_discover_tick, _get_settings().candidate_discover_cron, {"minute": 20, "hour": 8}, "wechat_candidates"),
         # 候选自动收录:紧随发现之后,按标准挑号补进 WeRSS 订阅池(带数量闸门,见 settings)
         (candidate_import_tick, _get_settings().candidate_auto_import_cron, {"minute": 30, "hour": 8}, "wechat_candidate_import"),
-        (run_feishu_daily, _get_settings().feishu_daily_cron, {"minute": 0, "hour": 8}, "feishu_daily"),
-        (run_feishu_wechat_analysis, _get_settings().feishu_wechat_cron, {"minute": 0, "hour": 10}, "feishu_wechat"),
-        (run_feishu_insight_digest, _get_settings().feishu_insight_cron, {"day_of_week": "mon", "hour": 9, "minute": 0}, "feishu_insight"),
-        (run_weekly_summary, _get_settings().weekly_summary_cron, {"day_of_week": "sun", "hour": 20, "minute": 0}, "weekly_summary"),
+        # 推送时段表(2026-10-01):日报/热榜速览/选题分析/Agent/爆点回顾/复盘周报/洞察周报
+        # 共 7 类推送不再各占一条 Cron,改由这一个每分钟 tick 按库里的时段配置判定
+        # (见 app/services/push_timeline.py)。改时间即刻生效,不必重启或重建作业。
+        (push_timeline_tick, "* * * * *", {"minute": "*"}, "push_timeline"),
     ]
     for func, expr, default, job_id in jobs:
         scheduler.add_job(_safe(func), _cron_trigger(expr, default), id=job_id, max_instances=1, coalesce=True)

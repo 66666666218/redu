@@ -103,6 +103,9 @@ export const api = {
   collect: (platform) => req('POST', `/api/collect/${platform}`),
   schedules: () => req('GET', '/api/schedules'),
   setSchedule: (section, payload) => req('PUT', `/api/schedules/${section}`, payload),
+  // 推送时段表(2026-10-01):取代写死在 settings 里的 7 条推送 cron
+  pushTimeline: () => req('GET', '/api/push-timeline'),
+  setPushTimeline: (kinds) => req('PUT', '/api/push-timeline', { kinds }),
   dashboard: () => req('GET', '/api/dashboard'),
   platformAgent: () => req('GET', '/api/platform-agent'),
   platformView: (platform) => req('GET', '/api/platform/' + platform),

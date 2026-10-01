@@ -536,14 +536,22 @@ def test_daily_includes_keyword_agent_section(session) -> None:
 
 
 def test_scheduler_registers_insight_job() -> None:
-    """调度器应注册"爆点回顾"周报 job(feishu_insight)。"""
+    """爆点回顾不再单占一条 cron,改由「推送时段表」的每分钟 tick 按配置触发(2026-10-01)。
+
+    默认时刻仍在 `push_timeline.PUSH_KINDS["insight"]`(周一 09:00),由
+    tests/test_push_timeline.py 逐条锁定;这里只确认调度器上装的是那条 tick。
+    """
     from apscheduler.schedulers.background import BackgroundScheduler
     from app.services.scheduler import build_jobs
+    from app.services.push_timeline import PUSH_KINDS
 
     sched = BackgroundScheduler(timezone="Asia/Shanghai")
     build_jobs(sched)
     ids = [j.id for j in sched.get_jobs()]
-    assert "feishu_insight" in ids
+    assert "push_timeline" in ids
+    assert "feishu_insight" not in ids            # 老的独立 job 已撤
+    assert PUSH_KINDS["insight"]["times"] == ["09:00"]
+    assert PUSH_KINDS["insight"]["days"] == [1]   # 周一
     sched.shutdown(wait=False) if sched.running else None
 
 
