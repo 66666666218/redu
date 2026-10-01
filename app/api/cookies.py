@@ -34,6 +34,25 @@ def cookies_del(platform: str, user: User = Depends(get_current_user), db: Sessi
     return {"platform": platform, "deleted": True}
 
 
+@router.post("/api/cookies/goofish/qr-start")
+def goofish_qr_start(user: User = Depends(get_current_user)):
+    """闲鱼扫码登录·生成二维码(v2.12.0 可视化):返回 {session_id, qr_png(base64), expires_in}。"""
+    from app.services.xianyu_login import start_qr_login
+
+    try:
+        return start_qr_login(user.id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"二维码生成失败:{str(exc)[:120]}")
+
+
+@router.get("/api/cookies/goofish/qr-status")
+def goofish_qr_status(session_id: str, user: User = Depends(get_current_user)):
+    """闲鱼扫码登录·轮询状态:waiting/scanned/confirmed/success/expired/failed/not_found。"""
+    from app.services.xianyu_login import poll_qr_login
+
+    return poll_qr_login(session_id)
+
+
 @router.get("/api/user/smtp")
 def user_smtp_get(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return {"host": user.smtp_host or "", "port": user.smtp_port or 465,

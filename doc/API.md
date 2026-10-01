@@ -1413,6 +1413,15 @@ GET `/api/admin/health`(perm `logs.view`)→ 各平台最近采集状态 + 数�
   立即把该板块「关键词监控」卡片推到飞书(含名次变化 ↑N/↓N);平时每日 08:00 日报自动推。
   → `{"ok": true, "pushed": true}`(未配飞书 webhook 时 pushed 为 false)。
 
+### 16b.3 闲鱼扫码登录(2026-10-01,可视化一键扫码)
+
+- **生成二维码**: POST `/api/cookies/goofish/qr-start` → `{"session_id": "...", "qr_png": "<base64 PNG>", "expires_in": 900}`
+- **轮询状态**: GET `/api/cookies/goofish/qr-status?session_id=...` → `{"status": "waiting|scanned|confirmed|success|expired|failed|not_found", "message": "..."}`
+
+> 前端入口:「Cookie 管理」页 · 闲鱼卡片的「📱 扫码登录」按钮(弹窗显示二维码 + 2.5s 轮询)。
+> 扫码确认后自动**预热 mtop 令牌 → 校验登录态(unb/cookie2) → Cookie 加密入库**,全程零手工。
+> 会话存进程内存(15 分钟 TTL);服务重启后旧会话失效,重新生成即可。
+
 ## 16b. Cookie 管理(/api/cookies)
 
 > 登录用户,凭据按 user_id 隔离;明文只写不读(GET 不回传 Cookie 本体)。
