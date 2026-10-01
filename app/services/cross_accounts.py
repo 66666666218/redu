@@ -24,6 +24,8 @@
 
 from __future__ import annotations
 
+import time
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -83,6 +85,25 @@ def _search_zhihu(cookie: str, keyword: str, limit: int = 20) -> list[dict]:
 
 SEARCHERS = {"zhihu": _search_zhihu}
 
+# MediaCrawler 覆盖的平台(2026-10-01):它们**光带 Cookie 过不去**(微博 -100/贴吧 403/
+# 小红书抖音要签名),只能靠真浏览器算签名——所以走 `mediacrawler_source`,而且是
+# **批量跑**(它的 CLI 一次吃一整个关键词列表,逐词调用等于反复开关浏览器)。
+# MediaCrawler 覆盖的平台(2026-10-01):它们**光带 Cookie 过不去**(微博 -100/贴吧 403/
+# 小红书抖音要签名),只能靠真浏览器算签名——所以走 `mediacrawler_source`。
+MEDIACRAWLER_PLATFORMS = ("xiaohongshu", "douyin", "kuaishou", "weibo", "tieba", "bilibili")
+
+# 限速(2026-10-01,用户要求"一次不要访问太多"):持续高频轮询是最容易被判定为爬虫的模式。
+# 知乎逐词之间留间隔;MediaCrawler **每轮只跑一个平台**(轮换),不是一次开六个浏览器。
+_ZHIHU_GAP = 4.0
+
+
+def pick_mediacrawler_platform(seed: int | None = None) -> str:
+    """按天轮换选一个 MediaCrawler 平台——一次只碰一个,别一天把六个平台的浏览器都开一遍。"""
+    from datetime import date
+
+    s = seed if seed is not None else date.today().toordinal()
+    return MEDIACRAWLER_PLATFORMS[s % len(MEDIACRAWLER_PLATFORMS)]
+
 
 def discover_cross_accounts(session: Session, user_id: int, settings=None,
                             keywords: list[str] | None = None, limit: int = 0) -> dict:
@@ -107,7 +128,9 @@ def discover_cross_accounts(session: Session, user_id: int, settings=None,
         return {"status": "no_cookie", "new": 0}
 
     found, new, items = 0, 0, []
-    for kw in keywords:
+    for idx, kw in enumerate(keywords):
+        if idx:
+            time.sleep(_ZHIHU_GAP)   # 限速:逐词之间留间隔(用户要求"一次不要访问太多")
         for plat in platforms:
             try:
                 hits = SEARCHERS[plat](cookies[plat], kw, limit=20)
@@ -121,8 +144,24 @@ def discover_cross_accounts(session: Session, user_id: int, settings=None,
                 if _save(session, user_id, plat, h, kw):
                     new += 1
                     items.append({"platform": plat, "name": h["name"], "keyword": kw})
+    # ② MediaCrawler 型平台:一次跑**全部关键词**(它的 CLI 是批量的,逐词调用等于反复开关浏览器)。
+    #    工具没装/跑挂都不该拖垮上面那条直连型的发现,所以整段兜住异常。
+    try:
+        from app.services import mediacrawler_source as mc
+
+        if mc.available()[0]:
+            for plat in [pick_mediacrawler_platform()]:   # 每天只碰一个平台,不一次开六个浏览器
+                for h in mc.crawl(plat, keywords):
+                    if not h.get("pan_link"):
+                        continue
+                    found += 1
+                    if _save(session, user_id, plat, h, keywords[0] if keywords else ""):
+                        new += 1
+                        items.append({"platform": plat, "name": h["name"], "keyword": "批量"})
+    except Exception:  # noqa: BLE001 - 工具缺依赖/失效都不影响直连型平台
+        logger.exception("MediaCrawler 发现失败")
     session.commit()
-    logger.info("跨平台发现:关键词 %d × 平台 %d → 命中 %d,新增 %d",
+    logger.info("跨平台发现:关键词 %d × 直连平台 %d → 命中 %d,新增 %d",
                 len(keywords), len(platforms), found, new)
     return {"status": "ok", "keywords": keywords, "platforms": platforms,
             "found": found, "new": new, "items": items}
