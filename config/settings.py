@@ -109,6 +109,11 @@ class Settings(BaseSettings):
     tg_proxy: str = ""              # 出口代理(http://host:port);留空直连
     tg_limit: int = 30              # 单频道每轮取最近几条
     tg_cron: str = "*/30 * * * *"   # 采集频率(默认每 30 分钟;频道更新密度远低于热点榜)
+    # ---- 跨平台同类资源号发现(2026-10-01):拿资源关键词去知乎/B站等平台搜同类号 ----
+    # 只收录**内容里真含网盘链**的账号;各平台门槛见 app/services/cross_platform.py 头注
+    cross_discover_enabled: bool = True
+    cross_discover_keywords: int = 5        # 每轮从资源库取几个资源名当搜索词
+    cross_discover_cron: str = "0 9 * * *"  # 每日一轮(默认 09:00,与其它推送错开)
     # ---- 实例角色(2026-10-01):分体部署时避免两端重复跑同一批作业 ----
     # 本项目有两套部署:本机(公众号 + 闲鱼)与远程 VPS(热点四路),**各自的数据库是独立的**,
     # 但推的是同一个飞书群。不加约束的话两边会各跑一套完整调度器 —— 重复推飞书、重复打上游,

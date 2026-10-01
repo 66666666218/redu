@@ -361,6 +361,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.wechat_monitor import retire_dormant_tick_all_users
     from app.services.push_timeline import tick as push_timeline_tick
     from app.services.telegram_source import collect_tick as tg_collect_tick
+    from app.services.cross_accounts import cross_account_tick
 
     jobs = [
         # 阅读量采样(traffic_tick)已停用:2026-09-29 用户决策放弃 dajiala(不充值),
@@ -397,6 +398,9 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         (candidate_discover_tick, _get_settings().candidate_discover_cron, {"minute": 20, "hour": 8}, "wechat_candidates", "wechat"),
         # 候选自动收录:紧随发现之后,按标准挑号补进 WeRSS 订阅池(带数量闸门,见 settings)
         (candidate_import_tick, _get_settings().candidate_auto_import_cron, {"minute": 30, "hour": 8}, "wechat_candidate_import", "wechat"),
+        # 跨平台同类资源号发现(2026-10-01):拿资源库的**已验证资源名**去知乎等平台搜,
+        # 只收录内容里真含网盘链的账号(各平台门槛见 cross_platform.py 头注)
+        (cross_account_tick, _get_settings().cross_discover_cron, {"minute": 0, "hour": 9}, "cross_account_discover", "wechat"),
         # Telegram 频道资源源(2026-10-01):公众号之外的第二路盘链 feed。
         # 默认关闭——本机直连 t.me 不通;能出网的机器把 TG_ENABLED 打开即可(见 settings)。
         (tg_collect_tick, _get_settings().tg_cron, {"minute": "*/30"}, "tg_collect", "both"),

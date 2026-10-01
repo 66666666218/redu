@@ -444,6 +444,33 @@ class WechatCandidate(Base):
     discovered_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
+class CrossPlatformAccount(Base):
+    """跨平台同类资源号(2026-10-01):拿公众号的资源关键词反查其他平台发现的账号。
+
+    与 `WechatBenchmark`(公众号对标号)是同一思路的**跨平台版**——那边在微信生态内用搜狗
+    找同类号,这边拿**具体的资源关键词**去知乎/B站等平台搜,并且**只收录内容里真含网盘链
+    的账号**(用户口径:"确认其内容,如果确认是推广网盘的就设置成对标账号添加进去")。
+
+    `uid` 是平台内账号 ID(知乎 url_token / B站 mid),与 platform 组成唯一键;
+    `status`: active=纳入监控 / dismissed=人工忽略。
+    """
+
+    __tablename__ = "cross_platform_accounts"
+    __table_args__ = (UniqueConstraint("user_id", "platform", "uid", name="uq_cross_acct"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    platform: Mapped[str] = mapped_column(String(16), index=True)      # zhihu / bilibili …
+    uid: Mapped[str] = mapped_column(String(64), default="")           # 平台内账号 ID
+    name: Mapped[str] = mapped_column(String(128), default="")
+    url: Mapped[str] = mapped_column(String(500), default="")          # 账号主页/代表内容
+    hit_keyword: Mapped[str] = mapped_column(String(128), default="")  # 由哪个资源词发现
+    snippet: Mapped[str] = mapped_column(String(255), default="")      # 代表内容摘要
+    pan_link: Mapped[str] = mapped_column(String(500), default="")     # 内容里检出的网盘链
+    status: Mapped[str] = mapped_column(String(16), default="active")
+    discovered_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
 class WechatBenchmark(Base):
     """对标公众号:监听(新文检测)与同步(全量文章)的目标账号。
 
