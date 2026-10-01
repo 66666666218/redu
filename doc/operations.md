@@ -450,7 +450,17 @@ python scripts/wemp_cred.py --check          # 以后想确认还能不能用
 - 本机 `.env`:`SCHEDULER_ROLE=wechat` ✅ 已设(2026-10-01)
 - 远程:需在其 `.env` 里设 `SCHEDULER_ROLE=hotspot` 并重启容器 ⚠️ **待办**
 
-**验证**:重启后 `data/app.log` 会打 `实例角色 wechat 跳过作业 hot_source(hotspot 侧)`。
+**验证**:用一次性进程断言最可靠 ——
+
+```bash
+python -c "from apscheduler.schedulers.background import BackgroundScheduler as B;
+from app.services.scheduler import build_jobs as b; s=B(); b(s);
+print(sorted(j.id for j in s.get_jobs()))"
+```
+
+角色为 `wechat` 时应恰好 **16 个**作业、且不含任何热点侧项(`hot_source` / `douhot_window_tick` /
+`early_agent_tick` / `agent_learning` / `event_assign` / `suggestion_settle`)。
+日志里也会有 `实例角色 wechat 跳过作业 XXX(hotspot 侧)`,但受日志缓冲影响不保证即时刷出。
 
 ## 5. 阅读量显示 "—"
 
