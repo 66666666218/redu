@@ -87,3 +87,52 @@ def test_tick_swallows_single_failure(session, monkeypatch) -> None:
     monkeypatch.setitem(pt.PUSH_KINDS["hotrank"], "times", ["08:00"])
     out = pt.tick(db=session, when=datetime(2026, 10, 5, 8, 0))
     assert out["failed"] == ["daily"] and out["ran"] == ["hotrank"]
+
+
+# ---- 补跑:调度器偶尔把一次 tick 拖到下一分钟,被跳过的时刻不能永久漏掉 ----
+
+
+def test_minutes_since_covers_skipped_minutes() -> None:
+    last = datetime(2026, 10, 5, 8, 0)
+    now = datetime(2026, 10, 5, 8, 3, 30)
+    got = [m.strftime("%H:%M") for m in pt.minutes_since(last, now)]
+    assert got == ["08:01", "08:02", "08:03"]
+
+
+def test_minutes_since_caps_backfill_window() -> None:
+    """服务停了一夜后重启,不该把攒了一晚上的推送全倒出来。"""
+    last = datetime(2026, 10, 4, 8, 0)
+    now = datetime(2026, 10, 5, 8, 0)
+    got = pt.minutes_since(last, now, cap=10)
+    assert len(got) == 10
+    assert got[-1] == now.replace(second=0, microsecond=0)
+
+
+def test_minutes_since_empty_within_same_minute() -> None:
+    """同一分钟内被触发第二次(调度抖动)不该重复检查——否则同一条会推两遍。"""
+    assert pt.minutes_since(datetime(2026, 10, 5, 8, 0, 30),
+                            datetime(2026, 10, 5, 8, 0, 45)) == []
+
+
+def test_tick_backfills_skipped_minute(session, monkeypatch) -> None:
+    """核心回归:08:00 那一刻被调度器跳过,08:01 的 tick 必须把它补上。"""
+    ran: list[str] = []
+    monkeypatch.setattr(pt, "_run", lambda kind, settings: ran.append(kind) or 1)
+    assert pt.tick(db=session, when=datetime(2026, 10, 5, 7, 59))["ran"] == []  # 先建好水位
+    out = pt.tick(db=session, when=datetime(2026, 10, 5, 8, 1))                 # 跳过 08:00
+    assert out["ran"] == ["daily"] and ran == ["daily"]
+
+
+def test_tick_does_not_repeat_within_same_minute(session, monkeypatch) -> None:
+    ran: list[str] = []
+    monkeypatch.setattr(pt, "_run", lambda kind, settings: ran.append(kind) or 1)
+    assert pt.tick(db=session, when=datetime(2026, 10, 5, 8, 0, 10))["ran"] == ["daily"]
+    assert pt.tick(db=session, when=datetime(2026, 10, 5, 8, 0, 50))["ran"] == []
+    assert ran == ["daily"]        # 只推了一次
+
+
+def test_tick_first_run_still_checks_current_minute(session, monkeypatch) -> None:
+    """首次部署(没有水位记录)时,当前这一分钟必须照常检查,不能空转。"""
+    ran: list[str] = []
+    monkeypatch.setattr(pt, "_run", lambda kind, settings: ran.append(kind) or 1)
+    assert pt.tick(db=session, when=datetime(2026, 10, 5, 8, 0))["ran"] == ["daily"]

@@ -24,7 +24,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -32,35 +31,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.db.database import init_db  # noqa: E402
 from app.db import get_session_local  # noqa: E402
-from app.db.models import SystemConfig, User, WechatBenchmark  # noqa: E402
+from app.db.models import User, WechatBenchmark  # noqa: E402
+from app.services.wemp_cred import load as load_cred, save as save_cred  # noqa: E402
 from app.services.wechat.wemp_client import (  # noqa: E402
     WempAuthError, WempClient, WempError, WempRateLimited,
 )
 from sqlalchemy import select  # noqa: E402
 
-KEY = "wemp_cred_{uid}"
 WERSS_LIC = Path("D:/werss/data/wx.lic")
-
-
-def load_cred(db, user_id: int) -> dict:
-    row = db.scalar(select(SystemConfig).where(SystemConfig.key == KEY.format(uid=user_id)))
-    if not row or not row.value:
-        return {}
-    try:
-        return json.loads(row.value)
-    except ValueError:
-        return {}
-
-
-def save_cred(db, user_id: int, cookie: str, token: str) -> None:
-    key = KEY.format(uid=user_id)
-    row = db.scalar(select(SystemConfig).where(SystemConfig.key == key))
-    value = json.dumps({"cookie": cookie.strip(), "token": token.strip()}, ensure_ascii=False)
-    if row is None:
-        db.add(SystemConfig(key=key, value=value))
-    else:
-        row.value = value
-    db.commit()
 
 
 def parse_lic(path: Path) -> dict:

@@ -100,13 +100,13 @@ def source_health(db: Session, user_id: int, settings=None) -> list[dict]:
         list_sources = ""
         if section == "wechat":
             # 列表源链状态(2026-10-01 抗停维升级):运维一眼看到源链在位情况与降级位
-            from app.db.models import SystemConfig as _SC
+            from app.services.wemp_cred import exists as _wemp_cred_exists
+
             g = getattr
             srcs = []
             if g(settings, "wechat_werss_url", "") and g(settings, "wechat_werss_ak", ""):
                 srcs.append("WeRSS")
-            _wrow = db.scalar(select(_SC).where(_SC.key == f"wemp_cred_{user_id}"))
-            if _wrow and _wrow.value:
+            if _wemp_cred_exists(db, user_id):
                 srcs.append("自研Wemp")
             if g(settings, "wechat_reader_platform_url", "") and g(settings, "wechat_reader_token", ""):
                 srcs.append("读书平台")

@@ -143,24 +143,18 @@ class MultiSourceClient:
 
 
 def _wemp_client(session, user_id: int):
-    """自研 appmsgpublish 客户端(凭据自持 system_config[wemp_cred_{uid}])。
+    """自研 appmsgpublish 客户端(凭据自持 `system_config[wemp_cred_{uid}]`,**加密存储**)。
 
     2026-09-30:WeRSS 同类项目有停维前科,列表源不能赌单一开源项目存活——
     该客户端按公开接口合同独立实现,与 WeRSS 互备。无凭据返回 None。
-    """
-    import json as _json
 
-    from app.db.models import SystemConfig
+    读凭据统一走 `app.services.wemp_cred`(单一事实源:健康页/录入脚本也用它,
+    免得改一处漏一处)。那边解不开时返回空 dict,这里就当"未配置"降级到下一个源。
+    """
+    from app.services.wemp_cred import load as _load_wemp_cred
     from app.services.wechat.wemp_client import WempClient
 
-    row = session.scalar(select(SystemConfig).where(
-        SystemConfig.key == f"wemp_cred_{user_id}"))
-    if not row or not row.value:
-        return None
-    try:
-        cred = _json.loads(row.value)
-    except ValueError:
-        return None
+    cred = _load_wemp_cred(session, user_id)
     if not cred.get("cookie") or not cred.get("token"):
         return None
     return WempClient(cred["cookie"], cred["token"])
