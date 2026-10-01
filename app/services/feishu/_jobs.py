@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from app.db import repository
 
-from app.db.models import BaiduHotItem, DouhotWatchSnap, DouhotWord, FeishuAlert, WeiboHotItem, XianyuItem
+from app.db.models import FeishuAlert
 
 from app.services import douhot
 
-from app.services.feishu_client import FeishuClient, platform_webhook, webhook_for, webhooks_for
+from app.services.feishu_client import platform_webhook, webhooks_for
 
 from config.settings import Settings, get_settings
 
@@ -169,7 +169,7 @@ def run_feishu_insight_digest(settings: Settings | None = None) -> int:
     settings = settings or get_settings()
     if not settings.feishu_webhook:
         return 0
-    from app.services import keyword_agent, tenant
+    from app.services import keyword_agent
     from app.db import get_session_local
     since = datetime.now() - timedelta(days=7)
     client = _pkg.FeishuClient(settings.feishu_webhook, settings.feishu_secret)
@@ -221,7 +221,6 @@ def run_feishu_keyword_alerts(user_id: int, settings: Settings | None = None, db
     if not _pkg.webhook_for(settings, "douhot"):
         return 0
     from app.services import keyword_agent
-    from app.services import tenant
     from app.db import get_session_local
 
     own_session = db is None

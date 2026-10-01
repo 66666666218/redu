@@ -1,7 +1,7 @@
 """多租户 ORM 模型(数据均以 `user_id` 隔离)。
 
 - `User` / `UserCookie`:用户与用户自行配置的各平台 Cookie。
-- 监控数据表(WeiboHotItem / WeiboTrend / XianyuItem / XianyuSummary /
+- 监控数据表(WeiboHotItem / WeiboTrend / XianyuItem / XianyuDaily /
   DouhotWord / DouhotAlerted / AlertRecord / RunRecord)全部带 `user_id`。
 """
 from __future__ import annotations
@@ -117,16 +117,6 @@ class XianyuItem(Base):
     hit_keywords: Mapped[int] = mapped_column(Integer, default=0)
     best_rank: Mapped[int] = mapped_column(Integer, default=0)
     keywords: Mapped[str] = mapped_column(String(500), default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
-
-
-class XianyuSummary(Base):
-    __tablename__ = "xianyu_summary"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
-    summary_date: Mapped[str] = mapped_column(String(16))
-    summary_json: Mapped[str] = mapped_column(Text())
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 

@@ -36,7 +36,7 @@ from app.services.cookie_store import get_cookies, set_cookie
 _XIANYU_ROUND_LOCK = __import__('threading').Lock()
 from app.services.notifier import get_user_notifier
 from app.db import repository
-from app.services.trend_analyzer import compute_growth, compute_slope, recent_growth
+from app.services.trend_analyzer import compute_slope, recent_growth
 from app.services.tenant_base import _base, _record_run, persist_refreshed_cookie, verify_cooldown_active  # noqa: F401  (供外部/测试引用)
 from app.services.xianyu_analytics import run_xianyu_deep, xianyu_analytics, xianyu_daily, xianyu_deep_due  # noqa: F401
 from app.services.keyword_watch import (  # noqa: F401
@@ -456,7 +456,6 @@ def build_weekly_summary(db: Session, user_id: int, settings: Settings) -> str:
     from datetime import datetime, timedelta
 
     from app.services import keyword_agent
-    from app.db.models import DouhotWatchSnap
 
     since = datetime.now() - timedelta(days=7)
     lines = ["📊 本周热点洞察(近 7 天)", ""]

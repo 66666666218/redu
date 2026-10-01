@@ -1,7 +1,6 @@
 """一键同步:免费列表翻页 + 微信读书兜底,同盘链去重推卡。"""
 
-from app.db.models import (FeishuAlert, User, WechatArticle, WechatBenchmark, WechatCandidate,
-                           WechatPanLink, WechatRewrite, WechatTrafficSample)
+from app.db.models import (WechatArticle, WechatBenchmark, WechatPanLink)
 
 from app.services.reader_platform_client import PlatformError, ReaderPlatformClient
 
@@ -11,18 +10,18 @@ from app.services.weread_client import WereadAuthError, WereadClient, WereadErro
 
 from app.services.werss_client import WerssClient
 
-from config.settings import Settings, get_settings
+from config.settings import Settings
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import select, update
 
 from sqlalchemy.orm import Session
 
 from app.services.wechat._text import _parse_time
-from app.services.wechat._source import _platform_client, _weread_cookie, feed_biz, refresh_weread_cookie
-from app.services.wechat._enrich import _enrich_new_articles, _insert_new_articles
-from app.services.wechat._listen import _push_listen, repush_unpushed
+from app.services.wechat._source import feed_biz
+from app.services.wechat._enrich import _insert_new_articles
+from app.services.wechat._listen import _push_listen
 
 
 from app.utils import get_logger

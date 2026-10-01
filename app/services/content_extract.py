@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import re
-from collections import Counter
 
 from app.utils import get_logger
 

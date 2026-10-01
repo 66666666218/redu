@@ -1,13 +1,12 @@
 """数据源选择/Cookie 解析/对标号 CRUD/书架导入/微信读书续期(彼此咬合,故同模块)。"""
 
-from app.db.models import (FeishuAlert, User, WechatArticle, WechatBenchmark, WechatCandidate,
-                           WechatPanLink, WechatRewrite, WechatTrafficSample)
+from app.db.models import (User, WechatArticle, WechatBenchmark, WechatPanLink, WechatRewrite, WechatTrafficSample)
 
 from app.services.reader_platform_client import PlatformError, ReaderPlatformClient
 
-from app.services.tenant_base import _base, _record_run
+from app.services.tenant_base import _base
 
-from app.services.weread_client import WereadAuthError, WereadClient, WereadError, build_mp_url
+from app.services.weread_client import WereadAuthError, WereadError
 
 from app.services.werss_client import WerssClient
 
@@ -15,13 +14,12 @@ from config.settings import Settings, get_settings
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select
 
 from sqlalchemy.orm import Session
 
 import re
 
-from app.services.wechat._text import extract_article_meta
 
 
 _FEED_BIZ_PREFIX = "MP_WXS_"
@@ -504,7 +502,7 @@ def refresh_weread_cookie(session: Session, user_id: int, settings: Settings | N
     返回 {status: success|skipped|failed, reason?, verified, cookie?}。
     """
     from app.db.models import SystemConfig
-    from app.services.cookie_store import get_cookie, set_cookie
+    from app.services.cookie_store import set_cookie
 
     settings = _base(settings)
     # 冷却优先于 Cookie 检查:锁定期内连解析都不做(避免每分钟监听自救反复撞频控)

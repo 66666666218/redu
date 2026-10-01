@@ -5,7 +5,6 @@ import time
 
 import pydantic
 from fastapi import Depends, HTTPException
-from sqlalchemy.orm import Session
 
 from app.auth import require_admin
 from app import admin as admin_svc

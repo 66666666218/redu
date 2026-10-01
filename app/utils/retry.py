@@ -8,7 +8,7 @@ import functools
 import random
 import time
 from collections.abc import Callable
-from typing import Any, ParamSpec, TypeVar
+from typing import ParamSpec, TypeVar
 
 from app.utils.logger import get_logger
 

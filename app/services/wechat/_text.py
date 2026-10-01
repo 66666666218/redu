@@ -1,11 +1,9 @@
 """盘链识别/正文抓取/质量评估/微信读书响应解析(纯函数,零内部依赖)。"""
 
-from app.db.models import (FeishuAlert, User, WechatArticle, WechatBenchmark, WechatCandidate,
-                           WechatPanLink, WechatRewrite, WechatTrafficSample)
 
-from app.services.quark_transfer import QuarkAuthError, QuarkError, QuarkTransfer, extract_quark_urls
+from app.services.quark_transfer import extract_quark_urls
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import html as html_mod
 
@@ -32,7 +30,6 @@ _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 from app.utils import get_logger
 
 logger = get_logger(__name__)
-from app.services import wechat_monitor as _root  # 兼容 monkeypatch:可替换名经门面运行时查找
 
 def detect_pan_types(text: str) -> list[str]:
     """返回文本涉及的网盘类型:优先分享链接特征(确认级),否则退回盘名关键词(标题疑似级)。"""

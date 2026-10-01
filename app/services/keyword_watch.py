@@ -15,7 +15,7 @@ from config.settings import Settings
 from app.db import repository
 from app.db.models import DouhotWatch, DouhotWatchSnap
 from app.services import douhot, xianyu
-from app.services.trend_analyzer import compute_growth, compute_slope
+from app.services.trend_analyzer import compute_growth
 
 
 _WORD_TYPES = ("word", "search", "subscribe", "video", "topic")

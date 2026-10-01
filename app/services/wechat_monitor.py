@@ -4,6 +4,9 @@
 与测试引用的私有名、以及 monkeypatch 目标(requests/WereadError 等外部名)全部保持可用;
 新代码请经本门面引用(直接 import 子模块会触发循环导入:子模块头部依赖门面)。
 """
+# ruff: noqa: F401
+# ↑ 本文件的**全部** import 都是有意为之的 re-export,不是未使用;逐个加 `# noqa` 会淹没真正的告警,
+#   故用文件级豁免(2026-10-01 清理 F401 噪音时定)。
 # ---- 原 wechat_monitor.py 的完整 import 区(门面兼容:monkeypatch 目标与测试可见名) ----
 from __future__ import annotations
 """公众号监听公共工具:盘链识别/正文抓取/元信息解析/质量评估/响应解析。

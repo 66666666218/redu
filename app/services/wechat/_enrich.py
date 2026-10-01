@@ -1,25 +1,25 @@
 """新文后处理:盘链回填、夸克/百度转存换我方链(推送前)。"""
 
-from app.db.models import (FeishuAlert, User, WechatArticle, WechatBenchmark, WechatCandidate,
-                           WechatPanLink, WechatRewrite, WechatTrafficSample)
+from app.db.models import (FeishuAlert, WechatArticle, WechatBenchmark, WechatCandidate,
+                           WechatPanLink)
 
-from app.db.tx import HeldSavepoint, savepoint
+from app.db.tx import savepoint
 
 from app.services.content_extract import extract_account_refs as _ear
 
-from app.services.quark_transfer import QuarkAuthError, QuarkError, QuarkTransfer, extract_quark_urls
+from app.services.quark_transfer import QuarkAuthError, QuarkError, QuarkTransfer
 
-from config.settings import Settings, get_settings
+from config.settings import Settings
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import func, or_, select
 
 from sqlalchemy.orm import Session
 
 import re
 
-from app.services.wechat._text import _extract_pan_urls, assess_quality, detect_pan_types, fetch_article_content, title_hits
+from app.services.wechat._text import _extract_pan_urls, assess_quality, detect_pan_types
 from app.services.wechat._source import _quark_cookie
 from app.services.wechat._candidates import _push_candidates
 

@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from app.db import repository
 
-from app.db.models import BaiduHotItem, DouhotWatchSnap, DouhotWord, FeishuAlert, WeiboHotItem, XianyuItem
+from app.db.models import BaiduHotItem, DouhotWord, WeiboHotItem, XianyuItem
 
-from app.services import douhot
 
 from config.settings import Settings, get_settings
 
@@ -20,7 +19,6 @@ import unicodedata
 
 from app.utils import get_logger
 logger = get_logger(__name__)
-import app.services.feishu as _pkg  # 兼容 monkeypatch:FeishuClient 等经包命名空间运行时查找
 
 
 SECTIONS = ("weibo", "xianyu", "douhot", "baidu")

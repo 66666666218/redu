@@ -332,8 +332,6 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     """注册后台作业:按用户频率采集、定时告警摘要、失败自动重试、飞书日报/周报、邮件周报。"""
     from app.admin import retry_failed_runs
     from app.services.alert_service import check_collect_failures, check_health_stalls, run_fixed_time_digests
-    from app.services.tenant import run_weekly_summary
-    from app.services.feishu import run_feishu_daily, run_feishu_insight_digest, run_feishu_wechat_analysis
     from config.settings import get_settings as _get_settings
 
     _add_job(scheduler, collect_tick, CronTrigger(minute="*"), "collect_tick", "both")

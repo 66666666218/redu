@@ -18,7 +18,6 @@ from app.db.models import (
     AlertRule,
     BaiduHotItem,
     DouhotWatch,
-    DouhotWatchSnap,
     DouhotWord,
     FeishuAlert,
     LoginLog,
@@ -651,7 +650,6 @@ def insights(db: Session) -> dict:
     - `hot_words`:全站抖音内容词按热度去重 Top N
     """
     from app.services import keyword_agent
-    from app.services.trend_analyzer import compute_growth
 
     today = date.today().isoformat()
     # 统计

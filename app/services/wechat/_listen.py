@@ -1,9 +1,8 @@
 """监听轮:书架粗筛、额度熔断、微信读书采集、批次轮换、主循环。"""
 
-from app.db.models import (FeishuAlert, User, WechatArticle, WechatBenchmark, WechatCandidate,
-                           WechatPanLink, WechatRewrite, WechatTrafficSample)
+from app.db.models import (WechatArticle, WechatBenchmark, WechatPanLink)
 
-from app.db.tx import HeldSavepoint, savepoint
+from app.db.tx import savepoint
 
 from app.services.reader_platform_client import PlatformError, ReaderPlatformClient
 
@@ -13,11 +12,11 @@ from app.services.weread_client import WereadAuthError, WereadClient, WereadErro
 
 from app.services.werss_client import WerssClient
 
-from config.settings import Settings, get_settings
+from config.settings import Settings
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 
 from sqlalchemy.exc import IntegrityError
 
@@ -31,9 +30,9 @@ import uuid
 
 import zlib
 
-from app.services.wechat._text import _MY_LINK_RE, _parse_time, fetch_article_content
-from app.services.wechat._source import _cookie_fingerprint, _platform_client, _weread_cookie, add_benchmark, feed_biz, refresh_weread_cookie, weread_shelf
-from app.services.wechat._enrich import _enrich_new_articles, _insert_new_articles
+from app.services.wechat._text import _MY_LINK_RE, _parse_time
+from app.services.wechat._source import _cookie_fingerprint, feed_biz
+from app.services.wechat._enrich import _insert_new_articles
 
 
 _LISTEN_CURSOR_KEY = "wechat_listen_cursor_{uid}"

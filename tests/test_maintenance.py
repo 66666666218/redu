@@ -53,14 +53,10 @@ def test_cleanup_deletes_old_keeps_recent(session) -> None:
     assert session.scalar(select(WeiboHotItem).where(WeiboHotItem.title == "新微博")) is not None
 
 
-def test_cleanup_wechat_articles_covers_null_pan_urls_and_xianyu_summary(session) -> None:
-    """公众号文章分级清理的两处漏网:
-
-    1. `pan_urls` 为 NULL 的历史行(建表早期/别处写入)在 SQL 里既不 `= ""` 也不 `!= ""`,
-       两张网都漏掉 → wechat_articles 无限增长;
-    2. `xianyu_summary`(每天一行的深采摘要,大 Text)曾根本不在清理清单里。
-    """
-    from app.db.models import WechatArticle, XianyuSummary
+def test_cleanup_wechat_articles_covers_null_pan_urls(session) -> None:
+    """公众号文章分级清理的漏网:`pan_urls` 为 NULL 的历史行(建表早期/别处写入)
+    在 SQL 里既不 `= ""` 也不 `!= ""`,两张网都漏掉 → wechat_articles 无限增长。"""
+    from app.db.models import WechatArticle
 
     old = datetime.now() - timedelta(days=70)
     session.add_all([
@@ -70,16 +66,13 @@ def test_cleanup_wechat_articles_covers_null_pan_urls_and_xianyu_summary(session
                       source="listen", pan_urls="", created_at=old),
         WechatArticle(user_id=1, title="带链但未满 180 天", url="https://mp.weixin.qq.com/s/k",
                       source="listen", pan_urls="https://pan.quark.cn/s/abc", created_at=old),
-        XianyuSummary(user_id=1, summary_date=(datetime.now() - timedelta(days=70)).date().isoformat(),
-                      summary_json="{}", created_at=old),
     ])
     session.commit()
 
-    res = cleanup_old_data(_settings(), db=session)
+    cleanup_old_data(_settings(), db=session)
     assert session.scalar(select(WechatArticle).where(WechatArticle.title == "NULL 链列旧文")) is None
     assert session.scalar(select(WechatArticle).where(WechatArticle.title == "空串旧文")) is None
     assert session.scalar(select(WechatArticle).where(WechatArticle.title == "带链但未满 180 天")) is not None
-    assert res["xianyu_summary"] == 1
 
 
 def test_cleanup_bounds_snap_date_string(session) -> None:

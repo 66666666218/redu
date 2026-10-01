@@ -5,18 +5,15 @@ from app.utils import get_logger
 logger = get_logger(__name__)
 from app.services import wechat_monitor as _root  # 兼容 monkeypatch:可替换名经门面运行时查找
 
-from app.db.models import (FeishuAlert, User, WechatArticle, WechatBenchmark, WechatCandidate,
-                           WechatPanLink, WechatRewrite, WechatTrafficSample)
+from app.db.models import (User, WechatArticle, WechatBenchmark, WechatCandidate)
 
-from app.services.feishu_client import is_quiet_hours
 
-from app.services.sogou_weixin import search_articles as sogou_search_articles
 
 from app.services.tenant_base import _base, _record_run
 
 from config.settings import Settings, get_settings
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import select
 
 from sqlalchemy.orm import Session
 

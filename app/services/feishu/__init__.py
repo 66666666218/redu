@@ -2,6 +2,8 @@
 
 本 __init__ 即兼容层:历史调用方(`from app.services.feishu import X`)与测试引用的名字全部保持可用。
 """
+# ruff: noqa: F401
+# ↑ 与 wechat_monitor.py 同理:本文件全部 import 都是有意为之的 re-export。
 # ---- 原 feishu.py 的完整 import 区(兼容层:外部名与 monkeypatch 目标保持可见) ----
 from __future__ import annotations
 import time

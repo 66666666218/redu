@@ -372,7 +372,7 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
     返回本次告警条数;未配置飞书 webhook 时跳过。`db` 供测试注入。
     """
     settings = settings or get_settings()
-    from app.services.feishu_client import FeishuClient, platform_webhook, webhook_for, webhooks_for
+    from app.services.feishu_client import FeishuClient, platform_webhook, webhooks_for
     if not settings.feishu_webhook and not any(
             platform_webhook(settings, s) for s in ("weibo", "xianyu", "douhot", "baidu", "wechat")):
         return 0

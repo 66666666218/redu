@@ -44,7 +44,6 @@ from app.db.models import (
     AgentStage,
     XianyuDaily,
     XianyuItem,
-    XianyuSummary,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,7 +58,6 @@ _TABLES = [
     (HotSourceItem, "captured_at", False),   # 多平台热榜(2026-10-01):290 条/小时,漏加 30 天膨胀 20 万条
     (WeiboTrend, "decided_at", False),
     (XianyuItem, "created_at", False),
-    (XianyuSummary, "created_at", False),   # 每天一行的深采摘要(大 Text),漏加会无限膨胀
     (XianyuDaily, "snap_date", True),      # YYYY-MM-DD 字符串
     (RunRecord, "started_at", False),
     (AlertRecord, "triggered_at", False),

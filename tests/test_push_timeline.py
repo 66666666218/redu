@@ -15,6 +15,18 @@ from app.db import models  # noqa: F401
 from app.services import push_timeline as pt
 
 
+@pytest.fixture(autouse=True)
+def _pin_role_all(monkeypatch):
+    """把实例角色钉成 `all`。
+
+    本机 `.env` 里设了 `SCHEDULER_ROLE=wechat`(双实例分工),它会让 `daily` 这类
+    hotspot 侧推送被过滤掉 —— 而这些用例测的是"时刻/星期匹配",不该受部署环境干扰
+    (2026-10-01 踩过:换到配了角色的机器上,7 个用例集体变红)。
+    角色隔离本身由 `test_due_kinds_respects_instance_role` 显式传 role 覆盖。
+    """
+    monkeypatch.setattr(pt, "_instance_role", lambda: "all")
+
+
 @pytest.fixture
 def session():
     engine = create_engine("sqlite://")

@@ -18,7 +18,6 @@ import time
 from datetime import datetime
 from collections.abc import Mapping
 from typing import Any
-from urllib.parse import quote
 
 import requests
 

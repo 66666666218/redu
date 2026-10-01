@@ -1,19 +1,18 @@
 """独立定时作业:网盘 Cookie 保活、全量补采、关键词文章监听。"""
 
-from app.db.models import (FeishuAlert, User, WechatArticle, WechatBenchmark, WechatCandidate,
-                           WechatPanLink, WechatRewrite, WechatTrafficSample)
+from app.db.models import (FeishuAlert, User, WechatBenchmark)
 
 from app.services.early_agent import _md_safe_light
 
-from app.services.quark_transfer import QuarkAuthError, QuarkError, QuarkTransfer, extract_quark_urls
+from app.services.quark_transfer import QuarkAuthError, QuarkTransfer
 
-from app.services.weread_client import WereadAuthError, WereadClient, WereadError, build_mp_url
+from app.services.weread_client import WereadError
 
 from config.settings import Settings, get_settings
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import select
 
 from sqlalchemy.orm import Session
 
@@ -21,9 +20,6 @@ import re
 
 import time
 
-from app.services.wechat._text import title_hits
-from app.services.wechat._source import _weread_cookie
-from app.services.wechat._sync import sync_wechat_account
 
 
 from app.utils import get_logger
