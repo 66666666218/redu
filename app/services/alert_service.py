@@ -303,7 +303,9 @@ def notify_incident(db: Session, user_id: int, kind: str, title: str, detail: st
     settings = settings or get_settings()
     from app.services.feishu_client import FeishuClient, webhook_for
 
-    webhook = webhook_for(settings, kind) if push_feishu else ""
+    # 告警是运维信息,推**管理员群**(未配则回落原板块群)——
+    # 客户内容群里不该混进"哪个采集挂了/哪个 Cookie 失效"(2026-10-01 受众分流)
+    webhook = webhook_for(settings, "admin") if push_feishu else ""
     if push_feishu and not webhook:
         return False
     section, key = f"incident_{kind}", title[:80]

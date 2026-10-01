@@ -999,6 +999,32 @@ def settle_suggestions_all_users(settings: Settings | None = None) -> int:
     return total
 
 
+def _auto_transfer(session, user_id: int, pan_url: str, settings) -> str:
+    """把别人的原始链转存成**我方分享链**;任何失败都返回空串(文案照常生成,只是没我方链)。
+
+    仅夸克(百度转存是另一套实现,按需再接)。触发频率低——`generate_draft` 按需调用,
+    不会像监听轮的批量转存那样打风控。
+    """
+    from app.services.cookie_store import get_cookie
+    from app.services.quark_transfer import QuarkTransfer
+
+    ck = get_cookie(session, user_id, "quark")
+    if not ck:
+        logger.info("自动转存跳过:未配夸克 Cookie")
+        return ""
+    try:
+        quark = QuarkTransfer(ck, fid_store=getattr(settings, "quark_fid_store", "") or None)
+        res = quark.transfer_and_share(pan_url,
+                                       save_dir=getattr(settings, "quark_save_dir", "") or "/来自选题",
+                                       password=getattr(settings, "quark_share_password", "") or "")
+        out = str(res.get("share_url") or "")
+        logger.info("现成资源已自动转存:%s → %s", pan_url[:44], out[:44])
+        return out
+    except Exception as exc:  # noqa: BLE001 - 转存失败不挡文案生成
+        logger.warning("现成资源自动转存失败 %s:%s", pan_url[:44], exc)
+        return ""
+
+
 def generate_draft(session, user_id: int, suggestion_id: int, settings=None) -> dict:
     """按建议生成可直接发布的公众号文案(v2.5.0 发布最后一公里,按需调用省成本)。
 
@@ -1017,17 +1043,24 @@ def generate_draft(session, user_id: int, suggestion_id: int, settings=None) -> 
     if not getattr(settings, "deepseek_api_key", ""):
         return {"status": "no_llm_key"}
 
-    # 我方链:建议自带 link 优先;否则按关键词去资源库找现成转存(可直接复用)
-    my_link = ""
+    # 我方链:建议自带 link 优先;否则按关键词去资源库找 —— 有我方转存链直接用;
+    # 只有别人的原始链时,**当场转存成我方链**再进文案(2026-10-01 用户要求:
+    # "有现成的网盘资源先保存到我自己的网盘里面然后再转存出推送")。
+    my_link, raw_link = "", ""
     try:
         from app.services.resource_library import search_resources
 
         for r in search_resources(session, user_id, sug.keyword, limit=3):
-            if r.get("my_link"):
+            if not my_link and r.get("my_link"):
                 my_link = r["my_link"]
+            if not raw_link and r.get("pan_url"):
+                raw_link = r["pan_url"]
+            if my_link and raw_link:
                 break
     except Exception:  # noqa: BLE001 - 资源库查询失败不挡文案生成
         logger.debug("文案生成查资源库失败", exc_info=True)
+    if not my_link and raw_link:
+        my_link = _auto_transfer(session, user_id, raw_link, settings)
 
     out = llm_client.draft_article(
         settings.deepseek_base_url, settings.deepseek_api_key, settings.deepseek_model,

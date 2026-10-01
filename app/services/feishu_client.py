@@ -57,7 +57,14 @@ def is_quiet_hours(settings: object, now: datetime | None = None) -> bool:
 
 
 def webhook_for(settings: object, section: str = "") -> str:
-    """按板块取飞书 webhook:优先板块专属群,未配则回落主群(总群)。"""
+    """按板块取飞书 webhook。
+
+    `section="admin"`:**管理员群**(告警/诊断/运维类,2026-10-01)——客户内容群里
+    不该混进"哪个采集挂了"这类运营噪音;未配 admin 群时回落主群(维持旧行为)。
+    其余板块:优先板块专属群,未配则回落主群。
+    """
+    if section == "admin":
+        return getattr(settings, "feishu_webhook_admin", "") or settings.feishu_webhook
     return platform_webhook(settings, section) or settings.feishu_webhook
 
 
