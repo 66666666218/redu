@@ -343,6 +343,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.hot_sources import hot_source_tick_all_users
     from app.services.wechat_monitor import retire_dormant_tick_all_users
     from app.services.push_timeline import tick as push_timeline_tick
+    from app.services.telegram_source import collect_tick as tg_collect_tick
 
     jobs = [
         # 阅读量采样(traffic_tick)已停用:2026-09-29 用户决策放弃 dajiala(不充值),
@@ -377,6 +378,9 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         (candidate_discover_tick, _get_settings().candidate_discover_cron, {"minute": 20, "hour": 8}, "wechat_candidates"),
         # 候选自动收录:紧随发现之后,按标准挑号补进 WeRSS 订阅池(带数量闸门,见 settings)
         (candidate_import_tick, _get_settings().candidate_auto_import_cron, {"minute": 30, "hour": 8}, "wechat_candidate_import"),
+        # Telegram 频道资源源(2026-10-01):公众号之外的第二路盘链 feed。
+        # 默认关闭——本机直连 t.me 不通;能出网的机器把 TG_ENABLED 打开即可(见 settings)。
+        (tg_collect_tick, _get_settings().tg_cron, {"minute": "*/30"}, "tg_collect"),
         # 推送时段表(2026-10-01):日报/热榜速览/选题分析/Agent/爆点回顾/复盘周报/洞察周报
         # 共 7 类推送不再各占一条 Cron,改由这一个每分钟 tick 按库里的时段配置判定
         # (见 app/services/push_timeline.py)。改时间即刻生效,不必重启或重建作业。

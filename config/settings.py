@@ -98,6 +98,14 @@ class Settings(BaseSettings):
     candidate_auto_import_min_accounts: int = 2  # 资源库验证阈值:该来源词对应的资源被 ≥N 个
                                                  # 对标号发过才算"需求已验证",随 LLM 资源号一并收录
     candidate_auto_import_cron: str = "30 8 * * *"  # 每日自动收录时间(默认 08:30,紧随候选发现之后)
+    # ---- Telegram 频道资源源(2026-10-01):公众号之外的第二路盘链 feed ----
+    # ⚠️ 需能出网的环境(本机直连 t.me 超时且无本地代理端口)。解析逻辑已单测覆盖,
+    # 启用条件只是网络——所以默认关,免得每轮刷失败日志。
+    tg_enabled: bool = False        # 总开关
+    tg_channels: str = ""           # 频道名(逗号分隔,不带 @),如 "channel_a,channel_b"
+    tg_proxy: str = ""              # 出口代理(http://host:port);留空直连
+    tg_limit: int = 30              # 单频道每轮取最近几条
+    tg_cron: str = "*/30 * * * *"   # 采集频率(默认每 30 分钟;频道更新密度远低于热点榜)
     douhot_cookie_file: str = "data/douhot_cookie.txt"  # 抖音热点宝 Cookie 文件(gitignored)
     douhot_top_n: int = 100         # 内容词趋势条数(抖音热点接口可到 200)
     douhot_watch_entry_cap: int = 100  # 榜单搜索类关注(话题/搜索/视频)每次采集最多记录的相关主题条数
