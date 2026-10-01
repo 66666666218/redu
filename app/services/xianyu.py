@@ -157,11 +157,13 @@ class XianyuClient:
         return "; ".join(f"{c.name}={c.value}" for c in self.session.cookies.jar)
 
     def _refresh(self, resp: curl.Response) -> bool:
-        m = re.search(r"_m_h5_tk=([0-9a-f]{32})_", resp.headers.get("set-cookie", ""))
-        if m and m.group(1):
-            self.session.cookies.set("_m_h5_tk", m.group(1), domain=".goofish.com", path="/")
-            return True
-        return False
+        """令牌刷新检测:curl_cffi 会自动把响应 Set-Cookie 吸进 session jar
+        (headers 里不暴露 set-cookie,故从 jar 直接取新值判断)。"""
+        new = self.session.cookies.get("_m_h5_tk", domain=".goofish.com") or ""
+        # 判"完整形态"(hex_时间戳)——**不回写**:curl_cffi 已自动吸收完整值,
+        # 旧代码 set 32 位前缀会覆盖成残值,网关判 ILLEGAL → 刷新死循环
+        # (2026-10-01 实测定位:XianyuClient 报"令牌循环过期"的真根因)
+        return bool(re.match(r"^[0-9a-f]{32}_\d+", new))
 
     def _sign(self, t: str, token: str, data: str) -> str:
         return hashlib.md5(f"{token}&{t}&{self.APP_KEY}&{data}".encode()).hexdigest()

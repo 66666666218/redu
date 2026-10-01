@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT))
 PASSPORT = "https://passport.goofish.com"
 _SITE = {"appName": "xianyu", "fromSite": "77", "appEntrance": "web"}
 _BIZ = "taobaoBizLoginFrom=web&renderRefer=https://www.goofish.com/"
-_REQUIRED = ("_m_h5_tk", "unb", "cookie2")  # 官方登录态三件套(缺一必 TOKEN_ILLEGAL)
+_REQUIRED = ("unb", "cookie2")  # 官方登录态三件套(缺一必 TOKEN_ILLEGAL)
 
 
 def _log(msg: str) -> None:
@@ -50,7 +50,7 @@ def _cookie_names(session) -> set[str]:
     return {c.name for c in session.cookies.jar}
 
 
-def login(user_id: int, poll_timeout: int = 180) -> int:
+def login(user_id: int, poll_timeout: int = 600) -> int:
     from curl_cffi import requests as creq
 
     s = creq.Session(impersonate="chrome")
@@ -98,6 +98,14 @@ def login(user_id: int, poll_timeout: int = 180) -> int:
         qr.make()
         _log("\n请用 **手机闲鱼 App** 扫码登录(打开 App → 我的 → 右上角扫一扫):\n")
         qr.print_ascii(invert=True)
+        # 同时存 PNG:终端字符图不好扫,图片文件最稳(2026-10-01 用户实测反馈)
+        try:
+            img = qrcode.make(code_content)
+            png = ROOT / "data" / "xianyu_qr.png"
+            img.save(str(png))
+            _log(f"\n📱 二维码图片已存:{png}(可直接打开此图片扫码,比下面的字符图好扫)")
+        except Exception:  # noqa: BLE001 - PNG 失败不影响终端图
+            pass
     except ImportError:
         _log(f"未装 qrcode 库,请手动打开链接完成扫码:{code_content}")
     _log(f"\n(二维码 {poll_timeout} 秒内有效;等待扫码...)")
@@ -143,7 +151,16 @@ def login(user_id: int, poll_timeout: int = 180) -> int:
         _log("[失败] 超时未确认,请重新运行本脚本")
         return 3
 
-    # ⑤ 收集 Cookie → 校验三件套 → 入库
+    # ⑤ 预热:登录流程不下发 `_m_h5_tk`(它是 mtop 网关令牌,调 API 时才 Set-Cookie)——
+    # 打一次闲鱼首页,网关自动下发;缺失则采集必 TOKEN_ILLEGAL(2026-10-01 实测踩过)
+    try:
+        # mtop 网关对任何请求都会 Set-Cookie 下发 _m_h5_tk(公开时间戳接口,无鉴权)
+        s.get("https://h5api.m.goofish.com/h5/mtop.common.getTimestamp/1.0/",
+              headers={"User-Agent": ua, "Referer": "https://www.goofish.com/"}, timeout=20)
+    except Exception:  # noqa: BLE001 - 预热失败不终止(校验会兜底提示)
+        pass
+
+    # ⑥ 收集 Cookie → 校验三件套 → 入库
     names = _cookie_names(s)
     missing = [n for n in _REQUIRED if n not in names]
     if missing:
@@ -174,8 +191,9 @@ def main() -> int:
         pass
     ap = argparse.ArgumentParser(description="闲鱼扫码登录,自动入库 Cookie")
     ap.add_argument("--user", type=int, default=1, help="入库用户 ID(默认 1)")
+    ap.add_argument("--timeout", type=int, default=600, help="二维码有效期秒数(默认 600)")
     args = ap.parse_args()
-    return login(args.user)
+    return login(args.user, poll_timeout=args.timeout)
 
 
 if __name__ == "__main__":

@@ -178,7 +178,9 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
     # 早退不跑采集:省一轮无谓请求,也让用户贴的"只有设备标识字段"的残缺 Cookie
     # 立刻得到明确提示,而不是先烧一轮全失败再报"网络/接口异常"(实测踩过)。
     _names = {kv.split("=", 1)[0].strip() for kv in goofish_cookie.split(";") if kv.strip()}
-    _missing = [n for n in ("_m_h5_tk", "unb", "cookie2") if n not in _names]
+    # unb+cookie2=登录态核心;_m_h5_tk 是 mtop 短效令牌,采集器首次请求自动从网关拿——
+    # 不该在这里校验(扫码登录的会话就没有它,2026-10-01 修正:此前误拦导致新 Cookie 白入库)
+    _missing = [n for n in ("unb", "cookie2") if n not in _names]
     if _missing:
         _record_run(session, user_id, "xianyu", "skipped",
                     f"cookie_incomplete(缺 {'/'.join(_missing)};请重新导出完整 Cookie)")

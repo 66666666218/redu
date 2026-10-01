@@ -1144,3 +1144,22 @@ def test_admin_import_users_role_not_written_as_username(session) -> None:
     assert users["u1@x.com"].role == "editor" and users["u2@x.com"].role == "editor"
 
 
+
+
+def test_xianyu_refresh_token_not_truncated(monkeypatch) -> None:
+    """_refresh 回归(2026-10-01):不得截断 jar 里的 _m_h5_tk(旧 bug 把 hex_时间戳
+    覆盖成 32 位前缀→网关 ILLEGAL→刷新死循环;扫码会话无初始令牌才暴露)。"""
+    from app.services.xianyu import XianyuClient
+
+    c = XianyuClient("unb=1; cookie2=c2")
+    # 模拟网关下发完整令牌(curl_cffi 已自动吸进 jar)
+    c.session.cookies.set("_m_h5_tk", "a" * 32 + "_1790781013725", domain=".goofish.com")
+
+    class _R:
+        pass
+    # 1) 完整形态 → True,且**不回写**(jar 值保持完整)
+    assert c._refresh(_R()) is True
+    assert c.session.cookies.get("_m_h5_tk", domain=".goofish.com") == "a" * 32 + "_1790781013725"
+    # 2) 残值(无时间戳) → False,不误判可用
+    c.session.cookies.set("_m_h5_tk", "a" * 32, domain=".goofish.com")
+    assert c._refresh(_R()) is False

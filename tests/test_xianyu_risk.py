@@ -159,13 +159,20 @@ def test_token_loop_exhaustion_raises_cookie_expired(monkeypatch) -> None:
     class _Resp:
         status_code = 200
         text = "{}"
-        headers = {"set-cookie": "_m_h5_tk=abcdef0123456789abcdef0123456789_1760000000; Path=/; Domain=.goofish.com"}
 
         def json(self):
             return {"ret": ["FAIL_SYS_TOKEN_EXOIRED::令牌过期"], "data": {}}
 
     qt = xy.XianyuClient("cookie=x")
-    monkeypatch.setattr(qt.session, "post", lambda *a, **kw: _Resp())
+
+    def _fake_post(*a, **kw):
+        # 模拟 curl_cffi 行为:响应 Set-Cookie 自动吸进 jar(新 _refresh 从 jar 判刷新成功)
+        qt.session.cookies.set("_m_h5_tk",
+                               "abcdef0123456789abcdef0123456789_1760000000",
+                               domain=".goofish.com")
+        return _Resp()
+
+    monkeypatch.setattr(qt.session, "post", _fake_post)
     try:
         qt._post("mtop.taobao.idle.pc.search", {"keyword": "x"})
         raised = ""
