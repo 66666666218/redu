@@ -436,9 +436,12 @@ def test_generate_draft_with_library_link(session, monkeypatch) -> None:
     assert out["status"] == "ok"
     assert out["titles"] == ["标题甲", "标题乙", "标题丙"]
     assert "mine1" in out["my_link"]          # 资源库我方链自动带上
-    assert "mine1" in out["content"]          # 文中含链(复制即用)
+    # 公众号 SEO 模式(2026-10-01):正文**不放链**(带外链影响微信收录与排名),
+    # 链接挪到「公众号配置」区,由运营配到关键词自动回复里
+    assert "mine1" not in out["content"]
     session.refresh(sug)
     assert "标题甲" in sug.draft
+    assert "mine1" in sug.draft               # 链接在配置区,不在正文
 
     # 未配 key → 明确状态
     assert ha.generate_draft(session, 1, sug.id, settings=_agent_settings())["status"] == "no_llm_key"

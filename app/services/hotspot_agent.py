@@ -1022,10 +1022,17 @@ def generate_draft(session, user_id: int, suggestion_id: int, settings=None) -> 
         hotspot=sug.keyword or "", resource=(sug.plan or "")[:400], my_link=my_link)
     if not out:
         return {"status": "failed"}
-    titles, content = out["titles"], out["content"]
-    # 文案里若已有我方链则不再重复追加;否则文末附上(员工复制即用)
-    if my_link and my_link not in content:
-        content = content.rstrip() + chr(10) + chr(10) + "📦 资源链接:" + chr(10) + my_link
-    sug.draft = (chr(10).join(titles) + chr(10) + chr(10) + content)[:8000]
+    titles, content, keyword = out["titles"], out["content"], out.get("keyword", "")
+    # 公众号 SEO 模式(2026-10-01 依调研改,见 doc/pan-promotion-channels.md):
+    # **正文不挂链**——公众号带外链会影响微信收录与排名;链接与自动回复关键词另起一段
+    # 交给运营,由他在后台配「关键词回复」。老行为(文末直接附链接)已废。
+    block = [" | ".join(titles), "", content]
+    if keyword or my_link:
+        block += ["", "——— 公众号配置(正文里不要放链接)———"]
+        if keyword:
+            block.append(f"① 自动回复关键词:{keyword}")
+        if my_link:
+            block.append("② 该关键词的回复内容:" + chr(10) + "📦 资源链接:" + chr(10) + my_link)
+    sug.draft = chr(10).join(block)[:8000]
     session.commit()
     return {"status": "ok", "titles": titles, "content": content, "my_link": my_link}

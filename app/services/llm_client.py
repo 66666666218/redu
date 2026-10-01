@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+import re
+
 import requests
 
 from app.utils import get_logger
@@ -215,19 +217,42 @@ def rewrite_article(base_url: str, api_key: str, model: str,
 def draft_article(base_url: str, api_key: str, model: str, *,
                   hotspot: str, resource: str = "", title_hint: str = "",
                   audience: str = "", hook: str = "", my_link: str = "",
-                  timeout: int = 150) -> dict | None:
+                  wechat_seo: bool = True, timeout: int = 150) -> dict | None:
     """选题建议 → 可直接发布的公众号文案(v2.5.0,发布最后一公里)。
 
     与 rewrite_article 的区别:改写是"有原文改",本函数是"无原文创作"——
     输入是建议的教学字段(资源/人群/钩子),让 LLM 直接写一篇配套资源的推广文。
-    返回 {"titles": [3 个备选标题], "content": "正文草稿"};失败返回 None。
+
+    `wechat_seo`(默认 True,2026-10-01 依调研改):**正文里不放网盘链接**,改为文末引导
+    "在公众号回复关键词"。依据见 `doc/pan-promotion-channels.md` —— 公众号正文带外链会
+    影响微信收录与排名,行业通行做法是"文章只给钩子、链接走关键词自动回复"。该模式下
+    额外返回 `keyword`(配套回复关键词),供调用方配到公众号后台。
+    设 False 退回老行为(正文直接挂链),适用于发贴吧/知乎等不怕外链的地方。
+
+    返回 {"titles": [3 个备选标题], "content": "正文草稿", "keyword": "..."};失败返回 None。
     """
     nl = chr(10)
     if not api_key or not hotspot:
         return None
-    link_line = (f"我的网盘链接(必须原样出现在正文里,并自然引导读者保存/转存):{my_link}"
-                 if my_link else
-                 "如没有现成链接则不虚构,正文末尾引导读者'回复关键词'或以资源整理攻略角度收尾")
+    if wechat_seo:
+        link_line = (
+            f"本次要交付的网盘链接是:{my_link}。**正文里绝对不要出现这条链接、也不要出现任何网址**"
+            "(公众号带外链会影响微信收录与排名),改为在文末引导读者「在公众号回复关键词获取」"
+            if my_link else
+            "正文里不要出现任何网址,文末引导读者「在公众号回复关键词获取」")
+        head_rule = (
+            "① 第一行=3 个备选标题(不同角度:时效/人群/利益点),用 | 分隔、不要编号;" + nl
+            + "② 第二行=一个公众号自动回复关键词(2~6 字,好记、贴合资源,格式严格为「关键词:XXX」);" + nl
+        )
+        body_no = "④"
+        body_idx = "③"
+    else:
+        link_line = (f"我的网盘链接(必须原样出现在正文里,并自然引导读者保存/转存):{my_link}"
+                     if my_link else
+                     "如没有现成链接则不虚构,正文末尾引导读者'回复关键词'或以资源整理攻略角度收尾")
+        head_rule = "① 标题给 3 个备选(不同角度:时效/人群/利益点),严格一行一个、不要编号;" + nl
+        body_no = "③"
+        body_idx = "②"
     user_prompt = (
         f"请为公众号写一篇【网盘资源推广】可发布文案。{nl}"
         + f"热点:{hotspot}{nl}"
@@ -236,10 +261,10 @@ def draft_article(base_url: str, api_key: str, model: str, *,
         + (f"目标人群:{audience}{nl}" if audience else "")
         + (f"转存钩子:{hook}{nl}" if hook else "")
         + link_line + nl
-        + "要求:① 标题给 3 个备选(不同角度:时效/人群/利益点),严格一行一个、不要编号;"
-        + "② 正文 400~800 字:开头蹭热点 2~3 句→点出资料价值→引导获取→结尾轻量催存;"
-        + "③ 风格口语自然、像真人分享,不要营销腔和违禁词;④ 输出格式:第一行=3 个标题用 | 分隔,"
-        + "空一行,之后=正文(纯文本,分段清晰)"
+        + "要求:" + head_rule
+        + body_idx + " 正文 400~800 字:开头蹭热点 2~3 句→点出资料价值→引导获取→结尾轻量催存;"
+        + body_no + " 风格口语自然、像真人分享,不要营销腔和违禁词;" + nl
+        + "输出格式:标题行(与关键词行如有)在前,空一行,之后=正文(纯文本,分段清晰)"
     )
     try:
         resp = requests.post(
@@ -263,11 +288,15 @@ def draft_article(base_url: str, api_key: str, model: str, *,
         if not text:
             return None
         parts = text.split(nl + nl, 1)
-        titles = [x.strip().lstrip("# ").strip()[:64] for x in parts[0].split("|") if x.strip()][:3]
+        head = [x.strip() for x in parts[0].split(nl) if x.strip()]
+        titles = [x.strip().lstrip("# ").strip()[:64] for x in head[0].split("|") if x.strip()][:3]
+        keyword = ""
+        if wechat_seo and len(head) > 1:
+            keyword = re.sub(r"^关键词\s*[:：]\s*", "", head[1]).strip().strip("「」\"'")[:32]
         content = parts[1].strip() if len(parts) > 1 else text
         if not titles or not content:
             return None
-        return {"titles": titles, "content": content}
+        return {"titles": titles, "content": content, "keyword": keyword}
     except Exception as exc:  # noqa: BLE001
         _record_usage(None, ok=False)
         logger.warning("AI 文案生成异常:%s", exc)
