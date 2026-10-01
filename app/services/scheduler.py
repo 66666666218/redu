@@ -338,7 +338,8 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.early_agent import agent_tick_all_users
     from app.services.hotspot_agent import (hotspot_agent_tick_all_users,
                                             settle_suggestions_all_users)
-    from app.services.wechat_monitor import (candidate_discover_tick, keyword_article_all_users,
+    from app.services.wechat_monitor import (candidate_discover_tick, candidate_import_tick,
+                                              keyword_article_all_users,
                                               pan_cookie_keepalive_tick, weread_refresh_tick)
     from app.services.hot_sources import hot_source_tick_all_users, push_hot_rank_card_all_users
     from app.services.wechat_monitor import retire_dormant_tick_all_users
@@ -378,6 +379,8 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # 搜狗验证码红线约 30~50 次/天:每 4 小时一轮 × 每轮最多 5 词 = 30 次/天(安全区)
         (keyword_article_all_users, "40 */4 * * *", {"minute": 40}, "keyword_article"),
         (candidate_discover_tick, _get_settings().candidate_discover_cron, {"minute": 20, "hour": 8}, "wechat_candidates"),
+        # 候选自动收录:紧随发现之后,按标准挑号补进 WeRSS 订阅池(带数量闸门,见 settings)
+        (candidate_import_tick, _get_settings().candidate_auto_import_cron, {"minute": 30, "hour": 8}, "wechat_candidate_import"),
         (run_feishu_daily, _get_settings().feishu_daily_cron, {"minute": 0, "hour": 8}, "feishu_daily"),
         (run_feishu_wechat_analysis, _get_settings().feishu_wechat_cron, {"minute": 0, "hour": 10}, "feishu_wechat"),
         (run_feishu_insight_digest, _get_settings().feishu_insight_cron, {"day_of_week": "mon", "hour": 9, "minute": 0}, "feishu_insight"),

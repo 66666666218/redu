@@ -44,7 +44,9 @@ async function loadArticles(append = false) {
     articles.value = append ? articles.value.concat(items) : items
   } catch (e) { msg.value = e.message }
 }
-async function load() { await Promise.all([loadBenches(), loadArticles(), loadCandidates(), loadStatus()]) }
+async function load() {
+  await Promise.all([loadBenches(), loadArticles(), loadCandidates(), loadStatus(), loadImportable()])
+}
 
 async function loadCandidates() {
   try { candidates.value = (await api.wechatCandidates()).items } catch (e) { msg.value = e.message }
@@ -72,15 +74,77 @@ async function dismissCandidate(c) {
 async function importCandidate(c) {
   busy.value = 'imp' + c.id
   try {
-    const r = await api.post(`/api/wechat/candidates/${c.id}/import`)
-    if (r.data.listenable) toastOk(`已收录「${r.data.nickname}」,可直接监听 ✅`)
-    else toastOk(`已收录「${r.data.nickname}」——${r.data.hint || '还需书架导入补齐标识'}`)
+    const r = await api.wechatCandidateImport(c.id)
+    if (r.listenable) toastOk(`已收录「${r.nickname}」,可直接监听 ✅`)
+    else toastOk(`已收录「${r.nickname}」——${r.hint || '暂无可监听标识'}`)
     await load()
   } catch (e) {
-    toastErr('收录失败:' + (e?.response?.data?.detail || e.message || e))
+    toastErr('收录失败:' + (e.message || e))
   } finally {
     busy.value = ''
   }
+}
+
+// ---- 候选批量收录(2026-10-01):自动发现→按标准挑号→补进 WeRSS 订阅池 ----
+const selected = ref(new Set())
+const importableIds = ref(new Set())
+const onlyImportable = ref(false)
+
+const visibleCandidates = computed(() => {
+  const rows = candidates.value.filter(c => c.status === 'new')
+  return onlyImportable.value ? rows.filter(c => importableIds.value.has(c.id)) : rows
+})
+
+async function loadImportable() {
+  try {
+    importableIds.value = new Set((await api.wechatCandidateImportable()).items.map(i => i.id))
+  } catch (e) { msg.value = e.message }
+}
+
+function toggleSelect(id) {
+  const s = new Set(selected.value)
+  if (s.has(id)) s.delete(id); else s.add(id)
+  selected.value = s
+}
+function selectAllVisible() {
+  selected.value = new Set(visibleCandidates.value.filter(c => !c.imported).map(c => c.id))
+}
+function clearSelect() { selected.value = new Set() }
+
+async function importBatch() {
+  const ids = [...selected.value]
+  if (!ids.length) { toastErr('请先勾选候选号'); return }
+  busy.value = 'impbatch'
+  try {
+    const r = await api.wechatCandidateImportBatch(ids)
+    const miss = r.items.filter(x => x.status === 'ok' && !x.listenable).length
+    toastOk(`收录完成:${r.ok}/${r.count} 个建号,${r.listenable} 个可直接监听` +
+            (miss ? `,${miss} 个待补标识(见提示)` : ''))
+    clearSelect()
+    await load()
+  } catch (e) { toastErr(e.message) } finally { busy.value = '' }
+}
+
+async function dismissBatch() {
+  const ids = [...selected.value]
+  if (!ids.length) { toastErr('请先勾选候选号'); return }
+  busy.value = 'disbatch'
+  try {
+    const r = await api.wechatCandidateDismissBatch(ids)
+    toastOk(`已忽略 ${r.dismissed} 个候选`)
+    clearSelect()
+    await load()
+  } catch (e) { toastErr(e.message) } finally { busy.value = '' }
+}
+
+async function autoImport() {
+  busy.value = 'autoimp'
+  try {
+    const r = await api.wechatCandidateAutoImport(0)
+    if (!r.picked) toastErr('没有符合标准的候选(需 LLM 判为资源号,或资源已被多号验证)')
+    else toastOk(`自动收录:符合标准 ${r.picked} 个,本轮处理 ${r.imported} 个(可监听 ${r.listenable})`)
+    await load()
+  } catch (e) { toastErr(e.message) } finally { busy.value = '' }
 }
 
 async function addBench() {
@@ -255,12 +319,30 @@ onMounted(load)
     </div>
 
     <div class="card" style="margin-bottom:16px">
-      <h3>同类候选号({{ candidates.filter(c => c.status === 'new' && !c.imported).length }})</h3>
-      <table v-if="candidates.filter(c => c.status === 'new').length">
-        <tr><th>公众号</th><th>代表文章</th><th>来源词</th><th>发现时间</th><th>操作</th></tr>
-        <tr v-for="c in candidates.filter(c => c.status === 'new')" :key="c.id">
-          <td>{{ c.name }}<span v-if="c.imported" class="empty"> (已收录)</span></td>
-          <td class="empty">{{ c.title.slice(0, 40) }}{{ c.title_ts ? ' (' + c.title_ts.slice(5, 10) + ')' : '' }}</td>
+      <h3>同类候选号({{ visibleCandidates.filter(c => !c.imported).length }})
+        <span class="empty" v-if="importableIds.size">符合收录标准 {{ importableIds.size }} 个</span>
+      </h3>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+        <button :disabled="busy==='discover'" @click="discoverCandidates">{{ busy==='discover' ? '发现中…' : '发现同类号' }}</button>
+        <button :disabled="busy==='autoimp'" @click="autoImport">
+          {{ busy==='autoimp' ? '收录中…' : '一键自动收录(按标准)' }}</button>
+        <label style="display:flex;align-items:center;gap:4px">
+          <input type="checkbox" v-model="onlyImportable" @change="clearSelect()" />只看符合标准的</label>
+        <span class="empty">已勾选 {{ selected.size }} 个</span>
+        <button class="ghost" :disabled="busy==='impbatch'" @click="importBatch">
+          {{ busy==='impbatch' ? '收录中…' : '收录选中' }}</button>
+        <button class="ghost" :disabled="busy==='disbatch'" @click="dismissBatch">
+          {{ busy==='disbatch' ? '处理中…' : '忽略选中' }}</button>
+        <button class="ghost" @click="selectAllVisible">全选</button>
+        <button class="ghost" @click="clearSelect">清空</button>
+      </div>
+      <table v-if="visibleCandidates.length">
+        <tr><th style="width:32px"></th><th>公众号</th><th>代表文章</th><th>来源词</th><th>发现时间</th><th>操作</th></tr>
+        <tr v-for="c in visibleCandidates" :key="c.id">
+          <td><input type="checkbox" :checked="selected.has(c.id)" @change="toggleSelect(c.id)" /></td>
+          <td>{{ c.name }}<span v-if="c.imported" class="empty"> (已收录)</span>
+            <div class="empty" v-if="importableIds.has(c.id)">✅ 符合收录标准</div></td>
+          <td class="empty">{{ (c.title || '').slice(0, 40) }}{{ c.title_ts ? ' (' + c.title_ts.slice(5, 10) + ')' : '' }}</td>
           <td class="empty">{{ c.term }}</td>
           <td class="empty">{{ fmt(c.discovered_at) }}</td>
           <td>
@@ -270,7 +352,10 @@ onMounted(load)
           </td>
         </tr>
       </table>
-      <div v-else class="empty">暂无候选:点「发现同类号」按标题画像词搜同类公众号(免费),也可每日 08:20 自动发现</div>
+      <div v-else class="empty">
+        暂无候选:点「发现同类号」按标题画像词搜同类公众号(免费),也可每日 08:20 自动发现。
+        收录即把该号补进 WeRSS 订阅池,下一轮监听自动接上,无需再去微信读书关注导入。
+      </div>
     </div>
 
     <div class="card" style="margin-bottom:16px">

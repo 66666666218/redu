@@ -4090,3 +4090,134 @@ def test_retire_dormant_benchmarks_with_safety_valve(session) -> None:
     b_dead.active = True
     session.commit()
     assert retire_dormant_benchmarks(session, 1, _settings(wechat_dormant_retire_days=0)) == []
+
+
+# ---- 候选自动收录(2026-10-01):无链接候选 → 补进 WeRSS 订阅池 → 监听接上 ----
+
+
+class _FakeWerss:
+    """够用的假列表源:按名查订阅 / 搜全量号 / 加订阅(记录调用次数供断言)。"""
+
+    def __init__(self, feeds=None, search=None):
+        self._feeds = feeds or []      # [{id, mp_name}] 已有订阅
+        self._search = search or []    # [{fakeid, nickname}]
+        self.added: list[tuple] = []
+        self.searched: list[str] = []
+
+    def list_feeds(self, kw: str = "", limit: int = 100, offset: int = 0):
+        return self._feeds
+
+    def search_mp(self, kw: str, limit: int = 10):
+        self.searched.append(kw)
+        return self._search
+
+    def add_feed(self, mp_name: str, fakeid: str, avatar: str = "", intro: str = ""):
+        self.added.append((mp_name, fakeid))
+        return {"id": f"MP_WXS_{fakeid.strip('=')[-6:]}", "mp_name": mp_name}
+
+
+def _use_plat(monkeypatch, plat):
+    monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings: plat)
+
+
+def test_add_benchmark_by_name_subscribes_and_backfills_biz(session, monkeypatch) -> None:
+    """无链接候选按名建号:搜到精确同名 → 加订阅 → biz 落地,可直接监听。"""
+    plat = _FakeWerss(search=[{"fakeid": "MzY5OTE5NDE0Mg==", "nickname": "兔耳软游社"}])
+    _use_plat(monkeypatch, plat)
+    out = wechat_monitor.add_benchmark_by_name(session, 1, "兔耳软游社", settings=_settings())
+    assert out["created"] is True and out["listenable"] is True
+    assert out["biz"].startswith("MP_WXS_")
+    assert plat.added == [("兔耳软游社", "MzY5OTE5NDE0Mg==")]
+    assert session.scalar(select(WechatBenchmark).where(
+        WechatBenchmark.nickname == "兔耳软游社")).biz == out["biz"]
+
+
+def test_add_benchmark_by_name_uses_existing_subscription_without_adding(
+        session, monkeypatch) -> None:
+    """订阅池里已有同名:零副作用直接接上,不再调 add_feed(那个动作会排一次历史抓取)。"""
+    plat = _FakeWerss(feeds=[{"id": "MP_WXS_123", "mp_name": "已订号"}],
+                      search=[{"fakeid": "AAA==", "nickname": "已订号"}])
+    _use_plat(monkeypatch, plat)
+    out = wechat_monitor.add_benchmark_by_name(session, 1, "已订号", settings=_settings())
+    assert out["biz"] == "MP_WXS_123" and out["listenable"] is True
+    assert plat.added == [] and plat.searched == []  # 没搜也没加
+
+
+def test_add_benchmark_by_name_rejects_ambiguous_name(session, monkeypatch) -> None:
+    """重名歧义(搜到多个同名)不订阅——拿不准就不猜,号先建着等人工。"""
+    plat = _FakeWerss(search=[{"fakeid": "AAA==", "nickname": "重名号"},
+                              {"fakeid": "BBB==", "nickname": "重名号"}])
+    _use_plat(monkeypatch, plat)
+    out = wechat_monitor.add_benchmark_by_name(session, 1, "重名号", settings=_settings())
+    assert out["listenable"] is False and plat.added == []
+    assert "未搜到" in out["hint"] or "歧义" in out["hint"]
+
+
+def test_add_benchmark_by_name_skips_near_miss(session, monkeypatch) -> None:
+    """形近号(名不完全相同)不认——搜狗给的就是公众号名,相似不等于同一个号。"""
+    plat = _FakeWerss(search=[{"fakeid": "AAA==", "nickname": "兔耳软游社2"}])
+    _use_plat(monkeypatch, plat)
+    out = wechat_monitor.add_benchmark_by_name(session, 1, "兔耳软游社", settings=_settings())
+    assert out["listenable"] is False and plat.added == []
+
+
+def test_import_candidate_without_url_now_succeeds(session, monkeypatch) -> None:
+    """回归:v1 对无链接候选一律返回 no_url(搜狗候选全是这种),收录按钮从未成功过。"""
+    plat = _FakeWerss(search=[{"fakeid": "MzY5OTE5NDE0Mg==", "nickname": "兔耳软游社"}])
+    _use_plat(monkeypatch, plat)
+    cand = WechatCandidate(user_id=1, name="兔耳软游社", title="奶蛙快跑手游", term="奶蛙快跑")
+    session.add(cand)
+    session.commit()
+    out = wechat_monitor.import_candidate(session, 1, cand.id, settings=_settings())
+    assert out["status"] == "ok" and out["listenable"] is True
+    session.refresh(cand)
+    assert cand.status == "imported"
+
+
+def test_import_candidate_retries_then_dismisses(session, monkeypatch) -> None:
+    """订阅不上的号(WeRSS 搜不到)给有限次重试,试满转 dismissed,不再霸占每轮名额。"""
+    _use_plat(monkeypatch, _FakeWerss(search=[]))
+    cand = WechatCandidate(user_id=1, name="搜不到的号", title="x", term="资源号")
+    session.add(cand)
+    session.commit()
+    for _ in range(wechat_monitor._IMPORT_MAX_TRIES - 1):
+        assert wechat_monitor.import_candidate(session, 1, cand.id, settings=_settings())["status"] == "ok"
+        session.refresh(cand)
+        assert cand.status == "new"          # 还能重试
+    wechat_monitor.import_candidate(session, 1, cand.id, settings=_settings())
+    session.refresh(cand)
+    assert cand.status == "dismissed" and cand.import_tries == wechat_monitor._IMPORT_MAX_TRIES
+
+
+def test_select_importable_picks_resource_and_validated_terms(session, monkeypatch) -> None:
+    """收录标准:①LLM 判资源号 ②来源词对应的资源已被 ≥N 个对标号验证。资源号优先。"""
+    from app.services import resource_library
+
+    def _fake_search(db, user_id, query, days=90, limit=20):
+        return [{"accounts": 3}] if query == "花少2人格" else []
+
+    monkeypatch.setattr(resource_library, "search_resources", _fake_search)
+    session.add_all([
+        WechatCandidate(user_id=1, name="甲号", term="某词|LLM:资源号(高)"),
+        WechatCandidate(user_id=1, name="乙号", term="某词|LLM:营销号(低)"),
+        WechatCandidate(user_id=1, name="丙号", term="花少2人格|LLM:无关(低)"),
+        WechatCandidate(user_id=1, name="丁号", term="冷门词|LLM:无关(低)"),
+        WechatCandidate(user_id=1, name="戊号", term="半年前的号", status="dismissed"),
+    ])
+    session.commit()
+    picks = wechat_monitor.select_importable(session, 1, _settings())
+    assert [p["cand"].name for p in picks] == ["甲号", "丙号"]   # 营销号/无关/已忽略都不入选
+    assert picks[0]["reason"] == "资源号" and picks[1]["accounts"] == 3
+
+
+def test_auto_import_candidates_respects_gate(session, monkeypatch) -> None:
+    """数量闸门:一次最多收录 limit 个(上游加订阅会排历史抓取,不能一口气灌完)。"""
+    _use_plat(monkeypatch, _FakeWerss(search=[{"fakeid": "AAA==", "nickname": "甲号"},
+                                              {"fakeid": "BBB==", "nickname": "乙号"}]))
+    session.add_all([WechatCandidate(user_id=1, name="甲号", term="w|LLM:资源号(高)"),
+                     WechatCandidate(user_id=1, name="乙号", term="w|LLM:资源号(高)")])
+    session.commit()
+    out = wechat_monitor.auto_import_candidates(session, 1, _settings(), limit=1)
+    assert out["picked"] == 2 and out["imported"] == 1 and out["listenable"] == 1
+    # 闸门只放行一个号:两个候选只建出一个对标号(id 大的排前,即乙号)
+    assert len(session.scalars(select(WechatBenchmark)).all()) == 1

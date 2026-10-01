@@ -87,6 +87,11 @@ function errMessage(data, raw, status) {
 }
 
 export const api = {
+  // 兼容层:早期三处调用(Cookies 扫码登录 / 建议生成文案 / 候选收录)写的是 axios 风格
+  // `api.post(url)` 再取 `r.data`,但 api.js 里从来没有这个方法——req() 返回的**已经是**响应体。
+  // 那些按钮因此一直抛 TypeError(2026-10-01 发现并修复)。包装成 `{ data }` 即可全部救活,
+  // 新代码请直接用下面的具名方法。
+  post: (path, body) => req('POST', path, body).then(data => ({ data })),
   register: (email, password, username) => req('POST', '/api/auth/register', { email, password, username }),
   login: (login, password) => req('POST', '/api/auth/login', { login, password }),
   forgot: (email) => req('POST', '/api/auth/forgot', { email }),
@@ -164,6 +169,12 @@ export const api = {
   wechatCandidates: () => req('GET', '/api/wechat/candidates'),
   wechatCandidateDiscover: () => req('POST', '/api/wechat/candidates/discover'),
   wechatCandidatePatch: (id, o) => req('PATCH', `/api/wechat/candidates/${id}`, o),
+  wechatCandidateImport: (id) => req('POST', `/api/wechat/candidates/${id}/import`),
+  // 候选自动收录(2026-10-01):按标准(资源号/资源已被多号验证)补进 WeRSS 订阅池
+  wechatCandidateImportable: (limit = 0) => req('GET', '/api/wechat/candidates/importable' + (limit ? `?limit=${limit}` : '')),
+  wechatCandidateImportBatch: (ids) => req('POST', '/api/wechat/candidates/import-batch', { ids }),
+  wechatCandidateDismissBatch: (ids) => req('POST', '/api/wechat/candidates/dismiss-batch', { ids }),
+  wechatCandidateAutoImport: (limit = 0) => req('POST', '/api/wechat/candidates/auto-import', { limit }),
   wechatImportShelf: () => req('POST', '/api/wechat/benchmarks/import_shelf'),
   wechatArticles: (q = '') => req('GET', '/api/wechat/articles' + (q ? '?' + q : '')),
   wechatTrafficRefresh: (o = {}) => req('POST', '/api/wechat/traffic/refresh', o),

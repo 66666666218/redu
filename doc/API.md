@@ -868,20 +868,47 @@
 > 文章来源标记:`manual` 手动录入 / `listen` 监听新文 / `sync` 历史同步;`pan_types` 为涉及的网盘类型
 > (标题=盘名疑似级,自抓正文命中链接=确认级),逗号分隔,如 `"夸克网盘,百度网盘"`。
 
-### 9b.8 候选对标号自动发现(2026-09-07)
+### 9b.8 候选对标号自动发现 + 自动收录(2026-09-07 发现 / 2026-10-01 收录闭环)
 
 - **候选列表**: GET `/api/wechat/candidates`
-  → `{"count":N,"items":[{"id","name","title","term","status"(new/dismissed),"imported","title_ts","discovered_at"}]}`
+  → `{"count":N,"items":[{"id","name","title","term","status"(new/dismissed/imported),"imported","title_ts","discovered_at"}]}`
   (`imported`=该公众号名已收录为正式对标号)
 - **手动发现一轮**: POST `/api/wechat/candidates/discover`
   → `{"platform":"wechat","status":"success","terms":[搜索词],"new":新候选数,"blocked":被搜狗验证码拦截的词数}`
 - **更新候选状态**: PATCH `/api/wechat/candidates/{id}` body: `{"status":"dismissed"}`(忽略)或 `{"status":"new"}`
+- **预览可收录清单**: GET `/api/wechat/candidates/importable?limit=200`
+  → `{"count":N,"items":[{"id","name","title","term","reason","accounts"}]}`
+  (`reason`=`资源号` 或 `资源库N号验证`,`accounts`=该来源词的资源被多少个对标号发过)
+- **一键自动收录**: POST `/api/wechat/candidates/auto-import` body: `{"limit":8}`(省略或 ≤0 用配置闸门)
+  → `{"picked","imported","listenable","items":[{id,name,status,reason,listenable,hint}]}`
+- **批量收录选中**: POST `/api/wechat/candidates/import-batch` body: `{"ids":[1,2,3]}`
+  → `{"count","ok","listenable","items":[{id,status,nickname,listenable,hint}]}`
+- **批量忽略选中**: POST `/api/wechat/candidates/dismiss-batch` body: `{"ids":[1,2,3]}`
+  → `{"count","dismissed"}`
+- **单个收录**: POST `/api/wechat/candidates/{id}/import`
+  → `{"status":"ok","benchmark_id","nickname","listenable","created","hint"}`
+  (`listenable=false` 时 `hint` 说明原因;HTTP 400 为 `failed`)
+
 - **原理(全免费)**:搜索词 = 标题书名号/【】实体词(《乡村晋升录》《花少2人格》等,最准)
   + 滑窗高频内容词(兜底)+ `CANDIDATE_SEARCH_TERMS` 配置词 → 搜狗微信搜索(免账号,内置 2.5s 限频,
   连续 2 词命中验证码即收手)→ 按**公众号名**与现有对标号/已存在候选去重入库 → 推公众号专属飞书群
-- **人工闭环**:飞书/列表里看到候选 → 手机微信读书搜索关注 → 监听页"从微信读书书架导入" → 自动进监听
-- 每日自动:调度作业(默认 08:20,`CANDIDATE_DISCOVER_CRON`);配置:`CANDIDATE_SEARCH_TERMS`(词,逗号分隔)、
-  `CANDIDATE_MAX_TERMS`(单轮词数上限,默认 8)、`CANDIDATE_MINE_TERMS`(画像词上限,默认 6)
+- **收录闭环(2026-10-01 补全)**:候选 → `POST /api/wechat/candidates/{id}/import` →
+  按号名搜 WeRSS 全量库(`GET /api/v1/wx/mps/search/{名称}`)→ **精确同名**才订阅
+  (`POST /api/v1/wx/mps`)→ 拿回 `MP_WXS_*` 写进对标号 `biz` 列 → 下一轮监听 ⓪ 分支自动抓它的文章。
+  **不需要**再去微信读书关注 + 书架导入。
+  - 搜狗结果只有公众号名、没有文章链接(其 `/link?url=` 是 JS 二次跳转),故收录走"按名"而非"按链接"
+  - 订阅池里已有同名号时零副作用直接接上(不再重复调加订阅接口——那会触发一次历史抓取)
+  - 重名歧义(搜到多个同名)与形近名一律不订阅,号先建着并提示人工处理
+  - 订阅不上的候选保留 `new` 重试,试满 `_IMPORT_MAX_TRIES`(3)次转 `dismissed`,不长期霸占收录名额
+- **自动收录标准**(按需扩展):① LLM 判为**资源号**;② **它发的资源已被
+  ≥`CANDIDATE_AUTO_IMPORT_MIN_ACCOUNTS` 个对标号验证过**(同链多号同发 = 需求坐实)
+- **数量闸门**:单轮最多 `CANDIDATE_AUTO_IMPORT_MAX`(默认 8)个——WeRSS 加订阅会顺带排一次历史抓取,
+  一口气灌几百个号会把抓取队列压垮
+- 每日自动:发现(默认 08:20,`CANDIDATE_DISCOVER_CRON`)→ 收录(默认 08:30,`CANDIDATE_AUTO_IMPORT_CRON`);
+  配置:`CANDIDATE_SEARCH_TERMS`(词,逗号分隔)、`CANDIDATE_MAX_TERMS`(单轮词数上限,默认 8)、
+  `CANDIDATE_MINE_TERMS`(画像词上限,默认 6)、`CANDIDATE_AUTO_IMPORT`(总开关)、
+  `CANDIDATE_AUTO_IMPORT_MAX`(单轮闸门)、`CANDIDATE_AUTO_IMPORT_MIN_ACCOUNTS`(验证阈值)
+
 
 ### 9b.7 微信读书免费源(2026-09-07)
 

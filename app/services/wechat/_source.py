@@ -231,6 +231,68 @@ def add_benchmark(session: Session, user_id: int, url: str, nickname: str = "",
     session.commit()
     return {"id": row.id, "nickname": row.nickname, "ghid": row.ghid,
             "biz": row.biz, "anchor_url": row.anchor_url}
+def _subscribe_by_name(plat: object, nickname: str) -> str:
+    """把公众号名补进 WeRSS 订阅池,返回订阅 id(即 `biz`);拿不准一律空串,不猜。
+
+    先查已有订阅(`find_feed_biz_by_name`):命中就零副作用返回——**这一步很关键**,
+    因为 `add_feed` 会顺带排一次历史抓取,对已在池子里的号重复调用纯属浪费上游配额。
+    没订阅才去搜全量号:只在**规范化名精确相等**时订阅(搜狗给的候选名就是公众号名,
+    形近号(「XX说」vs「XX説」)一律不认);重名歧义也走空串,交人工。
+    """
+    if not hasattr(plat, "search_mp"):
+        return ""
+    existing = find_feed_biz_by_name(plat, nickname)
+    if existing:
+        return existing
+    want = _norm_mp_name(nickname)
+    hits = [h for h in plat.search_mp(nickname, limit=10)  # type: ignore[attr-defined]
+            if _norm_mp_name(h.get("nickname", "")) == want]
+    if len(hits) != 1:
+        return ""
+    feed = plat.add_feed(hits[0]["nickname"], hits[0]["fakeid"],  # type: ignore[attr-defined]
+                         avatar=hits[0].get("avatar", ""), intro=hits[0].get("intro", ""))
+    fid = str(feed.get("id") or "")
+    return fid if fid.startswith(_FEED_BIZ_PREFIX) else ""
+def add_benchmark_by_name(session: Session, user_id: int, nickname: str, note: str = "",
+                          settings: Settings | None = None) -> dict:
+    """候选无文章链接时按公众号名加号:补进 WeRSS 订阅 → 拿到 biz,直接可监听。
+
+    与 `add_benchmark` 的分工:那条路拿**文章链接**当锚点(锚点空就没法查重),这条拿**号名**。
+    候选号正是"有名字、没链接"的形态——搜狗结果链接是 `/link?url=` 二次跳转(且要执行
+    JS 拼接才拿得到,见 `sogou_weixin`),所以我们从没存下来过。补齐订阅即等价于手动加号:
+    `biz` 一落地,监听 ⓪ 分支下一轮就会走 WeRSS 列表源抓取。
+
+    返回 {"id", "nickname", "biz", "listenable", "created", "hint"}。
+    """
+    name = (nickname or "").strip()
+    if not name:
+        raise ValueError("公众号名不可为空")
+    dup = session.scalar(select(WechatBenchmark).where(
+        WechatBenchmark.user_id == user_id, WechatBenchmark.nickname == name))
+    if dup is not None:
+        listenable = bool(feed_biz(dup) or dup.weread_book_id)
+        return {"id": dup.id, "nickname": dup.nickname, "biz": dup.biz, "created": False,
+                "listenable": listenable,
+                "hint": "" if listenable else "已存在同名对标号,但仍无可监听标识"}
+    settings = settings or get_settings()
+    plat = _root._platform_client(settings)
+    biz, hint = "", ""
+    if plat is None:
+        hint = "未配置列表源(WeRSS),已建号但暂无监听能力"
+    else:
+        try:
+            biz = _subscribe_by_name(plat, name)
+        except PlatformError as exc:  # 订阅失败不挡建号:号先留着,下次收录会重试
+            logger.info("候选订阅 WeRSS 失败:%s", exc)
+            hint = f"订阅列表源失败:{exc}"
+        if not biz and not hint:
+            hint = "WeRSS 未搜到该号或重名歧义,已建号但暂无监听能力"
+    row = WechatBenchmark(user_id=user_id, nickname=name[:128], ghid="", biz=biz[:64],
+                          anchor_url="", note=(note or "").strip()[:255])
+    session.add(row)
+    session.commit()
+    return {"id": row.id, "nickname": row.nickname, "biz": row.biz, "created": True,
+            "listenable": bool(biz), "hint": hint}
 def list_benchmarks(session: Session, user_id: int) -> list[dict]:
     rows = session.scalars(select(WechatBenchmark).where(
         WechatBenchmark.user_id == user_id).order_by(WechatBenchmark.id.desc())).all()

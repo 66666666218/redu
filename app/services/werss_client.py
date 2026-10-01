@@ -18,6 +18,13 @@
   该视图不含正文(`ArticleBase`)。
 - 手动刷新:`POST /api/v1/wx/mps/update/{mp_id}?start_page&end_page`,**同步**抓取,
   自带 60s 节流(过快返回业务码 40402)。
+- 搜索公众号:`GET /api/v1/wx/mps/search/{kw}?limit` → `data.list[] =
+  {fakeid(base64), nickname, round_head_img, signature}`(`apis/mps.py` 的 `search_mp`)。
+  搜的是微信侧全量号,不是本地订阅,同名/形近号都可能返回。
+- 添加订阅:`POST /api/v1/wx/mps`,body `{mp_name, mp_id(=上面的 base64 fakeid),
+  avatar, mp_intro}` → `data.id = MP_WXS_<base64decode(fakeid)>`(`apis/mps.py` 的 `add_mp`)。
+  **这个 id 才是我们要写进 `biz` 列的值**;上游按 fakeid 去重,重复添加是原地更新。
+  添加成功会顺带排一次历史抓取,所以调用方要自带数量闸门。
 - 统一响应封装:`{"code": 0, "message": "success", "data": ...}`;`code != 0` 即业务失败。
   注意它有个别错误分支挂在 HTTP 201 上,所以判定成功与否**只看 `code`**,不看状态码。
 
@@ -65,7 +72,8 @@ class WerssClient:
         return {"Accept": "application/json",
                 "Authorization": f"AK-SK {self.access_key}:{self.secret_key}"}
 
-    def _request(self, method: str, path: str, *, params: dict | None = None) -> dict:
+    def _request(self, method: str, path: str, *, params: dict | None = None,
+                 body: dict | None = None) -> dict:
         if not self.base_url:
             raise WerssError("WeRSS 地址未配置")
         with self._lock:
@@ -75,7 +83,7 @@ class WerssClient:
             self._last = time.time()
         try:
             resp = requests.request(method, self.base_url + _API_BASE + path, params=params,
-                                    timeout=self.timeout, headers=self._headers())
+                                    json=body, timeout=self.timeout, headers=self._headers())
         except requests.RequestException as exc:
             raise WerssError(f"WeRSS 请求失败:{exc}") from exc
         if resp.status_code in (401, 403):
@@ -109,6 +117,47 @@ class WerssClient:
                 out.append({"id": str(raw["id"]).strip(),
                             "mp_name": str(raw.get("mp_name") or "").strip()})
         return out
+
+    def search_mp(self, kw: str, limit: int = 10) -> list[dict]:
+        """按关键词搜公众号 → [{fakeid, nickname, avatar, intro}](候选收录用)。
+
+        `fakeid` 是 base64 串,**添加订阅时要原样回传**(见 `add_feed`);它不是我们的
+        `biz`——`biz` 是添加成功后上游返回的 `MP_WXS_<decode(fakeid)>`。
+        上游搜的不是自己的订阅库,而是微信侧的全量公众号,因此**同名/近名的号都会返回**,
+        调用方必须按 `nickname` 精确比对后再用(否则会把形近号订阅进来)。
+        """
+        from urllib.parse import quote
+
+        name = (kw or "").strip()
+        if not name:
+            return []
+        data = self._request("GET", "/mps/search/" + quote(name, safe=""),
+                             params={"limit": str(max(1, min(int(limit), 100)))})
+        out = []
+        for raw in data.get("list") or []:
+            if not isinstance(raw, dict) or not raw.get("fakeid"):
+                continue
+            out.append({"fakeid": str(raw["fakeid"]).strip(),
+                        "nickname": str(raw.get("nickname") or "").strip(),
+                        "avatar": str(raw.get("round_head_img") or "").strip(),
+                        "intro": str(raw.get("signature") or "").strip()})
+        return out
+
+    def add_feed(self, mp_name: str, fakeid: str, avatar: str = "", intro: str = "") -> dict:
+        """添加订阅(幂等:上游按 fakeid 去重,已存在则原地更新)。→ {id, mp_name}。
+
+        上游会顺手排一次历史文章抓取任务,所以这个调用**不轻**——自动收录必须有
+        数量闸门,不能拿它当循环体刷(见 `_candidates.auto_import_candidates`)。
+        """
+        name = (mp_name or "").strip()
+        fid = (fakeid or "").strip()
+        if not name or not fid:
+            raise WerssError("添加订阅需要公众号名与 fakeid")
+        data = self._request("POST", "/mps", body={"mp_name": name[:255], "mp_id": fid,
+                                                   "avatar": (avatar or "")[:500],
+                                                   "mp_intro": (intro or "")[:255]})
+        return {"id": str(data.get("id") or "").strip(),
+                "mp_name": str(data.get("mp_name") or name).strip()}
 
     def mp_articles(self, mp_id: str, page: int = 1, limit: int = 20) -> list[dict]:
         """某号文章列表(发布时间降序)。归一化为 ReaderPlatformClient 的同一结构。"""

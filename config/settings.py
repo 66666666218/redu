@@ -91,6 +91,13 @@ class Settings(BaseSettings):
     candidate_mine_terms: int = 6      # 标题画像词上限(从已入库标题挖高频内容词)
     candidate_max_terms: int = 8       # 单轮候选发现的搜索词总数上限(搜狗限频,宁少勿封)
     candidate_discover_cron: str = "20 8 * * *"  # 每日候选对标号发现时间(默认 08:20)
+    # ---- 候选自动收录(2026-10-01):发现→筛选→补进 WeRSS 订阅池→监听自动接上 ----
+    candidate_auto_import: bool = True     # 关掉则只在候选页手工点收录
+    candidate_auto_import_max: int = 8     # 单轮最多收录几个号(上游加订阅会排一次历史抓取,
+                                           # 是重操作;8/天≈11 天消化掉积压的 89 个候选)
+    candidate_auto_import_min_accounts: int = 2  # 资源库验证阈值:该来源词对应的资源被 ≥N 个
+                                                 # 对标号发过才算"需求已验证",随 LLM 资源号一并收录
+    candidate_auto_import_cron: str = "30 8 * * *"  # 每日自动收录时间(默认 08:30,紧随候选发现之后)
     douhot_cookie_file: str = "data/douhot_cookie.txt"  # 抖音热点宝 Cookie 文件(gitignored)
     douhot_top_n: int = 100         # 内容词趋势条数(抖音热点接口可到 200)
     douhot_watch_entry_cap: int = 100  # 榜单搜索类关注(话题/搜索/视频)每次采集最多记录的相关主题条数

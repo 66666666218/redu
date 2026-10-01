@@ -136,7 +136,8 @@ def _migrate() -> None:
                         "date_window INTEGER"],
         "douhot_watch_snap": ["section VARCHAR(16) DEFAULT 'douhot'", "entry_title VARCHAR(255) DEFAULT ''", "trend_growth FLOAT DEFAULT 0"],
         "wechat_benchmarks": ["weread_book_id VARCHAR(64) DEFAULT ''", "biz VARCHAR(64) DEFAULT ''"],
-        "wechat_candidates": ["url VARCHAR(600) DEFAULT ''"],  # 收录按钮用(v2.6.0)
+        "wechat_candidates": ["url VARCHAR(600) DEFAULT ''",  # 收录按钮用(v2.6.0)
+                              "import_tries INTEGER DEFAULT 0"],  # 自动收录失败重试计数(v2.13.0)
         "hotspot_suggestions": ["saves INTEGER DEFAULT 0", "saves_at DATETIME",
                                 "platforms VARCHAR(64) DEFAULT ''",
                                 "opportunity FLOAT DEFAULT 0",

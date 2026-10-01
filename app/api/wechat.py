@@ -314,6 +314,67 @@ def wechat_viral_resources(hours: int = 24, user: User = Depends(get_current_use
     return {"hours": hours, "items": detect_viral_resources(db, user.id, hours=hours)}
 
 
+@router.get("/api/wechat/candidates/importable")
+def wechat_candidate_importable(limit: int = 0, user: User = Depends(get_current_user),
+                               db: Session = Depends(get_db)):
+    """预览"符合自动收录标准"的候选(资源号 / 资源已被多号验证),供前端批量勾选。"""
+    from app.services.wechat._candidates import select_importable
+
+    picks = select_importable(db, user.id, limit=max(0, min(int(limit or 0), 200)))
+    return {"count": len(picks), "items": [
+        {"id": p["cand"].id, "name": p["cand"].name, "title": p["cand"].title,
+         "term": p["cand"].term, "reason": p["reason"], "accounts": p["accounts"]}
+        for p in picks]}
+
+
+@router.post("/api/wechat/candidates/auto-import")
+def wechat_candidate_auto_import(payload: dict | None = None,
+                                 user: User = Depends(get_current_user),
+                                 db: Session = Depends(get_db)):
+    """按标准跑一轮自动收录(补进 WeRSS 订阅池);`limit` 省略或 ≤0 时用配置的闸门值。"""
+    from app.services.wechat._candidates import auto_import_candidates
+
+    limit = int((payload or {}).get("limit") or 0)
+    return auto_import_candidates(db, user.id, limit=max(0, min(limit, 50)))
+
+
+@router.post("/api/wechat/candidates/import-batch")
+def wechat_candidate_import_batch(payload: dict, user: User = Depends(get_current_user),
+                                  db: Session = Depends(get_db)):
+    """批量收录勾选的候选(前端多选):逐个执行,单个失败不中断整批。"""
+    from app.services.wechat._candidates import import_candidate
+
+    ids = [int(i) for i in (payload.get("ids") or []) if str(i).lstrip("-").isdigit()][:100]
+    items: list[dict] = []
+    for cid in ids:
+        try:
+            r = import_candidate(db, user.id, cid)
+        except Exception as exc:  # noqa: BLE001 - 单条失败不该让整批回滚
+            db.rollback()
+            logger.exception("候选批量收录失败 id=%s", cid)
+            items.append({"id": cid, "status": "error", "hint": str(exc)[:120]})
+            continue
+        items.append({"id": cid, "status": r.get("status"), "nickname": r.get("nickname"),
+                      "listenable": bool(r.get("listenable")), "hint": r.get("hint", "")})
+    return {"count": len(items), "ok": sum(1 for x in items if x.get("status") == "ok"),
+            "listenable": sum(1 for x in items if x.get("listenable")), "items": items}
+
+
+@router.post("/api/wechat/candidates/dismiss-batch")
+def wechat_candidate_dismiss_batch(payload: dict, user: User = Depends(get_current_user),
+                                   db: Session = Depends(get_db)):
+    """批量忽略勾选的候选(不再出现在待审列表,日后重新搜到仍可再发现)。"""
+    ids = [int(i) for i in (payload.get("ids") or []) if str(i).lstrip("-").isdigit()][:500]
+    done = 0
+    for cid in ids:
+        try:
+            wechat_monitor.set_candidate_status(db, user.id, cid, "dismissed")
+            done += 1
+        except (KeyError, ValueError):
+            continue
+    return {"count": len(ids), "dismissed": done}
+
+
 @router.post("/api/wechat/candidates/{candidate_id}/import")
 def wechat_candidate_import(candidate_id: int, user: User = Depends(get_current_user),
                             db: Session = Depends(get_db)):

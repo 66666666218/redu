@@ -448,7 +448,8 @@ class WechatCandidate(Base):
     url: Mapped[str] = mapped_column(String(600), default="")                 # 代表文章链接(收录用,v2.6.0)
     title_ts: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # 代表文章发布时间
     term: Mapped[str] = mapped_column(String(64), default="")                 # 命中的搜索词
-    status: Mapped[str] = mapped_column(String(16), default="new")            # new / dismissed
+    status: Mapped[str] = mapped_column(String(16), default="new")            # new / dismissed / imported
+    import_tries: Mapped[int] = mapped_column(Integer, default=0)             # 自动收录尝试次数(v2.13.0)
     discovered_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
