@@ -251,8 +251,9 @@ UC / 迅雷只有 `pan_types` 标签、没有我方链(卡片上是 `—`),要�
 > 2. **微信读书的公众号数据不要求用户已关注**:`mp_cover(bookId)` 在未关注的号上照样返回
 >    号名/头像/最新一篇(不存在的 bookId 直接报错)。**候选收录因此可以全自动**——
 >    2026-10-01 收录的 84 个号(53 个补填 book_id)在下一轮监听就抓到 53 篇,零人工关注。
-> - ⚠️ 号数已从 142 涨到 **196**,超过 WeRSS `GATHER_UPDATE_LIMIT` 默认 **90** —— WeRSS 恢复抓取前
->   无影响,但**恢复后排在队尾的号会永不自动刷新**。要么调大该配置,要么接受"WeRSS 只当补充源"。
+> - ⚠️ 号数已从 142 涨到 **196**。此前担心的 "GATHER_UPDATE_LIMIT 默认 90" 经 2026-10-01 核源码
+>   **并不存在**(见本节末),**但 WeRSS 连定时采集任务都没配**(`message_tasks` 空表)——
+>   号数多少都不是当下的瓶颈,它的问题在更前面。
 > - 📌 文档此前写的手动催抓端点 `POST /api/v1/wx/mps/update/{id}` **是错的**(实测 405),源码是
 >   `@router.get("/update/{mp_id}")`。`werss_client.refresh_mp()` 照文档实现成了 POST,故一直无效
 >   (`nudge_werss` 同理)——**待修**。
@@ -329,9 +330,14 @@ wewe-rss 的抓取全靠一个公共转发服务,`weread.111965.xyz` 现在回 *
      自动催一次(`nudge_werss`,不阻塞用户请求);批量回填时 `python scripts/werss_backfill_biz.py
      --apply --nudge 5` 对刚写入的前 5 个各催一次。WeRSS 是**同步抓取 + 全局 60 秒节流**,
      `--nudge` 开大就是在打上游,被节流挡掉的会显示"未执行",交给它自己的定时即可。
-   - **号数上限**:WeRSS 的 `GATHER_UPDATE_LIMIT` 默认 90,每轮只刷最近 90 个订阅。我们是 81 个号,
-     现在够用;一旦订阅数超过它,排在队尾的号会**永不自动刷新**——又是一次静默漏推。加号超过 ~85 个
-     就要把 WeRSS 的该配置调大(或换更密的定时)。
+   - ~~**号数上限**:WeRSS 的 `GATHER_UPDATE_LIMIT` 默认 90~~ —— **这条是错的,2026-10-01 核过源码**:
+     `jobs/mps.py` 的 `add_job` 遍历 `get_all_mps()` 返回的**全部** `status==1` 订阅,`config.yaml`
+     里也没有 `GATHER_UPDATE_LIMIT` 这个配置项。号数涨到 196 **不会**让队尾的号漏刷。
+   - **但真正的问题更靠前**:WeRSS 的 `message_tasks`(**定时采集任务**)表是**空的** —— 它压根没有
+     定时任务在跑,连"第一轮"都不存在。加上 `gather.model` 仍是默认的 `web`(容器内 Chromium,
+     无登录态),`weread.cookie/ticket/vid` 三个 env 全空 —— 这是它零文章的完整解释。
+     要让它复活得同时满足:① 在 WeRSS 里建一条定时任务;② 把采集模式切到 `weread_mp` 并喂进
+     微信读书 Cookie(我们手里现成有,且出口 IP 相同)。详见 §4g 复核块。
 
 验证接没接上:跑一轮监听后看 `wechat_listen` 运行记录 detail 里的 `weread_list(ok=… off=…)`,
 `ok` 应该接近号数、`off_with_new` 归 0;站内「预警」页也不再出现"只能拿到最新一篇"那条。
