@@ -109,8 +109,12 @@ class NewsnowSource(HotSource):
     newsnow 项目若停维,容器照常运行(仅平台清单不再更新——届时以自研源补齐核心平台)。
     """
 
-    def __init__(self, platform_id: str, base_url: str = "http://127.0.0.1:4444") -> None:
+    def __init__(self, platform_id: str, base_url: str = "") -> None:
         self.id = platform_id
+        if not base_url:
+            from config.settings import get_settings
+
+            base_url = getattr(get_settings(), "hot_newsnow_url", "") or "http://127.0.0.1:4444"
         self.base_url = base_url.rstrip("/")
 
     def fetch(self, limit: int = 30) -> list[dict]:

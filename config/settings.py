@@ -135,6 +135,11 @@ class Settings(BaseSettings):
 
     # ---- 分析阈值 ----
     index_sources: str = "weibo"  # 指数源优先级链(逗号分隔):weibo/douyin/baidu
+    # newsnow 容器地址(2026-10-01 可配):默认本机直跑;**容器化部署时必须改**——
+    # 在 redu-api 容器里 127.0.0.1 指容器自己,不是宿主机,newsnow 就全连不上
+    # (实测:远程只有 bilibili/douban 两个自研源有数据,newsnow 的 40 个全空)。
+    # Docker 里填宿主机网关 `http://172.17.0.1:4444`(newsnow 需绑 0.0.0.0 而非 127.0.0.1)。
+    hot_newsnow_url: str = "http://127.0.0.1:4444"
     mock_index: bool = True  # 本地/测试用合成指数源(免真实抓取)
     alert_mode: str = "both"  # 交叉验证: both=所有信号源同涨才告警; any=任一源涨即告警
     growth_threshold: float = 0.30  # 环比增长率判定阈值
