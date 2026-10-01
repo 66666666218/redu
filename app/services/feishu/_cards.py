@@ -483,7 +483,7 @@ def _daily_cross_lines(db: Session, user_id: int) -> list[str]:
     return lines
 def _wechat_ops_lines(db, user_id: int) -> list:
     """公众号运营段:近24h 监听/盘链/采样 统计(从文章表聚合,失败不阻塞日报)。"""
-    from datetime import datetime, timedelta
+    from datetime import datetime
     from sqlalchemy import func
     from app.db.models import WechatArticle, WechatBenchmark
     lines = ["📡 公众号运营(近24h)"]

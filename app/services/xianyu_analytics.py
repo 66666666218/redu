@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from config.settings import Settings
 from app.db import repository
-from app.db.models import XianyuDaily, XianyuSummary, RunRecord
+from app.db.models import XianyuDaily, RunRecord
 from app.services import xianyu
 from app.services.cookie_store import get_cookies
 from app.services import alert_service
@@ -23,11 +23,35 @@ logger = get_logger(__name__)
 
 
 def xianyu_daily(session: Session, user_id: int) -> dict:
+    """当日闲鱼快照明细(深采落进 `xianyu_daily` 表的那些商品)。
+
+    与 `xianyu_analytics` 的分工:那个算**今日 vs 昨日的涨跌**(面板用),这个只给
+    **当日原始快照**(想要数/收藏/出单/浏览量/类目),供列表或导出用。
+
+    历史注:本函数此前返回 `{"summary_date": …, "items": []}` —— 它读的 `XianyuSummary`
+    表**全项目没有任何写入方**(设计了一半的链路),所以 `items` 恒为空、`today` 变量算了
+    没用(2026-10-01 审查发现)。现改为直接读当日快照表,即 `run_xianyu_deep` 真正写入的那张。
+    """
     today = datetime.now().date().isoformat()
-    summary = session.scalar(
-        select(XianyuSummary).where(XianyuSummary.user_id == user_id).order_by(XianyuSummary.id.desc())
-    )
-    return {"summary_date": summary.summary_date if summary else None, "items": []}
+    rows = repository.xianyu_daily_by_date(session, user_id, today)
+    return {
+        "date": today,
+        "count": len(rows),
+        "items": [
+            {
+                "item_id": r.item_id,
+                "title": r.title,
+                "price": r.price,
+                "category": r.category or "未分类",
+                "want_count": r.want_count,
+                "collect_count": r.collect_count,
+                "sold_count": r.sold_count,
+                "view_count": r.view_count,
+                "seller_fans": r.seller_fans,
+            }
+            for r in rows
+        ],
+    }
 
 
 def _xy_detail_limit(settings: Settings) -> int:

@@ -212,7 +212,6 @@ def _push_candidates(session: Session, user_id: int, settings: Settings,
 def candidate_discover_tick(settings: Settings | None = None) -> int:
     """每日定时:为所有(有对标号的)用户发现一轮同类候选号。返回新增候选数。"""
     from app.db import get_session_local
-    from app.db.models import User
     from sqlalchemy import func as sa_func
 
     settings = settings or get_settings()
@@ -410,7 +409,6 @@ def auto_import_candidates(session: Session, user_id: int, settings: Settings | 
 def candidate_import_tick(settings: Settings | None = None) -> int:
     """每日定时:为所有(有对标号的)用户自动收录候选号。返回本轮收录成功的号数。"""
     from app.db import get_session_local
-    from app.db.models import User
     from sqlalchemy import func as sa_func
 
     settings = settings or get_settings()

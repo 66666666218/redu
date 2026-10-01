@@ -142,7 +142,7 @@ class QuarkTransfer:
                 continue
             try:
                 data = resp.json()
-            except ValueError as e:
+            except ValueError:
                 last_err = QuarkError(f"夸克接口返回非 JSON: {resp.text[:300]}")
                 continue
             code = data.get("code")

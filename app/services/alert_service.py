@@ -342,7 +342,10 @@ def notify_incident(db: Session, user_id: int, kind: str, title: str, detail: st
             break
         time.sleep(1.5)
     if not sent:
-        # 失败不烧冷却期(送达日志一并不写,与旧行为一致)
+        # 失败不烧冷却期(送达日志一并不写,与旧行为一致),但**原因必须留痕**:
+        # 此前 last_err 算完即丢,告警发不出去时运维只看得见"失败"、看不见"为什么"
+        # —— 而这恰恰是最需要知道原因的时刻(2026-10-01 审查发现)。
+        logger.warning("飞书推送失败(试了 %d 次):%s | %s", attempts, last_err or "未知", title[:60])
         gate.close(keep=False)
         return False
     from app.db.models import NotificationLog

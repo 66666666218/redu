@@ -42,10 +42,8 @@ def pan_cookie_keepalive_tick(settings: Settings | None = None) -> int:
     """
     from app.services.alert_service import notify_incident
     from app.db import get_session_local
-    from app.db.models import User
     from app.services.baidupan_transfer import BaiduPanAuthError, BaiduPanClient
     from app.services.cookie_store import get_cookie
-    from app.services.quark_transfer import QuarkAuthError, QuarkTransfer
 
     settings = settings or get_settings()
     if not settings.pan_transfer_enabled:
@@ -261,7 +259,6 @@ def keyword_article_all_users(settings: Settings | None = None) -> int:
     _safe 吞掉——关键词文章监控从未真正运行过(2026-09-14 审计发现)。
     """
     from app.db import get_session_local
-    from app.db.models import User
 
     settings = settings or get_settings()
     db = get_session_local()()

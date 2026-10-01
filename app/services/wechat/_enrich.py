@@ -486,7 +486,6 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                                       settings.focus_cooldown_hours, f"{cnt} 篇同发")
 
     # 文章内容交叉提取:从正文提取新公众号名 → 自动入库为候选对标号
-    from app.db.models import WechatCandidate
 
     known_names = set(session.scalars(select(WechatBenchmark.nickname).where(
         WechatBenchmark.user_id == user_id)).all())

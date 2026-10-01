@@ -657,7 +657,7 @@ def retire_dormant_benchmarks(session, user_id: int, settings=None) -> list[str]
     """
     from datetime import datetime, timedelta
 
-    from sqlalchemy import and_, func, or_
+    from sqlalchemy import or_
 
     from app.db.models import RunRecord, WechatBenchmark
 

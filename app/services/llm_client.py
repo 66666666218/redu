@@ -171,7 +171,6 @@ def rewrite_article(base_url: str, api_key: str, model: str,
     nl = chr(10)
     if not api_key or not content or len(content) < 100:
         return None
-    link_line = f"我的网盘链接(必须原样保留在文中,并自然引导读者保存):{my_link}" if my_link else "文中如无网盘链接则不虚构,以资源收集攻略角度改写"
     user_prompt = (
         f"请把以下公众号文章改写为原创可发布稿。{nl}"
         + f"原文标题:{title}{nl}"

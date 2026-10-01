@@ -38,7 +38,6 @@ logger = logging.getLogger(__name__)
 
 def dashboard(db: Session) -> dict:
     today = date.today().isoformat()
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
     counts = {
         "users": db.scalar(select(func.count(User.id))) or 0,
         "enabled_users": db.scalar(select(func.count(User.id)).where(User.enabled.is_(True))) or 0,

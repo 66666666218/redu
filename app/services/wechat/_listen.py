@@ -541,14 +541,12 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                 logger.warning("读书平台监听 %s 失败,降级后续源:%s", b.nickname or b.biz, exc)
         # ① 微信读书(免费):对标号已关联 bookId 且有 Cookie;登录失效时自动续期重试一次
         wr_eligible = (not used) and bool(cookie) and bool(b.weread_book_id)
-        wr_skipped_this = False
         if not used and not wr_eligible and not plat:
             no_free_source += 1  # 免费列表源缺失+无 bookId 的手动号:本轮结构性失明,计入运维记录
         if wr_eligible and breaker["off"]:
             # 整源已停:本号这一轮"什么都不知道",不能算 answered(故不动 miss_count),
             # 但必须计数暴露——否则运维记录会长得跟"81 个号都问过了、只是没新文"一样。
             quota_skipped += 1
-            wr_skipped_this = True
         elif wr_eligible and b.weread_book_id in gate["skip"]:
             # 书架水位未变:cover 只会吐库里已有的那篇旧文,这一跳省的是纯白问、不是盲区。
             # 语义与"cover 答了但没新文"对齐(miss_count+1、置 used 视为本号已有答案);
@@ -914,7 +912,6 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
         return 0
     from collections import OrderedDict
 
-    from app.db.models import WechatPanLink
     # 重复资源计数:一次 GROUP BY 批量查本轮全部文章(循环内逐篇 COUNT 是 N+1)。
     # 不再只算 rows[:20]——全量推送下每篇都要有 🔥xN 标记。
     dup_counts: dict[str, int] = {}

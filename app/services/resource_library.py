@@ -125,10 +125,17 @@ def resource_profile(session: Session, user_id: int, pan_url: str) -> dict | Non
 
 
 def library_summary(session: Session, user_id: int, days: int = 90) -> dict:
-    """资源库概览(CLI/前端展示用):总链数/多号验证数/已转存数。"""
+    """资源库概览(CLI/前端展示用):总链数/多号验证数。
+
+    `days` 是**同一个时间窗口**,两个数字必须同口径:此前 `cutoff` 算了却没用,
+    `total_links` 统计的是**全历史**、而 `multi_account` 是近 days 天 —— 前端同屏
+    显示两个不同尺度的数字,看着像"总链 500 条,其中多号验证只有 12 条",其实是拿
+    90 天的分子比全历史的分母(2026-10-01 审查发现)。
+    """
     cutoff = datetime.now() - timedelta(days=days)
     total = session.scalar(select(func.count(func.distinct(WechatPanLink.pan_url))).where(
-        WechatPanLink.user_id == user_id)) or 0
+        WechatPanLink.user_id == user_id,
+        WechatPanLink.created_at >= cutoff)) or 0
     verified = len(resonance_resources(session, user_id, days=days, min_accounts=2, limit=10000))
     return {"total_links": int(total), "multi_account": int(verified), "days": days}
 

@@ -320,7 +320,6 @@ def run_feishu_realtime(
         cur, prev = _batches(db, user_id, section)
         if not cur:
             return 0
-        client = None
         whs = webhooks_for(settings, section)   # 主群 + 该板块专属群
         pushed_items: list[tuple[str, str]] = []
         for title, c in list(cur.items())[:40]:
