@@ -145,13 +145,56 @@ SOURCES: dict[str, HotSource] = {
     "bilibili": BilibiliSource(),
     "douban": DoubanSource(),
     # ---- newsnow 长尾(自部署容器;知乎 401 等无法直连的平台走这里) ----
+    # 2026-10-01 扩容:9 个 → 40 个。容器实测支持 **44 个**,除下列之外全接 ——
+    #   · `bilibili-*` / `douban`:我们已有**自研直连**(命门自持,不依赖 newsnow)
+    #   · `baidu`:已有自研采集通道(`baidu_hot_items` 表)
+    #   · `douyin` / `hackernews` / `kaopu` / `mktnews-flash` / `pcbeta-windows11` /
+    #     `steam` / `zaobao`:容器当前版本不支持(实测 API 不返回 items),等它升级再说
+    # 分类沿用 newsnow 的 column:china 综合热点 / tech 科技 / finance 财经 / world 国际 / sports 体育
+    #
+    # -- china 综合热点 --
     "zhihu": NewsnowSource("zhihu"),
     "weibo": NewsnowSource("weibo"),
     "kuaishou": NewsnowSource("kuaishou"),
     "iqiyi": NewsnowSource("iqiyi"),
+    "toutiao": NewsnowSource("toutiao"),
+    "ifeng": NewsnowSource("ifeng"),
+    "thepaper": NewsnowSource("thepaper"),
+    "tencent-hot": NewsnowSource("tencent-hot"),
+    "tieba": NewsnowSource("tieba"),
+    "nowcoder": NewsnowSource("nowcoder"),
+    "chongbuluo-hot": NewsnowSource("chongbuluo-hot"),
+    "chongbuluo-latest": NewsnowSource("chongbuluo-latest"),
+    "freebuf": NewsnowSource("freebuf"),
+    "qqvideo-tv-hotsearch": NewsnowSource("qqvideo-tv-hotsearch"),
+    # -- tech 科技/资源 --
     "36kr": NewsnowSource("36kr"),
+    "36kr-quick": NewsnowSource("36kr-quick"),
+    "36kr-renqi": NewsnowSource("36kr-renqi"),
     "juejin": NewsnowSource("juejin"),
     "ithome": NewsnowSource("ithome"),
+    "sspai": NewsnowSource("sspai"),
+    "coolapk": NewsnowSource("coolapk"),
+    "github-trending-today": NewsnowSource("github-trending-today"),
+    "producthunt": NewsnowSource("producthunt"),
+    "solidot": NewsnowSource("solidot"),
+    "aihot": NewsnowSource("aihot"),
+    # -- finance 财经 --
+    "cls-hot": NewsnowSource("cls-hot"),
+    "cls-depth": NewsnowSource("cls-depth"),
+    "cls-telegraph": NewsnowSource("cls-telegraph"),
+    "wallstreetcn-hot": NewsnowSource("wallstreetcn-hot"),
+    "wallstreetcn-news": NewsnowSource("wallstreetcn-news"),
+    "wallstreetcn-quick": NewsnowSource("wallstreetcn-quick"),
+    "xueqiu-hotstock": NewsnowSource("xueqiu-hotstock"),
+    "jin10": NewsnowSource("jin10"),
+    "gelonghui": NewsnowSource("gelonghui"),
+    "fastbull-express": NewsnowSource("fastbull-express"),
+    "fastbull-news": NewsnowSource("fastbull-news"),
+    # -- world 国际 --
+    "cankaoxiaoxi": NewsnowSource("cankaoxiaoxi"),
+    "sputniknewscn": NewsnowSource("sputniknewscn"),
+    # -- sports 体育 --
     "hupu": NewsnowSource("hupu"),
     "dongqiudi": NewsnowSource("dongqiudi"),
     # 抖音:newsnow 侧 id 无效(实测),我们已有 douhot 采集通道,不重复
@@ -247,17 +290,42 @@ def hot_source_tick_all_users(settings=None) -> int:
     return total
 
 
-_PLAT_LABEL = {"bilibili": "B站", "douban": "豆瓣", "zhihu": "知乎", "weibo": "微博",
-               "kuaishou": "快手", "iqiyi": "爱奇艺", "36kr": "36氪", "juejin": "掘金",
-               "ithome": "IT之家", "hupu": "虎扑", "dongqiudi": "懂球帝"}
+_PLAT_LABEL = {
+    # 自研直连
+    "bilibili": "B站", "douban": "豆瓣",
+    # china 综合热点
+    "zhihu": "知乎", "weibo": "微博", "kuaishou": "快手", "iqiyi": "爱奇艺",
+    "toutiao": "今日头条", "ifeng": "凤凰网", "thepaper": "澎湃新闻",
+    "tencent-hot": "腾讯新闻", "tieba": "百度贴吧", "nowcoder": "牛客",
+    "chongbuluo-hot": "虫部落热帖", "chongbuluo-latest": "虫部落最新",
+    "freebuf": "Freebuf", "qqvideo-tv-hotsearch": "腾讯视频",
+    # tech 科技/资源
+    "36kr": "36氪", "36kr-quick": "36氪快讯", "36kr-renqi": "36氪人气",
+    "juejin": "掘金", "ithome": "IT之家", "sspai": "少数派", "coolapk": "酷安",
+    "github-trending-today": "GitHub趋势", "producthunt": "Product Hunt",
+    "solidot": "Solidot", "aihot": "AI HOT",
+    # finance 财经
+    "cls-hot": "财联社热门", "cls-depth": "财联社深度", "cls-telegraph": "财联社电报",
+    "wallstreetcn-hot": "华尔街见闻热榜", "wallstreetcn-news": "华尔街见闻要闻",
+    "wallstreetcn-quick": "华尔街见闻快讯", "xueqiu-hotstock": "雪球热股",
+    "jin10": "金十数据", "gelonghui": "格隆汇",
+    "fastbull-express": "法布财经快讯", "fastbull-news": "法布财经",
+    # world 国际 / sports 体育
+    "cankaoxiaoxi": "参考消息", "sputniknewscn": "卫星通讯社",
+    "hupu": "虎扑", "dongqiudi": "懂球帝",
+}
 
 
-def push_hot_rank_card_all_users(settings=None, top_n: int = 5) -> int:
+def push_hot_rank_card_all_users(settings=None, top_n: int = 3) -> int:
     """多平台热榜速览卡 → 飞书总群(2026-10-01 v2.2.0「新平台接入总群」)。
 
     每日 09:30/21:30 两次(定时),每平台取最新一轮 top N 拼接文本卡;
     与 Agent 选题卡(命中新平台热点时另行推送)互补——本卡是「雷达」,选题卡是「弹药」。
     返回成功发送的群数。
+
+    `top_n` 默认 3(2026-10-01 由 5 下调):平台数已从 11 涨到 **40**,再按每平台 5 条
+    拼会撑出两千多行的卡。飞书文本消息本身能到 30KB,但**读的人不会翻那么久** ——
+    雷达卡的价值在"一眼扫过各平台在聊什么",细节该去站内看。
     """
     from config.settings import get_settings
 
@@ -294,5 +362,5 @@ def push_hot_rank_card_all_users(settings=None, top_n: int = 5) -> int:
                     lines.append(f"  {rank}. {title[:38]}{tail}")
     finally:
         db.close()
-    text = "".join(lines)[:3000]
+    text = "".join(lines)[:8000]
     return 1 if FeishuClient(hook, settings.feishu_secret).send(text) else 0
