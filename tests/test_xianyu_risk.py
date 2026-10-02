@@ -231,3 +231,38 @@ def test_rate_limit_enters_cooldown_only_after_repeats(session) -> None:
         row.started_at = datetime.now() - timedelta(hours=3)
     session.commit()
     assert verify_cooldown_active(session, 3, st) is False
+
+
+def test_ret_array_with_user_validate_surfaces_verify_url(monkeypatch) -> None:
+    """⚠️ **ret 可能是数组且含多项,`data.url` 是验证入口**(2026-10-02 据公开资料证实):
+
+        {"ret":["FAIL_SYS_USER_VALIDATE","RGV587_ERROR::SM::哎哟喂,被挤爆啦,请稍后重试"],
+         "data":{"url":"https://hot.tb.com:xxx"}}
+
+    旧实现只取 `ret[0]` 判 code → **看漏风控信号**;而且**没把 data.url 带出来** ——
+    那可是"点开过一次滑块,账号就能恢复"的入口,丢了用户只能干等。
+    """
+    from app.services import xianyu
+
+    class _Resp:
+        text = '{"ret":["FAIL_SYS_USER_VALIDATE","RGV587_ERROR::SM::哎哟喂,被挤爆啦,请稍后重试"]}'
+
+        def json(self):
+            return {"ret": ["FAIL_SYS_USER_VALIDATE",
+                            "RGV587_ERROR::SM::哎哟喂,被挤爆啦,请稍后重试"],
+                    "data": {"url": "https://hot.tb.com:8899/verify"}}
+
+    class _Sess:
+        def post(self, *a, **k):
+            return _Resp()
+
+    c = xianyu.XianyuClient("dummy=1")
+    monkeypatch.setattr(c, "_sign", lambda *a: "s", raising=False)
+    monkeypatch.setattr(c, "_token", lambda: "t", raising=False)
+    monkeypatch.setattr(c, "session", _Sess())
+
+    with pytest.raises(xianyu.XianyuVerify) as ei:
+        c._post(xianyu.API, {})
+    msg = str(ei.value)
+    assert "人机验证" in msg
+    assert "https://hot.tb.com:8899/verify" in msg, "验证入口必须带出来,否则用户只能干等"

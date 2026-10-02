@@ -215,8 +215,21 @@ class XianyuClient:
             except ValueError as exc:
                 raise XianyuError(f"闲鱼响应非 JSON:{exc}") from exc
             # ret 可能缺省/为 null/为空列表,统一兜成 [""] 再取首元素(空列表直接[0]会 IndexError)
-            ret = (obj.get("ret") or [""])[0] or ""
+            rets = obj.get("ret") or [""]
+            ret = str(rets[0] or "")
             code = ret.split("::")[0]
+            # ⚠️ **ret 可能是数组且含多个元素**(2026-10-02 从公开资料证实):
+            #   {"ret":["FAIL_SYS_USER_VALIDATE","RGV587_ERROR::SM::哎哟喂,被挤爆啦,请稍后重试"],
+            #    "data":{"url":"https://hot.tb.com:xxx"}}
+            # 只取 [0] 会**看漏**风控信号,而且 `data.url` 是**验证入口** —— 丢了它用户只能干等,
+            # 留着它用户点开过一次滑块,账号就能恢复。所以**整串一起判**,并把 url 带进异常。
+            joined = " ".join(str(r) for r in rets if r)
+            data_obj = obj.get("data") if isinstance(obj.get("data"), dict) else {}
+            verify_url = str(data_obj.get("url") or "")
+            if "USER_VALIDATE" in joined:
+                raise XianyuVerify(
+                    f"闲鱼要求人机验证(滑块),需人工处理:{joined[:140]}"
+                    + (f";**验证入口(点开过一次即可恢复)**:{verify_url}" if verify_url else ""))
             if code in TOKEN_ERRORS:
                 if self._refresh(resp):
                     last_token_err = ret
