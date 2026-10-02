@@ -6,6 +6,20 @@ import { toasts } from './toast'
 
 const router = useRouter()
 const role = ref('')
+// **本实例的板块归属**(2026-10-02):两端部署各有独立库,本机不采微博/抖音/百度 ——
+// 那些页面照常能打开、里面却是**3 天前的旧数据**(实测 73~82h),不标出来会被误以为在更新。
+const sections = ref({})
+
+function owned(path) {
+  // 路径 → 板块;板块不在本实例管辖内 → false(未取到归属时不标,避免闪一下)
+  const sec = { '/weibo': 'weibo', '/xianyu': 'xianyu', '/douhot': 'douhot', '/baidu': 'baidu' }[path]
+  if (!sec || !sections.value[sec]) return true
+  return !!sections.value[sec].owned
+}
+
+function navText(path, label) {
+  return owned(path) ? label : label + '(远端)'
+}
 
 function logout() {
   clearToken()
@@ -14,6 +28,7 @@ function logout() {
 onMounted(async () => {
   if (localStorage.getItem('token')) {
     try { role.value = (await api.me()).role } catch {}
+    try { sections.value = (await api.instance()).sections || {} } catch {}
   }
 })
 </script>
@@ -23,11 +38,11 @@ onMounted(async () => {
     <div class="brand">🔥 热点监控平台</div>
     <nav>
       <router-link to="/">仪表盘</router-link>
-      <router-link to="/weibo">微博</router-link>
+      <router-link to="/weibo" :title="owned('/weibo') ? '微博' : '微博由远端实例采集,本机页面是旧数据'">{{ navText('/weibo', '微博') }}</router-link>
       <router-link to="/xianyu">闲鱼</router-link>
-      <router-link to="/douhot">抖音</router-link>
+      <router-link to="/douhot" :title="owned('/douhot') ? '抖音' : '抖音由远端实例采集,本机页面是旧数据'">{{ navText('/douhot', '抖音') }}</router-link>
       <router-link to="/wechat">公众号监听</router-link>
-      <router-link to="/baidu">百度</router-link>
+      <router-link to="/baidu" :title="owned('/baidu') ? '百度' : '百度由远端实例采集,本机页面是旧数据'">{{ navText('/baidu', '百度') }}</router-link>
       <router-link to="/cookies">Cookie 管理</router-link>
       <router-link to="/schedule">采集频率</router-link>
       <router-link to="/alerts">预警设置</router-link>

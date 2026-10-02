@@ -97,6 +97,7 @@ export const api = {
   forgot: (email) => req('POST', '/api/auth/forgot', { email }),
   reset: (token, new_password) => req('POST', '/api/auth/reset', { token, new_password }),
   me: () => req('GET', '/api/auth/me'),
+  instance: () => req('GET', '/api/instance'),
   cookies: () => req('GET', '/api/cookies'),
   setCookie: (platform, cookie) => req('PUT', `/api/cookies/${platform}`, { cookie }),
   delCookie: (platform) => req('DELETE', `/api/cookies/${platform}`),

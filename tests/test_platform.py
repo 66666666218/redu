@@ -1163,3 +1163,23 @@ def test_xianyu_refresh_token_not_truncated(monkeypatch) -> None:
     # 2) 残值(无时间戳) → False,不误判可用
     c.session.cookies.set("_m_h5_tk", "a" * 32, domain=".goofish.com")
     assert c._refresh(_R()) is False
+
+
+def test_instance_info_reports_section_ownership() -> None:
+    """`GET /api/instance`(2026-10-02):前端据此在导航上标出"不归本机采"的板块 ——
+
+    两端部署各有独立库,本机不采微博/抖音/百度,那些页面照常能打开、里面却是**3 天前的
+    旧数据**(实测 73~82h),不标出来会被误以为在更新。
+    """
+    from app.api.misc import instance_info
+
+    out = instance_info(user=None)          # 依赖注入的参数,单元测试直接传 None
+    assert out["scheduler_role"]
+    assert set(out["sections"]) >= {"wechat", "xianyu", "weibo", "douhot", "baidu"}
+    for sec, info in out["sections"].items():
+        assert info["owner"] in ("wechat", "hotspot"), sec
+        assert isinstance(info["owned"], bool), sec
+    # 归属映射必须与调度器护栏**同源**(不另立一份):本机 wechat 角色下闲鱼归自己、微博不归
+    if out["scheduler_role"] == "wechat":
+        assert out["sections"]["xianyu"]["owned"] is True
+        assert out["sections"]["weibo"]["owned"] is False
