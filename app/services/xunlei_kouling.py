@@ -136,6 +136,13 @@ def ingest(session, user_id: int, kouling: str, settings=None) -> dict:
         return out
 
     url = info["share_url"] + (f"?pwd={info['pass_code']}" if info["pass_code"] else "")
+    # ⚠️ 转存前过闸门(盘满了 / 泛化大包 → 不搬只留痕),与群采集同一套判据
+    from app.services import xunlei_group
+
+    allowed, why = xunlei_group.admit_transfer(kouling, settings=settings)
+    if not allowed:
+        out.update(status="skipped", message=why)
+        return out
     res = xt.transfer_and_share(url)
     if res.get("status") != "ok":
         out.update(status="failed", message=(res.get("message") or "")[:200])

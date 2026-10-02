@@ -173,3 +173,63 @@ def test_list_group_shares_returns_transferred_url(session) -> None:
     items = xg.list_group_shares(session, 1)
     assert items[0]["group_name"] == "三岁分享" and items[0]["our_url"].endswith("OUR1")
     assert xg.list_group_shares(session, 1, status="pending") == []
+
+
+# ---------------------------------------------------------------- 转存闸门(2026-10-02)
+
+def test_is_bulk_resource_flags_giant_collections() -> None:
+    """泛化大包要认出来 —— 实测就是「【全网最齐】游戏软件资源合集」把盘顶爆的。"""
+    assert xg.is_bulk_resource("【全网最齐】游戏软件资源合集")
+    assert xg.is_bulk_resource("全网最全宝库")
+    assert xg.is_bulk_resource("最全文件")
+    assert not xg.is_bulk_resource("手机警报器（警笛模拟器）2.0版")
+    assert not xg.is_bulk_resource("蓝河工具箱")
+    assert not xg.is_bulk_resource("")
+
+
+class _GateSettings:
+    xunlei_transfer_max_usage_ratio = 0.9
+
+
+def test_admit_transfer_blocks_when_disk_almost_full() -> None:
+    """盘到阈值 → **整批不搬**(这次翻车的直接原因),原因要能读懂。"""
+    ok, why = xg.admit_transfer("蓝河工具箱", settings=_GateSettings(), ratio=1.26)
+    assert ok is False and "盘快满了" in why and "126%" in why
+    ok, _ = xg.admit_transfer("蓝河工具箱", settings=_GateSettings(), ratio=0.5)
+    assert ok is True
+
+
+def test_admit_transfer_blocks_bulk_even_when_space_ok() -> None:
+    """空间够也不搬泛化大包 —— 体积不可控,只把链推给人。"""
+    ok, why = xg.admit_transfer("【全网最齐】游戏软件资源合集",
+                                settings=_GateSettings(), ratio=0.3)
+    assert ok is False and "泛化大包" in why
+
+
+def test_admit_transfer_allows_when_ratio_unknown() -> None:
+    """配额**拿不到**时不能误判成"满" —— 否则接口一抖就整个停摆(探针失败≠盘满)。"""
+    ok, _ = xg.admit_transfer("蓝河工具箱", settings=_GateSettings(), ratio=None)
+    assert ok is True
+
+
+def test_transfer_pending_marks_skipped_instead_of_transferring(session, monkeypatch) -> None:
+    """闸门挡下的行标 `skipped` 并留原因,**不调用转存**;剩下的照常处理。"""
+    from app.services import xunlei_transfer as xt
+
+    session.add_all([
+        XunleiGroupShare(user_id=1, group_id="g", share_id="A", title="【全网最齐】资源合集",
+                         origin_url="u-A", status="pending"),
+        XunleiGroupShare(user_id=1, group_id="g", share_id="B", title="蓝河工具箱",
+                         origin_url="u-B", status="pending")])
+    session.commit()
+    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None: 0.3)
+    called: list[str] = []
+    monkeypatch.setattr(xt, "transfer_and_share",
+                        lambda url, parent_id="", settings=None: (
+                            called.append(url) or {"status": "ok", "share_url": "s",
+                                                   "code": "", "fid": "f"}))
+    out = xg.transfer_pending(session, 1, limit=5, settings=_GateSettings())
+    assert out["ok"] == 1 and out["skipped"] == 1 and called == ["u-B"]
+    rows = {r.share_id: r for r in session.scalars(select(XunleiGroupShare)).all()}
+    assert rows["A"].status == "skipped" and "泛化大包" in rows["A"].message
+    assert rows["B"].status == "ok"

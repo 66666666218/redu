@@ -159,6 +159,11 @@ class Settings(BaseSettings):
     xunlei_group_enabled: bool = True
     xunlei_group_cron: str = "*/20 * * * *"   # 每 20 分钟采一轮
     xunlei_group_transfer_limit: int = 5      # 每轮最多转存几条(0 = 只采集不转存)
+    # **转存闸门**(2026-10-02):盘使用率到这条线就**整批不搬**。
+    # 为什么必须有:实测自动转存把群里的大合集搬进盘,空间顶到 126%,之后全部
+    # `file_space_not_enough`;而**文件夹的体积 API 根本不给**(分享详情里 size 恒为 0,
+    # parent_id/file_id 被忽略),所以只能靠"盘级"兜底 + 名字判泛化大包(见 BULK_WORDS)。
+    xunlei_transfer_max_usage_ratio: float = 0.9
     # ---- 实例角色(2026-10-01):分体部署时避免两端重复跑同一批作业 ----
     # 本项目有两套部署:本机(公众号 + 闲鱼)与远程 VPS(热点四路),**各自的数据库是独立的**,
     # 但推的是同一个飞书群。不加约束的话两边会各跑一套完整调度器 —— 重复推飞书、重复打上游,

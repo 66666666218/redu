@@ -132,3 +132,18 @@ def test_ingest_not_kouling_is_explicit(session, monkeypatch) -> None:
     _patch_search(monkeypatch, "")
     assert kk.ingest(session, 1, "随便一个词")["status"] == "not_kouling"
     assert session.query(XunleiResource).count() == 0
+
+
+def test_ingest_skips_when_gate_blocks(session, monkeypatch) -> None:
+    """闸门挡下时 `status=skipped` 且**不调用转存**(盘满/泛化大包只留痕,不写库)。"""
+    from app.services import xunlei_group, xunlei_transfer as xt
+
+    _patch_search(monkeypatch, "https://pan.xunlei.com/s/ABC?&pwd=1")
+    monkeypatch.setattr(xunlei_group, "admit_transfer",
+                        lambda name, cred=None, settings=None, ratio=None:
+                        (False, "盘快满了(已用 126%,阈值 90%),先清理再搬"))
+    monkeypatch.setattr(xt, "transfer_and_share",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不该调用转存")))
+    out = kk.ingest(session, 1, "玩车不求人")
+    assert out["status"] == "skipped" and "盘快满了" in out["message"]
+    assert session.query(XunleiResource).count() == 0

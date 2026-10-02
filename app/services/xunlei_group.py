@@ -234,12 +234,65 @@ def sync_group_shares(session, user_id: int, group_ids: list[str] | None = None,
     return {"status": "ok", "groups": len(groups), "new": new_count}
 
 
+# ---------------------------------------------------------------- 转存闸门
+
+# **泛化大包**的警戒词。群里动辄几十 TB 的正是这类合集 —— 2026-10-02 实测翻过车:
+# 自动转存把「【全网最齐】游戏软件资源合集」搬进用户盘,一把顶到 126%,之后所有转存
+# 都 `file_space_not_enough`。名字里带这些词的一律**不自动搬、只把链推给人**。
+BULK_WORDS = ("合集", "大全", "资源包", "资源库", "宝库", "全部", "整合", "整理",
+              "分类", "最齐", "最全", "全集", "日更", "每日", "更新")
+
+
+def is_bulk_resource(name: str) -> bool:
+    """是不是"泛化大包"(名字里带合集/大全/最全…)。
+
+    ⚠️ **为什么只能按名字判体量**:分享详情里**文件夹的 `size` 一律是 0**,而分享接口
+    也不给展开子目录(实测 `parent_id`/`file_id` **都被忽略**,永远返回分享根)——
+    所以**拿不到真实体积**。名字是唯一便宜且能生效的判据。
+
+    (抖音那边的取词清洗用的是同一份词表,见 `douyin_leads._to_search_word`。)
+    """
+    return any(w in (name or "") for w in BULK_WORDS)
+
+
+_UNSET = object()          # 区分"没传 ratio"与"传了 None(= 不知道)"
+
+
+def admit_transfer(name: str, cred: dict | None = None, settings=None,
+                   ratio: float | None | object = _UNSET) -> tuple[bool, str]:
+    """转存准入检查:**两道闸门**都过了才放行。
+
+    ① **盘级**:使用率 ≥ `xunlei_transfer_max_usage_ratio`(默认 0.9)→ 整批不搬 ——
+       这是这次翻车的直接原因,也是唯一能兜住"资源包到底多大"的办法;
+    ② **名字**:命中泛化大包词 → 不搬(见 `is_bulk_resource`)。
+
+    `ratio` 可由调用方**预先算好传进来**(整批共用),省得每条都去打一次配额接口;
+    **显式传 `None` 表示"不知道"**(探针失败)→ 放行,别把探测失败误判成盘满。
+
+    返回 `(放行?, 原因)`;原因会写进记录并推给运营,所以必须是**人话**。
+    """
+    if ratio is _UNSET:
+        from app.services import xunlei_transfer as xt
+
+        ratio = xt.quota_ratio(cred)
+    limit = float(getattr(settings, "xunlei_transfer_max_usage_ratio", 0.9) or 0.9)
+    if ratio is not None and ratio >= limit:
+        return False, f"盘快满了(已用 {ratio * 100:.0f}%,阈值 {limit * 100:.0f}%),先清理再搬"
+    if is_bulk_resource(name):
+        return False, "泛化大包(名字含合集/大全/最全…),体积不可控,只推链不搬"
+    return True, ""
+
+
 # ---------------------------------------------------------------- 限量转存
 
 def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> dict:
     """把 pending 的群分享**限量转存**到我方盘,回填我方分享链。
 
-    返回 `{"status", "picked", "ok", "failed", "items"}`;`items` 供飞书推送。
+    ⚠️ **转存前过闸门**(`admit_transfer`):盘满了 / 命中泛化大包 → 标 `skipped` 只留痕,
+    **不搬**。2026-10-02 实测:没有闸门时自动转存把大合集搬进盘,空间顶到 126%,
+    之后所有转存都 `file_space_not_enough`。
+
+    返回 `{"status", "picked", "ok", "failed", "skipped", "items"}`;`items` 供飞书推送。
     """
     from app.services import xunlei_transfer as xt
 
@@ -248,9 +301,16 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
             XunleiGroupShare.user_id == user_id,
             XunleiGroupShare.status == "pending",
         ).order_by(XunleiGroupShare.msg_time.desc()).limit(limit)).all()
+    ratio = xt.quota_ratio()               # 只查一次,整批共用(别每条都打一次配额)
     ok_items: list[dict] = []
-    failed = 0
+    failed = skipped = 0
     for row in rows:
+        allowed, why = admit_transfer(row.title, settings=settings, ratio=ratio)
+        if not allowed:
+            row.status, row.message = "skipped", why[:200]
+            skipped += 1
+            logger.info("迅雷群分享跳过转存 %s:%s", row.title, why)
+            continue
         out = xt.transfer_and_share(row.origin_url)
         if out.get("status") == "ok":
             row.status, row.our_url = "ok", out.get("share_url") or ""
@@ -264,7 +324,7 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
             logger.warning("迅雷群分享转存失败 %s:%s", row.title, row.message)
     session.commit()
     return {"status": "ok", "picked": len(rows), "ok": len(ok_items),
-            "failed": failed, "items": ok_items}
+            "failed": failed, "skipped": skipped, "items": ok_items}
 
 
 def list_group_shares(session, user_id: int, status: str = "", limit: int = 200) -> list[dict]:

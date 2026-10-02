@@ -25,6 +25,9 @@
       <div class="muted" style="font-size:12px">
         {{ captchaText }}
       </div>
+      <div :style="{ fontSize: '12px', color: quota.full ? '#c00' : '#888' }">
+        {{ quotaText }}
+      </div>
     </div>
 
     <div class="card">
@@ -35,6 +38,7 @@
           <td>{{ it.title || '—' }}</td>
           <td>
             <span v-if="it.status === 'ok'" style="color:#080">已转存</span>
+            <span v-else-if="it.status === 'skipped'" style="color:#b60" :title="it.message">已跳过</span>
             <span v-else-if="it.status === 'failed'" style="color:#c00" :title="it.message">失败</span>
             <span v-else class="muted">待转存</span>
           </td>
@@ -64,31 +68,41 @@ import { api } from '../api'
 const items = ref([])
 const groups = ref([])
 const captcha = ref({})
+const quota = ref({})
 const msg = ref('')
 const busy = ref('')
 
 const pendingCount = computed(() => items.value.filter(i => i.status === 'pending').length)
+// 盘空间:转存闸门按它判 —— 到 90% 就整批不搬(2026-10-02 被大合集顶爆过一次)
+const quotaText = computed(() => {
+  if (!quota.value.ok) return `盘空间:${quota.value.message || '取不到'}`
+  const pct = (Number(quota.value.ratio || 0) * 100).toFixed(1)
+  return `盘空间:已用 ${quota.value.usage_text} / ${quota.value.limit_text}(${pct}%)`
+    + (quota.value.full ? ' —— 已达闸门,转存已自动暂停,请先清理' : '')
+})
 // captcha 寿命只有十几分钟,转存时会自动补铸;这里只是把状态摆出来给人看
 const captchaText = computed(() => {
   const t = captcha.value.last_minted_at
-  if (!t) return 'captcha：还没铸过（转存时会自动铸）'
+  if (!t) return 'captcha:还没铸过(转存时会自动铸)'
   const at = new Date(Number(t) * 1000).toLocaleTimeString()
-  return `captcha：${at} 铸${captcha.value.last_error ? `（最近一次失败：${captcha.value.last_error}）` : ''}`
+  return `captcha:${at} 铸${captcha.value.last_error ? `(最近一次失败:${captcha.value.last_error})` : ''}`
 })
 
 async function load() {
   try {
-    const [r, g, c] = await Promise.all([
+    const [r, g, c, q] = await Promise.all([
       api.get('/api/xunlei/shares'),
       api.get('/api/xunlei/groups'),
       api.get('/api/xunlei/captcha'),
+      api.get('/api/xunlei/quota'),
     ])
     items.value = r.data.items
     groups.value = g.data.items
     captcha.value = c.data || {}
+    quota.value = q.data || {}
     msg.value = ''
   } catch (e) {
-    msg.value = '加载失败：' + (e?.response?.data?.detail || e.message || e)
+    msg.value = '加载失败:' + (e?.response?.data?.detail || e.message || e)
   }
 }
 

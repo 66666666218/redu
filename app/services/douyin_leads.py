@@ -120,24 +120,25 @@ def find_leads(keywords: list[str], limit: int = 30) -> list[dict]:
     return out[:limit]
 
 
-_GENERIC_WORDS = ("合集", "大全", "资源包", "资源库", "宝库", "全部", "整理", "分类",
-                  "更新", "最新", "其他", "转存", "文件", "每日", "日更")
-
-
 def _to_search_word(title: str) -> str:
     """群资源标题 → 搜索词:取**主体名**,丢掉括号里的补充说明与版本号。
 
     实测群里的标题长这样:「手机警报器（警笛模拟器）2.0版」—— 整句丢进抖音搜不到东西,
     「手机警报器」才对;「【全网最齐】游戏软件资源合集」这种**泛化合集名**则整个丢掉
     (搜出来全是噪音,还会把无关内容一起带进来)。
+
+    ⚠️ 泛词表**共用** `xunlei_group.BULK_WORDS` —— 它在转存侧是"不自动搬"的闸门判据,
+    在这里是"不当搜索词"的判据,同一件事(这条资源名太泛、指不到具体东西)只该有一份定义。
     """
+    from app.services.xunlei_group import is_bulk_resource
+
     text = re.sub(r"[（(【\[][^)）】\]]*[)）】\]]", " ", title or "")
     text = re.split(r"[|｜\-—·,，、:：!！?？]", text)[0]
     # 再丢掉**版本号式的尾串**(「2.0版」「v3」「2024版」)—— 它们搜不出东西
     tokens = [t for t in text.split()
               if t and not re.match(r"^[vV]?\d", t) and not t.endswith("版")]
     word = " ".join(tokens).strip()
-    if len(word) < 4 or any(g in word for g in _GENERIC_WORDS):
+    if len(word) < 4 or is_bulk_resource(word):
         return ""
     return word[:12]
 
@@ -233,6 +234,7 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
         res = kk.ingest(session, user_id, mark)
         ld["kouling"] = {"kind": "share", "status": res.get("status"),
                          "our_url": res.get("our_url") or "",
+                         "share_url": info["share_url"],
                          "message": res.get("message") or ""}
     return leads
 
@@ -247,6 +249,8 @@ def _kouling_line(ld: dict) -> str:
         return "✅ 之前已转存过(库里已有)"
     if kind == "share" and status == "over_budget":
         return f"⏸ 本轮转存额度用完,未搬(原链 {info.get('share_url') or ''})"
+    if kind == "share" and status == "skipped":
+        return f"⏸ 未搬({info.get('message') or '被闸门挡下'}) —— 原链:{info.get('share_url') or ''}"
     if kind == "share" and status == "failed":
         return f"⚠️ 转存失败:{info.get('message') or ''}"
     if kind == "group":

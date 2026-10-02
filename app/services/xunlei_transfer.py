@@ -307,6 +307,36 @@ def verify(settings=None) -> dict:
 
 # ---------------------------------------------------------------- 业务
 
+def quota_info(cred: dict | None = None) -> dict:
+    """盘配额 `{"usage", "limit", "ratio"}`(字节;拿不到就是空 dict)。
+
+    转存前的**盘级闸门**要用它:2026-10-02 实测翻过车 —— 群里的大包被自动搬进盘,
+    直接把空间顶到 126%,之后所有转存都 `file_space_not_enough`。
+
+    ⚠️ **探针失败必须降级成"不知道",不能冒泡** —— 这是闸门的判据,它自己抖一下就把
+    整条转存链带崩,比不判还糟。所以**连取凭据都包在 try 里**。
+    """
+    try:
+        cred = cred or _credentials()
+        if not cred:
+            return {}
+        r = requests.get(f"{_API}/drive/v1/about", timeout=_TIMEOUT,
+                         headers=_drive_headers(_fresh_cred(cred)))
+        quota = (_json(r).get("quota") or {}) if r.status_code == 200 else {}
+        limit, usage = int(quota.get("limit") or 0), int(quota.get("usage") or 0)
+        if not limit:
+            return {}
+        return {"usage": usage, "limit": limit, "ratio": usage / limit}
+    except Exception:  # noqa: BLE001 - 探针:拿不到就说不知道
+        logger.exception("迅雷配额查询失败")
+        return {}
+
+
+def quota_ratio(cred: dict | None = None) -> float | None:
+    """盘的使用率(`usage/limit`)。**拿不到返回 None**(调用方按"不知道"处理,别误判成满)。"""
+    return quota_info(cred).get("ratio")
+
+
 def _extract_share_id(url: str) -> tuple[str, str]:
     """`pan.xunlei.com/s/<id>?pwd=xxxx` → (share_id, pass_code)。"""
     u = urlparse(url.strip())

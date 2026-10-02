@@ -85,3 +85,18 @@ def xunlei_captcha_refresh(user: User = Depends(get_current_user)):
     """
     ok = xunlei_captcha.refresh(force=True)
     return {"ok": ok, **xunlei_captcha.status()}
+
+
+@router.get("/api/xunlei/quota")
+def xunlei_quota(user: User = Depends(get_current_user)):
+    """盘空间用量(转存闸门就是按它判的:到 `XUNLEI_TRANSFER_MAX_USAGE_RATIO` 就整批不搬)。"""
+    from app.services import xunlei_transfer as xt
+
+    info = xt.quota_info()
+    if not info:
+        return {"ok": False, "message": "取不到配额(凭据或网络问题)"}
+    gb = 1024 ** 3
+    return {"ok": True, "ratio": round(info["ratio"], 4),
+            "usage_text": f"{info['usage'] / gb / 1024:.2f}TB",
+            "limit_text": f"{info['limit'] / gb / 1024:.2f}TB",
+            "full": info["ratio"] >= 0.9}
