@@ -32,9 +32,55 @@ from app.utils import get_logger
 
 logger = get_logger(__name__)
 
-# 标题**以**《…》开头 = 分享者自贴的推广标识(与视频内容无关的那一段)。
-# 必须要求"开头":《My Dearest》这种出现在句中、且本身就是内容的(剧名)不算。
+# 标题里所有《…》(不限位置)——口令可能出现在开头(`《白泽的梦》diplay…`),
+# 也可能嵌在句中(`苹果安卓手车互联更新《玩车不求人》新版本`)。
+_ANY_BRACKET_RE = re.compile(r"《([^》]{1,20})》")
+# 标题**以**《…》开头 —— 最强的信号(分享者把自己的品牌名顶在最前面)。
 _LEAD_RE = re.compile(r"^《([^》]{1,20})》\s*")
+
+
+def _matches_nickname(mark: str, masked_name: str) -> bool:
+    """《》里的名字是否就是**本账号自己**(用脱敏昵称校验)。
+
+    MediaCrawler 的脱敏规则是"首尾各留 1 字、中间打星"(`玩车不求人` → `玩***人`),
+    所以**首尾字都对得上**就足以认定《》里写的是这个号的品牌名 —— 那是口令。
+    反之 `My Dearest` vs `汶***汝` 对不上,说明它只是视频内容(剧名),不该收。
+    """
+    if not mark or not masked_name or "*" not in masked_name:
+        return False
+    return mark[0] == masked_name[0] and mark[-1] == masked_name[-1]
+
+
+def _lead_mark(text: str, masked_name: str = "") -> str:
+    """从标题里取出**口令候选**;没有《…》则返回空串。
+
+    ⚠️ **不要用"《》内容 = 账号名"来判定** —— 用户 2026-10-02 明确指出:
+    "账号名称跟关键词并没有特殊关联,只是这个凑巧了"。也就是说 `《玩车不求人》`
+    碰巧等于昵称,但**一般情况两者无关**,拿昵称做判据会漏。
+
+    所以这里只做一件事:**把标题里的《…》摘出来当候选**。
+    排序用的优先级(不影响"收不收",只影响先后):
+      ① 标题**以**《…》开头 —— 分享者把品牌名顶在最前;
+      ② 《》内容与**本账号脱敏昵称首尾吻合** —— 碰巧同名时的高置信信号;
+      ③ 其余(《》嵌在句中的)。
+    最终"是不是真口令"由人看 —— 线索本来就是推给人判断的。
+    """
+    m = _LEAD_RE.match(text)
+    if m:
+        return m.group(1)[:20]
+    for cand in _ANY_BRACKET_RE.findall(text):
+        return cand[:20]          # 不限位置:句中也可能藏口令
+    return ""
+
+
+def _lead_rank(text: str, masked_name: str) -> int:
+    """线索排序优先级(越小越靠前):开头《》 0 / 与昵称吻合 1 / 其它 2。"""
+    if _LEAD_RE.match(text):
+        return 0
+    for cand in _ANY_BRACKET_RE.findall(text):
+        if _matches_nickname(cand, masked_name):
+            return 1
+    return 2
 
 
 def find_leads(keywords: list[str], limit: int = 30) -> list[dict]:
@@ -58,15 +104,20 @@ def find_leads(keywords: list[str], limit: int = 30) -> list[dict]:
     for h in mc.crawl("douyin", keywords):
         text = (h.get("snippet") or "").strip()
         url = (h.get("url") or "").strip()
-        m = _LEAD_RE.match(text)
-        if not m or not url or url in seen:
-            continue          # 无《》前缀 / 拿不到视频链 / 同一个视频(多词命中)去重
+        if not url or url in seen:
+            continue          # 拿不到视频链 / 同一个视频(多词命中)去重
+        name = h.get("name") or ""
+        mark = _lead_mark(text, name)
+        if not mark:
+            continue          # 标题里没有《…》 → 不是线索
         seen.add(url)
-        out.append({"mark": m.group(1)[:20], "title": text[:120], "url": url,
-                    "keyword": h.get("keyword", "")})
-        if len(out) >= limit:
-            break
-    return out
+        out.append({"mark": mark, "title": text[:120], "url": url,
+                    "keyword": h.get("keyword", ""),
+                    "_rank": _lead_rank(text, name)})
+    out.sort(key=lambda x: x["_rank"])      # 强信号排前面(开头《》> 与昵称吻合 > 其它)
+    for x in out:
+        x.pop("_rank", None)
+    return out[:limit]
 
 
 def push_leads(leads: list[dict], settings) -> bool:

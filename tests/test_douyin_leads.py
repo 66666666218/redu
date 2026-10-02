@@ -44,6 +44,40 @@ def test_find_leads_keeps_only_book_prefix_and_dedupes(monkeypatch) -> None:
     assert leads[0]["url"] == "https://www.douyin.com/video/1"
 
 
+def test_find_leads_takes_bracket_anywhere_in_title(monkeypatch) -> None:
+    """《》**嵌在句中**也要收 —— 用户 2026-10-02 给的样本就是这么写的:
+
+        苹果安卓手车互联更新《玩车不求人》新版本…
+
+    并且用户明确纠正过:"账号名称跟关键词并没有特殊关联,只是这个凑巧了" ——
+    所以**不拿"《》内容=账号名"当判据**,只把带《》的摘出来,真伪由人判断。
+    代价是 `《My Dearest》`(剧名)这类噪音会一起进来,靠排序把强信号放前面。
+    """
+    from app.services import douyin_leads as dl
+    from app.services import mediacrawler_source as mc
+
+    monkeypatch.setattr(mc, "available", lambda: (True, "ok"))
+    monkeypatch.setattr(mc, "crawl", lambda p, ks, timeout=600: [
+        {"uid": "a", "url": "https://d/1", "name": "玩***人",
+         "snippet": "苹果安卓手车互联更新《玩车不求人》新版本", "keyword": "k"},
+        {"uid": "b", "url": "https://d/2", "name": "睡***着",
+         "snippet": "《白泽的梦》diplay软件下载教程", "keyword": "k"},
+    ])
+    leads = dl.find_leads(["玩车不求人"])
+    assert len(leads) == 2
+    assert leads[0]["mark"] == "白泽的梦"          # 开头《》优先级最高,排前面
+    assert leads[1]["mark"] == "玩车不求人"        # 句中的排后面,但**要收**
+
+
+def test_lead_rank_orders_strong_signals_first() -> None:
+    """排序:开头《》=0 / 与昵称吻合=1 / 其它=2(只影响先后,不影响收不收)。"""
+    from app.services.douyin_leads import _lead_rank
+
+    assert _lead_rank("《白泽的梦》diplay教程", "睡***着") == 0
+    assert _lead_rank("更新《玩车不求人》新版本", "玩***人") == 1
+    assert _lead_rank("终于找到《My Dearest》资源了", "汶***汝") == 2
+
+
 def test_find_leads_without_tool_is_noop(monkeypatch) -> None:
     """工具没装/不可用 → 空返回,不该抛异常拖垮调度。"""
     from app.services import douyin_leads as dl
