@@ -4225,3 +4225,52 @@ def test_auto_import_candidates_respects_gate(session, monkeypatch) -> None:
     assert out["picked"] == 2 and out["imported"] == 1 and out["listenable"] == 1
     # 闸门只放行一个号:两个候选只建出一个对标号(id 大的排前,即乙号)
     assert len(session.scalars(select(WechatBenchmark)).all()) == 1
+
+
+def test_pan_cookie_keepalive_covers_xunlei(session, monkeypatch) -> None:
+    """**迅雷凭据**也要进每日巡检(2026-10-02 补)。
+
+    它扫码出来约 **12 小时**就废,废了之后**采集照跑、转存/分享全停** —— 不喊一声
+    没人知道,今早就静默失效过一次(靠人工发现才重扫)。
+    """
+    from app.db import models as _m
+    from app.services import alert_service, cookie_store, xunlei_transfer
+
+    session.add(_m.User(id=1, username="u1", email="u1@b.c", password_hash="x", enabled=True))
+    monkeypatch.setattr(cookie_store, "get_cookie",
+                        lambda db, uid, plat: '{"refresh_token":"r"}' if plat == "xunlei" else "")
+    captured: list[tuple] = []
+    monkeypatch.setattr(alert_service, "notify_incident",
+                        lambda db, uid, kind, title, detail, settings=None, **kw:
+                        captured.append((uid, kind, title, detail)) or False)
+    monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+    monkeypatch.setattr(xunlei_transfer, "verify",
+                        lambda settings=None: {"ok": False, "message": "refresh_token 已失效"})
+
+    st = _settings(quark_cookie="", pan_transfer_enabled=True)
+    assert wechat_monitor.pan_cookie_keepalive_tick(settings=st) == 0
+    assert len(captured) == 1
+    uid, kind, title, detail = captured[0]
+    assert uid == 1 and kind == "wechat"
+    assert "迅雷" in title and "凭据" in title            # 迅雷不是 Cookie,别乱写
+    assert "xl_qr_login" in detail                        # 要给出**可执行**的补救动作
+    assert "采集不受影响" in detail                        # 说清影响面(别让人以为全停了)
+
+
+def test_pan_cookie_keepalive_xunlei_ok_is_silent(session, monkeypatch) -> None:
+    """迅雷凭据正常时**不告警**、且计入健康数。"""
+    from app.db import models as _m
+    from app.services import alert_service, cookie_store, xunlei_transfer
+
+    session.add(_m.User(id=1, username="u1", email="u1@b.c", password_hash="x", enabled=True))
+    monkeypatch.setattr(cookie_store, "get_cookie",
+                        lambda db, uid, plat: '{"refresh_token":"r"}' if plat == "xunlei" else "")
+    captured: list = []
+    monkeypatch.setattr(alert_service, "notify_incident",
+                        lambda *a, **kw: captured.append(a) or False)
+    monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+    monkeypatch.setattr(xunlei_transfer, "verify", lambda settings=None: {"ok": True})
+
+    st = _settings(quark_cookie="", pan_transfer_enabled=True)
+    assert wechat_monitor.pan_cookie_keepalive_tick(settings=st) == 1   # 健康计数 +1
+    assert captured == []

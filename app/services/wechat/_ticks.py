@@ -28,13 +28,16 @@ logger = get_logger(__name__)
 from app.services import wechat_monitor as _root  # 兼容 monkeypatch:可替换名经门面运行时查找
 
 def pan_cookie_keepalive_tick(settings: Settings | None = None) -> int:
-    """每日定时巡检网盘转存 Cookie(夸克 + 百度网盘),失效即时告警。返回健康的 (用户,平台) 数。
+    """每日定时巡检网盘转存凭据(夸克 + 百度网盘 + 迅雷),失效即时告警。返回健康的 (用户,平台) 数。
 
     旧版三处不对等:① `if not settings.quark_cookie: return 0` —— 只在「Cookie 管理」按用户配了
     凭据的人**根本没被巡检过**,于是"失效"只能等到监听里转存炸了才报;② 百度盘完全没有保活,
     而它的失败(errno)长得像"对方链接失效",没人会怀疑是自己 Cookie 死了;③ 告警挂到 id 最小的
     用户、板块写成 xianyu(发到闲鱼群)。夸克保活仍是轻量列目录(顺带滚动延长 __puus)。
     同一份 Cookie 只探一次、只告警一次:多用户共用全局凭据时不重复撞接口也不刷屏。
+
+    **迅雷**(2026-10-02 补):它的凭据是扫码出来的、**约 12 小时就废**,废了之后
+    **采集还能跑但转存/分享全停** —— 不喊一声没人知道,所以纳入同一巡检。
     """
     from app.services.alert_service import notify_incident
     from app.db import get_session_local
@@ -44,17 +47,29 @@ def pan_cookie_keepalive_tick(settings: Settings | None = None) -> int:
     settings = settings or get_settings()
     if not settings.pan_transfer_enabled:
         return 0
-    _NICK = {"quark": "夸克", "baidupan": "百度网盘"}
+    _NICK = {"quark": "夸克", "baidupan": "百度网盘", "xunlei": "迅雷网盘"}
     _FIX = {"quark": "请浏览器登录 pan.quark.cn 后 F12 复制 Cookie,更新到「Cookie 管理」页的 "
                       "quark 平台(或 .env 的 QUARK_COOKIE)",
             "baidupan": "请浏览器登录 pan.baidu.com 后复制含 BDUSS 的 Cookie,更新到"
-                        "「Cookie 管理」页的 baidupan 平台(百度盘没有全局默认值,只能按用户配)"}
+                        "「Cookie 管理」页的 baidupan 平台(百度盘没有全局默认值,只能按用户配)",
+            # 迅雷：凭据是**扫码**出来的(JSON,不是 Cookie 串),约 12 小时就废;
+            # 废物后采集还能跑、**转存/分享全停** —— 正是最该有人喊一声的时候
+            "xunlei": "迅雷凭据约 12 小时过期,请重新扫码:在项目根目录跑 "
+                      "`python tools/xl_qr_login.py`(会弹浏览器,用迅雷 App 扫一下)"}
 
     def _probe(platform: str, cookie: str) -> str:
         """ok / auth(凭据已死,要人工换) / error(网络或风控,不该报"Cookie 失效")。"""
         try:
             if platform == "quark":
                 QuarkTransfer(cookie).keepalive()
+            elif platform == "xunlei":
+                # 迅雷不用传 cookie 串:`verify()` 自己从 cookie_store 读那套 JSON,
+                # 且**自带 captcha 自愈**;走到失败通常是 refresh_token 已废 → 只能重扫
+                from app.services import xunlei_transfer as xt
+
+                res = xt.verify()
+                if not res.get("ok"):
+                    return f"auth:{res.get('message', '')}"[:200]
             else:
                 BaiduPanClient(cookie).keepalive()
             return "ok"
@@ -72,7 +87,7 @@ def pan_cookie_keepalive_tick(settings: Settings | None = None) -> int:
     try:
         users = db.scalars(select(User.id).where(User.enabled.is_(True)).order_by(User.id)).all()
         for uid in users:
-            for platform in ("quark", "baidupan"):
+            for platform in ("quark", "baidupan", "xunlei"):
                 fallback = settings.quark_cookie if platform == "quark" else ""
                 ck = (get_cookie(db, uid, platform) or fallback or "").strip()
                 if not ck:
@@ -84,9 +99,13 @@ def pan_cookie_keepalive_tick(settings: Settings | None = None) -> int:
                     healthy += 1
                 elif results[key].startswith("auth:") and key not in warned:
                     warned.add(key)
+                    # 迅雷不是 Cookie 是**扫码凭据**,且"监听"是公众号的说法 —— 文案按平台走
+                    what = "凭据" if platform == "xunlei" else "Cookie"
+                    note = ("采集不受影响,仅转存/分享暂停" if platform == "xunlei"
+                            else "监听不受影响,仅转存暂停")
                     notify_incident(db, uid, "wechat",
-                                    f"🟠 {_NICK[platform]} Cookie 已失效,转存功能停用",
-                                    f"{results[key][5:]}。{_FIX[platform]};监听不受影响,仅转存暂停",
+                                    f"🟠 {_NICK[platform]} {what} 已失效,转存功能停用",
+                                    f"{results[key][5:]}。{_FIX[platform]};{note}",
                                     settings=settings)
     finally:
         db.close()

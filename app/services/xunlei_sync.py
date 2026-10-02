@@ -9,6 +9,10 @@
 
   扫盘 → 挑出还没登记过的 → 生成我方分享链 → 入库(`xunlei_resources`)
 
+**跨源去重**(2026-10-02):群采集/口令解析转存进来的资源**已经在 `xunlei_group_shares` 里
+登记过**,扫盘时必须按 `fid` 跳过 —— 否则同一份资源①在资源库**重复展示**、
+②被**重新生成一条分享链**(白占额度)。实测两表 fid 交集曾有 10 条。
+
 **扫描范围**:根目录的直接子项(用户口径"扫整个盘")。每个顶层文件夹当成**一个资源包**
 (如"右右玩软件"内含 7 个分类目录),根目录下的单个文件也算一条。迅雷自带的系统目录
 (`超级保险箱`)跳过。
@@ -17,7 +21,7 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
-from app.db.models import XunleiResource
+from app.db.models import XunleiGroupShare, XunleiResource
 from app.utils import get_logger
 
 logger = get_logger(__name__)
@@ -96,6 +100,13 @@ def sync_xunlei_resources(session, user_id: int, settings=None) -> dict:
 
     known = set(session.scalars(
         select(XunleiResource.fid).where(XunleiResource.user_id == user_id)).all())
+    # ⚠️ **跨源去重**(2026-10-02 实测:两表 fid 交集 10 条):群采集 / 口令解析转存进来的
+    # 资源已经在 `xunlei_group_shares` 里登记过(自带我方分享链),扫盘再登记一遍会
+    # ① **资源库重复展示**同一份资源;② 给同一份资源**重新生成一条分享链**(白占分享额度)。
+    known |= set(session.scalars(
+        select(XunleiGroupShare.fid).where(
+            XunleiGroupShare.user_id == user_id,
+            XunleiGroupShare.fid != "").distinct()).all())
     new: list[dict] = []
     _collect_resources(xt, session, user_id, "", 0, known, new)
     session.commit()
