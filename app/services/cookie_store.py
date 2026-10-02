@@ -20,7 +20,8 @@ from app.utils import get_logger
 logger = get_logger(__name__)
 
 PLATFORMS = ("weibo", "baidu", "douyin", "goofish", "weread", "baidupan", "quark",
-             "zhihu")   # zhihu:跨平台同类资源号发现用(2026-10-01,带登录 Cookie 即可搜)
+             "zhihu",   # zhihu:跨平台同类资源号发现用(2026-10-01,带登录 Cookie 即可搜)
+             "bilibili")  # bilibili:同上(2026-10-02,**匿名也能搜**,配了 Cookie 风控更宽松)
 
 # 平台 → 兜底源:env 全局 Cookie / 本机 Cookie 文件(settings 属性名)。
 # 网盘类(baidupan/quark)故意不在内:自愈会把运营者的全局凭据明文写进

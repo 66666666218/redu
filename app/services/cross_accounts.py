@@ -46,6 +46,13 @@ def _pan_of(text: str) -> str:
     return urls[0] if urls else ""
 
 
+# 「这号明摆着是网盘推广号」的强特征词(2026-10-02)。用于**搜索层不给链**的平台(B站):
+# 谁把自己的号叫成"网盘资源商行""夸克网盘扩容免费",谁就是在做这门生意——这比链更直接。
+# 只认 **"网盘"/具体网盘品牌名**,**不认泛词"资源"**(否则会收进一大堆无关号)。
+_PAN_ACCOUNT_HINTS = ("网盘", "夸克", "百度盘", "百度网盘", "阿里云盘", "迅雷",
+                      "uc网盘", "115网盘", "蓝奏云", "盘搜")
+
+
 def _search_zhihu(cookie: str, keyword: str, limit: int = 20) -> list[dict]:
     """知乎搜索 → `[{uid, name, url, snippet, pan_link}]`。
 
@@ -83,7 +90,107 @@ def _search_zhihu(cookie: str, keyword: str, limit: int = 20) -> list[dict]:
     return out
 
 
-SEARCHERS = {"zhihu": _search_zhihu}
+# B站搜索的 wbi 签名(2023 起该接口要求 `w_rid`)——算法**公开、纯本地可算**,
+# 不需要浏览器/真机,这是它比抖音小红书好接的根本原因。打乱表是官方固定值。
+_BILI_WBI_TAB = (46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
+                 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40, 61,
+                 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36,
+                 20, 34, 44, 52)
+_bili_mixin_cache: dict = {"key": "", "ts": 0.0}
+_BILI_MIXIN_TTL = 3600.0     # wbi key 每天轮换;mixin 缓存 1 小时足够,还能省掉每轮的 nav 请求
+
+
+def _bili_mixin() -> str:
+    """取 B站 wbi 的 mixin key(带缓存)。
+
+    **未登录也会返回** `wbi_img`——实测 nav 接口 `code=-101`(未登录)但 `data.wbi_img` 照给。
+    """
+    now = time.time()
+    if _bili_mixin_cache["key"] and now - float(_bili_mixin_cache["ts"]) < _BILI_MIXIN_TTL:
+        return str(_bili_mixin_cache["key"])
+    import requests
+
+    try:
+        payload = requests.get(
+            "https://api.bilibili.com/x/web-interface/nav",
+            headers={"User-Agent": _UA, "Referer": "https://www.bilibili.com/"},
+            timeout=15).json()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("B站 wbi key 获取失败:%s", exc)
+        return ""
+    wbi = (payload.get("data") or {}).get("wbi_img") or {}
+    ik = str(wbi.get("img_url") or "").rsplit("/", 1)[-1].split(".")[0]
+    sk = str(wbi.get("sub_url") or "").rsplit("/", 1)[-1].split(".")[0]
+    if not ik or not sk:
+        return ""
+    mixin = "".join((ik + sk)[i] for i in _BILI_WBI_TAB)[:32]
+    _bili_mixin_cache.update(key=mixin, ts=now)
+    return mixin
+
+
+def _search_bilibili(cookie: str, keyword: str, limit: int = 20) -> list[dict]:
+    """B站**搜用户** → `[{uid, name, url, snippet, pan_link, looks_like_pan}]`。
+
+    **为什么搜用户而不是搜视频**(2026-10-02 两条路都实测过):
+    - 搜视频:20 条结果的 `description` **全是空的**——搜索接口不返回视频简介,拿不到链
+      (与抖音同理:链不在搜索层);
+    - 搜用户:一次请求返回 20 个**账号**,带 `mid`(**可拼主页**)+ `uname` + `usign`(签名),
+      且实测搜"网盘资源"返回的号名本身就写着「网盘资源/网盘资源商行/夸克网盘资源/
+      看简介有网盘资源」——**这比链更直接**:谁把号叫成这个,谁就在做这门生意。
+
+    匿名即可搜(wbi 签名本地自算);风控**按频率**(连发即 `-352`),调用方必须限速。
+    """
+    import hashlib
+    import urllib.parse
+
+    import requests
+
+    if not (keyword or "").strip():
+        return []
+    mixin = _bili_mixin()
+    if not mixin:
+        return []
+    params = {"search_type": "bili_user", "keyword": keyword.strip(), "page": 1,
+              "wts": int(time.time())}
+    # wbi 规范:值里去掉 !'()* 四个字符,按键排序后再拼接参与签名
+    clean = {k: "".join(c for c in str(v) if c not in "!'()*") for k, v in sorted(params.items())}
+    query = urllib.parse.urlencode(clean)
+    url = ("https://api.bilibili.com/x/web-interface/wbi/search/type?"
+           f"{query}&w_rid={hashlib.md5((query + mixin).encode()).hexdigest()}")
+    headers = {"User-Agent": _UA, "Referer": "https://www.bilibili.com/"}
+    if cookie:
+        headers["Cookie"] = cookie     # 配了就用(风控更宽松);没有也能跑
+    try:
+        payload = requests.get(url, headers=headers, timeout=20).json()
+    except Exception as exc:  # noqa: BLE001 - 单平台搜索失败不该炸整轮发现
+        logger.warning("B站搜索失败(%s):%s", keyword, exc)
+        return []
+    out: list[dict] = []
+    for item in ((payload.get("data") or {}).get("result") or [])[:max(1, min(limit, 50))]:
+        mid = str(item.get("mid") or "").strip()
+        name = str(item.get("uname") or "").strip()
+        if not mid or not name:
+            continue
+        text = f"{name} {item.get('usign') or ''}".strip()
+        out.append({"uid": mid, "name": name,
+                    "url": f"https://space.bilibili.com/{mid}",
+                    "snippet": text[:255],
+                    "pan_link": _pan_of(text),
+                    "looks_like_pan": any(h in text for h in _PAN_ACCOUNT_HINTS)})
+    return out
+
+
+# 平台注册表:新增平台只加一个 `(cookie, keyword, limit) -> list[dict]`。
+# 各平台门槛与实测结论见 `doc/pan-promotion-channels.md` §七。
+SEARCHERS = {"zhihu": _search_zhihu, "bilibili": _search_bilibili}
+
+# 免 Cookie 即可跑的平台:B站的 wbi 签名是公开算法(本地自算),没配 Cookie 也能搜。
+# 其余(知乎)必须有登录态——没 Cookie 的会被 `platforms` 过滤掉。
+ANON_PLATFORMS = frozenset({"bilibili"})
+
+# 账号**垂直**平台(区别于知乎那种"在内容里顺手分享"的平台):这里的网盘号是**专门做
+# 这门生意**的,所以要用**行业词**而不是资源词去搜(见 discover_cross_accounts 的 docstring)。
+ACCOUNT_PLATFORMS = frozenset({"bilibili"})
 
 # MediaCrawler 覆盖的平台(2026-10-01):它们**光带 Cookie 过不去**(微博 -100/贴吧 403/
 # 小红书抖音要签名),只能靠真浏览器算签名——所以走 `mediacrawler_source`,而且它的 CLI
@@ -96,8 +203,8 @@ SEARCHERS = {"zhihu": _search_zhihu}
 MEDIACRAWLER_PLATFORMS = ("xiaohongshu", "douyin", "kuaishou", "weibo", "tieba", "bilibili")
 
 # 限速(2026-10-01,用户要求"一次不要访问太多"):持续高频轮询是最容易被判定为爬虫的模式。
-# 知乎逐词之间留间隔;MediaCrawler **每轮只跑一个平台**(轮换),不是一次开六个浏览器。
-_ZHIHU_GAP = 4.0
+# 逐个**请求**之间留间隔——一轮 3 词 × N 平台 = 3N 次请求,而 B站风控正是按频率(连发即 -352)。
+_REQ_GAP = 4.0
 
 
 def pick_mediacrawler_platform(seed: int | None = None) -> str:
@@ -110,13 +217,19 @@ def pick_mediacrawler_platform(seed: int | None = None) -> str:
 
 def discover_cross_accounts(session: Session, user_id: int, settings=None,
                             keywords: list[str] | None = None, limit: int = 0) -> dict:
-    """拿资源关键词去各平台搜,把**内容含网盘链**的账号收录为跨平台对标号。
+    """拿搜索词去各平台搜,把**明摆着做网盘推广**的账号收录为跨平台对标号。
 
-    关键词来源:`resource_library.resonance_resources`(同链被 ≥2 个对标号同发 = 需求被
-    反复验证)——用**已被验证过的资源**当搜索词,比拿热榜标题去搜精准得多。
+    **两类平台的搜索词来源不同**(2026-10-02 实测,这是本功能的关键设计):
+    - **内容平台(知乎)**:用**资源词**——`resource_library.resonance_resources`(同链被
+      ≥2 个对标号同发 = 需求被反复验证),问的是"谁在分享**这个具体资源**";
+    - **账号垂直平台(B站)**:用**行业词**(`settings.cross_bili_keywords`),问的是
+      "谁在做**这门生意**"。实测差异极大:拿资源词去 B站 搜用户返回 **0 个**;
+      拿"网盘资源"搜返回 **20 个号、20 个全是网盘号**(号名就写着"网盘资源/
+      夸克网盘资源/网盘资源商行")——B站 上这类号是**垂直账号**,不是"顺手分享",
+      所以必须按行业找,而不是按资源找。
 
     返回 `{"status", "keywords", "platforms", "found", "new", "items"}`;
-    `found` 统计的是**带盘链**的命中数(光聊资源的不计)。
+    `found` 统计的是**判定命中**(有盘链 或 号名/签名明写网盘)的条数。
     """
     from app.services.cookie_store import get_cookies
 
@@ -126,27 +239,35 @@ def discover_cross_accounts(session: Session, user_id: int, settings=None,
     if not keywords:
         return {"status": "no_keywords", "new": 0}
     cookies = get_cookies(session, user_id)
-    platforms = [p for p in SEARCHERS if cookies.get(p)]
+    platforms = [p for p in SEARCHERS if cookies.get(p) or p in ANON_PLATFORMS]
     if not platforms:
         return {"status": "no_cookie", "new": 0}
 
+    # 组装 (平台, 搜索词) 任务表:内容平台配资源词,账号垂直平台配行业词(见 docstring)。
+    jobs: list[tuple[str, str]] = [(p, kw) for kw in keywords
+                                   for p in platforms if p not in ACCOUNT_PLATFORMS]
+    jobs += [(p, kw) for kw in _account_keywords(settings)
+             for p in platforms if p in ACCOUNT_PLATFORMS]
+
     found, new, items = 0, 0, []
-    for idx, kw in enumerate(keywords):
+    for idx, (plat, kw) in enumerate(jobs):
         if idx:
-            time.sleep(_ZHIHU_GAP)   # 限速:逐词之间留间隔(用户要求"一次不要访问太多")
-        for plat in platforms:
-            try:
-                hits = SEARCHERS[plat](cookies[plat], kw, limit=20)
-            except Exception:  # noqa: BLE001 - 单平台失败不影响其余
-                logger.exception("跨平台搜索失败 %s/%s", plat, kw)
+            time.sleep(_REQ_GAP)   # 限速:每个请求之间都留间隔(用户要求"一次不要访问太多")
+        try:
+            hits = SEARCHERS[plat](cookies.get(plat, ""), kw, limit=20)
+        except Exception:  # noqa: BLE001 - 单平台失败不影响其余
+            logger.exception("跨平台搜索失败 %s/%s", plat, kw)
+            continue
+        for h in hits:
+            # 收录判据:① 内容里有真盘链(知乎口径);或 ② **号名/签名明写网盘**(B站口径,
+            # 见 _PAN_ACCOUNT_HINTS——B站搜索层不给链,但号名本身就是强信号)。
+            # 两者都没有 = 光聊资源的普通用户,不要。
+            if not h.get("pan_link") and not h.get("looks_like_pan"):
                 continue
-            for h in hits:
-                if not h.get("pan_link"):
-                    continue      # 只收"真在发网盘资源"的号——光聊资源的普通用户不要
-                found += 1
-                if _save(session, user_id, plat, h, kw):
-                    new += 1
-                    items.append({"platform": plat, "name": h["name"], "keyword": kw})
+            found += 1
+            if _save(session, user_id, plat, h, kw):
+                new += 1
+                items.append({"platform": plat, "name": h["name"], "keyword": kw})
     # ② MediaCrawler 型平台:一次跑**全部关键词**(它的 CLI 是批量的,逐词调用等于反复开关浏览器)。
     #    工具没装/跑挂都不该拖垮上面那条直连型的发现,所以整段兜住异常。
     #    2026-10-02 默认关(实测:账号脱敏 + 拿不到盘链,见 settings 里的说明)。
@@ -170,6 +291,16 @@ def discover_cross_accounts(session: Session, user_id: int, settings=None,
                 len(keywords), len(platforms), found, new)
     return {"status": "ok", "keywords": keywords, "platforms": platforms,
             "found": found, "new": new, "items": items}
+
+
+def _account_keywords(settings) -> list[str]:
+    """账号垂直平台(B站)的搜索词:**行业词**,不是资源词(理由见 `discover_cross_accounts`)。
+
+    默认 "网盘资源/夸克网盘/百度网盘"——实测拿它搜 B站 用户,返回的号名里就写着网盘。
+    想按自己的方向收窄,配 `CROSS_BILI_KEYWORDS` 加词(如 "影视网盘资源,漫剧资源")。
+    """
+    raw = getattr(settings, "cross_bili_keywords", "") or "网盘资源,夸克网盘,百度网盘"
+    return [k.strip() for k in raw.split(",") if k.strip()]
 
 
 def _keywords_from_library(session: Session, user_id: int, top: int = 5) -> list[str]:
@@ -203,6 +334,11 @@ def _save(session: Session, user_id: int, platform: str, hit: dict, keyword: str
         url=str(hit.get("url") or "")[:500], hit_keyword=keyword[:128],
         snippet=str(hit.get("snippet") or "")[:255],
         pan_link=str(hit.get("pan_link") or "")[:500]))
+    # 立刻 flush(不依赖 autoflush):生产的 session 是 autoflush=False,而**同一轮里多个
+    # 搜索词常命中同一个号**(如"夸克网盘资源"在"网盘资源"和"夸克网盘"两次搜索里都出现),
+    # 不落库的话下一次查重看不到它 → 重复 add → commit 时唯一键冲突 → **整轮白跑**
+    # (2026-10-02 实跑撞到,测试用 autoflush=False 的 session 复现)。
+    session.flush()
     return True
 
 
