@@ -148,7 +148,10 @@ def _parse_record(rec: dict, platform: str) -> dict | None:
     from app.services.wechat_monitor import _extract_pan_urls
 
     user = rec.get("user") if isinstance(rec.get("user"), dict) else {}
-    name = str(rec.get("nickname") or user.get("nickname") or rec.get("author") or "").strip()
+    # ⚠️ 各平台字段名不同(实测):抖音/小红书/快手用 `nickname`,**贴吧用 `user_nickname`** ——
+    # 少认一个,那个平台就**永远解析出 0 条**(2026-10-02 贴吧实跑踩到:爬到了 10 条、解析返回 0)
+    name = str(rec.get("nickname") or rec.get("user_nickname")
+               or user.get("nickname") or rec.get("author") or "").strip()
     uid = str(rec.get("user_id") or user.get("user_id") or rec.get("uid")
               or user.get("id") or rec.get("creator_hash") or "").strip()
     if not name or not uid:
