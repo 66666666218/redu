@@ -23,7 +23,9 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
+import time
 from pathlib import Path
 
 from app.utils import get_logger
@@ -46,6 +48,16 @@ PLATFORM_IDS = {"xiaohongshu": "xhs", "douyin": "dy", "kuaishou": "ks",
 # 结果一条都读不到(2026-10-02 实跑发现)。
 DIR_NAMES = {"xiaohongshu": "xhs", "douyin": "douyin", "kuaishou": "kuaishou",
              "bilibili": "bilibili", "weibo": "weibo", "tieba": "tieba", "zhihu": "zhihu"}
+
+
+class MediaCrawlerError(RuntimeError):
+    """MediaCrawler **硬失败**(未装 / 超时 / 非零退出 / 起不来)。
+
+    ⚠️ **为什么必须与"跑通了但没结果"分开**(2026-10-03):此前 `crawl()` 把**所有**失败都吞成
+    `[]`,于是"工具没登录/扫码超时"和"真的一条都没搜到"完全一样 —— 下游 `douyin_leads` 会把它
+    记成 `success(线索0)`。而它**只在每天 11:00 无人值守时跑**,失败你不会收到任何信号
+    (与闲鱼那次"假成功"、知乎那次静默失败是同一类问题)。
+    """
 
 
 def available() -> tuple[bool, str]:
@@ -75,38 +87,59 @@ def crawl(platform: str, keywords: list[str], timeout: int = 600) -> list[dict]:
     """跑一轮关键词搜索 → `[{uid, name, url, snippet, pan_link}]`。
 
     `platform` 用我们的名字(xiaohongshu/douyin/…),内部转成 MediaCrawler 的 id。
-    失败(未装/超时/登录态失效)一律返回空列表——发现任务不该被单平台拖垮。
+    **硬失败抛 `MediaCrawlerError`**(不再返回空列表冒充"没搜到");跑通但没结果才返回 `[]`。
     """
     ok, why = available()
     if not ok:
-        logger.info("MediaCrawler 不可用:%s", why)
-        return []
+        raise MediaCrawlerError(why)
     pid = PLATFORM_IDS.get(platform)
     if not pid or not keywords:
         return []
     try:
         _write_config(keywords)
     except OSError as exc:
-        logger.warning("写 MediaCrawler 配置失败:%s", exc)
-        return []
+        raise MediaCrawlerError(f"写配置失败:{exc}") from exc
     cmd = [str(VENV_PY), "main.py", "--platform", pid, "--lt", "qrcode", "--type", "search"]
+    started = time.time()          # ⚠️ 必须在**起进程之前**取:用来判"哪个文件是本轮写的"
     try:
         proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        logger.warning("MediaCrawler 超时(%s):%s", platform, keywords)
-        return []
+    except subprocess.TimeoutExpired as exc:
+        # 最常见的无人值守失败:等扫码等到超时(600s)。必须冒泡,否则这轮会被当成"没线索"。
+        raise MediaCrawlerError(f"{platform} 超时({timeout}s)——多半卡在扫码登录") from exc
     except OSError as exc:
-        logger.warning("MediaCrawler 启动失败:%s", exc)
-        return []
+        raise MediaCrawlerError(f"{platform} 启动失败:{exc}") from exc
     if proc.returncode != 0:
         tail = (proc.stderr or b"")[-300:].decode("utf-8", "ignore")
-        logger.warning("MediaCrawler 退出码 %s(%s):%s", proc.returncode, platform, tail)
-        return []
-    return _read_results(platform)
+        raise MediaCrawlerError(f"{platform} 退出码 {proc.returncode}:{tail}")
+    out = _read_results(platform, since=started)
+    if not out:
+        _raise_if_all_keywords_empty(platform, proc, keywords)
+    return out
 
 
-def _read_results(platform: str) -> list[dict]:
-    """从 `data/<平台全名>/jsonl/` 读**最新的内容型** jsonl,归一化成我们的结构。
+def _raise_if_all_keywords_empty(platform: str, proc, keywords: list[str]) -> None:
+    """**一个词都没搜到** → 多半是登录态失效,必须报出来而不是安静地交出 0 条。
+
+    2026-10-03 实测:抖音对 `网盘资源` 这种必然有结果的泛词也返回 `aweme_list:[]`,
+    而 10-02 同一工具、同一档案能出 40 条 —— 这就是**扫码登录过期**的样子。
+    MediaCrawler 的日志里每个词打一行 `keyword:<词>, aweme_list:[…]`,全空即是该信号。
+    """
+    text = ((proc.stdout or b"") + (proc.stderr or b"")).decode("utf-8", "ignore")
+    total = len(re.findall(r"aweme_list:\[", text))
+    empty = len(re.findall(r"aweme_list:\[\]", text))
+    if total and empty == total:
+        raise MediaCrawlerError(
+            f"{platform} 的 {total} 个关键词全部无结果(词:{','.join(keywords[:3])})——"
+            f"多半是**登录态失效**,需要重扫一次码(实测连泛词都返回空)")
+
+
+def _read_results(platform: str, since: float | None = None) -> list[dict]:
+    """从 `data/<平台全名>/jsonl/` 读**本轮**产出的内容型 jsonl,归一化成我们的结构。
+
+    ⚠️ **`since` 是防"读旧数据"的闸门**(2026-10-03 实测踩到):MediaCrawler 在**搜到 0 条时
+    根本不写文件**,而那些文件是按日期命名的(`search_contents_2026-10-02.jsonl`)——
+    于是"今天什么都没搜到"会**回退读到昨天的文件**,把 40 条旧线索当成新线索返回,
+    下游就会**每天把同一批旧线索再推一遍**。判据用文件 mtime:只有本轮起进程之后写过的才算。
 
     只读 `search_contents_*.jsonl`:同目录的 `search_comments_*.jsonl` 是**评论者**记录
     (不是发帖人),拿它当对标号会把评论区路人一起收进来。
@@ -118,8 +151,10 @@ def _read_results(platform: str) -> list[dict]:
     files = sorted(d.glob("search_contents_*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
     if not files:
         files = sorted(d.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if since is not None:
+        files = [f for f in files if f.stat().st_mtime >= since]
     if not files:
-        logger.info("MediaCrawler 没有产出 jsonl(%s)", platform)
+        logger.info("MediaCrawler 本轮没有产出新文件(%s)——按「本轮无结果」处理,不读旧文件", platform)
         return []
     out: list[dict] = []
     for line in files[0].read_text(encoding="utf-8", errors="ignore").splitlines():

@@ -81,12 +81,21 @@ def test_lead_rank_orders_strong_signals_first() -> None:
 
 
 def test_find_leads_without_tool_is_noop(monkeypatch) -> None:
-    """工具没装/不可用 → 空返回,不该抛异常拖垮调度。"""
+    """工具没装/不可用 → **抛 `MediaCrawlerError`**(2026-10-03 改)。
+
+    此前是"返回空列表",于是"扫码没通过/工具没装"与"真的一条都没搜到"完全一样,
+    `douyin_leads_tick` 会把它记成 `success(线索0)` —— 而这条链**只在每天 11:00
+    无人值守时跑**,失败收不到任何信号(与闲鱼/知乎那次"假成功"同一类)。
+    现在冒泡给 tick 记 `failed`。
+    """
     from app.services import douyin_leads as dl
     from app.services import mediacrawler_source as mc
 
     monkeypatch.setattr(mc, "available", lambda: (False, "未安装"))
-    assert dl.find_leads(["x"]) == []
+    monkeypatch.setattr(mc, "crawl", lambda *a, **k: (_ for _ in ()).throw(
+        mc.MediaCrawlerError("未安装")))
+    with pytest.raises(mc.MediaCrawlerError):
+        dl.find_leads(["x"])
 
 
 def test_push_leads_builds_card_with_video_links(monkeypatch) -> None:

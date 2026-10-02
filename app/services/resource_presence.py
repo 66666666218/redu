@@ -93,10 +93,23 @@ def probe(session, user_id: int, settings=None) -> dict:
         return {"status": "no_tool", "platforms": 0, "items": []}
 
     items: list[dict] = []
+    from app.services.mediacrawler_source import MediaCrawlerError
+
+    tried = failed = 0
+    last_err = ""
     for plat in plats:
-        rows = mc.crawl(plat, names)                     # 一次吃整个词表,别逐词开浏览器
+        tried += 1
+        try:
+            rows = mc.crawl(plat, names)                 # 一次吃整个词表,别逐词开浏览器
+        except MediaCrawlerError as exc:
+            # 单平台硬失败(多半是那个平台没登录)不该拖垮整轮 —— 但要**计数**,
+            # 全平台都失败就得冒泡,别让"一个都没开起来"记成 success(空)。
+            failed += 1
+            last_err = f"{plat}: {exc}"
+            logger.warning("跨平台热度:%s 抓取失败(%s)", plat, exc)
+            continue
         if not rows:
-            continue                                     # 该平台没登录/没结果 → 跳过,不影响其余
+            continue                                     # 该平台没结果 → 跳过,不影响其余
         by_name: dict[str, list[dict]] = {}
         for r in rows:
             kw = str(r.get("keyword") or "").strip()
@@ -108,6 +121,9 @@ def probe(session, user_id: int, settings=None) -> dict:
                           "samples": [(h.get("snippet") or "")[:60] for h in hits[:2]],
                           "link": _library_link(session, user_id, name)})
         logger.info("跨平台热度:%s 命中资源 %d 个", plat, len(by_name))
+    if tried and failed == tried:
+        # 一个平台都没开起来 → 这不是"没热度",是链路坏了,必须让上层记 failed
+        raise MediaCrawlerError(f"{tried} 个平台全部抓取失败:{last_err}")
     return {"status": "ok", "platforms": len(plats), "items": items}
 
 

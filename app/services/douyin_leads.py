@@ -123,12 +123,11 @@ def find_leads(keywords: list[str], limit: int = 30, platform: str = "douyin") -
     """
     from app.services import mediacrawler_source as mc
 
-    ok, why = mc.available()
-    if not ok:
-        logger.info("抖音线索:MediaCrawler 不可用(%s)", why)
-        return []
     if not keywords:
         return []
+    # ⚠️ `mc.crawl` 的硬失败(未装/扫码超时/非零退出)会抛 `MediaCrawlerError`,这里**不吞** ——
+    # 让它一路冒到 `douyin_leads_tick` 记 `failed`。否则"扫码没通过"会被记成
+    # `success(线索0)`,而这条链**只在每天 11:00 无人值守时跑**,失败你收不到任何信号。
     out: list[dict] = []
     seen: set[str] = set()
     for h in mc.crawl(platform, keywords):
