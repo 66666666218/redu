@@ -1508,7 +1508,47 @@ GET `/api/admin/health`(perm `logs.view`)→ 各平台最近采集状态 + 数�
 ```
 
 ### 16b.2 设置 / 删除
-- **设置**: PUT `/api/cookies/{platform}`,Body `{"cookie": "完整 Cookie 串"}` → `{"platform": "weread", "configured": true}`(Fernet 加密落库;platform ∈ weibo/baidu/douyin/goofish/weread/baidupan/quark)
+- **设置**: PUT `/api/cookies/{platform}`,Body `{"cookie": "完整 Cookie 串"}` → `{"platform": "weread", "configured": true}`(Fernet 加密落库;platform ∈ weibo/baidu/douyin/goofish/weread/baidupan/quark/zhihu/bilibili)
 - **删除**: DELETE `/api/cookies/{platform}` → `{"platform": "goofish", "deleted": true}`
 
 > 网盘类(baidupan/quark)与 dajiala 故意不走自愈:运营者全局凭据不进普通用户可见面。
+
+## 20. 跨平台对标号(/api/cross,2026-10-02)
+
+> 拿公众号监控到的**网盘资源**去别的平台找同类资源号。
+> **两类平台的搜索词来源不同**(实测,这是关键):内容平台(知乎)用**资源词**(谁在分享
+> 这个**具体资源**);账号垂直平台(B站)用**行业词**(谁在做**这门生意**,见 `CROSS_BILI_KEYWORDS`)。
+> ⚠️ 会真实访问外部平台且**带限速**(每请求间隔 4 秒),一轮约 6 个请求,默认每周一/四 09:00。
+
+### 20.1 列表
+- **接口名称**: 跨平台对标号列表(新→旧,最多 200)
+- **请求方式**: GET
+- **URL 路径**: `/api/cross/accounts`
+- **请求参数 (Query)**: `platform`(可选,`zhihu` / `bilibili`;空 = 全部)
+
+**响应示例 (200)**
+```json
+{ "count": 61,
+  "items": [ { "id": 61, "platform": "bilibili", "uid": "87482673",
+               "name": "百度网盘会员福利酱", "url": "https://space.bilibili.com/87482673",
+               "hit_keyword": "百度网盘", "snippet": "...", "pan_link": "",
+               "status": "active", "discovered_at": "2026-10-02 10:14:22" } ] }
+```
+
+### 20.2 手动发现一轮
+- **接口名称**: 立即跑一轮跨平台发现
+- **请求方式**: POST
+- **URL 路径**: `/api/cross/discover`
+- **请求参数**: 无(用户取自登录态)
+
+**响应示例 (200)**
+```json
+{ "status": "ok", "keywords": ["霸王茶姬杯贴自定义入口链"],
+  "platforms": ["zhihu", "bilibili"], "found": 60, "new": 59,
+  "items": [ { "platform": "bilibili", "name": "网盘资源商行", "keyword": "网盘资源" } ] }
+```
+
+> **收录判据**(或关系):① 内容里含**真网盘链**(知乎口径);② **号名/签名明写网盘**
+> (`_PAN_ACCOUNT_HINTS`,只认"网盘"/具体品牌名,**不认泛词"资源"**)——B站搜索层给不出链,
+> 靠 ② 才收得到号。
+> **前端入口**:「跨平台对标号」页 `/cross`(含平台筛选 + 手动触发)。
