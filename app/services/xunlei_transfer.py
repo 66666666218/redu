@@ -154,13 +154,25 @@ def _access_token(cred: dict) -> str:
     return _refresh_access_token(cred["refresh_token"], cred.get("client_id") or _WEB_CLIENT_ID)
 
 
-def _headers(access_token: str, captcha: str, device_id: str) -> dict:
+def _headers(access_token: str, captcha: str, device_id: str,
+             client_id: str = _CLIENT_ID) -> dict:
     return {"Accept": "*/*", "Accept-Language": "zh-CN,zh;q=0.9",
             "Cache-Control": "no-cache", "Content-Type": "application/json",
             "Origin": "https://pan.xunlei.com", "Pragma": "no-cache",
             "Referer": "https://pan.xunlei.com/", "User-Agent": _USER_AGENT,
             "Authorization": "Bearer " + access_token, "x-captcha-token": captcha,
-            "x-client-id": _CLIENT_ID, "x-device-id": device_id}
+            "x-client-id": client_id, "x-device-id": device_id}
+
+
+def _drive_headers(cred: dict) -> dict:
+    """盘接口的请求头。
+
+    ⚠️ **身份必须用凭据里那套**(扫码登录出来的是**网页版身份**:`client_id=Xqp0kJBXWhwaTpB6`),
+    不能混用 android 的 `_CLIENT_ID` —— captcha 与 `client_id`/`device_id` **三者绑定**,
+    混着用就是之前一直 `captcha_invalid: no client info found` 的原因。
+    """
+    return _headers(_access_token(cred), _captcha_token(cred),
+                    cred.get("device_id") or "", cred.get("client_id") or _CLIENT_ID)
 
 
 # ---------------------------------------------------------------- captcha 自续
@@ -224,10 +236,8 @@ def verify(settings=None) -> dict:
     if not cred:
         return {"ok": False, "message": "未配置迅雷凭据(需先扫码登录)"}
     try:
-        at = _access_token(cred)
         r = requests.get(f"{_API}/drive/v1/about", timeout=_TIMEOUT,
-                         headers=_headers(at, _captcha_token(cred),
-                                          cred.get("device_id") or ""))
+                         headers=_drive_headers(cred))
         data = r.json()
         if r.status_code != 200:
             return {"ok": False, "message": f"配额查询 {r.status_code}:{str(data)[:160]}"}
@@ -266,8 +276,7 @@ def share_files(file_ids: list[str], expiration_days: str = "7",
     if not file_ids:
         return {"status": "failed", "message": "没有文件 id"}
     try:
-        at = _access_token(cred)
-        h = _headers(at, _captcha_token(cred), cred.get("device_id") or "")
+        h = _drive_headers(cred)
         share = requests.post(f"{_API}/drive/v1/share", headers=h, timeout=_TIMEOUT,
                               json={"file_ids": file_ids, "share_to": "copy",
                                     "params": {"subscribe_push": "false",
@@ -291,8 +300,7 @@ def list_files(parent_id: str = "", cred: dict | None = None, limit: int = 200) 
     if not cred:
         return []
     try:
-        at = _access_token(cred)
-        h = _headers(at, _captcha_token(cred), cred.get("device_id") or "")
+        h = _drive_headers(cred)
         r = requests.get(f"{_API}/drive/v1/files", headers=h, timeout=_TIMEOUT,
                          params={"limit": str(limit), "parent_id": parent_id,
                                  "with_audit": "true"})
@@ -315,8 +323,7 @@ def transfer_and_share(share_url: str, parent_id: str = "", settings=None) -> di
     if not share_id:
         return {"status": "failed", "message": f"解析不出 share_id:{share_url[:80]}"}
     try:
-        at = _access_token(cred)
-        h = _headers(at, _captcha_token(cred), cred.get("device_id") or "")
+        h = _drive_headers(cred)
 
         detail = requests.get(f"{_API}/drive/v1/share", headers=h, timeout=_TIMEOUT,
                               params={"share_id": share_id, "pass_code": pass_code,

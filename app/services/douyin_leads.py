@@ -120,6 +120,74 @@ def find_leads(keywords: list[str], limit: int = 30) -> list[dict]:
     return out[:limit]
 
 
+def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[dict]:
+    """把线索里《…》包的口令**真的变成资源**(2026-10-02):解析 → 转存入库 / 加群。
+
+    **为什么默认开**:此前这条链断在"口令 → 分享 id",线索只能推给人、由人去 App 里搜。
+    现在 `xunlei_kouling` 把口令直接解成**网盘分享链**(可直接转存)或**群邀请**(加群后由
+    群采集轮收),所以"抖音发现 → 加进网盘 → 转存"可以真的全自动。
+
+    **两道闸门**:① 每轮最多真转存 `douyin_leads_transfer_limit` 条(转存慢且占盘),
+    超出的**只解析**、把结果写进卡片由人决定;② 已经转存过的词(`xunlei_resources` 里
+    `parent_name="口令解析"` 的那些)直接跳过,不重复搬。
+    """
+    from app.services import xunlei_kouling as kk
+
+    if not getattr(settings, "douyin_leads_auto_transfer", True):
+        for ld in leads:
+            ld["kouling"] = {"kind": "off"}
+        return leads
+    budget = int(getattr(settings, "douyin_leads_transfer_limit", 3) or 0)
+    already = kk.known_koulings(session, user_id)
+    for ld in leads:
+        mark = (ld.get("mark") or "").strip()
+        if not mark:
+            continue
+        if mark in already:
+            ld["kouling"] = {"kind": "share", "status": "already"}
+            continue
+        info = kk.resolve(mark)
+        if info["kind"] == kk.KIND_NONE:
+            ld["kouling"] = {"kind": "none"}
+            continue
+        if info["kind"] == kk.KIND_GROUP:
+            res = kk.ingest(session, user_id, mark)
+            ld["kouling"] = {"kind": "group", "status": res.get("status"),
+                             "group_id": info["group_id"]}
+            continue
+        if budget <= 0:
+            ld["kouling"] = {"kind": "share", "status": "over_budget",
+                             "share_url": info["share_url"]}
+            continue
+        budget -= 1
+        res = kk.ingest(session, user_id, mark)
+        ld["kouling"] = {"kind": "share", "status": res.get("status"),
+                         "our_url": res.get("our_url") or "",
+                         "message": res.get("message") or ""}
+    return leads
+
+
+def _kouling_line(ld: dict) -> str:
+    """把解析/转存结果渲染成卡片上的一行(让运营一眼看出这条线索值不值钱)。"""
+    info = ld.get("kouling") or {}
+    kind, status = info.get("kind"), info.get("status")
+    if kind == "share" and status == "ok":
+        return f"✅ **已自动转存**,我方链:{info.get('our_url') or ''}"
+    if kind == "share" and status == "already":
+        return "✅ 之前已转存过"
+    if kind == "share" and status == "over_budget":
+        return f"⏸ 本轮转存额度用完,未搬(原链 {info.get('share_url') or ''})"
+    if kind == "share" and status == "failed":
+        return f"⚠️ 转存失败:{info.get('message') or ''}"
+    if kind == "group":
+        return "👥 指向**群组**,已加群(群里的资源由群采集自动收)"
+    if kind == "none":
+        return "· 未解析出资源(可能只是剧名/普通词)"
+    if kind == "off":
+        return "· 自动转存已关闭,仅作线索"
+    return ""
+
+
 def push_leads(leads: list[dict], settings) -> bool:
     """把线索推飞书。
 
@@ -138,12 +206,15 @@ def push_leads(leads: list[dict], settings) -> bool:
 
     elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
         f"抖音上标题带《…》前缀的推广视频 **{len(leads)}** 条。\n"
-        "《…》里就是**迅雷分享口令** —— 丢进迅雷搜索框就能搜到资源;"
-        "点视频链接能看到作者(账号被工具脱敏,需人工确认)。"}}]
+        "《…》里就是**迅雷口令** —— 已自动解析:能解的**已转存进你的盘**并生成我方分享链,"
+        "指向群组的已加群;点视频链接能看到作者(账号被工具脱敏,需人工确认)。"}}]
     for ld in leads:
+        line = _kouling_line(ld)
         elements.append({"tag": "hr"})
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content":
-            f"**《{ld['mark']}》**\n{ld['title']}\n[▶ 打开视频]({ld['url']})"}})
+            f"**《{ld['mark']}》**\n{ld['title']}\n"
+            + (f"{line}\n" if line else "")
+            + f"[▶ 打开视频]({ld['url']})"}})
     card = {
         "config": {"wide_screen_mode": True},
         "header": {"template": "purple", "title": {"tag": "plain_text",
@@ -179,6 +250,8 @@ def douyin_leads_tick(settings=None) -> int:
                 leads = find_leads(kws)
                 total += len(leads)
                 if leads:
+                    # 口令 → 资源(分享链直接转存入库 / 群则加群),结果一并写进卡片
+                    apply_kouling(leads, db, uid, settings)
                     push_leads(leads, settings)
             except Exception:  # noqa: BLE001 - 单用户失败不影响其余
                 logger.exception("抖音线索失败 user=%s", uid)

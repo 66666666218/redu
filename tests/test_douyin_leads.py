@@ -124,3 +124,86 @@ def test_push_leads_no_webhook_is_noop() -> None:
 
     assert dl.push_leads([{"mark": "x", "title": "t", "url": "u", "keyword": ""}], _S()) is False
     assert dl.push_leads([], _Settings()) is False
+
+
+# ---------------------------------------------------------------- 口令 → 资源(2026-10-02)
+
+import pytest  # noqa: E402
+from sqlalchemy import create_engine  # noqa: E402
+from sqlalchemy.orm import sessionmaker  # noqa: E402
+
+from app.db.database import Base  # noqa: E402
+from app.db import models  # noqa: F401,E402
+from app.db.models import User  # noqa: E402
+from app.services import douyin_leads as dl  # noqa: E402
+from app.services import xunlei_kouling as kk  # noqa: E402
+
+
+@pytest.fixture
+def session():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+    db.add(User(id=1, username="admin", email="a@b.c", password_hash="x", enabled=True))
+    db.commit()
+    yield db
+    db.close()
+
+
+def _leads(*marks: str) -> list[dict]:
+    return [{"mark": m, "title": f"{m}的内容", "url": f"https://douyin/{i}"}
+            for i, m in enumerate(marks)]
+
+
+def test_apply_kouling_transfers_share_and_joins_group(session, monkeypatch) -> None:
+    """能解的**自动转存**、指向群组的**加群**、解不出的**不动** —— 三种结果要分得清。"""
+    monkeypatch.setattr(kk, "known_koulings", lambda s, u: set())
+    monkeypatch.setattr(kk, "resolve", lambda m: {
+        "三岁宝库": {"kind": "share", "share_url": "https://pan.xunlei.com/s/A", "group_id": ""},
+        "三岁分享": {"kind": "group", "share_url": "", "group_id": "1550069837"},
+        "My Dearest": {"kind": "none", "share_url": "", "group_id": ""},
+    }[m])
+    monkeypatch.setattr(kk, "ingest", lambda s, u, m, settings=None: (
+        {"status": "ok", "our_url": "https://pan.xunlei.com/s/OUR?pwd=1"}
+        if m == "三岁宝库" else {"status": "deferred"}))
+
+    out = dl.apply_kouling(_leads("三岁宝库", "三岁分享", "My Dearest"), session, 1, _Settings())
+    assert out[0]["kouling"]["status"] == "ok" and "OUR" in out[0]["kouling"]["our_url"]
+    assert out[1]["kouling"]["kind"] == "group" and out[1]["kouling"]["group_id"] == "1550069837"
+    assert out[2]["kouling"] == {"kind": "none"}
+    assert "已自动转存" in dl._kouling_line(out[0])
+    assert "群组" in dl._kouling_line(out[1])
+    assert "未解析出资源" in dl._kouling_line(out[2])
+
+
+def test_apply_kouling_respects_budget_and_skips_already_done(session, monkeypatch) -> None:
+    """转存慢且占盘,所以**每轮限量**;已经搬过的词**不再重复搬**。"""
+    monkeypatch.setattr(kk, "known_koulings", lambda s, u: {"甲"})
+    monkeypatch.setattr(kk, "resolve",
+                        lambda m: {"kind": "share", "share_url": f"s/{m}", "group_id": ""})
+    monkeypatch.setattr(kk, "ingest",
+                        lambda s, u, m, settings=None: {"status": "ok", "our_url": f"our/{m}"})
+
+    class _S(_Settings):
+        douyin_leads_transfer_limit = 1
+
+    out = dl.apply_kouling(_leads("甲", "乙", "丙"), session, 1, _S())
+    assert out[0]["kouling"]["status"] == "already"          # 已搬过 → 跳过
+    assert out[1]["kouling"]["status"] == "ok"               # 额度内 → 真搬
+    assert out[2]["kouling"]["status"] == "over_budget"      # 超额度 → 只解析
+    assert "额度用完" in dl._kouling_line(out[2])
+
+
+def test_apply_kouling_disabled_only_annotates(session, monkeypatch) -> None:
+    """关掉自动转存 → 只标注、**完全不碰迅雷**(不解析也不转存)。"""
+    def _boom(*a, **k):
+        raise AssertionError("关掉开关后不该调用任何迅雷接口")
+
+    monkeypatch.setattr(kk, "resolve", _boom)
+    monkeypatch.setattr(kk, "known_koulings", _boom)
+
+    class _S(_Settings):
+        douyin_leads_auto_transfer = False
+
+    out = dl.apply_kouling(_leads("三岁宝库"), session, 1, _S())
+    assert out[0]["kouling"] == {"kind": "off"}

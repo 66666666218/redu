@@ -135,6 +135,10 @@ class Settings(BaseSettings):
     douyin_leads_enabled: bool = True
     douyin_leads_cron: str = "0 11 * * 2,5"   # 周二/周五 11:00(**低频**:它要开浏览器,一次几分钟)
     douyin_leads_keywords: int = 3            # 每轮取几个资源词当搜索词
+    # 线索里的《口令》**自动变成资源**(2026-10-02):解析成分享链就直接转存入库,
+    # 指向群组就加群(群里的资源由群采集轮收)。转存慢且占盘,故每轮限量。
+    douyin_leads_auto_transfer: bool = True
+    douyin_leads_transfer_limit: int = 3      # 每轮最多真转存几条(0 = 只解析不转存)
     # ---- 迅雷盘同步(2026-10-02)见 app/services/xunlei_sync.py ----
     # 扫用户的迅雷盘 → 新转存进来的资源**自动生成我方分享链** → 入库(与公众号资源统一管理)。
     # ⚠️ "用口令找到资源并转存"这一步**只有手机 App 能做**:服务端搜索接口不对外开放
