@@ -86,6 +86,10 @@ class XianyuBrowserClient:
             self._ctx = self._pw.chromium.launch_persistent_context(**kwargs)
         self._pg = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
         self._pg.goto(HOME, wait_until="domcontentloaded", timeout=60000)
+        try:                                    # goofish 首页会自己做客户端跳转,等它静下来
+            self._pg.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:  # noqa: BLE001 - 等不到就继续,后面 evaluate 还有重试
+            logger.debug("闲鱼首页 networkidle 等待超时,继续")
         for _ in range(30):                     # mtop 是按需加载的,等它挂上来
             try:
                 if self._pg.evaluate("() => !!(window.lib && window.lib.mtop)"):
@@ -119,6 +123,27 @@ class XianyuBrowserClient:
         """
         return ""
 
+    def _eval_search(self, pg, payload: dict) -> str:
+        """页面内调用 + **重试**。
+
+        ⚠️ 实测(2026-10-02 23:45 那轮定时采集):`goto` 之后页面**自己又跳了一次**
+        (goofish 首页有客户端跳转),`evaluate` 正好撞上就报
+        `Execution context was destroyed, most likely because of a navigation` ——
+        同一段代码手跑却没事,因为是竞态。**等一下重来**即可,别把它当"闲鱼挂了"。
+        """
+        last = None
+        for _ in range(3):
+            try:
+                return pg.evaluate(_JS_SEARCH, [API, payload])
+            except Exception as exc:  # noqa: BLE001
+                last = exc
+                msg = str(exc)
+                if "Execution context was destroyed" in msg or "navigation" in msg:
+                    pg.wait_for_timeout(1500)
+                    continue
+                raise
+        raise XianyuError(f"闲鱼页面内调用重试 3 次仍失败:{str(last)[:140]}")
+
     # ---------------------------------------------------------------- 采集
     def search(self, keyword: str, page: int = 1, rows: int = 30) -> list[dict]:
         """与 `XianyuClient.search` 同签名同返回(商品 dict 列表)。"""
@@ -131,7 +156,7 @@ class XianyuBrowserClient:
         }
         import json
 
-        raw = pg.evaluate(_JS_SEARCH, [API, payload])
+        raw = self._eval_search(pg, payload)
         try:
             obj = json.loads(raw)
         except ValueError as exc:

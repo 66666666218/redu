@@ -78,3 +78,43 @@ def test_shared_client_is_reused() -> None:
     xb.close_client()
     assert xb.get_client() is not a
     xb.close_client()
+
+
+class _FlakyPage:
+    """前两次抛"上下文被跳转销毁",第三次成功 —— 复刻实测的竞态。"""
+
+    def __init__(self, payload: str, fail_times: int = 2):
+        self._payload, self._left = payload, fail_times
+        self.waited = 0
+
+    def evaluate(self, js, arg=None):
+        if self._left > 0:
+            self._left -= 1
+            raise RuntimeError("Execution context was destroyed, most likely because of a navigation")
+        return self._payload
+
+    def wait_for_timeout(self, ms):
+        self.waited += ms
+
+
+def test_search_retries_when_page_navigates_under_it() -> None:
+    """⚠️ **页面在 `goto` 之后又自己跳了一次**时,`evaluate` 会报
+    "Execution context was destroyed ... navigation"(实测 23:45 那轮定时采集踩到,
+    手跑却没事 —— 典型竞态)。**重试**即可,别当"闲鱼挂了"。"""
+    payload = json.dumps({"data": {"resultList": [
+        {"item": {"main": {"exContent": {"title": "剪映会员", "itemId": "1"}}}}]}})
+    page = _FlakyPage(payload, fail_times=2)
+    c = xb.XianyuBrowserClient()
+    c._pg = page
+    items = c.search("剪映会员")
+    assert len(items) == 1
+    assert page.waited == 3000, "两次重试各等 1500ms"
+
+
+def test_search_gives_up_after_three_attempts() -> None:
+    """连续 3 次都被跳转打断 → 明确报错(带上原因),不静默当 0 条。"""
+    c = xb.XianyuBrowserClient()
+    c._pg = _FlakyPage("{}", fail_times=99)
+    with pytest.raises(XianyuError) as ei:
+        c.search("剪映会员")
+    assert "重试 3 次" in str(ei.value)
