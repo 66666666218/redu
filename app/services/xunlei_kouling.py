@@ -147,9 +147,9 @@ def ingest(session, user_id: int, kouling: str, settings=None) -> dict:
     res = xt.transfer_and_share(url)
     if res.get("status") != "ok":
         msg = res.get("message") or ""
-        # 是我们自己的分享 → 终态 skipped(重试必然还失败);其余按 failed 留痕
-        out.update(status="skipped" if xt.is_own_share_error(msg) else "failed",
-                   message=msg[:200])
+        # 终态的两类:是我们自己的分享、或分享本身已死(分享者被封/过期) —— 重试都没意义
+        terminal = xt.is_own_share_error(msg) or xt.is_dead_share_error(msg)
+        out.update(status="skipped" if terminal else "failed", message=msg[:200])
         return out
     out["our_url"] = res.get("share_url") or ""
     session.add(XunleiResource(user_id=user_id, fid=res.get("fid") or "",

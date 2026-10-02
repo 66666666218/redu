@@ -283,3 +283,99 @@ def test_list_files_filters_trashed(monkeypatch) -> None:
 
     assert [f["id"] for f in xt.list_files("")] == ["A", "C"]
     assert [f["id"] for f in xt.list_files("", include_trashed=True)] == ["A", "B", "C"]
+
+
+# ---------------------------------------------------------------- 转存落点(2026-10-02)
+
+def test_resolve_parent_id_finds_folder_by_name(monkeypatch) -> None:
+    """按**名字**找落点目录(不写死 id):目录改名/重建都能跟上。
+
+    用户口径:"以后都存进最全文件里面"。
+    """
+    from app.services import xunlei_transfer as xt
+
+    monkeypatch.setattr(xt, "_parent_cache", {"name": "", "id": "", "at": 0.0})
+    monkeypatch.setattr("config.settings.get_settings",
+                        lambda: type("S", (), {"xunlei_transfer_parent": "最全文件",
+                                               "xunlei_transfer_parent_id": ""})())
+    calls = {"n": 0}
+
+    def fake_list(*a, **k):
+        calls["n"] += 1
+        return [{"id": "F1", "name": "别的目录", "kind": "drive#folder"},
+                {"id": "F2", "name": "最全文件", "kind": "drive#folder"},
+                {"id": "F3", "name": "最全文件", "kind": "drive#file"}]   # 同名文件不算
+
+    monkeypatch.setattr(xt, "list_files", fake_list)
+    assert xt.resolve_parent_id() == "F2"
+    assert xt.resolve_parent_id() == "F2" and calls["n"] == 1        # 第二次走缓存
+
+
+def test_resolve_parent_id_missing_folder_falls_back_to_root(monkeypatch) -> None:
+    """目录没找到 → 落根目录(返回 ""),**不能让整条链停摆**。"""
+    from app.services import xunlei_transfer as xt
+
+    monkeypatch.setattr(xt, "_parent_cache", {"name": "", "id": "", "at": 0.0})
+    monkeypatch.setattr("config.settings.get_settings",
+                        lambda: type("S", (), {"xunlei_transfer_parent": "最全文件",
+                                               "xunlei_transfer_parent_id": ""})())
+    monkeypatch.setattr(xt, "list_files", lambda *a, **k: [
+        {"id": "F1", "name": "别的", "kind": "drive#folder"}])
+    assert xt.resolve_parent_id() == ""
+
+
+def test_transfer_sends_files_into_configured_parent(monkeypatch) -> None:
+    """转存的 restore 请求里 `parent_id` 必须是解析出来的落点目录 id。"""
+    from app.services import xunlei_transfer as xt
+
+    bodies: list[dict] = []
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None: {
+        "access_token": "a", "captcha_token": "c", "device_id": "d", "client_id": "x"})
+    monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
+    monkeypatch.setattr(xt, "resolve_parent_id", lambda cred=None, **k: "PARENT_DIR")
+    monkeypatch.setattr(xt, "list_files", lambda *a, **k: [])
+
+    def fake_get(url, **kw):
+        if url.endswith("/drive/v1/share"):
+            return _FakeResp({"share_status": "OK", "pass_code_token": "t",
+                              "files": [{"id": "F1"}]})
+        return _FakeResp({"progress": 100,
+                          "params": {"trace_file_ids": json.dumps({"F1": "N1"})}})
+
+    def fake_post(url, **kw):
+        bodies.append(kw.get("json") or {})
+        if url.endswith("/restore"):
+            return _FakeResp({"restore_task_id": "T1"})
+        return _FakeResp({"share_url": "https://pan.xunlei.com/s/OUR", "pass_code": "9"})
+
+    monkeypatch.setattr(xt.requests, "get", fake_get)
+    monkeypatch.setattr(xt.requests, "post", fake_post)
+
+    assert xt.transfer_and_share("https://pan.xunlei.com/s/S?pwd=p")["status"] == "ok"
+    assert bodies[0]["parent_id"] == "PARENT_DIR"       # ← restore 那条
+
+
+def test_resolve_parent_id_prefers_configured_id(monkeypatch) -> None:
+    """⚠️ **优先用配置的 id**:实测「最全文件」明明存在(GET by id 返回 200),
+    却不出现在根目录列表里 —— 名字查找靠不住,所以配了 id 就直接用、连目录都不用扫。"""
+    from app.services import xunlei_transfer as xt
+    from config.settings import get_settings
+
+    monkeypatch.setattr(xt, "_parent_cache", {"name": "", "id": "", "at": 0.0})
+    monkeypatch.setattr(xt, "list_files",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("配了 id 不该扫目录")))
+    monkeypatch.setattr("config.settings.get_settings",
+                        lambda: type("S", (), {"xunlei_transfer_parent": "最全文件",
+                                               "xunlei_transfer_parent_id": "FIXED_ID"})())
+    assert xt.resolve_parent_id() == "FIXED_ID"
+
+
+def test_is_dead_share_error_recognizes_banned_or_expired() -> None:
+    """分享本身已死(分享者被封/过期/取消)—— 永远转不了,该标终态而不是反复 failed。"""
+    from app.services import xunlei_transfer as xt
+
+    assert xt.is_dead_share_error(
+        "分享状态异常:{'error': 'get_share_user_banned', 'error_code': 7}")
+    assert xt.is_dead_share_error("分享状态异常:{'share_status': 'share_overdue'}")
+    assert not xt.is_dead_share_error("{'error': 'file_space_not_enough'}")
+    assert not xt.is_dead_share_error("")

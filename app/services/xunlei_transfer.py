@@ -280,6 +280,42 @@ def _captcha_token(cred: dict) -> str:
     return fresh
 
 
+_parent_cache: dict = {"name": "", "id": "", "at": 0.0}
+
+
+def resolve_parent_id(cred: dict | None = None, *, refresh: bool = False) -> str:
+    """**转存落点目录 id**:按 `settings.xunlei_transfer_parent`(默认「最全文件」)在根目录里找。
+
+    用户口径(2026-10-02):"以后都存进最全文件里面" —— 所有自动转存的资源统一落那个目录,
+    不再散在根目录。
+
+    - 按**名字**找而不是写死 id:目录改名/重建都能跟上;
+    - **找不到返回 ""(根目录)并记 warning** —— 目录没了不该让整条链停摆;
+    - 结果缓存 10 分钟,免得每次转存都去扫一遍目录。
+    """
+    from config.settings import get_settings
+
+    st = get_settings()
+    # **优先用配置的 id**(2026-10-02:名字查找不可靠 —— 「最全文件」存在却不被列表返回)
+    fixed = (getattr(st, "xunlei_transfer_parent_id", "") or "").strip()
+    if fixed:
+        return fixed
+    name = (getattr(st, "xunlei_transfer_parent", "") or "").strip()
+    if not name:
+        return ""
+    now = time.time()
+    if (not refresh and _parent_cache["name"] == name and _parent_cache["id"]
+            and now - _parent_cache["at"] < 600):
+        return str(_parent_cache["id"])
+    for f in list_files("", cred=cred):
+        if (f.get("name") or "").strip() == name and f.get("kind") == "drive#folder":
+            _parent_cache.update(name=name, id=str(f.get("id") or ""), at=now)
+            return str(f.get("id") or "")
+    logger.warning("转存落点目录「%s」没找到,本轮落根目录", name)
+    _parent_cache.update(name=name, id="", at=now)
+    return ""
+
+
 def verify(settings=None) -> dict:
     """探针:拿 token → 拉一次配额。返回 `{ok, message, quota}`。
 
@@ -414,6 +450,20 @@ def is_own_share_error(message: str) -> bool:
     return any(h in text for h in _OWN_SHARE_HINTS)
 
 
+_DEAD_SHARE_HINTS = ("get_share_user_banned", "share_overdue", "share_cancelled",
+                     "sensitive_resource", "分享已失效", "分享已取消", "分享已过期")
+
+
+def is_dead_share_error(message: str) -> bool:
+    """这条失败是不是"**分享本身已经死了**"(分享者被封 / 过期 / 被取消 / 敏感资源)。
+
+    实测(2026-10-02):群里大量条目是**被封号的人发的分享**(`get_share_user_banned`)
+    —— 它们**永远转不了**,反复当 `failed` 留痕只是噪音,该直接标终态。
+    """
+    text = message or ""
+    return any(h in text for h in _DEAD_SHARE_HINTS)
+
+
 
 def _extract_share_id(url: str) -> tuple[str, str]:
     """`pan.xunlei.com/s/<id>?pwd=xxxx` → (share_id, pass_code)。"""
@@ -508,6 +558,9 @@ def transfer_and_share(share_url: str, parent_id: str = "", settings=None) -> di
     share_id, pass_code = _extract_share_id(share_url)
     if not share_id:
         return {"status": "failed", "message": f"解析不出 share_id:{share_url[:80]}"}
+    # 用户口径:转存统一落到「最全文件」下(可在 settings.xunlei_transfer_parent 改);
+    # 找不到那个目录就落根目录,不影响转存本身
+    parent_id = parent_id or resolve_parent_id(cred)
     def _once() -> dict:
         h = _drive_headers(_fresh_cred(cred))
 

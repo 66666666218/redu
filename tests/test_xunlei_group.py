@@ -136,7 +136,7 @@ def test_transfer_pending_fills_our_share_and_marks_failed(session, monkeypatch)
         if url == "u-A1":
             return {"status": "ok", "share_url": "https://pan.xunlei.com/s/OUR1?pwd=abcd",
                     "code": "abcd", "fid": "F1"}
-        return {"status": "failed", "message": "分享已失效"}
+        return {"status": "failed", "message": "未知错误(非终态)"}
 
     monkeypatch.setattr(xt, "transfer_and_share", fake_transfer)
     out = xg.transfer_pending(session, 1, limit=5)
@@ -146,7 +146,7 @@ def test_transfer_pending_fills_our_share_and_marks_failed(session, monkeypatch)
     rows = {r.share_id: r for r in session.scalars(select(XunleiGroupShare)).all()}
     assert rows["A1"].status == "ok" and rows["A1"].fid == "F1"
     assert rows["A1"].our_url.endswith("pwd=abcd")
-    assert rows["B1"].status == "failed" and "失效" in rows["B1"].message
+    assert rows["B1"].status == "failed" and "未知错误" in rows["B1"].message
 
 
 def test_transfer_pending_respects_limit(session, monkeypatch) -> None:

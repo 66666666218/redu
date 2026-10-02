@@ -334,6 +334,12 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
                 skipped += 1
                 logger.info("迅雷群分享是自己的分享,跳过:%s", row.title)
                 continue
+            if xt.is_dead_share_error(msg):
+                # **分享本身已死**(分享者被封/过期/取消):永远转不了 → 直接终态,别再当失败
+                row.status, row.message = "skipped", "分享已失效(分享者被封/过期/取消),转不了"
+                skipped += 1
+                logger.info("迅雷群分享已失效,跳过:%s", row.title)
+                continue
             if xt.is_space_error(msg):
                 # **第二层兜底**:闸门靠配额探针,探针失效会漏;真撞上"空间不足"时也要
                 # 把它当**可重试**处理 —— 行**保持 pending**,整批停下,清出空间自动继续。
@@ -370,7 +376,11 @@ def list_group_shares(session, user_id: int, status: str = "", limit: int = 200)
 # ---------------------------------------------------------------- 推送
 
 def push_new_shares(items: list[dict], settings) -> bool:
-    """转存成功的资源推**管理员群**(与 `xunlei_sync.push_new_resources` 同一出口)。"""
+    """转存成功的群资源推飞书。
+
+    版式与公众号推送**一致**(2026-10-02 用户口径"格式按照公众号的格式"):
+    **四列网格** —— 来源群 / 资源 / 我方分享链,不靠空格对齐。
+    """
     if not items:
         return False
     webhook = (getattr(settings, "feishu_webhook_admin", "") or
@@ -378,15 +388,19 @@ def push_new_shares(items: list[dict], settings) -> bool:
     if not webhook:
         return False
 
+    from app.services.feishu._cards import _col_set_row, _md_safe
     from app.services.feishu_client import FeishuClient
 
     elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
-        f"迅雷群组新转存 **{len(items)}** 个资源,已生成我方分享链:"}}]
+        f"迅雷群组新转存 **{len(items)}** 个资源(已归入「"
+        f"{getattr(settings, 'xunlei_transfer_parent', '') or '最全文件'}」):"}},
+        _col_set_row([("**来源群**", 3), ("**资源**", 5), ("**我方分享链**", 4)], grey=True)]
     for it in items:
-        elements.append({"tag": "hr"})
-        elements.append({"tag": "div", "text": {"tag": "lark_md", "content":
-            f"📦 **{it['title']}**{' · 来自「' + it['group_name'] + '」' if it.get('group_name') else ''}"
-            f"\n{it['share_url']}"}})
+        elements.append(_col_set_row([
+            (_md_safe(it.get("group_name") or "—"), 3),
+            (_md_safe(it.get("title") or ""), 5),
+            (f"[▶ 打开]({_md_safe(it.get('share_url') or '')})"
+             + (f" 🔑{_md_safe(it.get('code') or '')}" if it.get("code") else ""), 4)]))
     card = {"config": {"wide_screen_mode": True},
             "header": {"template": "blue", "title": {"tag": "plain_text",
                                                       "content": f"📥 迅雷群资源 · {len(items)} 个"}},

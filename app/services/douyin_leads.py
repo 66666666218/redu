@@ -112,6 +112,7 @@ def find_leads(keywords: list[str], limit: int = 30) -> list[dict]:
             continue          # 标题里没有《…》 → 不是线索
         seen.add(url)
         out.append({"mark": mark, "title": text[:120], "url": url,
+                    "author": name,                     # 账号名(**被工具脱敏**,如「籽***」)
                     "keyword": h.get("keyword", ""),
                     "_rank": _lead_rank(text, name)})
     out.sort(key=lambda x: x["_rank"])      # 强信号排前面(开头《》> 与昵称吻合 > 其它)
@@ -267,34 +268,50 @@ def _kouling_line(ld: dict) -> str:
 def push_leads(leads: list[dict], settings) -> bool:
     """把线索推飞书。
 
-    **推管理员群**(未配则回落总群):这是"谁在发资源"的运营线索、给运营自己看的,
-    不是给客户的内容素材 —— 与告警同属内部信息。
+    **推抖音专属群**(`FEISHU_WEBHOOK_DOUHOT`,未配则回落主群)——用户口径(2026-10-02):
+    "既然是抖音的来源就推送到抖音群聊里面"。版式与公众号推送一致:**四列网格**
+    (作者 / 作品 / 资源 / 链接),不靠空格对齐。
     """
     if not leads:
         return False
-    webhook = (getattr(settings, "feishu_webhook_admin", "") or
-               getattr(settings, "feishu_webhook", ""))
+    from app.services.feishu_client import webhook_for
+
+    webhook = webhook_for(settings, "douhot") or getattr(settings, "feishu_webhook_admin", "")
     if not webhook:
         logger.info("抖音线索:未配飞书 webhook,跳过推送")
         return False
 
+    from app.services.feishu._cards import _col_set_row, _md_safe
     from app.services.feishu_client import FeishuClient
 
     elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
-        f"抖音上标题带《…》前缀的推广视频 **{len(leads)}** 条。\n"
-        "搜索词来自**群组里新出现的资源** + 公众号已验证资源。\n"
-        "《…》里就是**迅雷口令** —— 已自动解析:能解的**已转存进你的盘**,"
-        "指向群组的已加群。(账号被工具脱敏,点视频链接才能看到作者)"}}]
+        f"抖音上标题带《…》前缀的推广视频 **{len(leads)}** 条。"
+        "搜索词来自**群组里新出现的资源** + 公众号已验证资源;"
+        "《…》就是迅雷口令,能解的**已转存进「最全文件」**。"}},
+        # **四列网格**:与公众号推送同一套版式(作者/作品/资源/链接),不靠空格对齐
+        _col_set_row([("**作者**", 3), ("**作品**", 5), ("**资源**", 3), ("**链接**", 2)],
+                     grey=True)]
     for ld in leads:
-        line = _kouling_line(ld)
-        elements.append({"tag": "hr"})
-        elements.append({"tag": "div", "text": {"tag": "lark_md", "content":
-            f"**【{ld['title'][:60]}】**\n"
-            f"口令《{ld['mark']}》"
-            + (f" · 搜索词:{ld['keyword']}" if ld.get("keyword") else "")
-            + "\n"
-            + (f"{line}\n" if line else "")
-            + f"[▶ 打开视频]({ld['url']})"}})
+        info = ld.get("kouling") or {}
+        author = _md_safe(ld.get("author") or "—")
+        title = _md_safe(ld.get("title") or "")
+        shown = title[:22] + ("…" if len(title) > 22 else "")
+        # 资源列:一眼看出"这条值不值钱"(已转存/已加群/没解出资源/被闸门挡下)
+        if info.get("kind") == "share" and info.get("status") == "ok":
+            res = f"[🔴我方链]({_md_safe(info.get('our_url') or '')})"
+        elif info.get("kind") == "group":
+            res = "👥已加群"
+        elif info.get("status") == "already":
+            res = "🔴已转存过"
+        elif info.get("status") in ("skipped", "disk_full", "over_budget"):
+            res = "⏸未搬"
+        else:
+            res = "·非资源"
+        elements.append(_col_set_row([
+            (author, 3),
+            (f"{shown}\n`{_md_safe(ld.get('mark') or '')}`", 5),
+            (res, 3),
+            (f"[▶视频]({_md_safe(ld.get('url') or '')})", 2)]))
     card = {
         "config": {"wide_screen_mode": True},
         "header": {"template": "purple", "title": {"tag": "plain_text",

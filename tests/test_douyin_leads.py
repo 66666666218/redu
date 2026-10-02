@@ -9,6 +9,7 @@ class _Settings:
     """最小 settings 替身(只覆盖 push_leads 用到的字段)。"""
     feishu_webhook_admin = "https://example.com/hook"
     feishu_webhook = ""
+    feishu_webhook_douhot = "https://example.com/douhot"   # 抖音专属群
     feishu_secret = ""
 
 
@@ -107,7 +108,8 @@ def test_push_leads_builds_card_with_video_links(monkeypatch) -> None:
                          "url": "https://www.douyin.com/video/1", "keyword": "diplay"}],
                        _Settings())
     assert ok is True
-    assert sent["webhook"] == "https://example.com/hook"      # 推的是**管理员群**
+    # 用户口径:"既然是抖音的来源就推送到抖音群聊里面" → 推**抖音专属群**
+    assert sent["webhook"] == "https://example.com/douhot"
     body = str(sent["card"])
     assert "https://www.douyin.com/video/1" in body
     assert "白泽的梦" in body
@@ -261,3 +263,58 @@ def test_search_keywords_puts_group_words_first(session, monkeypatch) -> None:
         douyin_leads_group_keywords = 3
 
     assert dl.search_keywords(session, 1, top=4, settings=_S()) == ["蓝河工具箱", "霸王茶姬杯贴"]
+
+
+def test_push_leads_falls_back_when_douhot_missing(monkeypatch) -> None:
+    """抖音群没配时回落主群/管理员群 —— 不能因为少配一个群就整条推送丢掉。"""
+    from app.services import douyin_leads as dl
+    from app.services import feishu_client
+
+    sent = {}
+
+    class _C:
+        def __init__(self, webhook, secret):
+            sent["webhook"] = webhook
+
+        def send_card(self, card):
+            return True
+
+    class _S(_Settings):
+        feishu_webhook_douhot = ""
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+    dl.push_leads([{"mark": "甲", "title": "t", "url": "u", "author": "", "keyword": ""}], _S())
+    assert sent["webhook"] == "https://example.com/hook"
+
+
+def test_push_leads_card_is_grid_with_author_work_link(monkeypatch) -> None:
+    """版式对齐公众号:**四列网格**(作者/作品/资源/链接)——用户口径
+    "格式按照公众号的格式 作者名字 作品名字 以及链接"。"""
+    from app.services import douyin_leads as dl
+    from app.services import feishu_client
+
+    sent = {}
+
+    class _C:
+        def __init__(self, webhook, secret):
+            pass
+
+        def send_card(self, card):
+            sent["card"] = card
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+    dl.push_leads([{
+        "mark": "白泽的梦", "title": "《白泽的梦》diplay车机互联教程",
+        "url": "https://www.douyin.com/video/1", "author": "籽***", "keyword": "diplay",
+        "kouling": {"kind": "share", "status": "ok", "our_url": "https://pan.xunlei.com/s/OUR"}}],
+        _Settings())
+
+    cols = [e for e in sent["card"]["elements"] if e.get("tag") == "column_set"]
+    assert len(cols) == 2, "应为表头 + 一条数据行"
+    header = [c["elements"][0]["text"]["content"] for c in cols[0]["columns"]]
+    assert header == ["**作者**", "**作品**", "**资源**", "**链接**"]
+    row = str(cols[1])
+    assert "籽***" in row and "白泽的梦" in row
+    assert "https://www.douyin.com/video/1" in row        # 作品链接
+    assert "https://pan.xunlei.com/s/OUR" in row          # 我方资源链
