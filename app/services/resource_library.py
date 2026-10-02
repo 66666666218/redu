@@ -37,7 +37,11 @@ def _pan_kind(url: str) -> str:
 
 
 def _my_link_of(session: Session, user_id: int, pan_url: str) -> str:
-    """该链在本租户是否已有我方转存链(可直接复用)。"""
+    """该链在本租户是否已有我方转存链(可直接复用)。
+
+    两处都查:公众号链存 `WechatArticle.my_pan_urls`,**公开平台发现的**存
+    `discovered_pan_links.our_url`(2026-10-02 并入)。
+    """
     blobs = session.scalars(select(WechatArticle.my_pan_urls).join(
         WechatPanLink, WechatPanLink.article_id == WechatArticle.id).where(
         WechatPanLink.pan_url == pan_url, WechatArticle.user_id == user_id,
@@ -48,7 +52,44 @@ def _my_link_of(session: Session, user_id: int, pan_url: str) -> str:
             line = line.strip()
             if line.startswith("https://"):
                 return line
-    return ""
+    return _discovered_my_link(session, user_id, pan_url)
+
+
+def _discovered_my_link(session: Session, user_id: int, pan_url: str) -> str:
+    """公开平台(知乎)发现的那条链,我方是否已转存。"""
+    from app.db.models import DiscoveredPanLink
+
+    return str(session.scalar(select(DiscoveredPanLink.our_url).where(
+        DiscoveredPanLink.user_id == user_id, DiscoveredPanLink.origin_url == pan_url,
+        DiscoveredPanLink.our_url != "").limit(1)) or "")
+
+
+def _discovered_resources(session: Session, user_id: int, query: str = "",
+                          days: int = 90, limit: int = 20) -> list[dict]:
+    """**公开平台发现的**盘链(知乎等),结构对齐 `_rows_to_resources`。
+
+    2026-10-02 并入资源库:知乎回答里直接贴的夸克/百度链,和公众号文章里的链**是同一类东西**
+    (键都是"别人的原链"),所以按 `pan_url` 天然能合在一起看。
+    `accounts` 记 1(一个来源),`source` 标出来源平台 —— 别和公众号的"多少号同发"混为一谈。
+    """
+    from app.db.models import DiscoveredPanLink
+
+    stmt = select(DiscoveredPanLink).where(
+        DiscoveredPanLink.user_id == user_id,
+        DiscoveredPanLink.found_at >= datetime.now() - timedelta(days=days))
+    if query:
+        stmt = stmt.where(DiscoveredPanLink.title.contains(query))
+    rows = session.scalars(stmt.order_by(DiscoveredPanLink.found_at.desc()).limit(limit)).all()
+    label = {"zhihu": "知乎"}
+    out = []
+    for r in rows:
+        ts = r.found_at.isoformat(sep=" ", timespec="seconds") if r.found_at else ""
+        out.append({"pan_url": r.origin_url, "pan_type": _pan_kind(r.origin_url),
+                    "accounts": 1, "titles": [str(r.title or "")[:60]] if r.title else [],
+                    "first_seen": ts, "last_seen": ts, "my_link": str(r.our_url or ""),
+                    "source": label.get(r.platform, r.platform or "发现"),
+                    "author": str(r.author or "")})
+    return out
 
 
 def _rows_to_resources(session: Session, user_id: int, rows, with_my: bool = True) -> list[dict]:
@@ -66,6 +107,7 @@ def _rows_to_resources(session: Session, user_id: int, rows, with_my: bool = Tru
             "first_seen": first_seen.isoformat(sep=" ", timespec="seconds") if first_seen else "",
             "last_seen": last_seen.isoformat(sep=" ", timespec="seconds") if last_seen else "",
             "my_link": _my_link_of(session, user_id, pan_url) if with_my else "",
+            "source": "公众号",
         })
     return out
 
@@ -91,7 +133,13 @@ def search_resources(session: Session, user_id: int, query: str,
         .group_by(WechatPanLink.pan_url)
         .order_by(func.count(func.distinct(WechatArticle.author)).desc())
         .limit(limit)).all()
-    return _rows_to_resources(session, user_id, rows)
+    ours = _rows_to_resources(session, user_id, rows)
+    # **并入公开平台发现的链**(2026-10-02):同一条链可能既被公众号发过、又被知乎贴过 ——
+    # 以**公众号那条为准**(它带"多少号同发"这个更强的信号),只补公众号没有的。
+    seen = {r["pan_url"] for r in ours}
+    extra = [d for d in _discovered_resources(session, user_id, q, days, limit)
+             if d["pan_url"] not in seen]
+    return (ours + extra)[:limit]
 
 
 def resonance_resources(session: Session, user_id: int, days: int = 30,
@@ -119,6 +167,11 @@ def resource_profile(session: Session, user_id: int, pan_url: str) -> dict | Non
         .join(WechatPanLink, WechatPanLink.article_id == WechatArticle.id)
         .where(WechatPanLink.user_id == user_id, WechatPanLink.pan_url == pan_url)).one()
     if not row or not row[0]:
+        # 公众号里没有 → 看是不是**公开平台发现的**那条链
+        found = _discovered_resources(session, user_id, limit=200)
+        for d in found:
+            if d["pan_url"] == pan_url:
+                return d
         return None
     res = _rows_to_resources(session, user_id, [(pan_url, row[0], row[1], row[2])])
     return res[0] if res else None
@@ -137,7 +190,9 @@ def library_summary(session: Session, user_id: int, days: int = 90) -> dict:
         WechatPanLink.user_id == user_id,
         WechatPanLink.created_at >= cutoff)) or 0
     verified = len(resonance_resources(session, user_id, days=days, min_accounts=2, limit=10000))
-    return {"total_links": int(total), "multi_account": int(verified), "days": days}
+    discovered = len(_discovered_resources(session, user_id, days=days, limit=10000))
+    return {"total_links": int(total), "multi_account": int(verified),
+            "discovered": discovered, "days": days}
 
 
 def detect_viral_resources(session: Session, user_id: int, hours: int = 24,

@@ -81,3 +81,63 @@ def test_detect_viral_resources(session) -> None:
     # 窗口对齐:全历史视角(90 天)两条都算
     v2 = detect_viral_resources(session, 1, hours=24 * 90, min_accounts=3)
     assert len(v2) == 2
+
+
+# ---------------------------------------------------------------- 并入"公开平台发现"的链(2026-10-02)
+
+def _mk_discovered(session, title, pan_url, our="", platform="zhihu", author="作者甲", days_ago=0):
+    from app.db.models import DiscoveredPanLink
+
+    session.add(DiscoveredPanLink(user_id=1, platform=platform, origin_url=pan_url,
+                                  title=title, author=author, our_url=our,
+                                  status="ok" if our else "pending",
+                                  found_at=datetime.now() - timedelta(days=days_ago)))
+    session.commit()
+
+
+def test_search_resources_includes_discovered_links(session) -> None:
+    """**公开平台发现的链要能在资源库里搜到** —— 用户口径:"加进资源库"。
+
+    它的键(别人的原链)与公众号链是同一类,所以能天然合并展示;来源要标出来,
+    别和公众号的"多少号同发"混为一谈。
+    """
+    from app.services.resource_library import search_resources
+
+    _mk_discovered(session, "最近爆火的花少2人格测试", "https://pan.quark.cn/s/AAA",
+                   our="https://pan.quark.cn/s/OUR")
+    out = search_resources(session, 1, "花少2")
+    assert len(out) == 1
+    assert out[0]["pan_url"] == "https://pan.quark.cn/s/AAA"
+    assert out[0]["source"] == "知乎" and out[0]["author"] == "作者甲"
+    assert out[0]["my_link"] == "https://pan.quark.cn/s/OUR"     # 已有我方链要带出来
+
+
+def test_search_resources_wechat_wins_on_same_url(session) -> None:
+    """同一条链**两处都有**时只出一条,且以**公众号**为准(它带"多少号同发"这个更强信号)。"""
+    from app.services.resource_library import search_resources
+
+    _mk(session, "花少2人格测试", "号甲", "https://pan.quark.cn/s/SAME")
+    _mk(session, "花少2人格测试", "号乙", "https://pan.quark.cn/s/SAME")
+    _mk_discovered(session, "花少2人格测试", "https://pan.quark.cn/s/SAME")
+    out = search_resources(session, 1, "花少2")
+    assert len(out) == 1
+    assert out[0]["accounts"] == 2 and out[0]["source"] == "公众号"
+
+
+def test_resource_profile_falls_back_to_discovered(session) -> None:
+    """画像也要认发现链(公众号里没有时)。"""
+    from app.services.resource_library import resource_profile
+
+    _mk_discovered(session, "某资源", "https://pan.quark.cn/s/BBB", our="OUR")
+    p = resource_profile(session, 1, "https://pan.quark.cn/s/BBB")
+    assert p and p["source"] == "知乎" and p["my_link"] == "OUR"
+
+
+def test_library_summary_counts_discovered(session) -> None:
+    """概览带上"发现"数,否则前端同屏两个数字会让人以为库变小了。"""
+    from app.services.resource_library import library_summary
+
+    _mk(session, "甲资源", "号甲", "https://pan.quark.cn/s/W1")
+    _mk_discovered(session, "乙资源", "https://pan.quark.cn/s/D1")
+    s = library_summary(session, 1)
+    assert s["total_links"] == 1 and s["discovered"] == 1

@@ -24,9 +24,9 @@
     <div class="card" style="margin-bottom:14px" v-if="viral.length">
       <h3>🚨 爆款资源(近 {{ viralHours }}h 多号同发)</h3>
       <table>
-        <tr><th>号数</th><th>盘</th><th>资源</th><th>我方链</th><th>最近</th></tr>
+        <tr><th>来源</th><th>盘</th><th>资源</th><th>我方链</th><th>最近</th></tr>
         <tr v-for="r in viral" :key="'v' + r.pan_url">
-          <td>×{{ r.accounts }}</td><td>{{ r.pan_type }}</td>
+          <td>{{ r.source || '公众号' }}×{{ r.accounts }}</td><td>{{ r.pan_type }}</td>
           <td style="max-width:340px">{{ r.titles[0] || '—' }}</td>
           <td><a v-if="r.my_link" :href="r.my_link" target="_blank">已转存✓ 点开</a><span v-else class="muted">未转存</span></td>
           <td class="muted">{{ r.last_seen.slice(0, 10) }}</td>
@@ -37,9 +37,9 @@
     <div class="card">
       <h3>{{ q ? '检索「' + q + '」' : '高共振资源榜' }}({{ items.length }})</h3>
       <table v-if="items.length">
-        <tr><th>号数</th><th>盘</th><th>资源(标题样例)</th><th>我方链</th><th>最近</th><th>首次</th></tr>
+        <tr><th>来源</th><th>盘</th><th>资源(标题样例)</th><th>我方链</th><th>最近</th><th>首次</th></tr>
         <tr v-for="r in items" :key="r.pan_url">
-          <td>×{{ r.accounts }}</td><td>{{ r.pan_type }}</td>
+          <td>{{ r.source || '公众号' }}×{{ r.accounts }}</td><td>{{ r.pan_type }}</td>
           <td style="max-width:360px">
             <div>{{ r.titles[0] || '—' }}</div>
             <div class="muted" style="font-size:12px" v-if="r.titles[1]">{{ r.titles[1] }}</div>
