@@ -83,7 +83,37 @@ def _lead_rank(text: str, masked_name: str) -> int:
     return 2
 
 
-def find_leads(keywords: list[str], limit: int = 30) -> list[dict]:
+# **线索平台注册表**(2026-10-02):"按资源词搜内容 → 抓口令 → 转存"这条链的搜索源。
+# 接新平台 = 加一行 + 在 .env 配 `FEISHU_WEBHOOK_<平台>` + 用 MediaCrawler 登录一次。
+# ⚠️ **已被实测排除的**:B站/知乎的内容层**没有口令形态**(见 doc/pan-promotion-channels.md §九),
+# 它们只适合"按行业词找账号"那条路(cross_accounts),别往这里加。
+PLATFORMS = {
+    "douyin": {"section": "douhot", "label": "抖音"},        # 抖音的板块名是历史遗留的 douhot
+    "kuaishou": {"section": "kuaishou", "label": "快手"},
+    "xiaohongshu": {"section": "xiaohongshu", "label": "小红书"},
+    "weibo": {"section": "weibo", "label": "微博"},
+    "bilibili": {"section": "bilibili", "label": "B站"},
+    "zhihu": {"section": "zhihu", "label": "知乎"},
+    "tieba": {"section": "tieba", "label": "贴吧"},
+}
+
+
+def platforms_of(settings) -> list[str]:
+    """本轮要跑的平台(逗号分隔配置);未知名字忽略并记 warning(别让一个拼错停掉整轮)。"""
+    raw = str(getattr(settings, "leads_platforms", "douyin") or "").split(",")
+    out: list[str] = []
+    for name in (x.strip() for x in raw):
+        if not name:
+            continue
+        if name not in PLATFORMS:
+            logger.warning("线索平台 `%s` 不认识,已忽略(可选:%s)", name, "/".join(PLATFORMS))
+            continue
+        if name not in out:
+            out.append(name)
+    return out or ["douyin"]
+
+
+def find_leads(keywords: list[str], limit: int = 30, platform: str = "douyin") -> list[dict]:
     """搜抖音 → 挑出标题带 `《…》` 前缀的推广线索。
 
     返回 `[{mark, title, url, keyword}]`;`mark` 是《》里那段 —— **迅雷分享口令**(可直接去迅雷搜)。
@@ -101,7 +131,7 @@ def find_leads(keywords: list[str], limit: int = 30) -> list[dict]:
         return []
     out: list[dict] = []
     seen: set[str] = set()
-    for h in mc.crawl("douyin", keywords):
+    for h in mc.crawl(platform, keywords):
         text = (h.get("snippet") or "").strip()
         url = (h.get("url") or "").strip()
         if not url or url in seen:
@@ -269,7 +299,7 @@ def _kouling_line(ld: dict) -> str:
     return ""
 
 
-def push_leads(leads: list[dict], settings) -> bool:
+def push_leads(leads: list[dict], settings, platform: str = "douyin") -> bool:
     """把线索推飞书。
 
     **推抖音专属群**(`FEISHU_WEBHOOK_DOUHOT`,未配则回落主群)——用户口径(2026-10-02):
@@ -280,7 +310,8 @@ def push_leads(leads: list[dict], settings) -> bool:
         return False
     from app.services.feishu_client import webhook_for
 
-    webhook = webhook_for(settings, "douhot") or getattr(settings, "feishu_webhook_admin", "")
+    section = (PLATFORMS.get(platform) or {}).get("section", "douhot")
+    webhook = webhook_for(settings, section) or getattr(settings, "feishu_webhook_admin", "")
     if not webhook:
         logger.info("抖音线索:未配飞书 webhook,跳过推送")
         return False
@@ -289,8 +320,9 @@ def push_leads(leads: list[dict], settings) -> bool:
     from app.services.feishu_client import FeishuClient
 
     brand = (getattr(settings, "brand_name", "") or "").strip()
+    label = (PLATFORMS.get(platform) or {}).get("label", platform)
     elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
-        f"抖音上发现 **{len(leads)}** 条在推同类资源的视频。"
+        f"{label}上发现 **{len(leads)}** 条在推同类资源的视频。"
         "已自动解析并把能拿到的**转存进我方网盘**(归入「最全文件」),可直接取用。"}},
         # **四列网格**:与公众号推送同一套版式(作者/作品/资源/链接),不靠空格对齐
         _col_set_row([("**作者**", 3), ("**作品**", 5), ("**资源**", 3), ("**链接**", 2)],
@@ -322,7 +354,7 @@ def push_leads(leads: list[dict], settings) -> bool:
         "config": {"wide_screen_mode": True},
         "header": {"template": "purple", "title": {"tag": "plain_text",
                                                    "content": f"🎯 {brand + ' · ' if brand else ''}"
-                                                              f"抖音推广线索 · {len(leads)} 条"}},
+                                                              f"{label}推广线索 · {len(leads)} 条"}},
         "elements": elements,
     }
     try:
@@ -333,7 +365,11 @@ def push_leads(leads: list[dict], settings) -> bool:
 
 
 def douyin_leads_tick(settings=None) -> int:
-    """定时:按资源库的词搜抖音 → 推推广线索。返回线索条数。"""
+    """定时:按资源库的词去各**线索平台**搜 → 解析口令 → 推推广线索。返回线索条数。
+
+    平台列表来自 `settings.leads_platforms`(默认只有抖音)。**每个平台各开一次浏览器**
+    (MediaCrawler 一次几分钟),所以别贪多 —— 实测只有抖音的内容层真带《口令》。
+    """
     from config.settings import get_settings
     from app.db import get_session_local
     from app.db.models import User
@@ -342,23 +378,27 @@ def douyin_leads_tick(settings=None) -> int:
     if not getattr(settings, "douyin_leads_enabled", True):
         return 0
     top = int(getattr(settings, "douyin_leads_keywords", 3) or 3)
+    plats = platforms_of(settings)
     db = get_session_local()()
     total = 0
     try:
         for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
-            try:
-                # 词来自**群组新资源 + 公众号已验证资源**(见 search_keywords 的注释)
-                kws = search_keywords(db, uid, top, settings)
-                if not kws:
-                    continue
-                leads = find_leads(kws)
-                total += len(leads)
-                if leads:
+            # 词来自**群组新资源 + 公众号已验证资源**(见 search_keywords 的注释);各平台共用
+            kws = search_keywords(db, uid, top, settings)
+            if not kws:
+                continue
+            for plat in plats:
+                try:
+                    leads = find_leads(kws, platform=plat)
+                    total += len(leads)
+                    if not leads:
+                        continue
                     # 口令 → 资源(分享链直接转存入库 / 群则加群),结果一并写进卡片
                     apply_kouling(leads, db, uid, settings)
-                    push_leads(leads, settings)
-            except Exception:  # noqa: BLE001 - 单用户失败不影响其余
-                logger.exception("抖音线索失败 user=%s", uid)
+                    push_leads(leads, settings, platform=plat)
+                except Exception:  # noqa: BLE001 - 单平台失败不影响其余
+                    db.rollback()
+                    logger.exception("线索平台 %s 失败 user=%s", plat, uid)
     finally:
         db.close()
     return total

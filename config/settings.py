@@ -249,6 +249,16 @@ class Settings(BaseSettings):
     feishu_webhook_douhot: str = "" # 抖音专属群 Webhook
     feishu_webhook_baidu: str = ""  # 百度专属群 Webhook
     feishu_webhook_wechat: str = "" # 公众号专属群 Webhook
+    # ---- 线索平台(2026-10-02):"按资源词搜内容 → 抓口令 → 转存"这条链的搜索源 ----
+    # 现状:只有**抖音**成立(内容层真带《口令》,实测);B站/知乎**实测没有**口令形态,
+    # 快手/小红书/微博/贴吧**待验证**(需先扫码登录一次,见 doc/pan-promotion-channels.md §九)。
+    # 接新平台 = 这里加一个名字 + 配它的专属群(下面)+ 用 MediaCrawler 登录一次。
+    leads_platforms: str = "douyin"        # 逗号分隔;每轮按顺序各搜一遍(每个都开浏览器,别贪多)
+    feishu_webhook_kuaishou: str = ""      # 快手专属群(未配回落主群)
+    feishu_webhook_xiaohongshu: str = ""   # 小红书专属群
+    feishu_webhook_bilibili: str = ""      # B站专属群
+    feishu_webhook_zhihu: str = ""         # 知乎专属群
+    feishu_webhook_tieba: str = ""         # 贴吧专属群
     feishu_secret: str = ""         # 机器人签名校验密钥(为空则不签名)
     own_account_names: str = "天一项目拆解"  # 自营号名单(逗号分隔):飞书推送一律脱敏为「内部号」,防自营身份暴露(2026-09-29)
     feishu_daily_cron: str = "0 8 * * *"   # 每日热点日报时间(默认 08:00)

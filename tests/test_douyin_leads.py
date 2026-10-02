@@ -333,3 +333,61 @@ def test_strip_others_removes_others_name() -> None:
     assert strip_others("《白泽的梦》资源更新了") == "资源更新了"
     assert strip_others("普通标题无书名号") == "普通标题无书名号"   # 没有《》就不动
     assert strip_others("") == ""
+
+
+# ---------------------------------------------------------------- 平台泛化(2026-10-02)
+
+def test_platforms_of_parses_and_ignores_unknown() -> None:
+    """平台列表来自配置;拼错的名字**忽略并告警**,不能让一个笔误停掉整轮。"""
+    from app.services import douyin_leads as dl
+
+    class _S:
+        leads_platforms = "douyin, kuaishou ,, 不存在的平台, douyin"
+
+    assert dl.platforms_of(_S()) == ["douyin", "kuaishou"]     # 去空、去重、忽略未知
+
+    class _Empty:
+        leads_platforms = ""
+
+    assert dl.platforms_of(_Empty()) == ["douyin"]             # 空配置回落抖音
+
+
+def test_find_leads_passes_platform_to_crawler(monkeypatch) -> None:
+    """搜哪个平台要**真的传下去**(此前写死 "douyin",接新平台就白搭)。"""
+    from app.services import douyin_leads as dl, mediacrawler_source as mc
+
+    seen = {}
+    monkeypatch.setattr(mc, "available", lambda: (True, "ok"))
+    monkeypatch.setattr(mc, "crawl",
+                        lambda plat, kws: seen.update(plat=plat, kws=kws) or [])
+    dl.find_leads(["词"], platform="kuaishou")
+    assert seen["plat"] == "kuaishou" and seen["kws"] == ["词"]
+
+
+def test_push_leads_routes_by_platform(monkeypatch) -> None:
+    """每个平台推**自己的专属群**:快手→快手群;没配就回落主群/管理员群。"""
+    from app.services import douyin_leads as dl
+    from app.services import feishu_client
+
+    sent = {}
+
+    class _C:
+        def __init__(self, webhook, secret):
+            sent["webhook"] = webhook
+
+        def send_card(self, card):
+            sent["card"] = card
+            return True
+
+    class _S(_Settings):
+        feishu_webhook_kuaishou = "https://example.com/kuaishou"
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+    dl.push_leads([{"mark": "甲", "title": "t", "url": "u", "author": "", "keyword": ""}],
+                  _S(), platform="kuaishou")
+    assert sent["webhook"] == "https://example.com/kuaishou"
+    assert "快手" in str(sent["card"]["header"])            # 卡片也要说清来自哪个平台
+
+    dl.push_leads([{"mark": "甲", "title": "t", "url": "u", "author": "", "keyword": ""}],
+                  _Settings(), platform="douyin")
+    assert sent["webhook"] == "https://example.com/douhot"  # 抖音仍走历史的 douhot 群

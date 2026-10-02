@@ -36,6 +36,10 @@ _SECTION_WEBHOOK = {
     "weibo": "feishu_webhook_weibo", "xianyu": "feishu_webhook_xianyu",
     "douhot": "feishu_webhook_douhot", "baidu": "feishu_webhook_baidu",
     "wechat": "feishu_webhook_wechat",
+    # 线索平台的专属群(2026-10-02):抖音用历史上的 "douhot",其余按平台名对齐
+    "kuaishou": "feishu_webhook_kuaishou", "xiaohongshu": "feishu_webhook_xiaohongshu",
+    "bilibili": "feishu_webhook_bilibili", "zhihu": "feishu_webhook_zhihu",
+    "tieba": "feishu_webhook_tieba",
 }
 
 
