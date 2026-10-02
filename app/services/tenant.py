@@ -233,8 +233,9 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
         # 闲鱼表随 DATA_RETENTION 长期累积,全量 SELECT 每轮把租户全部历史 ID 拉进 Python 内存,
         # 而 prev_keys 的用途(去重 + 告警 new 判定)只需要本轮这批 key 的存在性,语义等价。
         keys_now = {it["item_id"] for it in hot if it.get("item_id")}
-        prev_keys = set(session.scalars(select(XianyuItem.item_id).where(
-            XianyuItem.user_id == user_id, XianyuItem.item_id.in_(keys_now))).all()) if keys_now else set()
+        prev_rows = {r.item_id: r for r in session.scalars(select(XianyuItem).where(
+            XianyuItem.user_id == user_id, XianyuItem.item_id.in_(keys_now))).all()} if keys_now else {}
+        prev_keys = set(prev_rows)
         # 快照:入库循环会把本轮 item_id 就地 add 进 prev_keys,而 evaluate 的 "new" 规则
         # 靠 `key not in prev_keys` 判定——必须在变异前取旧集合,否则闲鱼"新上榜"永不触发。
         prev_keys_before = set(prev_keys)
@@ -244,7 +245,16 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
         for it in hot:
             # 跨轮去重:同 item_id 或 24h 内同资源键(重上架换ID/换发货话术)只插一次,不刷重复条目
             rk = xianyu.resource_key(it["title"])
-            if it["item_id"] in prev_keys or (rk and rk in prev_titles):
+            row = prev_rows.get(it["item_id"])
+            if row is not None:
+                # 已知商品:**只刷新行情**不新增行 —— 想要数/价格每轮都在变,而"价位行情"
+                # 面板(`xianyu_market`)正是读这张表;不刷新的话老商品永远是入库那天的数值
+                # (列是 2026-10-03 才加的,更早的行恒为 0,会把供需比拉垮)。
+                row.want_count = int(it.get("want_count") or 0)
+                row.sold_price = str(it.get("sold_price") or "")[:32]
+                row.tags = str(it.get("tags") or "")[:255]
+                continue
+            if rk and rk in prev_titles:
                 continue
             prev_keys.add(it["item_id"])
             session.add(XianyuItem(user_id=user_id, **it))
