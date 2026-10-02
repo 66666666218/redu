@@ -327,8 +327,18 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
             ok_items.append({"title": row.title, "group_name": row.group_name,
                              "share_url": row.our_url, "code": row.pass_code})
         else:
+            msg = out.get("message") or ""
+            if xt.is_space_error(msg):
+                # **第二层兜底**:闸门靠配额探针,探针失效会漏;真撞上"空间不足"时也要
+                # 把它当**可重试**处理 —— 行**保持 pending**,整批停下,清出空间自动继续。
+                row.message = msg[:200]
+                session.commit()
+                logger.warning("迅雷群分享转存遇空间不足,本轮停止:%s", msg[:80])
+                return {"status": "disk_full", "picked": len(rows), "ok": len(ok_items),
+                        "failed": failed, "skipped": skipped,
+                        "message": "转存返回空间不足,本轮停止(清理出空间后会继续)", "items": ok_items}
             # ⚠️ 单条失败**不重试到底**:标 failed 留痕,避免每轮都拿它空转。
-            row.status, row.message = "failed", (out.get("message") or "")[:200]
+            row.status, row.message = "failed", msg[:200]
             failed += 1
             logger.warning("迅雷群分享转存失败 %s:%s", row.title, row.message)
     session.commit()

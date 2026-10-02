@@ -254,3 +254,35 @@ def test_transfer_pending_keeps_rows_pending_when_disk_full(session, monkeypatch
     out = xg.transfer_pending(session, 1, limit=5, settings=_GateSettings())
     assert out["status"] == "disk_full" and out["picked"] == 0 and "盘快满了" in out["message"]
     assert session.scalars(select(XunleiGroupShare)).one().status == "pending"   # 没被标死
+
+
+def test_is_space_error_recognizes_disk_full() -> None:
+    """盘满要**认得出来** —— 它不是"这条资源的问题",是可重试的盘问题。"""
+    from app.services import xunlei_transfer as xt
+
+    assert xt.is_space_error("{'error': 'file_space_not_enough', ...}")
+    assert xt.is_space_error("转存失败:{'error_description': '空间不足，请清理后再试'}")
+    assert not xt.is_space_error("分享已失效")
+    assert not xt.is_space_error("")
+
+
+def test_transfer_pending_stops_and_keeps_pending_on_space_error(session, monkeypatch) -> None:
+    """**第二层兜底**:闸门漏了(配额探针失效)也要保住 —— 真撞"空间不足"时
+    行**保持 pending**、整批立刻停下,而不是标终态(标了就永远不再搬)。"""
+    from app.services import xunlei_transfer as xt
+
+    session.add_all([
+        XunleiGroupShare(user_id=1, group_id="g", share_id="A", title="蓝河工具箱",
+                         origin_url="u-A", status="pending"),
+        XunleiGroupShare(user_id=1, group_id="g", share_id="B", title="警笛模拟器",
+                         origin_url="u-B", status="pending")])
+    session.commit()
+    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None: None)     # 探针失效 → 闸门放行
+    monkeypatch.setattr(xt, "transfer_and_share",
+                        lambda url, parent_id="", settings=None: {
+                            "status": "failed",
+                            "message": "{'error': 'file_space_not_enough', 'error_description': '空间不足'}"})
+    out = xg.transfer_pending(session, 1, limit=5, settings=_GateSettings())
+    assert out["status"] == "disk_full" and out["failed"] == 0
+    statuses = {r.share_id: r.status for r in session.scalars(select(XunleiGroupShare)).all()}
+    assert statuses == {"A": "pending", "B": "pending"}                # 一条都没被标死

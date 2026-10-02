@@ -320,9 +320,16 @@ def quota_info(cred: dict | None = None) -> dict:
         cred = cred or _credentials()
         if not cred:
             return {}
-        r = requests.get(f"{_API}/drive/v1/about", timeout=_TIMEOUT,
-                         headers=_drive_headers(_fresh_cred(cred)))
-        quota = (_json(r).get("quota") or {}) if r.status_code == 200 else {}
+
+        def _once() -> dict:
+            r = requests.get(f"{_API}/drive/v1/about", timeout=_TIMEOUT,
+                             headers=_drive_headers(_fresh_cred(cred)))
+            return _json(r) if r.status_code == 200 else {}
+
+        # ⚠️ 配额接口**也要 captcha** —— 必须走自愈重试,否则 captcha 一过期,闸门就
+        # "什么都不知道"而放行(2026-10-02 实测:闸门刚上线就因为这个漏了一次,
+        # 3 条被无条件搬、撞 `file_space_not_enough`)
+        quota = (_with_captcha_retry(_once).get("quota") or {})
         limit, usage = int(quota.get("limit") or 0), int(quota.get("usage") or 0)
         if not limit:
             return {}
@@ -335,6 +342,22 @@ def quota_info(cred: dict | None = None) -> dict:
 def quota_ratio(cred: dict | None = None) -> float | None:
     """盘的使用率(`usage/limit`)。**拿不到返回 None**(调用方按"不知道"处理,别误判成满)。"""
     return quota_info(cred).get("ratio")
+
+
+_SPACE_ERROR_HINTS = ("file_space_not_enough", "空间不足", "file_space")
+
+
+def is_space_error(message: str) -> bool:
+    """这条失败是不是"**盘没空间**"。
+
+    盘满不是"这条资源的问题",是**盘的问题** —— 它必须**可重试**(清出空间后接着搬),
+    不能像"分享已失效"那样标终态。闸门已经会挡,但闸门靠配额探针,而探针本身也要
+    captcha、会失效(2026-10-02 实测漏过一次:3 条被无条件搬、撞空间不足还标了终态),
+    所以这里做**第二层**兜底。
+    """
+    text = message or ""
+    return any(h in text for h in _SPACE_ERROR_HINTS)
+
 
 
 def _extract_share_id(url: str) -> tuple[str, str]:
