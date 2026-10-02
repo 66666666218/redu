@@ -62,7 +62,14 @@ def xianyu_deep_due(session: Session, user_id: int, settings: Settings) -> bool:
     """闲鱼深采是否到期:距上次成功深采 >= `xianyu_deep_interval_hours`,且当前不在验证冷却。
 
     搜索接力深采时用——避免每次搜索(2h)都跑一次深采(10详情)累积风控;默认 6 小时一次。
+
+    ⚠️ **只要标题时深采直接关**(用户口径 2026-10-03:"只需要抓取虚拟资料标题就行了"):
+    `xianyu_detail_limit <= 0` → 一律不跑。深采要**逐个商品打详情接口**,是风控的最大爆发点
+    (settings 里原话),而它换来的"想要数/类目"统计用户并不需要。**代价**:`XianyuDaily`
+    日快照不再更新 → 「关注词分析」与管理后台的闲鱼统计会变空(搜索标题/价格照常)。
     """
+    if int(getattr(settings, "xianyu_detail_limit", 10) or 0) <= 0:
+        return False
     if verify_cooldown_active(session, user_id, settings):
         return False
     hours = getattr(settings, "xianyu_deep_interval_hours", None) or 6

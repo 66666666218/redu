@@ -266,3 +266,18 @@ def test_ret_array_with_user_validate_surfaces_verify_url(monkeypatch) -> None:
     msg = str(ei.value)
     assert "人机验证" in msg
     assert "https://hot.tb.com:8899/verify" in msg, "验证入口必须带出来,否则用户只能干等"
+
+
+def test_deep_collection_off_when_detail_limit_zero(session) -> None:
+    """⚠️ **只要标题时,深采整个关掉**(用户口径 2026-10-03:"只需要抓取虚拟资料标题就行了")。
+
+    深采要**逐个商品打详情接口** —— settings 里原话就是"详情是触发 mtop 风控的最大爆发点";
+    它换来的"想要数/类目"统计用户并不需要。`xianyu_detail_limit=0` → 一律不跑。
+
+    **代价**:`XianyuDaily` 日快照不再更新 → 「关注词分析」与管理后台的闲鱼统计会变空
+    (搜索标题/价格照常)。
+    """
+    from app.services.xianyu_analytics import xianyu_deep_due
+
+    assert xianyu_deep_due(session, 1, _settings(xianyu_detail_limit=0)) is False
+    assert xianyu_deep_due(session, 1, _settings(xianyu_detail_limit=10)) is True
