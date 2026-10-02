@@ -57,19 +57,27 @@ def verify_cooldown_active(session: Session, user_id: int, settings: Settings) -
         RunRecord.kind.in_(["xianyu", "xianyu_deep"]),
         RunRecord.started_at >= day_cutoff,
     )
+    marker = (RunRecord.detail.contains("XianyuVerify")
+              | RunRecord.detail.contains("XianyuWafBlock"))
     hits = session.scalar(
-        select(func.count()).select_from(
-            blocked.filter(RunRecord.detail.contains("XianyuVerify")
-                           | RunRecord.detail.contains("XianyuWafBlock")).subquery()
-        )
-    ) or 0
+        select(func.count()).select_from(blocked.filter(marker).subquery())) or 0
+
+    # **限流也要进冷却**(2026-10-02 补):`RGV587_ERROR`("被挤爆啦")与滑块同级 ——
+    # 同样是账号/IP 级压制,每轮硬撞只会加重它(实测**连续 10 轮每轮全失败**,每轮还白等 65s 退避)。
+    # ⚠️ 但**单次抖动不该停 30 分钟**,所以阈值更严:近 2 小时 ≥3 次才计入,且沿用同一套指数退避。
+    rate_hits = session.scalar(
+        select(func.count()).select_from(blocked.filter(
+            RunRecord.detail.contains("XianyuRateLimit"),
+            RunRecord.started_at >= datetime.now() - timedelta(hours=2)).subquery())) or 0
+    if rate_hits >= 3:
+        marker = marker | RunRecord.detail.contains("XianyuRateLimit")
+        hits = max(hits, rate_hits)
+
     backoff = min(minutes * (2 ** max(0, min(hits, 3) - 1)), 240) if hits else minutes
     cutoff = datetime.now() - timedelta(minutes=backoff)
     row = session.scalar(
-        blocked.filter(
-            RunRecord.detail.contains("XianyuVerify") | RunRecord.detail.contains("XianyuWafBlock"),
-            RunRecord.started_at >= cutoff,
-        ).order_by(RunRecord.id.desc())
+        blocked.filter(marker, RunRecord.started_at >= cutoff)
+        .order_by(RunRecord.id.desc())
     )
     return row is not None
 

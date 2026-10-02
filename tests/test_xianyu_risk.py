@@ -205,3 +205,29 @@ def test_post_proxy_network_error_masks_creds(monkeypatch) -> None:
     assert raised, "应抛 XianyuError"
     assert "psecret" not in raised and "pu:" not in raised
     assert "9.9.9.9:3128" in raised
+
+
+def test_rate_limit_enters_cooldown_only_after_repeats(session) -> None:
+    """⚠️ **限流也要进冷却,但阈值更严**(2026-10-02 补)。
+
+    `RGV587_ERROR`("哎哟喂,被挤爆啦")与滑块同级:同为账号/IP 级压制,每轮硬撞只会加重它
+    (实测**连续 10 轮每轮全失败**,每轮还白等 65s 退避)。但**单次抖动不该停 30 分钟** ——
+    所以近 2 小时 ≥3 次才计入。
+    """
+    st = _settings()
+    for i in range(2):                      # 只 2 次 → 还不冷却
+        _record_run(session, 3, "xianyu", "failed",
+                    f"XianyuRateLimit: 闲鱼限流,请稍后再试:RGV587_ERROR::{i}")
+    session.commit()
+    assert verify_cooldown_active(session, 3, st) is False
+
+    _record_run(session, 3, "xianyu", "failed",
+                "XianyuRateLimit: 闲鱼限流,请稍后再试:RGV587_ERROR::SM::被挤爆啦")
+    session.commit()
+    assert verify_cooldown_active(session, 3, st) is True     # 第 3 次 → 持续压制,进冷却
+
+    # 全部挪到 3 小时前 → 超出"近 2 小时"窗口,不再冷却(避免陈旧限流长期锁死)
+    for row in session.scalars(select(RunRecord).where(RunRecord.user_id == 3)).all():
+        row.started_at = datetime.now() - timedelta(hours=3)
+    session.commit()
+    assert verify_cooldown_active(session, 3, st) is False

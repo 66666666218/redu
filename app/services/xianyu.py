@@ -95,7 +95,13 @@ TOKEN_ERRORS = {
     "FAIL_SYS_USER_NOT_LOGIN",
 }
 # 真限流码(可退避重试);注意 USER_VALIDATE 属"人机验证",归 XianyuVerify,不进此表
-RATE_ERRORS = {"FAIL_SYS_RATE_LIMIT", "FAIL_SYS_USER_LIMIT"}
+#
+# ⚠️ **RGV587_ERROR 是 2026-10-02 补进来的**(此前它不在这张表里,代价很大):
+# 闲鱼把"挤爆"也走这个码 —— `RGV587_ERROR::SM::哎哟喂,被挤爆啦,请稍后重试!`。
+# 不在表里 → 落到"普通接口错误"分支**直接抛**、**不退避不重试** → 每轮全量失败。
+# 实测(本机):**连续 10 轮(约 5 小时)每轮都失败**,而运行记录里的 `recovered`
+# 全是"同一个错、重试一次就成了" —— 教科书式的可退避限流。补进表后走 [5,15,45] 退避。
+RATE_ERRORS = {"FAIL_SYS_RATE_LIMIT", "FAIL_SYS_USER_LIMIT", "RGV587_ERROR"}
 
 
 class XianyuClient:

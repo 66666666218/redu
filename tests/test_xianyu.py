@@ -261,3 +261,41 @@ def test_post_returns_success(monkeypatch: pytest.MonkeyPatch) -> None:
     client = XianyuClient("tracknick=x; ")
     monkeypatch.setattr(client.session, "post", lambda *a, **k: _Resp())
     assert client._post("mtop.taobao.idlemtopsearch.pc.search", {"keyword": "k"})["ret"][0].startswith("SUCCESS")
+
+
+def test_rgv587_is_rate_limit_and_retries(monkeypatch) -> None:
+    """⚠️ **RGV587_ERROR(闲鱼"被挤爆啦")是限流,必须退避重试**(2026-10-02 修)。
+
+    此前它**不在 RATE_ERRORS 里** → 落到"普通接口错误"分支**直接抛、不退避重试**
+    → 实测**连续 10 轮(约 5 小时)每轮全量失败**,而运行记录里的 `recovered`
+    全是"同一个错、重试一次就成了" —— 教科书式的可退避限流。
+    """
+    from app.services import xianyu
+
+    assert "RGV587_ERROR" in xianyu.RATE_ERRORS
+
+    calls = {"n": 0}
+
+    class _Resp:
+        def __init__(self, ret):
+            self._ret, self.text = ret, ret
+
+        def json(self):
+            return {"ret": [self._ret]}
+
+    class _Sess:
+        def post(self, *a, **k):
+            calls["n"] += 1
+            if calls["n"] == 1:                       # 第一次:被挤爆
+                return _Resp("RGV587_ERROR::SM::哎哟喂,被挤爆啦,请稍后重试!")
+            return _Resp("SUCCESS::调用成功")          # 退避后成功
+
+    c = xianyu.XianyuClient("dummy=1")
+    monkeypatch.setattr(c, "_sign", lambda *a: "s", raising=False)
+    monkeypatch.setattr(c, "_token", lambda: "t", raising=False)
+    monkeypatch.setattr(c, "session", _Sess())          # ⚠️ 属性名是 session(不是 _session)
+    monkeypatch.setattr(xianyu.time, "sleep", lambda *_: None)   # 别真等 5 秒
+
+    obj = c._post(xianyu.API, {})
+    assert calls["n"] == 2, "限流码没走退避重试"
+    assert obj["ret"][0].startswith("SUCCESS")
