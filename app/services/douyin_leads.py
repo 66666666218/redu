@@ -1,0 +1,136 @@
+"""抖音推广线索(2026-10-02,用户提供的判据)。
+
+**要解决的问题**:抖音上的网盘推广号,标题里会多出一段**与视频内容无关**的文字——
+常见形式是**书名号包裹**,而 `《…》` 里就是**迅雷的分享口令**(用户口径,2026-10-02):
+进迅雷搜索框搜「白泽的梦」「三岁分享」就能搜到资源。所以它不只是"这人像推广号"的信号,
+**本身就是可用的资源入口**。
+实测(拿"diplay车机互联"搜 13 条):
+
+    ★《白泽的梦》diplay软件下载教程 支持安卓苹果车机互联…     ← 命中
+    ★《三岁分享》#diplay车机互联#carplay 一个软件实现车机互联,不用盒子 ← 命中
+      不用加盒子,一个车机软件就可以实现无线CarPlay              ← 未命中
+      Diplay如何安装#用车小常识 #Carplay #比亚迪 #iphone        ← 未命中
+      …(其余 9 条同样都是直接的内容描述)
+
+**格式差异一眼可辨**:命中那 2 条以《…》开头,其余全是直接描述内容。这是用户给的判据。
+
+**为什么只推线索、不自动收号**:本项目装的 MediaCrawler 是作者的**教学版**,账号信息被
+刻意脱敏(昵称 `睡***着`、user id 是 sha256 截断不可逆、主页链接不采集),**拿不到是谁**;
+而**视频链接是完整的**——推给运营点开就能看到作者,人工补最后一步即可。
+(账号层能全自动的只有知乎/B站,见 `cross_accounts.py`。)
+
+判据:`标题以 《…》 开头`。它比"内容里有网盘链"更早命中——因为抖音的链本来就不在公开层
+(见 `doc/pan-promotion-channels.md` §七)。
+"""
+from __future__ import annotations
+
+import re
+
+from sqlalchemy import select
+
+from app.utils import get_logger
+
+logger = get_logger(__name__)
+
+# 标题**以**《…》开头 = 分享者自贴的推广标识(与视频内容无关的那一段)。
+# 必须要求"开头":《My Dearest》这种出现在句中、且本身就是内容的(剧名)不算。
+_LEAD_RE = re.compile(r"^《([^》]{1,20})》\s*")
+
+
+def find_leads(keywords: list[str], limit: int = 30) -> list[dict]:
+    """搜抖音 → 挑出标题带 `《…》` 前缀的推广线索。
+
+    返回 `[{mark, title, url, keyword}]`;`mark` 是《》里那段 —— **迅雷分享口令**(可直接去迅雷搜)。
+    ⚠️ 会**开浏览器**(MediaCrawler),一次几分钟 —— 只该低频跑。
+
+    关键词**一次性全给** MediaCrawler(它的 CLI 吃整个列表,逐词调用等于反复开关浏览器)。
+    """
+    from app.services import mediacrawler_source as mc
+
+    ok, why = mc.available()
+    if not ok:
+        logger.info("抖音线索:MediaCrawler 不可用(%s)", why)
+        return []
+    if not keywords:
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for h in mc.crawl("douyin", keywords):
+        text = (h.get("snippet") or "").strip()
+        url = (h.get("url") or "").strip()
+        m = _LEAD_RE.match(text)
+        if not m or not url or url in seen:
+            continue          # 无《》前缀 / 拿不到视频链 / 同一个视频(多词命中)去重
+        seen.add(url)
+        out.append({"mark": m.group(1)[:20], "title": text[:120], "url": url,
+                    "keyword": h.get("keyword", "")})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def push_leads(leads: list[dict], settings) -> bool:
+    """把线索推飞书。
+
+    **推管理员群**(未配则回落总群):这是"谁在发资源"的运营线索、给运营自己看的,
+    不是给客户的内容素材 —— 与告警同属内部信息。
+    """
+    if not leads:
+        return False
+    webhook = (getattr(settings, "feishu_webhook_admin", "") or
+               getattr(settings, "feishu_webhook", ""))
+    if not webhook:
+        logger.info("抖音线索:未配飞书 webhook,跳过推送")
+        return False
+
+    from app.services.feishu_client import FeishuClient
+
+    elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
+        f"抖音上标题带《…》前缀的推广视频 **{len(leads)}** 条。\n"
+        "《…》里就是**迅雷分享口令** —— 丢进迅雷搜索框就能搜到资源;"
+        "点视频链接能看到作者(账号被工具脱敏,需人工确认)。"}}]
+    for ld in leads:
+        elements.append({"tag": "hr"})
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content":
+            f"**《{ld['mark']}》**\n{ld['title']}\n[▶ 打开视频]({ld['url']})"}})
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "purple", "title": {"tag": "plain_text",
+                                                   "content": f"🎯 抖音推广线索 · {len(leads)} 条"}},
+        "elements": elements,
+    }
+    try:
+        return FeishuClient(webhook, getattr(settings, "feishu_secret", "")).send_card(card)
+    except Exception:  # noqa: BLE001 - 推送失败不该影响采集
+        logger.exception("抖音线索推送失败")
+        return False
+
+
+def douyin_leads_tick(settings=None) -> int:
+    """定时:按资源库的词搜抖音 → 推推广线索。返回线索条数。"""
+    from config.settings import get_settings
+    from app.db import get_session_local
+    from app.db.models import User
+    from app.services.cross_accounts import _keywords_from_library
+
+    settings = settings or get_settings()
+    if not getattr(settings, "douyin_leads_enabled", True):
+        return 0
+    top = int(getattr(settings, "douyin_leads_keywords", 3) or 3)
+    db = get_session_local()()
+    total = 0
+    try:
+        for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
+            try:
+                kws = _keywords_from_library(db, uid, top)
+                if not kws:
+                    continue
+                leads = find_leads(kws)
+                total += len(leads)
+                if leads:
+                    push_leads(leads, settings)
+            except Exception:  # noqa: BLE001 - 单用户失败不影响其余
+                logger.exception("抖音线索失败 user=%s", uid)
+    finally:
+        db.close()
+    return total

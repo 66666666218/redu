@@ -1025,17 +1025,19 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
     delivered: list[int] = []   # 成功送达那一页所盖的 article id → 收尾统一落 pushed_at
     for page_idx, chunk in enumerate(chunks):
         elements: list[dict] = [
+            # ⚠️ 这段是**外部可见文案**:措辞按用户口径去掉了会暴露内部动作的字眼
+            # (2026-10-02 "不要暴露我")——不再提"转存链 / 识别到的 / 补采 / 投诉"。
             {"tag": "note", "elements": [{"tag": "plain_text",
-                "content": "点文章标题打开链接(优先你的夸克转存链) · 网盘列=识别到的盘链,"
-                           "—=这篇没带网盘链(仍照常推) · 阅读未采样为 —"
-                           " · 标题后 ·MM-DD=那天发的(旧文/补采,盘链可能已失效)"
-                           " · ⛔=原文被投诉下架,别点"}]},
+                "content": "点文章标题看原文 · 网盘列=该文带的网盘链接,"
+                           "—=这篇没带(仍照常推) · 阅读未采样为 —"
+                           " · 标题后 ·MM-DD=发文日期(旧文链接可能已失效)"
+                           " · ⛔=原文已被下架,别点"}]},
         ]
         if page_idx == 0:
             n_pan = sum(1 for r in rows if (r.pan_urls or "").strip())
             elements.append({"tag": "note", "elements": [{"tag": "plain_text",
-                "content": f"本轮共 {len(rows)} 篇新发文,来自 {len(groups)} 个公众号"
-                           f"(按账号分组,全量推送),其中 {n_pan} 篇带网盘资源"}]})
+                "content": f"本轮共 {len(rows)} 篇新发文(按账号分组),"
+                           f"其中 {n_pan} 篇带网盘资源"}]})
         elements.append(_col_set_row(
             [("**公众号**", 3), ("**文章**", 7), ("**网盘**", 2), ("**阅读**", 2)], grey=True))
         last_author: str | None = None

@@ -129,6 +129,12 @@ class Settings(BaseSettings):
     # 真盘链 0 条);③ 其 LICENSE 为 NON-COMMERCIAL LEARNING LICENSE 1.1,明禁商业用途。
     # 保留代码与登录态备用,但**不再进定时轮**——开它只是每周多开一次浏览器白招风控。
     cross_mediacrawler_enabled: bool = False
+    # ---- 抖音推广线索(2026-10-02,用户提供的判据)见 app/services/douyin_leads.py ----
+    # 抖音推广号的标题里会多出一段与内容无关的文字(常见是《…》包裹),推给运营人工确认。
+    # 账号信息被 MediaCrawler 教学版脱敏,所以**只推视频链接、不自动收号**。
+    douyin_leads_enabled: bool = True
+    douyin_leads_cron: str = "0 11 * * 2,5"   # 周二/周五 11:00(**低频**:它要开浏览器,一次几分钟)
+    douyin_leads_keywords: int = 3            # 每轮取几个资源词当搜索词
     # ---- 实例角色(2026-10-01):分体部署时避免两端重复跑同一批作业 ----
     # 本项目有两套部署:本机(公众号 + 闲鱼)与远程 VPS(热点四路),**各自的数据库是独立的**,
     # 但推的是同一个飞书群。不加约束的话两边会各跑一套完整调度器 —— 重复推飞书、重复打上游,

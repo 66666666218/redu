@@ -51,7 +51,7 @@ DIR_NAMES = {"xiaohongshu": "xhs", "douyin": "douyin", "kuaishou": "kuaishou",
 def available() -> tuple[bool, str]:
     """工具是否就绪(venv + 依赖装好)。返回 (是否可用, 原因)。"""
     if not ROOT.exists():
-        return False, f"未安装(tools/MediaCrawler 不存在;见本模块头注的集成步骤)"
+        return False, "未安装(tools/MediaCrawler 不存在;见本模块头注的集成步骤)"
     if not VENV_PY.exists():
         return False, "独立 venv 未建(在 tools/MediaCrawler 下跑 python -m venv .venv)"
     return True, "ok"
@@ -153,8 +153,13 @@ def _parse_record(rec: dict, platform: str) -> dict | None:
               or user.get("id") or rec.get("creator_hash") or "").strip()
     if not name or not uid:
         return None
-    text = " ".join(str(rec.get(k) or "") for k in ("title", "desc", "content", "text")).strip()
+    # 抖音的 `title` 与 `desc` 常常是**同一段文字**(实测),不去重的话卡片里会显示两遍。
+    parts = [str(rec.get(k) or "").strip() for k in ("title", "desc", "content", "text")]
+    text = " ".join(dict.fromkeys(p for p in parts if p))   # dict.fromkeys = 保序去重
     urls = _extract_pan_urls("", text)
     url = str(rec.get("note_url") or rec.get("url") or rec.get("aweme_url") or "").strip()
     return {"uid": uid, "name": name, "url": url[:500], "snippet": text[:255],
-            "pan_link": (urls[0] if urls else "")[:500]}
+            "pan_link": (urls[0] if urls else "")[:500],
+            # 该条来自哪个搜索词(抖音 jsonl 的 source_keyword)——
+            # 抖音线索要按词回显"这条是搜什么词搜出来的"。
+            "keyword": str(rec.get("source_keyword") or "")[:80]}

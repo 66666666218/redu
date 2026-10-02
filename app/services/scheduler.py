@@ -362,6 +362,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.push_timeline import tick as push_timeline_tick
     from app.services.telegram_source import collect_tick as tg_collect_tick
     from app.services.cross_accounts import cross_account_tick
+    from app.services.douyin_leads import douyin_leads_tick
 
     jobs = [
         # 阅读量采样(traffic_tick)已停用:2026-09-29 用户决策放弃 dajiala(不充值),
@@ -401,6 +402,9 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # 跨平台同类资源号发现(2026-10-01):拿资源库的**已验证资源名**去知乎等平台搜,
         # 只收录内容里真含网盘链的账号(各平台门槛见 cross_platform.py 头注)
         (cross_account_tick, _get_settings().cross_discover_cron, {"minute": 0, "hour": 9}, "cross_account_discover", "wechat"),
+        # 抖音推广线索(2026-10-02):标题带《…》前缀的推广视频 → 推**视频链接**给运营人工确认
+        # (账号被 MediaCrawler 教学版脱敏,拿不到"是谁";低频——它要开浏览器,一次几分钟)
+        (douyin_leads_tick, _get_settings().douyin_leads_cron, {"minute": 0, "hour": 11}, "douyin_leads", "wechat"),
         # Telegram 频道资源源(2026-10-01):公众号之外的第二路盘链 feed。
         # 默认关闭——本机直连 t.me 不通;能出网的机器把 TG_ENABLED 打开即可(见 settings)。
         (tg_collect_tick, _get_settings().tg_cron, {"minute": "*/30"}, "tg_collect", "both"),
