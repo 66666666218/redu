@@ -21,11 +21,19 @@ from app.utils import get_logger
 
 logger = get_logger(__name__)
 
-_LABELS = {"weibo": "微博", "xianyu": "闲鱼", "douhot": "抖音", "baidu": "百度", "wechat": "公众号"}
-_SECTIONS = ("weibo", "xianyu", "douhot", "baidu", "wechat")
+_LABELS = {"weibo": "微博", "xianyu": "闲鱼", "douhot": "抖音", "baidu": "百度",
+           "wechat": "公众号", "pan": "网盘资源"}
+# "pan"(2026-10-02 新增):把**迅雷/公开平台那几条资源链**也纳入体检 ——
+# 它们此前**一条运行记录都不写**、健康页完全看不到,静默失败没人知道。
+_SECTIONS = ("weibo", "xianyu", "douhot", "baidu", "wechat", "pan")
 # wechat 板块的运行记录按细粒度 kind 落库(wechat_listen/wechat_sync),
 # 而 section 名是 "wechat"——直接用 section 查恒不命中,健康度里公众号恒显示"从未运行"。
-_KINDS = {"wechat": ("wechat_listen", "wechat_sync", "wechat")}
+# 板块归哪一侧跑(见 settings.scheduler_role):分体部署时**本实例不跑的不该报"停滞"**
+_SECTION_ROLE = {"weibo": "hotspot", "douhot": "hotspot", "baidu": "hotspot",
+                 "xianyu": "wechat", "wechat": "wechat", "pan": "wechat"}
+_KINDS = {"wechat": ("wechat_listen", "wechat_sync", "wechat"),
+          "pan": ("xunlei_group", "xunlei_sync", "douyin_leads",
+                  "pan_discovery", "resource_presence")}
 
 
 def _kinds(section: str) -> tuple[str, ...]:
@@ -44,6 +52,20 @@ def _last_data_age(db: Session, user_id: int, section: str) -> float | None:
         from app.db.models import WechatArticle
         ts = db.scalar(select(func.max(WechatArticle.created_at)).where(
             WechatArticle.user_id == user_id))
+    elif section == "pan":
+        # 三条资源链**任一**有新数据就算新鲜(群转存 / 扫盘 / 公开平台发现)。
+        # ⚠️ 必须**先滤掉 None 再 max** —— 空表返回 None,直接 max 会 None>None 报 TypeError
+        from app.db.models import DiscoveredPanLink, XunleiGroupShare, XunleiResource
+
+        stamps = [
+            db.scalar(select(func.max(XunleiGroupShare.synced_at)).where(
+                XunleiGroupShare.user_id == user_id)),
+            db.scalar(select(func.max(XunleiResource.synced_at)).where(
+                XunleiResource.user_id == user_id)),
+            db.scalar(select(func.max(DiscoveredPanLink.found_at)).where(
+                DiscoveredPanLink.user_id == user_id)),
+        ]
+        ts = max([t for t in stamps if t]) if any(stamps) else None
     else:
         model, col = model_ts[section]
         ts = db.scalar(select(func.max(getattr(model, col))).where(model.user_id == user_id))
@@ -66,6 +88,9 @@ def source_health(db: Session, user_id: int, settings=None) -> list[dict]:
             # 拿 interval 当基准会把夜间空档(20:00→4:00)误判成数据停滞。
             from app.services.schedule_service import wechat_listen_gap_hours
             interval_h = wechat_listen_gap_hours()
+        if section == "pan":
+            # 资源本来就不是每小时都有:按 24h 当基准(停滞阈值 max(24*1.5,2)=36h)
+            interval_h = 24.0
 
         last_ok = db.scalar(select(func.max(RunRecord.started_at)).where(
             RunRecord.user_id == user_id, RunRecord.kind.in_(_kinds(section)),
@@ -78,8 +103,8 @@ def source_health(db: Session, user_id: int, settings=None) -> list[dict]:
             RunRecord.status == "failed").order_by(RunRecord.id.desc()).limit(1)) or ""
 
         from app.services.cookie_store import get_cookie
-        cookie_ready = bool((get_cookie(db, user_id, "weibo" if section != "wechat" else "weread")
-                             or "").strip())
+        _ck_plat = {"wechat": "weread", "pan": "xunlei"}.get(section, "weibo")
+        cookie_ready = bool((get_cookie(db, user_id, _ck_plat) or "").strip())
         if section == "wechat":  # 公众号:书架号也算数据源在位
             cookie_ready = cookie_ready or bool(db.scalar(
                 select(func.count()).select_from(UserCookie).where(
@@ -134,6 +159,16 @@ def source_health(db: Session, user_id: int, settings=None) -> list[dict]:
             health, emoji = "DEGRADED", "🟡"
         else:
             health, emoji = "HEALTHY", "🟢"
+
+        # ⚠️ **分体部署的现实**(2026-10-02 修):作业本来就按角色过滤(本机 wechat 角色
+        # **不跑**微博/抖音/百度),可健康页却在报它们"数据停滞 80 小时" —— 天天假警报。
+        # 本实例不跑的板块一律标 N/A 且**不计问题**。
+        # 用**传进来的 settings**(而不是全局),测试里换替身就能验;语义与 scheduler._role_allows 一致
+        _role = (getattr(settings, "scheduler_role", "all") or "all").strip().lower()
+        _want = _SECTION_ROLE.get(section, "both")
+        if _role not in ("all", "both") and _role != _want:
+            health, emoji = "N/A", "⚪"
+            problems = [f"本实例不跑该板块(角色={getattr(settings, 'scheduler_role', 'all')})"]
 
         out.append({
             "section": section, "label": _LABELS[section],

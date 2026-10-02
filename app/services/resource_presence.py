@@ -168,14 +168,21 @@ def presence_tick(settings=None) -> int:
     total = 0
     try:
         for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
+            from app.services.tenant_base import _record_run
+
             try:
                 out = probe(db, uid, settings=settings)
                 total += len(out.get("items") or [])
                 if out.get("items"):
                     push_items(out["items"], settings)
-            except Exception:  # noqa: BLE001 - 单用户失败不影响其余
+                _record_run(db, uid, "resource_presence", "success",
+                            f"平台{out.get('platforms', 0)} 命中{len(out.get('items') or [])}")
+                db.commit()
+            except Exception as exc:  # noqa: BLE001 - 单用户失败不影响其余
                 db.rollback()
                 logger.exception("跨平台热度失败 user=%s", uid)
+                _record_run(db, uid, "resource_presence", "failed", str(exc)[:200])
+                db.commit()
     finally:
         db.close()
     return total

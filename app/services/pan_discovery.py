@@ -251,14 +251,21 @@ def pan_discovery_tick(settings=None) -> int:
     total = 0
     try:
         for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
+            from app.services.tenant_base import _record_run
+
             try:
                 out = sync(db, uid, settings=settings)
                 total += out.get("ok", 0)
                 if out.get("items"):
                     push_items(out["items"], settings)
-            except Exception:  # noqa: BLE001 - 单用户失败不影响其余
+                _record_run(db, uid, "pan_discovery", "success",
+                            f"候选{out.get('found', 0)} 转存{out.get('ok', 0)}")
+                db.commit()
+            except Exception as exc:  # noqa: BLE001 - 单用户失败不影响其余
                 db.rollback()
                 logger.exception("网盘发现失败 user=%s", uid)
+                _record_run(db, uid, "pan_discovery", "failed", str(exc)[:200])
+                db.commit()
     finally:
         db.close()
     return total

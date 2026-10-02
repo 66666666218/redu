@@ -431,15 +431,23 @@ def xunlei_group_tick(settings=None) -> int:
     total = 0
     try:
         for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
+            from app.services.tenant_base import _record_run
+
             try:
-                sync_group_shares(db, uid, settings=settings)
-                if limit:
-                    out = transfer_pending(db, uid, limit=limit, settings=settings)
-                    total += out.get("ok", 0)
-                    push_new_shares(out.get("items") or [], settings)
-            except Exception:  # noqa: BLE001 - 单用户失败不影响其余
+                got = sync_group_shares(db, uid, settings=settings)
+                out = transfer_pending(db, uid, limit=limit, settings=settings) if limit else {}
+                total += out.get("ok", 0)
+                push_new_shares(out.get("items") or [], settings)
+                # ⚠️ 写运行记录:否则健康页**看不到这条链**(2026-10-02 补)
+                _record_run(db, uid, "xunlei_group", "success",
+                            f"群{got.get('groups', 0)} 新{got.get('new', 0)} "
+                            f"转存{out.get('ok', 0)} 跳过{out.get('skipped', 0)}")
+                db.commit()
+            except Exception as exc:  # noqa: BLE001 - 单用户失败不影响其余
                 db.rollback()
                 logger.exception("迅雷群采集失败 user=%s", uid)
+                _record_run(db, uid, "xunlei_group", "failed", str(exc)[:200])
+                db.commit()
     finally:
         db.close()
     return total

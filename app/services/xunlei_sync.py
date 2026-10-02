@@ -156,14 +156,21 @@ def xunlei_sync_tick(settings=None) -> int:
     total = 0
     try:
         for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
+            from app.services.tenant_base import _record_run
+
             try:
                 out = sync_xunlei_resources(db, uid, settings=settings)
                 total += out.get("new", 0)
                 if out.get("items"):
                     push_new_resources(out["items"], settings)
-            except Exception:  # noqa: BLE001 - 单用户失败不影响其余
+                _record_run(db, uid, "xunlei_sync", "success",
+                            f"扫{out.get('scanned', 0)} 新{out.get('new', 0)}")
+                db.commit()
+            except Exception as exc:  # noqa: BLE001 - 单用户失败不影响其余
                 db.rollback()
                 logger.exception("迅雷盘同步失败 user=%s", uid)
+                _record_run(db, uid, "xunlei_sync", "failed", str(exc)[:200])
+                db.commit()
     finally:
         db.close()
     return total

@@ -388,17 +388,23 @@ def douyin_leads_tick(settings=None) -> int:
             if not kws:
                 continue
             for plat in plats:
+                from app.services.tenant_base import _record_run
+
                 try:
                     leads = find_leads(kws, platform=plat)
                     total += len(leads)
-                    if not leads:
-                        continue
-                    # 口令 → 资源(分享链直接转存入库 / 群则加群),结果一并写进卡片
-                    apply_kouling(leads, db, uid, settings)
-                    push_leads(leads, settings, platform=plat)
-                except Exception:  # noqa: BLE001 - 单平台失败不影响其余
+                    if leads:
+                        # 口令 → 资源(分享链直接转存入库 / 群则加群),结果一并写进卡片
+                        apply_kouling(leads, db, uid, settings)
+                        push_leads(leads, settings, platform=plat)
+                    _record_run(db, uid, "douyin_leads", "success",
+                                f"{plat} 词{len(kws)} 线索{len(leads)}")
+                    db.commit()
+                except Exception as exc:  # noqa: BLE001 - 单平台失败不影响其余
                     db.rollback()
                     logger.exception("线索平台 %s 失败 user=%s", plat, uid)
+                    _record_run(db, uid, "douyin_leads", "failed", f"{plat}: {str(exc)[:160]}")
+                    db.commit()
     finally:
         db.close()
     return total

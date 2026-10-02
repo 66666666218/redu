@@ -125,3 +125,56 @@ def test_check_optional_containers(monkeypatch) -> None:
     st2 = Settings(_env_file=None, wechat_werss_url="")
     down2 = h.check_optional_containers(st2)
     assert down2 == ["newsnow 热榜源"]
+
+
+def test_pan_section_uses_xunlei_cred_and_resource_freshness(session) -> None:
+    """新增的「网盘资源」板块(2026-10-02):凭据看**迅雷**、数据看**三条资源链任一**。
+
+    此前这些作业(群采集/扫盘/线索/发现/热度)**一条运行记录都不写**,健康页完全看不到它们
+    —— 静默失败没人知道。这个板块就是给它们开的入口。
+    """
+    from app.db.models import XunleiGroupShare
+
+    pan = next(r for r in health.source_health(session, 1, _settings())
+               if r["section"] == "pan")
+    assert pan["label"] == "网盘资源"
+    assert pan["health"] == "CIRCUIT_OPEN"                 # 没凭据 → 断路
+    assert any("Cookie" in p for p in pan["problems"])
+
+    now = datetime.now()
+    from app.security import encrypt_cookie
+
+    session.add(UserCookie(user_id=1, platform="xunlei",
+                           cookie=encrypt_cookie('{"refresh_token":"r"}')))
+    session.add(XunleiGroupShare(user_id=1, group_id="g", share_id="s1", title="资源甲",
+                                 synced_at=now))
+    session.add(RunRecord(run_id="1", user_id=1, kind="xunlei_group", status="success",
+                          started_at=now))
+    session.commit()
+    pan = next(r for r in health.source_health(session, 1, _settings())
+               if r["section"] == "pan")
+    assert pan["health"] == "HEALTHY", pan
+    assert pan["last_success_age_h"] is not None           # 运行记录认到了
+
+
+def test_sections_filtered_by_scheduler_role(session) -> None:
+    """**分体部署的现实**(2026-10-02 修):作业本来就按角色过滤(本机 wechat 角色
+    **不跑**微博/抖音/百度),可健康页却在报它们"数据停滞 80 小时" —— 天天假警报、
+    白耗注意力。本实例不跑的板块一律标 N/A 且**不计问题**。
+    """
+    import types
+
+    st = types.SimpleNamespace(xianyu_cooldown_minutes=30, xianyu_proxy_url="",
+                               scheduler_role="wechat")
+    out = {r["section"]: r for r in health.source_health(session, 1, st)}
+    assert out["weibo"]["health"] == "N/A" and out["douhot"]["health"] == "N/A"
+    assert out["baidu"]["health"] == "N/A"
+    assert any("本实例不跑" in p for p in out["weibo"]["problems"])
+    assert out["wechat"]["health"] != "N/A"      # 公众号是本实例的活,照常体检
+    assert out["pan"]["health"] != "N/A"         # 网盘资源也归 wechat 侧
+
+    # 热点实例反过来:公众号/网盘标 N/A,微博照常
+    st2 = types.SimpleNamespace(xianyu_cooldown_minutes=30, xianyu_proxy_url="",
+                                scheduler_role="hotspot")
+    out2 = {r["section"]: r for r in health.source_health(session, 1, st2)}
+    assert out2["wechat"]["health"] == "N/A" and out2["weibo"]["health"] != "N/A"
