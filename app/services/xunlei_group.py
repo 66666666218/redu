@@ -259,7 +259,7 @@ _UNSET = object()          # 区分"没传 ratio"与"传了 None(= 不知道)"
 
 
 def admit_transfer(name: str, cred: dict | None = None, settings=None,
-                   ratio: float | None | object = _UNSET) -> tuple[bool, str]:
+                   ratio: float | None | object = _UNSET) -> tuple[bool, str, bool]:
     """转存准入检查:**两道闸门**都过了才放行。
 
     ① **盘级**:使用率 ≥ `xunlei_transfer_max_usage_ratio`(默认 0.9)→ 整批不搬 ——
@@ -269,7 +269,9 @@ def admit_transfer(name: str, cred: dict | None = None, settings=None,
     `ratio` 可由调用方**预先算好传进来**(整批共用),省得每条都去打一次配额接口;
     **显式传 `None` 表示"不知道"**(探针失败)→ 放行,别把探测失败误判成盘满。
 
-    返回 `(放行?, 原因)`;原因会写进记录并推给运营,所以必须是**人话**。
+    返回 `(放行?, 原因, 可重试?)`。⚠️ **两者的终态不同,不能一刀切**:
+      - 盘满 → **可重试**:调用方**不该**把它标成终态,否则用户清理完空间还得人工重新排队;
+      - 泛化大包 → **不可重试**:策略性不搬,标终态留痕即可。
     """
     if ratio is _UNSET:
         from app.services import xunlei_transfer as xt
@@ -277,10 +279,10 @@ def admit_transfer(name: str, cred: dict | None = None, settings=None,
         ratio = xt.quota_ratio(cred)
     limit = float(getattr(settings, "xunlei_transfer_max_usage_ratio", 0.9) or 0.9)
     if ratio is not None and ratio >= limit:
-        return False, f"盘快满了(已用 {ratio * 100:.0f}%,阈值 {limit * 100:.0f}%),先清理再搬"
+        return False, f"盘快满了(已用 {ratio * 100:.0f}%,阈值 {limit * 100:.0f}%),先清理再搬", True
     if is_bulk_resource(name):
-        return False, "泛化大包(名字含合集/大全/最全…),体积不可控,只推链不搬"
-    return True, ""
+        return False, "泛化大包(名字含合集/大全/最全…),体积不可控,只推链不搬", False
+    return True, "", False
 
 
 # ---------------------------------------------------------------- 限量转存
@@ -305,9 +307,16 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
     ok_items: list[dict] = []
     failed = skipped = 0
     for row in rows:
-        allowed, why = admit_transfer(row.title, settings=settings, ratio=ratio)
+        allowed, why, retryable = admit_transfer(row.title, settings=settings, ratio=ratio)
         if not allowed:
-            row.status, row.message = "skipped", why[:200]
+            if retryable:
+                # ⚠️ 盘满:**整批停下,行保持 pending** —— 清理出空间后下一轮自动继续,
+                # 若标成 skipped,用户清完还得人工重新排队(那是把方便留给了代码、麻烦留给人)
+                logger.info("迅雷群分享暂停转存(盘满):%s", why)
+                session.commit()
+                return {"status": "disk_full", "picked": 0, "ok": 0, "failed": 0, "skipped": 0,
+                        "message": why, "items": []}
+            row.status, row.message = "skipped", why[:200]      # 策略性不搬 → 终态留痕
             skipped += 1
             logger.info("迅雷群分享跳过转存 %s:%s", row.title, why)
             continue

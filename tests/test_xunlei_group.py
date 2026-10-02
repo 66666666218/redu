@@ -193,22 +193,24 @@ class _GateSettings:
 
 def test_admit_transfer_blocks_when_disk_almost_full() -> None:
     """盘到阈值 → **整批不搬**(这次翻车的直接原因),原因要能读懂。"""
-    ok, why = xg.admit_transfer("蓝河工具箱", settings=_GateSettings(), ratio=1.26)
+    ok, why, retryable = xg.admit_transfer("蓝河工具箱", settings=_GateSettings(), ratio=1.26)
     assert ok is False and "盘快满了" in why and "126%" in why
-    ok, _ = xg.admit_transfer("蓝河工具箱", settings=_GateSettings(), ratio=0.5)
+    assert retryable is True                     # 盘满**可重试**:清完空间该自动接着搬
+    ok, _, _ = xg.admit_transfer("蓝河工具箱", settings=_GateSettings(), ratio=0.5)
     assert ok is True
 
 
 def test_admit_transfer_blocks_bulk_even_when_space_ok() -> None:
     """空间够也不搬泛化大包 —— 体积不可控,只把链推给人。"""
-    ok, why = xg.admit_transfer("【全网最齐】游戏软件资源合集",
-                                settings=_GateSettings(), ratio=0.3)
+    ok, why, retryable = xg.admit_transfer("【全网最齐】游戏软件资源合集",
+                                           settings=_GateSettings(), ratio=0.3)
     assert ok is False and "泛化大包" in why
+    assert retryable is False                    # 泛化大包**不可重试**:策略性不搬
 
 
 def test_admit_transfer_allows_when_ratio_unknown() -> None:
     """配额**拿不到**时不能误判成"满" —— 否则接口一抖就整个停摆(探针失败≠盘满)。"""
-    ok, _ = xg.admit_transfer("蓝河工具箱", settings=_GateSettings(), ratio=None)
+    ok, _, _ = xg.admit_transfer("蓝河工具箱", settings=_GateSettings(), ratio=None)
     assert ok is True
 
 
@@ -233,3 +235,22 @@ def test_transfer_pending_marks_skipped_instead_of_transferring(session, monkeyp
     rows = {r.share_id: r for r in session.scalars(select(XunleiGroupShare)).all()}
     assert rows["A"].status == "skipped" and "泛化大包" in rows["A"].message
     assert rows["B"].status == "ok"
+
+
+def test_transfer_pending_keeps_rows_pending_when_disk_full(session, monkeypatch) -> None:
+    """⚠️ 盘满时**整批停下、行保持 pending** —— 清完空间下一轮自动接着搬。
+
+    若把盘满也标成终态(skipped),用户清理完还得人工重新排队:那是把方便留给代码、
+    麻烦留给人。所以"可重试"与"策略性不搬"必须分开。
+    """
+    from app.services import xunlei_transfer as xt
+
+    session.add(XunleiGroupShare(user_id=1, group_id="g", share_id="A", title="蓝河工具箱",
+                                 origin_url="u-A", status="pending"))
+    session.commit()
+    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None: 1.26)
+    monkeypatch.setattr(xt, "transfer_and_share",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("盘满不该转存")))
+    out = xg.transfer_pending(session, 1, limit=5, settings=_GateSettings())
+    assert out["status"] == "disk_full" and out["picked"] == 0 and "盘快满了" in out["message"]
+    assert session.scalars(select(XunleiGroupShare)).one().status == "pending"   # 没被标死

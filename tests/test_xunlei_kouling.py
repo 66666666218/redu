@@ -141,9 +141,29 @@ def test_ingest_skips_when_gate_blocks(session, monkeypatch) -> None:
     _patch_search(monkeypatch, "https://pan.xunlei.com/s/ABC?&pwd=1")
     monkeypatch.setattr(xunlei_group, "admit_transfer",
                         lambda name, cred=None, settings=None, ratio=None:
-                        (False, "盘快满了(已用 126%,阈值 90%),先清理再搬"))
+                        (False, "泛化大包(名字含合集/大全/最全…),体积不可控,只推链不搬", False))
     monkeypatch.setattr(xt, "transfer_and_share",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("不该调用转存")))
     out = kk.ingest(session, 1, "玩车不求人")
-    assert out["status"] == "skipped" and "盘快满了" in out["message"]
+    assert out["status"] == "skipped" and "泛化大包" in out["message"]
     assert session.query(XunleiResource).count() == 0
+
+
+def test_ingest_disk_full_does_not_mark_as_done(session, monkeypatch) -> None:
+    """⚠️ 盘满时**不能写库** —— 否则会被 `known_koulings` 当成"已搬过"而永不重试。
+
+    盘满是**可重试**状态:抖音作业每天跑,空间清出来那天自然会再搬一次。
+    """
+    from app.services import xunlei_group
+    from app.services import xunlei_transfer as xt
+
+    _patch_search(monkeypatch, "https://pan.xunlei.com/s/ABC?&pwd=1")
+    monkeypatch.setattr(xunlei_group, "admit_transfer",
+                        lambda name, cred=None, settings=None, ratio=None:
+                        (False, "盘快满了(已用 126%,阈值 90%),先清理再搬", True))
+    monkeypatch.setattr(xt, "transfer_and_share",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不该调用转存")))
+    out = kk.ingest(session, 1, "玩车不求人")
+    assert out["status"] == "disk_full" and "盘快满了" in out["message"]
+    assert session.query(XunleiResource).count() == 0
+    assert kk.known_koulings(session, 1) == set()          # 没被记成"已搬过"

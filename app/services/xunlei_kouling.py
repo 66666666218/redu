@@ -136,12 +136,13 @@ def ingest(session, user_id: int, kouling: str, settings=None) -> dict:
         return out
 
     url = info["share_url"] + (f"?pwd={info['pass_code']}" if info["pass_code"] else "")
-    # ⚠️ 转存前过闸门(盘满了 / 泛化大包 → 不搬只留痕),与群采集同一套判据
+    # ⚠️ 转存前过闸门(与群采集同一套判据)。**盘满不写库** —— 否则会被 `known_koulings`
+    # 当成"已搬过"而永不重试;留成未搬状态,下一轮(抖音作业每天跑)自然再试一次。
     from app.services import xunlei_group
 
-    allowed, why = xunlei_group.admit_transfer(kouling, settings=settings)
+    allowed, why, retryable = xunlei_group.admit_transfer(kouling, settings=settings)
     if not allowed:
-        out.update(status="skipped", message=why)
+        out.update(status="disk_full" if retryable else "skipped", message=why)
         return out
     res = xt.transfer_and_share(url)
     if res.get("status") != "ok":

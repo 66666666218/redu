@@ -249,6 +249,8 @@ def _kouling_line(ld: dict) -> str:
         return "✅ 之前已转存过(库里已有)"
     if kind == "share" and status == "over_budget":
         return f"⏸ 本轮转存额度用完,未搬(原链 {info.get('share_url') or ''})"
+    if kind == "share" and status == "disk_full":
+        return f"⏸ 盘满未搬({info.get('message') or ''}) —— 清出空间后会再试。原链:{info.get('share_url') or ''}"
     if kind == "share" and status == "skipped":
         return f"⏸ 未搬({info.get('message') or '被闸门挡下'}) —— 原链:{info.get('share_url') or ''}"
     if kind == "share" and status == "failed":
