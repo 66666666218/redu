@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     xianyu_request_delay: float = 8.0  # 闲鱼相邻请求间隔(秒,带抖动);比通用更大,防 mtop 风控
     xianyu_batch_keywords: int = 5     # 每次采集最多处理的关键词数(风控降频:少量多次,按运行数轮转覆盖全部)
     xianyu_cooldown_minutes: int = 30  # 闲鱼触发人机验证(滑块)后,暂停采集该分钟数,避免反复撞枪口
+    # **采集路径**(2026-10-02):`browser` = Playwright 打开真页面、在页面里调闲鱼自己的
+    # `window.lib.mtop.request`(签名/指纹全由它的 JS 做);`protocol` = 老的自算签名纯协议
+    # (实测被"哎哟喂,被挤爆啦"**账号级**限流,换出口也没用;页面内调用则正常)。
+    xianyu_use_browser: bool = True
     xianyu_proxy_url: str = ""      # 闲鱼专用"单一固定"出口代理(http://user:pass@host:port,如住宅IP);留空直连。勿用轮换代理池——mtop token/session 绑定出口 IP
     weread_cookie: str = ""         # 微信读书 Cookie(免费监听数据源;优先用平台内按用户配置的「weread」Cookie)
     wechat_reader_platform_url: str = ""  # 读书平台地址(wewe-rss v2 兼容,免费全量文章列表;如 https://weread.xxx 自建实例)

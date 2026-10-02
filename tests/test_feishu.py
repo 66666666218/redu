@@ -743,7 +743,8 @@ def test_notify_incident_sends_then_cooldowns(session) -> None:
 
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
-    st = _settings(feishu_webhook_xianyu="https://open.feishu.cn/hook/xianyu")
+    st = _settings(feishu_webhook_xianyu="https://open.feishu.cn/hook/xianyu",
+                   xianyu_use_browser=False)   # 这两条用例测的是**协议路**的错误映射
     assert alert_service.notify_incident(session, 1, "xianyu", "🔴 闲鱼触发人机验证(滑块)",
                                          "FAIL_SYS_USER_VALIDATE", settings=st) is True
     assert "滑块" in sent[0]
@@ -825,7 +826,8 @@ def test_run_xianyu_full_block_notifies_incident(session, monkeypatch: pytest.Mo
 
     monkeypatch.setattr(xianyu_mod, "XianyuClient", _VerifyClient)
     monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
-    st = _settings(feishu_webhook_xianyu="https://open.feishu.cn/hook/xianyu")
+    st = _settings(feishu_webhook_xianyu="https://open.feishu.cn/hook/xianyu",
+                   xianyu_use_browser=False)   # 这两条用例测的是**协议路**的错误映射
 
     with pytest.raises(XianyuVerify):
         tenant.run_xianyu(session, 1, settings=st)  # 失败后照常上抛(调度器记 failed)
@@ -863,7 +865,9 @@ def test_xianyu_block_alert_routing_by_actionability(session, monkeypatch: pytes
     monkeypatch.setattr(xianyu_mod, "XianyuClient", lambda ck, proxy=None: object())
     monkeypatch.setattr(xianyu_mod, "collect_hot", _collect)
     with pytest.raises(exc_cls):
-        tenant.run_xianyu(session, 1, settings=_settings())
+        # ⚠️ 显式关掉浏览器路径:本用例测的是**协议路**的错误映射/告警路由,
+        # 而 `run_xianyu` 默认已改走浏览器(`xianyu_use_browser=True`)
+        tenant.run_xianyu(session, 1, settings=_settings(xianyu_use_browser=False))
     assert captured, f"{exc_name} 应当产生事件告警"
     # 没写 push_feishu 就等于默认发飞书
     assert captured[0][1].get("push_feishu", True) is expect_feishu, captured[0][1]

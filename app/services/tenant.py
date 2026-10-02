@@ -171,7 +171,12 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
         return {"platform": "xianyu", "count": 0, "status": "skipped", "reason": "verify_cooldown"}
     cookies = get_cookies(session, user_id)
     goofish_cookie = cookies.get("goofish", "")
-    if not goofish_cookie:
+    # **采集路径**(2026-10-02):默认走**浏览器** —— 让闲鱼自己的 JS 发请求。
+    # 纯协议(自算签名 + 伪造指纹)实测被 `RGV587_ERROR::被挤爆啦` **账号级**限流
+    # (换出口没用、量只有 6 次/小时),而**页面内调用正常**;见 `xianyu_browser.py`。
+    # ⚠️ 浏览器路径**不需要 Cookie 三件套校验**:登录态在浏览器档案里,请求由页面自己发。
+    browser_mode = bool(getattr(settings, "xianyu_use_browser", True))
+    if not browser_mode and not goofish_cookie:
         raise ValueError("未配置闲鱼 Cookie")
     # Cookie 完整性三件套校验(2026-10-01,借鉴开源实现判定标准):
     # 官方登录态必须集齐 `_m_h5_tk`+`unb`+`cookie2`——缺任一必 TOKEN_ILLEGAL。
@@ -180,7 +185,7 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
     _names = {kv.split("=", 1)[0].strip() for kv in goofish_cookie.split(";") if kv.strip()}
     # unb+cookie2=登录态核心;_m_h5_tk 是 mtop 短效令牌,采集器首次请求自动从网关拿——
     # 不该在这里校验(扫码登录的会话就没有它,2026-10-01 修正:此前误拦导致新 Cookie 白入库)
-    _missing = [n for n in ("unb", "cookie2") if n not in _names]
+    _missing = [n for n in ("unb", "cookie2") if n not in _names] if not browser_mode else []
     if _missing:
         _record_run(session, user_id, "xianyu", "skipped",
                     f"cookie_incomplete(缺 {'/'.join(_missing)};请重新导出完整 Cookie)")
@@ -189,7 +194,12 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
                 "reason": f"cookie_incomplete: 缺 {'、'.join(_missing)}——请在浏览器登录 "
                           "www.goofish.com 后从 Network 请求头整串复制 Cookie"}
     # 构造客户端不产生网络请求,放在 try 外:失败路径也能回写运行中刷新的令牌
-    client = xianyu.XianyuClient(goofish_cookie, proxy=settings.xianyu_proxy_url or None)
+    if browser_mode:
+        from app.services.xianyu_browser import get_client
+
+        client = get_client(settings)          # 进程内复用,一轮只启一次浏览器
+    else:
+        client = xianyu.XianyuClient(goofish_cookie, proxy=settings.xianyu_proxy_url or None)
     if not _XIANYU_ROUND_LOCK.acquire(blocking=False):
         _record_run(session, user_id, "xianyu", "skipped",
                     "running(上一轮闲鱼采集尚未结束,防同会话并发)")
