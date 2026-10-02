@@ -243,3 +243,43 @@ def test_quota_info_self_heals_captcha_on_400(monkeypatch) -> None:
     info = xt.quota_info()
     assert info["ratio"] == 0.95, info
     assert calls["renew"] == 1
+
+
+def test_trash_files_deletes_each_id_and_reports_partial(monkeypatch) -> None:
+    """删除走 `DELETE /drive/v1/files/{id}`(**不是** `files/trash`,那条实测白试过三轮),
+    且**没有批量接口** —— 逐个删,部分失败要如实报出来。"""
+    from app.services import xunlei_transfer as xt
+
+    seen: list[str] = []
+
+    def fake_delete(url, **kw):
+        fid = url.rsplit("/", 1)[-1]
+        seen.append(fid)
+        if fid == "BAD":
+            return _FakeResp({"error": "file_not_found"}, status=404)
+        return _FakeResp({})
+
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None: {"access_token": "a"})
+    monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
+    monkeypatch.setattr(xt.requests, "delete", fake_delete)
+
+    out = xt.trash_files(["OK1", "BAD", "OK2"])
+    assert seen == ["OK1", "BAD", "OK2"]
+    assert out["status"] == "ok" and out["deleted"] == 2 and len(out["errors"]) == 1
+    assert xt.trash_files([])["status"] == "failed"          # 空输入别发请求
+
+
+def test_list_files_filters_trashed(monkeypatch) -> None:
+    """⚠️ 列表接口**默认把回收站条目一起返回**(删一棵树后实测混进 2000+ 项)——
+    不过滤的话扫盘会把**已删除的文件当新资源**登记,还去给它建分享链(必失败)。"""
+    from app.services import xunlei_transfer as xt
+
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None: {"access_token": "a"})
+    monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
+    monkeypatch.setattr(xt.requests, "get", lambda url, **kw: _FakeResp({"files": [
+        {"id": "A", "name": "活着"},
+        {"id": "B", "name": "已删", "trashed": True},
+        {"id": "C", "name": "也活着"}]}))
+
+    assert [f["id"] for f in xt.list_files("")] == ["A", "C"]
+    assert [f["id"] for f in xt.list_files("", include_trashed=True)] == ["A", "B", "C"]

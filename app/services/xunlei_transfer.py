@@ -307,6 +307,47 @@ def verify(settings=None) -> dict:
 
 # ---------------------------------------------------------------- 业务
 
+def trash_files(file_ids: list[str], cred: dict | None = None) -> dict:
+    """把文件/文件夹**移入回收站**(`DELETE /drive/v1/files/{file_id}`)。
+
+    ⚠️ 实测踩过的坑(2026-10-02):
+      - **`/drive/v1/files/trash` 不是删除接口** —— 对它 `POST` 回 501、`DELETE` 回
+        `file_not_found`(那是"回收站"相关路径),白试了三轮;
+      - **正解是 `DELETE /drive/v1/files/{file_id}`**(路径里带 id),成功返回 `{}`;
+      - **没有批量**:得逐个删,所以这里循环。
+
+    用途:清理"自动转存搬错的大件"。返回 `{"status", "message", "deleted", "errors"}`。
+    """
+    cred = cred or _credentials()
+    if not cred or not file_ids:
+        return {"status": "failed", "message": "没有凭据或没有文件 id", "deleted": 0, "errors": []}
+
+    def _once() -> dict:
+        headers = _drive_headers(_fresh_cred(cred))
+        deleted, errors = 0, []
+        for fid in file_ids:
+            r = requests.delete(f"{_API}/drive/v1/files/{fid}", headers=headers, timeout=_TIMEOUT)
+            data = _json(r)                  # 先解析:captcha_invalid 是 400,别漏掉自愈
+            if r.status_code == 200:
+                deleted += 1
+            else:
+                errors.append(f"{fid}: {str(data)[:100]}")
+        if deleted == 0 and errors:
+            return {"status": "failed", "message": errors[0][:200],
+                    "deleted": 0, "errors": errors}
+        return {"status": "ok", "message": f"已移入回收站 {deleted} 个",
+                "deleted": deleted, "errors": errors}
+
+    try:
+        return _with_captcha_retry(_once)
+    except _CaptchaExpired:
+        return {"status": "failed", "message": "captcha 失效且自动续期失败 —— 需要重新扫码登录",
+                "deleted": 0, "errors": []}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("迅雷删除失败")
+        return {"status": "failed", "message": str(exc)[:200], "deleted": 0, "errors": []}
+
+
 def quota_info(cred: dict | None = None) -> dict:
     """盘配额 `{"usage", "limit", "ratio"}`(字节;拿不到就是空 dict)。
 
@@ -348,6 +389,7 @@ def quota_ratio(cred: dict | None = None) -> float | None:
 
 
 _SPACE_ERROR_HINTS = ("file_space_not_enough", "空间不足", "file_space")
+_OWN_SHARE_HINTS = ("file_restore_own", "转存自己的文件")
 
 
 def is_space_error(message: str) -> bool:
@@ -360,6 +402,16 @@ def is_space_error(message: str) -> bool:
     """
     text = message or ""
     return any(h in text for h in _SPACE_ERROR_HINTS)
+
+
+def is_own_share_error(message: str) -> bool:
+    """这条失败是不是"**这是我们自己发的分享**"(`file_restore_own`)。
+
+    群里会转我们自己发出去的分享(2026-10-02 实测:「最全文件」就是),这种**永远不可能成功**
+    —— 重试也是白试,**该直接标终态**,不该当普通失败留着重试。
+    """
+    text = message or ""
+    return any(h in text for h in _OWN_SHARE_HINTS)
 
 
 
@@ -414,18 +466,28 @@ def share_files(file_ids: list[str], expiration_days: str = "7",
         return {"status": "failed", "message": str(exc)[:200]}
 
 
-def list_files(parent_id: str = "", cred: dict | None = None, limit: int = 200) -> list[dict]:
-    """列某个目录下的文件/文件夹(扫盘用)。失败返回空表。"""
+def list_files(parent_id: str = "", cred: dict | None = None, limit: int = 200,
+               include_trashed: bool = False) -> list[dict]:
+    """列某个目录下的文件/文件夹(扫盘用)。失败返回空表。
+
+    ⚠️ **必须过滤 `trashed`**(2026-10-02 实测踩过):接口**默认把回收站里的条目一起返回**
+    —— 删掉一个文件夹后,它**整棵子树**(实测 2000+ 项)都会带着 `trashed=true` 混在列表里。
+    不过滤的话,扫盘作业会把**已删除的文件当成新资源**登记、还去给它建分享链(必失败)。
+    """
     cred = cred or _credentials()
     if not cred:
         return []
+
     def _once() -> list[dict]:
         r = requests.get(f"{_API}/drive/v1/files", headers=_drive_headers(_fresh_cred(cred)),
                          timeout=_TIMEOUT,
                          params={"limit": str(limit), "parent_id": parent_id,
                                  "with_audit": "true"})
         data = _json(r)                       # 先解析:captcha_invalid 是 400,别漏掉自愈
-        return (data.get("files") or []) if r.status_code == 200 else []
+        if r.status_code != 200:
+            return []
+        files = data.get("files") or []
+        return files if include_trashed else [f for f in files if not f.get("trashed")]
 
     try:
         return _with_captcha_retry(_once)

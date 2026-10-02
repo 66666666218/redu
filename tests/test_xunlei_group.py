@@ -286,3 +286,40 @@ def test_transfer_pending_stops_and_keeps_pending_on_space_error(session, monkey
     assert out["status"] == "disk_full" and out["failed"] == 0
     statuses = {r.share_id: r.status for r in session.scalars(select(XunleiGroupShare)).all()}
     assert statuses == {"A": "pending", "B": "pending"}                # 一条都没被标死
+
+
+def test_is_own_share_error_recognizes_our_own_share() -> None:
+    """认得出"这是我们自己的分享" —— 它**永远不可能成功**,该直接终态。"""
+    from app.services import xunlei_transfer as xt
+
+    assert xt.is_own_share_error(
+        "{'error': 'file_restore_own', 'error_description': '不能转存自己的文件(夹)'}")
+    assert xt.is_own_share_error("转存失败:{'error_description': '转存自己的文件'}")
+    assert not xt.is_own_share_error("{'error': 'file_space_not_enough'}")
+    assert not xt.is_own_share_error("")
+
+
+def test_transfer_pending_marks_own_share_as_skipped_not_failed(session, monkeypatch) -> None:
+    """自己的分享 → 标 `skipped` 终态(不是 failed)并继续处理下一条,不拖累整批。"""
+    from app.services import xunlei_transfer as xt
+
+    session.add_all([
+        XunleiGroupShare(user_id=1, group_id="g", share_id="A", title="警笛模拟器",
+                         origin_url="u-A", status="pending"),
+        XunleiGroupShare(user_id=1, group_id="g", share_id="B", title="蓝河工具箱",
+                         origin_url="u-B", status="pending")])
+    session.commit()
+    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None: 0.3)
+
+    def fake_transfer(url, parent_id="", settings=None):
+        if url == "u-A":
+            return {"status": "failed",
+                    "message": "{'error': 'file_restore_own', 'error_description': '不能转存自己的文件'}"}
+        return {"status": "ok", "share_url": "s", "code": "", "fid": "f"}
+
+    monkeypatch.setattr(xt, "transfer_and_share", fake_transfer)
+    out = xg.transfer_pending(session, 1, limit=5, settings=_GateSettings())
+    assert out["ok"] == 1 and out["skipped"] == 1 and out["failed"] == 0
+    rows = {r.share_id: r for r in session.scalars(select(XunleiGroupShare)).all()}
+    assert rows["A"].status == "skipped" and "自己的分享" in rows["A"].message
+    assert rows["B"].status == "ok"

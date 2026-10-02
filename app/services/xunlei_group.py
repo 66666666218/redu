@@ -328,6 +328,12 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
                              "share_url": row.our_url, "code": row.pass_code})
         else:
             msg = out.get("message") or ""
+            if xt.is_own_share_error(msg):
+                # **我们自己发的分享**:转存自己必然失败,重试也是白试 → 直接终态
+                row.status, row.message = "skipped", "这是我们自己的分享(转存自己的文件),不搬"
+                skipped += 1
+                logger.info("迅雷群分享是自己的分享,跳过:%s", row.title)
+                continue
             if xt.is_space_error(msg):
                 # **第二层兜底**:闸门靠配额探针,探针失效会漏;真撞上"空间不足"时也要
                 # 把它当**可重试**处理 —— 行**保持 pending**,整批停下,清出空间自动继续。
