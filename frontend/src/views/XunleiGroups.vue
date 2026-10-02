@@ -15,9 +15,15 @@
           {{ busy === 'transfer' ? '转存中（每条最慢约 1 分钟）…' : '转存 3 条' }}
         </button>
         <button class="ghost" @click="load">刷新</button>
+        <button class="ghost" :disabled="busy" @click="doMint">
+          {{ busy === 'mint' ? '补铸中（约 30 秒）…' : '补铸 captcha' }}
+        </button>
       </div>
       <div class="muted" style="font-size:12px;margin-top:8px">
         已加入：{{ groups.map(g => g.name || g.group_id).join('、') || '未取到' }}
+      </div>
+      <div class="muted" style="font-size:12px">
+        {{ captchaText }}
       </div>
     </div>
 
@@ -57,22 +63,46 @@ import { api } from '../api'
 
 const items = ref([])
 const groups = ref([])
+const captcha = ref({})
 const msg = ref('')
 const busy = ref('')
 
 const pendingCount = computed(() => items.value.filter(i => i.status === 'pending').length)
+// captcha 寿命只有十几分钟,转存时会自动补铸;这里只是把状态摆出来给人看
+const captchaText = computed(() => {
+  const t = captcha.value.last_minted_at
+  if (!t) return 'captcha：还没铸过（转存时会自动铸）'
+  const at = new Date(Number(t) * 1000).toLocaleTimeString()
+  return `captcha：${at} 铸${captcha.value.last_error ? `（最近一次失败：${captcha.value.last_error}）` : ''}`
+})
 
 async function load() {
   try {
-    const [r, g] = await Promise.all([
+    const [r, g, c] = await Promise.all([
       api.get('/api/xunlei/shares'),
       api.get('/api/xunlei/groups'),
+      api.get('/api/xunlei/captcha'),
     ])
     items.value = r.data.items
     groups.value = g.data.items
+    captcha.value = c.data || {}
     msg.value = ''
   } catch (e) {
     msg.value = '加载失败：' + (e?.response?.data?.detail || e.message || e)
+  }
+}
+
+async function doMint() {
+  busy.value = 'mint'
+  msg.value = '补铸中…（会开一次无头浏览器，约 30 秒）'
+  try {
+    const d = (await api.post('/api/xunlei/captcha/refresh')).data || {}
+    msg.value = d.ok ? '已补铸一枚新 captcha' : '补铸失败 —— 可能登录态过期了，需要重新扫码'
+    await load()
+  } catch (e) {
+    msg.value = '补铸失败：' + (e?.response?.data?.detail || e.message || e)
+  } finally {
+    busy.value = ''
   }
 }
 

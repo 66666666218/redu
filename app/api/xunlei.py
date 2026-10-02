@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.auth import get_current_user
 from app.db import get_db
 from app.db.models import User
-from app.services import xunlei_group, xunlei_kouling
+from app.services import xunlei_captcha, xunlei_group, xunlei_kouling
 
 router = APIRouter()
 
@@ -68,3 +68,20 @@ def xunlei_resolve_kouling(body: KoulingBody, user: User = Depends(get_current_u
     if body.transfer:
         return xunlei_kouling.ingest(db, user.id, body.kouling)
     return xunlei_kouling.resolve(body.kouling)
+
+
+@router.get("/api/xunlei/captcha")
+def xunlei_captcha_status(user: User = Depends(get_current_user)):
+    """captcha 续期状态(上次铸造时间 / 最近错误 / 冷却秒数)。"""
+    return xunlei_captcha.status()
+
+
+@router.post("/api/xunlei/captcha/refresh")
+def xunlei_captcha_refresh(user: User = Depends(get_current_user)):
+    """手动补铸一枚 captcha(会开一次无头浏览器,约 15~30 秒)。
+
+    正常情况下**不需要手动调** —— 转存遇到 `captcha_invalid` 会自动补铸重试;
+    这个口子留给"想提前确认凭据还活着"的场合。
+    """
+    ok = xunlei_captcha.refresh(force=True)
+    return {"ok": ok, **xunlei_captcha.status()}

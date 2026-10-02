@@ -175,6 +175,59 @@ def _drive_headers(cred: dict) -> dict:
                     cred.get("device_id") or "", cred.get("client_id") or _CLIENT_ID)
 
 
+# ---------------------------------------------------------------- captcha 失效自愈
+
+class _CaptchaExpired(RuntimeError):
+    """盘接口回了 `captcha_invalid` —— 上层应**重铸一枚 captcha 再试**。"""
+
+
+def _json(resp) -> dict:
+    """取 JSON;若是 `captcha_invalid` 就抛 `_CaptchaExpired` 交给上层续期重试。"""
+    try:
+        data = resp.json()
+    except ValueError:
+        return {}
+    if isinstance(data, dict) and data.get("error") == "captcha_invalid":
+        raise _CaptchaExpired(str(data.get("error_description") or "captcha_invalid"))
+    return data
+
+
+def _fresh_cred(cred: dict) -> dict:
+    """重跑前**重新读一遍凭据**。
+
+    ⚠️ captcha 续期是写回库的,而 `_once()` 闭包里那份 `cred` 是**续期之前**读的快照 ——
+    重试时若继续吃它,等于拿着旧 captcha 再打一次,续期就白做了(2026-10-02 实测踩过:
+    verify 跑了 28 秒把浏览器都开起来了,重试仍然 captcha_invalid)。
+    """
+    return _credentials() or cred
+
+
+def _renew_captcha() -> bool:
+    """借网页版铸一枚新 captcha 并写回库(实现在 `app/services/xunlei_captcha.py`)。"""
+    try:
+        from app.services import xunlei_captcha
+
+        return xunlei_captcha.refresh(force=True)
+    except Exception:  # noqa: BLE001 - 续期失败不该盖住原始错误
+        logger.exception("captcha 续期失败")
+        return False
+
+
+def _with_captcha_retry(fn):
+    """跑 `fn()`;命中 `_CaptchaExpired` 就**重铸 captcha 再跑一次**。
+
+    captcha 寿命很短(网页给它标的过期时间只有十几分钟),所以"过期 → 重铸 → 重试"必须
+    是自动的,否则盘写操作动不动就要人工补。**只重试一次**:再失败就是续期本身有问题。
+    """
+    for attempt in (0, 1):
+        try:
+            return fn()
+        except _CaptchaExpired:
+            if attempt or not _renew_captcha():
+                raise
+    raise RuntimeError("unreachable")
+
+
 # ---------------------------------------------------------------- captcha 自续
 # ⚠️ **2026-10-02 修正一条旧结论**:此前记的是"captcha_token 自取不行",错的 —— 那次
 # 是拿 **android 盐值**去算 **web client_id** 的签名。用 android 身份(我们本来就是拿
@@ -235,13 +288,19 @@ def verify(settings=None) -> dict:
     cred = _credentials(settings)
     if not cred:
         return {"ok": False, "message": "未配置迅雷凭据(需先扫码登录)"}
-    try:
+
+    def _once() -> dict:
         r = requests.get(f"{_API}/drive/v1/about", timeout=_TIMEOUT,
-                         headers=_drive_headers(cred))
-        data = r.json()
+                         headers=_drive_headers(_fresh_cred(cred)))
+        data = _json(r)
         if r.status_code != 200:
             return {"ok": False, "message": f"配额查询 {r.status_code}:{str(data)[:160]}"}
         return {"ok": True, "message": "ok", "quota": (data.get("quota") or {})}
+
+    try:
+        return _with_captcha_retry(_once)
+    except _CaptchaExpired:
+        return {"ok": False, "message": "captcha 失效且自动续期失败 —— 需要重新扫码登录"}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc)[:200]}
 
@@ -276,19 +335,24 @@ def share_files(file_ids: list[str], expiration_days: str = "7",
     if not file_ids:
         return {"status": "failed", "message": "没有文件 id"}
     try:
-        h = _drive_headers(cred)
-        share = requests.post(f"{_API}/drive/v1/share", headers=h, timeout=_TIMEOUT,
-                              json={"file_ids": file_ids, "share_to": "copy",
-                                    "params": {"subscribe_push": "false",
-                                               "WithPassCodeInLink": "true"},
-                                    "title": "云盘资源分享", "restore_limit": "-1",
-                                    "expiration_days": expiration_days}).json()
-        if not share.get("share_url"):
-            return {"status": "failed", "message": f"生成分享失败:{str(share)[:160]}"}
-        return {"status": "ok", "message": "ok",
-                "share_url": share["share_url"] + "?pwd=" + (share.get("pass_code") or ""),
-                "code": share.get("pass_code") or "",
-                "share_id": share.get("share_id") or ""}
+        def _once() -> dict:
+            h = _drive_headers(_fresh_cred(cred))
+            share = _json(requests.post(f"{_API}/drive/v1/share", headers=h, timeout=_TIMEOUT,
+                                        json={"file_ids": file_ids, "share_to": "copy",
+                                              "params": {"subscribe_push": "false",
+                                                         "WithPassCodeInLink": "true"},
+                                              "title": "云盘资源分享", "restore_limit": "-1",
+                                              "expiration_days": expiration_days}))
+            if not share.get("share_url"):
+                return {"status": "failed", "message": f"生成分享失败:{str(share)[:160]}"}
+            return {"status": "ok", "message": "ok",
+                    "share_url": share["share_url"] + "?pwd=" + (share.get("pass_code") or ""),
+                    "code": share.get("pass_code") or "",
+                    "share_id": share.get("share_id") or ""}
+
+        return _with_captcha_retry(_once)
+    except _CaptchaExpired:
+        return {"status": "failed", "message": "captcha 失效且自动续期失败 —— 需要重新扫码登录"}
     except Exception as exc:  # noqa: BLE001
         logger.exception("迅雷生成分享失败")
         return {"status": "failed", "message": str(exc)[:200]}
@@ -299,13 +363,16 @@ def list_files(parent_id: str = "", cred: dict | None = None, limit: int = 200) 
     cred = cred or _credentials()
     if not cred:
         return []
-    try:
-        h = _drive_headers(cred)
-        r = requests.get(f"{_API}/drive/v1/files", headers=h, timeout=_TIMEOUT,
+    def _once() -> list[dict]:
+        r = requests.get(f"{_API}/drive/v1/files", headers=_drive_headers(_fresh_cred(cred)),
+                         timeout=_TIMEOUT,
                          params={"limit": str(limit), "parent_id": parent_id,
                                  "with_audit": "true"})
-        return (r.json().get("files") or []) if r.status_code == 200 else []
-    except Exception:  # noqa: BLE001
+        return (_json(r).get("files") or []) if r.status_code == 200 else []
+
+    try:
+        return _with_captcha_retry(_once)
+    except Exception:  # noqa: BLE001 - 探针类调用,失败即空(含续期失败)
         logger.exception("迅雷列目录失败")
         return []
 
@@ -322,32 +389,34 @@ def transfer_and_share(share_url: str, parent_id: str = "", settings=None) -> di
     share_id, pass_code = _extract_share_id(share_url)
     if not share_id:
         return {"status": "failed", "message": f"解析不出 share_id:{share_url[:80]}"}
-    try:
-        h = _drive_headers(cred)
+    def _once() -> dict:
+        h = _drive_headers(_fresh_cred(cred))
 
-        detail = requests.get(f"{_API}/drive/v1/share", headers=h, timeout=_TIMEOUT,
-                              params={"share_id": share_id, "pass_code": pass_code,
-                                      "limit": "100", "pass_code_token": "",
-                                      "page_token": "", "thumbnail_size": "SIZE_SMALL"}).json()
+        detail = _json(requests.get(f"{_API}/drive/v1/share", headers=h, timeout=_TIMEOUT,
+                                    params={"share_id": share_id, "pass_code": pass_code,
+                                            "limit": "100", "pass_code_token": "",
+                                            "page_token": "",
+                                            "thumbnail_size": "SIZE_SMALL"}))
         if detail.get("share_status") != "OK":
             return {"status": "failed", "message": f"分享状态异常:{str(detail)[:160]}"}
         files = [f.get("id") for f in (detail.get("files") or []) if f.get("id")]
         if not files:
             return {"status": "failed", "message": "分享里没有文件"}
 
-        restore = requests.post(f"{_API}/drive/v1/share/restore", headers=h, timeout=_TIMEOUT,
-                                json={"parent_id": parent_id, "share_id": share_id,
-                                      "pass_code_token": detail.get("pass_code_token") or "",
-                                      "ancestor_ids": [], "specify_parent_id": True,
-                                      "file_ids": files}).json()
+        restore = _json(requests.post(f"{_API}/drive/v1/share/restore", headers=h,
+                                      timeout=_TIMEOUT,
+                                      json={"parent_id": parent_id, "share_id": share_id,
+                                            "pass_code_token": detail.get("pass_code_token") or "",
+                                            "ancestor_ids": [], "specify_parent_id": True,
+                                            "file_ids": files}))
         task_id = restore.get("restore_task_id") or ""
         if not task_id:
             return {"status": "failed", "message": f"转存失败:{str(restore)[:160]}"}
 
         task: dict = {}
         for _ in range(50):                       # 最多 50 次 × 2 秒
-            task = requests.get(f"{_API}/drive/v1/tasks/{task_id}", headers=h,
-                                timeout=_TIMEOUT).json()
+            task = _json(requests.get(f"{_API}/drive/v1/tasks/{task_id}", headers=h,
+                                      timeout=_TIMEOUT))
             if int(task.get("progress") or -1) == 100:
                 break
             time.sleep(2)
@@ -358,17 +427,22 @@ def transfer_and_share(share_url: str, parent_id: str = "", settings=None) -> di
             return {"status": "failed",
                     "message": f"转存任务未返回文件 id(progress={task.get('progress')})"}
 
-        share = requests.post(f"{_API}/drive/v1/share", headers=h, timeout=_TIMEOUT,
-                              json={"file_ids": file_ids, "share_to": "copy",
-                                    "params": {"subscribe_push": "false",
-                                               "WithPassCodeInLink": "true"},
-                                    "title": "云盘资源分享", "restore_limit": "-1",
-                                    "expiration_days": "7"}).json()
+        share = _json(requests.post(f"{_API}/drive/v1/share", headers=h, timeout=_TIMEOUT,
+                                    json={"file_ids": file_ids, "share_to": "copy",
+                                          "params": {"subscribe_push": "false",
+                                                     "WithPassCodeInLink": "true"},
+                                          "title": "云盘资源分享", "restore_limit": "-1",
+                                          "expiration_days": "7"}))
         if not share.get("share_url"):
             return {"status": "failed", "message": f"生成分享失败:{str(share)[:160]}"}
         return {"status": "ok", "message": "转存并分享成功",
                 "share_url": share["share_url"] + "?pwd=" + (share.get("pass_code") or ""),
                 "code": share.get("pass_code") or "", "fid": ",".join(file_ids)}
+
+    try:
+        return _with_captcha_retry(_once)
+    except _CaptchaExpired:
+        return {"status": "failed", "message": "captcha 失效且自动续期失败 —— 需要重新扫码登录"}
     except Exception as exc:  # noqa: BLE001 - 对外只返回结构化失败,不抛
         logger.exception("迅雷转存失败")
         return {"status": "failed", "message": str(exc)[:200]}
