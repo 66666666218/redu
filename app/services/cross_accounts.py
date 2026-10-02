@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 
 from sqlalchemy import select
@@ -36,6 +37,11 @@ logger = get_logger(__name__)
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+# 资源库标题 → 搜索词的清洗件(见 `library_search_word` 的注释与实测数据)
+_PAREN_RE = re.compile(r"[（(【\[][^)）】\]]*[)）】\]]")
+_PUNCT = "｜|·—-,，、:：!！?？~ "
+_LEAD_NOISE = ("亲测", "爆火", "最新", "超火", "实测", "分享")
 
 
 def _pan_of(text: str) -> str:
@@ -53,11 +59,22 @@ _PAN_ACCOUNT_HINTS = ("网盘", "夸克", "百度盘", "百度网盘", "阿里�
                       "uc网盘", "115网盘", "蓝奏云", "盘搜")
 
 
+class SearchSourceError(RuntimeError):
+    """搜索源**硬失败**(网络异常 / 非 200 / 返回体不是搜索结构)。
+
+    ⚠️ **为什么必须与"搜到 0 条"分开**(2026-10-03):此前 `_search_zhihu` 把所有异常都吞成
+    `[]`,于是**被限流/登录态失效时与"真的没有"完全无法区分** —— 下游 `pan_discovery.sync()`
+    照样记 `success(候选0)`,链路看着健康、其实早被挡住了(与闲鱼那次"假成功"同一类问题)。
+    实测就踩到过:同一批词,单跑能捞到夸克链,紧接着整轮 `sync()` 却是 0 —— 静默失败。
+    """
+
+
 def _search_zhihu(cookie: str, keyword: str, limit: int = 20) -> list[dict]:
     """知乎搜索 → `[{uid, name, url, snippet, pan_link}]`。
 
     端点 `api/v4/search_v3` 实测**带登录 Cookie 即可、无需 x-zse 签名**(2026-10-01)。
     账号标识取 `author.url_token`(知乎账号的稳定 id,主页 = `/people/<token>`)。
+    **硬失败抛 `SearchSourceError`**(不再返回空列表冒充"没有结果")。
     """
     import requests
 
@@ -70,10 +87,19 @@ def _search_zhihu(cookie: str, keyword: str, limit: int = 20) -> list[dict]:
             headers={"Cookie": cookie, "User-Agent": _UA, "Referer": "https://www.zhihu.com/",
                      "Accept": "application/json, text/plain, */*"},
             timeout=20)
+    except Exception as exc:  # noqa: BLE001 - 包成自己的异常类型,好让调用方区分
+        raise SearchSourceError(f"请求异常:{exc}") from exc
+    if getattr(resp, "status_code", 200) != 200:
+        sc = resp.status_code
+        hint = "(登录态失效或被限流)" if sc in (401, 403, 429) else ""
+        raise SearchSourceError(f"HTTP {sc}{hint}")
+    try:
         payload = resp.json()
-    except Exception as exc:  # noqa: BLE001 - 搜索失败不该炸整轮发现
-        logger.warning("知乎搜索失败(%s):%s", keyword, exc)
-        return []
+    except ValueError as exc:
+        raise SearchSourceError(f"返回非 JSON:{str(getattr(resp, 'text', ''))[:80]}") from exc
+    if not isinstance(payload, dict) or "data" not in payload:
+        # 限流时知乎回 {"error": {...}} —— 那不是"没有结果",必须报错
+        raise SearchSourceError(f"返回体无 data:{str(payload)[:100]}")
     out: list[dict] = []
     for item in payload.get("data") or []:
         obj = item.get("object") or {}
@@ -303,8 +329,57 @@ def _account_keywords(settings) -> list[str]:
     return [k.strip() for k in raw.split(",") if k.strip()]
 
 
+def library_search_word(title: str, limit: int = 16) -> str:
+    """资源库标题 → 平台搜索词(抖音线索 / 知乎直链 / 跨平台热度 **三条链共用**)。
+
+    ⚠️ **不能直接复用 `douyin_leads._to_search_word`**(2026-10-03 实测):那条是为
+    **群资源标题**设计的(「手机警报器（警笛模拟器）2.0版」),做法是**按 `、！` 等分隔符
+    取首段**;而资源库标题常是完整短语(「七宗罪、七美德测试免费入口直达（附最新链接）」),
+    照搬会被砍成「七宗罪」→ 不足 4 字 → **整条丢掉**。实测库里 8 条资源,照搬**丢 3 条**。
+
+    实测暴露的三个真问题与对策:
+      · **截断留下分隔符尾巴**:`花少2人格测试直达入口｜最新测试` 硬切 12 → `…入口｜` → 清尾部标点;
+      · **括号补充说明吃掉预算**:`霸王茶姬杯贴自定义入口链接直达（附教程）0919` 硬切 12 只到
+        `…入口链` —— **先剥括号**,整名才进得来(这也是把预算从 12 放到 16 的原因);
+      · **开头口水词**:`亲测！苹果ios共享id…` 的「亲测！」搜不出东西 —— 只在**紧跟标点时**才剥,
+        否则会误伤 `爆火的“审批小程序”`(引号里的才是名字)。
+    """
+    text = _PAREN_RE.sub(" ", title or "")
+    text = re.sub(r"\s+", "", text)                       # 中文标题里的空格多是排版,去掉
+    for noise in _LEAD_NOISE:                             # 只在后面跟标点时才剥,避免误伤
+        if text.startswith(noise) and len(text) > len(noise) and text[len(noise)] in _PUNCT:
+            text = text[len(noise):]
+            break
+    text = re.sub(r"[vV]?\d+(?:\.\d+)+版?$", "", text)    # 版本尾串(2.0版 / v1.2)
+    text = re.sub(r"\d{2,}$", "", text)                   # 尾巴上的日期串(0919 / 20241001)
+    # 分隔符之后多是补充说明(「…直达入口｜最新测试」「…高清动态壁纸｜200张+8k…」),
+    # 从第一个**位置 ≥6** 的分隔符处切断 —— 阈值 6 是为了别把「七宗罪、七美德…」砍成「七宗罪」。
+    for i, ch in enumerate(text):
+        if i >= 6 and ch in _PUNCT:
+            text = text[:i]
+            break
+    if len(text) > limit:                                 # 仍超预算 → 硬切,但别切在 ASCII 词中间
+        cut = limit
+        if text[cut - 1].isascii() and text[cut].isascii() and text[cut - 1].isalnum():
+            while cut > 0 and text[cut - 1].isascii() and text[cut - 1].isalnum():
+                cut -= 1
+        text = text[:cut]
+    text = text.strip(_PUNCT)
+    if len(text) < 4:
+        return ""                                         # 太短搜不出东西(与群那条同口径)
+    from app.services.xunlei_group import is_bulk_resource
+
+    # 泛化大包名(最全文件/XX合集)当搜索词只会招来噪音 —— 闸门**共用**群那条路的词表,
+    # "这条资源名太泛、指不到具体东西"是同一件事,只该有一份定义(见 `is_bulk_resource`)。
+    return "" if is_bulk_resource(text) else text
+
+
 def _keywords_from_library(session: Session, user_id: int, top: int = 5) -> list[str]:
-    """从资源库挑**需求被验证过**的资源名当搜索词(同链被多号同发)。"""
+    """从资源库挑**需求被验证过**的资源名当搜索词(同链被多号同发)。
+
+    清洗见 `library_search_word` —— 此前这里是 `strip()[:12]` 硬切,三条下游链(抖音线索/
+    知乎直链/跨平台热度)都吃这个粗词。
+    """
     try:
         from app.services.resource_library import resonance_resources
 
@@ -315,9 +390,10 @@ def _keywords_from_library(session: Session, user_id: int, top: int = 5) -> list
     kws: list[str] = []
     for r in rows:
         titles = r.get("titles") or []
-        # 取标题前 12 字当搜索词:整句搜不到,核心资源名才搜得到
         if titles and str(titles[0]).strip():
-            kws.append(str(titles[0]).strip()[:12])
+            word = library_search_word(str(titles[0]))
+            if word and word not in kws:
+                kws.append(word)
     return kws[:top]
 
 

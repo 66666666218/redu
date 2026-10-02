@@ -38,6 +38,8 @@ def test_search_zhihu_skips_non_account_items_and_reads_pan_link(monkeypatch) ->
     """知乎返回里混着 hot_timing/ring_box 这类非账号条目,要跳过;
     盘链从标题+正文里判(用户口径:确认是推广网盘的才收)。"""
     class _R:
+        status_code = 200                       # 现在非 200 会被判成硬失败(见 SearchSourceError)
+
         def json(self):
             return {"data": [
                 {"type": "hot_timing", "object": {}},                       # 非账号条目
@@ -203,3 +205,96 @@ def test_discover_noop_when_no_usable_platform(session, monkeypatch) -> None:
     monkeypatch.setattr("app.services.cookie_store.get_cookies", lambda s, u: {})
     out = cp.discover_cross_accounts(session, 1, keywords=["测试词"])
     assert out["status"] == "no_cookie" and out["new"] == 0
+
+
+# ---------------------------------------------------------------- 资源库搜索词清洗
+
+def test_library_search_word_strips_parenthetical_before_budget() -> None:
+    """括号里的补充说明**先剥掉**,否则它会吃掉预算、把资源名切半。
+
+    实测(2026-10-03):`霸王茶姬杯贴自定义入口链接直达（附教程）0919` 硬切 12 字只到
+    `…入口链`(资源名断在半截),剥括号后整名才进得来。
+    """
+    assert cp.library_search_word("霸王茶姬杯贴自定义入口链接直达（附教程）0919") == \
+        "霸王茶姬杯贴自定义入口链接直达"
+
+
+def test_library_search_word_cuts_at_separator_not_mid_phrase() -> None:
+    """分隔符之后多是补充说明 → 从第一个(位置 ≥6 的)分隔符切断,别留一条竖线在词里。"""
+    assert cp.library_search_word("花少2人格测试直达入口｜最新测试（附链接）") == "花少2人格测试直达入口"
+    assert cp.library_search_word("𝐢𝐩𝐚𝐝平板高清动态壁纸｜200张+8k横屏动漫壁纸") == "𝐢𝐩𝐚𝐝平板高清动态壁纸"
+
+
+def test_library_search_word_keeps_late_separator_phrase_intact() -> None:
+    """⚠️ 阈值 6 的由来:分隔符**太靠前**时不能切 —— 会把「七宗罪、七美德…」砍成「七宗罪」(3 字)。
+
+    这正是它**不能**复用 `douyin_leads._to_search_word` 的原因(那条按分隔符取首段),
+    实测库里 8 条资源照搬会丢 3 条。
+    """
+    assert cp.library_search_word("七宗罪、七美德测试免费入口直达（附最新链接）") == \
+        "七宗罪、七美德测试免费入口直达"
+
+
+def test_library_search_word_strips_leading_noise_and_version() -> None:
+    """开头口水词(紧跟标点时)与版本尾串都要剥;`亲测！` 留着搜不出东西。"""
+    assert cp.library_search_word("亲测！苹果ios共享id，测试可用 10月1最新免费入口") == "苹果ios共享id"
+    assert cp.library_search_word("手机警报器（警笛模拟器）2.0版") == "手机警报器"
+
+
+def test_library_search_word_does_not_cut_mid_ascii_word() -> None:
+    """硬切时别切在英文词中间(`pdf` 被切成 `pd`)。"""
+    assert cp.library_search_word("github高性价比人生指南pdf") == "github高性价比人生指南"
+
+
+def test_library_search_word_drops_generic_and_short() -> None:
+    """泛化大包名(与群那条路**共用**同一份词表)与过短的都丢掉 —— 搜出来全是噪音。"""
+    assert cp.library_search_word("最全文件") == ""
+    assert cp.library_search_word("短的") == ""
+    assert cp.library_search_word("") == ""
+
+
+def test_search_zhihu_raises_on_rate_limit_instead_of_empty(monkeypatch) -> None:
+    """⚠️ 被限流必须**抛**,不能返回空列表冒充"没有结果"。
+
+    否则下游 `pan_discovery.sync()` 会把"被挡住"记成 `success(候选0)`,链路看着健康、
+    其实早停了(与闲鱼那次"假成功"同一类)。实测踩过:同一批词单跑能捞到链,整轮 sync 却是 0。
+    """
+    class _R:
+        status_code = 403
+        text = ""
+
+        def json(self):
+            return {}
+
+    import requests
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _R())
+    with pytest.raises(cp.SearchSourceError) as ei:
+        cp._search_zhihu("ck", "网盘资源")
+    assert "403" in str(ei.value) and "限流" in str(ei.value)
+
+
+def test_search_zhihu_raises_when_payload_has_no_data(monkeypatch) -> None:
+    """知乎限流时回的是 `{"error": …}` —— 那不是"没有结果",同样是硬失败。"""
+    class _R:
+        status_code = 200
+
+        def json(self):
+            return {"error": {"code": 403, "message": "请求过于频繁"}}
+
+    import requests
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _R())
+    with pytest.raises(cp.SearchSourceError):
+        cp._search_zhihu("ck", "网盘资源")
+
+
+def test_search_zhihu_empty_data_is_not_an_error(monkeypatch) -> None:
+    """真的搜到 0 条(`{"data": []}`)是**正常**结果,不能抛 —— 否则每轮都误报失败。"""
+    class _R:
+        status_code = 200
+
+        def json(self):
+            return {"data": []}
+
+    import requests
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _R())
+    assert cp._search_zhihu("ck", "网盘资源") == []

@@ -120,17 +120,28 @@ def find_candidates(session, user_id: int, keywords: list[str], limit: int = 20,
     返回 `[{platform, origin_url, title, author, source_url}]`(按 `origin_url` 去重)。
     """
     from app.services.cookie_store import get_cookie
-    from app.services.cross_accounts import _search_zhihu
+    from app.services.cross_accounts import SearchSourceError, _search_zhihu
 
     ck = (get_cookie(session, user_id, "zhihu") or "").strip()
     if not ck:
         logger.info("网盘发现跳过:未配知乎 Cookie(这条路靠它搜)")
         return []
     found: dict[str, dict] = {}
+    failed = 0
+    last_err = ""
     for i, kw in enumerate(keywords):
         if i:
             time.sleep(_REQ_GAP)                    # 限速:逐词之间必须隔开
-        for r in _search_zhihu(ck, kw, limit):
+        try:
+            rows = _search_zhihu(ck, kw, limit)
+        except SearchSourceError as exc:
+            # 单个词失败(限流/网络)不该丢掉其余词 —— 但**必须记下来**:全失败要报错,
+            # 不能像以前那样返回空列表被下游当成"真的没有"(见 SearchSourceError 的说明)。
+            failed += 1
+            last_err = str(exc)
+            logger.warning("网盘发现:词「%s」搜索失败(%s)", kw, exc)
+            continue
+        for r in rows:
             url = str(r.get("pan_link") or "").strip()
             if not url or url in found:
                 continue
@@ -139,6 +150,8 @@ def find_candidates(session, user_id: int, keywords: list[str], limit: int = 20,
                           "title": snippet[:255] or kw[:60],
                           "author": str(r.get("name") or "")[:64],
                           "source_url": str(r.get("url") or "")[:500]}
+    if keywords and failed == len(keywords):
+        raise SearchSourceError(f"{len(keywords)} 个词全部搜索失败:{last_err}")
     return list(found.values())
 
 

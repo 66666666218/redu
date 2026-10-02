@@ -225,3 +225,36 @@ def test_clean_strips_tags_and_structured_leftovers() -> None:
     assert pd._clean("最近爆火的<em>花少2人格测试</em>") == "最近爆火的花少2人格测试"
     assert pd._clean("最近爆火的花少2人格测试 [{'content': '这个太好玩了") == "最近爆火的花少2人格测试"
     assert pd._clean("") == ""
+
+
+def test_find_candidates_raises_when_all_keywords_fail(session, monkeypatch) -> None:
+    """**全部词都硬失败** → 抛错,让 sync 记 `failed` 而不是 `success(候选0)`。
+
+    这是"假成功"的防线:被限流时链路必须看起来是坏的,而不是安静地什么都不做。
+    """
+    from app.services import cross_accounts as ca
+
+    def boom(ck, kw, limit=20):
+        raise ca.SearchSourceError("HTTP 403(登录态失效或被限流)")
+
+    monkeypatch.setattr(ca, "_search_zhihu", boom)
+    monkeypatch.setattr("app.services.cookie_store.get_cookie", lambda s, u, p: "ck")
+    with pytest.raises(ca.SearchSourceError) as ei:
+        pd.find_candidates(session, 1, ["甲", "乙"], settings=_S())
+    assert "全部搜索失败" in str(ei.value)
+
+
+def test_find_candidates_keeps_going_when_one_keyword_fails(session, monkeypatch) -> None:
+    """**部分**词失败要保住其余词的产出(限速是常态,不能一失败就整轮白跑)。"""
+    from app.services import cross_accounts as ca
+
+    def flaky(ck, kw, limit=20):
+        if kw == "甲":
+            raise ca.SearchSourceError("超时")
+        return [{"uid": "a", "name": "作者", "url": "",
+                 "snippet": "花少2人格测试", "pan_link": "https://pan.quark.cn/s/Y"}]
+
+    monkeypatch.setattr(ca, "_search_zhihu", flaky)
+    monkeypatch.setattr("app.services.cookie_store.get_cookie", lambda s, u, p: "ck")
+    out = pd.find_candidates(session, 1, ["甲", "乙"], settings=_S())
+    assert len(out) == 1 and out[0]["origin_url"] == "https://pan.quark.cn/s/Y"
