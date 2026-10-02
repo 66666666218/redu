@@ -1,0 +1,278 @@
+"""迅雷网盘转存 + 分享(2026-10-02)。
+
+**移植自** [ctwj/urldb](https://github.com/ctwj/urldb) 的 `common/xunlei_pan.go` +
+`common/xunlei_login.go`(Go)。它把迅雷那套签名完整复刻出来了 —— 关键结论是
+**签名是纯函数**(MD5 迭代盐值),不是真机签名,所以 Python 能 1:1 复刻。
+
+**本项目实际走的凭据路线**(2026-10-02 实测,比 urldb 更省事):
+  1. **扫码登录一次**(`tools/xl_qr_login.py`)→ 从网页版 localStorage 抽
+     `access_token`(有效期 **12 小时**)、`refresh_token`、`captcha_token`、`device_id`;
+  2. **access_token 过期** → 用 `refresh_token` 换新的:⚠️ **client_id 必须用网页版那个**
+     (`Xqp0kJBXWhwaTpB6`,就是 localStorage 里 `credentials_<clientId>` 的那串),
+     用 urldb 的 android `ClientID` 会 `invalid_grant`(实测);`client_secret` 传空即可;
+  3. **captcha_token**:实测**标称过期后仍可用**(`expires_at` 标 11:42、11:50 调用照样 200),
+     所以直接用扫码时拿的那份。**自取不行** —— `captcha/init` 的 `captcha_sign` 把 client_id
+     算进去了,拿 android 的盐值算网页版的签名会 `invalid captcha_sign`(实测)。
+
+**流程**(同 urldb 的 `Transfer`):
+  `GET  /drive/v1/share`          → 分享详情(拿 file_ids + pass_code_token)
+  `POST /drive/v1/share/restore`  → 转存任务
+  `GET  /drive/v1/tasks/{id}`     → 轮询到 progress==100
+  `POST /drive/v1/share`          → 生成**我方**分享链
+
+⚠️ **只做转存+分享**:「口令 → shareID」这一步只存在于迅雷客户端,本模块做不到。
+调用方拿到的应该是 `pan.xunlei.com/s/<shareID>`(或带 `?pwd=` 的完整链)。
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import time
+from urllib.parse import parse_qs, urlparse
+
+import requests
+
+from app.utils import get_logger
+
+logger = get_logger(__name__)
+
+_API = "https://api-pan.xunlei.com"
+_AUTH = "https://xluser-ssl.xunlei.com"
+_TIMEOUT = 25
+
+# urldb 的 android 身份(签名盐值在这儿,用于**算 captcha_sign**;但刷新 token 要用网页版 client_id)
+_CLIENT_ID = "Xp6vsxz_7IYVw2BB"
+_CLIENT_VERSION = "8.31.0.9726"
+_PACKAGE_NAME = "com.xunlei.downloadprovider"
+_USER_AGENT = ("ANDROID-com.xunlei.downloadprovider/8.31.0.9726 netWorkType/5G appid/40 "
+               "deviceName/Xiaomi_M2004j7ac deviceModel/M2004J7AC OSVersion/12 protocolVersion/301 "
+               "platformVersion/10 sdkVersion/512000 Oauth2Client/0.9 "
+               "(Linux 4_14_186-perf-gddfs8vbb238b) (JAVA 0)")
+_APP_ID = "40"
+_APP_KEY = "34a062aaa22f906fca4fefe9fb3a3021"
+_ALGOS = ("9uJNVj/wLmdwKrJaVj/omlQ", "Oz64Lp0GigmChHMf/6TNfxx7O9PyopcczMsnf",
+          "Eb+L7Ce+Ej48u", "jKY0", "ASr0zCl6v8W4aidjPK5KHd1Lq3t+vBFf41dqv5+fnOd",
+          "wQlozdg6r1qxh0eRmt3QgNXOvSZO6q/GXK", "gmirk+ciAvIgA/cxUUCema47jr/YToixTT+Q6O",
+          "5IiCoM9B1/788ntB", "P07JH0h6qoM6TSUAK2aL9T5s2QBVeY9JWvalf",
+          "+oK0AN")
+# 网页版 client_id(刷新 token 必须用它;扫码拿到的凭据里也会带一份,以凭据为准)
+_WEB_CLIENT_ID = "Xqp0kJBXWhwaTpB6"
+
+
+# ---------------------------------------------------------------- 签名(纯函数)
+
+def _md5hex(s: str) -> str:
+    return hashlib.md5(s.encode("utf-8")).hexdigest()
+
+
+def _sign_with_timestamp(device_id: str, timestamp: str, client_id: str = _CLIENT_ID) -> str:
+    """captcha 签名:对 `ClientID+ClientVersion+PackageName+DeviceID+时间戳` 依次加盐 MD5。
+
+    ⚠️ `client_id` 参与计算,所以身份不同 → 签名不同(这是"自取 captcha 失败"的根因)。
+    """
+    s = client_id + _CLIENT_VERSION + _PACKAGE_NAME + device_id + timestamp
+    for salt in _ALGOS:
+        s = _md5hex(s + salt)
+    return "1." + s
+
+
+def _device_sign(device_id: str) -> str:
+    """设备签名:`div101.` + DeviceID + MD5(SHA1(DeviceID+PackageName+AppID+AppKey))。"""
+    sha1_hex = hashlib.sha1(
+        (device_id + _PACKAGE_NAME + _APP_ID + _APP_KEY).encode("utf-8")).hexdigest()
+    return "div101." + device_id + _md5hex(sha1_hex)
+
+
+def _jwt_exp(access_token: str) -> float:
+    """从 JWT 里读过期时间(秒)。读不到返回 0(当作已过期)。"""
+    try:
+        payload = access_token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return float(json.loads(base64.urlsafe_b64decode(payload)).get("exp") or 0)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _jwt_sub(access_token: str) -> str:
+    """从 JWT 里读用户 id。"""
+    try:
+        payload = access_token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return str(json.loads(base64.urlsafe_b64decode(payload)).get("sub") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+# ---------------------------------------------------------------- 凭据
+
+def _credentials(settings=None) -> dict:
+    """从 cookie_store 读迅雷凭据(加密存的 JSON)。取第一个启用用户的 —— 与 quark 一致。"""
+    from sqlalchemy import select
+
+    from app.db import get_session_local
+    from app.db.models import User
+    from app.services.cookie_store import get_cookie
+
+    db = get_session_local()()
+    try:
+        for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
+            raw = get_cookie(db, uid, "xunlei")
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except ValueError:
+                continue
+            if data.get("refresh_token"):
+                return data
+    finally:
+        db.close()
+    return {}
+
+
+def _refresh_access_token(refresh_token: str, client_id: str = "") -> str:
+    """用 refresh_token 换 access_token(**client_id 必须是网页版那个**)。"""
+    resp = requests.post(
+        f"{_AUTH}/v1/auth/token",
+        json={"grant_type": "refresh_token", "refresh_token": refresh_token,
+              "client_id": client_id or _WEB_CLIENT_ID, "client_secret": ""},
+        headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
+        timeout=_TIMEOUT)
+    data = resp.json()
+    token = data.get("access_token") or ""
+    if not token:
+        raise RuntimeError(f"迅雷刷新 token 失败:{str(data)[:180]}")
+    return token
+
+
+def _access_token(cred: dict) -> str:
+    """取可用的 access_token:先用存着的(12h),快过期才刷。"""
+    at = cred.get("access_token") or ""
+    if at and _jwt_exp(at) > time.time() + 120:
+        return at
+    return _refresh_access_token(cred["refresh_token"], cred.get("client_id") or _WEB_CLIENT_ID)
+
+
+def _headers(access_token: str, captcha: str, device_id: str) -> dict:
+    return {"Accept": "*/*", "Accept-Language": "zh-CN,zh;q=0.9",
+            "Cache-Control": "no-cache", "Content-Type": "application/json",
+            "Origin": "https://pan.xunlei.com", "Pragma": "no-cache",
+            "Referer": "https://pan.xunlei.com/", "User-Agent": _USER_AGENT,
+            "Authorization": "Bearer " + access_token, "x-captcha-token": captcha,
+            "x-client-id": _CLIENT_ID, "x-device-id": device_id}
+
+
+def verify(settings=None) -> dict:
+    """探针:拿 token → 拉一次配额。返回 `{ok, message, quota}`。
+
+    用于"凭据是否失效"的巡检,也是自测入口。
+    """
+    cred = _credentials(settings)
+    if not cred:
+        return {"ok": False, "message": "未配置迅雷凭据(需先扫码登录)"}
+    try:
+        at = _access_token(cred)
+        r = requests.get(f"{_API}/drive/v1/about", timeout=_TIMEOUT,
+                         headers=_headers(at, cred.get("captcha_token") or "",
+                                          cred.get("device_id") or ""))
+        data = r.json()
+        if r.status_code != 200:
+            return {"ok": False, "message": f"配额查询 {r.status_code}:{str(data)[:160]}"}
+        return {"ok": True, "message": "ok", "quota": (data.get("quota") or {})}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": str(exc)[:200]}
+
+
+# ---------------------------------------------------------------- 业务
+
+def _extract_share_id(url: str) -> tuple[str, str]:
+    """`pan.xunlei.com/s/<id>?pwd=xxxx` → (share_id, pass_code)。"""
+    u = urlparse(url.strip())
+    parts = [p for p in u.path.split("/") if p]
+    share_id = ""
+    if len(parts) >= 2 and parts[0] == "s":
+        share_id = parts[1]
+    elif parts:
+        share_id = parts[-1]
+    pwd = (parse_qs(u.query).get("pwd") or [""])[0]
+    return share_id, pwd
+
+
+def transfer_and_share(share_url: str, parent_id: str = "", settings=None) -> dict:
+    """`pan.xunlei.com/s/xxx` → 转存到我方盘 → 生成我方分享链。
+
+    返回结构与 `quark_transfer.transfer_and_share` 对齐:
+    `{"status": "ok"|"failed", "message", "share_url", "code", "fid"}`。
+    """
+    cred = _credentials(settings)
+    if not cred:
+        return {"status": "failed", "message": "未配置迅雷凭据(需先扫码登录)"}
+    share_id, pass_code = _extract_share_id(share_url)
+    if not share_id:
+        return {"status": "failed", "message": f"解析不出 share_id:{share_url[:80]}"}
+    try:
+        at = _access_token(cred)
+        h = _headers(at, cred.get("captcha_token") or "", cred.get("device_id") or "")
+
+        detail = requests.get(f"{_API}/drive/v1/share", headers=h, timeout=_TIMEOUT,
+                              params={"share_id": share_id, "pass_code": pass_code,
+                                      "limit": "100", "pass_code_token": "",
+                                      "page_token": "", "thumbnail_size": "SIZE_SMALL"}).json()
+        if detail.get("share_status") != "OK":
+            return {"status": "failed", "message": f"分享状态异常:{str(detail)[:160]}"}
+        files = [f.get("id") for f in (detail.get("files") or []) if f.get("id")]
+        if not files:
+            return {"status": "failed", "message": "分享里没有文件"}
+
+        restore = requests.post(f"{_API}/drive/v1/share/restore", headers=h, timeout=_TIMEOUT,
+                                json={"parent_id": parent_id, "share_id": share_id,
+                                      "pass_code_token": detail.get("pass_code_token") or "",
+                                      "ancestor_ids": [], "specify_parent_id": True,
+                                      "file_ids": files}).json()
+        task_id = restore.get("restore_task_id") or ""
+        if not task_id:
+            return {"status": "failed", "message": f"转存失败:{str(restore)[:160]}"}
+
+        task: dict = {}
+        for _ in range(50):                       # 最多 50 次 × 2 秒
+            task = requests.get(f"{_API}/drive/v1/tasks/{task_id}", headers=h,
+                                timeout=_TIMEOUT).json()
+            if int(task.get("progress") or -1) == 100:
+                break
+            time.sleep(2)
+        file_ids = _trace_file_ids(task) or files
+
+        share = requests.post(f"{_API}/drive/v1/share", headers=h, timeout=_TIMEOUT,
+                              json={"file_ids": file_ids, "share_to": "copy",
+                                    "params": {"subscribe_push": "false",
+                                               "WithPassCodeInLink": "true"},
+                                    "title": "云盘资源分享", "restore_limit": "-1",
+                                    "expiration_days": "7"}).json()
+        if not share.get("share_url"):
+            return {"status": "failed", "message": f"生成分享失败:{str(share)[:160]}"}
+        return {"status": "ok", "message": "转存并分享成功",
+                "share_url": share["share_url"] + "?pwd=" + (share.get("pass_code") or ""),
+                "code": share.get("pass_code") or "", "fid": ",".join(file_ids)}
+    except Exception as exc:  # noqa: BLE001 - 对外只返回结构化失败,不抛
+        logger.exception("迅雷转存失败")
+        return {"status": "failed", "message": str(exc)[:200]}
+
+
+def _trace_file_ids(task: dict) -> list[str]:
+    """从任务结果里取转存后的文件 id(urldb 兼容多种返回格式,这里同样兜住)。"""
+    out: list[str] = []
+    for key in ("trace_file_ids", "file_ids"):
+        val = task.get(key)
+        if isinstance(val, list):
+            out += [str(v) for v in val if v]
+        elif isinstance(val, str) and val:
+            try:
+                parsed = json.loads(val)
+                if isinstance(parsed, list):
+                    out += [str(v) for v in parsed if v]
+            except ValueError:
+                out.append(val)
+    if not out and task.get("file_id"):
+        out.append(str(task["file_id"]))
+    return out
