@@ -86,10 +86,13 @@ def _search_zhihu(cookie: str, keyword: str, limit: int = 20) -> list[dict]:
 SEARCHERS = {"zhihu": _search_zhihu}
 
 # MediaCrawler 覆盖的平台(2026-10-01):它们**光带 Cookie 过不去**(微博 -100/贴吧 403/
-# 小红书抖音要签名),只能靠真浏览器算签名——所以走 `mediacrawler_source`,而且是
-# **批量跑**(它的 CLI 一次吃一整个关键词列表,逐词调用等于反复开关浏览器)。
-# MediaCrawler 覆盖的平台(2026-10-01):它们**光带 Cookie 过不去**(微博 -100/贴吧 403/
-# 小红书抖音要签名),只能靠真浏览器算签名——所以走 `mediacrawler_source`。
+# 小红书抖音要签名),只能靠真浏览器算签名——所以走 `mediacrawler_source`,而且它的 CLI
+# 一次吃一整个关键词列表,逐词调用等于反复开关浏览器,故**批量跑**。
+#
+# ⚠️ 2026-10-02 抖音实跑后**默认停用**(见 settings.cross_mediacrawler_enabled 的说明):
+# 该工具是作者的教学版,账号信息刻意脱敏(昵称 `籽***）`、user id 为 sha256 截断、无主页
+# 链接)→ 收录不了对标号;且抖音盘链不在搜索返回里(143 条实测 0 条真链)。留着代码和
+# 登录态,但不再进定时轮——省得每周开一次浏览器白招风控。
 MEDIACRAWLER_PLATFORMS = ("xiaohongshu", "douyin", "kuaishou", "weibo", "tieba", "bilibili")
 
 # 限速(2026-10-01,用户要求"一次不要访问太多"):持续高频轮询是最容易被判定为爬虫的模式。
@@ -146,20 +149,22 @@ def discover_cross_accounts(session: Session, user_id: int, settings=None,
                     items.append({"platform": plat, "name": h["name"], "keyword": kw})
     # ② MediaCrawler 型平台:一次跑**全部关键词**(它的 CLI 是批量的,逐词调用等于反复开关浏览器)。
     #    工具没装/跑挂都不该拖垮上面那条直连型的发现,所以整段兜住异常。
-    try:
-        from app.services import mediacrawler_source as mc
+    #    2026-10-02 默认关(实测:账号脱敏 + 拿不到盘链,见 settings 里的说明)。
+    if getattr(settings, "cross_mediacrawler_enabled", False):
+        try:
+            from app.services import mediacrawler_source as mc
 
-        if mc.available()[0]:
-            for plat in [pick_mediacrawler_platform()]:   # 每天只碰一个平台,不一次开六个浏览器
-                for h in mc.crawl(plat, keywords):
-                    if not h.get("pan_link"):
-                        continue
-                    found += 1
-                    if _save(session, user_id, plat, h, keywords[0] if keywords else ""):
-                        new += 1
-                        items.append({"platform": plat, "name": h["name"], "keyword": "批量"})
-    except Exception:  # noqa: BLE001 - 工具缺依赖/失效都不影响直连型平台
-        logger.exception("MediaCrawler 发现失败")
+            if mc.available()[0]:
+                for plat in [pick_mediacrawler_platform()]:   # 每天只碰一个平台,不一次开六个浏览器
+                    for h in mc.crawl(plat, keywords):
+                        if not h.get("pan_link"):
+                            continue
+                        found += 1
+                        if _save(session, user_id, plat, h, keywords[0] if keywords else ""):
+                            new += 1
+                            items.append({"platform": plat, "name": h["name"], "keyword": "批量"})
+        except Exception:  # noqa: BLE001 - 工具缺依赖/失效都不影响直连型平台
+            logger.exception("MediaCrawler 发现失败")
     session.commit()
     logger.info("跨平台发现:关键词 %d × 直连平台 %d → 命中 %d,新增 %d",
                 len(keywords), len(platforms), found, new)

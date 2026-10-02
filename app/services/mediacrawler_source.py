@@ -40,6 +40,13 @@ DATA_DIR = ROOT / "data"
 PLATFORM_IDS = {"xiaohongshu": "xhs", "douyin": "dy", "kuaishou": "ks",
                 "bilibili": "bili", "weibo": "wb", "tieba": "tieba", "zhihu": "zhihu"}
 
+# 我们的平台名 → MediaCrawler **产出目录**名。⚠️ 别用 --platform 的缩写:实测传 `--platform dy`
+# 出来的是 `data/douyin/jsonl/`,目录用的是平台全名(xhs 是唯一缩写特例)。曾用
+# `rglob("*dy*.jsonl")` 匹配、因文件名是 `search_contents_<日期>.jsonl` 而不含平台名,
+# 结果一条都读不到(2026-10-02 实跑发现)。
+DIR_NAMES = {"xiaohongshu": "xhs", "douyin": "douyin", "kuaishou": "kuaishou",
+             "bilibili": "bilibili", "weibo": "weibo", "tieba": "tieba", "zhihu": "zhihu"}
+
 
 def available() -> tuple[bool, str]:
     """工具是否就绪(venv + 依赖装好)。返回 (是否可用, 原因)。"""
@@ -99,14 +106,23 @@ def crawl(platform: str, keywords: list[str], timeout: int = 600) -> list[dict]:
 
 
 def _read_results(platform: str) -> list[dict]:
-    """从 data/ 下读最新的 jsonl(它按平台建目录),归一化成我们的结构。"""
-    pid = PLATFORM_IDS.get(platform, platform)
-    cands = sorted(DATA_DIR.rglob(f"*{pid}*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not cands:
+    """从 `data/<平台全名>/jsonl/` 读**最新的内容型** jsonl,归一化成我们的结构。
+
+    只读 `search_contents_*.jsonl`:同目录的 `search_comments_*.jsonl` 是**评论者**记录
+    (不是发帖人),拿它当对标号会把评论区路人一起收进来。
+    """
+    d = DATA_DIR / DIR_NAMES.get(platform, platform) / "jsonl"
+    if not d.is_dir():
+        logger.info("MediaCrawler 没有产出目录(%s)", d)
+        return []
+    files = sorted(d.glob("search_contents_*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not files:
+        files = sorted(d.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not files:
         logger.info("MediaCrawler 没有产出 jsonl(%s)", platform)
         return []
     out: list[dict] = []
-    for line in cands[0].read_text(encoding="utf-8", errors="ignore").splitlines():
+    for line in files[0].read_text(encoding="utf-8", errors="ignore").splitlines():
         if not line.strip():
             continue
         try:
@@ -123,14 +139,18 @@ def _parse_record(rec: dict, platform: str) -> dict | None:
     """把各平台**字段名不同**的记录归一化成统一结构。
 
     实测字段:xhs 用 `user.nickname`/`user.user_id` + `title`/`desc`;
-    其余平台多为 `nickname`/`user_id` + `content`/`title`。这里做多路兼容。
+    **抖音用 `nickname` + `creator_hash`**(没有 user_id/uid);其余平台多为
+    `nickname`/`user_id` + `content`/`title`。这里做多路兼容。
+
+    ⚠️ 该工具是教学版:`nickname` 已被中间脱敏(`籽***）`)、`creator_hash` 是 sha256 截断、
+    账号主页链接不采集——所以收上来的号**名字不可用、也点不进去**,这也是它默认停用的原因。
     """
     from app.services.wechat_monitor import _extract_pan_urls
 
     user = rec.get("user") if isinstance(rec.get("user"), dict) else {}
     name = str(rec.get("nickname") or user.get("nickname") or rec.get("author") or "").strip()
     uid = str(rec.get("user_id") or user.get("user_id") or rec.get("uid")
-              or user.get("id") or "").strip()
+              or user.get("id") or rec.get("creator_hash") or "").strip()
     if not name or not uid:
         return None
     text = " ".join(str(rec.get(k) or "") for k in ("title", "desc", "content", "text")).strip()
