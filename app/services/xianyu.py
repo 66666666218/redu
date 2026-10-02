@@ -377,6 +377,58 @@ def item_price(it: dict) -> str:
     return re.sub(r"¥+", "¥", text).strip()
 
 
+_WANT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(万)?\s*人想要")
+
+
+def tag_contents(it: dict) -> list[str]:
+    """抠出商品卡上**所有渲染标签**的文字。
+
+    ⚠️ 2026-10-03 发现:闲鱼把「6770人想要」这类信息放在
+    `fishTags.<组>.tagList[].data.content` 里 —— 它是**给前端渲染的文案**,不是数值字段。
+    所以搜索响应里那个正经的 `want` 字段**恒为空串**(实测 90 条全空),而热度真值在这里
+    (实测 90 条里 86 条命中 = **95% 覆盖**)。这意味着**需求热度不必打详情接口**,
+    也就绕开了滑块验证。其余标签同样有用:`累计降价N%`(内卷程度)、`N分钟内发货`(卖家人力)。
+    """
+    out: list[str] = []
+    tags = it.get("fishTags")
+    if not isinstance(tags, dict):
+        return out
+    for group in tags.values():
+        for t in ((group or {}).get("tagList") or []):
+            txt = str(((t or {}).get("data") or {}).get("content") or "").strip()
+            if txt:
+                out.append(txt)
+    return out
+
+
+def item_want(it: dict) -> int:
+    """想要数 —— **需求热度的免费来源**(搜索响应里就有,不必打详情接口、不必过滑块)。
+
+    支持 "6770人想要" 与 "1.2万人想要" 两种写法。
+    """
+    for txt in tag_contents(it):
+        m = _WANT_RE.search(txt)
+        if m:
+            return int(float(m.group(1)) * (10000 if m.group(2) else 1))
+    return 0
+
+
+def item_tags(it: dict) -> str:
+    """标签串(用 `|` 连接,截到 255)—— 「人想要」由 `want_count` 单列,这里排除掉防重复。"""
+    keep = [t for t in tag_contents(it) if "人想要" not in t]
+    return _trunc("|".join(keep), 255)
+
+
+def item_sold_price(it: dict) -> str:
+    """到手价(`detailParams.soldPrice`),比 `price` 那段富文本更好解析 —— 价位行情用它。"""
+    params = it.get("detailParams")
+    if isinstance(params, dict):
+        p = params.get("soldPrice")
+        if p not in (None, ""):
+            return _trunc(p, 32)
+    return ""
+
+
 def load_cookie(path: str) -> str:
     """从文件读取闲鱼 Cookie 字符串。"""
     return Path(path).read_text(encoding="utf-8").strip()
@@ -544,6 +596,10 @@ def collect_hot(settings: Settings, client: XianyuClient | None = None, start_of
                 "hit_keywords": len(b["keywords"]),
                 "best_rank": min(b["ranks"]),
                 "keywords": _trunc(",".join(b["keywords"]), 500),
+                # 行情三件套:全部**出自搜索响应**,零额外请求(见 item_want/item_tags 的说明)
+                "want_count": item_want(item),
+                "sold_price": item_sold_price(item),
+                "tags": item_tags(item),
             }
         )
     return result

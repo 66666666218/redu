@@ -117,6 +117,10 @@ class XianyuItem(Base):
     hit_keywords: Mapped[int] = mapped_column(Integer, default=0)
     best_rank: Mapped[int] = mapped_column(Integer, default=0)
     keywords: Mapped[str] = mapped_column(String(500), default="")
+    # 行情三件套:**搜索响应自带**(2026-10-03 发现于 fishTags),不必打详情接口 → 绕开滑块
+    want_count: Mapped[int] = mapped_column(Integer, default=0)   # 想要数(需求端热度)
+    sold_price: Mapped[str] = mapped_column(String(32), default="")  # 到手价(价位行情用,好解析)
+    tags: Mapped[str] = mapped_column(String(255), default="")     # 其他标签(降价%/发货速度…)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
@@ -207,6 +211,11 @@ class XianyuDaily(Base):
     sold_count: Mapped[int] = mapped_column(Integer, default=0)   # 已售/出单量
     view_count: Mapped[int] = mapped_column(Integer, default=0)  # 浏览量
     seller_fans: Mapped[int] = mapped_column(Integer, default=0)  # 卖家粉丝
+    # 这行的来源:`search` = 每轮搜索免费带回来的热度(想要数,95% 覆盖);
+    # `detail` = 深采详情接口补全的(含收藏/出单/浏览量,但受滑块限制)。
+    # 同日同商品只有一行(唯一约束),靠它判优先级:**detail 不被 search 覆盖**。
+    source: Mapped[str] = mapped_column(String(16), default="detail")
+    tags: Mapped[str] = mapped_column(String(255), default="")
     snap_date: Mapped[str] = mapped_column(String(16))            # YYYY-MM-DD
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 

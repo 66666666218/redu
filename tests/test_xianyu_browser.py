@@ -118,3 +118,17 @@ def test_search_gives_up_after_three_attempts() -> None:
     with pytest.raises(XianyuError) as ei:
         c.search("剪映会员")
     assert "重试 3 次" in str(ei.value)
+
+
+def test_detail_uses_in_page_api() -> None:
+    """**行情(想要数/收藏/出单/浏览量)只有详情接口有** —— 浏览器路径也必须能取。
+
+    2026-10-03 发现:深采此前**还在用纯协议客户端**,而搜索早换了浏览器路 →
+    行情一直卡在"被挤爆"那条路上。这条用例钉住"详情也走页面内调用"。
+    """
+    payload = json.dumps({"data": {"itemDO": {"wantCnt": 12, "collectCnt": 3, "soldCnt": 1}}})
+    c = _client(payload)
+    obj = c.detail("123")
+    assert obj["data"]["itemDO"]["wantCnt"] == 12
+    api, data = c._pg.calls[0]
+    assert api == xb.DETAIL_API and data == {"itemId": "123"}

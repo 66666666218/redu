@@ -55,6 +55,13 @@ def xianyu_analytics(user: User = Depends(get_current_user), db: Session = Depen
     return tenant.xianyu_analytics(db, user.id)
 
 
+@router.get("/api/xianyu/market")
+def xianyu_market(days: int = 30, user: User = Depends(get_current_user),
+                  db: Session = Depends(get_db)):
+    """价位行情:价格=供给热度(红海程度),想要数=需求热度,供需比才是真热度。"""
+    return tenant.xianyu_market(db, user.id, days=max(1, min(int(days), 365)))
+
+
 @router.get("/api/schedules")
 def schedules_list(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return schedule_service.list_schedules(db, user.id)

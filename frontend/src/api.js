@@ -127,6 +127,8 @@ export const api = {
   xianyuDaily: () => req('GET', '/api/xianyu/daily'),
   xianyuCollectDeep: () => req('POST', '/api/xianyu/collect-deep'),
   xianyuAnalytics: () => req('GET', '/api/xianyu/analytics'),
+  // 价位行情:价格看供给(红海程度),想要数看需求(搜索免费带回),供需比才是真热度
+  xianyuMarket: (days) => req('GET', '/api/xianyu/market?days=' + (days || 30)),
   douhotWatchAdd: (listType, keyword, filterKeyword, dateWindow) => req('POST', '/api/douhot/watch', { list_type: listType, keyword, filter_keyword: filterKeyword || '', date_window: dateWindow || null }),
   douhotWatchList: () => req('GET', '/api/douhot/watch'),
   douhotWatchAnalytics: () => req('GET', '/api/douhot/watch-analytics'),

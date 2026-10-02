@@ -131,6 +131,13 @@ def _migrate() -> None:
             "smtp_pass VARCHAR(255)", "smtp_from VARCHAR(128)", "reset_token VARCHAR(128)", "reset_expires DATETIME",
         ],
         "runs": ["retry_count INTEGER DEFAULT 0"],
+        # 闲鱼行情三件套(2026-10-03):want_count/sold_price/tags 全部出自**搜索响应**,
+        # 不必打详情接口 → 需求热度绕开滑块验证。存量行 want_count=0 = "还没用新解析重采过"。
+        "xianyu_items": ["want_count INTEGER DEFAULT 0", "sold_price VARCHAR(32) DEFAULT ''",
+                         "tags VARCHAR(255) DEFAULT ''"],
+        # source 区分「搜索免费行情」与「详情深采」:同日同商品一行,靠它判优先级不被覆盖。
+        # 存量行一律标 detail —— 历史行确实都是深采写的,标 search 会让深采跳过它们、永不补全。
+        "xianyu_daily": ["source VARCHAR(16) DEFAULT 'detail'", "tags VARCHAR(255) DEFAULT ''"],
         "alerts": ["section VARCHAR(32) DEFAULT ''"],
         "douhot_watch": ["section VARCHAR(16) DEFAULT 'douhot'", "filter_keyword VARCHAR(64) DEFAULT ''",
                         "date_window INTEGER"],

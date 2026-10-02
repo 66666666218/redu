@@ -24,9 +24,12 @@
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from app.services.xianyu import API, XianyuError, _extract_items
+
+DETAIL_API = "mtop.taobao.idle.pc.detail"      # 商品详情(与 XianyuClient.detail 同一个接口)
 from app.utils import get_logger
 
 logger = get_logger(__name__)
@@ -123,7 +126,7 @@ class XianyuBrowserClient:
         """
         return ""
 
-    def _eval_search(self, pg, payload: dict) -> str:
+    def _eval_api(self, pg, api: str, payload: dict) -> str:
         """页面内调用 + **重试**。
 
         ⚠️ 实测(2026-10-02 23:45 那轮定时采集):`goto` 之后页面**自己又跳了一次**
@@ -134,7 +137,7 @@ class XianyuBrowserClient:
         last = None
         for _ in range(3):
             try:
-                return pg.evaluate(_JS_SEARCH, [API, payload])
+                return pg.evaluate(_JS_SEARCH, [api, payload])
             except Exception as exc:  # noqa: BLE001
                 last = exc
                 msg = str(exc)
@@ -142,7 +145,7 @@ class XianyuBrowserClient:
                     pg.wait_for_timeout(1500)
                     continue
                 raise
-        raise XianyuError(f"闲鱼页面内调用重试 3 次仍失败:{str(last)[:140]}")
+        raise XianyuError(f"闲鱼页面内调用重试 3 次仍失败({api}):{str(last)[:140]}")
 
     # ---------------------------------------------------------------- 采集
     def search(self, keyword: str, page: int = 1, rows: int = 30) -> list[dict]:
@@ -154,9 +157,7 @@ class XianyuBrowserClient:
             "customGps": "", "searchReqFromPage": "pcSearch", "extraFilterValue": "{}",
             "userPositionJson": "{}",
         }
-        import json
-
-        raw = self._eval_search(pg, payload)
+        raw = self._eval_api(pg, API, payload)
         try:
             obj = json.loads(raw)
         except ValueError as exc:
@@ -172,6 +173,22 @@ class XianyuBrowserClient:
             raise XianyuError(f"未解析到商品,keyword={keyword}")
         logger.debug("闲鱼(浏览器路径)搜索 %s → %s 条", keyword, len(items))
         return items
+
+    def detail(self, item_id: str) -> dict:
+        """商品详情 —— **行情(想要数/收藏/出单/浏览量)的唯一来源**,与 `XianyuClient.detail` 同签名。
+
+        ⚠️ 深采此前**还在用纯协议客户端**,而搜索早换了浏览器路 → 行情一直卡在被挤爆那条路上
+        (2026-10-03 发现)。这里补齐,让两条路一致。
+        """
+        pg = self._ensure_page()
+        raw = self._eval_api(pg, DETAIL_API, {"itemId": item_id})
+        try:
+            obj = json.loads(raw)
+        except ValueError as exc:
+            raise XianyuError(f"闲鱼详情(浏览器路径)返回非 JSON:{str(exc)[:120]}") from exc
+        if isinstance(obj, dict) and obj.get("__err"):
+            raise XianyuError(f"闲鱼详情(浏览器路径)失败:{str(obj['__err'])[:140]}")
+        return obj if isinstance(obj, dict) else {}
 
 
 _CLIENT: "XianyuBrowserClient | None" = None

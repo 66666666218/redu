@@ -4,6 +4,8 @@ import { api } from '../api'
 
 const dash = ref({ weibo_trends: [], xianyu_hot: [], douhot_words: [], wechat_overview: null })
 const analytics = ref({ total_want: 0, top_risers: [], categories: [], top_fallers: [], items: [] })
+// 价位行情:供给(价格/在售数)+ 需求(想要数)→ 供需比(想要÷在售,高=蓝海)
+const market = ref({ days: 30, item_count: 0, supply: {}, demand: {}, ratio: 0, keywords: [], blue_ocean: [], red_ocean: [], price_buckets: [] })
 const watches = ref([])
 const platformAgent = ref({ weibo: [], xianyu: [] })
 const watchForm = ref({ list_type: 'word', keyword: '' })
@@ -39,6 +41,9 @@ async function loadAgent() {
 }
 async function loadAnalytics() {
   try { analytics.value = await api.xianyuAnalytics() } catch (e) { console.debug('闲鱼分析暂无数据', e) }
+}
+async function loadMarket() {
+  try { market.value = await api.xianyuMarket(30) } catch (e) { console.debug('闲鱼行情暂无数据', e) }
 }
 async function loadWatches() {
   try { watches.value = await api.douhotWatchAnalytics() } catch (e) { console.debug('关注词分析暂无数据', e) }
@@ -100,7 +105,7 @@ function trendClass(label) {
   return label === '上升期' ? 'up' : (label === '回落期' ? 'down' : '')
 }
 
-onMounted(async () => { await load(); await loadAgent(); await loadAnalytics(); await loadWatches() })
+onMounted(async () => { await load(); await loadAgent(); await loadAnalytics(); await loadMarket(); await loadWatches() })
 </script>
 
 <template>
@@ -147,7 +152,7 @@ onMounted(async () => { await load(); await loadAgent(); await loadAnalytics(); 
 
       <div class="card">
         <h3>闲鱼 · Top20 详情分析(想要数)  <span class="empty">昨日→今日</span></h3>
-        <p class="empty">今日总想要 {{ analytics.total_want }} · 上榜 {{ analytics.count }} <span style="color:var(--dim)">(想要数受反爬限制,无则显示 0)</span></p>
+        <p class="empty">今日总想要 {{ analytics.total_want }} · 上榜 {{ analytics.count }} <span style="color:var(--dim)">(想要数自 2026-10-03 起由搜索直接带回,不再依赖详情接口)</span></p>
         <h4 style="color:var(--dim);margin:8px 0">🔥 上升榜</h4>
         <table v-if="analytics.top_risers.length"><tr><th>标题</th><th>涨跌</th><th>涨跌%</th></tr>
           <tr v-for="it in analytics.top_risers.slice(0,8)" :key="it.item_id"><td>{{ it.title.slice(0,24) }}</td><td class="up">+{{ it.delta }}</td><td class="up">{{ pct(it.pct) }}</td></tr>
@@ -155,6 +160,41 @@ onMounted(async () => { await load(); await loadAgent(); await loadAnalytics(); 
         <div v-else class="empty">先"闲鱼深度采集"</div>
         <h4 style="color:var(--dim);margin:10px 0 4px">类目分布</h4>
         <div v-for="c in analytics.categories" :key="c.name" class="empty">· {{ c.name }} ×{{ c.count }}</div>
+      </div>
+
+      <div class="card" v-if="market.item_count">
+        <h3>闲鱼 · 价位行情 <span class="empty">近 {{ market.days }} 天 · 价格看供给,想要数看需求</span></h3>
+        <div class="row" style="gap:18px;margin:8px 0;flex-wrap:wrap">
+          <div><div class="empty" style="padding:0">在售</div><b class="num">{{ market.item_count }}</b></div>
+          <div><div class="empty" style="padding:0">最低价</div><b class="num price">¥{{ market.supply.min_price }}</b></div>
+          <div><div class="empty" style="padding:0">中位价</div><b class="num price">¥{{ market.supply.median_price }}</b></div>
+          <div><div class="empty" style="padding:0">总想要</div><b class="num">{{ market.demand.want_total }}</b></div>
+          <div><div class="empty" style="padding:0">供需比</div><b class="num up">{{ market.ratio }}</b></div>
+        </div>
+        <h4 style="color:var(--dim);margin:8px 0 4px">🌊 蓝海(想要多、在售少)</h4>
+        <table v-if="market.blue_ocean.length">
+          <tr><th>关键词</th><th>在售</th><th>中位价</th><th>总想要</th><th>供需比</th><th>降价</th></tr>
+          <tr v-for="k in market.blue_ocean.slice(0,6)" :key="k.keyword">
+            <td>{{ k.keyword }}</td><td>{{ k.items }}</td><td class="price">¥{{ k.median_price }}</td>
+            <td>{{ k.want_total }}</td><td class="up">{{ k.ratio }}</td><td>{{ k.price_cut }}</td>
+          </tr>
+        </table>
+        <div v-else class="empty">再采集几轮(蓝海榜要求该词 ≥3 条在售,避免小样本噪音)</div>
+        <h4 style="color:var(--dim);margin:10px 0 4px">🔥 红海(一堆人在卖)</h4>
+        <table v-if="market.red_ocean.length">
+          <tr><th>关键词</th><th>在售</th><th>最低价</th><th>总想要</th><th>供需比</th></tr>
+          <tr v-for="k in market.red_ocean.slice(0,6)" :key="k.keyword">
+            <td>{{ k.keyword }}</td><td>{{ k.items }}</td><td class="price">¥{{ k.min_price }}</td>
+            <td>{{ k.want_total }}</td><td :class="{ down: k.ratio < 100 }">{{ k.ratio }}</td>
+          </tr>
+        </table>
+        <h4 style="color:var(--dim);margin:10px 0 4px">价位分布</h4>
+        <div class="row" style="gap:10px;flex-wrap:wrap">
+          <span v-for="b in market.price_buckets" :key="b.range" class="empty">¥{{ b.range }} ×{{ b.count }}</span>
+        </div>
+        <p class="empty" style="margin-top:8px">
+          供需比 = 想要总数 ÷ 在售条数,<b>高 = 想买的人多而供给少 = 蓝海</b>。想要数由<b>搜索响应直接带回</b>(实测 95% 覆盖,藏在商品卡标签里),不必打详情接口、不受反爬影响。
+        </p>
       </div>
 
       <div class="card">

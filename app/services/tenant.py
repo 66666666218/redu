@@ -38,7 +38,14 @@ from app.services.notifier import get_user_notifier
 from app.db import repository
 from app.services.trend_analyzer import compute_slope, recent_growth
 from app.services.tenant_base import _base, _record_run, persist_refreshed_cookie, verify_cooldown_active  # noqa: F401  (供外部/测试引用)
-from app.services.xianyu_analytics import run_xianyu_deep, xianyu_analytics, xianyu_daily, xianyu_deep_due  # noqa: F401
+from app.services.xianyu_analytics import (  # noqa: F401
+    record_search_snapshot,
+    run_xianyu_deep,
+    xianyu_analytics,
+    xianyu_daily,
+    xianyu_deep_due,
+    xianyu_market,
+)
 from app.services.keyword_watch import (  # noqa: F401
     _record_douhot_watch_snaps,
     add_douhot_watch,
@@ -242,6 +249,15 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
             prev_keys.add(it["item_id"])
             session.add(XianyuItem(user_id=user_id, **it))
         session.commit()
+        # 行情(想要数)顺路落当日快照:全部出自**搜索响应**提供的标签,零额外请求、
+        # 不碰详情接口 → 需求热度从此每轮自动更新,不再被滑块卡死(2026-10-03)。
+        # 注意传的是**整个 hot**(不是上面去重后的子集):行情要的是"当前在售行情",
+        # 与"这商品是否新入库"无关。
+        try:
+            record_search_snapshot(session, user_id, hot)
+        except Exception:  # noqa: BLE001 - 行情落库失败不该让整轮采集算失败
+            logger.warning("闲鱼搜索行情快照写入失败", exc_info=True)
+            session.rollback()
         persist_refreshed_cookie(session, user_id, client)
         latest = [{"key": it["item_id"], "hit_keywords": it["hit_keywords"], "best_rank": it["best_rank"]} for it in hot]
         alert_service.evaluate(session, user_id, "xianyu", latest, prev_keys_before, settings)

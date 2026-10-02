@@ -258,6 +258,41 @@
 
 ---
 
+### 6.4 价位行情(价格=供给热度,想要数=需求热度)
+
+- **接口名称**: 闲鱼价位行情 / 供需比
+- **请求方式**: GET
+- **URL 路径**: `/api/xianyu/market`
+- **请求参数**: `days`(可选,查询窗口天数,默认 30,取值 1–365)
+
+**响应示例 (200)**
+```json
+{
+  "days": 30,
+  "item_count": 87,
+  "seller_count": 61,
+  "supply": { "min_price": 1.0, "median_price": 2.5, "avg_price": 12.4, "p25_price": 1.28 },
+  "demand": { "want_total": 24810, "want_median": 203.0 },
+  "ratio": 285.2,
+  "keywords": [
+    { "keyword": "ps教程", "items": 12, "min_price": 1.0, "median_price": 1.28,
+      "avg_price": 3.1, "want_total": 12800, "ratio": 1066.7, "price_cut": 4 }
+  ],
+  "blue_ocean": [ { "keyword": "ps教程", "items": 12, "ratio": 1066.7 } ],
+  "red_ocean":  [ { "keyword": "剪映会员", "items": 31, "ratio": 88.0 } ],
+  "price_buckets": [ { "range": "0-1", "count": 22 }, { "range": "1-3", "count": 41 } ]
+}
+```
+
+> **口径(2026-10-03 起)**:
+> - **价格是供给端信号** —— 同款在售条数越多、价被压得越低,只说明**红海**(有人验证过能卖,但你在跟几百个同行抢)。单看价格**看不出需求热度**。
+> - **想要数才是需求端信号**,且**2026-10-03 起由搜索响应免费提供**(藏在商品卡 `fishTags` 的渲染标签里,如「6770人想要」;实测 90 条命中 86 条 = **95% 覆盖**),**不需要打详情接口**,因而**不再被滑块验证阻塞**。搜索每轮顺路写当日快照(`xianyu_daily.source='search'`)。
+> - **供需比 `ratio` = 想要总数 ÷ 在售条数**:高 = 想买的人多而供给少 → 蓝海。
+> - `blue_ocean` / `red_ocean` **只收 ≥3 条在售的词**(1 条样本能刷出任何离谱比值)。`price_cut` 为该词下打了「累计降价」标签的在售条数(内卷程度)。
+> - 深采(详情接口)仍存在,降级为**锦上添花**:多给收藏/出单/浏览量,受滑块限制、允许失败;其行标 `source='detail'`,**不被搜索快照覆盖**。
+
+---
+
 ## 7. 抖音热点 · 内容词趋势
 
 > 需要本地 `.env` 配置 `DOUHOT_COOKIE_FILE`(抖音热点宝授权 Cookie);采集为**纯 requests 直连**(接口只校验登录 Cookie,不需要签名参数,也不再依赖浏览器)。Cookie 失效时采集记录为 failed,原因为「热点宝 Cookie 已失效」。
@@ -1474,6 +1509,7 @@ GET `/api/admin/health`(perm `logs.view`)→ 各平台最近采集状态 + 数�
 
 - GET `/api/xianyu/daily` → 按日汇总(命中词数/新增商品/最佳名次序列)。
 - GET `/api/xianyu/analytics` → 深度分析(资源类目分布、词效对比、趋势)。
+- GET `/api/xianyu/market` → 价位行情(供给价分布 + 需求想要数 → **供需比**;支持 `?days=`)。
 
 ---
 
