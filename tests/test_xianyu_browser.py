@@ -132,3 +132,51 @@ def test_detail_uses_in_page_api() -> None:
     assert obj["data"]["itemDO"]["wantCnt"] == 12
     api, data = c._pg.calls[0]
     assert api == xb.DETAIL_API and data == {"itemId": "123"}
+
+
+def test_thread_bound_client_keeps_all_work_on_one_thread(monkeypatch) -> None:
+    """⚠️ Playwright 的 sync 对象**只能在创建它的线程里用**,而调度器是多线程的
+    (`ThreadPoolExecutor(24)`,FastAPI 同步端点另有一套线程池)。
+
+    实测 2026-10-03 00:50 那轮采集报 `Cannot switch to a different thread` —— 前两轮恰好
+    复用同一线程没事,**第三轮换了线程就炸**(这种"偶发、像网络抖动"的失败最难查)。
+    这里用假客户端钉住:`_ThreadBoundClient` 无论被哪个线程调用,真正干活的客户端
+    **始终建在同一个线程**里。
+    """
+    import threading
+
+    seen: list[int] = []
+
+    class _FakeClient:
+        def __init__(self, settings=None):
+            seen.append(threading.get_ident())          # 记录"客户端建在哪个线程"
+
+        def search(self, keyword, page=1, rows=30):
+            seen.append(threading.get_ident())          # 干活也必须在同一线程
+            return [{"title": keyword, "item_id": "1"}]
+
+        def detail(self, item_id):
+            seen.append(threading.get_ident())
+            return {"itemId": item_id}
+
+        def close(self):
+            seen.append(threading.get_ident())
+
+    monkeypatch.setattr(xb, "XianyuBrowserClient", _FakeClient)
+    c = xb._ThreadBoundClient()
+    out: list = []
+    threads = [threading.Thread(target=lambda: out.append(c.search("剪映会员"))) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(out) == 6
+    assert len(set(seen)) == 1, f"客户端被建在了多个线程上:{set(seen)}"
+    c.close()
+
+
+def test_get_client_returns_thread_bound_proxy() -> None:
+    """`get_client()` 必须给**线程绑定**的代理(否则跨线程调用会炸)。"""
+    xb.close_client()
+    assert isinstance(xb.get_client(), xb._ThreadBoundClient)
+    xb.close_client()

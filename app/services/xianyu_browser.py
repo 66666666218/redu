@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from app.services.xianyu import API, XianyuError, _extract_items
@@ -191,18 +192,75 @@ class XianyuBrowserClient:
         return obj if isinstance(obj, dict) else {}
 
 
-_CLIENT: "XianyuBrowserClient | None" = None
+class _ThreadBoundClient:
+    """把浏览器客户端**钉在一个专属线程**上(Playwright 的 sync 对象有线程亲和性)。
+
+    ⚠️ **为什么必须**(2026-10-03 实测):调度器是 `ThreadPoolExecutor(24)`(见 `scheduler.
+    _scheduler_kwargs`),每个作业落在**任意**工作线程;FastAPI 的同步端点又各在自己的线程池
+    线程。而进程级单例里那个 Playwright 对象**只能在创建它的线程里用** —— 实测 00:50 那轮采集
+    报 `Cannot switch to a different thread`(前两轮恰好复用同一线程所以没事,**第三轮换了线程就炸**;
+    这种"偶发、看起来像网络抖动"的失败最难查)。
+
+    做法:`max_workers=1` 的执行器,**惰性**创建 —— 浏览器只在**这一个线程**里开、用、关。
+    顺带把"同一档案被两个上下文抢"的 `TargetClosedError` 也一并消掉(单线程 = 单持有者)。
+    """
+
+    def __init__(self, settings=None) -> None:
+        self._settings = settings
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="xianyu-browser")
+        self._client: XianyuBrowserClient | None = None
+
+    def _call(self, name: str, *args, **kwargs):
+        """在专属线程里执行(客户端也在那个线程里惰性创建)。
+
+        ⚠️ 提交的函数**不许再调 `_call`**(会自己等自己 → 死锁);它只碰 `self._client`。
+        """
+        def _run():
+            if self._client is None:
+                self._client = XianyuBrowserClient(settings=self._settings)
+            return getattr(self._client, name)(*args, **kwargs)
+
+        return self._pool.submit(_run).result()
+
+    # ---- 与 `XianyuBrowserClient` 同接口(调用方零改动) ----
+    def search(self, keyword: str, page: int = 1, rows: int = 30) -> list[dict]:
+        return self._call("search", keyword, page, rows)
+
+    def detail(self, item_id: str) -> dict:
+        return self._call("detail", item_id)
+
+    def cookie_header(self) -> str:
+        return ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """关闭也要**在那个线程里**做 —— Playwright 对象同样不能跨线程。"""
+        try:
+            if self._client is not None:
+                self._pool.submit(self._client.close).result()
+        except Exception:  # noqa: BLE001 - 收尾失败不该冒泡
+            logger.debug("闲鱼浏览器关闭异常", exc_info=True)
+        finally:
+            self._client = None
+            self._pool.shutdown(wait=False)
 
 
-def get_client(settings=None) -> XianyuBrowserClient:
-    """进程内**复用**一个浏览器客户端。
+_CLIENT: "_ThreadBoundClient | None" = None
+
+
+def get_client(settings=None) -> "_ThreadBoundClient":
+    """进程内**复用**一个浏览器客户端(线程安全:实际工作全在专属线程里)。
 
     开一次浏览器约 10~20 秒,一轮里有多个关键词 —— **复用同一个页面**,别每词开关一次。
-    常驻一个 headless 浏览器的开销(~200MB)换来"每轮只启一次",值。
     """
     global _CLIENT
     if _CLIENT is None:
-        _CLIENT = XianyuBrowserClient(settings=settings)
+        _CLIENT = _ThreadBoundClient(settings=settings)
     return _CLIENT
 
 
