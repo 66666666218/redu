@@ -517,18 +517,17 @@ def build_daily(db: Session, user_id: int, settings: Settings, include_keywords:
     return mask_own("\n".join(lines), settings)
 
 
-def rebrand(text: str, brand: str) -> str:
-    """把文本里**别人的名字**(《…》包的口令/群名)换成**我们自己的品牌词**。
+def strip_others(text: str) -> str:
+    """把文本里**别人的名字**(《…》包的口令/群名)删掉。
 
-    用户口径(2026-10-02):"转存后把推广的**别人名字改成我们的名字**推广到飞书" ——
-    抖音推广号会把自己群的名字写进《…》(实测《三岁分享》《白泽的梦》),卡片是发到
-    客户群看的,**露出别人的名字等于把人往别人那儿送**;换成我们自己的,这张卡就是
-    "我们在发这个资源"。
+    抖音推广号会把自己群的名字写进《…》(实测《三岁分享》《白泽的梦》),卡片发到客户群,
+    露出别人的名字等于把人往别人那儿送。
 
-    `brand` 为空时退化成"抹掉"(至少不露别人的名字)。
+    ⚠️ **口径变更史(2026-10-02,别再反复)**:
+      v2 = **删掉**(当前采用,用户 17:55 明确选它);
+      v3 曾改成"**替换成《我们的品牌词》**",用户对比后**选回 v2** —— 所以这里不做替换,
+      品牌词只出现在**卡片标题**里(`brand_name`)。
     """
     import re
 
-    if not brand:
-        return re.sub(r"《[^》]{1,20}》", "", text or "").strip()
-    return re.sub(r"《[^》]{1,20}》", f"《{brand}》", text or "").strip()
+    return re.sub(r"《[^》]{1,20}》", "", text or "").strip()

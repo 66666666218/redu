@@ -285,7 +285,7 @@ def push_leads(leads: list[dict], settings) -> bool:
         logger.info("抖音线索:未配飞书 webhook,跳过推送")
         return False
 
-    from app.services.feishu._cards import _col_set_row, _md_safe, rebrand
+    from app.services.feishu._cards import _col_set_row, _md_safe, strip_others
     from app.services.feishu_client import FeishuClient
 
     brand = (getattr(settings, "brand_name", "") or "").strip()
@@ -297,10 +297,10 @@ def push_leads(leads: list[dict], settings) -> bool:
                      grey=True)]
     for ld in leads:
         info = ld.get("kouling") or {}
-        # ⚠️ **署名换成我们自己的**(用户口径:"把推广的别人名字改成我们的名字"):抖音账号名
-        # 是**别人**的,客户扫到就被带走了 —— 这里显示我们的品牌词。视频链接仍指向原视频。
-        author = _md_safe(brand or ld.get("author") or "—")
-        title = _md_safe(rebrand(ld.get("title") or "", brand))
+        # 作者列显示**抖音账号名**(工具脱敏过的,如「籽***」)—— v2 口径(2026-10-02 用户选定)
+        author = _md_safe(ld.get("author") or "—")
+        # 标题里别人的口令《…》**删掉**(不是替换,见 `strip_others` 的口径变更史)
+        title = _md_safe(strip_others(ld.get("title") or ""))
         shown = title[:24] + ("…" if len(title) > 24 else "")
         # 资源列:一眼看出"这条值不值钱"(已转存/已加群/没解出资源/被闸门挡下)
         if info.get("kind") == "share" and info.get("status") == "ok":
