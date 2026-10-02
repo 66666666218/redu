@@ -132,7 +132,7 @@ def test_tick_skips_admin_disabled_user(monkeypatch: pytest.MonkeyPatch, session
     monkeypatch.setattr(
         scheduler, "_runners", lambda: {s: (lambda db, uid, st, s=s: called.append((uid, s))) for s in svc.SECTIONS}
     )
-    scheduler.collect_tick()
+    scheduler.collect_tick(settings=_role_all())
     assert [uid for uid, _ in called] and all(uid == 7 for uid, _ in called)  # 只跑启用用户 7
 
 
@@ -152,6 +152,13 @@ def test_ten_minute_interval_runs_six_times_an_hour(session) -> None:
 
 
 # ---- 调度 tick ----
+def _role_all():
+    """角色中性的 settings 替身:`_section_allowed` 对 `all` 一律放行 ——
+    这些用例测的是"缺 Cookie 跳过/失败也标记"等**其它行为**,不该被分侧护栏影响。"""
+    import types
+    return types.SimpleNamespace(scheduler_role="all")
+
+
 def _patch_session(monkeypatch: pytest.MonkeyPatch, session) -> None:
     import app.db
 
@@ -168,7 +175,7 @@ def test_tick_runs_due_sections(monkeypatch: pytest.MonkeyPatch, session) -> Non
     monkeypatch.setattr(
         scheduler, "_runners", lambda: {s: (lambda db, uid, st, s=s: called.append((uid, s))) for s in svc.SECTIONS}
     )
-    out = scheduler.collect_tick()
+    out = scheduler.collect_tick(settings=_role_all())
     # 只配了微博 Cookie:微博/百度跑(百度是公开接口无需 Cookie),闲鱼/抖音因缺 Cookie 被跳过;
     # 公众号监听不需要 Cookie(用 dajiala key),同样会跑
     assert out == {"due": 2, "ok": 2, "failed": 0, "skipped": 2}
@@ -180,7 +187,7 @@ def test_tick_enrolls_new_users(monkeypatch: pytest.MonkeyPatch, session) -> Non
     _patch_session(monkeypatch, session)
     _add_user(session, 7)
     monkeypatch.setattr(scheduler, "_runners", lambda: {s: (lambda db, uid, st: None) for s in svc.SECTIONS})
-    scheduler.collect_tick()
+    scheduler.collect_tick(settings=_role_all())
     assert {r.section for r in session.scalars(select(UserSchedule)).all()} == set(svc.SECTIONS)
 
 
@@ -189,12 +196,12 @@ def test_tick_skips_section_without_cookie(monkeypatch: pytest.MonkeyPatch, sess
     _patch_session(monkeypatch, session)
     _add_user(session, 7)
     monkeypatch.setattr(scheduler, "_runners", lambda: {s: (lambda db, uid, st: None) for s in svc.SECTIONS})
-    assert scheduler.collect_tick() == {"due": 1, "ok": 1, "failed": 0, "skipped": 3}
+    assert scheduler.collect_tick(settings=_role_all()) == {"due": 1, "ok": 1, "failed": 0, "skipped": 3}
     assert len(svc.due_schedules(session)) == 4  # 未被标记(微博/闲鱼/抖音缺 Cookie;百度已跑;wechat 归独立作业)
 
     session.add(UserCookie(user_id=7, platform="douyin", cookie="x"))
     session.commit()
-    assert scheduler.collect_tick()["ok"] == 1
+    assert scheduler.collect_tick(settings=_role_all())["ok"] == 1
 
 
 def test_tick_marks_ran_even_on_failure(monkeypatch: pytest.MonkeyPatch, session) -> None:
@@ -208,7 +215,7 @@ def test_tick_marks_ran_even_on_failure(monkeypatch: pytest.MonkeyPatch, session
         raise RuntimeError("Cookie 失效")
 
     monkeypatch.setattr(scheduler, "_runners", lambda: {"douhot": boom})
-    out = scheduler.collect_tick()
+    out = scheduler.collect_tick(settings=_role_all())
     assert out["failed"] == 1
     assert svc.get_or_create(session, 7, "douhot").last_run_at is not None
     # 抖音已标记不再重跑;微博/闲鱼/百度/公众号因无 runner 被跳过、未标记,仍在待跑队列
@@ -249,7 +256,7 @@ def test_wechat_collect_tick_handles_wechat_section(monkeypatch, session) -> Non
     from app.services import wechat_monitor
     monkeypatch.setattr(wechat_monitor, "run_wechat_listen", lambda db, uid, settings=None: None)
 
-    scheduler.collect_tick()
+    scheduler.collect_tick(settings=_role_all())
     row = svc.get_or_create(session, 7, "wechat")
     assert row.last_run_at is None  # collect_tick 已跳过 wechat,未标记
 
@@ -382,3 +389,43 @@ def test_instance_role_filters_jobs(monkeypatch) -> None:
     assert "collect_tick" in wechat and "collect_tick" in hotspot
     # 两端的并集必须等于全集 —— 漏掉谁都是"某个作业永远不会被登记"
     assert wechat | hotspot == all_ids
+
+
+def test_collect_tick_gates_sections_by_instance_role(monkeypatch, session) -> None:
+    """⚠️ **按板块分侧**(2026-10-02 补):`collect_tick` 是 `both` 角色**两端都跑**,
+    而它的防重复靠 `claim_schedule` 原子抢占 —— **两台实例的数据库独立,各自抢占都会成功**
+    → 同一个上游账号会被两端同时采集。闲鱼实测"哎哟喂,被挤爆啦"是**账号级**限流
+    (换出口也没用、请求量只有 6 次/小时),高度疑似与此有关。
+
+    所以:本机(wechat 角色)只采**闲鱼**;微博/抖音/百度归远程(hotspot)。
+    """
+    import types
+
+    _patch_session(monkeypatch, session)
+    _add_user(session, 7)
+    for plat in ("goofish", "weibo", "douyin"):     # 三个都配了 Cookie,确保差异只来自角色
+        session.add(UserCookie(user_id=7, platform=plat, cookie="x"))
+    session.commit()
+    called: list[str] = []
+    monkeypatch.setattr(
+        scheduler, "_runners",
+        lambda: {s: (lambda db, uid, st, s=s: called.append(s)) for s in svc.SECTIONS})
+
+    scheduler.collect_tick(settings=types.SimpleNamespace(scheduler_role="wechat"))
+    assert called == ["xianyu"], "本机只该采闲鱼;热点板块归远程"
+
+    called.clear()
+    scheduler.collect_tick(settings=types.SimpleNamespace(scheduler_role="hotspot"))
+    assert "xianyu" not in called and "weibo" in called, "远程不该采闲鱼"
+
+
+def test_section_allowed_is_permissive_for_unlisted_and_all_roles() -> None:
+    """未登记的板块/`all`/`both` 角色一律放行(向后兼容,别把老部署拦死)。"""
+    import types
+
+    for role in ("all", "both"):
+        st = types.SimpleNamespace(scheduler_role=role)
+        assert all(scheduler._section_allowed(s, st)
+                   for s in ("xianyu", "weibo", "douhot", "baidu", "别的"))
+    st = types.SimpleNamespace(scheduler_role="wechat")
+    assert scheduler._section_allowed("别的板块", st) is True

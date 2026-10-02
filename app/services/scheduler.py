@@ -34,6 +34,27 @@ def _runners() -> dict:
             "wechat": run_wechat_listen}
 
 
+# **板块归哪一侧跑**(与 `doc/operations.md` §4j 的分工一致):
+#   wechat 侧 = 公众号 + 闲鱼   /   hotspot 侧 = 微博/抖音/百度
+#
+# ⚠️ 为什么光有 `SCHEDULER_ROLE` 还不够:`collect_tick` 本身是 **`both` 角色(两端都跑)**,
+# 它的防重复靠 `claim_schedule` 原子抢占 —— 而**两台实例的数据库是独立的**,各自抢占都会成功
+# → 同一个上游账号会被两端同时采集。闲鱼实测"哎哟喂,被挤爆啦"(**账号级**限流:换出口
+# 也没用、请求量只有 6 次/小时)高度疑似与此有关。所以这里**再按板块分一次侧**:
+# 本实例不分管的板块直接跳过(不打上游、不消耗配额)。
+_SECTION_ROLE = {"wechat": "wechat", "xianyu": "wechat",
+                 "weibo": "hotspot", "douhot": "hotspot", "baidu": "hotspot"}
+
+
+def _section_allowed(section: str, settings: Settings) -> bool:
+    """本实例该不该采这个板块(未登记的板块不拦,向后兼容)。"""
+    want = _SECTION_ROLE.get(section)
+    if not want:
+        return True
+    cur = (getattr(settings, "scheduler_role", "all") or "all").strip().lower()
+    return cur in ("all", "both") or cur == want
+
+
 def collect_tick(settings: Settings | None = None, now: datetime | None = None) -> dict:
     """每分钟执行一次:把到期的 (用户, 板块) 采集跑掉。
 
@@ -53,6 +74,11 @@ def collect_tick(settings: Settings | None = None, now: datetime | None = None) 
         for row in due:
             if row.section == "wechat":
                 continue  # 公众号监听由 wechat_collect_tick 独立作业处理(长任务,勿阻塞其它板块)
+            if not _section_allowed(row.section, settings):
+                skipped += 1
+                logger.debug("跳过不属于本实例的板块:%s(角色=%s)", row.section,
+                             getattr(settings, "scheduler_role", "all"))
+                continue
             runner = runners.get(row.section)
             if runner is None:
                 continue
