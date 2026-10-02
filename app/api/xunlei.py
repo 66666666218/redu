@@ -6,14 +6,22 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.db import get_db
 from app.db.models import User
-from app.services import xunlei_group
+from app.services import xunlei_group, xunlei_kouling
 
 router = APIRouter()
+
+
+class KoulingBody(BaseModel):
+    """口令解析入参。"""
+
+    kouling: str
+    transfer: bool = False          # True = 解析到分享链后**直接转存入库**(会写你的盘)
 
 
 @router.get("/api/xunlei/groups")
@@ -47,3 +55,16 @@ def xunlei_transfer_now(limit: int = 3, user: User = Depends(get_current_user),
     `limit` 限死上限,别一次拉太大。
     """
     return xunlei_group.transfer_pending(db, user.id, limit=max(1, min(limit, 10)))
+
+
+@router.post("/api/xunlei/kouling")
+def xunlei_resolve_kouling(body: KoulingBody, user: User = Depends(get_current_user),
+                           db: Session = Depends(get_db)):
+    """**口令解析** —— 抖音标题里《…》包的那串口令 → 真实资源入口。
+
+    `transfer=false` 只解析(纯读,安全);`transfer=true` 解析到分享链后**直接转存入库**
+    (⚠️ 会写你的迅雷盘);解析到**群**时只加群,资源交给群采集轮。
+    """
+    if body.transfer:
+        return xunlei_kouling.ingest(db, user.id, body.kouling)
+    return xunlei_kouling.resolve(body.kouling)

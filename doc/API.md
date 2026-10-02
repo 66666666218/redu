@@ -1637,3 +1637,37 @@ GET `/api/admin/health`(perm `logs.view`)→ 各平台最近采集状态 + 数�
 > 单条失败会被标成 `failed` 留痕,**不会每轮重复重试**它。
 > **前端入口**:「迅雷群组」页 `/xunlei`(群列表 + 采集/转存按钮 + 分享表格)。
 
+### 21.5 口令解析(抖音《口令》→ 资源入口)
+
+- **接口名称**: 迅雷口令解析(可选择性直接转存)
+- **请求方式**: POST
+- **URL 路径**: `/api/xunlei/kouling`
+- **请求参数 (Body)**:
+  | 字段 | 类型 | 必填 | 说明 |
+  | --- | --- | --- | --- |
+  | `kouling` | string | 是 | 抖音标题里《…》包的那串口令(也是群名) |
+  | `transfer` | bool | 否 | 默认 `false` 只解析;**`true` = 解析到分享链后直接转存入库**(会写用户的盘) |
+
+**响应示例 (200)** —— 解析到**网盘分享链**(最常见):
+```json
+{ "kind": "share", "share_url": "https://pan.xunlei.com/s/VOtw0rXU99xNQ-XD-0vtBexoA1",
+  "pass_code": "gcsk", "group_id": "", "title": "玩车不求人", "raw_type": "share_page" }
+```
+**响应示例 (200)** —— 解析到**群邀请**(要先进群):
+```json
+{ "kind": "group", "group_id": "1550069837", "share_url": "", "raw_type": "" }
+```
+**响应示例 (200)** —— 不是口令(判据干净,不乱动):
+```json
+{ "kind": "none", "share_url": "", "group_id": "", "raw_type": "" }
+```
+`transfer=true` 时返回转存结果:`{"status": "ok"|"deferred"|"not_kouling"|"failed",
+"kind", "kouling", "group_id", "share_url", "our_url", "message"}` ——
+`deferred` 表示解析到的是**群**,已加群,资源交给群采集轮。
+
+> **背景**:这个接口就是迅雷 App 搜索框「粘贴口令」用的那个
+> (`associate_search` 返回的链接里带 `from=BHO/paste/kouling`)。它把此前
+> 判定"服务端做不了"的**口令 → 分享 id** 那一环补上了,是「抖音发现 → 自动入库」
+> 全自动链路的关键一环。
+
+

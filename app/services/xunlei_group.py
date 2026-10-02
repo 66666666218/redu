@@ -106,6 +106,33 @@ def group_records(group_id, count: int = _PAGE_SIZE, record_id: int = 0,
         return []
 
 
+def join_group(group_id) -> dict:
+    """按群号加群(`POST /chitchat/v1/group/join`)。
+
+    **已在群里**也返回 ok(`newly_joined=false`)——所以这个接口可以无脑重放,不用先查。
+    ⚠️ `group_id` **必须传数字**:传字符串服务端报 `code 201 请求参数错误`(实测)。
+    """
+    h = _headers()
+    if not h:
+        return {"status": "failed", "message": "未配置迅雷凭据(需先扫码登录)"}
+    try:
+        num = int(str(group_id).strip())
+    except (ValueError, TypeError):
+        return {"status": "failed", "message": f"群号不是数字:{group_id}"}
+    try:
+        resp = requests.post(f"{_BASE}/chitchat/v1/group/join", headers=h, timeout=_TIMEOUT,
+                             json={"group_id": num})
+        data = resp.json()
+        if data.get("code") != 0:
+            return {"status": "failed", "message": f"加群失败:{str(data)[:160]}"}
+        return {"status": "ok", "group_id": str(num),
+                "newly_joined": bool(data.get("newly_joined")),
+                "message": "已加入" if data.get("newly_joined") else "已在群里"}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("迅雷加群失败 group=%s", group_id)
+        return {"status": "failed", "message": str(exc)[:200]}
+
+
 # ---------------------------------------------------------------- 解析
 
 def _parse_content(raw) -> dict:

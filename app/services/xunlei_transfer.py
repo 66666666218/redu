@@ -10,9 +10,9 @@
   2. **access_token 过期** → 用 `refresh_token` 换新的:⚠️ **client_id 必须用网页版那个**
      (`Xqp0kJBXWhwaTpB6`,就是 localStorage 里 `credentials_<clientId>` 的那串),
      用 urldb 的 android `ClientID` 会 `invalid_grant`(实测);`client_secret` 传空即可;
-  3. **captcha_token**:实测**标称过期后仍可用**(`expires_at` 标 11:42、11:50 调用照样 200),
-     所以直接用扫码时拿的那份。**自取不行** —— `captcha/init` 的 `captcha_sign` 把 client_id
-     算进去了,拿 android 的盐值算网页版的签名会 `invalid captcha_sign`(实测)。
+  3. **captcha_token**:存的那份寿命**约 1.5 小时**,过期后盘写操作一律 `captcha_invalid`。
+     `_captcha_token()` 会在没有存的那份时**自取兜底**,⚠️ 但自取的 token **过不了
+     `/drive/v1/share`**(见该函数注释)—— 真正的解法见下面"待办"。
 
 **流程**(同 urldb 的 `Transfer`):
   `GET  /drive/v1/share`          → 分享详情(拿 file_ids + pass_code_token)
@@ -163,6 +163,58 @@ def _headers(access_token: str, captcha: str, device_id: str) -> dict:
             "x-client-id": _CLIENT_ID, "x-device-id": device_id}
 
 
+# ---------------------------------------------------------------- captcha 自续
+# ⚠️ **2026-10-02 修正一条旧结论**:此前记的是"captcha_token 自取不行",错的 —— 那次
+# 是拿 **android 盐值**去算 **web client_id** 的签名。用 android 身份(我们本来就是拿
+# `_CLIENT_ID` 发请求的)算签名,`/v1/shield/captcha/init` 直接 200。
+# 存的那份寿命**约 1.5 小时**(标称 expires_at 还能再多撑一会儿),过期后所有盘写操作
+# 报 `captcha_invalid` —— 所以这里自续,不必再让用户扫码。
+_CAPTCHA_ACTION = "POST:/drive/v1/share"      # 实测 action 只校验格式,拿到的 token 全盘通用
+_CAPTCHA_TTL = 25 * 60                        # 保守:25 分钟续一次(寿命的 ~1/3)
+_captcha_cache: dict = {"token": "", "at": 0.0}
+
+
+def _init_captcha(cred: dict, action: str = _CAPTCHA_ACTION) -> str:
+    """自取一枚新的 captcha_token。失败返回空串(调用方降级用存的那份)。"""
+    device_id = cred.get("device_id") or ""
+    timestamp = str(int(time.time() * 1000))
+    try:
+        resp = requests.post(
+            f"{_AUTH}/v1/shield/captcha/init",
+            json={"client_id": _CLIENT_ID, "device_id": device_id, "action": action,
+                  "captcha_token": "", "redirect_uri": "", "timestamp": timestamp,
+                  "sign": _sign_with_timestamp(device_id, timestamp, _CLIENT_ID)},
+            headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
+            timeout=_TIMEOUT)
+        return (resp.json() or {}).get("captcha_token") or ""
+    except Exception:  # noqa: BLE001 - 拿不到就退回过期那份,由调用方报错
+        logger.exception("迅雷 captcha 自取失败")
+        return ""
+
+
+def _captcha_token(cred: dict) -> str:
+    """给盘接口用的 captcha_token:**优先用扫码存下的那份**,没有才自取。
+
+    ⚠️ **自取的 token 不是万能钥匙**(2026-10-02 实测):`captcha/init` 返回 200、也能
+    通过 `about` / 列目录这类接口,但**`/drive/v1/share` 一律回 `captcha_invalid`
+    (`detail: no client info found`)** —— 服务端要求这枚 token 绑在一个它认识的
+    **客户端会话**上,而我们这套凭据是**网页版扫码**登录的(是 web 会话),自取时用的
+    android 身份对不上;把签名塞进 `meta.captcha_sign` 更直接被拒
+    (`invalid captcha_sign`,因为 `device_id` 不是 android 客户端注册过的那个)。
+    所以**自取只当兜底**,真正可靠的是扫码那份(寿命约 1.5 小时)。
+    """
+    stored = cred.get("captcha_token") or ""
+    if stored:
+        return stored
+    now = time.time()
+    if _captcha_cache["token"] and now - _captcha_cache["at"] < _CAPTCHA_TTL:
+        return _captcha_cache["token"]
+    fresh = _init_captcha(cred)
+    if fresh:
+        _captcha_cache.update(token=fresh, at=now)
+    return fresh
+
+
 def verify(settings=None) -> dict:
     """探针:拿 token → 拉一次配额。返回 `{ok, message, quota}`。
 
@@ -174,7 +226,7 @@ def verify(settings=None) -> dict:
     try:
         at = _access_token(cred)
         r = requests.get(f"{_API}/drive/v1/about", timeout=_TIMEOUT,
-                         headers=_headers(at, cred.get("captcha_token") or "",
+                         headers=_headers(at, _captcha_token(cred),
                                           cred.get("device_id") or ""))
         data = r.json()
         if r.status_code != 200:
@@ -215,7 +267,7 @@ def share_files(file_ids: list[str], expiration_days: str = "7",
         return {"status": "failed", "message": "没有文件 id"}
     try:
         at = _access_token(cred)
-        h = _headers(at, cred.get("captcha_token") or "", cred.get("device_id") or "")
+        h = _headers(at, _captcha_token(cred), cred.get("device_id") or "")
         share = requests.post(f"{_API}/drive/v1/share", headers=h, timeout=_TIMEOUT,
                               json={"file_ids": file_ids, "share_to": "copy",
                                     "params": {"subscribe_push": "false",
@@ -240,7 +292,7 @@ def list_files(parent_id: str = "", cred: dict | None = None, limit: int = 200) 
         return []
     try:
         at = _access_token(cred)
-        h = _headers(at, cred.get("captcha_token") or "", cred.get("device_id") or "")
+        h = _headers(at, _captcha_token(cred), cred.get("device_id") or "")
         r = requests.get(f"{_API}/drive/v1/files", headers=h, timeout=_TIMEOUT,
                          params={"limit": str(limit), "parent_id": parent_id,
                                  "with_audit": "true"})
@@ -264,7 +316,7 @@ def transfer_and_share(share_url: str, parent_id: str = "", settings=None) -> di
         return {"status": "failed", "message": f"解析不出 share_id:{share_url[:80]}"}
     try:
         at = _access_token(cred)
-        h = _headers(at, cred.get("captcha_token") or "", cred.get("device_id") or "")
+        h = _headers(at, _captcha_token(cred), cred.get("device_id") or "")
 
         detail = requests.get(f"{_API}/drive/v1/share", headers=h, timeout=_TIMEOUT,
                               params={"share_id": share_id, "pass_code": pass_code,
