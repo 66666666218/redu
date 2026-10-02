@@ -365,6 +365,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.douyin_leads import douyin_leads_tick
     from app.services.xunlei_sync import xunlei_sync_tick
     from app.services.xunlei_group import xunlei_group_tick
+    from app.services.pan_discovery import pan_discovery_tick
 
     jobs = [
         # 阅读量采样(traffic_tick)已停用:2026-09-29 用户决策放弃 dajiala(不充值),
@@ -408,6 +409,9 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # → 推卡片(标题+视频链接+我方分享链)。搜索词来自**群组新资源 + 公众号已验证资源**;
         # **每天** 11:00 一轮(低频——它要开浏览器,一次几分钟)。
         (douyin_leads_tick, _get_settings().douyin_leads_cron, {"minute": 0, "hour": 11}, "douyin_leads", "wechat"),
+        # 网盘资源发现(2026-10-02):**直链型**那条 —— 按资源词搜知乎 → 抽夸克/百度盘链 →
+        # 转存成我方链 → 推知乎群。与抖音(口令型)**形态不同但互补**,错开半小时跑。
+        (pan_discovery_tick, _get_settings().pan_discovery_cron, {"minute": 30, "hour": 11}, "pan_discovery", "wechat"),
         # 迅雷盘同步(2026-10-02):扫用户迅雷盘 → 新转存进来的资源自动生成我方分享链 → 入库。
         # "用口令找资源并转存"那步只有手机 App 能做(服务端搜索接口不对外 + 部分口令是群组口令),
         # 所以人工只在 App 里搜+转存,本作业接手扫盘/二次分享/入库。

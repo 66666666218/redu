@@ -566,6 +566,33 @@ class XunleiGroupShare(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
+class DiscoveredPanLink(Base):
+    """**公开平台**上发现的盘链(2026-10-02):知乎等平台的内容里**直接贴着的**别人的分享链。
+
+    **为什么又开一张表**:`WechatPanLink` 的 `article_id` 是**外键**(链必须挂在公众号文章下),
+    这里的链来自知乎回答,没有文章;**与 `XunleiResource` 也不同** —— 那张表记的是
+    "已经在**迅雷**盘里"的资源,而这里抓到的是**夸克/百度**链,转存后落在**各自的盘**。
+
+    `origin_url`(别人的原链)是去重键:同一条链被多个回答贴出只算一条。
+    """
+
+    __tablename__ = "discovered_pan_links"
+    __table_args__ = (UniqueConstraint("user_id", "origin_url", name="uq_discovered_pan"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    platform: Mapped[str] = mapped_column(String(16), default="")       # 哪个平台发现的(zhihu)
+    origin_url: Mapped[str] = mapped_column(String(500), index=True)    # 别人的原链(去重键)
+    title: Mapped[str] = mapped_column(String(255), default="")         # 内容标题
+    author: Mapped[str] = mapped_column(String(64), default="")         # 作者名
+    source_url: Mapped[str] = mapped_column(String(500), default="")    # 内容链接(知乎回答)
+    status: Mapped[str] = mapped_column(String(16), default="pending")  # pending/ok/failed/skipped
+    message: Mapped[str] = mapped_column(String(200), default="")
+    our_url: Mapped[str] = mapped_column(String(500), default="")       # **我方**分享链
+    pass_code: Mapped[str] = mapped_column(String(32), default="")
+    found_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
 class AgentStage(Base):
     """苗头 Agent 的关键词生命周期记忆(思维状态):苗头→上升→爆发→回落。"""
 

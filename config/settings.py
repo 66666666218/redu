@@ -259,6 +259,13 @@ class Settings(BaseSettings):
     feishu_webhook_bilibili: str = ""      # B站专属群
     feishu_webhook_zhihu: str = ""         # 知乎专属群
     feishu_webhook_tieba: str = ""         # 贴吧专属群
+    # ---- 网盘资源发现(2026-10-02)见 app/services/pan_discovery.py ----
+    # 与抖音那条链**形态不同**:抖音是**口令型**(标题里《群名》,要先解析),知乎是**直链型**
+    # (回答里直接贴夸克/百度盘链,拿到就能转存)。实测 5 个资源词搜知乎 → 87 条里 3 条带直链。
+    pan_discovery_enabled: bool = True
+    pan_discovery_cron: str = "30 11 * * *"   # 每天 11:30(错开抖音那条的 11:00)
+    pan_discovery_keywords: int = 5           # 每轮几个资源词(**逐词限速**,别贪多)
+    pan_discovery_transfer_limit: int = 3     # 每轮最多真转存几条(转存慢且占盘)
     feishu_secret: str = ""         # 机器人签名校验密钥(为空则不签名)
     own_account_names: str = "天一项目拆解"  # 自营号名单(逗号分隔):飞书推送一律脱敏为「内部号」,防自营身份暴露(2026-09-29)
     feishu_daily_cron: str = "0 8 * * *"   # 每日热点日报时间(默认 08:00)
