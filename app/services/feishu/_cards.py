@@ -515,3 +515,20 @@ def build_daily(db: Session, user_id: int, settings: Settings, include_keywords:
         lines += _keyword_watch_lines(db, user_id)
     lines += _wechat_ops_lines(db, user_id)
     return mask_own("\n".join(lines), settings)
+
+
+def rebrand(text: str, brand: str) -> str:
+    """把文本里**别人的名字**(《…》包的口令/群名)换成**我们自己的品牌词**。
+
+    用户口径(2026-10-02):"转存后把推广的**别人名字改成我们的名字**推广到飞书" ——
+    抖音推广号会把自己群的名字写进《…》(实测《三岁分享》《白泽的梦》),卡片是发到
+    客户群看的,**露出别人的名字等于把人往别人那儿送**;换成我们自己的,这张卡就是
+    "我们在发这个资源"。
+
+    `brand` 为空时退化成"抹掉"(至少不露别人的名字)。
+    """
+    import re
+
+    if not brand:
+        return re.sub(r"《[^》]{1,20}》", "", text or "").strip()
+    return re.sub(r"《[^》]{1,20}》", f"《{brand}》", text or "").strip()

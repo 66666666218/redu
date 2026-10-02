@@ -316,11 +316,22 @@ def test_push_leads_card_is_grid_with_author_work_link(monkeypatch) -> None:
     header = [c["elements"][0]["text"]["content"] for c in cols[0]["columns"]]
     assert header == ["**作者**", "**作品**", "**资源**", "**链接**"]
     row = str(cols[1])
-    assert "籽***" in row                                 # 作者
-    assert "车机互联教程" in row                           # 作品名(去掉《》后剩下的部分)
-    # ⚠️ 用户口径"不要带别人的关键词":★ **别人的口令一个字都不该出现** ★
-    assert "白泽的梦" not in row
-    assert "https://www.douyin.com/video/1" in row        # 作品链接
+    # ⚠️ 用户口径:"转存后把推广的**别人名字改成我们的名字**推广到飞书"
+    assert "念飞思雪" in row                               # 署名 = 我们的品牌词
+    assert "籽***" not in row                             # 别人的账号名不出现
+    assert "车机互联教程" in row                           # 作品名其余部分保留
+    assert "白泽的梦" not in row                           # 别人的口令被**替换**掉了
+    assert "《念飞思雪》" in row                           # 原标题的《…》换成我们的
+    assert "https://www.douyin.com/video/1" in row        # 作品链接(仍指向原视频)
     assert "https://pan.xunlei.com/s/OUR" in row          # 我方资源链
-    # 卡片标题要有**我们的**品牌词
     assert "念飞思雪" in str(sent["card"]["header"])
+
+
+def test_rebrand_replaces_others_name_with_ours() -> None:
+    """把**别人的名字**换成我们的(用户口径:"转存后把推广的别人名字改成我们的名字")。"""
+    from app.services.feishu._cards import rebrand
+
+    assert rebrand("《三岁分享》diplay车机互联", "念飞思雪") == "《念飞思雪》diplay车机互联"
+    assert rebrand("《白泽的梦》资源更新了", "念飞思雪") == "《念飞思雪》资源更新了"
+    assert rebrand("普通标题无书名号", "念飞思雪") == "普通标题无书名号"     # 没有《》就不动
+    assert rebrand("《三岁分享》x", "") == "x"                          # 没配品牌 → 至少抹掉

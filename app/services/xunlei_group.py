@@ -388,7 +388,7 @@ def push_new_shares(items: list[dict], settings) -> bool:
     if not webhook:
         return False
 
-    from app.services.feishu._cards import _col_set_row, _md_safe
+    from app.services.feishu._cards import _col_set_row, _md_safe, rebrand
     from app.services.feishu_client import FeishuClient
 
     brand = (getattr(settings, "brand_name", "") or "").strip()
@@ -400,7 +400,7 @@ def push_new_shares(items: list[dict], settings) -> bool:
         _col_set_row([("**资源**", 6), ("**链接**", 4)], grey=True)]
     for it in items:
         elements.append(_col_set_row([
-            (_md_safe(it.get("title") or ""), 6),
+            (_md_safe(rebrand(it.get("title") or "", brand)), 6),
             (f"[▶ 打开]({_md_safe(it.get('share_url') or '')})"
              + (f" 🔑{_md_safe(it.get('code') or '')}" if it.get("code") else ""), 4)]))
     card = {"config": {"wide_screen_mode": True},

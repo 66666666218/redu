@@ -136,9 +136,7 @@ class Settings(BaseSettings):
     # **每天** 11:00(用户口径 2026-10-02:"我想要你每天都在抖音发现新的资源")。
     # 它要开浏览器,一次几分钟 —— 所以每天只跑一轮,别加频次。
     douyin_leads_cron: str = "0 11 * * *"
-    # 每轮一共几个搜索词(每个词一次抖音搜索)。4→5:2026-10-02 加了**品牌词**当第一个,
-    # 不抬高总数的话会把"公众号资源库"那路挤掉。
-    douyin_leads_keywords: int = 5
+    douyin_leads_keywords: int = 4            # 每轮一共几个搜索词(每个词一次抖音搜索)
     # 其中**群组新资源**贡献几个词(其余来自公众号资源库):群里的词新鲜(刚有人要),
     # 资源库的词被验证过(同链多号同发)—— 两路结合,见 douyin_leads.search_keywords
     douyin_leads_group_keywords: int = 3
