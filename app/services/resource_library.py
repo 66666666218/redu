@@ -49,10 +49,23 @@ def _my_link_of(session: Session, user_id: int, pan_url: str) -> str:
     ).limit(3)).all()
     for blob in blobs:
         for line in (blob or "").splitlines():
-            line = line.strip()
-            if line.startswith("https://"):
-                return line
+            link = _clean_link(line)
+            if link:
+                return link
     return _discovered_my_link(session, user_id, pan_url)
+
+
+def _clean_link(line: str) -> str:
+    """从一行里抠出**干净的 URL**。
+
+    ⚠️ 历史数据常带尾巴:实测 `WechatArticle.my_pan_urls` 里存过
+    `https://pan.quark.cn/s/xxx (自分享)` —— 整行拿去当链接**点不开**
+    (2026-10-02 跨平台热度卡片里发现)。所以在**取用端**统一抠一次。
+    """
+    import re
+
+    m = re.match(r"(https?://[^\s()（）【】、,，]+)", (line or "").strip())
+    return m.group(1) if m else ""
 
 
 def _discovered_my_link(session: Session, user_id: int, pan_url: str) -> str:

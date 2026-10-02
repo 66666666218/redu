@@ -266,6 +266,13 @@ class Settings(BaseSettings):
     pan_discovery_cron: str = "30 11 * * *"   # 每天 11:30(错开抖音那条的 11:00)
     pan_discovery_keywords: int = 5           # 每轮几个资源词(**逐词限速**,别贪多)
     pan_discovery_transfer_limit: int = 3     # 每轮最多真转存几条(转存慢且占盘)
+    # ---- 跨平台资源热度(2026-10-02)见 app/services/resource_presence.py ----
+    # 用户口径:"小红书可以只抓取资源名称,网盘链接从资源库匹配,别的也照这个模式"——
+    # 绕开"平台上没有链"的死结:平台上有没有链不重要,只要**有人在做同一个资源**,库里就有链。
+    presence_enabled: bool = True
+    presence_cron: str = "0 9 * * 1"                    # 每周一 09:00(**每平台各开一次浏览器**,低频)
+    presence_platforms: str = "xiaohongshu,kuaishou"    # 探哪些平台(逗号分隔)
+    presence_names: int = 3                             # 探几个资源名(词越多越慢)
     feishu_secret: str = ""         # 机器人签名校验密钥(为空则不签名)
     own_account_names: str = "天一项目拆解"  # 自营号名单(逗号分隔):飞书推送一律脱敏为「内部号」,防自营身份暴露(2026-09-29)
     feishu_daily_cron: str = "0 8 * * *"   # 每日热点日报时间(默认 08:00)

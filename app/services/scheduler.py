@@ -366,6 +366,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.xunlei_sync import xunlei_sync_tick
     from app.services.xunlei_group import xunlei_group_tick
     from app.services.pan_discovery import pan_discovery_tick
+    from app.services.resource_presence import presence_tick
 
     jobs = [
         # 阅读量采样(traffic_tick)已停用:2026-09-29 用户决策放弃 dajiala(不充值),
@@ -412,6 +413,9 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # 网盘资源发现(2026-10-02):**直链型**那条 —— 按资源词搜知乎 → 抽夸克/百度盘链 →
         # 转存成我方链 → 推知乎群。与抖音(口令型)**形态不同但互补**,错开半小时跑。
         (pan_discovery_tick, _get_settings().pan_discovery_cron, {"minute": 30, "hour": 11}, "pan_discovery", "wechat"),
+        # 跨平台资源热度(2026-10-02):抓**资源名** → 回**资源库**匹配链 —— 用于"平台上没有链"
+        # 的那些平台(小红书/快手/贴吧)。每平台各开一次浏览器,所以**每周一轮**。
+        (presence_tick, _get_settings().presence_cron, {"minute": 0, "hour": 9}, "resource_presence", "wechat"),
         # 迅雷盘同步(2026-10-02):扫用户迅雷盘 → 新转存进来的资源自动生成我方分享链 → 入库。
         # "用口令找资源并转存"那步只有手机 App 能做(服务端搜索接口不对外 + 部分口令是群组口令),
         # 所以人工只在 App 里搜+转存,本作业接手扫盘/二次分享/入库。

@@ -141,3 +141,17 @@ def test_library_summary_counts_discovered(session) -> None:
     _mk_discovered(session, "乙资源", "https://pan.quark.cn/s/D1")
     s = library_summary(session, 1)
     assert s["total_links"] == 1 and s["discovered"] == 1
+
+
+def test_my_link_strips_trailing_text(session) -> None:
+    """⚠️ 历史数据里我方链带过尾巴(`…fa (自分享)`)—— 整行拿去当链接**点不开**,
+    取用端必须抠出干净的 URL(2026-10-02 跨平台热度卡片里发现)。"""
+    from app.services.resource_library import _clean_link, _my_link_of
+
+    assert _clean_link("https://pan.quark.cn/s/abc (自分享)") == "https://pan.quark.cn/s/abc"
+    assert _clean_link("https://pan.quark.cn/s/abc（自分享）") == "https://pan.quark.cn/s/abc"
+    assert _clean_link("不是链接") == ""
+
+    _mk(session, "某资源", "号甲", "https://pan.quark.cn/s/abc",
+        my="https://pan.quark.cn/s/abc (自分享)")
+    assert _my_link_of(session, 1, "https://pan.quark.cn/s/abc") == "https://pan.quark.cn/s/abc"
