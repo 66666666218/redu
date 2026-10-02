@@ -41,3 +41,6 @@ node_modules/
 
 # 本地工具(如 sing-box 代理客户端,31MB 二进制,不该进仓库)
 tools/
+
+# 逆向临时物(迅雷 APK 等大文件,不进仓库)
+.tmp_xl/

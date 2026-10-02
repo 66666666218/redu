@@ -135,6 +135,21 @@ class Settings(BaseSettings):
     douyin_leads_enabled: bool = True
     douyin_leads_cron: str = "0 11 * * 2,5"   # 周二/周五 11:00(**低频**:它要开浏览器,一次几分钟)
     douyin_leads_keywords: int = 3            # 每轮取几个资源词当搜索词
+    # ---- 迅雷盘同步(2026-10-02)见 app/services/xunlei_sync.py ----
+    # 扫用户的迅雷盘 → 新转存进来的资源**自动生成我方分享链** → 入库(与公众号资源统一管理)。
+    # ⚠️ "用口令找到资源并转存"这一步**只有手机 App 能做**:服务端搜索接口不对外开放
+    # (2026-10-02 实测 `/drive/v1/share/search` 要 share_id、`api-shoulei-ssl` 搜索端点 403),
+    # 而且部分口令是**群组口令**(要先进群,PC 客户端没有进群功能,所以 PC 端搜不出来)。
+    # 所以人工只保留"App 里搜一下 + 点转存",本作业接手剩下的全自动部分。
+    xunlei_sync_enabled: bool = True
+    xunlei_sync_cron: str = "*/30 * * * *"    # 每 30 分钟扫一次(秒级完成,不打风控)
+    # ---- 迅雷群组采集(2026-10-02)见 app/services/xunlei_group.py ----
+    # 群消息流里**群主发的分享卡自带 `pan.xunlei.com/s/<share_id>`** —— 客户端唯一的
+    # "口令 → shareID"那一步,**群组替我们做了**。两步走:①采集登记(pending,纯 HTTP 读,
+    # 可高频)②**限量**转存(转存慢且占盘,所以每轮只放 `transfer_limit` 条)。
+    xunlei_group_enabled: bool = True
+    xunlei_group_cron: str = "*/20 * * * *"   # 每 20 分钟采一轮
+    xunlei_group_transfer_limit: int = 5      # 每轮最多转存几条(0 = 只采集不转存)
     # ---- 实例角色(2026-10-01):分体部署时避免两端重复跑同一批作业 ----
     # 本项目有两套部署:本机(公众号 + 闲鱼)与远程 VPS(热点四路),**各自的数据库是独立的**,
     # 但推的是同一个飞书群。不加约束的话两边会各跑一套完整调度器 —— 重复推飞书、重复打上游,

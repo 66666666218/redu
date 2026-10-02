@@ -199,6 +199,57 @@ def _extract_share_id(url: str) -> tuple[str, str]:
     return share_id, pwd
 
 
+def share_files(file_ids: list[str], expiration_days: str = "7",
+                cred: dict | None = None) -> dict:
+    """把盘里已有的文件**生成我方分享链**。
+
+    与 `transfer_and_share` 的区别:那个是"从别人的分享转存进来",这个是"盘里已经有了,
+    给它开个分享" —— 扫盘登记(`xunlei_sync`)走这条。
+
+    返回 `{"status", "message", "share_url", "code"}`。
+    """
+    cred = cred or _credentials()
+    if not cred:
+        return {"status": "failed", "message": "未配置迅雷凭据(需先扫码登录)"}
+    if not file_ids:
+        return {"status": "failed", "message": "没有文件 id"}
+    try:
+        at = _access_token(cred)
+        h = _headers(at, cred.get("captcha_token") or "", cred.get("device_id") or "")
+        share = requests.post(f"{_API}/drive/v1/share", headers=h, timeout=_TIMEOUT,
+                              json={"file_ids": file_ids, "share_to": "copy",
+                                    "params": {"subscribe_push": "false",
+                                               "WithPassCodeInLink": "true"},
+                                    "title": "云盘资源分享", "restore_limit": "-1",
+                                    "expiration_days": expiration_days}).json()
+        if not share.get("share_url"):
+            return {"status": "failed", "message": f"生成分享失败:{str(share)[:160]}"}
+        return {"status": "ok", "message": "ok",
+                "share_url": share["share_url"] + "?pwd=" + (share.get("pass_code") or ""),
+                "code": share.get("pass_code") or "",
+                "share_id": share.get("share_id") or ""}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("迅雷生成分享失败")
+        return {"status": "failed", "message": str(exc)[:200]}
+
+
+def list_files(parent_id: str = "", cred: dict | None = None, limit: int = 200) -> list[dict]:
+    """列某个目录下的文件/文件夹(扫盘用)。失败返回空表。"""
+    cred = cred or _credentials()
+    if not cred:
+        return []
+    try:
+        at = _access_token(cred)
+        h = _headers(at, cred.get("captcha_token") or "", cred.get("device_id") or "")
+        r = requests.get(f"{_API}/drive/v1/files", headers=h, timeout=_TIMEOUT,
+                         params={"limit": str(limit), "parent_id": parent_id,
+                                 "with_audit": "true"})
+        return (r.json().get("files") or []) if r.status_code == 200 else []
+    except Exception:  # noqa: BLE001
+        logger.exception("迅雷列目录失败")
+        return []
+
+
 def transfer_and_share(share_url: str, parent_id: str = "", settings=None) -> dict:
     """`pan.xunlei.com/s/xxx` → 转存到我方盘 → 生成我方分享链。
 
@@ -241,7 +292,12 @@ def transfer_and_share(share_url: str, parent_id: str = "", settings=None) -> di
             if int(task.get("progress") or -1) == 100:
                 break
             time.sleep(2)
-        file_ids = _trace_file_ids(task) or files
+        file_ids = _trace_file_ids(task)
+        if not file_ids:
+            # ⚠️ 这里**不能**兜底用源分享的 file_ids:那些 id 不在我方盘里,
+            # 建分享必 `file_not_found`(2026-10-02 实测踩过)。宁可明确失败。
+            return {"status": "failed",
+                    "message": f"转存任务未返回文件 id(progress={task.get('progress')})"}
 
         share = requests.post(f"{_API}/drive/v1/share", headers=h, timeout=_TIMEOUT,
                               json={"file_ids": file_ids, "share_to": "copy",
@@ -260,19 +316,26 @@ def transfer_and_share(share_url: str, parent_id: str = "", settings=None) -> di
 
 
 def _trace_file_ids(task: dict) -> list[str]:
-    """从任务结果里取转存后的文件 id(urldb 兼容多种返回格式,这里同样兜住)。"""
-    out: list[str] = []
-    for key in ("trace_file_ids", "file_ids"):
+    """从转存任务里取**我方盘里**新文件 id(urldb 兼容多种返回格式,这里同样兜住)。
+
+    ⚠️ **实测(2026-10-02,修复一个把整条链卡死的 bug)**:真实字段在
+    `task["params"]["trace_file_ids"]`(**不在顶层**),而且值是
+    **JSON 字符串包着的 dict**:`{"<源文件id>": "<我方新文件id>"}` —— 要取 **values**。
+    原实现只读顶层、只认 list/dict-as-list → 恒取空 → 调用方兜底用**源分享的 id**
+    去建分享 → `file_not_found`(转存明明成功,却卡在最后一步)。
+    """
+    raw = (task.get("params") or {}).get("trace_file_ids") or task.get("trace_file_ids")
+    if isinstance(raw, str) and raw:
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = [raw]
+    if isinstance(raw, dict):                      # 源 id → 我方 id,取 value
+        return [str(v) for v in raw.values() if v]
+    if isinstance(raw, list):
+        return [str(v) for v in raw if v]
+    for key in ("file_ids",):                      # 老格式兜底
         val = task.get(key)
         if isinstance(val, list):
-            out += [str(v) for v in val if v]
-        elif isinstance(val, str) and val:
-            try:
-                parsed = json.loads(val)
-                if isinstance(parsed, list):
-                    out += [str(v) for v in parsed if v]
-            except ValueError:
-                out.append(val)
-    if not out and task.get("file_id"):
-        out.append(str(task["file_id"]))
-    return out
+            return [str(v) for v in val if v]
+    return [str(task["file_id"])] if task.get("file_id") else []

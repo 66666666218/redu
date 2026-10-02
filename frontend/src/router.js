@@ -20,6 +20,7 @@ import Suggestions from './views/Suggestions.vue'
 import Resources from './views/Resources.vue'
 import HotRank from './views/HotRank.vue'
 import CrossAccounts from './views/CrossAccounts.vue'
+import XunleiGroups from './views/XunleiGroups.vue'
 
 const routes = [
   { path: '/login', component: Login },
@@ -40,6 +41,7 @@ const routes = [
   { path: '/suggestions', component: Suggestions, meta: { auth: true } },
   { path: '/resources', component: Resources, meta: { auth: true } },
   { path: '/cross', component: CrossAccounts, meta: { auth: true } },
+  { path: '/xunlei', component: XunleiGroups, meta: { auth: true } },
   { path: '/hotrank', component: HotRank, meta: { auth: true } },
   { path: '/health', component: Health, meta: { auth: true } },
   { path: '/admin', component: Admin, meta: { auth: true, admin: true } },

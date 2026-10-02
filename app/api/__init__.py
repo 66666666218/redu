@@ -1,5 +1,5 @@
 """平台 API 路由包:按领域拆分的 APIRouter 模块。"""
-from app.api import admin, alerts, auth, collect, cookies, cross, dashboard, events_api, hotspot, members, misc, quark, wechat
+from app.api import admin, alerts, auth, collect, cookies, cross, dashboard, events_api, hotspot, members, misc, quark, wechat, xunlei
 
 all_routers = [
     auth.router,
@@ -15,6 +15,7 @@ all_routers = [
     quark.router,
     hotspot.router,
     cross.router,
+    xunlei.router,
 ]
 
-__all__ = ["all_routers", "auth", "cookies", "dashboard", "collect", "alerts", "members", "events_api", "admin", "misc", "wechat", "quark", "hotspot", "cross"]
+__all__ = ["all_routers", "auth", "cookies", "dashboard", "collect", "alerts", "members", "events_api", "admin", "misc", "wechat", "quark", "hotspot", "cross", "xunlei"]

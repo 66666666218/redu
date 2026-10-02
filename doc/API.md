@@ -1552,3 +1552,88 @@ GET `/api/admin/health`(perm `logs.view`)→ 各平台最近采集状态 + 数�
 > (`_PAN_ACCOUNT_HINTS`,只认"网盘"/具体品牌名,**不认泛词"资源"**)——B站搜索层给不出链,
 > 靠 ② 才收得到号。
 > **前端入口**:「跨平台对标号」页 `/cross`(含平台筛选 + 手动触发)。
+
+---
+
+## 21. 迅雷群组资源采集(/api/xunlei,2026-10-02)
+
+> **为什么有这一节**:此前最大的卡点是「**口令 → 分享 id(shareID)** 只存在于迅雷客户端」,
+> 服务端拿不到。而**迅雷群消息流里的分享卡自带现成分享链** —— 抖音标题里《》包的那串口令,
+> 本质就是**群名**(实测:「三岁分享」「白泽的梦」既是抖音线索,也是账号已加入的群)。
+> 所以采集走群消息,不再需要解析口令。
+>
+> **两步走**:①**采集**(只登记,纯 HTTP 读,秒级、可高频)②**转存**(限量 —— 每条要真的
+> 存进用户迅雷盘并生成我方分享链,慢且占空间,默认每轮 5 条)。
+>
+> ⚠️ `/api/xunlei/transfer` 会**真实写入用户的迅雷网盘**。
+> **前置条件**:需先在「Cookie 管理」里配置迅雷凭据(扫码登录,见 `tools/xl_qr_login.py`)。
+
+### 21.1 群列表
+
+- **接口名称**: 账号所在的迅雷群列表
+- **请求方式**: GET
+- **URL 路径**: `/api/xunlei/groups`
+- **请求参数**: 无(用户取自登录态)
+
+**响应示例 (200)**
+```json
+{ "count": 7,
+  "items": [ { "group_id": "1550069837", "name": "三岁分享", "role": "member" },
+             { "group_id": "1555276876", "name": "全网最全宝库", "role": "creator" } ] }
+```
+
+> 实时拉一次(不落库);未配置凭据时 `items` 为空数组,不报错。
+
+### 21.2 已采分享列表
+
+- **接口名称**: 群分享列表(新→旧,最多 `limit` 条)
+- **请求方式**: GET
+- **URL 路径**: `/api/xunlei/shares`
+- **请求参数 (Query)**: `status`(可选,`pending` / `ok` / `failed`;空 = 全部)、`limit`(默认 200)
+
+**响应示例 (200)**
+```json
+{ "count": 28,
+  "items": [ { "group_id": "1550069837", "group_name": "三岁分享",
+               "title": "手机警报器（警笛模拟器）2.0版",
+               "origin_url": "https://pan.xunlei.com/s/VP2rVszEvka7-8jWT0PxdxolA1",
+               "our_url": "https://pan.xunlei.com/s/VP2uzaCB0yCevYHQyFrtOXALA1?pwd=64gh",
+               "pass_code": "64gh", "status": "ok", "message": "",
+               "kind": "drive#folder", "msg_time": "2026-10-02 12:40" } ] }
+```
+
+> `status`:`pending` 待转存 / `ok` 已转存(此时 `our_url` 是我方链)/ `failed`(原因在 `message`)。
+
+### 21.3 手动采集一轮
+
+- **接口名称**: 立即扫一轮群消息(只登记,**不转存**)
+- **请求方式**: POST
+- **URL 路径**: `/api/xunlei/sync`
+- **请求参数**: 无
+
+**响应示例 (200)**
+```json
+{ "status": "ok", "groups": 7, "new": 28 }
+```
+
+> `status` 取值:`ok` / `no_cred`(未配置迅雷凭据)/ `empty`(没拿到群列表)。
+
+### 21.4 手动转存一批
+
+- **接口名称**: 转存 pending 的群分享(限量)
+- **请求方式**: POST
+- **URL 路径**: `/api/xunlei/transfer`
+- **请求参数 (Query)**: `limit`(默认 3,服务端夹在 1~10)
+
+**响应示例 (200)**
+```json
+{ "status": "ok", "picked": 3, "ok": 2, "failed": 1,
+  "items": [ { "title": "diplay-车机互联（安卓+苹果）", "group_name": "三岁分享",
+               "share_url": "https://pan.xunlei.com/s/VP2uz_O8UT8yOkE4wLQwJbVHA1?pwd=zp47",
+               "code": "zp47" } ] }
+```
+
+> ⚠️ **会真实写入用户迅雷盘**,单条最慢约 1 分钟(转存任务轮询),别连点。
+> 单条失败会被标成 `failed` 留痕,**不会每轮重复重试**它。
+> **前端入口**:「迅雷群组」页 `/xunlei`(群列表 + 采集/转存按钮 + 分享表格)。
+

@@ -36,6 +36,7 @@ onMounted(async () => {
       <router-link to="/suggestions">热点建议</router-link>
       <router-link to="/resources">资源库</router-link>
       <router-link to="/cross">跨平台对标号</router-link>
+      <router-link to="/xunlei">迅雷群组</router-link>
       <router-link to="/hotrank">多平台热榜</router-link>
       <router-link to="/health">数据源健康</router-link>
       <router-link v-if="role==='admin' || role==='operator'" to="/admin">管理后台</router-link>

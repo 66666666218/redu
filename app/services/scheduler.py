@@ -363,6 +363,8 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.telegram_source import collect_tick as tg_collect_tick
     from app.services.cross_accounts import cross_account_tick
     from app.services.douyin_leads import douyin_leads_tick
+    from app.services.xunlei_sync import xunlei_sync_tick
+    from app.services.xunlei_group import xunlei_group_tick
 
     jobs = [
         # 阅读量采样(traffic_tick)已停用:2026-09-29 用户决策放弃 dajiala(不充值),
@@ -405,6 +407,14 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # 抖音推广线索(2026-10-02):标题带《…》前缀的推广视频 → 推**视频链接**给运营人工确认
         # (账号被 MediaCrawler 教学版脱敏,拿不到"是谁";低频——它要开浏览器,一次几分钟)
         (douyin_leads_tick, _get_settings().douyin_leads_cron, {"minute": 0, "hour": 11}, "douyin_leads", "wechat"),
+        # 迅雷盘同步(2026-10-02):扫用户迅雷盘 → 新转存进来的资源自动生成我方分享链 → 入库。
+        # "用口令找资源并转存"那步只有手机 App 能做(服务端搜索接口不对外 + 部分口令是群组口令),
+        # 所以人工只在 App 里搜+转存,本作业接手扫盘/二次分享/入库。
+        (xunlei_sync_tick, _get_settings().xunlei_sync_cron, {"minute": "*/30"}, "xunlei_sync", "wechat"),
+        # 迅雷**群组**采集(2026-10-02):群消息流里群主发的分享卡**自带分享链** ——
+        # 客户端唯一的"口令→shareID"那步,群组替我们做了。两步:采集登记(纯 HTTP 读,
+        # 秒级、可高频) + **限量**转存(转存慢且占盘,每轮默认 5 条)。
+        (xunlei_group_tick, _get_settings().xunlei_group_cron, {"minute": "*/20"}, "xunlei_group", "wechat"),
         # Telegram 频道资源源(2026-10-01):公众号之外的第二路盘链 feed。
         # 默认关闭——本机直连 t.me 不通;能出网的机器把 TG_ENABLED 打开即可(见 settings)。
         (tg_collect_tick, _get_settings().tg_cron, {"minute": "*/30"}, "tg_collect", "both"),

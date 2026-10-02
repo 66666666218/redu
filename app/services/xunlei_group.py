@@ -1,0 +1,316 @@
+"""迅雷**群组**资源采集(2026-10-02)。
+
+**背景**:用户给了一条群邀链(`https://dlj.8uri.cn/dlj/c9494ae1` → 迅雷群组 1550069837
+「三岁分享」)并说"点击链接可直接申请加入,这个就是群聊的"。此前记录在案的最大卡点是
+「**口令 → shareID** 只存在于客户端」——而**群消息流本身就是 shareID 的批发出口**:
+群主发的每条分享卡里都带着现成的 `pan.xunlei.com/s/<share_id>`。
+
+**接口**(全部 2026-10-02 实测;域名 `api-shoulei-ssl.xunlei.com`,复用 `xunlei_transfer`
+的登录态与请求头):
+
+    GET  /chitchat/v1/group/list          账号所在的全部群(实测 7 个)
+    POST /chitchat/v1/group/query         单个群信息(邀请页 SSR 无需登录也能拿到)
+    POST /chitchat/v1/group/join          按 group_id 加群
+    GET  /chitchat/group/records          **群消息 —— 资源就在这儿**
+    POST /chitchat/v1/group/member/query  群成员
+
+⚠️ **路由形状不一致**(实测踩过):消息接口**没有 `v1` 前缀**(`/chitchat/group/records`),
+群管理接口**有**(`/chitchat/v1/group/*`);对 records 发 POST 一律 404,只有 GET 通。
+
+**群消息体的形状**(`records[].content` 是 **JSON 字符串**,要二次 `json.loads`):
+
+    type 7   群主分享卡 → `data.share_url` + `data.title` + `data.share_id`  ✅ 可直接转存
+    type 15  群文件库/更新卡 → `data.folders[]`,每项有 `share_id` / `folder_name` / `pass_code`
+    type 11  群公告、type 14 引导语、无 type 的纯文本 → 没有资源,跳过
+
+**分页**:`count` 服务端封顶 **20**;翻页用 `record_id` 游标(配合 `direction`)。
+
+**为什么采集与转存分成两步**:7 个群一天能出新分享几十条,逐条转存要把文件**全搬进
+用户盘**(慢 + 占空间)。所以:
+
+    ① `sync_group_shares`  只把分享**登记**成 pending(纯 HTTP 读,秒级,可高频跑)
+    ② `transfer_pending`   每轮**限量**转存(默认 5 条),把结果回填成我方分享链
+
+判据是"**群消息里那条现成的分享链**",所以本模块**不需要**任何口令解析 —— 客户端唯一的
+那一步,群组替我们做了。
+"""
+from __future__ import annotations
+
+import json
+from datetime import datetime
+
+import requests
+from sqlalchemy import select
+
+from app.db.models import XunleiGroupShare
+from app.utils import get_logger
+
+logger = get_logger(__name__)
+
+_BASE = "https://api-shoulei-ssl.xunlei.com"
+_TIMEOUT = 25
+_PAGE_SIZE = 20          # 服务端封顶,传更大也只返回 20
+_SHARE_TYPE = 7          # 群主分享卡
+_LIBRARY_TYPE = 15       # 群文件库/更新卡(多条 file,共用 share_id)
+
+
+# ---------------------------------------------------------------- 只读接口
+
+def _headers() -> dict | None:
+    """复用 `xunlei_transfer` 的登录态;没配凭据返回 None。"""
+    from app.services import xunlei_transfer as xt
+
+    cred = xt._credentials()
+    if not cred:
+        return None
+    return xt._headers(xt._access_token(cred), cred.get("captcha_token") or "",
+                       cred.get("device_id") or "")
+
+
+def list_groups() -> list[dict]:
+    """账号所在的全部群:`[{group_id, name, role}]`。失败返回空表(不抛)。"""
+    h = _headers()
+    if not h:
+        return []
+    try:
+        resp = requests.get(f"{_BASE}/chitchat/v1/group/list", headers=h, timeout=_TIMEOUT)
+        data = resp.json().get("data") or []
+        return [{"group_id": str(g.get("id") or g.get("group_id") or ""),
+                 "name": str(g.get("name") or g.get("group_name") or ""),
+                 "role": str(g.get("user_role") or g.get("role") or "")}
+                for g in data if (g.get("id") or g.get("group_id"))]
+    except Exception:  # noqa: BLE001 - 探针类调用,失败即空
+        logger.exception("迅雷群列表获取失败")
+        return []
+
+
+def group_records(group_id, count: int = _PAGE_SIZE, record_id: int = 0,
+                  direction: int = 0) -> list[dict]:
+    """拉一个群的消息(服务端返回**新→旧**)。失败返回空表。
+
+    `record_id` 是游标:不传返回最新一页;传某个消息 id 可前后翻(`direction` 0/1)。
+    """
+    h = _headers()
+    if not h or not str(group_id):
+        return []
+    params: dict = {"group_id": str(group_id), "count": count}
+    if record_id:
+        params["record_id"] = record_id
+        params["direction"] = direction
+    try:
+        resp = requests.get(f"{_BASE}/chitchat/group/records", headers=h, params=params,
+                            timeout=_TIMEOUT)
+        return resp.json().get("records") or []
+    except Exception:  # noqa: BLE001
+        logger.exception("迅雷群消息获取失败 group=%s", group_id)
+        return []
+
+
+# ---------------------------------------------------------------- 解析
+
+def _parse_content(raw) -> dict:
+    """`content` 是 JSON 字符串 → dict;解析不出来返回 `{"type": None, "data": {}}`。"""
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(raw or "{}")
+        return parsed if isinstance(parsed, dict) else {"data": {}}
+    except (ValueError, TypeError):
+        return {"data": {}}
+
+
+def _share_from_card(data: dict, record: dict, group_id: str, group_name: str) -> dict:
+    """把一条分享卡归一化成入库结构(`share_id` 为空则视为无效)。"""
+    share_id = str(data.get("share_id") or "")
+    return {"message_id": str(record.get("id") or ""),
+            "group_id": group_id, "group_name": group_name,
+            "share_id": share_id,
+            "origin_url": str(data.get("share_url") or f"https://pan.xunlei.com/s/{share_id}"),
+            "title": str(data.get("title") or data.get("folder_name") or "")[:255],
+            "sender": str(record.get("sender") or ""),
+            "kind": str(data.get("kind") or "")[:16],
+            "msg_time": _msg_time(record.get("created_at"))}
+
+
+def extract_shares(records: list[dict], group_id: str, group_name: str = "") -> list[dict]:
+    """从群消息里挑出**分享**(type 7 分享卡 + type 15 群文件库卡),按 `share_id` 去重。
+
+    返回 `[{message_id, group_id, group_name, share_id, origin_url, title, sender, kind,
+    msg_time}]`,顺序保持消息的"新→旧"。
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    for rec in records:
+        content = _parse_content(rec.get("content"))
+        ctype = content.get("type")
+        data = content.get("data") or {}
+        if not isinstance(data, dict):
+            continue
+        cards: list[dict] = []
+        if ctype == _SHARE_TYPE:
+            cards = [data]                                  # 单条分享卡
+        elif ctype == _LIBRARY_TYPE:
+            cards = [f for f in (data.get("folders") or []) if isinstance(f, dict)]
+        for card in cards:
+            item = _share_from_card(card, rec, group_id, group_name)
+            if not item["share_id"] or item["share_id"] in seen:
+                continue
+            seen.add(item["share_id"])
+            out.append(item)
+    return out
+
+
+def _msg_time(raw) -> datetime | None:
+    """群消息时间(unix 秒)→ datetime;非法值返回 None。"""
+    try:
+        return datetime.fromtimestamp(int(raw)) if raw else None
+    except (ValueError, TypeError, OSError):
+        return None
+
+
+# ---------------------------------------------------------------- 采集入库
+
+def sync_group_shares(session, user_id: int, group_ids: list[str] | None = None,
+                      settings=None) -> dict:
+    """扫一轮群消息,**把没见过的分享登记成 pending**(不转存)。
+
+    `group_ids` 为空 = 账号所在的全部群。返回 `{"status", "groups", "new"}`。
+    """
+    if not _headers():
+        return {"status": "no_cred", "groups": 0, "new": 0}
+    groups = list_groups()
+    if group_ids:
+        want = {str(g) for g in group_ids}
+        groups = [g for g in groups if g["group_id"] in want] or \
+            [{"group_id": str(g), "name": ""} for g in group_ids]
+    if not groups:
+        return {"status": "empty", "groups": 0, "new": 0}
+
+    known = set(session.scalars(select(XunleiGroupShare.share_id).where(
+        XunleiGroupShare.user_id == user_id)).all())
+    new_count = 0
+    for group in groups:
+        gid, gname = group["group_id"], group.get("name") or ""
+        for item in extract_shares(group_records(gid), gid, gname):
+            if item["share_id"] in known:
+                continue
+            known.add(item["share_id"])
+            session.add(XunleiGroupShare(
+                user_id=user_id, group_id=item["group_id"], group_name=item["group_name"],
+                message_id=item["message_id"], share_id=item["share_id"],
+                origin_url=item["origin_url"][:300], title=item["title"],
+                sender=item["sender"], kind=item["kind"], msg_time=item["msg_time"]))
+            session.flush()                     # ⚠️ 见 cross_accounts 的教训:同轮去重靠它
+            new_count += 1
+    session.commit()
+    logger.info("迅雷群采集:%d 个群 → 新登记 %d 条分享", len(groups), new_count)
+    return {"status": "ok", "groups": len(groups), "new": new_count}
+
+
+# ---------------------------------------------------------------- 限量转存
+
+def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> dict:
+    """把 pending 的群分享**限量转存**到我方盘,回填我方分享链。
+
+    返回 `{"status", "picked", "ok", "failed", "items"}`;`items` 供飞书推送。
+    """
+    from app.services import xunlei_transfer as xt
+
+    rows = session.scalars(
+        select(XunleiGroupShare).where(
+            XunleiGroupShare.user_id == user_id,
+            XunleiGroupShare.status == "pending",
+        ).order_by(XunleiGroupShare.msg_time.desc()).limit(limit)).all()
+    ok_items: list[dict] = []
+    failed = 0
+    for row in rows:
+        out = xt.transfer_and_share(row.origin_url)
+        if out.get("status") == "ok":
+            row.status, row.our_url = "ok", out.get("share_url") or ""
+            row.pass_code, row.fid, row.message = out.get("code") or "", out.get("fid") or "", ""
+            ok_items.append({"title": row.title, "group_name": row.group_name,
+                             "share_url": row.our_url, "code": row.pass_code})
+        else:
+            # ⚠️ 单条失败**不重试到底**:标 failed 留痕,避免每轮都拿它空转。
+            row.status, row.message = "failed", (out.get("message") or "")[:200]
+            failed += 1
+            logger.warning("迅雷群分享转存失败 %s:%s", row.title, row.message)
+    session.commit()
+    return {"status": "ok", "picked": len(rows), "ok": len(ok_items),
+            "failed": failed, "items": ok_items}
+
+
+def list_group_shares(session, user_id: int, status: str = "", limit: int = 200) -> list[dict]:
+    """群分享列表(新→旧),供 API/前端展示。"""
+    stmt = select(XunleiGroupShare).where(XunleiGroupShare.user_id == user_id)
+    if status:
+        stmt = stmt.where(XunleiGroupShare.status == status)
+    rows = session.scalars(
+        stmt.order_by(XunleiGroupShare.msg_time.desc().nullslast(),
+                      XunleiGroupShare.id.desc()).limit(limit)).all()
+    return [{"group_id": r.group_id, "group_name": r.group_name, "title": r.title,
+             "origin_url": r.origin_url, "our_url": r.our_url, "pass_code": r.pass_code,
+             "status": r.status, "message": r.message, "kind": r.kind,
+             "msg_time": r.msg_time.strftime("%Y-%m-%d %H:%M") if r.msg_time else ""}
+            for r in rows]
+
+
+# ---------------------------------------------------------------- 推送
+
+def push_new_shares(items: list[dict], settings) -> bool:
+    """转存成功的资源推**管理员群**(与 `xunlei_sync.push_new_resources` 同一出口)。"""
+    if not items:
+        return False
+    webhook = (getattr(settings, "feishu_webhook_admin", "") or
+               getattr(settings, "feishu_webhook", ""))
+    if not webhook:
+        return False
+
+    from app.services.feishu_client import FeishuClient
+
+    elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
+        f"迅雷群组新转存 **{len(items)}** 个资源,已生成我方分享链:"}}]
+    for it in items:
+        elements.append({"tag": "hr"})
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content":
+            f"📦 **{it['title']}**{' · 来自「' + it['group_name'] + '」' if it.get('group_name') else ''}"
+            f"\n{it['share_url']}"}})
+    card = {"config": {"wide_screen_mode": True},
+            "header": {"template": "blue", "title": {"tag": "plain_text",
+                                                      "content": f"📥 迅雷群资源 · {len(items)} 个"}},
+            "elements": elements}
+    try:
+        return FeishuClient(webhook, getattr(settings, "feishu_secret", "")).send_card(card)
+    except Exception:  # noqa: BLE001
+        logger.exception("迅雷群资源推送失败")
+        return False
+
+
+# ---------------------------------------------------------------- 定时入口
+
+def xunlei_group_tick(settings=None) -> int:
+    """定时:先采集(登记 pending),再限量转存。返回本轮转存成功数。"""
+    from app.db import get_session_local
+    from app.db.models import User
+    from config.settings import get_settings
+
+    settings = settings or get_settings()
+    if not getattr(settings, "xunlei_group_enabled", True):
+        return 0
+    limit = int(getattr(settings, "xunlei_group_transfer_limit", 5) or 0)
+    db = get_session_local()()
+    total = 0
+    try:
+        for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
+            try:
+                sync_group_shares(db, uid, settings=settings)
+                if limit:
+                    out = transfer_pending(db, uid, limit=limit, settings=settings)
+                    total += out.get("ok", 0)
+                    push_new_shares(out.get("items") or [], settings)
+            except Exception:  # noqa: BLE001 - 单用户失败不影响其余
+                db.rollback()
+                logger.exception("迅雷群采集失败 user=%s", uid)
+    finally:
+        db.close()
+    return total

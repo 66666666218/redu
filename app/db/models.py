@@ -507,6 +507,65 @@ class WechatPanLink(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
+class XunleiResource(Base):
+    """迅雷网盘资源(2026-10-02):扫盘登记 + 自动生成我方分享链。
+
+    **为什么另开一张表**:公众号来源的盘链存在 `WechatPanLink`,而它的 `article_id` 是
+    **外键**(每条链必须挂在某篇文章下);迅雷这批资源是"用户在 App 里转存进来的",
+    **没有对应文章**,硬塞会破坏约束。资源库查询时把两边合并展示(带来源标签)。
+
+    `fid` 是迅雷侧的文件/文件夹 id,当去重键 —— 同一个资源重复扫到不会重复入库。
+    """
+
+    __tablename__ = "xunlei_resources"
+    __table_args__ = (UniqueConstraint("user_id", "fid", name="uq_xunlei_fid"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    fid: Mapped[str] = mapped_column(String(64), index=True)          # 迅雷文件 id
+    name: Mapped[str] = mapped_column(String(255), default="")        # 转存进来的名字
+    kind: Mapped[str] = mapped_column(String(16), default="")         # file / folder
+    size: Mapped[str] = mapped_column(String(32), default="")         # 字节数(文件夹为 0)
+    parent_name: Mapped[str] = mapped_column(String(128), default="")  # 所在目录名(看来源)
+    share_url: Mapped[str] = mapped_column(String(500), default="")   # **我方**分享链
+    pass_code: Mapped[str] = mapped_column(String(32), default="")    # 提取码
+    synced_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class XunleiGroupShare(Base):
+    """迅雷**群组**里的分享(2026-10-02):群消息流 → 限量转存 → 我方分享链。
+
+    **为什么又开一张表**(与 `XunleiResource` 的区别):`XunleiResource` 记的是
+    "**已经在我方盘里**"的资源(有 `fid`、能直接再分享);群里的分享**还没转存**,
+    没有我方 fid,却多出"哪个群 / 谁发的 / 群主原链 / 什么时候发的"这些 `XunleiResource`
+    没有的维度。转存成功后把结果**回填到本行**(`fid` + `our_url`),不再另插一条。
+
+    `share_id` 是迅雷侧的分享 id,当去重键 —— 同一条分享会被"群文件库更新卡"重复播报,
+    按 `share_id` 去重才不会重复转存。
+    """
+
+    __tablename__ = "xunlei_group_shares"
+    __table_args__ = (UniqueConstraint("user_id", "share_id", name="uq_xunlei_group_share"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    group_id: Mapped[str] = mapped_column(String(32), index=True)      # 群号
+    group_name: Mapped[str] = mapped_column(String(128), default="")   # 群名(展示用)
+    message_id: Mapped[str] = mapped_column(String(32), default="")    # 群消息 id(溯源)
+    share_id: Mapped[str] = mapped_column(String(64), index=True)      # 迅雷分享 id(去重键)
+    origin_url: Mapped[str] = mapped_column(String(300), default="")   # 群主原链
+    title: Mapped[str] = mapped_column(String(255), default="")        # 资源名
+    sender: Mapped[str] = mapped_column(String(32), default="")        # 发送者 uid
+    kind: Mapped[str] = mapped_column(String(16), default="")          # drive#folder / drive#file
+    status: Mapped[str] = mapped_column(String(16), default="pending")  # pending/ok/failed
+    message: Mapped[str] = mapped_column(String(200), default="")      # 失败原因
+    our_url: Mapped[str] = mapped_column(String(500), default="")      # **我方**分享链
+    pass_code: Mapped[str] = mapped_column(String(32), default="")     # 我方提取码
+    fid: Mapped[str] = mapped_column(String(64), default="")           # 我方盘文件 id
+    msg_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # 群消息时间
+    synced_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
 class AgentStage(Base):
     """苗头 Agent 的关键词生命周期记忆(思维状态):苗头→上升→爆发→回落。"""
 
