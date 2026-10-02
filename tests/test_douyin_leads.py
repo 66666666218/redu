@@ -207,3 +207,57 @@ def test_apply_kouling_disabled_only_annotates(session, monkeypatch) -> None:
 
     out = dl.apply_kouling(_leads("三岁宝库"), session, 1, _S())
     assert out[0]["kouling"] == {"kind": "off"}
+
+
+# ---------------------------------------------------------------- 取词:群组新资源 + 资源库
+
+from datetime import datetime, timedelta  # noqa: E402
+
+from app.db.models import XunleiGroupShare  # noqa: E402
+
+
+def test_to_search_word_keeps_subject_and_drops_generic() -> None:
+    """群标题 → 搜索词:取主体名(丢括号补充与版本号);**泛化合集名整个丢掉**。
+
+    实测样本:群里真是这么写的 —— 整句丢进抖音搜不到,泛词搜出来全是噪音。
+    """
+    assert dl._to_search_word("手机警报器（警笛模拟器）2.0版") == "手机警报器"
+    assert dl._to_search_word("日乙安卓直装（先存后下,否则会乱🐎的）") == "日乙安卓直装"
+    assert dl._to_search_word("【全网最齐】游戏软件资源合集") == ""      # 泛词 → 丢
+    assert dl._to_search_word("最全文件") == ""                          # 泛词 → 丢
+    assert dl._to_search_word("短的") == ""                              # 太短 → 丢
+    assert dl._to_search_word("") == ""
+
+
+def test_group_keywords_prefers_recent_specific(session) -> None:
+    """群组取词:只要**最近 7 天**的、**够具体**的,按消息时间倒序,去重。"""
+    now = datetime.now()
+    rows = [
+        XunleiGroupShare(user_id=1, group_id="g", share_id="s1", title="蓝河工具箱",
+                         msg_time=now - timedelta(hours=2)),
+        XunleiGroupShare(user_id=1, group_id="g", share_id="s2", title="警笛模拟器（2.0）",
+                         msg_time=now - timedelta(days=1)),
+        XunleiGroupShare(user_id=1, group_id="g", share_id="s3", title="【全网最齐】资源合集",
+                         msg_time=now - timedelta(hours=1)),          # 泛词 → 丢
+        XunleiGroupShare(user_id=1, group_id="g", share_id="s4", title="老货工具箱",
+                         msg_time=now - timedelta(days=30)),          # 太旧 → 丢
+        XunleiGroupShare(user_id=1, group_id="g", share_id="s5", title="蓝河工具箱",
+                         msg_time=now - timedelta(hours=3)),          # 重复 → 去重
+    ]
+    session.add_all(rows)
+    session.commit()
+    assert dl.group_keywords(session, 1, top=5) == ["蓝河工具箱", "警笛模拟器"]
+
+
+def test_search_keywords_puts_group_words_first(session, monkeypatch) -> None:
+    """汇总:群组的词**排前面**(更新鲜),再补资源库的词;去重后按 top 截断。"""
+    session.add(XunleiGroupShare(user_id=1, group_id="g", share_id="s1",
+                                 title="蓝河工具箱", msg_time=datetime.now()))
+    session.commit()
+    monkeypatch.setattr("app.services.cross_accounts._keywords_from_library",
+                        lambda s, u, top: ["蓝河工具箱", "霸王茶姬杯贴"])
+
+    class _S:
+        douyin_leads_group_keywords = 3
+
+    assert dl.search_keywords(session, 1, top=4, settings=_S()) == ["蓝河工具箱", "霸王茶姬杯贴"]

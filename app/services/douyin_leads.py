@@ -120,6 +120,76 @@ def find_leads(keywords: list[str], limit: int = 30) -> list[dict]:
     return out[:limit]
 
 
+_GENERIC_WORDS = ("合集", "大全", "资源包", "资源库", "宝库", "全部", "整理", "分类",
+                  "更新", "最新", "其他", "转存", "文件", "每日", "日更")
+
+
+def _to_search_word(title: str) -> str:
+    """群资源标题 → 搜索词:取**主体名**,丢掉括号里的补充说明与版本号。
+
+    实测群里的标题长这样:「手机警报器（警笛模拟器）2.0版」—— 整句丢进抖音搜不到东西,
+    「手机警报器」才对;「【全网最齐】游戏软件资源合集」这种**泛化合集名**则整个丢掉
+    (搜出来全是噪音,还会把无关内容一起带进来)。
+    """
+    text = re.sub(r"[（(【\[][^)）】\]]*[)）】\]]", " ", title or "")
+    text = re.split(r"[|｜\-—·,，、:：!！?？]", text)[0]
+    # 再丢掉**版本号式的尾串**(「2.0版」「v3」「2024版」)—— 它们搜不出东西
+    tokens = [t for t in text.split()
+              if t and not re.match(r"^[vV]?\d", t) and not t.endswith("版")]
+    word = " ".join(tokens).strip()
+    if len(word) < 4 or any(g in word for g in _GENERIC_WORDS):
+        return ""
+    return word[:12]
+
+
+def group_keywords(session, user_id: int, top: int = 3, days: int = 7) -> list[str]:
+    """**群组里新出现的资源** → 抖音搜索词。
+
+    用户口径(2026-10-02):"结合着进的群组新资源的出现再去抖音搜索" —— 群里刚冒出来的
+    资源 = **"最近有人在找这个"**,拿它去抖音搜,抓到的正是**正在蹭这波热度的推广号**,
+    比自己凭资源库瞎猜要准。只取最近 `days` 天、按消息时间倒序。
+    """
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import select
+
+    from app.db.models import XunleiGroupShare
+
+    since = datetime.now() - timedelta(days=days)
+    rows = session.execute(
+        select(XunleiGroupShare.title, XunleiGroupShare.msg_time)
+        .where(XunleiGroupShare.user_id == user_id,
+               XunleiGroupShare.title != "")
+        .order_by(XunleiGroupShare.msg_time.desc().nullslast(),
+                  XunleiGroupShare.id.desc()).limit(top * 6)).all()
+    words: list[str] = []
+    for title, msg_time in rows:
+        if msg_time and msg_time < since:
+            continue
+        word = _to_search_word(title)
+        if word and word not in words:
+            words.append(word)
+        if len(words) >= top:
+            break
+    return words
+
+
+def search_keywords(session, user_id: int, top: int, settings) -> list[str]:
+    """本轮抖音反查用的搜索词 = **群组新资源**(优先) + 公众号已验证资源。
+
+    两路都要:群组的词**新鲜**(刚有人要),公众号的词**被验证过**(同链多号同发)。
+    去重后按 `top` 截断 —— 每个词一次抖音搜索,词越多越慢。
+    """
+    from app.services.cross_accounts import _keywords_from_library
+
+    n_group = int(getattr(settings, "douyin_leads_group_keywords", 3) or 0)
+    kws = group_keywords(session, user_id, top=n_group)
+    for w in _keywords_from_library(session, user_id, max(1, top - len(kws))):
+        if w not in kws:
+            kws.append(w)
+    return kws[:top]
+
+
 def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[dict]:
     """把线索里《…》包的口令**真的变成资源**(2026-10-02):解析 → 转存入库 / 加群。
 
@@ -172,9 +242,9 @@ def _kouling_line(ld: dict) -> str:
     info = ld.get("kouling") or {}
     kind, status = info.get("kind"), info.get("status")
     if kind == "share" and status == "ok":
-        return f"✅ **已自动转存**,我方链:{info.get('our_url') or ''}"
+        return f"✅ **已自动转存进你的盘**,我方分享链:[▶ 点这里打开]({info.get('our_url') or ''})"
     if kind == "share" and status == "already":
-        return "✅ 之前已转存过"
+        return "✅ 之前已转存过(库里已有)"
     if kind == "share" and status == "over_budget":
         return f"⏸ 本轮转存额度用完,未搬(原链 {info.get('share_url') or ''})"
     if kind == "share" and status == "failed":
@@ -206,13 +276,17 @@ def push_leads(leads: list[dict], settings) -> bool:
 
     elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
         f"抖音上标题带《…》前缀的推广视频 **{len(leads)}** 条。\n"
-        "《…》里就是**迅雷口令** —— 已自动解析:能解的**已转存进你的盘**并生成我方分享链,"
-        "指向群组的已加群;点视频链接能看到作者(账号被工具脱敏,需人工确认)。"}}]
+        "搜索词来自**群组里新出现的资源** + 公众号已验证资源。\n"
+        "《…》里就是**迅雷口令** —— 已自动解析:能解的**已转存进你的盘**,"
+        "指向群组的已加群。(账号被工具脱敏,点视频链接才能看到作者)"}}]
     for ld in leads:
         line = _kouling_line(ld)
         elements.append({"tag": "hr"})
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content":
-            f"**《{ld['mark']}》**\n{ld['title']}\n"
+            f"**【{ld['title'][:60]}】**\n"
+            f"口令《{ld['mark']}》"
+            + (f" · 搜索词:{ld['keyword']}" if ld.get("keyword") else "")
+            + "\n"
             + (f"{line}\n" if line else "")
             + f"[▶ 打开视频]({ld['url']})"}})
     card = {
@@ -233,7 +307,6 @@ def douyin_leads_tick(settings=None) -> int:
     from config.settings import get_settings
     from app.db import get_session_local
     from app.db.models import User
-    from app.services.cross_accounts import _keywords_from_library
 
     settings = settings or get_settings()
     if not getattr(settings, "douyin_leads_enabled", True):
@@ -244,7 +317,8 @@ def douyin_leads_tick(settings=None) -> int:
     try:
         for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
             try:
-                kws = _keywords_from_library(db, uid, top)
+                # 词来自**群组新资源 + 公众号已验证资源**(见 search_keywords 的注释)
+                kws = search_keywords(db, uid, top, settings)
                 if not kws:
                     continue
                 leads = find_leads(kws)

@@ -404,8 +404,9 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # 跨平台同类资源号发现(2026-10-01):拿资源库的**已验证资源名**去知乎等平台搜,
         # 只收录内容里真含网盘链的账号(各平台门槛见 cross_platform.py 头注)
         (cross_account_tick, _get_settings().cross_discover_cron, {"minute": 0, "hour": 9}, "cross_account_discover", "wechat"),
-        # 抖音推广线索(2026-10-02):标题带《…》前缀的推广视频 → 推**视频链接**给运营人工确认
-        # (账号被 MediaCrawler 教学版脱敏,拿不到"是谁";低频——它要开浏览器,一次几分钟)
+        # 抖音推广线索(2026-10-02):标题带《…》前缀的推广视频 → 解析口令 → **自动转存入库**
+        # → 推卡片(标题+视频链接+我方分享链)。搜索词来自**群组新资源 + 公众号已验证资源**;
+        # **每天** 11:00 一轮(低频——它要开浏览器,一次几分钟)。
         (douyin_leads_tick, _get_settings().douyin_leads_cron, {"minute": 0, "hour": 11}, "douyin_leads", "wechat"),
         # 迅雷盘同步(2026-10-02):扫用户迅雷盘 → 新转存进来的资源自动生成我方分享链 → 入库。
         # "用口令找资源并转存"那步只有手机 App 能做(服务端搜索接口不对外 + 部分口令是群组口令),

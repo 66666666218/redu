@@ -133,8 +133,13 @@ class Settings(BaseSettings):
     # 抖音推广号的标题里会多出一段与内容无关的文字(常见是《…》包裹),推给运营人工确认。
     # 账号信息被 MediaCrawler 教学版脱敏,所以**只推视频链接、不自动收号**。
     douyin_leads_enabled: bool = True
-    douyin_leads_cron: str = "0 11 * * 2,5"   # 周二/周五 11:00(**低频**:它要开浏览器,一次几分钟)
-    douyin_leads_keywords: int = 3            # 每轮取几个资源词当搜索词
+    # **每天** 11:00(用户口径 2026-10-02:"我想要你每天都在抖音发现新的资源")。
+    # 它要开浏览器,一次几分钟 —— 所以每天只跑一轮,别加频次。
+    douyin_leads_cron: str = "0 11 * * *"
+    douyin_leads_keywords: int = 4            # 每轮一共几个搜索词(每个词一次抖音搜索)
+    # 其中**群组新资源**贡献几个词(其余来自公众号资源库):群里的词新鲜(刚有人要),
+    # 资源库的词被验证过(同链多号同发)—— 两路结合,见 douyin_leads.search_keywords
+    douyin_leads_group_keywords: int = 3
     # 线索里的《口令》**自动变成资源**(2026-10-02):解析成分享链就直接转存入库,
     # 指向群组就加群(群里的资源由群采集轮收)。转存慢且占盘,故每轮限量。
     douyin_leads_auto_transfer: bool = True
