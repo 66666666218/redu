@@ -324,7 +324,10 @@ def quota_info(cred: dict | None = None) -> dict:
         def _once() -> dict:
             r = requests.get(f"{_API}/drive/v1/about", timeout=_TIMEOUT,
                              headers=_drive_headers(_fresh_cred(cred)))
-            return _json(r) if r.status_code == 200 else {}
+            # ⚠️ **先解析再判状态码**:`captcha_invalid` 是 400 返回的,若写成
+            # "200 才解析",异常就永远不会抛、自愈也就永远不会触发(2026-10-02 实测踩过)
+            data = _json(r)
+            return data if r.status_code == 200 else {}
 
         # ⚠️ 配额接口**也要 captcha** —— 必须走自愈重试,否则 captcha 一过期,闸门就
         # "什么都不知道"而放行(2026-10-02 实测:闸门刚上线就因为这个漏了一次,
@@ -421,7 +424,8 @@ def list_files(parent_id: str = "", cred: dict | None = None, limit: int = 200) 
                          timeout=_TIMEOUT,
                          params={"limit": str(limit), "parent_id": parent_id,
                                  "with_audit": "true"})
-        return (_json(r).get("files") or []) if r.status_code == 200 else []
+        data = _json(r)                       # 先解析:captcha_invalid 是 400,别漏掉自愈
+        return (data.get("files") or []) if r.status_code == 200 else []
 
     try:
         return _with_captcha_retry(_once)

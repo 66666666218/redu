@@ -214,3 +214,32 @@ def test_retry_uses_renewed_credentials(monkeypatch) -> None:
     out = xt.transfer_and_share("https://pan.xunlei.com/s/S?pwd=p")
     assert out["status"] == "ok", out
     assert seen[0] == "stale" and seen[-1] == "fresh", seen
+
+
+def test_quota_info_self_heals_captcha_on_400(monkeypatch) -> None:
+    """⚠️ 配额接口(闸门的判据)**也要 captcha**:400 `captcha_invalid` 时必须自愈重试。
+
+    否则 captcha 一过期,闸门就"什么都不知道"而放行 —— 实测漏过一次
+    (3 条被无条件搬、撞空间不足)。注意 `captcha_invalid` 是 **400** 返回的,
+    所以"只在 200 时解析 JSON"的写法会让异常永远不抛、自愈永远不触发。
+    """
+    from app.services import xunlei_transfer as xt
+
+    calls = {"n": 0, "renew": 0}
+
+    def fake_get(url, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _FakeResp({"error": "captcha_invalid", "error_description": "验证码无效"},
+                             status=400)
+        return _FakeResp({"quota": {"limit": "1000", "usage": "950"}})
+
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None: {"access_token": "a"})
+    monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
+    monkeypatch.setattr(xt.requests, "get", fake_get)
+    monkeypatch.setattr(xt, "_renew_captcha",
+                        lambda: (calls.__setitem__("renew", calls["renew"] + 1) or True))
+
+    info = xt.quota_info()
+    assert info["ratio"] == 0.95, info
+    assert calls["renew"] == 1
