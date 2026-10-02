@@ -177,19 +177,26 @@ def group_keywords(session, user_id: int, top: int = 3, days: int = 7) -> list[s
 
 
 def search_keywords(session, user_id: int, top: int, settings) -> list[str]:
-    """本轮抖音反查用的搜索词 = **群组新资源**(优先) + 公众号已验证资源。
+    """本轮抖音反查用的搜索词 = **我们的品牌词** + **群组新资源**(优先) + 公众号已验证资源。
 
-    两路都要:群组的词**新鲜**(刚有人要),公众号的词**被验证过**(同链多号同发)。
+    品牌词排第一(用户口径 2026-10-02:"可以把你关键词也换成我们的,我们的关键词念飞思雪")
+    —— 一是看谁在蹭我们的牌子,二是让推送侧有我们自己的词可用(推送里不露别人的词)。
     去重后按 `top` 截断 —— 每个词一次抖音搜索,词越多越慢。
     """
     from app.services.cross_accounts import _keywords_from_library
 
+    kws: list[str] = []
+    brand = (getattr(settings, "brand_name", "") or "").strip()
+    if brand:
+        kws.append(brand)
     n_group = int(getattr(settings, "douyin_leads_group_keywords", 3) or 0)
-    kws = group_keywords(session, user_id, top=n_group)
-    for w in _keywords_from_library(session, user_id, max(1, top - len(kws))):
+    for w in group_keywords(session, user_id, top=n_group):
         if w not in kws:
             kws.append(w)
-    return kws[:top]
+    for w in _keywords_from_library(session, user_id, max(1, top - len(kws) + 1)):
+        if w not in kws:
+            kws.append(w)
+    return kws[:max(1, top)]
 
 
 def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[dict]:
@@ -265,6 +272,16 @@ def _kouling_line(ld: dict) -> str:
     return ""
 
 
+def _scrub_others(text: str) -> str:
+    """把标题里**别人的口令**《…》抹掉。
+
+    用户口径(2026-10-02):"不要带别人的关键词" —— 抖音推广号会把**自己群的名称**写在
+    《…》里(实测《三岁分享》《白泽的梦》),卡片是发到客户群看的,**露出别人的群名
+    等于把人往别人那儿送**。所以展示前一律抹掉(抹掉后剩余文字仍能说明这是什么资源)。
+    """
+    return re.sub(r"《[^》]{1,20}》", "", text or "").strip()
+
+
 def push_leads(leads: list[dict], settings) -> bool:
     """把线索推飞书。
 
@@ -284,18 +301,19 @@ def push_leads(leads: list[dict], settings) -> bool:
     from app.services.feishu._cards import _col_set_row, _md_safe
     from app.services.feishu_client import FeishuClient
 
+    brand = (getattr(settings, "brand_name", "") or "").strip()
     elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
-        f"抖音上标题带《…》前缀的推广视频 **{len(leads)}** 条。"
-        "搜索词来自**群组里新出现的资源** + 公众号已验证资源;"
-        "《…》就是迅雷口令,能解的**已转存进「最全文件」**。"}},
+        f"抖音上发现 **{len(leads)}** 条在推同类资源的视频。"
+        "已自动解析并把能拿到的**转存进我方网盘**(归入「最全文件」),可直接取用。"}},
         # **四列网格**:与公众号推送同一套版式(作者/作品/资源/链接),不靠空格对齐
         _col_set_row([("**作者**", 3), ("**作品**", 5), ("**资源**", 3), ("**链接**", 2)],
                      grey=True)]
     for ld in leads:
         info = ld.get("kouling") or {}
         author = _md_safe(ld.get("author") or "—")
-        title = _md_safe(ld.get("title") or "")
-        shown = title[:22] + ("…" if len(title) > 22 else "")
+        # ⚠️ 标题先抹掉别人的口令《…》,再截断(见 _scrub_others)
+        title = _md_safe(_scrub_others(ld.get("title") or ""))
+        shown = title[:24] + ("…" if len(title) > 24 else "")
         # 资源列:一眼看出"这条值不值钱"(已转存/已加群/没解出资源/被闸门挡下)
         if info.get("kind") == "share" and info.get("status") == "ok":
             res = f"[🔴我方链]({_md_safe(info.get('our_url') or '')})"
@@ -309,13 +327,14 @@ def push_leads(leads: list[dict], settings) -> bool:
             res = "·非资源"
         elements.append(_col_set_row([
             (author, 3),
-            (f"{shown}\n`{_md_safe(ld.get('mark') or '')}`", 5),
+            (shown, 5),
             (res, 3),
             (f"[▶视频]({_md_safe(ld.get('url') or '')})", 2)]))
     card = {
         "config": {"wide_screen_mode": True},
         "header": {"template": "purple", "title": {"tag": "plain_text",
-                                                   "content": f"🎯 抖音推广线索 · {len(leads)} 条"}},
+                                                   "content": f"🎯 {brand + ' · ' if brand else ''}"
+                                                              f"抖音推广线索 · {len(leads)} 条"}},
         "elements": elements,
     }
     try:

@@ -11,6 +11,7 @@ class _Settings:
     feishu_webhook = ""
     feishu_webhook_douhot = "https://example.com/douhot"   # 抖音专属群
     feishu_secret = ""
+    brand_name = "念飞思雪"                                # 我们自己的品牌词
 
 
 def test_lead_regex_requires_leading_book_title() -> None:
@@ -111,8 +112,8 @@ def test_push_leads_builds_card_with_video_links(monkeypatch) -> None:
     # 用户口径:"既然是抖音的来源就推送到抖音群聊里面" → 推**抖音专属群**
     assert sent["webhook"] == "https://example.com/douhot"
     body = str(sent["card"])
-    assert "https://www.douyin.com/video/1" in body
-    assert "白泽的梦" in body
+    assert "https://www.douyin.com/video/1" in body        # 视频链接必须有(运营看作者的唯一入口)
+    assert "白泽的梦" not in body                          # ⚠️ 别人的口令《…》要被抹掉
 
 
 def test_push_leads_no_webhook_is_noop() -> None:
@@ -315,6 +316,11 @@ def test_push_leads_card_is_grid_with_author_work_link(monkeypatch) -> None:
     header = [c["elements"][0]["text"]["content"] for c in cols[0]["columns"]]
     assert header == ["**作者**", "**作品**", "**资源**", "**链接**"]
     row = str(cols[1])
-    assert "籽***" in row and "白泽的梦" in row
+    assert "籽***" in row                                 # 作者
+    assert "车机互联教程" in row                           # 作品名(去掉《》后剩下的部分)
+    # ⚠️ 用户口径"不要带别人的关键词":★ **别人的口令一个字都不该出现** ★
+    assert "白泽的梦" not in row
     assert "https://www.douyin.com/video/1" in row        # 作品链接
     assert "https://pan.xunlei.com/s/OUR" in row          # 我方资源链
+    # 卡片标题要有**我们的**品牌词
+    assert "念飞思雪" in str(sent["card"]["header"])

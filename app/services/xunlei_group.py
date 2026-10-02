@@ -391,19 +391,22 @@ def push_new_shares(items: list[dict], settings) -> bool:
     from app.services.feishu._cards import _col_set_row, _md_safe
     from app.services.feishu_client import FeishuClient
 
+    brand = (getattr(settings, "brand_name", "") or "").strip()
     elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
-        f"迅雷群组新转存 **{len(items)}** 个资源(已归入「"
+        f"新到 **{len(items)}** 个资源(已归入「"
         f"{getattr(settings, 'xunlei_transfer_parent', '') or '最全文件'}」):"}},
-        _col_set_row([("**来源群**", 3), ("**资源**", 5), ("**我方分享链**", 4)], grey=True)]
+        # ⚠️ **不列来源群**:那是**别人的群名**,卡片是发到客户群看的(2026-10-02 用户口径
+        # "不要带别人的关键词")—— 露出别人的群等于把人往别人那儿送
+        _col_set_row([("**资源**", 6), ("**链接**", 4)], grey=True)]
     for it in items:
         elements.append(_col_set_row([
-            (_md_safe(it.get("group_name") or "—"), 3),
-            (_md_safe(it.get("title") or ""), 5),
+            (_md_safe(it.get("title") or ""), 6),
             (f"[▶ 打开]({_md_safe(it.get('share_url') or '')})"
              + (f" 🔑{_md_safe(it.get('code') or '')}" if it.get("code") else ""), 4)]))
     card = {"config": {"wide_screen_mode": True},
             "header": {"template": "blue", "title": {"tag": "plain_text",
-                                                      "content": f"📥 迅雷群资源 · {len(items)} 个"}},
+                                                      "content": f"📥 {brand + ' · ' if brand else ''}"
+                                                                 f"新资源 · {len(items)} 个"}},
             "elements": elements}
     try:
         return FeishuClient(webhook, getattr(settings, "feishu_secret", "")).send_card(card)

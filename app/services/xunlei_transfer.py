@@ -384,6 +384,46 @@ def trash_files(file_ids: list[str], cred: dict | None = None) -> dict:
         return {"status": "failed", "message": str(exc)[:200], "deleted": 0, "errors": []}
 
 
+def move_files(file_ids: list[str], parent_id: str, cred: dict | None = None) -> dict:
+    """把文件/文件夹**移到**指定目录(`POST /drive/v1/files/{file_id}/move`)。
+
+    ⚠️ **形状踩坑记**(2026-10-02,试了 6 种才中):body 是**嵌套消息**
+    `{"to": {"parent_id": "<目标目录 id>"}}` ——
+      - 传字符串(`{"to": "xxx"}`)→ protobuf 解析器直接拒(`proto: syntax error`);
+      - 传 `{"to": {"id": "xxx"}}` → 报 `file_move_or_copy_to_cur`(它把 id 当成了"当前目录")。
+    返回 `{"status", "moved", "errors"}`;移动是**异步任务**(接口只回 task_id),
+    所以调用方要稍后自查落点,别指望这一行就到位。
+    """
+    cred = cred or _credentials()
+    if not cred or not file_ids or not parent_id:
+        return {"status": "failed", "message": "缺凭据/文件 id/目标目录", "moved": 0, "errors": []}
+
+    def _once() -> dict:
+        headers = _drive_headers(_fresh_cred(cred))
+        moved, errors = 0, []
+        for fid in file_ids:
+            r = requests.post(f"{_API}/drive/v1/files/{fid}/move", headers=headers,
+                              timeout=_TIMEOUT, json={"to": {"parent_id": parent_id}})
+            data = _json(r)                  # 先解析:captcha_invalid 是 400,别漏掉自愈
+            if r.status_code == 200:
+                moved += 1
+            else:
+                errors.append(f"{fid}: {str(data)[:100]}")
+        if moved == 0 and errors:
+            return {"status": "failed", "message": errors[0][:200], "moved": 0, "errors": errors}
+        return {"status": "ok", "message": f"已提交移动 {moved} 个",
+                "moved": moved, "errors": errors}
+
+    try:
+        return _with_captcha_retry(_once)
+    except _CaptchaExpired:
+        return {"status": "failed", "message": "captcha 失效且自动续期失败 —— 需要重新扫码登录",
+                "moved": 0, "errors": []}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("迅雷移动失败")
+        return {"status": "failed", "message": str(exc)[:200], "moved": 0, "errors": []}
+
+
 def quota_info(cred: dict | None = None) -> dict:
     """盘配额 `{"usage", "limit", "ratio"}`(字节;拿不到就是空 dict)。
 
