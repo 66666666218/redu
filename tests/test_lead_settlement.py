@@ -101,3 +101,80 @@ def test_coefficient_override_is_read(session) -> None:
     _lead(session, "a", 100, _monday(0))
     session.commit()
     assert ls.weekly_report(session, 1, weeks=1)["weeks"][0]["estimated"] == 50.0
+
+
+# ---------------------------------------------------------------- 周录提醒(2026-10-03)
+
+def _stub_tick(monkeypatch, session):
+    import app.db as db_mod
+    monkeypatch.setattr(db_mod, "get_session_local", lambda: (lambda: session))
+
+
+def _S(**kw):
+    from types import SimpleNamespace
+    base = dict(recruit_reminder_enabled=True, feishu_webhook_admin="ADMIN",
+                feishu_webhook="CUSTOMER", feishu_secret="")
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_missing_weeks_excludes_current_week(session) -> None:
+    """**本周还没结束,不算"缺录"** —— 只数已经过完的周。"""
+    out = ls._missing_weeks(session, 1, weeks=3)
+    from datetime import date, timedelta
+
+    this_monday = (date.today() - timedelta(days=date.today().weekday())).isoformat()
+    assert this_monday not in out
+    assert len(out) == 3
+
+
+def test_reminder_pushes_to_admin_when_week_missing(session, monkeypatch) -> None:
+    """⚠️ 真值入口空着就提醒 —— 推**管理员群**(内部待办,不回落客户群)。"""
+    from app.services import feishu_client as fc
+
+    _stub_tick(monkeypatch, session)
+    sent: list = []
+
+    class _F:
+        def __init__(self, webhook, secret="") -> None:
+            sent.append(webhook)
+
+        def send(self, text):
+            sent.append(text)
+            return True
+
+    monkeypatch.setattr(fc, "FeishuClient", _F)
+    assert ls.record_reminder_tick(_S()) == 1
+    assert sent[0] == "ADMIN"
+    assert "该录上周拉新" in sent[1] and "分渠道" in sent[1]
+
+
+def test_reminder_is_silent_when_last_week_recorded(session, monkeypatch) -> None:
+    """⚠️ **录了就不再提醒** —— 否则每周一条通知,很快变成噪音被无视
+
+    (与看门狗告警"一天响 4 次"同一个教训)。
+    """
+    from datetime import date, timedelta
+
+    _stub_tick(monkeypatch, session)
+    this_monday = date.today() - timedelta(days=date.today().weekday())
+    for i in range(1, 5):                       # 把最近 4 周都录上
+        wk = this_monday - timedelta(weeks=i)
+        session.add(PanRecruitWeekly(user_id=1, week_start=datetime.combine(wk, datetime.min.time()),
+                                     recruits=10, channels=""))
+    session.commit()
+    called = {"n": 0}
+
+    class _F:
+        def __init__(self, *a, **k) -> None:
+            called["n"] += 1
+
+    from app.services import feishu_client as fc
+    monkeypatch.setattr(fc, "FeishuClient", _F)
+    assert ls.record_reminder_tick(_S()) == 0 and called["n"] == 0
+
+
+def test_reminder_does_not_fall_back_to_customer_group(session, monkeypatch) -> None:
+    """没配管理员群就**安静跳过** —— 这是内部待办,推进客户群是事故。"""
+    _stub_tick(monkeypatch, session)
+    assert ls.record_reminder_tick(_S(feishu_webhook_admin="")) == 0

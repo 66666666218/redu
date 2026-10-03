@@ -1203,6 +1203,10 @@
 - **查询**: GET `/api/hotspot/recruits?limit=12` → `{"total":N,"list":[{"week_start","recruits","channels","note","created_at"}]}`(最近在前)
 - 同 `week_start` 重录 = 覆盖更新;`pan_recruit_weekly` 表按 user_id 隔离。
 - 命令行入口:`python scripts/record_recruits.py 2026-09-22=12 2026-09-29=7 [--note 备注]`
+- **每周一 09:40 自动提醒**(`recruit_reminder`,推**管理员群**):`pan_recruit_weekly` 是
+  **转化回路唯一的真值入口**(链接级真值在夸克/迅雷侧都拿不到,已定案),却长期 0 行 ——
+  入口早就有,缺的只是"有人去录"。⚠️ **录了就不再提醒**(只列还缺的周),否则每周一条通知
+  很快变成噪音被无视;⚠️ 没配管理员群就**安静跳过**,不回落客户群(这是内部待办)。
 
 ### 11.5 线索结算对账(2026-10-03)
 

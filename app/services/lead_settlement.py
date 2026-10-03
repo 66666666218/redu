@@ -64,6 +64,77 @@ def _channels_of(row: PanRecruitWeekly | None) -> dict[str, int]:
     return {str(k): int(v) for k, v in d.items() if isinstance(v, (int, float))}
 
 
+def _missing_weeks(db: Session, user_id: int, weeks: int = 4) -> list[str]:
+    """最近 `weeks` 个**已结束**的周里,哪些还没录(周一日期,倒序)。"""
+    today = date.today()
+    this_monday = today - timedelta(days=today.weekday())
+    done = {r.week_start.date().isoformat() for r in db.scalars(
+        select(PanRecruitWeekly).where(PanRecruitWeekly.user_id == user_id)).all()}
+    out: list[str] = []
+    for i in range(1, weeks + 1):
+        wk = (this_monday - timedelta(weeks=i)).isoformat()
+        if wk not in done:
+            out.append(wk)
+    return out
+
+
+def record_reminder_tick(settings=None) -> int:
+    """每周一提醒录**上周**拉新(推**管理员群**)。返回是否推了(0/1)。
+
+    **为什么值得单独做一个作业**:`pan_recruit_weekly` 是**转化回路唯一的真值入口**
+    (链接级真实转存数在夸克/迅雷侧都拿不到,链接级不可得是定案的),而它**至今 0 行** ——
+    没有真值,`weekly_report` 那半张对账表永远是空的,系统也无从校准"哪类内容真的带来拉新"。
+    入口(接口/前端)早就有,缺的只是**有人去录**。
+
+    ⚠️ **录了就不再提醒**(只列"还缺的周"):这是每周一次的内部待办,不是每周一次的通知 ——
+    无条件推会变成噪音然后被无视(与看门狗告警同一个教训)。
+    """
+    from config.settings import get_settings
+
+    settings = settings or get_settings()
+    if not getattr(settings, "recruit_reminder_enabled", True):
+        return 0
+    webhook = str(getattr(settings, "feishu_webhook_admin", "") or "").strip()
+    if not webhook:                       # 内部待办 → 只推管理群,不回落客户群
+        logger.info("周录提醒跳过:未配管理员群 webhook")
+        return 0
+    from app.db import get_session_local
+    from app.db.models import User
+
+    db = get_session_local()()
+    try:
+        uid = db.scalar(select(User.id).where(User.enabled.is_(True)).order_by(User.id))
+        if not uid:
+            return 0
+        missing = _missing_weeks(db, int(uid), weeks=4)
+        if not missing:                   # 上一周已录 → 静默
+            return 0
+        last = missing[0]
+        end = (date.fromisoformat(last) + timedelta(days=6)).isoformat()
+        lines = [
+            f"📝 **该录上周拉新了**（{last} ~ {end}）",
+            "",
+            "从官方后台抄**分渠道**周总量,录进「建议」页(或 `POST /api/hotspot/recruits`):",
+            "　抖音 ______　公众号 ______",
+            "",
+            "**为什么重要**:链接级真实转存数在夸克/迅雷侧都拿不到(已定案),"
+            "所以这是转化回路**唯一的真值** —— 没它,「线索结算对账」只有系统侧那半张表,"
+            "也无从校准哪类内容真的带来拉新。",
+        ]
+        if len(missing) > 1:
+            lines += ["", f"⚠️ 已累计 **{len(missing)} 周**未录:{' / '.join(missing)}"]
+        from app.services.feishu_client import FeishuClient
+
+        ok = FeishuClient(webhook, getattr(settings, "feishu_secret", "")).send("\n".join(lines))
+        logger.info("周录提醒已推送(缺 %d 周)", len(missing))
+        return 1 if ok else 0
+    except Exception:  # noqa: BLE001 - 提醒失败不该炸调度
+        logger.exception("周录提醒推送失败")
+        return 0
+    finally:
+        db.close()
+
+
 def weekly_report(db: Session, user_id: int, weeks: int = 8) -> dict:
     """近 N 周的对账表(每周一行):系统侧线索量级 vs 人工周录真值。
 

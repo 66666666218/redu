@@ -398,6 +398,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.health import health_push_tick
     from app.services.resource_presence import presence_tick
     from app.services.xunlei_cleanup import cleanup_tick as xunlei_cleanup_tick
+    from app.services.lead_settlement import record_reminder_tick as recruit_reminder_tick
 
     jobs = [
         # 阅读量采样(traffic_tick)已停用:2026-09-29 用户决策放弃 dajiala(不充值),
@@ -447,6 +448,9 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # 跨平台资源热度(2026-10-02):抓**资源名** → 回**资源库**匹配链 —— 用于"平台上没有链"
         # 的那些平台(小红书/快手/贴吧)。每平台各开一次浏览器,所以**每周一轮**。
         (presence_tick, _get_settings().presence_cron, {"minute": 0, "hour": 9}, "resource_presence", "wechat"),
+        # 拉新周录提醒(2026-10-03):每周一提醒录上周拉新 —— `pan_recruit_weekly` 是转化回路
+        # **唯一的真值入口**(链接级真值不可得,已定案),却至今 0 行。**录了就不再提醒**。
+        (recruit_reminder_tick, _get_settings().recruit_reminder_cron, {"minute": 40, "hour": 9}, "recruit_reminder", "wechat"),
         # 跨实例健康可见(2026-10-03):远端每天推一张**板块健康卡**到管理员群。
         # 为什么推卡而不是本机轮询远端库:两边**库是独立的**,推飞书零配置、零新增暴露面;
         # 远端整机挂了这张卡就断,"该来没来"本身是信号(本机另有 peer_status 探活兜底)。
