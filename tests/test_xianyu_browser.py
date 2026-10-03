@@ -180,3 +180,79 @@ def test_get_client_returns_thread_bound_proxy() -> None:
     xb.close_client()
     assert isinstance(xb.get_client(), xb._ThreadBoundClient)
     xb.close_client()
+
+
+# ---------------------------------------------------------------- 页面驱动搜索(2026-10-03)
+
+class _PageDrivenPage:
+    """页面驱动路:跳到搜索页后,`evaluate` 读回钩子截获的 `__xy_cap`。"""
+
+    def __init__(self, caps: list, direct_payload: str = ""):
+        self._caps = caps
+        self._direct = direct_payload
+        self.goto_url = ""
+        self.waited = 0
+
+    def goto(self, url, **kw):
+        self.goto_url = url
+
+    def evaluate(self, js, arg=None):
+        if "__xy_cap" in js:
+            return json.dumps(self._caps)
+        if not self._direct:
+            raise AssertionError("不该走到直连那条路")
+        return self._direct
+
+    def wait_for_timeout(self, ms):
+        self.waited += ms
+
+
+def _cap_payload(title: str, item_id: str) -> dict:
+    return {"api": "mtop.taobao.idlemtopsearch.pc.search",
+            "data": {"resultList": [{"item": {"main": {"exContent":
+                {"title": title, "itemId": item_id}}}}]}}
+
+
+def test_search_prefers_page_driven_and_captures_results() -> None:
+    """⚠️ **让页面自己去搜**(2026-10-03 实测的修复)。
+
+    同一浏览器同一登录态下,我们自己调 `idlemtopsearch.pc.search` 会被回
+    `TIMEOUT::接口超时`,而**页面自己的 JS 发同样的搜索完全正常**
+    (同一时刻 `idlehome.feed`/`user.page.nav` 都正常 → 不是环境被封、不是登录失效,
+    **是这一个接口被单独限了**)。所以改成钩住页面的 mtop、截获它拿到的结构化响应。
+    """
+    c = xb.XianyuBrowserClient()
+    pg = _PageDrivenPage([_cap_payload("剪映会员秒发", "111")])
+    c._pg = pg
+    items = c.search("剪映会员")
+    assert len(items) == 1 and items[0]["title"] == "剪映会员秒发"
+    assert "/search?q=" in pg.goto_url and "%E5%89%AA%E6%98%A0" in pg.goto_url   # 词进了 URL
+
+
+def test_search_falls_back_to_direct_when_page_yields_nothing() -> None:
+    """页面路拿不到东西(钩子失效/站点改版) → **退回直连**,别整条链判死。"""
+    direct = json.dumps({"data": {"resultList": [
+        {"item": {"main": {"exContent": {"title": "直连拿到的", "itemId": "222"}}}}]}})
+    c = xb.XianyuBrowserClient()
+    c._pg = _PageDrivenPage([], direct_payload=direct)
+    items = c.search("ps教程")
+    assert len(items) == 1 and items[0]["title"] == "直连拿到的"
+
+
+def test_search_raises_when_both_paths_fail() -> None:
+    """两条路都空 → 明确报错(不能静默当 0 条)。"""
+    c = xb.XianyuBrowserClient()
+    c._pg = _PageDrivenPage([], direct_payload=json.dumps({"data": {"resultList": []}}))
+    with pytest.raises(XianyuError) as ei:
+        c.search("ps教程")
+    assert "未解析到商品" in str(ei.value)
+
+
+def test_hook_is_injected_before_navigation() -> None:
+    """钩子必须走 `add_init_script`(每次页面加载都先执行)。
+
+    ⚠️ 实测:用 `page.evaluate` 装钩子会被**跳转清掉**,截获恒为 0。
+    """
+    src = (xb.__file__ and open(xb.__file__, encoding="utf-8").read()) or ""
+    assert "add_init_script(_HOOK_INIT)" in src
+    assert "__xy_patched" in src          # 防重复包(同一页可能加载多次)

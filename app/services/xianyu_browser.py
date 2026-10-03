@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import json
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -55,6 +56,34 @@ async ([api, payload]) => {
   }
 }
 """
+
+# 钩住页面**自己的** mtop 请求,把搜索响应截下来(见 `_search_by_page` 的说明)。
+# 用 `add_init_script` 注入:它会在**每次页面加载**时先于站点脚本执行,所以跳转到搜索页之后
+# 依然有效(⚠️ 实测:用 `page.evaluate` 装钩子会被跳转清掉,截获恒为 0)。
+_HOOK_INIT = """
+(() => {
+  window.__xy_cap = [];
+  const patch = () => {
+    if (!(window.lib && window.lib.mtop)) return false;
+    if (window.lib.mtop.request.__xy_patched) return true;   // 别重复包(同一页可能加载多次)
+    const orig = window.lib.mtop.request;
+    window.lib.mtop.request = async function (opts) {
+      const r = await orig.call(this, opts);
+      try {
+        if (String((opts || {}).api).indexOf("mtop.taobao.idlemtopsearch") >= 0) {
+          window.__xy_cap.push(r);
+        }
+      } catch (_) {}
+      return r;
+    };
+    window.lib.mtop.request.__xy_patched = true;
+    return true;
+  };
+  const t = setInterval(() => { if (patch()) clearInterval(t); }, 100);
+})();
+"""
+
+_SEARCH_URL = "https://www.goofish.com/search?q="
 
 
 class XianyuBrowserClient:
@@ -89,6 +118,11 @@ class XianyuBrowserClient:
             logger.info("闲鱼浏览器路径:未找到 Edge,改用自带 Chromium")
             self._ctx = self._pw.chromium.launch_persistent_context(**kwargs)
         self._pg = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
+        # 装钩子:**必须在 goto 之前**,`add_init_script` 保证每次页面加载都先于站点脚本执行
+        try:
+            self._ctx.add_init_script(_HOOK_INIT)
+        except Exception:  # noqa: BLE001 - 钩子装不上还有直连那条兜底
+            logger.debug("闲鱼搜索钩子注入失败", exc_info=True)
         self._pg.goto(HOME, wait_until="domcontentloaded", timeout=60000)
         try:                                    # goofish 首页会自己做客户端跳转,等它静下来
             self._pg.wait_for_load_state("networkidle", timeout=15000)
@@ -149,9 +183,42 @@ class XianyuBrowserClient:
         raise XianyuError(f"闲鱼页面内调用重试 3 次仍失败({api}):{str(last)[:140]}")
 
     # ---------------------------------------------------------------- 采集
-    def search(self, keyword: str, page: int = 1, rows: int = 30) -> list[dict]:
-        """与 `XianyuClient.search` 同签名同返回(商品 dict 列表)。"""
-        pg = self._ensure_page()
+    def _search_by_page(self, keyword: str) -> list[dict]:
+        """**让页面自己去搜**,把它的搜索响应截下来(首选路)。
+
+        ⚠️ **为什么不再自己调 mtop**(2026-10-03 实测):同一浏览器、同一登录态下,
+        `window.lib.mtop.request({api: "mtop.taobao.idlemtopsearch.pc.search"})`
+        —— 我们用了很久的那条路 —— 会被回 **`TIMEOUT::接口超时`**;
+        而**页面自己的 JS 发同样的搜索完全正常**(同一时刻测:搜索接口超时,
+        而 `idlehome.feed` / `user.page.nav` 都正常返回 → **不是环境被封、也不是登录失效,
+        是这一个接口被单独限了**)。手点搜索页也能正常出商品(实测 121 个节点)。
+
+        做法:`add_init_script` 钩住 `window.lib.mtop.request` → 跳到搜索页让**页面自己**发请求
+        → 读回它拿到的**结构化响应**(比解析 DOM 稳,还复用现成的 `_extract_items`)。
+        """
+        pg = self._pg
+        pg.goto(_SEARCH_URL + urllib.parse.quote(keyword), wait_until="domcontentloaded",
+                timeout=60000)
+        items: list[dict] = []
+        for _ in range(24):                       # 最多等 ~24 秒,等页面把搜索请求发出去
+            try:
+                caps = json.loads(pg.evaluate("() => JSON.stringify(window.__xy_cap || [])") or "[]")
+            except Exception:  # noqa: BLE001 - 页面在跳转(已知竞态)→ 等一下再来
+                pg.wait_for_timeout(1000)
+                continue
+            for cap in caps:
+                items.extend(_extract_items(cap))
+            if items:
+                break
+            pg.wait_for_timeout(1000)
+        return items
+
+    def _search_direct(self, pg, keyword: str, page: int, rows: int) -> list[dict]:
+        """**直连**路(老做法):在页面上下文里自己调 mtop。
+
+        现在多半会被回 `TIMEOUT::接口超时`(见 `_search_by_page`),留作兜底 ——
+        万一哪天平台又放开、或钩子因为站点改版失效,这条路还能顶上。
+        """
         payload = {
             "pageNumber": page, "keyword": keyword, "fromFilter": False, "rowsPerPage": rows,
             "sortValue": "", "sortField": "", "customDistance": "", "gps": "", "propValueStr": {},
@@ -169,7 +236,21 @@ class XianyuBrowserClient:
             if "USER_VALIDATE" in err or "RGV587" in err:
                 raise XianyuError(f"闲鱼页面内也被风控:{err[:160]}")
             raise XianyuError(f"闲鱼浏览器路径失败:{err[:160]}")
-        items = _extract_items(obj)
+        return _extract_items(obj)
+
+    def search(self, keyword: str, page: int = 1, rows: int = 30) -> list[dict]:
+        """与 `XianyuClient.search` 同签名同返回(商品 dict 列表)。
+
+        **先走"页面自己搜"那条路**(见 `_search_by_page`),拿不到再退回直连。
+        """
+        pg = self._ensure_page()
+        items: list[dict] = []
+        try:
+            items = self._search_by_page(keyword)
+        except Exception as exc:  # noqa: BLE001 - 页面路失败不该直接判死刑,还有直连兜底
+            logger.debug("闲鱼页面驱动搜索失败(%s):%s", keyword, str(exc)[:120])
+        if not items:
+            items = self._search_direct(pg, keyword, page, rows)
         if not items:
             raise XianyuError(f"未解析到商品,keyword={keyword}")
         logger.debug("闲鱼(浏览器路径)搜索 %s → %s 条", keyword, len(items))
