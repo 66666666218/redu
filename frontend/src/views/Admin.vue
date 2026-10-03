@@ -377,7 +377,10 @@ onMounted(load)
           </tr>
         </table>
         <div v-if="!failed.length" class="empty">暂无失败运行</div>
-        <p class="empty">系统每 30 分钟自动重试近24h失败且重试<3次的采集</p>
+        <!-- ⚠️ `<` 必须转义:裸写 `重试<3次` 会被 HTML 词法器当成**标签开头**
+             (`vue/no-parsing-error: invalid-first-character-of-tag-name`,2026-10-03 lint 发现)。
+             浏览器会"尽力恢复",但那是**未定义行为**,该渲染成什么样取决于解析器容错策略。 -->
+        <p class="empty">系统每 30 分钟自动重试近24h失败且重试&lt;3次的采集</p>
       </div>
     </template>
 

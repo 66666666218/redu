@@ -411,7 +411,11 @@ onMounted(load)
       <div class="empty" style="margin-top:8px">阅读列"—"=尚未采样;「刷新阅读量」按 ¥0.06/篇 调用 dajiala,每轮最多 30 篇(可在 .env 调整)</div>
     <div v-if="rewriteText" class="card" style="margin-top:16px">
       <h3>AI 改写稿:{{ rewriteTitle }}</h3>
-      <textarea readonly style="width:100%;min-height:300px;font-size:13px">{{ rewriteText }}</textarea>
+      <!-- ⚠️ 用 `:value` 而不是 `{{ }}`:Vue 官方明确说 **textarea 里不要用插值**
+           (eslint-plugin-vue 的 vue/no-textarea-mustache 就是为这个设的) ——
+           插值能不能渲染出来依编译器版本而异,渲染不出来时用户看到的是**一个空框**,
+           而"AI 改写稿"正是靠这个框显示内容的。`:value` 在任何版本都成立(2026-10-03 修)。 -->
+      <textarea readonly :value="rewriteText" style="width:100%;min-height:300px;font-size:13px"></textarea>
       <button style="margin-top:8px" @click="copyRewrite">复制全文</button>
     </div>
     </div>

@@ -680,6 +680,29 @@ python scripts/check_secrets.py --history   # 连 git 历史一起扫(慢,但那
 > 长期方案:上 [`gitleaks`](https://github.com/gitleaks/gitleaks)(单文件二进制、带熵分析与几百条
 > 规则,可挂 pre-commit/CI)。本项目脚本是**零依赖兜底**,覆盖已知形态 + 能扫历史;两者可并存。
 
+### 7e. 前端静态检查(2026-10-03 补 —— 此前**只有构建,没有任何 lint**)
+
+```sh
+cd frontend && npm run lint      # = npx eslint src
+```
+已被 `tests/test_frontend_lint.py` 接进测试套件(依赖不在时自动 skip)。
+
+⚠️ **为什么必须有**:这个项目对后端有 pyflakes 级别的防线,前端却**只有 `vite build`** ——
+而**构建通过 ≠ 模板正确**(模板里用了未声明变量会**整页白屏**,构建照样成功)。加 lint 后
+**第一次跑就抓出两个真问题**:
+
+| 位置 | 问题 | 后果 |
+| --- | --- | --- |
+| `WechatListen.vue` | `<textarea>{{ rewriteText }}</textarea>` | Vue 官方明确说 textarea 里别用插值;渲染不出来时用户看到的是**一个空框**,而"AI 改写稿"正靠它显示 |
+| `Admin.vue` | `重试<3次`(裸 `<`) | 被 HTML 词法器当成**标签开头**(`invalid-first-character-of-tag-name`),属未定义行为 |
+
+**配置口径**:只开 **essential + 少量核心规则**(`no-undef` / `vue/no-undef-components` /
+`vue/no-undef-properties` / 重复键 / 不可达代码),**关掉纯命名约定**
+(`vue/multi-word-component-names` 曾让 23 个视图全红)—— 风格告警会把真问题淹掉,
+结果就是"开了 lint 但没人看"。
+⚠️ 两个必配项:`router-link`/`router-view` 由 vue-router **全局注册**,要进
+`ignorePatterns`;`confirm`/`prompt` 等浏览器全局要进 `globals` —— 否则全是误报。
+
 ## 8. 关键文件位置
 
 | 文件 | 用途 |
