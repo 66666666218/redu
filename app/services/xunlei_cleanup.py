@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.db.models import DiscoveredPanLink, DouyinLead, XunleiGroupShare
@@ -177,10 +177,23 @@ def run_cleanup(db: Session, user_id: int, days: int = 7, settings=None,
             continue
         if (r or {}).get("status") == "ok" or (r or {}).get("deleted"):
             result["deleted"] += 1
+            # ⚠️ **联动删掉资源清单里的那一行**(2026-10-03):`xunlei_resources` 是
+            # `resource_library` 的取链来源(今天刚接通),盘上删了却留着行 = 资源库会
+            # **给出已经失效的分享链**。按 fid 精确删(清单里的 fid 就是盘上的文件 id)。
+            try:
+                from app.db.models import XunleiResource
+
+                n = db.execute(delete(XunleiResource).where(
+                    XunleiResource.user_id == user_id,
+                    XunleiResource.fid == str(f["id"]))).rowcount
+                result["unlisted"] = int(result.get("unlisted", 0)) + n
+            except Exception:  # noqa: BLE001 - 联动失败不该让清理算失败
+                logger.exception("清理后同步资源清单失败:%s", f["name"])
         else:
             result["errors"].append(f"{f['name']}: {str((r or {}).get('message'))[:60]}")
-    logger.info("迅雷盘清理:候选 %d,本轮移入回收站 %d(失败 %d)",
-                len(stale), result["deleted"], len(result["errors"]))
+    db.commit()
+    logger.info("迅雷盘清理:候选 %d,本轮移入回收站 %d(失败 %d,清单同步 %d)",
+                len(stale), result["deleted"], len(result["errors"]), result.get("unlisted", 0))
     return result
 
 

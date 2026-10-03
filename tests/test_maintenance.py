@@ -256,3 +256,95 @@ def test_cleanup_records_snapshot_error_for_corrupt_source(tmp_path, session) ->
     bak = tmp_path / "backups"
     leftovers = list(bak.glob("*.db")) if bak.exists() else []
     assert leftovers == [], f"失败不应留下半成品:{leftovers}"
+
+
+# ---------------------------------------------------------------- 2026-10 新增表的保留策略
+
+def _aged(days: int) -> datetime:
+    return datetime.now() - timedelta(days=days)
+
+
+def test_cleanup_prunes_new_tables_at_180_days_not_30(session) -> None:
+    """新表按**性质分档**,不是一律 30 天:
+
+    历史类(建议/线索/发现链/分享快照)保留 180 天 —— 它们是**结算与复盘**的底料,
+    对账要跨月看,用默认 30 天会把刚攒起来的对照数据清掉。
+    """
+    from app.db.models import DiscoveredPanLink, DouyinLead, HotspotSuggestion
+
+    session.add_all([
+        HotspotSuggestion(user_id=1, keyword="旧", created_at=_aged(200)),
+        HotspotSuggestion(user_id=1, keyword="半年内", created_at=_aged(100)),
+        DouyinLead(user_id=1, aweme_id="a", found_at=_aged(200)),
+        DouyinLead(user_id=1, aweme_id="b", found_at=_aged(10)),
+        DiscoveredPanLink(user_id=1, origin_url="u", found_at=_aged(200)),
+    ])
+    session.commit()
+    cleanup_old_data(_settings(), db=session)
+    assert session.query(HotspotSuggestion).count() == 1        # 30 天的不该被删,180 天的删
+    assert [r.keyword for r in session.query(HotspotSuggestion).all()] == ["半年内"]
+    assert session.query(DouyinLead).count() == 1
+    assert session.query(DiscoveredPanLink).count() == 0
+
+
+def test_cleanup_keeps_assets(session) -> None:
+    """⚠️ **资产不按时间删** —— `xunlei_resources` 是我方资源清单、`cross_platform_accounts`
+    是收录的对标号;按时间删 = 系统"忘了自己有什么",那是自毁不是清理。"""
+    from app.db.models import CrossPlatformAccount, XunleiResource
+
+    session.add_all([
+        XunleiResource(user_id=1, fid="f1", name="老资源", synced_at=_aged(400)),
+        CrossPlatformAccount(user_id=1, platform="bilibili", uid="u1", name="网盘号",
+                             status="active", discovered_at=_aged(400)),
+    ])
+    session.commit()
+    cleanup_old_data(_settings(), db=session)
+    assert session.query(XunleiResource).count() == 1
+    assert session.query(CrossPlatformAccount).count() == 1
+
+
+def test_cleanup_drops_dismissed_accounts(session) -> None:
+    """明确被否掉的对标号(`status='dismissed'`)才清。"""
+    from app.db.models import CrossPlatformAccount
+
+    session.add_all([
+        CrossPlatformAccount(user_id=1, platform="bilibili", uid="u1", name="留",
+                             status="active", discovered_at=_aged(1)),
+        CrossPlatformAccount(user_id=1, platform="bilibili", uid="u2", name="否",
+                             status="dismissed", discovered_at=_aged(1)),
+    ])
+    session.commit()
+    cleanup_old_data(_settings(), db=session)
+    assert [r.name for r in session.query(CrossPlatformAccount).all()] == ["留"]
+
+
+def test_cleanup_group_shares_only_drops_untransferred_stale(session) -> None:
+    """群分享:**只清"从没转存成功过"且过期很久的**。
+
+    转存成功的行要留 —— 它们是我方资源的来源凭证(`our_url`/`fid` 在别处被引用)。
+    """
+    from app.db.models import XunleiGroupShare
+
+    session.add_all([
+        XunleiGroupShare(user_id=1, group_id="g", share_id="s1", title="旧且没转", msg_time=_aged(90)),
+        XunleiGroupShare(user_id=1, group_id="g", share_id="s2", title="旧但转过了",
+                         our_url="https://pan.xunlei.com/s/X", msg_time=_aged(90)),
+        XunleiGroupShare(user_id=1, group_id="g", share_id="s3", title="新的没转", msg_time=_aged(3)),
+    ])
+    session.commit()
+    cleanup_old_data(_settings(), db=session)
+    assert sorted(r.share_id for r in session.query(XunleiGroupShare).all()) == ["s2", "s3"]
+
+
+def test_data_cleanup_is_not_at_0400_anymore() -> None:
+    """⚠️ **04:00 是全天最挤的一处** —— 那里 `wechat_collect_tick`(网络长任务)也在跑,
+    而清理要跨 ~22 张表 DELETE + 23MB 快照拷贝,两者都在压 SQLite 写锁。已错开到 03:10。"""
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from app.services.scheduler import build_jobs
+
+    sched = BackgroundScheduler(timezone="Asia/Shanghai")
+    build_jobs(sched)
+    job = next(j for j in sched.get_jobs() if j.id == "data_cleanup")
+    fields = {f.name: str(f) for f in job.trigger.fields}
+    assert fields["hour"] == "3" and fields["minute"] == "10"
+    sched.shutdown(wait=False) if sched.running else None

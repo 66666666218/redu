@@ -118,3 +118,33 @@ def test_run_cleanup_moves_to_trash_and_respects_limit(session, monkeypatch) -> 
     out = xc.run_cleanup(session, 1, days=7, settings=_S(), dry_run=False)
     assert out["to_delete"] == 3 and out["deleted"] == 2      # _S.max_per_run = 2
     assert out["skipped_by_limit"] == 1 and len(deleted) == 2
+
+
+def test_run_cleanup_also_unlists_from_resource_library(session, monkeypatch) -> None:
+    """⚠️ **删了盘上的资源,资源清单里的那一行也要删**(2026-10-03)。
+
+    `xunlei_resources` 是 `resource_library` 的取链来源 —— 盘上删了却留着行,
+    **资源库就会给出已经失效的分享链**(比"没有链"更糟:用户点了打不开)。
+    """
+    from app.db.models import XunleiResource
+
+    session.add(XunleiResource(user_id=1, fid="id-旧资源", name="旧资源",
+                               share_url="https://pan.xunlei.com/s/DEAD", synced_at=None))
+    session.commit()
+    monkeypatch.setattr(xt, "list_files", lambda *a, **k: [_folder("旧资源", 30, fid="id-旧资源")])
+    monkeypatch.setattr(xt, "trash_files", lambda ids: {"status": "ok", "deleted": len(ids)})
+    out = xc.run_cleanup(session, 1, days=7, settings=_S(), dry_run=False)
+    assert out["deleted"] == 1 and out["unlisted"] == 1
+    assert session.query(XunleiResource).count() == 0
+
+
+def test_dry_run_does_not_touch_resource_library(session, monkeypatch) -> None:
+    """预览**什么都不动** —— 包括资源清单(别把"看一眼"变成写操作)。"""
+    from app.db.models import XunleiResource
+
+    session.add(XunleiResource(user_id=1, fid="id-旧资源", name="旧资源",
+                               share_url="https://pan.xunlei.com/s/DEAD"))
+    session.commit()
+    monkeypatch.setattr(xt, "list_files", lambda *a, **k: [_folder("旧资源", 30, fid="id-旧资源")])
+    out = xc.run_cleanup(session, 1, days=7, settings=_S(), dry_run=True)
+    assert out["deleted"] == 0 and session.query(XunleiResource).count() == 1

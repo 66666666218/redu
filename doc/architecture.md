@@ -129,7 +129,7 @@ ewsnow-image-20261001.tar（51MB，docker load 可恢复）
 | health_push / health_stalls / check_collect_failures | 09:20 / 30 分钟 | 采集源健康卡(**远端推管理员群**)/ 停摆告警 / 失败聚合告警 |
 | pan_cookie_keepalive | 7:00 | 网盘 Cookie 保活 |
 | check_collect_failures / health_stalls | 30 分钟 | 失败聚合告警（含 ✅ 恢复确认）/ 停摆告警 |
-| cleanup_old_data | 4:00 | 数据保留治理 |
+| cleanup_old_data | **3:10** | 数据保留治理(**按表分档**,见 `doc/operations.md` §数据保留;⚠️ 曾在 4:00,与 `wechat_collect_tick` 撞、争 SQLite 写锁,2026-10-03 错开) |
 
 ## 6. 关键工程约束（踩坑沉淀）
 

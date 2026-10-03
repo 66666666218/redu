@@ -206,6 +206,44 @@ def cleanup_old_data(settings: Settings | None = None, db: Session | None = None
         except Exception:  # noqa: BLE001 - 孤儿回收失败不阻塞
             logger.exception("改写稿孤儿行回收失败")
 
+        # ---- 2026-10 新增的资源/线索表:按**性质分档**,不是一律用 30 天(2026-10-03 审计) ----
+        # 这 7 张表此前**全都不在清理清单**(与 2026-09-22 审计补的那批同型问题复发)。
+        # ⚠️ **但不能一刀切**:里面既有**历史日志**(可按时间清),也有**资产**
+        # (`xunlei_resources` 是我方资源清单、`cross_platform_accounts` 是收录的对标号)——
+        # 对资产按时间删 = 系统"忘了自己有什么",那是自毁,不是清理。
+        try:
+            from app.db.models import (CrossPlatformAccount, DouyinLead, DiscoveredPanLink,
+                                       HotspotSuggestion, QuarkShareStat, XunleiGroupShare)
+
+            # ① 历史类:保留 180 天(比默认 30 天长) —— 它们是**结算/复盘**的底料,
+            #    对账要跨月看,30 天会把刚攒起来的对照数据清掉。
+            cutoff180 = datetime.now() - timedelta(days=180)
+            for model, col in ((HotspotSuggestion, "created_at"), (DouyinLead, "found_at"),
+                               (DiscoveredPanLink, "found_at"), (QuarkShareStat, "captured_at")):
+                n = db.execute(delete(model).where(getattr(model, col) < cutoff180)).rowcount
+                if n:
+                    result[model.__tablename__] = n
+
+            # ② 群分享:**只清"从没转存成功过"且过期很久的**(pending/失败)。
+            #    转存成功的行要留 —— 它们是我方资源的来源凭证(`our_url`/`fid` 在别处被引用)。
+            cutoff60 = datetime.now() - timedelta(days=60)
+            no_own = or_(XunleiGroupShare.our_url.is_(None), XunleiGroupShare.our_url == "")
+            n_gs = db.execute(delete(XunleiGroupShare).where(
+                no_own, XunleiGroupShare.msg_time < cutoff60)).rowcount
+            if n_gs:
+                result["xunlei_group_shares_stale"] = n_gs
+
+            # ③ 对标号:**资产,不按时间删**;只清明确被否掉的(`status='dismissed'`)。
+            n_ca = db.execute(delete(CrossPlatformAccount).where(
+                CrossPlatformAccount.status == "dismissed")).rowcount
+            if n_ca:
+                result["cross_platform_accounts_dismissed"] = n_ca
+
+            # (`xunlei_resources` 明确**不动** —— 它是我方盘里资源的清单,是资产。
+            #  资源从盘上删掉时,对应行由 `xunlei_cleanup` 一并删除,见那边的注释。)
+        except Exception:  # noqa: BLE001 - 新表清理失败不阻塞其余
+            logger.exception("资源/线索表清理失败")
+
         db.commit()
         total = sum(result.values())
         if total:

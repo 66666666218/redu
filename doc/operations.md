@@ -525,13 +525,31 @@ print(sorted(j.id for j in s.get_jobs()))"
 
 ## 7. 数据备份
 
-- **自动**(SQLite 本地部署):每日 04:00 快照到 `data/backups/platform_YYYYMMDD.db`,保留最近 7 份。
-  走 SQLite 在线备份 API,库正被写入时也一致;快照产出后会校验非空 + `PRAGMA quick_check`,
+- **自动**(SQLite 本地部署):每日 **03:10**(随 `data_cleanup`,2026-10-03 从 04:00 错开 ——
+  那里与 `wechat_collect_tick` 撞、两者都在压 SQLite 写锁)快照到 `data/backups/platform_YYYYMMDD.db`,
+  保留最近 7 份。走 SQLite 在线备份 API,库正被写入时也一致;快照产出后会校验非空 + `PRAGMA quick_check`,
   不合格的直接删掉——**宁可没有,也不留 0 字节的假备份**。
 - **手动**:`sh scripts/backup.sh`(按 `DATABASE_URL` 自动选 SQLite / MySQL;SQLite 与自动快照同一实现)
 - 检查备份是否健康:`ls -la data/backups/` —— **任何 0 字节文件都说明备份失败**,别当成"有备份"。
   备份失败会在服务日志里记 `SQLite 快照备份失败`(stdout,`docker logs` 可见)。
 - ⚠️ 不要直接 `cp`/`gzip` 库文件当备份:写入过程中拷贝可能得到撕裂的中间状态,恢复时才发现坏。
+
+### 7b. 数据保留(按表分档,2026-10-03)
+
+`DATA_RETENTION_DAYS`(默认 30)只兜住**热榜/快照/运行/日志**那一批;其余按**性质**各自定窗口
+(`app/db/maintenance.py`)。**关键是别把"资产"当成"日志"删** —— 那等于让系统"忘了自己有什么":
+
+| 类别 | 表 | 窗口 | 为什么 |
+| --- | --- | --- | --- |
+| 热榜/快照/运行/日志 | `douhot_words`、`weibo/baidu_hot_items`、`runs`、`feishu_alerts` 等(~22 张) | **30 天** | 纯时间序列,旧的没有价值 |
+| 公众号文章 | `wechat_articles` | **无盘链 60 天 / 带盘链 180 天** | 带链的是改写素材 |
+| **结算/复盘底料** | `hotspot_suggestions`、`douyin_leads`、`discovered_pan_links`、`quark_share_stats` | **180 天** | 对账要跨月看,30 天会把刚攒的对照清掉 |
+| 群分享 | `xunlei_group_shares` | **未转存且 >60 天** | 转存成功的行是**我方资源的来源凭证**,要留 |
+| **资产(不按时间删)** | `xunlei_resources`、`cross_platform_accounts` | — | 我方资源清单 / 收录的对标号,**删了就"忘了自己有什么"** |
+| 明确废弃 | `cross_platform_accounts` 中 `status='dismissed'` | 立即清 | 被否掉的号留着没意义 |
+
+> ⚠️ `xunlei_resources` 的另一半联动在 `xunlei_cleanup`:资源**从盘上删掉**时,
+> 对应行**一并删除** —— 否则资源库会给出**已经失效的分享链**(比"没有链"更糟:点了打不开)。
 
 ## 8. 关键文件位置
 

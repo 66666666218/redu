@@ -374,10 +374,13 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     for func, job_id in ((retry_failed_runs, "auto_retry_failed_runs"), (check_collect_failures, "collect_failed_alert"),
                          (check_health_stalls, "health_stall_alert")):
         _add_job(scheduler, func, CronTrigger(minute="*/30"), job_id, "both")
-    # 数据保留治理:每天 04:00 删除超过 DATA_RETENTION_DAYS 的旧快照/运行/日志
+    # 数据保留治理:每天删除超过各自窗口的旧快照/运行/日志。
+    # ⚠️ **03:10,不是 04:00**(2026-10-03 改):04:00 与 `wechat_collect_tick`(4/8/14/20 定点,
+    # 网络长任务)**同分同秒**,而这里要跑跨 ~22 张表的 DELETE + 23MB SQLite 全量快照拷贝 ——
+    # 两者都在压 SQLite 写锁(库是单写者),是全天最挤的一处。错开 50 分钟。
     from app.db.maintenance import cleanup_old_data
 
-    _add_job(scheduler, cleanup_old_data, CronTrigger(hour=4, minute=0), "data_cleanup", "both")
+    _add_job(scheduler, cleanup_old_data, CronTrigger(hour=3, minute=10), "data_cleanup", "both")
     from app.services.early_agent import agent_tick_all_users
     from app.services.hotspot_agent import settle_suggestions_all_users
     from app.services.wechat_monitor import (candidate_discover_tick, candidate_import_tick,
