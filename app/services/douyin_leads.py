@@ -497,6 +497,8 @@ def _save_leads(session, user_id: int, leads: list[dict]) -> int:
         row.keyword = str(ld.get("keyword") or "")[:64]
         row.share_count = int(ld.get("share_count") or 0)
         row.kind = str((ld.get("kouling") or {}).get("kind") or "")[:16]
+        # **这条线索搬成了哪条链**(2026-10-04 补):原来落库时丢了,事后查不出来
+        row.our_url = str((ld.get("kouling") or {}).get("our_url") or "")[:500]
         n += 1
     return n
 

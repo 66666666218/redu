@@ -89,7 +89,8 @@ ewsnow
 ewsnow-image-20261001.tar（51MB，docker load 可恢复）
 ```
 
-**实测（2026-10-01）**：12 源 11 通（B站/豆瓣直连 ✓ + newsnow 9 源 ✓；知乎 401 故走 newsnow）。
+**实测(2026-10-01)**：12 源 11 通(B站/豆瓣直连 ✓ + newsnow 9 源 ✓;知乎 401 故走 newsnow)。
+⚠️ **那个"12 源"是当时的快照,不是全部**(2026-10-04 审查时实测 `SOURCES` 已 **43** 个)。**别把这里的数字当准** —— 要看当前有哪些源,跑 `python -c "from app.services.hot_sources import SOURCES; print(len(SOURCES))"`。
 
 **已接入现有体系（2026-10-01）**：
 - **库表** `hot_source_items`（每轮全量快照，retention 治理覆盖）；

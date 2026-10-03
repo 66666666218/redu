@@ -141,6 +141,9 @@ def _migrate() -> None:
         # 拉新周录的**分渠道明细**(2026-10-03 用户口径:"我只能给你我的"且要分渠道):
         # JSON 如 {"douyin": 42, "wechat": 18}。只有分开录,才能分别对账两条链。
         "pan_recruit_weekly": ["channels TEXT DEFAULT ''"],
+        # 线索搬成了哪条链(2026-10-04 补,计划第 12 项):原来落库时**丢了**,
+        # 于是"这个口令到底搬没搬成"事后查不出来。存量行留空 = "还没用新版重采过"。
+        "douyin_leads": ["our_url VARCHAR(500) DEFAULT ''"],
         "alerts": ["section VARCHAR(32) DEFAULT ''"],
         "douhot_watch": ["section VARCHAR(16) DEFAULT 'douhot'", "filter_keyword VARCHAR(64) DEFAULT ''",
                         "date_window INTEGER"],

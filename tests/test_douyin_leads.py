@@ -787,3 +787,37 @@ class TestCountGroupsByResourceNotKouling:
              "share_count": 1, "kouling": {"kind": "group", "status": "deferred"}},
         ])
         assert rows[0]["columns"][5]["elements"][0]["text"]["content"] == "2"
+
+
+class TestLeadKeepsOurUrl:
+    """⚠️ `DouyinLead.our_url` —— **这条线索搬成了哪条链**(2026-10-04 补,计划第 12 项)。
+
+    原来**落库时把它丢了**,于是"这个口令到底搬没搬成、搬成了哪条链"**事后查不出来**,
+    只能去翻当时的飞书卡片。当天整理本轮线索时正是卡在这里(做卡片的"条数/资源身份"
+    都拿不到链)。**飞书卡片会过期、会刷屏,库里的字段不会。**
+    """
+
+    def test_saved(self, session) -> None:
+        from app.db.models import DouyinLead
+        from app.services import douyin_leads as dl
+
+        dl._save_leads(session, 1, [{
+            "aweme_id": "a1", "mark": "某口令", "title": "t", "author": "a",
+            "url": "https://d/v/1", "keyword": "k", "share_count": 3,
+            "kouling": {"kind": "share", "status": "ok",
+                        "our_url": "https://pan.xunlei.com/s/OUR"}}])
+        session.commit()          # `_save_leads` 不提交,由调用方提交(见 tick)
+        row = session.scalar(select(DouyinLead))
+        assert row.our_url == "https://pan.xunlei.com/s/OUR"
+
+    def test_empty_when_not_transferred(self, session) -> None:
+        """没搬成的留空 —— **不拿假值填**(存量行留空也表示"还没用新版重采过")。"""
+        from app.db.models import DouyinLead
+        from app.services import douyin_leads as dl
+
+        dl._save_leads(session, 1, [{
+            "aweme_id": "a2", "mark": "某口令", "title": "t", "author": "a",
+            "url": "https://d/v/2", "keyword": "k", "share_count": 3,
+            "kouling": {"kind": "share", "status": "disk_full"}}])
+        session.commit()
+        assert session.scalar(select(DouyinLead)).our_url == ""

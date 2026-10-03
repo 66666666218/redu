@@ -419,6 +419,11 @@ class DouyinLead(Base):
     keyword: Mapped[str] = mapped_column(String(64), default="")    # 搜哪个词搜出来的
     share_count: Mapped[int] = mapped_column(Integer, default=0)    # **转发量**(转化代理)
     kind: Mapped[str] = mapped_column(String(16), default="")       # 口令解析结果(share/group/none/error)
+    # **这条线索搬成了哪条链**(2026-10-04 补,计划里第 12 项):
+    # ⚠️ 原来**落库时丢了** —— 于是"这个口令到底搬没搬成、搬成了哪条链"**事后查不出来**,
+    # 只能去翻当时的飞书卡片。当天整理本轮线索时正是卡在这里(要为卡片做"条数/资源身份"
+    # 都拿不到链)。`share` 类型成功时填**我方分享链**;群口令填群号不填这里。
+    our_url: Mapped[str] = mapped_column(String(500), default="")
     found_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     found_date: Mapped[str] = mapped_column(String(16), index=True, default="")  # YYYY-MM-DD
 
