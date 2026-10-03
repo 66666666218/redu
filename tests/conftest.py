@@ -10,14 +10,9 @@ def settings() -> Settings:
     return Settings(
         _env_file=None,
         is_dev=True,
-        mock_index=True,
         use_proxy=False,
         top_n=5,
-        min_heat=100,
-        min_samples=3,
         growth_threshold=0.3,
-        slope_threshold=0.0,
         request_delay_seconds=0.0,
         xianyu_request_delay=0.0,
-        data_dir="data/test",
     )

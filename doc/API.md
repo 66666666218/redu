@@ -1,8 +1,12 @@
 # 接口规范(API)
 
-> 版本: v1.4　|　最后更新: 2026-09-29(混合结算)
+> 版本: v1.5　|　最后更新: 2026-10-03(全项目审查:错误体订正 + 幽灵路由清理)
 > 基础地址: 调度/监控系统暴露的 HTTP 服务(默认 `http://localhost:8080`)
 > 认证: 除 `/healthz`(健康检查)外,所有接口需 **JWT Bearer** 登录态;管理接口另需 admin/operator 角色权限。
+
+> ⚠️ **维护规则(2026-10-03 加)**:本文件里的每个 `/api/...` 路径都会**被测试对照真实路由表**校验
+> (`tests/test_api_doc_routes.py`) —— 改了路由不改文档,**测试直接红**。
+> 唯一的例外是 **WeRSS 那个外部服务**的 `/api/v1/wx/*`(不是我们的路由,已在测试里白名单)。
 
 ---
 
@@ -10,23 +14,18 @@
 
 - 请求与响应均为 `application/json`。
 - 时间统一为 ISO 8601(含时区),如 `2026-08-29T10:00:00+08:00`。
-- 错误响应统一结构:
+- **错误响应结构**(2026-10-03 订正 —— 此前本文写的 `{"error": {"code": …}}` **代码从来不产生**,
+  是设计稿残留,照着它写前端会取不到错误文案):
 
-```json
-{
-  "error": {
-    "code": "INTERNAL_ERROR",
-    "message": "描述性错误信息",
-    "detail": "可选的更多细节"
-  }
-}
-```
-
-| 错误码 | HTTP | 说明 |
+| 场景 | 实际结构 | 说明 |
 | --- | --- | --- |
-| `BAD_REQUEST` | 400 | 参数错误 |
-| `NOT_FOUND` | 404 | 资源不存在 |
-| `INTERNAL_ERROR` | 500 | 系统内部错误 |
+| 业务错误(`HTTPException`) | `{"detail": "描述性错误信息"}` | 绝大多数错误的形态 |
+| 参数校验失败(422) | `{"detail": [{"loc": [...], "msg": "…"}]}` | **`detail` 是数组**,当字符串用会显示成 `[object Object]` |
+| 未捕获异常(500) | `{"detail": "服务器开小差了…"}` | 前端对 500 **不展示 body**(可能含 SQL/连接串) |
+| 401 / 403 / 404 | `{"detail": …}` | 前端另有固定文案兜底 |
+
+> 前端解析入口:`frontend/src/api.js` 的 `errMessage()` —— 它按上表分档处理(含 422 数组展开)。
+> **没有 `code` 字段**,也没有 `BAD_REQUEST`/`NOT_FOUND`/`INTERNAL_ERROR` 这套错误码。
 
 ---
 
@@ -59,11 +58,30 @@
 
 ## 1.1 Web 看板
 
+> ⚠️⚠️ **§1.1–§5 的路径是 v1.0 设计稿残留,实现时全部改过名** —— 2026-10-03 全项目审查时
+> 逐条对照 `app/api/` 的真实路由表确认:**这些 `/api/v1/*` 一条都不存在**。
+> 本文**保留它们**是为了留下对照关系,但**别照着它们写代码**。现状以 **§6 起**为准。
+>
+> | 本文旧路径(不存在) | 真实路径 |
+> | --- | --- |
+> | `/api/v1/trends/latest` | **`/api/trending`**(跨平台统一标准化快照) |
+> | `/api/v1/alerts/latest` | **`/api/alerts/list`** |
+> | `/api/v1/runs`(触发采集) | **`POST /api/collect/{platform}`** |
+> | `/api/v1/runs/latest`(运行状态) | **`/api/admin/health`**(各源最近采集状态) |
+> | `/api/v1/xianyu/hot` | **`/api/dashboard`**(其中的 `xianyu_hot` 字段) |
+> | `/api/v1/xianyu/runs` | **`POST /api/collect/xianyu`** |
+> | `/api/v1/xianyu/daily` | **`/api/xianyu/daily`**(仅少了 `/v1`) |
+> | `/api/v1/douhot/trends` | **`/api/douhot/watch-analytics`** |
+> | `/api/v1/douhot/runs` | **`POST /api/collect/douhot`** |
+>
+> `tests/test_api_doc_routes.py` 会**逐个核对本文提到的路径**,上面这批以"已知旧路径"白名单放行 ——
+> 除它们和外部服务 WeRSS 的 `/api/v1/wx/*` 之外,本文再出现对不上的路径**测试就红**。
+
 - **接口名称**: 监控仪表盘
 - **请求方式**: GET
 - **URL 路径**: `/`
 
-页面加载后自动请求 `/api/v1/trends/latest`、`/api/v1/xianyu/hot`、`/api/v1/xianyu/daily` 并渲染。
+页面加载后自动请求 `/api/trending`、`/api/dashboard` 并渲染。
 
 ---
 

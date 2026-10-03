@@ -20,8 +20,14 @@ class Settings(BaseSettings):
     )
 
     # ---- 采集 ----
+    # ⚠️ 2026-10-03 全项目审查:删掉 13 个**生产代码零引用**的配置 —— 其中 3 个
+    # (`INDEX_SOURCES`/`ALERT_MODE`/`FEISHU_DAILY_CRON`)**用户已在 `.env` 里配了却毫无作用**,
+    # `.env.example` 也把它们当生效项列出。留着的害处很具体:下一个人照它去改,改了不生效。
+    # 删的清单:baidu_cookie / wechat_traffic_cron(作业早已停用)/ index_sources / mock_index /
+    # alert_mode / slope_threshold / min_heat / min_samples(前者多为旧指数分析残骸)/
+    # feishu_daily_cron·feishu_wechat_cron·feishu_insight_cron·weekly_summary_cron
+    # (**已被 `push_timeline.PUSH_KINDS` 取代**,改推送时段去那里)/ data_dir(备份路径是从库路径推的)。
     weibo_cookie: str = ""          # 微博登录态
-    baidu_cookie: str = ""          # 百度指数登录态(降级源)
     douyin_cookie: str = ""         # 抖音创作者中心/巨量算数登录态
     goofish_cookie_file: str = "data/goofish_cookie.txt"  # 闲鱼登录 Cookie 文件(gitignored)
     xianyu_keywords: str = "ps教程,网盘资源,代充,剪映会员,软件,素材,cad,ae,pr,office,会员,课程,影视,源码"  # 虚拟商品关键词
@@ -56,7 +62,6 @@ class Settings(BaseSettings):
     pan_transfer_enabled: bool = True      # 是否自动转存(需 quark_cookie;失败回落原链接推送)
     pan_transfer_backfill_limit: int = 8   # 每轮监听额外补转存的历史文章数
                                            # (同步当场转存失败/早于该逻辑入库的旧文,靠这个队列慢慢补)
-    wechat_traffic_cron: str = "30 21 * * *"  # 每日阅读量采样时间(默认 21:30)
     wechat_resonance_hours: int = 48         # 资源共振窗口(同一盘链 N 小时内 ≥2 篇文章)
     wechat_repush_window_hours: int = 24     # 补推窗口:入库 N 小时内未送达飞书的文章还要补
     wechat_repush_limit: int = 100           # 单轮补推篇数上限(超出留给下一轮,不一次刷屏)
@@ -214,19 +219,13 @@ class Settings(BaseSettings):
     proxy_refresh_seconds: int = 170  # 提取池刷新间隔(每个 IP 约 3 分钟)
 
     # ---- 分析阈值 ----
-    index_sources: str = "weibo"  # 指数源优先级链(逗号分隔):weibo/douyin/baidu
     # newsnow 容器地址(2026-10-01 可配):默认本机直跑;**容器化部署时必须改**——
     # 在 redu-api 容器里 127.0.0.1 指容器自己,不是宿主机,newsnow 就全连不上
     # (实测:远程只有 bilibili/douban 两个自研源有数据,newsnow 的 40 个全空)。
     # Docker 里填宿主机网关 `http://172.17.0.1:4444`(newsnow 需绑 0.0.0.0 而非 127.0.0.1)。
     hot_newsnow_url: str = "http://127.0.0.1:4444"
-    mock_index: bool = True  # 本地/测试用合成指数源(免真实抓取)
-    alert_mode: str = "both"  # 交叉验证: both=所有信号源同涨才告警; any=任一源涨即告警
     growth_threshold: float = 0.30  # 环比增长率判定阈值
-    slope_threshold: float = 0.0    # 线性回归斜率判定阈值
-    min_heat: int = 200_000         # 候选词清洗下限热度
     top_n: int = 10                 # 进入指数分析的热搜词数量
-    min_samples: int = 3            # 线性回归所需最少指数样本点
 
     # ---- 调度 ----
     # 采集频率由**每个用户自行设置**(user_schedules 表,10~1440 分钟),调度器每分钟检查到期任务。
@@ -314,21 +313,16 @@ class Settings(BaseSettings):
     health_push_cron: str = "20 9 * * *"
     feishu_secret: str = ""         # 机器人签名校验密钥(为空则不签名)
     own_account_names: str = "天一项目拆解"  # 自营号名单(逗号分隔):飞书推送一律脱敏为「内部号」,防自营身份暴露(2026-09-29)
-    feishu_daily_cron: str = "0 8 * * *"   # 每日热点日报时间(默认 08:00)
-    feishu_wechat_cron: str = "0 10 * * *"  # 公众号内容选题分析推送时间(默认 10:00)
     feishu_hot_rank_jump: int = 3          # 排名跳升 ≥ 该名次即实时推送
     feishu_hot_ratio: float = 0.30         # 分值环比涨幅 ≥ 该比例即实时推送
     feishu_burst_min_confidence: str = "高"  # 实时推送"预测爆发"所需最低置信度(高/中/低);中低置信只进日报与洞察、不实时推,减少噪音
     feishu_alert_cooldown_hours: int = 6   # 同一话题实时推送冷却(小时),防刷屏
-    feishu_insight_cron: str = "0 9 * * 1"  # 每周一 09:00 推"近7天爆点回顾"(day_of_week 用标准 cron,0=周日)
-    weekly_summary_cron: str = "0 20 * * 0"  # 每周日 20:00 给每个用户发"本周热点洞察"邮件(day_of_week 0=周日)
     # 抖音热点宝走代理池:部分服务器 IP 会被抖音风控(直接返回 502 nginx),
     # 开这个后 douhot 采集走 PROXY_EXTRACT_URL 提取的住宅代理。生产服务器建议开启。
     douhot_use_proxy: bool = False
 
     # ---- 服务 ----
     app_port: int = 8080
-    data_dir: str = "data"          # 归档与快照根目录
 
     # ---- 多租户平台 ----
     # 主机名必须与 docker-compose.yml 的服务名一致(mysql)。曾误写为 `@db:3306`,
