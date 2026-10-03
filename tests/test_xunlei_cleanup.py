@@ -244,3 +244,67 @@ class TestDuplicateNameDedupe:
 
     class _S:
         xunlei_transfer_parent_id = "P"
+
+
+class TestDedupeTick:
+    """同名去重**定时作业**(2026-10-04 用户:"做成定时作业")。
+
+    ⚠️ **它与 `cleanup_tick` 默认值相反** —— 那个默认关(删盘难逆,先让人看清单),
+    这个**默认开**:因为只删**内容可证明完全相同**的副本,且走移入回收站,风险不是一个量级。
+    """
+
+    def _S(self, **kw):
+        base = {"xunlei_transfer_parent_id": "P", "xunlei_dedupe_enabled": True,
+                "xunlei_dedupe_max_per_run": 30}
+        base.update(kw)
+        return type("S", (), base)()
+
+    def _wire(self, session, monkeypatch, tree):
+        import app.db as appdb
+        from app.services import xunlei_transfer as xt
+        monkeypatch.setattr(appdb, "get_session_local",
+                            lambda: sessionmaker(bind=session.get_bind()))
+        monkeypatch.setattr(xt, "list_files", lambda fid, limit=200: tree.get(str(fid), []))
+        trashed = []
+        monkeypatch.setattr(xt, "trash_files", lambda ids: trashed.extend(ids) or {"status": "ok"})
+        return trashed
+
+    def _tree(self):
+        return {
+            "P": [{"name": "甲", "id": "A", "kind": "drive#folder", "created_time": "0"},
+                  {"name": "甲(1)", "id": "B", "kind": "drive#folder", "created_time": "0"}],
+            "A": [{"name": "x", "size": 1}], "B": [{"name": "x", "size": 1}],
+        }
+
+    def test_disabled_switch_returns_zero_without_recording(self, session) -> None:
+        """⚠️ 关了就直接返回、**不记运行记录** —— 免得出现"success 但啥也没干"的空轮。"""
+        from app.db.models import RunRecord
+        from app.services import xunlei_cleanup as cl
+
+        assert cl.dedupe_tick(self._S(xunlei_dedupe_enabled=False)) == 0
+        assert session.scalars(select(RunRecord)).all() == []
+
+    def test_enabled_deletes_and_records(self, session, monkeypatch) -> None:
+        from app.db.models import RunRecord
+        from app.services import xunlei_cleanup as cl
+
+        trashed = self._wire(session, monkeypatch, self._tree())
+        assert cl.dedupe_tick(self._S()) == 1
+        assert trashed == ["B"]
+        row = session.scalars(select(RunRecord).where(RunRecord.kind == "xunlei_dedupe")).first()
+        assert row is not None and row.status == "success"
+        assert "移入回收站1" in row.detail
+
+    def test_respects_per_run_limit(self, session, monkeypatch) -> None:
+        """`trash_files` 没有批量接口、逐个删 —— 必须限流,别一次打爆。"""
+        from app.services import xunlei_cleanup as cl
+
+        tree = {"P": [{"name": "甲", "id": "A", "kind": "drive#folder", "created_time": "0"}]}
+        for i in range(1, 5):
+            tree["P"].append({"name": f"甲({i})", "id": f"B{i}", "kind": "drive#folder",
+                              "created_time": "0"})
+            tree[f"B{i}"] = [{"name": "x", "size": 1}]
+        tree["A"] = [{"name": "x", "size": 1}]
+        trashed = self._wire(session, monkeypatch, tree)
+        cl.dedupe_tick(self._S(xunlei_dedupe_max_per_run=2))
+        assert len(trashed) == 2, f"该被限到 2 个:{trashed}"

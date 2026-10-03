@@ -322,13 +322,21 @@ def plan_duplicates(db: Session, user_id: int, settings=None) -> dict:
 def dedupe_duplicates(db: Session, user_id: int, settings=None,
                       dry_run: bool = True) -> dict:
     """执行同名去重:**移入回收站**(可恢复),并联动删掉清单里指向它的行。"""
+    from config.settings import get_settings
+
+    settings = settings or get_settings()
     out = plan_duplicates(db, user_id, settings=settings)
-    result = {**out, "deleted": 0, "errors": [], "dry_run": dry_run, "unlisted": 0}
-    if out.get("error") or dry_run or not out["dups"]:
+    todo = out["dups"]
+    limit = int(getattr(settings, "xunlei_dedupe_max_per_run", 30) or 30)
+    result = {**out, "dups": todo, "to_delete": len(todo), "deleted": 0, "errors": [],
+              "dry_run": dry_run, "unlisted": 0,
+              "skipped_by_limit": max(0, len(todo) - limit)}
+    if out.get("error") or dry_run or not todo:
         return result
+    todo = todo[:limit]          # ⚠️ 限流:`trash_files` 没有批量接口,逐个删,别一次打爆
     from app.services import xunlei_transfer as xt
 
-    for d in out["dups"]:
+    for d in todo:
         try:
             r = xt.trash_files([d["id"]])
         except Exception as exc:  # noqa: BLE001 - 单个失败不中断整批
@@ -352,3 +360,47 @@ def dedupe_duplicates(db: Session, user_id: int, settings=None,
     logger.info("迅雷盘同名去重:移入回收站 %d(失败 %d,清单同步 %d)",
                 result["deleted"], len(result["errors"]), result["unlisted"])
     return result
+
+
+def dedupe_tick(settings=None) -> int:
+    """定时:**同名去重**(默认开,`xunlei_dedupe_enabled`)。
+
+    与 `cleanup_tick` 的两点不同,都是**故意的**:
+      ① **默认开** —— 它只删"内容可证明完全相同"的副本(逐个进文件夹比子项名+大小),
+         且走**移入回收站**(可恢复);用户也明确要求按时跑。
+      ② **每周一次**(`xunlei_dedupe_cron` 默认周日 04:00)—— 重名积累得慢。
+    同样地:**开关关了就直接返回、不记运行记录**(免得出现"success 但啥也没干"的空轮)。
+    """
+    from config.settings import get_settings
+
+    settings = settings or get_settings()
+    if not getattr(settings, "xunlei_dedupe_enabled", True):
+        return 0
+    from app.db import get_session_local
+    from app.db.models import User
+
+    db = get_session_local()()
+    total = 0
+    try:
+        from app.services.tenant_base import _record_run
+
+        for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
+            try:
+                out = dedupe_duplicates(db, uid, settings=settings, dry_run=False)
+                total += int(out.get("deleted") or 0)
+                note = (f"同名组{len(out.get('groups') or [])} 移入回收站{out.get('deleted', 0)}"
+                        + (f" 超限{out['skipped_by_limit']}" if out.get("skipped_by_limit") else "")
+                        + (f" 错误{len(out['errors'])}" if out.get("errors") else ""))
+                if out.get("error"):
+                    note = f"跳过:{out['error'][:120]}"
+                _record_run(db, uid, "xunlei_dedupe",
+                            "failed" if out.get("error") else "success", note)
+                db.commit()
+            except Exception as exc:  # noqa: BLE001 - 单用户失败不影响其余
+                db.rollback()
+                logger.exception("迅雷盘同名去重失败 user=%s", uid)
+                _record_run(db, uid, "xunlei_dedupe", "failed", str(exc)[:200])
+                db.commit()
+    finally:
+        db.close()
+    return total
