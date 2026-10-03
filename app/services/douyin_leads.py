@@ -494,6 +494,23 @@ def _kouling_line(ld: dict) -> str:
     return ""
 
 
+def _pan_name(url: str) -> str:
+    """链接属于哪个网盘 → **中文盘名**(夸克/百度/迅雷);认不出返回空串。
+
+    ⚠️ 用户口径(2026-10-04):"**资源不要写我方链接,那个网盘就写那个网盘名称**"。
+    卡片的「资源」列原来写的是 `🔴我方链` —— "**我方**"二字**在客户群里会暴露我们是运营方**,
+    换成中性的**盘名**既说清了"这条是哪个盘、能直接取",又不露身份。
+    """
+    u = (url or "").lower()
+    if "quark.cn" in u:
+        return "夸克"
+    if "baidu.com" in u:
+        return "百度"
+    if "xunlei.com" in u:
+        return "迅雷"
+    return ""
+
+
 def push_leads(leads: list[dict], settings, platform: str = "douyin") -> bool:
     """把线索推飞书。
 
@@ -516,7 +533,6 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin") -> bool:
     from app.services.feishu._cards import _col_set_row, _md_safe, strip_others
     from app.services.feishu_client import FeishuClient
 
-    brand = (getattr(settings, "brand_name", "") or "").strip()
     label = (PLATFORMS.get(platform) or {}).get("label", platform)
     elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
         f"{label}上发现 **{len(leads)}** 条在推同类资源的视频。"
@@ -537,15 +553,23 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin") -> bool:
         sc = int(ld.get("share_count") or 0)
         if sc:
             shown += f" · ↗{sc}"
-        # 资源列:一眼看出"这条值不值钱"(已转存/已加群/没解出资源/被闸门挡下)
+        # 资源列:**写"哪个盘"而不是"我方链"**(用户口径 2026-10-04)——
+        # "我方"二字在客户群里暴露运营方身份;盘名(夸克/百度/迅雷)中性且信息量更大。
+        # 状态也写清**为什么没搬**:`disk_full` 是**盘满**(最该让人看到的一种,
+        # 因为只有人能清),`over_budget` 是本轮额度、`skipped` 是被闸门挡下。
+        pan = _pan_name(info.get("our_url") or info.get("share_url") or "")
         if info.get("kind") == "share" and info.get("status") == "ok":
-            res = f"[🔴我方链]({_md_safe(info.get('our_url') or '')})"
+            res = f"[🔴{pan or '已转存'}]({_md_safe(info.get('our_url') or '')})"
         elif info.get("kind") == "group":
             res = "👥已加群"
         elif info.get("status") == "already":
-            res = "🔴已转存过"
-        elif info.get("status") in ("skipped", "disk_full", "over_budget"):
-            res = "⏸未搬"
+            res = f"🔴{pan or '已转存'}(转过)"
+        elif info.get("status") == "disk_full":
+            res = f"⏸{pan or '盘'}(网盘已满)"
+        elif info.get("status") == "over_budget":
+            res = f"⏸{pan or '盘'}(本轮额度)"
+        elif info.get("status") == "skipped":
+            res = f"⏸{pan or '盘'}(被挡下)"
         else:
             res = "·非资源"
         elements.append(_col_set_row([
@@ -555,9 +579,13 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin") -> bool:
             (f"[▶视频]({_md_safe(ld.get('url') or '')})", 2)]))
     card = {
         "config": {"wide_screen_mode": True},
+        # ⚠️ **不带头部品牌名**(用户口径 2026-10-04:"**不要带念飞思雪**")。
+        # 这是对 2026-10-02 那条"品牌词只进标题"口径的**变更** —— 当时想让品牌露个脸,
+        # 但实操下来:① 卡片是发到**客户群/抖音群**的,头部挂运营方品牌**没有给客户的价值**;
+        # ② 与「资源」列**同一动机** —— 客户群里不该暴露"这是谁在运营"。
+        # (真正需要品牌的地方是**作品标题里的替换**(`_rebrand`),那套没动。)
         "header": {"template": "purple", "title": {"tag": "plain_text",
-                                                   "content": f"🎯 {brand + ' · ' if brand else ''}"
-                                                              f"{label}推广线索 · {len(leads)} 条"}},
+                                                   "content": f"🎯 {label}推广线索 · {len(leads)} 条"}},
         "elements": elements,
     }
     try:

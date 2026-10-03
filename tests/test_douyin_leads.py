@@ -335,8 +335,14 @@ def test_push_leads_card_is_grid_with_author_work_link(monkeypatch) -> None:
     assert "车机互联教程" in row                           # 作品名其余部分保留
     assert "白泽的梦" not in row                           # 别人的口令《…》被**删掉**(不是替换)
     assert "https://www.douyin.com/video/1" in row        # 作品链接
-    assert "https://pan.xunlei.com/s/OUR" in row          # 我方资源链
-    assert "念飞思雪" in str(sent["card"]["header"])       # 品牌词只出现在**卡片标题**
+    assert "https://pan.xunlei.com/s/OUR" in row          # 资源链仍可点
+    # ⚠️ **口径变更(2026-10-04 用户)**:「资源」列写**盘名**(迅雷),不再写"我方链" ——
+    # 客户群里"我方"二字会暴露运营方身份。见 `_pan_name` 的说明。
+    assert "迅雷" in row and "我方链" not in row
+    # ⚠️ **口径变更(2026-10-04 用户:"不要带念飞思雪")**:卡片头**不再挂品牌名**
+    # —— 它是对 2026-10-02"品牌词只进标题"那条的**变更**(客户群里挂运营方品牌没价值)。
+    assert "念飞思雪" not in str(sent["card"]["header"])
+    assert "抖音推广线索" in str(sent["card"]["header"])
 
 
 def test_strip_others_removes_others_name() -> None:
@@ -548,3 +554,56 @@ class TestUsedWordsGoLast:
             douyin_leads_group_keywords = 0
 
         assert dl.search_keywords(session, 1, top=2, settings=_S()) == ["出链的资料真题", "乙资料模板"]
+
+
+class TestResourceColumnShowsPanName:
+    """「资源」列写**盘名**(夸克/百度/迅雷),并**说清为什么没搬**(2026-10-04 用户口径)。
+
+    用户原话:"**资源不要写我方链接,那个网盘就写那个网盘名称**"、"**未搬运是什么问题**"。
+    ① 原来写 `🔴我方链` —— "我方"二字**在客户群里暴露运营方身份**,换成中性的**盘名**;
+    ② 原来没搬的一律写 `⏸未搬`,**看不出为什么** —— 而最常见的原因是**网盘满了**
+       (只有人能清),那正是最该让人看到的一种。
+    """
+
+    def _render(self, monkeypatch, **kouling) -> str:
+        from app.services import douyin_leads as dl
+        from app.services import feishu_client
+
+        sent = {}
+
+        class _C:
+            def __init__(self, *a) -> None: ...
+            def send_card(self, card):
+                sent["card"] = card
+                return True
+
+        monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+        dl.push_leads([{"mark": "m", "title": "《x》某资源", "url": "https://d/v/1",
+                        "author": "籽***", "keyword": "k", "kouling": kouling}], _Settings())
+        return str(sent["card"])
+
+    def test_pan_name_from_url(self) -> None:
+        from app.services.douyin_leads import _pan_name
+
+        assert _pan_name("https://pan.quark.cn/s/x") == "夸克"
+        assert _pan_name("https://pan.baidu.com/s/1x") == "百度"
+        assert _pan_name("https://pan.xunlei.com/s/x") == "迅雷"
+        assert _pan_name("https://example.com/x") == ""
+
+    def test_transferred_shows_pan_name_not_our_link_wording(self, monkeypatch) -> None:
+        card = self._render(monkeypatch, kind="share", status="ok",
+                            our_url="https://pan.quark.cn/s/OUR")
+        assert "夸克" in card and "我方链" not in card
+        assert "https://pan.quark.cn/s/OUR" in card        # 链接仍可点
+
+    def test_disk_full_says_why(self, monkeypatch) -> None:
+        """⚠️ 盘满是最该让人看到的一种 —— 只有人能清。"""
+        card = self._render(monkeypatch, kind="share", status="disk_full",
+                            share_url="https://pan.quark.cn/s/S")
+        assert "网盘已满" in card, f"盘满却没说原因:{card[:200]}"
+
+    def test_over_budget_and_skipped_have_distinct_wording(self, monkeypatch) -> None:
+        assert "本轮额度" in self._render(monkeypatch, kind="share", status="over_budget",
+                                        share_url="https://pan.xunlei.com/s/S")
+        assert "被挡下" in self._render(monkeypatch, kind="share", status="skipped",
+                                      share_url="https://pan.baidu.com/s/1S")
