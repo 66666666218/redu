@@ -262,3 +262,53 @@ class TestGossipByEventNotByName:
         """是明星 ≠ 是瓜。没有事件词就不该收 —— 否则大瓜会变成"凡是人名都收"。"""
         assert ct.classify("新歌发布") == ""
         assert ct.classify("演唱会门票") == ""
+
+
+class TestNameLearning:
+    """**从数据里学人名**(2026-10-04,用户口径)。
+
+    用户原话:"大瓜一版标题上都会有明星或者公众人物网红的名字……大瓜也可以加一条
+    **标题是否带人名**,如果带人名就可去判断一下" + "大瓜**慢慢的学习**可以,
+    **先把容易确定的写好**"。
+
+    ⚠️ **不写死名单**:明星/网红的名字天天在变,写死的必然过期(且过期了没人知道)。
+    做法是——被判为**大瓜**的标题,去掉事件词后剩下的中文片段当**候选人名**记一次,
+    **攒够 N 次**才算数。这样 `某明星` 这类泛称被停用词挡掉,真名字自然浮上来。
+
+    ⚠️ 它只是**弱信号**:排在所有类目之后,只在"别的都判不出来"时才用 ——
+    因为用户说的是"**可去判断一下**",不是"直接收"。
+    """
+
+    def test_extract_names_removes_event_words(self) -> None:
+        assert ct.extract_candidate_names("孙宇晨小作文") == ["孙宇晨"]
+        assert ct.extract_candidate_names("张三李四塌房") == ["张三李四"]
+        assert ct.extract_candidate_names("新歌发布") == ["新歌发布"]      # 不是瓜,不学(调用方把关)
+
+    def test_generic_words_are_stopped(self) -> None:
+        """泛称不该被当成名字 —— 否则它会因为太常见而攒够阈值,把真名字淹掉。"""
+        assert "某明星" not in ct.extract_candidate_names("某明星塌房")
+        assert "工作室" not in ct.extract_candidate_names("某某工作室道歉声明")
+
+    def test_learn_accumulates_and_threshold_applies(self, session) -> None:
+        ct.learn_names(session, "孙宇晨小作文")
+        assert ct.known_names(session) == set()          # 才 1 次,还不够
+        ct.learn_names(session, "孙宇晨回应")
+        assert ct.known_names(session) == {"孙宇晨"}      # 攒够 2 次
+
+    def test_name_is_a_weak_signal_only(self, session) -> None:
+        """带已学到的人名、且**没有**事件词 → 判大瓜(弱信号)。"""
+        ct.learn_names(session, "孙宇晨小作文")
+        ct.learn_names(session, "孙宇晨回应")
+        names = ct.known_names(session)
+        assert ct.classify("孙宇晨直播首秀", names) == "大瓜"
+
+    def test_without_names_the_behaviour_is_unchanged(self) -> None:
+        """⚠️ **不传 names 时和以前一模一样** —— `classify` 保持纯函数,不因为加了这个功能而变。"""
+        assert ct.classify("孙宇晨直播首秀") == ""
+
+    def test_other_categories_still_win(self, session) -> None:
+        """人名只是**兜底**:能判出别的类目的,不能被它抢走。"""
+        ct.learn_names(session, "孙宇晨小作文")
+        ct.learn_names(session, "孙宇晨回应")
+        names = ct.known_names(session)
+        assert ct.classify("孙宇晨的PS教程", names) == "软件"

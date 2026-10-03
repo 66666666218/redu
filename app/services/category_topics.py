@@ -20,6 +20,8 @@
 """
 from __future__ import annotations
 
+import re
+
 from sqlalchemy import select
 
 # ⚠️ **草稿种子,不是全集**(见模块说明)。顺序 = 轮换顺序。
@@ -106,7 +108,61 @@ GENERIC_HINTS = frozenset({
 })
 
 
-def classify(text: str) -> str:
+# 抽"候选人名"时要挡掉的**泛称/功能词** —— 它们在瓜标题里反复出现,但不是名字。
+# ⚠️ 不挡掉的话,"某明星"这种会因为太常见而攒够阈值,反而把真名字淹掉。
+_NAME_STOP = frozenset({
+    "某明星", "明星", "网红", "网友", "公众人物", "工作室", "官方", "本人", "当事人",
+    "全网", "最新", "完整版", "合集", "事件", "回应", "道歉", "塌房", "爆料", "吃瓜",
+})
+
+
+def extract_candidate_names(title: str) -> list[str]:
+    """从标题里抽**候选人名**:先去掉已命中的话题词,再从剩下的**纯中文片段**里取 2~4 字。
+
+    例:`孙宇晨小作文` → 去掉"小作文" → `["孙宇晨"]`。
+    """
+    t = title or ""
+    for hints in categories().values():
+        for h in hints:
+            t = t.replace(h, " ")
+    out: list[str] = []
+    for seg in re.split(r"[^一-鿿]+", t):
+        seg = seg.strip()
+        if 2 <= len(seg) <= 4 and seg not in _NAME_STOP and seg not in out:
+            out.append(seg)
+    return out
+
+
+def learn_names(session, title: str) -> int:
+    """把标题里的候选人名各记一次(用户:"大瓜**慢慢的学习**可以")。返回记了几个。
+
+    **真的用不着写死名单**:被反复提到的名字会自然攒够次数浮上来,
+    `某明星` 这类泛称被停用词挡在外面。
+    """
+    from app.db.models import NameLexicon
+
+    n = 0
+    for nm in extract_candidate_names(title):
+        row = session.get(NameLexicon, nm)
+        if row is None:
+            session.add(NameLexicon(name=nm, hits=1))
+        else:
+            row.hits = (row.hits or 0) + 1
+        n += 1
+    if n:
+        session.commit()
+    return n
+
+
+def known_names(session, min_hits: int = 2) -> set[str]:
+    """已学到的名字(**攒够 `min_hits` 次**才算,避免一次性的巧合名词混进来)。"""
+    from app.db.models import NameLexicon
+
+    return {r.name for r in session.scalars(
+        select(NameLexicon).where(NameLexicon.hits >= min_hits))}
+
+
+def classify(text: str, names: set[str] | None = None) -> str:
     """文本属于哪个类目?认不出返回空串(**不猜** —— 猜错会把词出到错的类里去)。
 
     **计分规则**:
@@ -126,7 +182,14 @@ def classify(text: str) -> str:
         score = sum(word.count(h) * (1 if h in GENERIC_HINTS else 2) for h in hints)
         if score > best_score:
             best, best_score = cat, score
-    return best
+    if best:
+        return best
+    # **弱信号**:话题词一个都没命中,但标题里带**已学到的人名** → 它是瓜的候选。
+    # ⚠️ 用户原话是"如果带人名就**可去判断一下**" —— 是"去看看",**不是"直接收"**,
+    # 所以它排在所有类目之后,只在"别的都判不出来"时才用。
+    if names and any(n in word for n in names):
+        return "大瓜"
+    return ""
 
 
 def current_category(session) -> str:
@@ -162,7 +225,7 @@ def advance_category(session) -> str:
     return nxt
 
 
-def pick(words: list[str], cat: str, need: int) -> list[str]:
+def pick(words: list[str], cat: str, need: int, names: set[str] | None = None) -> list[str]:
     """挑出本轮该搜的词。**优先顺序**(2026-10-04 定):
 
         ① 当前类目的**资源名**   ← 主料(用户口径:"搜索词应该是资源名称")
@@ -183,8 +246,8 @@ def pick(words: list[str], cat: str, need: int) -> list[str]:
         return []
     mine, unknown = [], []
     for w in words:
-        (mine if classify(w) == cat else unknown).append(w)
-    unknown = [w for w in unknown if classify(w) == ""]      # 别的类目的仍然不要(让轮换有意义)
+        (mine if classify(w, names) == cat else unknown).append(w)
+    unknown = [w for w in unknown if classify(w, names) == ""]   # 别的类目的不要(让轮换有意义)
     out = (mine + unknown)[:need]
     if len(out) >= need:
         return out

@@ -339,12 +339,17 @@ def search_keywords(session, user_id: int, top: int, settings,
 
     cat = category_topics.current_category(session)
     n_group = int(getattr(settings, "douyin_leads_group_keywords", 3) or 0)
-    # 先取**全部**候选(群里的资源名 + 资源库名称),再按类目挑 —— 挑不够会自动补不分类的
+    # 先取**全部**候选(群里的资源名 + 资源库名称),再按类目挑 —— 挑不够会自动补本类目话题词
     cand = group_keywords(session, user_id, top=n_group)
     for w in _keywords_from_library(session, user_id, max(1, int(top))):
         if w not in cand:
             cand.append(w)
-    kws = category_topics.pick(cand, cat, int(top))
+    # 学到的"人名"是**弱信号**(见 `category_topics.classify`);顺手从明显的瓜词里继续学
+    names = category_topics.known_names(session)
+    for w in cand:
+        if category_topics.classify(w) == "大瓜":
+            category_topics.learn_names(session, w)      # 用户口径:"大瓜**慢慢的学习**可以"
+    kws = category_topics.pick(cand, cat, int(top), names)
     # 用过的词排到最后(不删):名额先给没试过的
     seen = _words_already_resolved_to_group(session, user_id)
     if seen:

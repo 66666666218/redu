@@ -766,6 +766,30 @@ class JobHeartbeat(Base):
     last_error: Mapped[str] = mapped_column(String(255), default="")
 
 
+class NameLexicon(Base):
+    """**从数据里学出来的"人名/网红名"**(2026-10-04,用户口径)。
+
+    用户原话:"大瓜一版标题上都会有明星或者公众人物网红的名字……大瓜也可以加一条
+    **标题是否带人名**,如果带人名就可去判断一下"、"大瓜**慢慢的学习**可以"。
+
+    ⚠️ **为什么是"学"而不是"写一张名单"**:明星/网红的名字**天天在变**,
+    写死的名单必然过期(而且过期了没人知道)。所以按用户说的"慢慢学":
+    凡是被判为**大瓜**的标题,把它去掉事件词后剩下的中文片段当**候选名**记一次;
+    同一名字**攒够 N 次**才算数 —— 这样 `某明星` 这种泛称会因为"太泛"要么被停用词挡掉、
+    要么永远达不到阈值,而真名字会自然浮上来。
+
+    ⚠️ 它只是**弱信号**(在 `category_topics.classify` 里排在其他类目之后):
+    有人名**不等于**是瓜 —— 用户也说"如果带人名就**可去判断一下**",是"去看看",不是"直接收"。
+    """
+
+    __tablename__ = "name_lexicon"
+
+    name: Mapped[str] = mapped_column(String(32), primary_key=True)
+    hits: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now,
+                                                 onupdate=datetime.now)
+
+
 class GroupMember(Base):
     """付费群会员:按入群时间+周期自动生成续费提醒与超期踢人名单。
 
