@@ -224,3 +224,41 @@ class TestFourWayDistinction:
         """⚠️ 核心回归:**通用后缀词(模板/合集)不得盖过具体话题词(问卷/吃瓜)**。"""
         assert ct.classify("问卷模板") == "问卷"
         assert ct.classify("吃瓜合集") == "大瓜"
+
+
+class TestTutorialIsAmbiguous:
+    """⚠️ **"教程"本身不携带类目信息**(用户 2026-10-04:"**教程需要分清楚软件还是什么教程**")。
+
+    `PS教程` 是**软件**教程、`小学数学教程` 是**学习资料** —— 光看"教程"判不出来,
+    得看**主题词**。所以把它降成**通用词**(1 分),由主题词(PS / 小学·数学)决定,
+    与「入口」是同一套处理。
+    """
+
+    def test_software_tutorials(self) -> None:
+        for t in ("PS教程", "PR剪辑教程", "Excel教程", "车机互联教程", "Office安装包"):
+            assert ct.classify(t) == "软件", t
+
+    def test_study_tutorials(self) -> None:
+        for t in ("小学数学教程", "考公教程", "人教版数学课件"):
+            assert ct.classify(t) == "资料", t
+
+
+class TestGossipByEventNotByName:
+    """⚠️ **大瓜靠"事件词"判,不靠人名**(用户 2026-10-04:"大瓜一般标题上都会有明星或者
+    公众人物网红的名字")。
+
+    **我们没有人名库** —— 明星名天天变,写死必然过期;**事件词是稳定的**:
+    不管主角是谁,"塌房/分手/官宣/实锤"都在。所以按事件词建表。
+
+    下面这批**带人名但不含"爆料/塌房"**的,正是这条判据要覆盖的:
+    """
+
+    def test_events_with_names(self) -> None:
+        for t in ("张三李四分手", "某网红离婚", "XX官宣恋情", "某明星起诉", "某某取关",
+                  "工作室道歉声明", "孙宇晨小作文", "某明星塌房", "吃瓜合集"):
+            assert ct.classify(t) == "大瓜", t
+
+    def test_a_celebrity_without_an_event_is_not_gossip(self) -> None:
+        """是明星 ≠ 是瓜。没有事件词就不该收 —— 否则大瓜会变成"凡是人名都收"。"""
+        assert ct.classify("新歌发布") == ""
+        assert ct.classify("演唱会门票") == ""

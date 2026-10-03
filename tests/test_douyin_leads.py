@@ -268,16 +268,16 @@ def test_search_keywords_merges_group_names_and_library_names(session, monkeypat
     (本轮类目 = 轮换游标当前值,默认第一个类目「资料」;这里两个词都属它,避免走类目兜底。)
     """
     session.add(XunleiGroupShare(user_id=1, group_id="g", share_id="s1",
-                                 title="PS教程 全套", msg_time=datetime.now()))
+                                 title="四级真题 网盘", msg_time=datetime.now()))
     session.commit()
     monkeypatch.setattr("app.services.cross_accounts._keywords_from_library",
-                        lambda s, u, top: ["PS教程 全套", "四级资料真题"])
+                        lambda s, u, top: ["四级真题 网盘", "考公资料"])
 
     class _S:
         douyin_leads_group_keywords = 3
 
-    # top=2:两个候选都属「资料」且够用,不会走"话题词兜底"补位
-    assert dl.search_keywords(session, 1, top=2, settings=_S()) == ["PS教程 全套", "四级资料真题"]
+    # top=2:两个候选都属「资料」(默认类目)且够用,不会走"话题词兜底"补位
+    assert dl.search_keywords(session, 1, top=2, settings=_S()) == ["四级真题 网盘", "考公资料"]
 
 
 def test_push_leads_falls_back_when_douhot_missing(monkeypatch) -> None:
