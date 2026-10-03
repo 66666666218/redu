@@ -224,5 +224,23 @@ onMounted(load)
         </tr>
       </tbody>
     </table>
+    <h2 style="margin-top:28px">按推广号排行(谁最能带量)</h2>
+    <p class="muted">
+      预估转化 = 该号的<b>互动量(转发量)之和 × 渠道系数</b> —— <b>全自动,不需要任何人填</b>。
+      (抖音看转发 ×70%,公众号看阅读 ×30%,可按你给的口径调。)
+      ⚠️ 抖音账号名被采集工具脱敏(如「籽***」),只能用来<b>区分不同号</b>,不能拿去站内搜人。
+    </p>
+    <table style="margin-top:8px;max-width:640px">
+      <thead><tr><th>推广号</th><th>线索数</th><th>转发量合计</th><th>预估转化</th></tr></thead>
+      <tbody>
+        <tr v-for="a in (settlement.authors || [])" :key="a.author">
+          <td>{{ a.author }}</td><td>{{ a.leads }}</td>
+          <td>{{ a.share_total }}</td><td class="up">{{ a.estimated }}</td>
+        </tr>
+        <tr v-if="!settlement.authors || !settlement.authors.length">
+          <td colspan="4" class="muted">还没有线索数据(抖音链每天 11:00 跑一轮)</td>
+        </tr>
+      </tbody>
+    </table>
   </div>
 </template>

@@ -178,3 +178,48 @@ def test_reminder_does_not_fall_back_to_customer_group(session, monkeypatch) -> 
     """没配管理员群就**安静跳过** —— 这是内部待办,推进客户群是事故。"""
     _stub_tick(monkeypatch, session)
     assert ls.record_reminder_tick(_S(feishu_webhook_admin="")) == 0
+
+
+# ---------------------------------------------------------------- 按互动量 × 系数分析(2026-10-03 用户口径)
+
+def test_wechat_coefficient_is_30_percent(session) -> None:
+    """⚠️ **公众号转化 = 30%**(用户 2026-10-03 更正:先说 10%,当天改口 30%)。
+
+    抖音 = 转发量 × 70%(60~80% 取中值),公众号 = 阅读量 × 30%。
+    """
+    from app.services.lead_settlement import PRIOR_COEFFICIENTS
+
+    assert PRIOR_COEFFICIENTS["wechat"] == 0.3
+    assert PRIOR_COEFFICIENTS["douyin"] == 0.7
+    assert ls.load_coefficients(session)["wechat"] == 0.3      # 默认值也要能读出来
+
+
+def test_author_ranking_aggregates_by_account(session) -> None:
+    """**按推广号统计谁最能带量**(用户口径:"还能统计不同用户的情况")。
+
+    预估转化 = 该号所有线索的互动量(转发量)之和 × 系数 —— 全自动,不需要任何人填。
+    """
+    now = datetime.now()
+    for aid, author, shares in (("1", "号甲", 100), ("2", "号甲", 50),
+                                ("3", "号乙", 400), ("4", "号丙", 0)):
+        session.add(DouyinLead(user_id=1, aweme_id=aid, title="t", author=author,
+                               share_count=shares, found_at=now, found_date=now.date().isoformat()))
+    session.commit()
+    out = ls.author_ranking(session, 1, days=7)
+    assert [a["author"] for a in out] == ["号乙", "号甲", "号丙"]      # 按预估转化倒序
+    by = {a["author"]: a for a in out}
+    assert by["号甲"]["leads"] == 2 and by["号甲"]["share_total"] == 150
+    assert by["号甲"]["estimated"] == 105.0                          # 150 × 0.7
+    assert by["号乙"]["estimated"] == 280.0
+
+
+def test_weekly_report_includes_authors(session) -> None:
+    """对账表要带上按号视角(前端/接口直接展示)。"""
+    now = datetime.now()
+    session.add(DouyinLead(user_id=1, aweme_id="1", title="t", author="号甲",
+                           share_count=100, found_at=now, found_date=now.date().isoformat()))
+    session.commit()
+    rep = ls.weekly_report(session, 1, weeks=2)
+    assert rep["authors"] and rep["authors"][0]["author"] == "号甲"
+    # 提示文案分两支(有周录 / 没有),但**两支都要讲清"预估转化是怎么来的"**
+    assert "预估转化" in rep["note"]

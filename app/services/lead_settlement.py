@@ -29,10 +29,16 @@ from app.utils import get_logger
 logger = get_logger(__name__)
 
 _COEF_KEY = "lead_coefficients"
-# 用户口径(2026-10-03):"抖音的看转发的量,转化有 60%-80%" —— 取中值当**展示用**先验。
-# ⚠️ 它乘的是**别人视频**的转发量,所以是"这个资源大概能带来多少转存"的粗估,
-# 不是我们自己号的实际转化率(见模块头注)。
-PRIOR_COEFFICIENTS = {"douyin": 0.7}
+# **用户口径**(2026-10-03,含一次更正):
+#   · **抖音**:看**转发量**,转发的人里 60~80% 去转存了 → 取中值 **0.7**
+#   · **公众号**:看**阅读量**,转化 **30%**(用户先说过 10%,当天更正为 **30%**)
+#
+# ⚠️⚠️ **为什么是"互动量 × 系数",而不是人工标"已发"**(用户 2026-10-03 指出,我原方案错了):
+#   人工标记要人做、而且是**自报** —— 而"拉新周录至今 0 行"已经证明**要人做的环节一定没人做**;
+#   播放/转发量则是**客观、自动、且能按号归因**的。所以:
+#       预估转化 = 该项内容的**互动量** × 该渠道系数   ← 不需要任何人填任何东西
+#   (我原方案里的"给发现卡片加『已发』标记"因此**取消** —— 那是把同一个坑再挖一遍。)
+PRIOR_COEFFICIENTS = {"douyin": 0.7, "wechat": 0.3}
 
 
 def load_coefficients(db: Session) -> dict[str, float]:
@@ -62,6 +68,31 @@ def _channels_of(row: PanRecruitWeekly | None) -> dict[str, int]:
     except (ValueError, TypeError):
         return {}
     return {str(k): int(v) for k, v in d.items() if isinstance(v, (int, float))}
+
+
+def author_ranking(db: Session, user_id: int, days: int = 30) -> list[dict]:
+    """按**推广号**聚合:谁最能带量。
+
+    用户口径(2026-10-03):"根据播放量转化率去进行分析…**还能统计不同用户的情况**"。
+    对每条线索取它的**互动量**(抖音=转发量),按作者汇总,再乘渠道系数给**预估转化** ——
+    这样一眼能看出**哪个号最能带量**,而不是只知道"本轮推了多少条"。
+
+    ⚠️ 抖音线索的 `author` 是 MediaCrawler **脱敏过的**(如「籽***」),所以它只能用来
+    **区分不同号**,不能直接去站内搜人 —— 这是那个工具教学版的已知限制。
+    """
+    coef = load_coefficients(db)
+    cutoff = datetime.now() - timedelta(days=max(1, days))
+    rows = db.execute(
+        select(DouyinLead.author, func.count(), func.sum(DouyinLead.share_count))
+        .where(DouyinLead.user_id == user_id, DouyinLead.found_at >= cutoff)
+        .group_by(DouyinLead.author)).all()
+    out = []
+    for author, n, total in rows:
+        total = int(total or 0)
+        out.append({"author": str(author or "—"), "leads": int(n or 0),
+                    "share_total": total,
+                    "estimated": round(total * coef.get("douyin", 0.0), 1)})
+    return sorted(out, key=lambda x: -x["estimated"])
 
 
 def _missing_weeks(db: Session, user_id: int, weeks: int = 4) -> list[str]:
@@ -191,7 +222,12 @@ def weekly_report(db: Session, user_id: int, weeks: int = 8) -> dict:
         })
     recorded_weeks = sum(1 for x in out if x["has_record"])
     return {"weeks": out, "coefficients": coef, "recorded_weeks": recorded_weeks,
-            "note": ("系统侧转发量是**别人视频**的(这个资源在抖音有多热),"
-                     "与你录的**自己号拉新**不同源 —— 只看趋势是否同步,别直接相除当转化率。"
+            # 按**推广号**聚合 —— 用户口径"还能统计不同用户的情况"(谁最能带量)
+            "authors": author_ranking(db, user_id, days=max(1, weeks) * 7),
+            "note": ("预估转化 = **互动量 × 渠道系数**(抖音看转发 70%,公众号看阅读 30%)——"
+                     "**全自动、不需要任何人填**。"
+                     "对账表右侧那栏是你**自己号**的真实拉新,两者不同源:"
+                     "**看趋势是否同步就好,别拿它们相除**。"
                      if recorded_weeks else
-                     "还没有任何周录 —— 把官方后台的数字录进来,这张表才开始有意义。")}
+                     "还没有任何周录 —— 系统侧(预估转化)已经在算了,"
+                     "把官方后台的数字录进来,这张表才开始有意义。")}
