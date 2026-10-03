@@ -422,3 +422,35 @@ def test_apply_kouling_survives_dead_xunlei_credentials(session, monkeypatch) ->
     assert all(x["kouling"]["kind"] == "error" for x in out)
     line = dl._kouling_line(out[0])
     assert "迅雷登录态失效" in line and "invalid_grant" in line
+
+
+# ---------------------------------------------------------------- 线索落库(结算归因)
+
+def test_aweme_id_extracted_from_video_url() -> None:
+    """去重键必须是**作品维度**。
+
+    ⚠️ 不能用 `_parse_record` 给的 `uid` —— 那是 **creator_hash**(作者维度),
+    同一个作者的多条视频会全撞在一起,落库时把线索丢了。
+    """
+    assert dl._aweme_id("https://www.douyin.com/video/7412345678901234567") == "7412345678901234567"
+    assert dl._aweme_id("https://www.douyin.com/note/7412345678901234567") == "7412345678901234567"
+    assert dl._aweme_id("https://www.douyin.com/user/abc") == ""
+
+
+def test_save_leads_is_idempotent_and_keeps_share_count(session) -> None:
+    """同一作品重复发现只存一条(幂等 upsert),转发量要落下来 —— 它是结算要用的量级代理。"""
+    from app.db.models import DouyinLead
+
+    leads = [
+        {"aweme_id": "111", "mark": "三岁分享", "title": "t1", "author": "a", "url": "u1",
+         "keyword": "k", "share_count": 176, "kouling": {"kind": "group"}},
+        {"aweme_id": "", "mark": "没有作品id", "title": "t2", "url": "u2"},   # 缺去重键 → 跳过
+    ]
+    assert dl._save_leads(session, 1, leads) == 1
+    session.commit()
+    # 第二次(转发量涨了)→ 覆盖更新,不新增行
+    leads[0]["share_count"] = 300
+    assert dl._save_leads(session, 1, leads) == 1
+    session.commit()
+    rows = session.query(DouyinLead).all()
+    assert len(rows) == 1 and rows[0].share_count == 300 and rows[0].kind == "group"

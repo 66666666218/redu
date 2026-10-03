@@ -381,8 +381,46 @@ class PanRecruitWeekly(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     week_start: Mapped[datetime] = mapped_column(DateTime)   # 统计周期起始日(默认周一)
     recruits: Mapped[int] = mapped_column(Integer, default=0)
+    # **分渠道明细**(2026-10-03):JSON 如 `{"douyin": 42, "wechat": 18}`。
+    # 用户口径:"我只能给你我的"且要**分渠道**给 —— 只有分开录,才能分别对账两个渠道
+    # (总账一个数没法回答"哪条链在起作用")。用 JSON 列而不是给唯一键加 channel:
+    # 加 channel 要重建 `(user_id, week_start)` 唯一约束(SQLite 得整表重建),
+    # 而每周每用户本来就只有一行,嵌套进去最省事。
+    channels: Mapped[str] = mapped_column(Text, default="")
     note: Mapped[str] = mapped_column(String(255), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class DouyinLead(Base):
+    """抖音推广线索(2026-10-03):标题带《口令》的推广视频 → 落库,供**结算归因**。
+
+    **为什么必须落库**:结算要用**转发量**当线索级的强弱代理(链接级真实转存数在夸克侧
+    不可得,2026-09-29 定案),而 `share_count` 只在**抓取那一次**有效 —— 不存下来,
+    一周后就再也算不出"本周发现的线索总量级"了。
+
+    ⚠️ **口径要说清**(免得自己骗自己):`share_count` 是**别人视频**的转发量,它衡量的是
+    **"这个资源在抖音有多热"**,不等于**我们自己发文带来的转化**。所以它只用于
+    ① 线索强弱排序、② 与人工周录的真值做**趋势对账**;在拿到几周真实偏差之前,
+    **不用它自动调权重**(见 `lead_settlement` 的说明)。
+
+    `aweme_id` 当去重键:同一个视频会被多个搜索词命中,也只该算一次。
+    """
+
+    __tablename__ = "douyin_leads"
+    __table_args__ = (UniqueConstraint("user_id", "aweme_id", name="uq_douyin_lead"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    aweme_id: Mapped[str] = mapped_column(String(64), index=True)   # 抖音视频 id(去重键)
+    mark: Mapped[str] = mapped_column(String(64), default="")       # 《》里的口令
+    title: Mapped[str] = mapped_column(String(255), default="")
+    author: Mapped[str] = mapped_column(String(64), default="")     # 工具脱敏过的账号名
+    url: Mapped[str] = mapped_column(String(500), default="")
+    keyword: Mapped[str] = mapped_column(String(64), default="")    # 搜哪个词搜出来的
+    share_count: Mapped[int] = mapped_column(Integer, default=0)    # **转发量**(转化代理)
+    kind: Mapped[str] = mapped_column(String(16), default="")       # 口令解析结果(share/group/none/error)
+    found_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    found_date: Mapped[str] = mapped_column(String(16), index=True, default="")  # YYYY-MM-DD
 
 
 class QuarkShareStat(Base):

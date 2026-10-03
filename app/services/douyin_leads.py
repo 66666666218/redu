@@ -113,6 +113,19 @@ def platforms_of(settings) -> list[str]:
     return out or ["douyin"]
 
 
+_AWEME_RE = re.compile(r"/(?:video|note)/(\d+)")
+
+
+def _aweme_id(url: str) -> str:
+    """从抖音链接里取**作品 id** —— 线索落库的去重键。
+
+    ⚠️ 不能用 `_parse_record` 给的 `uid`:那个是 **creator_hash**(作者维度),
+    同一个作者发的多条视频会全撞在一起,去重会丢线索。落库键必须是**作品维度**。
+    """
+    m = _AWEME_RE.search(url or "")
+    return m.group(1) if m else ""
+
+
 def find_leads(keywords: list[str], limit: int = 30, platform: str = "douyin") -> list[dict]:
     """搜抖音 → 挑出标题带 `《…》` 前缀的推广线索。
 
@@ -143,6 +156,10 @@ def find_leads(keywords: list[str], limit: int = 30, platform: str = "douyin") -
         out.append({"mark": mark, "title": text[:120], "url": url,
                     "author": name,                     # 账号名(**被工具脱敏**,如「籽***」)
                     "keyword": h.get("keyword", ""),
+                    # 转发量(结算用):衡量**这个资源在抖音有多热**;⚠️ 是**别人视频**的数,
+                    # 不等于我们自己发文的转化(见 DouyinLead/lead_settlement 的口径说明)。
+                    "share_count": int(h.get("share_count") or 0),
+                    "aweme_id": _aweme_id(url),         # 去重键(同一视频会被多个词命中)
                     "_rank": _lead_rank(text, name)})
     out.sort(key=lambda x: x["_rank"])      # 强信号排前面(开头《》> 与昵称吻合 > 其它)
     for x in out:
@@ -361,6 +378,39 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
     return leads
 
 
+def _save_leads(session, user_id: int, leads: list[dict]) -> int:
+    """线索**落库**(按 `aweme_id` 幂等 upsert),供结算归因。
+
+    ⚠️ **为什么必须存**:`share_count` 只在**抓取那一次**有效 —— 不存下来,一周后就再也
+    算不出"本周发现的线索总量级"了(见 `DouyinLead` 的注释)。
+    没有 `aweme_id` 的跳过:去重键缺了就只能靠 URL 硬碰,不如不落(宁缺勿假)。
+    """
+    from datetime import date
+
+    from app.db.models import DouyinLead
+
+    today = date.today().isoformat()
+    n = 0
+    for ld in leads:
+        aid = str(ld.get("aweme_id") or "").strip()
+        if not aid:
+            continue
+        row = session.scalar(select(DouyinLead).where(
+            DouyinLead.user_id == user_id, DouyinLead.aweme_id == aid))
+        if row is None:
+            row = DouyinLead(user_id=user_id, aweme_id=aid, found_date=today)
+            session.add(row)
+        row.mark = str(ld.get("mark") or "")[:64]
+        row.title = str(ld.get("title") or "")[:255]
+        row.author = str(ld.get("author") or "")[:64]
+        row.url = str(ld.get("url") or "")[:500]
+        row.keyword = str(ld.get("keyword") or "")[:64]
+        row.share_count = int(ld.get("share_count") or 0)
+        row.kind = str((ld.get("kouling") or {}).get("kind") or "")[:16]
+        n += 1
+    return n
+
+
 def _kouling_line(ld: dict) -> str:
     """把解析/转存结果渲染成卡片上的一行(让运营一眼看出这条线索值不值钱)。"""
     info = ld.get("kouling") or {}
@@ -423,6 +473,12 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin") -> bool:
         # 标题里别人的口令《…》**删掉**(不是替换,见 `strip_others` 的口径变更史)
         title = _md_safe(strip_others(ld.get("title") or ""))
         shown = title[:24] + ("…" if len(title) > 24 else "")
+        # 转发量**并进作品列**:一眼看出"这条资源在抖音多热"。
+        # 没有就不显示(不拿 0 冒充有数据);口径见 `DouyinLead` 的注释 ——
+        # 它是**别人视频**的转发量,衡量热度,不等于我们自己的转化。
+        sc = int(ld.get("share_count") or 0)
+        if sc:
+            shown += f" · ↗{sc}"
         # 资源列:一眼看出"这条值不值钱"(已转存/已加群/没解出资源/被闸门挡下)
         if info.get("kind") == "share" and info.get("status") == "ok":
             res = f"[🔴我方链]({_md_safe(info.get('our_url') or '')})"
@@ -488,6 +544,7 @@ def douyin_leads_tick(settings=None) -> int:
                     if leads:
                         # 口令 → 资源(分享链直接转存入库 / 群则加群),结果一并写进卡片
                         apply_kouling(leads, db, uid, settings)
+                        _save_leads(db, uid, leads)      # 落库:转发量只在这一次有效(结算要用)
                         push_leads(leads, settings, platform=plat)
                     _record_run(db, uid, "douyin_leads", "success",
                                 f"{plat} 词{len(kws)} 线索{len(leads)}")

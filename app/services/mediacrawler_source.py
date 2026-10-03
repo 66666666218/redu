@@ -196,8 +196,15 @@ def _parse_record(rec: dict, platform: str) -> dict | None:
     text = " ".join(dict.fromkeys(p for p in parts if p))   # dict.fromkeys = 保序去重
     urls = _extract_pan_urls("", text)
     url = str(rec.get("note_url") or rec.get("url") or rec.get("aweme_url") or "").strip()
+    # **转发量**(2026-10-03):结算要用它当线索级强弱代理(链接级真实转存数在夸克侧不可得)。
+    # 抖音给的字段名是 `share_count`,值是**字符串**("176"),要转成 int。
+    try:
+        share_count = int(float(str(rec.get("share_count") or 0).strip() or 0))
+    except (TypeError, ValueError):
+        share_count = 0
     return {"uid": uid, "name": name, "url": url[:500], "snippet": text[:255],
             "pan_link": (urls[0] if urls else "")[:500],
+            "share_count": share_count,
             # 该条来自哪个搜索词(抖音 jsonl 的 source_keyword)——
             # 抖音线索要按词回显"这条是搜什么词搜出来的"。
             "keyword": str(rec.get("source_keyword") or "")[:80]}

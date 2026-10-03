@@ -202,7 +202,10 @@ export const api = {
   suggestionActed: (id, acted = true) => req('POST', `/api/hotspot/suggestions/${id}/acted`, { acted }),
   suggestionSettle: () => req('POST', '/api/hotspot/settle'),
   recruits: (limit = 12) => req('GET', '/api/hotspot/recruits' + `?limit=${limit}`),
-  recruitUpsert: (week_start, recruits, note = '') => req('POST', '/api/hotspot/recruits', { week_start, recruits, note }),
+  recruitUpsert: (week_start, recruits, note = '', channels = null) =>
+    req('POST', '/api/hotspot/recruits', { week_start, recruits, note, channels: channels || {} }),
+  // 线索结算对账:系统侧(线索数/转发量) vs 人工周录真值,按周并排
+  leadsSettlement: (weeks = 8) => req('GET', '/api/hotspot/leads/settlement?weeks=' + weeks),
   quarkShareCollect: () => req('POST', '/api/quark/shares/collect'),
   quarkShares: () => req('GET', '/api/quark/shares')
 }

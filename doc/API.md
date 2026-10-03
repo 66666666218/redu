@@ -1162,23 +1162,57 @@
 
 ### 11.4 拉新周录(方案B 总账)
 
-- **接口名称**: 录入/更新周度拉新总数
+- **接口名称**: 录入/更新周度拉新数(**支持分渠道**)
 - **请求方式**: POST
 - **URL 路径**: `/api/hotspot/recruits`
 - **请求参数 (Body)**:
 
 ```json
-{ "week_start": "2026-09-22", "recruits": 12, "note": "含国庆活动" }
+{ "week_start": "2026-09-22", "recruits": 60, "channels": { "douyin": 42, "wechat": 18 }, "note": "含国庆活动" }
 ```
 
 **响应示例 (200)**
 ```json
-{ "status": "ok", "id": 1, "week_start": "2026-09-22", "recruits": 12 }
+{ "status": "ok", "id": 1, "week_start": "2026-09-22", "recruits": 60,
+  "channels": { "douyin": 42, "wechat": 18 } }
 ```
 
-- **查询**: GET `/api/hotspot/recruits?limit=12` → `{"total":N,"list":[{"week_start","recruits","note","created_at"}]}`(最近在前)
+> **`channels` 是分渠道明细**(2026-10-03 用户口径:"我只能给你我的",且要**分渠道**给)——
+> 只有分开录,才能分别对账抖音/公众号两条链;**给了明细就以明细之和为准**,
+> 免得总数与明细打架。只传 `recruits` 仍按总量录(向后兼容)。
+> 落库为 `pan_recruit_weekly.channels`(JSON 列)。
+
+- **查询**: GET `/api/hotspot/recruits?limit=12` → `{"total":N,"list":[{"week_start","recruits","channels","note","created_at"}]}`(最近在前)
 - 同 `week_start` 重录 = 覆盖更新;`pan_recruit_weekly` 表按 user_id 隔离。
 - 命令行入口:`python scripts/record_recruits.py 2026-09-22=12 2026-09-29=7 [--note 备注]`
+
+### 11.5 线索结算对账(2026-10-03)
+
+- **接口名称**: 系统侧线索量级 vs 人工周录真值(按周并排)
+- **请求方式**: GET
+- **URL 路径**: `/api/hotspot/leads/settlement?weeks=8`(weeks 1~26)
+- **权限**: 登录用户
+
+**响应示例 (200)**
+```json
+{
+  "weeks": [
+    { "week_start": "2026-09-29", "leads": 13, "share_total": 4123, "estimated": 2886.1,
+      "recorded_total": 60, "recorded_channels": { "douyin": 42, "wechat": 18 },
+      "has_record": true }
+  ],
+  "coefficients": { "douyin": 0.7 },
+  "recorded_weeks": 1,
+  "note": "系统侧转发量是**别人视频**的…"
+}
+```
+
+> ⚠️ **口径**:`share_total` 是本周发现的线索所带**转发量之和**,来自**别人**的推广视频
+> (`douyin_leads.share_count`),衡量"这个资源在抖音有多热";`recorded_*` 是用户从官方后台
+> 抄来的**我们自己号**的拉新。**两者不同源,不许相除当转化率** —— 只看趋势是否同步。
+> `estimated = share_total × coefficients.douyin`,系数是**展示用先验**(用户给的 60~80% 取中值 0.7,
+> 可用 `system_config(lead_coefficients)` 覆盖),**不参与任何自动决策**。
+> `has_record=false` 表示**这一周你还没录**,与"录了 0"是两件事。
 
 ## 11e. 账号健康趋势(2026-10-01)
 

@@ -138,6 +138,9 @@ def _migrate() -> None:
         # source 区分「搜索免费行情」与「详情深采」:同日同商品一行,靠它判优先级不被覆盖。
         # 存量行一律标 detail —— 历史行确实都是深采写的,标 search 会让深采跳过它们、永不补全。
         "xianyu_daily": ["source VARCHAR(16) DEFAULT 'detail'", "tags VARCHAR(255) DEFAULT ''"],
+        # 拉新周录的**分渠道明细**(2026-10-03 用户口径:"我只能给你我的"且要分渠道):
+        # JSON 如 {"douyin": 42, "wechat": 18}。只有分开录,才能分别对账两条链。
+        "pan_recruit_weekly": ["channels TEXT DEFAULT ''"],
         "alerts": ["section VARCHAR(32) DEFAULT ''"],
         "douhot_watch": ["section VARCHAR(16) DEFAULT 'douhot'", "filter_keyword VARCHAR(64) DEFAULT ''",
                         "date_window INTEGER"],

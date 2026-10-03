@@ -335,24 +335,31 @@ def test_settle_skips_unacted_or_unattributed(session) -> None:
 
 
 def test_recruits_upsert_and_list(session) -> None:
-    """方案B:拉新周录 upsert(同周覆盖)+ 列表倒序。"""
+    """方案B:拉新周录 upsert(同周覆盖)+ 列表倒序。
+
+    假 payload 要带上 `channels`(真实 `RecruitIn` 有默认值 `{}`,手搓的没有 → 会 AttributeError)。
+    """
     from app.api.hotspot import list_recruits, upsert_recruit
 
     session.add(User(id=1, email="op@test.com", username="op", password_hash="x"))
     session.commit()
     user = session.get(User, 1)
-    p = type("P", (), {"week_start": "2026-09-22", "recruits": 12, "note": "首周"})
+    p = type("P", (), {"week_start": "2026-09-22", "recruits": 12, "note": "首周", "channels": {}})
     out = upsert_recruit(p, user=user, db=session)
     assert out["recruits"] == 12
-    p2 = type("P", (), {"week_start": "2026-09-22", "recruits": 15, "note": ""})
+    p2 = type("P", (), {"week_start": "2026-09-22", "recruits": 15, "note": "", "channels": {}})
     upsert_recruit(p2, user=user, db=session)          # 同周重录=覆盖
-    p3 = type("P", (), {"week_start": "2026-09-29", "recruits": 7, "note": ""})
+    # **分渠道**(2026-10-03 用户口径):给了明细就以**明细之和**为准,免得总数和明细打架
+    p3 = type("P", (), {"week_start": "2026-09-29", "recruits": 999, "note": "",
+                        "channels": {"douyin": 42, "wechat": 18}})
     upsert_recruit(p3, user=user, db=session)
     listing = list_recruits(limit=12, user=user, db=session)
     assert listing["total"] == 2
     assert listing["list"][0]["week_start"] == "2026-09-29"
     weeks = {r["week_start"]: r["recruits"] for r in listing["list"]}
-    assert weeks["2026-09-22"] == 15 and weeks["2026-09-29"] == 7
+    assert weeks["2026-09-22"] == 15
+    assert weeks["2026-09-29"] == 60                    # 42+18,不是传进来的 999
+    assert listing["list"][0]["channels"] == {"douyin": 42, "wechat": 18}
 
 
 def test_auto_mark_acted_from_pan_link_and_title(session, monkeypatch) -> None:

@@ -1,6 +1,7 @@
 """热点建议路由:一键标记「已发」+ 结算 + 拉新周录(预测→下注→结算闭环的 API 面)。"""
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -23,6 +24,10 @@ class ActedIn(BaseModel):
 class RecruitIn(BaseModel):
     week_start: str          # 统计周期起始日 YYYY-MM-DD(默认按拉新后台口径,一般周一)
     recruits: int
+    # **分渠道明细**(2026-10-03 用户口径:"我只能给你我的",且要分渠道):
+    # 如 `{"douyin": 42, "wechat": 18}`。只有分开录,才能分别对账两条链;
+    # 给了明细就以**明细之和**为准(免得总数和明细打架)。
+    channels: dict[str, int] = {}
     note: str = ""
 
 
@@ -121,21 +126,26 @@ def settle(user: User = Depends(get_current_user), db: Session = Depends(get_db)
 @router.post("/api/hotspot/recruits")
 def upsert_recruit(payload: RecruitIn, user: User = Depends(get_current_user),
                    db: Session = Depends(get_db)):
-    """录入/更新夸克官方拉新后台的周度拉新总数(方案B 总账,人工周录)。"""
+    """录入/更新夸克官方拉新后台的周度拉新数(方案B 总账,人工周录)。
+
+    给了 `channels` 就**以明细之和为准**(避免总数与明细对不上,后面没法对账)。
+    """
     try:
         week = datetime.strptime(payload.week_start, "%Y-%m-%d")
     except ValueError as exc:
         raise HTTPException(400, "week_start 需为 YYYY-MM-DD") from exc
+    chans = {str(k)[:16]: max(0, int(v)) for k, v in (payload.channels or {}).items()}
     row = db.scalar(select(PanRecruitWeekly).where(
         PanRecruitWeekly.user_id == user.id, PanRecruitWeekly.week_start == week))
     if row is None:
         row = PanRecruitWeekly(user_id=user.id, week_start=week)
         db.add(row)
-    row.recruits = max(0, payload.recruits)
+    row.recruits = sum(chans.values()) if chans else max(0, payload.recruits)
+    row.channels = json.dumps(chans, ensure_ascii=False) if chans else ""
     row.note = payload.note[:255]
     db.commit()
     return {"status": "ok", "id": row.id, "week_start": payload.week_start,
-            "recruits": row.recruits}
+            "recruits": row.recruits, "channels": chans}
 
 
 @router.get("/api/hotspot/recruits")
@@ -147,6 +157,31 @@ def list_recruits(limit: int = 12, user: User = Depends(get_current_user),
         PanRecruitWeekly.week_start.desc()).limit(min(limit, 52))).all()
     return {"total": len(rows), "list": [{
         "week_start": r.week_start.strftime("%Y-%m-%d"), "recruits": r.recruits,
+        "channels": _channels_json(r.channels),
         "note": r.note,
         "created_at": r.created_at.isoformat() if r.created_at else None,
     } for r in rows]}
+
+
+def _channels_json(raw: str) -> dict:
+    """周录的分渠道明细(老行没有 → 空表,前端据此显示"未分渠道")。"""
+    if not raw:
+        return {}
+    try:
+        d = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    return {str(k): v for k, v in d.items()} if isinstance(d, dict) else {}
+
+
+@router.get("/api/hotspot/leads/settlement")
+def leads_settlement(weeks: int = 8, user: User = Depends(get_current_user),
+                     db: Session = Depends(get_db)):
+    """**线索结算对账**:系统侧(线索数/转发量)与人工周录真值,按周并排。
+
+    ⚠️ 两边**不同源**(转发量是别人视频的,周录是我们自己号的拉新)——
+    只看趋势是否同步,**别拿它们相除当转化率**(见 `lead_settlement` 的模块说明)。
+    """
+    from app.services import lead_settlement
+
+    return lead_settlement.weekly_report(db, user.id, weeks=max(1, min(int(weeks), 26)))

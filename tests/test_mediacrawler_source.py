@@ -138,3 +138,15 @@ def test_crawl_returns_empty_when_only_some_keywords_empty(monkeypatch) -> None:
     monkeypatch.setattr(mc.subprocess, "run", lambda *a, **k: _P())
     monkeypatch.setattr(mc, "_read_results", lambda platform, since=None: [])
     assert mc.crawl("douyin", ["a", "b"]) == []
+
+
+def test_parse_record_keeps_share_count() -> None:
+    """**转发量必须带出来**(2026-10-03):结算要拿它当线索级强弱代理。
+
+    抖音给的是**字符串**("176"),不转 int 的话后面算总和会变成字符串拼接。
+    """
+    rec = {"nickname": "籽***）", "creator_hash": "h", "aweme_url": "https://d/video/1",
+           "title": "《三岁分享》某某资源", "share_count": "176"}
+    item = mc._parse_record(rec, "douyin")
+    assert item is not None and item["share_count"] == 176
+    assert mc._parse_record({"nickname": "n", "creator_hash": "h", "title": "t"}, "douyin")["share_count"] == 0
