@@ -185,6 +185,72 @@ class TestDeadLinkIsTerminal:
         assert out["status"] == "skipped"
 
 
+class TestAuthExpiryIsRetryableAndAlerted:
+    """登录态失效 → 记 `pending`(可重试)**且推管理员群**(2026-10-04)。
+
+    实测:一轮 15 条失败里 **10 条**是 `errno=-6 账户已过期,重新登陆` ——
+    也就是说一批**本来能搬**的资源全卡在"没人去重粘百度 Cookie"上。
+    它们既不是死链(不该判终态),也不该**一声不响**(公众号链早就有这个告警,这条链漏了)。
+    """
+
+    def _st(self):
+        return type("S", (), {})()
+
+    def test_baidu_auth_error_is_pending_and_alerts(self, session, monkeypatch) -> None:
+        from app.services import baidupan_transfer
+
+        class _C:
+            def __init__(self, ck) -> None: ...
+            def transfer_and_share(self, url, password=""):
+                raise baidupan_transfer.BaiduPanAuthError("百度网盘登录态失效(账户已过期，重新登陆)")
+
+        monkeypatch.setattr(baidupan_transfer, "BaiduPanClient", _C)
+        monkeypatch.setattr("app.services.cookie_store.get_cookie", lambda s, u, p: "ck")
+        alerts = []
+        monkeypatch.setattr("app.services.alert_service.notify_incident",
+                            lambda *a, **k: alerts.append(a[3]) or True)
+
+        out = pd.transfer_pan_url(session, 1, "https://pan.baidu.com/s/1abc")
+        assert out["status"] == "pending", "登录态失效是可重试的,判终态会把恢复后的重试也掐掉"
+        assert alerts and "百度网盘" in alerts[0], f"没告警:{alerts}"
+
+    def test_quark_auth_error_is_pending_too(self, session, monkeypatch) -> None:
+        from app.services import quark_transfer
+
+        class _Q:
+            def __init__(self, ck, fid_store=None) -> None: ...
+            def transfer_and_share(self, url, **k):
+                raise quark_transfer.QuarkAuthError("夸克 Cookie 已失效")
+
+        monkeypatch.setattr(quark_transfer, "QuarkTransfer", _Q)
+        monkeypatch.setattr("app.services.cookie_store.get_cookie", lambda s, u, p: "ck")
+        alerts = []
+        monkeypatch.setattr("app.services.alert_service.notify_incident",
+                            lambda *a, **k: alerts.append(a[3]) or True)
+
+        out = pd.transfer_pan_url(session, 1, "https://pan.quark.cn/s/abc")
+        assert out["status"] == "pending"
+        assert alerts and "夸克" in alerts[0]
+
+    def test_alert_failure_does_not_break_the_result(self, session, monkeypatch) -> None:
+        """告警自己挂了,不能把转存结果也带崩(它本来只是"顺带通知")。"""
+        from app.services import baidupan_transfer
+
+        class _C:
+            def __init__(self, ck) -> None: ...
+            def transfer_and_share(self, url, password=""):
+                raise baidupan_transfer.BaiduPanAuthError("登录态失效")
+
+        monkeypatch.setattr(baidupan_transfer, "BaiduPanClient", _C)
+        monkeypatch.setattr("app.services.cookie_store.get_cookie", lambda s, u, p: "ck")
+
+        def _boom(*a, **k):
+            raise RuntimeError("飞书挂了")
+
+        monkeypatch.setattr("app.services.alert_service.notify_incident", _boom)
+        assert pd.transfer_pan_url(session, 1, "https://pan.baidu.com/s/1abc")["status"] == "pending"
+
+
 def test_kind_of_maps_hosts() -> None:
     assert pd._kind_of("https://pan.quark.cn/s/abc") == "quark"
     assert pd._kind_of("https://pan.baidu.com/s/1abc") == "baidu"

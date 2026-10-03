@@ -9,7 +9,24 @@ import os
 os.environ.setdefault("JWT_SECRET", "test_secret_0123456789abcdef0123456789abcdef")
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 
-from app.services.baidupan_transfer import _transfer_error  # noqa: E402
+from app.services.baidupan_transfer import _looks_like_auth_issue, _transfer_error  # noqa: E402
+
+
+def test_auth_expiry_is_recognized_from_show_msg() -> None:
+    """⚠️ **百度把"登录态过期"也塞在 `errno=-6` 里,只有 `show_msg` 认得出**(2026-10-04 实测)。
+
+    实测原文就长这样:`转存失败(errno=-6 账户已过期，重新登陆)`。
+    如果只按 errno 归成"普通失败",下游就只记一条泛泛的 `failed` ——
+    **一批本来能搬的资源全卡着,却没人知道要去重粘 Cookie**(那天一轮 15 条里 10 条是这个)。
+    """
+    for msg in ("账户已过期，重新登陆", "请先登录", "登录失效", "未登录"):
+        assert _looks_like_auth_issue(msg) is True, msg
+
+
+def test_dead_link_wording_is_not_mistaken_for_auth() -> None:
+    """反向:死链的措辞不能被当成登录态问题(否则会去推一条错误的告警)。"""
+    for msg in ("分享文件已被删除", "分享不存在", "", "转存过于频繁"):
+        assert _looks_like_auth_issue(msg) is False, msg
 
 
 def test_show_msg_is_included() -> None:

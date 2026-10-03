@@ -82,6 +82,26 @@ def _fail(message: str) -> dict:
             "message": message, "our_url": "", "code": ""}
 
 
+def _alert_auth_expired(session, user_id: int, kind: str, message: str) -> None:
+    """登录态失效 → 推**管理员群**(运维信息)。
+
+    ⚠️ **为什么必须报**(2026-10-04 实测):公开发现链一轮 15 条失败里,**10 条**都是
+    `转存失败(errno=-6 账户已过期,重新登陆)` —— 也就是**一批本来能搬的资源全卡在
+    "没人去重粘百度 Cookie"** 上,而旧实现只记一条泛泛的 `failed`:
+    **运行记录看不出该干什么,也没有任何告警**(很容易被当成"这些链又失效了"而忽略)。
+    公众号链早就有这个告警(`_enrich.py` 的「百度网盘 Cookie 已失效,转存停用」),这条链漏了。
+    """
+    try:
+        from app.services.alert_service import notify_incident
+
+        notify_incident(session, user_id, "pan_discovery",
+                        f"{kind} 登录态失效(公开发现链转存停用)",
+                        f"{message[:120]} —— 去「Cookie 管理」重粘 {kind} Cookie 即可;"
+                        f"已发现的盘链会留 pending,恢复后自动重试。")
+    except Exception:  # noqa: BLE001 - 告警自身失败不该影响转存结果
+        logger.exception("登录态失效告警推送失败")
+
+
 def transfer_pan_url(session, user_id: int, pan_url: str, settings=None,
                      snippet: str = "") -> dict:
     """**按链分发转存**:夸克走 `QuarkTransfer`、百度走 `BaiduPanClient`、迅雷走 `xunlei_transfer`。
@@ -143,6 +163,16 @@ def transfer_pan_url(session, user_id: int, pan_url: str, settings=None,
             return {"status": "skipped", "message": msg, "our_url": "", "code": ""}
         return {"status": "failed", "message": msg, "our_url": "", "code": ""}
     except Exception as exc:  # noqa: BLE001 - 单链失败不该炸整轮
+        from app.services.baidupan_transfer import BaiduPanAuthError
+        from app.services.quark_transfer import QuarkAuthError
+
+        if isinstance(exc, (BaiduPanAuthError, QuarkAuthError)):
+            # **登录态失效 ≠ 链死了**:重粘 Cookie 就能搬,所以记 `pending`(可重试)而不是终态,
+            # 并推一次管理员群 —— 否则会像 2026-10-04 那样,一批资源卡着却没人知道要去重新登录。
+            kind = "百度网盘" if isinstance(exc, BaiduPanAuthError) else "夸克"
+            logger.warning("盘链转存:%s 登录态失效(%s)", kind, str(exc)[:80])
+            _alert_auth_expired(session, user_id, kind, str(exc))
+            return {"status": "pending", "message": str(exc)[:200], "our_url": "", "code": ""}
         logger.warning("盘链转存失败 %s:%s", pan_url[:50], exc)
         return _fail(str(exc)[:200])
 

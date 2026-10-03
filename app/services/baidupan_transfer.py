@@ -37,6 +37,18 @@ class BaiduPanAuthError(BaiduPanError):
     """Cookie 失效(BDUSS 过期),需重新复制。"""
 
 
+# 百度把"**登录态过期**"也塞在 `errno=-6` 里,只靠 `show_msg` 认得出 —— 实测
+# `转存失败(errno=-6 账户已过期，重新登陆)`。它**不是死链,是"该去重粘 Cookie"**,
+# 必须单独抛 `BaiduPanAuthError`,否则下游只会记一条泛泛的 `failed`,
+# **卡着一批能搬的资源却没人知道该干什么**(2026-10-04 实测:一轮 15 条里 10 条是这个)。
+_AUTH_HINTS = ("账户已过期", "重新登陆", "重新登录", "登录失效", "未登录", "请先登录", "登录已过期")
+
+
+def _looks_like_auth_issue(show_msg: str) -> bool:
+    text = show_msg or ""
+    return any(h in text for h in _AUTH_HINTS)
+
+
 def _transfer_error(errno, show_msg: str = "") -> str:
     """转存失败的**可读**错误串:必须带上百度的 `show_msg`。
 
@@ -159,7 +171,12 @@ class BaiduPanClient:
             t["show_msg"] = t["info"][0].get("show_msg") or t.get("show_msg") or ""
         errno = t.get("errno", -1)
         if errno not in (0, 4):  # 4=文件已存在,复用
-            raise BaiduPanError(_transfer_error(errno, str(t.get("show_msg") or "")))
+            why = str(t.get("show_msg") or "")
+            # ⚠️ **登录态失效要单独抛**:它和"链死了"完全不同 —— 前者重粘 Cookie 就能搬,
+            # 后者永远搬不了。混在一个 `errno=-6` 里,下游既看不出该干什么,也报警不出来。
+            if _looks_like_auth_issue(why):
+                raise BaiduPanAuthError(f"百度网盘登录态失效({why.strip()[:40]})")
+            raise BaiduPanError(_transfer_error(errno, why))
         paths = [f"{target_dir.rstrip('/')}/{n}" for n in names if n]
 
         # pset 分享(NetdiskUA,无需 bdstoken);转存后立刻分享偶发未就绪,重试 2 次
