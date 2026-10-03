@@ -92,6 +92,22 @@ export const api = {
   // 那些按钮因此一直抛 TypeError(2026-10-01 发现并修复)。包装成 `{ data }` 即可全部救活,
   // 新代码请直接用下面的具名方法。
   post: (path, body) => req('POST', path, body).then(data => ({ data })),
+  // 同款兼容层(2026-10-03):**12 处** axios 风格 `api.get(url, { params })` 再取 `.data`
+  // (健康页/资源库/热榜/迅雷群/跨平台号/Cookies 扫码,共 6 个页面),而 api.js **从来没有 get**
+  // —— 那些页面整体抛 `TypeError: api.get is not a function`。
+  // ⚠️ **与上面 post 是同一个坑**:2026-10-01 只修了 post,漏了 get,于是又躺了两天。
+  // 这里把 `{params}` 拼成查询串,并同样返回 `{ data }`,一次救活 6 个页面。
+  get: (path, opts) => {
+    const params = (opts && opts.params) || null
+    let qs = ''
+    if (params) {
+      const sp = new URLSearchParams()
+      for (const [k, v] of Object.entries(params))
+        if (v !== undefined && v !== null) sp.append(k, v)
+      qs = sp.toString() ? (path.includes('?') ? '&' : '?') + sp : ''
+    }
+    return req('GET', path + qs).then(data => ({ data }))
+  },
   register: (email, password, username) => req('POST', '/api/auth/register', { email, password, username }),
   login: (login, password) => req('POST', '/api/auth/login', { login, password }),
   forgot: (email) => req('POST', '/api/auth/forgot', { email }),
