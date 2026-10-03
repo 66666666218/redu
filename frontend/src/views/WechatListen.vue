@@ -238,15 +238,9 @@ async function delBench(b) {
   } catch (e) { toastErr(e.message) }
 }
 
-async function refreshTraffic() {
-  busy.value = 'traffic'
-  try {
-    const r = await api.wechatTrafficRefresh({ limit: 30 })
-    if (r.status === 'skipped') toastErr(`采样跳过:${r.reason === 'no_targets' ? '没有待采样的文章' : r.reason === 'no_key' ? '未配置 DAJIALA_KEY' : '余额不足(¥' + (r.balance ?? 0).toFixed(2) + ')'}`)
-    else toastOk(`阅读量采样完成:更新 ${r.sampled} 篇`)
-    await loadArticles()
-  } catch (e) { toastErr(e.message) } finally { busy.value = '' }
-}
+// ⚠️ `refreshTraffic()`(调 `api.wechatTrafficRefresh` → POST /api/wechat/traffic/refresh)已删除(2026-10-03):
+// 那条路由后端从来没有,dajiala 付费阅读采样 2026-09-29 已废弃,点下去只会 404。
+// 阅读/点赞走微信读书站内数,随监听免费入库 —— 无需手动触发(守卫:scripts/check_frontend_routes.py)。
 
 const fmt = (t) => t ? String(t).replace('T', ' ') : '—'
 const rewriting = ref(0)
@@ -312,7 +306,10 @@ onMounted(load)
     <div class="card" style="margin-bottom:16px">
       <div class="row" style="gap:10px;flex-wrap:wrap;align-items:center">
         <button :disabled="busy==='listen'" @click="listenAll">{{ busy==='listen' ? '监听中…' : '立即监听一轮' }}</button>
-        <button class="ghost" :disabled="busy==='traffic'" @click="refreshTraffic">{{ busy==='traffic' ? '采样中…' : '刷新阅读量(¥0.06/篇)' }}</button>
+        <!-- ⚠️ 这里原本有个「刷新阅读量(¥0.06/篇)」按钮,2026-10-03 已删:
+             它调的 `POST /api/wechat/traffic/refresh` **后端根本没有这条路由**(必 404),
+             写的是 dajiala 付费采样 —— 而 dajiala 2026-09-29 已废弃(scheduler 的 traffic_tick 停用)。
+             阅读/点赞现在来自**微信读书站内数,随监听免费一并入库、零额外请求**,没有"手动刷新"这回事。 -->
         <label style="display:flex;align-items:center;gap:4px"><input type="checkbox" v-model="onlyPan" @change="loadArticles()" />只看带网盘链接</label>
         <span class="empty">盘链文 {{ panCount }} 篇 · 阅读量合计 {{ totalRead }}</span>
       </div>
@@ -389,7 +386,7 @@ onMounted(load)
       <table v-if="articles.length">
         <tr>
           <th>发现时间</th><th>公众号</th><th>标题</th><th>网盘</th><th>我的链接</th>
-          <th>操作</th><th>阅读</th><th>点赞</th><th>转发</th><th>采样时间</th>
+          <th>操作</th><th>阅读</th><th>点赞</th>
         </tr>
         <tr v-for="a in articles" :key="a.id">
           <td class="empty">{{ fmt(a.created_at) }}</td>
@@ -398,17 +395,20 @@ onMounted(load)
           <td>{{ a.pan_types ? '🔴 ' + a.pan_types : '—' }}<span v-if="a.trend_flag" :class="a.trend_flag==='回落' ? 'empty' : ''">{{ a.trend_flag==='爆点苗头' ? ' 🚀爆点苗头' : a.trend_flag==='回落' ? ' 📉回落' : '' }}</span></td>
           <td><a v-if="firstMy(a.my_pan_urls)" :href="firstMy(a.my_pan_urls)" target="_blank" rel="noopener">打开</a><span v-else class="empty">—</span></td>
           <td><button class="ghost" :disabled="rewriting===a.id" @click="rewrite(a)">{{ rewriting===a.id ? '…' : 'AI改写' }}</button></td>
-          <td>{{ a.traffic_at ? a.read_num : '—' }}</td>
-          <td>{{ a.traffic_at ? a.zan_num : '—' }}</td>
-          <td>{{ a.traffic_at ? a.share_num : '—' }}</td>
-          <td class="empty">{{ fmt(a.traffic_at) }}</td>
+          <!-- ⚠️ 这两格 2026-10-03 之前挂的是 `a.traffic_at ? ... : '—'`,而 `traffic_at` 是 dajiala
+               采样时间戳 —— dajiala 2026-09-29 废弃后**全库无一行非空**(实测 703 篇全为空),
+               于是**有真实阅读量的 168 篇也被显示成 '—'**。改挂真数据源本身。
+               原「转发」「采样时间」两列已删:前者 `share_num` 全项目从不写入、
+               后者 `traffic_at` 永不设置 —— 永远为空的列就是"拿空冒充数据"(本项目反复修的那一类)。 -->
+          <td>{{ a.read_num || '—' }}</td>
+          <td>{{ a.zan_num || '—' }}</td>
         </tr>
       </table>
       <div v-else class="empty">暂无文章:添加对标号后点「立即监听一轮」</div>
       <div class="row" style="margin-top:8px;justify-content:center" v-if="articles.length >= 100">
         <button class="ghost" @click="loadArticles(true)">加载更多</button>
       </div>
-      <div class="empty" style="margin-top:8px">阅读列"—"=尚未采样;「刷新阅读量」按 ¥0.06/篇 调用 dajiala,每轮最多 30 篇(可在 .env 调整)</div>
+      <div class="empty" style="margin-top:8px">阅读/点赞取自<b>微信读书站内数</b>(免费,随监听一并入库,零额外请求);"—"=该篇微信读书未返回此数</div>
     <div v-if="rewriteText" class="card" style="margin-top:16px">
       <h3>AI 改写稿:{{ rewriteTitle }}</h3>
       <!-- ⚠️ 用 `:value` 而不是 `{{ }}`:Vue 官方明确说 **textarea 里不要用插值**

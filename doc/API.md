@@ -1608,12 +1608,22 @@ GET `/api/admin/health`(perm `logs.view`)→ 各平台最近采集状态 + 数�
 | 删除 | DELETE | `/api/wechat/benchmarks/{benchmark_id}` | `{"deleted": true}` |
 | 同步历史文章 | POST | `/api/wechat/benchmarks/{benchmark_id}/sync?max_pages=3` | 免费源优先,付费兜底;返回入库与推送计数 |
 
-### 17.3 文章 · 阅读量采样与 AI 改写
+### 17.3 文章 · AI 改写
 | 动作 | 方式 | 路径 | 说明 |
 |---|---|---|---|
-| 单篇采样历史 | GET | `/api/wechat/articles/{article_id}/traffic` | `{"article_id","count","items":[{"read_num","sampled_at","..."}]}`;404=文章不存在。**只读历史**:dajiala 收费采样已于 2026-09-29 整体摘除,新数据不再产生采样点 |
 | AI 改写 | POST | `/api/wechat/articles/{article_id}/rewrite` | 需配 DEEPSEEK_API_KEY(400);正文未抓到 400;成功 `{"ok":true,"article_id","title","..."}` |
 | 改写历史 | GET | `/api/wechat/articles/{article_id}/rewrites` | `{"count":N,"items":[{"id","title","..."}]}` |
+
+> ⚠️ **「单篇采样历史」`GET /api/wechat/articles/{article_id}/traffic` 已停止** —— 接口本身也于
+> **2026-10-03 删除**(全项目审查)。原因:它读的 `wechat_traffic_samples` 表**全项目无写入方**
+> (只有一个读它、一个删它),**永远返回 `count: 0`**,前端也没有调用方 —— 是把
+> "这项早就不测了"伪装成"还没有采样点"的空壳。dajiala 付费阅读采样 2026-09-29 废弃
+> (`scheduler.py` 的 `traffic_tick` 停用)后就没有采样端了。
+> **阅读/点赞的现役来源**:`WechatArticle.read_num/zan_num`,取自**微信读书站内数**
+> (免费,随监听一并入库、零额外请求),见 `GET /api/wechat/articles` 的响应字段。
+> 效果评估改走**方案B 人工拉新周录**(`GET /api/hotspot/leads/settlement`)。
+> 前端同批摘除了那个调不到路由的「刷新阅读量(¥0.06/篇)」按钮
+> (守卫:`scripts/check_frontend_routes.py`)。
 
 ---
 

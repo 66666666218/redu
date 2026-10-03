@@ -403,24 +403,15 @@ def wechat_candidate_update(candidate_id: int, payload: dict,
     return {"ok": True}
 
 
-@router.get("/api/wechat/articles/{article_id}/traffic")
-def wechat_article_traffic(article_id: int, user: User = Depends(get_current_user),
-                           db: Session = Depends(get_db)):
-    """单篇文章的流量采样曲线(供增长折线)。"""
-    from app.db.models import WechatTrafficSample
-
-    row = db.scalar(select(WechatArticle).where(WechatArticle.id == article_id,
-                                                WechatArticle.user_id == user.id))
-    if row is None:
-        raise HTTPException(404, "文章不存在")
-    samples = db.scalars(select(WechatTrafficSample).where(
-        WechatTrafficSample.user_id == user.id,
-        WechatTrafficSample.article_id == article_id).order_by(WechatTrafficSample.sampled_at)).all()
-    return {"article_id": article_id, "count": len(samples), "items": [
-        {"read_num": s.read_num, "zan_num": s.zan_num, "looking_num": s.looking_num,
-         "share_num": s.share_num, "collect_num": s.collect_num,
-         "comment_count": s.comment_count,
-         "sampled_at": s.sampled_at.isoformat(sep=" ", timespec="seconds")} for s in samples]}
+# ⚠️ **文章流量采样曲线接口已删除**(2026-10-03):原 `GET /api/wechat/articles/{id}/traffic`
+# 读的是 `WechatTrafficSample`,而**全项目没有任何一处写入这张表**(只有本接口在读、
+# `_source.py` 在删)—— 它**永远返回 `count: 0`**,前端也没人调(2026-10-03 全项目审查实测)。
+# 根因:dajiala 付费阅读采样 2026-09-29 废弃(`scheduler.py` 的 `traffic_tick` 随之停用),
+# 采样端没了,样本表就成了空壳。**效果评估改走方案B(人工拉新周录)**,见 `lead_settlement.py`。
+# 表与模型**保留**(删表要走迁移、且有历史兼容行,收益为零);阅读/点赞的**现役来源**是
+# 微信读书站内数,随监听免费入库到 `WechatArticle.read_num/zan_num`,不再有"采样"这一层。
+# 同批被摘的还有前端那个调不存在路由的「刷新阅读量(¥0.06/篇)」按钮。
+# 守卫:`scripts/check_frontend_routes.py`(api.js ↔ 后端路由)、`tests/test_api_doc_routes.py`。
 
 
 @router.post("/api/wechat/articles/{article_id}/rewrite")

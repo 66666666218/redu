@@ -194,7 +194,10 @@ export const api = {
   wechatCandidateAutoImport: (limit = 0) => req('POST', '/api/wechat/candidates/auto-import', { limit }),
   wechatImportShelf: () => req('POST', '/api/wechat/benchmarks/import_shelf'),
   wechatArticles: (q = '') => req('GET', '/api/wechat/articles' + (q ? '?' + q : '')),
-  wechatTrafficRefresh: (o = {}) => req('POST', '/api/wechat/traffic/refresh', o),
+  // ⚠️ `wechatTrafficRefresh`(→ POST /api/wechat/traffic/refresh)已删除(2026-10-03):
+  // **后端从来没有这条路由** —— dajiala 付费阅读采样 2026-09-29 废弃(scheduler 的 traffic_tick 停用),
+  // 按钮没跟着摘。它调下去必 404,是闲鱼那个"扫了不生效却显示成功"按钮的翻版。
+  // 守卫:`scripts/check_frontend_routes.py` / tests/test_frontend_routes.py(补上了 api.js ↔ 后端路由 这道缝)。
   wechatArticleRewrite: (id) => req('POST', `/api/wechat/articles/${id}/rewrite`),
   members: () => req('GET', '/api/members'),
   memberAdd: (o) => req('POST', '/api/members', o),
