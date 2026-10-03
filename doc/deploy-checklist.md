@@ -25,7 +25,7 @@ python scripts/check_env.py   # 一键校验(列缺失/空/占位符,不打印�
 | `DOUHOT_USE_PROXY` | `true` | 抖音采集被服务器 IP 风控 → **502** |
 | `PROXY_EXTRACT_URL` | 熊猫代理 glip URL(含 secret/orderNo) | 同上 |
 | `DOUHOT_TOP_N` | `100` | 只采 50 条(覆盖不到 100) |
-| `FEISHU_WEBHOOK` | **新机器人** `2a294b76-74ab-441e-a31e-39eda459c72a` | 告警发到旧机器人 |
+| `FEISHU_WEBHOOK` | **新机器人** `<从 .env 复制,别写进本文档>` | 告警发到旧机器人 |
 | `FEISHU_SECRET` | 空(签名已关) | — |
 | `XIANYU_REQUEST_DELAY` | `4.0`(建议) | 闲鱼限流默认 2.5 偏快 |
 | `XIANYU_DETAIL_LIMIT` | `10`(建议) | 详情抓取越多越易风控 |
