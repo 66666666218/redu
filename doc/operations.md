@@ -463,6 +463,14 @@ python scripts/wemp_cred.py --check          # 以后想确认还能不能用
 >    **不新增暴露面**)→ 布上 `PEER_HEALTH_URL` 即可见"远端在线/失联";
 > ② 远端每天 09:20(`health_push`)**往管理员群推一张板块健康卡** —— 只在远端跑,本机不重复;
 >    ⚠️ **只推管理员群、不回落主群**(采集源健康属运维噪音,进客户群是事故)。
+>
+> **远端配 `FEISHU_WEBHOOK_ADMIN` 的正确姿势(2026-10-03 实测)**:compose 与 `.env` 都在
+> `/www/server/panel/data/compose/redu/`,**服务名是 `redu-api`**(不是 api)。⚠️
+> **`docker restart` 不会重读 env** —— 必须让容器**重建**:
+> `cd /www/server/panel/data/compose/redu && docker compose -f docker-compose.yaml up -d redu-api`
+> (该命令会顺带拉最新镜像,所以它同时也是远程的**手动发版**手段)。改前先 `cp -a .env .env.bak.$(date +%s)`。
+> 配好后的实测效果:远端卡显示 `🟢 微博 0.5h / 🟢 抖音 0.9h / 🟢 百度 0.4h` ——
+> **本机看到的"那三条停在 09-29"纯粹是库独立造成的,远端一直是健康的**。
 
 | 类别 | 本机 | 远程 | 备注 |
 | --- | :---: | :---: | --- |

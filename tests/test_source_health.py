@@ -245,3 +245,19 @@ def test_health_push_skips_without_admin_group(monkeypatch) -> None:
     out = health.health_push_tick(types.SimpleNamespace(
         health_push_enabled=True, feishu_webhook_admin="", health_push_cron="20 9 * * *"))
     assert out == 0
+
+
+def test_health_card_renders_missing_age_as_dash(session) -> None:
+    """数据龄为 None 的板块**不能渲染成 `Noneh`**。
+
+    实测(2026-10-03):远端第一张卡里出现过 `· 数据 Noneh` —— 那些是"本实例不跑"的板块
+    (远端卡里是闲鱼/公众号/网盘资源),数据龄本来就该是空。残字很显眼,直接钉住。
+    """
+    import types
+
+    st = types.SimpleNamespace(xianyu_cooldown_minutes=30, xianyu_proxy_url="",
+                               scheduler_role="hotspot")
+    card = health.health_card(st, session, 1)
+    body = card["elements"][0]["text"]["content"]
+    assert "Noneh" not in body
+    assert "—" in body                      # 没有数据龄的板块渲染成破折号

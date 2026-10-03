@@ -237,7 +237,8 @@ def health_card(settings=None, db: Session | None = None, user_id: int = 1) -> d
         except Exception:  # noqa: BLE001 - 健康卡本身不该因为一个源炸掉
             logger.exception("健康卡取 source_health 失败")
     lines = [f"{r.get('emoji', '')} **{r.get('label')}** {r.get('health')}"
-             f" · 数据 {r.get('data_age_h')}h"
+             # 数据龄可能是 None(该板块在本实例没有数据)—— 直接插值会打出 "Noneh"
+             f" · 数据 {'—' if r.get('data_age_h') is None else str(r.get('data_age_h')) + 'h'}"
              + (f" · 24h 失败 {r['fails_24h']}" if r.get("fails_24h") else "")
              + (f"\n　　{(r.get('problems') or [''])[0]}" if r.get("problems") else "")
              for r in rows]
