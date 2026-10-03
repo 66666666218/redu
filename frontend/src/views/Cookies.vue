@@ -7,39 +7,13 @@ const drafts = ref({})
 const msg = ref('')
 const smtp = ref({ host: '', port: 465, user: '', password: '', from_name: '' })
 
-const qr = ref({ show: false, png: '', status: '', text: '' })
-let qrTimer = null
+// ⚠️ **闲鱼的「扫码登录」按钮已删除**(2026-10-03)。
+// 它原走纯协议二维码流程、把登录态写进 `cookie_store`;但 2026-10-02 起采集默认走
+// **浏览器档案**(`xianyu_browser`),`tenant.run_xianyu` 在浏览器模式下**不读也不校验**那个
+// cookie —— 于是那个按钮**扫了完全没效果,却会显示「✅ 登录成功」**(比报错更糟:用户以为修好了)。
+// **现在闲鱼登录的正确做法**见本页闲鱼那行的说明。实测:摘除后采集照常(count=90)。
 
-function closeQr() {
-  qr.value.show = false
-  if (qrTimer) { clearInterval(qrTimer); qrTimer = null }
-}
-
-async function startScan() {
-  closeQr()
-  try {
-    const r = await api.post('/api/cookies/goofish/qr-start')
-    qr.value = { show: true, png: r.data.qr_png, status: 'waiting', text: '等待扫码…' }
-    qrTimer = setInterval(async () => {
-      try {
-        const s = await api.get('/api/cookies/goofish/qr-status', { params: { session_id: r.data.session_id } })
-        const st = s.data.status
-        qr.value.status = st
-        qr.value.text = s.data.message || { waiting: '等待扫码…', scanned: '已扫码,请在手机上确认登录', confirmed: '确认中…', success: '✅ 登录成功,Cookie 已入库' }[st] || st
-        if (st === 'success') {
-          clearInterval(qrTimer); qrTimer = null
-          await load()   // 刷新 Cookie 列表状态
-        } else if (st === 'expired' || st === 'failed' || st === 'not_found') {
-          clearInterval(qrTimer); qrTimer = null
-        }
-      } catch { /* 单次轮询失败忽略 */ }
-    }, 2500)
-  } catch (e) {
-    msg.value = '二维码生成失败:' + (e?.response?.data?.detail || e.message || e)
-  }
-}
-
-const labels = { weibo: '微博', baidu: '百度', douyin: '抖音(热点宝)', goofish: '闲鱼', baidupan: '百度网盘', quark: '夸克网盘', weread: '微信读书', dajiala: 'dajiala(付费接口)' }
+const labels = { weibo: '微博', baidu: '百度', douyin: '抖音(热点宝)', goofish: '闲鱼', baidupan: '百度网盘', quark: '夸克网盘', weread: '微信读书' }
 
 async function load() {
   try {
@@ -103,24 +77,13 @@ onMounted(async () => { await load() })
         <div class="row">
           <button @click="save(c.platform)">保存</button>
           <button class="ghost" v-if="c.configured" @click="remove(c.platform)">删除</button>
-          <button v-if="c.platform === 'goofish'" @click="startScan">📱 扫码登录</button>
         </div>
-      </div>
-    </div>
-
-    <!-- 闲鱼扫码登录弹窗(v2.12.0 可视化一键扫码) -->
-    <div v-if="qr.show" style="position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:99" @click.self="closeQr">
-      <div class="card" style="max-width:360px;text-align:center">
-        <h3 style="margin-top:0">闲鱼扫码登录</h3>
-        <img v-if="qr.png" :src="'data:image/png;base64,' + qr.png" style="width:260px;height:260px" alt="二维码" />
-        <p :style="{ color: qr.status === 'success' ? '#080' : qr.status === 'failed' || qr.status === 'expired' ? '#c00' : '' }">
-          {{ qr.text }}
-        </p>
-        <p class="empty" style="font-size:12px">手机闲鱼 App → 我的 → 右上角扫一扫</p>
-        <div class="row" style="justify-content:center">
-          <button v-if="qr.status === 'waiting' || qr.status === 'scanned'" class="ghost" @click="closeQr">取消</button>
-          <button v-else @click="startScan">重新生成二维码</button>
-          <button v-if="qr.status === 'success'" @click="closeQr">完成</button>
+        <!-- ⚠️ 闲鱼这里原本有个「扫码登录」按钮,2026-10-03 已删 —— 它扫了不生效
+             (采集走浏览器档案,不读这里存的 cookie),却显示"登录成功"。
+             正确做法写在这行里,免得用户找不到入口。 -->
+        <div class="empty" style="font-size:12px;margin-top:6px" v-if="c.platform === 'goofish'">
+          闲鱼登录态在<b>浏览器档案</b>里,不在这里的 Cookie —— 需要重登时,在项目目录跑
+          <code>python scripts/xianyu_login.py</code>(会打开浏览器,登完关窗口即可)。
         </div>
       </div>
     </div>

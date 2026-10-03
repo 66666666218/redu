@@ -1633,13 +1633,21 @@ GET `/api/admin/health`(perm `logs.view`)→ 各平台最近采集状态 + 数�
   立即把该板块「关键词监控」卡片推到飞书(含名次变化 ↑N/↓N);平时每日 08:00 日报自动推。
   → `{"ok": true, "pushed": true}`(未配飞书 webhook 时 pushed 为 false)。
 
-### 16b.3 闲鱼扫码登录(2026-10-01,可视化一键扫码)
+### 16b.3 ~~闲鱼扫码登录~~ → **已删除(2026-10-03)**
 
-- **生成二维码**: POST `/api/cookies/goofish/qr-start` → `{"session_id": "...", "qr_png": "<base64 PNG>", "expires_in": 900}`
-- **轮询状态**: GET `/api/cookies/goofish/qr-status?session_id=...` → `{"status": "waiting|scanned|confirmed|success|expired|failed|not_found", "message": "..."}`
-
-> 前端入口:「Cookie 管理」页 · 闲鱼卡片的「📱 扫码登录」按钮(弹窗显示二维码 + 2.5s 轮询)。
-> 扫码确认后自动**预热 mtop 令牌 → 校验登录态(unb/cookie2) → Cookie 加密入库**,全程零手工。
+> ⚠️ 原有两个接口 `POST /api/cookies/goofish/qr-start` 与
+> `GET /api/cookies/goofish/qr-status`(以及 `app/services/xianyu_login.py`)**已删除**。
+>
+> **为什么删**:它们走纯协议二维码流程、把登录态写进 `cookie_store`;但 **2026-10-02 起采集默认
+> 走浏览器档案**(`xianyu_browser`,登录态在 `tools/xianyu_profile`),`tenant.run_xianyu`
+> 在浏览器模式下**不读也不校验**那个 cookie —— 于是那个按钮**扫了完全没效果,却会显示
+> 「✅ 登录成功」**。**比报错更糟**:用户以为修好了,实际问题一直在。
+>
+> **现在闲鱼登录的正确做法**:跑 `python scripts/xianyu_login.py`(打开**浏览器档案**让你登,
+> 登完关窗口即可);或在项目目录直接用该档案开浏览器登录。见 `doc/operations.md §10`。
+> (纯协议那条路 `XIANYU_USE_BROWSER=false` 是被证明会遭**账号级限流**的兜底,不推荐。)
+>
+> **摘除后的实测**:闲鱼采集照常(`POST /api/collect/xianyu` → `count=90`)。
 > 会话存进程内存(15 分钟 TTL);服务重启后旧会话失效,重新生成即可。
 
 ## 16b. Cookie 管理(/api/cookies)

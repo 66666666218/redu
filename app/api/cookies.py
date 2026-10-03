@@ -34,25 +34,15 @@ def cookies_del(platform: str, user: User = Depends(get_current_user), db: Sessi
     return {"platform": platform, "deleted": True}
 
 
-@router.post("/api/cookies/goofish/qr-start")
-def goofish_qr_start(user: User = Depends(get_current_user)):
-    """闲鱼扫码登录·生成二维码(v2.12.0 可视化):返回 {session_id, qr_png(base64), expires_in}。"""
-    from app.services.xianyu_login import start_qr_login
-
-    try:
-        return start_qr_login(user.id)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, f"二维码生成失败:{str(exc)[:120]}")
-
-
-@router.get("/api/cookies/goofish/qr-status")
-def goofish_qr_status(session_id: str, user: User = Depends(get_current_user)):
-    """闲鱼扫码登录·轮询状态:waiting/scanned/confirmed/success/expired/failed/not_found。"""
-    from app.services.xianyu_login import poll_qr_login
-
-    return poll_qr_login(session_id)
-
-
+# ⚠️ **闲鱼扫码登录的两个接口已删除**(2026-10-03)。
+# 原实现(`/api/cookies/goofish/qr-start|qr-status` → `app.services.xianyu_login`)走的是
+# **纯协议二维码流程**,把登录态写进 `cookie_store`。但 2026-10-02 起采集默认改走
+# **浏览器档案**(`xiangyu_browser`,登录态在 `tools/xianyu_profile` 里),`tenant.run_xianyu`
+# 在浏览器模式下**不读也不校验**那个 cookie —— 于是这个按钮**扫了完全没效果,却显示"✅ 登录成功"**
+# (比报错更糟:用户以为修好了)。
+# **现在闲鱼登录的正确做法**:关掉面板,跑 `scripts/xianyu_login.py` 或直接用
+# `tools/xianyu_profile` 那个档案开浏览器登录(见 doc/operations.md §10)。
+# 纯协议那条路(`XIANYU_USE_BROWSER=false`)是被证明会被**账号级限流**的兜底,不推荐。
 @router.get("/api/user/smtp")
 def user_smtp_get(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return {"host": user.smtp_host or "", "port": user.smtp_port or 465,
