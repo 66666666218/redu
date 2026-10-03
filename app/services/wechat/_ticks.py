@@ -55,7 +55,7 @@ def pan_cookie_keepalive_tick(settings: Settings | None = None) -> int:
             # 迅雷：凭据是**扫码**出来的(JSON,不是 Cookie 串),约 12 小时就废;
             # 废物后采集还能跑、**转存/分享全停** —— 正是最该有人喊一声的时候
             "xunlei": "迅雷凭据约 12 小时过期,请重新扫码:在项目根目录跑 "
-                      "`python tools/xl_qr_login.py`(会弹浏览器,用迅雷 App 扫一下)"}
+                      "`python scripts/xunlei_login.py`(会弹浏览器,用迅雷 App 扫一下)"}
 
     def _probe(platform: str, cookie: str) -> str:
         """ok / auth(凭据已死,要人工换) / error(网络或风控,不该报"Cookie 失效")。"""

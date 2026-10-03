@@ -5,7 +5,7 @@
 **签名是纯函数**(MD5 迭代盐值),不是真机签名,所以 Python 能 1:1 复刻。
 
 **本项目实际走的凭据路线**(2026-10-02 实测,比 urldb 更省事):
-  1. **扫码登录一次**(`tools/xl_qr_login.py`)→ 从网页版 localStorage 抽
+  1. **扫码登录一次**(`scripts/xunlei_login.py`)→ 从网页版 localStorage 抽
      `access_token`(有效期 **12 小时**)、`refresh_token`、`captcha_token`、`device_id`;
   2. **access_token 过期** → 用 `refresh_token` 换新的:⚠️ **client_id 必须用网页版那个**
      (`Xqp0kJBXWhwaTpB6`,就是 localStorage 里 `credentials_<clientId>` 的那串),

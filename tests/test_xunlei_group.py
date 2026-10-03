@@ -655,6 +655,26 @@ class TestTransferFailuresSurface:
         assert row.status == "partial"
         assert "部分转存失败" in row.detail
 
+    def test_disk_full_is_not_reported_as_success(self, session, monkeypatch) -> None:
+        """⚠️ 盘满时 `failed=0`(那批行**保持 pending** 等清空间),但它**绝不是"成功"** ——
+        它意味着"有货但搬不进去"。旧写法会让它落进 success 分支,于是"盘满停摆"和
+        "今天群里真没新资源"又长得一样。"""
+        import app.db as appdb
+        monkeypatch.setattr(appdb, "get_session_local",
+                            lambda: sessionmaker(bind=session.get_bind()))
+        from app.services.tenant_base import _record_run  # noqa: F401
+        monkeypatch.setattr(xg, "sync_group_shares",
+                            lambda *a, **k: {"status": "ok", "groups": 9, "new": 3})
+        monkeypatch.setattr(xg, "transfer_pending",
+                            lambda *a, **k: {"status": "disk_full", "picked": 0, "ok": 0,
+                                             "failed": 0, "skipped": 0,
+                                             "message": "转存返回空间不足", "items": []})
+        monkeypatch.setattr(xg, "push_new_shares", lambda *a, **k: None)
+        xg.xunlei_group_tick(self._S())
+        row = session.scalars(select(RunRecord).where(RunRecord.kind == "xunlei_group")
+                              .order_by(RunRecord.id.desc())).first()
+        assert row.status == "failed" and "盘满" in row.detail
+
     def test_no_failures_stays_success(self, session, monkeypatch) -> None:
         import app.db as appdb
         monkeypatch.setattr(appdb, "get_session_local",

@@ -542,6 +542,7 @@ def xunlei_group_tick(settings=None) -> int:
                 # 于是"群列表拉不到(凭据失效)"被记成"群0 新0 转存0",跟"今天群里真没新资源"
                 # 长得一模一样。`no_cred`/`failed` 都不算成功。
                 st = str(got.get("status") or "")
+                t_status = str(out.get("status") or "")
                 t_ok = int(out.get("ok", 0) or 0)
                 t_bad = int(out.get("failed", 0) or 0)
                 note = (f"群{got.get('groups', 0)} 新{got.get('new', 0)} "
@@ -557,6 +558,10 @@ def xunlei_group_tick(settings=None) -> int:
                 if st in ("failed", "no_cred"):
                     _record_run(db, uid, "xunlei_group", "failed",
                                 f"{st}: {str(got.get('message') or '')[:140]} {note}")
+                elif t_status == "disk_full":
+                    # 盘满 → 整批停下(行保持 pending,清空间后自动继续)。**但这不是"成功"**:
+                    # 它意味着"有货但搬不进去",不报出来就会以为一切正常。
+                    _record_run(db, uid, "xunlei_group", "failed", f"盘满暂停: {why} {note}")
                 elif t_bad and not t_ok:
                     _record_run(db, uid, "xunlei_group", "failed", f"转存全失败: {why} {note}")
                 elif t_bad:

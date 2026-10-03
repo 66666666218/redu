@@ -1691,7 +1691,7 @@ GET `/api/admin/health`(perm `logs.view`)→ 各平台最近采集状态 + 数�
 > 存进用户迅雷盘并生成我方分享链,慢且占空间,默认每轮 5 条)。
 >
 > ⚠️ `/api/xunlei/transfer` 会**真实写入用户的迅雷网盘**。
-> **前置条件**:需先在「Cookie 管理」里配置迅雷凭据(扫码登录,见 `tools/xl_qr_login.py`)。
+> **前置条件**:需先在「Cookie 管理」里配置迅雷凭据(扫码登录,见 `scripts/xunlei_login.py`)。
 
 ### 21.1 群列表
 

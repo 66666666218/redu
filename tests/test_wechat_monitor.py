@@ -4253,7 +4253,7 @@ def test_pan_cookie_keepalive_covers_xunlei(session, monkeypatch) -> None:
     uid, kind, title, detail = captured[0]
     assert uid == 1 and kind == "wechat"
     assert "迅雷" in title and "凭据" in title            # 迅雷不是 Cookie,别乱写
-    assert "xl_qr_login" in detail                        # 要给出**可执行**的补救动作
+    assert "xunlei_login" in detail                        # 要给出**可执行**的补救动作
     assert "采集不受影响" in detail                        # 说清影响面(别让人以为全停了)
 
 
