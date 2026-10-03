@@ -201,10 +201,21 @@ class BaiduPanClient:
         raise BaiduPanError(f"创建分享失败({last})")
 
     def keepalive(self) -> bool:
-        """登录态检查: 失败抛 BaiduPanAuthError。"""
-        r = self._browser().get(f"{PAN_API}/api/loginStatus",
+        """登录态检查:**查的是"网页会话"**,失败抛 `BaiduPanAuthError`。
+
+        ⚠️ **不能用 `/api/loginStatus` 判**(2026-10-04 实测踩到):一份**只有 `BDUSS`、
+        没有 `STOKEN`** 的"半登录"Cookie,`loginStatus` 照样回 `errno:0` ——
+        于是体检说"正常",而**转存(`/share/transfer`)与分享页解析全失败**:
+        这就是典型的**假成功**,而且它让"Cookie 失效"的告警**永远等不到**。
+
+        真正决定能不能转存的是**网页会话**,所以改探 `/api/quota`
+        (未登录回 `errno:-6 用户未登录`)。错误文案也写清**该去哪、缺什么**。
+        """
+        r = self._browser().get(f"{PAN_API}/api/quota",
                                 params={"clienttype": "0", "web": "1"}, timeout=self.timeout)
         errno = r.json().get("errno", -1)
         if errno != 0:
-            raise BaiduPanAuthError("百度网盘 Cookie 已失效,请重新复制")
+            raise BaiduPanAuthError(
+                "百度网盘**网页登录态**失效(常见原因:Cookie 里缺 `STOKEN`)—— "
+                "请打开 pan.baidu.com 确认已登录后,重新复制**整份** Cookie")
         return True

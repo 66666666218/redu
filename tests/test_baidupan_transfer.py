@@ -9,7 +9,56 @@ import os
 os.environ.setdefault("JWT_SECRET", "test_secret_0123456789abcdef0123456789abcdef")
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 
-from app.services.baidupan_transfer import _looks_like_auth_issue, _transfer_error  # noqa: E402
+import pytest  # noqa: E402
+
+from app.services.baidupan_transfer import (  # noqa: E402
+    BaiduPanAuthError,
+    BaiduPanClient,
+    _looks_like_auth_issue,
+    _transfer_error,
+)
+
+
+class _FakeSession:
+    """假会话:记下请求过的 URL,固定回一份 JSON。"""
+
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+        self.urls: list[str] = []
+
+    def get(self, url, **kw):
+        self.urls.append(url)
+        payload = self.payload
+        return type("R", (), {"json": lambda self: payload, "status_code": 200})()
+
+
+def _client_with(payload: dict) -> tuple[BaiduPanClient, _FakeSession]:
+    c = BaiduPanClient("BDUSS=x")
+    sess = _FakeSession(payload)
+    c._browser = lambda: sess          # type: ignore[method-assign]
+    return c, sess
+
+
+def test_keepalive_probes_the_web_session_not_login_status() -> None:
+    """⚠️ **必须探网页会话**(`/api/quota`),不能探 `/api/loginStatus`(2026-10-04 实测)。
+
+    一份**只有 `BDUSS`、没有 `STOKEN`** 的"半登录" Cookie,`loginStatus` 照样回 `errno:0` ——
+    体检说"正常",而转存和分享页解析全挂。**这就是假成功,还让 Cookie 失效的告警永远等不到。**
+    所以这条测试钉的是"**打的是哪个端点**":谁把它改回 `loginStatus`,这里就红。
+    """
+    c, sess = _client_with({"errno": 0})
+    assert c.keepalive() is True
+    assert sess.urls and "/api/quota" in sess.urls[0], f"探错端点了:{sess.urls}"
+    assert not any("loginStatus" in u for u in sess.urls)
+
+
+def test_keepalive_raises_actionable_message_on_half_login() -> None:
+    """半登录(只要 BDUSS 没有 STOKEN)必须抛,且文案要**说清该去哪、缺什么**。"""
+    c, _ = _client_with({"errno": -6, "errmsg": "用户未登录"})
+    with pytest.raises(BaiduPanAuthError) as ei:
+        c.keepalive()
+    msg = str(ei.value)
+    assert "STOKEN" in msg and "pan.baidu.com" in msg, f"文案不可操作:{msg}"
 
 
 def test_auth_expiry_is_recognized_from_show_msg() -> None:
