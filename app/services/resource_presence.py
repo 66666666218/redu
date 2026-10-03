@@ -181,6 +181,7 @@ def push_items(items: list[dict], settings) -> bool:
     sent_any = False
     for plat in sorted({it["platform"] for it in items}):
         group = [it for it in items if it["platform"] == plat]
+        # 内容卡:未配专属群的平台回落**客户主群**是对的(同上,管理群只接维护信息)
         hook = webhook_for(settings, PLATFORMS.get(plat, {}).get("section", ""))
         if not hook:
             continue

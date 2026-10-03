@@ -450,6 +450,8 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin") -> bool:
     from app.services.feishu_client import webhook_for
 
     section = (PLATFORMS.get(platform) or {}).get("section", "douhot")
+    # 抖音线索也是**内容卡** → 未配专属群时落客户群是对的。
+    # (末尾那个 `or feishu_webhook_admin` 是够不到的死代码:主群已配时 webhook_for 永不返回空串)
     webhook = webhook_for(settings, section) or getattr(settings, "feishu_webhook_admin", "")
     if not webhook:
         logger.info("抖音线索:未配飞书 webhook,跳过推送")

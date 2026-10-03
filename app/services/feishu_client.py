@@ -72,6 +72,7 @@ def webhook_for(settings: object, section: str = "") -> str:
     return platform_webhook(settings, section) or settings.feishu_webhook
 
 
+
 def webhooks_for(settings: object, section: str = "") -> list[str]:
     """该板块消息要推送的**所有**群(主群 + 专属群,去重)。
 

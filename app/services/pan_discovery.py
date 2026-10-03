@@ -223,6 +223,8 @@ def push_items(items: list[dict], settings) -> bool:
         return False
     from app.services.feishu_client import webhook_for
 
+    # 这是**内容卡**(资源 + 可用链,给客户用)→ 未配专属群时回落**客户主群**是对的。
+    # (2026-10-03 曾误改成"落管理群",用户纠正:管理群只接维护信息、内容就该进客户群。)
     webhook = webhook_for(settings, "zhihu")
     if not webhook:
         return False
