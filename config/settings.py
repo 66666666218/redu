@@ -317,6 +317,15 @@ class Settings(BaseSettings):
     #    "该来没来"本身就是信号。作业角色 hotspot → 只在远端跑,本机不重复推。
     health_push_enabled: bool = True
     health_push_cron: str = "20 9 * * *"
+    # ③ 磁盘水位守卫(2026-10-03 全项目审查补):磁盘写满 → **整站 502**(写不进库、写不进日志),
+    #    而水位是**逐渐**涨上来的,远在崩溃之前就有征兆 —— 这是最典型"本可以预警却没预警"的故障。
+    #    每天查一次,超 `disk_warn_ratio` 推**管理员群**(运维信息,按 2026-10-01 受众分流口径);
+    #    `disk_crit_ratio` 只决定措辞级别(🔴严重/🟠偏高),不改变是否推送。
+    #    告警去重靠 `notify_incident` 的冷却门(标题里**不含数字**,否则每天比值都变、冷却形同虚设)。
+    disk_guard_enabled: bool = True
+    disk_guard_cron: str = "40 9 * * *"      # 与 health_push(9:20) 错开,别挤在一起
+    disk_warn_ratio: float = 0.85
+    disk_crit_ratio: float = 0.95
     feishu_secret: str = ""         # 机器人签名校验密钥(为空则不签名)
     own_account_names: str = "天一项目拆解"  # 自营号名单(逗号分隔):飞书推送一律脱敏为「内部号」,防自营身份暴露(2026-09-29)
     feishu_hot_rank_jump: int = 3          # 排名跳升 ≥ 该名次即实时推送

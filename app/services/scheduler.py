@@ -396,6 +396,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.xunlei_group import xunlei_group_tick
     from app.services.pan_discovery import pan_discovery_tick
     from app.services.health import health_push_tick
+    from app.services.disk_guard import disk_guard_tick
     from app.services.resource_presence import presence_tick
     from app.services.xunlei_cleanup import cleanup_tick as xunlei_cleanup_tick
     from app.services.lead_settlement import record_reminder_tick as recruit_reminder_tick
@@ -456,6 +457,10 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # 远端整机挂了这张卡就断,"该来没来"本身是信号(本机另有 peer_status 探活兜底)。
         # 角色 hotspot → 只在远端跑,本机不重复推。
         (health_push_tick, _get_settings().health_push_cron, {"minute": 20, "hour": 9}, "health_push", "hotspot"),
+        # 磁盘水位守卫(2026-10-03 全项目审查补):磁盘写满 → **整站 502**,而水位是**逐渐**涨的,
+        # 远在崩溃前就有征兆 —— 属"本可以预警却没预警"的典型。角色 **both**:两端机器各有各的盘,
+        # 各查自己的(不是"同一件事两边都推")。超阈值推管理员群,标题不含数字以免冷却门失效。
+        (disk_guard_tick, _get_settings().disk_guard_cron, {"minute": 40, "hour": 9}, "disk_guard", "both"),
         # 迅雷盘同步(2026-10-02):扫用户迅雷盘 → 新转存进来的资源自动生成我方分享链 → 入库。
         # "用口令找资源并转存"那步只有手机 App 能做(服务端搜索接口不对外 + 部分口令是群组口令),
         # 所以人工只在 App 里搜+转存,本作业接手扫盘/二次分享/入库。
