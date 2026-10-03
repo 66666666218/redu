@@ -1040,76 +1040,33 @@
 
 ---
 
-## 10. 夸克 · 分享统计(2026-09-29,拉新效果回填)
+## 10. 夸克 · 分享统计(**已停用并删除端点**,2026-10-03)
 
-> 采集夸克「我的分享」每条链接的保存/浏览数据(`share/update_list` 接口,免签名直连),
-> 落 `quark_share_stats` 表;并把保存数**精确回填**到热点建议表(`hotspot_suggestions`,
-> 按分享链接与建议 `link` 精确匹配,只回填人工未干预的行)。
-> 前置:「Cookie 管理」里配置 **quark** 平台 Cookie。
-
-### 10.1 触发一次分享统计采集
-
-- **接口名称**: 夸克分享统计采集
-- **请求方式**: POST
-- **URL 路径**: `/api/quark/shares/collect`
-- **请求参数**: 无(Cookie 取当前用户已配置的 quark Cookie)
-
-**响应示例 (200)**
-```json
-{
-  "total": 45,
-  "saved": 45,
-  "suggestions_backfilled": 0,
-  "top_saves": [
-    { "title": "四级真题及答案(2015.6-2025.12)", "save_pv": 12, "share_url": "https://pan.quark.cn/s/xxxx" }
-  ]
-}
-```
-
-> - `total`=接口返回条数;`saved`=落库条数(按 user_id+share_id 覆盖更新,幂等)
-> - `suggestions_backfilled`=本次回填热点建议行数
-> - 夸克 Cookie 失效 → HTTP 400(`夸克 Cookie 已失效…`);未配置 Cookie → HTTP 400
-
-### 10.2 查询分享统计
-
-- **接口名称**: 分享统计列表
-- **请求方式**: GET
-- **URL 路径**: `/api/quark/shares`
-- **请求参数**: 无(按当前用户隔离,按保存数降序)
-
-**响应示例 (200)**
-```json
-{
-  "total": 45,
-  "list": [
-    {
-      "share_id": "153f4345320848f6aef7e6999c2324da",
-      "title": "奶蛙快跑(先保存后使用)",
-      "share_url": "https://pan.quark.cn/s/45b1cfe8cc4c",
-      "save_pv": 0,
-      "click_pv": -1,
-      "download_pv": 0,
-      "visit_user_count": 0,
-      "file_num": 1,
-      "status": 1,
-      "audit_status": 4,
-      "path_info": "/资源测试库",
-      "share_created_at": "2026-09-26T16:11:01",
-      "captured_at": "2026-09-29T13:01:50"
-    }
-  ]
-}
-```
-
-> `click_pv=-1` 表示平台未给出该字段(语义待与 App 端人工对照确认);
-> `save_pv/click_pv/download_pv/visit_user_count` 为夸克侧原始计数。
+> ⚠️ 本节原来的两个端点 `POST /api/quark/shares/collect`、`GET /api/quark/shares`
+> **已连同 `app/api/quark.py` 一起删除**(用户决定"删端点、保留服务与只读探测脚本")。
+> **为什么**:这是"废弃链只摘了一半"的第二例(第一例是 `wechat/traffic/refresh`)——
+>   ① **采集口零触发方**:前端没有对应方法(2026-10-03 随 10 个死方法清掉),调度器里
+>      也**没有任何 quark 作业**,生产库 `quark_share_stats` 表因此**冻结在 2026-09-29 13:01**;
+>   ② **查询口零展示方**:没有任何页面读它;
+>   ③ **结算早已改道**:`settle_suggestions` 2026-09-29 起用 **`repost_gain`(盘链扩散)**
+>      做主信号,总账走**方案B 人工拉新周录**(见 §11、§21),**不再读这张表**。
+> 根因是 2026-09-29 的定案:夸克官方「分享管理」**不提供链接级转存数**,
+> `save_pv/click_pv=-1` 是平台不对外、不是"有开关没打开"。
+>
+> **保留物**(有价值、零维护成本):
+>   - `app/services/quark_share_stats.py` —— 免签名直连 `share/update_list` 的接口细节
+>     (`share_read_statues=[0]` 必带、`fr` 参与鉴权等)都写在模块说明里;
+>   - `scripts/probe_quark_share_stats.py` —— 只读探测脚本,将来夸克若开放链接级转存数可直接复现;
+>   - `quark_share_stats` 表 —— 夸克唯一一份链接级快照数据,删表要走迁移,留着零成本。
 
 ---
 
 ## 11. 热点建议 · 已发标记与回看(2026-09-29,Agent v5「预测→下注→结算」闭环)
 
 > 建议推送行带 `[# 建议ID]`;运营发货后一键标记「已发」——只有 acted 的建议 +
-> 夸克 save_pv 结算才构成 Agent 学习样本(没执行的建议不进样本,避免把"没发"误学成"发了没效果")。
+> **结算信号**才构成 Agent 学习样本(没执行的建议不进样本,避免把"没发"误学成"发了没效果")。
+> ⚠️ **结算信号 2026-09-29 起是 `repost_gain`(发文后全网新增的该文盘链记录数),
+> 不再是夸克 save_pv**(夸克不提供链接级转存数,采集链已休眠、端点 2026-10-03 删除,见 §10)。
 
 ### 11.1 标记已发/取消
 

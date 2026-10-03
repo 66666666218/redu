@@ -427,7 +427,16 @@ class QuarkShareStat(Base):
     """夸克「我的分享」统计快照(share/update_list 接口采集)。
 
     每条分享链接一行(user_id+share_id 唯一),采集时覆盖更新统计字段,
-    captured_at 记录最近一次采集时间;保存数喂给拉新效果回填闭环。
+    captured_at 记录最近一次采集时间。
+
+    ⚠️ **本表当前处于休眠(2026-10-03)**:原写"保存数喂给拉新效果回填闭环",
+    但采集口 `POST /api/quark/shares/collect` **零调用方**(前端无方法、调度器无作业),
+    生产库最后一行停在 **2026-09-29 13:01**;结算早已改道 `repost_gain`(盘链扩散)
+    + 方案B 人工周录,**不再读这张表**。路由与 `app/api/quark.py` 已删除
+    (2026-10-03 用户决定"删端点、保留服务与只读探测脚本")。
+    **表保留**:删表要走迁移、且这是夸克唯一一份链接级快照数据,留着零成本。
+    复现采集:见 `app/services/quark_share_stats.py` 的模块说明与
+    `scripts/probe_quark_share_stats.py`。
     """
 
     __tablename__ = "quark_share_stats"

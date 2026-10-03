@@ -10,6 +10,19 @@
   -1/0 = 平台不对外,并非"有开关未打开";链接级转存数当前不可得,
   本采集的价值在库存清单/失效/违规监控与将来若开放的统计回填。
 - 纪律: 只读采集、Cookie 复用 user_cookies 配置、失败抛语义化异常。
+
+**⚠️ 本服务当前没有 HTTP 入口(2026-10-03 用户决定)**:
+原有两个路由 `POST /api/quark/shares/collect`、`GET /api/quark/shares` 已连同
+`app/api/quark.py` 整个删除。原因和"阅读量采样"是同一类 —— **废弃链只摘了一半**:
+  - 采集口**没有任何触发方**:前端没有 `api.js` 方法(2026-10-03 随 10 个死方法清掉)、
+    调度器里没有任何 quark 作业 → 生产库里 `quark_share_stats` 表**冻结在 2026-09-29 13:01**;
+  - 查询口**没有任何展示方**:前端无页面读它;
+  - 更关键的是**结算已经改道**:`hotspot_agent.settle_suggestions` 2026-09-29 起用
+    **`repost_gain`(盘链扩散)** 做结算主信号,**不再读这张表**。
+用户选定"**删掉端点、保留本服务与只读探测脚本**" —— 反查出来的接口细节(签名免签、
+`share_read_statues=[0]` 必带等)是有价值的沉淀,将来若夸克开放链接级转存数,
+靠 `scripts/probe_quark_share_stats.py --cookie-file <文件>` 只读探测即可复现,
+不必先养两条没人走的 HTTP 路。
 """
 from __future__ import annotations
 

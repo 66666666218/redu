@@ -36,8 +36,10 @@ def mark_acted(sid: int, payload: ActedIn | None = None,
                user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """一键标记某条建议「已发」(下注)。
 
-    只有 acted 的建议 + 夸克 save_pv 结算,才构成 Agent 的"预测→结算"学习样本;
+    只有 acted 的建议 + **结算信号**,才构成 Agent 的"预测→结算"学习样本;
     没执行的建议不进样本(否则把"没发"误学成"发了没效果")。
+    ⚠️ 结算信号 2026-09-29 起是 **`repost_gain`(盘链扩散)**,不再是夸克 save_pv
+    (夸克不提供链接级转存数,采集链已休眠、端点 2026-10-03 删除)。见 `settle_suggestions`。
     """
     row = db.scalar(select(HotspotSuggestion).where(
         HotspotSuggestion.id == sid, HotspotSuggestion.user_id == user.id))
