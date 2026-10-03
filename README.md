@@ -14,7 +14,7 @@
 - **AI 改写** 对标文一键转原创可发布稿(≈¥0.01/篇)
 - **自动发现新对标号** 内容交叉提取 + 搜狗搜索 + LLM 评级过滤
 
-> 开发文档:`doc/dev.md` · 接口规范:`doc/API.md` · **外部接口速查:`doc/外部接口速查.md`** · 变更日志:`CHANGELOG`
+> 开发文档:`doc/dev.md` · 接口规范:`doc/API.md` · **外部接口速查:`doc/外部接口速查.md`** · **能力清单:`doc/能力清单.md`** · 变更日志:`CHANGELOG`
 
 ## 技术栈
 - 后端:FastAPI · SQLAlchemy · MySQL · JWT · requests · APScheduler · SMTP

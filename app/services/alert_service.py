@@ -449,7 +449,18 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
                     if FeishuClient(wh, settings.feishu_secret).send(
                             f"✅ 采集已恢复 · 用户#{uid} 板块[{kind}]——此前「持续失败」告警作废,以本条为准"):
                         _ok += 1
-                db.delete(row)
+                # ⚠️ **必须按这对 (uid, kind) 重新查,不能沿用上面扫描循环遗留的 `row`**
+                # (2026-10-04 修,由作业心跳抓出):
+                # 那个 `row` 最后一次赋值可能是 **None**(最后一对恰好没有告警行),
+                # 于是 `db.delete(None)` 抛 `UnmappedInstanceError: Class 'builtins.NoneType'
+                # is not mapped` —— **整个 `check_collect_failures` 当场崩掉**,
+                # 也就是"采集失败告警"这条链**根本没在工作**(而崩溃发生在最常见的分支:
+                # 有恢复、当前没坏)。多对恢复时它还会反复删同一行。历史遗留变量是祸根。
+                stale = db.scalar(select(FeishuAlert).where(
+                    FeishuAlert.section == "collect_fail", FeishuAlert.user_id == uid,
+                    FeishuAlert.title == kind))
+                if stale is not None:
+                    db.delete(stale)
             if _ok:
                 db.commit()
                 logger.info("采集恢复确认推送,条数=%s", _ok)
