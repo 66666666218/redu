@@ -92,8 +92,25 @@ def _rank_series(db: Session, user_id: int) -> dict[str, dict[str, list[int]]]:
             for sec, per in out.items()}
 
 
+# 增速两档的比例:原硬编码是 30(≥50%)/ 40(≥100%)。权重表里只有 `velocity` 一个键
+# (它对应"满分档"),温和档按这个比例折算 —— 保持两档的相对关系**不随学习漂移**
+# (否则学习只调了满分档,温和档还是常数,两档会越走越近甚至反超)。
+_VELOCITY_MILD_RATIO = 0.75
+
+
 def detect_signals(db: Session, user_id: int, settings: Settings) -> list[dict]:
-    """全板块信号评分(纯函数式,可单测)。返回 [{board, kw, norm, score, parts, latest}] 按分排序。"""
+    """全板块信号评分(纯函数式,可单测)。返回 [{board, kw, norm, score, parts, latest}] 按分排序。
+
+    ⚠️ **分值是"可学习权重",不是写死的常数**(2026-10-03 修)。
+    每一项都从 `agent_learning.load_weights()` 取(读 `system_config.agent_weights`,
+    没有记录/键缺失时回落 `DEFAULT_WEIGHTS`)。此前这里硬编码 40/30/20/25/15/15/30 ——
+    而 `agent_learning` 每天回测、把调好的权重**存进库却没有任何消费者**,
+    于是"自学习"名不副实(**学而不改**):权重算了、落库了,打分永远用常数。
+    现在权重真正参与打分 —— 命中率高的信号分值上调、低的下调(幅度 ±30%,见 agent_learning)。
+    """
+    from app.services.agent_learning import load_weights
+
+    w = load_weights(db)
     signals: list[dict] = []
     for sec, series in _board_series(db, user_id).items():
         for kw, pts in series.items():
@@ -124,10 +141,10 @@ def detect_signals(db: Session, user_id: int, settings: Settings) -> list[dict]:
                 v_now = (latest - prev) / prev * 100
                 if v_now >= 100:
                     parts.append(f"{prev:.0f}→{latest:.0f}(+{v_now:.0f}%)")
-                    score += 40
+                    score += w["velocity"]
                 elif v_now >= 50:
                     parts.append(f"{prev:.0f}→{latest:.0f}(+{v_now:.0f}%)")
-                    score += 30
+                    score += round(w["velocity"] * _VELOCITY_MILD_RATIO)
                 elif v_now <= -30:
                     parts.append(f"回落{v_now:.0f}%({prev:.0f}→{latest:.0f})")
             # ② 加速:增速比再升 ≥20 个百分点(起势最早的标志)
@@ -135,20 +152,20 @@ def detect_signals(db: Session, user_id: int, settings: Settings) -> list[dict]:
                 v_prev = (prev - values[-3]) / values[-3] * 100 if prev is not None else 0
                 if v_now is not None and v_now - v_prev >= 20 and v_now >= 20:
                     parts.append("加速上涨")
-                    score += 20
+                    score += w["accel"]
             # ③ 新上榜:近 24h 首次出现且样本 ≤2(兼容 datetime/字符串时间戳)
             first_ts = _to_dt(pts[0][0])
             if len(values) <= 2 and first_ts and datetime.now() - first_ts <= timedelta(hours=24):
                 parts.append("新上榜")
-                score += 25
+                score += w["new_entry"]
             # ④ 反复:连续出现 ≥3 轮
             if len(values) >= 3:
                 parts.append(f"连续{len(values)}轮")
-                score += 15
+                score += w["repeat"]
             # ⑤ 量级
             if latest >= 200:
                 parts.append(f"量级{latest:.0f}")
-                score += 15
+                score += w["volume"]
             if not parts:
                 continue
             signals.append({"board": sec, "kw": kw, "norm": n, "score": min(score, 100),
@@ -163,7 +180,7 @@ def detect_signals(db: Session, user_id: int, settings: Settings) -> list[dict]:
         jump = ranks[-2] - ranks[-1]  # 名次前移为正
         if jump >= 3:
             s["parts"].append(f"排名↑{jump}")
-            s["score"] = min(100, s["score"] + 15)
+            s["score"] = min(100, s["score"] + w["rank_jump"])
 
     # ⑥ 跨板块联想:同名/包含出现在 ≥2 板块 → 共振加成 +30
     for i, s1 in enumerate(signals):
@@ -175,7 +192,7 @@ def detect_signals(db: Session, user_id: int, settings: Settings) -> list[dict]:
                 for s in (s1, s2):
                     if "共振" not in s["parts"]:
                         s["parts"].append("共振")
-                        s["score"] = min(100, s["score"] + 30)
+                        s["score"] = min(100, s["score"] + w["resonance"])
                         s["boards"] = sorted({s1["board"], s2["board"]})
     return sorted(signals, key=lambda x: -x["score"])
 

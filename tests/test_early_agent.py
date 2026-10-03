@@ -292,3 +292,79 @@ def test_tick_all_users_skips_disabled(session, st, monkeypatch) -> None:
     stub = type("S", (), {"agent_enabled": True})()
     assert early_agent.agent_tick_all_users(settings=stub) == 0
     assert seen == [1]  # user2 已禁用 → 不进入枚举
+
+
+# ---------------------------------------------------------------- 学习闭环(2026-10-03)
+
+def test_detect_signals_uses_learned_weights(session, st) -> None:
+    """⚠️ **分值是"可学习权重",不是写死的常数**(2026-10-03 修)。
+
+    `agent_learning` 每天回测、把调好的权重存进 `system_config(agent_weights)`,
+    但此前**没有任何消费者** —— `detect_signals` 用的是硬编码 40/20/15/15,
+    于是"自学习"名不副实(**学而不改**)。这条钉住:同一组热度数据,权重一变分值必须跟着变。
+
+    基线(默认权重)= 3 轮 100→150→400 → 增速 40 + 加速 20 + 连续 15 + 量级 15 = 90。
+    默认值刻意与旧常数一致,所以**不上权重时行为完全不变**(向后兼容)。
+    """
+    import json
+
+    from app.db.models import SystemConfig
+
+    for i, h in enumerate([100, 150, 400]):
+        _weibo(session, "某游戏新版本", h, hours_ago=(3 - i) * 2)
+    session.commit()
+    assert next(x for x in early_agent.detect_signals(session, 1, st)
+                if x["kw"] == "某游戏新版本")["score"] == 90
+
+    session.add(SystemConfig(key="agent_weights", value=json.dumps({
+        "velocity": 52, "accel": 14, "new_entry": 25,
+        "repeat": 15, "volume": 15, "resonance": 30, "rank_jump": 15})))
+    session.commit()
+    s = next(x for x in early_agent.detect_signals(session, 1, st) if x["kw"] == "某游戏新版本")
+    assert s["score"] == 52 + 14 + 15 + 15          # 40+20+15+15 → 52+14+15+15
+
+
+def test_learned_weights_round_trip_into_scoring(session, st) -> None:
+    """**闭环端到端**:`agent_learning.save_weights()` 写下的权重,`detect_signals()` 必须读到。
+
+    这条就是"自学习闭环"的守卫 —— 此前 `load_weights` 只在 `agent_learning` 内部
+    被调用一次,写入方和读取方之间是断的。
+    """
+    from app.services import agent_learning as al
+
+    for i, h in enumerate([100, 150, 400]):
+        _weibo(session, "某游戏新版本", h, hours_ago=(3 - i) * 2)
+    session.commit()
+    w = dict(al.DEFAULT_WEIGHTS)
+    w["volume"] = 20          # 15→20;总量 40+20+15+20=95,不触发 min(score,100) 截顶
+    al.save_weights(session, w)
+    s = next(x for x in early_agent.detect_signals(session, 1, st) if x["kw"] == "某游戏新版本")
+    assert s["score"] == 40 + 20 + 15 + 20
+
+
+def test_velocity_mild_tier_tracks_weight(session, st) -> None:
+    """温和档(增速 ≥50%)按 `velocity × 0.75` 折算。
+
+    权重表里只有 `velocity` 一个键(对应满分档 40),硬编码时代温和档是 30 —— 若只让
+    满分档跟着学、温和档留常数,两档会越走越近甚至反超。这里用**差值**断言,
+    免得依赖"这一组数据还触发了哪些别的信号"。
+    """
+    import json
+
+    from app.db.models import SystemConfig
+
+    # 100→170 = +70%(落温和档);首个样本放到 30 小时前,避开"新上榜"
+    for i, h in enumerate([100, 170]):
+        _weibo(session, "某游戏新版本", h, hours_ago=(2 - i) * 30)
+    session.commit()
+
+    def _score() -> int:
+        return next(x for x in early_agent.detect_signals(session, 1, st)
+                    if x["kw"] == "某游戏新版本")["score"]
+
+    base = _score()
+    session.add(SystemConfig(key="agent_weights", value=json.dumps({
+        "velocity": 60, "accel": 20, "new_entry": 25,
+        "repeat": 15, "volume": 15, "resonance": 30, "rank_jump": 15})))
+    session.commit()
+    assert _score() - base == round(60 * 0.75) - round(40 * 0.75)   # 45 - 30 = 15
