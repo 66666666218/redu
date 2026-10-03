@@ -394,6 +394,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.pan_discovery import pan_discovery_tick
     from app.services.health import health_push_tick
     from app.services.resource_presence import presence_tick
+    from app.services.xunlei_cleanup import cleanup_tick as xunlei_cleanup_tick
 
     jobs = [
         # 阅读量采样(traffic_tick)已停用:2026-09-29 用户决策放弃 dajiala(不充值),
@@ -456,6 +457,10 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # 客户端唯一的"口令→shareID"那步,群组替我们做了。两步:采集登记(纯 HTTP 读,
         # 秒级、可高频) + **限量**转存(转存慢且占盘,每轮默认 5 条)。
         (xunlei_group_tick, _get_settings().xunlei_group_cron, {"minute": "*/20"}, "xunlei_group", "wechat"),
+        # 过期转存清理(2026-10-03 用户口径:"一个星期内没有人再发了就可以删除")。
+        # ⚠️ **默认关**(`xunlei_cleanup_enabled`),开了才动手;动作是**移入回收站**不是永久删,
+        # 且单轮限量。它**解决不了"盘快满"** —— 实测本流水线在盘里只有 ~0.9TB(见体检方案)。
+        (xunlei_cleanup_tick, _get_settings().xunlei_cleanup_cron, {"minute": 30, "hour": 3}, "xunlei_cleanup", "wechat"),
         # Telegram 频道资源源(2026-10-01):公众号之外的第二路盘链 feed。
         # 默认关闭——本机直连 t.me 不通;能出网的机器把 TG_ENABLED 打开即可(见 settings)。
         (tg_collect_tick, _get_settings().tg_cron, {"minute": "*/30"}, "tg_collect", "both"),

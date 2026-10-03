@@ -293,6 +293,15 @@ class Settings(BaseSettings):
     #   (`Chromium distribution 'chrome' is not found`),所以给它单开一条 API 路。
     presence_platforms: str = "xiaohongshu,kuaishou,tieba,bilibili"
     presence_names: int = 3                             # 探几个资源名(词越多越慢)
+    # ---- 过期转存清理(2026-10-03 用户口径)----
+    # "可以定期清理久远资源,如果**一个星期内没有人再发了**就可以删除了" —— 见
+    # `app/services/xunlei_cleanup.py`(判据:转存时间 / 群分享 / 线索 / 发现链 取最新那个)。
+    # ⚠️ **默认关**:删盘难逆,先让人看过清单(`GET /api/xunlei/cleanup/plan`)再开。
+    # ⚠️ 它**解决不了"盘快满"**:实测本流水线在盘里只有 ~0.9TB,配额 24TB 的大头在别处。
+    xunlei_cleanup_enabled: bool = False
+    xunlei_cleanup_days: int = 7                        # 闲置超过这么多天视为过期
+    xunlei_cleanup_max_per_run: int = 20                # 单轮最多移入回收站几个(接口无批量)
+    xunlei_cleanup_cron: str = "30 3 * * *"             # 每天 03:30(避开 04:00 那波重活)
     # ---- 跨实例健康可见(2026-10-03)----
     # 背景:本机(wechat)与远程(hotspot)**数据库各自独立**,微博/抖音/百度热榜归远程跑,
     # 本机只知道它们"数据停在某天",分不清是**远端整机挂了**还是**那些源本身没更新**。

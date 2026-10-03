@@ -100,3 +100,30 @@ def xunlei_quota(user: User = Depends(get_current_user)):
             "usage_text": f"{info['usage'] / gb / 1024:.2f}TB",
             "limit_text": f"{info['limit'] / gb / 1024:.2f}TB",
             "full": info["ratio"] >= 0.9}
+
+
+@router.get("/api/xunlei/cleanup/plan")
+def xunlei_cleanup_plan(days: int = 7, user: User = Depends(get_current_user),
+                        db: Session = Depends(get_db)):
+    """**只看不删**:列出哪些转存文件夹已"一周没人再发"(用户口径 2026-10-03)。
+
+    每个文件夹给出 `last_seen` 与**判据**(转存时间 / 外部又有人发),便于人工核对其合理性。
+    ⚠️ 目录返回空时 `error` 会说明"可能是真为空、也可能是凭据/网络失败"(迅雷接口不区分)。
+    """
+    from app.services import xunlei_cleanup
+
+    return xunlei_cleanup.plan(db, user.id, days=max(1, min(int(days), 90)))
+
+
+@router.post("/api/xunlei/cleanup")
+def xunlei_cleanup_run(days: int = 7, dry_run: bool = True,
+                       user: User = Depends(get_current_user),
+                       db: Session = Depends(get_db)):
+    """执行清理:**移入回收站**(可恢复,非永久删)。
+
+    `dry_run=false` 才真动手 —— 默认预览,删盘是难逆操作,不该被一个误点的 POST 触发。
+    """
+    from app.services import xunlei_cleanup
+
+    return xunlei_cleanup.run_cleanup(db, user.id, days=max(1, min(int(days), 90)),
+                                      dry_run=bool(dry_run))
