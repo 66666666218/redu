@@ -50,3 +50,18 @@ def test_weekly_review_sections(session) -> None:
     assert "扩散为 0" in text                          # 行动提示(降权观察)
     # 无数据用户不炸
     assert "【执行概况】" in build_weekly_review(session, 99, days=7)
+
+
+def test_review_leads_with_one_line_conclusion(session) -> None:
+    """⚠️ **一句话结论要在最上面**(2026-10-03 用户口径:"推送是为了用户更好总结")。
+
+    周报本身就是总结,但结论原来埋在**最下面第四节** —— 提到标题下,一眼就能拿去用/转述。
+    """
+    from app.services.weekly_review import build_weekly_review
+
+    text = build_weekly_review(session, 1)
+    lines = text.splitlines()
+    assert lines[0].startswith("📊")
+    assert lines[1].startswith("👉"), f"第二行应该是结论,实际是:{lines[1][:40]!r}"
+    # 样本少时也要给出**可执行的下一步**,而不是空着
+    assert "样本" in lines[1] or "扩散" in lines[1] or "同行" in lines[1]

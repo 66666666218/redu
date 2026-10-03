@@ -424,15 +424,18 @@ def list_group_shares(session, user_id: int, status: str = "", limit: int = 200)
 # ---------------------------------------------------------------- 推送
 
 def push_new_shares(items: list[dict], settings) -> bool:
-    """转存成功的群资源推飞书。
+    """转存成功的群资源推飞书 —— **客户群**(主群)。
 
     版式与公众号推送**一致**(2026-10-02 用户口径"格式按照公众号的格式"):
-    **四列网格** —— 来源群 / 资源 / 我方分享链,不靠空格对齐。
+    **四列网格** —— 资源 / 我方分享链,不靠空格对齐。
+
+    ⚠️ **目的地(2026-10-03 用户口径)**:"**内容是给用户看的,推客户群就行;管理群职责是
+    接受维护的信息**。" 这张卡是**内容**(资源 + 可直接用的链),所以走**主群** ——
+    此前推管理员群是错的。运营侧要看的是另一件事(哪条被闸门挡下/失败),那走 `push_ops_note`。
     """
     if not items:
         return False
-    webhook = (getattr(settings, "feishu_webhook_admin", "") or
-               getattr(settings, "feishu_webhook", ""))
+    webhook = str(getattr(settings, "feishu_webhook", "") or "").strip()
     if not webhook:
         return False
 
@@ -441,8 +444,10 @@ def push_new_shares(items: list[dict], settings) -> bool:
 
     brand = (getattr(settings, "brand_name", "") or "").strip()
     elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
-        f"新到 **{len(items)}** 个资源(已归入「"
-        f"{getattr(settings, 'xunlei_transfer_parent', '') or '最全文件'}」):"}},
+        # **结论先行**(用户口径"推送是为了用户更好总结"):先说"这批是什么、能直接干什么",
+        # 再上列表 —— 光甩一张表,看的人还要自己数、自己猜能不能用。
+        f"**本批 {len(items)} 个资源,已全部转存并生成分享链,点开即用。**\n"
+        f"已归入「{getattr(settings, 'xunlei_transfer_parent', '') or '最全文件'}」。"}},
         # ⚠️ **不列来源群**:那是**别人的群名**,卡片是发到客户群看的(2026-10-02 用户口径
         # "不要带别人的关键词")—— 露出别人的群等于把人往别人那儿送
         _col_set_row([("**资源**", 6), ("**链接**", 4)], grey=True)]
@@ -501,6 +506,25 @@ def xunlei_group_tick(settings=None) -> int:
                 else:
                     _record_run(db, uid, "xunlei_group", "success", note)
                 db.commit()
+                # 🔔 **内部版 → 管理群**(2026-10-03 用户口径:"内容推客户群,管理群推真正的内部消息"):
+                # 内容卡(`push_new_shares`)已去客户群,但"**哪个群拉不到 / 哪条被闸门挡下 /
+                # 哪条转存失败**"是**维护信息** —— 运营得知道,客户不该知道。
+                # ⚠️ **只在真有需处理项时才推**:否则每 20 分钟一条,又变噪音被无视。
+                ops_bits = []
+                if got.get("failed_groups"):
+                    ops_bits.append(f"{len(got['failed_groups'])} 个群拉取失败")
+                if out.get("skipped"):
+                    ops_bits.append(f"{out['skipped']} 条被闸门挡下(泛化大包/盘快满)")
+                if out.get("failed"):
+                    ops_bits.append(f"{out['failed']} 条转存失败")
+                if ops_bits:
+                    from app.services import alert_service
+
+                    alert_service.notify_incident(
+                        db, uid, "pan", "迅雷群采集:本轮有需处理的项",
+                        "；".join(ops_bits) + f"(本轮成功转存 {out.get('ok', 0)} 条)",
+                        settings=settings, push_feishu=True)
+                    db.commit()
             except Exception as exc:  # noqa: BLE001 - 单用户失败不影响其余
                 db.rollback()
                 logger.exception("迅雷群采集失败 user=%s", uid)

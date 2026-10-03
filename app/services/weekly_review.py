@@ -101,6 +101,20 @@ def build_weekly_review(session: Session, user_id: int, days: int = 7) -> str:
     if not hot and not settled:
         lines.append("  · 本周样本少:先按「热点建议」页执行几条,系统自会积累复盘数据")
     lines.append(nl + "(口径:扩散=盘链全网转存增量;金矿=多号同发验证;全自动,无需人工录入)")
+    # ⑤ **一句话结论放顶部**(2026-10-03 用户口径:"推送是为了用户更好总结")。
+    # 周报本身就是总结,但**结论埋在最下面第四节** —— 提到标题下,一眼就能拿去用/转述。
+    bits: list[str] = []
+    if top:
+        bits.append(f"扩散最好的是「{str(top[0].keyword or '')[:14]}」+{int(top[0].repost_gain or 0)}")
+    elif settled:
+        bits.append("已发建议本周扩散都为 0")
+    else:
+        bits.append("本周还没有结算样本")
+    if hot:
+        t0 = str((hot[0]["titles"] or [""])[0])[:14]
+        unt = [r for r in hot if not r["my_link"]]
+        bits.append(f"同行在猛推「{t0}」等 {len(hot)} 条" + (f",其中 {len(unt)} 条还没转存" if unt else ""))
+    lines.insert(1, "👉 " + "；".join(bits) if bits else "👉 本周样本少,先按建议执行几条,系统自会积累复盘数据")
     return nl.join(lines)
 
 

@@ -411,3 +411,80 @@ def test_tick_records_no_cred_as_failed(session, monkeypatch) -> None:
     xg.xunlei_group_tick()
     runs = session.scalars(select(RunRecord).where(RunRecord.kind == "xunlei_group")).all()
     assert len(runs) == 1 and runs[0].status == "failed"
+
+
+# ---------------------------------------------------------------- 推送目的地(2026-10-03 用户口径)
+
+class _FakeFeishu:
+    last_webhook = ""
+    last_card = None
+
+    def __init__(self, webhook, secret="") -> None:
+        _FakeFeishu.last_webhook = webhook
+
+    def send_card(self, card: dict) -> bool:
+        _FakeFeishu.last_card = card
+        return True
+
+
+class _S:
+    feishu_webhook = "CUSTOMER"
+    feishu_webhook_admin = "ADMIN"
+    feishu_secret = ""
+    brand_name = "念飞思雪"
+    xunlei_transfer_parent = "最全文件"
+
+
+def test_new_shares_card_goes_to_customer_group(monkeypatch) -> None:
+    """⚠️ **内容卡走客户群,不是管理群**(2026-10-03 用户口径:
+
+    "5个平台卡片推到管理群推的是什么?如果是内容,推客户群里面就行;管理群职责是接受维护的信息")。
+    这张卡是**资源 + 可直接用的链** = 内容 → 客户群。以前推管理群是错的。
+    """
+    from app.services import feishu_client as fc
+    from app.services import xunlei_group as xg
+
+    monkeypatch.setattr(fc, "FeishuClient", _FakeFeishu)
+    ok = xg.push_new_shares([{"title": "某资源", "share_url": "https://p/s/X", "code": "abcd"}], _S())
+    assert ok and _FakeFeishu.last_webhook == "CUSTOMER"
+
+
+def test_new_shares_card_leads_with_conclusion(monkeypatch) -> None:
+    """**结论先行**(用户口径"推送是为了用户更好总结"):先说这批是什么、能不能直接用,
+
+    再上列表 —— 光甩一张表,看的人还要自己数、自己猜。
+    """
+    from app.services import feishu_client as fc
+    from app.services import xunlei_group as xg
+
+    monkeypatch.setattr(fc, "FeishuClient", _FakeFeishu)
+    xg.push_new_shares([{"title": "某资源", "share_url": "https://p/s/X", "code": ""}], _S())
+    body = _FakeFeishu.last_card["elements"][0]["text"]["content"]
+    assert "点开即用" in body and "已全部转存" in body
+
+
+def test_tick_sends_internal_note_to_admin_only_when_needed(session, monkeypatch) -> None:
+    """⚠️ **维护信息 → 管理群**,而且**只在真有需处理项时才推**。
+
+    内容卡去了客户群,但"哪个群拉不到 / 哪条被闸门挡下 / 哪条转存失败"是运营要知道的
+    内部消息;每 20 分钟无条件推一条又会变噪音被无视,所以要有条件。
+    """
+    import app.db as db_mod
+    from app.services import alert_service, xunlei_group as xg
+
+    monkeypatch.setattr(db_mod, "get_session_local", lambda: (lambda: session))
+    calls: list = []
+    monkeypatch.setattr(alert_service, "notify_incident", lambda *a, **k: calls.append(a) or True)
+
+    base = {"status": "ok", "groups": 9, "new": 0, "failed_groups": []}
+    clean = {"ok": 0, "skipped": 0, "failed": 0, "items": []}
+    monkeypatch.setattr(xg, "sync_group_shares", lambda *a, **k: base)
+    monkeypatch.setattr(xg, "transfer_pending", lambda *a, **k: clean)
+    monkeypatch.setattr(xg, "push_new_shares", lambda *a, **k: False)
+    xg.xunlei_group_tick()
+    assert not calls, "一切正常时不该推内部消息(否则就是噪音)"
+
+    dirty = {"ok": 2, "skipped": 3, "failed": 1, "items": []}
+    monkeypatch.setattr(xg, "transfer_pending", lambda *a, **k: dirty)
+    xg.xunlei_group_tick()
+    assert calls and "被闸门挡下" in calls[0][4] and "转存失败" in calls[0][4]

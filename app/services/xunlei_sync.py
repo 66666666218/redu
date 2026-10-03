@@ -125,18 +125,24 @@ def sync_xunlei_resources(session, user_id: int, settings=None) -> dict:
 
 
 def push_new_resources(items: list[dict], settings) -> bool:
-    """把新登记的资源推飞书(**管理员群**:这是运营自己的资源清单)。"""
+    """把新登记的资源推飞书 —— **客户群**(主群)。
+
+    ⚠️ **目的地(2026-10-03 用户口径)**:这张卡内容是**资源 + 我方分享链**,属于**内容**,
+    该进客户群;管理群只接**维护信息**。此前推管理员群是错的(运营真正的内部盘点是
+    `xunlei_cleanup` 的清理报告与运行记录,不是这张卡)。
+    """
     if not items:
         return False
-    webhook = (getattr(settings, "feishu_webhook_admin", "") or
-               getattr(settings, "feishu_webhook", ""))
+    webhook = str(getattr(settings, "feishu_webhook", "") or "").strip()
     if not webhook:
         return False
 
     from app.services.feishu_client import FeishuClient
 
     elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
-        f"迅雷盘新转存 **{len(items)}** 个资源,已生成我方分享链:"}}]
+        # 结论先行(用户口径"推送是为了用户更好总结")
+        f"**盘里发现 {len(items)} 个资源,已生成分享链,点开即用。**\n"
+        "（来自你自己的迅雷盘,已自动登记进资源库）"}}]
     for it in items:
         icon = "📁" if it.get("kind") == "drive#folder" else "📄"
         elements.append({"tag": "hr"})

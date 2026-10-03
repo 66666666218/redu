@@ -181,3 +181,28 @@ def test_tick_records_no_cred_as_failed(session, monkeypatch) -> None:
     xs.xunlei_sync_tick()
     runs = session.scalars(select(RunRecord).where(RunRecord.kind == "xunlei_sync")).all()
     assert len(runs) == 1 and runs[0].status == "failed"
+
+
+def test_new_resources_card_goes_to_customer_group(monkeypatch) -> None:
+    """盘里的资源清单也是**内容**(资源 + 我方分享链)→ 客户群(2026-10-03 用户口径)。"""
+    from app.services import feishu_client as fc
+    from app.services import xunlei_sync as xs
+
+    class _F:
+        last = ""
+
+        def __init__(self, webhook, secret="") -> None:
+            _F.last = webhook
+
+        def send_card(self, card):
+            return True
+
+    class _S:
+        feishu_webhook = "CUSTOMER"
+        feishu_webhook_admin = "ADMIN"
+        feishu_secret = ""
+
+    monkeypatch.setattr(fc, "FeishuClient", _F)
+    assert xs.push_new_resources([{"name": "某资源", "kind": "drive#folder",
+                                   "share_url": "https://p/s/X"}], _S())
+    assert _F.last == "CUSTOMER"
