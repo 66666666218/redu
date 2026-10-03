@@ -143,6 +143,48 @@ class TestTiebaSource:
         assert called == [], "关掉了还在跑贴吧源"
 
 
+class TestDeadLinkIsTerminal:
+    """死链判终态(`skipped`),其余留 `failed` 重试(2026-10-04)。
+
+    背景:贴吧/知乎发现的影视盘链**大批已失效**(实测一轮 17 条里 15 条死链),
+    而旧实现一律记 `failed` → 这些死链**每天被重试一遍、永远重试不完**,
+    `failed` 越堆越多还看着像"链路故障"。
+    """
+
+    def test_explicit_dead_wording_is_terminal(self) -> None:
+        for msg in ("夸克接口失败(41011): 分享地址已失效",
+                    "分享页解析失败(链接失效或需提取码): uk=True files=0",
+                    "转存失败(errno=-6 分享文件已被删除)",
+                    "分享不存在", "get_share_user_banned"):
+            assert pd._fail(msg)["status"] == "skipped", msg
+
+    def test_rate_limit_stays_retryable(self) -> None:
+        """限流是"等一会就好",不是终态 —— 判成 skipped 会把这条链永久钉死。"""
+        for msg in ("转存被限制(errno=105 转存过于频繁),稍后重试",
+                    "HTTP 403 请求过于频繁", "网络超时"):
+            assert pd._fail(msg)["status"] == "failed", msg
+
+    def test_ambiguous_errno_without_show_msg_stays_retryable(self) -> None:
+        """⚠️ **判据从紧**:`errno=-6` 但**没有 show_msg** 时判不出是"失效"还是"限流" ——
+        宁可多试一次,也不能误判终态(把能搬的链永久钉死这个反向的坑,2026-10-02 踩过)。"""
+        assert pd._fail("转存失败(errno=-6)")["status"] == "failed"
+        assert pd._is_dead_link("转存失败(errno=-6)") is False
+
+    def test_transfer_maps_dead_error_to_skipped(self, session, monkeypatch) -> None:
+        """接上调用方:客户端抛的异常串里带死链措辞 → 整条记 `skipped`(终态)。"""
+        from app.services import baidupan_transfer
+
+        class _C:
+            def __init__(self, ck) -> None: ...
+            def transfer_and_share(self, url, password=""):
+                raise baidupan_transfer.BaiduPanError("转存失败(errno=-6 分享文件已被删除)")
+
+        monkeypatch.setattr(baidupan_transfer, "BaiduPanClient", _C)
+        monkeypatch.setattr("app.services.cookie_store.get_cookie", lambda s, u, p: "ck")
+        out = pd.transfer_pan_url(session, 1, "https://pan.baidu.com/s/1abc")
+        assert out["status"] == "skipped"
+
+
 def test_kind_of_maps_hosts() -> None:
     assert pd._kind_of("https://pan.quark.cn/s/abc") == "quark"
     assert pd._kind_of("https://pan.baidu.com/s/1abc") == "baidu"

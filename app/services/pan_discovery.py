@@ -52,6 +52,36 @@ def _kind_of(url: str) -> str:
     return ""
 
 
+# **终态**失败特征:分享已死(被取消 / 删号 / 违规 / 过期)—— 重试一万次也不会变好。
+# ⚠️ 只收**措辞明确**的;含糊的(如 `errno=-6` 却没有 `show_msg`)宁可留 `failed` 再试一次,
+# 也别误判成终态,把一条其实能搬的链永久钉死(这个反向的坑 2026-10-02 踩过)。
+_DEAD_LINK_HINTS = (
+    "分享地址已失效", "链接失效", "分享不存在", "分享已取消", "分享已被删除",
+    "分享文件已被删除", "文件不存在", "已被和谐", "违规内容", "含违规",
+    "41011",                      # 夸克:分享地址已失效
+    "get_share_user_banned",      # 迅雷:分享者被封
+)
+
+
+def _is_dead_link(message: str) -> bool:
+    """这条失败是"**链本身已经死了**"吗?"""
+    text = message or ""
+    return any(h in text for h in _DEAD_LINK_HINTS)
+
+
+def _fail(message: str) -> dict:
+    """失败结果:`死链` → `skipped`(**终态,不再重试**),其余 → `failed`(**下轮还会重试**)。
+
+    ⚠️ **为什么必须分开**(2026-10-04):贴吧/知乎发现的影视盘链**大批是失效的**
+    (实测一轮 17 条里 15 条死链),而旧实现一律记 `failed` —— 于是这些死链**每天被重试一遍、
+    永远重试不完**,`failed` 越堆越多,运行记录看着还像"链路故障"。
+    现在能看到百度的 `show_msg` 了,就该把"**已失效**"和"**限流该等**"分开 ——
+    前者是终态,后者才值得重试。
+    """
+    return {"status": "skipped" if _is_dead_link(message) else "failed",
+            "message": message, "our_url": "", "code": ""}
+
+
 def transfer_pan_url(session, user_id: int, pan_url: str, settings=None,
                      snippet: str = "") -> dict:
     """**按链分发转存**:夸克走 `QuarkTransfer`、百度走 `BaiduPanClient`、迅雷走 `xunlei_transfer`。
@@ -82,10 +112,10 @@ def transfer_pan_url(session, user_id: int, pan_url: str, settings=None,
                 pan_url,
                 save_dir=getattr(settings, "quark_save_dir", "") or "/来自发现",
                 password=getattr(settings, "quark_share_password", "") or "")
-            return {"status": "ok" if res.get("share_url") else "failed",
-                    "our_url": str(res.get("share_url") or ""),
-                    "code": str(res.get("password") or ""),   # ⚠️ 夸克返回的键是 password
-                    "message": "" if res.get("share_url") else "转存未返回我方链"}
+            if res.get("share_url"):
+                return {"status": "ok", "our_url": str(res.get("share_url")),
+                        "code": str(res.get("password") or ""), "message": ""}   # ⚠️ 夸克返回的键是 password
+            return _fail("转存未返回我方链")
 
         if kind == "baidu":
             from app.services.baidupan_transfer import BaiduPanClient, extract_pwd
@@ -96,21 +126,25 @@ def transfer_pan_url(session, user_id: int, pan_url: str, settings=None,
                         "our_url": "", "code": ""}
             pwd = extract_pwd(snippet or "", pan_url) or ""
             res = BaiduPanClient(ck).transfer_and_share(pan_url, password=pwd)
-            return {"status": "ok" if res.get("share_url") else "failed",
-                    "our_url": str(res.get("share_url") or ""),
-                    "code": str(res.get("password") or ""),   # ⚠️ 百度返回的键也是 password
-                    "message": "" if res.get("share_url") else "转存未返回我方链"}
+            if res.get("share_url"):
+                return {"status": "ok", "our_url": str(res.get("share_url")),
+                        "code": str(res.get("password") or ""), "message": ""}   # ⚠️ 百度返回的键也是 password
+            return _fail("转存未返回我方链")
 
         from app.services import xunlei_transfer as xt
 
         res = xt.transfer_and_share(pan_url)
-        return {"status": "ok" if res.get("status") == "ok" else "failed",
-                "our_url": str(res.get("share_url") or ""),
-                "code": str(res.get("code") or ""),
-                "message": str(res.get("message") or "")[:200]}
+        if res.get("status") == "ok":
+            return {"status": "ok", "our_url": str(res.get("share_url") or ""),
+                    "code": str(res.get("code") or ""), "message": ""}
+        msg = str(res.get("message") or "")
+        # 迅雷另有两类**终态**:分享者被封(`is_dead_share_error`)、或那是**我们自己发的**(`is_own_share_error`)
+        if xt.is_dead_share_error(msg) or xt.is_own_share_error(msg) or _is_dead_link(msg):
+            return {"status": "skipped", "message": msg, "our_url": "", "code": ""}
+        return {"status": "failed", "message": msg, "our_url": "", "code": ""}
     except Exception as exc:  # noqa: BLE001 - 单链失败不该炸整轮
         logger.warning("盘链转存失败 %s:%s", pan_url[:50], exc)
-        return {"status": "failed", "message": str(exc)[:200], "our_url": "", "code": ""}
+        return _fail(str(exc)[:200])
 
 
 def _candidates_from_zhihu(ck: str, keywords: list[str], limit: int) -> list[dict]:
