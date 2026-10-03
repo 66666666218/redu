@@ -125,6 +125,43 @@ def _rows_to_resources(session: Session, user_id: int, rows, with_my: bool = Tru
     return out
 
 
+def _xunlei_resources(session: Session, user_id: int, query: str = "",
+                      days: int = 90, limit: int = 20) -> list[dict]:
+    """**我们自己迅雷盘里**的资源(口令转存 + 扫盘),结构对齐 `_rows_to_resources`。
+
+    ⚠️ **这条出口此前根本不存在**(2026-10-03 全项目审查发现):`xunlei_resources` 有
+    **两处写入**(`xunlei_kouling` 口令转存 / `xunlei_sync` 扫盘)、**零处读取**(除健康检查
+    取个时间),而 `resource_library` 只合并公众号链与公开平台发现链 —— 于是
+    **抖音口令搬进来的资源、扫盘扫出来的资源,进了库谁也看不见、presence 也匹配不到**,
+    等于白搬。
+
+    ⚠️ **形状差别要说清**:公众号/知乎那两条里 `pan_url` 是"**别人的原链**"、`my_link` 是
+    "我们的";而这里是**我们自己盘里的东西**,没有"别人的原链"可记 —— 所以 `pan_url` 与
+    `my_link` **都是我们那条分享链**,`source` 标 `迅雷盘` 让界面能一眼区分"这条已经是我们的了"。
+    没有 `share_url` 的行**跳过**(库的用途是"给出可用链",没链的放进来只会干扰)。
+    """
+    from app.db.models import XunleiResource
+
+    stmt = select(XunleiResource).where(XunleiResource.user_id == user_id,
+                                       XunleiResource.share_url != "")
+    if query:
+        stmt = stmt.where(XunleiResource.name.contains(query))
+    if days:
+        stmt = stmt.where(XunleiResource.synced_at >= datetime.now() - timedelta(days=days))
+    rows = session.scalars(stmt.order_by(XunleiResource.synced_at.desc()).limit(limit)).all()
+    out: list[dict] = []
+    for r in rows:
+        url = str(r.share_url or "")
+        ts = r.synced_at.isoformat(sep=" ", timespec="seconds") if r.synced_at else ""
+        out.append({"pan_url": url, "pan_type": _pan_kind(url),
+                    "accounts": 1,
+                    "titles": [str(r.name or "")[:60]] if r.name else [],
+                    "first_seen": ts, "last_seen": ts,
+                    "my_link": url,                  # 本来就是我们自己的链
+                    "source": "迅雷盘"})
+    return out
+
+
 def search_resources(session: Session, user_id: int, query: str,
                      days: int = 90, limit: int = 20) -> list[dict]:
     """关键词检索资源库:匹配文章标题,聚合到盘链级,按验证强度(号数)排序。
@@ -152,7 +189,12 @@ def search_resources(session: Session, user_id: int, query: str,
     seen = {r["pan_url"] for r in ours}
     extra = [d for d in _discovered_resources(session, user_id, q, days, limit)
              if d["pan_url"] not in seen]
-    return (ours + extra)[:limit]
+    # **并入我们自己迅雷盘里的资源**(2026-10-03):口令转存 + 扫盘进来的那些此前**完全没有出口**,
+    # 补上以后 presence「名字型」也能匹配到它们(否则"搬进来了但用不上")。
+    seen |= {d["pan_url"] for d in extra}
+    mine = [x for x in _xunlei_resources(session, user_id, q, days, limit)
+            if x["pan_url"] not in seen]
+    return (ours + extra + mine)[:limit]
 
 
 def resonance_resources(session: Session, user_id: int, days: int = 30,

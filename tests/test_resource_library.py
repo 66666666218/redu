@@ -155,3 +155,52 @@ def test_my_link_strips_trailing_text(session) -> None:
     _mk(session, "某资源", "号甲", "https://pan.quark.cn/s/abc",
         my="https://pan.quark.cn/s/abc (自分享)")
     assert _my_link_of(session, 1, "https://pan.quark.cn/s/abc") == "https://pan.quark.cn/s/abc"
+
+
+# ---------------------------------------------------------------- 迅雷盘资源出口(2026-10-03)
+
+def _mk_xl(session, name, share_url, days_ago=1, parent="最全文件"):
+    from app.db.models import XunleiResource
+
+    session.add(XunleiResource(user_id=1, fid=f"fid-{name}", name=name,
+                               kind="drive#folder", parent_name=parent,
+                               share_url=share_url, pass_code="abcd",
+                               synced_at=datetime.now() - timedelta(days=days_ago)))
+
+
+def test_xunlei_resources_are_searchable(session) -> None:
+    """⚠️ **我方迅雷盘里的资源必须有出口**(2026-10-03 修)。
+
+    此前 `xunlei_resources` **写入 2 处(口令转存 + 扫盘)、读取 0 处** —— 抖音口令搬进来的、
+    扫盘扫出来的资源,**进了库谁也看不见、presence 也匹配不到**,等于白搬。
+    """
+    from app.services.resource_library import search_resources
+
+    _mk_xl(session, "手机警报器", "https://pan.xunlei.com/s/OUR1?pwd=abcd")
+    session.commit()
+    rs = search_resources(session, 1, "手机警报器", days=365, limit=10)
+    assert len(rs) == 1
+    assert rs[0]["source"] == "迅雷盘"
+    # 盘里的东西本来就是我们的 → pan_url 与 my_link 同一条链(与公众号那种"别人的原链"不同)
+    assert rs[0]["my_link"] == rs[0]["pan_url"] == "https://pan.xunlei.com/s/OUR1?pwd=abcd"
+
+
+def test_xunlei_resources_skips_rows_without_share_url(session) -> None:
+    """没有分享链的行**不进库** —— 库的用途是"给出可用链",没链的放进来只会干扰。"""
+    from app.services.resource_library import search_resources
+
+    _mk_xl(session, "没链的资源", "")
+    session.commit()
+    assert search_resources(session, 1, "没链的资源", days=365, limit=10) == []
+
+
+def test_search_dedupes_across_sources(session) -> None:
+    """同一条链既在公众号、又在我们迅雷盘里 → **只出一次**(公众号优先,它带"多少号同发")。"""
+    from app.services.resource_library import search_resources
+
+    url = "https://pan.xunlei.com/s/SAME?pwd=x"
+    _mk(session, "某资源分享", "号甲", url)
+    _mk_xl(session, "某资源分享", url)
+    session.commit()
+    rs = search_resources(session, 1, "某资源分享", days=365, limit=10)
+    assert len(rs) == 1 and rs[0]["source"] == "公众号"

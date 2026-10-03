@@ -102,6 +102,31 @@ def xunlei_quota(user: User = Depends(get_current_user)):
             "full": info["ratio"] >= 0.9}
 
 
+@router.get("/api/xunlei/resources")
+def xunlei_resources(q: str = "", limit: int = 50,
+                     user: User = Depends(get_current_user),
+                     db: Session = Depends(get_db)):
+    """**我方迅雷盘里的资源清单**(口令转存 + 扫盘),可按名字筛。
+
+    ⚠️ 这是 2026-10-03 补的出口:此前 `xunlei_resources` **写入 2 处、读取 0 处** ——
+    搬进来的资源在系统里**没有任何地方能看见**,presence「名字型」也匹配不到,等于白搬。
+    """
+    from sqlalchemy import select
+
+    from app.db.models import XunleiResource
+
+    stmt = select(XunleiResource).where(XunleiResource.user_id == user.id)
+    if q.strip():
+        stmt = stmt.where(XunleiResource.name.contains(q.strip()))
+    rows = db.scalars(stmt.order_by(XunleiResource.synced_at.desc())
+                      .limit(max(1, min(int(limit), 200)))).all()
+    return {"total": len(rows), "list": [{
+        "name": r.name, "kind": r.kind, "size": r.size, "parent": r.parent_name or "",
+        "share_url": r.share_url or "", "pass_code": r.pass_code or "",
+        "synced_at": r.synced_at.isoformat(sep=" ", timespec="seconds") if r.synced_at else "",
+    } for r in rows]}
+
+
 @router.get("/api/xunlei/cleanup/plan")
 def xunlei_cleanup_plan(days: int = 7, user: User = Depends(get_current_user),
                         db: Session = Depends(get_db)):
