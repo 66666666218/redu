@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -22,12 +23,32 @@ logger = get_logger(__name__)
 
 
 @asynccontextmanager
+def _mark_graceful_shutdown() -> None:
+    """优雅关停时写个时间戳 —— 让看门狗能区分「计划内重启」与「崩溃」。
+
+    ⚠️ **为什么需要**(2026-10-03 实测):看门狗失联告警上线当天就响了 **4 次**,其中大部分是
+    开发/发版时**主动重启**触发的 —— 看门狗只知道"健康检查不通",分不清是"人关的"还是
+    "它崩的"。照这样下去告警很快会变成噪音、然后被无视,**那就白做了**。
+    所以应用**正常关停**时留个痕,看门狗见到"刚刚优雅关停过"就不报警。
+
+    配套:`scripts/win/stop_app.bat`(计划内停机走它 —— 它先写这个标记再停,不依赖本函数
+    真被执行:`taskkill /F` 是强杀,不会走 lifespan)。
+    """
+    try:
+        (Path("data")).mkdir(parents=True, exist_ok=True)
+        (Path("data") / "last_shutdown.txt").write_text(
+            datetime.now().isoformat(timespec="seconds"), encoding="utf-8")
+    except OSError:
+        pass
+
+
 async def _lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     """应用启停:随 API 进程启动后台调度器(按各用户设置的频率采集)。"""
     scheduler.start()
     try:
         yield
     finally:
+        _mark_graceful_shutdown()
         scheduler.shutdown()
 
 

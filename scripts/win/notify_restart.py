@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -47,6 +48,18 @@ def _log(line: str) -> None:
 def main() -> int:
     dry_run = "--dry-run" in sys.argv
     try:
+        # ⚠️ **先看是不是"计划内停机"**(2026-10-03):应用正常关停时会写 `last_shutdown.txt`
+        # (`app.platform._mark_graceful_shutdown`,或 `stop_app.bat` 显式写)。刚关过就说明是
+        # 人主动停的,不是崩溃 —— 这种也报警的话,告警当天就当噪音被无视了(实测一天响 4 次)。
+        marker = ROOT / "data" / "last_shutdown.txt"
+        try:
+            age = time.time() - marker.stat().st_mtime
+            if age < 180:
+                _log(f"跳过:应用 {age:.0f}s 前才**优雅关停**(计划内重启,不是崩溃)")
+                return 0
+        except OSError:
+            pass                      # 没有标记 = 没优雅关停过 → 正常告警
+
         from config.settings import get_settings
 
         settings = get_settings()

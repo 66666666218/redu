@@ -724,6 +724,14 @@ print(sorted(j.id for j in s.get_jobs()))"
 > (测试 `tests/test_notify_restart.py` 钉住)。
 > ⚠️ **别指望它写进 `data/app.log`**:该文件被服务进程占着,Windows 下追加报
 > `PermissionError`(实测)—— 所以脚本**退到 `data/notify_restart.log`**。
+>
+> ⚠️⚠️ **重启请走 `scripts/win/stop_app.bat`,不要直接 `taskkill`**:告警上线当天就响了
+> **4 次**,其中大部分是**开发/发版时主动重启**触发的 —— 看门狗只知道"健康检查不通",
+> 分不清"人关的"和"它崩的"。照这样下去告警会变噪音然后被无视,**那就白做了**。
+> `stop_app.bat` 会**先写 `data/last_shutdown.txt`** 再停(只杀占用 8080 的那个进程,
+> 不是 `taskkill /IM pythonw.exe` 那种连 MediaCrawler 一起杀的写法);看门狗见到
+> "180 秒内刚优雅关停过"就**不发**告警。实测两个分支:
+> `已推送`(非计划停机)/ `跳过:…优雅关停`(计划内重启)。
 
 - 启动方式:`scripts/win/app_watchdog.bat` —— 先探 `http://127.0.0.1:8080/healthz`,
   通了就退出(幂等);不通才拉起 uvicorn(隐藏窗口,日志追加到 `data/app.log`)。

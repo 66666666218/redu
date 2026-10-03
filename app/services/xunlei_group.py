@@ -67,28 +67,49 @@ def _headers() -> dict | None:
                        cred.get("device_id") or "")
 
 
+class XunleiGroupError(RuntimeError):
+    """迅雷**群组接口**硬失败(HTTP 非 200 / 网络异常)。
+
+    ⚠️ **为什么必须与"群里没有新分享"分开**(2026-10-03 全项目 A 类排查):此前
+    `list_groups` / `group_records` 把所有失败吞成 `[]`,而 `xunlei_group_tick` 记
+    `success(群0 新0 转存0)` —— **凭据失效时整条群链静默停摆**,运行记录里跟"群里今天
+    真没新资源"长得一模一样。这是本项目已修 6 次的静默失败(闲鱼/知乎/MediaCrawler/
+    迅雷扫盘/跨平台号/这里)同型问题的第 7 例。
+    **判据**:群列表为空是正常的(账号没加群);但**请求失败**不是。
+    """
+
+
 def list_groups() -> list[dict]:
-    """账号所在的全部群:`[{group_id, name, role}]`。失败返回空表(不抛)。"""
+    """账号所在的全部群:`[{group_id, name, role}]`。**硬失败抛 `XunleiGroupError`**。
+
+    没配凭据时仍返回 `[]`(调用方 `sync_group_shares` 会先查 `_headers()` 再决定 ——
+    与 `xunlei_transfer.list_files` 同一口径)。
+    """
     h = _headers()
     if not h:
         return []
     try:
         resp = requests.get(f"{_BASE}/chitchat/v1/group/list", headers=h, timeout=_TIMEOUT)
+        if resp.status_code != 200:
+            raise XunleiGroupError(f"群列表 HTTP {resp.status_code}: {resp.text[:100]}")
         data = resp.json().get("data") or []
         return [{"group_id": str(g.get("id") or g.get("group_id") or ""),
                  "name": str(g.get("name") or g.get("group_name") or ""),
                  "role": str(g.get("user_role") or g.get("role") or "")}
                 for g in data if (g.get("id") or g.get("group_id"))]
-    except Exception:  # noqa: BLE001 - 探针类调用,失败即空
+    except XunleiGroupError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 包成自己的异常类型,好让调用方区分
         logger.exception("迅雷群列表获取失败")
-        return []
+        raise XunleiGroupError(f"群列表失败:{type(exc).__name__}: {str(exc)[:100]}") from exc
 
 
 def group_records(group_id, count: int = _PAGE_SIZE, record_id: int = 0,
                   direction: int = 0) -> list[dict]:
-    """拉一个群的消息(服务端返回**新→旧**)。失败返回空表。
+    """拉一个群的消息(服务端返回**新→旧**)。**硬失败抛 `XunleiGroupError`**。
 
     `record_id` 是游标:不传返回最新一页;传某个消息 id 可前后翻(`direction` 0/1)。
+    ⚠️ 之前这里失败返回 `[]`,于是"这个群拉不到消息"被当成"这个群今天没消息"。
     """
     h = _headers()
     if not h or not str(group_id):
@@ -100,10 +121,14 @@ def group_records(group_id, count: int = _PAGE_SIZE, record_id: int = 0,
     try:
         resp = requests.get(f"{_BASE}/chitchat/group/records", headers=h, params=params,
                             timeout=_TIMEOUT)
+        if resp.status_code != 200:
+            raise XunleiGroupError(f"群消息 HTTP {resp.status_code}: {resp.text[:100]}")
         return resp.json().get("records") or []
-    except Exception:  # noqa: BLE001
+    except XunleiGroupError:
+        raise
+    except Exception as exc:  # noqa: BLE001
         logger.exception("迅雷群消息获取失败 group=%s", group_id)
-        return []
+        raise XunleiGroupError(f"群 {group_id} 消息失败:{type(exc).__name__}") from exc
 
 
 def join_group(group_id) -> dict:
@@ -204,21 +229,39 @@ def sync_group_shares(session, user_id: int, group_ids: list[str] | None = None,
     `group_ids` 为空 = 账号所在的全部群。返回 `{"status", "groups", "new"}`。
     """
     if not _headers():
-        return {"status": "no_cred", "groups": 0, "new": 0}
-    groups = list_groups()
+        return {"status": "no_cred", "groups": 0, "new": 0, "message": "未配迅雷凭据",
+                "failed_groups": []}
+    try:
+        groups = list_groups()
+    except XunleiGroupError as exc:
+        # ⚠️ **不能当成"这个账号没加群"**:群列表拉不到 = 凭据/网络问题,群里其实有货。
+        # 旧实现返回空表 → tick 记 `success(群0 新0)`,整条群链静默停摆(2026-10-03 修)。
+        session.rollback()
+        logger.warning("迅雷群列表失败:%s", exc)
+        return {"status": "failed", "groups": 0, "new": 0, "failed_groups": [],
+                "message": str(exc)[:200]}
     if group_ids:
         want = {str(g) for g in group_ids}
         groups = [g for g in groups if g["group_id"] in want] or \
             [{"group_id": str(g), "name": ""} for g in group_ids]
     if not groups:
-        return {"status": "empty", "groups": 0, "new": 0}
+        return {"status": "empty", "groups": 0, "new": 0, "failed_groups": []}
 
     known = set(session.scalars(select(XunleiGroupShare.share_id).where(
         XunleiGroupShare.user_id == user_id)).all())
     new_count = 0
+    failed_groups: list[str] = []
     for group in groups:
         gid, gname = group["group_id"], group.get("name") or ""
-        for item in extract_shares(group_records(gid), gid, gname):
+        try:
+            records = group_records(gid)
+        except XunleiGroupError as exc:
+            # 单个群拉不到**不该中断整轮**,但**必须计数**:全群失败时"被挡住"与
+            # "群里今天真没新分享"在运行记录里长得一样(2026-10-03 修)。
+            failed_groups.append(gname or gid)
+            logger.warning("迅雷群 %s 消息拉取失败:%s", gid, exc)
+            continue
+        for item in extract_shares(records, gid, gname):
             if item["share_id"] in known:
                 continue
             known.add(item["share_id"])
@@ -230,8 +273,13 @@ def sync_group_shares(session, user_id: int, group_ids: list[str] | None = None,
             session.flush()                     # ⚠️ 见 cross_accounts 的教训:同轮去重靠它
             new_count += 1
     session.commit()
-    logger.info("迅雷群采集:%d 个群 → 新登记 %d 条分享", len(groups), new_count)
-    return {"status": "ok", "groups": len(groups), "new": new_count}
+    if failed_groups and len(failed_groups) == len(groups):
+        # **全部群都拉不到** → 不是"今天群里没新分享",是链路坏了。必须冒出去让 tick 记 failed。
+        raise XunleiGroupError(f"{len(groups)} 个群全部拉取失败(如 {failed_groups[0]})")
+    logger.info("迅雷群采集:%d 个群 → 新登记 %d 条分享(失败群 %d)",
+                len(groups), new_count, len(failed_groups))
+    return {"status": "ok", "groups": len(groups), "new": new_count,
+            "failed_groups": failed_groups}
 
 
 # ---------------------------------------------------------------- 转存闸门
@@ -439,9 +487,19 @@ def xunlei_group_tick(settings=None) -> int:
                 total += out.get("ok", 0)
                 push_new_shares(out.get("items") or [], settings)
                 # ⚠️ 写运行记录:否则健康页**看不到这条链**(2026-10-02 补)
-                _record_run(db, uid, "xunlei_group", "success",
-                            f"群{got.get('groups', 0)} 新{got.get('new', 0)} "
-                            f"转存{out.get('ok', 0)} 跳过{out.get('skipped', 0)}")
+                # ⚠️ **按 status 区分**(2026-10-03 修):旧实现无条件记 `success`,
+                # 于是"群列表拉不到(凭据失效)"被记成"群0 新0 转存0",跟"今天群里真没新资源"
+                # 长得一模一样。`no_cred`/`failed` 都不算成功。
+                st = str(got.get("status") or "")
+                note = (f"群{got.get('groups', 0)} 新{got.get('new', 0)} "
+                        f"转存{out.get('ok', 0)} 跳过{out.get('skipped', 0)}")
+                if got.get("failed_groups"):
+                    note += f" 失败群{len(got['failed_groups'])}"
+                if st in ("failed", "no_cred"):
+                    _record_run(db, uid, "xunlei_group", "failed",
+                                f"{st}: {str(got.get('message') or '')[:140]} {note}")
+                else:
+                    _record_run(db, uid, "xunlei_group", "success", note)
                 db.commit()
             except Exception as exc:  # noqa: BLE001 - 单用户失败不影响其余
                 db.rollback()

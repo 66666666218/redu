@@ -323,3 +323,91 @@ def test_transfer_pending_marks_own_share_as_skipped_not_failed(session, monkeyp
     rows = {r.share_id: r for r in session.scalars(select(XunleiGroupShare)).all()}
     assert rows["A"].status == "skipped" and "自己的分享" in rows["A"].message
     assert rows["B"].status == "ok"
+
+
+# ---------------------------------------------------------------- 静默失败修复(2026-10-03)
+
+def _stub_headers(monkeypatch, xg):
+    monkeypatch.setattr(xg, "_headers", lambda: {"x": "y"})
+
+
+def test_list_groups_raises_on_http_error(monkeypatch) -> None:
+    """群列表**非 200 = 硬失败**(不是"这个账号没加群")。"""
+    from app.services import xunlei_group as xg
+
+    _stub_headers(monkeypatch, xg)
+
+    class _R:
+        status_code = 403
+        text = "forbidden"
+
+    monkeypatch.setattr(xg.requests, "get", lambda *a, **k: _R())
+    with pytest.raises(xg.XunleiGroupError) as ei:
+        xg.list_groups()
+    assert "403" in str(ei.value)
+
+
+def test_sync_returns_failed_when_group_list_fails(session, monkeypatch) -> None:
+    """⚠️ **群列表拉不到不能当"没加群"**(2026-10-03 修)。
+
+    旧实现返回空表 → tick 记 `success(群0 新0 转存0)`,与"今天群里真没新资源"无法区分,
+    凭据失效时整条群链**静默停摆**。
+    """
+    from app.services import xunlei_group as xg
+
+    _stub_headers(monkeypatch, xg)
+    monkeypatch.setattr(xg, "list_groups", lambda: (_ for _ in ()).throw(
+        xg.XunleiGroupError("群列表 HTTP 403")))
+    out = xg.sync_group_shares(session, 1)
+    assert out["status"] == "failed" and "403" in out["message"]
+
+
+def test_sync_raises_when_every_group_fails(session, monkeypatch) -> None:
+    """**每个群都拉不到** → 抛(让 tick 记 failed),不是"今天没有新分享"。"""
+    from app.services import xunlei_group as xg
+
+    _stub_headers(monkeypatch, xg)
+    monkeypatch.setattr(xg, "list_groups", lambda: [
+        {"group_id": "g1", "name": "群一"}, {"group_id": "g2", "name": "群二"}])
+    monkeypatch.setattr(xg, "group_records", lambda *a, **k: (_ for _ in ()).throw(
+        xg.XunleiGroupError("超时")))
+    with pytest.raises(xg.XunleiGroupError) as ei:
+        xg.sync_group_shares(session, 1)
+    assert "全部拉取失败" in str(ei.value)
+
+
+def test_sync_keeps_going_when_some_groups_fail(session, monkeypatch) -> None:
+    """**部分群失败**要保住其余群的产出,并把失败群**记名**(否则"某个群一直拉不到"查不出来)。"""
+    from app.services import xunlei_group as xg
+
+    _stub_headers(monkeypatch, xg)
+    monkeypatch.setattr(xg, "list_groups", lambda: [
+        {"group_id": "g1", "name": "群一"}, {"group_id": "g2", "name": "坏群"}])
+
+    def _rec(gid, *a, **k):
+        if gid == "g2":
+            raise xg.XunleiGroupError("超时")
+        return [{"content": '{"type":7,"data":{"share_id":"S1","share_url":"https://p/s/S1",'
+                            '"title":"某资源","share_user_id":"u"}}'}]
+
+    monkeypatch.setattr(xg, "group_records", _rec)
+    out = xg.sync_group_shares(session, 1)
+    assert out["status"] == "ok" and out["new"] == 1
+    assert out["failed_groups"] == ["坏群"]
+
+
+def test_tick_records_no_cred_as_failed(session, monkeypatch) -> None:
+    """没配凭据**不算成功** —— 它在运行记录里同样会伪装成"群0 新0 一切正常"。"""
+    from sqlalchemy import select
+    from app.db.models import RunRecord
+    import app.db as db_mod
+    from app.services import xunlei_group as xg
+
+    monkeypatch.setattr(db_mod, "get_session_local", lambda: (lambda: session))
+    monkeypatch.setattr(xg, "sync_group_shares",
+                        lambda *a, **k: {"status": "no_cred", "groups": 0, "new": 0,
+                                         "failed_groups": [], "message": "未配迅雷凭据"})
+    monkeypatch.setattr(xg, "transfer_pending", lambda *a, **k: {})
+    xg.xunlei_group_tick()
+    runs = session.scalars(select(RunRecord).where(RunRecord.kind == "xunlei_group")).all()
+    assert len(runs) == 1 and runs[0].status == "failed"
