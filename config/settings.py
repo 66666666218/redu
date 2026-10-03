@@ -76,9 +76,11 @@ class Settings(BaseSettings):
     quiet_hours_end: int = 8              # 免打扰结束(小时,8=早8点);实时热点等紧急推送不受限
     agent_enabled: bool = True             # 早期苗头 Agent(全板块自主预测)开关
     agent_score_threshold: int = 55        # 苗头判定分数线(≥70 上升,≥85 爆发)
-    agent_cooldown_hours: int = 12         # 同一(板块,关键词)的苗头冷却(小时)
+    # ⚠️ 此处原有 `agent_cooldown_hours` 与 `hotspot_agent_cron`,**生产代码零引用**(死配置):
+    # 前者被 `AgentStage` 状态机取代,后者的时段早已迁到 `push_timeline.PUSH_KINDS`
+    # (`hotspot_agent._tick` 根本没有独立 cron)。2026-10-03 审计删除 —— 留着只会让
+    # 下一个人照它去改调度、改了却不生效。
     hotspot_agent_enabled: bool = True   # 热点→网盘选题 Agent(监控词热度 × 供应商新资源 → 发货建议,站内推送)
-    hotspot_agent_cron: str = "10 9,15,21 * * *"  # Agent 运行时刻(跟在白天三个定点监听后面,数据最鲜)
     hotspot_min_growth: float = 50.0     # 热点词 24h 涨幅达标线(低于此值不生成建议)
     hotspot_agent_top_n: int = 15        # 单轮最多产出几条选题建议(2026-10-01 由 8 上调)
     hotspot_agent_llm_top: int = 10      # 没现成资源的热点里,最多几个交给 LLM 生成选题

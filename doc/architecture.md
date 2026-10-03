@@ -122,10 +122,11 @@ ewsnow-image-20261001.tar（51MB，docker load 可恢复）
 | wechat_collect_tick | 4/8/14/20 点 | 公众号监听(**自适应分批**:批=ceil(池/4)夹[8,75];沉睡号(miss≥7)每3轮1次;扩建无需手调) |
 | weread_refresh_tick | 每 6 小时 :50 | 微信读书 Cookie 主动续期（rt 单次编码自洽） |
 | douhot_window_tick | 20 分钟 | 抖音多窗口对比 |
-| hotspot_agent_tick | 9/15/21 点 | 热点选题建议（LLM 教学式输出） |
+| hotspot_agent_tick | **09:10/14:10/20:40** | 热点选题建议(三层匹配+机会分) —— ⚠️ **没有独立 cron**,由 `push_timeline` 的 `agent` 类驱动(改时段改那里,不是这里) |
 | settle_suggestions | 22:00 | 建议结算（盘链扩散增量）+ acted 自动归因 |
 | event_assign | 15 分钟 | 跨平台事件归并 |
-| run_feishu_* | 定点 | 日报/洞察/实时推送 |
+| push_timeline | 每分钟 tick | **7 类推送的统一时段表**(日报 07:30 / 选题 Agent 09:10·14:10·20:40 / 热榜速览 10:30·21:30 / 选题分析 11:30 / 爆点回顾周一 13:30 / 复盘周报周一 16:30 / 洞察周报周日 19:00) —— 改时间改库里配置,即时生效 |
+| health_push / health_stalls / check_collect_failures | 09:20 / 30 分钟 | 采集源健康卡(**远端推管理员群**)/ 停摆告警 / 失败聚合告警 |
 | pan_cookie_keepalive | 7:00 | 网盘 Cookie 保活 |
 | check_collect_failures / health_stalls | 30 分钟 | 失败聚合告警（含 ✅ 恢复确认）/ 停摆告警 |
 | cleanup_old_data | 4:00 | 数据保留治理 |

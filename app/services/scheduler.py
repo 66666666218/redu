@@ -206,7 +206,7 @@ def douhot_window_tick(settings: Settings | None = None) -> dict:
                 if out.get("status") == "success" and out.get("ok"):
                     users_ok += 1
                     pushed += run_feishu(db, uid, settings)
-                    # 爆发 → 即时联动拉新方案(不必等 9:10/15:10/21:10 的定时 Agent):
+                    # 爆发 → 即时联动拉新方案(不必等 09:10/14:10/20:40 的定时 Agent,见 push_timeline):
                     # 多窗口对比检出 burst 的话题,立刻给「发什么货/标题/人群/转存钩子」,
                     # 站内推送(爆发卡片已在飞书,方案落站内,口径 2026-09-27)
                     burst_rows = [r for r in analytics(db, uid, settings=settings)
@@ -408,8 +408,8 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         (hot_source_tick_all_users, "5 * * * *", {"minute": 5}, "hot_source", "hotspot"),
         # 死号清理(v2.6.0):每日 05:30——7 天无发文的对标号自动停监控(带链路安全阀)
         (retire_dormant_tick_all_users, "30 5 * * *", {"minute": 30, "hour": 5}, "bench_retire", "wechat"),
-        # 选题复盘周报已并入推送时段表(默认周一 10:00)
-        # 多平台热榜速览卡已并入推送时段表(默认 09:30/21:30)
+        # 选题复盘周报已并入推送时段表(默认**周一 16:30**)
+        # 多平台热榜速览卡已并入推送时段表(默认 10:30/21:30)
         # 会员续费检查:每日 10:05(到期该收续费/超 24h 该踢名单 → 飞书);业务运营,归主实例
         (_member_renewal, "5 10 * * *", {"minute": 5, "hour": 10}, "member_renewal", "wechat"),
         # 事件归属:每 15 分钟把近 24h 快照归并为事件(跨平台共振/生命周期的基础层)
@@ -422,7 +422,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # renewal=换新会话,mp/articles 列表只在会话初期可用,每轮赶上窗口)。
         # ⚠️ 此前这里硬编码 "50 */6 * * *",settings 的对齐改动从未生效(2026-09-28 修复)
         (weread_refresh_tick, _get_settings().weread_refresh_cron, {"minute": 50, "hour": "*/6"}, "weread_refresh", "wechat"),
-        # 选题 Agent 已并入推送时段表(默认 09:10/15:10/21:10)
+        # 选题 Agent 已并入推送时段表(默认 09:10/14:10/20:40)
         # 建议结算:每日 22:00(v5 结算端:盘链全网扩散增量 repost_gain,2026-09-30 起 reads_gain 采样已废)
         (settle_suggestions_all_users, "0 22 * * *", {"minute": 0, "hour": 22}, "suggestion_settle", "hotspot"),
         # 搜狗验证码红线约 30~50 次/天:每 4 小时一轮 × 每轮最多 5 词 = 30 次/天(安全区)

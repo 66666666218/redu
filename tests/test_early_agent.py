@@ -34,7 +34,7 @@ def st():
                     feishu_webhook="https://open.feishu.cn/hook/main",
                     feishu_webhook_weibo="https://open.feishu.cn/hook/weibo",
                     feishu_webhook_xianyu="https://open.feishu.cn/hook/xianyu",
-                    agent_score_threshold=55, agent_cooldown_hours=12,
+                    agent_score_threshold=55,
                     focus_min_len=4, wechat_resample_growth_pct=100,
                     wechat_burst_min_reads=200)
 

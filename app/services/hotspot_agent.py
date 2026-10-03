@@ -20,7 +20,9 @@ LLM 只负责选题发散,不参与排序——可解释、可回测、可调权
 
 节流:同一热点词 24h 内只推一次(记忆落 system_config);输出按 2026-09-27 口径走
 站内告警(push_feishu=False,飞书群只推文章与 Cookie 提醒)。
-计划任务:hotspot_agent_cron(默认 9:10/15:10/21:10,跟在三个白天定点监听后面,数据最鲜)。
+计划任务:**没有独立 cron** —— 本函数由 `push_timeline` 的 `agent` 类驱动
+(时段见 `push_timeline.PUSH_KINDS["agent"]`,默认 **09:10/14:10/20:40**,跟在白天定点监听后面,数据最鲜)。
+(旧注释写的 `hotspot_agent_cron` 是**死配置**:`scheduler` 从不读它,已删除。)
 """
 from __future__ import annotations
 
