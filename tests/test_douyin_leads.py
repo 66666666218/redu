@@ -484,3 +484,61 @@ class TestKoulingSummary:
         """**自循环的样子**:解析出一堆群口令,但**一个新群都没有**。"""
         leads = [{"kouling": {"kind": "group", "newly_joined": False}} for _ in range(9)]
         assert dl._kouling_summary(leads) == "新群0/群9/链0"
+
+
+class TestUsedWordsGoLast:
+    """**已经解析出过群的词,下轮排到最后**(2026-10-04,用户口径)。
+
+    "而不是一直用着一个口令进群,我们是需要创新的" —— 抖音搜索次数有限、每轮又慢,
+    名额要优先给**没试过的词**。
+
+    ⚠️ **只排后、不删掉**:同一个词将来还可能解析出**别的**群(推广号会换口令);
+    硬删就把它堵死了 —— 正是本项目反复踩过的"把能搬的判成终态"那种反向错误。
+    """
+
+    def test_seen_words_are_sorted_last(self, session, monkeypatch) -> None:
+        from app.db.models import DouyinLead
+        from app.services import douyin_leads as dl
+
+        session.add(DouyinLead(user_id=1, aweme_id="a1", keyword="用过的词", kind="group",
+                               title="t", found_at=datetime.now()))
+        session.commit()
+        monkeypatch.setattr("app.services.cross_accounts._keywords_from_library",
+                            lambda s, u, top: ["用过的词", "没试过的词"])
+
+        class _S:
+            douyin_leads_group_keywords = 0        # 群组词已默认关
+
+        assert dl.search_keywords(session, 1, top=2, settings=_S()) == ["没试过的词", "用过的词"]
+
+    def test_word_is_not_dropped_just_deprioritised(self, session, monkeypatch) -> None:
+        """只有这一个词时它仍要出现 —— 排后不等于删除。"""
+        from app.db.models import DouyinLead
+        from app.services import douyin_leads as dl
+
+        session.add(DouyinLead(user_id=1, aweme_id="a1", keyword="唯一的词", kind="group",
+                               title="t", found_at=datetime.now()))
+        session.commit()
+        monkeypatch.setattr("app.services.cross_accounts._keywords_from_library",
+                            lambda s, u, top: ["唯一的词"])
+
+        class _S:
+            douyin_leads_group_keywords = 0
+
+        assert dl.search_keywords(session, 1, top=2, settings=_S()) == ["唯一的词"]
+
+    def test_share_kind_does_not_deprioritise(self, session, monkeypatch) -> None:
+        """只有**解析成群**的才算"用过的" —— 解析出**链**的词不影响(它能反复产出链接)。"""
+        from app.db.models import DouyinLead
+        from app.services import douyin_leads as dl
+
+        session.add(DouyinLead(user_id=1, aweme_id="a1", keyword="出链的词", kind="share",
+                               title="t", found_at=datetime.now()))
+        session.commit()
+        monkeypatch.setattr("app.services.cross_accounts._keywords_from_library",
+                            lambda s, u, top: ["出链的词", "乙词"])
+
+        class _S:
+            douyin_leads_group_keywords = 0
+
+        assert dl.search_keywords(session, 1, top=2, settings=_S()) == ["出链的词", "乙词"]

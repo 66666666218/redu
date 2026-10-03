@@ -198,19 +198,33 @@ def search_resources(session: Session, user_id: int, query: str,
 
 
 def resonance_resources(session: Session, user_id: int, days: int = 30,
-                        min_accounts: int = 2, limit: int = 15) -> list[dict]:
-    """高共振资源榜:同链被 ≥min_accounts 个号同发——需求被反复验证的金矿。"""
+                        min_accounts: int = 2, limit: int = 15,
+                        order: str = "resonance") -> list[dict]:
+    """高共振资源榜:同链被 ≥min_accounts 个号同发——需求被反复验证的金矿。
+
+    `order`:
+      · `"resonance"`(默认)—— 按**几个号同发**降序:被验证得越多越靠前;
+      · `"fresh"` —— 按**最近一次被发**降序:谁**还在被发**谁靠前。
+
+    ⚠️ **为什么要有 `fresh`**(2026-10-04,用户口径"**最重要的就是新鲜冒头的资源**"):
+    "共振"是**沉淀过**的信号(30 天窗口里被反复发),而抖音线索那条链要的是
+    "**现在正在冒头**"的词 —— 拿半年前的爆款去搜,搜到的推广号早就换话题了。
+    两者都要,但**选词的链应该吃新鲜的那份**;`min_accounts` 这道"被验证过"的门槛照旧保留。
+    """
     cutoff = datetime.now() - timedelta(days=days)
-    rows = session.execute(
+    stmt = (
         select(WechatPanLink.pan_url,
                func.count(func.distinct(WechatArticle.author)),
                func.min(WechatArticle.created_at), func.max(WechatArticle.created_at))
         .join(WechatArticle, WechatArticle.id == WechatPanLink.article_id)
         .where(WechatPanLink.user_id == user_id, WechatArticle.created_at >= cutoff)
         .group_by(WechatPanLink.pan_url)
-        .having(func.count(func.distinct(WechatArticle.author)) >= min_accounts)
-        .order_by(func.count(func.distinct(WechatArticle.author)).desc())
-        .limit(limit)).all()
+        .having(func.count(func.distinct(WechatArticle.author)) >= min_accounts))
+    if order == "fresh":
+        stmt = stmt.order_by(func.max(WechatArticle.created_at).desc())
+    else:
+        stmt = stmt.order_by(func.count(func.distinct(WechatArticle.author)).desc())
+    rows = session.execute(stmt.limit(limit)).all()
     return _rows_to_resources(session, user_id, rows)
 
 

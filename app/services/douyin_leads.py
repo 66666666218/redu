@@ -193,9 +193,14 @@ def _to_search_word(title: str) -> str:
 def group_keywords(session, user_id: int, top: int = 3, days: int = 7) -> list[str]:
     """**群组里新出现的资源** → 抖音搜索词。
 
-    用户口径(2026-10-02):"结合着进的群组新资源的出现再去抖音搜索" —— 群里刚冒出来的
-    资源 = **"最近有人在找这个"**,拿它去抖音搜,抓到的正是**正在蹭这波热度的推广号**,
-    比自己凭资源库瞎猜要准。只取最近 `days` 天、按消息时间倒序。
+    用户口径(2026-10-02 起,2026-10-04 再次确认):"**搜索词应该是资源名称**" ——
+    群里刚冒出来的资源 = **"最近有人在找这个"**,拿它去抖音搜,抓到的正是**正在蹭这波热度的推广号**。
+
+    ⚠️ **自循环的解法不是"把词换成品类"**(2026-10-04 一度这么改,用户当即纠正:
+    "不对,搜索词应该是资源名称")—— **品类**那层应该来自**监控里的类目→其下的具体话题**,
+    而不是硬编一张词表。真正的解法是**别反复消耗同一个词**:见 `known_word_groups` 的去重。
+
+    只取最近 `days` 天、按消息时间倒序(**新鲜冒头优先**)。
     """
     from datetime import datetime, timedelta
 
@@ -275,12 +280,41 @@ def hot_seed_words(settings, limit: int = 3) -> list[str]:
     return out
 
 
+def _words_already_resolved_to_group(session, user_id: int, days: int = 21) -> set[str]:
+    """近 `days` 天**已经解析出过群**的搜索词 —— 下轮把它们排到最后。
+
+    用户口径(2026-10-04):"**而不是一直用着一个口令进群,我们是需要创新的**"。
+    同一个词反复解析出群,说明它指向的就是**那一批**群;而抖音搜索**次数有限、每轮又慢**
+    (一次浏览器几分钟),把名额优先给**没试过的词**,才谈得上往外扩。
+
+    ⚠️ **只"排后"不"删掉"**:这个词将来还可能解析出**别的**群(推广号会换口令),
+    硬删会把这条路堵死 —— 正如本项目反复踩过的"把能搬的链判成终态"那种反向错误。
+    **数据来源不新建表**:`DouyinLead` 已经存了 `keyword` + `kind`,查得出来就别再造一张。
+    """
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import select
+
+    from app.db.models import DouyinLead
+
+    since = datetime.now() - timedelta(days=days)
+    rows = session.execute(
+        select(DouyinLead.keyword).where(
+            DouyinLead.user_id == user_id,
+            DouyinLead.kind == "group",
+            DouyinLead.keyword != "",
+            DouyinLead.found_at >= since).distinct()).all()
+    return {str(k) for (k,) in rows}
+
+
 def search_keywords(session, user_id: int, top: int, settings,
                     hot: list[str] | None = None) -> list[str]:
-    """本轮抖音反查用的搜索词 = **群组新资源**(优先) + 公众号已验证资源 + **热榜外部种子**。
+    """本轮抖音反查用的搜索词 = **资源库词**(新鲜优先) + **热榜外部种子**。
 
-    前两路都要:群组的词**新鲜**(刚有人要),公众号的词**被验证过**(同链多号同发)。
-    去重后按 `top` 截断 —— 每个词一次抖音搜索,词越多越慢。
+    **方向是单向的**(用户 2026-10-04 逐字口径):"**群组只有通过口令进入,而口令就是从
+    搜索资源里面获得**"、"**搜索词应该是资源名称**" ——
+        资源(词) → 抖音搜 → 口令 → 进群
+    **群是目的地,不是词源**;所以 `douyin_leads_group_keywords` 默认 **0**(见 settings 的说明)。
 
     `hot` 由 `hot_seed_words()` 取好传进来,**不在这里取**:那是网络调用,而本函数是**纯 DB**
     的(`pan_discovery` 也用它),别让一个本地函数偷偷出网。
@@ -288,18 +322,25 @@ def search_keywords(session, user_id: int, top: int, settings,
     `top` 只管**已知词**那条路的额度;热榜种子**额外附加**在末尾 —— 抖音搜一个词只要几秒
     (实测 3 个词一轮 83 秒),没必要让外部种子和已知词互相挤位置。
 
-    ⚠️ **不放品牌词**(2026-10-02 用户澄清):这条链的目的是"**发现新资源**",
+    ⚠️ **已经解析出过群的词排到最后**(`_words_already_resolved_to_group`):抖音搜索次数有限、
+    每轮又慢,名额要优先给**没试过的词** —— 否则就是"一直用着一个口令进群"。
+
+    ⚠️ **不放品牌词**(2026-10-02 用户澄清):这条链的目的是"**发现新资源**"",
     不是"看谁在提我们的牌子";品牌词是用在**推送侧**把别人的名字换成我们的(见
     `_rebrand`),不是用来搜的。
     """
     from app.services.cross_accounts import _keywords_from_library
 
-    n_group = int(getattr(settings, "douyin_leads_group_keywords", 3) or 0)
+    n_group = int(getattr(settings, "douyin_leads_group_keywords", 0) or 0)
     kws = group_keywords(session, user_id, top=n_group)
     for w in _keywords_from_library(session, user_id, max(1, int(top) - len(kws))):
         if w not in kws:
             kws.append(w)
     kws = kws[: int(top)]
+    # 用过的词排到最后(不删):名额先给没试过的
+    seen = _words_already_resolved_to_group(session, user_id)
+    if seen:
+        kws.sort(key=lambda w: w in seen)
     for w in (hot or []):
         if w and w not in kws:
             kws.append(w)

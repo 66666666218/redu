@@ -449,11 +449,16 @@ def _keywords_from_library(session: Session, user_id: int, top: int = 5) -> list
 
     清洗见 `library_search_word` —— 此前这里是 `strip()[:12]` 硬切,三条下游链(抖音线索/
     知乎直链/跨平台热度)都吃这个粗词。
+
+    ⚠️ **排序用 `fresh` 而不是 `resonance`**(2026-10-04,用户口径"**最重要的就是
+    新鲜冒头的资源**"):`min_accounts` 那道"被验证过"的门槛照旧保留,但**谁还在被发谁靠前** ——
+    半年前的爆款拿去搜,推广号早换话题了。
     """
     try:
         from app.services.resource_library import resonance_resources
 
-        rows = resonance_resources(session, user_id, days=30, min_accounts=2, limit=top)
+        rows = resonance_resources(session, user_id, days=30, min_accounts=2,
+                                   limit=top, order="fresh")
     except Exception:  # noqa: BLE001
         logger.exception("取资源库关键词失败")
         return []
