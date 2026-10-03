@@ -90,6 +90,121 @@ def test_extract_shares_ignores_malformed_content() -> None:
     assert xg.extract_shares(bad, "g") == []
 
 
+# ---------------------------------------------------------------- 补翻(2026-10-03)
+#
+# `group_records` 每页只回 20 条,而旧实现只拉最新一页 → "两次采集之间消息超过 20 条"
+# 的那段(停机/连续失败/群刷屏)里的分享会被**永久跳过且不报错**。
+# 判据:拿库里已有的 share_id 当水位线,整页都是新分享时才往回翻(direction=1)。
+
+def _share(rid: int, sid: str) -> dict:
+    return _rec(rid, 887920981, {"type": 7, "data": {"share_id": sid,
+                                                     "share_url": f"http://pan.xunlei.com/s/{sid}",
+                                                     "title": f"资源{sid}"}})
+
+
+def _fake_records(pages: dict, calls: list):
+    """按 `record_id` 分页的假接口:键 0 = 最新一页,其余 = 以该 id 为游标往回翻。"""
+    def _f(gid, count=20, record_id=0, direction=0):
+        calls.append((record_id, direction))
+        return pages.get(record_id, [])
+    return _f
+
+
+def test_catchup_costs_nothing_when_page_has_a_known_share(session, monkeypatch) -> None:
+    """稳态:**这一页里有见过的分享** → 一次请求都不多花(补翻只在真漏消息时发生)。"""
+    session.add(XunleiGroupShare(user_id=1, group_id="g1", group_name="群一",
+                                 message_id="1", share_id="A1", origin_url="u"))
+    session.commit()
+    calls: list = []
+    monkeypatch.setattr(xg, "list_groups", lambda: [{"group_id": "g1", "name": "群一"}])
+    monkeypatch.setattr(xg, "group_records", _fake_records(
+        {0: [_share(30, "A1"), _share(29, "B1")]}, calls))
+
+    xg.sync_group_shares(session, 1, group_ids=["g1"])
+    assert len(calls) == 1, f"稳态下多翻了页:{calls}"
+    assert calls[0] == (0, 0)
+
+
+def test_catchup_pages_back_when_whole_page_is_new(session, monkeypatch) -> None:
+    """整页都是没见过的分享 = 真漏消息的信号 → 往回翻,把中间那批补回来。
+
+    注意走的是 `record_id=<本页最旧 id>` + `direction=1`(实测=往更旧翻)。
+    """
+    calls: list = []
+    monkeypatch.setattr(xg, "list_groups", lambda: [{"group_id": "g1", "name": "群一"}])
+    monkeypatch.setattr(xg, "group_records", _fake_records(
+        {0: [_share(30, "C1"), _share(29, "C2")],
+         29: [_share(29, "C2"), _share(20, "B1"), _share(19, "B2")]}, calls))
+
+    out = xg.sync_group_shares(session, 1)
+    assert out["new"] == 4, "补翻回来的分享没入库"
+    assert {r.share_id for r in session.scalars(select(XunleiGroupShare)).all()} == {
+        "C1", "C2", "B1", "B2"}
+    assert calls[1] == (29, 1), f"补翻没带游标/方向:{calls}"
+
+
+def test_catchup_stops_as_soon_as_it_reaches_a_known_share(session, monkeypatch) -> None:
+    """翻到"有见过的分享"的那一页就停 —— 说明已接上水位线,再往前是本轮之前采过的。"""
+    session.add(XunleiGroupShare(user_id=1, group_id="g1", group_name="群一",
+                                 message_id="10", share_id="B1", origin_url="u"))
+    session.commit()
+    calls: list = []
+    monkeypatch.setattr(xg, "list_groups", lambda: [{"group_id": "g1", "name": "群一"}])
+    monkeypatch.setattr(xg, "group_records", _fake_records(
+        {0: [_share(30, "C1")],
+         30: [_share(30, "C1"), _share(10, "B1")],     # 这页含已见过的 B1 → 到此为止
+         10: [_share(9, "A1")]}, calls))
+
+    out = xg.sync_group_shares(session, 1)
+    assert out["new"] == 1                              # 只补回 C1(B1 已在库)
+    assert len(calls) == 2, f"到达水位线后还在翻:{calls}"
+
+
+def test_catchup_has_a_page_cap(session, monkeypatch) -> None:
+    """保险丝:接口若一直不回我们见过的分享,不能无限翻下去打爆接口。"""
+    calls: list = []
+
+    def _always_new(gid, count=20, record_id=0, direction=0):
+        calls.append((record_id, direction))
+        base = 1000 - len(calls) * 10
+        return [_share(base, f"S{len(calls)}-{base}")]
+
+    monkeypatch.setattr(xg, "list_groups", lambda: [{"group_id": "g1", "name": "群一"}])
+    monkeypatch.setattr(xg, "group_records", _always_new)
+    xg.sync_group_shares(session, 1)
+    assert len(calls) == xg._MAX_CATCHUP_PAGES, f"没按上限收手:{len(calls)} 次"
+
+
+def test_catchup_failure_does_not_lose_the_first_page(session, monkeypatch) -> None:
+    """补翻失败**不拖垮整轮**:最新一页已经拿到手,顶多少补几条历史。"""
+    monkeypatch.setattr(xg, "list_groups", lambda: [{"group_id": "g1", "name": "群一"}])
+
+    def _boom(gid, count=20, record_id=0, direction=0):
+        if record_id == 0:
+            return [_share(30, "C1"), _share(29, "C2")]      # 首页正常
+        raise xg.XunleiGroupError("补翻被挡")
+
+    monkeypatch.setattr(xg, "group_records", _boom)
+    out = xg.sync_group_shares(session, 1)
+    assert out["status"] == "ok" and out["new"] == 2, "补翻失败把首页也丢了"
+
+
+def test_first_page_failure_still_raises(session, monkeypatch) -> None:
+    """**首页**拉不到仍然是硬失败(不能因为加了补翻就把这条契约吃掉)。
+
+    这条守住 2026-10-03 修的另一点:"全群拉不到"必须冒出去记 `failed`,
+    否则"被挡住"和"群里今天真没新分享"在运行记录里长得一模一样。
+    """
+    monkeypatch.setattr(xg, "list_groups", lambda: [{"group_id": "g1", "name": "群一"}])
+
+    def _boom(*a, **k):
+        raise xg.XunleiGroupError("全群消息拉取失败")
+
+    monkeypatch.setattr(xg, "group_records", _boom)
+    with pytest.raises(xg.XunleiGroupError):
+        xg.sync_group_shares(session, 1)
+
+
 # ---------------------------------------------------------------- 采集
 
 def test_sync_group_shares_registers_pending_and_is_idempotent(session, monkeypatch) -> None:

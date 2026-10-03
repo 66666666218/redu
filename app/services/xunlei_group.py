@@ -222,6 +222,49 @@ def _msg_time(raw) -> datetime | None:
 
 # ---------------------------------------------------------------- 采集入库
 
+# 漏消息时的补翻上限(页)。一页 `_PAGE_SIZE` 条消息,3 页 = 60 条。
+# 设上限是为了:接口若返回异常页(比如一直不回我们见过的分享),不至于无限翻下去打爆接口。
+_MAX_CATCHUP_PAGES = 3
+
+
+def _records_with_catchup(group_id: str, gname: str, known_share_ids: set[str]) -> list[dict]:
+    """拉一个群的消息,**必要时往回补翻几页**;返回合并后的记录(可能有重复,入库靠 share_id 去重)。
+
+    ⚠️ **为什么需要**(2026-10-03 全项目审查):`/chitchat/group/records` 每页只回
+    `_PAGE_SIZE`(20)条,而旧实现**只拉最新一页** —— 于是"两次采集之间消息数超过 20 条"
+    的那段时间(停机、连续失败、或群突然刷屏)里发出的分享**会被永久跳过**,且**不报错**:
+    下一次采集照样报 `新0`,运行记录一片绿。这正是本项目反复修的那类"静默丢失"。
+
+    **实测风险量级**(2026-10-03):最活跃的群约 1 条消息/27 分钟,20 条 ≈ **9 小时**;
+    而当天上午迅雷群链**恰好连续失败 8 小时**(02:40~10:40)——
+    **离"丢消息"只差 2 小时**,不是纯理论。
+
+    **判据**:拿**库里已有的 `share_id`** 当水位线 —— 这一页里只要出现**一个见过的分享**,
+    就说明已经接上历史、不必再翻。稳态下(每轮都能看到上一轮的分享)**不会多花任何请求**;
+    只有"整页都是新分享"这个真·漏消息信号出现时才往回翻。`direction=1` = 往更旧翻(实测确认)。
+    """
+    page = group_records(group_id)
+    merged = list(page)
+    for _ in range(_MAX_CATCHUP_PAGES - 1):
+        shares = extract_shares(page, group_id, gname)
+        if not shares or any(s["share_id"] in known_share_ids for s in shares):
+            break                                   # 已接上水位线(或这页没有分享),不必再翻
+        ids = [r.get("record_id") or r.get("id") for r in page]
+        oldest = min((i for i in ids if i), default=None)
+        if not oldest:
+            break
+        try:
+            page = group_records(group_id, record_id=oldest, direction=1)
+        except XunleiGroupError as exc:
+            # 补翻失败**不拖垮整轮**:最新一页已经拿到手,顶多少补几条历史。
+            logger.warning("迅雷群 %s 补翻失败(不影响本页):%s", group_id, exc)
+            break
+        if not page:
+            break
+        merged.extend(page)
+    return merged
+
+
 def sync_group_shares(session, user_id: int, group_ids: list[str] | None = None,
                       settings=None) -> dict:
     """扫一轮群消息,**把没见过的分享登记成 pending**(不转存)。
@@ -254,7 +297,8 @@ def sync_group_shares(session, user_id: int, group_ids: list[str] | None = None,
     for group in groups:
         gid, gname = group["group_id"], group.get("name") or ""
         try:
-            records = group_records(gid)
+            # ⚠️ 走带补翻的版本:只拉最新一页会在"消息超过 20 条的空档"里**静默丢分享**
+            records = _records_with_catchup(gid, gname, known)
         except XunleiGroupError as exc:
             # 单个群拉不到**不该中断整轮**,但**必须计数**:全群失败时"被挡住"与
             # "群里今天真没新分享"在运行记录里长得一样(2026-10-03 修)。
