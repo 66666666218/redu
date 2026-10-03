@@ -400,3 +400,25 @@ def test_push_leads_routes_by_platform(monkeypatch) -> None:
     dl.push_leads([{"mark": "甲", "title": "t", "url": "u", "author": "", "keyword": ""}],
                   _Settings(), platform="douyin")
     assert sent["webhook"] == "https://example.com/douhot"  # 抖音仍走历史的 douhot 群
+
+
+def test_apply_kouling_survives_dead_xunlei_credentials(session, monkeypatch) -> None:
+    """⚠️ 迅雷登录态失效(`resolve` 抛)时,**线索照推**,只是标成"未解析"。
+
+    实测 2026-10-03:迅雷 refresh token 失效(`invalid_grant`),而 `apply_kouling` 原本
+    没有兜底 → 整轮 `douyin_leads` 记 failed、**连卡片都推不出去**。可是"发现线索"和
+    "能不能转存"是两件事:转存挂了,线索本身仍然有值(人要看的)。
+    """
+    from app.services import xunlei_kouling as kk
+
+    monkeypatch.setattr(kk, "known_koulings", lambda s, u: set())
+
+    def _boom(m):
+        raise RuntimeError("迅雷刷新 token 失败:{'error': 'invalid_grant'}")
+
+    monkeypatch.setattr(kk, "resolve", _boom)
+    out = dl.apply_kouling(_leads("三岁宝库", "白泽的梦"), session, 1, _Settings())
+    assert len(out) == 2                                   # 线索一条没丢
+    assert all(x["kouling"]["kind"] == "error" for x in out)
+    line = dl._kouling_line(out[0])
+    assert "迅雷登录态失效" in line and "invalid_grant" in line

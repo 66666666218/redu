@@ -205,11 +205,71 @@ def group_keywords(session, user_id: int, top: int = 3, days: int = 7) -> list[s
     return words
 
 
-def search_keywords(session, user_id: int, top: int, settings) -> list[str]:
-    """本轮抖音反查用的搜索词 = **群组新资源**(优先) + 公众号已验证资源。
+# 热榜里明显不是"可搜的资源"的词:泛词/时事/情绪。**只做便宜且不会误伤的两道**
+# (长度 + 这张小表),剩下的交给**搜索结果自己筛** —— 见 `hot_seed_words` 的说明。
+_HOT_STOP = {"搞笑视频", "今日金价", "手势舞", "新闻", "直播", "热门", "推荐", "视频"}
+_HOT_MAX_LEN = 8          # 作品/资源名一般短;事件句常更长(「张美娥为什么不早说」9 字)
 
-    两路都要:群组的词**新鲜**(刚有人要),公众号的词**被验证过**(同链多号同发)。
+
+def hot_seed_words(settings, limit: int = 3) -> list[str]:
+    """**外部种子**:抖音热点宝的搜索榜/话题榜 → 当搜索词。取不到就返回 `[]`(绝不抛)。
+
+    **为什么这是"真正的自主发现"**:此前所有种子都来自**我们已知的东西**(群组里的资源名、
+    资源库里的资源名)—— 本质是"在已知圈子里向外扩散",起点永远是我们已经知道的。
+    热榜词**不来自我们的数据**,它来自"抖音此刻什么火",所以才可能撞见我们没听说过的东西。
+
+    **为什么不写复杂筛选**(2026-10-03):热榜里大量是事件/时事(国足0-5巴勒斯坦、EDG发文道歉),
+    想用规则分辨"作品名 vs 事件句"非常容易过拟合;而**搜索本身就是最好的筛子** ——
+    搜不出《口令》的词自然沉掉,不需要我们先猜对。代价是每个废词一次搜索(约 90 秒),
+    所以 `limit` 要小(默认 3),且用长度 + 小黑名单挡掉最明显的那批。
+
+    这条链**帮不到**的:它只找**有推广号在发**的资源。热榜词若没人做资源,就是白搜一次。
+    """
+    n = int(limit or 0)
+    if n <= 0 or not getattr(settings, "douyin_leads_hot_keywords", 0):
+        return []
+    from pathlib import Path
+
+    from app.services import douhot
+
+    cookie_file = Path(getattr(settings, "douhot_cookie_file", "data/douhot_cookie.txt"))
+    try:
+        cookie = cookie_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        logger.info("热榜种子跳过:读不到抖音热点宝 Cookie(%s)", cookie_file)
+        return []
+    if not cookie:
+        return []
+    words: list[str] = []
+    for fetch, label in ((douhot.fetch_search_words, "搜索榜"), (douhot.fetch_topic_words, "话题榜")):
+        try:
+            rows = fetch(cookie, settings)
+        except Exception:  # noqa: BLE001 - 热榜拿不到不该拖垮线索链
+            logger.warning("热榜种子:%s 取词失败,跳过", label, exc_info=True)
+            continue
+        for r in rows or []:
+            w = str(r.get("title") or r.get("key_word") or r.get("challenge_name") or "").strip()
+            if not w or len(w) > _HOT_MAX_LEN or w in _HOT_STOP or w in words:
+                continue
+            words.append(w)
+    out = words[:n]
+    if out:
+        logger.info("热榜种子(外部输入):%s", "、".join(out))
+    return out
+
+
+def search_keywords(session, user_id: int, top: int, settings,
+                    hot: list[str] | None = None) -> list[str]:
+    """本轮抖音反查用的搜索词 = **群组新资源**(优先) + 公众号已验证资源 + **热榜外部种子**。
+
+    前两路都要:群组的词**新鲜**(刚有人要),公众号的词**被验证过**(同链多号同发)。
     去重后按 `top` 截断 —— 每个词一次抖音搜索,词越多越慢。
+
+    `hot` 由 `hot_seed_words()` 取好传进来,**不在这里取**:那是网络调用,而本函数是**纯 DB**
+    的(`pan_discovery` 也用它),别让一个本地函数偷偷出网。
+
+    `top` 只管**已知词**那条路的额度;热榜种子**额外附加**在末尾 —— 抖音搜一个词只要几秒
+    (实测 3 个词一轮 83 秒),没必要让外部种子和已知词互相挤位置。
 
     ⚠️ **不放品牌词**(2026-10-02 用户澄清):这条链的目的是"**发现新资源**",
     不是"看谁在提我们的牌子";品牌词是用在**推送侧**把别人的名字换成我们的(见
@@ -219,10 +279,14 @@ def search_keywords(session, user_id: int, top: int, settings) -> list[str]:
 
     n_group = int(getattr(settings, "douyin_leads_group_keywords", 3) or 0)
     kws = group_keywords(session, user_id, top=n_group)
-    for w in _keywords_from_library(session, user_id, max(1, top - len(kws))):
+    for w in _keywords_from_library(session, user_id, max(1, int(top) - len(kws))):
         if w not in kws:
             kws.append(w)
-    return kws[:top]
+    kws = kws[: int(top)]
+    for w in (hot or []):
+        if w and w not in kws:
+            kws.append(w)
+    return kws
 
 
 def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[dict]:
@@ -244,6 +308,7 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
         return leads
     budget = int(getattr(settings, "douyin_leads_transfer_limit", 3) or 0)
     already = kk.known_koulings(session, user_id)
+    down: list[str] = []          # 凭据级失败(如 refresh token 失效):影响全部口令,只报一次
     for ld in leads:
         mark = (ld.get("mark") or "").strip()
         if not mark:
@@ -251,12 +316,26 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
         if mark in already:
             ld["kouling"] = {"kind": "share", "status": "already"}
             continue
-        info = kk.resolve(mark)
+        try:
+            info = kk.resolve(mark)
+        except Exception as exc:  # noqa: BLE001 - 单条解不出不该炸掉整轮线索
+            # ⚠️ **2026-10-03 实测踩到**:迅雷 refresh token 失效时 `_headers()` 直接抛,
+            # 而这里原本没有兜底 → 整轮 `douyin_leads` 记 failed,**连卡片都推不出去**。
+            # 可是"发现线索"和"能不能转存"是两件事:转存挂了,线索本身仍然有值(人要看的)。
+            # 所以这里兜住,把原因写进条目,卡片照推(会显示"⚠️未解析")。
+            ld["kouling"] = {"kind": "error", "message": str(exc)[:80]}
+            down.append(str(exc)[:60])
+            continue
         if info["kind"] == kk.KIND_NONE:
             ld["kouling"] = {"kind": "none"}
             continue
         if info["kind"] == kk.KIND_GROUP:
-            res = kk.ingest(session, user_id, mark)
+            try:
+                res = kk.ingest(session, user_id, mark)
+            except Exception as exc:  # noqa: BLE001 - 同上,别让一条炸掉整轮
+                ld["kouling"] = {"kind": "error", "message": str(exc)[:80]}
+                down.append(str(exc)[:60])
+                continue
             ld["kouling"] = {"kind": "group", "status": res.get("status"),
                              "group_id": info["group_id"]}
             continue
@@ -265,11 +344,20 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
                              "share_url": info["share_url"]}
             continue
         budget -= 1
-        res = kk.ingest(session, user_id, mark)
+        try:
+            res = kk.ingest(session, user_id, mark)
+        except Exception as exc:  # noqa: BLE001
+            ld["kouling"] = {"kind": "error", "message": str(exc)[:80]}
+            down.append(str(exc)[:60])
+            continue
         ld["kouling"] = {"kind": "share", "status": res.get("status"),
                          "our_url": res.get("our_url") or "",
                          "share_url": info["share_url"],
                          "message": res.get("message") or ""}
+    if down:
+        # 同一条原因会重复 N 次 → 只报一次,并说清"是凭据挂了,不是线索没价值"
+        logger.warning("口令解析/转存本轮失败 %d 条,原因:%s(线索照推,只是没自动搬)",
+                       len(down), down[0])
     return leads
 
 
@@ -293,6 +381,8 @@ def _kouling_line(ld: dict) -> str:
         return "👥 指向**群组**,已加群(群里的资源由群采集自动收)"
     if kind == "none":
         return "· 未解析出资源(可能只是剧名/普通词)"
+    if kind == "error":
+        return f"⚠️ **没能解析/转存**(通常是我方迅雷登录态失效,不是你网络问题):`{info.get('message') or ''}`"
     if kind == "off":
         return "· 自动转存已关闭,仅作线索"
     return ""
@@ -382,8 +472,11 @@ def douyin_leads_tick(settings=None) -> int:
     total = 0
     try:
         for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
-            # 词来自**群组新资源 + 公众号已验证资源**(见 search_keywords 的注释);各平台共用
-            kws = search_keywords(db, uid, top, settings)
+            # 词来自**群组新资源 + 公众号已验证资源**(见 search_keywords 的注释);各平台共用。
+            # **热榜外部种子**只喂给抖音:它是"找《口令》"那条路用的;小红书/快手没有口令,
+            # 拿热榜词去搜只是白开一次浏览器。
+            hot = hot_seed_words(settings) if "douyin" in plats else []
+            kws = search_keywords(db, uid, top, settings, hot=hot)
             if not kws:
                 continue
             for plat in plats:
