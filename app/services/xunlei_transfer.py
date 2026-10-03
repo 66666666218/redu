@@ -556,13 +556,27 @@ def share_files(file_ids: list[str], expiration_days: str = "7",
         return {"status": "failed", "message": str(exc)[:200]}
 
 
+class XunleiDriveError(RuntimeError):
+    """迅雷网盘接口**硬失败**(HTTP 非 200 / 网络异常 / 续期失败)。
+
+    ⚠️ **为什么必须与"目录是空的"分开**(2026-10-03 全项目审查):此前 `list_files` 把所有
+    失败吞成 `[]`,于是 `xunlei_sync` 把"**凭据失效/网络断了**"当成"**盘里没有资源**",
+    **每天记 `success(扫0 新0)`** —— 资源静默丢失且无人知。这是本项目已修 4 次的
+    静默失败(闲鱼/知乎/MediaCrawler/这里)同型问题的第 5 例。
+    **判据**:空目录是 `HTTP 200 + files: []`(返回空表);其余一律是硬失败(抛本异常)。
+    """
+
+
 def list_files(parent_id: str = "", cred: dict | None = None, limit: int = 200,
                include_trashed: bool = False) -> list[dict]:
-    """列某个目录下的文件/文件夹(扫盘用)。失败返回空表。
+    """列某个目录下的文件/文件夹(扫盘用)。**硬失败抛 `XunleiDriveError`**,不再返回空表。
 
     ⚠️ **必须过滤 `trashed`**(2026-10-02 实测踩过):接口**默认把回收站里的条目一起返回**
     —— 删掉一个文件夹后,它**整棵子树**(实测 2000+ 项)都会带着 `trashed=true` 混在列表里。
     不过滤的话,扫盘作业会把**已删除的文件当成新资源**登记、还去给它建分享链(必失败)。
+
+    ⚠️ **没配凭据时仍返回 `[]`**(调用方 `xunlei_sync` 会先查 `_credentials()` 再决定;
+    把它也变成抛错会让"没配迅雷"这种正常部署形态变成硬报错)。
     """
     cred = cred or _credentials()
     if not cred:
@@ -575,15 +589,19 @@ def list_files(parent_id: str = "", cred: dict | None = None, limit: int = 200,
                                  "with_audit": "true"})
         data = _json(r)                       # 先解析:captcha_invalid 是 400,别漏掉自愈
         if r.status_code != 200:
-            return []
+            # 空目录是 200 + files:[](下面正常返回空表);走到这里就是**硬失败** ——
+            # 401/403 凭据失效、5xx 上游故障,统统不能装作"目录是空的"。
+            raise XunleiDriveError(f"HTTP {r.status_code}: {str(data)[:120]}")
         files = data.get("files") or []
         return files if include_trashed else [f for f in files if not f.get("trashed")]
 
     try:
         return _with_captcha_retry(_once)
-    except Exception:  # noqa: BLE001 - 探针类调用,失败即空(含续期失败)
+    except XunleiDriveError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 包成自己的异常类型,好让调用方区分
         logger.exception("迅雷列目录失败")
-        return []
+        raise XunleiDriveError(f"列目录失败:{type(exc).__name__}: {str(exc)[:120]}") from exc
 
 
 def transfer_and_share(share_url: str, parent_id: str = "", settings=None) -> dict:

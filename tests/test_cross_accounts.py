@@ -330,3 +330,85 @@ def test_search_bilibili_videos_raises_on_risk_control(monkeypatch) -> None:
     with pytest.raises(cp.SearchSourceError) as ei:
         cp.search_bilibili_videos("网盘资源")
     assert "-412" in str(ei.value)
+
+
+# ---------------------------------------------------------------- 静默失败修复(2026-10-03)
+
+def test_search_bilibili_raises_on_risk_control(monkeypatch) -> None:
+    """B站 `code=-412`(风控)必须**抛**,不能返回空列表。
+
+    否则"被拦"与"真没新号"在运行记录里长得一模一样 —— 与已修的 `_search_zhihu` 对齐。
+    """
+    monkeypatch.setattr(cp, "_bili_signed_get",
+                        lambda *a, **k: {"code": -412, "message": "请求被拦截"})
+    with pytest.raises(cp.SearchSourceError) as ei:
+        cp._search_bilibili("", "网盘资源")
+    assert "-412" in str(ei.value)
+
+
+def test_discover_raises_when_every_search_fails(session, monkeypatch) -> None:
+    """⚠️ **全部搜索都失败 → 抛**,不能返回 `ok(新增0)`(2026-10-03 修)。
+
+    被限流/登录失效时,`ok(新增0)` 与"真的没有新号"完全无法区分 —— 账号发现会静默停摆。
+    """
+    def _boom(ck, kw, limit=20):
+        raise cp.SearchSourceError("B站返回 code=-412 请求被拦截")
+
+    monkeypatch.setattr(cp, "SEARCHERS", {"bilibili": _boom})
+    monkeypatch.setattr(cp, "_account_keywords", lambda s: ["词A", "词B"])
+    monkeypatch.setattr("app.services.cookie_store.get_cookies", lambda s, u: {})
+    with pytest.raises(cp.SearchSourceError) as ei:
+        cp.discover_cross_accounts(session, 1, keywords=["占位"])
+    assert "全部失败" in str(ei.value)
+
+
+def test_discover_keeps_going_when_some_searches_fail(session, monkeypatch) -> None:
+    """**部分**失败要保住其余产出(限速是常态,不能一失败就整轮白跑),并把失败数报出来。"""
+    calls = {"n": 0}
+
+    def _flaky(ck, kw, limit=20):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise cp.SearchSourceError("超时")
+        return [{"uid": f"u{calls['n']}", "name": "网盘资源商行", "url": "",
+                 "snippet": "", "pan_link": "", "looks_like_pan": True}]
+
+    monkeypatch.setattr(cp, "SEARCHERS", {"bilibili": _flaky})
+    monkeypatch.setattr(cp, "_account_keywords", lambda s: ["词A", "词B", "词C"])
+    monkeypatch.setattr("app.services.cookie_store.get_cookies", lambda s, u: {})
+    out = cp.discover_cross_accounts(session, 1, keywords=["占位"])
+    assert out["status"] == "ok" and out["failed"] == 1 and out["new"] == 2
+
+
+def test_cross_account_tick_records_run(session, monkeypatch) -> None:
+    """⚠️ 这个作业**此前根本不写运行记录** —— 于是"它到底跑没跑"在系统里查不到。
+
+    与 `xunlei_sync` 同型的可见性缺口(2026-10-03 一起补)。
+    """
+    from sqlalchemy import select
+    from app.db.models import RunRecord
+    import app.db as db_mod
+
+    monkeypatch.setattr(db_mod, "get_session_local", lambda: (lambda: session))
+    monkeypatch.setattr(cp, "discover_cross_accounts",
+                        lambda *a, **k: {"status": "ok", "found": 3, "new": 2, "failed": 0})
+    cp.cross_account_tick()
+    runs = session.scalars(select(RunRecord).where(RunRecord.kind == "cross_account_discover")).all()
+    assert len(runs) == 1 and runs[0].status == "success" and "新增2" in runs[0].detail
+
+
+def test_cross_account_tick_records_failure(session, monkeypatch) -> None:
+    """全失败(现在会抛 `SearchSourceError`)必须在运行记录里体现为 `failed`。"""
+    from sqlalchemy import select
+    from app.db.models import RunRecord
+    import app.db as db_mod
+
+    monkeypatch.setattr(db_mod, "get_session_local", lambda: (lambda: session))
+
+    def _boom(*a, **k):
+        raise cp.SearchSourceError("2 次搜索全部失败:B站 code=-412")
+
+    monkeypatch.setattr(cp, "discover_cross_accounts", _boom)
+    cp.cross_account_tick()
+    runs = session.scalars(select(RunRecord).where(RunRecord.kind == "cross_account_discover")).all()
+    assert len(runs) == 1 and runs[0].status == "failed" and "-412" in runs[0].detail

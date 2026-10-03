@@ -239,9 +239,14 @@ def _search_bilibili(cookie: str, keyword: str, limit: int = 20) -> list[dict]:
         return []
     try:
         payload = _bili_signed_get("bili_user", keyword, cookie)
-    except Exception as exc:  # noqa: BLE001 - 单平台搜索失败不该炸整轮发现
-        logger.warning("B站搜索失败(%s):%s", keyword, exc)
-        return []
+    except Exception as exc:  # noqa: BLE001 - 包成自己的异常类型,好让调用方区分
+        raise SearchSourceError(f"B站请求异常:{exc}") from exc
+    if not payload:
+        raise SearchSourceError("B站搜索不可用(wbi mixin 取不到)")
+    if payload.get("code") != 0:
+        # 风控 -412 / 频率 -352 都会落到这里 —— 必须报错,别跟"搜到 0 条"混为一谈
+        # (2026-10-03 修:此前这里 `return []`,于是"被拦"在运行记录里长得像"真没新号")。
+        raise SearchSourceError(f"B站返回 code={payload.get('code')} {str(payload.get('message'))[:60]}")
     out: list[dict] = []
     for item in ((payload.get("data") or {}).get("result") or [])[:max(1, min(limit, 50))]:
         mid = str(item.get("mid") or "").strip()
@@ -327,12 +332,20 @@ def discover_cross_accounts(session: Session, user_id: int, settings=None,
              for p in platforms if p in ACCOUNT_PLATFORMS]
 
     found, new, items = 0, 0, []
+    tried = 0
+    failed: list[str] = []
+    last_err = ""
     for idx, (plat, kw) in enumerate(jobs):
         if idx:
             time.sleep(_REQ_GAP)   # 限速:每个请求之间都留间隔(用户要求"一次不要访问太多")
+        tried += 1
         try:
             hits = SEARCHERS[plat](cookies.get(plat, ""), kw, limit=20)
-        except Exception:  # noqa: BLE001 - 单平台失败不影响其余
+        except Exception as exc:  # noqa: BLE001 - 单平台失败不影响其余
+            # ⚠️ 单次失败不该炸整轮,但**必须计数**:全失败时"被限流/登录失效"与
+            # "真的没有新号"长得一模一样(2026-10-03 修,与已修的三条发现链对齐)。
+            failed.append(f"{plat}/{kw}")
+            last_err = f"{plat}: {type(exc).__name__}: {str(exc)[:80]}"
             logger.exception("跨平台搜索失败 %s/%s", plat, kw)
             continue
         for h in hits:
@@ -364,10 +377,16 @@ def discover_cross_accounts(session: Session, user_id: int, settings=None,
         except Exception:  # noqa: BLE001 - 工具缺依赖/失效都不影响直连型平台
             logger.exception("MediaCrawler 发现失败")
     session.commit()
+    if tried and len(failed) == tried:
+        # **全部搜索都失败** → 这不是"没有新号",是链路被挡住(限流/登录失效/风控)。
+        # 必须抛出去,否则会记成 `success(新增0)` —— 与"真没新号"无法区分(2026-10-03 修)。
+        raise SearchSourceError(f"{tried} 次搜索全部失败:{last_err}")
+    if failed:
+        logger.warning("跨平台发现:%d/%d 次搜索失败(其余照常)", len(failed), tried)
     logger.info("跨平台发现:关键词 %d × 直连平台 %d → 命中 %d,新增 %d",
                 len(keywords), len(platforms), found, new)
     return {"status": "ok", "keywords": keywords, "platforms": platforms,
-            "found": found, "new": new, "items": items}
+            "found": found, "new": new, "items": items, "failed": len(failed)}
 
 
 def _account_keywords(settings) -> list[str]:
@@ -495,12 +514,20 @@ def cross_account_tick(settings=None) -> int:
     total = 0
     try:
         for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
+            from app.services.tenant_base import _record_run
+
             try:
                 out = discover_cross_accounts(db, uid, settings=settings)
                 total += out.get("new", 0)
-            except Exception:  # noqa: BLE001 - 单用户失败不影响其余
+                note = (f"命中{out.get('found', 0)} 新增{out.get('new', 0)}"
+                        + (f" 失败{out['failed']}" if out.get("failed") else ""))
+                _record_run(db, uid, "cross_account_discover", "success", note)
+                db.commit()
+            except Exception as exc:  # noqa: BLE001 - 单用户失败不影响其余
                 db.rollback()
                 logger.exception("跨平台发现失败 user=%s", uid)
+                _record_run(db, uid, "cross_account_discover", "failed", str(exc)[:200])
+                db.commit()
     finally:
         db.close()
     return total

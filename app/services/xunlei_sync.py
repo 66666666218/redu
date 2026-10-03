@@ -93,22 +93,32 @@ def sync_xunlei_resources(session, user_id: int, settings=None) -> dict:
     from app.services import xunlei_transfer as xt
 
     if not xt._credentials():
-        return {"status": "no_cred", "scanned": 0, "new": 0, "items": []}
-    root = xt.list_files("")                            # 根目录
-    if not root:
-        return {"status": "empty", "scanned": 0, "new": 0, "items": []}
+        return {"status": "no_cred", "scanned": 0, "new": 0, "items": [],
+                "message": "未配迅雷凭据"}
+    try:
+        root = xt.list_files("")                        # 根目录
+        if not root:
+            return {"status": "empty", "scanned": 0, "new": 0, "items": []}
 
-    known = set(session.scalars(
-        select(XunleiResource.fid).where(XunleiResource.user_id == user_id)).all())
-    # ⚠️ **跨源去重**(2026-10-02 实测:两表 fid 交集 10 条):群采集 / 口令解析转存进来的
-    # 资源已经在 `xunlei_group_shares` 里登记过(自带我方分享链),扫盘再登记一遍会
-    # ① **资源库重复展示**同一份资源;② 给同一份资源**重新生成一条分享链**(白占分享额度)。
-    known |= set(session.scalars(
-        select(XunleiGroupShare.fid).where(
-            XunleiGroupShare.user_id == user_id,
-            XunleiGroupShare.fid != "").distinct()).all())
-    new: list[dict] = []
-    _collect_resources(xt, session, user_id, "", 0, known, new)
+        known = set(session.scalars(
+            select(XunleiResource.fid).where(XunleiResource.user_id == user_id)).all())
+        # ⚠️ **跨源去重**(2026-10-02 实测:两表 fid 交集 10 条):群采集 / 口令解析转存进来的
+        # 资源已经在 `xunlei_group_shares` 里登记过(自带我方分享链),扫盘再登记一遍会
+        # ① **资源库重复展示**同一份资源;② 给同一份资源**重新生成一条分享链**(白占分享额度)。
+        known |= set(session.scalars(
+            select(XunleiGroupShare.fid).where(
+                XunleiGroupShare.user_id == user_id,
+                XunleiGroupShare.fid != "").distinct()).all())
+        new: list[dict] = []
+        _collect_resources(xt, session, user_id, "", 0, known, new)
+    except xt.XunleiDriveError as exc:
+        # ⚠️ **硬失败不能当成"盘是空的"**(2026-10-03 修):凭据失效/网络断时资源**还在盘里**,
+        # 而旧实现返回空表 → 上层记 `success(扫0 新0)`,静默丢失且无人知。
+        # 注意这里**不 commit**:扫到一半失败时,半截结果落库会让下次"已登记"误判。
+        session.rollback()
+        logger.warning("迅雷扫盘失败:%s", exc)
+        return {"status": "failed", "scanned": 0, "new": 0, "items": [],
+                "message": str(exc)[:200]}
     session.commit()
     logger.info("迅雷盘同步:根目录 %d 项 → 新登记 %d", len(root), len(new))
     return {"status": "ok", "scanned": len(root), "new": len(new), "items": new}
@@ -163,8 +173,20 @@ def xunlei_sync_tick(settings=None) -> int:
                 total += out.get("new", 0)
                 if out.get("items"):
                     push_new_resources(out["items"], settings)
-                _record_run(db, uid, "xunlei_sync", "success",
-                            f"扫{out.get('scanned', 0)} 新{out.get('new', 0)}")
+                # ⚠️ **按实际 status 记账**(2026-10-03 修):`failed`(凭据/网络)与 `no_cred`
+                # **绝不能记 success** —— 旧实现无条件记 `success(扫0 新0)`,于是"扫盘早就断了"
+                # 在运行记录里跟"盘里确实没资源"长得一模一样,静默了整整一天。
+                st = str(out.get("status") or "")
+                if st == "ok":
+                    run_status = "success"
+                    note = f"扫{out.get('scanned', 0)} 新{out.get('new', 0)}"
+                elif st in ("failed", "no_cred"):
+                    run_status = "failed"
+                    note = f"{st}: {str(out.get('message') or '')[:140]}"
+                else:                      # empty = 盘真的空,这是正常结果不是错误
+                    run_status = "success"
+                    note = "扫0 新0(盘内无资源)"
+                _record_run(db, uid, "xunlei_sync", run_status, note)
                 db.commit()
             except Exception as exc:  # noqa: BLE001 - 单用户失败不影响其余
                 db.rollback()

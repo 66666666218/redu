@@ -121,3 +121,63 @@ def test_sync_without_cred_is_noop(session, monkeypatch) -> None:
 
     monkeypatch.setattr(xt_mod, "_credentials", staticmethod(lambda settings=None: {}))
     assert xs.sync_xunlei_resources(session, 1)["status"] == "no_cred"
+
+
+# ---------------------------------------------------------------- 静默失败修复(2026-10-03)
+
+def test_sync_reports_failure_when_listing_raises(session, monkeypatch) -> None:
+    """⚠️ **硬失败不能当成"盘是空的"**(2026-10-03 修)。
+
+    此前 `list_files` 失败返回 `[]` → 这里返回 `status="empty"` → tick 记 `success(扫0 新0)`,
+    于是"凭据失效/网络断"在运行记录里跟"盘里真没资源"长得**一模一样**,静默了一整天。
+    """
+    from app.services import xunlei_transfer as xt
+
+    monkeypatch.setattr(xt, "_credentials", lambda *a, **k: {"access_token": "x"})
+    monkeypatch.setattr(xt, "list_files", lambda *a, **k: (_ for _ in ()).throw(
+        xt.XunleiDriveError("HTTP 403: captcha_invalid")))
+    out = xs.sync_xunlei_resources(session, 1)
+    assert out["status"] == "failed" and "403" in out["message"]
+
+
+def test_sync_still_ok_when_disk_really_empty(session, monkeypatch) -> None:
+    """**真·空盘**仍是 `empty`(不是 failed)—— 别把修复做成一刀切,那会让正常空盘天天告警。"""
+    from app.services import xunlei_transfer as xt
+
+    monkeypatch.setattr(xt, "_credentials", lambda *a, **k: {"access_token": "x"})
+    monkeypatch.setattr(xt, "list_files", lambda *a, **k: [])
+    assert xs.sync_xunlei_resources(session, 1)["status"] == "empty"
+
+
+def test_tick_records_failed_not_success_on_hard_failure(session, monkeypatch) -> None:
+    """**记 `failed` 而不是 `success`** —— 这才是那条 bug 的要害。
+
+    旧实现无条件 `_record_run(..., "success", f"扫0 新0")`:盘爆了也记成功,
+    所以"扫盘其实早就断了"在运行记录里查不出来。
+    """
+    from sqlalchemy import select
+    from app.db.models import RunRecord
+    import app.db as db_mod
+
+    monkeypatch.setattr(db_mod, "get_session_local", lambda: (lambda: session))
+    monkeypatch.setattr(xs, "sync_xunlei_resources",
+                        lambda *a, **k: {"status": "failed", "scanned": 0, "new": 0,
+                                         "items": [], "message": "HTTP 403: captcha_invalid"})
+    xs.xunlei_sync_tick()
+    runs = session.scalars(select(RunRecord).where(RunRecord.kind == "xunlei_sync")).all()
+    assert len(runs) == 1 and runs[0].status == "failed" and "403" in runs[0].detail
+
+
+def test_tick_records_no_cred_as_failed(session, monkeypatch) -> None:
+    """没配凭据也**不算成功** —— 它在运行记录里同样会伪装成"扫0 新0 一切正常"。"""
+    from sqlalchemy import select
+    from app.db.models import RunRecord
+    import app.db as db_mod
+
+    monkeypatch.setattr(db_mod, "get_session_local", lambda: (lambda: session))
+    monkeypatch.setattr(xs, "sync_xunlei_resources",
+                        lambda *a, **k: {"status": "no_cred", "scanned": 0, "new": 0,
+                                         "items": [], "message": "未配迅雷凭据"})
+    xs.xunlei_sync_tick()
+    runs = session.scalars(select(RunRecord).where(RunRecord.kind == "xunlei_sync")).all()
+    assert len(runs) == 1 and runs[0].status == "failed"

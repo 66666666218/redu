@@ -379,3 +379,74 @@ def test_is_dead_share_error_recognizes_banned_or_expired() -> None:
     assert xt.is_dead_share_error("分享状态异常:{'share_status': 'share_overdue'}")
     assert not xt.is_dead_share_error("{'error': 'file_space_not_enough'}")
     assert not xt.is_dead_share_error("")
+
+
+def _stub_request_path(monkeypatch, xt) -> None:
+    """把"请求前"的凭据处理全打桩,让测试**真的走到那行 HTTP 判断**。
+
+    ⚠️ 不打桩的话会先炸在 `_fresh_cred`(缺 refresh_token)上,测试**因错的原因通过** ——
+    那只证明"会抛异常",不证明"非 200 被判成硬失败"。
+    """
+    monkeypatch.setattr(xt, "_credentials", lambda *a, **k: {"access_token": "x"})
+    monkeypatch.setattr(xt, "_fresh_cred", lambda c: c)
+    monkeypatch.setattr(xt, "_drive_headers", lambda *a, **k: {})
+
+
+def test_list_files_raises_on_http_error(monkeypatch) -> None:
+    """**非 200 = 硬失败**(空目录是 `200 + files: []`)。
+
+    2026-10-03 修:此前非 200 直接 `return []`,于是凭据失效/上游故障被当成"目录是空的"。
+    这里用**非 captcha** 的 500 走状态码分支(`captcha_invalid` 会先命中续期路径,见下一条)。
+    """
+    from app.services import xunlei_transfer as xt
+
+    _stub_request_path(monkeypatch, xt)
+
+    class _R:
+        status_code = 500
+
+        def json(self):
+            return {"error": "server_error"}
+
+    monkeypatch.setattr(xt.requests, "get", lambda *a, **k: _R())
+    with pytest.raises(xt.XunleiDriveError) as ei:
+        xt.list_files("")
+    assert "HTTP 500" in str(ei.value)          # 证明走的是**状态码分支**,不是别的异常
+
+
+def test_list_files_raises_when_captcha_renew_fails(monkeypatch) -> None:
+    """`captcha_invalid` 走"重铸→重试"路径;**续期也失败时同样是硬失败**,不能变空表。
+
+    这条覆盖的是另一条分支:`_json()` 在状态码判断**之前**就先抛 `_CaptchaExpired`。
+    """
+    from app.services import xunlei_transfer as xt
+
+    _stub_request_path(monkeypatch, xt)
+    monkeypatch.setattr(xt, "_renew_captcha", lambda: False)     # 续期失败
+
+    class _R:
+        status_code = 403
+
+        def json(self):
+            return {"error": "captcha_invalid", "error_description": "captcha_invalid"}
+
+    monkeypatch.setattr(xt.requests, "get", lambda *a, **k: _R())
+    with pytest.raises(xt.XunleiDriveError) as ei:
+        xt.list_files("")
+    assert "captcha_invalid" in str(ei.value)
+
+
+def test_list_files_returns_empty_for_truly_empty_dir(monkeypatch) -> None:
+    """真·空目录(200 + files: [])必须仍返回空表 —— 别把"失败"和"空"一起变成异常。"""
+    from app.services import xunlei_transfer as xt
+
+    _stub_request_path(monkeypatch, xt)
+
+    class _R:
+        status_code = 200
+
+        def json(self):
+            return {"files": []}
+
+    monkeypatch.setattr(xt.requests, "get", lambda *a, **k: _R())
+    assert xt.list_files("") == []
