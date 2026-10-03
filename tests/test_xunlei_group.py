@@ -15,7 +15,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db.database import Base
 from app.db import models  # noqa: F401
-from app.db.models import User, XunleiGroupShare
+from app.db.models import RunRecord, User, XunleiGroupShare
 from app.services import xunlei_group as xg
 
 
@@ -603,3 +603,61 @@ def test_tick_sends_internal_note_to_admin_only_when_needed(session, monkeypatch
     monkeypatch.setattr(xg, "transfer_pending", lambda *a, **k: dirty)
     xg.xunlei_group_tick()
     assert calls and "被闸门挡下" in calls[0][4] and "转存失败" in calls[0][4]
+
+
+class TestTransferFailuresSurface:
+    """⚠️ **转存失败必须反映到运行记录的状态里**(2026-10-04 修)。
+
+    实测:迅雷 `refresh_token` 失效 → 转存 5 条**全挂**,而作业每 20 分钟照报
+    `success(群9 新0 转存0)` —— 因为旧实现只看"群采集"的 status,`out['failed']` 被完全忽略。
+    采集只用缓存凭据、不需要新 token,**所以只有转存这一步会暴露**;
+    它一被吞掉,整条链断了也没人知道。
+    """
+
+    def _tick(self, session, monkeypatch, *, t_ok: int, t_bad: int, msg: str = ""):
+        monkeypatch.setattr(xg, "sync_group_shares",
+                            lambda *a, **k: {"status": "ok", "groups": 9, "new": 0})
+        monkeypatch.setattr(xg, "transfer_pending",
+                            lambda *a, **k: {"status": "ok", "picked": t_ok + t_bad,
+                                             "ok": t_ok, "failed": t_bad, "skipped": 0,
+                                             "message": msg, "items": []})
+        monkeypatch.setattr(xg, "push_new_shares", lambda *a, **k: None)
+        xg.xunlei_group_tick(self._S())
+        from sqlalchemy import select as _sel
+        return session.scalars(_sel(RunRecord).where(RunRecord.kind == "xunlei_group")
+                               .order_by(RunRecord.id.desc())).first()
+
+    class _S:
+        xunlei_group_enabled = True
+        xunlei_group_transfer_limit = 5
+        xunlei_transfer_max_usage_ratio = 0.9
+        # 转存失败时 tick 会往**管理群**推一条内部说明 —— 这里留空表示"没配群",
+        # `notify_incident` 会直接返回(否则 `webhook_for` 取 `settings.feishu_webhook` 会 AttributeError)
+        feishu_webhook = ""
+        feishu_webhook_admin = ""
+        feishu_secret = ""
+
+    def test_all_transfers_failing_is_recorded_as_failed(self, session, monkeypatch) -> None:
+        # `xunlei_group_tick` 用 get_session_local() 自建会话 → 指向测试库
+        import app.db as appdb
+        monkeypatch.setattr(appdb, "get_session_local",
+                            lambda: sessionmaker(bind=session.get_bind()))
+        row = self._tick(session, monkeypatch, t_ok=0, t_bad=5,
+                         msg="迅雷刷新 token 失败：invalid refresh token")
+        assert row.status == "failed", f"转存全失败却记成 {row.status}"
+        assert "转存全失败" in row.detail and "失败5" in row.detail
+
+    def test_partial_failures_are_recorded_as_partial(self, session, monkeypatch) -> None:
+        import app.db as appdb
+        monkeypatch.setattr(appdb, "get_session_local",
+                            lambda: sessionmaker(bind=session.get_bind()))
+        row = self._tick(session, monkeypatch, t_ok=2, t_bad=1, msg="某条失败")
+        assert row.status == "partial"
+        assert "部分转存失败" in row.detail
+
+    def test_no_failures_stays_success(self, session, monkeypatch) -> None:
+        import app.db as appdb
+        monkeypatch.setattr(appdb, "get_session_local",
+                            lambda: sessionmaker(bind=session.get_bind()))
+        row = self._tick(session, monkeypatch, t_ok=3, t_bad=0)
+        assert row.status == "success" and "失败0" in row.detail

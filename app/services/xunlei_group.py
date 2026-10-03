@@ -398,6 +398,7 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
     ratio = xt.quota_ratio()               # 只查一次,整批共用(别每条都打一次配额)
     ok_items: list[dict] = []
     failed = skipped = 0
+    first_err = ""          # 第一条失败原因 —— 带出去让运行记录**可照做**(见 tick 的状态判定)
     for row in rows:
         allowed, why, retryable = admit_transfer(row.title, settings=settings, ratio=ratio)
         if not allowed:
@@ -444,10 +445,11 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
             # ⚠️ 单条失败**不重试到底**:标 failed 留痕,避免每轮都拿它空转。
             row.status, row.message = "failed", msg[:200]
             failed += 1
+            first_err = first_err or msg[:160]
             logger.warning("迅雷群分享转存失败 %s:%s", row.title, row.message)
     session.commit()
     return {"status": "ok", "picked": len(rows), "ok": len(ok_items),
-            "failed": failed, "skipped": skipped, "items": ok_items}
+            "failed": failed, "skipped": skipped, "message": first_err, "items": ok_items}
 
 
 def list_group_shares(session, user_id: int, status: str = "", limit: int = 200) -> list[dict]:
@@ -540,13 +542,25 @@ def xunlei_group_tick(settings=None) -> int:
                 # 于是"群列表拉不到(凭据失效)"被记成"群0 新0 转存0",跟"今天群里真没新资源"
                 # 长得一模一样。`no_cred`/`failed` 都不算成功。
                 st = str(got.get("status") or "")
+                t_ok = int(out.get("ok", 0) or 0)
+                t_bad = int(out.get("failed", 0) or 0)
                 note = (f"群{got.get('groups', 0)} 新{got.get('new', 0)} "
-                        f"转存{out.get('ok', 0)} 跳过{out.get('skipped', 0)}")
+                        f"转存{t_ok} 跳过{out.get('skipped', 0)} 失败{t_bad}")
                 if got.get("failed_groups"):
                     note += f" 失败群{len(got['failed_groups'])}"
+                # ⚠️ **转存失败必须反映到状态里**(2026-10-04 修):旧实现只看 `got['status']`,
+                # 于是"凭据失效导致 5 条转存**全挂**"被记成 `success(转存0)` ——
+                # 和"今天群里真没新资源"长得**一模一样**。实测:迅雷 refresh_token 失效、
+                # 转存全失败,而作业每 20 分钟照报 success,**断了好几天没人知道**
+                # (采集只用缓存凭据、不需要新 token,所以只有转存这一步会暴露)。
+                why = str(out.get("message") or "")[:140]
                 if st in ("failed", "no_cred"):
                     _record_run(db, uid, "xunlei_group", "failed",
                                 f"{st}: {str(got.get('message') or '')[:140]} {note}")
+                elif t_bad and not t_ok:
+                    _record_run(db, uid, "xunlei_group", "failed", f"转存全失败: {why} {note}")
+                elif t_bad:
+                    _record_run(db, uid, "xunlei_group", "partial", f"部分转存失败: {why} {note}")
                 else:
                     _record_run(db, uid, "xunlei_group", "success", note)
                 db.commit()
