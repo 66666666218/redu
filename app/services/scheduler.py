@@ -470,8 +470,10 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         (agent_tick_all_users, "*/30 * * * *", {"minute": "*/30"}, "early_agent_tick", "hotspot"),
         (douhot_window_tick, _get_settings().douhot_window_cron, {"minute": "*/20"}, "douhot_window_tick", "hotspot"),
         # wr_skey 短效且轮换:主动换新则永不过期;失败即时推飞书。
-        # 计划读 settings.weread_refresh_cron(默认对齐 4 个监听定点前 10 分钟:
-        # renewal=换新会话,mp/articles 列表只在会话初期可用,每轮赶上窗口)。
+        # 计划读 settings.weread_refresh_cron(默认对齐 4 个监听定点前 10 分钟)。
+        # ⚠️ 当年"对齐定点"的理由是"renewal 换新会话后 mp/articles 列表能列一会儿" ——
+        # 2026-10-04 实测**该窗口不存在**(续期 success+verified 后立刻再拉仍恒 -2041)。
+        # 对齐现只为"每轮监听都拿到最新鲜的会话",**别再拿它去赌列表可用**。
         # ⚠️ 此前这里硬编码 "50 */6 * * *",settings 的对齐改动从未生效(2026-09-28 修复)
         (weread_refresh_tick, _get_settings().weread_refresh_cron, {"minute": 50, "hour": "*/6"}, "weread_refresh", "wechat"),
         # 选题 Agent 已并入推送时段表(默认 09:10/14:10/20:40)

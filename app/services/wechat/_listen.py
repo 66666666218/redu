@@ -143,14 +143,18 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
                     breaker: dict | None = None, shelf_ts: str | int | None = None,
                     banned_out: dict[str, str] | None = None
                     ) -> tuple[list[WechatArticle], bool]:
-    """微信读书单号采集:**cover 最新一篇(稳定可用)→ mp/articles 列表(可选,常被限权)。
+    """微信读书单号采集:**只取 cover 最新一篇**(唯一还活着的路径)。
 
-    实测(2026-09):mp/articles 仅在会话建立初期可用,数小时后被服务端限权(-2041),
-    cover 始终可用——故 cover 为主路径,mp/articles 失败静默跳过不影响监听。
-    **但"只有 cover"就意味着同一天发第 2、3 篇会被最新一篇顶掉、永久漏采**(两轮之间最长 8h),
-    这正是"近 24h 必须全推"的唯一真实缺口;列表可用时该缺口不存在。
+    ⚠️ `/web/mp/articles` **已永久废弃,不是"限权"**(2026-10-04 实测定案:续期
+    success+verified 之后**立刻**再拉,书架前 5 个号仍全部 -2041)。下面那段列表调用
+    实际每轮必失败一次、随即被 `_is_weread_quota_error` 熔断 —— 它是**为"万一复活"留的
+    探针**,不是主路径;别再按"会话初期可用"给它排期。
+    **"只有 cover"就意味着同一天发第 2、3 篇会被最新一篇顶掉、永久漏采**(两轮之间最长 8h),
+    这正是"近 24h 必须全推"的唯一真实缺口 —— ⚠️ 该缺口现在**没有免费解**:全量列表改由
+    平台源(WeRSS / 自研 wemp 的 `mp_articles`)承担,微信读书这条不再负责。
     `stats` 记账可枚举性(见调用方),不可枚举又采到新文时必须暴露给运维,不能假装全覆盖。
-    近3天过滤;阅读/点赞以 cover/mp_articles 自带值为准(免费)。
+    近3天过滤。⚠️ **阅读/点赞已不再是免费数据**:唯一带 readNum 的接口已死、cover 不带、
+    WeRSS 不带 —— 见 `doc/外部接口速查.md §3.2`。
     `shelf_ts` = 书架粗筛拿到的 lastChapterCreateTime:cover 文章就是该号最新一篇,
     书架时间戳即它的发布时间——此前 cover 路径 publish_at 恒空,卡片时效/补推窗口/
     采样窗口全都吃不到,现在每轮监听顺手补上(2026-09-27)。
