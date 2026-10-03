@@ -742,6 +742,30 @@ class SystemConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
+class JobHeartbeat(Base):
+    """**每个调度作业的"上次真实执行"**(2026-10-04 加)。
+
+    为什么需要 —— 作业的"执行事实"此前**没有统一落点**:
+      · 有的作业把痕迹写进 `runs`,但用的是**另一个名字**(`wechat_collect_tick` → `wechat_listen`,
+        `collect_tick` → `weibo/baidu/xianyu/douhot`);
+      · 有的作业(`disk_guard`/`data_cleanup`/`push_timeline`/`cross_account_discover` …)**压根不写**。
+    于是"配置里说每天跑"与"实际跑没跑"之间**没有任何可查的对照** —— `resource_presence`
+    就这么潜伏着:注册着、trigger 正确、`enabled=True`,**六天一次没跑**,直到人工比对才撞见。
+
+    本表由 `scheduler._add_job` **自动维护**(每个作业执行后 upsert 一行),
+    所以**注册了就一定有心跳**;要问"上个作业到底跑没跑、成没成",直接看它。
+    """
+
+    __tablename__ = "job_heartbeats"
+
+    job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_ok_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    run_count: Mapped[int] = mapped_column(Integer, default=0)
+    error_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str] = mapped_column(String(255), default="")
+
+
 class GroupMember(Base):
     """付费群会员:按入群时间+周期自动生成续费提醒与超期踢人名单。
 

@@ -124,14 +124,48 @@ def collect_tick(settings: Settings | None = None, now: datetime | None = None) 
     return {"due": ok + failed, "ok": ok, "failed": failed, "skipped": skipped}
 
 
-def _safe(func):  # type: ignore[no-untyped-def]
-    """包裹调度作业:异常只记日志,不杀死调度器。"""
+def _beat(job_id: str, ok: bool, err: str = "") -> None:
+    """写一条**作业心跳** —— 让"这个作业到底跑没跑"有据可查(见 `JobHeartbeat`)。
+
+    ⚠️ **心跳失败绝不能影响作业本身**:它只是"顺手记一笔",DB 被锁/表缺失都得咽下去。
+    """
+    try:
+        from sqlalchemy import select
+
+        from app.db.database import get_session_local
+        from app.db.models import JobHeartbeat
+
+        now = datetime.now()
+        with get_session_local()() as db:
+            row = db.scalar(select(JobHeartbeat).where(JobHeartbeat.job_id == job_id))
+            if row is None:
+                row = JobHeartbeat(job_id=job_id)
+                db.add(row)
+            row.last_run_at = now
+            row.run_count = (row.run_count or 0) + 1
+            if ok:
+                row.last_ok_at = now
+            else:
+                row.error_count = (row.error_count or 0) + 1
+                row.last_error = (err or "")[:255]
+            db.commit()
+    except Exception:  # noqa: BLE001 - 见上:记不上就算了,不能连带作业
+        logger.warning("作业心跳写入失败:%s", job_id)
+
+
+def _safe(func, job_id: str = ""):  # type: ignore[no-untyped-def]
+    """包裹调度作业:异常只记日志,不杀死调度器;**并落一条心跳**。"""
 
     def wrapper() -> None:
+        ok, err = True, ""
         try:
             func()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            ok = False
+            err = f"{type(exc).__name__}: {exc}"
             logger.exception("调度作业执行失败:%s", getattr(func, "__name__", func))
+        if job_id:
+            _beat(job_id, ok, err)
 
     wrapper.__name__ = getattr(func, "__name__", "job")
     return wrapper
@@ -340,6 +374,16 @@ def _role_allows(job_role: str) -> bool:
     return cur == "all" or job_role == "both" or cur == job_role
 
 
+# 错过触发后的宽限期(秒)。APScheduler 默认为 **1 秒** —— 差一点点就直接**丢弃**这次执行。
+# 而本机是**笔记本/台式常驻**、看门狗还会重启(实测 6 天重启 125 次):只要触发那一刻
+# 机器在休眠唤醒、进程在重启、或调度线程被占住,那 1 秒就过去了,作业**静默不跑**。
+# 项目里 `wechat_collect_tick` 早就因此显式设了 3600(注释写着"防止休眠/重启错过窗口"),
+# 但**其余定点作业没设** —— 实测 `resource_presence`(每天 09:00)因此**六天一次没跑**,
+# 而它隔壁的 `wechat_collect_tick`(08:00,有 3600)天天正常,证据链正指向这里。
+# 所以改成**统一兜底**:调用方显式传的仍然优先(`setdefault`)。
+_DEFAULT_MISFIRE_GRACE = 3600
+
+
 def _add_job(scheduler: BackgroundScheduler, func, trigger, job_id: str,
              role: str = "both", **kw) -> bool:
     """按角色登记作业;被角色挡下的**不登记也不报错**(这是预期行为,不是失败)。
@@ -350,7 +394,8 @@ def _add_job(scheduler: BackgroundScheduler, func, trigger, job_id: str,
         logger.info("实例角色 %s 跳过作业 %s(%s 侧)",
                     getattr(get_settings(), "scheduler_role", "all"), job_id, role)
         return False
-    scheduler.add_job(_safe(func), trigger, id=job_id, max_instances=1, coalesce=True, **kw)
+    kw.setdefault("misfire_grace_time", _DEFAULT_MISFIRE_GRACE)   # 见上:别用 1 秒默认值
+    scheduler.add_job(_safe(func, job_id), trigger, id=job_id, max_instances=1, coalesce=True, **kw)
     return True
 
 

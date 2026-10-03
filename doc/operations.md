@@ -852,6 +852,28 @@ cd frontend && npm run lint      # = npx eslint src
 | 角色 **both**(两端各跑) | 两端机器**各有各的盘**,不是"同一件事两边都推" |
 | 整段包在 `try` 里 | 守卫自己失败不能变成新故障、带崩同一轮调度器里的其它作业 |
 
+### 7g. 作业落实性对账:"配置说跑"≠"真的在跑"(2026-10-04 补)
+
+```sh
+python scripts/job_liveness.py            # 列出每个注册作业的上次执行/次数/错误/期望间隔
+python scripts/job_liveness.py --strict   # 有"从没跑过/已超期"就退出码 1(可挂 CI)
+```
+
+**为什么有它**(一次真实的教训):`resource_presence`(每天 09:00)**注册着、trigger 正确、
+`enabled=True`,却六天一次没跑** —— 而"小红书/快手每天跑一次"这件事我们一直以为成立。
+根因是**作业的执行事实没有统一落点**:有的把痕迹写进 `runs` 但**换个名字**
+(`wechat_collect_tick` → `wechat_listen`、`collect_tick` → `weibo/baidu/xianyu`),
+有的**压根不写**;于是"配置说每天跑"与"实际跑没跑"之间无从对照。
+
+现在 `scheduler._add_job` 给**每个**作业自动包一层心跳(执行后 upsert 一行到 `job_heartbeats`),
+所以 **注册了就一定有痕迹**;上表由脚本并排打出来。**新增作业无需做任何事**。
+
+> ⚠️ **同时修的一个隐患**:APScheduler 的 `misfire_grace_time` 默认只有 **1 秒** ——
+> 触发那一刻只要机器在休眠唤醒 / 进程在重启 / 调度线程被占住,这次执行就被**直接丢弃且不报错**。
+> 实测证据:`wechat_collect_tick`(08:00,**显式设了 3600**)天天正常,而隔壁
+> `resource_presence`(09:00,**没设,用默认 1 秒**)**六天一次没跑**。
+> 现在 `_add_job` **统一兜底 3600 秒**(调用方显式传的仍然优先)。
+
 ## 8. 关键文件位置
 
 | 文件 | 用途 |
