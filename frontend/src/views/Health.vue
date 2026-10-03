@@ -11,6 +11,12 @@ async function load() {
   try { items.value = await api.sourceHealth() } catch (e) { msg.value = e.message }
 }
 const trend = ref(null)
+// **对端实例探活**(2026-10-03):本机与远程库独立,微博/抖音/百度热榜归远程跑 ——
+// 这个探活把"远端整机失联"与"那些源本身没数据"分开(用的是对端公开的 /healthz)。
+const peer = ref(null)
+async function loadPeer() {
+  try { peer.value = (await api.get('/api/source-health/peer')).data } catch { peer.value = null }
+}
 const sigLabels = { wechat_quota: '微信读书额度耗尽', cookie_expired: 'Cookie 失效', xianyu_verify: '闲鱼滑块' }
 async function loadTrend() {
   try {
@@ -22,13 +28,20 @@ function dayFail(row) {
   for (const k of Object.values(row.kinds || {})) n += (k.failed || 0)
   return n
 }
-onMounted(async () => { await load(); await loadTrend() })
+onMounted(async () => { await load(); await loadTrend(); await loadPeer() })
 </script>
 
 <template>
   <div>
     <h2>数据源健康</h2>
     <p class="muted">每采集源三态:🟢 HEALTHY / 🟡 DEGRADED(新鲜度超标、24h 失败≥3)/ 🔴 CIRCUIT_OPEN(熔断/Cookie 失效)。判定信号:最近成功、24h 失败数、滑块/WAF 冷却、数据写入新鲜度。</p>
+    <p v-if="peer && peer.configured" style="margin:8px 0;padding:8px 10px;background:rgba(127,127,127,.12);border-radius:6px">
+      <b>对端实例(远程 hotspot)</b>:
+      <span v-if="peer.online">🟢 在线 · v{{ peer.version }} · 响应 {{ peer.latency_ms }}ms</span>
+      <span v-else style="color:#c00">🔴 失联 —— 微博/抖音/百度热榜归它跑,它挂了那些源会集体停更({{ peer.error }})</span>
+      <span class="muted" style="font-size:12px"> · {{ peer.url }}</span>
+    </p>
+    <p v-else-if="peer" class="muted" style="font-size:12px">对端实例:未配置(设 <code>PEER_HEALTH_URL</code> 后可见远程在线状态)</p>
     <p v-if="msg" style="color:#c00">{{ msg }}</p>
     <table style="margin-top:12px">
       <thead><tr><th>数据源</th><th>健康</th><th>问题</th><th>最近成功</th><th>24h失败</th><th>数据新鲜度</th><th>采集间隔</th></tr></thead>

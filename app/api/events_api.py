@@ -32,6 +32,18 @@ def source_health(user: User = Depends(get_current_user), db: Session = Depends(
     return _health(db, user.id)
 
 
+@router.get("/api/source-health/peer")
+def source_health_peer(user: User = Depends(get_current_user)):
+    """**对端实例**探活(2026-10-03):另一侧部署(远程 hotspot)是否在线。
+
+    本机看不到远端的 runs(两边库独立),微博/抖音/百度热榜归远端跑 —— 这个探活把
+    "**远端整机失联**"与"**那些源本身没数据**"分开。用的是对端已有的公开 `/healthz`。
+    """
+    from app.services.health import peer_status
+
+    return peer_status()
+
+
 @router.get("/api/trending")
 def trending_normalized(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """统一标准化快照视图(Normalization 出口):跨平台同构字段,新数据源无需改库。"""

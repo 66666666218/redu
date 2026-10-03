@@ -291,6 +291,16 @@ class Settings(BaseSettings):
     #   (`Chromium distribution 'chrome' is not found`),所以给它单开一条 API 路。
     presence_platforms: str = "xiaohongshu,kuaishou,tieba,bilibili"
     presence_names: int = 3                             # 探几个资源名(词越多越慢)
+    # ---- 跨实例健康可见(2026-10-03)----
+    # 背景:本机(wechat)与远程(hotspot)**数据库各自独立**,微博/抖音/百度热榜归远程跑,
+    # 本机只知道它们"数据停在某天",分不清是**远端整机挂了**还是**那些源本身没更新**。
+    # ① `peer_health_url`:对端基址 —— 本机填远程地址,用对端**已有的公开 `/healthz`** 探活
+    #    (不新增暴露面)。留空则本机不探、显示"未配置"。
+    peer_health_url: str = ""
+    # ② 远端每天推一张**板块健康卡**到管理员群(零配置、零暴露面);远端整机挂了这张卡就断,
+    #    "该来没来"本身就是信号。作业角色 hotspot → 只在远端跑,本机不重复推。
+    health_push_enabled: bool = True
+    health_push_cron: str = "20 9 * * *"
     feishu_secret: str = ""         # 机器人签名校验密钥(为空则不签名)
     own_account_names: str = "天一项目拆解"  # 自营号名单(逗号分隔):飞书推送一律脱敏为「内部号」,防自营身份暴露(2026-09-29)
     feishu_daily_cron: str = "0 8 * * *"   # 每日热点日报时间(默认 08:00)

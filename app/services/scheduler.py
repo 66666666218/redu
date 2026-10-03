@@ -392,6 +392,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.xunlei_sync import xunlei_sync_tick
     from app.services.xunlei_group import xunlei_group_tick
     from app.services.pan_discovery import pan_discovery_tick
+    from app.services.health import health_push_tick
     from app.services.resource_presence import presence_tick
 
     jobs = [
@@ -442,6 +443,11 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # 跨平台资源热度(2026-10-02):抓**资源名** → 回**资源库**匹配链 —— 用于"平台上没有链"
         # 的那些平台(小红书/快手/贴吧)。每平台各开一次浏览器,所以**每周一轮**。
         (presence_tick, _get_settings().presence_cron, {"minute": 0, "hour": 9}, "resource_presence", "wechat"),
+        # 跨实例健康可见(2026-10-03):远端每天推一张**板块健康卡**到管理员群。
+        # 为什么推卡而不是本机轮询远端库:两边**库是独立的**,推飞书零配置、零新增暴露面;
+        # 远端整机挂了这张卡就断,"该来没来"本身是信号(本机另有 peer_status 探活兜底)。
+        # 角色 hotspot → 只在远端跑,本机不重复推。
+        (health_push_tick, _get_settings().health_push_cron, {"minute": 20, "hour": 9}, "health_push", "hotspot"),
         # 迅雷盘同步(2026-10-02):扫用户迅雷盘 → 新转存进来的资源自动生成我方分享链 → 入库。
         # "用口令找资源并转存"那步只有手机 App 能做(服务端搜索接口不对外 + 部分口令是群组口令),
         # 所以人工只在 App 里搜+转存,本作业接手扫盘/二次分享/入库。

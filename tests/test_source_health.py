@@ -178,3 +178,70 @@ def test_sections_filtered_by_scheduler_role(session) -> None:
                                 scheduler_role="hotspot")
     out2 = {r["section"]: r for r in health.source_health(session, 1, st2)}
     assert out2["wechat"]["health"] == "N/A" and out2["weibo"]["health"] != "N/A"
+
+
+# ---------------------------------------------------------------- 跨实例可见(2026-10-03)
+
+def test_peer_status_unconfigured_is_noop() -> None:
+    """没配 `PEER_HEALTH_URL` 就**不探、不报错** —— 默认零行为,不给出网请求。"""
+    import types
+    out = health.peer_status(types.SimpleNamespace(peer_health_url=""))
+    assert out == {"configured": False, "online": False, "url": ""}
+
+
+def test_peer_status_reports_online_and_reads_version(monkeypatch) -> None:
+    """探对端**已有的公开 `/healthz`**(不新增暴露面),把"远端整机失联"与"源没数据"分开。"""
+    import types
+
+    import requests
+
+    class _R:
+        status_code = 200
+
+        def json(self):
+            return {"status": "ok", "version": "2.14.0", "time": "2026-10-03T14:33:24"}
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _R())
+    out = health.peer_status(types.SimpleNamespace(peer_health_url="https://peer.example/"))
+    assert out["configured"] and out["online"] and out["version"] == "2.14.0"
+    assert out["url"] == "https://peer.example"          # 结尾斜杠要去掉,别拼成 //healthz
+
+
+def test_peer_status_offline_on_error(monkeypatch) -> None:
+    """对端挂了/超时 → `online=False` 并带原因(**不抛** —— 探活失败本身就是结论)。"""
+    import types
+
+    import requests
+
+    def _boom(*a, **k):
+        raise requests.ConnectionError("connection refused")
+
+    monkeypatch.setattr(requests, "get", _boom)
+    out = health.peer_status(types.SimpleNamespace(peer_health_url="https://peer.example"))
+    assert out["configured"] and out["online"] is False and "ConnectionError" in out["error"]
+
+
+def test_health_card_titles_and_counts_bad_sources(session) -> None:
+    """健康卡:全部正常→绿;有熔断/24h失败≥3→红并计数(远端每天推这张到管理员群)。"""
+    import types
+
+    now = datetime.now()
+    for i in range(3):
+        session.add(RunRecord(user_id=1, kind="weibo", status="failed", run_id=f"r{i}",
+                              started_at=now - timedelta(minutes=i)))
+    session.commit()
+    st = types.SimpleNamespace(xianyu_cooldown_minutes=30, xianyu_proxy_url="",
+                               scheduler_role="hotspot")
+    card = health.health_card(st, session, 1)
+    title = card["header"]["title"]["content"]
+    assert "hotspot" in title and "需处理" in title and card["header"]["template"] == "red"
+
+
+def test_health_push_skips_without_admin_group(monkeypatch) -> None:
+    """⚠️ **没配管理员群就跳过,不回落客户主群** —— 采集源健康是运维噪音,
+    推进客户群是事故(`webhook_for('admin')` 的回落行为在这里不能用)。"""
+    import types
+
+    out = health.health_push_tick(types.SimpleNamespace(
+        health_push_enabled=True, feishu_webhook_admin="", health_push_cron="20 9 * * *"))
+    assert out == 0

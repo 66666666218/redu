@@ -186,6 +186,107 @@ def source_health(db: Session, user_id: int, settings=None) -> list[dict]:
     return out
 
 
+def peer_status(settings=None, timeout: float = 6.0) -> dict:
+    """探**对端实例**是否在线 —— 只为回答"远端那几条链路还活着吗"。
+
+    ⚠️ **为什么需要它**(2026-10-03):本机(wechat 侧)与远程(hotspot 侧)**数据库各自独立**
+    (见 `doc/operations.md`),本机看不到远程的 runs —— 微博/抖音/百度热榜归远程跑,
+    所以本机只知道它们"数据停在某天",**分不清是远端整机挂了、还是那些源本身没更新**。
+    这里用对端**已有的公开 `/healthz`** 做一次轻探,把"对端失联"与"源没数据"分开。
+
+    **不新增任何暴露面**:`/healthz` 本来就是对端给探活用的公开端点,我们只是从另一侧去读它。
+    未配 `peer_health_url` 时返回 `{"configured": False}`(不探、不报错)。
+    """
+    settings = settings or get_settings()
+    base = str(getattr(settings, "peer_health_url", "") or "").strip().rstrip("/")
+    if not base:
+        return {"configured": False, "online": False, "url": ""}
+    import time
+
+    import requests
+
+    t0 = time.monotonic()
+    try:
+        resp = requests.get(f"{base}/healthz", timeout=timeout)
+        ms = round((time.monotonic() - t0) * 1000)
+        data = resp.json() if resp.status_code == 200 else {}
+        return {"configured": True, "online": resp.status_code == 200,
+                "url": base, "latency_ms": ms,
+                "version": str((data or {}).get("version") or ""),
+                "time": str((data or {}).get("time") or ""),
+                "error": "" if resp.status_code == 200 else f"HTTP {resp.status_code}"}
+    except Exception as exc:  # noqa: BLE001 - 探测失败就是"失联",不该抛给调用方
+        logger.warning("对端健康探测失败(%s):%s", base, exc)
+        return {"configured": True, "online": False, "url": base,
+                "latency_ms": round((time.monotonic() - t0) * 1000),
+                "version": "", "time": "", "error": f"{type(exc).__name__}: {str(exc)[:120]}"}
+
+
+def health_card(settings=None, db: Session | None = None, user_id: int = 1) -> dict:
+    """**板块健康卡**(飞书 JSON):一眼看完所有采集源,给远端(hotspot 侧)每日自报用。
+
+    设计取舍:远端每天往**管理员群**推一张,而不是让本机去轮询远端数据库 ——
+    两边库是独立的,推卡片是零配置、零新增暴露面的做法;远端整机挂了这张卡就断,
+    "该来没来"本身就是信号(本机侧的 `peer_status` 探活可作为第二重确认)。
+    """
+    settings = settings or get_settings()
+    rows: list[dict] = []
+    if db is not None:
+        try:
+            rows = source_health(db, user_id, settings)
+        except Exception:  # noqa: BLE001 - 健康卡本身不该因为一个源炸掉
+            logger.exception("健康卡取 source_health 失败")
+    lines = [f"{r.get('emoji', '')} **{r.get('label')}** {r.get('health')}"
+             f" · 数据 {r.get('data_age_h')}h"
+             + (f" · 24h 失败 {r['fails_24h']}" if r.get("fails_24h") else "")
+             + (f"\n　　{(r.get('problems') or [''])[0]}" if r.get("problems") else "")
+             for r in rows]
+    bad = [r for r in rows if r.get("health") == "CIRCUIT_OPEN" or (r.get("fails_24h") or 0) >= 3]
+    role = str(getattr(settings, "scheduler_role", "") or "")
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "red" if bad else "green",
+                   "title": {"tag": "plain_text",
+                             "content": f"🩺 采集源健康 · {role or '本机'}"
+                                        + (f" · {len(bad)} 个需处理" if bad else " · 全部正常")}},
+        "elements": [{"tag": "div", "text": {"tag": "lark_md",
+                                             "content": "\n".join(lines) or "（无板块）"}}],
+    }
+
+
+def health_push_tick(settings=None) -> int:
+    """定时(远端 hotspot 侧):把**板块健康卡**推到**管理员群**。返回 1=推成功,0=跳过。
+
+    ⚠️ **只推管理员群,不回落主群**:`webhook_for(settings, "admin")` 在未配管理员群时会
+    回落客户主群(旧行为)—— 采集源健康属**运维噪音**,推进客户群是事故。所以这里直接读
+    `feishu_webhook_admin`,没配就安静跳过(本机侧的 `peer_status` 探活仍能看到这台机活着)。
+    """
+    settings = settings or get_settings()
+    if not getattr(settings, "health_push_enabled", True):
+        return 0
+    webhook = str(getattr(settings, "feishu_webhook_admin", "") or "").strip()
+    if not webhook:
+        logger.info("健康卡跳过:未配管理员群 webhook(不回落主群)")
+        return 0
+    from app.db import get_session_local
+    from app.db.models import User
+
+    db = get_session_local()()
+    try:
+        uid = db.scalar(select(User.id).where(User.enabled.is_(True)).order_by(User.id))
+        card = health_card(settings, db, int(uid or 1))
+    finally:
+        db.close()
+    from app.services.feishu_client import FeishuClient
+
+    try:
+        FeishuClient(webhook, getattr(settings, "feishu_secret", "")).send_card(card)
+        return 1
+    except Exception:  # noqa: BLE001 - 推失败只记日志,别把调度打挂
+        logger.exception("健康卡推送失败")
+        return 0
+
+
 def check_optional_containers(settings=None) -> list[str]:
     """可选容器探活(v2.8.0):WeRSS / newsnow 挂了要有人知道(此前静默)。
 
