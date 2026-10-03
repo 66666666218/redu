@@ -134,3 +134,42 @@ def test_push_items_cards_per_platform(monkeypatch) -> None:
     assert "https://pan.quark.cn/s/OUR" in str(xhs_card)      # 可用链在卡片里
     ks_card = next(c for h, c in sent if h == "https://example.com/ks")
     assert "库内暂无链" in str(ks_card)                        # 库里没有就如实说
+
+
+def test_probe_reports_partial_platform_failure(session, monkeypatch) -> None:
+    """**部分**失败(小红书成了、快手挂了)要能被看见。
+
+    它不抛错(单平台挂不该拖垮整轮),但平台名要进返回值的 `failed` ——
+    否则 `presence_tick` 只记 success,而"有个平台天天在挂"从运行记录上完全查不出来
+    (静默的部分失败,与"假成功"同一类)。
+    """
+    from app.services import mediacrawler_source as mc
+
+    monkeypatch.setattr(mc, "available", lambda: (True, "ok"))
+    monkeypatch.setattr(rp, "library_names", lambda s, u, top: ["甲"])
+
+    def _crawl(plat, names, timeout=600):
+        if plat == "kuaishou":
+            raise mc.MediaCrawlerError("kuaishou 超时(600s)——多半卡在扫码登录")
+        return [{"uid": "u", "name": "作者", "snippet": "甲", "keyword": "甲"}]
+
+    monkeypatch.setattr(mc, "crawl", _crawl)
+    out = rp.probe(session, 1, settings=_S())
+    assert out["failed"] == ["kuaishou"]                  # 挂的那个**记名**
+    assert len(out["items"]) == 1                         # 成了的那个照常产出
+
+
+def test_probe_raises_when_every_platform_fails(session, monkeypatch) -> None:
+    """全平台都挂 → 抛错(让整轮记 failed),不是"今天没热度"。"""
+    from app.services import mediacrawler_source as mc
+
+    monkeypatch.setattr(mc, "available", lambda: (True, "ok"))
+    monkeypatch.setattr(rp, "library_names", lambda s, u, top: ["甲"])
+
+    def _boom(plat, names, timeout=600):
+        raise mc.MediaCrawlerError(f"{plat} 未安装")
+
+    monkeypatch.setattr(mc, "crawl", _boom)
+    with pytest.raises(mc.MediaCrawlerError) as ei:
+        rp.probe(session, 1, settings=_S())
+    assert "全部抓取失败" in str(ei.value)

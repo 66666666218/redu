@@ -72,11 +72,14 @@ def _library_link(session, user_id: int, name: str) -> dict:
     return {}
 
 
-def probe(session, user_id: int, settings=None) -> dict:
+def probe(session, user_id: int, settings=None, platforms: list[str] | None = None) -> dict:
     """按资源名探各平台 → 附库内链。返回 `{"status", "platforms", "items"}`。
 
     `items` 形如 `[{"name", "platform", "label", "count", "samples": [...], "link": {...}}]`,
     **只保留有内容命中的**(没命中的说明这个资源在该平台没人做,不必推)。
+
+    `platforms` 传了就用它(定时作业按"每周/每天"两轮给不同的清单,见 `presence_daily_tick`);
+    不传就读 `presence_platforms`。
     """
     from config.settings import get_settings
 
@@ -84,7 +87,7 @@ def probe(session, user_id: int, settings=None) -> dict:
     from app.services import mediacrawler_source as mc
 
     names = library_names(session, user_id, int(getattr(settings, "presence_names", 3) or 3))
-    plats = platforms_of(settings)
+    plats = platforms if platforms is not None else platforms_of(settings)
     if not names or not plats:
         return {"status": "empty", "platforms": 0, "items": []}
     ok, why = mc.available()
@@ -95,16 +98,19 @@ def probe(session, user_id: int, settings=None) -> dict:
     items: list[dict] = []
     from app.services.mediacrawler_source import MediaCrawlerError
 
-    tried = failed = 0
+    tried = 0
+    failed: list[str] = []
     last_err = ""
     for plat in plats:
         tried += 1
         try:
             rows = mc.crawl(plat, names)                 # 一次吃整个词表,别逐词开浏览器
         except MediaCrawlerError as exc:
-            # 单平台硬失败(多半是那个平台没登录)不该拖垮整轮 —— 但要**计数**,
-            # 全平台都失败就得冒泡,别让"一个都没开起来"记成 success(空)。
-            failed += 1
+            # 单平台硬失败(多半是那个平台没登录)不该拖垮整轮 —— 但要**记名**:
+            # ① 全平台都失败 → 冒泡,别让"一个都没开起来"记成 success(空);
+            # ② 只有部分失败 → 名字进返回值,由 `presence_tick` 写进运行记录
+            #    (否则"小红书成了、快手挂了"查不出来 —— 静默的部分失败)。
+            failed.append(plat)
             last_err = f"{plat}: {exc}"
             logger.warning("跨平台热度:%s 抓取失败(%s)", plat, exc)
             continue
@@ -121,10 +127,10 @@ def probe(session, user_id: int, settings=None) -> dict:
                           "samples": [(h.get("snippet") or "")[:60] for h in hits[:2]],
                           "link": _library_link(session, user_id, name)})
         logger.info("跨平台热度:%s 命中资源 %d 个", plat, len(by_name))
-    if tried and failed == tried:
+    if tried and len(failed) == tried:
         # 一个平台都没开起来 → 这不是"没热度",是链路坏了,必须让上层记 failed
         raise MediaCrawlerError(f"{tried} 个平台全部抓取失败:{last_err}")
-    return {"status": "ok", "platforms": len(plats), "items": items}
+    return {"status": "ok", "platforms": len(plats), "items": items, "failed": failed}
 
 
 def push_items(items: list[dict], settings) -> bool:
@@ -171,7 +177,7 @@ def push_items(items: list[dict], settings) -> bool:
     return sent_any
 
 
-def presence_tick(settings=None) -> int:
+def presence_tick(settings=None, platforms: list[str] | None = None) -> int:
     """定时:按资源名探各平台 → 匹配库内链 → 推卡片。返回推送的资源条目数。"""
     from config.settings import get_settings
     from app.db import get_session_local
@@ -187,12 +193,17 @@ def presence_tick(settings=None) -> int:
             from app.services.tenant_base import _record_run
 
             try:
-                out = probe(db, uid, settings=settings)
+                out = probe(db, uid, settings=settings, platforms=platforms)
                 total += len(out.get("items") or [])
                 if out.get("items"):
                     push_items(out["items"], settings)
-                _record_run(db, uid, "resource_presence", "success",
-                            f"平台{out.get('platforms', 0)} 命中{len(out.get('items') or [])}")
+                # ⚠️ **把失败平台写进运行记录**:`probe` 只在"全平台都失败"时才抛错,
+                # 所以"小红书成了、快手挂了"这种**部分失败**本来查不出来。
+                failed = out.get("failed") or []
+                note = f"平台{out.get('platforms', 0)} 命中{len(out.get('items') or [])}"
+                if failed:
+                    note += f" 失败:{','.join(failed)}"
+                _record_run(db, uid, "resource_presence", "success", note)
                 db.commit()
             except Exception as exc:  # noqa: BLE001 - 单用户失败不影响其余
                 db.rollback()
