@@ -354,7 +354,9 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
                 down.append(str(exc)[:60])
                 continue
             ld["kouling"] = {"kind": "group", "status": res.get("status"),
-                             "group_id": info["group_id"]}
+                             "group_id": info["group_id"],
+                             # 见 `xunlei_kouling.ingest`:区分"新加了个群"与"口令指向已有的群"
+                             "newly_joined": bool(res.get("newly_joined"))}
             continue
         if budget <= 0:
             ld["kouling"] = {"kind": "share", "status": "over_budget",
@@ -511,6 +513,24 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin") -> bool:
         return False
 
 
+def _kouling_summary(leads: list[dict]) -> str:
+    """本轮口令解析的**构成**,尤其是"**新群几个**"(2026-10-04 加)。
+
+    **为什么必须有这个数**:这条链的搜索词有相当一部分来自**我们自己已有的群**
+    (`group_keywords` 直接取群里的资源标题当词),于是很容易形成**自循环** ——
+    搜出来的口令反复指向**已经加过**的群:线索数看着不少,**新群一个没有**。
+    用户 2026-10-04 的原话:"而不是一直用着一个口令进群,我们是需要创新的"。
+
+    一行就能判断这条链是在**往外扩**还是在**原地打转**:
+      `新群0/群9/链3` → 解析出 9 个群口令但**全是已有的** = 自循环信号(该换词源了)。
+    """
+    ks = [(ld.get("kouling") or {}) for ld in leads]
+    n_new = sum(1 for k in ks if k.get("kind") == "group" and k.get("newly_joined"))
+    n_group = sum(1 for k in ks if k.get("kind") == "group")
+    n_share = sum(1 for k in ks if k.get("kind") == "share")
+    return f"新群{n_new}/群{n_group}/链{n_share}"
+
+
 def douyin_leads_tick(settings=None) -> int:
     """定时:按资源库的词去各**线索平台**搜 → 解析口令 → 推推广线索。返回线索条数。
 
@@ -549,7 +569,8 @@ def douyin_leads_tick(settings=None) -> int:
                         _save_leads(db, uid, leads)      # 落库:转发量只在这一次有效(结算要用)
                         push_leads(leads, settings, platform=plat)
                     _record_run(db, uid, "douyin_leads", "success",
-                                f"{plat} 词{len(kws)} 线索{len(leads)}")
+                                f"{plat} 词{len(kws)} 线索{len(leads)} "
+                                f"{_kouling_summary(leads)}")
                     db.commit()
                 except Exception as exc:  # noqa: BLE001 - 单平台失败不影响其余
                     db.rollback()

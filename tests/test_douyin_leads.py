@@ -454,3 +454,33 @@ def test_save_leads_is_idempotent_and_keeps_share_count(session) -> None:
     session.commit()
     rows = session.query(DouyinLead).all()
     assert len(rows) == 1 and rows[0].share_count == 300 and rows[0].kind == "group"
+
+
+class TestKoulingSummary:
+    """运行记录要能看出这条链在**往外扩**还是在**原地打转**(2026-10-04 加)。
+
+    搜索词有一路是从**我们自己已有的群**取的(`group_keywords` 拿群里的资源标题当词),
+    于是容易形成自循环:搜出来的口令反复指向**已经加过**的群 ——
+    线索数看着不少、**新群一个没有**。用户原话:"而不是一直用着一个口令进群,
+    我们是需要创新的"。没有"新群"这个数,自循环永远看不出来。
+    """
+
+    def test_counts_new_groups_separately(self) -> None:
+        from app.services import douyin_leads as dl
+
+        leads = [
+            {"kouling": {"kind": "group", "newly_joined": True}},
+            {"kouling": {"kind": "group", "newly_joined": False}},   # 已有的群
+            {"kouling": {"kind": "group", "newly_joined": False}},
+            {"kouling": {"kind": "share"}},
+            {"kouling": {"kind": "none"}},
+            {},                                                       # 没解析
+        ]
+        assert dl._kouling_summary(leads) == "新群1/群3/链1"
+
+    def test_self_loop_shows_new_group_zero(self) -> None:
+        from app.services import douyin_leads as dl
+
+        """**自循环的样子**:解析出一堆群口令,但**一个新群都没有**。"""
+        leads = [{"kouling": {"kind": "group", "newly_joined": False}} for _ in range(9)]
+        assert dl._kouling_summary(leads) == "新群0/群9/链0"

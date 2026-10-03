@@ -133,6 +133,12 @@ def ingest(session, user_id: int, kouling: str, settings=None) -> dict:
         joined = join_group(info["group_id"])
         out["status"] = "deferred" if joined.get("status") == "ok" else "failed"
         out["message"] = joined.get("message") or "已加群,等采一轮会收进群里的分享"
+        # ⚠️ **`newly_joined` 必须带出去**(2026-10-04 补):它区分"**新加了一个群**"和
+        # "这个口令指向我们**已经在**的群"。旧实现把它丢了,于是**"新群率"从来没被度量过** ——
+        # 而"搜出来的口令反复指向已有的群"正是自循环的样子(用户 2026-10-04 指出:
+        # "而不是一直用着一个口令进群")。没有这个数,创新与否无从验证。
+        out["newly_joined"] = bool(joined.get("newly_joined"))
+        out["group_id"] = info["group_id"]
         return out
 
     url = info["share_url"] + (f"?pwd={info['pass_code']}" if info["pass_code"] else "")
