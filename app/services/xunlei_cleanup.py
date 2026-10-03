@@ -23,6 +23,7 @@
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta
 
 from sqlalchemy import delete, select
@@ -238,3 +239,116 @@ def cleanup_tick(settings=None) -> int:
         db.close()
     return total
 
+
+
+# ---------------------------------------------------------------- 同名去重
+
+_SUFFIX_RE = re.compile(r"[（(]\s*\d+\s*[)）]\s*$")
+
+
+def _children_sig(fid: str) -> tuple[tuple, str] | None:
+    """文件夹的**内容指纹**:子项 `(名字, 大小)` 排序后的元组。取不到返回 None。
+
+    ⚠️ **重名 ≠ 内容相同**(2026-10-04 实测踩到):迅雷转存同名时会自动加 `(1)`/`(2)`,
+    但**同名也可能是两份不同的东西**。所以要**真进去比一比**,不能只看名字就删。
+    """
+    from app.services import xunlei_transfer as xt
+
+    try:
+        kids = xt.list_files(fid, limit=200)
+    except Exception:  # noqa: BLE001 - 比不了就不删(宁可留着,也别误删)
+        logger.warning("同名去重:读子项失败,跳过 %s", fid)
+        return None
+    return tuple(sorted((str(k.get("name")), str(k.get("size"))) for k in kids))
+
+
+def plan_duplicates(db: Session, user_id: int, settings=None) -> dict:
+    """**同名去重**(只看不删):迅雷转存同名会自动加 `(1)`/`(2)`,同一份资源就躺了好几份。
+
+    返回 `{"groups":[...], "dups":[{name,id,base}], "scanned":N, "error":""}`。
+
+    ⚠️ **保留哪一个**:留**无后缀**的那个 —— 它才是**资源清单引用的 fid**
+    (实测:转存出来的文件夹名 = 源内容的原名,而清单里存的是**口令**,
+     所以"高性价比人生指南"在盘上其实叫「爆🔥资源包【先存!以防下架】」;
+     若按"(N) 是副本"的直觉去删,会把**刚搬成功的那份**一起删掉)。
+    """
+    from config.settings import get_settings
+
+    settings = settings or get_settings()
+    from app.services import xunlei_transfer as xt
+
+    out: dict = {"groups": [], "dups": [], "scanned": 0, "error": ""}
+    parent = str(getattr(settings, "xunlei_transfer_parent_id", "") or "")
+    if not parent:
+        out["error"] = "未配 xunlei_transfer_parent_id(不知道该扫哪个目录)"
+        return out
+    try:
+        items = xt.list_files(parent, limit=500)
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"列目录失败:{type(exc).__name__}: {str(exc)[:120]}"
+        return out
+    if not items:
+        out["error"] = "目录返回空:可能真为空,也可能凭据/网络失败(接口不区分)"
+        return out
+
+    from collections import defaultdict
+
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for f in items:
+        if f.get("kind") != "drive#folder":
+            continue
+        out["scanned"] += 1
+        groups[_SUFFIX_RE.sub("", str(f.get("name") or "")).strip()].append(f)
+
+    for base, fs in sorted(groups.items()):
+        if len(fs) < 2:
+            continue
+        ordered = sorted(fs, key=lambda x: (bool(_SUFFIX_RE.search(str(x.get("name") or ""))),
+                                            str(x.get("name"))))
+        keep, others = ordered[0], ordered[1:]      # 无后缀的排在第一个 ✓
+        keep_sig = _children_sig(str(keep["id"]))
+        if keep_sig is None:
+            continue                                 # 指纹都拿不到 → 整个组别动
+        same = [o for o in others if _children_sig(str(o["id"])) == keep_sig]
+        if not same:
+            logger.info("同名但**内容不同**,不动:%s", base)
+            continue
+        out["groups"].append({"base": base, "keep": keep.get("name"),
+                              "same": len(same), "total": len(fs)})
+        out["dups"].extend({"name": o.get("name"), "id": str(o["id"]), "base": base} for o in same)
+    return out
+
+
+def dedupe_duplicates(db: Session, user_id: int, settings=None,
+                      dry_run: bool = True) -> dict:
+    """执行同名去重:**移入回收站**(可恢复),并联动删掉清单里指向它的行。"""
+    out = plan_duplicates(db, user_id, settings=settings)
+    result = {**out, "deleted": 0, "errors": [], "dry_run": dry_run, "unlisted": 0}
+    if out.get("error") or dry_run or not out["dups"]:
+        return result
+    from app.services import xunlei_transfer as xt
+
+    for d in out["dups"]:
+        try:
+            r = xt.trash_files([d["id"]])
+        except Exception as exc:  # noqa: BLE001 - 单个失败不中断整批
+            result["errors"].append(f"{d['name']}: {type(exc).__name__}")
+            continue
+        if (r or {}).get("status") == "ok" or (r or {}).get("deleted"):
+            result["deleted"] += 1
+            # 联动删清单行(与 `run_cleanup` 同一道理:盘上没了却留着行 = 资源库给出失效链)
+            try:
+                from app.db.models import XunleiResource
+
+                n = db.execute(delete(XunleiResource).where(
+                    XunleiResource.user_id == user_id,
+                    XunleiResource.fid == d["id"])).rowcount
+                result["unlisted"] += int(n)
+            except Exception:  # noqa: BLE001
+                logger.exception("同名去重后同步资源清单失败:%s", d["name"])
+        else:
+            result["errors"].append(f"{d['name']}: {str((r or {}).get('message'))[:60]}")
+    db.commit()
+    logger.info("迅雷盘同名去重:移入回收站 %d(失败 %d,清单同步 %d)",
+                result["deleted"], len(result["errors"]), result["unlisted"])
+    return result

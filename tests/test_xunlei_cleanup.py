@@ -11,7 +11,7 @@ os.environ.setdefault("JWT_SECRET", "test_secret_0123456789abcdef0123456789abcde
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from app.db.database import Base
@@ -148,3 +148,99 @@ def test_dry_run_does_not_touch_resource_library(session, monkeypatch) -> None:
     monkeypatch.setattr(xt, "list_files", lambda *a, **k: [_folder("旧资源", 30, fid="id-旧资源")])
     out = xc.run_cleanup(session, 1, days=7, settings=_S(), dry_run=True)
     assert out["deleted"] == 0 and session.query(XunleiResource).count() == 1
+
+
+class TestDuplicateNameDedupe:
+    """**同名去重**(2026-10-04,用户:"里面我发现一些重名的文件你去删除吧")。
+
+    迅雷转存同名时会自动加 `(1)`/`(2)`,同一份资源就躺了好几份。
+
+    ⚠️ **两条必须守住的**:
+      ① **重名 ≠ 内容相同** —— 必须真进去比子项,**比不了/不一样就一个都不删**;
+      ② **保留"无后缀"那个** —— 实测:转存出来的文件夹名 = **源内容的原名**,
+         而资源清单里存的是**口令**,所以"高性价比人生指南"在盘上其实叫
+         「爆🔥资源包【先存!以防下架】」。**按"(N) 是副本"的直觉删,会把刚搬成功的那份一起删掉。**
+    """
+
+    def _fake_list(self, monkeypatch, tree: dict) -> None:
+        from app.services import xunlei_transfer as xt
+        monkeypatch.setattr(xt, "list_files", lambda fid, limit=200: tree.get(str(fid), []))
+
+    def _child(self, name: str, size: int = 100) -> dict:
+        return {"name": name, "size": size, "kind": "drive#file"}
+
+    def test_identical_contents_are_flagged(self, session, monkeypatch) -> None:
+        from app.services import xunlei_cleanup as cl
+
+        tree = {
+            "P": [{"name": "甲", "id": "A", "kind": "drive#folder", "created_time": "0"},
+                  {"name": "甲(1)", "id": "B", "kind": "drive#folder", "created_time": "0"}],
+            "A": [self._child("x.mp4", 9)], "B": [self._child("x.mp4", 9)],
+        }
+        self._fake_list(monkeypatch, tree)
+        out = cl.plan_duplicates(session, 1, settings=self._S())
+        assert [d["id"] for d in out["dups"]] == ["B"], "该删带 (1) 的那个、保留无后缀的"
+        assert out["groups"][0]["keep"] == "甲"
+
+    def test_different_contents_are_left_alone(self, session, monkeypatch) -> None:
+        """⚠️ **同名但内容不同 → 一个都不删**(宁可留着,也别误删)。"""
+        from app.services import xunlei_cleanup as cl
+
+        tree = {
+            "P": [{"name": "甲", "id": "A", "kind": "drive#folder", "created_time": "0"},
+                  {"name": "甲(1)", "id": "B", "kind": "drive#folder", "created_time": "0"}],
+            "A": [self._child("x.mp4", 9)], "B": [self._child("完全不同的东西.zip", 77)],
+        }
+        self._fake_list(monkeypatch, tree)
+        out = cl.plan_duplicates(session, 1, settings=self._S())
+        assert out["dups"] == [] and out["groups"] == []
+
+    def test_unreadable_group_is_skipped(self, session, monkeypatch) -> None:
+        """指纹读不出来时**整个组别动** —— 比不了就不删。"""
+        from app.services import xunlei_cleanup as cl
+        from app.services import xunlei_transfer as xt
+
+        tree = {"P": [{"name": "甲", "id": "A", "kind": "drive#folder", "created_time": "0"},
+                      {"name": "甲(1)", "id": "B", "kind": "drive#folder", "created_time": "0"}]}
+
+        def _flaky(fid, limit=200):
+            if str(fid) == "A":
+                raise RuntimeError("接口炸了")
+            return tree.get(str(fid), [])
+
+        monkeypatch.setattr(xt, "list_files", _flaky)
+        assert cl.plan_duplicates(session, 1, settings=self._S())["dups"] == []
+
+    def test_dry_run_deletes_nothing(self, session, monkeypatch) -> None:
+        from app.services import xunlei_cleanup as cl
+
+        self._fake_list(monkeypatch, {
+            "P": [{"name": "甲", "id": "A", "kind": "drive#folder", "created_time": "0"},
+                  {"name": "甲(1)", "id": "B", "kind": "drive#folder", "created_time": "0"}],
+            "A": [self._child("x", 1)], "B": [self._child("x", 1)]})
+        called = []
+        from app.services import xunlei_transfer as xt
+        monkeypatch.setattr(xt, "trash_files", lambda ids: called.append(ids))
+        out = cl.dedupe_duplicates(session, 1, settings=self._S(), dry_run=True)
+        assert out["deleted"] == 0 and called == []
+
+    def test_execute_trashes_and_unlists(self, session, monkeypatch) -> None:
+        from app.db.models import XunleiResource
+        from app.services import xunlei_cleanup as cl
+        from app.services import xunlei_transfer as xt
+
+        session.add(XunleiResource(user_id=1, fid="B", name="口令", share_url="u"))
+        session.commit()
+        self._fake_list(monkeypatch, {
+            "P": [{"name": "甲", "id": "A", "kind": "drive#folder", "created_time": "0"},
+                  {"name": "甲(1)", "id": "B", "kind": "drive#folder", "created_time": "0"}],
+            "A": [self._child("x", 1)], "B": [self._child("x", 1)]})
+        trashed = []
+        monkeypatch.setattr(xt, "trash_files", lambda ids: trashed.extend(ids) or {"status": "ok"})
+        out = cl.dedupe_duplicates(session, 1, settings=self._S(), dry_run=False)
+        assert out["deleted"] == 1 and trashed == ["B"]
+        assert out["unlisted"] == 1, "盘上删了要联动删清单行(否则资源库给失效链)"
+        assert session.scalars(select(XunleiResource)).all() == []
+
+    class _S:
+        xunlei_transfer_parent_id = "P"
