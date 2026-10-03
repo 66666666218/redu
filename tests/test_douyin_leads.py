@@ -728,3 +728,62 @@ class TestUnmovedQueue:
 
         _enqueue_later(session, 1, {"share_url": ""}, "x")
         assert session.scalars(select(DiscoveredPanLink)).all() == []
+
+
+class TestCountGroupsByResourceNotKouling:
+    """⚠️ 「条数」按**资源身份**分组,**不是按口令**(2026-10-04 修正)。
+
+    实测发现:同一个资源会被不同推广号起**不同口令** ——
+    《齐民要术》《人生使用说明书》其实都是《高性价比人生指南》的别名。
+    按口令分会把**同一份资源算成好几条**,那就看不出"大家都在抢这个"了。
+
+    判据:**能拿到原始链就用它当身份**(那才是资源本身),拿不到的(群口令/没解出来)才回落到口令。
+    """
+
+    def _render(self, monkeypatch, leads) -> list:
+        from app.services import douyin_leads as dl
+        from app.services import feishu_client
+
+        sent = {}
+
+        class _C:
+            def __init__(self, *a) -> None: ...
+            def send_card(self, card):
+                sent["card"] = card
+                return True
+
+        monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+        dl.push_leads(leads, _Settings())
+        return [e for e in sent["card"]["elements"] if e.get("tag") == "column_set"][1:]
+
+    def _lead(self, mark, share_url, **extra):
+        k = {"kind": "share", "status": "disk_full", "share_url": share_url}
+        k.update(extra)
+        return {"mark": mark, "title": f"标题{mark}", "url": f"https://d/v/{mark}",
+                "author": "a", "share_count": 1, "kouling": k}
+
+    def test_same_resource_different_kouling_counts_together(self, monkeypatch) -> None:
+        rows = self._render(monkeypatch, [
+            self._lead("高性价比人生指南", "https://pan.xunlei.com/s/SAME"),
+            self._lead("齐民要术", "https://pan.xunlei.com/s/SAME"),      # 别名,同一条链
+        ])
+        assert rows[0]["columns"][5]["elements"][0]["text"]["content"] == "2"
+        assert rows[1]["columns"][5]["elements"][0]["text"]["content"] == "2"
+
+    def test_different_resources_count_separately(self, monkeypatch) -> None:
+        rows = self._render(monkeypatch, [
+            self._lead("甲", "https://pan.xunlei.com/s/A"),
+            self._lead("乙", "https://pan.xunlei.com/s/B"),
+        ])
+        assert rows[0]["columns"][5]["elements"][0]["text"]["content"] == "1"
+        assert rows[1]["columns"][5]["elements"][0]["text"]["content"] == "1"
+
+    def test_no_link_falls_back_to_kouling(self, monkeypatch) -> None:
+        """拿不到链的(群口令/没解出)按口令分组 —— 总得有个身份。"""
+        rows = self._render(monkeypatch, [
+            {"mark": "同一群口令", "title": "t1", "url": "https://d/v/1", "author": "a",
+             "share_count": 1, "kouling": {"kind": "group", "status": "deferred"}},
+            {"mark": "同一群口令", "title": "t2", "url": "https://d/v/2", "author": "b",
+             "share_count": 1, "kouling": {"kind": "group", "status": "deferred"}},
+        ])
+        assert rows[0]["columns"][5]["elements"][0]["text"]["content"] == "2"

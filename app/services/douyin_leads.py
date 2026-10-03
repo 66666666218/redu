@@ -568,11 +568,19 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin") -> bool:
     from app.services.feishu_client import FeishuClient
 
     label = (PLATFORMS.get(platform) or {}).get("label", platform)
-    # 「条数」= **这个资源(口令)本轮被几条视频在推** —— 用户口径(2026-10-04):
-    # 一眼看出"大家都在抢这个"。按**口令**(`mark`)分组,同一口令的行显示同一个数。
+    # 「条数」= **这个资源本轮被几条视频在推** —— 用户口径(2026-10-04):
+    # 一眼看出"大家都在抢这个"。
+    # ⚠️ **按"资源身份"分组,不是按口令**:同一个资源会被不同推广号起**不同口令**
+    # (实测:《齐民要术》《人生使用说明书》其实都是《高性价比人生指南》的别名)——
+    # 按口令分会把同一份资源算成好几条。**能拿到原始链的就用它当身份**(那才是资源本身),
+    # 拿不到的(群口令/没解出来)才回落到口令。
     from collections import Counter
 
-    _counts = Counter(str(ld.get("mark") or "") for ld in leads)
+    def _res_key(ld_: dict) -> str:
+        info_ = ld_.get("kouling") or {}
+        return str(info_.get("share_url") or "") or f"mark:{ld_.get('mark') or ''}"
+
+    _counts = Counter(_res_key(x) for x in leads)
 
     elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
         f"{label}上发现 **{len(leads)}** 条在推同类资源的视频。"
@@ -615,7 +623,7 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin") -> bool:
             (res, 2),
             (f"[▶视频]({vurl})" if vurl else "—", 2),
             (f"↗{sc}" if sc else "—", 2),
-            (str(_counts.get(str(ld.get("mark") or ""), 1)), 1)]))
+            (str(_counts.get(_res_key(ld), 1)), 1)]))
     card = {
         "config": {"wide_screen_mode": True},
         # ⚠️ **不带头部品牌名**(用户口径 2026-10-04:"**不要带念飞思雪**")。
