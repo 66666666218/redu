@@ -39,6 +39,7 @@ _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 
 # 资源库标题 → 搜索词的清洗件(见 `library_search_word` 的注释与实测数据)
+_TAG_RE = re.compile(r"<[^>]+>")            # B站/知乎返回里带 `<em class="keyword">` 高亮标签
 _PAREN_RE = re.compile(r"[（(【\[][^)）】\]]*[)）】\]]")
 _PUNCT = "｜|·—-,，、:：!！?？~ "
 _LEAD_NOISE = ("亲测", "爆火", "最新", "超火", "实测", "分享")
@@ -154,6 +155,74 @@ def _bili_mixin() -> str:
     return mixin
 
 
+def _bili_signed_get(search_type: str, keyword: str, cookie: str = "") -> dict:
+    """B站 wbi 签名 GET(签名是**公开算法、本地纯 Python 可算**,所以匿名也能搜)。
+
+    签名规范:值里去掉 `!'()*` 四个字符,按键排序拼成 query,再 `md5(query + mixin)`。
+    """
+    import hashlib
+    import urllib.parse
+
+    import requests
+
+    mixin = _bili_mixin()
+    if not mixin:
+        return {}
+    params = {"search_type": search_type, "keyword": keyword.strip(), "page": 1,
+              "wts": int(time.time())}
+    clean = {k: "".join(c for c in str(v) if c not in "!'()*") for k, v in sorted(params.items())}
+    query = urllib.parse.urlencode(clean)
+    url = ("https://api.bilibili.com/x/web-interface/wbi/search/type?"
+           f"{query}&w_rid={hashlib.md5((query + mixin).encode()).hexdigest()}")
+    headers = {"User-Agent": _UA, "Referer": "https://www.bilibili.com/"}
+    if cookie:
+        headers["Cookie"] = cookie     # 配了就用(风控更宽松);没有也能跑
+    return requests.get(url, headers=headers, timeout=20).json()
+
+
+def search_bilibili_videos(keyword: str, limit: int = 20, cookie: str = "") -> list[dict]:
+    """B站**搜视频** → `[{uid, name, url, snippet, pan_link}]`,供**名字型**用。
+
+    **为什么搜视频**(2026-10-03):`_search_bilibili` 搜的是**用户**(那是找对标号的口径),
+    而名字型要的是"**这个资源在平台上有没有人在推**" —— 那必须看内容。
+    实测搜「网盘资源」20 条,标题正是「【原版】火影忍者720集网盘资源!!未删减版」这类。
+
+    ⚠️ 视频简介(`description`)**实测基本是空的**(搜索接口不给),所以 `snippet` 里能用的
+    只有**标题** + 作者 —— 但名字型**不需要更多**:判断"有没有人在推同一资源"看标题就够,
+    要链的话回**资源库**匹配(那才是名字型的本意)。
+
+    匿名即可,无需登录;风控**按频率**(与搜用户同一条口径),调用方要限速。
+    """
+    if not (keyword or "").strip():
+        return []
+    try:
+        payload = _bili_signed_get("video", keyword, cookie)
+    except Exception as exc:  # noqa: BLE001 - 包成自己的异常类型,好让调用方区分
+        raise SearchSourceError(f"B站请求异常:{exc}") from exc
+    if not payload:
+        raise SearchSourceError("B站搜索不可用(wbi mixin 取不到)")
+    if payload.get("code") != 0:
+        # 风控 -412 / 频率 -352 都会落到这里 —— 必须报错,别跟"搜到 0 条"混为一谈
+        raise SearchSourceError(f"B站返回 code={payload.get('code')} {str(payload.get('message'))[:60]}")
+    out: list[dict] = []
+    for item in ((payload.get("data") or {}).get("result") or [])[: max(1, min(limit, 50))]:
+        bvid = str(item.get("bvid") or "").strip()
+        # 标题里带 `<em class="keyword">` 高亮标签,要剥掉(与知乎 snippet 同一处理)
+        title = _TAG_RE.sub("", str(item.get("title") or "")).strip()
+        if not bvid or not title:
+            continue
+        author = str(item.get("author") or "").strip()
+        out.append({"uid": bvid, "name": author or "—",
+                    "url": f"https://www.bilibili.com/video/{bvid}",
+                    "snippet": title[:255], "pan_link": _pan_of(title),
+                    # ⚠️ **必须回填 `keyword`**:调用方(`resource_presence.probe`)按它把结果
+                    # 归到"是搜哪个资源名搜出来的";少了这个字段 → 匹配不上 → **永远出 0 条**
+                    # (2026-10-03 单测抓到的静默归零)。
+                    "keyword": keyword.strip(),
+                    "looks_like_pan": False})
+    return out
+
+
 def _search_bilibili(cookie: str, keyword: str, limit: int = 20) -> list[dict]:
     """B站**搜用户** → `[{uid, name, url, snippet, pan_link, looks_like_pan}]`。
 
@@ -166,28 +235,10 @@ def _search_bilibili(cookie: str, keyword: str, limit: int = 20) -> list[dict]:
 
     匿名即可搜(wbi 签名本地自算);风控**按频率**(连发即 `-352`),调用方必须限速。
     """
-    import hashlib
-    import urllib.parse
-
-    import requests
-
     if not (keyword or "").strip():
         return []
-    mixin = _bili_mixin()
-    if not mixin:
-        return []
-    params = {"search_type": "bili_user", "keyword": keyword.strip(), "page": 1,
-              "wts": int(time.time())}
-    # wbi 规范:值里去掉 !'()* 四个字符,按键排序后再拼接参与签名
-    clean = {k: "".join(c for c in str(v) if c not in "!'()*") for k, v in sorted(params.items())}
-    query = urllib.parse.urlencode(clean)
-    url = ("https://api.bilibili.com/x/web-interface/wbi/search/type?"
-           f"{query}&w_rid={hashlib.md5((query + mixin).encode()).hexdigest()}")
-    headers = {"User-Agent": _UA, "Referer": "https://www.bilibili.com/"}
-    if cookie:
-        headers["Cookie"] = cookie     # 配了就用(风控更宽松);没有也能跑
     try:
-        payload = requests.get(url, headers=headers, timeout=20).json()
+        payload = _bili_signed_get("bili_user", keyword, cookie)
     except Exception as exc:  # noqa: BLE001 - 单平台搜索失败不该炸整轮发现
         logger.warning("B站搜索失败(%s):%s", keyword, exc)
         return []

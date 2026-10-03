@@ -284,10 +284,12 @@ class Settings(BaseSettings):
     # 原先每周一次是怕"每平台各开一次浏览器"太费;实测小红书单关键词约 277s(它逐条拉笔记
     # 详情),两个平台 × 3 个资源名 ≈ 20~30 分钟,每天一轮可接受。
     presence_cron: str = "0 9 * * *"
-    # 探哪些平台(逗号分隔)。**贴吧 2026-10-03 实测可用**(38 秒 10 条,内容是「《平凡的世界》
-    # 全集百度网盘」这类影视资源推广 —— 正是名字型要的:不需要链接,只要有人在推同一资源)。
-    # B站暂不加:MediaCrawler 抓它要登录(实测 280 秒超时卡在扫码)。
-    presence_platforms: str = "xiaohongshu,kuaishou,tieba"
+    # 探哪些平台(逗号分隔)。
+    # · 贴吧 2026-10-03 实测可用(38 秒 10 条,「《平凡的世界》全集百度网盘」这类影视推广)。
+    # · **B站走公开 API,不开浏览器**(wbi 签名本地可算、匿名即可):实测搜「网盘资源」
+    #   20 条标题就是「【原版】火影忍者720集网盘资源」—— 而 MediaCrawler 抓 B站 起不来
+    #   (`Chromium distribution 'chrome' is not found`),所以给它单开一条 API 路。
+    presence_platforms: str = "xiaohongshu,kuaishou,tieba,bilibili"
     presence_names: int = 3                             # 探几个资源名(词越多越慢)
     feishu_secret: str = ""         # 机器人签名校验密钥(为空则不签名)
     own_account_names: str = "天一项目拆解"  # 自营号名单(逗号分隔):飞书推送一律脱敏为「内部号」,防自营身份暴露(2026-09-29)

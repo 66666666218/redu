@@ -298,3 +298,35 @@ def test_search_zhihu_empty_data_is_not_an_error(monkeypatch) -> None:
     import requests
     monkeypatch.setattr(requests, "get", lambda *a, **k: _R())
     assert cp._search_zhihu("ck", "网盘资源") == []
+
+
+# ---------------------------------------------------------------- B站搜视频(名字型用)
+
+def test_search_bilibili_videos_strips_em_and_keeps_keyword(monkeypatch) -> None:
+    """B站**搜视频**给名字型用:标题要剥掉 `<em>` 高亮,且**必须带 `keyword`**。
+
+    少了 `keyword`,`resource_presence.probe` 就归不了组 → **永远是 0 条**(静默归零,
+    2026-10-03 单测抓到过)。
+    """
+    class _R:
+        def json(self):
+            return {"code": 0, "data": {"result": [
+                {"bvid": "BV1", "title": '<em class="keyword">网盘资源</em>火影忍者720集',
+                 "author": "4K超清臻享版"}]}}
+
+    import requests
+    monkeypatch.setattr(cp, "_bili_signed_get", lambda *a, **k: _R().json())
+    out = cp.search_bilibili_videos("网盘资源")
+    assert len(out) == 1
+    assert "<em" not in out[0]["snippet"] and "火影忍者" in out[0]["snippet"]
+    assert out[0]["keyword"] == "网盘资源"
+    assert out[0]["url"] == "https://www.bilibili.com/video/BV1"
+
+
+def test_search_bilibili_videos_raises_on_risk_control(monkeypatch) -> None:
+    """风控 `code=-412` 必须**抛**,不能返回空列表 —— 否则"被拦"会被当成"这资源没人推"。"""
+    monkeypatch.setattr(cp, "_bili_signed_get",
+                        lambda *a, **k: {"code": -412, "message": "请求被拦截"})
+    with pytest.raises(cp.SearchSourceError) as ei:
+        cp.search_bilibili_videos("网盘资源")
+    assert "-412" in str(ei.value)

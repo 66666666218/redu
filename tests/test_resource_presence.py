@@ -173,3 +173,62 @@ def test_probe_raises_when_every_platform_fails(session, monkeypatch) -> None:
     with pytest.raises(mc.MediaCrawlerError) as ei:
         rp.probe(session, 1, settings=_S())
     assert "全部抓取失败" in str(ei.value)
+
+
+def test_bilibili_uses_public_api_not_browser(session, monkeypatch) -> None:
+    """B站 走**公开 API**(不开浏览器)—— MediaCrawler 抓它起不来
+    (`Chromium distribution 'chrome' is not found`),而 wbi 签名本地可算、匿名即可搜。"""
+    from app.services import cross_accounts as ca
+    from app.services import mediacrawler_source as mc
+
+    called = {"mc": 0}
+
+    def _no_mc(*a, **k):
+        called["mc"] += 1
+        return []
+
+    monkeypatch.setattr(mc, "crawl", _no_mc)
+    monkeypatch.setattr(ca, "search_bilibili_videos",
+                        lambda kw, limit=20, cookie="": [{"uid": "BV1", "name": "UP主",
+                                                          "url": "https://b/v/1",
+                                                          "snippet": kw, "pan_link": "",
+                                                          "keyword": kw}])
+    monkeypatch.setattr(rp, "_BILI_GAP", 0)
+    rows = rp._crawl_platform("bilibili", ["甲", "乙"])
+    assert len(rows) == 2                      # 两个词各搜一次
+    assert called["mc"] == 0, "B站不该去开 MediaCrawler"
+
+
+def test_bilibili_api_failure_is_visible(session, monkeypatch) -> None:
+    """B站 API 硬失败(风控/网络)要让整轮**看得见**,不能混成"这个资源没人推"。"""
+    from app.services import cross_accounts as ca
+
+    def _boom(kw, limit=20, cookie=""):
+        raise ca.SearchSourceError("B站返回 code=-412 请求被拦截")
+
+    monkeypatch.setattr(ca, "search_bilibili_videos", _boom)
+    monkeypatch.setattr(rp, "_BILI_GAP", 0)
+    monkeypatch.setattr(rp, "library_names", lambda s, u, top: ["甲"])
+    monkeypatch.setattr(rp, "platforms_of", lambda s: ["bilibili"])
+    # 全平台都失败 → probe 统一抛 MediaCrawlerError(带上最后一个平台的原因)
+    from app.services.mediacrawler_source import MediaCrawlerError
+    with pytest.raises(MediaCrawlerError) as ei:
+        rp.probe(session, 1, settings=_S())
+    assert "全部抓取失败" in str(ei.value) and "-412" in str(ei.value)
+
+
+def test_probe_does_not_need_mediacrawler_for_api_only_platforms(session, monkeypatch) -> None:
+    """全是 API 平台时,MediaCrawler 装没装都不该拦(否则 B站 会被它连累成 no_tool)。"""
+    from app.services import cross_accounts as ca
+    from app.services import mediacrawler_source as mc
+
+    monkeypatch.setattr(mc, "available", lambda: (False, "未安装"))
+    monkeypatch.setattr(ca, "search_bilibili_videos",
+                        lambda kw, limit=20, cookie="": [{"uid": "BV1", "name": "UP",
+                                                          "url": "u", "snippet": kw, "pan_link": "",
+                                                          "keyword": kw}])
+    monkeypatch.setattr(rp, "_BILI_GAP", 0)
+    monkeypatch.setattr(rp, "library_names", lambda s, u, top: ["甲"])
+    monkeypatch.setattr(rp, "platforms_of", lambda s: ["bilibili"])
+    out = rp.probe(session, 1, settings=_S())
+    assert out["status"] == "ok" and len(out["items"]) == 1

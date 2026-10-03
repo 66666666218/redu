@@ -18,6 +18,8 @@
 """
 from __future__ import annotations
 
+import time
+
 from sqlalchemy import select
 
 from app.utils import get_logger
@@ -33,6 +35,14 @@ PLATFORMS = {
     "weibo": {"section": "weibo", "label": "微博"},
     "bilibili": {"section": "bilibili", "label": "B站"},
 }
+
+
+# 走**公开 API、不开浏览器**的平台(见 `_crawl_platform`)。B站 的 wbi 签名是公开算法、
+# 本地纯 Python 可算,匿名即可搜 —— 而 MediaCrawler 抓 B站 反而起不来(它去找 Chrome)。
+API_PLATFORMS = frozenset({"bilibili"})
+
+# B站 风控**按频率**(连发即 -352),所以逐词之间要隔开(与 cross_accounts 同一套口径)
+_BILI_GAP = 4.0
 
 
 def platforms_of(settings) -> list[str]:
@@ -72,14 +82,36 @@ def _library_link(session, user_id: int, name: str) -> dict:
     return {}
 
 
+def _crawl_platform(plat: str, names: list[str]) -> list[dict]:
+    """抓一个平台的内容 —— **按平台选路**。
+
+    · `bilibili`:**公开 API**(wbi 签名是公开算法、本地纯 Python 可算,匿名即可,不开浏览器)。
+      实测搜「网盘资源」20 条标题正是「【原版】火影忍者720集网盘资源!!未删减版」这类 ——
+      而 MediaCrawler 抓 B站 反而起不来(`Chromium distribution 'chrome' is not found`)。
+      风控**按频率**(连发即 -352),所以逐词之间要隔开。
+    · 其余:MediaCrawler(要浏览器、要登录态)。
+    """
+    if plat == "bilibili":
+        from app.services.cross_accounts import search_bilibili_videos
+
+        out: list[dict] = []
+        for i, kw in enumerate(names):
+            if i:
+                time.sleep(_BILI_GAP)
+            out.extend(search_bilibili_videos(kw))
+        return out
+    from app.services import mediacrawler_source as mc
+
+    return mc.crawl(plat, names)
+
+
 def probe(session, user_id: int, settings=None, platforms: list[str] | None = None) -> dict:
     """按资源名探各平台 → 附库内链。返回 `{"status", "platforms", "items"}`。
 
     `items` 形如 `[{"name", "platform", "label", "count", "samples": [...], "link": {...}}]`,
     **只保留有内容命中的**(没命中的说明这个资源在该平台没人做,不必推)。
 
-    `platforms` 传了就用它(定时作业按"每周/每天"两轮给不同的清单,见 `presence_daily_tick`);
-    不传就读 `presence_platforms`。
+    `platforms` 传了就用它;不传就读 `presence_platforms`。
     """
     from config.settings import get_settings
 
@@ -90,12 +122,14 @@ def probe(session, user_id: int, settings=None, platforms: list[str] | None = No
     plats = platforms if platforms is not None else platforms_of(settings)
     if not names or not plats:
         return {"status": "empty", "platforms": 0, "items": []}
-    ok, why = mc.available()
+    # MediaCrawler 只在**真的要开浏览器**的平台才需要 —— 全是 B站 时它装没装都无所谓
+    ok, why = mc.available() if any(p not in API_PLATFORMS for p in plats) else (True, "ok")
     if not ok:
         logger.info("跨平台热度跳过:MediaCrawler 不可用(%s)", why)
         return {"status": "no_tool", "platforms": 0, "items": []}
 
     items: list[dict] = []
+    from app.services.cross_accounts import SearchSourceError
     from app.services.mediacrawler_source import MediaCrawlerError
 
     tried = 0
@@ -104,8 +138,8 @@ def probe(session, user_id: int, settings=None, platforms: list[str] | None = No
     for plat in plats:
         tried += 1
         try:
-            rows = mc.crawl(plat, names)                 # 一次吃整个词表,别逐词开浏览器
-        except MediaCrawlerError as exc:
+            rows = _crawl_platform(plat, names)          # 一次吃整个词表,别逐词开浏览器
+        except (MediaCrawlerError, SearchSourceError) as exc:
             # 单平台硬失败(多半是那个平台没登录)不该拖垮整轮 —— 但要**记名**:
             # ① 全平台都失败 → 冒泡,别让"一个都没开起来"记成 success(空);
             # ② 只有部分失败 → 名字进返回值,由 `presence_tick` 写进运行记录
