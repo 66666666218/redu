@@ -42,6 +42,28 @@ def _mark_graceful_shutdown() -> None:
         pass
 
 
+def _close_browser_clients() -> None:
+    """关停进程级 Playwright 浏览器单例(2026-10-03 补)。
+
+    ⚠️ **为什么需要**:`xianyu_browser.get_client()` 建的是一个**模块级单例**
+    (`_ThreadBoundClient`:一个 Playwright 浏览器 + 一个 `max_workers=1` 线程池,
+    专治 Playwright 的线程亲和),而它的 `close_client()` **此前全项目无人调用** ——
+    连这里也没有(全项目审查发现:该函数只在测试里出现过)。
+    后果:每次重启/退出都**不显式关闭浏览器**,在 Windows 上容易留下**孤儿 chromium 进程**
+    (PID 不受管、继续吃内存与句柄);`taskkill /F` 强杀(看门狗与 `stop_app.bat` 都走这条)更是必然留下。
+    这不属于"死代码",而是**"该调没调"** —— 函数写对了,缺的是这一次接线。
+
+    顺序有意放在 `scheduler.shutdown()` **之后**:APScheduler 的 shutdown 会等待在跑作业结束,
+    先关浏览器会把正在用它的闲鱼采集作业打断(那类作业会如实记 failed,但本可避免)。
+    """
+    try:
+        from app.services.xianyu_browser import close_client
+
+        close_client()
+    except Exception:  # noqa: BLE001 - 关停阶段任何异常都不该阻止进程退出
+        logger.exception("关闭闲鱼浏览器单例失败(不影响退出)")
+
+
 async def _lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     """应用启停:随 API 进程启动后台调度器(按各用户设置的频率采集)。"""
     scheduler.start()
@@ -50,6 +72,7 @@ async def _lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     finally:
         _mark_graceful_shutdown()
         scheduler.shutdown()
+        _close_browser_clients()
 
 
 def create_app() -> FastAPI:

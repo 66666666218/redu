@@ -1165,6 +1165,31 @@ def test_xianyu_refresh_token_not_truncated(monkeypatch) -> None:
     assert c._refresh(_R()) is False
 
 
+def test_shutdown_closes_browser_singleton(monkeypatch) -> None:
+    """关停流程必须关掉闲鱼浏览器的**进程级单例**(2026-10-03 接线)。
+
+    ⚠️ 背景(全项目审查发现):`xianyu_browser.get_client()` 建的是模块级单例
+    (`_ThreadBoundClient`:一个 Playwright 浏览器 + 一个专用线程池),而它的 `close_client()`
+    **此前全项目无人调用** —— 连 `lifespan` 也没有。于是每次重启/退出都不显式关闭浏览器,
+    Windows 上容易留下不受管的孤儿 chromium 进程。这不是"死代码",是**"该调没调"**。
+
+    本测试钉两件事:① 关停确实调到了它;② 关停阶段的异常**不外抛**(不能因此卡住进程退出)。
+    """
+    from app import platform as platform_mod
+    from app.services import xianyu_browser
+
+    called: list[int] = []
+    monkeypatch.setattr(xianyu_browser, "close_client", lambda: called.append(1))
+    platform_mod._close_browser_clients()
+    assert called == [1], "关停没有调用 close_client —— 浏览器单例又没人管了"
+
+    def _boom() -> None:
+        raise RuntimeError("模拟关闭失败")
+
+    monkeypatch.setattr(xianyu_browser, "close_client", _boom)
+    platform_mod._close_browser_clients()          # 不得外抛
+
+
 def test_instance_info_reports_section_ownership() -> None:
     """`GET /api/instance`(2026-10-02):前端据此在导航上标出"不归本机采"的板块 ——
 

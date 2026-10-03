@@ -43,6 +43,33 @@ class TestNormalizeAndSimilarity:
         assert similarity("某明星官宣结婚", "新一轮降雨预报发布") < 0.42
 
 
+class TestOpposedPairs:
+    """强对立词判定:`_OPPOSED_PAIRS` 是归并的**否决票**(2026-10-03 修复的回归)。
+
+    ⚠️ **回归来历**(全项目审查发现):`7ce3872`「perf: bigram 预计算」把归属热路径里的
+    `similarity(norm, e.norm_title)` 换成了 `_dice(grams, ge)` —— **只搬走 dice、
+    漏掉了这里的否决票**,而 `similarity()` 随之失去调用方,于是那条手工维护的对立词表
+    (上任/辞职、被捕/获释、胜诉/败诉、上涨/下跌…)自那次提交起**一直没被检查过**。
+    这批测试把"否决票必须生效"钉死,防止下次重构再"只搬一半"。
+    """
+
+    def test_is_opposed_detects_curated_pairs(self):
+        from app.services.events import _is_opposed
+
+        assert _is_opposed("某明星被捕", "某明星获释")
+        assert _is_opposed("某公司胜诉", "某公司败诉")
+        assert not _is_opposed("某明星官宣结婚", "某明星宣布结婚")
+
+    def test_opposed_titles_are_dice_similar_but_similarity_zero(self):
+        """先证明这对标题**光看 dice 确实够像**(否则回归无害、测试也就失去意义),
+        再证明 `similarity()` 的否决票把它判成 0 —— 这是被 `_dice` 漏掉的那一半语义。"""
+        from app.services.events import dice_similarity, similarity
+
+        a, b = "某明星被捕", "某明星获释"
+        assert dice_similarity(a, b) >= 0.42, "选例不当:这对字面不够像,验证不到否决票"
+        assert similarity(a, b) == 0.0
+
+
 class TestAssignTick:
     def _seed(self, db, title, heat, hours_ago=1, board="weibo"):
         ts = datetime.now() - timedelta(hours=hours_ago)
@@ -69,6 +96,18 @@ class TestAssignTick:
         assert ev.sample_count == 3
         assert ev.peak_value == 2200                       # 峰值追踪
         assert (datetime.now() - ev.peak_at).total_seconds() < 3600 + 5  # 峰值时刻=最新高点
+
+    def test_opposed_titles_do_not_merge_into_one_event(self, session):
+        """端到端:归属循环里也必须带否决票 —— 只修 `similarity()` 是没用的,热路径根本不走它。
+
+        (这正是回归能潜伏的原因:被取代的函数测试全绿,而真正跑的路径没人测。)
+        """
+        from app.services import events
+
+        self._seed(session, "某明星被捕", 1000, hours_ago=3 / 12)
+        self._seed(session, "某明星获释", 1500, hours_ago=2 / 12)
+        out = events.assign_tick(session, 1)
+        assert out["created"] == 2, "反义标题被并成同一条事件了 —— 对立词否决票又丢了"
 
     def test_cross_platform_counts(self, session):
         from app.services import events

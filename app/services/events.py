@@ -62,6 +62,21 @@ _OPPOSED_PAIRS = [
 ]
 
 
+def _is_opposed(a: str, b: str) -> bool:
+    """标题含**强对立词对** → 即便字面高度相似,也判为**不同事件**(归并的否决票)。
+
+    ⚠️ **为什么单独抽成函数**(2026-10-03 全项目审查):这段判定原来只长在 `similarity()` 里,
+    而 `similarity()` 在 `7ce3872`("perf: bigram 预计算")把热路径换成 `_dice(grams, ge)` 之后
+    **就没人调了** —— 那次重构**只搬走了 dice、漏掉了这里的否决票**。后果:自那次提交起,
+    「XX上任」与「XX辞职」、「XX被捕」与「XX获释」这类**反义标题**只要字面够像就会被**并成同一条事件**
+    (对立词表是手工维护的,一直活着,只是没被检查)。抽出来供两处共用,避免再次"搬一半"。
+    """
+    for x, y in _OPPOSED_PAIRS:
+        if (x in a and y in b) or (y in a and x in b):
+            return True
+    return False
+
+
 def dice_similarity(a: str, b: str) -> float:
     """字符 bigram Dice 系数(0~1)。比 Jaccard 对长度差/语序变化宽容:
     "官宣结婚"vs"宣布结婚" Jaccard 仅 0.33(漏归并),Dice 0.46。"""
@@ -76,10 +91,13 @@ def dice_similarity(a: str, b: str) -> float:
 
 
 def similarity(a: str, b: str) -> float:
-    """归并相似度:Dice 系数;强对立词对直接判 0。"""
-    for x, y in _OPPOSED_PAIRS:
-        if (x in a and y in b) or (y in a and x in b):
-            return 0.0
+    """归并相似度:对未切分的两个标题做 Dice;强对立词对直接判 0。
+
+    热路径请用 `_dice(预切bigram)` + `_is_opposed(两个标题)`(见归属循环),
+    那两个函数合起来才是本函数的完整语义 —— 别再只搬一半。
+    """
+    if _is_opposed(a, b):
+        return 0.0
     return dice_similarity(a, b)
 
 
@@ -156,7 +174,11 @@ def assign_tick(db: Session, user_id: int, settings=None) -> dict:
                 grams = _bigrams(norm)
                 for e in events:
                     ge = ev_grams.get(e.id)
-                    if ge and _dice(grams, ge) >= SIM_THRESHOLD:
+                    # ⚠️ 两个条件缺一不可:字面够像 **且** 不是反义标题。
+                    # 2026-10-03 前这里只判了 `_dice`,漏掉对立词否决 —— 见 `_is_opposed` 的说明。
+                    # 顺序有意为之:先算便宜的 dice(集合运算),通过了才做对立词子串检查。
+                    if (ge and _dice(grams, ge) >= SIM_THRESHOLD
+                            and not _is_opposed(norm, e.norm_title)):
                         ev = e
                         break
             if ev is None:  # 新事件
