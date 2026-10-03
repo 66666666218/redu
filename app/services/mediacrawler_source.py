@@ -110,11 +110,27 @@ def crawl(platform: str, keywords: list[str], timeout: int = 600) -> list[dict]:
         raise MediaCrawlerError(f"{platform} 启动失败:{exc}") from exc
     if proc.returncode != 0:
         tail = (proc.stderr or b"")[-300:].decode("utf-8", "ignore")
-        raise MediaCrawlerError(f"{platform} 退出码 {proc.returncode}:{tail}")
+        raise MediaCrawlerError(f"{platform} 退出码 {proc.returncode}:{_explain(tail)}")
     out = _read_results(platform, since=started)
     if not out:
         _raise_if_all_keywords_empty(platform, proc, keywords)
     return out
+
+
+def _explain(tail: str) -> str:
+    """把常见的退出原因翻成**能照做**的话(否则一律只是漫长的 Playwright 堆栈)。
+
+    ⚠️ 最要命的一条:`TargetClosedError` —— **采集过程中浏览器窗口被手工关掉了**。
+    本项目的 CDP 模式 `CDP_CONNECT_EXISTING=False`,程序**会自己启动 Edge 并接管**、
+    跑完自己关;所以采集期间弹出来的那个窗口是**程序正在用的**,关它 = 直接失败
+    (2026-10-04 实测:小红书/快手就是这样挂的,却很容易被误读成"没登录")。
+    """
+    if "TargetClosedError" in tail or "Target page, context or browser has been closed" in tail:
+        return ("浏览器在采集过程中被关闭 —— 采集会自己启动窗口、跑完自己关,"
+                "**期间请不要手工关掉那个窗口**(不是登录问题)。原始栈:" + tail[-160:])
+    if "CDP port" in tail and "not accessible" in tail:
+        return "连不上浏览器的 CDP 端口 —— 检查是否有另一个 Edge 占着同一档案目录。原始栈:" + tail[-160:]
+    return tail
 
 
 def _raise_if_all_keywords_empty(platform: str, proc, keywords: list[str]) -> None:

@@ -150,3 +150,26 @@ def test_parse_record_keeps_share_count() -> None:
     item = mc._parse_record(rec, "douyin")
     assert item is not None and item["share_count"] == 176
     assert mc._parse_record({"nickname": "n", "creator_hash": "h", "title": "t"}, "douyin")["share_count"] == 0
+
+
+class TestExplain:
+    """把退出原因翻成**能照做**的话(2026-10-04)。
+
+    ⚠️ 最要命的一条 `TargetClosedError`:本项目 CDP 模式 `CDP_CONNECT_EXISTING=False`,
+    程序**自己启动 Edge 并接管**、跑完自己关 —— 采集期间弹出来的窗口是**程序正在用的**,
+    关它就直接失败(实测小红书/快手就是这么挂的),而堆栈长得很容易被误读成"没登录"。
+    """
+
+    def test_target_closed_says_dont_close_the_window(self) -> None:
+        tail = ('playwright._impl._errors.TargetClosedError: BrowserContext.cookies: '
+                'Target page, context or browser has been closed')
+        msg = mc._explain(tail)
+        assert "不要手工关掉" in msg and "不是登录问题" in msg
+
+    def test_cdp_port_conflict_is_explained(self) -> None:
+        assert "CDP 端口" in mc._explain("Error: CDP port 9222 is not accessible")
+
+    def test_unknown_tail_passes_through_unchanged(self) -> None:
+        """认不出来的原因**原样带出** —— 别自作主张翻译成一句含糊的话,那是毁证据。"""
+        tail = "Traceback: some_other_random_failure at foo.py:12"
+        assert mc._explain(tail) == tail
