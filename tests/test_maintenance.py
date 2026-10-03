@@ -348,3 +348,29 @@ def test_data_cleanup_is_not_at_0400_anymore() -> None:
     fields = {f.name: str(f) for f in job.trigger.fields}
     assert fields["hour"] == "3" and fields["minute"] == "10"
     sched.shutdown(wait=False) if sched.running else None
+
+
+def test_snapshot_failure_alerts_instead_of_only_logging(session, monkeypatch) -> None:
+    """⚠️ **本机快照备份失败必须喊出来**(2026-10-03)。
+
+    此前只写日志 —— 而"备份静默失败"是最骗人的故障:**每天看着有备份文件,真要用时
+    才发现是空的/根本没有**;而且本机快照一断,随后的异地备份也整条跟着断。
+    """
+    import app.db.maintenance as m
+    import app.services.alert_service as als
+
+    monkeypatch.setattr(m, "snapshot_sqlite",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("disk full")))
+    sent: list[tuple] = []
+    monkeypatch.setattr(als, "notify_incident",
+                        lambda *a, **k: sent.append((a, k)) or True)
+    from app.db.models import User
+
+    session.add(User(id=1, username="u1", email="u@b.c", password_hash="x", enabled=True))
+    session.commit()
+    st = _settings()
+    st.database_url = "sqlite://"       # 只有 sqlite 才会走快照那条路
+    out = m.cleanup_old_data(st, db=session)
+    assert "sqlite_backup_error" in out and "disk full" in out["sqlite_backup_error"]
+    assert sent, "备份失败没有触发告警 —— 又变成静默失败了"
+    assert "备份失败" in sent[0][0][3]          # title 参数

@@ -530,6 +530,13 @@ print(sorted(j.id for j in s.get_jobs()))"
   保留最近 7 份。走 SQLite 在线备份 API,库正被写入时也一致;快照产出后会校验非空 + `PRAGMA quick_check`,
   不合格的直接删掉——**宁可没有,也不留 0 字节的假备份**。
 - **手动**:`sh scripts/backup.sh`(按 `DATABASE_URL` 自动选 SQLite / MySQL;SQLite 与自动快照同一实现)
+- **远程 MySQL 自动备份(2026-10-03 新增)**:VPS 上 `/root/redu-backup.sh` + cron 每日 **03:40**,
+  产出 `/root/redu-backups/redu_YYYYMMDD_HHMMSS.sql.gz`(约 57MB),**留 7 份**。
+  ⚠️ 脚本是**自包含**的 —— VPS 上只有 `docker-compose.yaml` + `.env`,**没有源码**,
+  所以复用不了仓库里的 `scripts/backup.sh`(实测确认)。凭据在容器内取
+  (`MYSQL_USER`/`MYSQL_PASSWORD` 是 mysql 容器的环境变量),**不写进脚本**;
+  **失败会推管理员群**(备份静默失败等于没有备份)。⚠️ 但它和数据库在**同一块盘上**,
+  扛不住盘坏 —— 见 §7c-D 的缺口说明。
 - 检查备份是否健康:`ls -la data/backups/` —— **任何 0 字节文件都说明备份失败**,别当成"有备份"。
   备份失败会在服务日志里记 `SQLite 快照备份失败`(stdout,`docker logs` 可见)。
 - ⚠️ 不要直接 `cp`/`gzip` 库文件当备份:写入过程中拷贝可能得到撕裂的中间状态,恢复时才发现坏。
@@ -550,6 +557,78 @@ print(sorted(j.id for j in s.get_jobs()))"
 
 > ⚠️ `xunlei_resources` 的另一半联动在 `xunlei_cleanup`:资源**从盘上删掉**时,
 > 对应行**一并删除** —— 否则资源库会给出**已经失效的分享链**(比"没有链"更糟:点了打不开)。
+
+### 7c. 恢复步骤(2026-10-03 补 —— 此前**完全没有**恢复文档)
+
+> **"备份了但不知道怎么恢复" = 没有备份。** 这一节是 2026-10-03 全项目审查补的,
+> 此前 `doc/` 里 grep "恢复/restore/还原" 零命中。
+
+#### A. 本机 SQLite(`data/platform.db`)
+
+```sh
+# 1) 停应用(⚠️ 用 stop_app.bat,不要 taskkill —— 它会写"计划内停机"标记,看门狗才不会误报警)
+cmd /c scripts\win\stop_app.bat
+# 2) 把坏库挪开(别直接覆盖 —— 万一还想从坏库里捞数据)
+move data\platform.db data\platform.db.broken
+#     ⚠️ 别忘了 -wal / -shm 两个附属文件,只挪主库会得到不一致状态
+# 3) 取备份:优先本机每日快照;本机没了就去异地仓库
+copy data\backups\platform_YYYYMMDD.db data\platform.db
+#     异地:git clone git@github.com:66666666218/redu-backup.git → 取 platform_latest.db
+# 4) 起应用
+cmd /c scripts\win\app_watchdog.bat
+# 5) 验证:健康页 + 首页数据非空(不是"起来了就行")
+curl -s http://127.0.0.1:8080/healthz
+```
+
+#### B. 远程 MySQL(redu 库)
+
+```sh
+# 1) 停 API(留 mysql 跑着,恢复期间别让应用写入)
+docker stop redu-api
+# 2) 取最近一份 dump(VPS 本地,每日 03:40 自动产出,留 7 份)
+ls -1t /root/redu-backups/redu_*.sql.gz | head -1
+# 3) 先在容器里建一个临时库试恢复(⚠️ 别一上来就覆盖生产库)
+gunzip -c /root/redu-backups/redu_YYYYMMDD_HHMMSS.sql.gz | \
+  docker exec -i redu-mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u"$MYSQL_USER" -e "CREATE DATABASE redu_restore_check"'
+gunzip -c /root/redu-backups/redu_*.sql.gz | \
+  docker exec -i redu-mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u"$MYSQL_USER" redu_restore_check'
+#    确认行数/关键表对得上,再删掉临时库
+# 4) 真要覆盖生产库:
+docker exec -i redu-mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u"$MYSQL_USER" "$MYSQL_DATABASE"' < <(gunzip -c /root/redu-backups/redu_*.sql.gz)
+# 5) 起 API + 验证
+docker start redu-api && curl -s http://127.0.0.1:8080/healthz
+```
+
+#### C. ⚠️ 密钥(`.env`)—— **最容易被忽略、也最容易被做错的一环**
+
+**症状**:只恢复 DB、不恢复 `.env` → **登录能用**(`password_hash` 是 bcrypt,不依赖密钥),
+但**所有采集凭据全部解不开** —— 库里的 `user_cookies`、`wemp_cred_N`、`smtp_pass` 都是
+Fernet 加密的(密钥来自 `.env` 的 `JWT_SECRET`/`COOKIE_ENCRYPT_KEY`)。结果是**所有平台都要重扫码**。
+
+⚠️⚠️ **但绝不能把 `.env` 放进异地 GitHub 仓库**:
+异地仓库里那份 DB **本身是加密的** —— 一旦把密钥放进**同一个仓库**,
+等于**把钥匙和锁放在一起**,加密形同虚设(而那个仓库的可见性刚被证明是会变的:
+2026-10-03 就查到一起"线上 webhook 落在**公开**仓库"的事故)。
+
+**正确做法**:密钥**单独存一份在别处**(密码管理器 / 离线介质 / 只有你自己能拿到的地方)。
+`data/backups/` 与异地仓库都**刻意不含 `.env`**,这是设计,不是遗漏。
+
+#### D. 现状与缺口(如实标注)
+
+| 东西 | 备份到哪 | 能扛住 | **扛不住** |
+| --- | --- | --- | --- |
+| 本机 SQLite | 本机 `data/backups/`(7 份)+ **GitHub 私有仓库** | 误删、本机盘坏 | 仓库可见性误改 |
+| **远程 MySQL** | **只在 VPS 本地** `/root/redu-backups/`(7 份) | 误删配置/误删行 | **⚠️ VPS 盘坏 = 全失** |
+| `.env`(密钥) | **刻意不自动备份** | — | 见上面 C —— 需你单独存一份 |
+
+⚠️ **远程 MySQL 这一格是真缺口**:dump 和数据库在**同一块盘**上,扛不住 VPS 盘坏。
+关掉它两条路(**都需要你参与**):
+1. **VPS 生成 SSH key → 加到私有仓库当 deploy key** → 每天把 57MB 的 dump 推上去
+   (GitHub 单文件上限 100MB,57MB 可行;但仓库会逐日变大,建议只推每周一份);
+2. **本机定时从 VPS 拉**:写个脚本走 sftp 取最新 dump,再随现有异地流程推走
+   —— 代价是本机要**持久保存 VPS 凭据**(目前刻意不落盘)。
+
+⚠️ 另:VPS 盘已用 **89%(49G 里剩 5.3G)**,本身就是个风险 —— 满盘会让容器起不来。
 
 ## 8. 关键文件位置
 

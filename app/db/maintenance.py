@@ -260,6 +260,21 @@ def cleanup_old_data(settings: Settings | None = None, db: Session | None = None
         except Exception as exc:  # noqa: BLE001 - 备份失败不阻塞清理
             logger.exception("SQLite 快照备份失败")
             result["sqlite_backup_error"] = f"{type(exc).__name__}: {exc}"
+            # ⚠️ **失败必须喊出来**(2026-10-03):此前这里只写日志 —— 而"备份静默失败"是最骗人的
+            # 故障:**每天看着有文件、真要用时才发现全是空的/根本没有**。而且本机快照一断,
+            # 随后的异地备份也整条跟着断。推管理员群(运维告警,本就该去那儿)。
+            try:
+                from app.db.models import User
+                from app.services import alert_service
+
+                uid = db.scalar(select(User.id).where(User.enabled.is_(True)).order_by(User.id))
+                if uid:
+                    alert_service.notify_incident(
+                        db, int(uid), "ops", "⚠️ 本机 SQLite 快照备份失败",
+                        f"{type(exc).__name__}: {str(exc)[:160]} —— 异地备份也会跟着断",
+                        settings=settings, push_feishu=True)
+            except Exception:  # noqa: BLE001 - 告警本身失败不该再抛
+                logger.exception("备份失败告警推送失败")
         result["retention_days"] = days
         return result
     finally:
