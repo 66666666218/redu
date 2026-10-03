@@ -116,3 +116,34 @@ class TestCategoriesAreExtensible:
         monkeypatch.setattr(cs, "get_settings",
                             lambda: type("S", (), {"lead_categories": ""})())
         assert ct.categories() == ct.DEFAULT_CATEGORIES
+
+
+class TestUserRealExamples:
+    """⚠️ **用户给的真实例子**(2026-10-04)—— 这批比我自己编的样例有价值得多:
+
+        超人模拟器|入口                                   → 软件
+        2026性格测试｜七宗罪&七美德测试入口+完整版操作教程   → 问卷
+        孙宇晨小作文                                      → 大瓜
+
+    **三条里两条当场把我打回原形**:
+      ① "…测试…+完整版操作教程" 含资料类的"教程",而原来的判定是"**第一个命中的类目就赢**"
+         + 资料排在表头 → **被误判成资料**。改成**按命中次数计分**后:问卷"测试"×2 > 资料"教程"×1 ✅
+      ② "小作文"这种**实际说法**原来不在大瓜词表里 → **认不出**。已补(顺带补了塌房/道歉/内讧等)。
+
+    同时它也说明了**为什么"入口"不能当判据**:软件类(超人模拟器|入口)和问卷类(测试入口)
+    里都有它 —— **本身不携带类目信息**,放进去只会制造误判。
+    """
+
+    def test_software(self) -> None:
+        assert ct.classify("超人模拟器|入口") == "软件"
+
+    def test_questionnaire_beats_the_generic_tutorial_word(self) -> None:
+        """⚠️ 这条是核心回归:命中"教程"(资料)也不能盖过两次"测试"(问卷)。"""
+        assert ct.classify("2026性格测试｜七宗罪&七美德测试入口+完整版操作教程") == "问卷"
+
+    def test_gossip(self) -> None:
+        assert ct.classify("孙宇晨小作文") == "大瓜"
+
+    def test_the_two_obvious_ones(self) -> None:
+        assert ct.classify("四级真题 网盘") == "资料"
+        assert ct.classify("挑丨情丑闻【韩剧】") == "影视"
