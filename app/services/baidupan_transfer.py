@@ -37,6 +37,21 @@ class BaiduPanAuthError(BaiduPanError):
     """Cookie 失效(BDUSS 过期),需重新复制。"""
 
 
+def _transfer_error(errno, show_msg: str = "") -> str:
+    """转存失败的**可读**错误串:必须带上百度的 `show_msg`。
+
+    ⚠️ **为什么不能只报 errno**(2026-10-03 实测):贴吧/知乎发现的影视盘链大批回
+    `errno=-6`,而**光看数字分不清是"分享已失效"(终态,别再重试)还是"转存被限制"(等一会就好)**;
+    这两者对下游的意义完全相反 —— 前者该标 skipped,后者该留 failed 下轮重来。
+    带上 `show_msg` 才判得出来。`105/-70` 是已知的"转存被限制"码,单独措辞。
+    """
+    why = (show_msg or "").strip()[:60]
+    tail = f" {why}" if why else ""       # 没原因就别留个悬空空格
+    if errno in (105, -70):
+        return f"转存被限制(errno={errno}{tail}),稍后重试"
+    return f"转存失败(errno={errno}{tail})"
+
+
 def extract_baidu_urls(text: str) -> list[str]:
     """从文本提取百度盘分享链接(保序去重)。"""
     seen: set[str] = set()
@@ -138,11 +153,13 @@ class BaiduPanClient:
         t = r.json()
         if t.get("info") and isinstance(t["info"], list) and t["info"][0].get("errno"):
             t["errno"] = t["info"][0]["errno"]
+            # ⚠️ **show_msg 必须一起带出来**(2026-10-03 实测踩到):只留 `errno=-6` 时
+            # **看不出是"分享已失效"(终态,别再重试)还是"转存被限制"(等一会就好)** ——
+            # 这两者对下游的意义完全相反。第 165 行创建分享时本来就带了 `show_msg`,这里漏了。
+            t["show_msg"] = t["info"][0].get("show_msg") or t.get("show_msg") or ""
         errno = t.get("errno", -1)
         if errno not in (0, 4):  # 4=文件已存在,复用
-            if errno in (105, -70):
-                raise BaiduPanError(f"转存被限制(errno={errno}),稍后重试")
-            raise BaiduPanError(f"转存失败(errno={errno})")
+            raise BaiduPanError(_transfer_error(errno, str(t.get("show_msg") or "")))
         paths = [f"{target_dir.rstrip('/')}/{n}" for n in names if n]
 
         # pset 分享(NetdiskUA,无需 bdstoken);转存后立刻分享偶发未就绪,重试 2 次

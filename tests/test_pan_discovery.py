@@ -35,6 +35,112 @@ class _S:
     feishu_secret = ""
     pan_discovery_keywords = 3
     pan_discovery_transfer_limit = 2
+    # ⚠️ **单测里必须关掉贴吧源**:它走 MediaCrawler,一跑就是 30s+ 真浏览器(实测一次
+    # 让本文件从 9s 涨到 259s)。要测它的分支请单独 patch `crawl`,别让它出网。
+    pan_discovery_tieba = False
+
+
+class TestSearchWords:
+    """知乎搜索词必须**带限定后缀**(2026-10-03 实测,同账号同时段对照)。
+
+    裸词命中 **0%**(鞠婧祎/苏超/兰香如故 48 条结果 → 0 条盘链);
+    补上"网盘/全集/教程/资料"后 **17.8%**(107 条 → 19 条)。
+    原因是知乎的盘链回答集中在**资料/合集**类问题,裸剧名搜到的全是剧情讨论。
+    所以 `_search_words` 给每个动态词补后缀 —— 这条测试防的就是"有人把后缀优化没了"。
+    """
+
+    def _st(self, **kw):
+        base = {"pan_discovery_suffix": " 网盘", "pan_discovery_terms": ""}
+        base.update(kw)
+        return type("S", (), base)()
+
+    def test_dynamic_words_get_the_suffix(self, session, monkeypatch) -> None:
+        monkeypatch.setattr("app.services.douyin_leads.search_keywords",
+                            lambda s, u, t, st: ["兰香如故", "四级真题"])
+        out = pd._search_words(session, 1, 5, self._st())
+        assert out == ["兰香如故 网盘", "四级真题 网盘"]
+
+    def test_terms_take_priority_but_respect_top(self, session, monkeypatch) -> None:
+        """资料词表**排在前面**且吃掉名额 —— 它命中率最高,该优先。`top` 是上限不是目标。"""
+        monkeypatch.setattr("app.services.douyin_leads.search_keywords",
+                            lambda s, u, t, st: ["动态甲", "动态乙"])
+        out = pd._search_words(session, 1, 2, self._st(
+            pan_discovery_terms="四级真题 网盘, PS教程 全套 网盘, 考公资料 网盘"))
+        assert out == ["四级真题 网盘", "PS教程 全套 网盘"]      # 截到 top=2,动态词没位置
+
+    def test_no_duplicate_when_term_matches_dynamic_plus_suffix(self, session, monkeypatch) -> None:
+        monkeypatch.setattr("app.services.douyin_leads.search_keywords", lambda s, u, t, st: ["甲"])
+        out = pd._search_words(session, 1, 5, self._st(pan_discovery_terms="甲 网盘"))
+        assert out == ["甲 网盘"]
+
+    def test_empty_suffix_leaves_words_untouched(self, session, monkeypatch) -> None:
+        """后缀可关(留空即不补)—— 给"想原样搜"的场合留个口子。"""
+        monkeypatch.setattr("app.services.douyin_leads.search_keywords", lambda s, u, t, st: ["甲"])
+        assert pd._search_words(session, 1, 5, self._st(pan_discovery_suffix="")) == ["甲"]
+
+
+class TestTiebaSource:
+    """贴吧源(2026-10-03 加):实测命中 **56%**,是知乎(17.8%)的 3 倍,故为**主源**。
+
+    它走 MediaCrawler(真浏览器),所以这些用例一律 patch 掉,只验**接线与失败语义**。
+    """
+
+    def _st(self, **kw):
+        base = {"pan_discovery_tieba": True}
+        base.update(kw)
+        return type("S", (), base)()
+
+    def test_candidates_from_tieba_drops_rows_without_pan_link(self, monkeypatch) -> None:
+        from app.services import mediacrawler_source
+        monkeypatch.setattr(mediacrawler_source, "crawl", lambda p, kws, timeout=600: [
+            {"uid": "1", "name": "甲", "url": "u1", "snippet": "有链",
+             "pan_link": "https://pan.baidu.com/s/A"},
+            {"uid": "2", "name": "乙", "url": "u2", "snippet": "没链", "pan_link": ""}])
+        out = pd._candidates_from_tieba(["词"])
+        assert len(out) == 1 and out[0]["platform"] == "tieba"
+        assert out[0]["origin_url"] == "https://pan.baidu.com/s/A"
+
+    def test_tieba_alone_can_produce_candidates_without_zhihu_cookie(self, session, monkeypatch) -> None:
+        """**没配知乎 Cookie 也要能用** —— 贴吧是主源,不该被知乎的缺失连累。"""
+        monkeypatch.setattr("app.services.cookie_store.get_cookie", lambda s, u, p: "")
+        monkeypatch.setattr(pd, "_candidates_from_tieba", lambda kws: [
+            {"platform": "tieba", "origin_url": "https://pan.baidu.com/s/X",
+             "title": "某剧", "author": "a", "source_url": "u"}])
+        out = pd.find_candidates(session, 1, ["甲"], settings=self._st())
+        assert len(out) == 1 and out[0]["platform"] == "tieba"
+
+    def test_one_source_failing_keeps_the_other(self, session, monkeypatch) -> None:
+        """贴吧挂了(MediaCrawler 超时/未登录)**不能丢掉知乎已经拿到的那条**。"""
+        from app.services import mediacrawler_source
+        monkeypatch.setattr("app.services.cookie_store.get_cookie", lambda s, u, p: "ck")
+        monkeypatch.setattr(pd, "_candidates_from_zhihu", lambda ck, kws, lim: [
+            {"platform": "zhihu", "origin_url": "https://pan.quark.cn/s/Z",
+             "title": "知乎的", "author": "", "source_url": ""}])
+        def _boom(platform, kws, timeout=600):
+            raise mediacrawler_source.MediaCrawlerError("贴吧超时")
+        monkeypatch.setattr(mediacrawler_source, "crawl", _boom)
+        out = pd.find_candidates(session, 1, ["甲"], settings=self._st())
+        assert [c["platform"] for c in out] == ["zhihu"]
+
+    def test_all_sources_failing_raises(self, session, monkeypatch) -> None:
+        """**全都失败**要抛出来 —— 否则"两边都挂了"会被下游读成"今天真没资源"。"""
+        from app.services import mediacrawler_source
+        from app.services.cross_accounts import SearchSourceError
+        monkeypatch.setattr("app.services.cookie_store.get_cookie", lambda s, u, p: "ck")
+        monkeypatch.setattr(pd, "_candidates_from_zhihu",
+                            lambda ck, kws, lim: (_ for _ in ()).throw(SearchSourceError("知乎限流")))
+        def _boom(platform, kws, timeout=600):
+            raise mediacrawler_source.MediaCrawlerError("贴吧超时")
+        monkeypatch.setattr(mediacrawler_source, "crawl", _boom)
+        with pytest.raises(SearchSourceError):
+            pd.find_candidates(session, 1, ["甲"], settings=self._st())
+
+    def test_source_can_be_switched_off(self, session, monkeypatch) -> None:
+        monkeypatch.setattr("app.services.cookie_store.get_cookie", lambda s, u, p: "")
+        called = []
+        monkeypatch.setattr(pd, "_candidates_from_tieba", lambda kws: called.append(1) or [])
+        assert pd.find_candidates(session, 1, ["甲"], settings=self._st(pan_discovery_tieba=False)) == []
+        assert called == [], "关掉了还在跑贴吧源"
 
 
 def test_kind_of_maps_hosts() -> None:

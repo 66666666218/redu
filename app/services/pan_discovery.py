@@ -113,25 +113,15 @@ def transfer_pan_url(session, user_id: int, pan_url: str, settings=None,
         return {"status": "failed", "message": str(exc)[:200], "our_url": "", "code": ""}
 
 
-def find_candidates(session, user_id: int, keywords: list[str], limit: int = 20,
-                    settings=None) -> list[dict]:
-    """按资源词搜知乎 → 挑出**带直接盘链**的内容。
-
-    返回 `[{platform, origin_url, title, author, source_url}]`(按 `origin_url` 去重)。
-    """
-    from app.services.cookie_store import get_cookie
+def _candidates_from_zhihu(ck: str, keywords: list[str], limit: int) -> list[dict]:
+    """知乎:逐词搜(**有频控**,词间必须隔开)。全部词失败则抛 `SearchSourceError`。"""
     from app.services.cross_accounts import SearchSourceError, _search_zhihu
 
-    ck = (get_cookie(session, user_id, "zhihu") or "").strip()
-    if not ck:
-        logger.info("网盘发现跳过:未配知乎 Cookie(这条路靠它搜)")
-        return []
-    found: dict[str, dict] = {}
-    failed = 0
-    last_err = ""
+    out: list[dict] = []
+    failed, last_err = 0, ""
     for i, kw in enumerate(keywords):
         if i:
-            time.sleep(_REQ_GAP)                    # 限速:逐词之间必须隔开
+            time.sleep(_REQ_GAP)
         try:
             rows = _search_zhihu(ck, kw, limit)
         except SearchSourceError as exc:
@@ -139,20 +129,123 @@ def find_candidates(session, user_id: int, keywords: list[str], limit: int = 20,
             # 不能像以前那样返回空列表被下游当成"真的没有"(见 SearchSourceError 的说明)。
             failed += 1
             last_err = str(exc)
-            logger.warning("网盘发现:词「%s」搜索失败(%s)", kw, exc)
+            logger.warning("网盘发现:知乎词「%s」失败(%s)", kw, exc)
             continue
         for r in rows:
             url = str(r.get("pan_link") or "").strip()
-            if not url or url in found:
+            if not url:
                 continue
-            snippet = _clean(r.get("snippet") or "")
-            found[url] = {"platform": "zhihu", "origin_url": url,
-                          "title": snippet[:255] or kw[:60],
-                          "author": str(r.get("name") or "")[:64],
-                          "source_url": str(r.get("url") or "")[:500]}
+            out.append({"platform": "zhihu", "origin_url": url,
+                        "title": _clean(r.get("snippet") or "")[:255] or kw[:60],
+                        "author": str(r.get("name") or "")[:64],
+                        "source_url": str(r.get("url") or "")[:500]})
     if keywords and failed == len(keywords):
         raise SearchSourceError(f"{len(keywords)} 个词全部搜索失败:{last_err}")
+    return out
+
+
+def _candidates_from_tieba(keywords: list[str]) -> list[dict]:
+    """贴吧:走 MediaCrawler(**带 Cookie 直连 403**,只能走它),一次浏览器跑完所有词。
+
+    ⚠️ **实测产出是知乎的 3 倍**(2026-10-03 同口径对照):
+    贴吧 16 条 → **9 条带盘链(56%)**,且**全是百度网盘**、内容集中在影视剧集(对口赛道);
+    而知乎加了限定词后也才 17.8%。所以贴吧不是"备选",是**主源**。
+
+    代价:一次浏览器启动(实测 ~32s,与词数无关 —— MediaCrawler 内部遍历),
+    且**需要先登录过一次**(档案 `cdp_tieba_user_data_dir`,见 `tools/tieba_login.py`;
+    未登录时它会卡在扫码直到超时,由 `MediaCrawlerError` 如实冒出来)。
+    """
+    from app.services.mediacrawler_source import crawl
+
+    out: list[dict] = []
+    for r in crawl("tieba", keywords):
+        url = str(r.get("pan_link") or "").strip()
+        if not url:
+            continue
+        out.append({"platform": "tieba", "origin_url": url,
+                    "title": _clean(r.get("snippet") or "")[:255],
+                    "author": str(r.get("name") or "")[:64],
+                    "source_url": str(r.get("url") or "")[:500]})
+    return out
+
+
+def find_candidates(session, user_id: int, keywords: list[str], limit: int = 20,
+                    settings=None) -> list[dict]:
+    """按资源词搜**公开平台** → 挑出**带直接盘链**的内容,按 `origin_url` 去重。
+
+    两个源(谁没配谁跳过),**一个源失败不影响另一个**:
+      · **贴吧**(MediaCrawler,主源,实测命中 56%);
+      · **知乎**(带 Cookie 直搜,命中 17.8%)。
+    只有**全部都失败**才抛 `SearchSourceError` —— 否则"全挂了"会被下游当成"今天真没资源"。
+
+    返回 `[{platform, origin_url, title, author, source_url}]`。
+    """
+    from config.settings import get_settings
+
+    from app.services.cookie_store import get_cookie
+    from app.services.cross_accounts import SearchSourceError
+    from app.services.mediacrawler_source import MediaCrawlerError
+
+    settings = settings or get_settings()
+    found: dict[str, dict] = {}
+    attempted = failures = 0
+    last_err = ""
+
+    ck = (get_cookie(session, user_id, "zhihu") or "").strip()
+    if ck:
+        attempted += 1
+        try:
+            for c in _candidates_from_zhihu(ck, keywords, limit):
+                found.setdefault(c["origin_url"], c)
+        except SearchSourceError as exc:
+            failures += 1
+            last_err = str(exc)
+    else:
+        logger.info("网盘发现:未配知乎 Cookie,跳过知乎源")
+
+    if getattr(settings, "pan_discovery_tieba", True):
+        attempted += 1
+        try:
+            for c in _candidates_from_tieba(keywords):
+                found.setdefault(c["origin_url"], c)
+        except MediaCrawlerError as exc:
+            failures += 1
+            last_err = str(exc)
+            logger.warning("网盘发现:贴吧源失败(%s)", str(exc)[:120])
+
+    if attempted and failures == attempted:
+        raise SearchSourceError(f"{attempted} 个源全部失败:{last_err}")
+    if not attempted:
+        logger.info("网盘发现跳过:两个源都没启用/都没配")
     return list(found.values())
+
+
+def _search_words(session, user_id: int, top: int, settings) -> list[str]:
+    """知乎搜索词 = **资料词表**(优先) + 「动态词 + 限定后缀」。
+
+    ⚠️ **为什么不能直接拿 `douyin_leads.search_keywords` 的结果去搜**(2026-10-03 实测):
+    那套词的用途是"在抖音热点里找《口令》",给的是**剧名/热点名**;拿到知乎上,
+    48 条结果里**一条盘链都没有**(鞠婧祎/苏超/兰香如故 全 0)。原因是知乎的盘链回答
+    集中在**资料/合集**类问题,裸剧名搜到的全是剧情讨论。
+
+    同一批词**补上限定词**后立刻有产出(同账号同时段对照):
+    `兰香如故 全集 网盘`→1、`教程 资料 网盘`→2、`四级真题 网盘`→4、`PS教程 全套 网盘`→6 ——
+    命中率 **0% → 17.8%**。所以这里统一补后缀;`pan_discovery_terms` 里还能再放
+    自己赛道的资料词(**优先于**动态词)。
+
+    `top` 是**上限不是目标**:逐词要隔 `_REQ_GAP` 秒,且知乎有频控(实测连打 20+ 次会 403)。
+    """
+    from app.services.douyin_leads import search_keywords
+
+    suffix = str(getattr(settings, "pan_discovery_suffix", "") or "")
+    terms = [t.strip() for t in str(getattr(settings, "pan_discovery_terms", "") or "").split(",")
+             if t.strip()]
+    out = list(terms)
+    for w in search_keywords(session, user_id, top, settings):
+        q = f"{w}{suffix}".strip()
+        if q and q not in out:
+            out.append(q)
+    return out[:top]
 
 
 def sync(session, user_id: int, settings=None) -> dict:
@@ -160,10 +253,8 @@ def sync(session, user_id: int, settings=None) -> dict:
     from config.settings import get_settings
 
     settings = settings or get_settings()
-    from app.services.douyin_leads import search_keywords   # 同一套"资源词"来源
-
     top = int(getattr(settings, "pan_discovery_keywords", 5) or 5)
-    keywords = search_keywords(session, user_id, top, settings)
+    keywords = _search_words(session, user_id, top, settings)
     if not keywords:
         return {"status": "no_keywords", "found": 0, "ok": 0, "skipped": 0,
                 "pending": 0, "failed": 0, "items": []}
