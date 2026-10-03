@@ -329,11 +329,25 @@ def sync(session, user_id: int, settings=None) -> dict:
     known = set(session.scalars(select(DiscoveredPanLink.origin_url).where(
         DiscoveredPanLink.user_id == user_id,
         DiscoveredPanLink.status.in_(("ok", "skipped"))).distinct()).all())
-    cands = [c for c in find_candidates(session, user_id, keywords, settings=settings)
-             if c["origin_url"] not in known]
     # 已存在的行(含 pending/failed)→ **更新而不是再插一条**:否则重试撞唯一键
     exist = {r.origin_url: r for r in session.scalars(select(DiscoveredPanLink).where(
         DiscoveredPanLink.user_id == user_id)).all()}
+    # ⚠️ **存量待办必须优先重试**(2026-10-04 加):库里 `pending`/`failed` 的行
+    # (缺 Cookie / **盘满** / 超额度)**不能只等"再次被搜到"才动** ——
+    # 而**盘满恰恰是最常见的停摆原因**(用户当天亲身遇到:抖音那轮 5 条全卡在盘满,
+    # 盘一清出来却没有任何机制会去重搬它们)。
+    # 复用本表当**待办队列**:**不新建表、不新增作业**,抖音那条链也把搬不动的往这里入队。
+    backlog = [{"platform": r.platform, "origin_url": r.origin_url, "title": r.title or "",
+                "author": r.author or "", "source_url": r.source_url or ""}
+               for r in exist.values() if r.status in ("pending", "failed")]
+    fresh = [c for c in find_candidates(session, user_id, keywords, settings=settings)
+             if c["origin_url"] not in known]
+    cands, _seen = [], set()
+    for c in backlog + fresh:            # 待办在前(它们等得最久),再是新发现的
+        if c["origin_url"] in _seen:
+            continue
+        _seen.add(c["origin_url"])
+        cands.append(c)
     budget = int(getattr(settings, "pan_discovery_transfer_limit", 3) or 0)
     ok = skipped = failed = pending = 0
     items: list[dict] = []

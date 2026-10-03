@@ -472,3 +472,30 @@ def test_find_candidates_keeps_going_when_one_keyword_fails(session, monkeypatch
     monkeypatch.setattr("app.services.cookie_store.get_cookie", lambda s, u, p: "ck")
     out = pd.find_candidates(session, 1, ["甲", "乙"], settings=_S())
     assert len(out) == 1 and out[0]["origin_url"] == "https://pan.quark.cn/s/Y"
+
+
+def test_sync_retries_backlog_without_refinding_it(session, monkeypatch) -> None:
+    """⚠️ **存量待办必须优先重试,不能只等"再次被搜到"**(2026-10-04 加)。
+
+    用户遇到的场景:抖音那轮 5 条卡在**盘满**,而盘一清出来 ——
+    旧实现**没有任何机制会去重搬它们**(`sync` 的候选只来自"本轮新搜到的",
+    pending 行只有在被重新搜到时才会更新,纯属碰运气)。
+
+    现在 `sync` 会把库里 `pending`/`failed` 的行**排在新发现的前面**先处理。
+    这条测试:**本轮一个新候选都搜不到**,但存量待办仍然被搬了。
+    """
+    session.add(DiscoveredPanLink(user_id=1, platform="douyin",
+                                  origin_url="https://pan.quark.cn/s/BACKLOG",
+                                  title="攒着的", status="pending"))
+    session.commit()
+    monkeypatch.setattr(pd, "_search_words", lambda *a, **k: ["某词"])
+    monkeypatch.setattr(pd, "find_candidates", lambda *a, **k: [])       # 本轮没搜到新的
+    monkeypatch.setattr(pd, "transfer_pan_url",
+                        lambda *a, **k: {"status": "ok", "our_url": "OUR-BACKLOG",
+                                         "code": "", "message": ""})
+
+    out = pd.sync(session, 1, settings=_S())
+    assert out["ok"] == 1, f"存量待办没被重试:{out}"
+    row = session.scalar(select(DiscoveredPanLink).where(
+        DiscoveredPanLink.origin_url == "https://pan.quark.cn/s/BACKLOG"))
+    assert row.status == "ok" and row.our_url == "OUR-BACKLOG"

@@ -360,6 +360,35 @@ def search_keywords(session, user_id: int, top: int, settings,
     return kws
 
 
+def _enqueue_later(session, user_id: int, info: dict, mark: str) -> None:
+    """**把"能搬、但现在搬不了"的链入队**,等条件好了再重试(2026-10-04 加)。
+
+    用户口径:"**可以加上**"(指给"未搬"加待办队列)。场景正是他自己遇到的:
+    抖音那轮 **5 条全卡在盘满**,而盘一清出来 —— **没有任何机制会去重搬它们**,
+    只能等"同一个视频再次被搜到",纯属碰运气。
+
+    ⚠️ **不新建表、不新增作业**:复用 `DiscoveredPanLink`(公开发现链那张)——
+    它本来就有 `pending/ok/skipped` 的状态机,而 `pan_discovery.sync` **现在优先重试存量待办**。
+    这就是"待办队列"该有的样子:**一处状态机,两条链共用**。
+    """
+    from app.db.models import DiscoveredPanLink
+
+    url = str(info.get("share_url") or "").strip()
+    if not url:
+        return
+    row = session.scalar(select(DiscoveredPanLink).where(
+        DiscoveredPanLink.user_id == user_id, DiscoveredPanLink.origin_url == url))
+    if row is None:
+        session.add(DiscoveredPanLink(
+            user_id=user_id, platform="douyin", origin_url=url[:500],
+            title=str(mark)[:255], status="pending",
+            message="抖音线索:转存未成(盘满/超额度),等下一轮重试"))
+    elif row.status not in ("ok", "skipped"):
+        row.status = "pending"
+        row.message = "抖音线索:转存未成,等下一轮重试"
+    session.commit()
+
+
 def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[dict]:
     """把线索里《…》包的口令**真的变成资源**(2026-10-02):解析 → 转存入库 / 加群。
 
@@ -413,6 +442,8 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
                              "newly_joined": bool(res.get("newly_joined"))}
             continue
         if budget <= 0:
+            # ⚠️ **超额度也要入队**:不然它只是"这轮没搬",下一轮同样不会自动补
+            _enqueue_later(session, user_id, info, mark)
             ld["kouling"] = {"kind": "share", "status": "over_budget",
                              "share_url": info["share_url"]}
             continue
@@ -423,6 +454,9 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
             ld["kouling"] = {"kind": "error", "message": str(exc)[:80]}
             down.append(str(exc)[:60])
             continue
+        if res.get("status") in ("disk_full", "failed"):
+            # **盘满 / 单次失败** → 入队,等条件好了由 `pan_discovery` 的存量待办优先重试
+            _enqueue_later(session, user_id, info, mark)
         ld["kouling"] = {"kind": "share", "status": res.get("status"),
                          "our_url": res.get("our_url") or "",
                          "share_url": info["share_url"],
@@ -534,29 +568,32 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin") -> bool:
     from app.services.feishu_client import FeishuClient
 
     label = (PLATFORMS.get(platform) or {}).get("label", platform)
+    # 「条数」= **这个资源(口令)本轮被几条视频在推** —— 用户口径(2026-10-04):
+    # 一眼看出"大家都在抢这个"。按**口令**(`mark`)分组,同一口令的行显示同一个数。
+    from collections import Counter
+
+    _counts = Counter(str(ld.get("mark") or "") for ld in leads)
+
     elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
         f"{label}上发现 **{len(leads)}** 条在推同类资源的视频。"
-        "已自动解析并把能拿到的**转存进我方网盘**(归入「最全文件」),可直接取用。"}},
-        # **四列网格**:与公众号推送同一套版式(作者/作品/资源/链接),不靠空格对齐
-        _col_set_row([("**作者**", 3), ("**作品**", 5), ("**资源**", 3), ("**链接**", 2)],
-                     grey=True)]
+        "已自动解析并把能拿到的**转存进我方网盘**,可直接取用。"}},
+        # **六列网格**(用户口径 2026-10-04):作者 / 作品 / 资源 / 视频 / 转发数 / 条数
+        # ⚠️ 两处可点(**照公众号那套**):「作品」点开是**抖音视频**、「资源」点开是**我方链**;
+        #    「资源」写的是**网盘名**(夸克/百度/迅雷)而**不是链接文本** —— 见 `_pan_name`。
+        _col_set_row([("**作者**", 3), ("**作品**", 5), ("**资源**", 2), ("**视频**", 2),
+                      ("**转发数**", 2), ("**条数**", 1)], grey=True)]
     for ld in leads:
         info = ld.get("kouling") or {}
-        # 作者列显示**抖音账号名**(工具脱敏过的,如「籽***」)—— v2 口径(2026-10-02 用户选定)
         author = _md_safe(ld.get("author") or "—")
-        # 标题里别人的口令《…》**删掉**(不是替换,见 `strip_others` 的口径变更史)
         title = _md_safe(strip_others(ld.get("title") or ""))
-        shown = title[:24] + ("…" if len(title) > 24 else "")
-        # 转发量**并进作品列**:一眼看出"这条资源在抖音多热"。
-        # 没有就不显示(不拿 0 冒充有数据);口径见 `DouyinLead` 的注释 ——
-        # 它是**别人视频**的转发量,衡量热度,不等于我们自己的转化。
+        shown = title[:22] + ("…" if len(title) > 22 else "")
+        vurl = _md_safe(ld.get("url") or "")
+        # 「作品」列:**标题本体可点** → 抖音视频(公众号卡片的「文章」列就是这个做法)
+        work = f"[{shown}]({vurl})" if vurl else shown
+        # 转发量**独立成列**(原来并进作品列,六列版式下挪出来)。没有就不显示,
+        # 不拿 0 冒充有数据 —— 口径见 `DouyinLead` 的注释(它是**别人视频**的转发量)。
         sc = int(ld.get("share_count") or 0)
-        if sc:
-            shown += f" · ↗{sc}"
-        # 资源列:**写"哪个盘"而不是"我方链"**(用户口径 2026-10-04)——
-        # "我方"二字在客户群里暴露运营方身份;盘名(夸克/百度/迅雷)中性且信息量更大。
-        # 状态也写清**为什么没搬**:`disk_full` 是**盘满**(最该让人看到的一种,
-        # 因为只有人能清),`over_budget` 是本轮额度、`skipped` 是被闸门挡下。
+        # 「资源」列:**网盘名 + 可点(→ 我方链)**;没搬的写明**为什么**
         pan = _pan_name(info.get("our_url") or info.get("share_url") or "")
         if info.get("kind") == "share" and info.get("status") == "ok":
             res = f"[🔴{pan or '已转存'}]({_md_safe(info.get('our_url') or '')})"
@@ -571,12 +608,14 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin") -> bool:
         elif info.get("status") == "skipped":
             res = f"⏸{pan or '盘'}(被挡下)"
         else:
-            res = "·非资源"
+            res = "—"
         elements.append(_col_set_row([
             (author, 3),
-            (shown, 5),
-            (res, 3),
-            (f"[▶视频]({_md_safe(ld.get('url') or '')})", 2)]))
+            (work, 5),
+            (res, 2),
+            (f"[▶视频]({vurl})" if vurl else "—", 2),
+            (f"↗{sc}" if sc else "—", 2),
+            (str(_counts.get(str(ld.get("mark") or ""), 1)), 1)]))
     card = {
         "config": {"wide_screen_mode": True},
         # ⚠️ **不带头部品牌名**(用户口径 2026-10-04:"**不要带念飞思雪**")。

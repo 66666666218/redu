@@ -141,7 +141,7 @@ def test_push_leads_no_webhook_is_noop() -> None:
 # ---------------------------------------------------------------- 口令 → 资源(2026-10-02)
 
 import pytest  # noqa: E402
-from sqlalchemy import create_engine  # noqa: E402
+from sqlalchemy import create_engine, select  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 from app.db.database import Base  # noqa: E402
@@ -328,7 +328,8 @@ def test_push_leads_card_is_grid_with_author_work_link(monkeypatch) -> None:
     cols = [e for e in sent["card"]["elements"] if e.get("tag") == "column_set"]
     assert len(cols) == 2, "应为表头 + 一条数据行"
     header = [c["elements"][0]["text"]["content"] for c in cols[0]["columns"]]
-    assert header == ["**作者**", "**作品**", "**资源**", "**链接**"]
+    # **六列**(用户口径 2026-10-04):作者/作品/资源/视频/转发数/条数
+    assert header == ["**作者**", "**作品**", "**资源**", "**视频**", "**转发数**", "**条数**"]
     row = str(cols[1])
     # **v2 口径**(2026-10-02 用户在三个版本里选定):
     assert "籽***" in row                                 # 作者列 = 抖音账号名(工具脱敏过的)
@@ -607,3 +608,123 @@ class TestResourceColumnShowsPanName:
                                         share_url="https://pan.xunlei.com/s/S")
         assert "被挡下" in self._render(monkeypatch, kind="share", status="skipped",
                                       share_url="https://pan.baidu.com/s/1S")
+
+
+class TestSixColumnCard:
+    """**六列版式**(用户口径 2026-10-04):作者 / 作品 / 资源 / 视频 / 转发数 / 条数。
+
+    两处可点(**照公众号卡片那套**):
+      · 「**作品**」点开是**抖音视频**(公众号的「文章」列就是这个做法);
+      · 「**资源**」写**网盘名**(夸克/百度/迅雷)、点开是**我方链**。
+
+    「**条数**」= **这个资源(口令)本轮被几条视频在推**(用户选定)——
+    一眼看出"大家都在抢这个";转发量原来并进作品列,现在**独立成列**。
+    """
+
+    def _render(self, monkeypatch, leads) -> dict:
+        from app.services import douyin_leads as dl
+        from app.services import feishu_client
+
+        sent = {}
+
+        class _C:
+            def __init__(self, *a) -> None: ...
+            def send_card(self, card):
+                sent["card"] = card
+                return True
+
+        monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+        dl.push_leads(leads, _Settings())
+        return sent["card"]
+
+    def _lead(self, mark, title, sc, **kouling):
+        return {"mark": mark, "title": title, "url": f"https://d/v/{mark}", "author": "籽***",
+                "keyword": "k", "share_count": sc, "kouling": kouling}
+
+    def test_count_column_groups_by_kouling(self, monkeypatch) -> None:
+        """⚠️ 「条数」是**同一口令被几条视频推** —— 不是行号、也不是总条数。"""
+        card = self._render(monkeypatch, [
+            self._lead("高性价比人生指南", "A", 40257, kind="share", status="ok",
+                       our_url="https://pan.quark.cn/s/OUR"),
+            self._lead("高性价比人生指南", "B", 1027, kind="share", status="ok",
+                       our_url="https://pan.quark.cn/s/OUR"),
+            self._lead("趣玩收藏", "C", 0, kind="share", status="ok",
+                       our_url="https://pan.xunlei.com/s/OUR2"),
+        ])
+        rows = [e for e in card["elements"] if e.get("tag") == "column_set"][1:]
+
+        def cell(row_el, idx: int) -> str:      # 取某行第 idx 列的可见文本
+            return row_el["columns"][idx]["elements"][0]["text"]["content"]
+
+        assert cell(rows[0], 5) == "2", f"同一口令两条 → 条数应为 2,实得 {cell(rows[0], 5)}"
+        assert cell(rows[1], 5) == "2"
+        assert cell(rows[2], 5) == "1", "另一个口令 → 条数为 1"
+
+    def test_work_column_links_to_video(self, monkeypatch) -> None:
+        """「作品」列**可点** → 抖音视频(不是纯文本)。"""
+        card = self._render(monkeypatch, [
+            self._lead("x", "某资源标题", 10, kind="share", status="ok",
+                       our_url="https://pan.quark.cn/s/OUR")])
+        row = str([e for e in card["elements"] if e.get("tag") == "column_set"][1])
+        assert "[某资源标题](https://d/v/x)" in row, f"作品应是可点链接:{row[:200]}"
+
+    def test_share_count_is_its_own_column_not_merged_into_work(self, monkeypatch) -> None:
+        card = self._render(monkeypatch, [
+            self._lead("x", "某资源标题", 40257, kind="share", status="ok",
+                       our_url="https://pan.quark.cn/s/OUR")])
+        row = str([e for e in card["elements"] if e.get("tag") == "column_set"][1])
+        assert "↗40257" in row and "某资源标题 · ↗40257" not in row, "转发数应独立成列"
+
+
+class TestUnmovedQueue:
+    """**"未搬"进待办队列**(2026-10-04,用户:"可以加上")。
+
+    场景正是用户遇到的:抖音那轮 **5 条全卡在盘满**,而盘一清出来 ——
+    **没有任何机制会去重搬它们**,只等"同一个视频再次被搜到"纯属碰运气。
+
+    ⚠️ 做法是**复用 `DiscoveredPanLink`** 那张表(公开发现链的),它本来就有
+    `pending/ok/skipped` 状态机,而 `pan_discovery.sync` 现在**优先重试存量待办** ——
+    **一处状态机、两条链共用**,不新建表也不新增作业。
+    """
+
+    def test_creates_pending_row(self, session) -> None:
+        from app.db.models import DiscoveredPanLink
+        from app.services.douyin_leads import _enqueue_later
+
+        _enqueue_later(session, 1, {"share_url": "https://pan.quark.cn/s/X"}, "某口令")
+        row = session.scalar(select(DiscoveredPanLink))
+        assert row is not None and row.status == "pending"
+        assert row.platform == "douyin" and row.title == "某口令"
+
+    def test_is_idempotent(self, session) -> None:
+        """同一个链重复入队 → **更新那一行**,不是插第二条(否则撞唯一键)。"""
+        from app.db.models import DiscoveredPanLink
+        from app.services.douyin_leads import _enqueue_later
+
+        for _ in range(3):
+            _enqueue_later(session, 1, {"share_url": "https://pan.quark.cn/s/X"}, "某口令")
+        assert len(session.scalars(select(DiscoveredPanLink)).all()) == 1
+
+    def test_does_not_downgrade_finished_rows(self, session) -> None:
+        """⚠️ **已经搬好(`ok`)或终态(`skipped`)的行不能被退回 pending** ——
+        那会让"搬成功过的链"被反复重搬(正是本项目反复踩过的反向错误)。"""
+        from app.db.models import DiscoveredPanLink
+        from app.services.douyin_leads import _enqueue_later
+
+        session.add(DiscoveredPanLink(user_id=1, platform="douyin",
+                                      origin_url="https://pan.quark.cn/s/DONE", status="ok"))
+        session.add(DiscoveredPanLink(user_id=1, platform="douyin",
+                                      origin_url="https://pan.quark.cn/s/DEAD", status="skipped"))
+        session.commit()
+        _enqueue_later(session, 1, {"share_url": "https://pan.quark.cn/s/DONE"}, "a")
+        _enqueue_later(session, 1, {"share_url": "https://pan.quark.cn/s/DEAD"}, "b")
+        got = {r.origin_url: r.status for r in session.scalars(select(DiscoveredPanLink)).all()}
+        assert got["https://pan.quark.cn/s/DONE"] == "ok"
+        assert got["https://pan.quark.cn/s/DEAD"] == "skipped"
+
+    def test_blank_url_is_ignored(self, session) -> None:
+        from app.db.models import DiscoveredPanLink
+        from app.services.douyin_leads import _enqueue_later
+
+        _enqueue_later(session, 1, {"share_url": ""}, "x")
+        assert session.scalars(select(DiscoveredPanLink)).all() == []
