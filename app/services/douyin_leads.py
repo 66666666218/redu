@@ -322,6 +322,11 @@ def search_keywords(session, user_id: int, top: int, settings,
     `top` 只管**已知词**那条路的额度;热榜种子**额外附加**在末尾 —— 抖音搜一个词只要几秒
     (实测 3 个词一轮 83 秒),没必要让外部种子和已知词互相挤位置。
 
+    ⚠️ **按类目轮换出词**(2026-10-04,见 `category_topics`):本轮只出**当前类目**的词,
+    下一轮换一类 —— 广度由**轮换**保证,而不是"永远搜最热的那个"。
+    **轮换游标的推进放在 `douyin_leads_tick` 里**(不在这里),免得别的调用方(如 `pan_discovery`)
+    也跟着推进、把类目跳掉。
+
     ⚠️ **已经解析出过群的词排到最后**(`_words_already_resolved_to_group`):抖音搜索次数有限、
     每轮又慢,名额要优先给**没试过的词** —— 否则就是"一直用着一个口令进群"。
 
@@ -329,14 +334,17 @@ def search_keywords(session, user_id: int, top: int, settings,
     不是"看谁在提我们的牌子";品牌词是用在**推送侧**把别人的名字换成我们的(见
     `_rebrand`),不是用来搜的。
     """
+    from app.services import category_topics
     from app.services.cross_accounts import _keywords_from_library
 
-    n_group = int(getattr(settings, "douyin_leads_group_keywords", 0) or 0)
-    kws = group_keywords(session, user_id, top=n_group)
-    for w in _keywords_from_library(session, user_id, max(1, int(top) - len(kws))):
-        if w not in kws:
-            kws.append(w)
-    kws = kws[: int(top)]
+    cat = category_topics.current_category(session)
+    n_group = int(getattr(settings, "douyin_leads_group_keywords", 3) or 0)
+    # 先取**全部**候选(群里的资源名 + 资源库名称),再按类目挑 —— 挑不够会自动补不分类的
+    cand = group_keywords(session, user_id, top=n_group)
+    for w in _keywords_from_library(session, user_id, max(1, int(top))):
+        if w not in cand:
+            cand.append(w)
+    kws = category_topics.pick(cand, cat, int(top))
     # 用过的词排到最后(不删):名额先给没试过的
     seen = _words_already_resolved_to_group(session, user_id)
     if seen:
@@ -595,6 +603,9 @@ def douyin_leads_tick(settings=None) -> int:
             # **热榜外部种子**只喂给抖音:它是"找《口令》"那条路用的;小红书/快手没有口令,
             # 拿热榜词去搜只是白开一次浏览器。
             hot = hot_seed_words(settings) if "douyin" in plats else []
+            from app.services import category_topics
+
+            cat = category_topics.current_category(db)      # 本轮搜哪个类目(轮换,见 category_topics)
             kws = search_keywords(db, uid, top, settings, hot=hot)
             if not kws:
                 continue
@@ -610,7 +621,7 @@ def douyin_leads_tick(settings=None) -> int:
                         _save_leads(db, uid, leads)      # 落库:转发量只在这一次有效(结算要用)
                         push_leads(leads, settings, platform=plat)
                     _record_run(db, uid, "douyin_leads", "success",
-                                f"{plat} 词{len(kws)} 线索{len(leads)} "
+                                f"{plat} 类目{cat} 词{len(kws)} 线索{len(leads)} "
                                 f"{_kouling_summary(leads)}")
                     db.commit()
                 except Exception as exc:  # noqa: BLE001 - 单平台失败不影响其余
@@ -618,6 +629,10 @@ def douyin_leads_tick(settings=None) -> int:
                     logger.exception("线索平台 %s 失败 user=%s", plat, uid)
                     _record_run(db, uid, "douyin_leads", "failed", f"{plat}: {str(exc)[:160]}")
                     db.commit()
+            # ⚠️ **轮换游标在"整轮跑完之后"才推进**(2026-10-04):放在出词之后就推的话,
+            # 中途失败会白白跳过一个类目 —— 而"每类都要覆盖到"正是轮换的意义。
+            nxt = category_topics.advance_category(db)
+            logger.info("抖音线索:类目 %s 跑完 → 下轮 %s", cat, nxt)
     finally:
         db.close()
     return total

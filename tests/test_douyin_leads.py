@@ -261,18 +261,23 @@ def test_group_keywords_prefers_recent_specific(session) -> None:
     assert dl.group_keywords(session, 1, top=5) == ["蓝河工具箱", "警笛模拟器"]
 
 
-def test_search_keywords_puts_group_words_first(session, monkeypatch) -> None:
-    """汇总:群组的词**排前面**(更新鲜),再补资源库的词;去重后按 top 截断。"""
+def test_search_keywords_merges_group_names_and_library_names(session, monkeypatch) -> None:
+    """汇总:候选 = **群里的资源名** + **资源库名称**,去重后按 top 截断。
+
+    用户口径(2026-10-04):"你抖音搜索就跟着**群里面的资源名字**走,**结合资源库里面的名称**"。
+    (本轮类目 = 轮换游标当前值,默认第一个类目「资料」;这里两个词都属它,避免走类目兜底。)
+    """
     session.add(XunleiGroupShare(user_id=1, group_id="g", share_id="s1",
-                                 title="蓝河工具箱", msg_time=datetime.now()))
+                                 title="PS教程 全套", msg_time=datetime.now()))
     session.commit()
     monkeypatch.setattr("app.services.cross_accounts._keywords_from_library",
-                        lambda s, u, top: ["蓝河工具箱", "霸王茶姬杯贴"])
+                        lambda s, u, top: ["PS教程 全套", "四级资料真题"])
 
     class _S:
         douyin_leads_group_keywords = 3
 
-    assert dl.search_keywords(session, 1, top=4, settings=_S()) == ["蓝河工具箱", "霸王茶姬杯贴"]
+    # top=2:两个候选都属「资料」且够用,不会走"话题词兜底"补位
+    assert dl.search_keywords(session, 1, top=2, settings=_S()) == ["PS教程 全套", "四级资料真题"]
 
 
 def test_push_leads_falls_back_when_douhot_missing(monkeypatch) -> None:
@@ -500,45 +505,46 @@ class TestUsedWordsGoLast:
         from app.db.models import DouyinLead
         from app.services import douyin_leads as dl
 
-        session.add(DouyinLead(user_id=1, aweme_id="a1", keyword="用过的词", kind="group",
+        session.add(DouyinLead(user_id=1, aweme_id="a1", keyword="用过的资料真题", kind="group",
                                title="t", found_at=datetime.now()))
         session.commit()
         monkeypatch.setattr("app.services.cross_accounts._keywords_from_library",
-                            lambda s, u, top: ["用过的词", "没试过的词"])
-
-        class _S:
-            douyin_leads_group_keywords = 0        # 群组词已默认关
-
-        assert dl.search_keywords(session, 1, top=2, settings=_S()) == ["没试过的词", "用过的词"]
-
-    def test_word_is_not_dropped_just_deprioritised(self, session, monkeypatch) -> None:
-        """只有这一个词时它仍要出现 —— 排后不等于删除。"""
-        from app.db.models import DouyinLead
-        from app.services import douyin_leads as dl
-
-        session.add(DouyinLead(user_id=1, aweme_id="a1", keyword="唯一的词", kind="group",
-                               title="t", found_at=datetime.now()))
-        session.commit()
-        monkeypatch.setattr("app.services.cross_accounts._keywords_from_library",
-                            lambda s, u, top: ["唯一的词"])
+                            lambda s, u, top: ["用过的资料真题", "没试过的资料模板"])
 
         class _S:
             douyin_leads_group_keywords = 0
 
-        assert dl.search_keywords(session, 1, top=2, settings=_S()) == ["唯一的词"]
+        assert dl.search_keywords(session, 1, top=2, settings=_S()) == ["没试过的资料模板",
+                                                                        "用过的资料真题"]
+
+    def test_word_is_not_dropped_just_deprioritised(self, session, monkeypatch) -> None:
+        """唯一一个词即使"用过"也仍在结果里 —— **排后不等于删除**。"""
+        from app.db.models import DouyinLead
+        from app.services import douyin_leads as dl
+
+        session.add(DouyinLead(user_id=1, aweme_id="a1", keyword="唯一的资料真题", kind="group",
+                               title="t", found_at=datetime.now()))
+        session.commit()
+        monkeypatch.setattr("app.services.cross_accounts._keywords_from_library",
+                            lambda s, u, top: ["唯一的资料真题"])
+
+        class _S:
+            douyin_leads_group_keywords = 0
+
+        assert dl.search_keywords(session, 1, top=1, settings=_S()) == ["唯一的资料真题"]
 
     def test_share_kind_does_not_deprioritise(self, session, monkeypatch) -> None:
         """只有**解析成群**的才算"用过的" —— 解析出**链**的词不影响(它能反复产出链接)。"""
         from app.db.models import DouyinLead
         from app.services import douyin_leads as dl
 
-        session.add(DouyinLead(user_id=1, aweme_id="a1", keyword="出链的词", kind="share",
+        session.add(DouyinLead(user_id=1, aweme_id="a1", keyword="出链的资料真题", kind="share",
                                title="t", found_at=datetime.now()))
         session.commit()
         monkeypatch.setattr("app.services.cross_accounts._keywords_from_library",
-                            lambda s, u, top: ["出链的词", "乙词"])
+                            lambda s, u, top: ["出链的资料真题", "乙资料模板"])
 
         class _S:
             douyin_leads_group_keywords = 0
 
-        assert dl.search_keywords(session, 1, top=2, settings=_S()) == ["出链的词", "乙词"]
+        assert dl.search_keywords(session, 1, top=2, settings=_S()) == ["出链的资料真题", "乙资料模板"]
