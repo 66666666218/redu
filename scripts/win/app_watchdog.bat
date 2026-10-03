@@ -10,4 +10,9 @@ cd /d D:\code\redian
 curl -s -o NUL -m 5 http://127.0.0.1:8080/healthz >NUL 2>&1
 if %errorlevel%==0 exit /b 0
 echo [%date% %time%] watchdog: app not answering, starting uvicorn >> data\app.log
+rem App is down => every in-process alert died with it (doc/operations.md admits
+rem this). The watchdog is the only thing still alive, so IT must report the
+rem outage. Secrets stay out of this git-tracked file: the script reads .env
+rem itself. Failure there must never delay the restart (the script swallows it).
+"C:\Python314\pythonw.exe" scripts\win\notify_restart.py
 start "" /b "C:\Python314\pythonw.exe" -m uvicorn app.platform:app --host 127.0.0.1 --port 8080 >> data\app.log 2>&1

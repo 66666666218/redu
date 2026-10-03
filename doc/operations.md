@@ -716,6 +716,15 @@ print(sorted(j.id for j in s.get_jobs()))"
 无第二台服务器。**2026-09-20 22:34 应用被关闭后静默停机 7 天无人发现**——所有告警都跑在应用内部,
 应用死了告警也死,这是本节要根治的问题。
 
+> ✅ **2026-10-03 补上最后一块**:看门狗拉起应用**之前**,先跑
+> `scripts/win/notify_restart.py` 往**管理员群**推一条"应用进程失联、看门狗已重启"。
+> **为什么必须由看门狗(而不是应用自己)来推** —— 它就是进程外唯一还活着的东西。
+> ⚠️ **密钥不进 `.bat`**:那个文件受 git 跟踪(本项目刚因"线上 webhook 落在公开仓库"
+> 排查过一轮),脚本统一走 `config.settings` 读 `.env`;告警失败被吞掉、**绝不耽误重启**
+> (测试 `tests/test_notify_restart.py` 钉住)。
+> ⚠️ **别指望它写进 `data/app.log`**:该文件被服务进程占着,Windows 下追加报
+> `PermissionError`(实测)—— 所以脚本**退到 `data/notify_restart.log`**。
+
 - 启动方式:`scripts/win/app_watchdog.bat` —— 先探 `http://127.0.0.1:8080/healthz`,
   通了就退出(幂等);不通才拉起 uvicorn(隐藏窗口,日志追加到 `data/app.log`)。
   `scripts/win/start_hidden.vbs` 是无窗口包装,给计划任务用。
