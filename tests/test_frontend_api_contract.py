@@ -65,3 +65,25 @@ def test_api_get_compat_layer_exists() -> None:
     这条单独钉住,是因为它**已经被漏修过一次**(2026-10-01 只修了 post)。
     """
     assert "get" in _exported_methods(), "api.js 的 api 对象里必须有 get(兼容层)"
+
+
+def test_no_unused_exported_api_methods() -> None:
+    """⚠️ **反向守卫**:`api.js` 里声明了、但前端任何地方都不调用的方法 —— 不许堆积。
+
+    2026-10-03 清掉 10 个(`crossRising`/`watchList`/`xianyuDaily`/`douhotWatchList`/
+    `wechatShelf`/`wechatArticleTraffic`/`wechatArticleRewrites`/`trending`/`quarkShares*`)。
+    它们对应的**后端接口都还活着**(`doc/API.md` 记着),只是**前端没入口** ——
+    留着的唯一效果是让下一个人以为"这些功能在界面上有"。
+
+    (与 `test_frontend_only_calls_exported_api_methods` 是一对:那条管"调了不存在的方法",
+    这条管"声明了没人调的方法"。两条都红不了,前端契约才算自洽。)
+    """
+    exported = _exported_methods()
+    used = set(_used_methods())
+    # 兼容层是给"外部/早期写法"备的,不算死代码
+    keep = {"get", "post"}
+    unused = sorted(n for n in exported if n not in used and n not in keep)
+    assert not unused, (
+        "api.js 里这些方法前端从不调用(死代码):\n  " + "\n  ".join(unused) +
+        "\n修法:删掉它们;真要预留就在本测试的 keep 里登记并写清为什么。"
+    )

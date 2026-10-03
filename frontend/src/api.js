@@ -126,7 +126,6 @@ export const api = {
   dashboard: () => req('GET', '/api/dashboard'),
   platformAgent: () => req('GET', '/api/platform-agent'),
   platformView: (platform) => req('GET', '/api/platform/' + platform),
-  crossRising: () => req('GET', '/api/cross/rising'),
   douhotList: (listType, keyword, filterKeyword, dateWindow) => {
     let q = ''
     if (keyword) q += (q ? '&' : '?') + 'keyword=' + encodeURIComponent(keyword)
@@ -137,16 +136,13 @@ export const api = {
   watchAdd: (section, keyword, listType, filterKeyword, dateWindow) => req('POST', '/api/watch/' + section, { keyword, list_type: listType || 'word', filter_keyword: filterKeyword || '', date_window: dateWindow || null }),
   watchDel: (section, listType, keyword, filterKeyword) => req('DELETE', '/api/watch/' + section, { list_type: listType, keyword, filter_keyword: filterKeyword || '' }),
   watchUpdate: (section, listType, keyword, filterKeyword, dateWindow) => req('PATCH', '/api/watch/' + section, { list_type: listType, keyword, filter_keyword: filterKeyword || '', date_window: dateWindow }),
-  watchList: (section) => req('GET', '/api/watch/' + section),
   watchAnalytics: (section) => req('GET', '/api/watch/' + section + '/analytics'),
   watchDigest: (section) => req('POST', '/api/watch/' + section + '/digest'),
-  xianyuDaily: () => req('GET', '/api/xianyu/daily'),
   xianyuCollectDeep: () => req('POST', '/api/xianyu/collect-deep'),
   xianyuAnalytics: () => req('GET', '/api/xianyu/analytics'),
   // 价位行情:价格看供给(红海程度),想要数看需求(搜索免费带回),供需比才是真热度
   xianyuMarket: (days) => req('GET', '/api/xianyu/market?days=' + (days || 30)),
   douhotWatchAdd: (listType, keyword, filterKeyword, dateWindow) => req('POST', '/api/douhot/watch', { list_type: listType, keyword, filter_keyword: filterKeyword || '', date_window: dateWindow || null }),
-  douhotWatchList: () => req('GET', '/api/douhot/watch'),
   douhotWatchAnalytics: () => req('GET', '/api/douhot/watch-analytics'),
   douhotWatchWindows: () => req('GET', '/api/douhot/watch-windows'),
   douhotWatchWindowsRefresh: () => req('POST', '/api/douhot/watch-windows/refresh'),
@@ -186,7 +182,6 @@ export const api = {
   wechatBenchmarkDel: (id) => req('DELETE', `/api/wechat/benchmarks/${id}`),
   wechatBenchmarkSync: (id, maxPages) => req('POST', `/api/wechat/benchmarks/${id}/sync` + (maxPages ? `?max_pages=${maxPages}` : '')),
   wechatListen: () => req('POST', '/api/wechat/listen'),
-  wechatShelf: () => req('GET', '/api/wechat/weread/shelf'),
   wechatWereadRefresh: () => req('POST', '/api/wechat/weread/refresh'),
   wechatCandidates: () => req('GET', '/api/wechat/candidates'),
   wechatCandidateDiscover: () => req('POST', '/api/wechat/candidates/discover'),
@@ -200,10 +195,7 @@ export const api = {
   wechatImportShelf: () => req('POST', '/api/wechat/benchmarks/import_shelf'),
   wechatArticles: (q = '') => req('GET', '/api/wechat/articles' + (q ? '?' + q : '')),
   wechatTrafficRefresh: (o = {}) => req('POST', '/api/wechat/traffic/refresh', o),
-  wechatArticleTraffic: (id) => req('GET', `/api/wechat/articles/${id}/traffic`),
   wechatArticleRewrite: (id) => req('POST', `/api/wechat/articles/${id}/rewrite`),
-  wechatArticleRewrites: (id) => req('GET', `/api/wechat/articles/${id}/rewrites`)
-  ,
   members: () => req('GET', '/api/members'),
   memberAdd: (o) => req('POST', '/api/members', o),
   memberRenew: (id) => req('POST', `/api/members/${id}/renew`),
@@ -212,7 +204,6 @@ export const api = {
   events: (q = '') => req('GET', '/api/events' + (q ? '?' + q : '')),
   eventsAssign: () => req('POST', '/api/events/assign'),
   sourceHealth: () => req('GET', '/api/source-health'),
-  trending: () => req('GET', '/api/trending'),
   // 热点建议(预测→下注→结算闭环,2026-09-29 v5)
   suggestions: (q = '') => req('GET', '/api/hotspot/suggestions' + (q ? '?' + q : '')),
   suggestionActed: (id, acted = true) => req('POST', `/api/hotspot/suggestions/${id}/acted`, { acted }),
@@ -222,6 +213,4 @@ export const api = {
     req('POST', '/api/hotspot/recruits', { week_start, recruits, note, channels: channels || {} }),
   // 线索结算对账:系统侧(线索数/转发量) vs 人工周录真值,按周并排
   leadsSettlement: (weeks = 8) => req('GET', '/api/hotspot/leads/settlement?weeks=' + weeks),
-  quarkShareCollect: () => req('POST', '/api/quark/shares/collect'),
-  quarkShares: () => req('GET', '/api/quark/shares')
 }

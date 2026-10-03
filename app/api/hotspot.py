@@ -107,7 +107,10 @@ def list_suggestions(limit: int = 50, acted: bool | None = None,
         "resource_title": r.resource_title, "link": r.link, "plan": r.plan,
         "saves": r.saves, "saves_at": r.saves_at.isoformat() if r.saves_at else None,
         "acted": r.acted, "acted_at": r.acted_at.isoformat() if r.acted_at else None,
-        "article_id": r.article_id, "reads_gain": r.reads_gain,
+        "article_id": r.article_id,
+        # ⚠️ `reads_gain` **已从响应里摘掉**(2026-10-03):2026-09-30 放弃 dajiala 阅读采样后
+        # 它**永远是 0**,而返回 0 会被读成"阅读增量为 0"而不是"**这项早就不测了**" ——
+        # 属于"拿假 0 冒充真数据"(本会话已修过多例)。列仍在表里(兼容旧行),只是不再对外给。
         "repost_gain": r.repost_gain,
         "settled_at": r.settled_at.isoformat() if r.settled_at else None,
         "created_at": r.created_at.isoformat() if r.created_at else None,
@@ -172,6 +175,23 @@ def _channels_json(raw: str) -> dict:
     except (ValueError, TypeError):
         return {}
     return {str(k): v for k, v in d.items()} if isinstance(d, dict) else {}
+
+
+@router.get("/api/hotspot/suppliers")
+def hotspot_suppliers(days: int = 30, user: User = Depends(get_current_user),
+                      db: Session = Depends(get_db)):
+    """**供应商(对标号)评分**:近 N 天 产出资源数 × 盘链被全网转载次数。
+
+    用于「**优质号加密监控 / 劣质号降权**」—— 产出多、且链被别人反复转载的号,
+    说明它在持续供**被验证过的**资源。
+
+    ⚠️ **这个函数此前写了但没有任何调用方**(2026-10-03 全项目审查发现,属"白写了"那一类)——
+    现在接出来可查,而不是删掉它(它算的是真数据:`WechatArticle` × `WechatPanLink`)。
+    """
+    from app.services import hotspot_agent
+
+    return {"days": days,
+            "list": hotspot_agent.supplier_scores(db, user.id, days=max(1, min(int(days), 180)))}
 
 
 @router.get("/api/hotspot/leads/settlement")
