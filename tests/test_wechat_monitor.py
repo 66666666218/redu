@@ -4274,3 +4274,51 @@ def test_pan_cookie_keepalive_xunlei_ok_is_silent(session, monkeypatch) -> None:
     st = _settings(quark_cookie="", pan_transfer_enabled=True)
     assert wechat_monitor.pan_cookie_keepalive_tick(settings=st) == 1   # 健康计数 +1
     assert captured == []
+
+
+def test_renewal_does_not_plant_the_fullsync_landmine_when_disabled(
+        session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """⚠️ **续期成功时别再无条件打"全量补采"标记**(2026-10-04)。
+
+    消费这个标记的 `run_full_sync_if_pending` **默认关停** —— 注释写着"renewal 后打 81×2
+    的补采炸弹会数小时内打穿全部会话额度"。可续期那边**每次都无条件写标记**,于是:
+    ① 标记永远不清,库里常驻一行垃圾;
+    ② **埋雷**:哪天把开关打开,会立刻对全部号打一轮列表、把当时那把会话的额度烧光;
+       而监听现在是按"最久没轮到"轮转的,额度被抽干后后面的号全退到 cover,
+       **轮转节奏直接被打乱**。
+    """
+    from sqlalchemy import select
+
+    from app.db.models import SystemConfig, User
+
+    session.add(User(id=1, username="op", password_hash="x", role="admin"))
+    session.commit()
+
+    class _OK:
+        def __init__(self, cookie: str) -> None:
+            self.cookie = cookie
+
+        def refresh_skey(self, timeout: int = 20) -> str:
+            return self.cookie.replace("wr_skey=OLD", "wr_skey=NEW")
+
+        def shelf(self) -> list:
+            return [{"book_id": "MP_WXS_1", "name": "号A"}]
+
+    monkeypatch.setattr(wechat_monitor, "WereadClient", _OK)
+    ck = "wr_vid=1; wr_rt=R; wr_skey=OLD"
+    key = "weread_fullsync_pending_1"
+
+    def _flag():
+        return session.scalar(select(SystemConfig).where(SystemConfig.key == key))
+
+    # 默认关 → 不该打标记
+    out = wechat_monitor.refresh_weread_cookie(
+        session, 1, settings=_settings(weread_cookie=ck))
+    assert out["status"] == "success"
+    assert _flag() is None, "补采开关关着还打标记 = 库里常驻垃圾 + 埋雷"
+
+    # 开关打开 → 才打标记(行为与注释一致)
+    out = wechat_monitor.refresh_weread_cookie(
+        session, 1, settings=_settings(weread_cookie=ck, weread_fullsync_on_renewal=True))
+    assert out["status"] == "success"
+    assert _flag() is not None and _flag().value, "开了开关就该打标记"

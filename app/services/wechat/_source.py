@@ -560,14 +560,27 @@ def refresh_weread_cookie(session: Session, user_id: int, settings: Settings | N
     # 打"会话初期"标记:新 Cookie 的 mp/articles 列表接口仅在会话初期可用,
     # 此时自动触发一轮全量 sync 把各对标号停更期间的历史文章补齐
     # ( cover 只出最新一篇,停更号的历史列表平时拿不到——2026-09-18 诊断)
-    flag_key = f"weread_fullsync_pending_{user_id}"
-    flag = session.scalar(select(SystemConfig).where(SystemConfig.key == flag_key))
-    if flag:
-        flag.value = datetime.now().isoformat()
+    #
+    # ⚠️ **开关关着就别打标记**(2026-10-04 修):消费这个标记的 `run_full_sync_if_pending`
+    # 默认关停(实测"renewal 后打 81×2 的补采炸弹会数小时内打穿全部会话额度"),
+    # 而这里**每次续期成功都无条件写** ⇒ 两件事:
+    #   ① 标记**永远不清**,库里常驻一行垃圾(今天 17:48 又写了一行);
+    #   ② 埋雷:哪天把开关打开,会**立刻**对全部 142 个号打一轮列表、把当时那把会话的
+    #      额度烧光 —— 而监听现在是按"最久没轮到"轮转的,额度被抽干后后面的号全退到
+    #      cover,**轮转节奏直接被打乱**。
+    # 所以:开关关着就不写标记(要补采的人本来就得先打开开关)。
+    if getattr(settings or get_settings(), "weread_fullsync_on_renewal", False):
+        flag_key = f"weread_fullsync_pending_{user_id}"
+        flag = session.scalar(select(SystemConfig).where(SystemConfig.key == flag_key))
+        if flag:
+            flag.value = datetime.now().isoformat()
+        else:
+            session.add(SystemConfig(key=flag_key, value=datetime.now().isoformat()))
+        session.commit()
+        logger.info("微信读书 Cookie 已续期并验证通过(用户 %s),已标记全量补采", user_id)
     else:
-        session.add(SystemConfig(key=flag_key, value=datetime.now().isoformat()))
-    session.commit()
-    logger.info("微信读书 Cookie 已续期并验证通过(用户 %s),已标记全量补采", user_id)
+        logger.info("微信读书 Cookie 已续期并验证通过(用户 %s);全量补采开关关闭,不打标记",
+                    user_id)
     # 恢复确认(对齐闲鱼"✅采集已恢复",2026-09-30):失败告警发过,恢复也得说一声——
     # 否则群里"续期失败"的旧告警变成孤魂,用户看到旧告警+新推送并存会误判(实测困惑)
     try:
