@@ -350,6 +350,15 @@ def is_bulk_resource(name: str) -> bool:
 _UNSET = object()          # 区分"没传 ratio"与"传了 None(= 不知道)"
 
 
+def _gate_limit(settings=None) -> float:
+    """盘级预闸门的阈值(`usage/limit`)。
+
+    **单一事实源**:闸门判定(`admit_transfer`)与"**闸门失准**"自检(`transfer_pending`)共用它 ——
+    否则改阈值只改一处,自检就会拿错门槛、把正常挡下报成失准(或反过来漏报)。
+    """
+    return float(getattr(settings, "xunlei_transfer_max_usage_ratio", 0.9) or 0.9)
+
+
 def admit_transfer(name: str, cred: dict | None = None, settings=None,
                    ratio: float | None | object = _UNSET) -> tuple[bool, str, bool]:
     """转存准入检查:**两道闸门**都过了才放行。
@@ -369,7 +378,7 @@ def admit_transfer(name: str, cred: dict | None = None, settings=None,
         from app.services import xunlei_transfer as xt
 
         ratio = xt.quota_ratio(cred)
-    limit = float(getattr(settings, "xunlei_transfer_max_usage_ratio", 0.9) or 0.9)
+    limit = _gate_limit(settings)
     if ratio is not None and ratio >= limit:
         return False, f"盘快满了(已用 {ratio * 100:.0f}%,阈值 {limit * 100:.0f}%),先清理再搬", True
     if is_bulk_resource(name):
@@ -408,6 +417,8 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
                 logger.info("迅雷群分享暂停转存(盘满):%s", why)
                 session.commit()
                 return {"status": "disk_full", "picked": 0, "ok": 0, "failed": 0, "skipped": 0,
+                        "quota_ratio": ratio, "quota_limit": _gate_limit(settings),
+                        "gate_mismatch": False,      # 预闸门**按设计**挡下的,不是失准
                         "message": why, "items": []}
             row.status, row.message = "skipped", why[:200]      # 策略性不搬 → 终态留痕
             skipped += 1
@@ -439,8 +450,17 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
                 row.message = msg[:200]
                 session.commit()
                 logger.warning("迅雷群分享转存遇空间不足,本轮停止:%s", msg[:80])
+                # 🔎 **闸门失准自检**(2026-10-04):转存已经说了"空间不足",那就回头看
+                # **配额探针当时怎么说** —— 探针若报"没到阈值"(闸门本来会放行),两者就是矛盾的:
+                # 说明那道预闸门**挡不住这件事**。实测:配额 **79.9%**(阈值 90%)、转存照样
+                # `file_space_not_enough`,一路连撞 30 多轮,而闸门每次都放行。
+                # 这里**不额外打接口** —— `ratio` 是本次批量开头算好的,直接用。
+                # 探针拿不到(None)就**不下结论**,别把"不知道"报成"失准"。
+                gate = _gate_limit(settings)
                 return {"status": "disk_full", "picked": len(rows), "ok": len(ok_items),
                         "failed": failed, "skipped": skipped,
+                        "quota_ratio": ratio, "quota_limit": gate,
+                        "gate_mismatch": ratio is not None and ratio < gate,
                         "message": "转存返回空间不足,本轮停止(清理出空间后会继续)", "items": ok_items}
             # ⚠️ 单条失败**不重试到底**:标 failed 留痕,避免每轮都拿它空转。
             row.status, row.message = "failed", msg[:200]
@@ -561,7 +581,28 @@ def xunlei_group_tick(settings=None) -> int:
                 elif t_status == "disk_full":
                     # 盘满 → 整批停下(行保持 pending,清空间后自动继续)。**但这不是"成功"**:
                     # 它意味着"有货但搬不进去",不报出来就会以为一切正常。
-                    _record_run(db, uid, "xunlei_group", "failed", f"盘满暂停: {why} {note}")
+                    _mm, _rr = bool(out.get("gate_mismatch")), out.get("quota_ratio")
+                    tag = (f" ⚠️闸门失准(配额只报 {_rr * 100:.0f}%,闸门本该放行)"
+                           if _mm and _rr is not None else "")
+                    _record_run(db, uid, "xunlei_group", "failed", f"盘满暂停: {why} {note}{tag}")
+                    # 🔔 **闸门失准 → 单独告警**(2026-10-04 用户要求加)。
+                    # 预闸门本该在"盘满"之前就把整批挡住;若它**放行了**、转存却仍被迅雷挡回
+                    # 「空间不足」,那就是**闸门自身失准** —— 只看运行记录只知道"盘满",
+                    # 看不出"那道闸门其实没起作用",于是会一直误以为"到 90% 才会停"
+                    # (实测:配额 79.9% 就已经搬不动了)。
+                    # ⚠️ 标题**不含数字**:冷却门按标题去重,带数字就每次都算新告警、每轮刷屏
+                    # (与 `disk_guard` 同一条教训)。
+                    if _mm:
+                        from app.services import alert_service
+
+                        alert_service.notify_incident(
+                            db, uid, "pan", "迅雷盘闸门失准:配额说还有空间,转存却报空间不足",
+                            f"配额探针报 **{_rr * 100:.1f}%**(闸门阈值 {out.get('quota_limit', 0) * 100:.0f}%)"
+                            f"= 闸门本该放行,但转存被迅雷挡回「空间不足」。"
+                            f"→ 那道预闸门挡不住这件事:**容量已到实际极限,需人工清理或扩容**。"
+                            f"原始:{why}",
+                            settings=settings, push_feishu=True)
+                        db.commit()
                 elif t_bad and not t_ok:
                     _record_run(db, uid, "xunlei_group", "failed", f"转存全失败: {why} {note}")
                 elif t_bad:

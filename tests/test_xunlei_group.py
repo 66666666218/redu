@@ -399,8 +399,52 @@ def test_transfer_pending_stops_and_keeps_pending_on_space_error(session, monkey
                             "message": "{'error': 'file_space_not_enough', 'error_description': '空间不足'}"})
     out = xg.transfer_pending(session, 1, limit=5, settings=_GateSettings())
     assert out["status"] == "disk_full" and out["failed"] == 0
+    # 探针拿不到 → **不下"闸门失准"的结论**(与 admit_transfer 的"不知道≠满"同一条纪律)
+    assert out["gate_mismatch"] is False
     statuses = {r.share_id: r.status for r in session.scalars(select(XunleiGroupShare)).all()}
     assert statuses == {"A": "pending", "B": "pending"}                # 一条都没被标死
+
+
+def test_space_error_with_roomy_quota_is_flagged_as_gate_mismatch(session, monkeypatch) -> None:
+    """⚠️ **2026-10-04 实测的矛盾**:配额探针报 **79.9%**(阈值 90%)= 闸门**本该放行**,
+    转存却被迅雷挡回「空间不足」—— 说明**那道预闸门挡不住这件事**。
+
+    必须把两个数一起交出去(供 tick 单独告警),否则只看运行记录只知"盘满",
+    看不出"闸门其实没起作用",会一直误以为"到 90% 才会停"。
+    """
+    from app.services import xunlei_transfer as xt
+
+    session.add(XunleiGroupShare(user_id=1, group_id="g", share_id="A", title="蓝河工具箱",
+                                 origin_url="u-A", status="pending"))
+    session.commit()
+    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None: 0.799)     # 闸门放行
+    monkeypatch.setattr(xt, "transfer_and_share",
+                        lambda url, parent_id="", settings=None: {
+                            "status": "failed",
+                            "message": "{'error': 'file_space_not_enough', "
+                                       "'error_description': '空间不足'}"})
+
+    out = xg.transfer_pending(session, 1, limit=5, settings=_GateSettings())
+
+    assert out["status"] == "disk_full"
+    assert out["gate_mismatch"] is True, "配额说还有空间、转存说不足 —— 这就是闸门失准"
+    assert abs(out["quota_ratio"] - 0.799) < 1e-9 and out["quota_limit"] == 0.9
+
+
+def test_gate_pre_stop_is_not_a_mismatch(session, monkeypatch) -> None:
+    """预闸门**按设计**挡下的那种 `disk_full`(quota ≥ 阈值),不许被报成"失准"。"""
+    from app.services import xunlei_transfer as xt
+
+    session.add(XunleiGroupShare(user_id=1, group_id="g", share_id="A", title="蓝河工具箱",
+                                 origin_url="u-A", status="pending"))
+    session.commit()
+    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None: 1.26)
+    monkeypatch.setattr(xt, "transfer_and_share",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("闸门挡下不该转存")))
+
+    out = xg.transfer_pending(session, 1, limit=5, settings=_GateSettings())
+
+    assert out["status"] == "disk_full" and out["gate_mismatch"] is False
 
 
 def test_is_own_share_error_recognizes_our_own_share() -> None:
@@ -681,3 +725,67 @@ class TestTransferFailuresSurface:
                             lambda: sessionmaker(bind=session.get_bind()))
         row = self._tick(session, monkeypatch, t_ok=3, t_bad=0)
         assert row.status == "success" and "失败0" in row.detail
+
+    def test_miscalibrated_gate_raises_a_dedicated_alert(self, session, monkeypatch) -> None:
+        """⚠️ 盘满的原因**也得分清**:"闸门按设计挡下" 与 "闸门**没起作用**" 是两回事。
+
+        实测(2026-10-04):配额只报 **79.9%**(阈值 90%)、闸门本该放行,转存却已被迅雷挡回
+        「空间不足」—— 一路连撞 30 多轮。只看运行记录只知道"盘满",看不出**闸门失准**,
+        于是会一直误以为"到 90% 才会停"。**所以要单独告警。**
+        反向验证:摘掉 tick 里那段 `if _mm:` 告警,本测试立刻变红。
+        """
+        import app.db as appdb
+        from app.services import alert_service
+
+        monkeypatch.setattr(appdb, "get_session_local",
+                            lambda: sessionmaker(bind=session.get_bind()))
+        monkeypatch.setattr(xg, "sync_group_shares",
+                            lambda *a, **k: {"status": "ok", "groups": 9, "new": 3})
+        monkeypatch.setattr(xg, "transfer_pending",
+                            lambda *a, **k: {"status": "disk_full", "picked": 0, "ok": 0,
+                                             "failed": 0, "skipped": 0,
+                                             "quota_ratio": 0.799, "quota_limit": 0.9,
+                                             "gate_mismatch": True,
+                                             "message": "转存返回空间不足", "items": []})
+        monkeypatch.setattr(xg, "push_new_shares", lambda *a, **k: None)
+        sent: list[tuple] = []
+        monkeypatch.setattr(alert_service, "notify_incident",
+                            lambda db, uid, kind, title, detail, **k: (
+                                sent.append((kind, title, detail)) or True))
+
+        xg.xunlei_group_tick(self._S())
+
+        assert sent, "闸门失准却没告警 —— 又变成'只有运行记录、没人会看'"
+        kind, title, detail = sent[0]
+        assert kind == "pan" and "闸门失准" in title
+        assert "79.9%" in detail and "90%" in detail
+        assert not any(ch.isdigit() for ch in title), \
+            "标题不能含数字:冷却门按标题去重,带数字就每轮都算新告警、每轮刷屏"
+        row = session.scalars(select(RunRecord).where(RunRecord.kind == "xunlei_group")
+                              .order_by(RunRecord.id.desc())).first()
+        assert "闸门失准" in row.detail, "运行记录里也要留痕,否则翻记录同样看不出来"
+
+    def test_calibrated_gate_stop_stays_quiet(self, session, monkeypatch) -> None:
+        """预闸门**按设计**挡下的盘满不许告警 —— 否则正常的"盘满了"会变噪音被无视。"""
+        import app.db as appdb
+        from app.services import alert_service
+
+        monkeypatch.setattr(appdb, "get_session_local",
+                            lambda: sessionmaker(bind=session.get_bind()))
+        monkeypatch.setattr(xg, "sync_group_shares",
+                            lambda *a, **k: {"status": "ok", "groups": 9, "new": 3})
+        monkeypatch.setattr(xg, "transfer_pending",
+                            lambda *a, **k: {"status": "disk_full", "picked": 0, "ok": 0,
+                                             "failed": 0, "skipped": 0,
+                                             "quota_ratio": 1.26, "quota_limit": 0.9,
+                                             "gate_mismatch": False,
+                                             "message": "盘快满了", "items": []})
+        monkeypatch.setattr(xg, "push_new_shares", lambda *a, **k: None)
+        sent: list[tuple] = []
+        monkeypatch.setattr(alert_service, "notify_incident",
+                            lambda db, uid, kind, title, detail, **k: (
+                                sent.append((kind, title)) or True))
+
+        xg.xunlei_group_tick(self._S())
+
+        assert sent == [], "闸门正常挡下也告警 → 告警变噪音"
