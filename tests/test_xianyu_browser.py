@@ -256,3 +256,110 @@ def test_hook_is_injected_before_navigation() -> None:
     src = (xb.__file__ and open(xb.__file__, encoding="utf-8").read()) or ""
     assert "add_init_script(_HOOK_INIT)" in src
     assert "__xy_patched" in src          # 防重复包(同一页可能加载多次)
+
+
+# ------------------------- 浏览器"没了"的自愈 + 闲置自动关(2026-10-04)
+
+def test_looks_closed_only_matches_browser_gone() -> None:
+    """只认"浏览器没了" —— **别的错照旧冒泡**:风控/限流靠重试只会撞得更狠。"""
+    assert xb._looks_closed(RuntimeError("Target page, context or browser has been closed"))
+    assert xb._looks_closed(RuntimeError("Browser has been closed"))
+    assert not xb._looks_closed(XianyuError("RGV587_ERROR::哎哟喂,被挤爆啦"))
+    assert not xb._looks_closed(RuntimeError("TIMEOUT::接口超时"))
+
+
+def test_idle_close_seconds_default_and_off_switch() -> None:
+    """默认 15 分钟;**配 ≤0 = 不关**(退回旧行为,给不想被关的人留后路)。"""
+
+    class _Default:
+        pass
+
+    class _Off:
+        xianyu_browser_idle_close_sec = 0
+
+    class _Custom:
+        xianyu_browser_idle_close_sec = 60
+
+    assert xb._idle_close_seconds(_Default()) == 900
+    assert xb._idle_close_seconds(_Off()) == 0
+    assert xb._idle_close_seconds(_Custom()) == 60
+
+
+def test_window_closed_by_hand_is_rebuilt_transparently(monkeypatch) -> None:
+    """⚠️ 用户看到桌面那个 `about:blank` 窗口会想**手动关** —— 而此前关了**不会重开**:
+    `_ThreadBoundClient` 见 `_client` 非空就直接用、`_ensure_page` 见 `_pg` 非空也不重建,
+    闲鱼链会**一路失败到重启为止**。现在必须**丢掉坏实例、重建一次**。
+    """
+    built: list[int] = []
+
+    class _FakeClient:
+        def __init__(self, settings=None):
+            built.append(1)
+
+        def search(self, keyword, page=1, rows=30):
+            if len(built) == 1:                 # 第一个实例 = 已经被手工关掉的那个
+                raise RuntimeError("Target page, context or browser has been closed")
+            return [{"title": keyword, "item_id": "1"}]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(xb, "XianyuBrowserClient", _FakeClient)
+    monkeypatch.setattr(xb, "_arm_idle_close", lambda *a, **k: None)   # 别真排定时器
+    c = xb._ThreadBoundClient()
+
+    assert c.search("剪映会员") == [{"title": "剪映会员", "item_id": "1"}]
+    assert len(built) == 2, "被关掉的浏览器没有被重建"
+    c.close()
+
+
+def test_closed_browser_still_fails_after_one_rebuild(monkeypatch) -> None:
+    """重建后仍失败 → **照旧抛**,不无限重试(否则一条链就卡死在这里)。"""
+
+    class _AlwaysClosed:
+        def __init__(self, settings=None):
+            pass
+
+        def search(self, keyword, page=1, rows=30):
+            raise RuntimeError("Target page, context or browser has been closed")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(xb, "XianyuBrowserClient", _AlwaysClosed)
+    monkeypatch.setattr(xb, "_arm_idle_close", lambda *a, **k: None)
+    c = xb._ThreadBoundClient()
+
+    with pytest.raises(RuntimeError, match="has been closed"):
+        c.search("剪映会员")
+    c.close()
+
+
+def test_close_if_idle_only_fires_when_really_idle(monkeypatch) -> None:
+    """⚠️ 闲置判定必须**在专属线程里复查一次**:定时器到点时可能刚好有新的一轮进来
+    (`max_workers=1` 意味着这个任务排在它后面),那时就不该关 —— 否则会把正在跑的一轮掐断。
+    """
+    closed: list[int] = []
+
+    class _FakeClient:
+        def __init__(self, settings=None):
+            pass
+
+        def search(self, keyword, page=1, rows=30):
+            return []
+
+        def close(self):
+            closed.append(1)
+
+    monkeypatch.setattr(xb, "XianyuBrowserClient", _FakeClient)
+    monkeypatch.setattr(xb, "_arm_idle_close", lambda *a, **k: None)
+    c = xb._ThreadBoundClient()
+    c.search("x")                            # 先把客户端建起来
+
+    assert c.close_if_idle(3600) is False, "刚用过就关 —— 会把正在跑的一轮掐断"
+    assert closed == []
+    assert c.close_if_idle(0) is True, "真闲置了就该关"
+    assert closed == [1]
+
+    c.search("x")                            # 关掉之后还能自动重开
+    c.close()

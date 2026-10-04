@@ -25,6 +25,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -290,18 +292,71 @@ class _ThreadBoundClient:
         self._settings = settings
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="xianyu-browser")
         self._client: XianyuBrowserClient | None = None
+        self._last_used = time.monotonic()
+
+    def _drop_client(self) -> None:
+        """丢掉当前客户端。
+
+        ⚠️ **只能在池线程之外调** —— 它自己会 `submit(...).result()`,在池线程里调就是自己等自己。
+        收尾也必须回专属线程做(Playwright 对象不能跨线程)。
+        """
+        c, self._client = self._client, None
+        if c is not None:
+            try:
+                self._pool.submit(c.close).result()
+            except Exception:  # noqa: BLE001 - 收尾失败不该冒泡
+                logger.debug("闲鱼浏览器丢弃时收尾异常", exc_info=True)
 
     def _call(self, name: str, *args, **kwargs):
         """在专属线程里执行(客户端也在那个线程里惰性创建)。
 
-        ⚠️ 提交的函数**不许再调 `_call`**(会自己等自己 → 死锁);它只碰 `self._client`。
+        ⚠️ 提交的函数**不许再调 `_call`/`_drop_client`**(会自己等自己 → 死锁);它只碰 `self._client`。
+
+        ⚠️ **要能自愈**(2026-10-04):用户看到桌面挂着那个 `about:blank` 窗口会想**手动关** ——
+        而此前关了**不会重开**(`_client` 非空就直接用、`_ensure_page` 见 `_pg` 非空也不重建),
+        闲鱼链会**一路失败到重启为止**(与 MediaCrawler 的 `TargetClosedError` 是同一类)。
+        所以撞到"浏览器没了"这类错时**丢掉坏实例、重建一次再试**。
         """
         def _run():
             if self._client is None:
                 self._client = XianyuBrowserClient(settings=self._settings)
             return getattr(self._client, name)(*args, **kwargs)
 
-        return self._pool.submit(_run).result()
+        try:
+            try:
+                return self._pool.submit(_run).result()
+            except Exception as exc:  # noqa: BLE001
+                if not _looks_closed(exc):
+                    raise                    # 别的错照旧冒泡(风控/网络不该靠重试掩盖)
+                logger.warning("闲鱼浏览器已不在了(窗口被关/崩了),重建后重试一次")
+                self._drop_client()
+                return self._pool.submit(_run).result()
+        finally:
+            self._last_used = time.monotonic()
+            _arm_idle_close(self._settings)
+
+    def close_if_idle(self, idle_sec: float) -> bool:
+        """**真的闲置了才关**(在专属线程里复查一次),免得把正在跑的一轮掐断。
+
+        复查是必需的:`max_workers=1` 意味着这个任务排在已排队/在跑的采集之后才执行;
+        等它真跑起来时 `_last_used` 可能刚被刷新 —— 那就说明不闲,直接放行。
+        """
+        def _run() -> bool:
+            if self._client is None or (time.monotonic() - self._last_used) < idle_sec:
+                return False
+            c, self._client = self._client, None      # 已在池线程里 → 直接收尾,别再 submit
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001 - 收尾失败不该冒泡
+                logger.debug("闲鱼浏览器闲置关闭异常", exc_info=True)
+            logger.info("闲鱼浏览器闲置 %d 秒,已自动关闭(下次用到再开)", int(idle_sec))
+            return True
+
+        try:
+            return bool(self._pool.submit(_run).result())
+        except Exception:  # noqa: BLE001
+            logger.debug("闲鱼浏览器闲置关闭提交失败", exc_info=True)
+            return False
 
     # ---- 与 `XianyuBrowserClient` 同接口(调用方零改动) ----
     def search(self, keyword: str, page: int = 1, rows: int = 30) -> list[dict]:
@@ -331,6 +386,70 @@ class _ThreadBoundClient:
             self._pool.shutdown(wait=False)
 
 
+# ---- 浏览器"没了"的识别 + 闲置自动关(2026-10-04)---------------------------
+_CLOSED_MARKS = (
+    "TargetClosedError",
+    "Target page, context or browser has been closed",
+    "Browser has been closed",
+    "browser has been closed",
+    "Connection closed",
+)
+
+
+def _looks_closed(exc: BaseException) -> bool:
+    """这个异常是不是"**浏览器没了**"(窗口被手工关掉 / 进程崩了)?
+
+    只认这一类 —— **别的错照旧冒泡**:风控/限流靠重试只会撞得更狠(闲鱼被"挤爆"的教训)。
+    """
+    text = f"{type(exc).__name__}: {exc}"
+    return any(m in text for m in _CLOSED_MARKS)
+
+
+def _idle_close_seconds(settings=None) -> float:
+    """闲置多久自动关浏览器。**≤0 = 不关**(退回旧行为)。"""
+    try:
+        return float(getattr(settings, "xianyu_browser_idle_close_sec", 900))
+    except (TypeError, ValueError):
+        return 900.0
+
+
+_IDLE_TIMER: "threading.Timer | None" = None
+_IDLE_LOCK = threading.Lock()
+
+
+def _arm_idle_close(settings=None) -> None:
+    """每次用过浏览器,就重排一个"闲置 N 分钟后自动关"的定时器。
+
+    ⚠️ **为什么必须自动关**(2026-10-04 用户实测):`get_client()` 是**进程级单例**,
+    而**全项目没有任何调用方调 `close()`** —— 只有进程退出时 `platform` 才关一次。
+    于是第一次闲鱼采集把浏览器开起来后,那个**可见窗口就一直挂在桌面上**
+    (实测挂了 10.5 小时、1.4 GB;用户看到的是"监控开的浏览器没关、还停在 about:blank")。
+
+    关掉 ≠ 每轮重开:一轮里多个关键词仍然**共用同一个页面**(轮内复用没变),
+    只是**不再跨轮常驻**;代价是每轮多 10~20 秒启动(闲鱼约 30 分钟一轮,可以接受)。
+    """
+    global _IDLE_TIMER
+    sec = _idle_close_seconds(settings)
+    if sec <= 0:
+        return
+    with _IDLE_LOCK:
+        if _IDLE_TIMER is not None:
+            _IDLE_TIMER.cancel()
+        t = threading.Timer(sec, _close_if_idle, args=(sec,))
+        t.daemon = True                 # 守护线程:绝不拖住进程退出
+        _IDLE_TIMER = t
+        t.start()
+
+
+def _close_if_idle(idle_sec: float) -> None:
+    global _IDLE_TIMER
+    with _IDLE_LOCK:
+        _IDLE_TIMER = None
+        c = _CLIENT
+    if c is not None:
+        c.close_if_idle(idle_sec)       # 关不关由它**在专属线程里**再判一次
+
+
 _CLIENT: "_ThreadBoundClient | None" = None
 
 
@@ -347,7 +466,11 @@ def get_client(settings=None) -> "_ThreadBoundClient":
 
 def close_client() -> None:
     """关掉常驻客户端(测试/优雅停机用)。"""
-    global _CLIENT
+    global _CLIENT, _IDLE_TIMER
+    with _IDLE_LOCK:                    # 先撤定时器,免得它对着已经关掉的客户端再动一次
+        if _IDLE_TIMER is not None:
+            _IDLE_TIMER.cancel()
+            _IDLE_TIMER = None
     if _CLIENT is not None:
         _CLIENT.close()
         _CLIENT = None

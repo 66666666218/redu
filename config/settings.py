@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     # (实测被"哎哟喂,被挤爆啦"**账号级**限流,换出口也没用;页面内调用则正常)。
     xianyu_use_browser: bool = True
     xianyu_proxy_url: str = ""      # 闲鱼专用"单一固定"出口代理(http://user:pass@host:port,如住宅IP);留空直连。勿用轮换代理池——mtop token/session 绑定出口 IP
+    # 闲鱼浏览器**闲置多久自动关**(秒;**≤0 = 不关**,退回旧行为)。为什么要关:
+    # `xianyu_browser.get_client()` 是进程级单例,而全项目**没有任何调用方调 `close()`** ——
+    # 只有进程退出时才关一次,于是那个**可见窗口会一直挂在桌面上**(2026-10-04 实测挂了
+    # 10.5 小时、1.4 GB;用户看到的是"监控开的浏览器没关、还停在 about:blank")。
+    # 轮内复用不受影响(一轮里多个关键词仍共用一个页面),代价只是每轮多 10~20 秒启动。
+    xianyu_browser_idle_close_sec: float = 900
     weread_cookie: str = ""         # 微信读书 Cookie(免费监听数据源;优先用平台内按用户配置的「weread」Cookie)
     wechat_reader_platform_url: str = ""  # 读书平台地址(wewe-rss v2 兼容,免费全量文章列表;如 https://weread.xxx 自建实例)
     wechat_reader_token: str = ""   # 读书平台 token(含 vid 的 JWT)
