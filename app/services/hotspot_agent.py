@@ -260,12 +260,20 @@ def _opportunity(db: Session, user_id: int, hotspots: list[dict],
     LLM 只负责选题发散(资源/人群/钩子),不参与排序(v5, 2026-09-29)。
     """
     _window_factor(db, user_id, hotspots)
+    # **品类权重**(2026-10-04 用户口径「自动调选题权重」):从**结算回来的实测数据**
+    # 学一个倍数(reads_gain / repost_gain 各一条依据)。⚠️ 带护栏:样本 <3 的品类不参与、
+    # 倍数夹在 [0.5,2.0]、**无数据时是空 dict ⇒ 公式与以前完全一致**(向后兼容)。
+    from app.services.category_weight import multiplier_for, multipliers
+
+    _cw = multipliers(db, user_id)
     for h in hotspots:
         h["competition"] = _competition_factor(supply, h["keyword"])
         _fit = h.get("fit")
         _fit_score = _fit.score if _fit is not None else 1.0  # burst 路径无 fit,不惩罚
+        h["category_weight"] = multiplier_for(_cw, str(h.get("category") or ""))
         h["opportunity"] = (h["effective_growth"] * h["competition"] * h["window_factor"]
-                            * max(_fit_score, 0.3))  # 适配度是乘数但设下限:弱适配不清零需求
+                            * max(_fit_score, 0.3)       # 适配度是乘数但设下限:弱适配不清零需求
+                            * h["category_weight"])      # 品类权重(无数据时恒为 1.0)
     hotspots.sort(key=lambda x: x["opportunity"], reverse=True)
 
 
@@ -935,11 +943,17 @@ def settle_suggestions(db: Session, user_id: int) -> dict:
     - 归因: acted 建议 → 按盘链精确匹配发文(不做标题模糊,宁少样本不脏样本);
     - repost_gain = 发文后(acted_at 起)全网新增的该文盘链记录数(wechat_pan_links
       随时间增长 = 资源被疯转 = 需求被反复验证)——**结算主信号**;
-    - reads_gain 已停用(dajiala 阅读采样放弃后无免费阅读数源),字段留存兼容;
+    - **reads_gain 已复活**(2026-10-04):当初停用是因为"dajiala 放弃后无免费阅读数源",
+      而现在**有了** —— 微信读书列表接口带精确 `readNum`,列表额度轮转也修好了。
+      口径:走 `conversion` 单一事实源(**公众号第一原则 = 阅读数 × 30%**)。
+      ⚠️ 它是**需求侧预估**(乘的是这条文的阅读数),**不是我方实收**;
+      ⚠️ `read_num <= 0` 时**不写**(0 表示"没采到",不是"没人读")——
+         阅读数受列表额度限制(每轮 25 个号、~2 天轮一圈),没轮到的号就是没有;
     - 总账对账: pan_recruit_weekly(拉新周录,人工)。
     可重复结算: repost_gain 随盘链扩散刷新。
     """
     from app.db.models import WechatPanLink
+    from app.services import conversion
 
     auto = _auto_mark_acted(db, user_id)
     if auto:
@@ -965,20 +979,31 @@ def settle_suggestions(db: Session, user_id: int) -> dict:
             WechatPanLink.article_id == art.id,
             WechatPanLink.created_at >= baseline)) or 0
         sug.repost_gain = int(repost)
+        # **reads_gain 复活**(2026-10-04):阅读数 × 30%(公众号第一原则,走 conversion)。
+        # ⚠️ `read_num <= 0` 保持原值不动 —— 0 是"这一轮没采到"(列表额度轮转),
+        #    不是"没人读";写成 0 会让"没采样"和"热度为零"混成一样(本仓的老毛病)。
+        reads = int(getattr(art, "read_num", 0) or 0)
+        if reads > 0:
+            est = conversion.estimate("wechat", {"read_num": reads})
+            if est["estimate"] is not None:
+                sug.reads_gain = int(est["estimate"])
         sug.settled_at = now
         settled += 1
         attributed += 1
     db.commit()
     # 按品类聚合"哪类真赚"(P1 转化回流,2026-10-01):repost_gain 是盘链扩散的代理指标,
     # 聚合后给运营看"该往哪个品类加码",也是未来自动调 PROVEN_CATEGORIES 权重的数据源。
+    # 2026-10-04 起再加一列 **reads_gain**(阅读数×30% 的预估拉新量)—— 与 repost_gain
+    # **并列**而不是替代:一个是"资源配置被疯转",一个是"预估触达",口径不同、互相印证。
     by_cat: dict[str, dict] = {}
     for sug in rows:
         if sug.article_id is None:
             continue
         cat = (sug.category or "未分类")[:16]
-        e = by_cat.setdefault(cat, {"n": 0, "repost_gain": 0})
+        e = by_cat.setdefault(cat, {"n": 0, "repost_gain": 0, "reads_gain": 0})
         e["n"] += 1
         e["repost_gain"] += int(sug.repost_gain or 0)
+        e["reads_gain"] += int(sug.reads_gain or 0)
     return {"status": "ok", "acted_with_link": len(rows), "settled": settled,
             "attributed": attributed, "auto_acted": auto, "by_category": by_cat}
 

@@ -469,3 +469,59 @@ def test_platform_family_normalizes_multi_listing_ids() -> None:
     assert _family("cls-hot") == _family("cls-depth") == "cls"
     assert _family("douban") == "douban"      # 不在映射表里的原样返回
     assert _family("") == ""
+
+
+def test_settle_revives_reads_gain_from_read_count(session) -> None:
+    """★ **reads_gain 复活**(2026-10-04)。
+
+    它当初停用的理由写在 docstring 里:「dajiala 阅读采样放弃后**无免费阅读数源**」——
+    而现在**有了**(微信读书列表接口带精确 `readNum`,额度轮转也修好了)。
+    口径:走 `conversion` 单一事实源(**公众号第一原则 = 阅读数 × 30%**)。
+    """
+    from app.db.models import WechatArticle
+    from app.services import conversion
+    from app.services.hotspot_agent import settle_suggestions
+
+    link = "https://pan.quark.cn/s/reads1"
+    now = dt.datetime.now()
+    session.add(WechatArticle(id=81, user_id=1, title="有阅读数的发文", author="我",
+                              source="manual", url="https://mp.weixin.qq.com/s/r1",
+                              my_pan_urls=link, read_num=1000,
+                              created_at=now - dt.timedelta(days=1)))
+    session.commit()
+    session.add(HotspotSuggestion(user_id=1, keyword="kw", kind="match", category="影视",
+                                  link=link, acted=True, acted_at=now - dt.timedelta(hours=2)))
+    session.commit()
+
+    settle_suggestions(session, 1)
+    row = session.scalars(select(HotspotSuggestion)).one()
+    expect = conversion.estimate("wechat", {"read_num": 1000})["estimate"]
+    assert row.reads_gain == expect == 300, "阅读数 × 30% 必须走 conversion 算出来"
+
+    # 品类聚合里两列**并列**(口径不同,互相印证,不是替代)
+    out = settle_suggestions(session, 1)
+    cat = out["by_category"]["影视"]
+    assert cat["reads_gain"] == 300 and "repost_gain" in cat
+
+
+def test_settle_leaves_reads_gain_alone_when_no_read_count(session) -> None:
+    """⚠️ **`read_num` 为 0 时不写** —— 0 是"这一轮没采到"(列表额度轮转,每轮 25 个号、
+    ~2 天一圈),**不是"没人读"**。写成 0 会让"没采样"和"热度为零"混成一样(本仓的老毛病)。"""
+    from app.db.models import WechatArticle
+    from app.services.hotspot_agent import settle_suggestions
+
+    link = "https://pan.quark.cn/s/reads0"
+    now = dt.datetime.now()
+    session.add(WechatArticle(id=82, user_id=1, title="还没轮到采的号", author="我",
+                              source="manual", url="https://mp.weixin.qq.com/s/r2",
+                              my_pan_urls=link, read_num=0,
+                              created_at=now - dt.timedelta(days=1)))
+    session.commit()
+    session.add(HotspotSuggestion(user_id=1, keyword="kw", kind="match",
+                                  link=link, acted=True, acted_at=now - dt.timedelta(hours=2)))
+    session.commit()
+
+    settle_suggestions(session, 1)
+    row = session.scalars(select(HotspotSuggestion)).one()
+    assert row.settled_at is not None, "还是要结算(repost_gain 那条路照走)"
+    assert int(row.reads_gain or 0) == 0, "没采到就保持 0,不许编一个值"
