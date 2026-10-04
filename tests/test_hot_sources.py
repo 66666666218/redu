@@ -151,18 +151,40 @@ def test_tencent_skips_the_ranking_placeholder(monkeypatch) -> None:
     assert [r["rank"] for r in rows] == list(range(1, 9))     # 名次连续(滤掉后重排)
 
 
-def test_zhihu_raises_instead_of_returning_empty_when_no_cookie(monkeypatch) -> None:
-    """★★ **拿不到 Cookie 要抛错,不能返回空列表** —— 空列表会被读成"今天没热点",
-    而事实是"我们没凭据"。这正是本仓反复踩的「静默失败=假成功」。"""
+def test_zhihu_falls_back_to_newsnow_without_a_cookie(monkeypatch) -> None:
+    """★★ **没有 Cookie 时回落 newsnow,而不是报错**(2026-10-04 远程实测踩到的回归)。
+
+    经过:我给知乎写了自研版、并**把它从 newsnow 名单摘掉** —— 但**知乎 Cookie 只在本机**
+    (家宽那条盘链搜索链在用),于是**远程实例的知乎热榜从"能用"变成"不能用"**。
+    **两实例的库独立,凭据不跟着代码走。**
+    ⇒ 正确姿势:有 Cookie 用自研(命门自持),没有就回落容器那份。
+    """
     from app.services import hot_sources as hs
 
     monkeypatch.setattr(hs.ZhihuHotSource, "_cookie", lambda self: "")
+    monkeypatch.setattr(hs.NewsnowSource, "fetch",
+                        lambda self, limit=30: [{"rank": 1, "title": "来自容器", "url": "", "extra": ""}])
+    rows = hs.ZhihuHotSource().fetch()
+    assert rows and rows[0]["title"] == "来自容器"
+
+
+def test_zhihu_raises_only_when_both_paths_fail(monkeypatch) -> None:
+    """★★ **两条路都不通才抛错** —— 那时才是"真的拿不到";
+    而任何情况下**都不许返回空列表冒充"今天没热点"**(本仓反复踩的「静默失败=假成功」)。"""
+    from app.services import hot_sources as hs
+
+    monkeypatch.setattr(hs.ZhihuHotSource, "_cookie", lambda self: "")
+
+    def _boom(self, limit=30):
+        raise hs.HotSourceError("容器连不上")
+
+    monkeypatch.setattr(hs.NewsnowSource, "fetch", _boom)
     try:
         hs.ZhihuHotSource().fetch()
     except hs.HotSourceError as exc:
-        assert "Cookie" in str(exc)
+        assert "两条路都不通" in str(exc)
     else:
-        raise AssertionError("没有 Cookie 时必须抛 HotSourceError,不许静默返回空")
+        raise AssertionError("两条路都不通时必须抛错,不许静默返回空")
 
 
 def test_moved_sources_are_self_built_not_newsnow() -> None:
@@ -176,3 +198,41 @@ def test_moved_sources_are_self_built_not_newsnow() -> None:
     # 自研源数量只增不减(2026-10-04:2 → 6)
     own = [k for k, v in SOURCES.items() if type(v).__name__ != "NewsnowSource"]
     assert len(own) >= 6, own
+
+
+def test_bilibili_business_code_is_treated_as_an_error(monkeypatch) -> None:
+    """★★ **HTTP 200 不等于成功** —— B站被风控时返回的是 **200 + `code:-352` + 空 list**。
+
+    ⚠️ 只 catch 异常的话,这会**悄悄变成"今天榜单是空的"**,还被记成 `ok`
+    —— 远程实测就这么瞒了不知道多久(`ok=42 failed=1 items=959`,那 0 条的就是它)。
+    这正是本仓反复踩的「静默失败=假成功」。
+    """
+    from app.services import hot_sources as hs
+
+    class _R:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._p = payload
+
+        def json(self):
+            return self._p
+
+    # 风控:-352
+    monkeypatch.setattr(hs.creq, "get",
+                        lambda *a, **k: _R({"code": -352, "message": "risk control",
+                                            "data": {"list": []}}))
+    for src in (hs.BilibiliSource(), hs.BilibiliHotSearchSource()):
+        try:
+            rows = src.fetch()
+        except hs.HotSourceError as exc:
+            assert "-352" in str(exc), str(exc)
+        else:
+            raise AssertionError(f"{type(src).__name__} 把风控当成了空榜单: {rows}")
+
+    # 正常 code=0 照常返回
+    monkeypatch.setattr(hs.creq, "get",
+                        lambda *a, **k: _R({"code": 0, "data": {"list": [
+                            {"title": f"t{i}", "bvid": f"B{i}", "tname": "动画",
+                             "stat": {"view": 1}} for i in range(8)]}}))
+    assert len(hs.BilibiliSource().fetch(limit=30)) == 8

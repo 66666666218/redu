@@ -49,6 +49,10 @@ class BilibiliSource(HotSource):
     """B站全站排行榜(官方公开 API,无需鉴权;2026-10-01 实测 200)。
 
     对"漫剧/影视"方向价值高:动画区/影视区热门的二创素材指向明确。
+
+    ⚠️ **2026-10-04 补上"看业务码"**:B站被风控时返回的是 **HTTP 200 + `code:-352` + 空 list**
+    (`-352` = 被风控系统拦下)—— 只 catch 异常的话,这会**悄悄变成"今天榜单是空的"**,
+    还被记成 `ok`(远程实测就这么瞒了不知道多久)。本仓反复踩的「静默失败=假成功」,这里又中一次。
     """
 
     id = "bilibili"
@@ -59,9 +63,16 @@ class BilibiliSource(HotSource):
                          params={"rid": "0", "type": "all"},
                          impersonate="chrome", timeout=15,
                          headers={"User-Agent": _UA, "Referer": "https://www.bilibili.com/"})
-            data = r.json().get("data") or {}
+            payload = r.json()
         except Exception as exc:  # noqa: BLE001
             raise HotSourceError(f"B站排行请求失败:{type(exc).__name__}") from exc
+        # ⚠️ **业务码要当错误看**:HTTP 200 不等于成功
+        code = payload.get("code")
+        if code not in (0, None):
+            raise HotSourceError(
+                f"B站排行被拒:code={code} {str(payload.get('message') or '')[:60]}"
+                + ("(风控,按频率触发)" if str(code) in ("-352", "-412") else ""))
+        data = payload.get("data") or {}
         out = []
         for i, it in enumerate((data.get("list") or [])[:limit], 1):
             title = str(it.get("title") or "").strip()
@@ -181,10 +192,15 @@ class BilibiliHotSearchSource(HotSource):
                          params={"limit": str(max(limit, 10))},
                          impersonate="chrome", timeout=15,
                          headers={"User-Agent": _UA, "Referer": "https://www.bilibili.com/"})
-            trending = ((r.json().get("data") or {}).get("trending") or {})
-            rows = trending.get("list") or []
+            payload = r.json()
         except Exception as exc:  # noqa: BLE001
             raise HotSourceError(f"B站热搜请求失败:{type(exc).__name__}") from exc
+        # ⚠️ 与 `BilibiliSource` 同一条纪律:**HTTP 200 不等于成功**,业务码要当错误看
+        code = payload.get("code")
+        if code not in (0, None):
+            raise HotSourceError(f"B站热搜被拒:code={code} {str(payload.get('message') or '')[:60]}")
+        trending = ((payload.get("data") or {}).get("trending") or {})
+        rows = trending.get("list") or []
         out = []
         for i, it in enumerate(rows[:limit], 1):
             kw = str(it.get("keyword") or it.get("show_name") or "").strip()
@@ -197,14 +213,15 @@ class BilibiliHotSearchSource(HotSource):
 
 
 class ZhihuHotSource(HotSource):
-    """知乎热榜(需要登录态;2026-10-04 实测带 Cookie 200 / 30 条)。
+    """知乎热榜:优先**自研**(用我们自己的 Cookie),**拿不到 Cookie 就回落 newsnow**。
 
-    ⚠️ **知乎热榜裸连 401**(要登录),所以它原本只能走 newsnow 容器。
-    我们**本来就有知乎 Cookie**(公众号盘链搜索那条链在用)—— 复用它即可,
-    于是这个源也变成"命门自持"。
+    ⚠️ **为什么必须回落**(2026-10-04 远程实测踩到的回归):
+    知乎热榜裸连 401,原本只能走 newsnow 容器。我给它写了自研版并**从 newsnow 名单里摘掉**,
+    但**知乎 Cookie 只在本机**(家宽那条盘链搜索链在用)—— 于是**远程实例的知乎热榜
+    从"能用"变成"不能用"**。两实例的库是独立的,**凭据不跟着代码走**。
+    ⇒ 所以:有 Cookie 就用自研(命门自持),没有就**回落容器**(那份数据本来就有)。
 
-    ⚠️ Cookie 从库里现取(源接口没有 session 参数);取不到就**抛 `HotSourceError`**
-    —— 别返回空列表冒充"今天没热点"(那正是本仓反复踩的"静默失败=假成功")。
+    ⚠️ 两条都不通时才抛 `HotSourceError` —— **绝不返回空列表冒充"今天没热点"**。
     """
 
     id = "zhihu"
@@ -217,18 +234,30 @@ class ZhihuHotSource(HotSource):
         from app.db import get_session_local
         from app.db.models import UserCookie
         from app.security import decrypt_cookie
-        db = get_session_local()()
+        try:
+            db = get_session_local()()
+        except Exception:  # noqa: BLE001 - 拿不到库就当没有凭据(回落容器)
+            return ""
         try:
             row = db.scalar(select(UserCookie).where(UserCookie.platform == "zhihu")
                             .order_by(UserCookie.id.desc()))
             return decrypt_cookie(row.cookie) if row else ""
+        except Exception:  # noqa: BLE001
+            logger.warning("知乎 Cookie 读取失败,回落 newsnow")
+            return ""
         finally:
             db.close()
 
     def fetch(self, limit: int = 30) -> list[dict]:
         ck = self._cookie()
         if not ck:
-            raise HotSourceError("知乎热榜需要登录 Cookie,库里没有(别返回空冒充'没热点')")
+            # 回落:本实例没有知乎凭据(它在家宽产生/绑出口 IP),而容器那份是现成的
+            logger.info("知乎热榜:本实例没有 Cookie,回落 newsnow 容器")
+            try:
+                return NewsnowSource("zhihu").fetch(limit)
+            except HotSourceError as exc:
+                raise HotSourceError(
+                    f"知乎热榜两条路都不通:本实例没有 Cookie,newsnow 也不可用({exc})") from exc
         try:
             r = creq.get("https://www.zhihu.com/api/v3/feed/topstory/hot-lists/total",
                          params={"limit": str(max(limit, 50))},
