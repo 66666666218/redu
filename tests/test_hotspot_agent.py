@@ -595,3 +595,80 @@ def test_library_evidence_does_not_resurrect_a_none_growth(session, monkeypatch)
     hotspots = [{"keyword": "某某热点", "growth": 0, "effective_growth": 0}]
     ha._library_evidence(session, 1, hotspots)
     assert hotspots[0]["effective_growth"] == 0.0, "0 × 1.4 还是 0,不该被'补'成别的数"
+
+
+# ------------------------------- agent 完善:跨平台资源同现(2026-10-05)
+def test_cross_platform_evidence_boosts_only_when_seen_on_two_plus(session) -> None:
+    """★★ **跨平台资源同现**是现在能拿到的**最硬**的需求证据:
+    榜单说"大家在**讨论**",而"同一个资源在**多个平台**都被贴过"说
+    "**有人已经在不止一处靠它拉新**"(与"多号同发"同一逻辑,但把**号**扩到了**平台**)。
+
+    ⚠️ **必须 `>=2` 个平台才加权** —— 单个平台命中是常态(某个词本来就在某平台流行),
+    给它加分等于给所有词加一样的分,没有信息量。
+    """
+    from app.db.models import DiscoveredPanLink
+    from app.services import hotspot_agent as ha
+
+    now = dt.datetime.now()
+    for plat, title in (("weibo", "武林外传 全集 网盘"), ("zhihu", "武林外传 资源"),
+                        ("tieba", "武林外传 下载"), ("weibo", "别的资源")):
+        session.add(DiscoveredPanLink(user_id=1, platform=plat, origin_url=f"u-{title}",
+                                      title=title, found_at=now))
+    session.commit()
+
+    hs = [{"keyword": "武林外传", "growth": 10, "effective_growth": 10},   # 3 个平台
+          {"keyword": "别的资源", "growth": 10, "effective_growth": 10},   # 只 1 个平台
+          {"keyword": "短", "growth": 10, "effective_growth": 10}]         # 两字以下不匹配
+    ha._cross_platform_evidence(session, 1, hs)
+
+    assert hs[0]["platforms_found"] == ["tieba", "weibo", "zhihu"]
+    assert hs[0]["cross_boost"] == 1.6 and hs[0]["effective_growth"] == 16.0
+    assert "跨平台资源同现" in ha._cross_platform_tag(hs[0])
+    assert "微博" in ha._cross_platform_tag(hs[0])
+
+    assert hs[1]["cross_boost"] == 1.0, "单平台不该加分"
+    assert hs[1]["effective_growth"] == 10.0
+    assert ha._cross_platform_tag(hs[1]) == ""
+
+    assert hs[2]["cross_boost"] == 1.0 and hs[2]["platforms_found"] == []
+
+
+def test_cross_platform_counts_wechat_as_a_platform(session) -> None:
+    """★ **公众号算一个平台** —— 同一个资源既被公众号发、又被微博贴 = 跨平台同现,
+    这是最典型的"已经在运行"信号。"""
+    from app.db.models import WechatArticle, WechatPanLink
+    from app.services import hotspot_agent as ha
+    from app.db.models import DiscoveredPanLink
+
+    now = dt.datetime.now()
+    art = WechatArticle(user_id=1, author="某号", title="齐民要术 资源合集",
+                        url="https://mp.weixin.qq.com/s/x", created_at=now)
+    session.add(art)
+    session.flush()
+    session.add(WechatPanLink(user_id=1, article_id=art.id, pan_url="https://pan.quark.cn/s/a",
+                              created_at=now))
+    session.add(DiscoveredPanLink(user_id=1, platform="weibo", origin_url="u2",
+                                  title="齐民要术 网盘", found_at=now))
+    session.commit()
+
+    hs = [{"keyword": "齐民要术", "growth": 10, "effective_growth": 10}]
+    ha._cross_platform_evidence(session, 1, hs)
+    assert set(hs[0]["platforms_found"]) == {"wechat", "weibo"}
+    assert hs[0]["cross_boost"] == 1.3
+    assert "公众号" in ha._cross_platform_tag(hs[0])
+
+
+def test_cross_platform_ignores_old_and_unmatched(session) -> None:
+    """只看窗口内的;匹配不上的**不加分**(不是减分)—— "没发现"≠"不行"。"""
+    from app.db.models import DiscoveredPanLink
+    from app.services import hotspot_agent as ha
+
+    old = dt.datetime.now() - dt.timedelta(days=60)
+    session.add(DiscoveredPanLink(user_id=1, platform="weibo", origin_url="o1",
+                                  title="老资源 网盘", found_at=old))
+    session.commit()
+    hs = [{"keyword": "老资源", "growth": 5, "effective_growth": 5},
+          {"keyword": "谁也没提过", "growth": 5, "effective_growth": 5}]
+    ha._cross_platform_evidence(session, 1, hs, days=14)
+    assert hs[0]["cross_boost"] == 1.0 and hs[0]["platforms_found"] == []
+    assert hs[1]["cross_boost"] == 1.0 and hs[1]["effective_growth"] == 5.0

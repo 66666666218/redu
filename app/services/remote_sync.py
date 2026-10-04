@@ -42,6 +42,12 @@ _ARTICLE_COLS = ("user_id", "author", "title", "content", "url", "publish_at", "
                  "trend_flag", "quality", "pushed_at")
 _BENCH_COLS = ("user_id", "nickname", "ghid", "weread_book_id", "biz", "anchor_url",
                "note", "active", "miss_count", "last_item_at", "created_at")
+# **公开平台发现的盘链**(2026-10-05 新增):微博/知乎/贴吧发现的链 —— 它们**只在本机产生**
+# (发现链归 wechat 侧),而 Agent 在远程。不同步的话,"**跨平台资源同现**"这个信号
+# 在远程永远是空的 —— 而它恰恰是需求被反复验证的最直接证据。
+# ⚠️ 它的时间列叫 **`found_at`**(不是 `created_at`),去重键用 `origin_url`。
+_LINK2_COLS = ("user_id", "platform", "origin_url", "title", "author", "source_url",
+               "status", "message", "our_url", "pass_code", "found_at")
 
 
 def _engine(remote_url: str, settings=None):
@@ -152,7 +158,7 @@ def sync_once(local: Session, remote_url: str, days: int = DEFAULT_DAYS,
     except Exception as exc:  # noqa: BLE001
         return {"status": "failed", "reason": f"建连接失败:{type(exc).__name__}: {str(exc)[:120]}"}
 
-    sent = {"benchmarks": 0, "articles": 0, "links": 0}
+    sent = {"benchmarks": 0, "articles": 0, "links": 0, "discovered": 0}
     try:
         with remote.begin() as conn:
             # ---------- ① 对标号:先推(articles.benchmark_id 要引用它)----------
@@ -252,6 +258,27 @@ def sync_once(local: Session, remote_url: str, days: int = DEFAULT_DAYS,
                     "INSERT INTO wechat_pan_links (user_id, article_id, pan_url, created_at) "
                     "VALUES (:user_id, :article_id, :pan_url, :created_at)"), new_l)
                 sent["links"] = len(new_l)
+
+            # ---------- ④ 公开平台发现的盘链(微博/知乎/贴吧)----------
+            # ⚠️ 去重键用 `origin_url`(它**没有** article_id 那种外键,所以不必走映射);
+            #    时间列是 `found_at`,别拿 `created_at` 去查(会 Unknown column)。
+            local_found = local.execute(
+                text("SELECT user_id, platform, origin_url, title, author, source_url, "
+                     "status, message, our_url, pass_code, found_at FROM discovered_pan_links "
+                     "WHERE found_at >= :s LIMIT :n"), {"s": since, "n": limit}).all()
+            if local_found:
+                f_urls = [str(r[2]) for r in local_found if r[2]]
+                have_f: set[str] = set()
+                for i in range(0, len(f_urls), 200):
+                    chunk = f_urls[i:i + 200]
+                    ph = ", ".join(f":f{j}" for j in range(len(chunk)))
+                    params = {f"f{j}": v for j, v in enumerate(chunk)}
+                    have_f |= {str(u) for (u,) in conn.execute(text(
+                        f"SELECT origin_url FROM discovered_pan_links "
+                        f"WHERE user_id = 1 AND origin_url IN ({ph})"), params)}
+                cols = list(_LINK2_COLS)
+                new_f = [dict(zip(cols, r)) for r in local_found if str(r[2]) not in have_f]
+                sent["discovered"] = _push("discovered_pan_links", _LINK2_COLS, new_f, conn)
     except Exception as exc:  # noqa: BLE001 - 远程任何问题都不该影响本机
         logger.warning("远程同步失败(不影响本机):%s: %s", type(exc).__name__, str(exc)[:200])
         return {"status": "failed", "reason": f"{type(exc).__name__}: {str(exc)[:160]}", **sent}
@@ -297,9 +324,11 @@ def remote_sync_tick(settings=None) -> int:
             db.commit()
             return 0
         from app.services.tenant_base import _record_run
-        total = int(out.get("benchmarks", 0) + out.get("articles", 0) + out.get("links", 0))
+        total = int(out.get("benchmarks", 0) + out.get("articles", 0)
+                    + out.get("links", 0) + out.get("discovered", 0))
         _record_run(db, 1, "remote_sync", "success",
-                    f"对标号{out['benchmarks']} 文章{out['articles']} 盘链{out['links']}")
+                    f"对标号{out['benchmarks']} 文章{out['articles']} "
+                    f"盘链{out['links']} 发现链{out['discovered']}")
         db.commit()
         return total
     finally:

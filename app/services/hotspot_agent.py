@@ -264,6 +264,66 @@ def _library_tag(h: dict) -> str:
     return f" 📦库内有「{sample}」(还没搬)"
 
 
+# **跨平台资源同现**的加权(2026-10-05)。比榜单共振**更硬的一档**:
+#   榜单共振 = "大家在**讨论**";这一档 = "**同一个资源被多个平台的人贴过**"
+#   —— 有人已经在靠它拉新,而且不止一处。
+CROSS_PLATFORM_BOOST: dict[int, float] = {3: 1.6, 2: 1.3}   # 平台数 → 倍数(<2 不加)
+
+
+def _cross_platform_evidence(db: Session, user_id: int, hotspots: list[dict],
+                             days: int = 14) -> None:
+    """给热点补「**跨平台资源同现**」证据:这个资源在**几个平台**被人贴过。
+
+    ⚠️ **为什么值得单独一档**(它是目前能拿到的**最硬**的需求证据):
+    榜单只是"大家在讨论";而**同一个资源在微博/知乎/贴吧/公众号都被贴出来**
+    说明"**有人已经在靠它拉新,而且不止一处**"。这与 `resource_library.resonance_resources`
+    的"多号同发"是同一逻辑,但把"号"扩到了"**平台**" —— 跨平台同现比同平台多号更难伪装。
+
+    ⚠️ **`>= 2` 个平台才加权**:单个平台命中是常态(某个词本来就在某平台流行),
+    加它等于给所有词加一样的分,没信息量。
+
+    原地写 `h["platforms_found"]`(平台名列表)、`h["cross_boost"]`,并乘进 `effective_growth`。
+    """
+    from app.db.models import DiscoveredPanLink
+
+    since = datetime.now() - timedelta(days=days)
+    # (平台, 标题) 对:发现链自带 platform;公众号那条从文章标题取,平台记作 wechat
+    pairs: list[tuple[str, str]] = [
+        (str(p or ""), str(t or ""))
+        for p, t in db.execute(select(DiscoveredPanLink.platform, DiscoveredPanLink.title)
+                               .where(DiscoveredPanLink.user_id == user_id,
+                                      DiscoveredPanLink.found_at >= since)).all()]
+    pairs += [("wechat", str(t or ""))
+              for (t,) in db.execute(
+                  select(WechatArticle.title)
+                  .join(WechatPanLink, WechatPanLink.article_id == WechatArticle.id)
+                  .where(WechatPanLink.user_id == user_id,
+                         WechatArticle.created_at >= since)).all()]
+    pairs = [(pl, ti) for pl, ti in pairs if pl and ti]
+    for h in hotspots:
+        kw = str(h.get("keyword") or "").strip()
+        if len(kw) < 2:
+            h.setdefault("platforms_found", [])
+            h.setdefault("cross_boost", 1.0)
+            continue
+        plats = sorted({pl for pl, ti in pairs if kw in ti})
+        h["platforms_found"] = plats
+        boost = CROSS_PLATFORM_BOOST.get(len(plats), 1.0)
+        h["cross_boost"] = boost
+        if boost != 1.0:
+            h["effective_growth"] = float(h.get("effective_growth") or h.get("growth") or 0) * boost
+
+
+def _cross_platform_tag(h: dict) -> str:
+    """人读标记:`🌍跨平台资源同现(微博+知乎+贴吧)` / 空串(不足 2 个平台不加)。"""
+    plats = h.get("platforms_found") or []
+    if len(plats) < 2:
+        return ""
+    _cn = {"wechat": "公众号", "weibo": "微博", "zhihu": "知乎", "tieba": "贴吧",
+           "xiaohongshu": "小红书", "kuaishou": "快手", "douyin": "抖音", "bilibili": "B站"}
+    return f" 🌍跨平台资源同现({'+'.join(_cn.get(p, p) for p in plats)})"
+
+
 def _window_factor(db: Session, user_id: int, hotspots: list[dict],
                    hours: int = 24) -> None:
     """热度动量 → 剩余窗口估计(v5)。
@@ -641,7 +701,7 @@ def burst_plan(db: Session, user_id: int, topics: list[str],
                 my = next((x.strip() for x in (art.my_pan_urls or "").splitlines() if x.strip()), "")
                 src = next((x.strip() for x in (art.pan_urls or "").splitlines() if x.strip()), "")
                 link = my or src
-                lines.append(f"⚡《{t}》爆发{_resonance_tag(h)}{_library_tag(h)} → 已有现成资源:「{art.title[:40]}」"
+                lines.append(f"⚡《{t}》爆发{_resonance_tag(h)}{_library_tag(h)}{_cross_platform_tag(h)} → 已有现成资源:「{art.title[:40]}」"
                              + (f" → 点这:{link}" if link else ""))
                 db.add(HotspotSuggestion(user_id=user_id, keyword=t, growth=0, kind="match",
                                          resource_title=art.title[:255],
@@ -651,7 +711,7 @@ def burst_plan(db: Session, user_id: int, topics: list[str],
         p = (llm.get("plans") or {}).get(t)
         if p:
             plan_text = _plan_text(p)
-            lines.append(f"⚡《{t}》爆发{_resonance_tag(h)}{_library_tag(h)} → {plan_text}")
+            lines.append(f"⚡《{t}》爆发{_resonance_tag(h)}{_library_tag(h)}{_cross_platform_tag(h)} → {plan_text}")
             db.add(HotspotSuggestion(user_id=user_id, keyword=t, growth=0, kind="llm",
                                      plan=plan_text[:500],
                                      platforms=str(h.get("platforms") or "douyin")))
@@ -776,6 +836,9 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
     # **资源库证据**(2026-10-04):库里有没有这个资源、我方有没有现成的链。
     # 与"榜单共振"同一套加权,但依据不同 —— 榜单是"大家在讨论",这里是"**已经有人在发**"。
     _library_evidence(db, user_id, hotspots)
+    # **跨平台资源同现**(2026-10-05):同一个资源在几个平台被贴过 —— 目前能拿到的**最硬**的需求证据。
+    # 榜单是"大家在讨论",这一档是"**有人已经在不止一处靠它拉新**"。
+    _cross_platform_evidence(db, user_id, hotspots)
 
     mem_key = f"hotspot_agent_last_{user_id}"
     mem_row = db.get(SystemConfig, mem_key)
