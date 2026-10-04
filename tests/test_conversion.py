@@ -32,42 +32,43 @@ def test_wechat_uses_read_num_and_douyin_uses_share_count() -> None:
     assert d["degraded"] is False
 
 
-def test_others_prefer_play_then_view_then_share() -> None:
-    """其余平台按"播放量"优先;没有播放量才降级 —— **阶梯顺序即优先级**。"""
-    r = cv.estimate("bilibili", {"play_count": 1000, "view_count": 500, "share_count": 10})
-    assert r["basis"] == "play_count" and r["estimate"] == 400
+def test_others_prefer_play_count_then_like_derived() -> None:
+    """其余平台:① 真·播放量优先 → ② **点赞量推算**(用户口径:"按点赞量的 10%")。"""
+    r = cv.estimate("bilibili", {"play_count": 1000, "liked_count": 5000})
+    assert r["basis"] == "play_count" and r["value"] == 1000 and r["raw"] == 1000
+    assert r["estimate"] == 400                       # 有真播放量就不许用点赞推算
 
-    r = cv.estimate("zhihu", {"view_count": 500, "share_count": 10})       # 无播放量
-    assert r["basis"] == "view_count" and r["estimate"] == 200
+    # 没播放量的平台(小红书/知乎/快手…)→ 走点赞推算
+    r = cv.estimate("xiaohongshu", {"liked_count": 4013})
+    assert r["basis"] == "like_derived" and r["metric"] == "liked_count"
+    assert r["raw"] == 4013                            # 原始点赞数要留着
+    assert r["value"] == 40130                         # 曝光 = 点赞 ÷ 10%
+    assert r["estimate"] == int(40130 * 0.40)
 
-    r = cv.estimate("xiaohongshu", {"share_count": 419})                    # 只剩分享
-    assert r["basis"] == "share_count" and r["estimate"] == int(419 * 0.40)
 
+def test_like_derived_direction_is_pinned() -> None:
+    """★ **方向必须钉死**:曝光 = 点赞 **÷** 10%(点赞约占播放 10%)。
 
-def test_engage_is_the_last_resort_ladder() -> None:
-    """★ 实测事实:小红书/贴吧的搜索接口**根本没有播放量**。
-    小红书实测字段 = liked/collected/comment/share;贴吧只有 total_replay_num。
-
-    阶梯顺序 `播放 → 浏览 → 分享 → 互动总量`:分享**排在互动之前**(它更接近"曝光/传播"),
-    所以小红书有 `share_count` 时会走分享档。⚠️ 这个选择是**有代价的**:
-    同一条笔记(赞 4013/藏 6498/评 28/转 419)走分享档只算出 167,走互动档是 4383 —— **差 26 倍**。
-    本测试把两种口径都钉住,口径若要改(把 `share_count` 从阶梯里拿掉)一眼能看出影响面。
+    ⚠️ 口径若被理解反(×0.1),曝光会比点赞还小 —— 而点赞是播放的子集,量纲就反了。
+    这条测试保证改错方向时立刻变红。
     """
+    r = cv.estimate("zhihu", {"voteup_count": 1000})       # 知乎的赞字段名
+    assert r["value"] > r["raw"], "曝光必须**大于**点赞(点赞是播放的子集)"
+    assert r["value"] == 10000
+    assert cv.LIKE_AS_PLAY_RATIO == 0.10
+
+
+def test_engage_only_when_there_is_not_even_a_like() -> None:
+    """★ 实测:贴吧搜索接口**只有回复数**,连点赞都没有 ⇒ 才落到互动总量兜底。"""
+    tieba = cv.estimate("tieba", {"total_replay_num": 7})
+    assert tieba["basis"] == "engage" and tieba["value"] == 7
+    assert tieba["estimate"] == int(7 * 0.40)
+
+    # 有赞就用赞,不用互动总量
     xhs = cv.estimate("xiaohongshu", {"liked_count": "4013", "collected_count": "6498",
                                       "comment_count": "28", "share_count": "419"})
-    assert xhs["basis"] == "share_count", "分享档优先于互动档(阶梯顺序即优先级)"
-    assert xhs["estimate"] == int(419 * 0.40)
-
-    # 没有分享档时才落到互动总量
-    xhs2 = cv.estimate("xiaohongshu", {"liked_count": "4013", "collected_count": "6498",
-                                       "comment_count": "28"})
-    assert xhs2["basis"] == "engage"
-    assert xhs2["value"] == 4013 + 6498 + 28          # 字符串也要能转
-    assert xhs2["estimate"] == int(xhs2["value"] * 0.40)
-
-    tieba = cv.estimate("tieba", {"total_replay_num": 1, "total_replay_page": 1})
-    # 贴吧用的是**回复数**当曝光 —— 量纲与"播放量"差着数量级,所以必须带出来
-    assert tieba["value"] == 1 and tieba["basis"] in ("view_count", "engage")
+    assert xhs["basis"] == "like_derived", "有赞就不该用互动总量"
+    assert xhs["value"] == 40130
 
 
 def test_unknown_is_none_not_zero() -> None:
