@@ -232,3 +232,73 @@ def test_probe_does_not_need_mediacrawler_for_api_only_platforms(session, monkey
     monkeypatch.setattr(rp, "platforms_of", lambda s: ["bilibili"])
     out = rp.probe(session, 1, settings=_S())
     assert out["status"] == "ok" and len(out["items"]) == 1
+
+
+# ------------------------------------------------ 配上了 → 自动转存 + 推我们的链
+class _TransferS:
+    presence_transfer_limit: int = 3
+
+
+def test_transfer_missing_links_only_touches_ones_without_our_link(monkeypatch) -> None:
+    """★ **已有我方链的不碰** —— 重复转存既占盘又白打接口。"""
+    from app.services import pan_discovery
+
+    calls: list[str] = []
+    monkeypatch.setattr(pan_discovery, "transfer_pan_url",
+                        lambda s, u, url, st, snippet="": (
+                            calls.append(url) or {"status": "ok", "our_url": f"our:{url}"}))
+
+    items = [
+        {"name": "有链的", "link": {"pan_url": "p1", "my_link": "already"}},   # 不碰
+        {"name": "没链的", "link": {"pan_url": "p2", "my_link": ""}},          # 转
+        {"name": "没匹配上", "link": {}},                                       # 不碰
+    ]
+    out = rp.transfer_missing_links(None, 1, items, _TransferS())
+    assert calls == ["p2"]
+    assert out == {"attempted": 1, "ok": 1, "failed": 0, "skipped": 0}
+    assert items[0]["link"]["my_link"] == "already"      # 原样不动
+    assert items[1]["link"]["my_link"] == "our:p2"
+
+
+def test_transfer_missing_links_respects_the_batch_cap(monkeypatch) -> None:
+    """★ **每轮有上限** —— 转存是网络写操作且占盘,一轮开几十个会把盘顶满。
+    超额的要**说明原因**(不是静默跳过)。"""
+    from app.services import pan_discovery
+
+    monkeypatch.setattr(pan_discovery, "transfer_pan_url",
+                        lambda *a, **k: {"status": "ok", "our_url": "our"})
+    items = [{"name": f"r{i}", "link": {"pan_url": f"p{i}", "my_link": ""}} for i in range(5)]
+    out = rp.transfer_missing_links(None, 1, items, _TransferS())          # limit=3
+    assert out["attempted"] == 3 and out["ok"] == 3 and out["skipped"] == 2
+    assert "额度已用完" in items[4]["link"]["transfer_error"]
+
+
+def test_transfer_failure_keeps_the_item_and_records_why(monkeypatch) -> None:
+    """★ **失败不改判**:转存没成,这条**照样带着原链推出去**,只把原因记下来。
+    别让"没转成"变成"这条没热度"(与推送口径里"未搬要说明原因"同源)。"""
+    from app.services import pan_discovery
+
+    monkeypatch.setattr(pan_discovery, "transfer_pan_url",
+                        lambda *a, **k: {"status": "failed", "our_url": "",
+                                         "message": "盘满/单个资源太大"})
+    items = [{"name": "r", "link": {"pan_url": "p", "my_link": ""}}]
+    out = rp.transfer_missing_links(None, 1, items, _TransferS())
+    assert out["failed"] == 1 and out["ok"] == 0
+    assert "单个资源太大" in items[0]["link"]["transfer_error"]
+    assert items[0]["link"]["pan_url"] == "p"            # 条目本身没被丢掉
+
+
+def test_transfer_can_be_disabled(monkeypatch) -> None:
+    """`presence_transfer_limit = 0` = 不自动转存(退回旧行为:只附库里已有的链)。"""
+    from app.services import pan_discovery
+
+    called = []
+    monkeypatch.setattr(pan_discovery, "transfer_pan_url",
+                        lambda *a, **k: called.append(1) or {"status": "ok"})
+
+    class _Off:
+        presence_transfer_limit = 0
+
+    items = [{"name": "r", "link": {"pan_url": "p", "my_link": ""}}]
+    out = rp.transfer_missing_links(None, 1, items, _Off())
+    assert called == [] and out == {"attempted": 0, "ok": 0, "failed": 0, "skipped": 1}

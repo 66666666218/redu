@@ -331,6 +331,11 @@ class Settings(BaseSettings):
     #   (`Chromium distribution 'chrome' is not found`),所以给它单开一条 API 路。
     presence_platforms: str = "xiaohongshu,kuaishou,tieba,bilibili"
     presence_names: int = 3                             # 探几个资源名(词越多越慢)
+    # 匹配上但**还没有我方链**的资源,每轮自动转存几个(2026-10-04 用户口径:
+    # "配上了就自动转存 + 推我们的链")。⚠️ 转存是**网络写操作**且**占盘**,
+    # 一轮开几十个会把盘顶满(迅雷那边刚因空间不足整批停过),所以给上限。
+    # 设 0 = 不自动转存(退回旧行为:只附库里已有的链)。
+    presence_transfer_limit: int = 3
     # ---- 过期转存清理(2026-10-03 用户口径)----
     # "可以定期清理久远资源,如果**一个星期内没有人再发了**就可以删除了" —— 见
     # `app/services/xunlei_cleanup.py`(判据:转存时间 / 群分享 / 线索 / 发现链 取最新那个)。

@@ -167,6 +167,52 @@ def probe(session, user_id: int, settings=None, platforms: list[str] | None = No
     return {"status": "ok", "platforms": len(plats), "items": items, "failed": failed}
 
 
+def transfer_missing_links(session, user_id: int, items: list[dict],
+                           settings=None) -> dict:
+    """把「**库里有这个资源、但我们还没有我方链**」的命中项**自动转存**成我方链。
+
+    用户口径:「没有外链的平台,按名字调资源库配对 —— 配上了就**自动转存 + 推我们的链**」。
+
+    ⚠️ **三条纪律**:
+      ⒜ **已有我方链的不碰** —— 重复转存既占盘又白打接口;
+      ⒝ **每轮有上限**(`presence_transfer_limit`,默认 3)—— 转存是**网络写操作**且**占盘**,
+         一轮开几十个会把盘顶满(迅雷那边刚因空间不足整批停过);
+      ⒞ **失败不改判** —— 转存失败只把原因记进 `link["transfer_error"]`,
+         该条**照样带着原链推出去**;别让"没转成"变成"这条没热度"
+         (与推送口径里"未搬要说明原因"同源)。
+    """
+    from config.settings import get_settings
+
+    settings = settings or get_settings()
+    limit = int(getattr(settings, "presence_transfer_limit", 3) or 0)
+    from app.services.pan_discovery import transfer_pan_url
+
+    done = ok = failed = skipped = 0
+    for it in items:
+        link = it.get("link") or {}
+        if not link or link.get("my_link"):
+            continue                                   # 没匹配 或 已经有我方链
+        pan_url = str(link.get("pan_url") or "")
+        if not pan_url:
+            continue
+        if done >= limit:
+            skipped += 1
+            link["transfer_error"] = "本轮转存额度已用完(下轮继续)"
+            continue
+        done += 1
+        # 把名字一起传进去:百度链的提取码常写在附近文字里(`transfer_pan_url` 会去找)
+        res = transfer_pan_url(session, user_id, pan_url, settings,
+                               snippet=str(it.get("name") or ""))
+        if res.get("status") == "ok" and res.get("our_url"):
+            link["my_link"] = res["our_url"]
+            link["moved"] = True
+            ok += 1
+        else:
+            link["transfer_error"] = str(res.get("message") or res.get("status") or "")[:120]
+            failed += 1
+    return {"attempted": done, "ok": ok, "failed": failed, "skipped": skipped}
+
+
 def push_items(items: list[dict], settings) -> bool:
     """推飞书(**各平台自己的群**,未配回落主群)。版式与其他推送一致:四列网格。
 
@@ -229,13 +275,20 @@ def presence_tick(settings=None, platforms: list[str] | None = None) -> int:
 
             try:
                 out = probe(db, uid, settings=settings, platforms=platforms)
-                total += len(out.get("items") or [])
-                if out.get("items"):
-                    push_items(out["items"], settings)
+                items = out.get("items") or []
+                total += len(items)
+                # **配上了就自动转存**(2026-10-04 用户口径)。放在 push 之前,
+                # 这样卡片上带的就是**我方链**;转存失败也会把原因带进卡片(不静默)。
+                moved = transfer_missing_links(db, uid, items, settings)
+                if items:
+                    push_items(items, settings)
                 # ⚠️ **把失败平台写进运行记录**:`probe` 只在"全平台都失败"时才抛错,
                 # 所以"小红书成了、快手挂了"这种**部分失败**本来查不出来。
                 failed = out.get("failed") or []
-                note = f"平台{out.get('platforms', 0)} 命中{len(out.get('items') or [])}"
+                note = f"平台{out.get('platforms', 0)} 命中{len(items)}"
+                if moved["attempted"]:
+                    note += (f" 转存{moved['ok']}/{moved['attempted']}"
+                             f"(失败{moved['failed']} 超额{moved['skipped']})")
                 if failed:
                     note += f" 失败:{','.join(failed)}"
                 _record_run(db, uid, "resource_presence", "success", note)
