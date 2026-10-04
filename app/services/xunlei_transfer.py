@@ -424,7 +424,23 @@ def move_files(file_ids: list[str], parent_id: str, cred: dict | None = None) ->
         return {"status": "failed", "message": str(exc)[:200], "moved": 0, "errors": []}
 
 
-def quota_info(cred: dict | None = None) -> dict:
+# ⚠️ **配额探针必须限流**(2026-10-04):`/drive/v1/about` **要 captcha**、会走自愈重试,
+# 打太密既费 captcha 额度也吃账号级限流。而配额是**粗判据**(只用来比 0.9 / 算剩余空间),
+# 秒级陈旧完全无害。所以进程内共享一份、`_QUOTA_TTL` 秒内复用。
+#
+# 为什么需要这样做:`transfer_pending` 开头**已经**查了一次(注释写着"只查一次,整批共用,
+# 别每条都打一次配额"),但"按剩余空间预判单个资源"这件事天然发生在**每一条**转存里 ——
+# 若每次都各自探一次,一批 20 条就是 21 次探针(≈ 把那条纪律反过来做)。缓存让整批共享一次。
+_QUOTA_TTL = 60.0
+_quota_cache: dict = {"at": 0.0, "probed": False, "info": {}}
+
+
+def reset_quota_cache() -> None:
+    """丢掉缓存的配额。测试要"冷的探针"时显式调用(生产不需要)。"""
+    _quota_cache.update({"at": 0.0, "probed": False, "info": {}})
+
+
+def quota_info(cred: dict | None = None, fresh: bool = False) -> dict:
     """盘配额 `{"usage", "limit", "ratio"}`(字节;拿不到就是空 dict)。
 
     转存前的**盘级闸门**要用它:2026-10-02 实测翻过车 —— 群里的大包被自动搬进盘,
@@ -432,7 +448,25 @@ def quota_info(cred: dict | None = None) -> dict:
 
     ⚠️ **探针失败必须降级成"不知道",不能冒泡** —— 这是闸门的判据,它自己抖一下就把
     整条转存链带崩,比不判还糟。所以**连取凭据都包在 try 里**。
+
+    ⚠️ **有 `_QUOTA_TTL` 秒的进程内缓存**(含失败结果):失败也缓存,是为了别让一次
+    captcha 失效在**同一条链里被反复撞**(那正是把 captcha 打爆的写法)。代价是恢复慢 ≤ TTL。
+
+    `fresh=True` = **绕过缓存真打一次**(顺手刷新缓存)。给**人按的那个按钮**用 ——
+    用户刚清完盘点"刷新盘况",给他 60 秒前的旧数会让人以为"清理没生效"。
+    调度链里**别传它** —— 那里要的正是"整批共用一次"。
     """
+    now = time.monotonic()
+    if (not fresh and _quota_cache["probed"]
+            and (now - _quota_cache["at"]) < _QUOTA_TTL):
+        return _quota_cache["info"]
+    info = _probe_quota(cred)
+    _quota_cache.update({"at": now, "probed": True, "info": info})
+    return info
+
+
+def _probe_quota(cred: dict | None = None) -> dict:
+    """真去打一次探针(不读缓存)。"""
     try:
         cred = cred or _credentials()
         if not cred:

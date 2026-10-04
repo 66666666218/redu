@@ -240,6 +240,7 @@ def test_quota_info_self_heals_captcha_on_400(monkeypatch) -> None:
     monkeypatch.setattr(xt, "_renew_captcha",
                         lambda: (calls.__setitem__("renew", calls["renew"] + 1) or True))
 
+    xt.reset_quota_cache()          # 探针有 60s 缓存,要"冷的"必须显式清(否则受测试顺序影响)
     info = xt.quota_info()
     assert info["ratio"] == 0.95, info
     assert calls["renew"] == 1
@@ -576,3 +577,117 @@ def test_unknown_space_does_not_block_a_transfer(monkeypatch) -> None:
 
     out = xt.transfer_and_share("https://pan.xunlei.com/s/S?pwd=p")
     assert out["status"] == "ok", "探针拿不到时必须放行,不能把'不知道'当'满'"
+
+
+# ------------------------------------------------- 配额探针必须限流(别每条都打)
+def test_quota_probe_is_shared_within_its_ttl(monkeypatch) -> None:
+    """⚠️ `/drive/v1/about` **要 captcha**、会走自愈重试 —— 打密了既费 captcha 也吃限流。
+
+    配额是**粗判据**(比 0.9 / 算剩余空间),秒级陈旧无害,所以进程内缓存。
+    """
+    from app.services import xunlei_transfer as xt
+
+    calls = {"n": 0}
+
+    def fake_get(url, **kw):
+        calls["n"] += 1
+        return _FakeResp({"quota": {"limit": "1000", "usage": "800"}})
+
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None: {"access_token": "a"})
+    monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
+    monkeypatch.setattr(xt.requests, "get", fake_get)
+
+    xt.reset_quota_cache()
+    assert xt.quota_info()["ratio"] == 0.8
+    assert xt.quota_info()["ratio"] == 0.8
+    assert xt.free_bytes() == 200
+    assert calls["n"] == 1, f"TTL 内应共用一次探针,实际打了 {calls['n']} 次"
+
+    xt.reset_quota_cache()                     # 清了才会真打
+    xt.quota_info()
+    assert calls["n"] == 2
+
+
+def test_failed_probe_is_cached_too(monkeypatch) -> None:
+    """⚠️ **失败也要缓存**:一次 captcha 失效若在同一条链里被反复重撞,那正是把 captcha 打爆的写法。
+    代价是恢复慢 ≤ TTL —— 比"20 条资源各撞一次"划算得多。"""
+    from app.services import xunlei_transfer as xt
+
+    calls = {"n": 0}
+
+    def fake_get(url, **kw):
+        calls["n"] += 1
+        raise RuntimeError("网络炸了")
+
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None: {"access_token": "a"})
+    monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
+    monkeypatch.setattr(xt.requests, "get", fake_get)
+
+    xt.reset_quota_cache()
+    assert xt.quota_info() == {} and xt.quota_ratio() is None
+    assert xt.quota_info() == {}
+    assert calls["n"] == 1, f"失败结果也该缓存,实际打了 {calls['n']} 次"
+
+
+def test_prejudgment_does_not_probe_quota_per_resource(monkeypatch) -> None:
+    """⚠️ **回归守卫**:加了"按剩余空间预判"之后,最容易犯的错就是**每条资源各探一次配额** ——
+    `transfer_pending` 开头明明写过"只查一次,整批共用(别每条都打一次配额)"。
+    这里跑 3 条转存,断言 `/drive/v1/about` **只被打了一次**。"""
+    from app.services import xunlei_transfer as xt
+
+    probe_calls = {"n": 0}
+
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None: {
+        "access_token": "a", "captcha_token": "c", "device_id": "d", "client_id": "x"})
+    monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
+    monkeypatch.setattr(xt, "resolve_parent_id", lambda cred=None, **k: "P")
+    monkeypatch.setattr(xt, "list_files", lambda *a, **k: [])
+
+    def fake_get(url, **kw):
+        if url.endswith("/drive/v1/about"):
+            probe_calls["n"] += 1
+            return _FakeResp({"quota": {"limit": str(33_092_723_015_680),
+                                        "usage": str(26_454_214_882_191)}})
+        if "/tasks/" in url:
+            return _FakeResp({"progress": 100,
+                              "params": {"trace_file_ids": json.dumps({"F1": "N1"})}})
+        return _FakeResp({"share_status": "OK", "pass_code_token": "t",
+                          "files": [{"id": "F1", "size": 1024}]})
+
+    def fake_post(url, **kw):
+        if url.endswith("/restore"):
+            return _FakeResp({"restore_task_id": "T1"})
+        return _FakeResp({"share_url": "https://pan.xunlei.com/s/OUR", "pass_code": "9"})
+
+    monkeypatch.setattr(xt.requests, "get", fake_get)
+    monkeypatch.setattr(xt.requests, "post", fake_post)
+
+    xt.reset_quota_cache()
+    for _ in range(3):
+        assert xt.transfer_and_share("https://pan.xunlei.com/s/S?pwd=p")["status"] == "ok"
+    assert probe_calls["n"] == 1, f"3 条资源打了 {probe_calls['n']} 次配额探针 —— 又变成每条各打一次了"
+
+
+def test_fresh_probe_bypasses_the_cache(monkeypatch) -> None:
+    """⚠️ **给人按的那个按钮必须拿到新鲜数**:他刚清完盘再点"刷新盘况",
+    返回 60 秒前的缓存会被读成"清理没生效" —— 那就是**把缓存伪装成现状**。"""
+    from app.services import xunlei_transfer as xt
+
+    calls = {"n": 0}
+    usage = {"v": 800}
+
+    def fake_get(url, **kw):
+        calls["n"] += 1
+        return _FakeResp({"quota": {"limit": "1000", "usage": str(usage["v"])}})
+
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None: {"access_token": "a"})
+    monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
+    monkeypatch.setattr(xt.requests, "get", fake_get)
+
+    xt.reset_quota_cache()
+    assert xt.quota_info()["ratio"] == 0.8
+    usage["v"] = 500                        # 盘被清了一些
+    assert xt.quota_info()["ratio"] == 0.8, "缓存内应复用(这是「整批共用一次」的基础)"
+    assert xt.quota_info(fresh=True)["ratio"] == 0.5, "fresh=True 必须看到新数"
+    assert calls["n"] == 2
+    assert xt.quota_info()["ratio"] == 0.5, "fresh 的结果要顺手写回缓存"

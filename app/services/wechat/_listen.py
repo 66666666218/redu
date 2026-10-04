@@ -138,52 +138,101 @@ def _detect_ban_reason(page_text: str) -> str:
             ip = ("版权" in page_text or "商标" in page_text or "专利" in page_text)
             return f"{note}·{'侵权投诉(版权/商标/专利)' if ip else '平台规范'}"
     return ""
-# ---------------------------------------------------------- 列表额度:轮转窗口
+# ---------------------------------------------------------- 列表额度:按"最久没轮到"挑
 # `/web/mp/articles`(**带精确阅读数**)有**会话额度**:2026-10-04 实测 —— 续期后从
 # 书架第 1 个号问起,前 29 个全成功、第 30 个被 `-10100` 挡。而一轮有 75 个号
 # ⇒ 全问必然只有前 29 个拿得到阅读数,后面的还白挨一次熔断。
-# 所以列表**只对一段轮转窗口里的号**要:窗口平滑右移,每个号迟早轮到。
-# 游标存 `system_config` —— 与 `category_topics.advance_category` 同一套路。
+# 所以列表**每轮只问 `_LIST_WINDOW` 个号**,其余号只取 cover(不花额度)。
+#
+# ⚠️ **为什么不是"按序号切窗口 + 游标右移"(第一版写法,同日改掉)**:
+# 本轮的号列表**不是固定的全量** —— 先被 `_select_listen_batch` 按批轮转切成子集
+# (142 号池 → 每轮 36 个),再被书架闸门 `rows = sorted(rows, key=tier)` **按每轮都可能变的
+# 次序重排**。在"内容与次序都在变"的列表上按小标切窗口,覆盖是**碰巧**而不是保证 ——
+# 模拟 5 次:全覆盖要 16~22 轮(4~5.5 天),而"游标右移"的写法让它看起来像 1.4 天。
+# ⇒ 改成**按"上次问到列表的时间"排序,取最久没轮到的 N 个**:
+#   与批子集、与排序**都无关**,全覆盖有闭式上界 `ceil(池/批) × ceil(批/窗口)`
+#   —— 142 号池、批 36、窗口 25 ⇒ `4 × 2 = 8` 轮 ≈ **2 天**(实测 5 个随机种子都是 8 轮)。
+#   而"按序号 + 游标右移"那种写法实测要 16~22 轮,**却让人误以为只要 1.4 天**。
+# 记号存 `system_config` 的 JSON(与 `weread_shelf_marks_<uid>` 同一套路)。
 _LIST_WINDOW = 25            # 实测额度 29,取 25 留余量
-_LIST_CURSOR_KEY = "weread_list_cursor_{uid}"
+_LIST_MARKS_KEY = "weread_list_marks_{uid}"
 
 
-def _list_cursor(session: Session, user_id: int) -> int:
-    from app.db.models import SystemConfig
+def _list_key(b) -> str:
+    """列表轮转用的**号身份**:`weread_book_id`。
 
-    row = session.scalar(select(SystemConfig).where(
-        SystemConfig.key == _LIST_CURSOR_KEY.format(uid=user_id)))
-    try:
-        return int(row.value) if row and row.value else 0
-    except (TypeError, ValueError):
-        return 0
-
-
-def _list_window(session: Session, user_id: int, rows: list) -> tuple[set[int], int]:
-    """本轮允许问「列表」的号 id 集合 + 下一轮游标(环绕)。"""
-    n = len(rows)
-    if n == 0:
-        return set(), 0
-    start = _list_cursor(session, user_id) % n
-    size = min(_LIST_WINDOW, n)
-    allow = {rows[(start + i) % n].id for i in range(size)}
-    return allow, (start + size) % n
-
-
-def _advance_list_cursor(session: Session, user_id: int, value: int) -> None:
-    """推进列表游标。
-
-    ⚠️ **只在"本批没被额度挡"时才调** —— 被挡了还推进,那批号就**永久轮空**了
-    (和书架水位"问都没问成就不准前移"是同一条纪律)。
+    ⚠️ 不能用自增 `id`(更不能用序号):`rows` 每轮都是**按批轮转切出来的子集**、
+    又被书架闸门重排过,序号的含义每轮都在变。
     """
+    return str(getattr(b, "weread_book_id", "") or "")
+
+
+def _list_marks(session: Session, user_id: int) -> dict[str, float]:
+    """每个号**上次真正问过列表**的时间(epoch 秒)。读不出来就当空(全都"从没问过")。"""
+    import json
+
     from app.db.models import SystemConfig
 
     row = session.scalar(select(SystemConfig).where(
-        SystemConfig.key == _LIST_CURSOR_KEY.format(uid=user_id)))
+        SystemConfig.key == _LIST_MARKS_KEY.format(uid=user_id)))
+    try:
+        data = json.loads(row.value) if row and row.value else {}
+    except (TypeError, ValueError):
+        return {}
+    return {str(k): float(v) for k, v in data.items() if isinstance(data, dict)} if data else {}
+
+
+def _list_attempts(stats: dict) -> int:
+    """本轮**真去问过列表**的次数(成功/失败都算,`weread_list_skipped`=没问过,不算)。
+
+    记号必须按"**问没问过**"记、而不是"**问没问成**" —— 后者会让"额度只够前 10 个、
+    窗口 25 个"这种情形卡死:没问成的号永远排在队头,而队头永远是同一批(次键是 bookId),
+    于是 bookId 靠后的号**永远进不来**。按"问过"记 ⇒ 每个被挑中的号都轮到过,
+    失败的下个周期再来。这正是"轮转"该有的性质。
+    """
+    return sum(stats.get(k, 0) for k in
+               ("weread_list_ok", "weread_list_off_new", "weread_list_off"))
+
+
+def _list_window(session: Session, user_id: int, rows: list) -> set[str]:
+    """本轮**允许问列表**的号(bookId 集合)—— 取"最久没轮到"的那 `_LIST_WINDOW` 个。
+
+    ⚠️ 键用 `weread_book_id`(**不是序号**):序号会随批子集/重排漂移,bookId 不会。
+    从没问过的记 0 ⇒ 排最前,所以新加的号第一轮就能拿到阅读数。
+    """
+    if not rows:
+        return set()
+    marks = _list_marks(session, user_id)
+    # 次序里带 bookId 做次键:并列时结果**确定**(否则同一批号的顺序每次不同,难复现)
+    ordered = sorted(rows, key=lambda b: (marks.get(_list_key(b), 0.0), _list_key(b)))
+    return {_list_key(b) for b in ordered[:_LIST_WINDOW]}
+
+
+def _mark_listed(session: Session, user_id: int, keys: set[str]) -> None:
+    """把"这些号**这一轮真问到列表了**"记下来(epoch 秒),下轮好把机会让给别人。
+
+    ⚠️ **只记号、不推游标**:没问到的号(不在窗口里 / 被额度挡下 / 被平台源抢先消费)
+    记号**保持旧值** ⇒ 下一轮它仍然排在队头,不会因为"别人前进"而被永久轮空。
+    这正是第一版"游标右移 + 被挡就不推进"要花力气防的那件事,现在由数据结构本身保证。
+    """
+    import json
+    import time
+
+    from app.db.models import SystemConfig
+
+    keys = {str(k) for k in keys if k}
+    if not keys:
+        return
+    marks = _list_marks(session, user_id)
+    now = time.time()
+    marks.update({k: now for k in keys})
+    key = _LIST_MARKS_KEY.format(uid=user_id)
+    payload = json.dumps(marks, ensure_ascii=False)
+    row = session.scalar(select(SystemConfig).where(SystemConfig.key == key))
     if row:
-        row.value = str(value)
+        row.value = payload
     else:
-        session.add(SystemConfig(key=_LIST_CURSOR_KEY.format(uid=user_id), value=str(value)))
+        session.add(SystemConfig(key=key, value=payload))
 
 
 def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
@@ -570,9 +619,11 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     # 被额度类错误(-2014/-2041)挡下后继续让剩余号逐个去撞,只会把风控加深、让队尾整轮挨饿,
     # 所以这里合闸:列表先停,连续 _COVER_QUOTA_TRIP 个号 cover 也挡不下就整源停。
     breaker: dict = {"list_off": False, "cover_quota_fails": 0, "off": False}
-    # 列表额度的**轮转窗口**:本轮只让窗口里的号问 `/web/mp/articles`(带精确阅读数),
-    # 其余号只取 cover。窗口平滑右移 —— 详见 `_list_window` 上方注释。
-    list_allow, next_list_cursor = _list_window(session, user_id, rows)
+    # 列表额度的**轮转**:本轮只让"最久没轮到"的 `_LIST_WINDOW` 个号问
+    # `/web/mp/articles`(带精确阅读数),其余号只取 cover。挑法与批子集、排序**都无关** ——
+    # 详见 `_list_window` 上方注释。
+    list_allow = _list_window(session, user_id, rows)
+    listed_keys: set[str] = set()      # 本轮**真问到**列表的号 → 轮末记号(问不到的不记)
     quota_skipped = 0
     no_free_source = 0
     marks_advance: dict[str, str] = {}   # 本轮「问过且答上」的号 → 书架信号值(轮末前移水位)
@@ -619,10 +670,14 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
         elif wr_eligible:
             try:
                 weread = weread or _root.WereadClient(cookie)
+                _seen = _list_attempts(wr_stats)
                 got, answered = _weread_collect(user_id, b, weread, session,
                                                 stats=wr_stats, breaker=breaker,
                                                 shelf_ts=gate["signals"].get(b.weread_book_id),
-                                                banned_out=banned, list_allow=b.id in list_allow)
+                                                banned_out=banned,
+                                                list_allow=_list_key(b) in list_allow)
+                if _list_attempts(wr_stats) > _seen:
+                    listed_keys.add(_list_key(b))          # 问过就记号(成败都算,见 _list_attempts)
                 # 只有免费源真答了才算"本号已被消费":答不上按 failed 计,如实暴露。
                 used = answered
                 if answered and gate["signals"].get(b.weread_book_id):
@@ -650,10 +705,14 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                     # mp/articles 仅在会话建立/续期后初期可用)→ 熔断重新合上再试
                     breaker.update(list_off=False, cover_quota_fails=0, off=False)
                     try:
+                        _seen = _list_attempts(wr_stats)
                         got, answered = _weread_collect(user_id, b, _root.WereadClient(cookie), session,
                                                         stats=wr_stats, breaker=breaker,
                                                         shelf_ts=gate["signals"].get(b.weread_book_id),
-                                                        banned_out=banned, list_allow=b.id in list_allow)
+                                                        banned_out=banned,
+                                                        list_allow=_list_key(b) in list_allow)
+                        if _list_attempts(wr_stats) > _seen:
+                            listed_keys.add(_list_key(b))
                         used = answered  # 答上了就消费掉本号(答不上按 failed 计,如实暴露)
                         if answered and gate["signals"].get(b.weread_book_id):
                             marks_advance[b.weread_book_id] = gate["signals"][b.weread_book_id]
@@ -698,10 +757,9 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                                        breaker["cover_quota_fails"])
                 else:
                     breaker["cover_quota_fails"] = 0
-    # 列表游标:本批**没被额度挡**才推进 —— 被挡了还推,那批号就永久轮空了
-    # (与书架水位"问都没问成不准前移"同一条纪律)。
-    if not breaker["list_off"]:
-        _advance_list_cursor(session, user_id, next_list_cursor)
+    # 列表轮转记号:只记**这一轮真去问过列表**的号(成败都记,见 `_list_attempts`)。
+    # 没轮到的号记号不变 ⇒ 下一轮仍排在最前面,不会被"别人前进"顶掉。
+    _mark_listed(session, user_id, listed_keys)
     # 水位前移(只收问过且答上的号,铁律见 _save_shelf_marks):写丢=下轮重问一遍,无害
     try:
         advanced = _save_shelf_marks(session, user_id, marks_advance)
