@@ -83,8 +83,25 @@ def _tunnel_engine(settings):
     db_pw = str(getattr(settings, "remote_db_password", "") or "")
     db_name = str(getattr(settings, "remote_db_name", "redu") or "redu")
 
+    key_file = str(getattr(settings, "remote_ssh_key", "") or "")
     tr = paramiko.Transport((host, port))
-    tr.connect(username=user, password=pw)
+    if key_file:
+        # ⚠️ **优先用密钥**(可随时吊销,且 .env 里不必留密码)。
+        # 需要远端 `PubkeyAuthentication yes` —— 2026-10-04 已开(开前用 `sshd -t` 自检过)。
+        # ⚠️ `Transport.connect()` **只接 `pkey`,不接 `key_filename`** ⇒ 得自己把私钥加载成对象;
+        #    密钥类型未知,所以按常见几种依次试(ed25519 → rsa → ecdsa)。
+        pkey = None
+        for loader in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):
+            try:
+                pkey = loader.from_private_key_file(key_file)
+                break
+            except Exception:  # noqa: BLE001 - 换下一种类型
+                continue
+        if pkey is None:
+            raise RuntimeError(f"读不出私钥({key_file}):类型不支持或文件损坏")
+        tr.connect(username=user, pkey=pkey)
+    else:
+        tr.connect(username=user, password=pw)
 
     def _creator():
         # ⚠️ **`sock=` 只在 `connect()` 上,不在构造函数上**(pymysql 实测)

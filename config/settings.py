@@ -130,7 +130,8 @@ class Settings(BaseSettings):
     remote_ssh_host: str = ""          # 例:103.117.136.167(填了它才走隧道)
     remote_ssh_port: int = 22
     remote_ssh_user: str = "root"
-    remote_ssh_password: str = ""
+    remote_ssh_password: str = ""     # 兜底(有 key 时不用它)
+    remote_ssh_key: str = ""          # 专用私钥路径(优先于密码;可随时吊销)
     remote_db_host: str = "172.22.0.2"  # 隧道对端(容器 IP);
     remote_db_port: int = 3306
     remote_db_user: str = "redu"
