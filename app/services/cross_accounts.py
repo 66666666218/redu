@@ -70,6 +70,109 @@ class SearchSourceError(RuntimeError):
     """
 
 
+def _search_weibo(cookie: str, keyword: str, limit: int = 20,
+                  page: int = 1) -> list[dict]:
+    """微博搜索 → `[{uid, name, url, snippet, pan_link, metrics}]`(2026-10-05 实测)。
+
+    **它是目前质量最好的盘链源**:微博有一批"资源铺"账号(#小说资源铺# 等超话),
+    发帖正文里直接挂盘链 —— 实测「资源 合集」19 条里 5 条带链、去重 18 条
+    (百度 14 / 夸克 3 / 迅雷 1),而且**是真正在分享资源**,不是知乎/掘金那种"顺手一提"。
+
+    ⚠️ **两个坑(都踩过)**:
+      ⒜ `statuses` 在**顶层**,**不是** `data.statuses` —— 我第一版读错路径,得到"0 条";
+      ⒝ 同一条链会在 `url_struct[]` 的 `ori_url` / `long_url` / `actionlog.ext` 里
+         **各出现一次** ⇒ **必须按 url 去重**,否则命中数会虚报约 3 倍
+         (我先前那个"66 条"就是这么来的,真实只有 ~22 条)。
+
+    ⚠️ **硬失败抛 `SearchSourceError`**(与 `_search_zhihu` 同一条纪律):
+    `retcode=6102` / 跳新浪通行证 = 登录态失效,必须当错误,不能返回空列表冒充"没有结果"。
+    """
+    import requests
+
+    if not cookie or not (keyword or "").strip():
+        return []
+    from urllib.parse import quote
+    try:
+        resp = requests.get(
+            "https://weibo.com/ajax/statuses/search",
+            params={"q": keyword.strip(), "count": max(1, min(limit, 20)), "page": page},
+            headers={"Cookie": cookie, "User-Agent": _UA,
+                     "Referer": "https://s.weibo.com/weibo?q=" + quote(keyword.strip()),
+                     "Accept": "application/json, text/plain, */*"},
+            timeout=20)
+    except Exception as exc:  # noqa: BLE001
+        raise SearchSourceError(f"请求异常:{exc}") from exc
+    if getattr(resp, "status_code", 200) != 200:
+        raise SearchSourceError(f"HTTP {resp.status_code}(登录态失效或被限流)")
+    # ⚠️ 失效时会返回一个跳转 HTML(`retcode=6102` → 新浪通行证页),不是 JSON
+    if "retcode=6102" in (resp.text or "")[:600]:
+        raise SearchSourceError("微博登录态失效(retcode=6102)—— 需要换一份新 Cookie")
+    try:
+        payload = resp.json()
+    except ValueError as exc:
+        raise SearchSourceError(f"返回非 JSON:{resp.text[:80]}") from exc
+    if not isinstance(payload, dict) or "statuses" not in payload:
+        raise SearchSourceError(f"返回体无 statuses:{str(payload)[:100]}")
+
+    out: list[dict] = []
+    for it in payload.get("statuses") or []:
+        if it.get("isAd"):                      # 广告位不是内容
+            continue
+        u = it.get("user") or {}
+        uid = str(u.get("id") or "").strip()
+        name = str(u.get("screen_name") or "").strip()
+        if not uid or not name:
+            continue
+        # 盘链:先看帖子**自带的结构化链接**(url_struct),再兜底扫正文
+        pans: list[str] = []
+        for us in (it.get("url_struct") or []):
+            for k in ("long_url", "ori_url", "url"):
+                m = _PAN_URL_RE.search(str(us.get(k) or ""))
+                if m:
+                    pans.append(m.group(0))
+        snippet = _strip_tags(str(it.get("text_raw") or it.get("text") or "")).strip()
+        m2 = _PAN_URL_RE.search(snippet)
+        if m2:
+            pans.append(m2.group(0))
+        mblogid = str(it.get("mblogid") or it.get("mid") or "")
+        out.append({"uid": uid, "name": name,
+                    "url": f"https://weibo.com/{uid}/{mblogid}" if mblogid else "",
+                    "snippet": snippet[:255],
+                    "pan_link": (pans[0] if pans else ""),
+                    # 曝光/互动:微博给的是**转发/评论/赞** —— 交给 `conversion` 自己去选档
+                    "metrics": _weibo_metrics(it)})
+    return out
+
+
+_PAN_URL_RE = re.compile(r"https?://pan\.(?:quark|baidu|xunlei)\.(?:cn|com)/[^\s\"'<>\\]{6,}",
+                         re.I)
+_TAGS_RE = re.compile(r"<[^>]+>")
+
+
+def _strip_tags(s: str) -> str:
+    """微博正文里带 `<a>` 等标签(关键词还会被 `<em>` 高亮),去掉它们。"""
+    return _TAGS_RE.sub("", s or "")
+
+
+def _weibo_metrics(it: dict) -> dict[str, int]:
+    """微博的互动指标 → `conversion` 认的 `metrics`(`_pick` 会自己挑)。
+
+    ⚠️ **缺失/为 0 就不放进去** —— 让 `conversion` 走它的降级阶梯,别在这儿填 0
+    (填 0 会被读成"没人看")。
+    """
+    pairs = (("share_count", "reposts_count"), ("comment_count", "comments_count"),
+             ("liked_count", "attitudes_count"))
+    out: dict[str, int] = {}
+    for key, src in pairs:
+        try:
+            v = int(it.get(src) or 0)
+        except (TypeError, ValueError):
+            continue
+        if v > 0:
+            out[key] = v
+    return out
+
+
 def _search_zhihu(cookie: str, keyword: str, limit: int = 20) -> list[dict]:
     """知乎搜索 → `[{uid, name, url, snippet, pan_link}]`。
 

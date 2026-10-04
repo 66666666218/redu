@@ -208,6 +208,42 @@ def _candidates_from_zhihu(ck: str, keywords: list[str], limit: int) -> list[dic
     return out
 
 
+def _candidates_from_weibo(ck: str, keywords: list[str], limit: int) -> list[dict]:
+    """微博:逐词搜(**有频控**,词间隔开)。全部词失败则抛 `SearchSourceError`。
+
+    ⚠️ **它是目前质量最好的盘链源**(2026-10-05 实测):微博有一批"资源铺"账号
+    (#小说资源铺# 等超话),帖子里直接挂盘链。实测「资源 合集」19 条里 5 条带链、
+    去重 18 条(百度 14 / 夸克 3 / 迅雷 1),而且**是真正在分享资源** ——
+    不像知乎/掘金那样只是"技术文章里顺手一提"。
+    """
+    from app.services.cross_accounts import SearchSourceError, _search_weibo
+
+    out: list[dict] = []
+    failed, last_err = 0, ""
+    for i, kw in enumerate(keywords):
+        if i:
+            time.sleep(_REQ_GAP)
+        try:
+            rows = _search_weibo(ck, kw, limit)
+        except SearchSourceError as exc:
+            failed += 1
+            last_err = str(exc)
+            logger.warning("网盘发现:微博词「%s」失败(%s)", kw, exc)
+            continue
+        for r in rows:
+            url = str(r.get("pan_link") or "").strip()
+            if not url:
+                continue
+            out.append({"platform": "weibo", "origin_url": url,
+                        "title": _clean(r.get("snippet") or "")[:255] or kw[:60],
+                        "author": str(r.get("name") or "")[:64],
+                        "source_url": str(r.get("url") or "")[:500],
+                        "metrics": r.get("metrics") or {}})
+    if keywords and failed == len(keywords):
+        raise SearchSourceError(f"{len(keywords)} 个词全部搜索失败:{last_err}")
+    return out
+
+
 def _candidates_from_tieba(keywords: list[str]) -> list[dict]:
     """贴吧:走 MediaCrawler(**带 Cookie 直连 403**,只能走它),一次浏览器跑完所有词。
 
@@ -286,6 +322,21 @@ def find_candidates(session, user_id: int, keywords: list[str], limit: int = 20,
             last_err = str(exc)
     else:
         logger.info("网盘发现:未配知乎 Cookie,跳过知乎源")
+
+    # **微博**(2026-10-05 新增):实测是目前质量最好的盘链源 —— 微博有"资源铺"账号
+    # (#小说资源铺# 等超话),帖子里直接挂盘链。放在**贴吧之后**(贴吧 56% 命中、它是主源),
+    # 用它补贴吧没覆盖到的品类(小说/资料类尤其多)。
+    wb_ck = (get_cookie(session, user_id, "weibo") or "").strip()
+    if wb_ck and getattr(settings, "pan_discovery_weibo", True):
+        attempted += 1
+        try:
+            for c in _candidates_from_weibo(wb_ck, keywords, limit):
+                found.setdefault(c["origin_url"], c)
+        except SearchSourceError as exc:
+            failures += 1
+            last_err = str(exc)
+    elif not wb_ck:
+        logger.info("网盘发现:未配微博 Cookie,跳过微博源")
 
     if getattr(settings, "pan_discovery_tieba", True):
         attempted += 1
