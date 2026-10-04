@@ -43,26 +43,28 @@ def test_others_prefer_play_count_then_like_derived() -> None:
     assert r["basis"] == "like_derived" and r["metric"] == "liked_count"
     assert r["raw"] == 4013                            # 原始点赞数要留着
     assert r["value"] == 4013                           # 这一档 value 就是点赞量本身
-    assert r["estimate"] == 40130                       # ★ 点赞 × 1000% = 转存数(不再乘 0.4)
+    assert r["estimate"] == 20065                       # ★ 点赞 × 5 = 转存数(不再乘 0.4)
 
 
 def test_like_derived_is_a_direct_transfer_estimate() -> None:
-    """★★ **点赞 × 1000% 直接就是转存数**(用户口径 2026-10-04 修正)。
+    """★★ **点赞 × 5 直接就是转存数**(用户口径 2026-10-04;系数经样本复核后由 10 下调到 5)。
 
     ⚠️ 这里我**错过一次**:最初把"按点赞量的 10%"理解成"点赞约占播放 10%",
     于是先算出"曝光"再乘平台系数 0.4 ⇒ 最终 **点赞×4** —— **多乘了一次 0.4**。
     用户对比抖音的点赞与转发量后纠正:**1000% 本身就是"点赞→转存"的系数**,
     这一档**不再乘平台系数**。
 
-    (抖音数据佐证:同批样本里 `liked_count=61` 而 `share_count=4406` —— 转发远大于点赞,
-     所以"点赞要放大很多倍才抵得上传播量"是符合直觉的。)
+    ⚠️ **系数不是拍的**:用本仓 530 条真实抖音视频反推自洽系数(转发×0.8/点赞),
+    全体中位仅 0.2,但**带《口令》的 57 条 = 中位 3.45 / 均值 5.57** ——
+    用户观察到的"口令类转发远大于点赞"确实成立,只是量级没到 12.5。
+    据样本下调到 5(用户拍板)。详见 `conversion.LIKE_TO_TRANSFER` 的注释。
     """
     r = cv.estimate("zhihu", {"voteup_count": 1000})       # 知乎的赞字段名
     assert r["basis"] == "like_derived"
     assert r["value"] == 1000, "这一档的 value 就是**原始点赞量**,不再换算成'曝光'"
     assert r["raw"] == 1000
-    assert r["estimate"] == 10000, "点赞 × 1000% = 转存数"
-    assert cv.LIKE_TO_TRANSFER == 10.0
+    assert r["estimate"] == 5000, "点赞 × 5 = 转存数"
+    assert cv.LIKE_TO_TRANSFER == 5.0
     assert not hasattr(cv, "LIKE_AS_PLAY_RATIO"), "旧口径的常量该删掉,别留两处真相"
 
 
@@ -76,7 +78,7 @@ def test_engage_only_when_there_is_not_even_a_like() -> None:
     xhs = cv.estimate("xiaohongshu", {"liked_count": "4013", "collected_count": "6498",
                                       "comment_count": "28", "share_count": "419"})
     assert xhs["basis"] == "like_derived", "有赞就不该用互动总量"
-    assert xhs["value"] == 4013 and xhs["estimate"] == 40130
+    assert xhs["value"] == 4013 and xhs["estimate"] == 20065
 
 
 def test_unknown_is_none_not_zero() -> None:
@@ -201,3 +203,36 @@ def test_first_principle_is_never_overridden_by_other_metrics() -> None:
     # ⚠️ **但第一原则取不到时必须标 degraded** —— 不能悄悄换成别的数还说"这就是抖音的数"
     d2 = cv.estimate("douyin", {"liked_count": 1000})
     assert d2["degraded"] is True and d2["basis"] != "share_count"
+
+
+def test_every_platform_without_exposure_uses_the_same_like_rule() -> None:
+    """★★ **只要有"赞"、没有播放量/浏览量,就一律按「点赞 × 5 = 转存数」算**(用户口径:
+    「别的点赞记得也按照这个格式来算,那些抓不到播放量的」)。
+
+    这一档是**通用的**(`like_derived` 不分平台)—— 所以这里把**所有会落到这一档的平台**
+    都过一遍,防止将来有人给某个平台单独写一个"特例系数"。
+    ⚠️ 抖音/公众号**不在此列**:它们的第一原则是转发量/阅读数,只在**取不到时**才降级到这一档
+    (那时 `degraded=True`,会被标出来)。
+    """
+    likes_only = {
+        "xiaohongshu": {"liked_count": 100},
+        "tieba": {"liked_count": 100},
+        "zhihu": {"voteup_count": 100},         # 知乎无浏览量时(只有文章类会这样)
+        "bilibili": {"like_num": 100},          # B站无播放量时
+        "kuaishou": {"liked_count": 100},
+        "weibo": {"liked_count": 100},
+        "douyin": {"liked_count": 100},         # 没有 share_count → 降级
+        "wechat": {"zan_num": 100},             # 没有 read_num → 降级
+    }
+    for plat, m in likes_only.items():
+        r = cv.estimate(plat, m)
+        assert r["basis"] == "like_derived", f"{plat} 应落到点赞档,实际 {r['basis']}"
+        assert r["estimate"] == 500, f"{plat}: 100 赞应算出 500,实际 {r['estimate']}"
+        assert r["factor"] == cv.LIKE_TO_TRANSFER == 5.0
+
+    # 抖音/公众号降级时**必须标出来**(它们的第一原则不是点赞)
+    assert cv.estimate("douyin", {"liked_count": 100})["degraded"] is True
+    assert cv.estimate("wechat", {"zan_num": 100})["degraded"] is True
+    # 而这些平台**本来就没有第一原则**,不算降级
+    assert cv.estimate("xiaohongshu", {"liked_count": 100})["degraded"] is False
+    assert cv.estimate("tieba", {"liked_count": 100})["degraded"] is False
