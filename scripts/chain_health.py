@@ -35,6 +35,7 @@ CHAINS: tuple[tuple[str, str, str | None, str], ...] = (
     ("迅雷·群转存", "xunlei_group", None, "群消息 → 转存 → 推卡"),
     ("迅雷·盘同步", "xunlei_sync", None, "扫盘入库"),
     ("闲鱼·采集", "xianyu", None, "Playwright 页面内调 mtop"),
+    ("本机→远程·公众号数据同步", "remote_sync", "文章", "SSH 隧道推到远程(补 Agent 的输入)"),
 )
 
 

@@ -286,14 +286,21 @@ def remote_sync_tick(settings=None) -> int:
     try:
         out = sync_once(db, url, days=int(getattr(settings, "remote_sync_days", DEFAULT_DAYS)),
                         settings=settings)
+        # ⚠️ **每轮都记运行记录,哪怕推了 0 条**(2026-10-04 改)。
+        # 原本想省掉"什么也没干"的空轮,但那样**链路体检就看不见这个作业的死活**
+        # (`pipeline_health` 会显示"从没跑过") —— 而"同步在跑、只是暂时没新数据"
+        # 与"同步根本没在跑"是**完全不同的两件事**,不能长得一样。
+        # 这跟今天反复踩的那条线是同一条:别让一条链**静默地**存在或不存在。
         if out.get("status") != "ok":
-            return 0
-        total = int(out.get("benchmarks", 0) + out.get("articles", 0) + out.get("links", 0))
-        if total:
             from app.services.tenant_base import _record_run
-            _record_run(db, 1, "remote_sync", "success",
-                        f"对标号{out['benchmarks']} 文章{out['articles']} 盘链{out['links']}")
+            _record_run(db, 1, "remote_sync", "failed", str(out.get("reason") or "")[:200])
             db.commit()
+            return 0
+        from app.services.tenant_base import _record_run
+        total = int(out.get("benchmarks", 0) + out.get("articles", 0) + out.get("links", 0))
+        _record_run(db, 1, "remote_sync", "success",
+                    f"对标号{out['benchmarks']} 文章{out['articles']} 盘链{out['links']}")
+        db.commit()
         return total
     finally:
         db.close()
