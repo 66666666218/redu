@@ -433,6 +433,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
                                               pan_cookie_keepalive_tick, weread_refresh_tick)
     from app.services.hot_sources import hot_source_tick_all_users
     from app.services.wechat_monitor import retire_dormant_tick_all_users
+    from app.services.wechat_digest import run_wechat_digest_all_users
     from app.services.push_timeline import tick as push_timeline_tick
     from app.services.telegram_source import collect_tick as tg_collect_tick
     from app.services.cross_accounts import cross_account_tick
@@ -485,6 +486,13 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         (candidate_discover_tick, _get_settings().candidate_discover_cron, {"minute": 20, "hour": 8}, "wechat_candidates", "wechat"),
         # 候选自动收录:紧随发现之后,按标准挑号补进 WeRSS 订阅池(带数量闸门,见 settings)
         (candidate_import_tick, _get_settings().candidate_auto_import_cron, {"minute": 30, "hour": 8}, "wechat_candidate_import", "wechat"),
+        # 公众号板块总结(2026-10-04):按**阅读数**总结 + **闭环体检**(发现/收录/监控三段
+        # 各自最近产出),推**管理群**。⚠️ 为什么必须体检:这条闭环的四段早就都在,但**各自静默**
+        # —— 收录连续几天 0、监听一篇阅读数都没拿到,都没人知道(2026-10-04 实测
+        # WeRSS 明明是好的、而 `listenable=0` 连了三天,分不清"正常"还是"断了")。
+        # 每周一轮(阅读数 ~2 天轮一圈,日推只会重复);放周一 09:50,早于复盘周报。
+        (run_wechat_digest_all_users, _get_settings().wechat_digest_cron,
+         {"minute": 50, "hour": 9, "day_of_week": "mon"}, "wechat_digest", "wechat"),
         # 跨平台同类资源号发现(2026-10-01):拿资源库的**已验证资源名**去知乎等平台搜,
         # 只收录内容里真含网盘链的账号(各平台门槛见 cross_platform.py 头注)
         (cross_account_tick, _get_settings().cross_discover_cron, {"minute": 0, "hour": 9}, "cross_account_discover", "wechat"),

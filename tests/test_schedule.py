@@ -383,8 +383,10 @@ def test_instance_role_filters_jobs(monkeypatch) -> None:
 
     assert {"hot_source", "douhot_window_tick", "early_agent_tick"} <= hotspot
     assert not ({"hot_source", "douhot_window_tick", "early_agent_tick"} & wechat)
-    assert {"wechat_collect_tick", "wechat_candidates", "weread_refresh"} <= wechat
-    assert not ({"wechat_collect_tick", "wechat_candidates", "weread_refresh"} & hotspot)
+    assert {"wechat_collect_tick", "wechat_candidates", "weread_refresh",
+            "wechat_digest"} <= wechat
+    assert not ({"wechat_collect_tick", "wechat_candidates", "weread_refresh",
+                 "wechat_digest"} & hotspot)
     # 中性作业两边都跑:它们各按自己库里的数据行事(采集调度/告警/清理)
     assert "collect_tick" in wechat and "collect_tick" in hotspot
     # 两端的并集必须等于全集 —— 漏掉谁都是"某个作业永远不会被登记"
@@ -429,3 +431,24 @@ def test_section_allowed_is_permissive_for_unlisted_and_all_roles() -> None:
                    for s in ("xianyu", "weibo", "douhot", "baidu", "别的"))
     st = types.SimpleNamespace(scheduler_role="wechat")
     assert scheduler._section_allowed("别的板块", st) is True
+
+
+def test_wechat_digest_runs_on_monday_morning_per_wechat_role(monkeypatch) -> None:
+    """公众号板块总结:每周一 09:50、**wechat 侧**。
+
+    ⚠️ 这个仓库在 `day_of_week` 上栽过(POSIX 的 0=周日 vs APScheduler 的 0=周一)——
+    所以这里**直接断言 trigger 解析出来的 day_of_week**,而不是只看 cron 字符串。
+    """
+    from apscheduler.schedulers.background import BackgroundScheduler
+
+    from app.services import scheduler as sch
+
+    monkeypatch.setattr(sch, "get_settings",
+                        lambda: type("S", (), {"scheduler_role": "wechat"})())
+    s = BackgroundScheduler(timezone="Asia/Shanghai")
+    sch.build_jobs(s)
+    job = s.get_job("wechat_digest")
+    assert job is not None, "作业没被登记 —— 公众号总结就不会自动跑"
+    fields = {f.name: str(f) for f in job.trigger.fields}
+    assert fields["hour"] == "9" and fields["minute"] == "50"
+    assert fields["day_of_week"] in ("mon", "0"), fields          # 周一(不是周日)
