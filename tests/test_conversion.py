@@ -42,20 +42,28 @@ def test_others_prefer_play_count_then_like_derived() -> None:
     r = cv.estimate("xiaohongshu", {"liked_count": 4013})
     assert r["basis"] == "like_derived" and r["metric"] == "liked_count"
     assert r["raw"] == 4013                            # 原始点赞数要留着
-    assert r["value"] == 40130                         # 曝光 = 点赞 ÷ 10%
-    assert r["estimate"] == int(40130 * 0.40)
+    assert r["value"] == 4013                           # 这一档 value 就是点赞量本身
+    assert r["estimate"] == 40130                       # ★ 点赞 × 1000% = 转存数(不再乘 0.4)
 
 
-def test_like_derived_direction_is_pinned() -> None:
-    """★ **方向必须钉死**:曝光 = 点赞 **÷** 10%(点赞约占播放 10%)。
+def test_like_derived_is_a_direct_transfer_estimate() -> None:
+    """★★ **点赞 × 1000% 直接就是转存数**(用户口径 2026-10-04 修正)。
 
-    ⚠️ 口径若被理解反(×0.1),曝光会比点赞还小 —— 而点赞是播放的子集,量纲就反了。
-    这条测试保证改错方向时立刻变红。
+    ⚠️ 这里我**错过一次**:最初把"按点赞量的 10%"理解成"点赞约占播放 10%",
+    于是先算出"曝光"再乘平台系数 0.4 ⇒ 最终 **点赞×4** —— **多乘了一次 0.4**。
+    用户对比抖音的点赞与转发量后纠正:**1000% 本身就是"点赞→转存"的系数**,
+    这一档**不再乘平台系数**。
+
+    (抖音数据佐证:同批样本里 `liked_count=61` 而 `share_count=4406` —— 转发远大于点赞,
+     所以"点赞要放大很多倍才抵得上传播量"是符合直觉的。)
     """
     r = cv.estimate("zhihu", {"voteup_count": 1000})       # 知乎的赞字段名
-    assert r["value"] > r["raw"], "曝光必须**大于**点赞(点赞是播放的子集)"
-    assert r["value"] == 10000
-    assert cv.LIKE_AS_PLAY_RATIO == 0.10
+    assert r["basis"] == "like_derived"
+    assert r["value"] == 1000, "这一档的 value 就是**原始点赞量**,不再换算成'曝光'"
+    assert r["raw"] == 1000
+    assert r["estimate"] == 10000, "点赞 × 1000% = 转存数"
+    assert cv.LIKE_TO_TRANSFER == 10.0
+    assert not hasattr(cv, "LIKE_AS_PLAY_RATIO"), "旧口径的常量该删掉,别留两处真相"
 
 
 def test_engage_only_when_there_is_not_even_a_like() -> None:
@@ -68,7 +76,7 @@ def test_engage_only_when_there_is_not_even_a_like() -> None:
     xhs = cv.estimate("xiaohongshu", {"liked_count": "4013", "collected_count": "6498",
                                       "comment_count": "28", "share_count": "419"})
     assert xhs["basis"] == "like_derived", "有赞就不该用互动总量"
-    assert xhs["value"] == 40130
+    assert xhs["value"] == 4013 and xhs["estimate"] == 40130
 
 
 def test_unknown_is_none_not_zero() -> None:

@@ -18,7 +18,7 @@
 
 所以取曝光的顺序是:
     ① **真·播放量**(B站有;抖音原始响应里有,待补抓)
-    ② **点赞量推算**(用户口径:看不到播放量的按点赞量算 → `LIKE_AS_PLAY_RATIO`)
+    ② **点赞量推算**(用户口径:看不到播放量的按点赞量算 → `LIKE_TO_TRANSFER`)
     ③ **互动总量**(只剩连"赞"都没有的平台,如贴吧)
 
 ⚠️ **不许静默替换**:0.4 乘在"播放量"和乘在"点赞推算的曝光"上,可信度差很多,
@@ -50,15 +50,20 @@ PLATFORM_PRIMARY: dict[str, str] = {
 # 降级阶梯:越靠前越接近"曝光量"的本义。**顺序即优先级**。
 #   play_count  = 真·播放量(**首选**)
 #   view_count  = **浏览量**(知乎搜索直接给 `visits_count`;与播放量同类,只是叫法不同)
-#   like_derived= **点赞量 ÷ 点赞率**(用户口径:看不到播放量的按点赞量算)
+#   like_derived= **点赞量 × 1000%**(用户口径;这一档**直接给转存数**,不再乘平台系数)
 #   engage      = 互动总量(赞+藏+评+转)—— 只剩连"赞"都没有的平台时兜底(如贴吧)
 EXPOSURE_LADDER: tuple[str, ...] = ("play_count", "view_count", "like_derived", "engage")
 
-# ⚠️ **点赞率假设**:用户口径"看不到播放量的就按点赞量的 10%"。
-# 按字面 ×0.1 会让"曝光"小于"点赞"(点赞是播放的子集,量纲反了),所以按
-# **点赞约占播放量的 10%** 解读 ⇒ **曝光 ≈ 点赞量 ÷ 10% = 点赞量 × 10**。
-# ⚠️ 这是个**经验值,不是实测值**;若口径理解错了,改这一个数即可(测试已钉住两种方向)。
-LIKE_AS_PLAY_RATIO = 0.10
+# ⚠️ **点赞 → 转存**的系数(用户口径 2026-10-04 修正):
+#   「**点赞量需要 1000% 才是转存数量**」—— 用户对比过抖音的点赞与转发量得出的。
+# ⇒ **点赞 × 10 = 转存数**(**直接是转存**,不再乘平台系数 0.4)。
+#
+# ⚠️ 这一档与"播放量 × 40%"是**两条独立的路径**,别串起来用:
+#     · 有播放量  → 播放量 × 40%(用户最早给的"其余平台"口径)
+#     · 只有点赞  → 点赞 × 1000%(本条;平台不给播放量时的替代口径)
+#   早先我按"点赞约占播放 10%"理解成 点赞÷10% 得曝光、再 ×40% ⇒ 最终 **点赞×4**,
+#   那是**错的**(多乘了一次 0.4)。用户当场纠正。
+LIKE_TO_TRANSFER = 10.0   # 1000%
 
 # 兜底合成"互动总量"时,加哪几个字段
 ENGAGE_KEYS: tuple[str, ...] = ("liked_count", "collected_count", "comment_count", "share_count")
@@ -120,7 +125,7 @@ def estimate(platform: str, metrics: dict[str, Any]) -> dict[str, Any]:
     返回 `{"platform","factor","basis","metric","raw","value","estimate","degraded"}`:
       - `basis`  : `play_count` / `like_derived` / `engage` —— **用了哪一档**
       - `metric` : 原始指标名(便于回查);`raw` = 原始值
-      - `value`  : **实际参与计算的曝光量**(`like_derived` 时 = 点赞量 ÷ 点赞率,≠ raw)
+      - `value`  : 参与计算的值(`like_derived` 时**就是点赞量本身**,`estimate` 由它直接折算)
       - `degraded`: True = **没用上该平台点名的指标**(抖音点名分享、公众号点名阅读数)
                     ⇒ 下游**必须**标出来,不能当等效数字用
 
@@ -130,9 +135,12 @@ def estimate(platform: str, metrics: dict[str, Any]) -> dict[str, Any]:
     fac = factor_for(p)
     primary = PLATFORM_PRIMARY.get(p)
 
-    def _make(basis: str, metric: str, raw: int, exposure: int) -> dict[str, Any]:
-        return {"platform": p, "factor": fac, "basis": basis, "metric": metric,
-                "raw": raw, "value": exposure, "estimate": int(exposure * fac),
+    def _make(basis: str, metric: str, raw: int, exposure: int,
+              estimate: int | None = None, factor: float | None = None) -> dict[str, Any]:
+        f = fac if factor is None else factor
+        return {"platform": p, "factor": f, "basis": basis, "metric": metric,
+                "raw": raw, "value": exposure,
+                "estimate": int(exposure * f) if estimate is None else int(estimate),
                 "degraded": primary is not None}
 
     # ① 平台点名了指标,先按点名取(公众号=阅读数 / 抖音=分享数)
@@ -149,8 +157,11 @@ def estimate(platform: str, metrics: dict[str, Any]) -> dict[str, Any]:
         if rung == "like_derived":
             likes = _pick(metrics, "liked_count")
             if likes is not None:
-                return _make("like_derived", "liked_count", likes,
-                             int(likes / LIKE_AS_PLAY_RATIO) if LIKE_AS_PLAY_RATIO else likes)
+                # ⚠️ **直接给出转存数**:点赞 × 1000%(用户口径)。
+                # **不再乘平台系数 0.4** —— 1000% 本身就是"点赞→转存"的系数,
+                # 再乘一次就是重复折算(我先前犯过,用户当场纠正)。
+                return _make("like_derived", "liked_count", likes, likes,
+                             estimate=int(likes * LIKE_TO_TRANSFER), factor=LIKE_TO_TRANSFER)
         elif rung == "engage":
             eng = _engage(metrics)
             if eng is not None:
@@ -192,11 +203,15 @@ def describe(result: dict[str, Any]) -> str:
     if result.get("estimate") is None:
         return "预估 —(没有可用的曝光指标)"
     basis_cn = {"play_count": "播放量", "like_derived": "点赞推算", "engage": "互动总量",
-                "read_num": "阅读数", "share_count": "分享数"}.get(result["basis"], result["basis"])
+                "read_num": "阅读数", "share_count": "分享数",
+                "view_count": "浏览量"}.get(result["basis"], result["basis"])
     src = f"{basis_cn} {result.get('raw', result['value'])}"
-    if result["basis"] == "like_derived" and result["value"] != result.get("raw"):
-        # 把"点赞 → 曝光"这一步摊开写,免得读者以为曝光就是点赞数
-        src += f"(按点赞率 {LIKE_AS_PLAY_RATIO:.0%} 推算曝光 {result['value']})"
+    if result["basis"] == "like_derived":
+        # ⚠️ 点赞这一档**已经直接是转存数**了(点赞 × 1000%),不再追加"× 系数"
+        # (否则会显示成 `× 1000%(直接折算转存) × 10.0`,同一个数说两遍)
+        return (f"预估 {result['estimate']}({result['platform']}:{src}"
+                f" × {LIKE_TO_TRANSFER:.0%}(已直接折算为转存))"
+                + (" ⚠️降级指标" if result.get("degraded") else ""))
     suffix = " ⚠️降级指标" if result.get("degraded") else ""
     return (f"预估 {result['estimate']}({result['platform']}:{src}"
             f" × {result['factor']}){suffix}")
