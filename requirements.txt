@@ -32,3 +32,4 @@ pyflakes>=3.2
 # 仅 scripts/probe_*.py 抓包探测用(核对接口是否仍免签名);运行时采集已全量直连,无需浏览器
 playwright>=1.42
 qrcode>=7.4  # 闲鱼扫码登录 CLI 的终端二维码渲染
+aiotieba>=4.8  # 贴吧**点赞数**(agree):MediaCrawler 的搜索接口只给回复数,连赞都没有。见 app/services/tieba_metrics.py

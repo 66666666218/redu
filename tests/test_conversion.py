@@ -135,3 +135,61 @@ def test_zero_play_count_means_missing_not_zero() -> None:
 
     # 只有 0、什么都没有 → 拿不到就是拿不到
     assert cv.estimate("xiaohongshu", {"play_count": 0})["estimate"] is None
+
+
+def test_view_count_ranks_before_like_derived() -> None:
+    """★ 知乎搜索**直接给浏览量**(`visits_count`)。浏览量是与"播放量"同类的**曝光**,
+    比"点赞 ÷ 10% 推算"更接近本义 —— 所以阶梯里排在 `like_derived` **之前**。
+    (用户口径里它就是"播放量"那一档,只是平台叫法不同。)
+    """
+    r = cv.estimate("zhihu", {"view_count": 51906, "liked_count": 25})
+    assert r["basis"] == "view_count", "有浏览量就不该退到点赞推算"
+    assert r["estimate"] == int(51906 * 0.40)
+
+    # ⚠️ 字段名坑:**搜索接口是 `visits_count`(带 s)、详情接口是 `visit_count`** —— 两个都要认
+    assert cv.estimate("zhihu", {"visits_count": 1000})["basis"] == "view_count"
+    assert cv.estimate("zhihu", {"visit_count": 1000})["basis"] == "view_count"
+
+
+def test_zhihu_search_metrics_are_extracted() -> None:
+    """知乎 `answer` 对象**直接带**这四个指标(实测 2026-10-04),不用再打详情接口。"""
+    from app.services.cross_accounts import _zhihu_metrics
+
+    obj = {"type": "answer", "visits_count": 51906, "voteup_count": 25,
+           "comment_count": 1, "favorites_count": 78}
+    assert _zhihu_metrics(obj) == {"liked_count": 25, "view_count": 51906,
+                                   "comment_count": 1, "collected_count": 78}
+    # `article` 没有 visits_count(知乎不暴露文章浏览量)→ 只带赞与评论
+    art = {"type": "article", "voteup_count": 7, "comment_count": 1, "zfav_count": 55}
+    m = _zhihu_metrics(art)
+    assert "view_count" not in m and m["liked_count"] == 7 and m["collected_count"] == 55
+    # 全 0 / 缺失 → 空 dict(让 conversion 去走降级,别填 0 冒充"没人看")
+    assert _zhihu_metrics({}) == {}
+    assert _zhihu_metrics({"voteup_count": 0, "visits_count": 0}) == {}
+
+
+def test_first_principle_is_never_overridden_by_other_metrics() -> None:
+    """★★ **用户口径:抖音第一原则=转发量,公众号第一原则=阅读数 —— 不许混。**
+
+    这两条是**业务定性**,不是"哪个数大用哪个":
+      · 抖音:分享数才是这单生意里真正对应"有人想去拿资源"的动作;
+      · 公众号:阅读数是唯一直接可见的触达。
+    所以哪怕别的指标**更大、更"像曝光"**,也**不许顶掉**它们。
+    """
+    # 抖音:play_count / liked_count 再大也不能顶掉 share_count
+    d = cv.estimate("douyin", {"share_count": 100, "play_count": 9_999_999,
+                               "liked_count": 500_000})
+    assert d["basis"] == "share_count" and d["value"] == 100
+    assert d["estimate"] == int(100 * 0.80)
+    assert d["degraded"] is False
+
+    # 公众号:其他指标再大也不能顶掉 read_num
+    w = cv.estimate("wechat", {"read_num": 50, "share_count": 9_999_999,
+                               "liked_count": 9_999_999})
+    assert w["basis"] == "read_num" and w["value"] == 50
+    assert w["estimate"] == int(50 * 0.30)
+    assert w["degraded"] is False
+
+    # ⚠️ **但第一原则取不到时必须标 degraded** —— 不能悄悄换成别的数还说"这就是抖音的数"
+    d2 = cv.estimate("douyin", {"liked_count": 1000})
+    assert d2["degraded"] is True and d2["basis"] != "share_count"

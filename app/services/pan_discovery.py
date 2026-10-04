@@ -221,16 +221,36 @@ def _candidates_from_tieba(keywords: list[str]) -> list[dict]:
     """
     from app.services.mediacrawler_source import crawl
 
+    rows = crawl("tieba", keywords)
+    # **补点赞数**(2026-10-04):MediaCrawler 的贴吧搜索**只给回复数,连赞都没有**,
+    # 而"其余平台按播放量×40%"需要一个曝光/互动量兜底。搜索出来的 tid 拿去 `aiotieba`
+    # 取**楼主楼层的 `agree`**(实测 14 条里 6 条非 0 ⇒ 真有值,不是恒 0)。
+    # ⚠️ 这是**旁路**:拿不到只影响"预估",不该拖垮发现链(`fetch_agree` 自己不抛)。
+    from app.services.tieba_metrics import agree_to_metrics, fetch_agree
+
+    agrees = fetch_agree([t for t in (_tid_of(r.get("url")) for r in rows) if t])
+
     out: list[dict] = []
-    for r in crawl("tieba", keywords):
+    for r in rows:
         url = str(r.get("pan_link") or "").strip()
         if not url:
             continue
         out.append({"platform": "tieba", "origin_url": url,
                     "title": _clean(r.get("snippet") or "")[:255],
                     "author": str(r.get("name") or "")[:64],
-                    "source_url": str(r.get("url") or "")[:500]})
+                    "source_url": str(r.get("url") or "")[:500],
+                    # 曝光/互动指标(目前只有点赞)—— 交给 `conversion` 算预估拉新
+                    "metrics": agree_to_metrics(agrees.get(_tid_of(r.get("url"))))})
     return out
+
+
+_TID_RE = re.compile(r"/p/(\d+)")
+
+
+def _tid_of(url: object) -> str:
+    """从贴吧帖子 URL 抽 tid(`https://tieba.baidu.com/p/11071928513`)。抽不到返回空串。"""
+    m = _TID_RE.search(str(url or ""))
+    return m.group(1) if m else ""
 
 
 def find_candidates(session, user_id: int, keywords: list[str], limit: int = 20,

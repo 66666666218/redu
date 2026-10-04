@@ -36,17 +36,23 @@ PLATFORM_FACTORS: dict[str, float] = {
 }
 DEFAULT_FACTOR = 0.40    # 其余平台:播放量 × 40%
 
-# 各平台的**指定指标**(用户点名要用的那个);取不到才走阶梯
+# 各平台的**第一原则指标**(用户口径:2026-10-04「**抖音第一原则是转发量,
+# 公众号是阅读第一原则**,不要搞混了」)。**它优先于任何阶梯** ——
+# 这两条是业务定性,不是"哪个数大用哪个":
+#   · 抖音:分享数才对应"有人想去拿资源"这个动作;
+#   · 公众号:阅读数是唯一直接可见的触达。
+# ⚠️ 它们取不到时**必须标 `degraded`**(不许悄悄换成别的数还说"这就是抖音的数")。
 PLATFORM_PRIMARY: dict[str, str] = {
     "wechat": "read_num",
     "douyin": "share_count",
 }
 
 # 降级阶梯:越靠前越接近"曝光量"的本义。**顺序即优先级**。
-#   play_count  = 真·曝光(**首选**)
+#   play_count  = 真·播放量(**首选**)
+#   view_count  = **浏览量**(知乎搜索直接给 `visits_count`;与播放量同类,只是叫法不同)
 #   like_derived= **点赞量 ÷ 点赞率**(用户口径:看不到播放量的按点赞量算)
 #   engage      = 互动总量(赞+藏+评+转)—— 只剩连"赞"都没有的平台时兜底(如贴吧)
-EXPOSURE_LADDER: tuple[str, ...] = ("play_count", "like_derived", "engage")
+EXPOSURE_LADDER: tuple[str, ...] = ("play_count", "view_count", "like_derived", "engage")
 
 # ⚠️ **点赞率假设**:用户口径"看不到播放量的就按点赞量的 10%"。
 # 按字面 ×0.1 会让"曝光"小于"点赞"(点赞是播放的子集,量纲反了),所以按
@@ -60,7 +66,8 @@ ENGAGE_KEYS: tuple[str, ...] = ("liked_count", "collected_count", "comment_count
 # 各平台字段名差异(媒体爬虫/自研路径给的键不一样,这里归一)
 ALIASES: dict[str, tuple[str, ...]] = {
     "play_count": ("play_count", "play_num", "view", "play", "vv"),
-    "view_count": ("view_count", "view_num", "read_num", "visit_count"),
+    "view_count": ("view_count", "view_num", "visits_count", "visit_count",
+                   "read_num", "browse_count"),
     "share_count": ("share_count", "share_num", "repost_count", "forward_count"),
     "liked_count": ("liked_count", "like_count", "like_num", "zan_num", "voteup_count",
                     "digg_count", "up_count"),
@@ -136,21 +143,22 @@ def estimate(platform: str, metrics: dict[str, Any]) -> dict[str, Any]:
             out["degraded"] = False
             return out
 
-    # ② 真·播放量
-    play = _pick(metrics, "play_count")
-    if play is not None:
-        return _make("play_count", "play_count", play, play)
-
-    # ③ 点赞量推算(用户口径)
-    likes = _pick(metrics, "liked_count")
-    if likes is not None:
-        return _make("like_derived", "liked_count", likes,
-                     int(likes / LIKE_AS_PLAY_RATIO) if LIKE_AS_PLAY_RATIO else likes)
-
-    # ④ 互动总量兜底(贴吧这类连"赞"都没有的)
-    eng = _engage(metrics)
-    if eng is not None:
-        return _make("engage", ",".join(ENGAGE_KEYS), eng, eng)
+    # ② 按**阶梯**取曝光。⚠️ 顺序由 `EXPOSURE_LADDER` 单一决定 ——
+    #    别在这里再硬编码一遍顺序(那是"两处真相"的开始,改一处漏一处)。
+    for rung in EXPOSURE_LADDER:
+        if rung == "like_derived":
+            likes = _pick(metrics, "liked_count")
+            if likes is not None:
+                return _make("like_derived", "liked_count", likes,
+                             int(likes / LIKE_AS_PLAY_RATIO) if LIKE_AS_PLAY_RATIO else likes)
+        elif rung == "engage":
+            eng = _engage(metrics)
+            if eng is not None:
+                return _make("engage", ",".join(ENGAGE_KEYS), eng, eng)
+        else:
+            val = _pick(metrics, rung)
+            if val is not None:
+                return _make(rung, rung, val, val)
 
     return {"platform": p, "factor": fac, "basis": "", "metric": "", "raw": 0, "value": 0,
             "estimate": None, "degraded": primary is not None}

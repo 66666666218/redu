@@ -113,7 +113,35 @@ def _search_zhihu(cookie: str, keyword: str, limit: int = 20) -> list[dict]:
         out.append({"uid": uid, "name": name,
                     "url": f"https://www.zhihu.com/people/{uid}",
                     "snippet": snippet[:255],
-                    "pan_link": _pan_of(snippet)})
+                    "pan_link": _pan_of(snippet),
+                    "metrics": _zhihu_metrics(obj)})
+    return out
+
+
+def _zhihu_metrics(obj: dict) -> dict[str, int]:
+    """从知乎搜索结果的对象里取**曝光/互动指标**(2026-10-04 实测)。
+
+    实测:`answer` 对象**直接带**这些,不用再打一次详情接口 ——
+        `visits_count` 51906 / `voteup_count` 25 / `comment_count` 1 / `favorites_count` 78
+    ⚠️ 字段名有坑:**搜索是 `visits_count`(带 s)、详情接口是 `visit_count`**,两个都认。
+    ⚠️ `article` 类型**没有** `visits_count`(知乎不暴露文章浏览量),那就只带赞与评论。
+    ⚠️ 缺失的键**不放进去** —— 让 `conversion` 去走降级阶梯,别在这儿填 0
+    (填 0 会被读成"没人看")。
+    """
+    pairs = (("liked_count", ("voteup_count",)),          # 赞
+             ("view_count", ("visits_count", "visit_count")),   # 浏览量(两个名字都试)
+             ("comment_count", ("comment_count",)),
+             ("collected_count", ("favorites_count", "fav_count", "zfav_count")))
+    out: dict[str, int] = {}
+    for key, aliases in pairs:
+        for a in aliases:
+            try:
+                v = int(obj.get(a) or 0)
+            except (TypeError, ValueError):
+                continue
+            if v > 0:                    # ⚠️ 0 当"没给"(与 conversion.ZERO_MEANS_MISSING 同源)
+                out[key] = v
+                break
     return out
 
 
