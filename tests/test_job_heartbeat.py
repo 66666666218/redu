@@ -135,3 +135,75 @@ def test_interval_estimate_is_conservative() -> None:
     assert job_liveness._interval_seconds(CronTrigger(minute="*/20")) == 1200
     assert job_liveness._interval_seconds(CronTrigger(minute="*")) == 60
     assert job_liveness._interval_seconds(CronTrigger(minute="0", hour="9")) is None  # 定点 → 估不出
+
+
+# ---------------------------------------------- "没有心跳"要分两类(2026-10-04)
+
+class _J:
+    """够用即可:对账脚本只读 `.id` 与 `.trigger`。"""
+
+    def __init__(self, jid, trigger):
+        self.id, self.trigger = jid, trigger
+
+
+def _job_liveness():
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    import job_liveness
+
+    return job_liveness
+
+
+def test_liveness_does_not_flag_jobs_that_are_not_due_yet() -> None:
+    """⚠️ 2026-10-04 实测踩到:心跳表是**当天 03:10 才上线**的,于是"每天/每周跑一次"的作业
+    全被报成"从没执行过" —— 一次列出 4 个**全是假的**:`douyin_leads`(每天 11:00)、
+    `pan_discovery`(每天 11:30)当天稍晚就会自己补上;`cross_account_discover`(周一/周四)、
+    `recruit_reminder`(周一)本来就是今天(周日)还不到。**误报的代价是重复劳动。**
+    """
+    from datetime import datetime
+
+    from apscheduler.triggers.cron import CronTrigger
+
+    jl = _job_liveness()
+    baseline, now = datetime(2026, 10, 4, 3, 10), datetime(2026, 10, 4, 10, 50)
+    jobs = [
+        _J("daily_11", CronTrigger(minute="0", hour="11")),                       # 今天 11:00 → 未到
+        _J("weekly_mon", CronTrigger(minute="40", hour="9", day_of_week="mon")),  # 周一 → 未到
+        _J("daily_08", CronTrigger(minute="0", hour="8")),                        # 今天 08:00 → 早过了
+        _J("has_beat", CronTrigger(minute="0", hour="9")),                        # 有心跳
+    ]
+    missing, not_yet = jl.classify_missing(jobs, {"has_beat": object()}, now, baseline)
+
+    assert missing == ["daily_08"], "过了触发点还没心跳的,才是真问题"
+    assert sorted(not_yet) == ["daily_11", "weekly_mon"], "还没到点的别报出来"
+
+
+def test_liveness_flags_everything_when_baseline_is_unknown() -> None:
+    """心跳表还空着(基线查不到)时**不许假装没事** —— 维持旧行为,一律按"漏跑"报。"""
+    from datetime import datetime
+
+    from apscheduler.triggers.cron import CronTrigger
+
+    jl = _job_liveness()
+    jobs = [_J("a", CronTrigger(minute="0", hour="11")), _J("b", CronTrigger(minute="*"))]
+    missing, not_yet = jl.classify_missing(jobs, {}, datetime(2026, 10, 4, 10, 50), None)
+
+    assert not_yet == [], "基线未知时不能替作业开脱"
+    assert missing == ["a", "b"]
+
+
+def test_should_have_fired_handles_aware_vs_naive() -> None:
+    """库里的 `baseline` 是 **naive**,trigger 给的下一跳是 **aware** —— 直接比会 `TypeError`
+    把整个对账脚本打崩。必须走进保守分支,而不是抛。"""
+    from datetime import datetime
+
+    from apscheduler.triggers.cron import CronTrigger
+
+    jl = _job_liveness()
+    tr = CronTrigger(minute="0", hour="11")          # 用本机时区,免依赖测试机所在时区
+    assert jl._should_have_fired(tr, datetime(2026, 10, 4, 3, 10),
+                                 datetime(2026, 10, 4, 10, 50)) is False   # 11:00 还没到
+    assert jl._should_have_fired(tr, datetime(2026, 10, 4, 3, 10),
+                                 datetime(2026, 10, 4, 11, 30)) is True    # 早过了
