@@ -23,9 +23,12 @@ sys.path.insert(0, ".")
 
 GREEN, YELLOW, RED = "🟢", "🟡", "🔴"
 
-# 每条链:`(名称, 运行记录 kind, 期望产出的字段, 说明)`
+# 每条链:`(名称, 运行记录 kind, 期望产出的字段, 说明, 侧)`
 # 「期望产出字段」取运行记录 detail 里的 `key=数字`;`None` = 该链没有产出计数
-CHAINS: tuple[tuple[str, str, str | None, str], ...] = (
+# 「侧」:`"local"`(默认,跑在本机)/ **`"remote"`(跑在远程,本机库看不到它的运行记录)**
+#   ⚠️ **远程侧不能按本地标准判红** —— 本机与远程**库是独立的**,本机查不到它的记录是**正常的**,
+#   报红就是误报。而"一条永远红的项会训练人忽略整份报告"(与"闸门失准"同一条教训)。
+CHAINS: tuple[tuple[str, str, str | None, str, str], ...] = (
     ("公众号·发现候选号", "wechat_candidates", "new", "搜狗微信搜索(免费免账号)"),
     ("公众号·收录对标号", "wechat_candidate_import", "listenable", "WeRSS search_mp → MP_WXS_*"),
     ("公众号·监听采文", "wechat_listen", "new", "微信读书 cover + 列表轮转"),
@@ -34,12 +37,12 @@ CHAINS: tuple[tuple[str, str, str | None, str], ...] = (
     ("小红书/贴吧·名字型热度", "resource_presence", "命中", "按资源名探平台 → 库内配对 → 转存"),
     ("迅雷·群转存", "xunlei_group", None, "群消息 → 转存 → 推卡"),
     ("迅雷·盘同步", "xunlei_sync", None, "扫盘入库"),
-    ("闲鱼·采集", "xianyu", None, "Playwright 页面内调 mtop"),
+    ("闲鱼·采集", "xianyu", None, "Playwright 页面内调 mtop", "local"),
     ("本机→远程·公众号数据同步", "remote_sync", "文章", "SSH 隧道推到远程(补 Agent 的输入)"),
     # ⚠️ 这一条重点看 detail 里的「证据触发」:**恒为 0 的那几档**是"接了但没生效"的信号
     # (数据源没接上 / 阈值太高),不是"今天恰好没有" —— 那是本仓反复出现的"废弃链只摘了一半"。
     ("热点选题 Agent(远程)", "hotspot_agent", "热点",
-     "detail 尾部带各档证据的触发次数,恒 0 的档要查"),
+     "detail 尾部带各档证据的触发次数,恒 0 的档要查;⚠️ 它跑在远程,本机库看不到", "remote"),
 )
 
 
@@ -160,10 +163,19 @@ def check_chains(db, days: int = 3) -> list[dict]:
     import re
 
     out: list[dict] = []
-    for label, kind, metric, _desc in CHAINS:
+    for entry in CHAINS:
+        label, kind, metric = entry[0], entry[1], entry[2]
+        side = entry[4] if len(entry) > 4 else "local"
         rows = _rows(db, kind)
         if not rows:
-            out.append({"name": label, "level": RED, "detail": "没有任何运行记录"})
+            # ⚠️ **远程侧的链不能按本地标准判红**:两库独立,本机查不到它的运行记录是**正常的** ——
+            # 报红就是误报,而"一条永远红的项会训练人忽略整份报告"(与"闸门失准"同一条教训)。
+            if side == "remote":
+                out.append({"name": label, "level": YELLOW,
+                            "detail": "跑在**远程**,本机库看不到它的运行记录(属正常;"
+                                      "要查它得登录远程)"})
+            else:
+                out.append({"name": label, "level": RED, "detail": "没有任何运行记录"})
             continue
         last = rows[0]
         age_h = (datetime.now() - last.started_at).total_seconds() / 3600
