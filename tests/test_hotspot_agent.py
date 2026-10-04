@@ -672,3 +672,58 @@ def test_cross_platform_ignores_old_and_unmatched(session) -> None:
     ha._cross_platform_evidence(session, 1, hs, days=14)
     assert hs[0]["cross_boost"] == 1.0 and hs[0]["platforms_found"] == []
     assert hs[1]["cross_boost"] == 1.0 and hs[1]["effective_growth"] == 5.0
+
+
+# ------------------------------- agent 完善:证据可观测性(2026-10-05)
+def test_evidence_tag_lists_only_the_tiers_that_fired() -> None:
+    """★★ **可观测性**:把"这条靠哪几档证据顶上来"摊开,而且**只列触发过的**。
+
+    这是它真正的用处:一眼看出哪一档在起作用、**哪一档从没触发过** ——
+    没触发的那档要么数据源没接上、要么阈值太高,两种都值得看一眼
+    (本仓反复出现的"废弃链只摘了一半"就是这类:功能在、但永远不生效)。
+    """
+    from app.services import hotspot_agent as ha
+
+    full = {"keyword": "k", "growth": 100, "baidu": {"rank": 3}, "weibo": {"rank": 9},
+            "library": {"my_link": "our://x", "titles": ["t"]}, "library_boost": 1.4,
+            "platforms_found": ["weibo", "zhihu", "tieba"], "cross_boost": 1.6,
+            "category_weight": 1.2}
+    tag = ha._evidence_tag(full)
+    for want in ("百度榜×1.5", "微博榜×1.2", "资源库已有链×1.4", "跨平台(3个)×1.6",
+                 "品类权重×1.2"):
+        assert want in tag, f"{want} 没列出来:{tag}"
+
+    # 只触发一档 → 只列那一档(不把没触发的补零,否则看不出"哪档没动")
+    one = ha._evidence_tag({"keyword": "k", "growth": 1, "baidu": {"rank": 1}})
+    assert "百度榜×1.5" in one and "微博榜" not in one and "跨平台" not in one
+
+    # 一档都没有 → 空串(**这条信息本身也重要**:说明它完全靠原生热度上来)
+    assert ha._evidence_tag({"keyword": "k", "growth": 1}) == ""
+
+    # 资源库"待搬"(没我方链)要能区别于"已有链" —— 两者的可执行性完全不同
+    assert "资源库待搬" in ha._evidence_tag(
+        {"keyword": "k", "library": {"my_link": "", "titles": ["t"]}, "library_boost": 1.2})
+
+
+def test_evidence_tally_calls_out_never_fired_tiers() -> None:
+    """★ 体检行要**点名"一档都没触发"** —— 那是"接了但没生效"的信号,
+    不是"今天恰好没有"。不点名的话,一条永远不生效的链能瞒很久。"""
+    from app.services import hotspot_agent as ha
+
+    t = ha._evidence_tally([{"keyword": "a"}, {"keyword": "b", "baidu": {"rank": 1}}])
+    assert "百度榜1" in t and "微博榜0" in t
+    assert "未触发" not in t, "有档触发过就不该整行报警"
+
+    t2 = ha._evidence_tally([{"keyword": "a"}, {"keyword": "b"}])
+    assert "⚠️未触发" in t2 and "微博榜" in t2
+    assert "值得看一眼" in t2
+
+
+def test_evidence_tag_is_wired_into_both_entry_types() -> None:
+    """★ 两种展示行(有现成资源 / LLM 选题)**都要带** —— 否则可观测性只覆盖一半。"""
+    import inspect
+
+    from app.services import hotspot_agent as ha
+    src = inspect.getsource(ha.run_hotspot_agent)
+    assert src.count("_evidence_tag(h)") >= 2, "两种 entry 都要带证据标记"
+    assert "_evidence_tally(fresh)" in src, "体检行要进推送头部"

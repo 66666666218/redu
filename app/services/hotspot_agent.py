@@ -314,6 +314,62 @@ def _cross_platform_evidence(db: Session, user_id: int, hotspots: list[dict],
             h["effective_growth"] = float(h.get("effective_growth") or h.get("growth") or 0) * boost
 
 
+def _evidence_tag(h: dict) -> str:
+    """把这条热点**靠哪几档证据顶上来**摊开(`[证据 榜单×1.5 跨平台×1.6 …]`)。
+
+    ⚠️ **只列触发过的档** —— 这正是它的用处:一眼看出哪一档在起作用、哪一档**从没触发过**。
+    没触发的档要么是数据源没接上、要么是阈值定得太高,两种都值得看一眼
+    (本仓反复出现的"废弃链只摘了一半"就是这类:功能在、但永远不生效)。
+
+    返回空串 = **一档都没触发** —— 这条信息本身也重要(说明这条完全靠原生热度上来的)。
+    """
+    tiers: list[tuple[str, float]] = []
+    # 榜单共振:微博/百度各算一档(与 `_resonance` 的加权一一对应)
+    if h.get("baidu"):
+        tiers.append(("百度榜", 1.5))
+    if h.get("weibo"):
+        tiers.append(("微博榜", 1.2))
+    lib = h.get("library")
+    if lib:
+        tiers.append(("资源库已有链" if lib.get("my_link") else "资源库待搬",
+                      float(h.get("library_boost") or 1.0)))
+    plats = h.get("platforms_found") or []
+    if len(plats) >= 2:
+        tiers.append((f"跨平台({len(plats)}个)", float(h.get("cross_boost") or 1.0)))
+    cw = float(h.get("category_weight") or 1.0)
+    if abs(cw - 1.0) > 1e-9:
+        tiers.append(("品类权重", cw))
+    if not tiers:
+        return ""
+    body = " ".join(f"{n}×{v:g}" for n, v in tiers)
+    return f" [证据 {body}]"
+
+
+def _evidence_tally(hotspots: list[dict]) -> str:
+    """本轮**各档证据各触发了几次**(给运维看的体检行)。
+
+    形如:`📊 证据触发:百度榜2 微博榜5 资源库3 跨平台1 品类权重0`。
+    ⚠️ **恒为 0 的那几档要显眼** —— 那是"接了但没生效"的信号,不是"今天恰好没有"。
+    """
+    cnt = {"百度榜": 0, "微博榜": 0, "资源库": 0, "跨平台同现": 0, "品类权重": 0}
+    for h in hotspots:
+        if h.get("baidu"):
+            cnt["百度榜"] += 1
+        if h.get("weibo"):
+            cnt["微博榜"] += 1
+        if h.get("library"):
+            cnt["资源库"] += 1
+        if len(h.get("platforms_found") or []) >= 2:
+            cnt["跨平台同现"] += 1
+        if abs(float(h.get("category_weight") or 1.0) - 1.0) > 1e-9:
+            cnt["品类权重"] += 1
+    parts = [f"{k}{v}" for k, v in cnt.items()]
+    dead = [k for k, v in cnt.items() if v == 0]
+    tail = (f" ⚠️未触发:{'、'.join(dead)}(没数据或阈值太高,值得看一眼)"
+            if len(dead) == len(cnt) else "")
+    return f"📊 证据触发({len(hotspots)} 条热点):" + " ".join(parts) + tail
+
+
 def _cross_platform_tag(h: dict) -> str:
     """人读标记:`🌍跨平台资源同现(微博+知乎+贴吧)` / 空串(不足 2 个平台不加)。"""
     plats = h.get("platforms_found") or []
@@ -939,7 +995,7 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
         comp = h.get("competition")
         comp_tag = f" 竞争{round(1 / comp - 1)}家" if comp is not None and comp < 1 else " 竞争空白"
         line = (f"🔥[# {row_ids.get(h['keyword'], '?')}]《{h['keyword']}》热度 +{h['growth']:.0f}%"
-                f"{_resonance_tag(h)}{_window_tag(h)}{comp_tag} → 已有现成资源:"
+                f"{_resonance_tag(h)}{_window_tag(h)}{_evidence_tag(h)}{comp_tag} → 已有现成资源:"
                 f"「{art.title[:40]}」({_safe_author(art.author, settings)})"
                 + (f" [{why}]" if why and why != "标题字面命中" else "")
                 + risk_tag
@@ -949,10 +1005,13 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
     for kw, plan in plan_by_kw.items():
         h = by_kw.get(kw, {})
         entries.append((float(h.get("opportunity") or 0),
-            f"💡[# {row_ids[kw]}] {kw}{_resonance_tag(h)}{_window_tag(h)}\n{_fit_line(h)}{_plan_text(plan)}",
+            f"💡[# {row_ids[kw]}] {kw}{_resonance_tag(h)}{_window_tag(h)}{_evidence_tag(h)}"
+            f"\n{_fit_line(h)}{_plan_text(plan)}",
                         ""))
     entries.sort(key=lambda x: -x[0])
-    lines = ["🎯 优先发货(机会分 top):"]
+    # **证据体检行**(2026-10-05):把"这一轮各档证据各触发几次"摊开 ——
+    # ⚠️ 恒为 0 的那几档是"接了但没生效"的信号(数据源没接上 / 阈值太高),不是"今天恰好没有"。
+    lines = ["🎯 优先发货(机会分 top):", _evidence_tally(fresh)]
     lines.extend(e[1] for e in entries[:push_top])
     if len(entries) > push_top:
         lines.append("📋 备选(已落库,机会分靠后):")
