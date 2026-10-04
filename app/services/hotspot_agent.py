@@ -1011,7 +1011,8 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
     entries.sort(key=lambda x: -x[0])
     # **证据体检行**(2026-10-05):把"这一轮各档证据各触发几次"摊开 ——
     # ⚠️ 恒为 0 的那几档是"接了但没生效"的信号(数据源没接上 / 阈值太高),不是"今天恰好没有"。
-    lines = ["🎯 优先发货(机会分 top):", _evidence_tally(fresh)]
+    tally = _evidence_tally(fresh)
+    lines = ["🎯 优先发货(机会分 top):", tally]
     lines.extend(e[1] for e in entries[:push_top])
     if len(entries) > push_top:
         lines.append("📋 备选(已落库,机会分靠后):")
@@ -1043,7 +1044,10 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
         + "\n💡 做完之后什么都不用做——系统会自动识别发文并结算这条建议带了多少拉新",
         settings=settings, push_feishu=False)
     return {"status": "ok", "hotspots": len(fresh), "matched": len(matched),
-            "llm": len(plan_by_kw), "notified": len(matched) + len(plan_by_kw)}
+            "llm": len(plan_by_kw), "notified": len(matched) + len(plan_by_kw),
+            # 把"各档证据各触发几次"带出去 —— 调用方写进运行记录,链路体检就能读到
+            # (不用等推送;而且**恒为 0 的档**一眼可见,那是"接了但没生效"的信号)
+            "evidence_tally": tally}
 
 
 def hotspot_agent_tick_all_users(settings: Settings | None = None) -> int:
@@ -1060,6 +1064,13 @@ def hotspot_agent_tick_all_users(settings: Settings | None = None) -> int:
                 out = run_hotspot_agent(db, uid, settings)
                 if out.get("status") == "ok":
                     total += 1
+                    # ⚠️ **记运行记录**(2026-10-05 补):这个作业此前**一行记录都不留**,
+                    # 于是链路体检看不见它、也看不见"哪档证据从没触发过"。
+                    # 把证据触发统计写进 detail ⇒ 随手跑一次体检就能看出哪档死了。
+                    from app.services.tenant_base import _record_run
+                    _record_run(db, uid, "hotspot_agent", "success",
+                                f"热点{out.get('hotspots', 0)} 现成资源{out.get('matched', 0)} "
+                                f"选题{out.get('llm', 0)} | {out.get('evidence_tally', '')}")
                 db.commit()
             except Exception:  # noqa: BLE001 - 单用户失败不影响其余
                 db.rollback()

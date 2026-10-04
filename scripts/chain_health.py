@@ -36,6 +36,10 @@ CHAINS: tuple[tuple[str, str, str | None, str], ...] = (
     ("迅雷·盘同步", "xunlei_sync", None, "扫盘入库"),
     ("闲鱼·采集", "xianyu", None, "Playwright 页面内调 mtop"),
     ("本机→远程·公众号数据同步", "remote_sync", "文章", "SSH 隧道推到远程(补 Agent 的输入)"),
+    # ⚠️ 这一条重点看 detail 里的「证据触发」:**恒为 0 的那几档**是"接了但没生效"的信号
+    # (数据源没接上 / 阈值太高),不是"今天恰好没有" —— 那是本仓反复出现的"废弃链只摘了一半"。
+    ("热点选题 Agent(远程)", "hotspot_agent", "热点",
+     "detail 尾部带各档证据的触发次数,恒 0 的档要查"),
 )
 
 

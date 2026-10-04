@@ -44,25 +44,29 @@ def test_search_weibo_reads_statuses_from_the_top_level(monkeypatch) -> None:
     assert len(rows) == 1, "顶层 statuses 没被读到"
 
 
-def test_search_weibo_yields_one_candidate_per_post_first_link_wins(monkeypatch) -> None:
-    """★ 一条微博 → **一个候选**(`pan_link` 取**第一条**链)。
+def test_search_weibo_keeps_all_links_and_dedupes_repeats(monkeypatch) -> None:
+    """★ **一条微博挂多条链时要全收**(2026-10-05 改)。
 
-    ⚠️ **两条限制,如实记下**:
-      ⒜ 同一条链在 `long_url` / `ori_url` 里重复出现时,由于只取第一条,**输出不受影响** ——
-         但**探测脚本**里若直接 `findall` 统计,会把命中数虚报约 3 倍(我先前那个"66 条"
-         就是这么来的,真实 ~22);
-      ⒝ **一条微博挂多条链时,目前只取第一条** —— 实测「资源 合集」里有的帖子挂 2 条
-         (百度 + 夸克),后几条会漏。要全收得改接口(`pan_link` 单值 → `pan_links` 列表),
-         暂未做。
+    实测「资源 合集」里有帖子**同时挂百度 + 夸克** —— 只取第一条会漏。
+    同时:同一条链会在 `long_url` / `ori_url` 里**重复出现**,必须去重,
+    否则一条链会被当成两条(那正是我先前那个"66 条"虚报的来源,真实 ~22)。
     """
     u1 = "https://pan.baidu.com/s/1FnQLSdlKEr8pjDdNXZvk6A"
     u2 = "https://pan.quark.cn/s/494a0b616761"
     p = _post(urls=(u1, u2))
-    p["url_struct"][0]["ori_url"] = u1                   # 同一链重复出现
+    p["url_struct"][0]["ori_url"] = u1                   # 同一链重复出现 → 要去重
     monkeypatch.setattr("requests.get", lambda *a, **k: _R({"statuses": [p]}))
+
     rows = ca._search_weibo("ck", "小说")
-    assert len(rows) == 1                                # 一条微博一个候选
-    assert rows[0]["pan_link"] == u1                     # 第一条胜出(限制见 docstring)
+    assert len(rows) == 1                                 # 一条微博 = 一个"源记录"
+    assert rows[0]["pan_links"] == [u1, u2], "两条链都要在,且按出现顺序"
+    assert rows[0]["pan_link"] == u1                      # 兼容字段仍是第一条
+
+    # 调用方对**每条链**各产一个候选
+    from app.services.pan_discovery import _candidates_from_weibo
+
+    cands = _candidates_from_weibo("ck", ["小说"], limit=20)
+    assert [c["origin_url"] for c in cands] == [u1, u2], "两条链都该成为候选"
 
 
 def test_search_weibo_skips_ads_and_keeps_panless_posts_with_empty_link(monkeypatch) -> None:

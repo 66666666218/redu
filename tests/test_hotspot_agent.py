@@ -727,3 +727,23 @@ def test_evidence_tag_is_wired_into_both_entry_types() -> None:
     src = inspect.getsource(ha.run_hotspot_agent)
     assert src.count("_evidence_tag(h)") >= 2, "两种 entry 都要带证据标记"
     assert "_evidence_tally(fresh)" in src, "体检行要进推送头部"
+
+
+def test_agent_records_a_run_so_health_can_see_it() -> None:
+    """★ **agent 此前一行运行记录都不留**(2026-10-05 补)。
+
+    后果有两层:⒜ 链路体检**根本看不见这个作业**;⒝ 更看不见"**哪档证据从没触发过**"——
+    而那是"接了但没生效"的信号(数据源没接上 / 阈值太高),本仓反复出现的
+    "废弃链只摘了一半"就是这类。所以把证据触发统计写进运行记录的 detail。
+    """
+    import inspect
+
+    from app.services import hotspot_agent as ha
+
+    tick_src = inspect.getsource(ha.hotspot_agent_tick_all_users)
+    assert "_record_run" in tick_src, "tick 必须记运行记录"
+    assert '"hotspot_agent"' in tick_src, "运行记录的 kind 要对(体检按它查)"
+    assert "evidence_tally" in tick_src, "证据统计要写进 detail,否则体检读不到"
+
+    # `run_hotspot_agent` 要把统计**带出去**给 tick 用
+    assert "evidence_tally" in inspect.getsource(ha.run_hotspot_agent)

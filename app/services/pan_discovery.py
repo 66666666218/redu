@@ -231,14 +231,18 @@ def _candidates_from_weibo(ck: str, keywords: list[str], limit: int) -> list[dic
             logger.warning("网盘发现:微博词「%s」失败(%s)", kw, exc)
             continue
         for r in rows:
-            url = str(r.get("pan_link") or "").strip()
-            if not url:
-                continue
-            out.append({"platform": "weibo", "origin_url": url,
-                        "title": _clean(r.get("snippet") or "")[:255] or kw[:60],
-                        "author": str(r.get("name") or "")[:64],
-                        "source_url": str(r.get("url") or "")[:500],
-                        "metrics": r.get("metrics") or {}})
+            # ⚠️ **一条微博的所有链都要收**(2026-10-05):实测有的帖子同时挂百度 + 夸克,
+            # 只取 `pan_link`(第一条)会把后面的漏掉。`pan_links` 缺失时回落到单值(兼容旧形状)。
+            urls = r.get("pan_links") or ([r["pan_link"]] if r.get("pan_link") else [])
+            for url in urls:
+                url = str(url or "").strip()
+                if not url:
+                    continue
+                out.append({"platform": "weibo", "origin_url": url,
+                            "title": _clean(r.get("snippet") or "")[:255] or kw[:60],
+                            "author": str(r.get("name") or "")[:64],
+                            "source_url": str(r.get("url") or "")[:500],
+                            "metrics": r.get("metrics") or {}})
     if keywords and failed == len(keywords):
         raise SearchSourceError(f"{len(keywords)} 个词全部搜索失败:{last_err}")
     return out

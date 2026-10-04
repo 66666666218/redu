@@ -123,7 +123,10 @@ def _search_weibo(cookie: str, keyword: str, limit: int = 20,
         name = str(u.get("screen_name") or "").strip()
         if not uid or not name:
             continue
-        # 盘链:先看帖子**自带的结构化链接**(url_struct),再兜底扫正文
+        # 盘链:先看帖子**自带的结构化链接**(url_struct),再兜底扫正文。
+        # ⚠️ **一条微博常挂多条链**(实测「资源 合集」里有的帖子同时挂百度+夸克),
+        # 所以收**全部**并按 url 去重 —— 只取第一条会漏掉后面几条。
+        #  (同一条链会在 long_url/ori_url 里重复出现,去重是必须的。)
         pans: list[str] = []
         for us in (it.get("url_struct") or []):
             for k in ("long_url", "ori_url", "url"):
@@ -134,11 +137,14 @@ def _search_weibo(cookie: str, keyword: str, limit: int = 20,
         m2 = _PAN_URL_RE.search(snippet)
         if m2:
             pans.append(m2.group(0))
+        # 保序去重(`dict.fromkeys`)
+        pans = list(dict.fromkeys(pans))
         mblogid = str(it.get("mblogid") or it.get("mid") or "")
         out.append({"uid": uid, "name": name,
                     "url": f"https://weibo.com/{uid}/{mblogid}" if mblogid else "",
                     "snippet": snippet[:255],
-                    "pan_link": (pans[0] if pans else ""),
+                    "pan_link": (pans[0] if pans else ""),   # 兼容:仍是第一条
+                    "pan_links": pans,                        # 全部(调用方逐条产候选)
                     # 曝光/互动:微博给的是**转发/评论/赞** —— 交给 `conversion` 自己去选档
                     "metrics": _weibo_metrics(it)})
     return out
