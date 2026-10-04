@@ -691,3 +691,70 @@ def test_fresh_probe_bypasses_the_cache(monkeypatch) -> None:
     assert xt.quota_info(fresh=True)["ratio"] == 0.5, "fresh=True 必须看到新数"
     assert calls["n"] == 2
     assert xt.quota_info()["ratio"] == 0.5, "fresh 的结果要顺手写回缓存"
+
+
+# ---------------------------------------------------------------- refresh_token 轮换
+def test_refresh_writes_back_the_rotated_refresh_token(monkeypatch, session) -> None:
+    """★★ **迅雷刷新会轮换 `refresh_token`,必须写回**(2026-10-05 实测踩到)。
+
+    症状:今晚 **00:20 自动刷新成功、00:40 整条迅雷链就开始 `invalid_grant (4126)`**
+    —— 因为兑过一次后旧的 refresh_token 即失效,而我们**没把新的存回去**。
+
+    ⚠️ 项目里 `xunlei_captcha` 早就知道这个坑(docstring:"那次兑换会轮换 refresh_token,
+    而我们不一定接得住,2026-10-02 踩过"),**但直接调 token 端点这条捷径没处理**。
+    """
+    import json
+
+    from app.db.models import User
+    from app.services import cookie_store
+    from app.services import xunlei_transfer as xt
+
+    session.add(User(id=1, username="u", password_hash="x", enabled=True))
+    session.commit()
+    old = {"access_token": "OLD", "refresh_token": "RT-OLD", "client_id": "web"}
+    cookie_store.set_cookie(session, 1, "xunlei", json.dumps(old))
+
+    monkeypatch.setattr(xt.requests, "post", lambda *a, **k: _FakeResp(
+        {"access_token": "NEW", "refresh_token": "RT-NEW", "expires_in": 43200}))
+    # `_save_credentials` 自己开 session,这里把工厂指到同一个引擎
+    monkeypatch.setattr(xt, "_save_credentials",
+                        lambda patch: cookie_store.set_cookie(
+                            session, 1, "xunlei",
+                            json.dumps({**old, **{k: v for k, v in patch.items() if v}})))
+
+    assert xt._refresh_access_token("RT-OLD", "web") == "NEW"
+
+    raw = cookie_store.get_cookie(session, 1, "xunlei")
+    got = json.loads(raw)
+    assert got["refresh_token"] == "RT-NEW", f"轮换后的 refresh_token 没写回:{got}"
+    assert got["access_token"] == "NEW"
+
+
+def test_refresh_keeps_old_token_when_server_does_not_rotate(monkeypatch) -> None:
+    """★ 服务端**未必每次都轮换** —— 回的 refresh_token 与旧的相同时,不该多写一遍
+    (但也不能把它写成空)。"""
+    from app.services import xunlei_transfer as xt
+
+    saved: list[dict] = []
+    monkeypatch.setattr(xt.requests, "post", lambda *a, **k: _FakeResp(
+        {"access_token": "NEW2", "expires_in": 43200}))       # 没回 refresh_token
+    monkeypatch.setattr(xt, "_save_credentials", lambda patch: saved.append(patch))
+
+    assert xt._refresh_access_token("RT-KEEP", "web") == "NEW2"
+    assert saved and "refresh_token" not in saved[0], "没轮换就不该动 refresh_token"
+
+@pytest.fixture()
+def session():
+    """这个文件原本没有 DB fixture;写回那条链要查库。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db.database import Base
+    from app.db import models as _models       # 建表要靠它注册模型
+
+    assert _models is not None
+    eng = create_engine("sqlite://")
+    Base.metadata.create_all(eng)
+    db = sessionmaker(bind=eng)()
+    yield db
+    db.close()

@@ -131,8 +131,51 @@ def _credentials(settings=None) -> dict:
     return {}
 
 
+def _save_credentials(patch: dict) -> None:
+    """把刷新出来的新凭据**写回加密存储**(与 `xunlei_captcha` 同一套)。
+
+    ⚠️ **必须写回,尤其是 `refresh_token`**(2026-10-05 实测踩到):
+    迅雷的 token 端点**会轮换 refresh_token** —— 兑过一次,旧的即失效。
+    不写回的话**下一次刷新就 `invalid_grant (4126)`**,而症状是
+    **"刷新完 20 分钟后整条迅雷链突然全挂"**(今晚 00:20 刷新、00:40 就开始失败)。
+
+    ⚠️ 项目里 `xunlei_captcha` **早就知道这个坑**(它 docstring 写着
+    "那次兑换会轮换 refresh_token,而我们不一定接得住,2026-10-02 踩过")——
+    但**直接调 token 端点这条捷径没处理**,于是又踩了一次。
+    """
+    import json as _json
+
+    from sqlalchemy import select
+
+    from app.db import get_session_local
+    from app.db.models import User
+    from app.services import cookie_store
+
+    db = get_session_local()()
+    try:
+        for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
+            raw = cookie_store.get_cookie(db, uid, "xunlei")
+            if not raw:
+                continue
+            try:
+                cur = _json.loads(raw)
+            except ValueError:
+                continue
+            if not cur.get("refresh_token"):
+                continue
+            cur.update({k: v for k, v in patch.items() if v})   # 只覆盖非空值
+            cookie_store.set_cookie(db, uid, "xunlei", _json.dumps(cur, ensure_ascii=False))
+            return
+    finally:
+        db.close()
+
+
 def _refresh_access_token(refresh_token: str, client_id: str = "") -> str:
-    """用 refresh_token 换 access_token(**client_id 必须是网页版那个**)。"""
+    """用 refresh_token 换 access_token(**client_id 必须是网页版那个**)。
+
+    ⚠️ **顺手把轮换后的 `refresh_token` 写回**(2026-10-05 修):
+    这个端点回的新 `refresh_token` 覆盖旧的,不存回去下次就 `invalid_grant`。
+    """
     resp = requests.post(
         f"{_AUTH}/v1/auth/token",
         json={"grant_type": "refresh_token", "refresh_token": refresh_token,
@@ -143,6 +186,17 @@ def _refresh_access_token(refresh_token: str, client_id: str = "") -> str:
     token = data.get("access_token") or ""
     if not token:
         raise RuntimeError(f"迅雷刷新 token 失败:{str(data)[:180]}")
+    # 🔑 **轮换后的 refresh_token 必须落库** —— 否则下一次刷新就 invalid_grant。
+    # 注意:新值可能与旧值**相同**(服务端未必每次都轮换),所以有就写、没有就算了。
+    new_rt = data.get("refresh_token") or ""
+    try:
+        patch = {"access_token": token, "expires_at": data.get("expires_in") or ""}
+        if new_rt and new_rt != refresh_token:
+            patch["refresh_token"] = new_rt
+            logger.info("迅雷 refresh_token 已轮换,正在写回")
+        _save_credentials(patch)
+    except Exception:  # noqa: BLE001 - 写回失败不该把这次刷新作废(本次 token 仍可用)
+        logger.exception("迅雷凭据写回失败(本次 token 仍可用)")
     return token
 
 
