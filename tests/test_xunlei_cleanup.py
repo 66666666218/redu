@@ -308,3 +308,20 @@ class TestDedupeTick:
         trashed = self._wire(session, monkeypatch, tree)
         cl.dedupe_tick(self._S(xunlei_dedupe_max_per_run=2))
         assert len(trashed) == 2, f"该被限到 2 个:{trashed}"
+
+
+# ------------------------------------ 重名后缀的两种位置(2026-10-04)
+
+def test_suffix_regex_catches_the_mid_name_form() -> None:
+    """⚠️ 迅雷把 `(N)` 插在**最后一个点之前**(`…2.0版` → `…2(1).0版`),只认结尾会**永远漏掉这一类**。
+
+    实测:`最全文件` 下真有一对 `手机警报器（警笛模拟器）2(1).0版` / `…2.0版`,
+    而周日的去重作业一直没碰过它们 —— 因为旧正则只匹配**结尾**的 `(N)`。
+    """
+    assert xc._SUFFIX_RE.sub("", "手机警报器（警笛模拟器）2(1).0版").strip() == \
+        "手机警报器（警笛模拟器）2.0版"
+    assert xc._SUFFIX_RE.sub("", "资源包 (1)").strip() == "资源包"
+    assert xc._SUFFIX_RE.sub("", "资源包（2）").strip() == "资源包"
+    # ⚠️ 正常名字**不许误伤**(前瞻: `(N)` 后面只能只剩最后一段、或直接结束)
+    assert xc._SUFFIX_RE.sub("", "套装(1)张").strip() == "套装(1)张"
+    assert xc._SUFFIX_RE.sub("", "第2.0版教程").strip() == "第2.0版教程"
