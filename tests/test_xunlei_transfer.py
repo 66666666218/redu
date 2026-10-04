@@ -359,7 +359,6 @@ def test_resolve_parent_id_prefers_configured_id(monkeypatch) -> None:
     """⚠️ **优先用配置的 id**:实测「最全文件」明明存在(GET by id 返回 200),
     却不出现在根目录列表里 —— 名字查找靠不住,所以配了 id 就直接用、连目录都不用扫。"""
     from app.services import xunlei_transfer as xt
-    from config.settings import get_settings
 
     monkeypatch.setattr(xt, "_parent_cache", {"name": "", "id": "", "at": 0.0})
     monkeypatch.setattr(xt, "list_files",
@@ -450,3 +449,130 @@ def test_list_files_returns_empty_for_truly_empty_dir(monkeypatch) -> None:
 
     monkeypatch.setattr(xt.requests, "get", lambda *a, **k: _R())
     assert xt.list_files("") == []
+
+
+# ---------------------------------------------------------------- 单个太大 ≠ 盘满
+# 2026-10-04 用户口径:「**不一定是搬不动,有没有可能是你一次搬太多**」——
+# 实测盘 30.10 TiB / 已用 79.9% / **剩 6.04 TiB**,而卡住的那个包迅雷自己报要 **6.88 TiB**。
+# 所以"盘满"这个结论是错的,真相是**单个资源比剩余空间大**。这两件事的运维动作完全不同。
+def test_human_bytes_reads_the_measured_numbers() -> None:
+    """实测的两个数字要能原样读回来(它们是这份结论的证据)。"""
+    from app.services.xunlei_transfer import human_bytes
+
+    assert human_bytes(7563939414460) == "6.88 TiB"     # 迅雷报的 required_size
+    assert human_bytes(6640745233489) == "6.04 TiB"     # 当时的剩余空间
+    assert human_bytes(0) == "0.00 B"
+    assert human_bytes(None) == "?" and human_bytes("x") == "?"   # 不知道就不编数
+    # ⚠️ 缺口要**跟着需要量选单位**:自动单位会落到 `861.88 GiB`,读的人还得自己换算成 TiB
+    assert human_bytes(925431280971, ref=7563939414460) == "0.84 TiB"
+    assert human_bytes(925431280971) == "861.88 GiB"
+
+
+def test_required_size_is_read_from_error_details() -> None:
+    """迅雷在错里**自己给了** `required_size`(还是字符串)—— 用它,别拿使用率猜。"""
+    from app.services.xunlei_transfer import required_size_from_error
+
+    resp = {"details": [{"type": "DRIVE_SPACE_NOT_ENOUGH",
+                         "data": {"required_size": "7563939414460"}}]}
+    assert required_size_from_error(resp) == 7563939414460
+    # ⚠️ 不知道 ≠ 满:别的错误类型 / 空响应 / 结构变了,一律返回 None
+    assert required_size_from_error({}) is None
+    assert required_size_from_error({"details": [{"type": "OTHER", "data": {}}]}) is None
+    assert required_size_from_error({"details": "not-a-list"}) is None
+
+
+def test_share_required_bytes_treats_folders_as_zero() -> None:
+    """分享详情里各文件 size 之和;**文件夹恒报 0** ⇒ 只能当下限(见 docstring)。"""
+    from app.services.xunlei_transfer import share_required_bytes
+
+    assert share_required_bytes({"files": [{"size": 10}, {"size": 5}]}) == 15
+    assert share_required_bytes({"files": [{"size": 0}]}) is None   # 全 0 → 拿不到,别当"0 字节"
+    assert share_required_bytes({}) is None
+
+
+def test_oversized_share_is_refused_without_even_attempting_restore(monkeypatch) -> None:
+    """⚠️ **核心**:分享的 size 之和若已超过剩余空间,**连试都不试** —— 别白挨一次转存。"""
+    from app.services import xunlei_transfer as xt
+
+    posted: list[str] = []
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None: {
+        "access_token": "a", "captcha_token": "c", "device_id": "d", "client_id": "x"})
+    monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
+    monkeypatch.setattr(xt, "resolve_parent_id", lambda cred=None, **k: "P")
+    monkeypatch.setattr(xt, "list_files", lambda *a, **k: [])
+    monkeypatch.setattr(xt, "quota_info", lambda cred=None: {
+        "usage": 26_454_214_882_191, "limit": 33_092_723_015_680, "ratio": 0.799})
+    monkeypatch.setattr(xt.requests, "get", lambda url, **kw: _FakeResp(
+        {"share_status": "OK", "pass_code_token": "t",
+         "files": [{"id": "F1", "size": 7_563_939_414_460}]}))
+
+    def fake_post(url, **kw):
+        posted.append(url)
+        return _FakeResp({"restore_task_id": "T1"})
+
+    monkeypatch.setattr(xt.requests, "post", fake_post)
+
+    out = xt.transfer_and_share("https://pan.xunlei.com/s/S?pwd=p")
+    assert out["status"] == "failed" and out["code"] == "space_insufficient"
+    assert posted == [], "已经确定装不下,不该再去打 restore"
+    assert out["required_size"] == 7_563_939_414_460
+    assert xt.space_insufficient(out) is True
+    # ⚠️ 文案里必须带「空间不足」:上层 `is_space_error` 靠它走"可重试"分支
+    assert xt.is_space_error(out["message"]) is True
+    assert "6.88 TiB" in out["message"] and "6.04 TiB" in out["message"]
+
+
+def test_restore_space_error_carries_both_numbers(monkeypatch) -> None:
+    """预判漏掉时(文件夹 size 恒 0 ⇒ 下限),转存失败那一步也要把两个数带出来。"""
+    from app.services import xunlei_transfer as xt
+
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None: {
+        "access_token": "a", "captcha_token": "c", "device_id": "d", "client_id": "x"})
+    monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
+    monkeypatch.setattr(xt, "resolve_parent_id", lambda cred=None, **k: "P")
+    monkeypatch.setattr(xt, "list_files", lambda *a, **k: [])
+    monkeypatch.setattr(xt, "quota_info", lambda cred=None: {
+        "usage": 26_454_214_882_191, "limit": 33_092_723_015_680, "ratio": 0.799})
+    monkeypatch.setattr(xt.requests, "get", lambda url, **kw: _FakeResp(
+        {"share_status": "OK", "pass_code_token": "t", "files": [{"id": "F1", "size": 0}]}))
+    monkeypatch.setattr(xt.requests, "post", lambda url, **kw: _FakeResp({
+        "error": "file_space_not_enough", "error_description": "空间不足",
+        "details": [{"type": "DRIVE_SPACE_NOT_ENOUGH",
+                     "data": {"required_size": "7563939414460"}}]}))
+
+    out = xt.transfer_and_share("https://pan.xunlei.com/s/S?pwd=p")
+    assert out["code"] == "space_insufficient"
+    assert "6.88 TiB" in out["message"] and "6.04 TiB" in out["message"]
+    assert "还差 0.84 TiB" in out["message"], "缺口要算出来(6.88 - 6.04),这才是用户要的答案"
+
+
+def test_unknown_space_does_not_block_a_transfer(monkeypatch) -> None:
+    """⚠️ **不知道 ≠ 满**:配额探针拿不到时**照常转**,不许拿"不知道"去挡(与 `admit_transfer` 同源)。"""
+    from app.services import xunlei_transfer as xt
+
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None: {
+        "access_token": "a", "captcha_token": "c", "device_id": "d", "client_id": "x"})
+    monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
+    monkeypatch.setattr(xt, "resolve_parent_id", lambda cred=None, **k: "P")
+    monkeypatch.setattr(xt, "list_files", lambda *a, **k: [])
+    monkeypatch.setattr(xt, "quota_info", lambda cred=None: {})      # 探针失效 → 剩余空间未知
+
+    def fake_get(url, **kw):
+        # 分享详情 / 转存任务轮询走同一个 GET,要分开(任务必须一次就 progress=100,否则会 sleep)
+        if "/tasks/" in url:
+            return _FakeResp({"progress": 100,
+                              "params": {"trace_file_ids": json.dumps({"F1": "N1"})}})
+        return _FakeResp({"share_status": "OK", "pass_code_token": "t",
+                          "files": [{"id": "F1", "size": 9_999_999_999_999}]})
+
+    monkeypatch.setattr(xt.requests, "get", fake_get)
+
+    def fake_post(url, **kw):
+        if url.endswith("/restore"):
+            return _FakeResp({"restore_task_id": "T1"})
+        return _FakeResp({"share_url": "https://pan.xunlei.com/s/OUR", "pass_code": "9"})
+
+    monkeypatch.setattr(xt.requests, "post", fake_post)
+
+    out = xt.transfer_and_share("https://pan.xunlei.com/s/S?pwd=p")
+    assert out["status"] == "ok", "探针拿不到时必须放行,不能把'不知道'当'满'"

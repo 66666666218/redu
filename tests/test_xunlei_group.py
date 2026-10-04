@@ -405,6 +405,46 @@ def test_transfer_pending_stops_and_keeps_pending_on_space_error(session, monkey
     assert statuses == {"A": "pending", "B": "pending"}                # 一条都没被标死
 
 
+def test_oversized_single_resource_is_skipped_without_stalling_the_batch(
+        session, monkeypatch) -> None:
+    """⚠️ **2026-10-04 用户口径**:「不一定是搬不动,有没有可能是你**一次搬太多**」。
+
+    实测:盘 30.10 TiB、已用 79.9%、**还剩 6.04 TiB**,而卡住的那个包要 **6.88 TiB**
+    —— 所以**不是盘满,是这一个包比剩余空间大**。这两件事**该有完全不同的处置**:
+    盘满 → 整批停(清空间后继续);单个太大 → **只跳过这一条,其余照搬**。
+    旧实现一律走"整批停",于是**一个大包把后面 30 条全卡住了**(放大伤害)。
+    """
+    from app.services import xunlei_transfer as xt
+
+    session.add_all([
+        XunleiGroupShare(user_id=1, group_id="g", share_id="BIG", title="某大包资源",
+                         origin_url="u-BIG", status="pending"),
+        XunleiGroupShare(user_id=1, group_id="g", share_id="OK1", title="正常资源1",
+                         origin_url="u-OK1", status="pending"),
+        XunleiGroupShare(user_id=1, group_id="g", share_id="OK2", title="正常资源2",
+                         origin_url="u-OK2", status="pending")])
+    session.commit()
+    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None: None)     # 探针失效 → 闸门放行
+
+    def fake(url, parent_id="", settings=None):
+        if url == "u-BIG":
+            return {"status": "failed", "code": "space_insufficient",
+                    "required_size": 7_563_939_414_460, "free_size": 6_640_745_233_489,
+                    "message": "空间不足:这个包需要 6.88 TiB,盘上只剩 6.04 TiB"}
+        return {"status": "ok", "share_url": f"our-{url[-1]}", "code": "9", "fid": "N"}
+
+    monkeypatch.setattr(xt, "transfer_and_share", fake)
+
+    out = xg.transfer_pending(session, 1, limit=5, settings=_GateSettings())
+    # ⚠️ **不是 disk_full** —— 盘还有空间,只是这一个包太大,整批照常跑完
+    assert out["status"] == "ok" and out["too_large"] == 1 and out["ok"] == 2
+    assert out["required_size"] == 7_563_939_414_460
+    rows = {r.share_id: r for r in session.scalars(select(XunleiGroupShare)).all()}
+    assert rows["OK1"].status == "ok" and rows["OK2"].status == "ok", "不能因一个大包拖停别人"
+    # ⚠️ 超大那条**保持 pending**(清出空间后仍可搬),不是终态 —— 标死了就永远不再试
+    assert rows["BIG"].status == "pending" and "空间不足" in (rows["BIG"].message or "")
+
+
 def test_space_error_with_roomy_quota_is_flagged_as_gate_mismatch(session, monkeypatch) -> None:
     """⚠️ **2026-10-04 实测的矛盾**:配额探针报 **79.9%**(阈值 90%)= 闸门**本该放行**,
     转存却被迅雷挡回「空间不足」—— 说明**那道预闸门挡不住这件事**。
@@ -718,6 +758,30 @@ class TestTransferFailuresSurface:
         row = session.scalars(select(RunRecord).where(RunRecord.kind == "xunlei_group")
                               .order_by(RunRecord.id.desc())).first()
         assert row.status == "failed" and "盘满" in row.detail
+
+    def test_oversized_skip_is_visible_in_the_run_record(self, session, monkeypatch) -> None:
+        """⚠️ "单个太大跳过 N 条"**必须写进运行记录** —— 否则运维只看到"转存 N 条",
+        完全不知道有货被这样跳过了(它不标终态,连失败计数都不涨)。
+        这是"静默失败=假成功"那条纪律在**计数**上的版本。"""
+        import app.db as appdb
+        monkeypatch.setattr(appdb, "get_session_local",
+                            lambda: sessionmaker(bind=session.get_bind()))
+        monkeypatch.setattr(xg, "sync_group_shares",
+                            lambda *a, **k: {"status": "ok", "groups": 9, "new": 3})
+        monkeypatch.setattr(xg, "transfer_pending",
+                            lambda *a, **k: {"status": "ok", "picked": 3, "ok": 2,
+                                             "failed": 0, "skipped": 0, "too_large": 1,
+                                             "required_size": 7_563_939_414_460,
+                                             "free_size": 6_640_745_233_489,
+                                             "message": "", "items": []})
+        monkeypatch.setattr(xg, "push_new_shares", lambda *a, **k: None)
+        xg.xunlei_group_tick(self._S())
+        row = session.scalars(select(RunRecord).where(RunRecord.kind == "xunlei_group")
+                              .order_by(RunRecord.id.desc())).first()
+        assert "单个太大跳过1" in row.detail, row.detail
+        # 两个数要**同量纲**读得出来(6.88/6.04 TiB),别报成 861.88 GiB 让人自己换算
+        assert "6.88 TiB" in row.detail and "6.04 TiB" in row.detail, row.detail
+        assert "未标终态" in row.detail, "要说清它还能搬,否则会被当成永久丢弃"
 
     def test_no_failures_stays_success(self, session, monkeypatch) -> None:
         import app.db as appdb

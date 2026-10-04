@@ -490,6 +490,91 @@ def is_own_share_error(message: str) -> bool:
     return any(h in text for h in _OWN_SHARE_HINTS)
 
 
+def human_bytes(n: int | float | None, ref: int | float | None = None) -> str:
+    """字节数 → 人话(`6.88 TiB`)。**拿不到返回 `?`**(不编数)。
+
+    `ref` = **跟着它选单位**。缺口单独算时很有用:需要 6.88 TiB / 剩 6.04 TiB,
+    缺口若自动落到 `861.88 GiB` 就**换了单位**,读的人要自己换算 ——
+    传 `ref=需要的那个数` 就得到同一量纲的 `0.84 TiB`。
+    """
+    try:
+        v = float(n)
+    except (TypeError, ValueError):
+        return "?"
+    if v < 0:
+        return "?"
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    if ref is not None:
+        try:
+            r, i = abs(float(ref)), 0
+            while r >= 1024 and i < len(units) - 1:
+                r /= 1024
+                i += 1
+            return f"{v / 1024 ** i:.2f} {units[i]}"
+        except (TypeError, ValueError):
+            pass
+    for unit in units:
+        if v < 1024:
+            return f"{v:.2f} {unit}"
+        v /= 1024
+    return f"{v:.2f} PiB"
+
+
+def free_bytes(cred: dict | None = None) -> int | None:
+    """盘上还剩多少字节 = `limit - usage`。**拿不到返回 None**(按"不知道"处理)。"""
+    info = quota_info(cred)
+    try:
+        return int(info["limit"]) - int(info["usage"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def required_size_from_error(resp: dict) -> int | None:
+    """从转存失败的响应里取出迅雷**自己报**的所需空间(`DRIVE_SPACE_NOT_ENOUGH`)。
+
+    实测报文:`{"details":[{"type":"DRIVE_SPACE_NOT_ENOUGH",
+    "data":{"required_size":"7563939414460"}}]}` —— ⚠️ `required_size` 是**字符串**。
+
+    它比"使用率闸门"准得多:能直接回答用户问的那个问题 ——
+    **"是盘满了,还是这一个包比剩下的空间还大?"**(2026-10-04 实测:使用率才 **79.9%**,
+    盘上还剩 **6.04 TiB**,而这个包要 **6.88 TiB**)。拿不到返回 None(**不知道 ≠ 满**)。
+    """
+    for d in (resp.get("details") or []):
+        if not isinstance(d, dict) or d.get("type") != "DRIVE_SPACE_NOT_ENOUGH":
+            continue
+        try:
+            return int((d.get("data") or {}).get("required_size"))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def share_required_bytes(detail: dict) -> int | None:
+    """分享详情里各文件 `size` 之和 = **预计要占多少**;全为 0 或拿不到时返回 None。
+
+    ⚠️ **只能当"下限"用**:迅雷对**文件夹**恒报 `size=0`(2026-10-04 实测),
+    所以含文件夹的分享会被**严重低估**。因此这里**只允许用于"确定装不下"的提前放行**
+    (低估 ⇒ 不会误挡),真实判据仍然是转存失败时迅雷自己给的 `required_size`。
+    """
+    total = 0
+    for f in (detail.get("files") or []):
+        if isinstance(f, dict):
+            try:
+                total += int(f.get("size") or 0)
+            except (TypeError, ValueError):
+                continue
+    return total or None
+
+
+def space_insufficient(out: dict) -> bool:
+    """这条失败是不是"**单个资源比剩余空间大**"(而不是"盘的使用率到阈值了")。
+
+    两者的运维动作完全不同:前者只要**不搬这一个**、让链路照推;后者才要清盘/扩容。
+    2026-10-04 用户正是据此纠正了"盘满"的结论 —— 盘还有 6.04 TiB。
+    """
+    return (out or {}).get("code") == "space_insufficient"
+
+
 _DEAD_SHARE_HINTS = ("get_share_user_banned", "share_overdue", "share_cancelled",
                      "sensitive_resource", "分享已失效", "分享已取消", "分享已过期")
 
@@ -633,6 +718,18 @@ def transfer_and_share(share_url: str, parent_id: str = "", settings=None) -> di
         if not files:
             return {"status": "failed", "message": "分享里没有文件"}
 
+        # 🔎 **超出剩余空间的预判**(2026-10-04):别等迅雷挡回来才知道搬不下 ——
+        # 分享详情的 `size` 之和若**已经**大于剩余空间,直接不试。
+        # ⚠️ 文件夹恒报 size=0 ⇒ 这个和是**下限**,只会漏报不会误报(见 `share_required_bytes`)。
+        need = share_required_bytes(detail)
+        free = free_bytes(cred) if need else None
+        if need and free is not None and need > free:
+            return {"status": "failed", "code": "space_insufficient",
+                    "required_size": need, "free_size": free,
+                    "message": (f"空间不足:这个包至少 {human_bytes(need)},"
+                                f"盘上只剩 {human_bytes(free)},还差 {human_bytes(need - free, ref=need)}"
+                                f"(单个资源比剩余空间大 —— 与「盘满」不是一回事)")}
+
         restore = _json(requests.post(f"{_API}/drive/v1/share/restore", headers=h,
                                       timeout=_TIMEOUT,
                                       json={"parent_id": parent_id, "share_id": share_id,
@@ -641,6 +738,18 @@ def transfer_and_share(share_url: str, parent_id: str = "", settings=None) -> di
                                             "file_ids": files}))
         task_id = restore.get("restore_task_id") or ""
         if not task_id:
+            # 🔎 迅雷**自己报**的所需空间 —— 比"使用率闸门"准得多,用来把"盘满"拆成
+            #    「按设计挡下」还是「单个资源就是比剩余空间大」(2026-10-04 用户口径)。
+            need = required_size_from_error(restore)
+            if need is not None:
+                free = free_bytes(cred)
+                short = (f",还差 {human_bytes(need - free, ref=need)}"
+                         if free is not None and need > free else "")
+                return {"status": "failed", "code": "space_insufficient",
+                        "required_size": need, "free_size": free,
+                        "message": (f"空间不足:这个包需要 {human_bytes(need)},"
+                                    f"盘上只剩 {human_bytes(free) if free is not None else '未知'}"
+                                    f"{short}(单个资源比剩余空间大 —— 与「盘满」不是一回事)")}
             return {"status": "failed", "message": f"转存失败:{str(restore)[:160]}"}
 
         task: dict = {}

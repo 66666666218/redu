@@ -407,6 +407,11 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
     ratio = xt.quota_ratio()               # 只查一次,整批共用(别每条都打一次配额)
     ok_items: list[dict] = []
     failed = skipped = 0
+    # 本轮**跳过但没标终态**的条数:单个资源比剩余空间大(盘没满,是这一个包太大)。
+    # 与 `skipped` 分开记 —— `skipped` 是"永远搬不了、已标终态",这个是"以后还能搬"。
+    too_large = 0
+    too_large_need: int | None = None      # 这些大包里**最大的**那个要多少(留痕用)
+    too_large_free: int | None = None      # 当时盘上还剩多少
     first_err = ""          # 第一条失败原因 —— 带出去让运行记录**可照做**(见 tick 的状态判定)
     for row in rows:
         allowed, why, retryable = admit_transfer(row.title, settings=settings, ratio=ratio)
@@ -445,6 +450,20 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
                 logger.info("迅雷群分享已失效,跳过:%s", row.title)
                 continue
             if xt.is_space_error(msg):
+                # 🔎 **先分两种**(2026-10-04 用户口径:「不一定是搬不动,有没有可能是一次搬太多」):
+                #   ⒜ **单个资源比剩余空间大** —— 盘上明明还有 6.04 TiB,只是这一个包要 6.88 TiB。
+                #      ⇒ **只跳过这一条,整批照常继续**。它自己**保持 pending**(清出空间后仍可搬),
+                #        但**不许拖停别人的转存** —— 之前那版让 1 个大包把 30 条全卡住,是放大伤害。
+                #   ⒝ **盘真的要满** ⇒ 整批停下(清空间后自动继续),并触发「闸门失准」自检。
+                if xt.space_insufficient(out):
+                    row.message = msg[:200]            # 保持 pending:可重试,只是本轮不搬
+                    too_large += 1
+                    _need = out.get("required_size")
+                    if isinstance(_need, int) and (too_large_need is None or _need > too_large_need):
+                        too_large_need, too_large_free = _need, out.get("free_size")
+                    logger.warning("迅雷群分享跳过(单个资源比剩余空间大,整批继续):%s | %s",
+                                   row.title, msg[:100])
+                    continue
                 # **第二层兜底**:闸门靠配额探针,探针失效会漏;真撞上"空间不足"时也要
                 # 把它当**可重试**处理 —— 行**保持 pending**,整批停下,清出空间自动继续。
                 row.message = msg[:200]
@@ -458,10 +477,13 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
                 # 探针拿不到(None)就**不下结论**,别把"不知道"报成"失准"。
                 gate = _gate_limit(settings)
                 return {"status": "disk_full", "picked": len(rows), "ok": len(ok_items),
-                        "failed": failed, "skipped": skipped,
+                        "failed": failed, "skipped": skipped, "too_large": too_large,
                         "quota_ratio": ratio, "quota_limit": gate,
                         "gate_mismatch": ratio is not None and ratio < gate,
-                        "message": "转存返回空间不足,本轮停止(清理出空间后会继续)", "items": ok_items}
+                        "required_size": out.get("required_size"),
+                        "free_size": out.get("free_size"),
+                        "message": "转存返回空间不足,本轮停止(清理出空间后会继续)",
+                        "items": ok_items}
             # ⚠️ 单条失败**不重试到底**:标 failed 留痕,避免每轮都拿它空转。
             row.status, row.message = "failed", msg[:200]
             failed += 1
@@ -469,7 +491,9 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
             logger.warning("迅雷群分享转存失败 %s:%s", row.title, row.message)
     session.commit()
     return {"status": "ok", "picked": len(rows), "ok": len(ok_items),
-            "failed": failed, "skipped": skipped, "message": first_err, "items": ok_items}
+            "failed": failed, "skipped": skipped, "too_large": too_large,
+            "required_size": too_large_need, "free_size": too_large_free,
+            "message": first_err, "items": ok_items}
 
 
 def list_group_shares(session, user_id: int, status: str = "", limit: int = 200) -> list[dict]:
@@ -569,6 +593,15 @@ def xunlei_group_tick(settings=None) -> int:
                         f"转存{t_ok} 跳过{out.get('skipped', 0)} 失败{t_bad}")
                 if got.get("failed_groups"):
                     note += f" 失败群{len(got['failed_groups'])}"
+                # ⚠️ **"单个资源太大"必须留痕,否则会被读成"今天群里真没这条"**(2026-10-04):
+                # 它**不标终态**(行仍 pending,清出空间后还能搬),但确实没搬成 ——
+                # 运行记录里不写,运维就只知道"转存 N 条",不知道有 N 条被这样跳过。
+                if out.get("too_large"):
+                    from app.services import xunlei_transfer as xt
+                    _sz = (f"(最大那个要 {xt.human_bytes(out.get('required_size'))}"
+                           f"/当时剩 {xt.human_bytes(out.get('free_size'))};"
+                           if out.get("required_size") is not None else "(")
+                    note += f" 单个太大跳过{out['too_large']}{_sz}未标终态,清空间后可搬)"
                 # ⚠️ **转存失败必须反映到状态里**(2026-10-04 修):旧实现只看 `got['status']`,
                 # 于是"凭据失效导致 5 条转存**全挂**"被记成 `success(转存0)` ——
                 # 和"今天群里真没新资源"长得**一模一样**。实测:迅雷 refresh_token 失效、
@@ -584,12 +617,14 @@ def xunlei_group_tick(settings=None) -> int:
                     _mm, _rr = bool(out.get("gate_mismatch")), out.get("quota_ratio")
                     tag = (f" ⚠️闸门失准(配额只报 {_rr * 100:.0f}%,闸门本该放行)"
                            if _mm and _rr is not None else "")
-                    _record_run(db, uid, "xunlei_group", "failed", f"盘满暂停: {why} {note}{tag}")
+                    _record_run(db, uid, "xunlei_group", "failed",
+                                f"盘满暂停: {why} {note}{tag}")
                     # 🔔 **闸门失准 → 单独告警**(2026-10-04 用户要求加)。
                     # 预闸门本该在"盘满"之前就把整批挡住;若它**放行了**、转存却仍被迅雷挡回
                     # 「空间不足」,那就是**闸门自身失准** —— 只看运行记录只知道"盘满",
-                    # 看不出"那道闸门其实没起作用",于是会一直误以为"到 90% 才会停"
-                    # (实测:配额 79.9% 就已经搬不动了)。
+                    # 看不出"那道闸门其实没起作用",于是会一直误以为"到 90% 才会停"。
+                    # ⚠️ **进到这里的一定不是"单个资源太大"**(那种已经在上面 `continue` 掉了,
+                    # 只跳过自己、不拖停整批):所以这里是**真的**盘况与闸门对不上。
                     # ⚠️ 标题**不含数字**:冷却门按标题去重,带数字就每次都算新告警、每轮刷屏
                     # (与 `disk_guard` 同一条教训)。
                     if _mm:
@@ -599,7 +634,8 @@ def xunlei_group_tick(settings=None) -> int:
                             db, uid, "pan", "迅雷盘闸门失准:配额说还有空间,转存却报空间不足",
                             f"配额探针报 **{_rr * 100:.1f}%**(闸门阈值 {out.get('quota_limit', 0) * 100:.0f}%)"
                             f"= 闸门本该放行,但转存被迅雷挡回「空间不足」。"
-                            f"→ 那道预闸门挡不住这件事:**容量已到实际极限,需人工清理或扩容**。"
+                            f"⚠️ 已排除「单个资源太大」那种(那种只会跳过它自己,不会走到这条告警)"
+                            f"→ 疑似**真实停摆点比阈值低**,需人工看一眼盘况(未必是容量到顶)。"
                             f"原始:{why}",
                             settings=settings, push_feishu=True)
                         db.commit()
