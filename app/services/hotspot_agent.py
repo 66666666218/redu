@@ -207,6 +207,63 @@ def _resonance_tag(h: dict) -> str:
     return f" 🌐共振({' + '.join(['抖音'] + parts)})"
 
 
+# **资源库证据**的加权(2026-10-04)。与榜单共振同一套分级思路,但依据不同:
+#   榜单说"**大家在讨论**";资源库说"**已经有人在发这个资源的盘链**"。
+LIBRARY_BOOST_WITH_LINK = 1.4   # 库里有 + **我方已有链** ⇒ 点一下就能发,最强
+LIBRARY_BOOST_NO_LINK = 1.2     # 库里有 + 还没搬 ⇒ 需求在,但还得动手
+
+
+def _library_evidence(db: Session, user_id: int, hotspots: list[dict],
+                      days: int = 30, cap: int = 25) -> None:
+    """给热点补「**资源库证据**」:库里有没有这个资源、我方有没有现成的链。
+
+    ⚠️ **为什么值得单独一档**(对拉新业务而言它可能比榜单更硬):
+    榜单说明"**大家在讨论**",而"**已经有人在发这个资源的盘链**"说明"**这事有人已经在做了**";
+    ⭐ 若我方**已经有链**,那就是"**点一下就能发**"——这是最接近可执行的信号。
+
+    原地写 `h["library"]`(命中详情或 None)、`h["library_boost"]`,并乘进 `effective_growth`
+    (与 `_resonance` 同一套加权口径,可叠加)。
+
+    ⚠️ **拿不到不算负面** —— 匹配不上就是 `None`(倍数 1.0),**不惩罚**:
+    "库里没有"可能是"我们还没搬",不是"这事不行"。
+    """
+    from app.services.resource_library import search_resources
+
+    for h in hotspots[:cap]:
+        kw = str(h.get("keyword") or "").strip()
+        hit = None
+        if len(kw) >= 2:                     # 两字以下不检索(与 search_resources 同口径)
+            try:
+                hits = search_resources(db, user_id, kw, days=days, limit=1)
+            except Exception:  # noqa: BLE001 - 检索失败不该拖垮选题
+                logger.exception("资源库证据检索失败 kw=%s", kw)
+                hits = []
+            hit = hits[0] if hits else None
+        h["library"] = hit
+        boost = 1.0
+        if hit:
+            boost = LIBRARY_BOOST_WITH_LINK if hit.get("my_link") else LIBRARY_BOOST_NO_LINK
+        h["library_boost"] = boost
+        if boost != 1.0:
+            h["effective_growth"] = float(h.get("effective_growth") or h.get("growth") or 0) * boost
+        # ⚠️ 一屏内别刷太多检索:热点通常十来条,但 burst 路径可能更多
+    for h in hotspots[cap:]:
+        h.setdefault("library", None)
+        h.setdefault("library_boost", 1.0)
+
+
+def _library_tag(h: dict) -> str:
+    """人读资源库标记:`📦库内已有链`(点一下就能发)/ `📦库内有(待搬)` / 空串。"""
+    hit = h.get("library")
+    if not hit:
+        return ""
+    titles = hit.get("titles") or []
+    sample = str(titles[0])[:20] if titles else ""
+    if hit.get("my_link"):
+        return f" 📦库内已有链「{sample}」"
+    return f" 📦库内有「{sample}」(还没搬)"
+
+
 def _window_factor(db: Session, user_id: int, hotspots: list[dict],
                    hours: int = 24) -> None:
     """热度动量 → 剩余窗口估计(v5)。
@@ -584,7 +641,7 @@ def burst_plan(db: Session, user_id: int, topics: list[str],
                 my = next((x.strip() for x in (art.my_pan_urls or "").splitlines() if x.strip()), "")
                 src = next((x.strip() for x in (art.pan_urls or "").splitlines() if x.strip()), "")
                 link = my or src
-                lines.append(f"⚡《{t}》爆发{_resonance_tag(h)} → 已有现成资源:「{art.title[:40]}」"
+                lines.append(f"⚡《{t}》爆发{_resonance_tag(h)}{_library_tag(h)} → 已有现成资源:「{art.title[:40]}」"
                              + (f" → 点这:{link}" if link else ""))
                 db.add(HotspotSuggestion(user_id=user_id, keyword=t, growth=0, kind="match",
                                          resource_title=art.title[:255],
@@ -594,7 +651,7 @@ def burst_plan(db: Session, user_id: int, topics: list[str],
         p = (llm.get("plans") or {}).get(t)
         if p:
             plan_text = _plan_text(p)
-            lines.append(f"⚡《{t}》爆发{_resonance_tag(h)} → {plan_text}")
+            lines.append(f"⚡《{t}》爆发{_resonance_tag(h)}{_library_tag(h)} → {plan_text}")
             db.add(HotspotSuggestion(user_id=user_id, keyword=t, growth=0, kind="llm",
                                      plan=plan_text[:500],
                                      platforms=str(h.get("platforms") or "douyin")))
@@ -716,6 +773,9 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
 
     # 多平台共振:微博/百度新上榜交叉验证,共振热点加权上浮(输入去单一化)
     _resonance(db, user_id, hotspots)
+    # **资源库证据**(2026-10-04):库里有没有这个资源、我方有没有现成的链。
+    # 与"榜单共振"同一套加权,但依据不同 —— 榜单是"大家在讨论",这里是"**已经有人在发**"。
+    _library_evidence(db, user_id, hotspots)
 
     mem_key = f"hotspot_agent_last_{user_id}"
     mem_row = db.get(SystemConfig, mem_key)

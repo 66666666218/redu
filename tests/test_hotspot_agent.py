@@ -525,3 +525,73 @@ def test_settle_leaves_reads_gain_alone_when_no_read_count(session) -> None:
     row = session.scalars(select(HotspotSuggestion)).one()
     assert row.settled_at is not None, "还是要结算(repost_gain 那条路照走)"
     assert int(row.reads_gain or 0) == 0, "没采到就保持 0,不许编一个值"
+
+
+# ------------------------------------------------ agent 完善:资源库证据
+def test_library_evidence_boosts_and_tags(session, monkeypatch) -> None:
+    """★ **资源库证据**:库里有没有这个资源、我方有没有现成的链 ⇒ 加权 + 打标。
+
+    为什么这条值得单独一档:榜单说"**大家在讨论**",而资源库说
+    "**已经有人在发这个资源的盘链**" —— 对拉新业务,后者更接近可执行;
+    ⭐ 若我方**已经有链**,那就是"**点一下就能发**"(最高档)。
+    """
+    from app.services import hotspot_agent as ha
+    from app.services import resource_library
+
+    def fake_search(db, uid, q, days=30, limit=1):
+        if q == "有链的热点":
+            return [{"pan_url": "p1", "my_link": "our1", "titles": ["某某资源全集"]}]
+        if q == "没链的热点":
+            return [{"pan_url": "p2", "my_link": "", "titles": ["另一个资源"]}]
+        return []
+
+    monkeypatch.setattr(resource_library, "search_resources", fake_search)
+    hotspots = [{"keyword": "有链的热点", "growth": 10, "effective_growth": 10},
+                {"keyword": "没链的热点", "growth": 10, "effective_growth": 10},
+                {"keyword": "库里没有的热点", "growth": 10, "effective_growth": 10},
+                {"keyword": "短", "growth": 10, "effective_growth": 10}]
+    ha._library_evidence(session, 1, hotspots)
+
+    assert hotspots[0]["library_boost"] == ha.LIBRARY_BOOST_WITH_LINK == 1.4
+    assert hotspots[0]["effective_growth"] == 14.0
+    assert "库内已有链" in ha._library_tag(hotspots[0])
+
+    assert hotspots[1]["library_boost"] == ha.LIBRARY_BOOST_NO_LINK == 1.2
+    assert hotspots[1]["effective_growth"] == 12.0
+    assert "还没搬" in ha._library_tag(hotspots[1])
+
+    # ⚠️ **拿不到不算负面**:匹配不上就是 1.0,**不惩罚**
+    # ("库里没有"可能是"我们还没搬",不是"这事不行")
+    assert hotspots[2]["library"] is None and hotspots[2]["library_boost"] == 1.0
+    assert hotspots[2]["effective_growth"] == 10.0
+    assert ha._library_tag(hotspots[2]) == ""
+
+    # 两字以下不检索(与 search_resources 同口径)
+    assert hotspots[3]["library"] is None and hotspots[3]["library_boost"] == 1.0
+
+
+def test_library_evidence_survives_search_failure(session, monkeypatch) -> None:
+    """★ 检索炸了**不该拖垮选题** —— 这一档是"锦上添花",不是主路径。"""
+    from app.services import hotspot_agent as ha
+    from app.services import resource_library
+
+    def boom(*a, **k):
+        raise RuntimeError("库查询炸了")
+    monkeypatch.setattr(resource_library, "search_resources", boom)
+
+    hotspots = [{"keyword": "随便什么热点", "growth": 5, "effective_growth": 5}]
+    ha._library_evidence(session, 1, hotspots)          # 不该抛
+    assert hotspots[0]["library_boost"] == 1.0
+    assert hotspots[0]["effective_growth"] == 5
+
+
+def test_library_evidence_does_not_resurrect_a_none_growth(session, monkeypatch) -> None:
+    """⚠️ 加权要基于**现有的** effective_growth;拿不到就当 0,**别编一个数**。"""
+    from app.services import hotspot_agent as ha
+    from app.services import resource_library
+
+    monkeypatch.setattr(resource_library, "search_resources",
+                        lambda *a, **k: [{"pan_url": "p", "my_link": "ours", "titles": ["x"]}])
+    hotspots = [{"keyword": "某某热点", "growth": 0, "effective_growth": 0}]
+    ha._library_evidence(session, 1, hotspots)
+    assert hotspots[0]["effective_growth"] == 0.0, "0 × 1.4 还是 0,不该被'补'成别的数"
