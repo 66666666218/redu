@@ -84,9 +84,7 @@ WeRSS(容器,成熟实现,含free_publish降级)
   └─ newsnow 长尾（自部署容器 127.0.0.1:4444）：知乎/微博/快手/爱奇艺/掘金/虎扑/懂球帝...
      └ 容器数据源在自己机器上；newsnow 停维不影响运行，仅平台清单不再更新→届时自研补齐核心
 资产层：全部条目写入我们自己的库（与第三方无关）
-保险层：newsnow 镜像快照 D:
-ewsnow
-ewsnow-image-20261001.tar（51MB，docker load 可恢复）
+保险层：newsnow 镜像快照 `D:\newsnow\newsnow-image-20261001.tar`（51MB，docker load 可恢复）
 ```
 
 **实测(2026-10-01)**：12 源 11 通(B站/豆瓣直连 ✓ + newsnow 9 源 ✓;知乎 401 故走 newsnow)。
