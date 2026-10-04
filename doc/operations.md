@@ -523,9 +523,24 @@ python scripts/wemp_cred.py --check          # 以后想确认还能不能用
 - **两侧合起来必须等于全集**,有测试锁定(`test_instance_role_filters_jobs` 断言
   `wechat | hotspot == all_ids`)——以后新增作业忘了标归属,测试会直接红。
 
-**当前配置**:
-- 本机 `.env`:`SCHEDULER_ROLE=wechat` ✅ 已设(2026-10-01)
-- 远程:需在其 `.env` 里设 `SCHEDULER_ROLE=hotspot` 并重启容器 ⚠️ **待办**
+**当前配置**(2026-10-04 **登录远程实测确认**):
+- 本机 `.env`:`SCHEDULER_ROLE=wechat` ✅
+- 远程 `.env`:**`SCHEDULER_ROLE=hotspot` ✅ 已设、`HOT_NEWSNOW_URL=http://172.22.0.1:4444` ✅ 已配**
+  (`/www/server/panel/data/compose/redu/.env`;容器内实测 `ROLE=hotspot`)
+
+> ⚠️ **本节此前一直挂着"远程角色待办",那是过期的**(2026-10-04 实测更正)。
+> 当时误判的经过值得记下来:**我拿本机库里的数据去判断远程状态** ——
+> 而**两边库是独立的**(见本文上半节 + 远程用的是 **MySQL** 而本机是 SQLite),
+> 本机的 `hot_source_items` 冻结在 10-01,看起来就像"41 个源全黑"。
+> **远程实测**:`hot_source` 每几分钟跑一轮、`ok=42 failed=1 items=959`、
+> `hot_source_items` 已 **74,364 条**、`weibo`/`baidu`/`douhot` 全在跑。
+> **判据要用远程自己的库,不是本机的旧快照。**
+
+> ⚠️ **网关那个坑也顺便定案**:`settings.py` 的注释写 `172.17.0.1`,记忆里记的是 `172.22.0.1`。
+> **现场实测两个都通**(newsnow 绑 `0.0.0.0:4444`,宿主机任一 IP 都能到),
+> 而 `redu-api` 容器实际在 **`redu_default` 网络**(网关 **172.22.0.1**)——
+> **它配的正是对的那个**。但**别据此以为 172.17.0.1 是错的**:那是 `bridge` 网络的网关,
+> 同样能到宿主机。**配哪个都能通,关键是别配成容器自己的 127.0.0.1。**
 
 **验证**:用一次性进程断言最可靠 ——
 
