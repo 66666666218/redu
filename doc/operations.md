@@ -634,6 +634,32 @@ print(sorted(j.id for j in s.get_jobs()))"
 > 但一整天没处理 —— 于是这条链的百度转存**全天都是停的**。
 > 处置:**去「Cookie 管理」重粘百度网盘 Cookie**,10 条 pending 会自动重试。
 
+### 4n. 小红书采集报 `JSONDecodeError`(2026-10-04 排查 + 已修,附补丁)
+
+**症状**:`resource_presence` 的运行记录写 `平台N 命中M 失败:xiaohongshu`,日志是
+`xiaohongshu 退出码 1:… tenacity.RetryError[… raised JSONDecodeError]` ——
+**搜索是通的**(实测已拿到 20 条笔记列表),挂在**逐条取笔记详情**那步,整轮退出码 1、零产出。
+
+**根因(两层,别混)**:
+1. 🔴 **致命层 —— 解析器跟不上页面改版**:详情页的 `window.__INITIAL_STATE__` 现在含
+   **`new Map([])`**(JS 字面量,不是 JSON),而 `media_platform/xhs/extractor.py` 用
+   `json.loads(state)` 解析**整个** state → 在 `new Map([])` 处**整段**崩。
+   **我们要的数据其实完好无损**:实测把 `new Map([])` 换成 `{}` 后解析成功,
+   `note.noteDetailMap[<note_id>].note` 的 title/desc/nickname 全在。
+2. **触发层 —— API 被限流(这是设计内的)**:JSON API `get_note_by_id` 回 **HTTP 461 + CAPTCHA**
+   (`Verifytype: 124`,同秒多次重试)。core 层 `except RetryError: pass` 后转 HTML 兜底 ——
+   兜底本身是对的,它**确实拿到了正常笔记页**,只是解析器崩了。
+   ⇒ **这不是"小红书封了我们的号"**,别去折腾换 IP / 过验证码。
+
+**⚠️ 放大伤害的缺口(本轮未改)**:`get_note_detail_async_task` 只 catch
+`NoteNotFoundError`/`IPBlockError`/`PlatformAccessError`,`JSONDecodeError` 不在其中 →
+**一条笔记解析不了,整个 `asyncio.gather` 全崩**,20 条里其余 19 条一起丢。
+
+**修法**:打 `patches/mediacrawler-xhs-extractor.patch`(把 `new Map([])` 归成 `{}` 再 parse)。
+修复后实测单关键词跑通、写出 `data/xhs/jsonl/search_contents_<日期>.jsonl` **20 条**。
+⚠️ `tools/` 是 **gitignore 的独立克隆**,**重装 / 重新 clone 后必须重新打这个补丁**
+(这也是它要单独存成 patch 文件、而不是只改本地的原因)。
+
 ## 5. 阅读量显示 "—"
 
 ⚠️ **本条已于 2026-10-04 整体失效** —— 阅读/点赞**已全平台断供**:微信读书
@@ -898,6 +924,14 @@ python scripts/job_liveness.py --strict   # 有"从没跑过/已超期"就退出
 - 教训:静默过滤必须留痕(计数/日志),否则表现为"数据源停更",排查方向全错。
 
 ### 9.2 mp/articles 的 -2041 与冻结号的替代源(2026-09-18,2026-09-27 修正定性)
+
+> **2026-10-04 补记(与下面第 4 条对照看)**:下面提到"续期=新会话,每轮赶上窗口"——
+> **这句已被实测证否**:调项目的 `refresh_weread_cookie` 拿到 `success + verified=True` 之后
+> **立刻**再拉,书架 142 个号里抽 5 个仍**全部 `-2041`**。原因是
+> **续期只是同会话换 `wr_skey`,不是新建会话**,所以它开不出窗口。
+> ⚠️ 但下面记的 `-2041 → -2014`(换一把**刚建立**的会话)**仍然成立、仍未定案** ——
+> 两条不矛盾:前者否掉的是"续期能开窗",后者说的是"新会话可能另有额度"。
+> 要验后者只能让人**重扫一次码**建新会话;判据与逐条实测见 `外部接口速查.md §3.2`。
 
 - 实测:mp/articles 回 -2041 后**换新 Cookie 依旧**,而 cover/书架接口不受影响。
   当时据此写成"账号级永久限制"——**这个结论已降级为未定论**:GitHub 上的

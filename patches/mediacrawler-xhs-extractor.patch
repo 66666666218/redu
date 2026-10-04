@@ -1,0 +1,27 @@
+# 小红书(xhs)详情页解析补丁 —— 2026-10-04
+#
+# 背景:tests/MediaCrawler 的详情页 window.__INITIAL_STATE__ 现在含 JS 字面量
+#       `"noteDetailMap":new Map([])`,而 extractor 用 json.loads 解析整段 state,
+#       撞上它整段崩 → 一条笔记失败拖垮整个 asyncio.gather(整轮退出码 1、零产出)。
+#       实测:归成 {} 后解析成功,note.noteDetailMap[<id>].note 里 title/desc 全在。
+# 排查记录:doc/operations.md §4n
+#
+# 应用(在仓库根目录, tools/ 是 gitignore 的独立克隆,重装后需重新打):
+#   git apply -p1 patches/mediacrawler-xhs-extractor.patch
+#   # 或  patch -p1 < patches/mediacrawler-xhs-extractor.patch
+
+--- a/tools/MediaCrawler/media_platform/xhs/extractor.py
++++ b/tools/MediaCrawler/media_platform/xhs/extractor.py
+@@ -43,7 +43,11 @@
+ 
+         state = re.findall(r"window.__INITIAL_STATE__=({.*})</script>", html)[
+             0
+-        ].replace("undefined", '""')
++        ]
++        # 2026-10-04:新版详情页把 JS 字面量塞进了 state(`"noteDetailMap":new Map([])`),
++        # 而 json.loads 解析的是**整段** state —— 撞上它就整段崩,害得一条笔记失败拖垮整轮
++        # (见 doc/operations.md §4n)。先把这类 JS-only 记法归成合法 JSON 再解析。
++        state = re.sub(r"new Map\(\s*\[\s*\]\s*\)", "{}", state).replace("undefined", '""')
+         if state != "{}":
+             note_dict = humps.decamelize(json.loads(state))
+             return note_dict["note"]["note_detail_map"][note_id]["note"]

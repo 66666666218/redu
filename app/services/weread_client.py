@@ -5,11 +5,13 @@
           ⚠️ userVid 必须传**空字符串**,非空会 -2012「登录超时」
 - 最新一篇: GET /api/mp/cover?bookId=MP_WXS_XXX  → {name,title,pic,reviewId,digest}
           ⚠️ 返回体里**没有 readNum**(只有 avatar/name/title/pic/reviewId/template/coverBoxInfo)
-- 列表:  GET /web/mp/articles → **永久废弃,别再试**(2026-10-04 实测定案)
-          旧注释写"仅在会话续期后初期可用" —— **那是错的,那个窗口不存在**:
-          续期 success+verified 之后**立刻**再拉,书架前 5 个号仍全部 -2041。
-          故调用方按"只取 cover 最新一篇"处理(见 wechat_monitor);
-          **别再为它编排续期时机**(详见 doc/外部接口速查.md §3.2)
+- 列表:  GET /web/mp/articles → 我们的会话恒 -2041(2026-10-04 实测)
+          旧注释写"仅在会话续期后初期可用" —— **那条是错的**:续期 success+verified
+          之后**立刻**再拉,书架前 5 个号仍全部 -2041。因为**续期 = 同会话换 skey,
+          不是新会话**,它开不出窗口。
+          ⚠️ 但**别据此断言"永久关死"**:本仓 09-27 另见过 -2014(新建立的会话),
+          两种定性尚未定案(见 doc/operations.md §9.2)。故调用方按"只取 cover 最新一篇"
+          处理(见 wechat_monitor);**别再为它编排续期时机**(见 doc/外部接口速查.md §3.2)
 - 正文:  GET /web/mp/content?reviewId=MP_WXS_...  → HTML(#js_content)
 - reviewId 形如 `MP_WXS_<bookId>_<articleToken>`,末段即 mp.weixin.qq.com/s/ 原文短链
   的 token(token 可能含 `~`,必须原样保留,见 build_mp_url)

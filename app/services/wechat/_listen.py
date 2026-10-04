@@ -145,10 +145,11 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
                     ) -> tuple[list[WechatArticle], bool]:
     """微信读书单号采集:**只取 cover 最新一篇**(唯一还活着的路径)。
 
-    ⚠️ `/web/mp/articles` **已永久废弃,不是"限权"**(2026-10-04 实测定案:续期
-    success+verified 之后**立刻**再拉,书架前 5 个号仍全部 -2041)。下面那段列表调用
-    实际每轮必失败一次、随即被 `_is_weread_quota_error` 熔断 —— 它是**为"万一复活"留的
-    探针**,不是主路径;别再按"会话初期可用"给它排期。
+    ⚠️ `/web/mp/articles` 对我们的会话恒 `-2041`(2026-10-04 实测:续期 success+verified
+    之后**立刻**再拉,书架前 5 个号仍全部 -2041)。旧说"仅在会话初期可用"**是错的** ——
+    续期 = 同会话换 skey,开不出窗口;但"永久关死"同样未定案(09-27 另见过 `-2014`,
+    见 `doc/operations.md §9.2`)。下面那段列表调用实际每轮必失败一次、随即被
+    `_is_weread_quota_error` 熔断 —— 它是**为"万一复活"留的探针**,不是主路径。
     **"只有 cover"就意味着同一天发第 2、3 篇会被最新一篇顶掉、永久漏采**(两轮之间最长 8h),
     这正是"近 24h 必须全推"的唯一真实缺口 —— ⚠️ 该缺口现在**没有免费解**:全量列表改由
     平台源(WeRSS / 自研 wemp 的 `mp_articles`)承担,微信读书这条不再负责。
