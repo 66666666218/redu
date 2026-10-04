@@ -347,7 +347,10 @@ SOURCES: dict[str, HotSource] = {
     # 分类沿用 newsnow 的 column:china 综合热点 / tech 科技 / finance 财经 / world 国际 / sports 体育
     #
     # -- china 综合热点 --
-    "weibo": NewsnowSource("weibo"),
+    # ⚠️ **微博不在这里** —— 它已有专门的采集器 `app/services/collector.py`
+    # (带 Cookie + 代理 + 退避重试,写 `weibo_hot_items`,而 Agent 的 `_resonance`
+    #  正是读那张表)。2026-10-04 复核时发现这里还留着一份 `NewsnowSource("weibo")`
+    # —— **同一个源两条链,同一份数据入库两次**,已摘掉。
     "kuaishou": NewsnowSource("kuaishou"),
     "iqiyi": NewsnowSource("iqiyi"),
     "ifeng": NewsnowSource("ifeng"),
