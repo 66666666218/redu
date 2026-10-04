@@ -69,8 +69,17 @@ ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 
+# ⚠️ **这些指标取到 0 时,当成"平台没给",不是"真的是 0"**(2026-10-04 实测定案):
+# 抖音的 `play_count` 对**别人的视频恒为 0**(203 条实测,非 0 的 0 条)——
+# 播放量是创作者私有数据。若把 0 当真实值,一个"点赞 4013"的笔记会被算成
+# 「曝光 0 × 0.4 = 预估 0」,而它其实是热门 —— 数字会精确地骗人。
+# 判据:曝光量若为 0 而下方互动非 0,在物理上不可能;所以 0 只能是"缺失"。
+ZERO_MEANS_MISSING: tuple[str, ...] = ("play_count", "view_count")
+
+
 def _pick(metrics: dict, key: str) -> int | None:
     """按别名表取一个非负整数指标;取不到返回 None(**不是 0** —— "没有"与"是0"不同)。"""
+    zero_ok = key not in ZERO_MEANS_MISSING      # 曝光类:0 视为缺失
     for alias in ALIASES.get(key, (key,)):
         if alias not in metrics:
             continue
@@ -78,7 +87,7 @@ def _pick(metrics: dict, key: str) -> int | None:
             v = int(float(str(metrics[alias]).strip() or 0))
         except (TypeError, ValueError):
             continue
-        if v >= 0:
+        if v > 0 or (v == 0 and zero_ok):
             return v
     return None
 

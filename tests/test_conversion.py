@@ -111,3 +111,27 @@ def test_negative_or_garbage_metrics_are_treated_as_unknown() -> None:
     """平台给 `-1`(未给出)或乱码时,当"不知道"处理 —— 别乘出负数。"""
     assert cv.estimate("bilibili", {"play_count": -1, "view_count": "n/a"})["estimate"] is None
     assert cv._pick({"play_count": -5}, "play_count") is None
+
+
+def test_zero_play_count_means_missing_not_zero() -> None:
+    """★ **实测定案**(2026-10-04):抖音的 `play_count` 对**别人的视频恒为 0**
+    (203 条实测,非 0 的 **0** 条)—— 播放量是创作者私有数据。
+
+    ⚠️ 若把 0 当真实值:一条"点赞 4013"的笔记会被算成「曝光 0 × 0.4 = **预估 0**」,
+    而它明明是热门 —— 数字会**精确地**骗人(不是大得离谱,而是小得像个结论)。
+    判据:曝光为 0 而互动非 0 在物理上不可能 ⇒ 0 只能是"缺失"。
+    """
+    r = cv.estimate("xiaohongshu", {"play_count": 0, "liked_count": 4013})
+    assert r["basis"] == "like_derived", "play_count=0 必须当成「平台没给」"
+    assert r["estimate"] > 0
+
+    # 抖音点名了分享数,不受这条影响(用户口径:抖音还是采用转发计数)
+    d = cv.estimate("douyin", {"play_count": 0, "share_count": 4406})
+    assert d["basis"] == "share_count" and d["estimate"] == int(4406 * 0.80)
+
+    # 真·播放量(非 0)照用
+    b = cv.estimate("bilibili", {"play_count": 1000, "liked_count": 50})
+    assert b["basis"] == "play_count" and b["estimate"] == 400
+
+    # 只有 0、什么都没有 → 拿不到就是拿不到
+    assert cv.estimate("xiaohongshu", {"play_count": 0})["estimate"] is None

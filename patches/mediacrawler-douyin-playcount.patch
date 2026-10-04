@@ -1,0 +1,38 @@
+# 抖音:把原始响应里本就有、却被原版丢掉的 `play_count` 带出来
+#
+# 背景:`store/douyin/__init__.py` 已经取到 `aweme_item["statistics"]` 字典,
+# 原版只映射 digg/collect/comment/share 四项 —— **`play_count` 没映射,直接丢了**。
+#
+# ⚠️ **实测定案(2026-10-04):补了也拿不到值**。
+#   当日实跑一次抖音搜索(203 条),`play_count` **非 0 的 0 条** ——
+#   抖音对**别人的视频**恒给 0。这与 GitHub 上 `cwjcw/xhs_douyin_content` 的结论一致:
+#   **播放量是「创作者私有数据」**,只对自己的号可见(要爬创作者中心)。
+#   同批数据里 `share_count` 194/200 非 0、`liked_count` 196/200 非 0,说明不是抓取坏了。
+#
+# 那为什么还留着这个补丁:
+#   ① 字段名带出来后,下游 `_parse_record` → `conversion` 的链路是通的,
+#      将来若接入我们**自己的**创作者后台(同名字段),直接可用;
+#   ② 抖音若改政策,不用再翻一次源码。
+#   ⚠️ 但**必须记住 0 = "平台没给",不是"没人看"** ——
+#      `conversion.ZERO_MEANS_MISSING` 已把这种 0 当缺失处理。
+#
+# 应用到 gitignore 的独立克隆(重装后需重打):
+#   cd tools/MediaCrawler && git apply ../../patches/mediacrawler-douyin-playcount.patch
+# 反验(改动已存在时会静默成功):
+#   cd tools/MediaCrawler && git apply -R --check ../../patches/mediacrawler-douyin-playcount.patch
+#
+diff --git a/store/douyin/__init__.py b/store/douyin/__init__.py
+index 1d5e2b9..746deef 100644
+--- a/store/douyin/__init__.py
++++ b/store/douyin/__init__.py
+@@ -107,6 +107,10 @@ async def update_douyin_aweme(aweme_item: Dict):
+         "collected_count": str(interact_info.get("collect_count")),
+         "comment_count": str(interact_info.get("comment_count")),
+         "share_count": str(interact_info.get("share_count")),
++        # 播放量(2026-10-04 补):原始 `statistics` 里本就有 `play_count`,原版只映射了
++        # 上面四项、把它丢掉了。⚠️ 抖音对**别人的视频**可能恒给 0(需实跑验证),
++        # 所以下游要按"拿不到就说拿不到"处理,别把 0 当成"没人看"。
++        "play_count": str(interact_info.get("play_count")),
+         "last_modify_ts": utils.get_current_timestamp(),
+         "aweme_url": f"https://www.douyin.com/video/{aweme_id}",
+         "cover_url": extract_cover_url(aweme_item),

@@ -186,6 +186,33 @@ def _read_results(platform: str, since: float | None = None) -> list[dict]:
     return out
 
 
+# 各平台**曝光/互动指标**的归一键(与 `conversion.ALIASES` 对齐)。
+# ⚠️ **播放量并非每个平台都有**:小红书/贴吧的搜索接口根本没有该字段
+# (2026-10-04 实测;小红书/抖音的播放量是"创作者私有数据",别人的内容拿不到)。
+# 所以这里**取不到就不放进 `metrics`** —— 让 `conversion` 去走它的降级阶梯,
+# 而不是在这里填 0(填 0 会被读成"没人看")。
+_METRIC_KEYS: tuple[str, ...] = ("play_count", "liked_count", "collected_count",
+                                 "comment_count", "share_count")
+
+
+def _metric_int(v: object) -> int | None:
+    """指标值 → 非负整数;**缺失/解析不出/负数一律返回 `None`**(= 没有这个数据,不是 0)。
+
+    ⚠️ **空串也算缺失** —— `""` 与 `"0"` 是两回事:前者是"平台没给",后者是"确实是 0"。
+    混在一起会让"字段缺失"被读成"没人看"。
+    """
+    if v is None:
+        return None
+    text = str(v).strip()
+    if not text:                       # "" / "  " / "None" 之外的空白 ⇒ 缺失
+        return None
+    try:
+        n = int(float(text))
+    except (TypeError, ValueError):
+        return None
+    return n if n >= 0 else None
+
+
 def _parse_record(rec: dict, platform: str) -> dict | None:
     """把各平台**字段名不同**的记录归一化成统一结构。
 
@@ -212,15 +239,15 @@ def _parse_record(rec: dict, platform: str) -> dict | None:
     text = " ".join(dict.fromkeys(p for p in parts if p))   # dict.fromkeys = 保序去重
     urls = _extract_pan_urls("", text)
     url = str(rec.get("note_url") or rec.get("url") or rec.get("aweme_url") or "").strip()
-    # **转发量**(2026-10-03):结算要用它当线索级强弱代理(链接级真实转存数在夸克侧不可得)。
-    # 抖音给的字段名是 `share_count`,值是**字符串**("176"),要转成 int。
-    try:
-        share_count = int(float(str(rec.get("share_count") or 0).strip() or 0))
-    except (TypeError, ValueError):
-        share_count = 0
+    # **全部曝光/互动指标**(2026-10-04):原版只取 `share_count`,其余(尤其**播放量**)全丢。
+    # 归一成 `metrics` 字典 ⇒ **直接喂给 `conversion.estimate(platform, metrics)`**,
+    # 省得每个调用方各写一遍字段名映射(那是"两处真相"的开始)。
+    metrics = {k: n for k in _METRIC_KEYS if (n := _metric_int(rec.get(k))) is not None}
     return {"uid": uid, "name": name, "url": url[:500], "snippet": text[:255],
             "pan_link": (urls[0] if urls else "")[:500],
-            "share_count": share_count,
+            # 兼容既有调用方(douyin_leads 读它):缺了就 0 —— 它的列本来就是这么定义的
+            "share_count": metrics.get("share_count", 0),
+            "metrics": metrics,                  # 交给 conversion 算曝光
             # 该条来自哪个搜索词(抖音 jsonl 的 source_keyword)——
             # 抖音线索要按词回显"这条是搜什么词搜出来的"。
             "keyword": str(rec.get("source_keyword") or "")[:80]}
