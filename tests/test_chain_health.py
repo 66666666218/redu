@@ -43,3 +43,34 @@ def test_every_chain_declares_how_to_judge_it() -> None:
         assert label and kind and desc, (label, kind, desc)
         if metric:
             assert isinstance(metric, str) and "=" not in metric, metric
+
+
+def test_newsnow_is_not_red_on_a_wechat_only_instance(monkeypatch) -> None:
+    """★ **依赖检查要按实例角色判断**。
+
+    newsnow 只服务于 `hot_source`(role=**hotspot**),而本机是 role=**wechat**
+    ⇒ **本来就不该有它**,报红是**误报**。
+    ⚠️ 一条永远红的项会训练人忽略整份报告 —— 与"闸门失准"告警是同一条教训
+    (那时也是"把不该报的报了",导致真问题淹在噪音里)。
+    """
+    import config.settings as cs
+
+    import chain_health as ch
+
+    monkeypatch.setattr(cs, "get_settings",
+                        lambda: type("S", (), {"scheduler_role": "wechat"})())
+    row = [r for r in ch.check_dependencies() if "newsnow" in r["name"]][0]
+    assert row["level"] == GREEN, f"wechat 侧不该报红,实际 {row}"
+    assert "不该跑热榜" in row["detail"]
+
+
+def test_newsnow_is_checked_on_a_hotspot_instance(monkeypatch) -> None:
+    """但**热点侧就必须真查** —— 那边它是要用的,缺了就该红/黄。"""
+    import config.settings as cs
+
+    import chain_health as ch
+
+    monkeypatch.setattr(cs, "get_settings",
+                        lambda: type("S", (), {"scheduler_role": "hotspot"})())
+    row = [r for r in ch.check_dependencies() if "newsnow" in r["name"]][0]
+    assert row["level"] in (RED, YELLOW), f"hotspot 侧必须真查,实际 {row}"

@@ -98,14 +98,24 @@ def check_dependencies() -> list[dict]:
     n = len([d for d in os.listdir(prof) if "tieba" in d.lower()]) if os.path.isdir(prof) else 0
     add("贴吧登录档案", n > 0, f"{prof} 下 {n} 个贴吧档案")
 
-    # newsnow(本机已停;只在 hot_source 跑在本地时才需要)
+    # newsnow(热榜长尾)—— ⚠️ **按实例角色判断**:它只服务于 `hot_source`(role=hotspot),
+    # 而本机是 role=wechat ⇒ **本来就不该有它**,报红是**误报**。
+    # (一条永远红的项会训练人忽略整份报告 —— 与"闸门失准"告警同一条教训。)
+    from config.settings import get_settings
+
+    role = str(getattr(get_settings(), "scheduler_role", "all") or "all")
+    if role not in ("all", "hotspot"):
+        out.append({"name": "newsnow 容器(热榜长尾)", "level": GREEN,
+                    "detail": f"本机 role={role} **不该跑热榜**,不需要它"
+                              f"(远程 hotspot 侧才要,且需配 HOT_NEWSNOW_URL)"})
+        return out
     try:
         r = subprocess.run(["docker", "ps", "-a", "--filter", "name=newsnow",
                             "--format", "{{.Status}}"],
                            capture_output=True, text=True, timeout=15)
         st = (r.stdout or "").strip()
         add("newsnow 容器(热榜长尾)", bool(st) and st.startswith("Up"),
-            st or "容器不存在 —— 本机 role=wechat 不需要它,但远程要配 HOT_NEWSNOW_URL")
+            st or "容器不存在 —— 本机 role=hotspot 需要它,且 .env 要配 HOT_NEWSNOW_URL")
     except Exception as exc:  # noqa: BLE001
         out.append({"name": "newsnow 容器(热榜长尾)", "level": YELLOW,
                     "detail": f"探不到 docker:{type(exc).__name__}"})
