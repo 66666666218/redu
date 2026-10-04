@@ -434,6 +434,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.hot_sources import hot_source_tick_all_users
     from app.services.wechat_monitor import retire_dormant_tick_all_users
     from app.services.wechat_digest import run_wechat_digest_all_users
+    from app.services.remote_sync import remote_sync_tick
     from app.services.push_timeline import tick as push_timeline_tick
     from app.services.telegram_source import collect_tick as tg_collect_tick
     from app.services.cross_accounts import cross_account_tick
@@ -509,6 +510,11 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # 拉新周录提醒(2026-10-03):每周一提醒录上周拉新 —— `pan_recruit_weekly` 是转化回路
         # **唯一的真值入口**(链接级真值不可得,已定案),却至今 0 行。**录了就不再提醒**。
         (recruit_reminder_tick, _get_settings().recruit_reminder_cron, {"minute": 40, "hour": 9}, "recruit_reminder", "wechat"),
+        # **本机 → 远程 单向同步**(2026-10-04):公众号监听必须在本机(微信读书 Cookie 绑出口 IP),
+        # 而选题 Agent 在远程 —— 两边库独立,不同步的话远程 Agent 的"竞品供给"永远是旧快照。
+        # ⚠️ 方向**单向**(本机→远程);没配 `remote_db_url` 时它是空转(不记运行记录)。
+        (remote_sync_tick, _get_settings().remote_sync_cron, {"minute": "*/30"},
+         "remote_sync", "wechat"),
         # 跨实例健康可见(2026-10-03):远端每天推一张**板块健康卡**到管理员群。
         # 为什么推卡而不是本机轮询远端库:两边**库是独立的**,推飞书零配置、零新增暴露面;
         # 远端整机挂了这张卡就断,"该来没来"本身是信号(本机另有 peer_status 探活兜底)。

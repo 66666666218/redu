@@ -117,6 +117,28 @@ class Settings(BaseSettings):
                                            # 是重操作;8/天≈11 天消化掉积压的 89 个候选)
     candidate_auto_import_min_accounts: int = 2  # 资源库验证阈值:该来源词对应的资源被 ≥N 个
                                                  # 对标号发过才算"需求已验证",随 LLM 资源号一并收录
+    # ---- 本机 → 远程 单向同步(2026-10-04)----
+    # **为什么需要**:公众号监听必须在本机(微信读书 Cookie 绑家宽出口 IP),而**选题 Agent 在远程**
+    # —— 两边库独立 ⇒ 远程 Agent 的"竞品供给"一直吃的是旧快照(实测远程 wechat_articles 停在 09-28)。
+    # 这里把本机的公众号数据**单向推过去**(只写远程,不回读)。
+    # ⚠️ **凭据只放 `.env`,不写进代码/文档/提交**。留空 = 关(不同步)。
+    remote_db_url: str = ""            # 直连用(留空 + 下面配 SSH = 走隧道);两种都留空 = 关
+    # ⚠️ **实测结论:直连走不通,要走 SSH 隧道**(2026-10-04):
+    #   `redu-mysql` 容器**没把 3306 映射到宿主机**,公网上那个 3306 是**宝塔自己装的另一个 MySQL**。
+    #   业务库在 docker 网络里是 `172.22.0.2:3306` ⇒ 本机只能经 SSH 隧道打进去。
+    # ⚠️ 以下凭据**只放 `.env`**,不写进代码/文档/提交。
+    remote_ssh_host: str = ""          # 例:103.117.136.167(填了它才走隧道)
+    remote_ssh_port: int = 22
+    remote_ssh_user: str = "root"
+    remote_ssh_password: str = ""
+    remote_db_host: str = "172.22.0.2"  # 隧道对端(容器 IP);
+    remote_db_port: int = 3306
+    remote_db_user: str = "redu"
+    remote_db_password: str = ""
+    remote_db_name: str = "redu"
+    remote_sync_cron: str = "*/30 * * * *"   # 每 30 分钟一轮(数据是"补最新",不必更密)
+    remote_sync_days: int = 14         # 每次回看多少天(靠天然键去重,天然幂等)
+
     candidate_auto_import_cron: str = "30 8 * * *"  # 每日自动收录时间(默认 08:30,紧随候选发现之后)
     # 公众号板块总结(2026-10-04):按**阅读数**总结 + **闭环体检**(发现/收录/监控三段各自
     # 最近产出),推**管理群**(具体数字只进管理群,客户群只看火爆程度)。
