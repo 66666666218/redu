@@ -75,6 +75,186 @@ class BilibiliSource(HotSource):
         return out
 
 
+def _dig_titled(payload, title_keys: tuple[str, ...], max_depth: int = 6) -> list[dict]:
+    """在**深嵌套**的返回体里找"最长的那串带标题的字典"(各平台外壳形状不一,别硬编路径)。
+
+    ⚠️ **别按记忆写路径**:上游随手加一层 `data`/`result` 就全空,而空会被读成
+    "今天没热点"(本仓的老毛病)。这里用"找最长 list-of-dict 且含标题键"的启发式,
+    但仍要求**至少 5 条**才算数 —— 太少说明找错了层。
+    """
+    best: list[dict] = []
+
+    def walk(node, depth: int) -> None:
+        nonlocal best
+        if depth > max_depth:
+            return
+        if isinstance(node, list) and node and isinstance(node[0], dict):
+            if any(k in node[0] for k in title_keys) and len(node) > len(best):
+                best = node
+        if isinstance(node, dict):
+            for v in node.values():
+                walk(v, depth + 1)
+        elif isinstance(node, list):
+            for v in node[:5]:
+                walk(v, depth + 1)
+
+    walk(payload, 0)
+    return best if len(best) >= 5 else []
+
+
+class ToutiaoSource(HotSource):
+    """头条热榜(公开接口,免登录;2026-10-04 实测 200 / 50 条)。
+
+    为什么自研它:它在 newsnow 长尾里,而**热榜类平台是"命门自持"最该优先搬的**——
+    公开、免登录、且对热点选题直接有用。
+    """
+
+    id = "toutiao"
+
+    def fetch(self, limit: int = 30) -> list[dict]:
+        try:
+            r = creq.get("https://www.toutiao.com/hot-event/hot-board/",
+                         params={"origin": "toutiao_pc"},
+                         impersonate="chrome", timeout=15,
+                         headers={"User-Agent": _UA, "Referer": "https://www.toutiao.com/"})
+            rows = _dig_titled(r.json(), ("Title", "title"))
+        except HotSourceError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HotSourceError(f"头条热榜请求失败:{type(exc).__name__}") from exc
+        out = []
+        for i, it in enumerate(rows[:limit], 1):
+            title = str(it.get("Title") or it.get("title") or "").strip()
+            if not title:
+                continue
+            hot = it.get("HotValue") or it.get("hot_value") or ""
+            out.append({"rank": i, "title": title,
+                        "url": str(it.get("Url") or it.get("url") or ""),
+                        "extra": f"热度{hot}" if hot else "头条热榜"})
+        return out
+
+
+class TencentNewsSource(HotSource):
+    """腾讯新闻热点榜(公开接口,免登录;2026-10-04 实测 200 / 51 条)。"""
+
+    id = "tencent-hot"
+
+    def fetch(self, limit: int = 30) -> list[dict]:
+        try:
+            r = creq.get("https://r.inews.qq.com/gw/event/hot_ranking_list",
+                         params={"page_size": str(max(limit, 30))},
+                         impersonate="chrome", timeout=15,
+                         headers={"User-Agent": _UA, "Referer": "https://news.qq.com/"})
+            rows = _dig_titled(r.json(), ("title",))
+        except HotSourceError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HotSourceError(f"腾讯新闻热榜请求失败:{type(exc).__name__}") from exc
+        out = []
+        for it in rows:
+            title = str(it.get("title") or it.get("Title") or "").strip()
+            url = str(it.get("surl") or it.get("url") or "").strip()
+            # ⚠️ 返回体**第 0 条是榜单说明**(「腾讯新闻用户最关注的热点,每10分钟更新一次」,
+            # `id=TIP…` / `articletype=560` / **没有 surl**)—— 它不是热点条目。
+            # 判据用"**有没有可点的链接**"而不是硬编那句标题(标题会变,结构不会)。
+            if not title or not url:
+                continue
+            out.append({"rank": len(out) + 1, "title": title, "url": url,
+                        "extra": str(it.get("time") or "腾讯新闻热榜")[:20]})
+            if len(out) >= limit:
+                break
+        return out
+
+
+class BilibiliHotSearchSource(HotSource):
+    """B站**热搜词**(公开接口,免登录;2026-10-04 实测 200 / 30 条)。
+
+    与已有的 `BilibiliSource`(排行榜)**互补**:排行是"哪些视频火",
+    热搜词是"**大家在搜什么**"—— 对选词/选题,后者常常更直接。
+    """
+
+    id = "bilibili-hotsearch"
+
+    def fetch(self, limit: int = 30) -> list[dict]:
+        try:
+            r = creq.get("https://api.bilibili.com/x/web-interface/search/square",
+                         params={"limit": str(max(limit, 10))},
+                         impersonate="chrome", timeout=15,
+                         headers={"User-Agent": _UA, "Referer": "https://www.bilibili.com/"})
+            trending = ((r.json().get("data") or {}).get("trending") or {})
+            rows = trending.get("list") or []
+        except Exception as exc:  # noqa: BLE001
+            raise HotSourceError(f"B站热搜请求失败:{type(exc).__name__}") from exc
+        out = []
+        for i, it in enumerate(rows[:limit], 1):
+            kw = str(it.get("keyword") or it.get("show_name") or "").strip()
+            if not kw:
+                continue
+            out.append({"rank": i, "title": kw,
+                        "url": f"https://search.bilibili.com/all?keyword={kw}",
+                        "extra": f"热搜 · 热度{it.get('heat_score') or 0}"})
+        return out
+
+
+class ZhihuHotSource(HotSource):
+    """知乎热榜(需要登录态;2026-10-04 实测带 Cookie 200 / 30 条)。
+
+    ⚠️ **知乎热榜裸连 401**(要登录),所以它原本只能走 newsnow 容器。
+    我们**本来就有知乎 Cookie**(公众号盘链搜索那条链在用)—— 复用它即可,
+    于是这个源也变成"命门自持"。
+
+    ⚠️ Cookie 从库里现取(源接口没有 session 参数);取不到就**抛 `HotSourceError`**
+    —— 别返回空列表冒充"今天没热点"(那正是本仓反复踩的"静默失败=假成功")。
+    """
+
+    id = "zhihu"
+    _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " \
+          "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+
+    def _cookie(self) -> str:
+        from sqlalchemy import select
+
+        from app.db import get_session_local
+        from app.db.models import UserCookie
+        from app.security import decrypt_cookie
+        db = get_session_local()()
+        try:
+            row = db.scalar(select(UserCookie).where(UserCookie.platform == "zhihu")
+                            .order_by(UserCookie.id.desc()))
+            return decrypt_cookie(row.cookie) if row else ""
+        finally:
+            db.close()
+
+    def fetch(self, limit: int = 30) -> list[dict]:
+        ck = self._cookie()
+        if not ck:
+            raise HotSourceError("知乎热榜需要登录 Cookie,库里没有(别返回空冒充'没热点')")
+        try:
+            r = creq.get("https://www.zhihu.com/api/v3/feed/topstory/hot-lists/total",
+                         params={"limit": str(max(limit, 50))},
+                         impersonate="chrome", timeout=15,
+                         headers={"User-Agent": self._UA, "Cookie": ck,
+                                  "Referer": "https://www.zhihu.com/hot",
+                                  "Accept": "application/json"})
+            if getattr(r, "status_code", 200) != 200:
+                raise HotSourceError(f"知乎热榜 HTTP {r.status_code}(登录态失效或限流)")
+            rows = r.json().get("data") or []
+        except HotSourceError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HotSourceError(f"知乎热榜请求失败:{type(exc).__name__}") from exc
+        out = []
+        for i, it in enumerate(rows[:limit], 1):
+            tgt = it.get("target") or {}
+            title = str(tgt.get("title") or it.get("title") or "").strip()
+            if not title:
+                continue
+            out.append({"rank": i, "title": title,
+                        "url": str(tgt.get("url") or ""),
+                        "extra": str(it.get("detail_text") or "知乎热榜")[:60]})
+        return out
+
+
 class DoubanSource(HotSource):
     """豆瓣热门电影(公开 JSON;2026-10-01 实测 200)。
 
@@ -147,7 +327,17 @@ class NewsnowSource(HotSource):
 SOURCES: dict[str, HotSource] = {
     # ---- 自研直连(命门自持) ----
     "bilibili": BilibiliSource(),
+    "bilibili-hotsearch": BilibiliHotSearchSource(),   # 2026-10-04 新增:热搜词(与排行互补)
     "douban": DoubanSource(),
+    # 2026-10-04 **从 newsnow 搬过来**(用户口径「完善那 41 个平台监控的链路」+
+    # 「不再依赖别人的容器」):这三个都实测过公开/cookie 即可直连 ——
+    #   · toutiao     公开免登录 50 条
+    #   · tencent-hot 公开免登录 51 条
+    #   · zhihu       裸连 401,但**我们本来就有知乎 Cookie**(盘链搜索在用)⇒ 复用即可
+    # ⚠️ 搬走的这几个**别再注册回 NewsnowSource** —— 同一个源两条链会重复入库。
+    "toutiao": ToutiaoSource(),
+    "tencent-hot": TencentNewsSource(),
+    "zhihu": ZhihuHotSource(),
     # ---- newsnow 长尾(自部署容器;知乎 401 等无法直连的平台走这里) ----
     # 2026-10-01 扩容:9 个 → 40 个。容器实测支持 **44 个**,除下列之外全接 ——
     #   · `bilibili-*` / `douban`:我们已有**自研直连**(命门自持,不依赖 newsnow)
@@ -157,14 +347,11 @@ SOURCES: dict[str, HotSource] = {
     # 分类沿用 newsnow 的 column:china 综合热点 / tech 科技 / finance 财经 / world 国际 / sports 体育
     #
     # -- china 综合热点 --
-    "zhihu": NewsnowSource("zhihu"),
     "weibo": NewsnowSource("weibo"),
     "kuaishou": NewsnowSource("kuaishou"),
     "iqiyi": NewsnowSource("iqiyi"),
-    "toutiao": NewsnowSource("toutiao"),
     "ifeng": NewsnowSource("ifeng"),
     "thepaper": NewsnowSource("thepaper"),
-    "tencent-hot": NewsnowSource("tencent-hot"),
     "tieba": NewsnowSource("tieba"),
     "nowcoder": NewsnowSource("nowcoder"),
     "chongbuluo-hot": NewsnowSource("chongbuluo-hot"),

@@ -104,3 +104,75 @@ def test_platform_hot_candidates_aggregates_by_platform(session) -> None:
     # 跨平台同现排在单平台之前(平台数降序)
     assert titles[0] == "迪拜航空客机事故"
     assert cands[0]["platforms"] in ("bilibili+zhihu", "zhihu+bilibili")
+
+
+# ------------------------------- 2026-10-04:从 newsnow 搬过来的 4 个自研源
+def test_dig_titled_finds_the_longest_titled_list_and_rejects_tiny_ones() -> None:
+    """★ **别按记忆写路径**:上游随手加一层 `data`/`result` 就全空,
+    而空会被读成"今天没热点"(本仓的老毛病)。这里用"找最长的带标题列表"的启发式。
+
+    ⚠️ 但要**要求至少 5 条** —— 太少说明找错层了,宁可返回空(让调用方报错),
+    也不要把一个 2 条的边角列表当成整张榜。
+    """
+    from app.services.hot_sources import _dig_titled
+
+    payload = {"result": {"data": {"list": [{"title": f"t{i}"} for i in range(50)]}},
+               "small": [{"title": "x"}, {"title": "y"}]}
+    assert len(_dig_titled(payload, ("title",))) == 50
+    # 只有小列表 → 不当真
+    assert _dig_titled({"a": [{"title": "x"}, {"title": "y"}]}, ("title",)) == []
+    # 键名不匹配 → 空
+    assert _dig_titled({"list": [{"nope": 1} for _ in range(20)]}, ("title",)) == []
+
+
+def test_tencent_skips_the_ranking_placeholder(monkeypatch) -> None:
+    """★ 返回体**第 0 条是榜单说明**(`id=TIP…`、**没有 surl**),不是热点条目。
+
+    判据用"**有没有可点的链接**"而不是硬编那句标题 —— 标题会变,结构不会。
+    """
+    from app.services import hot_sources as hs
+
+    class _R:
+        status_code = 200
+
+        def json(self):
+            return {"idlist": [
+                {"id": "TIP2022", "title": "腾讯新闻用户最关注的热点，每10分钟更新一次",
+                 "articletype": 560},                       # 占位符:没有 url
+                *[{"id": f"a{i}", "title": f"真热点{i}",
+                   "surl": f"https://view.inews.qq.com/a/{i}"} for i in range(8)],
+            ]}
+
+    monkeypatch.setattr(hs.creq, "get", lambda *a, **k: _R())
+    rows = hs.TencentNewsSource().fetch(limit=30)
+    assert len(rows) == 8, f"占位符该被滤掉,实际 {len(rows)} 条"
+    assert all("每10分钟更新一次" not in r["title"] for r in rows)
+    assert all(r["url"] for r in rows)
+    assert [r["rank"] for r in rows] == list(range(1, 9))     # 名次连续(滤掉后重排)
+
+
+def test_zhihu_raises_instead_of_returning_empty_when_no_cookie(monkeypatch) -> None:
+    """★★ **拿不到 Cookie 要抛错,不能返回空列表** —— 空列表会被读成"今天没热点",
+    而事实是"我们没凭据"。这正是本仓反复踩的「静默失败=假成功」。"""
+    from app.services import hot_sources as hs
+
+    monkeypatch.setattr(hs.ZhihuHotSource, "_cookie", lambda self: "")
+    try:
+        hs.ZhihuHotSource().fetch()
+    except hs.HotSourceError as exc:
+        assert "Cookie" in str(exc)
+    else:
+        raise AssertionError("没有 Cookie 时必须抛 HotSourceError,不许静默返回空")
+
+
+def test_moved_sources_are_self_built_not_newsnow() -> None:
+    """★ 搬过来的这几个**别再注册回 `NewsnowSource`** —— 同一个源两条链会重复入库,
+    而且搬的意义就在于"不再依赖容器"。"""
+    from app.services.hot_sources import SOURCES
+
+    for sid in ("zhihu", "toutiao", "tencent-hot", "bilibili-hotsearch"):
+        assert sid in SOURCES, f"{sid} 没注册"
+        assert type(SOURCES[sid]).__name__ != "NewsnowSource", f"{sid} 又走回 newsnow 了"
+    # 自研源数量只增不减(2026-10-04:2 → 6)
+    own = [k for k, v in SOURCES.items() if type(v).__name__ != "NewsnowSource"]
+    assert len(own) >= 6, own
