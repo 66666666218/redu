@@ -651,12 +651,15 @@ print(sorted(j.id for j in s.get_jobs()))"
    兜底本身是对的,它**确实拿到了正常笔记页**,只是解析器崩了。
    ⇒ **这不是"小红书封了我们的号"**,别去折腾换 IP / 过验证码。
 
-**⚠️ 放大伤害的缺口(本轮未改)**:`get_note_detail_async_task` 只 catch
-`NoteNotFoundError`/`IPBlockError`/`PlatformAccessError`,`JSONDecodeError` 不在其中 →
-**一条笔记解析不了,整个 `asyncio.gather` 全崩**,20 条里其余 19 条一起丢。
+**⚠️ 放大伤害的缺口(已一并修)**:`get_note_detail_async_task` 原本只 catch
+`NoteNotFoundError`/`IPBlockError`/`PlatformAccessError`,而 **HTML 兜底抛的 `RetryError` 无人接住**
+(那段 `except RetryError: pass` 只包了 API 路径那一次调用)→ **一条笔记解析不了,整个
+`asyncio.gather` 全崩**,20 条里其余 19 条一起丢。已照 API 路径的写法补上,
+降级为"跳过这一条 + WARNING"(再遇到页面改版,最多少几条,不会整轮归零)。
 
-**修法**:打 `patches/mediacrawler-xhs-extractor.patch`(把 `new Map([])` 归成 `{}` 再 parse)。
-修复后实测单关键词跑通、写出 `data/xhs/jsonl/search_contents_<日期>.jsonl` **20 条**。
+**修法**:打 `patches/mediacrawler-xhs-detail-fix.patch`(含 3 个文件:extractor 的 JS 字面量
+归一化、core 的 `RetryError` 兜底、以及**回归测试**;反验过 —— 摘掉 core 那处测试立刻变红)。
+修复后实测:单关键词跑通(`Xhs Crawler finished`)、写出 jsonl(20 条/轮)。
 ⚠️ `tools/` 是 **gitignore 的独立克隆**,**重装 / 重新 clone 后必须重新打这个补丁**
 (这也是它要单独存成 patch 文件、而不是只改本地的原因)。
 

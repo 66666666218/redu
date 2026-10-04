@@ -1,0 +1,112 @@
+# 小红书(xhs)采集修复补丁 —— 2026-10-04
+#
+# 症状:resource_presence 的小红书整轮挂,运行记录写 "失败:xiaohongshu",
+#       日志是 `退出码 1 … tenacity.RetryError[… raised JSONDecodeError]`,零产出。
+#       **看着像封号,其实是解析器过时**(页面是正常笔记页,captcha/验证 计数全 0)。
+#
+# 两处改动:
+#   1. extractor.py —— 新版详情页的 window.__INITIAL_STATE__ 含 JS 字面量
+#      `"noteDetailMap":new Map([])`,而 json.loads 解析的是**整段** state,
+#      撞上它整段崩。先把这类 JS-only 记法归成合法 JSON 再解析。
+#   2. core.py —— HTML 兜底同样会抛 RetryError,而此前只兜了 API 路径那一次:
+#      一条笔记解析失败 → asyncio.gather 全崩 → 其余 19 条一起丢。
+#      照 API 路径的写法吞掉,降级为"跳过这一条"。
+#   3. tests/…core_access_error.py —— 加回归测试(反向验证过:摘掉第 2 处即变红)。
+#
+# 排查记录:doc/operations.md §4n
+#
+# 应用(在仓库根目录;tools/ 是 gitignore 的独立克隆,**重装/重新 clone 后要重新打**):
+#   git apply -p1 patches/mediacrawler-xhs-detail-fix.patch
+#   # 或  patch -p1 < patches/mediacrawler-xhs-detail-fix.patch
+#
+--- a/tools/MediaCrawler/media_platform/xhs/extractor.py
++++ b/tools/MediaCrawler/media_platform/xhs/extractor.py
+@@ -43,7 +43,11 @@
+ 
+         state = re.findall(r"window.__INITIAL_STATE__=({.*})</script>", html)[
+             0
+-        ].replace("undefined", '""')
++        ]
++        # 2026-10-04:新版详情页把 JS 字面量塞进了 state(`"noteDetailMap":new Map([])`),
++        # 而 json.loads 解析的是**整段** state —— 撞上它就整段崩,害得一条笔记失败拖垮整轮
++        # (见 doc/operations.md §4n)。先把这类 JS-only 记法归成合法 JSON 再解析。
++        state = re.sub(r"new Map\(\s*\[\s*\]\s*\)", "{}", state).replace("undefined", '""')
+         if state != "{}":
+             note_dict = humps.decamelize(json.loads(state))
+             return note_dict["note"]["note_detail_map"][note_id]["note"]
+--- a/tools/MediaCrawler/media_platform/xhs/core.py
++++ b/tools/MediaCrawler/media_platform/xhs/core.py
+@@ -314,8 +314,17 @@
+                     pass
+ 
+                 if not note_detail:
+-                    note_detail = await self.xhs_client.get_note_by_id_from_html(note_id, xsec_source, xsec_token,
+-                                                                                 enable_cookie=True)
++                    try:
++                        note_detail = await self.xhs_client.get_note_by_id_from_html(note_id, xsec_source, xsec_token,
++                                                                                     enable_cookie=True)
++                    except RetryError as ex:
++                        # 2026-10-04:这条兜底同样会重试后抛 `RetryError`(实测:详情页改版让
++                        # extractor 的 json.loads 整段崩 —— 见 doc/operations.md §4n)。
++                        # **单条笔记失败不该拖垮整批**:照上面 API 路径的写法吞掉,
++                        # 降级为"跳过这一条"。此前没有这层,一条解析失败就让 20 条一起丢。
++                        utils.logger.warning(
++                            f"[skip] xhs get note detail from html failed after retries, Id: {note_id}, {ex}")
++                        return None
+                     if not note_detail:
+                         utils.logger.warning(f"[skip] Failed to get note detail, Id: {note_id}, 跳过继续")
+                         return None
+--- a/tools/MediaCrawler/tests/test_xhs_core_access_error.py
++++ b/tools/MediaCrawler/tests/test_xhs_core_access_error.py
+@@ -20,6 +20,7 @@
+ import pytest
+ 
+ import config
++from tenacity import RetryError
+ from media_platform.xhs.core import XiaoHongShuCrawler
+ from media_platform.xhs.exception import IPBlockError, PlatformAccessError
+ 
+@@ -122,3 +123,43 @@
+ 
+     # 被限流的创作者整体跳过,后面的创作者照常采集
+     assert crawled_user_ids == ["ok"]
++
++
++
++def _make_retry_error() -> RetryError:
++    """造一个**真的** RetryError(让 tenacity 自己跑出来,不手搓它的内部结构)。"""
++    from tenacity import retry, stop_after_attempt, wait_fixed
++
++    @retry(stop=stop_after_attempt(1), wait=wait_fixed(0))
++    def _boom():
++        raise ValueError("extractor blew up(新版详情页 state 含 JS 字面量)")
++
++    try:
++        _boom()
++    except RetryError as exc:
++        return exc
++    raise AssertionError("应当抛出 RetryError")
++
++
++@pytest.mark.asyncio
++async def test_html_fallback_retry_error_skips_note():
++    """2026-10-04:HTML 兜底重试耗尽时必须**跳过该条**,不能拖垮整批。
++
++    真因见 doc/operations.md §4n:新版小红书详情页的 `window.__INITIAL_STATE__` 含
++    JS 字面量 `new Map([])`,extractor 用 json.loads 解析**整段** state 时整段崩 →
++    RetryError 冒泡 → 此前无人接住,20 条笔记一起丢(整轮退出码 1、零产出)。
++
++    反向验证:把 core.py 里那段 try/except RetryError 摘掉,本测试立刻变红。
++    """
++    xhs_client = AsyncMock()
++    xhs_client.get_note_by_id.return_value = None  # API 路径没拿到 → 走 HTML 兜底
++    xhs_client.get_note_by_id_from_html.side_effect = _make_retry_error()
++
++    result = await make_crawler(xhs_client).get_note_detail_async_task(
++        note_id="n1",
++        xsec_source="pc_search",
++        xsec_token="token",
++        semaphore=asyncio.Semaphore(1),
++    )
++
++    assert result is None
