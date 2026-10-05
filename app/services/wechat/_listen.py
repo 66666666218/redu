@@ -360,7 +360,11 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
     # ⚠️ 只在网页路没成功时走(App 有自己的配额,未知上限 —— 不无谓地双倍消耗);
     # ⚠️ **记账要分路**(`weread_list_app_ok` 而不是 `weread_list_ok`):合在一起就再也看不出
     #    "网页路到底恢复了没" —— 而"能不能恢复"决定这条兜底是临时的还是永久的。
-    if not listed and app_client is not None:
+    # ⚠️ **必须叠加 `not list_skipped`**(2026-10-05 审计抓到,我第一版漏了):
+    #    不叠加的话,"在轮转窗口外"和"本轮已熔断"的号**也会去打 App 接口** ——
+    #    那正是窗口机制要省的那批号。App 配额上限未知,而**这个账号的网页配额就是被
+    #    我们自己打没的**(`-2041`)⇒ 同一套轮转纪律必须一并适用于 App,不能双份消耗。
+    if not listed and not list_skipped and app_client is not None:
         try:
             rows = app_client.articles(b.weread_book_id)
             _append_listed(items, [{"title": r["title"], "read_num": r["read_num"],

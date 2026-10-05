@@ -13,7 +13,7 @@ from config.settings import Settings
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 
 from sqlalchemy.orm import Session
 
@@ -65,23 +65,58 @@ def _backfill_pan_urls(session: Session, user_id: int, limit: int = 100) -> int:
 def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchmark,
                          items: list[dict], source: str, fetch_content: bool = False,
                          content_resolver=None, require_pan: bool = True) -> list[WechatArticle]:
-    """按链接去重入库;网盘类型=标题 + (可选)自抓正文 的并集。"""
-    existing = {u.rstrip("/").strip() for u in session.scalars(
-        select(WechatArticle.url).where(
-            WechatArticle.user_id == user_id, WechatArticle.url != "")).all()}
+    """按链接去重入库;网盘类型=标题 + (可选)自抓正文 的并集。
+
+    ⚠️ **已有行也要补阅读数**(2026-10-05 修,审计抓到的"阅读数恒 0 第二根因")。
+    此前这里是 `if url_norm in existing: continue` —— **已有行直接跳过**,
+    而 `read_num` 只在**插入时**写。后果两条,都很要命:
+
+      ① **最新一篇永远没有阅读数**:`_weread_collect` 把 cover 放在 `items` **最前**,
+         而 cover **不带 read_num**;几秒后同一个号的文章列表才给出精确值,
+         但它已经在 `existing` 里了 ⇒ 被当重复丢掉。实测每号每轮正好少 1 篇。
+      ② **历史积压永远补不上**:断供期入库的那批(如 2026-09-29~10-05 的 162 篇)
+         全是 `read_num=0`,之后列表再给出精确值也没人回填。
+
+    所以改成:遇到已有行时,若**新值 > 0 而旧值是 0** ⇒ **回填**。
+    只在"旧值缺、新值有"时写,**绝不覆盖已有的非零值**(那是拿一次采样去覆盖另一次,
+    没有依据),也**不写 0**(0 是"不知道",不是"没有")。
+    """
+    # url → (库里的 id, 已有的 read_num, 本轮**还没 flush** 的对象或 None)
+    # ⚠️ 第三个字段是必须的:同一轮里刚 `session.add` 的行**还没有 id**(flush 在函数末尾),
+    #    那时回填只能**直接改对象**;我第一版只按 id 回填,UPDATE 打在 id=0 上、
+    #    什么都没改 —— 而"cover 在前、列表在后"恰恰全发生在同一轮内,
+    #    所以那个 bug 会让这条修复在最常见的场景下完全失效(是测试当场抓出来的)。
+    existing: dict[str, tuple[int, int, WechatArticle | None]] = {}
+    backfilled = 0
+    for rid, u, rn in session.execute(
+            select(WechatArticle.id, WechatArticle.url, WechatArticle.read_num)
+            .where(WechatArticle.user_id == user_id, WechatArticle.url != "")).all():
+        existing[u.rstrip("/").strip()] = (int(rid), int(rn or 0), None)
     added: list[WechatArticle] = []
     for it in items:
         url = it["url"]
         title = (it.get("title") or "").strip()
         url_norm = url.rstrip("/").strip()
+        # 读数要在**去重之前**算出来 —— 已有行也要用它回填(见上)
+        preset_read = int(it.get("read_num") or 0)
+        preset_like = int(it.get("like_num") or 0)
         if url_norm in existing:
+            rid, old_read, obj = existing[url_norm]
+            if preset_read > 0 and old_read == 0:
+                if obj is not None:               # 本轮新插入、还没 id → 直接改对象
+                    obj.read_num = preset_read
+                    if preset_like:
+                        obj.zan_num = preset_like
+                elif rid > 0:
+                    session.execute(update(WechatArticle).where(WechatArticle.id == rid)
+                                    .values(read_num=preset_read,
+                                            zan_num=preset_like or WechatArticle.zan_num))
+                existing[url_norm] = (rid, preset_read, obj)
+                backfilled += 1
             continue
         if not title:
             continue  # 空标题无价值(无法展示/分析/搜索)
-        existing.add(url_norm)
         types = detect_pan_types(title)
-        preset_read = int(it.get("read_num") or 0)
-        preset_like = int(it.get("like_num") or 0)
         content = ""
         if _root.title_hits(title):
             if content_resolver:  # 免费源注入(微信读书正文);传 url 让实现方能对上本篇 reviewId
@@ -103,6 +138,13 @@ def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchm
                             quality=quality["quality_score"])
         session.add(row)
         added.append(row)
+        # 记进 existing:本轮内后续若出现**同一个 URL 但有精确读数**的条目(cover 先、列表后),
+        # 就能直接改这个对象(它此时还没有 id,见上方注释)
+        existing[url_norm] = (0, preset_read, row)
+    if backfilled:
+        # ⚠️ **要说出来**:回填是"补历史",量大的时候应该看得见 ——
+        # 静默回填 162 条与"本来就有"在日志里长得一样(本仓的老毛病)。
+        logger.info("回填阅读数 %s 条(benchmark=%s)", backfilled, benchmark.nickname)
     if added:
         session.flush()  # 拿到自增 id,同步写盘链归一化表(资源共振走索引查询)
         for r in added:

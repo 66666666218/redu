@@ -4409,3 +4409,84 @@ def test_没配_App_凭据时不能因此报错(session) -> None:
     wechat_monitor._weread_collect(1, b, _FakeWereadBlocked(), session,
                                    stats=stats, app_client=None)
     assert stats.get("weread_list_app_ok", 0) == 0
+
+
+# ------------------------------------------------ 阅读数回填(2026-10-05)
+
+def _mk_bench(session, name="回填号", bid="MP_WXS_BF"):
+    b = WechatBenchmark(user_id=1, nickname=name, weread_book_id=bid)
+    session.add(b)
+    session.commit()
+    return b
+
+
+def test_cover在前列表在后_同一篇也要拿到阅读数(session) -> None:
+    """★ **真实顺序**:`_weread_collect` 把 cover 放在 `items` **最前**,而 cover 不带
+    read_num;几秒后同一个号的文章列表才给出精确值。
+
+    修复前:第一条(cover)入库、第二条(有 read_num)被当重复丢掉 ⇒
+    **每号每轮正好少 1 篇阅读数**(实测 10 篇里 9 篇有,缺的正是最新那篇)。
+    """
+    b = _mk_bench(session)
+    url = "https://mp.weixin.qq.com/s/coverfirst"
+    items = [{"title": "最新一篇", "url": url, "publish_at": datetime.now()},   # cover:无读数
+             {"title": "最新一篇", "url": url, "read_num": 4321,
+              "publish_at": datetime.now()}]                                     # 列表:有读数
+    wechat_monitor._insert_new_articles(session, 1, b, items, source="listen",
+                                        require_pan=False)
+    session.commit()
+    row = session.scalar(select(WechatArticle).where(WechatArticle.url == url))
+    assert row is not None
+    assert row.read_num == 4321, "同一篇的精确阅读数必须回填上去,不能被去重丢掉"
+
+
+def test_历史积压行也要补上阅读数(session) -> None:
+    """★ 断供期入库的那批(如 2026-09-29~10-05 的 162 篇)全是 `read_num=0`,
+    之后列表再给出精确值也**没人回填** —— 这是"阅读数恒 0"的第二根因。
+    """
+    b = _mk_bench(session, "积压号", "MP_WXS_OLD")
+    old = WechatArticle(user_id=1, author="积压号", title="旧文",
+                        url="https://mp.weixin.qq.com/s/old0", read_num=0, source="listen",
+                        benchmark_id=b.id, created_at=datetime.now())
+    session.add(old)
+    session.commit()
+    wechat_monitor._insert_new_articles(
+        session, 1, b,
+        [{"title": "旧文", "url": "https://mp.weixin.qq.com/s/old0", "read_num": 99}],
+        source="listen", require_pan=False)
+    session.commit()
+    assert session.get(WechatArticle, old.id).read_num == 99
+
+
+def test_已有非零读数_绝不覆盖(session) -> None:
+    """⚠️ 反向:**不许拿一次采样覆盖另一次采样** —— 那没有依据。
+    只在"旧值缺、新值有"时写。
+    """
+    b = _mk_bench(session, "不覆盖号", "MP_WXS_KEEP")
+    row = WechatArticle(user_id=1, author="不覆盖号", title="已有读数",
+                        url="https://mp.weixin.qq.com/s/keep1", read_num=500, source="listen",
+                        benchmark_id=b.id, created_at=datetime.now())
+    session.add(row)
+    session.commit()
+    wechat_monitor._insert_new_articles(
+        session, 1, b,
+        [{"title": "已有读数", "url": "https://mp.weixin.qq.com/s/keep1", "read_num": 7}],
+        source="listen", require_pan=False)
+    session.commit()
+    assert session.get(WechatArticle, row.id).read_num == 500, "非零旧值不能被覆盖"
+
+
+def test_新值为0时不当成回填(session) -> None:
+    """0 是"**不知道**",不是"没有" ⇒ 不许拿 0 去写。"""
+    b = _mk_bench(session, "零值号", "MP_WXS_ZERO")
+    row = WechatArticle(user_id=1, author="零值号", title="零值",
+                        url="https://mp.weixin.qq.com/s/zero1", read_num=0, source="listen",
+                        benchmark_id=b.id, created_at=datetime.now())
+    session.add(row)
+    session.commit()
+    wechat_monitor._insert_new_articles(
+        session, 1, b,
+        [{"title": "零值", "url": "https://mp.weixin.qq.com/s/zero1", "read_num": 0}],
+        source="listen", require_pan=False)
+    session.commit()
+    assert session.get(WechatArticle, row.id).read_num == 0  # 无变化,不应报错
