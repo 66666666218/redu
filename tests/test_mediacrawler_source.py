@@ -173,3 +173,81 @@ class TestExplain:
         """认不出来的原因**原样带出** —— 别自作主张翻译成一句含糊的话,那是毁证据。"""
         tail = "Traceback: some_other_random_failure at foo.py:12"
         assert mc._explain(tail) == tail
+
+
+# ------------------------------------------------ 残留浏览器清理(2026-10-05)
+
+class TestKillStaleBrowsers:
+    """★ **2026-10-05 实测事故**:小红书连挂几天,**根因不是登录过期**。
+
+    链路:`subprocess.run(timeout=600)` 超时**只杀直接子进程**,而 Edge 是 `main.py`
+    **另起**的、不在它的进程树里 ⇒ 留在那儿占着 profile ⇒ 下一个跑同平台的进程**撞锁**
+    ⇒ 又失败 ⇒ 又留一批。**失败会自我延续。**
+
+    实测:今早 09:00 那轮留下 **10 个** Edge(`xhs` 档案),一直占着,
+    连 **Cookies 文件都读不出来**(PermissionError)。而档案里
+    **`web_session` 到期 2027-10-05** —— **登录一直是好的**。
+    """
+
+    def test_非_windows_直接返回0(self, monkeypatch) -> None:
+        """本模块只在 Windows 上用,但别让别的平台炸。"""
+        import app.services.mediacrawler_source as mc
+
+        monkeypatch.setattr("sys.platform", "linux")
+        assert mc.kill_stale_browsers() == 0
+
+    def test_按输出里的_pid_计数(self, monkeypatch) -> None:
+        import subprocess
+
+        import app.services.mediacrawler_source as mc
+
+        calls = {}
+
+        class _P:
+            stdout = b"1234\n5678\n"
+
+        def fake_run(cmd, **kw):
+            calls["cmd"] = cmd
+            return _P()
+
+        monkeypatch.setattr("sys.platform", "win32")
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert mc.kill_stale_browsers() == 2
+
+    def test_只杀带_MediaCrawler_路径的_不碰用户的浏览器(self, monkeypatch) -> None:
+        """⚠️ **这条是安全阀**:机器上实测 36 个 Edge 里只有 10 个是我们的,
+        杀错就是**把用户正在用的浏览器关了**。所以命令行里必须有 MediaCrawler 的路径。
+        """
+        import subprocess
+
+        import app.services.mediacrawler_source as mc
+
+        calls = {}
+
+        class _P:
+            stdout = b""
+
+        def fake_run(cmd, **kw):
+            calls["ps"] = cmd[-1]
+            return _P()
+
+        monkeypatch.setattr("sys.platform", "win32")
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        mc.kill_stale_browsers()
+        ps = calls["ps"]
+        assert "MediaCrawler" in ps and "browser_data" in ps, \
+            f"筛选条件必须限定在 MediaCrawler 的档案目录,实际是:{ps[:120]}"
+        assert "msedge.exe" in ps
+
+    def test_清理失败不能挡住采集(self, monkeypatch) -> None:
+        """它是**善后**,不是主流程 —— 失败就返回 0,绝不抛。"""
+        import subprocess
+
+        import app.services.mediacrawler_source as mc
+
+        def boom(*a, **k):
+            raise OSError("powershell 不在 PATH")
+
+        monkeypatch.setattr("sys.platform", "win32")
+        monkeypatch.setattr(subprocess, "run", boom)
+        assert mc.kill_stale_browsers() == 0

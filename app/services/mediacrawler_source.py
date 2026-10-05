@@ -69,6 +69,42 @@ def available() -> tuple[bool, str]:
     return True, "ok"
 
 
+def kill_stale_browsers() -> int:
+    """杀掉 **MediaCrawler 自己起的、残留没退** 的 Edge;返回杀掉的个数。
+
+    ⚠️ **为什么必须做**(2026-10-05 实测):`subprocess.run(timeout=...)` 超时**只杀直接子进程**,
+    而 `main.py` 是**另起 Edge** 的 —— Edge 不在它的进程树里,于是**留在那儿**。
+    实测今早 09:00 小红书超时后留下 **10 个** Edge,一直占着那个 profile;
+    下一个跑同平台的进程就会**撞锁**,于是失败会**自我延续**。
+
+    ⚠️ **只杀命令行里带 MediaCrawler 路径的**:机器上还有用户自己的 Edge
+    (实测 36 个里面只有 10 个是我们的)—— **杀错就是把人正在用的浏览器关了**。
+    ⚠️ 非 Windows 直接返回 0(本模块只在 Windows 上跑)。
+    """
+    import subprocess
+    import sys
+
+    if sys.platform != "win32":
+        return 0
+    ps = (
+        "Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" | "
+        "Where-Object { $_.CommandLine -like '*MediaCrawler*browser_data*' } | "
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; "
+        "Write-Output $_.ProcessId }"
+    )
+    try:
+        p = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                           capture_output=True, timeout=60)
+        n = len([x for x in p.stdout.decode("utf-8", "ignore").split() if x.strip().isdigit()])
+    except Exception:  # noqa: BLE001 - 清理失败绝不能挡住采集
+        logger.debug("清理残留浏览器失败", exc_info=True)
+        return 0
+    if n:
+        logger.warning("清掉 %d 个残留的 MediaCrawler 浏览器进程(它们会占住 profile、"
+                       "让下一轮同平台撞锁)", n)
+    return n
+
+
 def _write_config(keywords: list[str]) -> None:
     """把关键词与输出格式写进它的 base_config.py(原地改两行,保持其余不动)。"""
     text = CONFIG.read_text(encoding="utf-8")
@@ -101,20 +137,29 @@ def crawl(platform: str, keywords: list[str], timeout: int = 600) -> list[dict]:
         raise MediaCrawlerError(f"写配置失败:{exc}") from exc
     cmd = [str(VENV_PY), "main.py", "--platform", pid, "--lt", "qrcode", "--type", "search"]
     started = time.time()          # ⚠️ 必须在**起进程之前**取:用来判"哪个文件是本轮写的"
+    # ⚠️ **开跑前先清残留**(2026-10-05):上一轮的 Edge 若没退,会占着同一个 profile,
+    # 这次起来就撞锁 —— 失败于是**自我延续**(实测小红书就这么连挂几天)。
+    kill_stale_browsers()
     try:
-        proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        # 最常见的无人值守失败:等扫码等到超时(600s)。必须冒泡,否则这轮会被当成"没线索"。
-        raise MediaCrawlerError(f"{platform} 超时({timeout}s)——多半卡在扫码登录") from exc
-    except OSError as exc:
-        raise MediaCrawlerError(f"{platform} 启动失败:{exc}") from exc
-    if proc.returncode != 0:
-        tail = (proc.stderr or b"")[-300:].decode("utf-8", "ignore")
-        raise MediaCrawlerError(f"{platform} 退出码 {proc.returncode}:{_explain(tail)}")
-    out = _read_results(platform, since=started)
-    if not out:
-        _raise_if_all_keywords_empty(platform, proc, keywords)
-    return out
+        try:
+            proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            # 最常见的无人值守失败:等扫码等到超时(600s)。必须冒泡,否则这轮会被当成"没线索"。
+            raise MediaCrawlerError(f"{platform} 超时({timeout}s)——多半卡在扫码登录") from exc
+        except OSError as exc:
+            raise MediaCrawlerError(f"{platform} 启动失败:{exc}") from exc
+        if proc.returncode != 0:
+            tail = (proc.stderr or b"")[-300:].decode("utf-8", "ignore")
+            raise MediaCrawlerError(f"{platform} 退出码 {proc.returncode}:{_explain(tail)}")
+        out = _read_results(platform, since=started)
+        if not out:
+            _raise_if_all_keywords_empty(platform, proc, keywords)
+        return out
+    finally:
+        # ⚠️ **不论成败都清**:`subprocess.run(timeout=)` 只杀直接子进程,
+        # 而 Edge 是 `main.py` **另起**的、不在它的进程树里 ⇒ 超时那轮**必然**留下它们。
+        # 不清就是"这次失败 → 占住 profile → 下次也失败"(2026-10-05 实测 10 个残留)。
+        kill_stale_browsers()
 
 
 def _explain(tail: str) -> str:

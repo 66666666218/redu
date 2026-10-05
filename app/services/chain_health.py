@@ -128,6 +128,46 @@ def check_dependencies() -> list[dict]:
     return out
 
 
+def check_leaked_browsers() -> list[dict]:
+    """①b **残留的采集浏览器** —— 它们占住 profile,会让下一轮同平台**撞锁**。
+
+    ⚠️ **为什么必须单独看**(2026-10-05 实测):小红书连挂几天,**根因不是登录过期**
+    —— 档案里 `web_session` 到期 **2027-10-05**,登录一直是好的;
+    真正的原因是**上一轮超时留下的 10 个 Edge 一直占着那个 profile**
+    (`subprocess.run(timeout=)` 只杀直接子进程,而 Edge 是 `main.py` **另起**的),
+    于是失败**自我延续**。
+
+    这类东西**不看进程就发现不了**:运行记录里只有一行"xiaohongshu 抓取失败",
+    与"要重新扫码"长得**一模一样**,而处置完全相反(一个是清理残留,一个是人工扫码)。
+
+    ⚠️ 判据只看**命令行里带 MediaCrawler 路径的**:机器上还有用户自己的浏览器,
+    数错了会得出"采个集开 36 个浏览器"这种离谱结论。
+    """
+    import sys
+
+    if sys.platform != "win32":
+        return [{"name": "采集浏览器残留", "level": GREEN, "detail": "非 Windows,不适用"}]
+    try:
+        import subprocess
+
+        ps = ("(Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" | "
+              "Where-Object { $_.CommandLine -like '*MediaCrawler*browser_data*' } | "
+              "Measure-Object).Count")
+        p = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                           capture_output=True, timeout=60)
+        n = int((p.stdout or b"0").decode("utf-8", "ignore").strip() or 0)
+    except Exception as exc:  # noqa: BLE001 - 查不到就说不知道,别报成"有残留"
+        return [{"name": "采集浏览器残留", "level": YELLOW,
+                 "detail": f"查不到({type(exc).__name__})"}]
+    if n == 0:
+        return [{"name": "采集浏览器残留", "level": GREEN, "detail": "0 个(干净)"}]
+    return [{"name": "采集浏览器残留", "level": YELLOW,
+             "detail": f"**{n} 个** MediaCrawler 的 Edge 没退,正占着 profile ⇒ "
+                       f"该平台下一轮会**撞锁**。现在采集前会自动清(`mediacrawler_source."
+                       f"kill_stale_browsers`),下一轮跑到就会好;若持续不为 0 说明"
+                       f"**有进程逃出了清理**"}]
+
+
 def check_credentials(db) -> list[dict]:
     """② 凭证层:各平台 Cookie 在不在、最后一次更新是什么时候。
 
@@ -346,7 +386,7 @@ def check_read_num_coverage(db, days: int = 3) -> list[dict]:
 
 def collect_sections(db) -> list[tuple[str, list[dict]]]:
     """跑完三层检查,返回 [(小标题, 结果列表)]。**只读**。调用方负责渲染/推送。"""
-    return [("依赖(容器/库/venv/档案)", check_dependencies()),
+    return [("依赖(容器/库/venv/档案)", check_dependencies() + check_leaked_browsers()),
             ("凭证(Cookie 在不在)", check_credentials(db)),
             ("产出(最近几次真跑出来的东西)", check_chains(db) + check_read_num_coverage(db))]
 
