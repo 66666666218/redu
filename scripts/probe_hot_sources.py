@@ -31,7 +31,9 @@ CANDIDATES: list[tuple[str, object]] = [
     ("solidot", RssSource("solidot", "https://www.solidot.org/index.rss", "Solidot")),
     ("aihot", RssSource("aihot", "https://aihot.virxact.com/feed/all.xml", "AI热点")),
     ("freebuf", RssSource("freebuf", "https://www.freebuf.com/feed", "FreeBuf")),
-    ("hackernews", RssSource("hackernews", "https://hnrss.org/frontpage?count=30", "HN")),
+    # ⚠️ HN 给**两个镜像**:实测两边可达性相反(远程:官方通/第三方 502;本机:反过来)
+    ("hackernews", RssSource("hackernews", ("https://news.ycombinator.com/rss",
+                                            "https://hnrss.org/frontpage?count=30"), "HN")),
     ("chongbuluo-latest", RssSource(
         "chongbuluo-latest", "https://www.chongbuluo.com/forum.php?mod=rss&view=newthread",
         "虫部落")),

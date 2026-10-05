@@ -13,7 +13,9 @@
 """
 from __future__ import annotations
 
+import html
 import json
+import re
 
 from curl_cffi import requests as creq
 
@@ -22,6 +24,11 @@ from sqlalchemy import func, select
 from app.utils import get_logger
 
 logger = get_logger(__name__)
+
+# ⚠️ **必须要求"看起来像标签"**(`<` 后面跟字母或 `/`)——用 `<[^>]*>` 会把
+# `标题里有 < 和 > 但没标签` 中间那段**当成标签吃掉**,那就从"清洗"变成"改写内容"了
+_RE_TAG = re.compile(r"</?[a-zA-Z][^>]{0,80}>")
+_RE_WS = re.compile(r"\s+")
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
@@ -84,6 +91,17 @@ class BilibiliSource(HotSource):
                 "extra": f"{it.get('tname') or ''} · 播放{it.get('stat', {}).get('view', 0)}",
             })
         return out
+
+
+def _clean_title(s: str) -> str:
+    """去掉标题里的 HTML 标签与实体,并压掉多余空白。
+
+    为什么要它:有的源把**正文片段**当标题给(实测 `wallstreetcn-quick` 回的是
+    `<p>菲律宾股指日内涨幅扩大至2%。</p>`),不洗就会**原样进推送卡片**。
+    ⚠️ 只做"去标签 + 解实体 + 压空白"这类**无损**清洗,不改写内容。
+    """
+    s = _RE_TAG.sub("", s or "")
+    return _RE_WS.sub(" ", html.unescape(s)).strip()
 
 
 def _pick(node, key: str):
@@ -393,7 +411,7 @@ class JsonListSource(HotSource):
         for it in rows:
             if not isinstance(it, dict):
                 continue
-            title = next((str(_pick(it, k) or "").strip() for k in self._title_keys
+            title = next((_clean_title(str(_pick(it, k) or "")) for k in self._title_keys
                           if _pick(it, k)), "")
             if not title:
                 continue
@@ -415,25 +433,40 @@ class RssSource(HotSource):
 
     ⚠️ 只用标准库解析(`xml.etree`),**不引新依赖**。
     ⚠️ 解析不出条目就抛错,不返回空(同上)。
+
+    `url` 可以给**多个**(按顺序试,第一个通就用)—— 这不是过度设计:
+    本仓是**跨两个网络**部署的(本机家宽 / 远程 VPS),实测 **同一个站两边可达性相反**
+    (`news.ycombinator.com` 远程 0.4s、本机超时;`hnrss.org` 本机通、远程稳定 502)。
+    只写一个 URL,就等于**有一侧永远是坏的**。
     """
 
-    def __init__(self, sid: str, url: str, label: str = "") -> None:
+    def __init__(self, sid: str, url: str | tuple[str, ...], label: str = "") -> None:
         self.id = sid
-        self._url = url
+        self._urls: tuple[str, ...] = (url,) if isinstance(url, str) else tuple(url)
         self._label = label or sid
 
-    def fetch(self, limit: int = 30) -> list[dict]:
-        try:
-            import xml.etree.ElementTree as ET
+    def _load(self, url: str):
+        import xml.etree.ElementTree as ET
 
-            r = creq.get(self._url, headers={"User-Agent": _UA}, impersonate="chrome", timeout=15)
-            root = ET.fromstring(r.content)                       # noqa: S314 - 是我们信任的源
-        except Exception as exc:  # noqa: BLE001
-            raise HotSourceError(f"{self.id} RSS 拉取/解析失败:{type(exc).__name__}") from exc
+        r = creq.get(url, headers={"User-Agent": _UA}, impersonate="chrome", timeout=15)
+        return ET.fromstring(r.content)                           # noqa: S314 - 是我们信任的源
+
+    def fetch(self, limit: int = 30) -> list[dict]:
+        root, errs = None, []
+        for url in self._urls:                                    # 多镜像:第一个通的就用
+            try:
+                root = self._load(url)
+                break
+            except Exception as exc:  # noqa: BLE001
+                errs.append(f"{url.split('/')[2]}:{type(exc).__name__}")
+        if root is None:
+            # ⚠️ 全挂了要把**每个镜像各自的错**都带出来 —— 只报最后一个会掩盖"哪几个镜像坏了"
+            raise HotSourceError(f"{self.id} RSS 全镜像失败({', '.join(errs)})")
         items = (root.findall(".//item") or root.findall(".//{http://www.w3.org/2005/Atom}entry"))
         out = []
         for it in items:
-            t = (it.findtext("title") or it.findtext("{http://www.w3.org/2005/Atom}title") or "").strip()
+            t = _clean_title(
+                it.findtext("title") or it.findtext("{http://www.w3.org/2005/Atom}title") or "")
             if not t:
                 continue
             link = (it.findtext("link") or it.findtext("{http://www.w3.org/2005/Atom}link") or "")
@@ -592,7 +625,11 @@ SOURCES: dict[str, HotSource] = {
         title_keys=("title", "content"), ok_codes=(20000, 0, None), extra_label="华尔街见闻快讯",
         headers={"Referer": "https://wallstreetcn.com/"}),
     # -- **新接平台**(原本连 newsnow 都没有,48 个口径里多出来的) --
-    "hackernews": RssSource("hackernews", "https://hnrss.org/frontpage?count=30", "HN"),
+    # ⚠️ **给两个镜像**:实测两边可达性**相反** —— 远程容器打官方 `news.ycombinator.com/rss`
+    # 三次全 200/0.4s、打第三方 `hnrss.org` **稳定 502**;本机家宽则反过来(官方超时、
+    # hnrss 通)。只写一个 URL 就等于**有一侧永远是坏的**。官方放前面(实际跑它的在远程)。
+    "hackernews": RssSource("hackernews", ("https://news.ycombinator.com/rss",
+                                           "https://hnrss.org/frontpage?count=30"), "HN"),
     # ---- newsnow 长尾(自部署容器;知乎 401 等无法直连的平台走这里) ----
     # 2026-10-01 扩容:9 个 → 40 个。容器实测支持 **44 个**,除下列之外全接 ——
     #   · `bilibili-*` / `douban`:我们已有**自研直连**(命门自持,不依赖 newsnow)
