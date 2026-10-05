@@ -191,7 +191,7 @@ def test_discover_dedupes_across_keywords_in_one_round(session, monkeypatch) -> 
         {"uid": "same", "name": "网盘资源商行", "url": "", "snippet": "",
          "pan_link": "", "looks_like_pan": True},
     ]})
-    monkeypatch.setattr(cp, "_account_keywords", lambda s: ["词A", "词B", "词C"])
+    monkeypatch.setattr(cp, "_account_keywords", lambda *a, **k: ["词A", "词B", "词C"])
     monkeypatch.setattr("app.services.cookie_store.get_cookies", lambda s, u: {})
     out = cp.discover_cross_accounts(session, 1, keywords=["占位"])
     assert out["found"] == 3                # 三次搜索都命中
@@ -355,7 +355,7 @@ def test_discover_raises_when_every_search_fails(session, monkeypatch) -> None:
         raise cp.SearchSourceError("B站返回 code=-412 请求被拦截")
 
     monkeypatch.setattr(cp, "SEARCHERS", {"bilibili": _boom})
-    monkeypatch.setattr(cp, "_account_keywords", lambda s: ["词A", "词B"])
+    monkeypatch.setattr(cp, "_account_keywords", lambda *a, **k: ["词A", "词B"])
     monkeypatch.setattr("app.services.cookie_store.get_cookies", lambda s, u: {})
     with pytest.raises(cp.SearchSourceError) as ei:
         cp.discover_cross_accounts(session, 1, keywords=["占位"])
@@ -374,7 +374,7 @@ def test_discover_keeps_going_when_some_searches_fail(session, monkeypatch) -> N
                  "snippet": "", "pan_link": "", "looks_like_pan": True}]
 
     monkeypatch.setattr(cp, "SEARCHERS", {"bilibili": _flaky})
-    monkeypatch.setattr(cp, "_account_keywords", lambda s: ["词A", "词B", "词C"])
+    monkeypatch.setattr(cp, "_account_keywords", lambda *a, **k: ["词A", "词B", "词C"])
     monkeypatch.setattr("app.services.cookie_store.get_cookies", lambda s, u: {})
     out = cp.discover_cross_accounts(session, 1, keywords=["占位"])
     assert out["status"] == "ok" and out["failed"] == 1 and out["new"] == 2
@@ -412,3 +412,30 @@ def test_cross_account_tick_records_failure(session, monkeypatch) -> None:
     cp.cross_account_tick()
     runs = session.scalars(select(RunRecord).where(RunRecord.kind == "cross_account_discover")).all()
     assert len(runs) == 1 and runs[0].status == "failed" and "-412" in runs[0].detail
+
+
+def test_兜底词表必须与_settings_默认一致() -> None:
+    """★ **防漂移守卫**(2026-10-05)。
+
+    `discover_cross_accounts` 的 `settings` 参数**没有默认值**,而调用方(含大量测试)
+    常常不传 ⇒ `_account_keywords` 里那份 `_DEFAULT_BILI_KEYWORDS` **必须有,且得对**。
+    ⚠️ 这条链原来就靠这个兜底工作 —— 2026-10-05 我改成轮转时**顺手去掉了它**,
+    当场被 5 条测试打红(`bili_keywords` 变空 ⇒ 一个平台都没搜)。
+    两处默认值飘了就会重现那种"静默什么都不做"。
+    """
+    from config.settings import Settings
+
+    from app.services import cross_accounts as cp
+
+    assert cp._DEFAULT_BILI_KEYWORDS == Settings.model_fields["cross_bili_keywords"].default, (
+        "两处默认词表飘了 —— 改一处必须改另一处")
+    # 窗口必须**严格小于**池子,否则没有轮转可言(每轮都用全部词 ⇒ 发现饱和)
+    pool = [k.strip() for k in cp._DEFAULT_BILI_KEYWORDS.split(",") if k.strip()]
+    assert cp._BILI_WINDOW < len(pool), "词池必须大于窗口,否则'轮转'是假的"
+
+
+def test_settings_为_None_时也要出词() -> None:
+    """反向:把兜底再去掉一次,这条必须红。"""
+    from app.services import cross_accounts as cp
+
+    assert cp._account_keywords(None, None, 3) == ["网盘资源", "夸克网盘", "百度网盘"]

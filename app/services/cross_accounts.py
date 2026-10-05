@@ -465,7 +465,8 @@ def discover_cross_accounts(session: Session, user_id: int, settings=None,
     # 组装 (平台, 搜索词) 任务表:内容平台配资源词,账号垂直平台配行业词(见 docstring)。
     jobs: list[tuple[str, str]] = [(p, kw) for kw in keywords
                                    for p in platforms if p not in ACCOUNT_PLATFORMS]
-    jobs += [(p, kw) for kw in _account_keywords(settings)
+    bili_kws = _account_keywords(settings, session, _BILI_WINDOW)
+    jobs += [(p, kw) for kw in bili_kws
              for p in platforms if p in ACCOUNT_PLATFORMS]
 
     found, new, items = 0, 0, []
@@ -523,17 +524,72 @@ def discover_cross_accounts(session: Session, user_id: int, settings=None,
     logger.info("跨平台发现:关键词 %d × 直连平台 %d → 命中 %d,新增 %d",
                 len(keywords), len(platforms), found, new)
     return {"status": "ok", "keywords": keywords, "platforms": platforms,
+            "bili_keywords": bili_kws,      # 本轮实际用的行业词(供运行记录/排障)
             "found": found, "new": new, "items": items, "failed": len(failed)}
 
 
-def _account_keywords(settings) -> list[str]:
+_BILI_CURSOR_KEY = "cross_bili_keyword_cursor"
+# 每轮取几个行业词(与 `settings.cross_discover_keywords` 同一条纪律:**宁少勿多**,
+# 每个词都是一次平台请求,风控盯的就是访问量)。窗口小于池子 ⇒ 才谈得上轮转。
+_BILI_WINDOW = 3
+# ⚠️ **`settings=None` 时的兜底**。`discover_cross_accounts` 的 `settings` 参数**没有默认**,
+# 而调用方(含大量测试)常常不传 ⇒ 这里必须有兜底,否则词池为空、这条链**静默什么都不做**。
+# (2026-10-05 我改成轮转时**去掉了旧的兜底**,当场被 5 条测试打红 —— 那条链原本靠它工作。)
+# 与 `config.settings.cross_bili_keywords` 的默认**必须一致**,有测试钉住(见
+# `test_cross_accounts.py::test_兜底词表必须与_settings_默认一致`)。
+_DEFAULT_BILI_KEYWORDS = ("网盘资源,夸克网盘,百度网盘,迅雷网盘,UC网盘,"
+                          "影视网盘资源,漫剧资源,资料网盘,问卷资源")
+
+
+def _account_keywords(settings, session=None, window: int = 3) -> list[str]:
     """账号垂直平台(B站)的搜索词:**行业词**,不是资源词(理由见 `discover_cross_accounts`)。
 
     默认 "网盘资源/夸克网盘/百度网盘"——实测拿它搜 B站 用户,返回的号名里就写着网盘。
     想按自己的方向收窄,配 `CROSS_BILI_KEYWORDS` 加词(如 "影视网盘资源,漫剧资源")。
+
+    ⚠️ **2026-10-05:改成按窗口轮转**。此前是**每次把设置里所有词全用上**,而词是固定的
+    ⇒ **每周跑两轮挖到的永远是同一批号**。实测三个词各挖满一页(20 个)之后,
+    **59 个号全部停在 10-02**,此后三天 `新增0` —— **"每周两轮"的排期形同虚设**
+    (跑多少轮结果都一样)。这与抖音"热榜种子"是**同一类问题:词源不轮转 ⇒ 发现停摆**。
+
+    现在:词池可以配大,每轮只取 `window` 个,按游标轮转(池子 9 个、窗口 3 ⇒ 3 轮转一圈)。
+    轮转游标由 `cross_account_tick` 在**整轮跑完之后**推进(与 `category_topics` 同一手法:
+    中途失败不推进,免得白白跳过一个词)。
+
+    `session=None`(纯函数调用/测试)时只取前 `window` 个,不轮转。
     """
-    raw = getattr(settings, "cross_bili_keywords", "") or "网盘资源,夸克网盘,百度网盘"
-    return [k.strip() for k in raw.split(",") if k.strip()]
+    raw = getattr(settings, "cross_bili_keywords", "") or _DEFAULT_BILI_KEYWORDS
+    pool = [k.strip() for k in raw.split(",") if k.strip()]
+    if not pool:
+        return []
+    w = max(1, int(window or 1))
+    if session is None or len(pool) <= w:
+        return pool[:w]
+    start = _bili_cursor(session) % len(pool)
+    return [pool[(start + i) % len(pool)] for i in range(w)]
+
+
+def _bili_cursor(session) -> int:
+    from app.db.models import SystemConfig
+
+    row = session.scalar(select(SystemConfig).where(SystemConfig.key == _BILI_CURSOR_KEY))
+    try:
+        return int(row.value) if row and row.value else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def advance_bili_cursor(session, window: int = 3) -> None:
+    """把 B站行业词的窗口往前推一格(在**整轮跑完之后**调)。"""
+    from app.db.models import SystemConfig
+
+    row = session.scalar(select(SystemConfig).where(SystemConfig.key == _BILI_CURSOR_KEY))
+    nxt = str(_bili_cursor(session) + max(1, int(window or 1)))
+    if row is None:
+        session.add(SystemConfig(key=_BILI_CURSOR_KEY, value=nxt))
+    else:
+        row.value = nxt
+    session.commit()
 
 
 def library_search_word(title: str, limit: int = 16) -> str:
@@ -661,10 +717,18 @@ def cross_account_tick(settings=None) -> int:
             try:
                 out = discover_cross_accounts(db, uid, settings=settings)
                 total += out.get("new", 0)
+                # 把**本轮实际用的行业词**写进运行记录 —— 不写就看不出轮转有没有生效,
+                # 也看不出"某个词是不是一直挖不到东西"(与抖音那条"按词源分档"同一考虑)。
                 note = (f"命中{out.get('found', 0)} 新增{out.get('new', 0)}"
+                        + (f" B站词{'/'.join(out.get('bili_keywords') or [])}"
+                           if out.get("bili_keywords") else "")
                         + (f" 失败{out['failed']}" if out.get("failed") else ""))
                 _record_run(db, uid, "cross_account_discover", "success", note)
                 db.commit()
+                # ⚠️ 轮转游标在**整轮跑完之后**才推进(与 `category_topics.advance_category`
+                # 同一手法):中途失败不推进,免得白白跳过一个词。
+                if out.get("status") == "ok":
+                    advance_bili_cursor(db, _BILI_WINDOW)
             except Exception as exc:  # noqa: BLE001 - 单用户失败不影响其余
                 db.rollback()
                 logger.exception("跨平台发现失败 user=%s", uid)
