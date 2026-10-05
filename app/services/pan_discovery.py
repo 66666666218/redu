@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 import time
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.db.models import DiscoveredPanLink
 from app.utils import get_logger
@@ -100,6 +100,28 @@ def _alert_auth_expired(session, user_id: int, kind: str, message: str) -> None:
                         f"已发现的盘链会留 pending,恢复后自动重试。")
     except Exception:  # noqa: BLE001 - 告警自身失败不该影响转存结果
         logger.exception("登录态失效告警推送失败")
+
+
+def _alert_backlog(session, user_id: int, backlog_left: int, out: dict) -> None:
+    """积压超过阈值 → 推**管理员群**。
+
+    ⚠️ **为什么必须报**(2026-10-05 生产实测):一轮 **候选 44 条、只转存 3 条**,
+    库里堆了 **41 条 pending**,理由清一色「本轮转存额度用完」——**它们是健康的、能搬的链**,
+    纯粹被额度卡住;按当时 3 条/天要**两周**才清得完。而**运行记录一路 `success`**,
+    没有任何地方提到"还剩 41 条在排队" ⇒ **额度不足可以无声无息地持续几周**。
+    这与本仓反复踩的「静默失败 = 假成功」完全同源:系统说自己好,实际上在堆积。
+    """
+    try:
+        from app.services.alert_service import notify_incident
+
+        notify_incident(session, user_id, "pan_discovery",
+                        f"网盘发现积压 {backlog_left} 条(转存额度跟不上发现)",
+                        f"本轮候选 {out.get('found', 0)} 条、成功 {out.get('ok', 0)} 条,"
+                        f"仍积压 **{backlog_left}** 条(pending/failed)。"
+                        f"积压多半是「额度用完」而非链失效 —— 可调大 `PAN_DISCOVERY_TRANSFER_LIMIT`"
+                        f"(积压额度)或 `PAN_DISCOVERY_FRESH_LIMIT`(新发现额度)加快清空。")
+    except Exception:  # noqa: BLE001 - 告警自身失败不该影响本轮结果
+        logger.exception("积压告警推送失败")
 
 
 def _resource_name_hints(title: str) -> list[str]:
@@ -479,28 +501,39 @@ def sync(session, user_id: int, settings=None) -> dict:
             continue
         _seen.add(c["origin_url"])
         cands.append(c)
-    budget = int(getattr(settings, "pan_discovery_transfer_limit", 3) or 0)
+    # 两份额度(2026-10-05,理由见 settings 里 `pan_discovery_transfer_limit` 的注释):
+    # **积压**吃大额慢慢清,**新发现**保底推进 —— 否则积压排在最前且吃满额度,fresh 永远轮不到。
+    backlog_budget = int(getattr(settings, "pan_discovery_transfer_limit", 10) or 0)
+    fresh_budget = int(getattr(settings, "pan_discovery_fresh_limit", 3) or 0)
+    backlog_urls = {c["origin_url"] for c in backlog}
     ok = skipped = failed = pending = 0
     reused = 0                     # **复用了别的盘已有的链**(省下一次转存)
     items: list[dict] = []
     for c in cands:
+        # 这条候选是**存量待办**还是**本轮新搜到的**?决定吃哪份额度(见上面两行注释)
+        is_backlog = c["origin_url"] in backlog_urls
+        src = "积压" if is_backlog else "新发现"
         # **三盘互通**(2026-10-05 用户口径):先看**别的网盘**有没有这个资源。
         # 有 ⇒ **不再转存**,直接把已有那条链推出去 —— 省空间、省额度、少一次写操作。
-        # ⚠️ 这一步**不花 transfer 额度**(没调转存接口),所以放在 budget 判断之前。
+        # ⚠️ 这一步**不花 transfer 额度**(没调转存接口),所以放在额度判断之前。
         have = already_have(session, user_id, c["title"])
         if have:
             status = "ok"
             message = f"库里已有(跳过转存,直接复用该盘):{str(have.get('pan_url') or '')[:60]}"
             our, code = str(have.get("my_link") or ""), ""
             reused += 1
-        elif budget <= 0:
-            status, message, our, code = "pending", "本轮转存额度用完", "", ""
+        elif (backlog_budget if is_backlog else fresh_budget) <= 0:
+            # 消息里**写清是哪份额度**用完 —— 否则看日志分不出"积压没清完"和"新发现被挡"
+            status, message, our, code = "pending", f"本轮{src}额度用完", "", ""
         else:
             res = transfer_pan_url(session, user_id, c["origin_url"], settings, c["title"])
             status, message = res["status"], res["message"]
             our, code = res["our_url"], res["code"]
             if status == "ok":
-                budget -= 1
+                if is_backlog:
+                    backlog_budget -= 1
+                else:
+                    fresh_budget -= 1
         row = exist.get(c["origin_url"])
         if row is None:
             row = DiscoveredPanLink(user_id=user_id, origin_url=c["origin_url"][:500])
@@ -522,9 +555,23 @@ def sync(session, user_id: int, settings=None) -> dict:
         elif status == "failed":
             failed += 1
     session.commit()
-    logger.info("网盘发现:词 %d 个 → 候选 %d 条 → 转存成功 %d", len(keywords), len(cands), ok)
+    # ⚠️ **积压必须被算出来并说出来**(2026-10-05)。原来这里只记「候选 N 转存 M」——
+    # 而**积压恰恰是看不见的那一半**:实测一轮候选 44、转存 3,库里静静躺着 41 条
+    # `pending`,运行记录一路 `success`。没人会去查"还剩多少没搬",于是额度不足
+    # 可以无声无息地持续几周(与「静默失败 = 假成功」同源)。
+    backlog_left = int(session.scalar(
+        select(func.count()).select_from(DiscoveredPanLink).where(
+            DiscoveredPanLink.user_id == user_id,
+            DiscoveredPanLink.status.in_(("pending", "failed")))) or 0)
+    logger.info("网盘发现:词 %d 个 → 候选 %d 条 → 转存成功 %d(其中复用已有 %d);"
+                "**积压剩 %d 条**(积压额度 %d / 新发现额度 %d)",
+                len(keywords), len(cands), ok, reused, backlog_left,
+                int(getattr(settings, "pan_discovery_transfer_limit", 10) or 0),
+                int(getattr(settings, "pan_discovery_fresh_limit", 3) or 0))
     return {"status": "ok", "found": len(cands), "ok": ok, "skipped": skipped,
-            "pending": pending, "failed": failed, "reused": reused, "items": items}
+            "pending": pending, "failed": failed, "reused": reused, "items": items,
+            "backlog_size": len(backlog),        # 本轮开始时**排队等搬**的存量
+            "backlog_left": backlog_left}        # 本轮结束时**仍**在排队的
 
 
 def push_items(items: list[dict], settings) -> bool:
@@ -583,8 +630,15 @@ def pan_discovery_tick(settings=None) -> int:
                 total += out.get("ok", 0)
                 if out.get("items"):
                     push_items(out["items"], settings)
+                # 运行记录里**必须带上积压数** —— 只写「候选N 转存M」的话,一个持续
+                # 堆积的系统看起来和健康的系统一模一样(2026-10-05 实测踩到)。
                 _record_run(db, uid, "pan_discovery", "success",
-                            f"候选{out.get('found', 0)} 转存{out.get('ok', 0)}")
+                            f"候选{out.get('found', 0)} 转存{out.get('ok', 0)} "
+                            f"复用{out.get('reused', 0)} **积压{out.get('backlog_left', 0)}**")
+                threshold = int(getattr(settings, "pan_discovery_backlog_alert", 60) or 0)
+                left = int(out.get("backlog_left") or 0)
+                if threshold and left >= threshold:
+                    _alert_backlog(db, uid, left, out)
                 db.commit()
             except Exception as exc:  # noqa: BLE001 - 单用户失败不影响其余
                 db.rollback()

@@ -34,7 +34,10 @@ class _S:
     feishu_webhook = ""
     feishu_secret = ""
     pan_discovery_keywords = 3
-    pan_discovery_transfer_limit = 2
+    # 两份额度(2026-10-05 拆开):**积压**与**新发现**各算各的,见 `sync()`。
+    # 单测里都设 2,好让"额度"这件事一眼可算。
+    pan_discovery_transfer_limit = 2          # 积压额度
+    pan_discovery_fresh_limit = 2             # 新发现额度
     # ⚠️ **单测里必须关掉贴吧源**:它走 MediaCrawler,一跑就是 30s+ 真浏览器(实测一次
     # 让本文件从 9s 涨到 259s)。要测它的分支请单独 patch `crawl`,别让它出网。
     pan_discovery_tieba = False
@@ -356,12 +359,65 @@ def test_sync_transfers_within_budget_and_persists(session, monkeypatch) -> None
                             "status": "ok", "our_url": f"OUR-{url[-1]}",
                             "code": "1", "message": ""})
 
-    out = pd.sync(session, 1, settings=_S())            # 额度 = 2
+    out = pd.sync(session, 1, settings=_S())            # 新发现额度 = 2
     assert out["status"] == "ok" and out["ok"] == 2
     rows = session.scalars(select(DiscoveredPanLink).order_by(DiscoveredPanLink.id)).all()
     assert len(rows) == 3
     assert [r.status for r in rows] == ["ok", "ok", "pending"]     # 第三条超额度
-    assert rows[0].our_url == "OUR-0" and rows[2].message == "本轮转存额度用完"
+    # ⚠️ 消息里**要写清是哪份额度**用完(积压 / 新发现)—— 否则看日志分不出
+    # "积压没清完"和"新发现被挡",而这两件事的处置完全不同。
+    assert rows[0].our_url == "OUR-0" and rows[2].message == "本轮新发现额度用完"
+    assert out["backlog_left"] == 1, "本轮结束时还剩 1 条在排队,必须报出来"
+
+
+def test_积压与新发现各吃各的额度_互不饿死(session, monkeypatch) -> None:
+    """★ **这条测试防的就是本功能要解决的那个问题本身**。
+
+    2026-10-05 实测:一轮 **候选 44 条、只转存 3 条**,库里堆了 41 条 healthy pending,
+    理由清一色「额度用完」。而积压在 `cands` 里**排在最前**,单额度下它会把额度吃满
+    ⇒ **本轮真正新搜到的资源一条都轮不上**,可新资源的时效性恰恰最强(热点过了就没意义)。
+
+    所以额度拆成两份,这里钉住"两份额度都真的被用上" —— 否则改回单额度、或把
+    两份算成同一份,这条会立刻红。
+    """
+    class _S2(_S):
+        pan_discovery_transfer_limit = 1          # 积压额度 1
+        pan_discovery_fresh_limit = 1             # 新发现额度 1
+
+    # 库里先有 2 条**积压**(等得最久)
+    session.add_all([
+        DiscoveredPanLink(user_id=1, platform="zhihu", title="旧1", status="pending",
+                          origin_url="https://pan.quark.cn/s/OLD1"),
+        DiscoveredPanLink(user_id=1, platform="zhihu", title="旧2", status="pending",
+                          origin_url="https://pan.quark.cn/s/OLD2"),
+    ])
+    session.commit()
+
+    monkeypatch.setattr("app.services.douyin_leads.search_keywords",
+                        lambda s, u, t, st: ["甲"])
+    # ⚠️ 关掉"三盘互通":否则命中的候选会被判"库里已有"而不走转存,数不出额度
+    monkeypatch.setattr(pd, "already_have", lambda s, u, title: None)
+    monkeypatch.setattr(pd, "find_candidates", lambda *a, **k: [
+        {"platform": "zhihu", "origin_url": "https://pan.quark.cn/s/NEW1",
+         "title": "新1", "author": "a", "source_url": "u"},
+        {"platform": "zhihu", "origin_url": "https://pan.quark.cn/s/NEW2",
+         "title": "新2", "author": "a", "source_url": "u"}])
+    calls: list[str] = []
+    monkeypatch.setattr(pd, "transfer_pan_url",
+                        lambda s, u, url, st=None, snip="": (
+                            calls.append(url) or
+                            {"status": "ok", "our_url": "OUR", "code": "", "message": ""}))
+
+    out = pd.sync(session, 1, settings=_S2())
+
+    assert len(calls) == 2, f"积压与新发现各留 1 份额度,应转 2 条,实际 {calls}"
+    assert any("OLD" in u for u in calls), f"积压那条没被搬:{calls}"
+    assert any("NEW" in u for u in calls), f"**新发现被积压饿死了** —— 只搬了 {calls}"
+    assert out["ok"] == 2 and out["backlog_size"] == 2, "积压 2 条、共成功 2 条"
+    # ⚠️ `backlog_left` 是**队列深度**(所有 pending/failed),**不只是原来那批积压** ——
+    # 本轮没轮上的新发现也仍在队里,所以这里是 2(OLD2 + NEW2),不是 1。
+    # 用"队列深度"而不是"原积压剩几条"是有意的:告警要问的是"**还有多少没搬完**"。
+    assert out["backlog_left"] == 2, "OLD2 + NEW2 仍排队 ⇒ 队列深度 2"
 
 
 def test_sync_ignores_already_known_urls(session, monkeypatch) -> None:
