@@ -27,6 +27,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+# Windows 控制台默认 GBK,直接 print 非 ASCII(如 ❌)→ UnicodeEncodeError。
+# ⚠️ 本脚本**就是靠 ❌ 那几行报问题**,所以缺了这行不是"显示难看",而是**报错清单打不出来**:
+#    2026-10-05 实测它正好在打印"注册了却从没执行过"时崩掉,退出码非 0、清单全无。
+#    (其余 scripts/ 下的脚本都有这一行,这个漏了。)
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from apscheduler.schedulers.background import BackgroundScheduler  # noqa: E402
 
@@ -92,15 +97,24 @@ def classify_missing(jobs, beats, now: datetime, baseline: datetime | None
                      ) -> tuple[list[str], list[str]]:
     """把**没有心跳**的作业分成两类,别把"还没到点"报成"从没跑过"。
 
-    返回 `(真·漏跑, 还没到点)`。`baseline` = 心跳表最早一条(机制上线时刻);
-    为 None(表还空着)时无从判断,一律归入"真·漏跑"(维持旧行为,不假装没事)。
+    返回 `(真·漏跑, 还没到点)`。
+
+    ⚠️ **基线要按作业各算各的**(2026-10-05 修):此前一律用**全表最早一条**当 `since`,
+    但那是"**心跳机制上线时刻**",不是"**这个作业的注册时刻**"。于是当天 13:10 才注册的
+    `chain_report`(每天 09:30 触发)被误报成"注册了却从没执行过" —— 它只是还没到第一次点。
+    **误报的代价是"重复劳动"**,正是本脚本 docstring 里反思过的那件事。
+
+    现在优先用**该作业自己的** `first_seen_at`(`scheduler._register_beat` 在注册时写入),
+    取不到才退回全表基线(旧库/旧行)。
     """
     missing: list[str] = []
     not_yet: list[str] = []
     for j in jobs:
-        if j.id in beats:
-            continue
-        if baseline is not None and not _should_have_fired(j.trigger, baseline, now):
+        b = beats.get(j.id)
+        if b is not None and b.last_run_at is not None:
+            continue                      # 真跑过,不在这份清单里
+        since = (b.first_seen_at if b is not None and b.first_seen_at else None) or baseline
+        if since is not None and not _should_have_fired(j.trigger, since, now):
             not_yet.append(j.id)
         else:
             missing.append(j.id)
@@ -114,8 +128,13 @@ def main() -> int:
 
     from sqlalchemy import select
 
-    from app.db.database import get_session_local
+    from app.db.database import get_session_local, init_db
     from app.db.models import JobHeartbeat
+
+    # ⚠️ **必须先 init_db()**:`first_seen_at` 这一列是后加的,而 `_migrate()` 只在应用启动时跑。
+    # 独立跑本脚本时若不补这一步,就会在只有旧表的库上炸
+    # `no such column: job_heartbeats.first_seen_at` —— 对账脚本自己先挂,等于没对账。
+    init_db()
 
     sched = BackgroundScheduler(timezone="Asia/Shanghai")
     build_jobs(sched)

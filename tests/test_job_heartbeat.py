@@ -146,6 +146,18 @@ class _J:
         self.id, self.trigger = jid, trigger
 
 
+class _B:
+    """心跳行的替身。
+
+    ⚠️ **别用裸 `object()` 当心跳**(2026-10-05 踩过):那样测试就**没建模真实行的字段**,
+    脚本一旦多读一个属性(如 `first_seen_at`)就 AttributeError —— 红的却是**测试的替身太弱**,
+    而不是被测代码有问题。替身至少要带上真行会被读到的字段。
+    """
+
+    def __init__(self, last_run_at=None, first_seen_at=None):
+        self.last_run_at, self.first_seen_at = last_run_at, first_seen_at
+
+
 def _job_liveness():
     import sys
     from pathlib import Path
@@ -174,10 +186,58 @@ def test_liveness_does_not_flag_jobs_that_are_not_due_yet() -> None:
         _J("daily_08", CronTrigger(minute="0", hour="8")),                        # 今天 08:00 → 早过了
         _J("has_beat", CronTrigger(minute="0", hour="9")),                        # 有心跳
     ]
-    missing, not_yet = jl.classify_missing(jobs, {"has_beat": object()}, now, baseline)
+    missing, not_yet = jl.classify_missing(jobs, {"has_beat": _B(last_run_at=now)}, now, baseline)
 
     assert missing == ["daily_08"], "过了触发点还没心跳的,才是真问题"
     assert sorted(not_yet) == ["daily_11", "weekly_mon"], "还没到点的别报出来"
+
+
+def test_基线用作业自己的注册时刻_不用全表最早一条() -> None:
+    """⚠️ **2026-10-05 修的假阳性**:此前一律拿**全表最早一条**当 `since`,
+    但那是"心跳机制上线时刻",不是"**这个作业的注册时刻**"。
+
+    实测案例:当天 13:10 才注册的 `chain_report`(每天 09:30 触发、角色 wechat),
+    被报成"注册了却从没执行过" —— 它只是**还没到第一次点**。
+    **误报的代价是重复劳动**,与上面那条同源。
+
+    修法:优先用该作业自己的 `first_seen_at`(`scheduler._register_beat` 在注册时写入),
+    取不到才退回全表基线。
+    """
+    from datetime import datetime
+
+    from apscheduler.triggers.cron import CronTrigger
+
+    jl = _job_liveness()
+    baseline = datetime(2026, 10, 4, 3, 10)          # 全表最早一条(心跳机制上线)
+    now = datetime(2026, 10, 5, 16, 0)
+    jobs = [_J("chain_report", CronTrigger(minute="30", hour="9"))]
+    # 该作业今天 13:10 才注册 → 09:30 的触发点**在注册之前**,不该算它漏跑
+    beats = {"chain_report": _B(first_seen_at=datetime(2026, 10, 5, 13, 10))}
+
+    missing, not_yet = jl.classify_missing(jobs, beats, now, baseline)
+
+    assert missing == [], "注册晚于当天触发点 → 还没轮到第一次执行,不是漏跑"
+    assert not_yet == ["chain_report"]
+
+
+def test_注册早于触发点却仍没跑_要报() -> None:
+    """反向:同样没跑,但**注册早于**触发点 ⇒ 那就是真漏跑,必须报出来。
+
+    少了这条,上面那条只要"永远归入 not_yet"就能骗过 —— 正是本仓那个老毛病。
+    """
+    from datetime import datetime
+
+    from apscheduler.triggers.cron import CronTrigger
+
+    jl = _job_liveness()
+    jobs = [_J("chain_report", CronTrigger(minute="30", hour="9"))]
+    beats = {"chain_report": _B(first_seen_at=datetime(2026, 10, 5, 8, 0))}   # 早于 09:30
+
+    missing, not_yet = jl.classify_missing(jobs, beats, datetime(2026, 10, 5, 16, 0),
+                                           datetime(2026, 10, 4, 3, 10))
+
+    assert missing == ["chain_report"], "注册过了触发点还没跑 ⇒ 真漏跑"
+    assert not_yet == []
 
 
 def test_liveness_flags_everything_when_baseline_is_unknown() -> None:

@@ -956,3 +956,24 @@ def test_build_keyword_card_filters_by_section(session) -> None:
     only = json.dumps(build_keyword_card(session, 1, st, section="douhot"), ensure_ascii=False)
     assert "抖音词" in only and "微博词" not in only  # 板块群=只含该板块
     assert build_keyword_card(session, 1, st, section="baidu") is None  # 无该板块词
+
+
+def test_jobs_不自己持有_feishu_client_的函数引用():
+    """⚠️ 回归守卫(2026-10-05):`platform_webhook` / `webhooks_for` 必须**经包命名空间**查找。
+
+    为什么:`feishu/` 包的既有约定是**补丁打在包命名空间上**
+    (`monkeypatch.setattr(feishu, "webhook_for", ...)`,见 tests/test_wechat_monitor.py)。
+    若 `_jobs.py` 在顶层 `from app.services.feishu_client import platform_webhook`,
+    就会在模块里**另绑一份** —— 补丁门面时 `_jobs` 里的那份**不被替换**,
+    于是**测试静默假通过**(补丁看着生效了,实际这条链根本没被覆盖)。
+
+    2026-10-05 审查发现这两个名字是**全包唯一的漏点**;本测试把它钉死,
+    再有人图省事写顶层 import,立刻红。
+    """
+    from app.services.feishu import _jobs
+
+    for name in ("platform_webhook", "webhooks_for", "webhook_for", "FeishuClient"):
+        assert not hasattr(_jobs, name), (
+            f"`feishu/_jobs.py` 顶层绑定了 `{name}` —— 必须改成经包命名空间 `_pkg.{name}` 调用,"
+            "否则 monkeypatch 门面名不生效(静默假通过)"
+        )

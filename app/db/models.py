@@ -758,8 +758,15 @@ class JobHeartbeat(Base):
     于是"配置里说每天跑"与"实际跑没跑"之间**没有任何可查的对照** —— `resource_presence`
     就这么潜伏着:注册着、trigger 正确、`enabled=True`,**六天一次没跑**,直到人工比对才撞见。
 
-    本表由 `scheduler._add_job` **自动维护**(每个作业执行后 upsert 一行),
-    所以**注册了就一定有心跳**;要问"上个作业到底跑没跑、成没成",直接看它。
+    本表由 `scheduler` **自动维护**,分两个时机、是一件事的两半:
+
+      · **注册时** `_add_job` 落一行、写 `first_seen_at`(只写一次)⇒ **注册了就一定有心跳行**;
+      · **执行后** `_safe` 包一层 `_beat` 更新 `last_run_at/run_count/...`。
+
+    ⚠️ **2026-10-05 更正**:此前这里写着"由 `_add_job` 自动维护(每个作业执行后 upsert 一行),
+    所以注册了就一定有心跳" —— **两句都不准**:upsert 实际发生在 `_safe` 的包装器里(不是 `_add_job`),
+    而且**只在执行后** ⇒ **注册了但没跑过的作业根本没有行**。"注册了就一定有心跳"是假的,
+    而 `job_liveness` 判断"没心跳"时正是被这句话带偏的。现在补上注册时那一半,它才成立。
     """
 
     __tablename__ = "job_heartbeats"
@@ -770,6 +777,13 @@ class JobHeartbeat(Base):
     run_count: Mapped[int] = mapped_column(Integer, default=0)
     error_count: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str] = mapped_column(String(255), default="")
+    # **该作业第一次被注册的时刻**(2026-10-05 加)。由 `scheduler._add_job` 在登记时写。
+    #
+    # ⚠️ **为什么非要它**:对账脚本要判"没心跳 = 真漏跑 还是 还没到第一次执行点",
+    # 而此前只能用**全表最早一条**当基线 —— 那是"心跳机制上线时刻",不是"这个作业的注册时刻"。
+    # 于是刚加进来的作业(如 13:10 注册、每天 09:30 触发)会被误判成"注册了却从没执行过"。
+    # 有了这一列,判据才是"自**它自己**注册起,本该触发过吗"。
+    first_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class NameLexicon(Base):

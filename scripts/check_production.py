@@ -23,7 +23,6 @@ required = {
     "FEISHU_WEBHOOK": "飞书总群 webhook",
 }
 optional = {
-    "DAJIALA_KEY": "dajiala(阅读量采样,不充可跳过)",
     "FEISHU_WEBHOOK_WECHAT": "公众号专属群(空则推总群)",
     "XIANYU_PROXY_URL": "闲鱼固定代理(风控时配置)",
     "WECHAT_WERSS_URL": "自建 WeRSS(免费全量文章列表;漏推风险的根治源,配了还要跑 scripts/werss_backfill_biz.py)",
@@ -43,7 +42,10 @@ for key, desc in {**required, **optional}.items():
         issues.append(f"缺少 {key}: {desc}")
 
 print(NL + "== 2. 模块 ==")
-mods = ["app.services.weread_client", "app.services.dajiala_client", "app.services.quark_transfer",
+# ⚠️ **这份清单必须与代码同步**:2026-10-05 审查发现这里还留着 `app.services.dajiala_client`,
+# 而那个模块 **2026-09-30 就整体摘除了** ⇒ 本脚本**永远 FAIL**,而"永远红的东西没人看"
+# (与"闸门失准"同一条)。摘模块时**顺手删这里的名字**,别只删代码。
+mods = ["app.services.weread_client", "app.services.quark_transfer",
         "app.services.llm_client", "app.services.content_extract", "app.services.wechat_monitor",
         "app.services.early_agent", "app.services.focus_alert", "app.services.agent_learning",
         "app.services.reader_platform_client", "app.services.werss_client"]

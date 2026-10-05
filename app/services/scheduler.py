@@ -384,6 +384,31 @@ def _role_allows(job_role: str) -> bool:
 _DEFAULT_MISFIRE_GRACE = 3600
 
 
+def _register_beat(job_id: str) -> None:
+    """**注册时**落一行心跳,只写 `first_seen_at`(2026-10-05 加)。
+
+    为什么要在"注册"这个时点写:此前心跳**只在执行后**才有 ⇒ "注册了但还没到第一次执行点"
+    与"真·从没跑过"在库里长得一模一样,对账脚本只能拿**全表最早一条**当基线 ——
+    于是刚加的作业会被误判成漏跑(2026-10-05 `chain_report` 就被误报过)。
+    有了这行,"注册了却没执行"才第一次成为**可判的事实**。
+
+    ⚠️ 与 `_beat` 一样:**写不上绝不能影响调度**(DB 锁/表缺失都咽下去)。
+    """
+    try:
+        from sqlalchemy import select
+
+        from app.db.database import get_session_local
+        from app.db.models import JobHeartbeat
+
+        with get_session_local()() as db:
+            row = db.scalar(select(JobHeartbeat).where(JobHeartbeat.job_id == job_id))
+            if row is None:
+                db.add(JobHeartbeat(job_id=job_id, first_seen_at=datetime.now()))
+                db.commit()
+    except Exception:  # noqa: BLE001 - 见上:记不上就算了,不能连带调度
+        logger.debug("作业注册心跳写入失败:%s", job_id)
+
+
 def _add_job(scheduler: BackgroundScheduler, func, trigger, job_id: str,
              role: str = "both", **kw) -> bool:
     """按角色登记作业;被角色挡下的**不登记也不报错**(这是预期行为,不是失败)。
@@ -396,6 +421,7 @@ def _add_job(scheduler: BackgroundScheduler, func, trigger, job_id: str,
         return False
     kw.setdefault("misfire_grace_time", _DEFAULT_MISFIRE_GRACE)   # 见上:别用 1 秒默认值
     scheduler.add_job(_safe(func, job_id), trigger, id=job_id, max_instances=1, coalesce=True, **kw)
+    _register_beat(job_id)          # 注册即留痕(见该函数:这是"注册了却没执行"可判的前提)
     return True
 
 

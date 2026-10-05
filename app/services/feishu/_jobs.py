@@ -8,8 +8,11 @@ from app.db.models import FeishuAlert
 
 from app.services import douhot
 
-from app.services.feishu_client import platform_webhook, webhooks_for
-
+# ⚠️ **别在这里顶层 from ... import**:`platform_webhook` / `webhooks_for` 必须经包命名空间
+# `_pkg.` 运行时查找,否则 `monkeypatch.setattr(feishu, "platform_webhook", ...)` **不生效** ——
+# 而按本包既有约定,补丁就该打在包命名空间上(同文件的 `_pkg.webhook_for` / `_pkg.FeishuClient` 都走它)。
+# 2026-10-05 审查发现:这两处是**全包唯一的漏点**,今天没暴雷只因测试恰好没 patch 它们;
+# 一旦有人补,就是"测试静默假通过"。门面已 re-export(见 `app/services/feishu/__init__.py`)。
 from config.settings import Settings, get_settings
 
 from datetime import datetime, timedelta
@@ -61,7 +64,7 @@ def run_feishu_daily(settings: Settings | None = None, db: Session | None = None
                     sent += 1
             # 各平台专属群:该平台日报段(主群之外的"加料",互不替代)
             for sec in SECTIONS:
-                wh = platform_webhook(settings, sec)
+                wh = _pkg.platform_webhook(settings, sec)
                 if not wh:
                     continue
                 text = "\n".join([f"📊 {SECTION_LABELS[sec]}日报 · {datetime.now().strftime('%m-%d')}"]
@@ -319,7 +322,7 @@ def run_feishu_realtime(
         cur, prev = _batches(db, user_id, section)
         if not cur:
             return 0
-        whs = webhooks_for(settings, section)   # 主群 + 该板块专属群
+        whs = _pkg.webhooks_for(settings, section)   # 主群 + 该板块专属群
         pushed_items: list[tuple[str, str]] = []
         for title, c in list(cur.items())[:40]:
             tag, extra = _delta(section, c, prev)
