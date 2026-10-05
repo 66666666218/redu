@@ -490,14 +490,31 @@ class TestKoulingSummary:
         ]
         # ⚠️ 2026-10-05 改口径:原来的 `链N` 数的是"口令**是**分享链的条数",
         # 读起来却像"搬成了 N 条" —— 里面一大半是早就搬过、或这轮没搬的。现在摊开。
-        assert dl._kouling_summary(leads) == "新群1/群3/分享链1(有链0 已搬过0 超额度0)"
+        assert dl._kouling_summary(leads) == "新群1/群3/分享链1(新搬0 已搬过0 超额度0)"
 
     def test_self_loop_shows_new_group_zero(self) -> None:
         from app.services import douyin_leads as dl
 
         """**自循环的样子**:解析出一堆群口令,但**一个新群都没有**。"""
         leads = [{"kouling": {"kind": "group", "newly_joined": False}} for _ in range(9)]
-        assert dl._kouling_summary(leads) == "新群0/群9/分享链0(有链0 已搬过0 超额度0)"
+        assert dl._kouling_summary(leads) == "新群0/群9/分享链0(新搬0 已搬过0 超额度0)"
+
+    def test_已搬过的不算本轮产出(self) -> None:
+        """★ **2026-10-05 P2**:`already` 那一支现在也带 `our_url`(从历史捡回来的,
+        卡片上该显示),但它**不是本轮的产出** —— 算进去就把指标注水了,
+        而这条链要的正是"**新**群/新资源"。
+        """
+        from app.services import douyin_leads as dl
+
+        leads = [
+            {"kouling": {"kind": "share", "status": "ok",
+                         "our_url": "https://pan.quark.cn/s/new1"}},     # 本轮真搬的
+            {"kouling": {"kind": "share", "status": "already",
+                         "our_url": "https://pan.quark.cn/s/old1"}},     # 历史捡回的
+        ]
+        got = dl._kouling_summary(leads)
+        assert "新搬1" in got, f"只该数本轮真搬的:{got}"
+        assert "已搬过1" in got
 
 
 class TestUsedWordsGoLast:
@@ -914,3 +931,127 @@ class TestHotSeedBudget:
         assert Settings.model_fields["douyin_leads_hot_keywords"].default == 1, (
             "热榜种子名额被改动了 —— 这是基于实测有效率(0% vs 86%)的决定,"
             "改之前请看 doc/抖音线索链-最优策略-2026-10-05.md")
+
+
+class TestKeywordScore:
+    """**词级产出评分**(2026-10-05 P1):把库里已有的归因数据用起来。
+
+    背景:`douyin_leads.keyword` 从 10-03 起**每行都填**(实测 43/43)——
+    "每个词产出了什么"一直在库里,**却从来没用来选过词**;
+    排序依据一直是"新鲜度",那条规则定于 10-04,**当时还没有产出数据**。
+    """
+
+    def test_没搜过的词给中性值(self) -> None:
+        from app.services.douyin_leads import keyword_score
+
+        assert keyword_score(0, 0) == 0.5, "没有样本就不该高看也不该低看"
+
+    def test_零产出词低于没搜过的词_这就是冷却(self) -> None:
+        """★ **"零产出降权"是这条公式的自然结果,不需要单独一套规则**。"""
+        from app.services.douyin_leads import keyword_score
+
+        assert keyword_score(2, 0) < keyword_score(0, 0), "搜过且零产出的,该排到没搜过的之后"
+        assert keyword_score(5, 0) < keyword_score(2, 0), "样本越多越像真废词,降得越多"
+
+    def test_小样本被拉回中性_不捧红也不打死(self) -> None:
+        """⚠️ 5 次里蒙中 1 次,该算什么?
+
+        **不是 20%**(样本太小、不敢信),也**不是废词**(只搜了 5 次)。
+        收缩把它拉回中性:**0.31** ——
+        · 比原始 20% **高**(说明"不敢信",不是判死);
+        · 但比没搜过的 0.5 **低**(有失败样本,该降);
+        · 更比 25/29 的 0.83 **低得多**(走运的小样本不能压过验证过的大样本)。
+        """
+        from app.services.douyin_leads import keyword_score
+
+        s51, s00, s2925 = keyword_score(5, 1), keyword_score(0, 0), keyword_score(29, 25)
+        assert s51 > 0.2, "收缩是拉回中性,不是把 20% 判成废词"
+        assert s51 < s00, "但有失败样本 ⇒ 该排在'没搜过'之后"
+        assert s51 < s2925, "走运的小样本绝不能压过验证过的大样本"
+
+    def test_大样本贴近实测(self) -> None:
+        """29 次里中 25 次 ≈ 86%(实测值)⇒ 收缩不该把大样本也拉平。"""
+        from app.services.douyin_leads import keyword_score
+
+        assert 0.75 < keyword_score(29, 25) < 0.90
+
+    def test_产出归因把_none_算作零产出(self) -> None:
+        """★ `kind="none"` = "搜到视频但标题里没《口令》" —— **搜了个寂寞**,
+        必须算零产出。本仓的"线索数"把它和真产出混在一个数里,那是误导指标。
+        """
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        from app.db.models import Base, DouyinLead
+        from app.services.douyin_leads import keyword_yield
+
+        eng = create_engine("sqlite://")
+        Base.metadata.create_all(eng)
+        db = sessionmaker(bind=eng)()
+        try:
+            for i, k in enumerate(["none", "none", "share", "group"]):
+                db.add(DouyinLead(user_id=1, aweme_id=f"a{i}", keyword="词A", kind=k))
+            db.add(DouyinLead(user_id=1, aweme_id="b0", keyword="词B", kind="share"))
+            db.commit()
+            y = keyword_yield(db, 1)
+            assert y["词A"] == (4, 2), f"4 条线索里只有 share/group 算产出:{y}"
+            assert y["词B"] == (1, 1)
+        finally:
+            db.close()
+
+
+class TestVariants:
+    """**高产出词深挖变体**(2026-10-05 P2)。
+
+    推广号做同一批资源**往往一次做一批**,换个写法就是另一个视频/另一个《口令》。
+    实测 `霸王茶姬杯贴自定义入口链接直达` 有效率 **100%**、`高性价比人生指南共338页pdf` **78%**。
+    ⇒ **沿着已验证的方向探**,而不是沿着类目探。
+    """
+
+    def test_剥掉推广后缀得到核心名(self) -> None:
+        from app.services.douyin_leads import _variants
+
+        assert _variants("霸王茶姬杯贴自定义入口链接直达") == ["霸王茶姬杯贴"]
+        assert _variants("七宗罪测试免费入口直达附链接") != []
+
+    def test_太短就不要(self) -> None:
+        """剥完不足 4 字 ⇒ 搜出来全是噪声。"""
+        from app.services.douyin_leads import _variants
+
+        assert _variants("入口链接直达") == []
+
+    def test_剥不动就返回空_不重复搜同一个词(self) -> None:
+        from app.services.douyin_leads import _variants
+
+        assert _variants("高性价比人生指南共338页pdf") == []
+        assert _variants("") == []
+
+    def test_变体不覆盖它自己的历史评分(self) -> None:
+        """变体若**自己搜过**,用它自己的数据,别拿母词的分数盖掉。"""
+        # 这条由 `search_keywords` 里的 `if v not in scores` 保证;这里钉住语义:
+        from app.services.douyin_leads import _VARIANT_DISCOUNT, keyword_score
+
+        parent = keyword_score(29, 25)
+        assert parent * _VARIANT_DISCOUNT < 0.5 + 1e9   # 打折后仍是"高"信号
+        assert parent * _VARIANT_DISCOUNT > keyword_score(0, 0), \
+            "变体继承了证据,应该**高于**完全没搜过的词"
+
+
+class TestNormWord:
+    """**查分前先归一**(2026-10-05):同一资源常有好几种写法。"""
+
+    def test_桥过大小写与标点(self) -> None:
+        from app.services.douyin_leads import _norm_word
+
+        assert _norm_word("高性价比人生指南PDF") == _norm_word("高性价比人生指南pdf")
+        assert _norm_word("A B-C") == "abc"
+        assert _norm_word("  空格  多  ") == "空格多"
+
+    def test_有意不桥_词中间多几个字(self) -> None:
+        """⚠️ `高性价比人生指南共338页pdf` 与 `高性价比人生指南pdf` 归一化后**仍不同**
+        —— 那属于"同一个资源的两种叫法",本函数**有意不猜**:
+        **乱匹配会把 A 的分数安到 B 头上,比漏认更坏。**
+        """
+        from app.services.douyin_leads import _norm_word
+
+        assert _norm_word("高性价比人生指南共338页pdf") != _norm_word("高性价比人生指南pdf")

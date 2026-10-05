@@ -297,6 +297,85 @@ def hot_seed_words(settings, limit: int | None = None) -> list[str]:
     return out
 
 
+# ---- 词级产出评分(2026-10-05,P1) --------------------------------------------
+#
+# **为什么现在才做**:`douyin_leads.keyword` 从 10-03 起就**每行都填**(实测 43/43),
+# 也就是说"**每个词产出了什么**"一直在库里 —— **却从来没用来选过词**。
+# 排序依据一直是"新鲜度"(`order="fresh"`),那条规则定于 10-04,**当时还没有产出数据**。
+# 现在让它说话。
+_YIELD_PRIOR = 0.5      # 无样本时的中性值(既不高看也不低看)
+_YIELD_K = 3.0          # 收缩强度:**相当于先验算 3 次**
+_VARIANT_MIN_SCORE = 0.6   # 母词达到这个分才值得深挖它的变体
+_VARIANT_DISCOUNT = 0.9    # 变体继承母词证据时打的折(同资源、不同写法)
+_VARIANT_MAX = 2           # 一轮最多为几个母词生成变体(名额有限,别铺开)
+# 推广后缀:剥掉它们得到"**同资源的核心名**"
+_VARIANT_SUFFIX = re.compile(
+    r"(自定义|入口|链接|直达|自取|免费下载|可保存|最新教程|获取最新教程|附链接|附最新链接|教程)+$")
+
+
+def _norm_word(w: str) -> str:
+    """词的**归一化形式**:小写、去掉空白与标点。
+
+    ⚠️ **为什么查分前要先归一**:同一个资源在库里常有好几种写法,实测
+    `高性价比人生指南pdf` / `高性价比人生指南PDF` 就是同一个词的两种大小写形态 ——
+    **按原串查分,后面那种就白白丢掉前面攒的证据**。
+    (汉字是 `\\w`,不会被 `\\W` 去掉;只吃空白与标点。)
+
+    ⚠️ **它桥不过"词中间多几个字"**:`高性价比人生指南共338页pdf` 与
+    `高性价比人生指南pdf` 归一化后仍不同 —— 那属于"同一个资源的两种叫法",
+    本函数**有意不猜**(乱匹配会把 A 的分数安到 B 头上,比漏认更坏)。
+    """
+    return re.sub(r"[\s\W_]+", "", str(w or "").lower())
+
+
+def keyword_yield(session, user_id: int) -> dict[str, tuple[int, int]]:
+    """`{词: (线索数, 其中有产出的)}` —— 有产出 = `kind` 是 `group` 或 `share`。
+
+    ⚠️ **`kind="none"` 要算作零产出**:它的意思是"搜到了抖音视频,但标题里没有《口令》"
+    —— 搜了个寂寞。本仓的"线索数"把它和真产出混在一个数里,是**误导指标**
+    (运行记录里已经拆开,见 `_kouling_summary`)。
+    """
+    from sqlalchemy import func, select
+
+    from app.db.models import DouyinLead
+
+    rows = session.execute(
+        select(DouyinLead.keyword, func.count(DouyinLead.id),
+               func.sum(func.iif(DouyinLead.kind.in_(("group", "share")), 1, 0)))
+        .where(DouyinLead.user_id == user_id, DouyinLead.keyword != "")
+        .group_by(DouyinLead.keyword)).all()
+    return {str(k): (int(n or 0), int(ok or 0)) for k, n, ok in rows if k}
+
+
+def keyword_score(n: int, ok: int) -> float:
+    """**小样本收缩后**的有效率。
+
+    ⚠️ **为什么不直接用 `ok/n`**:5 次里蒙中 1 次就是 20%,而 29 次里中 25 次是 86%
+    —— 前者样本太小、不该当结论。加个"先验算 K 次、先验值 0.5"再算:
+      · 没搜过 → `0.5`(中性,不偏袒也不排挤)
+      · 0/2    → `0.30`(**低于**没搜过的词 ⇒ 自然"冷却",不用另写规则)
+      · 0/5    → `0.19`(样本越多、越像真废词 ⇒ 降得越多)
+      · 25/29  → `0.83`(与实测 86% 吻合)
+    ⇒ **"零产出降权"是这条公式的自然结果,不需要单独一套规则**(P1 第 2 项)。
+    """
+    return (ok + _YIELD_PRIOR * _YIELD_K) / (n + _YIELD_K)
+
+
+def _variants(word: str) -> list[str]:
+    """高产出词的**核心名**(剥掉「入口/直达/附链接」这类推广后缀)。
+
+    **为什么值得搜核心名**(2026-10-05,P2):推广号做同一批资源**往往一次做一批**,
+    换个写法就是另一个视频/另一个《口令》。实测 `霸王茶姬杯贴自定义入口链接直达` 有效率
+    **100%**、`高性价比人生指南共338页pdf` **78%** —— 它们背后的资源**还在被继续推**,
+    而"核心名"通常也是**别的推广号正在用的**搜索词。
+
+    ⚠️ **这是"探索"的正确方向**:沿着**已验证的方向**探,而不是沿着类目探。
+    ⚠️ 剥完不足 4 字就放弃(太短的词搜出来全是噪声);没变化也返回空(不重复搜同一个词)。
+    """
+    core = _VARIANT_SUFFIX.sub("", str(word or "")).strip()
+    return [core] if 4 <= len(core) < len(str(word or "")) else []
+
+
 def _words_already_resolved_to_group(session, user_id: int, days: int = 21) -> set[str]:
     """近 `days` 天**已经解析出过群**的搜索词 —— 下轮把它们排到最后。
 
@@ -366,16 +445,37 @@ def search_keywords(session, user_id: int, top: int, settings,
     for w in _keywords_from_library(session, user_id, max(1, int(top))):
         if w not in cand:
             cand.append(w)
+    # ---- 词级产出评分(2026-10-05) ----
+    # 数据本来就在库里(`douyin_leads.keyword` 43/43 全填),只是从没用来选过词。
+    yld = keyword_yield(session, user_id)
+    # ⚠️ 按**归一化**形式合并后再查:同一资源常有好几种写法(如 `…pdf` / `…PDF`),
+    # 按原串查会让后一种白丢证据。见 `_norm_word`。
+    by_norm: dict[str, tuple[int, int]] = {}
+    for w, (n, ok) in yld.items():
+        k = _norm_word(w)
+        pn, pok = by_norm.get(k, (0, 0))
+        by_norm[k] = (pn + n, pok + ok)
+    scores = {w: keyword_score(*by_norm.get(_norm_word(w), (0, 0))) for w in cand}
+    # 高产出词的**核心名**也进候选 —— 沿着已验证的方向探(见 `_variants`)
+    for w in sorted([x for x in cand if scores[x] >= _VARIANT_MIN_SCORE],
+                    key=lambda x: -scores[x])[:_VARIANT_MAX]:
+        for v in _variants(w):
+            if v not in scores:
+                scores[v] = scores[w] * _VARIANT_DISCOUNT   # 同资源、不同写法 ⇒ 继承证据
+                cand.append(v)
+    # 同档内高分在前:`pick` 保持输入顺序,所以这一步决定了**同类里谁被选中**
+    cand.sort(key=lambda w: -scores.get(w, _YIELD_PRIOR))
     # 学到的"人名"是**弱信号**(见 `category_topics.classify`);顺手从明显的瓜词里继续学
     names = category_topics.known_names(session)
     for w in cand:
         if category_topics.classify(w) == "大瓜":
             category_topics.learn_names(session, w)      # 用户口径:"大瓜**慢慢的学习**可以"
     kws = category_topics.pick(cand, cat, int(top), names)
-    # 用过的词排到最后(不删):名额先给没试过的
+    # 两个判据都要,**顺序不能反**:
+    #   ① `seen`(已经解出过群)排后 —— 用户口径:「而不是一直用着一个口令进群」;
+    #   ② 有效率(高→低) —— 同类之间的排序依据。
     seen = _words_already_resolved_to_group(session, user_id)
-    if seen:
-        kws.sort(key=lambda w: w in seen)
+    kws.sort(key=lambda w: (w in seen, -scores.get(w, _YIELD_PRIOR)))
     for w in (hot or []):
         if w and w not in kws:
             kws.append(w)
@@ -693,11 +793,15 @@ def _kouling_summary(leads: list[dict]) -> str:
     # 而里面一大半是 `already`(早就搬过)和 `over_budget`(这轮没搬)—— **读起来像"搬成了 N 条"**,
     # 其实一条都没搬。这正是"看起来像产出、其实不是"的那类指标。
     # 现在把**真正的结果**摊开:有链(拿到我方分享链的)/ 已搬过 / 超额度。
-    n_moved = sum(1 for k in shares if k.get("our_url"))
+    # ⚠️ **"有链"必须是"本轮新搬到的"**(2026-10-05 P2):`already` 那一支现在也带 `our_url`
+    # (从历史捡回来的,卡片上该显示),但**它不是本轮的产出** —— 算进去就把指标注水了,
+    # 而这条链要的正是"**新**群/新资源"。
+    n_moved = sum(1 for k in shares
+                  if k.get("our_url") and k.get("status") != "already")
     n_already = sum(1 for k in shares if k.get("status") == "already")
     n_over = sum(1 for k in shares if k.get("status") == "over_budget")
     return (f"新群{n_new}/群{n_group}/分享链{len(shares)}"
-            f"(有链{n_moved} 已搬过{n_already} 超额度{n_over})")
+            f"(新搬{n_moved} 已搬过{n_already} 超额度{n_over})")
 
 
 def douyin_leads_tick(settings=None) -> int:
