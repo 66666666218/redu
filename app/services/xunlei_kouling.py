@@ -185,3 +185,21 @@ def known_koulings(session, user_id: int) -> set[str]:
     return set(session.scalars(select(XunleiResource.name).where(
         XunleiResource.user_id == user_id,
         XunleiResource.parent_name == "口令解析")).all())
+
+
+def known_kouling_links(session, user_id: int) -> dict[str, str]:
+    """已经转存过的口令 → **我方分享链**(2026-10-05 加)。
+
+    ⚠️ **为什么需要它**:`known_koulings` 只给一个**名字集合** —— 于是"这个口令已经搬过了"
+    这条路上,调用方拿得到"搬过",却**拿不到"搬成了哪条链"**。
+    结果是 `douyin_leads.our_url` 恒为空:明明是**已转存**的线索,事后却查不出我方链
+    (`our_url` 这个字段 2026-10-04 加出来,**就是为了**回答"这个口令到底搬没搬成")。
+
+    **一个只说"做过"、不说"做成了什么"的判据,等于把结果丢了。**
+    """
+    rows = session.execute(
+        select(XunleiResource.name, XunleiResource.share_url).where(
+            XunleiResource.user_id == user_id,
+            XunleiResource.parent_name == "口令解析",
+            XunleiResource.share_url != "")).all()
+    return {str(n): str(u) for n, u in rows if n and u}

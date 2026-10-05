@@ -408,13 +408,21 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
         return leads
     budget = int(getattr(settings, "douyin_leads_transfer_limit", 3) or 0)
     already = kk.known_koulings(session, user_id)
+    # ⚠️ 光有"搬过没"不够,还要"搬成了哪条"(见 `known_kouling_links` 的 docstring)
+    already_links = kk.known_kouling_links(session, user_id)
     down: list[str] = []          # 凭据级失败(如 refresh token 失效):影响全部口令,只报一次
     for ld in leads:
         mark = (ld.get("mark") or "").strip()
         if not mark:
             continue
         if mark in already:
-            ld["kouling"] = {"kind": "share", "status": "already"}
+            # ⚠️ **必须带上已有的我方链**(2026-10-05 修):原来这里只写 `status=already`,
+            # 于是"搬过"记下了、**"搬成了哪条链"丢了** ⇒ `douyin_leads.our_url` 恒空
+            # (43 条线索、0 条有链)—— 而那个字段 2026-10-04 加出来**就是为了**回答
+            # "这个口令到底搬没搬成"。**只说"做过"不说"做成了什么"的判据,等于把结果丢了。**
+            ld["kouling"] = {"kind": "share", "status": "already",
+                             "our_url": already_links.get(mark, ""),
+                             "share_url": ""}
             continue
         try:
             info = kk.resolve(mark)
@@ -658,8 +666,16 @@ def _kouling_summary(leads: list[dict]) -> str:
     ks = [(ld.get("kouling") or {}) for ld in leads]
     n_new = sum(1 for k in ks if k.get("kind") == "group" and k.get("newly_joined"))
     n_group = sum(1 for k in ks if k.get("kind") == "group")
-    n_share = sum(1 for k in ks if k.get("kind") == "share")
-    return f"新群{n_new}/群{n_group}/链{n_share}"
+    shares = [k for k in ks if k.get("kind") == "share"]
+    # ⚠️ **`链N` 这个旧标签是误导的**(2026-10-05 改):它数的是"口令解出来**是**分享链的条数",
+    # 而里面一大半是 `already`(早就搬过)和 `over_budget`(这轮没搬)—— **读起来像"搬成了 N 条"**,
+    # 其实一条都没搬。这正是"看起来像产出、其实不是"的那类指标。
+    # 现在把**真正的结果**摊开:有链(拿到我方分享链的)/ 已搬过 / 超额度。
+    n_moved = sum(1 for k in shares if k.get("our_url"))
+    n_already = sum(1 for k in shares if k.get("status") == "already")
+    n_over = sum(1 for k in shares if k.get("status") == "over_budget")
+    return (f"新群{n_new}/群{n_group}/分享链{len(shares)}"
+            f"(有链{n_moved} 已搬过{n_already} 超额度{n_over})")
 
 
 def douyin_leads_tick(settings=None) -> int:

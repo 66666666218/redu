@@ -488,14 +488,16 @@ class TestKoulingSummary:
             {"kouling": {"kind": "none"}},
             {},                                                       # 没解析
         ]
-        assert dl._kouling_summary(leads) == "新群1/群3/链1"
+        # ⚠️ 2026-10-05 改口径:原来的 `链N` 数的是"口令**是**分享链的条数",
+        # 读起来却像"搬成了 N 条" —— 里面一大半是早就搬过、或这轮没搬的。现在摊开。
+        assert dl._kouling_summary(leads) == "新群1/群3/分享链1(有链0 已搬过0 超额度0)"
 
     def test_self_loop_shows_new_group_zero(self) -> None:
         from app.services import douyin_leads as dl
 
         """**自循环的样子**:解析出一堆群口令,但**一个新群都没有**。"""
         leads = [{"kouling": {"kind": "group", "newly_joined": False}} for _ in range(9)]
-        assert dl._kouling_summary(leads) == "新群0/群9/链0"
+        assert dl._kouling_summary(leads) == "新群0/群9/分享链0(有链0 已搬过0 超额度0)"
 
 
 class TestUsedWordsGoLast:
@@ -821,3 +823,55 @@ class TestLeadKeepsOurUrl:
             "kouling": {"kind": "share", "status": "disk_full"}}])
         session.commit()
         assert session.scalar(select(DouyinLead)).our_url == ""
+
+
+# ------------------------------------------------ 已搬过的口令要带上我方链(2026-10-05)
+
+class TestKnownKoulingLinks:
+    """★ **2026-10-05 修的洞**:`known_koulings` 只给"搬过没",**不给"搬成了哪条链"**
+    ⇒ `douyin_leads.our_url` **恒为空**(实测 43 条线索 / 0 条有链),
+    而那个字段 10-04 加出来就是为了回答"这个口令到底搬没搬成"。
+
+    **一个只说"做过"、不说"做成了什么"的判据,等于把结果丢了。**
+    """
+
+    def _db(self):
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        from app.db.models import Base
+
+        eng = create_engine("sqlite://")
+        Base.metadata.create_all(eng)
+        return sessionmaker(bind=eng)()
+
+    def test_已搬过的口令要能查到它的我方链(self) -> None:
+        from app.db.models import XunleiResource
+        from app.services import xunlei_kouling as kk
+
+        db = self._db()
+        try:
+            db.add(XunleiResource(user_id=1, fid="f1", name="两全其美",
+                                  parent_name="口令解析", share_url="https://pan.xunlei.com/s/AAA"))
+            db.add(XunleiResource(user_id=1, fid="f2", name="没链的", parent_name="口令解析"))
+            db.add(XunleiResource(user_id=1, fid="f3", name="别人的", parent_name="其他目录",
+                                  share_url="https://pan.xunlei.com/s/BBB"))
+            db.commit()
+            links = kk.known_kouling_links(db, 1)
+            assert links == {"两全其美": "https://pan.xunlei.com/s/AAA"}, \
+                "只认『口令解析』目录下、且确实有分享链的那些"
+        finally:
+            db.close()
+
+    def test_只按本租户取_不串号(self) -> None:
+        from app.db.models import XunleiResource
+        from app.services import xunlei_kouling as kk
+
+        db = self._db()
+        try:
+            db.add(XunleiResource(user_id=2, fid="f9", name="别人的资源",
+                                  parent_name="口令解析", share_url="https://pan.xunlei.com/s/XXX"))
+            db.commit()
+            assert kk.known_kouling_links(db, 1) == {}
+        finally:
+            db.close()
