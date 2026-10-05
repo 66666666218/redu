@@ -7,6 +7,7 @@ from app.services.reader_platform_client import PlatformError, ReaderPlatformCli
 from app.services.tenant_base import _base
 
 from app.services.weread_client import WereadAuthError, WereadError
+from app.services import weread_budget   # 额度统一入口:续期成功要解熔断(新会话=新额度账)
 
 from app.services.werss_client import WerssClient
 
@@ -562,8 +563,13 @@ def refresh_weread_cookie(session: Session, user_id: int, settings: Settings | N
     except WereadError as exc:  # 非登录问题(风控/接口异常):保留续期结果但标注未验证
         logger.warning("微信读书续期后书架验证异常(非登录问题,用户 %s):%s", user_id, exc)
         set_cookie(session, user_id, "weread", new_cookie)
+        # ⚠️ **续期成功 = 新会话 = 新的额度账** ⇒ 解除额度熔断(2026-10-05)。
+        # 不解除的话,上一把会话吃光额度时记下的冷静期会**继续压着新会话**,
+        # 于是"刚换到一把好会话,却因为旧账被停半小时" —— 白白浪费掉最鲜的那段窗口。
+        weread_budget.clear(session, user_id)
         return {"status": "success", "verified": False, "cookie": new_cookie}
     set_cookie(session, user_id, "weread", new_cookie)
+    weread_budget.clear(session, user_id)   # 新会话 = 新额度账(见上一条注释)
     row = session.scalar(select(SystemConfig).where(
         SystemConfig.key == _RENEWAL_COOLDOWN_KEY.format(uid=user_id)))
     if row:

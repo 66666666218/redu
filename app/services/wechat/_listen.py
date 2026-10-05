@@ -9,6 +9,7 @@ from app.services.reader_platform_client import PlatformError, ReaderPlatformCli
 from app.services.tenant_base import _base, _record_run
 
 from app.services.weread_client import WereadAuthError, WereadClient, WereadError, build_mp_url
+from app.services import weread_budget   # 额度判据 + 跨路径共享熔断(单一事实来源)
 
 from app.services.werss_client import WerssClient
 
@@ -59,7 +60,12 @@ def _advance_listen_cursor(session: Session, user_id: int) -> int:
         row.value = str(current + 1)
     session.commit()
     return current
-_WEREAD_QUOTA_MARKS = ("-2014", "-2041", "-10100")
+# 额度判据的**单一事实来源**在 `app/services/weread_budget.py`(2026-10-05 搬过去)。
+# ⚠️ 搬家的原因:额度是**跨模块的公共资源** —— 监听、同步、续期、体检验活、探针脚本
+# 全在用同一个账号的额度,而判据原来住在这个 1200 行、监听专用的文件里,
+# 别的路径嫌重干脆不 import ⇒ `_sync` 那边**根本没判过额度**。
+# 这里保留名字只为兼容既有调用方与测试(值本身不再在此定义)。
+_WEREAD_QUOTA_MARKS = weread_budget.QUOTA_MARKS
 _COVER_QUOTA_TRIP = 3
 _DORMANT_MISS = 7      # 连续 N 轮确认未发文 → 沉睡降频(与前端"沉睡"口径一致)
 _DORMANT_SKIP = 3      # 沉睡号每 3 轮参与 1 轮
@@ -118,9 +124,12 @@ def _select_listen_batch(session: Session, user_id: int, all_rows: list,
 
 
 def _is_weread_quota_error(exc: BaseException) -> bool:
-    """-2014(频率额度)/ -2041(会话列表预算耗尽):同属"再问也不给,还会把风控加深"。"""
-    text = str(exc)
-    return any(mark in text for mark in _WEREAD_QUOTA_MARKS)
+    """-2014(频率额度)/ -2041(会话列表预算耗尽):同属"再问也不给,还会把风控加深"。
+
+    判据在 `weread_budget`(单一事实来源),这里只是**兼容入口** ——
+    新增代码直接用 `weread_budget.is_quota_error`。
+    """
+    return weread_budget.is_quota_error(exc)
 _BAN_MARKERS = (("此账号已被屏蔽", "账号封禁"), ("该内容已被发布者删除", "作者删除"),
                 ("此内容因违规无法查看", "违规处理"))
 def _detect_ban_reason(page_text: str) -> str:
@@ -343,9 +352,17 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
     list_skipped = (not list_allow) or bool(breaker is not None and breaker.get("list_off"))
     if not list_skipped:
         try:
-            payload = weread.mp_articles(b.weread_book_id)
+            payload = weread_budget.call(
+                session, user_id, lambda: weread.mp_articles(b.weread_book_id),
+                what=f"mp/articles({b.nickname})")
             _append_listed(items, _WC.flatten_mp_articles(payload), cutoff)
             listed, list_via = True, "web"
+        except weread_budget.Blocked as exc:
+            # ⚠️ **熔断中 = 我们主动没发请求**,不是"这个源坏了"。合闸后本轮不再问。
+            # 与"发出去了被拒"必须分开 —— 前者是保护、后者才是风控信号。
+            if breaker is not None:
+                breaker["list_off"] = True
+            logger.debug("%s", exc)
         except Exception as exc:  # noqa: BLE001 - 限权/废弃不影响 cover 主路径
             # -2041 是新版微信读书对该接口的永久限权,每进程只记一次,避免每账号刷屏
             if not getattr(_weread_collect, "_mp_articles_warned", False):
@@ -360,17 +377,32 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
     # ⚠️ 只在网页路没成功时走(App 有自己的配额,未知上限 —— 不无谓地双倍消耗);
     # ⚠️ **记账要分路**(`weread_list_app_ok` 而不是 `weread_list_ok`):合在一起就再也看不出
     #    "网页路到底恢复了没" —— 而"能不能恢复"决定这条兜底是临时的还是永久的。
-    # ⚠️ **必须叠加 `not list_skipped`**(2026-10-05 审计抓到,我第一版漏了):
-    #    不叠加的话,"在轮转窗口外"和"本轮已熔断"的号**也会去打 App 接口** ——
-    #    那正是窗口机制要省的那批号。App 配额上限未知,而**这个账号的网页配额就是被
-    #    我们自己打没的**(`-2041`)⇒ 同一套轮转纪律必须一并适用于 App,不能双份消耗。
-    if not listed and not list_skipped and app_client is not None:
+    # ⚠️ **这里改过一次,记下来免得改回去**(2026-10-05 同一天内):
+    #    第一版写的是 `not list_skipped`(审计建议),理由是"窗口外的号别去打 App"。
+    #    **那个理由对了一半,但用错了变量**:`list_skipped` 是
+    #    `(不在窗口) or (本轮网页已熔断)` 两个条件的**或** —— 用它挡 App,
+    #    就等于"网页一被挡,唯一还能用的 App 也一起停" ⇒ **兜底在最需要它的时候失效**。
+    #    正确的窗口纪律来自 `list_allow`(这个号在不在本轮窗口),而 Web 的熔断
+    #    **不应该**连累 App(App 是另一套鉴权与配额)。
+    # ⚠️ 用 **`list_allow`(在不在本轮窗口)**,不是 `list_skipped`:
+    #    `list_skipped` 把两件事混成一个布尔 —— ⒜"这个号不在窗口里"(该省额度)
+    #    和 ⒝"网页本轮已熔断"。用 ⒝ 去挡 App 是**错的**:App 是另一套鉴权与配额,
+    #    **网页恰好被挡的时候,正是 App 该顶上的时候**(兜底的全部价值就在这)。
+    #    窗口纪律照旧(⒜ 仍然省),但不再让网页的熔断连累唯一还能用的那条路。
+    #    (这是 `test_listen_counts_quiet_rounds_on_weread_path` 与额度收窄一起逼出来的。)
+    if not listed and list_allow and app_client is not None:
         try:
-            rows = app_client.articles(b.weread_book_id)
+            # ⚠️ **scope=app**:App 是另一套鉴权与配额,网页被 `-2041` 拦了它照样能取 ——
+            # 这正是兜底的价值。熔断按通道分开记,别让网页的挡牵连唯一还能用的这条路。
+            rows = weread_budget.call(
+                session, user_id, lambda: app_client.articles(b.weread_book_id),
+                what=f"app/book/articles({b.nickname})", scope=weread_budget.SCOPE_APP)
             _append_listed(items, [{"title": r["title"], "read_num": r["read_num"],
                                     "like_num": r["like_num"], "create_time": r["publish_at"],
                                     "original_id": r["original_id"]} for r in rows], cutoff)
             listed, list_via = True, "app"
+        except weread_budget.Blocked as exc:
+            logger.debug("%s", exc)
         except Exception as exc:  # noqa: BLE001 - 兜底也失败 = 本号没答案,但不影响 cover
             logger.debug("App 列表兜底失败(%s):%s", b.weread_book_id, str(exc)[:80])
     # 正文:先直抓 mp.weixin.qq.com(不占微信读书配额),**抓空了再用这篇的 reviewId
@@ -689,6 +721,21 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     # 被额度类错误(-2014/-2041)挡下后继续让剩余号逐个去撞,只会把风控加深、让队尾整轮挨饿,
     # 所以这里合闸:列表先停,连续 _COVER_QUOTA_TRIP 个号 cover 也挡不下就整源停。
     breaker: dict = {"list_off": False, "cover_quota_fails": 0, "off": False}
+    # ⚠️ **跨路径共享的额度熔断**(2026-10-05):`breaker` 是**轮内**的 ——
+    # 它管得住本轮,管不住"同步那条路也被挡了""上一轮被挡过"。
+    # 这里查一次共享状态(轮级只查一次,不是每号一次)。
+    # ⚠️ **只合 `list_off`,不合 `off`**:共享熔断记的是**列表预算**(`mp/articles`),
+    # 而实测 `-2041` 打的是列表的额度 —— 同一时刻 **cover 与 shelf 都好好的**。
+    # 把 cover 一起停掉 = 每个号连"当天有没有发文"都答不上,那才是真瞎。
+    # (这条是 `test_listen_counts_quiet_rounds_on_weread_path` 当场逼出来的。)
+    try:
+        _blk = weread_budget.blocked_until(session, user_id)
+        if _blk is not None:
+            breaker["list_off"] = True
+            logger.info("微信读书列表额度熔断中(至 %s):本轮不问列表,cover 照常",
+                        _blk.strftime("%H:%M"))
+    except Exception:  # noqa: BLE001 - 查不到就当没熔断(宁可多打一次,也别把整轮卡死)
+        logger.debug("读共享额度熔断失败", exc_info=True)
     # 列表额度的**轮转**:本轮只让"最久没轮到"的 `_LIST_WINDOW` 个号问
     # `/web/mp/articles`(带精确阅读数),其余号只取 cover。挑法与批子集、排序**都无关** ——
     # 详见 `_list_window` 上方注释。

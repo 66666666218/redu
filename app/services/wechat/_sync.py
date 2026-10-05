@@ -7,6 +7,7 @@ from app.services.reader_platform_client import PlatformError, ReaderPlatformCli
 from app.services.tenant_base import _base, _record_run
 
 from app.services.weread_client import WereadAuthError, WereadClient, WereadError, build_mp_url
+from app.services import weread_budget   # 额度统一入口:这条链以前完全没判额度
 
 from app.services.werss_client import WerssClient
 
@@ -178,7 +179,16 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
 
             listed, out = "error", []
             try:
-                for it in _WC.flatten_mp_articles(client.mp_articles(b.weread_book_id)):
+                # ⚠️ **经统一额度入口**(2026-10-05):这条同步链原来**完全没判额度** ——
+                # 判据住在 1200 行的 `_listen.py` 里,这边嫌重就没 import。
+                # 后果:监听轮被 `-2041` 挡下、闸门都合了,这边**照打不误**,
+                # 把同一个账号的风控越打越深(而"谁在抢额度"当时根本看不出来)。
+                # 现在经 `weread_budget.call` ⇒ ①被挡时**根本不发**;②被拒时**全路径共享熔断**。
+                payload = weread_budget.call(
+                    session, user_id, lambda: client.mp_articles(b.weread_book_id),
+                    what=f"sync/mp/articles({b.nickname})",
+                    scope=weread_budget.SCOPE_WEB_LIST)
+                for it in _WC.flatten_mp_articles(payload):
                     ts = it.get("create_time") or 0
                     pub = datetime.fromtimestamp(ts) if ts else None
                     if pub and pub < datetime.now() - timedelta(days=3):
@@ -189,9 +199,14 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
                 listed = "ok"
             except WereadAuthError:
                 raise  # Cookie 失效必须往上抛(上层据此续期);吞成 error 会让 80 个号白撞
+            except weread_budget.Blocked as exc:
+                # **熔断中 = 我们主动没发请求**,不是"这个源坏了" ⇒ 状态标 limited(可预期),
+                # 不能标 error(error 会被当成故障信号去告警 —— 保护措施不该报警)
+                listed = "limited"
+                logger.info("同步跳过列表(额度熔断中):%s", str(exc)[:80])
             except Exception as exc:  # noqa: BLE001 - 列表是"锦上添花",任何形状问题都不该打断同步
                 # -2041 = 本会话列表预算耗尽(可预期,别当故障);其余按异常归类
-                listed = "limited" if "-2041" in str(exc) else "error"
+                listed = "limited" if weread_budget.is_quota_error(exc) else "error"
                 logger.warning("微信读书近期列表不可用(%s),%s 退到最新一篇", str(exc)[:60], b.nickname)
             cover = None
             try:
