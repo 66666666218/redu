@@ -180,12 +180,20 @@ def _rows(session: Session, model, since: datetime, limit: int) -> list[Any]:
 
 
 def _push(table: str, cols: tuple[str, ...], values: list[dict], conn) -> int:
-    """批量插入(**)不带 id**)。返回写入行数。"""
+    """批量插入(**)不带 id**)。返回写入行数。
+
+    ⚠️⚠️ **标识符必须加反引号**(2026-10-05 拿真 MySQL 跑才暴露):
+    `hot_source_items` 有个列叫 **`rank`** —— 那是 **MySQL 8 的保留字**(窗口函数),
+    裸写进去直接 `1064 syntax error`。而**用 SQLite 当假远端的单测永远发现不了**
+    (SQLite 容忍裸 `rank`),所以这个坑只在生产上炸。
+    原注释写着「不加反引号:SQLite 不认」—— **那句是错的**:实测 SQLite 完全接受反引号
+    (`sqlite3` 支持 MySQL 风格的标识符引用)。两边都认 ⇒ 一律加,顺带挡住以后出现的保留字列。
+    """
     if not values:
         return 0
-    col_sql = ", ".join(cols)          # 不加反引号:SQLite(测试用假远端)不认
+    col_sql = ", ".join(f"`{c}`" for c in cols)
     val_sql = ", ".join(f":{c}" for c in cols)
-    conn.execute(text(f"INSERT INTO {table} ({col_sql}) VALUES ({val_sql})"), values)
+    conn.execute(text(f"INSERT INTO `{table}` ({col_sql}) VALUES ({val_sql})"), values)
     return len(values)
 
 

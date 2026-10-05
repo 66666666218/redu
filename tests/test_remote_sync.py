@@ -303,3 +303,46 @@ class TestBiliPanHotSync:
         assert out.get("status") == "failed", f"应当记失败,实际 {out}"
         assert rs._bili_hot_watermark(local) == "1970-01-01 00:00:00", \
             "提交失败那轮**绝不能**推进水位线(否则那批行永久丢失)"
+
+
+class TestPushQuotesIdentifiers:
+    """★★ **2026-10-05 拿真 MySQL 跑才暴露的坑**:`hot_source_items` 有个列叫 **`rank`**,
+    那是 **MySQL 8 的保留字** —— 裸写进 INSERT 直接 `1064 syntax error`。
+
+    ⚠️ 而这个坑**用 SQLite 假远端的往返测试永远发现不了**(SQLite 容忍裸 `rank`),
+    所以只能**直接钉住生成的 SQL 形态**。真实故障现场:
+    `ProgrammingError (1064, "... right syntax to use near 'rank, title, url, extra, c")`。
+    """
+
+    class _Conn:
+        def __init__(self):
+            self.sql = ""
+
+        def execute(self, stmt, values):
+            self.sql = str(stmt)
+
+    def test_列名与表名都要加反引号(self) -> None:
+        conn = self._Conn()
+        n = rs._push("hot_source_items", ("user_id", "rank", "title"),
+                     [{"user_id": 1, "rank": 1, "title": "x"}], conn)
+        assert n == 1
+        assert "`rank`" in conn.sql, f"列名必须加反引号(MySQL 8 里 rank 是保留字):{conn.sql}"
+        assert "`hot_source_items`" in conn.sql, f"表名也应加:{conn.sql}"
+        # 命名参数本身**不能**加引号,否则绑不上值
+        assert ":rank" in conn.sql and "`:`" not in conn.sql
+
+    def test_空列表不发SQL(self) -> None:
+        conn = self._Conn()
+        assert rs._push("hot_source_items", ("rank",), [], conn) == 0
+        assert conn.sql == "", "没数据时不该发 SQL"
+
+    def test_SQLite也认反引号(self, local, remote_url) -> None:
+        """原注释写着「不加反引号:SQLite(测试用假远端)不认」—— **那句是错的**。
+        实测 SQLite 接受反引号,所以加引号对两边的方言都安全。"""
+        from app.db.models import HotSourceItem
+
+        local.add(HotSourceItem(user_id=1, source="bili-pan", rank=3, title="带保留字列的行",
+                                url="", extra=""))
+        local.commit()
+        out = rs.sync_once(local, remote_url)
+        assert out.get("bili_hot") == 1, f"SQLite 假远端上也要能推成功:{out}"
