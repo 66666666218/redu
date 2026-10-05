@@ -439,3 +439,52 @@ def test_settings_为_None_时也要出词() -> None:
     from app.services import cross_accounts as cp
 
     assert cp._account_keywords(None, None, 3) == ["网盘资源", "夸克网盘", "百度网盘"]
+
+
+class TestQueuePanLink:
+    """发现到的**真盘链**必须同时进转存队列(2026-10-05)。
+
+    ⚠️ 此前它**只被抄在账号行上**(`cross_platform_accounts.pan_link`),而那张列
+    **除了本模块自己没有任何消费者** —— 于是"发现时顺手抓到的链"要么靠 `pan_discovery`
+    用**另一套关键词**再搜一遍撞上,要么就永久躺在账号行里。这不是"偶尔漏",是**结构性的**:
+    账号发现与资源转存是两条独立的路,唯一的交汇点纯属巧合。
+    """
+
+    def test_有盘链就入队且状态是pending(self, session) -> None:
+        from app.db.models import DiscoveredPanLink
+        from app.services import cross_accounts as cp
+
+        hit = {"uid": "u1", "name": "作者甲", "url": "https://zhihu.com/a",
+               "snippet": "最近爆火的<em>花少2人格测试</em>来啦",
+               "pan_link": "https://pan.quark.cn/s/abc"}
+        assert cp._save(session, 1, "zhihu", hit, "花少2") is True
+
+        rows = session.scalars(select(DiscoveredPanLink)).all()
+        assert len(rows) == 1, "账号入库时,它带的真盘链也要进转存队列"
+        assert rows[0].origin_url == "https://pan.quark.cn/s/abc"
+        assert rows[0].status == "pending", "必须是 pending,`pan_discovery` 的 backlog 才会重试它"
+        assert rows[0].platform == "zhihu" and rows[0].author == "作者甲"
+        # 标题要用**内容摘要**(含资源名),`already_have` 是按标题里抽的资源名去查库的;
+        # 而且 HTML 高亮标签要剥掉
+        assert "花少2人格测试" in rows[0].title and "<em>" not in rows[0].title
+
+    def test_重复发现同一条链不重复入队(self, session) -> None:
+        from app.db.models import DiscoveredPanLink
+        from app.services import cross_accounts as cp
+
+        hit = {"uid": "u1", "pan_link": "https://pan.quark.cn/s/abc", "name": "甲",
+               "url": "u", "snippet": "s"}
+        cp._save(session, 1, "zhihu", hit, "kw")
+        # 换一个号、同一条链(不同回答贴了同一资源)—— 不该再插一条
+        cp._save(session, 1, "zhihu", dict(hit, uid="u2"), "kw")
+        assert len(session.scalars(select(DiscoveredPanLink)).all()) == 1
+
+    def test_没有盘链就不入队(self, session) -> None:
+        from app.db.models import DiscoveredPanLink
+        from app.services import cross_accounts as cp
+
+        # B站那种"号名明写网盘、但内容里没有链"的号:账号要收,但队列里不该凭空多一条
+        hit = {"uid": "60000", "name": "网盘资源商行", "url": "b",
+               "snippet": "网盘资源商行 多多支持", "pan_link": ""}
+        assert cp._save(session, 1, "bilibili", hit, "网盘资源") is True
+        assert session.scalars(select(DiscoveredPanLink)).all() == []

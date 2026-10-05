@@ -465,6 +465,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.push_timeline import tick as push_timeline_tick
     from app.services.telegram_source import collect_tick as tg_collect_tick
     from app.services.cross_accounts import cross_account_tick
+    from app.services.bili_account_scan import bili_account_scan_tick
     from app.services.douyin_leads import douyin_leads_tick
     from app.services.xunlei_sync import xunlei_sync_tick
     from app.services.xunlei_group import xunlei_group_tick
@@ -583,6 +584,19 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # (见 app/services/push_timeline.py)。改时间即刻生效,不必重启或重建作业。
         # 角色标 both:tick 本身两边都跑,但**推哪些类**由 push_timeline 按角色过滤
         # (热点类归远程发、公众号类归本机发),否则同一个群会收到两份。
+        # B站对标号的**投稿标题**采集(2026-10-05):用户口径「b站如果没有链可以只采集标题,
+        # 从资源库里搜然后完善」。落到 `hot_source_items`(`source="bili-pan"`)⇒ 选题 Agent
+        # 的 `_platform_hot_candidates` 自动当候选、`_library_evidence` 自动回资源库查有没有。
+        # ⚠️ **每 2 小时只扫 1 个号**:B站 space 接口匿名额度极低(实测连发即 412/-352),
+        # 59 个号轮一圈约 5 天 —— 这是有意压着跑,调大只会换来整轮 failed。
+        # ⚠️ 角色必须是 **hotspot(远程)**,不能是 wechat(本机):
+        # ① 它的产物落 `hot_source_items`,而**读它的选题 Agent(`agent_tick_all_users`)
+        #    也在 hotspot** —— 挂本机的话标题落本机库,`remote_sync` **又不推这张表**
+        #    (只推公众号那几张 + cross_platform_accounts),这条链**当场就是断的**;
+        # ② 它需要的 59 个对标号来自 `cross_platform_accounts`,那张表**已经在同步到远程**;
+        # ③ 附带好处:远程 IP 是**另一个限流桶**,不与本机 `cross_accounts` 的 B站调用互相挤。
+        (bili_account_scan_tick, _get_settings().bili_scan_cron, {"minute": 0, "hour": "*/2"},
+         "bili_account_scan", "hotspot"),
         (push_timeline_tick, "* * * * *", {"minute": "*"}, "push_timeline", "both"),
     ]
     for func, expr, default, job_id, role in jobs:

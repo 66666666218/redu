@@ -665,8 +665,48 @@ def _keywords_from_library(session: Session, user_id: int, top: int = 5) -> list
     return kws[:top]
 
 
+def _queue_pan_link(session: Session, user_id: int, platform: str, hit: dict) -> bool:
+    """发现到的**真盘链**同时送进转存队列(`discovered_pan_links`,`status=pending`)。
+
+    ⚠️ **为什么必须送**(2026-10-05 审查发现):这条链此前**只把链抄在账号行上**
+    (`cross_platform_accounts.pan_link`),而**除了本模块自己、没有任何消费者** ——
+    于是"发现时顺手抓到的链接"要么靠 `pan_discovery` 用**另一套关键词**再搜一遍撞上,
+    要么就永久躺在账号行里。这不是"偶尔漏",是**结构性的**:账号发现与资源转存
+    是两条独立的路,唯一的交汇点纯属巧合。
+
+    送进 `discovered_pan_links` 之后**立刻接上现成的一切**:`pan_discovery.sync` 的
+    `backlog` 会把它当存量待办重试(pending/failed 都在内)、按盘分发转存、
+    成功后进资源库 → 选题 Agent 的 `_library_evidence` 就能看到。
+
+    去重靠 `(user_id, origin_url)`(与表上的唯一约束同口径);已存在就返回 False。
+    """
+    url = str(hit.get("pan_link") or "").strip()
+    if not url:
+        return False
+    from app.db.models import DiscoveredPanLink
+
+    url = url[:500]
+    exists = session.scalar(select(DiscoveredPanLink.id).where(
+        DiscoveredPanLink.user_id == user_id,
+        DiscoveredPanLink.origin_url == url).limit(1))
+    if exists:
+        return False
+    session.add(DiscoveredPanLink(
+        user_id=user_id, platform=platform, origin_url=url,
+        # 标题用**内容摘要**(里面就是资源名),而不是账号名 —— `already_have` 是按标题里
+        # 抽出的资源名去库里查的,摘要才匹配得上。
+        title=_strip_tags(str(hit.get("snippet") or "")).strip()[:255],
+        author=str(hit.get("name") or "")[:64],
+        source_url=str(hit.get("url") or "")[:500], status="pending"))
+    session.flush()
+    return True
+
+
 def _save(session: Session, user_id: int, platform: str, hit: dict, keyword: str) -> bool:
     """入库(按 user+platform+uid 去重);返回是否新增。"""
+    # **顺手把真盘链送进转存队列** —— 放在查重**之前**:账号已存在、但链是这一轮才
+    # 抓到的(或上轮漏送的)也要补送。函数内部自己去重,重复调用无副作用。
+    _queue_pan_link(session, user_id, platform, hit)
     exists = session.scalar(select(CrossPlatformAccount.id).where(
         CrossPlatformAccount.user_id == user_id,
         CrossPlatformAccount.platform == platform,

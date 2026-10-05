@@ -204,3 +204,52 @@ def test_search_dedupes_across_sources(session) -> None:
     session.commit()
     rs = search_resources(session, 1, "某资源分享", days=365, limit=10)
     assert len(rs) == 1 and rs[0]["source"] == "公众号"
+
+
+def _mk_group(session, title, our_url, days_ago=0, share_id="s1", status="ok"):
+    from app.db.models import XunleiGroupShare
+
+    session.add(XunleiGroupShare(
+        user_id=1, group_id="g1", group_name="全网游戏软件大全", share_id=share_id,
+        origin_url="https://pan.xunlei.com/s/OTHER", title=title, status=status,
+        our_url=our_url, synced_at=datetime.now() - timedelta(days=days_ago)))
+
+
+def test_xunlei_group_shares_are_searchable(session) -> None:
+    """⚠️ **群分享转存进来的资源也必须有出口**(2026-10-05 补)。
+
+    实测本地库 `xunlei_group_shares` **60 条里 40 条已有 `our_url`**(群分享→转存→我方链
+    全链跑通),而 `xunlei_resources` 只有 **8** 条 —— 也就是说 **40 条"我们已经拥有的资源"
+    在资源库里查不到**。后果与 `xunlei_resources` 那次一模一样:
+    ① 选题 Agent 的 `_library_evidence` 判成「待搬」而不是「已有链」;
+    ② `pan_discovery.already_have` 判成"没有" ⇒ **去别的盘重复搬一份**,白占空间。
+    """
+    from app.services.resource_library import search_resources
+
+    _mk_group(session, "日乙安卓直装", "https://pan.xunlei.com/s/G1?pwd=aa")
+    session.commit()
+    rs = search_resources(session, 1, "日乙安卓直装", days=365, limit=10)
+    assert len(rs) == 1
+    assert rs[0]["source"] == "迅雷群"
+    assert rs[0]["my_link"] == rs[0]["pan_url"] == "https://pan.xunlei.com/s/G1?pwd=aa"
+
+
+def test_xunlei_group_skips_rows_without_our_url(session) -> None:
+    """**还没转存**的群分享(没有我方链)不进库 —— 库要的是"可用链"。"""
+    from app.services.resource_library import search_resources
+
+    _mk_group(session, "还没搬的资源", "", status="pending")
+    session.commit()
+    assert search_resources(session, 1, "还没搬的资源", days=365, limit=10) == []
+
+
+def test_group_and_pan_share_the_same_url_only_once(session) -> None:
+    """同一条链既在 `xunlei_resources`(扫盘)又在群分享里 → 只出一次。"""
+    from app.services.resource_library import search_resources
+
+    url = "https://pan.xunlei.com/s/BOTH?pwd=x"
+    _mk_xl(session, "同一个资源", url)
+    _mk_group(session, "同一个资源", url, share_id="s9")
+    session.commit()
+    rs = search_resources(session, 1, "同一个资源", days=365, limit=10)
+    assert len(rs) == 1, f"同链应当只出一次,实际 {[r['source'] for r in rs]}"

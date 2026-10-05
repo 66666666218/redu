@@ -191,6 +191,19 @@ class Settings(BaseSettings):
     # 真盘链 0 条);③ 其 LICENSE 为 NON-COMMERCIAL LEARNING LICENSE 1.1,明禁商业用途。
     # 保留代码与登录态备用,但**不再进定时轮**——开它只是每周多开一次浏览器白招风控。
     cross_mediacrawler_enabled: bool = False
+    # ---- B站对标号**投稿标题**采集(2026-10-05)见 app/services/bili_account_scan.py ----
+    # 用户口径:「**b站如果没有链可以只采集标题,从资源库里搜然后完善**」。
+    # 这绕开了实测的死结:`space` 接口能通,但**视频简介里没有盘链**(实测 30 条投稿的
+    # `desc` 里一条夸克/百度链都没有)。而**标题本身就是资源名**("野鹅敢死队 经典影片"),
+    # 够用了 —— 落进 `hot_source_items`,选题 Agent 会自动拿它去**资源库**查有没有。
+    bili_scan_enabled: bool = True
+    # ⚠️ **匿名额度极低**:实测连发两次即 `HTTP 412`(HTML 拦截页),再试 `code=-352`。
+    # 所以**每轮只扫 1 个号**、两小时一轮 ⇒ 一天 12 个号,59 个号约 5 天轮完一圈。
+    # 调大前先想清楚:**被限流时整轮记 `failed`**(不静默),但你看到的会是"扫不动"。
+    # ⚠️ 作业角色是 **hotspot(远程)**:产物落 `hot_source_items`,而**读它的选题 Agent
+    #    (`agent_tick_all_users`)也在远程**;挂本机的话 `remote_sync` **不推这张表**,链当场就断。
+    bili_scan_cron: str = "0 */2 * * *"
+    bili_scan_accounts_per_run: int = 1
     # ---- 抖音推广线索(2026-10-02,用户提供的判据)见 app/services/douyin_leads.py ----
     # 抖音推广号的标题里会多出一段与内容无关的文字(常见是《…》包裹),推给运营人工确认。
     # 账号信息被 MediaCrawler 教学版脱敏,所以**只推视频链接、不自动收号**。

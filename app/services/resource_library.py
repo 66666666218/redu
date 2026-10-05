@@ -162,6 +162,45 @@ def _xunlei_resources(session: Session, user_id: int, query: str = "",
     return out
 
 
+def _xunlei_group_resources(session: Session, user_id: int, query: str = "",
+                            days: int = 90, limit: int = 20) -> list[dict]:
+    """**迅雷群组里转存进来的**资源(2026-10-05 补的出口)。结构与 `_xunlei_resources` 一致。
+
+    ⚠️ **这条出口此前不存在,而缺口比 `XunleiResource` 那次还大**:实测本地库
+    `xunlei_group_shares` **60 条里 40 条已经有 `our_url`**(群分享 → 转存 → 我方链,全链跑通),
+    而 `xunlei_resources` 只有 **8** 条 —— 也就是说 **40 条"我们已经拥有的资源"在资源库里查不到**。
+    后果与 `_xunlei_resources` 那次一模一样(`resource_library` 只并公众号链 + 公开发现链):
+    ① 选题 Agent 的 `_library_evidence` 看到"库里没有" ⇒ 标成「待搬」而不是「已有链」;
+    ② `pan_discovery.already_have` 也会判成"没有" ⇒ **去别的盘重复搬一份**(白占空间)。
+    两张表都是"我方盘里的东西",只是**入库路径不同**(群分享 vs 扫盘/口令),
+    所以形状照抄,只在 `source` 上区分,便于界面与排障认出来源。
+
+    只收 **`our_url != ""`**(群分享需先转存才有我方链)—— 没链的放进来只会干扰,
+    与 `_xunlei_resources` 跳过无 `share_url` 行是同一条理由。
+    """
+    from app.db.models import XunleiGroupShare
+
+    stmt = select(XunleiGroupShare).where(XunleiGroupShare.user_id == user_id,
+                                          XunleiGroupShare.our_url != "")
+    if query:
+        stmt = stmt.where(XunleiGroupShare.title.contains(query))
+    if days:
+        stmt = stmt.where(XunleiGroupShare.synced_at >= datetime.now() - timedelta(days=days))
+    rows = session.scalars(stmt.order_by(XunleiGroupShare.synced_at.desc())
+                           .limit(limit)).all()
+    out: list[dict] = []
+    for r in rows:
+        url = str(r.our_url or "")
+        ts = r.synced_at.isoformat(sep=" ", timespec="seconds") if r.synced_at else ""
+        out.append({"pan_url": url, "pan_type": _pan_kind(url),
+                    "accounts": 1,
+                    "titles": [str(r.title or "")[:60]] if r.title else [],
+                    "first_seen": ts, "last_seen": ts,
+                    "my_link": url,                  # 本来就是我们自己的链
+                    "source": "迅雷群"})
+    return out
+
+
 def search_resources(session: Session, user_id: int, query: str,
                      days: int = 90, limit: int = 20) -> list[dict]:
     """关键词检索资源库:匹配文章标题,聚合到盘链级,按验证强度(号数)排序。
@@ -194,7 +233,13 @@ def search_resources(session: Session, user_id: int, query: str,
     seen |= {d["pan_url"] for d in extra}
     mine = [x for x in _xunlei_resources(session, user_id, q, days, limit)
             if x["pan_url"] not in seen]
-    return (ours + extra + mine)[:limit]
+    # **并入迅雷群组里转存进来的那些**(2026-10-05):同样是"我方盘里的东西",只是入库路径
+    # 不同(群分享转存,而非扫盘/口令)。实测 40 条已转存的群分享此前在库里查不到 ——
+    # 直接后果是 `already_have` 判"没有"→ **去别的盘重复搬一份**,白占空间。
+    seen |= {d["pan_url"] for d in mine}
+    groups = [x for x in _xunlei_group_resources(session, user_id, q, days, limit)
+              if x["pan_url"] not in seen]
+    return (ours + extra + mine + groups)[:limit]
 
 
 def resonance_resources(session: Session, user_id: int, days: int = 30,
