@@ -63,6 +63,15 @@ def test_标题里的_实体与多余空白要被清掉():
     assert _clean_title("  多   空白\n换行  ") == "多 空白 换行"
 
 
+def test_长标签也要能洗掉_上限别卡太小():
+    """⚠️ **回归测试**:第一版上限写 `{0,80}`,金十的 `<a href="https://cdn.jin10.com/…">`
+    **单标签就 130 字符**,上线后实测仍有 18 行漏网。上限是**量出来的**。
+    """
+    tag = '<a href="https://cdn.jin10.com/vip_column/index.html#/detail/' + "x" * 60 + '">看</a>'
+    assert len(tag) > 80
+    assert _clean_title(tag) == "看"
+
+
 def test_清洗不改写内容():
     """⚠️ 只去标签/解实体/压空白,**不许**截断或改写 —— 改了就成内容事故了。"""
     assert _clean_title("标题里有 < 和 > 但没标签") == "标题里有 < 和 > 但没标签"
