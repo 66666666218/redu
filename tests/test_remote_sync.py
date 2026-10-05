@@ -148,3 +148,53 @@ def test_old_rows_are_not_pushed(local, remote_url) -> None:
         assert c.execute(text("SELECT count(*) FROM wechat_articles WHERE url = 'https://x/old'")) \
             .scalar() == 0
     eng.dispose()
+
+
+def test_sync_pushes_cross_platform_accounts(local, remote_url) -> None:
+    """★ **2026-10-05 补的洞**:`cross_platform_accounts`(知乎/B站发现的网盘号)
+    **只在本机产生**(发现链归 wechat 侧),而选题 Agent 在 **远程** ——
+    不同步的话远程**根本看不到我们发现了哪些号**。实测本机 61 个(59 B站 + 2 知乎)、
+    **远程 0** ⇒ **白发现**。
+
+    ⚠️ 它与 `discovered_pan_links` 那次是**同一类遗漏:本机产、远程用**。
+    所以这条测试钉的不只是这一个表,而是"**本机产出的东西要记得推**"这件事本身。
+    """
+    from app.db.models import CrossPlatformAccount
+
+    local.add(CrossPlatformAccount(
+        user_id=1, platform="bilibili", uid="m123", name="网盘资源商行",
+        url="https://space.bilibili.com/123", hit_keyword="网盘资源",
+        snippet="", pan_link="", status="active", discovered_at=datetime.now()))
+    local.commit()
+
+    out = rs.sync_once(local, remote_url)
+    assert out["accounts"] == 1, f"没推过去:{out}"
+
+    eng = create_engine(remote_url)
+    with eng.connect() as c:
+        rows = c.execute(text(
+            "SELECT name, platform, uid FROM cross_platform_accounts")).all()
+    eng.dispose()
+    assert [tuple(r) for r in rows] == [("网盘资源商行", "bilibili", "m123")], rows
+
+    # **幂等**:靠天然键 (user_id, platform, uid) 去重,再推一次不该重复
+    out2 = rs.sync_once(local, remote_url)
+    assert out2["accounts"] == 0, f"第二次又插了一遍:{out2}"
+
+
+def test_跨平台账号也只推窗口内的(local, remote_url) -> None:
+    """与别的表同一条纪律:同步是"补最新",不是"全量搬运"。"""
+    from app.db.models import CrossPlatformAccount
+
+    local.add(CrossPlatformAccount(
+        user_id=1, platform="bilibili", uid="old1", name="很久以前的号",
+        url="", hit_keyword="", snippet="", pan_link="", status="active",
+        discovered_at=datetime.now() - timedelta(days=200)))
+    local.commit()
+    rs.sync_once(local, remote_url, days=14)
+    eng = create_engine(remote_url)
+    with eng.connect() as c:
+        n = c.execute(text(
+            "SELECT count(*) FROM cross_platform_accounts WHERE uid = 'old1'")).scalar()
+    eng.dispose()
+    assert n == 0

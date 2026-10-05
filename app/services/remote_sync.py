@@ -48,6 +48,21 @@ _BENCH_COLS = ("user_id", "nickname", "ghid", "weread_book_id", "biz", "anchor_u
 # ⚠️ 它的时间列叫 **`found_at`**(不是 `created_at`),去重键用 `origin_url`。
 _LINK2_COLS = ("user_id", "platform", "origin_url", "title", "author", "source_url",
                "status", "message", "our_url", "pass_code", "found_at")
+# **跨平台对标号(知乎/B站)发现的账号**(2026-10-05 新增)。⚠️ **它只在本机产生**
+# (发现链归 `wechat` 侧)⇒ 不同步的话**远程那份是空的**。实测 2026-10-05:
+# 本机 61 个(59 B站 + 2 知乎)、**远程 0**。
+#
+# ⚠️ **但要说准它给谁用**:这张表由 **API 读**(`/api/cross/accounts` → `list_cross_accounts`),
+# 也就是**前端页面**;⚠️ **`hotspot_agent` 并不读它**(实测它读的是 WechatPanLink /
+# BaiduHotItem / DouhotWatchSnap / DiscoveredPanLink / HotSourceItem / WechatArticle /
+# WeiboHotItem)。所以"不同步 ⇒ Agent 看不见"这句是**不准确的** ——
+# 真实后果是"**远程前端页面上那张表是空的**"。
+# (要不要让 Agent 也用上"我们发现了哪些网盘推广号"这个信号,是**产品决策**,另说。)
+#
+# 天然键是 **`(user_id, platform, uid)`**(与本地唯一约束 `uq_cross_acct` 同名同形),
+# 时间列是 **`discovered_at`** —— 别拿 `created_at` 去查(会 Unknown column)。
+_ACCT_COLS = ("user_id", "platform", "uid", "name", "url", "hit_keyword", "snippet",
+              "pan_link", "status", "discovered_at")
 
 
 def _engine(remote_url: str, settings=None):
@@ -158,7 +173,7 @@ def sync_once(local: Session, remote_url: str, days: int = DEFAULT_DAYS,
     except Exception as exc:  # noqa: BLE001
         return {"status": "failed", "reason": f"建连接失败:{type(exc).__name__}: {str(exc)[:120]}"}
 
-    sent = {"benchmarks": 0, "articles": 0, "links": 0, "discovered": 0}
+    sent = {"benchmarks": 0, "articles": 0, "links": 0, "discovered": 0, "accounts": 0}
     try:
         with remote.begin() as conn:
             # ---------- ① 对标号:先推(articles.benchmark_id 要引用它)----------
@@ -279,6 +294,24 @@ def sync_once(local: Session, remote_url: str, days: int = DEFAULT_DAYS,
                 cols = list(_LINK2_COLS)
                 new_f = [dict(zip(cols, r)) for r in local_found if str(r[2]) not in have_f]
                 sent["discovered"] = _push("discovered_pan_links", _LINK2_COLS, new_f, conn)
+
+            # ---------- ⑤ 跨平台对标号(知乎/B站发现的网盘号)----------
+            # ⚠️ **它只在本机产生**(发现链归 wechat 侧),而选题 Agent 在远程
+            # ⇒ 不同步的话远程**根本看不到我们发现了哪些网盘号** —— 白发现。
+            # 天然键 `(user_id, platform, uid)`;这边行数很少(实测 61),直接全量比对,
+            # 不必像别的表那样分批(读回来也就几十行)。
+            local_accts = local.execute(
+                text("SELECT user_id, platform, uid, name, url, hit_keyword, snippet, "
+                     "pan_link, status, discovered_at FROM cross_platform_accounts "
+                     "WHERE discovered_at >= :s LIMIT :n"), {"s": since, "n": limit}).all()
+            if local_accts:
+                have_a = {tuple(str(x) for x in row) for row in conn.execute(text(
+                    "SELECT user_id, platform, uid FROM cross_platform_accounts "
+                    "WHERE user_id = 1"))}
+                cols = list(_ACCT_COLS)
+                new_a2 = [dict(zip(cols, r)) for r in local_accts if str(r[2])
+                          and (str(r[0]), str(r[1]), str(r[2])) not in have_a]
+                sent["accounts"] = _push("cross_platform_accounts", _ACCT_COLS, new_a2, conn)
     except Exception as exc:  # noqa: BLE001 - 远程任何问题都不该影响本机
         logger.warning("远程同步失败(不影响本机):%s: %s", type(exc).__name__, str(exc)[:200])
         return {"status": "failed", "reason": f"{type(exc).__name__}: {str(exc)[:160]}", **sent}
