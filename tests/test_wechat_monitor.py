@@ -4492,3 +4492,99 @@ def test_新值为0时不当成回填(session) -> None:
         source="listen", require_pan=False)
     session.commit()
     assert session.get(WechatArticle, row.id).read_num == 0  # 无变化,不应报错
+
+
+# ------------------------------------------------ 后处理回滚事故(2026-10-05)
+
+def test_告警步骤炸了也不能丢转存结果(session, monkeypatch) -> None:
+    """★ **2026-10-05 生产事故的回归测试**。
+
+    **事故链**(实测,日志 `14:02:04 监听后处理失败 user=1` + 堆栈):
+    共振告警的冷却门 `feishu_alert_gate` 里 `with savepoint(db)` 建保存点时撞上
+    SQLite **`database is locked`**(本地并发写抢占,`busy_timeout=30s` 都没等到)
+    → 异常上抛 → 外层 `_listen_round` 的 savepoint 把**整段 enrich 回滚**
+    → 那一轮 **10 篇的转存/复用全部白干**。
+
+    而外面看到的是:**轮次状态 `success`、日志里"盘链复用(免重复转存)"一条不少、
+    卡片照常推送** —— 只是网盘列变成「⏳待转存」。**教科书级的"看起来成功实则失败"**。
+
+    **修法**:转存结果在下面那段"锦上添花"(共振告警/交叉提取)**之前** commit。
+    本测试用"告警必炸"逼出那条路径,断言**转存已经落库**。
+    """
+    import app.services.wechat._enrich as en
+
+    b = WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1")
+    session.add(b)
+    session.commit()
+    # 两篇**同一条盘链**——共振告警要求"≥2 篇推过同一链"才会触发
+    for i in (1, 2):
+        session.add(WechatArticle(user_id=1, author="号A", title=f"文{i}",
+                                  url=f"https://mp.weixin.qq.com/s/rb{i}",
+                                  pan_urls="https://pan.quark.cn/s/same1",
+                                  pan_types="夸克网盘", my_pan_urls="", source="listen",
+                                  benchmark_id=b.id, created_at=datetime.now()))
+    session.commit()
+    rows = session.scalars(select(WechatArticle)).all()
+    # ⚠️ 共振是按**归一化表**统计的(`WechatPanLink` GROUP BY),不是 `pan_urls` ——
+    # 不写这张表就触发不到告警那一步,测试会"因为没走到而通过"。
+    from app.db.models import WechatPanLink
+    for r in rows:
+        session.add(WechatPanLink(user_id=1, article_id=r.id,
+                                  pan_url="https://pan.quark.cn/s/same1",
+                                  created_at=datetime.now()))
+    session.commit()
+
+    # 夸克:假转存成功(不走网络)
+    monkeypatch.setattr(en, "_quark_cookie", lambda *a, **k: "fake_ck")
+    monkeypatch.setattr(en, "QuarkTransfer", lambda *a, **k: type("Q", (), {
+        "transfer_and_share": lambda self, u, **kw: {
+            "share_url": "https://pan.quark.cn/s/ours1", "password": ""}})())
+
+    # ⚠️ 告警门只在**发卡成功之后**才调 ⇒ 先把发卡假成功,否则走不到那一步
+    # (测试会"因为没走到而通过",那种绿毫无意义)。
+    import app.services.feishu_client as fc
+    monkeypatch.setattr(fc, "FeishuClient", lambda *a, **k: type("F", (), {
+        "send": lambda self, *a, **k: True,
+        "send_card": lambda self, *a, **k: True})())
+
+    # ⚠️ **断言要落在"提交顺序"上,不能落在"读得到值"上**:
+    # 同一个 session 里 `expire` 再读,看到的是**未提交**的改动 —— 我第一版就是这么写的,
+    # 结果**拿掉 commit 测试照样绿**(反向验证当场拆穿)。改成记录 commit 次数,
+    # 让告警那步**自己**检查"转存是否已经落库"。
+    committed = {"n": 0}
+    _orig_commit = session.commit
+
+    def _spy_commit():
+        committed["n"] += 1
+        return _orig_commit()
+
+    monkeypatch.setattr(session, "commit", _spy_commit)
+
+    # 共振告警的冷却门:进来先断言"转存已提交",然后必炸(复现 database is locked)
+    import app.services.alert_service as als
+
+    def _boom_gate(*a, **k):
+        assert committed["n"] > 0, (
+            "告警这步跑的时候转存还没 commit ⇒ 它一炸,整段 enrich 被回滚、"
+            "那一轮转存全白干(2026-10-05 的事故形态)")
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(als, "feishu_alert_gate", _boom_gate)
+
+    from config.settings import Settings as _S
+    st = _S(_env_file=None, is_dev=True, pan_transfer_enabled=True,
+            feishu_webhook_wechat="https://open.feishu.cn/hook/wechat",
+            wechat_resonance_hours=48, focus_cooldown_hours=24)
+
+    raised = False
+    try:
+        en._enrich_new_articles(session, 1, st, list(rows))
+    except RuntimeError:
+        raised = True
+    assert raised, "告警那步炸了应该上抛(让调用方知道后处理没走完)"
+
+    # **关键断言**:转存结果已经在炸之前落库 —— 用 expire 逼它回库重读
+    for r in rows:
+        session.expire(r)
+        assert (r.my_pan_urls or "").startswith("https://pan.quark.cn/"), (
+            f"文{r.id} 的转存结果被回滚丢了 —— 这正是 2026-10-05 那次事故的形态")

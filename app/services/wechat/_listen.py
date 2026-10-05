@@ -917,12 +917,17 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     # 本轮已采到的新文照样 commit + 推飞书(回落原文)。此前它是裸调用,
     # 一次转存异常会连带 `_record_run`/`_push_listen` 全部跳过(第八轮审计)。
     replacements: dict[int, list[tuple[str, str, str]]] = {}
+    enrich_failed = ""
     try:
         with savepoint(session):
             replacements = _root._enrich_new_articles(session, user_id, settings, new_rows)
-    except Exception:  # noqa: BLE001 - 转存炸了也要推(标题回落原文)
+    except Exception as exc:  # noqa: BLE001 - 转存炸了也要推(标题回落原文)
+        # ⚠️ **别只写日志**:外面看到的是"轮次 success、卡片照常推送",
+        # 而后处理可能已经废了一半(2026-10-05 就是转存全被回滚、卡片显示"⏳待转存")。
+        # 所以**必须进运行记录**,否则运维永远只能靠翻日志偶然撞见。
         logger.exception("监听后处理失败 user=%s(本轮推送回落原文)", user_id)
         replacements = {}
+        enrich_failed = type(exc).__name__
 
     session.commit()
 
@@ -972,6 +977,10 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
         detail += f" shelf(off={gate['reason']})"
     if banned:
         detail += f" banned={len(banned)}"
+    if enrich_failed:
+        # 后处理(转存/复用)整段被回滚 ⇒ 这一轮的"待转存"是**故障**不是"还没轮到我方转存"。
+        # 不点名的话,它在运行记录里跟正常轮次长得一样。
+        detail += f" ⚠️enrich_failed={enrich_failed}"
     _record_run(session, user_id, "wechat_listen", status, detail)
     session.commit()
     if push and new_rows:

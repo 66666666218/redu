@@ -427,6 +427,22 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                         logger.info("百度链转存跳过 %s: %s", u[:50], str(exc)[:70])
                 if baidu_dead:
                     break
+    # ⚠️⚠️ **转存结果必须在这里落库,别再往下拖**(2026-10-05 生产事故)。
+    #
+    # 下面那段(资源共振告警 / 交叉提取)是**锦上添花**,而外层 `_listen_round` 把整个
+    # `_enrich_new_articles` 关在**一个 savepoint** 里 ⇒ **它一旦抛异常,上面刚做完的
+    # 全部转存与复用会被一起回滚**。
+    #
+    # **实测就是这么丢的**(2026-10-05 14:02:04):共振告警的冷却门 `feishu_alert_gate`
+    # 里 `with savepoint(db)` 建保存点时撞上 SQLite **`database is locked`**
+    # (本地 SQLite 并发写抢占,`busy_timeout=30s` 都没等到)→ 异常上抛 →
+    # 整段 enrich 回滚 → 那一轮 10 篇的转存/复用**全部白干**。
+    # 而外面看到的是:**轮次状态 `success`、日志里"盘链复用(免重复转存)"一条不少、
+    # 卡片照常推送**,只是网盘列变成"⏳待转存" —— **典型的"看起来成功实则失败"**。
+    #
+    # 落库之后,即使下面再炸:`replacements` 虽然会丢(调用方置 `{}`),
+    # 但推送渲染会**回落到 `r.my_pan_urls`**(已有值)⇒ 卡片照样显示 🔴 我方链。
+    session.commit()
     # 资源级共振:同一盘链在窗口期内被 ≥2 篇文章推送 → 同行网络都在发的确认级爆点资源
     from app.services.feishu import _col_set_row, _md_safe
     from app.services.feishu_client import FeishuClient, webhook_for
