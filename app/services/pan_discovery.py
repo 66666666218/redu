@@ -102,6 +102,62 @@ def _alert_auth_expired(session, user_id: int, kind: str, message: str) -> None:
         logger.exception("登录态失效告警推送失败")
 
 
+def _resource_name_hints(title: str) -> list[str]:
+    """从一条候选的标题里挖出**可能的资源名**(用来回查我们库里有没有)。
+
+    三路取词,按精度从高到低:
+      ① 《…》/【…】 实体(引流号把资源名标出来,最准);
+      ② 去掉话题标签后的**连续中文片段**(4~12 字);
+      ③ 兜底:整条标题(短的时候)。
+    """
+    t = str(title or "")
+    hints: list[str] = []
+    try:
+        from app.services.wechat._candidates import mine_title_entities
+        hints += mine_title_entities([t], top=3)
+    except Exception:  # noqa: BLE001 - 抽不出来不影响主流程
+        pass
+    # ② 连续中文片段(先去掉 #话题# 与链接,免得把推广词当资源名)
+    body = re.sub(r"#\s*[^#]{1,30}\s*#", " ", t)
+    body = re.sub(r"https?://\S+", " ", body)
+    for seg in re.findall(r"[一-鿿]{4,12}", body):
+        hints.append(seg)
+    out: list[str] = []
+    for h in hints:                       # 保序去重 + 去掉过短的
+        h = h.strip()
+        if len(h) >= 3 and h not in out:
+            out.append(h)
+    return out[:5]
+
+
+def already_have(session, user_id: int, title: str) -> dict | None:
+    """这个资源我们**已经有我方链**了吗(在**任意一个网盘**上)。
+
+    用户口径(2026-10-05):「**三个网盘之间能否做到互通来缓解单个网盘内存的压力** ——
+    如果同一资源单个网盘已经有了,就不需要多个网盘进行转存了,只需要**从已有的里面推这个资源**就行」。
+
+    ⚠️ **匹配只能按名字,不能按链接**:同一份资源在夸克和百度上是**不同的 share_id**,
+    按链接去重挡不住"同一资源被搬到第二个盘"——而那正是要避免的浪费。
+
+    ⚠️ **宁可漏判不要误判**:匹配不上就返回 `None`(照常转存)。
+    误判的代价是"把 A 资源的链当成 B 资源推出去",那是**内容事故**;
+    漏判的代价只是"多搬了一份",是**空间浪费**。两者不是一个量级。
+    """
+    try:
+        from app.services.resource_library import search_resources
+    except Exception:  # noqa: BLE001
+        return None
+    for name in _resource_name_hints(title):
+        try:
+            rows = search_resources(session, user_id, name, limit=3)
+        except Exception:  # noqa: BLE001 - 查库失败就当没有,别挡转存
+            continue
+        for r in rows:
+            if r.get("my_link"):
+                return r
+    return None
+
+
 def transfer_pan_url(session, user_id: int, pan_url: str, settings=None,
                      snippet: str = "") -> dict:
     """**按链分发转存**:夸克走 `QuarkTransfer`、百度走 `BaiduPanClient`、迅雷走 `xunlei_transfer`。
@@ -425,9 +481,19 @@ def sync(session, user_id: int, settings=None) -> dict:
         cands.append(c)
     budget = int(getattr(settings, "pan_discovery_transfer_limit", 3) or 0)
     ok = skipped = failed = pending = 0
+    reused = 0                     # **复用了别的盘已有的链**(省下一次转存)
     items: list[dict] = []
     for c in cands:
-        if budget <= 0:
+        # **三盘互通**(2026-10-05 用户口径):先看**别的网盘**有没有这个资源。
+        # 有 ⇒ **不再转存**,直接把已有那条链推出去 —— 省空间、省额度、少一次写操作。
+        # ⚠️ 这一步**不花 transfer 额度**(没调转存接口),所以放在 budget 判断之前。
+        have = already_have(session, user_id, c["title"])
+        if have:
+            status = "ok"
+            message = f"库里已有(跳过转存,直接复用该盘):{str(have.get('pan_url') or '')[:60]}"
+            our, code = str(have.get("my_link") or ""), ""
+            reused += 1
+        elif budget <= 0:
             status, message, our, code = "pending", "本轮转存额度用完", "", ""
         else:
             res = transfer_pan_url(session, user_id, c["origin_url"], settings, c["title"])
@@ -458,7 +524,7 @@ def sync(session, user_id: int, settings=None) -> dict:
     session.commit()
     logger.info("网盘发现:词 %d 个 → 候选 %d 条 → 转存成功 %d", len(keywords), len(cands), ok)
     return {"status": "ok", "found": len(cands), "ok": ok, "skipped": skipped,
-            "pending": pending, "failed": failed, "items": items}
+            "pending": pending, "failed": failed, "reused": reused, "items": items}
 
 
 def push_items(items: list[dict], settings) -> bool:

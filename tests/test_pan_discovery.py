@@ -499,3 +499,97 @@ def test_sync_retries_backlog_without_refinding_it(session, monkeypatch) -> None
     row = session.scalar(select(DiscoveredPanLink).where(
         DiscoveredPanLink.origin_url == "https://pan.quark.cn/s/BACKLOG"))
     assert row.status == "ok" and row.our_url == "OUR-BACKLOG"
+
+
+# ------------------------- 三个网盘互通:别的盘已有就别再搬(2026-10-05)
+def test_already_have_matches_by_name_not_by_link(session) -> None:
+    """★★ **三盘互通**(用户口径:「如果同一资源单个网盘已经有了,就不需要多个网盘进行转存了,
+    只需要从已有的里面推这个资源就行」)。
+
+    ⚠️ **必须按名字匹配,不能按链接** —— 同一份资源在夸克和百度上是**不同的 share_id**,
+    按链接去重挡不住"同一资源被搬到第二个盘"。这里造一份**库里已有的公众号资源**,
+    再去问一个新发现的候选(名字相同、链接完全不同)—— 它必须认得出来。
+    """
+    from app.db.models import WechatArticle, WechatPanLink
+
+    art = WechatArticle(user_id=1, author="某号", title="【齐民要术】完整版资源合集",
+                        url="https://mp.weixin.qq.com/s/x", my_pan_urls="https://pan.quark.cn/s/OUR-OWN-LINK-abc123")
+    session.add(art)
+    session.flush()
+    session.add(WechatPanLink(user_id=1, article_id=art.id,
+                              pan_url="https://pan.quark.cn/s/ALREADY-HAVE"))
+    session.commit()
+
+    # 候选的链接是**另一个盘**的,但名字对得上
+    hit = pd.already_have(session, 1, "【齐民要术】完整版资源合集 速存 https://pan.baidu.com/s/NEW")
+    assert hit is not None, "名字相同、不同盘 —— 必须认出来,否则会白搬一份"
+    assert hit["my_link"] == "https://pan.quark.cn/s/OUR-OWN-LINK-abc123"
+
+
+def test_already_have_returns_none_when_unknown(session) -> None:
+    """⚠️ **宁可漏判不要误判**:匹配不上就返回 None(照常转存)。
+    误判的代价是"把 A 的链当成 B 推出去"(**内容事故**);
+    漏判只是"多搬一份"(**空间浪费**)—— 两者不是一个量级。"""
+    assert pd.already_have(session, 1, "一个谁也没提过的资源") is None
+
+
+def test_already_have_requires_our_link(session) -> None:
+    """库里**只有原始链、没有我方链**时**不算**"已有" —— 那还是得搬一次。"""
+    from app.db.models import WechatArticle, WechatPanLink
+
+    art = WechatArticle(user_id=1, author="某号", title="【独一份】资源包",
+                        url="https://mp.weixin.qq.com/s/y")      # my_pan_urls 为空
+    session.add(art)
+    session.flush()
+    session.add(WechatPanLink(user_id=1, article_id=art.id,
+                              pan_url="https://pan.baidu.com/s/NO-OUR-LINK"))
+    session.commit()
+    assert pd.already_have(session, 1, "【独一份】资源包") is None, "没我方链就得自己搬"
+
+
+def test_resource_name_hints_prefers_bracket_entities() -> None:
+    """取词按精度排:《》实体优先,其次连续中文片段;链接和话题标签要剔掉(它们是噪音)。"""
+    hints = pd._resource_name_hints("《齐民要术》完整版 #资源分享# https://pan.quark.cn/s/abc")
+    assert hints[0] == "齐民要术", f"《》实体该排第一:{hints}"
+    assert all("pan.quark" not in h for h in hints), "链接不该进候选词"
+    assert all("资源分享" != h for h in hints), "话题标签不该进候选词"
+
+
+# ------------------------- 集成:三盘互通必须真的发生在**转存循环里**(2026-10-05)
+def test_sync_reuses_existing_link_instead_of_transferring(session, monkeypatch) -> None:
+    """★★ **集成测试**(反向验证逼出来的):候选的资源**已经在别的盘**时,
+    `sync` 的转存循环**不该再调 `transfer_pan_url`**,而是直接复用已有那条链。
+
+    ⚠️ 为什么要单写这条:`already_have` 自己的单测全绿,**但"循环里有没有真的用它"没被钉住** ——
+    我做完反向验证(把那一行换成 `have = None`)时,测试**竟然还是全绿**,说明那一层是裸的。
+    """
+    from app.db.models import WechatArticle, WechatPanLink
+
+    # ① 库里先有一条**已有我方链**的资源(在夸克)
+    art = WechatArticle(user_id=1, author="某号", title="【齐民要术】完整版资源合集",
+                        url="https://mp.weixin.qq.com/s/x",
+                        my_pan_urls="https://pan.quark.cn/s/OUR-OWN-LINK-abc123")
+    session.add(art)
+    session.flush()
+    session.add(WechatPanLink(user_id=1, article_id=art.id,
+                              pan_url="https://pan.quark.cn/s/ALREADY-HAVE"))
+    session.commit()
+
+    # ② 发现链给出一个**同名、但链接在另一个盘**的候选
+    monkeypatch.setattr(pd, "find_candidates", lambda *a, **k: [
+        {"platform": "weibo", "origin_url": "https://pan.baidu.com/s/NEW-ONE",
+         "title": "【齐民要术】完整版资源合集 速存", "author": "资源铺",
+         "source_url": "https://weibo.com/1/x"}])
+    # ③ 转存被调用就要记下来(它不该被调)
+    calls: list[str] = []
+    monkeypatch.setattr(pd, "transfer_pan_url",
+                        lambda *a, **k: calls.append(a[2]) or {
+                            "status": "ok", "our_url": "SHOULD-NOT-HAPPEN",
+                            "code": "", "message": ""})
+
+    out = pd.sync(session, 1, settings=_S())
+    assert calls == [], f"库里已有却还去转存了:{calls}"
+    assert out["reused"] == 1, out
+    # ⚠️ **仍然要推出去** —— 只是用**已有那条链**,这正是用户要的"从已有的里面推这个资源"
+    assert out["items"] and out["items"][0]["share_url"] \
+        == "https://pan.quark.cn/s/OUR-OWN-LINK-abc123"
