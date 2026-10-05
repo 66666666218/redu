@@ -104,6 +104,12 @@ class Settings(BaseSettings):
     hotspot_agent_llm_top: int = 10      # 没现成资源的热点里,最多几个交给 LLM 生成选题
                                          # (2026-10-01 由 3 上调:实测 430 条候选里只有 3 条能进
                                          #  LLM,热点利用率不足 4%;DeepSeek 单价低,提到 10)
+    # **单平台候选的保底名额**(2026-10-05 实测出来的):候选排序把"跨平台同现"放最前,
+    # 于是当**跨平台条数 ≥ cap(60)** 时,`out[:cap]` **全是跨平台条目** ——
+    # 平台权重(`SOURCE_FIT`)那段排序等于白做,**所有单平台源一条都进不了 LLM**。
+    # 远程实测 24h:去重 **2027** 条候选里**跨平台只有 81 条** ⇒ 81 > 60,1946 条单平台全被埋
+    # (B站对标号 `source="bili-pan"` 那条链正是这样一条都进不去,权重 0.60 全场最高也白搭)。
+    hotspot_single_platform_slots: int = 20
     weread_fullsync_on_renewal: bool = False  # renewal 后的全量补采开关(默认关!)
                                      # 2026-09-28 实测:81 号×cover+列表 ≈162 次的补采炸弹会在
                                      # renewal 后的新会话上一次性打穿全部额度,会话数小时内即死,

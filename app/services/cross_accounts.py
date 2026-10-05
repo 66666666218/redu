@@ -312,6 +312,12 @@ def _bili_signed_get(search_type: str, keyword: str, cookie: str = "") -> dict:
     url = ("https://api.bilibili.com/x/web-interface/wbi/search/type?"
            f"{query}&w_rid={hashlib.md5((query + mixin).encode()).hexdigest()}")
     headers = {"User-Agent": _UA, "Referer": "https://www.bilibili.com/"}
+    # ⚠️ **必须 strip**:cookie 夹带行尾 `\r`/空格时 requests 会抛
+    # `Invalid leading whitespace, reserved character(s), or return character(s) in header value`
+    # —— 而 `.env` 的值就在行尾,带 `\r` 是常态。2026-10-05 在 `bili_account_scan` 那条链上
+    # 实测踩到(报错措辞完全看不出"是 cookie 带了回车"),这里一并堵住 ——
+    # 同一类坑别在两条链上各踩一次。
+    cookie = str(cookie or "").strip()
     if cookie:
         headers["Cookie"] = cookie     # 配了就用(风控更宽松);没有也能跑
     return requests.get(url, headers=headers, timeout=20).json()

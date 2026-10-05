@@ -90,7 +90,8 @@ def _family(src: str) -> str:
 
 
 def _platform_hot_candidates(db: Session, user_id: int, top_rank: int = 10,
-                             hours: int = 24, cap: int = 60) -> list[dict]:
+                             hours: int = 24, cap: int = 60,
+                             cap_single: int | None = None) -> list[dict]:
     """多平台热榜候选(v2.2.0):hot_source_items 近 N 小时 top 条目进入选题池。
 
     跨平台同现(标题归一化相同 ≥2 平台)是全网级真实信号;单平台 top 交给 LLM 判可做性。
@@ -100,9 +101,24 @@ def _platform_hot_candidates(db: Session, user_id: int, top_rank: int = 10,
     15 条 —— 实测 430 条候选里 415 条被砍在 LLM 之前,**热点利用率不足 4%**。
     按权重排序而非单纯截断,是为了让"豆瓣热剧/酷安软件"这类真能出素材的排在
     "雪球热股/财联社快讯"前面(权重表见 `niche_fit.SOURCE_FIT`)。
+
+    ⚠️⚠️ **`cap_single`:单平台条目的保底名额(2026-10-05 加,实测出来的)**
+    上面那套排序有一个**没预料到的后果**:跨平台条目永远排在最前,于是当
+    **跨平台条数 ≥ cap** 时,`out[:cap]` **全是跨平台条目,单平台的一条都进不去** ——
+    平台权重那段排序**等于白做**(它只影响"取不到"的那些)。
+    远程实测(24h):去重 **2027** 条候选,其中**跨平台(≥2)只有 81 条** ⇒ 81 > 60,
+    **1946 条单平台条目全被埋在 LLM 之前**。这不是某个源的问题,**所有单平台源都被埋**;
+    B站对标号那条链(`source="bili-pan"`,权重 0.60 全场最高)正是这样一条都进不去的。
+    所以给单平台单独留名额:先按原规则取 `cap` 条跨平台,再补 `cap_single` 条
+    **按权重最好**的单平台条目。
     """
     from app.db.models import HotSourceItem
     from app.services.niche_fit import SOURCE_FIT
+
+    if cap_single is None:                       # 不传就读配置,便于线上调参
+        from config.settings import get_settings
+
+        cap_single = int(getattr(get_settings(), "hotspot_single_platform_slots", 20) or 0)
 
     cutoff = datetime.now() - timedelta(hours=hours)
     rows = db.execute(select(HotSourceItem.source, HotSourceItem.title, HotSourceItem.rank)
@@ -121,12 +137,19 @@ def _platform_hot_candidates(db: Session, user_id: int, top_rank: int = 10,
             "platforms": "+".join(sorted(e["plats"])), "rank": e["best_rank"],
             "auto": True}  # 自动发现型:需过适配度;用户自选监控词(growth 型)不拦
            for e in agg.values()]
+
+    def _fams(h: dict) -> int:
+        """**真·跨平台数**(同一平台挂在多个榜上只算一个)。"""
+        return len({_family(p) for p in h["platforms"].split("+")})
+
     out.sort(key=lambda h: (
-        -len({_family(p) for p in h["platforms"].split("+")}),               # 真·跨平台数(同平台多榜算一个)
+        -_fams(h),                                                           # 真·跨平台数
         -max(SOURCE_FIT.get(p, 0.0) for p in h["platforms"].split("+")),     # 再看平台拉新权重
         h["rank"],                                                           # 最后看名次
     ))
-    return out[:cap]
+    multi = [h for h in out if _fams(h) >= 2]
+    single = [h for h in out if _fams(h) == 1]
+    return multi[:cap] + single[:max(0, cap_single)]
 
 
 def _platform_newcomers(db: Session, user_id: int, model,

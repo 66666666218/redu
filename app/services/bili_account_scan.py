@@ -108,6 +108,11 @@ def _signed_get(params: dict, referer: str, cookie: str = "") -> dict:
     query = urllib.parse.urlencode(clean)
     url = f"{_SPACE_URL}?{query}&w_rid={hashlib.md5((query + mixin).encode()).hexdigest()}"
     headers = {"User-Agent": _UA, "Referer": referer}
+    # ⚠️ **必须 strip**(2026-10-05 实测踩到):cookie 里夹带行尾 `\r`/空格时,requests 直接抛
+    # `Invalid leading whitespace, reserved character(s), or return character(s) in header value`
+    # —— 而 `.env` 的值恰好在**行尾**,带 `\r` 是常态(Windows 编辑/CRLF)。这个坑**不是理论**:
+    # 第一次把 cookie 送上远程就是这么炸的,而且报错措辞完全看不出"是 cookie 带了回车"。
+    cookie = str(cookie or "").strip()
     if cookie:
         headers["Cookie"] = cookie
     resp = requests.get(url, headers=headers, timeout=20)

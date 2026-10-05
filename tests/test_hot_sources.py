@@ -236,3 +236,59 @@ def test_bilibili_business_code_is_treated_as_an_error(monkeypatch) -> None:
                             {"title": f"t{i}", "bvid": f"B{i}", "tname": "动画",
                              "stat": {"view": 1}} for i in range(8)]}}))
     assert len(hs.BilibiliSource().fetch(limit=30)) == 8
+
+
+class TestSinglePlatformNotStarved:
+    """★ **2026-10-05 实测出来的结构问题**:候选排序把"跨平台同现"放最前,于是当
+    **跨平台条数 ≥ cap** 时,`out[:cap]` **全是跨平台条目** —— 平台权重(`SOURCE_FIT`)
+    那段排序**等于白做**,**所有单平台源一条都进不了 LLM**。
+
+    远程实测 24h:去重 **2027** 条候选里 **跨平台只有 81 条** ⇒ 81 > 60,
+    **1946 条单平台条目全被埋在 LLM 之前**(B站对标号 `source="bili-pan"` 那条链
+    正是这样一条都进不去,权重 0.60 全场最高也白搭)。
+    """
+
+    def _mk(self, session, n_multi: int, singles: list[tuple[str, str]]) -> None:
+        from datetime import datetime
+
+        from app.db.models import HotSourceItem
+
+        now = datetime.now()
+        rows = []
+        for i in range(n_multi):                      # 每条挂 2 个源 ⇒ 真·跨平台
+            for src in ("weibo", "baidu"):
+                rows.append(HotSourceItem(user_id=1, source=src, rank=1,
+                                          title=f"跨平台热点{i}", captured_at=now))
+        for src, title in singles:
+            rows.append(HotSourceItem(user_id=1, source=src, rank=1,
+                                      title=title, captured_at=now))
+        session.add_all(rows)
+        session.commit()
+
+    def test_跨平台占满cap时单平台仍有保底(self, session) -> None:
+        from app.services.hotspot_agent import _platform_hot_candidates
+
+        self._mk(session, 70, [("bili-pan", "野鹅敢死队 经典影片")])
+        cands = _platform_hot_candidates(session, 1, cap=60, cap_single=20)
+        assert any("bili-pan" in c["platforms"] for c in cands), \
+            "跨平台条目占满 cap 后,单平台条目必须仍有保底名额(否则这条链白采)"
+        assert len(cands) == 61, f"60 条跨平台 + 1 条单平台 ⇒ 61,实际 {len(cands)}"
+
+    def test_保底名额按平台权重取最好的(self, session) -> None:
+        """单平台名额有限时,要按 `SOURCE_FIT` 取**权重最高**的 —— 否则保底也没意义。"""
+        from app.services.hotspot_agent import _platform_hot_candidates
+
+        self._mk(session, 70, [("weibo", "低权重条目"), ("bili-pan", "高权重条目")])
+        cands = _platform_hot_candidates(session, 1, cap=60, cap_single=1)
+        singles = [c for c in cands if "+" not in c["platforms"]]
+        assert [c["keyword"] for c in singles] == ["高权重条目"], \
+            "只剩 1 个单平台名额时应当给权重最高的 bili-pan(0.60),而不是 weibo(0.15)"
+
+    def test_不给保底时退回原行为(self, session) -> None:
+        """`cap_single=0` 时行为与改动前一致(便于线上把它关掉)。"""
+        from app.services.hotspot_agent import _platform_hot_candidates
+
+        self._mk(session, 70, [("bili-pan", "野鹅敢死队 经典影片")])
+        cands = _platform_hot_candidates(session, 1, cap=60, cap_single=0)
+        assert len(cands) == 60
+        assert not any("bili-pan" in c["platforms"] for c in cands)

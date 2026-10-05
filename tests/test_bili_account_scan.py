@@ -194,3 +194,50 @@ class TestBiliCookie:
         monkeypatch.setattr(bas.time, "sleep", lambda s: None)
         bas.scan_accounts(session, 1, settings=_S())
         assert seen == ["SESSDATA=db; bili_jct=y"], f"cookie 没传到抓取函数,实际 {seen}"
+
+
+class TestCookieWhitespace:
+    """★ 2026-10-05 **实测踩到**的坑:`.env` 的值在**行尾**,带 `\r` 是常态,
+    而 requests 见到 header 头尾有空白会直接抛
+    `Invalid leading whitespace, reserved character(s), or return character(s) in header value`
+    —— 报错措辞完全看不出"是 cookie 带了回车"。
+    第一次把 cookie 送上远程就是这么炸的。
+    """
+
+    def test_cookie带行尾回车不会炸且被strip(self, monkeypatch) -> None:
+        import requests
+
+        seen: dict = {}
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"code": 0, "message": "OK", "data": {"list": {"vlist": []}}}
+
+        def fake_get(url, headers=None, timeout=None):
+            seen.update(headers or {})
+            return _Resp()
+
+        monkeypatch.setattr("app.services.cross_accounts._bili_mixin", lambda: "mixin")
+        monkeypatch.setattr(requests, "get", fake_get)
+        bas.fetch_user_titles("123", cookie="SESSDATA=abc; bili_jct=x\r\n  ")
+        assert seen.get("Cookie") == "SESSDATA=abc; bili_jct=x", \
+            f"cookie 必须 strip 掉行尾回车/空格,实际 {seen.get('Cookie')!r}"
+
+    def test_空cookie不设header(self, monkeypatch) -> None:
+        import requests
+
+        seen: dict = {}
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"code": 0, "data": {"list": {"vlist": []}}}
+
+        monkeypatch.setattr("app.services.cross_accounts._bili_mixin", lambda: "mixin")
+        monkeypatch.setattr(requests, "get",
+                            lambda url, headers=None, timeout=None: (seen.update(headers or {}), _Resp())[1])
+        bas.fetch_user_titles("123", cookie="   ")
+        assert "Cookie" not in seen, "空白 cookie 不该设出空 header"
