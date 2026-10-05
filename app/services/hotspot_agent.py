@@ -570,6 +570,84 @@ def _plan_text(p: dict) -> str:
     return "\n".join(seg)[:500]
 
 
+def _json_cut_points(text: str) -> list[int]:
+    """**不在字符串里**的 `}` 位置(从后往前)—— 截断 JSON 的候选修复点。
+
+    ⚠️ 必须跟踪字符串状态:标题里带 `}`(如「{模板}」)会把朴素的 `rfind("}")` 骗过去。
+    """
+    out: list[int] = []
+    in_str = esc = False
+    for i, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "}":
+            out.append(i)
+    return out[::-1]
+
+
+def _balance(text: str) -> str:
+    """补上未闭合的 `[`/`{`(字符串内不计)。"""
+    stack: list[str] = []
+    in_str = esc = False
+    for ch in text:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "[{":
+            stack.append(ch)
+        elif ch in "]}":
+            if stack:
+                stack.pop()
+    return text + "".join("]" if c == "[" else "}" for c in reversed(stack))
+
+
+def loads_llm_json(text: str) -> dict | None:
+    """解析 LLM 返回的 JSON;**被 `max_tokens` 截断时救出已写完的部分**(绝不补造)。
+
+    ⚠️ **为什么必须救**(2026-10-05 实测):一次真实调用 `finish_reason=length` ——
+    3109 字的输出被截在 `...{"hotspot": "新能源车补贴", "why`,而**前面十几条 plan
+    是完整的**。整批丢掉 = "一天跑三次的选题 Agent **一条建议都不出**"。
+
+    ⚠️ **更要紧的是原实现从不看 `finish_reason`**:把"上下文超了"记成
+    「LLM 返回非 JSON」—— **看着像模型乱输出,方向完全错**,于是没人去调 `max_tokens`。
+    (本仓那条母题:一个错误的诊断会把排障带往反方向。)
+
+    救法:从后往前找**不在字符串里**的 `}`,把尾巴截到那里再补齐括号重试。
+    **只保留原文里确实存在的字段** —— 截断处那个半截对象会被丢掉,不猜。
+    """
+    t = (text or "").strip()
+    if not t:
+        return None
+    try:
+        obj = json.loads(t)
+        return obj if isinstance(obj, dict) else None
+    except ValueError:
+        pass
+    for cut in _json_cut_points(t)[:120]:
+        try:
+            obj = json.loads(_balance(t[:cut + 1]))
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and (obj.get("matches") or obj.get("plans")):
+            return obj
+    return None
+
+
 def _llm_plan(settings: Settings, hotspots: list[dict],
               supply: list[WechatArticle], proven: list[str]) -> dict:
     """一次 LLM 调用同时完成:①热点↔资源语义匹配 ②无资源热点的拉新选题。
@@ -639,12 +717,18 @@ def _llm_plan(settings: Settings, hotspots: list[dict],
                          "matches 里没有对应资源的热点必须给 plan;禁止编造不存在的 article_id。"
                          "你的输出是教一个新手「怎么利用这条热点」,不是报告热度——"
                          "每条建议都要给到能照着做的程度。"}],
-                  "temperature": 0.5, "max_tokens": 1600},
-            timeout=60)
+                  "temperature": 0.5,
+                  # ⚠️ 1600 不够(2026-10-05 实测 `finish_reason=length`,3109 字被截断 ⇒
+                  # **整批建议被丢**)。每轮要出十几条 plan、每条 8 个字段,留足余量;
+                  # 就算还超,下面 `loads_llm_json` 也能把**已写完的那部分**救回来。
+                  "max_tokens": 4000},
+            timeout=90)
         if resp.status_code >= 400:
             logger.warning("热点 LLM 规划失败 HTTP %s", resp.status_code)
             return {}
-        text = (resp.json().get("choices", [{}])[0].get("message", {}) or {}).get("content") or ""
+        _choice = (resp.json().get("choices") or [{}])[0]
+        text = (_choice.get("message") or {}).get("content") or ""
+        finish = str(_choice.get("finish_reason") or "")
     except requests.RequestException as exc:
         logger.warning("热点 LLM 规划请求异常:%s", exc)
         return {}
@@ -653,11 +737,20 @@ def _llm_plan(settings: Settings, hotspots: list[dict],
         text = text.split("```", 2)[1]
         if text.startswith("json"):
             text = text[4:]
-    try:
-        data = json.loads(text.strip())
-    except ValueError:
-        logger.warning("热点 LLM 返回非 JSON,丢弃(%s...)", text[:80])
+    data = loads_llm_json(text)
+    if data is None:
+        # ⚠️ **把"截断"与"乱输出"分开报** —— 原来一律记成「返回非 JSON」,
+        # 看着像模型胡说八道,于是没人去调 max_tokens。截断是**我们这边参数给少了**。
+        if finish == "length":
+            logger.warning("热点 LLM **被 max_tokens 截断**且抢救不出完整条目"
+                           "(max_tokens=%s,输出 %d 字)—— 调大 max_tokens 或减少每轮热点数",
+                           4000, len(text))
+        else:
+            logger.warning("热点 LLM 返回非 JSON(finish_reason=%s),丢弃(%s...)",
+                           finish or "?", text[:80])
         return {}
+    if finish == "length":
+        logger.info("热点 LLM 输出被截断(finish_reason=length),已**抢救出完整的那部分**")
     matches = {str(m.get("hotspot") or "").strip(): {"article_id": m.get("article_id"),
                                                      "why": str(m.get("why") or "")}
                for m in data.get("matches", []) if m.get("hotspot")}

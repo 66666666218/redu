@@ -747,3 +747,62 @@ def test_agent_records_a_run_so_health_can_see_it() -> None:
 
     # `run_hotspot_agent` 要把统计**带出去**给 tick 用
     assert "evidence_tally" in inspect.getsource(ha.run_hotspot_agent)
+
+# ------------------------------------------------ LLM 返回被截断时的抢救(2026-10-05)
+
+class TestLoadsLlmJson:
+    """★ **起因**:远程日志反复出现「热点 LLM 返回非 JSON,丢弃」——
+    而真因是 **`max_tokens: 1600` 不够、输出被截断**(实测 `finish_reason=length`,
+    3109 字被截在 `...{"hotspot": "新能源车补贴", "why`)。
+
+    **前面十几条 plan 是完整的**,整批丢掉 = "一天跑三次的选题 Agent 一条建议都不出"。
+    ⚠️ 更要紧的是原实现**从不看 `finish_reason`**,把"上下文超了"记成"模型乱输出"
+    —— **方向完全错**,于是没人去调 `max_tokens`。
+    """
+
+    def test_完整_json_照常解析(self) -> None:
+        from app.services.hotspot_agent import loads_llm_json
+
+        obj = loads_llm_json('{"matches": [], "plans": [{"hotspot": "x"}]}')
+        assert obj and obj["plans"][0]["hotspot"] == "x"
+
+    def test_被截断时救出已写完的部分(self) -> None:
+        from app.services.hotspot_agent import loads_llm_json
+
+        # 形态照抄实测那条:末尾断在 `{"hotspot": "…", "why`
+        truncated = ('{"matches": [{"hotspot": "A", "article_id": 725, "why": "改写旧文"}], '
+                     '"plans": [{"hotspot": "B", "why_doable": "缺模板", "resource": "清单"}, '
+                     '{"hotspot": "新能源车补贴", "why')
+        obj = loads_llm_json(truncated)
+        assert obj is not None, "截断就整批丢掉 —— 正是那条日志背后的行为"
+        assert len(obj["matches"]) == 1
+        assert len(obj["plans"]) == 1, "半截的那条该**丢掉**,不能猜"
+
+    def test_只保留原文里真有的_不编造(self) -> None:
+        """ⓐ 抢救的边界:**不补造内容**。半截对象里的字段一个都不该出现。"""
+        from app.services.hotspot_agent import loads_llm_json
+
+        truncated = '{"plans": [{"hotspot": "完整的"}, {"hotspot": "半截的", "wh'
+        obj = loads_llm_json(truncated)
+        assert obj is not None
+        assert [p["hotspot"] for p in obj["plans"]] == ["完整的"]
+
+    def test_字符串里的右花括号骗不过切点扫描(self) -> None:
+        """ⓑ 标题里带 `}` 是常事(「{模板}」),朴素 `rfind` 会被骗。"""
+        from app.services.hotspot_agent import loads_llm_json
+
+        assert loads_llm_json('{"plans": [{"hotspot": "a}b", "x": 1}]}') is not None
+
+    def test_真乱输出还是返回_None(self) -> None:
+        """反向:不是 JSON 的东西**别硬救** —— 救出垃圾比没救更坏。"""
+        from app.services.hotspot_agent import loads_llm_json
+
+        assert loads_llm_json("<html>502 Bad Gateway</html>") is None
+        assert loads_llm_json("") is None
+        assert loads_llm_json("模型说:我建议你做资料") is None
+
+    def test_救出来的空对象不算数(self) -> None:
+        """截断在最开头时补出来的是个空壳 —— 那没有信息量,该返回 None。"""
+        from app.services.hotspot_agent import loads_llm_json
+
+        assert loads_llm_json('{"matches": [{"hotspot": "A"') is None
