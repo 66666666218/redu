@@ -875,3 +875,42 @@ class TestKnownKoulingLinks:
             assert kk.known_kouling_links(db, 1) == {}
         finally:
             db.close()
+
+
+class TestHotSeedBudget:
+    """**外部种子名额**(2026-10-05 从 3 降到 1)。"""
+
+    def test_设为0时一个都不取_且不出网(self) -> None:
+        """额度为 0 要**早退** —— 这是唯一能离线测的分支,也确实是"关掉"的路径。"""
+        from app.services.douyin_leads import hot_seed_words
+
+        class _S:
+            douyin_leads_hot_keywords = 0
+
+        assert hot_seed_words(_S()) == []
+
+    def test_名额真的由设置控制_不是函数默认参数(self) -> None:
+        """⚠️ **此前是个坑**:设置 `douyin_leads_hot_keywords` **只当开关用**,
+        真正常量是 `hot_seed_words(limit=3)` 的**默认参数** —— 改设置不生效。
+        现在 `limit=None` 时**读设置**。
+        """
+        from app.services.douyin_leads import hot_seed_words
+
+        class _S:
+            douyin_leads_hot_keywords = 0        # 0 即"关"
+        assert hot_seed_words(_S()) == []
+        # 显式传 limit 时仍覆盖设置(供测试/特殊用途)
+        assert hot_seed_words(_S(), limit=0) == []
+
+    def test_默认名额是1_不是3(self) -> None:
+        """**这是数据决策,不是口味**:按 `douyin_leads.keyword` 归因全历史 43 条线索 ——
+        **热榜种子有效率 0%(0/5)、资源名 86%(25/29)**,而它每轮占 3/7 个名额(43%)。
+
+        要改回 3,先看 `doc/抖音线索链-最优策略-2026-10-05.md` 里的证据,
+        并确认那 5 条样本已经攒够、结论已经更新。
+        """
+        from config.settings import Settings
+
+        assert Settings.model_fields["douyin_leads_hot_keywords"].default == 1, (
+            "热榜种子名额被改动了 —— 这是基于实测有效率(0% vs 86%)的决定,"
+            "改之前请看 doc/抖音线索链-最优策略-2026-10-05.md")

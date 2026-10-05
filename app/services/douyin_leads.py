@@ -233,7 +233,7 @@ _HOT_STOP = {"搞笑视频", "今日金价", "手势舞", "新闻", "直播", "�
 _HOT_MAX_LEN = 8          # 作品/资源名一般短;事件句常更长(「张美娥为什么不早说」9 字)
 
 
-def hot_seed_words(settings, limit: int = 3) -> list[str]:
+def hot_seed_words(settings, limit: int | None = None) -> list[str]:
     """**外部种子**:抖音热点宝的搜索榜/话题榜 → 当搜索词。取不到就返回 `[]`(绝不抛)。
 
     **为什么这是"真正的自主发现"**:此前所有种子都来自**我们已知的东西**(群组里的资源名、
@@ -243,12 +243,29 @@ def hot_seed_words(settings, limit: int = 3) -> list[str]:
     **为什么不写复杂筛选**(2026-10-03):热榜里大量是事件/时事(国足0-5巴勒斯坦、EDG发文道歉),
     想用规则分辨"作品名 vs 事件句"非常容易过拟合;而**搜索本身就是最好的筛子** ——
     搜不出《口令》的词自然沉掉,不需要我们先猜对。代价是每个废词一次搜索(约 90 秒),
-    所以 `limit` 要小(默认 3),且用长度 + 小黑名单挡掉最明显的那批。
+    所以 `limit` 要小,且用长度 + 小黑名单挡掉最明显的那批。
 
     这条链**帮不到**的:它只找**有推广号在发**的资源。热榜词若没人做资源,就是白搜一次。
+
+    ⚠️ **2026-10-05:名额从 3 降到 1,而且第一次有了数据依据**。
+    实测(全历史 43 条线索的 `keyword` 归因):
+
+    | 词源 | 线索 | 有产出(新群/新链) | **有效率** |
+    |---|---|---|---|
+    | 热榜种子(剧名/明星/事件) | 5 | **0** | **0%** |
+    | 资源名 | 29 | 25 | **86%** |
+
+    根因:热榜种子是"**大家在聊什么**",而这条链要的是"**谁在推资源**" —— 不是一回事。
+    而它每轮占 3/7 个名额(43%)⇒ **约四成搜索预算花在 0% 有效率的词上**。
+    ⚠️ 样本只有 5 条,**不代表定论**,所以是**降额 + 单独计量**(不是删掉);
+    样本攒够再决定要不要彻底去掉。详见 `doc/抖音线索链-最优策略-2026-10-05.md`。
+
+    ⚠️ `limit` 现在**真的**由 `settings.douyin_leads_hot_keywords` 控制 —— 此前那个设置
+    只当开关用(真正常量是这里的默认参数 `3`),改设置不生效,**是个坑**。
     """
-    n = int(limit or 0)
-    if n <= 0 or not getattr(settings, "douyin_leads_hot_keywords", 0):
+    raw = getattr(settings, "douyin_leads_hot_keywords", 0)
+    n = int(raw if limit is None else limit)
+    if n <= 0 or not raw:
         return []
     from pathlib import Path
 
@@ -723,9 +740,21 @@ def douyin_leads_tick(settings=None) -> int:
                         apply_kouling(leads, db, uid, settings)
                         _save_leads(db, uid, leads)      # 落库:转发量只在这一次有效(结算要用)
                         push_leads(leads, settings, platform=plat)
+                    # ⚠️ **按词源分开报**(2026-10-05):只报总数看不出"哪档在起作用" ——
+                    # 而实测两档差了 86 个百分点(资源名 86% / 热榜种子 0%)。
+                    # 不分开就永远发现不了"四成预算花在 0% 有效率的词上"这件事。
+                    # ⚠️ `search_keywords` **已经把热榜词并进 `kws` 了** ——
+                    # 所以这里报的是 `kws 共 N(其中外部 M)`,**不能写成 `词N+外部M`**(会重复计数)。
+                    hs = set(hot or [])
+                    n_hot_used = sum(1 for w in hs if w in set(kws))
+                    n_hot = sum(1 for x in leads if (x.get("keyword") or "") in hs)
+                    n_hot_ok = sum(1 for x in leads
+                                   if (x.get("keyword") or "") in hs
+                                   and (x.get("kouling") or {}).get("kind") in ("group", "share"))
                     _record_run(db, uid, "douyin_leads", "success",
-                                f"{plat} 类目{cat} 词{len(kws)} 线索{len(leads)} "
-                                f"{_kouling_summary(leads)}")
+                                f"{plat} 类目{cat} 词{len(kws)}(其中外部{n_hot_used}) "
+                                f"线索{len(leads)} {_kouling_summary(leads)} "
+                                f"[外部命中{n_hot}/产出{n_hot_ok}]")
                     db.commit()
                 except Exception as exc:  # noqa: BLE001 - 单平台失败不影响其余
                     db.rollback()
