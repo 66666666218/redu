@@ -191,7 +191,7 @@ def _list_attempts(stats: dict) -> int:
     失败的下个周期再来。这正是"轮转"该有的性质。
     """
     return sum(stats.get(k, 0) for k in
-               ("weread_list_ok", "weread_list_off_new", "weread_list_off"))
+               ("weread_list_ok", "weread_list_app_ok", "weread_list_off_new", "weread_list_off"))
 
 
 def _list_window(session: Session, user_id: int, rows: list) -> set[str]:
@@ -235,10 +235,49 @@ def _mark_listed(session: Session, user_id: int, keys: set[str]) -> None:
         session.add(SystemConfig(key=key, value=payload))
 
 
+def _append_listed(items: list, rows, cutoff) -> None:
+    """把"列表"查到的新文并进 `items`(网页路与 App 路**共用**这段)。
+
+    两条路的响应形状不同(网页 `flatten_mp_articles` 出 `create_time`,
+    App 路在调用处已归一成同名字段),但**过滤与落字段的规则必须一致** ——
+    写成两份迟早会飘(本仓最不缺的就是这个)。
+    """
+    for it in rows:
+        ts = it.get("create_time") or 0
+        pub = datetime.fromtimestamp(ts) if ts else None
+        if pub and pub < cutoff:
+            continue
+        items.append({"title": it["title"], "url": build_mp_url(it["original_id"]),
+                      "read_num": it.get("read_num"), "like_num": it.get("like_num"),
+                      "publish_at": pub, "review_id": str(it.get("review_id") or "")})
+
+
+def _weread_app_client(session: Session, user_id: int):
+    """取本租户的 **App 侧**客户端(不配就返回 `None`,不报错)。
+
+    ⚠️ 返回 `None` 是**正常分支**(没配过 App 凭据),不是失败 —— 调用方据此跳过兜底。
+    ⚠️ 凭据是 JSON(`scripts/weread_app_login.py` 写的),**解析失败要能说出来**:
+    静默当成"没配"会让"token 坏了"表现为"阅读数又是 0",正是本仓最怕的那种。
+    """
+    try:
+        from app.services.cookie_store import get_cookie
+        from app.services.weread_app_client import WereadAppClient
+
+        raw = get_cookie(session, user_id, "weread_app")
+        if not raw:
+            return None
+        blob = json.loads(raw)
+        return WereadAppClient(blob.get("accessToken") or "", blob.get("vid") or "")
+    except Exception as exc:  # noqa: BLE001 - 不能因为兜底坏了就停掉整轮监听
+        logger.warning("App 侧凭据不可用(跳过列表兜底):%s", str(exc)[:120])
+        return None
+
+
 def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
                     session: Session, stats: dict | None = None,
                     breaker: dict | None = None, shelf_ts: str | int | None = None,
-                    banned_out: dict[str, str] | None = None, list_allow: bool = True
+                    banned_out: dict[str, str] | None = None, list_allow: bool = True,
+                    app_client=None
                     ) -> tuple[list[WechatArticle], bool]:
     """微信读书单号采集:**cover 最新一篇(始终可用)+ 窗口内的号才拉精确列表**。
 
@@ -283,6 +322,7 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
     # 同 IP 连打 7 次 cover 即回 -2014)。所以一旦本轮被额度类错误挡下,`breaker` 就合闸,
     # 剩余号不再问列表——省下来的额度留给"每个号至少问得动 cover"。
     listed = False
+    list_via = ""          # "web" / "app" —— 两条路要**分开计数**,见文件末的记账块
     # 两道闸:① `list_allow` —— 本号在不在本轮的**轮转窗口**里(额度只有 ~29 个号,
     # 而一轮 75 个;不在窗口里的号只取 cover,把额度留给别人,下轮轮到它);
     # ② `breaker["list_off"]` —— 本轮已经被额度挡过一次,剩余号一律不再问。
@@ -290,15 +330,8 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
     if not list_skipped:
         try:
             payload = weread.mp_articles(b.weread_book_id)
-            for it in _WC.flatten_mp_articles(payload):
-                ts = it.get("create_time") or 0
-                pub = datetime.fromtimestamp(ts) if ts else None
-                if pub and pub < cutoff:
-                    continue
-                items.append({"title": it["title"], "url": build_mp_url(it["original_id"]),
-                              "read_num": it["read_num"], "like_num": it["like_num"],
-                              "publish_at": pub, "review_id": str(it.get("review_id") or "")})
-            listed = True
+            _append_listed(items, _WC.flatten_mp_articles(payload), cutoff)
+            listed, list_via = True, "web"
         except Exception as exc:  # noqa: BLE001 - 限权/废弃不影响 cover 主路径
             # -2041 是新版微信读书对该接口的永久限权,每进程只记一次,避免每账号刷屏
             if not getattr(_weread_collect, "_mp_articles_warned", False):
@@ -306,6 +339,22 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
                 logger.warning("mp/articles 不可用(%s),全部账号仅用 cover 最新一篇", exc)
             if breaker is not None and _is_weread_quota_error(exc):
                 breaker["list_off"] = True
+    # **App 侧兜底**(2026-10-05):网页 `/web/mp/articles` 已被账号级拦截 `-2041`
+    # (控制变量实验:刚续期 1 分钟内、三种上下文、8 个号全挂),而 App 的
+    # `i.weread.qq.com/book/articles` **同源同数据、带精确 readNum,且没被拦**。
+    # ⇒ 网页路拿不到时改问 App 路,把**已经断了一周的阅读数**接回来。
+    # ⚠️ 只在网页路没成功时走(App 有自己的配额,未知上限 —— 不无谓地双倍消耗);
+    # ⚠️ **记账要分路**(`weread_list_app_ok` 而不是 `weread_list_ok`):合在一起就再也看不出
+    #    "网页路到底恢复了没" —— 而"能不能恢复"决定这条兜底是临时的还是永久的。
+    if not listed and app_client is not None:
+        try:
+            rows = app_client.articles(b.weread_book_id)
+            _append_listed(items, [{"title": r["title"], "read_num": r["read_num"],
+                                    "like_num": r["like_num"], "create_time": r["publish_at"],
+                                    "original_id": r["original_id"]} for r in rows], cutoff)
+            listed, list_via = True, "app"
+        except Exception as exc:  # noqa: BLE001 - 兜底也失败 = 本号没答案,但不影响 cover
+            logger.debug("App 列表兜底失败(%s):%s", b.weread_book_id, str(exc)[:80])
     # 正文:先直抓 mp.weixin.qq.com(不占微信读书配额),**抓空了再用这篇的 reviewId
     # 走微信读书转发页**。此前这里只传 fetch_content=True,把 cover/列表白拿的 reviewId 丢了,
     # 于是直抓被风控的那 26% 正文永远为空 → 盘链认不出 → 飞书卡片整片"—"而员工以为号没发资源
@@ -342,7 +391,10 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
                 # 沿用 41031 的标记位语义:卡片网盘列认「原文失效」显示 ⛔,免得员工白点尸体链
                 r.my_pan_urls = f"⚠️原文失效({banned_out[r.url]}),未转存"
     if stats is not None:
-        if listed:
+        if list_via == "app":
+            # **单独一个键**:和 `weread_list_ok` 合在一起,就再也看不出"网页路恢复了没"
+            key = "weread_list_app_ok"
+        elif listed:
             key = "weread_list_ok"
         elif got:
             # 列不出却采到新文 = 同日其它篇**未知丢失**,必须进铁律告警,不能因为
@@ -623,6 +675,10 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     # `/web/mp/articles`(带精确阅读数),其余号只取 cover。挑法与批子集、排序**都无关** ——
     # 详见 `_list_window` 上方注释。
     list_allow = _list_window(session, user_id, rows)
+    # **App 侧客户端**(2026-10-05):整轮只建一次;没配就 None,兜底自动跳过。
+    # 兜底存在的理由:网页 `/web/mp/articles` 被账号级拦截,而它是**精确阅读数**的唯一来源
+    # (见 weread_app_client.py 头注释)。不建这一步,阅读数就永远是 0。
+    app_client = _weread_app_client(session, user_id)
     listed_keys: set[str] = set()      # 本轮**真问到**列表的号 → 轮末记号(问不到的不记)
     quota_skipped = 0
     no_free_source = 0
@@ -675,7 +731,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                                                 stats=wr_stats, breaker=breaker,
                                                 shelf_ts=gate["signals"].get(b.weread_book_id),
                                                 banned_out=banned,
-                                                list_allow=_list_key(b) in list_allow)
+                                                list_allow=_list_key(b) in list_allow,
+                                                app_client=app_client)
                 if _list_attempts(wr_stats) > _seen:
                     listed_keys.add(_list_key(b))          # 问过就记号(成败都算,见 _list_attempts)
                 # 只有免费源真答了才算"本号已被消费":答不上按 failed 计,如实暴露。
@@ -710,7 +767,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                                                         stats=wr_stats, breaker=breaker,
                                                         shelf_ts=gate["signals"].get(b.weread_book_id),
                                                         banned_out=banned,
-                                                        list_allow=_list_key(b) in list_allow)
+                                                        list_allow=_list_key(b) in list_allow,
+                                                        app_client=app_client)
                         if _list_attempts(wr_stats) > _seen:
                             listed_keys.add(_list_key(b))
                         used = answered  # 答上了就消费掉本号(答不上按 failed 计,如实暴露)
@@ -831,7 +889,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
         # list_off 必须写进运维记录:"只采到 cover 最新一篇"时同日其它篇是**未知丢失**,
         # 不能让它和"该号今天真的只发了一篇"长得一样(与 -2014 假象、全败标 success 同族)。
         # list_skipped = 本轮列表已被额度熔断挡下、这些号根本没被问过(见 breaker)。
-        detail += (f" weread_list(ok={enumerable} off={wr_stats.get('weread_list_off', 0)}"
+        detail += (f" weread_list(ok={enumerable} app={wr_stats.get('weread_list_app_ok', 0)}"
+                   f" off={wr_stats.get('weread_list_off', 0)}"
                    f" off_with_new={off_new} skipped={wr_stats.get('weread_list_skipped', 0)})")
     if gate["ok"]:
         detail += (f" shelf(signals={len(gate['signals'])} skip={len(gate['skip'])}"

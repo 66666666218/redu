@@ -2561,7 +2561,8 @@ def test_listen_exposes_unenumerable_accounts_and_alerts(session, monkeypatch) -
     out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings(), push=True)
     assert out["new"] == 2 and out["weread_list"] == {"weread_list_off_new": 2}
     run = session.scalars(select(RunRecord).where(RunRecord.kind == "wechat_listen")).first()
-    assert "weread_list(ok=0 off=0 off_with_new=2 skipped=0)" in run.detail
+    # `app=` 是 **App 侧兜底**的计数(2026-10-05):单独记才看得出"网页路恢复了没"
+    assert "weread_list(ok=0 app=0 off=0 off_with_new=2 skipped=0)" in run.detail
     alert = next((a for a in alerts if a[2].startswith("⚠️ 微信读书")), None)
     assert alert is not None and alert[2] == "⚠️ 微信读书只能拿到最新一篇,同日其它篇可能漏推"
     assert "列不出却采到新文的号:2" in alert[3]  # 数字放正文,标题稳定才冷却去重有效
@@ -4322,3 +4323,89 @@ def test_renewal_does_not_plant_the_fullsync_landmine_when_disabled(
         session, 1, settings=_settings(weread_cookie=ck, weread_fullsync_on_renewal=True))
     assert out["status"] == "success"
     assert _flag() is not None and _flag().value, "开了开关就该打标记"
+
+
+# ------------------------------------------------ App 侧列表兜底(2026-10-05)
+
+class _FakeWereadBlocked:
+    """网页 `/web/mp/articles` 被账号级拦截(-2041)的替身;cover 仍可用。"""
+
+    def latest_article(self, book_id):
+        return {"title": "封面旧文", "url": "https://mp.weixin.qq.com/s/cover",
+                "review_id": "MP_WXS_1_c", "digest": "", "name": "号A"}
+
+    def mp_content(self, review_id: str) -> str:
+        return ""
+
+    def mp_articles(self, book_id, offset=0, count=20):
+        raise RuntimeError("微信读书接口不可用/被拦截(-2041):")
+
+
+class _FakeWereadOk(_FakeWereadBlocked):
+    def mp_articles(self, book_id, offset=0, count=20):
+        now_ts = int(datetime.now().timestamp())
+        return {"reviews": [{"createTime": now_ts, "subReviews": [{"review": {
+            "mpInfo": {"title": "网页路来的文", "originalId": "web_id",
+                       "readNum": 77, "likeNum": 3},
+            "reviewId": book_id + "_w"}, "createTime": now_ts}]}], "synckey": 1}
+
+
+class _FakeApp:
+    """App 侧客户端替身;记录被调了几次(用来钉"网页路好时不许碰 App")。"""
+
+    def __init__(self):
+        self.calls = 0
+
+    def articles(self, book_id, **kw):
+        self.calls += 1
+        # ⚠️ 时间戳必须是**新的**:`_append_listed` 会按"近 3 天"过滤,
+        # 写死一个旧值会让整条断言因为"被时间过滤掉"而失败 —— 红的原因与想测的无关。
+        return [{"title": "App 路来的文", "read_num": 1234, "like_num": 9,
+                 "publish_at": int(datetime.now().timestamp()), "original_id": "app_id",
+                 "mp_name": "号A"}]
+
+
+def test_网页路被拦时_App_兜底要把阅读数接回来(session) -> None:
+    """⚠️ 这条钉的是"**阅读数断了整整一周**"那件事的修复(2026-10-05)。
+
+    背景:网页 `/web/mp/articles` 是精确阅读数的唯一来源,2026-09-29 起被账号级拦截
+    `-2041`,于是近 3 天入库 162 篇、有阅读数的 **0** 篇 —— 而所有监控都在报绿。
+    App 的 `i.weread.qq.com/book/articles` 同源同数据、带 `readNum`、没被拦。
+    """
+    b = WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1")
+    session.add(b)
+    session.commit()
+    app = _FakeApp()
+    stats: dict = {}
+    got, _answered = wechat_monitor._weread_collect(
+        1, b, _FakeWereadBlocked(), session, stats=stats, app_client=app)
+
+    assert app.calls == 1, "网页路挂了,必须走 App 兜底"
+    assert any(getattr(g, "read_num", 0) == 1234 for g in got), "阅读数没接回来"
+    assert stats.get("weread_list_app_ok") == 1, "App 路要**单独计数**(合进 ok 就看不出网页路恢复没)"
+    assert stats.get("weread_list_ok", 0) == 0
+
+
+def test_网页路正常时不许碰_App_兜底(session) -> None:
+    """反向:网页路成功就走网页路 —— App 有自己的配额(上限未知),不能无谓双倍消耗。"""
+    b = WechatBenchmark(user_id=1, nickname="号B", weread_book_id="MP_WXS_2")
+    session.add(b)
+    session.commit()
+    app = _FakeApp()
+    stats: dict = {}
+    wechat_monitor._weread_collect(1, b, _FakeWereadOk(), session, stats=stats, app_client=app)
+
+    assert app.calls == 0, "网页路通了还去打 App = 浪费 + 多一份被风控的机会"
+    assert stats.get("weread_list_ok") == 1
+    assert stats.get("weread_list_app_ok", 0) == 0
+
+
+def test_没配_App_凭据时不能因此报错(session) -> None:
+    """`app_client=None` 是正常分支(没配过),整轮监听不能因为它停摆。"""
+    b = WechatBenchmark(user_id=1, nickname="号C", weread_book_id="MP_WXS_3")
+    session.add(b)
+    session.commit()
+    stats: dict = {}
+    wechat_monitor._weread_collect(1, b, _FakeWereadBlocked(), session,
+                                   stats=stats, app_client=None)
+    assert stats.get("weread_list_app_ok", 0) == 0

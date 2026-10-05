@@ -134,6 +134,7 @@ from app.services.wechat._listen import (  # noqa: F401
     _is_weread_quota_error,
     _listen_lock_key,
     _listen_round,
+    _weread_app_client,   # App 侧列表兜底(2026-10-05):测试要能 patch 掉它(否则真去连模拟器库)
     _load_shelf_marks,
     _my_pan_link_from_history,
     _push_listen,

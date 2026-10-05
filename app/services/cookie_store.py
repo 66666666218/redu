@@ -22,7 +22,13 @@ logger = get_logger(__name__)
 PLATFORMS = ("weibo", "baidu", "douyin", "goofish", "weread", "baidupan", "quark",
              "zhihu",   # zhihu:跨平台同类资源号发现用(2026-10-01,带登录 Cookie 即可搜)
              "bilibili",  # bilibili:同上(2026-10-02,**匿名也能搜**,配了 Cookie 风控更宽松)
-             "xunlei")  # xunlei:迅雷网盘(2026-10-02,搜口令→转存→分享)
+             "xunlei",  # xunlei:迅雷网盘(2026-10-02,搜口令→转存→分享)
+             "weread_app")  # weread_app:**微信读书 App 侧**凭据 JSON({accessToken, vid},
+                            # 2026-10-05)。与 `weread`(网页 cookie)**是两套独立鉴权** ——
+                            # 网页那枚在 App 接口上回 -2012,反之亦然,别互相替代。
+                            # 它是目前**唯一还能拿到精确阅读数**的路
+                            # (网页 /web/mp/articles 已被账号级拦截 -2041)。取法见
+                            # `scripts/weread_app_login.py`。
 
 # 平台 → 兜底源:env 全局 Cookie / 本机 Cookie 文件(settings 属性名)。
 # 网盘类(baidupan/quark)故意不在内:自愈会把运营者的全局凭据明文写进
