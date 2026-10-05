@@ -143,6 +143,7 @@ def check_credentials(db) -> list[dict]:
     from sqlalchemy import select
 
     from app.db.models import UserCookie
+    from config.settings import get_settings
 
     out: list[dict] = []
     rows = db.scalars(select(UserCookie).where(UserCookie.user_id == 1)).all()
@@ -166,20 +167,50 @@ def check_credentials(db) -> list[dict]:
         # **验活**(只对微信读书做:它有一个只读且便宜的探针)
         if plat == "weread":
             alive, why = _weread_alive(db)
-            if alive is False:
-                level, detail = RED, f"**已失效**({why})—— 需重新贴 Cookie;更新于 {str(at)[:16]}"
-            elif alive is True:
-                detail += " · 验活 ✓"
+            nxt = _next_renewal(get_settings())
+            if alive is True:
+                detail += f" · 验活 ✓({why})"
+            elif alive is False:
+                # ⚠️ **失效 ≠ 故障**:`wr_skey` 短效,而续期每 6 小时一次 ——
+                # 两次续期之间它本来就可能过期,**那个空窗里没有任何作业要用它**,
+                # 下一轮续期会在监听前 10 分钟接上。所以判 **🟡 而不是 🔴**。
+                # (我第一次就是在这里误报的:12:57 测到 -2012 就喊"监听要挂了",
+                #  而 13:50 的续期会接上 —— 假红比漏报更糟,它会训练人忽略整份报告。)
+                # ⚠️ **真正的告警在续期作业那边**:`weread_refresh_tick` 失败时会直接推飞书
+                # "请重新复制 Cookie" —— 那个才是"凭据真死了"的信号,不靠这里。
+                when = f"下一次续期 {nxt:%H:%M}" if nxt else "续期时间未知"
+                level = YELLOW
+                detail = (f"当前未通过验活({why}),但**这多半是正常空窗** —— "
+                          f"{when},会接在监听之前。若那次续期也失败,"
+                          f"续期作业会单独推飞书告警。更新于 {str(at)[:16]}")
             else:
                 detail += f" · 验活跳过({why})"
         out.append({"name": label, "level": level, "detail": detail})
     return out
 
 
+def _next_renewal(settings) -> datetime | None:
+    """下一次微信读书续期的时间(从 `weread_refresh_cron` 算)。算不出返回 None。"""
+    try:
+        from apscheduler.triggers.cron import CronTrigger
+
+        return CronTrigger.from_crontab(str(settings.weread_refresh_cron)).get_next_fire_time(
+            None, datetime.now()).replace(tzinfo=None)
+    except Exception:  # noqa: BLE001 - 算不出就当不知道
+        return None
+
+
 def _weread_alive(db) -> tuple[bool | None, str]:
     """微信读书凭据**验活**(只读):读一次书架。
 
     返回 `(True/False/None, 原因)`;`None` = **验不了**(别把"不知道"当成"活着")。
+
+    ⚠️ **返回 False 不等于"故障"**(2026-10-05 血的教训):
+    `wr_skey` 是**短效**的,而续期是**每 6 小时一次**(03:50/07:50/13:50/19:50,对齐四个监听定点)。
+    所以**两次续期之间它本来就可能已经过期** —— 那个空窗里没有任何作业要用它,
+    下一轮续期会在监听前 10 分钟接上。**只看"此刻活不活"就会把正常空窗报成故障**
+    (我第一次就是这么误报的:12:57 测到 `-2012`,就喊"监听要挂了",而 13:50 的续期会接上)。
+    ⇒ 调用方要**结合下次续期时间**判断,别把空窗当故障。
     """
     try:
         import requests
