@@ -170,6 +170,29 @@ def _save_credentials(patch: dict) -> None:
         db.close()
 
 
+def iso_expires_at(epoch: float | None = None, *, seconds_from_now: int | None = None) -> str:
+    """迅雷**网页 localStorage** 里 `expires_at` 的格式:ISO-8601 + 毫秒 + `Z`。
+
+    ⚠️ **必须是这个格式**(2026-10-05 定位到的"每天得重扫一次"根因):
+    `xunlei_captcha` 借网页铸 captcha 时,要把一个"新鲜的" `expires_at` 注入页面,
+    好让网页**认为 token 还没过期、不要去兑换** —— 因为那次兑换会**轮换 refresh_token**。
+    它原来注入的是**整数 epoch**(`int(_jwt_exp(...))`),而页面用的是 ISO 串
+    (实测库里读回的是 `2026-10-05T07:22:15.275Z`)。**格式对不上 ⇒ 页面照样去兑 ⇒
+    refresh_token 被换掉而我们接不住 ⇒ 直连刷新 `invalid_grant` ⇒ 只能重扫。**
+    实测时间线:15:20:41 captcha 续期 → **15:30 就 invalid_grant**;
+    而 access_token 寿命实测 12 小时(JWT 看出来的)⇒ **一天一扫**。
+
+    ⚠️ **注入点与写回点必须用同一个函数** —— 两处各写各的,迟早再飘一次
+    (这正是这次踩的坑:同一个字段两种格式)。
+    """
+    from datetime import datetime, timezone
+
+    if epoch is None:
+        epoch = time.time() + int(seconds_from_now or 0)
+    return (datetime.fromtimestamp(float(epoch), timezone.utc)
+            .isoformat(timespec="milliseconds").replace("+00:00", "Z"))
+
+
 def _refresh_access_token(refresh_token: str, client_id: str = "") -> str:
     """用 refresh_token 换 access_token(**client_id 必须是网页版那个**)。
 
@@ -190,7 +213,15 @@ def _refresh_access_token(refresh_token: str, client_id: str = "") -> str:
     # 注意:新值可能与旧值**相同**(服务端未必每次都轮换),所以有就写、没有就算了。
     new_rt = data.get("refresh_token") or ""
     try:
-        patch = {"access_token": token, "expires_at": data.get("expires_in") or ""}
+        # ⚠️ `expires_at` 要写**真正的到期时刻(ISO)**,不是 `expires_in` 那个秒数。
+        # 原写法 `data.get("expires_in")` 会把 `43200` 塞进 `expires_at` —— 字段名与内容不符,
+        # 而且和 `xunlei_captcha` 写回的那种 ISO 串**格式打架**(同一个字段两种格式)。
+        patch: dict = {"access_token": token}
+        try:
+            patch["expires_at"] = iso_expires_at(
+                seconds_from_now=int(data.get("expires_in") or 43200))
+        except (TypeError, ValueError):
+            logger.debug("expires_in 解析失败,跳过 expires_at")
         if new_rt and new_rt != refresh_token:
             patch["refresh_token"] = new_rt
             logger.info("迅雷 refresh_token 已轮换,正在写回")

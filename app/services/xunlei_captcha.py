@@ -73,11 +73,19 @@ def _mint_via_web(share_url: str) -> dict:
 
     client_id = cred.get("client_id") or xt._WEB_CLIENT_ID
     access = xt._access_token(cred)
-    # ⚠️ expires_at 写新鲜:否则网页判断"该刷新了",会拿 refresh_token 去兑 —— 那次兑换
-    # **会轮换 refresh_token**,而我们不一定接得住(2026-10-02 踩过)
+    # ⚠️ `expires_at` 写新鲜:否则网页判断"该刷新了",会拿 refresh_token 去兑 ——
+    # 那次兑换**会轮换 refresh_token**,而我们不一定接得住(2026-10-02 踩过)。
+    #
+    # ⚠️⚠️ **2026-10-05:`expires_at` 必须按**页面自己的格式**(ISO 串)注入** ——
+    # 这里原来塞的是 `int(...)` 的**整数 epoch**,而页面 localStorage 里用的明明是
+    # `2026-10-05T07:22:15.275Z` 这种 ISO 串(从库里读回的那份就是页面写的)。
+    # **格式对不上 ⇒ 页面判定"这值没法用/已过期" ⇒ 照样去兑换 ⇒ refresh_token 被轮换**,
+    # 于是"每天得重扫一次"(access_token 寿命实测 12 小时,到期后直连刷新必 `invalid_grant`)。
+    # 实测时间线:15:20:41 captcha 续期 → **15:30 刷新就 invalid_grant**。
+    _exp = xt._jwt_exp(access) or (time.time() + 3600)
     injected = {"access_token": access,
                 "refresh_token": cred.get("refresh_token") or "",
-                "expires_at": int(xt._jwt_exp(access) or (time.time() + 3600)),
+                "expires_at": xt.iso_expires_at(_exp),      # ⚠️ 格式见该函数:必须是 ISO 串
                 "expires_in": 43200,
                 "sub": xt._jwt_sub(access),
                 "user_id": xt._jwt_sub(access),
@@ -97,9 +105,20 @@ def _mint_via_web(share_url: str) -> dict:
 
             pg.on("request", on_req)
             pg.goto(_PAN_HOME, wait_until="domcontentloaded", timeout=60000)
+            # ⚠️⚠️ **顶层 `expires_at` 必须一起注入**(2026-10-05 找到的"每天要重扫"真根因)。
+            # 页面的凭据**存在两处**:SDK 的 `credentials_<clientId>` blob **和** 一组顶层键。
+            # 见 `scripts/xunlei_login.py` 读页面时**两处都读**(`localStorage["access_token"]`
+            # 与 `JSON.parse(localStorage["credentials_<cid>"])`)。
+            # 这里原来只注入了 blob + 顶层 access/refresh,**漏了顶层 `expires_at`** ⇒
+            # 页面读顶层读不到新鲜值 ⇒ **仍判定"该刷新了"** ⇒ 去兑换 ⇒
+            # **refresh_token 被轮换掉**,而页面把新值落盘与否我们接不住 ⇒
+            # 12 小时后(access 寿命实测 12h)直连刷新 `invalid_grant` ⇒ **只能重扫**。
+            # 实测时间线:15:20:41 captcha 续期 → **15:30 就 invalid_grant**。
             for k, v in ((f"credentials_{client_id}", json.dumps(injected)),
                          ("access_token", injected["access_token"]),
-                         ("refresh_token", injected["refresh_token"])):
+                         ("refresh_token", injected["refresh_token"]),
+                         ("expires_at", injected["expires_at"]),
+                         ("expires_in", injected["expires_in"])):
                 pg.evaluate("([k, v]) => localStorage.setItem(k, v)", [k, v])
             pg.goto(share_url, wait_until="domcontentloaded", timeout=60000)
             for _ in range(25):
@@ -155,6 +174,32 @@ def refresh(force: bool = False) -> bool:
         cur.update(captcha_token=minted["token"], device_id=minted["device_id"],
                    client_id=minted["client_id"])
         set_cookie(db, uid, _CREDS_KEY, json.dumps(cur, ensure_ascii=False))
+
+        # ⚠️⚠️ **续期后立刻验一次刷新**(2026-10-05):网页兑换**可能已经把 refresh_token
+        # 换掉**,而"**服务端轮换了、页面却没落到 localStorage**"这种情况**我们读不回来** ——
+        # 于是库里那枚就是废的,但要等 access_token 到期(12 小时)才会暴露,那时**只能重扫**。
+        # 与其等 12 小时,不如现在就用一次刷新把状态**钉死**:
+        #   · 成功 ⇒ `_refresh_access_token` 会把**全新的一对**写回(顺带盖掉网页换走的那枚);
+        #   · 失败 ⇒ **refresh_token 已死** ⇒ **当场告警"请重新扫码"**,别等它半夜自己烂掉。
+        # 代价是每次续期多一次刷新调用(续期本身有 `_MIN_INTERVAL` 冷却,很便宜)。
+        try:
+            xt._refresh_access_token(cur.get("refresh_token") or "",
+                                     cur.get("client_id") or "")
+            logger.info("captcha 续期后刷新验证通过(凭据已钉死为最新)")
+        except Exception as exc:  # noqa: BLE001 - 验活失败**必须说出来**,不能只写日志
+            logger.error("captcha 续期后刷新验证失败:%s", str(exc)[:160])
+            try:
+                from app.services.alert_service import notify_incident
+
+                notify_incident(db, uid, "xunlei", "🔴 迅雷 refresh_token 已失效,需重新扫码",
+                                f"captcha 续期后立刻验证刷新就失败了:{str(exc)[:120]}。"
+                                "说明这枚 refresh_token 已经被作废(多半是网页兑换轮换掉了、"
+                                "而新值没落盘)。**转存与群分享两条链会全停**,"
+                                "请跑 `python scripts/xunlei_login.py` 重新扫码。",
+                                push_feishu=True)
+                db.commit()
+            except Exception:  # noqa: BLE001 - 告警失败不影响续期结果
+                logger.debug("迅雷失效告警推送失败", exc_info=True)
     finally:
         db.close()
     _last_error = ""
