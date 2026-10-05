@@ -110,3 +110,78 @@ def session():
     db = sessionmaker(bind=eng)()
     yield db
     db.close()
+
+
+# ---------------- 阅读数覆盖专检(2026-10-05) ----------------
+
+def _db_with(rows):
+    """造一个只含 wechat_articles 的内存库;`rows` = [(days_ago, read_num)]。"""
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db.models import Base, WechatArticle
+
+    eng = create_engine("sqlite://")
+    Base.metadata.create_all(eng)
+    db = sessionmaker(bind=eng)()
+    for ago, rn in rows:
+        db.add(WechatArticle(user_id=1, title="t", url=f"https://mp.weixin.qq.com/s/{id(object())}",
+                             read_num=rn, created_at=datetime.now() - timedelta(days=ago)))
+    db.commit()
+    return db
+
+
+def test_采文正常但阅读数全丢_要判红() -> None:
+    """★ **这一条对着 2026-10-05 的真实事故**:网页路被账号级拦了整整一周
+    (近 3 天入库 162 篇、有阅读数的 0 篇),而"监听采文"那条链一直是绿
+    —— 因为它看的是 `new=N`,**采到文章就绿,不关心阅读数**。
+
+    ⇒ "采到文章"与"采到阅读数"是两件事,必须分开盯。少了这条,
+       同一个事故可以再发生一次而没人知道。
+    """
+    from app.services.chain_health import check_read_num_coverage
+
+    db = _db_with([(0, 0), (1, 0), (2, 0)])
+    try:
+        out = check_read_num_coverage(db)
+    finally:
+        db.close()
+    assert out[0]["level"] == RED
+    assert "全丢" in out[0]["detail"]
+    # 报红时**必须给出下一步**,否则运维只知道坏、不知道修哪儿
+    assert "weread_app_login" in out[0]["detail"]
+
+
+def test_阅读数正常要判绿() -> None:
+    from app.services.chain_health import check_read_num_coverage
+
+    db = _db_with([(0, 27), (1, 15)])
+    try:
+        assert check_read_num_coverage(db)[0]["level"] == GREEN
+    finally:
+        db.close()
+
+
+def test_近几天没新文时不下结论() -> None:
+    """没有样本就**别假装知道** —— "统计不出来"和"统计为 0"不是一回事。"""
+    from app.services.chain_health import check_read_num_coverage
+
+    db = _db_with([(9, 27)])
+    try:
+        out = check_read_num_coverage(db)[0]
+        assert out["level"] == YELLOW and "无从判断" in out["detail"]
+    finally:
+        db.close()
+
+
+def test_覆盖率偏低判黄不判红() -> None:
+    """红只留给"全丢";少量缺失是额度窗口的正常表现(不是故障)。"""
+    from app.services.chain_health import check_read_num_coverage
+
+    db = _db_with([(0, 5), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0)])
+    try:
+        assert check_read_num_coverage(db)[0]["level"] == YELLOW
+    finally:
+        db.close()

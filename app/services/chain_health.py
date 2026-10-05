@@ -297,11 +297,58 @@ def render(sections: list[tuple[str, list[dict]]]) -> str:
     return chr(10).join(lines)
 
 
+def check_read_num_coverage(db, days: int = 3) -> list[dict]:
+    """④ **阅读数覆盖** —— 只看**库里的真值**,不看运行记录字符串。
+
+    ⚠️ **为什么必须单列这一条**(2026-10-05 的真实事故):`check_chains` 判"监听采文"
+    看的是 detail 里的 `new=N` —— **采到文章就绿**。而精确阅读数在 detail 里只是个 `ok=0`。
+    于是 2026-09-29 ~ 10-05 网页路被账号级拦了**整整一周**:近 3 天入库 162 篇、
+    **有阅读数的 0 篇**,而每一层监控都在报绿/黄。
+
+    ⇒ **"采到文章"与"采到阅读数"是两件事,得分开盯。** 这条是对着"它会再坏一次"加的,
+    不是对着"这次坏了"。
+
+    判据用**落库数据**而不是 detail 格式:格式会飘(这仓飘过),而库里的 `read_num` 是事实。
+    """
+    from sqlalchemy import func, select
+
+    from app.db.models import WechatArticle
+
+    since = datetime.now() - timedelta(days=days)
+    try:
+        total = db.scalar(select(func.count(WechatArticle.id))
+                          .where(WechatArticle.created_at >= since)) or 0
+        withnum = db.scalar(select(func.count(WechatArticle.id))
+                            .where(WechatArticle.created_at >= since,
+                                   WechatArticle.read_num > 0)) or 0
+    except Exception as exc:  # noqa: BLE001 - 查不到就说不知道,别报成"死了"
+        return [{"name": "公众号·精确阅读数", "level": YELLOW,
+                 "detail": f"查不到({type(exc).__name__})"}]
+
+    if total == 0:
+        return [{"name": "公众号·精确阅读数", "level": YELLOW,
+                 "detail": f"近 {days} 天没有新文,无从判断"}]
+    ratio = withnum / total
+    detail = f"近 {days} 天入库 {total} 篇,其中有阅读数的 **{withnum}** 篇"
+    if withnum == 0:
+        # 这正是 2026-10-05 那次的形态 —— 采文一切正常,阅读数全无
+        return [{"name": "公众号·精确阅读数", "level": RED,
+                 "detail": detail + " ⇒ **精确阅读数全丢**。查两条路:网页 "
+                           "`/web/mp/articles`(可能 `-2041` 被拦)、App "
+                           "`i.weread.qq.com/book/articles`(token 可能过期,跑 "
+                           "`scripts/weread_app_login.py` 重取)"}]
+    if ratio < 0.2:
+        return [{"name": "公众号·精确阅读数", "level": YELLOW,
+                 "detail": detail + f"(覆盖率 {ratio:.0%},偏低 —— 通常说明列表额度/兜底有问题)"}]
+    return [{"name": "公众号·精确阅读数", "level": GREEN,
+             "detail": detail + f"(覆盖率 {ratio:.0%})"}]
+
+
 def collect_sections(db) -> list[tuple[str, list[dict]]]:
     """跑完三层检查,返回 [(小标题, 结果列表)]。**只读**。调用方负责渲染/推送。"""
     return [("依赖(容器/库/venv/档案)", check_dependencies()),
             ("凭证(Cookie 在不在)", check_credentials(db)),
-            ("产出(最近几次真跑出来的东西)", check_chains(db))]
+            ("产出(最近几次真跑出来的东西)", check_chains(db) + check_read_num_coverage(db))]
 
 
 def chain_report_tick(settings=None) -> int:
