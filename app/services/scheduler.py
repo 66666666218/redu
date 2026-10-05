@@ -594,7 +594,8 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         #    也在 hotspot** —— 挂本机的话标题落本机库,`remote_sync` **又不推这张表**
         #    (只推公众号那几张 + cross_platform_accounts),这条链**当场就是断的**;
         # ② 它需要的 59 个对标号来自 `cross_platform_accounts`,那张表**已经在同步到远程**;
-        # ③ 附带好处:远程 IP 是**另一个限流桶**,不与本机 `cross_accounts` 的 B站调用互相挤。
+        # ③ 限流是**按端点**分的、与 IP 无关(2026-10-05 受控对比:`search/type` 两边都 OK、
+        #    `space/wbi/arc/search` 两边都 412)⇒ **远程 IP 没被封**,别据此"挪回本机"。
         (bili_account_scan_tick, _get_settings().bili_scan_cron, {"minute": 0, "hour": "*/2"},
          "bili_account_scan", "hotspot"),
         (push_timeline_tick, "* * * * *", {"minute": "*"}, "push_timeline", "both"),

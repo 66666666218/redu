@@ -202,6 +202,8 @@ class Settings(BaseSettings):
     # 调大前先想清楚:**被限流时整轮记 `failed`**(不静默),但你看到的会是"扫不动"。
     # ⚠️ 作业角色是 **hotspot(远程)**:产物落 `hot_source_items`,而**读它的选题 Agent
     #    (`agent_tick_all_users`)也在远程**;挂本机的话 `remote_sync` **不推这张表**,链当场就断。
+    # ⚠️ **限流是按端点分的、与 IP 无关**(2026-10-05 受控对比:`search/type` 本机与远程都 OK,
+    #    `space/wbi/arc/search` 两边都 412)⇒ 远程 IP **没被封**;烧额度的是当天的密集探测。
     bili_scan_cron: str = "0 */2 * * *"
     bili_scan_accounts_per_run: int = 1
     # ---- 抖音推广线索(2026-10-02,用户提供的判据)见 app/services/douyin_leads.py ----
