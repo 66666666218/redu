@@ -63,6 +63,37 @@ class BiliScanError(RuntimeError):
     """B站采集被挡住(限流/风控/非 JSON)。**必须抛**,不能吞成空列表。"""
 
 
+def _bili_cookie(session, user_id: int, settings=None) -> str:
+    """取 B站 cookie:**先 cookie_store,再 `.env` 兜底**(与 `pan_discovery` 取夸克 cookie 同口径)。
+
+    ⚠️ **为什么要 cookie**(2026-10-05 受控实测):`space/wbi/arc/search` 的**风控比普通搜索严得多**。
+    同一 IP 上 `search/type`(搜用户/搜视频)完全正常,而 space 端点:
+
+    | 发起处 | 结果 |
+    |---|---|
+    | 本机家宽 | 可用(实测取到 30 条,多次) |
+    | 远程机房 | `{"code":-352,"message":"风控校验失败","v_voucher":…}` |
+
+    —— 即机房 IP 在该端点上被要求**过风控验证**,而家宽 IP 不必。裸请求带 `buvid3` **无效**。
+    登录态(`SESSDATA` 等)通常能显著放宽风控,所以这里把 cookie 带上;拿不到就退回匿名
+    (**不报错**,只是更可能被挡 —— 被挡会如实抛,不会假装成功)。
+
+    `.env` 兜底(`BILI_COOKIE`)是给**远程**用的:本地 `bili_login.py` 扫一次码,
+    把 cookie 同时放进远程 `.env` 即可(`user_cookies` 表**不在** `remote_sync` 的同步清单里)。
+    """
+    try:
+        from app.services.cookie_store import get_cookie
+
+        ck = (get_cookie(session, user_id, "bilibili") or "").strip()
+        if ck:
+            return ck
+    except Exception:  # noqa: BLE001 - 取不到就当没配
+        logger.debug("读取 B站 cookie 失败", exc_info=True)
+    if settings is None:
+        settings = _settings()
+    return str(getattr(settings, "bili_cookie", "") or "").strip()
+
+
 def _signed_get(params: dict, referer: str, cookie: str = "") -> dict:
     """带 wbi 签名的 GET(mixin 复用 `cross_accounts._bili_mixin`,匿名也能取到)。"""
     import requests
@@ -187,8 +218,12 @@ def scan_accounts(session, user_id: int, settings=None, count: int | None = None
     picked = [rows[(start + i) % len(rows)] for i in range(min(max(1, n), len(rows)))]
 
     written, seen_names = 0, []
+    ck = _bili_cookie(session, user_id, settings)      # 登录态能显著放宽 space 端点的风控
+    if not ck:
+        logger.info("未配 B站 cookie,本轮按**匿名**取(更可能被风控挡);"
+                    "扫码一次即可:python scripts/bili_login.py")
     for acc in picked:
-        titles = fetch_user_titles(acc.uid)          # 限流会在这里抛,整轮中止(有意)
+        titles = fetch_user_titles(acc.uid, cookie=ck)   # 限流/风控会在这里抛,整轮中止(有意)
         written += _save_titles(session, user_id, acc, titles, settings)
         seen_names.append(f"{acc.name}({len(titles)})")
         time.sleep(2.0)                              # 号与号之间留间隔,别连发

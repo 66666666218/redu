@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     # (**已被 `push_timeline.PUSH_KINDS` 取代**,改推送时段去那里)/ data_dir(备份路径是从库路径推的)。
     weibo_cookie: str = ""          # 微博登录态
     douyin_cookie: str = ""         # 抖音创作者中心/巨量算数登录态
+    # B站 cookie(2026-10-05):`space/wbi/arc/search` 的**风控比普通搜索严得多** ——
+    # 实测同一 IP 上 `search/type` 正常,而 space 端点在**机房 IP** 上稳定返回
+    # `code=-352 风控校验失败`(还带 `v_voucher` 验证凭证),家宽 IP 则可用。
+    # 登录态通常能显著放宽风控。本地跑 `python scripts/bili_login.py` 扫一次码会写进
+    # `cookie_store`(**本地够用**);这里这个字段是给**远程**兜底的 ——
+    # `user_cookies` 表**不在** `remote_sync` 的同步清单里,所以远程必须另给一份。
+    bili_cookie: str = ""
     goofish_cookie_file: str = "data/goofish_cookie.txt"  # 闲鱼登录 Cookie 文件(gitignored)
     xianyu_keywords: str = "ps教程,网盘资源,代充,剪映会员,软件,素材,cad,ae,pr,office,会员,课程,影视,源码"  # 虚拟商品关键词
     xianyu_top_n: int = 100         # 前 N 虚拟商品榜(搜索级,无风控)

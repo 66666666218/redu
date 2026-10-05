@@ -153,3 +153,44 @@ class TestTickDoesNotAdvanceCursorOnFailure:
         for key in (bas._CURSOR_KEY,):
             row = session.scalar(select(SystemConfig).where(SystemConfig.key == key))
             assert row is None or row.value == "0", "限流那轮不该推游标"
+
+
+class TestBiliCookie:
+    """★ space 端点的风控**按 IP 类别**区别对待(受控实测):本机家宽可用、机房 IP 稳定
+    `-352 风控校验失败`。登录态能显著放宽风控,所以 cookie 必须真的带上。
+
+    取值口径与 `pan_discovery` 取夸克 cookie 一致:**先 cookie_store,再 `.env` 兜底**
+    (后者是给远程用的 —— `user_cookies` 表不在 `remote_sync` 的同步清单里)。
+    """
+
+    class _SWithCookie:
+        bili_scan_enabled = True
+        bili_scan_accounts_per_run = 1
+        bili_cookie = "SESSDATA=fromenv; bili_jct=x"
+
+    def test_优先用cookie_store_其次env兜底(self, session) -> None:
+        from app.services import cookie_store
+
+        # 库里没有 → 用 .env
+        assert bas._bili_cookie(session, 1, self._SWithCookie()) == "SESSDATA=fromenv; bili_jct=x"
+        # 库里有 → 库里优先(与夸克那套口径一致)
+        cookie_store.set_cookie(session, 1, "bilibili", "SESSDATA=fromdb; bili_jct=y")
+        session.commit()
+        assert bas._bili_cookie(session, 1, self._SWithCookie()) == "SESSDATA=fromdb; bili_jct=y"
+
+    def test_两处都没有就返回空串而不是报错(self, session) -> None:
+        assert bas._bili_cookie(session, 1, _S()) == "", "没配就匿名跑,不该抛"
+
+    def test_扫描时cookie真的传给了抓取函数(self, session, monkeypatch) -> None:
+        """防"写了取值函数却忘了传参" —— 那等于没配。"""
+        from app.services import cookie_store
+
+        _mk_accounts(session, 1)
+        cookie_store.set_cookie(session, 1, "bilibili", "SESSDATA=db; bili_jct=y")
+        session.commit()
+        seen: list[str] = []
+        monkeypatch.setattr(bas, "fetch_user_titles",
+                            lambda mid, **k: seen.append(k.get("cookie", "<未传>")) or [])
+        monkeypatch.setattr(bas.time, "sleep", lambda s: None)
+        bas.scan_accounts(session, 1, settings=_S())
+        assert seen == ["SESSDATA=db; bili_jct=y"], f"cookie 没传到抓取函数,实际 {seen}"
