@@ -258,16 +258,30 @@ def _weread_app_client(session: Session, user_id: int):
     ⚠️ 返回 `None` 是**正常分支**(没配过 App 凭据),不是失败 —— 调用方据此跳过兜底。
     ⚠️ 凭据是 JSON(`scripts/weread_app_login.py` 写的),**解析失败要能说出来**:
     静默当成"没配"会让"token 坏了"表现为"阅读数又是 0",正是本仓最怕的那种。
+
+    **自愈**:`accessToken` 会随 App 会话轮换,轮换后即失效。这里挂上
+    `weread_app_token.refresh` 作回调 —— 遇到登录态错误时**自动重取并重试一次**,
+    不用人记得去跑脚本(那是靠不住的)。
     """
     try:
-        from app.services.cookie_store import get_cookie
         from app.services.weread_app_client import WereadAppClient
+        from app.services import weread_app_token as wat
 
-        raw = get_cookie(session, user_id, "weread_app")
-        if not raw:
+        blob = wat.load(session, user_id)
+        if not blob:
             return None
-        blob = json.loads(raw)
-        return WereadAppClient(blob.get("accessToken") or "", blob.get("vid") or "")
+
+        def _reget():
+            """重取凭据;返回 `(token, vid)` 或 `None`(取不到就 None,不抛)。"""
+            out = wat.refresh(session, user_id)
+            if not out.get("ok"):
+                logger.warning("App 凭据自愈失败(需开雷电并登录微信读书):%s",
+                               str(out.get("reason"))[:120])
+                return None
+            return out["accessToken"], out["vid"]
+
+        return WereadAppClient(blob.get("accessToken") or "", blob.get("vid") or "",
+                               on_auth_error=_reget)
     except Exception as exc:  # noqa: BLE001 - 不能因为兜底坏了就停掉整轮监听
         logger.warning("App 侧凭据不可用(跳过列表兜底):%s", str(exc)[:120])
         return None

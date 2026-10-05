@@ -66,18 +66,45 @@ class WereadAppAuthError(WereadAppError):
 
 
 class WereadAppClient:
-    """App 侧只读客户端。构造需要 `access_token` 与 `vid`(见 `scripts/weread_app_login.py`)。"""
+    """App 侧只读客户端。构造需要 `access_token` 与 `vid`(见 `scripts/weread_app_login.py`)。
 
-    def __init__(self, access_token: str, vid: str | int, *, timeout: int = 20) -> None:
+    **自愈**:`accessToken` 会随 App 会话轮换(实测三个值),轮换后接口回
+    `-2010/-2012`、阅读数又断。所以构造时可以传 `on_auth_error` ——
+    一个"重取凭据"的回调,**遇到登录态错误时自动重取并重试一次**。
+    没有它,就得靠人记得去跑脚本;那种机制迟早会忘(本仓已经吃过一次)。
+
+    ⚠️ **只重试一次**:重取还要开模拟器,取不到就别死循环 —— 取不到就照常抛,
+    由上层按"这次没有兜底"处理。
+    """
+
+    def __init__(self, access_token: str, vid: str | int, *, timeout: int = 20,
+                 on_auth_error=None) -> None:
         if not access_token or not vid:
             raise WereadAppAuthError("缺 accessToken 或 vid(跑 scripts/weread_app_login.py 取)")
         self._token, self._vid, self._timeout = access_token, str(vid), timeout
+        self._on_auth_error = on_auth_error
+        self.refreshed = False        # 供调用方/测试断言"确实自愈过"
 
     def _headers(self) -> dict[str, str]:
         return {**_DEFAULT_HEADERS, "accessToken": self._token, "vid": self._vid}
 
     def articles(self, book_id: str, *, count: int = 20, offset: int = 0) -> list[dict[str, Any]]:
-        """取某公众号的文章列表(含**精确** `read_num` / `like_num`)。
+        """取某公众号的文章列表(含**精确** `read_num` / `like_num`)。见 `_fetch`。"""
+        try:
+            return self._fetch(book_id, count, offset)
+        except WereadAppAuthError:
+            if self._on_auth_error is None:
+                raise
+            got = self._on_auth_error()          # 重取凭据(可能是 None)
+            if not got:
+                raise                            # 取不到就照实抛,别假装重试过
+            self._token, self._vid = str(got[0]), str(got[1])
+            self.refreshed = True
+            logger.info("App 凭据已自愈(vid=%s),重试这一次请求", self._vid)
+            return self._fetch(book_id, count, offset)
+
+    def _fetch(self, book_id: str, count: int, offset: int) -> list[dict[str, Any]]:
+        """真正发请求并解析。
 
         ⚠️ **业务码要当错误看**:HTTP 200 + `errcode` 是最典型的假成功(与 B站 `-352`、
         网页版 `-2041` 同一条纪律)。这里**失败抛异常,绝不返回空列表** ——

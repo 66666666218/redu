@@ -165,3 +165,70 @@ def test_凭据坏掉时要能说出来_不静默当没配(monkeypatch, caplog):
             "凭据坏掉必须留下 WARNING —— 静默当'没配'会让 token 失效表现成'阅读数又是 0'"
     finally:
         db.close()
+
+
+# ---------------- 自愈:token 轮换后自动重取 ----------------
+
+def test_登录态失效会自愈并重试一次(monkeypatch):
+    """⚠️ **这条是这条链能长期活着的前提**:`accessToken` 随 App 会话轮换,
+    轮换后接口回 `-2010/-2012`、阅读数又断。靠人记得跑脚本是**靠不住**的
+    (本仓已经吃过一次:断了一周没人知道)。
+    """
+    import app.services.weread_app_client as m
+
+    calls: list[str] = []
+
+    class FakeReq:
+        def __init__(self):
+            self.n = 0
+
+        def get(self, url, headers=None, params=None, timeout=None):
+            self.n += 1
+            calls.append(headers["accessToken"])
+            if self.n == 1:
+                return _Resp({"errcode": -2012, "errmsg": "登录超时"})
+            return _Resp(_payload([{"title": "自愈后的文", "readNum": 99}]))
+
+    monkeypatch.setattr(m, "requests", FakeReq(), raising=False)
+    cli = WereadAppClient("old_token", "1",
+                          on_auth_error=lambda: ("new_token", "1"))
+    arts = cli.articles("MP_WXS_1")
+    assert cli.refreshed is True, "要留下'确实自愈过'的痕迹,否则事后查不出来"
+    assert calls == ["old_token", "new_token"], "必须用**新** token 重试"
+    assert arts[0]["read_num"] == 99
+
+
+def test_重取不到时不许假装重试过(monkeypatch):
+    """反向:回调返回 None(模拟器没开是**常态**)⇒ 照实抛,不吞。
+
+    吞掉就会表现成"阅读数又是 0" —— 又一个假成功。
+    """
+    import app.services.weread_app_client as m
+
+    class FakeReq:
+        def get(self, *a, **k):
+            return _Resp({"errcode": -2010, "errmsg": "用户不存在"})
+
+    monkeypatch.setattr(m, "requests", FakeReq(), raising=False)
+    cli = WereadAppClient("t", "1", on_auth_error=lambda: None)
+    with pytest.raises(WereadAppAuthError):
+        cli.articles("MP_WXS_1")
+    assert cli.refreshed is False
+
+
+def test_只重试一次_重取后还失败就不再试(monkeypatch):
+    """取到新 token 仍失败 ⇒ 抛出去。**不能死循环**(每次重取都要开模拟器,代价很高)。"""
+    import app.services.weread_app_client as m
+
+    n = {"calls": 0}
+
+    class FakeReq:
+        def get(self, *a, **k):
+            n["calls"] += 1
+            return _Resp({"errcode": -2012, "errmsg": "登录超时"})
+
+    monkeypatch.setattr(m, "requests", FakeReq(), raising=False)
+    cli = WereadAppClient("t", "1", on_auth_error=lambda: ("t2", "1"))
+    with pytest.raises(WereadAppAuthError):
+        cli.articles("MP_WXS_1")
+    assert n["calls"] == 2, "原始 1 次 + 重试 1 次,不该更多"
