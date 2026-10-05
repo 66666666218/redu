@@ -131,7 +131,15 @@ def check_dependencies() -> list[dict]:
 
 
 def check_credentials(db) -> list[dict]:
-    """② 凭证层:各平台 Cookie 在不在、最后一次更新是什么时候。"""
+    """② 凭证层:各平台 Cookie 在不在、最后一次更新是什么时候。
+
+    ⚠️ **2026-10-05 补:微信读书要"验活",不能只看更新时间**。
+    当天实测踩到:这里显示 `🟢 微信读书 —— 更新于 07:50(0 天前)`,
+    **而那个 cookie 其实已经 `-2012 登录态失效`** —— 因为 08:02~12:57 之间死的。
+    **只看"多久前更新过"是假绿**;一个不验证的指标,绿灯毫无意义
+    (与"静默失败=假成功"同一条线)。
+    微信读书正好有一个**只读且便宜**的验活口:`/web/shelf/sync`。
+    """
     from sqlalchemy import select
 
     from app.db.models import UserCookie
@@ -151,11 +159,50 @@ def check_credentials(db) -> list[dict]:
             # 夸克/百度缺失时转存会降级,不一定是红
             out.append({"name": label, "level": YELLOW if plat in ("quark", "baidupan") else RED,
                         "detail": "库里没有该平台 Cookie"})
-        else:
-            age = (datetime.now() - at).days
-            out.append({"name": label, "level": GREEN if age <= 7 else YELLOW,
-                        "detail": f"更新于 {str(at)[:16]}({age} 天前)"})
+            continue
+        age = (datetime.now() - at).days
+        level = GREEN if age <= 7 else YELLOW
+        detail = f"更新于 {str(at)[:16]}({age} 天前)"
+        # **验活**(只对微信读书做:它有一个只读且便宜的探针)
+        if plat == "weread":
+            alive, why = _weread_alive(db)
+            if alive is False:
+                level, detail = RED, f"**已失效**({why})—— 需重新贴 Cookie;更新于 {str(at)[:16]}"
+            elif alive is True:
+                detail += " · 验活 ✓"
+            else:
+                detail += f" · 验活跳过({why})"
+        out.append({"name": label, "level": level, "detail": detail})
     return out
+
+
+def _weread_alive(db) -> tuple[bool | None, str]:
+    """微信读书凭据**验活**(只读):读一次书架。
+
+    返回 `(True/False/None, 原因)`;`None` = **验不了**(别把"不知道"当成"活着")。
+    """
+    try:
+        import requests
+
+        from app.services.cookie_store import get_cookie
+        # ⚠️ `get_cookie` **返回的已经是明文**(它在内部解密)—— 别再 `decrypt_cookie` 一次,
+        # 那会双重解密直接 `InvalidToken`(我第一版就这么写的)。
+        ck = get_cookie(db, 1, "weread") or ""
+        if not ck:
+            return False, "库里没有 Cookie"
+        r = requests.get("https://weread.qq.com/web/shelf/sync",
+                         params={"userVid": "", "synckey": "0", "lectureSynckey": "0"},
+                         headers={"User-Agent": "Mozilla/5.0", "Cookie": ck,
+                                  "Accept": "application/json"}, timeout=15)
+        data = r.json()
+        # ⚠️ 微信读书**失败也回 HTTP 200**,判据只能是 `errCode` ——
+        # 光看状态码会把它当成功(本仓的"HTTP 200 ≠ 成功",B站那处也栽过)
+        code = data.get("errCode")
+        if code in (None, 0) and data.get("books"):
+            return True, f"{len(data['books'])} 个号"
+        return False, f"errCode={code}"
+    except Exception as exc:  # noqa: BLE001 - 探针拿不到就说不知道,别报成"死了"
+        return None, f"{type(exc).__name__}"
 
 
 def check_chains(db, days: int = 3) -> list[dict]:
