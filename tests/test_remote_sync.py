@@ -198,3 +198,108 @@ def test_跨平台账号也只推窗口内的(local, remote_url) -> None:
             "SELECT count(*) FROM cross_platform_accounts WHERE uid = 'old1'")).scalar()
     eng.dispose()
     assert n == 0
+
+
+class TestBiliPanHotSync:
+    """B站对标号的投稿标题(2026-10-05)—— **只推 `source='bili-pan'` 那几十行**。
+
+    ⚠️⚠️ 这张表**远程自己也在用**(它的 `hot_source` 每几分钟写一轮,实测 7 万+ 条)。
+    整表同步会把它灌爆 —— 所以"**只推自己那几十行、绝不碰别人的**"是本类最要紧的一条。
+    """
+
+    def _seed_hot(self, local, source, title, when=None, rank=1):
+        from app.db.models import HotSourceItem
+
+        local.add(HotSourceItem(user_id=1, source=source, rank=rank, title=title,
+                                url="", extra="网盘号A",
+                                captured_at=when or datetime.now()))
+        local.commit()
+
+    def _remote_rows(self, remote_url, source=None):
+        eng = create_engine(remote_url)
+        try:
+            sql = "SELECT source, title FROM hot_source_items"
+            params = {}
+            if source:
+                sql += " WHERE source = :s"
+                params["s"] = source
+            with eng.connect() as c:
+                return [tuple(r) for r in c.execute(text(sql), params)]
+        finally:
+            eng.dispose()
+
+    def test_只推bili_pan_不动远程自己的热榜(self, local, remote_url) -> None:
+        eng = create_engine(remote_url)
+        with eng.begin() as c:      # 远程自己的一条热榜(模拟它那 7 万条)
+            c.execute(text("INSERT INTO hot_source_items (id, user_id, source, rank, title, url, "
+                           "extra, captured_at) VALUES (900, 1, 'weibo', 1, '远程自己的热搜', "
+                           "'', '', '2026-10-05 00:00:00')"))
+        eng.dispose()
+
+        self._seed_hot(local, "bili-pan", "野鹅敢死队 经典影片")
+        self._seed_hot(local, "weibo", "本机也有的热搜")      # 非 bili-pan,不该被推
+
+        out = rs.sync_once(local, remote_url)
+        assert out.get("bili_hot") == 1, f"应只推 1 条,实际 {out}"
+
+        rows = self._remote_rows(remote_url)
+        assert len(rows) == 2, f"远程应只有'它自己的 1 条 + 我们推的 1 条',实际 {rows}"
+        assert ("weibo", "远程自己的热搜") in rows, "**远程自己的热榜绝不能被覆盖/删除**"
+        assert ("bili-pan", "野鹅敢死队 经典影片") in rows
+        assert ("weibo", "本机也有的热搜") not in rows, "非 bili-pan 的行不该被推过去"
+
+    def test_水位线让第二轮不再重复推(self, local, remote_url) -> None:
+        self._seed_hot(local, "bili-pan", "第一条")
+        assert rs.sync_once(local, remote_url).get("bili_hot") == 1
+        # 第二轮:没有新行 ⇒ 推 0 条(否则每 30 分钟就把历史重推一遍,表会被灌爆)
+        out2 = rs.sync_once(local, remote_url)
+        assert out2.get("bili_hot") == 0, f"水位线没生效,第二轮还在推:{out2}"
+        assert len(self._remote_rows(remote_url, "bili-pan")) == 1
+
+    def test_新增的行第三轮能推上去(self, local, remote_url) -> None:
+        self._seed_hot(local, "bili-pan", "第一条")
+        rs.sync_once(local, remote_url)
+        self._seed_hot(local, "bili-pan", "第二条")
+        assert rs.sync_once(local, remote_url).get("bili_hot") == 1
+        titles = {t for _, t in self._remote_rows(remote_url, "bili-pan")}
+        assert titles == {"第一条", "第二条"}
+
+    def test_远端提交失败时水位线不前进(self, local, remote_url, monkeypatch) -> None:
+        """★ **这条是防"永久丢数据"的**,而且**必须让"提交"本身失败才算数**。
+
+        ⚠️ **我第一版写错了、它是个假验证**:当时用 `sqlite:///:memory:` 制造失败 ——
+        可那个 URL **在进入 `with remote.begin()` 之前**就建不出连接,
+        块内的代码**一行都没跑**,所以"水位线在块内推进"这个 bug 也照样能通过。
+        (与"证伪不控制变量"同类:验证动作没打到出问题的那一段。)
+
+        正确的模拟:`with remote.begin()` 是**一个远端事务**,退出时才提交 ——
+        这里让 `__exit__` 在**真提交之后**抛,精确对应"提交这一步失败"。
+        水位线若在块内推进(而 `_set_bili_hot_watermark` 自己会 `local.commit()`),
+        本地就会认为"推过了" ⇒ **那批标题永久丢失,且不会有任何报错**。
+        """
+        self._seed_hot(local, "bili-pan", "必须被推到的一条")
+        real = rs._engine(remote_url)
+
+        class _Wrap:
+            def __init__(self, cm):
+                self._cm = cm
+
+            def __enter__(self):
+                return self._cm.__enter__()
+
+            def __exit__(self, *a):
+                self._cm.__exit__(*a)                 # 真提交
+                raise RuntimeError("提交时断网(模拟)")
+
+        class _Eng:
+            def begin(self):
+                return _Wrap(real.begin())
+
+            def dispose(self):
+                real.dispose()
+
+        monkeypatch.setattr(rs, "_engine", lambda *a, **k: _Eng())
+        out = rs.sync_once(local, remote_url)
+        assert out.get("status") == "failed", f"应当记失败,实际 {out}"
+        assert rs._bili_hot_watermark(local) == "1970-01-01 00:00:00", \
+            "提交失败那轮**绝不能**推进水位线(否则那批行永久丢失)"

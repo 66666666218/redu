@@ -156,7 +156,10 @@ ADDITIONS: dict[str, list[str]] = {
     "wechat_benchmarks": ["weread_book_id VARCHAR(64) DEFAULT ''", "biz VARCHAR(64) DEFAULT ''"],
     "wechat_candidates": ["url VARCHAR(600) DEFAULT ''",  # 收录按钮用(v2.6.0)
                           "import_tries INTEGER DEFAULT 0"],  # 自动收录失败重试计数(v2.13.0)
-    "hotspot_suggestions": ["saves INTEGER DEFAULT 0", "saves_at DATETIME",
+    # B站对标号的**扫描状态**(2026-10-05):识别"空壳号"并让轮转**先扫没扫过的**。
+    # 起因:实测轮转轮到第 1 个号(uid 650752289)时它**一条投稿都没有**,白跑一轮;
+    # 59 个号里有多少这种得先能**量出来**。`video_count = -1` 表示"还没扫过"。
+    "cross_platform_accounts": ["last_scan_at DATETIME", "video_count INTEGER DEFAULT -1"],    "hotspot_suggestions": ["saves INTEGER DEFAULT 0", "saves_at DATETIME",
                             "platforms VARCHAR(64) DEFAULT ''",
                             "category VARCHAR(16) DEFAULT ''",   # 验证品类(结算归因聚合键,2026-10-01)
                             "opportunity FLOAT DEFAULT 0",

@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (Boolean, DateTime, Float, ForeignKey, Integer, String, Text,
+                       UniqueConstraint, text)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.database import Base
@@ -550,6 +551,15 @@ class CrossPlatformAccount(Base):
     pan_link: Mapped[str] = mapped_column(String(500), default="")     # 内容里检出的网盘链
     status: Mapped[str] = mapped_column(String(16), default="active")
     discovered_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    # **扫描状态**(2026-10-05):`last_scan_at` 让轮转"先扫没扫过的"、并把**已知空壳**排最后;
+    # `video_count` 是"59 个号里有多少空壳"唯一能量出来的来源(space 端点限流紧,不可能专门扫一圈统计)。
+    # ⚠️ `-1` = 还没扫过(别用 0 当"未知":0 是"扫过且确认没投稿",语义完全不同)。
+    last_scan_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # ⚠️ **必须带 `server_default`**:`remote_sync._push` 是**裸 INSERT**、不带这一列,
+    # 而 `default=-1` 只是 **Python 侧**默认值 —— 全新库走 `create_all` 时模型会建出
+    # `NOT NULL` 且无 DB 默认的列 ⇒ 裸 INSERT 直接 `IntegrityError`
+    # (2026-10-05 被既有测试当场抓到;`ADDITIONS` 迁移那边本来就有 `DEFAULT -1`,两边要对齐)。
+    video_count: Mapped[int] = mapped_column(Integer, default=-1, server_default=text("-1"))
 
 
 class WechatBenchmark(Base):

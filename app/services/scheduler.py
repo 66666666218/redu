@@ -589,15 +589,16 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # 的 `_platform_hot_candidates` 自动当候选、`_library_evidence` 自动回资源库查有没有。
         # ⚠️ **每 2 小时只扫 1 个号**:B站 space 接口匿名额度极低(实测连发即 412/-352),
         # 59 个号轮一圈约 5 天 —— 这是有意压着跑,调大只会换来整轮 failed。
-        # ⚠️ 角色必须是 **hotspot(远程)**,不能是 wechat(本机):
-        # ① 它的产物落 `hot_source_items`,而**读它的选题 Agent(`agent_tick_all_users`)
-        #    也在 hotspot** —— 挂本机的话标题落本机库,`remote_sync` **又不推这张表**
-        #    (只推公众号那几张 + cross_platform_accounts),这条链**当场就是断的**;
-        # ② 它需要的 59 个对标号来自 `cross_platform_accounts`,那张表**已经在同步到远程**;
-        # ③ 限流是**按端点**分的、与 IP 无关(2026-10-05 受控对比:`search/type` 两边都 OK、
-        #    `space/wbi/arc/search` 两边都 412)⇒ **远程 IP 没被封**,别据此"挪回本机"。
+        # ⚠️ **角色 = wechat(本机)** —— 2026-10-05 实测后定的:
+        # ① `space` 端点的风控**按 IP 类别区别对待**:同一时刻 `search/type` 两边都正常,
+        #    而 `space` 上**本机家宽能过、远程机房稳定 `-352 风控校验失败`**;
+        #    **配上登录 cookie 后机房也能过** —— 但 cookie 是在**本机**扫码产生的,
+        #    而 `user_cookies` **不在 `remote_sync` 的同步清单里** ⇒ 挂远程就得每次重登
+        #    **人工把 cookie 搬到远程 `.env`**。挂本机则**零搬运**(cookie 就在 localhost 的库里)。
+        # ② 产物落 `hot_source_items`,而读它的选题 Agent 在远程 ⇒ **由 `remote_sync` 窄同步过去**
+        #    (只推 `source='bili-pan'` 那几十行,不碰远程自己那 7 万条热榜)。
         (bili_account_scan_tick, _get_settings().bili_scan_cron, {"minute": 0, "hour": "*/2"},
-         "bili_account_scan", "hotspot"),
+         "bili_account_scan", "wechat"),
         (push_timeline_tick, "* * * * *", {"minute": "*"}, "push_timeline", "both"),
     ]
     for func, expr, default, job_id, role in jobs:

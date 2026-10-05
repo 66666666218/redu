@@ -20,7 +20,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db import models  # noqa: F401
 from app.db.database import Base
-from app.db.models import CrossPlatformAccount, HotSourceItem, User, SystemConfig
+from app.db.models import CrossPlatformAccount, HotSourceItem, User
 from app.services import bili_account_scan as bas
 
 
@@ -119,26 +119,56 @@ class TestScanAccounts:
         assert {r.source for r in rows} == {"bili-pan"}
         assert rows[0].extra == "网盘号0", "extra 要记账号名,排障时能认出是谁发的"
 
-    def test_游标轮转_不会永远只扫第一个号(self, session, monkeypatch) -> None:
+    def test_轮转先扫没扫过的_空壳排最后(self, session, monkeypatch) -> None:
+        """★ 2026-10-05 改:**不再用"游标 % 总数"**,改成按扫描状态排序取队首。
+
+        动机是实测出来的:轮到第 1 个号(uid 650752289)时它**一条投稿都没有**,白烧一轮
+        space 额度(而该端点额度极紧)。旧写法还有第二个毛病:中途增删号会让窗口错位、有的号被跳过。
+        新顺序:**没扫过的 → 扫过的(最久没扫优先)→ 已知空壳**。
+        """
+        from datetime import datetime as _dt
+
         _mk_accounts(session, 3)
+        # 0 号扫过且非空、1 号扫过但是**空壳**、2 号**从未扫过**
+        a0, a1, a2 = session.scalars(select(CrossPlatformAccount).order_by(
+            CrossPlatformAccount.id)).all()
+        a0.last_scan_at, a0.video_count = _dt(2026, 10, 1), 30
+        a1.last_scan_at, a1.video_count = _dt(2026, 10, 4), 0
+        session.commit()
+
         seen: list[str] = []
         monkeypatch.setattr(bas, "fetch_user_titles",
                             lambda mid, **k: seen.append(mid) or [])
-        monkeypatch.setattr(bas.time, "sleep", lambda s: None)   # 别在单测里真睡
-        for _ in range(4):
-            bas.scan_accounts(session, 1, settings=_S())
-            bas.advance_cursor(session, 1)
-        assert seen == ["600000", "600001", "600002", "600000"], \
-            f"游标要在 3 个号之间轮转,实际 {seen}"
+        monkeypatch.setattr(bas.time, "sleep", lambda s: None)
+
+        class _S3(_S):
+            bili_scan_accounts_per_run = 1
+        for _ in range(3):
+            bas.scan_accounts(session, 1, settings=_S3())
+        assert seen == ["600002", "600000", "600001"], \
+            f"顺序应为'没扫过 → 最久没扫 → 空壳',实际 {seen}"
+
+    def test_扫描后记录投稿数(self, session, monkeypatch) -> None:
+        """**"59 个号里有多少空壳"只能靠这个字段量出来** —— space 端点限流紧,
+        不可能为了统计专门扫一圈。"""
+        _mk_accounts(session, 1)
+        monkeypatch.setattr(bas, "fetch_user_titles",
+                            lambda mid, **k: [{"title": "资源", "bvid": "B", "url": "u", "created": 0}])
+        monkeypatch.setattr(bas.time, "sleep", lambda s: None)
+        bas.scan_accounts(session, 1, settings=_S())
+        acc = session.scalars(select(CrossPlatformAccount)).one()
+        assert acc.video_count == 1 and acc.last_scan_at is not None
+        s = bas.empty_account_summary(session, 1)
+        assert s == {"total": 1, "scanned": 1, "empty": 0, "unscanned": 0}
 
     def test_没有对标号时返回no_accounts(self, session) -> None:
         assert bas.scan_accounts(session, 1, settings=_S())["status"] == "no_accounts"
 
 
-class TestTickDoesNotAdvanceCursorOnFailure:
-    def test_限流时游标不推_下一轮重来(self, session, monkeypatch) -> None:
-        """⚠️ 被限流就**不能推游标** —— 否则那个号会被**永久跳过**,
-        而它恰恰是"还没成功采过"的那个。"""
+class TestTickOnFailure:
+    def test_限流时不记扫描状态_下一轮重来(self, session, monkeypatch) -> None:
+        """⚠️ 被限流就**不能把那个号记成"扫过了"** —— 否则它会带着 `video_count=-1`(或旧值)
+        被排到队尾,**而它恰恰是"还没成功采过"的那个**。旧写法盯的是游标,现在盯 `last_scan_at`。"""
         _mk_accounts(session, 3)
         # ⚠️ tick 里是 `from app.db import get_session_local`(**调用时才 import**),
         # 所以要打到 `app.db` 上,打到本模块会 AttributeError。
@@ -150,9 +180,9 @@ class TestTickDoesNotAdvanceCursorOnFailure:
 
         bas.bili_account_scan_tick(settings=_S())
 
-        for key in (bas._CURSOR_KEY,):
-            row = session.scalar(select(SystemConfig).where(SystemConfig.key == key))
-            assert row is None or row.value == "0", "限流那轮不该推游标"
+        for acc in session.scalars(select(CrossPlatformAccount)).all():
+            assert acc.last_scan_at is None, "被挡住那轮不该把号记成已扫过"
+            assert acc.video_count == -1
 
 
 class TestBiliCookie:
@@ -241,3 +271,59 @@ class TestCookieWhitespace:
                             lambda url, headers=None, timeout=None: (seen.update(headers or {}), _Resp())[1])
         bas.fetch_user_titles("123", cookie="   ")
         assert "Cookie" not in seen, "空白 cookie 不该设出空 header"
+
+
+class TestVerifyLogin:
+    """★ cookie 会过期,而**过期后的症状是"采集突然全失败"**(space 端点退回匿名风控)。
+
+    ⚠️ B站**失败也回 HTTP 200** —— 判据只能是 `data.isLogin`,按"HTTP 通了"判
+    就会把"cookie 已失效"读成"一切正常"。
+    """
+
+    def test_未登录要判成失效(self, monkeypatch) -> None:
+        import requests
+
+        class _R:
+            status_code = 200
+
+            def json(self):
+                # ⚠️ **HTTP 200 但 code=-101、isLogin=False** —— 这正是踩点
+                return {"code": -101, "message": "账号未登录", "data": {"isLogin": False}}
+
+        monkeypatch.setattr(requests, "get", lambda *a, **k: _R())
+        st = bas.verify_login("SESSDATA=expired")
+        assert st["is_login"] is False, "HTTP 200 + isLogin=False 必须判成失效"
+
+    def test_已登录要判成有效(self, monkeypatch) -> None:
+        import requests
+
+        class _R:
+            status_code = 200
+
+            def json(self):
+                return {"code": 0, "data": {"isLogin": True, "uname": "bili_xxx", "mid": 123}}
+
+        monkeypatch.setattr(requests, "get", lambda *a, **k: _R())
+        st = bas.verify_login("SESSDATA=good")
+        assert st["is_login"] is True and st["uname"] == "bili_xxx"
+
+    def test_没配cookie直接判失效(self) -> None:
+        assert bas.verify_login("")["is_login"] is False
+
+    def test_网络异常与失效要分开报(self, monkeypatch) -> None:
+        """网络抖一下 ≠ cookie 失效 —— 报错里要能区分,否则会误报"去重扫"。"""
+        import requests
+
+        def _boom(*a, **k):
+            raise ConnectionError("超时")
+        monkeypatch.setattr(requests, "get", _boom)
+        st = bas.verify_login("SESSDATA=x")
+        assert st["is_login"] is False and "ConnectionError" in st["reason"]
+
+    def test_失效时推告警(self, session, monkeypatch) -> None:
+        sent: list[tuple] = []
+        monkeypatch.setattr("app.services.alert_service.notify_incident",
+                            lambda *a, **k: sent.append(a) or True)
+        bas._alert_cookie_dead(session, 1, "账号未登录")
+        assert sent, "cookie 失效必须推告警(要人重新扫码)"
+        assert "重扫码" in str(sent[0]) or "bili_login" in str(sent[0])

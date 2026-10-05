@@ -10,37 +10,27 @@
 `_library_evidence` 会**自动**去资源库查"这个资源我们有没有、有没有我方链"。
 于是"**只采标题 → 回资源库补全**"这条链**不用改 Agent 一行代码**就通了。
 
-⚠️ **这个作业必须挂在 `hotspot`(远程)角色**,不能挂本机:
-① 产物落 `hot_source_items`,而**读它的选题 Agent(`agent_tick_all_users`)也在远程**,
-   且 `remote_sync` **不推这张表** —— 挂本机的话标题永远到不了 Agent 眼前;
-② 它需要的对标号来自 `cross_platform_accounts`,那张表**已经同步到远程**。
+⚠️ **这个作业挂在 `wechat`(本机)角色** —— 2026-10-05 实测的结论:
+`space/wbi/arc/search` 的**风控按 IP 类别区别对待**(同一时刻 `search/type` 两边都 OK):
 
-⚠️⚠️ **关于限流,别被"远程跑不动"这种第一印象带偏**(2026-10-05 亲历):
-两个 IP 现在**都** 412,看起来像"机房 IP 被封",于是很容易得出"该挪回本机"的结论 ——
-**那是错的**。做**受控对比**(同一时刻、同一套签名、两种 IP × 两个端点)才看清真相:
-
-| 端点 | 本机 | 远程 |
+| 发起处 | 匿名 | 带登录 cookie |
 |---|---|---|
-| `search/type`(搜用户/搜视频) | OK | OK |
-| `space/wbi/arc/search` | **412** | **412** |
+| 本机家宽 | 可用 | 可用 |
+| 远程机房 | **`code=-352 风控校验失败`** | **可用** |
 
-⇒ **限流是按端点分的,与 IP 无关**,`space` 的额度**远紧于** `search`;两边表现一模一样,
-远程 IP **没有被封**。烧额度的是我当天的密集探测(先是本机成功取到 30 条**两次**,
-连打几次之后才开始 412 —— 注意这本身就证明"能通")。
-另外试过铸 `buvid3` 带上,**无效**(仍 412),别再重复这条路。
+而 cookie 是在**本机**扫码产生的,`user_cookies` **又不在 `remote_sync` 的同步清单里** ——
+挂远程就得每次重登**人工把 cookie 搬到远程 `.env`**。挂本机则**零搬运**;
+产物(`hot_source_items` 里 `source="bili-pan"` 的行)由 `remote_sync` **窄同步**给远程的
+选题 Agent(只推这几十行,不碰远程自己那 7 万条热榜)。
 
-⚠️⚠️ **限流是这条链的头号风险**:B站 `space` 接口**匿名额度很低** —— 实测连发两次就
-`HTTP 412`(返回 HTML 拦截页,不是 JSON),再试是 `code=-352`(频率限制)。
-所以:① **每轮只扫一个号**;② 游标轮转,59 个号轮着来;③ **限流必须抛**,
-绝不 `return []` —— 否则"被挡住"会记成"这个号没投稿",与本仓反复踩的
-「静默失败 = 假成功」一模一样(`falsification-needs-control-variables` 也提醒:
-拿被限流的样本下结论是错的)。
+⚠️ 另试过铸 `buvid3` 带上,**无效**(仍 412),别再重复这条路。
 """
 from __future__ import annotations
 
 import hashlib
 import time
 import urllib.parse
+from datetime import datetime
 
 from sqlalchemy import select
 
@@ -50,7 +40,6 @@ logger = get_logger(__name__)
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
-_CURSOR_KEY = "bili_account_scan_cursor"
 _SPACE_URL = "https://api.bilibili.com/x/space/wbi/arc/search"
 # 一轮最多记多少条标题进热榜表。Agent 侧只取 `rank <= 10`,多记无用;
 # 留 30 是为了让"最近 30 条投稿"整体可见(排障时想看全)。
@@ -153,27 +142,52 @@ def fetch_user_titles(mid: str, *, ps: int = _MAX_TITLES, cookie: str = "") -> l
     return out
 
 
-def _cursor(session) -> int:
-    from app.db.models import SystemConfig
+_NAV_URL = "https://api.bilibili.com/x/web-interface/nav"
 
-    row = session.scalar(select(SystemConfig).where(SystemConfig.key == _CURSOR_KEY))
+
+def verify_login(cookie: str = "") -> dict:
+    """拿 nav 接口验 cookie 还有没有效 → `{is_login, uname, mid}`。
+
+    ⚠️ **B站失败也回 HTTP 200**,判据只能是 `data.isLogin` —— 接口一旦按"HTTP 通了"判,
+    就会把"cookie 已失效"读成"一切正常"(本仓最熟的那个坑)。
+
+    ⚠️ **为什么要主动验**:cookie 会过期(实测 `SESSDATA` 通常撑数月,但不是永久)。
+    等它过期后,`space` 端点会退回**匿名风控**(远程机房 IP 直接 `-352 风控校验失败`),
+    症状是"采集突然全失败" —— 而**用户需要知道的只有一句:去重新扫码**。
+    所以这一步在每轮扫描前跑,失效就当场告警,别让人对着 412 猜。
+    """
+    import requests
+
+    ck = str(cookie or "").strip()
+    if not ck:
+        return {"is_login": False, "uname": "", "mid": 0, "reason": "未配 cookie"}
     try:
-        return int(row.value) if row and row.value else 0
-    except (TypeError, ValueError):
-        return 0
+        r = requests.get(_NAV_URL, headers={"User-Agent": _UA, "Cookie": ck,
+                                            "Referer": "https://www.bilibili.com/"}, timeout=20)
+        d = (r.json() or {}).get("data") or {}
+        return {"is_login": bool(d.get("isLogin")), "uname": str(d.get("uname") or ""),
+                "mid": int(d.get("mid") or 0), "reason": ""}
+    except Exception as exc:  # noqa: BLE001 - 网络问题≠失效,分开报
+        return {"is_login": False, "uname": "", "mid": 0,
+                "reason": f"{type(exc).__name__}: {str(exc)[:80]}"}
 
 
-def advance_cursor(session, n: int = 1) -> None:
-    """把窗口往前推(在**整轮跑完之后**调,与 `cross_accounts.advance_bili_cursor` 同口径)。"""
-    from app.db.models import SystemConfig
+def _alert_cookie_dead(session, user_id: int, reason: str) -> None:
+    """cookie 失效 → 推管理员群(要人动手,所以 push_feishu 默认开)。
 
-    row = session.scalar(select(SystemConfig).where(SystemConfig.key == _CURSOR_KEY))
-    nxt = str(_cursor(session) + max(1, int(n or 1)))
-    if row is None:
-        session.add(SystemConfig(key=_CURSOR_KEY, value=nxt))
-    else:
-        row.value = nxt
-    session.commit()
+    复用 `notify_incident` 的冷却去重,不会每 2 小时刷一次屏。
+    """
+    try:
+        from app.services.alert_service import notify_incident
+
+        notify_incident(session, user_id, "bili_scan",
+                        "🔴 B站 cookie 已失效,对标号采集停用",
+                        f"`nav` 接口判定 `isLogin=False`({reason or '未登录'})。"
+                        "space 端点会退回**匿名风控**(机房 IP 直接 `-352 风控校验失败`),"
+                        "所以标题采集会全失败。**跑一次 `python scripts/bili_login.py` 扫码即可**;"
+                        "扫完本机会自动带上(不必再手动往别处搬 cookie)。")
+    except Exception:  # noqa: BLE001 - 告警失败不影响本轮结果
+        logger.debug("B站 cookie 失效告警推送失败", exc_info=True)
 
 
 def _save_titles(session, user_id: int, account, titles: list[dict], settings=None) -> int:
@@ -218,9 +232,14 @@ def scan_accounts(session, user_id: int, settings=None, count: int | None = None
     rows = session.scalars(select(CrossPlatformAccount).where(
         CrossPlatformAccount.user_id == user_id,
         CrossPlatformAccount.platform == "bilibili",
-        CrossPlatformAccount.status == "active").order_by(CrossPlatformAccount.id)).all()
-    start = _cursor(session) % len(rows)
-    picked = [rows[(start + i) % len(rows)] for i in range(min(max(1, n), len(rows)))]
+        CrossPlatformAccount.status == "active").order_by(_scan_priority(),
+                                                          CrossPlatformAccount.last_scan_at.asc(),
+                                                          CrossPlatformAccount.id)).all()
+    # ⚠️ **不再用"游标 % 总数"**(2026-10-05 改):那种轮转有两个毛病 ——
+    # ① 中途增删号会让窗口错位、有的号被跳过;② **已知的"空壳号"(0 投稿)每轮都还会轮到一次**,
+    # 白烧一次本就紧张的 space 额度(实测第 1 个号 uid 650752289 就是 0 投稿)。
+    # 改成**按扫描状态排序取队首**:没扫过的优先 → 再扫最久没扫的 → 已知空壳排最后。
+    picked = rows[: max(1, min(n, len(rows)))]
 
     written, seen_names = 0, []
     ck = _bili_cookie(session, user_id, settings)      # 登录态能显著放宽 space 端点的风控
@@ -230,13 +249,51 @@ def scan_accounts(session, user_id: int, settings=None, count: int | None = None
     for acc in picked:
         titles = fetch_user_titles(acc.uid, cookie=ck)   # 限流/风控会在这里抛,整轮中止(有意)
         written += _save_titles(session, user_id, acc, titles, settings)
+        # ⚠️ **记下扫描状态** —— 这是"59 个号里有多少空壳"唯一能**量出来**的办法
+        # (space 端点限流极紧,不可能为了统计专门扫一圈)。
+        acc.last_scan_at = datetime.now()
+        acc.video_count = len(titles)
         seen_names.append(f"{acc.name}({len(titles)})")
         time.sleep(2.0)                              # 号与号之间留间隔,别连发
     session.commit()
-    logger.info("B站对标号扫描:游标 %d/%d → 扫 %s,写入标题 %d 条",
-                start, len(rows), "、".join(seen_names), written)
+    logger.info("B站对标号扫描:共 %d 个号 → 本轮扫 %s,写入标题 %d 条",
+                len(rows), "、".join(seen_names), written)
     return {"status": "ok", "scanned": len(picked), "titles": written,
-            "accounts": seen_names, "cursor": start}
+            "accounts": seen_names, "total": len(rows)}
+
+
+def _scan_priority():
+    """轮转优先级:**没扫过的(0) → 扫过的(1) → 已知空壳(2)**。
+
+    用 `case` 而不是 `last_scan_at IS NULL` 排序,是为了把"**空壳号**"单独降一档 ——
+    它们不是"没扫过",而是"扫过且确认没东西",不该和外层完全一样的待遇。
+    """
+    from sqlalchemy import case
+
+    from app.db.models import CrossPlatformAccount
+
+    return case(
+        (CrossPlatformAccount.last_scan_at.is_(None), 0),
+        (CrossPlatformAccount.video_count == 0, 2),
+        else_=1,
+    )
+
+
+def empty_account_summary(session, user_id: int) -> dict:
+    """**给巡检/人看**:59 个号里扫过多少、空壳多少、还没扫多少。"""
+    from sqlalchemy import func
+
+    from app.db.models import CrossPlatformAccount
+
+    base = select(func.count()).select_from(CrossPlatformAccount).where(
+        CrossPlatformAccount.user_id == user_id,
+        CrossPlatformAccount.platform == "bilibili",
+        CrossPlatformAccount.status == "active")
+    total = int(session.scalar(base) or 0)
+    scanned = int(session.scalar(base.where(CrossPlatformAccount.last_scan_at.isnot(None))) or 0)
+    empty = int(session.scalar(base.where(CrossPlatformAccount.last_scan_at.isnot(None),
+                                          CrossPlatformAccount.video_count == 0)) or 0)
+    return {"total": total, "scanned": scanned, "empty": empty, "unscanned": total - scanned}
 
 
 def _settings():
@@ -248,7 +305,7 @@ def _settings():
 def bili_account_scan_tick(settings=None) -> int:
     """定时入口:扫一轮,返回写入的标题条数。"""
     from app.db import get_session_local
-    from app.db.models import User, SystemConfig
+    from app.db.models import User
     from app.services.tenant_base import _record_run
 
     from sqlalchemy import select as _select
@@ -261,22 +318,25 @@ def bili_account_scan_tick(settings=None) -> int:
     try:
         for (uid,) in db.execute(_select(User.id).where(User.enabled.is_(True))).all():
             try:
+                # ⚠️ **先验 cookie 是否还有效**(nav 接口,判据 `data.isLogin`)。
+                # 配了 cookie 却已失效 ⇒ **当场告警"去重新扫码"**;否则它会退回匿名风控,
+                # 表现为"采集突然全失败",而人对着 412 只能猜。
+                ck = _bili_cookie(db, uid, settings)
+                if ck:
+                    st = verify_login(ck)
+                    if not st["is_login"]:
+                        _alert_cookie_dead(db, uid, str(st.get("reason") or ""))
+                        db.commit()
                 out = scan_accounts(db, uid, settings=settings)
                 total += out.get("titles", 0)
-                # ⚠️ **跑完才推游标**(与 cross_accounts 同口径):中途抛了就不推,
-                # 下一轮从同一个号重来 —— 否则被限流的那个号会被**永久跳过**。
-                if out.get("status") == "ok" and out.get("scanned"):
-                    cnt = int(getattr(settings, "bili_scan_accounts_per_run", 1) or 1)
-                    row = db.scalar(_select(SystemConfig).where(
-                        SystemConfig.key == _CURSOR_KEY))
-                    nxt = str(_cursor(db) + max(1, cnt))
-                    if row is None:
-                        db.add(SystemConfig(key=_CURSOR_KEY, value=nxt))
-                    else:
-                        row.value = nxt
+                # ⚠️ **不再有游标**:轮转改成按 `last_scan_at` / `video_count` 排序取队首
+                # (见 `scan_accounts`),降权与"没扫过的优先"都由排序本身表达 ——
+                # 中途增删号也不会像"游标 % 总数"那样错位跳过。
+                summary = empty_account_summary(db, uid)
                 _record_run(db, uid, "bili_account_scan", "success",
                             f"扫{out.get('scanned', 0)}个号 标题{out.get('titles', 0)}条"
-                            f" {','.join(out.get('accounts') or [])}")
+                            f" **空壳{summary['empty']}/{summary['scanned']}扫过**"
+                            f"(共{summary['total']}) {','.join(out.get('accounts') or [])}")
                 db.commit()
             except Exception as exc:  # noqa: BLE001 - 单用户失败不影响其余
                 # **限流必须记成 failed 而不是 success(0)** —— 否则"被挡住"看不见

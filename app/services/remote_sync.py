@@ -22,7 +22,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from app.db.models import WechatArticle, WechatBenchmark
@@ -63,6 +63,37 @@ _LINK2_COLS = ("user_id", "platform", "origin_url", "title", "author", "source_u
 # 时间列是 **`discovered_at`** —— 别拿 `created_at` 去查(会 Unknown column)。
 _ACCT_COLS = ("user_id", "platform", "uid", "name", "url", "hit_keyword", "snippet",
               "pan_link", "status", "discovered_at")
+# **B站对标号的投稿标题**(2026-10-05):`hot_source_items` 里 `source='bili-pan'` 的那些行。
+#
+# ⚠️⚠️ **必须按 source 过滤,绝不能整表同步** —— `hot_source_items` 是**远程自己也在用**的表
+# (它的 `hot_source` 每几分钟写一轮,实测 7 万+ 条)。整表推会把远程自己的热榜灌爆/覆盖。
+# 我们这边只在本地产那几十行/轮,B站采集链挂 `wechat` 侧(理由见 `scheduler` 里那条注释)。
+#
+# ⚠️ **该表没有天然唯一键**(不是 `(user, platform, uid)` 那种)。用**本地水位线**
+# (`SystemConfig` 里的 `remote_sync_bili_hot_watermark`)去重,而不是拿远端 `MAX(captured_at)`:
+# **两边时钟未必一致**,以远端时间为准会漏推(远端时钟偏快时,本地新行永远"不够新")。
+# 本地水位线只依赖本地时钟,且这些行**插入后不改**,所以安全。
+_HOTPAN_COLS = ("user_id", "source", "rank", "title", "url", "extra", "captured_at")
+_BILLI_HOT_WM_KEY = "remote_sync_bili_hot_watermark"
+
+
+def _bili_hot_watermark(local) -> str:
+    """本地水位线(已成功推送到此为止的 `captured_at`)。没有就返回远古时刻 ⇒ 全推。"""
+    from app.db.models import SystemConfig
+
+    row = local.scalar(select(SystemConfig).where(SystemConfig.key == _BILLI_HOT_WM_KEY))
+    return str(row.value) if row and row.value else "1970-01-01 00:00:00"
+
+
+def _set_bili_hot_watermark(local, value: str) -> None:
+    from app.db.models import SystemConfig
+
+    row = local.scalar(select(SystemConfig).where(SystemConfig.key == _BILLI_HOT_WM_KEY))
+    if row is None:
+        local.add(SystemConfig(key=_BILLI_HOT_WM_KEY, value=str(value)))
+    else:
+        row.value = str(value)
+    local.commit()
 
 
 def _engine(remote_url: str, settings=None):
@@ -173,7 +204,9 @@ def sync_once(local: Session, remote_url: str, days: int = DEFAULT_DAYS,
     except Exception as exc:  # noqa: BLE001
         return {"status": "failed", "reason": f"建连接失败:{type(exc).__name__}: {str(exc)[:120]}"}
 
-    sent = {"benchmarks": 0, "articles": 0, "links": 0, "discovered": 0, "accounts": 0}
+    sent = {"benchmarks": 0, "articles": 0, "links": 0, "discovered": 0, "accounts": 0,
+            "bili_hot": 0}
+    hot_wm = ""       # B站标题的本地水位线;**远端事务提交后**才落库(见块内注释)
     try:
         with remote.begin() as conn:
             # ---------- ① 对标号:先推(articles.benchmark_id 要引用它)----------
@@ -312,6 +345,28 @@ def sync_once(local: Session, remote_url: str, days: int = DEFAULT_DAYS,
                 new_a2 = [dict(zip(cols, r)) for r in local_accts if str(r[2])
                           and (str(r[0]), str(r[1]), str(r[2])) not in have_a]
                 sent["accounts"] = _push("cross_platform_accounts", _ACCT_COLS, new_a2, conn)
+
+            # ---------- ⑥ B站对标号的投稿标题(只推 source='bili-pan')----------
+            # 这条链挂 `wechat`(本机):`space` 端点的风控对机房 IP 严(远程匿名稳定 `-352`),
+            # 而登录 cookie 在**本机**扫码产生、又不在本表的同步清单里 —— 挂本机就**零搬运**。
+            # 产物在远程由选题 Agent 消费(`_platform_hot_candidates`),所以必须推过去。
+            wm = _bili_hot_watermark(local)
+            local_hot = local.execute(
+                text("SELECT user_id, source, rank, title, url, extra, captured_at "
+                     "FROM hot_source_items WHERE source = 'bili-pan' AND captured_at > :w "
+                     "ORDER BY captured_at LIMIT :n"), {"w": wm, "n": limit}).all()
+            if local_hot:
+                cols = list(_HOTPAN_COLS)
+                new_h = [dict(zip(cols, r)) for r in local_hot]
+                sent["bili_hot"] = _push("hot_source_items", _HOTPAN_COLS, new_h, conn)
+                # ⚠️⚠️ **水位线只在这里记下,块外才落库** —— 整个 `with remote.begin()`
+                # 是**一个远端事务**,退出时才提交。在块内推进水位线的话,远端一旦回滚,
+                # 本地已经认为"推过了" ⇒ **那批行永久丢失**(且不会有任何报错)。
+                if sent["bili_hot"] and local_hot[-1][6] is not None:
+                    hot_wm = str(local_hot[-1][6])
+        # 走到这里 = 远端事务已提交,推送才算数
+        if hot_wm:
+            _set_bili_hot_watermark(local, hot_wm)
     except Exception as exc:  # noqa: BLE001 - 远程任何问题都不该影响本机
         logger.warning("远程同步失败(不影响本机):%s: %s", type(exc).__name__, str(exc)[:200])
         return {"status": "failed", "reason": f"{type(exc).__name__}: {str(exc)[:160]}", **sent}
