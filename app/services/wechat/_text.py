@@ -2,6 +2,7 @@
 
 
 from app.services.quark_transfer import extract_quark_urls
+from app.utils.ua import CHROME_WINDOWS  # 统一 UA(见该模块注释)
 
 from datetime import datetime
 
@@ -25,9 +26,9 @@ TITLE_HINTS = ("夸克", "百度网盘", "百度云", "UC网盘", "UC盘", "迅�
                "入口", "地址", "下载", "获取", "自取", "领取", "复制", "保存", "直达",
                "素材", "模板", "线稿", "电子版", "答案", "真题", "教程", "壁纸", "表情包",
                "pdf", "PDF")
-_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-       "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36")
+_UA = CHROME_WINDOWS
 from app.utils import get_logger
+from app.utils.timeutil import to_dt  # 时间解析单源
 
 logger = get_logger(__name__)
 
@@ -144,22 +145,13 @@ _QUALITY_MULTI = 2     # 多号同发
 
 
 def _parse_time(value: object) -> datetime | None:
-    """发文字段容错解析:epoch 秒(数字/数字串)或 ISO 字符串。"""
-    if value is None:
-        return None
-    try:
-        if isinstance(value, (int, float)):
-            return datetime.fromtimestamp(value)
-        s = str(value).strip()
-        if s.isdigit():
-            return datetime.fromtimestamp(int(s))
-        # 带 Z/偏移的 ISO 串是 UTC 墙钟,而全库时间戳统一为"服务器本地 naive"
-        # (datetime.now());必须先 astimezone() 转本地再抹 tzinfo,否则会把 UTC
-        # 当本地存,发布时段×阅读、近 N 天过滤整体偏移一个时区。naive 串 astimezone()
-        # 按本地解释、值不变,安全。
-        return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
-    except (ValueError, OSError, TypeError):
-        return None
+    """发文字段容错解析:**统一到 `app.utils.timeutil.to_dt`**(2026-10-05 收敛)。
+
+    这个逻辑原来在本仓有**两份**(另一份在 `wechat_analyzer`),语义还不一样 ——
+    调用方看不出区别,直到同一篇文走两条路解析出不同的时间。现在单源。
+    保留本名只为兼容既有调用方与测试。
+    """
+    return to_dt(value)
 
 
 def _extract_pan_urls(title: str, content: str) -> list[str]:

@@ -25,6 +25,7 @@
 不必先养两条没人走的 HTTP 路。
 """
 from __future__ import annotations
+from app.utils.ua import CHROME_WINDOWS  # 统一 UA
 
 from datetime import datetime
 
@@ -38,8 +39,7 @@ from app.utils import get_logger
 logger = get_logger(__name__)
 
 UPDATE_LIST_URL = "https://drive-pc.quark.cn/1/clouddrive/share/update_list"
-UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36")
+UA = CHROME_WINDOWS
 PAGE_SIZE = 100
 MAX_PAGES = 20  # 保险丝:单次采集最多 20 页(2000 条),防 metadata 异常导致死循环
 

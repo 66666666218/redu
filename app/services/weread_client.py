@@ -28,6 +28,7 @@ wr_rt 换新 wr_skey 后,旧 skey 很快失效;因此续期成功后必须把新
 requests.Session 的 cookie jar(domain=weread.qq.com),否则服务端按游客处理返回 -2013。
 """
 from __future__ import annotations
+from app.utils.ua import CHROME_WINDOWS  # 统一 UA(见该模块注释)
 
 import json
 import re
@@ -42,8 +43,7 @@ from app.utils import get_logger
 logger = get_logger(__name__)
 
 BASE = "https://weread.qq.com"
-_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-       "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36")
+_UA = CHROME_WINDOWS
 _AUTH_CODES = (-2012, -2010)
 
 
@@ -263,8 +263,7 @@ class WereadClient:
         from urllib.parse import unquote as _unquote
         jar = requests.Session()
         jar.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                          "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "User-Agent": CHROME_WINDOWS,
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "Origin": BASE,

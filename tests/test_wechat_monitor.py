@@ -4360,9 +4360,11 @@ class _FakeApp:
         self.calls += 1
         # ⚠️ 时间戳必须是**新的**:`_append_listed` 会按"近 3 天"过滤,
         # 写死一个旧值会让整条断言因为"被时间过滤掉"而失败 —— 红的原因与想测的无关。
+        # ⚠️ 字段名要跟 `WereadAppClient` **真实产出**一致(`create_time`,不是 `publish_at`)
+        # —— 替身用了旧字段名前也能"碰巧过"(时间缺失就不过滤),那就等于没在测真实形状。
         return [{"title": "App 路来的文", "read_num": 1234, "like_num": 9,
-                 "publish_at": int(datetime.now().timestamp()), "original_id": "app_id",
-                 "mp_name": "号A"}]
+                 "create_time": int(datetime.now().timestamp()), "original_id": "app_id",
+                 "review_id": "MP_WXS_1_a", "mp_name": "号A"}]
 
 
 def test_网页路被拦时_App_兜底要把阅读数接回来(session) -> None:

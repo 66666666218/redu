@@ -15,6 +15,7 @@
 跑一次约 15 秒,所以有**冷却时间**(`_MIN_INTERVAL`),避免一次失败把浏览器开成串。
 """
 from __future__ import annotations
+from app.utils.ua import CHROME_WINDOWS  # 统一 UA
 
 import json
 import time
@@ -85,9 +86,7 @@ def _mint_via_web(share_url: str) -> dict:
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            ctx = browser.new_context(user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"))
+            ctx = browser.new_context(user_agent=CHROME_WINDOWS)
             pg = ctx.new_page()
 
             def on_req(req) -> None:

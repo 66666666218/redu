@@ -7,6 +7,7 @@
 纯协议下伪浏览器指纹能降低被 mtop 风控识别为机器人的概率(见 scripts/probe_xianyu_curl.py)。
 """
 from __future__ import annotations
+from app.utils.ua import CHROME_WINDOWS  # 统一 UA
 
 import hashlib
 import json
@@ -27,10 +28,7 @@ logger = get_logger(__name__)
 H5_BASE = "https://h5api.m.goofish.com/h5"
 API = "mtop.taobao.idlemtopsearch.pc.search"
 APP_KEY = "34839810"  # 闲鱼 mtop appKey
-_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
-)
+_UA = CHROME_WINDOWS
 _MTOP_HEADERS = {
     "User-Agent": _UA,
     "Accept": "application/json",

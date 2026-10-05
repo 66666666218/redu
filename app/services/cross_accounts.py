@@ -23,6 +23,7 @@
 """
 
 from __future__ import annotations
+from app.utils.ua import CHROME_WINDOWS  # 统一 UA(见该模块注释)
 
 import re
 import time
@@ -35,8 +36,7 @@ from app.utils import get_logger
 
 logger = get_logger(__name__)
 
-_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+_UA = CHROME_WINDOWS
 
 # 资源库标题 → 搜索词的清洗件(见 `library_search_word` 的注释与实测数据)
 _TAG_RE = re.compile(r"<[^>]+>")            # B站/知乎返回里带 `<em class="keyword">` 高亮标签

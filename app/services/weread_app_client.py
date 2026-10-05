@@ -132,16 +132,22 @@ class WereadAppClient:
             raise WereadAppError(f"App 接口报错:{code} {msg}")
         out = []
         for it in payload.get("reviews") or []:
-            mp = ((it or {}).get("review") or {}).get("mpInfo") or {}
+            rev = (it or {}).get("review") or {}
+            mp = rev.get("mpInfo") or {}
             title = str(mp.get("title") or "").strip()
             if not title:
                 continue
+            # ⚠️ **字段名与网页端 `flatten_mp_articles` 保持逐字一致**(2026-10-05 收敛):
+            # 两条路产出同一形状,调用方才不用再写一层翻译 —— 那种翻译正是"两处同构、
+            # 迟早飘一个"的来源(本仓在 UA/时间解析上都吃过这个亏)。
+            # 差异只有两个:**多余字段**(`mp_name` 网页端没有,带着无害)。
             out.append({
                 "title": title,
+                "original_id": str(mp.get("originalId") or ""),
+                "review_id": str((it or {}).get("reviewId") or ""),
                 "read_num": _int(mp.get("readNum")),
                 "like_num": _int(mp.get("likeNum")),
-                "publish_at": _int(mp.get("time")),
-                "original_id": str(mp.get("originalId") or ""),
+                "create_time": _int(mp.get("time")),
                 "mp_name": str(mp.get("mp_name") or ""),
             })
         return out

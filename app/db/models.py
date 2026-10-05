@@ -326,6 +326,10 @@ class WechatArticle(Base):
     collect_num: Mapped[int] = mapped_column(Integer, default=0)
     comment_count: Mapped[int] = mapped_column(Integer, default=0)
     traffic_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # 最近一次采样时间
+    # ⚠️ `traffic_at` **已废弃**与 `WechatTrafficSample` 同因(dajiala 摘除)。
+    # **实测全库非空数 = 0** ⇒ **别再拿它当判断条件**:`feishu/_cards.py` 曾用它
+    # 过滤出一行"已采样阅读 N 篇",而那个 N **结构上永远是 0**(长得像统计、其实恒定)。
+    # 要判"这篇有没有读数",用 `read_num > 0`。
     sample_count: Mapped[int] = mapped_column(Integer, default=0)         # 已采样次数
     first_read_num: Mapped[int] = mapped_column(Integer, default=0)     # 首采样阅读数(基线对比)
     trend_flag: Mapped[str] = mapped_column(String(16), default="")     # 爆点苗头 / 回落 / 空
@@ -468,7 +472,22 @@ class QuarkShareStat(Base):
 
 
 class WechatTrafficSample(Base):
-    """公众号文章流量采样点(构成单篇流量增长曲线)。"""
+    """公众号文章流量采样点(构成单篇流量增长曲线)。
+
+    ⚠️ **已废弃(2026-09-29),别再往这张表写**(2026-10-05 明确标注)。
+    它的唯一数据源 `dajiala` 付费阅读采样当天被用户决策放弃,`traffic_tick` 随之停用,
+    读它的 API(`GET /api/wechat/articles/{id}/traffic`)**2026-10-03 也已删除**。
+
+    **实测状态(2026-10-05)**:全库 **0 行**,且**全项目无任何写入点**
+    ⇒ 它是一条"只摘了一半"的链:源没了、接口没了,**model 与保留策略还在**。
+
+    ⚠️ **为什么不直接删表**:删表是**不可逆**的(万一历史行还要查),而收益只是整洁。
+    本仓的处置约定是"**先标记废弃、再迁移**",不是随手 drop。
+    真要清理时,按顺序动这五处(改之前先 `grep` 确认没有新的写入点):
+      `app/db/models.py`(本类)→ `app/db/maintenance.py`(保留策略那一行)→
+      `app/services/wechat/_source.py`(删文章时顺带删采样,唯一"使用"点)→
+      `app/services/wechat_monitor.py`(门面 re-export)→ `tests/test_wechat_monitor.py`。
+    """
 
     __tablename__ = "wechat_traffic_samples"
 

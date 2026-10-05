@@ -13,6 +13,7 @@
 本模块只负责**取回原始条目列表**,字段解析归 `app/services/douhot.py`(业务层)。
 """
 from __future__ import annotations
+from app.utils.ua import EDGE_WINDOWS  # 统一 UA(原为内联 Edge UA)
 
 import json
 from typing import Callable
@@ -40,10 +41,7 @@ WORD_PAGE_SIZE = 24   # 内容词单页上限(服务端硬顶)
 MAX_PAGES = 20        # 翻页上限,防止接口异常时死循环
 AUTH_CODE = 8         # 未登录/Cookie 失效
 
-_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0"
-)
+_UA = EDGE_WINDOWS
 _HEADERS = {
     "User-Agent": _UA,
     "Accept": "application/json, text/plain, */*",

@@ -14,6 +14,7 @@
 """
 
 from __future__ import annotations
+from app.utils.ua import CHROME_WINDOWS  # 统一 UA(见该模块注释)
 
 import html as html_mod
 import re
@@ -28,8 +29,7 @@ from app.utils import get_logger
 logger = get_logger(__name__)
 
 _BASE = "https://t.me/s/"
-_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-       "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36")
+_UA = CHROME_WINDOWS
 # 正文所在 div 的右边界:优先切到 footer(t.me 的固定骨架),切不到再退回第一个 </div>
 _TEXT_UNTIL_FOOTER = re.compile(
     r'class="[^"]*js-message_text[^"]*"[^>]*>(.*?)<div class="tgme_widget_message_footer', re.S)

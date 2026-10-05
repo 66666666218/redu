@@ -232,3 +232,40 @@ def test_只重试一次_重取后还失败就不再试(monkeypatch):
     with pytest.raises(WereadAppAuthError):
         cli.articles("MP_WXS_1")
     assert n["calls"] == 2, "原始 1 次 + 重试 1 次,不该更多"
+
+
+def test_产出形状必须与网页端逐字一致():
+    """★ **防飘守卫**:App 路与网页路产出的字段名必须一样。
+
+    为什么值得一条测试:这两条路是**同一个概念**(某号的文章列表)的两种取法,
+    调用方(`_append_listed`)只该认一种形状。历史上本仓在 UA、时间解析上都吃过
+    "两处同构、各自漂移"的亏 —— 一旦飘了,症状是"某条路的发布时间全空"
+    这种**不会报错、只是数据悄悄变差**的形态。所以拿网页端的真实实现当基准比。
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    import app.services.weread_client as wc
+    import app.services.weread_app_client as wac
+    from app.db.models import Base
+
+    # 网页端产出
+    payload = {"reviews": [{"createTime": 1791164421, "subReviews": [{"review": {
+        "mpInfo": {"title": "甲", "originalId": "o1", "readNum": 7, "likeNum": 1},
+        "reviewId": "r1"}}]}]}
+    web = wc.WereadClient.flatten_mp_articles(payload)[0]
+
+    # App 端产出
+    eng = create_engine("sqlite://"); Base.metadata.create_all(eng)
+    import app.services.weread_app_client as m
+    class R:
+        def get(self, *a, **k):
+            return type("X", (), {"json": lambda self2: {"reviews": [{"reviewId": "r1", "review": {
+                "mpInfo": {"title": "甲", "originalId": "o1", "readNum": 7, "likeNum": 1,
+                           "time": 1791164421}}}]}, "status_code": 200})()
+    m.requests = R()
+    app = wac.WereadAppClient("t", "1").articles("MP_WXS_1")[0]
+
+    assert set(web) <= set(app), f"App 端缺网页端的字段:{set(web) - set(app)}"
+    for k in ("title", "original_id", "review_id", "read_num", "like_num", "create_time"):
+        assert app[k] == web[k], f"字段 `{k}` 两端对不上:{app[k]!r} vs {web[k]!r}"

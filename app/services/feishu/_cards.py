@@ -492,13 +492,20 @@ def _wechat_ops_lines(db, user_id: int) -> list:
         pan_arts = db.scalar(select(func.count()).select_from(WechatArticle).where(
             WechatArticle.user_id == user_id, WechatArticle.pan_types != "",
             WechatArticle.created_at >= since)) or 0
-        sampled = db.scalar(select(func.count()).select_from(WechatArticle).where(
-            WechatArticle.user_id == user_id, WechatArticle.traffic_at.is_not(None),
+        # ⚠️ 这里原来有一行「已采样阅读 {sampled} 篇」,而 `sampled` 数的是
+        # `traffic_at IS NOT NULL` —— **dajiala 采样 2026-09-29 摘除后该列全库恒空
+        # (实测非空数 = 0)** ⇒ 那行**每天都是"0 篇"**,却长得像一条统计数字。
+        # **一个恒为 0 的指标比没有指标更坏**:它教读者"0 是正常的",真出问题时也没人看出区别。
+        # (与 `chain_health` 那条"恒为 0 的档位是'接了但没生效'的信号"同一条教训。)
+        # 改成现在真正关心的:**有精确阅读数的篇数** —— 它曾经整整一周是 0,
+        # 而当时这张卡片天天在报"一切正常"。
+        with_read = db.scalar(select(func.count()).select_from(WechatArticle).where(
+            WechatArticle.user_id == user_id, WechatArticle.read_num > 0,
             WechatArticle.created_at >= since)) or 0
         bm = db.scalar(select(func.count()).select_from(WechatBenchmark).where(
             WechatBenchmark.user_id == user_id, WechatBenchmark.active.is_(True))) or 0
-        lines.append(f"  · 在监对标号 {bm} 个 · 新文章 {new_art} 篇(带盘链 {pan_arts})")
-        lines.append(f"  · 已采样阅读 {sampled} 篇")
+        lines.append(f"  · 在监对标号 {bm} 个 · 新文章 {new_art} 篇"
+                     f"(带盘链 {pan_arts} · 有阅读数 {with_read})")
     except Exception:  # noqa: BLE001 - 统计失败不阻塞日报
         lines.append("  · 统计暂不可用")
     return lines

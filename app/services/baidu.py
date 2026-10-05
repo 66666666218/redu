@@ -4,6 +4,7 @@
 字段对齐 `WeiboHotItem` 的 title/heat/rank/url,便于复用判涨与智能体。
 """
 from __future__ import annotations
+from app.utils.ua import EDGE_WINDOWS  # 统一 UA(原为内联 Edge UA)
 
 import requests
 
@@ -13,10 +14,7 @@ from app.utils import get_logger, retry
 logger = get_logger(__name__)
 
 BAIDU_TOP_URL = "https://top.baidu.com/api/board?platform=wise&tab=realtime"
-_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0"
-)
+_UA = EDGE_WINDOWS
 
 
 class BaiduItem:

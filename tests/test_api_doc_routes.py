@@ -89,3 +89,83 @@ def test_guard_would_catch_drift() -> None:
     real = _real_routes()
     fake = _norm("/api/definitely-not-a-real-route")
     assert fake not in real
+
+
+# ------------------------------------------------ 后端接口 × 前端接线(2026-10-05)
+
+# **运维/按需调用的接口** —— 有实现、真能跑,但**前端确实不需要入口**。
+# ⚠️ 这份白名单是**要维护的**:往里加东西时必须在注释里写清"为什么前端不需要"。
+# 不加注释就往里塞,等于把"没接线"变成"没人记得为什么" —— 那正是本测试要防的。
+_OPS_ONLY: dict[str, str] = {
+    "/api/wechat/analyze":
+        "选题分析报告(含盘链偏好/类目阅读/最佳时段)。给人看的长报告,不是界面控件;"
+        "目前按需 curl 调,若要做成看板页再从这里移出。",
+    "/api/wechat/weread/shelf":
+        "书架**导入预览**。前端「导入书架」走的是 import_shelf(一步到位);"
+        "预览是「先看再导」的增强,属产品决策,未定之前不硬接。",
+    "/api/wechat/articles/{}/rewrites":
+        "同一篇的历史改写稿。前端目前只展示**最新一稿**(POST rewrite 的返回);"
+        "历史列表要不要露出来是产品决策。",
+    "/api/wechat/keywords":
+        "只读地列出当前关键词。改它要动服务器 .env,前端没有可写的入口,展示出来也无事可做。",
+}
+
+
+def _norm_path(p: str) -> str:
+    """把路径参数统一成 `{}`,好让 `{id}` / `{article_id}` / ${x} 三种写法可比。"""
+    out, i = [], 0
+    while i < len(p):
+        ch = p[i]
+        if ch == "$" and p[i:i + 2] == "${":
+            j = p.find("}", i)
+            if j < 0:
+                out.append(p[i:]); break
+            out.append("{}"); i = j + 1; continue
+        if ch == "{":
+            j = p.find("}", i)
+            if j < 0:
+                out.append(p[i:]); break
+            out.append("{}"); i = j + 1; continue
+        out.append(ch); i += 1
+    return "".join(out).rstrip("/") or "/"
+
+
+def _frontend_paths() -> set[str]:
+    """从前端源码里抠出它调用的所有 `/api/...` 路径(含模板串)。"""
+    fe = ""
+    for f in (ROOT / "frontend" / "src").rglob("*"):
+        if f.suffix in (".vue", ".js"):
+            fe += f.read_text(encoding="utf-8", errors="replace")
+    # 只要求"以 /api/ 开头、由路径安全字符组成";模板串里的 ${...} 也吃进来
+    raw = re.findall(r"/api/[A-Za-z0-9_/$\{\}\.\-]*", fe)
+    return {_norm_path(x) for x in raw}
+
+
+def test_每个后端公众号接口要么前端在用_要么在运维白名单里():
+    """★ **把"没接线"从意外变成记录在案的选择**。
+
+    背景(2026-10-05 审计):后端 25 条公众号接口里 **4 条前端从没调用过** ——
+    有实现、有文档、**没人调**,而且**没人知道**。这正是本仓那份《能力清单》
+    存在的原因("不知道系统已经有这个能力")。
+
+    本测试不强制"必须接线"(有些确实不需要 UI),但**强制它是个显式决定**:
+    要么前端真的在用,要么出现在 `_OPS_ONLY` 里并写清原因。
+    于是"新加了个接口但忘了接前端"会立刻红,而不是三个月后被人偶然发现。
+    """
+    from app.api.wechat import router as _r
+
+    fe = _frontend_paths()
+    missing = []
+    for route in _r.routes:
+        path = _norm_path(str(getattr(route, "path", "")))
+        if not path.startswith("/api/wechat"):
+            continue
+        if path not in fe and path not in _OPS_ONLY:
+            methods = sorted(getattr(route, "methods", None) or [])
+            missing.append(f"{','.join(methods)} {path}")
+
+    assert not missing, (
+        "这些后端接口前端没调用、也不在 _OPS_ONLY 白名单里 —— "
+        "要么接上前端,要么加进白名单并写清为什么不需要入口:" + chr(10) + "  " +
+        (chr(10) + "  ").join(missing)
+    )

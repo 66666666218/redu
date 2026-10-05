@@ -397,9 +397,10 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
             rows = weread_budget.call(
                 session, user_id, lambda: app_client.articles(b.weread_book_id),
                 what=f"app/book/articles({b.nickname})", scope=weread_budget.SCOPE_APP)
-            _append_listed(items, [{"title": r["title"], "read_num": r["read_num"],
-                                    "like_num": r["like_num"], "create_time": r["publish_at"],
-                                    "original_id": r["original_id"]} for r in rows], cutoff)
+            # ⚠️ **不再翻译字段**:App 端产出的形状已与网页端 `flatten_mp_articles` 逐字一致
+            # (2026-10-05 收敛)—— 之前这里有一层 `publish_at→create_time` 的映射,
+            # 那正是"两处同构、迟早飘一个"的来源。
+            _append_listed(items, rows, cutoff)
             listed, list_via = True, "app"
         except weread_budget.Blocked as exc:
             logger.debug("%s", exc)

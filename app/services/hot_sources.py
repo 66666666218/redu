@@ -12,6 +12,7 @@
 实测(2026-10-01):B站排行 API / 豆瓣电影 JSON 直连 200;知乎热榜 401(需登录态)——归 newsnow 长尾。
 """
 from __future__ import annotations
+from app.utils.ua import CHROME_WINDOWS  # 统一 UA(见该模块注释)
 
 import html
 import json
@@ -33,8 +34,7 @@ logger = get_logger(__name__)
 _RE_TAG = re.compile(r"</?[a-zA-Z][^>]{0,400}>")
 _RE_WS = re.compile(r"\s+")
 
-_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+_UA = CHROME_WINDOWS
 
 
 class HotSourceError(Exception):
@@ -269,8 +269,7 @@ class ZhihuHotSource(HotSource):
     """
 
     id = "zhihu"
-    _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " \
-          "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+    _UA = CHROME_WINDOWS
 
     def _cookie(self) -> str:
         from sqlalchemy import select

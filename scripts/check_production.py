@@ -64,8 +64,12 @@ try:
     from config.settings import get_settings
     engine = create_engine(get_settings().database_url)
     existing = set(_insp(engine).get_table_names())
+    # ⚠️ **只列出还有写入点的表**。`wechat_traffic_samples` 曾在这里 —— 但它的数据源
+    # (dajiala)2026-09-29 摘除后**全项目无一写入**(实测 0 行),再检查它只是
+    # "检查一个永远空的东西",还得为它保留建表逻辑。已经从清单移除;表本身仍留着
+    # (删表不可逆,按"先标记废弃"处置,见 `models.WechatTrafficSample` 的 docstring)。
     for t in ["wechat_benchmarks", "wechat_articles", "wechat_pan_links",
-              "wechat_traffic_samples", "agent_stages", "wechat_candidates", "user_schedules"]:
+              "agent_stages", "wechat_candidates", "user_schedules"]:
         ok = t in existing
         print(f"  {'OK ' if ok else 'MISS'} {t}")
         if not ok:

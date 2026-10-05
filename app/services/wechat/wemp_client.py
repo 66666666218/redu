@@ -13,6 +13,7 @@
     publish_page 解析: publish_list[*].publish_info(json 字符串) → appmsgex[*] 为文章。
 """
 from __future__ import annotations
+from app.utils.ua import CHROME_WINDOWS  # 统一 UA(见该模块注释)
 
 import base64
 import json
@@ -25,8 +26,7 @@ from app.utils import get_logger
 logger = get_logger(__name__)
 
 WEMP_BASE = "https://mp.weixin.qq.com"
-_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+_UA = CHROME_WINDOWS
 
 
 class WempError(PlatformError):

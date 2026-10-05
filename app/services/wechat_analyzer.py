@@ -13,6 +13,7 @@
 对外接口:`analyze_articles(articles: list[dict]) -> dict`。
 """
 from __future__ import annotations
+from app.utils.timeutil import to_dt  # 时间解析单源
 
 import re
 from collections import Counter
@@ -38,19 +39,17 @@ _CJK_RUN = re.compile(r"[一-鿿]+")
 
 
 def _parse_time(value: object) -> datetime | None:
-    """把 publish_at 解析为 datetime;取不到返回 None。"""
-    if isinstance(value, datetime):
-        return value
+    """把 publish_at 解析为 datetime;取不到返回 None。
+
+    **统一到 `app.utils.timeutil.to_dt`**(2026-10-05 收敛):本仓原来有**两份**
+    各写各的时间解析(另一份在 `wechat._text`),语义还不一样 ——
+    同一篇文走两条路可能解析出不同的值。现在单源。
+    ⚠️ 保留原实现的**"空值先返回 None"** 前置判断:`to_dt(0)` 会给出 1970-01-01,
+    而这里的老语义是"0 当作没有时间"(行为不能悄悄变)。
+    """
     if not value:
         return None
-    if isinstance(value, str):
-        v = value.strip()[:19].replace("T", " ")
-        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-            try:
-                return datetime.strptime(v, fmt)
-            except ValueError:
-                continue
-    return None
+    return to_dt(value)
 
 
 def _bigram_topics(texts: list[str], top_n: int = 10) -> list[dict]:

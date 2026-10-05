@@ -172,93 +172,92 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
         return {"platform": "wechat_sync", "status": "skipped",
                 "reason": "no_source(无微信读书 Cookie 且无免费列表源)"}
 
-    if True:  # noqa: SIM108 - 原付费分支已摘除;保留块结构使下方缩进/补丁最小化
-        def _fetch(client: WereadClient) -> tuple[list[dict], "object | None", str]:
-            """(近期列表, cover 那篇, 列表状态 ok|limited|error)。"""
-            from app.services.weread_client import WereadClient as _WC
+    def _fetch(client: WereadClient) -> tuple[list[dict], "object | None", str]:
+        """(近期列表, cover 那篇, 列表状态 ok|limited|error)。"""
+        from app.services.weread_client import WereadClient as _WC
 
-            listed, out = "error", []
-            try:
-                # ⚠️ **经统一额度入口**(2026-10-05):这条同步链原来**完全没判额度** ——
-                # 判据住在 1200 行的 `_listen.py` 里,这边嫌重就没 import。
-                # 后果:监听轮被 `-2041` 挡下、闸门都合了,这边**照打不误**,
-                # 把同一个账号的风控越打越深(而"谁在抢额度"当时根本看不出来)。
-                # 现在经 `weread_budget.call` ⇒ ①被挡时**根本不发**;②被拒时**全路径共享熔断**。
-                payload = weread_budget.call(
-                    session, user_id, lambda: client.mp_articles(b.weread_book_id),
-                    what=f"sync/mp/articles({b.nickname})",
-                    scope=weread_budget.SCOPE_WEB_LIST)
-                for it in _WC.flatten_mp_articles(payload):
-                    ts = it.get("create_time") or 0
-                    pub = datetime.fromtimestamp(ts) if ts else None
-                    if pub and pub < datetime.now() - timedelta(days=3):
-                        continue
-                    out.append({"title": it["title"], "url": build_mp_url(it["original_id"]),
-                                "read_num": it["read_num"], "like_num": it["like_num"],
-                                "publish_at": pub, "review_id": it.get("review_id") or ""})
-                listed = "ok"
-            except WereadAuthError:
-                raise  # Cookie 失效必须往上抛(上层据此续期);吞成 error 会让 80 个号白撞
-            except weread_budget.Blocked as exc:
-                # **熔断中 = 我们主动没发请求**,不是"这个源坏了" ⇒ 状态标 limited(可预期),
-                # 不能标 error(error 会被当成故障信号去告警 —— 保护措施不该报警)
-                listed = "limited"
-                logger.info("同步跳过列表(额度熔断中):%s", str(exc)[:80])
-            except Exception as exc:  # noqa: BLE001 - 列表是"锦上添花",任何形状问题都不该打断同步
-                # -2041 = 本会话列表预算耗尽(可预期,别当故障);其余按异常归类
-                listed = "limited" if weread_budget.is_quota_error(exc) else "error"
-                logger.warning("微信读书近期列表不可用(%s),%s 退到最新一篇", str(exc)[:60], b.nickname)
-            cover = None
-            try:
-                cover = client.latest_article(b.weread_book_id)
-            except WereadAuthError:
-                raise  # 登录态刚死:必须让上层续期重试,不能当成"这次没 cover"继续
-            except WereadError as exc:
-                if listed != "ok":
-                    raise          # 两条路都没有 → 交给上层(监听/路由决定降级或续期)
-                logger.warning("cover 也失败(%s),本次只同步列表内容", str(exc)[:60])
-            return out, cover, listed
-
-        wc = weread or _root.WereadClient(cookie)
+        listed, out = "error", []
         try:
-            items, cover, listed = _fetch(wc)
+            # ⚠️ **经统一额度入口**(2026-10-05):这条同步链原来**完全没判额度** ——
+            # 判据住在 1200 行的 `_listen.py` 里,这边嫌重就没 import。
+            # 后果:监听轮被 `-2041` 挡下、闸门都合了,这边**照打不误**,
+            # 把同一个账号的风控越打越深(而"谁在抢额度"当时根本看不出来)。
+            # 现在经 `weread_budget.call` ⇒ ①被挡时**根本不发**;②被拒时**全路径共享熔断**。
+            payload = weread_budget.call(
+                session, user_id, lambda: client.mp_articles(b.weread_book_id),
+                what=f"sync/mp/articles({b.nickname})",
+                scope=weread_budget.SCOPE_WEB_LIST)
+            for it in _WC.flatten_mp_articles(payload):
+                ts = it.get("create_time") or 0
+                pub = datetime.fromtimestamp(ts) if ts else None
+                if pub and pub < datetime.now() - timedelta(days=3):
+                    continue
+                out.append({"title": it["title"], "url": build_mp_url(it["original_id"]),
+                            "read_num": it["read_num"], "like_num": it["like_num"],
+                            "publish_at": pub, "review_id": it.get("review_id") or ""})
+            listed = "ok"
         except WereadAuthError:
-            # wr_skey 十几小时必过期,而用户点「同步文章」走的正是这条路。
-            # wr_rt 还活着时先像监听那样自救续期一次再重试;续期不成才把异常抛给上层
-            # (路由翻成 502 可执行文案,此前这里是裸 500 → 前端只报"服务器开小差了")。
-            # 续期会换出新会话——正是 mp/articles 可用的窗口,列表这次能补回同日漏掉的篇。
-            refreshed = _root.refresh_weread_cookie(session, user_id, settings)
-            if refreshed.get("status") != "success":
-                raise
-            wc = _root.WereadClient(refreshed["cookie"])
-            items, cover, listed = _fetch(wc)
-        if cover and cover["url"] and not any(it["url"] == cover["url"] for it in items):
-            items = [cover] + items       # 列表里没这篇(刚发/翻页边界)也要带上
-        # cover 的正文用它的 reviewId 走转发页;列表项各自的 reviewId 由 content_resolver 复用。
-        # 空 reviewId 不能占键:`{it["url"]: it.get("review_id") or ""}` 会让 cover 那条
-        # 有效的 reviewId 被 setdefault 跳过(同篇既在列表里又缺 reviewId 时正文直接为空)。
-        rid_of = {it["url"]: it["review_id"] for it in items if it.get("review_id")}
-        if cover and cover.get("url") and cover.get("review_id"):
-            rid_of.setdefault(cover["url"], cover["review_id"])
+            raise  # Cookie 失效必须往上抛(上层据此续期);吞成 error 会让 80 个号白撞
+        except weread_budget.Blocked as exc:
+            # **熔断中 = 我们主动没发请求**,不是"这个源坏了" ⇒ 状态标 limited(可预期),
+            # 不能标 error(error 会被当成故障信号去告警 —— 保护措施不该报警)
+            listed = "limited"
+            logger.info("同步跳过列表(额度熔断中):%s", str(exc)[:80])
+        except Exception as exc:  # noqa: BLE001 - 列表是"锦上添花",任何形状问题都不该打断同步
+            # -2041 = 本会话列表预算耗尽(可预期,别当故障);其余按异常归类
+            listed = "limited" if weread_budget.is_quota_error(exc) else "error"
+            logger.warning("微信读书近期列表不可用(%s),%s 退到最新一篇", str(exc)[:60], b.nickname)
+        cover = None
+        try:
+            cover = client.latest_article(b.weread_book_id)
+        except WereadAuthError:
+            raise  # 登录态刚死:必须让上层续期重试,不能当成"这次没 cover"继续
+        except WereadError as exc:
+            if listed != "ok":
+                raise          # 两条路都没有 → 交给上层(监听/路由决定降级或续期)
+            logger.warning("cover 也失败(%s),本次只同步列表内容", str(exc)[:60])
+        return out, cover, listed
 
-        def _resolve(title: str, url: str = "") -> str:
-            rid = rid_of.get(url) or ""
-            return wc.mp_content(rid) if rid else ""
+    wc = weread or _root.WereadClient(cookie)
+    try:
+        items, cover, listed = _fetch(wc)
+    except WereadAuthError:
+        # wr_skey 十几小时必过期,而用户点「同步文章」走的正是这条路。
+        # wr_rt 还活着时先像监听那样自救续期一次再重试;续期不成才把异常抛给上层
+        # (路由翻成 502 可执行文案,此前这里是裸 500 → 前端只报"服务器开小差了")。
+        # 续期会换出新会话——正是 mp/articles 可用的窗口,列表这次能补回同日漏掉的篇。
+        refreshed = _root.refresh_weread_cookie(session, user_id, settings)
+        if refreshed.get("status") != "success":
+            raise
+        wc = _root.WereadClient(refreshed["cookie"])
+        items, cover, listed = _fetch(wc)
+    if cover and cover["url"] and not any(it["url"] == cover["url"] for it in items):
+        items = [cover] + items       # 列表里没这篇(刚发/翻页边界)也要带上
+    # cover 的正文用它的 reviewId 走转发页;列表项各自的 reviewId 由 content_resolver 复用。
+    # 空 reviewId 不能占键:`{it["url"]: it.get("review_id") or ""}` 会让 cover 那条
+    # 有效的 reviewId 被 setdefault 跳过(同篇既在列表里又缺 reviewId 时正文直接为空)。
+    rid_of = {it["url"]: it["review_id"] for it in items if it.get("review_id")}
+    if cover and cover.get("url") and cover.get("review_id"):
+        rid_of.setdefault(cover["url"], cover["review_id"])
 
-        new_rows = []
-        if items:
-            new_rows = _insert_new_articles(session, user_id, b, items, source="sync",
-                                            content_resolver=_resolve, require_pan=False)
-            b.last_item_at = datetime.now()
-        push = _sync_push_after_transfer(session, user_id, settings, new_rows)
-        _record_run(session, user_id, "wechat_sync",
-                    "success" if listed == "ok" else "partial",
-                    f"weread({listed},items={len(items)}) account={b.nickname} new={len(new_rows)} "
-                    f"pushed={push['pushed']} deduped={push['deduped']} truncated={push['truncated']}")
-        session.commit()
-        return {"platform": "wechat_sync",
-                "status": "success" if listed == "ok" else "partial",
-                "reason": "" if listed == "ok" else f"weread_list_{listed}_latest_only",
-                "weread_list": listed, "items": len(items),
-                "pages": 1 if items else 0, "new": len(new_rows), "ghid": b.ghid,
-                "nickname": b.nickname, **push}
+    def _resolve(title: str, url: str = "") -> str:
+        rid = rid_of.get(url) or ""
+        return wc.mp_content(rid) if rid else ""
+
+    new_rows = []
+    if items:
+        new_rows = _insert_new_articles(session, user_id, b, items, source="sync",
+                                        content_resolver=_resolve, require_pan=False)
+        b.last_item_at = datetime.now()
+    push = _sync_push_after_transfer(session, user_id, settings, new_rows)
+    _record_run(session, user_id, "wechat_sync",
+                "success" if listed == "ok" else "partial",
+                f"weread({listed},items={len(items)}) account={b.nickname} new={len(new_rows)} "
+                f"pushed={push['pushed']} deduped={push['deduped']} truncated={push['truncated']}")
+    session.commit()
+    return {"platform": "wechat_sync",
+            "status": "success" if listed == "ok" else "partial",
+            "reason": "" if listed == "ok" else f"weread_list_{listed}_latest_only",
+            "weread_list": listed, "items": len(items),
+            "pages": 1 if items else 0, "new": len(new_rows), "ghid": b.ghid,
+            "nickname": b.nickname, **push}

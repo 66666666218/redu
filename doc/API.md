@@ -1570,7 +1570,11 @@ GET `/api/admin/health`(perm `logs.view`)→ 各平台最近采集状态 + 数�
 
 ### 17.1 关键词搜索词
 - GET `/api/wechat/keywords` → `{"terms": ["网盘","问卷", "..."]}`
-- PUT `/api/wechat/keywords` → 恒 400(提示到服务器 .env 的 KEYWORD_SEARCH_TERMS 改,重启生效;占位接口)
+- ~~PUT `/api/wechat/keywords`~~ → **已删除(2026-10-05)**:它无条件 `raise 400`,
+  是一个"**结构上永远做不到**"的接口 —— 出现在 `openapi.json` 与本文件里
+  会让人以为能改关键词,实际每次都失败,且全仓无人调用。
+  关键词只在服务器 `.env` 的 `KEYWORD_SEARCH_TERMS` 里改(**重启生效**)。
+  ⚠️ 按本仓惯例**保留此行做留痕**(别当"文档写错了"又加回去)。
 
 ### 17.2 对标号 · 单个修改/删除/同步
 | 动作 | 方式 | 路径 | 说明 |

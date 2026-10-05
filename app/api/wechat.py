@@ -137,18 +137,17 @@ def wechat_analyze(limit: int = 200, user: User = Depends(get_current_user), db:
 
 
 # ---------------------------------------------------------------- 对标号:监听/同步
+# ⚠️ **`PUT /api/wechat/keywords` 已删除**(2026-10-05):它**无条件 `raise 400`** ——
+# 是一个"结构上永远做不到"的接口。它会出现在 `/openapi.json` 与 `doc/API.md` 里,
+# **看着像能改关键词,实际每次都失败** —— 与"看起来成功实则失败"同族,只是方向反过来
+# (它看起来能成功,实际必定失败)。而它**全仓无人调用**(前端/脚本/测试都没有)。
+# 关键词只在服务器 `.env` 的 `KEYWORD_SEARCH_TERMS` 里配(改完要重启),GET 仍保留。
 @router.get("/api/wechat/keywords")
 def wechat_keywords_get(user: User = Depends(get_current_user)):
-    """获取关键词文章监控搜索词。"""
+    """获取关键词文章监控搜索词(**只读**:改它要动服务器 `.env`,重启生效)。"""
     from config.settings import get_settings
     terms = get_settings().keyword_search_terms or ""
     return {"terms": [x.strip() for x in terms.split(",") if x.strip()]}
-
-
-@router.put("/api/wechat/keywords")
-def wechat_keywords_put(payload: dict, user: User = Depends(get_current_user)):
-    """更新关键词文章监控搜索词(需要修改 .env 或环境变量,此处仅返回当前值提示)。"""
-    raise HTTPException(400, "关键词搜索词请在服务器 .env 的 KEYWORD_SEARCH_TERMS 中配置(重启生效)")
 
 
 @router.get("/api/wechat/status")
