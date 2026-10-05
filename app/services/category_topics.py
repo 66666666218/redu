@@ -225,30 +225,46 @@ def advance_category(session) -> str:
     return nxt
 
 
-def pick(words: list[str], cat: str, need: int, names: set[str] | None = None) -> list[str]:
-    """挑出本轮该搜的词。**优先顺序**(2026-10-04 定):
+def pick(words: list[str], cat: str, need: int, names: set[str] | None = None,
+         other_max: int | None = None) -> list[str]:
+    """挑出本轮该搜的词。**优先顺序**(2026-10-05 修订):
 
         ① 当前类目的**资源名**   ← 主料(用户口径:"搜索词应该是资源名称")
         ② **未分类的资源名**     ← 见下,不能丢
-        ③ 当前类目的**话题词**   ← 没货时的兜底
+        ③ **别的类目的真资源名** ← ⚠️ 2026-10-05 新增,见下
+        ④ 当前类目的**话题词**   ← 泛词兜底
 
     ⚠️ **②为什么要留着"未分类的资源名"**:类目表是**收窄**的(如「资料」只收**学习资料**),
     于是壁纸/字体/模板这类资源名**归不进任何类目**。若把它们一律丢掉,
     轮换到任何类目时都用不上它们 —— **等于把用户自己的资源名给扔了**,与
     "搜索词应该是资源名称"直接冲突。所以未分类的**排在类目内资源名之后、话题词之前**。
 
-    ⚠️ **③为什么兜底用"本类目的话题词"而不是"别的类目的资源名"**(2026-10-04 实测发现):
-    候选池小时,轮到「问卷」「软件」这类**没有现成资源名**的类目,若拿别的类目的词充数,
-    **轮换就形同虚设** —— 每个类目出的其实是同一批词。而拿**本类目的话题词**去搜
-    (如「问卷」→"性格测试"),才是**主动往这个方向扩**,也是用户要的"创新"。
+    ⚠️ **③为什么加"别的类目的真资源名"**(2026-10-05 实测代价太大):
+    原来这一类是**直接丢掉**的,理由是"否则轮换形同虚设"。但实测(类目=软件那轮):
+    候选池 7 个里 **4 个是「资料」类** —— 全是**被共振验证过**(≥2 个号在发)的**真资源名**,
+    它们被丢光,最后拿去搜的是**泛话题词「软件」**。结果 `线索 2`(此前 14/12/27)。
+    **用泛词搜,基本搜不到《口令》** —— 而"真资源名"正是抖音上推广号标题里会写的那些。
+    ⇒ 所以:**真资源名(任何类目)优先于泛话题词**。
+
+    ⚠️ **但给 ③ 限流**(`other_max`,默认一半名额):全放开就成了代码注释担心的那样 ——
+    每个类目出的都是同一批词、轮换作废。留一半给"本类目那套",**广度靠轮换、深度靠证据**。
     """
     if need <= 0:
         return []
-    mine, unknown = [], []
+    mine, unknown, other = [], [], []
     for w in words:
-        (mine if classify(w, names) == cat else unknown).append(w)
-    unknown = [w for w in unknown if classify(w, names) == ""]   # 别的类目的不要(让轮换有意义)
+        c = classify(w, names)
+        if c == cat:
+            mine.append(w)
+        elif c == "":
+            unknown.append(w)
+        else:
+            # **别的类目的真资源名** —— 不再直接丢(见 docstring ③)
+            other.append(w)
+    cap = need // 2 if other_max is None else max(0, int(other_max))
     out = (mine + unknown)[:need]
+    if len(out) < need:
+        out += other[:min(cap, need - len(out))]
     if len(out) >= need:
         return out
     hints = [h for h in categories().get(cat, ()) if h not in out]

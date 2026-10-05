@@ -59,10 +59,17 @@ def test_pick_falls_back_to_that_categorys_own_topics() -> None:
     若拿别的类目的词凑数,**轮换就形同虚设**(每个类目出的其实是同一批)。
     而"主动往这个方向扩"正是要的"创新"。
     """
+    # ⚠️ **2026-10-05 改**:原来"别的类目的词一律不要",理由是"否则轮换形同虚设"。
+    # 但实测代价太大(类目=软件那轮,把 **4 个被共振验证过的真资源名**丢光,
+    # 最后拿去搜的是泛话题词「软件」,线索从 14 掉到 2)。
+    # 现在**限量放行**:真资源名优先于泛话题词,但最多占一半名额 —— 广度靠轮换、深度靠证据。
     words = ["四级真题 网盘", "韩剧全集"]           # 只有资料类、影视类
     got = ct.pick(words, "问卷", 2)
-    assert all(ct.classify(w) == "问卷" for w in got), f"兜底词必须是本类目的:{got}"
-    assert "四级真题 网盘" not in got, "不能拿别的类目的资源名充数"
+    real = [w for w in got if w in words]
+    hints = [w for w in got if w not in words]
+    assert len(real) == 1, f"别的类目的**真资源名**要能进,但只占一半:{got}"
+    assert all(ct.classify(h) == "问卷" for h in hints), f"剩下那半留给本类目话题词:{got}"
+    assert len(got) == 2
 
 
 def test_pick_zero_or_negative_is_empty() -> None:
@@ -183,12 +190,26 @@ class TestUnclassifiedIsNotDropped:
         got = ct.pick(["某某冷门资源", "四级真题"], "资料", 2)
         assert got == ["四级真题", "某某冷门资源"], f"未分类的不该被丢:{got}"
 
-    def test_other_categories_words_are_excluded(self) -> None:
-        """但**别的类目**的词仍然不要 —— 否则轮换没有意义。"""
+    def test_别的类目的真资源名_限量放行(self) -> None:
+        """**2026-10-05 改**:原来一律丢。代价实测太大 —— 被丢的是**共振验证过**
+        (≥2 个号在发)的**真资源名**,而顶上来的是**泛话题词**。
+        用泛词搜基本搜不到《口令》。⇒ 真资源名(任何类目)优先于泛话题词。
+        """
         got = ct.pick(["韩剧全集", "四级真题"], "资料", 2)
-        assert got[0] == "四级真题"
-        assert "韩剧全集" not in got          # 影视类的,留给影视那一轮
-        assert len(got) == 2                   # 空位由本类目话题词补上
+        assert got[0] == "四级真题"                 # 本类目资源名仍是主料、排最前
+        assert "韩剧全集" in got, "别的类目的**真资源名**不该被丢"
+        assert len(got) == 2
+
+    def test_别的类目最多占一半_保住轮换的意义(self) -> None:
+        """反向:**不能全占** —— 全放开就成了"每个类目出的都是同一批词",轮换作废。"""
+        # ⚠️ 选的词必须是**确定归到别的类目**的:`综艺合集`→资料、`音乐包`→未分类,
+        # 而**未分类本来就不受限**(那是另一条规则)—— 混进来会测出假结果。
+        words = ["韩剧全集", "动漫资源", "性格测试"]      # 影视 / 影视 / 问卷
+        assert all(ct.classify(w) not in ("", "资料") for w in words)
+        got = ct.pick(words, "资料", 4)
+        from_other = [w for w in got if w in words]
+        assert len(from_other) <= 2, f"最多占一半(need//2):{got}"
+        assert len(got) == 4, f"空位由本类目话题词补上:{got}"
 
 
 class TestFourWayDistinction:
