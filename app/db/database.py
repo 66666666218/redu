@@ -12,6 +12,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from config.settings import get_settings
+from app.utils import get_logger
+
+logger = get_logger(__name__)
 
 
 class Base(DeclarativeBase):
@@ -118,74 +121,123 @@ def db_status() -> dict:
         return {"connected": False, "error_type": type(exc).__name__}
 
 
+# 迁移表:**要补的列**(提成模块级,好让"修远程冻住的库"复用同一份清单)。
+# ⚠️ 每条形如 `列名 类型 [DEFAULT ...]` —— **第一个词是列名,不是类型**。
+# ⚠️ TEXT 类的 `DEFAULT` 在 MySQL 上不合法(报 1101),由 `_coldef_for_mysql` 摘掉并补空串。
+ADDITIONS: dict[str, list[str]] = {
+    "users": [
+        "email VARCHAR(128)", "role VARCHAR(16) DEFAULT 'user'", "enabled INTEGER DEFAULT 1",
+        "smtp_host VARCHAR(128)", "smtp_port INTEGER", "smtp_user VARCHAR(128)",
+        "smtp_pass VARCHAR(255)", "smtp_from VARCHAR(128)", "reset_token VARCHAR(128)", "reset_expires DATETIME",
+    ],
+    "runs": ["retry_count INTEGER DEFAULT 0"],
+    # 作业**注册时刻**(2026-10-05):原来只在"执行后"才有心跳行,于是"注册了但还没到第一次
+    # 执行点"的作业对账时无法与"真·从没跑过"区分(chain_report 当天就被误报过一次)。
+    "job_heartbeats": ["first_seen_at DATETIME"],
+    # 闲鱼行情三件套(2026-10-03):want_count/sold_price/tags 全部出自**搜索响应**,
+    # 不必打详情接口 → 需求热度绕开滑块验证。存量行 want_count=0 = "还没用新解析重采过"。
+    "xianyu_items": ["want_count INTEGER DEFAULT 0", "sold_price VARCHAR(32) DEFAULT ''",
+                     "tags VARCHAR(255) DEFAULT ''"],
+    # source 区分「搜索免费行情」与「详情深采」:同日同商品一行,靠它判优先级不被覆盖。
+    # 存量行一律标 detail —— 历史行确实都是深采写的,标 search 会让深采跳过它们、永不补全。
+    "xianyu_daily": ["source VARCHAR(16) DEFAULT 'detail'", "tags VARCHAR(255) DEFAULT ''"],
+    # 拉新周录的**分渠道明细**(2026-10-03 用户口径:"我只能给你我的"且要分渠道):
+    # JSON 如 {"douyin": 42, "wechat": 18}。只有分开录,才能分别对账两条链。
+    # ⚠️ **就是这条把远程库冻住的**:`TEXT DEFAULT ''` 在 MySQL 报 1101,而它后面还有 8 张表。
+    "pan_recruit_weekly": ["channels TEXT DEFAULT ''"],
+    # 线索搬成了哪条链(2026-10-04 补,计划第 12 项):原来落库时**丢了**,
+    # 于是"这个口令到底搬没搬成"事后查不出来。存量行留空 = "还没用新版重采过"。
+    "douyin_leads": ["our_url VARCHAR(500) DEFAULT ''"],
+    "alerts": ["section VARCHAR(32) DEFAULT ''"],
+    "douhot_watch": ["section VARCHAR(16) DEFAULT 'douhot'", "filter_keyword VARCHAR(64) DEFAULT ''",
+                     "date_window INTEGER"],
+    "douhot_watch_snap": ["section VARCHAR(16) DEFAULT 'douhot'", "entry_title VARCHAR(255) DEFAULT ''",
+                          "trend_growth FLOAT DEFAULT 0"],
+    "wechat_benchmarks": ["weread_book_id VARCHAR(64) DEFAULT ''", "biz VARCHAR(64) DEFAULT ''"],
+    "wechat_candidates": ["url VARCHAR(600) DEFAULT ''",  # 收录按钮用(v2.6.0)
+                          "import_tries INTEGER DEFAULT 0"],  # 自动收录失败重试计数(v2.13.0)
+    "hotspot_suggestions": ["saves INTEGER DEFAULT 0", "saves_at DATETIME",
+                            "platforms VARCHAR(64) DEFAULT ''",
+                            "category VARCHAR(16) DEFAULT ''",   # 验证品类(结算归因聚合键,2026-10-01)
+                            "opportunity FLOAT DEFAULT 0",
+                            "acted INTEGER DEFAULT 0", "acted_at DATETIME",
+                            "article_id INTEGER", "reads_gain INTEGER DEFAULT 0",
+                            "settled_at DATETIME", "repost_gain INTEGER DEFAULT 0",
+                            "draft TEXT DEFAULT ''"],  # AI 发布文案(v2.5.0 按需生成)
+    "hotspot_events": ["reappear_count INTEGER DEFAULT 0", "last_growth FLOAT"],
+    "wechat_articles": ["source VARCHAR(16) DEFAULT 'manual'", "benchmark_id INTEGER",
+                        "pan_types VARCHAR(128) DEFAULT ''", "pan_urls TEXT", "my_pan_urls TEXT",
+                        "read_num INTEGER DEFAULT 0", "zan_num INTEGER DEFAULT 0", "looking_num INTEGER DEFAULT 0",
+                        "share_num INTEGER DEFAULT 0", "collect_num INTEGER DEFAULT 0",
+                        "comment_count INTEGER DEFAULT 0", "traffic_at DATETIME",
+                        "sample_count INTEGER DEFAULT 0",
+                        "first_read_num INTEGER DEFAULT 0",
+                        "trend_flag VARCHAR(16) DEFAULT ''", "quality INTEGER DEFAULT 0",
+                        # 进过飞书卡片的时间;NULL=从未推出去,由监听开头的补推扫回
+                        "pushed_at DATETIME"],
+}
+
+
+def _coldef_for_mysql(coldef: str) -> tuple[str, bool]:
+    """把列定义改成 **MySQL 也吃得下**的形态。返回 `(列定义, 是否要把存量行补成空串)`。
+
+    ⚠️ **为什么必须做**(2026-10-05 生产定位到根因):
+    **MySQL 不允许 `TEXT`/`BLOB`/`JSON` 列带 `DEFAULT`**(报 `1101`),而本地 SQLite 允许。
+    于是 `channels TEXT DEFAULT ''` 这条**在远程库上必失败** —— 而失败一列会把它**后面
+    所有列**一起挡掉(原实现共用一个事务),**远程库就这样静默冻住**。
+
+    这里把 TEXT 类的 `DEFAULT ...` 摘掉,并让调用方加完列后
+    `UPDATE ... SET col='' WHERE col IS NULL` —— **语义与 `DEFAULT ''` 等价**
+    (代码本来都按 `or ""` 读)。非 TEXT 类(VARCHAR/INTEGER/DATETIME)**原样返回**。
+    """
+    parts = coldef.split()
+    # ⚠️ `coldef` 是 **`列名 类型 [DEFAULT ...]`**(如 `channels TEXT DEFAULT ''`),
+    # **第一个词是列名不是类型** —— 我第一版就按第一个词判,结果全部原样返回、等于没改
+    # (测试当场打出来才看见)。
+    typ = parts[1].upper() if len(parts) > 1 else ""
+    typ = typ.split("(")[0]        # `VARCHAR(500)` → `VARCHAR`
+    if typ in ("TEXT", "LONGTEXT", "MEDIUMTEXT", "TINYTEXT", "BLOB", "JSON"):
+        if " DEFAULT " in coldef:
+            return coldef.split(" DEFAULT ")[0].strip(), True
+    return coldef, False
+
+
 def _migrate() -> None:
     """轻量迁移:为已存在的表补充缺失列(兼容旧库)。"""
     from sqlalchemy import inspect, text
 
     inspector = inspect(get_engine())
     existing = set(inspector.get_table_names())
-    additions = {
-        "users": [
-            "email VARCHAR(128)", "role VARCHAR(16) DEFAULT 'user'", "enabled INTEGER DEFAULT 1",
-            "smtp_host VARCHAR(128)", "smtp_port INTEGER", "smtp_user VARCHAR(128)",
-            "smtp_pass VARCHAR(255)", "smtp_from VARCHAR(128)", "reset_token VARCHAR(128)", "reset_expires DATETIME",
-        ],
-        "runs": ["retry_count INTEGER DEFAULT 0"],
-        # 作业**注册时刻**(2026-10-05):原来只在"执行后"才有心跳行,于是"注册了但还没到第一次
-        # 执行点"的作业对账时无法与"真·从没跑过"区分(chain_report 当天就被误报过一次)。
-        "job_heartbeats": ["first_seen_at DATETIME"],
-        # 闲鱼行情三件套(2026-10-03):want_count/sold_price/tags 全部出自**搜索响应**,
-        # 不必打详情接口 → 需求热度绕开滑块验证。存量行 want_count=0 = "还没用新解析重采过"。
-        "xianyu_items": ["want_count INTEGER DEFAULT 0", "sold_price VARCHAR(32) DEFAULT ''",
-                         "tags VARCHAR(255) DEFAULT ''"],
-        # source 区分「搜索免费行情」与「详情深采」:同日同商品一行,靠它判优先级不被覆盖。
-        # 存量行一律标 detail —— 历史行确实都是深采写的,标 search 会让深采跳过它们、永不补全。
-        "xianyu_daily": ["source VARCHAR(16) DEFAULT 'detail'", "tags VARCHAR(255) DEFAULT ''"],
-        # 拉新周录的**分渠道明细**(2026-10-03 用户口径:"我只能给你我的"且要分渠道):
-        # JSON 如 {"douyin": 42, "wechat": 18}。只有分开录,才能分别对账两条链。
-        "pan_recruit_weekly": ["channels TEXT DEFAULT ''"],
-        # 线索搬成了哪条链(2026-10-04 补,计划第 12 项):原来落库时**丢了**,
-        # 于是"这个口令到底搬没搬成"事后查不出来。存量行留空 = "还没用新版重采过"。
-        "douyin_leads": ["our_url VARCHAR(500) DEFAULT ''"],
-        "alerts": ["section VARCHAR(32) DEFAULT ''"],
-        "douhot_watch": ["section VARCHAR(16) DEFAULT 'douhot'", "filter_keyword VARCHAR(64) DEFAULT ''",
-                        "date_window INTEGER"],
-        "douhot_watch_snap": ["section VARCHAR(16) DEFAULT 'douhot'", "entry_title VARCHAR(255) DEFAULT ''", "trend_growth FLOAT DEFAULT 0"],
-        "wechat_benchmarks": ["weread_book_id VARCHAR(64) DEFAULT ''", "biz VARCHAR(64) DEFAULT ''"],
-        "wechat_candidates": ["url VARCHAR(600) DEFAULT ''",  # 收录按钮用(v2.6.0)
-                              "import_tries INTEGER DEFAULT 0"],  # 自动收录失败重试计数(v2.13.0)
-        "hotspot_suggestions": ["saves INTEGER DEFAULT 0", "saves_at DATETIME",
-                                "platforms VARCHAR(64) DEFAULT ''",
-                                "category VARCHAR(16) DEFAULT ''",   # 验证品类(结算归因聚合键,2026-10-01)
-                                "opportunity FLOAT DEFAULT 0",
-                                "acted INTEGER DEFAULT 0", "acted_at DATETIME",
-                                "article_id INTEGER", "reads_gain INTEGER DEFAULT 0",
-                                "settled_at DATETIME", "repost_gain INTEGER DEFAULT 0",
-                                "draft TEXT DEFAULT ''"],  # AI 发布文案(v2.5.0 按需生成)
-        "hotspot_events": ["reappear_count INTEGER DEFAULT 0", "last_growth FLOAT"],
-        "wechat_articles": ["source VARCHAR(16) DEFAULT 'manual'", "benchmark_id INTEGER",
-                            "pan_types VARCHAR(128) DEFAULT ''", "pan_urls TEXT", "my_pan_urls TEXT",
-                            "read_num INTEGER DEFAULT 0", "zan_num INTEGER DEFAULT 0", "looking_num INTEGER DEFAULT 0",
-                            "share_num INTEGER DEFAULT 0", "collect_num INTEGER DEFAULT 0",
-                            "comment_count INTEGER DEFAULT 0", "traffic_at DATETIME",
-                            "sample_count INTEGER DEFAULT 0",
-                            "first_read_num INTEGER DEFAULT 0",
-                            "trend_flag VARCHAR(16) DEFAULT ''", "quality INTEGER DEFAULT 0",
-                            # 进过飞书卡片的时间;NULL=从未推出去,由监听开头的补推扫回
-                            "pushed_at DATETIME"],
-    }
     added_pushed_at = False
-    with get_engine().begin() as conn:
-        for table, coldefs in additions.items():
-            if table not in existing:
+    # ⚠️⚠️ **每列一个事务 + 逐列吞错**(2026-10-05 生产定位):
+    # 原来所有列共用一个 `with get_engine().begin()`,**一列失败就整段抛出** ⇒
+    # 它**后面所有列全都没加上**,而且只在启动时打一条 ERROR —— **远程库就这样静默冻住了**。
+    # 实测(远程 MySQL):`pan_recruit_weekly.channels TEXT DEFAULT ''` 报
+    # `(1101, "BLOB, TEXT, GEOMETRY or JSON column 'channels' can't have a default value")`
+    # ⇒ 它之后的 `hotspot_suggestions.draft` 等**全部没上**,于是任何全字段 SELECT 都
+    # `Unknown column 'draft'`(远程的选题 Agent 一碰就炸)。
+    for table, coldefs in ADDITIONS.items():
+        if table not in existing:
+            continue
+        cols = {c["name"] for c in inspector.get_columns(table)}
+        for coldef in coldefs:
+            ddl, backfill = _coldef_for_mysql(coldef)
+            col = ddl.split()[0]
+            if col in cols:
                 continue
-            cols = {c["name"] for c in inspector.get_columns(table)}
-            for coldef in coldefs:
-                col = coldef.split()[0]
-                if col not in cols:
-                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {coldef}"))
-                    if table == "wechat_articles" and col == "pushed_at":
-                        added_pushed_at = True
+            try:
+                with get_engine().begin() as conn:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
+                    if backfill:
+                        # MySQL 不许 TEXT 带 DEFAULT ⇒ 摘掉默认值,改用它把存量行补齐,
+                        # 语义与 `DEFAULT ''` 等价(代码本来就按 `or ""` 读)
+                        conn.execute(text(f"UPDATE {table} SET {col} = '' WHERE {col} IS NULL"))
+                if table == "wechat_articles" and col == "pushed_at":
+                    added_pushed_at = True
+            except Exception as exc:  # noqa: BLE001 - **单列失败绝不能挡住其余列**
+                logger.warning("迁移跳过 %s.%s(其余列继续):%s",
+                               table, col, str(exc)[:140])
+    with get_engine().begin() as conn:
         # 加列那一次:存量行一律视为"已推过"。否则新机制上线后的第一轮,补推会把库里
         # 积压的历史文章全当成"从未推过"重新灌进员工群(刷屏事故)。代价是"上线前 24h 内
         # 真没推出去的文"这一次补不回来——一次性、有界,而从此以后新增的行都受补推保护。
