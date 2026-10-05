@@ -137,7 +137,11 @@ class Settings(BaseSettings):
     remote_db_user: str = "redu"
     remote_db_password: str = ""
     remote_db_name: str = "redu"
-    remote_sync_cron: str = "*/30 * * * *"   # 每 30 分钟一轮(数据是"补最新",不必更密)
+    remote_sync_cron: str = "*/30 * * * *"
+    # 链路体检推送(2026-10-05 用户口径:「没有推送小红书、B站、知乎、贴吧多平台的运行情况啊」):
+    # 每天把**全部链路**的运行情况推**管理群**。⚠️ 全绿也推 —— "今天全绿"本身是运维要知道的信息,
+    # 而且只有每天都来,人才会注意到"今天没来"(与 health_push 同一条)。
+    chain_report_cron: str = "30 9 * * *"   # 每天 09:30(早上开工前,压在 wechat_digest 09:50 前面)   # 每 30 分钟一轮(数据是"补最新",不必更密)
     remote_sync_days: int = 14         # 每次回看多少天(靠天然键去重,天然幂等)
 
     candidate_auto_import_cron: str = "30 8 * * *"  # 每日自动收录时间(默认 08:30,紧随候选发现之后)

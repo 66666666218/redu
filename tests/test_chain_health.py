@@ -5,15 +5,13 @@
 而不是靠人回忆。这里钉住的是它的**汇报口径**:红/黄/绿的判据要能自己复核。
 """
 import os
-import sys
 
 import pytest
 
 os.environ.setdefault("JWT_SECRET", "test_secret_0123456789abcdef0123456789abcdef")
 os.environ.setdefault("DATABASE_URL", "sqlite://")
-sys.path.insert(0, "scripts")
 
-from chain_health import CHAINS, GREEN, RED, YELLOW, render  # noqa: E402
+from app.services.chain_health import CHAINS, GREEN, RED, YELLOW, render  # noqa: E402
 
 
 def test_render_counts_and_names_the_red_ones() -> None:
@@ -60,7 +58,7 @@ def test_newsnow_is_not_red_on_a_wechat_only_instance(monkeypatch) -> None:
     """
     import config.settings as cs
 
-    import chain_health as ch
+    from app.services import chain_health as ch
 
     monkeypatch.setattr(cs, "get_settings",
                         lambda: type("S", (), {"scheduler_role": "wechat"})())
@@ -73,7 +71,7 @@ def test_newsnow_is_checked_on_a_hotspot_instance(monkeypatch) -> None:
     """但**热点侧就必须真查** —— 那边它是要用的,缺了就该红/黄。"""
     import config.settings as cs
 
-    import chain_health as ch
+    from app.services import chain_health as ch
 
     monkeypatch.setattr(cs, "get_settings",
                         lambda: type("S", (), {"scheduler_role": "hotspot"})())
@@ -88,7 +86,7 @@ def test_remote_side_chain_is_not_flagged_red_locally(session) -> None:
     而"一条永远红的项会训练人忽略整份报告"(与"闸门失准"告警同一条教训:
     那次也是把不该报的报了,真问题淹在噪音里)。
     """
-    import chain_health as ch
+    from app.services import chain_health as ch
 
     rows = ch.check_chains(session, days=3)
     agent = [r for r in rows if "Agent" in r["name"]]

@@ -435,6 +435,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.wechat_monitor import retire_dormant_tick_all_users
     from app.services.wechat_digest import run_wechat_digest_all_users
     from app.services.remote_sync import remote_sync_tick
+    from app.services.chain_health import chain_report_tick
     from app.services.push_timeline import tick as push_timeline_tick
     from app.services.telegram_source import collect_tick as tg_collect_tick
     from app.services.cross_accounts import cross_account_tick
@@ -515,6 +516,10 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # ⚠️ 方向**单向**(本机→远程);没配 `remote_db_url` 时它是空转(不记运行记录)。
         (remote_sync_tick, _get_settings().remote_sync_cron, {"minute": "*/30"},
          "remote_sync", "wechat"),
+        # **链路体检推送**(2026-10-05):把**全部链路**(不只公众号)的运行情况推管理群。
+        # 之前只有公众号有周期总结,其余几条链全靠人手动跑脚本看 —— 等于没有主动通报。
+        (chain_report_tick, _get_settings().chain_report_cron, {"minute": 30, "hour": 9},
+         "chain_report", "wechat"),
         # 跨实例健康可见(2026-10-03):远端每天推一张**板块健康卡**到管理员群。
         # 为什么推卡而不是本机轮询远端库:两边**库是独立的**,推飞书零配置、零新增暴露面;
         # 远端整机挂了这张卡就断,"该来没来"本身是信号(本机另有 peer_status 探活兜底)。
