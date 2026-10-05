@@ -86,6 +86,27 @@ class BilibiliSource(HotSource):
         return out
 
 
+def _pick(node, key: str):
+    """按**点路径**取值:`_pick(it, "content.title")`。键为空返回 `None`。
+
+    为什么要它:不少平台把标题**嵌一层**(掘金 `data[].content.title`)。不支持点路径
+    就得为每个形状写一个类 —— 38 个平台写 38 个类,那是"静默返回空"的温床。
+    """
+    if not key or not isinstance(node, dict):
+        return None
+    cur = node
+    for seg in key.split("."):
+        if isinstance(cur, dict):
+            cur = cur.get(seg)
+        elif isinstance(cur, list) and seg.isdigit():
+            cur = cur[int(seg)] if int(seg) < len(cur) else None
+        else:
+            return None
+        if cur is None:
+            return None
+    return cur
+
+
 def _dig_titled(payload, title_keys: tuple[str, ...], max_depth: int = 6) -> list[dict]:
     """在**深嵌套**的返回体里找"最长的那串带标题的字典"(各平台外壳形状不一,别硬编路径)。
 
@@ -100,7 +121,9 @@ def _dig_titled(payload, title_keys: tuple[str, ...], max_depth: int = 6) -> lis
         if depth > max_depth:
             return
         if isinstance(node, list) and node and isinstance(node[0], dict):
-            if any(k in node[0] for k in title_keys) and len(node) > len(best):
+            # 标题键支持点路径(`content.title`)——判断用的样本**多看几个元素**,
+            # 有的接口首条是广告位/占位,没有标题字段
+            if any(_pick(e, k) for e in node[:3] for k in title_keys) and len(node) > len(best):
                 best = node
         if isinstance(node, dict):
             for v in node.values():
@@ -284,6 +307,147 @@ class ZhihuHotSource(HotSource):
         return out
 
 
+class JsonListSource(HotSource):
+    """**声明式**热榜源:一个 JSON 接口 + 用"点路径"指出标题列表在哪。
+
+    为什么做成声明式(2026-10-05):用户要「接入 38 个平台」——
+    逐个平台手写类既慢又容易写出"**遇到结构变化就静默返回空**"的源(本仓的老毛病)。
+    这些平台的形状高度一致(一个接口 → 一串带标题的对象),所以用配置描述,
+    共性逻辑集中在一处,出问题只查一处。
+
+    ⚠️ **取不到就抛 `HotSourceError`**,绝不返回空列表 ——
+    空会被读成"今天没热点",而事实是"接口变了/被挡了"(同 `BilibiliSource` 看业务码那条纪律)。
+
+    字段:
+      `list_path`  —— 从响应里"找那个带标题的列表"的路径;
+                      给 `None` 表示**自动找最长的带标题列表**(见 `_dig_titled`);
+      `title_key`  —— 标题字段名(可给多个候选);
+      `url_key`    —— 链接字段名(可选);
+      `hot_key`    —— 热度/描述字段名(可选,只进 `extra`);
+      `url_tpl`    —— 链接要拼模板时用(`{v}` 会被替换)。
+    """
+
+    def __init__(self, sid: str, url: str, *, title_keys: tuple[str, ...] = ("title",),
+                 list_path: str | None = None, url_key: str = "", url_tpl: str = "",
+                 hot_key: str = "", headers: dict | None = None, post_json: dict | None = None,
+                 extra_label: str = "", ok_codes: tuple = (0, None, "0"),
+                 strip_js: bool = False) -> None:
+        """`title_keys` / `url_key` / `hot_key` 支持**点路径**(如 `content.title`)——
+        很多平台把标题嵌一层(掘金 `data[].content.title`),不支持下就得为它单写一个类。
+        `ok_codes`  —— 该平台自己的成功码;华尔街见闻用 **20000** 当 OK,不认它会被当失败。
+        `strip_js`   —— 响应是 `var newest = [...]` 这种**JS 赋值**时先剥壳再解析(金十)。
+        """
+        self.id = sid
+        self._url = url
+        self._title_keys = title_keys
+        self._list_path = list_path
+        self._url_key = url_key
+        self._url_tpl = url_tpl
+        self._hot_key = hot_key
+        self._headers = headers or {}
+        self._post_json = post_json
+        self._label = extra_label or sid
+        self._ok_codes = ok_codes
+        self._strip_js = strip_js
+
+    def _rows(self, payload) -> list[dict]:
+        if self._list_path is None:
+            return _dig_titled(payload, self._title_keys)
+        node = payload
+        for seg in self._list_path.split("."):
+            if isinstance(node, dict):
+                node = node.get(seg)
+            elif isinstance(node, list) and seg.isdigit():
+                node = node[int(seg)] if int(seg) < len(node) else None
+            else:
+                node = None
+            if node is None:
+                return []
+        return node if isinstance(node, list) else []
+
+    def fetch(self, limit: int = 30) -> list[dict]:
+        try:
+            h = {"User-Agent": _UA, **self._headers}
+            if self._post_json is not None:
+                import json as _j
+                r = creq.post(self._url, headers={**h, "Content-Type": "application/json"},
+                              data=_j.dumps(self._post_json), impersonate="chrome", timeout=15)
+            else:
+                r = creq.get(self._url, headers=h, impersonate="chrome", timeout=15)
+            body = r.text
+            if self._strip_js:                     # `var newest = [...]` → 只留数组
+                body = body[body.find("["):body.rfind("]") + 1] or "[]"
+            import json as _j
+            payload = _j.loads(body)
+        except Exception as exc:  # noqa: BLE001
+            raise HotSourceError(f"{self.id} 请求失败:{type(exc).__name__}") from exc
+        # ⚠️ **有些平台失败也回 200**,业务码要当错误看(与 B站那条同源)
+        if isinstance(payload, dict):
+            code = payload.get("code", payload.get("errno", payload.get("err_no")))
+            if code not in self._ok_codes:
+                raise HotSourceError(f"{self.id} 接口报错:code={code}")
+        rows = self._rows(payload)
+        if not rows:
+            raise HotSourceError(f"{self.id} 解析不到列表(接口结构可能变了)")
+        out = []
+        for it in rows:
+            if not isinstance(it, dict):
+                continue
+            title = next((str(_pick(it, k) or "").strip() for k in self._title_keys
+                          if _pick(it, k)), "")
+            if not title:
+                continue
+            link = str(_pick(it, self._url_key) or "") if self._url_key else ""
+            if link and self._url_tpl:
+                link = self._url_tpl.replace("{v}", link)
+            hot = str(_pick(it, self._hot_key) or "") if self._hot_key else ""
+            out.append({"rank": len(out) + 1, "title": title, "url": link,
+                        "extra": f"{self._label} · {hot}"[:60] if hot else self._label})
+            if len(out) >= limit:
+                break
+        if not out:
+            raise HotSourceError(f"{self.id} 列表里没有可用的标题(字段名可能变了)")
+        return out
+
+
+class RssSource(HotSource):
+    """**声明式** RSS/Atom 源(2026-10-05):很多站点仍然给 RSS —— 那是**最稳**的一类接口。
+
+    ⚠️ 只用标准库解析(`xml.etree`),**不引新依赖**。
+    ⚠️ 解析不出条目就抛错,不返回空(同上)。
+    """
+
+    def __init__(self, sid: str, url: str, label: str = "") -> None:
+        self.id = sid
+        self._url = url
+        self._label = label or sid
+
+    def fetch(self, limit: int = 30) -> list[dict]:
+        try:
+            import xml.etree.ElementTree as ET
+
+            r = creq.get(self._url, headers={"User-Agent": _UA}, impersonate="chrome", timeout=15)
+            root = ET.fromstring(r.content)                       # noqa: S314 - 是我们信任的源
+        except Exception as exc:  # noqa: BLE001
+            raise HotSourceError(f"{self.id} RSS 拉取/解析失败:{type(exc).__name__}") from exc
+        items = (root.findall(".//item") or root.findall(".//{http://www.w3.org/2005/Atom}entry"))
+        out = []
+        for it in items:
+            t = (it.findtext("title") or it.findtext("{http://www.w3.org/2005/Atom}title") or "").strip()
+            if not t:
+                continue
+            link = (it.findtext("link") or it.findtext("{http://www.w3.org/2005/Atom}link") or "")
+            if not link:                                          # Atom 的 link 在属性里
+                el = it.find("{http://www.w3.org/2005/Atom}link")
+                link = (el.get("href") if el is not None else "") or ""
+            out.append({"rank": len(out) + 1, "title": t, "url": link, "extra": self._label})
+            if len(out) >= limit:
+                break
+        if not out:
+            raise HotSourceError(f"{self.id} RSS 里没有可解析的条目")
+        return out
+
+
 class DoubanSource(HotSource):
     """豆瓣热门电影(公开 JSON;2026-10-01 实测 200)。
 
@@ -367,6 +531,68 @@ SOURCES: dict[str, HotSource] = {
     "toutiao": ToutiaoSource(),
     "tencent-hot": TencentNewsSource(),
     "zhihu": ZhihuHotSource(),
+    # ---- 声明式直连(2026-10-05,用户口径「先接入 38 个平台」) ----
+    # URL 全部抠自 **newsnow 自己的源定义**(`server/sources/*.ts`),不是我猜的。
+    # ⚠️ **注册进来 = 实测过**:每个都跑过真实解析,判据是"**解析出 ≥5 条**"而不是
+    #    "HTTP 200"(本仓老毛病:200 但 0 条被读成"今天没热点")。
+    # ⚠️ 一条源**只能有一条链**:搬过来的这几个**绝不能再留 NewsnowSource**,
+    #    否则同一份数据入库两次(微博那条就是这么踩过的)。
+    #
+    # -- 实测通、已搬离 newsnow --
+    "aihot": RssSource("aihot", "https://aihot.virxact.com/feed/all.xml", "AI热点"),
+    "freebuf": RssSource("freebuf", "https://www.freebuf.com/feed", "FreeBuf"),
+    "chongbuluo-latest": RssSource(
+        "chongbuluo-latest", "https://www.chongbuluo.com/forum.php?mod=rss&view=newthread",
+        "虫部落"),
+    "producthunt": RssSource("producthunt", "https://www.producthunt.com/feed", "Product Hunt"),
+    "juejin": JsonListSource(
+        "juejin", "https://api.juejin.cn/content_api/v1/content/article_rank"
+                  "?category_id=1&type=hot&spider=0",
+        title_keys=("content.title",), list_path="data", extra_label="掘金",
+        headers={"Referer": "https://juejin.cn/"}),
+    "tieba": JsonListSource(
+        "tieba", "https://tieba.baidu.com/hottopic/browse/topicList",
+        title_keys=("topic_name", "title"), url_key="topic_url", hot_key="discuss_num",
+        extra_label="贴吧热榜", headers={"Referer": "https://tieba.baidu.com/"}),
+    "thepaper": JsonListSource(
+        "thepaper", "https://cache.thepaper.cn/contentapi/wwwIndex/rightSidebar",
+        title_keys=("name", "title"), extra_label="澎湃",
+        headers={"Referer": "https://www.thepaper.cn/"}),
+    "dongqiudi": JsonListSource(
+        "dongqiudi", "https://api.dongqiudi.com/app/tabs/web/1.json",
+        title_keys=("title",), extra_label="懂球帝",
+        headers={"Referer": "https://www.dongqiudi.com/"}),
+    "nowcoder": JsonListSource(
+        "nowcoder", "https://gw-c.nowcoder.com/api/sparta/hot-search/top-hot-pc?size=20",
+        title_keys=("title", "content"), hot_key="hotValue", extra_label="牛客",
+        headers={"Referer": "https://www.nowcoder.com/"}),
+    "jin10": JsonListSource(
+        "jin10", "https://www.jin10.com/flash_newest.js",
+        title_keys=("data.content", "data.title"), strip_js=True, extra_label="金十",
+        headers={"Referer": "https://www.jin10.com/"}),
+    "sspai": JsonListSource(
+        "sspai", "https://sspai.com/api/v1/article/tag/page/get?limit=20&offset=0"
+                 "&tag=%E7%83%AD%E9%97%A8%E6%96%87%E7%AB%A0&released=false",
+        title_keys=("title",), extra_label="少数派", headers={"Referer": "https://sspai.com/"}),
+    "wallstreetcn-hot": JsonListSource(
+        "wallstreetcn-hot", "https://api-one.wallstcn.com/apiv1/content/articles/hot"
+                            "?period=all",
+        title_keys=("title",), list_path="data.day_items", url_key="uri", hot_key="pageviews",
+        ok_codes=(20000, 0, None), extra_label="华尔街见闻",
+        headers={"Referer": "https://wallstreetcn.com/"}),
+    "wallstreetcn-news": JsonListSource(
+        "wallstreetcn-news", "https://api-one.wallstcn.com/apiv1/content/information-flow"
+                             "?channel=global-channel&accept=article&limit=30",
+        title_keys=("resource.title", "resource.content_short"), list_path="data.items",
+        url_key="resource.uri", ok_codes=(20000, 0, None), extra_label="华尔街见闻要闻",
+        headers={"Referer": "https://wallstreetcn.com/"}),
+    "wallstreetcn-quick": JsonListSource(
+        "wallstreetcn-quick", "https://api-one.wallstcn.com/apiv1/content/lives"
+                              "?channel=global-channel&limit=30",
+        title_keys=("title", "content"), ok_codes=(20000, 0, None), extra_label="华尔街见闻快讯",
+        headers={"Referer": "https://wallstreetcn.com/"}),
+    # -- **新接平台**(原本连 newsnow 都没有,48 个口径里多出来的) --
+    "hackernews": RssSource("hackernews", "https://hnrss.org/frontpage?count=30", "HN"),
     # ---- newsnow 长尾(自部署容器;知乎 401 等无法直连的平台走这里) ----
     # 2026-10-01 扩容:9 个 → 40 个。容器实测支持 **44 个**,除下列之外全接 ——
     #   · `bilibili-*` / `douban`:我们已有**自研直连**(命门自持,不依赖 newsnow)
@@ -383,45 +609,34 @@ SOURCES: dict[str, HotSource] = {
     "kuaishou": NewsnowSource("kuaishou"),
     "iqiyi": NewsnowSource("iqiyi"),
     "ifeng": NewsnowSource("ifeng"),
-    "thepaper": NewsnowSource("thepaper"),
-    "tieba": NewsnowSource("tieba"),
-    "nowcoder": NewsnowSource("nowcoder"),
+    # thepaper / tieba / nowcoder / chongbuluo-latest / freebuf 已搬自研(见上)
     "chongbuluo-hot": NewsnowSource("chongbuluo-hot"),
-    "chongbuluo-latest": NewsnowSource("chongbuluo-latest"),
-    "freebuf": NewsnowSource("freebuf"),
     "qqvideo-tv-hotsearch": NewsnowSource("qqvideo-tv-hotsearch"),
     # -- tech 科技/资源 --
     "36kr": NewsnowSource("36kr"),
     "36kr-quick": NewsnowSource("36kr-quick"),
     "36kr-renqi": NewsnowSource("36kr-renqi"),
-    "juejin": NewsnowSource("juejin"),
     "ithome": NewsnowSource("ithome"),
-    "sspai": NewsnowSource("sspai"),
     "coolapk": NewsnowSource("coolapk"),
     "github-trending-today": NewsnowSource("github-trending-today"),
-    "producthunt": NewsnowSource("producthunt"),
-    "solidot": NewsnowSource("solidot"),
-    "aihot": NewsnowSource("aihot"),
+    "solidot": NewsnowSource("solidot"),      # 自研 RSS 实测**只剩 1 条**(站点 feed 半废),仍走容器
+    # juejin / sspai / producthunt / aihot / freebuf 已搬自研(见上)
     # -- finance 财经 --
     "cls-hot": NewsnowSource("cls-hot"),
     "cls-depth": NewsnowSource("cls-depth"),
-    "cls-telegraph": NewsnowSource("cls-telegraph"),
-    "wallstreetcn-hot": NewsnowSource("wallstreetcn-hot"),
-    "wallstreetcn-news": NewsnowSource("wallstreetcn-news"),
-    "wallstreetcn-quick": NewsnowSource("wallstreetcn-quick"),
-    "xueqiu-hotstock": NewsnowSource("xueqiu-hotstock"),
-    "jin10": NewsnowSource("jin10"),
+    "cls-telegraph": NewsnowSource("cls-telegraph"),   # 自研实测 code=10012(要签名),走容器
+    "xueqiu-hotstock": NewsnowSource("xueqiu-hotstock"),  # 自研实测 400(要 cookie),走容器
     "gelonghui": NewsnowSource("gelonghui"),
     "fastbull-express": NewsnowSource("fastbull-express"),
     "fastbull-news": NewsnowSource("fastbull-news"),
     # -- world 国际 --
-    "cankaoxiaoxi": NewsnowSource("cankaoxiaoxi"),
+    "cankaoxiaoxi": NewsnowSource("cankaoxiaoxi"),     # 自研实测 404(端点变了),走容器
     "sputniknewscn": NewsnowSource("sputniknewscn"),
     "steam": NewsnowSource("steam"),
     # -- sports 体育 --
-    "hupu": NewsnowSource("hupu"),
-    "dongqiudi": NewsnowSource("dongqiudi"),
-    # 抖音:newsnow 侧 id 无效(实测),我们已有 douhot 采集通道,不重复
+    "hupu": NewsnowSource("hupu"),                     # 自研端点实测是 HTML 不是 JSON,走容器
+    # 抖音:newsnow 侧 id 无效(实测),我们已有 douhot 采集通道(写 DouhotWord,
+    # 20 分钟一轮带趋势),**不重复注册** —— 同一个源两条链会入库两次
 }
 
 
@@ -516,8 +731,7 @@ def hot_source_tick_all_users(settings=None) -> int:
 
 _PLAT_LABEL = {
     # 自研直连
-    "bilibili": "B站", "douban": "豆瓣",
-    # china 综合热点
+    "bilibili": "B站", "bilibili-hotsearch": "B站热搜", "douban": "豆瓣",    # china 综合热点
     "zhihu": "知乎", "weibo": "微博", "kuaishou": "快手", "iqiyi": "爱奇艺",
     "toutiao": "今日头条", "ifeng": "凤凰网", "thepaper": "澎湃新闻",
     "tencent-hot": "腾讯新闻", "tieba": "百度贴吧", "nowcoder": "牛客",
@@ -537,6 +751,8 @@ _PLAT_LABEL = {
     # world 国际 / sports 体育
     "cankaoxiaoxi": "参考消息", "sputniknewscn": "卫星通讯社", "steam": "Steam",
     "hupu": "虎扑", "dongqiudi": "懂球帝",
+    # 2026-10-05 新增(声明式直连,原本连 newsnow 都没有)
+    "hackernews": "Hacker News",
 }
 
 
