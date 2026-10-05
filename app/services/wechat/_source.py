@@ -232,7 +232,18 @@ def _subscribe_by_name(plat: object, nickname: str) -> str:
     形近号(「XX说」vs「XX説」)一律不认);重名歧义也走空串,交人工。
     """
     if not hasattr(plat, "search_mp"):
-        return ""
+        # ⚠️ **绝不能静默返回空串**(2026-10-05 审计揪出的潜在失效):
+        # 返回空串会被上层写成「WeRSS 未搜到该号或重名歧义」—— 而真相是
+        # **"当前列表源根本没有按名解析能力"** ⇒ **两句提示的方向完全相反**:
+        #   一个说"这个号不存在"(去别处找号),一个说"我们查不了"(去修配置)。
+        # 触发条件今天不成立(**`add_benchmark_by_name` 调 `_platform_client(settings)`
+        # 不传 session ⇒ 只拿得到裸 `WerssClient`,它有 `search_mp`**),但**一旦配上
+        # `reader_platform`,`_platform_client` 就会返回 `MultiSourceClient`(不转发
+        # `search_mp`)⇒ 按名加号会**无声失效**,而且提示还把人往错方向带。**
+        # 所以这里必须抛:让 hint 说"解析能力缺失",而不是"号没搜到"。
+        raise PlatformError(
+            f"当前列表源({type(plat).__name__})不支持按公众号名解析(缺 search_mp)"
+            "⇒ 无法把号名换成订阅 id;检查 WeRSS 配置,或改用「文章链接」方式加号")
     existing = find_feed_biz_by_name(plat, nickname)
     if existing:
         return existing

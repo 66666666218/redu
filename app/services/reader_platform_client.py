@@ -141,14 +141,6 @@ class ReaderPlatformClient:
             })
         return items
 
-    # ---- 扫码绑定(可选:对接 wewe-rss 登录) ----
-    def login_url(self) -> dict:
-        obj = self._request("GET", "/api/v2/login/platform")
-        payload = obj.get("data") if isinstance(obj.get("data"), dict) else obj
-        return {"uuid": str((payload or {}).get("uuid") or ""),
-                "scan_url": str((payload or {}).get("scanUrl") or (payload or {}).get("scan_url") or "")}
-
-    def login_result(self, uuid: str) -> dict:
-        obj = self._request("GET", f"/api/v2/login/platform/{uuid}")
-        payload = obj.get("data") if isinstance(obj.get("data"), dict) else obj
-        return payload or {}
+    # ⚠️ 2026-10-05:这里原有 `login_url()` / `login_result()` 两个"扫码绑定"方法,
+    # **全仓零引用**(app/tests/scripts/frontend/doc 都搜过,只有定义处)⇒ 已删。
+    # 需要时从 git 历史取回;留着的代价是"看着像有这功能"。

@@ -911,7 +911,12 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                    f" off={wr_stats.get('weread_list_off', 0)}"
                    f" off_with_new={off_new} skipped={wr_stats.get('weread_list_skipped', 0)})")
     if gate["ok"]:
+        # `skip` 是**计划**跳过数,`saved` 是**实际**跳过数(wr_stats 里那个计数)。
+        # ⚠️ 加 `saved` 是因为 2026-10-05 审计发现 `weread_cover_shelf_skipped`
+        # **只写不读** —— 书架闸门的价值(省了多少次 cover 请求)运维根本看不到,
+        # 于是"它到底有没有在省"只能靠猜。**只写不读的计数等于没有。**
         detail += (f" shelf(signals={len(gate['signals'])} skip={len(gate['skip'])}"
+                   f" saved={wr_stats.get('weread_cover_shelf_skipped', 0)}"
                    f" force={len(gate['force'])} adv={advanced})")
     elif gate["reason"] not in ("", "disabled", "no_shelf_entries"):
         # 试过但没用上:no_signal_field=条目认不出信号字段(拿 probe 的字段表回来对名单),

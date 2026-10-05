@@ -3525,7 +3525,7 @@ def test_listen_shelf_gate_skips_accounts_with_unchanged_signal(session, monkeyp
                                     "MP_WXS_2": "1790393639",   # 答上的号才前移
                                     "MP_WXS_3": "1790393640"}
     run = session.scalars(select(RunRecord).where(RunRecord.kind == "wechat_listen")).first()
-    assert "shelf(signals=3 skip=1 force=0 adv=2)" in run.detail
+    assert "shelf(signals=3 skip=1 saved=1 force=0 adv=2)" in run.detail
 
 
 def test_listen_shelf_gate_force_ask_and_tier_order(session, monkeypatch) -> None:
