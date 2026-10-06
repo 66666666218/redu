@@ -53,10 +53,10 @@ def _collect_resources(xt, session, user_id: int, parent_id: str, depth: int,
     单文件(根目录直接躺着的)也各算一条。
     """
     # ⚠️⚠️ **必须翻页**(2026-10-07 修):原来这里用 `list_files` —— 它**只发一页**,
-    # 而响应里明明有 `next_page_token` 却从来没用过 ⇒
-    # **任何超过一页(约 200 条)的目录,后面的内容我们永远看不到**。
-    # 实测代价:盘上真实占用 **24.17 TiB**,而本地索引 `xunlei_resources` **只有 8 行** ——
-    # 不是盘里没东西,是我们**只看了第一页**。
+    # 而响应里明明有 `next_page_token` 却从来没用过 ⇒ **任何超过一页的目录都会被截断**。
+    # ⚠️ **但它不是"24 TiB 只索引到 8 行"的原因**(我一度那么写过,不成立):
+    # 实测根目录活条目只有 3~5 条(原始列表 197/200 是 `trashed` 的),内容都在深层子目录;
+    # 那 8 行更像是**扫描深度上限 + 只登记"资源包"**的结果。
     for f in xt.list_all_files(parent_id):
         fid = str(f.get("id") or "")
         name = str(f.get("name") or "").strip()
@@ -101,8 +101,9 @@ def sync_xunlei_resources(session, user_id: int, settings=None) -> dict:
         return {"status": "no_cred", "scanned": 0, "new": 0, "items": [],
                 "message": "未配迅雷凭据"}
     try:
-        # ⚠️ **根目录也要翻页**(2026-10-07):根目录本身就有几千条(实测),
-        # 只发一页的话后面的永远看不到 —— 这是"24 TiB 只索引到 8 行"的一半原因。
+        # ⚠️ **根目录也要翻页**(2026-10-07):只发一页的话后面的条目会被截断。
+        # (⚠️ 别写成"这是 24 TiB 只索引到 8 行的原因" —— 实测根目录**活条目只有 3~5 条**,
+        #  原始列表 200 条里 197 条是 `trashed`;内容在深层子目录。那个说法不成立。)
         root = xt.list_all_files("")
         if not root:
             return {"status": "empty", "scanned": 0, "new": 0, "items": []}
