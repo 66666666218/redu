@@ -37,7 +37,10 @@ from app.utils import get_logger
 logger = get_logger(__name__)
 
 ROOT = Path(__file__).resolve().parents[2]
-UI_SCRIPT = ROOT / "scripts" / "quark_kouling_ui.py"
+# ⚠️ **故意放在 `tools/`(gitignored)** —— 那份脚本就是"怎么用模拟器把夸克口令变成我方链"
+# 的**全部 know-how**,与迅雷的 sniff/captcha 脚本同一处。**不进仓库**:
+# 别人 clone 下来也拿不到这条路(用户口径:「**不想被别人拿来就能用**」)。
+UI_SCRIPT = ROOT / "tools" / "quark_kouling_ui.py"
 # 一个口令 15–20 秒,但模拟器冷启动/弹窗卡住时要留足;超时**必须当失败**,不能假装成功
 _UI_TIMEOUT = 240
 _SAVE_DIR = "来自：分享"          # App 保存分享文件的默认目录
@@ -79,6 +82,8 @@ def resolve(text: str, *, save: bool = True, timeout: int = _UI_TIMEOUT) -> dict
     """
     if not str(text or "").strip():
         return {"ok": False, "reason": "空文本"}
+    if not UI_SCRIPT.exists():      # 换机器/新克隆时会走到这 —— 说清楚,别让人对着 failed 猜
+        return {"ok": False, "reason": f"本机没有 {UI_SCRIPT.name}(它是 gitignored 的本地脚本,不随仓库走)"}
     try:
         cmd = [sys.executable, str(UI_SCRIPT), str(text)]
         if save:
@@ -140,7 +145,7 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
         .order_by(DouyinLead.id.desc()).limit(max(limit * 8, 24))).all()
     # **看起来像夸克口令的排前面** —— 它们才是真会成的;其余的也会试,但排在后面。
     todo = sorted(todo, key=lambda r: (not _looks_like_quark(r.title), -int(r.id)))[:limit]
-    done = failed = 0
+    done = failed = reused = 0      # `reused` = **三盘互通命中**(连模拟器都没跑)
     try:
         qt = QuarkTransfer(ck)
     except Exception as exc:  # noqa: BLE001
@@ -166,6 +171,7 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
             lead.our_url = str(have["my_link"])[:500]
             logger.info("夸克口令:线索 %s 命中三盘互通,直接复用 %s", lead.aweme_id, lead.our_url)
             done += 1
+            reused += 1
             continue
 
         for attempt in (1, 2):
@@ -216,7 +222,8 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
             logger.warning("夸克口令:线索 %s 处理失败:%s", lead.aweme_id, str(exc)[:120])
             continue
     session.commit()
-    return {"status": "ok", "tried": len(todo), "done": done, "failed": failed}
+    return {"status": "ok", "tried": len(todo), "done": done, "failed": failed,
+            "reused": reused}
 
 
 def quark_kouling_tick(settings=None) -> int:
@@ -242,7 +249,8 @@ def quark_kouling_tick(settings=None) -> int:
                     continue
                 _record_run(db, uid, "quark_kouling", "success",
                             f"试{out.get('tried', 0)} 成功{out.get('done', 0)} "
-                            f"失败{out.get('failed', 0)}")
+                            f"(其中**三盘互通复用{out.get('reused', 0)}**)"
+                            f" 失败{out.get('failed', 0)}")
                 db.commit()
             except Exception as exc:  # noqa: BLE001
                 db.rollback()
