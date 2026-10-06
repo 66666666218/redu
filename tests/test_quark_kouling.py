@@ -236,3 +236,53 @@ class TestFindLeadsAcceptsQuark:
         monkeypatch.setattr("app.services.mediacrawler_source.crawl", _MC.crawl)
         out = dl.find_leads(["夸克口令"])
         assert out and out[0]["mark"] == "咐置铸剑上供叩苓", out
+
+
+class TestSaveRetry:
+    """★ **"解析出来了但没找到文件"要重试一次**(2026-10-06 实测会遇到)。
+
+    那多半是**保存那一步偶发失败**(UI 点击落空 / 保存任务还没落盘),不是"口令没内容"。
+    ⇒ **只重试这一种失败,且最多两次**:压根没解析出来的重试一百次也没用,
+    给它翻倍烧模拟器时间(一条 15–20 秒)纯属浪费。
+    """
+
+    def _patch(self, monkeypatch, finder):
+        monkeypatch.setattr("app.services.cookie_store.get_cookie", lambda s, u, p: "CK")
+        monkeypatch.setattr("app.services.quark_transfer.QuarkTransfer", _FakeQt)
+        monkeypatch.setattr(qk, "resolve", lambda text, **k: {"ok": True, "title": "铸剑纳贡（ForgeTax）"})
+        monkeypatch.setattr(qk, "_find_saved_fid", finder)
+        monkeypatch.setattr(qk.time, "sleep", lambda s: None)   # 别真睡
+
+    def test_第一次找不到会再试一次(self, session, monkeypatch) -> None:
+        lead = _lead(session, "a1", "咐置铸剑上供叩苓")
+        calls: list[int] = []
+
+        def _finder(qt, title, sess=None, uid=0):
+            calls.append(1)
+            return "" if len(calls) == 1 else "F1"     # 第二次才找到
+        self._patch(monkeypatch, _finder)
+        out = qk.drain(session, 1, _S())
+        assert len(calls) == 2, f"应当重试一次,实际试了 {len(calls)} 次"
+        assert out["done"] == 1, out
+        session.refresh(lead)
+        assert lead.our_url.startswith("https://pan.quark.cn/s/OUR")
+
+    def test_两次都找不到才算失败(self, session, monkeypatch) -> None:
+        _lead(session, "a1", "咐置铸剑上供叩苓")      # ⚠️ 没线索就没人试,失败的当然是 0
+        self._patch(monkeypatch, lambda *a, **k: "")
+        out = qk.drain(session, 1, _S())
+        assert out["done"] == 0 and out["failed"] == 1, out
+
+    def test_没解析出来的不重试(self, session, monkeypatch) -> None:
+        """⚠️ **反向**:压根没弹卡片的,重试是白烧时间(一条 15–20 秒)。"""
+        _lead(session, "a1", "《三岁分享》#投票入口")
+        n = {"resolve": 0}
+
+        def _res(text, **k):
+            n["resolve"] += 1
+            return {"ok": False, "reason": "没弹卡片"}
+        monkeypatch.setattr("app.services.cookie_store.get_cookie", lambda s, u, p: "CK")
+        monkeypatch.setattr("app.services.quark_transfer.QuarkTransfer", _FakeQt)
+        monkeypatch.setattr(qk, "resolve", _res)
+        qk.drain(session, 1, _S())
+        assert n["resolve"] == 1, f"没解析出来的不该重试,实际跑了 {n['resolve']} 次"

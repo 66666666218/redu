@@ -27,6 +27,7 @@ import ast
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from sqlalchemy import select
@@ -149,18 +150,28 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
     for lead in todo:
         # **无论成败都盖章** —— 这一条是防"无限重试失败项"的关键。
         lead.kouling_tried_at = _dt.now()
-        res = resolve(lead.title or lead.mark or "")
-        if not res.get("ok"):
-            failed += 1
-            logger.info("夸克口令:线索 %s 没解出来(%s)", lead.aweme_id, res.get("reason"))
-            continue
-        title = str(res.get("title") or "")
-        try:
+        title, fid = "", ""
+        # ⚠️ **"解析出来了、但没找到文件"要重试一次**(2026-10-06 实测会遇到) ——
+        # 那多半是**保存那一步偶发失败**(UI 点击落空 / 保存任务还没落盘),
+        # 而不是"这条口令没内容"。**只重试这一种失败,且最多两次**:
+        # "压根没解析出来"重试一百次也没用,给它翻倍烧模拟器时间纯属浪费。
+        for attempt in (1, 2):
+            res = resolve(lead.title or lead.mark or "", save=True)
+            if not res.get("ok"):
+                logger.info("夸克口令:线索 %s 没解出来(%s)", lead.aweme_id, res.get("reason"))
+                break
+            title = str(res.get("title") or "")
             fid = _find_saved_fid(qt, title, session, user_id)
-            if not fid:
-                failed += 1
-                logger.warning("夸克口令:解出「%s」但在 %s 里找不到文件(没保存成功?)", title, _SAVE_DIR)
-                continue
+            if fid:
+                break
+            if attempt == 1:
+                logger.info("夸克口令:「%s」第一次没找到文件(保存可能没落地),重试一次", title[:24])
+                time.sleep(3)          # 给保存任务一点落盘时间
+        if not fid:
+            failed += 1
+            logger.warning("夸克口令:解出「%s」但两次都在 %s 里找不到文件", title or "?", _SAVE_DIR)
+            continue
+        try:
             sh = qt.share_fids([fid], title=title or "口令转存")
             lead.our_url = str(sh["share_url"])[:500]
             # 同时进**资源库**那条路:`status='ok'` 是有意的 ——
