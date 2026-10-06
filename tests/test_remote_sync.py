@@ -346,3 +346,58 @@ class TestPushQuotesIdentifiers:
         local.commit()
         out = rs.sync_once(local, remote_url)
         assert out.get("bili_hot") == 1, f"SQLite 假远端上也要能推成功:{out}"
+
+
+class TestRunRecordShowsBiliCount:
+    """★ **2026-10-06 补的**:`remote_sync` 的运行记录原来只有「对标号/文章/盘链/发现链」,
+    **推了几条 B站标题完全看不见** —— 只能靠水位线和远端计数**间接**判断推没推成功,
+    而"间接判断"正是本仓反复吃亏的地方(与「静默失败」同源:看不见就等于没有)。
+    """
+
+    class _DB:
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    def _run(self, monkeypatch, out: dict) -> dict:
+        rec: dict = {}
+        monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: self._DB()))
+        monkeypatch.setattr(rs, "sync_once", lambda *a, **k: out)
+        monkeypatch.setattr("app.services.tenant_base._record_run",
+                            lambda db, uid, kind, status, detail:
+                            rec.update(kind=kind, status=status, detail=detail))
+
+        class _S:
+            remote_db_url = "mysql://x"
+            remote_ssh_host = ""
+            remote_sync_days = 30
+        rs.remote_sync_tick(settings=_S())
+        return rec
+
+    def test_推了B站标题时运行记录要写出来(self, monkeypatch) -> None:
+        rec = self._run(monkeypatch, {"status": "ok", "benchmarks": 1, "articles": 2,
+                                      "links": 3, "discovered": 4, "bili_hot": 30})
+        assert rec["kind"] == "remote_sync" and rec["status"] == "success"
+        assert "标题30" in rec["detail"], f"运行记录里必须能看到推了几条标题:{rec['detail']}"
+
+    def test_推0条也要写标题0(self, monkeypatch) -> None:
+        """**"推了 0 条"和"推失败"是两件事**,不能长得一样 —— 所以 0 也要显示。"""
+        rec = self._run(monkeypatch, {"status": "ok", "benchmarks": 0, "articles": 0,
+                                      "links": 0, "discovered": 0, "bili_hot": 0})
+        assert "标题0" in rec["detail"], rec["detail"]
+
+    def test_返回的总数把标题也算进去(self, monkeypatch) -> None:
+        monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: self._DB()))
+        monkeypatch.setattr(rs, "sync_once", lambda *a, **k: {
+            "status": "ok", "benchmarks": 1, "articles": 2, "links": 3,
+            "discovered": 4, "bili_hot": 5})
+        monkeypatch.setattr("app.services.tenant_base._record_run",
+                            lambda *a, **k: None)
+
+        class _S:
+            remote_db_url = "mysql://x"
+            remote_ssh_host = ""
+            remote_sync_days = 30
+        assert rs.remote_sync_tick(settings=_S()) == 1 + 2 + 3 + 4 + 5

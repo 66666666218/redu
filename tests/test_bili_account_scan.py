@@ -38,6 +38,7 @@ def session():
 class _S:
     bili_scan_enabled = True
     bili_scan_accounts_per_run = 1
+    bili_scan_tthin_below = 2
 
 
 def _mk_accounts(session, n: int = 3) -> None:
@@ -159,7 +160,8 @@ class TestScanAccounts:
         acc = session.scalars(select(CrossPlatformAccount)).one()
         assert acc.video_count == 1 and acc.last_scan_at is not None
         s = bas.empty_account_summary(session, 1)
-        assert s == {"total": 1, "scanned": 1, "empty": 0, "unscanned": 0}
+        # ⚠️ 抽到 1 条 ⇒ 按新定义(thin_below=2)这号算「极少」,不是 0
+        assert s == {"total": 1, "scanned": 1, "empty": 0, "thin": 1, "unscanned": 0}
 
     def test_没有对标号时返回no_accounts(self, session) -> None:
         assert bas.scan_accounts(session, 1, settings=_S())["status"] == "no_accounts"
@@ -327,3 +329,63 @@ class TestVerifyLogin:
         bas._alert_cookie_dead(session, 1, "账号未登录")
         assert sent, "cookie 失效必须推告警(要人重新扫码)"
         assert "重扫码" in str(sent[0]) or "bili_login" in str(sent[0])
+
+
+class TestThinAccountsAlsoDeprioritized:
+    """★ **2026-10-06 首夜实测发现的缺口**:原来**只有 `video_count == 0` 才降权**,
+    而真实分布是 —— **空壳只有 1 个,却有 2 个号只有 1 条投稿**
+    (`网盘资源分发` / `-网盘资源官-`)。
+
+    它们不是空的,但**实质产出与空壳无异**,每次轮到都白烧一次本就紧张的 space 额度。
+    所以轮转扩成**四档**:**没扫过(0) → 正常(1) → 内容极少(2) → 空壳(3)**。
+    """
+
+    def _mk4(self, session):
+        """造四个号,分别落在四档上。"""
+        from datetime import datetime as _dt
+
+        _mk_accounts(session, 4)
+        a0, a1, a2, a3 = session.scalars(select(CrossPlatformAccount).order_by(
+            CrossPlatformAccount.id)).all()
+        # a0 = 从未扫过(最高优先级)
+        a1.last_scan_at, a1.video_count = _dt(2026, 10, 1), 30      # 正常
+        a2.last_scan_at, a2.video_count = _dt(2026, 10, 2), 1       # 极少
+        a3.last_scan_at, a3.video_count = _dt(2026, 10, 3), 0       # 空壳(最低)
+        session.commit()
+        return a0, a1, a2, a3
+
+    def test_四档顺序_空壳最后_极少在正常之后(self, session, monkeypatch) -> None:
+        self._mk4(session)
+        seen: list[str] = []
+        monkeypatch.setattr(bas, "fetch_user_titles",
+                            lambda mid, **k: seen.append(mid) or [])
+        monkeypatch.setattr(bas.time, "sleep", lambda s: None)
+
+        class _S4(_S):
+            bili_scan_accounts_per_run = 1
+        for _ in range(4):        # 每次扫 1 个,连扫 4 轮看顺序
+            bas.scan_accounts(session, 1, settings=_S4())
+        assert seen == ["600000", "600001", "600002", "600003"], \
+            f"顺序应为'没扫过 → 正常 → 极少 → 空壳',实际 {seen}"
+
+    def test_极少号排在空壳之前(self, session) -> None:
+        """细化断言:同为'已扫过且内容少',**1 条的应当比 0 条的**先被扫。"""
+        _, a1, a2, a3 = self._mk4(session)
+        prio = bas._scan_priority(2)
+        # 直接比大小:case 表达式的值越小越靠前
+        vals = {a.uid: session.scalar(select(prio.label("p")).where(
+            CrossPlatformAccount.id == a.id)) for a in (a1, a2, a3)}
+        assert vals[a2.uid] < vals[a3.uid], f"极少号应当排在空壳之前:{vals}"
+        assert vals[a1.uid] < vals[a2.uid], f"正常号应当排在极少号之前:{vals}"
+
+    def test_配置为0时退回只降权空壳(self, session) -> None:
+        """`BILI_SCAN_THIN_BELOW=0` 是**关掉这条**的开关 —— 关掉后 1 条的号不再被降权。"""
+        expr = bas._scan_priority(0)
+        text = str(expr.compile(compile_kwargs={"literal_binds": True})).replace("\n", " ")
+        assert "video_count < 0" not in text, f"tthin_below=0 时不该再有'极少'那一档:{text[:160]}"
+
+    def test_汇总把空壳与极少分开报(self, session) -> None:
+        """⚠️ **两者分开报是有意的**:并成一个数就看不出"是没人发内容,还是号本身没内容"。"""
+        self._mk4(session)
+        s = bas.empty_account_summary(session, 1, _S())
+        assert s == {"total": 4, "scanned": 3, "empty": 1, "thin": 1, "unscanned": 1}, s

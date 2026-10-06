@@ -421,10 +421,15 @@ def remote_sync_tick(settings=None) -> int:
             return 0
         from app.services.tenant_base import _record_run
         total = int(out.get("benchmarks", 0) + out.get("articles", 0)
-                    + out.get("links", 0) + out.get("discovered", 0))
+                    + out.get("links", 0) + out.get("discovered", 0)
+                    + out.get("bili_hot", 0))       # B站标题也算推过去的行数
+        # ⚠️ **`标题N` 必须列出来**(2026-10-06 补):原来 detail 只有"对标号/文章/盘链/发现链",
+        # **B站标题推了多少完全看不见** —— 只能靠水位线和远端计数**间接**判断,
+        # 而"间接判断"正是本仓反复吃亏的地方。推了 0 条也要显示,好区分"没新数据"与"推失败"。
         _record_run(db, 1, "remote_sync", "success",
                     f"对标号{out['benchmarks']} 文章{out['articles']} "
-                    f"盘链{out['links']} 发现链{out['discovered']}")
+                    f"盘链{out['links']} 发现链{out['discovered']} "
+                    f"标题{out.get('bili_hot', 0)}")
         db.commit()
         return total
     finally:

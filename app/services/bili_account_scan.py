@@ -229,12 +229,16 @@ def scan_accounts(session, user_id: int, settings=None, count: int | None = None
     if not total:
         return {"status": "no_accounts", "scanned": 0, "titles": 0, "accounts": [], "cursor": 0}
 
+    # ⚠️ `_scan_priority` 的阈值**从这里显式传进去**,而不是让它自己去读全局 settings ——
+    # 否则测试传进来的假 settings 不起作用,那个配置项等于**不可验证**。
+    thin_below = int(getattr(settings, "bili_scan_thin_below", 2) or 0)
     rows = session.scalars(select(CrossPlatformAccount).where(
         CrossPlatformAccount.user_id == user_id,
         CrossPlatformAccount.platform == "bilibili",
-        CrossPlatformAccount.status == "active").order_by(_scan_priority(),
-                                                          CrossPlatformAccount.last_scan_at.asc(),
-                                                          CrossPlatformAccount.id)).all()
+        CrossPlatformAccount.status == "active").order_by(
+            _scan_priority(thin_below),
+            CrossPlatformAccount.last_scan_at.asc(),
+            CrossPlatformAccount.id)).all()
     # ⚠️ **不再用"游标 % 总数"**(2026-10-05 改):那种轮转有两个毛病 ——
     # ① 中途增删号会让窗口错位、有的号被跳过;② **已知的"空壳号"(0 投稿)每轮都还会轮到一次**,
     # 白烧一次本就紧张的 space 额度(实测第 1 个号 uid 650752289 就是 0 投稿)。
@@ -262,38 +266,59 @@ def scan_accounts(session, user_id: int, settings=None, count: int | None = None
             "accounts": seen_names, "total": len(rows)}
 
 
-def _scan_priority():
-    """轮转优先级:**没扫过的(0) → 扫过的(1) → 已知空壳(2)**。
+def _scan_priority(thin_below: int | None = None):
+    """轮转优先级:**没扫过的(0)→ 正常(1)→ 内容极少(2)→ 空壳(3)**。
 
-    用 `case` 而不是 `last_scan_at IS NULL` 排序,是为了把"**空壳号**"单独降一档 ——
-    它们不是"没扫过",而是"扫过且确认没东西",不该和外层完全一样的待遇。
+    ⚠️ `case` 的**分支从上往下第一个匹配者胜**,所以顺序必须"最特殊在前" ——
+    `last_scan_at IS NULL` 必须排第一(未扫过的号同时也满足 `video_count = -1`,
+    若把数值判断放前面,它们会被误降权)。
+
+    ⚠️ **为什么从"只有空壳降权"扩成四档**(2026-10-06 实测):首夜扫完 7 个号,
+    **空壳只有 1 个**,却有两个号**只有 1 条投稿**(`网盘资源分发`/`-网盘资源官-`)——
+    它们不是空的,但实质产出与空壳无异,**每次轮到都白烧一次本就紧张的 space 额度**。
+    所以把"数量低于 `thin_below`"也算进降权;`thin_below <= 0` 时退回旧行为(只降权空壳)。
     """
     from sqlalchemy import case
 
     from app.db.models import CrossPlatformAccount
 
-    return case(
-        (CrossPlatformAccount.last_scan_at.is_(None), 0),
-        (CrossPlatformAccount.video_count == 0, 2),
-        else_=1,
-    )
+    if thin_below is None:
+        from config.settings import get_settings
+
+        thin_below = int(getattr(get_settings(), "bili_scan_thin_below", 2) or 0)
+    thin_below = int(thin_below)
+    branches = [(CrossPlatformAccount.last_scan_at.is_(None), 0),
+                (CrossPlatformAccount.video_count == 0, 3)]
+    if thin_below > 0:
+        branches.append((CrossPlatformAccount.video_count < thin_below, 2))
+    return case(*branches, else_=1)
 
 
-def empty_account_summary(session, user_id: int) -> dict:
-    """**给巡检/人看**:59 个号里扫过多少、空壳多少、还没扫多少。"""
+def empty_account_summary(session, user_id: int, settings=None) -> dict:
+    """**给巡检/人看**:这些号里扫过多少、空壳多少、内容极少多少、还没扫多少。
+
+    ⚠️ `thin` 与 `empty` **分开报**是有意的(2026-10-06):首夜实测 **空壳只有 1 个**,
+    但**只有 1 条投稿的有 2 个** —— 把它们并成一个数会看不出"到底是没人发内容,
+    还是号本身就没内容"。两者的处置不同。
+    """
     from sqlalchemy import func
 
     from app.db.models import CrossPlatformAccount
 
+    thin_below = int(getattr(settings or _settings(), "bili_scan_thin_below", 2) or 0)
     base = select(func.count()).select_from(CrossPlatformAccount).where(
         CrossPlatformAccount.user_id == user_id,
         CrossPlatformAccount.platform == "bilibili",
         CrossPlatformAccount.status == "active")
+    done = CrossPlatformAccount.last_scan_at.isnot(None)
     total = int(session.scalar(base) or 0)
-    scanned = int(session.scalar(base.where(CrossPlatformAccount.last_scan_at.isnot(None))) or 0)
-    empty = int(session.scalar(base.where(CrossPlatformAccount.last_scan_at.isnot(None),
-                                          CrossPlatformAccount.video_count == 0)) or 0)
-    return {"total": total, "scanned": scanned, "empty": empty, "unscanned": total - scanned}
+    scanned = int(session.scalar(base.where(done)) or 0)
+    empty = int(session.scalar(base.where(done, CrossPlatformAccount.video_count == 0)) or 0)
+    thin = int(session.scalar(base.where(
+        done, CrossPlatformAccount.video_count > 0,
+        CrossPlatformAccount.video_count < max(1, thin_below))) or 0) if thin_below > 0 else 0
+    return {"total": total, "scanned": scanned, "empty": empty, "thin": thin,
+            "unscanned": total - scanned}
 
 
 def _settings():
@@ -332,11 +357,12 @@ def bili_account_scan_tick(settings=None) -> int:
                 # ⚠️ **不再有游标**:轮转改成按 `last_scan_at` / `video_count` 排序取队首
                 # (见 `scan_accounts`),降权与"没扫过的优先"都由排序本身表达 ——
                 # 中途增删号也不会像"游标 % 总数"那样错位跳过。
-                summary = empty_account_summary(db, uid)
+                summary = empty_account_summary(db, uid, settings)
                 _record_run(db, uid, "bili_account_scan", "success",
                             f"扫{out.get('scanned', 0)}个号 标题{out.get('titles', 0)}条"
-                            f" **空壳{summary['empty']}/{summary['scanned']}扫过**"
-                            f"(共{summary['total']}) {','.join(out.get('accounts') or [])}")
+                            f" **空壳{summary['empty']} 极少{summary['thin']}"
+                            f"/{summary['scanned']}扫过**(共{summary['total']})"
+                            f" {','.join(out.get('accounts') or [])}")
                 db.commit()
             except Exception as exc:  # noqa: BLE001 - 单用户失败不影响其余
                 # **限流必须记成 failed 而不是 success(0)** —— 否则"被挡住"看不见
