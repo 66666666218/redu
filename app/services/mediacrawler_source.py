@@ -105,8 +105,32 @@ def kill_stale_browsers() -> int:
     return n
 
 
-def _write_config(keywords: list[str]) -> None:
-    """把关键词与输出格式写进它的 base_config.py(原地改两行,保持其余不动)。"""
+def _login_cookie(platform: str) -> str:
+    """该平台的**登录 cookie**(来自 `.env`;没有就返回空串 = 退回扫码)。
+
+    小红书走 MediaCrawler 的 `login_by_cookies`,而它**只认 `web_session` 一个值**
+    (见 `media_platform/xhs/login.py::login_by_cookies`),所以 `.env` 里存的就是那一行。
+    取值方式见 `tools/xhs_export_cookie.py`。
+    """
+    if platform != "xiaohongshu":
+        return ""
+    try:
+        from config.settings import get_settings
+
+        return (getattr(get_settings(), "xhs_web_session", "") or "").strip()
+    except Exception:  # noqa: BLE001 - 读不到就当没配,退回扫码(不影响采集)
+        return ""
+
+
+def _write_config(keywords: list[str], cookie: str = "") -> None:
+    """把关键词、输出格式、**登录方式**写进它的 base_config.py(原地改几行,其余不动)。
+
+    ⚠️ **登录方式也在这里定**(2026-10-06):有我们自己的 `web_session` 就写
+    `LOGIN_TYPE="cookie"` + `COOKIES="<…>"` —— **不再弹二维码等人扫**。
+    为什么这件事值得改:扫码是**无人值守流程里最脆的一环**(等 120s 没人扫就整轮失败,
+    而失败长得像"接口挂了"),而 cookie 存进 `.env` 之后它和其他平台凭据一样可管理、
+    可验活、失效能报警。
+    """
     text = CONFIG.read_text(encoding="utf-8")
     kw = ",".join(k.strip() for k in keywords if k.strip())
     out = []
@@ -115,6 +139,10 @@ def _write_config(keywords: list[str]) -> None:
             line = f'KEYWORDS = "{kw}"'
         elif line.startswith("SAVE_DATA_OPTION = "):
             line = 'SAVE_DATA_OPTION = "jsonl"'
+        elif line.startswith("LOGIN_TYPE = "):
+            line = f'LOGIN_TYPE = "{"cookie" if cookie else "qrcode"}"'
+        elif line.startswith("COOKIES = "):
+            line = f'COOKIES = "{cookie}"'
         out.append(line)
     CONFIG.write_text("\n".join(out) + "\n", encoding="utf-8")
 
@@ -132,7 +160,7 @@ def crawl(platform: str, keywords: list[str], timeout: int = 600) -> list[dict]:
     if not pid or not keywords:
         return []
     try:
-        _write_config(keywords)
+        _write_config(keywords, _login_cookie(platform))
     except OSError as exc:
         raise MediaCrawlerError(f"写配置失败:{exc}") from exc
     cmd = [str(VENV_PY), "main.py", "--platform", pid, "--lt", "qrcode", "--type", "search"]

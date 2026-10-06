@@ -204,6 +204,14 @@ class Settings(BaseSettings):
     # 真盘链 0 条);③ 其 LICENSE 为 NON-COMMERCIAL LEARNING LICENSE 1.1,明禁商业用途。
     # 保留代码与登录态备用,但**不再进定时轮**——开它只是每周多开一次浏览器白招风控。
     cross_mediacrawler_enabled: bool = False
+    # 小红书 `web_session`(**MediaCrawler 的 cookie 登录**)——取值见 `tools/xhs_export_cookie.py`。
+    # ⚠️ 代号点:MediaCrawler 的 `login_by_cookies` **只认 `web_session` 一个值**(见其实现),
+    # 所以这里存的就是 `web_session=<值>` 这一行,不是整串 cookie。
+    # ⚠️ **为什么放 .env 而不是库里的 cookie_store**:`mediacrawler_source` 是**无会话**的
+    # 纯子进程封装(连 session 都拿不到),而 .env 里已经有 QUARK_COOKIE / BILI_COOKIE
+    # 同一类东西 —— 保持同一套放法,别为它单开一条取凭据的路。
+    # 配上就走 `--lt cookie`(**不再弹二维码等人扫**);留空则退回 qrcode。
+    xhs_web_session: str = ""
     # ---- B站对标号**投稿标题**采集(2026-10-05)见 app/services/bili_account_scan.py ----
     # 用户口径:「**b站如果没有链可以只采集标题,从资源库里搜然后完善**」。
     # 这绕开了实测的死结:`space` 接口能通,但**视频简介里没有盘链**(实测 30 条投稿的

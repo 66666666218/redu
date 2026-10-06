@@ -1,3 +1,4 @@
+- [2026-10-06 23:39] FEAT: 小红书改 `--lt cookie` —— 不再弹二维码等人扫 (Files: app/services/mediacrawler_source.py, config/settings.py, tests/test_mediacrawler_cookie_login.py, tests/test_mediacrawler_source.py, tools/xhs_export_cookie.py[gitignored], .env)
 - [2026-10-06 23:22] FEAT: 补链扩到百度+迅雷(队列原来只收夸克链) (Files: app/services/wechat/_enrich.py, tests/test_wechat_monitor.py, tests/test_slowwork_guard.py)
 - [2026-10-06 22:56] FEAT: 跨平台采集部分失败要推告警(小红书登录态过期连挂 3 天没人知道) (Files: app/services/resource_presence.py, tests/test_resource_presence.py, .env)
 - [2026-10-06 22:22] FIX: 夸克口令的环境故障不该消耗线索;单测不再操作模拟器 (Files: app/services/quark_kouling.py, tests/test_quark_kouling.py, tools/quark_kouling_ui.py[gitignored])

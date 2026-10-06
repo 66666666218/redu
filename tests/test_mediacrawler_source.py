@@ -21,7 +21,9 @@ _REAL_READ_RESULTS = mc._read_results
 def _stub_io(monkeypatch):
     """默认让"装好了、配置写得进、跑完读得到结果",各用例只覆盖自己关心的那一段。"""
     monkeypatch.setattr(mc, "available", lambda: (True, "ok"))
-    monkeypatch.setattr(mc, "_write_config", lambda kws: None)
+    # ⚠️ `_write_config` 现在多一个参数(登录 cookie,2026-10-06 起支持 --lt cookie);
+    # 桩要跟着收宽,否则报 `lambda() takes 1 positional argument but 2 were given`。
+    monkeypatch.setattr(mc, "_write_config", lambda kws, cookie="": None)
     monkeypatch.setattr(mc, "_read_results", lambda platform, since=None: [{"uid": "u"}])
     monkeypatch.setattr(mc, "PLATFORM_IDS", {"douyin": "dy"})
 
