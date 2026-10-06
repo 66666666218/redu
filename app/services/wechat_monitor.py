@@ -70,6 +70,7 @@ from app.services.wechat._source import (  # noqa: F401
     _is_privileged,
     _norm_mp_name,
     _platform_client,
+    configured_backends,
     _wemp_client,
     retire_dormant_benchmarks,
     retire_dormant_tick_all_users,

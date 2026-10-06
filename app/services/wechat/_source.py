@@ -159,12 +159,18 @@ def _wemp_client(session, user_id: int):
     return WempClient(cred["cookie"], cred["token"])
 
 
-def _platform_client(settings: Settings, session=None, user_id: int | None = None):
-    """免费全量列表的数据源客户端;各家合同一致(都提供 `mp_articles`),按配置择一。
+def configured_backends(settings: Settings, session=None,
+                        user_id: int | None = None) -> list[tuple[str, object]]:
+    """当前**配好了的**列表源后端,按优先级排列(顺序 = 择源顺序,别顺手调)。
 
-    优先级:WeRSS(自建成熟,含 free_publish 降级) → **自研 WempClient(兜底,凭据自持)**
-    → wewe-rss 兼容"读书平台"。都没配返回 None。
-    传了 session+user_id 才会考虑自研兜底(凭据存 system_config,与用户绑定)。
+    ⚠️ **为什么要把这份清单单独暴露出来**(2026-10-06):`MultiSourceClient` 会把某个源的
+    失效吞成"换下一个源",外面**只看得到最后那个异常** —— 分不出是谁死的。
+    实测代价:`wemp`(自研兜底,本该是"WeRSS 挂了"的保险)自 10-02 起每轮报
+    `200003 会话失效`,**连着 4 天没人知道**,因为没人能单独问它一句。
+    体检要能**逐个验活**,就得先能拿到"逐个"。
+
+    ⚠️ 还有一层:`wemp` 的凭据要 `session` 才读得到(system_config),所以体检调用时
+    必须把 session 传进来,否则**这一源会被静默漏掉**,体检反而给出假绿。
     """
     backends: list[tuple[str, object]] = []
     if settings.wechat_werss_url and settings.wechat_werss_ak and settings.wechat_werss_sk:
@@ -179,6 +185,17 @@ def _platform_client(settings: Settings, session=None, user_id: int | None = Non
         backends.append(("reader_platform", ReaderPlatformClient(
             settings.wechat_reader_platform_url,
             token=settings.wechat_reader_token, vid=settings.wechat_reader_vid)))
+    return backends
+
+
+def _platform_client(settings: Settings, session=None, user_id: int | None = None):
+    """免费全量列表的数据源客户端;各家合同一致(都提供 `mp_articles`),按配置择一。
+
+    优先级:WeRSS(自建成熟,含 free_publish 降级) → **自研 WempClient(兜底,凭据自持)**
+    → wewe-rss 兼容"读书平台"。都没配返回 None。
+    传了 session+user_id 才会考虑自研兜底(凭据存 system_config,与用户绑定)。
+    """
+    backends = configured_backends(settings, session, user_id)
     if not backends:
         return None
     if len(backends) == 1:

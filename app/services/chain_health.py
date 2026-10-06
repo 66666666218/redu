@@ -274,6 +274,111 @@ def _weread_alive(db) -> tuple[bool | None, str]:
         return None, f"{type(exc).__name__}"
 
 
+#: 「这个源的失效**等多久都不会自己好**」—— 只有这类才判 🔴。判据宁可漏、不可假红:
+#: 假红会训练人忽略整份报告(2026-10-05 我给微信读书误报 🔴 那次就是这么栽的)。
+_AUTH_MARKERS = ("200003", "会话失效", "重新扫码", "invalid session", "登录态失效",
+                 "授权失效", "token 失效", "重新登录", "凭据失效")
+#: **自愈类**(限流/网络/超时)—— 报红就是假红,一律 🟡。
+_SELFHEAL_MARKERS = ("200013", "频率限制", "限流", "超时", "timeout", "connection",
+                     "ssl", "proxy", "代理")
+
+
+def _classify_source_error(exc: BaseException) -> tuple[str, str]:
+    """源报错归成 `("auth"|"selfheal"|"unknown", 原因文本)`。
+
+    `auth` = **凭据死了、等多久都不会自己好** ⇒ 要人动手,判 🔴;
+    其余(限流/网络/超时/认不出)= **自愈或未知** ⇒ 判 🟡 —— **不能报红**。
+    """
+    text = f"{type(exc).__name__}: {exc}"
+    low = text.lower()
+    for m in _AUTH_MARKERS:
+        if m.lower() in low:
+            return "auth", text
+    for m in _SELFHEAL_MARKERS:
+        if m.lower() in low:
+            return "selfheal", text
+    return "unknown", text
+
+
+def check_list_sources(db, settings=None) -> list[dict]:
+    """④ 公众号**列表源逐个验活** —— 光看"配了没"是假绿(2026-10-06 补)。
+
+    ⚠️ 与 10-05 给微信读书补验活是**同一个病**:`MultiSourceClient` 把某个源的失效
+    当成"换下一个源"的 WARNING 吞掉,链路照跑 ⇒ **降级是静默的**。
+    实测代价:`wemp`(自研兜底,本该是"WeRSS 挂了"的保险)自 **2026-10-02 14:00** 起
+    每轮报 `200003 会话失效`,**连着 4 天没人知道**;而每天 09:30 推管理群的那份体检报告上,
+    **它连一行都没有**。保险失效而无人察觉,比没有保险更糟 —— 人会以为自己有兜底。
+
+    ⚠️ **被动记日志救不了它**:WeRSS 答上了的号,`MultiSourceClient` **命中即返回**,
+    `wemp` 根本不会被调用 —— 它的死在日志里**也不会出现**。所以只能**主动**拿一个真号
+    逐个去问(每源一次请求,日级频率可忽略)。
+
+    ⚠️ 本函数**只读**(GET 拉一页列表),且**绝不抛**:体检里一个探针崩掉不该毁掉整份报告
+    (与 `_weread_alive` 同一条纪律)。
+    """
+    from sqlalchemy import select
+
+    from app.db.models import WechatBenchmark
+    from config.settings import get_settings
+
+    settings = settings or get_settings()
+    try:
+        from app.services import wechat_monitor as _wm   # 走门面:子模块直 import 会循环导入
+
+        backends = _wm.configured_backends(settings, session=db, user_id=1)
+    except Exception as exc:  # noqa: BLE001 - 体检不吃异常
+        return [{"name": "公众号·列表源", "level": YELLOW,
+                 "detail": f"取不到源清单({type(exc).__name__}: {str(exc)[:80]}),本轮跳过验活"}]
+    if not backends:
+        return [{"name": "公众号·列表源", "level": RED,
+                 "detail": "**一个列表源都没配**(WeRSS / wemp 凭据 / 读书平台全缺) —— "
+                           "公众号采集没有任何免费全量列表来源"}]
+
+    # 验活要拿**真号**去问:没有对标号就没法验,明说,别给假绿。
+    bm = db.scalar(select(WechatBenchmark).where(
+        WechatBenchmark.user_id == 1, WechatBenchmark.biz != "").limit(1))
+    feed = _wm.feed_biz(bm) if bm is not None else ""
+    if not feed:
+        return [{"name": f"公众号·列表源({len(backends)} 个已配)", "level": YELLOW,
+                 "detail": "库里没有可试的对标号(biz 不是 MP_WXS_* 形态),本轮**跳过**验活 —— "
+                           "**跳过不等于通过**,别把这行当绿灯"}]
+
+    out: list[dict] = []
+    alive = 0
+    for name, be in backends:
+        try:
+            items = be.mp_articles(feed, page=1, limit=1)
+        except Exception as exc:  # noqa: BLE001 - 一个源失败不能毁掉整份报告
+            kind, why = _classify_source_error(exc)
+            if kind == "auth":
+                out.append({"name": f"公众号·列表源·{name}", "level": RED,
+                            "detail": f"**凭据已失效,等多久都不会自己好** —— {why[:110]}。"
+                                      f"修法:浏览器登录 mp.weixin.qq.com → F12 复制整条 Cookie + "
+                                      f"地址栏里的 token → `python scripts/wemp_cred.py "
+                                      f'--cookie "..." --token "..."`'})
+            else:
+                out.append({"name": f"公众号·列表源·{name}", "level": YELLOW,
+                            "detail": f"失败,但**看起来会自愈**(限流/网络):{why[:110]} —— "
+                                      f"不报红:假红会让人忽略整份报告"})
+        else:
+            alive += 1
+            # ⚠️ 「答了但是 0 条」**算活** —— 不能判黄:WeRSS 空转时每轮都是 0 条(它至今
+            #    一篇文章没抓到过),那会变成**恒黄**,而恒黄的项等于没有。
+            out.append({"name": f"公众号·列表源·{name}", "level": GREEN,
+                        "detail": f"验活 ✓(问「{bm.nickname}」答了 {len(items)} 条;"
+                                  f"0 条也可能是该源没收录这个号,不代表它坏了)"})
+    # ★ **单点风险单独说**:只剩一个能答的源时降级链实际没有备胎,而"还有源在答"会让
+    #    所有产出指标照常绿 —— 只有这一行看得出来。
+    if alive <= 1:
+        out.append({"name": "公众号·列表源兜底", "level": RED if alive == 0 else YELLOW,
+                    "detail": f"**能答的源只剩 {alive} 个** ⇒ `MultiSourceClient` 的降级链"
+                              f"实际上没有备胎。" + (
+                                  "链路已经完全取不到列表了。" if alive == 0 else
+                                  "挂掉的那个源**不影响产出指标**(它答不上时会被静默跳过),"
+                                  "所以只能靠这一行看出来。")})
+    return out
+
+
 def check_chains(db, days: int = 3) -> list[dict]:
     """③ 产出层:每条链最近几次运行的产出(判据取自运行记录的 detail)。"""
     import re
@@ -385,9 +490,13 @@ def check_read_num_coverage(db, days: int = 3) -> list[dict]:
 
 
 def collect_sections(db) -> list[tuple[str, list[dict]]]:
-    """跑完三层检查,返回 [(小标题, 结果列表)]。**只读**。调用方负责渲染/推送。"""
+    """跑完三层检查,返回 [(小标题, 结果列表)]。**只读**。调用方负责渲染/推送。
+
+    ⚠️ ② 凭证层**不只是列 Cookie**,还有 `check_list_sources`(逐个列表源验活)——
+    10-02 起 `wemp` 失效 4 天、报告上却一行都没有,就是缺了这一段。
+    """
     return [("依赖(容器/库/venv/档案)", check_dependencies() + check_leaked_browsers()),
-            ("凭证(Cookie 在不在)", check_credentials(db)),
+            ("凭证(Cookie 在不在 / 源活不活)", check_credentials(db) + check_list_sources(db)),
             ("产出(最近几次真跑出来的东西)", check_chains(db) + check_read_num_coverage(db))]
 
 
