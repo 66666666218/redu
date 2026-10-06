@@ -155,6 +155,19 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
         # 那多半是**保存那一步偶发失败**(UI 点击落空 / 保存任务还没落盘),
         # 而不是"这条口令没内容"。**只重试这一种失败,且最多两次**:
         # "压根没解析出来"重试一百次也没用,给它翻倍烧模拟器时间纯属浪费。
+        # ★ **三盘互通**(用户口径:「所有资源都走三盘互通」):先拿**线索标题**查一次库 ——
+        # 这一步**不花模拟器时间**;命中就直接复用已有链,**不保存、不建链**(省 20 秒 + 省一次保存)。
+        # ⚠️ 线索标题是抖音文案、不是资源名,所以 `already_have` 靠**抽取名字**去匹配,
+        # 会有漏(漏了不要紧 —— 下面解析出**真资源名**后还会再查一次)。
+        from app.services.pan_discovery import reuse_if_have
+
+        have = reuse_if_have(session, user_id, lead.title or lead.mark or "")
+        if have and have.get("my_link"):
+            lead.our_url = str(have["my_link"])[:500]
+            logger.info("夸克口令:线索 %s 命中三盘互通,直接复用 %s", lead.aweme_id, lead.our_url)
+            done += 1
+            continue
+
         for attempt in (1, 2):
             res = resolve(lead.title or lead.mark or "", save=True)
             if not res.get("ok"):
@@ -172,7 +185,14 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
             logger.warning("夸克口令:解出「%s」但两次都在 %s 里找不到文件", title or "?", _SAVE_DIR)
             continue
         try:
-            sh = qt.share_fids([fid], title=title or "口令转存")
+            # ★ **三盘互通(第二道)**:解析出**真资源名**后再查一次 —— 这一道比"拿线索标题查"准得多。
+            # 命中就**直接用已有的链**,不再另建一条重复分享(资源本来就在我们盘里)。
+            have2 = reuse_if_have(session, user_id, title)
+            if have2 and have2.get("my_link"):
+                sh = {"share_url": str(have2["my_link"]), "password": "", "share_id": ""}
+                logger.info("夸克口令:「%s」三盘互通命中,复用已有链(不另建分享)", title[:24])
+            else:
+                sh = qt.share_fids([fid], title=title or "口令转存")
             lead.our_url = str(sh["share_url"])[:500]
             # 同时进**资源库**那条路:`status='ok'` 是有意的 ——
             # `pan_discovery` 只把 ok/skipped 当"已知",于是**不会被重复转存**;

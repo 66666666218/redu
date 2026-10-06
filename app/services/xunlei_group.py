@@ -429,6 +429,18 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
             skipped += 1
             logger.info("迅雷群分享跳过转存 %s:%s", row.title, why)
             continue
+        # ★ **三盘互通**(用户口径:「所有资源都走三盘互通」):群里这条资源
+        # **别的盘已经有了** ⇒ 直接复用那条链,**不再搬一份**(省盘空间、省一次转存)。
+        from app.services.pan_discovery import reuse_if_have
+
+        _have = reuse_if_have(session, user_id, row.title)
+        if _have and _have.get("my_link"):
+            row.status, row.our_url = "ok", str(_have["my_link"])
+            row.message = "三盘互通:复用已有链,未重复转存"
+            ok_items.append({"title": row.title, "group_name": row.group_name,
+                             "share_url": row.our_url, "code": ""})
+            logger.info("迅雷群分享:三盘互通命中,复用已有链 %s", row.title)
+            continue
         out = xt.transfer_and_share(row.origin_url)
         if out.get("status") == "ok":
             row.status, row.our_url = "ok", out.get("share_url") or ""

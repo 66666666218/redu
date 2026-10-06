@@ -286,3 +286,39 @@ class TestSaveRetry:
         monkeypatch.setattr(qk, "resolve", _res)
         qk.drain(session, 1, _S())
         assert n["resolve"] == 1, f"没解析出来的不该重试,实际跑了 {n['resolve']} 次"
+
+
+class TestThreePanInterop:
+    """★ **三盘互通**:同一个资源在**任意一个盘**已经有了,**就不再搬一份**(用户口径:
+    「所有资源都走三盘互通」)。
+
+    ⚠️ 这道门原来**只有 `pan_discovery` 一条链有**,而夸克口令 / 迅雷群 / 迅雷口令
+    三条链**一律盲转** —— 同一个资源在三个盘里各存一份。
+    """
+
+    def test_命中互通就不跑UI不建链(self, session, monkeypatch) -> None:
+        """★ 命中时**连解析都不该跑** —— 那是 15–20 秒的模拟器时间。"""
+        _lead(session, "a1", "咐置铸剑上供叩苓")
+        monkeypatch.setattr("app.services.cookie_store.get_cookie", lambda s, u, p: "CK")
+        monkeypatch.setattr("app.services.quark_transfer.QuarkTransfer", _FakeQt)
+        monkeypatch.setattr("app.services.pan_discovery.already_have",
+                            lambda s, u, t: {"my_link": "https://pan.quark.cn/s/HAVE",
+                                             "pan_url": "https://pan.baidu.com/s/x", "titles": ["铸剑"]})
+        ran: list[int] = []
+        monkeypatch.setattr(qk, "resolve", lambda text, **k: ran.append(1) or {"ok": True, "title": "X"})
+
+        out = qk.drain(session, 1, _S())
+
+        assert out["done"] == 1, out
+        assert ran == [], "命中三盘互通就不该再去跑模拟器(那是 15–20 秒)"
+        lead = session.scalars(select(DouyinLead)).one()
+        assert lead.our_url == "https://pan.quark.cn/s/HAVE", "应当直接复用已有链"
+
+    def test_没命中才照常搬(self, session, monkeypatch) -> None:
+        _lead(session, "a1", "咐置铸剑上供叩苓")
+        monkeypatch.setattr("app.services.cookie_store.get_cookie", lambda s, u, p: "CK")
+        monkeypatch.setattr("app.services.quark_transfer.QuarkTransfer", _FakeQt)
+        monkeypatch.setattr("app.services.pan_discovery.already_have", lambda s, u, t: None)
+        monkeypatch.setattr(qk, "resolve", lambda text, **k: {"ok": True, "title": "铸剑纳贡（ForgeTax）"})
+        out = qk.drain(session, 1, _S())
+        assert out["done"] == 1, out

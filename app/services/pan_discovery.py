@@ -180,6 +180,26 @@ def already_have(session, user_id: int, title: str) -> dict | None:
     return None
 
 
+def reuse_if_have(session, user_id: int, title: str) -> dict | None:
+    """★ **三盘互通**的统一入口:**这个资源我们盘里已经有了吗?有就把那条链给你,别再搬一份。**
+
+    用户口径(2026-10-05):「**三个网盘之间能否做到互通来缓解单个网盘内存的压力** ——
+    如果同一资源单个网盘已经有了,就不需要多个网盘进行转存,只需要从已有的里面推这个资源」。
+
+    ⚠️ **为什么要有这个门面**(2026-10-06):`already_have` 原来**只有 `pan_discovery.sync`
+    一条链在用**,而别的转存点(夸克口令 / 迅雷群 / 抖音口令 / 选题 Agent 的自动转存)
+    **一律盲转** —— 同一个资源在三个盘里各存一份。用户口径是「**所有资源都走三盘互通**」,
+    所以给它一个**统一入口**:新链路接进来只需一行,不必各自复刻匹配逻辑。
+
+    返回 `{"my_link","pan_url","titles","source",...}`(命中,链可直接复用)或 `None`(没有,照常搬)。
+    """
+    try:
+        return already_have(session, user_id, title)
+    except Exception:  # noqa: BLE001 - 查库失败就当没有,别挡转存
+        logger.exception("三盘互通查询失败 title=%s", str(title)[:40])
+        return None
+
+
 def transfer_pan_url(session, user_id: int, pan_url: str, settings=None,
                      snippet: str = "") -> dict:
     """**按链分发转存**:夸克走 `QuarkTransfer`、百度走 `BaiduPanClient`、迅雷走 `xunlei_transfer`。

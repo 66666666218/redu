@@ -150,6 +150,16 @@ def ingest(session, user_id: int, kouling: str, settings=None) -> dict:
     if not allowed:
         out.update(status="disk_full" if retryable else "skipped", message=why)
         return out
+    # ★ **三盘互通**(用户口径:「所有资源都走三盘互通」):这个口令对应的资源
+    # **别的盘已经有了** ⇒ 直接复用,不再搬一份。
+    from app.services.pan_discovery import reuse_if_have
+
+    _have = reuse_if_have(session, user_id, info.get("title") or kouling)
+    if _have and _have.get("my_link"):
+        out.update(status="ok", share_url=str(_have["my_link"]),
+                   message="三盘互通:复用已有链,未重复转存")
+        logger.info("迅雷口令:三盘互通命中,复用已有链 %s", str(info.get("title"))[:24])
+        return out
     res = xt.transfer_and_share(url)
     if res.get("status") != "ok":
         msg = res.get("message") or ""
