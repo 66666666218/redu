@@ -1,3 +1,4 @@
+- [2026-10-06 21:58] FEAT: 多平台热榜速览卡改推「多平台监控」专属群 (Files: config/settings.py, app/services/feishu_client.py, app/services/hot_sources.py, tests/test_hot_sources.py, .env)
 - [2026-10-06 21:50] FIX: 抖音卡片标题点开是视频而不是网盘 —— 10-04 那次实现读错了需求 (Files: app/services/douyin_leads.py, tests/test_douyin_leads.py, .env)
 - [2026-10-06 21:50] CHORE: 配 小红书/B站/知乎/贴吧 四个专属群 webhook(.env,未进仓库)
 - [2026-10-06 21:31] FIX: App 路登录态失效要推飞书 —— 光写日志没人看见 (Files: app/services/wechat/_listen.py, tests/test_read_num_health.py)

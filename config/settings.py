@@ -385,6 +385,9 @@ class Settings(BaseSettings):
     feishu_webhook_bilibili: str = ""      # B站专属群
     feishu_webhook_zhihu: str = ""         # 知乎专属群
     feishu_webhook_tieba: str = ""         # 贴吧专属群
+    # 多平台"雷达"专属群(2026-10-06 用户新建):「🔥 多平台热榜速览」推这里。
+    # 未配则回落主群 —— 与其余板块同一条规矩(专属群各收各的,主群不因此少收)。
+    feishu_webhook_multiplatform: str = ""
     # ---- 网盘资源发现(2026-10-02)见 app/services/pan_discovery.py ----
     # 与抖音那条链**形态不同**:抖音是**口令型**(标题里《群名》,要先解析),知乎是**直链型**
     # (回答里直接贴夸克/百度盘链,拿到就能转存)。实测 5 个资源词搜知乎 → 87 条里 3 条带直链。

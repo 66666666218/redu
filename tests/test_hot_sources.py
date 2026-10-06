@@ -292,3 +292,33 @@ class TestSinglePlatformNotStarved:
         cands = _platform_hot_candidates(session, 1, cap=60, cap_single=0)
         assert len(cands) == 60
         assert not any("bili-pan" in c["platforms"] for c in cands)
+
+
+class _S:
+    """最小 settings 桩(webhook_for 被 patch 掉,用不到真实字段)。"""
+    feishu_webhook = "https://hook/main"
+    feishu_webhook_multiplatform = ""
+
+
+def test_热榜速览卡走多平台专属群(monkeypatch) -> None:
+    """★ **去向 2026-10-06 变更**:用户新建了「多平台监控」群并指定这张雷达卡进那儿。
+
+    原来是硬编码推总群(`webhook_for(settings, "")`);现在走 `multiplatform` 板块,
+    于是"专属群优先、未配回落总群"这条既有规矩自动生效 —— 主群不会因此少收。
+    """
+    from app.services import hot_sources as hs
+    import app.services.feishu_client as fc
+
+    seen: list[str] = []
+    monkeypatch.setattr(fc, "webhook_for",
+                        lambda st, sec="": seen.append(sec) or "")   # 返回空 ⇒ 函数提前返回
+    assert hs.push_hot_rank_card_all_users(_S()) == 0
+    assert seen == ["multiplatform"], (
+        f"这张卡必须走 multiplatform 板块(不然又推回总群了),实际问了 {seen}")
+
+
+def test_未配专属群时回落总群() -> None:
+    """⚠️ 反向:别把总群那条路堵死 —— 没配专属群时应当回落(feishu_client 的既有规矩)。"""
+    from app.services.feishu_client import webhook_for
+
+    assert webhook_for(_S(), "multiplatform") == "https://hook/main"

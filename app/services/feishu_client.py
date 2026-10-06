@@ -40,6 +40,8 @@ _SECTION_WEBHOOK = {
     "kuaishou": "feishu_webhook_kuaishou", "xiaohongshu": "feishu_webhook_xiaohongshu",
     "bilibili": "feishu_webhook_bilibili", "zhihu": "feishu_webhook_zhihu",
     "tieba": "feishu_webhook_tieba",
+    # 多平台"雷达"卡(热榜速览)专属群(2026-10-06)
+    "multiplatform": "feishu_webhook_multiplatform",
 }
 
 

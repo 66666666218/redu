@@ -796,7 +796,11 @@ _PLAT_LABEL = {
 
 
 def push_hot_rank_card_all_users(settings=None, top_n: int = 3) -> int:
-    """多平台热榜速览卡 → 飞书总群(2026-10-01 v2.2.0「新平台接入总群」)。
+    """多平台热榜速览卡 → **多平台专属群**(未配则回落总群)。
+
+    ⚠️ 去向 **2026-10-06 变更**:原来固定推**总群**(2026-10-01 v2.2.0「新平台接入总群」),
+    用户新建了「多平台监控」群并指定这张卡进那儿 ⇒ 改走 `multiplatform` 板块
+    (专属群优先、未配回落总群,与其余板块同一条规矩,主群不会因此少收)。
 
     每日 09:30/21:30 两次(定时),每平台取最新一轮 top N 拼接文本卡;
     与 Agent 选题卡(命中新平台热点时另行推送)互补——本卡是「雷达」,选题卡是「弹药」。
@@ -811,7 +815,7 @@ def push_hot_rank_card_all_users(settings=None, top_n: int = 3) -> int:
     settings = settings or get_settings()
     from app.services.feishu_client import FeishuClient, webhook_for
 
-    hook = webhook_for(settings, "")  # 总群
+    hook = webhook_for(settings, "multiplatform")
     if not hook:
         return 0
     from app.db import get_session_local
