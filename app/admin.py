@@ -489,6 +489,7 @@ def _retry_runners() -> dict:
     避免两套映射不一致(历史上手动只有 weibo/xianyu/douhot,重试 baidu/wechat_* 直接
     报"未知板块",而自动路径反而支持)。"""
     from app.services import tenant
+    from app.services.douyin_leads import run_douyin_leads
     from app.services.wechat_monitor import run_wechat_listen
     from app.services.xianyu_analytics import run_xianyu_deep
 
@@ -500,6 +501,11 @@ def _retry_runners() -> dict:
         "douhot": tenant.run_douhot,
         "wechat_listen": run_wechat_listen,
         "wechat_sync": run_wechat_listen,
+        # ⚠️ **2026-10-06 补**:`douyin_leads` 原先**不在表里**,而它是**每天只跑 1 轮**的
+        # 低频作业 ⇒ **一次失败就要等第二天**。10-06 11:00 就撞上了:MediaCrawler 的
+        # Playwright 访问 douyin.com **超时 30 秒**(纯网络抖动,前后两天都正常),
+        # 结果**整天的抖音线索全没了**。这不是额度问题,调额度治不了。
+        "douyin_leads": run_douyin_leads,
     }
 
 
@@ -623,6 +629,16 @@ def retry_failed_runs(max_retry: int = 3) -> dict:
                 m = _re.search(r"cursor=(\d+)", run.detail or "")
                 if m:
                     kwargs["batch_index"] = int(m.group(1))
+            if run.kind == "douyin_leads":
+                # ⚠️ **同 `wechat_listen` 的道理**(2026-10-06):重试必须**重跑同一个类目**,
+                # 且 **`advance=False`**(不推进轮换游标)——
+                # 否则"失败那轮"等于白跳过一个类目,而"每类都要覆盖到"正是轮换的意义。
+                # 类目写在 detail 里的 `类目X`(见 `run_douyin_leads` 的 _record_run)。
+                import re as _re
+
+                m = _re.search(r"类目(\S+)", run.detail or "")
+                kwargs["category"] = m.group(1) if m else None
+                kwargs["advance"] = False
             try:
                 res = runner(db, run.user_id, settings, **kwargs)
                 if _retry_blocked(res):

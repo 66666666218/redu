@@ -1208,3 +1208,74 @@ def test_instance_info_reports_section_ownership() -> None:
     if out["scheduler_role"] == "wechat":
         assert out["sections"]["xianyu"]["owned"] is True
         assert out["sections"]["weibo"]["owned"] is False
+
+
+def test_retry_failed_runs_covers_douyin_leads(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """★ **2026-10-06**:`douyin_leads` 原先**不在重试表里**,而它是**每天只跑 1 轮**的
+    低频作业 ⇒ **一次失败要等第二天**.
+
+    10-06 11:00 就撞上了:MediaCrawler 的 Playwright 访问 douyin.com **超时 30 秒**
+    (纯网络抖动,前后两天同一作业都正常),结果**整天的抖音线索全没了**。
+    注意:**这不是额度问题** —— 调 `douyin_leads_transfer_limit` 治不了它。
+
+    这条同时钉住两个容易漏的点:
+      ① 它**必须在 `_retry_runners()` 里**(否则 `retry_failed_runs` 直接 `continue` 跳过);
+      ② 重试要**重跑同一个类目**且 **`advance=False`** —— 否则失败那轮白跳过一个类目,
+         而"每类都要覆盖到"正是轮换的意义(与 `wechat_listen` 的 `batch_index` 同一条纪律)。
+    """
+    from datetime import datetime, timedelta
+
+    from app.admin import retry_failed_runs
+    from app.db.models import RunRecord
+    from app.services import douyin_leads, tenant
+
+    session.add(RunRecord(user_id=1, run_id="dy001", kind="douyin_leads", status="failed",
+                          detail="douyin: douyin 退出码 1: Timeout 30000ms exceeded",
+                          retry_count=0, started_at=datetime.now() - timedelta(hours=2)))
+    session.commit()
+
+    calls: list[dict] = []
+    monkeypatch.setattr(douyin_leads, "run_douyin_leads",
+                        lambda db, uid, settings=None, **kw: calls.append(
+                            {"uid": uid, **kw}) or 0)
+
+    import app.db as appdb
+    test_engine = sessionmaker(bind=session.get_bind())
+    monkeypatch.setattr(appdb, "get_session_local", lambda: test_engine)
+    for name in ("run_weibo", "run_xianyu", "run_douhot", "run_baidu"):
+        monkeypatch.setattr(tenant, name, lambda db, uid, settings=None: None)
+
+    retry_failed_runs(max_retry=3)
+
+    assert calls, "douyin_leads 的失败没被重试 —— 它不在 _retry_runners() 里?"
+    assert calls[0]["uid"] == 1
+    assert calls[0].get("advance") is False, \
+        "重试**不能**推进类目轮换游标(否则失败那轮白跳一个类目)"
+    # detail 里没有 `类目X` 时传 None(由 run_douyin_leads 自己去取当前类目),不应报错
+    assert "category" in calls[0]
+
+
+def test_retry_douyin_leads_重跑同一个类目(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """detail 里带 `类目影视` 时,重试必须**带着这个类目**重跑(不是取当前类目)。"""
+    from datetime import datetime, timedelta
+
+    from app.admin import retry_failed_runs
+    from app.db.models import RunRecord
+    from app.services import douyin_leads, tenant
+
+    session.add(RunRecord(user_id=1, run_id="dy002", kind="douyin_leads", status="failed",
+                          detail="douyin 类目影视 词7(其中外部1) 线索14 新群2/群3/链8",
+                          retry_count=0, started_at=datetime.now() - timedelta(hours=2)))
+    session.commit()
+
+    calls: list[dict] = []
+    monkeypatch.setattr(douyin_leads, "run_douyin_leads",
+                        lambda db, uid, settings=None, **kw: calls.append(kw) or 0)
+    import app.db as appdb
+    monkeypatch.setattr(appdb, "get_session_local",
+                        lambda: sessionmaker(bind=session.get_bind()))
+    for name in ("run_weibo", "run_xianyu", "run_douhot", "run_baidu"):
+        monkeypatch.setattr(tenant, name, lambda db, uid, settings=None: None)
+
+    retry_failed_runs(max_retry=3)
+    assert calls and calls[0].get("category") == "影视", f"应当重跑失败那个类目:{calls}"

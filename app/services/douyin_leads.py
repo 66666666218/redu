@@ -804,11 +804,81 @@ def _kouling_summary(leads: list[dict]) -> str:
             f"(新搬{n_moved} 已搬过{n_already} 超额度{n_over})")
 
 
+def run_douyin_leads(db, user_id: int, settings=None, category: str | None = None,
+                     advance: bool = True) -> int:
+    """**单用户**跑一轮抖音线索:定时 tick 与「失败重试」**共用这一条路径**。
+
+    ⚠️ **为什么必须共用一个函数**(而不是给重试另写一套):本项目在 `wechat_listen` 上踩过
+    —— 两条路各写各的,迟早飘出两套行为;那边连"重试要重跑同一组"都是**事后单独打补丁**
+    才补上的(`_retry_runners` 里读 `cursor=` 那段)。
+
+    ⚠️ `advance=False` 是给**重试**用的:重试必须**重跑同一个类目**、**不能推进游标** ——
+    否则失败那一轮等于白跳过一个类目,而"每类都要覆盖到"正是轮换的意义
+    (与 `wechat_listen` 的 `batch_index` 同一条纪律)。
+    """
+    from app.services import category_topics
+    from app.services.tenant_base import _record_run
+
+    if settings is None:
+        from config.settings import get_settings
+
+        settings = get_settings()
+    plats = platforms_of(settings)
+    # 词来自**群组新资源 + 公众号已验证资源**(见 search_keywords 的注释);各平台共用。
+    # **热榜外部种子**只喂给抖音:小红书/快手没有口令,拿热榜词去搜只是白开一次浏览器。
+    hot = hot_seed_words(settings) if "douyin" in plats else []
+    cat = category or category_topics.current_category(db)   # 本轮搜哪个类目(轮换)
+    kws = search_keywords(db, user_id,
+                          int(getattr(settings, "douyin_leads_keywords", 3) or 3),
+                          settings, hot=hot)
+    if not kws:
+        return 0
+    total = 0
+    for plat in plats:
+        try:
+            leads = find_leads(kws, platform=plat)
+            total += len(leads)
+            if leads:
+                # 口令 → 资源(分享链直接转存入库 / 群则加群),结果一并写进卡片
+                apply_kouling(leads, db, user_id, settings)
+                _save_leads(db, user_id, leads)      # 落库:转发量只在这一次有效(结算要用)
+                push_leads(leads, settings, platform=plat)
+            # ⚠️ **按词源分开报**(2026-10-05):只报总数看不出"哪档在起作用" ——
+            # 而实测两档差了 86 个百分点(资源名 86% / 热榜种子 0%)。
+            # 不分开就永远发现不了"四成预算花在 0% 有效率的词上"这件事。
+            # ⚠️ `search_keywords` **已经把热榜词并进 `kws` 了** ——
+            # 所以这里报的是 `kws 共 N(其中外部 M)`,**不能写成 `词N+外部M`**(会重复计数)。
+            hs = set(hot or [])
+            n_hot_used = sum(1 for w in hs if w in set(kws))
+            n_hot = sum(1 for x in leads if (x.get("keyword") or "") in hs)
+            n_hot_ok = sum(1 for x in leads
+                           if (x.get("keyword") or "") in hs
+                           and (x.get("kouling") or {}).get("kind") in ("group", "share"))
+            _record_run(db, user_id, "douyin_leads", "success",
+                        f"{plat} 类目{cat} 词{len(kws)}(其中外部{n_hot_used}) "
+                        f"线索{len(leads)} {_kouling_summary(leads)} "
+                        f"[外部命中{n_hot}/产出{n_hot_ok}]")
+            db.commit()
+        except Exception as exc:  # noqa: BLE001 - 单平台失败不影响其余
+            db.rollback()
+            logger.exception("线索平台 %s 失败 user=%s", plat, user_id)
+            _record_run(db, user_id, "douyin_leads", "failed", f"{plat}: {str(exc)[:160]}")
+            db.commit()
+    if advance:
+        # ⚠️ **轮换游标在"整轮跑完之后"才推进**(2026-10-04):放在出词之后就推的话,
+        # 中途失败会白白跳过一个类目 —— 而"每类都要覆盖到"正是轮换的意义。
+        nxt = category_topics.advance_category(db)
+        logger.info("抖音线索:类目 %s 跑完 → 下轮 %s", cat, nxt)
+    return total
+
+
 def douyin_leads_tick(settings=None) -> int:
     """定时:按资源库的词去各**线索平台**搜 → 解析口令 → 推推广线索。返回线索条数。
 
     平台列表来自 `settings.leads_platforms`(默认只有抖音)。**每个平台各开一次浏览器**
     (MediaCrawler 一次几分钟),所以别贪多 —— 实测只有抖音的内容层真带《口令》。
+
+    单用户的活全在 `run_douyin_leads` 里(**重试走同一个函数**,理由见那边的说明)。
     """
     from config.settings import get_settings
     from app.db import get_session_local
@@ -817,58 +887,11 @@ def douyin_leads_tick(settings=None) -> int:
     settings = settings or get_settings()
     if not getattr(settings, "douyin_leads_enabled", True):
         return 0
-    top = int(getattr(settings, "douyin_leads_keywords", 3) or 3)
-    plats = platforms_of(settings)
     db = get_session_local()()
     total = 0
     try:
         for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
-            # 词来自**群组新资源 + 公众号已验证资源**(见 search_keywords 的注释);各平台共用。
-            # **热榜外部种子**只喂给抖音:它是"找《口令》"那条路用的;小红书/快手没有口令,
-            # 拿热榜词去搜只是白开一次浏览器。
-            hot = hot_seed_words(settings) if "douyin" in plats else []
-            from app.services import category_topics
-
-            cat = category_topics.current_category(db)      # 本轮搜哪个类目(轮换,见 category_topics)
-            kws = search_keywords(db, uid, top, settings, hot=hot)
-            if not kws:
-                continue
-            for plat in plats:
-                from app.services.tenant_base import _record_run
-
-                try:
-                    leads = find_leads(kws, platform=plat)
-                    total += len(leads)
-                    if leads:
-                        # 口令 → 资源(分享链直接转存入库 / 群则加群),结果一并写进卡片
-                        apply_kouling(leads, db, uid, settings)
-                        _save_leads(db, uid, leads)      # 落库:转发量只在这一次有效(结算要用)
-                        push_leads(leads, settings, platform=plat)
-                    # ⚠️ **按词源分开报**(2026-10-05):只报总数看不出"哪档在起作用" ——
-                    # 而实测两档差了 86 个百分点(资源名 86% / 热榜种子 0%)。
-                    # 不分开就永远发现不了"四成预算花在 0% 有效率的词上"这件事。
-                    # ⚠️ `search_keywords` **已经把热榜词并进 `kws` 了** ——
-                    # 所以这里报的是 `kws 共 N(其中外部 M)`,**不能写成 `词N+外部M`**(会重复计数)。
-                    hs = set(hot or [])
-                    n_hot_used = sum(1 for w in hs if w in set(kws))
-                    n_hot = sum(1 for x in leads if (x.get("keyword") or "") in hs)
-                    n_hot_ok = sum(1 for x in leads
-                                   if (x.get("keyword") or "") in hs
-                                   and (x.get("kouling") or {}).get("kind") in ("group", "share"))
-                    _record_run(db, uid, "douyin_leads", "success",
-                                f"{plat} 类目{cat} 词{len(kws)}(其中外部{n_hot_used}) "
-                                f"线索{len(leads)} {_kouling_summary(leads)} "
-                                f"[外部命中{n_hot}/产出{n_hot_ok}]")
-                    db.commit()
-                except Exception as exc:  # noqa: BLE001 - 单平台失败不影响其余
-                    db.rollback()
-                    logger.exception("线索平台 %s 失败 user=%s", plat, uid)
-                    _record_run(db, uid, "douyin_leads", "failed", f"{plat}: {str(exc)[:160]}")
-                    db.commit()
-            # ⚠️ **轮换游标在"整轮跑完之后"才推进**(2026-10-04):放在出词之后就推的话,
-            # 中途失败会白白跳过一个类目 —— 而"每类都要覆盖到"正是轮换的意义。
-            nxt = category_topics.advance_category(db)
-            logger.info("抖音线索:类目 %s 跑完 → 下轮 %s", cat, nxt)
+            total += run_douyin_leads(db, uid, settings)
     finally:
         db.close()
     return total
