@@ -779,15 +779,24 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin") -> bool:
         title = _md_safe(strip_others(ld.get("title") or ""))
         shown = title[:22] + ("…" if len(title) > 22 else "")
         vurl = _md_safe(ld.get("url") or "")
-        # 「作品」列:**标题本体可点** → 抖音视频(公众号卡片的「文章」列就是这个做法)
-        work = f"[{shown}]({vurl})" if vurl else shown
+        # 「作品」列:标题可点 → **我方网盘链**(不是抖音视频!)
+        # ⚠️⚠️ **2026-10-06 修,这是一次实现错误**:`26b6d69`(10-04)那条提交的说明里
+        # 用户原话是「资源不要直接是链接形式,**跟公众号一样点作品就能跳转**」——
+        # 而公众号卡片里标题跳的**正是我方转存链**(见 `_listen.py::_push_listen` 的 `article_md`)。
+        # 当时却实现成"标题 → 抖音视频",后果:① **点标题拿不到网盘**(用户报的就是这个);
+        # ② 同一张卡上视频被链**两次**(这里一次 + 后面「▶视频」列一次),纯冗余。
+        # 现在两处分工:标题 → 网盘,**▶视频** → 视频。
+        our = _md_safe(info.get("our_url") or "")
+        work = f"[{shown}]({our})" if our else shown
         # 转发量**独立成列**(原来并进作品列,六列版式下挪出来)。没有就不显示,
         # 不拿 0 冒充有数据 —— 口径见 `DouyinLead` 的注释(它是**别人视频**的转发量)。
         sc = int(ld.get("share_count") or 0)
-        # 「资源」列:**网盘名 + 可点(→ 我方链)**;没搬的写明**为什么**
+        # 「资源」列:**纯文本的网盘名**(不带链接)—— 与「作品」同一口径:
+        # 「资源**不要直接是链接形式**」。链接统一由标题承担,这正是**公众号卡片的做法**
+        # (那边资源列写 `🔴夸克` 也是纯文本)。没搬的写明**为什么**。
         pan = _pan_name(info.get("our_url") or info.get("share_url") or "")
         if info.get("kind") == "share" and info.get("status") == "ok":
-            res = f"[🔴{pan or '已转存'}]({_md_safe(info.get('our_url') or '')})"
+            res = f"🔴{pan or '已转存'}"
         elif info.get("kind") == "group":
             res = "👥已加群"
         elif info.get("status") == "already":

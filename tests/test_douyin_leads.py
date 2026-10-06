@@ -691,13 +691,46 @@ class TestSixColumnCard:
         assert cell(rows[1], 5) == "2"
         assert cell(rows[2], 5) == "1", "另一个口令 → 条数为 1"
 
-    def test_work_column_links_to_video(self, monkeypatch) -> None:
-        """「作品」列**可点** → 抖音视频(不是纯文本)。"""
+    def test_作品列点开是我方网盘链_不是抖音视频(self, monkeypatch) -> None:
+        """★ **用户 2026-10-06 报的就是这条**。
+
+        `26b6d69`(10-04)那条提交的说明里用户原话是「资源不要直接是链接形式,
+        **跟公众号一样点作品就能跳转**」—— 而公众号卡片里标题跳的**正是我方转存链**
+        (见 `_listen.py::_push_listen` 的 `article_md`)。当时实现成了"标题 → 抖音视频",
+        于是点标题拿不到网盘,而且同一个视频还被链了两次(这里 + 「▶视频」列)。
+        """
         card = self._render(monkeypatch, [
             self._lead("x", "某资源标题", 10, kind="share", status="ok",
                        our_url="https://pan.quark.cn/s/OUR")])
         row = str([e for e in card["elements"] if e.get("tag") == "column_set"][1])
-        assert "[某资源标题](https://d/v/x)" in row, f"作品应是可点链接:{row[:200]}"
+        assert "[某资源标题](https://pan.quark.cn/s/OUR)" in row, f"作品该指向我方网盘链:{row[:220]}"
+        assert "[某资源标题](https://d/v/x)" not in row, \
+            "作品**不该**再指向抖音视频(那是「视频」列的活,链两次是冗余)"
+
+    def test_视频列仍在_两处分工(self, monkeypatch) -> None:
+        """⚠️ 反向:改完不能把"看原视频"弄丢 —— 改由「▶视频」列承担。"""
+        card = self._render(monkeypatch, [
+            self._lead("x", "某资源标题", 10, kind="share", status="ok",
+                       our_url="https://pan.quark.cn/s/OUR")])
+        row = str([e for e in card["elements"] if e.get("tag") == "column_set"][1])
+        assert "[▶视频](https://d/v/x)" in row, f"视频列必须还在:{row[:220]}"
+
+    def test_资源列是纯文本不带链接(self, monkeypatch) -> None:
+        """用户 10-04 的原话:「**资源不要直接是链接形式**」——
+        与公众号卡片一致(那边资源列写 `🔴夸克` 也是纯文本)。"""
+        card = self._render(monkeypatch, [
+            self._lead("x", "某资源标题", 10, kind="share", status="ok",
+                       our_url="https://pan.quark.cn/s/OUR")])
+        row = str([e for e in card["elements"] if e.get("tag") == "column_set"][1])
+        assert "🔴夸克" in row, row[:220]
+        assert "[🔴夸克]" not in row, "资源列不该是可点链接"
+
+    def test_没搬的_标题不硬链视频(self, monkeypatch) -> None:
+        """没我方链时标题**不点** —— 别又退回"点了跳视频"那个歧义。"""
+        card = self._render(monkeypatch, [
+            self._lead("x", "某资源标题", 10, kind="share", status="skipped")])
+        row = str([e for e in card["elements"] if e.get("tag") == "column_set"][1])
+        assert "某资源标题" in row and "某资源标题](" not in row, row[:220]
 
     def test_share_count_is_its_own_column_not_merged_into_work(self, monkeypatch) -> None:
         card = self._render(monkeypatch, [
