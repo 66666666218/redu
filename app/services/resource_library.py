@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+import re
+
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -271,6 +273,152 @@ def resonance_resources(session: Session, user_id: int, days: int = 30,
         stmt = stmt.order_by(func.count(func.distinct(WechatArticle.author)).desc())
     rows = session.execute(stmt.limit(limit)).all()
     return _rows_to_resources(session, user_id, rows)
+
+
+#: 资源名里的**通用前后缀** —— 它们区分不出一份资源,只制造"同物异名"。
+#: 归一化时剥掉,让「高性价比人生指南 pdf电子版 共338页」与「《高性价比人生指南》pdf」
+#: 落到**同一个身份**上。
+_CORE_PREFIX = ("今日分享的是", "今日分享", "分享一个", "亲测", "github", "GitHub",
+                "值得一看", "推荐", "爆火", "最新", "2026", "2025", "2024", "【", "《")
+# ⚠️ **「最新」必须放在后缀里**(2026-10-07 实测:我一开始把它当前缀,于是
+# 「时代峰峻喜欢的脸top9投票最新」原样留下、和带「入口」的那条分成了两份 ——
+# 同一个资源的两种写法就是这么散开的)。同理收下「共/等/附」这类**光杆尾巴**:
+# 「高性价比人生指南pdf电子版共」剥掉它才继续往下剥「电子版/pdf」。
+_CORE_SUFFIX = ("pdf", "PDF", "epub", "EPUB", "电子版", "完整版", "最新版", "最新", "高清",
+                "免费", "可保存", "可下载", "可打印", "自取", "直达", "入口", "链接", "下载",
+                "在线观看", "资源", "分享", "附教程", "附下载", "附最新", "共", "等", "附",
+                "】", "》")
+_CORE_TAIL_RE = re.compile(r"(共\s*\d+\s*页|\d+\s*页|第\s*\d+\s*篇|\d{2,})")
+_CORE_PUNCT = " 	·・|｜/\、,，。.。:：;；!！?？—－-~～+＋*＊#＃'\"“”‘’()（）[]【】《》<>"
+
+
+def core_resource_name(name: str) -> str:
+    """把**清洗过的资源名**再归一化一层,得到用于"是不是同一份资源"的身份。
+
+    ⚠️⚠️ **为什么要再来一层**(2026-10-07 实测踩到):`library_search_word` 是为
+    **搜索词**设计的(必须具体才搜得到),**不是为"身份"设计的**。实测同一份
+    《高性价比人生指南》在库里有 **20+ 个标题变体**,清洗后仍散成 **8 个不同的名字**:
+
+        高性价比人生指南pdf电子版 / 高性价比人生指南pdf电子版共 / 高性价比人生指南共338页
+        《高性价比人生指南》pdf/ / 2026高性价比人生指南. / github高性价比人生指南 …
+
+    ⇒ 拿它当身份,共振榜会把**同一份资源数成好几条** —— 那正是它要解决的问题本身。
+    所以这里剥掉通用前后缀与页数/日期尾巴,只留**指得到具体东西的那段核心**。
+
+    ⚠️ 仍然**不是完美归一化**(真正的同义名「高性价比人生指南」vs「人生使用说明书」
+    这种靠字符串救不了)。所以跨平台共振榜**先只读输出让人看**,别直接上卡片。
+    """
+    t = str(name or "").strip()
+    if not t:
+        return ""
+    t = _CORE_TAIL_RE.sub("", t)
+    t = t.strip(_CORE_PUNCT)
+    # 前后缀各多剥几轮(「【值得一看】高性价比…pdf电子版【自取】」要剥三次)
+    for _ in range(4):
+        before = t
+        low = t.lower()
+        for p in _CORE_PREFIX:
+            if low.startswith(p.lower()) and len(t) > len(p) + 3:
+                t = t[len(p):].strip(_CORE_PUNCT)
+                low = t.lower()
+                break
+        for suf in _CORE_SUFFIX:
+            if low.endswith(suf.lower()) and len(t) > len(suf) + 3:
+                t = t[: len(t) - len(suf)].strip(_CORE_PUNCT)
+                low = t.lower()
+                break
+        if t == before:
+            break
+    t = t.strip(_CORE_PUNCT)
+    return t if len(t) >= 4 else str(name or "").strip()
+
+
+def cross_platform_resonance(session: Session, user_id: int, days: int = 90,
+                             min_platforms: int = 2, limit: int = 20) -> list[dict]:
+    """**跨平台共振榜**:同一份资源在**几个平台、被几个号**在推(2026-10-07)。
+
+    ## 为什么不能沿用 `resonance_resources`
+    那个数的是"同一**盘链**被几个**公众号**发过"。而跨平台**不能拿盘链当身份**:
+    **每个推广号自己建分享链**,同一份资源在不同平台上是完全不同的 URL
+    (2026-10-07 实测:两张表的盘链**零交集** ——
+     `https://pan.baidu.com/s/1-0ttlsu0Zd8DWM1-QLOnFw` vs `http://pan.baidu.com/s/1AnM-_F9_5KmYQCIe7403Rg`)。
+
+    ⇒ 身份换成**资源名**(`cross_accounts.library_search_word` 清洗出的主体名),
+    于是"公众号 A + 微博 B + 贴吧 C 都在推同一个资源"这才**第一次能被数出来**。
+
+    ⚠️⚠️ **名字归一化会误配**(同名的不同资源 / 同一资源的不同叫法),所以这个函数
+    **先只读输出**,让运营者看准不准 —— **别急着接进卡片**。判据看两个:
+      · `platforms` ≥2 且 `accounts` 也 ≥2:跨平台被不同人验证,是**真共振**;
+      · 只有 1 个号却跨 2 个平台:多半是**同一个人多平台分发**,那是"矩阵号"不是共振。
+    所以结果里两个数都给出来,让人自己看。
+    """
+    from app.services.cross_accounts import library_search_word
+
+    cutoff = datetime.now() - timedelta(days=days)
+    buckets: dict[str, dict] = {}
+
+    def _add(raw_name: str, platform: str, account: str, pan_url: str) -> None:
+        # ⚠️ **桶的键是核心名,不是清洗名**:同一份资源有 20+ 种标题写法(实测),
+        #    拿清洗名当身份会把一份资源数成好几条 —— 见 `core_resource_name` 的实测。
+        core = core_resource_name(raw_name)
+        if not core:
+            return                      # 洗不出名字的(太短/太泛/空标题)直接丢,别凑数
+        b = buckets.setdefault(core, {"name": core, "variants": {},
+                                      "platforms": set(), "accounts": set(), "pans": []})
+        b["variants"][raw_name] = b["variants"].get(raw_name, 0) + 1
+        b["platforms"].add(platform or "未知")
+        if account:
+            b["accounts"].add(f"{platform}:{account}")
+        if pan_url:
+            b["pans"].append(pan_url)
+
+    # ① 公众号(含量最大、也是唯一带"同一链被几号同发"的那份)
+    for t, a, u in session.execute(
+            select(WechatArticle.title, WechatArticle.author, WechatPanLink.pan_url)
+            .join(WechatPanLink, WechatPanLink.article_id == WechatArticle.id)
+            .where(WechatPanLink.user_id == user_id, WechatArticle.created_at >= cutoff)):
+        _add(library_search_word(str(t or "")), "公众号", str(a or ""), str(u or ""))
+
+    # ② 公开平台发现(微博/贴吧/知乎/抖音…)—— 这一份以前**从不参与共振计数**
+    from app.db.models import DiscoveredPanLink
+    try:
+        for p, t, a, u in session.execute(
+                select(DiscoveredPanLink.platform, DiscoveredPanLink.title,
+                       DiscoveredPanLink.author, DiscoveredPanLink.origin_url)
+                .where(DiscoveredPanLink.user_id == user_id)):
+            _add(library_search_word(str(t or "")), str(p or ""), str(a or ""), str(u or ""))
+    except Exception:                   # noqa: BLE001 - 这张表缺列/空都不该拖垮整榜
+        logger.exception("跨平台共振:读公开平台发现失败(其余照常)")
+
+    out: list[dict] = []
+    for b in buckets.values():
+        if len(b["platforms"]) < min_platforms:
+            continue
+        pans = [u for u in dict.fromkeys(b["pans"]) if u]   # 去重保序
+        my = ""
+        for u in pans[:5]:              # 抽前几条查"我们有没有" —— 不必全查
+            try:
+                my = _my_link_of(session, user_id, u) or _discovered_my_link(session, user_id, u)
+            except Exception:           # noqa: BLE001
+                my = ""
+            if my:
+                break
+        shown = max(b["variants"], key=b["variants"].get)   # 最常见的那个写法当标题
+        out.append({
+            "name": b["name"],
+            "shown": shown,
+            "variant_count": len(b["variants"]),            # 合并了几种写法(归一化效果的量尺)
+            "platforms": sorted(b["platforms"]),
+            "platform_count": len(b["platforms"]),
+            "accounts": sorted(b["accounts"]),
+            "account_count": len(b["accounts"]),
+            "pan_count": len(pans),
+            "pans": pans[:3],
+            "my_link": my,
+        })
+    # 排序:**平台数**优先(跨平台才是这条榜的价值),再按号数
+    out.sort(key=lambda x: (-x["platform_count"], -x["account_count"], x["name"]))
+    return out[:limit]
 
 
 def resource_profile(session: Session, user_id: int, pan_url: str) -> dict | None:
