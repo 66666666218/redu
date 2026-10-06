@@ -130,6 +130,23 @@ def _is_weread_quota_error(exc: BaseException) -> bool:
     新增代码直接用 `weread_budget.is_quota_error`。
     """
     return weread_budget.is_quota_error(exc)
+
+
+#: App 路"登录态失效"类错误的标记 —— 这一类**等多久都不会自己好,要人动手**,
+#: 所以它才值得推飞书(限流/网络那类会自愈,推了只会变成噪音)。
+_APP_AUTH_MARKERS = ("-2010", "-2012", "登录", "凭据", "token", "accessToken")
+
+
+def _app_auth_needs_human(exc: BaseException) -> bool:
+    """App 路的失败**是不是"要人去模拟器里重登"**那一种。
+
+    ⚠️ 分这一刀的理由和 `chain_health._classify_source_error` 完全一致:
+    **只有"等多久都不会自己好"的才打扰人** —— 限流/网络抖动推飞书,只会训练人忽略告警。
+    实测(2026-10-06):这一类断了 8 天没人知道,而修法只是"在雷电里打开微信读书 App"
+    (用户打开后 token `jXHu1v8j`→`Xph3xEtt`,8/8 个号立刻全通)。
+    """
+    text = f"{type(exc).__name__}: {exc}"
+    return any(m in text for m in _APP_AUTH_MARKERS)
 _BAN_MARKERS = (("此账号已被屏蔽", "账号封禁"), ("该内容已被发布者删除", "作者删除"),
                 ("此内容因违规无法查看", "违规处理"))
 def _detect_ban_reason(page_text: str) -> str:
@@ -415,6 +432,25 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
                     stats["weread_app_fail_logged"] = 1
                 logger.warning("App 列表兜底失败(%s):%s —— **App 这条路当前是断的**,阅读数只剩网页路",
                                b.nickname or b.weread_book_id, str(exc)[:140])
+                # ⚠️⚠️ **光写日志还是没人看见** —— 运营者不读日志。
+                # 而且这一类(**登录态失效、等多久都不会自己好**)是唯一需要人动手的:
+                # 网页路被账号级拦是外因,App 路只要人去雷电里重登一次就能接回来
+                # (2026-10-06 实测:用户打开 App 后 token `jXHu1v8j`→`Xph3xEtt`,8/8 个号立刻通了)。
+                # ⇒ 归到"要人工"的那一类,**直接推飞书**(冷却去重由 notify_incident 管)。
+                if _app_auth_needs_human(exc):
+                    try:
+                        from app.services.alert_service import notify_incident
+
+                        notify_incident(
+                            session, user_id, "wechat",
+                            "🟠 微信读书 App 登录态失效,精确阅读数断了",
+                            "App 兜底路(阅读数的最后一条路)取不到数据。修法:**在雷电模拟器里"
+                            "打开微信读书 App**(必要时退出重登),然后跑 "
+                            "`python scripts/weread_app_token.py` 重取 token;"
+                            "取到新 token 后下一轮监听自动接回。网页路被账号级拦(`-2041`),"
+                            "App 路是当前唯一能拿到精确阅读数的通道。")
+                    except Exception:  # noqa: BLE001 - 告警失败不影响监听
+                        logger.debug("App 路失效告警推送失败", exc_info=True)
     # 正文:先直抓 mp.weixin.qq.com(不占微信读书配额),**抓空了再用这篇的 reviewId
     # 走微信读书转发页**。此前这里只传 fetch_content=True,把 cover/列表白拿的 reviewId 丢了,
     # 于是直抓被风控的那 26% 正文永远为空 → 盘链认不出 → 飞书卡片整片"—"而员工以为号没发资源

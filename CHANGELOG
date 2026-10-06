@@ -1,3 +1,4 @@
+- [2026-10-06 21:31] FIX: App 路登录态失效要推飞书 —— 光写日志没人看见 (Files: app/services/wechat/_listen.py, tests/test_read_num_health.py)
 - [2026-10-06 20:56] FIX: 阅读数断供 8 天无人知 —— 体检假绿 + 黄档漏报 + App 兜底空转 (Files: app/services/chain_health.py, app/services/weread_app_client.py, app/services/wechat/_listen.py, tests/test_read_num_health.py)
 - [2026-10-06 20:44] FIX: 续期「恢复正常」通知没有前提条件 —— 系统一直健康也天天报 (Files: app/services/wechat/_source.py, tests/test_renewal_recovery_notice.py)
 - [2026-10-06 20:44] FIX: 转存成功了但记录随那一轮被丢弃 —— 卡片显示「待转存」且下轮重转 (Files: app/services/wechat/_source.py, app/services/wechat/_enrich.py, tests/test_renewal_recovery_notice.py, tests/test_wechat_enrich_durability.py)

@@ -138,3 +138,32 @@ class TestAppSelfHealIsNotAFreePass:
         monkeypatch.setattr(c, "_fetch", calls)
         assert c.articles("MP_WXS_1") == [{"readNum": 7}]
         assert c.refreshed is True
+
+
+class TestWhichAppFailuresPageAHuman:
+    """★ **只有"等多久都不会自己好"的才打扰人**(与 `chain_health._classify_source_error` 同一条纪律)。
+
+    限流/网络抖动推飞书,只会训练人忽略告警 —— 而告警一旦被忽略,
+    真出事那次也就没人看了(本仓反复吃这个亏)。
+    """
+
+    def _f(self, exc):
+        import importlib
+        m = importlib.import_module("app.services.wechat._listen")
+        return m._app_auth_needs_human(exc)
+
+    def test_登录超时要人重登(self) -> None:
+        assert self._f(RuntimeError("App 登录态问题:-2012 登录超时 ⇒ 重新取 token")) is True
+
+    def test_同token空转的报错也要人重登(self) -> None:
+        """这正是 2026-10-06 那条:**模拟器里登录态失效**,修法是"在雷电里打开 App"。"""
+        assert self._f(RuntimeError(
+            "重取到的 token 与原来**完全相同**(8 字符)⇒ **模拟器里微信读书的登录态已失效**")) is True
+
+    def test_限流不该打扰人(self) -> None:
+        """⚠️ 反向:限流会自愈,推飞书就是噪音。"""
+        assert self._f(RuntimeError("appmsgpublish 频率限制(200013)")) is False
+        assert self._f(RuntimeError("微信读书接口不可用/被拦截(-2041)")) is False
+
+    def test_网络抖动不该打扰人(self) -> None:
+        assert self._f(TimeoutError("Connection timed out")) is False
