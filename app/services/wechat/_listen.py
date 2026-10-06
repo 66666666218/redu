@@ -405,7 +405,16 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
         except weread_budget.Blocked as exc:
             logger.debug("%s", exc)
         except Exception as exc:  # noqa: BLE001 - 兜底也失败 = 本号没答案,但不影响 cover
-            logger.debug("App 列表兜底失败(%s):%s", b.weread_book_id, str(exc)[:80])
+            # ⚠️⚠️ **兜底也断了必须看得见**(2026-10-06 实测)。这里原来打的是 `debug`,
+            # 而生产日志级别是 INFO ⇒ **App 兜底全断,日志里一个字都没有**。
+            # 代价:这条路(10-05 为"把断了一周的阅读数接回来"而加)**一次都没成功过**,
+            # 也没有任何人知道 —— 每天 17 轮静默失败,看起来和"今天没人发文章"一样。
+            # 每轮只喊一次(142 个号会刷屏),并把它记进 `wr_stats` 供运行记录统计。
+            if not (stats or {}).get("weread_app_fail_logged"):
+                if stats is not None:
+                    stats["weread_app_fail_logged"] = 1
+                logger.warning("App 列表兜底失败(%s):%s —— **App 这条路当前是断的**,阅读数只剩网页路",
+                               b.nickname or b.weread_book_id, str(exc)[:140])
     # 正文:先直抓 mp.weixin.qq.com(不占微信读书配额),**抓空了再用这篇的 reviewId
     # 走微信读书转发页**。此前这里只传 fetch_content=True,把 cover/列表白拿的 reviewId 丢了,
     # 于是直抓被风控的那 26% 正文永远为空 → 盘链认不出 → 飞书卡片整片"—"而员工以为号没发资源

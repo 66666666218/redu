@@ -92,16 +92,40 @@ class WereadAppClient:
         """取某公众号的文章列表(含**精确** `read_num` / `like_num`)。见 `_fetch`。"""
         try:
             return self._fetch(book_id, count, offset)
-        except WereadAppAuthError:
+        except WereadAppAuthError as first:
             if self._on_auth_error is None:
                 raise
+            old_token = str(self._token)
             got = self._on_auth_error()          # 重取凭据(可能是 None)
             if not got:
                 raise                            # 取不到就照实抛,别假装重试过
-            self._token, self._vid = str(got[0]), str(got[1])
+            new_token = str(got[0])
+            # ⚠️⚠️ **重取到的 token 与原来一模一样 ⇒ 重试必然还是同一个错**(2026-10-06 实测)。
+            # 这条路(10-05 加的 App 兜底)**一次都没成功过**:34 条日志全是
+            # 「App 侧凭据已重取并写回」+「App 凭据已自愈,重试这一次请求」——
+            # 而模拟器里的那个值**根本没变**,所谓自愈是**空转**。
+            # **空转最坏的地方不是白费**:它让"这条路全断了"在日志里长得像"自愈机制在正常工作"。
+            # 所以:token 没变就别装模作样地重试,直接给出**要人做的那一步**。
+            if new_token == old_token:
+                self.refreshed = False
+                raise WereadAppAuthError(
+                    f"{first} —— 重取到的 token 与原来**完全相同**({len(new_token)} 字符),"
+                    f"重试必然同样失败 ⇒ **模拟器里微信读书的登录态已失效**,"
+                    f"请在雷电里打开(必要时重新登录)微信读书 App 后重试"
+                ) from first
+            self._token, self._vid = new_token, str(got[1])
             self.refreshed = True
             logger.info("App 凭据已自愈(vid=%s),重试这一次请求", self._vid)
-            return self._fetch(book_id, count, offset)
+            try:
+                return self._fetch(book_id, count, offset)
+            except WereadAppAuthError as second:
+                # ⚠️ **换了 token 还是失效,必须留痕**(2026-10-06):
+                # 此前这里直接上抛,被上层的宽 `except` 吞成一行 **DEBUG** ——
+                # 生产日志级别是 INFO,"App 兜底全断"在日志里一个字都没有。
+                logger.warning("App 路重取凭据后**仍然**登录失效(vid=%s):%s —— "
+                               "App 兜底这条线当前是断的,阅读数只能靠网页路",
+                               self._vid, str(second)[:140])
+                raise
 
     def _fetch(self, book_id: str, count: int, offset: int) -> list[dict[str, Any]]:
         """真正发请求并解析。

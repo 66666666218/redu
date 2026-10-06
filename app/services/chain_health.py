@@ -187,17 +187,26 @@ def check_credentials(db) -> list[dict]:
     rows = db.scalars(select(UserCookie).where(UserCookie.user_id == 1)).all()
     have = {str(r.platform): r.updated_at for r in rows}
     # 只需要凭证的平台(公众号/抖音/贴吧走匿名或档案,不在这张表里)
-    for plat, label in (("weread", "微信读书(公众号阅读数)"),
+    for plat, label in (("weread", "微信读书(Cookie/书架)"),
                         ("zhihu", "知乎(盘链搜索)"),
                         ("xunlei", "迅雷(转存)"),
                         ("quark", "夸克(转存)"),
                         ("baidupan", "百度网盘(转存)"),
                         ("goofish", "闲鱼(采集)")):
         at = have.get(plat)
+        # ⚠️⚠️ **这一行只验 `shelf`,根本不碰列表接口** —— 而"公众号阅读数"走的正是列表接口
+        # (`/web/mp/articles` 或 App `book/articles`)。所以这句说明要**跟着这一行一直挂着**,
+        # 不管这个 Cookie 在不在。2026-10-06 实测的假绿:这里报 **🟢「验活 ✓(142 个号)」**
+        # 的同时,阅读数**已经断了 8 天**(覆盖率 1%)。**一个绿灯去管它管不着的事,就是假绿**;
+        # 用户正是被这一行骗过去的(他来问"为什么不带阅读数了",而报告上这里是绿的)。
+        # 处置:标签改名为它**实际验的东西**,并把判阅读数的责任明确推给
+        # `check_read_num_coverage`(产出层那条,判据取库里的真值)。
+        note = ("(⚠️ 本条**只验书架**,不含列表接口 —— 阅读数看「产出」层的「精确阅读数」)"
+                if plat == "weread" else "")
         if at is None:
             # 夸克/百度缺失时转存会降级,不一定是红
             out.append({"name": label, "level": YELLOW if plat in ("quark", "baidupan") else RED,
-                        "detail": "库里没有该平台 Cookie"})
+                        "detail": "库里没有该平台 Cookie" + note})
             continue
         age = (datetime.now() - at).days
         level = GREEN if age <= 7 else YELLOW
@@ -223,7 +232,7 @@ def check_credentials(db) -> list[dict]:
                           f"续期作业会单独推飞书告警。更新于 {str(at)[:16]}")
             else:
                 detail += f" · 验活跳过({why})"
-        out.append({"name": label, "level": level, "detail": detail})
+        out.append({"name": label, "level": level, "detail": detail + note})
     return out
 
 
@@ -475,16 +484,23 @@ def check_read_num_coverage(db, days: int = 3) -> list[dict]:
                  "detail": f"近 {days} 天没有新文,无从判断"}]
     ratio = withnum / total
     detail = f"近 {days} 天入库 {total} 篇,其中有阅读数的 **{withnum}** 篇"
-    if withnum == 0:
-        # 这正是 2026-10-05 那次的形态 —— 采文一切正常,阅读数全无
+    broken = ("查两条路:① 网页 `/web/mp/articles` —— 账号级 `-2041` 时**换新会话也没用**"
+              "(2026-10-06 实测:刚续期、验证通过,第 1 个号就被挡);"
+              "② App `i.weread.qq.com/book/articles` —— token 过期时「重取」拿回来的是**同一个值**"
+              "(模拟器里微信读书登录态失效:在雷电里打开 / 重新登录微信读书 App,"
+              "或跑 `scripts/weread_app_login.py` 重取)。")
+    # ⚠️⚠️ **"几乎全丢"必须按红灯报**(2026-10-06 修)。此前只有"**恰好一篇都没有**"才判红,
+    # 于是 163 篇里有 2 篇侥幸漏进来就掉到 🟡「偏低」—— 而 🟡 是最容易被忽略的那一档。
+    # **实测代价**:阅读数从 09-28 起实际上全断,报告上一直写着"🟡 偏低",**8 天没人发现**,
+    # 直到用户自己来问"为什么不带阅读数了"。**一个会长期挂在黄档的指标,等于没有指标。**
+    # 5% 这条线的依据:轮转窗口正常时覆盖率是三成以上(窗口外的号本来就该显示"—"),
+    # 低到 5% 以下时,"还能侥幸漏进来两篇"与"全断"在处置上无从区分。
+    if ratio < 0.05:
         return [{"name": "公众号·精确阅读数", "level": RED,
-                 "detail": detail + " ⇒ **精确阅读数全丢**。查两条路:网页 "
-                           "`/web/mp/articles`(可能 `-2041` 被拦)、App "
-                           "`i.weread.qq.com/book/articles`(token 可能过期,跑 "
-                           "`scripts/weread_app_login.py` 重取)"}]
+                 "detail": f"{detail}(覆盖率 {ratio:.0%})⇒ **精确阅读数实质上全丢**。{broken}"}]
     if ratio < 0.2:
         return [{"name": "公众号·精确阅读数", "level": YELLOW,
-                 "detail": detail + f"(覆盖率 {ratio:.0%},偏低 —— 通常说明列表额度/兜底有问题)"}]
+                 "detail": detail + f"(覆盖率 {ratio:.0%},偏低 —— 通常说明列表额度/兜底有问题。" + broken + ")"}]
     return [{"name": "公众号·精确阅读数", "level": GREEN,
              "detail": detail + f"(覆盖率 {ratio:.0%})"}]
 
