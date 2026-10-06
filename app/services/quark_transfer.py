@@ -373,6 +373,30 @@ class QuarkTransfer:
                     return found
         return ""
 
+    def delete_files(self, fids: list, *, to_recycle: bool = True) -> dict:
+        """把若干 fid 删进**回收站**(默认)或彻底删除。返回 `{"ok", "message", "count"}`。
+
+        ⚠️⚠️ **这是破坏性能力,调用方必须先确认**。本方法**不抛业务异常**之外的错,
+        但它删的是**用户网盘里的真东西** —— 所以:
+          · `to_recycle=True`(默认)走 `action_type=2` = **进回收站**(可恢复);
+          · 只有明确要"彻底删"时才传 `False`,那时**不可恢复**。
+
+        ⚠️ **端点是按公开协议写的,没在真数据上试过** —— 上线前请先用
+        `scripts/quark_delete_probe.py`(**它建一个临时文件夹再删它**)验证,
+        别拿真资源当小白鼠。
+        """
+        fids = [str(f) for f in (fids or []) if str(f).strip()]
+        if not fids:
+            return {"ok": False, "message": "没有要删的 fid", "count": 0}
+        try:
+            data = self._request("POST", "/1/clouddrive/file/delete", api=QUARK_FILE_API,
+                                 json={"action_type": 2 if to_recycle else 1,
+                                       "filelist": fids, "exclude_fids": []})
+        except (QuarkAuthError, QuarkError) as exc:
+            return {"ok": False, "message": str(exc)[:160], "count": 0}
+        return {"ok": True, "message": "已" + ("移入回收站" if to_recycle else "彻底删除"),
+                "count": len(fids), "raw": str(data.get("data"))[:120]}
+
     def keepalive(self) -> bool:
         """每日保活:轻量列根目录,让服务端滚动延长 __puus 有效期(防闲置过期)。
 

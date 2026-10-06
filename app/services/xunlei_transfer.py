@@ -808,6 +808,52 @@ def list_files(parent_id: str = "", cred: dict | None = None, limit: int = 200,
         raise XunleiDriveError(f"列目录失败:{type(exc).__name__}: {str(exc)[:120]}") from exc
 
 
+def list_all_files(parent_id: str = "", cred: dict | None = None, page_size: int = 200,
+                   max_pages: int = 500, include_trashed: bool = False) -> list[dict]:
+    """**翻页**列完一个目录 —— 跟着响应里的 `next_page_token` 一直走到没有为止。
+
+    ⚠️⚠️ **为什么必须有它**(2026-10-07 实测):原来的 `list_files` **只发一页请求**,
+    而响应里**明明带着 `next_page_token`** 却从来没人用 ⇒
+    **任何条目数超过 `limit` 的目录,后面的内容我们永远看不到**。
+    这就是"**盘上真实占用 24.17 TiB,而本地索引 `xunlei_resources` 只有 8 行**"的直接原因 ——
+    不是盘里没东西,是我们**只看了第一页**。
+
+    `max_pages` 是**防跑飞**的上限(默认 500 页 × 200 = 10 万条/目录);
+    真撞上上限会记一条 warning —— **别让"没列完"和"列完了"长得一样**(本仓的母题)。
+    """
+    cred = cred or _credentials()
+    if not cred:
+        return []
+    out: list[dict] = []
+    token = ""
+    for page in range(max_pages):
+        def _once(_t=token) -> dict:
+            p = {"limit": str(page_size), "parent_id": parent_id, "with_audit": "true"}
+            if _t:
+                p["page_token"] = _t
+            r = requests.get(f"{_API}/drive/v1/files",
+                             headers=_drive_headers(_fresh_cred(cred)), timeout=_TIMEOUT, params=p)
+            data = _json(r)
+            if r.status_code != 200:
+                raise XunleiDriveError(f"HTTP {r.status_code}: {str(data)[:120]}")
+            return data
+        try:
+            data = _with_captcha_retry(_once)
+        except XunleiDriveError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("迅雷翻页列目录失败")
+            raise XunleiDriveError(f"列目录失败:{type(exc).__name__}: {str(exc)[:120]}") from exc
+        files = data.get("files") or []
+        out.extend(files if include_trashed else [f for f in files if not f.get("trashed")])
+        token = str(data.get("next_page_token") or "")
+        if not token or not files:
+            return out
+    logger.warning("迅雷列目录达到翻页上限 %d 页(parent_id=%s)—— **可能没列完**",
+                   max_pages, parent_id or "/")
+    return out
+
+
 def transfer_and_share(share_url: str, parent_id: str = "", settings=None) -> dict:
     """`pan.xunlei.com/s/xxx` → 转存到我方盘 → 生成我方分享链。
 

@@ -52,7 +52,12 @@ def _collect_resources(xt, session, user_id: int, parent_id: str, depth: int,
       文件夹里**只有文件夹** → 当容器,继续往下走。
     单文件(根目录直接躺着的)也各算一条。
     """
-    for f in xt.list_files(parent_id):
+    # ⚠️⚠️ **必须翻页**(2026-10-07 修):原来这里用 `list_files` —— 它**只发一页**,
+    # 而响应里明明有 `next_page_token` 却从来没用过 ⇒
+    # **任何超过一页(约 200 条)的目录,后面的内容我们永远看不到**。
+    # 实测代价:盘上真实占用 **24.17 TiB**,而本地索引 `xunlei_resources` **只有 8 行** ——
+    # 不是盘里没东西,是我们**只看了第一页**。
+    for f in xt.list_all_files(parent_id):
         fid = str(f.get("id") or "")
         name = str(f.get("name") or "").strip()
         if not fid or not name or fid in known:
@@ -61,7 +66,7 @@ def _collect_resources(xt, session, user_id: int, parent_id: str, depth: int,
             continue                                    # 迅雷自带系统目录
         is_dir = f.get("kind") == "drive#folder"
         if is_dir:
-            children = xt.list_files(fid)
+            children = xt.list_all_files(fid)
             if not children:
                 continue                                # 空目录不算资源
             # 分类目录(我的转存/最全文件…)或**纯文件夹** → 继续深入,不登记自己
@@ -96,7 +101,9 @@ def sync_xunlei_resources(session, user_id: int, settings=None) -> dict:
         return {"status": "no_cred", "scanned": 0, "new": 0, "items": [],
                 "message": "未配迅雷凭据"}
     try:
-        root = xt.list_files("")                        # 根目录
+        # ⚠️ **根目录也要翻页**(2026-10-07):根目录本身就有几千条(实测),
+        # 只发一页的话后面的永远看不到 —— 这是"24 TiB 只索引到 8 行"的一半原因。
+        root = xt.list_all_files("")
         if not root:
             return {"status": "empty", "scanned": 0, "new": 0, "items": []}
 

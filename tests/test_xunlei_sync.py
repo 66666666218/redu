@@ -42,6 +42,12 @@ class _FakeXt:
     def list_files(self, parent_id="", **kw):
         return self.tree.get(parent_id, [])
 
+    def list_all_files(self, parent_id="", **kw):
+        """⚠️ 扫盘现在走**翻页版**(2026-10-07:原来只发一页 ⇒ 超过一页的目录永远看不到,
+        实测盘上 24 TiB 只索引到 8 行)。桩里让它与 `list_files` **同一份数据** ——
+        这里测的是**收集逻辑**,翻页本身另有 `tests/test_xunlei_pagination.py`。"""
+        return self.list_files(parent_id, **kw)
+
     def share_files(self, file_ids, **kw):
         self.shared += list(file_ids)
         return {"status": "ok", "share_url": f"https://pan.xunlei.com/s/{file_ids[0]}?pwd=x",
@@ -106,7 +112,7 @@ def test_sync_dedupes_against_group_collector(session, monkeypatch) -> None:
 
     import app.services.xunlei_transfer as xt_mod
     monkeypatch.setattr(xt_mod, "_credentials", staticmethod(lambda settings=None: {"a": 1}))
-    monkeypatch.setattr(xt_mod, "list_files",
+    monkeypatch.setattr(xt_mod, "list_all_files",
                         staticmethod(lambda parent_id="", **kw: [_folder("P1", "x")]))
     monkeypatch.setattr(xs, "_collect_resources", fake_collect)
 
@@ -134,7 +140,7 @@ def test_sync_reports_failure_when_listing_raises(session, monkeypatch) -> None:
     from app.services import xunlei_transfer as xt
 
     monkeypatch.setattr(xt, "_credentials", lambda *a, **k: {"access_token": "x"})
-    monkeypatch.setattr(xt, "list_files", lambda *a, **k: (_ for _ in ()).throw(
+    monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: (_ for _ in ()).throw(
         xt.XunleiDriveError("HTTP 403: captcha_invalid")))
     out = xs.sync_xunlei_resources(session, 1)
     assert out["status"] == "failed" and "403" in out["message"]
@@ -145,7 +151,7 @@ def test_sync_still_ok_when_disk_really_empty(session, monkeypatch) -> None:
     from app.services import xunlei_transfer as xt
 
     monkeypatch.setattr(xt, "_credentials", lambda *a, **k: {"access_token": "x"})
-    monkeypatch.setattr(xt, "list_files", lambda *a, **k: [])
+    monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: [])
     assert xs.sync_xunlei_resources(session, 1)["status"] == "empty"
 
 
