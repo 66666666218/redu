@@ -41,6 +41,9 @@ SLOW_SITES: dict[str, str] = {
     # 夸克口令:循环里跑**模拟器**(15–20 秒/条)。调用处写的是裸 `resolve(`,
     # 本模块内它是 `quark_kouling.resolve`。
     "app/services/quark_kouling.py": "res = resolve(",
+    # 公众号入库的**迅雷**补链段(2026-10-06 新增):走统一入口 `transfer_pan_url`,
+    # 而迅雷转存要过 captcha 续期,**可能几十秒**。
+    "app/services/wechat/_enrich.py": "res = transfer_pan_url(",
 }
 
 

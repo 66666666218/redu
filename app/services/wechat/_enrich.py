@@ -284,24 +284,29 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                         "「Cookie 管理」页配 quark 平台即可(或 .env 的 QUARK_COOKIE),"
                         "保存后下一轮自动生效",
                         settings=settings)
-    if settings.pan_transfer_enabled and quark_ck:
-        quark = QuarkTransfer(quark_ck, fid_store=settings.quark_fid_store)
-        # 盘链级转存去重:同一资源(相同夸克分享链)只转存一次,后续文章复用首篇的
-        # 我方分享链——多个对标号发同一资源时,旧逻辑每篇各存一份(浪费空间+成倍风控暴露)。
-        reused: dict[str, tuple[str, str]] = {}  # pan_url -> (my_share_url, 提取码)
-        # 补转存兜底:历史转存失败(有原链无我链)的文章每轮补 `pan_transfer_backfill_limit` 篇,
-        # 让"推送带我的夸克链接"的覆盖率逐渐收敛(同步入库时走的是实时转存,这里补的是当场失败
-        # 与该逻辑上线前的旧文)。
-        # 排序按 id 升序=队头优先,所以**永久失败的必须当场出队**,否则几篇源已被封的死链
-        # 年年霸占配额,后面真正能转的文章永远轮不到(2026-09-22 本机库实测:24 篇 09-15
-        # 的文章卡在队头,一周没动过)。
-        # 入队还要再加一条"含夸克链":队列里只有夸克转存会消费(百度走自己的门控),
-        # 只带百度/UC/迅雷链的历史行既转不动也不落 my_pan_urls,等于**永久霸占队头**,
-        # 把每轮 8 个名额吃光,真正待转的夸克文再也轮不到(2026-09-26 第八轮审计 High)。
+    # ⚠️⚠️ **补转存队列必须算在"有没有夸克 Cookie"之外**(2026-10-06 修)。
+    # 它同时喂 **夸克 / 百度 / 迅雷** 三段,而队列原来只在 `if quark_ck:` 里算 ⇒
+    # "没配夸克、但配了百度"时三段全拿不到 `transfer_rows`(实测直接 `UnboundLocalError`,
+    # 而且那等于**整条兜底不存在**:配了百度也永远不会补链)。
+    # 门控改成 `pan_transfer_enabled` —— 任一盘可用就该补,别绑在某一个盘上。
+    #
+    # 入队条件 = **认得出且转得动的盘**(夸克/百度/迅雷):
+    # 只带 UC 的历史行既转不动也不落 `my_pan_urls`,放进来等于**永久霸占队头**、
+    # 把每轮 8 个名额吃光,真正待转的再也轮不到(2026-09-26 第八轮审计 High)。
+    # 排序按 id 升序=队头优先,所以"永久失败"的必须当场出队(见各段里的出队逻辑)。
+    backfill: list = []
+    transfer_rows = list(rows)
+    if settings.pan_transfer_enabled and run_backfill:
         try:
-            backfill = [] if not run_backfill else session.scalars(select(WechatArticle).where(
+            backfill = session.scalars(select(WechatArticle).where(
                 WechatArticle.user_id == user_id, WechatArticle.pan_urls != "",
-                WechatArticle.pan_urls.like("%pan.quark.cn%"),
+                # ⚠️ **队列要收"能转的盘",不是"只有夸克"**(2026-10-06 扩到**百度 + 迅雷**)。
+                # 原来写死 `like("%pan.quark.cn%")` ⇒ **只带百度/迅雷链的文章永远进不了队列**,
+                # 于是它们从入库那轮起就永久停在"⏳待转存"—— 用户口径:「百度链和迅雷也需要
+                # 设置上补链」。这三条转存路径**本来就有**(下面各一段),只是队列不收它们。
+                or_(WechatArticle.pan_urls.like("%pan.quark.cn%"),
+                    WechatArticle.pan_urls.like("%pan.baidu.com/s/%"),
+                    WechatArticle.pan_urls.like("%pan.xunlei.com%")),
                 or_(WechatArticle.my_pan_urls.is_(None), WechatArticle.my_pan_urls == "")
             ).order_by(WechatArticle.id).limit(
                 max(1, int(getattr(settings, "pan_transfer_backfill_limit", 8) or 8)))).all()
@@ -311,6 +316,11 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
         # 而不是布尔值,放进 in 的判断里语义含混。
         row_ids = {id(x) for x in rows}
         transfer_rows = list(rows) + [x for x in backfill if id(x) not in row_ids]
+    if settings.pan_transfer_enabled and quark_ck:
+        quark = QuarkTransfer(quark_ck, fid_store=settings.quark_fid_store)
+        # 盘链级转存去重:同一资源(相同夸克分享链)只转存一次,后续文章复用首篇的
+        # 我方分享链——多个对标号发同一资源时,旧逻辑每篇各存一份(浪费空间+成倍风控暴露)。
+        reused: dict[str, tuple[str, str]] = {}  # pan_url -> (my_share_url, 提取码)
         for r in transfer_rows:
             dead = False
             # 只把夸克链交给夸克:UC/迅雷/百度链走识别与各自的转存门控,
@@ -411,7 +421,7 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
     # 2026-09-26 补提醒:缺 Cookie / Cookie 失效此前都只有一行 info 日志(或静默 break),
     # 运营者看到的是永久的"—",与夸克那套"点名告警"不对等。
     if settings.pan_transfer_enabled and any(
-            "pan.baidu.com/s/" in (r.pan_urls or "") for r in rows):
+            "pan.baidu.com/s/" in (r.pan_urls or "") for r in transfer_rows):
         from app.services.alert_service import notify_incident
         from app.services.baidupan_transfer import (BaiduPanAuthError, BaiduPanClient,
                                                     extract_pwd)
@@ -434,7 +444,7 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
             baidu_client = BaiduPanClient(bck)
             login_checked = False   # 每轮最多一次 loginStatus 定性,不额外刷接口
             baidu_dead = False
-            for r in rows:
+            for r in transfer_rows:
                 for u in [x.strip() for x in (r.pan_urls or "").splitlines()
                           if x.strip().startswith("https://pan.baidu.com/s/")][:2]:
                     try:
@@ -490,6 +500,58 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                         logger.info("百度链转存跳过 %s: %s", u[:50], str(exc)[:70])
                 if baidu_dead:
                     break
+    # 迅雷云盘链接:走**统一入口** `pan_discovery.transfer_pan_url`(三盘分发,含 captcha 自愈)。
+    # ⚠️ **为什么用统一入口而不是照抄百度那段**(2026-10-06):迅雷的转存带 captcha 续期、
+    # 失败语义也特殊(未配 Cookie 要标 `pending` 而不是终态),那套都封在 `xunlei_transfer`
+    # 与统一入口里了 —— 这里再手写一遍就是**第二个真相源**(本仓吃过这个亏)。
+    # 用户口径:「百度链和迅雷也需要设置上补链」。
+    if settings.pan_transfer_enabled and any(
+            "pan.xunlei.com" in (r.pan_urls or "") for r in transfer_rows):
+        from app.services.pan_discovery import transfer_pan_url
+
+        for r in transfer_rows:
+            urls = [x.strip() for x in (r.pan_urls or "").splitlines()
+                    if "pan.xunlei.com" in x][:2]
+            if not urls:
+                continue
+            got = ""
+            for u in urls:
+                # ① 历史复用:库里已有别人转好的**同一条链**,直接用,别重复搬一份
+                hist = session.execute(
+                    select(WechatArticle.my_pan_urls).join(
+                        WechatPanLink, WechatPanLink.article_id == WechatArticle.id)
+                    .where(WechatPanLink.pan_url == u,
+                           WechatArticle.user_id == user_id,   # 只复用本租户自己转的
+                           WechatArticle.my_pan_urls.like("%pan.xunlei.com%"),
+                           WechatArticle.id != r.id).limit(1)).scalar()
+                picked = next((x.strip() for x in (hist or "").splitlines()
+                               if "pan.xunlei.com" in x), "")
+                if picked:
+                    got = picked.split(" (提取码")[0].strip()
+                    break
+                # ② 首次见到该资源:转存(统一入口**不抛**,失败也是结构化返回)
+                # ⚠️ **网络活之前先放掉写锁**(与夸克/百度同一条纪律,由
+                # `tests/test_slowwork_guard.py` 守着):迅雷转存要走 captcha 续期,
+                # **可能几十秒**,而 SQLite 是单写者、别的作业 `busy_timeout` 只有 30 秒。
+                session.commit()
+                res = transfer_pan_url(session, user_id, u, settings,
+                                       snippet=f"{r.title or ''} {(r.content or '')[:200]}")
+                if res.get("status") == "ok" and res.get("our_url"):
+                    got = str(res["our_url"])
+                    break
+                logger.info("迅雷链转存未成 %s(%s):%s", u[:50], res.get("status"),
+                            str(res.get("message"))[:70])
+            if not got:
+                continue
+            mine = [x for x in (r.my_pan_urls or "").splitlines() if x.strip()]
+            mine.append(f"{got} [迅雷]")
+            r.my_pan_urls = chr(10).join(mine)[:2000]
+            replacements.setdefault(r.id, []).append((urls[0], got, ""))
+            _commit_now(session, "迅雷转存")     # 外部副作用已发生 ⇒ 当场落盘
+            try:
+                _relink_notify(session, user_id, settings, r, "迅雷", got, "")
+            except Exception:  # noqa: BLE001 - 补链失败不影响转存结果
+                logger.debug("迅雷补链消息失败", exc_info=True)
     # ⚠️⚠️ **转存结果必须在这里落库,别再往下拖**(2026-10-05 生产事故)。
     #
     # 下面那段(资源共振告警 / 交叉提取)是**锦上添花**,而外层 `_listen_round` 把整个

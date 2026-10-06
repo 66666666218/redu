@@ -2892,33 +2892,43 @@ def test_listen_alert_send_failure_keeps_round_articles(session, monkeypatch: py
     assert session.scalar(select(FeishuAlert)) is None                 # 但冷却期不烧
 
 
-def test_backfill_queue_skips_non_quark_history(session, monkeypatch: pytest.MonkeyPatch) -> None:
-    """补转存队列每轮只有 `pan_transfer_backfill_limit` 个名额、按 id 升序取队头:
-    只带百度链的历史文夸克转不动、也不落 `my_pan_urls`,于是**永久霸占队头**,
-    把名额吃光,真正待转的夸克文永远轮不到(必须根本不入队)。"""
-    from app.services.quark_transfer import QuarkTransfer
+def test_backfill_queue_takes_transferable_pans_only(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """★ **入队条件 = "认得出且转得动",不是"只有夸克"**(2026-10-06 改)。
 
+    改之前写死 `like('%pan.quark.cn%')` ⇒ **只带百度/迅雷链的历史文永远进不了补转存队列**,
+    从入库那轮起就永久停在"⏳待转存";而百度/迅雷的转存能力**本来就有**。
+    (用户口径:「百度链和迅雷也需要设置上补链」。)
+
+    ⚠️ 但"**转不动的盘不能入队**"这条**仍然成立**:它既转不动也不落 `my_pan_urls`,
+    等于永久霸占队头、把每轮名额吃光(2026-09-26 第八轮审计 High)——
+    所以这条测试守的是"**能转才收**",拿 **UC 链**当反例(它是我们唯一不转的盘)。
+    """
+    from app.services.baidupan_transfer import BaiduPanClient
+
+    # 队头是一条**转不动的** UC 链(id 最小 = 队头),后面才是能转的百度链
+    old_uc = WechatArticle(user_id=1, title="UC老文", url="https://mp.weixin.qq.com/s/uc",
+                           source="listen", pan_urls="https://drive.uc.cn/s/1UCONLY")
     old_baidu = WechatArticle(user_id=1, title="百度老文", url="https://mp.weixin.qq.com/s/bo",
-                              source="listen", pan_urls="https://pan.baidu.com/s/1OLDONLY")
-    old_quark = WechatArticle(user_id=1, title="夸克老文", url="https://mp.weixin.qq.com/s/so",
-                              source="listen", pan_urls="https://pan.quark.cn/s/1NEED")
+                              source="listen", pan_urls="https://pan.baidu.com/s/1NEED")
+    # 本轮得**有新文**才会走补转存队列(空轮直接早退)
     fresh = WechatArticle(user_id=1, title="本轮新文", url="https://mp.weixin.qq.com/s/fn",
                           source="listen", pan_urls="https://pan.quark.cn/s/1FRESH")
-    session.add_all([old_baidu, old_quark, fresh])
+    session.add_all([old_uc, old_baidu, fresh])
     session.commit()
 
-    calls: list[str] = []
-    monkeypatch.setattr(QuarkTransfer, "__init__", lambda self, *a, **kw: None)
-    monkeypatch.setattr(
-        QuarkTransfer, "transfer_and_share",
-        lambda self, url, **kw: (calls.append(url),
-                                 {"share_url": url.replace("/s/1", "/s/MINE"), "password": ""})[1])
-    st = _settings(quark_cookie="ck=x", pan_transfer_enabled=True, wechat_listen_sample_new=False,
+    _baidu_cookie_only(monkeypatch)
+    monkeypatch.setattr(BaiduPanClient, "__init__", lambda self, *a, **k: None)
+    monkeypatch.setattr(BaiduPanClient, "transfer_and_share",
+                        lambda self, url, password="", **k: {
+                            "share_url": "https://pan.baidu.com/s/1MINE", "password": ""})
+    st = _settings(quark_cookie="", pan_transfer_enabled=True, wechat_listen_sample_new=False,
                    pan_transfer_backfill_limit=1)
     wechat_monitor._enrich_new_articles(session, 1, st, [fresh])
-    assert calls == ["https://pan.quark.cn/s/1FRESH", "https://pan.quark.cn/s/1NEED"]
-    assert "pan.quark.cn/s/MINE" in old_quark.my_pan_urls  # 唯一名额给了真正待转的夸克文
-    assert old_baidu.my_pan_urls in (None, "")             # 百度链走自己的门控,不占队列
+
+    assert "1MINE" in (old_baidu.my_pan_urls or ""), (
+        "百度链现在能转了、也该入队 —— 唯一名额该给它(以前它永远进不来)")
+    assert not (old_uc.my_pan_urls or "").strip(), (
+        "转不动的 UC 链**不该被碰**:它占了名额也落不下链,等于永久霸占队头")
 
 
 def test_push_listen_sanitizes_llm_narrative(session, monkeypatch) -> None:
@@ -4592,3 +4602,49 @@ def test_告警步骤炸了也不能丢转存结果(session, monkeypatch) -> Non
         session.expire(r)
         assert (r.my_pan_urls or "").startswith("https://pan.quark.cn/"), (
             f"文{r.id} 的转存结果被回滚丢了 —— 这正是 2026-10-05 那次事故的形态")
+
+
+def test_xunlei_links_get_backfilled_too(session, monkeypatch) -> None:
+    """★ **迅雷链也要补链**(2026-10-06,用户口径:「百度链和迅雷也需要设置上补链」)。
+
+    走的是**统一入口** `pan_discovery.transfer_pan_url`(三盘分发、含 captcha 自愈),
+    不在 `_enrich` 里另写一套迅雷逻辑 —— 那会变成第二个真相源(本仓吃过这个亏)。
+    """
+    import app.services.pan_discovery as pd
+
+    r = WechatArticle(user_id=1, title="迅雷资源", url="https://mp.weixin.qq.com/s/xl",
+                      source="listen", pan_urls="https://pan.xunlei.com/s/1XL")
+    session.add(r)
+    session.commit()
+
+    seen: list[str] = []
+
+    def _tp(sess, uid, url, settings=None, snippet=""):
+        seen.append(url)
+        return {"status": "ok", "our_url": "https://pan.xunlei.com/s/1MINE", "code": "",
+                "message": ""}
+    monkeypatch.setattr(pd, "transfer_pan_url", _tp)
+
+    st = _settings(quark_cookie="", pan_transfer_enabled=True, wechat_listen_sample_new=False)
+    reps = wechat_monitor._enrich_new_articles(session, 1, st, [r])
+
+    assert seen == ["https://pan.xunlei.com/s/1XL"], seen
+    assert "[迅雷]" in (r.my_pan_urls or ""), r.my_pan_urls
+    assert reps[r.id] == [("https://pan.xunlei.com/s/1XL", "https://pan.xunlei.com/s/1MINE", "")]
+
+
+def test_xunlei_failure_leaves_it_retryable(session, monkeypatch) -> None:
+    """⚠️ 反向:没转成(未配凭据/额度)就**别落链** —— 落了链等于"已转存",
+    下一轮再也不会补,而员工点开是空的。留空才会重试。"""
+    import app.services.pan_discovery as pd
+
+    r = WechatArticle(user_id=1, title="迅雷资源", url="https://mp.weixin.qq.com/s/xl2",
+                      source="listen", pan_urls="https://pan.xunlei.com/s/1XL2")
+    session.add(r)
+    session.commit()
+    monkeypatch.setattr(pd, "transfer_pan_url",
+                        lambda *a, **k: {"status": "pending", "our_url": "", "code": "",
+                                         "message": "未配迅雷凭据"})
+    st = _settings(quark_cookie="", pan_transfer_enabled=True, wechat_listen_sample_new=False)
+    wechat_monitor._enrich_new_articles(session, 1, st, [r])
+    assert not (r.my_pan_urls or "").strip(), "没转成就不该落链,好让下轮重试"
