@@ -1,3 +1,4 @@
+- [2026-10-07 00:22] FEAT: 全平台共振榜接进推送(每天10:30→多平台监控群)+ 喂给 agent 当独立信号 (Files: app/services/resource_library.py, app/services/early_agent.py, app/services/agent_learning.py, config/settings.py, app/services/scheduler.py, tests/)
 - [2026-10-07 00:10] FEAT: 跨平台共振榜(只读) —— 资源身份从'盘链'换成'核心资源名' (Files: app/services/resource_library.py, tests/test_cross_platform_resonance.py)
 - [2026-10-06 23:39] FEAT: 小红书改 `--lt cookie` —— 不再弹二维码等人扫 (Files: app/services/mediacrawler_source.py, config/settings.py, tests/test_mediacrawler_cookie_login.py, tests/test_mediacrawler_source.py, tools/xhs_export_cookie.py[gitignored], .env)
 - [2026-10-06 23:22] FEAT: 补链扩到百度+迅雷(队列原来只收夸克链) (Files: app/services/wechat/_enrich.py, tests/test_wechat_monitor.py, tests/test_slowwork_guard.py)

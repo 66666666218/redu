@@ -194,6 +194,35 @@ def detect_signals(db: Session, user_id: int, settings: Settings) -> list[dict]:
                         s["parts"].append("共振")
                         s["score"] = min(100, s["score"] + w["resonance"])
                         s["boards"] = sorted({s1["board"], s2["board"]})
+
+    # ⑦ **跨平台同资源共振**(2026-10-07 新增,用户口径「多平台共振」)。
+    # ⚠️ **与 ⑥ 不是一回事,别合并**:
+    #   ⑥ = 同一个**词**在多个**板块**冒头(板块 = 微博/百度那些热榜);
+    #   ⑦ = 同一份**资源**在多个**平台**被人推(平台 = 公众号/微博/贴吧/知乎/抖音)。
+    # ⑦ 更接近"**有人已经在靠它拉新,而且不止一处**"这个事实 —— 所以它**单独成一个信号**
+    # (`cross_resonance`),能被 `agent_learning` 独立回测、独立调权,而不是混进 ⑥ 里。
+    # 身份用的是 `resource_library.cross_platform_resonance` 的**核心资源名**
+    # (盘链跨不了平台:每个推广号自己建链,实测两表零交集)。
+    try:
+        from app.services.resource_library import cross_platform_resonance
+
+        hot_res = cross_platform_resonance(db, user_id, days=90, min_platforms=2,
+                                           min_accounts=2, limit=40)
+    except Exception:  # noqa: BLE001 - 共振榜取不到不能拖垮信号检测
+        logger.exception("跨平台共振榜取数失败(本轮跳过该信号)")
+        hot_res = []
+    for s in signals:
+        if "跨平台共振" in s["parts"] or len(s["norm"]) < settings.focus_min_len:
+            continue
+        for r in hot_res:
+            nm = str(r.get("name") or "")
+            if len(nm) < settings.focus_min_len:
+                continue
+            short, long_ = (s["norm"], nm) if len(s["norm"]) <= len(nm) else (nm, s["norm"])
+            if short in long_:          # 与 ⑥ 同一条包含判据(短的在长的里面)
+                s["parts"].append(f"跨平台共振({r['platform_count']}平台/{r['account_count']}号)")
+                s["score"] = min(100, s["score"] + w["cross_resonance"])
+                break
     return sorted(signals, key=lambda x: -x["score"])
 
 

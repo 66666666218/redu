@@ -275,6 +275,17 @@ def resonance_resources(session: Session, user_id: int, days: int = 30,
     return _rows_to_resources(session, user_id, rows)
 
 
+#: 平台代号 → 中文(卡片上给人看;`discovered_pan_links.platform` 存的是英文代号)
+_PLATFORM_CN = {"weibo": "微博", "tieba": "贴吧", "zhihu": "知乎", "douyin": "抖音",
+                "douyin-kouling": "抖音口令", "xiaohongshu": "小红书", "bilibili": "B站",
+                "kuaishou": "快手", "公众号": "公众号"}
+
+
+def _cn(platforms) -> str:
+    """平台列的中文串 —— ⚠️ 不认识的代号**原样留着**,别悄悄吞掉(那会让人以为没这个平台)。"""
+    return "/".join(_PLATFORM_CN.get(str(p), str(p)) for p in (platforms or []))
+
+
 #: 资源名里的**通用前后缀** —— 它们区分不出一份资源,只制造"同物异名"。
 #: 归一化时剥掉,让「高性价比人生指南 pdf电子版 共338页」与「《高性价比人生指南》pdf」
 #: 落到**同一个身份**上。
@@ -334,7 +345,8 @@ def core_resource_name(name: str) -> str:
 
 
 def cross_platform_resonance(session: Session, user_id: int, days: int = 90,
-                             min_platforms: int = 2, limit: int = 20) -> list[dict]:
+                             min_platforms: int = 2, min_accounts: int = 1,
+                             limit: int = 20) -> list[dict]:
     """**跨平台共振榜**:同一份资源在**几个平台、被几个号**在推(2026-10-07)。
 
     ## 为什么不能沿用 `resonance_resources`
@@ -368,7 +380,11 @@ def cross_platform_resonance(session: Session, user_id: int, days: int = 90,
         b["variants"][raw_name] = b["variants"].get(raw_name, 0) + 1
         b["platforms"].add(platform or "未知")
         if account:
-            b["accounts"].add(f"{platform}:{account}")
+            # ⚠️⚠️ **账号身份只按"人",不带平台前缀**(2026-10-07 实测踩到):
+            # 原来存 `f"{platform}:{account}"` ⇒ **同一个人跨 3 个平台被算成 3 个号** ——
+            # `min_accounts` 于是完全失效,而它挡的正是"矩阵号"(同一个人多平台分发,
+            # 那不是"需求被验证过")。平台维度已经由 `platforms` 单独记着,不必混进账号里。
+            b["accounts"].add(str(account))
         if pan_url:
             b["pans"].append(pan_url)
 
@@ -393,6 +409,11 @@ def cross_platform_resonance(session: Session, user_id: int, days: int = 90,
     out: list[dict] = []
     for b in buckets.values():
         if len(b["platforms"]) < min_platforms:
+            continue
+        # ⚠️ `min_accounts` 挡的是**"矩阵号"不是共振**:同一个人在多平台发同一份资源
+        # 也能凑出"平台数=2",但那说明不了"需求被验证过"。给人看的榜可以留 1(配 `platforms`
+        # 一起判),给 agent 当信号时必须 ≥2,否则它会把自家人多平台分发读成市场热度。
+        if len(b["accounts"]) < min_accounts:
             continue
         pans = [u for u in dict.fromkeys(b["pans"]) if u]   # 去重保序
         my = ""
@@ -455,6 +476,84 @@ def library_summary(session: Session, user_id: int, days: int = 90) -> dict:
     discovered = len(_discovered_resources(session, user_id, days=days, limit=10000))
     return {"total_links": int(total), "multi_account": int(verified),
             "discovered": discovered, "days": days}
+
+
+def push_cross_platform_resonance(session: Session, user_id: int, settings=None,
+                                  days: int = 30, min_platforms: int = 2,
+                                  min_accounts: int = 2, limit: int = 12) -> bool:
+    """跨平台共振榜 → 飞书卡(2026-10-07,用户口径「每天推一次」)。
+
+    去向:`multiplatform` 板块(即「多平台监控」群,未配回落主群)。
+
+    ⚠️ **门槛是 `平台≥2` **且** `号数≥2`,不是"平台≥2"就够**:
+    同一个人在多平台发同一份资源也能凑出平台数 2,但那说明不了"需求被验证过"
+    —— 那是**矩阵号**,不是共振。宁可少推几条。
+    """
+    from config.settings import get_settings
+
+    settings = settings or get_settings()
+    rows = cross_platform_resonance(session, user_id, days=days,
+                                    min_platforms=min_platforms,
+                                    min_accounts=min_accounts, limit=limit)
+    if not rows:
+        return False
+    from app.services.feishu._cards import _col_set_row, _md_safe
+    from app.services.feishu_client import FeishuClient, webhook_for
+
+    hook = webhook_for(settings, "multiplatform")
+    if not hook:
+        return False
+    brand = (getattr(settings, "brand_name", "") or "").strip()
+    elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
+        f"近 {days} 天里,**同一份资源在多个平台被人同时推** —— 需求被反复验证过的:"
+        f"（按平台数排序,⚠️ 只看「几个平台/几个号」,不看我方有没有）"}},
+        _col_set_row([("**资源**", 6), ("**平台**", 3), ("**号数**", 2), ("**我方链**", 2)],
+                     grey=True)]
+    for r in rows:
+        my = r.get("my_link") or ""
+        cell = "[▶ 打开]({})".format(_md_safe(my)) if my else "—"
+        elements.append(_col_set_row([
+            (_md_safe(str(r.get("name") or "")[:40]), 6),
+            (_md_safe(_cn(r.get("platforms"))[:24]), 3),
+            (str(r.get("account_count") or 0), 2),
+            (cell, 2)]))
+    card = {"config": {"wide_screen_mode": True},
+            "header": {"template": "orange", "title": {"tag": "plain_text",
+                                                       "content": f"🔥 {brand + ' · ' if brand else ''}"
+                                                                  f"全平台共振榜 · {len(rows)} 个"}},
+            "elements": elements}
+    try:
+        return FeishuClient(hook, getattr(settings, "feishu_secret", "")).send_card(card)
+    except Exception:  # noqa: BLE001 - 推送失败不该影响采集
+        logger.exception("跨平台共振榜推送失败")
+        return False
+
+
+def cross_resonance_tick(settings=None) -> int:
+    """定时入口(每天一次):全平台共振榜推「多平台监控」群。返回发送成功数。
+
+    ⚠️ 与 `push_viral_alerts` 那种"事件驱动"不同,这条是**固定节奏的日报** ——
+    共振是**沉淀信号**(窗口期内被反复验证),不会因为晚看两小时就变。
+    """
+    from config.settings import get_settings
+
+    settings = settings or get_settings()
+    from app.db import get_session_local
+    from app.db.models import User
+
+    db = get_session_local()()
+    sent = 0
+    try:
+        for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
+            try:
+                if push_cross_platform_resonance(db, uid, settings):
+                    sent += 1
+            except Exception:  # noqa: BLE001 - 单用户失败不影响其余
+                db.rollback()
+                logger.exception("跨平台共振榜推送失败 user=%s", uid)
+    finally:
+        db.close()
+    return sent
 
 
 def detect_viral_resources(session: Session, user_id: int, hours: int = 24,

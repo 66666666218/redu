@@ -74,3 +74,36 @@ def test_backtest_seen_cursor_dedups_across_calls() -> None:
     after_second = _load_stats(db)
     assert after_second.get("增速", {}).get("total") == 1, "静止行不应重复记账"
     db.close()
+
+
+class TestSignalMappingOrder:
+    """★ **信号标签→权重键的映射里,顺序就是语义**(2026-10-07)。
+
+    判定是 `startswith(sig) or sig in part` 且**首个匹配胜** —— 所以「跨平台共振」
+    必须排在「共振」**前面**。排后面的话它永远被"共振"吃掉,**而且不报错、只是永远学不到**
+    (这类静默失效最难发现,所以抽成纯函数单独钉住)。
+    """
+
+    def test_跨平台共振不能被共振吃掉(self) -> None:
+        from app.services.agent_learning import sig_of_part
+
+        assert sig_of_part("跨平台共振(4平台/32号)") == "cross_resonance"
+        assert sig_of_part("共振") == "resonance"
+
+    def test_其余信号照旧(self) -> None:
+        from app.services.agent_learning import sig_of_part
+
+        assert sig_of_part("增速+52%") == "velocity"
+        assert sig_of_part("排名↑3") == "rank_jump"
+        assert sig_of_part("量级200") == "volume"
+
+    def test_认不出的返回空而不是瞎归一类(self) -> None:
+        from app.services.agent_learning import sig_of_part
+
+        assert sig_of_part("某个新标签") == ""
+
+    def test_新权重键有默认值(self) -> None:
+        """没有默认值的话,`load_weights` 补不出来,打分时会 KeyError。"""
+        from app.services.agent_learning import DEFAULT_WEIGHTS
+
+        assert DEFAULT_WEIGHTS.get("cross_resonance") == 35

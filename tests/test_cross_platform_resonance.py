@@ -110,3 +110,73 @@ class TestCrossPlatformResonance:
         session.commit()
         for r in cross_platform_resonance(session, 1, days=90, min_platforms=2):
             assert r["name"], "空名字不该出现"
+
+
+class TestPushCard:
+    """★ **榜做出来没人看等于没做** —— 接进推送(2026-10-07,用户口径「每天推一次」)。"""
+
+    def _patch_feishu(self, monkeypatch):
+        import app.services.feishu_client as fc
+        sent: dict = {}
+
+        class _C:
+            def __init__(self, hook, secret=None) -> None:
+                sent["hook"] = hook
+
+            def send_card(self, card):
+                sent["card"] = card
+                return True
+
+        monkeypatch.setattr(fc, "FeishuClient", _C)
+        return sent
+
+    def _row(self, session, name: str, plats: list[str], authors: list[str]) -> None:
+        for i, (p, a) in enumerate(zip(plats, authors)):
+            if p == "公众号":
+                _wx(session, f"{name} pdf电子版", a, f"https://pan.quark.cn/s/{name}{i}")
+            else:
+                _disc(session, f"{name} pdf电子版", p, a, f"https://pan.baidu.com/s/{name}{i}")
+        session.commit()
+
+    def test_推给多平台群且平台名是中文(self, session, monkeypatch) -> None:
+        from app.services import resource_library as rl
+        from config.settings import Settings
+
+        self._row(session, "高性价比人生指南", ["公众号", "weibo", "tieba"],
+                  ["甲", "乙", "丙"])
+        sent = self._patch_feishu(monkeypatch)
+        st = Settings(_env_file=None, is_dev=True)
+        monkeypatch.setattr(st, "feishu_webhook_multiplatform", "https://hook/mp", raising=False)
+        monkeypatch.setattr(st, "brand_name", "", raising=False)
+
+        assert rl.push_cross_platform_resonance(session, 1, st, days=90) is True
+        assert sent["hook"] == "https://hook/mp", "该推「多平台监控」群"
+        body = str(sent["card"])
+        assert "全平台共振榜" in body and "高性价比人生指南" in body
+        # ⚠️ 平台列给人看,**不能是英文代号**(注意排序:中文排在 ASCII 之后)
+        for cn in ("公众号", "微博", "贴吧"):
+            assert cn in body, body[:400]
+        assert "weibo" not in body and "tieba" not in body, body[:400]
+
+    def test_没上榜就不发(self, session, monkeypatch) -> None:
+        """反向:一条都没有时**别发空卡**(空卡只会训练人忽略这个群)。"""
+        from app.services import resource_library as rl
+        from config.settings import Settings
+
+        sent = self._patch_feishu(monkeypatch)
+        st = Settings(_env_file=None, is_dev=True)
+        monkeypatch.setattr(st, "feishu_webhook_multiplatform", "https://hook/mp", raising=False)
+        assert rl.push_cross_platform_resonance(session, 1, st, days=90) is False
+        assert "card" not in sent
+
+    def test_单人多平台不算共振(self, session, monkeypatch) -> None:
+        """★ **矩阵号不是共振**:同一个人在 3 个平台发同一份资源,凑得出平台数 3,
+        但"需求被验证过"这句话不成立 —— agent 的判据里尤其不能放过(`min_accounts=2`)。"""
+        from app.services import resource_library as rl
+        from config.settings import Settings
+
+        self._row(session, "某个资源", ["公众号", "weibo", "tieba"], ["同一个人"] * 3)
+        self._patch_feishu(monkeypatch)
+        st = Settings(_env_file=None, is_dev=True)
+        monkeypatch.setattr(st, "feishu_webhook_multiplatform", "https://hook/mp", raising=False)
+        assert rl.push_cross_platform_resonance(session, 1, st, days=90) is False

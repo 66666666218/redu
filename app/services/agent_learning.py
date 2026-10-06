@@ -32,10 +32,43 @@ DEFAULT_WEIGHTS = {
     "new_entry": 25,  # 新上榜
     "repeat": 15,     # 连续≥3轮
     "volume": 15,     # 量级≥200
-    "resonance": 30,  # 跨板块共振
+    "resonance": 30,  # 跨板块共振(同一个词在多个板块冒头)
+    # **跨平台同资源共振**(2026-10-07):同一份资源在 ≥2 个平台被多个号在推。
+    # 给 35 而不是 30:它比"同词跨板块"更接近"**有人已经在靠它拉新,而且不止一处**"
+    # 这个事实。但**只是起点** —— 它会被回测按命中率上下调(±30%)。
+    "cross_resonance": 35,
     "rank_jump": 15,  # 排名前移≥3
     "accel": 20,      # 加速上涨
 }
+
+
+#: 信号标签 → 权重键。⚠️ **顺序即语义**:「跨平台共振」必须排在「共振」**前面** ——
+#: 判定是 `startswith(sig) or sig in part` 且**首个匹配胜**,排在后面它永远被"共振"吃掉,
+#: 新信号就白加了(而且**不报错**,只是永远学不到)。
+_SIG_KEYS: tuple[tuple[str, str], ...] = (
+    ("增速", "velocity"), ("加速", "accel"), ("新上榜", "new_entry"),
+    ("连续", "repeat"), ("量级", "volume"),
+    ("跨平台共振", "cross_resonance"),      # ← 必须在"共振"之前
+    ("共振", "resonance"), ("排名", "rank_jump"),
+)
+
+
+def sig_of_part(part: str) -> str:
+    """一个信号标签属于哪个权重键;认不出返回空串。"""
+    p = str(part or "")
+    for sig, key in _SIG_KEYS:
+        if p.startswith(sig) or sig in p:
+            return key
+    return ""
+
+
+def sig_of_part_name(part: str) -> str:
+    """同上,返回**信号名**(记账用);认不出返回空串。"""
+    p = str(part or "")
+    for sig, _ in _SIG_KEYS:
+        if p.startswith(sig) or sig in p:
+            return sig
+    return ""
 
 
 def load_weights(db: Session) -> dict[str, int]:
@@ -150,13 +183,12 @@ def backtest_and_learn(db: Session, user_id: int, settings=None) -> dict:
             hits += 1
         # 解析该阶段的信号标签,逐信号记账
         for part in (st.parts or "").split():
-            for sig in ("增速", "加速", "新上榜", "连续", "量级", "共振", "排名"):
-                if part.startswith(sig) or sig in part:
-                    bucket = signal_stats.setdefault(sig, {"hits": 0, "total": 0})
-                    bucket["total"] += 1
-                    if hit:
-                        bucket["hits"] += 1
-                    break
+            sig = sig_of_part_name(part)      # 顺序语义见 _SIG_KEYS 的注释
+            if sig:
+                bucket = signal_stats.setdefault(sig, {"hits": 0, "total": 0})
+                bucket["total"] += 1
+                if hit:
+                    bucket["hits"] += 1
 
     # 权重自适应(样本 ≥10 才动,防小样本抖动;幅度 ±30%)
     if backtested >= 10:
@@ -164,9 +196,7 @@ def backtest_and_learn(db: Session, user_id: int, settings=None) -> dict:
             if stat["total"] < 5:
                 continue
             rate = stat["hits"] / stat["total"]
-            key_map = {"增速": "velocity", "加速": "accel", "新上榜": "new_entry",
-                       "连续": "repeat", "量级": "volume", "共振": "resonance", "排名": "rank_jump"}
-            wkey = key_map.get(sig)
+            wkey = dict(_SIG_KEYS).get(sig)   # 与上面同一份表,不再各写一份(会漂)
             if not wkey:
                 continue
             base_w = DEFAULT_WEIGHTS[wkey]

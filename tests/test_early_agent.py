@@ -171,8 +171,11 @@ def test_agent_learning_roundtrip_and_backtest(session, st) -> None:
     from app.services.agent_learning import load_weights, save_weights, backtest_and_learn
 
     w = load_weights(session)
+    # ⚠️ `cross_resonance` 是 2026-10-07 新加的**独立**信号(跨平台同资源共振),
+    # 与 `resonance`(同词跨板块)分开学 —— 混在一起就再也看不出是哪个在起作用。
     assert set(DEFAULT_W_KEYS := w.keys()) == {"velocity", "new_entry", "repeat", "volume",
-                                                "resonance", "rank_jump", "accel"}
+                                                "resonance", "rank_jump", "accel",
+                                                "cross_resonance"}
     w["resonance"] = 35
     save_weights(session, w)
     assert load_weights(session)["resonance"] == 35

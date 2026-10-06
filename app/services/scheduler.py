@@ -474,6 +474,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.health import health_push_tick
     from app.services.disk_guard import disk_guard_tick
     from app.services.resource_presence import presence_tick
+    from app.services.resource_library import cross_resonance_tick
     from app.services.xunlei_cleanup import cleanup_tick as xunlei_cleanup_tick
     from app.services.xunlei_cleanup import dedupe_tick as xunlei_dedupe_tick
     from app.services.lead_settlement import record_reminder_tick as recruit_reminder_tick
@@ -536,6 +537,12 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # 跨平台资源热度(2026-10-02):抓**资源名** → 回**资源库**匹配链 —— 用于"平台上没有链"
         # 的那些平台(小红书/快手/贴吧)。每平台各开一次浏览器,所以**每周一轮**。
         (presence_tick, _get_settings().presence_cron, {"minute": 0, "hour": 9}, "resource_presence", "wechat"),
+        # **跨平台共振榜**(2026-10-07,用户口径「每天推一次」):同一份**资源**在几个**平台**
+        # 被几个号在推 —— 身份用核心资源名(盘链跨不了平台:每个推广号自己建链)。
+        # 推「多平台监控」群(未配回落主群)。放 10:30:09:00 的跨平台采集刚跑完,
+        # 榜里能带上今天新采到的命中。
+        (cross_resonance_tick, _get_settings().cross_resonance_cron, {"minute": 30, "hour": 10},
+         "cross_resonance", "wechat"),
         # 拉新周录提醒(2026-10-03):每周一提醒录上周拉新 —— `pan_recruit_weekly` 是转化回路
         # **唯一的真值入口**(链接级真值不可得,已定案),却至今 0 行。**录了就不再提醒**。
         (recruit_reminder_tick, _get_settings().recruit_reminder_cron, {"minute": 40, "hour": 9}, "recruit_reminder", "wechat"),
