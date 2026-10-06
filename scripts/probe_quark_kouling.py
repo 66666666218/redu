@@ -64,6 +64,55 @@
 - **B 抓 App 包**:雷电模拟器(`D:/leidian/LDPlayer14` 已在)+ `tools/mitmvenv`(mitmdump 已在)+ 系统 CA,
   在 App 里粘口令抓真实请求。**最可靠**,环境项目做过两次。
 
+## ⭐⭐ 2026-10-06 深夜:反编译 APK,**端点和参数全找到了**(还差签名)
+
+从模拟器里 `adb pull` 出夸克 base.apk(130MB,不用找下载源),用 **androguard** 解 dex。
+
+### 功能真身
+内部代号 **「U口令」(`utoken` = U Token)**。域名:
+```
+https://utoken2.quark.cn        (备用 https://utoken2.uc.cn)
+```
+### 端点(全部**实测存活**)
+| 端点 | 证据 |
+|---|---|
+| `POST /utoken/v2/parse` | 空 body → `无效的请求:app=null`;传 app 后 → `requestBytes invalid` |
+| `POST /utoken/v2/create` | 空 body → `分享计划无效:shareCode=null`;带 shareCode → `新建口令请求反序列化失败` |
+| `POST /third/share/landing/info` | GET → `405`,POST → `无效的请求` |
+
+### 请求参数(从 `Lzh1/c` 的方法里读出来的原样字符串)
+```
+parse :  kps · app · QUARK · clipboard · identifier · shareSecret · timestamp · sign
+create:  shareCode · businessCode · kps · sign
+         POST · application/json
+```
+**⚠️ 请求带 `sign`** —— 这就是为什么裸 JSON 和手搓 protobuf 全被拒(`requestBytes invalid`)。
+我先前误判成 protobuf,**是错的**:服务器说的是"反序列化失败",但结构其实是**带签名的 JSON**。
+
+### 为什么之前所有请求都 404
+真实 URL **由服务端 CMS 下发**,配置键原样是:
+```
+cms_utoken_request_query_url / cms_utoken_request_build_url
+cms_utoken_min_length / cms_utoken_limit_length / cms_utoken_regular_rules
+cms_utoken_direct_jump_config / cms_utoken_title_suffix_config / cms_utoken_blocking_dialog_config
+```
+⇒ **硬编码里根本搜不到**,猜路径必然 404。
+
+### 拿到的错误码表(有诊断价值)
+`SHARE_PLAN_INVALID` · `SHARE_PLAN_UNAUTHORATIZED` · `SHARE_TIMES_OVERLIMIT` ·
+`SHARE_TIMES_OVERLIMIT_PLAN` · `SELF_UTOKEN` · `口令已过期` ·
+`今日生成口令次数已达到上限` · `口令数量总数已达到系统上限` · `口令违规`
+
+### ❌ 还差最后一步:`sign` 怎么算
+需要知道`sign = f(哪些字段, 顺序, 密钥, 算法)`。**可能在 native `.so` 里** —— 那样成本要再上一个台阶。
+**GitHub 上没有现成实现**:`ihmily/quarkpantool`、`lich0821/QuarkPan`、`ByLsPro/JxPan`
+三个主流夸克库**都没有 utoken/口令相关代码**;精确搜域名也**无结果**。
+
+### 备选方案(不需签名)
+模拟器里实测过:**App 已登录、剪贴板粘口令会自动弹出解析卡片**(显示资源标题 +「立即查看」)。
+⇒ 可以用 `adb shell input` + `uiautomator dump` **驱动 UI 自动化**拿结果,**完全绕开签名**。
+代价:要模拟器常开、每个口令一次 UI 操作。
+
 跑法:`python scripts/probe_quark_kouling.py`(只读、少量请求、带间隔)
 """
 from __future__ import annotations
