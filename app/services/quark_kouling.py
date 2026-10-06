@@ -169,6 +169,28 @@ def _find_saved_fid(qt, title: str, session=None, user_id: int = 0) -> str:
     return ""
 
 
+def _snapshot_failure() -> str:
+    """失败时把模拟器屏幕拍下来(子进程跑 UI 脚本里的 `snapshot`)。失败返回空串,**绝不抛**。
+
+    ⚠️⚠️ **单独抽出来,是为了能在单测里被替换掉** —— 因为它**真的会去操作模拟器**:
+    原来这段内联在 `drain` 的失败分支里,于是**每跑一次单测就真的截一次模拟器屏幕**
+    (2026-10-06 实测:单测跑一遍生成 4 张 `_quark_nosave_*.png`,一天堆了 47 张)。
+
+    **单测不该碰真设备**:慢、有副作用,而且**会污染诊断** —— 当天我正是拿这批
+    "截图证据"当成了生产失败现场,一路推出一个错误根因(见
+    [[falsification-needs-control-variables]])。**先让证据干净,再谈归因。**
+    """
+    try:
+        import subprocess as _sp
+        r = _sp.run([sys.executable, "-c",
+                     "import sys; sys.path.insert(0,'tools');"
+                     "from quark_kouling_ui import snapshot; print(snapshot('nosave'))"],
+                    capture_output=True, timeout=90)
+        return (r.stdout or b"").decode("utf-8", "replace").strip()
+    except Exception:  # noqa: BLE001 - 截图是诊断附属品,失败不影响判定
+        return ""
+
+
 def drain(session, user_id: int, settings=None, limit: int | None = None) -> dict:
     """处理 N 条待办抖音线索。返回统计。
 
@@ -211,7 +233,10 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
     from datetime import datetime as _dt
     for lead in todo:
         # **无论成败都盖章** —— 这一条是防"无限重试失败项"的关键。
+        # ⚠️ 例外:下面判成**环境故障**(`env_fail`)时会把章撤回 —— 那是模拟器/焦点的问题,
+        # 与这条口令有没有内容无关,不该拿它判死线索。
         lead.kouling_tried_at = _dt.now()
+        env_fail = False
         # ⚠️⚠️ **先落一次并释放写锁,再去做慢活**(2026-10-06 实测踩到):
         # 下面要跑 **15–20 秒的模拟器**(×8 条 ≈ 2.7 分钟),而 SQLite 是**单写者**。
         # 原来整轮都在一个写事务里 ⇒ **把别的作业全饿死**:14:00 那一分钟里
@@ -241,6 +266,13 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
         for attempt in (1, 2):
             res = resolve(lead.title or lead.mark or "", save=True)
             if not res.get("ok"):
+                # ⚠️⚠️ **环境故障不该消耗线索**(2026-10-06):`resolve` 用 `env=True` 标出
+                # "模拟器/焦点/超时"这类**与口令内容无关**的失败。上面已经给这条盖了"试过"的章
+                # —— 那是防"无限重试没内容的口令"的,而**环境故障被盖成"试过"是误伤**:
+                # 实测当天前台被全屏游戏占着,夸克收不到剪贴板,**一条都成不了**,
+                # 若照旧盖章,整批线索会被一次环境抖动**永久判死**。所以这里撤销那个章。
+                if res.get("env"):
+                    env_fail = True
                 logger.info("夸克口令:线索 %s 没解出来(%s)", lead.aweme_id, res.get("reason"))
                 break
             title = str(res.get("title") or "")
@@ -252,17 +284,12 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
                 time.sleep(3)          # 给保存任务一点落盘时间
         if not fid:
             failed += 1
+            if env_fail:
+                # ★ **撤回"试过"的章**:这是环境故障(模拟器拿不到焦点等),不是"这条口令没内容"。
+                # 不撤的话,一次环境抖动会把整批线索**永久判死**(见上面 `env=True` 处的说明)。
+                lead.kouling_tried_at = None
             # **把屏幕拍下来** —— 剩下这类失败是"保存没产出文件",光看日志只能猜
-            shot = ""
-            try:
-                import subprocess as _sp
-                r = _sp.run([sys.executable, "-c",
-                             "import sys; sys.path.insert(0,'tools');"
-                             "from quark_kouling_ui import snapshot; print(snapshot('nosave'))"],
-                            capture_output=True, timeout=90)
-                shot = (r.stdout or b"").decode("utf-8", "replace").strip()
-            except Exception:  # noqa: BLE001
-                pass
+            shot = _snapshot_failure()
             logger.warning("夸克口令:解出「%s」但两次都在 %s 里找不到文件(截图:%s)",
                            title or "?", _SAVE_DIR, shot or "失败")
             continue

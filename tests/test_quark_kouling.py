@@ -410,3 +410,53 @@ class TestEmptyTitleFallback:
     def test_空标题走兜底而不是直接判失败(self, session) -> None:
         assert qk._find_saved_fid(_FakeQt(), "", session, 1) == "NEWEST"
         assert qk._find_saved_fid(_FakeQt(), None, session, 1) == "NEWEST"
+
+
+@pytest.fixture(autouse=True)
+def _no_real_snapshot(monkeypatch):
+    """⚠️⚠️ **单测绝不碰模拟器**(2026-10-06 修)。
+
+    `drain` 的失败分支会**真的去跑子进程截模拟器屏幕** —— 实测跑一遍单测生成 4 张
+    `_quark_nosave_*.png`,一天堆了 **47 张**。慢、有副作用,而且**污染过诊断**:
+    我当天正是拿这批**测试产物**当成了生产失败现场,一路推出一个错误根因。
+    **先让证据干净,再谈归因。**
+    """
+    monkeypatch.setattr(qk, "_snapshot_failure", lambda: "")
+
+
+class TestEnvFailureDoesNotBurnTheLead:
+    """★ **环境故障不消耗线索**(2026-10-06)。
+
+    实测:前台被全屏程序占着时,雷电窗口拿不到焦点 ⇒ 宿主剪贴板**同步不进安卓**
+    ⇒ 夸克一条都收不到口令。而 `drain` 是**无论成败都盖 `kouling_tried_at`** 的
+    (那是为"没内容的口令别无限重试"设计的)⇒ **一次环境抖动会把整批线索永久判死**。
+    所以 `resolve` 用 `env=True` 标出这类失败,`drain` 据此**撤回那个章**。
+    """
+
+    def _patch(self, monkeypatch, res):
+        monkeypatch.setattr("app.services.cookie_store.get_cookie", lambda s, u, p: "CK")
+        monkeypatch.setattr("app.services.quark_transfer.QuarkTransfer", _FakeQt)
+        monkeypatch.setattr(qk, "resolve", lambda text, **k: res)
+        monkeypatch.setattr(qk, "_find_saved_fid", lambda *a, **k: "")
+
+    def test_环境故障不盖章_下轮还能再试(self, session, monkeypatch) -> None:
+        lead = _lead(session, "a1", "咐置铸剑上供叩苓")
+        self._patch(monkeypatch, {"ok": False, "env": True, "reason": "雷电窗口拿不到焦点"})
+
+        out = qk.drain(session, 1, _S())
+        session.refresh(lead)
+        assert out["failed"] == 1
+        assert lead.kouling_tried_at is None, (
+            "环境故障被盖成'试过'了 ⇒ 一次焦点问题会把整批线索**永久判死**"
+            "(它们再也不会进待办队列)")
+        assert qk.drain(session, 1, _S())["tried"] == 1, "下一轮应当还能再试这条"
+
+    def test_内容型失败照旧盖章(self, session, monkeypatch) -> None:
+        """⚠️ 反向:**别把闸门拆了** —— "这条口令没内容"必须留痕,否则每轮白烧模拟器时间。"""
+        lead = _lead(session, "a1", "《三岁分享》#投票入口")
+        self._patch(monkeypatch, {"ok": False, "reason": "没弹出剪贴板卡片(口令无效)"})
+
+        qk.drain(session, 1, _S())
+        session.refresh(lead)
+        assert lead.kouling_tried_at is not None, "内容型失败必须留痕"
+        assert qk.drain(session, 1, _S())["tried"] == 0
