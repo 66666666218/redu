@@ -1,3 +1,4 @@
+- [2026-10-07 00:58] FIX: 夸克口令打通 —— 根因是**提供剪贴板的进程必须保持存活** (Files: tools/quark_kouling_ui.py[gitignored])
 - [2026-10-07 00:32] FIX: 共振榜错开 10:30→10:40(与热榜速览撞点,本仓口径是不要堆在一个时间点推) (Files: config/settings.py)
 - [2026-10-07 00:22] FEAT: 全平台共振榜接进推送(每天10:30→多平台监控群)+ 喂给 agent 当独立信号 (Files: app/services/resource_library.py, app/services/early_agent.py, app/services/agent_learning.py, config/settings.py, app/services/scheduler.py, tests/)
 - [2026-10-07 00:10] FEAT: 跨平台共振榜(只读) —— 资源身份从'盘链'换成'核心资源名' (Files: app/services/resource_library.py, tests/test_cross_platform_resonance.py)
