@@ -142,12 +142,14 @@ def resolve(kouling: str, save: bool = False) -> dict:
 
 
 def main() -> int:
-    kouling = sys.argv[1] if len(sys.argv) > 1 else ""
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    do_save = "--save" in sys.argv
+    kouling = args[0] if args else ""
     if not kouling:
         print("用法: python scripts/quark_kouling_ui.py \"<完整口令文本>\"")
         print("(不带参数会提示;剪贴板读取在 Android 14 上受隐私限制,所以要求显式传入)")
         return 1
-    r = resolve(kouling)
+    r = resolve(kouling, save=do_save)
     print("结果:", r)
     return 0 if r.get("ok") else 2
 

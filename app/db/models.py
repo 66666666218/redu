@@ -432,6 +432,9 @@ class DouyinLead(Base):
     our_url: Mapped[str] = mapped_column(String(500), default="")
     found_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     found_date: Mapped[str] = mapped_column(String(16), index=True, default="")  # YYYY-MM-DD
+    # 夸克口令那条链**是否已经试过**(2026-10-06):失败也要落痕 ——
+    # 否则每轮都会拿同一批"App 匹配不了"的迅雷型线索去烧模拟器时间。
+    kouling_tried_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class QuarkShareStat(Base):

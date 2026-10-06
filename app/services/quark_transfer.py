@@ -196,6 +196,71 @@ class QuarkTransfer:
                 break
         return entries
 
+    def list_dir(self, fid: str = "0") -> list[dict]:
+        """列目录的**公开门面**(2026-10-06)。夸克口令那条链要"在 App 把文件存进我盘后把它找出来",
+        而原方法叫 `_list_dir`(私有)—— 跨模块调私有方法等于把两边实现焊死。"""
+        return self._list_dir(fid)
+
+    def search_files(self, keyword: str, size: int = 20) -> list[dict]:
+        """按名字搜我盘里的文件(`/1/clouddrive/file/search`)。
+
+        ⚠️ **为什么必须用它、而不是 `list_dir`**(2026-10-06 实测):找「来自：分享」这种目录时,
+        `list_dir` 返回的**正好是 10000 项** —— 也就是 50 页 × 200 的**硬上限**,
+        而该目录**排在第 1 万条之外**,全量遍历**根本够不着**(我当时据此误判成"文件没保存成功")。
+        搜索接口**一次就命中**。
+        """
+        data = self._request("GET", "/1/clouddrive/file/search", api=QUARK_FILE_API,
+                             params={"q": keyword, "_page": 1, "_size": size})
+        return list((data.get("data") or {}).get("list") or [])
+
+    def list_recent(self, fid: str = "0", size: int = 30) -> list[dict]:
+        """按**更新时间倒序**取一页 —— 回答"**刚存进来的文件在哪**"(2026-10-06)。
+
+        ⚠️ 别用 `list_dir`(它按文件名分页遍历**整个目录**):在大盘上(实测该账号上万文件)
+        既慢、又**可能翻不到目标**(`_list_dir` 最多 50 页 × 200 = 1 万条就停),
+        而"刚保存的"**一定在最新一页**。
+        """
+        data = self._request("GET", "/1/clouddrive/file/sort", api=QUARK_FILE_API,
+                             params={"pdir_fid": fid, "_page": 1, "_size": size,
+                                     "_sort": "updated_at:desc"})
+        return list((data.get("data") or {}).get("list") or [])
+
+    def share_fids(self, fid_list: list, title: str = "监听转存",
+                   password: str = "", expire_days: int = 0) -> dict:
+        """给**已经在盘里**的文件建我方分享链 → `{"share_url","password","share_id"}`。
+
+        ⚠️ **为什么抽出来**(2026-10-06):这段原来**内联在 `transfer_and_share` 里**,
+        于是"文件已经在盘里、只想建条链"的场景(夸克口令链正是这种)没法复用,
+        只能把 `/1/clouddrive/share` 那套协议**再抄一遍** —— 同一协议两处实现,迟早飘。
+        现在 `transfer_and_share` 也改成调它。
+        """
+        ids = [str(x) for x in (fid_list or []) if x]
+        if not ids:
+            raise QuarkError("无可分享文件(fid_list 为空)")
+        expired_type = 1 if expire_days <= 0 else 2
+        share_payload: dict[str, Any] = {"fid_list": ids, "title": (title or "监听转存")[:100],
+                                         "url_type": 1, "expired_type": expired_type}
+        if expire_days > 0:
+            share_payload["expire_time"] = expire_days * 86400
+        if password:
+            share_payload["passcode"] = password
+        share_resp = self._request("POST", "/1/clouddrive/share", json=share_payload)
+        share_id = self._find_share_id(share_resp)
+        if not share_id:
+            tid = str(self._find_first(share_resp, {"task_id", "taskId"}) or "") \
+                if isinstance(share_resp, Mapping) else ""
+            if not tid:
+                raise QuarkError(f"夸克创建分享失败,未返回 share_id/task_id: {str(share_resp)[:200]}")
+            share_id = self._find_share_id(self._wait_share_task(tid))
+            if not share_id:
+                raise QuarkError("夸克创建分享完成但未返回 share_id")
+        pwd_resp = self._request("POST", "/1/clouddrive/share/password",
+                                 json={"share_id": share_id})
+        sd = pwd_resp.get("data", {}) or {}
+        um = SHARE_URL_RE.search(str(sd.get("share_url") or "")) if sd.get("share_url") else None
+        return {"share_url": um.group(0) if um else f"https://pan.quark.cn/s/{share_id}",
+                "password": str(sd.get("passcode") or password or ""), "share_id": share_id}
+
     def _mk_dir(self, parent_fid: str, name: str) -> str:
         """创建目录;成功返回 fid,撞名/幽灵占用(23008)抛 QuarkError。"""
         created = self._request("POST", "/1/clouddrive/file", api=QUARK_FILE_API,
@@ -381,31 +446,9 @@ class QuarkTransfer:
         if not share_ids:
             raise QuarkError("无可分享文件(保存未返回且目录无匹配)")
 
-        expired_type = 1 if expire_days <= 0 else 2
-        share_payload: dict[str, Any] = {"fid_list": share_ids, "title": "监听转存",
-                                         "url_type": 1, "expired_type": expired_type}
-        if expire_days > 0:
-            share_payload["expire_time"] = expire_days * 86400
-        if password:
-            share_payload["passcode"] = password
-        share_resp = self._request("POST", "/1/clouddrive/share", json=share_payload)
-        new_share_id = self._find_share_id(share_resp)
-        if not new_share_id:
-            task_id = ""
-            if isinstance(share_resp, Mapping):
-                task_id = str(self._find_first(share_resp, {"task_id", "taskId"}) or "")
-            if not task_id:
-                raise QuarkError(f"夸克创建分享失败,未返回 share_id/task_id: {str(share_resp)[:200]}")
-            new_share_id = self._find_share_id(self._wait_share_task(task_id))
-            if not new_share_id:
-                raise QuarkError("夸克创建分享完成但未返回 share_id")
-        pwd_resp = self._request("POST", "/1/clouddrive/share/password",
-                                 json={"share_id": new_share_id})
-        share_data = pwd_resp.get("data", {}) or {}
-        url_m = SHARE_URL_RE.search(str(share_data.get("share_url") or "")) \
-            if share_data.get("share_url") else None
-        new_url = url_m.group(0) if url_m else f"https://pan.quark.cn/s/{new_share_id}"
-        out_password = str(share_data.get("passcode") or password or "")
+        _share = self.share_fids(share_ids, title="监听转存", password=password,
+                                 expire_days=expire_days)
+        new_url, out_password = _share["share_url"], _share["password"]
         logger.info("夸克转存+分享完成: %s 个文件(含复用 %s 个)→ %s",
                     len(share_ids), len(matched_ids), new_url)
         return {"share_url": new_url, "password": out_password, "files": len(share_ids)}

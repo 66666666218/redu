@@ -147,7 +147,10 @@ ADDITIONS: dict[str, list[str]] = {
     "pan_recruit_weekly": ["channels TEXT DEFAULT ''"],
     # 线索搬成了哪条链(2026-10-04 补,计划第 12 项):原来落库时**丢了**,
     # 于是"这个口令到底搬没搬成"事后查不出来。存量行留空 = "还没用新版重采过"。
-    "douyin_leads": ["our_url VARCHAR(500) DEFAULT ''"],
+    # `kouling_tried_at`(2026-10-06):夸克口令那条链**试过一次就不再试**。
+    # 起因:抖音线索里绝大多数是**迅雷形态**(《》里的群/分享口令),夸克 App 匹配不了 ——
+    # 实测同样两条标题,迅雷型不弹卡片、夸克型才弹。不留痕的话每轮都会重试同一批失败项。
+    "douyin_leads": ["our_url VARCHAR(500) DEFAULT ''", "kouling_tried_at DATETIME"],
     "alerts": ["section VARCHAR(32) DEFAULT ''"],
     "douhot_watch": ["section VARCHAR(16) DEFAULT 'douhot'", "filter_keyword VARCHAR(64) DEFAULT ''",
                      "date_window INTEGER"],

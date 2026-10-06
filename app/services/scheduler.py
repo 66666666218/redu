@@ -466,6 +466,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.telegram_source import collect_tick as tg_collect_tick
     from app.services.cross_accounts import cross_account_tick
     from app.services.bili_account_scan import bili_account_scan_tick
+    from app.services.quark_kouling import quark_kouling_tick
     from app.services.douyin_leads import douyin_leads_tick
     from app.services.xunlei_sync import xunlei_sync_tick
     from app.services.xunlei_group import xunlei_group_tick
@@ -599,6 +600,11 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         #    (只推 `source='bili-pan'` 那几十行,不碰远程自己那 7 万条热榜)。
         (bili_account_scan_tick, _get_settings().bili_scan_cron, {"minute": 0, "hour": "*/2"},
          "bili_account_scan", "wechat"),
+        # 夸克**口令**(2026-10-06):抖音线索里**迅雷搬不动**的那些,用模拟器里的夸克 App 再试一遍。
+        # ⚠️ 角色必须是 **wechat** —— **模拟器在本机**;挂远程毫无意义。
+        # ⚠️ 它依赖"雷电模拟器常开 + 夸克已登录",不开就一路 failed(如实记,不静默)。
+        (quark_kouling_tick, _get_settings().quark_kouling_cron, {"minute": 0, "hour": "*/2"},
+         "quark_kouling", "wechat"),
         (push_timeline_tick, "* * * * *", {"minute": "*"}, "push_timeline", "both"),
     ]
     for func, expr, default, job_id, role in jobs:

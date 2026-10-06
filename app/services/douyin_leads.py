@@ -151,7 +151,13 @@ def find_leads(keywords: list[str], limit: int = 30, platform: str = "douyin") -
         name = h.get("name") or ""
         mark = _lead_mark(text, name)
         if not mark:
-            continue          # 标题里没有《…》 → 不是线索
+            # ⚠️ **夸克口令帖没有《》**(2026-10-06):抖音上的夸克口令长
+            # `咐置…叩苓` 或 `/~令牌~/`,而本函数原来只认《》 ⇒ 这类帖**一条都进不来**。
+            # 实测搜「夸克口令」一次就捞到 15 条,全被这条判据挡在门外。
+            from app.services.quark_kouling import mark_of
+            mark = mark_of(text)
+        if not mark:
+            continue          # 既没有《…》也没有夸克标记 → 不是线索
         seen.add(url)
         out.append({"mark": mark, "title": text[:120], "url": url,
                     "author": name,                     # 账号名(**被工具脱敏**,如「籽***」)
@@ -477,6 +483,13 @@ def search_keywords(session, user_id: int, top: int, settings,
     seen = _words_already_resolved_to_group(session, user_id)
     kws.sort(key=lambda w: (w in seen, -scores.get(w, _YIELD_PRIOR)))
     for w in (hot or []):
+        if w and w not in kws:
+            kws.append(w)
+    # ⚠️ **夸克口令专搜词**(2026-10-06):上面的词都来自**我们自己的资源库**,
+    # 搜出来的自然是"我们已有的"、而且**几乎全是迅雷形态**;实测补上这几个词后
+    # **一次捞到 15 条夸克口令帖** —— 它们此前**一条都进不来**(`find_leads` 只认《》)。
+    for w in str(getattr(settings, "douyin_leads_quark_keywords", "") or "").split(","):
+        w = w.strip()
         if w and w not in kws:
             kws.append(w)
     return kws
