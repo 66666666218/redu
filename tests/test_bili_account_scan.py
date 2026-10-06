@@ -389,3 +389,69 @@ class TestThinAccountsAlsoDeprioritized:
         self._mk4(session)
         s = bas.empty_account_summary(session, 1, _S())
         assert s == {"total": 4, "scanned": 3, "empty": 1, "thin": 1, "unscanned": 1}, s
+
+
+class TestPublishCutoff:
+    """★ **按投稿时间过滤**(2026-10-06 用户口径:「2026年10月份之前的不要再保存进来了」)。
+
+    `fetch_user_titles` **本来就把 `created` 取回来了**(接口一直给),
+    只是下游从来没人用 ⇒ 于是"扫到 30 条"里混着好几年前的老视频,全当新内容喂给 Agent。
+    **注意区分两个时间**:`created` 是**视频上传时间**(新鲜度的真依据),
+    而标题里的"1978年出品"是**影片年份**,跟新鲜度无关 —— 别拿那个当判据。
+    """
+
+    def _mk(self, session, created_list):
+        _mk_accounts(session, 1)
+        acc = session.scalars(select(CrossPlatformAccount)).one()
+        titles = [{"title": f"资源{i}", "bvid": f"B{i}", "url": "u", "created": c}
+                  for i, c in enumerate(created_list)]
+        return acc, titles
+
+    def test_早于下限的不入库(self, session) -> None:
+        import datetime as dt
+        from app.services.bili_account_scan import _save_titles
+
+        acc, titles = self._mk(session, [
+            int(dt.datetime(2026, 10, 5).timestamp()),
+            int(dt.datetime(2026, 1, 1).timestamp()),      # 早于下限
+        ])
+
+        class _S2(_S):
+            content_min_publish_date = "2026-10-01"
+            douyin_leads_min_publish_date = ""
+        n = _save_titles(session, 1, acc, titles, _S2())
+        session.commit()
+        rows = session.scalars(select(HotSourceItem)).all()
+        assert n == 1 and len(rows) == 1, f"老投稿必须被丢掉,实际入库 {n}"
+        assert rows[0].published_at is not None, "要记下发布时间(新鲜度的真依据)"
+
+    def test_缺时间的不入库但不算静默(self, session) -> None:
+        from app.services.bili_account_scan import _save_titles
+
+        acc, titles = self._mk(session, [0])
+        class _S2(_S):
+            content_min_publish_date = "2026-10-01"
+            douyin_leads_min_publish_date = ""
+        assert _save_titles(session, 1, acc, titles, _S2()) == 0
+
+    def test_投稿数记的是原始条数不是过滤后的(self, session, monkeypatch) -> None:
+        """⚠️ `video_count` 必须是**接口返回的原始条数** —— 否则一个投稿全是老视频的号
+        会被误判成"空壳"(`video_count == 0`),那是另一套降权逻辑的判据。"""
+        import datetime as dt
+
+        _mk_accounts(session, 1)
+        monkeypatch.setattr(bas, "fetch_user_titles", lambda mid, **k: [
+            {"title": "老的", "bvid": "B", "url": "u", "created": int(dt.datetime(2020, 1, 1).timestamp())}])
+        monkeypatch.setattr(bas.time, "sleep", lambda s: None)
+        monkeypatch.setattr(bas, "_settings", lambda: _S_withcut())
+        bas.scan_accounts(session, 1, settings=_S_withcut())
+        acc = session.scalars(select(CrossPlatformAccount)).one()
+        assert acc.video_count == 1, f"原始投稿数应为 1,实际 {acc.video_count}"
+        assert session.scalars(select(HotSourceItem)).all() == [], "老投稿不该入库"
+
+
+def _S_withcut():
+    class _C(_S):
+        content_min_publish_date = "2026-10-01"
+        douyin_leads_min_publish_date = ""
+    return _C()

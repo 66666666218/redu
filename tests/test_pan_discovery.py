@@ -649,3 +649,50 @@ def test_sync_reuses_existing_link_instead_of_transferring(session, monkeypatch)
     # ⚠️ **仍然要推出去** —— 只是用**已有那条链**,这正是用户要的"从已有的里面推这个资源"
     assert out["items"] and out["items"][0]["share_url"] \
         == "https://pan.quark.cn/s/OUR-OWN-LINK-abc123"
+
+
+class TestPublishCutoff:
+    """★ **公开平台发现也要按发布时间过滤**(2026-10-06)。
+
+    知乎/微博的原始响应里**一直有时间**(实测 `object.created_time` /
+    `mblog.created_at`),只是解析时没读 ⇒ 下游只能拿"我们发现的时刻"当新鲜度,
+    那是**假的新鲜度**(老帖被反复搜到时照样"刚发现")。
+
+    ⚠️ **拿不到时间的也跳过** —— 但那种情况**必须报数**(整条链静默归零是本仓最忌讳的)。
+    """
+
+    def _cands(self, monkeypatch, rows):
+        from app.services import pan_discovery as pd
+
+        monkeypatch.setattr(pd, "_candidates_from_zhihu",
+                            lambda ck, kws, limit: list(rows))
+        monkeypatch.setattr(pd, "_candidates_from_weibo", lambda ck, kws, limit: [])
+        monkeypatch.setattr(pd, "_candidates_from_tieba", lambda kws, limit: [])
+        monkeypatch.setattr("app.services.cookie_store.get_cookie", lambda s, u, p: "CK")
+        monkeypatch.setattr(pd, "_search_words", lambda *a, **k: ["网盘"])
+        return pd
+
+    def _row(self, url, pub):
+        return {"platform": "zhihu", "origin_url": url, "title": "某资源", "author": "甲",
+                "source_url": "u", "publish_at": pub}
+
+    def test_早于下限的被丢掉(self, monkeypatch, session) -> None:
+        import datetime as dt
+        pd = self._cands(monkeypatch, [
+            self._row("https://pan.quark.cn/s/NEW", int(dt.datetime(2026, 10, 5).timestamp())),
+            self._row("https://pan.quark.cn/s/OLD", int(dt.datetime(2026, 8, 1).timestamp())),
+        ])
+
+        class _S2(_S):
+            content_min_publish_date = "2026-10-01"
+            douyin_leads_min_publish_date = ""
+        out = pd.find_candidates(session, 1, ["网盘"], settings=_S2())
+        assert [c["origin_url"] for c in out] == ["https://pan.quark.cn/s/NEW"], out
+
+    def test_没有时间的也丢掉(self, monkeypatch, session) -> None:
+        pd = self._cands(monkeypatch, [self._row("https://pan.quark.cn/s/NO", 0)])
+
+        class _S2(_S):
+            content_min_publish_date = "2026-10-01"
+            douyin_leads_min_publish_date = ""
+        assert pd.find_candidates(session, 1, ["网盘"], settings=_S2()) == []

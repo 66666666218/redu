@@ -145,6 +145,9 @@ def _search_weibo(cookie: str, keyword: str, limit: int = 20,
                     "snippet": snippet[:255],
                     "pan_link": (pans[0] if pans else ""),   # 兼容:仍是第一条
                     "pan_links": pans,                        # 全部(调用方逐条产候选)
+                    # **发布时间**(2026-10-06):微博给的是 `created_at` 字符串
+                    # (格式 `Sun Oct 04 23:56:44 +0800 2026`),这里解析成 Unix 秒。
+                    "publish_at": _weibo_ts(it.get("created_at")),
                     # 曝光/互动:微博给的是**转发/评论/赞** —— 交给 `conversion` 自己去选档
                     "metrics": _weibo_metrics(it)})
     return out
@@ -153,6 +156,25 @@ def _search_weibo(cookie: str, keyword: str, limit: int = 20,
 _PAN_URL_RE = re.compile(r"https?://pan\.(?:quark|baidu|xunlei)\.(?:cn|com)/[^\s\"'<>\\]{6,}",
                          re.I)
 _TAGS_RE = re.compile(r"<[^>]+>")
+
+
+def _weibo_ts(v: object) -> int:
+    """微博的 `created_at` → Unix 秒;解析不了返回 0(= 判不了)。
+
+    ⚠️ 微博**不是** epoch,是 `Sun Oct 04 23:56:44 +0800 2026` 这种**英文日期串**
+    (实测)—— 所以必须 strptime,不能直接 int()。格式若变了就返回 0 走"判不了"那条路,
+    **不会**静默当成"很旧"把整条链清空(下游对 0 是"跳过并记账",会打日志)。
+    """
+    from datetime import datetime as _dt
+
+    s = str(v or "").strip()
+    if not s:
+        return 0
+    try:
+        return int(_dt.strptime(s, "%a %b %d %H:%M:%S %z %Y").timestamp())
+    except ValueError:
+        logger.debug("微博 created_at 解析失败:%r", s[:40])
+        return 0
 
 
 def _strip_tags(s: str) -> str:
@@ -223,6 +245,10 @@ def _search_zhihu(cookie: str, keyword: str, limit: int = 20) -> list[dict]:
                     "url": f"https://www.zhihu.com/people/{uid}",
                     "snippet": snippet[:255],
                     "pan_link": _pan_of(snippet),
+                    # **发布时间**(2026-10-06):知乎原始响应里**一直有**
+                    # `object.created_time`(实测),只是解析时没读 ⇒ 下游只能拿
+                    # "我们发现的时刻"当新鲜度,那是**假的新鲜度**。
+                    "publish_at": int(obj.get("created_time") or 0),
                     "metrics": _zhihu_metrics(obj)})
     return out
 

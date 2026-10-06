@@ -200,12 +200,34 @@ def _save_titles(session, user_id: int, account, titles: list[dict], settings=No
     from app.db.models import HotSourceItem
 
     name = str(getattr(account, "name", "") or "")[:60]
-    n = 0
+    # **按投稿时间过滤**(2026-10-06):`fetch_user_titles` 本来就把 `created` 取回来了
+    # (**只是下游一直没人用**)⇒ 于是"扫到 30 条"里混着好几年前的老视频,全当新内容喂给 Agent。
+    # 用户口径:「**2026年10月份之前的不要再保存进来了**」—— 所有内容源同一条口径。
+    from app.services.douyin_leads import _min_publish_ts
+
+    min_ts = _min_publish_ts(settings or _settings())
+    n = skipped = 0
     for i, t in enumerate(titles[:_MAX_TITLES], start=1):
+        created = int(t.get("created") or 0)
+        if min_ts:
+            if created <= 0:
+                skipped += 1        # 判不了就不收(但记账,不静默)
+                continue
+            if created < min_ts:
+                skipped += 1
+                continue
+        pub = None
+        if created > 0:
+            try:
+                pub = datetime.fromtimestamp(created)
+            except (OverflowError, OSError, ValueError):
+                pub = None          # 时间戳离谱就留空,别让一条脏数据炸掉整轮
         session.add(HotSourceItem(user_id=user_id, source="bili-pan", rank=i,
                                   title=str(t["title"])[:500], url=str(t.get("url") or "")[:700],
-                                  extra=name[:200]))
+                                  extra=name[:200], published_at=pub))
         n += 1
+    if skipped:
+        logger.info("B站对标号「%s」:按投稿时间过滤掉 %d 条(早于下限或缺时间)", name, skipped)
     return n
 
 

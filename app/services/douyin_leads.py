@@ -201,7 +201,10 @@ def _min_publish_ts(settings) -> int:
     """
     from datetime import datetime as _dt
 
-    raw = str(getattr(settings, "douyin_leads_min_publish_date", "") or "").strip()
+    # ⚠️ **抖音专属的值优先,留空则回落通用口径**(`content_min_publish_date`)——
+    # 用户那条「2026年10月份之前的不要再保存进来了」是**对所有内容源**说的,
+    # 只筛抖音的话,**老资源从别的链照样进来**。
+    raw = str(getattr(settings, "douyin_leads_min_publish_date", "") or "").strip()         or str(getattr(settings, "content_min_publish_date", "") or "").strip()
     if not raw:
         return 0
     try:

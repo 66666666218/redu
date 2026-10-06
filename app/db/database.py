@@ -166,7 +166,10 @@ ADDITIONS: dict[str, list[str]] = {
     # B站对标号的**扫描状态**(2026-10-05):识别"空壳号"并让轮转**先扫没扫过的**。
     # 起因:实测轮转轮到第 1 个号(uid 650752289)时它**一条投稿都没有**,白跑一轮;
     # 59 个号里有多少这种得先能**量出来**。`video_count = -1` 表示"还没扫过"。
-    "cross_platform_accounts": ["last_scan_at DATETIME", "video_count INTEGER DEFAULT -1"],    "hotspot_suggestions": ["saves INTEGER DEFAULT 0", "saves_at DATETIME",
+    "cross_platform_accounts": ["last_scan_at DATETIME", "video_count INTEGER DEFAULT -1"],
+    # B站投稿的**发布时间**(2026-10-06):`fetch_user_titles` 本来就把 `created` 取回来了,
+    # **只是下游一直没人用** ⇒ 于是"扫到 30 条"里混着好几年前的老视频,全当新内容喂给 Agent。
+    "hot_source_items": ["published_at DATETIME"],    "hotspot_suggestions": ["saves INTEGER DEFAULT 0", "saves_at DATETIME",
                             "platforms VARCHAR(64) DEFAULT ''",
                             "category VARCHAR(16) DEFAULT ''",   # 验证品类(结算归因聚合键,2026-10-01)
                             "opportunity FLOAT DEFAULT 0",

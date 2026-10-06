@@ -65,6 +65,9 @@ class HotSourceItem(Base):
     url: Mapped[str] = mapped_column(String(700), default="")
     extra: Mapped[str] = mapped_column(String(200), default="")
     captured_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    # **内容自身的发布时间**(2026-10-06)。⚠️ 与 `captured_at`(我们抓到的时刻)是两个东西:
+    # 只有它才是新鲜度的真依据 —— 老帖被反复扫到时,`captured_at` 照样是"刚刚"。
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class WeiboHotItem(Base):

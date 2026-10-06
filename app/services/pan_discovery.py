@@ -300,7 +300,8 @@ def _candidates_from_zhihu(ck: str, keywords: list[str], limit: int) -> list[dic
             out.append({"platform": "zhihu", "origin_url": url,
                         "title": _clean(r.get("snippet") or "")[:255] or kw[:60],
                         "author": str(r.get("name") or "")[:64],
-                        "source_url": str(r.get("url") or "")[:500]})
+                        "source_url": str(r.get("url") or "")[:500],
+                        "publish_at": int(r.get("publish_at") or 0)})
     if keywords and failed == len(keywords):
         raise SearchSourceError(f"{len(keywords)} 个词全部搜索失败:{last_err}")
     return out
@@ -340,6 +341,7 @@ def _candidates_from_weibo(ck: str, keywords: list[str], limit: int) -> list[dic
                             "title": _clean(r.get("snippet") or "")[:255] or kw[:60],
                             "author": str(r.get("name") or "")[:64],
                             "source_url": str(r.get("url") or "")[:500],
+                            "publish_at": int(r.get("publish_at") or 0),
                             "metrics": r.get("metrics") or {}})
     if keywords and failed == len(keywords):
         raise SearchSourceError(f"{len(keywords)} 个词全部搜索失败:{last_err}")
@@ -454,7 +456,28 @@ def find_candidates(session, user_id: int, keywords: list[str], limit: int = 20,
         raise SearchSourceError(f"{attempted} 个源全部失败:{last_err}")
     if not attempted:
         logger.info("网盘发现跳过:两个源都没启用/都没配")
-    return list(found.values())
+    cands = list(found.values())
+    # **按发布时间过滤**(2026-10-06,与抖音/B站**同一条口径**)。
+    # ⚠️ 拿不到时间的也跳过,但**必须报数** —— 某个源若永远给不出时间,
+    # 它会这样**静默归零**(整条链 0 产出),那正是本仓最忌讳的,所以要吵。
+    from app.services.douyin_leads import _min_publish_ts
+
+    min_ts = _min_publish_ts(settings or get_settings())
+    if min_ts:
+        kept, n_old, n_notime = [], 0, 0
+        for c in cands:
+            pv = int(c.get("publish_at") or 0)
+            if pv <= 0:
+                n_notime += 1
+            elif pv < min_ts:
+                n_old += 1
+            else:
+                kept.append(c)
+        if n_old or n_notime:
+            logger.info("公开平台发现:按发布时间过滤掉 %d 条(早于下限)+ %d 条(没有发布时间)",
+                        n_old, n_notime)
+        cands = kept
+    return cands
 
 
 def _search_words(session, user_id: int, top: int, settings) -> list[str]:
