@@ -231,8 +231,12 @@ class TestFindLeadsAcceptsQuark:
         class _MC:
             @staticmethod
             def crawl(platform, keywords):
+                import datetime as _dt
+                # ⚠️ **必须带发布时间的近期值** —— `find_leads` 现在会按
+                # `douyin_leads_min_publish_date`(默认 2026-10-01)过滤,缺时间的会被丢掉。
                 return [{"uid": "v1", "name": "某号", "url": "https://v.douyin.com/AAA/",
-                         "snippet": "咐置铸剑上供叩苓 forgetax下载教程", "keyword": "夸克口令"}]
+                         "snippet": "咐置铸剑上供叩苓 forgetax下载教程", "keyword": "夸克口令",
+                         "publish_at": int((_dt.datetime.now() - _dt.timedelta(days=1)).timestamp())}]
         monkeypatch.setattr("app.services.mediacrawler_source.crawl", _MC.crawl)
         out = dl.find_leads(["夸克口令"])
         assert out and out[0]["mark"] == "咐置铸剑上供叩苓", out

@@ -295,4 +295,8 @@ def _parse_record(rec: dict, platform: str) -> dict | None:
             "metrics": metrics,                  # 交给 conversion 算曝光
             # 该条来自哪个搜索词(抖音 jsonl 的 source_keyword)——
             # 抖音线索要按词回显"这条是搜什么词搜出来的"。
-            "keyword": str(rec.get("source_keyword") or "")[:80]}
+            "keyword": str(rec.get("source_keyword") or "")[:80],
+            # **帖子发布时间**(Unix 秒,2026-10-06):`create_time` 一直在 jsonl 里
+            # (实测字段齐全),**只是这里从来没人往上传** ⇒ 下游只能拿"我们发现的时刻"
+            # 当新鲜度,而那是**假的新鲜度**(老帖被反复推时照样"刚发现")。
+            "publish_at": int(rec.get("create_time") or 0)}

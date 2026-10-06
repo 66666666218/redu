@@ -4,6 +4,19 @@ import os
 os.environ.setdefault("JWT_SECRET", "test_secret_0123456789abcdef0123456789abcdef")
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_publish_cutoff(monkeypatch):
+    """单测里**默认关掉发布时间过滤**。
+
+    ⚠️ `find_leads` 读的是**全局 settings**(它没有 settings 参数),所以给假件加字段没用 ——
+    必须打这个补丁。大多数用例验的是"判据 / 去重",不是"新鲜度";
+    **过滤本身在 `TestPublishCutoff` 里专门验**。
+    """
+    monkeypatch.setattr("app.services.douyin_leads._min_publish_ts", lambda s: 0)
+
 
 class _Settings:
     """最小 settings 替身(只覆盖 push_leads 用到的字段)。"""
@@ -140,7 +153,6 @@ def test_push_leads_no_webhook_is_noop() -> None:
 
 # ---------------------------------------------------------------- 口令 → 资源(2026-10-02)
 
-import pytest  # noqa: E402
 from sqlalchemy import create_engine, select  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 
@@ -1055,3 +1067,70 @@ class TestNormWord:
         from app.services.douyin_leads import _norm_word
 
         assert _norm_word("高性价比人生指南共338页pdf") != _norm_word("高性价比人生指南pdf")
+
+
+class TestPublishCutoff:
+    """★ **发布时间下限**(2026-10-06 用户口径:「**2026年10月份之前的不要再保存进来了**」)。
+
+    起因不是洁癖:抖音上的网盘推广帖**高度重复** —— 一条 8 月的老帖会被推广号**反复推**,
+    照样"刚被发现",于是"每天搬 8 条"搬回来的**大半是已有的老资源**
+    (实测一轮 8 条里 **5 条命中三盘互通**)。所以新鲜度不能靠"我们发现的时刻",要靠**帖子自己的发布时间**。
+
+    ⚠️ **没有发布时间的也跳过** —— 判不了就宁可不收;但**必须报数**,
+    绝不静默丢(否则整平台静默归零,正是本仓最忌讳的那类)。
+    """
+
+    def _leads(self, monkeypatch, rows):
+        class _MC:
+            @staticmethod
+            def crawl(platform, keywords):
+                return rows
+        monkeypatch.setattr("app.services.mediacrawler_source.crawl", _MC.crawl)
+        from app.services import douyin_leads as dl
+        return dl
+
+    def _row(self, aid, title, pub):
+        return {"uid": f"u{aid}", "name": "某号", "url": f"https://v.douyin.com/{aid}/",
+                "snippet": title, "publish_at": pub, "keyword": "夸克口令"}
+
+    def test_早于下限的丢掉(self, monkeypatch) -> None:
+        import datetime as dt
+        dl = self._leads(monkeypatch, [
+            self._row("new", "咐置新的叩苓", int(dt.datetime(2026, 10, 5).timestamp())),
+            self._row("old", "咐置旧的叩苓", int(dt.datetime(2026, 8, 1).timestamp())),
+        ])
+        monkeypatch.setattr(dl, "_min_publish_ts",
+                            lambda s: int(dt.datetime(2026, 10, 1).timestamp()))
+        out = dl.find_leads(["夸克口令"])
+        assert [x["mark"] for x in out] == ["咐置新的叩苓"], f"旧帖必须被丢掉:{out}"
+
+    def test_没有发布时间的也丢掉(self, monkeypatch) -> None:
+        import datetime as dt
+        dl = self._leads(monkeypatch, [self._row("nt", "咐置无时间叩苓", 0)])
+        monkeypatch.setattr(dl, "_min_publish_ts",
+                            lambda s: int(dt.datetime(2026, 10, 1).timestamp()))
+        assert dl.find_leads(["夸克口令"]) == [], "判不了就不收(但会报数,不是静默)"
+
+    def test_越新越靠前(self, monkeypatch) -> None:
+        import datetime as dt
+        dl = self._leads(monkeypatch, [
+            self._row("a", "咐置甲的叩苓", int(dt.datetime(2026, 10, 2).timestamp())),
+            self._row("b", "咐置乙的叩苓", int(dt.datetime(2026, 10, 5).timestamp())),
+        ])
+        monkeypatch.setattr(dl, "_min_publish_ts",
+                            lambda s: int(dt.datetime(2026, 10, 1).timestamp()))
+        out = dl.find_leads(["夸克口令"])
+        assert [x["mark"] for x in out] == ["咐置乙的叩苓", "咐置甲的叩苓"], "新的要排前面"
+
+    def test_下限留空就不过滤(self, monkeypatch) -> None:
+        dl = self._leads(monkeypatch, [self._row("x", "咐置某叩苓", 0)])
+        monkeypatch.setattr(dl, "_min_publish_ts", lambda s: 0)
+        assert len(dl.find_leads(["夸克口令"])) == 1
+
+    def test_日期写坏了要吭声_不是静默不过滤(self) -> None:
+        """⚠️ 写坏日期**不能静默变成"不过滤"** —— 那等于用户的规则悄悄失效了。"""
+        from app.services.douyin_leads import _min_publish_ts
+
+        class _S:
+            douyin_leads_min_publish_date = "2026/10/01"      # 格式不对
+        assert _min_publish_ts(_S()) == 0                     # 降级成不过滤,但**打了 warning**

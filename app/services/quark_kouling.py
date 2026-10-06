@@ -142,9 +142,16 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
         select(DouyinLead).where(DouyinLead.user_id == user_id,
                                  DouyinLead.our_url == "",
                                  DouyinLead.kouling_tried_at.is_(None))
-        .order_by(DouyinLead.id.desc()).limit(max(limit * 8, 24))).all()
-    # **看起来像夸克口令的排前面** —— 它们才是真会成的;其余的也会试,但排在后面。
-    todo = sorted(todo, key=lambda r: (not _looks_like_quark(r.title), -int(r.id)))[:limit]
+        .order_by(DouyinLead.id.desc()).limit(max(limit * 12, 60))).all()
+    # 排序的三档,按重要性从高到低:
+    #   ① **看起来像夸克口令的排前面** —— 它们才是真会成的;
+    #   ② **帖子越新越优先**(`publish_at` 倒序)—— 用户要的是**新鲜资源**,
+    #      而老帖会被推广号**反复推**,把它们排在前面就是在重复搬已有的东西;
+    #   ③ 都没发布时间的老数据(2026-10-06 之前入库的)排最后。
+    todo = sorted(todo, key=lambda r: (
+        not _looks_like_quark(r.title),
+        -(r.publish_at.timestamp() if r.publish_at else 0),
+        -int(r.id)))[:limit]
     done = failed = reused = 0      # `reused` = **三盘互通命中**(连模拟器都没跑)
     try:
         qt = QuarkTransfer(ck)

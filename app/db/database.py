@@ -150,7 +150,11 @@ ADDITIONS: dict[str, list[str]] = {
     # `kouling_tried_at`(2026-10-06):夸克口令那条链**试过一次就不再试**。
     # 起因:抖音线索里绝大多数是**迅雷形态**(《》里的群/分享口令),夸克 App 匹配不了 ——
     # 实测同样两条标题,迅雷型不弹卡片、夸克型才弹。不留痕的话每轮都会重试同一批失败项。
-    "douyin_leads": ["our_url VARCHAR(500) DEFAULT ''", "kouling_tried_at DATETIME"],
+        # `publish_at`(2026-10-06):**帖子发布时间** —— 新鲜度的**唯一真依据**。
+    # ⚠️ 此前只有 `found_at`(我们发现的时刻),那是**假的新鲜度**:
+    # 老帖被推广号反复推时,照样是"刚发现",于是"每天搬 8 条"搬回来的大半是老资源。
+    "douyin_leads": ["our_url VARCHAR(500) DEFAULT ''", "kouling_tried_at DATETIME",
+                     "publish_at DATETIME"],
     "alerts": ["section VARCHAR(32) DEFAULT ''"],
     "douhot_watch": ["section VARCHAR(16) DEFAULT 'douhot'", "filter_keyword VARCHAR(64) DEFAULT ''",
                      "date_window INTEGER"],

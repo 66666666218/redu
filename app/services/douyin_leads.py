@@ -143,11 +143,26 @@ def find_leads(keywords: list[str], limit: int = 30, platform: str = "douyin") -
     # `success(线索0)`,而这条链**只在每天 11:00 无人值守时跑**,失败你收不到任何信号。
     out: list[dict] = []
     seen: set[str] = set()
+    # **发布时间下限**(用户口径:「2026年10月份之前的不要再保存进来了」)。
+    # ⚠️ **没有发布时间的也跳过** —— 判不了就宁可不收;但**逐条记账、最后打出来**,
+    # 绝不静默丢(本仓最忌讳的就是"看着没产出、其实是我们在丢")。
+    from config.settings import get_settings
+
+    min_pub_ts = _min_publish_ts(get_settings())
+    n_old = n_notime = 0
     for h in mc.crawl(platform, keywords):
         text = (h.get("snippet") or "").strip()
         url = (h.get("url") or "").strip()
         if not url or url in seen:
             continue          # 拿不到视频链 / 同一个视频(多词命中)去重
+        pub = int(h.get("publish_at") or 0)
+        if min_pub_ts:
+            if pub <= 0:
+                n_notime += 1
+                continue
+            if pub < min_pub_ts:
+                n_old += 1
+                continue
         name = h.get("name") or ""
         mark = _lead_mark(text, name)
         if not mark:
@@ -165,12 +180,35 @@ def find_leads(keywords: list[str], limit: int = 30, platform: str = "douyin") -
                     # 转发量(结算用):衡量**这个资源在抖音有多热**;⚠️ 是**别人视频**的数,
                     # 不等于我们自己发文的转化(见 DouyinLead/lead_settlement 的口径说明)。
                     "share_count": int(h.get("share_count") or 0),
+                    "publish_at": int(h.get("publish_at") or 0),   # ★ 帖子发布时间(新鲜度的唯一依据)
                     "aweme_id": _aweme_id(url),         # 去重键(同一视频会被多个词命中)
                     "_rank": _lead_rank(text, name)})
-    out.sort(key=lambda x: x["_rank"])      # 强信号排前面(开头《》> 与昵称吻合 > 其它)
+    if min_pub_ts and (n_old or n_notime):
+        logger.info("抖音线索:按发布时间过滤掉 %d 条(早于下限)+ %d 条(没有发布时间)",
+                    n_old, n_notime)
+    out.sort(key=lambda x: (-int(x.get("publish_at") or 0), x["_rank"]))
+    # ↑ **越新越靠前**(发布时间倒序),同档内仍按强信号排(开头《》> 与昵称吻合 > 其它)
     for x in out:
         x.pop("_rank", None)
     return out[:limit]
+
+
+def _min_publish_ts(settings) -> int:
+    """`douyin_leads_min_publish_date` → Unix 秒;留空/写坏都返回 0(= 不过滤)。
+
+    ⚠️ **写坏了要吭声**:解析失败就记一条 warning,别静默当成"不过滤" ——
+    那等于用户的规则**悄悄失效**了。
+    """
+    from datetime import datetime as _dt
+
+    raw = str(getattr(settings, "douyin_leads_min_publish_date", "") or "").strip()
+    if not raw:
+        return 0
+    try:
+        return int(_dt.strptime(raw, "%Y-%m-%d").timestamp())
+    except ValueError:
+        logger.warning("douyin_leads_min_publish_date 解析失败(%r),本轮**不过滤**", raw)
+        return 0
 
 
 def _to_search_word(title: str) -> str:
@@ -618,7 +656,7 @@ def _save_leads(session, user_id: int, leads: list[dict]) -> int:
     算不出"本周发现的线索总量级"了(见 `DouyinLead` 的注释)。
     没有 `aweme_id` 的跳过:去重键缺了就只能靠 URL 硬碰,不如不落(宁缺勿假)。
     """
-    from datetime import date
+    from datetime import date, datetime
 
     from app.db.models import DouyinLead
 
@@ -633,6 +671,12 @@ def _save_leads(session, user_id: int, leads: list[dict]) -> int:
         if row is None:
             row = DouyinLead(user_id=user_id, aweme_id=aid, found_date=today)
             session.add(row)
+        _pub = int(ld.get("publish_at") or 0)
+        if _pub > 0:
+            try:
+                row.publish_at = datetime.fromtimestamp(_pub)
+            except (OverflowError, OSError, ValueError):
+                pass          # 时间戳离谱就留空,别让一条脏数据炸掉整轮
         row.mark = str(ld.get("mark") or "")[:64]
         row.title = str(ld.get("title") or "")[:255]
         row.author = str(ld.get("author") or "")[:64]

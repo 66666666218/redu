@@ -435,6 +435,10 @@ class DouyinLead(Base):
     # 夸克口令那条链**是否已经试过**(2026-10-06):失败也要落痕 ——
     # 否则每轮都会拿同一批"App 匹配不了"的迅雷型线索去烧模拟器时间。
     kouling_tried_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # **帖子发布时间**(2026-10-06):新鲜度的**唯一真依据**。
+    # 没有它时只能拿 `found_at`(我们发现的时刻)当新鲜度 —— 那是**假的新鲜度**:
+    # 老帖被推广号反复推时照样"刚发现",于是搬回来的大半是已有的老资源。
+    publish_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class QuarkShareStat(Base):
