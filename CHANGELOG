@@ -1,3 +1,5 @@
+- [2026-10-06 20:44] FIX: 续期「恢复正常」通知没有前提条件 —— 系统一直健康也天天报 (Files: app/services/wechat/_source.py, tests/test_renewal_recovery_notice.py)
+- [2026-10-06 20:44] FIX: 转存成功了但记录随那一轮被丢弃 —— 卡片显示「待转存」且下轮重转 (Files: app/services/wechat/_source.py, app/services/wechat/_enrich.py, tests/test_renewal_recovery_notice.py, tests/test_wechat_enrich_durability.py)
 - [2026-10-06 20:22] FEAT: 公众号列表源逐个验活 —— 补上体检报告里缺的那一段 (Files: app/services/chain_health.py, app/services/wechat/_source.py, app/services/wechat_monitor.py, tests/test_list_source_health.py)
 - [2026-10-06 16:47] FIX: 新鲜度规则只落在抖音一条链上 —— 公众号补闸,判定收进单一事实源 (Files: app/services/freshness.py, app/services/wechat/_enrich.py, app/services/douyin_leads.py, tests/test_freshness.py, tests/test_wechat_monitor.py)
 - [2026-10-06 16:39] FIX: 慢活占着写事务饿死其他作业 —— 补齐第二条链并加源码级守卫防复发(Files: app/services/pan_discovery.py, app/services/resource_presence.py, tests/test_slowwork_guard.py, tests/test_resource_presence.py)

@@ -62,6 +62,33 @@ def _backfill_pan_urls(session: Session, user_id: int, limit: int = 100) -> int:
         session.commit()
         logger.info("回填盘链列 %d 篇(正文有链但过去没抽到)", fixed)
     return fixed
+def _commit_now(session: Session, why: str) -> None:
+    """★ **外部副作用一旦发生,对应的记录必须当场落盘**(2026-10-06 实测逼出来的)。
+
+    `transfer_and_share` 不是"准备一个待写的值",它**真的动了外部世界**:
+    文件已经进了我们的网盘、分享链已经建好、额度/空间已经花掉。而这一段跑在
+    监听轮的**大事务**里(收尾才 commit)⇒ 只要那一轮**卡住/进程被重启**,
+    未提交的事务就整段消失,变成:
+
+      · 库里 `my_pan_urls` 是空的 → 卡片只能显示"⏳待转存"(用户看到的就是这个);
+      · 下一轮又把**同一批资源重转一遍** → 多建一份分享、多占一份空间。
+
+    **实测证据(2026-10-06)**:`14:01:49` 四条「盘链复用(免重复转存)」成功落日志,
+    之后那一轮**再没有产出任何日志**(同时段调度器其他作业一切正常),
+    `14:29:31` 服务重启 ⇒ 库里那几行的 `my_pan_urls` **全是空的**。
+    也就是说:**盘上的转存是真花了,记录却没了。**
+
+    ⚠️ 在 `savepoint` 块里调用它是**安全的、且是既有模式** ——
+    `app/db/tx.py::_quiet` 的注释写明:"段内可能已发生外层 commit … 静默跳过即可,数据已经落库"。
+    """
+    try:
+        session.commit()
+    except Exception:  # noqa: BLE001 - 落盘失败要说出来,但不能让整轮崩掉
+        # 落不下盘 = 这份转存结果白花了(下一轮会重转)。**必须显式喊一声**,
+        # 不能让"转存成功"的日志成为这件事的最后一句话。
+        logger.exception("转存结果落盘失败(%s)—— 这一份会丢,下一轮会重转", why)
+
+
 def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchmark,
                          items: list[dict], source: str, fetch_content: bool = False,
                          content_resolver=None, require_pan: bool = True,
@@ -344,6 +371,7 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                                 mine.append(u + " (自分享)")
                                 r.my_pan_urls = chr(10).join(mine)[:2000]
                                 replacements.setdefault(r.id, []).append((u, u, ""))
+                                _commit_now(session, "夸克自分享收录")
                                 logger.info("盘链为自己分享,直接采用: %s", u[:60])
                                 continue
                             # 41031=对方分享被封(源永久失效,重试不可能成功)→ 落一条标记
@@ -353,6 +381,10 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                                 mine = [x for x in (r.my_pan_urls or "").splitlines() if x.strip()]
                                 mine.append("⚠️源分享已被封(41031),未转存")
                                 r.my_pan_urls = chr(10).join(mine)[:2000]
+                                # ⚠️ **出队标记也要当场落盘**:它是"这条永久失败、别再占队头"的凭据。
+                                # 丢了它 ⇒ 死链每轮都排在队头、吃光 `pan_transfer_backfill_limit`
+                                # 个名额,真正待转的永远轮不到(而日志里看不出任何异常)。
+                                _commit_now(session, "夸克源失效出队")
                                 logger.info("夸克源分享已失效,出队补转存队列 %s:%s", u, str(exc)[:80])
                                 continue
                             logger.warning("夸克转存失败 %s:%s(推送保留原链接)", u, str(exc)[:80])
@@ -363,6 +395,9 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                 mine.append(share_url + (f" (提取码 {pwd})" if pwd else ""))
                 r.my_pan_urls = chr(10).join(mine)[:2000]
                 replacements.setdefault(r.id, []).append((u, share_url, pwd))
+                # ⚠️ **转存是外部副作用,结果当场落盘**(见 `_commit_now` 的实测证据):
+                # 这一轮后面无论卡住还是被重启,这份已经花掉的转存都不能丢记录。
+                _commit_now(session, "夸克转存")
                 # 已推送过的历史行(backfill 队列救回的):补一条轻量链接消息,员工拿得到我方链
                 try:
                     _relink_notify(session, user_id, settings, r, "夸克", share_url, pwd)
@@ -429,6 +464,8 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                         mine.append(mine_b)
                         r.my_pan_urls = chr(10).join(mine)[:2000]
                         replacements.setdefault(r.id, []).append((u, share_url_b, code_b))
+                        # ⚠️ 百度这边同理:**转存已经真花了,记录不能挂在轮末那次 commit 上**。
+                        _commit_now(session, "百度转存")
                         # 已推送过的历史行:补一条轻量链接消息(百度转存常晚于推送)
                         try:
                             _relink_notify(session, user_id, settings, r, "百度", share_url_b, code_b)

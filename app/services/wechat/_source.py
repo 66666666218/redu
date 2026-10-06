@@ -521,6 +521,41 @@ def _renewal_cooldown_until(session: Session, user_id: int) -> datetime | None:
         except ValueError:
             return None
     return None
+#: 续期**失败**时立的旗子 —— 「恢复通知」的前提条件(见 `refresh_weread_cookie`)。
+_RENEWAL_FAILED_KEY = "weread_renewal_failed_{uid}"
+
+
+def _renewal_failed_since(session: Session, user_id: int) -> str:
+    """续期是否处于"失败未恢复":返回失败时间;空串 = **没有失败要恢复**。"""
+    from app.db.models import SystemConfig
+
+    row = session.scalar(select(SystemConfig).where(
+        SystemConfig.key == _RENEWAL_FAILED_KEY.format(uid=user_id)))
+    return str(row.value or "") if row else ""
+
+
+def _mark_renewal_failed(session: Session, user_id: int) -> None:
+    """续期失败 → 立旗。**恢复通知的前提是这个旗子,而不是时间冷却**。"""
+    from app.db.models import SystemConfig
+
+    key = _RENEWAL_FAILED_KEY.format(uid=user_id)
+    row = session.scalar(select(SystemConfig).where(SystemConfig.key == key))
+    if row is None:
+        session.add(SystemConfig(key=key, value=datetime.now().isoformat()))
+    else:
+        row.value = datetime.now().isoformat()
+
+
+def _clear_renewal_failed(session: Session, user_id: int) -> None:
+    """**恢复通知真发出去了**才落旗 —— 没发成就不落,下一轮还会想发。"""
+    from app.db.models import SystemConfig
+
+    row = session.scalar(select(SystemConfig).where(
+        SystemConfig.key == _RENEWAL_FAILED_KEY.format(uid=user_id)))
+    if row is not None:
+        session.delete(row)
+
+
 def refresh_weread_cookie(session: Session, user_id: int, settings: Settings | None = None) -> dict:
     """微信读书 Cookie 续期:长效 wr_rt → 新短效 wr_skey,并回写 Cookie 管理。
 
@@ -617,16 +652,27 @@ def refresh_weread_cookie(session: Session, user_id: int, settings: Settings | N
                     user_id)
     # 恢复确认(对齐闲鱼"✅采集已恢复",2026-09-30):失败告警发过,恢复也得说一声——
     # 否则群里"续期失败"的旧告警变成孤魂,用户看到旧告警+新推送并存会误判(实测困惑)
+    #
+    # ⚠️⚠️ **2026-10-06 修:只有"真的失败过"才发**。原来这里是"续期成功就发",而续期
+    # **每 6 小时成功一次**、冷静期恰好也设成 6 小时 ⇒ **系统完全健康也天天推"恢复正常"**
+    # (实测约 2 次/天;用户直接来问"为什么今天还在提醒我",而其实一次失败都没发生过)。
+    # 这条通知自己写着"此前如有「续期失败」告警,以本条为准",却**从不检查此前失败过没有**——
+    # **没有失败就报恢复,等于把告警变成噪音,而噪音会训练人忽略整块告警**
+    # (与"恒为 0 的档位""假红会训练人忽略整份报告"同一条教训)。
+    # 判据改成旗子:失败时立(`_mark_renewal_failed`)、**发出去才落**(`_clear_renewal_failed`)。
     try:
-        from app.services.alert_service import feishu_alert_gate
-        from app.services.feishu_client import FeishuClient, webhook_for as _wf
+        if _renewal_failed_since(session, user_id):
+            from app.services.alert_service import feishu_alert_gate
+            from app.services.feishu_client import FeishuClient, webhook_for as _wf
 
-        _st = settings or get_settings()
-        _hook = _wf(_st, "wechat")
-        if _hook and feishu_alert_gate(session, user_id, "weread_renewal_ok",
-                                       f"renewal_ok:{user_id}", 6, "续期成功,监听恢复"):
-            FeishuClient(_hook, _st.feishu_secret).send(
-                "✅ 微信读书 Cookie 已自动续期,监听恢复正常——此前如有「续期失败」告警,以本条为准")
+            _st = settings or get_settings()
+            _hook = _wf(_st, "wechat")
+            if _hook and feishu_alert_gate(session, user_id, "weread_renewal_ok",
+                                           f"renewal_ok:{user_id}", 6, "续期成功,监听恢复"):
+                FeishuClient(_hook, _st.feishu_secret).send(
+                    "✅ 微信读书 Cookie 已自动续期,监听恢复正常——此前如有「续期失败」告警,以本条为准")
+                _clear_renewal_failed(session, user_id)
+                session.commit()
     except Exception:  # noqa: BLE001 - 恢复确认是锦上添花,失败不影响续期结果
         logger.debug("续期恢复确认推送失败(不影响续期)", exc_info=True)
     return {"status": "success", "verified": True, "cookie": new_cookie}
@@ -670,6 +716,14 @@ def weread_refresh_tick(settings: Settings | None = None) -> int:
                 failed.append((uid, "exception"))
     finally:
         if failed:
+            # ★ **立旗**:这一轮确有失败 ⇒ 之后某轮续期成功时,才轮到"恢复通知"出场。
+            # 没这面旗子,"恢复通知"就只能在不知道有没有失败的情况下凭时间瞎发(2026-10-06 修)。
+            for _uid, _ in failed:
+                _mark_renewal_failed(db, _uid)
+            try:
+                db.commit()
+            except Exception:  # noqa: BLE001 - 立旗失败不该挡住真正的失败告警
+                logger.exception("续期失败旗子落库失败(恢复通知可能漏发或误发)")
             try:
                 detail = "; ".join(f"用户{u}:{_RENEWAL_FAIL_TEXT.get(r, r) or '未知原因'}" for u, r in failed)
                 from app.services.cookie_store import get_cookie
