@@ -329,3 +329,55 @@ def test_transfer_can_be_disabled(monkeypatch) -> None:
     items = [{"name": "r", "link": {"pan_url": "p", "my_link": ""}}]
     out = rp.transfer_missing_links(_Sess(), 1, items, _Off())
     assert called == [] and out == {"attempted": 0, "ok": 0, "failed": 0, "skipped": 1}
+
+
+class _PresS:
+    presence_names = 3
+    presence_platforms = "xiaohongshu,bilibili"
+
+
+class TestPartialFailureAlerts:
+    """★ **部分失败也要有人知道**(2026-10-06)。
+
+    原来它只把平台名拼进运行记录的 detail(注释里自己写着"否则查不出来"),
+    而**运行记录没人天天看** —— 实测小红书登录态过期后**连挂 3 天**
+    (10-04/05/06 各失败一次),最后是用户来问"群里的机器人都配置好了吗"才被发现。
+    """
+
+    def _patch(self, monkeypatch, boom: str | None = "xiaohongshu", plats=("xiaohongshu", "bilibili")):
+        from app.services import mediacrawler_source as mc
+
+        monkeypatch.setattr(mc, "available", lambda: (True, "ok"))
+        monkeypatch.setattr(rp, "library_names", lambda s, u, top=5: ["某个资源"])
+        monkeypatch.setattr(rp, "platforms_of", lambda st: list(plats))
+
+        def _crawl(plat, names):
+            if boom is None or plat == boom:
+                raise mc.MediaCrawlerError(f"{plat} 超时(600s)——多半卡在扫码登录")
+            return [{"keyword": "某个资源", "snippet": "x", "uid": "u1", "name": "n",
+                     "url": "http://x"}]
+        monkeypatch.setattr(rp, "_crawl_platform", _crawl)
+
+    def test_部分失败推告警并给出扫码命令(self, session, monkeypatch) -> None:
+        sent: list = []
+        import app.services.alert_service as asvc
+        monkeypatch.setattr(asvc, "notify_incident", lambda *a, **k: sent.append(a) or True)
+        self._patch(monkeypatch)
+
+        out = rp.probe(session, 1, _PresS())
+
+        assert out["failed"] == ["xiaohongshu"], out
+        assert sent, "部分失败必须推告警 —— 只写进运行记录等于没人知道"
+        # notify_incident(db, uid, kind, title, detail) ⇒ [3]=标题 [4]=详情
+        title, detail = sent[0][3], sent[0][4]
+        assert "小红书" in title, title
+        assert "--platform xhs" in detail, f"要给**能照着做的那一步**(平台 id):{detail[:180]}"
+
+    def test_全部失败仍然冒泡(self, session, monkeypatch) -> None:
+        """⚠️ 反向:全挂必须抛(不能记成 success 空)—— 别被新加的告警顺手吞掉。"""
+        import app.services.alert_service as asvc
+        monkeypatch.setattr(asvc, "notify_incident", lambda *a, **k: True)
+        self._patch(monkeypatch, boom=None)
+
+        with pytest.raises(Exception):
+            rp.probe(session, 1, _PresS())

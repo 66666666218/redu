@@ -147,6 +147,34 @@ def probe(session, user_id: int, settings=None, platforms: list[str] | None = No
             failed.append(plat)
             last_err = f"{plat}: {exc}"
             logger.warning("跨平台热度:%s 抓取失败(%s)", plat, exc)
+            # ⚠️⚠️ **部分失败也要有人知道**(2026-10-06):上面这条注释说的是"查不出来",
+            # 而它只把平台名拼进运行记录的 detail —— **运行记录没人天天看**。
+            # 实测代价:小红书登录态过期后**连挂 3 天**(10-04/05/06 各失败一次),
+            # 最后是用户来问"群里的机器人都配置好了吗"才被发现。
+            # 这一类(登录态失效)**等多久都不会自己好,要人扫码** ⇒ 归"需人工",推飞书;
+            # 冷却去重由 `notify_incident` 管,不会刷屏。
+            try:
+                from app.services.alert_service import notify_incident
+
+                _t = f"{type(exc).__name__}: {exc}"
+                _need = any(m in _t for m in ("扫码", "登录", "qrcode", "超时"))
+                _label = PLATFORMS.get(plat, {}).get("label", plat)
+                # 平台 id 复用 `mediacrawler_source.PLATFORM_IDS`(单一事实源,别在这里抄一份)
+                from app.services.mediacrawler_source import PLATFORM_IDS as _PIDS
+
+                _pid = _PIDS.get(plat, plat)
+                notify_incident(
+                    session, user_id, "multiplatform",
+                    f"🟠 跨平台热度采集失败:{_label}",
+                    f"{_t[:160]}。" + (
+                        f"**多半是登录态过期,需要扫码重登**:浏览器会弹二维码 —— 跑 "
+                        f"`cd tools/MediaCrawler && .venv/Scripts/python.exe main.py "
+                        f"--platform {_pid} --lt qrcode --type search` "
+                        f"用 App 扫一下即可(登录态会缓存在 browser_data/,不用每次扫)。"
+                        if _need else "该平台本轮跳过,其余平台照常。"),
+                    settings=settings)
+            except Exception:  # noqa: BLE001 - 告警失败绝不能影响采集
+                logger.debug("跨平台热度失败告警推送失败", exc_info=True)
             continue
         if not rows:
             continue                                     # 该平台没结果 → 跳过,不影响其余

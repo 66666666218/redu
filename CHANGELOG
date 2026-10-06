@@ -1,3 +1,4 @@
+- [2026-10-06 22:56] FEAT: 跨平台采集部分失败要推告警(小红书登录态过期连挂 3 天没人知道) (Files: app/services/resource_presence.py, tests/test_resource_presence.py, .env)
 - [2026-10-06 22:22] FIX: 夸克口令的环境故障不该消耗线索;单测不再操作模拟器 (Files: app/services/quark_kouling.py, tests/test_quark_kouling.py, tools/quark_kouling_ui.py[gitignored])
 - [2026-10-06 22:04] FIX: B站扫描提速(1→6/轮)并把'每号落盘'补上 —— 提速的前置条件 (Files: app/services/bili_account_scan.py, config/settings.py, tests/test_bili_account_scan.py)
 - [2026-10-06 21:58] FEAT: 多平台热榜速览卡改推「多平台监控」专属群 (Files: config/settings.py, app/services/feishu_client.py, app/services/hot_sources.py, tests/test_hot_sources.py, .env)
