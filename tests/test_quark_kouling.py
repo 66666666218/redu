@@ -51,10 +51,22 @@ class _FakeQt:
 
     def __init__(self, *a, **k):
         self.shared: list = []
+        import time as _t
+        self._recent = [{"fid": "NEWEST", "file_name": "第五人格美化包教程下载-",
+                         "updated_at": str(int(_t.time() * 1000))}]
+
+    def list_dir(self, fid: str = "0"):
+        return [{"fid": "DIR1", "file_name": "来自：分享"}] if fid == "0" else []
+
+    def list_recent(self, fid: str = "0", size: int = 30):
+        return self._recent
 
     def search_files(self, keyword: str, size: int = 20):
         """⚠️ 现在是**搜索**而不是列目录 —— 起因是对着真账号踩到 `list_dir` 的 1 万条上限,
         「来自：分享」排在第 1 万条之外、**根本够不着**(详见 `_find_saved_fid` 的注释)。"""
+        # 目录本身也要能"搜到" —— 兜底那条路靠它拿 fid(不能靠 list_dir,见实现里的注释)
+        if keyword == "来自：分享":
+            return [{"fid": "DIR1", "file_name": "来自：分享", "updated_at": "1"}]
         if "铸剑" in keyword:
             return [{"fid": "F0", "file_name": "铸剑纳贡（ForgeTax）", "updated_at": "100"},
                     {"fid": "F1", "file_name": "铸剑纳贡（ForgeTax）", "updated_at": "200"}]
@@ -99,18 +111,39 @@ class TestResolveFailuresAreStructured:
 
 
 class TestFindSavedFid:
-    def test_按资源名匹配_取最新(self) -> None:
+    """⚠️ **卡片标题与保存后的文件名经常对不上**(2026-10-06 找到的真原因,实测):
+
+        卡片:「第五人格美化包（先保存再下载）」
+        盘里:「第五人格美化包教程下载-」        ← **互不包含**
+
+    而按名字匹配的实现遇到这种就判"没找到文件",于是一条**明明搬成了**的线索被记成失败。
+    所以:**先按名字找;找不到就取"刚刚新增的那个"**(App 刚存的一定是最新的),
+    **但只认时间窗内的**(5 分钟)—— 不是无脑取最新,否则会误取别人的文件。
+    """
+
+    def test_按名字匹配优先(self) -> None:
         assert qk._find_saved_fid(_FakeQt(), "铸剑纳贡（ForgeTax）") == "F1"
 
-    def test_匹配不上返回空_不瞎搬(self) -> None:
-        """⚠️ 宁可少搬一条,也别搬错资源。"""
-        assert qk._find_saved_fid(_FakeQt(), "完全不相干的资源") == ""
+    def test_名字对不上就取刚刚新增的(self, session) -> None:
+        """★ 这是**真原因**:卡片的标题和盘里的文件名互不包含。"""
+        assert qk._find_saved_fid(_FakeQt(), "完全不相干的资源", session, 1) == "NEWEST"
 
-    def test_搜不到就返回空(self) -> None:
-        class _Empty:
-            def search_files(self, keyword, size=20):
-                return []
-        assert qk._find_saved_fid(_Empty(), "x") == ""
+    def test_兜底只认时间窗内_不无脑取最新(self, session) -> None:
+        """⚠️ 反向:如果"最新那个"是**一小时前**的(不是刚存的),就不该认 —— 那多半是别人的文件。"""
+        class _Old(_FakeQt):
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k)
+                import time as _t
+                self._recent = [{"fid": "STALE", "file_name": "别人的文件",
+                                 "updated_at": str(int((_t.time() - 3600) * 1000))}]
+        assert qk._find_saved_fid(_Old(), "对不上的名字", session, 1) == ""
+
+    def test_都没时间也返回空(self, session) -> None:
+        class _NoTime(_FakeQt):
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k)
+                self._recent = [{"fid": "X", "file_name": "y", "updated_at": "0"}]
+        assert qk._find_saved_fid(_NoTime(), "对不上", session, 1) == ""
 
 
 class TestDrain:
@@ -363,3 +396,17 @@ class TestSlowWorkOutsideTransaction:
         assert order.index("commit") < order.index("ui"), (
             "**必须先 commit 释放写锁,再去做慢活** —— 否则整轮占着单写者的库,"
             f"别的作业会 `database is locked`。实际顺序:{order}")
+
+
+class TestEmptyTitleFallback:
+    """★ **空标题是最常见的失败原因**(2026-10-06 实测)。
+
+    日志一直在打「解出「**?**」但两次都找不到文件」—— 那个 `?` 就是**空标题**:
+    卡片弹出来了(所以 `resolve` 判 `ok`),但**标题没抽出来**。
+    而 `_find_saved_fid` 原来 `if not key: return ""` ⇒ **连"刚刚新增"的兜底都走不到**,
+    一条明明搬成了的线索被判成失败。
+    """
+
+    def test_空标题走兜底而不是直接判失败(self, session) -> None:
+        assert qk._find_saved_fid(_FakeQt(), "", session, 1) == "NEWEST"
+        assert qk._find_saved_fid(_FakeQt(), None, session, 1) == "NEWEST"

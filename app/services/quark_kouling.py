@@ -44,6 +44,9 @@ UI_SCRIPT = ROOT / "tools" / "quark_kouling_ui.py"
 # 一个口令 15–20 秒,但模拟器冷启动/弹窗卡住时要留足;超时**必须当失败**,不能假装成功
 _UI_TIMEOUT = 240
 _SAVE_DIR = "来自：分享"          # App 保存分享文件的默认目录
+_SAVE_DIR_FID_KEY = "quark_share_save_dir_fid"   # 该目录的 fid 缓存(见 _find_saved_fid)
+# "刚刚新增"的时间窗(毫秒):只认 5 分钟内更新过的,避免误取别人的文件
+_RECENT_SAVE_MS = 5 * 60 * 1000
 # **夸克口令的形态标记**(2026-10-06 实测得到):抖音上的规避写法是「复制…口令」的形近替换,
 # 我们见过的样本长 `咐置<资源名>叩苓`;App 自己生成的那段还带 `/~<token>~/`。
 # ⚠️ **这只是"优先"不是"判据"** —— 不同推广号会换替换字,所以漏网的要靠"试过就不再试"兜住,
@@ -111,12 +114,59 @@ def _find_saved_fid(qt, title: str, session=None, user_id: int = 0) -> str:
     ⇒ **根本够不着**,我当时还据此误判成"保存没成功"。搜索接口**一次命中**。
     """
     key = str(title or "").strip()
-    if not key:
-        return ""
-    cand = [x for x in qt.search_files(key, size=20)
-            if key in str(x.get("file_name") or "") or str(x.get("file_name") or "") in key]
+    # ⚠️⚠️ **标题为空时不能提前返回**(2026-10-06 实测到的**真原因**):
+    # 日志一直在打「解出「?」但两次都找不到文件」—— 那个 `?` 就是**空标题**。
+    # 也就是说:**卡片弹出来了、但标题没读出来**(`resolve` 只认「来自剪贴板」这句话,
+    # 标题抽不到就给了空串)。而原来这里 `if not key: return ""` ⇒
+    # **连"刚刚新增"的兜底都走不到**,一条明明搬成了的线索被判成失败。
+    # 空标题时**跳过去名字匹配,直接走兜底** —— App 刚存的那条一定是最新的。
+    cand = []
+    if key:
+        cand = [x for x in qt.search_files(key, size=20)
+                if key in str(x.get("file_name") or "") or str(x.get("file_name") or "") in key]
     cand.sort(key=lambda x: int(x.get("updated_at") or 0), reverse=True)
-    return str(cand[0].get("fid") or "") if cand else ""
+    if cand:
+        return str(cand[0].get("fid") or "")
+
+    # ⚠️⚠️ **兜底:名字匹配不上时,取"刚刚新增的那个"**(2026-10-06 找到的真原因)。
+    # **卡片标题与保存后的文件名经常对不上**(实测):
+    #   卡片:「第五人格美化包（先保存再下载）」
+    #   盘里:「第五人格美化包教程下载-」      ← 互不包含 ⇒ 按名字永远找不到
+    # 而 **App 刚存的那条一定是最新的**。加一个**时间窗**(5 分钟)防止误取别人的:
+    # 只认"刚刚更新过"的,不是无脑取最新。
+    from app.db.models import SystemConfig as _SC
+
+    d_fid = ""
+    if session is not None:
+        row = session.scalar(select(_SC).where(_SC.key == _SAVE_DIR_FID_KEY))
+        d_fid = str(row.value) if row and row.value else ""
+    if not d_fid:
+        # ⚠️⚠️ **必须用搜索接口找目录,不能用 `list_dir`**(2026-10-06 实测踩到,而且是**第二次**):
+        # `list_dir("0")` 最多 50 页 × 200 = **10000 条就停**,而「来自：分享」**排在第 1 万条之外**
+        # ⇒ d_fid 永远为空 ⇒ 兜底直接返回 ""(失败照旧),**而且每个口令都白翻 50 页**
+        # (一轮 8 条从 83 秒涨到 **795 秒**)。搜索接口一次命中 —— 上面按名字找文件时就是这么修的,
+        # 这里**又栽了同一跤**。
+        for x in qt.search_files(_SAVE_DIR, size=5):
+            if str(x.get("file_name")) == _SAVE_DIR and x.get("fid"):
+                d_fid = str(x["fid"])
+                break
+        if d_fid and session is not None:
+            row = session.scalar(select(_SC).where(_SC.key == _SAVE_DIR_FID_KEY))
+            if row is None:
+                session.add(_SC(key=_SAVE_DIR_FID_KEY, value=d_fid))
+            else:
+                row.value = d_fid
+            session.commit()
+    if not d_fid:
+        return ""
+    now_ms = int(time.time() * 1000)
+    for x in qt.list_recent(d_fid, size=10):
+        age_ms = now_ms - int(x.get("updated_at") or 0)
+        if 0 <= age_ms <= _RECENT_SAVE_MS:
+            logger.info("夸克口令:名字对不上(%r),按**刚刚新增**兜底取到 %s",
+                        key[:20], str(x.get("file_name"))[:24])
+            return str(x.get("fid") or "")
+    return ""
 
 
 def drain(session, user_id: int, settings=None, limit: int | None = None) -> dict:
@@ -202,7 +252,19 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
                 time.sleep(3)          # 给保存任务一点落盘时间
         if not fid:
             failed += 1
-            logger.warning("夸克口令:解出「%s」但两次都在 %s 里找不到文件", title or "?", _SAVE_DIR)
+            # **把屏幕拍下来** —— 剩下这类失败是"保存没产出文件",光看日志只能猜
+            shot = ""
+            try:
+                import subprocess as _sp
+                r = _sp.run([sys.executable, "-c",
+                             "import sys; sys.path.insert(0,'tools');"
+                             "from quark_kouling_ui import snapshot; print(snapshot('nosave'))"],
+                            capture_output=True, timeout=90)
+                shot = (r.stdout or b"").decode("utf-8", "replace").strip()
+            except Exception:  # noqa: BLE001
+                pass
+            logger.warning("夸克口令:解出「%s」但两次都在 %s 里找不到文件(截图:%s)",
+                           title or "?", _SAVE_DIR, shot or "失败")
             continue
         try:
             # ★ **三盘互通(第二道)**:解析出**真资源名**后再查一次 —— 这一道比"拿线索标题查"准得多。
