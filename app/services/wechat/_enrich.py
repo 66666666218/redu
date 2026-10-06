@@ -64,7 +64,8 @@ def _backfill_pan_urls(session: Session, user_id: int, limit: int = 100) -> int:
     return fixed
 def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchmark,
                          items: list[dict], source: str, fetch_content: bool = False,
-                         content_resolver=None, require_pan: bool = True) -> list[WechatArticle]:
+                         content_resolver=None, require_pan: bool = True,
+                         min_ts: int | None = None) -> list[WechatArticle]:
     """按链接去重入库;网盘类型=标题 + (可选)自抓正文 的并集。
 
     ⚠️ **已有行也要补阅读数**(2026-10-05 修,审计抓到的"阅读数恒 0 第二根因")。
@@ -88,6 +89,16 @@ def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchm
     #    所以那个 bug 会让这条修复在最常见的场景下完全失效(是测试当场抓出来的)。
     existing: dict[str, tuple[int, int, WechatArticle | None]] = {}
     backfilled = 0
+    # ⚠️⚠️ **新鲜度闸(2026-10-06 补)** —— 用户口径「**2026 年 10 月份之前的不要再保存进来了**」
+    # 是**对所有内容源**说的,但此前只落在抖音线索上,**公众号这条链一处都没有**:
+    # 审计实测 10-01 之后仍有 **34 篇 9 月的文章**入库。判定逻辑收在 `app.services.freshness`
+    # (单一事实源)—— 免得这条规则再被"修一条、漏一条"。
+    # `min_ts=None` 时**自己从配置取**:四个调用点一个都不用改,规则就不会漏挂。
+    from app.services import freshness
+
+    if min_ts is None:
+        min_ts = freshness.min_publish_ts()
+    stale = undated = 0
     for rid, u, rn in session.execute(
             select(WechatArticle.id, WechatArticle.url, WechatArticle.read_num)
             .where(WechatArticle.user_id == user_id, WechatArticle.url != "")).all():
@@ -116,6 +127,15 @@ def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchm
             continue
         if not title:
             continue  # 空标题无价值(无法展示/分析/搜索)
+        # ★ **10 月之前的不要**(闸放在抓正文**之前** —— 否则白跑一次网络才发现该丢)
+        if min_ts:
+            if freshness.is_too_old(it.get("publish_at"), min_ts):
+                stale += 1
+                continue
+            if freshness.parsed_publish_ts(it.get("publish_at")) is None:
+                # ⚠️ **不挡,但必须计数** —— 实测这类占三成,若只是"不挡",
+                # 用户的规则就在这儿**静默漏掉三成**,而日志里一点痕迹都没有。
+                undated += 1
         types = detect_pan_types(title)
         content = ""
         if _root.title_hits(title):
@@ -145,6 +165,12 @@ def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchm
         # ⚠️ **要说出来**:回填是"补历史",量大的时候应该看得见 ——
         # 静默回填 162 条与"本来就有"在日志里长得一样(本仓的老毛病)。
         logger.info("回填阅读数 %s 条(benchmark=%s)", backfilled, benchmark.nickname)
+    if min_ts and (stale or undated):
+        # ⚠️⚠️ **这道闸的"覆盖了多少"本身就是要看的数**:`undated` 那批**没被挡**,
+        # 它们占实测三成 —— 只报"挡了 N 篇"会让人以为规则全生效了。
+        # (计数口径:去重之后、有标题的条目;被去重/空标题丢掉的本来也不入库。)
+        logger.info("新鲜度闸(benchmark=%s):挡下 %s 篇早于截止的;另有 %s 篇**判不出发布时间**",
+                    benchmark.nickname, stale, undated)
     if added:
         session.flush()  # 拿到自增 id,同步写盘链归一化表(资源共振走索引查询)
         for r in added:

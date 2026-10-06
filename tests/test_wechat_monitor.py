@@ -3630,7 +3630,11 @@ def test_listen_cover_article_gets_publish_time_from_shelf(session, monkeypatch)
     _seed_marks(session, {"MP_WXS_1": "1001"})          # 号1 水位相等 → 会被跳过(无 cover)
     monkeypatch.setattr(wechat_monitor, "fetch_article_content", lambda url, timeout=15: "")
     monkeypatch.setattr(wechat_monitor, "_shelf_slot", lambda bid, every: 1)
-    ts = 1758960000
+    # ⚠️ **必须晚于新鲜度截止**(`content_min_publish_date`,默认 2026-10-01):
+    # 入库那条链现在有闸,拿 2025 年的时间戳喂它会**被正确拦掉**(2026-10-06 补闸时
+    # 这个测试正是这么红的)。本测试要验的是"书架时间戳能盖成发布时间",不是新鲜度,
+    # 所以取"昨天"—— 既满足闸门,又不会随截止日期改动而再次失效。
+    ts = int((_dt.now() - timedelta(days=1)).timestamp())
     fake = _ShelfWeread(entries=[_shelf_entry("MP_WXS_1", 1001),
                                  _shelf_entry("MP_WXS_2", ts),        # 正常 → 盖发布时间
                                  _shelf_entry("MP_WXS_3", 7)])        # 离谱值 → 宁缺勿错

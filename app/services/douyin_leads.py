@@ -196,22 +196,13 @@ def find_leads(keywords: list[str], limit: int = 30, platform: str = "douyin") -
 def _min_publish_ts(settings) -> int:
     """`douyin_leads_min_publish_date` → Unix 秒;留空/写坏都返回 0(= 不过滤)。
 
-    ⚠️ **写坏了要吭声**:解析失败就记一条 warning,别静默当成"不过滤" ——
-    那等于用户的规则**悄悄失效**了。
+    ★ 2026-10-06:**实现搬进 `app.services.freshness`(单一事实源)**,这里只做转发。
+    起因是公众号那条链**压根没实现这条规则**(审计实测 34 篇 9 月文章照旧入库)——
+    同一规则在几条链上各写一遍,必然"修一条、漏一条"。
     """
-    from datetime import datetime as _dt
+    from app.services.freshness import min_publish_ts
 
-    # ⚠️ **抖音专属的值优先,留空则回落通用口径**(`content_min_publish_date`)——
-    # 用户那条「2026年10月份之前的不要再保存进来了」是**对所有内容源**说的,
-    # 只筛抖音的话,**老资源从别的链照样进来**。
-    raw = str(getattr(settings, "douyin_leads_min_publish_date", "") or "").strip()         or str(getattr(settings, "content_min_publish_date", "") or "").strip()
-    if not raw:
-        return 0
-    try:
-        return int(_dt.strptime(raw, "%Y-%m-%d").timestamp())
-    except ValueError:
-        logger.warning("douyin_leads_min_publish_date 解析失败(%r),本轮**不过滤**", raw)
-        return 0
+    return min_publish_ts(settings, specific_key="douyin_leads_min_publish_date")
 
 
 def _to_search_word(title: str) -> str:
