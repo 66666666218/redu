@@ -200,6 +200,13 @@ def transfer_missing_links(session, user_id: int, items: list[dict],
             link["transfer_error"] = "本轮转存额度已用完(下轮继续)"
             continue
         done += 1
+        # ⚠️⚠️ **转存前先放掉写锁**(2026-10-06 审计逮到 —— 与 `pan_discovery` **同一个坑的第二条链**)。
+        # `transfer_pan_url` 是**网络慢活**(每条 1–3 秒),而 SQLite 是**单写者**、别的作业
+        # `busy_timeout` 只有 30 秒。这里的额度虽然只有 3 条(3–9 秒,通常饿不死别人),
+        # 但 `transfer_pan_url` **内部还有重试/换盘**,一旦撞上就翻倍 —— 纪律不能靠"这次应该够快"。
+        # 证据在 `pan_discovery`:13 条 × 1–3 秒 > 30 秒 ⇒ `11:34:30` 那批
+        # 「作业心跳写入失败」正是它干的。**慢活(网络/浏览器/模拟器)一律不要在事务里做。**
+        session.commit()
         # 把名字一起传进去:百度链的提取码常写在附近文字里(`transfer_pan_url` 会去找)
         res = transfer_pan_url(session, user_id, pan_url, settings,
                                snippet=str(it.get("name") or ""))

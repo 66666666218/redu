@@ -239,22 +239,49 @@ class _TransferS:
     presence_transfer_limit: int = 3
 
 
+class _Sess:
+    """桩 session:只记 `commit()` 次数。
+
+    ⚠️ 原来这里传的是 `None` —— 而 `transfer_missing_links` **必须在慢活(转存)前提交**,
+    于是加 `session.commit()` 就把三个测试打红了。**该改的是测试不是生产代码**:
+    "传 None 也能跑"是测试的偷懒,生产调用永远带真 session。
+    转存是网络慢活(1–3 秒/条),占着 SQLite 的单写者会把别的作业饿死
+    (成批 `database is locked` / `作业心跳写入失败`,见 `tests/test_slowwork_guard.py`)。
+    """
+
+    def __init__(self) -> None:
+        self.commits = 0
+
+    def commit(self) -> None:
+        self.commits += 1
+
+
 def test_transfer_missing_links_only_touches_ones_without_our_link(monkeypatch) -> None:
     """★ **已有我方链的不碰** —— 重复转存既占盘又白打接口。"""
     from app.services import pan_discovery
 
     calls: list[str] = []
-    monkeypatch.setattr(pan_discovery, "transfer_pan_url",
-                        lambda s, u, url, st, snippet="": (
-                            calls.append(url) or {"status": "ok", "our_url": f"our:{url}"}))
+    sess = _Sess()
+    commits_at_transfer: list[int] = []
+
+    def _transfer(s, u, url, st, snippet=""):
+        # 转存的那一刻,commit 必须**已经发生过** —— 否则写锁还握在手里
+        commits_at_transfer.append(sess.commits)
+        calls.append(url)
+        return {"status": "ok", "our_url": f"our:{url}"}
+
+    monkeypatch.setattr(pan_discovery, "transfer_pan_url", _transfer)
 
     items = [
         {"name": "有链的", "link": {"pan_url": "p1", "my_link": "already"}},   # 不碰
         {"name": "没链的", "link": {"pan_url": "p2", "my_link": ""}},          # 转
         {"name": "没匹配上", "link": {}},                                       # 不碰
     ]
-    out = rp.transfer_missing_links(None, 1, items, _TransferS())
+    out = rp.transfer_missing_links(sess, 1, items, _TransferS())
     assert calls == ["p2"]
+    assert commits_at_transfer == [1], (
+        "**转存前必须先 commit 放掉写锁** —— SQLite 单写者,"
+        f"整轮占着库会把别的作业饿死。实际转存时的 commit 次数:{commits_at_transfer}")
     assert out == {"attempted": 1, "ok": 1, "failed": 0, "skipped": 0}
     assert items[0]["link"]["my_link"] == "already"      # 原样不动
     assert items[1]["link"]["my_link"] == "our:p2"
@@ -268,7 +295,7 @@ def test_transfer_missing_links_respects_the_batch_cap(monkeypatch) -> None:
     monkeypatch.setattr(pan_discovery, "transfer_pan_url",
                         lambda *a, **k: {"status": "ok", "our_url": "our"})
     items = [{"name": f"r{i}", "link": {"pan_url": f"p{i}", "my_link": ""}} for i in range(5)]
-    out = rp.transfer_missing_links(None, 1, items, _TransferS())          # limit=3
+    out = rp.transfer_missing_links(_Sess(), 1, items, _TransferS())          # limit=3
     assert out["attempted"] == 3 and out["ok"] == 3 and out["skipped"] == 2
     assert "额度已用完" in items[4]["link"]["transfer_error"]
 
@@ -282,7 +309,7 @@ def test_transfer_failure_keeps_the_item_and_records_why(monkeypatch) -> None:
                         lambda *a, **k: {"status": "failed", "our_url": "",
                                          "message": "盘满/单个资源太大"})
     items = [{"name": "r", "link": {"pan_url": "p", "my_link": ""}}]
-    out = rp.transfer_missing_links(None, 1, items, _TransferS())
+    out = rp.transfer_missing_links(_Sess(), 1, items, _TransferS())
     assert out["failed"] == 1 and out["ok"] == 0
     assert "单个资源太大" in items[0]["link"]["transfer_error"]
     assert items[0]["link"]["pan_url"] == "p"            # 条目本身没被丢掉
@@ -300,5 +327,5 @@ def test_transfer_can_be_disabled(monkeypatch) -> None:
         presence_transfer_limit = 0
 
     items = [{"name": "r", "link": {"pan_url": "p", "my_link": ""}}]
-    out = rp.transfer_missing_links(None, 1, items, _Off())
+    out = rp.transfer_missing_links(_Sess(), 1, items, _Off())
     assert called == [] and out == {"attempted": 0, "ok": 0, "failed": 0, "skipped": 1}

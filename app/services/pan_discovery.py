@@ -569,6 +569,13 @@ def sync(session, user_id: int, settings=None) -> dict:
             # 消息里**写清是哪份额度**用完 —— 否则看日志分不出"积压没清完"和"新发现被挡"
             status, message, our, code = "pending", f"本轮{src}额度用完", "", ""
         else:
+            # ⚠️⚠️ **转存前先放掉写锁**(2026-10-06 审计逮到,与夸克口令那条**同源**):
+            # `transfer_pan_url` 是**网络慢活**(每条 1–3 秒 × 最多 13 条),而 SQLite 是**单写者**,
+            # 别的作业 `busy_timeout` 只有 30 秒 ⇒ **它们的心跳写入被饿死**。
+            # 实测证据:`11:34:30`(正好是本作业跑的时段)**`alert_fixed_time` / `collect_tick`
+            # 的「作业心跳写入失败」成批出现**;`14:19–14:23` 我手动跑 drain 时又来一批。
+            # 纪律:**慢活(网络/浏览器/模拟器)一律不要在事务里做**。
+            session.commit()
             res = transfer_pan_url(session, user_id, c["origin_url"], settings, c["title"])
             status, message = res["status"], res["message"]
             our, code = res["our_url"], res["code"]
