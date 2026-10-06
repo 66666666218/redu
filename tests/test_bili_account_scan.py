@@ -455,3 +455,63 @@ def _S_withcut():
         content_min_publish_date = "2026-10-01"
         douyin_leads_min_publish_date = ""
     return _C()
+
+
+class TestRateLimitKeepsWorkDone:
+    """★ **被挡之前扫到的号必须留在库里**(2026-10-06 修)。
+
+    `scan_accounts` 里 `fetch_user_titles` 一旦抛(限流/风控),原来那次 `commit()`
+    **根本走不到**(它在循环之后)⇒ 前面已经成功、**已经花掉本就紧张的 space 额度**
+    的号,一起被回滚。与"转存成功了但记录随那一轮丢掉"是**同一个病**:**额度花了,账没了**。
+
+    而它正是**提速的前置条件**:每轮从 1 提到 6,一次限流丢的就成倍放大。
+    """
+
+    class _S3:
+        """⚠️ 必须把 `per_run` 调大于 1 —— 否则本轮只挑得到 1 个号,
+        "第二个号被挡"这个场景根本构造不出来(第一版就栽在这)。"""
+        bili_scan_enabled = True
+        bili_scan_accounts_per_run = 3
+        bili_scan_thin_below = 2
+
+    def _patch(self, monkeypatch, how) -> None:
+        monkeypatch.setattr(bas, "fetch_user_titles", how)
+        monkeypatch.setattr(bas.time, "sleep", lambda s: None)   # 别真睡 2 秒
+
+    def test_第二个号被挡_第一个号的战果要留下(self, session, monkeypatch) -> None:
+        _mk_accounts(session, 3)
+        n = {"i": 0}
+
+        def _fetch(uid, **k):
+            n["i"] += 1
+            if n["i"] >= 2:
+                raise bas.BiliScanError("B站限流 code=-352 风控校验失败")
+            return [{"title": "某资源分享", "url": "https://www.bilibili.com/video/BV1",
+                     "publish_at": None}]
+        self._patch(monkeypatch, _fetch)
+
+        with pytest.raises(bas.BiliScanError):
+            bas.scan_accounts(session, 1, self._S3())
+
+        done = session.scalars(select(CrossPlatformAccount).where(
+            CrossPlatformAccount.last_scan_at.isnot(None))).all()
+        assert done, ("被挡**之前**已经扫到的号被整轮回滚了 —— "
+                      "额度花了、账没了;而且这正是'每轮多扫几个'的前提")
+
+    def test_每号都落盘_不是攒到轮末(self, session, monkeypatch) -> None:
+        """3 个号全成功时,每扫完一个就该能看到一个(而不是轮末一次性)。"""
+        _mk_accounts(session, 3)
+        seen: list[int] = []
+        real_commit = session.commit
+
+        def _commit():
+            real_commit()
+            seen.append(len(session.scalars(select(CrossPlatformAccount).where(
+                CrossPlatformAccount.last_scan_at.isnot(None))).all()))
+        monkeypatch.setattr(session, "commit", _commit)
+        self._patch(monkeypatch, lambda uid, **k: [
+            {"title": "某资源", "url": "https://www.bilibili.com/video/BV1", "publish_at": None}])
+
+        bas.scan_accounts(session, 1, self._S3())
+        # 每号一次 commit ⇒ 进度应当是逐个递增,不该只有一个"3"
+        assert len([x for x in seen if x > 0]) >= 3, f"应当每号落盘,实际 commit 后进度:{seen}"

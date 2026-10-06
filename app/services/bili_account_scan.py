@@ -273,13 +273,26 @@ def scan_accounts(session, user_id: int, settings=None, count: int | None = None
         logger.info("未配 B站 cookie,本轮按**匿名**取(更可能被风控挡);"
                     "扫码一次即可:python scripts/bili_login.py")
     for acc in picked:
-        titles = fetch_user_titles(acc.uid, cookie=ck)   # 限流/风控会在这里抛,整轮中止(有意)
+        try:
+            titles = fetch_user_titles(acc.uid, cookie=ck)   # 限流/风控会在这里抛
+        except Exception:
+            # ⚠️⚠️ **被挡之前已经扫到的号,必须留在库里**(2026-10-06 修)。
+            # 原来 `session.commit()` 在循环**之后** ⇒ 中途一个号被 `-352/-412` 挡下,
+            # 整轮(含前面已经成功、**已经花掉 space 额度**的那些号)**全部回滚**。
+            # 与"转存成功了但记录随那一轮丢掉"是**同一个病**:**额度花了,账没了**。
+            # 而且它正是"提速"的前置条件 —— 每轮扫 1 个号时损失还小,
+            # 把每轮数量调大之后,一次限流丢的就成倍放大。
+            # 先落盘再抛:**"整轮中止"的本意是"别继续撞已挡的端点",不是"丢掉战果"**。
+            session.commit()
+            raise
         written += _save_titles(session, user_id, acc, titles, settings)
         # ⚠️ **记下扫描状态** —— 这是"59 个号里有多少空壳"唯一能**量出来**的办法
         # (space 端点限流极紧,不可能为了统计专门扫一圈)。
         acc.last_scan_at = datetime.now()
         acc.video_count = len(titles)
         seen_names.append(f"{acc.name}({len(titles)})")
+        # ★ **每号落盘**:见上面的注释 —— 战果不能挂在"整轮跑完"上。
+        session.commit()
         time.sleep(2.0)                              # 号与号之间留间隔,别连发
     session.commit()
     logger.info("B站对标号扫描:共 %d 个号 → 本轮扫 %s,写入标题 %d 条",
