@@ -162,6 +162,13 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
     for lead in todo:
         # **无论成败都盖章** —— 这一条是防"无限重试失败项"的关键。
         lead.kouling_tried_at = _dt.now()
+        # ⚠️⚠️ **先落一次并释放写锁,再去做慢活**(2026-10-06 实测踩到):
+        # 下面要跑 **15–20 秒的模拟器**(×8 条 ≈ 2.7 分钟),而 SQLite 是**单写者**。
+        # 原来整轮都在一个写事务里 ⇒ **把别的作业全饿死**:14:00 那一分钟里
+        # `bili_account_scan` / `xunlei_sync` / `xunlei_group` **三个作业同时**
+        # 报 `database is locked`(它们的 `busy_timeout` 只有 30 秒)。
+        # 纪律:**慢活(网络/浏览器/模拟器)一律不要在事务里做**。
+        session.commit()
         title, fid = "", ""
         # ⚠️ **"解析出来了、但没找到文件"要重试一次**(2026-10-06 实测会遇到) ——
         # 那多半是**保存那一步偶发失败**(UI 点击落空 / 保存任务还没落盘),

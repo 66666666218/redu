@@ -326,3 +326,40 @@ class TestThreePanInterop:
         monkeypatch.setattr(qk, "resolve", lambda text, **k: {"ok": True, "title": "铸剑纳贡（ForgeTax）"})
         out = qk.drain(session, 1, _S())
         assert out["done"] == 1, out
+
+
+class TestSlowWorkOutsideTransaction:
+    """★ **慢活绝不能在写事务里做**(2026-10-06 实测踩到,而且是当场打脸的那次)。
+
+    `drain` 要在循环里跑**模拟器**(15–20 秒/条 ×8 ≈ 2.7 分钟),而 SQLite 是**单写者**。
+    原来整轮都在一个写事务里 ⇒ **把别的作业全饿死**:14:00 那一分钟里
+    `bili_account_scan` / `xunlei_sync` / `xunlei_group` **三个作业同时**报
+    `database is locked`(它们的 `busy_timeout` 只有 30 秒)。
+    """
+
+    def test_跑模拟器之前先提交一次(self, session, monkeypatch) -> None:
+        _lead(session, "a1", "咐置铸剑上供叩苓")
+        monkeypatch.setattr("app.services.cookie_store.get_cookie", lambda s, u, p: "CK")
+        monkeypatch.setattr("app.services.quark_transfer.QuarkTransfer", _FakeQt)
+        monkeypatch.setattr("app.services.pan_discovery.already_have", lambda s, u, t: None)
+        monkeypatch.setattr(qk, "_find_saved_fid", lambda *a, **k: "F1")
+
+        order: list[str] = []
+        real_commit = session.commit
+
+        def _commit():
+            order.append("commit")
+            real_commit()
+        monkeypatch.setattr(session, "commit", _commit)
+
+        def _resolve(text, **k):
+            order.append("ui")           # 慢活:模拟器
+            return {"ok": True, "title": "铸剑纳贡（ForgeTax）"}
+        monkeypatch.setattr(qk, "resolve", _resolve)
+
+        qk.drain(session, 1, _S())
+
+        assert "ui" in order and "commit" in order, order
+        assert order.index("commit") < order.index("ui"), (
+            "**必须先 commit 释放写锁,再去做慢活** —— 否则整轮占着单写者的库,"
+            f"别的作业会 `database is locked`。实际顺序:{order}")
