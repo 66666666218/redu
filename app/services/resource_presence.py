@@ -39,7 +39,10 @@ PLATFORMS = {
 
 # 走**公开 API、不开浏览器**的平台(见 `_crawl_platform`)。B站 的 wbi 签名是公开算法、
 # 本地纯 Python 可算,匿名即可搜 —— 而 MediaCrawler 抓 B站 反而起不来(它去找 Chrome)。
-API_PLATFORMS = frozenset({"bilibili"})
+#: ⚠️ **微博 2026-10-07 也进来了**:它改走移动端公开接口(`m.weibo.cn/.../getIndex`),
+#: **不需要签名**、只要一枚 cookie ⇒ 从此**不再开浏览器**。
+#: 于是每轮"要开浏览器"的平台从 4 个降到 **3 个**(小红书/快手/贴吧)。
+API_PLATFORMS = frozenset({"bilibili", "weibo"})
 
 # B站 风控**按频率**(连发即 -352),所以逐词之间要隔开(与 cross_accounts 同一套口径)
 _BILI_GAP = 4.0
@@ -82,7 +85,7 @@ def _library_link(session, user_id: int, name: str) -> dict:
     return {}
 
 
-def _crawl_platform(plat: str, names: list[str]) -> list[dict]:
+def _crawl_platform(plat: str, names: list[str], session=None) -> list[dict]:
     """抓一个平台的内容 —— **按平台选路**。
 
     · `bilibili`:**公开 API**(wbi 签名是公开算法、本地纯 Python 可算,匿名即可,不开浏览器)。
@@ -97,6 +100,18 @@ def _crawl_platform(plat: str, names: list[str]) -> list[dict]:
     # 页面路是我们在闲鱼上验证过的同一个套路:**让页面自己的 JS 带签名,只读 DOM**。
     # ⚠️ **它抛错必须冒泡**(`XhsPageError` 不是 `MediaCrawlerError`)—— 这里转成
     # `MediaCrawlerError` 让上层按"单平台硬失败"处理(记名 + 推告警),而不是静默跳过。
+    # ⚠️ **微博也改走"纯协议"**(2026-10-07):移动端 `m.weibo.cn/api/container/getIndex`
+    # 是**公开且稳定**的接口,**不需要任何签名**(不像抖音的 a_bogus、小红书的 x-s),
+    # 只要一枚登录 cookie。实测 16 张 card / 15 条带正文 ✓
+    # ⇒ 省掉一个浏览器(更快、更省内存、**没有浏览器指纹那类风控暴露**)。
+    if plat == "weibo":
+        from app.services import weibo_search
+        from app.services.mediacrawler_source import MediaCrawlerError
+
+        try:
+            return weibo_search.search(names, session=session)
+        except weibo_search.WeiboSearchError as exc:
+            raise MediaCrawlerError(f"weibo(纯协议): {exc}") from exc
     if plat == "xiaohongshu":
         from app.services import xhs_page_source
         from app.services.mediacrawler_source import MediaCrawlerError
@@ -165,7 +180,7 @@ def probe(session, user_id: int, settings=None, platforms: list[str] | None = No
     for plat in plats:
         tried += 1
         try:
-            rows = _crawl_platform(plat, names)          # 一次吃整个词表,别逐词开浏览器
+            rows = _crawl_platform(plat, names, session=session)   # 一次吃整个词表
         except (MediaCrawlerError, SearchSourceError) as exc:
             # 单平台硬失败(多半是那个平台没登录)不该拖垮整轮 —— 但要**记名**:
             # ① 全平台都失败 → 冒泡,别让"一个都没开起来"记成 success(空);
