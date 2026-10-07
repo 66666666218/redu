@@ -977,3 +977,85 @@ def test_jobs_不自己持有_feishu_client_的函数引用():
             f"`feishu/_jobs.py` 顶层绑定了 `{name}` —— 必须改成经包命名空间 `_pkg.{name}` 调用,"
             "否则 monkeypatch 门面名不生效(静默假通过)"
         )
+
+
+def test_health_stalls_covers_wechat_listen_stopped(monkeypatch, session) -> None:
+    """★ **公众号原来根本不在这条告警的名单里**(2026-10-07 实测代价)。
+
+    监听轮从 10-06 20:02 起整整 **30 小时一轮没跑**(应用全程在线、其他作业照跑),
+    而这条"专门抓静默停摆"的告警**一个字都没说过** —— 因为
+    `data_tables`/`labels`/`cookie_to_data` 三处都没有公众号。
+    代价是"阅读数又断了"要靠用户来问才发现。
+    """
+    from datetime import datetime, timedelta
+
+    from app.db.models import RunRecord, UserCookie, UserSchedule, WechatArticle
+    from app.services import alert_service
+
+    session.add(UserSchedule(user_id=1, section="wechat", interval_minutes=60, enabled=True))
+    session.add(UserCookie(user_id=1, platform="weread", cookie="x"))
+    # 最后一轮成功是 30h 前(阈值 = 两个定点空档 = 8h*2 = 16h)
+    session.add(RunRecord(user_id=1, run_id="r1", kind="wechat_listen", status="success",
+                          started_at=datetime.now() - timedelta(hours=30)))
+    session.add(WechatArticle(user_id=1, title="老文",
+                              created_at=datetime.now() - timedelta(hours=30)))
+    session.commit()
+
+    sent: list[str] = []
+    monkeypatch.setattr(feishu_client, "FeishuClient",
+                        lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
+    n = alert_service.check_health_stalls(_settings(health_stall_hours=24), db=session)
+    assert n == 1
+    assert "公众号" in sent[0] and "停摆" in sent[0]
+    # 讯息要给出**这一条**的具体成因,不是一堆通用词
+    assert "监听轮次" in sent[0]
+
+
+def test_health_stalls_wechat_running_quietly_is_not_stall(monkeypatch, session) -> None:
+    """⚠️ 与上一条配对的**反例**:轮次在跑、只是这几小时没人发文 ⇒ **不算停摆**。
+
+    判据落在**运行记录**而不是"有没有新文章",为的就是把这两件事分开 ——
+    否则一个安静的凌晨就会换来一次假警,而假警会训练人忽略告警。
+    """
+    from datetime import datetime, timedelta
+
+    from app.db.models import RunRecord, UserCookie, UserSchedule
+    from app.services import alert_service
+
+    session.add(UserSchedule(user_id=1, section="wechat", interval_minutes=60, enabled=True))
+    session.add(UserCookie(user_id=1, platform="weread", cookie="x"))
+    session.add(RunRecord(user_id=1, run_id="r1", kind="wechat_listen", status="success",
+                          started_at=datetime.now() - timedelta(hours=2)))
+    session.commit()          # 注意:一篇新文章都没有
+
+    sent: list[str] = []
+    monkeypatch.setattr(feishu_client, "FeishuClient",
+                        lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
+    assert alert_service.check_health_stalls(_settings(health_stall_hours=24), db=session) == 0
+    assert not sent
+
+
+def test_health_stalls_wechat_only_success_counts(monkeypatch, session) -> None:
+    """失败轮次不算"在跑" —— 只有 success/partial 才重置停摆计时。
+
+    否则"每轮都失败"会永远看着像"轮次在跑",正是这条告警要抓的东西。
+    """
+    from datetime import datetime, timedelta
+
+    from app.db.models import RunRecord, UserCookie, UserSchedule
+    from app.services import alert_service
+
+    session.add(UserSchedule(user_id=1, section="wechat", interval_minutes=60, enabled=True))
+    session.add(UserCookie(user_id=1, platform="weread", cookie="x"))
+    # 最近两小时一直在**失败**;最后一次成功在 30h 前
+    session.add(RunRecord(user_id=1, run_id="ok", kind="wechat_listen", status="success",
+                          started_at=datetime.now() - timedelta(hours=30)))
+    for i in range(3):
+        session.add(RunRecord(user_id=1, run_id=f"f{i}", kind="wechat_listen", status="failed",
+                              started_at=datetime.now() - timedelta(minutes=10 * (i + 1))))
+    session.commit()
+
+    sent: list[str] = []
+    monkeypatch.setattr(feishu_client, "FeishuClient",
+                        lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
+    assert alert_service.check_health_stalls(_settings(health_stall_hours=24), db=session) == 1

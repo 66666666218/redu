@@ -522,7 +522,8 @@ def check_health_stalls(settings: Settings | None = None, db: Session | None = N
     db = db or get_session_local()()
     stall_hours = getattr(settings, "health_stall_hours", 24) or 24
     since = datetime.now() - timedelta(hours=stall_hours)
-    labels = {"weibo": "微博", "xianyu": "闲鱼", "douhot": "抖音", "baidu": "百度"}
+    labels = {"weibo": "微博", "xianyu": "闲鱼", "douhot": "抖音", "baidu": "百度",
+              "wechat": "公众号"}
     data_tables = {
         "weibo": (WeiboHotItem, "captured_at"),
         "baidu": (BaiduHotItem, "captured_at"),
@@ -558,6 +559,30 @@ def check_health_stalls(settings: Settings | None = None, db: Session | None = N
                 User.enabled.is_(True), UserCookie.platform == data_to_cookie[p]).order_by(User.id).limit(1))
             stalled.append((p, latest, uid))
     stalled = [s for s in stalled if s[2] is not None]
+    # ⚠️⚠️ **公众号要单独判,而且判"轮次有没有在跑"而不是"有没有新文章"**(2026-10-07)
+    #
+    # **代价先说**:监听轮从 10-06 20:02 起整整 **30 小时一轮没跑**,而这条**专门用来抓
+    # 静默停摆**的告警一个字都没说过 —— 因为 `data_tables`/`labels`/`cookie_to_data`
+    # **三处都没有公众号**,它压根不在被检查的名单里。后果是"阅读数又断了"要靠用户来问。
+    #
+    # **为什么不用上面那套"最新数据时间"**:公众号每轮正常会入库几十篇(实测 8 个号一轮
+    # 78 篇),所以数据新鲜度确实能反映问题;但**"跑了却没新文"与"根本没跑"是两件事**,
+    # 而我们要的恰好是后者 —— 判据落在**运行记录**上才分得开(与 `source_health` 同口径)。
+    #
+    # **阈值取两个定点空档**(4 个定点 ⇒ 最大空档 8h ⇒ 16h):一个空档是正常的夜间间隔,
+    # 连丢两格才说明调度真出事了 —— 宁可晚 8 小时,也不要在正常运行时报假警。
+    from app.services.schedule_service import wechat_listen_gap_hours
+
+    if "wechat" in sched_on and "weread" in raw:
+        _gap_h = wechat_listen_gap_hours()
+        _last_listen = db.scalar(select(func.max(RunRecord.started_at)).where(
+            RunRecord.kind.in_(("wechat_listen", "wechat_sync")),
+            RunRecord.status.in_(("success", "partial"))))
+        if _last_listen is None or _last_listen < datetime.now() - timedelta(hours=_gap_h * 2):
+            _uid = db.scalar(select(User.id).where(User.enabled.is_(True))
+                             .order_by(User.id).limit(1))
+            if _uid is not None:
+                stalled.append(("wechat", _last_listen, _uid))
     if not stalled:
         if own_session:
             db.close()
@@ -591,8 +616,14 @@ def check_health_stalls(settings: Settings | None = None, db: Session | None = N
                     long_txt = f"  【长期】已 {days} 天,建议人工排查"
             head = (f"🔴 采集停摆(> {stall_hours}h 无新数据,已长期)" if long
                     else f"⚠️ 采集停摆(> {stall_hours}h 无新数据)")
-            lines = [head, f"  · {labels.get(p, p)}:最近数据 {when}{long_txt}",
-                     "可能:后端宕机/调度停止/Cookie失效/被风控全挡(闲鱼常见滑块/限流)"]
+            # 各板块的"可能原因"不一样 —— 给一句具体的,别让人从一堆通用词里猜。
+            cause = ("可能:监听轮次停跑(进程被杀会留下未释放的锁 `wechat_listen_running_*`,"
+                     "要等 TTL 到期才有人接管)/微信读书凭据失效/调度器停"
+                     if p == "wechat" else
+                     "可能:后端宕机/调度停止/Cookie失效/被风控全挡(闲鱼常见滑块/限流)")
+            lines = [head, f"  · {labels.get(p, p)}:最近"
+                     f"{'轮次成功' if p == 'wechat' else '数据'} {when}{long_txt}",
+                     cause]
             # 按板块路由:主群 + 该平台专属群 都发(互不替代),任一送达即算成功
             whs = webhooks_for(settings, p)
             msg = "\n".join(lines)
