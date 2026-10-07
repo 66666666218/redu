@@ -1,3 +1,31 @@
+- [2026-10-07 17:35] DOCS: **更正** —— 前一条提交把夸克口令失败归因成"模拟器/浏览器抢焦点",该因果**已被证伪** (Files: CHANGELOG)
+
+  ⚠️ **更正什么**:上一条提交(`975dbb7`)写着"是我这边开着 Edge 占了前台,模拟器拿不到焦点
+  ⇒ 一条都成不了"。**那个因果是错的** —— 我只读了 `last_error` 里那行报错文本,没读
+  `tools/quark_kouling_ui.py` 里 **2026-10-07 早些时候**已经写下的证伪记录:
+  关掉游戏后前台已是 dnplayer 照样不弹 / 换顺序照样不弹 / 手动补 Ctrl+V 照样不弹。
+
+  **本次验证复现了这一点**:前台是 `Code`(不是 msedge)、`activate_emulator()` 返回 **True**
+  (前置检查过了),`drain` 仍然 `tried 7 / done 1 / failed 6`,
+  失败原因全是 **`没弹出剪贴板卡片(口令无效?)`** —— **不是焦点**。
+
+  三条**确定**的事实:剪贴板**宿主侧写入成功**、夸克**启动成功**、**安卓侧拿不到那段文本**。
+  真因**尚未定位**(最可疑是雷电主程序的"剪贴板共享"开关)。
+
+  **控制变量做了一轮**:原以为"失败多是因为大部分口令是迅雷型(夸克不认)"——
+  **数据不支持**:9 条失败里只有 **4 条**带《》/迅雷标记;而且**同一个口令(mark)出现过
+  "一次成一次败"**(2 组重复口令里 2 组都是成败混杂)。⇒ 更像**偶发**而不是形态决定,
+  ⚠️ 但 n=2,**证据还不够硬**,不作为改策略的依据。
+
+  **已修的地方**(防止下一个人照着错话排查):
+    · `tools/quark_kouling_ui.py` 那行 `reason` 的措辞 —— 它**会落库**(`douyin_leads.last_error`)
+      并进运行记录,带上因果就会把人带偏。改成只说"前置检查未过"、**不解释卡片为什么不弹**。
+      (该文件 gitignored,不进提交。)
+    · 记忆 [[quark-kouling-clipboard-not-focus]] 已改写(原名 `...failure-is-environment`,
+      那名字本身就是错的)。
+
+  **教训**:报错文本是"**当时那条判据的措辞**",不是"原因"。我这次犯的正是
+  [[falsification-needs-control-variables]] 里那条 —— 而且是在同一个模块上**第二次**犯。
 - [2026-10-07 17:12] FIX: 夸克环境故障早退 + B站滤掉涨粉标题、每轮号数 6→9(依实测无风控) (Files: app/services/quark_kouling.py, app/services/bili_account_scan.py, config/settings.py, app/services/scheduler.py, tests/test_quark_kouling.py, tests/test_bili_account_scan.py)
 - [2026-10-07 17:03] FIX: 夸克口令失败原因落库(`douyin_leads.last_error`)+ 修 `moved_at` 打戳漏判空链 (Files: app/db/models.py, app/db/database.py, app/services/quark_kouling.py, app/services/chain_delivery.py, tests/test_quark_kouling.py, tests/test_douyin_leads.py, tests/test_chain_delivery.py)
 - [2026-10-07 16:53] FEAT: 补作业时长采集(`job_heartbeats.last_duration_ms`)—— 此前全仓量不到任何时长 (Files: app/db/models.py, app/db/database.py, app/services/scheduler.py, app/services/chain_health.py, scripts/job_liveness.py, tests/test_job_liveness.py)
