@@ -113,13 +113,24 @@ def _crawl_platform(plat: str, names: list[str], session=None) -> list[dict]:
         except weibo_search.WeiboSearchError as exc:
             raise MediaCrawlerError(f"weibo(纯协议): {exc}") from exc
     if plat == "xiaohongshu":
-        from app.services import xhs_page_source
+        # ★ **纯协议优先,页面渲染兜底**(2026-10-07,用户已确认接受 xhshow 的许可证状况)。
+        # 纯协议 ~0.85 秒/请求,页面渲染 ~15 秒/词 ⇒ 快约 18 倍,而且**不开浏览器**。
+        # ⚠️ 兜底**要说出来**:签名库停更/小红书改版时它会悄悄退回慢路,
+        # 不记日志的话"为什么又变慢了"查不出来。
+        from app.services import xhs_page_source, xhs_protocol_source
         from app.services.mediacrawler_source import MediaCrawlerError
 
         try:
+            return xhs_protocol_source.search(names, session=session)
+        except xhs_protocol_source.XhsProtocolError as exc:
+            logger.warning("小红书纯协议失败(%s),降级到页面渲染:%s",
+                           getattr(exc, "kind", "?"), str(exc)[:140])
+        try:
             return xhs_page_source.search(names)
         except xhs_page_source.XhsPageError as exc:
-            raise MediaCrawlerError(f"xiaohongshu(页面路): {exc}") from exc
+            raise MediaCrawlerError(
+                f"xiaohongshu:纯协议与页面渲染**两条路都失败** —— 页面路:{str(exc)[:110]}"
+            ) from exc
     if plat == "bilibili":
         from app.services.cross_accounts import search_bilibili_videos
 

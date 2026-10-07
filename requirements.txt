@@ -33,3 +33,8 @@ pyflakes>=3.2
 playwright>=1.42
 qrcode>=7.4  # 闲鱼扫码登录 CLI 的终端二维码渲染
 aiotieba>=4.8  # 贴吧**点赞数**(agree):MediaCrawler 的搜索接口只给回复数,连赞都没有。见 app/services/tieba_metrics.py
+# 小红书**纯协议**的签名库(2026-10-07):算 x-s / x-s-common,直连接口,不再开浏览器。
+# ⚠️ **它在 PyPI 上没有声明许可证**(license: None,法律上默认"保留所有权利")
+#    —— 用户已知情并接受。它哪天停更,照 `doc/小红书纯协议-链路拆解.md` 自己接。
+# 仓库:https://github.com/cloxl/xhshow
+xhshow>=0.2.0

@@ -23,6 +23,11 @@ PLATFORMS = ("weibo", "baidu", "douyin", "goofish", "weread", "baidupan", "quark
              "zhihu",   # zhihu:跨平台同类资源号发现用(2026-10-01,带登录 Cookie 即可搜)
              "bilibili",  # bilibili:同上(2026-10-02,**匿名也能搜**,配了 Cookie 风控更宽松)
              "xunlei",  # xunlei:迅雷网盘(2026-10-02,搜口令→转存→分享)
+             # xiaohongshu(2026-10-07):**纯协议采集**要一枚完整 cookie。
+             # ⚠️ 它必须从**浏览器档案解密导出**(`tools/xhs_export_cookie.py`)——
+             # 手抄那份实测**丢了 `id_token`**,站点回 `-101 无登录信息`。
+             # 也就是:**纯协议的是"采集",不是"登录"**(登录仍要浏览器一次)。
+             "xiaohongshu",
              "weread_app")  # weread_app:**微信读书 App 侧**凭据 JSON({accessToken, vid},
                             # 2026-10-05)。与 `weread`(网页 cookie)**是两套独立鉴权** ——
                             # 网页那枚在 App 接口上回 -2012,反之亦然,别互相替代。
