@@ -70,8 +70,8 @@ def main() -> int:
                 continue
             if "folder" in str(x.get("kind")):
                 kids = ls(str(x.get("id")))
-                dirs.append({"id": str(x.get("id")), "name": name,
-                             "n": len(kids), "path": f"{path}/{name}"})
+                dirs.append({"id": str(x.get("id")), "name": name, "n": len(kids),
+                             "parent": path, "path": f"{path}/{name}"})
                 walk(str(x.get("id")), depth + 1, f"{path}/{name}")
             else:
                 files.append({"id": str(x.get("id")), "name": name,
@@ -84,22 +84,30 @@ def main() -> int:
     if not files:
         return 0
 
-    # ⚠️⚠️ **判据在「资源包(文件夹)」这一层,不是文件层**(2026-10-07 实测踩到):
-    # 第一版按**文件名**去重,报出来的"重复"绝大多数是
-    #   【必看.jpg】×5、【解压方法看这里.JPG】×3、【使用帮助及新版软件.jpeg】×8
-    # —— 那些**不是重复,是每个资源包各自带的说明书**!按文件删会把**每个包都弄坏**。
-    # 真正的重复是**整个资源包被存了两份**(实测:`白泽的梦` 与 `白泽的梦(1)`)。
-    # ⇒ 只比**文件夹**,并排掉说明类目录名。
-    groups: dict[str, list[dict]] = collections.defaultdict(list)
+    # ⚠️⚠️ **判据:同级 + 归一化名相同** —— 关键是「**同级**」这三个字。
+    #
+    # 前两版都栽在同一类误判上,只是从文件挪到了文件夹:
+    #   ① 按**文件**名去重 → 报出【必看.jpg】×5、【解压方法看这里.JPG】×3、
+    #      【使用帮助及新版软件.jpeg】×8 —— 每个资源包各自带的说明书,删了会弄坏每个包;
+    #   ② 改成按**文件夹**名去重 → 报出【公众号:小林的家】×14 —— 同样是每个包里的
+    #      **品牌文件夹**(实测 14 份分布在 14 个**不同**资源包里)。
+    #
+    # **真正的重复长什么样**:`/J开头游戏/捷德升华模拟器` 与 `/J开头游戏/捷德升华模拟器(1)`
+    #   —— **同一层并排的两个**。
+    # **包内固定件长什么样**:`/A开头游戏/avvy/公众号:小林的家` 与
+    #   `/A开头游戏/安洁拉世界/公众号:小林的家` —— 名字一样,但**父目录各不相同**。
+    # ⇒ 键必须是 `(父目录, 归一化名)`:父目录不同就永远不成一组。
+    groups: dict[tuple, list[dict]] = collections.defaultdict(list)
     for d in dirs:
-        k = core_resource_name(_strip_copy_suffix(d["name"]))
-        if k and not _is_notice(k):
-            groups[k].append(d)
+        base = core_resource_name(_strip_copy_suffix(str(d["name"])))
+        if not base or _is_notice(base):
+            continue
+        groups[(d["parent"], base)].append(d)
     dups = {k: v for k, v in groups.items() if len(v) > 1}
 
-    print(f"=== 重复的**资源包(文件夹)**:{len(dups)} 组 ===")
+    print(f"=== 重复的**资源包(同级同名)**:{len(dups)} 组 ===")
     for k, v in sorted(dups.items(), key=lambda kv: -len(kv[1])):
-        print(f"\n  【{k[:44]}】×{len(v)}")
+        print(f"\n  【{k[1][:44]}】×{len(v)}   同处 {str(k[0])[:44] or '/'}")
         for x in sorted(v, key=lambda y: y["path"]):
             print(f"     {x['path'][:86]}   ({x['n']} 项)")
     print()
