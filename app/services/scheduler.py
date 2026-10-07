@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from datetime import datetime
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -124,7 +125,7 @@ def collect_tick(settings: Settings | None = None, now: datetime | None = None) 
     return {"due": ok + failed, "ok": ok, "failed": failed, "skipped": skipped}
 
 
-def _beat(job_id: str, ok: bool, err: str = "") -> None:
+def _beat(job_id: str, ok: bool, err: str = "", duration_ms: int | None = None) -> None:
     """写一条**作业心跳** —— 让"这个作业到底跑没跑"有据可查(见 `JobHeartbeat`)。
 
     ⚠️ **心跳失败绝不能影响作业本身**:它只是"顺手记一笔",DB 被锁/表缺失都得咽下去。
@@ -142,6 +143,10 @@ def _beat(job_id: str, ok: bool, err: str = "") -> None:
                 row = JobHeartbeat(job_id=job_id)
                 db.add(row)
             row.last_run_at = now
+            # **上次执行耗时**(2026-10-07):此前全仓量不到作业时长(`runs.finished_at`
+            # 从没被写过),而"这个作业占着单写者的库多久"正是排期错峰要用的数。
+            if duration_ms is not None:
+                row.last_duration_ms = duration_ms
             row.run_count = (row.run_count or 0) + 1
             if ok:
                 row.last_ok_at = now
@@ -158,6 +163,9 @@ def _safe(func, job_id: str = ""):  # type: ignore[no-untyped-def]
 
     def wrapper() -> None:
         ok, err = True, ""
+        # ⚠️ `monotonic` 而不是 `now()`:系统时钟被校准时,`now()` 会把时长算成负数
+        # (本机今天出现过时钟跳变 —— 多个作业在同一分钟里"提前"触发)。
+        t0 = time.monotonic()
         try:
             func()
         except Exception as exc:  # noqa: BLE001
@@ -165,7 +173,8 @@ def _safe(func, job_id: str = ""):  # type: ignore[no-untyped-def]
             err = f"{type(exc).__name__}: {exc}"
             logger.exception("调度作业执行失败:%s", getattr(func, "__name__", func))
         if job_id:
-            _beat(job_id, ok, err)
+            _beat(job_id, ok, err,
+                  duration_ms=int((time.monotonic() - t0) * 1000))
 
     wrapper.__name__ = getattr(func, "__name__", "job")
     return wrapper

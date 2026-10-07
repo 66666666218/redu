@@ -175,6 +175,12 @@ class RunRecord(Base):
     status: Mapped[str] = mapped_column(String(16), default="running")
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
     started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    # ⚠️⚠️ **这一列从来没被写过(2026-10-07 实测全表 100% 为 NULL)**,也**没有任何读取方** ——
+    # `_record_run` 是在作业**跑完之后**才被调用的,它只写 `started_at`(= 落记录的时刻,
+    # 严格说是**结束**时刻,名字也是错的)。所以「这次跑了多久」这个维度**结构上就缺失**,
+    # 想量侵占风险(比如"模拟器作业占着库多久")时拿不到数。
+    # ⇒ **别查 `finished_at`**(你会得到一片 NULL,还以为是"没跑完");
+    #   作业级时长看 `JobHeartbeat.last_duration_ms`(由 `scheduler._safe` 计时写入)。
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     detail: Mapped[str] = mapped_column(Text(), default="")
 
@@ -834,6 +840,10 @@ class JobHeartbeat(Base):
     # 于是刚加进来的作业(如 13:10 注册、每天 09:30 触发)会被误判成"注册了却从没执行过"。
     # 有了这一列,判据才是"自**它自己**注册起,本该触发过吗"。
     first_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # **上一次执行耗时(毫秒)**(2026-10-07)。为什么要有它:排期错峰、判断"哪个作业占着单写者
+    # 的锁最久"全靠它,而在此之前**全仓拿不到任何时长**(见 `RunRecord.finished_at` 的说明)。
+    # 由 `scheduler._safe` 在作业外层计时 —— 一处覆盖全部作业,不用改几十个调用点。
+    last_duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class NameLexicon(Base):

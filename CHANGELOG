@@ -1,3 +1,4 @@
+- [2026-10-07 16:53] FEAT: 补作业时长采集(`job_heartbeats.last_duration_ms`)—— 此前全仓量不到任何时长 (Files: app/db/models.py, app/db/database.py, app/services/scheduler.py, app/services/chain_health.py, scripts/job_liveness.py, tests/test_job_liveness.py)
 - [2026-10-07 16:48] FIX: 6 个定点作业让开 :00/:30 网格(那里坐着会拉起重活的重试 tick) (Files: config/settings.py, app/services/scheduler.py, tests/test_job_stagger.py)
 - [2026-10-07 16:42] FIX: 4 处定点作业撞在同一分钟 + 加错峰守卫(把 :02 那次手工修正自动化) (Files: config/settings.py, tests/test_job_stagger.py)
 - [2026-10-07 16:25] REFACTOR: 作业落实性对账提到服务层 + 修多定点判不出间隔 + 接进每日体检 (Files: app/services/job_liveness.py, app/services/chain_health.py, scripts/job_liveness.py, tests/test_job_liveness.py, tests/test_job_heartbeat.py)

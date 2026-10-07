@@ -190,3 +190,87 @@ class TestSourceGuard:
         titles = [t for t, _ in ch.collect_sections.__wrapped__()] if hasattr(
             ch.collect_sections, "__wrapped__") else None
         assert titles is None or any("作业" in x for x in titles)
+
+
+class TestDuration:
+    """作业时长(2026-10-07 补)。
+
+    ⚠️ 在此之前**全仓量不到任何作业时长**:`runs.finished_at` 只声明、从不写(实测 12 类作业
+    100% 为 NULL),而 `_record_run` 是在作业**跑完之后**才落记录的 —— 于是"这个作业占着
+    单写者的库多久"这个数**结构上不存在**,排期错峰只能靠时刻聚类猜。现在由
+    `scheduler._safe` 在**作业外层**计时,一处覆盖全部作业。
+    """
+
+    def test_beat_写入耗时(self, session, monkeypatch) -> None:
+        from app.services import scheduler as sch
+
+        monkeypatch.setattr("app.db.database.get_session_local", lambda: (lambda: session))
+        sch._beat("demo_job", True, "", duration_ms=1234)
+        b = session.query(JobHeartbeat).filter_by(job_id="demo_job").one()
+        assert b.last_duration_ms == 1234
+
+    def test_没给耗时就不覆盖旧值(self, session, monkeypatch) -> None:
+        from app.services import scheduler as sch
+
+        monkeypatch.setattr("app.db.database.get_session_local", lambda: (lambda: session))
+        sch._beat("demo_job", True, "", duration_ms=500)
+        sch._beat("demo_job", True, "")                    # 不传 ⇒ 保留上次的值
+        b = session.query(JobHeartbeat).filter_by(job_id="demo_job").one()
+        assert b.last_duration_ms == 500
+
+    def test_safe_包裹会真的计时(self, session, monkeypatch) -> None:
+        """用**真实耗时**验:`_safe` 的 wrapper 必须把 func 跑的时间量出来并落库。"""
+        import time as _t
+
+        from app.services import scheduler as sch
+
+        monkeypatch.setattr("app.db.database.get_session_local", lambda: (lambda: session))
+        monkeypatch.setattr(sch, "_register_beat", lambda *a, **k: None)
+
+        def _slow() -> None:
+            _t.sleep(0.12)
+
+        sch._safe(_slow, "slow_job")()
+        b = session.query(JobHeartbeat).filter_by(job_id="slow_job").one()
+        assert b.last_duration_ms is not None and b.last_duration_ms >= 100
+
+    def test_作业挂了也要记耗时(self, session, monkeypatch) -> None:
+        """失败作业不落时长的话,"它卡了 20 分钟才失败"这件事就查不出来。"""
+        from app.services import scheduler as sch
+
+        monkeypatch.setattr("app.db.database.get_session_local", lambda: (lambda: session))
+        monkeypatch.setattr(sch, "_register_beat", lambda *a, **k: None)
+
+        def _boom() -> None:
+            raise RuntimeError("炸")
+
+        sch._safe(_boom, "boom_job")()
+        b = session.query(JobHeartbeat).filter_by(job_id="boom_job").one()
+        assert b.last_duration_ms is not None and b.last_error.startswith("RuntimeError")
+
+
+class TestSlowestInHealth:
+    def test_体检里报最慢的作业(self, session) -> None:
+        """排期错峰要的是"**谁真的占着库**",不是"谁看着重" —— 所以体检要把它打出来。"""
+        from app.services import chain_health as ch
+        from app.services import job_liveness as _jl
+
+        sched = _Sched([_Job("wechat_collect_tick",
+                             CronTrigger(hour="4,8,14,20", minute="2")),
+                        _Job("xunlei_group", CronTrigger(minute="7,27,47"))])
+        session.add(JobHeartbeat(job_id="wechat_collect_tick", last_run_at=NOW,
+                                 first_seen_at=NOW - timedelta(days=9),
+                                 last_duration_ms=612000))     # 10.2 分钟
+        session.add(JobHeartbeat(job_id="xunlei_group", last_run_at=NOW,
+                                 first_seen_at=NOW - timedelta(days=9),
+                                 last_duration_ms=2100))
+        session.commit()
+        orig = _jl.audit
+        _jl.audit = lambda db, **k: orig(db, scheduler=sched, now=NOW)
+        try:
+            items = ch.check_job_liveness(session)
+        finally:
+            _jl.audit = orig
+        joined = " ".join(i["detail"] for i in items)
+        assert "最慢" in joined and "wechat_collect_tick" in joined
+        assert "612.0s" in joined          # 毫秒 → 秒的换算要对(612000ms = 10.2 分钟)

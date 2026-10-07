@@ -133,7 +133,10 @@ ADDITIONS: dict[str, list[str]] = {
     "runs": ["retry_count INTEGER DEFAULT 0"],
     # 作业**注册时刻**(2026-10-05):原来只在"执行后"才有心跳行,于是"注册了但还没到第一次
     # 执行点"的作业对账时无法与"真·从没跑过"区分(chain_report 当天就被误报过一次)。
-    "job_heartbeats": ["first_seen_at DATETIME"],
+    "job_heartbeats": ["first_seen_at DATETIME",
+                      # **上次执行耗时(ms)**(2026-10-07):此前全仓量不到任何作业时长
+                      # (runs.finished_at 从没被写过),错峰只能靠时刻聚类猜。
+                      "last_duration_ms INTEGER"],
     # 闲鱼行情三件套(2026-10-03):want_count/sold_price/tags 全部出自**搜索响应**,
     # 不必打详情接口 → 需求热度绕开滑块验证。存量行 want_count=0 = "还没用新解析重采过"。
     "xianyu_items": ["want_count INTEGER DEFAULT 0", "sold_price VARCHAR(32) DEFAULT ''",

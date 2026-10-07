@@ -484,11 +484,22 @@ def check_job_liveness(db) -> list[dict]:
                  "detail": f"共 {n_jobs} 个作业注册;**心跳表还没有基线**(机制刚上线或新库),"
                            f"本次不判'从没跑过'"}]
 
+    # **最慢的几个作业** —— 排期错峰时要的是"谁真的占着库",不是"谁看着重"。
+    # ⚠️ 这条在 2026-10-07 加时长采集之前**根本量不出来**(全仓没有作业时长,
+    # 见 `RunRecord.finished_at` 的说明),当时只能靠时刻聚类猜。
+    slow = sorted(((b.last_duration_ms, jid) for jid, b in r["beats"].items()
+                   if getattr(b, "last_duration_ms", None)),
+                  reverse=True)[:3]
+    slow_txt = ("" if not slow else
+                ";最慢:" + "、".join(f"{jid} {ms / 1000:.1f}s" for ms, jid in slow))
+
     if not r["never"] and not r["stale"]:
         return [{"name": "作业落实性", "level": GREEN,
-                 "detail": f"共 {n_jobs} 个作业,全部有心跳且间隔正常"}]
+                 "detail": f"共 {n_jobs} 个作业,全部有心跳且间隔正常{slow_txt}"}]
 
     items: list[dict] = []
+    if slow_txt:
+        items.append({"name": "作业落实性", "level": GREEN, "detail": slow_txt.lstrip(";")})
     if r["never"]:
         items.append({"name": "作业落实性", "level": RED,
                       "detail": f"**注册了却从没执行过**({len(r['never'])} 个):"

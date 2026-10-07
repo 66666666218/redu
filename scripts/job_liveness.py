@@ -37,15 +37,17 @@ def main() -> int:
     with get_session_local()() as db:
         r = jl.audit(db)
 
-    print(f"{'作业':<26}{'上次执行':<18}{'跑了':>6}{'错':>5}  期望最大空档")
-    print("-" * 84)
+    print(f"{'作业':<26}{'上次执行':<18}{'跑了':>6}{'错':>5}{'上次耗时':>10}  期望最大空档")
+    print("-" * 95)
     for j in r["jobs"]:
         b = r["beats"].get(j.id)
         iv = jl.trigger_interval_seconds(j.trigger)
         last_txt = (b.last_run_at.strftime("%m-%d %H:%M") if b and b.last_run_at
                     else "—— 无记录 ——")
+        dur = getattr(b, "last_duration_ms", None) if b else None
         print(f"{j.id:<26}{last_txt:<18}{b.run_count if b else 0:>6}"
-              f"{b.error_count if b else 0:>5}  {f'{iv / 3600:.2f}h' if iv else '—'}")
+              f"{b.error_count if b else 0:>5}{f'{dur / 1000:.1f}s' if dur else '—':>10}"
+              f"  {f'{iv / 3600:.2f}h' if iv else '—'}")
 
     print()
     if r["baseline"] is not None:
