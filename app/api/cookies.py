@@ -42,7 +42,9 @@ def cookies_del(platform: str, user: User = Depends(get_current_user), db: Sessi
 # (比报错更糟:用户以为修好了)。
 # **现在闲鱼登录的正确做法**:关掉面板,跑 `scripts/xianyu_login.py` 或直接用
 # `tools/xianyu_profile` 那个档案开浏览器登录(见 doc/operations.md §10)。
-# 纯协议那条路(`XIANYU_USE_BROWSER=false`)是被证明会被**账号级限流**的兜底,不推荐。
+# 纯协议那条路(`XIANYU_USE_BROWSER=false`)不推荐 —— 实测被"哎哟喂,被挤爆啦"挡住。
+# ⚠️ **2026-10-08 订正**:此前写的"**账号级**限流"**已证伪**(匿名请求同样被挤爆),
+# 所以**换号/换 Cookie 不是解法**;详见 `app/services/xianyu_browser.py`。
 @router.get("/api/user/smtp")
 def user_smtp_get(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return {"host": user.smtp_host or "", "port": user.smtp_port or 465,

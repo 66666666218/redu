@@ -63,7 +63,9 @@ def verify_cooldown_active(session: Session, user_id: int, settings: Settings) -
         select(func.count()).select_from(blocked.filter(marker).subquery())) or 0
 
     # **限流也要进冷却**(2026-10-02 补):`RGV587_ERROR`("被挤爆啦")与滑块同级 ——
-    # 同样是账号/IP 级压制,每轮硬撞只会加重它(实测**连续 10 轮每轮全失败**,每轮还白等 65s 退避)。
+    # 每轮硬撞只会加重它(实测**连续 10 轮每轮全失败**,每轮还白等 65s 退避)。
+    # ⚠️ 原文写"账号/IP 级压制",**2026-10-08 订正**:匿名对照证明**与账号无关**
+    # (见 `app/services/xianyu_browser.py`)。冷却的理由不变 —— 撞不出结果就别撞。
     # ⚠️ 但**单次抖动不该停 30 分钟**,所以阈值更严:近 2 小时 ≥3 次才计入,且沿用同一套指数退避。
     rate_hits = session.scalar(
         select(func.count()).select_from(blocked.filter(

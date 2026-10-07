@@ -179,8 +179,9 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
     cookies = get_cookies(session, user_id)
     goofish_cookie = cookies.get("goofish", "")
     # **采集路径**(2026-10-02):默认走**浏览器** —— 让闲鱼自己的 JS 发请求。
-    # 纯协议(自算签名 + 伪造指纹)实测被 `RGV587_ERROR::被挤爆啦` **账号级**限流
+    # 纯协议(自算签名 + 伪造指纹)实测被 `RGV587_ERROR::被挤爆啦` 挡住
     # (换出口没用、量只有 6 次/小时),而**页面内调用正常**;见 `xianyu_browser.py`。
+    # ⚠️ **2026-10-08 订正**:此前写的"**账号级**"已证伪(匿名请求同样被挤爆)⇒ 换号不是解法。
     # ⚠️ 浏览器路径**不需要 Cookie 三件套校验**:登录态在浏览器档案里,请求由页面自己发。
     browser_mode = bool(getattr(settings, "xianyu_use_browser", True))
     if not browser_mode and not goofish_cookie:

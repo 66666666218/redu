@@ -1640,7 +1640,9 @@ GET `/api/admin/health`(perm `logs.view`)→ 各平台最近采集状态 + 数�
 >
 > **现在闲鱼登录的正确做法**:跑 `python scripts/xianyu_login.py`(打开**浏览器档案**让你登,
 > 登完关窗口即可);或在项目目录直接用该档案开浏览器登录。见 `doc/operations.md §10`。
-> (纯协议那条路 `XIANYU_USE_BROWSER=false` 是被证明会遭**账号级限流**的兜底,不推荐。)
+> (纯协议那条路 `XIANYU_USE_BROWSER=false` 会被"哎哟喂,被挤爆啦"挡住,不推荐。
+> ⚠️ 2026-10-08 订正:那不是**账号级**限流 —— 匿名请求同样被挤爆,所以**换号不是解法**,
+> 见 `app/services/xianyu_browser.py`。)
 >
 > **摘除后的实测**:闲鱼采集照常(`POST /api/collect/xianyu` → `count=90`)。
 > 会话存进程内存(15 分钟 TTL);服务重启后旧会话失效,重新生成即可。

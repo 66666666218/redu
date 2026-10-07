@@ -46,7 +46,10 @@ class Settings(BaseSettings):
     xianyu_cooldown_minutes: int = 30  # 闲鱼触发人机验证(滑块)后,暂停采集该分钟数,避免反复撞枪口
     # **采集路径**(2026-10-02):`browser` = Playwright 打开真页面、在页面里调闲鱼自己的
     # `window.lib.mtop.request`(签名/指纹全由它的 JS 做);`protocol` = 老的自算签名纯协议
-    # (实测被"哎哟喂,被挤爆啦"**账号级**限流,换出口也没用;页面内调用则正常)。
+    # (实测被"哎哟喂,被挤爆啦"挡住;页面内调用则正常)。
+    # ⚠️ **2026-10-08 订正**:此处原写"**账号级**限流"—— **已证伪**:匿名请求(没有账号)
+    # 同样被挤爆,照抄能跑通的开源客户端也一样。详见 `app/services/xianyu_browser.py`。
+    # **结论不变:保持 `browser`**。
     xianyu_use_browser: bool = True
     xianyu_proxy_url: str = ""      # 闲鱼专用"单一固定"出口代理(http://user:pass@host:port,如住宅IP);留空直连。勿用轮换代理池——mtop token/session 绑定出口 IP
     # 闲鱼浏览器**闲置多久自动关**(秒;**≤0 = 不关**,退回旧行为)。为什么要关:

@@ -396,8 +396,10 @@ def test_instance_role_filters_jobs(monkeypatch) -> None:
 def test_collect_tick_gates_sections_by_instance_role(monkeypatch, session) -> None:
     """⚠️ **按板块分侧**(2026-10-02 补):`collect_tick` 是 `both` 角色**两端都跑**,
     而它的防重复靠 `claim_schedule` 原子抢占 —— **两台实例的数据库独立,各自抢占都会成功**
-    → 同一个上游账号会被两端同时采集。闲鱼实测"哎哟喂,被挤爆啦"是**账号级**限流
-    (换出口也没用、请求量只有 6 次/小时),高度疑似与此有关。
+    → 同一个上游账号会被两端同时采集。闲鱼实测"哎哟喂,被挤爆啦",当时怀疑与此有关
+    (⚠️ **2026-10-08 订正**:此前这里写"是**账号级**限流 —— 换出口也没用、量只有 6 次/小时",
+     **"账号级"已证伪**:匿名请求同样被挤爆,见 `app/services/xianyu_browser.py`。
+     防双跑的护栏照旧 —— 重复采集本来就该避免,只是它不再是"挤爆"的证据)。
 
     所以:本机(wechat 角色)只采**闲鱼**;微博/抖音/百度归远程(hotspot)。
     """
