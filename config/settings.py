@@ -496,7 +496,12 @@ class Settings(BaseSettings):
     # · **B站走公开 API,不开浏览器**(wbi 签名本地可算、匿名即可):实测搜「网盘资源」
     #   20 条标题就是「【原版】火影忍者720集网盘资源」—— 而 MediaCrawler 抓 B站 起不来
     #   (`Chromium distribution 'chrome' is not found`),所以给它单开一条 API 路。
-    presence_platforms: str = "xiaohongshu,kuaishou,tieba,bilibili"
+    # ⚠️ 微博(2026-10-07 加):它原来**只跑热榜**(全站热搜),没有"按资源名搜盘"——
+    # 用户口径「微博不是也是搜索关键词盘资源推送为什么我没有看到」,查实是**配置里就没有它**
+    # (resource_presence 本身支持 weibo,MediaCrawler 也有 wb 平台)。
+    # ⚠️ 它是**走浏览器**的平台(要扫码登录、每轮开一次 Edge)⇒ 跟小红书/贴吧同节奏(每天两轮),
+    # 不进 B站那条每 2 小时的快作业。
+    presence_platforms: str = "xiaohongshu,kuaishou,tieba,bilibili,weibo"
     # 每轮探几个资源名。⚠️ **这是覆盖面真正的瓶颈**,不是 cron 频率:
     # 资源库有 600+ 条盘链,而每轮只探 3 个 ≈ 0.5%。
     # 加大它**不增加浏览器启动次数**(MediaCrawler 一次会话吃整个词表),
