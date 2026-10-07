@@ -38,3 +38,8 @@ aiotieba>=4.8  # 贴吧**点赞数**(agree):MediaCrawler 的搜索接口只给�
 #    —— 用户已知情并接受。它哪天停更,照 `doc/小红书纯协议-链路拆解.md` 自己接。
 # 仓库:https://github.com/cloxl/xhshow
 xhshow>=0.2.0
+# 抖音**纯协议**的签名(2026-10-07):`a_bogus` 的算法体逐字移植自 f2(Apache-2.0),
+# 见 `app/services/douyin_sign/NOTICE.md`;它只用 gmssl 一个第三方库(纯 Python 的国密
+# SM3,BSD 许可)。**不装 f2 本身** —— 那是 9MB 的全能下载器,我们只要这 40KB 签名。
+# ⚠️ 搬源码而不 pip 装,是为了**改版时自己修得动**(xhshow 那条链只能等上游,吃过亏)。
+gmssl>=3.2.2,<4
