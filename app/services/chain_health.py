@@ -19,6 +19,10 @@ import json
 import sys
 from datetime import datetime, timedelta
 
+from app.utils import get_logger
+
+logger = get_logger(__name__)
+
 GREEN, YELLOW, RED = "🟢", "🟡", "🔴"
 
 # 每条链:`(名称, 运行记录 kind, 期望产出的字段, 说明, 侧)`
@@ -451,6 +455,56 @@ def render(sections: list[tuple[str, list[dict]]]) -> str:
     return chr(10).join(lines)
 
 
+def check_job_liveness(db) -> list[dict]:
+    """⑤ **作业落实性**:注册的作业 vs 真实心跳 —— "该跑没跑"要自己说出来(2026-10-07)。
+
+    ⚠️ **为什么必须加这一条**:2026-10-07 实测,公众号监听轮**从 10-06 20:02 起 30 小时
+    一轮没跑**(应用全程在线、别的作业照跑),而**没有任何一处告警** ——
+    唯一的守卫 `scripts/job_liveness.py` ①**只有人手动跑** ②它把
+    `hour='4,8,14,20'` 这种多定点判成"算不出间隔"直接放过,**监听作业恰好被排除在外**。
+    代价是"阅读数又断了"要靠用户来问。⇒ 判活逻辑已提到 `app.services.job_liveness`
+    (服务层,脚本只能是薄壳),并且**接进每天这份体检**。
+
+    分级:`从没执行过` 报红(注册了就该跑);`间隔远超预期` 超过期望 6 倍报红,否则黄
+    (留出"晚一轮"的余地 —— 告警变噪音就没人看了)。
+    """
+    from app.services.job_liveness import STALE_FACTOR, audit
+
+    try:
+        r = audit(db)
+    except Exception as exc:  # noqa: BLE001 - 对账自己挂了也要说出来,别让整份体检断掉
+        logger.exception("作业落实性对账失败")
+        return [{"name": "作业落实性", "level": YELLOW,
+                 "detail": f"对账本身失败:{type(exc).__name__}: {str(exc)[:120]}"}]
+
+    n_jobs = len(r["jobs"])
+    if r["baseline"] is None:
+        # 心跳机制刚上线/新库:没有基线时"没记录"分不出真假,别报红(那会是一次假问题)
+        return [{"name": "作业落实性", "level": YELLOW,
+                 "detail": f"共 {n_jobs} 个作业注册;**心跳表还没有基线**(机制刚上线或新库),"
+                           f"本次不判'从没跑过'"}]
+
+    if not r["never"] and not r["stale"]:
+        return [{"name": "作业落实性", "level": GREEN,
+                 "detail": f"共 {n_jobs} 个作业,全部有心跳且间隔正常"}]
+
+    items: list[dict] = []
+    if r["never"]:
+        items.append({"name": "作业落实性", "level": RED,
+                      "detail": f"**注册了却从没执行过**({len(r['never'])} 个):"
+                                f"{'、'.join(r['never'])} —— 注册成功 ≠ 跑过,"
+                                f"查 trigger / 是否被角色挡下 / 是否每次都提前 return"})
+    for s in r["stale"]:
+        over_h = s["over_s"] / 3600
+        expect_h = s["expect_s"] / 3600
+        level = RED if s["over_s"] > s["expect_s"] * STALE_FACTOR * 2 else YELLOW
+        items.append({"name": "作业落实性", "level": level,
+                      "detail": f"**{s['job_id']}** 已 {over_h:.1f}h 没跑"
+                                f"(期望最大空档 {expect_h:.1f}h,超 {STALE_FACTOR}× 即报);"
+                                f"上次 {s['last_run_at']:%m-%d %H:%M}"})
+    return items
+
+
 def check_read_num_coverage(db, days: int = 3) -> list[dict]:
     """④ **阅读数覆盖** —— 只看**库里的真值**,不看运行记录字符串。
 
@@ -513,7 +567,10 @@ def collect_sections(db) -> list[tuple[str, list[dict]]]:
     """
     return [("依赖(容器/库/venv/档案)", check_dependencies() + check_leaked_browsers()),
             ("凭证(Cookie 在不在 / 源活不活)", check_credentials(db) + check_list_sources(db)),
-            ("产出(最近几次真跑出来的东西)", check_chains(db) + check_read_num_coverage(db))]
+            ("产出(最近几次真跑出来的东西)",
+             check_chains(db) + check_read_num_coverage(db)),
+            # ⑤ **"该跑没跑"** —— 与"跑了但没产出"是两个层次的事,分开报(2026-10-07)。
+            ("作业落实性(注册的 vs 真跑的)", check_job_liveness(db))]
 
 
 def chain_report_tick(settings=None) -> int:

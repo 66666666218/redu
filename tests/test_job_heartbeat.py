@@ -123,18 +123,26 @@ def test_add_job_sets_a_misfire_grace_by_default() -> None:
 
 
 def test_interval_estimate_is_conservative() -> None:
-    """期望间隔只做**确定性**估计:拿不准的返回 None(宁可漏报也不误报,否则"超期"变噪音)。"""
-    import sys
-    from pathlib import Path
+    """期望间隔只做**确定性**估计:拿不准的返回 None(宁可漏报也不误报,否则"超期"变噪音)。
 
+    ⚠️ 2026-10-07 更新:逻辑已从 `scripts/job_liveness.py` 提到
+    `app.services.job_liveness`(服务层,脚本只能是薄壳),函数也随之改名。
+    ⚠️ 同时**改了判据**:原来"定点"一律 `None`,于是 `wechat_collect_tick`
+    (`hour='4,8,14,20'`)**恰好被排除在超期判定之外** —— 而它正是停跑了 30 小时的那个。
+    现在定点按**最大空档**判(那条教训见 `app.services.job_liveness` 的 docstring)。
+    """
     from apscheduler.triggers.cron import CronTrigger
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-    import job_liveness
+    from app.services import job_liveness as jl
 
-    assert job_liveness._interval_seconds(CronTrigger(minute="*/20")) == 1200
-    assert job_liveness._interval_seconds(CronTrigger(minute="*")) == 60
-    assert job_liveness._interval_seconds(CronTrigger(minute="0", hour="9")) is None  # 定点 → 估不出
+    assert jl.trigger_interval_seconds(CronTrigger(minute="*/20")) == 1200
+    assert jl.trigger_interval_seconds(CronTrigger(minute="*")) == 60
+    assert jl.trigger_interval_seconds(CronTrigger(minute="0", hour="9")) == 86400  # 每天一次
+    assert jl.trigger_interval_seconds(CronTrigger(hour="4,8,14,20", minute="2")) == 8 * 3600
+
+    class _NoFields:            # 触发器换了 API / 认不出的形状 ⇒ 不猜
+        fields = None
+    assert jl.trigger_interval_seconds(_NoFields()) is None
 
 
 # ---------------------------------------------- "没有心跳"要分两类(2026-10-04)
@@ -159,11 +167,8 @@ class _B:
 
 
 def _job_liveness():
-    import sys
-    from pathlib import Path
-
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-    import job_liveness
+    """⚠️ 逻辑已提到服务层(`app.services.job_liveness`)—— 定义这份对账的**不该是脚本**。"""
+    from app.services import job_liveness
 
     return job_liveness
 
@@ -263,7 +268,7 @@ def test_should_have_fired_handles_aware_vs_naive() -> None:
 
     jl = _job_liveness()
     tr = CronTrigger(minute="0", hour="11")          # 用本机时区,免依赖测试机所在时区
-    assert jl._should_have_fired(tr, datetime(2026, 10, 4, 3, 10),
+    assert jl.should_have_fired(tr, datetime(2026, 10, 4, 3, 10),
                                  datetime(2026, 10, 4, 10, 50)) is False   # 11:00 还没到
-    assert jl._should_have_fired(tr, datetime(2026, 10, 4, 3, 10),
+    assert jl.should_have_fired(tr, datetime(2026, 10, 4, 3, 10),
                                  datetime(2026, 10, 4, 11, 30)) is True    # 早过了
