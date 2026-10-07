@@ -1,3 +1,4 @@
+- [2026-10-07 12:06] FEAT: agent 学习**接上结算结果**当标签(原来只学'话题热不热') (Files: app/services/agent_learning.py, tests/test_agent_learning_settlement_label.py)
 - [2026-10-07 11:53] FEAT: 微博接进「按资源名搜盘」那条链(原来只跑热榜) (Files: config/settings.py)
 - [2026-10-07 11:03] FEAT: 阅读数**自愈**(唤醒App→重取→验活→重试)+ 夸克口令错开整点 (Files: app/services/weread_app_token.py, app/services/wechat/_listen.py, config/settings.py, tests/test_weread_app_selfheal.py)
 - [2026-10-07 10:40] FEAT: 去重加**风险闸** —— 「要删的比留的还大」的组默认跳过 + 判定收成单一实现 (Files: scripts/_pan_dedupe.py, scripts/pan_dedupe_report.py, scripts/pan_dedupe_apply.py, tests/test_pan_dedupe_risk_gate.py)

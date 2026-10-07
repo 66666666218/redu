@@ -138,6 +138,34 @@ def backtest_and_learn(db: Session, user_id: int, settings=None) -> dict:
         except (ValueError, TypeError):
             signal_stats = {}
 
+    # ★★ **更接近真相的标签:结算结果**(2026-10-07)
+    #
+    # `HotspotSuggestion.repost_gain`(每晚 22:00 结算)= 发文后**全网新增的该文盘链数**,
+    # 也就是"这条资源**真的被疯转了**没有" —— 比"关键词热度涨没涨"更接近拉新要的东西。
+    # **它一直在库里算着,却从没被回测用过**(只被结算端自己消费)。
+    # 这里把它接上:
+    #   · 该关键词**有已结算的建议** ⇒ **以结算为准**(命中 = 真的传播开了);
+    #   · 没有 ⇒ 退回原来的热度标签 —— **不能因为"没结算"就不记样本**,那会让样本大量流失。
+    #
+    # ⚠️ 归一化必须与 `AgentStage.norm` **同一口径**(去空格 + 小写),否则两边对不上:
+    #    实测 `kw='小米18Pro 防窥屏'` 的 `norm='小米18pro防窥屏'`,而建议表存的是**原始 keyword**。
+    # ⚠️ 懒导入:模块级 import hotspot_agent 会成环(它反过来调本模块)。
+    from app.services.hotspot_agent import _norm as _norm_kw
+
+    settled: dict[str, int] = {}
+    try:
+        from app.db.models import HotspotSuggestion
+
+        for sug in db.scalars(select(HotspotSuggestion).where(
+                HotspotSuggestion.user_id == user_id,
+                HotspotSuggestion.settled_at.isnot(None))).all():
+            _k = _norm_kw(str(sug.keyword or ""))
+            if _k:
+                settled[_k] = int(sug.repost_gain or 0)
+    except Exception:  # noqa: BLE001 - 读不到结算就退回热度标签,别让整轮回测停摆
+        logger.exception("读结算结果失败(本轮退回热度标签)")
+    label_counts = {"结算": 0, "热度": 0}
+
     backtested = hits = 0
     two_days_ago = dt.now() - timedelta(days=2)
     stages = db.scalars(select(AgentStage).where(
@@ -176,7 +204,14 @@ def backtest_and_learn(db: Session, user_id: int, settings=None) -> dict:
         if base <= 0:
             continue
         growth = (now_v - base) / base
-        hit = growth >= 0.5
+        hit = growth >= 0.5          # 退路:关键词热度涨了 ≥50%
+        label = "热度"
+        # ★ **有结算就以结算为准** —— 它衡量的是"资源真的传播开了没有",不是"话题热不热"
+        _k = _norm_kw(str(st.norm or st.kw or ""))
+        if _k in settled:
+            hit = settled[_k] > 0
+            label = "结算"
+        label_counts[label] += 1
         seen[row_sig] = "1"
         backtested += 1
         if hit:
@@ -239,4 +274,10 @@ def backtest_and_learn(db: Session, user_id: int, settings=None) -> dict:
             db.add(SystemConfig(key=seen_key, value=seen_payload))
         db.commit()
 
-    return {"backtested": backtested, "hits": hits, "weights": weights}
+    # ⚠️ **把"用哪种标签学的"报出来**:否则接没接上、结算覆盖多少,运维都看不见
+    # (本仓母题:只写不读等于没有)。
+    if label_counts["结算"] or backtested:
+        logger.info("Agent 回测:%d 例(结算标签 %d / 热度标签 %d),命中 %d",
+                    backtested, label_counts["结算"], label_counts["热度"], hits)
+    return {"backtested": backtested, "hits": hits, "weights": weights,
+            "labels": label_counts}
