@@ -1,4 +1,14 @@
-"""盘内**重复资源包**的检测逻辑(报告与执行器共用一份,免得两处各写一遍又漂)。
+"""盘内**重复资源包**的检测与清理(2026-10-07 从 `scripts/_pan_dedupe.py` 提到服务层)。
+
+⚠️ **为什么必须提到服务层**:排定的周作业(`pan_dedupe_tick`)要跑它,而
+**服务层不能依赖 `scripts/`**(Docker 镜像根本不 COPY `scripts/`)—— 与 `job_liveness`
+那次同一个理由。脚本现在只是薄壳。
+
+⚠️ **同时要说明它与 `xunlei_cleanup.dedupe_duplicates` 的关系**:那套**不再排定**了 ——
+两套的"留哪份"规则**不一样**,同时跑有**互相删掉对方那份**的风险(这是删盘,不能赌)。
+将来若要恢复那套,必须先把"留哪份"的判据合并成一份。
+
+盘内**重复资源包**的检测逻辑(报告与执行器共用一份,免得两处各写一遍又漂)。
 
 判据经过**两轮收紧**(2026-10-07,见 `pan_dedupe_report.py` 的注释):
   · 键 = `(父目录, 归一化名)` —— **父目录不同就永远不成一组**(否则会把"每个包里都带的
@@ -13,12 +23,10 @@
 from __future__ import annotations
 
 import collections
-import sys
-from pathlib import Path
+from app.services import xunlei_transfer as xt
+from app.utils import get_logger
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from app.services import xunlei_transfer as xt  # noqa: E402
+logger = get_logger(__name__)
 
 import os
 
@@ -156,3 +164,115 @@ def build_plan(max_depth: int = 3, budget: int = BUDGET) -> dict:
             "n_risky": sum(1 for p in plan if p["risky"]),
             "freed": sum(s["size"] for p in plan if not p["risky"] for s in p["drop"]),
             "risky_freed": sum(s["size"] for p in plan if p["risky"] for s in p["drop"])}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 排定作业:每周自动清一次(2026-10-07,用户口径「B 自动删就可以」)
+# ══════════════════════════════════════════════════════════════════════════
+
+def trash_plan(plan: list[dict], cap: int | None = None,
+               include_risky: bool = False) -> dict:
+    """把计划里"该删的整包"移入回收站。返回 `{"fids", "deleted", "result"}`。
+
+    ⚠️ **只碰非 risky 组**(除非显式 `include_risky`)—— 见 `RISKY_RATIO` 的实测说明:
+    "要删的比留的还大"多半意味着**那两份根本不是同一样东西**。
+    ⚠️ 走 `trash_files`(**回收站**),不是永久删 —— 删盘是难逆操作,留一条后悔路。
+    """
+    picked = plan if include_risky else [p for p in plan if not p["risky"]]
+    fids = [s["id"] for p in picked for s in p["drop"]]
+    if cap is not None:
+        fids = fids[:max(0, int(cap))]
+    if not fids:
+        return {"fids": [], "deleted": 0, "result": {}}
+    res = xt.trash_files(fids)
+    return {"fids": fids, "deleted": int(res.get("deleted") or 0), "result": res}
+
+
+def pan_dedupe_tick(settings=None) -> int:
+    """**每周一次**的盘内去重(返回删掉的整包数)。
+
+    ## 为什么排定作业改用这一套(2026-10-07)
+    原来排的是 `xunlei_cleanup.dedupe_duplicates`(只删"内容可证明完全相同"的)——
+    它**从来没删掉过任何东西**:10-04 跑过一次,找到 4 组、判定"不完全相同"、删 0。
+    而能真正找出重复的是这一套(实测一次找出 13 组 / 14 个整包 / 67 GiB)。
+    ⇒ 用户口径「B 自动删就可以」:排定的这轮改用这一套。
+
+    ⚠️ **两套的"留哪份"规则不一样**,同时跑会**互相删掉对方那份** ⇒ 旧的那套**不再排定**
+    (它还留在 `xunlei_cleanup` 里,粒度是文件级、与这里的整包级不同;要恢复必须先合并判据)。
+
+    ## 两条硬规矩
+    1. **扫描没扫完(`complete=False`)就一个都不删** —— 预算撞上限时 `_dir_stats` 只能数到
+       一部分,而"留内容多的那份"**恰恰依赖条目数**;数了一半就选,可能把内容更全的那份删掉。
+    2. **风险组永不自动删**(要删的比留的大 ⇒ 多半根本不是同一份),只在告警里列出来交人工看。
+    """
+    from config.settings import get_settings
+
+    settings = settings or get_settings()
+    if not getattr(settings, "xunlei_dedupe_enabled", True):
+        return 0
+    from app.db import get_session_local
+    from app.db.models import User
+    from app.services.tenant_base import _record_run
+
+    depth = int(getattr(settings, "xunlei_dedupe_depth", 3) or 3)
+    cap = int(getattr(settings, "xunlei_dedupe_max_per_run", 30) or 30)
+    db = get_session_local()()
+    total = 0
+    try:
+        for (uid,) in db.execute(__import__("sqlalchemy").select(User.id)
+                                 .where(User.enabled.is_(True))).all():
+            try:
+                out = build_plan(depth)
+                groups, risky = out["plan"], [p for p in out["plan"] if p["risky"]]
+                note = (f"扫{out['scanned_dirs']}目录 {out['calls']}次调用;"
+                        f"重复组{len(groups)}(跳过risky{len(risky)})")
+                if not out["complete"]:
+                    # **撞预算 ⇒ 一个都不删**(见 docstring 的硬规矩 1)
+                    note += " —— ⚠️ **撞 API 预算,本轮不删**(条目数被截断会选错'留哪份')"
+                    _record_run(db, uid, "xunlei_dedupe", "failed", note)
+                    db.commit()
+                    continue
+                res = trash_plan(groups, cap=cap)
+                total += res["deleted"]
+                note += (f";移入回收站 {res['deleted']} 个整包,"
+                         f"约省 {out['freed'] / 2 ** 30:.2f} GiB")
+                if len(res["fids"]) < out["n_drop"]:
+                    note += f"(超单轮上限 {cap},余下下周继续)"
+                errs = res["result"].get("errors") or []
+                if errs:
+                    note += f" 错误{len(errs)}:{str(errs[0])[:60]}"
+                _record_run(db, uid, "xunlei_dedupe",
+                            "failed" if errs else "success", note)
+                db.commit()
+                if risky or errs or res["deleted"]:
+                    _notify(db, uid, note, risky, errs, settings=settings)
+            except Exception as exc:  # noqa: BLE001 - 单用户失败不影响其余
+                db.rollback()
+                logger.exception("盘内去重失败 user=%s", uid)
+                _record_run(db, uid, "xunlei_dedupe", "failed", str(exc)[:200])
+                db.commit()
+    finally:
+        db.close()
+    return total
+
+
+def _notify(db, uid: int, note: str, risky: list[dict], errs: list,
+            settings=None) -> None:
+    """把"这周删了什么 / 还有什么要人工看"推管理群。
+
+    ⚠️ **删盘必须留一份可核对的账**:工具自己就写着"删完请自己去回收站确认一遍,
+    别只信这一行"。所以卡片里带上条数与省下的空间,人一眼能对。
+    """
+    try:
+        from app.services.alert_service import notify_incident
+
+        extra = ""
+        if risky:
+            names = "、".join(p["name"][:20] for p in risky[:4])
+            extra = (f"\n⚠️ **{len(risky)} 组要人工看**(要删的比留的大 ⇒ 可能不是同一份):"
+                     f"{names}")
+        if errs:
+            extra += f"\n❌ 有 {len(errs)} 个删除失败:{str(errs[0])[:80]}"
+        notify_incident(db, uid, "pan", "🧹 迅雷盘去重(每周)", note + extra, settings=settings)
+    except Exception:  # noqa: BLE001 - 告警失败绝不影响去重本身
+        logger.debug("盘内去重告警推送失败", exc_info=True)

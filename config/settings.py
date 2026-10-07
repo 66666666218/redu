@@ -568,7 +568,15 @@ class Settings(BaseSettings):
     # 而且走**移入回收站**(可恢复),风险不是一个量级。用户也明确要求它按时跑。
     xunlei_dedupe_enabled: bool = True
     xunlei_dedupe_max_per_run: int = 30                 # 单轮最多移入回收站几个(接口无批量)
-    xunlei_dedupe_cron: str = "50 4 * * 0"               # 每周日 04:00(重名积累得慢,不用每天)
+    xunlei_dedupe_cron: str = "50 4 * * 0"
+    # ⚠️ 排定的这轮跑的是 `app.services.pan_dedupe`(2026-10-07 换的,用户口径「B 自动删就可以」)。
+    # 换的原因:原来排的 `xunlei_cleanup.dedupe_duplicates`(只删"内容可证明完全相同"的)
+    # **从来没删掉过任何东西** —— 10-04 跑过一次,找到 4 组、判定"不完全相同"、删 0。
+    # 而能真正找出重复的是这一套(实测一次 13 组 / 14 个整包 / 67 GiB)。
+    # ⚠️ 两套的"留哪份"规则不同,同时跑会互相删掉对方那份 ⇒ 旧的**不再排定**。
+    xunlei_dedupe_depth: int = 3          # 扫到第几层(3 层够覆盖 /最全文件 与 /资源✨/X开头游戏)
+    xunlei_dedupe_max_per_run: int = 30   # **单轮删除上限**:一次删太多难复核,余下下周继续
+               # 每周日 04:00(重名积累得慢,不用每天)
 
     # ---- 拉新周录提醒(2026-10-03)----
     # `pan_recruit_weekly` 是**转化回路唯一的真值入口**,但至今 0 行 —— 入口(接口/前端)早就有,

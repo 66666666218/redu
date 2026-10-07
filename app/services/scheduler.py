@@ -494,7 +494,10 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.resource_library import cross_resonance_tick
     from app.services.chain_ordering import chain_ordering_tick
     from app.services.xunlei_cleanup import cleanup_tick as xunlei_cleanup_tick
-    from app.services.xunlei_cleanup import dedupe_tick as xunlei_dedupe_tick
+    # ⚠️ 排定去重改用 `pan_dedupe`(2026-10-07):旧的 `xunlei_cleanup.dedupe_tick`
+    # **从来没删掉过东西**(只删"可证明完全相同"的),而这一套实测能找出 13 组/67GiB。
+    # 两套"留哪份"的规则不同,同时跑有互相删掉对方那份的风险 ⇒ 旧的停排(函数保留,见其注释)。
+    from app.services.pan_dedupe import pan_dedupe_tick as xunlei_dedupe_tick
     from app.services.lead_settlement import record_reminder_tick as recruit_reminder_tick
 
     jobs = [

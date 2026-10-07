@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts._pan_dedupe import build_plan  # noqa: E402
+from app.services.pan_dedupe import build_plan  # noqa: E402
 
 # ⚠️ **脚本自己定 stdout 编码,不依赖调用环境**(2026-10-07 实测踩到):
 # 后台跑时 stdout 不是终端,默认编码是 **GBK**,而本脚本要打印 ✔/✂

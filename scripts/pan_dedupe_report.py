@@ -1,9 +1,9 @@
 """盘内**重复资源包**只读报告(2026-10-07)。**不删任何东西。**
 
-判据与执行器**共用一份**(`scripts/_pan_dedupe.py`)—— 那种"两处各写一遍、迟早飘"的事
+判据与执行器**共用一份**(`app/services/pan_dedupe.py`)—— 那种"两处各写一遍、迟早飘"的事
 本仓吃过大亏,这里不再来一次。
 
-⚠️ 三条别忘(都是实测踩出来的,详见 `_pan_dedupe` 的注释):
+⚠️ 三条别忘(都是实测踩出来的,详见 `app.services.pan_dedupe` 的注释):
   ① 判据是 **`(父目录, 只差 (N) 的名字)`** —— 按文件名/按归一化名都试过,都会误判;
   ② 「老」**算不出来**:盘上所有时间都是入库那天,没有区分度 ⇒ 本报告只做**重复**;
   ③ 「要删的比留的还大」的组**自动跳过** —— 条目多 ≠ 内容全,那种多半是两份不同的东西。
@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts._pan_dedupe import build_plan  # noqa: E402
+from app.services.pan_dedupe import build_plan  # noqa: E402
 
 # ⚠️ **脚本自己定 stdout 编码,不依赖调用环境**(2026-10-07 实测踩到):
 # 后台跑时 stdout 不是终端,默认编码是 **GBK**,而本脚本要打印 ✔/✂

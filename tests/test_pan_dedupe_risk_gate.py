@@ -14,7 +14,9 @@ os.environ.setdefault("DATABASE_URL", "sqlite://")
 
 import pytest  # noqa: E402
 
-from scripts import _pan_dedupe as pd  # noqa: E402
+# ⚠️ 逻辑已从 `scripts/_pan_dedupe.py` 提到服务层(排定作业要跑它,而服务层不能
+# 依赖 scripts/)。脚本现在只是薄壳。
+from app.services import pan_dedupe as pd  # noqa: E402
 
 MiB = 1024 * 1024
 
