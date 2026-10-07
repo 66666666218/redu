@@ -1,3 +1,4 @@
+- [2026-10-07 21:58] DOCS: 小红书纯协议**链路拆解与自修指南**(不把 xhshow 当黑盒)+ 实测通过 (Files: doc/小红书纯协议-链路拆解.md, tools/xhs_protocol_probe.py)
 - [2026-10-07 21:49] FIX: 补上一条带红提交的修复 —— 快作业语义从「只跑B站」扩成「跑所有 API 平台」(微博纯协议后一并进快车道);并修两处测试桩签名 (Files: app/services/resource_presence.py, config/settings.py, tests/test_resource_presence.py, CHANGELOG)
 - [2026-10-07 21:44] FEAT: 微博搜索改成**纯协议**(不再开浏览器)—— 每轮开浏览器的平台 4→3 (Files: app/services/weibo_search.py, app/services/resource_presence.py, tests/test_weibo_search.py)
 - [2026-10-07 21:35] FEAT: B站对标号**自适应降频**(内容没变就给冷却,变了立刻解冻)+ 两条静默坑的守卫(ADDITIONS 重复键 / 非空列破坏裸 INSERT) (Files: app/db/models.py, app/db/database.py, config/settings.py, app/services/bili_account_scan.py, tests/test_bili_account_scan.py, tests/test_migrations_unique.py)
