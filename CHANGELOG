@@ -1,3 +1,4 @@
+- [2026-10-07 17:12] FIX: 夸克环境故障早退 + B站滤掉涨粉标题、每轮号数 6→9(依实测无风控) (Files: app/services/quark_kouling.py, app/services/bili_account_scan.py, config/settings.py, app/services/scheduler.py, tests/test_quark_kouling.py, tests/test_bili_account_scan.py)
 - [2026-10-07 17:03] FIX: 夸克口令失败原因落库(`douyin_leads.last_error`)+ 修 `moved_at` 打戳漏判空链 (Files: app/db/models.py, app/db/database.py, app/services/quark_kouling.py, app/services/chain_delivery.py, tests/test_quark_kouling.py, tests/test_douyin_leads.py, tests/test_chain_delivery.py)
 - [2026-10-07 16:53] FEAT: 补作业时长采集(`job_heartbeats.last_duration_ms`)—— 此前全仓量不到任何时长 (Files: app/db/models.py, app/db/database.py, app/services/scheduler.py, app/services/chain_health.py, scripts/job_liveness.py, tests/test_job_liveness.py)
 - [2026-10-07 16:48] FIX: 6 个定点作业让开 :00/:30 网格(那里坐着会拉起重活的重试 tick) (Files: config/settings.py, app/services/scheduler.py, tests/test_job_stagger.py)

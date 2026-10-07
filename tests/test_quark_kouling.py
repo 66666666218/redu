@@ -515,3 +515,63 @@ class TestFailureReasonStored:
         reasons = ["UI 流程超时(90s)"] * 5 + ["空文本"]
         top = collections.Counter(reasons).most_common(1)
         assert top[0][0] == "UI 流程超时(90s)" and top[0][1] == 5
+
+
+class TestEnvFailFast:
+    """★ **环境故障要早退**(2026-10-07 实测逼出来的)。
+
+    抓到一次 8 条**全**失败,原因是「雷电窗口拿不到焦点(当前前台:msedge)」——
+    那是**整轮级**的故障,与这条口令有没有内容无关。继续跑只是把同样的失败重演 7 遍:
+    7 × 15~20 秒的模拟器 = **白烧 2 分钟**。
+
+    判据用**连续**两条(不是"出现过一次"):偶发抖动之后可能就自己好了。
+    """
+
+    def _patch_counting(self, monkeypatch):
+        calls: list[str] = []
+        monkeypatch.setattr("app.services.cookie_store.get_cookie", lambda s, u, p: "CK")
+        monkeypatch.setattr("app.services.quark_transfer.QuarkTransfer", _FakeQt)
+
+        def _fake_resolve(text, **k):
+            calls.append(text)
+            return {"ok": False, "reason": "雷电窗口拿不到焦点(当前前台:msedge)",
+                    "env": True}
+
+        monkeypatch.setattr(qk, "resolve", _fake_resolve)
+        return calls
+
+    def test_连续两条环境故障就提前收工(self, session, monkeypatch) -> None:
+        for i in range(5):
+            _lead(session, f"a{i}", f"咐置铸剑上供叩苓{i}")
+        calls = self._patch_counting(monkeypatch)
+        out = qk.drain(session, 1, _S())
+        assert len(calls) == 2, f"应只问 2 条就收工,实际问了 {len(calls)} 次"
+        assert out["failed"] == 2
+        assert all("焦点" in r for r in out["reasons"])
+
+    def test_环境故障不判死线索(self, session, monkeypatch) -> None:
+        """早退归早退,**章必须撤回** —— 否则一次环境抖动把整批线索永久判死。"""
+        lead = _lead(session, "a1", "咐置铸剑上供叩苓")
+        self._patch_counting(monkeypatch)
+        qk.drain(session, 1, _S())
+        session.refresh(lead)
+        assert lead.kouling_tried_at is None, "环境故障不该盖'试过'的章"
+
+    def test_一条环境故障后成功就继续(self, session, monkeypatch) -> None:
+        """只有**连续**才早退 —— 偶尔一条坏了,后面的照跑(别为一次抖动放弃整轮)。"""
+        for i in range(4):
+            _lead(session, f"a{i}", f"咐置铸剑上供叩苓{i}")
+        seen: list[str] = []
+
+        def _alternate(text, **k):
+            seen.append(text)
+            if len(seen) == 1:
+                return {"ok": False, "reason": "雷电窗口拿不到焦点", "env": True}
+            return {"ok": True, "title": "铸剑纳贡（ForgeTax）"}
+
+        monkeypatch.setattr("app.services.cookie_store.get_cookie", lambda s, u, p: "CK")
+        monkeypatch.setattr("app.services.quark_transfer.QuarkTransfer", _FakeQt)
+        monkeypatch.setattr(qk, "resolve", _alternate)
+        out = qk.drain(session, 1, _S())
+        assert out["failed"] >= 1
+        assert len(seen) >= 2, "第一条环境故障后就整个停了 —— 判据应是'连续'"

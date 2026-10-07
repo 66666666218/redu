@@ -515,3 +515,89 @@ class TestRateLimitKeepsWorkDone:
         bas.scan_accounts(session, 1, self._S3())
         # 每号一次 commit ⇒ 进度应当是逐个递增,不该只有一个"3"
         assert len([x for x in seen if x > 0]) >= 3, f"应当每号落盘,实际 commit 后进度:{seen}"
+
+
+class TestOfftopicFilter:
+    """★ 滤掉**涨粉/互动**标题,但**绝不许误杀资源标题**。
+
+    ⚠️ 这个类里两条用例的数据**全部取自生产库**(2026-10-07 抓的 121 条 bili-pan 标题)。
+    为什么要拿真实数据钉:我自己在这一步**差点用错判据** —— 一开始拿"含不含
+    `资源/网盘/链接` 字样"当判据,于是把「野鹅敢死队 经典影片 国语配音」这种
+    **真资源标题**判成了"纯互动内容",差点得出"B站这条路没价值"的错结论。
+    资源名本来就长那样,**不带"资源"两个字**。
+    """
+
+    #: 生产库里真实采到的**涨粉/互动**标题(该滤)
+    涨粉 = [
+        "盘盘大型“追粉”现场！路过的宝宝～请别划走🙏成为盘粉好吗？盘盘宠你！！！",
+        "难度升级！只亮一个看谁能成功？",
+        "截图挑战！下次和好朋友就这样拍～",
+        "等一下！盘盘有话对你说...",
+    ]
+
+    #: **已知漏网**:这条也是涨粉号发的内容,但它**一个涨粉特征词都不含**。
+    #: ⚠️ 我**不给它加规则** —— 为一条样本加规则就是过拟合,而且会拉高误杀风险
+    #: (本仓的教训:判据选错会得出自信的错结论)。这里把它显式记下来,
+    #: 是为了让下一个人知道**这条过滤器的边界在哪**,而不是以为它滴水不漏。
+    已知漏网 = ["换装变戏法~"]
+
+    #: 生产库里真实采到的**资源**标题(**一条都不许滤**)
+    资源 = [
+        "野鹅敢死队  经典影片  国语配音",
+        "别墅阴影  大陆老剧  经典电视剧  怀旧 陈道明主演",
+        "泰星来客 经典美剧 国语配音  第一季",
+        "霍桑探案  大陆老剧 经典电视剧 怀旧",
+        "【车载U盘】45分钟近期爆火音乐合集，开听！",
+        "孩子最爱动画版《秦王统一六国》",
+        "微信短剧机器人详细搭建教程，半小时内搭建属于自己的机器人",
+        "短剧推荐《试用夫人是大佬（80集）》",
+        "《最奇妙的蛋》绘本故事",
+    ]
+
+    def test_涨粉标题被滤掉(self) -> None:
+        from app.services.bili_account_scan import is_offtopic_title
+
+        missed = [t for t in self.涨粉 if not is_offtopic_title(t)]
+        assert not missed, f"这些涨粉标题没被滤掉:{missed}"
+
+    def test_资源标题一条都不许误杀(self) -> None:
+        """★ 误杀的代价比漏滤大得多 —— 那是**真资源**,漏了就永久丢了。"""
+        from app.services.bili_account_scan import is_offtopic_title
+
+        killed = [t for t in self.资源 if is_offtopic_title(t)]
+        assert not killed, f"**资源标题被误杀了**:{killed}"
+
+    def test_判据要两边都看(self) -> None:
+        """只判一半都会坏:只看涨粉词会误杀正经标题,只看内容词会漏掉大量涨粉号。"""
+        from app.services.bili_account_scan import is_offtopic_title
+
+        # 含涨粉词 + 含内容特征 ⇒ **不滤**(保守:宁漏滤不误杀)
+        assert not is_offtopic_title("【教程】三连关注我就能看全集")
+        # 含内容特征但没涨粉词 ⇒ 不滤
+        assert not is_offtopic_title("经典老电影 国语配音")
+        # 空标题不滤(交给别的环节处理)
+        assert not is_offtopic_title("")
+
+    def test_滤掉的条数要报出来(self, session) -> None:
+        """⚠️ **静默丢数据和静默失败是同一个病** —— 必须能看见滤了多少。"""
+        from app.db.models import CrossPlatformAccount
+        from app.services.bili_account_scan import _save_titles
+
+        acc = CrossPlatformAccount(user_id=1, platform="bilibili", uid="u1", name="号")
+        session.add(acc)
+        session.commit()
+        from datetime import datetime as _dt
+
+        titles = [{"title": t, "created": int(_dt.now().timestamp())}
+                  for t in self.涨粉[:3] + self.资源[:2]]
+        stats: dict = {}
+        n = _save_titles(session, 1, acc, titles, _S(), stats=stats)
+        assert n == 2, f"应只写入 2 条资源标题,实际 {n}"
+        assert stats["offtopic"] == 3, stats
+
+    def test_已知漏网要被显式记着_而不是假装没有(self) -> None:
+        """★ 过滤器的**边界**也要有测试:哪天它变强了,这条会红,提醒去更新认知。"""
+        from app.services.bili_account_scan import is_offtopic_title
+
+        assert not any(is_offtopic_title(t) for t in self.已知漏网), (
+            "这条已经能被滤掉了 —— 把 `已知漏网` 里的条目挪进 `涨粉`")

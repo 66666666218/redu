@@ -44,6 +44,41 @@ _SPACE_URL = "https://api.bilibili.com/x/space/wbi/arc/search"
 # 一轮最多记多少条标题进热榜表。Agent 侧只取 `rank <= 10`,多记无用;
 # 留 30 是为了让"最近 30 条投稿"整体可见(排障时想看全)。
 _MAX_TITLES = 30
+
+#: **涨粉/互动类标题的特征词**(2026-10-07 实测:121 条 bili-pan 标题里近一半是这类)。
+#: 实测样本:「盘盘大型"追粉"现场！路过的宝宝～请别划走🙏成为盘粉好吗？」
+#: 「难度升级！只亮一个看谁能成功？」「截图挑战！」「等一下！盘盘有话对你说...」
+#: —— 这些号名字里带"网盘资源"(所以被搜出来),内容却是**纯涨粉**,
+#: 喂给选题 Agent 只会污染候选池。
+_OFFTOPIC_MARKERS = (
+    "追粉", "涨粉", "盘粉", "宠粉", "宠你", "请别划走", "别划走", "三连", "点赞关注",
+    "关注我", "互关", "粉丝福利", "抽奖", "截图挑战", "有话对你说", "看谁能成功",
+    "的宝宝", "宝宝们", "路过的宝宝",
+)
+
+#: **内容/作品名的特征词**。判"是不是涨粉标题"时**必须同时要求它一条都不命中** ——
+#: 这是个**保守**的过滤(宁可漏滤,不可误杀),因为本仓的教训是"判据选错会得出自信的错结论"。
+#: 特别提醒:资源标题常**不带**"资源/网盘"字样 —— 实测「野鹅敢死队 经典影片 国语配音」
+#: 「霍桑探案 大陆老剧」才是真资源名。所以这里的词表是**作品/类型**特征,不是"资源"特征。
+_CONTENT_MARKERS = (
+    "《", "》", "配音", "国语", "中字", "字幕", "全集", "合集", "电影", "电视剧", "短剧",
+    "第一季", "第二季", "纪录片", "动画", "动漫", "游戏", "教程", "资料", "素材", "模板",
+    "高清", "4k", "hd", "u盘", "软件", "工具", "搭建", "课程", "绘本", "解说",
+)
+
+
+def is_offtopic_title(title: str) -> bool:
+    """这条标题是不是**涨粉/互动**类(与资源无关)。
+
+    ⚠️ 判据是"命中涨粉词 **且** 一条内容特征都不命中" —— 两边都要,别只判一半:
+    只看涨粉词会误杀(正经标题里也会出现"关注")、只看内容词又会漏掉大量涨粉号。
+    """
+    t = str(title or "").lower()
+    if not t:
+        return False
+    if not any(m in t for m in _OFFTOPIC_MARKERS):
+        return False
+    return not any(m in t for m in _CONTENT_MARKERS)
 # 限流返回码:B站用 -352(频率)/-412(风控)两个都表示"被挡住",而非"没有数据"。
 _RATE_LIMIT_CODES = (-352, -412, -509)
 
@@ -190,7 +225,8 @@ def _alert_cookie_dead(session, user_id: int, reason: str) -> None:
         logger.debug("B站 cookie 失效告警推送失败", exc_info=True)
 
 
-def _save_titles(session, user_id: int, account, titles: list[dict], settings=None) -> int:
+def _save_titles(session, user_id: int, account, titles: list[dict], settings=None,
+                 stats: dict | None = None) -> int:
     """标题 → `hot_source_items`(`source="bili-pan"`)。返回写入条数。
 
     `rank` 用**投稿在最近列表里的位置**(第 1 条最新)当名次 —— Agent 只取 `rank <= 10`,
@@ -206,8 +242,13 @@ def _save_titles(session, user_id: int, account, titles: list[dict], settings=No
     from app.services.douyin_leads import _min_publish_ts
 
     min_ts = _min_publish_ts(settings or _settings())
-    n = skipped = 0
+    n = skipped = offtopic = 0
     for i, t in enumerate(titles[:_MAX_TITLES], start=1):
+        if is_offtopic_title(t.get("title") or ""):
+            # ⚠️ **滤掉要说出来**(计数进 stats + 日志),否则"这轮怎么少收了"永远查不出来 ——
+            # 静默丢数据和静默失败是同一个病。
+            offtopic += 1
+            continue
         created = int(t.get("created") or 0)
         if min_ts:
             if created <= 0:
@@ -228,6 +269,10 @@ def _save_titles(session, user_id: int, account, titles: list[dict], settings=No
         n += 1
     if skipped:
         logger.info("B站对标号「%s」:按投稿时间过滤掉 %d 条(早于下限或缺时间)", name, skipped)
+    if offtopic:
+        logger.info("B站对标号「%s」:滤掉 %d 条涨粉/互动内容(不是资源)", name, offtopic)
+    if stats is not None:
+        stats["offtopic"] = stats.get("offtopic", 0) + offtopic
     return n
 
 
@@ -268,6 +313,7 @@ def scan_accounts(session, user_id: int, settings=None, count: int | None = None
     picked = rows[: max(1, min(n, len(rows)))]
 
     written, seen_names = 0, []
+    stats: dict = {}                     # 累计"滤掉多少涨粉内容"等旁路计数
     ck = _bili_cookie(session, user_id, settings)      # 登录态能显著放宽 space 端点的风控
     if not ck:
         logger.info("未配 B站 cookie,本轮按**匿名**取(更可能被风控挡);"
@@ -285,7 +331,7 @@ def scan_accounts(session, user_id: int, settings=None, count: int | None = None
             # 先落盘再抛:**"整轮中止"的本意是"别继续撞已挡的端点",不是"丢掉战果"**。
             session.commit()
             raise
-        written += _save_titles(session, user_id, acc, titles, settings)
+        written += _save_titles(session, user_id, acc, titles, settings, stats=stats)
         # ⚠️ **记下扫描状态** —— 这是"59 个号里有多少空壳"唯一能**量出来**的办法
         # (space 端点限流极紧,不可能为了统计专门扫一圈)。
         acc.last_scan_at = datetime.now()
@@ -298,7 +344,7 @@ def scan_accounts(session, user_id: int, settings=None, count: int | None = None
     logger.info("B站对标号扫描:共 %d 个号 → 本轮扫 %s,写入标题 %d 条",
                 len(rows), "、".join(seen_names), written)
     return {"status": "ok", "scanned": len(picked), "titles": written,
-            "accounts": seen_names, "total": len(rows)}
+            "accounts": seen_names, "total": len(rows), "offtopic": stats.get("offtopic", 0)}
 
 
 def _scan_priority(thin_below: int | None = None):
@@ -393,8 +439,13 @@ def bili_account_scan_tick(settings=None) -> int:
                 # (见 `scan_accounts`),降权与"没扫过的优先"都由排序本身表达 ——
                 # 中途增删号也不会像"游标 % 总数"那样错位跳过。
                 summary = empty_account_summary(db, uid, settings)
+                # **滤掉多少涨粉内容要看得见**(2026-10-07):实测这条链采到的标题里近一半是
+                # 「追粉现场/截图挑战/有话对你说」这类纯互动内容 —— 不报出来的话,
+                # "这轮怎么少收了"只能靠猜,而**静默丢数据和静默失败是同一个病**。
+                off = int(out.get("offtopic") or 0)
+                off_txt = f" 滤掉涨粉{off}条" if off else ""
                 _record_run(db, uid, "bili_account_scan", "success",
-                            f"扫{out.get('scanned', 0)}个号 标题{out.get('titles', 0)}条"
+                            f"扫{out.get('scanned', 0)}个号 标题{out.get('titles', 0)}条{off_txt}"
                             f" **空壳{summary['empty']} 极少{summary['thin']}"
                             f"/{summary['scanned']}扫过**(共{summary['total']})"
                             f" {','.join(out.get('accounts') or [])}")

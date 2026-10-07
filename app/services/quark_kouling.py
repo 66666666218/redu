@@ -225,8 +225,9 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
         not _looks_like_quark(r.title),
         -(r.publish_at.timestamp() if r.publish_at else 0),
         -int(r.id)))[:limit]
-    done = failed = reused = 0
-    reasons: list[str] = []      # 失败原因(落库 + 汇总进运行记录)      # `reused` = **三盘互通命中**(连模拟器都没跑)
+    done = failed = reused = 0      # `reused` = **三盘互通命中**(连模拟器都没跑)
+    reasons: list[str] = []         # 失败原因(落库 + 汇总进运行记录)
+    env_streak = 0                  # 连续环境故障计数;够 2 条就提前收工(见下面的 break)
     try:
         qt = QuarkTransfer(ck)
     except Exception as exc:  # noqa: BLE001
@@ -238,7 +239,7 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
         # ⚠️ 例外:下面判成**环境故障**(`env_fail`)时会把章撤回 —— 那是模拟器/焦点的问题,
         # 与这条口令有没有内容无关,不该拿它判死线索。
         lead.kouling_tried_at = _dt.now()
-        env_fail = False
+        env_fail = False        # 本条是否"环境故障"(与口令内容无关)
         # ⚠️⚠️ **先落一次并释放写锁,再去做慢活**(2026-10-06 实测踩到):
         # 下面要跑 **15–20 秒的模拟器**(×8 条 ≈ 2.7 分钟),而 SQLite 是**单写者**。
         # 原来整轮都在一个写事务里 ⇒ **把别的作业全饿死**:14:00 那一分钟里
@@ -291,15 +292,31 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
                 time.sleep(3)          # 给保存任务一点落盘时间
         if not fid:
             failed += 1
+            if env_fail:
+                # ★ 环境故障(**整轮级**,与这条口令有没有内容无关):
+                #   · 原因照实落库,但**措辞不同** —— 原来一律写成"解出「?」但找不到文件",
+                #     那是**误导**(根本没解出东西来,是模拟器没反应);
+                #   · **不拍截图**:截图是给"保存没产出文件"那类失败定位用的,环境故障的原因
+                #     已经在 `reason` 里写着,再拍只是往 data/ 里堆垃圾
+                #     (而且实测那种垃圾会污染诊断 —— 我拿测试产的截图当过生产证据);
+                #   · **撤回"试过"的章**:不撤的话,一次环境抖动会把整批线索**永久判死**;
+                #   · **够 2 条就早退**:见下面 ★★ 的说明。
+                lead.last_error = (reason or "模拟器拿不到焦点等环境问题")[:200]
+                reasons.append(lead.last_error[:60])
+                lead.kouling_tried_at = None
+                env_streak += 1
+                if env_streak >= 2:
+                    logger.warning("夸克口令:**连续 %d 条都是环境故障**"
+                                   "(模拟器拿不到焦点/前台被别的程序占着),本轮提前结束 —— "
+                                   "别把剩下的线索也各烧 15~20 秒", env_streak)
+                    break
+                continue
+            env_streak = 0
             # ⚠️ **把原因落库**(2026-10-07):原来它只进 `logger.info`,而日志不落盘 ⇒
             # "失败 N 条"永远只有一个数字,查不出是超时、没保存成、还是口令本身没内容。
-            lead.last_error = reason or f"解出「{title}」但保存没产出文件"[:200]
+            lead.last_error = (reason or f"解出「{title}」但保存没产出文件")[:200]
             reasons.append(lead.last_error[:60])
-            if env_fail:
-                # ★ **撤回"试过"的章**:这是环境故障(模拟器拿不到焦点等),不是"这条口令没内容"。
-                # 不撤的话,一次环境抖动会把整批线索**永久判死**(见上面 `env=True` 处的说明)。
-                lead.kouling_tried_at = None
-            # **把屏幕拍下来** —— 剩下这类失败是"保存没产出文件",光看日志只能猜
+            # **把屏幕拍下来** —— 这一类是"保存没产出文件",光看日志只能猜
             shot = _snapshot_failure()
             logger.warning("夸克口令:解出「%s」但两次都在 %s 里找不到文件(截图:%s)",
                            title or "?", _SAVE_DIR, shot or "失败")
