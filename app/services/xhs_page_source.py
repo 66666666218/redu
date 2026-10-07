@@ -187,7 +187,13 @@ def _profile(settings=None) -> Path:
 #: 实测:号 2 的 cookie 注进去但站点不认,搜索页写着「登录后查看搜索结果」;
 #: 那时 `section.note-item` 是 **0**、`search-empty-wrapper` 也是 **0**,
 #: 于是旧代码走进了"这次没搜到"的分支 ⇒ **静默返回空**(假阴性:日志会说成"小红书没热度")。
-NEED_LOGIN = ("登录后查看搜索结果", "扫码成功", "请在手机上确认", "重新扫码")
+NEED_LOGIN = (
+    "登录后查看搜索结果", "扫码成功", "请在手机上确认", "重新扫码",
+    # ⚠️ **"被踢下线"也算未登录**(2026-10-07 实测):号 1 的搜索页写着
+    # 「电脑设备登录超限,请重新登录」—— 小红书**按设备/IP 限制同时登录的账号数**,
+    # 同一台电脑登第二个号会把第一个踢掉。这句不在词表里 ⇒ 又是**静默返回空**。
+    "请重新登录", "登录超限", "登录已过期", "账号异常",
+)
 
 
 def needs_login(body: str = "") -> bool:
@@ -281,22 +287,31 @@ def _search_with_profile(p, prof, kws: list[str], per_kw_wait_ms: int,
             ctx = p.chromium.launch_persistent_context(**kwargs)
         try:
             pg = ctx.pages[0] if ctx.pages else ctx.new_page()
-            # ⚠️ **先开一次首页"热身"再跳搜索**(2026-10-07 实测):直接 goto 搜索页会
-            # `Timeout 60000ms exceeded`(整站 app 冷启动 + 直落深链更慢),而
-            # **先 /explore 再跳搜索就正常**(探针就是这么跑通的)。这不是重试能救的 ——
-            # 冷启动的第一次导航本来就该给更长的时间,而且是同一条路径。
-            try:
-                pg.goto("https://www.xiaohongshu.com/explore",
-                        wait_until="domcontentloaded", timeout=90000)
-                pg.wait_for_timeout(4000)
-            except Exception:  # noqa: BLE001 - 热身失败仍往下试(可能只是慢)
-                logger.info("小红书页面路:首页热身超时,继续试搜索页")
+            # ⚠️⚠️ **不要"先热身 /explore 再跳搜索"**(2026-10-07 实测,踩了两轮):
+            # 那样跳过去 URL 会被前端路由改写成 `/search_result/`(**多一个斜杠**),
+            # 标题看着正常(「网盘资源 - 小红书搜索」)却**一张卡都不渲染** ⇒ 静默返回空。
+            # 我当初加热身是为了绕 `domcontentloaded` 超时 —— 而**真正的解法是
+            # `wait_until="commit"`**(只等导航提交),不用热身。现在直接跳搜索页:
+            # 实测 22 张卡。
             for kw in kws:
-                try:
-                    pg.goto(SEARCH_URL.format(kw=kw), wait_until="commit",
-                            timeout=60000)
-                except Exception as exc:  # noqa: BLE001
-                    raise XhsPageError(f"打开搜索页失败({kw[:20]}):{str(exc)[:80]}") from exc
+                # ⚠️ **冷启动第一次导航会超时**(实测:档案越大越明显,xhs_1 稳定撞 60s,
+                # 而 xhs_2 一次就过)⇒ **重试一次**,第二次基本都成。
+                # 这比"先热身 /explore"好:热身会让前端路由把 URL 改写成
+                # `/search_result/`(多一个斜杠)、页面**一张卡都不渲染** —— 我踩过。
+                last_goto = ""
+                for _try in (1, 2):
+                    try:
+                        pg.goto(SEARCH_URL.format(kw=kw), wait_until="commit",
+                                timeout=60000)
+                        last_goto = ""
+                        break
+                    except Exception as exc:  # noqa: BLE001
+                        last_goto = f"{type(exc).__name__}: {str(exc)[:70]}"
+                        logger.info("小红书页面路:打开搜索页第 %d 次失败(%s),重试",
+                                    _try, last_goto)
+                        pg.wait_for_timeout(2000)
+                if last_goto:
+                    raise XhsPageError(f"打开搜索页失败({kw[:20]}):{last_goto}") from None
                 try:
                     pg.wait_for_selector(CARD_SEL, timeout=20000)
                 except Exception:  # noqa: BLE001 - 没有卡片:下面按"空态/被拦"分辨
@@ -321,6 +336,16 @@ def _search_with_profile(p, prof, kws: list[str], per_kw_wait_ms: int,
                         f"账号未登录(搜索页提示「登录后查看搜索结果」)—— 对档案 "
                         f"{prof.name} 跑 `python tools/xhs_pass_verify.py {prof}` 登录一次",
                         needs_human=True)
+                # 兜底:万一被路由改写成 `/search_result/`,用规范 URL 再来一次。
+                # (判据仍是 url/标题,**不是**卡片数 —— 但这里"没卡片"是唯一的信号)
+                if "/search_result/" in pg.url:
+                    logger.info("小红书页面路:URL 被改写成带斜杠,切回规范 URL 重试")
+                    try:
+                        pg.goto(SEARCH_URL.format(kw=kw), wait_until="commit",
+                                timeout=60000)
+                        pg.wait_for_timeout(per_kw_wait_ms)
+                    except Exception:  # noqa: BLE001
+                        pass
                 pg.mouse.wheel(0, 1600)          # 触发懒加载
                 pg.wait_for_timeout(2000)
                 cards = pg.locator(CARD_SEL)

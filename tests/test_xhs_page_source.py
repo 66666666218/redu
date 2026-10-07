@@ -249,3 +249,9 @@ class TestNotLoggedIn:
         rows = x.search(["甲"])
         assert tried == ["xhs_a", "xhs_b"] and rows[0]["snippet"] == "b 号的结果"
         assert any("xhs_a" in s for s in x.need_verify_profiles())
+
+    def test_被踢下线也算未登录(self) -> None:
+        """⚠️ 实测:账号 1 是被账号 2 **踢下线**的(「电脑设备登录超限,请重新登录」)。
+        这句话不在词表里的话,就会**静默返回空** —— 又一次假阴性。"""
+        assert x.needs_login("电脑设备登录超限，请重新登录")
+        assert x.needs_login("登录已过期，请重新登录")
