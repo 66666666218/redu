@@ -1,3 +1,4 @@
+- [2026-10-07 19:00] FIX: 小红书 461 —— 改走「页面渲染」(不再逆签名),实测搜到 60 条;根因是「会话被判需安全验证」,过一次即恢复 (Files: app/services/xhs_page_source.py, app/services/resource_presence.py, config/settings.py, tests/test_xhs_page_source.py, tests/test_resource_presence.py, tools/xhs_page_probe.py, tools/xhs_pass_verify.py)
 - [2026-10-07 18:24] FEAT: 排定去重作业改用真能删的那套(用户口径「B 自动删」);逻辑从 scripts/ 提到服务层 (Files: app/services/pan_dedupe.py, app/services/scheduler.py, app/services/xunlei_cleanup.py, config/settings.py, scripts/pan_dedupe_report.py, scripts/pan_dedupe_apply.py, tests/test_pan_dedupe.py, tests/test_pan_dedupe_risk_gate.py)
 - [2026-10-07 17:50] FEAT: 夸克口令允许重试一次(并报出「重试才成」读数)+ 迅雷盘清理 14 个重复整包/67GiB (Files: app/db/models.py, app/db/database.py, config/settings.py, app/services/quark_kouling.py, tests/test_quark_kouling.py)
 - [2026-10-07 17:35] DOCS: **更正** —— 前一条提交把夸克口令失败归因成"模拟器/浏览器抢焦点",该因果**已被证伪** (Files: CHANGELOG)

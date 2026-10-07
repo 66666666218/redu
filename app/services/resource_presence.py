@@ -91,6 +91,20 @@ def _crawl_platform(plat: str, names: list[str]) -> list[dict]:
       风控**按频率**(连发即 -352),所以逐词之间要隔开。
     · 其余:MediaCrawler(要浏览器、要登录态)。
     """
+    # ⚠️ **小红书改走"页面渲染"这条路**(2026-10-07):MediaCrawler 直连它的搜索接口
+    # 回 `461 CAPTCHA`(`code 300011 检测到账号异常`),而上游"集成 xhshow 修好"那条路
+    # 要升级整个 MediaCrawler,我们本地是**脱敏教学版**(许可证禁商用),不合适。
+    # 页面路是我们在闲鱼上验证过的同一个套路:**让页面自己的 JS 带签名,只读 DOM**。
+    # ⚠️ **它抛错必须冒泡**(`XhsPageError` 不是 `MediaCrawlerError`)—— 这里转成
+    # `MediaCrawlerError` 让上层按"单平台硬失败"处理(记名 + 推告警),而不是静默跳过。
+    if plat == "xiaohongshu":
+        from app.services import xhs_page_source
+        from app.services.mediacrawler_source import MediaCrawlerError
+
+        try:
+            return xhs_page_source.search(names)
+        except xhs_page_source.XhsPageError as exc:
+            raise MediaCrawlerError(f"xiaohongshu(页面路): {exc}") from exc
     if plat == "bilibili":
         from app.services.cross_accounts import search_bilibili_videos
 

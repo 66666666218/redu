@@ -75,10 +75,14 @@ def test_probe_groups_by_name_and_attaches_library_link(session, monkeypatch) ->
                 my="https://pan.quark.cn/s/OUR")
     monkeypatch.setattr(mc, "available", lambda: (True, "ok"))
     monkeypatch.setattr(rp, "library_names", lambda s, u, top: ["花少2人格测试", "没人做的资源"])
-    monkeypatch.setattr(mc, "crawl", lambda plat, kws: (
-        [{"keyword": "花少2人格测试", "snippet": "《花少2》中你和谁最像？", "name": "森*", "url": "u"},
-         {"keyword": "花少2人格测试", "snippet": "花少2旅行人格测试", "name": "6***6", "url": "u2"}]
-        if plat == "xiaohongshu" else []))
+    # ⚠️ **小红书自 2026-10-07 改走"页面渲染"**(MediaCrawler 直连它回 461 CAPTCHA),
+    # 所以它的桩要打在**新那条路**上;其余平台仍走 MediaCrawler。
+    from app.services import xhs_page_source as _xhs
+
+    monkeypatch.setattr(_xhs, "search", lambda kws: [
+        {"keyword": "花少2人格测试", "snippet": "《花少2》中你和谁最像？", "name": "森*", "url": "u"},
+        {"keyword": "花少2人格测试", "snippet": "花少2旅行人格测试", "name": "6***6", "url": "u2"}])
+    monkeypatch.setattr(mc, "crawl", lambda plat, kws: [])
 
     out = rp.probe(session, 1, settings=_S())
     assert out["status"] == "ok"
@@ -169,7 +173,13 @@ def test_probe_raises_when_every_platform_fails(session, monkeypatch) -> None:
     def _boom(plat, names, timeout=600):
         raise mc.MediaCrawlerError(f"{plat} 未安装")
 
+    from app.services import xhs_page_source as _xhs
+
+    def _boom_xhs(kws):
+        raise _xhs.XhsPageError("要安全验证")
+
     monkeypatch.setattr(mc, "crawl", _boom)
+    monkeypatch.setattr(_xhs, "search", _boom_xhs)   # 小红书走的是这条新路
     with pytest.raises(mc.MediaCrawlerError) as ei:
         rp.probe(session, 1, settings=_S())
     assert "全部抓取失败" in str(ei.value)
