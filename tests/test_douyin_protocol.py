@@ -317,6 +317,64 @@ def test_传了_session_就不该报那条警告(caplog):
 
 
 # ---------------------------------------------------------------------------
+# 节奏:连发会被限流成"空成功",间隔必须真的生效
+# ---------------------------------------------------------------------------
+
+
+class _Clock:
+    """替掉模块的 `time`,记下 sleep 了多少 —— 免得测试真的睡 8 秒。"""
+
+    slept: list[float] = []
+
+    @staticmethod
+    def sleep(seconds: float) -> None:
+        _Clock.slept.append(seconds)
+
+
+def test_词与词之间真的按_GAP_停顿(monkeypatch):
+    """★ 2026-10-07 真踩到的坑:1.5 秒间隔连发 4 次,账号进了**"空成功"**状态
+    (`status_code=0 + data:[]`,约 3.9KB,与"真没搜到"**形状完全一样**),
+    约 35 分钟后自己恢复。
+
+    这个测试守两件事:①间隔**真的被 sleep 了**(别被谁顺手删掉);
+    ②用的就是 `_GAP` 那个值(别让它和实际生效的值对不上)。
+    """
+    import requests
+
+    _Clock.slept = []
+    monkeypatch.setattr(dp, "time", _Clock)
+    monkeypatch.setattr(requests, "get",
+                        lambda *a, **k: _FakeResp(payload=_resp([_video()])))
+    dp.search(["词一", "词二", "词三"])
+    assert _Clock.slept == [dp._GAP, dp._GAP], f"停顿没按 _GAP 生效:{_Clock.slept}"
+
+
+def test_单次搜索不该有停顿(monkeypatch):
+    """反面对照:只有一个词时**一次都不该睡**(否则每个请求都白等 8 秒)。"""
+    import requests
+
+    _Clock.slept = []
+    monkeypatch.setattr(dp, "time", _Clock)
+    monkeypatch.setattr(requests, "get",
+                        lambda *a, **k: _FakeResp(payload=_resp([_video()])))
+    dp.search(["只有一个词"])
+    assert _Clock.slept == []
+
+
+def test_间隔不许被随手调小():
+    """**绊索**:`_GAP` 调小是一次要**证据**的决定,不是随手改的常数。
+
+    1.5 秒 → 账号进"空成功"(实测);8 秒是照 MediaCrawler 那条能跑通的链路
+    (≈11 秒/词)取的。真要往下调,先照 memory `stress-test-costs-the-account`
+    的规矩问过用户,再来改这个数字与它的注释。
+    """
+    assert dp._GAP >= 5.0, (
+        f"_GAP 被调到 {dp._GAP} —— 低于 5 秒有实测过的限流风险,"
+        f"先读模块里 _GAP 那段注释与 doc/抖音纯协议-链路拆解.md §5"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 翻页契约
 # ---------------------------------------------------------------------------
 
