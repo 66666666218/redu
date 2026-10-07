@@ -233,6 +233,13 @@ class Settings(BaseSettings):
     # 空 = 用 MediaCrawler 那个(`tools/MediaCrawler/browser_data/cdp_xhs_user_data_dir`)——
     # 登录态就在里面,**别另开一个新的**(新档案等于没登录,又要过一次验证)。
     xhs_browser_profile: str = ""
+    # **多账号:逗号分隔的浏览器档案目录**(2026-10-07,用户口径「我给你多个账号」)。
+    # 每个账号一个**独立档案**(登录态在里面);**共用同一个档案 = 同一个账号**,白配。
+    # 配了它就以它为准,`xhs_browser_profile` 只当"没配多个"时的单账号回落。
+    # 轮换游标在 `system_config["xhs_account_cursor"]`:连续几轮落在不同号上,单号频率 = 1/N。
+    # ⚠️ 被风控(安全验证)拦住时会**自动换下一个号**并标记它;标记过的下轮跳过。
+    #    人过验证:`python tools/xhs_pass_verify.py <档案目录>`
+    xhs_browser_profiles: str = ""
     # ---- B站对标号**投稿标题**采集(2026-10-05)见 app/services/bili_account_scan.py ----
     # 用户口径:「**b站如果没有链可以只采集标题,从资源库里搜然后完善**」。
     # 这绕开了实测的死结:`space` 接口能通,但**视频简介里没有盘链**(实测 30 条投稿的
