@@ -15,6 +15,7 @@ os.environ.setdefault("JWT_SECRET", "test_secret_0123456789abcdef0123456789abcde
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 
 import pytest
+from datetime import datetime, timedelta  # noqa: E402
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
@@ -601,3 +602,106 @@ class TestOfftopicFilter:
 
         assert not any(is_offtopic_title(t) for t in self.已知漏网), (
             "这条已经能被滤掉了 —— 把 `已知漏网` 里的条目挪进 `涨粉`")
+
+
+class TestAdaptiveCooldown:
+    """★ **内容没变就给冷却**(2026-10-07,用户口径「B站每轮采的都是相同的」)。
+
+    实测:59 个号里能出内容的只有 ~14 个,9 个/小时 ⇒ 每个号 1.5 小时被重扫一次,
+    而它们**发帖很慢** ⇒ 多数轮次采回同一批标题,白烧 space 额度。
+    规则:这次指纹和上次一样 ⇒ 冷却一段时间;**变了就不冷却**(发得勤就扫得勤)。
+    """
+
+    def _acc(self, session, uid_: str, name: str, **kw):
+        from app.db.models import CrossPlatformAccount
+
+        a = CrossPlatformAccount(user_id=1, platform="bilibili", uid=uid_, name=name, **kw)
+        session.add(a)
+        session.commit()
+        return a
+
+    def test_指纹与顺序无关(self) -> None:
+        from app.services.bili_account_scan import _titles_fp
+
+        a = [{"title": "甲"}, {"title": "乙"}]
+        assert _titles_fp(a) == _titles_fp(list(reversed(a)))
+        assert _titles_fp(a) != _titles_fp([{"title": "甲"}])
+
+    def test_内容没变就设冷却(self, session, monkeypatch) -> None:
+        """★ 核心行为:**指纹没变 ⇒ 给这个号设冷却**;变了 ⇒ 清掉冷却。
+
+        ⚠️ 测法说明:冷却是在**那一轮扫描时**才写的,所以"下轮跳过"要**预先**把
+        指纹设成与本次采到的一致(模拟"它上轮已经扫过、内容没变")。
+        """
+        from app.services import bili_account_scan as bas
+
+        class _S:
+            bili_scan_accounts_per_run = 1
+            bili_scan_thin_below = 2
+            bili_scan_cooldown_hours = 4
+
+        titles = [{"title": "永远一样的标题",
+                   "created": int(datetime.now().timestamp())}]
+        monkeypatch.setattr(bas, "fetch_user_titles", lambda uid, **k: list(titles))
+
+        a = self._acc(session, "u1", "甲", last_scan_at=datetime.now(),
+                      last_titles_fp=bas._titles_fp(titles))   # ← 指纹与本次相同
+        bas.scan_accounts(session, 1, settings=_S())
+        session.refresh(a)
+        assert a.next_scan_after is not None, "内容没变却没设冷却 ⇒ 下轮还会重扫同一个号"
+        assert a.next_scan_after > datetime.now()
+
+    def test_内容变了就清冷却(self, session, monkeypatch) -> None:
+        """反例:号发了新东西 ⇒ **必须立刻清掉冷却**,别把它按在冷板凳上。"""
+        from app.services import bili_account_scan as bas
+
+        class _S:
+            bili_scan_accounts_per_run = 1
+            bili_scan_thin_below = 2
+            bili_scan_cooldown_hours = 4
+
+        monkeypatch.setattr(bas, "fetch_user_titles", lambda uid, **k: [
+            {"title": "新投稿！", "created": int(datetime.now().timestamp())}])
+        a = self._acc(session, "u1", "甲", last_scan_at=datetime.now(),
+                      last_titles_fp="老指纹不一样")
+        bas.scan_accounts(session, 1, settings=_S())
+        session.refresh(a)
+        assert a.next_scan_after is None
+        assert a.last_titles_fp == bas._titles_fp([{"title": "新投稿！"}])
+
+    def test_冷却中的号会被跳过(self, session, monkeypatch) -> None:
+        from app.services import bili_account_scan as bas
+
+        class _S:
+            bili_scan_accounts_per_run = 1
+            bili_scan_thin_below = 2
+            bili_scan_cooldown_hours = 4
+
+        calls: list[str] = []
+        monkeypatch.setattr(bas, "fetch_user_titles", lambda uid, **k: (
+            calls.append(uid) or [{"title": "x", "created": int(datetime.now().timestamp())}]))
+        sticky = self._acc(session, "u1", "冷却中的", last_scan_at=datetime.now(),
+                           next_scan_after=datetime.now() + timedelta(hours=3))
+        self._acc(session, "u2", "可扫的", last_scan_at=datetime.now())
+        out = bas.scan_accounts(session, 1, settings=_S())
+        assert out["cooling"] >= 1, "冷却没进运行记录 ⇒ '这轮怎么没扫那个号'答不出来"
+        assert sticky.uid not in calls, "冷却中的号还是被扫了"
+
+    def test_全在冷却里也不停摆(self, session, monkeypatch) -> None:
+        """⚠️ 池子一起进冷却时必须**忽略冷却照常扫** —— 否则这个链会安静地什么都不做。"""
+        from app.services import bili_account_scan as bas
+
+        class _S3:
+            bili_scan_accounts_per_run = 1
+            bili_scan_thin_below = 2
+            bili_scan_cooldown_hours = 4
+
+        calls: list[str] = []
+        monkeypatch.setattr(bas, "fetch_user_titles", lambda uid, **k: (
+            calls.append(uid) or [{"title": "x", "created": int(datetime.now().timestamp())}]))
+        far = datetime.now() + timedelta(hours=10)
+        self._acc(session, "u1", "甲", last_scan_at=datetime.now(), next_scan_after=far)
+        self._acc(session, "u2", "乙", last_scan_at=datetime.now(), next_scan_after=far)
+        out = bas.scan_accounts(session, 1, settings=_S3())
+        assert calls, "全都冷却中却一个都没扫 —— 停摆了"
+        assert out["scanned"] >= 1

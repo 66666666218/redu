@@ -299,10 +299,31 @@ def scan_accounts(session, user_id: int, settings=None, count: int | None = None
     # ⚠️ `_scan_priority` 的阈值**从这里显式传进去**,而不是让它自己去读全局 settings ——
     # 否则测试传进来的假 settings 不起作用,那个配置项等于**不可验证**。
     thin_below = int(getattr(settings, "bili_scan_thin_below", 2) or 0)
-    rows = session.scalars(select(CrossPlatformAccount).where(
+    # ★ **自适应降频**(2026-10-07):内容没变的号有一段冷却,到期才再扫。
+    # ⚠️ **不能因此停摆**:若全部号都在冷却里,就**忽略冷却**照常扫
+    # (否则池子一起进入冷却时,这个链会安静地什么都不做 —— 本仓最忌讳的那种)。
+    from datetime import datetime as _dt_cls, timedelta as _td
+    from sqlalchemy import or_
+
+    _now = _dt_cls.now()          # ⚠️ 是**实例**不是类 —— `_now()` 会 TypeError(我踩过)
+
+    _base = select(CrossPlatformAccount).where(
         CrossPlatformAccount.user_id == user_id,
         CrossPlatformAccount.platform == "bilibili",
-        CrossPlatformAccount.status == "active").order_by(
+        CrossPlatformAccount.status == "active")
+    _cool = int(getattr(settings, "bili_scan_cooldown_hours", 4) or 0)
+    cooling = 0
+    if _cool > 0:
+        _all = session.scalars(_base.order_by(
+            _scan_priority(thin_below),
+            CrossPlatformAccount.last_scan_at.asc(),
+            CrossPlatformAccount.id)).all()
+        _ready = [r for r in _all
+                  if r.next_scan_after is None or r.next_scan_after <= _now]
+        cooling = len(_all) - len(_ready)
+        rows = _ready or _all                 # 全在冷却 ⇒ 忽略冷却,别停摆
+    else:
+        rows = session.scalars(_base.order_by(
             _scan_priority(thin_below),
             CrossPlatformAccount.last_scan_at.asc(),
             CrossPlatformAccount.id)).all()
@@ -336,6 +357,15 @@ def scan_accounts(session, user_id: int, settings=None, count: int | None = None
         # (space 端点限流极紧,不可能为了统计专门扫一圈)。
         acc.last_scan_at = datetime.now()
         acc.video_count = len(titles)
+        # ★ **内容没变 ⇒ 给这个号一段冷却**(见模型里 `next_scan_after` 的说明)。
+        # 指纹按标题集合算(与顺序无关 —— 榜单顺序会抖,但内容一样就不该反复扫)。
+        _fp = _titles_fp(titles)
+        _changed = _fp != (acc.last_titles_fp or "")
+        acc.last_titles_fp = _fp
+        if _cool > 0 and not _changed:
+            acc.next_scan_after = datetime.now() + _td(hours=_cool)
+        else:
+            acc.next_scan_after = None        # 有新内容 ⇒ 不冷却(发得勤就扫得勤)
         seen_names.append(f"{acc.name}({len(titles)})")
         # ★ **每号落盘**:见上面的注释 —— 战果不能挂在"整轮跑完"上。
         session.commit()
@@ -344,7 +374,16 @@ def scan_accounts(session, user_id: int, settings=None, count: int | None = None
     logger.info("B站对标号扫描:共 %d 个号 → 本轮扫 %s,写入标题 %d 条",
                 len(rows), "、".join(seen_names), written)
     return {"status": "ok", "scanned": len(picked), "titles": written,
-            "accounts": seen_names, "total": len(rows), "offtopic": stats.get("offtopic", 0)}
+            "accounts": seen_names, "total": len(rows), "offtopic": stats.get("offtopic", 0),
+            "cooling": cooling}
+
+
+def _titles_fp(titles: list[dict]) -> str:
+    """标题集合的指纹(**与顺序无关** —— 榜单顺序会抖,内容一样就不该反复扫)。"""
+    import hashlib
+
+    names = sorted(str(t.get("title") or "") for t in (titles or []))
+    return hashlib.sha1("|".join(names).encode("utf-8")).hexdigest()[:32]
 
 
 def _scan_priority(thin_below: int | None = None):
@@ -444,6 +483,10 @@ def bili_account_scan_tick(settings=None) -> int:
                 # "这轮怎么少收了"只能靠猜,而**静默丢数据和静默失败是同一个病**。
                 off = int(out.get("offtopic") or 0)
                 off_txt = f" 滤掉涨粉{off}条" if off else ""
+                # **冷却跳过要看得见**:降频之后"这轮怎么没扫那个号"要能自答,
+                # 否则它长得跟"漏扫了"一模一样。
+                _cl = int(out.get("cooling") or 0)
+                off_txt += f" 冷却跳过{_cl}个" if _cl else ""
                 _record_run(db, uid, "bili_account_scan", "success",
                             f"扫{out.get('scanned', 0)}个号 标题{out.get('titles', 0)}条{off_txt}"
                             f" **空壳{summary['empty']} 极少{summary['thin']}"

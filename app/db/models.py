@@ -591,6 +591,19 @@ class CrossPlatformAccount(Base):
     # `video_count` 是"59 个号里有多少空壳"唯一能量出来的来源(space 端点限流紧,不可能专门扫一圈统计)。
     # ⚠️ `-1` = 还没扫过(别用 0 当"未知":0 是"扫过且确认没投稿",语义完全不同)。
     last_scan_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # **上次扫到的标题指纹** + **冷却到什么时候**(2026-10-07,自适应降频)。
+    # 为什么需要:池子里**能出内容的号只有 ~14 个**,而每轮扫 9 个 ⇒ 每个号 1.5 小时
+    # 就被重扫一次,而它们**发帖很慢** ⇒ 绝大多数轮次采回**同一批标题**,
+    # 白烧 space 额度(用户看卡片都能看出来"每轮都一样")。
+    # 规则:**这次采到的标题指纹和上次一样 ⇒ 给这个号一段冷却**,到点才再扫。
+    # 内容变了(有新投稿)就**不设冷却** —— 于是"发得勤的号扫得勤"是**自适应的**。
+    # ⚠️ **必须 nullable**(2026-10-07 实测踩到):`remote_sync` 用**裸 SQL** 往远端插这张表,
+    # 而裸 INSERT **只会写它列出的那几列** —— SQLAlchemy 的 `default=` 是 **Python 侧**的,
+    # 数据库层面拿不到(那条测试文件的注释里本来就写着这条警告,我没照做)。
+    # 非空 ⇒ 远端插入直接违反 NOT NULL、同步静默少推一个号。
+    # 而且这两列是**本机专属状态**(远程不扫 B站),本来就不该推过去 ⇒ 保持 nullable。
+    last_titles_fp: Mapped[str | None] = mapped_column(String(64), nullable=True, default="")
+    next_scan_after: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # ⚠️ **必须带 `server_default`**:`remote_sync._push` 是**裸 INSERT**、不带这一列,
     # 而 `default=-1` 只是 **Python 侧**默认值 —— 全新库走 `create_all` 时模型会建出
     # `NOT NULL` 且无 DB 默认的列 ⇒ 裸 INSERT 直接 `IntegrityError`
