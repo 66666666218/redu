@@ -1,3 +1,4 @@
+- [2026-10-07 17:50] FEAT: 夸克口令允许重试一次(并报出「重试才成」读数)+ 迅雷盘清理 14 个重复整包/67GiB (Files: app/db/models.py, app/db/database.py, config/settings.py, app/services/quark_kouling.py, tests/test_quark_kouling.py)
 - [2026-10-07 17:35] DOCS: **更正** —— 前一条提交把夸克口令失败归因成"模拟器/浏览器抢焦点",该因果**已被证伪** (Files: CHANGELOG)
 
   ⚠️ **更正什么**:上一条提交(`975dbb7`)写着"是我这边开着 Edge 占了前台,模拟器拿不到焦点

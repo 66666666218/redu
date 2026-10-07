@@ -211,10 +211,12 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
     # 起因(2026-10-06 实测):抖音线索里**绝大多数是迅雷形态**(《》里的群/分享口令),
     # 而夸克 App **对它们不弹卡片** —— 同样两条标题,迅雷型失败、夸克型成功。
     # 不留痕的话每轮都会拿同一批"匹配不了"的线索去烧模拟器时间(一条 15–20 秒)。
+    # ⚠️ **判据从"试过一次没有"改成"试够几次没有"**(2026-10-07)—— 见 `kouling_tries` 的说明。
+    max_tries = max(1, int(getattr(settings, "quark_kouling_max_tries", 2) or 2))
     todo = session.scalars(
         select(DouyinLead).where(DouyinLead.user_id == user_id,
                                  DouyinLead.our_url == "",
-                                 DouyinLead.kouling_tried_at.is_(None))
+                                 DouyinLead.kouling_tries < max_tries)
         .order_by(DouyinLead.id.desc()).limit(max(limit * 12, 60))).all()
     # 排序的三档,按重要性从高到低:
     #   ① **看起来像夸克口令的排前面** —— 它们才是真会成的;
@@ -226,6 +228,7 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
         -(r.publish_at.timestamp() if r.publish_at else 0),
         -int(r.id)))[:limit]
     done = failed = reused = 0      # `reused` = **三盘互通命中**(连模拟器都没跑)
+    retried_ok = 0                  # 重试才成的条数(一次就成的不算)—— 用来量"重试到底值不值"
     reasons: list[str] = []         # 失败原因(落库 + 汇总进运行记录)
     env_streak = 0                  # 连续环境故障计数;够 2 条就提前收工(见下面的 break)
     try:
@@ -267,6 +270,8 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
             logger.info("夸克口令:线索 %s 命中三盘互通,直接复用 %s", lead.aweme_id, lead.our_url)
             done += 1
             reused += 1
+            if int(lead.kouling_tries or 0) > 0:
+                retried_ok += 1
             continue
 
         reason = ""
@@ -316,6 +321,9 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
             # "失败 N 条"永远只有一个数字,查不出是超时、没保存成、还是口令本身没内容。
             lead.last_error = (reason or f"解出「{title}」但保存没产出文件")[:200]
             reasons.append(lead.last_error[:60])
+            # **这一次真的试过了** ⇒ 记数;试够 `max_tries` 才不再进待办
+            # (环境故障那条路**不记** —— 它压根没试成,记了就等于判死线索)
+            lead.kouling_tries = int(lead.kouling_tries or 0) + 1
             # **把屏幕拍下来** —— 这一类是"保存没产出文件",光看日志只能猜
             shot = _snapshot_failure()
             logger.warning("夸克口令:解出「%s」但两次都在 %s 里找不到文件(截图:%s)",
@@ -349,17 +357,20 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
                     pass_code=str(sh.get("password") or "")[:32]))
             session.flush()
             done += 1
+            if int(lead.kouling_tries or 0) > 0:
+                retried_ok += 1      # 这条是**重试才成**的 —— 直接量出"重试值不值"
             logger.info("夸克口令:「%s」→ %s", title[:30], lead.our_url)
         except Exception as exc:  # noqa: BLE001 - 单条失败不影响其余
             session.rollback()
             failed += 1
             lead.last_error = f"{type(exc).__name__}: {str(exc)[:150]}"
             reasons.append(lead.last_error[:60])
+            lead.kouling_tries = int(lead.kouling_tries or 0) + 1
             logger.warning("夸克口令:线索 %s 处理失败:%s", lead.aweme_id, str(exc)[:120])
             continue
     session.commit()
     return {"status": "ok", "tried": len(todo), "done": done, "failed": failed,
-            "reused": reused, "reasons": reasons}
+            "reused": reused, "reasons": reasons, "retried_ok": retried_ok}
 
 
 def quark_kouling_tick(settings=None) -> int:
@@ -389,6 +400,9 @@ def quark_kouling_tick(settings=None) -> int:
 
                 top = _c.Counter(out.get("reasons") or []).most_common(1)
                 why = f";主因:{top[0][0]}({top[0][1]}×)" if top else ""
+                # **重试才成的条数**要报出来 —— 那是"重试值不值"这个实验的直接读数
+                ro = int(out.get("retried_ok") or 0)
+                why += f";**重试才成{ro}条**" if ro else ""
                 _record_run(db, uid, "quark_kouling", "success",
                             f"试{out.get('tried', 0)} 成功{out.get('done', 0)} "
                             f"(其中**三盘互通复用{out.get('reused', 0)}**)"

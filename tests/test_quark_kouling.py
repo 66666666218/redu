@@ -211,11 +211,23 @@ class TestTriedMarker:
         session.refresh(lead)
         assert lead.kouling_tried_at is not None, "试过了必须留痕,否则每轮重试同一批"
 
-    def test_试过的不再进待办(self, session, monkeypatch) -> None:
+    def test_试够次数才不再进待办(self, session, monkeypatch) -> None:
+        """★ **策略在 2026-10-07 从"试一次就判死"改成"试够 N 次才放弃"**。
+
+        旧策略的假设是"失败了就说明这条口令夸克永远认不了"。但实测发现失败**是偶发的**
+        (同一个口令出现过"一次成一次败"),所以允许一次重试。
+        ⚠️ 证据只有 n=2 组、**不够硬** —— 所以这同时是一次实验:运行记录会报
+        "重试才成 X 条",X>0 就证伪了旧假设,X≈0 就该改回来。
+        """
         _lead(session, "a1", "随便一条")
         self._patch(monkeypatch)
-        assert qk.drain(session, 1, _S())["tried"] == 1
-        assert qk.drain(session, 1, _S())["tried"] == 0, "第二轮不该再拿同一条去烧时间"
+
+        class _S2(_S):
+            quark_kouling_max_tries = 2
+
+        assert qk.drain(session, 1, _S2())["tried"] == 1, "第一轮该试"
+        assert qk.drain(session, 1, _S2())["tried"] == 1, "第二轮该**重试**一次"
+        assert qk.drain(session, 1, _S2())["tried"] == 0, "试够 2 次后不该再烧时间"
 
     def test_夸克形态优先于迅雷形态(self, session, monkeypatch) -> None:
         _lead(session, "x1", "《三岁分享》#时代峰峻")          # 迅雷形态,靠后
@@ -459,7 +471,10 @@ class TestEnvFailureDoesNotBurnTheLead:
         qk.drain(session, 1, _S())
         session.refresh(lead)
         assert lead.kouling_tried_at is not None, "内容型失败必须留痕"
-        assert qk.drain(session, 1, _S())["tried"] == 0
+        assert lead.kouling_tries == 1, "内容型失败要计入'真的试过'的次数"
+        # 闸门仍然有效:试够上限后不再进待办(否则每轮白烧 15~20 秒)
+        _S_lim = type("_S_lim", (_S,), {"quark_kouling_max_tries": 1})
+        assert qk.drain(session, 1, _S_lim())["tried"] == 0
 
 
 class TestFailureReasonStored:
@@ -575,3 +590,50 @@ class TestEnvFailFast:
         out = qk.drain(session, 1, _S())
         assert out["failed"] >= 1
         assert len(seen) >= 2, "第一条环境故障后就整个停了 —— 判据应是'连续'"
+
+
+class TestRetriedOk:
+    """★ "重试才成 X 条" —— 这是让「允许重试」成为**一次实验**而不是一次信仰的那个读数。
+
+    没有它,我们只会看到"都成了",分不出**是重试救回来的**还是本来就成。
+    """
+
+    def test_重试才成的会被单独计数(self, session, monkeypatch) -> None:
+        lead = _lead(session, "a1", "咐置铸剑上供叩苓")
+        calls = {"n": 0}
+
+        def _fails_then_ok(text, **k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"ok": False, "reason": "没弹出剪贴板卡片(口令无效)"}
+            return {"ok": True, "title": "铸剑纳贡（ForgeTax）"}
+
+        monkeypatch.setattr("app.services.cookie_store.get_cookie", lambda s, u, p: "CK")
+        monkeypatch.setattr("app.services.quark_transfer.QuarkTransfer", _FakeQt)
+        monkeypatch.setattr(qk, "resolve", _fails_then_ok)
+        monkeypatch.setattr(qk, "_find_saved_fid", lambda *a, **k: "FID")
+
+        # 第一次:失败(不计入"重试才成",但计入"真的试过")
+        out1 = qk.drain(session, 1, _S())
+        session.refresh(lead)
+        assert out1["failed"] == 1 and out1["retried_ok"] == 0
+        assert lead.our_url == "" and lead.kouling_tries == 1
+
+        # 第二次:**重试**,这次成了 ⇒ 必须被单独计进 `retried_ok`
+        out2 = qk.drain(session, 1, _S())
+        session.refresh(lead)
+        assert out2["done"] == 1, "重试该成功"
+        assert out2["retried_ok"] == 1, "这条是**重试才成**的,必须能单独量出来"
+        assert lead.our_url != ""
+
+        # 成了就不再进待办
+        assert qk.drain(session, 1, _S())["tried"] == 0
+
+    def test_一次就成的不算重试(self, session, monkeypatch) -> None:
+        _lead(session, "a1", "咐置铸剑上供叩苓")
+        monkeypatch.setattr("app.services.cookie_store.get_cookie", lambda s, u, p: "CK")
+        monkeypatch.setattr("app.services.quark_transfer.QuarkTransfer", _FakeQt)
+        monkeypatch.setattr(qk, "resolve",
+                            lambda text, **k: {"ok": True, "title": "铸剑纳贡"})
+        out = qk.drain(session, 1, _S())
+        assert out["done"] == 1 and out["retried_ok"] == 0
