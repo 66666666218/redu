@@ -152,7 +152,7 @@ def test_probe_reports_partial_platform_failure(session, monkeypatch) -> None:
     monkeypatch.setattr(mc, "available", lambda: (True, "ok"))
     monkeypatch.setattr(rp, "library_names", lambda s, u, top: ["甲"])
 
-    def _crawl(plat, names, timeout=600):
+    def _crawl(plat, names, timeout=600, session=None):
         if plat == "kuaishou":
             raise mc.MediaCrawlerError("kuaishou 超时(600s)——多半卡在扫码登录")
         return [{"uid": "u", "name": "作者", "snippet": "甲", "keyword": "甲"}]
@@ -368,7 +368,7 @@ class TestPartialFailureAlerts:
         monkeypatch.setattr(rp, "library_names", lambda s, u, top=5: ["某个资源"])
         monkeypatch.setattr(rp, "platforms_of", lambda st: list(plats))
 
-        def _crawl(plat, names):
+        def _crawl(plat, names, session=None):
             if boom is None or plat == boom:
                 raise mc.MediaCrawlerError(f"{plat} 超时(600s)——多半卡在扫码登录")
             return [{"keyword": "某个资源", "snippet": "x", "uid": "u1", "name": "n",
@@ -433,4 +433,10 @@ class TestPlatformSplit:
         monkeypatch.setattr("app.services.resource_presence.presence_tick",
                             lambda st, platforms=None: seen.update(p=platforms) or 0)
         rp.presence_bili_tick(s)
-        assert seen.get("p") == ["bilibili"], f"只该带 B站,实际 {seen}"
+        # ⚠️ **2026-10-07 语义扩展**:微博改成纯协议后也进了这条"走 API 的快车道"
+        # ⇒ 这里不该再断言"只有 B站",而该断言"**只有 API 平台**"
+        #(走浏览器的三个绝不能进来 —— 那才是这条测试真正要防的)。
+        from app.services.resource_presence import API_PLATFORMS
+        assert seen.get("p"), f"快作业没带任何平台:{seen}"
+        assert set(seen["p"]) <= set(API_PLATFORMS), f"浏览器平台混进快车道了:{seen}"
+        assert "xiaohongshu" not in seen["p"] and "kuaishou" not in seen["p"]
