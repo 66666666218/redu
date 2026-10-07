@@ -696,6 +696,12 @@ def collect_hot_sources(session, user_id: int, sources: list[str] | None = None,
     from app.db.models import HotSourceItem
 
     ok = failed = items = 0
+    #: 本轮**共享**的批次时刻 —— 所有源、所有行都盖它。
+    #: ⚠️ 不共享的话每行走模型默认值 `datetime.now`,**同一批里每行微秒都不同**,
+    #: "这一轮采到了什么"就**查不出来**(热榜卡因此被迫去猜,我两版都踩过)。
+    from datetime import datetime as _dt
+
+    batch_ts = _dt.now()
     for sid in (sources or list(SOURCES)):
         try:
             rows = fetch_hot(sid, limit=limit)
@@ -707,7 +713,13 @@ def collect_hot_sources(session, user_id: int, sources: list[str] | None = None,
             session.add(HotSourceItem(user_id=user_id, source=sid, rank=int(it.get("rank") or 0),
                                       title=str(it.get("title") or "")[:500],
                                       url=str(it.get("url") or "")[:700],
-                                      extra=str(it.get("extra") or "")[:200]))
+                                      extra=str(it.get("extra") or "")[:200],
+                                      # ⚠️⚠️ **必须传"这一轮的批次时刻"**(2026-10-07 修):
+                                      # 不传的话每行走模型默认值 `datetime.now` ⇒
+                                      # **同一批里每行微秒都不同**,"这一轮采到了什么"就
+                                      # **查不出来**;热榜卡也因此被迫用"全表最新那一刻"
+                                      # (只覆盖一批源)或"时间窗"去猜(我两版都踩过)。
+                                      captured_at=batch_ts))
         ok += 1
         items += len(rows)
     return {"ok": ok, "failed": failed, "items": items}
@@ -795,7 +807,7 @@ _PLAT_LABEL = {
 }
 
 
-def push_hot_rank_card_all_users(settings=None, top_n: int = 3) -> int:
+def push_hot_rank_card_all_users(settings=None, top_n: int | None = None) -> int:
     """多平台热榜速览卡 → **多平台专属群**(未配则回落总群)。
 
     ⚠️ 去向 **2026-10-06 变更**:原来固定推**总群**(2026-10-01 v2.2.0「新平台接入总群」),
@@ -813,6 +825,8 @@ def push_hot_rank_card_all_users(settings=None, top_n: int = 3) -> int:
     from config.settings import get_settings
 
     settings = settings or get_settings()
+    if top_n is None:
+        top_n = int(getattr(settings, "hotrank_top_n", 3) or 3)
     from app.services.feishu_client import FeishuClient, webhook_for
 
     hook = webhook_for(settings, "multiplatform")

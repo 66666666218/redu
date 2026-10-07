@@ -183,3 +183,28 @@ class TestFailureStaysQueued:
         _run_until_killed(session, [r])
         session.rollback()
         assert "41031" in _my_link(engine, r.id), "源永久失效的必须落标记出队"
+
+
+def test_做后处理之前必须先落盘() -> None:
+    """★ **源码级守卫**:`_enrich_new_articles` 之前必须有一次 `session.commit()`。
+
+    ⚠️ 为什么值得钉(2026-10-07 实测代价,很贵):后处理原来跑在**同一个未提交事务**里,
+    会话一旦进了失败状态(某处吞了异常没回滚),**`savepoint` 自己就抛
+    `PendingRollbackError`** ⇒ **整段后处理全废**。实测 20:08 那轮:210 个号、
+    70 篇新文、**转存一条没做** ⇒ 卡片全是「⏳待转存」、阅读数全「—」,
+    **而这一轮记的是 success**。
+
+    先 commit 才敢在会话坏掉时回滚 —— 也就是说"**先落盘**"是"**坏了还能接着做**"的前提。
+    这条不变式一破,那个故障模式就原样回来(而且它长得跟"今天没东西可搬"一模一样)。
+    """
+    import inspect
+
+    from app.services.wechat import _listen as L
+
+    src = inspect.getsource(L._listen_round)
+    i_enrich = src.index("_enrich_new_articles")
+    before = src[:i_enrich]
+    assert "session.commit()" in before, (
+        "`_enrich_new_articles` 之前没有 commit —— 会话一坏,整段后处理会陪葬")
+    assert "is_active" in before, (
+        "缺「会话已进失败状态就先回滚」那一步 —— 坏掉的会话会让 savepoint 自己抛错")

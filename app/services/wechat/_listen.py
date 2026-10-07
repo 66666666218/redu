@@ -966,6 +966,22 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     # 本轮已采到的新文照样 commit + 推飞书(回落原文)。此前它是裸调用,
     # 一次转存异常会连带 `_record_run`/`_push_listen` 全部跳过(第八轮审计)。
     replacements: dict[int, list[tuple[str, str, str]]] = {}
+    # ⚠️⚠️ **做后处理之前,先把新文落盘**(2026-10-07 实测代价,很贵):
+    # 后处理(回填/采样/转存/共振)是本轮**最容易炸**的一段,而它原来跑在**同一个
+    # 未提交事务**里。会话一旦进了失败状态(某处吞了异常没回滚),
+    # **`savepoint` 自己就会抛 `PendingRollbackError`** ⇒ **整段后处理全废**。
+    # 实测 20:08 那轮:210 个号、70 篇新文、转存一条没做
+    # ⇒ 卡片全是「⏳待转存」、阅读数全是「—」,**而这一轮记的是 success**。
+    # 先 commit 有两个好处:
+    #   ① 采到的文**立刻 durable**,后处理再炸也丢不了;
+    #   ② 之后才**敢回滚**那个坏掉的事务 —— 于是后处理**仍然能跑**,而不是陪葬。
+    session.commit()
+    if not session.is_active:
+        logger.warning("监听:后处理前 DB 会话已进入失败状态(某处吞了异常没回滚),"
+                       "先回滚再做后处理 user=%s —— ⚠️ 这行日志出现说明**上游有吞异常的点**",
+                       user_id)
+        session.rollback()
+
     enrich_failed = ""
     try:
         with savepoint(session):
@@ -987,7 +1003,10 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     # 否则 81 号只问了 12 个的一轮会长得跟"81 号都问过了、只是没新文"一模一样。
     if failed == len(rows):
         status = "failed"
-    elif failed or quota_skipped:
+    elif failed or quota_skipped or enrich_failed:
+        # ⚠️ **后处理失败要降级成 partial**(2026-10-07):它原来只在 detail 里带一句
+        # `⚠️enrich_failed=…`,而 `status` 照旧是 **success** ⇒ 体检按 status 判读时
+        # **看不见它**。实测代价:转存全没做、阅读数全丢,而所有指标都是绿的。
         status = "partial"
     else:
         status = "success"

@@ -1,3 +1,4 @@
+- [2026-10-07 21:13] FIX: 公众号后处理整段作废(卡片全「待转存」/阅读数全丢)—— 做后处理前先落盘 +失败降级 partial;热榜采集加**批次时刻**+每平台条数可配 (Files: app/services/wechat/_listen.py, app/services/hot_sources.py, config/settings.py, tests/test_wechat_enrich_durability.py)
 - [2026-10-07 20:55] FIX: 热榜速览卡被上一条改坏了(只剩标题)—— `captured_at` 是**每行各自**的插入时刻,按 `== ts` 只中 1 行;改成「每个源最新那一批」的 5 秒窗口 + **空卡不发** (Files: app/services/hot_sources.py, tests/test_xhs_page_source.py)
 - [2026-10-07 20:49] FIX: 多平台热榜速览卡只显示十几个源(用户当场看出)—— 改成**每个源各取自己最新一轮** (Files: app/services/hot_sources.py, tests/test_xhs_page_source.py)
 - [2026-10-07 20:42] FEAT: 小红书账号可用性进每日体检(被踢下线不再要等人来问) (Files: app/services/chain_health.py, tests/test_xhs_page_source.py)
