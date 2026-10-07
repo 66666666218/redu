@@ -96,7 +96,11 @@ def needs_login(text: str) -> bool:
     t = str(text or "")
     return ("无登录信息" in t or "登录信息为空" in t or "-101" in t
             or "300011" in t or "检测到账号异常" in t or "请重新登录" in t
-            or "登录超限" in t)
+            or "登录超限" in t
+            # ⚠️ **`-100 登录已过期` 必须在内**(2026-10-07 压测当场踩到):
+            # 少了它,那次失败被归成 `kind="api"`(像"接口出错")而不是
+            # "要人重新登录" —— 于是**不会推需人工的告警**,得等人自己发现。
+            or "-100" in t or "登录已过期" in t or "登录过期" in t)
 
 
 def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
@@ -178,7 +182,18 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
                     f"重新导一次凭据:`python tools/xhs_export_cookie.py`",
                     kind="need_login", needs_human=True)
             if not d.get("success"):
-                raise XhsProtocolError(f"接口不成功:code={d.get('code')} "
+                code = d.get("code")
+                # ⚠️ **`-104 没有权限访问` 要单独说**(2026-10-07 压测后实测):
+                # 它意味着**凭据能认证、但账号被限制**(实测:那次连发 ~200 次之后,
+                # 先 461、再 -100、重新登录后变成 -104)。这是**账号级**的,
+                # 与签名无关 —— 修法是**等它解封**,不是改代码。
+                if code == -104 or "没有权限" in str(d.get("msg") or ""):
+                    raise XhsProtocolError(
+                        f"小红书**账号被限制**(code={code} "
+                        f"{str(d.get('msg'))[:60]})—— 凭据能认证,是账号级风控。"
+                        f"修法:**停手等它解封**(几小时~一天),别反复重登/重试",
+                        kind="restricted", needs_human=True)
+                raise XhsProtocolError(f"接口不成功:code={code} "
                                        f"msg={str(d.get('msg'))[:80]}", kind="api")
             items = ((d.get("data") or {}).get("items") or [])
             for it in items:

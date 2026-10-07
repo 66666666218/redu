@@ -161,6 +161,20 @@ class TestErrors:
         assert self._run(monkeypatch, _Resp(payload=_ok())) == []
 
 
+    def test_账号没权限要单独说清并标需人工(self, monkeypatch) -> None:
+        """★ **`-104 没有权限访问`** 是**账号级风控**,与签名无关。
+
+        2026-10-07 压测当场走完这条链路:连发 ~200 次 ⇒ 先 `461` ⇒ 再 `-100 登录已过期`
+        ⇒ 重新登录后变成 `-104`。**修法是等它解封,不是改代码** ——
+        所以必须单独成一类,别混进"接口出错"里让人去查签名。
+        """
+        with pytest.raises(xp.XhsProtocolError) as e:
+            self._run(monkeypatch, _Resp(payload={"success": False, "code": -104,
+                                                  "msg": "您当前登录的账号没有权限访问"}))
+        assert e.value.kind == "restricted" and e.value.needs_human
+        assert "等它解封" in str(e.value)
+
+
 class TestWiring:
     def test_协议优先页面兜底(self, monkeypatch) -> None:
         from app.services import resource_presence as rp

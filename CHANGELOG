@@ -1,3 +1,4 @@
+- [2026-10-07 22:54] FIX: 小红书压测结论 + 修三个坑(`-100` 判据 / 杀浏览器致凭据未落盘 / 导出工具静默回退) (Files: app/services/xhs_protocol_source.py, tools/xhs_pass_verify.py, tools/xhs_export_cookie.py, tools/xhs_stress.py, tests/test_xhs_protocol.py)
 - [2026-10-07 22:07] FEAT: 小红书改成**纯协议**(~0.85 秒/请求,不开浏览器),页面渲染留作兜底;实测 4 词×2 页零 461/406,真实链路推送 8 条 (Files: app/services/xhs_protocol_source.py, tools/xhs_export_cookie.py, app/services/resource_presence.py, app/services/cookie_store.py, requirements.txt, tests/test_xhs_protocol.py)
 - [2026-10-07 21:58] DOCS: 小红书纯协议**链路拆解与自修指南**(不把 xhshow 当黑盒)+ 实测通过 (Files: doc/小红书纯协议-链路拆解.md, tools/xhs_protocol_probe.py)
 - [2026-10-07 21:49] FIX: 补上一条带红提交的修复 —— 快作业语义从「只跑B站」扩成「跑所有 API 平台」(微博纯协议后一并进快车道);并修两处测试桩签名 (Files: app/services/resource_presence.py, config/settings.py, tests/test_resource_presence.py, CHANGELOG)
