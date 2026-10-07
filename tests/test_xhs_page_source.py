@@ -162,7 +162,9 @@ class TestMultiAccount:
         def _fake(p_, prof, kws, wait, headed):
             tried.append(prof.name)
             if prof.name == "xhs_a":
-                raise x.XhsPageError("小红书要**安全验证**(被重定向到 captcha 页)")
+                # ⚠️ 新契约:`needs_human=True` 才触发"标记 + 换号" ——
+                # 抛不带标记的 XhsPageError 表示"换个号也没用",会被直接上抛。
+                raise x.XhsPageError("小红书要**安全验证**", needs_human=True)
             return [{"keyword": kws[0], "snippet": "好用的号", "uid": "", "name": "",
                      "url": "", "pan_link": ""}]
 
@@ -199,9 +201,51 @@ class TestMultiAccount:
         monkeypatch.setattr(x, "need_verify_profiles", lambda: set())
 
         def _boom(p_, prof, kws, wait, headed):
-            raise x.XhsPageError("小红书要**安全验证**(被重定向到 captcha 页)")
+            raise x.XhsPageError("小红书要**安全验证**", needs_human=True)
 
         monkeypatch.setattr(x, "_search_with_profile", _boom)
         with pytest.raises(x.XhsPageError) as e:
             x.search(["甲"])
         assert "xhs_pass_verify" in str(e.value) and "xhs_a" in str(e.value)
+
+
+class TestNotLoggedIn:
+    """★ **"未登录" 必须报错,不能返回空**(2026-10-07 抓到的假阴性)。
+
+    实测:号 2 的 cookie 注进去了但站点不认,搜索页写着「登录后查看搜索结果」;
+    那时 `section.note-item` 是 0、`search-empty-wrapper` 也是 0 ——
+    于是旧代码走进"这次没搜到"的分支,**静默返回空**。
+    日志里它长得像"小红书没热度",而不是"账号掉线了"。
+    """
+
+    def test_判据认得出未登录(self) -> None:
+        assert x.needs_login("登录后查看搜索结果 扫码成功")
+        assert x.needs_login("请在手机上确认")
+
+    def test_真没有结果不算未登录(self) -> None:
+        """★ 反例:空态页**绝不能**被判成未登录,否则正常的"没结果"会变成告警。"""
+        assert not x.needs_login("网盘资源 - 小红书搜索 没有找到相关结果")
+
+    def test_异常带需要人工的标记(self) -> None:
+        assert x.XhsPageError("x", needs_human=True).needs_human is True
+        assert x.XhsPageError("x").needs_human is False
+
+    def test_未登录会标记该号并换下一个(self, session, monkeypatch) -> None:
+        """未登录的号要**被标记 + 换下一个**,而不是把"空"当成结果交上去。"""
+        monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+        profs = [x.Path("data/xhs_a"), x.Path("data/xhs_b")]
+        monkeypatch.setattr(x, "_profiles", lambda s=None: profs)
+        monkeypatch.setattr(x.Path, "exists", lambda self: True)
+        tried: list[str] = []
+
+        def _fake(p_, prof, kws, wait, headed):
+            tried.append(prof.name)
+            if prof.name == "xhs_a":
+                raise x.XhsPageError("账号未登录", needs_human=True)
+            return [{"keyword": kws[0], "snippet": "b 号的结果", "uid": "", "name": "",
+                     "url": "", "pan_link": ""}]
+
+        monkeypatch.setattr(x, "_search_with_profile", _fake)
+        rows = x.search(["甲"])
+        assert tried == ["xhs_a", "xhs_b"] and rows[0]["snippet"] == "b 号的结果"
+        assert any("xhs_a" in s for s in x.need_verify_profiles())

@@ -158,6 +158,13 @@ def test_probe_reports_partial_platform_failure(session, monkeypatch) -> None:
         return [{"uid": "u", "name": "作者", "snippet": "甲", "keyword": "甲"}]
 
     monkeypatch.setattr(mc, "crawl", _crawl)
+    # ⚠️ **小红书自 2026-10-07 走的是页面渲染那条路,不再经过 `mc.crawl`** ——
+    # 不桩它,这条用例会**真的去开一次浏览器搜一遍**(单元测试不该联网)。
+    from app.services import xhs_page_source as _xhs
+
+    monkeypatch.setattr(_xhs, "search", lambda kws: [
+        {"uid": "u", "name": "作者", "snippet": "甲", "keyword": "甲", "url": "",
+         "pan_link": ""}])
     out = rp.probe(session, 1, settings=_S())
     assert out["failed"] == ["kuaishou"]                  # 挂的那个**记名**
     assert len(out["items"]) == 1                         # 成了的那个照常产出

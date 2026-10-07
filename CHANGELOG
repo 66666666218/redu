@@ -1,3 +1,4 @@
+- [2026-10-07 20:04] FIX: 小红书「未登录」被静默当成「没搜到」(假阴性)—— 现在报错并自动换号 (Files: app/services/xhs_page_source.py, tests/test_xhs_page_source.py, tests/test_resource_presence.py, tools/xhs_pass_verify.py)
 - [2026-10-07 19:32] FIX: 补上 `xhs_browser_profiles` 配置项(多账号原来根本配不了)+ 验证工具支持指定档案 (Files: config/settings.py, tools/xhs_pass_verify.py)
 - [2026-10-07 19:27] FEAT: 小红书多账号轮换 + 失败自动切换 (Files: app/services/xhs_page_source.py, config/settings.py, tests/test_xhs_page_source.py)
 - [2026-10-07 19:06] FEAT: 加轮次 —— 小红书/快手/贴吧/微博 2→6 轮/天(实测单轮约 20 分钟);B站 12→24 轮/天 (Files: config/settings.py)

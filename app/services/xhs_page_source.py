@@ -48,7 +48,15 @@ EMPTY_SEL = ".search-empty-wrapper"
 
 
 class XhsPageError(Exception):
-    """页面路硬失败(被拦 / 浏览器起不来)。**必须冒泡**,不能当成"没搜到"。"""
+    """页面路硬失败(被拦 / 未登录 / 浏览器起不来)。**必须冒泡**,不能当成"没搜到"。
+
+    `needs_human=True` 表示"这个号要人去处理一下"(过安全验证 **或** 登录)——
+    多账号轮换据此**标记它并换下一个**。
+    """
+
+    def __init__(self, msg: str, needs_human: bool = False) -> None:
+        super().__init__(msg)
+        self.needs_human = needs_human
 
 
 _CURSOR_KEY = "xhs_account_cursor"
@@ -175,6 +183,18 @@ def _profile(settings=None) -> Path:
     return raw if raw.is_absolute() else Path(__file__).resolve().parents[2] / raw
 
 
+#: 搜索页上"**没登录**"的痕迹。⚠️ 必须与"真的没有结果"分开 ——
+#: 实测:号 2 的 cookie 注进去但站点不认,搜索页写着「登录后查看搜索结果」;
+#: 那时 `section.note-item` 是 **0**、`search-empty-wrapper` 也是 **0**,
+#: 于是旧代码走进了"这次没搜到"的分支 ⇒ **静默返回空**(假阴性:日志会说成"小红书没热度")。
+NEED_LOGIN = ("登录后查看搜索结果", "扫码成功", "请在手机上确认", "重新扫码")
+
+
+def needs_login(body: str = "") -> bool:
+    """页面是不是在要求**登录**(而不是"真的没有结果")。"""
+    return any(w in (body or "") for w in NEED_LOGIN)
+
+
 def verify_needed(url: str, title: str, body: str = "") -> bool:
     """页面是不是**被安全验证拦住**了(而不是"真的没结果")。
 
@@ -235,14 +255,16 @@ def search(keywords: list[str], settings=None, per_kw_wait_ms: int = 6000,
             except XhsPageError as exc:
                 tried.append(prof.name)
                 last_err = str(exc)
-                if "安全验证" in str(exc):
+                if getattr(exc, "needs_human", False):
                     mark_need_verify(prof)
-                    logger.warning("小红书账号「%s」要安全验证 —— 标记并换下一个", prof.name)
+                    logger.warning("小红书账号「%s」需人工处理(过验证/重新登录)"
+                                   " —— 标记并换下一个", prof.name)
                     continue
                 raise                        # 别的错(打不开页等)不是"换账号"能解决的
     raise XhsPageError(
         f"所有小红书账号都不可用(试过 {tried})。修法:对每个档案各跑一次 "
-        f"`python tools/xhs_pass_verify.py <档案目录>` 人工过验证。最后原因:{last_err[:120]}")
+        f"`python tools/xhs_pass_verify.py <档案目录>`(**登录 或 过安全验证**)。"
+        f"最后原因:{last_err[:120]}")
 
 
 def _search_with_profile(p, prof, kws: list[str], per_kw_wait_ms: int,
@@ -280,11 +302,25 @@ def _search_with_profile(p, prof, kws: list[str], per_kw_wait_ms: int,
                 except Exception:  # noqa: BLE001 - 没有卡片:下面按"空态/被拦"分辨
                     pass
                 pg.wait_for_timeout(per_kw_wait_ms)
-                if verify_needed(pg.url, pg.title() or "", pg.content()[:4000]):
+                _title = pg.title() or ""
+                if verify_needed(pg.url, _title, pg.content()[:4000]):
                     raise XhsPageError(
                         "小红书要**安全验证**(被重定向到 captcha 页)—— 跑 "
-                        "`python tools/xhs_pass_verify.py` 人工过一次即可,"
-                        "过完会话恢复(实测搜索页能出 38 张卡)")
+                        "`python tools/xhs_pass_verify.py <档案目录>` 人工过一次即可,"
+                        "过完会话恢复(实测搜索页能出 38 张卡)", needs_human=True)
+                _body = ""
+                try:
+                    _body = pg.inner_text("body")[:600]
+                except Exception:  # noqa: BLE001
+                    pass
+                if needs_login(_body):
+                    # ⚠️⚠️ **这一条是修一个假阴性**:没有它,搜索页的
+                    # 「登录后查看搜索结果」会走进下面的"没卡片 ⇒ 这次没搜到"分支,
+                    # 于是**静默返回空** —— 日志里长得像"小红书没热度"。
+                    raise XhsPageError(
+                        f"账号未登录(搜索页提示「登录后查看搜索结果」)—— 对档案 "
+                        f"{prof.name} 跑 `python tools/xhs_pass_verify.py {prof}` 登录一次",
+                        needs_human=True)
                 pg.mouse.wheel(0, 1600)          # 触发懒加载
                 pg.wait_for_timeout(2000)
                 cards = pg.locator(CARD_SEL)
