@@ -31,6 +31,11 @@ BUDGET = int(os.environ.get("PAN_DEDUPE_BUDGET") or 800)
 #: 这条规则**静默失效**(实测踩到:4 组的 ✔留/✂删 全是 0.0 MiB,等于没判)。
 WALK_RATIO = 0.7
 
+#: 「要删的那份比留的大这么多倍」⇒ 认定"条目多≠内容全",**自动删跳过**。见 build_plan 里的说明。
+RISKY_RATIO = 1.5
+#: 而且差值要够大才算 risky(小文件之间的正常波动不惊动人工)。
+RISKY_MIN_MIB = 100
+
 
 def strip_copy_suffix(name: str) -> str:
     """剥掉末尾的「(1)」「(2)」副本后缀(**只在末尾、括号里是纯数字时才剥**)。"""
@@ -128,9 +133,26 @@ def build_plan(max_depth: int = 3, budget: int = BUDGET) -> dict:
             stats.append({**x, "items": n, "size": sz})
         keep = max(stats, key=lambda s: (s["items"], s["size"],
                                          0 if has_copy_suffix(s["name"]) else 1))
-        plan.append({"name": k[1], "parent": k[0], "keep": keep,
-                     "drop": [s for s in stats if s["id"] != keep["id"]]})
+        drop = [s for s in stats if s["id"] != keep["id"]]
+        # ⚠️⚠️ **「删的那份比留的还大」→ 不许自动删**(2026-10-07,干跑逮到)。
+        # "留内容多的"我们是按**先条目数、再体积**判的,但**条目多 ≠ 内容全**:
+        # 实测「宝可梦朱紫」留的是 36 项 / **2.55 GiB**,而要删的是 24 项 / **27.76 GiB**
+        # —— 那 24 项几乎肯定是视频/镜像大文件,而这两份**可能是不同的东西**(本体 vs 本体+DLC),
+        # 根本就不是"同一份存了两次"。**自动删下去就是删掉一份真资源。**
+        # ⇒ 这类组标成 risky,**执行器默认跳过**,交人工看。
+        big = [s for s in drop if s["size"] > keep["size"] * RISKY_RATIO
+               and s["size"] - keep["size"] > RISKY_MIN_MIB * 2 ** 20]
+        risky = ""
+        if big:
+            worst = max(big, key=lambda s: s["size"])
+            risky = (f"要删的那份比留的大 {worst['size'] / max(keep['size'], 1):.1f} 倍"
+                     f"({worst['size'] / 2**30:.1f} GiB vs {keep['size'] / 2**30:.2f} GiB)"
+                     f" —— 条目多≠内容全,可能根本不是同一份")
+        plan.append({"name": k[1], "parent": k[0], "keep": keep, "drop": drop,
+                     "risky": bool(risky), "risky_reason": risky})
     return {"plan": plan, "scanned_dirs": len(dirs), "calls": calls["n"],
             "complete": calls["n"] < budget,
-            "n_drop": sum(len(p["drop"]) for p in plan),
-            "freed": sum(s["size"] for p in plan for s in p["drop"])}
+            "n_drop": sum(len(p["drop"]) for p in plan if not p["risky"]),
+            "n_risky": sum(1 for p in plan if p["risky"]),
+            "freed": sum(s["size"] for p in plan if not p["risky"] for s in p["drop"]),
+            "risky_freed": sum(s["size"] for p in plan if p["risky"] for s in p["drop"])}

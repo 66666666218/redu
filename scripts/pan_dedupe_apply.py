@@ -35,18 +35,34 @@ def main() -> int:
 
     out = build_plan(depth)
     plan = out["plan"][:cap] if cap else out["plan"]
+    include_risky = "--include-risky" in sys.argv
+    safe = [p for p in plan if not p["risky"]]
+    risk = [p for p in plan if p["risky"]]
     print(f"扫了 {out['scanned_dirs']} 个目录,{out['calls']} 次 API 调用"
           f"{'' if out['complete'] else ' —— ⚠️ **撞预算,没扫完,下面的清单不完整**'}")
-    print(f"重复组 {len(plan)} 组,拟删 {sum(len(p['drop']) for p in plan)} 个整包,"
-          f"约省 {sum(s['size'] for p in plan for s in p['drop']) / 2**30:.2f} GiB\n")
-    for p in plan:
+    print(f"重复组 {len(plan)} 组:可自动删 **{len(safe)} 组 / "
+          f"{sum(len(p['drop']) for p in safe)} 个整包 / "
+          f"{sum(s['size'] for p in safe for s in p['drop']) / 2**30:.2f} GiB**"
+          f";另有 {len(risk)} 组**跳过待人工看**\n")
+    for p in safe:
         k, d = p["keep"], p["drop"]
         print(f"【{p['name'][:40]}】  同处 {str(p['parent'])[:36] or '/'}")
         print(f"   ✔留  {k['items']:>4} 项 / {k['size'] / 2**20:>9.1f} MiB  {k['path'][:70]}")
         for s in d:
             print(f"   ✂删  {s['items']:>4} 项 / {s['size'] / 2**20:>9.1f} MiB  {s['path'][:70]}")
             print(f"        fid={s['id']}")
-    fids = [s["id"] for p in plan for s in p["drop"]]
+    if risk:
+        # ⚠️⚠️ **这些组默认不碰** —— 见 `_pan_dedupe.build_plan` 里 RISKY_RATIO 的说明:
+        # "留内容多的"是按"先条目数、再体积"判的,而**条目多 ≠ 内容全**
+        # (实测「宝可梦朱紫」留 2.55 GiB、要删 27.76 GiB —— 那多半是两份**不同的东西**)。
+        print(f"\n=== ⚠️ 跳过 {len(risk)} 组(要删的比留的还大)—— **必须人工看** ===")
+        for p in risk:
+            print(f"   【{p['name'][:36]}】{p['risky_reason']}")
+            print(f"      ✔留 {p['keep']['path'][:70]}")
+            for s in p["drop"]:
+                print(f"      ✂删 {s['path'][:70]}   fid={s['id']}")
+        print("   要我一起删?加 `--include-risky`(⚠️ 删下去就进回收站了,先想清楚)。")
+    fids = [s["id"] for p in (plan if include_risky else safe) for s in p["drop"]]
     if not fids:
         print("\n没有要删的。")
         return 0
