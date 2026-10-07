@@ -496,11 +496,11 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # 免得下一个人以为"作业还在、只是没启用"。
         # 元组末位是**实例角色**(见 _role_allows):wechat=公众号+闲鱼侧 / hotspot=热点侧 /
         # both=中性(各按自己库里的数据跑)。分体部署时本机设 wechat、远程设 hotspot。
-        (pan_cookie_keepalive_tick, "0 7 * * *", {"minute": 0, "hour": 7}, "pan_cookie_keepalive", "wechat"),
+        (pan_cookie_keepalive_tick, "34 7 * * *", {"minute": 34, "hour": 7}, "pan_cookie_keepalive", "wechat"),
         # 多平台热榜采集(v2.2.0):每小时 05 分——bilibili/douban 自研 + newsnow 长尾
         (hot_source_tick_all_users, "5 * * * *", {"minute": 5}, "hot_source", "hotspot"),
         # 死号清理(v2.6.0):每日 05:30——7 天无发文的对标号自动停监控(带链路安全阀)
-        (retire_dormant_tick_all_users, "30 5 * * *", {"minute": 30, "hour": 5}, "bench_retire", "wechat"),
+        (retire_dormant_tick_all_users, "34 5 * * *", {"minute": 34, "hour": 5}, "bench_retire", "wechat"),
         # 选题复盘周报已并入推送时段表(默认**周一 16:30**)
         # 多平台热榜速览卡已并入推送时段表(默认 10:30/21:30)
         # 会员续费检查:每日 10:05(到期该收续费/超 24h 该踢名单 → 飞书);业务运营,归主实例

@@ -146,3 +146,31 @@ def test_守卫本身不能是空跑() -> None:
     fixed = [j.id for j in sched.get_jobs() if j.id not in PERIODIC]
     assert len(fixed) >= 15, f"只枚举到 {len(fixed)} 个定点作业,守卫可能是空跑:{fixed}"
     assert "wechat_collect_tick" in fixed
+
+
+def test_定点作业不落在半小时网格上() -> None:
+    """★ **`:00` 与 `:30` 是 `auto_retry_failed_runs` 和三条告警 tick 的地盘**,别的作业让开。
+
+    ## 为什么这条比"两两不撞车"更强(2026-10-07 实测)
+    `runs.detail` 里 `database is locked` 共 **30 条**,抽出来看**全部落在 `:00/:01` 分** ——
+    那正是 `auto_retry_failed_runs`(每 30 分钟一次,会**启动重活的重试**)与其它作业
+    撞在一起的时刻。"两两不撞车"抓不到这个:**它只保证同一分钟没有两个定点作业**,
+    而"定点作业 + 那条会拉起重活的 tick"照样会争锁。
+    ⇒ 于是把"**定点作业一律不占 `:00/:30`**"作为更强的不变式(用户口径:
+    "如果会影响有侵占的风险就可以动")。原先坐在网格上的 6 个已全部挪到 `:31`~`:34`。
+
+    ⚠️ 网格的**主人**不能参与这条判断 —— 那三条 tick 本来就是设计成每 30 分钟跑的。
+    """
+    sched = BackgroundScheduler(timezone="Asia/Shanghai")
+    build_jobs(sched)
+    bad = []
+    for j in sched.get_jobs():
+        if j.id in PERIODIC:
+            continue
+        mins = {m for _, _, m in _slots(j)}
+        hit = sorted(mins & {0, 30})
+        if hit:
+            bad.append(f"{j.id} 在 {hit} 分")
+    assert not bad, (
+        "这些定点作业落在 :00/:30 网格上(那是重试与告警 tick 的地盘): "
+        + " / ".join(bad))
