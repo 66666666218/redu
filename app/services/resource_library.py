@@ -344,6 +344,45 @@ def core_resource_name(name: str) -> str:
     return t if len(t) >= 4 else str(name or "").strip()
 
 
+def recent_source_names(session: Session, user_id: int, days: int = 30,
+                        limit: int = 40) -> list[str]:
+    """**别的链**最近发现的资源名(迅雷群转存 / 我方迅雷盘 / 公开平台发现)。
+
+    ## 为什么要单独有它(2026-10-07,用户口径)
+    `resonance_resources` 的门槛是"**被 ≥2 个号同发**"(需求被反复验证)—— 那是**公众号**
+    才有的信号。而迅雷群/小红书/B站/贴吧/知乎 发现的资源**没有这个信号**,
+    于是它们**永远进不了抖音的搜索词池** ⇒ 抖音只会去搜"公众号上被多号发过的资源"。
+    实测:用户看到「冒险岛国际服」「派出所模拟器」从**迅雷群**转存进来并推了卡,
+    但抖音**永远不会去搜它们** —— 就是因为取词只看了共振榜。
+
+    ⚠️ 这里**不做"被几个号验证"的门槛**(用户口径 a:**一视同仁当候选**)——
+    它们的"验证"是**"进了别人的群 / 被人发出来了"**,与"多号同发"不是同一个信号,
+    但**同样说明有人在推**。排序按**最近发生**,让新鲜的先被搜到。
+    """
+    cutoff = datetime.now() - timedelta(days=days)
+    out: list[str] = []
+    try:
+        from app.db.models import DiscoveredPanLink, XunleiGroupShare
+
+        for title in session.execute(
+                select(XunleiGroupShare.title).where(
+                    XunleiGroupShare.user_id == user_id,
+                    XunleiGroupShare.synced_at >= cutoff).order_by(
+                    XunleiGroupShare.synced_at.desc()).limit(limit)).scalars():
+            if title:
+                out.append(str(title))
+        for title in session.execute(
+                select(DiscoveredPanLink.title).where(
+                    DiscoveredPanLink.user_id == user_id,
+                    DiscoveredPanLink.found_at >= cutoff).order_by(
+                    DiscoveredPanLink.found_at.desc()).limit(limit)).scalars():
+            if title:
+                out.append(str(title))
+    except Exception:  # noqa: BLE001 - 取不到就退回只有共振榜,别让整条取词路崩
+        logger.exception("取'其它源'资源名失败(退回只有共振榜)")
+    return out
+
+
 def cross_platform_resonance(session: Session, user_id: int, days: int = 90,
                              min_platforms: int = 2, min_accounts: int = 1,
                              limit: int = 20) -> list[dict]:

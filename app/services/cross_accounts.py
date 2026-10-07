@@ -679,21 +679,51 @@ def _keywords_from_library(session: Session, user_id: int, top: int = 5) -> list
     新鲜冒头的资源**"):`min_accounts` 那道"被验证过"的门槛照旧保留,但**谁还在被发谁靠前** ——
     半年前的爆款拿去搜,推广号早换话题了。
     """
+    # ⚠️⚠️ **两个源交替取,而不是一个填满再取另一个**(2026-10-07,用户口径 a「一视同仁」)。
+    #
+    # 原来只吃 `resonance_resources`,而它的门槛是"**被 ≥2 个号同发**" —— 那是**公众号
+    # 专属**信号(它只统计 `wechat_pan_links`)。后果:
+    #   迅雷群 / 小红书 / B站 / 贴吧 / 知乎 发现的资源 **永远进不了抖音的搜索词池**
+    #   ⇒ 抖音只会去搜"公众号上被多号发过的资源"。
+    # 实测(用户报的现象):「冒险岛国际服」「派出所模拟器」从**迅雷群**转存进来、卡也推了,
+    # 但抖音**从不去搜它们** —— 就是这个口径不一致造成的。
+    #
+    # ⚠️ **交替**这两个字是关键的:如果先填满共振榜再补其它源,那"并进来"等于没并
+    # (共振榜必然先占满 top 个名额)。交替才真的给两边各留位子。
+    hot: list[str] = []
     try:
         from app.services.resource_library import resonance_resources
 
-        rows = resonance_resources(session, user_id, days=30, min_accounts=2,
-                                   limit=top, order="fresh")
+        for r in resonance_resources(session, user_id, days=30, min_accounts=2,
+                                     limit=top, order="fresh"):
+            titles = r.get("titles") or []
+            if titles and str(titles[0]).strip():
+                hot.append(str(titles[0]))
     except Exception:  # noqa: BLE001
         logger.exception("取资源库关键词失败")
-        return []
+
+    others: list[str] = []
+    try:
+        from app.services.resource_library import recent_source_names
+
+        others = recent_source_names(session, user_id, limit=max(top * 3, 12))
+    except Exception:  # noqa: BLE001 - 取不到就退回只有共振榜,别让取词整条崩
+        logger.exception("取'其它源'资源名失败")
+
     kws: list[str] = []
-    for r in rows:
-        titles = r.get("titles") or []
-        if titles and str(titles[0]).strip():
-            word = library_search_word(str(titles[0]))
-            if word and word not in kws:
-                kws.append(word)
+
+    def _add(title: str) -> None:
+        if len(kws) >= top:
+            return
+        w = library_search_word(str(title or ""))
+        if w and w not in kws:
+            kws.append(w)
+
+    for i in range(max(len(hot), len(others))):
+        if i < len(hot):
+            _add(hot[i])
+        if i < len(others):
+            _add(others[i])
     return kws[:top]
 
 
