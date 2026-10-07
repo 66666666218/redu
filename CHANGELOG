@@ -1,3 +1,4 @@
+- [2026-10-07 10:27] FEAT: 跨平台热度**拆成两条作业**(B站每2小时/其余每天两轮)+ 每轮资源名 3→8 (Files: app/services/resource_presence.py, config/settings.py, app/services/scheduler.py, tests/test_resource_presence.py)
 - [2026-10-07 09:51] CHORE: 扫盘预算可配(PAN_DEDUPE_BUDGET);实测**接口不支持服务端排除回收站** (Files: scripts/_pan_dedupe.py)
 - [2026-10-07 09:41] FEAT: 盘内重复清理**工具链**(判定/报告/执行器,dry-run 默认)——判据第三轮收紧 (Files: scripts/_pan_dedupe.py, scripts/pan_dedupe_report.py, scripts/pan_dedupe_apply.py)
 - [2026-10-07 09:14] FIX: 重复判据第二次收紧 —— 限定「**同级同名**」,消掉品牌文件夹那类误判 (Files: scripts/pan_dedupe_report.py)

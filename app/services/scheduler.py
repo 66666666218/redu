@@ -473,7 +473,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.pan_discovery import pan_discovery_tick
     from app.services.health import health_push_tick
     from app.services.disk_guard import disk_guard_tick
-    from app.services.resource_presence import presence_tick
+    from app.services.resource_presence import presence_bili_tick, presence_tick
     from app.services.resource_library import cross_resonance_tick
     from app.services.xunlei_cleanup import cleanup_tick as xunlei_cleanup_tick
     from app.services.xunlei_cleanup import dedupe_tick as xunlei_dedupe_tick
@@ -537,6 +537,10 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # 跨平台资源热度(2026-10-02):抓**资源名** → 回**资源库**匹配链 —— 用于"平台上没有链"
         # 的那些平台(小红书/快手/贴吧)。每平台各开一次浏览器,所以**每周一轮**。
         (presence_tick, _get_settings().presence_cron, {"minute": 0, "hour": 9}, "resource_presence", "wechat"),
+        # **B站快作业**(2026-10-07):它走公开 API、不开浏览器、无风控,所以能每 2 小时;
+        # 小红书/快手/贴吧仍按 `presence_cron` 每天两轮(它们每轮各开一次浏览器)。
+        (presence_bili_tick, _get_settings().presence_bili_cron, {"minute": 0, "hour": "*/2"},
+         "resource_presence_bili", "wechat"),
         # **跨平台共振榜**(2026-10-07,用户口径「每天推一次」):同一份**资源**在几个**平台**
         # 被几个号在推 —— 身份用核心资源名(盘链跨不了平台:每个推广号自己建链)。
         # 推「多平台监控」群(未配回落主群)。放 10:30:09:00 的跨平台采集刚跑完,

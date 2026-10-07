@@ -105,6 +105,19 @@ def _crawl_platform(plat: str, names: list[str]) -> list[dict]:
     return mc.crawl(plat, names)
 
 
+def browser_platforms_of(settings) -> list[str]:
+    """**走浏览器的**平台(MediaCrawler)—— B站不在里面,它有自己的快节奏作业。
+
+    ⚠️ **为什么要拆**(2026-10-07,用户口径「小红书/B站/贴吧能否跟抖音一样两小时一轮」):
+    这四个平台的**成本差一个数量级**:
+      · **B站**走公开 API(`API_PLATFORMS`),**不开浏览器、无风控**,加密到 2 小时几乎不要钱;
+      · 小红书/快手/贴吧走 MediaCrawler,**每轮各开一次浏览器**(实测小红书单次 157 秒),
+        一轮 5–8 分钟。加密到 2 小时 ⇒ 12 轮/天 ≈ **1~1.5 小时浏览器自动化 + 风控暴露 ×12**。
+    ⇒ 拆成两条:B站每 2 小时;**那三个保持每天两轮**。
+    """
+    return [p for p in platforms_of(settings) if p not in API_PLATFORMS]
+
+
 def probe(session, user_id: int, settings=None, platforms: list[str] | None = None) -> dict:
     """按资源名探各平台 → 附库内链。返回 `{"status", "platforms", "items"}`。
 
@@ -293,6 +306,21 @@ def push_items(items: list[dict], settings) -> bool:
     return sent_any
 
 
+def presence_bili_tick(settings=None) -> int:
+    """**B站单独一条快节奏作业**(每 2 小时,2026-10-07)。
+
+    只挑 `API_PLATFORMS` 里配了的平台。没配就返回 0(**不发请求**)——
+    与 `presence_tick` 共用同一套采集/匹配/转存/推送,不另写一遍。
+    """
+    from config.settings import get_settings
+
+    settings = settings or get_settings()
+    plats = [p for p in platforms_of(settings) if p in API_PLATFORMS]
+    if not plats:
+        return 0
+    return presence_tick(settings, platforms=plats)
+
+
 def presence_tick(settings=None, platforms: list[str] | None = None) -> int:
     """定时:按资源名探各平台 → 匹配库内链 → 推卡片。返回推送的资源条目数。"""
     from config.settings import get_settings
@@ -309,7 +337,9 @@ def presence_tick(settings=None, platforms: list[str] | None = None) -> int:
             from app.services.tenant_base import _record_run
 
             try:
-                out = probe(db, uid, settings=settings, platforms=platforms)
+                out = probe(db, uid, settings=settings,
+                            platforms=(platforms if platforms is not None
+                                       else browser_platforms_of(settings)))
                 items = out.get("items") or []
                 total += len(items)
                 # **配上了就自动转存**(2026-10-04 用户口径)。放在 push 之前,

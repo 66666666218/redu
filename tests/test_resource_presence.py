@@ -381,3 +381,39 @@ class TestPartialFailureAlerts:
 
         with pytest.raises(Exception):
             rp.probe(session, 1, _PresS())
+
+
+class TestPlatformSplit:
+    """★ **四个平台的成本差一个数量级,所以拆成两条作业**(2026-10-07)。
+
+    用户口径:「小红书/B站/贴吧能否跟抖音一样两小时一轮」。
+    查下来的事实:B站走**公开 API**(不开浏览器、无风控),而小红书/快手/贴吧走 MediaCrawler
+    **每轮各开一次浏览器**(实测小红书单次 157 秒 ⇒ 一轮 5–8 分钟)。
+    加密到 2 小时 ⇒ 12 轮/天 ≈ 1~1.5 小时浏览器自动化 + 风控暴露 ×12。
+    ⇒ **B站单独每 2 小时;那三个保持每天两轮**。
+    """
+
+    def test_浏览器平台不含b站(self) -> None:
+        from config.settings import Settings
+        s = Settings(_env_file=None, is_dev=True)
+        allp = rp.platforms_of(s)
+        assert "bilibili" in allp, "前提:B站是配了的"
+        assert "bilibili" not in rp.browser_platforms_of(s), \
+            "B站不该出现在'走浏览器'那份里 —— 它有自己每 2 小时的快作业"
+
+    def test_没配b站时空转不发请求(self, monkeypatch) -> None:
+        """⚠️ 反向:没配 B站时 `presence_bili_tick` 要**直接返回 0**,别去空跑一轮采集。"""
+        from config.settings import Settings
+        s = Settings(_env_file=None, is_dev=True, presence_platforms="xiaohongshu,tieba")
+        monkeypatch.setattr("app.services.resource_presence.presence_tick",
+                            lambda *a, **k: (_ for _ in ()).throw(AssertionError("不该跑")))
+        assert rp.presence_bili_tick(s) == 0
+
+    def test_b站快作业只带b站(self, monkeypatch) -> None:
+        from config.settings import Settings
+        s = Settings(_env_file=None, is_dev=True)
+        seen: dict = {}
+        monkeypatch.setattr("app.services.resource_presence.presence_tick",
+                            lambda st, platforms=None: seen.update(p=platforms) or 0)
+        rp.presence_bili_tick(s)
+        assert seen.get("p") == ["bilibili"], f"只该带 B站,实际 {seen}"
