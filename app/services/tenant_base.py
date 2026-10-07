@@ -84,6 +84,42 @@ def verify_cooldown_active(session: Session, user_id: int, settings: Settings) -
     return row is not None
 
 
+def xianyu_cookie_missing(cookie: str) -> list[str]:
+    """协议路的硬门槛(`unb`+`cookie2`)差哪几个;返回空列表 = 齐。
+
+    ⚠️ **不校验 `_m_h5_tk`**:它是 mtop 短效令牌,采集器首次请求会自己从网关拿
+    (扫码登录的会话本来就没有它;2026-10-01 修正过:此前误拦导致新 Cookie 白入库)。
+    """
+    names = {kv.split("=", 1)[0].strip() for kv in (cookie or "").split(";") if kv.strip()}
+    return [n for n in ("unb", "cookie2") if n not in names]
+
+
+def pick_xianyu_client(settings, cookie: str) -> tuple[object, str]:
+    """选闲鱼客户端:**协议优先**,浏览器只作兜底。返回 `(client, 来源标签)`。
+
+    ★ **搜索与深采必须用同一条路**(2026-10-03 的教训,这里再钉一次):
+    当时搜索换了浏览器、深采还在用协议 → 行情(想要数/收藏/出单)一直卡在"被挤爆"那条路上,
+    而症状看起来像"接口没数据"。**现在方向反过来**(2026-10-08 协议被证明可用),
+    所以两边都改成这个函数 —— 只有一处的规则才不会再分叉。
+
+    ⚠️ 调用方要自己看 `来源标签` 并把它写进运行记录:两条路都可能产出 0 条,
+    不标来源就分不清"协议挂了"和"真没货"。
+    """
+    # 局部导入:`tenant_base` 是最底层,别在 import 期把两个客户端拖进来
+    from app.services import xianyu
+
+    proxy = getattr(settings, "xianyu_proxy_url", "") or None
+    prefer = bool(getattr(settings, "xianyu_prefer_protocol", True))
+    allowed = bool(getattr(settings, "xianyu_use_browser", True))
+    if prefer and not xianyu_cookie_missing(cookie):
+        return xianyu.XianyuClient(cookie, proxy=proxy), "协议"
+    if allowed:
+        from app.services.xianyu_browser import get_client
+
+        return get_client(settings), "浏览器"      # 进程内复用,一轮只启一次
+    return xianyu.XianyuClient(cookie, proxy=proxy), "协议"
+
+
 def persist_refreshed_cookie(session: Session, user_id: int, client: object) -> bool:
     """把闲鱼客户端运行中刷新的 Cookie(`_m_h5_tk` 等)回写到该用户配置。
 

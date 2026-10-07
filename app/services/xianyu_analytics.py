@@ -16,7 +16,14 @@ from app.db.models import XianyuDaily, XianyuItem, RunRecord
 from app.services import xianyu
 from app.services.cookie_store import get_cookies
 from app.services import alert_service
-from app.services.tenant_base import _base, _record_run, persist_refreshed_cookie, verify_cooldown_active
+from app.services.tenant_base import (
+    _base,
+    _record_run,
+    persist_refreshed_cookie,
+    pick_xianyu_client,
+    verify_cooldown_active,
+    xianyu_cookie_missing,
+)
 from app.utils import get_logger
 
 logger = get_logger(__name__)
@@ -110,18 +117,14 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
         return {"platform": "xianyu_deep", "count": 0, "status": "skipped", "reason": "verify_cooldown"}
     cookies = get_cookies(session, user_id)
     goofish = cookies.get("goofish", "")
-    # ⚠️ **客户端要跟搜索那条路一致**(2026-10-03 修):深采此前**还在用纯协议客户端**,
-    # 而搜索早换了浏览器路 → 行情(想要数/收藏/出单)一直卡在"被挤爆"那条路上。
-    browser_mode = bool(getattr(settings, "xianyu_use_browser", True))
-    if not browser_mode and not goofish:
-        raise ValueError("未配置闲鱼 Cookie")
+    # ⚠️ **客户端必须跟搜索那条路一致**(2026-10-03 的教训,2026-10-08 再反转一次):
+    # 当时搜索换了浏览器、深采还在用协议 → 行情(想要数/收藏/出单)一直卡在"被挤爆"
+    # 那条路上,而症状看起来像"接口没数据"。现在协议被证明可用 ⇒ 两边都改用
+    # **同一个选路函数**,规则只有一处,不会再分叉。
+    if xianyu_cookie_missing(goofish) and not bool(getattr(settings, "xianyu_use_browser", True)):
+        raise ValueError("未配置闲鱼 Cookie(且浏览器路已关闭)")
     # 构造客户端不产生网络请求,放在 try 外:失败路径也能回写运行中刷新的令牌
-    if browser_mode:
-        from app.services.xianyu_browser import get_client
-
-        client = get_client(settings)
-    else:
-        client = xianyu.XianyuClient(goofish, proxy=settings.xianyu_proxy_url or None)
+    client, _src = pick_xianyu_client(settings, goofish)
     try:
         if hot is None:
             hot = xianyu.collect_hot(settings, client)

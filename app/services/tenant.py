@@ -37,7 +37,14 @@ _XIANYU_ROUND_LOCK = __import__('threading').Lock()
 from app.services.notifier import get_user_notifier
 from app.db import repository
 from app.services.trend_analyzer import compute_slope, recent_growth
-from app.services.tenant_base import _base, _record_run, persist_refreshed_cookie, verify_cooldown_active  # noqa: F401  (供外部/测试引用)
+from app.services.tenant_base import (  # noqa: F401  (供外部/测试引用)
+    _base,
+    _record_run,
+    persist_refreshed_cookie,
+    pick_xianyu_client,
+    verify_cooldown_active,
+    xianyu_cookie_missing,
+)
 from app.services.xianyu_analytics import (  # noqa: F401
     record_search_snapshot,
     run_xianyu_deep,
@@ -170,6 +177,35 @@ def _baidu_rising(session, user_id: int, settings: Settings, now) -> list[dict]:
     return rising[:20]
 
 
+def _collect_hot_with_fallback(settings: Settings, client: object, source: str, *,
+                               browser_allowed: bool, start_offset: int,
+                               stats: dict) -> tuple[list, object, str]:
+    """跑一轮闲鱼的**网络采集**;协议路失败时**回落浏览器**重跑一次。
+
+    返回 `(hot, 实际用的 client, 来源标签)`。
+
+    ⚠️ **为什么只包这一步**:`collect_hot` 后面才是入库。包在这里 ⇒ 回落时**没有半截写入**。
+
+    ⚠️ **回落的底线意义**:2026-10-08 之前闲鱼**一直**走浏览器,所以哪怕协议路第二天就挂,
+    回落也只是**退回当时的行为** —— 不会比之前更差。这正是敢把默认改成"协议优先"的原因。
+
+    ⚠️ 回落**必须留痕**:两条路都会产出 0 条,不标来源就分不清"协议挂了被回落"和"真没货"。
+    """
+    try:
+        hot = xianyu.collect_hot(settings, client, start_offset=start_offset, stats=stats)
+        return hot, client, source
+    except xianyu.XianyuError as exc:
+        if source != "协议" or not browser_allowed:
+            raise
+        logger.warning("闲鱼纯协议失败(%s),回落浏览器:%s",
+                       type(exc).__name__, str(exc)[:160])
+        from app.services.xianyu_browser import get_client
+
+        fallback = get_client(settings)
+        hot = xianyu.collect_hot(settings, fallback, start_offset=start_offset, stats=stats)
+        return hot, fallback, "浏览器兜底"
+
+
 def run_xianyu(session: Session, user_id: int, settings: Settings | None = None) -> dict:
     settings = _base(settings)
     if verify_cooldown_active(session, user_id, settings):  # 验证后冷却:避免反复撞滑块
@@ -183,31 +219,26 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
     # (换出口没用、量只有 6 次/小时),而**页面内调用正常**;见 `xianyu_browser.py`。
     # ⚠️ **2026-10-08 订正**:此前写的"**账号级**"已证伪(匿名请求同样被挤爆)⇒ 换号不是解法。
     # ⚠️ 浏览器路径**不需要 Cookie 三件套校验**:登录态在浏览器档案里,请求由页面自己发。
-    browser_mode = bool(getattr(settings, "xianyu_use_browser", True))
-    if not browser_mode and not goofish_cookie:
-        raise ValueError("未配置闲鱼 Cookie")
-    # Cookie 完整性三件套校验(2026-10-01,借鉴开源实现判定标准):
-    # 官方登录态必须集齐 `_m_h5_tk`+`unb`+`cookie2`——缺任一必 TOKEN_ILLEGAL。
-    # 早退不跑采集:省一轮无谓请求,也让用户贴的"只有设备标识字段"的残缺 Cookie
-    # 立刻得到明确提示,而不是先烧一轮全失败再报"网络/接口异常"(实测踩过)。
-    _names = {kv.split("=", 1)[0].strip() for kv in goofish_cookie.split(";") if kv.strip()}
-    # unb+cookie2=登录态核心;_m_h5_tk 是 mtop 短效令牌,采集器首次请求自动从网关拿——
-    # 不该在这里校验(扫码登录的会话就没有它,2026-10-01 修正:此前误拦导致新 Cookie 白入库)
-    _missing = [n for n in ("unb", "cookie2") if n not in _names] if not browser_mode else []
-    if _missing:
+    browser_allowed = bool(getattr(settings, "xianyu_use_browser", True))
+    # Cookie 完整性(2026-10-01):登录态核心必须集齐 `unb`+`cookie2`,缺任一必 TOKEN_ILLEGAL。
+    # 判据与"选路"共用 `tenant_base` 那一份 —— 两边各写一遍必然分叉(2026-10-03 吃过)。
+    _missing = xianyu_cookie_missing(goofish_cookie)
+    if _missing and not browser_allowed:
+        # 协议跑不了、浏览器又被关掉 ⇒ **早退**。别硬撞:多吃一次 `TOKEN_ILLEGAL`
+        # 没意义,还会在风控那边记一笔(本仓吃过教训:每轮硬撞只会加重)。
         _record_run(session, user_id, "xianyu", "skipped",
-                    f"cookie_incomplete(缺 {'/'.join(_missing)};请重新导出完整 Cookie)")
+                    f"cookie_incomplete(缺 {'/'.join(_missing)};需重新导出完整 Cookie)")
         session.commit()
         return {"platform": "xianyu", "count": 0, "status": "skipped",
-                "reason": f"cookie_incomplete: 缺 {'、'.join(_missing)}——请在浏览器登录 "
-                          "www.goofish.com 后从 Network 请求头整串复制 Cookie"}
+                "reason": f"cookie_incomplete: 缺 {'、'.join(_missing)}——跑 "
+                          "`python tools/xianyu_export_cookie.py` 从浏览器档案导出整套 Cookie"}
     # 构造客户端不产生网络请求,放在 try 外:失败路径也能回写运行中刷新的令牌
-    if browser_mode:
-        from app.services.xianyu_browser import get_client
-
-        client = get_client(settings)          # 进程内复用,一轮只启一次浏览器
-    else:
-        client = xianyu.XianyuClient(goofish_cookie, proxy=settings.xianyu_proxy_url or None)
+    #
+    # **选路**(2026-10-08):**协议优先**,浏览器只作兜底 ——
+    # 协议约 0.35 秒/词(实测 3/3 关键词通),浏览器要 10~20 秒,还偶发 `TargetClosedError`
+    # 让整轮失败(2026-10-08 00:43 就失败过一次)。见 `config/settings.py` 那段长说明。
+    # ⚠️ 规则本身在 `tenant_base.pick_xianyu_client` —— **深采必须与搜索同路**。
+    client, source = pick_xianyu_client(settings, goofish_cookie)
     if not _XIANYU_ROUND_LOCK.acquire(blocking=False):
         _record_run(session, user_id, "xianyu", "skipped",
                     "running(上一轮闲鱼采集尚未结束,防同会话并发)")
@@ -229,7 +260,11 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
         else:
             rot_row.value = str(prior + 1)
         stats: dict = {}
-        hot = xianyu.collect_hot(settings, client, start_offset=start_offset, stats=stats)
+        # ⚠️ **回落只重跑这一步**(网络采集)—— 入库在它后面,所以回落时**没有半截写入**的风险,
+        # 这也是有意把它放在这个位置的原因。
+        hot, client, source = _collect_hot_with_fallback(
+            settings, client, source, browser_allowed=browser_allowed,
+            start_offset=start_offset, stats=stats)
         # 只反查"本轮采到的 item_id 里哪些库里已有",不再全历史加载:
         # 闲鱼表随 DATA_RETENTION 长期累积,全量 SELECT 每轮把租户全部历史 ID 拉进 Python 内存,
         # 而 prev_keys 的用途(去重 + 告警 new 判定)只需要本轮这批 key 的存在性,语义等价。
@@ -273,7 +308,9 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
         latest = [{"key": it["item_id"], "hit_keywords": it["hit_keywords"], "best_rank": it["best_rank"]} for it in hot]
         alert_service.evaluate(session, user_id, "xianyu", latest, prev_keys_before, settings)
         _record_watch(session, user_id, "xianyu", [{"title": it["title"], "value": it.get("hit_keywords", 0)} for it in hot])
-        detail = f"items={len(hot)}"
+        # ⚠️ **来源标签要进运行记录**(2026-10-08):两条路都会产出 0 条,不标来源就分不清
+        # "协议挂了被回落"和"真没货上架"。排障第一眼看这个方括号。
+        detail = f"[{source}] items={len(hot)}"
         if stats.get("verify"):
             detail += f" partial_verify={len(stats['verify'])} blocked={','.join(stats['verify'])}"
             alert_service.notify_incident(

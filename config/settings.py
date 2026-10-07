@@ -44,12 +44,23 @@ class Settings(BaseSettings):
     xianyu_request_delay: float = 8.0  # 闲鱼相邻请求间隔(秒,带抖动);比通用更大,防 mtop 风控
     xianyu_batch_keywords: int = 5     # 每次采集最多处理的关键词数(风控降频:少量多次,按运行数轮转覆盖全部)
     xianyu_cooldown_minutes: int = 30  # 闲鱼触发人机验证(滑块)后,暂停采集该分钟数,避免反复撞枪口
-    # **采集路径**(2026-10-02):`browser` = Playwright 打开真页面、在页面里调闲鱼自己的
-    # `window.lib.mtop.request`(签名/指纹全由它的 JS 做);`protocol` = 老的自算签名纯协议
-    # (实测被"哎哟喂,被挤爆啦"挡住;页面内调用则正常)。
-    # ⚠️ **2026-10-08 订正**:此处原写"**账号级**限流"—— **已证伪**:匿名请求(没有账号)
-    # 同样被挤爆,照抄能跑通的开源客户端也一样。详见 `app/services/xianyu_browser.py`。
-    # **结论不变:保持 `browser`**。
+    # **采集路径**(2026-10-02 定,2026-10-08 重定):
+    #   `xianyu_prefer_protocol=True` ⇒ **协议优先**,失败(限流/人机验证/令牌失效)回落浏览器;
+    #   `xianyu_use_browser=True`     ⇒ 允许那条兜底存在(设 False = 只用协议,不兜底)。
+    #
+    # 2026-10-08 之前默认走浏览器,因为纯协议一律被 `RGV587_ERROR::哎哟喂,被挤爆啦` 挡住,
+    # 而当时的归因是错的("账号级" —— 已证伪,匿名请求同样被挤爆)。**决定性实验**
+    # (`tools/xianyu_replay_probe.py`)把页面自己发的请求逐字节抓下来用 Python 重放:
+    # 连**普通 `requests`** 都回 `SUCCESS::调用成功` ⇒ **卡的是 cookie,不是出口、不是 TLS、
+    # 也不是请求头**(那个请求只有 `Accept`/`Content-type` 两个头)。
+    # 我们当年只贴了"登录三件套",而页面发出去的是**整套 jar** —— 里面
+    # `sgcookie`/`tfstk`/`_hvn_lgc_` 这些由阿里 Havana 风控 SDK 发的 cookie 才是被校验的东西。
+    # 换成整套后实测 **3/3 关键词、每个约 0.35 秒**(浏览器那条要 10~20 秒,且偶发
+    # `TargetClosedError` 导致整轮失败 —— 2026-10-08 00:43 就失败过一次)。
+    #
+    # ⚠️ **整套 jar 从哪来**:`python tools/xianyu_export_cookie.py`
+    # (**别再手工从浏览器 Network 里抄** —— 抄不全,而且没人知道漏了哪一项)。
+    xianyu_prefer_protocol: bool = True
     xianyu_use_browser: bool = True
     xianyu_proxy_url: str = ""      # 闲鱼专用"单一固定"出口代理(http://user:pass@host:port,如住宅IP);留空直连。勿用轮换代理池——mtop token/session 绑定出口 IP
     # 闲鱼浏览器**闲置多久自动关**(秒;**≤0 = 不关**,退回旧行为)。为什么要关:
