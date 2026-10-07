@@ -165,6 +165,58 @@ def test_统计字段缺失时_metrics_为空而非全零():
     assert rows[0]["metrics"] == {}
 
 
+#: ★ **2026-10-08 逐字段核对真实响应**(`tools/_douyin_sample.json`,14 条)得到的结论:
+#: 我依赖的 6 个字段(`aweme_id`/`desc`/`create_time`/`author.nickname`/
+#: `author.sec_uid`/`statistics`)**13/13 命中**,5 个统计键也 **13/13 命中** ——
+#: 名字不是照猜的。下面两批数值是**真抓到的那一组**。
+REAL_STATS = [
+    {"digg_count": 855, "comment_count": 1368, "share_count": 179,
+     "collect_count": 226, "play_count": 0,
+     "forward_count": 0, "download_count": 0, "live_watch_count": 0},
+    {"digg_count": 321184, "comment_count": 2264, "share_count": 73472,
+     "collect_count": 264295, "play_count": 0,
+     "forward_count": 0, "download_count": 0, "live_watch_count": 0},
+]
+
+
+def test_播放量恒为0_要当缺失而不是0():
+    """★★ 逐字段核对**抓到的真问题**:抖音对**别人的作品**把 `play_count` **填 0**
+    (实测 13/13 全 0),而**同一批响应**里其余指标都是真实值(点赞 61~321,184、
+    转发 106~73,472、收藏 20~264,295、评论 7~3,085)。
+
+    这与已知事实一致(播放量是**创作者私有数据**,别人的内容拿不到)。
+    **直接采会把"拿不到"读成"没人看"** —— 而且它会喂给 `conversion.estimate` 算曝光,
+    影响的不只是展示。
+
+    ⚠️ 注意这也是"条数对不代表字段对"的例证:13 条解析得好好的,字段却是个假 0。
+    """
+    rows, _ = dp._parse(_resp([_video(statistics=s) for s in REAL_STATS]), "x")
+    assert len(rows) == 2
+    for r in rows:
+        assert "play_count" not in r["metrics"], "恒为 0 的播放量是假 0,不该进 metrics"
+    assert rows[0]["metrics"]["liked_count"] == 855
+    assert rows[1]["metrics"]["share_count"] == 73472
+    assert rows[1]["metrics"]["collected_count"] == 264295
+
+
+def test_播放量真有值时照样采():
+    """反面对照 —— 防上面那条守卫**过度**丢弃:真有播放量时必须采到。
+
+    做法是"恒为 0 就丢",不是"这个字段永远不读";哪天抖音开始真给,这里接得上。
+    """
+    rows, _ = dp._parse(_resp([_video(statistics={"play_count": 12345})]), "x")
+    assert rows[0]["metrics"]["play_count"] == 12345
+
+
+def test_负数与非法值一律当缺失():
+    """平台给 -1 / 字符串时不能当数字用 —— 那会污染 conversion 的计算。"""
+    rows, _ = dp._parse(_resp([_video(statistics={
+        "digg_count": -1, "share_count": "88", "comment_count": 3})]), "x")
+    m = rows[0]["metrics"]
+    assert "liked_count" not in m and "share_count" not in m
+    assert m["comment_count"] == 3
+
+
 def test_没有_desc_也不该整条丢掉():
     """标题空的帖子照样是线索(口令可能在别处)—— 丢它等于丢线索。"""
     rows, _ = dp._parse(_resp([_video(desc="")]), "x")

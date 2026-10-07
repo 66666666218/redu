@@ -127,19 +127,62 @@ def _aweme_id(url: str) -> str:
     return m.group(1) if m else ""
 
 
-def find_leads(keywords: list[str], limit: int = 30, platform: str = "douyin") -> list[dict]:
-    """搜抖音 → 挑出标题带 `《…》` 前缀的推广线索。
+def _try_protocol(keywords: list[str], session) -> tuple[list[dict], Exception | None]:
+    """走抖音纯协议取一批;返回 `(记录, 异常)`。**异常不在这里抛** —— 留给调用方决定回落。"""
+    from app.services import douyin_protocol_source as dps
 
-    返回 `[{mark, title, url, keyword}]`;`mark` 是《》里那段 —— **迅雷分享口令**(可直接去迅雷搜)。
-    ⚠️ 会**开浏览器**(MediaCrawler),一次几分钟 —— 只该低频跑。
+    try:
+        return dps.search(keywords, session=session), None
+    except Exception as exc:  # noqa: BLE001 - 回落是设计的一部分,这里就是它的入口
+        return [], exc
 
-    关键词**一次性全给** MediaCrawler(它的 CLI 吃整个列表,逐词调用等于反复开关浏览器)。
+
+def _collect(platform: str, keywords: list[str], session=None) -> tuple[list[dict], str]:
+    """取搜索结果 → `(记录列表, 来源标签)`。
+
+    **抖音走纯协议优先**(2026-10-08),其余平台照旧走 MediaCrawler。
+
+    为什么换(见 `config/settings.py` 的 `douyin_leads_use_protocol`):
+    协议约 1 秒/词、**不开浏览器**、能拿到**真实作者名**(MediaCrawler 是脱敏的 `某***`,
+    推送卡片的"作者列"只能显示星号);且它只依赖我们自己的代码 + f2(Apache-2.0),
+    不碰 MediaCrawler 那条 **NON-COMMERCIAL** 许可。
+
+    **回落规则有意做成"不会比今天更贵"**:今天是**每一次都开浏览器**;
+    这里只在「协议抛错」或「协议一条都没搜到」时才开 ⇒ 最坏与今天持平,通常便宜得多。
+
+    ⚠️ **回落一定要留痕**(日志 + 来源标签进运行记录)。它本来就是"没搜到"的生产者,
+    不说话的话,"协议挂了"就会被读成"抖音上没人在推资源" —— 本仓最忌讳的假阴性。
     """
+    if platform == "douyin":
+        from config.settings import get_settings
+
+        if getattr(get_settings(), "douyin_leads_use_protocol", True):
+            rows, err = _try_protocol(keywords, session)
+            if rows:
+                return rows, "协议"
+            if err is not None:
+                logger.warning("抖音纯协议失败(kind=%s),回落浏览器:%s",
+                               getattr(err, "kind", "?"), str(err)[:160])
+            else:
+                # ⚠️ **"一条都没搜到"必须与"抛错"分开报**:前者可能是限流
+                #    (实测:连发会回 `status_code=0 + data:[]`,与"真没结果"形状相同),
+                #    后者是硬失败。两种都回落,但日志里得看出是哪一种。
+                logger.warning("抖音纯协议**一条都没搜到**(没报错)—— 可能是限流"
+                               "(见 doc/抖音纯协议-链路拆解.md §5),本轮回落浏览器")
     from app.services import mediacrawler_source as mc
 
+    return mc.crawl(platform, keywords), "浏览器兜底"
+
+
+def collect_leads(keywords: list[str], limit: int = 30, platform: str = "douyin",
+                  session=None) -> tuple[list[dict], str]:
+    """`find_leads` 的完整版:**连来源标签一起返回**(运行记录要写它)。
+
+    其余行为完全一致 —— `find_leads` 就是它的薄封装。
+    """
     if not keywords:
-        return []
-    # ⚠️ `mc.crawl` 的硬失败(未装/扫码超时/非零退出)会抛 `MediaCrawlerError`,这里**不吞** ——
+        return [], ""
+    # ⚠️ 取数层的硬失败(协议+浏览器**都**挂了 / MediaCrawler 未装/扫码超时)**不吞** ——
     # 让它一路冒到 `douyin_leads_tick` 记 `failed`。否则"扫码没通过"会被记成
     # `success(线索0)`,而这条链**只在每天 11:00 无人值守时跑**,失败你收不到任何信号。
     out: list[dict] = []
@@ -151,7 +194,9 @@ def find_leads(keywords: list[str], limit: int = 30, platform: str = "douyin") -
 
     min_pub_ts = _min_publish_ts(get_settings())
     n_old = n_notime = 0
-    for h in mc.crawl(platform, keywords):
+    rows, source = _collect(platform, keywords, session)
+    logger.info("线索取数:平台=%s 来源=%s 原始 %d 条", platform, source or "-", len(rows))
+    for h in rows:
         text = (h.get("snippet") or "").strip()
         url = (h.get("url") or "").strip()
         if not url or url in seen:
@@ -176,7 +221,10 @@ def find_leads(keywords: list[str], limit: int = 30, platform: str = "douyin") -
             continue          # 既没有《…》也没有夸克标记 → 不是线索
         seen.add(url)
         out.append({"mark": mark, "title": text[:120], "url": url,
-                    "author": name,                     # 账号名(**被工具脱敏**,如「籽***」)
+                    # 账号名。⚠️ **取决于来源**(2026-10-08):纯协议给的是**真实昵称**,
+                    # MediaCrawler 那条是**脱敏**的(如「籽***」)—— 推送卡片的"作者列"
+                    # 因此可能显示星号;看到星号先看运行记录的来源标签,别以为解析坏了。
+                    "author": name,
                     "keyword": h.get("keyword", ""),
                     # 转发量(结算用):衡量**这个资源在抖音有多热**;⚠️ 是**别人视频**的数,
                     # 不等于我们自己发文的转化(见 DouyinLead/lead_settlement 的口径说明)。
@@ -191,7 +239,18 @@ def find_leads(keywords: list[str], limit: int = 30, platform: str = "douyin") -
     # ↑ **越新越靠前**(发布时间倒序),同档内仍按强信号排(开头《》> 与昵称吻合 > 其它)
     for x in out:
         x.pop("_rank", None)
-    return out[:limit]
+    return out[:limit], source
+
+
+def find_leads(keywords: list[str], limit: int = 30, platform: str = "douyin",
+               session=None) -> list[dict]:
+    """搜抖音 → 挑出带**口令**的推广线索(薄封装,保留既有调用方的形状)。
+
+    返回 `[{mark, title, url, keyword}]`;`mark` 是《…》里那段 —— **迅雷分享口令**。
+    ⚠️ 抖音现在走**纯协议**(约 1 秒/词),只有协议失败或全空时才回落浏览器(几分钟)。
+    想同时拿到**来源标签**,用 `collect_leads`。
+    """
+    return collect_leads(keywords, limit=limit, platform=platform, session=session)[0]
 
 
 def _min_publish_ts(settings) -> int:
@@ -901,7 +960,9 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
     total = 0
     for plat in plats:
         try:
-            leads = find_leads(kws, platform=plat)
+            # ⚠️ **必须传 `session`** —— 纯协议要从加密库读凭据;不传就是静默不带登录态
+            # (实测表现:回 `status_code=2483 请先登录`,而**看起来只是"没搜到"**)。
+            leads, source = collect_leads(kws, platform=plat, session=db)
             total += len(leads)
             if leads:
                 # 口令 → 资源(分享链直接转存入库 / 群则加群),结果一并写进卡片
@@ -919,8 +980,11 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
             n_hot_ok = sum(1 for x in leads
                            if (x.get("keyword") or "") in hs
                            and (x.get("kouling") or {}).get("kind") in ("group", "share"))
+            # ⚠️ **来源标签要进运行记录**(2026-10-08):抖音现在"协议优先、浏览器兜底",
+            # 而两条路都会产出"0 条"。不标来源的话,看到 0 就分不清是
+            # "协议挂了被回落"还是"真没人在推资源" —— 正是本仓最忌讳的那种含糊。
             _record_run(db, user_id, "douyin_leads", "success",
-                        f"{plat} 类目{cat} 词{len(kws)}(其中外部{n_hot_used}) "
+                        f"{plat}[{source or '-'}] 类目{cat} 词{len(kws)}(其中外部{n_hot_used}) "
                         f"线索{len(leads)} {_kouling_summary(leads)} "
                         f"[外部命中{n_hot}/产出{n_hot_ok}]")
             db.commit()

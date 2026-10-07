@@ -18,6 +18,20 @@ def _no_publish_cutoff(monkeypatch):
     monkeypatch.setattr("app.services.douyin_leads._min_publish_ts", lambda s: 0)
 
 
+@pytest.fixture(autouse=True)
+def _browser_path_only(monkeypatch):
+    """本模块验的是**判据 / 去重 / 卡片**,**不是"从哪取数"** ⇒ 统一钉死走浏览器那条。
+
+    ⚠️ 不加这个会出事:抖音从 2026-10-08 起**纯协议优先**,而这些用例只打了
+    `mc.crawl` 的桩 ⇒ `find_leads` 会**真的往抖音发请求**(还会因为测试环境没凭据回 2483),
+    变成"单测偷偷联网"这种最难查的毛病。
+    取数来源的选择由 `tests/test_douyin_leads_protocol.py` 专门验。
+    """
+    from config.settings import get_settings
+
+    monkeypatch.setattr(get_settings(), "douyin_leads_use_protocol", False, raising=False)
+
+
 class _Settings:
     """最小 settings 替身(只覆盖 push_leads 用到的字段)。"""
     feishu_webhook_admin = "https://example.com/hook"

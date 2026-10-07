@@ -286,6 +286,27 @@ def build_url(params: dict, use_abogus: bool = False) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: ★ **实测出来的一类"假 0"字段**(2026-10-08,13 条真实搜索结果**逐字段核对**):
+#: `play_count` **13/13 全是 0**,而**同一批响应**的其余指标都是真实且差异极大的值
+#: (点赞 61~321,184、转发 106~73,472、收藏 20~264,295、评论 7~3,085)。
+#: 与已知事实一致:`mediacrawler_source` 里早写着"小红书/抖音的播放量是**创作者私有
+#: 数据**,别人的内容拿不到" —— 抖音**把字段填 0** 而不是不给。
+#: ⇒ 直接采就会把"拿不到"读成"没人看"(本仓反复声明过的填 0 坑),
+#: 而且它会**喂给 `conversion.estimate` 去算曝光**,影响的不只是展示。
+#: ⚠️ 用"恒为 0 就丢弃"而不是"干脆不读":哪天抖音开始真给播放量,这里会自动接上。
+_ALWAYS_ZERO_KEYS = frozenset({"play_count"})
+
+
+def _metric_of(stats: dict, src: str) -> int | None:
+    """取一个原始指标;缺失 / 负数 / **结构性的假 0** 一律返回 `None`(= 拿不到)。"""
+    v = stats.get(src)
+    if not isinstance(v, int) or v < 0:
+        return None
+    if src in _ALWAYS_ZERO_KEYS and v == 0:
+        return None
+    return v
+
+
 def _parse(d: dict, keyword: str) -> tuple[list[dict], str]:
     """抖音响应 → 统一记录形状(与 `mediacrawler_source._parse_record` 对齐)。
 
@@ -321,8 +342,8 @@ def _parse(d: dict, keyword: str) -> tuple[list[dict], str]:
                          ("collect_count", "collected_count"),
                          ("comment_count", "comment_count"),
                          ("share_count", "share_count")):
-            v = stats.get(src)
-            if isinstance(v, int) and v >= 0:
+            v = _metric_of(stats, src)
+            if v is not None:
                 metrics[dst] = v
         rows.append({
             "uid": sec_uid or aweme_id,
