@@ -830,16 +830,27 @@ def push_hot_rank_card_all_users(settings=None, top_n: int = 3) -> int:
             # (hot_source 每小时 :05;百度/微博/抖音各自另算)⇒ 全表最新那一刻只有**那一批**
             # 源在,卡上于是只剩 13 个 —— 用户当场看出来:「不是 38 个平台吗,怎么就这几个」。
             # 实测:库里 **41 个源**,而按老写法只有 13 个进卡。
+            # ⚠️⚠️ **`captured_at` 是"每行各自的插入时刻"**(采集时没显式传,走模型默认值
+            # `datetime.now`)—— 所以 `captured_at == 某个时刻` **只会中 1 行**。
+            # 我第一版按 `== ts` 改,结果卡上**只剩标题、内容全空**(用户当场发现)。
+            # ⇒ 正确取法:**每个源取它自己最新"那一批"** —— 同一批是那个源一次循环里
+            # 毫秒级连写的(实测同一源的相邻行微秒相差个位数)。
+            # 窗口取 5 秒:足够容纳一批,又远小于下一批(小时级)。
+            from datetime import timedelta as _td
+
             per_src = dict(db.execute(
                 select(HotSourceItem.source, func.max(HotSourceItem.captured_at))
                 .where(HotSourceItem.user_id == uid)
                 .group_by(HotSourceItem.source)).all())
             by_src: dict[str, list] = {}
             for src, ts in per_src.items():
+                if ts is None:
+                    continue
                 for _t, rank, extra in db.execute(
                         select(HotSourceItem.title, HotSourceItem.rank, HotSourceItem.extra)
                         .where(HotSourceItem.user_id == uid, HotSourceItem.source == src,
-                               HotSourceItem.captured_at == ts, HotSourceItem.rank <= top_n)
+                               HotSourceItem.captured_at >= ts - _td(seconds=5),
+                               HotSourceItem.rank <= top_n)
                         .order_by(HotSourceItem.rank)).all():
                     by_src.setdefault(str(src), []).append((rank, _t, extra))
             for src in sorted(by_src, key=lambda s: s not in ("bilibili", "douban")):
@@ -850,5 +861,12 @@ def push_hot_rank_card_all_users(settings=None, top_n: int = 3) -> int:
                     lines.append(f"  {rank}. {title[:38]}{tail}")
     finally:
         db.close()
+    # ⚠️ **空卡不发**(2026-10-07 实测教训):我改坏判据那次,卡上只剩标题一行 ——
+    # 一张只有「🔥 多平台热榜速览」的空卡比不发更糟(读的人以为"今天没热点")。
+    # 真有内容才发;没有就说清原因,别让人对着空卡猜。
+    if len(lines) <= 1:
+        logger.warning("多平台热榜速览:本轮没有任何源的数据,**不发空卡**"
+                       "(查 hot_source 是否在采 / 库里有行没有)")
+        return 0
     text = "".join(lines)[:8000]
     return 1 if FeishuClient(hook, settings.feishu_secret).send(text) else 0

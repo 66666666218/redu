@@ -352,3 +352,42 @@ class TestHotRankCardAllSources:
             assert "虎扑热帖" in sent["text"]
         finally:
             db.close()
+
+    def test_没有数据时不发空卡(self, monkeypatch) -> None:
+        """★ 我改坏判据那次,卡上只剩标题一行 —— **一张空卡比不发更糟**
+        (读的人以为"今天没热点")。没内容就别发,并说清原因。"""
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        from app.db import models  # noqa: F401
+        from app.db.database import Base
+        from app.db.models import User
+        from app.services import hot_sources as hs
+
+        eng = create_engine("sqlite://")
+        Base.metadata.create_all(eng)
+        db = sessionmaker(bind=eng, autoflush=False, expire_on_commit=False)()
+        db.add(User(id=1, username="u1", email="u1@b.c", password_hash="x", enabled=True))
+        db.commit()
+        sent: list = []
+
+        class _F:
+            def __init__(self, *a, **k):
+                pass
+
+            def send(self, text):
+                sent.append(text)
+                return True
+
+        try:
+            monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: db))
+            monkeypatch.setattr("app.services.feishu_client.FeishuClient", _F)
+            monkeypatch.setattr("app.services.feishu_client.webhook_for",
+                                lambda *a, **k: "hook")
+
+            class _S:
+                feishu_secret = ""
+            assert hs.push_hot_rank_card_all_users(settings=_S()) == 0
+            assert sent == [], "没有数据却把空卡发出去了"
+        finally:
+            db.close()

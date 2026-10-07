@@ -1,3 +1,4 @@
+- [2026-10-07 20:55] FIX: 热榜速览卡被上一条改坏了(只剩标题)—— `captured_at` 是**每行各自**的插入时刻,按 `== ts` 只中 1 行;改成「每个源最新那一批」的 5 秒窗口 + **空卡不发** (Files: app/services/hot_sources.py, tests/test_xhs_page_source.py)
 - [2026-10-07 20:49] FIX: 多平台热榜速览卡只显示十几个源(用户当场看出)—— 改成**每个源各取自己最新一轮** (Files: app/services/hot_sources.py, tests/test_xhs_page_source.py)
 - [2026-10-07 20:42] FEAT: 小红书账号可用性进每日体检(被踢下线不再要等人来问) (Files: app/services/chain_health.py, tests/test_xhs_page_source.py)
 - [2026-10-07 20:18] FIX: 小红书「被踢下线」也算未登录(「电脑设备登录超限」)+ 去掉害人的热身 + goto 重试 (Files: app/services/xhs_page_source.py, tests/test_xhs_page_source.py)
