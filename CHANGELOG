@@ -1,3 +1,4 @@
+- [2026-10-07 09:41] FEAT: 盘内重复清理**工具链**(判定/报告/执行器,dry-run 默认)——判据第三轮收紧 (Files: scripts/_pan_dedupe.py, scripts/pan_dedupe_report.py, scripts/pan_dedupe_apply.py)
 - [2026-10-07 09:14] FIX: 重复判据第二次收紧 —— 限定「**同级同名**」,消掉品牌文件夹那类误判 (Files: scripts/pan_dedupe_report.py)
 - [2026-10-07 09:05] FEAT: 盘内重复资源只读报告(判据从**文件层**改到**资源包层**) (Files: scripts/pan_dedupe_report.py)
 - [2026-10-07 01:40] DOCS: 更正上一条的过度断言 —— 分页**不是**「24TiB 只索引到 8 行」的原因 (Files: app/services/xunlei_transfer.py, app/services/xunlei_sync.py)
