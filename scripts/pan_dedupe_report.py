@@ -19,6 +19,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts._pan_dedupe import build_plan  # noqa: E402
 
+# ⚠️ **脚本自己定 stdout 编码,不依赖调用环境**(2026-10-07 实测踩到):
+# 后台跑时 stdout 不是终端,默认编码是 **GBK**,而本脚本要打印 ✔/✂
+# ⇒ `UnicodeEncodeError` 直接崩,而且**崩在打印第一组时** —— 前面几分钟的扫描全白跑。
+# 上一次没崩只是因为那个 shell 恰好 export 了 PYTHONIOENCODING,那种'靠环境'的稳定是假的。
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 
 def main() -> int:
     depth = 4
