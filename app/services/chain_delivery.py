@@ -267,28 +267,103 @@ def render_lines(rep: dict) -> list[str]:
     return lines
 
 
-def recommend_cadence(rep: dict, ordering: dict | None = None) -> list[str]:
-    """由「提前量」反推「还要不要提速」——**带样本门槛,宁可不给建议**。
+#: 每条链的**探测周期**取自哪一项配置(单一事实源:不要在这里抄一份时间)。
+#: ⚠️ 用配置**字符串**而不是数字:改了 cron 之后这里自动跟着变,不会飘。
+_CHAIN_CRON = {
+    "抖音": "douyin_leads_cron",        # 线索抓取(口令解析也在这一步)
+    "迅雷群": "xunlei_group_cron",       # 群消息流采集 + 限量转存
+    "迅雷盘": "xunlei_sync_cron",        # 扫盘
+    "公开平台": "presence_cron",          # 小红书/快手/贴吧/微博 按资源名搜
+}
+
+
+def cron_interval_h(expr: str) -> float | None:
+    """从 cron 表达式估**一轮要多久**(小时)。估不出来返回 `None`(**别猜**)。
+
+    支持调度器里实际出现过的几种形状;其余一律 `None` —— 宁可"不知道周期"
+    也不要编一个数出来,那会让后面的判据看起来有依据而其实是错的。
+    """
+    p = str(expr or "").split()
+    if len(p) != 5:
+        return None
+    mi, hh, _dom, _mon, dow = p
+    try:
+        if hh.startswith("*/") and mi.isdigit():
+            return float(hh[2:])
+        if hh == "*" and mi.startswith("*/"):
+            return float(mi[2:]) / 60.0                    # 分钟内步进(如 */30)
+        if hh.isdigit() and dow == "*":
+            return 24.0
+        if hh.isdigit() and dow != "*":
+            return 168.0                                   # 每周一次
+        if all(x.isdigit() for x in hh.split(",")):
+            return 24.0 / len(hh.split(","))               # 每天 N 个定点
+        if hh == "*" and all(x.isdigit() for x in mi.split(",")) and len(mi.split(",")) > 1:
+            return 1.0 / len(mi.split(",")) * 1.0          # 每小时的 N 个定点
+        if hh == "*" and mi.isdigit():
+            return 1.0
+    except (ValueError, ZeroDivisionError):
+        return None
+    return None
+
+
+def _intervals_h(settings) -> dict[str, float]:
+    """各链当前的探测周期(小时)。取不到的链**就不出现在结果里**(不编数)。"""
+    from app.services.schedule_service import WECHAT_LISTEN_HOURS
+
+    out: dict[str, float] = {}
+    for chain, attr in _CHAIN_CRON.items():
+        v = cron_interval_h(str(getattr(settings, attr, "") or ""))
+        if v:
+            out[chain] = v
+    n = len(WECHAT_LISTEN_HOURS or [])
+    if n:
+        out["公众号"] = 24.0 / n
+    return out
+
+
+def recommend_cadence(ordering: dict, settings=None) -> list[str]:
+    """由「**提前量**」反推「**还要不要提速**」——**带样本门槛,宁可不给建议**。
 
     ## 判据(为什么不是"越快越好")
-    探测周期只决定"**我们什么时候看到它**";而提前量来自"**它在别的链上还没出现**"。
+    探测周期只决定"**我们什么时候看到它**";提前量来自"**它在别的链上还没出现**"。
     压缩周期能多拿到的提前量 **最多 = 当前周期**。所以:
       · 某链的中位提前量 **远大于** 它的周期(抖音:提前几十小时,周期 4 小时)
-        ⇒ 优势来自**平台本身**,**再压周期几乎没用**(4→2 小时只多抢 2 小时,而那几十小时
-          的领先早在上一轮就拿到了)⇒ **不建议动**。
-      · 提前量 **接近或小于** 周期 ⇒ 说明它是靠"跑得勤"赢的,这时压周期才真有用。
-    ⇒ 结论常常是"**谁的周期都不必动**",那也是个有用的结论(省下一次无谓的加密)。
+        ⇒ 优势来自**平台本身** —— 4→2 小时只多抢 2 小时,而那几十小时的领先
+          早在上一轮就拿到了 ⇒ **不建议动**,压周期是纯浪费。
+      · 提前量 **接近或小于** 周期 ⇒ 它多半是靠"跑得勤"才赢的,这时压周期才真有用。
+    ⇒ 结论常常是"**谁的周期都不必动**" —— 那也是个有用的结论(省下一次无谓的加密,
+      也就是省下风控暴露与机器时间)。
     """
-    if not rep:
-        return ["样本不足,先不下调度建议。"]
-    n = (ordering or {}).get("groups") or []
-    if len(n) < MIN_SAMPLE:
-        return [f"⚠️ 跨链样本只有 {len(n)} 份(门槛 {MIN_SAMPLE}),"
+    from config.settings import get_settings
+
+    settings = settings or get_settings()
+    groups = (ordering or {}).get("groups") or []
+    if len(groups) < MIN_SAMPLE:
+        return [f"⚠️ 跨链样本只有 {len(groups)} 份(门槛 {MIN_SAMPLE}),"
                 f"**现在给建议就是假信号** —— 等台账攒够再看。"]
+    pairs = (ordering or {}).get("pairs") or {}
+    leads: dict[str, list[float]] = {}
+    for k, v in pairs.items():
+        a = str(k).split("→")[0]
+        leads.setdefault(a, []).append(float(v.get("median_h") or 0))
+    if not leads:
+        return ["样本里没有可比的先后关系,先不下建议。"]
+    ivs = _intervals_h(settings)
     out: list[str] = []
-    for g in n:
-        ordr = g.get("order") or []
-        if len(ordr) < 2:
-            continue
-        out.append(f"{g['name'][:26]}: {' → '.join(ordr)}(跨 {g['lag_h']:.0f}h)")
-    return out[:10] or ["没有可比较的样本。"]
+    for chain, vals in sorted(leads.items(),
+                              key=lambda kv: -statistics.median(kv[1])):
+        lead = statistics.median(vals)
+        iv = ivs.get(chain)
+        if iv is None:
+            out.append(f"· {chain}: 中位提前 **{lead:.0f}h**(周期未知,不下判断)")
+        elif lead > iv * 3:
+            out.append(f"· {chain}: 提前 {lead:.0f}h ≫ 周期 {iv:.1f}h ⇒ 优势来自**平台本身**,"
+                       f"压周期最多再抢 {iv:.1f}h,**不必动**")
+        elif lead > iv:
+            out.append(f"· {chain}: 提前 {lead:.0f}h 略大于周期 {iv:.1f}h ⇒ 提速收益有限")
+        else:
+            out.append(f"· {chain}: 提前 {lead:.0f}h ≤ 周期 {iv:.1f}h ⇒ "
+                       f"**靠跑得勤赢的,压周期真有用**")
+    out.append("(仅建议,**不自动改配置** —— 改 cron 要重启才生效,由人决定)")
+    return out

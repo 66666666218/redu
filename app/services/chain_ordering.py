@@ -398,9 +398,16 @@ def chain_ordering_tick(settings=None) -> int:
         text += "\n" + TRUNCATION_NOTE
         # 交付看板:与台账同一张卡(见 docstring)。单独 try —— 它挂了不该把台账也带掉。
         try:
-            from app.services.chain_delivery import delivery_report, render_lines
+            from app.services.chain_delivery import (
+                delivery_report, recommend_cadence, render_lines,
+            )
 
-            text += "\n\n" + "\n".join(render_lines(delivery_report(db, uid, days=14)))
+            dreport = delivery_report(db, uid, days=14)
+            text += "\n\n" + "\n".join(render_lines(dreport))
+            # **调度建议**由"提前量 vs 探测周期"推出(见 `recommend_cadence` 的判据)。
+            # ⚠️ 样本不够时它只会说"现在给建议就是假信号" —— 那是**对的输出**,不是残缺。
+            text += "\n\n**调度建议**\n" + "\n".join(
+                recommend_cadence(rep, settings=settings))
         except Exception:  # noqa: BLE001
             logger.exception("交付看板渲染失败(台账照推)")
             text += "\n\n⚠️ 交付看板本轮渲染失败,已单独记日志。"

@@ -176,3 +176,55 @@ class TestRecommend:
         for i in range(8):
             _group(session, f"全成{i}", 2, status="ok", our_url=f"http://z/{i}")
         assert "仍在失败" not in cd.delivery_report(session, 1, days=14)["bottleneck"]
+
+
+class TestCronInterval:
+    """周期只用来做**量级**比较 —— 估不出来宁可 `None`,也别编一个数(编了后面的判据
+    看着有依据而其实是错的)。"""
+
+    def test_调度器里实际出现过的形状(self) -> None:
+        assert cd.cron_interval_h("10 */4 * * *") == 4.0          # 每 4 小时
+        assert cd.cron_interval_h("7,27,47 * * * *") == pytest.approx(1 / 3)
+        assert cd.cron_interval_h("*/30 * * * *") == 0.5
+        assert cd.cron_interval_h("10 9,17 * * *") == 12.0        # 每天两个定点
+        assert cd.cron_interval_h("15 10 * * 1") == 168.0         # 每周一次
+
+    def test_认不出来就返回None不猜(self) -> None:
+        assert cd.cron_interval_h("乱写") is None
+        assert cd.cron_interval_h("") is None
+        assert cd.cron_interval_h("* * * *") is None              # 段数不对
+
+
+class TestRecommendVerdict:
+    """判据本身:**提前量 ≫ 周期 ⇒ 优势来自平台,压周期没用**。
+    这条判据的价值恰恰在于它**常常说"不必动"** —— 省下一次无谓的加密(风控暴露)。"""
+
+    @staticmethod
+    def _run(monkeypatch, pairs: dict, groups: int = 25) -> list[str]:
+        monkeypatch.setattr(cd, "MIN_SAMPLE", 1)
+        monkeypatch.setattr(cd, "_intervals_h", lambda s: {"抖音": 4.0})
+        ordering = {"groups": [{"name": f"r{i}", "order": ["抖音", "公众号"], "lag_h": 1.0}
+                               for i in range(groups)],
+                    "pairs": pairs}
+        return cd.recommend_cadence(ordering, settings=object())
+
+    def test_提前量远大于周期就不必动(self, monkeypatch) -> None:
+        out = self._run(monkeypatch, {"抖音→公众号": {"median_h": 80.0}})
+        assert "不必动" in out[0] and "平台本身" in out[0]
+
+    def test_提前量小于周期说明靠跑得勤(self, monkeypatch) -> None:
+        out = self._run(monkeypatch, {"抖音→公众号": {"median_h": 1.0}})
+        assert "压周期真有用" in out[0]
+
+    def test_周期未知就不下判断(self, monkeypatch) -> None:
+        monkeypatch.setattr(cd, "MIN_SAMPLE", 1)
+        monkeypatch.setattr(cd, "_intervals_h", lambda s: {})
+        out = cd.recommend_cadence(
+            {"groups": [{"name": "r", "order": ["抖音"], "lag_h": 1.0}] * 25,
+             "pairs": {"抖音→公众号": {"median_h": 80.0}}}, settings=object())
+        assert "周期未知" in out[0]
+
+    def test_永远只是建议不自动改配置(self, monkeypatch) -> None:
+        """⚠️ 改 cron 要重启才生效,得由人决定 —— 建议里必须写死这一句。"""
+        out = self._run(monkeypatch, {"抖音→公众号": {"median_h": 80.0}})
+        assert any("不自动改配置" in x for x in out)

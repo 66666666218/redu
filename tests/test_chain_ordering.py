@@ -247,3 +247,35 @@ class TestTick:
         assert co.chain_ordering_tick(settings=_S()) == 1
         assert "左截断" in sent["text"]
         assert "抖音" in sent["text"] and "迅雷群" in sent["text"]
+
+    def test_周卡三块必须都在(self, session, monkeypatch) -> None:
+        """★ 集成:台账 / 交付看板 / 调度建议三块都要在卡上。
+
+        ⚠️ 为什么单独钉一条:交付与调度两块各自有 `try` 兜底(一块挂掉不许带走上限),
+        而**兜底会把 bug 变成一行小字** —— 实测就撞过一次(`recommend_cadence` 的关键字
+        参数改了名,卡照样发出去,只在末尾多一句"交付看板本轮渲染失败")。
+        没有这条断言,那种"静默降级"能一路混到线上。
+        """
+        self._seed(session)
+        sent: dict = {}
+
+        class _Hook:
+            def __init__(self, *a, **k):
+                pass
+
+            def send(self, text: str) -> bool:
+                sent["text"] = text
+                return True
+
+        class _S:
+            feishu_secret = ""
+
+        monkeypatch.setattr("app.services.feishu_client.webhook_for", lambda *a, **k: "hook")
+        monkeypatch.setattr("app.services.feishu_client.FeishuClient", _Hook)
+        monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+
+        assert co.chain_ordering_tick(settings=_S()) == 1
+        t = sent["text"]
+        assert "交付看板" in t, "交付那块没渲染出来"
+        assert "调度建议" in t, "调度建议那块没渲染出来"
+        assert "渲染失败" not in t, f"有块降级了:\n{t[-300:]}"
