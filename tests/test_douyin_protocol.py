@@ -292,6 +292,31 @@ def test_网络异常归类为_network(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# 凭据来源:没传 session 这件事必须**喊出来**
+# ---------------------------------------------------------------------------
+
+
+def test_没传_session_要报警告(caplog):
+    """★ 2026-10-07 **实测踩到**的坑:`_cookie(session=None)` **压根不查加密库**,
+    直接回落到 `.env`(通常为空)⇒ 请求不带登录态 ⇒ 2483,而**表现只是"搜不到"**。
+
+    那天是靠"库里 53 项、函数读到 0 字节"这个对比才发现的 —— 静默的代价太大,
+    所以这里钉住:**没传 session 必须留痕**。
+    """
+    with caplog.at_level("WARNING"):
+        dp._cookie(session=None)
+    assert any("没收到 db session" in r.message for r in caplog.records), \
+        "没传 session 时没有任何提示 —— 又会变成一次静默失败"
+
+
+def test_传了_session_就不该报那条警告(caplog):
+    """反面对照:传了 session 就不该喊(否则警告会被噪音淹没、没人再看)。"""
+    with caplog.at_level("WARNING"):
+        dp._cookie(session=object())      # 假 session:get_cookie 会抛,被吞成 debug
+    assert not any("没收到 db session" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
 # 翻页契约
 # ---------------------------------------------------------------------------
 

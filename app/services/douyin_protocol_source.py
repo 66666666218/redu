@@ -108,6 +108,13 @@ def _cookie(session=None, user_id: int = 1, settings=None) -> str:
         from config.settings import get_settings
         settings = get_settings()
     blob = ""
+    if session is None:
+        # ⚠️⚠️ **这是最容易踩的一脚**(2026-10-07 实测踩到):没传 `session` 就
+        # **压根没去查加密库** —— 凭据明明在库里,这里却回落到 `.env`(通常为空),
+        # 于是请求不带登录态、回 2483,而**表现只是"搜不到"**。
+        # 静默的代价太大:当天我就是靠"库里 53 项 / 函数读到 0 字节"这个对比才发现的。
+        logger.warning("抖音纯协议:`_cookie()` **没收到 db session** ⇒ 没有查加密库,"
+                       "只用 .env 的 `douyin_cookie`(通常为空)。生产调用务必传 `session=db`")
     if session is not None:
         try:
             from app.services.cookie_store import get_cookie
