@@ -29,6 +29,7 @@ import re
 from sqlalchemy import select
 
 from app.utils import get_logger
+from app.services.chain_delivery import mark_newly_moved
 
 logger = get_logger(__name__)
 
@@ -679,7 +680,11 @@ def _save_leads(session, user_id: int, leads: list[dict]) -> int:
         row.share_count = int(ld.get("share_count") or 0)
         row.kind = str((ld.get("kouling") or {}).get("kind") or "")[:16]
         # **这条线索搬成了哪条链**(2026-10-04 补):原来落库时丢了,事后查不出来
+        had_link = bool(str(row.our_url or ""))      # ⚠️ 赋值**之前**取,见 mark_newly_moved
         row.our_url = str((ld.get("kouling") or {}).get("our_url") or "")[:500]
+        # **首次搬成时刻**(2026-10-07):只覆盖"首采即搬成"的那些;后续轮次补搬的走
+        # `quark_kouling`,那一处另有打戳(两处都要,否则一半样本没有时延)。
+        mark_newly_moved(row, had_link)
         n += 1
     return n
 

@@ -44,6 +44,7 @@ from sqlalchemy import select
 
 from app.db.models import XunleiGroupShare
 from app.utils import get_logger
+from app.services.chain_delivery import mark_newly_moved
 
 logger = get_logger(__name__)
 
@@ -440,7 +441,9 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
 
         _have = reuse_if_have(session, user_id, row.title)
         if _have and _have.get("my_link"):
+            _had = bool(str(row.our_url or ""))
             row.status, row.our_url = "ok", str(_have["my_link"])
+            mark_newly_moved(row, _had)  # **首次搬成**(复用已有链也算搬成)
             row.message = "三盘互通:复用已有链,未重复转存"
             ok_items.append({"title": row.title, "group_name": row.group_name,
                              "share_url": row.our_url, "code": ""})
@@ -448,7 +451,9 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
             continue
         out = xt.transfer_and_share(row.origin_url)
         if out.get("status") == "ok":
+            _had = bool(str(row.our_url or ""))
             row.status, row.our_url = "ok", out.get("share_url") or ""
+            mark_newly_moved(row, _had)  # **首次搬成时刻**(2026-10-07)
             row.pass_code, row.fid, row.message = out.get("code") or "", out.get("fid") or "", ""
             ok_items.append({"title": row.title, "group_name": row.group_name,
                              "share_url": row.our_url, "code": row.pass_code})

@@ -438,6 +438,12 @@ class DouyinLead(Base):
     # 夸克口令那条链**是否已经试过**(2026-10-06):失败也要落痕 ——
     # 否则每轮都会拿同一批"App 匹配不了"的迅雷型线索去烧模拟器时间。
     kouling_tried_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # **首次搬成**的时刻(2026-10-07)。与 `our_url` 配套,但**不是同一件事**:
+    # `our_url` 只回答"搬成了哪条链",回答不了"**从看到到搬成花了多久**"——
+    # 而后者才是"够不够及时"的真指标(抖音最先看到 80 小时,如果搬成又要 3 天,那提前量是白给的)。
+    # ⚠️ **存量行为 NULL** —— 那批当时没记,补不出来(拿 found_at 顶 = 编数据)。
+    # 读取端必须把 NULL 当"**没记**"而不是"没搬成"(见 chain_delivery 的 `no_ts` 计数)。
+    moved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # **帖子发布时间**(2026-10-06):新鲜度的**唯一真依据**。
     # 没有它时只能拿 `found_at`(我们发现的时刻)当新鲜度 —— 那是**假的新鲜度**:
     # 老帖被推广号反复推时照样"刚发现",于是搬回来的大半是已有的老资源。
@@ -665,6 +671,11 @@ class XunleiGroupShare(Base):
     fid: Mapped[str] = mapped_column(String(64), default="")           # 我方盘文件 id
     msg_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # 群消息时间
     synced_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    # **首次搬成**的时刻(2026-10-07,与 `douyin_leads.moved_at` 同一件事、同一条纪律)。
+    # ⚠️ **不能用 `synced_at` 顶**:那一列每轮采集都会刷新(最后一次写库的时刻),
+    # 拿它减 `msg_time` 算"搬成耗时"会得出一个**随重跑次数变大**的假数。
+    # 存量行同样是 NULL(没记过),读取端当"没记"不当"没搬成"。
+    moved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class DiscoveredPanLink(Base):

@@ -367,6 +367,10 @@ def chain_ordering_tick(settings=None) -> int:
 
     ⚠️ 窗口取 **14 天**而不是 90:各链历史长度不同(见 `TRUNCATION_NOTE`),
     窗口越长左截断越重。14 天是"各链都在线"和"样本尽量多"之间的折中。
+
+    2026-10-07 补:同一张卡里带上**交付看板**(`chain_delivery`)——
+    "谁先看到"只答了一半,另一半是"看到了有没有及时搬成/推出去"。
+    **不另开一个 cron**:同一件事的两半,分开推只会让两边都容易被忽略。
     """
     from config.settings import get_settings
 
@@ -392,7 +396,15 @@ def chain_ordering_tick(settings=None) -> int:
                 text += (f"· {g['name'][:34]} —— {' → '.join(g['order'])}"
                          f"(跨 {g['lag_h']:.0f}h){flag}\n")
         text += "\n" + TRUNCATION_NOTE
+        # 交付看板:与台账同一张卡(见 docstring)。单独 try —— 它挂了不该把台账也带掉。
+        try:
+            from app.services.chain_delivery import delivery_report, render_lines
+
+            text += "\n\n" + "\n".join(render_lines(delivery_report(db, uid, days=14)))
+        except Exception:  # noqa: BLE001
+            logger.exception("交付看板渲染失败(台账照推)")
+            text += "\n\n⚠️ 交付看板本轮渲染失败,已单独记日志。"
     finally:
         db.close()
     return 1 if FeishuClient(hook, settings.feishu_secret).send(
-        "🧭 跨链先后台账(近 14 天)\n" + text[:3000]) else 0
+        "🧭 跨链时效(近 14 天:谁先看到 · 有没有及时交付)\n" + text[:3000]) else 0

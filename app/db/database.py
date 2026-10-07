@@ -154,7 +154,14 @@ ADDITIONS: dict[str, list[str]] = {
     # ⚠️ 此前只有 `found_at`(我们发现的时刻),那是**假的新鲜度**:
     # 老帖被推广号反复推时,照样是"刚发现",于是"每天搬 8 条"搬回来的大半是老资源。
     "douyin_leads": ["our_url VARCHAR(500) DEFAULT ''", "kouling_tried_at DATETIME",
-                     "publish_at DATETIME"],
+                     "publish_at DATETIME",
+                     # **首次搬成时刻**(2026-10-07):从"看到"到"搬成"隔了多久,
+                     # 是判断"够不够及时"的真指标。存量行 NULL = **当时没记**,
+                     # 读取端当"没记"处理,**不要拿 found_at 顶**(那是编数据)。
+                     "moved_at DATETIME"],
+    # 迅雷群分享的**首次搬成时刻**(2026-10-07)。⚠️ 别用 `synced_at` 顶 ——
+    # 那一列每轮采集都刷新,减出来的"搬成耗时"会随重跑次数变大。
+    "xunlei_group_shares": ["moved_at DATETIME"],
     "alerts": ["section VARCHAR(32) DEFAULT ''"],
     "douhot_watch": ["section VARCHAR(16) DEFAULT 'douhot'", "filter_keyword VARCHAR(64) DEFAULT ''",
                      "date_window INTEGER"],

@@ -33,6 +33,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from app.utils import get_logger
+from app.services.chain_delivery import mark_newly_moved
 
 logger = get_logger(__name__)
 
@@ -257,7 +258,9 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
 
         have = reuse_if_have(session, user_id, lead.title or lead.mark or "")
         if have and have.get("my_link"):
+            _had = bool(str(lead.our_url or ""))
             lead.our_url = str(have["my_link"])[:500]
+            mark_newly_moved(lead, _had)     # **首次搬成**(复用已有链也算搬成)
             logger.info("夸克口令:线索 %s 命中三盘互通,直接复用 %s", lead.aweme_id, lead.our_url)
             done += 1
             reused += 1
@@ -302,7 +305,9 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
                 logger.info("夸克口令:「%s」三盘互通命中,复用已有链(不另建分享)", title[:24])
             else:
                 sh = qt.share_fids([fid], title=title or "口令转存")
+            _had = bool(str(lead.our_url or ""))
             lead.our_url = str(sh["share_url"])[:500]
+            mark_newly_moved(lead, _had)     # **首次搬成时刻**(2026-10-07)
             # 同时进**资源库**那条路:`status='ok'` 是有意的 ——
             # `pan_discovery` 只把 ok/skipped 当"已知",于是**不会被重复转存**;
             # 而 `resource_library` 读这张表,agent 的 `_library_evidence` 就能看见它。

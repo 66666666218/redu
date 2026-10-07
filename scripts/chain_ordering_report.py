@@ -37,6 +37,25 @@ def main() -> int:
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     days = int(args[0]) if args and args[0].isdigit() else 90
 
+    if "--delivery" in sys.argv:
+        # 只看「看到 → 搬成 → 推出」那一半(链路的**交付**侧,不是先后)
+        from app.db import get_session_local
+        from app.db.models import User
+        from app.services.chain_delivery import delivery_report, render_lines
+
+        db = get_session_local()()
+        try:
+            uid = db.query(User).filter(User.enabled.is_(True)).first()
+            if uid is None:
+                print("没有启用的用户")
+                return 1
+            rep = delivery_report(db, int(uid.id), days=days if args else 14)
+        finally:
+            db.close()
+        for line in render_lines(rep):
+            print(line)
+        return 0
+
     from app.db import get_session_local
     from app.db.models import User
 
