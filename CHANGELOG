@@ -1,3 +1,4 @@
+- [2026-10-07 14:19] FIX: 全作业时刻错开 —— 监听挪到整点后2分,16 个作业各占不同分钟 (Files: app/services/scheduler.py, config/settings.py)
 - [2026-10-07 12:34] FIX: 去重脚本自己定 stdout 编码(原来靠调用环境,后台跑必崩) (Files: scripts/pan_dedupe_apply.py, scripts/pan_dedupe_report.py)
 - [2026-10-07 12:06] FEAT: agent 学习**接上结算结果**当标签(原来只学'话题热不热') (Files: app/services/agent_learning.py, tests/test_agent_learning_settlement_label.py)
 - [2026-10-07 11:53] FEAT: 微博接进「按资源名搜盘」那条链(原来只跑热榜) (Files: config/settings.py)

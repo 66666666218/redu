@@ -438,8 +438,16 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     # 每天仅 4 次主动请求,最大限度降低微信读书风控压力(Cookie 生命周期优先)。
     # misfire_grace_time=3600:定点错过后 1 小时内仍补跑(防止休眠/重启错过窗口)。
     from app.services.schedule_service import WECHAT_LISTEN_HOURS
+    # ⚠️⚠️ **挪到整点后 2 分钟**(2026-10-07)—— 起因是今天 04:00 / 08:00 / 14:00
+    # **三轮监听全被 `database is locked` 挡死**,而 `busy_timeout` 明明有 30 秒,
+    # 它却**只等 8 秒就失败**。机理:SQLite 对"**先读后写**"的锁升级**不走 busy_timeout**
+    # (等待会死锁,所以它选择立刻 BUSY)—— 而监听轮正是"先读一大堆、才第一次写"。
+    # 而 14:00:00 那一秒,**一批作业同时启动**(remote_sync / bili_account_scan /
+    # xunlei_sync / xunlei_group / presence_bili / douhot_window / collect_tick …)
+    # ⇒ 整点是最挤的时刻,监听挤在里面必输。
+    # 错开 2 分钟就能避开那一波(它们是 */20、*/30 的整点档,不会在 :02 上再撞)。
     _add_job(scheduler, wechat_collect_tick,
-             CronTrigger(hour=",".join(str(h) for h in sorted(WECHAT_LISTEN_HOURS)), minute="0"),
+             CronTrigger(hour=",".join(str(h) for h in sorted(WECHAT_LISTEN_HOURS)), minute="2"),
              "wechat_collect_tick", "wechat", misfire_grace_time=3600)
     _add_job(scheduler, run_fixed_time_digests, CronTrigger(minute="*"), "alert_fixed_time", "both")
     for func, job_id in ((retry_failed_runs, "auto_retry_failed_runs"), (check_collect_failures, "collect_failed_alert"),

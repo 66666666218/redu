@@ -115,7 +115,10 @@ class Settings(BaseSettings):
                                      # renewal 后的新会话上一次性打穿全部额度,会话数小时内即死,
                                      # 与书架门轻量监听抢同一份额度;需要补采历史时手动开+手动设
                                      # weread_fullsync_pending_<uid> 标记
-    weread_refresh_cron: str = "50 3,7,13,19 * * *"  # 微信读书 Cookie 续期:对齐到 4 个监听定点(4/8/14/20 点)前 10 分钟
+    # ⚠️ 监听 2026-10-07 挪到**整点后 2 分钟**(避开整点并发,见 scheduler 里的说明),
+    # 所以续期也跟着挪到 :52 —— 保持"**监听前 10 分钟**换好新 skey"这个对齐关系。
+    # (原来监听在整点,续期是 :50;现在 04:02 监听 ⇒ 03:52 续期。)
+    weread_refresh_cron: str = "52 3,7,13,19 * * *"
                                      # ——① skey 恒新,轮内 auth 兜底几乎不用出手;② renewal=换新会话,
                                      # mp/articles 列表只在会话初期可用,每轮都跑在窗口 freshly 重开的会话上,
                                      # 同日多篇枚举机会最大化(2026-09-28 定稿)
@@ -150,7 +153,7 @@ class Settings(BaseSettings):
     remote_db_user: str = "redu"
     remote_db_password: str = ""
     remote_db_name: str = "redu"
-    remote_sync_cron: str = "*/30 * * * *"
+    remote_sync_cron: str = "9,39 * * * *"
     # 链路体检推送(2026-10-05 用户口径:「没有推送小红书、B站、知乎、贴吧多平台的运行情况啊」):
     # 每天把**全部链路**的运行情况推**管理群**。⚠️ 全绿也推 —— "今天全绿"本身是运维要知道的信息,
     # 而且只有每天都来,人才会注意到"今天没来"(与 health_push 同一条)。
@@ -170,13 +173,13 @@ class Settings(BaseSettings):
     tg_channels: str = ""           # 频道名(逗号分隔,不带 @),如 "channel_a,channel_b"
     tg_proxy: str = ""              # 出口代理(http://host:port);留空直连
     tg_limit: int = 30              # 单频道每轮取最近几条
-    tg_cron: str = "*/30 * * * *"   # 采集频率(默认每 30 分钟;频道更新密度远低于热点榜)
+    tg_cron: str = "14,44 * * * *"   # 采集频率(默认每 30 分钟;频道更新密度远低于热点榜)
     # ---- 跨平台同类资源号发现(2026-10-01):拿资源关键词去知乎/B站等平台搜同类号 ----
     # 只收录**内容里真含网盘链**的账号;各平台门槛见 app/services/cross_platform.py 头注
     cross_discover_enabled: bool = True
     cross_discover_keywords: int = 3        # 每轮取几个资源名当搜索词(**宁少勿多**:
                                             # 每个词都是一次平台请求,风控盯的就是"访问量")
-    cross_discover_cron: str = "0 9 * * 1,4"  # **每周只跑两轮**(周一/周四 09:00)——
+    cross_discover_cron: str = "25 9 * * 1,4"  # **每周只跑两轮**(周一/周四 09:00)——
                                               # 用户要求"一次不要访问太多";持续高频轮询
                                               # 是最容易被平台判定为爬虫的模式
     # B站(账号**垂直**平台)的搜索词:**行业词,不是资源词**(2026-10-02 实测差异极大:
@@ -225,7 +228,7 @@ class Settings(BaseSettings):
     #    (`agent_tick_all_users`)也在远程**;挂本机的话 `remote_sync` **不推这张表**,链当场就断。
     # ⚠️ **限流是按端点分的、与 IP 无关**(2026-10-05 受控对比:`search/type` 本机与远程都 OK,
     #    `space/wbi/arc/search` 两边都 412)⇒ 远程 IP **没被封**;烧额度的是当天的密集探测。
-    bili_scan_cron: str = "0 */2 * * *"
+    bili_scan_cron: str = "12 */2 * * *"
     # ⚠️ **每轮扫几个号**:2026-10-06 由 **1 提到 6**。
     # 原来 `1 × 每 2 小时` = **12 个/天**,而池子有 59 个 ⇒ 跑一圈要 **5 天**
     # (用户口径:"59 个号只跑了 9 个,太慢")。池子还都是"没扫过的优先",
@@ -260,7 +263,7 @@ class Settings(BaseSettings):
     douyin_leads_hot_keywords: int = 1
     # **每天** 11:00(用户口径 2026-10-02:"我想要你每天都在抖音发现新的资源")。
     # 它要开浏览器,一次几分钟 —— 所以每天只跑一轮,别加频次。
-    douyin_leads_cron: str = "0 11 * * *"
+    douyin_leads_cron: str = "10 11 * * *"
     douyin_leads_keywords: int = 4            # 每轮一共几个搜索词(每个词一次抖音搜索)
     # **群里新冒出来的资源名**贡献几个词。它是**资源名称的一种来源**(另一种是资源库)。
     #
@@ -296,13 +299,13 @@ class Settings(BaseSettings):
     # 而且部分口令是**群组口令**(要先进群,PC 客户端没有进群功能,所以 PC 端搜不出来)。
     # 所以人工只保留"App 里搜一下 + 点转存",本作业接手剩下的全自动部分。
     xunlei_sync_enabled: bool = True
-    xunlei_sync_cron: str = "*/30 * * * *"    # 每 30 分钟扫一次(秒级完成,不打风控)
+    xunlei_sync_cron: str = "5,35 * * * *"    # 每 30 分钟扫一次(秒级完成,不打风控)
     # ---- 迅雷群组采集(2026-10-02)见 app/services/xunlei_group.py ----
     # 群消息流里**群主发的分享卡自带 `pan.xunlei.com/s/<share_id>`** —— 客户端唯一的
     # "口令 → shareID"那一步,**群组替我们做了**。两步走:①采集登记(pending,纯 HTTP 读,
     # 可高频)②**限量**转存(转存慢且占盘,所以每轮只放 `transfer_limit` 条)。
     xunlei_group_enabled: bool = True
-    xunlei_group_cron: str = "*/20 * * * *"   # 每 20 分钟采一轮
+    xunlei_group_cron: str = "7,27,47 * * * *"   # 每 20 分钟采一轮
     xunlei_group_transfer_limit: int = 5      # 每轮最多转存几条(0 = 只采集不转存)
     # **转存闸门**(2026-10-02):盘使用率到这条线就**整批不搬**。
     # 为什么必须有:实测自动转存把群里的大合集搬进盘,空间顶到 126%,之后全部
@@ -332,7 +335,7 @@ class Settings(BaseSettings):
     douhot_alert_max: int = 5       # 单次判涨告警上限(防刷屏)
     douhot_alert_cooldown_hours: int = 24  # 同一内容词告警冷却(小时)
     douhot_window_windows: str = "1,24"  # 关键词多窗口对比的窗口集(小时,逗号分隔;默认近1h+近1天)
-    douhot_window_cron: str = "*/20 * * * *"  # 多窗口对比采集频率(默认每20分钟,与榜单采集互补)
+    douhot_window_cron: str = "17,37,57 * * * *"  # 多窗口对比采集频率(默认每20分钟,与榜单采集互补)
     alert_cooldown_hours: int = 6   # 预警规则冷却(小时),避免重复刷
     proxy_url: str = ""             # 隧道代理地址
     proxy_user: str = ""            # 隧道代理账号
@@ -481,10 +484,10 @@ class Settings(BaseSettings):
     # ⚠️ **这条作业只跑"走浏览器"的平台**(小红书/快手/贴吧)——B站有自己的快作业,
     # 见 `presence_bili_cron`。每天两轮(2026-10-07:原来一轮,加密到两轮;
     # 再密就要付"每轮各开一次浏览器"的代价,不值)。
-    presence_cron: str = "0 9,17 * * *"
+    presence_cron: str = "10 9,17 * * *"
     # **B站单独的快节奏作业**:它走公开 API、不开浏览器、无风控,所以能每 2 小时跑。
     # 用户口径「小红书/B站/贴吧能否跟抖音一样两小时一轮」—— 只有 B站 承受得起。
-    presence_bili_cron: str = "0 */2 * * *"
+    presence_bili_cron: str = "20 */2 * * *"
     # 跨平台共振榜(2026-10-07 用户口径「每天推一次」):同一份资源在几个平台被几个号在推。
     # 放 10:40 而不是 10:30 —— 10:30 是「多平台热榜速览」的时刻(**远程实例发**),
     # 两张卡会同时落进「多平台监控」群。本仓的口径是「**不要堆在一个时间点推送**」
@@ -529,7 +532,7 @@ class Settings(BaseSettings):
     # 而且走**移入回收站**(可恢复),风险不是一个量级。用户也明确要求它按时跑。
     xunlei_dedupe_enabled: bool = True
     xunlei_dedupe_max_per_run: int = 30                 # 单轮最多移入回收站几个(接口无批量)
-    xunlei_dedupe_cron: str = "0 4 * * 0"               # 每周日 04:00(重名积累得慢,不用每天)
+    xunlei_dedupe_cron: str = "50 4 * * 0"               # 每周日 04:00(重名积累得慢,不用每天)
 
     # ---- 拉新周录提醒(2026-10-03)----
     # `pan_recruit_weekly` 是**转化回路唯一的真值入口**,但至今 0 行 —— 入口(接口/前端)早就有,
