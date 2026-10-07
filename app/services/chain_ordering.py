@@ -283,9 +283,21 @@ def ordering_report(session: Session, user_id: int, days: int = 90,
                 lag = (order[j][1]["ts"] - order[i][1]["ts"]).total_seconds() / 3600
                 pairs.setdefault((order[i][0], order[j][0]), []).append(lag)
         n_members = len({_norm(m["name"]) for m in g["members"]})
+        # **组内最小两两相似度** —— 判断"这一组是不是把不相干的东西并进来了"。
+        # ⚠️ 为什么需要它:`bloated`(写法数超上限)在**真的热门资源**上必然触发
+        # (实测《高性价比人生指南》确有 17 种写法),拿它当"误配"信号会**误报**。
+        # 真误配的特征是"组里有**一对**彼此不像",而两两最小相似度量的正是这个。
+        # 组是 leader 聚类(每条只跟种子比),所以这一步顺带验证"跟种子像"是否
+        # 传递到了"彼此也像"。
+        cores = {_norm(m["name"]): _grams(_norm(m["name"])) for m in g["members"]}
+        min_sim = 1.0
+        keys = list(cores)
+        for i in range(len(keys)):
+            for j in range(i + 1, len(keys)):
+                min_sim = min(min_sim, containment(cores[keys[i]], cores[keys[j]]))
         out_groups.append({
             "name": g["seed"], "seed": g["seed"], "chains": len(by_chain),
-            "members": n_members,
+            "members": n_members, "min_pair_sim": round(min_sim, 3),
             # ⚠️ 条数超上限 = 阈值太松的信号,**必须标出来**(见 `MAX_GROUP`)
             "bloated": n_members > MAX_GROUP,
             "order": [c for c, _ in order],
@@ -408,10 +420,17 @@ def chain_ordering_tick(settings=None) -> int:
             # ⚠️ 样本不够时它只会说"现在给建议就是假信号" —— 那是**对的输出**,不是残缺。
             text += "\n\n**调度建议**\n" + "\n".join(
                 recommend_cadence(rep, settings=settings))
+            # **假设台账**(2026-10-07):把"我们相信什么"落库,每周自动判一次,**只报变化**。
+            # 与前面两块同一张卡:三块讲的是同一件事的三个层次 ——
+            # 谁先看到(台账)→ 有没有交付(交付看板)→ 所以我们该信什么(假设台账)。
+            from app.services.learning_ledger import evaluate as _learn, render_lines as _lrender
+
+            text += "\n\n" + "\n".join(_lrender(_learn(db, uid, days=14)))
         except Exception:  # noqa: BLE001
-            logger.exception("交付看板渲染失败(台账照推)")
-            text += "\n\n⚠️ 交付看板本轮渲染失败,已单独记日志。"
+            logger.exception("交付看板/假设台账渲染失败(台账照推)")
+            text += "\n\n⚠️ 交付看板或假设台账本轮渲染失败,已单独记日志。"
     finally:
         db.close()
     return 1 if FeishuClient(hook, settings.feishu_secret).send(
-        "🧭 跨链时效(近 14 天:谁先看到 · 有没有及时交付)\n" + text[:3000]) else 0
+        "🧭 跨链时效与假设台账(近 14 天)\n"
+        "谁先看到 · 有没有及时交付 · 我们该信什么\n" + text[:2900]) else 0

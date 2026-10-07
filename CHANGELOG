@@ -1,3 +1,4 @@
+- [2026-10-07 15:51] FEAT: 假设台账 —— 把「我们相信什么」写成可证伪的主张,数据每周自动判一次 (Files: app/services/learning_ledger.py, scripts/learning_report.py, tests/test_learning_ledger.py, app/services/chain_ordering.py)
 - [2026-10-07 15:42] FEAT: 调度建议由「提前量 vs 探测周期」推出,并接进周卡 (Files: app/services/chain_delivery.py, app/services/chain_ordering.py, tests/test_chain_ordering.py, tests/test_chain_delivery.py)
 - [2026-10-07 15:37] FEAT: 交付看板「看到→搬成→推出」+ 补 first-move 时刻戳 (`moved_at`) (Files: app/services/chain_delivery.py, app/db/models.py, app/db/database.py, tests/test_chain_delivery.py, app/services/chain_ordering.py, scripts/chain_ordering_report.py, app/services/douyin_leads.py, app/services/quark_kouling.py, app/services/xunlei_group.py)
 - [2026-10-07 15:27] FEAT: 跨链「谁先看到这份资源」台账 —— 把平台先后假设变成可验证的数据 (Files: app/services/chain_ordering.py, scripts/chain_ordering_report.py, tests/test_chain_ordering.py, config/settings.py, app/services/scheduler.py)
