@@ -825,18 +825,23 @@ def push_hot_rank_card_all_users(settings=None, top_n: int = 3) -> int:
     lines = ["🔥 多平台热榜速览"]
     try:
         for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
-            latest = db.scalar(select(func.max(HotSourceItem.captured_at)).where(
-                HotSourceItem.user_id == uid))
-            if latest is None:
-                continue
-            rows = db.execute(
-                select(HotSourceItem.source, HotSourceItem.title, HotSourceItem.rank, HotSourceItem.extra)
-                .where(HotSourceItem.user_id == uid, HotSourceItem.captured_at == latest,
-                       HotSourceItem.rank <= top_n)
-                .order_by(HotSourceItem.source, HotSourceItem.rank)).all()
+            # ⚠️⚠️ **按"每个源自己的最新一轮"取,不能取"全表最新的那一刻"**(2026-10-07 修)。
+            # 原来写的是 `captured_at == max(captured_at)`,而**各源是不同作业在不同时刻写的**
+            # (hot_source 每小时 :05;百度/微博/抖音各自另算)⇒ 全表最新那一刻只有**那一批**
+            # 源在,卡上于是只剩 13 个 —— 用户当场看出来:「不是 38 个平台吗,怎么就这几个」。
+            # 实测:库里 **41 个源**,而按老写法只有 13 个进卡。
+            per_src = dict(db.execute(
+                select(HotSourceItem.source, func.max(HotSourceItem.captured_at))
+                .where(HotSourceItem.user_id == uid)
+                .group_by(HotSourceItem.source)).all())
             by_src: dict[str, list] = {}
-            for src, title, rank, extra in rows:
-                by_src.setdefault(str(src), []).append((rank, title, extra))
+            for src, ts in per_src.items():
+                for _t, rank, extra in db.execute(
+                        select(HotSourceItem.title, HotSourceItem.rank, HotSourceItem.extra)
+                        .where(HotSourceItem.user_id == uid, HotSourceItem.source == src,
+                               HotSourceItem.captured_at == ts, HotSourceItem.rank <= top_n)
+                        .order_by(HotSourceItem.rank)).all():
+                    by_src.setdefault(str(src), []).append((rank, _t, extra))
             for src in sorted(by_src, key=lambda s: s not in ("bilibili", "douban")):
                 label = _PLAT_LABEL.get(src, src)
                 lines.append(f"\n【{label}】")

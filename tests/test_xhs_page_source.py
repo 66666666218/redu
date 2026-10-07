@@ -289,3 +289,66 @@ class TestAccountHealth:
         monkeypatch.setattr(x, "_profiles", lambda s=None: [])
         items = ch.check_xhs_accounts()
         assert items[0]["level"] == ch.YELLOW and "XHS_BROWSER_PROFILES" in items[0]["detail"]
+
+
+class TestHotRankCardAllSources:
+    """★ **每个源各取自己最新那一轮**(2026-10-07 用户当场看出来的 bug)。
+
+    老写法取的是"**全表最新的那一刻**",而各源是**不同作业在不同时刻**写的
+    ⇒ 那一刻只有那一批源在,卡上于是只剩十几个(用户:「不是 38 个平台吗,怎么就这几个」)。
+    实测:库里 41 个源,老写法当场只能拿到 **1** 个。
+    """
+
+    @staticmethod
+    def _session():
+        from datetime import datetime, timedelta
+
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        from app.db import models  # noqa: F401
+        from app.db.database import Base
+        from app.db.models import HotSourceItem, User
+
+        eng = create_engine("sqlite://")
+        Base.metadata.create_all(eng)
+        db = sessionmaker(bind=eng, autoflush=False, expire_on_commit=False)()
+        db.add(User(id=1, username="u1", email="u1@b.c", password_hash="x", enabled=True))
+        now = datetime.now()
+        # 两个源在**不同时刻**采集 —— 这正是老写法翻车的地方
+        db.add(HotSourceItem(user_id=1, source="cankoxiaoxi", rank=1, title="参考消息头条",
+                             captured_at=now - timedelta(hours=3)))
+        db.add(HotSourceItem(user_id=1, source="hupu", rank=1, title="虎扑热帖",
+                             captured_at=now))
+        db.commit()
+        return db
+
+    def test_两个源即使采集时刻不同也都要上卡(self, monkeypatch) -> None:
+        from app.services import hot_sources as hs
+        from app.services.feishu_client import FeishuClient
+
+        sent: dict = {}
+
+        class _F:
+            def __init__(self, *a, **k):
+                pass
+
+            def send(self, text):
+                sent["text"] = text
+                return True
+
+        db = self._session()
+        try:
+            monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: db))
+            monkeypatch.setattr(hs, "webhook_for", lambda *a, **k: "hook", raising=False)
+            monkeypatch.setattr(FeishuClient, "send", _F("x", "").send, raising=False)
+            monkeypatch.setattr("app.services.feishu_client.FeishuClient", _F)
+            monkeypatch.setattr("app.services.feishu_client.webhook_for",
+                                lambda *a, **k: "hook")
+            class _S:
+                feishu_secret = ""
+            hs.push_hot_rank_card_all_users(settings=_S())
+            assert "参考消息头条" in sent["text"], "采得早的那个源被丢了"
+            assert "虎扑热帖" in sent["text"]
+        finally:
+            db.close()
