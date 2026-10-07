@@ -460,3 +460,58 @@ class TestEnvFailureDoesNotBurnTheLead:
         session.refresh(lead)
         assert lead.kouling_tried_at is not None, "内容型失败必须留痕"
         assert qk.drain(session, 1, _S())["tried"] == 0
+
+
+class TestFailureReasonStored:
+    """★ **失败原因必须落库**(2026-10-07 补)。
+
+    在这之前,运行记录里只有「失败 7」这个**数字**,而 `resolve()` 其实每次都返回了
+    很具体的原因(超时 / 没保存成 / 读不出结果 / 空文本 …)—— 那些只进了 `logger.info`,
+    而**日志不落盘**。于是「夸克口令为什么成功率这么低」事后一律查不出来,只能靠猜。
+    """
+
+    def _patch(self, monkeypatch, results: dict):
+        monkeypatch.setattr("app.services.cookie_store.get_cookie", lambda s, u, p: "CK")
+        monkeypatch.setattr("app.services.quark_transfer.QuarkTransfer", _FakeQt)
+        monkeypatch.setattr(qk, "resolve", lambda text, **k: results.get(
+            text, {"ok": False, "reason": "mock"}))
+        return results
+
+    def test_失败原因写进线索并且汇总返回(self, session, monkeypatch) -> None:
+        lead = _lead(session, "a1", "咐置铸剑上供叩苓")
+        self._patch(monkeypatch, {"咐置铸剑上供叩苓": {
+            "ok": False, "reason": "UI 流程超时(90s) —— 模拟器可能卡住了"}})
+        out = qk.drain(session, 1, _S())
+        assert out["failed"] == 1
+        session.refresh(lead)
+        assert "超时" in lead.last_error
+        # 汇总回去,好让运行记录能带出"主因"
+        assert out["reasons"] and "超时" in out["reasons"][0]
+
+    def test_解出来了但没存成文件也算有原因(self, session, monkeypatch) -> None:
+        lead = _lead(session, "a1", "咐置铸剑上供叩苓")
+        self._patch(monkeypatch, {"咐置铸剑上供叩苓": {"ok": True, "title": "铸剑纳贡"}})
+        monkeypatch.setattr(qk, "_find_saved_fid", lambda *a, **k: "")
+        out = qk.drain(session, 1, _S())
+        assert out["failed"] == 1
+        session.refresh(lead)
+        assert "没产出文件" in lead.last_error
+
+    def test_搬成后清空失败原因(self, session, monkeypatch) -> None:
+        """`last_error` 记的是「**最近一次**」—— 搬成了还留着旧原因会误导。"""
+        lead = _lead(session, "a1", "咐置铸剑上供叩苓")
+        lead.last_error = "上次超时了"
+        lead.kouling_tried_at = None
+        session.commit()
+        self._patch(monkeypatch, {"咐置铸剑上供叩苓": {"ok": True, "title": "铸剑纳贡（ForgeTax）"}})
+        assert qk.drain(session, 1, _S())["done"] == 1
+        session.refresh(lead)
+        assert lead.last_error == ""
+
+    def test_运行记录带出主因(self, session, monkeypatch) -> None:
+        """运行记录里光有「失败 7」查不出问题 —— 要把最高频那条原因带出来。"""
+        import collections
+
+        reasons = ["UI 流程超时(90s)"] * 5 + ["空文本"]
+        top = collections.Counter(reasons).most_common(1)
+        assert top[0][0] == "UI 流程超时(90s)" and top[0][1] == 5

@@ -161,7 +161,10 @@ ADDITIONS: dict[str, list[str]] = {
                      # **首次搬成时刻**(2026-10-07):从"看到"到"搬成"隔了多久,
                      # 是判断"够不够及时"的真指标。存量行 NULL = **当时没记**,
                      # 读取端当"没记"处理,**不要拿 found_at 顶**(那是编数据)。
-                     "moved_at DATETIME"],
+                     "moved_at DATETIME",
+                     # 夸克口令**失败原因**(2026-10-07):此前只进日志,而日志不落盘
+                     # ⇒ "失败 7 条为什么"查不出来,只能猜。
+                     "last_error VARCHAR(200) DEFAULT ''"],
     # 迅雷群分享的**首次搬成时刻**(2026-10-07)。⚠️ 别用 `synced_at` 顶 ——
     # 那一列每轮采集都刷新,减出来的"搬成耗时"会随重跑次数变大。
     "xunlei_group_shares": ["moved_at DATETIME"],

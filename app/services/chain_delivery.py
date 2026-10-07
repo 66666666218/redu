@@ -50,6 +50,14 @@ def mark_newly_moved(row: Any, had_link: bool, now: datetime | None = None) -> N
     """
     if had_link:
         return
+    # ⚠️⚠️ **还得"真的有链"才算搬成**(2026-10-07,被单测当场抓到):
+    # 起初只判了 `had_link`,于是 `our_url` **还是空**的时候也会被打上戳 ——
+    # 后果是"没搬成"的线索被记成"搬成时刻 = 采集时刻",那条时延口径**整片是假的**
+    # (而且它长得特别合理:每条的时延都≈0,像是"搬得飞快")。
+    # 五个调用点里有三个传进来的链**可能是空串**(`share_url or ""` 之类),
+    # 所以这条检查放在**这里**——一处兜住,不靠调用方记得。
+    if not str(getattr(row, "our_url", "") or ""):
+        return
     if getattr(row, "moved_at", None) is None:
         row.moved_at = now or datetime.now()
 

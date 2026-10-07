@@ -1167,3 +1167,87 @@ class TestPublishCutoff:
         class _S:
             douyin_leads_min_publish_date = "2026/10/01"      # 格式不对
         assert _min_publish_ts(_S()) == 0                     # 降级成不过滤,但**打了 warning**
+
+
+class TestMovedStamp:
+    """★ `moved_at`(首次搬成时刻)的落库路径。
+
+    ⚠️ 为什么单独测:生产库里 54 条线索**只有 1 条**有戳 —— 那**符合设计**
+    (搬成发生在加这一列之前的存量行**永不打戳**,见 `mark_newly_moved` 的说明),
+    但副作用是**"新搬成的会打戳"这条路径在生产里一直没被真正验证过**。
+    而"没被验证的仪表化"正是本仓反复吃亏的东西 —— 所以在这里用单测钉死它。
+    """
+
+    @staticmethod
+    def _session():
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        from app.db import models  # noqa: F401
+        from app.db.database import Base
+        from app.db.models import User
+
+        eng = create_engine("sqlite://")
+        Base.metadata.create_all(eng)
+        db = sessionmaker(bind=eng, autoflush=False, expire_on_commit=False)()
+        db.add(User(id=1, username="u1", email="u1@b.c", password_hash="x", enabled=True))
+        db.commit()
+        return db
+
+    @staticmethod
+    def _lead(aweme_id: str, our_url: str = "") -> dict:
+        return {"aweme_id": aweme_id, "title": "《高性价比人生指南》教程", "mark": "x",
+                "author": "a", "url": "http://v", "keyword": "k", "share_count": 1,
+                "kouling": {"kind": "share", "our_url": our_url}}
+
+    def test_首采即搬成会打戳(self) -> None:
+        from app.db.models import DouyinLead
+        from app.services.douyin_leads import _save_leads
+
+        db = self._session()
+        try:
+            _save_leads(db, 1, [self._lead("a1", "https://pan.quark.cn/s/OUR")])
+            db.commit()
+            row = db.query(DouyinLead).filter_by(aweme_id="a1").one()
+            assert row.our_url.endswith("/OUR")
+            assert row.moved_at is not None, "首采即搬成的没打戳 = 时延样本永远攒不起来"
+        finally:
+            db.close()
+
+    def test_后续轮次才搬成也会打戳(self) -> None:
+        """upsert 里 `our_url` 从空变有 —— 这是**最常见**的一条路(先采集、后搬运)。"""
+        from app.db.models import DouyinLead
+        from app.services.douyin_leads import _save_leads
+
+        db = self._session()
+        try:
+            _save_leads(db, 1, [self._lead("a1")])          # 第一轮:还没搬成
+            db.commit()
+            assert db.query(DouyinLead).filter_by(aweme_id="a1").one().moved_at is None
+            _save_leads(db, 1, [self._lead("a1", "https://pan.quark.cn/s/LATER")])
+            db.commit()
+            assert db.query(DouyinLead).filter_by(aweme_id="a1").one().moved_at is not None
+        finally:
+            db.close()
+
+    def test_存量行永不打戳(self) -> None:
+        """★ **本设计的核心**:已有链 + 没戳 = 那一批当时没记,**不许补打"现在"**。
+
+        否则"搬成耗时"会算成"从发布到现在" —— 那是**编的**,而且它长得很有说服力
+        (样本变多、数字合理),比缺样本危险得多。
+        """
+        from app.db.models import DouyinLead
+        from app.services.douyin_leads import _save_leads
+
+        db = self._session()
+        try:
+            _save_leads(db, 1, [self._lead("a1", "https://pan.quark.cn/s/OLD")])
+            db.commit()
+            row = db.query(DouyinLead).filter_by(aweme_id="a1").one()
+            row.moved_at = None                    # 模拟"加列之前的存量行"
+            db.commit()
+            _save_leads(db, 1, [self._lead("a1", "https://pan.quark.cn/s/OLD")])
+            db.commit()
+            assert db.query(DouyinLead).filter_by(aweme_id="a1").one().moved_at is None
+        finally:
+            db.close()

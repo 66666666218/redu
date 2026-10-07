@@ -225,7 +225,8 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
         not _looks_like_quark(r.title),
         -(r.publish_at.timestamp() if r.publish_at else 0),
         -int(r.id)))[:limit]
-    done = failed = reused = 0      # `reused` = **三盘互通命中**(连模拟器都没跑)
+    done = failed = reused = 0
+    reasons: list[str] = []      # 失败原因(落库 + 汇总进运行记录)      # `reused` = **三盘互通命中**(连模拟器都没跑)
     try:
         qt = QuarkTransfer(ck)
     except Exception as exc:  # noqa: BLE001
@@ -260,15 +261,18 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
         if have and have.get("my_link"):
             _had = bool(str(lead.our_url or ""))
             lead.our_url = str(have["my_link"])[:500]
+            lead.last_error = ""             # 搬成了就清掉上次的失败原因
             mark_newly_moved(lead, _had)     # **首次搬成**(复用已有链也算搬成)
             logger.info("夸克口令:线索 %s 命中三盘互通,直接复用 %s", lead.aweme_id, lead.our_url)
             done += 1
             reused += 1
             continue
 
+        reason = ""
         for attempt in (1, 2):
             res = resolve(lead.title or lead.mark or "", save=True)
             if not res.get("ok"):
+                reason = str(res.get("reason") or "")[:180]
                 # ⚠️⚠️ **环境故障不该消耗线索**(2026-10-06):`resolve` 用 `env=True` 标出
                 # "模拟器/焦点/超时"这类**与口令内容无关**的失败。上面已经给这条盖了"试过"的章
                 # —— 那是防"无限重试没内容的口令"的,而**环境故障被盖成"试过"是误伤**:
@@ -287,6 +291,10 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
                 time.sleep(3)          # 给保存任务一点落盘时间
         if not fid:
             failed += 1
+            # ⚠️ **把原因落库**(2026-10-07):原来它只进 `logger.info`,而日志不落盘 ⇒
+            # "失败 N 条"永远只有一个数字,查不出是超时、没保存成、还是口令本身没内容。
+            lead.last_error = reason or f"解出「{title}」但保存没产出文件"[:200]
+            reasons.append(lead.last_error[:60])
             if env_fail:
                 # ★ **撤回"试过"的章**:这是环境故障(模拟器拿不到焦点等),不是"这条口令没内容"。
                 # 不撤的话,一次环境抖动会把整批线索**永久判死**(见上面 `env=True` 处的说明)。
@@ -307,6 +315,7 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
                 sh = qt.share_fids([fid], title=title or "口令转存")
             _had = bool(str(lead.our_url or ""))
             lead.our_url = str(sh["share_url"])[:500]
+            lead.last_error = ""
             mark_newly_moved(lead, _had)     # **首次搬成时刻**(2026-10-07)
             # 同时进**资源库**那条路:`status='ok'` 是有意的 ——
             # `pan_discovery` 只把 ok/skipped 当"已知",于是**不会被重复转存**;
@@ -327,11 +336,13 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
         except Exception as exc:  # noqa: BLE001 - 单条失败不影响其余
             session.rollback()
             failed += 1
+            lead.last_error = f"{type(exc).__name__}: {str(exc)[:150]}"
+            reasons.append(lead.last_error[:60])
             logger.warning("夸克口令:线索 %s 处理失败:%s", lead.aweme_id, str(exc)[:120])
             continue
     session.commit()
     return {"status": "ok", "tried": len(todo), "done": done, "failed": failed,
-            "reused": reused}
+            "reused": reused, "reasons": reasons}
 
 
 def quark_kouling_tick(settings=None) -> int:
@@ -355,10 +366,16 @@ def quark_kouling_tick(settings=None) -> int:
                 total += int(out.get("done") or 0)
                 if out.get("status") == "no_cookie":
                     continue
+                # 失败原因取**最高频那条**带进运行记录 —— 一堆数字里,"主因是什么"最关键
+                # (以前只有一个"失败 7",查不出是超时、没保存成、还是口令本身没内容)。
+                import collections as _c
+
+                top = _c.Counter(out.get("reasons") or []).most_common(1)
+                why = f";主因:{top[0][0]}({top[0][1]}×)" if top else ""
                 _record_run(db, uid, "quark_kouling", "success",
                             f"试{out.get('tried', 0)} 成功{out.get('done', 0)} "
                             f"(其中**三盘互通复用{out.get('reused', 0)}**)"
-                            f" 失败{out.get('failed', 0)}")
+                            f" 失败{out.get('failed', 0)}{why}")
                 db.commit()
             except Exception as exc:  # noqa: BLE001
                 db.rollback()

@@ -71,7 +71,15 @@ class TestMarkNewlyMoved:
     """★ 这一列的唯一作用就是"测得准";测得不准比没有更糟(它会变成一句有说服力的错话)。"""
 
     class _Row:
-        moved_at = None
+        """⚠️ 替身必须**带上真行会被读到的字段**。
+
+        第一版这里没有 `our_url` —— 于是被测代码一读它就走"没有链 ⇒ 不算搬成"的分支,
+        测试红的是**替身太弱**,不是代码坏(本仓的老坑,同一类注释别处也写过)。
+        """
+
+        def __init__(self, our_url: str = "https://pan.quark.cn/s/X") -> None:
+            self.our_url = our_url
+            self.moved_at = None
 
     def test_首次搬成会打戳(self) -> None:
         r = self._Row()
@@ -84,6 +92,15 @@ class TestMarkNewlyMoved:
         r = self._Row()
         cd.mark_newly_moved(r, had_link=True, now=NOW)
         assert r.moved_at is None
+
+    def test_没有链就不算搬成(self) -> None:
+        """⚠️⚠️ **被单测当场抓到的真 bug**(2026-10-07):起初只判了 `had_link`,
+        于是 `our_url` **还是空**时也会被打戳 ⇒ "没搬成"的线索被记成"搬成时刻 = 采集时刻",
+        整片时延口径是假的,而且**长得特别合理**(每条时延≈0,像是搬得飞快)。
+        五个调用点里有三个传进来的链可能是空串,所以这条检查必须在**这里**。"""
+        r = self._Row(our_url="")
+        cd.mark_newly_moved(r, had_link=False, now=NOW)
+        assert r.moved_at is None, "空链也打戳了 —— 时延会全是假的 0"
 
     def test_已有戳不覆盖(self) -> None:
         r = self._Row()
