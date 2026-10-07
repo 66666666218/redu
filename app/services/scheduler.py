@@ -483,6 +483,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.disk_guard import disk_guard_tick
     from app.services.resource_presence import presence_bili_tick, presence_tick
     from app.services.resource_library import cross_resonance_tick
+    from app.services.chain_ordering import chain_ordering_tick
     from app.services.xunlei_cleanup import cleanup_tick as xunlei_cleanup_tick
     from app.services.xunlei_cleanup import dedupe_tick as xunlei_dedupe_tick
     from app.services.lead_settlement import record_reminder_tick as recruit_reminder_tick
@@ -625,6 +626,14 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         (quark_kouling_tick, _get_settings().quark_kouling_cron, {"minute": 0, "hour": "*/2"},
          "quark_kouling", "wechat"),
         (push_timeline_tick, "* * * * *", {"minute": "*"}, "push_timeline", "both"),
+        # **跨链先后台账**(2026-10-07):用户口径「抖音基本上是最先开始的,然后公众号,
+        # 一些大瓜从微博中可以更快获取到」—— 这是个**关于平台先后的假设**,要样本才能证。
+        # 只读(五张表各查一次,不开浏览器/不打盘 API),所以成本几乎为零;
+        # **每周一次**够了(见 `chain_ordering_cron`),别每天念同一批数据。
+        # 角色 wechat:五张表都是**本机采集**的(公众号/抖音线索/迅雷群/迅雷盘/公开平台),
+        # 远端只有同步过去的一部分,挂远端会算出一份**缺链**的台账。
+        (chain_ordering_tick, _get_settings().chain_ordering_cron,
+         {"minute": 15, "hour": 10, "day_of_week": "1"}, "chain_ordering", "wechat"),
     ]
     for func, expr, default, job_id, role in jobs:
         _add_job(scheduler, func, _cron_trigger(expr, default), job_id, role)
