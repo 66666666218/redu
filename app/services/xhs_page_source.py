@@ -51,6 +51,120 @@ class XhsPageError(Exception):
     """页面路硬失败(被拦 / 浏览器起不来)。**必须冒泡**,不能当成"没搜到"。"""
 
 
+_CURSOR_KEY = "xhs_account_cursor"
+_NEED_KEY = "xhs_account_need_verify"
+
+
+def _profiles(settings=None) -> list[Path]:
+    """**多账号**:逗号分隔的浏览器档案目录;没配就退回单个 `_profile()`。
+
+    为什么要多账号:**风控是账号级的**(实测码 `300011 检测到账号异常`)——
+    单账号频率除以账号数,是最直接的一条降险手段。
+    ⚠️ 每个账号必须是**各自独立的档案目录**(登录态在里面);共用同一个档案 = 同一个账号。
+    """
+    if settings is None:
+        from config.settings import get_settings
+        settings = get_settings()
+    raw = str(getattr(settings, "xhs_browser_profiles", "") or "").strip()
+    if not raw:
+        return [_profile(settings)]
+    out: list[Path] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        p = Path(part)
+        out.append(p if p.is_absolute() else Path(__file__).resolve().parents[2] / p)
+    return out or [_profile(settings)]
+
+
+def _cursor_index(n: int) -> int:
+    """读轮换游标(**存在 `system_config`,跨进程有效**)并自增,返回本轮用第几个账号。"""
+    if n <= 1:
+        return 0
+    try:
+        from sqlalchemy import select
+
+        from app.db import get_session_local
+        from app.db.models import SystemConfig
+
+        with get_session_local()() as db:
+            row = db.scalar(select(SystemConfig).where(SystemConfig.key == _CURSOR_KEY))
+            cur = int(str(row.value)) if row is not None and str(row.value).isdigit() else 0
+            nxt = str((cur + 1) % n)
+            if row is None:
+                db.add(SystemConfig(key=_CURSOR_KEY, value=nxt))
+            else:
+                row.value = nxt
+            db.commit()
+            return cur % n
+    except Exception:  # noqa: BLE001 - 游标读不到就固定用第 0 个,不该因此停摆
+        logger.debug("小红书账号游标读写失败(本轮用第 0 个)", exc_info=True)
+        return 0
+
+
+def mark_need_verify(profile: Path) -> None:
+    """把某个账号标成"要人过一次安全验证",这样轮换会**跳过它**、不继续烧风控。"""
+    try:
+        import json
+
+        from sqlalchemy import select
+
+        from app.db import get_session_local
+        from app.db.models import SystemConfig
+
+        with get_session_local()() as db:
+            row = db.scalar(select(SystemConfig).where(SystemConfig.key == _NEED_KEY))
+            cur = set(json.loads(row.value)) if row is not None and row.value else set()
+            cur.add(str(profile))
+            blob = json.dumps(sorted(cur), ensure_ascii=False)
+            if row is None:
+                db.add(SystemConfig(key=_NEED_KEY, value=blob))
+            else:
+                row.value = blob
+            db.commit()
+    except Exception:  # noqa: BLE001
+        logger.debug("标记'需验证'失败(不影响本轮)", exc_info=True)
+
+
+def need_verify_profiles() -> set[str]:
+    """哪些账号当前需要人过一次验证(供巡检/告警用)。"""
+    try:
+        import json
+
+        from sqlalchemy import select
+
+        from app.db import get_session_local
+        from app.db.models import SystemConfig
+
+        with get_session_local()() as db:
+            row = db.scalar(select(SystemConfig).where(SystemConfig.key == _NEED_KEY))
+            return set(json.loads(row.value)) if row is not None and row.value else set()
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def clear_need_verify(profile: Path) -> None:
+    """验证过了就把它从"需验证"名单里摘掉。"""
+    try:
+        import json
+
+        from sqlalchemy import select
+
+        from app.db import get_session_local
+        from app.db.models import SystemConfig
+
+        with get_session_local()() as db:
+            row = db.scalar(select(SystemConfig).where(SystemConfig.key == _NEED_KEY))
+            if row is None or not row.value:
+                return
+            cur = set(json.loads(row.value)) - {str(profile)}
+            row.value = json.dumps(sorted(cur), ensure_ascii=False)
+            db.commit()
+    except Exception:  # noqa: BLE001
+        logger.debug("清'需验证'标记失败", exc_info=True)
+
+
 def _profile(settings=None) -> Path:
     if settings is None:
         from config.settings import get_settings
@@ -83,10 +197,11 @@ def search(keywords: list[str], settings=None, per_kw_wait_ms: int = 6000,
     kws = [str(k).strip() for k in (keywords or []) if str(k).strip()]
     if not kws:
         return []
-    prof = _profile(settings)
-    if not prof.exists():
-        raise XhsPageError(f"小红书浏览器档案不存在:{prof} —— 先跑 "
-                           f"`python tools/xhs_pass_verify.py` 过一次验证")
+    profs = [p for p in _profiles(settings) if p.exists()]
+    if not profs:
+        raise XhsPageError(
+            f"小红书浏览器档案都不存在:{[str(p) for p in _profiles(settings)]} —— "
+            f"先跑 `python tools/xhs_pass_verify.py` 过一次验证")
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:  # noqa: BLE001
@@ -100,8 +215,41 @@ def search(keywords: list[str], settings=None, per_kw_wait_ms: int = 6000,
     except Exception:  # noqa: BLE001
         logger.debug("清理残留浏览器失败(继续)", exc_info=True)
 
-    rows: list[dict] = []
+    # ★ **多账号轮换 + 失败自动切换**(2026-10-07,用户口径「我给你多个账号」):
+    #   · 从**轮换游标**处开始,连续几轮落在不同账号上 ⇒ 单账号频率 = 1/N;
+    #   · 已知"需人过一次安全验证"的账号**直接跳过**,不继续烧风控;
+    #   · 万一还是被拦 ⇒ **标记它 + 自动换下一个**,不用等人。
+    start = _cursor_index(len(profs))
+    order = [profs[(start + i) % len(profs)] for i in range(len(profs))]
+    skip = need_verify_profiles()
+    usable = [p for p in order if str(p) not in skip] or order
+    tried: list[str] = []
+    last_err = ""
     with sync_playwright() as p:
+        for prof in usable:
+            try:
+                rows = _search_with_profile(p, prof, kws, per_kw_wait_ms, headed)
+                clear_need_verify(prof)
+                logger.info("小红书:本轮用账号「%s」,拿到 %d 条", prof.name, len(rows))
+                return rows
+            except XhsPageError as exc:
+                tried.append(prof.name)
+                last_err = str(exc)
+                if "安全验证" in str(exc):
+                    mark_need_verify(prof)
+                    logger.warning("小红书账号「%s」要安全验证 —— 标记并换下一个", prof.name)
+                    continue
+                raise                        # 别的错(打不开页等)不是"换账号"能解决的
+    raise XhsPageError(
+        f"所有小红书账号都不可用(试过 {tried})。修法:对每个档案各跑一次 "
+        f"`python tools/xhs_pass_verify.py <档案目录>` 人工过验证。最后原因:{last_err[:120]}")
+
+
+def _search_with_profile(p, prof, kws: list[str], per_kw_wait_ms: int,
+                         headed: bool) -> list[dict]:
+    """**单个账号**跑一轮搜索。被安全验证拦住时抛 `XhsPageError`(由调用方换账号)。"""
+    rows: list[dict] = []
+    if True:
         kwargs = {"user_data_dir": str(prof), "headless": not headed, "no_viewport": True}
         try:
             ctx = p.chromium.launch_persistent_context(channel="msedge",

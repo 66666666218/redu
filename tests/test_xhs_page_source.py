@@ -17,6 +17,25 @@ import pytest  # noqa: E402
 from app.services import xhs_page_source as x  # noqa: E402
 
 
+@pytest.fixture
+def session():
+    """内存库 + 一个用户(多账号的游标/标记都落在 system_config)。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db import models  # noqa: F401
+    from app.db.database import Base
+    from app.db.models import User
+
+    eng = create_engine("sqlite://")
+    Base.metadata.create_all(eng)
+    db = sessionmaker(bind=eng, autoflush=False, expire_on_commit=False)()
+    db.add(User(id=1, username="u1", email="u1@b.c", password_hash="x", enabled=True))
+    db.commit()
+    yield db
+    db.close()
+
+
 class TestVerifyNeeded:
     """判据用 **url / 标题**,不用"卡片数"。
 
@@ -98,3 +117,91 @@ class TestWiring:
         with pytest.raises(MediaCrawlerError) as e:
             rp._crawl_platform("xiaohongshu", ["网盘资源"])
         assert "xiaohongshu" in str(e.value) and "安全验证" in str(e.value)
+
+
+class TestMultiAccount:
+    """★ **多账号轮换 + 失败自动切换**(用户口径「小红书我给你多个账号」)。
+
+    为什么:风控是**账号级**的(实测码 `300011 检测到账号异常`)——
+    单账号频率除以账号数,是最直接的一条降险手段。
+    """
+
+    def test_没配就用单账号(self) -> None:
+        class _S:
+            xhs_browser_profiles = ""
+            xhs_browser_profile = ""
+        assert len(x._profiles(_S())) == 1
+
+    def test_配了多个就按顺序(self) -> None:
+        class _S:
+            xhs_browser_profiles = "data/xhs_a, data/xhs_b ,data/xhs_c"
+            xhs_browser_profile = ""
+        got = [p.name for p in x._profiles(_S())]
+        assert got == ["xhs_a", "xhs_b", "xhs_c"]
+
+    def test_游标会轮换(self, session, monkeypatch) -> None:
+        """★ 连续几轮必须落在**不同账号**上 —— 否则"多账号"只是摆设。"""
+        monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+        seen = [x._cursor_index(3) for _ in range(6)]
+        assert seen == [0, 1, 2, 0, 1, 2], seen
+
+    def test_单账号时不碰游标(self, monkeypatch) -> None:
+        called: list = []
+        monkeypatch.setattr("app.db.get_session_local",
+                            lambda: called.append(1) or (lambda: None))
+        assert x._cursor_index(1) == 0 and called == []
+
+    def test_被拦就换下一个账号(self, session, monkeypatch) -> None:
+        """★★ 最要紧的一条:**一个号被安全验证拦住,要自动换下一个**,不用等人。"""
+        monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+        profs = [x.Path("data/xhs_a"), x.Path("data/xhs_b")]
+        monkeypatch.setattr(x, "_profiles", lambda s=None: profs)
+        monkeypatch.setattr(x.Path, "exists", lambda self: True)
+        tried: list[str] = []
+
+        def _fake(p_, prof, kws, wait, headed):
+            tried.append(prof.name)
+            if prof.name == "xhs_a":
+                raise x.XhsPageError("小红书要**安全验证**(被重定向到 captcha 页)")
+            return [{"keyword": kws[0], "snippet": "好用的号", "uid": "", "name": "",
+                     "url": "", "pan_link": ""}]
+
+        monkeypatch.setattr(x, "_search_with_profile", _fake)
+        rows = x.search(["甲"])
+        assert len(tried) == 2 and "xhs_b" in tried      # 换了号
+        assert rows and rows[0]["snippet"] == "好用的号"
+        # 被拦的那个号要**被标记**,下一轮轮换直接跳过它(别继续烧风控)
+        # ⚠️ 存的是**完整路径**,所以用子串判断 —— `"xhs_a" in {set}` 是成员判断,会假红
+        assert any("xhs_a" in s for s in x.need_verify_profiles()),             x.need_verify_profiles()
+
+    def test_已知需验证的账号直接跳过(self, session, monkeypatch) -> None:
+        monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+        profs = [x.Path("data/xhs_a"), x.Path("data/xhs_b")]
+        monkeypatch.setattr(x, "_profiles", lambda s=None: profs)
+        monkeypatch.setattr(x.Path, "exists", lambda self: True)
+        monkeypatch.setattr(x, "need_verify_profiles", lambda: {str(profs[0])})
+        tried: list[str] = []
+
+        def _fake(p_, prof, kws, wait, headed):
+            tried.append(prof.name)
+            return [{"keyword": kws[0], "snippet": "x", "uid": "", "name": "",
+                     "url": "", "pan_link": ""}]
+
+        monkeypatch.setattr(x, "_search_with_profile", _fake)
+        x.search(["甲"])
+        assert tried == ["xhs_b"], f"该跳过 xhs_a,实际试了 {tried}"
+
+    def test_全都不可用要给出可执行的修法(self, session, monkeypatch) -> None:
+        monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+        monkeypatch.setattr(x, "_profiles",
+                            lambda s=None: [x.Path("data/xhs_a"), x.Path("data/xhs_b")])
+        monkeypatch.setattr(x.Path, "exists", lambda self: True)
+        monkeypatch.setattr(x, "need_verify_profiles", lambda: set())
+
+        def _boom(p_, prof, kws, wait, headed):
+            raise x.XhsPageError("小红书要**安全验证**(被重定向到 captcha 页)")
+
+        monkeypatch.setattr(x, "_search_with_profile", _boom)
+        with pytest.raises(x.XhsPageError) as e:
+            x.search(["甲"])
+        assert "xhs_pass_verify" in str(e.value) and "xhs_a" in str(e.value)
