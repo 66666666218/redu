@@ -410,6 +410,11 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
     # 本轮**跳过但没标终态**的条数:单个资源比剩余空间大(盘没满,是这一个包太大)。
     # 与 `skipped` 分开记 —— `skipped` 是"永远搬不了、已标终态",这个是"以后还能搬"。
     too_large = 0
+    # ★ **"单个资源太大"跳过的那些,要把名字留下来**(2026-10-07 用户口径:
+    #   「如果内存不够了,也需要把名称来告诉用户**而不是停摆**」)。
+    # 原来只 `logger.warning` 一行 —— **日志没人看**,用户只知道"今天没搬成",
+    # 不知道"是哪几个、因为要多大"。实测那 44 条跳过告警就是这么沉掉的。
+    too_large_names: list[str] = []
     too_large_need: int | None = None      # 这些大包里**最大的**那个要多少(留痕用)
     too_large_free: int | None = None      # 当时盘上还剩多少
     first_err = ""          # 第一条失败原因 —— 带出去让运行记录**可照做**(见 tick 的状态判定)
@@ -473,6 +478,7 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
                     _need = out.get("required_size")
                     if isinstance(_need, int) and (too_large_need is None or _need > too_large_need):
                         too_large_need, too_large_free = _need, out.get("free_size")
+                    too_large_names.append(str(row.title or "")[:60])
                     logger.warning("迅雷群分享跳过(单个资源比剩余空间大,整批继续):%s | %s",
                                    row.title, msg[:100])
                     continue
@@ -490,6 +496,10 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
                 gate = _gate_limit(settings)
                 return {"status": "disk_full", "picked": len(rows), "ok": len(ok_items),
                         "failed": failed, "skipped": skipped, "too_large": too_large,
+            "too_large_names": too_large_names,
+                        "too_large_names": too_large_names,
+                        "blocked_names": [str(r.title or "")[:60] for r in rows
+                                          if r.status == "pending"][:10],
                         "quota_ratio": ratio, "quota_limit": gate,
                         "gate_mismatch": ratio is not None and ratio < gate,
                         "required_size": out.get("required_size"),
@@ -613,7 +623,10 @@ def xunlei_group_tick(settings=None) -> int:
                     _sz = (f"(最大那个要 {xt.human_bytes(out.get('required_size'))}"
                            f"/当时剩 {xt.human_bytes(out.get('free_size'))};"
                            if out.get("required_size") is not None else "(")
-                    note += f" 单个太大跳过{out['too_large']}{_sz}未标终态,清空间后可搬)"
+                    _names = "、".join(out.get("too_large_names") or [])[:90]
+                    note += (f" 单个太大跳过{out['too_large']}{_sz}未标终态,清空间后可搬;"
+                             f"**是这几个:{_names}**)" if _names else
+                             f" 单个太大跳过{out['too_large']}{_sz}未标终态,清空间后可搬)")
                 # ⚠️ **转存失败必须反映到状态里**(2026-10-04 修):旧实现只看 `got['status']`,
                 # 于是"凭据失效导致 5 条转存**全挂**"被记成 `success(转存0)` ——
                 # 和"今天群里真没新资源"长得**一模一样**。实测:迅雷 refresh_token 失效、
@@ -667,6 +680,15 @@ def xunlei_group_tick(settings=None) -> int:
                     ops_bits.append(f"{len(got['failed_groups'])} 个群拉取失败")
                 if out.get("skipped"):
                     ops_bits.append(f"{out['skipped']} 条被闸门挡下(泛化大包/盘快满)")
+                # ★ **空间不够没搬成的,把名字说出来**(2026-10-07 用户口径)。
+                # 只报"跳过 N 条"等于没说 —— 用户没法判断"要不要清空间 / 清多少"。
+                if out.get("too_large_names"):
+                    _n = out["too_large_names"]
+                    _sz = (f"(最大那条要 {xt.human_bytes(out.get('required_size'))},"
+                           f"当时剩 {xt.human_bytes(out.get('free_size'))})"
+                           if out.get("required_size") is not None else "")
+                    ops_bits.append(f"**{len(_n)} 个资源因空间不够没搬成**{_sz}:"
+                                    + "、".join(_n[:8]) + ("…" if len(_n) > 8 else ""))
                 if out.get("failed"):
                     ops_bits.append(f"{out['failed']} 条转存失败")
                 if ops_bits:

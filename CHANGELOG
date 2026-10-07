@@ -1,3 +1,4 @@
+- [2026-10-07 15:09] FEAT: 抖音线索提频(1轮/天→每4小时)+ 空间不够时**报出资源名**而不是只写日志 (Files: config/settings.py, app/services/xunlei_group.py)
 - [2026-10-07 15:02] FIX: 抖音取词只吃公众号 —— 迅雷群/小红书/贴吧/知乎 发现的资源进不了它的搜索池 (Files: app/services/cross_accounts.py, app/services/resource_library.py, tests/test_douyin_keywords_merge_sources.py)
 - [2026-10-07 14:19] FIX: 全作业时刻错开 —— 监听挪到整点后2分,16 个作业各占不同分钟 (Files: app/services/scheduler.py, config/settings.py)
 - [2026-10-07 12:34] FIX: 去重脚本自己定 stdout 编码(原来靠调用环境,后台跑必崩) (Files: scripts/pan_dedupe_apply.py, scripts/pan_dedupe_report.py)
