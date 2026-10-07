@@ -1,3 +1,4 @@
+- [2026-10-07 09:05] FEAT: 盘内重复资源只读报告(判据从**文件层**改到**资源包层**) (Files: scripts/pan_dedupe_report.py)
 - [2026-10-07 01:40] DOCS: 更正上一条的过度断言 —— 分页**不是**「24TiB 只索引到 8 行」的原因 (Files: app/services/xunlei_transfer.py, app/services/xunlei_sync.py)
 - [2026-10-07 01:38] FEAT: 迅雷列目录**翻页**(盘上 24TiB 却只索引到 8 行的根因)+ 夸克删除能力(已安全验证) (Files: app/services/xunlei_transfer.py, app/services/xunlei_sync.py, app/services/quark_transfer.py, scripts/quark_delete_probe.py, tests/test_xunlei_pagination.py, tests/test_quark_delete.py)
 - [2026-10-07 00:58] FIX: 夸克口令打通 —— 根因是**提供剪贴板的进程必须保持存活** (Files: tools/quark_kouling_ui.py[gitignored])
