@@ -299,9 +299,13 @@ def _weread_app_client(session: Session, user_id: int):
 
         def _reget():
             """重取凭据;返回 `(token, vid)` 或 `None`(取不到就 None,不抛)。"""
-            out = wat.refresh(session, user_id)
+            # ⚠️ **走"唤醒+验活"那条,不是裸 refresh**(2026-10-07):
+            # 裸 refresh 只是"重取一次、拿到**同一个值**、再失败"——**空转**。
+            # 实测 App 长时间不动时数据库里就是旧 token,而 `am start` 唤醒它之后
+            # 才会写新的有效值(实测 `3sg_FVG7` 失败 → 唤醒后 `HbVEHrVJ` 连试 4 次全通)。
+            out = wat.refresh_with_wake(session, user_id)
             if not out.get("ok"):
-                logger.warning("App 凭据自愈失败(需开雷电并登录微信读书):%s",
+                logger.warning("App 凭据自愈失败(已唤醒 App 仍无效,可能需人工打开/重登):%s",
                                str(out.get("reason"))[:120])
                 return None
             return out["accessToken"], out["vid"]

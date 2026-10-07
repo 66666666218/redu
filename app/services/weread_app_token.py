@@ -21,6 +21,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -106,6 +107,89 @@ def load(session: Session, user_id: int) -> dict[str, Any] | None:
     except Exception as exc:  # noqa: BLE001 - 坏凭据 = 当没配,但要说出来
         logger.warning("App 侧凭据不可用(%s):%s", PLATFORM, str(exc)[:120])
         return None
+
+
+#: 微信读书 App 的启动组件 —— 唤醒它用。
+#: ⚠️ 实测 `am start -a MAIN -c LAUNCHER <pkg>` 在这个镜像上**会被拒**
+#: ("unable to resolve Intent"),**必须用显式组件名**。
+#: 取自 `adb shell cmd package resolve-activity --brief com.tencent.weread`。
+WEREAD_ACT = "com.tencent.weread/.LauncherActivity"
+
+
+def wake_app(adb: str = "", wait: float = 8.0) -> bool:
+    """用 adb 把微信读书 App **拉到前台** —— 目的是**让它刷新会话**。
+
+    ## 为什么这一步是必须的(2026-10-07 实测)
+    一直以为"阅读数断了 = 登录态失效,要人扫一次"。查下来**大半不是**:
+      · App 长时间不动时,它数据库里的 `accessToken` 会停在**旧值**,服务端已经不认;
+      · 而**只要 App 活动一次,它就会写一个新的、有效的**。
+    实测(同一分钟内):
+        拉到的 `3sg_FVG7` → **-2012 登录超时**
+        拉到的 `HbVEHrVJ` → **✓ 88 篇,82 篇带阅读数**(之后连拉 4 次都稳)
+    ⇒ "登录态失效"里有一大块其实是"**App 没活动**",**不用人手动去点**。
+    """
+    exe = _find_adb(adb)
+    if not exe:
+        return False
+    try:
+        subprocess.run([exe, "shell", "am", "start", "-n", WEREAD_ACT],
+                       capture_output=True, timeout=60)
+        time.sleep(wait)
+        return True
+    except Exception:  # noqa: BLE001 - 唤醒失败就照旧试一次,别把整轮带崩
+        logger.debug("唤醒微信读书 App 失败", exc_info=True)
+        return False
+
+
+def verify_by_api(session: Session, user_id: int):
+    """造一个 `(token, vid) -> bool` 的验活函数:**真拿一个号问一次 App 接口**。
+
+    ⚠️ 关键在于**真的问了**。调用方要知道的是"这个 token 现在能不能用",
+    不是"我有没有试着取"—— 后者就是本仓反复出现的**假绿灯**。
+    库里没有可试的号时返回 True(**不阻断**,与探针同口径)。
+    """
+    def _verify(token, vid) -> bool:
+        from sqlalchemy import select
+
+        from app.db.models import WechatBenchmark
+        from app.services.weread_app_client import WereadAppClient
+
+        try:
+            bm = session.scalar(select(WechatBenchmark).where(
+                WechatBenchmark.user_id == user_id,
+                WechatBenchmark.weread_book_id != "").limit(1))
+        except Exception:  # noqa: BLE001
+            return True
+        if bm is None:
+            return True
+        WereadAppClient(str(token), str(vid)).articles(bm.weread_book_id)   # 抛 = 验活失败
+        return True
+    return _verify
+
+
+def refresh_with_wake(session: Session, user_id: int, *, adb: str = "",
+                      attempts: int = 3) -> dict[str, Any]:
+    """**唤醒 App → 重取 → 立刻验活**,不行就重试。返回 `{ok, ...}`。
+
+    ⚠️ 这是"阅读数自愈"的入口。原来的 `_reget` 只是"重取一次、拿到**同一个值**、再失败"
+    —— 那是**空转**(见 quark_kouling 里同一条教训):它让"这条路全断了"在日志里
+    长得像"自愈机制在正常工作"。**有验活的才叫自愈。**
+    ⚠️ 全部尝试都失败才返回 `ok=False` —— 那时才该惊动人工。
+    """
+    last: dict[str, Any] = {"ok": False, "reason": "未尝试"}
+    for i in range(max(1, attempts)):
+        wake_app(adb)
+        last = refresh(session, user_id, adb=adb,
+                       verify=verify_by_api(session, user_id))
+        if last.get("ok"):
+            if i:
+                logger.info("微信读书 App token 第 %d 次唤醒后取到有效值", i + 1)
+            return last
+        logger.info("第 %d 次唤醒+重取仍无效:%s", i + 1, str(last.get("reason"))[:80])
+        time.sleep(3)
+    return {"ok": False,
+            "reason": f"唤醒 App {attempts} 次后重取仍失效 —— 可能真需要人工打开/重登。"
+                      f"最后原因:{last.get('reason')}"}
 
 
 def refresh(session: Session, user_id: int, *, adb: str = "", verify=None) -> dict[str, Any]:
