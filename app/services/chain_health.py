@@ -237,7 +237,44 @@ def check_credentials(db) -> list[dict]:
             else:
                 detail += f" · 验活跳过({why})"
         out.append({"name": label, "level": level, "detail": detail + note})
+    out.extend(check_xhs_accounts())
     return out
+
+
+def check_xhs_accounts() -> list[dict]:
+    """**小红书账号档位**:几个、有没有需要人工处理的(过验证 / 重新登录)。
+
+    ⚠️ **为什么单列这一条**(2026-10-07 实测):小红书走**页面渲染**之后,
+    它最大的失败模式是"**某个号被踢下线**"——实测 `给号2登录之后号1变成
+    「电脑设备登录超限,请重新登录」`(它按**设备/IP**限制同时登录数,与档案隔离无关)。
+    而这件事**不会自己好**:得人去重登。
+    不主动报的话,表现是"小红书这条链悄悄不产出了",要等到有人问才发现。
+    ⇒ 把"账号可用性"做成**每天能看见**的一行,而不是等轮次失败反推。
+    """
+    try:
+        from config.settings import get_settings
+
+        from app.services import xhs_page_source as xp
+
+        profs = xp._profiles(get_settings())
+        bad = xp.need_verify_profiles()
+        names = [p.name for p in profs]
+        need = [p.name for p in profs if str(p) in bad]
+        if not names:
+            return [{"name": "小红书账号", "level": YELLOW,
+                     "detail": "**一个档位都没配**(`XHS_BROWSER_PROFILES`)—— "
+                               "这条链不会产出"}]
+        if need:
+            return [{"name": "小红书账号", "level": RED,
+                     "detail": f"{len(need)}/{len(names)} 个号**需要人工处理**"
+                               f"(被踢下线或要过安全验证):{'、'.join(need)} —— "
+                               f"修法:`python tools/xhs_pass_verify.py <档案目录>`"}]
+        return [{"name": "小红书账号", "level": GREEN,
+                 "detail": f"{len(names)} 个号({','.join(names)}),没有待处理的"}]
+    except Exception as exc:  # noqa: BLE001 - 体检自己挂了要说出来,别静默
+        logger.exception("小红书账号体检失败")
+        return [{"name": "小红书账号", "level": YELLOW,
+                 "detail": f"检查失败:{type(exc).__name__}: {str(exc)[:100]}"}]
 
 
 def _next_renewal(settings) -> datetime | None:

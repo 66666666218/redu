@@ -255,3 +255,37 @@ class TestNotLoggedIn:
         这句话不在词表里的话,就会**静默返回空** —— 又一次假阴性。"""
         assert x.needs_login("电脑设备登录超限，请重新登录")
         assert x.needs_login("登录已过期，请重新登录")
+
+
+class TestAccountHealth:
+    """★ 小红书账号的可用性要**每天能看见**(2026-10-07)。
+
+    它最大的失败模式是"**某个号被踢下线**"(实测:登了号 2 之后号 1 变成
+    「电脑设备登录超限,请重新登录」),而这件事**不会自己好**。
+    不主动报的话,表现是"这条链悄悄不产出",要等人来问才发现。
+    """
+
+    def test_有待处理的号就报红并给修法(self, session, monkeypatch) -> None:
+        from app.services import chain_health as ch
+
+        monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+        profs = [x.Path("data/xhs_a"), x.Path("data/xhs_b")]
+        monkeypatch.setattr(x, "_profiles", lambda s=None: profs)
+        monkeypatch.setattr(x, "need_verify_profiles", lambda: {str(profs[0])})
+        items = ch.check_xhs_accounts()
+        assert items[0]["level"] == ch.RED
+        assert "xhs_a" in items[0]["detail"] and "xhs_pass_verify" in items[0]["detail"]
+
+    def test_都正常就报绿(self, session, monkeypatch) -> None:
+        from app.services import chain_health as ch
+
+        monkeypatch.setattr(x, "_profiles", lambda s=None: [x.Path("data/xhs_a")])
+        monkeypatch.setattr(x, "need_verify_profiles", lambda: set())
+        assert ch.check_xhs_accounts()[0]["level"] == ch.GREEN
+
+    def test_一个档位都没配要说出来(self, monkeypatch) -> None:
+        from app.services import chain_health as ch
+
+        monkeypatch.setattr(x, "_profiles", lambda s=None: [])
+        items = ch.check_xhs_accounts()
+        assert items[0]["level"] == ch.YELLOW and "XHS_BROWSER_PROFILES" in items[0]["detail"]
