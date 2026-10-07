@@ -67,7 +67,18 @@ class Settings(BaseSettings):
     wechat_burst_min_reads: int = 100  # 爆点检测最低站内阅读(微信读书口径,免费数据)
     wechat_burst_median_mult: float = 3.0  # 爆点判定:新文阅读 ≥ 同号近14天中位数×该倍数
     wechat_dormant_retire_days: int = 7  # 死号清理:连续 N 天无发文自动停监控(2026-10-01 用户口径"一星期没发文就取消";0=关闭)
-    wechat_listen_batch_size: int = 0  # 监听轮每批号数:0=自适应(2026-10-01,按池子规模自动分批+沉睡号降频,扩建无需手调);非 0=固定批(旧行为);负数=回全量
+    # ⚠️⚠️ **改成 -1(全量)**,2026-10-07 —— 起因是实测出来的**公众号滞后 25.5 小时**。
+    # 查下来**不是 bug,是设计**:自适应分批是 `ceil(有效池/定点数)`,
+    # 池 187 活跃 / 4 个定点 ⇒ 每轮 47 号 ⇒ **4 轮才转一圈 = 24 小时**,
+    # 也就是**每个号 24 小时才被看一次**(实测 25.5h 完全吻合)。
+    # 用户口径是**时效**,所以改成每轮跑全部号 ⇒ 每号 **6 小时看一次**。
+    #
+    # ⚠️ 代价**比看上去小**:一轮从 ~3 分钟涨到 ~11 分钟(187 号),而
+    #   · **列表额度不增加** —— 轮转窗口机制没变,窗口外的号照样只取 cover;
+    #   · **正文抓取总量不增加** —— 每篇只抓一次(入库即去重),只是分散到更多轮;
+    #   · cover 来自每轮**一次性**拉的书架,不是每号一次。
+    # 真正的成本只是"时间",而那几个定点是错开的(见 scheduler 的说明)。
+    wechat_listen_batch_size: int = -1
     quark_cookie: str = ""                 # 夸克网盘 Cookie(pan.quark.cn 登录后复制);用于转存对标文的分享
     quark_save_dir: str = "/redian监听"     # 转存目标目录(自动逐级创建)
     quark_fid_store: str = "data/quark_fid_cache.json"  # 目录 fid 持久缓存(大盘免重扫;幽灵同名复用)
@@ -78,7 +89,10 @@ class Settings(BaseSettings):
     wechat_resonance_hours: int = 48         # 资源共振窗口(同一盘链 N 小时内 ≥2 篇文章)
     wechat_repush_window_hours: int = 24     # 补推窗口:入库 N 小时内未送达飞书的文章还要补
     wechat_repush_limit: int = 100           # 单轮补推篇数上限(超出留给下一轮,不一次刷屏)
-    wechat_listen_lock_ttl_minutes: int = 20 # 监听"在跑"标记的有效期(超过视为进程被杀,允许后来者接管)
+    # ⚠️ 20 → **45**(2026-10-07):监听改成**全量一轮**(见 `wechat_listen_batch_size`),
+    # 一轮从 ~3 分钟涨到 ~11 分钟 —— 20 分钟的 TTL **够但太紧**(万一某轮慢一点,
+    # 就会被当成"进程已死"允许后来者接管 ⇒ **两轮并行扫同一批号** ⇒ 重复推送)。
+    wechat_listen_lock_ttl_minutes: int = 45
     weread_shelf_gate: bool = True    # 监听轮书架粗筛:1 次书架先分"谁没更新",cover 只问有变化的号(判据可证安全,任何不确定自动停用)
     weread_shelf_gate_every: int = 4  # 书架说"没更新"的号每 N 轮仍强制问一次 cover(错判盲区上界=N 轮;4 轮/天 → 每号每天至少真问一次)
     deepseek_api_key: str = ""               # DeepSeek API key(LLM 叙事层,OpenAI 兼容)

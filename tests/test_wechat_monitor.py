@@ -4042,6 +4042,24 @@ def test_multi_source_failover_and_breaker() -> None:
     assert m4.mp_articles("MP_WXS_1") == []
 
 
+def test_默认已改成全量一轮(session) -> None:
+    """★ **2026-10-07 有意改的默认**(不是疏漏):实测公众号滞后 **25.5 小时**。
+
+    查下来不是 bug 是设计 —— 自适应分批是 `ceil(有效池/定点数)`,池 187 / 4 定点
+    ⇒ 每轮 47 号 ⇒ **4 轮才转一圈 = 每个号 24 小时才被看一次**(实测 25.5h 吻合)。
+    用户口径是**时效**,所以改成每轮跑全部号 ⇒ 每号 **6 小时看一次**。
+    """
+    from types import SimpleNamespace
+
+    from app.services.wechat._listen import _select_listen_batch
+
+    rows, pos = _select_listen_batch(None, 1,
+                                     [SimpleNamespace(id=i, miss_count=0) for i in range(187)],
+                                     _settings(), batch_index=0)
+    assert len(rows) == 187, f"默认应当全量一轮,实际只取 {len(rows)} 个"
+    assert pos == "", "全量时不该再报 batch=x/y(那会让人以为还在分批)"
+
+
 def test_adaptive_batch_scales_with_pool_size(session) -> None:
     """自适应分批(2026-10-01 扩建准备):批大小=ceil(池/4) 夹 [8,75];沉睡降频;显式参数兼容。"""
     from types import SimpleNamespace
@@ -4051,7 +4069,9 @@ def test_adaptive_batch_scales_with_pool_size(session) -> None:
     def mk(n, miss=0):
         return [SimpleNamespace(id=i, miss_count=miss) for i in range(n)]
 
-    st = _settings()
+    # ⚠️ **显式传 0** —— 2026-10-07 起默认改成 `-1`(全量),自适应分批仍在代码里、
+    # 只是不再是默认。这条测的是**行为**,所以把开关显式打开,别依赖默认值。
+    st = _settings(wechat_listen_batch_size=0)
     # 池规模 → 批大小(4 定点;超 75 时天然多日轮转)
     for n, expect in ((100, 25), (142, 36), (200, 50), (280, 70), (400, 75)):
         rows, _pos = _select_listen_batch(None, 1, mk(n), st, batch_index=0)
