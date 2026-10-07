@@ -20,7 +20,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.services import xunlei_transfer as xt  # noqa: E402
 
-BUDGET = 800          # API 调用上限:扫不完就**说出扫不完**,别跑飞
+import os
+
+#: API 调用上限。默认 800;要一次扫完跑得久的树可以 `PAN_DEDUPE_BUDGET=5000` 抬上去。
+#: ⚠️ 试过 14 种"服务端排除回收站"的参数名,接口**一个都不认** —— 原始列表里约 197/200
+#: 是 trashed 条目,只能在客户端过滤,所以**每个目录都要多翻十几页**。这是扫描慢的根因。
+BUDGET = int(os.environ.get("PAN_DEDUPE_BUDGET") or 800)
 #: 扫描**最多用掉**预算的这个比例,剩下的**留给"数每组内容量"** ——
 #: 不留的话统计会撞上限,**每组都数出 0 项 0 字节**,于是"留内容多的那份"
 #: 这条规则**静默失效**(实测踩到:4 组的 ✔留/✂删 全是 0.0 MiB,等于没判)。
