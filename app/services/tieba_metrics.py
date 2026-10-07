@@ -13,16 +13,16 @@
 ⚠️ **`aiotieba` 是异步库,而本服务全程同步**:
   · APScheduler 的作业跑在**线程池**里 ⇒ 那个线程没有事件循环,`asyncio.run` 可用;
   · 但**万一**将来从协程里调到(uvicorn 的路由),`asyncio.run` 会抛
-    "cannot be called from a running event loop" —— 所以这里**显式判一下**,
-    有运行中的循环就丢到独立线程去跑(见 `_run_async`)。
+    "cannot be called from a running event loop" —— 所以用 `run_async` 显式判一下。
+
+★ 2026-10-08:那个"判一下"的helper**提升成了** `app.utils.asyncrun.run_async`
+(闲鱼/贴吧的纯协议也都要跑 aiotieba,一份实现就够),并且**超时从"静默返回 None"改成抛**
+—— 详见那个模块的 docstring。
 """
 from __future__ import annotations
 
-import asyncio
-import threading
-from typing import Any
-
 from app.utils import get_logger
+from app.utils.asyncrun import run_async
 
 logger = get_logger(__name__)
 
@@ -31,37 +31,19 @@ DEFAULT_LIMIT = 8
 _TIMEOUT = 25.0
 
 
-def _run_async(coro):
-    """在**没有运行中事件循环**的上下文里跑协程;若当前线程已有循环,换独立线程跑。
+async def _detail_of(tids: list[int], limit: int) -> dict[str, dict]:
+    """取每个 tid 的**首楼**:`{tid: {"agree": 点赞, "text": 全文}}`。
 
-    为什么不能无脑 `asyncio.run`:uvicorn 的请求处理线程里已经有一个在跑的循环,
-    在那种线程里调 `asyncio.run` 会直接抛异常。
+    ★ **全文在这里**(2026-10-08 补):`get_posts` 的楼层对象上,正文在 **`contents`**
+    (富文本片段列表),**不是 `content`** —— 后者恒为 `None`。我第一版读 `content`,
+    拿到"首楼 0 字",差点把结论写成"匿名取不到全文"。而盘链恰恰就在全文里
+    (搜索接口给的 `content` 是**截断的摘要**,里面通常没有链接)。
+
+    ⇒ 所以**点赞和全文是一次请求拿回来的**,两件事不各花一次。
     """
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)          # 没有运行中的循环(APScheduler 线程就是这种)→ 直接用
-    # 有循环 ⇒ 丢到独立线程,避免嵌套
-    box: dict[str, Any] = {}
-
-    def _worker() -> None:
-        try:
-            box["r"] = asyncio.run(coro)
-        except Exception as exc:  # noqa: BLE001 - 传回主线程再抛
-            box["e"] = exc
-
-    t = threading.Thread(target=_worker, daemon=True)
-    t.start()
-    t.join(_TIMEOUT + 5)
-    if "e" in box:
-        raise box["e"]
-    return box.get("r")
-
-
-async def _agree_of(tids: list[int], limit: int) -> dict[str, int]:
     import aiotieba
 
-    out: dict[str, int] = {}
+    out: dict[str, dict] = {}
     async with aiotieba.Client() as client:
         for tid in tids[:limit]:
             try:
@@ -70,17 +52,38 @@ async def _agree_of(tids: list[int], limit: int) -> dict[str, int]:
                 logger.debug("贴吧取楼层失败 tid=%s: %s", tid, exc)
                 continue
             first = next((p for p in posts if int(getattr(p, "floor", 0)) == 1), None)
-            if first is not None:
-                out[str(tid)] = int(getattr(first, "agree", 0) or 0)
+            if first is None:
+                continue
+            out[str(tid)] = {"agree": int(getattr(first, "agree", 0) or 0),
+                             "text": flatten_contents(getattr(first, "contents", None))}
     return out
 
 
-def fetch_agree(tids: list[str | int], limit: int = DEFAULT_LIMIT) -> dict[str, int]:
-    """批量取点赞:**`{tid: agree}`**。失败/取不到**不放进结果**(调用方按"没有"处理)。
+def flatten_contents(contents: object) -> str:
+    """`contents`(富文本片段)→ 一串文本。
 
-    ⚠️ **不抛异常**:这是"补一个指标"的旁路,拿不到不该拖垮发现链。
-    ⚠️ **`tid` 必须是 int** —— `aiotieba.get_posts` 对字符串会报
-    `'str' object cannot be interpreted as an integer`(实测踩过),这里先转好。
+    片段有两类:`FragText(text=…)` 和 `FragLink(text=…, title=…, raw_url=…)`。
+    链接**不在 `text` 里** —— 那是个 `tiebaclient://` 深链,真正的网盘地址藏在它的
+    查询串里(所以要把 `raw_url` 也拍进来,调用方再 `unquote` 一次)。
+    """
+    parts: list[str] = []
+    for frag in (contents or []):
+        got = False
+        for name in ("text", "title", "raw_url"):
+            v = getattr(frag, name, None)
+            if v:
+                parts.append(str(v))
+                got = True
+        if not got:
+            parts.append(str(frag))
+    return "\n".join(parts)
+
+
+def fetch_posts_detail(tids: list[str | int], limit: int = DEFAULT_LIMIT) -> dict[str, dict]:
+    """批量取首楼详情 `{tid: {"agree":…, "text":…}}`。**不抛异常**(旁路,拿不到就不放进去)。
+
+    ⚠️ **`tid` 必须先转 int** —— `aiotieba.get_posts` 对字符串会报
+    `'str' object cannot be interpreted as an integer`(实测踩过)。
     """
     nums: list[int] = []
     for t in tids:
@@ -91,13 +94,23 @@ def fetch_agree(tids: list[str | int], limit: int = DEFAULT_LIMIT) -> dict[str, 
     if not nums:
         return {}
     try:
-        return _run_async(_agree_of(nums, limit))
+        return run_async(_detail_of(nums, limit), timeout=_TIMEOUT + 5)
     except ImportError:
-        logger.info("贴吧点赞跳过:未安装 aiotieba(`pip install aiotieba`)")
+        logger.info("贴吧详情跳过:未安装 aiotieba(`pip install aiotieba`)")
         return {}
     except Exception as exc:  # noqa: BLE001
-        logger.warning("贴吧点赞获取失败(不影响发现链):%s", str(exc)[:150])
+        logger.warning("贴吧详情获取失败(不影响主链):%s", str(exc)[:150])
         return {}
+
+
+def fetch_agree(tids: list[str | int], limit: int = DEFAULT_LIMIT) -> dict[str, int]:
+    """批量取点赞:**`{tid: agree}`**。失败/取不到**不放进结果**(调用方按"没有"处理)。
+
+    ⚠️ **不抛异常**:这是"补一个指标"的旁路,拿不到不该拖垮发现链。
+    实现走 `fetch_posts_detail`(同一次请求顺带把全文也取了,见那里的说明)。
+    """
+    return {tid: int(d.get("agree", 0) or 0)
+            for tid, d in fetch_posts_detail(tids, limit=limit).items()}
 
 
 def agree_to_metrics(agree: int | None) -> dict[str, int]:

@@ -348,39 +348,69 @@ def _candidates_from_weibo(ck: str, keywords: list[str], limit: int) -> list[dic
     return out
 
 
-def _candidates_from_tieba(keywords: list[str]) -> list[dict]:
-    """贴吧:走 MediaCrawler(**带 Cookie 直连 403**,只能走它),一次浏览器跑完所有词。
+def _tieba_rows(keywords: list[str]) -> tuple[list[dict], str]:
+    """取贴吧搜索结果 → `(记录, 来源标签)`。**纯协议优先**,失败回落浏览器。
 
-    ⚠️ **实测产出是知乎的 3 倍**(2026-10-03 同口径对照):
-    贴吧 16 条 → **9 条带盘链(56%)**,且**全是百度网盘**、内容集中在影视剧集(对口赛道);
-    而知乎加了限定词后也才 17.8%。所以贴吧不是"备选",是**主源**。
-
-    代价:一次浏览器启动(实测 ~32s,与词数无关 —— MediaCrawler 内部遍历),
-    且**需要先登录过一次**(档案 `cdp_tieba_user_data_dir`,见 `tools/tieba_login.py`;
-    未登录时它会卡在扫码直到超时,由 `MediaCrawlerError` 如实冒出来)。
+    ⚠️ **回落不会比之前更差**:2026-10-08 之前**每一次**都开浏览器。
+    ⚠️ 回落要留痕:两条路都可能产出 0 条链,不标来源就分不清"协议挂了"和"真没货"。
     """
+    from app.services import tieba_search
     from app.services.mediacrawler_source import crawl
 
-    rows = crawl("tieba", keywords)
-    # **补点赞数**(2026-10-04):MediaCrawler 的贴吧搜索**只给回复数,连赞都没有**,
-    # 而"其余平台按播放量×40%"需要一个曝光/互动量兜底。搜索出来的 tid 拿去 `aiotieba`
-    # 取**楼主楼层的 `agree`**(实测 14 条里 6 条非 0 ⇒ 真有值,不是恒 0)。
-    # ⚠️ 这是**旁路**:拿不到只影响"预估",不该拖垮发现链(`fetch_agree` 自己不抛)。
+    from config.settings import get_settings
+
+    if not getattr(get_settings(), "tieba_prefer_protocol", True):
+        return crawl("tieba", keywords), "浏览器(开关关掉)"
+    try:
+        return tieba_search.search(keywords), "协议"
+    except tieba_search.TiebaSearchError as exc:
+        logger.warning("贴吧纯协议失败(%s),回落浏览器:%s", exc.kind, str(exc)[:140])
+    return crawl("tieba", keywords), "浏览器"
+
+
+def _candidates_from_tieba(keywords: list[str]) -> list[dict]:
+    """贴吧:盘链发现的**主源**(实测产出是知乎的 3 倍)。
+
+    ⚠️ **实测产出**(2026-10-03 同口径对照):贴吧 16 条 → **9 条带盘链(56%)**,
+    且**全是百度网盘**、内容集中在影视剧集(对口赛道);而知乎加了限定词后也才 17.8%。
+
+    ★ **2026-10-08 改走纯协议**(A/B 实跑,同一个词「网盘资源」):
+
+    | | 纯协议(aiotieba) | 浏览器(MediaCrawler) |
+    |---|---|---|
+    | **带盘链** | **19 条** | 16 条 |
+    | 耗时 | **12 秒** | 60 秒 |
+
+    ⇒ 盘链更多、快 5 倍,而且**不再需要登录档案**(匿名即可)。
+    ⚠️ **纯协议那条的盘链不在搜索返回里** —— 搜索给的是**截断的摘要**,
+    必须再取一次**首楼全文**才抽得出链(见 `tieba_search` 的 docstring)。
+    """
     from app.services.tieba_metrics import agree_to_metrics, fetch_agree
 
-    agrees = fetch_agree([t for t in (_tid_of(r.get("url")) for r in rows) if t])
+    rows, source = _tieba_rows(keywords)
+    # **补点赞数**:**只有浏览器那条需要补** ——
+    # 协议路在"取首楼全文"那一次请求里已经把 `agree` 顺带拿回来了(见 tieba_metrics),
+    # 再调一次 `fetch_agree` 等于把每个帖子又问一遍。
+    agrees = (fetch_agree([t for t in (_tid_of(r.get("url")) for r in rows) if t])
+              if source == "浏览器" else {})
 
     out: list[dict] = []
     for r in rows:
         url = str(r.get("pan_link") or "").strip()
         if not url:
             continue
+        tid = _tid_of(r.get("url"))
+        metrics = dict(r.get("metrics") or {})
+        metrics.update(agree_to_metrics(agrees.get(tid)))
         out.append({"platform": "tieba", "origin_url": url,
                     "title": _clean(r.get("snippet") or "")[:255],
                     "author": str(r.get("name") or "")[:64],
                     "source_url": str(r.get("url") or "")[:500],
-                    # 曝光/互动指标(目前只有点赞)—— 交给 `conversion` 算预估拉新
-                    "metrics": agree_to_metrics(agrees.get(_tid_of(r.get("url"))))})
+                    # ★ 协议路多给的:发帖时间(浏览器那条的贴吧记录里没有)
+                    "publish_at": int(r.get("publish_at") or 0),
+                    # 曝光/互动指标 —— 交给 `conversion` 算预估拉新
+                    "metrics": metrics})
+    logger.info("贴吧候选:%s → %d 条,带盘链 %d 条", source or "-", len(rows), len(out))
     return out
 
 

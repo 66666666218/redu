@@ -140,6 +140,23 @@ def _crawl_platform(plat: str, names: list[str], session=None) -> list[dict]:
                 time.sleep(_BILI_GAP)
             out.extend(search_bilibili_videos(kw))
         return out
+    if plat == "tieba":
+        # ★ **纯协议优先**(2026-10-08):`aiotieba.search_global`,**匿名**即可,不开浏览器。
+        # 与 `pan_discovery` 是同一份判据,区别在于**这里不要详情**:
+        # 这条路只关心"这个名字在贴吧出现了几次"(读 `keyword`/`snippet`),
+        # **不读 `pan_link`** ⇒ 别为它多花 N 次取首楼的请求。
+        # 另:`rn` 调大到 50 —— 它的判据是**条数**,拿得越多越准。
+        from app.services import tieba_search
+        from app.services.mediacrawler_source import MediaCrawlerError
+
+        from config.settings import get_settings
+
+        if getattr(get_settings(), "tieba_prefer_protocol", True):
+            try:
+                return tieba_search.search(names, rn=50, with_detail=False)
+            except tieba_search.TiebaSearchError as exc:
+                logger.warning("贴吧纯协议失败(%s),回落 MediaCrawler:%s",
+                               exc.kind, str(exc)[:140])
     from app.services import mediacrawler_source as mc
 
     return mc.crawl(plat, names)

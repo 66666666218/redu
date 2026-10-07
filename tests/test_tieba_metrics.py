@@ -27,9 +27,9 @@ def test_fetch_agree_coerces_tids_to_int(monkeypatch) -> None:
 
     async def _fake(tids, limit):
         seen.extend(tids)
-        return {str(t): 7 for t in tids}
+        return {str(t): {"agree": 7, "text": ""} for t in tids}
 
-    monkeypatch.setattr(tm, "_agree_of", _fake)
+    monkeypatch.setattr(tm, "_detail_of", _fake)
     out = tm.fetch_agree(["11071928513", 9879165365, "bad", None])
     assert all(isinstance(t, int) for t in seen), f"传下去的 tid 不是 int: {seen}"
     assert seen == [11071928513, 9879165365]          # 垃圾值被丢掉,不炸
@@ -41,12 +41,12 @@ def test_fetch_agree_never_raises(monkeypatch) -> None:
     async def _boom(tids, limit):
         raise RuntimeError("贴吧抽风了")
 
-    monkeypatch.setattr(tm, "_agree_of", _boom)
+    monkeypatch.setattr(tm, "_detail_of", _boom)
     assert tm.fetch_agree(["11071928513"]) == {}
 
     def _no_aiotieba(tids, limit):
         raise ImportError("No module named 'aiotieba'")
-    monkeypatch.setattr(tm, "_agree_of", _no_aiotieba)
+    monkeypatch.setattr(tm, "_detail_of", _no_aiotieba)
     assert tm.fetch_agree(["11071928513"]) == {}       # 没装也不炸(只是跳过)
 
 
@@ -58,8 +58,8 @@ def test_fetch_agree_empty_input() -> None:
 def test_limit_is_applied(monkeypatch) -> None:
     """一次别问太多 —— 每个帖子都是一次网络请求。"""
     async def _fake(tids, limit):
-        return {str(t): 1 for t in tids[:limit]}
+        return {str(t): {"agree": 1, "text": ""} for t in tids[:limit]}
 
-    monkeypatch.setattr(tm, "_agree_of", _fake)
+    monkeypatch.setattr(tm, "_detail_of", _fake)
     out = tm.fetch_agree([str(1000 + i) for i in range(20)], limit=3)
     assert len(out) == 3

@@ -17,6 +17,21 @@ from app.db.models import DiscoveredPanLink, User
 from app.services import cookie_store, pan_discovery as pd
 
 
+@pytest.fixture(autouse=True)
+def _browser_path_for_tieba(monkeypatch):
+    """本文件验的是**接线与失败语义**,不是"从哪取数" ⇒ 把贴吧钉死走浏览器那条。
+
+    ⚠️ 不加这个会出事:贴吧从 2026-10-08 起**纯协议优先**,而这些用例只打了
+    `mediacrawler_source.crawl` 的桩 ⇒ `_candidates_from_tieba` 会**真的往贴吧发请求**,
+    而且协议一旦成功,那些"crawl 抛错"的用例就永远走不到,断言全错
+    (实测:3 条用例红在这里)。
+    纯协议那条路由 `tests/test_tieba_search.py` 专门验。
+    """
+    from config.settings import get_settings
+
+    monkeypatch.setattr(get_settings(), "tieba_prefer_protocol", False, raising=False)
+
+
 @pytest.fixture
 def session():
     engine = create_engine("sqlite://")
