@@ -1,3 +1,4 @@
+- [2026-10-07 16:42] FIX: 4 处定点作业撞在同一分钟 + 加错峰守卫(把 :02 那次手工修正自动化) (Files: config/settings.py, tests/test_job_stagger.py)
 - [2026-10-07 16:25] REFACTOR: 作业落实性对账提到服务层 + 修多定点判不出间隔 + 接进每日体检 (Files: app/services/job_liveness.py, app/services/chain_health.py, scripts/job_liveness.py, tests/test_job_liveness.py, tests/test_job_heartbeat.py)
 - [2026-10-07 16:10] FIX: 公众号监听停摆 30 小时无告警 —— `check_health_stalls` 补上公众号 (Files: app/services/alert_service.py, tests/test_feishu.py)
 - [2026-10-07 15:51] FEAT: 假设台账 —— 把「我们相信什么」写成可证伪的主张,数据每周自动判一次 (Files: app/services/learning_ledger.py, scripts/learning_report.py, tests/test_learning_ledger.py, app/services/chain_ordering.py)

@@ -174,7 +174,7 @@ class Settings(BaseSettings):
     chain_report_cron: str = "30 9 * * *"   # 每天 09:30(早上开工前,压在 wechat_digest 09:50 前面)   # 每 30 分钟一轮(数据是"补最新",不必更密)
     remote_sync_days: int = 14         # 每次回看多少天(靠天然键去重,天然幂等)
 
-    candidate_auto_import_cron: str = "30 8 * * *"  # 每日自动收录时间(默认 08:30,紧随候选发现之后)
+    candidate_auto_import_cron: str = "35 8 * * *"  # 每日自动收录时间(默认 08:30,紧随候选发现之后)
     # 公众号板块总结(2026-10-04):按**阅读数**总结 + **闭环体检**(发现/收录/监控三段各自
     # 最近产出),推**管理群**(具体数字只进管理群,客户群只看火爆程度)。
     # **每周一轮**:阅读数受列表额度限制(~2 天轮一圈),日推会重复同样的数。
@@ -318,7 +318,7 @@ class Settings(BaseSettings):
     # 而且部分口令是**群组口令**(要先进群,PC 客户端没有进群功能,所以 PC 端搜不出来)。
     # 所以人工只保留"App 里搜一下 + 点转存",本作业接手剩下的全自动部分。
     xunlei_sync_enabled: bool = True
-    xunlei_sync_cron: str = "5,35 * * * *"    # 每 30 分钟扫一次(秒级完成,不打风控)
+    xunlei_sync_cron: str = "16,46 * * * *"    # 每 30 分钟扫一次(秒级完成,不打风控)
     # ---- 迅雷群组采集(2026-10-02)见 app/services/xunlei_group.py ----
     # 群消息流里**群主发的分享卡自带 `pan.xunlei.com/s/<share_id>`** —— 客户端唯一的
     # "口令 → shareID"那一步,**群组替我们做了**。两步走:①采集登记(pending,纯 HTTP 读,
@@ -506,7 +506,7 @@ class Settings(BaseSettings):
     presence_cron: str = "10 9,17 * * *"
     # **B站单独的快节奏作业**:它走公开 API、不开浏览器、无风控,所以能每 2 小时跑。
     # 用户口径「小红书/B站/贴吧能否跟抖音一样两小时一轮」—— 只有 B站 承受得起。
-    presence_bili_cron: str = "20 */2 * * *"
+    presence_bili_cron: str = "25 */2 * * *"
     # 跨平台共振榜(2026-10-07 用户口径「每天推一次」):同一份资源在几个平台被几个号在推。
     # 放 10:40 而不是 10:30 —— 10:30 是「多平台热榜速览」的时刻(**远程实例发**),
     # 两张卡会同时落进「多平台监控」群。本仓的口径是「**不要堆在一个时间点推送**」
@@ -579,7 +579,7 @@ class Settings(BaseSettings):
     #    `disk_crit_ratio` 只决定措辞级别(🔴严重/🟠偏高),不改变是否推送。
     #    告警去重靠 `notify_incident` 的冷却门(标题里**不含数字**,否则每天比值都变、冷却形同虚设)。
     disk_guard_enabled: bool = True
-    disk_guard_cron: str = "40 9 * * *"      # 与 health_push(9:20) 错开,别挤在一起
+    disk_guard_cron: str = "45 9 * * *"      # 与 health_push(9:20) 错开,别挤在一起
     disk_warn_ratio: float = 0.85
     disk_crit_ratio: float = 0.95
     feishu_secret: str = ""         # 机器人签名校验密钥(为空则不签名)
