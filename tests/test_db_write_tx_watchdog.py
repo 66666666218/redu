@@ -179,3 +179,42 @@ def test_没有别的持有者时要说清是别的进程(engine, cap):
     errs = [r for r in cap.records if "撞锁" in r.getMessage()]
     assert errs and "别的进程" in errs[0].getMessage(), (
         f"外部持有时应说清是别的进程,实际:\n{errs[0].getMessage() if errs else '(没报)'}")
+
+
+# ---------------------------------------------------------------------------
+# ★ 主动采样:不依赖任何错误路径
+# ---------------------------------------------------------------------------
+
+
+def test_主动采样_不用等撞锁也能点名(engine, cap):
+    """★★ 对着 2026-10-08 那次「**撞锁却零诊断**」加的。
+
+    原来只有两条路会说话:**持有者提交时**、**受害者报错时**。而那次两条都没响
+    (原因至今没定位)⇒ 我只能看到"又撞锁了",看不到是谁,一整天都在瞎修。
+
+    这条守护线程**不依赖任何错误路径**:每 5 秒扫一遍开着的写事务,谁超时就报一次。
+    """
+    holder = Session(bind=engine)         # ⚠️ 这个帮手收的是 **Session**,不是 Connection
+    _deep_wrapper(holder, 3)              # 抱着写事务不放(比阈值长得多)
+    try:
+        time.sleep(6.5)                   # 采样线程 5 秒一轮
+    finally:
+        holder.rollback()
+        holder.close()
+    warns = [r for r in cap.records if "已经持有" in r.getMessage()]
+    assert warns, "长持有的写事务没有被主动采样抓到 —— 那么再撞锁时我们又是瞎的"
+    assert "_hold_write_tx_in_named_function" in warns[0].getMessage(), \
+        f"采样要能点名到开事务那一处:\n{warns[0].getMessage()[:200]}"
+
+
+def test_主动采样_同一个事务只报一次(engine, cap):
+    """⚠️ 每 5 秒报一次会刷屏 —— 而刷屏的告警最终会被无视(本仓反复讲过的教训)。"""
+    holder = Session(bind=engine)
+    _deep_wrapper(holder, 3)
+    try:
+        time.sleep(13)                    # 跨两轮采样
+    finally:
+        holder.rollback()
+        holder.close()
+    warns = [r for r in cap.records if "已经持有" in r.getMessage()]
+    assert len(warns) == 1, f"同一个事务报了 {len(warns)} 次,会刷屏"

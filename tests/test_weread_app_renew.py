@@ -158,9 +158,17 @@ def test_体检_刚续过是绿(monkeypatch, session):
 
 
 def test_体检_超过两个周期要黄_超过四个要红(monkeypatch, session):
-    """★ 这就是 10-07 那次事故的形状:凭据早就断了两天,而报告一直是绿的。"""
+    """★ 这就是 10-07 那次事故的形状:凭据早就断了两天,而报告一直是绿的。
+
+    ⚠️ **必须把 cron 钉住**:真实配置是 `52 3,7,13,19`(**间隔 4/6/6/8 不等**),
+    而这一行取的是**最大间隔**(8h)⇒ 阈值是 16h/32h。测试若拿线上的值算,
+    就会随配置漂、也随我改配置而莫名其妙地红(我第一版就是硬写了 6h,结果线上是 8h)。
+    """
     from datetime import datetime, timedelta
 
+    from config.settings import get_settings
+
+    monkeypatch.setattr(get_settings(), "weread_refresh_cron", "50 */6 * * *", raising=False)
     monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
     for hours, want in ((13, "🟡"), (30, "🔴")):        # 周期 6h ⇒ 2 个=12h、4 个=24h
         _patch_app_blob(monkeypatch, {

@@ -313,17 +313,23 @@ def _weread_app_row() -> dict:
     if not blob:
         return {"name": _WEREAD_APP_LABEL, "level": YELLOW,
                 "detail": "未配置 —— 阅读数会一直是 `—`(配法:`scripts/weread_app_login.py`)"}
-    # 续期周期:直接从同一个 cron 算两次相邻触发之差(不硬编 6 小时)
-    gap_h = 6.0
+    # 续期周期:★ **用 `job_liveness.trigger_interval_seconds`**(它取的是**最大间隔**),
+    # 不自己算"接下来两次之差" —— 那个会**随时辰变**。
+    # ⚠️ 实测(2026-10-08):真实 cron 是 `52 3,7,13,19`(四个定点),间隔是 **4/6/6/8 小时**;
+    #    我第一版取"接下来两次的差",于是 19 点后算出 8h、凌晨算出 4h
+    #    ⇒ **同一个凭据在不同时辰被判成黄/红的标准都不一样**。
+    #    这正是 `job_liveness` 那条注释里写过的坑("拿平均间隔当基准会把每天都要发生的
+    #    夜间空档算成超期"),那份实现就在本仓,直接复用。
+    gap_h = 8.0
     try:
         from apscheduler.triggers.cron import CronTrigger
 
-        trig = CronTrigger.from_crontab(str(settings.weread_refresh_cron))
-        a = trig.get_next_fire_time(None, datetime.now())
-        b = trig.get_next_fire_time(a, a)
-        if a and b:
-            gap_h = max(0.5, (b - a).total_seconds() / 3600)
-    except Exception:  # noqa: BLE001 - 算不出就用默认 6h,不让体检变成错误源
+        from app.services.job_liveness import trigger_interval_seconds
+
+        secs = trigger_interval_seconds(CronTrigger.from_crontab(str(settings.weread_refresh_cron)))
+        if secs:
+            gap_h = max(0.5, secs / 3600)
+    except Exception:  # noqa: BLE001 - 算不出就用默认 8h,不让体检变成错误源
         pass
     try:
         pulled = datetime.fromisoformat(str(blob.get("pulled_at") or ""))

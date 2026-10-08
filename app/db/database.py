@@ -24,6 +24,9 @@ logger = get_logger(__name__)
 #: 撞锁时靠它把"当时是谁抱着锁"直接打出来(见 `_install_write_tx_watchdog`)。
 _OPEN_WRITE_TX: dict[int, tuple[float, str, str]] = {}
 
+#: 已经就"持有太久"报过的事务 —— 同一个事务只报一次,别刷屏(告警变噪音的第一步)。
+_WARNED_TX: set[int] = set()
+
 #: 诊断自己的文件名片段 —— 打调用栈时要把它滤掉,否则栈尾永远是这个 listener。
 #: 用 `os.path.join` 拼,免得在 f-string 里写反斜杠(老版本 Python 不允许)。
 _SELF_FRAME = os.path.join("app", "db", "database.py")
@@ -56,6 +59,9 @@ def _install_write_tx_watchdog(engine) -> None:
     下一次窗口自己就把真凶报出来 —— 比读代码猜可靠得多。
     """
     write_heads = ("insert", "update", "delete", "replace")
+    # ★ **装的时候就喊一声**(2026-10-08 补):13:13 那次撞锁,服务端**一条诊断都没有**,
+    #   而我无法判断是"没装"还是"装了没触发"。这行日志让下一个看的人一眼就知道它活着。
+    logger.info("SQLite 写事务看门狗已装(阈值 %.0fs)", WRITE_TX_WARN_SEC)
 
     @event.listens_for(engine, "before_cursor_execute")
     def _mark_write_start(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
@@ -79,6 +85,7 @@ def _install_write_tx_watchdog(engine) -> None:
         t0 = info.pop("tx_write_t0", None)
         stack = info.pop("tx_write_stack", None)
         _OPEN_WRITE_TX.pop(id(conn), None)
+        _WARNED_TX.discard(id(conn))
         if t0 is None:
             return
         dt = time.monotonic() - t0
@@ -135,6 +142,31 @@ def _install_write_tx_watchdog(engine) -> None:
                          + "\n".join("    " + f for f in frames[-4:]))
         logger.error("SQLite 撞锁(`database is locked`)—— **当前开着的写事务**:\n%s",
                      "\n".join(parts))
+
+    # ★★ **主动采样**(2026-10-08 补,对着 13:13 那次「撞锁却零诊断」加的)。
+    #
+    # 为什么非要它:原来只有两条路会说话 —— **持有者提交时**(长持有告警)和
+    # **受害者报错时**(撞锁点名)。而 13:13 那次**两条都没响**(原因至今没定位),
+    # 于是我一整天都在**瞎修**(只能看到"又撞锁了",看不到是谁)。
+    # 这条守护线程**不依赖任何错误路径**:每 5 秒扫一遍"开着的写事务",
+    # 谁超过阈值就报一次(同一事务只报一次,不刷屏)。
+    def _sample_forever() -> None:
+        while True:
+            time.sleep(5.0)
+            now = time.monotonic()
+            for key, (t0, stack, tname) in list(_OPEN_WRITE_TX.items()):
+                if now - t0 < WRITE_TX_WARN_SEC or key in _WARNED_TX:
+                    continue
+                _WARNED_TX.add(key)
+                frames = [ln.strip() for ln in stack.splitlines()
+                          if ln.strip().startswith('File "')
+                          and "site-packages" not in ln and _SELF_FRAME not in ln]
+                logger.warning(
+                    "SQLite 写事务**已经持有 %.0fs 还没提交**(线程 %s)—— 单写者下这会饿死别人的写。"
+                    "开在:\n%s", now - t0, tname,
+                    "\n".join("    " + f for f in frames[-5:]))
+
+    threading.Thread(target=_sample_forever, daemon=True, name="sqlite-tx-sampler").start()
 
 
 class Base(DeclarativeBase):
