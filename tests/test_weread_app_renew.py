@@ -121,3 +121,57 @@ def test_定时续期作业必须同时续_App(monkeypatch, session):
     monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
     src.weread_refresh_tick()
     assert called == [1], f"续期作业没有续 App 凭据(实际调用 {called})"
+
+
+# ---------------------------------------------------------------------------
+# 体检里那一行(★ 让"静默退化"变得看得见)
+# ---------------------------------------------------------------------------
+
+
+def _patch_app_blob(monkeypatch, blob):
+    from app.services import weread_app_token as wat
+
+    monkeypatch.setattr(wat, "load", lambda _s, _u: blob)
+
+
+def _row():
+    from app.services import chain_health as ch
+
+    return ch._weread_app_row()
+
+
+def test_体检_没配_App_凭据要黄(monkeypatch, session):
+    """★ 没配是**黄**不是绿:阅读数会一直是 `—`,而报告必须说出来。"""
+    _patch_app_blob(monkeypatch, None)
+    monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+    r = _row()
+    assert r["level"] == "🟡" and "未配置" in r["detail"]
+
+
+def test_体检_刚续过是绿(monkeypatch, session):
+    from datetime import datetime
+
+    _patch_app_blob(monkeypatch, {"accessToken": "t", "vid": "1",
+                                  "pulled_at": datetime.now().isoformat(timespec="seconds")})
+    monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+    assert _row()["level"] == "🟢"
+
+
+def test_体检_超过两个周期要黄_超过四个要红(monkeypatch, session):
+    """★ 这就是 10-07 那次事故的形状:凭据早就断了两天,而报告一直是绿的。"""
+    from datetime import datetime, timedelta
+
+    monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+    for hours, want in ((13, "🟡"), (30, "🔴")):        # 周期 6h ⇒ 2 个=12h、4 个=24h
+        _patch_app_blob(monkeypatch, {
+            "accessToken": "t", "vid": "1",
+            "pulled_at": (datetime.now() - timedelta(hours=hours)).isoformat(timespec="seconds")})
+        r = _row()
+        assert r["level"] == want, f"{hours}h 前续过应当是 {want},实际 {r['level']}:{r['detail']}"
+
+
+def test_体检_pulled_at_坏掉要黄而不是崩(monkeypatch, session):
+    _patch_app_blob(monkeypatch, {"accessToken": "t", "vid": "1", "pulled_at": "不是时间"})
+    monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+    r = _row()
+    assert r["level"] == "🟡" and "pulled_at" in r["detail"]

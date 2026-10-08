@@ -238,7 +238,78 @@ def check_credentials(db) -> list[dict]:
                 detail += f" · 验活跳过({why})"
         out.append({"name": label, "level": level, "detail": detail + note})
     out.extend(check_xhs_accounts())
+    out.append(_weread_app_row())
     return out
+
+
+#: 体检里 App 凭据那一行的名字
+_WEREAD_APP_LABEL = "微信读书 · App 凭据(精确阅读数的唯一来源)"
+
+
+def _weread_app_row() -> dict:
+    """**微信读书 App 凭据单独一行**(2026-10-08 补)。
+
+    ⚠️⚠️ **为什么必须单独一行**:上面那条「微信读书(Cookie/书架)」看的是**网页 Cookie**,
+    而**精确阅读数走的是 App 接口** —— 两件事。实测 2026-10-07~10-08 阅读数**整片丢了两天**
+    (卡片「阅读数」全是 `—`),而那份体检报告里那一行**一直是 🟢**。
+    **指标没覆盖到的地方,绿得再亮也不算数。**
+
+    判据只用**凭据年龄**,不打接口(便宜、也不占额度):
+    App token 按 `weread_refresh_cron` 的节奏续,所以
+      · 超过 **2 个周期**没续上 ⇒ 🟡(续期没接上 / 一直失败,阅读数会慢慢变 `—`)
+      · 超过 **4 个周期** ⇒ 🔴
+    """
+    from config.settings import get_settings
+
+    settings = get_settings()
+    try:
+        from app.db import get_session_local
+
+        db = get_session_local()()
+    except Exception:  # noqa: BLE001 - 体检本身不该因为读不到库而挂
+        return {"name": _WEREAD_APP_LABEL, "level": YELLOW, "detail": "读不到数据库"}
+    try:
+        from app.services import weread_app_token as wat
+
+        blob = wat.load(db, 1)
+    except Exception as exc:  # noqa: BLE001
+        return {"name": _WEREAD_APP_LABEL, "level": YELLOW,
+                "detail": f"读取失败:{type(exc).__name__}"}
+    finally:
+        db.close()
+    if not blob:
+        return {"name": _WEREAD_APP_LABEL, "level": YELLOW,
+                "detail": "未配置 —— 阅读数会一直是 `—`(配法:`scripts/weread_app_login.py`)"}
+    # 续期周期:直接从同一个 cron 算两次相邻触发之差(不硬编 6 小时)
+    gap_h = 6.0
+    try:
+        from apscheduler.triggers.cron import CronTrigger
+
+        trig = CronTrigger.from_crontab(str(settings.weread_refresh_cron))
+        a = trig.get_next_fire_time(None, datetime.now())
+        b = trig.get_next_fire_time(a, a)
+        if a and b:
+            gap_h = max(0.5, (b - a).total_seconds() / 3600)
+    except Exception:  # noqa: BLE001 - 算不出就用默认 6h,不让体检变成错误源
+        pass
+    try:
+        pulled = datetime.fromisoformat(str(blob.get("pulled_at") or ""))
+    except ValueError:
+        return {"name": _WEREAD_APP_LABEL, "level": YELLOW,
+                "detail": "凭据里的 `pulled_at` 读不出来 —— 重跑一次取凭据脚本"}
+    age_h = (datetime.now() - pulled).total_seconds() / 3600
+    if age_h > gap_h * 4:
+        level = RED
+    elif age_h > gap_h * 2:
+        level = YELLOW
+    else:
+        level = GREEN
+    detail = (f"{age_h:.1f} 小时前续过(续期周期 {gap_h:g}h;超过 "
+              f"{gap_h * 2:g}h 就该黄)")
+    if level != GREEN:
+        detail += (" —— **续期可能没接上**:查 `weread_refresh_tick` 的日志里有没有"
+                   "「App 凭据已定时续期」;没有就是没接上或一直失败")
+    return {"name": _WEREAD_APP_LABEL, "level": level, "detail": detail}
 
 
 def check_xhs_accounts() -> list[dict]:
