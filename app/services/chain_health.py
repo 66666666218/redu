@@ -522,6 +522,29 @@ def _next_renewal(settings) -> datetime | None:
         return None
 
 
+#: 抖音凭据里**该有**的风控/设备项(缺了不一定立刻坏,但**该重导一次**)。
+#: ⚠️ 这个表不是"必需项",是"**完整性探针**":2026-10-08 实测我们的 jar 比浏览器档案
+#: **少 4 项**(`__ac_nonce` / `x_tt_token` / `is_dbsc` + 一个空名),其中
+#: **`__ac_nonce` 与 `__ac_signature` 是一次会话生成的一对** —— 而我们发了签名却没有配对的 nonce。
+#: 补全后**滑块依旧**(见 `doc/抖音纯协议-链路拆解.md` §5.x)⇒ **它不解释这次的症状**,
+#: 所以只做**提示**,不判红(给一个解释不了的项判红,就是造一个假的红灯)。
+_DOUYIN_RISK_KEYS = ("s_v_web_id", "ttwid", "sessionid", "__ac_nonce", "x_tt_token", "UIFID")
+
+
+def _douyin_jar_note(cookie: str) -> str:
+    """一句话说明抖音 jar 与「该有的项」差在哪。**只提示,不影响判级。**"""
+    if not cookie:
+        return "jar 空"
+    from app.services.douyin_protocol_source import _cookie_dict
+
+    ck = _cookie_dict(cookie)
+    miss = [k for k in _DOUYIN_RISK_KEYS if k not in ck]
+    if not miss:
+        return f"jar {len(ck)} 项(风控项齐全)"
+    return (f"jar {len(ck)} 项,**缺 {'/'.join(miss)}** ⇒ 该重导一次"
+            f"(重导只补档案里现有的项,补不上就只能人去过验证)")
+
+
 def _cred_alive(platform: str, cookie: str, db) -> tuple[bool | None, str]:
     """抖音 / 微博 / 知乎 的凭据**验活**(2026-10-08 补)。
 
@@ -549,7 +572,7 @@ def _cred_alive(platform: str, cookie: str, db) -> tuple[bool | None, str]:
 
             rows = dps.search(["网盘资源"], session=db)
             if rows:
-                return True, f"搜到 {len(rows)} 条"
+                return True, f"搜到 {len(rows)} 条 · {_douyin_jar_note(cookie)}"
             # ⚠️ **"零结果"不能判成绿,也不能判成红** —— 本仓实测过抖音会回
             # `status_code=0 + data:[]`(连发被限流时,与"真没结果"形状**完全一样**)。
             # 但**"没抛 `need_login`"这件事本身是有信息的**:抖音对未登录**一律**回 2483,

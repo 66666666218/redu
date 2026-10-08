@@ -328,3 +328,26 @@ def test_抖音要求过验证_判红并给对修法(monkeypatch):
     # ⚠️ 措辞要准:重导 cookie **本身过不了验证**(它只是复制登录态),但"先让自动重导试一次"
     # 是值得的(换个会话有可能不再被拦)⇒ 消息里**不许**把它说成万能的、也不许说成毫无用处。
     assert "本身过不了验证" in why and "值得" in why, why
+
+
+def test_抖音jar缺项时只提示不判级() -> None:
+    """★ 2026-10-08:实测我们的抖音 jar 比**浏览器档案**少 4 项
+    (`__ac_nonce` / `x_tt_token` / `is_dbsc` + 一个空名),其中
+    **`__ac_nonce` 与 `__ac_signature` 是一次会话生成的一对** —— 我们发了签名却没有配对的 nonce。
+
+    ⚠️⚠️ **但补齐之后滑块依旧**(当场复验过)⇒ **它不解释这次的症状**。
+    所以这里**只提示、不判红** —— **给一个解释不了的项判红,就是造一个假的红灯**,
+    而假红灯会让整份报告被忽略(本仓反复讲过的教训)。
+    """
+    from app.services import chain_health as ch
+
+    full = ("s_v_web_id=1; ttwid=2; sessionid=3; __ac_nonce=4; x_tt_token=5; UIFID=6")
+    assert "风控项齐全" in ch._douyin_jar_note(full)
+    note = ch._douyin_jar_note("s_v_web_id=1; ttwid=2; sessionid=3")
+    assert "__ac_nonce" in note and "重导" in note, note
+    assert ch._douyin_jar_note("") == "jar 空"
+    # 完整性探针是**提示**,不是判据 —— 它出现在"搜到 N 条"后面,不参与 level 计算
+    import inspect
+
+    src = inspect.getsource(ch._cred_alive)
+    assert 'f"搜到 {len(rows)} 条 · {_douyin_jar_note(cookie)}"' in src
