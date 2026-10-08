@@ -16,6 +16,8 @@
 from __future__ import annotations
 
 import json
+import re          # ⚠️ 模块级(2026-10-08):`_PARTIAL_FAIL_RE` 是模块级常量,
+                   # 而这里原先只在函数里局部 import re,加模块级常量就会 NameError
 import sys
 from datetime import datetime, timedelta
 
@@ -45,6 +47,15 @@ CHAINS: tuple[tuple[str, str, str | None, str, str], ...] = (
     # (数据源没接上 / 阈值太高),不是"今天恰好没有" —— 那是本仓反复出现的"废弃链只摘了一半"。
     ("热点选题 Agent(远程)", "hotspot_agent", "热点",
      "detail 尾部带各档证据的触发次数,恒 0 的档要查;⚠️ 它跑在远程,本机库看不到", "remote"),
+    # ⚠️⚠️ 下面三条**以前根本不在体检里**(2026-10-08 首次做覆盖面审计时发现):
+    # 它们有运行记录、也有失败,但**没有任何一行报告会读到** —— 属于"埋了但没人看"。
+    # - 夸克口令:`quark_kouling` 的记录**状态是 success**,而 detail 里写着
+    #   `试8 成功0 失败2;主因:雷电窗口不在前台` —— **作业没崩 ≠ 事情做成了**,
+    #   实测白跑一整天(23 轮)没人知道。指标取 `成功`(解析要容忍 `成功0` 这种无等号写法)。
+    ("网盘·夸克口令转存", "quark_kouling", "成功", "雷电里读剪贴板口令 → 转存(前置检查不过则本轮不做)"),
+    # - B站对标号扫描:今天撞过 `-352` 限流;指标取 `标题`(扫到多少有资源标题的号)。
+    ("B站·对标号扫描", "bili_account_scan", "标题", "B站 API 搜账号 → 抽网盘号"),
+    ("闲鱼·深采", "xianyu_deep", "items", "闲鱼商品深采(详情页)"),
 )
 
 
@@ -735,6 +746,24 @@ def check_list_sources(db, settings=None) -> list[dict]:
     return out
 
 
+_PARTIAL_FAIL_RE = re.compile(r"失败[:=]\s*([^\s;；,。]+)")
+
+
+def _partial_failures(detail: str) -> list[str]:
+    """从 detail 里读「**点名了失败的东西**」→ 失败名单(空列表 = 没有)。
+
+    ⚠️ 必须是**带分隔符**的 `失败:xxx` / `失败=xxx`,**不能**匹配 `失败0` ——
+    后者是"失败**计数**为 0"(xunlei_group 的 detail 里就有 `失败0`),
+    把它读成"有失败"会把一切判红。
+    """
+    out: list[str] = []
+    for m in _PARTIAL_FAIL_RE.finditer(str(detail or "")):
+        name = m.group(1).strip()
+        if name and not name.isdigit():
+            out.append(name)
+    return out
+
+
 def check_chains(db, days: int = 3) -> list[dict]:
     """③ 产出层:每条链最近几次运行的产出(判据取自运行记录的 detail)。"""
     import re
@@ -760,8 +789,11 @@ def check_chains(db, days: int = 3) -> list[dict]:
         # 产出值:能从 detail 里解析出就用它,解析不出**不下结论**(可能只是格式变了)
         val = None
         if metric:
+            # ⚠️ 分隔符**可选**:仓库里的 detail 既有 `new=1` 也有 `成功0` / `标题0条`
+            # (2026-10-08 补三条链时发现 —— 只认 `=` 的话,那几条的指标**永远解析不出来**,
+            #  而"解析不出"会落到 else 分支 ⇒ **默认判绿**,等于加了个瞎指标)。
             for r in rows:
-                m = re.search(rf"(?:^|\s){re.escape(metric)}=(\d+)", str(r.detail or ""))
+                m = re.search(rf"(?:^|\s){re.escape(metric)}[=:：]?\s*(\d+)", str(r.detail or ""))
                 if m:
                     val = int(m.group(1))
                     break
@@ -771,8 +803,15 @@ def check_chains(db, days: int = 3) -> list[dict]:
         elif stale_h:
             lvl = YELLOW
         elif metric and val == 0 and all(
-                re.search(rf"(?:^|\s){re.escape(metric)}=0", str(r.detail or "")) for r in rows):
+                re.search(rf"(?:^|\s){re.escape(metric)}[=:：]?\s*0", str(r.detail or ""))
+                for r in rows):
             lvl = YELLOW          # 连着几次都是 0
+        elif _partial_failures(str(last.detail or "")):
+            # ⚠️⚠️ **部分失败不许被产出数淹没**(2026-10-08):`resource_presence` 的 detail 是
+            # `平台2 命中12 失败:xiaohongshu` —— 命中 12 > 0 ⇒ 原来判**绿**,
+            # 而小红书已经**连挂 5 轮**。判据是"有没有点名失败",不是"总数是不是 0"。
+            chronic = all(_partial_failures(str(r.detail or "")) for r in rows)
+            lvl = RED if chronic else YELLOW
         else:
             lvl = GREEN
         bits = [f"最近 {str(last.started_at)[:16]}({age_h:.0f}h 前)", last.status]
