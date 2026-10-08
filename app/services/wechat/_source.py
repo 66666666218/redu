@@ -682,6 +682,41 @@ _RENEWAL_FAIL_TEXT = {
     "no_rt": "Cookie 里根本没有 wr_rt,自动续期无从下手(这份 Cookie 十几小时必过期)",
     "exception": "续期流程抛异常(见服务端日志)",
 }
+def _renew_weread_app(db: Session, user_id: int) -> bool:
+    """让**微信读书 App** 刷一次会话并回写新的 `accessToken`。返回是否成功。
+
+    ★ **为什么必须有这一步**(2026-10-08,查 logger 名查出来的事实):
+    App 凭据原来**没有定时续期**,只靠监听轮里的"出错自救"。而那个自愈挂在
+    **App 兜底路径**上 —— 它只在「网页列表没拿到 **且** 该号在本轮轮转窗口内」才走得到。
+    ⇒ 实测 `app.services.weread_app_token` 的日志**自 2026-10-06 起一次都没出现过**,
+    而 token 早在 10-07 15:55 就轮换失效了 ⇒ **阅读数从 10-07 15:59 之后一篇都没拿到**
+    (卡片「阅读数」全是 `—`)。
+    一句话:**没被用到 = 永远不续 = 等真要用时它已经死了。**
+
+    ⚠️ `refresh_with_wake` 走 `adb shell am start`(**安卓内部**),**不抢 Windows 前台**,
+    所以放进定时作业是安全的;但它要十几秒,而且**模拟器没开就一定失败**。
+    失败**算这一路失败,不算"续期失败"** —— 那面旗子是给网页凭据用的:网页挂了监听会**断源**,
+    App 挂了只是**阅读数拿不到**,两件事的严重程度不一样。
+    """
+    from app.services import weread_app_token as wat
+
+    try:
+        if not wat.load(db, user_id):
+            return False          # 没配过 App 凭据是**正常分支**,不是失败
+        out = wat.refresh_with_wake(db, user_id)
+    except Exception:  # noqa: BLE001 - 模拟器没开/没装 adb 都不该影响网页续期
+        logger.warning("App 凭据定时续期异常(模拟器可能没开)", exc_info=True)
+        return False
+    if not out.get("ok"):
+        # ⚠️ 留痕但**不推飞书**:它的后果是"阅读数慢慢全变成 —",不是断源;
+        # 而"模拟器没开"是**常态**(那台机器不是一直开着),推了会变噪音。
+        logger.warning("App 凭据定时续期未成功(阅读数会退化):用户 %s —— %s",
+                       user_id, str(out.get("reason"))[:120])
+        return False
+    logger.info("微信读书 App 凭据已定时续期(用户 %s)", user_id)
+    return True
+
+
 def weread_refresh_tick(settings: Settings | None = None) -> int:
     """定时续期:wr_skey 短效且轮换制,有效期内主动换新则永不过期(兜底是 wr_rt,约 30 天)。
 
@@ -714,6 +749,11 @@ def weread_refresh_tick(settings: Settings | None = None) -> int:
                 db.rollback()
                 logger.exception("微信读书续期失败 user=%s", uid)
                 failed.append((uid, "exception"))
+            # ★ **App 侧凭据也要定时续**(2026-10-08):它原来**没有任何定时续期**,
+            # 只靠监听轮里"用到才自救",而那条路很少走到 ⇒ 实测自 10-06 起一次都没续过,
+            # 阅读数整片丢失。详见 `_renew_weread_app` 的说明。
+            # ⚠️ **它失败不计入 `failed`** —— 网页挂了会**断源**,App 挂了只是**阅读数**拿不到。
+            _renew_weread_app(db, uid)
     finally:
         if failed:
             # ★ **立旗**:这一轮确有失败 ⇒ 之后某轮续期成功时,才轮到"恢复通知"出场。
