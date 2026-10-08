@@ -167,3 +167,63 @@ def test_quota_error_codes_include_the_measured_one() -> None:
     """实测的额度边界码是 `-10100` —— 不登记它,熔断器就不会合闸,剩余号会一路硬撞。"""
     assert "-10100" in L._WEREAD_QUOTA_MARKS
     assert L._is_weread_quota_error(RuntimeError("微信读书错误 code=-10100:"))
+
+
+# ---------------------------------------------------------------------------
+# ★ 2026-10-08:没有 bookId 的号把窗口吃光 ⇒ 阅读数**静默死了两天**
+# ---------------------------------------------------------------------------
+
+
+def _books_without_id(session, n: int) -> list[WechatBenchmark]:
+    """手动加的号:有昵称、**没有 bookId**(关联不上微信读书的书) —— 真实库里 263 个号里
+    有 57 个是这种(实测)。它们照样要**采 cover**(别的源回答),只是**永远用不上列表窗口**。"""
+    rows = [WechatBenchmark(user_id=1, nickname=f"手{i}", weread_book_id="", biz="",
+                            active=True) for i in range(n)]
+    session.add_all(rows)
+    session.commit()
+    return rows
+
+
+def test_没有_bookId的号不许占用窗口名额(session) -> None:
+    """★★★ 对着 2026-10-07~10-08「阅读数整片为 0」那条事故加的。真凶**不是**凭据、不是风控。
+
+    机制:`_list_key` 对没有 bookId 的号返回**空串**,而空串在记号里没有(取 0.0 ⇒ 排最前),
+    于是窗口的 25 个名额**全被它们占住**;`{...}` 又把 25 个空串**收敛成一个元素 `{""}`**。
+    真正有 bookId 的号 `_list_key(b) in {""}` **恒为 False** ⇒ 窗口对它们恒为空 ⇒
+    **网页路与 App 路一次都没被调用过**。
+
+    ⚠️ 这里的形状必须是**空 bookId 的号多于窗口**(30 > 25):少于窗口时它们占不满,
+    真号还能挤进去几个,这个 bug 就**显不出来**了 —— 用"能跑"反推"没问题"正是本仓的老坑。
+    """
+    real = _books(session, 60)
+    blanks = _books_without_id(session, 30)
+    rows = blanks + real
+    w = L._list_window(session, 1, rows)
+    assert "" not in w, "空键不该出现在窗口里(它在集合里会把整个窗口塌成一个元素)"
+    assert len(w) == L._LIST_WINDOW, (
+        f"窗口被没有 bookId 的号吃掉了:只有 {len(w)} 个 —— 阅读数会整片掉成 0")
+    assert w <= _keys(real), "窗口里只该是有 bookId 的真号"
+    assert w == _keys(real[:L._LIST_WINDOW]), "挑法不变:仍按「最久没轮到」取前 N 个"
+
+
+def test_全是空_bookId的池子不炸_只是没有窗口(session) -> None:
+    """整池都没 bookId 时要回**空集**(没有谁问得动列表),而不是抛、也不是放出空键。"""
+    _books_without_id(session, 30)
+    w = L._list_window(session, 1, session.query(WechatBenchmark).all())
+    assert w == set(), f"没有可问的号时窗口必须是空的,实际 {w}"
+
+
+def test_混入空_bookId的号_不影响轮转覆盖(session) -> None:
+    """覆盖性质(见 `test_window_covers_every_book_despite_reordering`)在**夹着空号**的池子上
+    必须照样成立 —— 这是"修了窗口大小、却把轮转弄坏"的防线。"""
+    real = _books(session, 60)
+    pool = list(real) + _books_without_id(session, 30)
+    covered: set[str] = set()
+    for _ in range(6):
+        w = L._list_window(session, 1, pool)
+        covered |= w
+        L._mark_listed(session, 1, w)
+        session.commit()
+    assert covered == _keys(real), (
+        f"6 轮后还有 {len(_keys(real)) - len(covered)} 个真号没轮到过列表")
+

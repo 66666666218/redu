@@ -225,12 +225,28 @@ def _list_window(session: Session, user_id: int, rows: list) -> set[str]:
 
     ⚠️ 键用 `weread_book_id`(**不是序号**):序号会随批子集/重排漂移,bookId 不会。
     从没问过的记 0 ⇒ 排最前,所以新加的号第一轮就能拿到阅读数。
+
+    ⚠️⚠️ **没有 bookId 的号必须排除在排队之外**(2026-10-08 修)—— 这一处曾让
+    **阅读数整条链静默死了两天**,而所有告警都指向别处。机制:
+    它们 `_list_key(b)` 是空串、记号里也没有(取 0.0 ⇒ 排最前),于是**窗口的 25 个名额
+    全被这些"永远用不上窗口"的号占住**,`{...}` 又把 25 个空串收敛成**一个元素 `{""}`**;
+    而真正有 bookId 的号 `_list_key(b) in {""}` **恒为 False** ⇒ 窗口对它们**恒为空**。
+    后果是**两条路一次都没被调用过**(不是被拦、不是失效):运行记录已经写着
+    `weread_list(ok=0 app=0 off=0 skipped=79)` —— `ok/app/off 全 0 而 skipped 满员`
+    就是"谁都没问"的指纹(被额度挡会是 `off>0`,所以从计数就能与风控区分开)。
+    实测那天的库:263 个号里 **57 个 bookId 为空**,而有 bookId 的 **139 个全被挡在窗外**。
+    同一处再核一遍:`_mark_listed` 本来就过滤空键(`if k`),说明"空键不是有效号"
+    这件事在写入侧早已成立,漏的只是**读取侧的排队**。
     """
     if not rows:
         return set()
+    # ⚠️ 先滤空键:它们既不可能被问列表,也不该占用窗口名额(见上)
+    keyed = [b for b in rows if _list_key(b)]
+    if not keyed:
+        return set()
     marks = _list_marks(session, user_id)
     # 次序里带 bookId 做次键:并列时结果**确定**(否则同一批号的顺序每次不同,难复现)
-    ordered = sorted(rows, key=lambda b: (marks.get(_list_key(b), 0.0), _list_key(b)))
+    ordered = sorted(keyed, key=lambda b: (marks.get(_list_key(b), 0.0), _list_key(b)))
     return {_list_key(b) for b in ordered[:_LIST_WINDOW]}
 
 
