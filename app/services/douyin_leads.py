@@ -127,12 +127,17 @@ def _aweme_id(url: str) -> str:
     return m.group(1) if m else ""
 
 
-def _try_protocol(keywords: list[str], session) -> tuple[list[dict], Exception | None]:
-    """走抖音纯协议取一批;返回 `(记录, 异常)`。**异常不在这里抛** —— 留给调用方决定回落。"""
+def _try_protocol(keywords: list[str], session, stats: dict | None = None
+                  ) -> tuple[list[dict], Exception | None]:
+    """走抖音纯协议取一批;返回 `(记录, 异常)`。**异常不在这里抛** —— 留给调用方决定回落。
+
+    `stats` 会被 `douyin_protocol_source.search` 填进 `kw_total` / `kw_hit`
+    (几个词、其中几个有结果)—— **判"是不是被限流"就靠这两个数**。
+    """
     from app.services import douyin_protocol_source as dps
 
     try:
-        return dps.search(keywords, session=session), None
+        return dps.search(keywords, session=session, stats=stats), None
     except Exception as exc:  # noqa: BLE001 - 回落是设计的一部分,这里就是它的入口
         return [], exc
 
@@ -157,12 +162,29 @@ def _collect(platform: str, keywords: list[str], session=None) -> tuple[list[dic
         from config.settings import get_settings
 
         if getattr(get_settings(), "douyin_leads_use_protocol", True):
-            rows, err = _try_protocol(keywords, session)
-            if rows:
+            stats: dict = {}
+            rows, err = _try_protocol(keywords, session, stats)
+            total = int(stats.get("kw_total") or 0)
+            hit = int(stats.get("kw_hit") or 0)
+            # ★★ **"只有少数词有结果"要当成可疑,回落浏览器**(2026-10-08 实测逼出来的)。
+            # 同一套配置下实测两种极端都出现过:
+            #   · 8/8 个词各 14 条(共 113 条候选)—— 正常;
+            #   · **只有 1/8、1/6 个词有结果,其余全 0**(共 13~14 条)—— 形态与抖音
+            #     "首屏通、之后回 `status_code=0 + data:[]`"的**限流完全一致**。
+            # ⚠️ **只看总条数分不出这两种**:13 条与 113 条都是"十几到上百条"的量级,
+            #   而运行记录里只写"线索 N" ⇒ 少掉七分之六的量为**静默**发生。
+            # ⇒ 判据用**命中词占比**(< 一半 就可疑),与"完全没搜到"一样回落 ——
+            #   回落代价与今天持平(今天每一次都开浏览器),换的是**不静默丢量**。
+            few = bool(rows) and total >= 4 and hit * 2 < total
+            if rows and not few:
                 return rows, "协议"
             if err is not None:
                 logger.warning("抖音纯协议失败(kind=%s),回落浏览器:%s",
                                getattr(err, "kind", "?"), str(err)[:160])
+            elif few:
+                logger.warning("抖音纯协议**只有 %d/%d 个词有结果**(共 %d 条)—— 形态与限流一致"
+                               "(实测 8/8 与 1/8 都出现过),本轮回落浏览器",
+                               hit, total, len(rows))
             else:
                 # ⚠️ **"一条都没搜到"必须与"抛错"分开报**:前者可能是限流
                 #    (实测:连发会回 `status_code=0 + data:[]`,与"真没结果"形状相同),

@@ -57,8 +57,11 @@ def _patch_protocol(monkeypatch, rows=None, err=None):
 
     seen: list[object] = []
 
-    def fake(keywords, session):
+    def fake(keywords, session, stats=None):
         seen.append(session)
+        if stats is not None:          # ⚠️ 桩也要接 `stats`(它现在被用来判"命中词占比")
+            stats["kw_total"] = len(keywords)
+            stats["kw_hit"] = len(keywords) if rows else 0
         return (rows or []), err
 
     monkeypatch.setattr(dl, "_try_protocol", fake)
@@ -116,6 +119,73 @@ def test_协议一条都没搜到也要回落(monkeypatch, use_protocol, mc_spy,
     assert any("一条都没搜到" in r.message for r in caplog.records)
     assert any("限流" in r.message for r in caplog.records), \
         "「全空」与「抛错」要能分辨 —— 前者可能是限流"
+
+
+# ---------------------------------------------------------------------------
+# ★ 只有少数词有结果 ⇒ 也要回落(2026-10-08 实测逼出来的)
+# ---------------------------------------------------------------------------
+
+
+def _patch_protocol_ratio(monkeypatch, hit: int, total: int, per_kw: int = 14):
+    """协议桩:`total` 个词里 `hit` 个有结果,每个 `per_kw` 条。"""
+    from app.services import douyin_leads as dl
+
+    def fake(keywords, session, stats=None):
+        if stats is not None:
+            stats["kw_total"] = total
+            stats["kw_hit"] = hit
+        # ⚠️ **必须返回 `(rows, err)` 元组** —— 我第一版只返回了列表,
+        # 于是 `_collect` 里 `rows, err = ...` 直接 `too many values to unpack`
+        # (报错行号在 douyin_leads.py:166,很容易看成是生产代码的问题)。
+        return ([_row(url=f"https://www.douyin.com/video/{i:019d}")
+                 for i in range(hit * per_kw)], None)
+
+    monkeypatch.setattr(dl, "_try_protocol", fake)
+
+
+def test_只有少数词有结果要回落并在日志里说清(monkeypatch, use_protocol, mc_spy, caplog):
+    """★★ **这条是这次实测抓到的真问题**:同一套配置下,
+    有的轮次 **8/8 个词各 14 条**(113 条候选),有的轮次**只有 1/8 个词有结果**(14 条)。
+    后者与抖音"首屏通、之后回 `status_code=0 + data:[]`"的**限流形状完全一致**。
+
+    ⚠️ **只看总条数分不出这两种** —— 而运行记录里只写"线索 N",
+    少掉七分之六的量会**静默**发生。所以判据用**命中词占比**。
+    """
+    from app.services import douyin_leads as dl
+
+    with caplog.at_level("WARNING"):
+        _patch_protocol_ratio(monkeypatch, hit=1, total=8)
+        _, source = dl.collect_leads(["词"])
+    assert source == "浏览器兜底", "1/8 命中与限流形状一致,该回落"
+    assert any("只有 1/8 个词有结果" in r.message for r in caplog.records), \
+        f"要把命中比例说出来:{[r.message[:60] for r in caplog.records]}"
+    assert len(mc_spy) == 1
+
+
+def test_每个词都有结果就用协议(monkeypatch, use_protocol, mc_spy):
+    from app.services import douyin_leads as dl
+
+    _patch_protocol_ratio(monkeypatch, hit=8, total=8)
+    _, source = dl.collect_leads(["词"])
+    assert source == "协议" and mc_spy == []
+
+
+def test_恰好一半命中不回落(monkeypatch, use_protocol, mc_spy):
+    """边界:判据是「**不到一半**才算可疑」—— 恰好一半照常用协议(别把线画得太紧)。"""
+    from app.services import douyin_leads as dl
+
+    _patch_protocol_ratio(monkeypatch, hit=4, total=8)
+    _, source = dl.collect_leads(["词"])
+    assert source == "协议", "恰好一半不该判成限流"
+
+
+def test_词很少时不启用这个判据(monkeypatch, use_protocol, mc_spy):
+    """少于 4 个词时比例没意义(1/2 也能是"这个词恰好没结果")⇒ 不回落,免得白开浏览器。"""
+    from app.services import douyin_leads as dl
+
+    _patch_protocol_ratio(monkeypatch, hit=1, total=2)
+    _, source = dl.collect_leads(["词"])
+    assert source == "协议"
 
 
 def test_非抖音平台直接走浏览器(monkeypatch, use_protocol, mc_spy):
@@ -194,7 +264,7 @@ def test_session_一路透传到_protocol_source内部(monkeypatch, use_protocol
                         lambda keywords, **kw: (got.append(kw), [])[1])
     sentinel = object()
     dl._try_protocol(["词"], sentinel)
-    assert got == [{"session": sentinel}], (
+    assert [g.get("session") for g in got] == [sentinel], (
         f"session 没走到 `douyin_protocol_source.search`(收到的是 {got})⇒ "
         f"生产会静默不带凭据、回 2483,而表现只是「搜不到」"
     )

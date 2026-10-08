@@ -270,6 +270,7 @@ def check_credentials(db) -> list[dict]:
         out.append({"name": label, "level": level, "detail": detail + note})
     out.extend(check_xhs_accounts())
     out.append(_xhs_protocol_row(db))
+    out.append(_kuaishou_row(db))
     out.append(_weread_app_row())
     return out
 
@@ -442,6 +443,49 @@ def _xhs_protocol_row(db) -> dict:
                               f"(凭据能认证,是账号没权限),**重登/重试只会延长封锁** ⇒ 停手等解封"}
         return {"name": _XHS_PROTO_LABEL, "level": YELLOW,
                 "detail": f"验活没做成({kind}):{str(exc)[:100]}"}
+
+
+def _kuaishou_row(db) -> dict:
+    """快手**专属体检行**(2026-10-08 补)。
+
+    以前它的失败只埋在「名字型热度」那行的 `失败:kuaishou` 里 —— **一眼扫过去看不见**,
+    而这些埋着的失败正是本仓反复栽的那一类。
+
+    ⚠️ **为什么快手做不了协议验活**:它走 MediaCrawler 浏览器,而"验活"就等于
+    **跑一轮采集**(开浏览器、几十秒)—— 不适合塞进每天的体检。
+    所以这行的判据是**最近一轮 `resource_presence` 的结果**,不是现发探针。
+
+    ⚠️ **也别指望能自动接回**:快手的登录态在 MediaCrawler 的浏览器档案里
+    (`cdp_ks_user_data_dir`),而我们**没有存一份到加密库**(没有协议路要它)⇒
+    失效了只能**人扫码重登**。这行能做的就是把"该去重登了"摆到眼前。
+    """
+    from sqlalchemy import select
+
+    from app.db.models import RunRecord
+
+    name = "快手(跨平台热度)"
+    try:
+        row = db.scalars(select(RunRecord).where(RunRecord.kind == "resource_presence")
+                         .order_by(RunRecord.started_at.desc()).limit(1)).first()
+    except Exception as exc:  # noqa: BLE001 - 体检自己不该因为读不到而挂
+        return {"name": name, "level": YELLOW, "detail": f"读不到运行记录:{type(exc).__name__}"}
+    if row is None:
+        return {"name": name, "level": YELLOW, "detail": "还没有跑过跨平台热度那一轮"}
+    detail = str(row.detail or "")
+    failed = [x.strip() for x in detail.split("失败:")[1:]] if "失败:" in detail else []
+    # ⚠️ 失败记录的 detail 里可能带着**整段异常与 SQL 语句** —— 只取第一行,
+    #    否则体检报告会被一坨 SQL 撑爆,人就不看了(那是告警变噪音的第一步)。
+    one_line = detail.splitlines()[0] if detail else ""
+    head = f"最近一轮 {str(row.started_at)[5:16]} [{row.status}] {one_line[:70]}"
+    if any("kuaishou" in f for f in failed):
+        return {"name": name, "level": RED,
+                "detail": f"{head} —— ⚠️ **快手这一轮被抓取失败**,多半是登录态失效。"
+                          f"要**人扫码重登**(`cdp_ks_user_data_dir`,MediaCrawler 那条链),"
+                          f"快手没有可自动重导的凭据来源"}
+    if row.status != "success":
+        return {"name": name, "level": YELLOW, "detail": head}
+    return {"name": name, "level": GREEN,
+            "detail": head + (f"(其他平台失败:{','.join(failed)})" if failed else "")}
 
 
 def _next_renewal(settings) -> datetime | None:

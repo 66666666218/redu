@@ -376,10 +376,17 @@ def _is_argus_block(text: str) -> bool:
 
 
 def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
-           pages: int = 1, use_abogus: bool = False) -> list[dict]:
+           pages: int = 1, use_abogus: bool = False,
+           stats: dict | None = None) -> list[dict]:
     """按关键词搜抖音。返回 `{uid, name, url, snippet, pan_link, ...}`。
 
     形状与 `mediacrawler_source.crawl` 一致,上层(`douyin_leads.find_leads`)不用改。
+
+    `stats` 传字典时,会填进 **`kw_total` / `kw_hit`**(几个词、其中几个有结果)。
+    ★ 这两个数**是判"限流"的唯一线索**:2026-10-08 实测同一个配置下,
+    有的轮次 **8/8 个词各 14 条**,有的轮次 **只有 1/8 个词有结果、其余全 0**
+    —— 后者与抖音"首屏通、之后回 `status_code=0 + data:[]`"的限流形状**完全一致**。
+    只看总条数是分不出这两种情况的(都能是"十几条")。
     """
     import requests
 
@@ -395,6 +402,9 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
             kws.append(s)
     if not kws:
         return []
+    if stats is not None:
+        stats["kw_total"] = len(kws)
+        stats["kw_hit"] = 0
     blob = _cookie(session, user_id, settings)
     ck = _cookie_dict(blob)
     if not blob or not _uifid(ck):
@@ -412,6 +422,7 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
         if i:
             time.sleep(_GAP)
         search_id = ""            # 首屏传空;翻页用上一屏的 logid
+        hit_kw = False
         for page in range(1, max(1, pages) + 1):
             params = build_params(kw, offset=(page - 1) * PAGE_SIZE,
                                   search_id=search_id, ms_token=ms_token, webid=webid)
@@ -469,5 +480,8 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
                         kw[:24], page, len(page_rows), logid[:16] or "-")
             if not page_rows:
                 break
+            hit_kw = True
             search_id = logid
+        if hit_kw and stats is not None:
+            stats["kw_hit"] = int(stats.get("kw_hit", 0)) + 1
     return rows

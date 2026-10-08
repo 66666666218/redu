@@ -255,3 +255,51 @@ def test_小红书_重导后仍失败就报红(monkeypatch):
                           retry_rows=[])
     assert calls["reheal"] == 1 and row["level"] == "🔴"
     assert "复验仍零结果" in row["detail"]
+
+
+# ---------------------------------------------------------------------------
+# 快手:专属体检行(它的失败以前埋在「名字型热度」那行里,看不见)
+# ---------------------------------------------------------------------------
+
+
+class _Rec:
+    def __init__(self, status, detail):
+        from datetime import datetime
+        self.status, self.detail, self.started_at = status, detail, datetime.now()
+
+
+class _RecDB:
+    def __init__(self, rec):
+        self._rec = rec
+
+    def scalars(self, *a, **k):
+        rec = self._rec
+
+        class _R:
+            def first(self_inner):
+                return rec
+        return _R()
+
+
+def test_快手失败要单列报红并说要扫码():
+    """★ 以前它的失败只出现在「名字型热度」那行的 `失败:kuaishou` 里 —— 一眼扫不见。"""
+    row = ch._kuaishou_row(_RecDB(_Rec("success", "平台3 命中16 失败:kuaishou")))
+    assert row["level"] == "🔴"
+    assert "扫码重登" in row["detail"] and "cdp_ks_user_data_dir" in row["detail"]
+
+
+def test_快手成功要报绿():
+    row = ch._kuaishou_row(_RecDB(_Rec("success", "平台2 命中15")))
+    assert row["level"] == "🟢" and "平台2 命中15" in row["detail"]
+
+
+def test_快手整轮失败比如撞锁_要报黄而不是红():
+    """⚠️ **区分"快手自己挂了"与"这一轮整体没跑成"**:后者的修法完全不同(不是去重登)。"""
+    row = ch._kuaishou_row(_RecDB(_Rec("failed", "sqlite3.OperationalError: database is locked\n[SQL: INSERT…")))
+    assert row["level"] == "🟡"
+    assert "SQL:" not in row["detail"], "带 SQL 的整段异常会把报告撑爆,只该取第一行"
+
+
+def test_快手没跑过要报黄():
+    row = ch._kuaishou_row(_RecDB(None))
+    assert row["level"] == "🟡" and "没有跑过" in row["detail"]
