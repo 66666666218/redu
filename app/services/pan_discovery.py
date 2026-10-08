@@ -623,7 +623,22 @@ def sync(session, user_id: int, settings=None) -> dict:
         row.author, row.source_url = c["author"], c["source_url"]
         row.status, row.message = status, message[:200]
         row.our_url, row.pass_code = our[:500], code[:32]
-        session.flush()                     # 同轮去重靠它(见 cross_accounts 的教训)
+        # ★★ **必须是 `commit()`,不能是 `flush()`**(2026-10-08)。
+        #
+        # **实测证据**(拿生产库副本真跑这个循环,数 SQLAlchemy 的事务事件):
+        # `flush()` 版跑 **9 条候选只产生 2 次 COMMIT** ⇒ **事务横跨了多次迭代**;
+        # 改成 `commit()` 后是**每条一次**。
+        # 而每次迭代里都要调 `already_have()`(查库),所以事务横跨几轮 = 写锁被多抱几轮 ——
+        # SQLite 是**单写者**,别人 `busy_timeout` 30 秒等不到就 `database is locked`。
+        # 看门狗(见 `app/db/database.py`)点名撞锁时"开着的写事务"**正是这一行**。
+        #
+        # ⚠️ **不要把"横跨几轮"读成"几秒"**:看门狗早期报过一个 6.3s 的数字,
+        # 但那份仪器**没能复现**、后来还被发现可能虚报(它只在事务**结束**时报,
+        # 且没有可靠的清零信号)。**站得住的只有上面那条计数证据。**
+        #
+        # 语义不变:同轮去重靠内存里的 `exist` 字典;而"这一条先落盘"本来就是这个循环想要的
+        # (上面 608 行已经为同一个理由手工 commit 过一次)。
+        session.commit()
         if status == "ok":
             ok += 1
             items.append({"title": c["title"], "author": c["author"],
