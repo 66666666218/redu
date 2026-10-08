@@ -6,15 +6,130 @@
 """
 from __future__ import annotations
 
+import os
+import threading
+import time
+import traceback
 from collections.abc import Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from config.settings import get_settings
 from app.utils import get_logger
 
 logger = get_logger(__name__)
+
+#: **当前开着的写事务**:`id(conn) -> (起始时刻, 调用栈, 线程名)`。
+#: 撞锁时靠它把"当时是谁抱着锁"直接打出来(见 `_install_write_tx_watchdog`)。
+_OPEN_WRITE_TX: dict[int, tuple[float, str, str]] = {}
+
+#: 诊断自己的文件名片段 —— 打调用栈时要把它滤掉,否则栈尾永远是这个 listener。
+#: 用 `os.path.join` 拼,免得在 f-string 里写反斜杠(老版本 Python 不允许)。
+_SELF_FRAME = os.path.join("app", "db", "database.py")
+
+#: 写事务开着超过这么多秒就告警。20 秒是照 `busy_timeout=30` 定的 ——
+#: 别人最多等 30 秒就会以 `database is locked` 失败,所以在 20 秒时先喊,
+#: 留出 10 秒让我们**在它造成失败之前**看见。
+WRITE_TX_WARN_SEC = 20.0
+
+
+def _install_write_tx_watchdog(engine) -> None:
+    """给「把写事务开着做慢活」装一个**报警器**(只报不修)。
+
+    ## 为什么需要它(2026-10-08 实证)
+    本机是 SQLite **单写者**,且 `busy_timeout=30000` —— 也就是**别人要等 30 秒才放弃**。
+    于是只要有人把**写事务**开着去跑几分钟的慢活(网络 / 浏览器 / LLM),其它作业的写
+    就会一个个以 `database is locked` 失败。
+
+    **实测代价**:公众号转存在**夸克那边已经存成、空间也花了**,记录却因
+    `_commit_now` 撞锁没落盘 ⇒ 卡片显示「⏳待转存」,而下一轮还会**重存一份、多占一份空间**。
+    错误时间戳**精确落在长作业窗口里**(04:02、08:03~08:06),而空闲时写只要 0.003 秒
+    ⇒ 不是"锁坏了",是**有人持有太久**。
+
+    ## 判据是"持有"时长,不是单条语句耗时
+    从**这个事务里的第一条写语句**算到 `commit` —— 慢的是**持有**,
+    单看某一句话是看不出来的。
+
+    ## 它为什么带调用栈
+    光说"有个事务开了 200 秒"没法修。栈直接指出**开它的那一处代码**,
+    下一次窗口自己就把真凶报出来 —— 比读代码猜可靠得多。
+    """
+    write_heads = ("insert", "update", "delete", "replace")
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _mark_write_start(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
+        info = conn.info
+        if info.get("tx_write_t0") is not None:
+            return
+        if str(statement).lstrip()[:8].lower().startswith(write_heads):
+            t0 = time.monotonic()
+            stack = "".join(traceback.format_stack(limit=14))
+            info["tx_write_t0"] = t0
+            info["tx_write_stack"] = stack
+            _OPEN_WRITE_TX[id(conn)] = (t0, stack, threading.current_thread().name)
+
+    def _close(conn, how: str) -> None:  # noqa: ANN001
+        info = conn.info
+        t0 = info.pop("tx_write_t0", None)
+        stack = info.pop("tx_write_stack", None)
+        _OPEN_WRITE_TX.pop(id(conn), None)
+        if t0 is None:
+            return
+        dt = time.monotonic() - t0
+        if dt >= WRITE_TX_WARN_SEC:
+            logger.warning(
+                "SQLite 写事务**持有 %.1fs** 才 %s —— 单写者下这会饿死别人的写"
+                "(别人等 30 秒就 `database is locked`)。底下是**开这个写事务那一处**的调用栈,"
+                "去修它(慢活不该放在事务里):\n%s", dt, how, stack)
+
+    @event.listens_for(engine, "commit")
+    def _on_commit(conn):  # noqa: ANN001
+        _close(conn, "commit")
+
+    @event.listens_for(engine, "rollback")
+    def _on_rollback(conn):  # noqa: ANN001
+        _close(conn, "rollback")
+
+    @event.listens_for(engine, "begin")
+    def _on_begin(conn):  # noqa: ANN001 - 新事务不该继承上一个的计时
+        conn.info.pop("tx_write_t0", None)
+        conn.info.pop("tx_write_stack", None)
+        _OPEN_WRITE_TX.pop(id(conn), None)
+
+    @event.listens_for(engine, "handle_error")
+    def _on_error(exc_ctx):  # noqa: ANN001
+        """★ **撞锁的那一刻,把"当前所有开着的写事务"全打出来**。
+
+        ⚠️ 为什么值得这么麻烦:光记"某次提交失败"没法修 —— 得知道**当时是谁抱着锁**。
+        这个钩子在受害者报错的那一瞬间做快照,所以它报的就是真凶(而不是等下一个窗口从
+        一堆日志里对时间戳猜)。栈里第一条非 SQLAlchemy 的帧就是那处代码。
+        """
+        if "database is locked" not in str(getattr(exc_ctx, "original_exception", "") or ""):
+            return
+        # ⚠️ **把"受害者自己"排除掉**:它也在 before_cursor_execute 里登记过(那条写语句
+        #    就是失败的那条),不排除的话它会把自己列成"持有者",把真凶淹掉。
+        victim = getattr(exc_ctx, "connection", None)
+        now = time.monotonic()
+        openers = [(k, v) for k, v in _OPEN_WRITE_TX.items() if victim is None or k != id(victim)]
+        if not openers:
+            logger.error("SQLite 撞锁(`database is locked`)—— 但**本进程没有别的开着的写事务** "
+                         "⇒ 抱锁的是**别的进程**(另一个实例 / 外部工具),不是本服务内部")
+            return
+        parts = []
+        for _, (t0, stack, tname) in sorted(openers, key=lambda kv: now - kv[1][0],
+                                           reverse=True)[:3]:
+            # ⚠️ 只取 `File "…"` **开头的帧** —— `format_stack()` 每条是**多行**
+            #    (帧 + 源码行),逐行过滤会把孤立的源码行留在里面,看起来像乱码(实测)。
+            # ⚠️ 判据是"不在 site-packages 里",**不是**"路径含 redian" ——
+            #    后者在测试/别的部署路径下会把栈滤成空(也实测踩到了)。
+            frames = [ln.strip() for ln in stack.splitlines()
+                      if ln.strip().startswith('File "')
+                      and "site-packages" not in ln and _SELF_FRAME not in ln]
+            parts.append(f"  持有 {now - t0:.1f}s(线程 {tname}),开在:\n"
+                         + "\n".join("    " + f for f in frames[-4:]))
+        logger.error("SQLite 撞锁(`database is locked`)—— **当前开着的写事务**:\n%s",
+                     "\n".join(parts))
 
 
 class Base(DeclarativeBase):
@@ -41,8 +156,6 @@ def get_engine():
             # SQLite 本地部署:开启 WAL(读写不互斥)+ busy_timeout(写锁冲突时等待
             # 而非立即抛 database is locked——白天高峰 collect_tick 连续 4 分钟
             # 撞锁的 2026-09-19 实战)。MySQL 无此问题(行锁)。
-            from sqlalchemy import event
-
             engine_kwargs["connect_args"] = {"timeout": 30}  # sqlite3 busy_timeout 秒
             _engine = create_engine(url, **engine_kwargs)
 
@@ -53,6 +166,11 @@ def get_engine():
                 cur.execute("PRAGMA busy_timeout=30000")
                 cur.execute("PRAGMA synchronous=NORMAL")
                 cur.close()
+
+            # ★ 写事务持有太久的报警器(2026-10-08):`busy_timeout` 只能让**等的人**
+            #   多等 30 秒,挡不住**持有的人**开着事务跑几分钟慢活。它只报不修,
+            #   目的是把"是谁"打出来。见 `_install_write_tx_watchdog` 的说明。
+            _install_write_tx_watchdog(_engine)
         else:
             _engine = create_engine(url, **engine_kwargs)
     return _engine
