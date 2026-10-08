@@ -567,8 +567,10 @@ def _cred_alive(platform: str, cookie: str, db) -> tuple[bool | None, str]:
             # 在此之前这层只看 status_code/data ⇒ 报成"零结果,不作判定",
             # 于是报告上既不红也不黄,而实际上**整条链是断的**(实测连空 8 小时)。
             return False, ("**抖音要求过验证**(不是凭据失效、也不是限流):"
-                           "在浏览器里打开抖音过一次验证(滑块/验证码),重导 cookie **解决不了**"
-                           "—— 在此之前每个关键词都返回空。" + msg)
+                           "要在浏览器里打开抖音**过一次验证**(滑块/验证码)。"
+                           "⚠️ 措辞要准:重导 cookie **本身过不了验证**(它只是复制登录态),"
+                           "所以自动化在这里到顶了 —— 但**先让自动重导试一次**是值得的"
+                           "(换一个会话有可能不再被拦)。在此之前每个关键词都返回空。" + msg)
         if kind in ("need_login", "restricted", "argus") or "登录" in str(exc):
             return False, msg
         return None, msg

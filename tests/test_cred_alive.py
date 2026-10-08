@@ -324,4 +324,7 @@ def test_抖音要求过验证_判红并给对修法(monkeypatch):
     monkeypatch.setattr(dps, "search", _boom)
     alive, why = ch._cred_alive("douyin", "ck", None)
     assert alive is False, "要求过验证是**断源**,不能报成「不作判定」"
-    assert "过验证" in why and "重导 cookie" in why and "解决不了" in why
+    assert "过验证" in why and "过一次验证" in why, why
+    # ⚠️ 措辞要准:重导 cookie **本身过不了验证**(它只是复制登录态),但"先让自动重导试一次"
+    # 是值得的(换个会话有可能不再被拦)⇒ 消息里**不许**把它说成万能的、也不许说成毫无用处。
+    assert "本身过不了验证" in why and "值得" in why, why
