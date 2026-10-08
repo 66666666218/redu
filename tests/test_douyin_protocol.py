@@ -514,3 +514,64 @@ def test_真的零结果不许被当成要求过验证(monkeypatch):
     assert _run(monkeypatch, _FakeResp(payload={
         "status_code": 0, "data": [],
         "search_nil_info": {"search_nil_type": "normal"}})) == []
+
+
+# ---------------------------------------------------------------------------
+# ★ 2026-10-08:设备指纹要**跨轮次稳定**(用户问「纯协议如何避免滑块」时查到的)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fp_session():
+    """只建 `system_config` 一张表 —— 指纹就存在那里。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db.database import Base
+    from app.db import models  # noqa: F401
+    from app.db.models import SystemConfig
+
+    eng = create_engine("sqlite://")
+    Base.metadata.create_all(eng)
+    SystemConfig.__table__.create(eng, checkfirst=True)
+    db = sessionmaker(bind=eng)()
+    yield db
+    db.close()
+
+
+def test_webid_跨轮次稳定_而不是每次随机(fp_session) -> None:
+    """★ `webid` 是**设备标识** —— 真实浏览器生成一次、长期不变。
+
+    而改动前这里是**每次调用都重新随机**(19 位),即"每次换一个设备号";
+    把这样的客户端送到风控面前,本身就是机器特征。
+    ⚠️ 老实说清把握程度:旧注释说的"抖音不校验取值"**很可能仍然成立**
+    (随机值照样能搜到),但"稳定"这条是**与真实客户端行为对齐**,不是已证实的因果。
+    """
+    dp._FP_CACHE.clear()
+    a = dp._webid(fp_session, 1)
+    assert a == dp._webid(fp_session, 1), "同一次进程内就该是同一个"
+    assert len(a) == 19 and a.isdigit()
+    # 换一个"进程"(清掉内存缓存)也要拿到同一个 —— 靠 system_config 持久化
+    dp._FP_CACHE.clear()
+    assert dp._webid(fp_session, 1) == a, "重启后应当仍是同一个设备号"
+
+
+def test_ms_token_有真值就绝不覆盖(fp_session) -> None:
+    """⚠️ 站点会拿 `msToken` 和登录态对账,真有就**绝不能**换成造的。"""
+    dp._FP_CACHE.clear()
+    assert dp._ms_token({"msToken": "REAL123"}, fp_session, 1) == "REAL123"
+
+
+def test_造出来的假_msToken_也跨轮次稳定(fp_session) -> None:
+    dp._FP_CACHE.clear()
+    a = dp._ms_token({}, fp_session, 1)
+    assert len(a) == 184 and a.endswith("=="), "形状要照 f2 的写法(182 + ==)"
+    dp._FP_CACHE.clear()
+    assert dp._ms_token({}, fp_session, 1) == a
+
+
+def test_没有_session_时也不能每次随机() -> None:
+    """⚠️ 没有库(比如单测、脚本)时退回**进程内缓存**,而不是每次重造 ——
+    `search` 之外还有调用点(`build_params` 的兜底),它们拿不到 session。"""
+    dp._FP_CACHE.clear()
+    assert dp._webid() == dp._webid()

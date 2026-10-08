@@ -913,6 +913,61 @@ def check_read_num_coverage(db, days: int = 3) -> list[dict]:
              "detail": detail + f"(覆盖率 {ratio:.0%})"}]
 
 
+def check_weread_list_rotation(db, rounds: int = 3) -> list[dict]:
+    """④ **阅读数列表轮转** —— 读运行记录里的**机制指纹**,不看覆盖率。
+
+    ⚠️⚠️ **为什么必须单列这一条**(2026-10-08):`check_read_num_coverage` 判的是
+    **近 3 天的覆盖率**(红线 5%)。可**单日全断**时覆盖率还有约 **31%**
+    —— 前两天的好数据在稀释它 ⇒ 最多报黄,要衰减到 5% 得**三天**。
+    而这类事故(轮转窗口被"没有 bookId 的号"占满 ⇒ **两条路一次都没被调用过**)
+    **恰恰是「当天全断、三天后才红」** —— 那个检测窗**结构上就抓不到它**。
+
+    所以这里换判据:**不看产出,看机制**。运行记录里那四个数就是机制本身:
+
+        weread_list(ok=0 app=0 off=0 off_with_new=1 skipped=79)
+
+    | 形状 | 含义 | 处置 |
+    |---|---|---|
+    | `ok`/`app` 全 0、`skipped` 满员、`off=0` | **谁都没问过** ⇒ **轮转窗口坏了** | 查 `_list_window` 及其入参 |
+    | `ok`/`app` 全 0、`off>0` | 两条路**被额度/风控挡掉** | 外因:等 / 换会话,别改代码 |
+    | `ok`/`app` 有非 0 | 至少一条路在跑 | 绿(拿不到读数另有原因,看覆盖率那条) |
+
+    ⇒ **一轮就能判**,不必等三天。判据是「**调用过没有**」,不是「调用成没成」。
+    """
+    import re
+
+    rows = _rows(db, "wechat_listen", max(rounds, 5))
+    parsed: list[tuple[int, int, int, int]] = []
+    for r in rows:
+        m = re.search(r"weread_list\(ok=(\d+) app=(\d+) off=(\d+)[^)]*skipped=(\d+)\)",
+                      str(r.detail or ""))
+        if m:
+            parsed.append(tuple(int(g) for g in m.groups()))   # type: ignore[arg-type]
+    name = "公众号·阅读数列表轮转"
+    if not rows:
+        return [{"name": name, "level": YELLOW, "detail": "最近没有监听轮,无从判断"}]
+    if not parsed:
+        return [{"name": name, "level": YELLOW,
+                 "detail": f"最近 {len(rows)} 轮记录里都没有 `weread_list(...)` 记账"
+                           f"(格式变了?那就等于这个指标瞎了)"}]
+    ok, app, off, skipped = parsed[0]
+    asked = ok + app
+    shape = f"最近一轮:网页问成 {ok} / App 问成 {app} / 被挡 {off} / 窗口外 {skipped}"
+    if asked:
+        return [{"name": name, "level": GREEN, "detail": shape + " —— 至少一条路在跑"}]
+    if off:
+        return [{"name": name, "level": RED,
+                 "detail": f"{shape} ⇒ **两条路都被额度/风控挡掉了**"
+                           f"(与「窗口坏了」不是一回事:这是外因,该等或换会话,别改代码)。"
+                           f"看 `weread_budget` 的熔断记录"}]
+    return [{"name": name, "level": RED,
+             "detail": f"{shape} ⇒ **谁都没问过**(ok/app/off 全 0 而窗口外满员)"
+                       f"⇒ **轮转窗口坏了**。2026-10-08 那次就是这个形状:"
+                       f"`_list_window` 的窗口被**没有 bookId 的号**占满(它们不可能被问列表),"
+                       f"于是真有 bookId 的号**恒在窗口外**、两条路一次都没被调用。"
+                       f"查 `_listen._list_window` 与 `_list_key`"}]
+
+
 def collect_sections(db) -> list[tuple[str, list[dict]]]:
     """跑完三层检查,返回 [(小标题, 结果列表)]。**只读**。调用方负责渲染/推送。
 
@@ -922,7 +977,8 @@ def collect_sections(db) -> list[tuple[str, list[dict]]]:
     return [("依赖(容器/库/venv/档案)", check_dependencies() + check_leaked_browsers()),
             ("凭证(Cookie 在不在 / 源活不活)", check_credentials(db) + check_list_sources(db)),
             ("产出(最近几次真跑出来的东西)",
-             check_chains(db) + check_read_num_coverage(db)),
+             check_chains(db) + check_read_num_coverage(db)
+             + check_weread_list_rotation(db)),
             # ⑤ **"该跑没跑"** —— 与"跑了但没产出"是两个层次的事,分开报(2026-10-07)。
             ("作业落实性(注册的 vs 真跑的)", check_job_liveness(db))]
 

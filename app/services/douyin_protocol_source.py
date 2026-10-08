@@ -155,26 +155,79 @@ def _uifid(ck: dict) -> str:
     return str(ck.get("UIFID") or ck.get("UIFID_TEMP") or "").strip()
 
 
-def _webid() -> str:
-    """19 位数字的 `webid`(客户端自造的随机设备号)。
+#: 跨轮次**稳定**的设备指纹(2026-10-08)。存 `system_config`,进程内再缓存一层。
+_FP_CACHE: dict[str, str] = {}
+
+
+def _stable_fingerprint(session, user_id: int, key: str, make) -> str:
+    """取一个**跨轮次稳定**的指纹值(没有就生成一次并写回 `system_config`)。
+
+    ⚠️⚠️ **为什么必须稳定**(2026-10-08,用户问「纯协议如何避免滑块」):
+    `webid` / `msToken` 是**设备与会话标识** —— 真实浏览器生成一次、长期不变。
+    而改动前这里是**每次调用都重新随机**的(旧注释写着"抖音不校验它的取值"),
+    于是我们把一个"**每次换设备号**"的客户端送到了风控面前 —— 那正是机器特征。
+    ⚠️ **老实说清把握程度**:旧注释说的"不校验取值"很可能仍然成立(随机值照样能搜到),
+    但"**稳定**"这条是**与真实客户端行为对齐**,不是已证实的因果。它**可证伪**:
+    看后续几轮 `verify_check` 出现的频率有没有下降(记录见 §5.x)。
+    """
+    full = key.format(uid=user_id)
+    if full in _FP_CACHE:
+        return _FP_CACHE[full]
+    row = None
+    if session is not None:
+        try:
+            from sqlalchemy import select
+
+            from app.db.models import SystemConfig
+
+            row = session.scalar(select(SystemConfig).where(SystemConfig.key == full))
+            if row and row.value:
+                _FP_CACHE[full] = str(row.value)
+                return _FP_CACHE[full]
+        except Exception:  # noqa: BLE001 - 读不到就当没有,别挡搜索
+            logger.debug("读稳定指纹失败(%s)", full, exc_info=True)
+    val = make()
+    _FP_CACHE[full] = val
+    if session is not None:
+        try:
+            from app.db.models import SystemConfig
+
+            if row is not None:
+                row.value = val
+            else:
+                session.add(SystemConfig(key=full, value=val))
+            session.commit()
+        except Exception:  # noqa: BLE001 - 写失败只影响"下次重生",不该中断本次搜索
+            logger.debug("写稳定指纹失败(%s)", full, exc_info=True)
+    return val
+
+
+def _webid(session=None, user_id: int = 1) -> str:
+    """19 位数字的 `webid`(**跨轮次稳定的**设备号)。
 
     ⚠️ **按行为重写,不是搬 MediaCrawler 的代码** —— 它是 *NON-COMMERCIAL* 许可,
     本项目商用,不能复制其代码。这里只复刻**可观察行为**:19 位十进制。
-    抖音不校验它的取值(它本来就是随机的),所以这样足够。
+    ⚠️ 2026-10-08 起**稳定化**(原来每次调用都重新随机),理由见 `_stable_fingerprint`。
     """
-    return "".join(random.choice("0123456789") for _ in range(19))
+    return _stable_fingerprint(
+        session, user_id, "douyin_webid_{uid}",
+        lambda: "".join(random.choice("0123456789") for _ in range(19)))
 
 
-def _ms_token(ck: dict) -> str:
+def _ms_token(ck: dict, session=None, user_id: int = 1) -> str:
     """`msToken`:cookie 里有就**用真的**,没有才**造一个假的**。
 
     假 token 的形状按 f2 的写法:182 个 base64url 字符 + `==`。
     ⚠️ 真有 `msToken` 时**绝不能覆盖成假的** —— 站点会把它和登录态对账。
+    ⚠️ 2026-10-08 起:造出来的假 token 也**跨轮次稳定**(原来每次调用都换新的,
+    见 `_stable_fingerprint` 里那段说明)。
     """
     real = str(ck.get("msToken") or "").strip()
     if real:
         return real
-    return "".join(random.choice(_MS_CHARS) for _ in range(182)) + "=="
+    return _stable_fingerprint(
+        session, user_id, "douyin_ms_token_{uid}",
+        lambda: "".join(random.choice(_MS_CHARS) for _ in range(182)) + "==")
 
 
 # ---------------------------------------------------------------------------
@@ -413,8 +466,8 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
         logger.warning("抖音纯协议:凭据缺失或不含 uifid(cookie 长度 %d)—— "
                        "搜索结果会是 status_code=2483「请先登录」(实测口径),"
                        "别把空结果当成「没搜到」", len(blob))
-    ms_token = _ms_token(ck)
-    webid = _webid()
+    ms_token = _ms_token(ck, session, user_id)
+    webid = _webid(session, user_id)
     rows: list[dict] = []
 
     for i, kw in enumerate(kws):

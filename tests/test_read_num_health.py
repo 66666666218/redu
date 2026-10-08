@@ -167,3 +167,67 @@ class TestWhichAppFailuresPageAHuman:
 
     def test_网络抖动不该打扰人(self) -> None:
         assert self._f(TimeoutError("Connection timed out")) is False
+
+
+# ---------------------------------------------------------------------------
+# ★★ 2026-10-08:单日全断的**一轮检测器**(覆盖率那条结构上抓不到)
+# ---------------------------------------------------------------------------
+
+
+def _run(session, detail: str, n: int = 1, status: str = "success") -> None:
+    from app.db.models import RunRecord
+
+    now = datetime.now()
+    for i in range(n):
+        session.add(RunRecord(user_id=1, run_id=f"r{n}-{i}-{detail[:8]}", kind="wechat_listen",
+                              status=status, detail=detail,
+                              started_at=now - timedelta(minutes=i)))
+    session.commit()
+
+
+class TestListRotationIsTheEarlyDetector:
+    """★★ 为什么必须有这一条(而不是继续加宽覆盖率那条的窗口):
+
+    `check_read_num_coverage` 判的是**近 3 天的覆盖率**。而**单日全断**时覆盖率还有约 **31%**
+    (前两天的好数据在稀释它)⇒ 最多报黄,要衰减到 5% 红线得**三天**。
+    2026-10-08 那次事故(轮转窗口被"没有 bookId 的号"占满 ⇒ 两条路**一次都没被调用过**)
+    **恰恰是「当天全断、三天后才红」** —— 那个检测窗**结构上**抓不到它。
+
+    ⇒ 换判据:**不看产出,看机制**。运行记录里那四个数就是机制本身,**一轮就能判**。
+    """
+
+    def test_谁都没问过要判红(self, session) -> None:
+        """★ 事故当天的真实指纹。"""
+        _run(session, "accounts=187 new=1 weread_list(ok=0 app=0 off=0 off_with_new=1 skipped=79)")
+        row = ch.check_weread_list_rotation(session)[0]
+        assert row["level"] == ch.RED, f"这个形状是「窗口坏了」,必须红,实际 {row['level']}"
+        assert "谁都没问过" in row["detail"] and "_list_window" in row["detail"], row["detail"]
+
+    def test_被额度挡是另一种红_且说明处置不同(self, session) -> None:
+        """⚠️ 两种红的**修法完全不同**:窗口坏了要改代码;被挡是外因,改代码没用。"""
+        _run(session, "weread_list(ok=0 app=0 off=25 off_with_new=0 skipped=0)")
+        row = ch.check_weread_list_rotation(session)[0]
+        assert row["level"] == ch.RED and "额度" in row["detail"], row["detail"]
+        assert "窗口坏了" in row["detail"], "要说清它和「窗口坏了」不是一回事"
+
+    def test_有一条路在跑就是绿(self, session) -> None:
+        """反面对照 —— 不然它永远红,报告会被人忽略(本仓反复讲过的教训)。"""
+        from app.db.models import RunRecord
+
+        for detail in ("weread_list(ok=3 app=0 off=0 off_with_new=0 skipped=22)",
+                       "weread_list(ok=0 app=5 off=0 off_with_new=0 skipped=20)"):
+            session.query(RunRecord).delete()
+            session.commit()
+            _run(session, detail)
+            row = ch.check_weread_list_rotation(session)[0]
+            assert row["level"] == ch.GREEN, (detail, row)
+
+    def test_记账格式变了不许判绿(self, session) -> None:
+        """⚠️ 指标自己瞎掉时**不许绿**:格式飘了(本仓飘过)就该说"无从判断"。"""
+        _run(session, "accounts=187 new=1 只说了新文数,没有 weread_list 记账")
+        row = ch.check_weread_list_rotation(session)[0]
+        assert row["level"] == ch.YELLOW and "记账" in row["detail"], row
+
+    def test_最近没有轮次时黄而不是红(self, session) -> None:
+        row = ch.check_weread_list_rotation(session)[0]
+        assert row["level"] == ch.YELLOW, row
