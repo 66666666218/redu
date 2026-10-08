@@ -90,7 +90,14 @@ def pull_from_emulator(adb: str = "", tmpdir: str | None = None) -> dict[str, An
     if not rows:
         raise RuntimeError("账号库里没有有效的 accessToken/vid —— App 里是不是没登录?")
     row = rows[0]
+    # ★ **`refreshToken` 也一起读**(2026-10-08):它是**长效**凭据,拿它就能
+    # `POST https://i.weread.qq.com/login` **纯 HTTP 换新的 accessToken** ——
+    # 也就是说模拟器**只需要偶尔开一次**(换/续 refreshToken),日常续期不再需要它。
+    # 这条是查历史抓包(`data/_mitm_weread.txt`)发现的:`/login` 的请求体里
+    # `refreshToken` 就是那个"长效→短效"的兑换凭据。
     return {"accessToken": str(row["accessToken"]), "vid": str(row["vid"]),
+            "refreshToken": str(row.get("refreshToken") or ""),
+            "refreshTokenExpired": row.get("refreshTokenExpired"),
             "userName": row.get("userName") or "",
             "pulled_at": datetime.now().isoformat(" ", "seconds")}
 
