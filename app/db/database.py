@@ -64,7 +64,12 @@ def _install_write_tx_watchdog(engine) -> None:
             return
         if str(statement).lstrip()[:8].lower().startswith(write_heads):
             t0 = time.monotonic()
-            stack = "".join(traceback.format_stack(limit=14))
+            # ⚠️⚠️ **`limit` 必须够大**:`format_stack(limit=N)` 取的是**最里面** N 帧
+            # (最近的),而这里最里面那十几帧**全是 SQLAlchemy 自己 + 我这个 listener**
+            # —— 调用方那一帧在最外层,`limit=14` 直接把它截掉了。
+            # 实测代价:30 条诊断一条都没点到名,栈尾永远停在 `_mark_write_start`,
+            # 我得回头把它调大才有用。60 是留足余量(SQLAlchemy flush 链 ≈ 15 层)。
+            stack = "".join(traceback.format_stack(limit=60))
             info["tx_write_t0"] = t0
             info["tx_write_stack"] = stack
             _OPEN_WRITE_TX[id(conn)] = (t0, stack, threading.current_thread().name)
