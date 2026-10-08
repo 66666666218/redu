@@ -253,3 +253,63 @@ def test_group_and_pan_share_the_same_url_only_once(session) -> None:
     session.commit()
     rs = search_resources(session, 1, "同一个资源", days=365, limit=10)
     assert len(rs) == 1, f"同链应当只出一次,实际 {[r['source'] for r in rs]}"
+
+
+# ---------------------------------------------------------------------------
+# ★ 2026-10-08:回库匹配必须和「造词」用同一套归一化
+# ---------------------------------------------------------------------------
+
+
+def test_查询词被剥过括号_回库匹配也要剥(session) -> None:
+    """★★ 对着用户报的那个 bug 加的 —— 快手热度卡片上同一份资源「**一个有一个没有**」。
+
+    形状:查询词由 `library_search_word` 造出,而它**会剥掉括号标注**;
+    可回库匹配却拿**原始标题**做子串比较 ⇒ 标题只要**中间**夹一处 `【…】`,
+    就永远匹配不回去:
+
+        标题   `伪装直男【更至19】(1)等2个文件`
+        查询词 `伪装直男等2个文件`(括号已被剥掉)   → `contains` 为 **False**
+
+    用户看到的:同一份资源的两行,一行「▶ 打开」、一行「—(库内暂无链)」。
+    而本模块早先那句注释还写着「词就是资源库取的,所以必然能检索回去」——
+    **那个假设正是被"造词时剥括号"打破的**。
+    """
+    from app.db.models import XunleiGroupShare
+    from app.services.resource_library import search_resources
+
+    session.add(XunleiGroupShare(user_id=1, group_id="g1", share_id="s1",
+                                 title="伪装直男【更至19】(1)等2个文件",
+                                 our_url="https://pan.xunlei.com/s/GROUP1",
+                                 synced_at=datetime.now()))
+    session.add(XunleiGroupShare(user_id=1, group_id="g1", share_id="s2",
+                                 title="伪装直男【更至19】(1)",
+                                 our_url="https://pan.xunlei.com/s/GROUP2",
+                                 synced_at=datetime.now()))
+    session.commit()
+
+    rows = search_resources(session, 1, "伪装直男等2个文件")
+    assert rows, "带括号标注的标题必须能匹配回库(否则卡片那一行是「—(库内暂无链)」)"
+    assert "GROUP1" in rows[0]["my_link"], rows
+    assert all("GROUP2" not in r["my_link"] for r in rows), "不该把另一个变体也捞进来"
+
+    # 反向:另一个变体也照样配得上(它本来就是连续子串,这条是防回归)
+    assert search_resources(session, 1, "伪装直男"), "裸名必须仍然能配上"
+
+
+def test_文章标题中间夹括号也要能匹配回库(session) -> None:
+    """同一条缝在公众号那条链上一样存在(`title.contains`)——一并堵住。"""
+    from app.services.resource_library import search_resources
+
+    _mk(session, "伪装直男【更至19】等2个文件", "号A", "https://pan.quark.cn/s/x",
+        my="https://pan.quark.cn/s/mine")
+    rows = search_resources(session, 1, "伪装直男等2个文件")
+    assert rows and "mine" in rows[0]["my_link"], rows
+
+
+def test_match_key_剥括号去标点() -> None:
+    from app.services.resource_library import match_key
+
+    assert match_key("伪装直男【更至19】(1)等2个文件") == "伪装直男等2个文件"
+    assert match_key("伪装直男等2个文件") == "伪装直男等2个文件"
+    assert match_key("《花少2》人格测试 直达入口｜最新") == "花少2人格测试直达入口最新"
+    assert match_key("") == ""

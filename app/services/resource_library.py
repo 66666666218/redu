@@ -146,11 +146,15 @@ def _xunlei_resources(session: Session, user_id: int, query: str = "",
 
     stmt = select(XunleiResource).where(XunleiResource.user_id == user_id,
                                        XunleiResource.share_url != "")
-    if query:
-        stmt = stmt.where(XunleiResource.name.contains(query))
     if days:
         stmt = stmt.where(XunleiResource.synced_at >= datetime.now() - timedelta(days=days))
-    rows = session.scalars(stmt.order_by(XunleiResource.synced_at.desc()).limit(limit)).all()
+    rows = session.scalars(stmt.order_by(XunleiResource.synced_at.desc())).all()
+    if query:
+        # ⚠️ **不能在 SQL 里 `contains`**:查询词被 `library_search_word` 剥过括号,
+        # 而这里的名字是原始的 ⇒ 中间夹一处 `【…】` 就永远匹配不上(2026-10-08 修)。
+        key = match_key(query)
+        rows = [r for r in rows if key in match_key(r.name)]
+    rows = rows[:limit]
     out: list[dict] = []
     for r in rows:
         url = str(r.share_url or "")
@@ -184,12 +188,16 @@ def _xunlei_group_resources(session: Session, user_id: int, query: str = "",
 
     stmt = select(XunleiGroupShare).where(XunleiGroupShare.user_id == user_id,
                                           XunleiGroupShare.our_url != "")
-    if query:
-        stmt = stmt.where(XunleiGroupShare.title.contains(query))
     if days:
         stmt = stmt.where(XunleiGroupShare.synced_at >= datetime.now() - timedelta(days=days))
-    rows = session.scalars(stmt.order_by(XunleiGroupShare.synced_at.desc())
-                           .limit(limit)).all()
+    rows = session.scalars(stmt.order_by(XunleiGroupShare.synced_at.desc())).all()
+    if query:
+        # ⚠️ 同 `_xunlei_resources`:走 `match_key` 而不是 SQL `contains`(2026-10-08 修)。
+        # 用户报的那个 bug 就出在这里:标题 `伪装直男【更至19】(1)等2个文件` 配上查询词
+        # `伪装直男等2个文件` 在 SQL 里**匹配不上**(两段不相邻)。
+        key = match_key(query)
+        rows = [r for r in rows if key in match_key(r.title)]
+    rows = rows[:limit]
     out: list[dict] = []
     for r in rows:
         url = str(r.our_url or "")
@@ -203,6 +211,36 @@ def _xunlei_group_resources(session: Session, user_id: int, query: str = "",
     return out
 
 
+#: 名字里的「标注」:`【…】`/`（…）`/`(…)`/`[…]`
+_MATCH_BRACKET_RE = re.compile(r"[【（(\[][^】）)\]]*[】）)\]]")
+#: 匹配时一律去掉的标点与空白(中英混排)
+_MATCH_PUNCT_RE = re.compile(
+    r"[\s·・|｜/\\、,，。.:：;；!！?？—－\-~～+＋*＊#＃'\"“”‘’()（）\[\]【】《》<>_]")
+
+
+def match_key(text: str) -> str:
+    """**回库匹配用**的归一化:剥掉括号标注 + 去掉全部标点空白 + 转小写。
+
+    ⚠️⚠️ **为什么必须有这一层**(2026-10-08 用户报的 bug):
+    查询词是 `library_search_word` 造的,而它**会剥掉括号标注**;
+    可回库匹配却是拿**原始标题**做子串比较。于是标题里只要**中间**夹着一处 `【…】`,
+    就**永远匹配不回去**:
+
+        原标题   `伪装直男【更至19】(1)等2个文件`
+        查询词   `伪装直男等2个文件`   ← 由上面那条造出(括号被剥掉了)
+        `title.contains(查询词)` → **False**(两段在原标题里不相邻)
+
+    ⇒ 跨平台热度卡片那一行写「—(库内暂无链)」,而同一份资源的另一个名字变体
+    (`伪装直男`)却能配上 —— 用户看到的就是「**一个有一个没有**」。
+
+    ⚠️ 本模块早先那句注释写着「词就是资源库取的,所以必然能检索回去」——
+    **那个假设正是被"造词时剥括号"打破的**。凡是"造词"与"回查"用两套口径的地方,
+    迟早会出现这条缝。
+    """
+    t = _MATCH_BRACKET_RE.sub("", str(text or ""))
+    return _MATCH_PUNCT_RE.sub("", t).lower()
+
+
 def search_resources(session: Session, user_id: int, query: str,
                      days: int = 90, limit: int = 20) -> list[dict]:
     """关键词检索资源库:匹配文章标题,聚合到盘链级,按验证强度(号数)排序。
@@ -213,17 +251,30 @@ def search_resources(session: Session, user_id: int, query: str,
     if len(q) < 2:
         return []
     cutoff = datetime.now() - timedelta(days=days)
-    rows = session.execute(
-        select(WechatPanLink.pan_url,
-               func.count(func.distinct(WechatArticle.author)),
-               func.min(WechatArticle.created_at), func.max(WechatArticle.created_at))
+    # ⚠️ **匹配走 `match_key`(剥括号 + 去标点),不是 SQL 的子串比较**(2026-10-08 修)。
+    # 原来这里是 `WechatArticle.title.contains(q)`,而 `q` 是 `library_search_word` 造出来的
+    # —— 那个函数**会剥掉括号标注** ⇒ 只要标题**中间**夹一处 `【…】` 就永远匹配不回去
+    # (实测 `伪装直男【更至19】(1)等2个文件` vs 查询词 `伪装直男等2个文件`)。
+    # 聚合改到 Python 做,口径与原来的 SQL 一致(去重作者数、最早/最晚时间,按作者数倒序)。
+    key = match_key(q)
+    raw = session.execute(
+        select(WechatPanLink.pan_url, WechatArticle.author,
+               WechatArticle.created_at, WechatArticle.title)
         .join(WechatArticle, WechatArticle.id == WechatPanLink.article_id)
         .where(WechatPanLink.user_id == user_id,
-               WechatArticle.created_at >= cutoff,
-               WechatArticle.title.contains(q))
-        .group_by(WechatPanLink.pan_url)
-        .order_by(func.count(func.distinct(WechatArticle.author)).desc())
-        .limit(limit)).all()
+               WechatArticle.created_at >= cutoff)).all()
+    agg: dict[str, dict] = {}
+    for pan_url, author, created_at, title in raw:
+        if key not in match_key(title):
+            continue
+        a = agg.setdefault(str(pan_url), {"authors": set(), "first": None, "last": None})
+        if author:
+            a["authors"].add(author)
+        if created_at is not None:
+            a["first"] = created_at if a["first"] is None else min(a["first"], created_at)
+            a["last"] = created_at if a["last"] is None else max(a["last"], created_at)
+    rows = [(u, len(v["authors"]), v["first"], v["last"])
+            for u, v in sorted(agg.items(), key=lambda kv: -len(kv[1]["authors"]))[:limit]]
     ours = _rows_to_resources(session, user_id, rows)
     # **并入公开平台发现的链**(2026-10-02):同一条链可能既被公众号发过、又被知乎贴过 ——
     # 以**公众号那条为准**(它带"多少号同发"这个更强的信号),只补公众号没有的。
