@@ -1646,7 +1646,7 @@ def test_pan_first_transfer_records_replacement(session, monkeypatch) -> None:
     session.commit()
 
     class _FakeQuark:
-        def transfer_and_share(self, url, save_dir="", password=""):
+        def transfer_and_share(self, url, save_dir="", password="", **kw):
             assert url == "https://pan.quark.cn/s/freshY"
             return {"share_url": "https://pan.quark.cn/s/NEW", "password": "zz99"}
 
@@ -2377,7 +2377,7 @@ def _fake_quark(monkeypatch, out_map: dict[str, str], calls: list) -> None:
 
     monkeypatch.setattr(QuarkTransfer, "__init__", lambda self, *a, **kw: None)
 
-    def _transfer(self, url, save_dir="", password=""):
+    def _transfer(self, url, save_dir="", password="", **kw):
         calls.append(url)
         return {"share_url": out_map[url], "password": "ab12"}
 

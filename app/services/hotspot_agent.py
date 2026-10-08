@@ -1356,7 +1356,8 @@ def _auto_transfer(session, user_id: int, pan_url: str, settings) -> str:
         quark = QuarkTransfer(ck, fid_store=getattr(settings, "quark_fid_store", "") or None)
         res = quark.transfer_and_share(pan_url,
                                        save_dir=getattr(settings, "quark_save_dir", "") or "/来自选题",
-                                       password=getattr(settings, "quark_share_password", "") or "")
+                                       password=getattr(settings, "quark_share_password", "") or "",
+                                       intro_dir=getattr(settings, "pan_intro_quark_dir", "") or "")
         out = str(res.get("share_url") or "")
         logger.info("现成资源已自动转存:%s → %s", pan_url[:44], out[:44])
         return out

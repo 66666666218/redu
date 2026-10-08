@@ -374,8 +374,10 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                     else:
                         # ③ 真正首次见到该资源:转存
                         try:
-                            res = quark.transfer_and_share(u, save_dir=settings.quark_save_dir,
-                                                           password=settings.quark_share_password)
+                            res = quark.transfer_and_share(
+                                u, save_dir=settings.quark_save_dir,
+                                password=settings.quark_share_password,
+                                intro_dir=getattr(settings, "pan_intro_quark_dir", "") or "")
                         except QuarkAuthError as exc:
                             logger.error("夸克 Cookie 失效,本轮停止转存:%s", exc)
                             dead = True

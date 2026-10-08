@@ -209,11 +209,13 @@ class QuarkTransfer:
             raise QuarkError("夸克分享 token 获取失败,链接可能失效或提取码错误")
         return str(stoken)
 
-    def _list_share_files(self, share_id: str, stoken: str) -> list[dict]:
+    def _list_share_files(self, share_id: str, stoken: str,
+                          pdir_fid: str = "0") -> list[dict]:
         items: list[dict] = []
         for page in range(1, 51):
             data = self._request("GET", "/1/clouddrive/share/sharepage/detail",
-                                 params={"pwd_id": share_id, "stoken": stoken, "pdir_fid": "0",
+                                 params={"pwd_id": share_id, "stoken": stoken,
+                                         "pdir_fid": pdir_fid,
                                          "force": "0", "_page": page, "_size": 200})
             page_items = list(data.get("data", {}).get("list", []) or [])
             items.extend(x for x in page_items if x.get("fid"))
@@ -501,20 +503,24 @@ class QuarkTransfer:
         self._list_dir("0")
         return True
 
-    def transfer_and_share(self, share_url: str, save_dir: str = "/来自监听",
-                           password: str = "", expire_days: int = 0) -> dict:
-        """转存分享到自己网盘并创建二次分享,返回 {share_url, password, files}。"""
-        share_id, pwd = self._parse_share(share_url)
-        stoken = self._get_stoken(share_id, pwd)
-        files = self._list_share_files(share_id, stoken)
-        if not files:
-            raise QuarkError("分享内无可转存文件")
+    def _save_share_files(self, files: list[dict], share_id: str, stoken: str,
+                          target_fid: str, save_dir: str = "") -> tuple[list[str], list[str]]:
+        """把分享内这些条目**存进 `target_fid`** → `(新存的 fid, 复用的 fid)`。
 
-        target_fid = self._ensure_dir(save_dir)
+        ⚠️ **为什么抽出来**(2026-10-08):「把宣传简介放进资源目录」走的是**同一套保存协议**,
+        只是 `to_pdir_fid` 不同。同一协议写两处必飘 —— 本仓已经在 `share_fids` 上栽过一次
+        (那段原来内联在 `transfer_and_share` 里,于是"文件已在盘里、只想建链"的场景只能
+        把协议再抄一遍)。
+
+        `save_dir` 只在"目标目录是我们自己 `_ensure_dir` 解析出来的"时传 ——
+        用于缓存 fid 失效时清缓存重试;目标是**外部给的 fid**(如资源目录)时留空,不重试。
+        """
         # 文件级去重:盘商"同一资源换条分享链再发"是常态,wechat_monitor 的链接级复用
         # (批内/历史两层)管不住这种。同名+同大小视为同一文件已存过:跳过保存、直接把
         # 已有文件并入分享——避免同资源重复占空间;大小任一侧缺失不参与匹配
         # (宁多存一份,不冒领错文件)。
+        # ⚠️ **它只管"同一个目录内"** —— 目录一换就一个都认不出来,那正是
+        # `_adopt_existing_dir` 要防的事(见那里的注释)。
         by_name: dict[str, list[dict]] = {}
         for e in self._list_dir(target_fid):
             if e.get("file_name"):
@@ -529,20 +535,19 @@ class QuarkTransfer:
             else:
                 fresh.append(f)
         if matched_ids and not fresh:
-            logger.info("夸克文件级复用:分享内文件均已存在,免保存直接分享(%d 个)",
-                        len(matched_ids))
+            logger.info("夸克文件级复用:文件均已存在,免保存直接使用(%d 个)", len(matched_ids))
         if fresh:
             payload = {"fid_list": [f["fid"] for f in fresh],
                        "fid_token_list": [f.get("share_fid_token", "") for f in fresh],
                        "to_pdir_fid": target_fid, "pwd_id": share_id, "stoken": stoken,
                        "pdir_fid": "0", "scene": "link"}
-            norm_dir = save_dir.strip("/") or "/来自监听"
             try:
                 data = self._request("POST", "/1/clouddrive/share/sharepage/save",
                                      json=payload, timeout=60.0)
             except QuarkError:
                 # 复用持久化 fid 时目录可能已被用户删/移动:清缓存重建后重试一次
-                if norm_dir not in self._used_store:
+                norm_dir = save_dir.strip("/") or "/来自监听"
+                if not save_dir or norm_dir not in self._used_store:
                     raise
                 logger.warning("夸克缓存 fid 已失效(%s),重建目录后重试", norm_dir)
                 self.invalidate_dir(norm_dir)
@@ -556,22 +561,142 @@ class QuarkTransfer:
                 new_ids = self._wait_task_fids(task_id)
             if not new_ids:
                 names = [f.get("file_name") for f in fresh if f.get("file_name")]
-                new_ids = [e["fid"] for e in self._list_dir(target_fid) if e.get("file_name") in names]
+                new_ids = [e["fid"] for e in self._list_dir(target_fid)
+                           if e.get("file_name") in names]
             if not new_ids and not matched_ids:
                 raise QuarkError(f"夸克保存任务未返回新文件 ID task_id={task_id or '空'}")
         else:
             new_ids = []
+        return ([str(x) for x in new_ids], matched_ids)
+
+    def resolve_named_dir(self, name: str) -> str:
+        """按名字找回**我们盘里**的目录(**只找不建**)。找不到返回 `""`。
+
+        ⚠️ 用搜索而不是 `_ensure_dir`:后者找不到会**建一个新的** ——
+        简介目录要是没了,我们要的是"跳过并报警",不是悄悄建个空目录然后往里复制空气。
+        """
+        last = str(name or "").strip().strip("/").split("/")[-1]
+        if not last:
+            return ""
+        try:
+            for h in self.search_files(last, size=20):
+                if h.get("dir") and str(h.get("file_name") or "") == last:
+                    return str(h["fid"])
+        except Exception as exc:  # noqa: BLE001 - 搜不到就当没有,交给调用方决定
+            logger.warning("按名查找目录失败(%s):%s", last, str(exc)[:100])
+        return ""
+
+    def copy_into(self, src_items: list[dict], target_fid: str,
+                  *, timeout: float = 25.0) -> list[str]:
+        """把**自己盘里**的条目复制进 `target_fid` → 落地(或复用)的 fid 列表。
+
+        ★ 用途:把**宣传简介**放进刚转存好的资源目录(2026-10-08)。
+
+        ⚠️⚠️ **为什么不走"保存自己建的分享"**(那条路我先试了,当场就撞墙):
+        夸克对**自己的分享**一律回 **`41017 用户禁止转存自己的分享`** —— 换参数、换目录都没用。
+        而简介本来就在我们盘里 ⇒ **复制**比转存更直接:不动分享、不受这条限制、无需提取码。
+
+        ⚠️ 复制是**异步任务**(只返回 `task_id`),而 `_wait_task_fids` 解析不出这个响应形状
+        (实测返回 `[]`)⇒ 这里**按目标目录轮询**等文件出现,
+        判据是「**名字+大小都在**」而不是「收到了 200」—— 后者是本仓最贵的假成功。
+        """
+        by_name: dict[str, list[dict]] = {}
+        for e in self._list_dir(target_fid):
+            if e.get("file_name"):
+                by_name.setdefault(e["file_name"], []).append(e)
+        fresh: list[dict] = []
+        matched_ids: list[str] = []
+        for it in src_items:
+            cands = [e for e in by_name.get(it.get("file_name") or "", [])
+                     if it.get("size") is not None and e.get("size") == it.get("size")]
+            if cands:
+                matched_ids.append(str(cands[0]["fid"]))
+            else:
+                fresh.append(it)
+        if not fresh:
+            logger.info("宣传简介:资源目录里已有同款,**免复制**(%d 个)", len(matched_ids))
+            return matched_ids
+        self._request("POST", "/1/clouddrive/file/copy", api=QUARK_FILE_API,
+                      json={"filelist": [str(f["fid"]) for f in fresh],
+                            "to_pdir_fid": target_fid, "exclude_fids": []})
+        names = {str(f.get("file_name") or "") for f in fresh if f.get("file_name")}
+        # ⚠️ 落地判据必须**名字+大小一起认**(2026-10-08,测试当场抓到的):
+        # 只按名字匹配的话,目录里**同名但不同大小**的旧文件会被当成"新复制的落地了" ——
+        # 后果两条,都很坏:① 那个旧文件会被错误地并进分享清单;
+        # ② 复制其实没落地却判成落地 ⇒ 又一个"看起来成功"。
+        # 而 `fresh` 的定义就是"目标里没有同名同大小的" ⇒ 用 (名字,大小) 匹配天然排除了旧条目。
+        want = {(str(f.get("file_name") or ""), f.get("size")) for f in fresh}
+        landed: list[str] = []
+        deadline = time.time() + timeout
+        while True:
+            landed = [str(e["fid"]) for e in self._list_dir(target_fid)
+                      if (str(e.get("file_name") or ""), e.get("size")) in want]
+            if landed or time.time() >= deadline:
+                break
+            time.sleep(1.5)
+        if not landed:
+            # 异步任务"发出去了"不等于"落地了" —— 这里必须抛,别让上层以为放好了
+            raise QuarkError(f"夸克复制任务未在 {timeout:.0f} 秒内落地:{sorted(names)}")
+        return landed + matched_ids
+
+    def transfer_and_share(self, share_url: str, save_dir: str = "/来自监听",
+                           password: str = "", expire_days: int = 0,
+                           intro_dir: str = "") -> dict:
+        """转存分享到自己网盘 → **放进宣传简介** → 创建二次分享。
+
+        返回 `{share_url, password, files, intro}`。
+
+        ⚠️ **简介必须夹在"保存"与"建链"之间**(2026-10-08):先建链再放简介,
+        链子快照的就是没有简介的那份 —— 对方保存下来永远看不到它。
+
+        `intro_dir` = 我们盘里那个装着简介的目录名(如 `/监听宣传`),留空 = 不做。
+        """
+        share_id, pwd = self._parse_share(share_url)
+        stoken = self._get_stoken(share_id, pwd)
+        files = self._list_share_files(share_id, stoken)
+        if not files:
+            raise QuarkError("分享内无可转存文件")
+
+        target_fid = self._ensure_dir(save_dir)
+        new_ids, matched_ids = self._save_share_files(files, share_id, stoken,
+                                                      target_fid, save_dir=save_dir)
         # 分享清单 = 新存文件 + 已存在的同名同大小文件(部分命中时资源完整)
         share_ids = [str(x) for x in (list(new_ids) + matched_ids)]
         if not share_ids:
             raise QuarkError("无可分享文件(保存未返回且目录无匹配)")
 
+        intro_ids: list[str] = []
+        if intro_dir:
+            try:
+                src = self.resolve_named_dir(intro_dir)
+                promos = [x for x in self._list_dir(src) if not x.get("dir")] if src else []
+                if not src:
+                    logger.warning("宣传简介目录在盘里找不到,本轮跳过:%s", intro_dir)
+                elif not promos:
+                    logger.warning("宣传简介目录是空的,本轮跳过:%s", intro_dir)
+                else:
+                    # 资源本身就是**一个目录** ⇒ 简介放进它**里面**(对方整包保存时自动带走,
+                    # 也不会在自己盘里平铺出一堆 简介.doc)。
+                    single_dir = (len(files) == 1 and bool(files[0].get("dir"))
+                                  and len(new_ids) == 1)
+                    if single_dir:
+                        intro_ids = self.copy_into(promos, str(new_ids[0]))
+                    else:
+                        # 资源是**散文件** ⇒ 简介只能与它并列,那就**并进分享清单**,
+                        # 否则并列在我们自己的目录里,对方根本拿不到。
+                        intro_ids = self.copy_into(promos, target_fid)
+                        share_ids.extend(intro_ids)
+                    logger.info("宣传简介已放入资源(%s 个条目)", len(intro_ids))
+            except Exception as exc:  # noqa: BLE001 - 简介失败**不该毁掉整次转存**
+                logger.warning("宣传简介放入失败(转存本身不受影响):%s", str(exc)[:160])
+
         _share = self.share_fids(share_ids, title="监听转存", password=password,
                                  expire_days=expire_days)
         new_url, out_password = _share["share_url"], _share["password"]
-        logger.info("夸克转存+分享完成: %s 个文件(含复用 %s 个)→ %s",
-                    len(share_ids), len(matched_ids), new_url)
-        return {"share_url": new_url, "password": out_password, "files": len(share_ids)}
+        logger.info("夸克转存+分享完成: %s 个文件(含复用 %s 个、简介 %s 个)→ %s",
+                    len(share_ids), len(matched_ids), len(intro_ids), new_url)
+        return {"share_url": new_url, "password": out_password, "files": len(share_ids),
+                "intro": len(intro_ids)}
 
     @staticmethod
     def _find_first(data: Any, keys: set[str]) -> Any:

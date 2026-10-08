@@ -229,7 +229,8 @@ def transfer_pan_url(session, user_id: int, pan_url: str, settings=None,
             res = quark.transfer_and_share(
                 pan_url,
                 save_dir=getattr(settings, "quark_save_dir", "") or "/来自发现",
-                password=getattr(settings, "quark_share_password", "") or "")
+                password=getattr(settings, "quark_share_password", "") or "",
+                intro_dir=getattr(settings, "pan_intro_quark_dir", "") or "")
             if res.get("share_url"):
                 return {"status": "ok", "our_url": str(res.get("share_url")),
                         "code": str(res.get("password") or ""), "message": ""}   # ⚠️ 夸克返回的键是 password
