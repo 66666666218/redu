@@ -427,6 +427,102 @@ def _is_argus_block(text: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+#: 撞到 `verify_check` 后的**冷却闸**(2026-10-08)。存 `system_config`,进程内再缓存一层。
+#:
+#: ⚠️⚠️ **为什么要有它**(用户口径「处理埋点避免再出滑块」):滑块**绕不过去**
+#: (GitHub 调研:没有任何开源项目解决过 `search_nil_info`/`verify_check`),
+#: 但**我们自己在反复把它撞出来** ——
+#:   · `douyin_leads` 每轮按 8 个词挨个打;
+#:   · **`chain_health._cred_alive("douyin")` 每次体检还要探一次活**;
+#:   · 撞上之后又"自动重导 + 复验",再撞一次。
+#: 而本仓文档自己的话是「**每试一次都是一次风控输入**」,Evil0ctal 的原则也是
+#: 「**风控响应就是答案**,该冷却身份或换 IP,不是重试」。
+#: ⇒ 一旦见到 `verify_check`,就**在冷却期内一个请求都不发**(连体检探针也不发),
+#: 并把"要人去过验证"直接摆在报告里。**解冻只有一条路:重新导出 cookie**
+#: (即"人已经在浏览器里动过了")。
+_VERIFY_KEY = "douyin_verify_until_{uid}"
+_VERIFY_CACHE: dict[int, float] = {}
+
+
+def verify_cooldown_hours() -> float:
+    """冷却时长(小时)。默认 6 —— 过验证是**人的动作**,不是等一等就好;
+    定短了等于催着人去点,定长了会拖过一整天。"""
+    try:
+        from config.settings import get_settings
+
+        return float(getattr(get_settings(), "douyin_verify_cooldown_hours", 6) or 6)
+    except Exception:  # noqa: BLE001 - 配置读不到就用默认,别让闸门自己崩
+        return 6.0
+
+
+def _verify_until(session=None, user_id: int = 1) -> float:
+    """冷却截止的 epoch 秒(0 = 没在冷却)。"""
+    if user_id in _VERIFY_CACHE:
+        return _VERIFY_CACHE[user_id]
+    val = 0.0
+    if session is not None:
+        try:
+            from sqlalchemy import select
+
+            from app.db.models import SystemConfig
+
+            row = session.scalar(select(SystemConfig).where(
+                SystemConfig.key == _VERIFY_KEY.format(uid=user_id)))
+            if row and row.value:
+                from datetime import datetime
+
+                val = datetime.fromisoformat(str(row.value)).timestamp()
+        except Exception:  # noqa: BLE001 - 读不到就当没冷却(**宁可多打一次,也别永远停死**)
+            val = 0.0
+    _VERIFY_CACHE[user_id] = val
+    return val
+
+
+def note_verify(session=None, user_id: int = 1) -> None:
+    """记下"撞到验证了" ⇒ 进入冷却。"""
+    import time as _t
+    from datetime import datetime
+
+    until = _t.time() + verify_cooldown_hours() * 3600
+    _VERIFY_CACHE[user_id] = until
+    if session is None:
+        return
+    try:
+        from sqlalchemy import select
+
+        from app.db.models import SystemConfig
+
+        key = _VERIFY_KEY.format(uid=user_id)
+        val = datetime.fromtimestamp(until).isoformat(timespec="seconds")
+        row = session.scalar(select(SystemConfig).where(SystemConfig.key == key))
+        if row:
+            row.value = val
+        else:
+            session.add(SystemConfig(key=key, value=val))
+        session.commit()
+    except Exception:  # noqa: BLE001 - 写不进去只影响"跨进程共享",不该中断本次搜索
+        logger.debug("写验证冷却失败", exc_info=True)
+
+
+def clear_verify(session=None, user_id: int = 1) -> None:
+    """解冻(重新导出 cookie 时调)—— 那说明**人已经在浏览器里动过了**。"""
+    _VERIFY_CACHE.pop(user_id, None)
+    if session is None:
+        return
+    try:
+        from sqlalchemy import select
+
+        from app.db.models import SystemConfig
+
+        row = session.scalar(select(SystemConfig).where(
+            SystemConfig.key == _VERIFY_KEY.format(uid=user_id)))
+        if row:
+            row.value = ""
+            session.commit()
+    except Exception:  # noqa: BLE001
+        logger.debug("清验证冷却失败", exc_info=True)
+
+
 def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
            pages: int = 1, use_abogus: bool = False,
            stats: dict | None = None) -> list[dict]:
@@ -454,6 +550,19 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
             kws.append(s)
     if not kws:
         return []
+    # ⚠️ **冷却期一个请求都不发**(见 `_VERIFY_KEY` 那段):撞上验证后继续打,
+    # 只会把风控越打越深,而且**体检探针也在打**。
+    import time as _time
+
+    until = _verify_until(session, user_id)
+    if until and _time.time() < until:
+        from datetime import datetime as _dt
+
+        raise DouyinProtocolError(
+            f"抖音**验证冷却中**(至 {_dt.fromtimestamp(until):%m-%d %H:%M}),本次不发请求 —— "
+            f"滑块绕不过去,反复打只会加深风控。修法:**在浏览器里过一次验证**,"
+            f"再重新导出 cookie(那一步会自动解冻)",
+            kind="verify", needs_human=True)
     if stats is not None:
         stats["kw_total"] = len(kws)
         stats["kw_hit"] = 0
@@ -544,6 +653,7 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
             nil = d.get("search_nil_info") or {}
             nil_type = str(nil.get("search_nil_type") or "")
             if nil_type == "verify_check":
+                note_verify(session, user_id)          # ★ 立刻进冷却,别让下一轮再撞
                 raise DouyinProtocolError(
                     "抖音要求**过验证**(search_nil_info.search_nil_type=verify_check)"
                     "——它把搜索结果整页换成了验证页,**不是「没人推这个资源」**。"

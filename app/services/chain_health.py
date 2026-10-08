@@ -264,7 +264,15 @@ def check_credentials(db) -> list[dict]:
             elif alive is False:
                 level = RED
                 detail = f"**验活失败**:{why}"
-                if plat == "douyin":
+                if plat == "douyin" and "过验证" in why:
+                    # ★ 这一档**只报红 + 说清修法**,不重导、不复验(理由见下)
+                    detail += " · **不自动重导**:实测重导消不掉滑块,而它会解掉验证冷却"
+                if plat == "douyin" and "过验证" not in why:
+                    # ⚠️ **「要求过验证」这一档不许自动重导**(2026-10-08 实测):
+                    # ① 实测补全 jar 消不掉滑块 —— 重导拿回来的还是同一个"未被验证"的会话;
+                    # ② 更糟的是,**重导现在会解掉验证冷却**(重导 = "人动过了"的信号),
+                    #    于是"失败了→自动重导→解冻→再撞一次"会**自己把闸打开**,
+                    #    正是冷却闸要防的那件事。
                     healed = _douyin_reheal(db)
                     alive2, why2 = _cred_alive(plat, get_cookie(db, 1, plat) or "", db)
                     if alive2 is True:

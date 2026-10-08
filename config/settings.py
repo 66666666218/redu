@@ -107,6 +107,11 @@ class Settings(BaseSettings):
     #: ⇒ 你只要把简介放在盘里某个固定目录(默认 `/监听宣传`),改内容直接改那个文件。
     #: 万一目录名找不到:只记警告并跳过,**不会**悄悄建个空目录。
     pan_intro_quark_dir: str = ""
+    #: 抖音撞到 `verify_check`(要求过验证)后的**冷却小时数**(2026-10-08)。
+    #: 冷却期内**一个请求都不发**(连体检探针也不发)—— 因为本仓文档自己的话是
+    #: 「每试一次都是一次风控输入」,而滑块**绕不过去**(GitHub 调研:无开源项目解决过)。
+    #: 解冻只有一条路:**重新导出 cookie**(说明人已经在浏览器里过完验证了)。
+    douyin_verify_cooldown_hours: float = 6.0
     pan_transfer_enabled: bool = True      # 是否自动转存(需 quark_cookie;失败回落原链接推送)
     pan_transfer_backfill_limit: int = 8   # 每轮监听额外补转存的历史文章数
                                            # (同步当场转存失败/早于该逻辑入库的旧文,靠这个队列慢慢补)

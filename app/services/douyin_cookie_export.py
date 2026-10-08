@@ -90,6 +90,15 @@ def export_from_profile(db, user_id: int = 1, profile: Path | str | None = None)
         raise RuntimeError("一个 cookie 都没读到(档案可能没登录)")
     blob = "; ".join(f"{k}={v}" for k, v in ck.items())
     set_cookie(db, user_id, PLATFORM, blob)
+    # ★ **重导 = 人已经在浏览器里动过了** ⇒ 解掉"验证冷却"(2026-10-08)。
+    # 实测:补全 jar 消不掉滑块,**人过完验证再重导才是恢复路径** ——
+    # 所以这个动作是"人可以试了"的信号,不是"jar 变了"的信号。
+    try:
+        from app.services.douyin_protocol_source import clear_verify
+
+        clear_verify(db, user_id)
+    except Exception:  # noqa: BLE001 - 解冻失败不该让导出本身失败
+        logger.debug("清抖音验证冷却失败", exc_info=True)
     missing = [k for k in LOGIN_CORE if k not in ck]
     if missing:
         return f"{len(ck)} 个 cookie,但**缺 {'/'.join(missing)}** —— 档案里多半没登录"

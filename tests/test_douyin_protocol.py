@@ -482,6 +482,21 @@ def test_没有关键词就不发请求(monkeypatch):
     assert dp.search(["", "  ", None]) == []
 
 
+@pytest.fixture(autouse=True)
+def _clear_verify_cooldown():
+    """⚠️ **必须清**:`_VERIFY_CACHE` 是模块级的(生产里正该跨轮次保留),
+    但测试之间会**互相污染** —— 上一个用例撞出验证、下一个用例就被冷却挡住,
+    而且是"顺序一换就红/绿不同"的那种假失败(实测踩到)。"""
+    # ⚠️ 用 getattr 容错:否则"变异校验"时这个 fixture 会**引用不存在的属性**,
+    # 让整个文件 48 个用例一起报错 —— 那样就分不清"谁在守什么"了(实测踩到)。
+    cache = getattr(dp, "_VERIFY_CACHE", None)
+    if cache is not None:
+        cache.clear()
+    yield
+    if cache is not None:
+        cache.clear()
+
+
 def test_要求过验证时要抛_而不是返回空列表(monkeypatch):
     """★★ 2026-10-08 实测:抖音把搜索结果**整页换成了验证页**,而它在响应里**是明说的** ——
 
@@ -575,3 +590,68 @@ def test_没有_session_时也不能每次随机() -> None:
     `search` 之外还有调用点(`build_params` 的兜底),它们拿不到 session。"""
     dp._FP_CACHE.clear()
     assert dp._webid() == dp._webid()
+
+
+# ---------------------------------------------------------------------------
+# ★★ 验证冷却闸(用户口径「处理埋点避免再出滑块」)
+# ---------------------------------------------------------------------------
+
+
+def test_撞到验证后再打要直接抛_一个请求都不发(monkeypatch, fp_session) -> None:
+    """★★ **这条是「避免再出滑块」的核心**。
+
+    滑块**绕不过去**(GitHub 调研:没有任何开源项目解决过 `search_nil_info`/`verify_check`),
+    但**我们自己在反复把它撞出来**:`douyin_leads` 每轮 8 个词、**体检每次还要探一次活**、
+    撞上之后又"自动重导+复验"再撞一次。而本仓文档自己的话是「**每试一次都是一次风控输入**」。
+
+    ⇒ 一旦见到 `verify_check` 就进冷却,**冷却期内连一个请求都不发**
+    (判据用"`requests.get` 有没有被调用",不是"有没有报错")。
+    """
+    dp._VERIFY_CACHE.clear()
+    calls: list = []
+    monkeypatch.setattr("requests.get", lambda *a, **k: calls.append(a) or (_ for _ in ()).throw(
+        AssertionError("冷却期内不该发请求")))
+
+    dp.note_verify(fp_session, 1)                      # 相当于刚才撞到了 verify_check
+    with pytest.raises(dp.DouyinProtocolError) as e:
+        dp.search(["夸克口令"], session=fp_session, user_id=1)
+    assert e.value.kind == "verify" and e.value.needs_human
+    assert "冷却" in str(e.value), str(e.value)
+    assert calls == [], f"冷却期内居然发了 {len(calls)} 个请求"
+
+
+def test_重导之后解冻_请求恢复(monkeypatch, fp_session) -> None:
+    """★ 解冻只有一条路:**重新导出 cookie** —— 那说明人已经在浏览器里过完验证了。"""
+    dp._VERIFY_CACHE.clear()
+    dp.note_verify(fp_session, 1)
+    dp.clear_verify(fp_session, 1)
+    dp._VERIFY_CACHE.clear()                            # 换"进程"
+    # 解冻后:不再抛冷却错(会真发请求,所以把 requests.get 换成假响应)
+    monkeypatch.setattr("requests.get", lambda *a, **k: _FakeResp(
+        payload={"status_code": 0, "data": [], "search_nil_info": {"search_nil_type": "normal"}}))
+    assert dp.search(["夸克口令"], session=fp_session, user_id=1) == []
+
+
+def test_重新导出会解冻_接线守卫() -> None:
+    """⚠️ 这条是**接线守卫**:`export_from_profile` 里那句 `clear_verify` 一旦被删,
+    就会出现"冷却永远解不掉"或者更糟 —— 体检的自动重导**把闸自己打开**。"""
+    import inspect
+
+    from app.services import douyin_cookie_export as dce
+
+    src = inspect.getsource(dce.export_from_profile)
+    assert "clear_verify" in src, "导出必须解冻(它是「人动过了」的信号)"
+
+
+def test_体检的过验证档不许自动重导_接线守卫() -> None:
+    """⚠️ 实测:补全 jar 消不掉滑块,而**重导会解掉冷却** ⇒
+    「失败→自动重导→解冻→再撞一次」会**自己把闸打开**,正是冷却闸要防的事。
+    ⇒ 体检遇到 verify 档只报红 + 说清修法。"""
+    import inspect
+
+    from app.services import chain_health as ch
+
+    src = inspect.getsource(ch.check_credentials)
+    assert '"过验证" not in why' in src or "'过验证' not in why" in src, \
+        "verify 档必须跳过重导(否则重导会解冻冷却)"
+    assert "不自动重导" in src, "要把它说清,别让人以为重导能修"
