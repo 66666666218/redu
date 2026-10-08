@@ -208,3 +208,40 @@ def test_做后处理之前必须先落盘() -> None:
         "`_enrich_new_articles` 之前没有 commit —— 会话一坏,整段后处理会陪葬")
     assert "is_active" in before, (
         "缺「会话已进失败状态就先回滚」那一步 —— 坏掉的会话会让 savepoint 自己抛错")
+
+
+# ---------------------------------------------------------------------------
+# ★ 插完文章**必须结束写事务**(看门狗点名查出来的,2026-10-08)
+# ---------------------------------------------------------------------------
+
+
+def test_插入新文章之后不许留着未提交的写事务(session):
+    """★★ **看门狗实测**点名:监听轮**按号循环**调 `_insert_new_articles`,
+    第一个号就在里面 `flush()` 把写锁拿住,一直抱到**整轮末尾**才提交。
+
+    抓到的那条是「SQLite 写事务**持有 208.5s** 才 commit」,栈是:
+
+        wechat_collect_tick → run_wechat_listen → _listen_round
+          → _weread_collect → _insert_new_articles → (flush)
+
+    SQLite 单写者 + 别人 `busy_timeout` 只有 30 秒 ⇒ 这 208 秒里
+    「作业心跳写入」「转存结果落盘」「轮转计数」**成批失败** ——
+    卡片上的「⏳待转存」和 04:02 / 08:06 / 13:13 那几批 `database is locked` 都出在这个窗口里。
+
+    ⚠️ 判据用 **`session.in_transaction()`**,不去匹配源码 —— 重构了照样有效。
+    """
+    from datetime import datetime
+
+    from app.db.models import WechatBenchmark
+
+    b = WechatBenchmark(user_id=1, nickname="号A")
+    session.add(b)
+    session.commit()
+    wechat_monitor._insert_new_articles(
+        session, 1, b,
+        [{"title": "新资源", "url": "https://mp.weixin.qq.com/s/x",
+          "publish_at": datetime(2026, 10, 4)}],
+        source="listen", require_pan=False)
+    assert not session.in_transaction(), (
+        "插完文章还留着**未提交的写事务** ⇒ 写锁会被抱到整轮末尾(实测 208 秒),"
+        "别人的心跳/转存落盘会成批撞锁")

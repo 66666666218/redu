@@ -204,6 +204,24 @@ def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchm
             for u in [x.strip() for x in (r.pan_urls or "").splitlines() if x.strip()]:
                 session.add(WechatPanLink(user_id=user_id, article_id=r.id, pan_url=u[:500],
                                           created_at=r.created_at or datetime.now()))
+        # ★★ **这里必须 `commit()`,不能停在 `flush()`**(2026-10-08 由写事务看门狗点名查出)。
+        #
+        # **实测证据**:看门狗抓到一条
+        #   「SQLite 写事务**持有 208.5s** 才 commit」,栈是
+        #   `wechat_collect_tick → run_wechat_listen → _listen_round → _weread_collect
+        #    → _insert_new_articles → 本行的 flush`。
+        # 也就是说:**监听轮按号循环调它,第一个号就在这里把写锁拿住,一直抱到整轮末尾**
+        # (那一轮的 commit 在 `_listen.py` 收尾处)——**208 秒**。
+        # 而 SQLite 是单写者、别人的 `busy_timeout` 只有 30 秒 ⇒ 这段时间里
+        # 「作业心跳」「转存结果落盘」「轮转计数」**成批失败**,表现是
+        # 卡片「⏳待转存」+ 公众号那轮的句柄写入失败(2026-10-08 04:02/08:06/13:13 都在这个窗口里)。
+        #
+        # ⚠️ 与 `pan_discovery.sync` 那个是**同一类 bug**:`flush()` 发语句但**不结束事务**。
+        # 四个调用点(`_listen.py` 两处、`_sync.py` 两处)**都在按号循环里** ⇒
+        # 在这一处提交,四条路一起修好。
+        # 语义上也对:这批"文章 + 它们的盘链"本来就是**自成一批**的写,
+        # 而且本仓的纪律就是"采到的文立刻 durable"(见 `_commit_now` 的说明)。
+        session.commit()
     return added
 def _backfill_pan_links(session: Session) -> None:
     """一次性回填:归一化表建表前的旧文章,把 pan_urls 拆分写入 wechat_pan_links。
