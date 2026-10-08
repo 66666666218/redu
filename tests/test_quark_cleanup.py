@@ -208,3 +208,48 @@ def test_一批删除失败要记下来并继续下一批() -> None:
     out = apply_plan(_Q(), plan, batch=1)
     assert out["deleted"] == 2, "后两批该继续执行"
     assert len(out["failed"]) == 1, "失败的那批必须被记下来"
+
+
+# ---------------------------------------------------------------------------
+# ★ 家的「新旧」不能按 updated_at 排(2026-10-08 实测踩到)
+# ---------------------------------------------------------------------------
+
+
+def test_家的排序按名字里的日期_不按_updated_at() -> None:
+    """★ 实测形状:`redian监听_0929` 的 `updated_at` 被改成了**当天**(只是被动过),
+    于是按它排序 `_0929` 会跑到 `_1007` 前面 —— 而 `_0929` 是 9 月 29 日建立的家。
+
+    这个顺序**直接决定"跨目录重复留哪份"**:排错了就会留下旧家的那份、
+    删掉当前家正在用的那份。名字里的日期是建立那天写死的,不会被别处触碰。
+    """
+    from app.services.quark_dup import list_homes
+
+    class _Q:
+        def search_files(self, kw, size=20):
+            return [
+                {"file_name": "redian监听_0929", "fid": "S", "dir": True,
+                 "updated_at": 9_999_999_999},          # ← 被动过,时间戳最"新"
+                {"file_name": "redian监听_1007", "fid": "N", "dir": True,
+                 "updated_at": 1_000},
+                {"file_name": "redian监听", "fid": "NODATE", "dir": True,
+                 "updated_at": 9_999_999_998},          # ← 同样被碰过,但没日期
+            ]
+
+    assert [h["fid"] for h in list_homes(_Q())] == ["N", "S", "NODATE"], \
+        "必须按名字里的 MMDD 倒序(1007 > 0929 > 无日期)"
+
+
+def test_认领旧家时也按名字里的日期_不按_updated_at() -> None:
+    """同一件事在 `_adopt_existing_dir` 上更致命:它决定**后续资源写进哪个家**。
+    按 updated_at 选,会把新资源写进一个早已停用的旧目录,而查重**按目录**做 ⇒ 又一轮重复。"""
+    from app.services.quark_transfer import QuarkTransfer
+
+    qt = QuarkTransfer("ck")
+
+    qt.search_files = lambda kw, size=20: [
+        {"file_name": "redian监听_0929", "fid": "S", "dir": True, "updated_at": 9_999_999_999,
+         "pdir_fid": "0"},
+        {"file_name": "redian监听_1007", "fid": "N", "dir": True, "updated_at": 1,
+         "pdir_fid": "0"},
+    ]
+    assert qt._adopt_existing_dir("0", "redian监听") == "N"

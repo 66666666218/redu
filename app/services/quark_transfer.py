@@ -58,6 +58,28 @@ def extract_quark_urls(text: str) -> list[str]:
     return out
 
 
+def _dir_recency_key(name: str, base: str, updated_at: Any) -> tuple:
+    """目录的「新旧」排序键(**越大越新**)—— 按**名字里的 MMDD**,`updated_at` 只做次键。
+
+    ⚠️⚠️ **不能只按 `updated_at`**(2026-10-08 实测踩到):
+    `redian监听_0929` 的 `updated_at` 被改成了**当天**(只是被动过),于是按它排序
+    `_0929` 会排到 `_1007` 前面 —— 而 `_0929` 是 **9 月 29 日**建立的家。
+    一旦据此选"家",后续资源会被写进一个早已停用的旧目录,
+    而查重**按目录**做 ⇒ 又一轮重复占用(正是 `_adopt_existing_dir` 要根治的那件事)。
+
+    名字里的 `MMDD` 是**建立那天**写死的、不会被别处触碰,所以拿它当主键。
+    ⚠️ 它没有年份:跨年时同一个月会撞车。但梯子(`name_MMDD`)只在同一年内累积,
+    且真到了跨年,`updated_at` 作为次键仍能把它们分开 —— 记在这里,免得将来被当成 bug。
+    """
+    suffix = str(name or "")[len(base) + 1:] if str(name or "").startswith(f"{base}_") else ""
+    mmdd = ""
+    for part in suffix.split("_"):
+        if part.isdigit() and len(part) == 4:
+            mmdd = part
+            break
+    return (mmdd, int(updated_at or 0))
+
+
 class QuarkTransfer:
     """夸克转存 + 二次分享最小客户端(同步)。"""
 
@@ -398,7 +420,8 @@ class QuarkTransfer:
                       or str(h.get("file_name") or "").startswith(f"{name}_"))]
         if not cands:
             return ""
-        cands.sort(key=lambda h: int(h.get("updated_at") or 0), reverse=True)
+        cands.sort(key=lambda h: _dir_recency_key(str(h.get("file_name") or ""), name,
+                                                  h.get("updated_at")), reverse=True)
         best = cands[0]
         logger.warning(
             "夸克目录「%s」:缓存里没有,但盘上已有 %d 个同名/带日期兄弟 —— "

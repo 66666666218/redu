@@ -76,12 +76,21 @@ def home_mmdd(dir_name: str) -> str:
 
 
 def list_homes(qt: Any, base: str = "redian监听") -> list[dict]:
-    """列出所有「家」目录(搜索一次命中,不做分页重扫 —— 见 `QuarkTransfer.search_files`)。"""
+    """列出所有「家」目录,**按「新」在前**(搜索一次命中,不做分页重扫)。
+
+    ⚠️⚠️ **排序用名字里的 `MMDD`,不能用 `updated_at`**(2026-10-08 实测踩到):
+    `redian监听_0929` 的 `updated_at` 被改成了当天(只是被动过),
+    按它排序 `_0929` 会跑到 `_1007` 前面 —— 而 `_0929` 是 **9 月 29 日**建立的家。
+    这个顺序**直接决定"跨目录重复留哪份"**,排错了就会留下旧家的那份、
+    删掉当前家正在用的那份(空间确实省了,但目录里从此缺一角)。
+    名字里的日期是建立那天写死的,不会被别处触碰。`updated_at` 只做同月并列时的次键。
+    """
     hits = qt.search_files(base, size=50)
     homes = [h for h in hits if h.get("dir")
              and (str(h.get("file_name") or "") == base
                   or str(h.get("file_name") or "").startswith(f"{base}_"))]
-    homes.sort(key=lambda h: int(h.get("updated_at") or 0), reverse=True)
+    homes.sort(key=lambda h: (home_mmdd(str(h.get("file_name") or "")),
+                              int(h.get("updated_at") or 0)), reverse=True)
     return homes
 
 
