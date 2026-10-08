@@ -196,7 +196,11 @@ def check_credentials(db) -> list[dict]:
                         ("xunlei", "迅雷(转存)"),
                         ("quark", "夸克(转存)"),
                         ("baidupan", "百度网盘(转存)"),
-                        ("goofish", "闲鱼(采集)")):
+                        ("goofish", "闲鱼(采集)"),
+                        # ★ 2026-10-08 补:这两家**凭据一直在库里,体检却从来没看过它**。
+                        #   旧注释写着"抖音/贴吧走匿名或档案,不在这张表里"——那句**早过期了**。
+                        ("douyin", "抖音(线索搜索)"),
+                        ("weibo", "微博(名字型热度)")):
         at = have.get(plat)
         # ⚠️⚠️ **这一行只验 `shelf`,根本不碰列表接口** —— 而"公众号阅读数"走的正是列表接口
         # (`/web/mp/articles` 或 App `book/articles`)。所以这句说明要**跟着这一行一直挂着**,
@@ -234,6 +238,33 @@ def check_credentials(db) -> list[dict]:
                 detail = (f"当前未通过验活({why}),但**这多半是正常空窗** —— "
                           f"{when},会接在监听之前。若那次续期也失败,"
                           f"续期作业会单独推飞书告警。更新于 {str(at)[:16]}")
+            else:
+                detail += f" · 验活跳过({why})"
+        elif plat in ("douyin", "weibo", "zhihu"):
+            # ★ **协议验活**(2026-10-08):三家都做得到 —— 各发一次搜索即可。
+            # ⚠️ 但**只有抖音能自动接回**(它有浏览器档案);微博/知乎的 Cookie 是人粘的,
+            #    **没有可导的来源** ⇒ 只能报红并说清修法。别给它们假装一条不存在的自动化。
+            from app.services.cookie_store import get_cookie
+
+            ck = get_cookie(db, 1, plat) or ""
+            alive, why = _cred_alive(plat, ck, db)
+            if alive is True:
+                detail += f" · 验活 ✓({why})"
+            elif alive is False:
+                level = RED
+                detail = f"**验活失败**:{why}"
+                if plat == "douyin":
+                    healed = _douyin_reheal(db)
+                    alive2, why2 = _cred_alive(plat, get_cookie(db, 1, plat) or "", db)
+                    if alive2 is True:
+                        # 自动接回 ⇒ **降级为黄**:它已经不挡路了,但值得知道发生过
+                        level = YELLOW
+                        detail += f" · {healed} ⇒ **复验通过,已自动接回**"
+                    else:
+                        detail += f" · {healed} ⇒ 复验仍失败({why2});人工重导见 tools/douyin_export_cookie.py"
+                else:
+                    detail += (" · ⚠️ 这一家**没有可自动重导的来源**(Cookie 是人粘进"
+                               "「Cookie 管理」页的)⇒ **要人工重新复制**")
             else:
                 detail += f" · 验活跳过({why})"
         out.append({"name": label, "level": level, "detail": detail + note})
@@ -357,6 +388,79 @@ def _next_renewal(settings) -> datetime | None:
             None, datetime.now()).replace(tzinfo=None)
     except Exception:  # noqa: BLE001 - 算不出就当不知道
         return None
+
+
+def _cred_alive(platform: str, cookie: str, db) -> tuple[bool | None, str]:
+    """抖音 / 微博 / 知乎 的凭据**验活**(2026-10-08 补)。
+
+    ## 为什么这三家非加不可
+    它们的 Cookie 都是**人工粘进「Cookie 管理」页**的(没有浏览器档案来源),
+    而体检此前**连它们这一行都没有** —— 那行注释还写着"抖音/贴吧走匿名或档案,
+    不在这张表里",**那句早就过期了**(抖音的凭据 10-07 已进加密库,微博的 10-05 就在)。
+    ⇒ **凭据在库里,体检却不看它:死了没人知道。** 这正是本仓最恨的那种假绿。
+
+    ## ⚠️ 只能"验活",做不到"自动续期"
+    这三家是**长期登录态**(`sessionid` 这类),服务端**没有轮换接口** ——
+    与迅雷 `refresh_token`、微信读书 `wr_skey` 那种"短期令牌"**不是一类**。
+    所以它们的自动化上限就是:**① 能发现死了 ② 告警里把修法说清**。
+    1. 抖音额外还能**自动重导**(它有浏览器档案,见 `_douyin_reheal`);微博/知乎**没有**,
+       只能提示人去复制(别给它们假装一条不存在自动化 —— 那是骗下一个人)。
+
+    判据一律看**协议返回值**,不看"多久前写进去的":本仓在微信读书那条上已经吃过
+    "只看更新时间的假绿"。
+
+    返回 `(True/False/None, 说明)`;`None` = 验不了(网络抖动等),**别当成活着**。
+    """
+    try:
+        if platform == "douyin":
+            from app.services import douyin_protocol_source as dps
+
+            rows = dps.search(["网盘资源"], session=db)
+            if rows:
+                return True, f"搜到 {len(rows)} 条"
+            # ⚠️ **"零结果"不能判成绿,也不能判成红** —— 本仓实测过抖音会回
+            # `status_code=0 + data:[]`(连发被限流时,与"真没结果"形状**完全一样**)。
+            # 但**"没抛 `need_login`"这件事本身是有信息的**:抖音对未登录**一律**回 2483,
+            # 它没出现 ⇒ 凭据**被接受**了。所以这里如实说清"证明了什么、没证明什么",
+            # 而不是含混地报绿(那正是本仓最恨的假绿)。
+            return None, ("2483「请先登录」未出现 ⇒ 凭据**被接受**;但本次零结果"
+                          "(限流与真没结果形状相同),**不作判定**")
+        if platform == "weibo":
+            from app.services import weibo_search
+
+            hits = weibo_search.search(["网盘资源"], session=db)
+            return (True, f"搜到 {len(hits)} 条") if hits else (None, "协议通但零结果")
+        if platform == "zhihu":
+            from app.services.cross_accounts import _search_zhihu
+
+            hits = _search_zhihu(cookie, "网盘资源", limit=5)
+            return (True, f"搜到 {len(hits)} 条") if hits else (None, "协议通但零结果")
+    except Exception as exc:  # noqa: BLE001
+        # ⚠️ **登录态类错误要说出来,网络类错误别喊"Cookie 失效"** ——
+        # 两者修法完全不同:前者要人重新复制,后者等一会儿就好。
+        kind = str(getattr(exc, "kind", "") or "")
+        msg = f"{type(exc).__name__}: {str(exc)[:90]}"
+        if kind in ("need_login", "restricted", "argus") or "登录" in str(exc):
+            return False, msg
+        return None, msg
+    return None, "没有这一家的探针"
+
+
+def _douyin_reheal(db) -> str:
+    """抖音凭据失效时,**从浏览器档案自动重导**一次。返回结果说明(空串=没做)。
+
+    ⚠️ **这是这三家里唯一能做到"自动接回"的** —— 因为抖音的登录态活在
+    MediaCrawler 的 Chrome 档案里(`cdp_dy_user_data_dir`),档案只要还登着,
+    重新导一次就能接上,**不用人去点**。微博/知乎没有档案来源,做不到。
+    """
+    try:
+        from app.services.douyin_cookie_export import export_from_profile
+
+        out = export_from_profile(db, user_id=1)
+        return f"已从浏览器档案自动重导({out})" if out else "档案里也没读到有效凭据"
+    except Exception as exc:  # noqa: BLE001 - 自动补救失败不该让体检本身挂掉
+        logger.warning("抖音凭据自动重导失败", exc_info=True)
+        return f"自动重导失败:{type(exc).__name__}"
 
 
 def _weread_alive(db) -> tuple[bool | None, str]:
