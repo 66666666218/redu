@@ -1,7 +1,7 @@
-"""夸克盘**跨目录重复资源**只读报告(2026-10-08)。**不删任何东西。**
+"""夸克盘清理**计划**(只读,2026-10-08)。**不删任何东西。**
 
 判据与执行器共用一份(`app/services/quark_dup.py`)—— 那种"两处各写一遍、迟早飘"的事
-本仓吃过大亏,这里不再来一次。
+本仓吃过大亏。**要真删请用 `scripts/quark_dup_apply.py --yes`。**
 
 用法:`python scripts/quark_dup_report.py [10]`(参数 = 只清哪个 MMDD 前缀的账,默认 10 月)
 """
@@ -12,10 +12,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# ⚠️ **脚本自己定 stdout 编码,不依赖调用环境**:后台跑时 stdout 不是终端,
-# 默认编码是 GBK,而本脚本要打印 ✔/✂ ⇒ `UnicodeEncodeError` 直接崩,
-# 而且崩在打印第一组时(前面几分钟的扫描全白跑)。与 `pan_dedupe_report.py` 同一条教训。
+# ⚠️ **脚本自己定 stdout 编码,不依赖调用环境**:后台跑时 stdout 不是终端,默认编码是 GBK,
+# 而本脚本要打印 ✔/✂ ⇒ `UnicodeEncodeError` 直接崩,而且崩在打印第一组时(前面几分钟的
+# 扫描全白跑)。与 `pan_dedupe_report.py` 同一条教训。
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from app.services.quark_dup import build_plan  # noqa: E402
 
@@ -43,25 +44,40 @@ def main() -> int:
 
     print(f"扫了 {out['scanned_homes']} 个家、{out['scanned_files']} 个文件,"
           f"{out['calls']} 次 API 调用"
-          f"{'' if out['complete'] else ' —— ⚠️ **撞预算,没扫完,下面的清单不完整**'}")
+          f"{'' if out['complete'] else ' —— ⚠️ **撞预算,没扫完**'}")
+    if not out["complete"]:
+        print("    ⇒ ⚠️ 没扫完时「只出现在一个包里」这个判断是**假的**"
+              "(没扫到的家里可能也有一份)。抬 `QUARK_CLEANUP_BUDGET` 重跑。")
     print(f"我方分享 {out['shares']} 条,保护了 {out['protected']} 个 fid"
           f"(这些**永不删**:删掉 = 已发出的链接变「已失效」)\n")
 
-    if out["n_drop"]:
-        print(f"=== ✅ 可清理:{out['groups']} 组、{out['n_drop']} 个副本、"
-              f"约省 **{out['freed'] / 2 ** 30:.2f} GiB** ===")
-        for p in out["plan"]:
-            print(f"\n ✂ {p['name'][:64]}  ({_mb(p['size'])} × {len(p['drops'])} 份)")
-            print(f"   ✔ 留 {p['keep']['home']}/{p['keep']['path'].split('/', 1)[-1][:40]}")
-            for d in p["drops"]:
-                print(f"   ✂ 删 {d['home']}/{d['path'].split('/', 1)[-1][:40]}")
+    by_why: dict[str, list] = {}
+    for d in out["delete"]:
+        by_why.setdefault(d["why"], []).append(d)
+    if out["n_delete"]:
+        print(f"=== ✂ 计划删除 {out['n_delete']} 个文件,约省 {out['freed'] / 2 ** 30:.2f} GiB ===")
+        for why, items in sorted(by_why.items(), key=lambda kv: -len(kv[1])):
+            print(f"\n--- {why}  ({len(items)} 个) ---")
+            for d in items[:40]:
+                print(f"   ✂ [{_mb(d['size']):>9}] {d['name'][:52]:52} ← {d['home']}")
+            if len(items) > 40:
+                print(f"   …… 还有 {len(items) - 40} 个")
     else:
-        print("=== 没有可清理的重复 ===")
+        print("=== 没有要删的 ===")
 
-    if out["skipped"]:
-        print(f"\n=== ⏭ 跳过 {len(out['skipped'])} 组(没得删) ===")
-        for k in out["skipped"][:15]:
-            print(f"   {k['name'][:50]:50} {_mb(k['size']):>10}  ← {k['why']}")
+    if out["review"]:
+        print(f"\n=== ❓ 待确认 {len(out['review'])} 个(名字像引流,但只出现在一个包里)**不会删** ===")
+        for r in out["review"][:40]:
+            print(f"   ? [{_mb(r['size']):>9}] {r['name'][:52]:52} ← {r['home']}")
+        if len(out["review"]) > 40:
+            print(f"   …… 还有 {len(out['review']) - 40} 个")
+
+    if out["protected_left"]:
+        print(f"\n=== 🛡 被保护而跳过 {len(out['protected_left'])} 组 ===")
+        for p in out["protected_left"][:20]:
+            print(f"   🛡 {p['name'][:52]:52} ← {p['why']}")
+        if len(out["protected_left"]) > 20:
+            print(f"   …… 还有 {len(out['protected_left']) - 20} 组")
     return 0
 
 
