@@ -204,3 +204,54 @@ def test_体检里自动重导失败不能把体检带崩(monkeypatch):
     row = [r for r in ch.check_credentials(_FakeDB()) if r["name"].startswith("抖音")][0]
     assert row["level"] == "🔴"
     assert "自动重导失败" in row["detail"] and "RuntimeError" in row["detail"]
+
+
+# ---------------------------------------------------------------------------
+# 小红书:按失败类型分流(★ 拿真账号换来的分寸)
+# ---------------------------------------------------------------------------
+
+
+def _xhs_row(monkeypatch, exc, reheal_ok=True, retry_rows=None):
+    from app.services import xhs_protocol_source as xp
+
+    calls = {"probe": 0, "reheal": 0}
+
+    def _search(*a, **k):
+        calls["probe"] += 1
+        if calls["probe"] == 1:
+            raise exc
+        return retry_rows if retry_rows is not None else []
+
+    monkeypatch.setattr(xp, "search", _search)
+    monkeypatch.setattr(ch, "_xhs_reheal",
+                        lambda db: (calls.__setitem__("reheal", calls["reheal"] + 1)
+                                    or "已从档案自动重导"))
+    row = ch._xhs_protocol_row(object())
+    return row, calls
+
+
+def test_小红书_账号被限制时_绝对不许去重导(monkeypatch):
+    """★★ **这是拿真账号换来的那条分寸**:`-104 账号被限制` 时**重导没有任何用**
+    (凭据能认证,是账号没权限),而**反复重登/重试只会延长封锁**。
+    把"被踢"和"被限制"混成一句"小红书挂了",下一个人就会去重登 —— 那正是最不该做的。"""
+    class _R(_Boom):
+        pass
+
+    row, calls = _xhs_row(monkeypatch, _R("-104 账号被限制", kind="restricted"))
+    assert calls["reheal"] == 0, "**账号级限制时不该去重导凭据**"
+    assert row["level"] == "🔴"
+    assert "重导凭据没有任何用" in row["detail"] and "延长封锁" in row["detail"]
+
+
+def test_小红书_被踢下线时要自动重导并复验(monkeypatch):
+    row, calls = _xhs_row(monkeypatch, _Boom("-101 无登录信息", kind="need_login"),
+                          retry_rows=[{"url": "u"}] * 13)
+    assert calls["reheal"] == 1, "被踢是凭据问题,该重导"
+    assert row["level"] == "🟡" and "已自动接回" in row["detail"]
+
+
+def test_小红书_重导后仍失败就报红(monkeypatch):
+    row, calls = _xhs_row(monkeypatch, _Boom("-101 无登录信息", kind="need_login"),
+                          retry_rows=[])
+    assert calls["reheal"] == 1 and row["level"] == "🔴"
+    assert "复验仍零结果" in row["detail"]

@@ -269,6 +269,7 @@ def check_credentials(db) -> list[dict]:
                 detail += f" · 验活跳过({why})"
         out.append({"name": label, "level": level, "detail": detail + note})
     out.extend(check_xhs_accounts())
+    out.append(_xhs_protocol_row(db))
     out.append(_weread_app_row())
     return out
 
@@ -377,6 +378,70 @@ def check_xhs_accounts() -> list[dict]:
         logger.exception("小红书账号体检失败")
         return [{"name": "小红书账号", "level": YELLOW,
                  "detail": f"检查失败:{type(exc).__name__}: {str(exc)[:100]}"}]
+
+
+#: 协议凭据那一行的名字
+_XHS_PROTO_LABEL = "小红书 · 协议凭据(纯协议采集用的那份)"
+
+
+def _xhs_reheal(db) -> str:
+    """小红书凭据失效时,**从浏览器档案自动重导**一次。返回一句人话。"""
+    try:
+        from app.services.xhs_cookie_export import export_from_profile
+
+        return f"已从档案自动重导({export_from_profile(db, user_id=1)})"
+    except Exception as exc:  # noqa: BLE001 - 自动补救失败不该让体检本身挂掉
+        logger.warning("小红书凭据自动重导失败", exc_info=True)
+        return f"自动重导失败:{type(exc).__name__}"
+
+
+def _xhs_protocol_row(db) -> dict:
+    """小红书**协议凭据**验活 + 失效自动重导(2026-10-08 补)。
+
+    ⚠️ 与上面那行「小红书账号」**不是一回事**:那行看的是**页面渲染的档位**
+    (几个号、哪个要过验证),这行看的是**纯协议采集用的那份凭据**还活不活。
+
+    ★ **按失败类型分流 —— 这是拿真账号换来的教训**(2026-10-08 压测):
+      · `need_login`(被踢/凭据掉)⇒ **自动重导**能修,重导后**复验**;
+      · `restricted`(-104 账号被限制)⇒ **重导没有任何用**(凭据能认证,是账号没权限),
+        而且**反复重试/重登只会延长封锁** ⇒ 只报红、写明"**停手等解封**"。
+    把这两件混成一句"小红书挂了",下一个人就会去重登 —— 而那正是最不该做的事。
+    """
+    from app.services import xhs_protocol_source as xp
+
+    try:
+        rows = xp.search(["网盘资源"], session=db)
+        if rows:
+            return {"name": _XHS_PROTO_LABEL, "level": GREEN,
+                    "detail": f"验活 ✓(搜到 {len(rows)} 条)"}
+        # ⚠️ 零结果**不判绿也不判红** —— 与"被风控成空"形状相同,不硬下结论
+        return {"name": _XHS_PROTO_LABEL, "level": YELLOW,
+                "detail": "协议通但零结果(不作判定)"}
+    except Exception as exc:  # noqa: BLE001
+        kind = str(getattr(exc, "kind", "?") or "?")
+        if kind == "need_login":
+            healed = _xhs_reheal(db)
+            try:
+                again = xp.search(["网盘资源"], session=db)
+            except Exception as exc2:  # noqa: BLE001
+                return {"name": _XHS_PROTO_LABEL, "level": RED,
+                        "detail": f"凭据失效:{str(exc)[:90]} · {healed} ⇒ "
+                                  f"复验仍失败({str(exc2)[:70]})"}
+            if again:
+                return {"name": _XHS_PROTO_LABEL, "level": YELLOW,
+                        "detail": f"凭据曾失效,**{healed} ⇒ 复验通过,已自动接回**"
+                                  f"(搜到 {len(again)} 条)"}
+            return {"name": _XHS_PROTO_LABEL, "level": RED,
+                    "detail": f"{healed} ⇒ 复验仍零结果"}
+        if kind == "restricted":
+            # ⚠️ 异常文案里已经写了"停手等解封",**别再拼一遍**(重复的告警会让人跳读)。
+            #    这行只需补上**异常里没有**的那条信息:**重导没用**。
+            head = str(exc).split("——")[0].strip()
+            return {"name": _XHS_PROTO_LABEL, "level": RED,
+                    "detail": f"**账号级限制**:{head[:110]} —— ⚠️ **重导凭据没有任何用**"
+                              f"(凭据能认证,是账号没权限),**重登/重试只会延长封锁** ⇒ 停手等解封"}
+        return {"name": _XHS_PROTO_LABEL, "level": YELLOW,
+                "detail": f"验活没做成({kind}):{str(exc)[:100]}"}
 
 
 def _next_renewal(settings) -> datetime | None:
