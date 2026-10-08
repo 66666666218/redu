@@ -480,3 +480,37 @@ def test_没有关键词就不发请求(monkeypatch):
 
     monkeypatch.setattr(requests, "get", boom)
     assert dp.search(["", "  ", None]) == []
+
+
+def test_要求过验证时要抛_而不是返回空列表(monkeypatch):
+    """★★ 2026-10-08 实测:抖音把搜索结果**整页换成了验证页**,而它在响应里**是明说的** ——
+
+        {"search_nil_info": {"search_nil_type": "verify_check",
+                             "search_nil_item": "verify_check", "text_type": 9}}
+
+    在此之前这一层**只看 `status_code` 与 `data`**:`status_code=0` + `data=[]` 完全通过检查
+    ⇒ 一条都不返回 ⇒ 上层读成「限流 / 登录态失效」,白跑一次浏览器兜底,
+    而**日志里一个字都没提"验证"**。实测代价:12:11 之后连续 4 轮全空,
+    排查方向一直压在登录态上(活体探针也确实显示"没回 2483 ⇒ 凭据被接受")。
+
+    ⇒ 判据要落在**响应自己说的原因**上,而不是我们猜的那几个错误码。
+    """
+    with pytest.raises(dp.DouyinProtocolError) as e:
+        _run(monkeypatch, _FakeResp(payload={
+            "status_code": 0, "data": [],
+            "search_nil_info": {"search_nil_type": "verify_check",
+                                "search_nil_item": "verify_check", "text_type": 9}}))
+    assert e.value.kind == "verify", f"要单列 verify 档,实际 {e.value.kind}"
+    assert e.value.needs_human, "过验证只能靠人,必须标成要人工"
+    assert "过验证" in str(e.value)
+
+
+def test_真的零结果不许被当成要求过验证(monkeypatch):
+    """★ 反面对照 —— 不然"空"永远报成风控,告警立刻变噪音(本仓反复讲过的教训)。
+
+    真零结果(没有 `search_nil_info`、或类型不是 verify_check)照旧返回 `[]`。
+    """
+    assert _run(monkeypatch, _FakeResp(payload={"status_code": 0, "data": []})) == []
+    assert _run(monkeypatch, _FakeResp(payload={
+        "status_code": 0, "data": [],
+        "search_nil_info": {"search_nil_type": "normal"}})) == []

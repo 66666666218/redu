@@ -303,3 +303,25 @@ def test_快手整轮失败比如撞锁_要报黄而不是红():
 def test_快手没跑过要报黄():
     row = ch._kuaishou_row(_RecDB(None))
     assert row["level"] == "🟡" and "没有跑过" in row["detail"]
+
+
+def test_抖音要求过验证_判红并给对修法(monkeypatch):
+    """★ 2026-10-08 新增这一档。在此之前它落进"零结果,不作判定"那支 ⇒
+    报告上既不红也不黄,而实际上**整条链是断的**(实测连空 8 小时)。
+
+    ⚠️ 修法必须是「**人在浏览器里过一次验证**」,不能是「重导 cookie」——
+    重导只是复制 cookie,**过不了验证**。给错的修法 = 让下一个人把同样无效的动作
+    再试一遍(本仓最恨的"假装有自动化")。
+    """
+    from app.services import chain_health as ch
+    from app.services import douyin_protocol_source as dps
+
+    def _boom(*a, **k):
+        raise dps.DouyinProtocolError(
+            "抖音要求**过验证**(search_nil_info.search_nil_type=verify_check)",
+            kind="verify", needs_human=True)
+
+    monkeypatch.setattr(dps, "search", _boom)
+    alive, why = ch._cred_alive("douyin", "ck", None)
+    assert alive is False, "要求过验证是**断源**,不能报成「不作判定」"
+    assert "过验证" in why and "重导 cookie" in why and "解决不了" in why

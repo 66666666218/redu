@@ -51,7 +51,6 @@ MediaCrawler 是 *NON-COMMERCIAL LEARNING LICENSE*,而本项目是商用。
 """
 from __future__ import annotations
 
-import json
 import random
 import time
 import urllib.parse
@@ -474,11 +473,42 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
                     f"接口不成功:status_code={code} msg={str(d.get('status_msg'))[:80]}",
                     kind="api")
 
+            # ★★ 2026-10-08 **实测新增**:抖音把搜索结果**整页换成了验证页**,
+            # 而它在响应里**是明说的** —— `search_nil_info.search_nil_type`:
+            #
+            #     {"search_nil_type": "verify_check", "is_load_more": "first_flush",
+            #      "search_nil_item": "verify_check", "text_type": 9}
+            #     (同批 `polling_time: 3`)
+            #
+            # ⚠️⚠️ 在此之前这一层**只看 `status_code` 与 `data`**:`status_code=0` + `data=[]`
+            # 完全通过检查 ⇒ 一条都不返回 ⇒ 上层读成「限流 / 登录态失效」,
+            # 白跑一次浏览器兜底,而**日志里一个字都没提"验证"**。
+            # 实测代价:2026-10-08 12:11 之后 4 轮全空,排查方向一直压在登录态和限流上
+            # (活体探针也确实显示"没回 2483 ⇒ 凭据被接受"),真因是这个没人读的字段。
+            #
+            # ⇒ 判据必须落在**响应自己说的原因**上,而不是我们猜的那几个错误码。
+            # 这类字段一旦漏读,症状就和"真的没有数据"**一模一样** —— 本仓最贵的那类 bug。
+            nil = d.get("search_nil_info") or {}
+            nil_type = str(nil.get("search_nil_type") or "")
+            if nil_type == "verify_check":
+                raise DouyinProtocolError(
+                    "抖音要求**过验证**(search_nil_info.search_nil_type=verify_check)"
+                    "——它把搜索结果整页换成了验证页,**不是「没人推这个资源」**。"
+                    "修法:**在浏览器里打开抖音、过一次验证(滑块/验证码)**,再重新导出 cookie;"
+                    "在此之前每一个关键词都会返回空 —— 换词、拉长间隔、等自愈**都没用**"
+                    "(实测已连续空 8 小时)。见 doc/抖音纯协议-链路拆解.md §6",
+                    kind="verify", needs_human=True)
+
             page_rows, logid = _parse(d, kw)
             rows.extend(page_rows)
             logger.info("抖音纯协议:「%s」第 %d 页 +%d 条(logid=%s)",
                         kw[:24], page, len(page_rows), logid[:16] or "-")
             if not page_rows:
+                # ⚠️ 空结果也要留下**响应自己给的原因**:别的 nil 类型将来出现时,
+                # 这一行是唯一能一眼看出"是风控还是真没有"的地方。
+                if nil_type:
+                    logger.info("抖音纯协议:「%s」返回空,nil_type=%s",
+                                kw[:24], nil_type)
                 break
             hit_kw = True
             search_id = logid

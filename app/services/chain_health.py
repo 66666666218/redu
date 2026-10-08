@@ -260,6 +260,12 @@ def check_credentials(db) -> list[dict]:
                         # 自动接回 ⇒ **降级为黄**:它已经不挡路了,但值得知道发生过
                         level = YELLOW
                         detail += f" · {healed} ⇒ **复验通过,已自动接回**"
+                    elif "过验证" in why2:
+                        # ⚠️ 这一档**不许**给"重导 cookie"的修法:重导只是复制 cookie,
+                        # **过不了验证** —— 那是要人在浏览器里点一下的。
+                        # 给错的修法 = 让下一个人再把同样无效的动作试一遍(本仓最恨的"假装有自动化")。
+                        detail += (f" · {healed} ⇒ 复验**仍是「要求过验证」**:"
+                                   "要人在浏览器里打开抖音过一次验证;重导 cookie 解决不了")
                     else:
                         detail += f" · {healed} ⇒ 复验仍失败({why2});人工重导见 tools/douyin_export_cookie.py"
                 else:
@@ -555,6 +561,14 @@ def _cred_alive(platform: str, cookie: str, db) -> tuple[bool | None, str]:
         # 两者修法完全不同:前者要人重新复制,后者等一会儿就好。
         kind = str(getattr(exc, "kind", "") or "")
         msg = f"{type(exc).__name__}: {str(exc)[:90]}"
+        if kind == "verify":
+            # ★ 2026-10-08 新增这一档:抖音可以把搜索结果**整页换成验证页**
+            # (`search_nil_info.search_nil_type=verify_check`),而它在响应里是明说的。
+            # 在此之前这层只看 status_code/data ⇒ 报成"零结果,不作判定",
+            # 于是报告上既不红也不黄,而实际上**整条链是断的**(实测连空 8 小时)。
+            return False, ("**抖音要求过验证**(不是凭据失效、也不是限流):"
+                           "在浏览器里打开抖音过一次验证(滑块/验证码),重导 cookie **解决不了**"
+                           "—— 在此之前每个关键词都返回空。" + msg)
         if kind in ("need_login", "restricted", "argus") or "登录" in str(exc):
             return False, msg
         return None, msg
