@@ -289,8 +289,12 @@ def test_查询词被剥过括号_回库匹配也要剥(session) -> None:
 
     rows = search_resources(session, 1, "伪装直男等2个文件")
     assert rows, "带括号标注的标题必须能匹配回库(否则卡片那一行是「—(库内暂无链)」)"
-    assert "GROUP1" in rows[0]["my_link"], rows
-    assert all("GROUP2" not in r["my_link"] for r in rows), "不该把另一个变体也捞进来"
+    links = [r["my_link"] for r in rows]
+    assert any("GROUP1" in u for u in links), rows
+    # ⚠️ 这两条断言 2026-10-08 **改过**:原来要求"只捞 GROUP1、不许把另一个变体捞进来"。
+    # 加了盘商尾巴剥离(`等N个文件`)之后查询词归一成 `伪装直男`,
+    # 于是**两个变体都该被配上** —— 那更好(同一份资源的两条链都能用)。
+    assert any("GROUP2" in u for u in links), "同一资源的另一个变体也该配上"
 
     # 反向:另一个变体也照样配得上(它本来就是连续子串,这条是防回归)
     assert search_resources(session, 1, "伪装直男"), "裸名必须仍然能配上"
@@ -309,7 +313,32 @@ def test_文章标题中间夹括号也要能匹配回库(session) -> None:
 def test_match_key_剥括号去标点() -> None:
     from app.services.resource_library import match_key
 
-    assert match_key("伪装直男【更至19】(1)等2个文件") == "伪装直男等2个文件"
-    assert match_key("伪装直男等2个文件") == "伪装直男等2个文件"
+    assert match_key("伪装直男【更至19】(1)等2个文件") == "伪装直男"
+    assert match_key("伪装直男等2个文件") == "伪装直男"
     assert match_key("《花少2》人格测试 直达入口｜最新") == "花少2人格测试直达入口最新"
     assert match_key("") == ""
+
+
+def test_剥盘商自动尾巴() -> None:
+    """★ `等N个文件` 是**盘商保存多文件分享时的自动命名**,不是资源名的一部分。
+
+    它的存在让同一份资源在库里有两个名字(`伪装直男` / `伪装直男等2个文件`),
+    卡片上就出两行 —— 用户 2026-10-08 报的正是这个。
+    """
+    from app.services.resource_library import strip_vendor_suffix
+
+    assert strip_vendor_suffix("伪装直男【更至19】(1)等2个文件") == "伪装直男【更至19】(1)"
+    assert strip_vendor_suffix("某某资源等 12 个文件") == "某某资源"
+    assert strip_vendor_suffix("某某等3个压缩包") == "某某"
+    assert strip_vendor_suffix("伪装直男") == "伪装直男", "没有尾巴的不许动"
+    # ⚠️ 不能把资源名里的"等"误伤:那不是结尾的 `等N个文件`
+    assert strip_vendor_suffix("等待戈多等资源") == "等待戈多等资源"
+
+
+def test_同一份资源的命名变体归到同一个身份() -> None:
+    from app.services.resource_library import resource_key
+
+    a = resource_key("伪装直男")
+    b = resource_key("伪装直男【更至19】(1)等2个文件")
+    assert a == b == "伪装直男", (a, b)
+    assert resource_key("完全不相干的另一个资源") != a

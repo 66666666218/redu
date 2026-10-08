@@ -440,3 +440,37 @@ class TestPlatformSplit:
         assert seen.get("p"), f"快作业没带任何平台:{seen}"
         assert set(seen["p"]) <= set(API_PLATFORMS), f"浏览器平台混进快车道了:{seen}"
         assert "xiaohongshu" not in seen["p"] and "kuaishou" not in seen["p"]
+
+
+# ---------------------------------------------------------------------------
+# ★ 2026-10-08:同一份资源的多个命名变体必须**合并成一行**
+# ---------------------------------------------------------------------------
+
+
+def test_同一份资源的两个命名变体合并成一行() -> None:
+    """★ 用户报的现象:快手卡片上 `伪装直男` 与 `伪装直男等2个文件` 各占一行,
+    且一行有链一行没有。
+
+    `等N个文件` 是**盘商保存多文件分享时的自动命名**(夸克/迅雷都有),
+    于是同一份资源在库里有两条标题、造出两个搜索词、爬两遍、出两行。
+    """
+    rows = [{"keyword": "伪装直男", "snippet": "a"},
+            {"keyword": "伪装直男等2个文件", "snippet": "b"},
+            {"keyword": "伪装直男", "snippet": "c"}]
+    merged = rp.merge_hits_by_resource(rows, ["伪装直男", "伪装直男等2个文件"])
+    assert len(merged) == 1, f"同一份资源该并成一行,实际 {merged}"
+    g = merged[0]
+    assert g["name"] == "伪装直男", "展示名取**最短**那个(裸名匹配面最宽)"
+    assert len(g["hits"]) == 3, "内容数要相加"
+
+
+def test_不同资源不许被合并() -> None:
+    rows = [{"keyword": "伪装直男", "snippet": "a"},
+            {"keyword": "完全不相干的另一个资源", "snippet": "b"}]
+    merged = rp.merge_hits_by_resource(rows, ["伪装直男", "完全不相干的另一个资源"])
+    assert len(merged) == 2
+
+
+def test_不在本轮关键词里的命中要丢掉() -> None:
+    rows = [{"keyword": "别的资源", "snippet": "a"}]
+    assert rp.merge_hits_by_resource(rows, ["伪装直男"]) == []

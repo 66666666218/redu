@@ -180,3 +180,20 @@ class TestPushCard:
         st = Settings(_env_file=None, is_dev=True)
         monkeypatch.setattr(st, "feishu_webhook_multiplatform", "https://hook/mp", raising=False)
         assert rl.push_cross_platform_resonance(session, 1, st, days=90) is False
+
+
+def test_盘商自动尾巴不拆成两桶(session) -> None:
+    """★ 2026-10-08:桶的键从 `core_resource_name` 换成 `resource_key`。
+
+    `core_resource_name` **不剥盘商的自动尾巴**(`等N个文件`),于是
+    `伪装直男【更至19】(1)` 与 `伪装直男【更至19】(1)等2个文件` 各成一桶 ——
+    而那是**同一份资源**(多文件分享被盘商自动命名),共振榜照样数成两条。
+    用户口径:「**不只是这一个资源,每个盘都要避免这种情况**」。
+    """
+    now = datetime.now()
+    for i, t in enumerate(["伪装直男【更至19】(1)", "伪装直男【更至19】(1)等2个文件"]):
+        session.add(DiscoveredPanLink(user_id=1, platform="kuaishou", origin_url=f"u{i}",
+                                      title=t, author=f"号{i}", found_at=now, status="ok"))
+    session.commit()
+    out = cross_platform_resonance(session, 1, days=30, min_platforms=1)
+    assert len(out) == 1, f"同一份资源被数成 {len(out)} 条:{out}"

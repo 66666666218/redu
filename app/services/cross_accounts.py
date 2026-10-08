@@ -639,7 +639,14 @@ def library_search_word(title: str, limit: int = 16) -> str:
       · **开头口水词**:`亲测！苹果ios共享id…` 的「亲测！」搜不出东西 —— 只在**紧跟标点时**才剥,
         否则会误伤 `爆火的“审批小程序”`(引号里的才是名字)。
     """
-    text = _PAREN_RE.sub(" ", title or "")
+    # ⚠️ **先剥盘商自动尾巴**(2026-10-08,用户口径"扩展到每个盘"):
+    # `<首个文件名>等N个文件` 是**所有盘商**保存多文件分享时的自动命名(夸克/迅雷都有)
+    # ⇒ 不剥的话,同一份资源会造出**两个不同的搜索词**(`伪装直男` / `伪装直男等2个文件`),
+    # 然后各搜一遍、卡片上出两行。这里剥掉,等于在**源头**把变体合掉 ——
+    # 比在下游每一处各自打补丁可靠,而且**省掉一半的爬取**。
+    from app.services.resource_library import strip_vendor_suffix
+
+    text = _PAREN_RE.sub(" ", strip_vendor_suffix(title))
     text = re.sub(r"\s+", "", text)                       # 中文标题里的空格多是排版,去掉
     for noise in _LEAD_NOISE:                             # 只在后面跟标点时才剥,避免误伤
         if text.startswith(noise) and len(text) > len(noise) and text[len(noise)] in _PUNCT:
@@ -667,6 +674,13 @@ def library_search_word(title: str, limit: int = 16) -> str:
     # 泛化大包名(最全文件/XX合集)当搜索词只会招来噪音 —— 闸门**共用**群那条路的词表,
     # "这条资源名太泛、指不到具体东西"是同一件事,只该有一份定义(见 `is_bulk_resource`)。
     return "" if is_bulk_resource(text) else text
+
+
+def _resource_key(name: str) -> str:
+    """资源身份(`resource_library.resource_key`)——**懒加载**避免与它形成循环导入。"""
+    from app.services.resource_library import resource_key
+
+    return resource_key(name)
 
 
 def _keywords_from_library(session: Session, user_id: int, top: int = 5) -> list[str]:
@@ -716,7 +730,10 @@ def _keywords_from_library(session: Session, user_id: int, top: int = 5) -> list
         if len(kws) >= top:
             return
         w = library_search_word(str(title or ""))
-        if w and w not in kws:
+        # ⚠️ **按「资源身份」去重,不按字符串相等**(2026-10-08):同一份资源的两个命名变体
+        # 会造出两个词(`伪装直男` / `伪装直男等2个文件`),字符串比不出它们是同一个东西。
+        # 靠这里挡住,就不用让下游每个消费方各自去合并。
+        if w and w not in kws and _resource_key(w) not in {_resource_key(x) for x in kws}:
             kws.append(w)
 
     for i in range(max(len(hot), len(others))):

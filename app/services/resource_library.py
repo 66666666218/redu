@@ -218,8 +218,24 @@ _MATCH_PUNCT_RE = re.compile(
     r"[\s·・|｜/\\、,，。.:：;；!！?？—－\-~～+＋*＊#＃'\"“”‘’()（）\[\]【】《》<>_]")
 
 
+#: 盘商保存**多文件分享**时给的自动命名尾巴:`<首个文件名>等2个文件`。
+#: 夸克/迅雷都有这个行为 ⇒ **同一份资源在库里会有两个名字**。
+_VENDOR_SUFFIX_RE = re.compile(r"等\s*\d+\s*个(?:文件|文件夹|文件包|压缩包)?\s*$")
+
+
+def strip_vendor_suffix(name: str) -> str:
+    """剥掉盘商的自动命名尾巴(`等2个文件`)。
+
+    ⚠️ **为什么必须剥**(2026-10-08 用户报的"同一份资源显示成两行"):保存多文件分享时,
+    夸克/迅雷把顶层命名成 `<首个文件名>等N个文件`,于是库里同一份资源有两条标题
+    —— 实测 `伪装直男【更至19】(1)` 与 `伪装直男【更至19】(1)等2个文件`,
+    卡片上就是两行,一行有链一行显示「库内暂无链」。
+    """
+    return _VENDOR_SUFFIX_RE.sub("", str(name or "")).strip()
+
+
 def match_key(text: str) -> str:
-    """**回库匹配用**的归一化:剥掉括号标注 + 去掉全部标点空白 + 转小写。
+    """**回库匹配用**的归一化:剥盘商尾巴 + 剥括号标注 + 去标点空白 + 小写。
 
     ⚠️⚠️ **为什么必须有这一层**(2026-10-08 用户报的 bug):
     查询词是 `library_search_word` 造的,而它**会剥掉括号标注**;
@@ -233,12 +249,24 @@ def match_key(text: str) -> str:
     ⇒ 跨平台热度卡片那一行写「—(库内暂无链)」,而同一份资源的另一个名字变体
     (`伪装直男`)却能配上 —— 用户看到的就是「**一个有一个没有**」。
 
+    盘商尾巴(`等N个文件`)一并剥掉:它让同一份资源的两个名字**彻底归一**,
+    于是"两个变体各自成行"与"只配上一个"这两个症状一起消失。
+
     ⚠️ 本模块早先那句注释写着「词就是资源库取的,所以必然能检索回去」——
     **那个假设正是被"造词时剥括号"打破的**。凡是"造词"与"回查"用两套口径的地方,
     迟早会出现这条缝。
     """
-    t = _MATCH_BRACKET_RE.sub("", str(text or ""))
+    t = _MATCH_BRACKET_RE.sub("", strip_vendor_suffix(text))
     return _MATCH_PUNCT_RE.sub("", t).lower()
+
+
+def resource_key(name: str) -> str:
+    """**同一份资源的身份**(用于把不同命名变体合并成一行)。
+
+    `match_key`(剥尾巴与标注)之后再走 `core_resource_name`(剥通用前后缀/页数/日期)——
+    两个函数的职责不同:`match_key` 求"能不能匹配上",`resource_key` 求"是不是同一个东西"。
+    """
+    return core_resource_name(match_key(name))
 
 
 def search_resources(session: Session, user_id: int, query: str,
@@ -462,7 +490,13 @@ def cross_platform_resonance(session: Session, user_id: int, days: int = 90,
     def _add(raw_name: str, platform: str, account: str, pan_url: str) -> None:
         # ⚠️ **桶的键是核心名,不是清洗名**:同一份资源有 20+ 种标题写法(实测),
         #    拿清洗名当身份会把一份资源数成好几条 —— 见 `core_resource_name` 的实测。
-        core = core_resource_name(raw_name)
+        # ⚠️⚠️ **2026-10-08 改成 `resource_key`**(用户口径"扩展到每个盘"):
+        #    原来只用 `core_resource_name`,它**不剥盘商的自动尾巴**(`等N个文件`),
+        #    于是 `伪装直男【更至19】(1)` 与 `伪装直男【更至19】(1)等2个文件` 仍然各成一桶
+        #    —— 而那是**同一份资源**,共振榜照样数成两条。
+        #    `resource_key` = 剥盘商尾巴 + 剥括号标注 + 去标点 + 剥通用前后缀,
+        #    与卡片、搜索词、查重**共用同一份定义**,不再各处一套口径。
+        core = resource_key(raw_name)
         if not core:
             return                      # 洗不出名字的(太短/太泛/空标题)直接丢,别凑数
         b = buckets.setdefault(core, {"name": core, "variants": {},

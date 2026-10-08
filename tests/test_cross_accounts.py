@@ -488,3 +488,23 @@ class TestQueuePanLink:
                "snippet": "网盘资源商行 多多支持", "pan_link": ""}
         assert cp._save(session, 1, "bilibili", hit, "网盘资源") is True
         assert session.scalars(select(DiscoveredPanLink)).all() == []
+
+
+# ---------------------------------------------------------------------------
+# ★ 2026-10-08:造词侧也要剥盘商自动尾巴(用户口径"扩展到每个盘")
+# ---------------------------------------------------------------------------
+
+
+def test_造词先剥盘商自动尾巴() -> None:
+    """★ 在**源头**剥掉 `等N个文件`,下游就不必各自打补丁。
+
+    不剥的后果:同一份资源造出两个搜索词(`伪装直男` / `伪装直男等2个文件`)
+    ⇒ **爬两遍**(浪费一倍)、卡片上出两行、两行的链还可能一个有一个没有。
+    用户口径:「并不只是这一个资源,你应该扩展到每个盘都避免这种情况」。
+    """
+    from app.services.cross_accounts import library_search_word
+
+    assert library_search_word("伪装直男【更至19】(1)等2个文件") == "伪装直男"
+    assert library_search_word("某某资源等2个文件") == "某某资源"
+    # 裸名照旧
+    assert library_search_word("伪装直男") == "伪装直男"

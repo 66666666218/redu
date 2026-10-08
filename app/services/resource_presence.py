@@ -175,6 +175,33 @@ def browser_platforms_of(settings) -> list[str]:
     return [p for p in platforms_of(settings) if p not in API_PLATFORMS]
 
 
+def merge_hits_by_resource(rows: list[dict], names: list[str]) -> list[dict]:
+    """把命中行**按「资源身份」合并** → `[{"name", "hits"}]`。
+
+    ⚠️ **为什么按身份而不按关键词名**(2026-10-08 用户报的"同一份资源两行"):
+    关键词是从库里取的标题,而**同一份资源在库里有多个命名变体** ——
+    最常见的是盘商自动尾巴:保存多文件分享时夸克/迅雷把顶层命名成
+    `<首个文件名>等N个文件`,于是 `伪装直男` 与 `伪装直男等2个文件` 各成一个关键词、
+    各出一行,而两行的链还可能**一个有一个没有**。
+
+    合并规则:归并到同一身份后**内容数相加**,展示名取**最短**的那个(通常就是裸名)。
+    ⚠️ 那个"取最短"不是随手定的:裸名通常**不带**盘商尾巴与括号标注,
+    拿它去回库匹配的命中面最宽(实测 `伪装直男` 能同时配到两个变体的链)。
+    """
+    from app.services.resource_library import resource_key   # 懒加载:避免与它循环导入
+
+    by_key: dict[str, dict] = {}
+    for r in rows:
+        kw = str(r.get("keyword") or "").strip()
+        if kw not in names:
+            continue
+        g = by_key.setdefault(resource_key(kw), {"name": kw, "hits": []})
+        g["hits"].append(r)
+        if 0 < len(kw) < len(g["name"]):
+            g["name"] = kw
+    return list(by_key.values())
+
+
 def probe(session, user_id: int, settings=None, platforms: list[str] | None = None) -> dict:
     """按资源名探各平台 → 附库内链。返回 `{"status", "platforms", "items"}`。
 
@@ -248,17 +275,15 @@ def probe(session, user_id: int, settings=None, platforms: list[str] | None = No
             continue
         if not rows:
             continue                                     # 该平台没结果 → 跳过,不影响其余
-        by_name: dict[str, list[dict]] = {}
-        for r in rows:
-            kw = str(r.get("keyword") or "").strip()
-            if kw in names:
-                by_name.setdefault(kw, []).append(r)
-        for name, hits in by_name.items():
+        merged = merge_hits_by_resource(rows, names)
+        for g in merged:
+            name, hits = g["name"], g["hits"]
             items.append({"name": name, "platform": plat,
                           "label": PLATFORMS[plat]["label"], "count": len(hits),
                           "samples": [(h.get("snippet") or "")[:60] for h in hits[:2]],
                           "link": _library_link(session, user_id, name)})
-        logger.info("跨平台热度:%s 命中资源 %d 个", plat, len(by_name))
+        logger.info("跨平台热度:%s 命中资源 %d 个(合并前 %d 个关键词)",
+                    plat, len(merged), len({r.get("keyword") for r in rows}))
     if tried and len(failed) == tried:
         # 一个平台都没开起来 → 这不是"没热度",是链路坏了,必须让上层记 failed
         raise MediaCrawlerError(f"{tried} 个平台全部抓取失败:{last_err}")
