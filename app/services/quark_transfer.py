@@ -67,6 +67,9 @@ class QuarkTransfer:
         self.timeout = timeout
         self._dir_cache: dict[str, str] = {}  # path -> fid(一轮监听多次转存复用,免重复解析)
         self._used_store: set[str] = set()    # 本次从 fid_store 复用的路径(保存失败时自愈回重建)
+        # 本地**主动作废**过的路径(墓碑)—— 合并写回时要把它们排除,
+        # 否则刚被 invalidate 掉的 fid 会被磁盘上的旧值**又并回来**(见 `_persist_fids`)
+        self._dropped: set[str] = set()
         self._fid_store_path = str(fid_store or "")
         self._persisted: dict[str, str] = {}
         if self._fid_store_path and os.path.isfile(self._fid_store_path):
@@ -77,23 +80,57 @@ class QuarkTransfer:
                 self._persisted = {}
 
     def _persist_fids(self) -> None:
+        """把 path→fid 写回 fid_store。
+
+        ⚠️⚠️ **必须先读回磁盘再合并,不能直接 dump 内存那份**(2026-10-08 修)。
+
+        原来是把 `self._persisted`(构造时载入、之后只增不减的那一份)**整份覆盖写**。
+        后果是一个典型的**丢更新**:盘上明明有一份正确的映射,某个进程只要在
+        "别人写之后"落一次盘,就会用自己那份**旧快照**把它抹掉 ⇒ 下次 `_ensure_dir`
+        缓存缺失 ⇒ 走梯度候选**新建一个 `redian监听_MMDD`**。
+
+        代价是实打实的:实测该账号盘上有 **19 个 `redian监听_*` 目录**
+        (0913/0915/0916/0918/0920/0926~0929/1001/1004/1007,约每 3 天一个),
+        而查重是**按目录**做的(在目标目录里找同名同大小)——
+        换了目录就等于**一个都找不到** ⇒ 同一个资源在新目录里**又存一份**。
+        实例:`高性价比人生指南-HowToLiveBetter-现代-338页.pdf` 同时躺在
+        `redian监听_0929` 与 `redian监听_1004` 里各一份。
+
+        ⇒ 现在:读磁盘 → 合并(我们的值优先)→ 排除本地刚作废的路径 → 原子替换。
+        """
         if not self._fid_store_path:
             return
         try:
             os.makedirs(os.path.dirname(self._fid_store_path) or ".", exist_ok=True)
+            merged: dict[str, str] = {}
+            try:
+                if os.path.isfile(self._fid_store_path):
+                    with open(self._fid_store_path, encoding="utf-8") as f:
+                        merged = {str(k): str(v) for k, v in (json.load(f) or {}).items()}
+            except (OSError, ValueError):
+                merged = {}
+            merged.update(self._persisted)
+            for gone in self._dropped:      # ⚠️ 本地作废的**不许**被磁盘上的旧值并回来
+                merged.pop(gone, None)
+            self._persisted = merged
             tmp = self._fid_store_path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self._persisted, f, ensure_ascii=False)
+                json.dump(merged, f, ensure_ascii=False)
             os.replace(tmp, self._fid_store_path)
         except OSError:
             logger.warning("夸克 fid 缓存写入失败: %s", self._fid_store_path)
 
     def invalidate_dir(self, path: str) -> None:
-        """清除目录缓存(目录被删/fid 失效时),下次 _ensure_dir 会重新创建。"""
+        """清除目录缓存(目录被删/fid 失效时),下次 _ensure_dir 会重新创建。
+
+        ⚠️ 同时记进 `_dropped`(墓碑):`_persist_fids` 会合并磁盘上的旧值,
+        不排除的话**这个刚被作废的 fid 会被原样并回来**,作废等于没作。
+        """
         path = path.strip("/") or "/来自监听"
         self._dir_cache.pop(path, None)
         self._used_store.discard(path)
         self._persisted.pop(path, None)
+        self._dropped.add(path)
         self._persist_fids()
 
     # ---- HTTP ----
@@ -283,10 +320,15 @@ class QuarkTransfer:
     def _ensure_dir(self, path: str) -> str:
         """确保目录存在并返回末级 fid。
 
-        大盘实测:根目录 10000+ 文件时按名分页重扫一次要几十个慢请求(一次补偿转存拖到
-        半小时),故**完全不做重扫**——创建接口的成功/23008 就是存在性判定,撞名时沿
-        "原名→_MMDD→_MMDD_2→_MMDD_3"候选梯继续建。23008 还包含"幽灵占用"(目录实际
-        不存在却报同名,旧转存任务残留,线上案例"redian监听"),梯子同样兜得住。
+        大盘实测:根目录 10000+ 文件时**按名分页遍历**一次要几十个慢请求
+        (一次补偿转存拖到半小时),故**不做分页重扫** —— 存在性判定走
+        「搜索接口一次命中」(`_adopt_existing_dir`)或「创建接口的成功/23008」,
+        后者撞名时沿 "原名→_MMDD→_MMDD_2→_MMDD_3" 候选梯继续建。
+        ⚠️ **但"新建"必须是最后手段**(2026-10-08 订正):旧 docstring 把
+        "完全不做重扫"当特性,连**查找**都不做,于是缓存一丢就新建一个 `_MMDD` 目录、
+        而查重按目录做 ⇒ 同一资源重复占用(实测 19 个 `redian监听_*`),
+        详见 `_adopt_existing_dir`。23008 还包含"幽灵占用"(目录实际不存在却报同名,
+        旧转存任务残留,线上案例 "redian监听")—— 搜索会先证伪它,证伪不了才建新名。
         解析出的 fid 持久化到 fid_store,下轮直接复用,避免幽灵场景每轮新堆目录;
         fid 失效(目录被删)时保存会报错,调用方经 invalidate_dir() 清除后自动重建。
         """
@@ -312,8 +354,62 @@ class QuarkTransfer:
         self._persist_fids()
         return parent
 
+    def _adopt_existing_dir(self, parent_fid: str, name: str) -> str:
+        """按名字找回**已经在用**的那个目录,而不是新建一个。找不到返回 `""`。
+
+        ★★ 这是 2026-10-08 那次「夸克反复保存同一个资源、白占空间」的**正解**。
+
+        ## 病根
+        `_ensure_dir` 原来**只创建、从不查找**(它的 docstring 就把"完全不做重扫"当成
+        特性写的,理由是"大盘上按名分页重扫要几十个慢请求")。于是缓存一旦缺失:
+        `redian监听` 撞 `23008` → 梯度候选 —— **新建 `redian监听_MMDD`** → 新目录是空的。
+
+        而**查重是按目标目录做的**(在 `target_fid` 里找同名同大小),所以"家"一换,
+        之前的资源一个都认不出来 ⇒ **每个资源又存一份**。实测代价:
+        盘上 **19 个 `redian监听_*`**(约每 3 天新增一个),同一个
+        `高性价比人生指南-HowToLiveBetter-现代-338页.pdf` 在 `_0929` 和 `_1004` 里各一份。
+
+        ## 为什么"查找"这次是便宜的
+        用**搜索接口**(`/1/clouddrive/file/search`),一次请求就有结果 ——
+        这正是本文件 `search_files` 的 docstring 记的那件事:
+        `list_dir` 在大盘上要分页扫、还可能翻不到,而**搜索一次就命中**。
+        ⇒ 只挂在"缓存缺失"这条冷路径上(热路径仍然零额外请求)。
+
+        ## 为什么取"最近更新的那个"、不取同名那个
+        真实情况是同名目录与一堆 `_MMDD` 兄弟**并存**(实测 `redian监听` 本身只剩 4 项、
+        停在 09-13,而最近在用的是 `redian监听_1007`)。"家"的定义是
+        **最近在往里写东西的那个**,所以按 `updated_at` 倒序取第一个。
+        取同名那个会把后续资源全搬进一个早已不用的旧目录 —— 那等于**主动制造**下一次重复。
+        """
+        if not name:
+            return ""
+        try:
+            hits = self.search_files(name, size=50)
+        except Exception as exc:  # noqa: BLE001 - 搜不到就当不存在,退回"新建"(与旧行为一致)
+            logger.warning("夸克按名找回目录失败(%s),将按旧逻辑新建:%s",
+                           name, str(exc)[:100])
+            return ""
+        cands = [h for h in hits
+                 if h.get("dir")
+                 and str(h.get("pdir_fid") or "") == str(parent_fid)
+                 and (str(h.get("file_name") or "") == name
+                      or str(h.get("file_name") or "").startswith(f"{name}_"))]
+        if not cands:
+            return ""
+        cands.sort(key=lambda h: int(h.get("updated_at") or 0), reverse=True)
+        best = cands[0]
+        logger.warning(
+            "夸克目录「%s」:缓存里没有,但盘上已有 %d 个同名/带日期兄弟 —— "
+            "**沿用最近在用的「%s」,不新建**(先前每丢一次缓存就新建一个 `_MMDD`,"
+            "而查重按目录做 ⇒ 同一资源在新目录里又存一份,这就是空间被重复占用的根因)",
+            name, len(cands), best.get("file_name"))
+        return str(best["fid"])
+
     def _create_with_fallback(self, parent_fid: str, name: str) -> str:
-        """逐个候选名尝试创建,全部撞名才抛错(无重扫,最多 4 个请求)。"""
+        """先**找回已有目录**;确实没有才逐个候选名创建(全部撞名才抛错)。"""
+        adopted = self._adopt_existing_dir(parent_fid, name)
+        if adopted:
+            return adopted
         last = ""
         for cand in (name, f"{name}_{datetime.now():%m%d}",
                      f"{name}_{datetime.now():%m%d}_2", f"{name}_{datetime.now():%m%d}_3"):
