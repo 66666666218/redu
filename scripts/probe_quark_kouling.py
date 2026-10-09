@@ -136,8 +136,8 @@ Lzh1/c;->a(...)                      ← 构造 /utoken/v2/parse 的请求
 ```
 
 **native 在包里**:`libsgmainso-6.6.230703.so`、`libsgsecuritybodyso-6.6.230703.so`
-⇒ ⚠️⚠️ **下面这句当时的推断是错的,已在第三轮推翻(见文末)**:
-~~就是阿里聚安全 SecurityGuard 6.6.230703~~ —— 真签名在 **`libunet.so`**,与聚安全无关。
+⇒ 就是**阿里聚安全 SecurityGuard 6.6.230703**。**(第三轮核实:这一条是对的;**
+**只是它同时在 `libunet.so` 里也注册了入口,见 §1/§2。)**
 
 ### ★ 端点级确认:唯一那道门就是 `sign`
 拿真值打 `/utoken/v2/parse`(不带 Origin!见下):
@@ -165,10 +165,11 @@ Lzh1/c;->a(...)                      ← 构造 /utoken/v2/parse 的请求
    那次是靠移植 `f2` 的纯 Python 实现解决的)⇒ 已派人在 GitHub 上查;
 2. 都找不到 ⇒ 只能逆 `libsgmainso-6.6.230703.so`(成本再上一个台阶)。
 
-## ★★★ 2026-10-09(第三轮):**上面这两条的前提是错的** —— 签名根本不在聚安全里
+## ★★★ 2026-10-09(第三轮):签名链**完整读出来了**,并拿到一个**可用的 oracle**
 
-一句话:**上一轮把「同一次崩溃」当成了「签名落在 AVMP 里」的证据,而那个前提从来没验证过。**
-这轮做了静态验证,推翻了它。
+上一轮卡在「`signWithNumber` 究竟落在哪」。这轮把官方链路从 dex + native 里读全了,
+顺手拿到一个**能当场算签名的 oracle**,并把「Frida 一挂就崩」的**真因**查实。
+⚠️ 中途我一度写下「签名不在聚安全里」,**当天就纠正了** —— 结论是**仍在聚安全**(见 §2 的撤回记录)。
 
 ### 1. 真实链路(全部由 dex 静态读出,不是推测)
 ```
@@ -182,11 +183,22 @@ Lcom/uc/encrypt/a;->f(密钥号字符串, 内容)     ← ⚠️ 第一个参数
 **反查出函数指针** = `0x2af168`(`nativeEncrypt`=0x2aee68 / `nativeDecrypt`=0x2aefe8 /
 `nativeSetDelegate`=0x2aedf0)。这条路本身可复用于任何"注册式 JNI 找不到入口"的库。
 
-### 2. 为什么说「不在聚安全里」
-`libunet.so` 里 **`sgmain` / `doCommandNative` / `SecurityGuard` / `AVMP` / `libsg` 出现次数全是 0**,
-`DT_NEEDED` 也不含聚安全。它是一段**普通 ARM64 C++**:只有 `JNI_OnLoad` 一个导出符号,
-无 `.symtab`,但有完整 `.eh_frame` 和明文类名/方法名/签名串,自带 SHA-256 轮常量。
-⇒ 「AVMP LiteVM 黑盒 ⇒ 不可逆」这个结论**作废**。
+### 2. ⚠️⚠️ 撤回:**签名仍然在聚安全里**(这一条我当天先写错了,当场纠正)
+链路的后半段是 **native 回抛给 Java delegate**(r2 反编译 + androguard 读字节码看出来的):
+```
+libunet.so:nativeSign(J, S, String)              ← 只是**转发壳**,不算签名
+    └→(JNI 回调) UNetCryptJni.signWithNumber(Delegate, S, String)
+        └→ delegate 实现 = Lcom/uc/base/net/unet/impl/UnetSecurityGuardCryptDelegate;
+                            ^^^^^^^^^^^^^^ 类名直接写着 SecurityGuard
+            └→ SecurityGuardManager.getInstance(ctx).getSecureSignatureComp()
+                   .sign(SecurityGuardParamContext{ "INPUT" -> 内容 })
+```
+⇒ **真算法在聚安全的 native 里**,「AVMP 黑盒」的**难度判断依然成立**。
+
+**我为什么会写错**:我只查了 `libunet.so` **自己**的字符串表和 `DT_NEEDED`
+(`sgmain`/`AVMP`/`libsg` 出现次数确实全是 0),**但这条依赖走的是 Java 侧,那种查法根本看不见**。
+一个「没看到」被当成了「不存在」 —— 与上一轮「一次崩溃 ⇒ 签名落在 AVMP」是**同一类错误的两面**。
+**教训:`DT_NEEDED`/字符串表只能证明"有",不能证明"没有"。**
 
 ### 3. ★「Frida 一挂就 SIGSEGV」的真因:**Frida × Houdini**,不是反调试
 APK 的 `lib/` **只有 `arm64-v8a`**,而雷电是 x86_64
@@ -224,12 +236,27 @@ sign(密钥号 k, 内容 c) = 大端 2 字节(k) ‖ 20 字节 MAC(k, c)
 判据:**18/18** 个样本的前 4 个 hex 都等于 `struct.pack(">h", k).hex()`
 (`12000`→`2ee0`,`12001`→`2ee1`);同一输入多次调用结果**逐字节一致**(确定性)。
 
-### 6. 还差的最后一步:那 20 字节 MAC 的密钥/算法
-已排除:不是 `哈希(密钥号 ± 盐 ± 内容)`(2520 个构造全 0 命中)、不是与内容无关的常量异或。
-第 1 期密钥爆破(只读数据区 `.rodata`/`.data`/`.data.rel.ro`,4400 万候选 × 6 种构造)**无命中**;
-20 字节也不是 SM3 / RIPEMD-160 / SHA-1 的常量。
-⇒ **下一步必须上真正的反编译器**。注意 angr 的坑:它能建 CFG(3.7 万个函数),但
-`cfg.functions.get(0x2af1c0)` 是 **None** —— 这三个入口**只被 RegisterNatives 表引用**,
+### 6. ★ 那 20 字节是谁算的:**聚安全的 `ISecuritySignatureComponent.sign()`**
+`UnetSecurityGuardCryptDelegate.sign(String)` 的字节码(androguard 逐条读出来的):
+```
+SecurityGuardManager.getInstance(context).getSecureSignatureComp()   // ISecuritySignatureComponent
+HashMap(1).put("INPUT", 内容)
+new SecurityGuardParamContext()
+Short.toString(密钥号)
+comp.sign(paramContext)                       // ★ 聚安全出签名
+ByteBuffer.allocate(2).putShort(密钥号)        // ★ 2 字节**大端**密钥号
+byteToHexString(...)
+StringBuilder().append(密钥号hex).append(聚安全签名)   // ★★ 最终结果
+```
+**与实测逐字吻合**:`sign = hex(大端2字节密钥号) ‖ 聚安全签名`。
+⇒ 那 20 字节**不是我们能离线构造的普通哈希**(所以 2520 个构造 + 4400 万个只读区密钥候选全 0 命中),
+它是聚安全签名的输出。**要闭式解只有两条**:
+1. 对 **`libsgmainso-6.6.230703.so` 走 unidbg**(把 .so 当黑盒签名机跑,不逆算法)—— 这是本轮的
+   "换思路"里唯一没试过的主路;或
+2. 直接用 §4 的 **oracle**(模拟器当签名机,已验证可用)。
+
+⚠️ 附一条 angr 的坑(将来谁再走静态路会踩):angr 能建出 CFG(3.7 万个函数),但
+`cfg.functions.get(0x2af1c0)` 是 **None** —— 这些入口**只被 RegisterNatives 表引用**,
 CFG 看不到调用边,**必须显式传 `function_starts=[...]`**。
 """
 from __future__ import annotations
