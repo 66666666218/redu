@@ -263,3 +263,35 @@ UnidbgPointer fnPtr = objectType.findNativeFunction(emulator, method);   // ★ 
 
 拿到真参数之后:unidbg 里的 `10401` 才有机会出值 ⇒ 与 oracle 的已知答案对账
 (`2ee1…36ab7dd8…`)。
+
+
+---
+
+## 9. 第六步:从"不看星数"的开源搜索里挖到的东西(2026-10-10)
+
+用户提醒:**别只盯高星仓库**。换了一批**专属 6.6 插件架构的串**去搜
+(`middletierplugin` / `SecurityGuardMiddleTierPlugin` / `SGPluginExtras` / `app_SGLib` /
+`SG_INNER_DATA` / `libsgmiddletier`),挖到三样**低星但关键**的东西:
+
+| 来源 | 挖到什么 |
+|---|---|
+| **`WithHades/forest`**(低星) | 一份**完整可跑的 unidbg 聚安全签名**。★ **它的 `10401` 形状和天猫那份完全不同**:`[ArrayObject([内容]), "rpc-sdk-online", 0, ""]` ⇒ **参数形状随 app/版本变** |
+| **`Jokky6/tb/lazada.java`** | ★★ **SG 会读调用栈做反篡改**:lazada 专门伪造了一串 `StackTraceElement`(`JDKStack → JNICLibrary.doCommandNative(Native Method) → mainplugin.a.doCommand → middletierplugin…`)。**栈不对 ⇒ 不报错、直接返回 null** —— 与我们的症状形态一致 |
+| `sgInnora` | `analysis/version_comparison_v8000_v9000.md` 等版本对比(**尚未细看**) |
+
+### 实测结果
+
+- 伪造调用栈**已按夸克路径加进去**,但 **SG 在我们这条路径上并没有真的调用 `Thread.getStackTrace`**
+  (日志里只有 `GetMethodID`,没有调用)⇒ **它不是本次 null 的原因**;
+- **10401 两种形状都试了**(HashMap 版 / ArrayObject 版),**都是 null**;
+- **零缺项、零异常** ⇒ 卡点不在 JNI 层。
+
+### 判断
+
+**`10101` 返回 null(它本该返回成功码/句柄)**,说明**初始化本身可能没真正生效** ——
+这靠"猜参数"猜不出来。**静态推理这条路已经到头。**
+
+⇒ 下一步只有两条:
+- **(a) 回真机抓真实参数**(Frida hook `JNICLibrary.doCommandNative`,把真的 10101/10102/10401 打出来)。
+  ⚠️ 那是 native 方法,在 Houdini 上替换有崩的风险,且要用**生产模拟器** ⇒ **需用户点头**;
+- **(b) 继续在 unidbg 里盲试** —— 成功率低。
