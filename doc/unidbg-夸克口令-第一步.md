@@ -88,3 +88,40 @@ java.lang.UnsupportedOperationException:
 ★ **我们独有的对账手段**:每跑出一步,都拿**已有的 (内容 → 真签名) 样本对**比对
 (见 `scripts/probe_quark_kouling.py`),**不用等服务端试错** —— 社区卡在
 `701029904`/`701029906` 的人没有这个条件。
+
+
+---
+
+## 5. 第二步:补上 classloader 与文件层(2026-10-10)
+
+**加的四样**(全部有出处,照天猫那份案例改):
+
+| 加的东西 | 内容 |
+|---|---|
+| `getMainPluginClassLoader` | 返回一个 ClassLoader 代理 |
+| `ClassLoader.loadClass(name)` | 用 unidbg 代理类兜住,让 native 能 `RegisterNatives` |
+| 6 个 JNI 覆写 | `callIntMethod`/`callStaticIntMethod`/`callStaticVoidMethod`/`getStaticIntField`/`getStaticLongField`/`setStaticLongField`,给死值 |
+| **IOResolver** | `/proc/<pid>/stat`、`/proc/<pid>/wchan`、`/proc/self/status`、**`/proc/cpuinfo`(必须写成 AArch64)**;`app_SGLib/**` 摊**真实文件**(含三份插件清单 `pkgInfo`) |
+
+### 结果
+
+- ✅ `getMainPluginClassLoader` 被吃掉后,**native 不再抛异常,继续跑了很远**;
+- ✅ **三个插件库全部加载**:`main` 的 `JNI_OnLoad` 跑完;`securitybody` 的也跑了很远
+  (日志里能看到它在 `FindClass`/`GetMethodID`:`SecException`/`Long`/`Float`/`Double`/`ApmMonitorAdapter`);
+- ✅ **需要手写的补环境只有 1 项** —— 其余 JNI 需求 **unidbg 默认实现全兜住了**(比天猫那份经验还浅);
+- ✅ native **确实去读了文件**(日志里有 `read path=…RandomAccessFile`),说明 IOResolver 生效;
+- ⛔ `securitybody` 的 `JNI_OnLoad` **返回 -1** ⇒ `Illegal JNI version: 0xffffffff`。
+
+### 卡点的诊断与下一步
+
+**原因指向顺序**:天猫案例是 `main.JNI_OnLoad → **10101 初始化** → 再加载其余插件`;**我们跳过了 10101**。
+障碍:夸克没有 `JNICLibrary`,要先**找出 main 插件注册进来的 native 方法名**才能发 10101。
+⇒ 下一步:开 unidbg 的 `AndroidModule`(或 hook `RegisterNatives`)把注册的 (类名, 方法名, 签名) 打出来。
+
+### ★ 顺带踩到的两个 unidbg 自身的坑(与 SG 无关,但会要命)
+
+1. **调试器会卡在 stdin 上。** 当 native 调到一个 unidbg 没注册的 JNI 函数时,unidbg 弹
+   `SimpleARM64Debugger`,而它的 `loop()` 里有 `new Scanner(System.in)` + `scanner.nextLine()` ——
+   **整个程序就那么停住,一行日志都不再打**,看起来像"补环境卡死了"。
+   绕法:`yes c | java …`(继续命令是 **`c`**)。⚠️ **别把它误判成 SG 的坑。**
+2. (见 §3)classpath 里的中文路径会让 Java 类加载器找不到 jar。
