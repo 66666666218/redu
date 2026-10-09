@@ -258,6 +258,44 @@ StringBuilder().append(密钥号hex).append(聚安全签名)   // ★★ 最终�
 ⚠️ 附一条 angr 的坑(将来谁再走静态路会踩):angr 能建出 CFG(3.7 万个函数),但
 `cfg.functions.get(0x2af1c0)` 是 **None** —— 这些入口**只被 RegisterNatives 表引用**,
 CFG 看不到调用边,**必须显式传 `function_starts=[...]`**。
+
+## ★★★★ 2026-10-09(第四轮):**端到端打通** —— 口令 → 分享码,服务端接受我们自己发的请求
+
+### 1. 算签那段(classes9.dex `Lzh1/b;->a(Map, String)`,静态读出来的)
+```
+content = map 按 key **升序**、**只拼 value**(跳过空 key)
+key     = EncryptModel.f(flag)                 // "12000" / "12001"
+return com.uc.encrypt.a.c().f(key, content + 第二个参数)     // 第二个参数 = timestamp
+```
+
+### 2. 请求本体(classes9.dex `Lzh1/c;->a` 构造)—— **是明文 JSON,不是加密 blob**
+```
+POST https://utoken2.quark.cn/utoken/v2/parse      (Content-Type: application/json)
+{"app":"QUARK","clipboard":"<口令原文>","identifier":"<~>","shareSecret":"<token>",
+ "timestamp":"<毫秒>","kps":"",
+ "sign":"<f(key, \"QUARK\" + 口令原文 + identifier + token + timestamp)>"}
+```
+- `kps` 是**空串**;
+- 签名只覆盖 4 个字段(`app`/`clipboard`/`identifier`/`shareSecret`),但 `timestamp`
+  **被拼进签名内容** ⇒ **换了 timestamp 必须重签**。
+
+### 3. 实测(2026-10-09,`/~498b3bHYcr~:/`)
+抓到的真值:`identifier="~"`、`token="498b3bHYcr"`、keyNumber=`12001`、
+签名内容 = `QUARK/~498b3bHYcr~:/~498b3bHYcr1791554078829`、sign = `2ee104d93c0cbb14552c5bfee202ec282da1ee0c1c65`。
+
+| 请求 | 响应 |
+|---|---|
+| App 算出的真签名 | **200 `{"success":true,"code":"OK"}`**,`androidUrl` 里带 `"pwd_id":"6fc59982de5b"` |
+| sign 改坏一个字符 | **400 `sign check error`** |
+| 换 timestamp 但不重签 | **400** |
+
+`6fc59982de5b` **正是库里这条口令配对的分享码**(`https://pan.quark.cn/s/6fc59982de5b`)⇒ 闭环。
+
+### 4. 结论
+**除了那一段聚安全签名,整条请求都能在 Python 里 100% 复现。**
+⇒ 「**App 当签名机、其余全纯协议**」这条路是**实测成立**的。拿到的 `shareCode` 直接拼
+`https://pan.quark.cn/s/<shareCode>`,后面接我们**已有的**夸克转存链(纯协议、免签名)。
+⇒ 这是当前性价比最高的一条:**不用碰 unidbg,也不用改生产里那条 UI 链**。
 """
 from __future__ import annotations
 
