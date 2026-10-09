@@ -432,3 +432,45 @@ doCommand(10101, v15)
 卡点从"参数猜不对"变成"**`10102` 内部卡住**"—— 这是**可查**的:
 继续用同一套办法(反编译插件 dex)读 `10102` 的处理逻辑,看它卡在哪一步;
 必要时看它要读的文件(IOResolver 是否漏了路径)。
+
+
+---
+
+## 12. 第九步:死循环被逐层挖到「哪一行、哪个系统调用」
+
+### 挖掘方法(自造,可复用)
+
+死循环时日志是**静默的**(零系统调用、零 JNI 报错),所以自造了一个 **热点指令探测器**:
+挂 `CodeHook` 统计每个地址的命中次数,某个地址被命中超过阈值就打印出来 —— 一次就定位到循环体。
+
+### 逐层结果
+
+| 层 | 结果 |
+|---|---|
+| 模块 | **`libc.so`**(base 0x40340000) |
+| Offset | `0x17830`(一个 **PLT 跳转桩**,被打转 20 万次) |
+| 它跳向哪 | 读 GOT 槽 `libc+0xd8050` = `0x4035f1f8` = **`libc+0x1f1f8` = `__errno()`** |
+| 调用者(抓 LR) | **`libc+0x68a58`** |
+| 那一行在干什么 | 反汇编:`bl __errno` → `mov x0, #0x62`(**系统调用号 98 = `futex`**)→ `bl syscall` → `cmn w0,#1` → **`b.ne` 失败则读 errno 重试** |
+
+**⇒ 结论:某段 libc 代码在 `futex` 上死循环 —— 调用返回 -1 ⇒ 读 errno ⇒ 立刻重试 ⇒ 无限。**
+
+### unidbg 侧的原因(已定位到具体开关)
+
+```java
+// AndroidSyscallHandler.futex()
+case FUTEX_WAIT:
+    if (old != val) return -EAGAIN;
+    if (threadDispatcherEnabled && runningTask != null) { ...真正阻塞...; throw new ThreadContextSwitchException(); }
+    else return 0;          // ← 没开调度器 ⇒ 立刻返回 ⇒ 调用方以为"等到了" ⇒ 空转
+```
+
+**unidbg 默认 `threadDispatcherEnabled = false`**(全仓搜过:**没有任何地方把它设成 true**)。
+已尝试 `handler.setEnableThreadDispatcher(true)`,但**尚未解决** —— 说明还有别的条件(例如 `runningTask == null`,
+即"等待"发生在**主任务**里而不是独立线程里,那时分支仍走 `return 0`)。
+
+### 现在的准确位置
+
+**离打通只差"让 `FUTEX_WAIT` 真的挂起"这一步**,而它牵扯 unidbg 的线程调度内部。
+下一步要么继续读 unidbg 的 `UniThreadDispatcher`,要么**在 libc 的 `futex` 调用点直接改行为**
+(例如让 `libc+0x68a58` 那个循环的返回恒为 0)。
