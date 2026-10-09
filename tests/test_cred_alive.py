@@ -240,7 +240,13 @@ def test_小红书_账号被限制时_绝对不许去重导(monkeypatch):
     row, calls = _xhs_row(monkeypatch, _R("-104 账号被限制", kind="restricted"))
     assert calls["reheal"] == 0, "**账号级限制时不该去重导凭据**"
     assert row["level"] == "🔴"
-    assert "重导凭据没有任何用" in row["detail"] and "延长封锁" in row["detail"]
+    # ⚠️ **措辞 2026-10-09 订正过**:原来断言的是「重导凭据没有任何用」「只会延长封锁」——
+    # 而那两句**我没有控制变量**就写死了(当天实测「解封后重导 + 打一枪」就通了,
+    # 而「解封」与「重导」我分不开)⇒ 改断言**站得住的那部分**:
+    # 受限时**不许自动重导**(它过不了一道还在生效的账号级限制),且要说清"停手等解封"。
+    assert "重导凭据通常没用" in row["detail"], row["detail"]
+    assert "停手等解封" in row["detail"], row["detail"]
+    assert "过度归因" in row["detail"], "要如实记下这句话被订正过,别让下一个人再当它是实测结论"
 
 
 def test_小红书_被踢下线时要自动重导并复验(monkeypatch):
