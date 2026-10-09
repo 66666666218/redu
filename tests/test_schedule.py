@@ -383,6 +383,10 @@ def test_instance_role_filters_jobs(monkeypatch) -> None:
 
     assert {"hot_source", "douhot_window_tick", "early_agent_tick"} <= hotspot
     assert not ({"hot_source", "douhot_window_tick", "early_agent_tick"} & wechat)
+    # ★ 2026-10-09:跨平台共振榜**搬去远程**了(零本地依赖 + 它数的是全平台,
+    #   而远程握着微博/抖音/百度那侧)。钉住它,别哪天被谁顺手改回 wechat ——
+    #   那样它会静默地只看半张榜(而那正是它要解决的问题)。
+    assert "cross_resonance" in hotspot and "cross_resonance" not in wechat
     assert {"wechat_collect_tick", "wechat_candidates", "weread_refresh",
             "wechat_digest"} <= wechat
     assert not ({"wechat_collect_tick", "wechat_candidates", "weread_refresh",

@@ -568,8 +568,17 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # 被几个号在推 —— 身份用核心资源名(盘链跨不了平台:每个推广号自己建链)。
         # 推「多平台监控」群(未配回落主群)。放 10:30:09:00 的跨平台采集刚跑完,
         # 榜里能带上今天新采到的命中。
+        # ★ **2026-10-09 从 wechat 搬到 hotspot**(用户口径「按你的建议先搬」)。
+        # 它是**最干净的可搬项**,判据三条:
+        #   ① **零本地依赖** —— 只读库 + 推飞书(不开浏览器、不碰档案、不读本地文件);
+        #   ② **数据在远程是齐的** —— 它数的是"同一份资源在几个平台/几个号被推",
+        #      而**远程正好握着微博/抖音/百度那一侧**(本机那侧的数据源早已停用),
+        #      公众号那部分的文章/盘链/发现链由 `remote_sync` 单向同步过去(实测有量);
+        #   ③ **搬走反而更完整** —— 留本机的话,它只能看到"本机那一半"的平台。
+        # ⚠️ 搬过去之后,本机的报告/体检**看不到它的运行记录**(两边库独立)—— 这是**预期**,
+        #    它的产出是飞书卡,看群即可;远程的板块健康卡(`health_push`)会覆盖到它。
         (cross_resonance_tick, _get_settings().cross_resonance_cron, {"minute": 30, "hour": 10},
-         "cross_resonance", "wechat"),
+         "cross_resonance", "hotspot"),
         # 拉新周录提醒(2026-10-03):每周一提醒录上周拉新 —— `pan_recruit_weekly` 是转化回路
         # **唯一的真值入口**(链接级真值不可得,已定案),却至今 0 行。**录了就不再提醒**。
         (recruit_reminder_tick, _get_settings().recruit_reminder_cron, {"minute": 40, "hour": 9}, "recruit_reminder", "wechat"),
