@@ -474,3 +474,45 @@ case FUTEX_WAIT:
 **离打通只差"让 `FUTEX_WAIT` 真的挂起"这一步**,而它牵扯 unidbg 的线程调度内部。
 下一步要么继续读 unidbg 的 `UniThreadDispatcher`,要么**在 libc 的 `futex` 调用点直接改行为**
 (例如让 `libc+0x68a58` 那个循环的返回恒为 0)。
+
+
+---
+
+## 13. 第十步:环境全部打通,但 SG 所有命令返回 null(本轮终点)
+
+### 这一轮又修掉/查清的东西(按发现顺序)
+
+| # | 事项 | 结论 |
+|---|---|---|
+| 1 | **死循环真因** | libc `futex` 失败重试;把 `libc+0x68a80` 的 `b.ne` 改成**无条件 b** ⇒ **死循环消失、程序干净跑完(退出码 0)** |
+| 2 | **Windows 路径漏进客户机** | 我们用**宿主 `java.io.File`** 表示客户机的 `File`,它的 `getAbsolutePath()` 在 Windows 上给出 `D:\data\...` ⇒ SG 拿这个路径去 `open` ⇒ `createNewFile failed`。改成**装"客户机路径字符串"** |
+| 3 | **`File(parent,"/abs")` 陷阱** | 子路径以 `/` 开头会**丢弃 parent**,`"/data/..."` 在 Windows 上变成 `D:\data\...`(天猫那份参考在 macOS 写,没暴露) |
+| 4 | **SG 的状态文件** | 设备上 `files/` 里有 `SGMANAGER_DATA2`(4276B)、`JX0WDG83P1ZN.txt`(875B)、`.5bbf/fsg` 等;已全部拉到本地并喂进 IOResolver |
+| 5 | **rootfs** | `dlopen` 走的是 unidbg 的 rootfs,**不看 IOResolver**;已把三个插件库 + base.apk 铺进 `%TEMP%/rootfs/default/data/app/...` |
+| 6 | **确认参数送达** | 日志实证 native **逐个读走了我们的 10 个 10101 参数**、并读了 APK/文件目录/库目录 ⇒ 参数形状无问题 |
+| 7 | **应用的 appKey** | 反编译 `SecurityGuardManager.getInstance(Context)` ⇒ 它转调 `getInstance(ctx, "")`,**authCode 是空串** |
+| 8 | **SG 的存储桥** | `com/taobao/wireless/security/adapter/common/SPUtility2`(`read/write/readSS/writeSS`)—— 已补 shim(但实测它不调用) |
+| 9 | **SG 用了 Mtop** | 初始化里请求了 `mtopsdk/mtop/intf/{MtopBuilder,MtopSetting}`、`domain/{MtopRequest,MethodEnum}`、`common/MtopNetworkProp` —— **SG 6.6 的中间层要发 Mtop 请求(很可能是设备注册)** |
+
+### 现状
+
+```
+[1] libsgmainso 加载 ✓   [2] JNI_OnLoad ✓
+[3] 10101 -> null        [4] securitybody / middletier JNI_OnLoad ✓
+[5] 10102 ×3 ✓           [6] 10401 -> null
+零异常、零死循环、退出码 0
+```
+
+**⇒ 环境已完全干净,但 `10101`/`10601`/`10401` **全部返回 null**(native 自己决定返回 null)。**
+
+### 我的判断(诚实版)
+
+**最可疑的是第 9 条 —— Mtop 设备注册。** unidbg 里没有网络,注册请求无法完成 ⇒ SG 认为自己"没注册" ⇒ 所有命令拒绝服务。
+这与社区卡 `701029904`/`701029906` 是**同一档**。
+
+**而 6.6 在公开世界没有先例** —— 我们走的每一步都是自己趟的。
+
+### 离"打通"还差什么
+
+**要么**把 Mtop 那条链也模拟掉(需要知道 SG 期望什么响应,得继续读 native);
+**要么**接受这个边界,用已验证可用的 **oracle 半协议**方案(模拟器当签名机)。
