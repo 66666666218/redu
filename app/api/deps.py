@@ -101,6 +101,13 @@ class CookieIn(pydantic.BaseModel):
     cookie: str
 
 
+class WempCredIn(pydantic.BaseModel):
+    """公众号后台(wemp)凭据:**两个字段** —— 它是唯一需要 cookie + token 的凭据。"""
+
+    cookie: str = ""
+    token: str = ""
+
+
 class CookieOut(pydantic.BaseModel):
     platform: str
     configured: bool

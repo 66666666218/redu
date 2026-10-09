@@ -31,10 +31,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.db.database import init_db  # noqa: E402
 from app.db import get_session_local  # noqa: E402
-from app.db.models import User, WechatBenchmark  # noqa: E402
+from app.db.models import User  # noqa: E402
 from app.services.wemp_cred import load as load_cred, save as save_cred  # noqa: E402
 from app.services.wechat.wemp_client import (  # noqa: E402
-    WempAuthError, WempClient, WempError, WempRateLimited,
+    WempAuthError, WempError, WempRateLimited,
 )
 from sqlalchemy import select  # noqa: E402
 
@@ -69,18 +69,18 @@ def extract_from_lic(path: Path) -> tuple[str, str]:
 
 
 def probe(db, user_id: int, cookie: str, token: str) -> int:
-    """拿真实对标号打一枪,返回拿到的文章数;异常原样抛给调用方分类。"""
-    bm = db.scalar(select(WechatBenchmark).where(
-        WechatBenchmark.user_id == user_id, WechatBenchmark.biz != "").limit(1))
-    if bm is None:
-        print("⚠ 库里还没有可试的对标号,跳过探针(凭据已保存,监听轮会用它)")
-        return -1
-    mp_id = bm.biz if bm.biz.startswith("MP_WXS_") else bm.weread_book_id
-    items = WempClient(cookie, token).mp_articles(mp_id, page=1, limit=20)
-    print(f"✓ 探针成功:「{bm.nickname}」拿到 {len(items)} 篇")
-    for it in items[:3]:
-        print(f"    · {it['title'][:44]}")
-    return len(items)
+    """打一枪验凭据(打印版)。**判定逻辑在服务层**(`wemp_cred.probe`)——
+    这里只负责打成人话(服务层不打印、也不能被 scripts 反向依赖)。"""
+    from app.services.wemp_cred import probe as _probe
+
+    out = _probe(db, user_id, cookie, token)
+    if out.get("note"):
+        print(f"⚠ {out['note']}")
+    else:
+        print(f"✓ 探针成功:「{out.get('mp')}」拿到 {out.get('items')} 篇")
+        for t_ in out.get("titles") or []:
+            print(f"    · {t_}")
+    return int(out.get("items") or 0)
 
 
 def main() -> int:

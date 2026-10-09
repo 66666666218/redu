@@ -117,6 +117,10 @@ export const api = {
   cookies: () => req('GET', '/api/cookies'),
   setCookie: (platform, cookie) => req('PUT', `/api/cookies/${platform}`, { cookie }),
   delCookie: (platform) => req('DELETE', `/api/cookies/${platform}`),
+  // 公众号后台(wemp)凭据:**cookie + token 两个字段**(通用 Cookie 那套管不到它)
+  wempCredGet: () => req('GET', '/api/wemp/credential'),
+  wempCredPut: (cookie, token) => req('PUT', '/api/wemp/credential', { cookie, token }),
+  wempCredDel: () => req('DELETE', '/api/wemp/credential'),
   collect: (platform) => req('POST', `/api/collect/${platform}`),
   schedules: () => req('GET', '/api/schedules'),
   setSchedule: (section, payload) => req('PUT', `/api/schedules/${section}`, payload),

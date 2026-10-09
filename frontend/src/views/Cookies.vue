@@ -6,6 +6,11 @@ const items = ref([])
 const drafts = ref({})
 const msg = ref('')
 const smtp = ref({ host: '', port: 465, user: '', password: '', from_name: '' })
+// 公众号后台(wemp)凭据:cookie + token 两个字段,单独一块(通用 Cookie 那套是单字段的)
+const wemp = ref({ cookie: '', token: '' })
+const wempState = ref({ configured: false, cookie_len: 0, token_len: 0 })
+const wempMsg = ref('')
+const wempOk = ref(false)
 
 // ⚠️ **闲鱼的「扫码登录」按钮已删除**(2026-10-03)。
 // 它原走纯协议二维码流程、把登录态写进 `cookie_store`;但 2026-10-02 起采集默认走
@@ -36,11 +41,34 @@ async function remove(p) {
     await api.delCookie(p); drafts.value[p] = ''; msg.value = `${labels[p]} Cookie 已删除`; await load()
   } catch (e) { msg.value = '删除失败:' + e.message }
 }
+async function loadWemp() {
+  try { wempState.value = await api.wempCredGet() } catch (e) { console.debug('wemp 未配置', e) }
+}
+async function saveWemp() {
+  wempMsg.value = ''; wempOk.value = false
+  if (!wemp.value.cookie || !wemp.value.token) {
+    wempMsg.value = 'cookie 与 token 都要填(缺任何一个后台凭据都用不了)'; return
+  }
+  try {
+    const out = await api.wempCredPut(wemp.value.cookie, wemp.value.token)
+    wempOk.value = true
+    wempMsg.value = out.items >= 0
+      ? `已保存并验活 ✓ 探针「${out.mp}」拿到 ${out.items} 篇`
+      : `已保存(${out.note || '库里还没有可试的对标号,跳过探针'})`
+    wemp.value = { cookie: '', token: '' }
+    await loadWemp()
+  } catch (e) { wempMsg.value = e.message }
+}
+async function delWemp() {
+  wempMsg.value = ''
+  try { await api.wempCredDel(); wempMsg.value = 'wemp 凭据已清除'; await loadWemp() }
+  catch (e) { wempMsg.value = '清除失败:' + e.message }
+}
 async function saveSmtp() {
   msg.value = ''
   try { await api.userSmtpPut(smtp.value); msg.value = '告警邮箱已保存(预警发到该邮箱)' } catch (e) { msg.value = e.message }
 }
-onMounted(async () => { await load() })
+onMounted(async () => { await load(); await loadWemp() })
 </script>
 
 <template>
@@ -61,6 +89,30 @@ onMounted(async () => { await load() })
         <button @click="saveSmtp">保存</button>
       </div>
     </div>
+    <!-- 公众号后台(wemp):**唯一需要两个字段的凭据** —— 它不走通用 Cookie 那套(见后端注释) -->
+    <div class="card" style="margin-bottom:16px">
+      <div class="row">
+        <h3 style="margin:0">公众号后台凭据(列表源兜底 wemp)</h3>
+        <span class="badge">{{ wempState.configured ? '已配置' : '未配置' }}</span>
+      </div>
+      <p class="empty">
+        浏览器登录 <b>mp.weixin.qq.com</b> → F12 复制<b>整条 Cookie</b>,
+        再把地址栏里 <code>?token=…</code> 那段粘到下面第二个框。保存时会**当场打一枪验活**。
+      </p>
+      <textarea v-model="wemp.cookie" :placeholder="wempState.configured
+        ? `Cookie(已配置 ${wempState.cookie_len} 字符;留空则不修改)` 
+        : '粘贴整条 Cookie'"></textarea>
+      <input v-model="wemp.token" placeholder="地址栏里的 token" style="margin-top:6px" />
+      <div class="row">
+        <button @click="saveWemp">保存并验活</button>
+        <button class="ghost" v-if="wempState.configured" @click="delWemp">清除</button>
+      </div>
+      <!-- ⚠️ 两种失败要说清分别怎么办:会话失效=重登;被限流=凭据是好的,等配额 -->
+      <div :class="wempOk ? 'ok' : 'empty'" style="font-size:13px;margin-top:6px" v-if="wempMsg">
+        {{ wempMsg }}
+      </div>
+    </div>
+
     <span v-if="msg" class="ok">{{ msg }}</span>
 
     <div class="grid">

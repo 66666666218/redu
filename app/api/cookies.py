@@ -9,7 +9,7 @@ from app.db import get_db
 from app.db.models import User
 from app.services.cookie_store import delete_cookie as del_cookie
 from app.services.cookie_store import list_cookies, set_cookie
-from app.api.deps import CookieIn, CookieOut, UserSmtpIn
+from app.api.deps import CookieIn, CookieOut, UserSmtpIn, WempCredIn
 
 router = APIRouter()
 
@@ -76,3 +76,70 @@ def user_smtp_put(body: UserSmtpIn, user: User = Depends(get_current_user), db: 
     user.smtp_from = body.from_name or None
     db.commit()
     return {"saved": True}
+
+# ---------------------------------------------------------------------------
+# 公众号后台(wemp)凭据 —— **唯一需要两个字段的凭据**,所以单列几个接口
+# ---------------------------------------------------------------------------
+# ⚠️⚠️ **为什么不能复用上面那套 `/api/cookies/{platform}`**(2026-10-09,用户问的):
+# 那套走 `cookie_store`(`user_cookies`,**单字段**),而 wemp 的凭据是
+# **`cookie` + 地址栏里的 `token` 两个值**,存在 `system_config[wemp_cred_{uid}]` 的
+# **加密 JSON** 里(`app/services/wemp_cred.py` 是唯一读写入口)。
+# ⇒ 通用 Cookie 页**根本管不到它**,用户只能手抄命令行(而命令行会把凭据留在 shell 历史里)。
+# 这里补一条正路:**粘两个框 → 保存 → 当场验活**,结果直接显示"能拿几篇 / 会话失效 / 被限流"。
+
+
+@router.get("/api/wemp/credential")
+def wemp_cred_get(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    """凭据状态。⚠️ **只回长度,不回凭据本体** —— 它不该出现在任何响应里。"""
+    from app.services.wemp_cred import load
+
+    cred = load(db, user.id)
+    return {"configured": bool(cred.get("cookie") and cred.get("token")),
+            "cookie_len": len(cred.get("cookie") or ""),
+            "token_len": len(cred.get("token") or "")}
+
+
+@router.put("/api/wemp/credential")
+def wemp_cred_put(body: WempCredIn,
+                  user: User = Depends(get_current_user),
+                  db: Session = Depends(get_db)) -> dict:
+    """保存并**当场验活**。
+
+    ⚠️⚠️ **顺序是"先验活、成功了才落库"**(2026-10-09):反过来(先存再验)的话,
+    一次**粘错**就会把还能用的那份**覆盖成死的**,而症状是"公众号列表源悄悄少一个"
+    —— 那种静默退化正是本仓最恨的。两种例外照旧落库:
+      · **被限流(200013)**:凭据**本身有效**,只是配额满了 ⇒ 存;
+      · **库里还没对标号**:探不了,但**不是失败** ⇒ 存。
+    """
+    from app.services.wechat.wemp_client import WempAuthError, WempError, WempRateLimited
+    from app.services.wemp_cred import probe, save
+
+    cookie, token = (body.cookie or "").strip(), (body.token or "").strip()
+    if not cookie or not token:
+        raise HTTPException(400, "cookie 与 token **都要填** —— 后台凭据缺任何一个都用不了")
+    try:
+        out = probe(db, user.id, cookie, token)
+    except WempRateLimited as exc:
+        save(db, user.id, cookie, token)
+        raise HTTPException(400, f"凭据**有效**但被频率限制(200013):{exc}"
+                                 f" —— 已保存;换新注册的号更干净,或等配额恢复") from exc
+    except WempAuthError as exc:
+        raise HTTPException(400, f"**会话失效**:{exc} —— **没有保存**(免得覆盖掉还能用的那份)。"
+                                 f"请重新登录 mp.weixin.qq.com,把整条 Cookie 与地址栏里的 token 再取一次") from exc
+    except WempError as exc:
+        raise HTTPException(400, f"探针失败(**没有保存**):{exc}") from exc
+    save(db, user.id, cookie, token)
+    return {"saved": True, **out}
+
+
+@router.delete("/api/wemp/credential")
+def wemp_cred_del(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    from app.db.models import SystemConfig
+    from sqlalchemy import select as _select
+
+    key = f"wemp_cred_{user.id}"
+    row = db.scalar(_select(SystemConfig).where(SystemConfig.key == key))
+    if row is not None:
+        row.value = ""
+        db.commit()
+    return {"deleted": True}

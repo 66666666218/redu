@@ -82,3 +82,30 @@ def exists(session: Session, user_id: int) -> bool:
     row = session.scalar(select(SystemConfig.key).where(
         SystemConfig.key == _key(user_id), SystemConfig.value != ""))
     return row is not None
+
+def probe(session: Session, user_id: int, cookie: str, token: str) -> dict:
+    """拿一个**真实对标号**打一枪验凭据 → `{"ok", "mp", "items", "titles", "note"}`。
+
+    ⚠️ **从 `scripts/wemp_cred.py` 搬进服务层**(2026-10-09):凭据录入**界面/接口**也要用它,
+    而**服务层不能依赖 `scripts/`** —— Docker 镜像根本不 COPY 它(与 `pan_dedupe`、
+    `job_liveness` 被提到服务层是同一条理由)。**脚本现在只调它**,单一实现不会两处飘。
+
+    ⚠️ 异常**原样抛**给调用方分类:`WempAuthError`(会话失效 ⇒ 重登)、
+    `WempRateLimited`(200013 ⇒ 等配额/换号)、`WempError`(其它)—— **三种的修法完全不同**,
+    在这一层吞掉就等于把它们糊成一句"失败了"。
+    """
+    from sqlalchemy import select
+
+    from app.db.models import WechatBenchmark
+    from app.services.wechat.wemp_client import WempClient
+
+    bm = session.scalar(select(WechatBenchmark).where(
+        WechatBenchmark.user_id == user_id, WechatBenchmark.biz != "").limit(1))
+    if bm is None:
+        # 库里还没对标号 ⇒ **探不了**,但这**不是失败**(凭据已保存,监听轮会用它)
+        return {"ok": True, "items": -1, "mp": "", "titles": [],
+                "note": "库里还没有可试的对标号,跳过探针(凭据已保存,监听轮会用它)"}
+    mp_id = bm.biz if bm.biz.startswith("MP_WXS_") else bm.weread_book_id
+    items = WempClient(cookie, token).mp_articles(mp_id, page=1, limit=20)
+    return {"ok": True, "items": len(items), "mp": str(bm.nickname or ""),
+            "titles": [str(it.get("title") or "")[:44] for it in items[:3]]}
