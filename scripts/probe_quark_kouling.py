@@ -114,6 +114,55 @@ cms_utoken_direct_jump_config / cms_utoken_title_suffix_config / cms_utoken_bloc
 代价:要模拟器常开、每个口令一次 UI 操作。
 
 跑法:`python scripts/probe_quark_kouling.py`(只读、少量请求、带间隔)
+
+## ⭐⭐ 2026-10-09(第二轮):签名的**完整调用链**读出来了,只差 native
+
+APK 已不在盘上,这轮重新 `adb pull`(模拟器还在:`emulator-5554`),
+并把 `androguard 4.1.4` 装进 `tools/mitmvenv`(**不污染主环境**)。
+用**字符串交叉引用**找到了真正的请求构造处,链条如下(全是反编译读出来的,不是推测):
+
+```
+Lzh1/c;->a(...)                      ← 构造 /utoken/v2/parse 的请求
+    HashMap{ app=QUARK, clipboard, identifier, shareSecret, timestamp=当前毫秒, kps }
+    sign = Lzh1/b;->a(map, 第二个字符串参数)
+        list = new ArrayList(m.entrySet())
+        Collections.sort(list, new Lzh1/b$a())     // Lzh1/b$a.compare = key 的 String.compareTo ⇒ **按 key 升序**
+        for entry: sb.append(entry.getValue())     // ★ **只拼 value**,不拼 key
+        return Lcom/uc/encrypt/a;->f( sb + 第二个参数 , 密钥号 )
+            UnetEngineFactory.getCrypt() → UnetCrypt
+            UnetCrypt->signWithNumber((short)parseShort(密钥号), 内容)   ← ★ 真签名在这
+            …→ com.alibaba.wireless.security.open.SecException
+            EncryptModel;->f(boolean) 只返回两个字面量:**'12000' / '12001'**(密钥号)
+```
+
+**native 在包里**:`libsgmainso-6.6.230703.so`、`libsgsecuritybodyso-6.6.230703.so`
+⇒ 就是**阿里聚安全 SecurityGuard 6.6.230703**。
+
+### ★ 端点级确认:唯一那道门就是 `sign`
+拿真值打 `/utoken/v2/parse`(不带 Origin!见下):
+
+| 请求 | 响应 |
+|---|---|
+| `sign="x"` | `500 Internal Server Error` |
+| 不带 `sign` | `500` |
+| **`sign=""`** | **`400 sign check error`** ← **服务器明确说"签名校验失败"** |
+| `clipboard=/~令牌~/` | `500` |
+
+⇒ 字段名/DTO **都对**(否则会像 `landing/info` 那样报"反序列化失败"),
+**唯一没过的就是签名**。**没有绕过的余地**。
+
+### 顺带澄清两处
+- **`/third/share/landing/info` 不是口令接口**:它要 `thirdShareUrl` + `platform`;
+  传 `platform=XHS` 时错误会**从"反序列化失败"变成"PARSE_CONTENT_ID_ERROR 解析内容id失败"**
+  ⇒ 它是「**小红书分享链 → 夸克落地页**」那条功能。它的完整 URL 也不该被截短:
+  `…?uc_param_str=dnntnwvepffrgibijbprsvpidicheiut`(请照 dex 里的原样)。
+- ⚠️ **我自己这轮踩的坑**:第一版探针带了 `Origin` / `Referer`,**六个请求全 `403 Invalid CORS request`**
+  —— App 根本不发这两个头,那是**我的探针错**。**没有这一纠正,我会拿"403 被墙"去写结论。**
+
+### 现在的路只剩两条
+1. **找已有人复刻的 `signWithNumber` / SecurityGuard**(与抖音 `a_bogus` 同一类活,
+   那次是靠移植 `f2` 的纯 Python 实现解决的)⇒ 已派人在 GitHub 上查;
+2. 都找不到 ⇒ 只能逆 `libsgmainso-6.6.230703.so`(成本再上一个台阶)。
 """
 from __future__ import annotations
 
