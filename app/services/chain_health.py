@@ -211,7 +211,12 @@ def check_credentials(db) -> list[dict]:
                         # ★ 2026-10-08 补:这两家**凭据一直在库里,体检却从来没看过它**。
                         #   旧注释写着"抖音/贴吧走匿名或档案,不在这张表里"——那句**早过期了**。
                         ("douyin", "抖音(线索搜索)"),
-                        ("weibo", "微博(名字型热度)")):
+                        ("weibo", "微博(名字型热度)"),
+                        # ★ 2026-10-09 补:今天实测它的 cookie **已经死了**、我们连撞 14 次
+                        #   `-352`,而**没有任何一行报告看得见这件事** —— 是手工查才发现的。
+                        #   这条链的失败模式正好是"凭据死了 ⇒ 匿名扫 space ⇒ 必然 -352",
+                        #   所以凭据那一行必须单列(而不是等链失败反推)。
+                        ("bilibili", "B站(对标号扫描)")):
         at = have.get(plat)
         # ⚠️⚠️ **这一行只验 `shelf`,根本不碰列表接口** —— 而"公众号阅读数"走的正是列表接口
         # (`/web/mp/articles` 或 App `book/articles`)。所以这句说明要**跟着这一行一直挂着**,
@@ -251,7 +256,7 @@ def check_credentials(db) -> list[dict]:
                           f"续期作业会单独推飞书告警。更新于 {str(at)[:16]}")
             else:
                 detail += f" · 验活跳过({why})"
-        elif plat in ("douyin", "weibo", "zhihu"):
+        elif plat in ("douyin", "weibo", "zhihu", "bilibili"):
             # ★ **协议验活**(2026-10-08):三家都做得到 —— 各发一次搜索即可。
             # ⚠️ 但**只有抖音能自动接回**(它有浏览器档案);微博/知乎的 Cookie 是人粘的,
             #    **没有可导的来源** ⇒ 只能报红并说清修法。别给它们假装一条不存在的自动化。
@@ -588,6 +593,18 @@ def _cred_alive(platform: str, cookie: str, db) -> tuple[bool | None, str]:
             # 而不是含混地报绿(那正是本仓最恨的假绿)。
             return None, ("2483「请先登录」未出现 ⇒ 凭据**被接受**;但本次零结果"
                           "(限流与真没结果形状相同),**不作判定**")
+        if platform == "bilibili":
+            # B站 `space` 端点**风控比普通搜索严得多**:登录态失效后匿名去扫
+            # **直接回 `-352 风控校验失败`**(本模块与该文件文档都记着这条实测)。
+            # ⇒ 判据用 `nav` 接口的 `data.isLogin`(**B站失败也回 HTTP 200**,按 HTTP 判是假绿)。
+            from app.services import bili_account_scan as bas
+
+            st = bas.verify_login(cookie)
+            if st.get("is_login"):
+                return True, f"已登录({st.get('uname') or st.get('mid')})"
+            return False, (f"**不是登录态**({st.get('reason') or 'SESSDATA 未被接受'})—— "
+                           f"此后每一轮扫描都会匿名去撞 `space` 端点、**必然 -352**、零产出;"
+                           f"修法:`python scripts/bili_login.py` 扫码重登")
         if platform == "weibo":
             from app.services import weibo_search
 

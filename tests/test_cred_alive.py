@@ -357,3 +357,26 @@ def test_抖音jar缺项时只提示不判级() -> None:
 
     src = inspect.getsource(ch._cred_alive)
     assert 'f"搜到 {len(rows)} 条 · {_douyin_jar_note(cookie)}"' in src
+
+
+def test_B站凭据死了要判红并给对修法(monkeypatch) -> None:
+    """★ 2026-10-09 补这一行:**实测它的 cookie 已经死了、我们连撞 14 次 `-352`,
+    而没有任何一行报告看得见这件事** —— 是手工查才发现的。
+
+    这条链的失败模式正好是「**凭据死了 ⇒ 匿名扫 `space` 端点 ⇒ 必然 -352 ⇒ 零产出**」,
+    所以凭据必须**单列一行**,而不是等链失败去反推。
+    ⚠️ 判据要用 `nav` 接口的 `data.isLogin` —— **B站失败也回 HTTP 200**,按"HTTP 通了"判是假绿。
+    """
+    from app.services import bili_account_scan as bas
+    from app.services import chain_health as ch
+
+    monkeypatch.setattr(bas, "verify_login", lambda ck="": {
+        "is_login": True, "uname": "天一项目社", "mid": 1})
+    alive, why = ch._cred_alive("bilibili", "SESSDATA=x", None)
+    assert alive is True and "天一项目社" in why
+
+    monkeypatch.setattr(bas, "verify_login", lambda ck="": {
+        "is_login": False, "uname": "", "mid": 0, "reason": ""})
+    alive, why = ch._cred_alive("bilibili", "SESSDATA=x", None)
+    assert alive is False, "凭据死了必须判红"
+    assert "-352" in why and "bili_login.py" in why, why
