@@ -229,3 +229,37 @@ java/lang/Integer-><init>(I)V
 
 **⇒ 结论**:这条路**技术上成立**且 JNI 层已通;剩下的是"SG 内部状态怎么喂" —— 与社区卡
 `701029904`/`701029906` 的那类问题是同一族,但**我们有 oracle 可以逐步对账**。
+
+
+---
+
+## 8. 第五步:一条重要的路被证伪 —— unidbg **不执行 Java 字节码**
+
+**动机**:`10401` 返回 null,怀疑是"我们手工拼的命令参数不对"。于是想改成
+**让包里的 Java 框架驱动**(`SecurityGuardManager.getInstance(ctx).getSecureSignatureComp().sign(pctx)`),
+理由是这些类**都在 dex 里**,它们会喂真实参数、自己走完插件初始化。
+
+**结果:此路不通,而且原因在 unidbg 的架构里:**
+
+```java
+// DvmObject.callJniMethodObject → callJniMethod →
+UnidbgPointer fnPtr = objectType.findNativeFunction(emulator, method);   // ★ 只找 native 函数
+```
+
+**unidbg 的 `DalvikVM` 只是一个"壳"**:它给类/字段/方法的**元数据**(供 `FindClass`/`GetMethodID`),
+**只派发 native 方法**;纯 Java 方法一律落回我们自己实现的 `AbstractJni` 代理。
+⇒ **`SecurityGuardManager` 这些 Java 框架类在 unidbg 里永远不会真的执行。**
+
+**⇒ 推论(重要)**:
+- 「往上走一层、让插件自己驱动」**在 unidbg 里不可能**;
+- 只能在 **native 侧手工发 `10101/10102/10401`**,而 `10401 → null` 的修复**只能靠把参数喂对**;
+- 也就是说:**unidbg 的上限就是"我们能把命令参数猜对"**。
+
+### 下一步(具体且可行)
+
+**用 Frida 在真机上 hook `JNICLibrary.doCommandNative`,把真实的 `10101` / `10102` / `10401`
+参数原样打出来**,再喂给 unidbg。我们前面已经在同一台设备上跑通过多次 Frida
+(hook `com.uc.encrypt.a.f` / `UnetCrypt.signWithNumber`),这条路是现成的。
+
+拿到真参数之后:unidbg 里的 `10401` 才有机会出值 ⇒ 与 oracle 的已知答案对账
+(`2ee1…36ab7dd8…`)。
