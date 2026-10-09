@@ -313,3 +313,55 @@ UnidbgPointer fnPtr = objectType.findNativeFunction(emulator, method);   // ★ 
 **⇒ 公开世界不存在 阿里聚安全 6.6 / 夸克 的 unidbg 案例。** 现有公开案例覆盖的是:
 天猫/拉扎达(6.5)、forest(6.4)、支付宝(sgInnora)、libsgmain 反混淆(ylcangel)——
 **全部是"旧插件架构之前"或"别的 app"**。
+
+
+---
+
+## 10. 第七步:真机抓包(用户批准走 (a))—— 拿到真参数,但 unidbg 仍不出值
+
+### 怎么抓的(方法本身值得复用)
+
+`JNICLibrary` **不在 App 自己的 classloader 里**(实测 `ClassNotFoundException: DexPathList[[base.apk]]`)
+—— 它由**聚安全自己的 classloader** 在内存里加载(这就是"插件体系"的实质,也解释了为什么 APK dex 里搜不到它)。
+**绕法**:遍历所有 classloader 找能 `loadClass` 到它的那个,再用 `Java.ClassFactory.get(loader).use(...)` 挂钩:
+
+```js
+Java.enumerateClassLoaders({
+  onMatch: function (loader) {
+    try { loader.loadClass("com.taobao.wireless.security.adapter.JNICLibrary");
+          var J = Java.ClassFactory.get(loader).use("...JNICLibrary");
+          J.doCommandNative.overload("int","[Ljava.lang.Object;").implementation = function (code, arr) {...};
+    } catch (e) {}
+  }, onComplete: function(){}
+});
+```
+
+⚠️ late attach 下挂 native 方法**没有崩**(墓碑 20→20);上次崩的是 **spawn** 模式。
+
+### 抓到的真值(2026-10-10)
+
+```
+10401 → [ {INPUT=QUARK/~498b3bHYcr~:/~498b3bHYcr1791563432556}, "12001", "3", "", "true" ]
+                                                                    ↑★★★         ↑
+10601 → ['1','16','0','12001','[]','']      ← 签名前大量调用;第 4 参就是密钥号
+```
+
+- **★ 第 3 个参数是 `3`,不是天猫 6.5 的 `7`**;第 4 个不是 `null` 而是**空串** ⇒ 已改;
+- **✅ 顺带确认了签名内容公式**(与我们的 oracle 完全一致):
+  `INPUT = "QUARK" + 口令原文 + identifier + token + timestamp`;
+- **✅ 拿到一条新样本**(可用于对账):
+  content `QUARK/~498b3bHYcr~:/~498b3bHYcr1791563430294`
+  → 聚安全签名 `2ee1e0f9d2bc5ffe66b71093b1cb970e56ec24f2aedf`(前缀 `2ee1` = 密钥号 12001)。
+
+### 结果:**还是 null**
+
+按真机参数改完后,`10101` / `10601` / `10401` **依然全部返回 null**。
+
+**⇒ 这不是调用姿势的问题 —— 是 native 端自己决定返回 null**,即 **SG 的内部状态在 unidbg 里始终建立不起来**。
+这正是社区卡 `701029904`/`701029906` 的**同一档**。
+
+### ★ 阶段结论
+
+- **我们走到了公开世界的最前面**:公开案例全部覆盖"6.5 及更早 / 别的 app",**夸克 6.6 没有先例**;
+- 但要再往前,**缺的不只是参数,而是"整个初始化序列 + 设备注册"这一整块黑盒状态**;
+- ⇒ **性价比已经很低**,建议**冻结这条线**。
