@@ -136,7 +136,8 @@ Lzh1/c;->a(...)                      ← 构造 /utoken/v2/parse 的请求
 ```
 
 **native 在包里**:`libsgmainso-6.6.230703.so`、`libsgsecuritybodyso-6.6.230703.so`
-⇒ 就是**阿里聚安全 SecurityGuard 6.6.230703**。
+⇒ ⚠️⚠️ **下面这句当时的推断是错的,已在第三轮推翻(见文末)**:
+~~就是阿里聚安全 SecurityGuard 6.6.230703~~ —— 真签名在 **`libunet.so`**,与聚安全无关。
 
 ### ★ 端点级确认:唯一那道门就是 `sign`
 拿真值打 `/utoken/v2/parse`(不带 Origin!见下):
@@ -163,6 +164,73 @@ Lzh1/c;->a(...)                      ← 构造 /utoken/v2/parse 的请求
 1. **找已有人复刻的 `signWithNumber` / SecurityGuard**(与抖音 `a_bogus` 同一类活,
    那次是靠移植 `f2` 的纯 Python 实现解决的)⇒ 已派人在 GitHub 上查;
 2. 都找不到 ⇒ 只能逆 `libsgmainso-6.6.230703.so`(成本再上一个台阶)。
+
+## ★★★ 2026-10-09(第三轮):**上面这两条的前提是错的** —— 签名根本不在聚安全里
+
+一句话:**上一轮把「同一次崩溃」当成了「签名落在 AVMP 里」的证据,而那个前提从来没验证过。**
+这轮做了静态验证,推翻了它。
+
+### 1. 真实链路(全部由 dex 静态读出,不是推测)
+```
+Lcom/uc/encrypt/a;->f(密钥号字符串, 内容)     ← ⚠️ 第一个参数是**密钥号**,第二个才是内容
+    └→ Lcom/uc/base/net/unet/impl/UnetCrypt;->signWithNumber(short, String)  [classes6.dex, 纯 Java]
+        └→ Lcom/alibaba/mbg/unet/internal/UNetCryptJni;->nativeSign(J, S, String) [classes.dex, ★native]
+            └→ **libunet.so:0x2af168**        ← ★★★ 这里,不是 libsgmainso
+```
+怎么定位的:`lib/arm64-v8a/` 下 55 个 .so 逐个扫,`nativeSign` **只在 `libunet.so` 里出现**;
+再用 `.rela.dyn` 的 `R_AARCH64_RELATIVE` 重定位 + `.rodata` 里的 RegisterNatives 名字表
+**反查出函数指针** = `0x2af168`(`nativeEncrypt`=0x2aee68 / `nativeDecrypt`=0x2aefe8 /
+`nativeSetDelegate`=0x2aedf0)。这条路本身可复用于任何"注册式 JNI 找不到入口"的库。
+
+### 2. 为什么说「不在聚安全里」
+`libunet.so` 里 **`sgmain` / `doCommandNative` / `SecurityGuard` / `AVMP` / `libsg` 出现次数全是 0**,
+`DT_NEEDED` 也不含聚安全。它是一段**普通 ARM64 C++**:只有 `JNI_OnLoad` 一个导出符号,
+无 `.symtab`,但有完整 `.eh_frame` 和明文类名/方法名/签名串,自带 SHA-256 轮常量。
+⇒ 「AVMP LiteVM 黑盒 ⇒ 不可逆」这个结论**作废**。
+
+### 3. ★「Frida 一挂就 SIGSEGV」的真因:**Frida × Houdini**,不是反调试
+APK 的 `lib/` **只有 `arm64-v8a`**,而雷电是 x86_64
+(`ro.dalvik.vm.native.bridge = libhoudini.so`)⇒ 那套 native 库是**经 Intel 翻译层**跑的。
+墓碑实锤(两次:`tombstone_08` / `tombstone_09`):
+```
+Cmdline: com.quark.browser   tid: UnetInitThread
+signal 11 (SIGSEGV), code 128 (SI_KERNEL), fault addr 0x0
+backtrace: 4 帧**全在 /system/vendor/lib64/libhoudini.so 内**
+```
+**崩在翻译层里、fault addr 是 0**,不像任何主动 `abort()` 的反调试。
+
+**★ 可用姿势(实测一次都没崩)**:别用 `spawn`(App 冷启时 `UnetInitThread` 正撞上 Frida)。
+**让 App 自己正常启动 → 等约 35 秒 → 再 attach。**
+⚠️ 另一个坑:夸克启动后把**进程名改成了 `m.quark.browser`** ⇒ 按包名 attach 会报
+`ProcessNotFound`(**进程其实活得好好的**),只能按 PID attach。
+
+### 4. ★★★ 现在有 **signature oracle** 了(实测可用)
+```
+Java.use("com.uc.encrypt.a").c()             → 单例
+        .f(String 密钥号, String 内容)        → 返回真签名
+```
+实测(跨 App 重启**逐字节一致** ⇒ **密钥是固定的,不是会话协商的**):
+```
+f("12000", "hello")  → 2ee08189927c2afb5f2d3308d55710671fa765a975ba
+f("12000", "12000")  → 2ee02d52ca098a6f90cb51b1e06548a096498c8be17e
+f("12001", "hello")  → 2ee136ab7dd84e0549180cf6be66ac95bfcc3a21a031
+f("12000", "ZZZZZZZZ") → 2ee08ceaa78a9adcfc40c2e208142c3122497ddda175
+```
+
+### 5. ★ 签名的**结构**已经解出来了
+```
+sign(密钥号 k, 内容 c) = 大端 2 字节(k) ‖ 20 字节 MAC(k, c)
+```
+判据:**18/18** 个样本的前 4 个 hex 都等于 `struct.pack(">h", k).hex()`
+(`12000`→`2ee0`,`12001`→`2ee1`);同一输入多次调用结果**逐字节一致**(确定性)。
+
+### 6. 还差的最后一步:那 20 字节 MAC 的密钥/算法
+已排除:不是 `哈希(密钥号 ± 盐 ± 内容)`(2520 个构造全 0 命中)、不是与内容无关的常量异或。
+第 1 期密钥爆破(只读数据区 `.rodata`/`.data`/`.data.rel.ro`,4400 万候选 × 6 种构造)**无命中**;
+20 字节也不是 SM3 / RIPEMD-160 / SHA-1 的常量。
+⇒ **下一步必须上真正的反编译器**。注意 angr 的坑:它能建 CFG(3.7 万个函数),但
+`cfg.functions.get(0x2af1c0)` 是 **None** —— 这三个入口**只被 RegisterNatives 表引用**,
+CFG 看不到调用边,**必须显式传 `function_starts=[...]`**。
 """
 from __future__ import annotations
 
