@@ -422,6 +422,7 @@ def presence_tick(settings=None, platforms: list[str] | None = None) -> int:
     total = 0
     try:
         for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
+            from app.db.database import commit_with_lock_report
             from app.services.tenant_base import _record_run
 
             try:
@@ -445,7 +446,11 @@ def presence_tick(settings=None, platforms: list[str] | None = None) -> int:
                 if failed:
                     note += f" 失败:{','.join(failed)}"
                 _record_run(db, uid, "resource_presence", "success", note)
-                db.commit()
+                # ★ 用**会量等待时长**的提交(2026-10-09):撞锁时它会报"等了多久",
+                #   那能一刀切开「持有者真抱了 30 秒」与「这是不遵守 busy_timeout 的那类锁」——
+                #   我们过去三次撞锁**从没量过这个数**,才会在"看门狗不响"上自相矛盾一整天。
+                #   它还会**重试一次**(瞬时冲突换个新事务通常就过;重试仍失败会照实抛)。
+                commit_with_lock_report(db, "跨平台热度(resource_presence)")
             except Exception as exc:  # noqa: BLE001 - 单用户失败不影响其余
                 db.rollback()
                 logger.exception("跨平台热度失败 user=%s", uid)

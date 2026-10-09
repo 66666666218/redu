@@ -37,6 +37,87 @@ _SELF_FRAME = os.path.join("app", "db", "database.py")
 WRITE_TX_WARN_SEC = 20.0
 
 
+def commit_with_lock_report(session, what: str = "", retries: int = 1) -> bool:
+    """提交;撞锁时**量出等了多久**、报现场,并**重试一次**。返回是否成功。
+
+    ⚠️⚠️ **为什么要量"等了多久"**(2026-10-09):这能一刀切开两种完全不同的真因 ——
+
+    | 等的时间 | 含义 | 修法 |
+    |---|---|---|
+    | ≈ `busy_timeout`(30s) | 持有者**真抱着 30 秒** | 去把那个长持有者找出来 |
+    | **几乎立刻返回** | 是 SQLite **不遵守 busy handler** 的那类锁(`BUSY_SNAPSHOT` / `-shm`) | 持有者只需抱一瞬 ⇒ **看门狗看不到它正是必然** ⇒ 修法是**重试** |
+
+    我们一直只看到"撞锁了",**没人量过这个数** —— 于是三次都在猜"谁抱了那么久",
+    而看门狗(阈值 20 秒)一次都没响,自相矛盾了一整天。
+
+    **重试为什么是合理的、不是掩盖**:这类锁是**事务级的瞬时冲突**,换一个新事务通常就能过
+    (重试后仍失败会照实往上抛)。**日志里会明写"重试成功/仍失败"**,不会把问题藏起来。
+    """
+    import time as _t
+
+    _first_wait = 0.0
+    for attempt in range(retries + 1):
+        t0 = _t.monotonic()
+        try:
+            session.commit()
+            if attempt:
+                logger.warning("SQLite 撞锁后**重试第 %d 次提交成功**(首次等了 %.2fs)%s",
+                               attempt, _first_wait, f"—— {what}" if what else "")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            dt = _t.monotonic() - t0
+            if "database is locked" not in str(exc):
+                raise
+            if attempt == 0:
+                _first_wait = dt
+            verdict = ("**等了整整 %.2fs ⇒ 持有者真抱着**(去找那个长持有者)" % dt
+                       if dt > 5 else
+                       "**几乎立刻返回(%.2fs)⇒ 是「不遵守 busy_timeout」的那类锁,"
+                       "持有者只需抱一瞬** —— 看门狗看不到它正是必然" % dt)
+            logger.error("SQLite 撞锁(%s):%s · %s", what or "?", verdict,
+                         lock_diagnostics(session))
+            session.rollback()
+            if attempt >= retries:
+                raise
+            _t.sleep(0.5)
+    return False
+
+
+def lock_diagnostics(session=None) -> str:
+    """撞锁现场的一句话诊断 —— **实测**这个连接的参数,不靠"我们以为设了"。
+
+    ⚠️⚠️ **为什么要有它**(2026-10-09):
+    05:12 / 13:13 / 21:13 三次 `database is locked`,而 `app.db.database` 的
+    **ERROR 一条都没有**(看门狗的 `handle_error` 那条路在生产里**没触发**,原因至今未知)——
+    可是**调用点的 `except` 确实跑到了**(它的 traceback 明明在日志里)。
+    ⇒ 诊断不能只挂在"我以为是受害者报错那条路"上,要挂在**一定会跑的那一处**。
+    同时把 `busy_timeout` / `journal_mode` 取**实际值**:整个排查一直在假设
+    "busy_timeout=30000,所以等的人会等 30 秒",而**假设本身从来没验过**。
+    """
+    bits: list[str] = []
+    try:
+        if session is not None:
+            conn = session.connection()
+            bt = conn.exec_driver_sql("PRAGMA busy_timeout").scalar()
+            jm = conn.exec_driver_sql("PRAGMA journal_mode").scalar()
+            bits.append(f"本连接实测 busy_timeout={bt}ms, journal_mode={jm}")
+    except Exception as exc:  # noqa: BLE001 - 诊断自己不许再抛
+        bits.append(f"(取连接参数失败:{type(exc).__name__})")
+    now = time.monotonic()
+    if _OPEN_WRITE_TX:
+        for key, (t0, stack, tname) in sorted(_OPEN_WRITE_TX.items(),
+                                              key=lambda kv: now - kv[1][0],
+                                              reverse=True)[:2]:
+            frames = [ln.strip() for ln in stack.splitlines()
+                      if ln.strip().startswith('File "')
+                      and "site-packages" not in ln and _SELF_FRAME not in ln]
+            bits.append(f"本进程有写事务开着 {now - t0:.1f}s(线程 {tname})"
+                        f"，开在 {frames[-1] if frames else '?'}")
+    else:
+        bits.append("本进程**没有**开着的写事务 ⇒ 抱锁的在**别的进程**")
+    return " · ".join(bits)
+
+
 def _install_write_tx_watchdog(engine) -> None:
     """给「把写事务开着做慢活」装一个**报警器**(只报不修)。
 
@@ -61,7 +142,16 @@ def _install_write_tx_watchdog(engine) -> None:
     write_heads = ("insert", "update", "delete", "replace")
     # ★ **装的时候就喊一声**(2026-10-08 补):13:13 那次撞锁,服务端**一条诊断都没有**,
     #   而我无法判断是"没装"还是"装了没触发"。这行日志让下一个看的人一眼就知道它活着。
-    logger.info("SQLite 写事务看门狗已装(阈值 %.0fs)", WRITE_TX_WARN_SEC)
+    # ★ **把实测参数喊出来**(2026-10-09):整个排查一直在假设 busy_timeout=30000,
+    #   而那个假设**从来没验过**。这一行让下一个看日志的人一眼知道真实值。
+    try:
+        with engine.connect() as _c:
+            _bt = _c.exec_driver_sql("PRAGMA busy_timeout").scalar()
+            _jm = _c.exec_driver_sql("PRAGMA journal_mode").scalar()
+        logger.info("SQLite 写事务看门狗已装(阈值 %.0fs);实测 busy_timeout=%sms, journal_mode=%s",
+                    WRITE_TX_WARN_SEC, _bt, _jm)
+    except Exception:  # noqa: BLE001 - 探一下参数而已,失败不该挡住启动
+        logger.info("SQLite 写事务看门狗已装(阈值 %.0fs)", WRITE_TX_WARN_SEC)
 
     @event.listens_for(engine, "before_cursor_execute")
     def _mark_write_start(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001

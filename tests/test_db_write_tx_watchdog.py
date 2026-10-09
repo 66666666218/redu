@@ -218,3 +218,122 @@ def test_主动采样_同一个事务只报一次(engine, cap):
         holder.close()
     warns = [r for r in cap.records if "已经持有" in r.getMessage()]
     assert len(warns) == 1, f"同一个事务报了 {len(warns)} 次,会刷屏"
+
+
+# ---------------------------------------------------------------------------
+# ★★ 2026-10-09:「撞锁时**等了多久**」—— 这个数能一刀切开两种真因
+# ---------------------------------------------------------------------------
+
+
+class _Rec(logging.Handler):
+    def __init__(self, sink):
+        super().__init__()
+        self.sink = sink
+
+    def emit(self, record):
+        self.sink.append(record.getMessage())
+
+
+def test_撞锁要量出等待时长_并区分两种真因(caplog) -> None:
+    """★★ 生产里三次撞锁(05:12/13:13/21:13),而看门狗(阈值 20 秒)**一次都没响** ——
+    我们因此自相矛盾了一整天:既然 `busy_timeout=30000`,受害者就该等 30 秒,
+    那就一定有个抱了 30 秒的持有者;可看门狗从没见过它。
+
+    ⇒ **这个数(等了多久)从没量过**,而它正是分水岭:
+
+    · 等了 ≈30 秒 ⇒ 持有者**真抱着** ⇒ 去找它;
+    · **几乎立刻返回** ⇒ 是 SQLite **不遵守 busy handler** 的那类锁(`BUSY_SNAPSHOT`/`-shm`)
+      ⇒ 持有者只需抱一瞬 ⇒ **看门狗看不到它正是必然**(不是故障),修法是**重试**。
+    """
+    from app.db.database import commit_with_lock_report
+
+    logs: list[str] = []
+    lg = logging.getLogger("app.db.database")
+    h = _Rec(logs)
+    lg.addHandler(h)
+    lg.setLevel(logging.ERROR)
+    try:
+        class _Fast:
+            """第一次提交几乎立刻抛锁(模拟"不遵守 busy_timeout"那类)。"""
+
+            def __init__(self):
+                self.calls = 0
+
+            def commit(self):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("(sqlite3.OperationalError) database is locked")
+
+            def rollback(self):
+                pass
+
+            def connection(self):
+                raise RuntimeError("no conn")
+
+        s = _Fast()
+        assert commit_with_lock_report(s, "测试") is True, "瞬时冲突该重试成功"
+        assert s.calls == 2, "应当只重试一次"
+        joined = "\n".join(logs)
+        assert "几乎立刻返回" in joined, f"没量出'立刻返回'这个形状:\n{joined}"
+        assert "不遵守 busy_timeout" in joined, "要说清这类锁的性质"
+
+        class _StillLocked:
+            """一直撞锁 ⇒ 重试一次后**照实抛**,不许吞。"""
+
+            def __init__(self):
+                self.calls = 0
+
+            def commit(self):
+                self.calls += 1
+                raise RuntimeError("(sqlite3.OperationalError) database is locked")
+
+            def rollback(self):
+                pass
+
+            def connection(self):
+                raise RuntimeError("no conn")
+
+        s2 = _StillLocked()
+        with pytest.raises(RuntimeError):
+            commit_with_lock_report(s2, "测试")
+        assert s2.calls == 2, "该重试一次,然后照实抛(不许吞成成功)"
+    finally:
+        lg.removeHandler(h)
+
+
+def test_等了很久的那一档要说去找长持有者(monkeypatch, caplog) -> None:
+    """反面对照:等了 ≈busy_timeout 的那种,报法必须**完全不同**(要去找长持有者),
+    否则两种真因会被同一句话糊在一起,下一次又是瞎修。"""
+    import time as _t
+
+    from app.db.database import commit_with_lock_report
+
+    seq = iter([0.0, 31.0, 31.0, 31.0])          # 第二次调用起的差值 = 31 秒
+    monkeypatch.setattr(_t, "monotonic", lambda: next(seq, 31.0))
+
+    logs: list[str] = []
+    lg = logging.getLogger("app.db.database")
+    h = _Rec(logs)
+    lg.addHandler(h)
+    lg.setLevel(logging.ERROR)
+    try:
+        class _Slow:
+            def __init__(self):
+                self.calls = 0
+
+            def commit(self):
+                self.calls += 1
+                raise RuntimeError("database is locked")
+
+            def rollback(self):
+                pass
+
+            def connection(self):
+                raise RuntimeError("no conn")
+
+        with pytest.raises(RuntimeError):
+            commit_with_lock_report(_Slow(), "测试")
+    finally:
+        lg.removeHandler(h)
+    joined = chr(10).join(logs)
+    assert "持有者真抱着" in joined, "等满 30 秒时必须说去找长持有者:" + joined
