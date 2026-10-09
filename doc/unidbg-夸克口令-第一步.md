@@ -365,3 +365,70 @@ Java.enumerateClassLoaders({
 - **我们走到了公开世界的最前面**:公开案例全部覆盖"6.5 及更早 / 别的 app",**夸克 6.6 没有先例**;
 - 但要再往前,**缺的不只是参数,而是"整个初始化序列 + 设备注册"这一整块黑盒状态**;
 - ⇒ **性价比已经很低**,建议**冻结这条线**。
+
+
+---
+
+## 11. ★★★ 第八步:方法论突破 —— **聚安全的插件 dex 就在 `libsg*.so` 里,可以反编译读源码**
+
+### 怎么发现的
+
+早先挂钩 `JNICLibrary` 时,classloader 自己暴露了答案:
+
+```
+loader: PathClassLoader[DexPathList[[zip file ".../lib/arm64/**libsgmain.so**"], …]]
+```
+
+⇒ **那三个几十 KB 的 `libsg*.so` 其实是 ZIP/APK**,里面装着聚安全插件的 `classes.dex`:
+
+| 文件 | 内含 |
+|---|---|
+| `libsgmain.so`(39KB) | `classes.dex` 76,608B / **58 个类** |
+| `libsgmiddletier.so`(36KB) | `classes.dex` 64,852B / 46 个类 |
+| `libsgsecuritybody.so`(41KB) | `classes.dex` 71,340B / 60 个类 |
+
+**⇒ 从此所有参数问题都不必再猜 —— 直接读源码。**
+
+### 读到了什么(这一步的价值)
+
+`libsgmain.so` 的 `classes.dex` 里,命令总线入口是
+`Lcom/alibaba/wireless/security/mainplugin/б;.doCommand(I[Ljava/lang/Object;)`;
+`10101` / `10401` / `10601` 的调用点分别是:
+
+```
+SecurityGuardMainPlugin.onPluginLoaded(Context, IRouterComponent, ISGPluginInfo, String, Object[])  ← 10101
+...signRequest(SecurityGuardParamContext, …)                                                        ← 10401
+...(I I I String; [B String;)[B                                                                     ← 10601
+```
+
+**★ `10101` 的真实参数 —— 和我们猜的完全不同:**
+
+```java
+const/16  v15, 10
+new-array v15, 10, Object[]
+  [0] = context
+  [1] = Integer(0)                  ← 真机是 0;天猫/forest 抄的是 3
+  [2][3][4] = 来自框架传入的 Object[](可为 "")
+  [5] = context.getPackageName()
+  [6] = PackageInfo.versionName      ← "7.14.2.872"
+  [7] = Build.VERSION.RELEASE        ← "14"
+  [8] = ActivityManager 里本进程的 processName
+  [9] = Integer(0)
+doCommand(10101, v15)
+```
+
+**我们之前只传了 5 个参数** ⇒ **这是"所有命令都返回 null"的根因。**
+
+### 修完之后的实测变化
+
+| | 修之前 | 修之后 |
+|---|---|---|
+| `10101` | **秒回 null** | **真的跑起来了**:依次问 `getPackageCodePath` / `getFilesDir` / `getApplicationInfo` / `nativeLibraryDir` / `ApmMonitorAdapter`(SHIM #2–#6) |
+| `10102` | 无反应 | **真的在读我们的参数**:`GetArrayLength(["main","6.6.230703",…]) → 3` → `GetObjectArrayElement(0) → "main"` → `GetStringUtfChars("main")` |
+| 结局 | 全 null | **卡在 `10102` 处理 "main" 的过程中**(native 内部,无网络尝试,日志停住) |
+
+### 下一步
+
+卡点从"参数猜不对"变成"**`10102` 内部卡住**"—— 这是**可查**的:
+继续用同一套办法(反编译插件 dex)读 `10102` 的处理逻辑,看它卡在哪一步;
+必要时看它要读的文件(IOResolver 是否漏了路径)。
