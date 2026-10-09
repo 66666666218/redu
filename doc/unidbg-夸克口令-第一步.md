@@ -295,3 +295,21 @@ UnidbgPointer fnPtr = objectType.findNativeFunction(emulator, method);   // ★ 
 - **(a) 回真机抓真实参数**(Frida hook `JNICLibrary.doCommandNative`,把真的 10101/10102/10401 打出来)。
   ⚠️ 那是 native 方法,在 Houdini 上替换有崩的风险,且要用**生产模拟器** ⇒ **需用户点头**;
 - **(b) 继续在 unidbg 里盲试** —— 成功率低。
+
+### 补记:又扫了一圈(不设星数门槛),把公开玩家摸清了
+
+| 仓库 | 星 | 是什么 | 对我们有用吗 |
+|---|---|---|---|
+| `wzmwayne/fq-sign-api` | **0** | 番茄小说签名服务(**unidbg + JNI 补环境**),基于 `anjia0532/unidbg-boot-server` 骨架 | 一份完整的 `AbstractJni` 参考;**但覆写清单里没有我们没做过的东西**(VaList 变体、伪造 `StackTraceElement`,我们都独立踩到并做了) |
+| `iftoif/hongguo-desktop-mac` | **0** | FastAPI + **unidbg 签名服务**(红果/字节 `libmetasec_ml.so`) | 服务化架构参考;但不是阿里系 |
+| `CrackerCat/unidbg-qd-sign` | **0** | unidbg 取签名 | 同类骨架 |
+| `CrackerBot/bilibili-sign-reverse` | 2 | Frida + OLLVM 平坦化还原 + unidbg | 方法论参考 |
+| `LinXunFeng/fix_confict_SecurityEnvSDK_SGMain` | 3 | SGMain 相关 | 边角 |
+| `wqzhellohhwy/libnetcomm-rev-mcp` | 1 | TPRT 加固逆向的 MCP 工具集 | 工具性质 |
+
+**★ 一条硬结论**:拿"伪造调用栈的招牌写法" `JNICLibrary.doCommandNative(Native Method)` 去搜,
+**全网只有 1 个仓库命中(`Jokky6/tb/lazada.java`)** ⇒ **这个领域的公开玩家就那几个,已经全部找到**。
+
+**⇒ 公开世界不存在 阿里聚安全 6.6 / 夸克 的 unidbg 案例。** 现有公开案例覆盖的是:
+天猫/拉扎达(6.5)、forest(6.4)、支付宝(sgInnora)、libsgmain 反混淆(ylcangel)——
+**全部是"旧插件架构之前"或"别的 app"**。
