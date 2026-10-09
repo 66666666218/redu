@@ -481,6 +481,30 @@ def ime_ready() -> tuple[bool, str]:
     return True, f"ADBKeyboard 已在用({IME_ID})"
 
 
+def ensure_ime() -> tuple[bool, str]:
+    """确保 **ADBKeyboard 是当前输入法** —— 能自己设就自己设,不行才报没就绪。
+
+    ⚠️⚠️ **为什么必须自愈**(2026-10-09 实测):这个设置**扛不过模拟器重启** ——
+    重启后 `default_input_method` 会退回拼音输入法,而 ADBKeyboard **仍然装着**。
+    只检查不修的话,每次重启后这条链都会**静默失败**(症状与"口令无效"一模一样)。
+    ⇒ 装了就自己设回去(`settings put secure ...`,不需要人动手),设不回来才报错。
+    """
+    ok, why = ime_ready()
+    if ok:
+        return True, why
+    listed = _adb(["shell", "pm", "list", "packages"])
+    if not listed[0] or "com.android.adbkeyboard" not in listed[1]:
+        return False, ("客机里**没装 ADBKeyboard**(广播没人接);"
+                       "修法:`adb install data/_ADBKeyboard.apk`")
+    _adb(["shell", "settings", "put", "secure", "enabled_input_methods",
+          f"{IME_ID}:com.android.inputmethod.pinyin/.InputService"])
+    _adb(["shell", "settings", "put", "secure", "default_input_method", IME_ID])
+    import time
+
+    time.sleep(1.5)
+    return ime_ready()
+
+
 def feed_via_ime(text: str) -> tuple[bool, str]:
     """把 `text` 送进**客机自己的剪贴板**(走 IME 通道,不碰宿主剪贴板)。
 
@@ -489,7 +513,7 @@ def feed_via_ime(text: str) -> tuple[bool, str]:
     """
     if not str(text or "").strip():
         return False, "口令为空"
-    ok, why = ime_ready()
+    ok, why = ensure_ime()      # ★ 自愈:重启会把它重置掉(见该函数注释)
     if not ok:
         return False, why
     _adb(["shell", "am", "start", "-n", TYPING_TARGET])

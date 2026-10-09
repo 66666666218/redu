@@ -94,15 +94,62 @@ def test_喂入的四步顺序不能乱(monkeypatch) -> None:
     assert i_bc < i_cp
 
 
-def test_前置不就绪时不发任何命令(monkeypatch) -> None:
+def test_前置不就绪时不许发打字命令(monkeypatch) -> None:
+    """⚠️ 断言的是「**不许发打字命令**」,不是"一个 adb 都不许发" ——
+    前置检查自己**要探一次**(`ensure_ime` 会 `pm list` / 必要时 `settings put`)。
+    第一版写成 `calls == []`,改实现后当场变红(那种断言把实现细节焊死了)。"""
     calls: list = []
-    monkeypatch.setattr(kk, "ime_ready", lambda: (False, "输入法不对"))
-    monkeypatch.setattr(kk, "_adb", lambda a, timeout=30: (calls.append(a), (True, ""))[1])
+    monkeypatch.setattr(kk, "ensure_ime", lambda: (False, "输入法不对"))
+    monkeypatch.setattr(kk, "_adb", lambda a, timeout=30: (calls.append(list(a)), (True, ""))[1])
     ok, why = kk.feed_via_ime("口令")
     assert ok is False and "输入法不对" in why
-    assert calls == [], "前置没过就不该再去打字"
+    joined = [" ".join(c) for c in calls]
+    assert not any("ADB_INPUT_TEXT" in j or "keycombination" in j for j in joined), joined
 
 
 def test_口令为空要早退(monkeypatch) -> None:
     monkeypatch.setattr(kk, "ime_ready", lambda: (True, "ok"))
     assert kk.feed_via_ime("   ")[0] is False
+
+
+# ---------------------------------------------------------------------------
+# ★ IME 自愈:这个设置**扛不过模拟器重启**(2026-10-09 实测)
+# ---------------------------------------------------------------------------
+
+
+def test_装了就自己设回去_因为重启必然丢掉(monkeypatch) -> None:
+    """★★ 实测:模拟器重启后 `default_input_method` **退回拼音输入法**,
+    而 ADBKeyboard **仍然装着**。只检查不修的话,**每次重启后这条链静默失败**
+    (症状与"口令无效"一模一样)⇒ 必须自愈。
+
+    判据是**真的发出了那两条 settings 命令**,不是"函数返回 True"。
+    """
+    calls: list[list[str]] = []
+    state = {"ready": False}
+
+    def _adb(a, timeout=30):
+        calls.append(list(a))
+        if a[:3] == ["shell", "pm", "list"]:
+            return True, "package:com.android.adbkeyboard"
+        if a[:3] == ["shell", "settings", "put"]:
+            state["ready"] = True          # 设完就当生效(下一次 ime_ready 会真查)
+            return True, ""
+        return True, ""
+
+    monkeypatch.setattr(kk, "_adb", _adb)
+    monkeypatch.setattr(kk, "ime_ready",
+                        lambda: (state["ready"], "ok" if state["ready"] else "不是 ADBKeyboard"))
+    ok, why = kk.ensure_ime()
+    assert ok is True, why
+    joined = [" ".join(c) for c in calls]
+    assert any("settings put secure default_input_method " + kk.IME_ID in j for j in joined), joined
+    assert any("settings put secure enabled_input_methods" in j for j in joined), joined
+
+
+def test_没装_ADBKeyboard_要报清楚而不是瞎设(monkeypatch) -> None:
+    calls: list = []
+    monkeypatch.setattr(kk, "_adb", lambda a, timeout=30: (calls.append(list(a)), (True, "package:com.other"))[1])
+    monkeypatch.setattr(kk, "ime_ready", lambda: (False, "不是 ADBKeyboard"))
+    ok, why = kk.ensure_ime()
+    assert ok is False and "ADBKeyboard" in why and "adb install" in why, why
+    assert not any("settings" in " ".join(c) for c in calls), "没装就不该去改系统设置"
