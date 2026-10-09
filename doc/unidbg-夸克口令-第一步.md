@@ -175,3 +175,57 @@ java/lang/Integer-><init>(I)V
 
 **⇒ 结论**:unidbg 这条路**技术上成立**;剩下的不是"能不能",而是"**还有几个集合方法要补**"。
 补完这一段,`10401` 就能出值 ⇒ 直接与 oracle 的已知答案对账(`2ee1…36ab7dd8…`)。
+
+
+---
+
+## 7. 第四步:JNI 层打通(2026-10-10)
+
+最终状态:**退出码 0,20 项补环境,1401ms,剩余缺项为空(零 JNI 异常)**。
+
+```
+[1] libsgmainso base=0x40000000
+[2] libsgmainso.JNI_OnLoad ✓
+[3] 10101 初始化 → null
+[4] libsgsecuritybodyso.so / libsgmiddletierso.so .JNI_OnLoad ✓
+[5] 10102 ×3 注册三个插件完毕
+[6] 10401 签名 → null          ← ★ 不再是异常,是"正常返回但值为 null"
+[7] 累计补环境 20 项
+```
+
+### 20 项补环境(全部有名有姓、机械可补)
+
+| 类 | 项 |
+|---|---|
+| classloader | `getMainPluginClassLoader` / `getPluginClassLoader` / `getClassLoader`(**统一成"凡返回 ClassLoader 都给"**) |
+| Context | `getPackageCodePath` / `getPackageName` / `getFilesDir` / `getCacheDir` / `getApplicationInfo` / `getPackageManager` |
+| ApplicationInfo | `nativeLibraryDir` / `sourceDir` / `dataDir` / `packageName` |
+| java.io.File | `getAbsolutePath` / `getPath` / `exists` / `length` / `isDirectory` / `getParent(File)` |
+| Build | `VERSION.SDK_INT`(23,配 `AndroidResolver(23)`)、`MODEL` / `BRAND` / `MANUFACTURER` / `DEVICE` / `PRODUCT` / `FINGERPRINT` |
+| gson/集合 | **`java/util/HashMap->keySet()`**、**`java/util/Set->toArray()`**(unidbg 只实现了 `entrySet`/`iterator`) |
+| 装箱 | **`newObject()` 里的 `Integer/Boolean/Long-><init>`** |
+| 埋点 | `ApmMonitorAdapter.*` 一律空转 |
+| 兜底 | `X->getInstance()LX;` 静态单例 → 代理对象(**大声记 `SHIM-BLANK` 日志,绝不静默吞**) |
+
+### ★ 三个"找错地方"的教训(每个都耗了一轮)
+
+1. **装箱类型的 `<init>` 落在 `AbstractJni.newObject()`**,不在任何 `callXxxMethod` —— 我先后在
+   `callStaticVoidMethod` / `callVoidMethod` / `callStaticVoidMethodV` 里补,全都没用。
+   **看堆栈比猜快**:`at AbstractJni.newObject(AbstractJni.java:753)`。
+2. **unidbg 的 `AbstractJni` 默认实现就是"抛 UnsupportedOperation"**,所以覆写要成对 ——
+   `String` 变体和 **`VaList` 变体**都要覆写,否则永远过不去。
+3. **`Set->toArray()` unidbg 没实现**(只有 `entrySet`/`iterator`)—— SG 是按 `keySet().toArray()` 拿键的。
+
+### 现在的卡点:**不是 JNI,是 SG 的内部状态/参数形状**
+
+`10401` 正常返回 **null**(不再是异常)。可能原因(待查,按可能性排序):
+
+1. **`10101` 返回 null** —— 它本该返回一个成功码/句柄,而我们给它的参数是照天猫抄的
+   (`[context, 3, "", app_SGLib, ""]`),夸克 6.6 可能要别的形状;
+2. **HashMap 的形状**:真实链路里 `10401` 是**插件的 Java 层**调的,传的是它自己组装的
+   `SecurityGuardParamContext`;我们直接调 `doCommandNative(10401, …)` **跳过了插件内部的准备**;
+3. **缺前置步骤**:AVMP 相关的 `60401`(SafeToken)/ `70201`(建 AVMP 实例)可能必须先生效,
+   签名才有密钥可用 —— 注意夸克 6.6 **没有独立的 libsgavmp**,AVMP 并进了主库/中间层。
+
+**⇒ 结论**:这条路**技术上成立**且 JNI 层已通;剩下的是"SG 内部状态怎么喂" —— 与社区卡
+`701029904`/`701029906` 的那类问题是同一族,但**我们有 oracle 可以逐步对账**。
