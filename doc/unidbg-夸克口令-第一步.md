@@ -125,3 +125,53 @@ java.lang.UnsupportedOperationException:
    **整个程序就那么停住,一行日志都不再打**,看起来像"补环境卡死了"。
    绕法:`yes c | java …`(继续命令是 **`c`**)。⚠️ **别把它误判成 SG 的坑。**
 2. (见 §3)classpath 里的中文路径会让 Java 类加载器找不到 jar。
+
+
+---
+
+## 6. 第三步:整条链跑通(2026-10-10)
+
+**补齐次序后,三步链走完,退出码 0,总耗时约 990ms:**
+
+```
+[1] libsgmainso base=0x40000000
+[2] libsgmainso.JNI_OnLoad ✓
+[3] 10101 初始化 → null
+[4] libsgsecuritybodyso.so.JNI_OnLoad ✓     ← 补了 10101 之后才通过(之前一直返回 -1)
+[4] libsgmiddletierso.so.JNI_OnLoad ✓
+[5] 10102 ×3 注册三个插件完毕
+[6] 10401 签名(内容=hello) → null           ← 命令发出去了,但返回 null
+[7] 累计补环境 16 项
+```
+
+### ★★ 纠正一条错判(重要)
+
+上一版写「夸克没有 `JNICLibrary`、架构与天猫不同」——**错了**。我搜的是 APK 的 dex;
+这个类在 dex 里确实没有,但**运行时 native 自己 `RegisterNatives` 到它上面**(日志实证:
+`JNIEnv->RegisterNatives(com/taobao/wireless/security/adapter/JNICLibrary, …, 1)`)。
+⇒ **入口与天猫完全一致,配方可直接用。** 教训与 `absence-of-evidence-…` 同源:
+**静态搜不到 ≠ 运行时不存在。**
+
+### 补环境清单(16 项,全部有名有姓、机械可补)
+
+- `getXxxClassLoader` 系列(统一成"凡返回 ClassLoader 都给")
+- `Context.getPackageCodePath / getPackageName / getFilesDir / getCacheDir / getApplicationInfo / getPackageManager`
+- `ApplicationInfo.nativeLibraryDir / sourceDir / dataDir / packageName`
+- `java/io/File` 的 `getAbsolutePath / getPath / exists / length / isDirectory / getParent(File)`
+- `Build.VERSION.SDK_INT`(=23,与 `AndroidResolver(23)` 一致)、`Build.MODEL/BRAND/MANUFACTURER/DEVICE/PRODUCT/FINGERPRINT`
+- `ApmMonitorAdapter.*`(阿里自家埋点门面,一律空转)
+- `X->getInstance()LX;` 这类静态单例 → **显式兜底**(但**大声记日志**,记成 `SHIM-BLANK`,
+  绝不做静默吞掉 —— 免得把"没补"伪装成"补好了")
+
+### 还差什么(只剩这一段)
+
+`10401` 返回 null,是因为 **SG 遍历参数 map 时用了 unidbg 没实现的集合方法**:
+
+```
+java/util/HashMap->keySet()Ljava/util/Set;        ← 已补
+java/util/Set->toArray()[Ljava/lang/Object;       ← 下一个
+java/lang/Integer-><init>(I)V
+```
+
+**⇒ 结论**:unidbg 这条路**技术上成立**;剩下的不是"能不能",而是"**还有几个集合方法要补**"。
+补完这一段,`10401` 就能出值 ⇒ 直接与 oracle 的已知答案对账(`2ee1…36ab7dd8…`)。
