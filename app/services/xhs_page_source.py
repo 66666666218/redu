@@ -111,6 +111,22 @@ def _cursor_index(n: int) -> int:
         return 0
 
 
+def _pkey(profile) -> str:
+    """档案的**归一化身份**(绝对规范路径)。
+
+    ⚠️⚠️ **为什么必须有**(2026-10-09 实测踩到):原来 `mark`/`clear` 两边都直接用
+    `str(profile)` —— 于是**存的是绝对路径、摘的时候传相对路径就永远对不上**
+    (绝对路径 与 相对路径 不是同一个字符串,字符串相等永远为假)。
+    后果是**单向陷阱**:记号一旦写下,除了"轮次成功"那一条路,**谁也别想摘掉它**;
+    而小红书当时整条链是坏的(协议 `-104` + 页面路不可用)⇒ **那一轮永远等不到**
+    ⇒ 体检上就挂了一条**永远红的假红灯**,而假红灯会训练人忽略整份报告。
+    """
+    try:
+        return str(Path(profile).resolve())
+    except Exception:  # noqa: BLE001 - 归不了就当原样,别让体检自己崩
+        return str(profile)
+
+
 def mark_need_verify(profile: Path) -> None:
     """把某个账号标成"要人过一次安全验证",这样轮换会**跳过它**、不继续烧风控。"""
     try:
@@ -124,7 +140,7 @@ def mark_need_verify(profile: Path) -> None:
         with get_session_local()() as db:
             row = db.scalar(select(SystemConfig).where(SystemConfig.key == _NEED_KEY))
             cur = set(json.loads(row.value)) if row is not None and row.value else set()
-            cur.add(str(profile))
+            cur.add(_pkey(profile))
             blob = json.dumps(sorted(cur), ensure_ascii=False)
             if row is None:
                 db.add(SystemConfig(key=_NEED_KEY, value=blob))
@@ -166,7 +182,10 @@ def clear_need_verify(profile: Path) -> None:
             row = db.scalar(select(SystemConfig).where(SystemConfig.key == _NEED_KEY))
             if row is None or not row.value:
                 return
-            cur = set(json.loads(row.value)) - {str(profile)}
+            # ⚠️ 按**归一化身份**摘,而不是字符串相等:这样**以前用相对路径写下的旧记号
+            #    也能被清掉**(否则历史遗留的那些永远红着)。
+            key = _pkey(profile)
+            cur = {x for x in json.loads(row.value) if _pkey(x) != key}
             row.value = json.dumps(sorted(cur), ensure_ascii=False)
             db.commit()
     except Exception:  # noqa: BLE001

@@ -391,3 +391,67 @@ class TestHotRankCardAllSources:
             assert sent == [], "没有数据却把空卡发出去了"
         finally:
             db.close()
+
+
+# ---------------------------------------------------------------------------
+# ★★ 2026-10-09:「需验证」记号是一条**单向陷阱**(路径写法对不上就永远摘不掉)
+# ---------------------------------------------------------------------------
+
+
+def _tmp_db(monkeypatch):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db.database import Base
+    from app.db import models  # noqa: F401
+    from app.db.models import SystemConfig
+
+    eng = create_engine("sqlite://")
+    Base.metadata.create_all(eng)
+    SystemConfig.__table__.create(eng, checkfirst=True)
+    sm = sessionmaker(bind=eng)
+    import app.db as _db
+
+    monkeypatch.setattr(_db, "get_session_local", lambda: sm)
+    return sm
+
+
+def test_需验证记号_相对与绝对路径必须都能摘掉(monkeypatch, tmp_path) -> None:
+    """★★ 实测踩到:原来 `mark`/`clear` 两边都直接用 `str(profile)` ——
+    **存的是绝对路径、摘的时候传相对路径就永远对不上**,于是:
+
+      ① 记号一旦写下,除了「轮次成功」那一条路,**谁也别想摘掉**;
+      ② 而小红书当时整条链是坏的(协议 `-104` + 页面路不可用)⇒ **那一轮永远等不到**;
+      ③ ⇒ 体检上挂了一条**永远红的假红灯**,而假红灯会训练人忽略整份报告。
+
+    判据:同一台机器上**同一个档案**,不管用哪种写法传,都必须是同一个身份。
+    """
+    _tmp_db(monkeypatch)
+    from pathlib import Path
+
+    from app.services import xhs_page_source as xp
+
+    prof = Path("data/xhs_test")
+    xp.mark_need_verify(prof.resolve())                    # 存**绝对**
+    assert xp.need_verify_profiles(), "标记没写进去"
+    xp.clear_need_verify(Path("data/xhs_test"))            # 摘**相对** —— 必须能摘
+    assert xp.need_verify_profiles() == set(), "相对路径摘不掉绝对路径写的记号(单向陷阱)"
+
+
+def test_需验证记号_能清掉历史遗留的相对路径写法(monkeypatch) -> None:
+    """兼容:以前可能已经把**相对路径**写进库里了,现在按归一化身份也要能清掉。"""
+    import json
+
+    _tmp_db(monkeypatch)
+    from pathlib import Path
+
+    from app.db import get_session_local
+    from app.db.models import SystemConfig
+    from app.services import xhs_page_source as xp
+
+    with get_session_local()() as db:
+        db.add(SystemConfig(key="xhs_account_need_verify",
+                            value=json.dumps(["data/xhs_legacy"])))
+        db.commit()
+    xp.clear_need_verify(Path("data/xhs_legacy"))
+    assert xp.need_verify_profiles() == set(), "历史遗留的相对路径写法清不掉"

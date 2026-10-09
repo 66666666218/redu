@@ -40,6 +40,9 @@ class _S:
     bili_scan_enabled = True
     bili_scan_accounts_per_run = 1
     bili_scan_tthin_below = 2
+    # 2026-10-09 新增:限流冷却闸要用到(读不到时实现里也有默认值)
+    bili_scan_blocked_hours = 2
+    bili_scan_cooldown_hours = 0
 
 
 def _mk_accounts(session, n: int = 3) -> None:
@@ -705,3 +708,79 @@ class TestAdaptiveCooldown:
         out = bas.scan_accounts(session, 1, settings=_S3())
         assert calls, "全都冷却中却一个都没扫 —— 停摆了"
         assert out["scanned"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# ★★ 2026-10-09:凭据失效不许「照扫」;被限流要冷却
+# ---------------------------------------------------------------------------
+
+
+def _patch_tick_env(monkeypatch, session, *, cookie="SESSDATA=x", logged_in=True,
+                    blocked_hours=0):
+    """把 tick 的环境铺好,返回被调用的记录本。"""
+    from app.db.models import RunRecord
+
+    seen = {"scan": 0, "verify": 0}
+    monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+    monkeypatch.setattr(bas, "_bili_cookie", lambda *a, **k: cookie)
+    monkeypatch.setattr(bas, "_alert_cookie_dead", lambda *a, **k: None)
+
+    def _verify(ck=""):
+        seen["verify"] += 1
+        return {"is_login": logged_in, "uname": "u", "mid": 1, "reason": "不是登录态"}
+
+    monkeypatch.setattr(bas, "verify_login", _verify)
+
+    def _scan(*a, **k):
+        seen["scan"] += 1
+        return {"status": "ok", "scanned": 1, "titles": 3, "accounts": ["x"], "cursor": 0}
+
+    monkeypatch.setattr(bas, "scan_accounts", _scan)
+    return seen, RunRecord
+
+
+def test_凭据失效时不许照扫_一个请求都不发(session, monkeypatch) -> None:
+    """★★ 修之前:**验活失败只告警,然后照样 `scan_accounts`** ——
+    而匿名扫 `space` 端点,本文件自己的文档就写着「**远程机房 IP 直接 -352**」
+    ⇒ 每一轮都在**白挨一次风控**(今天 14 次失败全是这么来的)。
+
+    判据:凭据失效时 `scan_accounts` **一次都不许被调用**。
+    """
+    seen, RunRecord = _patch_tick_env(monkeypatch, session, logged_in=False)
+    bas.bili_account_scan_tick(_S())
+    assert seen["scan"] == 0, f"凭据失效还去扫了 {seen['scan']} 次 ⇒ 白挨风控"
+    row = session.scalars(select(RunRecord).where(
+        RunRecord.kind == "bili_account_scan").order_by(RunRecord.id.desc())).first()
+    assert row is not None and row.status == "partial", row
+    assert "不发请求" in (row.detail or ""), row.detail
+
+
+def test_冷却期内一个请求都不发(session, monkeypatch) -> None:
+    """★ `-352` 是**频率**风控,被挡过就别接着撞(本仓文档:「每试一次都是一次风控输入」)。"""
+    bas.note_blocked(session, 1, hours=2)
+    seen, RunRecord = _patch_tick_env(monkeypatch, session)
+    bas.bili_account_scan_tick(_S())
+    assert seen["scan"] == 0 and seen["verify"] == 0, "冷却期内不许发任何请求"
+    row = session.scalars(select(RunRecord).where(
+        RunRecord.kind == "bili_account_scan").order_by(RunRecord.id.desc())).first()
+    assert row is not None and "冷却中" in (row.detail or ""), row.detail
+
+
+def test_冷却到期后照常扫(session, monkeypatch) -> None:
+    """反面对照 —— 不然闸门一关就永远不动了(本仓最忌讳的"安静地什么都不做")。"""
+    bas.note_blocked(session, 1, hours=-1)          # 已经过期
+    seen, _ = _patch_tick_env(monkeypatch, session)
+    bas.bili_account_scan_tick(_S())
+    assert seen["scan"] == 1, "冷却到期就该照常扫"
+
+
+def test_被挡一次要记冷却(session, monkeypatch) -> None:
+    """限流 ⇒ 进冷却,别让下一个 tick 接着撞。"""
+    seen, _ = _patch_tick_env(monkeypatch, session)
+
+    def _boom(*a, **k):
+        raise bas.BiliScanError("B站限流 code=-352 风控校验失败")
+
+    monkeypatch.setattr(bas, "scan_accounts", _boom)
+    bas.bili_account_scan_tick(_S())
+    assert bas.blocked_until(session, 1) is not None, "被 -352 挡过却没记冷却"

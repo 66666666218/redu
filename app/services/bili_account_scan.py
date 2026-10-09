@@ -276,6 +276,58 @@ def _save_titles(session, user_id: int, account, titles: list[dict], settings=No
     return n
 
 
+#: 被 B站限流挡住后的**冷却闸**(2026-10-09)。存 `system_config`。
+#:
+#: ⚠️⚠️ **为什么必须有**(用户口径「B站减少次数」):B站 `-352` 是**频率**风控,
+#: 而本仓自己的文档写着「**每试一次都是一次风控输入**」。原来的行为是:
+#: 被挡 ⇒ 记一条 failed ⇒ **下一个 tick 照常再打** ⇒ 今天实测 **14 次** `-352`
+#: (昨天 2 次)—— 越打越深,而且**没有任何产出**。
+_BLOCK_KEY = "bili_scan_blocked_until_{uid}"
+
+
+def blocked_until(db, user_id: int = 1):
+    """冷却截止时间(`None` = 没在冷却)。读不到就当没冷却(宁可多打一次,别永远停死)。"""
+    try:
+        from sqlalchemy import select
+
+        from app.db.models import SystemConfig
+
+        row = db.scalar(select(SystemConfig).where(
+            SystemConfig.key == _BLOCK_KEY.format(uid=user_id)))
+        if row is not None and row.value:
+            from datetime import datetime
+
+            return datetime.fromisoformat(str(row.value))
+    except Exception:  # noqa: BLE001
+        logger.debug("读 B站冷却失败", exc_info=True)
+    return None
+
+
+def note_blocked(db, user_id: int = 1, hours: float | None = None) -> None:
+    """被限流挡过 ⇒ 记一段冷却,期间**一个请求都不发**。"""
+    try:
+        from datetime import datetime, timedelta
+
+        from sqlalchemy import select
+
+        from app.db.models import SystemConfig
+
+        h = hours if hours is not None else float(
+            getattr(_settings(), "bili_scan_blocked_hours", 2) or 2)
+        until = datetime.now() + timedelta(hours=h)
+        key = _BLOCK_KEY.format(uid=user_id)
+        row = db.scalar(select(SystemConfig).where(SystemConfig.key == key))
+        if row is not None:
+            row.value = until.isoformat(timespec="seconds")
+        else:
+            db.add(SystemConfig(key=key, value=until.isoformat(timespec="seconds")))
+        db.commit()
+        logger.warning("B站被限流 ⇒ **冷却 %.1f 小时**(至 %s),期间不再发请求",
+                       h, until.strftime("%m-%d %H:%M"))
+    except Exception:  # noqa: BLE001 - 记不上冷却不该中断整轮
+        logger.debug("写 B站冷却失败", exc_info=True)
+
+
 def scan_accounts(session, user_id: int, settings=None, count: int | None = None) -> dict:
     """从游标处取 `count` 个 B站对标号,采它们的投稿标题入热榜表。
 
@@ -466,12 +518,30 @@ def bili_account_scan_tick(settings=None) -> int:
                 # ⚠️ **先验 cookie 是否还有效**(nav 接口,判据 `data.isLogin`)。
                 # 配了 cookie 却已失效 ⇒ **当场告警"去重新扫码"**;否则它会退回匿名风控,
                 # 表现为"采集突然全失败",而人对着 412 只能猜。
+                # ★ **冷却期内一个请求都不发**(2026-10-09):被 `-352` 挡过就别接着撞 ——
+                #   实测今天 14 次 `-352`(昨天 2 次)全是这么来的,而且**没有产出**。
+                _blk = blocked_until(db, uid)
+                if _blk is not None and datetime.now() < _blk:
+                    _record_run(db, uid, "bili_account_scan", "partial",
+                                f"**限流冷却中**(至 {_blk:%m-%d %H:%M}),本轮跳过、不发请求 —— "
+                                f"B站 -352 是频率风控,接着打只会更深")
+                    db.commit()
+                    continue
+                # ⚠️⚠️ **凭据失效也必须跳过,而不是照扫**(2026-10-09 修):
+                #   原来这里只 `_alert_cookie_dead` 告警一句,**然后照样 `scan_accounts`** ——
+                #   而匿名扫 `space` 端点,本文件自己的文档就写着「**远程机房 IP 直接 -352**」
+                #   ⇒ 每一轮都在**白挨一次风控**。今天 14 次失败全是这么来的。
                 ck = _bili_cookie(db, uid, settings)
                 if ck:
                     st = verify_login(ck)
                     if not st["is_login"]:
                         _alert_cookie_dead(db, uid, str(st.get("reason") or ""))
+                        _record_run(db, uid, "bili_account_scan", "partial",
+                                    f"**凭据失效,本轮跳过、不发请求**:{str(st.get('reason'))[:80]}"
+                                    f" —— 匿名扫 space 端点必然 -352,发出去就是白挨风控;"
+                                    f"修法:浏览器登录 bilibili.com 后重新扫码/复制 cookie")
                         db.commit()
+                        continue
                 out = scan_accounts(db, uid, settings=settings)
                 total += out.get("titles", 0)
                 # ⚠️ **不再有游标**:轮转改成按 `last_scan_at` / `video_count` 排序取队首
@@ -497,6 +567,9 @@ def bili_account_scan_tick(settings=None) -> int:
                 # **限流必须记成 failed 而不是 success(0)** —— 否则"被挡住"看不见
                 db.rollback()
                 logger.warning("B站对标号扫描受阻:%s", str(exc)[:160])
+                # ★ 限流 ⇒ **进冷却**,别让下一个 tick 接着撞(2026-10-09)
+                if any(c in str(exc) for c in ("-352", "-412", "-509")):
+                    note_blocked(db, uid)
                 _record_run(db, uid, "bili_account_scan", "failed", str(exc)[:200])
                 db.commit()
     finally:
