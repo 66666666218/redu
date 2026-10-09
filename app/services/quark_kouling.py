@@ -416,3 +416,112 @@ def quark_kouling_tick(settings=None) -> int:
     finally:
         db.close()
     return total
+
+# ---------------------------------------------------------------------------
+# 把口令喂进模拟器(2026-10-09 换的实现:**走 IME 通道,不走剪贴板**)
+# ---------------------------------------------------------------------------
+# ⚠️⚠️ **为什么必须换**(2026-10-09 查清,有硬证据):
+# 这条链原来把口令**写进宿主的剪贴板**,指望雷电把它同步给客机。而
+# `vms/<vm>/Logs/VBox.log` 每次启动都写着 **`Shared Clipboard: Mode: Off`**
+# (四份轮转日志**全是 Off**)⇒ **宿主写的那一份客机从来拿不到**。
+# 这也解释了此前所有对不上的现象:
+#   · "提供剪贴板的进程必须存活(存活 20 秒就弹卡片)" —— **假相关**:
+#     真正相关的变量是「**客机自己的剪贴板里有没有东西**」,那次多半是上一次
+#     手动 Ctrl+C 的内容还留着;
+#   · "焦点"那条线(已用控制变量排除过)同理查不出所以然,因为**根因根本不在宿主侧**。
+# 而且那个开关**不在任何我们能碰的地方**(四条路逐个证伪):雷电的 JSON 设置里没有该键、
+# `ldconsole modify` 没有该选项、UI 是**远程网页**(标签本地搜不到,连 UTF-16LE 都 0 命中)、
+# 手动往 `.vbox` 加 `<Clipboard mode="Bidirectional"/>` 会被 LDPlayer 启动时**整份重写丢弃**。
+#
+# ⇒ 换成 **adb 的 IME 通道**:`am broadcast` 把文本打进**客机里任意一个可输入框**
+#   (走 InputConnection,**完全不经过剪贴板**),再在**客机内**用 `Ctrl+A / Ctrl+C`
+#   把它放进**客机自己的剪贴板** —— 夸克启动时读的是**客机**剪贴板,于是卡片就弹了。
+#   实测(2026-10-09):清空输入框 → 广播 → Ctrl+A/C → 启动夸克 ⇒ 卡片出现,
+#   且顶上写的是**解析出来的资源名**(逐条核过:`监听宣传` / `铸剑纳贡（ForgeTax）`)。
+#
+# ⚠️ **前置条件**(坏了会静默不弹,所以体检里单列一行):客机里要装 **ADBKeyboard**
+#   (`data/_ADBKeyboard.apk`,17KB)且**把它设为当前输入法**。少了它,广播没人接。
+ADB = "D:/leidian/LDPlayer14/adb.exe"   # ⚠️ 正斜杠:反斜杠会被当成转义(实测把  吃成了响铃)
+#: ADBKeyboard 的输入法 id —— 它就是"广播打字"的接收端
+IME_ID = "com.android.adbkeyboard/.AdbIME"
+#: 用来当"打字靶子"的可输入框。⚠️ **不必是夸克的输入框** —— 我们只要文本进客机剪贴板,
+#: 用系统搜索框是因为它**永远在、且是标准 EditText**(夸克首页是 WebView 混合 UI,
+#: uiautomator 抓不到它的输入框,实测)。
+TYPING_TARGET = "com.android.settings.intelligence/.search.SearchActivity"
+#: Android 键码:CTRL_LEFT=113 / A=29 / C=31
+_KEY_CTRL, _KEY_A, _KEY_C = 113, 29, 31
+
+
+def _adb(args: list[str], timeout: int = 30) -> tuple[bool, str]:
+    """跑一条 adb 命令 → `(成功?, 输出)`。**失败不抛**(调用方要能降级/报警)。"""
+    import subprocess
+
+    try:
+        r = subprocess.run([ADB, *args], capture_output=True, timeout=timeout)
+        out = (r.stdout or b"").decode("utf-8", "replace").strip()
+        err = (r.stderr or b"").decode("utf-8", "replace").strip()
+        return r.returncode == 0, out or err
+    except Exception as exc:  # noqa: BLE001 - adb 掉线/路径不对都算"没成功"
+        return False, f"{type(exc).__name__}: {str(exc)[:120]}"
+
+
+def ime_ready() -> tuple[bool, str]:
+    """喂口令的**前置条件**是否就绪 → `(是否就绪, 人话说明)`。
+
+    ⚠️ 单列它是为了**别让前置条件静默失效**:ADBKeyboard 被卸载、或输入法被换回拼音,
+    广播就没人接 —— 而症状是"卡片不弹",与"口令无效"**长得一模一样**(本仓最忌的那类)。
+    """
+    ok, listed = _adb(["shell", "ime", "list", "-s"])
+    if not ok:
+        return False, f"adb 不可用({listed})"
+    if IME_ID not in listed:
+        return False, (f"**当前输入法不是 ADBKeyboard**(现在是 {listed.strip() or '空'})—— "
+                       f"广播没人接,口令进不去;修法:装 `data/_ADBKeyboard.apk` 并 "
+                       f"`adb shell settings put secure default_input_method {IME_ID}`")
+    return True, f"ADBKeyboard 已在用({IME_ID})"
+
+
+def feed_via_ime(text: str) -> tuple[bool, str]:
+    """把 `text` 送进**客机自己的剪贴板**(走 IME 通道,不碰宿主剪贴板)。
+
+    三步:① 打开一个可输入框当靶子;② 广播打进去;③ 客机内 `Ctrl+A / Ctrl+C`。
+    返回 `(成功?, 人话)`。**任何一步失败都返回 False + 原因**,不抛 —— 调用方据此报警。
+    """
+    if not str(text or "").strip():
+        return False, "口令为空"
+    ok, why = ime_ready()
+    if not ok:
+        return False, why
+    _adb(["shell", "am", "start", "-n", TYPING_TARGET])
+    import time
+
+    time.sleep(4)                      # 等靶子窗口起来(实测 3~5 秒)
+    ok, out = _adb(["shell", "am", "broadcast", "-a", "ADB_INPUT_TEXT", "--es", "msg", text])
+    if not ok:
+        return False, f"广播打字失败:{out}"
+    time.sleep(2)
+    _adb(["shell", "input", "keycombination", str(_KEY_CTRL), str(_KEY_A)])
+    time.sleep(1)
+    ok, out = _adb(["shell", "input", "keycombination", str(_KEY_CTRL), str(_KEY_C)])
+    if not ok:
+        return False, f"客机内复制失败:{out}"
+    return True, "已送进客机剪贴板(IME 通道)"
+
+#: 卡片上的**判据词**。⚠️ **两种写法都要认**(2026-10-09 实测):
+#: 夸克实际渲染的是「来自剪**切**板」,而这条链原来只认「来自剪**贴**板」——
+#: **一个字的差别**,于是**卡片明明弹出来了却判成「口令无效」**,调用方据此**撤回线索**
+#: (等于把一条**成功解析**的口令记成失败 —— 本仓最忌的"看起来失败实则成功")。
+#: ⚠️ 这个函数放在**服务层**是故意的:它原来住在 gitignore 的 `tools/` 里,
+#: 那样的判据**改完也不会被提交**(同一族问题在导出逻辑上已经吃过一次)。
+CARD_MARKS = ("来自剪贴板", "来自剪切板")
+
+
+def judge_card(texts: list[str]) -> str:
+    """从 uiautomator 读到的屏幕文字里取出**卡片上的资源名**;没弹卡片返回空串。
+
+    卡片的形状:`[<资源名>, '来自剪X板', '立即查看']` ⇒ 资源名就在判据词的**上一条**。
+    """
+    for i, t in enumerate(texts or []):
+        if any(m in str(t) for m in CARD_MARKS) and i > 0:
+            return str(texts[i - 1])
+    return ""
