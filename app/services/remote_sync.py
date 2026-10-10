@@ -63,6 +63,23 @@ _LINK2_COLS = ("user_id", "platform", "origin_url", "title", "author", "source_u
 # 时间列是 **`discovered_at`** —— 别拿 `created_at` 去查(会 Unknown column)。
 _ACCT_COLS = ("user_id", "platform", "uid", "name", "url", "hit_keyword", "snippet",
               "pan_link", "status", "discovered_at")
+# **抖音推广线索**(2026-10-10 新增):`douyin_leads` —— 标题带《口令》的**同行推广视频**。
+#
+# ⚠️⚠️ **为什么必须同步(这次是"接了一半"的典型)**:2026-10-10 把「抖音线索进选题池」
+# 做进了 `hotspot_agent`,但那条链**跑在远程**,而 `douyin_leads` **只在本地产生**
+# (抖音采集挂 `wechat` 侧,见 scheduler 里那条)。远程实测:**表在、列齐、行数 0** ——
+# 也就是说这个新功能在线上**永远是空的**,而且**看起来一切正常**
+# (`lead_state=ok`、只是 `lead_total=0`,读起来像"这几天确实没线索")。
+# 这正是本仓最怕的**静默失效**:功能"在",但从不生效。
+# 判定对照(照抄上面那句纪律):**"同步在跑、只是没有新线索"与"这条链根本没接上"必须长得不一样**。
+#
+# 天然键 **`(user_id, aweme_id)`**(与本地唯一约束 `uq_douyin_lead` 同名同形)。
+# ⚠️ **只推新行、不回填老行** —— `our_url`/`moved_at`/`kouling_tried_at` 是**本机自己**的
+# 运营状态(搬链进展),远程 Agent 只拿这张表当"**需求信号**"(标题 / 转发量 / 发布时间),
+# 与 `discovered_pan_links` 同一取舍(那边也不回填)。
+_LEAD_COLS = ("user_id", "aweme_id", "mark", "title", "author", "url", "keyword",
+              "share_count", "kind", "our_url", "found_at", "found_date",
+              "kouling_tried_at", "publish_at", "moved_at", "last_error", "kouling_tries")
 # **B站对标号的投稿标题**(2026-10-05):`hot_source_items` 里 `source='bili-pan'` 的那些行。
 #
 # ⚠️⚠️ **必须按 source 过滤,绝不能整表同步** —— `hot_source_items` 是**远程自己也在用**的表
@@ -213,7 +230,7 @@ def sync_once(local: Session, remote_url: str, days: int = DEFAULT_DAYS,
         return {"status": "failed", "reason": f"建连接失败:{type(exc).__name__}: {str(exc)[:120]}"}
 
     sent = {"benchmarks": 0, "articles": 0, "links": 0, "discovered": 0, "accounts": 0,
-            "bili_hot": 0}
+            "bili_hot": 0, "leads": 0}
     hot_wm = ""       # B站标题的本地水位线;**远端事务提交后**才落库(见块内注释)
     try:
         with remote.begin() as conn:
@@ -372,6 +389,22 @@ def sync_once(local: Session, remote_url: str, days: int = DEFAULT_DAYS,
                 # 本地已经认为"推过了" ⇒ **那批行永久丢失**(且不会有任何报错)。
                 if sent["bili_hot"] and local_hot[-1][6] is not None:
                     hot_wm = str(local_hot[-1][6])
+
+            # ---------- ⑦ 抖音推广线索(2026-10-10)----------
+            # 「同行正在推这个资源」的证据,远程选题 Agent 按**转发率 + 新鲜度**用(见 `_LEAD_COLS`
+            # 上面那段:不同步 = 那条功能永远空转,而且看起来完全正常)。
+            local_leads = local.execute(
+                text("SELECT user_id, aweme_id, mark, title, author, url, keyword, share_count, "
+                     "kind, our_url, found_at, found_date, kouling_tried_at, publish_at, "
+                     "moved_at, last_error, kouling_tries FROM douyin_leads "
+                     "WHERE found_at >= :s LIMIT :n"), {"s": since, "n": limit}).all()
+            if local_leads:
+                have_l = {str(x) for (x,) in conn.execute(text(
+                    "SELECT aweme_id FROM douyin_leads WHERE user_id = 1"))}
+                cols = list(_LEAD_COLS)
+                new_l = [dict(zip(cols, r)) for r in local_leads
+                         if str(r[1]) and str(r[1]) not in have_l]
+                sent["leads"] = _push("douyin_leads", _LEAD_COLS, new_l, conn)
         # 走到这里 = 远端事务已提交,推送才算数
         if hot_wm:
             _set_bili_hot_watermark(local, hot_wm)
@@ -422,14 +455,14 @@ def remote_sync_tick(settings=None) -> int:
         from app.services.tenant_base import _record_run
         total = int(out.get("benchmarks", 0) + out.get("articles", 0)
                     + out.get("links", 0) + out.get("discovered", 0)
-                    + out.get("bili_hot", 0))       # B站标题也算推过去的行数
+                    + out.get("bili_hot", 0) + out.get("leads", 0))   # B站标题/抖音线索也算行数
         # ⚠️ **`标题N` 必须列出来**(2026-10-06 补):原来 detail 只有"对标号/文章/盘链/发现链",
         # **B站标题推了多少完全看不见** —— 只能靠水位线和远端计数**间接**判断,
         # 而"间接判断"正是本仓反复吃亏的地方。推了 0 条也要显示,好区分"没新数据"与"推失败"。
         _record_run(db, 1, "remote_sync", "success",
                     f"对标号{out['benchmarks']} 文章{out['articles']} "
                     f"盘链{out['links']} 发现链{out['discovered']} "
-                    f"标题{out.get('bili_hot', 0)}")
+                    f"标题{out.get('bili_hot', 0)} 抖音线索{out.get('leads', 0)}")
         db.commit()
         return total
     finally:
