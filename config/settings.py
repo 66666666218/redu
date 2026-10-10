@@ -169,6 +169,14 @@ class Settings(BaseSettings):
     #: ⚠️ `0` = 关闭闸门。资源型源(`bili-pan`)天然豁免,见 `niche_fit.RESOURCE_SIGNAL_SOURCES`。
     #: 剔除数 / 未知数会进 `runs.detail` 的 `pool_age`,便于回看闸门是否真在生效。
     hotspot_max_content_age_hours: int = 72
+    #: **抖音推广线索进选题池**(2026-10-10)。线索 = 标题里带《口令》的同行视频,
+    #: 是「**同行正在推这个资源**」的证据(与 `bili-pan` 同档,权重 0.60)。
+    #: ⚠️ 热度口径是**转发率**(转发/h)不是原始转发量 —— `share_count` 是抓取那一刻的
+    #: **一次性快照、累计量**,按原始量排 = 系统性偏向老线索(详见 `_lead_candidates`)。
+    hotspot_lead_enabled: bool = True
+    hotspot_lead_max_age_hours: int = 72   # 只取**发布**在近 72h 内的线索(抢时效)
+    hotspot_lead_cap: int = 5              # 按转发率排序取前几条(选择由名额做,不由阈值做:
+                                           # 阈值会让安静的某天整池归零,而"空"看着像"没接上")
     weread_fullsync_on_renewal: bool = False  # renewal 后的全量补采开关(默认关!)
                                      # 2026-09-28 实测:81 号×cover+列表 ≈162 次的补采炸弹会在
                                      # renewal 后的新会话上一次性打穿全部额度,会话数小时内即死,

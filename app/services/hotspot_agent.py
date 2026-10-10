@@ -228,6 +228,89 @@ def _platform_newcomers(db: Session, user_id: int, model,
     return dict(ranked[:limit])
 
 
+def _lead_keyword(title: str) -> str:
+    """线索标题 → 能做检索/匹配的**话题名**:去掉 URL、压掉空白、截断。
+
+    为什么要洗:抖音线索的标题里**常直接带链接**(实测
+    `《高性价比人生指南》原文100页。https://etern…`)—— 链接进关键词后,
+    ① 展示行被撑爆;② `_match_supply` 的**子串匹配**拿它去比对资源标题必然落空。
+    ⚠️ **只做无损清洗**(去链接、压空白、截断),不改写内容 —— 与 `hot_sources._clean_title` 同一纪律。
+    """
+    import re as _re
+
+    s = _re.sub(r"https?://\S+", "", str(title or ""))
+    s = _re.sub(r"\s+", " ", s).strip()
+    return s[:80]
+
+
+def _lead_candidates(db: Session, user_id: int, *, max_age_hours: int | None = None,
+                     cap: int | None = None, stats: dict | None = None) -> list[dict]:
+    """**抖音推广线索**当选题候选(2026-10-10,用户口径「接,按率和新鲜度」)。
+
+    ★★ **为什么热度必须用「转发率」而不是原始转发量** —— 这条不说清就会做错:
+    `share_count` 是**抓到那一刻的一次性快照**(见 `DouyinLead` 的 docstring),它是
+    **累计量** —— 线索越老攒得越多。所以**按原始转发量排序 = 系统性偏向老线索**。
+    实测:原始转发榜首那条是 **47156 转发 / 已发布 67.3 小时**;而一条
+    **4.2 小时就攒到 1379 转发**的「正在起量」线索,在原始榜上被压到十几名开外。
+    ⇒ 除以「发布→抓到的时长」才是**可比的热度**:实测中位 3.5/h、P75 17.3/h、
+    P90 65.8/h、最高 701/h(142 条有发布时间的线索)。
+    ⚠️ 这个量**只用来排序/展示**,**不冒充** `growth`(那是涨幅%):展示行对线索
+    换成「📈扩散 N 转发/小时」,排序用 `lead_demand`(见 `_resonance` 里那段)。
+
+    **为什么用"名额"而不是"最低转发率门槛"**:门槛会让安静的某天**整池归零**,
+    而"池子空"与"这条链没接上"看起来一模一样(本仓反复踩的老毛病)。
+    改成 **按率排序 + 取前 `cap` 条** —— 任何时候都有东西可看,冷热由率体现。
+
+    时间口径与 `chain_ordering` 一致:`coalesce(publish_at, found_at)`。
+    (`publish_at` 实测填充率 88%,缺的那批用抓到时刻兜底 —— **不编**。)
+    """
+    from app.db.models import DouyinLead
+
+    if cap is None:
+        cap = int(getattr(get_settings(), "hotspot_lead_cap", 5) or 0)
+    if max_age_hours is None:
+        max_age_hours = int(getattr(get_settings(), "hotspot_lead_max_age_hours", 72) or 0)
+    if cap <= 0 or max_age_hours <= 0:
+        if stats is not None:
+            stats.update({"lead_total": 0, "lead_kept": 0, "lead_state": "关闭"})
+        return []
+
+    now = datetime.now()
+    when = func.coalesce(DouyinLead.publish_at, DouyinLead.found_at)
+    rows = db.scalars(select(DouyinLead).where(
+        DouyinLead.user_id == user_id,
+        when >= now - timedelta(hours=max_age_hours))).all()
+
+    cands: list[dict] = []
+    for r in rows:
+        kw = _lead_keyword(r.title)
+        if len(kw) < 2:                      # 太短没法检索/匹配(与 search_resources 同口径)
+            continue
+        pub = r.publish_at or r.found_at
+        #: 分母**至少 1 小时** —— 刚发布的线索如果只过了几分钟,除以小数会把率放大成天文数字
+        age_h = max((r.found_at - pub).total_seconds() / 3600.0, 1.0)
+        rate = float(r.share_count or 0) / age_h
+        cands.append({
+            "keyword": kw, "growth": 0.0, "platforms": "douyin-lead", "auto": True,
+            "lead_rate": rate, "lead_age_h": age_h, "lead_shares": int(r.share_count or 0),
+            #: 排序用的需求强度(= 转发率)。**与 `growth` 分开存**:一个是"扩散速度",
+            #: 一个是"涨幅%",量纲不同,**不混用同一个字段**。
+            "lead_demand": rate,
+            "lead_author": str(r.author or ""),
+        })
+    cands.sort(key=lambda c: (-c["lead_rate"], c["lead_age_h"]))
+    kept = cands[:cap]
+    for i, c in enumerate(kept, 1):
+        c["rank"] = i
+    if stats is not None:
+        stats.update({"lead_total": len(cands), "lead_kept": len(kept),
+                      "lead_state": "ok", "lead_top_rate": round(kept[0]["lead_rate"], 1) if kept else 0})
+    if kept:
+        logger.info("抖音线索进池:%d 条(共 %d 条近 %dh 内的线索),最高扩散 %.1f 转发/小时",
+                    len(kept), len(cands), max_age_hours, kept[0]["lead_rate"])
+    return kept
+
+
 def _match_newcomer(kw_norm: str, newcomers: dict[str, dict]) -> dict | None:
     """抖音词 ↔ 热搜标题共振匹配(归一化双向包含;短词也能命中长标题同话题)。"""
     if len(kw_norm) < 2:
@@ -252,6 +335,19 @@ def _resonance(db: Session, user_id: int, hotspots: list[dict],
     weibo = _platform_newcomers(db, user_id, WeiboHotItem, hours, fresh_hours)
     baidu = _platform_newcomers(db, user_id, BaiduHotItem, hours, fresh_hours)
     for h in hotspots:
+        # ⚠️ **抖音线索不是"热词",必须在这里分流**(2026-10-10)。不分流的后果是**静默失效**:
+        # 下面两行会把 `platforms` **整个覆盖**成 `douyin(+weibo/baidu)`,把 `effective_growth`
+        # 覆盖成 `growth × boost` —— 而线索的 `growth` 是 **0**(我们没有它的涨幅%),
+        # 于是它进池后**需求强度被清零,在 `top_n` 截断前排到最后,候选直接消失**,
+        # 表面上看却是"池子正常、只是今天没选出线索"。所以:线索走自己的量。
+        if "lead_rate" in h:
+            h.setdefault("weibo", None)       # 拿视频标题去微博榜找同题 = 命中率≈0,不做
+            h.setdefault("baidu", None)
+            h["platforms"] = "douyin-lead"    # 保住平台权重(`niche_fit.SOURCE_FIT` 里 0.60)
+            #: 需求强度 = **转发率**(转发/小时)。与"涨幅%"同为**扩散速度**的量纲,
+            #: 所以能直接和 douhot 的 growth 一起参与 `_opportunity` 的排序。
+            h["effective_growth"] = float(h.get("lead_demand") or 0.0)
+            continue
         kw = _norm(h["keyword"])
         w = _match_newcomer(kw, weibo)
         b = _match_newcomer(kw, baidu)
@@ -265,6 +361,30 @@ def _resonance(db: Session, user_id: int, hotspots: list[dict],
         if w:
             boost *= 1.2
         h["effective_growth"] = h["growth"] * boost
+
+
+def _heat_text(h: dict) -> str:
+    """**热度口径**一行:线索用「扩散率」,其余用「涨幅%」。
+
+    ⚠️ 为什么要分口径:线索**没有**涨幅(`growth` 恒为 0)——
+    照原样渲染就是「热度 +0%」,读起来像"没人理",而事实是**转发率很高**。
+    **不能为了显示好看就把转发率塞进 `growth`** —— 那是把两个量纲混成一个字段,
+    以后谁都分不清"这个 300 到底是 300% 还是 300 次/小时"。
+    """
+    if "lead_rate" in h:
+        return (f"📈扩散 {h['lead_rate']:.0f} 转发/小时"
+                f"(已发布 {h.get('lead_age_h', 0):.0f}h,共 {h.get('lead_shares', 0)} 转发)")
+    return f"热度 +{h['growth']:.0f}%"
+
+
+def _lead_tag(h: dict) -> str:
+    """线索的**紧凑**标记 —— 给"没配到现成资源"的那一行用(那行本来不显示热度)。
+
+    返回空串 = 不是线索(所有非线索条目走这条,输出与改动前**完全一致**)。
+    """
+    if "lead_rate" not in h:
+        return ""
+    return f" 📈扩散 {h['lead_rate']:.0f}/h(发布 {h.get('lead_age_h', 0):.0f}h)"
 
 
 def _resonance_tag(h: dict) -> str:
@@ -1010,6 +1130,19 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
         if _k and _k not in _seen:
             hotspots.append(_c)
             _seen.add(_k)
+    # **抖音推广线索进池**(2026-10-10,用户口径「接,按率和新鲜度」):
+    # 「**同行正在推这个资源**」—— 与 bili-pan 同权重(0.60),热度按**转发率**(见 `_lead_candidates`)。
+    lead_stats: dict = {}
+    if getattr(settings, "hotspot_lead_enabled", True):
+        try:
+            for _c in _lead_candidates(db, user_id, stats=lead_stats):
+                _k = _norm(_c["keyword"])
+                if _k and _k not in _seen:
+                    hotspots.append(_c)
+                    _seen.add(_k)
+        except Exception:  # noqa: BLE001 - 线索链出问题不该拖垮整轮选题
+            logger.exception("抖音线索进池失败,本轮跳过(其余来源照常)")
+            lead_stats["lead_state"] = "异常"
     if not hotspots:
         # 晨间/冷却期兜底(2026-09-30):涨幅>=50% 的口径在热点冷却时段会空手——
         # 一级:微博/百度"新上榜"(上升信号最干净的代理);二级:douhot 降阈值取正增长词。
@@ -1160,7 +1293,7 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
         risk_tag = f" ⚠️{why_risk},慎投时效" if level == "high" else ""
         comp = h.get("competition")
         comp_tag = f" 竞争{round(1 / comp - 1)}家" if comp is not None and comp < 1 else " 竞争空白"
-        line = (f"🔥[# {row_ids.get(h['keyword'], '?')}]《{h['keyword']}》热度 +{h['growth']:.0f}%"
+        line = (f"🔥[# {row_ids.get(h['keyword'], '?')}]《{h['keyword']}》{_heat_text(h)}"
                 f"{_resonance_tag(h)}{_window_tag(h)}{_evidence_tag(h)}{comp_tag} → 已有现成资源:"
                 f"「{art.title[:40]}」({_safe_author(art.author, settings)})"
                 + (f" [{why}]" if why and why != "标题字面命中" else "")
@@ -1171,7 +1304,7 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
     for kw, plan in plan_by_kw.items():
         h = by_kw.get(kw, {})
         entries.append((float(h.get("opportunity") or 0),
-            f"💡[# {row_ids[kw]}] {kw}{_resonance_tag(h)}{_window_tag(h)}{_evidence_tag(h)}"
+            f"💡[# {row_ids[kw]}] {kw}{_lead_tag(h)}{_resonance_tag(h)}{_window_tag(h)}{_evidence_tag(h)}"
             f"\n{_fit_line(h)}{_plan_text(plan)}",
                         ""))
     entries.sort(key=lambda x: -x[0])
@@ -1217,7 +1350,11 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
             # 热榜候选池的**内容年龄**体检(2026-10-10):剔了几条超龄的 / 几条时间未知 /
             # 几条资源型豁免 —— 与 evidence_tally 同一个理由:**别让"闸门没生效"看起来像
             # "今天恰好没有旧内容"**。
-            "pool_age": pool_stats}
+            "pool_age": pool_stats,
+            # 抖音线索进池的体检(2026-10-10):近 N 小时有几条线索、进池几条、最高扩散率。
+            # 同一个理由:**「0 条」与「没接上」必须能分开看** —— `lead_state=ok 且 lead_total=0`
+            # 是"这几天确实没线索",`lead_state=关闭/异常` 才是链的问题。
+            "lead_pool": lead_stats}
 
 
 def hotspot_agent_tick_all_users(settings: Settings | None = None) -> int:
