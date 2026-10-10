@@ -194,7 +194,10 @@ class TestDeadLinkIsTerminal:
 
         class _C:
             def __init__(self, ck) -> None: ...
-            def transfer_and_share(self, url, password=""):
+            #: ⚠️ **替身要跟着真实签名走**:`transfer_and_share` 现在多一个 `intro_dir=`
+            #: (**三盘宣传简介**,2026-10-10)。不收 `**k` 的话,Python 在**调用时**就抛
+            #: `TypeError`(函数体根本没跑)⇒ 被上层当成「转存失败」记 `failed` —— 而**代码是对的**。
+            def transfer_and_share(self, url, password="", **k):
                 raise baidupan_transfer.BaiduPanError("转存失败(errno=-6 分享文件已被删除)")
 
         monkeypatch.setattr(baidupan_transfer, "BaiduPanClient", _C)
@@ -219,7 +222,10 @@ class TestAuthExpiryIsRetryableAndAlerted:
 
         class _C:
             def __init__(self, ck) -> None: ...
-            def transfer_and_share(self, url, password=""):
+            #: ⚠️ **替身要跟着真实签名走**:`transfer_and_share` 现在多一个 `intro_dir=`
+            #: (**三盘宣传简介**,2026-10-10)。不收 `**k` 的话,Python 在**调用时**就抛
+            #: `TypeError`(函数体根本没跑)⇒ 被上层当成「转存失败」记 `failed` —— 而**代码是对的**。
+            def transfer_and_share(self, url, password="", **k):
                 raise baidupan_transfer.BaiduPanAuthError("百度网盘登录态失效(账户已过期，重新登陆)")
 
         monkeypatch.setattr(baidupan_transfer, "BaiduPanClient", _C)
@@ -256,7 +262,10 @@ class TestAuthExpiryIsRetryableAndAlerted:
 
         class _C:
             def __init__(self, ck) -> None: ...
-            def transfer_and_share(self, url, password=""):
+            #: ⚠️ **替身要跟着真实签名走**:`transfer_and_share` 现在多一个 `intro_dir=`
+            #: (**三盘宣传简介**,2026-10-10)。不收 `**k` 的话,Python 在**调用时**就抛
+            #: `TypeError`(函数体根本没跑)⇒ 被上层当成「转存失败」记 `failed` —— 而**代码是对的**。
+            def transfer_and_share(self, url, password="", **k):
                 raise baidupan_transfer.BaiduPanAuthError("登录态失效")
 
         monkeypatch.setattr(baidupan_transfer, "BaiduPanClient", _C)
@@ -319,7 +328,13 @@ def test_transfer_baidu_extracts_pwd_from_snippet(session, monkeypatch) -> None:
         def __init__(self, ck):
             pass
 
-        def transfer_and_share(self, url, password=""):
+        #: ⚠️ **替身要跟着真实签名走**:`transfer_and_share` 现在多一个 `intro_dir=`
+
+        #: (**三盘宣传简介**,2026-10-10)。不收 `**k` 的话,Python 在**调用时**就抛
+
+        #: `TypeError`(函数体根本没跑)⇒ 被上层当成「转存失败」记 `failed` —— 而**代码是对的**。
+
+        def transfer_and_share(self, url, password="", **k):
             seen["pwd"] = password
             return {"share_url": "https://pan.baidu.com/s/OUR", "password": "abcd"}
 
