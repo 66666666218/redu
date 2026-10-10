@@ -90,11 +90,16 @@ def pull_from_emulator(adb: str = "", tmpdir: str | None = None) -> dict[str, An
     if not rows:
         raise RuntimeError("账号库里没有有效的 accessToken/vid —— App 里是不是没登录?")
     row = rows[0]
-    # ★ **`refreshToken` 也一起读**(2026-10-08):它是**长效**凭据,拿它就能
-    # `POST https://i.weread.qq.com/login` **纯 HTTP 换新的 accessToken** ——
-    # 也就是说模拟器**只需要偶尔开一次**(换/续 refreshToken),日常续期不再需要它。
-    # 这条是查历史抓包(`data/_mitm_weread.txt`)发现的:`/login` 的请求体里
-    # `refreshToken` 就是那个"长效→短效"的兑换凭据。
+    # ★ **`refreshToken` 也一起读**:它是**长效**凭据,而 `POST https://i.weread.qq.com/login`
+    # 的请求体里 `refreshToken` 就是那个「长效→短效」的兑换凭据(查历史抓包
+    # `data/_mitm_weread.txt` 得出的)。
+    #
+    # ⚠️⚠️ **2026-10-10 订正:这只是"读出来了",兑换那一步从来没实现。**
+    # 全仓库**没有任何 `/login` 的调用**(`weread_app_client` 只有 `articles()`)——
+    # 所以**续期实际仍然靠 `refresh_with_wake()` 用 adb 唤醒 App 重读账号库**,
+    # 模拟器照样每次都得开。原文写的是"日常续期不再需要它",读起来像**已经做完了**
+    # (本仓最忌的"看着像做了")。真要做,卡点是 `/login` 的**64 位签名(带密钥)**,
+    # 得逆微读 APK —— 与夸克那次同一形状,但**难度不在算法而在签名**。
     return {"accessToken": str(row["accessToken"]), "vid": str(row["vid"]),
             "refreshToken": str(row.get("refreshToken") or ""),
             "refreshTokenExpired": row.get("refreshTokenExpired"),
