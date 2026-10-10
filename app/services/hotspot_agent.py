@@ -91,7 +91,9 @@ def _family(src: str) -> str:
 
 def _platform_hot_candidates(db: Session, user_id: int, top_rank: int = 10,
                              hours: int = 24, cap: int = 60,
-                             cap_single: int | None = None) -> list[dict]:
+                             cap_single: int | None = None,
+                             max_age_hours: int | None = None,
+                             stats: dict | None = None) -> list[dict]:
     """多平台热榜候选(v2.2.0):hot_source_items 近 N 小时 top 条目进入选题池。
 
     跨平台同现(标题归一化相同 ≥2 平台)是全网级真实信号;单平台 top 交给 LLM 判可做性。
@@ -111,28 +113,75 @@ def _platform_hot_candidates(db: Session, user_id: int, top_rank: int = 10,
     B站对标号那条链(`source="bili-pan"`,权重 0.60 全场最高)正是这样一条都进不去的。
     所以给单平台单独留名额:先按原规则取 `cap` 条跨平台,再补 `cap_single` 条
     **按权重最好**的单平台条目。
+
+    ⚠️⚠️ **内容年龄闸门(2026-10-10 加,也是实测出来的)**
+    ★ 先说**为什么以前没发现**:`cutoff` 卡的是 **`captured_at`(我们抓到的时刻)**,
+    不是**内容自身的发布时刻** —— 于是**一个一周前的旧帖,只要还被我们每小时扫到,
+    就永远"年轻"**。这是"我们抓到了"与"东西是新的"两件事被混成一件。
+    实测(刚把 `published_at` 填上后,本地样本 283 条):候选池里 **26% 的内容超过 3 天**,
+    其中 6% 超过 7 天;最老的一条是**知乎半年前的提问**(5013 小时),
+    **少数派的中位年龄是 245.9 小时 ≈ 10 天**(它的「热门文章」接口本来就回十几天的文章)。
+    ⇒ 闸门:`published_at` 比 `max_age_hours` 更早的**不进池**。三条细则:
+      · **时间未知的不剔**(不少源就是不给时间;不知道 ≠ 不新鲜)—— 单独计数,别混进"剔除数";
+      · **资源型源豁免**(`niche_fit.RESOURCE_SIGNAL_SOURCES`):`bili-pan` 的那列是
+        **对标视频的投稿时刻**,老三天**照样是"同行正在推这个资源"**,而它是权重最高的那条链;
+      · **绝不静默**:剔了几条、几条时间未知,都写进 `stats`(调用方落到 `runs.detail`),
+        与 `evidence_tally` 同一个理由 —— "恒为 0"和"没接上"必须能分开看。
     """
     from app.db.models import HotSourceItem
-    from app.services.niche_fit import SOURCE_FIT
+    from app.services.niche_fit import RESOURCE_SIGNAL_SOURCES, SOURCE_FIT
 
     if cap_single is None:                       # 不传就读配置,便于线上调参
         from config.settings import get_settings
 
         cap_single = int(getattr(get_settings(), "hotspot_single_platform_slots", 20) or 0)
+    if max_age_hours is None:
+        from config.settings import get_settings
+
+        max_age_hours = int(getattr(get_settings(), "hotspot_max_content_age_hours", 72) or 0)
 
     cutoff = datetime.now() - timedelta(hours=hours)
-    rows = db.execute(select(HotSourceItem.source, HotSourceItem.title, HotSourceItem.rank)
+    rows = db.execute(select(HotSourceItem.source, HotSourceItem.title, HotSourceItem.rank,
+                             HotSourceItem.published_at)
                       .where(HotSourceItem.user_id == user_id,
                              HotSourceItem.captured_at >= cutoff,
                              HotSourceItem.rank <= top_rank)).all()
     agg: dict[str, dict] = {}
-    for src, title, rank in rows:
+    for src, title, rank, pub in rows:
         k = _norm(str(title or ""))
         if not k:
             continue
-        e = agg.setdefault(k, {"title": str(title), "plats": set(), "best_rank": 99})
+        e = agg.setdefault(k, {"title": str(title), "plats": set(), "best_rank": 99,
+                               "published_at": None})
         e["plats"].add(str(src))
         e["best_rank"] = min(e["best_rank"], int(rank or 99))
+        if pub is not None and (e["published_at"] is None or pub > e["published_at"]):
+            e["published_at"] = pub            # 同一条目多行:取**最新**的那个时刻
+
+    # ---- 内容年龄闸门(见上面长注释)----
+    stale = unknown = exempt = 0
+    if max_age_hours > 0:
+        old_cut = datetime.now() - timedelta(hours=max_age_hours)
+        kept: dict[str, dict] = {}
+        for k, e in agg.items():
+            pub = e["published_at"]
+            if pub is None:
+                unknown += 1
+            elif pub < old_cut:
+                if e["plats"] & RESOURCE_SIGNAL_SOURCES:
+                    exempt += 1                # 资源型源的"旧"不是旧(见集合注释)
+                else:
+                    stale += 1
+                    continue
+            kept[k] = e
+        agg = kept
+        if stale or exempt:
+            logger.info("热榜候选池:内容超过 %dh 的剔除 %d 条、资源型源豁免 %d 条;"
+                        "时间未知 %d 条(不剔)", max_age_hours, stale, exempt, unknown)
+    if stats is not None:                      # 非静默:调用方把它写进 runs.detail
+        stats.update({"pool_total": len(agg) + stale, "pool_age_dropped": stale,
+                      "pool_age_unknown": unknown, "pool_age_exempt": exempt,
+                      "pool_max_age_hours": max_age_hours})
     out = [{"keyword": e["title"], "growth": 0.0,
             "platforms": "+".join(sorted(e["plats"])), "rank": e["best_rank"],
             "auto": True}  # 自动发现型:需过适配度;用户自选监控词(growth 型)不拦
@@ -955,7 +1004,8 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
     hotspots = _hotspots(db, user_id, min_growth)
     # v2.2.0:多平台热榜候选并入(全部进入 Agent 选题;与 douhot 同词去重,保留涨幅版)
     _seen = {_norm(h["keyword"]) for h in hotspots}
-    for _c in _platform_hot_candidates(db, user_id):
+    pool_stats: dict = {}
+    for _c in _platform_hot_candidates(db, user_id, stats=pool_stats):
         _k = _norm(_c["keyword"])
         if _k and _k not in _seen:
             hotspots.append(_c)
@@ -1163,7 +1213,11 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
             "llm": len(plan_by_kw), "notified": len(matched) + len(plan_by_kw),
             # 把"各档证据各触发几次"带出去 —— 调用方写进运行记录,链路体检就能读到
             # (不用等推送;而且**恒为 0 的档**一眼可见,那是"接了但没生效"的信号)
-            "evidence_tally": tally}
+            "evidence_tally": tally,
+            # 热榜候选池的**内容年龄**体检(2026-10-10):剔了几条超龄的 / 几条时间未知 /
+            # 几条资源型豁免 —— 与 evidence_tally 同一个理由:**别让"闸门没生效"看起来像
+            # "今天恰好没有旧内容"**。
+            "pool_age": pool_stats}
 
 
 def hotspot_agent_tick_all_users(settings: Settings | None = None) -> int:

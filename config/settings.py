@@ -161,6 +161,14 @@ class Settings(BaseSettings):
     # 远程实测 24h:去重 **2027** 条候选里**跨平台只有 81 条** ⇒ 81 > 60,1946 条单平台全被埋
     # (B站对标号 `source="bili-pan"` 那条链正是这样一条都进不去,权重 0.60 全场最高也白搭)。
     hotspot_single_platform_slots: int = 20
+    #: **内容年龄闸门**(2026-10-10):热榜候选进池前,内容自身的发布时刻比它更早的**剔掉**。
+    #: 治的是什么:候选池按 `captured_at`(**我们抓到的时刻**)取 24h 窗口 ——
+    #: **一周前的旧帖只要还被我们每小时扫到,就永远"年轻"**。实测(填上 published_at 后)
+    #: 池里 **26% 的内容超过 3 天**,最老一条是知乎半年前的提问,少数派中位年龄 10 天。
+    #: 默认 **72**(3 天):先只剔"明显不是热点"的那一档,不碰 1~3 天仍在发酵的。
+    #: ⚠️ `0` = 关闭闸门。资源型源(`bili-pan`)天然豁免,见 `niche_fit.RESOURCE_SIGNAL_SOURCES`。
+    #: 剔除数 / 未知数会进 `runs.detail` 的 `pool_age`,便于回看闸门是否真在生效。
+    hotspot_max_content_age_hours: int = 72
     weread_fullsync_on_renewal: bool = False  # renewal 后的全量补采开关(默认关!)
                                      # 2026-09-28 实测:81 号×cover+列表 ≈162 次的补采炸弹会在
                                      # renewal 后的新会话上一次性打穿全部额度,会话数小时内即死,
