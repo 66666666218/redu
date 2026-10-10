@@ -97,7 +97,7 @@ def main() -> int:
     plan = (_load_plan(plan_file) if plan_file
             else build_plan(qt, cache=cache, depth=depth, mmdd_prefix=month))
     print(f"⚠️ 清理范围:`MMDD` 前缀 = {month!r}"
-          f"({'**所有月份**' if not month else '只清 ' + month + ' 月'})"
+          f"({'**所有月份**' if not month else '只清 ' + month + ' 月'})")
     # ⚠️ **保护名单现场重取**:计划可能是十几分钟前扫的,这期间又发了新链 ——
     # 用旧名单删就是拿一份过期的安全清单去删盘。
     pf, pn, ns = protected_fids(qt)
