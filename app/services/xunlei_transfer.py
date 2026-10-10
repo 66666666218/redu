@@ -859,12 +859,57 @@ def list_all_files(parent_id: str = "", cred: dict | None = None, page_size: int
     return out
 
 
-def transfer_and_share(share_url: str, parent_id: str = "", settings=None) -> dict:
+def _intro_file_ids(h: dict, intro_dir: str, *fallbacks: str) -> list[str]:
+    """找 `intro_dir` 这个目录、列出里面的**文件** id(目录不列)。
+
+    先在 `fallbacks` 给的父目录里找,再在**根目录**找 —— 简介目录通常就在根上。
+    ⚠️ 找不到就返回空,**不抛**(简介拿不到不该毁掉整次转存)。
+    """
+    want = intro_dir.strip().strip("/")
+    if not want:
+        return []
+    for pid in (*fallbacks, ""):
+        try:
+            top = _json(requests.get(f"{_API}/drive/v1/files", headers=h, timeout=_TIMEOUT,
+                                     params={"parent_id": pid or "", "limit": "200"}))
+        except Exception:                            # noqa: BLE001 - 某个父目录列不动就换下一个
+            continue
+        for x in (top.get("files") or []):
+            if str(x.get("kind")) != "drive#folder":
+                continue
+            if str(x.get("name") or "").strip() != want:
+                continue
+            try:
+                inner = _json(requests.get(f"{_API}/drive/v1/files", headers=h, timeout=_TIMEOUT,
+                                           params={"parent_id": str(x.get("id")), "limit": "200"}))
+            except Exception:                        # noqa: BLE001
+                return []
+            return [str(y["id"]) for y in (inner.get("files") or [])
+                    if str(y.get("kind")) != "drive#folder" and y.get("id")]
+    return []
+
+
+def transfer_and_share(share_url: str, parent_id: str = "", settings=None,
+                       intro_dir: str | None = None) -> dict:
     """`pan.xunlei.com/s/xxx` → 转存到我方盘 → 生成我方分享链。
 
     返回结构与 `quark_transfer.transfer_and_share` 对齐:
     `{"status": "ok"|"failed", "message", "share_url", "code", "fid"}`。
+
+    `intro_dir` = **宣传简介所在目录名**(如 `监控简介`)。
+    ⚠️ **留 `None` = 自己从 `settings.pan_intro_xunlei_dir` 读**(没配就不做)—— 这样
+    三个调用点**一个都不用改**,免得每处都抄一遍 `getattr(settings, …)`。
+    传空串 = 明确不做。
+    ⚠️ 简介是**并进分享清单**(`file_ids` 里加一个 id),**不做复制** ——
+    与夸克/百度同一条纪律:**必须在建链这一步就带上,建完再补是补不进去的**。
     """
+    if intro_dir is None:
+        try:
+            from config.settings import get_settings
+
+            intro_dir = (getattr(settings or get_settings(), "pan_intro_xunlei_dir", "") or "")
+        except Exception:                            # noqa: BLE001 - 读不到配置就当作不做
+            intro_dir = ""
     cred = _credentials(settings)
     if not cred:
         return {"status": "failed", "message": "未配置迅雷凭据(需先扫码登录)"}
@@ -935,6 +980,20 @@ def transfer_and_share(share_url: str, parent_id: str = "", settings=None) -> di
             # 建分享必 `file_not_found`(2026-10-02 实测踩过)。宁可明确失败。
             return {"status": "failed",
                     "message": f"转存任务未返回文件 id(progress={task.get('progress')})"}
+
+        # ★ 宣传简介:并进**分享清单**(不是复制)。与夸克/百度同一条纪律 ——
+        #   建链这一步就得带上,建完再补补不进去。
+        if intro_dir:
+            try:
+                intro_ids = _intro_file_ids(h, intro_dir, parent_id)
+                if intro_ids:
+                    file_ids = list(dict.fromkeys([*file_ids, *intro_ids]))
+                    logger.info("宣传简介已并进分享清单:%d 个(%s)", len(intro_ids), intro_dir)
+                else:
+                    logger.warning("宣传简介目录没找到或是空的,本轮跳过:%s", intro_dir)
+            except Exception as exc:                # noqa: BLE001 - 拿不到简介不该毁掉整次转存
+                logger.warning("取宣传简介失败(不挡转存/分享):%s: %s",
+                               type(exc).__name__, str(exc)[:120])
 
         share = _json(requests.post(f"{_API}/drive/v1/share", headers=h, timeout=_TIMEOUT,
                                     json={"file_ids": file_ids, "share_to": "copy",

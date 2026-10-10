@@ -254,7 +254,9 @@ def transfer_pan_url(session, user_id: int, pan_url: str, settings=None,
 
         from app.services import xunlei_transfer as xt
 
-        res = xt.transfer_and_share(pan_url)
+        res = xt.transfer_and_share(
+            pan_url, settings=settings,
+            intro_dir=getattr(settings, "pan_intro_xunlei_dir", "") or "")
         if res.get("status") == "ok":
             return {"status": "ok", "our_url": str(res.get("share_url") or ""),
                     "code": str(res.get("code") or ""), "message": ""}

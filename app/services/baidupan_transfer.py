@@ -288,31 +288,24 @@ class BaiduPanClient:
             raise BaiduPanError(_transfer_error(errno, why))
         paths = [f"{target_dir.rstrip('/')}/{n}" for n in names if n]
 
-        # ★ 宣传简介:夹在「转存」与「建分享」之间(顺序反了链子里就没有它)。
-        # ⚠️ 失败**不挡转存/分享** —— 但要大声记,别让它变成静默缺失。
+        # ★★★ 宣传简介(2026-10-10 定案):**不是复制,是并进分享清单**。
+        #   三条路实测都不通:① `opera=copy` 恒 `errno=2`(而 `delete` 正常 ⇒ 不是会话问题);
+        #   ② 转存**自己的**分享(建一条简介分享再 transfer)回 `errno=2 文件已存在`(百度挡自转);
+        #   ③ 上传接口未实现。
+        #   ⇒ 但 `share/pset(path_list=[...])` 本来就能一次列多个路径 ——
+        #     把简介**和资源并列**列进去,分享里就有它了(对方整包保存时一并拿到)。
+        #   ⚠️ 与夸克侧同一条纪律:**必须在建链这一步就带上**,建完再补是补不进去的。
         if intro_dir:
             try:
-                src = self.list_dir(intro_dir)
-                promo = [(str(x.get("path") or ""), str(x.get("server_filename") or ""),
-                          int(x.get("size") or 0))
-                         for x in src if not x.get("isdir") and x.get("path")]
-                if not src:
-                    logger.warning("宣传简介目录在我们盘里找不到,本轮跳过:%s", intro_dir)
-                elif not promo:
-                    logger.warning("宣传简介目录是空的,本轮跳过:%s", intro_dir)
+                promos = [x for x in self.list_dir(intro_dir)
+                          if not x.get("isdir") and x.get("server_filename")]
+                if not promos:
+                    logger.warning("宣传简介目录是空的或不存在,本轮跳过:%s", intro_dir)
                 else:
-                    # 已有同款就免复制 —— 判据是**名字 + 大小一起认**(只看名字会把同名不同内容
-                    # 的当成同款;与夸克侧的复制去重同一口径)。
-                    have = {(str(x.get("server_filename") or ""), int(x.get("size") or 0))
-                            for x in self.list_dir(target_dir)}
-                    todo = [p for p, n, s in promo if (n, s) not in have]
-                    if todo:
-                        self.copy_into(target_dir, todo)
-                        logger.info("宣传简介已放进资源目录:%d 个", len(todo))
-                    else:
-                        logger.info("宣传简介:资源目录里已有同款,**免复制**")
+                    paths += [f"{intro_dir.rstrip('/')}/{x['server_filename']}" for x in promos]
+                    logger.info("宣传简介已并进分享清单:%d 个", len(promos))
             except Exception as exc:                    # noqa: BLE001 - 简介失败不该毁掉整次转存
-                logger.warning("放宣传简介失败(不挡转存/分享):%s: %s",
+                logger.warning("取宣传简介失败(不挡转存/分享):%s: %s",
                                type(exc).__name__, str(exc)[:120])
 
         # pset 分享(NetdiskUA,无需 bdstoken);转存后立刻分享偶发未就绪,重试 2 次
