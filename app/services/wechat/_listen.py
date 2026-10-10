@@ -443,12 +443,23 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
             listed, list_via = True, "app"
         except weread_budget.Blocked as exc:
             logger.debug("%s", exc)
+            #: **被熔断挡下也要计数**(2026-10-10):它与"发出去了被拒"是两件事
+            #: (前者是我们主动不发、保护账号),但**都必须看得见** —— 否则"App 路整轮没动"
+            #: 在运行记录里跟"这一轮不需要问 App"长得一模一样。
+            if stats is not None:
+                stats["weread_list_app_blocked"] = stats.get("weread_list_app_blocked", 0) + 1
         except Exception as exc:  # noqa: BLE001 - 兜底也失败 = 本号没答案,但不影响 cover
             # ⚠️⚠️ **兜底也断了必须看得见**(2026-10-06 实测)。这里原来打的是 `debug`,
             # 而生产日志级别是 INFO ⇒ **App 兜底全断,日志里一个字都没有**。
             # 代价:这条路(10-05 为"把断了一周的阅读数接回来"而加)**一次都没成功过**,
             # 也没有任何人知道 —— 每天 17 轮静默失败,看起来和"今天没人发文章"一样。
             # 每轮只喊一次(142 个号会刷屏),并把它记进 `wr_stats` 供运行记录统计。
+            # ⚠️ **2026-10-10 补:光有"喊一次"也不够** —— 那个标志只让日志打一行,
+            # 而**运行记录里 `app=` 只统计成功**,于是"App 路 22 轮里 21 轮全是 0"
+            # 这种事实,在报告里看着和"这一轮不需要问 App"完全一样。
+            # ⇒ 现在**失败也计数**,汇总行进 detail。
+            if stats is not None:
+                stats["weread_list_app_fail"] = stats.get("weread_list_app_fail", 0) + 1
             if not (stats or {}).get("weread_app_fail_logged"):
                 if stats is not None:
                     stats["weread_app_fail_logged"] = 1
@@ -466,11 +477,15 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
                         notify_incident(
                             session, user_id, "wechat",
                             "🟠 微信读书 App 登录态失效,精确阅读数断了",
-                            "App 兜底路(阅读数的最后一条路)取不到数据。修法:**在雷电模拟器里"
-                            "打开微信读书 App**(必要时退出重登),然后跑 "
-                            "`python scripts/weread_app_token.py` 重取 token;"
-                            "取到新 token 后下一轮监听自动接回。网页路被账号级拦(`-2041`),"
-                            "App 路是当前唯一能拿到精确阅读数的通道。")
+                            "App 兜底路(阅读数的最后一条路)取不到数据。\n"
+                            "⚠️ **2026-10-10 起续期已是纯 HTTP**(签名 `sha256(timestamp+deviceId+random)`,"
+                            "无需模拟器),所以先看运行记录里的 `app_fail` 与自愈日志:\n"
+                            "  · 若报「HTTP 铸 token 失败」⇒ 多半是 **`refreshToken` 本身过期/被吊销**,\n"
+                            "    那才需要**开一次**雷电模拟器读账号库重取(用 "
+                            "`scripts/weread_app_token.py`),**不必像以前那样一直开着**;\n"
+                            "  · 若报「身份不配套 / -2012」⇒ token 与客户端身份档对不上(见 "
+                            "`EINK_HEADERS` 的注释)。\n"
+                            "网页路被账号级拦(`-2041`),App 路是当前唯一能拿到精确阅读数的通道。")
                     except Exception:  # noqa: BLE001 - 告警失败不影响监听
                         logger.debug("App 路失效告警推送失败", exc_info=True)
     # 正文:先直抓 mp.weixin.qq.com(不占微信读书配额),**抓空了再用这篇的 reviewId
@@ -1047,6 +1062,11 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
         # 不能让它和"该号今天真的只发了一篇"长得一样(与 -2014 假象、全败标 success 同族)。
         # list_skipped = 本轮列表已被额度熔断挡下、这些号根本没被问过(见 breaker)。
         detail += (f" weread_list(ok={enumerable} app={wr_stats.get('weread_list_app_ok', 0)}"
+                   # ★ **App 路的失败/熔断也要写出来**(2026-10-10):只统计成功的话,
+                   # 「App 路整轮没动」与「这轮不需要问 App」看起来一模一样 ——
+                   # 我们正是因此**漏看了这条路连续几周 `app=0`**。
+                   f" app_fail={wr_stats.get('weread_list_app_fail', 0)}"
+                   f" app_blocked={wr_stats.get('weread_list_app_blocked', 0)}"
                    f" off={wr_stats.get('weread_list_off', 0)}"
                    f" off_with_new={off_new} skipped={wr_stats.get('weread_list_skipped', 0)})")
     if gate["ok"]:
