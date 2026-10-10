@@ -486,7 +486,9 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                             code_b = m.group(1) if m else ""
                         else:
                             pwd_b = extract_pwd(getattr(r, "content", "") or "", u) or extract_pwd(r.title or "", u)
-                            res_b = baidu_client.transfer_and_share(u, password=pwd_b)
+                            res_b = baidu_client.transfer_and_share(
+                                u, password=pwd_b,
+                                intro_dir=getattr(settings, "pan_intro_baidu_dir", "") or "")
                             share_url_b = res_b["share_url"]
                             code_b = res_b.get("password", "") or ""
                             mine_b = f"{share_url_b} (提取码 {code_b}) [百度]" if code_b else f"{share_url_b} [百度]"

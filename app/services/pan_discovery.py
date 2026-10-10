@@ -244,7 +244,9 @@ def transfer_pan_url(session, user_id: int, pan_url: str, settings=None,
                 return {"status": "pending", "message": "未配百度网盘 Cookie(配上后会自动重试)",
                         "our_url": "", "code": ""}
             pwd = extract_pwd(snippet or "", pan_url) or ""
-            res = BaiduPanClient(ck).transfer_and_share(pan_url, password=pwd)
+            res = BaiduPanClient(ck).transfer_and_share(
+                pan_url, password=pwd,
+                intro_dir=getattr(settings, "pan_intro_baidu_dir", "") or "")
             if res.get("share_url"):
                 return {"status": "ok", "our_url": str(res.get("share_url")),
                         "code": str(res.get("password") or ""), "message": ""}   # ⚠️ 百度返回的键也是 password

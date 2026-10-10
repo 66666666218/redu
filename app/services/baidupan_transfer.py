@@ -105,6 +105,110 @@ class BaiduPanClient:
         self._session.headers["User-Agent"] = _BROWSER_UA
         return self._session
 
+    # ---- 盘内操作(为「转存后把宣传简介放进资源目录」而加,2026-10-10)----
+
+    def get_bdstoken(self) -> str:
+        """取**我们自己盘**的 `bdstoken` —— 网页版所有写操作都要它。
+
+        ⚠️ 与 `_share_meta` 里从**分享页**抠出来的那个不是一回事:那个只能用于转存别人的分享。
+        盘内操作(复制/移动/删除)必须用**本盘**的。
+        """
+        r = self._browser().get(f"{PAN_API}/api/gettemplatevariable",
+                                params={"fields": '["bdstoken","uk"]'},
+                                timeout=self.timeout)
+        try:
+            j = r.json()
+        except ValueError as exc:
+            raise BaiduPanError(f"取 bdstoken 失败:HTTP {r.status_code}") from exc
+        tok = str(((j.get("result") or {}).get("bdstoken")) or "")
+        if not tok or j.get("errno") not in (0, None):
+            raise BaiduPanAuthError(f"取 bdstoken 失败(errno={j.get('errno')})—— 多半是会话失效")
+        return tok
+
+    def list_dir(self, dir_path: str = "/") -> list[dict]:
+        """列目录(分页到 200/页,np 上跟到列完)。条目含 `server_filename`/`path`/`isdir`/`size`。"""
+        out: list[dict] = []
+        start = 0
+        while start < 10000:
+            r = self._browser().get(
+                f"{PAN_API}/api/list",
+                params={"dir": dir_path, "order": "name", "desc": 0, "start": start,
+                        "limit": 200, "web": 1, "app_id": 250528, "clienttype": 0,
+                        "channel": "chunlei"},
+                timeout=self.timeout)
+            j = r.json()
+            if j.get("errno") != 0:
+                raise BaiduPanError(f"列目录失败(errno={j.get('errno')} {dir_path})")
+            items = list(j.get("list") or [])
+            out.extend(items)
+            if len(items) < 200:
+                break
+            start += 200
+        return out
+
+    def copy_into(self, dest_dir: str, src_paths: list[str], *, bdstoken: str = "") -> dict:
+        """把**我们盘内**的文件复制进 `dest_dir`。
+
+        ⚠️⚠️ **2026-10-10 实测:这个网页版接口调不通,别在参数上浪费时间。**
+        对 `POST /api/filemanager?opera=copy` 试了 **6 种参数形态**(带/不带 `async`、
+        `ondup`、`dest` 带尾斜杠、`filelist` 用路径/路径串/`fs_id`、最小参数集、换目标目录),
+        **一律 `errno=2, info=[]`**。
+        ★ **决定性对照**:用**同一个接口**做 `opera=list`(而 `/api/list` 我们是用得通的)
+        —— **同样 `errno=2`** ⇒ 是**这条路由不可用**,不是参数没调对。
+        (没有这个对照,就会一直在参数上瞎调 —— 本仓的"找不到对照"教训,见
+        `falsification-needs-control-variables`。)
+
+        **想真做的话只有两条路**:
+          ① 走**官方 xpan 开放接口** `/rest/2.0/xpan/file?method=filemanager`,要 OAuth `access_token`;
+          ② 复用**已验证可用**的 `share/transfer` —— 给我们自己的简介建一条常驻分享,
+             每次把它转存进 `target_dir`(会多一条常驻分享链)。
+        两种都还没做,`pan_intro_baidu_dir` 默认留空 ⇒ **这条分支默认不生效**。
+        """
+        if not src_paths:
+            return {"copied": 0, "errno": 0}
+        tok = bdstoken or self.get_bdstoken()
+        r = self._browser().post(
+            f"{PAN_API}/api/filemanager",
+            params={"opera": "copy", "async": "1", "onnest": "fail", "bdstoken": tok,
+                    "clienttype": "0", "app_id": "250528", "web": "1", "channel": "chunlei"},
+            data={"filelist": json.dumps(src_paths, ensure_ascii=False), "dest": dest_dir},
+            headers={"X-Requested-With": "XMLHttpRequest",
+                     "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                     "Origin": PAN_API, "Referer": f"{PAN_API}/disk/main"},
+            timeout=self.timeout)
+        j = r.json()
+        info = j.get("info")
+        errno = j.get("errno", -1)
+        if isinstance(info, list) and info and info[0].get("errno") is not None:
+            errno = info[0]["errno"]
+        if errno not in (0, 4):
+            raise BaiduPanError(f"复制失败(errno={errno} {str(j.get('show_msg') or '')[:60]})")
+        return {"copied": len(src_paths), "errno": errno}
+
+    def delete_paths(self, paths: list[str], *, bdstoken: str = "") -> int:
+        """按**路径**删除(`opera=delete`)。返回删除条数。
+
+        ⚠️ 百度这边没有"回收站"保证 —— 调用方**必须自己确认路径**。
+        加它是因为「复制」需要一个可逆的验证手段(复制→核对→删掉),不是为了批量清理。
+        """
+        if not paths:
+            return 0
+        tok = bdstoken or self.get_bdstoken()
+        r = self._browser().post(
+            f"{PAN_API}/api/filemanager",
+            params={"opera": "delete", "async": "1", "onnest": "fail", "bdstoken": tok,
+                    "clienttype": "0", "app_id": "250528", "web": "1", "channel": "chunlei"},
+            data={"filelist": json.dumps(paths, ensure_ascii=False)},
+            headers={"X-Requested-With": "XMLHttpRequest",
+                     "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                     "Origin": PAN_API, "Referer": f"{PAN_API}/disk/main"},
+            timeout=self.timeout)
+        j = r.json()
+        errno = j.get("errno", -1)
+        if errno != 0:
+            raise BaiduPanError(f"删除失败(errno={errno} {str(j.get('show_msg') or '')[:60]})")
+        return len(paths)
+
     # ---- 协议步骤 ----
     def _verify(self, surl: str, password: str) -> None:
         """提取码验证;无密码分享跳过。失败抛 BaiduPanError。"""
@@ -143,8 +247,13 @@ class BaiduPanClient:
 
     def transfer_and_share(self, share_url: str, password: str = "",
                            target_dir: str = "/redian百度转存",
-                           share_pwd: str = "8888") -> dict:
-        """转存分享到自己网盘并创建新分享。返回 {share_url, password, files}。"""
+                           share_pwd: str = "8888", intro_dir: str = "") -> dict:
+        """转存分享到自己网盘、**放进宣传简介**、创建新分享。返回 {share_url, password, files}。
+
+        ⚠️ **简介必须夹在「转存」与「建分享」之间**(2026-10-10,照夸克侧同一条纪律):
+        先建链再放简介,链子快照的就是没有简介的那份 —— 对方保存下来永远看不到它。
+        `intro_dir` = **我们盘里**那个装着简介的目录(如 `/redian宣传`),留空 = 不做。
+        """
         surl = share_url.split("/s/1")[1]
         self._verify(surl, password)
         uk, shareid, bdstoken, files = self._share_meta(surl)
@@ -178,6 +287,33 @@ class BaiduPanClient:
                 raise BaiduPanAuthError(f"百度网盘登录态失效({why.strip()[:40]})")
             raise BaiduPanError(_transfer_error(errno, why))
         paths = [f"{target_dir.rstrip('/')}/{n}" for n in names if n]
+
+        # ★ 宣传简介:夹在「转存」与「建分享」之间(顺序反了链子里就没有它)。
+        # ⚠️ 失败**不挡转存/分享** —— 但要大声记,别让它变成静默缺失。
+        if intro_dir:
+            try:
+                src = self.list_dir(intro_dir)
+                promo = [(str(x.get("path") or ""), str(x.get("server_filename") or ""),
+                          int(x.get("size") or 0))
+                         for x in src if not x.get("isdir") and x.get("path")]
+                if not src:
+                    logger.warning("宣传简介目录在我们盘里找不到,本轮跳过:%s", intro_dir)
+                elif not promo:
+                    logger.warning("宣传简介目录是空的,本轮跳过:%s", intro_dir)
+                else:
+                    # 已有同款就免复制 —— 判据是**名字 + 大小一起认**(只看名字会把同名不同内容
+                    # 的当成同款;与夸克侧的复制去重同一口径)。
+                    have = {(str(x.get("server_filename") or ""), int(x.get("size") or 0))
+                            for x in self.list_dir(target_dir)}
+                    todo = [p for p, n, s in promo if (n, s) not in have]
+                    if todo:
+                        self.copy_into(target_dir, todo)
+                        logger.info("宣传简介已放进资源目录:%d 个", len(todo))
+                    else:
+                        logger.info("宣传简介:资源目录里已有同款,**免复制**")
+            except Exception as exc:                    # noqa: BLE001 - 简介失败不该毁掉整次转存
+                logger.warning("放宣传简介失败(不挡转存/分享):%s: %s",
+                               type(exc).__name__, str(exc)[:120])
 
         # pset 分享(NetdiskUA,无需 bdstoken);转存后立刻分享偶发未就绪,重试 2 次
         last = ""
