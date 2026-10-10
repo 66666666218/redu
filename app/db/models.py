@@ -336,12 +336,19 @@ class WechatArticle(Base):
     collect_num: Mapped[int] = mapped_column(Integer, default=0)
     comment_count: Mapped[int] = mapped_column(Integer, default=0)
     traffic_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # 最近一次采样时间
-    # ⚠️ `traffic_at` **已废弃**与 `WechatTrafficSample` 同因(dajiala 摘除)。
-    # **实测全库非空数 = 0** ⇒ **别再拿它当判断条件**:`feishu/_cards.py` 曾用它
-    # 过滤出一行"已采样阅读 N 篇",而那个 N **结构上永远是 0**(长得像统计、其实恒定)。
-    # 要判"这篇有没有读数",用 `read_num > 0`。
+    # ⚠️ **历史**:这一组列原本是 dajiala(`read_zan_pro`,¥0.06/篇/次)采样的产物,
+    # 那个源摘除后整条链废置,**实测全库非空数 = 0**(`feishu/_cards.py` 曾用它过滤出一行
+    # "已采样阅读 N 篇",而那个 N **结构上永远是 0**)。
+    # ★ **2026-10-10 起重新启用**:精确阅读数已改由**微信读书 App 接口**免费拿
+    # (`i.weread.qq.com/book/articles`,纯 HTTP、无需模拟器,见 `weread_app_token`)。
+    # ⇒ 判"这篇有没有读数"仍用 **`read_num > 0`**(不要拿 `traffic_at` 当存在性判据);
+    #    `traffic_at` 的语义回归它本来的用处:**最近一次采到读数的时刻**。
     sample_count: Mapped[int] = mapped_column(Integer, default=0)         # 已采样次数
     first_read_num: Mapped[int] = mapped_column(Integer, default=0)     # 首采样阅读数(基线对比)
+    #: **基线时刻**(2026-10-10 加):只有 `first_read_num` 而没有它的时刻,就算不出
+    #: **增速** —— 而增速才是"这篇文章正在起量"的信号(绝对值是累计量,系统性偏向老文章,
+    #: 与 `DouyinLead.share_count` 一模一样的 confound)。判读见 `wechat/read_trend.py`。
+    first_read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     trend_flag: Mapped[str] = mapped_column(String(16), default="")     # 爆点苗头 / 回落 / 空
     quality: Mapped[int] = mapped_column(Integer, default=0)            # 内容质量分 0~10
     # 成功进过飞书卡片的时间。NULL = 采到却从未推出去(飞书抖动/超时/进程被杀),

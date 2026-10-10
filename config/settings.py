@@ -93,6 +93,15 @@ class Settings(BaseSettings):
     #   · cover 来自每轮**一次性**拉的书架,不是每号一次。
     # 真正的成本只是"时间",而那几个定点是错开的(见 scheduler 的说明)。
     wechat_listen_batch_size: int = -1
+    #: ---- 阅读数**增长判读**(2026-10-10,dajiala 摘除后重启的那组列)----
+    #: 判据见 `app/services/wechat/read_trend.py`:**只看增速,不看绝对值**
+    #: (阅读数是累计量,绝对值系统性偏向老文章 —— 与 `DouyinLead.share_count` 同一个 confound)。
+    #: ⚠️ 两条防噪阈值不是凑数,是这类公式的必然毛病:
+    #:   `min_span_h` —— 两个采样点挨太近,分母趋零 ⇒ 速率会被放大成天文数字;
+    #:   `min_delta`  —— 冷门号"最近多了 1 个阅读"也算出极高速率,纯噪声。
+    wechat_read_trend_enabled: bool = True
+    wechat_read_trend_min_span_h: float = 2.0     # 观察窗短于这个小时数就不判(返回空)
+    wechat_read_trend_min_delta: int = 20         # 增量小于这个数就不判(返回空)
     quark_cookie: str = ""                 # 夸克网盘 Cookie(pan.quark.cn 登录后复制);用于转存对标文的分享
     quark_save_dir: str = "/redian监听"     # 转存目标目录(自动逐级创建)
     quark_fid_store: str = "data/quark_fid_cache.json"  # 目录 fid 持久缓存(大盘免重扫;幽灵同名复用)

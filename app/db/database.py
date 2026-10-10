@@ -452,6 +452,9 @@ ADDITIONS: dict[str, list[str]] = {
                         "comment_count INTEGER DEFAULT 0", "traffic_at DATETIME",
                         "sample_count INTEGER DEFAULT 0",
                         "first_read_num INTEGER DEFAULT 0",
+                        # 基线**时刻**(2026-10-10):没有它就算不出增速,而增速才是
+                        # "正在起量"的信号(绝对值是累计量,偏向老文章)
+                        "first_read_at DATETIME",
                         "trend_flag VARCHAR(16) DEFAULT ''", "quality INTEGER DEFAULT 0",
                         # 进过飞书卡片的时间;NULL=从未推出去,由监听开头的补推扫回
                         "pushed_at DATETIME"],

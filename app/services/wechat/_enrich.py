@@ -13,13 +13,14 @@ from config.settings import Settings
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, or_, select
 
 from sqlalchemy.orm import Session
 
 import re
 
 from app.services.wechat._text import _extract_pan_urls, assess_quality, detect_pan_types
+from app.services.wechat import read_trend   # 阅读数增长判读(只判读,不采集/不落库)
 from app.services.wechat._source import _quark_cookie
 from app.services.wechat._candidates import _push_candidates
 
@@ -140,15 +141,17 @@ def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchm
         preset_like = int(it.get("like_num") or 0)
         if url_norm in existing:
             rid, old_read, obj = existing[url_norm]
-            if preset_read > 0 and old_read == 0:
-                if obj is not None:               # 本轮新插入、还没 id → 直接改对象
-                    obj.read_num = preset_read
+            # ★★ **2026-10-10 改**:原来的条件是 `old_read == 0` ⇒
+            # **一篇文章一旦有了阅读数,后面更高的值就被丢掉了** —— 于是"增长"这件事
+            # 结构上不可能被观察到(不是判读缺失,是**数据根本没在更新**)。
+            # 现在**只要读数变了就回写**,并交给 `read_trend.observe` 判读增速。
+            if preset_read > 0 and preset_read != old_read:
+                target = obj if obj is not None else (
+                    session.get(WechatArticle, rid) if rid > 0 else None)
+                if target is not None:
+                    read_trend.observe(target, preset_read)     # 回写最新值 + 增速判读
                     if preset_like:
-                        obj.zan_num = preset_like
-                elif rid > 0:
-                    session.execute(update(WechatArticle).where(WechatArticle.id == rid)
-                                    .values(read_num=preset_read,
-                                            zan_num=preset_like or WechatArticle.zan_num))
+                        target.zan_num = preset_like
                 existing[url_norm] = (rid, preset_read, obj)
                 backfilled += 1
             continue
@@ -183,6 +186,10 @@ def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchm
                             pan_urls=chr(10).join(pan_urls)[:2000],
                             read_num=preset_read, zan_num=preset_like,
                             quality=quality["quality_score"])
+        # ★ **新行也要立基线**(2026-10-10):不立 `first_read_*`,"增速"就永远算不出来 ——
+        # 而这条路(cover 不带读数时 `preset_read=0`)什么都不做,等后面列表给出精确值时
+        # 由上面那条"读数变了就回写"的分支补上基线。两处**同一个判读函数**。
+        read_trend.observe(row, preset_read)
         session.add(row)
         added.append(row)
         # 记进 existing:本轮内后续若出现**同一个 URL 但有精确读数**的条目(cover 先、列表后),
