@@ -647,11 +647,16 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         #    (只推 `source='bili-pan'` 那几十行,不碰远程自己那 7 万条热榜)。
         (bili_account_scan_tick, _get_settings().bili_scan_cron, {"minute": 0, "hour": "*/2"},
          "bili_account_scan", "wechat"),
-        # 夸克**口令**(2026-10-06):抖音线索里**迅雷搬不动**的那些,用模拟器里的夸克 App 再试一遍。
-        # ⚠️ 角色必须是 **wechat** —— **模拟器在本机**;挂远程毫无意义。
-        # ⚠️ 它依赖"雷电模拟器常开 + 夸克已登录",不开就一路 failed(如实记,不静默)。
+        # 夸克**口令**(2026-10-06):抖音线索 → 取到口令指向的分享 → 转存 → 建我方分享链。
+        # ★ 角色 **hotspot**(2026-10-10 由 wechat 改过来):
+        #   这条链原来**只能跑本机**,因为要靠**雷电模拟器里的夸克 App** 解析口令。
+        #   现在签名能在本机算出来(unidbg 常驻服务),解析改走**纯协议**——
+        #   **不再需要模拟器**,于是跟着签名服务一起搬到远程。
+        # ⚠️ 前提:远程那个签名服务**必须在跑**(`QUARK_SIGN_BIND` 绑 docker 网关、
+        #   `.env` 里 `QUARK_SIGN_HOST` 指过去)。它没起时,本实例**不回落 UI**
+        #   (远程没有模拟器),而是**如实失败**并落库原因 —— 见 `_ui_fallback_available`。
         (quark_kouling_tick, _get_settings().quark_kouling_cron, {"minute": 0, "hour": "*/2"},
-         "quark_kouling", "wechat"),
+         "quark_kouling", "hotspot"),
         (push_timeline_tick, "* * * * *", {"minute": "*"}, "push_timeline", "both"),
         # **跨链先后台账**(2026-10-07):用户口径「抖音基本上是最先开始的,然后公众号,
         # 一些大瓜从微博中可以更快获取到」—— 这是个**关于平台先后的假设**,要样本才能证。

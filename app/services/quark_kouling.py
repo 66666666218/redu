@@ -96,6 +96,17 @@ def _proto_enabled(settings) -> bool:
     return bool(getattr(settings, "quark_kouling_proto", True))
 
 
+def _ui_fallback_available(settings) -> bool:
+    """UI 兜底**必须有雷电模拟器**才能用 —— 而模拟器只在 `wechat` 侧(本机)。
+
+    ⚠️ 这条不是可选项:在**远程**(`hotspot`)上回落 UI,只会为每条线索开一个
+    **必然失败**的子进程,把"签名服务挂了"伪装成"这条口令没内容" ——
+    正是本仓最忌的**静默失败**。所以那边**明确不回落**,把原因如实报出来。
+    """
+    role = str(getattr(settings, "scheduler_role", "all") or "all").strip().lower()
+    return role in ("all", "both", "wechat")
+
+
 def _record_moved(session, user_id: int, lead, title: str, sh: dict) -> None:
     """把「搬成了」落库:`our_url` + 首次搬成时刻 + 资源库那条路(`DiscoveredPanLink`)。
 
@@ -348,7 +359,20 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
                     logger.warning("夸克口令(纯协议)转存失败,回落 UI:%s", proto_reason)
             else:
                 proto_reason = str(pr.get("reason") or "纯协议没解析出分享码")[:140]
-                logger.info("夸克口令(纯协议)未成,回落 UI:%s", proto_reason)
+                logger.info("夸克口令(纯协议)未成:%s", proto_reason)
+
+        # ★★★ 本实例**没有模拟器**(远程 hotspot)⇒ **绝不回落 UI**。
+        #   回落只会开一个必然失败的子进程,把"签名服务挂了"伪装成"这条口令没内容"。
+        #   ⇒ 如实失败:原因写清楚,并记一次(防无限重试)。
+        if proto_reason and not _ui_fallback_available(settings):
+            failed += 1
+            lead.last_error = (f"纯协议没解出来:{proto_reason}"
+                               " | 本实例没有模拟器,按设计不回落 UI")[:200]
+            reasons.append(lead.last_error[:60])
+            lead.kouling_tries = int(lead.kouling_tries or 0) + 1
+            logger.warning("夸克口令:线索 %s 纯协议没解出来,且本实例无模拟器可回落 —— 如实失败:%s",
+                           lead.aweme_id, proto_reason[:100])
+            continue
 
         reason = ""
         for attempt in (1, 2):
