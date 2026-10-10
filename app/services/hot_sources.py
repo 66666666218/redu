@@ -765,6 +765,12 @@ def collect_hot_sources(session, user_id: int, sources: list[str] | None = None,
     from app.db.models import HotSourceItem
 
     ok = failed = items = 0
+    #: **失败源必须带名字进运行记录**(2026-10-10)。为什么:`runs.detail` 原来只有计数
+    #: (`ok=43 failed=1`),而 `logger.warning` 只写 stdout —— 本仓日志**不落盘**
+    #: ⇒ 一个源间歇性挂掉时,**事后根本查不出是谁**(远程实测:7:05~17:05 连续 8 轮
+    #: `failed=1`,21:05 又自己好了,全程无名无姓)。
+    #: ⚠️ 上限 **4 条 / 240 字符** —— detail 是给人看的一行,别让它被一长串错误淹没。
+    fail_note: list[str] = []
     #: 本轮**共享**的批次时刻 —— 所有源、所有行都盖它。
     #: ⚠️ 不共享的话每行走模型默认值 `datetime.now`,**同一批里每行微秒都不同**,
     #: "这一轮采到了什么"就**查不出来**(热榜卡因此被迫去猜,我两版都踩过)。
@@ -777,6 +783,8 @@ def collect_hot_sources(session, user_id: int, sources: list[str] | None = None,
         except HotSourceError as exc:
             failed += 1
             logger.warning("热榜源[%s]采集失败:%s", sid, str(exc)[:100])
+            if len(fail_note) < 4:                       # 带名字与原因(见上面那段注释)
+                fail_note.append(f"{sid}:{str(exc)[:50]}")
             continue
         for it in rows:
             session.add(HotSourceItem(user_id=user_id, source=sid, rank=int(it.get("rank") or 0),
@@ -797,7 +805,7 @@ def collect_hot_sources(session, user_id: int, sources: list[str] | None = None,
                                       captured_at=batch_ts))
         ok += 1
         items += len(rows)
-    return {"ok": ok, "failed": failed, "items": items}
+    return {"ok": ok, "failed": failed, "items": items, "fail_sources": fail_note}
 
 
 def hot_source_tick_all_users(settings=None) -> int:
@@ -844,6 +852,10 @@ def hot_source_tick_all_users(settings=None) -> int:
                 _record_run(db, uid, "hot_source",
                             "success" if not out["failed"] else "partial",
                             f"ok={out['ok']} failed={out['failed']} items={out['items']}"
+                            # 失败源**点名**(2026-10-10,见 `collect_hot_sources` 里那段):
+                            # 「failed=1」这种计数在事后**无法定位**,而失败只在 stdout 里留痕。
+                            + (f" 失败源:{'、'.join(out['fail_sources'])[:240]}"
+                               if out.get("fail_sources") else "")
                             + (f" viral={out['viral']}" if out.get("viral") else ""))
                 db.commit()
                 total += out["items"]

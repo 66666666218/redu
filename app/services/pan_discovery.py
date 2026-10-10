@@ -728,13 +728,16 @@ def pan_discovery_tick(settings=None) -> int:
             try:
                 out = sync(db, uid, settings=settings)
                 total += out.get("ok", 0)
-                if out.get("items"):
-                    push_items(out["items"], settings)
+                # ⚠️ **卡片推没推出去必须留痕**(2026-10-10,同 `resource_presence` 那处):
+                # `push_items` 在「没配 webhook」时**静默 return False**,返回值又被丢掉
+                # ⇒ 「这轮卡片到底推出去没有」事后查不出来。
+                pushed = push_items(out["items"], settings) if out.get("items") else None
                 # 运行记录里**必须带上积压数** —— 只写「候选N 转存M」的话,一个持续
                 # 堆积的系统看起来和健康的系统一模一样(2026-10-05 实测踩到)。
                 _record_run(db, uid, "pan_discovery", "success",
                             f"候选{out.get('found', 0)} 转存{out.get('ok', 0)} "
-                            f"复用{out.get('reused', 0)} **积压{out.get('backlog_left', 0)}**")
+                            f"复用{out.get('reused', 0)} **积压{out.get('backlog_left', 0)}**"
+                            + (f" 卡片{'已推' if pushed else '未推'}" if pushed is not None else ""))
                 threshold = int(getattr(settings, "pan_discovery_backlog_alert", 60) or 0)
                 left = int(out.get("backlog_left") or 0)
                 if threshold and left >= threshold:

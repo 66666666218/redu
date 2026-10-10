@@ -434,8 +434,11 @@ def presence_tick(settings=None, platforms: list[str] | None = None) -> int:
                 # **配上了就自动转存**(2026-10-04 用户口径)。放在 push 之前,
                 # 这样卡片上带的就是**我方链**;转存失败也会把原因带进卡片(不静默)。
                 moved = transfer_missing_links(db, uid, items, settings)
-                if items:
-                    push_items(items, settings)
+                # ⚠️ **卡片推没推出去必须留痕**(2026-10-10):`push_items` 的返回值原来**被丢掉了**,
+                # 而它在「该平台没配 webhook」时是**静默 `return False`** 的
+                # ⇒ 「这一轮卡片到底推出去没有」事后**查不出来**(用户提过这条)。
+                # 同一条纪律:别让「没做成」与「没做」长得一样。
+                pushed = push_items(items, settings) if items else None
                 # ⚠️ **把失败平台写进运行记录**:`probe` 只在"全平台都失败"时才抛错,
                 # 所以"小红书成了、快手挂了"这种**部分失败**本来查不出来。
                 failed = out.get("failed") or []
@@ -445,6 +448,8 @@ def presence_tick(settings=None, platforms: list[str] | None = None) -> int:
                              f"(失败{moved['failed']} 超额{moved['skipped']})")
                 if failed:
                     note += f" 失败:{','.join(failed)}"
+                if pushed is not None:               # 有东西可推 ⇒ 必须报告推成没成
+                    note += f" 卡片{'已推' if pushed else '未推'}"
                 _record_run(db, uid, "resource_presence", "success", note)
                 # ★ 用**会量等待时长**的提交(2026-10-09):撞锁时它会报"等了多久",
                 #   那能一刀切开「持有者真抱了 30 秒」与「这是不遵守 busy_timeout 的那类锁」——
