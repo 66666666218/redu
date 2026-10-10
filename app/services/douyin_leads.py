@@ -661,6 +661,10 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
     already_links = kk.known_kouling_links(session, user_id)
     down: list[str] = []          # 凭据级失败(如 refresh token 失效):影响全部口令,只报一次
     for ld in leads:
+        # ★ **先做一次资源库匹配**(2026-10-11 用户口径「我们资源库里面大部分应该就有这些资源」)。
+        #   放在口令解析**之前**,而且**每条线索都做** —— 因为不管口令解没解出来,
+        #   「库里有没有现成的」都决定卡片能不能点得动。匹配不上是 `None`(不影响原流程)。
+        ld["library"] = _library_link(session, user_id, str(ld.get("title") or ""))
         mark = (ld.get("mark") or "").strip()
         if not mark:
             continue
@@ -797,9 +801,98 @@ def _kouling_line(ld: dict) -> str:
     return ""
 
 
+#: `咐置 X 叩苓` / `/咐置 X 叩苓` —— **变体字**("复制 X 口令",`咐置`/`叩苓`
+#: 是「复制」「口令」的同形替换,用来躲抖音的文本审核)。★ **X 才是资源名**。
+_RE_BIANTI = re.compile(r"咐置\s*([^，。！?、\s|/]{2,20}?)\s*叩苓")
+#: `《X》` —— 最常见的形态,直接就是资源名/群名。
+_RE_BOOK = re.compile(r"《([^》]{2,24})》")
+_RE_TAG = re.compile(r"#\S+")
+
+
+def _cand_names(title: str, limit: int = 5) -> list[str]:
+    """从抖音标题里抽出**候选资源名**(按可信度排序、去重、最多 `limit` 个)。
+
+    三类形态都来自近 3 天真实线索的实测:
+      · `《X》`             —— 最可信,直接就是资源/群名;
+      · `咐置X叩苓`          —— 变体字,**X 才是名字**(`咐置`/`叩苓` 是「复制」「口令」的替换字);
+      · 其余正文长片段      —— 兜底,质量差但聊胜于无。
+    """
+    t = str(title or "")
+    out: list[str] = list(_RE_BOOK.findall(t)) + _RE_BIANTI.findall(t)
+    core = _RE_TAG.sub("", t).replace("咐置", " ").replace("叩苓", " ")
+    for seg in re.split(r"[，。！?、\s|/]+", core):
+        seg = seg.strip()
+        if len(seg) >= 3 and not seg.startswith("http"):
+            out.append(seg)
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for c in out:
+        c = c.strip()
+        if c and c not in seen:
+            seen.add(c)
+            uniq.append(c)
+    return uniq[:limit]
+
+
+def _library_link(db, user_id: int, title: str, *, days: int = 90) -> dict | None:
+    """**拿线索标题去我们自己的资源库里找一条现成的我方链**。找不到返回 `None`。
+
+    ★ 为什么需要它(2026-10-11 用户口径「**我们资源库里面大部分应该就有这些资源**」):
+
+    抖音视频里**没有网盘直链**,只有口令;而口令能解的比例很低 —— 近 3 天 107 条实测:
+    直链 15 条 / 群 29 条 / **迅雷连 X 都不认的变体字 63 条**。但**资源本身**我们库里
+    常常已经有(实测 `kind=share` 那批 **15/15 全部命中**库)。
+    ⇒ **不必解口令**:拿资源名去库里匹配,匹配上就直接用**我方链** ——
+    卡片于是与**公众号同形:点标题就跳网盘**(那边正是"正文里抽到链 → 用它")。
+
+    ⚠️ 匹配是**我们自己的库**(只读本地表),**不碰任何平台接口** —— 零风控风险。
+    """
+    from app.services.resource_library import search_resources
+
+    for name in _cand_names(title):
+        try:
+            hits = search_resources(db, user_id, name, days=days, limit=5)
+        except Exception:  # noqa: BLE001 - 库里查不到不该拖垮整轮(与 `_library_evidence` 同口径)
+            logger.debug("资源库匹配失败 name=%s", name, exc_info=True)
+            continue
+        for h in hits:
+            link = str(h.get("my_link") or "").strip()
+            if not link:
+                continue
+            # ⚠️⚠️ **必须加这道护栏 —— 实测首选命中会错**(2026-10-11):
+            #   「**伪装直男**」的首选命中是一条「**高分双男主精选BL向…500部AI漫剧合集**」,
+            #   而正确的专链(标题就是「《伪装直男》无雾版高清资源」)排在**第 2/3 位**。
+            #   名字只在**别的标题/正文**里出现过 ⇒ 短名子串匹配**天然模糊**。
+            #   ⇒ 只认「**候选名出现在该链的首个标题里**」的命中;都不满足就**返回 None**。
+            #   **给错链比不给链更坏**:用户点开会拿到完全不相干的东西。
+            first = str((h.get("titles") or [""])[0] or "")
+            if name not in first:
+                continue
+            return {"name": name, "link": link, "title": first[:80]}
+        # 该候选名的命中都过不了护栏 ⇒ 换下一个候选名(不拿"次优"凑数)
+    return None
+
+
+def _looks_like_kouling(title: str) -> bool:
+    """标题里**看着就是个口令**(哪怕迅雷解不开)。**只做识别,不做解析。**
+
+    ★ 用户口径(2026-10-11):「**你也没必要去解析口令才能知道是什么资源**,
+    因为你现在口令都可以识别了,而且标题后面肯定带着资源的名字」。
+
+    ⇒ 这条判据的全部意义是**把两种"没有链"分开**:
+      · `看着是口令但没解开` ⇒ **有救**(资源名在标题里,可以去库里配) → 卡片写「📋口令未解析」;
+      · `根本不是口令`         ⇒ 这条线索本来就没有资源   → 卡片写「—」。
+    混成同一个 `—` 的后果:人分不清是**该去配**还是**该放弃**。
+    """
+    t = str(title or "")
+    if _RE_BIANTI.search(t) or _RE_BOOK.search(t):
+        return True
+    # 迅雷的标准口令形态(`/~xxxx~/`,夸克/迅雷都用这一族)
+    return bool(re.search(r"/~[A-Za-z0-9]{6,}~", t))
+
+
 def _pan_name(url: str) -> str:
     """链接属于哪个网盘 → **中文盘名**(夸克/百度/迅雷);认不出返回空串。
-
     ⚠️ 用户口径(2026-10-04):"**资源不要写我方链接,那个网盘就写那个网盘名称**"。
     卡片的「资源」列原来写的是 `🔴我方链` —— "**我方**"二字**在客户群里会暴露我们是运营方**,
     换成中性的**盘名**既说清了"这条是哪个盘、能直接取",又不露身份。
@@ -872,7 +965,10 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin") -> bool:
         # 当时却实现成"标题 → 抖音视频",后果:① **点标题拿不到网盘**(用户报的就是这个);
         # ② 同一张卡上视频被链**两次**(这里一次 + 后面「▶视频」列一次),纯冗余。
         # 现在两处分工:标题 → 网盘,**▶视频** → 视频。
-        our = _md_safe(info.get("our_url") or "")
+        # ★ **口令没解出来时的第二来源:资源库里现成的那条**(2026-10-11)。
+        #   有它,标题就**点得动** —— 与公众号卡片同形(那边也是"抽到链就挂标题上")。
+        _lib = ld.get("library") or {}
+        our = _md_safe(info.get("our_url") or _lib.get("link") or "")
         work = f"[{shown}]({our})" if our else shown
         # 转发量**独立成列**(原来并进作品列,六列版式下挪出来)。没有就不显示,
         # 不拿 0 冒充有数据 —— 口径见 `DouyinLead` 的注释(它是**别人视频**的转发量)。
@@ -883,6 +979,12 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin") -> bool:
         pan = _pan_name(info.get("our_url") or info.get("share_url") or "")
         if info.get("kind") == "share" and info.get("status") == "ok":
             res = f"🔴{pan or '已转存'}"
+        elif _lib:
+            # ★ **库里已有现成链** ⇒ 用**我方链**,标题直接可点(与公众号同形)。
+            # 口径照旧(见 `_pan_name`):资源列写**盘名**,不写"我方链"那三个字。
+            # 「(库里已有)」是为了说清**这条不是我方刚搬的**,而是复用库里那份 ——
+            # 免得跟"本轮真的转存了"混在一起(本仓"要说清来源"那条)。
+            res = f"🔴{_pan_name(_lib.get('link') or '') or '已入库'}(库里已有)"
         elif info.get("kind") == "group":
             res = "👥已加群"
         elif info.get("status") == "already":
@@ -893,6 +995,12 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin") -> bool:
             res = f"⏸{pan or '盘'}(本轮额度)"
         elif info.get("status") == "skipped":
             res = f"⏸{pan or '盘'}(被挡下)"
+        elif _looks_like_kouling(str(ld.get("title") or "")):
+            # ★ **识别出口令 ≠ 解开它**(2026-10-11 用户口径:「你也没必要去解析口令才能知道是什么资源」)。
+            # 标题里明摆着是个口令(变体字《…》/`咐置X叩苓`/`/~…~/`),只是**迅雷不认** ——
+            # 这跟"这条视频根本没有资源"是两回事。写 `—` 会让人以为没东西;
+            # 写清「口令未解析」才知道**这条还有救**(资源名在标题里,可以去库里配)。
+            res = "📋口令未解析"
         else:
             res = "—"
         elements.append(_col_set_row([
