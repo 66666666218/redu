@@ -10,11 +10,16 @@
 6. `--max N` 只处理前 N 个(先小批试)。
 
 用法:
-    python scripts/quark_dup_apply.py            # 只看计划(默认)
+    python scripts/quark_dup_apply.py            # 只看计划(默认,与 report 同为「只清 10 月」)
     python scripts/quark_dup_apply.py --max 5    # 只看前 5 个
     python scripts/quark_dup_apply.py --yes      # 真删(进回收站)
     python scripts/quark_dup_apply.py --yes --allow-partial   # 明知没扫完也要删
-    python scripts/quark_dup_apply.py --depth 1  # 只扫到"家 → 一级子目录"(快 10 倍,见 report)
+    python scripts/quark_dup_apply.py --month "" # ⚠️ 清**所有月份**(默认只清 10 月)
+
+⚠️ **`--month` 别乱传**:默认 `"10"` 与 `report` 脚本**同一口径**。
+2026-10-10 踩过:本脚本当时没有这个参数(等于 `""` 全部月份),而报告用的是 `"10"`,
+于是**报告说 102 个 / 3.66 GiB,执行却删了 7735 个 / 264 GiB** ——
+"按报告判风险、执行却按另一个范围动手",这是最危险的一类不一致。
 
 ## 扫不完怎么办(2026-10-10 起)
 **多跑几轮即可**:扫完的家会存进快照(`data/quark_dup_cache.json`),下一轮直接复用;
@@ -62,6 +67,12 @@ def main() -> int:
     cap = None
     depth = 2          # 扫几层。⚠️ `--depth 1` **会漏扫 90% 的文件**(实测 491 vs 4953),
                        #    不是"等价的快捷方式";正路是多跑几轮靠快照收敛。详见 report 脚本。
+    # ★★ 清理**哪些月份的家**(`MMDD` 前缀)。
+    # ⚠️⚠️ **必须与 report 脚本同默认**,否则会删过头 —— 2026-10-10 实测踩到:
+    #   report 默认 `"10"`(只清 10 月),而本脚本原来**没有这个参数** ⇒ 默认 `""`(全部月份),
+    #   于是同一次清理,报告说 102 个 / 3.66 GiB,**执行却删了 7735 个 / 264 GiB**。
+    #   两边范围不一致,是"报告用来判风险、执行却按另一个范围动手" —— 必须钉死。
+    month = "10"
     args = sys.argv[1:]
     for i, a in enumerate(args):
         if a == "--max" and i + 1 < len(args):
@@ -70,6 +81,8 @@ def main() -> int:
             plan_file = args[i + 1]
         elif a == "--depth" and i + 1 < len(args):
             depth = int(args[i + 1])
+        elif a == "--month" and i + 1 < len(args):
+            month = args[i + 1]
 
     s = get_settings()
     db = get_session_local()()
@@ -82,7 +95,9 @@ def main() -> int:
     # ★ 扫描快照:扫完的家下轮复用;删完把受影响的家**作废**(那些家的内容变了)。
     cache = ScanCache()
     plan = (_load_plan(plan_file) if plan_file
-            else build_plan(qt, cache=cache, depth=depth))
+            else build_plan(qt, cache=cache, depth=depth, mmdd_prefix=month))
+    print(f"⚠️ 清理范围:`MMDD` 前缀 = {month!r}"
+          f"({'**所有月份**' if not month else '只清 ' + month + ' 月'})"
     # ⚠️ **保护名单现场重取**:计划可能是十几分钟前扫的,这期间又发了新链 ——
     # 用旧名单删就是拿一份过期的安全清单去删盘。
     pf, pn, ns = protected_fids(qt)
