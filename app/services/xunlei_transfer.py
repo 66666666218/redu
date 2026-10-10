@@ -392,7 +392,10 @@ def resolve_parent_id(cred: dict | None = None, *, refresh: bool = False) -> str
     if (not refresh and _parent_cache["name"] == name and _parent_cache["id"]
             and now - _parent_cache["at"] < 600):
         return str(_parent_cache["id"])
-    for f in list_files("", cred=cred):
+    # ⚠️ **这里必须翻页**(2026-10-10):根目录原始一页 200 条里 ~197 条是回收站条目,
+    # 活条目可能落在**第 2 页** ⇒ 用单页 `list_files` 会在某天**突然找不到落点目录**,
+    # 而症状只是 logger 里一句「没找到,本轮落根目录」—— 转存会静静地落到根目录去。
+    for f in list_all_files("", cred=cred):
         if (f.get("name") or "").strip() == name and f.get("kind") == "drive#folder":
             _parent_cache.update(name=name, id=str(f.get("id") or ""), at=now)
             return str(f.get("id") or "")

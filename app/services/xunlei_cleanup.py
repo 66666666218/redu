@@ -101,6 +101,9 @@ def plan(db: Session, user_id: int, days: int = 7, settings=None,
 
     返回 `{"days", "folders": [{name, id, created, last_seen, days_idle, matched_by}],
     "stale": N, "keep": N, "scanned": N, "error": ""}`。
+
+    ⚠️ `max_list` **已不再生效**(2026-10-10 改翻页后没有"最多列几条"这个概念了);
+    保留只是为了不改调用方的签名 —— **别再照它去理解"扫了多少"**,看返回的 `scanned`。
     """
     from config.settings import get_settings
 
@@ -113,7 +116,10 @@ def plan(db: Session, user_id: int, days: int = 7, settings=None,
         out["error"] = "未配 xunlei_transfer_parent_id(不知道该扫哪个目录)"
         return out
     try:
-        items = xt.list_files(parent, limit=max_list)
+        # ⚠️ **必须翻页**(2026-10-10):单页 `list_files` 在条目 >200 时会**静默只扫第一页**
+        # ⇒ 过期项被判成"还新鲜"、永远清不掉,而报告看起来一切正常。
+        # 落地目录实测现在 54 项(完整),但这只是"还没长到 200"而已。
+        items = xt.list_all_files(parent)
     except Exception as exc:  # noqa: BLE001 - 列目录失败要给明确原因,别当"没有过期资源"
         out["error"] = f"列目录失败:{type(exc).__name__}: {str(exc)[:120]}"
         return out
@@ -263,7 +269,9 @@ def _children_sig(fid: str) -> tuple[tuple, str] | None:
     from app.services import xunlei_transfer as xt
 
     try:
-        kids = xt.list_files(fid, limit=200)
+        # 同名去重要**比全**(2026-10-10):单页只看到前 200 项 ⇒ 漏看的重复项被判成"不重复",
+        # 而漏看的**唯一副本**又会让"这一组其实只剩一份"被误判成"可以删"。翻页。
+        kids = xt.list_all_files(fid, page_size=200)
     except Exception:  # noqa: BLE001 - 比不了就不删(宁可留着,也别误删)
         logger.warning("同名去重:读子项失败,跳过 %s", fid)
         return None
@@ -291,7 +299,7 @@ def plan_duplicates(db: Session, user_id: int, settings=None) -> dict:
         out["error"] = "未配 xunlei_transfer_parent_id(不知道该扫哪个目录)"
         return out
     try:
-        items = xt.list_files(parent, limit=500)
+        items = xt.list_all_files(parent)      # 翻页(理由同 `plan()` 那处,2026-10-10)
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"列目录失败:{type(exc).__name__}: {str(exc)[:120]}"
         return out
