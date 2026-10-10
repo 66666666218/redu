@@ -356,8 +356,10 @@ def _gate_limit(settings=None) -> float:
 
     **单一事实源**:闸门判定(`admit_transfer`)与"**闸门失准**"自检(`transfer_pending`)共用它 ——
     否则改阈值只改一处,自检就会拿错门槛、把正常挡下报成失准(或反过来漏报)。
+    ⚠️ 兜底值跟着 `settings` 一起改(2026-10-10 抬到 0.95)——两个数不一致就违背了
+    上面那句"单一事实源":将来真走到兜底分支时会**悄悄退回旧门槛**。
     """
-    return float(getattr(settings, "xunlei_transfer_max_usage_ratio", 0.9) or 0.9)
+    return float(getattr(settings, "xunlei_transfer_max_usage_ratio", 0.95) or 0.95)
 
 
 def admit_transfer(name: str, cred: dict | None = None, settings=None,

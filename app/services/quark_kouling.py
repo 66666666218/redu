@@ -102,7 +102,14 @@ def _ui_fallback_available(settings) -> bool:
     ⚠️ 这条不是可选项:在**远程**(`hotspot`)上回落 UI,只会为每条线索开一个
     **必然失败**的子进程,把"签名服务挂了"伪装成"这条口令没内容" ——
     正是本仓最忌的**静默失败**。所以那边**明确不回落**,把原因如实报出来。
+
+    ⚠️ **2026-10-10 起默认关闭**(`quark_kouling_ui_fallback=False`,用户口径):
+    纯协议已在本机跑通(常驻签名服务),而 UI 兜底要求雷电模拟器**常驻 ~2.2 GB**。
+    ⇒ 现在**两个条件都要满足**才回落:① 开关打开 ② 本实例是 `wechat` 侧。
+    关掉**不等于删掉那条路**(代码与两条路的对照关系都留着),只是不再为它养着模拟器。
     """
+    if not bool(getattr(settings, "quark_kouling_ui_fallback", False)):
+        return False
     role = str(getattr(settings, "scheduler_role", "all") or "all").strip().lower()
     return role in ("all", "both", "wechat")
 
@@ -356,18 +363,22 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
                     continue
                 except Exception as exc:  # noqa: BLE001 - 单条失败不影响其余
                     proto_reason = f"纯协议转存失败:{type(exc).__name__}: {str(exc)[:120]}"
-                    logger.warning("夸克口令(纯协议)转存失败,回落 UI:%s", proto_reason)
+                    # ⚠️ 措辞别写死"回落 UI"(2026-10-10):回不回落由下面 `_ui_fallback_available`
+                    #    决定,默认已关 —— 日志说"回落"而实际没回落,就是又一处"看着像做了"。
+                    logger.warning("夸克口令(纯协议)转存失败:%s", proto_reason)
             else:
                 proto_reason = str(pr.get("reason") or "纯协议没解析出分享码")[:140]
                 logger.info("夸克口令(纯协议)未成:%s", proto_reason)
 
-        # ★★★ 本实例**没有模拟器**(远程 hotspot)⇒ **绝不回落 UI**。
-        #   回落只会开一个必然失败的子进程,把"签名服务挂了"伪装成"这条口令没内容"。
+        # ★★★ 本实例**不回落 UI**(2026-10-10 起两个条件:开关关着 **或** 本实例没有模拟器)。
+        #   回落只会为每条线索开一个必然失败的子进程,把"签名服务挂了"伪装成"这条口令没内容"。
         #   ⇒ 如实失败:原因写清楚,并记一次(防无限重试)。
         if proto_reason and not _ui_fallback_available(settings):
             failed += 1
+            _why = ("UI 兜底已关闭" if not getattr(settings, "quark_kouling_ui_fallback", False)
+                    else "本实例没有模拟器")
             lead.last_error = (f"纯协议没解出来:{proto_reason}"
-                               " | 本实例没有模拟器,按设计不回落 UI")[:200]
+                               f" | 不回落 UI({_why})")[:200]
             reasons.append(lead.last_error[:60])
             lead.kouling_tries = int(lead.kouling_tries or 0) + 1
             logger.warning("夸克口令:线索 %s 纯协议没解出来,且本实例无模拟器可回落 —— 如实失败:%s",
