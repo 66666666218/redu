@@ -859,6 +859,31 @@ def list_all_files(parent_id: str = "", cred: dict | None = None, page_size: int
     return out
 
 
+def _kinds_of(h: dict, ids: list[str], parent_id: str) -> dict[str, bool]:
+    """id → **是不是目录**(列一次父目录建表即可,不必逐个问)。"""
+    try:
+        items = _json(requests.get(f"{_API}/drive/v1/files", headers=h, timeout=_TIMEOUT,
+                                   params={"parent_id": parent_id or "", "limit": "200"}))
+    except Exception:                                # noqa: BLE001 - 建不出表就当作"都不是目录"
+        return {}
+    return {str(x["id"]): str(x.get("kind")) == "drive#folder"
+            for x in (items.get("files") or []) if x.get("id")}
+
+
+def _batch_copy(h: dict, ids: list[str], to_parent: str) -> None:
+    """把 `ids` 复制进 `to_parent`(**盘内复制**)。
+
+    ★ 形状是**从迅雷自己的网页 JS 里挖出来的**(2026-10-10):
+    `{"ids": […], "to": {"parent_id": …}}` —— 我先试的 `/{id}/copy` 是**错路由**。
+    """
+    r = requests.post(f"{_API}/drive/v1/files:batchCopy", headers=h,
+                      json={"ids": ids, "to": {"parent_id": to_parent, "space": ""},
+                            "space": ""}, timeout=_TIMEOUT)
+    d = _json(r)
+    if not d.get("task_id") and d.get("error"):
+        raise RuntimeError(str(d.get("error_description") or d)[:120])
+
+
 def _intro_file_ids(h: dict, intro_dir: str, *fallbacks: str) -> list[str]:
     """找 `intro_dir` 这个目录、列出里面的**文件** id(目录不列)。
 
@@ -981,18 +1006,37 @@ def transfer_and_share(share_url: str, parent_id: str = "", settings=None,
             return {"status": "failed",
                     "message": f"转存任务未返回文件 id(progress={task.get('progress')})"}
 
-        # ★ 宣传简介:并进**分享清单**(不是复制)。与夸克/百度同一条纪律 ——
-        #   建链这一步就得带上,建完再补补不进去。
+        # ★★★ 宣传简介(2026-10-10)。**优先"塞进资源目录里面"**(与夸克同规则):
+        #   资源是**目录** ⇒ `batchCopy` 把简介复制进去,然后**只分享那些目录** ——
+        #   对方整包保存时自动带走,而且不会在他盘里平铺出一个 `简介.doc`。
+        #   ⚠️ 代价:**每个资源目录会真的多存一份**(实测约 2.9 MB)。
+        #   资源是**散文件** ⇒ 无处可塞 ⇒ 退回"并进分享清单"(并排顶层,不占空间)。
         if intro_dir:
             try:
                 intro_ids = _intro_file_ids(h, intro_dir, parent_id)
-                if intro_ids:
-                    file_ids = list(dict.fromkeys([*file_ids, *intro_ids]))
-                    logger.info("宣传简介已并进分享清单:%d 个(%s)", len(intro_ids), intro_dir)
-                else:
+                if not intro_ids:
                     logger.warning("宣传简介目录没找到或是空的,本轮跳过:%s", intro_dir)
+                else:
+                    kinds = _kinds_of(h, file_ids, parent_id)
+                    dirs = [i for i in file_ids if kinds.get(i)]
+                    if dirs and len(dirs) == len(file_ids):
+                        copied = 0
+                        for d in dirs:                  # 每个目录塞一份
+                            try:
+                                _batch_copy(h, intro_ids, d)
+                                copied += 1
+                            except Exception as exc:    # noqa: BLE001 - 单个目录失败不中断
+                                logger.warning("往目录 %s 塞简介失败:%s", d[:12], str(exc)[:80])
+                        if copied:
+                            logger.info("宣传简介已塞进 %d/%d 个资源目录(%s)",
+                                        copied, len(dirs), intro_dir)
+                        else:                            # 一个都没塞进去 ⇒ 退回并排,别让分享缺简介
+                            file_ids = list(dict.fromkeys([*file_ids, *intro_ids]))
+                    else:
+                        file_ids = list(dict.fromkeys([*file_ids, *intro_ids]))
+                        logger.info("资源含散文件 ⇒ 简介并排进分享清单:%d 个", len(intro_ids))
             except Exception as exc:                # noqa: BLE001 - 拿不到简介不该毁掉整次转存
-                logger.warning("取宣传简介失败(不挡转存/分享):%s: %s",
+                logger.warning("处理宣传简介失败(不挡转存/分享):%s: %s",
                                type(exc).__name__, str(exc)[:120])
 
         share = _json(requests.post(f"{_API}/drive/v1/share", headers=h, timeout=_TIMEOUT,
