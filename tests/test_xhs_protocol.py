@@ -41,15 +41,23 @@ def _ok(*titles):
 
 
 class _FakeXhshow:
-    """桩签名器:**记下每次收到的 payload**,用来验证 `search_id` 是否复用。"""
+    """桩签名器:**记下每次收到的 payload 与签名参数**,用来验证 `search_id` 是否复用、
+    以及**签名格式传对没有**。"""
 
     calls: list[dict] = []
+    #: 每次调用收到的 `(sign_format, x_rap)` —— 2026-10-11 加:
+    #: ★ 这两个参数**必须**传对(`xyw` + `x_rap=True`),否则小红书 2026-03 起对数据接口
+    #: 一律回 461(且响应是 `code:0,data:{}` 的**静默空**,会被读成"这个资源没人发")。
+    #: ⚠️ 桩**必须跟着真库的签名走**(本仓那条"测试替身方言不同"的教训)——
+    #: 第一版桩没收这两个参数,于是 9 个测试**因为桩自己不认识新参数**而全红。
+    sign_args: list[tuple] = []
 
     def get_search_id(self):
         return f"sid-{len(self.calls)}"
 
-    def sign_headers_post(self, uri, ck, payload=None):
+    def sign_headers_post(self, uri, ck, payload=None, sign_format="xys", x_rap=False):
         _FakeXhshow.calls.append(dict(payload or {}))
+        _FakeXhshow.sign_args.append((sign_format, x_rap))
         return {"x-s": "XYS_x", "x-s-common": "c", "x-t": "1"}
 
 
@@ -200,3 +208,38 @@ class TestWiring:
         with pytest.raises(MediaCrawlerError) as e:
             rp._crawl_platform("xiaohongshu", ["甲"], session=None)
         assert "两条路都失败" in str(e.value)
+
+
+class TestSignFormat:
+    """★ **签名格式必须传 `xyw` + `x_rap=True`**(2026-10-11 实测矩阵)。
+
+    小红书 2026-03 起对**数据接口**(含 `search/notes`)拒旧格式 `XYS_`:
+
+      | 格式 | x_rap | 结果 |
+      |---|---|---|
+      | `xys` | — | HTTP 461,响应 `code:0, data:{}`(**静默空** ← 会被读成"这个资源没人发") |
+      | `xyw` | 否 | HTTP 461,体里 `300011 当前账号存在异常` |
+      | **`xyw`** | **是** | HTTP 200(签名层过,只剩凭据问题) |
+
+    ⇒ 这一条**必须钉住**:默认值传错不会报错,只会**静默返回空**。
+    """
+
+    def test_搜索时传的是xyw加x_rap(self, monkeypatch) -> None:
+        import requests
+
+        import xhshow
+        _FakeXhshow.calls = []
+        _FakeXhshow.sign_args = []
+        monkeypatch.setattr(xhshow, "Xhshow", _FakeXhshow)
+        monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp(payload=_ok("甲")))
+        monkeypatch.setattr(xp, "_GAP", 0.0)
+
+        class _S:
+            xhs_web_session = "a1=aaa; web_session=bbb"
+            xhs_sign_format = "xyw"
+            xhs_sign_x_rap = True
+
+        assert xp.search(["甲"], settings=_S(), session=None)
+        assert _FakeXhshow.sign_args, "一次都没调签名器?"
+        assert all(fmt == "xyw" and rap is True for fmt, rap in _FakeXhshow.sign_args), \
+            f"签名参数传错了:{_FakeXhshow.sign_args}"
