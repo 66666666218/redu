@@ -115,6 +115,14 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
     kws = [str(k).strip() for k in (keywords or []) if str(k).strip()]
     if not kws:
         return []
+    from config.settings import get_settings
+
+    st = settings or get_settings()
+    #: ★ **签名格式必须显式传**(2026-10-10 实测矩阵,见 `config/settings.py` 那段):
+    #: 库的默认是 `xys`,而小红书 2026-03 起对数据接口拒 `XYS_` ⇒ 永远 461、
+    #: 且**响应是 `code:0, data:{}` 的"静默空"**(最容易被读成"这个资源没人发")。
+    _fmt = str(getattr(st, "xhs_sign_format", "xyw") or "xyw")
+    _rap = bool(getattr(st, "xhs_sign_x_rap", True))
     ck_str = _cookie(session, user_id, settings)
     if not ck_str:
         raise XhsProtocolError(
@@ -146,7 +154,8 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
                        "search_id": sid, "sort": "general", "note_type": 0,
                        "ext_flags": [], "image_formats": ["jpg", "webp", "avif"]}
             try:
-                headers = x.sign_headers_post(URI_SEARCH, ck, payload=payload)
+                headers = x.sign_headers_post(URI_SEARCH, ck, payload=payload,
+                                              sign_format=_fmt, x_rap=_rap)
             except Exception as exc:  # noqa: BLE001 - 签名库自己炸了要说清是哪一层
                 raise XhsProtocolError(f"算签名失败(xhshow):{type(exc).__name__}: "
                                        f"{str(exc)[:90]}", kind="sign") from exc
@@ -162,9 +171,21 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
                 raise XhsProtocolError(f"请求失败:{type(exc).__name__}: {str(exc)[:90]}",
                                        kind="network") from exc
             if r.status_code == 461:
+                # ⚠️ **461 其实是两种,必须分开**(2026-10-10 实测矩阵):
+                #   · 响应体 `code:300011 当前账号存在异常` ⇒ **账号级**,与签名无关
+                #     (换号 / 过验证才对,改代码是白折腾);
+                #   · 响应体 `code:0, data:{}`(**静默空**)⇒ **签名/指纹没通过**。
+                # 混成一句话的代价:账号被限时我们会一直去"比对签名常量"。
+                _body = r.text[:300]
+                if "300011" in _body or "账号存在异常" in _body:
+                    raise XhsProtocolError(
+                        f"小红书**账号异常**(HTTP 461;{_body[:110]})—— **账号级,与签名无关**。"
+                        f"修法:换号或过验证 `python tools/xhs_pass_verify.py <档案目录>`",
+                        kind="restricted", needs_human=True)
                 raise XhsProtocolError(
-                    "**HTTP 461** —— 签名/指纹没通过(不是「没搜到」)。"
-                    "照 `doc/小红书纯协议-链路拆解.md` §5 先比对签名常量", kind="sign")
+                    f"**HTTP 461** —— 签名/指纹没通过(不是「没搜到」)。"
+                    f"当前格式 `{_fmt}`、x_rap={_rap};响应体:{_body[:90]}"
+                    f" —— 照 `doc/小红书纯协议-链路拆解.md` §5 排查", kind="sign")
             if r.status_code == 406:
                 raise XhsProtocolError(
                     "**HTTP 406** —— 这个接口要 `XYW_` 格式(不是 `XYS_`)。"
@@ -179,7 +200,10 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
             if needs_login(r.text[:400] + str(d.get("msg") or "")):
                 raise XhsProtocolError(
                     f"小红书登录态失效/被踢({d.get('msg') or d.get('code')})—— "
-                    f"重新导一次凭据:`python tools/xhs_export_cookie.py`",
+                    f"⚠️ **重导凭据解决不了**(2026-10-10 实测:重导出来的还是同一枚死会话,"
+                    f"连最简单的 `user/selfinfo` 都回 `-100 登录已过期`,全线一致)"
+                    f"⇒ **需要人在浏览器里重新登录**:用 `data/xhs_2` 那个档案打开小红书、重登"
+                    f"(必要时过安全验证),**之后**再跑 `python tools/xhs_export_cookie.py`",
                     kind="need_login", needs_human=True)
             if not d.get("success"):
                 code = d.get("code")
