@@ -500,6 +500,10 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     # **从来没删掉过东西**(只删"可证明完全相同"的),而这一套实测能找出 13 组/67GiB。
     # 两套"留哪份"的规则不同,同时跑有互相删掉对方那份的风险 ⇒ 旧的停排(函数保留,见其注释)。
     from app.services.pan_dedupe import pan_dedupe_tick as xunlei_dedupe_tick
+    # **三盘自动去重/清理**(2026-10-10 用户口径「做第二档」):夸克+迅雷真删(进回收站),
+    # 百度只报告。边界(硬上限/没扫完拒绝删/弱判据不删/我方分享链一票否决/dry-run 默认开)
+    # 全在 `pan_auto_clean` 的头注里 —— 那些不是装饰,每条都对着一个踩过的坑。
+    from app.services.pan_auto_clean import auto_clean_tick as pan_auto_clean_tick
     from app.services.lead_settlement import record_reminder_tick as recruit_reminder_tick
 
     jobs = [
@@ -620,6 +624,11 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         (xunlei_dedupe_tick, _get_settings().xunlei_dedupe_cron, {"minute": 0, "hour": 4,
                                                                  "day_of_week": "0"},
          "xunlei_dedupe", "wechat"),
+        # **三盘自动去重/清理**(2026-10-10):夸克去重 + 迅雷过期清理 = **真删(进回收站)**;
+        # 百度**只报告**(删了不可逆)。角色 wechat —— 三个盘的 cookie 都只在本机。
+        # 默认**关**(自动删盘不该在新部署上默认生效);`dry_run` 默认**开**(先只看数字)。
+        (pan_auto_clean_tick, _get_settings().pan_auto_clean_cron, {"minute": 20, "hour": 4},
+         "pan_auto_clean", "wechat"),
         # Telegram 频道资源源(2026-10-01):公众号之外的第二路盘链 feed。
         # 默认关闭——本机直连 t.me 不通;能出网的机器把 TG_ENABLED 打开即可(见 settings)。
         (tg_collect_tick, _get_settings().tg_cron, {"minute": "*/30"}, "tg_collect", "both"),

@@ -78,15 +78,25 @@ class WereadAppClient:
     """
 
     def __init__(self, access_token: str, vid: str | int, *, timeout: int = 20,
-                 on_auth_error=None) -> None:
+                 on_auth_error=None, profile: str = "") -> None:
         if not access_token or not vid:
             raise WereadAppAuthError("缺 accessToken 或 vid(跑 scripts/weread_app_login.py 取)")
         self._token, self._vid, self._timeout = access_token, str(vid), timeout
         self._on_auth_error = on_auth_error
         self.refreshed = False        # 供调用方/测试断言"确实自愈过"
+        #: ★ **身份档:token 必须与"铸它的那套客户端身份"配套用**(2026-10-10 实测)。
+        #: 用 eink 身份铸的 token、配安卓 App 的头来调 → `-2012 登录超时`;
+        #: 换成 eink 头 → 200,`review.mpInfo.readNum` 正常。缺省 `app`(与旧行为完全一致)。
+        self._profile = str(profile or "app").strip().lower()
+        if self._profile == "eink":
+            from app.services.weread_app_token import EINK_HEADERS   # 单一事实源
+
+            self._base_headers = dict(EINK_HEADERS)
+        else:
+            self._base_headers = dict(_DEFAULT_HEADERS)
 
     def _headers(self) -> dict[str, str]:
-        return {**_DEFAULT_HEADERS, "accessToken": self._token, "vid": self._vid}
+        return {**self._base_headers, "accessToken": self._token, "vid": self._vid}
 
     def articles(self, book_id: str, *, count: int = 20, offset: int = 0) -> list[dict[str, Any]]:
         """取某公众号的文章列表(含**精确** `read_num` / `like_num`)。见 `_fetch`。"""
@@ -114,6 +124,19 @@ class WereadAppClient:
                     f"请在雷电里打开(必要时重新登录)微信读书 App 后重试"
                 ) from first
             self._token, self._vid = new_token, str(got[1])
+            # ★ **身份档可能跟着换**(2026-10-10):自愈若走的是**纯 HTTP**(铸出来的是 eink
+            #   身份的 token),而客户端还挂着安卓 App 的头 ⇒ 下一次调用照旧 `-2012`。
+            #   `_reget` 给了第三项就跟着换;没给(旧的二元组)保持原样,行为不变。
+            new_profile = str(got[2]).strip().lower() if len(got) > 2 else ""
+            if new_profile and new_profile != self._profile:
+                self._profile = new_profile
+                if new_profile == "eink":
+                    from app.services.weread_app_token import EINK_HEADERS
+
+                    self._base_headers = dict(EINK_HEADERS)
+                else:
+                    self._base_headers = dict(_DEFAULT_HEADERS)
+                logger.info("App 凭据自愈后**身份档切换为 %s**(token 换了签发身份)", new_profile)
             self.refreshed = True
             logger.info("App 凭据已自愈(vid=%s),重试这一次请求", self._vid)
             try:

@@ -321,13 +321,15 @@ def _weread_app_client(session: Session, user_id: int):
             # 才会写新的有效值(实测 `3sg_FVG7` 失败 → 唤醒后 `HbVEHrVJ` 连试 4 次全通)。
             out = wat.refresh_with_wake(session, user_id)
             if not out.get("ok"):
-                logger.warning("App 凭据自愈失败(已唤醒 App 仍无效,可能需人工打开/重登):%s",
+                logger.warning("App 凭据自愈失败(两条路都没成,可能需人工打开/重登):%s",
                                str(out.get("reason"))[:120])
                 return None
-            return out["accessToken"], out["vid"]
+            # ★ 第三项是**身份档**(2026-10-10):纯 HTTP 自愈铸出来的是 eink 身份的 token,
+            #   客户端必须跟着换头,否则下一次调用仍然 `-2012`。
+            return out["accessToken"], out["vid"], out.get("profile") or ""
 
         return WereadAppClient(blob.get("accessToken") or "", blob.get("vid") or "",
-                               on_auth_error=_reget)
+                               on_auth_error=_reget, profile=blob.get("profile") or "")
     except Exception as exc:  # noqa: BLE001 - 不能因为兜底坏了就停掉整轮监听
         logger.warning("App 侧凭据不可用(跳过列表兜底):%s", str(exc)[:120])
         return None
