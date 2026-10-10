@@ -1314,10 +1314,19 @@
 > ⚠️ **别拿 `captured_at` 判新鲜度** —— 同一个老帖每小时被我们扫到一次,`captured_at`
 > 永远是"刚刚";只有 `age_hours` 反映"这东西到底有多新"。
 > 源不给时间时 `published_at` 为 `""`、`age_hours` 为 `null`(**不知道**,不是 0)。
-> 实测(逐源打过原始返回):bilibili / 腾讯热榜 / 金十 / 少数派 / 澎湃 / 贴吧 / 懂球帝 /
-> 知乎 / 华尔街见闻×3 / 所有 RSS 源**都能给**;
-> **nowcoder、豆瓣、头条**的返回里**确实没有**时间字段(存 NULL,不编)。
-> ⚠️ 知乎那栏差点被写错 —— 我以为它没有,实测 `target.created` 一直就在。
+> **线上实测(2026-10-10 21:05 那一轮,远程):1058 行里 743 行有时刻 = 70%**。
+> ⚠️ **剩下的 30% 不是"没填",是"上游就没有"** —— 逐源打过原始返回之后才敢这么写:
+>   · 自研源里确实没有的:`nowcoder` / 豆瓣 / 头条(B站热搜词也没有,那是词不是作品);
+>   · `juejin` 的 `content.ctime` **恒为 0**(字段在、值是占位 0);
+>   · 走 newsnow 容器的源**逐个看过**:`cls-hot`/`hupu`/`coolapk`/`kuaishou`/
+>     `chongbuluo-hot`/`github-trending-today`/`xueqiu-hotstock` 的 `extra` 里
+>     只有 info/hover/icon,**没有时间**;而 `36kr*`/`gelonghui`/`cankaoxiaoxi`/`steam`/
+>     `cls-depth`/`solidot`/`iqiyi`/`sputniknewscn`/`qqvideo-tv-hotsearch` 有
+>     (`extra.date` 或顶层 `pubDate`,多为 Unix 毫秒)。
+>   ⇒ 判「某个源没填时间」之前**先打一遍它的原始返回**,别把上游的缺失当成自家的 bug。
+> ⚠️ `zhihu` 有个**分侧差异**:本机有知乎 Cookie ⇒ 走自研、`target.created` 有值;
+> 远程没有 Cookie ⇒ 回落 newsnow,而容器那份**不带时间** ⇒ 远程的知乎行是 NULL。
+> ⚠️ 知乎那栏我**差点写错** —— 我以为它没有时间字段,实测 `target.created` 一直就在。
 
 ## 11c. 资源库(2026-10-01,现成资源检索)
 

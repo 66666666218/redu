@@ -583,6 +583,15 @@ class NewsnowSource(HotSource):
             #: 也有源直接给 `timestamp`)。⚠️ **本机验证不了** —— newsnow 容器只跑在**远程那一侧**
             #: (两侧分工见 `SCHEDULER_ROLE`),本机 4444 连不上。所以这里是**尽力而为**:
             #: 给什么解析什么,读不懂就是 `None`(`hot_time` 对不认识的值一律返回 `None`,不猜)。
+            #:
+            #: **2026-10-10 逐源打了一遍容器的原始返回**(省得下次把"上游本来就没有"当成 bug):
+            #:   · 时间在 **`extra.date`**(多为 Unix 毫秒):36kr* / gelonghui / cankaoxiaoxi /
+            #:     sputniknewscn / ifeng(字符串 `2026-10-10 18:21:41`,且**只有个别条目有**)
+            #:   · 时间在 **顶层 `pubDate`**:cls-depth(毫秒)、steam(毫秒)、iqiyi、
+            #:     solidot(RFC822)、qqvideo-tv-hotsearch(**只有日期** `2026-10-10`)
+            #:   · **确实没有**:cls-hot、hupu、coolapk、kuaishou、chongbuluo-hot、
+            #:     github-trending-today、xueqiu-hotstock(它们的 `extra` 只有 info/hover/icon)
+            #:   ⇒ 所以"某个 newsnow 源全 NULL"**大概率是上游就没给**,先打一遍再判它坏。
             pub = parse_published(
                 (extra.get("date") if isinstance(extra, dict) else None)
                 or it.get("timestamp") or it.get("pubDate") or it.get("date"))
