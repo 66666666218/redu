@@ -144,8 +144,11 @@ def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchm
             # ★★ **2026-10-10 改**:原来的条件是 `old_read == 0` ⇒
             # **一篇文章一旦有了阅读数,后面更高的值就被丢掉了** —— 于是"增长"这件事
             # 结构上不可能被观察到(不是判读缺失,是**数据根本没在更新**)。
-            # 现在**只要读数变了就回写**,并交给 `read_trend.observe` 判读增速。
-            if preset_read > 0 and preset_read != old_read:
+            # ⚠️ 但**只能往高了走**:`preset_read > old_read` **严格包含**原来的 `old_read == 0`
+            # (0→正数也是变大),这是个**严格推广**,不是放开。
+            # 实测被测试当场挡住过:写成 `!= old_read` 时,一条**更小**的读数(7)把 500 覆盖掉了
+            # —— 阅读数是单调量,出现更小值 = 源抖动/取到旧快照,**不该回退**。
+            if preset_read > old_read:
                 target = obj if obj is not None else (
                     session.get(WechatArticle, rid) if rid > 0 else None)
                 if target is not None:

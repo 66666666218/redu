@@ -86,6 +86,11 @@ def observe(art: Any, read_num: Any, *, now: datetime | None = None,
     cur = _i(getattr(art, "read_num", 0))
     if new == cur:                                            # 没变 ⇒ 不算一次采样
         return str(getattr(art, "trend_flag", "") or "")
+    if new < cur:
+        # ⚠️ **阅读数是单调量,不往回退**(2026-10-10 被测试当场挡住过一次):
+        # 更小的值 = 源抖动 / 取到了旧快照,覆盖上去就是**伪造一次"暴跌"**。
+        # 判读层再兜一道,免得调用方哪天忘了这条。
+        return str(getattr(art, "trend_flag", "") or "")
     art.read_num = new                                        # ★ 最新值一定要回写
     art.traffic_at = now
     art.sample_count = _i(getattr(art, "sample_count", 0)) + 1

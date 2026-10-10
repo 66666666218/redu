@@ -220,6 +220,37 @@ def _list_attempts(stats: dict) -> int:
                ("weread_list_ok", "weread_list_app_ok", "weread_list_off_new", "weread_list_off"))
 
 
+def _list_windows(session: Session, user_id: int, rows: list, *, extra: int = 0) -> tuple[set[str], set[str]]:
+    """一轮里**两条路各自的窗口**:`(网页窗口, App 额外窗口)`。
+
+    ⚠️ **一份次序切两段**(2026-10-10):两条路**共用同一个"最久没轮到"的排序**,
+    只是网页吃前 `_LIST_WINDOW` 个、App 再吃**紧跟其后的 `extra` 个**。
+    ⇒ 好处是"下一个最该被问的号"永远由**同一个次序**决定,不会出现两条路各自
+    算一套"谁最久没轮"、结果互相抢或同时漏掉某批号(那种"两处各写一遍、迟早飘"的事本仓吃过)。
+
+    **为什么要给 App 开"窗口外"名额**:`/web/mp/articles` 有**会话额度(实测 29)**,
+    所以每轮只问 25 个号 ⇒ 206 个有 bookId 的号要 **8~20 轮**才轮到一次,
+    实测**精确阅读数覆盖率只有 44%**。而 App 路(`/book/articles`)**是另一套鉴权与配额**,
+    且 2026-10-10 起已改成**纯 HTTP、不需要模拟器** ⇒ 它可以去补网页吃不到的那些号。
+
+    ⚠️ **App 的配额上限是未知的**,所以这里**不默认放开**:`extra=0` = 与旧行为完全一致。
+    加量请走 `wechat_listen_app_extra`,并**盯 `runs.detail` 里的 `app_fail`/`app_blocked`**
+    (只成功不失败才往上加)—— 网页路那次被账号级拦了**一周**,代价不对称。
+    """
+    if not rows:
+        return set(), set()
+    # ⚠️ 先滤空键:它们既不可能被问列表,也不该占用窗口名额(见 `_list_window` 的说明)
+    keyed = [b for b in rows if _list_key(b)]
+    if not keyed:
+        return set(), set()
+    marks = _list_marks(session, user_id)
+    # 次序里带 bookId 做次键:并列时结果**确定**(否则同一批号的顺序每次不同,难复现)
+    ordered = sorted(keyed, key=lambda b: (marks.get(_list_key(b), 0.0), _list_key(b)))
+    web = {_list_key(b) for b in ordered[:_LIST_WINDOW]}
+    app = {_list_key(b) for b in ordered[_LIST_WINDOW:_LIST_WINDOW + max(0, int(extra))]}
+    return web, app
+
+
 def _list_window(session: Session, user_id: int, rows: list) -> set[str]:
     """本轮**允许问列表**的号(bookId 集合)—— 取"最久没轮到"的那 `_LIST_WINDOW` 个。
 
@@ -237,17 +268,11 @@ def _list_window(session: Session, user_id: int, rows: list) -> set[str]:
     实测那天的库:263 个号里 **57 个 bookId 为空**,而有 bookId 的 **139 个全被挡在窗外**。
     同一处再核一遍:`_mark_listed` 本来就过滤空键(`if k`),说明"空键不是有效号"
     这件事在写入侧早已成立,漏的只是**读取侧的排队**。
+
+    本函数**只返回网页窗口**(是 `_list_windows(extra=0)` 的第一段);App 的额外窗口
+    由调用方用 `_list_windows(extra=wechat_listen_app_extra)` 取。
     """
-    if not rows:
-        return set()
-    # ⚠️ 先滤空键:它们既不可能被问列表,也不该占用窗口名额(见上)
-    keyed = [b for b in rows if _list_key(b)]
-    if not keyed:
-        return set()
-    marks = _list_marks(session, user_id)
-    # 次序里带 bookId 做次键:并列时结果**确定**(否则同一批号的顺序每次不同,难复现)
-    ordered = sorted(keyed, key=lambda b: (marks.get(_list_key(b), 0.0), _list_key(b)))
-    return {_list_key(b) for b in ordered[:_LIST_WINDOW]}
+    return _list_windows(session, user_id, rows, extra=0)[0]
 
 
 def _mark_listed(session: Session, user_id: int, keys: set[str]) -> None:
@@ -339,7 +364,7 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
                     session: Session, stats: dict | None = None,
                     breaker: dict | None = None, shelf_ts: str | int | None = None,
                     banned_out: dict[str, str] | None = None, list_allow: bool = True,
-                    app_client=None
+                    app_client=None, app_allow: bool | None = None
                     ) -> tuple[list[WechatArticle], bool]:
     """微信读书单号采集:**cover 最新一篇(始终可用)+ 窗口内的号才拉精确列表**。
 
@@ -429,7 +454,12 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
     #    **网页恰好被挡的时候,正是 App 该顶上的时候**(兜底的全部价值就在这)。
     #    窗口纪律照旧(⒜ 仍然省),但不再让网页的熔断连累唯一还能用的那条路。
     #    (这是 `test_listen_counts_quiet_rounds_on_weread_path` 与额度收窄一起逼出来的。)
-    if not listed and list_allow and app_client is not None:
+    # ⚠️ **用 `app_allow`,不是 `list_allow`**(2026-10-10):两条路的窗口现在是**分开**的 ——
+    # 网页窗口吃前 `_LIST_WINDOW` 个(App 不必重复去问,省它的配额),
+    # 而 App 还额外吃紧跟其后的 `wechat_listen_app_extra` 个(那些号网页**吃不到**,
+    # 正是覆盖率卡在 44% 的原因)。不传 `app_allow` 时退化成 `list_allow`(旧行为)。
+    _app_ok = bool(list_allow if app_allow is None else app_allow)
+    if not listed and _app_ok and app_client is not None:
         try:
             # ⚠️ **scope=app**:App 是另一套鉴权与配额,网页被 `-2041` 拦了它照样能取 ——
             # 这正是兜底的价值。熔断按通道分开记,别让网页的挡牵连唯一还能用的这条路。
@@ -822,7 +852,16 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     # 列表额度的**轮转**:本轮只让"最久没轮到"的 `_LIST_WINDOW` 个号问
     # `/web/mp/articles`(带精确阅读数),其余号只取 cover。挑法与批子集、排序**都无关** ——
     # 详见 `_list_window` 上方注释。
-    list_allow = _list_window(session, user_id, rows)
+    # ★ **两条路各自的窗口**(2026-10-10):网页窗口受**会话额度(实测 29)**限制,
+    #   所以每轮只能问 `_LIST_WINDOW` 个号;App 路是**另一套鉴权与配额**,
+    #   再吃紧跟其后的 `wechat_listen_app_extra` 个 —— 那些号**网页吃不到**,
+    #   正是精确阅读数覆盖率只有 44% 的原因。
+    #   ⚠️ 默认 0 = **与旧行为完全一致**(App 只服务网页窗口内的号)。加量请改
+    #   `wechat_listen_app_extra` 并**盯 `runs.detail` 的 `app_fail`/`app_blocked`**。
+    _extra = int(getattr(settings, "wechat_listen_app_extra", 0) or 0)
+    _web_allow, _app_extra_allow = _list_windows(session, user_id, rows, extra=_extra)
+    list_allow = _web_allow
+    app_allow = _web_allow | _app_extra_allow
     # **App 侧客户端**(2026-10-05):整轮只建一次;没配就 None,兜底自动跳过。
     # 兜底存在的理由:网页 `/web/mp/articles` 被账号级拦截,而它是**精确阅读数**的唯一来源
     # (见 weread_app_client.py 头注释)。不建这一步,阅读数就永远是 0。
@@ -880,7 +919,10 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                                                 shelf_ts=gate["signals"].get(b.weread_book_id),
                                                 banned_out=banned,
                                                 list_allow=_list_key(b) in list_allow,
-                                                app_client=app_client)
+                                                app_client=app_client,
+                                                # ★ App 的窗口**比网页宽**:还包含"窗口外
+                                                # 最该被问"的那批(见 `_list_windows`)
+                                                app_allow=_list_key(b) in app_allow)
                 if _list_attempts(wr_stats) > _seen:
                     listed_keys.add(_list_key(b))          # 问过就记号(成败都算,见 _list_attempts)
                 # 只有免费源真答了才算"本号已被消费":答不上按 failed 计,如实暴露。
@@ -916,7 +958,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                                                         shelf_ts=gate["signals"].get(b.weread_book_id),
                                                         banned_out=banned,
                                                         list_allow=_list_key(b) in list_allow,
-                                                        app_client=app_client)
+                                                        app_client=app_client,
+                                                        app_allow=_list_key(b) in app_allow)
                         if _list_attempts(wr_stats) > _seen:
                             listed_keys.add(_list_key(b))
                         used = answered  # 答上了就消费掉本号(答不上按 failed 计,如实暴露)

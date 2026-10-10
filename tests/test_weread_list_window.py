@@ -227,3 +227,41 @@ def test_混入空_bookId的号_不影响轮转覆盖(session) -> None:
     assert covered == _keys(real), (
         f"6 轮后还有 {len(_keys(real)) - len(covered)} 个真号没轮到过列表")
 
+
+
+def test_app_window_takes_the_next_ones_after_web_window(session) -> None:
+    """**App 的额外窗口 = 紧跟网页窗口之后的那些号**(2026-10-10)。
+
+    两条路**共用同一个「最久没轮到」的次序**,只切成两段:网页吃前 `_LIST_WINDOW` 个,
+    App 再吃紧跟其后的 `extra` 个。为什么要这样:
+    网页 `/web/mp/articles` 有**会话额度(实测 29)** ⇒ 每轮只问 25 个,
+    而号池里有 bookId 的有 **206 个** ⇒ **精确阅读数覆盖率实测只有 44%**。
+    App 路是**另一套鉴权与配额**,且已改成**纯 HTTP、不需要模拟器** ⇒ 由它补上。
+    """
+    rows = _books(session, 80)
+    web, app = L._list_windows(session, 1, rows, extra=20)
+    assert len(web) == L._LIST_WINDOW
+    assert len(app) == 20
+    assert not (web & app), "两条路的窗口**不能重叠** —— 重叠就是白花一次 App 配额"
+    assert app == _keys(rows[L._LIST_WINDOW:L._LIST_WINDOW + 20]), "接在网页窗口后面"
+
+
+def test_app_window_default_is_off(session) -> None:
+    """⚠️ `extra=0`(默认)**必须与旧行为逐字一致** —— App 只服务网页窗口内的号。
+
+    App 的配额上限是**未知**的(网页路那次被账号级拦 `-2041`,一周才恢复),
+    所以这个能力**默认关**,加量要靠 `wechat_listen_app_extra` 一档一档来。
+    """
+    rows = _books(session, 80)
+    web0, app0 = L._list_windows(session, 1, rows, extra=0)
+    assert web0 == L._list_window(session, 1, rows), "网页窗口与老函数完全一致"
+    assert app0 == set(), "默认不给 App 任何窗口外的号"
+
+
+def test_app_window_extra_larger_than_pool_is_safe(session) -> None:
+    """`extra` 比号池还大 ⇒ 只取到有的那些,**不报错**(真实场景里号数会浮动)。"""
+    rows = _books(session, 30)
+    web, app = L._list_windows(session, 1, rows, extra=999)
+    assert len(web) == L._LIST_WINDOW
+    assert len(app) == 30 - L._LIST_WINDOW
+    assert not (web & app)
