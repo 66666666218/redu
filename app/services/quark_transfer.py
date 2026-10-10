@@ -719,7 +719,11 @@ class QuarkTransfer:
         logger.info("夸克转存+分享完成: %s 个文件(含复用 %s 个、简介 %s 个)→ %s",
                     len(share_ids), len(matched_ids), len(intro_ids), new_url)
         return {"share_url": new_url, "password": out_password, "files": len(share_ids),
-                "intro": len(intro_ids)}
+                "intro": len(intro_ids),
+                # ★ 新增(2026-10-10):转存回来的**真实文件名**。纯协议那条入口拿不到
+                #    UI 卡片上的资源名,只能靠它来落 `DiscoveredPanLink.title`。
+                #    往返回值里**加键是向后兼容的**,老调用方不受影响。
+                "names": [str(f.get("file_name") or "") for f in files]}
 
     @staticmethod
     def _find_first(data: Any, keys: set[str]) -> Any:

@@ -21,13 +21,17 @@
 | `QUARK_SIGN_PORT` | `29341` | 服务端口 |
 | `QUARK_SIGN_TOKEN` | 无 | **必填**;服务端也要求同一个值,否则拒答 |
 
-协议(明文 TCP,一行一问一答,UTF-8,`\\t` 分隔):
+协议(明文 TCP,一行一问一答,UTF-8,`\t` 分隔):
 
-    请求: {token}\t{密钥号}\t{内容}\n
+    请求: {token}\t{密钥号}\t{base64(内容)}\n
     响应: OK {40位小写hex}\n   或   ERR {原因}\n
+
+⚠️ **内容必须 base64** —— 真实输入(抖音标题)里**带换行**,而行式协议用 `readLine()` 收,
+不编码就会被截成两截。这个坑是接线后第一次真跑才暴露的。
 """
 from __future__ import annotations
 
+import base64
 import os
 import socket
 from typing import Final
@@ -48,33 +52,42 @@ class QuarkSignError(RuntimeError):
     """签名服务不可用或返回失败。**必须向上抛**,不能吞成"没有签名"。"""
 
 
-def _endpoint() -> tuple[str, int, str]:
-    token = os.environ.get(ENV_TOKEN, "").strip()
-    if not token:
-        raise QuarkSignError(f"未设置 {ENV_TOKEN} —— 签名服务要求令牌,不能裸连")
-    host = os.environ.get(ENV_HOST, DEFAULT_HOST).strip() or DEFAULT_HOST
-    raw_port = os.environ.get(ENV_PORT, str(DEFAULT_PORT)).strip()
+def _endpoint(host: str | None = None, port: int | None = None,
+              token: str | None = None) -> tuple[str, int, str]:
+    """解析端点。**显式参数 > 环境变量**;
+
+    ⚠️ 为什么要显式参数:pydantic 读 `.env` **不会**写进 `os.environ`,
+    所以配置一旦只写在 `.env` 里,这里 `os.environ` 是看不到的 —— 由调用方
+    (`quark_kouling_proto`)从 settings 取好再传进来。
+    """
+    tok = (token if token is not None else os.environ.get(ENV_TOKEN, "")).strip()
+    if not tok:
+        raise QuarkSignError(
+            "没有令牌 —— 请在 .env 配 QUARK_SIGN_TOKEN(签名服务也要求同一个值)")
+    h = (host if host is not None else os.environ.get(ENV_HOST, "")).strip() or DEFAULT_HOST
+    raw = port if port is not None else os.environ.get(ENV_PORT, str(DEFAULT_PORT))
     try:
-        port = int(raw_port)
-    except ValueError as exc:
-        raise QuarkSignError(f"{ENV_PORT} 不是端口号:{raw_port!r}") from exc
-    return host, port, token
+        p = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise QuarkSignError(f"端口不是数字:{raw!r}") from exc
+    return h, p, tok
 
 
 def _check_content(content: str) -> None:
-    for bad, name in (("\n", "换行"), ("\r", "回车"), ("\t", "制表符")):
-        if bad in content:
-            raise QuarkSignError(f"待签内容里不能有{name}(协议是行式的)")
+    if not isinstance(content, str):
+        raise QuarkSignError(f"待签内容必须是 str,收到 {type(content).__name__}")
 
 
 def sign(content: str, key_number: str = KEY_NUMBER_DEFAULT, *,
-         timeout: float = _CONNECT_TIMEOUT) -> str:
+         timeout: float = _CONNECT_TIMEOUT, host: str | None = None,
+         port: int | None = None, token: str | None = None) -> str:
     """求 `(密钥号, 内容)` 的 **20 字节裸签名**(40 位小写 hex)。
 
     Args:
         content: 待签内容(服务端原样送进聚安全,不做任何预处理)。
         key_number: 密钥号,夸克口令用 `"12001"`。
         timeout: 连接与读取超时(秒)。
+        host/port/token: 覆盖端点(**显式参数优先于环境变量**;见 `_endpoint`)。
 
     Returns:
         40 位小写 hex(20 字节)。
@@ -83,8 +96,9 @@ def sign(content: str, key_number: str = KEY_NUMBER_DEFAULT, *,
         QuarkSignError: 连不上 / 超时 / 服务端返回 `ERR` —— **一律当错误**。
     """
     _check_content(content)
-    host, port, token = _endpoint()
-    payload = f"{token}\t{key_number}\t{content}\n".encode("utf-8")
+    host, port, token = _endpoint(host, port, token)
+    b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
+    payload = f"{token}\t{key_number}\t{b64}\n".encode("utf-8")
     try:
         with socket.create_connection((host, port), timeout=timeout) as sock:
             sock.settimeout(timeout)

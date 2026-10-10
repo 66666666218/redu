@@ -1,11 +1,20 @@
 """夸克**口令(U口令)** → 搬进我们盘 → 建我方分享链(2026-10-06)。
 
-## 为什么走 UI 而不是接口
-解析接口是**带 `sign` 签名的 JSON**(端点 `utoken2.quark.cn/utoken/v2/parse` 已找到、
-参数也读出来了,但签名算法没解出),抓包又被**证书固定**挡住。
-⇒ 让 App 自己去解析,我们只读结果。**全部踩坑见 `scripts/quark_kouling_ui.py` 的 docstring。**
+## 两条解析路径(★★★ 2026-10-10 起,纯协议优先)
 
-## 实测走通的链路
+| 路径 | 怎么工作 | 什么时候用 |
+|---|---|---|
+| **纯协议**(首选) | 本机签名机算 sign → 直接 POST `utoken2.quark.cn/utoken/v2/parse` → 拿 pwd_id → 走已有转存链 | 签名服务在跑 |
+| UI(兜底) | 把口令丢进剪贴板,让夸克 App 自己解析,我们从 UI 读结果 | 签名服务没起 / 纯协议没解析出分享码 |
+
+**历史**:2026-10-06 起这条链**只能走 UI** —— 因为解析接口带 `sign` 签名而算法没解出、抓包又被证书固定挡住。
+2026-10-10 签名算法在本机跑通(常驻服务,见 `quark_sign_client` / `quark_kouling_proto`),
+于是**不必再驱动模拟器**。UI 那条路**保留为兜底**(两条路互为对照,别删)。
+
+⚠️ **回落必须有声** —— 纯协议失败时把原因带进失败记录,**不能静默换成 UI** 让人分不清哪条路出的事
+(见记忆 `silent-failure-is-fake-success`)。
+
+## 实测走通的链路(UI 路径)
 ```
 抖音线索标题(原样,不用提取口令 —— App 会做模糊匹配)
   → Set-Clipboard(Unicode) → 激活雷电窗口 → 夸克自动识别
@@ -77,6 +86,42 @@ def mark_of(text: str) -> str:
 
 def _looks_like_quark(title: str) -> bool:
     return any(h in str(title or "") for h in _QUARK_HINTS)
+
+
+def _proto_enabled(settings) -> bool:
+    """纯协议路径的开关(**默认开**)。
+
+    关掉它就退回"只能走 UI"的老行为 —— 留这个口子是给"签名服务挂了/要对照两条路"用的。
+    """
+    return bool(getattr(settings, "quark_kouling_proto", True))
+
+
+def _record_moved(session, user_id: int, lead, title: str, sh: dict) -> None:
+    """把「搬成了」落库:`our_url` + 首次搬成时刻 + 资源库那条路(`DiscoveredPanLink`)。
+
+    ⚠️ **两条入口(纯协议 / UI)共用这一个函数** —— 免得日后改一处漏一处,
+    出现"这条路径记了、那条路径没记"的静默不一致。
+    """
+    from app.db.models import DiscoveredPanLink
+
+    _had = bool(str(lead.our_url or ""))
+    lead.our_url = str(sh["share_url"])[:500]
+    lead.last_error = ""             # 搬成了就清掉上次的失败原因
+    mark_newly_moved(lead, _had)     # **首次搬成时刻**(2026-10-07)
+    # 同时进**资源库**那条路:`status='ok'` 是有意的 ——
+    # `pan_discovery` 只把 ok/skipped 当"已知",于是**不会被重复转存**;
+    # 而 `resource_library` 读这张表,agent 的 `_library_evidence` 就能看见它。
+    exists = session.scalar(select(DiscoveredPanLink.id).where(
+        DiscoveredPanLink.user_id == user_id,
+        DiscoveredPanLink.origin_url == lead.our_url).limit(1))
+    if not exists:
+        session.add(DiscoveredPanLink(
+            user_id=user_id, platform="douyin-kouling", origin_url=lead.our_url,
+            title=title[:255], author=str(lead.author or "")[:64],
+            source_url=str(lead.url or "")[:500], status="ok",
+            message="夸克口令转存", our_url=lead.our_url,
+            pass_code=str(sh.get("password") or "")[:32]))
+    session.flush()
 
 
 def resolve(text: str, *, save: bool = True, timeout: int = _UI_TIMEOUT) -> dict:
@@ -197,7 +242,7 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
 
     **每条都在自己的事务边界内**:一条失败不影响其余(`rollback` 后继续)。
     """
-    from app.db.models import DiscoveredPanLink, DouyinLead
+    from app.db.models import DouyinLead
     from app.services.cookie_store import get_cookie
     from app.services.quark_transfer import QuarkTransfer
 
@@ -274,11 +319,45 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
                 retried_ok += 1
             continue
 
+        # ★★★ 纯协议优先(2026-10-10):签名已能在本机算出来(常驻服务)⇒ **不必再驱动模拟器**。
+        #   这一步**不消耗模拟器时间**;成功就直接「按分享链转存 + 二次分享」。
+        #   ⚠️ 失败**绝不静默**:原因带进下面的失败记录,并**落回 UI 路径兜底** ——
+        #      两条路互为对照,不让人分不清是哪条出的事(见 `silent-failure-is-fake-success`)。
+        proto_reason = ""
+        if _proto_enabled(settings):
+            from app.services import quark_kouling_proto
+            pr = quark_kouling_proto.parse_via_protocol(lead.title or lead.mark or "")
+            if pr.get("ok") and pr.get("pwd_id"):
+                try:
+                    sh = qt.transfer_and_share(
+                        f"https://pan.quark.cn/s/{pr['pwd_id']}",
+                        save_dir=getattr(settings, "quark_save_dir", "") or "/来自发现",
+                        password=getattr(settings, "quark_share_password", "") or "",
+                        intro_dir=getattr(settings, "pan_intro_quark_dir", "") or "")
+                    # 资源名优先用转存回来的真实文件名;拿不到就退回线索标题(如实,不编造)
+                    names = [str(n) for n in (sh.get("names") or []) if n]
+                    _record_moved(session, user_id, lead,
+                                  names[0] if names else str(lead.title or ""), sh)
+                    done += 1
+                    if int(lead.kouling_tries or 0) > 0:
+                        retried_ok += 1
+                    logger.info("夸克口令(纯协议):「%s」→ %s", str(lead.title or "")[:30], lead.our_url)
+                    continue
+                except Exception as exc:  # noqa: BLE001 - 单条失败不影响其余
+                    proto_reason = f"纯协议转存失败:{type(exc).__name__}: {str(exc)[:120]}"
+                    logger.warning("夸克口令(纯协议)转存失败,回落 UI:%s", proto_reason)
+            else:
+                proto_reason = str(pr.get("reason") or "纯协议没解析出分享码")[:140]
+                logger.info("夸克口令(纯协议)未成,回落 UI:%s", proto_reason)
+
         reason = ""
         for attempt in (1, 2):
             res = resolve(lead.title or lead.mark or "", save=True)
             if not res.get("ok"):
-                reason = str(res.get("reason") or "")[:180]
+                # ⚠️ 纯协议的原因**放前面** —— 下面 `reasons` 汇总只留 60 字,
+                #    放后面会被 UI 的原因挤掉,等于白记(第一次真跑就踩到了)。
+                reason = ((f"纯协议:{proto_reason} | " if proto_reason else "")
+                          + str(res.get("reason") or ""))[:180]
                 # ⚠️⚠️ **环境故障不该消耗线索**(2026-10-06):`resolve` 用 `env=True` 标出
                 # "模拟器/焦点/超时"这类**与口令内容无关**的失败。上面已经给这条盖了"试过"的章
                 # —— 那是防"无限重试没内容的口令"的,而**环境故障被盖成"试过"是误伤**:
@@ -338,24 +417,7 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
                 logger.info("夸克口令:「%s」三盘互通命中,复用已有链(不另建分享)", title[:24])
             else:
                 sh = qt.share_fids([fid], title=title or "口令转存")
-            _had = bool(str(lead.our_url or ""))
-            lead.our_url = str(sh["share_url"])[:500]
-            lead.last_error = ""
-            mark_newly_moved(lead, _had)     # **首次搬成时刻**(2026-10-07)
-            # 同时进**资源库**那条路:`status='ok'` 是有意的 ——
-            # `pan_discovery` 只把 ok/skipped 当"已知",于是**不会被重复转存**;
-            # 而 `resource_library` 读这张表,agent 的 `_library_evidence` 就能看见它。
-            exists = session.scalar(select(DiscoveredPanLink.id).where(
-                DiscoveredPanLink.user_id == user_id,
-                DiscoveredPanLink.origin_url == lead.our_url).limit(1))
-            if not exists:
-                session.add(DiscoveredPanLink(
-                    user_id=user_id, platform="douyin-kouling", origin_url=lead.our_url,
-                    title=title[:255], author=str(lead.author or "")[:64],
-                    source_url=str(lead.url or "")[:500], status="ok",
-                    message="夸克口令转存", our_url=lead.our_url,
-                    pass_code=str(sh.get("password") or "")[:32]))
-            session.flush()
+            _record_moved(session, user_id, lead, title, sh)
             done += 1
             if int(lead.kouling_tries or 0) > 0:
                 retried_ok += 1      # 这条是**重试才成**的 —— 直接量出"重试值不值"
