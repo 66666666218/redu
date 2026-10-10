@@ -1299,12 +1299,25 @@
   "count": 11,
   "platforms": [
     { "source": "bilibili", "label": "B站", "captured_at": "2026-10-01 03:05:06",
-      "items": [ { "rank": 1, "title": "…", "url": "https://…", "extra": "手机游戏 · 播放123" } ] },
-    { "source": "zhihu", "label": "知乎", "captured_at": "…", "items": [ … ] }
+      "items": [ { "rank": 1, "title": "…", "url": "https://…", "extra": "手机游戏 · 播放123",
+                   "published_at": "2026-10-08 18:05:00", "age_hours": 50.7 } ] },
+    { "source": "zhihu", "label": "知乎", "captured_at": "…",
+      "items": [ { "rank": 1, "title": "…", "url": "…", "extra": "知乎",
+                   "published_at": "", "age_hours": null } ] }
   ]
 }
 ```
 > 各源**最新一轮** top N(B站/豆瓣自研直连优先在前,其余 newsnow 长尾);前端入口:导航「多平台热榜」。
+
+> **v2.16.0 变更(2026-10-10)**:`items[]` 新增 **`published_at`(内容自身的发布时刻)**
+> 与 **`age_hours`(内容已发布多少小时,由前者算出)**。
+> ⚠️ **别拿 `captured_at` 判新鲜度** —— 同一个老帖每小时被我们扫到一次,`captured_at`
+> 永远是"刚刚";只有 `age_hours` 反映"这东西到底有多新"。
+> 源不给时间时 `published_at` 为 `""`、`age_hours` 为 `null`(**不知道**,不是 0)。
+> 实测(逐源打过原始返回):bilibili / 腾讯热榜 / 金十 / 少数派 / 澎湃 / 贴吧 / 懂球帝 /
+> 知乎 / 华尔街见闻×3 / 所有 RSS 源**都能给**;
+> **nowcoder、豆瓣、头条**的返回里**确实没有**时间字段(存 NULL,不编)。
+> ⚠️ 知乎那栏差点被写错 —— 我以为它没有,实测 `target.created` 一直就在。
 
 ## 11c. 资源库(2026-10-01,现成资源检索)
 

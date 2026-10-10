@@ -17,6 +17,23 @@ from app.services import hotspot_agent
 router = APIRouter()
 
 
+def _hot_item(r, now: datetime) -> dict:
+    """把一行热榜条目转成**前端/分析用**的字典。
+
+    ⚠️ 2026-10-10 起多给两样东西,原因是"**`captured_at` 不等于新鲜度**":
+    同一个老帖被我们每小时反复扫到,`captured_at` 照样是"刚刚",看着像新热点。
+    `published_at` 才是**内容自己的发布时刻**,`age_hours` 是**由它算出的"内容有多旧"**。
+    ⇒ 判定"是不是新东西"要**看 `age_hours`,不要看 `captured_at`**。
+    源不给时间时 `published_at` 为空串、`age_hours` 为 `null`(**不知道**,不是 0)。
+    """
+    pub = getattr(r, "published_at", None)
+    return {
+        "rank": r.rank, "title": r.title, "url": r.url, "extra": r.extra,
+        "published_at": pub.isoformat(sep=" ", timespec="seconds") if pub else "",
+        "age_hours": round((now - pub).total_seconds() / 3600, 1) if pub else None,
+    }
+
+
 class ActedIn(BaseModel):
     acted: bool = True
 
@@ -80,6 +97,7 @@ def hot_rank(per: int = 10, user: User = Depends(get_current_user), db: Session 
         select(HotSourceItem.source, func.max(HotSourceItem.captured_at))
         .where(HotSourceItem.user_id == user.id)
         .group_by(HotSourceItem.source)).all()
+    now = datetime.now()
     out = []
     for src, ts in latest:
         rows = db.scalars(select(HotSourceItem).where(
@@ -88,7 +106,7 @@ def hot_rank(per: int = 10, user: User = Depends(get_current_user), db: Session 
         out.append({
             "source": str(src), "label": _PLAT_LABEL.get(str(src), str(src)),
             "captured_at": ts.isoformat(sep=" ", timespec="seconds") if ts else "",
-            "items": [{"rank": r.rank, "title": r.title, "url": r.url, "extra": r.extra} for r in rows],
+            "items": [_hot_item(r, now) for r in rows],
         })
     # 自研优先(B站/豆瓣)在前,其余按平台名
     out.sort(key=lambda p: (p["source"] not in ("bilibili", "douban"), p["source"]))

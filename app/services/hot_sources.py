@@ -23,6 +23,7 @@ from curl_cffi import requests as creq
 from sqlalchemy import func, select
 
 from app.utils import get_logger
+from app.services.hot_time import parse_published   # 发布时刻统一解析(见该模块:6 种时间形状)
 
 logger = get_logger(__name__)
 
@@ -92,6 +93,8 @@ class BilibiliSource(HotSource):
                 "rank": i, "title": title,
                 "url": str(it.get("short_link_v2") or f"https://www.bilibili.com/video/{it.get('bvid','')}"),
                 "extra": f"{it.get('tname') or ''} · 播放{it.get('stat', {}).get('view', 0)}",
+                # B站排行榜**自带投稿时刻**(`pubdate`)→ 发布时间有着落(2026-10-10 实测)
+                "published_at": parse_published(it.get("pubdate")),
             })
         return out
 
@@ -214,8 +217,14 @@ class TencentNewsSource(HotSource):
             # 判据用"**有没有可点的链接**"而不是硬编那句标题(标题会变,结构不会)。
             if not title or not url:
                 continue
+            # ⚠️ **订正一条我自己的误判(2026-10-10)**:我之前记的是"它的 `time` 是不带年份的
+            # 人读字符串、不可解析"—— **实测打脸**:`time` 是**完整时刻**(`"2026-10-10 11:23:21"`),
+            # 旁边还有个 `timestamp`。所以它当时被截断着塞进 `extra`(一个"标签"字段),
+            # 而**真正的列 `published_at` 一直空着** —— 数据在手边,却没放到该放的地方。
+            # 现在归位:`extra` 回到稳定标签,时刻进 `published_at`。
             out.append({"rank": len(out) + 1, "title": title, "url": url,
-                        "extra": str(it.get("time") or "腾讯新闻热榜")[:20]})
+                        "extra": "腾讯新闻热榜",
+                        "published_at": parse_published(it.get("time") or it.get("timestamp"))})
             if len(out) >= limit:
                 break
         return out
@@ -323,7 +332,12 @@ class ZhihuHotSource(HotSource):
                 continue
             out.append({"rank": i, "title": title,
                         "url": str(tgt.get("url") or ""),
-                        "extra": str(it.get("detail_text") or "知乎热榜")[:60]})
+                        "extra": str(it.get("detail_text") or "知乎热榜")[:60],
+                        # ⚠️ 我原本**以为**知乎不给时间,写文档前实测了一遍才没写错:
+                        # `target.created` 是 **Unix 秒**(2026-10-10 实测 = 1791605094)。
+                        # ⇒ 教训:**"看着没有"不等于"没有"** —— 断言前先打一遍原始返回
+                        #   (本仓同类教训:`absence-of-evidence-is-not-evidence-of-absence`)。
+                        "published_at": parse_published(tgt.get("created"))})
         return out
 
 
@@ -344,18 +358,23 @@ class JsonListSource(HotSource):
       `title_key`  —— 标题字段名(可给多个候选);
       `url_key`    —— 链接字段名(可选);
       `hot_key`    —— 热度/描述字段名(可选,只进 `extra`);
-      `url_tpl`    —— 链接要拼模板时用(`{v}` 会被替换)。
+      `url_tpl`    —— 链接要拼模板时用(`{v}` 会被替换);
+      `time_key`   —— **发布时刻**的字段名(可选,点路径,可给多个按序试;规则见 `hot_time`)。
     """
 
     def __init__(self, sid: str, url: str, *, title_keys: tuple[str, ...] = ("title",),
                  list_path: str | None = None, url_key: str = "", url_tpl: str = "",
                  hot_key: str = "", headers: dict | None = None, post_json: dict | None = None,
                  extra_label: str = "", ok_codes: tuple = (0, None, "0"),
-                 strip_js: bool = False) -> None:
+                 strip_js: bool = False, time_key: str | tuple[str, ...] = "") -> None:
         """`title_keys` / `url_key` / `hot_key` 支持**点路径**(如 `content.title`)——
         很多平台把标题嵌一层(掘金 `data[].content.title`),不支持下就得为它单写一个类。
         `ok_codes`  —— 该平台自己的成功码;华尔街见闻用 **20000** 当 OK,不认它会被当失败。
         `strip_js`   —— 响应是 `var newest = [...]` 这种**JS 赋值**时先剥壳再解析(金十)。
+        `time_key`   —— **发布时刻**字段(点路径,**可给多个按序试**)。⚠️ 留空 = 该源
+                       **确实没有**时间字段,别去猜一个 —— 猜出来的时间会污染全部新鲜度判断
+                       (`hot_time` 的注释)。多个的用法:澎湃的绝对时刻字段万一改名,
+                       还能退回相对时间字段(`("publishTime", "pubTime")`)。
         """
         self.id = sid
         self._url = url
@@ -369,6 +388,7 @@ class JsonListSource(HotSource):
         self._label = extra_label or sid
         self._ok_codes = ok_codes
         self._strip_js = strip_js
+        self._time_key = time_key
 
     def _rows(self, payload) -> list[dict]:
         if self._list_path is None:
@@ -421,8 +441,19 @@ class JsonListSource(HotSource):
             if link and self._url_tpl:
                 link = self._url_tpl.replace("{v}", link)
             hot = str(_pick(it, self._hot_key) or "") if self._hot_key else ""
+            #: **发布时刻**(源自己给的)—— 与 `captured_at`(我们抓到的时刻)是两回事:
+            #: 老帖被反复扫到时 `captured_at` 照样是"刚刚",只有它才是新鲜度的真依据。
+            #: 拿不到就是 `None`(="不知道"),**不编**。见 `hot_time`。
+            pub = None
+            for tk in ((self._time_key,) if isinstance(self._time_key, str) else self._time_key):
+                if not tk:
+                    continue
+                pub = parse_published(_pick(it, tk))
+                if pub is not None:                  # 多个候选:**第一个解析得出来的就收**
+                    break
             out.append({"rank": len(out) + 1, "title": title, "url": link,
-                        "extra": f"{self._label} · {hot}"[:60] if hot else self._label})
+                        "extra": f"{self._label} · {hot}"[:60] if hot else self._label,
+                        "published_at": pub})
             if len(out) >= limit:
                 break
         if not out:
@@ -475,7 +506,13 @@ class RssSource(HotSource):
             if not link:                                          # Atom 的 link 在属性里
                 el = it.find("{http://www.w3.org/2005/Atom}link")
                 link = (el.get("href") if el is not None else "") or ""
-            out.append({"rank": len(out) + 1, "title": t, "url": link, "extra": self._label})
+            #: **发布时刻**:RSS 用 `pubDate`、Atom 用 `published`/`updated` —— 这是**标准字段**,
+            #: 所以每个 RSS 源都白拿(实测 aihot/freebuf/chongbuluo/hackernews 四个都有)。
+            pub = parse_published(it.findtext("pubDate")
+                                  or it.findtext("{http://www.w3.org/2005/Atom}published")
+                                  or it.findtext("{http://www.w3.org/2005/Atom}updated"))
+            out.append({"rank": len(out) + 1, "title": t, "url": link, "extra": self._label,
+                        "published_at": pub})
             if len(out) >= limit:
                 break
         if not out:
@@ -542,11 +579,19 @@ class NewsnowSource(HotSource):
             if not title:
                 continue
             extra = it.get("extra") or {}
+            #: 容器条目**可能**带时间(newsnow 常见把相对时间放 `extra.date`,如"3小时前";
+            #: 也有源直接给 `timestamp`)。⚠️ **本机验证不了** —— newsnow 容器只跑在**远程那一侧**
+            #: (两侧分工见 `SCHEDULER_ROLE`),本机 4444 连不上。所以这里是**尽力而为**:
+            #: 给什么解析什么,读不懂就是 `None`(`hot_time` 对不认识的值一律返回 `None`,不猜)。
+            pub = parse_published(
+                (extra.get("date") if isinstance(extra, dict) else None)
+                or it.get("timestamp") or it.get("pubDate") or it.get("date"))
             out.append({
                 "rank": i, "title": title,
                 "url": str(it.get("url") or it.get("mobileUrl") or ""),
                 "extra": str(extra.get("info") or extra.get("hover") or "")[:80]
                 if isinstance(extra, dict) else str(extra)[:80],
+                "published_at": pub,
             })
         return out
 
@@ -574,6 +619,10 @@ SOURCES: dict[str, HotSource] = {
     #    否则同一份数据入库两次(微博那条就是这么踩过的)。
     #
     # -- 实测通、已搬离 newsnow --
+    # ⚠️ `time_key`(发布时刻字段)**只写实测确认过的** —— 2026-10-10 逐源打了一遍原始返回,
+    #    结果见下表。**没写的不是忘了,是实测没有**:`nowcoder` 无任何时间字段;
+    #    `juejin` 的 `content.ctime`/`mtime` **恒为 0**(占位值,收下会变成 1970-01-01)。
+    #    留空 = 老老实实存 NULL;编一个会污染**全部**新鲜度判断。
     "aihot": RssSource("aihot", "https://aihot.virxact.com/feed/all.xml", "AI热点"),
     "freebuf": RssSource("freebuf", "https://www.freebuf.com/feed", "FreeBuf"),
     "chongbuluo-latest": RssSource(
@@ -588,14 +637,20 @@ SOURCES: dict[str, HotSource] = {
     "tieba": JsonListSource(
         "tieba", "https://tieba.baidu.com/hottopic/browse/topicList",
         title_keys=("topic_name", "title"), url_key="topic_url", hot_key="discuss_num",
+        time_key="create_time",                       # Unix 秒(实测)
         extra_label="贴吧热榜", headers={"Referer": "https://tieba.baidu.com/"}),
     "thepaper": JsonListSource(
         "thepaper", "https://cache.thepaper.cn/contentapi/wwwIndex/rightSidebar",
-        title_keys=("name", "title"), extra_label="澎湃",
+        title_keys=("name", "title"),
+        # ⚠️ 它是 `"2026-10-10 10:38:33"` 这种**绝对**时刻;旁边那个 `pubTime` 是
+        #    `"10小时前"`(相对、按抓取时刻算)—— **优先取绝对的**,相对的当兜底。
+        time_key=("publishTime", "pubTime"),
+        extra_label="澎湃",
         headers={"Referer": "https://www.thepaper.cn/"}),
     "dongqiudi": JsonListSource(
         "dongqiudi", "https://api.dongqiudi.com/app/tabs/web/1.json",
-        title_keys=("title",), extra_label="懂球帝",
+        title_keys=("title",), time_key="published_at",   # 字符串时刻(实测)
+        extra_label="懂球帝",
         headers={"Referer": "https://www.dongqiudi.com/"}),
     "nowcoder": JsonListSource(
         "nowcoder", "https://gw-c.nowcoder.com/api/sparta/hot-search/top-hot-pc?size=20",
@@ -603,28 +658,33 @@ SOURCES: dict[str, HotSource] = {
         headers={"Referer": "https://www.nowcoder.com/"}),
     "jin10": JsonListSource(
         "jin10", "https://www.jin10.com/flash_newest.js",
-        title_keys=("data.content", "data.title"), strip_js=True, extra_label="金十",
+        title_keys=("data.content", "data.title"), strip_js=True, time_key="time",
+        extra_label="金十",
         headers={"Referer": "https://www.jin10.com/"}),
     "sspai": JsonListSource(
         "sspai", "https://sspai.com/api/v1/article/tag/page/get?limit=20&offset=0"
                  "&tag=%E7%83%AD%E9%97%A8%E6%96%87%E7%AB%A0&released=false",
-        title_keys=("title",), extra_label="少数派", headers={"Referer": "https://sspai.com/"}),
+        title_keys=("title",), time_key="released_time",  # Unix 秒(实测)
+        extra_label="少数派", headers={"Referer": "https://sspai.com/"}),
     "wallstreetcn-hot": JsonListSource(
         "wallstreetcn-hot", "https://api-one.wallstcn.com/apiv1/content/articles/hot"
                             "?period=all",
         title_keys=("title",), list_path="data.day_items", url_key="uri", hot_key="pageviews",
+        time_key="display_time",                      # Unix 秒(实测)
         ok_codes=(20000, 0, None), extra_label="华尔街见闻",
         headers={"Referer": "https://wallstreetcn.com/"}),
     "wallstreetcn-news": JsonListSource(
         "wallstreetcn-news", "https://api-one.wallstcn.com/apiv1/content/information-flow"
                              "?channel=global-channel&accept=article&limit=30",
         title_keys=("resource.title", "resource.content_short"), list_path="data.items",
-        url_key="resource.uri", ok_codes=(20000, 0, None), extra_label="华尔街见闻要闻",
+        url_key="resource.uri", time_key="resource.display_time",   # Unix 秒(实测)
+        ok_codes=(20000, 0, None), extra_label="华尔街见闻要闻",
         headers={"Referer": "https://wallstreetcn.com/"}),
     "wallstreetcn-quick": JsonListSource(
         "wallstreetcn-quick", "https://api-one.wallstcn.com/apiv1/content/lives"
                               "?channel=global-channel&limit=30",
-        title_keys=("title", "content"), ok_codes=(20000, 0, None), extra_label="华尔街见闻快讯",
+        title_keys=("title", "content"), time_key="display_time",   # Unix 秒(实测)
+        ok_codes=(20000, 0, None), extra_label="华尔街见闻快讯",
         headers={"Referer": "https://wallstreetcn.com/"}),
     # -- **新接平台**(原本连 newsnow 都没有,48 个口径里多出来的) --
     # ⚠️ **给两个镜像**:实测两边可达性**相反** —— 远程容器打官方 `news.ycombinator.com/rss`
@@ -714,6 +774,12 @@ def collect_hot_sources(session, user_id: int, sources: list[str] | None = None,
                                       title=str(it.get("title") or "")[:500],
                                       url=str(it.get("url") or "")[:700],
                                       extra=str(it.get("extra") or "")[:200],
+                                      #: **内容自身的发布时刻**(2026-10-10 起真正开始填)。
+                                      #: ⚠️ 与 `captured_at` 是两个东西:老帖被反复扫到时,
+                                      #: 后者照样是"刚刚",**只有它才是新鲜度的真依据**。
+                                      #: 源不给时间就是 `None`(实测 44 个源里多数能给,
+                                      #: 少数如 nowcoder/豆瓣 确实没有)—— **不编**。
+                                      published_at=it.get("published_at"),
                                       # ⚠️⚠️ **必须传"这一轮的批次时刻"**(2026-10-07 修):
                                       # 不传的话每行走模型默认值 `datetime.now` ⇒
                                       # **同一批里每行微秒都不同**,"这一轮采到了什么"就
