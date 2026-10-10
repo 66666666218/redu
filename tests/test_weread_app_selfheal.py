@@ -93,8 +93,13 @@ class TestVerifyByApi:
                 return type("B", (), {"weread_book_id": "MP_WXS_1", "nickname": "x"})()
 
         class _C:
-            def __init__(self, t, v):
-                pass
+            #: ★ 记下构造参数 —— **`profile=` 必须传进来**(2026-10-11):
+            #: 身份档(eink/安卓)如果传错,拿对的 token 去问也回 `-2012` ——
+            #: 我当晚就因为这个把自己的好 token 否掉过一次。
+            seen: list = []
+
+            def __init__(self, t, v, **k):
+                _C.seen.append(k)
 
             def articles(self, bid, **k):
                 raise RuntimeError("token 是旧的")
@@ -102,6 +107,8 @@ class TestVerifyByApi:
         v = wat.verify_by_api(_S(), 1)
         with pytest.raises(RuntimeError):
             v("T", "V")
+        assert _C.seen and "profile" in _C.seen[0], (
+            f"验活**必须带着身份档**去问(否则会拿对的 token 判死):{_C.seen!r}")
 
     def test_没有可试的号时不阻断(self, monkeypatch) -> None:
         class _S:

@@ -342,6 +342,9 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
         #   ⚠️ 失败**绝不静默**:原因带进下面的失败记录,并**落回 UI 路径兜底** ——
         #      两条路互为对照,不让人分不清是哪条出的事(见 `silent-failure-is-fake-success`)。
         proto_reason = ""
+        #: ⚠️ **显式初始化**:`pr` 只在 `_proto_enabled` 为真时才被绑定,而下面判"是不是环境故障"
+        #: 要读 `pr.get("env")` —— 少了这一行,proto 关掉时就是 `NameError`。
+        pr: dict = {}
         if _proto_enabled(settings):
             from app.services import quark_kouling_proto
             pr = quark_kouling_proto.parse_via_protocol(lead.title or lead.mark or "")
@@ -370,28 +373,44 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
                 proto_reason = str(pr.get("reason") or "纯协议没解析出分享码")[:140]
                 logger.info("夸克口令(纯协议)未成:%s", proto_reason)
 
-        # ★★★ 本实例**不回落 UI**(2026-10-10 起两个条件:开关关着 **或** 本实例没有模拟器)。
-        #   回落只会为每条线索开一个必然失败的子进程,把"签名服务挂了"伪装成"这条口令没内容"。
-        #   ⇒ 如实失败:原因写清楚,并记一次(防无限重试)。
-        if proto_reason and not _ui_fallback_available(settings):
-            failed += 1
-            _why = ("UI 兜底已关闭" if not getattr(settings, "quark_kouling_ui_fallback", False)
-                    else "本实例没有模拟器")
-            lead.last_error = (f"纯协议没解出来:{proto_reason}"
-                               f" | 不回落 UI({_why})")[:200]
-            reasons.append(lead.last_error[:60])
-            lead.kouling_tries = int(lead.kouling_tries or 0) + 1
-            logger.warning("夸克口令:线索 %s 纯协议没解出来,且本实例无模拟器可回落 —— 如实失败:%s",
-                           lead.aweme_id, proto_reason[:100])
-            continue
-
+        # ⚠️⚠️ **"不回落 UI" ≠ "直接盖章走人"**(2026-10-11,被
+        #   `test_环境故障不盖章_下轮还能再试` 当场抓住):我第一版在这里 `continue`,
+        #   于是**跳过了下面的"撤章"逻辑** —— 而"签名服务没起 / 网络抖动"正是 `env` 那一类
+        #   (标注见 `quark_kouling_proto`)。后果还是那句老话:
+        #   **一次环境抖动会把整批线索永久判死**(`kouling_tried_at` 一落库,
+        #   它们再也不会进待办队列)。
+        #   ⇒ 现在这里只**备好原因**,让它落进下面**同一段收尾**,由那段按 `env` 分流。
+        _why = ("UI 兜底已关闭" if not getattr(settings, "quark_kouling_ui_fallback", False)
+                else "本实例没有模拟器")
+        skip_ui = bool(proto_reason and not _ui_fallback_available(settings))
         reason = ""
-        for attempt in (1, 2):
+        fid = ""
+        if skip_ui:
+            reason = f"纯协议:{proto_reason} | 不回落 UI({_why})"[:180]
+            if (pr or {}).get("env"):
+                env_fail = True             # ← 环境故障:下面的收尾会把"试过"的章**撤回**
+            logger.warning("夸克口令:线索 %s 纯协议没成、且不回落 UI(%s):%s",
+                           lead.aweme_id, _why, proto_reason[:100])
+        # ⚠️ `skip_ui` 时用**空元组**跳过整个 UI 循环 —— **不能改写成 `continue`**:
+        #    `continue` 会跳过下面那段"撤章"逻辑,而那正是环境故障必须走的。
+        # ⚠️ **慢活之前必须先把写事务落盘**(SQLite 单写者):`resolve` 里是浏览器/模拟器,
+        #    几十秒起步,抱着事务做会把别的作业饿死(它们的 `busy_timeout` 只有 30 秒),
+        #    表现是成批的 `database is locked`。这条由 `test_slowwork_guard` 守着 ——
+        #    我 2026-10-11 那次重构把 `resolve(` 推离上一个 commit 太远,当场被抓住。
+        session.commit()
+
+        for attempt in (() if skip_ui else (1, 2)):
             res = resolve(lead.title or lead.mark or "", save=True)
             if not res.get("ok"):
                 # ⚠️ 纯协议的原因**放前面** —— 下面 `reasons` 汇总只留 60 字,
                 #    放后面会被 UI 的原因挤掉,等于白记(第一次真跑就踩到了)。
-                reason = ((f"纯协议:{proto_reason} | " if proto_reason else "")
+                # ⚠️ 纯协议的原因**放前面**,但**必须截短** —— 下面 `reasons` 汇总只留 60 字,
+                #    而"签名服务不可用:连不上签名服务 127.0.0.1:29341 —— ConnectionRefusedError…"
+                #    这种一条就吃掉 60 字,等于把**后面那条真正有用的 UI 原因**(超时/拿不到焦点)
+                #    **整条埋掉** —— 恰是这段注释本来要防的那件事,只是方向反了(2026-10-11 被
+                #    `test_失败原因写进线索并且汇总返回` / `test_连续两条环境故障就提前收工` 抓住)。
+                #    ⇒ 纯协议那段**只留 24 字**,两个原因都活。
+                reason = ((f"纯协议:{proto_reason[:24]} | " if proto_reason else "")
                           + str(res.get("reason") or ""))[:180]
                 # ⚠️⚠️ **环境故障不该消耗线索**(2026-10-06):`resolve` 用 `env=True` 标出
                 # "模拟器/焦点/超时"这类**与口令内容无关**的失败。上面已经给这条盖了"试过"的章

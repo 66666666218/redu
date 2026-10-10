@@ -36,6 +36,11 @@ def session():
 class _S:
     quark_kouling_enabled = True
     quark_kouling_per_run = 5
+    #: ★ **本文件测的是「UI 兜底」那条路**(mock 了 `qk.resolve`),所以**必须显式打开**它。
+    #: ⚠️ 生产默认是 **关**(2026-10-10 用户口径「关掉夸克依赖模拟器这条路」)——
+    #: 这个开关一关,`_ui_fallback_available()` 就返回 False,**这些测试根本走不到 UI**
+    #: (实测:漏了这一行,17 个测试一起红)。测试要测哪条路,就得把那条路的开关打开。
+    quark_kouling_ui_fallback = True
 
 
 def _lead(session, aweme_id: str, title: str) -> DouyinLead:

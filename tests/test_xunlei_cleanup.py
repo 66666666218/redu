@@ -47,6 +47,9 @@ def test_plan_flags_by_transfer_time_when_nobody_reposts(session, monkeypatch) -
     """没人再发 → 按**转存时间**算闲置:超过 days 天即过期。"""
     monkeypatch.setattr(xt, "list_files", lambda *a, **k: [
         _folder("亚麻壁纸", 17), _folder("新资源A", 1)])
+    # ★ 代码现在走翻页版 `list_all_files`(2026-10-10),替身也得给
+    monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: [
+        _folder("亚麻壁纸", 17), _folder("新资源A", 1)])
     p = xc.plan(session, 1, days=7, settings=_S())
     assert p["scanned"] == 2 and p["stale"] == 1 and p["keep"] == 1
     stale = next(f for f in p["folders"] if f["name"] == "亚麻壁纸")
@@ -65,6 +68,9 @@ def test_plan_keeps_resource_that_someone_reposted_recently(session, monkeypatch
     session.commit()
     monkeypatch.setattr(xt, "list_files", lambda *a, **k: [
         _folder("警笛模拟器", 30)])                      # 盘里那个 30 天前转的
+    # ★ 代码现在走翻页版 `list_all_files`(2026-10-10),替身也得给
+    monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: [
+        _folder("警笛模拟器", 30)])                      # 盘里那个 30 天前转的
     p = xc.plan(session, 1, days=7, settings=_S())
     f = p["folders"][0]
     assert f["matched_by"] == "外部又有人发" and f["days_idle"] <= 1
@@ -78,6 +84,8 @@ def test_plan_reports_error_on_empty_listing(session, monkeypatch) -> None:
     又一次静默假成功 —— 与本项目已修 4 次的 A 类问题同型。
     """
     monkeypatch.setattr(xt, "list_files", lambda *a, **k: [])
+    # ★ 代码现在走翻页版 `list_all_files`(2026-10-10),替身也得给
+    monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: [])
     p = xc.plan(session, 1, days=7, settings=_S())
     assert p["error"] and "空" in p["error"]
     assert p["scanned"] == 0
@@ -103,6 +111,8 @@ def test_run_cleanup_dry_run_never_deletes(session, monkeypatch) -> None:
     """默认只预览 —— 删盘难逆,不该被一个误点触发。"""
     called = {"n": 0}
     monkeypatch.setattr(xt, "list_files", lambda *a, **k: [_folder("旧资源", 30)])
+    # ★ 代码现在走翻页版 `list_all_files`(2026-10-10),替身也得给
+    monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: [_folder("旧资源", 30)])
     monkeypatch.setattr(xt, "trash_files", lambda ids: called.__setitem__("n", called["n"] + 1) or {})
     out = xc.run_cleanup(session, 1, days=7, settings=_S(), dry_run=True)
     assert out["to_delete"] == 1 and out["deleted"] == 0 and called["n"] == 0
@@ -112,6 +122,9 @@ def test_run_cleanup_moves_to_trash_and_respects_limit(session, monkeypatch) -> 
     """真执行时:走 `trash_files`(**移入回收站**,留后悔路),并按单轮上限限流。"""
     deleted: list[str] = []
     monkeypatch.setattr(xt, "list_files", lambda *a, **k: [
+        _folder("旧A", 30), _folder("旧B", 30), _folder("旧C", 30)])
+    # ★ 代码现在走翻页版 `list_all_files`(2026-10-10),替身也得给
+    monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: [
         _folder("旧A", 30), _folder("旧B", 30), _folder("旧C", 30)])
     monkeypatch.setattr(xt, "trash_files",
                         lambda ids: deleted.extend(ids) or {"status": "ok", "deleted": len(ids)})
@@ -132,6 +145,8 @@ def test_run_cleanup_also_unlists_from_resource_library(session, monkeypatch) ->
                                share_url="https://pan.xunlei.com/s/DEAD", synced_at=None))
     session.commit()
     monkeypatch.setattr(xt, "list_files", lambda *a, **k: [_folder("旧资源", 30, fid="id-旧资源")])
+    # ★ 代码现在走翻页版 `list_all_files`(2026-10-10),替身也得给
+    monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: [_folder("旧资源", 30, fid="id-旧资源")])
     monkeypatch.setattr(xt, "trash_files", lambda ids: {"status": "ok", "deleted": len(ids)})
     out = xc.run_cleanup(session, 1, days=7, settings=_S(), dry_run=False)
     assert out["deleted"] == 1 and out["unlisted"] == 1
@@ -146,6 +161,8 @@ def test_dry_run_does_not_touch_resource_library(session, monkeypatch) -> None:
                                share_url="https://pan.xunlei.com/s/DEAD"))
     session.commit()
     monkeypatch.setattr(xt, "list_files", lambda *a, **k: [_folder("旧资源", 30, fid="id-旧资源")])
+    # ★ 代码现在走翻页版 `list_all_files`(2026-10-10),替身也得给
+    monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: [_folder("旧资源", 30, fid="id-旧资源")])
     out = xc.run_cleanup(session, 1, days=7, settings=_S(), dry_run=True)
     assert out["deleted"] == 0 and session.query(XunleiResource).count() == 1
 
@@ -164,7 +181,9 @@ class TestDuplicateNameDedupe:
 
     def _fake_list(self, monkeypatch, tree: dict) -> None:
         from app.services import xunlei_transfer as xt
-        monkeypatch.setattr(xt, "list_files", lambda fid, limit=200: tree.get(str(fid), []))
+        monkeypatch.setattr(xt, "list_files", lambda fid, **k: tree.get(str(fid), []))
+    # ★ 代码现在走翻页版 `list_all_files`(2026-10-10),替身也得给
+        monkeypatch.setattr(xt, "list_all_files", lambda fid, **k: tree.get(str(fid), []))
 
     def _child(self, name: str, size: int = 100) -> dict:
         return {"name": name, "size": size, "kind": "drive#file"}
@@ -209,6 +228,8 @@ class TestDuplicateNameDedupe:
             return tree.get(str(fid), [])
 
         monkeypatch.setattr(xt, "list_files", _flaky)
+    # ★ 代码现在走翻页版 `list_all_files`(2026-10-10),替身也得给
+        monkeypatch.setattr(xt, "list_all_files", _flaky)
         assert cl.plan_duplicates(session, 1, settings=self._S())["dups"] == []
 
     def test_dry_run_deletes_nothing(self, session, monkeypatch) -> None:
@@ -264,7 +285,9 @@ class TestDedupeTick:
         from app.services import xunlei_transfer as xt
         monkeypatch.setattr(appdb, "get_session_local",
                             lambda: sessionmaker(bind=session.get_bind()))
-        monkeypatch.setattr(xt, "list_files", lambda fid, limit=200: tree.get(str(fid), []))
+        monkeypatch.setattr(xt, "list_files", lambda fid, **k: tree.get(str(fid), []))
+    # ★ 代码现在走翻页版 `list_all_files`(2026-10-10),替身也得给
+        monkeypatch.setattr(xt, "list_all_files", lambda fid, **k: tree.get(str(fid), []))
         trashed = []
         monkeypatch.setattr(xt, "trash_files", lambda ids: trashed.extend(ids) or {"status": "ok"})
         return trashed

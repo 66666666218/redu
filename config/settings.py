@@ -267,7 +267,7 @@ class Settings(BaseSettings):
     cross_discover_enabled: bool = True
     cross_discover_keywords: int = 3        # 每轮取几个资源名当搜索词(**宁少勿多**:
                                             # 每个词都是一次平台请求,风控盯的就是"访问量")
-    cross_discover_cron: str = "25 */6 * * *"  # **每 6 小时一轮**(2026-10-10 提速)——
+    cross_discover_cron: str = "45 */6 * * *"  # **每 6 小时一轮**(2026-10-10 提速)——
                                               # 原为"每周两轮"(周一/周四 09:00),理由是
                                               # 用户要求"一次不要访问太多"。⚠️ 但实测的短板
                                               # **不在单次访问量,而在发现周期**:资源号一周

@@ -120,8 +120,11 @@ def parse_via_protocol(text: str, *, timeout: float = _DEFAULT_TIMEOUT,
     try:
         bare = signer.sign(content, **_signer_kwargs(settings))
     except signer.QuarkSignError as exc:
+        # ★ `env: True` = **环境故障**(签名服务没起/连不上),**与"这条口令没内容"是两回事**
+        #   (2026-10-11):上层据此**撤回"试过"的章** —— 否则一次环境抖动会把整批线索
+        #   **永久判死**(它们再也不会进待办队列)。与 UI 那条 `env` 同一纪律。
         return {**base, "ok": False, "pwd_id": "", "share_code": "", "timestamp": timestamp,
-                "reason": f"签名服务不可用:{exc}"}
+                "env": True, "reason": f"签名服务不可用:{exc}"}
 
     sign = "2ee1" + bare          # 12001 → 0x2ee1
     body = {"app": APP, "clipboard": clipboard, "identifier": identifier,
@@ -132,7 +135,8 @@ def parse_via_protocol(text: str, *, timeout: float = _DEFAULT_TIMEOUT,
                              timeout=timeout)
     except requests.RequestException as exc:
         return {**base, "ok": False, "pwd_id": "", "share_code": "", "timestamp": timestamp,
-                "sign": sign, "reason": f"HTTP 失败:{type(exc).__name__}: {exc}"}
+                "sign": sign, "env": True,      # 网络失败同样是**环境**(见上面那条注释)
+                "reason": f"HTTP 失败:{type(exc).__name__}: {exc}"}
 
     try:
         data = resp.json()

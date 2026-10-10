@@ -308,6 +308,8 @@ def test_resolve_parent_id_finds_folder_by_name(monkeypatch) -> None:
                 {"id": "F3", "name": "最全文件", "kind": "drive#file"}]   # 同名文件不算
 
     monkeypatch.setattr(xt, "list_files", fake_list)
+    # ★ 代码现在走翻页版 `list_all_files`(2026-10-10),替身也得给
+    monkeypatch.setattr(xt, "list_all_files", fake_list)
     assert xt.resolve_parent_id() == "F2"
     assert xt.resolve_parent_id() == "F2" and calls["n"] == 1        # 第二次走缓存
 
@@ -322,6 +324,9 @@ def test_resolve_parent_id_missing_folder_falls_back_to_root(monkeypatch) -> Non
                                                "xunlei_transfer_parent_id": ""})())
     monkeypatch.setattr(xt, "list_files", lambda *a, **k: [
         {"id": "F1", "name": "别的", "kind": "drive#folder"}])
+    # ★ 代码现在走翻页版 `list_all_files`(2026-10-10),替身也得给
+    monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: [
+        {"id": "F1", "name": "别的", "kind": "drive#folder"}])
     assert xt.resolve_parent_id() == ""
 
 
@@ -335,6 +340,8 @@ def test_transfer_sends_files_into_configured_parent(monkeypatch) -> None:
     monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
     monkeypatch.setattr(xt, "resolve_parent_id", lambda cred=None, **k: "PARENT_DIR")
     monkeypatch.setattr(xt, "list_files", lambda *a, **k: [])
+    # ★ 代码现在走翻页版 `list_all_files`(2026-10-10),替身也得给
+    monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: [])
 
     def fake_get(url, **kw):
         if url.endswith("/drive/v1/share"):
@@ -363,6 +370,9 @@ def test_resolve_parent_id_prefers_configured_id(monkeypatch) -> None:
 
     monkeypatch.setattr(xt, "_parent_cache", {"name": "", "id": "", "at": 0.0})
     monkeypatch.setattr(xt, "list_files",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("配了 id 不该扫目录")))
+    # ★ 代码现在走翻页版 `list_all_files`(2026-10-10),替身也得给
+    monkeypatch.setattr(xt, "list_all_files",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("配了 id 不该扫目录")))
     monkeypatch.setattr("config.settings.get_settings",
                         lambda: type("S", (), {"xunlei_transfer_parent": "最全文件",
@@ -501,6 +511,8 @@ def test_oversized_share_is_refused_without_even_attempting_restore(monkeypatch)
     monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
     monkeypatch.setattr(xt, "resolve_parent_id", lambda cred=None, **k: "P")
     monkeypatch.setattr(xt, "list_files", lambda *a, **k: [])
+    # ★ 代码现在走翻页版 `list_all_files`(2026-10-10),替身也得给
+    monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: [])
     monkeypatch.setattr(xt, "quota_info", lambda cred=None: {
         "usage": 26_454_214_882_191, "limit": 33_092_723_015_680, "ratio": 0.799})
     monkeypatch.setattr(xt.requests, "get", lambda url, **kw: _FakeResp(
@@ -532,6 +544,8 @@ def test_restore_space_error_carries_both_numbers(monkeypatch) -> None:
     monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
     monkeypatch.setattr(xt, "resolve_parent_id", lambda cred=None, **k: "P")
     monkeypatch.setattr(xt, "list_files", lambda *a, **k: [])
+    # ★ 代码现在走翻页版 `list_all_files`(2026-10-10),替身也得给
+    monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: [])
     monkeypatch.setattr(xt, "quota_info", lambda cred=None: {
         "usage": 26_454_214_882_191, "limit": 33_092_723_015_680, "ratio": 0.799})
     monkeypatch.setattr(xt.requests, "get", lambda url, **kw: _FakeResp(
@@ -556,6 +570,8 @@ def test_unknown_space_does_not_block_a_transfer(monkeypatch) -> None:
     monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
     monkeypatch.setattr(xt, "resolve_parent_id", lambda cred=None, **k: "P")
     monkeypatch.setattr(xt, "list_files", lambda *a, **k: [])
+    # ★ 代码现在走翻页版 `list_all_files`(2026-10-10),替身也得给
+    monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: [])
     monkeypatch.setattr(xt, "quota_info", lambda cred=None: {})      # 探针失效 → 剩余空间未知
 
     def fake_get(url, **kw):
@@ -642,6 +658,8 @@ def test_prejudgment_does_not_probe_quota_per_resource(monkeypatch) -> None:
     monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
     monkeypatch.setattr(xt, "resolve_parent_id", lambda cred=None, **k: "P")
     monkeypatch.setattr(xt, "list_files", lambda *a, **k: [])
+    # ★ 代码现在走翻页版 `list_all_files`(2026-10-10),替身也得给
+    monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: [])
 
     def fake_get(url, **kw):
         if url.endswith("/drive/v1/about"):

@@ -357,8 +357,13 @@ def refresh_with_wake(session: Session, user_id: int, *, adb: str = "",
         logger.info("第 %d 次唤醒+重取仍无效:%s", i + 1, str(last.get("reason"))[:80])
         time.sleep(3)
     return {"ok": False,
-            "reason": f"两条路都没成 —— 纯 HTTP:{str(http_out.get('reason'))[:80]};"
-                      f"唤醒 App:{str(last.get('reason'))[:80]}"}
+            # ⚠️ **全失败时必须给出"人要做的那一步"**(这条被 `test_全失败才报错并给出人工步骤` 守着):
+            #    我 2026-10-11 加纯 HTTP 那条路时,把消息改成了"两条路都没成 —— …",
+            #    **信息更全了、却把"该人工做什么"弄丢了** —— 而那才是这条消息存在的理由。
+            "reason": f"两条路都没成(纯 HTTP:{str(http_out.get('reason'))[:60]};"
+                      f"唤醒 App:{str(last.get('reason'))[:60]})—— **需要人工**:"
+                      f"开一次雷电模拟器、在微信读书 App 里确认登录态(必要时重登),"
+                      f"再跑 `scripts/weread_app_token.py` 重取凭据"}
 
 
 def refresh(session: Session, user_id: int, *, adb: str = "", verify=None) -> dict[str, Any]:
