@@ -14,6 +14,11 @@
     python scripts/quark_dup_apply.py --max 5    # 只看前 5 个
     python scripts/quark_dup_apply.py --yes      # 真删(进回收站)
     python scripts/quark_dup_apply.py --yes --allow-partial   # 明知没扫完也要删
+    python scripts/quark_dup_apply.py --depth 1  # 只扫到"家 → 一级子目录"(快 10 倍,见 report)
+
+## 扫不完怎么办(2026-10-10 起)
+**多跑几轮即可**:扫完的家会存进快照(`data/quark_dup_cache.json`),下一轮直接复用;
+没排上的家会被记下来接着扫。全部扫完那一次 `complete` 才是 True、才允许删。
 """
 from __future__ import annotations
 
@@ -31,6 +36,7 @@ from app.services.quark_dup import (  # noqa: E402
     build_plan,
     protected_fids,
 )
+from app.services.quark_dup_cache import ScanCache  # noqa: E402
 
 
 def _load_plan(path: str) -> dict:
@@ -54,12 +60,16 @@ def main() -> int:
     allow_partial = "--allow-partial" in sys.argv
     plan_file = ""
     cap = None
+    depth = 2          # 扫几层。⚠️ `--depth 1` **会漏扫 90% 的文件**(实测 491 vs 4953),
+                       #    不是"等价的快捷方式";正路是多跑几轮靠快照收敛。详见 report 脚本。
     args = sys.argv[1:]
     for i, a in enumerate(args):
         if a == "--max" and i + 1 < len(args):
             cap = int(args[i + 1])
         elif a == "--plan-file" and i + 1 < len(args):
             plan_file = args[i + 1]
+        elif a == "--depth" and i + 1 < len(args):
+            depth = int(args[i + 1])
 
     s = get_settings()
     db = get_session_local()()
@@ -69,7 +79,10 @@ def main() -> int:
         db.close()
     qt = QuarkTransfer(ck, fid_store=getattr(s, "quark_fid_store", "") or None)
 
-    plan = _load_plan(plan_file) if plan_file else build_plan(qt)
+    # ★ 扫描快照:扫完的家下轮复用;删完把受影响的家**作废**(那些家的内容变了)。
+    cache = ScanCache()
+    plan = (_load_plan(plan_file) if plan_file
+            else build_plan(qt, cache=cache, depth=depth))
     # ⚠️ **保护名单现场重取**:计划可能是十几分钟前扫的,这期间又发了新链 ——
     # 用旧名单删就是拿一份过期的安全清单去删盘。
     pf, pn, ns = protected_fids(qt)
@@ -100,12 +113,16 @@ def main() -> int:
         return 0
     if not plan.get("complete", True) and not allow_partial:
         # ⚠️ 没扫完 ⇒「只出现在一个包里」是假判断 ⇒ 计划不可信。**默认拒绝**,而不是"提醒一下就删"。
-        print("\n❌ 扫描没跑完(撞预算),计划不可信 —— 拒绝执行。"
-              "抬 QUARK_CLEANUP_BUDGET 重跑,或明知故犯地加 --allow-partial。")
+        rem = plan.get("remaining_homes") or []
+        print(f"\n❌ 扫描没跑完(还差 {len(rem)} 个家没扫),计划不可信 —— 拒绝执行。")
+        print("   ⇒ 直接**再跑一次同样的命令**即可接着扫(扫完的家会从快照复用,不会重扫);")
+        print("      全部扫完那一次 `complete` 才会是 True。或明知故犯地加 --allow-partial。")
         return 2
 
-    out = apply_plan(qt, plan)
+    out = apply_plan(qt, plan, cache=cache)
     print(f"\n✅ 已删 {out['deleted']} 个(约 {out['bytes'] / 2 ** 30:.2f} GiB),全部进**回收站**可捞回")
+    if out.get("dropped_homes"):
+        print(f"   快照已作废 {out['dropped_homes']} 个受影响的家(下轮重扫它们 —— 内容变了)")
     if out["failed"]:
         print(f"⚠️ {len(out['failed'])} 批失败:{out['failed'][:3]}")
     return 0

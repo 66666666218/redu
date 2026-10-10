@@ -40,12 +40,15 @@ import re
 from collections import defaultdict
 from typing import Any
 
+from app.services.quark_dup_cache import ScanCache
 from app.utils import get_logger
 
 logger = get_logger(__name__)
 
 #: API 调用上限。⚠️ 必须**说得出"没扫完"** —— 首轮 600 就把 19 个家扫漏了,
 #: 而漏扫会让"这份文件只在一个家里"这种判断**变成假的**(它其实在没扫到的那个家里也有一份)。
+#: ★ 2026-10-10 起不再是"一轮扫不完就白扫":`build_plan` 会把扫完的家**存进快照**、
+#: 把没排上的家记进 `remaining_homes`,下一轮接着扫(见 `quark_dup_cache`)。
 BUDGET = int(os.environ.get("QUARK_CLEANUP_BUDGET") or 2500)
 
 #: 重复检测的体积下限(引流不限)。删小的重复省不到空间,却一样承担误删风险。
@@ -263,33 +266,75 @@ def classify(files: list[dict], prot_fids: set[str], prot_names: set[str], *,
 
 
 def build_plan(qt: Any, *, home_prefix: str = "redian监听", mmdd_prefix: str = "",
-               depth: int = 2, budget_cap: int | None = None) -> dict:
+               depth: int = 2, budget_cap: int | None = None,
+               cache: ScanCache | None = None, ttl_hours: float = 8.0) -> dict:
     """扫描并给出清理计划。**本函数只读,不删任何东西。**
 
     `depth=2`(家 → 资源目录 → 文件):实测跨目录重复都出现在这一层,而每深一层
     就多一次约 1.2 秒的 `list_dir` —— 全树扫 19 个家会跑到小时级,还会先撞预算。
     `mmdd_prefix=""` = 所有家都看(默认);传 `"10"` 则只动 10 月的账。
+
+    `cache` = 扫描快照(见 `quark_dup_cache`)。给了它之后:
+
+    * 有**有效快照**的家**直接复用**,不再重复扫 —— 这才是"多轮能收敛"的关键;
+    * 本轮没排上的家记进 `remaining_homes`,**下一轮接着扫**;
+    * `complete` 要求「**所有家都有有效数据**」**且**「没撞预算」。
+
+    ⚠️ **为什么 `complete` 必须同时看这两件事**:判据的核心是「这个文件出现在**几个家**里」。
+    只要有一个家没扫到,重复数就会**算少**,于是「只在一个家里」变成假判断。
+    ⚠️ 反过来,**残缺数据本身是安全的**:漏扫只会让重复看起来更少 ⇒ 倾向于**不删**。
+    危险的是"**过期的完整数据**"(快照说两家都有、其实一家已经没了)——
+    那由 `ttl_hours` 限窗口,并由「删除永远进回收站」兜底。
     """
     budget = {"n": 0, "cap": budget_cap or BUDGET}
     homes = list_homes(qt, home_prefix)
     order = [str(h.get("file_name")) for h in homes]
     files: list[dict] = []
+    reused: list[str] = []
+    scanned: list[str] = []
+    remaining: list[str] = []
+    partial: list[str] = []
     for h in homes:
         nm = str(h.get("file_name") or "")
-        files.extend(_walk(qt, str(h["fid"]), nm, nm, budget, 0, depth))
+        fid = str(h.get("fid") or "")
+        cached = cache.get_home(nm, fid, ttl_hours, depth) if cache else None
+        if cached is not None:
+            files.extend(cached)
+            reused.append(nm)
+            continue
+        if budget["n"] >= budget["cap"]:
+            remaining.append(nm)        # ★ 没排上的家**必须记下来** —— 不能当成"扫过了"
+            continue
+        got = _walk(qt, fid, nm, nm, budget, 0, depth)
+        files.extend(got)
+        if budget["n"] >= budget["cap"]:
+            # 走到一半撞预算 ⇒ 这份清单**不完整**:算进判据(只会更保守),
+            # 但**绝不写进快照**(下一轮会把残缺清单当成完整视图),也标成"没扫完"。
+            partial.append(nm)
+            remaining.append(nm)
+            continue
+        scanned.append(nm)
+        if cache:
+            cache.put_home(nm, fid, got, depth)
     prot_fids, prot_names, n_shares = protected_fids(qt)
     out = classify(files, prot_fids, prot_names, mmdd_prefix=mmdd_prefix, home_order=order)
     out.update({"scanned_homes": len(homes), "scanned_files": len(files),
                 "calls": budget["n"], "protected": len(prot_fids), "shares": n_shares,
-                "complete": budget["n"] < budget["cap"]})
+                "complete": not remaining and budget["n"] < budget["cap"],
+                "reused_homes": reused, "scanned_now": scanned,
+                "remaining_homes": remaining, "partial_homes": partial})
     return out
 
 
-def apply_plan(qt: Any, plan: dict, *, batch: int = 100) -> dict:
+def apply_plan(qt: Any, plan: dict, *, batch: int = 100,
+               cache: ScanCache | None = None) -> dict:
     """按计划**删进回收站**(可捞回)。返回 `{"deleted": n, "bytes": n, "failed": [...]}`。
 
     ⚠️ 只走 `delete_files(..., to_recycle=True)`:**永不彻底删**。
     清单丢了还能捞,彻底删就真没了 —— 而盘商回收站是现成的兜底,没有理由不用。
+
+    `cache` = 扫描快照。**删完必须把受影响的家作废** —— 那些家的内容已经变了,
+    再拿旧快照去判断,就是拿过期数据决定删哪个文件。
     """
     fids = [d["fid"] for d in plan.get("delete", []) if d.get("fid")]
     by_fid = {d["fid"]: d for d in plan.get("delete", []) if d.get("fid")}
@@ -305,4 +350,8 @@ def apply_plan(qt: Any, plan: dict, *, batch: int = 100) -> dict:
         except Exception as exc:                    # noqa: BLE001 - 一批失败不该中断整轮
             failed.append({"n": len(chunk), "error": f"{type(exc).__name__}: {str(exc)[:160]}"})
             logger.warning("删除失败(共 %d 个):%s", len(chunk), str(exc)[:160])
-    return {"deleted": deleted, "bytes": freed, "failed": failed}
+    out = {"deleted": deleted, "bytes": freed, "failed": failed}
+    if cache and deleted:
+        homes = {str(d.get("home") or "") for d in plan.get("delete", [])}
+        out["dropped_homes"] = cache.drop_homes(h for h in homes if h)
+    return out

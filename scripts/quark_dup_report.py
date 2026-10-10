@@ -19,6 +19,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from app.services.quark_dup import build_plan  # noqa: E402
+from app.services.quark_dup_cache import ScanCache  # noqa: E402
 
 
 def _mb(n: int) -> str:
@@ -38,16 +39,51 @@ def main() -> int:
     finally:
         db.close()
 
-    prefix = next((a for a in sys.argv[1:] if a.isdigit()), "10")
+    args = list(sys.argv[1:])
+    # `--depth N`:扫几层。**默认 2**(家 → 资源目录 → 子目录 → 文件)。
+    #
+    # ⚠️⚠️ **`--depth 1` 不是"等价的快捷方式",它会漏扫**。同一个家实测:
+    #      depth=1 → 491 个文件;depth=2 → 4953 个文件。**差 10 倍** ——
+    #      因为资源多在 `家/资源名/子目录/文件` 这一层,只扫一级等于看不见它们。
+    #      漏扫只会**漏删**(安全方向),但别指望它清得干净。
+    #    ✅ **正确用法**:保持默认 depth=2,靠"多跑几轮 + 快照复用"收敛
+    #      (实测一个家 728 次调用 ≈ 10.7 分钟,19 个家全扫完要 6~7 轮);
+    #      或把 `QUARK_CLEANUP_BUDGET` 调大,一轮多扫几个家。
+    depth = 2
+    if "--depth" in args:
+        i = args.index("--depth")
+        depth = int(args[i + 1])
+        del args[i:i + 2]
+    prefix = next((a for a in args if a.isdigit()), "10")
     qt = QuarkTransfer(ck, fid_store=getattr(s, "quark_fid_store", "") or None)
-    out = build_plan(qt, mmdd_prefix=prefix)
+    # ★ 扫描快照(**多轮收敛**的关键):扫完的家下一轮直接复用,没排上的家记下来接着扫。
+    cache = ScanCache()
+    out = build_plan(qt, mmdd_prefix=prefix, cache=cache, depth=depth)
 
+    cs = cache.summary()
     print(f"扫了 {out['scanned_homes']} 个家、{out['scanned_files']} 个文件,"
-          f"{out['calls']} 次 API 调用"
-          f"{'' if out['complete'] else ' —— ⚠️ **撞预算,没扫完**'}")
+          f"{out['calls']} 次 API 调用(depth={depth})"
+          f"(本轮复用快照 {len(out.get('reused_homes') or [])} 个家 / 新扫 "
+          f"{len(out.get('scanned_now') or [])} 个;快照共 {cs['homes']} 个家)")
+    if out["remaining_homes"]:
+        rem = out["remaining_homes"]
+        part = out.get("partial_homes") or []
+        print(f"   ⏳ **还差 {len(rem)} 个家没扫**(其中 {len(part)} 个扫了一半):"
+              f"{'、'.join(rem[:6])}{'…' if len(rem) > 6 else ''}")
+        if not out.get("scanned_now") and not out.get("reused_homes"):
+            # ⚠️ **零进度必须说出来**:预算小到"一个家都扫不完"时,这一轮等于什么都没留下,
+            #    而表面上它会打出一堆文件、看着像在干活(实测:预算 150 时收了 1763 个文件却零进度)。
+            print("   ❌ **本轮零进度** —— 预算小到连一个家都扫不完,什么都没存进快照。")
+            print("      请把 `QUARK_CLEANUP_BUDGET` 调大到**至少能扫完一个家**再跑,"
+                  "否则重复多少轮都不会收敛。")
+            print("      实测一个家的调用量:约 **728 次**(约 10.7 分钟)⇒ 预算至少设 **1000** 起步。")
+            print("      ⚠️ **别用 `--depth 1` 来省事** —— 它会漏扫(实测同一家 491 vs 4953 个文件)。")
+        else:
+            print("      ⇒ 直接**再跑一次**即可接着扫(扫完的家会从快照复用,不会重扫);"
+                  "全部扫完那一次 `complete` 才会是 True。")
     if not out["complete"]:
-        print("    ⇒ ⚠️ 没扫完时「只出现在一个包里」这个判断是**假的**"
-              "(没扫到的家里可能也有一份)。抬 `QUARK_CLEANUP_BUDGET` 重跑。")
+        print("   ⇒ ⚠️ 没扫完时「只出现在一个包里」这个判断是**假的**"
+              "(没扫到的家里可能也有一份)⇒ **执行器默认拒绝删**。多跑几轮凑齐即可。")
     print(f"我方分享 {out['shares']} 条,保护了 {out['protected']} 个 fid"
           f"(这些**永不删**:删掉 = 已发出的链接变「已失效」)\n")
 
