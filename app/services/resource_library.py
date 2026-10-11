@@ -26,6 +26,31 @@ from app.utils import get_logger
 logger = get_logger(__name__)
 
 
+
+#: **盘的优先级**(2026-10-11,用户口径:同一资源夸克和迅雷都有时**优先夸克**)。
+#: 判据是**空间**:夸克盘最宽裕,而迅雷盘只剩 ~1% ⇒ 多个盘都能提供同一资源时,
+#: 优先复用它落在**空间更宽裕**的那个盘上。
+#: 可用 `pan_prefer_order`(逗号分隔)改;认不出的盘排在**最后**(只是靠后,不丢)。
+_DEFAULT_PAN_ORDER = ("quark", "baidu", "xunlei")
+
+
+def _pan_rank(url: str) -> int:
+    """链接所属盘的优先级(**小 = 优先**)。认不出返回最后一名。"""
+    u = str(url or "").lower()
+    order = _DEFAULT_PAN_ORDER
+    try:
+        from config.settings import get_settings
+
+        raw = str(getattr(get_settings(), "pan_prefer_order", "") or "").strip()
+        if raw:
+            order = tuple(x.strip().lower() for x in raw.split(",") if x.strip()) or order
+    except Exception:  # noqa: BLE001 - 读不到配置就用默认,别让排序炸掉检索
+        pass
+    for i, key in enumerate(order):
+        if key and key in u:
+            return i
+    return len(order)
+
 def _pan_kind(url: str) -> str:
     if "pan.quark.cn" in (url or ""):
         return "夸克"
@@ -320,7 +345,18 @@ def search_resources(session: Session, user_id: int, query: str,
     seen |= {d["pan_url"] for d in mine}
     groups = [x for x in _xunlei_group_resources(session, user_id, q, days, limit)
               if x["pan_url"] not in seen]
-    return (ours + extra + mine + groups)[:limit]
+    # ★★ **同一资源在多个盘里都有时,按「盘的空间」优先**(2026-10-11,用户口径:
+    #    「如果夸克和迅雷是相同的资源,**优先保存进夸克**」——因为夸克盘空间最多)。
+    #
+    #    为什么必须**显式排**:原来这一行是 `(ours + extra + mine + groups)[:limit]`,
+    #    靠的是"迅雷那两类恰好排在最后"这个**排版副作用**;而**同组内部**仍是**按账号数**排的
+    #    ⇒ 一个 4 个号发过的**百度**链会压过一个 1 个号发过的**夸克**链。实测里"夸克赢"是
+    #    因为恰好没有更强的百度链,**不是规则保证的**。
+    #    ⇒ 加一道**稳定排序**:先按盘优先级、同盘内保持原来的账号数次序
+    #      (`sorted` 是稳定的,所以"同盘更可信的仍然在前")。
+    #    ⚠️ 这不是"把资源搬到夸克"(那需要下载+上传,我们没有那条链)—— 它只决定**复用哪条链**。
+    return sorted(ours + extra + mine + groups,
+                  key=lambda r: _pan_rank(str(r.get("my_link") or r.get("pan_url") or "")))[:limit]
 
 
 def resonance_resources(session: Session, user_id: int, days: int = 30,

@@ -114,6 +114,12 @@ class Settings(BaseSettings):
     wechat_read_trend_enabled: bool = True
     wechat_read_trend_min_span_h: float = 2.0     # 观察窗短于这个小时数就不判(返回空)
     wechat_read_trend_min_delta: int = 20         # 增量小于这个数就不判(返回空)
+    #: **盘的优先级**(2026-10-11,用户口径:同一资源夸克和迅雷都有时**优先夸克**)。
+    #: 判据是**空间** —— 夸克盘最宽裕,而迅雷盘只剩 ~1%。逗号分隔、**小 = 优先**。
+    #: 影响的是「**复用哪条链**」(链从哪个盘取),**不是**「把资源搬到夸克」——
+    #: 后者要下载+上传,我们没有那条链。
+    pan_prefer_order: str = "quark,baidu,xunlei"
+
     quark_cookie: str = ""                 # 夸克网盘 Cookie(pan.quark.cn 登录后复制);用于转存对标文的分享
     quark_save_dir: str = "/redian监听"     # 转存目标目录(自动逐级创建)
     quark_fid_store: str = "data/quark_fid_cache.json"  # 目录 fid 持久缓存(大盘免重扫;幽灵同名复用)
