@@ -262,6 +262,17 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
                        "先用着,若回 -101 就用 tools/xhs_export_cookie.py 重新导出")
 
     x = _signer(st)
+    #: **会话密钥 `ssk`**(与那枚 cookie **成对**存下来的)。有它才能签出**完整**的 `XYS_`
+    #: (`x5`/`x6`/`x7`)—— 2026-10-11 实测:已登录请求不带它,服务端回 `-100 登录已过期`
+    #: (而同一枚 cookie 在页面里明明是登录态);匿名请求则带不带都 200。
+    ssk = b""
+    if session is not None:
+        try:
+            from app.services.xhs_xys import load_ssk
+
+            ssk = load_ssk(session, user_id)
+        except Exception:  # noqa: BLE001 - 没有就退回旧签名(匿名那条路够用)
+            logger.debug("读 ssk 失败,按没有处理", exc_info=True)
     rows: list[dict] = []
     for i, kw in enumerate(kws):
         if i:
@@ -273,10 +284,19 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
                        "search_id": sid, "sort": "general", "note_type": 0,
                        "ext_flags": [], "image_formats": ["jpg", "webp", "avif"]}
             try:
-                headers = x.sign_headers_post(URI_SEARCH, ck, payload=payload,
-                                              sign_format=_fmt, x_rap=_rap)
+                if ssk:
+                    # ★ **完整 `XYS_`**(站点自己的算法:`x5`/`x6`/`x7` 都在)。
+                    #   注意:body 也必须**逐字节**用同一份紧凑 JSON(签名用的字节 = 发出去的字节)
+                    from app.services.xhs_xys import headers as _xys_headers
+
+                    headers = _xys_headers(x, "POST", URI_SEARCH, ck, payload=payload, ssk=ssk)
+                    body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+                else:
+                    headers = x.sign_headers_post(URI_SEARCH, ck, payload=payload,
+                                                  sign_format=_fmt, x_rap=_rap)
+                    body = json.dumps(payload)
             except Exception as exc:  # noqa: BLE001 - 签名库自己炸了要说清是哪一层
-                raise XhsProtocolError(f"算签名失败(xhshow):{type(exc).__name__}: "
+                raise XhsProtocolError(f"算签名失败:{type(exc).__name__}: "
                                        f"{str(exc)[:90]}", kind="sign") from exc
             # ⚠️ **`xhshow` 不会替你设 `Cookie` 头** —— 少了它签名照样被接受(HTTP 200、
             # 没有 461),但接口回 `-101 无登录信息`。这个坑极有欺骗性,写在这里。
@@ -284,7 +304,7 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
             headers["content-type"] = "application/json;charset=UTF-8"
             headers["user-agent"] = _UA
             try:
-                r = requests.post(API_BASE + URI_SEARCH, data=json.dumps(payload),
+                r = requests.post(API_BASE + URI_SEARCH, data=body,
                                   headers=headers, timeout=25)
             except Exception as exc:  # noqa: BLE001
                 raise XhsProtocolError(f"请求失败:{type(exc).__name__}: {str(exc)[:90]}",
