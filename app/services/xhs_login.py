@@ -113,6 +113,8 @@ class QrTicket:
     x_rap: bool = False
     _params_extra: dict[str, str] = field(default_factory=dict)
     public_key_b64: str = ""
+    #: **从真实页面截获的 `x-s-common`**(指纹头)。空 = 用库自合成的那份(见 `PageIdentity`)。
+    xs_common: str = ""
 
 
 @dataclass
@@ -178,7 +180,8 @@ def _transport():
 def _raw(signer: Any, cookies: dict[str, str], *, method: str, path: str,
          params: dict[str, Any] | None = None, payload: dict[str, Any] | None = None,
          sign_format: str = "xyw", x_rap: bool = False, timeout: int = 25,
-         extra_headers: dict[str, str] | None = None) -> tuple[int, str]:
+         extra_headers: dict[str, str] | None = None,
+         xs_common: str = "") -> tuple[int, str]:
     """**不做任何判读**地打一次请求,原样返回 `(HTTP 状态码, 响应原文)`。
 
     单独拆出来是给**诊断探针**用的:那种"只在某个状态下才出现"的怪象
@@ -199,6 +202,9 @@ def _raw(signer: Any, cookies: dict[str, str], *, method: str, path: str,
     headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
     headers["content-type"] = "application/json;charset=UTF-8"
     headers["user-agent"] = _UA
+    if xs_common:
+        # ⚠️ 用**真实页面截获的那份**替换库自合成的 `x-s-common`(指纹头)。理由见 `PageIdentity`。
+        headers["x-s-common"] = xs_common
     if extra_headers:
         headers.update(extra_headers)
     # ⚠️ **HTTP 层一个都不动,只换传输层**(TLS/HTTP2 指纹)——这样"下一个变量"才只有一个。
@@ -212,7 +218,8 @@ def _raw(signer: Any, cookies: dict[str, str], *, method: str, path: str,
 
 def _request(signer: Any, cookies: dict[str, str], *, method: str, path: str,
              params: dict[str, Any] | None = None, payload: dict[str, Any] | None = None,
-             sign_format: str = "xyw", x_rap: bool = False, timeout: int = 25) -> dict:
+             sign_format: str = "xyw", x_rap: bool = False, timeout: int = 25,
+             xs_common: str = "") -> dict:
     """带签名请求一次,并**判读信封**。**签名用的字节 = 发出去的字节**(见 `_raw`)。
 
     GET 的 query 由 `_query()` 拼(与库同规则),POST 的 body 由 `build_json_body()` 出 ——
@@ -222,7 +229,7 @@ def _request(signer: Any, cookies: dict[str, str], *, method: str, path: str,
     try:
         r_status, r_text = _raw(signer, cookies, method=method, path=path, params=params,
                                 payload=payload, sign_format=sign_format, x_rap=x_rap,
-                                timeout=timeout)
+                                timeout=timeout, xs_common=xs_common)
     except Exception as exc:  # noqa: BLE001 - 网络层失败要单独归一类,别混进"没登录"
         raise XhsQrLoginError(f"请求失败({path}):{type(exc).__name__}: {str(exc)[:90]}",
                               kind="network") from exc
@@ -259,11 +266,14 @@ def _request(signer: Any, cookies: dict[str, str], *, method: str, path: str,
 # --------------------------------------------------------------------------- 三个接口
 
 
-def _signer_for(settings=None) -> Any:
-    """签名器只能从**那一个门**出来(必须带签名模板版本补丁,见 `make_signer`)。"""
+def _signer_for(settings=None, env_flags: str = "") -> Any:
+    """签名器只能从**那一个门**出来(带模板版本 + 环境标志两处补丁,见 `make_signer`)。
+
+    `env_flags` 传**页面实时算出来的**那串 —— 它比任何写死的值都准,见 `_probe_env_flags`。
+    """
     from app.services.xhs_protocol_source import make_signer
 
-    return make_signer(settings)
+    return make_signer(settings, env_flags)
 
 
 def new_identity(settings=None) -> tuple[dict[str, str], Any]:
@@ -331,7 +341,8 @@ def diagnose_status(t: QrTicket) -> list[tuple[str, int, str]]:
             st, tx = _raw(t.signer, t.cookies, method="GET", path=PATH_QR_STATUS,
                           params=over.get("params", params),
                           sign_format=over.get("sign_format", t.sign_format),
-                          x_rap=t.x_rap, extra_headers=over.get("extra_headers"))
+                          x_rap=t.x_rap, extra_headers=over.get("extra_headers"),
+                          xs_common=t.xs_common)
         except Exception as exc:  # noqa: BLE001 - 诊断本身不许把主流程带崩
             st, tx = -1, f"{type(exc).__name__}: {exc}"
         out.append((name, st, tx.replace("\n", " ")[:200]))
@@ -377,7 +388,24 @@ def enrich_cookies(cookies: dict[str, str], *, paths: tuple[str, ...] = ("/",),
     return out
 
 
-def browser_identity(*, timeout_ms: int = 30000, settle_ms: int = 2500) -> dict[str, str]:
+@dataclass
+class PageIdentity:
+    """一次性页面取回来的**真实身份**:cookie 罐 + **真实 `x-s-common`**。
+
+    ⚠️ `xs_common` 为什么必须一起取(2026-10-11):参考实现(已端到端验证)发送的是
+    **从真实页面截获的** `x-s-common`,而我们此前一直用**库自己合成**的那份。
+    它那份文档明确记着登录链**三个接口全都带着** `x-s-common` 里的 **`x6`/`x7`
+    (`encSskSign`/`encSsk`)**—— 那两个字段**我们的签名库产不出来**。
+    而 `x-s-common` 是**指纹头**,服务端完全可能拿它判断"这个客户端配不配拿凭据"。
+    """
+
+    cookies: dict[str, str] = field(default_factory=dict)
+    xs_common: str = ""
+    #: **页面当场算出来的 `XYW_` 环境标志**(19 位)。取值含义见 `xhs_protocol_source.SIGN_ENV_FLAGS`。
+    env_flags: str = ""
+
+
+def browser_identity(*, timeout_ms: int = 30000, settle_ms: int = 2500) -> PageIdentity:
     """用**一次性 headless 页面**取一份**真实身份** cookie(站点 JS 自己造的 `a1` 等)。
 
     ⚠️ **这不是"登录"**:开的是**全新的、无档案的**上下文 —— 不碰任何账号、不读任何登录态、
@@ -394,22 +422,65 @@ def browser_identity(*, timeout_ms: int = 30000, settle_ms: int = 2500) -> dict[
     from playwright.sync_api import sync_playwright
 
     jar: dict[str, str] = {}
+    xs_common = ""
+    seen: list[str] = []
     with sync_playwright() as p:
         b = p.chromium.launch(headless=True)
         try:
             ctx = b.new_context(user_agent=_UA, locale="zh-CN")
             page = ctx.new_page()
+
+            def _grab(req) -> None:
+                """截获页面自己发的 **真实 `x-s-common`**(它对每个业务请求都带)。"""
+                if seen or "xiaohongshu.com" not in req.url:
+                    return
+                try:
+                    v = (req.headers or {}).get("x-s-common") or ""
+                except Exception:  # noqa: BLE001 - 头拿不到就当没有,别把取身份带崩
+                    return
+                if v:
+                    seen.append(v)
+
+            page.on("request", _grab)
             page.goto("https://www.xiaohongshu.com/explore",
                       wait_until="domcontentloaded", timeout=timeout_ms)
             page.wait_for_timeout(settle_ms)      # 等页面把 a1/webId/gid 这些写出来
             jar = {c["name"]: c["value"]
                    for c in ctx.cookies("https://www.xiaohongshu.com") if c.get("value")}
+            env_flags = _probe_env_flags(page)
         finally:
             b.close()
     if not jar.get("a1"):
         raise XhsQrLoginError("页面没给出 a1(站点结构可能变了)", kind="env")
-    logger.info("小红书扫码登录:取到真实身份 cookie %d 项:%s", len(jar), sorted(jar))
-    return jar
+    xs_common = seen[0] if seen else ""
+    logger.info("小红书扫码登录:取到真实身份 cookie %d 项:%s;真实 x-s-common %s;环境标志 %s",
+                len(jar), sorted(jar), f"{len(xs_common)} 字节" if xs_common else "**没截到**",
+                env_flags or "**没取到**")
+    return PageIdentity(cookies=jar, xs_common=xs_common, env_flags=env_flags)
+
+
+def _probe_env_flags(page) -> str:
+    """**让页面自己签一个废包**,再用公开的密钥/IV 解开,读出那串环境标志。
+
+    ⚠️ 这是"拿真值"最省的一条路:**不用逆任何 JS** —— `XYW_` 是 AES-128-CBC,
+    密钥/IV 都写死在网页里(公开常量),所以我们签的、解的都能对上。
+    取不到就回空串,由 `xhs_protocol_source._env_flags()` 逐级兜底。
+    """
+    import hashlib
+    import json as _json
+
+    from app.services.xhs_protocol_source import parse_env_flags
+
+    body = {"qr_type": 1}
+    c = PATH_QR_CREATE + _json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+    try:
+        out = page.evaluate("([c,u,p]) => window._webmsxyw(c,u,p)",
+                            [c, hashlib.md5(c.encode()).hexdigest(),
+                             hashlib.md5(PATH_QR_CREATE.encode()).hexdigest()])
+        return parse_env_flags((out or {}).get("X-s", "") if isinstance(out, dict) else "")
+    except Exception:  # noqa: BLE001 - 页面没这个函数/结构变了,都只是"没取到"
+        logger.info("小红书扫码登录:页面上取不到 _webmsxyw(环境标志走内置兜底)", exc_info=True)
+        return ""
 
 
 def create_qr(settings=None) -> QrTicket:
@@ -418,26 +489,29 @@ def create_qr(settings=None) -> QrTicket:
         from config.settings import get_settings
         settings = get_settings()
     cookies: dict[str, str] = {}
+    xs_common = ""
+    env_flags = ""
     if bool(getattr(settings, "xhs_qr_login_browser", True)):
         try:
-            cookies = browser_identity()          # ← 站点自己造的身份(见其 docstring 的理由)
+            ident = browser_identity()      # ← 站点造的身份 + 真实 x-s-common + **真实环境标志**
+            cookies, xs_common, env_flags = ident.cookies, ident.xs_common, ident.env_flags
         except Exception:  # noqa: BLE001 - 取不到就回落合成身份,别把工具卡死
             logger.warning("小红书扫码登录:取真实身份失败,回落合成身份", exc_info=True)
     if not cookies.get("a1"):
         cookies = new_identity(settings)[0]
     cookies = enrich_cookies(cookies)
-    signer = _signer_for(settings)
+    signer = _signer_for(settings, env_flags)
     payload = {"qr_type": 1}
     resp, fmt = _try_formats(lambda f: _request(signer, cookies, method="POST",
                                                 path=PATH_QR_CREATE, payload=payload,
-                                                sign_format=f))
+                                                sign_format=f, xs_common=xs_common))
     if resp.get("code") != 0 or not (resp.get("data") or {}).get("qr_id"):
         raise XhsQrLoginError(f"创建二维码失败:{str(resp)[:160]}", kind="api")
     d = resp["data"]
     logger.info("小红书扫码登录:已创建二维码(格式 %s)", fmt)
     return QrTicket(qr_id=str(d["qr_id"]), code=str(d.get("code") or ""),
                     url=str(d.get("url") or ""), cookies=cookies, signer=signer,
-                    sign_format=fmt, public_key_b64=_gen_public_key())
+                    sign_format=fmt, public_key_b64=_gen_public_key(), xs_common=xs_common)
 
 
 def poll_once(t: QrTicket) -> PollResult:
@@ -454,7 +528,7 @@ def poll_once(t: QrTicket) -> PollResult:
     params = {"qr_id": t.qr_id, "code": t.code, "client_public_key_base64": t.public_key_b64}
     try:
         r2 = _request(t.signer, t.cookies, method="GET", path=PATH_QR_STATUS, params=params,
-                      sign_format=t.sign_format, x_rap=t.x_rap)
+                      sign_format=t.sign_format, x_rap=t.x_rap, xs_common=t.xs_common)
         d2 = r2.get("data") or {}
         li = d2.get("login_info") or {}
         if li.get("session"):
@@ -467,7 +541,7 @@ def poll_once(t: QrTicket) -> PollResult:
     try:
         r3 = _request(t.signer, t.cookies, method="POST", path=PATH_QR_USERINFO,
                       payload={"qrId": t.qr_id, "code": t.code},
-                      sign_format=t.sign_format, x_rap=t.x_rap)
+                      sign_format=t.sign_format, x_rap=t.x_rap, xs_common=t.xs_common)
         cs = ((r3.get("data") or {}).get("codeStatus"))
         if cs is not None:
             out.code_status = int(cs)          # ← 过期判定以这条为准
@@ -507,7 +581,7 @@ def wait_for_login(t: QrTicket, *, on_status: Callable[[PollResult], None] | Non
 
 
 def me_is_guest(cookie: dict[str, str], signer: Any, *, sign_format: str = "xyw",
-                x_rap: bool = False) -> bool:
+                x_rap: bool = False, xs_common: str = "") -> bool:
     """`user/me` 的 `guest` 字段。**登录成功与否唯一的判据。**
 
     ⚠️ **「确定未登录」与「检测失败」必须分开**(上游陷阱 2):
@@ -517,7 +591,7 @@ def me_is_guest(cookie: dict[str, str], signer: Any, *, sign_format: str = "xyw"
     """
     try:
         r = _request(signer, cookie, method="GET", path=PATH_USER_ME,
-                     sign_format=sign_format, x_rap=x_rap)
+                     sign_format=sign_format, x_rap=x_rap, xs_common=xs_common)
     except XhsQrLoginError as exc:
         if exc.code in LOGGED_OUT_CODES:
             logger.info("小红书自查:服务端明确说没登录(code=%s)—— 不是检测失败", exc.code)

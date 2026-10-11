@@ -113,6 +113,21 @@ def needs_login(text: str) -> bool:
 SIGN_TEMPLATE = {"x0": "4.4.3", "x1": "xhs-pc-web", "x2": "Windows", "x3": "", "x4": ""}
 
 
+#: ★★ **`XYW_` 签名里的"环境标志"19 位**(2026-10-11 实测**解密**得到的真值)。
+#: `XYW_` 的明文只有一个式子:`x1=md5("url="+路径);x2=<这串标志>;x3=<a1>;x4=<毫秒时间戳>;`
+#: (AES-128-CBC,密钥/IV 都是公开常量 ⇒ **谁都能解开,不需要私钥**)。
+#: ⚠️ **库自带的默认值是错的** —— 逐位比:真值第 11、18 位是 `1`、末位是 `0`,
+#: 而库默认那串是 `0`/`1`(`0|0|0|1|0|0|1|0|0|0|1|1|0|0|0|1|0|0|0` vs
+#: `0|0|0|1|0|0|1|0|0|0|1|0|0|0|0|1|0|0|1`)。**就这三位之差,签名就有 60% 的字节不一样。**
+#: **证据(控制变量)**:同一 a1、同一毫秒时间戳下,把这一串换成真值 ⇒
+#: 我们库算出的 payload 与**页面 `window._webmsxyw` 算出的**逐字节相同;
+#: 换之前从第 80 字节起分叉(416 个十六进制字符里 239 个不同)。
+#: 取得方式(不逆任何 JS):让页面签一个废包 → 用公开密钥/IV 解开 → 读出 `x2`。
+#: 它**跨调用是稳定的**(实测两次一致),但仍**建议按页面实时值覆盖**(见 `xhs_login.browser_identity`)。
+#: 可用 `.env` 的 `xhs_sign_env_flags` 覆盖。
+SIGN_ENV_FLAGS = "0|0|0|1|0|0|1|0|0|0|1|1|0|0|0|1|0|0|0"
+
+
 def _template(settings=None) -> dict:
     """最终模板 = 内置常量,可被 **`xhs_sign_template`(JSON)** 覆盖。
 
@@ -137,26 +152,75 @@ def _template(settings=None) -> dict:
     return out
 
 
-def _signer(settings=None):
-    """造一个**打过模板版本补丁**的签名器(理由见 `SIGN_TEMPLATE`)。失败退回库自带。"""
+def _env_flags(settings=None, live: str = "") -> str:
+    """最终的环境标志 = **实时值(优先)** → 配置 → 内置实测值。
+
+    ⚠️ 优先级是刻意的:**页面当场算出来的那个**永远最准(它是站点自己的环境描述);
+    配置次之;内置值只是"上一次量到的真值",是**兜底**,不是权威。
+    """
+    for cand in (live, str(getattr(settings, "xhs_sign_env_flags", "") or "").strip(),
+                 SIGN_ENV_FLAGS):
+        if cand:
+            return cand
+    return SIGN_ENV_FLAGS
+
+
+def _signer(settings=None, env_flags: str = ""):
+    """造一个**打过补丁**的签名器:模板版本号(见 `SIGN_TEMPLATE`)+ 环境标志(见 `SIGN_ENV_FLAGS`)。
+
+    任何一处补丁失败都**退回库自带**,绝不让签名器起不来(那会让整条链 500)。
+    """
     from xhshow import Xhshow
 
     try:
         from xhshow.config.config import CryptoConfig
 
-        return Xhshow(config=CryptoConfig(SIGNATURE_DATA_TEMPLATE=_template(settings)))
+        cfg = CryptoConfig(SIGNATURE_DATA_TEMPLATE=_template(settings),
+                           XYW_ENV_FLAGS_DEFAULT=_env_flags(settings, env_flags))
+        return Xhshow(config=cfg)
     except Exception:  # noqa: BLE001 - 补丁失败不该让整条链崩
-        logger.warning("小红书签名模板补丁失败,退回库自带模板", exc_info=True)
+        logger.warning("小红书签名补丁失败,退回库自带", exc_info=True)
         return Xhshow()
 
 
-def make_signer(settings=None):
+def parse_env_flags(xyw_sig: str) -> str:
+    """从一枚**真实 `XYW_` 签名**里解出环境标志 `x2`(取值含义见 `SIGN_ENV_FLAGS`)。
+
+    为什么解得开:`XYW_` 是 AES-128-CBC,而**密钥与 IV 都是写死在网页 JS 里的公开常量**
+    —— 没有私钥的概念 ⇒ **谁都能解**。所以"拿真值"不需要逆向,只要让页面签一个包就行
+    (`xhs_login.browser_identity()` 就是这么做的)。拿不到一律回空串,由调用方兜底。
+    """
+    import base64 as _b64
+    import json as _json
+    import re as _re
+
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+        from xhshow.config.config import CryptoConfig as _C
+
+        blob = str(xyw_sig or "").split("_", 1)[-1]
+        payload = _json.loads(_b64.b64decode(blob).decode("utf-8"))["payload"]
+        d = Cipher(algorithms.AES(_C.XYW_AES_KEY), modes.CBC(_C.XYW_AES_IV)).decryptor()
+        raw = bytes.fromhex(payload)
+        pt = d.update(raw) + d.finalize()
+        pt = pt[:-pt[-1]] if pt and 0 < pt[-1] <= 16 else pt      # 去 PKCS7 填充
+        text = _b64.b64decode(pt).decode("utf-8", "replace")
+        m = _re.search(r"x2=([^;]*)", text)
+        return m.group(1) if m else ""
+    except Exception:  # noqa: BLE001 - 解析只是"取真值"的便利,失败就当没取到
+        logger.debug("从 XYW_ 签名里解环境标志失败", exc_info=True)
+        return ""
+
+
+def make_signer(settings=None, env_flags: str = ""):
     """**给别的模块用的公开入口**(如 `xhs_login` 的扫码登录)。
 
     伸手拿 `_signer` 也能跑,但那会让"补丁只此一处"这条纪律失去落点 ——
-    签名器必须**总是**从这一个门出来(带模板版本补丁)。
+    签名器必须**总是**从这一个门出来(带模板版本 + 环境标志两处补丁)。
+    `env_flags` 传**页面实时算出来的**那串(见 `xhs_login.browser_identity`)。
     """
-    return _signer(settings)
+    return _signer(settings, env_flags)
 
 
 def search(keywords: list[str], settings=None, session=None, user_id: int = 1,

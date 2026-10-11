@@ -81,3 +81,52 @@ def test_non_json_bad_override_still_yields_a_working_signer():
 
     x = m._signer(_Bad())
     assert dict(x.config.SIGNATURE_DATA_TEMPLATE) == m.SIGN_TEMPLATE
+
+
+# --------------------------------------------------------------- 环境标志(2026-10-11)
+# ⚠️ 为什么单列一组:`XYW_` 的明文只有四个字段,而**库自带的环境标志有 3 位是错的** ——
+# 就那 3 位,签名 416 个十六进制字符里 239 个不一样(实测)。这条比模板版本号还隐蔽。
+
+def test_env_flags_constant_is_the_measured_truth():
+    """内置值必须是**实测真值**,不能是库自带那串(那是回退,不是修复)。"""
+    from xhshow.config.config import CryptoConfig
+
+    lib_default = CryptoConfig().XYW_ENV_FLAGS_DEFAULT
+    assert m.SIGN_ENV_FLAGS != lib_default, "内置环境标志又变回库默认了"
+    assert m.SIGN_ENV_FLAGS == "0|0|0|1|0|0|1|0|0|0|1|1|0|0|0|1|0|0|0"
+    assert len(m.SIGN_ENV_FLAGS.split("|")) == 19
+
+
+def test_env_flags_priority_live_beats_config_beats_builtin():
+    """★ 优先级 = **实时(页面算的)** > 配置 > 内置 —— 站点自己算的永远最准。"""
+
+    class _S:
+        xhs_sign_env_flags = "CONFIG"
+
+    assert m._env_flags(_S(), live="LIVE") == "LIVE"
+    assert m._env_flags(_S()) == "CONFIG"
+    assert m._env_flags(None) == m.SIGN_ENV_FLAGS
+
+
+def test_signer_carries_env_flags():
+    x = m.make_signer(None, "1|2|3")
+    assert x.config.XYW_ENV_FLAGS_DEFAULT == "1|2|3"
+    # 不给就走内置实测值
+    assert m.make_signer(None).config.XYW_ENV_FLAGS_DEFAULT == m.SIGN_ENV_FLAGS
+
+
+def test_parse_env_flags_roundtrip():
+    """★ 解析器必须能**从一枚真签名里读回那串标志**(这就是"拿真值"的整套办法)。"""
+    from xhshow import Xhshow
+
+    flags = "0|0|0|1|0|0|1|0|0|0|1|1|0|0|0|1|0|0|0"
+    xs = Xhshow(config=__import__("xhshow.config.config", fromlist=["CryptoConfig"])
+                .CryptoConfig(XYW_ENV_FLAGS_DEFAULT=flags)).sign_xyw(
+        "POST", "/api/x", "1a12" + "0" * 48, payload={"a": 1})
+    assert m.parse_env_flags(xs) == flags
+
+
+def test_parse_env_flags_is_forgiving():
+    """垃圾输入一律回空串(由调用方兜底),绝不许抛 —— 它只是"取真值"的便利。"""
+    for bad in ("", "XYW_", "XYW_不是base64", "完全无关"):
+        assert m.parse_env_flags(bad) == ""

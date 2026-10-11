@@ -192,7 +192,8 @@ def test_diagnose_status_covers_the_variants(monkeypatch):
     seen: list[dict] = []
 
     def fake_raw(signer, cookies, *, method, path, params=None, payload=None,
-                 sign_format="xyw", x_rap=False, timeout=25, extra_headers=None):
+                 sign_format="xyw", x_rap=False, timeout=25, extra_headers=None,
+                 xs_common=""):
         seen.append({"params": params, "fmt": sign_format, "hdr": extra_headers})
         return 471, '{"code":0,"success":true,"data":{}}'
 
@@ -307,19 +308,37 @@ class _S:
     xhs_sign_template = ""
 
 
-def _stub_create(monkeypatch, jar):
-    """让 create_qr 只跑到"拿到 cookie + 创建成功"为止。"""
+def _stub_create(monkeypatch, jar, xs_common: str = ""):
+    """让 create_qr 只跑到"拿到身份 + 创建成功"为止。
+
+    ⚠️ 返回的必须是 `PageIdentity`(不是裸 dict)—— 2026-10-11 生产侧改成
+    "cookie + **真实 `x-s-common`**"一起取,替身没跟上就会方言不同。
+    """
     monkeypatch.setattr(L, "enrich_cookies", lambda c, **k: c)
     monkeypatch.setattr(L, "_request", lambda *a, **k: {
         "code": 0, "data": {"qr_id": "1", "code": "2", "url": "https://x/y"}})
-    monkeypatch.setattr(L, "browser_identity", lambda **k: jar)
+    monkeypatch.setattr(L, "browser_identity",
+                        lambda **k: L.PageIdentity(cookies=dict(jar), xs_common=xs_common))
 
 
 def test_create_qr_prefers_site_issued_identity(monkeypatch):
-    """★ 首选**站点自己造的**身份(真实 `a1`)—— 这是与参考实现对齐的那一步。"""
-    _stub_create(monkeypatch, {"a1": "realA1", "webId": "w", "gid": "g"})
+    """★ 首选**站点自己造的**身份(真实 `a1`)+ **真实 `x-s-common`** —— 与参考实现对齐的两步。"""
+    _stub_create(monkeypatch, {"a1": "realA1", "webId": "w", "gid": "g"},
+                 xs_common="REALXSC")
     t = L.create_qr(_S())
     assert t.cookies["a1"] == "realA1"
+    assert t.xs_common == "REALXSC", "真实 x-s-common 没带进票里"
+
+
+def test_raw_uses_captured_xs_common(monkeypatch):
+    """★ 截到的真实 `x-s-common` 必须**真的覆盖**发出去的请求头(否则等于没截)。"""
+    tp = _patch_http(monkeypatch, _Resp(200, {"code": 0, "success": True, "data": {}}))
+    L._raw(_FakeSigner(), {"a1": "a"}, method="GET", path="/x", xs_common="REALXSC")
+    assert tp.calls[0]["headers"]["x-s-common"] == "REALXSC"
+    # 不截的时候,保持库自合成的那一份(不能变成空)
+    tp2 = _patch_http(monkeypatch, _Resp(200, {"code": 0, "success": True, "data": {}}))
+    L._raw(_FakeSigner(), {"a1": "a"}, method="GET", path="/x")
+    assert tp2.calls[0]["headers"].get("x-s-common", "MISSING") != "REALXSC"
 
 
 def test_create_qr_falls_back_when_browser_fails(monkeypatch):
