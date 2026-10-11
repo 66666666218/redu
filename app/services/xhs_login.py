@@ -30,8 +30,14 @@
 3. **带登录 session 的无头浏览器再去导航 = 自杀。**
    实测:注入真 `web_session` 后**纯 API** 调 `user/me` 一切正常;一旦无头页面 `goto`
    小红书,服务端会**下发删除指令**把 `web_session` 作废。
-   ⇒ 本模块**全程不开浏览器**(签名由 `xhshow` 在 Python 里算),天然躲开这条;
-   **但也别**把这里拿到的 session 交给页面路去"刷新一下完整 cookie" —— 那正是把刚拿到的东西烧掉。
+   ⇒ **但也别**把这里拿到的 session 交给页面路去"刷新一下完整 cookie" —— 那正是把刚拿到的东西烧掉。
+
+   ⚠️ **一处更正(2026-10-11)**:"全程不开浏览器"这句话**不再成立**:实测自己"编"的 `a1`
+   在扫码确认后会被网关挡住(`status` 回 `471 + 空 data`),所以**创建二维码之前**会开一个
+   **一次性、无档案、不登录**的 headless 页面,只为把**站点自己造的**身份 cookie 取回来
+   (`browser_identity()`;`xhs_qr_login_browser=False` 可关掉,关掉就回落合成身份)。
+   它与上面那条**不冲突**:烧掉登录态的是"**带着登录 session** 去导航",而这里取身份时
+   **手里还没有任何登录态**。参考实现走的正是这一步。
 4. **`qrcode/status` 是带 query 的 GET,query 必须参与签名**;而且**每一轮都要调它** ——
    它不是"备选通道",公钥注册与凭据下发都是它。
 
@@ -47,6 +53,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import time
 import urllib.parse
 from dataclasses import dataclass, field
@@ -74,12 +81,23 @@ SESSION_PREFIX_REAL = "04"
 
 
 class XhsQrLoginError(Exception):
-    """扫码登录的硬失败。`kind` 说清是哪一种,**`needs_human` 表示要人动手**(扫码/重来)。"""
+    """扫码登录的硬失败。`kind` 说清是哪一种,**`needs_human` 表示要人动手**(扫码/重来)。
 
-    def __init__(self, msg: str, kind: str = "api", needs_human: bool = False) -> None:
+    `code` 是**业务码**(信封里的 `code`),只在 `kind == "api"` 时有意义 ——
+    判「确定未登录」要靠它,不能靠 HTTP 状态码(见 `LOGGED_OUT_CODES`)。
+    """
+
+    def __init__(self, msg: str, kind: str = "api", needs_human: bool = False,
+                 code: int | None = None) -> None:
         super().__init__(msg)
         self.kind = kind
         self.needs_human = needs_human
+        self.code = code
+
+
+#: **确定"没登录"**的业务码。⚠️ 与"检测失败"必须分开(上游《login-flow》陷阱 2):
+#: 把 406/网络/签名失败也当成未登录,人会一直重扫,而真因是自查请求根本没发出去。
+LOGGED_OUT_CODES: frozenset[int] = frozenset({-100, -101, -104, 300011})
 
 
 @dataclass
@@ -134,14 +152,15 @@ def _query(params: dict[str, Any]) -> str:
     return "&".join(parts)
 
 
-def _request(signer: Any, cookies: dict[str, str], *, method: str, path: str,
-             params: dict[str, Any] | None = None, payload: dict[str, Any] | None = None,
-             sign_format: str = "xyw", x_rap: bool = False, timeout: int = 25) -> dict:
-    """带签名请求一次。**签名用的字节 = 发出去的字节**(POST body 用库的 `build_json_body`)。
+def _raw(signer: Any, cookies: dict[str, str], *, method: str, path: str,
+         params: dict[str, Any] | None = None, payload: dict[str, Any] | None = None,
+         sign_format: str = "xyw", x_rap: bool = False, timeout: int = 25,
+         extra_headers: dict[str, str] | None = None) -> tuple[int, str]:
+    """**不做任何判读**地打一次请求,原样返回 `(HTTP 状态码, 响应原文)`。
 
-    GET 的 query 由 `_query()` 拼(与库同规则),POST 的 body 由 `build_json_body()` 出 ——
-    两处都**不自己** `json.dumps`,因为"两边各序列化一次"是本仓反复踩的坑
-    (上游实测:重新序列化哪怕只多一个空格,签名立刻失效,**症状是 406**,极易误判成风控)。
+    单独拆出来是给**诊断探针**用的:那种"只在某个状态下才出现"的怪象
+    (例:扫完确认后 `status` 开始回 471/空 `data`)**没法事后复现**(`qr_id` 一次性),
+    必须在当场用"同一张票、同一时刻、只变一个变量"的方式把原文抓下来。
     """
     import requests
 
@@ -159,41 +178,73 @@ def _request(signer: Any, cookies: dict[str, str], *, method: str, path: str,
     headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
     headers["content-type"] = "application/json;charset=UTF-8"
     headers["user-agent"] = _UA
+    if extra_headers:
+        headers.update(extra_headers)
+    r = requests.request(method.upper(), url, data=body, headers=headers, timeout=timeout)
+    return int(r.status_code), r.text
+
+
+def _request(signer: Any, cookies: dict[str, str], *, method: str, path: str,
+             params: dict[str, Any] | None = None, payload: dict[str, Any] | None = None,
+             sign_format: str = "xyw", x_rap: bool = False, timeout: int = 25) -> dict:
+    """带签名请求一次,并**判读信封**。**签名用的字节 = 发出去的字节**(见 `_raw`)。
+
+    GET 的 query 由 `_query()` 拼(与库同规则),POST 的 body 由 `build_json_body()` 出 ——
+    两处都**不自己** `json.dumps`,因为"两边各序列化一次"是本仓反复踩的坑
+    (上游实测:重新序列化哪怕只多一个空格,签名立刻失效,**症状是 406**,极易误判成风控)。
+    """
     try:
-        r = requests.request(method.upper(), url, data=body, headers=headers, timeout=timeout)
+        r_status, r_text = _raw(signer, cookies, method=method, path=path, params=params,
+                                payload=payload, sign_format=sign_format, x_rap=x_rap,
+                                timeout=timeout)
     except Exception as exc:  # noqa: BLE001 - 网络层失败要单独归一类,别混进"没登录"
         raise XhsQrLoginError(f"请求失败({path}):{type(exc).__name__}: {str(exc)[:90]}",
                               kind="network") from exc
-    if r.status_code in (406, 461):
+    if r_status in (406, 461):
         raise XhsQrLoginError(
-            f"签名被拒(HTTP {r.status_code})·{path} —— 多半是格式不匹配或 body 被重新序列化;"
-            f"响应:{r.text[:110]}", kind="sign")
-    if r.status_code == 471:
+            f"签名被拒(HTTP {r_status})·{path} —— 多半是格式不匹配或 body 被重新序列化;"
+            f"响应:{r_text[:110]}", kind="sign")
+    if r_status == 471:
         # ⚠️ **471 是"服务端忙/限频",不是失败**(2026-10-11 实测:连续创建二维码后立刻轮询撞到过,
         # 而响应体仍是 `{"code":0,"success":true,"msg":"成功","data":{}}`;隔一会儿再打就正常)。
         # 单列一类,是为了让上层**下一轮接着试**,而不是把它当成"这条链坏了"。
-        raise XhsQrLoginError(f"服务端忙/限频(HTTP 471)·{path} —— 下一轮重试即可",
-                              kind="busy")
-    if r.status_code != 200:
-        raise XhsQrLoginError(f"HTTP {r.status_code}·{path}:{r.text[:110]}", kind="api")
+        # ⚠️ **body 必须带出来**:2026-10-11 撞到一个"只有被扫过的那张票才 471、新票同一时刻 200"的怪象,
+        # 而当时这条消息里没有 body ⇒ **完全无法排查**。凡"说不清是什么"的错误,都要把原文带上。
+        raise XhsQrLoginError(f"服务端忙/限频(HTTP 471)·{path} —— 下一轮重试即可;"
+                              f"响应:{r_text[:160]}", kind="busy")
+    if r_status != 200:
+        raise XhsQrLoginError(f"HTTP {r_status}·{path}:{r_text[:110]}", kind="api")
     try:
-        return r.json()
+        d = json.loads(r_text)
     except ValueError as exc:
-        raise XhsQrLoginError(f"响应不是 JSON ·{path}:{r.text[:110]}", kind="api") from exc
+        raise XhsQrLoginError(f"响应不是 JSON ·{path}:{r_text[:110]}", kind="api") from exc
+    # ⚠️⚠️ **HTTP 200 不等于成功** —— 2026-10-11 实测:`status` 在被扫过之后会回
+    # `HTTP 200 + {"code":-1,"success":false,"msg":"登录异常"}`。只按状态码判断的话,
+    # 这**会被静默吞成"还在等扫码"**(本仓反复栽的那一类),而它其实是服务端明确在拒绝。
+    # ⇒ 信封里的 `code`/`success` 必须一起看。
+    d = d if isinstance(d, dict) else {}
+    code = d.get("code")
+    if d.get("success") is False or (isinstance(code, int) and code != 0):
+        raise XhsQrLoginError(f"接口报错 ·{path}:msg={str(d.get('msg'))[:60]} code={code}",
+                              kind="api", code=code if isinstance(code, int) else None)
+    return d
 
 
 # --------------------------------------------------------------------------- 三个接口
 
 
-def new_identity(settings=None) -> tuple[dict[str, str], Any]:
-    """造一份**全新的设备身份** + 打好补丁的签名器。
-
-    ⚠️ 用**新 `a1`** 是有意的:上游的成功路径就是每次开一个全新的 headless 上下文
-    (等于新设备)。`a1` 是设备标识、不是账号 —— 换新的不会动到任何账号。
-    """
+def _signer_for(settings=None) -> Any:
+    """签名器只能从**那一个门**出来(必须带签名模板版本补丁,见 `make_signer`)。"""
     from app.services.xhs_protocol_source import make_signer
 
-    signer = make_signer(settings)
+    return make_signer(settings)
+
+
+def new_identity(settings=None) -> tuple[dict[str, str], Any]:
+    """造一份**合成的**设备身份 + 打好补丁的签名器(纯协议,**一个字节都不出网**)。
+    ⚠️ 它是**回落**用的 —— 首选 `browser_identity()`(站点自己造的 `a1`),理由见其 docstring。
+    """
+    signer = _signer_for(settings)
     a1 = signer.generate_a1()
     return {"a1": a1, "webId": signer.generate_web_id(a1),
             "xsecappid": "xhs-pc-web"}, signer
@@ -229,9 +280,127 @@ def _try_formats(fn: Callable[[str], Any], fmts: tuple[str, ...] = ("xyw", "xys"
     raise last or XhsQrLoginError("签名格式试完仍不行", kind="sign")
 
 
+def diagnose_status(t: QrTicket) -> list[tuple[str, int, str]]:
+    """★ **一次性诊断**:同一张票、同一时刻、**只变一个变量**,把原文全打出来。
+
+    为什么非要有它:有些怪象**只在特定状态下出现**(例:扫完确认后 `status` 开始回
+    `471 + 空 data`),而 `qr_id` 是**一次性**的 —— 状态一过就**没法事后复现**,
+    只能趁它当场发生时抓。2026-10-11 就吃过这个亏:第一轮卡住时手里没有 qr_id/公钥,
+    连"换个进程复现一次"都做不到。
+
+    返回 `[(变量说明, HTTP 状态码, 响应原文), …]`。
+    """
+    params = {"qr_id": t.qr_id, "code": t.code, "client_public_key_base64": t.public_key_b64}
+    cases: list[tuple[str, dict]] = [
+        (f"① 原样({t.sign_format}, 带公钥)", {}),
+        (f"② 换签名格式({_other_format(t.sign_format)})", {"sign_format": _other_format(t.sign_format)}),
+        ("③ 补 Referer/Origin(上游有、我们没发)", {
+            "extra_headers": {"Referer": "https://www.xiaohongshu.com/",
+                              "Origin": "https://www.xiaohongshu.com"}}),
+        ("④ 不带公钥参数", {"params": {"qr_id": t.qr_id, "code": t.code}}),
+    ]
+    out: list[tuple[str, int, str]] = []
+    for name, over in cases:
+        try:
+            st, tx = _raw(t.signer, t.cookies, method="GET", path=PATH_QR_STATUS,
+                          params=over.get("params", params),
+                          sign_format=over.get("sign_format", t.sign_format),
+                          x_rap=t.x_rap, extra_headers=over.get("extra_headers"))
+        except Exception as exc:  # noqa: BLE001 - 诊断本身不许把主流程带崩
+            st, tx = -1, f"{type(exc).__name__}: {exc}"
+        out.append((name, st, tx.replace("\n", " ")[:200]))
+    return out
+
+
+def _other_format(fmt: str) -> str:
+    return "xys" if str(fmt) == "xyw" else "xyw"
+
+
+def enrich_cookies(cookies: dict[str, str], *, paths: tuple[str, ...] = ("/",),
+                   timeout: int = 25) -> dict[str, str]:
+    """**用纯 HTTP 打几个页面,把站点自己下发的 cookie 并进罐里**(不开浏览器)。
+
+    ⚠️ 为什么需要:我们自己造的罐只有 `a1`/`webId`/`xsecappid` 三项,**全是本地编的**;
+    而真实浏览器还带着**站点下发**的那几枚 —— 尤其 `acw_tc` 是 **WAF 网关 cookie**。
+
+    ⚠️ 为什么把它当嫌疑:2026-10-11 实测,扫码确认之后 `status` 稳定回
+    `471 + {"code":0,"success":true,"data":{}}`,而四种**请求形状**的对照
+    (签名格式 `xyw`/`xys`、补 `Referer`/`Origin`、去掉公钥参数)**全部一模一样**
+    ⇒ 不是形状问题。四个对照里**唯一没验过的变量就是 cookie 罐**。
+
+    ⚠️ 拿不到就**原样返回**(调用方不用管失败):这几枚是"更像真实浏览器",不是硬前提。
+    """
+    import requests
+
+    out = dict(cookies)
+    try:
+        s = requests.Session()
+        s.cookies.update(out)
+        for p in paths:
+            s.get("https://www.xiaohongshu.com" + p, timeout=timeout,
+                  headers={"user-agent": _UA,
+                           "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                           "accept-language": "zh-CN,zh;q=0.9"})
+        got = {c.name: c.value for c in s.cookies if c.value}
+        new = [k for k in got if k not in out]
+        out.update(got)
+        if new:
+            logger.info("小红书扫码登录:从页面补到 cookie %s(共 %d 项)", new, len(out))
+    except Exception:  # noqa: BLE001 - 补不到就照原样走,别把登录带崩
+        logger.warning("小红书扫码登录:补页面 cookie 失败(照原样继续)", exc_info=True)
+    return out
+
+
+def browser_identity(*, timeout_ms: int = 30000, settle_ms: int = 2500) -> dict[str, str]:
+    """用**一次性 headless 页面**取一份**真实身份** cookie(站点 JS 自己造的 `a1` 等)。
+
+    ⚠️ **这不是"登录"**:开的是**全新的、无档案的**上下文 —— 不碰任何账号、不读任何登录态、
+    不留档案,拿完就关。它只让页面跑一遍 JS,把站点**真正下发**的那几枚 cookie 取回来。
+
+    ⚠️ **为什么要它**(2026-10-11 实测):我们自己"编"的 `a1`(库的 `generate_a1()`)在
+    **扫码确认之后**会被网关挡住 —— `status` 稳定回 `471 + {"code":0,"success":true,"data":{}}`。
+    而四个**请求形状**的对照(签名格式 `xyw`/`xys`、补 `Referer`/`Origin`、去掉公钥参数)
+    **全部一模一样** ⇒ 不是形状问题;`userinfo` 同一时刻还是好的 ⇒ 也不是 IP 整体被封。
+    剩下的差异就只有"身份是不是站点自己造的" —— 而站点**不会**从 HTTP 响应里发 `a1`
+    (实测:不带 cookie 打首页,只回 `acw_tc`/`abRequestId`),`a1` 只能由页面 JS 生成。
+    参考实现(已端到端验证过)走的正是这一步。
+    """
+    from playwright.sync_api import sync_playwright
+
+    jar: dict[str, str] = {}
+    with sync_playwright() as p:
+        b = p.chromium.launch(headless=True)
+        try:
+            ctx = b.new_context(user_agent=_UA, locale="zh-CN")
+            page = ctx.new_page()
+            page.goto("https://www.xiaohongshu.com/explore",
+                      wait_until="domcontentloaded", timeout=timeout_ms)
+            page.wait_for_timeout(settle_ms)      # 等页面把 a1/webId/gid 这些写出来
+            jar = {c["name"]: c["value"]
+                   for c in ctx.cookies("https://www.xiaohongshu.com") if c.get("value")}
+        finally:
+            b.close()
+    if not jar.get("a1"):
+        raise XhsQrLoginError("页面没给出 a1(站点结构可能变了)", kind="env")
+    logger.info("小红书扫码登录:取到真实身份 cookie %d 项:%s", len(jar), sorted(jar))
+    return jar
+
+
 def create_qr(settings=None) -> QrTicket:
     """第 ① 步:创建二维码。"""
-    cookies, signer = new_identity(settings)
+    if settings is None:
+        from config.settings import get_settings
+        settings = get_settings()
+    cookies: dict[str, str] = {}
+    if bool(getattr(settings, "xhs_qr_login_browser", True)):
+        try:
+            cookies = browser_identity()          # ← 站点自己造的身份(见其 docstring 的理由)
+        except Exception:  # noqa: BLE001 - 取不到就回落合成身份,别把工具卡死
+            logger.warning("小红书扫码登录:取真实身份失败,回落合成身份", exc_info=True)
+    if not cookies.get("a1"):
+        cookies = new_identity(settings)[0]
+    cookies = enrich_cookies(cookies)
+    signer = _signer_for(settings)
     payload = {"qr_type": 1}
     resp, fmt = _try_formats(lambda f: _request(signer, cookies, method="POST",
                                                 path=PATH_QR_CREATE, payload=payload,
@@ -313,9 +482,21 @@ def wait_for_login(t: QrTicket, *, on_status: Callable[[PollResult], None] | Non
 
 def me_is_guest(cookie: dict[str, str], signer: Any, *, sign_format: str = "xyw",
                 x_rap: bool = False) -> bool:
-    """`user/me` 的 `guest` 字段。**登录成功与否唯一的判据。**"""
-    r = _request(signer, cookie, method="GET", path=PATH_USER_ME,
-                 sign_format=sign_format, x_rap=x_rap)
+    """`user/me` 的 `guest` 字段。**登录成功与否唯一的判据。**
+
+    ⚠️ **「确定未登录」与「检测失败」必须分开**(上游陷阱 2):
+    - 服务端**明确**说了"没登录/过期/受限"(`LOGGED_OUT_CODES`) ⇒ `True`,是真没登录;
+    - 请求**自己**没发成功(签名被拒/网络/471) ⇒ **原样抛出**,别糊成"未登录" ——
+      否则人会一遍遍重扫,而真因根本不在登录上。
+    """
+    try:
+        r = _request(signer, cookie, method="GET", path=PATH_USER_ME,
+                     sign_format=sign_format, x_rap=x_rap)
+    except XhsQrLoginError as exc:
+        if exc.code in LOGGED_OUT_CODES:
+            logger.info("小红书自查:服务端明确说没登录(code=%s)—— 不是检测失败", exc.code)
+            return True
+        raise
     d = r.get("data") or {}
     return bool(d.get("guest", True))
 

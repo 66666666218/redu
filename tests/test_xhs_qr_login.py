@@ -73,15 +73,242 @@ def test_new_identity_is_fresh_each_time():
 
 
 class _FakeSigner:
-    """占位签名器 —— 测试里 `_request` 被替换,这里只用来占位。"""
+    """占位签名器 —— 让 `_request` 能跑到 HTTP 那一步(测试里 `requests.request` 被打桩)。"""
 
-    def build_json_body(self, payload):  # pragma: no cover - 不走真路径
+    def sign_headers_get(self, uri, cookies, **kw):
+        return {}
+
+    def sign_headers_post(self, uri, cookies, **kw):
+        return {}
+
+    def build_json_body(self, payload):
         return "{}"
+
+
+class _Resp:
+    """假的 `requests` 响应。"""
+
+    def __init__(self, status: int, body):
+        import json as _json
+
+        self.status_code = status
+        self._body = body
+        self.text = body if isinstance(body, str) else _json.dumps(body, ensure_ascii=False)
+
+    def json(self):
+        import json as _json
+
+        return _json.loads(self.text) if isinstance(self._body, str) else self._body
 
 
 def _ticket() -> L.QrTicket:
     return L.QrTicket(qr_id="123", code="456", url="https://x/y",
                       cookies={"a1": "a"}, signer=_FakeSigner())
+
+
+def _patch_http(monkeypatch, resp):
+    """把 `requests.request` 打桩成固定响应(让 `_request` 真的走一遍信封解析)。"""
+    import requests
+
+    monkeypatch.setattr(requests, "request", lambda *a, **k: resp)
+
+
+def test_business_error_is_not_swallowed(monkeypatch):
+    """★★ **HTTP 200 不等于成功** —— 实测 `{"code":-1,"success":false,"msg":"登录异常"}`
+    就是 200 回来的。只按状态码判断会把它**静默吞成「还在等扫码」**(本仓反复栽的那类)。"""
+    _patch_http(monkeypatch, _Resp(200, {"code": -1, "success": False, "msg": "登录异常",
+                                         "data": None}))
+    r = L.poll_once(_ticket())
+    assert r.error and "登录异常" in r.error and not r.confirmed and not r.busy
+
+
+def test_business_error_not_reported_as_busy(monkeypatch):
+    """`登录异常` 是**拒绝**,不是"忙" —— 不能归成可重试的忙。"""
+    _patch_http(monkeypatch, _Resp(200, {"code": -1, "success": False, "msg": "登录异常"}))
+    assert not L.poll_once(_ticket()).busy
+
+
+def test_471_body_is_carried(monkeypatch):
+    """471 的**响应体必须带出来** —— 否则"服务端忙"这句话什么都没说,无法排查。"""
+    _patch_http(monkeypatch, _Resp(471, {"code": -1, "success": False, "msg": "登录异常"}))
+    r = L.poll_once(_ticket())
+    assert r.busy and "登录异常" in r.error
+
+
+def test_ok_envelope_passes(monkeypatch):
+    """正常信封(`code:0`)不能被误判成错误。"""
+    _patch_http(monkeypatch, _Resp(200, {"code": 0, "success": True, "msg": "成功",
+                                         "data": {"code_status": 0}}))
+    r = L.poll_once(_ticket())
+    assert r.code_status == 0 and not r.error and not r.busy
+
+
+def test_me_is_guest_true_when_server_says_logged_out(monkeypatch):
+    """服务端**明确**说没登录(`-100`)⇒ `guest=True`(真没登录)。"""
+    _patch_http(monkeypatch, _Resp(200, {"code": -100, "success": False, "msg": "登录已过期"}))
+    assert L.me_is_guest({"a1": "a"}, _FakeSigner()) is True
+
+
+def test_me_is_guest_reraises_on_detection_failure(monkeypatch):
+    """★ 请求**自己**没发成功 ⇒ **必须抛**,不许糊成"未登录"(否则人会一直重扫)。"""
+    import requests
+
+    def boom(*a, **k):
+        raise ConnectionError("网络断了")
+
+    monkeypatch.setattr(requests, "request", boom)
+    with pytest.raises(L.XhsQrLoginError) as e:
+        L.me_is_guest({"a1": "a"}, _FakeSigner())
+    assert e.value.kind == "network"
+
+
+def test_me_is_guest_false_when_logged_in(monkeypatch):
+    _patch_http(monkeypatch, _Resp(200, {"code": 0, "success": True,
+                                         "data": {"guest": False, "user_id": "u1"}}))
+    assert L.me_is_guest({"a1": "a"}, _FakeSigner()) is False
+
+
+# --------------------------------------------------------------- ③c 当场对照诊断
+
+
+def test_diagnose_status_covers_the_variants(monkeypatch):
+    """诊断必须**同一张票、只变一个变量**地打全四个对照,并把原文带回来。"""
+    seen: list[dict] = []
+
+    def fake_raw(signer, cookies, *, method, path, params=None, payload=None,
+                 sign_format="xyw", x_rap=False, timeout=25, extra_headers=None):
+        seen.append({"params": params, "fmt": sign_format, "hdr": extra_headers})
+        return 471, '{"code":0,"success":true,"data":{}}'
+
+    monkeypatch.setattr(L, "_raw", fake_raw)
+    out = L.diagnose_status(_ticket())
+    assert len(out) == 4
+    assert all(st == 471 and "data" in tx for _, st, tx in out)
+    # ② 只换了签名格式;③ 只加了 Referer/Origin;④ 只去掉了公钥参数
+    assert seen[0]["fmt"] == "xyw" and seen[1]["fmt"] == "xys"
+    assert seen[2]["hdr"] and "Referer" in seen[2]["hdr"]
+    assert "client_public_key_base64" not in seen[3]["params"]
+    # 原样那条必须带公钥(否则对照就不是"只变一个变量"了)
+    assert "client_public_key_base64" in seen[0]["params"]
+
+
+def test_diagnose_status_survives_exceptions(monkeypatch):
+    """诊断自己炸了也不能把主流程带崩 —— 它只是排查用的附庸。"""
+    def boom(*a, **k):
+        raise RuntimeError("炸了")
+
+    monkeypatch.setattr(L, "_raw", boom)
+    out = L.diagnose_status(_ticket())
+    assert len(out) == 4 and all(st == -1 for _, st, _ in out)
+
+
+def test_other_format_flips():
+    assert L._other_format("xyw") == "xys" and L._other_format("xys") == "xyw"
+
+
+# --------------------------------------------------------------- ③d 补页面 cookie
+
+
+class _FakeJar:
+    def __init__(self, items: dict[str, str]):
+        self._items = items
+
+    def update(self, d):
+        self._items.update(d)
+
+    def __iter__(self):
+        class _C:
+            def __init__(self, k, v):
+                self.name, self.value = k, v
+
+        return iter([_C(k, v) for k, v in self._items.items()])
+
+
+class _FakeSession:
+    def __init__(self):
+        self.cookies = _FakeJar({})
+        self.urls: list[str] = []
+
+    def get(self, url, **kw):
+        self.urls.append(url)
+        self.cookies.update({"acw_tc": "x" * 62, "abRequestId": "y" * 32})
+        return None
+
+
+def test_enrich_cookies_merges_without_overwriting_identity(monkeypatch):
+    """★ 补 cookie **不能覆盖我们自己的 `a1`/`webId`** —— 那是这套身份的本体。"""
+    import requests
+
+    s = _FakeSession()
+    monkeypatch.setattr(requests, "Session", lambda: s)
+    got = L.enrich_cookies({"a1": "mine", "webId": "w", "xsecappid": "xhs-pc-web"})
+    assert got["a1"] == "mine" and got["webId"] == "w"
+    assert got["acw_tc"] == "x" * 62 and got["abRequestId"] == "y" * 32
+    assert s.urls and s.urls[0].endswith("/")
+
+
+def test_enrich_cookies_survives_failure(monkeypatch):
+    """拿不到就**原样返回** —— 这几枚是"更像真实浏览器",不是硬前提。"""
+    import requests
+
+    class _Boom(_FakeSession):
+        def get(self, url, **kw):
+            raise ConnectionError("断网")
+
+    monkeypatch.setattr(requests, "Session", lambda: _Boom())
+    assert L.enrich_cookies({"a1": "mine"}) == {"a1": "mine"}
+
+
+# --------------------------------------------------------------- ③e 身份来源
+
+
+class _S:
+    """最小 settings 替身(只要 create_qr 会读的那几个)。"""
+
+    xhs_qr_login_browser = True
+    xhs_sign_format = "xyw"
+    xhs_sign_x_rap = True
+    xhs_sign_template = ""
+
+
+def _stub_create(monkeypatch, jar):
+    """让 create_qr 只跑到"拿到 cookie + 创建成功"为止。"""
+    monkeypatch.setattr(L, "enrich_cookies", lambda c, **k: c)
+    monkeypatch.setattr(L, "_request", lambda *a, **k: {
+        "code": 0, "data": {"qr_id": "1", "code": "2", "url": "https://x/y"}})
+    monkeypatch.setattr(L, "browser_identity", lambda **k: jar)
+
+
+def test_create_qr_prefers_site_issued_identity(monkeypatch):
+    """★ 首选**站点自己造的**身份(真实 `a1`)—— 这是与参考实现对齐的那一步。"""
+    _stub_create(monkeypatch, {"a1": "realA1", "webId": "w", "gid": "g"})
+    t = L.create_qr(_S())
+    assert t.cookies["a1"] == "realA1"
+
+
+def test_create_qr_falls_back_when_browser_fails(monkeypatch):
+    """取不到真实身份就**回落合成身份**,别把工具卡死。"""
+    _stub_create(monkeypatch, {})          # 空 jar ⇒ 触发回落
+
+    def boom(**k):
+        raise L.XhsQrLoginError("没起来", kind="env")
+
+    monkeypatch.setattr(L, "browser_identity", boom)
+    t = L.create_qr(_S())
+    assert t.cookies["a1"] and t.cookies["webId"]
+
+
+def test_create_qr_can_skip_browser(monkeypatch):
+    """`xhs_qr_login_browser=False` ⇒ 压根不起浏览器(纯协议)。"""
+    called = []
+
+    class _NoBr(_S):
+        xhs_qr_login_browser = False
+
+    _stub_create(monkeypatch, {"a1": "x"})
+    monkeypatch.setattr(L, "browser_identity", lambda **k: called.append(1) or {"a1": "x"})
+    t = L.create_qr(_NoBr())
+    assert not called and t.cookies["a1"] != "x"
 
 
 def test_poll_does_not_invent_success(monkeypatch):
