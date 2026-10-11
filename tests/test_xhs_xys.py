@@ -14,9 +14,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import time
-
-import pytest
 
 from app.services import xhs_xys as X
 
@@ -25,16 +22,21 @@ from app.services import xhs_xys as X
 
 
 def test_build_enc_ssk_matches_the_documented_formula(monkeypatch):
-    """★ 用**独立实现**重算一遍对拍(nonce 固定住,才能逐字节比)。"""
+    """★ 用**独立实现**重算一遍对拍。
+
+    ⚠️ **时间也必须冻住**:nonce 里带毫秒时间戳,只要跨过一毫秒,重算就对不上 ——
+    这测试第一版就是这么"偶发红"的(不是代码坏,是测试自己不确定)。
+    """
     ssk = bytes(range(32)) + b"tail-bytes"        # 比 32 长,才能验证 ssk[32:] 那段
     u_hex = "f6a462b6b0226d11b4c461e220029951"
     monkeypatch.setattr(X.os, "urandom", lambda n: b"\x01\x02\x03\x04")
+    monkeypatch.setattr(X.time, "time", lambda: 1_700_000_000.123)
 
     sign_v, ssk_v = X.build_enc_ssk(u_hex, ssk)
 
     # 独立重算:nonce = uint32LE(now + uint32LE(random4))
     r = int.from_bytes(b"\x01\x02\x03\x04", "little")
-    nonce = ((int(time.time() * 1000) & 0xFFFFFFFF) + r & 0xFFFFFFFF).to_bytes(4, "little")
+    nonce = ((int(1_700_000_000.123 * 1000) & 0xFFFFFFFF) + r & 0xFFFFFFFF).to_bytes(4, "little")
     payload = nonce + hashlib.sha1(ssk + nonce).digest() + ssk[32:]
     assert ssk_v == base64.b64encode(payload).decode()
     assert sign_v == base64.b64encode(hashlib.sha1(u_hex.encode() + payload).digest()).decode()
