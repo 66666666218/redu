@@ -299,7 +299,7 @@ def test_transfer_missing_links_only_touches_ones_without_our_link(monkeypatch) 
     assert commits_at_transfer == [1], (
         "**转存前必须先 commit 放掉写锁** —— SQLite 单写者,"
         f"整轮占着库会把别的作业饿死。实际转存时的 commit 次数:{commits_at_transfer}")
-    assert out == {"attempted": 1, "ok": 1, "failed": 0, "skipped": 0}
+    assert out == {"attempted": 1, "ok": 1, "failed": 0, "skipped": 0, "reused": 0}
     assert items[0]["link"]["my_link"] == "already"      # 原样不动
     assert items[1]["link"]["my_link"] == "our:p2"
 
@@ -345,7 +345,8 @@ def test_transfer_can_be_disabled(monkeypatch) -> None:
 
     items = [{"name": "r", "link": {"pan_url": "p", "my_link": ""}}]
     out = rp.transfer_missing_links(_Sess(), 1, items, _Off())
-    assert called == [] and out == {"attempted": 0, "ok": 0, "failed": 0, "skipped": 1}
+    assert called == [] and out == {"attempted": 0, "ok": 0, "failed": 0, "skipped": 1,
+                                          "reused": 0}
 
 
 class _PresS:
@@ -474,3 +475,28 @@ def test_不同资源不许被合并() -> None:
 def test_不在本轮关键词里的命中要丢掉() -> None:
     rows = [{"keyword": "别的资源", "snippet": "a"}]
     assert rp.merge_hits_by_resource(rows, ["伪装直男"]) == []
+
+
+def test_跨盘已有我方链就不另存一份(monkeypatch) -> None:
+    """★ **三盘互通(跨盘那一层)**(2026-10-11,用户口径「**一个盘里面有一个资源就行**」)。
+
+    上面那条 `link.get("my_link")` 只挡「**同一条链**已经搬过」—— 它挡不住
+    「**同一资源已经在另一个盘里**」。实测场景:资源在夸克已经有了,而这条命中来自一条
+    **百度**链 ⇒ `my_link` 是空的 ⇒ 照搬 ⇒ **两个盘各存一份**(正是要避免的浪费)。
+    """
+    from app.services import pan_discovery, resource_presence as rp
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        pan_discovery, "transfer_pan_url",
+        lambda s, u, url, st, snippet="": (calls.append(url),
+                                          {"status": "ok", "our_url": "our:" + url})[1])
+    monkeypatch.setattr(pan_discovery, "reuse_if_have",
+                        lambda s, u, t: {"my_link": "https://pan.quark.cn/s/HAVE"})
+
+    items = [{"name": "某资源", "link": {"pan_url": "https://pan.baidu.com/s/1a", "my_link": ""}}]
+    out = rp.transfer_missing_links(_Sess(), 1, items, _TransferS())
+
+    assert calls == [], "库里已有 ⇒ **不该再打转存接口**(它占盘、又慢)"
+    assert out["reused"] == 1 and out["attempted"] == 0, out
+    assert items[0]["link"]["my_link"] == "https://pan.quark.cn/s/HAVE"

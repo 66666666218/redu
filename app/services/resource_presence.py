@@ -308,13 +308,26 @@ def transfer_missing_links(session, user_id: int, items: list[dict],
 
     settings = settings or get_settings()
     limit = int(getattr(settings, "presence_transfer_limit", 3) or 0)
-    from app.services.pan_discovery import transfer_pan_url
+    from app.services.pan_discovery import reuse_if_have, transfer_pan_url
 
-    done = ok = failed = skipped = 0
+    done = ok = failed = skipped = reused = 0
     for it in items:
         link = it.get("link") or {}
         if not link or link.get("my_link"):
             continue                                   # 没匹配 或 已经有我方链
+        # ★★ **三盘互通(跨盘那一半)**(2026-10-11,用户口径「**一个盘里面有一个资源就行**」):
+        #   上面那条 `link.get("my_link")` 只挡住「**同一条链**已经搬过」——
+        #   它挡不住「**同一资源已经在另一个盘里**」,而**那才是重复占盘的来源**:
+        #   资源在夸克已经有了,这条命中却来自一条**百度**链 ⇒ `my_link` 是空的 ⇒ 照搬
+        #   ⇒ 夸克、百度各存一份。⇒ 转存前先问一次「**任意一个盘**有没有」,有就用那条链。
+        #   ⚠️ 放在**额度之前**是有意的:**复用不打接口、不占盘**,不该吃掉那 3 个名额
+        #   (否则"能复用"反而挤掉了真正需要转存的那几条)。
+        _have = reuse_if_have(session, user_id, str(it.get("name") or ""))
+        if _have and _have.get("my_link"):
+            link["my_link"] = str(_have["my_link"])
+            link["reused"] = True
+            reused += 1
+            continue
         pan_url = str(link.get("pan_url") or "")
         if not pan_url:
             continue
@@ -340,7 +353,10 @@ def transfer_missing_links(session, user_id: int, items: list[dict],
         else:
             link["transfer_error"] = str(res.get("message") or res.get("status") or "")[:120]
             failed += 1
-    return {"attempted": done, "ok": ok, "failed": failed, "skipped": skipped}
+    #: `reused` 单列 —— **它与"转存了几个"不是一回事**:那是**省下来的**(没打接口、没占盘),
+    #: 混在一起就看不出三盘互通到底省了多少(而"省了多少"正是这条机制存在的理由)。
+    return {"attempted": done, "ok": ok, "failed": failed, "skipped": skipped,
+            "reused": reused}
 
 
 def push_items(items: list[dict], settings) -> bool:
@@ -443,6 +459,8 @@ def presence_tick(settings=None, platforms: list[str] | None = None) -> int:
                 # 所以"小红书成了、快手挂了"这种**部分失败**本来查不出来。
                 failed = out.get("failed") or []
                 note = f"平台{out.get('platforms', 0)} 命中{len(items)}"
+                if moved.get("reused"):
+                    note += f" **复用{moved['reused']}**(三盘互通,没另存一份)"
                 if moved["attempted"]:
                     note += (f" 转存{moved['ok']}/{moved['attempted']}"
                              f"(失败{moved['failed']} 超额{moved['skipped']})")
