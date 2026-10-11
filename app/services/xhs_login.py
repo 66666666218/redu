@@ -152,6 +152,29 @@ def _query(params: dict[str, Any]) -> str:
     return "&".join(parts)
 
 
+def _transport():
+    """传输层:**优先 `curl_cffi`(impersonate=chrome,模拟真实 TLS/HTTP2 指纹)**,缺了回落 `requests`。
+
+    ⚠️ **为什么登录链上必须是它**(2026-10-11 实测):HTTP 层的变量我们已经**改遍了**都没用 ——
+    签名格式(`xyw`/`xys`)、补 `Referer`/`Origin`、去掉公钥参数、cookie 罐、**身份来源**
+    (库"编"的 `a1` vs 站点页面 JS 造的)、轮询次数、**连换一个全新账号都一样**
+    ⇒ 剩下的最大嫌疑就是 **HTTP 以下的指纹**:裸 `requests` 的 TLS 握手(JA3/JA4)一看就是脚本,
+    而 WAF 完全可能**只对"像脚本的客户端"扣住"发凭据"这个动作**,同时放行浏览类接口
+    (这正好解释:`create`/`userinfo` 都正常,**只有"发凭据"那一下被换成空 `data`**)。
+    **本仓的闲鱼那条链早就为同样的理由换成了 `curl_cffi`**(见 `app/services/xianyu.py` 开头),
+    这里沿用它 —— 不新造第二套说法。
+    """
+    try:
+        from curl_cffi import requests as creq
+
+        return creq
+    except Exception:  # noqa: BLE001 - 没有就回落,别把工具卡死
+        logger.warning("没有 curl_cffi,登录链回落裸 requests(TLS 指纹是脚本特征)")
+        import requests
+
+        return requests
+
+
 def _raw(signer: Any, cookies: dict[str, str], *, method: str, path: str,
          params: dict[str, Any] | None = None, payload: dict[str, Any] | None = None,
          sign_format: str = "xyw", x_rap: bool = False, timeout: int = 25,
@@ -162,8 +185,6 @@ def _raw(signer: Any, cookies: dict[str, str], *, method: str, path: str,
     (例:扫完确认后 `status` 开始回 471/空 `data`)**没法事后复现**(`qr_id` 一次性),
     必须在当场用"同一张票、同一时刻、只变一个变量"的方式把原文抓下来。
     """
-    import requests
-
     if method.upper() == "GET":
         q = _query(params or {})
         url = API_BASE + path + (f"?{q}" if q else "")
@@ -180,7 +201,12 @@ def _raw(signer: Any, cookies: dict[str, str], *, method: str, path: str,
     headers["user-agent"] = _UA
     if extra_headers:
         headers.update(extra_headers)
-    r = requests.request(method.upper(), url, data=body, headers=headers, timeout=timeout)
+    # ⚠️ **HTTP 层一个都不动,只换传输层**(TLS/HTTP2 指纹)——这样"下一个变量"才只有一个。
+    tp = _transport()
+    kw: dict[str, Any] = {"data": body, "headers": headers, "timeout": timeout}
+    if tp.__name__.startswith("curl_cffi"):
+        kw["impersonate"] = "chrome"
+    r = tp.request(method.upper(), url, **kw)
     return int(r.status_code), r.text
 
 

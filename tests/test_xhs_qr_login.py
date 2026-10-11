@@ -106,11 +106,31 @@ def _ticket() -> L.QrTicket:
                       cookies={"a1": "a"}, signer=_FakeSigner())
 
 
-def _patch_http(monkeypatch, resp):
-    """把 `requests.request` 打桩成固定响应(让 `_request` 真的走一遍信封解析)。"""
-    import requests
+class _FakeTransport:
+    """假的**传输层**(顶替 `curl_cffi`)。
 
-    monkeypatch.setattr(requests, "request", lambda *a, **k: resp)
+    ⚠️ 打桩点必须在**我们自己的 `_transport()` 接缝**上,不能打 `requests.request` ——
+    生产侧的传输层已经从裸 `requests` 换成 `curl_cffi`(模拟真实 TLS 指纹),
+    再去打 `requests.request` 就是**替身方言不同**:测试照样绿,生产那一条路一个字节都没测到。
+    """
+
+    __name__ = "fake_transport"
+
+    def __init__(self, resp=None, exc: Exception | None = None):
+        self.resp, self.exc, self.calls = resp, exc, []
+
+    def request(self, method, url, **kw):
+        self.calls.append({"method": method, "url": url, **kw})
+        if self.exc is not None:
+            raise self.exc
+        return self.resp
+
+
+def _patch_http(monkeypatch, resp):
+    """把**传输层**打桩成固定响应(让 `_raw` 真的走一遍:拼 URL → 签名 → 判信封)。"""
+    tp = _FakeTransport(resp=resp)
+    monkeypatch.setattr(L, "_transport", lambda: tp)
+    return tp
 
 
 def test_business_error_is_not_swallowed(monkeypatch):
@@ -151,12 +171,8 @@ def test_me_is_guest_true_when_server_says_logged_out(monkeypatch):
 
 def test_me_is_guest_reraises_on_detection_failure(monkeypatch):
     """★ 请求**自己**没发成功 ⇒ **必须抛**,不许糊成"未登录"(否则人会一直重扫)。"""
-    import requests
-
-    def boom(*a, **k):
-        raise ConnectionError("网络断了")
-
-    monkeypatch.setattr(requests, "request", boom)
+    monkeypatch.setattr(L, "_transport",
+                        lambda: _FakeTransport(exc=ConnectionError("网络断了")))
     with pytest.raises(L.XhsQrLoginError) as e:
         L.me_is_guest({"a1": "a"}, _FakeSigner())
     assert e.value.kind == "network"
@@ -204,6 +220,26 @@ def test_diagnose_status_survives_exceptions(monkeypatch):
 
 def test_other_format_flips():
     assert L._other_format("xyw") == "xys" and L._other_format("xys") == "xyw"
+
+
+# --------------------------------------------------------------- ③f 传输层(TLS 指纹)
+
+
+def test_transport_prefers_curl_cffi():
+    """★ 生产传输层必须是 `curl_cffi` —— 裸 `requests` 的 TLS 指纹一看就是脚本,
+    而登录链上**所有 HTTP 层变量都已排除**,只剩"HTTP 以下"这一条。"""
+    assert L._transport().__name__.startswith("curl_cffi"), "传输层不是 curl_cffi"
+
+
+def test_raw_passes_impersonate_chrome(monkeypatch):
+    """curl_cffi 那条路上**必须真的传 `impersonate`**,否则等于没换指纹(只换了库)。"""
+    class _C(_FakeTransport):
+        __name__ = "curl_cffi.requests"
+
+    tp = _C(resp=_Resp(200, {"code": 0, "success": True, "data": {}}))
+    monkeypatch.setattr(L, "_transport", lambda: tp)
+    L._raw(_FakeSigner(), {"a1": "a"}, method="GET", path="/x")
+    assert tp.calls and tp.calls[0].get("impersonate") == "chrome", tp.calls[:1]
 
 
 # --------------------------------------------------------------- ③d 补页面 cookie
