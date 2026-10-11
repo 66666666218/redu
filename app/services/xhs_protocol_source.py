@@ -103,6 +103,53 @@ def needs_login(text: str) -> bool:
             or "-100" in t or "登录已过期" in t or "登录过期" in t)
 
 
+#: ★★ **签名模板的版本号**(2026-10-11,来源:`Cloxl/xhshow` 的 **issue #110**)。
+#: 该库自带的 `SIGNATURE_DATA_TEMPLATE` 是 **`x0="4.3.5", x4="object"`**,而当前应当是
+#: **`x0="4.4.3", x4=""`** —— 版本号过旧会让**服务端把它当成异常客户端**。
+#: 实测(**同一 cookie、同一时刻,只改这一处**):
+#:   · 补丁前:`HTTP 461 + code 300011 当前账号存在异常`
+#:   · 补丁后:`HTTP 200 + code -100 登录已过期`  ← **错误确实变了**
+#: ⇒ 所以这不是"玄学调参",是**版本号**;以后小红书再改版,先看这个数。
+SIGN_TEMPLATE = {"x0": "4.4.3", "x1": "xhs-pc-web", "x2": "Windows", "x3": "", "x4": ""}
+
+
+def _template(settings=None) -> dict:
+    """最终模板 = 内置常量,可被 **`xhs_sign_template`(JSON)** 覆盖。
+
+    ⚠️ 为什么要能覆盖:小红书改版是**我们改代码/发版赶不上的那种事**(上一版 `x0`
+    用了小半年),而"改一个常量"不该要重新部署一遍整个服务。配错(不是 JSON / 不是对象)
+    **只告警、用内置的**,绝不让签名器起不来。
+    """
+    out = dict(SIGN_TEMPLATE)
+    raw = str(getattr(settings, "xhs_sign_template", "") or "").strip()
+    if not raw:
+        return out
+    try:
+        got = json.loads(raw)
+    except ValueError:
+        logger.warning("`xhs_sign_template` 不是合法 JSON,忽略、用内置模板:%s", raw[:60])
+        return out
+    if not isinstance(got, dict):
+        logger.warning("`xhs_sign_template` 不是 JSON 对象,忽略、用内置模板:%s", raw[:60])
+        return out
+    out.update({str(k): str(v) for k, v in got.items()})
+    logger.info("小红书签名模板被 `xhs_sign_template` 覆盖为:%s", out)
+    return out
+
+
+def _signer(settings=None):
+    """造一个**打过模板版本补丁**的签名器(理由见 `SIGN_TEMPLATE`)。失败退回库自带。"""
+    from xhshow import Xhshow
+
+    try:
+        from xhshow.config.config import CryptoConfig
+
+        return Xhshow(config=CryptoConfig(SIGNATURE_DATA_TEMPLATE=_template(settings)))
+    except Exception:  # noqa: BLE001 - 补丁失败不该让整条链崩
+        logger.warning("小红书签名模板补丁失败,退回库自带模板", exc_info=True)
+        return Xhshow()
+
+
 def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
            pages: int = 1) -> list[dict]:
     """按关键词搜小红书。返回 `{uid, name, url, snippet, pan_link, keyword}`。
@@ -110,7 +157,6 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
     形状与 `mediacrawler_source.crawl` 一致,上层(`resource_presence.probe`)不用改。
     """
     import requests
-    from xhshow import Xhshow
 
     kws = [str(k).strip() for k in (keywords or []) if str(k).strip()]
     if not kws:
@@ -142,7 +188,7 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
         logger.warning("小红书凭据里没有 `id_token`(手抄的常见缺它)—— "
                        "先用着,若回 -101 就用 tools/xhs_export_cookie.py 重新导出")
 
-    x = Xhshow()
+    x = _signer(st)
     rows: list[dict] = []
     for i, kw in enumerate(kws):
         if i:
