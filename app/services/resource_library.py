@@ -34,9 +34,8 @@ logger = get_logger(__name__)
 _DEFAULT_PAN_ORDER = ("quark", "baidu", "xunlei")
 
 
-def _pan_rank(url: str) -> int:
-    """链接所属盘的优先级(**小 = 优先**)。认不出返回最后一名。"""
-    u = str(url or "").lower()
+def _pan_order() -> tuple[str, ...]:
+    """盘的优先级次序(来自 `pan_prefer_order`,读不到就用默认)。**唯一一份表**。"""
     order = _DEFAULT_PAN_ORDER
     try:
         from config.settings import get_settings
@@ -46,10 +45,27 @@ def _pan_rank(url: str) -> int:
             order = tuple(x.strip().lower() for x in raw.split(",") if x.strip()) or order
     except Exception:  # noqa: BLE001 - 读不到配置就用默认,别让排序炸掉检索
         pass
-    for i, key in enumerate(order):
+    return order
+
+
+def pan_key(url: str) -> str:
+    """链接属于哪个盘 → `quark` / `baidu` / `xunlei`;**认不出返回 `""`**。
+
+    ⚠️ 与 `_pan_rank` **共用同一份表**(`_pan_order`),别在两处各写一份 ——
+    分开写迟早会飘:一处认「pan.quark.cn」、另一处只认「quark.cn」,于是排序与分流打架。
+    """
+    u = str(url or "").lower()
+    for key in _pan_order():
         if key and key in u:
-            return i
-    return len(order)
+            return key
+    return ""
+
+
+def _pan_rank(url: str) -> int:
+    """链接所属盘的优先级(**小 = 优先**)。认不出返回最后一名。"""
+    key = pan_key(url)
+    order = _pan_order()
+    return order.index(key) if key in order else len(order)
 
 def _pan_kind(url: str) -> str:
     if "pan.quark.cn" in (url or ""):

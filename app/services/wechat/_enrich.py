@@ -278,6 +278,29 @@ def _relink_notify(session, user_id: int, settings, r, kind: str,
     return FeishuClient(webhook, settings.feishu_secret).send("\n".join(lines))
 
 
+def _chosen_pan(r) -> str:
+    """这篇文章该用**哪个盘**转存 —— 取它所有链里**优先级最高**的那个盘(没有链返回 `""`)。
+
+    ★ 用户口径(2026-10-11):「如果夸克和迅雷是相同的资源,**优先保存进夸克**」。
+    判据是**空间**:夸克盘最宽裕,而迅雷盘只剩 ~1%。
+
+    ⚠️ **为什么必须按文章分流,而不是让三个块各扫一遍**:一篇文章常把**同一资源**
+    同时贴在夸克和百度(或迅雷)上 —— 三个块各扫一遍就是**同一资源在三个盘里各存一份**,
+    正是「三盘互通」要避免的浪费;而它**不归 `already_have` 管**(库里此前确实没有,
+    是这个**同一轮里**刚存进去的)。⇒ 每篇只挑一个盘。
+    """
+    from app.services.resource_library import _pan_rank, pan_key
+
+    keys = [pan_key(x) for x in (getattr(r, "pan_urls", "") or "").splitlines() if x.strip()]
+    keys = [k for k in keys if k]
+    return min(keys, key=lambda k: _pan_rank(k)) if keys else ""
+
+
+def _rows_for(pan: str, rows: list) -> list:
+    """只留「**这篇该用这个盘**」的文章(见 `_chosen_pan`)。"""
+    return [r for r in rows if _chosen_pan(r) == pan]
+
+
 def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                          rows: list[WechatArticle],
                          run_backfill: bool = True) -> dict[int, list[tuple[str, str, str]]]:
@@ -349,7 +372,10 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
         # 盘链级转存去重:同一资源(相同夸克分享链)只转存一次,后续文章复用首篇的
         # 我方分享链——多个对标号发同一资源时,旧逻辑每篇各存一份(浪费空间+成倍风控暴露)。
         reused: dict[str, tuple[str, str]] = {}  # pan_url -> (my_share_url, 提取码)
-        for r in transfer_rows:
+        # ★ **只搬「这篇该用夸克」的文章**(2026-10-11,见 `_chosen_pan`):
+        #   同一资源多盘都有时**优先夸克**(空间最多)—— 否则三个块各扫一遍,
+        #   同一资源会在三个盘里**各存一份**。
+        for r in _rows_for("quark", transfer_rows):
             dead = False
             # 只把夸克链交给夸克:UC/迅雷/百度链走识别与各自的转存门控,
             # 送进 _parse_share 只会得到"无法解析夸克分享链接"的假失败日志。
@@ -474,7 +500,10 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
             baidu_client = BaiduPanClient(bck)
             login_checked = False   # 每轮最多一次 loginStatus 定性,不额外刷接口
             baidu_dead = False
-            for r in transfer_rows:
+        # ★ **只搬「这篇该用百度」的文章**(2026-10-11,见 `_chosen_pan`):
+        #   同一资源多盘都有时**优先夸克**(空间最多)—— 否则三个块各扫一遍,
+        #   同一资源会在三个盘里**各存一份**。
+            for r in _rows_for("baidu", transfer_rows):
                 for u in [x.strip() for x in (r.pan_urls or "").splitlines()
                           if x.strip().startswith("https://pan.baidu.com/s/")][:2]:
                     try:
@@ -541,7 +570,10 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
             "pan.xunlei.com" in (r.pan_urls or "") for r in transfer_rows):
         from app.services.pan_discovery import transfer_pan_url
 
-        for r in transfer_rows:
+        # ★ **只搬「这篇该用迅雷」的文章**(2026-10-11,见 `_chosen_pan`):
+        #   同一资源多盘都有时**优先夸克**(空间最多)—— 否则三个块各扫一遍,
+        #   同一资源会在三个盘里**各存一份**。
+        for r in _rows_for("xunlei", transfer_rows):
             urls = [x.strip() for x in (r.pan_urls or "").splitlines()
                     if "pan.xunlei.com" in x][:2]
             if not urls:

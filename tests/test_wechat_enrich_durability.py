@@ -245,3 +245,47 @@ def test_插入新文章之后不许留着未提交的写事务(session):
     assert not session.in_transaction(), (
         "插完文章还留着**未提交的写事务** ⇒ 写锁会被抱到整轮末尾(实测 208 秒),"
         "别人的心跳/转存落盘会成批撞锁")
+
+
+class TestChosenPan:
+    """★ **同一资源多盘都有时,优先夸克**(2026-10-11 用户口径)。
+
+    判据是**空间**:夸克盘最宽裕,而迅雷盘只剩 ~1%。
+    ⚠️ **为什么这个分流必须存在**:一篇文章常把**同一资源**同时贴在夸克和百度(或迅雷)上
+    —— 三个转存块各扫一遍就是**同一资源在三个盘里各存一份**(那正是「三盘互通」要避免的浪费,
+    而它**不归 `already_have` 管**:库里此前确实没有,是这个**同一轮里**刚存进去的)。
+    """
+
+    def _r(self, urls: str):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(pan_urls=urls)
+
+    def test_夸克优先于百度与迅雷(self) -> None:
+        from app.services.wechat._enrich import _chosen_pan
+
+        assert _chosen_pan(self._r("https://pan.quark.cn/s/a\nhttps://pan.baidu.com/s/b")) == "quark"
+        assert _chosen_pan(self._r("https://pan.xunlei.com/s/c\nhttps://pan.quark.cn/s/a")) == "quark"
+
+    def test_没有夸克时按次序退回(self) -> None:
+        from app.services.wechat._enrich import _chosen_pan
+
+        assert _chosen_pan(self._r("https://pan.baidu.com/s/b\nhttps://pan.xunlei.com/s/c")) == "baidu"
+        assert _chosen_pan(self._r("https://pan.xunlei.com/s/c")) == "xunlei"
+
+    def test_认不出盘时返回空串(self) -> None:
+        """认不出 ⇒ `""` ⇒ **三个块都不会碰它**(块内本来就按 URL 前缀过滤)。"""
+        from app.services.wechat._enrich import _chosen_pan
+
+        assert _chosen_pan(self._r("https://example.com/x")) == ""
+        assert _chosen_pan(self._r("")) == ""
+
+    def test_一篇多盘的文章只进一个块(self) -> None:
+        """**这就是本次要防的那件事**:同一篇里夸克+迅雷两条链,只能被一个块拿走。"""
+        from app.services.wechat._enrich import _rows_for
+
+        rows = [self._r("https://pan.quark.cn/s/a\nhttps://pan.xunlei.com/s/c"),
+                self._r("https://pan.xunlei.com/s/d")]
+        assert len(_rows_for("quark", rows)) == 1
+        assert len(_rows_for("xunlei", rows)) == 1, "夸克那篇不该再进迅雷块(否则又各存一份)"
+        assert _rows_for("baidu", rows) == []
