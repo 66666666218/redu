@@ -150,6 +150,15 @@ def _signer(settings=None):
         return Xhshow()
 
 
+def make_signer(settings=None):
+    """**给别的模块用的公开入口**(如 `xhs_login` 的扫码登录)。
+
+    伸手拿 `_signer` 也能跑,但那会让"补丁只此一处"这条纪律失去落点 ——
+    签名器必须**总是**从这一个门出来(带模板版本补丁)。
+    """
+    return _signer(settings)
+
+
 def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
            pages: int = 1) -> list[dict]:
     """按关键词搜小红书。返回 `{uid, name, url, snippet, pan_link, keyword}`。
