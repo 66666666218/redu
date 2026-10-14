@@ -89,6 +89,14 @@ class _FakeCtx:
             self._page = _FakePage(self)
         return self._page
 
+    def add_init_script(self, script: str, *a, **k) -> None:
+        """真 context 有这个方法(登录路用它注入 stealth 脚本,2026-10-14)。
+
+        ⚠️ **替身要跟着生产代码的方言走**:登录路一旦多调一个方法,
+        替身不补就会被 `AttributeError` 打红 9 条 —— 那不是代码坏,是替身过时。
+        """
+        self.init_script = script
+
     def cookies(self, url=None) -> list[dict]:
         st = self.cookie_states[min(self.i, len(self.cookie_states) - 1)]
         self.i += 1
@@ -214,3 +222,41 @@ class TestFingerprintCapture:
         _patch(monkeypatch, ctx)
         res = L.wait_for_login(str(tmp_path), timeout_s=0.3, poll_s=0)
         assert res.client_hints == {}
+
+
+class Test登录浏览器不自报自动化:
+    """★ **登录那一步开的浏览器,必须与采集路长得一样**(2026-10-14 实测加)。
+
+    实测(照当时的启动参数):`navigator.webdriver === true`,**无头与有头都是** ——
+    因为它**既没带** `--disable-blink-features=AutomationControlled`,**也没注入**
+    stealth 脚本 ⇒ 等于交给小红书一枚**自己声明「我是自动化」**的浏览器去铸会话。
+
+    本仓已两度为「登录设备 ≠ 采集设备」付过代价(`300011`),这是同一族缺陷换了个位置
+    ⇒ 修法是**与采集路共用同一份**参数与脚本(`xhs_page_source`),不再各写一套。
+
+    ⚠️ 这条是**源码级守卫**(不开浏览器):它钉住"这两样必须出现在登录路里"。
+    真正的行为证据是实测 —— 修完后 `navigator.webdriver` 从 `True` 变成**不可见**,
+    `window.chrome` 是 `object`,UA 尾部仍是真实的 `Edg/155.0.0.0`。
+    """
+
+    def _src(self) -> str:
+        from pathlib import Path
+
+        from app.services import xhs_browser_login as L
+
+        return Path(L.__file__).read_text(encoding="utf-8")
+
+    def test_带上了关自动化特性的参数(self) -> None:
+        src = self._src()
+        assert "_NO_AUTOMATION_ARG" in src, (
+            "登录路必须带上 `--disable-blink-features=AutomationControlled`,"
+            "否则 navigator.webdriver 会是 true")
+        assert "_PS._NO_AUTOMATION_ARG" in src, "要**复用**采集路那一份常量,别自写一个字符串"
+
+    def test_注入了同一份_stealth_脚本(self) -> None:
+        assert "_STEALTH_JS" in self._src(), "登录路必须注入与采集路**同一份** stealth 脚本"
+
+    def test_与采集路同源(self) -> None:
+        """不许在登录路里出现第二份 stealth 定义(两条路各飘各的正是本仓反复吃的亏)。"""
+        src = self._src()
+        assert "Object.defineProperty" not in src, "stealth 脚本只能有一份(在 xhs_page_source)"

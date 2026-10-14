@@ -214,8 +214,20 @@ def wait_for_login(profile_dir: str, *, timeout_s: float = 900.0, poll_s: float 
             from app.services import xhs_net
 
             kw["args"] = list(xhs_net.playwright_direct_args())
+        #: ★★ **登录浏览器绝不能自报自动化**(2026-10-14 实测加):原来这里**既没有**
+        #: `--disable-blink-features=AutomationControlled`,**也没有**注入 stealth 脚本
+        #: ⇒ 实测 `navigator.webdriver === true`(无头与有头**都是**)⇒ 等于交给小红书
+        #: 一枚**自己声明「我是自动化」**的浏览器去铸会话。本仓已两度为
+        #: 「登录设备 ≠ 采集设备」付过代价,这是同一族缺陷换了个位置。
+        #: ⇒ 与采集路 `xhs_page_source` **共用同一份**参数与脚本(不自写第二份,
+        #: 免得两条路的启动参数各飘各的)。
+        from app.services import xhs_page_source as _PS
+
+        kw["args"] = list(kw.get("args") or []) + [_PS._NO_AUTOMATION_ARG]
         ctx = p.chromium.launch_persistent_context(**kw)
         try:
+            #: ⚠️ **必须在拿它开页面之前注入** —— 脚本只对**之后创建的文档**生效
+            ctx.add_init_script(_PS._STEALTH_JS)
             page = ctx.new_page() if not ctx.pages else ctx.pages[0]
 
             #: 先**只读**一次 —— 档案里可能早就登好了(那就不必让人再扫一次)
