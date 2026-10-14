@@ -56,6 +56,11 @@ def _transfer_error(errno, show_msg: str = "") -> str:
     `errno=-6`,而**光看数字分不清是"分享已失效"(终态,别再重试)还是"转存被限制"(等一会就好)**;
     这两者对下游的意义完全相反 —— 前者该标 skipped,后者该留 failed 下轮重来。
     带上 `show_msg` 才判得出来。`105/-70` 是已知的"转存被限制"码,单独措辞。
+
+    ⚠️ **别把这里的 `105` 与 `_verify` 里那个合并**(2026-10-13 测得两处含义不同):
+      · `/share/verify` 的 `105` = **分享已死**(实测:9 条该错码的分享页**恒回 404**)⇒ 终态;
+      · `/share/transfer` 的 `105` = "转存被限制" ⇒ 可重试。
+    合并成一个判据,就会把**已经死掉**的链重新变回"每天重试一遍"。
     """
     why = (show_msg or "").strip()[:60]
     tail = f" {why}" if why else ""       # 没原因就别留个悬空空格
@@ -209,6 +214,24 @@ class BaiduPanClient:
             raise BaiduPanError(f"删除失败(errno={errno} {str(j.get('show_msg') or '')[:60]})")
         return len(paths)
 
+    def _share_page_gone(self, surl: str) -> bool:
+        """分享页是不是**已经不存在**了(404 / 页面明写失效)。
+
+        ⚠️ 它只该在 `_verify` **已经报错之后**被调用 —— 它是"确认死链"的**证据**,
+        不是常规探测。判终态必须踩在确凿证据上:本仓在 2026-10-02 吃过反方向的亏
+        (把一条其实还能搬的链永久钉成 `skipped`)。
+        ⚠️ 探测本身失败 ⇒ 返回 False(**没证据就不许判终态**),照旧留可重试。
+        """
+        try:
+            r = self._browser().get(f"{PAN_API}/s/1{surl}", timeout=self.timeout)
+        except Exception:  # noqa: BLE001 - 拿不到证据就别下结论
+            return False
+        if r.status_code == 404:
+            return True
+        body = r.text or ""
+        return any(h in body for h in ("分享的文件已经被取消", "你访问的页面不存在",
+                                       "该链接已失效", "分享已失效"))
+
     # ---- 协议步骤 ----
     def _verify(self, surl: str, password: str) -> None:
         """提取码验证;无密码分享跳过。失败抛 BaiduPanError。"""
@@ -223,6 +246,18 @@ class BaiduPanClient:
             timeout=self.timeout)
         errno = r.json().get("errno", -1)
         if errno != 0:
+            # ★★★ **这一步的 `errno=105` = 分享已死**,既不是"提取码错"、也不是"转存被限制"
+            # (2026-10-13 实测定性)。证据:库里 9 条 `failed` 全是
+            # `提取码验证失败(errno=105)`,逐条去 GET 它们的分享页 ⇒ **恒回 HTTP 404**。
+            # 旧措辞("提取码验证失败")下游 `_is_dead_link` 认不出 ⇒ 一律记 `failed`
+            # ⇒ **每天重试同一批死链**:日志里 294 条「盘链转存失败」、积压恒卡 17 条不退。
+            # ⚠️ 与 `_transfer_error` 里那个 105 **不是一回事**(那是 `/share/transfer` 步骤),
+            #    两处别合并 —— 合并就会把这个终态又变回可重试。
+            # ⚠️ 判终态前必须**拿到确凿证据**(分享页 404):探测不到就照旧留可重试,
+            #    宁可多试一次,也别把一条其实能搬的链永久钉死。
+            if errno == 105 and self._share_page_gone(surl):
+                raise BaiduPanError(
+                    "分享地址已失效(errno=105):该分享已不存在(分享页 404),重试无意义")
             raise BaiduPanError(f"提取码验证失败(errno={errno})")
 
     def _share_meta(self, surl: str) -> tuple[str, str, str, list[dict]]:

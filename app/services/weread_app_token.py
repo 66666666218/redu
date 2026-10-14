@@ -283,7 +283,28 @@ def verify_by_api(session: Session, user_id: int, *, profile: str = ""):
         if bm is None:
             return True
         use = profile or str((load(session, user_id) or {}).get("profile") or "")
-        WereadAppClient(str(token), str(vid), profile=use).articles(bm.weread_book_id)
+        try:
+            WereadAppClient(str(token), str(vid), profile=use).articles(bm.weread_book_id)
+        except Exception as exc:  # noqa: BLE001
+            # ★★★ **额度错误 ≠ token 坏**(2026-10-13 实测定性,别再合并处理)
+            # 接口的顺序是**先校认证、后校额度** ⇒ 能走到额度这一步,说明**认证已经过了**。
+            # 同一本书、同一个号,只换 token:
+            #     · 库里那枚旧 token ⇒ `-2012 登录超时`(**认证失败**)
+            #     · 刚铸出来的新 token ⇒ `-2041`(**额度**)
+            # 两者是不同层的错误 —— 所以 `-2041` 恰恰证明**这枚 token 是好的**。
+            # ⚠️ 不区分会怎样(2026-10-11~13 实际发生的):
+            #   好 token 被**验活自己否掉** ⇒ `refresh_via_http` 报"未成" ⇒ 永远写不回库
+            #   ⇒ 库里那枚死 token 永远在用 ⇒ 监听每轮回 `-2012` ⇒ 推
+            #   「App 登录态失效」告警 ⇒ 人跑去开雷电模拟器(**白跑**,token 根本没坏)。
+            # ⇒ 与 `verify_by_api` 原有那条同口径:拿不准时**不阻断**
+            #   (库里没有可试的号时就是 return True),但**要留痕**,不做静默绿灯。
+            from app.services.weread_budget import is_quota_error
+
+            if is_quota_error(exc):
+                logger.warning("验活撞「额度」错误(%s)—— 认证已通过,**不据此判 token 坏**(%s)",
+                               str(exc)[:80], bm.weread_book_id)
+                return True
+            raise
         return True
     return _verify
 

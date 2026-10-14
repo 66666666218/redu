@@ -38,6 +38,7 @@ from __future__ import annotations
 import os
 import re
 from collections import defaultdict
+from collections.abc import Sequence
 from typing import Any
 
 from app.services.quark_dup_cache import ScanCache
@@ -84,8 +85,92 @@ STRONG_PATTERNS = (
 WEAK_PATTERNS = ("必看", "说明", "教程", "使用帮助", "注意", "公告",
                  "截图", "内部", "步骤", "福利")
 
-#: 绝不删的文件名(我们自己的东西)
+#: 绝不删的文件名(我们自己的东西)。
+#: ⚠️⚠️ **这只是"最低限度"的兜底,别把它当成简介的完整保护**(2026-10-13 实测):
+#: 这里写死的是 `简介.doc`,而用户当天把那份文件**改名**成了
+#: `热点监控第一时间获取.doc`(内容不变)⇒ 这个名单**从那一刻起就静默失效了**,
+#: 简介的保护等于不存在,却没有任何地方会报出来。
+#: ⇒ 真正生效的是 `intro_protect_dirs()` / `collect_intro_protect()`:
+#: **按配置的简介目录现取文件名单**,文件名怎么改都跟得上。
 PROTECT_NAMES = ("简介.doc",)
+
+
+def intro_protect_dirs(settings: Any = None) -> tuple[str, ...]:
+    """配置里那些**我们自己的宣传简介目录**的名字(夸克侧)。
+
+    ⚠️ **为什么要从配置现取,而不是写死文件名**:简介会被**复制进每一个资源**,
+    于是盘上会出现上千个同名副本。而它恰恰是最容易被判死的两类目标:
+    ① 广告图那种名字**命中强模式** ⇒ 每个夜里被清;
+    ② 简介本身在多个家里**同名同大小** ⇒ 被判成"跨目录重复"删掉旧的。
+    用户只要改一次文件名(实测真的改了),写死的名单就再也没用了。
+    """
+    if settings is None:
+        from config.settings import get_settings
+
+        settings = get_settings()
+    out: list[str] = []
+    for key in ("pan_intro_quark_dir",):
+        v = str(getattr(settings, key, "") or "").strip()
+        if v:
+            out.append(v)
+    return tuple(out)
+
+
+def collect_intro_protect(qt: Any, dirs: Sequence[str], *,
+                          settings: Any = None) -> tuple[set[str], set[str], list[dict]]:
+    """把简介目录**里面的文件**收进保护名单 → `(fids, names, 明细)`。**只读。**
+
+    ⚠️ **名字与 fid 两个维度都要收,少一个都漏**:
+    * 简介目录里那份**原件** → 靠 **fid** 精确保护;
+    * 被**复制进各资源里的副本** → fid 和原件完全不同,只能靠**名字**保护
+      (与 `PROTECT_NAMES` 同一层语义,只是改成从目录现取)。
+
+    ⚠️ 目录找不到 / 取不到 ⇒ **不加任何保护,但也绝不改判据**:
+    本函数只用于"**少删**",返回空时的行为与没有这个功能时**逐字一致** ——
+    所以它坏掉不会导致多删,只会(在日志里)明说自己没生效。
+    """
+    fids: set[str] = set()
+    names: set[str] = set()
+    detail: list[dict] = []
+    for d in dirs:
+        try:
+            fid = qt.resolve_named_dir(d)
+            items = qt._list_dir(fid) if fid else []
+        except Exception as exc:  # noqa: BLE001 - 取不到简介目录不该拖垮整轮清理
+            logger.warning("取简介目录「%s」失败,本轮**没有**加上简介保护:%s",
+                           d, str(exc)[:100])
+            continue
+        if not fid:
+            logger.warning("简介目录「%s」在盘里找不到,本轮**没有**加上简介保护", d)
+            continue
+        for it in items:
+            nm = str(it.get("file_name") or "")
+            if not nm or it.get("dir"):
+                continue
+            names.add(nm)
+            if it.get("fid"):
+                fids.add(str(it["fid"]))
+            detail.append({"dir": d, "name": nm, "size": int(it.get("size") or 0),
+                           "fid": str(it.get("fid") or "")})
+    return fids, names, detail
+
+
+def refresh_protect(qt: Any, dirs: Sequence[str] | None = None, *,
+                    settings: Any = None
+                    ) -> tuple[set[str], set[str], int, list[dict]]:
+    """**现场**重取保护名单 = 我方分享链 + 我方简介目录 → `(fids, names, 分享条数, 简介明细)`。
+
+    ⚠️ **执行前必须重取一次**:计划可能是十几分钟前扫的,这期间可能又发了新链、
+    也可能像 2026-10-13 那样刚把简介换了个名字 —— 拿一份过期名单去删,
+    就是拿一份已经失效的安全清单动手(而"失效"这件事在结果里看不出来)。
+    """
+    fids, names, n = protected_fids(qt)
+    use = intro_protect_dirs(settings) if dirs is None else tuple(dirs)
+    i_fids, i_names, detail = collect_intro_protect(qt, use, settings=settings)
+    if detail:
+        logger.info("简介保护名单:%d 个文件(来自 %s)→ %s",
+                    len(detail), list(use), [x["name"] for x in detail])
+    return fids | i_fids, names | i_names, n, detail
 
 #: 名字里的「标注」部分:【…】/（…）/(…)/[…]。
 #: 资源名尾部常挂来源标注(`【公众号xxx免费分享】`),而引流文件的**整名就是广告**。
@@ -267,7 +352,8 @@ def classify(files: list[dict], prot_fids: set[str], prot_names: set[str], *,
 
 def build_plan(qt: Any, *, home_prefix: str = "redian监听", mmdd_prefix: str = "",
                depth: int = 2, budget_cap: int | None = None,
-               cache: ScanCache | None = None, ttl_hours: float = 8.0) -> dict:
+               cache: ScanCache | None = None, ttl_hours: float = 8.0,
+               protect_dirs: Sequence[str] | None = None) -> dict:
     """扫描并给出清理计划。**本函数只读,不删任何东西。**
 
     `depth=2`(家 → 资源目录 → 文件):实测跨目录重复都出现在这一层,而每深一层
@@ -285,6 +371,10 @@ def build_plan(qt: Any, *, home_prefix: str = "redian监听", mmdd_prefix: str =
     ⚠️ 反过来,**残缺数据本身是安全的**:漏扫只会让重复看起来更少 ⇒ 倾向于**不删**。
     危险的是"**过期的完整数据**"(快照说两家都有、其实一家已经没了)——
     那由 `ttl_hours` 限窗口,并由「删除永远进回收站」兜底。
+
+    `protect_dirs` = 我们自己的**宣传简介目录**(默认 `None` = 从 settings 现取;
+    传 `()` = 刻意不加,离线测试用)。这些目录里的文件**永不删** —— 见
+    `collect_intro_protect` 里的说明:它们会被复制进每个资源,而恰恰最容易被判成"引流"或"重复"。
     """
     budget = {"n": 0, "cap": budget_cap or BUDGET}
     homes = list_homes(qt, home_prefix)
@@ -316,10 +406,12 @@ def build_plan(qt: Any, *, home_prefix: str = "redian监听", mmdd_prefix: str =
         scanned.append(nm)
         if cache:
             cache.put_home(nm, fid, got, depth)
-    prot_fids, prot_names, n_shares = protected_fids(qt)
+    prot_fids, prot_names, n_shares, intro_detail = refresh_protect(qt, protect_dirs)
     out = classify(files, prot_fids, prot_names, mmdd_prefix=mmdd_prefix, home_order=order)
     out.update({"scanned_homes": len(homes), "scanned_files": len(files),
                 "calls": budget["n"], "protected": len(prot_fids), "shares": n_shares,
+                # ★ 简介保护到底生没生效,要能在报告里**直接看见**(不然就是静默失效)
+                "intro_protected": intro_detail,
                 "complete": not remaining and budget["n"] < budget["cap"],
                 "reused_homes": reused, "scanned_now": scanned,
                 "remaining_homes": remaining, "partial_homes": partial})

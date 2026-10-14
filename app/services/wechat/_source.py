@@ -68,6 +68,55 @@ def nudge_werss(biz: str, settings: Settings | None = None) -> dict:
     if not hasattr(plat, "refresh_mp") or not value.startswith(_FEED_BIZ_PREFIX):
         return {"nudged": False, "reason": "not_werss_or_bad_biz"}
     return {"nudged": plat.refresh_mp(value), "reason": ""}
+def article_keys(url: str) -> tuple[str, ...]:
+    """同一篇文章在**不同列表源**下可能长得不一样的键,按精确度降序(命中即用)。
+
+    ★ 为什么不能直接比 url(2026-10-14 实测):库里存的 url 是**短链**
+    `https://mp.weixin.qq.com/s/pnzKiYr4-bbVY9qpuqBxcw`(`wechat_articles` 最近 12 行
+    清一色这个形态),而公众号后台 `appmsgpublish` 给的 `link` 是**长链**
+    `.../s?__biz=..&mid=..&idx=..&sn=..`。
+    ⇒ 直接比 url 会把**同一篇文章**判成两条,阅读数**永远补不上、且全程静默**
+    (这正是一类"修了但看不出没修好"的坑,所以必须有计数器把它暴露出来)。
+
+    ⚠️ 短链**推不出**长链,这一点也实测过,别想省事:把那条短链抓下来
+    (HTTP 200、3.6MB 正文),页面里 `var sn = "fd5c5b4a2c34d648e6989f0d9014ff59"`
+    **不等于**短链里的 `pnzKiYr4-bbVY9qpuqBxcw` —— 流传很广的「短链后半段就是 sn」
+    **在本机实测下不成立**。所以这里不赌任何单键,给三级候选:
+      ① 原样 url(两源同为短链/同为长链时最准);
+      ② `__biz|mid|idx`(两源都给长链时最准,这是微信自己的文章身份证);
+      ③ `host+path`(去掉 `scene`/`chksm`/`from` 这类**分享噪声尾巴**后比对)。
+    标题兜底**不在这里**(标题重不重复只有调用方看得见),由 `_merge_counts` 单独做。
+    """
+    raw = str(url or "").strip().rstrip("/")
+    if not raw:
+        return ()
+    from urllib.parse import parse_qs, urlsplit
+
+    try:
+        sp = urlsplit(raw)
+    except ValueError:
+        return ()
+    host = sp.netloc or ""
+    path = sp.path or ""
+    if not host:
+        # ⚠️ **没有 host 就不是 URL**(`"javascript:void(0)"`、相对路径、脏字符串)⇒ **不参与合并**。
+        # 这里绝不能"凑合给个键":源里若每个条目都是同一个占位串(如 `javascript:void(0)`),
+        # 它们会**全部并成一条** ⇒ 横向源的读数会被安到**第一篇**头上 —— 静默串号。
+        # 宁可这轮不补(`unmatched` 会把它数出来),也不能给错行安错数。
+        return ()
+    out: list[str] = [raw]
+    qs = parse_qs(sp.query or "")
+    biz = (qs.get("__biz") or [""])[0]
+    mid = (qs.get("mid") or [""])[0]
+    if biz and mid:
+        out.append(f"{biz}|{mid}|{(qs.get('idx') or [''])[0]}")
+    out.append(f"{(host or '').lower()}{path}".rstrip("/"))
+    # 去重但**保序** —— ① 必须排在第一个被命中(它最精确)
+    uniq: list[str] = []
+    for k in out:
+        if k and k not in uniq:
+            uniq.append(k)
+    return tuple(uniq)
 class MultiSourceClient:
     """免费列表源的多后端故障切换组合器(2026-10-01 抗停维升级)。
 
@@ -115,6 +164,134 @@ class MultiSourceClient:
         if last_exc is not None:
             raise last_exc
         return []
+
+    @staticmethod
+    def _merge_counts(base: list[dict], extras: list[list[dict]]) -> dict:
+        """把 `extras`(后问到的源)里的**阅读/点赞数**补进 `base`(第一个答上话的源)。
+
+        ★ 只补这两个字段,**标题/url/时间一律不动** —— 尤其 **url 绝不能改**:
+        `_insert_new_articles` 的入库去重就是按 url 做的,改了它等于把同一篇变两条。
+
+        ⚠️ **只能往高走**:与 `_enrich._insert_new_articles` 完全同一条纪律
+        (见那里的长注释)。阅读数是单调量,源抖动给出更小的旧快照时**不许回退**;
+        `None`/`0` 表示"该源不知道" ⇒ 什么都不改。
+
+        ⚠️ 标题兜底**只在唯一时**才敢用:两源 URL 形态不同(短链 vs 长链,见 `article_keys`)
+        时,标题是最后一座桥;但同一号 20 篇里可能有同名(如系列文"日报"),
+        一旦重名就**放弃兜底**,宁可这轮补不上(有 `unmatched` 计数暴露),也不给错行安错的读数。
+
+        返回 `{"filled": 补到数的篇数, "via_title": 其中靠标题兜底的, "unmatched": 对不上的}`。
+        """
+        idx: dict[str, dict] = {}
+        for it in base:
+            for k in article_keys(str(it.get("url") or "")):
+                idx.setdefault(k, it)
+        # 标题 → 出现次数(>1 表示重名,不许兜底)
+        tcount: dict[str, int] = {}
+        for it in base:
+            t = str(it.get("title") or "").strip()
+            if t:
+                tcount[t] = tcount.get(t, 0) + 1
+
+        def _find(it: dict) -> tuple[dict | None, bool]:
+            for k in article_keys(str(it.get("url") or "")):
+                hit = idx.get(k)
+                if hit is not None:
+                    return hit, False
+            t = str(it.get("title") or "").strip()
+            if t and tcount.get(t) == 1:
+                for cand in base:
+                    if str(cand.get("title") or "").strip() == t:
+                        return cand, True
+            return None, False
+
+        filled: list[dict] = []
+        via_title = 0
+        unmatched = 0
+        for items in extras:
+            for it in items:
+                tgt, by_title = _find(it)
+                if tgt is None:
+                    if int(it.get("read_num") or 0) or int(it.get("like_num") or 0):
+                        unmatched += 1   # 带数却对不上:URL 形态两源不一致的指纹,要能看见
+                    continue
+                got = False
+                for f in ("read_num", "like_num"):
+                    new = int(it.get(f) or 0)
+                    if new > int(tgt.get(f) or 0):
+                        tgt[f] = new
+                        got = True
+                if got:
+                    if tgt not in filled:
+                        filled.append(tgt)
+                    if by_title:
+                        via_title += 1
+        return {"filled": len(filled), "via_title": via_title, "unmatched": unmatched}
+
+    def mp_articles_with_reads(self, mp_id: str, page: int = 1, limit: int = 20,
+                               stats: dict | None = None) -> list[dict]:
+        """列表 + **横向补阅读数**(2026-10-14)。
+
+        与 `mp_articles` 只差一件事:`mp_articles` 一见到"有内容"的源就 `return`,
+        而**只有自研 wemp(后台 `appmsgpublish`)那一路带 `read_num`** ——
+        WeRSS 的归一化里根本没有这个字段(见 `werss_client.py`,只有
+        id/title/url/summary/publish_at_raw)。⇒ 只要 WeRSS 活着,
+        `mp_articles` 的 `if items: return items` 就是一道墙,wemp **永远问不到**,
+        卡片上阅读数永远是 `—`。**这是"阅读修不好"的结构性原因,不是配置问题。**
+
+        所以这里:先按老规则挑出"列表以谁为准",**再把其余源问一遍,只用来补
+        `read_num`/`like_num`**(规则见 `_merge_counts`)。
+
+        成本可忽略:监听轮**每天只跑 4 次**(04/08/14/20:02,见
+        `scheduler.WECHAT_LISTEN_HOURS`),每号最多多 1 次请求 ⇒ 每天约 324 次。
+        ⇒ **不需要像微信读书那样开窗口**(那 25 个号的窗口是为"会话额度 29"设的硬上限,
+        这里没有那种全局额度)。
+
+        ⚠️ 冷却照旧:`_cooling` 的源**一次都不问**。所以"wemp 凭据已死"不会退化成
+        "每号每轮都去撞一遍死源" —— 第一次 `200003` 就 `_trip`,600 秒内静默跳过。
+
+        `stats` 传进来时写三个计数(给 `runs.detail`,让"没生效"能被看见):
+        `reads_from` / `reads_via_title` / `reads_unmatched`。
+        """
+        last_exc: Exception | None = None
+        base: list[dict] | None = None
+        extras: list[list[dict]] = []
+        for name, be in self._backends:
+            if self._cooling(name):
+                continue
+            try:
+                items = be.mp_articles(mp_id, page=page, limit=limit)
+            except PlatformError as exc:
+                self._trip(name)
+                logger.warning("列表源[%s]失败,切换下一源:%s", name, str(exc)[:120])
+                last_exc = exc
+                continue
+            if not items:
+                continue      # 空 = 该源正常答"没有"(与 mp_articles 同一套语义)
+            if base is None:
+                base = items
+            else:
+                extras.append(items)
+        if base is None:
+            if last_exc is not None:
+                raise last_exc
+            return []
+        if extras:
+            merged = self._merge_counts(base, extras)
+            if stats is not None:
+                # `src` = "真有横向源答上了话"的次数。它与 `from` 一起才判得出性质:
+                #   src=0            ⇒ 横向源根本没被问到(缺配/冷却中/死了)—— 与"字段名取错"要分开
+                #   src>0 且 from=0  ⇒ **问到了、但它没带数** ⇒ 大概率是 _READ_KEYS 里的字段名不对
+                #                      (所以 wemp_client 那边有一次性的真实字段名日志)
+                #   unmatched>0      ⇒ 两边有数、但**键对不上**(短链 vs 长链,见 article_keys)
+                stats["reads_src"] = stats.get("reads_src", 0) + 1
+                stats["reads_from"] = stats.get("reads_from", 0) + merged["filled"]
+                stats["reads_via_title"] = stats.get("reads_via_title", 0) + merged["via_title"]
+                stats["reads_unmatched"] = stats.get("reads_unmatched", 0) + merged["unmatched"]
+            logger.info("列表 %s:横向补阅读数 补上=%s(其中靠标题兜底=%s) 对不上=%s [源=%s]",
+                        mp_id, merged["filled"], merged["via_title"], merged["unmatched"],
+                        self.names)
+        return base
 
     def list_feeds(self, kw: str = "", limit: int = 100) -> list[dict]:
         """订阅搜索转发:任一后端有该能力即可用(WeRSS 的 `kw` 搜索在加号路径要用)。"""

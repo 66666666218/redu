@@ -609,6 +609,22 @@ class QuarkTransfer:
             logger.warning("按名查找目录失败(%s):%s", last, str(exc)[:100])
         return ""
 
+    @staticmethod
+    def _collision_re(name: str) -> re.Pattern[str]:
+        """匹配「这个名字」以及夸克在**同名冲突**时自动改出来的 `名字(1).扩展名`。
+
+        ⚠️ 为什么必须有它(2026-10-13,盘上取到实证):真实目录里存在
+        **`简介(1).doc` 与 `简介.doc` 并列** —— 目标目录里已有同名但**不同大小**的文件时,
+        夸克**不覆盖**,而是把新复制的那份改名成 `名字(1).扩展名`。
+        而我们的落地判据是「**(名字, 大小) 都在**」⇒ 改名之后**永远匹配不上** ⇒
+        轮询到超时抛错 ⇒ **简介静默放不进去**(表现只是"少了个文件",没有任何报错)。
+        """
+        stem, dot, ext = str(name).rpartition(".")
+        if not dot:
+            stem, ext = str(name), ""
+        tail = re.escape(f".{ext}") if ext else ""
+        return re.compile(rf"^{re.escape(stem)}(?:\(\d+\))?{tail}$")
+
     def copy_into(self, src_items: list[dict], target_fid: str,
                   *, timeout: float = 25.0) -> list[str]:
         """把**自己盘里**的条目复制进 `target_fid` → 落地(或复用)的 fid 列表。
@@ -623,15 +639,16 @@ class QuarkTransfer:
         (实测返回 `[]`)⇒ 这里**按目标目录轮询**等文件出现,
         判据是「**名字+大小都在**」而不是「收到了 200」—— 后者是本仓最贵的假成功。
         """
-        by_name: dict[str, list[dict]] = {}
-        for e in self._list_dir(target_fid):
-            if e.get("file_name"):
-                by_name.setdefault(e["file_name"], []).append(e)
+        existing = self._list_dir(target_fid)
         fresh: list[dict] = []
         matched_ids: list[str] = []
         for it in src_items:
-            cands = [e for e in by_name.get(it.get("file_name") or "", [])
-                     if it.get("size") is not None and e.get("size") == it.get("size")]
+            # ⚠️ 名字要按 `_collision_re` 认(含夸克加的 `(N)`)—— 否则上次因冲突被改名的那份
+            #    认不出来,每次都重新复制一遍,简介自己就变成了新的空间占用。
+            pat = self._collision_re(str(it.get("file_name") or ""))
+            cands = [e for e in existing
+                     if e.get("file_name") and pat.match(str(e["file_name"]))
+                     and it.get("size") is not None and e.get("size") == it.get("size")]
             if cands:
                 matched_ids.append(str(cands[0]["fid"]))
             else:
@@ -648,12 +665,15 @@ class QuarkTransfer:
         # 后果两条,都很坏:① 那个旧文件会被错误地并进分享清单;
         # ② 复制其实没落地却判成落地 ⇒ 又一个"看起来成功"。
         # 而 `fresh` 的定义就是"目标里没有同名同大小的" ⇒ 用 (名字,大小) 匹配天然排除了旧条目。
-        want = {(str(f.get("file_name") or ""), f.get("size")) for f in fresh}
+        # ★ 名字这一侧放宽成 `_collision_re`(兼容夸克自动改名的 `名字(1).ext`),**大小这一侧不放宽**。
+        want = [(self._collision_re(str(f.get("file_name") or "")), f.get("size"))
+                for f in fresh]
         landed: list[str] = []
         deadline = time.time() + timeout
         while True:
             landed = [str(e["fid"]) for e in self._list_dir(target_fid)
-                      if (str(e.get("file_name") or ""), e.get("size")) in want]
+                      if any(e.get("size") == size and pat.match(str(e.get("file_name") or ""))
+                             for pat, size in want)]
             if landed or time.time() >= deadline:
                 break
             time.sleep(1.5)
@@ -689,15 +709,23 @@ class QuarkTransfer:
             raise QuarkError("无可分享文件(保存未返回且目录无匹配)")
 
         intro_ids: list[str] = []
+        intro_names: list[str] = []
         if intro_dir:
             try:
                 src = self.resolve_named_dir(intro_dir)
+                # ★ 取的是该目录里的**全部文件**(不是某个固定名字):放几个就带几个。
+                #   用户口径(2026-10-13)「下次需要自动把里面两个文件都挪进去」——
+                #   所以这里**绝不能**按名字/扩展名白名单过滤,否则他换一次名字就静默少带一个。
+                #   (把简介名写死在代码里的代价,见 `quark_dup.PROTECT_NAMES` 那段。)
                 promos = [x for x in self._list_dir(src) if not x.get("dir")] if src else []
                 if not src:
                     logger.warning("宣传简介目录在盘里找不到,本轮跳过:%s", intro_dir)
                 elif not promos:
                     logger.warning("宣传简介目录是空的,本轮跳过:%s", intro_dir)
                 else:
+                    intro_names = [str(x.get("file_name") or "") for x in promos]
+                    logger.info("宣传简介目录 %s 命中 %d 个文件,全部随资源走:%s",
+                                intro_dir, len(promos), intro_names)
                     # 资源本身就是**一个目录** ⇒ 简介放进它**里面**(对方整包保存时自动带走,
                     # 也不会在自己盘里平铺出一堆 简介.doc)。
                     single_dir = (len(files) == 1 and bool(files[0].get("dir"))
@@ -709,7 +737,8 @@ class QuarkTransfer:
                         # 否则并列在我们自己的目录里,对方根本拿不到。
                         intro_ids = self.copy_into(promos, target_fid)
                         share_ids.extend(intro_ids)
-                    logger.info("宣传简介已放入资源(%s 个条目)", len(intro_ids))
+                    logger.info("宣传简介已放入资源(%s/%s 个条目):%s",
+                                len(intro_ids), len(promos), intro_names)
             except Exception as exc:  # noqa: BLE001 - 简介失败**不该毁掉整次转存**
                 logger.warning("宣传简介放入失败(转存本身不受影响):%s", str(exc)[:160])
 
@@ -720,6 +749,9 @@ class QuarkTransfer:
                     len(share_ids), len(matched_ids), len(intro_ids), new_url)
         return {"share_url": new_url, "password": out_password, "files": len(share_ids),
                 "intro": len(intro_ids),
+                # ★ 2026-10-13:带出来的简介**文件名**(给人看的:确认"两个都在"),
+                #   与 `intro` 那个计数互补 —— 只有计数时,"带了 1 个但带错了哪个"看不出来。
+                "intro_names": intro_names,
                 # ★ 新增(2026-10-10):转存回来的**真实文件名**。纯协议那条入口拿不到
                 #    UI 卡片上的资源名,只能靠它来落 `DiscoveredPanLink.title`。
                 #    往返回值里**加键是向后兼容的**,老调用方不受影响。

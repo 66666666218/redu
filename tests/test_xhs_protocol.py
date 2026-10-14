@@ -17,6 +17,25 @@ from app.services import xhs_protocol_source as xp  # noqa: E402
 CK = "a1=aaa; web_session=bbb; webId=ccc; id_token=ddd"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_credentials(monkeypatch, tmp_path) -> None:
+    """★ 把"账号发现"的根目录挪到一个**空的临时目录**。
+
+    ⚠️ **为什么要它**(2026-10-12 实测):`data/xhs_session_*.json` 是**真凭据**,
+    而本文件的用例全都是在"**只给一份替身 settings**"的前提下断言各种错误分支的 ——
+    一旦仓库里真有凭据文件,`xhs_accounts.discover()` 就会把它捡进账号池,
+    用例的前提当场失效:
+      · 「没有凭据要抛错」那条会拿**真凭据去发真实请求**(报错文案完全不同 ⇒ 红);
+      · 「格式必须 xyw+x_rap」那条因为真凭据**带了 ssk** ⇒ 走 `xhs_xys` 那一档,
+        而桩签名器没有 `sign_xs` ⇒ `算签名失败`(红)。
+    ⇒ **测试必须与"这台机器上恰好有没有凭据"解耦** —— 否则"我登录成功了一次"
+       反而会把测试搞红,这是最冤的一种假红。
+    """
+    from app.services import xhs_accounts as pool
+
+    monkeypatch.setattr(pool, "_root", lambda: tmp_path)
+
+
 class _S:
     xhs_web_session = CK
 
@@ -42,18 +61,31 @@ def _ok(*titles):
 
 class _FakeXhshow:
     """桩签名器:**记下每次收到的 payload 与签名参数**,用来验证 `search_id` 是否复用、
-    以及**签名格式传对没有**。"""
+    以及**签名格式传对没有**。
+
+    ⚠️ `get_search_id()` 用**自己的计数器**,**不能挂在 `calls` 上** ——
+    2026-10-12 起默认走**纯 Python XYW_** 签名,`sign_headers_post()` 根本不会被调用,
+    `calls` 永远是空 ⇒ "每个关键词一个 id"会退化成"永远 sid-0"(**假红**)。
+
+    ⚠️ 它**收得下 `config=`**(真库 `Xhshow(config=...)` 就是那样):一是更贴近真库
+    (本仓那条"桩必须跟着真库走"的教训),二是免得 `_signer()` 每次都被迫
+    "补丁失败、退回库自带"而刷一堆警告。
+    """
 
     calls: list[dict] = []
     #: 每次调用收到的 `(sign_format, x_rap)` —— 2026-10-11 加:
     #: ★ 这两个参数**必须**传对(`xyw` + `x_rap=True`),否则小红书 2026-03 起对数据接口
     #: 一律回 461(且响应是 `code:0,data:{}` 的**静默空**,会被读成"这个资源没人发")。
-    #: ⚠️ 桩**必须跟着真库的签名走**(本仓那条"测试替身方言不同"的教训)——
-    #: 第一版桩没收这两个参数,于是 9 个测试**因为桩自己不认识新参数**而全红。
     sign_args: list[tuple] = []
+    #: `get_search_id()` 的自增计数(见类 docstring 的⚠️)
+    sid_n: int = 0
+
+    def __init__(self, *a, **k) -> None:
+        pass
 
     def get_search_id(self):
-        return f"sid-{len(self.calls)}"
+        _FakeXhshow.sid_n += 1
+        return f"sid-{_FakeXhshow.sid_n}"
 
     def sign_headers_post(self, uri, ck, payload=None, sign_format="xys", x_rap=False):
         _FakeXhshow.calls.append(dict(payload or {}))
@@ -107,30 +139,47 @@ class TestSearchIdReuse:
 
     2026-10-07 控制变量实测:同 id 翻两页**交集 0**(真在翻);
     每页各新生成**交集 5**(静默重复) —— 不报错,只让"多少人在推"虚高。
+
+    ⚠️ **2026-10-12 起改成"看真正发出去的请求体"**(而不是看桩签名器收到了什么):
+    签名现在有**三档**(纯 Python XYW_ / oracle / xhshow),默认走**纯 Python** ——
+    桩签名器会被**绕过**,于是"桩没被调用"会让这条测试**假红**。
+    `search_id` 是**载荷**里的字段、与哪一档签名无关 ⇒ 直接抓在线的 body 最稳,也最真。
     """
 
-    def test_同一关键词的两页共用一个_search_id(self, monkeypatch) -> None:
+    @staticmethod
+    def _capture(monkeypatch, payload):
+        """把 `requests.post` 换成一个**记下请求体**的桩,返回那个记账列表。"""
+        import json
+
         import requests
         import xhshow
 
+        sent: list[dict] = []
+
+        def _post(url, data=None, headers=None, timeout=None, **k):
+            try:
+                sent.append(json.loads(data))
+            except Exception:  # noqa: BLE001 - 记不下来也不该让测试崩
+                sent.append({})
+            return _Resp(payload=payload)
+
         _FakeXhshow.calls = []
+        _FakeXhshow.sid_n = 0               # 逐条独立:别让上一条的计数漏进来
         monkeypatch.setattr(xhshow, "Xhshow", _FakeXhshow)
-        monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp(payload=_ok("甲", "乙")))
+        monkeypatch.setattr(requests, "post", _post)
         monkeypatch.setattr(xp, "_GAP", 0.0)
+        return sent
+
+    def test_同一关键词的两页共用一个_search_id(self, monkeypatch) -> None:
+        sent = self._capture(monkeypatch, _ok("甲", "乙"))
         xp.search(["网盘资源"], settings=_S(), session=None, pages=2)
-        sids = {c["search_id"] for c in _FakeXhshow.calls}
-        assert len(_FakeXhshow.calls) == 2 and len(sids) == 1, _FakeXhshow.calls
+        sids = {c.get("search_id") for c in sent}
+        assert len(sent) == 2 and len(sids) == 1, sent
 
     def test_不同关键词各自一个_search_id(self, monkeypatch) -> None:
-        import requests
-        import xhshow
-
-        _FakeXhshow.calls = []
-        monkeypatch.setattr(xhshow, "Xhshow", _FakeXhshow)
-        monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp(payload=_ok("甲")))
-        monkeypatch.setattr(xp, "_GAP", 0.0)
+        sent = self._capture(monkeypatch, _ok("甲"))
         xp.search(["词一", "词二"], settings=_S(), session=None)
-        assert len({c["search_id"] for c in _FakeXhshow.calls}) == 2
+        assert len({c.get("search_id") for c in sent}) == 2, sent
 
 
 class TestErrors:
@@ -222,6 +271,10 @@ class TestSignFormat:
       | **`xyw`** | **是** | HTTP 200(签名层过,只剩凭据问题) |
 
     ⇒ 这一条**必须钉住**:默认值传错不会报错,只会**静默返回空**。
+
+    ⚠️ **2026-10-12:这一条专盯第三档(`xhshow`)** —— 必须显式把前两档关掉
+    (`xhs_sign_pure=False` / `xhs_sign_oracle=False`),否则纯 Python 签名会
+    **抢在 `xhshow` 前面**把它签掉,`xhshow` 一次都不会被调用 ⇒ 假红。
     """
 
     def test_搜索时传的是xyw加x_rap(self, monkeypatch) -> None:
@@ -238,6 +291,9 @@ class TestSignFormat:
             xhs_web_session = "a1=aaa; web_session=bbb"
             xhs_sign_format = "xyw"
             xhs_sign_x_rap = True
+            #: ↓ 关掉前两档,逼它走 `xhshow`(这一条要验的就是那一档)
+            xhs_sign_pure = False
+            xhs_sign_oracle = False
 
         assert xp.search(["甲"], settings=_S(), session=None)
         assert _FakeXhshow.sign_args, "一次都没调签名器?"

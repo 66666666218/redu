@@ -48,6 +48,45 @@ API_PLATFORMS = frozenset({"bilibili", "weibo"})
 _BILI_GAP = 4.0
 
 
+def _xhs_egress_guard() -> bool:
+    """★★ **动用账号之前的出口门禁**(2026-10-13,用"一个号都活不过一天"换来的)。
+
+    ## 顺序绝不能反
+        ① 先发一枚**不带任何登录态**的游客请求(零账号成本)
+        ② 确认回 `-101` ⇒ 这条出口是通的
+        ③ **然后**才拿真号去试
+
+    反过来 = 拿好账号去撞一条不知道干不干净的出口 ⇒ 每试一次就给账号记一笔账,
+    于是"新号活不过一天"。这几天我们正是这么干的。
+
+    ## 为什么必须做成门禁(而不是靠人记得先跑一下)
+    实测证据:一天内在一台机器上连登 4 个档案之后,**连游客请求都开始回 `300012`**
+    (`IP存在风险,请切换可靠网络环境后重试`)。
+    ⇒ 这时候**再换任何新号都没用** —— 号换了,出口没换。
+    那次判错的根源是把"IP 的静态属性"(家宽/不漂移/非机房)当成了"IP 没被标记";
+    **前者说明不了后者**,只有发一次游客请求才试得出来。
+
+    ## 返回
+    `True` = 可以继续;`False` = 本轮跳过(调用方应据此**整轮跳过**,不是继续硬撞)。
+
+    ⚠️ **探测本身失败时不拦采集** —— 门禁的目的是"别撞脏出口",不是"多一个会误报的开关";
+    网络抖一下就把采集停掉,那是另一种假故障。
+    """
+    try:
+        from app.services import xhs_net
+
+        blocked, ev = xhs_net.ip_blocked()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("小红书:出口门禁探测失败(%s)⇒ **不拦**采集(门禁不该变成新故障源)",
+                       type(exc).__name__)
+        return True
+    if blocked:
+        logger.error("小红书:**出口已被标记**,本轮跳过 —— %s", ev)
+        return False
+    logger.info("小红书:出口门禁通过(%s)", ev)
+    return True
+
+
 def platforms_of(settings) -> list[str]:
     """要探的平台(逗号分隔配置);不认识的名字忽略并告警,别让笔误停掉整轮。"""
     raw = str(getattr(settings, "presence_platforms", "") or "").split(",")
@@ -111,15 +150,64 @@ def _crawl_platform(plat: str, names: list[str], session=None) -> list[dict]:
         try:
             return weibo_search.search(names, session=session)
         except weibo_search.WeiboSearchError as exc:
-            raise MediaCrawlerError(f"weibo(纯协议): {exc}") from exc
+            err = MediaCrawlerError(f"weibo(纯协议): {exc}")
+            # ★ **把平台自己标的 `kind` 带上去**(2026-10-13):告警要按它决定"给哪种修法"。
+            # ⚠️ 原来告警只能**猜** —— 它靠"错误串里有没有『登录』两个字"判断要不要叫人重登,
+            #    而措辞一字之差就会把方向带偏(旧文案「登录态**或**风控问题」就是这么误触发的)。
+            #    传 `kind` 之后,**文案怎么写都不再影响告警的判据**(与贴吧 `exc.kind` 同一套)。
+            err.kind = getattr(exc, "kind", "")      # type: ignore[attr-defined]
+            raise err from exc
     if plat == "xiaohongshu":
-        # ★ **纯协议优先,页面渲染兜底**(2026-10-07,用户已确认接受 xhshow 的许可证状况)。
-        # 纯协议 ~0.85 秒/请求,页面渲染 ~15 秒/词 ⇒ 快约 18 倍,而且**不开浏览器**。
-        # ⚠️ 兜底**要说出来**:签名库停更/小红书改版时它会悄悄退回慢路,
-        # 不记日志的话"为什么又变慢了"查不出来。
-        from app.services import xhs_page_source, xhs_protocol_source
+        # ★★★ **动用账号之前,先过出口门禁**(2026-10-13,实测换来的)。
+        # 见 `_xhs_egress_guard` —— 顺序绝不能反,否则就是拿好账号去撞一条脏出口。
         from app.services.mediacrawler_source import MediaCrawlerError
 
+        if not _xhs_egress_guard():
+            raise MediaCrawlerError(
+                "xiaohongshu:**出口 IP 已被小红书标记** ⇒ 本轮跳过(零成本)"
+                "。换一条出口(手机热点 / 重拨 / 静态住宅代理),再跑 "
+                "`tools/xhs_guest_probe.py` 确认回 `-101`。"
+                "⚠️ **不要**靠换号/重登绕过 —— 那是同一条出口。")
+
+        # ★★★ **默认「页面渲染优先」**(2026-10-13 改,原来是"协议优先、页面兜底")。
+        # 旧顺序是 2026-10-07 为了快 18 倍定的(协议 ~0.85s/词 vs 页面 ~15s/词),
+        # 但**纯协议每发一次请求都在杀会话** —— 实测时间线:
+        #   14:26 重登成功 → 14:27:08 **零请求**读到的会话**仍然健康**
+        #   → 14:28 协议路发 **1 个**请求 ⇒ `HTTP 461 / code 300011 Account abnormal`
+        #   → 14:29 `web_session` **直接从档案里消失**。
+        # 用户独立观察一致:「多次协议请求后会出现一次[要重新登录]」;
+        # 更早的痕迹就在这段注释下面:`_crawl_platform` 的 10-07 记录里,MediaCrawler 直连
+        # 也是回 `461 CAPTCHA / code 300011 检测到账号异常` —— 当时**已经改走页面路了**。
+        # 机理:协议路没有 JS 环境 / Canvas / WebGL / 行为轨迹 ⇒ 与"登录它的那台真浏览器"
+        # 是**两套设备特征**(前人原话:"设备特征对不上,行为链路断了")。
+        # 页面路的签名、cookie、指纹、请求**全部由页面自己发出** ⇒ 与登录环境天然同源。
+        # 代价:慢 ~18 倍 —— 但"能用"比"快"重要,而且慢正好合上"低频"那条纪律。
+        from config.settings import get_settings
+
+        from app.services import xhs_page_source, xhs_protocol_source
+
+        if bool(getattr(get_settings(), "xhs_prefer_page", True)):
+            page_err = ""
+            try:
+                return xhs_page_source.search(names)
+            except xhs_page_source.XhsPageError as exc:
+                #: ⚠️ **页面路的失败原因要留住** —— 它通常正是人该看的那句
+                #: (如「要安全验证」⇒ 去跑 `tools/xhs_pass_verify.py`)。
+                #: 丢了它,上层只剩协议路的"登录已过期",会把修法引错地方。
+                page_err = str(exc)
+                logger.warning("小红书**页面渲染路失败**(%s),回退纯协议 —— "
+                               "⚠️ 协议路可能触发账号强制下线,仅当兜底:",
+                               page_err[:140])
+            try:
+                return xhs_protocol_source.search(names, session=session)
+            except xhs_protocol_source.XhsProtocolError as exc:
+                raise MediaCrawlerError(
+                    f"xiaohongshu:**页面渲染与纯协议两条路都失败** —— "
+                    f"页面路:{page_err[:110]};"
+                    f"协议路:{getattr(exc, 'kind', '?')} {str(exc)[:110]}"
+                ) from exc
+
+        #: ---- 下面这条是旧的"协议优先"顺序,只在 `XHS_PREFER_PAGE=false` 时才走 ----
         try:
             return xhs_protocol_source.search(names, session=session)
         except xhs_protocol_source.XhsProtocolError as exc:
@@ -254,21 +342,48 @@ def probe(session, user_id: int, settings=None, platforms: list[str] | None = No
                 from app.services.alert_service import notify_incident
 
                 _t = f"{type(exc).__name__}: {exc}"
-                _need = any(m in _t for m in ("扫码", "登录", "qrcode", "超时"))
+                # ★ 有**结构化 `kind`** 的平台(微博)按它判;没有的仍用关键词兜底。
+                #   ⚠️ 兜底那条是靠文案措辞的,本来就不该长期留着 —— 但改成"所有平台都必须
+                #   提供 kind"会牵动其它源,先只把新写的那条路做成结构化的(单一事实源在
+                #   各平台自己的异常类里,见 `weibo_search.WeiboSearchError.kind`)。
+                _kind = str(getattr(exc, "kind", "") or "")
+                _need = (_kind == "login_expired") if _kind else any(
+                    m in _t for m in ("扫码", "登录", "qrcode", "超时"))
                 _label = PLATFORMS.get(plat, {}).get("label", plat)
                 # 平台 id 复用 `mediacrawler_source.PLATFORM_IDS`(单一事实源,别在这里抄一份)
                 from app.services.mediacrawler_source import PLATFORM_IDS as _PIDS
 
                 _pid = _PIDS.get(plat, plat)
-                notify_incident(
-                    session, user_id, "multiplatform",
-                    f"🟠 跨平台热度采集失败:{_label}",
-                    f"{_t[:160]}。" + (
+                # ★★★ **修法必须按"这个平台实际走哪条路"给**(2026-10-13)。
+                # 原来不分平台一律叫人去跑 MediaCrawler。而**微博早在 10-07 就改走纯协议了**
+                # (见 `weibo_search` 头注):它读的是**我们 cookie 库**里那一枚,
+                # 而 MediaCrawler 的 `browser_data/cdp_wb_user_data_dir` 是**另一份档案** ——
+                # 照那条建议去扫码,扫完**库里那枚 cookie 还是旧的**,热度采集照样失败。
+                # 这是一次**"白跑"**(与微信读书那条"叫人去开模拟器"是同一类错误:
+                # 方向对、动作不对),而运营者按提示做完却没好,下次就会开始忽略告警。
+                if plat == "weibo" and _need:
+                    _how = (
+                        "**微博走的是纯协议(不开浏览器)**,所以要换的是**我们 cookie 库**里那一枚,"
+                        "不是 MediaCrawler 的档案 —— 两步:\n"
+                        "  ① 登录:`tools/MediaCrawler/.venv/Scripts/python.exe tools/mc_login.py weibo`"
+                        "(它会开一个 Edge 窗口,在里面登录 `m.weibo.cn` 即可);\n"
+                        "  ② 入库存:`python tools/weibo_export_cookie.py`"
+                        "(⚠️ 用**本项目**的 python,**别用 MediaCrawler 的 venv**"
+                        " —— 它缺 `pydantic_settings`,`import app.*` 会直接失败)"
+                        " —— 它会先问一次 `m.weibo.cn/api/config` 确认**真登录了**才写库。\n"
+                        "  ⚠️ 别去跑 `main.py --platform wb`:那条路微博已经不用了,跑完库里照样是旧 cookie。")
+                elif _need:
+                    _how = (
                         f"**多半是登录态过期,需要扫码重登**:浏览器会弹二维码 —— 跑 "
                         f"`cd tools/MediaCrawler && .venv/Scripts/python.exe main.py "
                         f"--platform {_pid} --lt qrcode --type search` "
-                        f"用 App 扫一下即可(登录态会缓存在 browser_data/,不用每次扫)。"
-                        if _need else "该平台本轮跳过,其余平台照常。"),
+                        f"用 App 扫一下即可(登录态会缓存在 browser_data/,不用每次扫)。")
+                else:
+                    _how = "该平台本轮跳过,其余平台照常。"
+                notify_incident(
+                    session, user_id, "multiplatform",
+                    f"🟠 跨平台热度采集失败:{_label}",
+                    f"{_t[:160]}。" + _how,
                     settings=settings)
             except Exception:  # noqa: BLE001 - 告警失败绝不能影响采集
                 logger.debug("跨平台热度失败告警推送失败", exc_info=True)

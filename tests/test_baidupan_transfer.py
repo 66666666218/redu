@@ -108,3 +108,117 @@ def test_missing_show_msg_does_not_crash_or_leave_dangling_space() -> None:
 def test_show_msg_is_truncated() -> None:
     """百度偶尔回一大段 HTML/堆栈 —— 别让它污染运行记录。"""
     assert len(_transfer_error(-6, "x" * 500)) < 120
+
+
+# ---------------------------------------------------------------------------
+# ★★★ 2026-10-13:`/share/verify` 的 `errno=105` 到底是"分享已死"还是"等一会"?
+#
+# 实测证据:库里 9 条 `failed` 全是 `提取码验证失败(errno=105)`,逐条去 GET 它们的
+# 分享页 ⇒ **恒回 HTTP 404** ⇒ 链接已不存在,重试一万次也不会好。
+# 而旧措辞下游 `_is_dead_link` 认不出 ⇒ 一律记 `failed` ⇒ **每天重试同一批死链**
+# (日志里 294 条「盘链转存失败」、积压恒卡 17 条不退)。
+# ---------------------------------------------------------------------------
+
+
+class _VerifySession:
+    """`/share/verify` 回指定 errno;分享页回指定 HTTP 码/正文。"""
+
+    def __init__(self, errno: int, page_status: int = 200, page_body: str = "",
+                 page_raises: bool = False) -> None:
+        self.errno = errno
+        self.page_status = page_status
+        self.page_body = page_body
+        self.page_raises = page_raises
+        self.posts: list[str] = []
+        self.gets: list[str] = []
+
+    def post(self, url, **kw):
+        self.posts.append(url)
+        # ⚠️ 先算成局部变量再塞进替身:写成 `lambda self: self.errno` 会被**替身自己**
+        #    的 `self` 遮蔽(`r.json()` 把实例当第一个参数传进来)⇒ 报 "R 没有 errno"。
+        payload = {"errno": self.errno, "err_msg": ""}
+        return type("R", (), {"json": lambda self: payload})()
+
+    def get(self, url, **kw):
+        self.gets.append(url)
+        if self.page_raises:
+            raise RuntimeError("连接超时")
+        return type("R", (), {"status_code": self.page_status, "text": self.page_body})()
+
+
+def _vc(**kw) -> tuple[BaiduPanClient, _VerifySession]:
+    c = BaiduPanClient("BDUSS=x")
+    sess = _VerifySession(**kw)
+    c._browser = lambda: sess          # type: ignore[method-assign]
+    return c, sess
+
+
+def test_verify_105_加上分享页404_记终态() -> None:
+    """★ 死链必须判**终态** —— 否则每天重试一遍,`failed` 永远不退。"""
+    import app.services.pan_discovery as pd
+
+    c, sess = _vc(errno=105, page_status=404)
+    with pytest.raises(Exception) as ei:
+        c._verify("BjXDjLdj3WB1EZdAdByJXA", "abcd")
+
+    msg = str(ei.value)
+    assert "分享地址已失效" in msg, f"措辞必须让下游 `_is_dead_link` 认得出死链:{msg}"
+    assert pd._is_dead_link(msg) and pd._fail(msg)["status"] == "skipped", (
+        f"认出来才是终态;否则又回到「每天重试同一批死链」:{msg}")
+    assert sess.gets, "判终态前**必须真去看一眼分享页** —— 不能凭 errno 猜"
+    assert "/s/1BjXDjLdj3WB1EZdAdByJXA" in sess.gets[0], sess.gets
+
+
+def test_verify_105_但分享页还活着_继续重试() -> None:
+    """⚠️ 反向守卫:**没证据就不许判终态**。
+
+    把一条其实能搬的链永久钉死,是本仓 2026-10-02 踩过的坑 ——
+    `errno=105` 单看数字分不清"链接死了"和"这一下没验过",所以必须由分享页拍板。
+    """
+    import app.services.pan_discovery as pd
+
+    c, _ = _vc(errno=105, page_status=200, page_body="<html>正常分享页</html>")
+    with pytest.raises(Exception) as ei:
+        c._verify("Babc", "abcd")
+
+    msg = str(ei.value)
+    assert pd._fail(msg)["status"] == "failed", f"页面还在 ⇒ 可重试:{msg}"
+
+
+def test_verify_探分享页失败_也不许判终态() -> None:
+    """探测本身失败(超时/网络抖动)⇒ 没有证据 ⇒ 照旧留可重试。"""
+    import app.services.pan_discovery as pd
+
+    c, _ = _vc(errno=105, page_raises=True)
+    with pytest.raises(Exception) as ei:
+        c._verify("Babc", "abcd")
+    assert pd._fail(str(ei.value))["status"] == "failed"
+
+
+def test_verify_页面明写已失效_也算死链() -> None:
+    """有些死链页面回 200 但正文写着"分享的文件已经被取消" —— 同样算证据。"""
+    import app.services.pan_discovery as pd
+
+    c, _ = _vc(errno=105, page_status=200, page_body="<p>分享的文件已经被取消</p>")
+    with pytest.raises(Exception) as ei:
+        c._verify("Babc", "abcd")
+    assert pd._fail(str(ei.value))["status"] == "skipped"
+
+
+def test_无密码分享不验提取码也不探页面() -> None:
+    """没有提取码 ⇒ 本就没有"验码"这一步,`_verify` 直接返回,别白发请求。"""
+    c, sess = _vc(errno=105, page_status=404)
+    c._verify("Babc", "")
+    assert sess.posts == [] and sess.gets == []
+
+
+def test_其它errno保持原措辞不误判死链() -> None:
+    """`errno=-9/-6` 等不是 105 的,**不许**被这次改动顺手判成死链。"""
+    import app.services.pan_discovery as pd
+
+    c, _ = _vc(errno=-9, page_status=404)
+    with pytest.raises(Exception) as ei:
+        c._verify("Babc", "abcd")
+    msg = str(ei.value)
+    assert "提取码验证失败(errno=-9)" == msg, msg
+    assert pd._fail(msg)["status"] == "failed"

@@ -1004,6 +1004,45 @@ def test_listen_prefers_platform_full_list(session, monkeypatch: pytest.MonkeyPa
     assert urls == {"https://mp.weixin.qq.com/s/p1", "https://mp.weixin.qq.com/s/p2"}
 
 
+def test_监听轮的横向源阅读数要一路落进库(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """★ **端到端**:用户的报障就是"卡片上阅读列整列 `—`"。
+
+    从 ⓪ 分支一路走到 `wechat_articles.read_num` —— 中间**任何一环**把阅读数丢掉
+    (归一化丢 / `norm` 投影丢 / 合并键对不上),这里都会红。这正是它的价值:
+    那三处坏点**单独看都"不报错"**,只有端到端才抓得住。
+
+    形态按**实测**摆(2026-10-14):WeRSS 那路给**短链**、**不带**阅读数;
+    后台 `appmsgpublish` 那路给**长链**、带阅读数。两源 url 形态不同 ⇒ 只能靠标题对上。
+    """
+    from app.services.wechat._source import MultiSourceClient
+
+    class _Src:
+        def __init__(self, items: list) -> None:
+            self.items = items
+
+        def mp_articles(self, mp_id: str, page: int = 1, limit: int = 20) -> list:
+            return self.items
+
+    ts = 1791770400   # 2026-10-12 10:00,过新鲜度闸
+    werss = _Src([{"id": "p1", "title": "资源文(夸克网盘)",
+                   "url": "https://mp.weixin.qq.com/s/p1", "publish_at_raw": ts}])
+    wemp = _Src([{"id": "w1", "title": "资源文(夸克网盘)",
+                  "url": "http://mp.weixin.qq.com/s?__biz=MjM5&mid=1&idx=1&sn=abc",
+                  "publish_at_raw": ts, "read_num": 4321, "like_num": 66}])
+    plat = MultiSourceClient([("werss", werss), ("wemp", wemp)])
+
+    _set_cookie(session, 1, "weread", "vid=1")
+    session.add(WechatBenchmark(user_id=1, nickname="号A", biz="MP_WXS_9001"))
+    session.commit()
+    out = wechat_monitor.run_wechat_listen(session, 1,
+                                           settings=_settings(pan_transfer_enabled=False),
+                                           platform=plat)
+    assert out["new"] == 1
+    row = session.scalars(select(WechatArticle)).one()
+    assert row.read_num == 4321, "阅读数没能从横向源落到库里(卡片上就还是 `—`)"
+    assert row.zan_num == 66, "点赞数也丢了"
+
+
 def test_sync_platform_paginates(session, monkeypatch: pytest.MonkeyPatch) -> None:
     """平台同步翻页拉全量,后续页全部已入库即停。"""
     b = WechatBenchmark(user_id=1, nickname="号A", biz="MP_WXS_9001")
@@ -4447,6 +4486,79 @@ def test_没配_App_凭据时不能因此报错(session) -> None:
     wechat_monitor._weread_collect(1, b, _FakeWereadBlocked(), session,
                                    stats=stats, app_client=None)
     assert stats.get("weread_list_app_ok", 0) == 0
+
+
+class _AlertSpy:
+    """记录 `notify_incident` 的调用(标题 + 是否推飞书),不发真告警。"""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def __call__(self, db, user_id, kind, title, detail, **kw):
+        self.calls.append({"title": title, "detail": detail,
+                           "push": kw.get("push_feishu", True)})
+        return True
+
+
+class _FakeAppQuota:
+    """App 路回**额度类** `-2041` —— 错误文本与 2026-10-13 实测逐字一致。"""
+
+    def articles(self, book_id, **kw):
+        raise RuntimeError("App 接口报错:-2041 -2041")
+
+
+class _FakeAppAuth:
+    """App 路回**登录态类** `-2012`。"""
+
+    def articles(self, book_id, **kw):
+        raise RuntimeError("App 登录态问题:-2012 登录超时 ⇒ 重新取 token")
+
+
+def test_App路被额度挡时报的是额度而不是登录态(session, monkeypatch) -> None:
+    """★★★ 2026-10-13 实测:**真因是 `-2041`,而告警报的却是 `-2012 登录态失效`**。
+
+    错报的来路:`WereadAppClient.articles()` 在自愈拿不到新 token 时**重抛的是原始错误**
+    (`-2012`),而那个自愈之所以拿不到 token,正是因为 `verify_by_api` 把好 token 上的
+    `-2041` 当成了"验活失败"(见 `test_weread_app_selfheal.py`)。
+    于是报告里的因果**整个反了**:真因(端点被挡)看不见,报出来的是"登录态失效"。
+
+    ⚠️ 这不是措辞问题:文案把人引向"开雷电模拟器重登",而实测纯 HTTP 铸 token 成功、
+    `/shelf/sync` 与 `/user/notebooks` 都回 200 —— 登录态**是好的**,开模拟器既修不了,
+    还多一次登录自证(风控更重)。
+    """
+    b = WechatBenchmark(user_id=1, nickname="号Q", weread_book_id="MP_WXS_Q")
+    session.add(b)
+    session.commit()
+    spy = _AlertSpy()
+    monkeypatch.setattr("app.services.alert_service.notify_incident", spy)
+
+    wechat_monitor._weread_collect(1, b, _FakeWereadBlocked(), session,
+                                   stats={}, app_client=_FakeAppQuota())
+
+    assert len(spy.calls) == 1, f"应当只落一条告警,实际 {spy.calls}"
+    c = spy.calls[0]
+    assert "-2041" in c["title"], c["title"]
+    assert "登录态失效" not in c["title"], (
+        f"额度类错报成「登录态失效」会把人引去开模拟器:{c['title']}")
+    assert c["push"] is False, "额度类是「换号/降频」的长期决策项 ⇒ 落站内,推群只是噪音"
+    assert "别开" in c["detail"], "必须明确拦住「去开雷电模拟器」这个错误动作"
+
+
+def test_App路登录态失效才推飞书(session, monkeypatch) -> None:
+    """反向:真·登录态类(`-2012`)等多久都不会自己好 ⇒ 该打扰人(与限额类分开)。"""
+    b = WechatBenchmark(user_id=1, nickname="号R", weread_book_id="MP_WXS_R")
+    session.add(b)
+    session.commit()
+    spy = _AlertSpy()
+    monkeypatch.setattr("app.services.alert_service.notify_incident", spy)
+
+    wechat_monitor._weread_collect(1, b, _FakeWereadBlocked(), session,
+                                   stats={}, app_client=_FakeAppAuth())
+
+    assert len(spy.calls) == 1, f"实际 {spy.calls}"
+    c = spy.calls[0]
+    assert "登录态失效" in c["title"], c["title"]
+    assert c["push"] is True, "登录态类要人动手,必须推群"
 
 
 # ------------------------------------------------ 阅读数回填(2026-10-05)

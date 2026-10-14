@@ -496,28 +496,56 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
                 logger.warning("App 列表兜底失败(%s):%s —— **App 这条路当前是断的**,阅读数只剩网页路",
                                b.nickname or b.weread_book_id, str(exc)[:140])
                 # ⚠️⚠️ **光写日志还是没人看见** —— 运营者不读日志。
-                # 而且这一类(**登录态失效、等多久都不会自己好**)是唯一需要人动手的:
-                # 网页路被账号级拦是外因,App 路只要人去雷电里重登一次就能接回来
-                # (2026-10-06 实测:用户打开 App 后 token `jXHu1v8j`→`Xph3xEtt`,8/8 个号立刻通了)。
-                # ⇒ 归到"要人工"的那一类,**直接推飞书**(冷却去重由 notify_incident 管)。
-                if _app_auth_needs_human(exc):
-                    try:
-                        from app.services.alert_service import notify_incident
+                #
+                # ★★★ **必须先分"额度"与"登录态"两刀**(2026-10-13 实测定性)。
+                # 判据不靠猜:同一枚新铸 token 去问,/shelf/sync 与 /user/notebooks **回 200**
+                # (认证是过的),只有 `/book/articles` 回 `-2041` ⇒ 接口的顺序是
+                # **先校认证、后校额度**,能走到额度这一步就**反证了认证通过**。
+                # 不分的代价(2026-10-11~13 真实发生的):真因是 `-2041`,
+                # 报出来的却是 `-2012 登录超时` —— 因为 `WereadAppClient.articles()`
+                # 在自愈拿不到新 token 时**重抛的是原始错误**,于是告警把人引向
+                # "开雷电模拟器重登",而那只既修不了、还多一次登录自证(风控更重)。
+                try:
+                    from app.services.alert_service import notify_incident
 
+                    if _is_weread_quota_error(exc):
+                        # 额度/端点级被挡 ⇒ **不是登录问题**,正确处置是"别动"。
+                        # ⇒ 落**站内告警**(`push_feishu=False`,与"要不要自建 WeRSS"同类):
+                        #   它是"要不要换号 / 要不要降频"的长期决策项,不是"现在去动手"
+                        #   的即时事件 —— 丢进飞书群只会训练人忽略告警。
+                        # 为什么不能干脆静默:这正是本仓最忌的**假绿灯** ——
+                        # "精确阅读数全断"会在报告里长得像"今天没人发文章"(10-06 已经吃过一次)。
+                        notify_incident(
+                            session, user_id, "wechat",
+                            "🟠 微信读书 App 路被挡(-2041),精确阅读数无来源",
+                            "App 兜底路(`i.weread.qq.com/book/articles`)回**额度/端点级**错误,\n"
+                            "⚠️ **这不是登录态失效** —— 别开雷电、别无谓重登。实测(2026-10-13):\n"
+                            "  · 纯 HTTP 铸 token **成功**(`refreshToken` 有效,`RefreshTokenExpired=0`);\n"
+                            "  · 同一枚新 token 问 `/shelf/sync`、`/user/notebooks` ⇒ **HTTP 200**;\n"
+                            "  · 只有 `/book/articles` ⇒ `-2041`(换书、换身份档都一样)⇒ 端点级。\n"
+                            "⇒ 精确阅读数当前**没有任何来源**:网页 `/web/mp/articles` 早被账号级\n"
+                            "`-2041` 拦(2026-10-04 起),App 这条路自 **2026-10-11 07:52** 起同样被挡。\n"
+                            "需要决策:换个微信读书账号出新会话,或接受「只能拿到最新一篇」。",
+                            push_feishu=False)   # 长期决策项 ⇒ 落站内,不丢进飞书群
+                    elif _app_auth_needs_human(exc):
+                        # 真·登录态类 ⇒ **要人动手**(等多久都不会自己好),该推飞书。
                         notify_incident(
                             session, user_id, "wechat",
                             "🟠 微信读书 App 登录态失效,精确阅读数断了",
                             "App 兜底路(阅读数的最后一条路)取不到数据。\n"
+                            "⚠️ **先分是不是额度类**:若日志里是 `-2041/-2014` ⇒ 那是端点级被挡,\n"
+                            "**不要开模拟器**(实测无效),见同时落下的那条站内告警。\n"
+                            "确认是登录态类(`-2012/-2010`)再照下面走 ——\n"
                             "⚠️ **2026-10-10 起续期已是纯 HTTP**(签名 `sha256(timestamp+deviceId+random)`,"
                             "无需模拟器),所以先看运行记录里的 `app_fail` 与自愈日志:\n"
                             "  · 若报「HTTP 铸 token 失败」⇒ 多半是 **`refreshToken` 本身过期/被吊销**,\n"
                             "    那才需要**开一次**雷电模拟器读账号库重取(用 "
                             "`scripts/weread_app_token.py`),**不必像以前那样一直开着**;\n"
                             "  · 若报「身份不配套 / -2012」⇒ token 与客户端身份档对不上(见 "
-                            "`EINK_HEADERS` 的注释)。\n"
-                            "网页路被账号级拦(`-2041`),App 路是当前唯一能拿到精确阅读数的通道。")
-                    except Exception:  # noqa: BLE001 - 告警失败不影响监听
-                        logger.debug("App 路失效告警推送失败", exc_info=True)
+                            "`EINK_HEADERS` 的注释):纯 HTTP 铸出来的**只能是 eink 档**,\n"
+                            "    必须配 `profile=\"eink\"` 去调,拿安卓 App 的头一定回 `-2012`。")
+                except Exception:  # noqa: BLE001 - 告警失败不影响监听
+                    logger.debug("App 路失效告警推送失败", exc_info=True)
     # 正文:先直抓 mp.weixin.qq.com(不占微信读书配额),**抓空了再用这篇的 reviewId
     # 走微信读书转发页**。此前这里只传 fetch_content=True,把 cover/列表白拿的 reviewId 丢了,
     # 于是直抓被风控的那 26% 正文永远为空 → 盘链认不出 → 飞书卡片整片"—"而员工以为号没发资源
@@ -877,8 +905,23 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
         feed_id = feed_biz(b)
         if plat and feed_id:
             try:
-                raw_items = plat.mp_articles(feed_id, page=1, limit=20)
+                # ★ **横向补阅读数**(2026-10-14):`mp_articles` 一见到"有内容"的源就 return,
+                # 而**只有自研 wemp(后台 appmsgpublish)那一路带阅读数**(WeRSS 结构里没有
+                # 这个字段)⇒ 只要 WeRSS 活着,wemp 永远问不到,卡片上就永远是 `—`。
+                # 所以这条首选路改用 `mp_articles_with_reads`:列表仍以第一个答上话的源为准,
+                # 其余源只用来补 read_num/like_num(详见 `_source._merge_counts`)。
+                # 单源客户端 / 测试替身没有这个方法 ⇒ 原样退回 `mp_articles`,行为逐字不变。
+                _with_reads = getattr(plat, "mp_articles_with_reads", None)
+                raw_items = (_with_reads(feed_id, page=1, limit=20, stats=wr_stats)
+                             if _with_reads is not None
+                             else plat.mp_articles(feed_id, page=1, limit=20))
+                # ⚠️ **阅读/点赞必须往下带**(2026-10-14 修):这里原来只取 title/url/时间,
+                # 把 `read_num` / `like_num` **白丢掉** —— 于是哪怕源(自研 wemp 后台那一路)
+                # 答上了阅读数,`_insert_new_articles` 收到的也是 0,卡片上照样是 `—`。
+                # 而 `_insert_new_articles` **本来就支持**(`preset_read`,且只在"旧值 0、
+                # 新值 >0"时回填),所以这是纯丢数据、不是没能力。取不到就是 None ⇒ 与旧行为逐字一致。
                 norm = [{"title": it["title"], "url": it["url"],
+                         "read_num": it.get("read_num"), "like_num": it.get("like_num"),
                          "publish_at": _parse_time(it.get("publish_at_raw"))} for it in raw_items]
                 if norm:
                     used = True
@@ -1098,6 +1141,16 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
         detail += f" biz_bad_shape({len(miskeyed)})"
     if repushed:
         detail += f" repushed={repushed}"   # 补推的上一轮欠推数,写进运维记录而非只进日志
+    # ★ **横向补阅读数的账**(2026-10-14):阅读列全 `—` 时,这四个数一眼分得出性质 ——
+    #   src=0           横向源根本没被问到(没配/冷却中/凭据死)
+    #   src>0 from=0    **问到了、它没带数** ⇒ 大概率 `wemp_client._READ_KEYS` 字段名不对
+    #   unmatched>0     两边都有数、**键对不上**(短链 vs 长链,见 `_source.article_keys`)
+    # 不写出来的话,"阅读补没补上、为什么没补上"就只能靠猜(与 weread_list 那条同一教训)。
+    if wr_stats.get("reads_src") or wr_stats.get("reads_from") or wr_stats.get("reads_unmatched"):
+        detail += (f" reads(src={wr_stats.get('reads_src', 0)}"
+                   f" from={wr_stats.get('reads_from', 0)}"
+                   f" via_title={wr_stats.get('reads_via_title', 0)}"
+                   f" unmatched={wr_stats.get('reads_unmatched', 0)})")
     enumerable = wr_stats.get("weread_list_ok", 0)
     off_new = wr_stats.get("weread_list_off_new", 0)
     if wr_stats:

@@ -223,56 +223,129 @@ def make_signer(settings=None, env_flags: str = ""):
     return _signer(settings, env_flags)
 
 
-def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
-           pages: int = 1) -> list[dict]:
-    """按关键词搜小红书。返回 `{uid, name, url, snippet, pan_link, keyword}`。
+def _xhs_proxies(st) -> dict[str, str] | None:
+    """小红书的出口 —— **必须**与登录时(浏览器)是同一个,否则会话会立刻被判异常。
 
-    形状与 `mediacrawler_source.crawl` 一致,上层(`resource_presence.probe`)不用改。
+    全部规则收在 `app/services/xhs_net.py`(**两条路同源**,别在这里另写一套):
+    `XHS_PROXY` → 全局隧道 → **系统代理**(浏览器用它)。
+    ⚠️ **绝不**回落"提取式轮换池" —— 那个池每 3 分钟换出口,而小红书会话绑出口 IP。
+    """
+    try:
+        from app.services import xhs_net
+
+        return xhs_net.for_requests(st)
+    except Exception:  # noqa: BLE001 - 出口算不出来就直连,不该让采集停摆
+        logger.debug("算小红书出口失败,按直连处理", exc_info=True)
+        return None
+
+
+def _http_post(url: str, body: str, headers: dict, st, timeout: int = 25,
+               impersonate: str | None = None):
+    """★ **按"浏览器形状"发一个 POST** —— 指纹与出口都在这一层收口。
+
+    ## 为什么要有它
+    2026-10-12 第一次拿到真 `04` 登录凭据的实测:cookie 15 项 + `webSsk` 齐全,
+    **两种签名**(带不带 `x6/x7`)都过了签名校验(HTTP 200),但会话仍在 ~5 分钟内
+    被判 `300011 当前账号存在异常` 并作废(随后 `-100 登录已过期`)。
+    ⇒ 剩下的差距**不在算法层**,在这两处:
+
+      1. **TLS / HTTP2 指纹** —— `requests` 的 JA3 是 `python-requests` 自己的,
+         与 Chrome 差得很远;**改 Header 补不上**(服务端看的是握手包)。
+         `curl_cffi` 的 `impersonate` 会把 **JA3/JA4 + HTTP/2 SETTINGS 顺序 + 头部顺序**
+         一起仿成真实浏览器。
+      2. **出口 IP 与登录时不一致** —— 见 `_xhs_proxies`。
+
+    ⚠️ **第 2 条后来被证伪了**(2026-10-12 补记,免得照着旧注释白改):
+    实测直连与走系统代理 **都是 112.247.45.87** —— 本地那个代理不改出口,两边本来就一致。
+    真正的第 2 条其实是 **UA 与签发会话的浏览器不一致**(`xhs_fingerprint`):
+    用 Edge 154 登的号却自称 Chrome 138 ⇒ 同样被判 `300011`。
+    ⇒ 所以 `impersonate` **必须按账号解析**:UA 写着 Edge 就仿 Edge 的 TLS,
+    否则等于把同一类错配换到更底下的层。`xhs_impersonate="auto"` 就是干这个的。
+
+    ⚠️ **任何一层失败都退回 `requests`**,绝不让"换了个发送器"变成整条链断掉。
+       指纹是**增强**,不是依赖。
+
+    `impersonate`:调用方**已解析好**的指纹目标(推荐,这样它能按账号带 UA 推出来);
+    不传则按 `headers["user-agent"]` + 配置**现解析**一次(兼容直接调用的老代码)。
     """
     import requests
 
-    kws = [str(k).strip() for k in (keywords or []) if str(k).strip()]
-    if not kws:
-        return []
-    from config.settings import get_settings
+    from app.services import xhs_fingerprint as fp
 
-    st = settings or get_settings()
+    proxies = _xhs_proxies(st)
+    if impersonate is None:
+        #: 没显式传 ⇒ 按**这一次真正发出去的 UA** 解析(保证 UA 与 TLS 指纹同源)
+        impersonate = fp.resolve_impersonate(getattr(st, "xhs_impersonate", ""),
+                                             headers.get("user-agent", ""))
+    imp = str(impersonate or "").strip()
+    if imp:
+        try:
+            from curl_cffi import requests as cffi
+
+            from app.services import xhs_net
+
+            kw: dict = dict(data=body.encode("utf-8"), headers=headers,
+                            timeout=timeout, impersonate=imp)
+            if proxies:
+                kw["proxies"] = proxies
+            #: ★★ **CA 证书包必须是"纯 ASCII 路径"** —— 否则 BoringSSL 打不开它,
+            #: **所有 HTTPS 请求会无一例外地失败**(curl error 77)。
+            #: 而小红书接口全是 HTTPS ⇒ 不修这里,上面的 `impersonate` **等于没生效**,
+            #: 请求会全部静默退回 `requests`,指纹伪装形同虚设。详见 `xhs_net.ca_bundle`。
+            ca = xhs_net.ca_bundle()
+            if ca:
+                kw["verify"] = ca
+            resp = cffi.post(url, **kw)
+            logger.debug("小红书请求:curl_cffi(impersonate=%s%s) → %s",
+                         imp, "+代理" if proxies else "", resp.status_code)
+            return resp
+        except Exception as exc:  # noqa: BLE001
+            #: ⚠️ **故意用 warning 而不是 info**:这次事故的根因就是"指纹层悄悄失效了
+            #: 却没人看见"。退回 `requests` 是**降级**,必须留痕。
+            logger.warning("小红书 curl_cffi 不可用(%s: %s)—— "
+                           "**指纹伪装未生效**,本次退回 requests",
+                           type(exc).__name__, str(exc)[:120])
+    return requests.post(url, data=body, headers=headers, timeout=timeout,
+                         proxies=proxies)
+
+
+def _search_with(ck: dict, ssk: bytes, kws: list[str], st, pages: int,
+                 session=None, user_id: int = 1, ua: str = "",
+                 hints: dict | None = None) -> list[dict]:
+    """**用一套凭据**跑完所有关键词。失败抛 `XhsProtocolError`(带 `kind`,供账号池判状态)。
+
+    ★ `ua`:**这份凭据登录时的真实 UA**(由 `pool.ua_of(ref)` 从存档取,可以为空)。
+    为什么不写死一个常量:会话是**某个浏览器**签发的,采集时必须**长得像它** ——
+    用 Edge 154 登的号却自称 Chrome 138,实测就是 `300011 当前账号存在异常`。
+    见 `app/services/xhs_fingerprint` 的模块头。
+
+    `hints`:`sec-ch-ua*` 客户端提示头(由 `pool.hints_of(ref)` 从存档取,可为 `None`)。
+    真实浏览器发请求时一定带这一组;我们原来一个都不发 ⇒ 与 UA 那处是**同一类自曝**。
+    """
+    import requests
+
+    from app.services import xhs_fingerprint
+
+    #: ★ **一次解析,全程复用** —— `ua` 进 Header,`impersonate` 进 TLS 层,两者同源。
+    fingerprint = xhs_fingerprint.resolve(ua, st)
+
     #: ★ **签名格式必须显式传**(2026-10-10 实测矩阵,见 `config/settings.py` 那段):
     #: 库的默认是 `xys`,而小红书 2026-03 起对数据接口拒 `XYS_` ⇒ 永远 461、
     #: 且**响应是 `code:0, data:{}` 的"静默空"**(最容易被读成"这个资源没人发")。
     _fmt = str(getattr(st, "xhs_sign_format", "xyw") or "xyw")
     _rap = bool(getattr(st, "xhs_sign_x_rap", True))
-    ck_str = _cookie(session, user_id, settings)
-    if not ck_str:
-        raise XhsProtocolError(
-            "没有小红书凭据 —— 跑 `python tools/xhs_export_cookie.py` 从浏览器档案导出"
-            "(只导一次,之后纯协议)", kind="need_login", needs_human=True)
-    ck = _cookie_dict(ck_str)
-    if "a1" not in ck or "web_session" not in ck:
-        # ⚠️ 硬失败**只认这两项**:`a1` 是设备标识(`x-s-common` 的 x5 就是它),
-        # `web_session` 是登录态本体 —— 缺哪个都必然不行。
-        raise XhsProtocolError(
-            f"小红书凭据不全(缺 {'a1' if 'a1' not in ck else 'web_session'})—— "
-            f"必须从浏览器档案导出全套,别手抄", kind="need_login", needs_human=True)
-    if "id_token" not in ck:
-        # ⚠️ **只是告警,不当硬失败**:手抄那份缺 `id_token` 且回 `-101`,
-        # 但那份**同时可能已经过期** ⇒ 把 -101 单独归因给 `id_token` 证据不够硬。
-        # 记一条日志 + 导出工具会提示,让它自己去失败、报真实原因。
-        logger.warning("小红书凭据里没有 `id_token`(手抄的常见缺它)—— "
-                       "先用着,若回 -101 就用 tools/xhs_export_cookie.py 重新导出")
 
-    x = _signer(st)
-    #: **会话密钥 `ssk`**(与那枚 cookie **成对**存下来的)。有它才能签出**完整**的 `XYS_`
-    #: (`x5`/`x6`/`x7`)—— 2026-10-11 实测:已登录请求不带它,服务端回 `-100 登录已过期`
-    #: (而同一枚 cookie 在页面里明明是登录态);匿名请求则带不带都 200。
-    ssk = b""
-    if session is not None:
-        try:
-            from app.services.xhs_xys import load_ssk
+    #: ★ **签名三档,从"最自主"到"最依赖"**(2026-10-12):
+    #:   1. **纯 Python XYW_**(`xhs_sign_pure`)—— 实测与站点**逐字节一致**,不开浏览器、
+    #:      不依赖 xhshow,且 `x3` 用**我们自己的 a1**(oracle 那条会用页面的 a1,会错配)。
+    #:      这是现在的主路。
+    #:   2. oracle(让页面算)—— 保底:万一站点改了 XYW_ 结构,页面算的仍然对。
+    #:   3. `xhshow` 复刻 —— 最后兜底(第三方库,`license: None`)。
+    #: 开关 `xhs_sign_pure`(默认 true)控制第 1 档是否启用。
+    _use_pure = bool(getattr(st, "xhs_sign_pure", True))
+    _use_oracle = bool(getattr(st, "xhs_sign_oracle", True))
 
-            ssk = load_ssk(session, user_id)
-        except Exception:  # noqa: BLE001 - 没有就退回旧签名(匿名那条路够用)
-            logger.debug("读 ssk 失败,按没有处理", exc_info=True)
+    x = _signer(st)      #: `search_id` 由它生成;纯 Python 路也复用它(它只生成 id,不签名)
     rows: list[dict] = []
     for i, kw in enumerate(kws):
         if i:
@@ -284,7 +357,21 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
                        "search_id": sid, "sort": "general", "note_type": 0,
                        "ext_flags": [], "image_formats": ["jpg", "webp", "avif"]}
             try:
-                if ssk:
+                if _use_pure:
+                    # ★ 纯 Python XYW_:x-s 逐字节等同站点,且 x3 = 我们自己的 a1
+                    from app.services.xhs_sign_pure import headers_xyw as _pure_headers
+
+                    headers = _pure_headers(URI_SEARCH, ck, payload=payload,
+                                            ua=fingerprint.ua)
+                    body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+                elif _use_oracle:
+                    # ★ oracle:页面自己的 JS 算(永远是当前线上版本)。
+                    #   body 必须**逐字节**与签名时一致(紧凑 JSON)。
+                    from app.services.xhs_sign_oracle import headers as _oracle_headers
+
+                    headers = _oracle_headers(URI_SEARCH, ck, payload=payload)
+                    body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+                elif ssk:
                     # ★ **完整 `XYS_`**(站点自己的算法:`x5`/`x6`/`x7` 都在)。
                     #   注意:body 也必须**逐字节**用同一份紧凑 JSON(签名用的字节 = 发出去的字节)
                     from app.services.xhs_xys import headers as _xys_headers
@@ -302,10 +389,14 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
             # 没有 461),但接口回 `-101 无登录信息`。这个坑极有欺骗性,写在这里。
             headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in ck.items())
             headers["content-type"] = "application/json;charset=UTF-8"
-            headers["user-agent"] = _UA
+            #: ★ 用**这份凭据自己**的 UA,不是全局常量(见本函数 docstring)
+            headers["user-agent"] = fingerprint.ua
+            #: ★ `sec-ch-ua*` —— 同样是**登录浏览器抓来的**,抓不到就不发(不编)
+            for _k, _v in (hints or {}).items():
+                headers[_k] = _v
             try:
-                r = requests.post(API_BASE + URI_SEARCH, data=body,
-                                  headers=headers, timeout=25)
+                r = _http_post(API_BASE + URI_SEARCH, body, headers, st, timeout=25,
+                               impersonate=fingerprint.impersonate)
             except Exception as exc:  # noqa: BLE001
                 raise XhsProtocolError(f"请求失败:{type(exc).__name__}: {str(exc)[:90]}",
                                        kind="network") from exc
@@ -337,12 +428,17 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
                 raise XhsProtocolError(f"响应不是 JSON(多半被挡):{r.text[:120]}",
                                        kind="api") from exc
             if needs_login(r.text[:400] + str(d.get("msg") or "")):
+                # ⚠️ **`-100` 与 `-101` 要分开报**:前者是"会话过期"(刷新/重登),
+                # 后者多是"没带全凭据"。账号池据此判 `expired` 还是 `guest`。
+                _code = d.get("code")
+                _why = ("登录已过期" if _code == -100 else
+                        "无登录信息/凭据不全" if _code == -101 else
+                        f"登录态失效(code={_code})")
                 raise XhsProtocolError(
-                    f"小红书登录态失效/被踢({d.get('msg') or d.get('code')})—— "
-                    f"⚠️ **重导凭据解决不了**(2026-10-10 实测:重导出来的还是同一枚死会话,"
-                    f"连最简单的 `user/selfinfo` 都回 `-100 登录已过期`,全线一致)"
-                    f"⇒ **需要人在浏览器里重新登录**:用 `data/xhs_2` 那个档案打开小红书、重登"
-                    f"(必要时过安全验证),**之后**再跑 `python tools/xhs_export_cookie.py`",
+                    f"小红书 {_why}({d.get('msg') or _code})—— "
+                    f"⚠️ **重导同一枚死会话解决不了**(2026-10-10 实测:重导出来还是它)"
+                    f"⇒ **需要人在浏览器里重新登录**:跑 "
+                    f"`tools/xhs_browser_login.py <档案>`,之后 `tools/xhs_go_live.py` 验证",
                     kind="need_login", needs_human=True)
             if not d.get("success"):
                 code = d.get("code")
@@ -373,3 +469,144 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
             if not items:
                 break
     return rows
+
+
+def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
+           pages: int = 1) -> list[dict]:
+    """按关键词搜小红书 —— **带账号池轮换**。返回 `{uid, name, url, snippet, pan_link, keyword}`。
+
+    形状与 `mediacrawler_source.crawl` 一致,上层(`resource_presence.probe`)不用改。
+
+    ★ **2026-10-12 起的取号逻辑**(`app/services/xhs_accounts.py`):
+    不再"死死用一枚 cookie",而是从**账号池**按 `healthy > unknown > 游客 > 过期 > …`
+    的顺序取号,先试最该用的;**失败了把结果报回池里**(状态机 + 冷却),
+    然后**换下一个账号**接着试。这样:
+
+      · 一个号被限/过期,**不会拖垮整轮**;
+      · 已知在冷却里的号**不会被继续撞**(越撞越糟是本仓的教训);
+      · 两条路(协议 / 页面)**共用同一份健康状态**。
+
+    ⚠️ **签名类错误(`kind="sign"`)不换号** —— 那是算法问题,换号没用,直接抛。
+    """
+    kws = [str(k).strip() for k in (keywords or []) if str(k).strip()]
+    if not kws:
+        return []
+    from config.settings import get_settings
+
+    from app.services import xhs_accounts as pool
+
+    st = settings or get_settings()
+
+    #: 候选:池里发现的账号;**池空**(数据库不可用/什么都没配)时退回旧单 cookie 逻辑,
+    #: 保证"最坏情况还能跑",而不是直接抛。
+    #: ⚠️ **只认"能直接拿出 cookie 串"的来源**(`COOKIE_KINDS`):纯浏览器档案
+    #: (`profile_dir`)里没有 cookie 串,协议路取了它只会每轮白报一次失败,
+    #: 还把那个其实好好的档案标脏。
+    refs = pool.discover(st)
+    cookie_refs = [r for r in refs if r.kind in pool.COOKIE_KINDS]
+
+    if not cookie_refs:
+        # 池里**一个能直接拿 cookie 的都没有** —— 分两种情形,别混成一句话:
+        # ① `.env`/库里有单枚 cookie ⇒ 退回"单 cookie"那套(最坏也能跑);
+        # ② 只有浏览器档案 ⇒ 协议路真用不了它们(那是页面路的东西) ——
+        #    这条要**说准**,否则会跟"全在冷却中"混在一起,把人引到错误的修法上。
+        if _cookie(session, user_id, st):
+            refs = [pool.AccountRef(key="legacy", label="单 cookie 回落",
+                                    kind="cookie_store", user_id=user_id)]
+        elif refs:
+            raise XhsProtocolError(
+                "小红书**只有浏览器档案、没有协议凭据** —— 协议路需要一份"
+                "`cookie + ssk` 的成套凭据。两条取法(按你的情形挑):\n"
+                "  · **成套(cookie + ssk,推荐)**:`tools/xhs_browser_login.py <档案>` "
+                "在浏览器里登录一次,它会同时导出 cookie 与 `localStorage[\"webSsk\"]`;\n"
+                "  · **只要 cookie(档案已登录时最快)**:`tools/xhs_export_cookie.py <档案>` "
+                "从已登录档案导出全套 cookie(**不含 ssk**),存进加密 cookie 库。\n"
+                "之后 `tools/xhs_go_live.py` 一键验证归档", kind="need_login",
+                needs_human=True)
+        else:
+            raise XhsProtocolError(
+                "小红书**没有任何可用凭据** —— 两条取法(按你的情形挑):\n"
+                "  · **成套(cookie + ssk,推荐)**:`tools/xhs_browser_login.py <档案>` "
+                "在浏览器里登录一次,它会同时导出 cookie 与 `localStorage[\"webSsk\"]`;\n"
+                "  · **只要 cookie(档案已登录时最快)**:`tools/xhs_export_cookie.py <档案>` "
+                "从已登录档案导出全套 cookie(**不含 ssk**),存进加密 cookie 库。\n"
+                "之后 `tools/xhs_go_live.py` 一键验证并归档", kind="need_login",
+                needs_human=True)
+
+    logger.info("小红书搜索:%s", pool.summary(st))
+
+    tried: set[str] = set()
+    last_exc: XhsProtocolError | None = None
+    #: ⚠️ **归因要留全貌,不能只留最后一个** —— 账号池一轮会走过好几个号,
+    #: "最后那个为什么失败"往往不是"整轮为什么失败"(本仓有过:只剩一句
+    #: "全在冷却中",把"其实只是凭据缺 `web_session`"这个**立刻能修**的原因埋掉了)。
+    failures: list[tuple[str, str]] = []      #: (账号标签, 原因)
+    missing_items: set[str] = set()           #: 凭据缺了哪些关键项
+    attempted = False                        #: 有没有**真的发出去过请求**
+    while True:
+        ref = pool.pick(st, exclude=tried, kinds=pool.COOKIE_KINDS)
+        if ref is None:
+            break
+        tried.add(ref.key)
+        label = ref.label or ref.key
+
+        ck_str = pool.cookie_of(ref, st, session) or _cookie(session, user_id, st)
+        ck = _cookie_dict(ck_str)
+        if not ck.get("a1") or not ck.get("web_session"):
+            miss = "a1" if "a1" not in ck else "web_session"
+            missing_items.add(miss)
+            pool.report(ref, pool.STATE_GUEST, f"凭据不全(缺 {miss})")
+            failures.append((label, f"凭据不全(缺 {miss})"))
+            logger.warning("小红书账号 %s 凭据不全(缺 %s),换下一个", label, miss)
+            continue
+        attempted = True
+        if "id_token" not in ck:
+            logger.warning("小红书账号 %s 没有 `id_token`(手抄的常见缺它)", label)
+
+        ssk = pool.ssk_of(ref) or b""
+        if not ssk and session is not None:
+            try:
+                from app.services.xhs_xys import load_ssk
+
+                ssk = load_ssk(session, user_id)
+            except Exception:  # noqa: BLE001
+                logger.debug("读 ssk 失败,按没有处理", exc_info=True)
+
+        #: ★ **指纹跟着凭据走** —— cookie / ssk / ua 三者同源(见 `xhs_fingerprint`)
+        _ua = pool.ua_of(ref)
+        _hints = pool.hints_of(ref)
+        try:
+            rows = _search_with(ck, ssk, kws, st, pages, session=session,
+                                user_id=user_id, ua=_ua, hints=_hints)
+        except XhsProtocolError as exc:
+            state = pool.from_error(exc.kind, str(exc))
+            pool.report(ref, state, str(exc))
+            if exc.kind == "sign":
+                #: 签名/算法问题 —— 换号无用,别浪费轮次
+                raise
+            last_exc = exc
+            failures.append((label, f"{exc.kind}: {str(exc)[:120]}"))
+            logger.warning("小红书账号 %s 失败(%s → %s),换下一个", label, exc.kind, state)
+            continue
+        pool.report(ref, pool.STATE_HEALTHY, f"{len(rows)} 条")
+        return rows
+
+    #: 所有账号都试过 / 都在冷却里 —— 按**已知最具体**的原因报,别一律说"冷却"
+    if last_exc is not None:
+        raise last_exc
+    if missing_items and not attempted:
+        #: 一枚请求都没发出去过 ⇒ **不是账号被限**,是**凭据本身不全**。
+        #: 硬失败只认 `a1`/`web_session`(见 `_cookie_dict` 的判据)——
+        #: 缺任一个必然不行,提前说清比"发一次再回 -101"有用。
+        raise XhsProtocolError(
+            f"小红书凭据**不完整**(缺 {', '.join(sorted(missing_items))})—— "
+            f"协议路硬失败只认 `a1`/`web_session`,缺任一个必然不行。取一枚完整凭据:"
+            f"`tools/xhs_export_cookie.py <档案>`(从**已登录**档案导出全套 cookie,不含 ssk)"
+            f"或 `tools/xhs_browser_login.py <档案>`(成套 cookie + ssk)",
+            kind="need_login", needs_human=True)
+    recap = ";".join(f"{l}→{d}" for l, d in failures) or "(没有可试的账号)"
+    raise XhsProtocolError(
+        f"小红书账号**全在冷却中**(都是近期失败过的号)。{pool.summary(st)} —— "
+        f"本轮各号结果:{recap}。"
+        f"**别再撞了**:等冷却结束,或换一个新号登录 "
+        f"(`tools/xhs_browser_login.py <新档案>`)", kind="restricted", needs_human=True)

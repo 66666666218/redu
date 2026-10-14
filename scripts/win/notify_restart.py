@@ -11,6 +11,11 @@
 ⚠️ 用 `pythonw` 调用时**没有 stdout**,所以本脚本**自己往 `data/app.log` 追加一行**,
 不依赖重定向。推送失败只记日志 —— **绝不能因为告警失败而耽误重启**。
 
+⚠️ **两类"不是崩溃"的停机都不该报**(第二种于 2026-10-13 实测补齐):
+① **计划内停机** —— 应用优雅关停/`stop_app.bat` 写 `data/last_shutdown.txt`,180s 内跳过;
+② **机器刚开机** —— 开机时长 < `BOOT_GRACE_SECONDS` 就跳过(重启/断电/蓝屏/强制关机都盖住)。
+   第 ② 条是必需的:**Windows 关机不走 lifespan**,第 ① 条在这种场景下**整条失效**。
+
 用法: `python scripts/win/notify_restart.py`(推管理员群)
       `python scripts/win/notify_restart.py --dry-run`(只组装 + 记日志,**不发**)
 """
@@ -25,6 +30,35 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 LOG = ROOT / "data" / "app.log"
+
+#: 开机后多久之内,**不再把"应用没应答"当成崩溃**(秒)。
+#:
+#: ⚠️ **为什么需要**(2026-10-13 实测):18:03:46 用户从开始菜单点了**重启**(事件 id=1074,
+#: 原因「其他(计划外)」)→ 18:04:35 开机 → 18:05:55 登录时启动文件夹里的看门狗发现
+#: `/healthz` 还没起来 ⇒ 推了一条 **🔴 应用进程失联 —— 看门狗已重启**。
+#: 但**它根本没崩**:是 Windows 关机把进程带走了。而 **Windows 关机不走 uvicorn 的 lifespan**,
+#: 所以上面那条 `last_shutdown.txt` 保护**整条失效**(实测该文件停在 10-11 18:08,
+#: 而 18:05:55 那条推送正是因此没被拦下)。
+#:
+#: 换判据成「机器刚开机」的好处:**与应用的关停方式无关** —— 重启/断电/蓝屏/强制关机
+#: 一律盖住,不用再逐个补标记。600s 足够覆盖「开机 → 登录 → 看门狗补跑」这段。
+BOOT_GRACE_SECONDS = 600
+
+
+def machine_uptime() -> float | None:
+    """本机已开机多少秒;**取不到返回 None**。
+
+    取不到时调用方**照旧告警** —— 这层保护只用于**少报假红**,绝不能因为探测失败就
+    连真崩溃也不报了(告警没响 = 假成功,是本仓最忌讳的那类)。
+    """
+    try:
+        if sys.platform != "win32":
+            return None
+        import ctypes
+
+        return ctypes.windll.kernel32.GetTickCount64() / 1000.0
+    except Exception:  # noqa: BLE001 - 探测失败不影响告警主流程
+        return None
 
 
 def _log(line: str) -> None:
@@ -60,15 +94,32 @@ def main() -> int:
         except OSError:
             pass                      # 没有标记 = 没优雅关停过 → 正常告警
 
+        # ⚠️ **再看是不是"机器刚开机"**(2026-10-13 实测):重启/断电/蓝屏同样会让应用
+        # "失联",但那不是崩溃。**这条比上面那个标记更根本** —— 标记要应用自己写,
+        # 而 Windows 关机**不给**它这个机会;开机时长则与关停方式无关。
+        up = machine_uptime()
+        if up is not None and up < BOOT_GRACE_SECONDS:
+            _log(f"跳过:本机 {up:.0f}s 前才开机(<{BOOT_GRACE_SECONDS}s,应用是被重启带走的,"
+                 f"不是崩溃)—— 想确认这次重启是谁触发的,查事件查看器 System 日志 id=1074/109")
+            return 0
+
         from config.settings import get_settings
 
         settings = get_settings()
         webhook = str(getattr(settings, "feishu_webhook_admin", "") or "").strip()
+        # 正文**自己说清是哪一种坏**(2026-10-13):收到 🔴 的人第一句会问「是它崩了,
+        # 还是机器刚起来?」—— 把开机时长写进去,就不必再去翻日志和事件查看器。
+        if up is None:
+            cause = "⚠️ 读不到本机开机时长,无法排除「刚开机」这一因 —— 请顺手确认。\n"
+        else:
+            cause = (f"本机已开机 {up / 3600:.1f} 小时(已超过 {BOOT_GRACE_SECONDS}s 宽限)"
+                     f"⇒ **不是刚开机**,是进程真的没了。\n")
         text = (
             "🔴 应用进程失联 —— 看门狗已重启\n"
             f"时间:{datetime.now():%Y-%m-%d %H:%M:%S}\n"
             "判据:健康检查 http://127.0.0.1:8080/healthz 当时不通。\n"
-            "⚠️ 应用内的所有告警在这种情况下会**一起失效**,所以这条由看门狗(进程外)发出。"
+            + cause
+            + "⚠️ 应用内的所有告警在这种情况下会**一起失效**,所以这条由看门狗(进程外)发出。"
         )
         if not webhook:
             _log("未配管理员群 webhook,跳过(不回落主群:这是运维告警)")

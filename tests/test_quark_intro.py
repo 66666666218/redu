@@ -13,6 +13,14 @@
    资源是**散文件** ⇒ 只能与它并列,那就必须**并进分享清单**,否则并列在我们盘里对他不可见。
 3. **失败边界**:简介放不进去**不许毁掉整次转存**;而"复制任务发出去了"**不等于"落地了"**
    —— 异步任务必须**按目标目录轮询**确认(判据是名字+大小都在,不是收到了 200)。
+
+## 2026-10-13 追加两条(用户口径:「下次需要自动把里面两个文件都挪进去」)
+4. **有几个带几个**:取的是目录里的**全部文件**,不是某个白名单名字。
+   ⚠️ 把简介名写死在代码里的代价本仓吃过一次(见 `quark_dup.PROTECT_NAMES`:
+   用户改名后那份保护**静默失效**了)⇒ 这里必须"放几个带几个、改名也跟得上"。
+5. **同名冲突**:目标里已有同名不同大小的文件时,夸克**不覆盖、自动改名**成 `名字(1).扩展名`
+   (盘上实证:`简介(1).doc` 与 `简介.doc` 并列)⇒ 落地判据必须认改名,
+   否则轮询超时抛错、简介**静默放不进去**。⚠️ 但**大小那一侧绝不放宽**。
 """
 from __future__ import annotations
 
@@ -39,10 +47,15 @@ def qt() -> QuarkTransfer:
 def _wire(qt: QuarkTransfer, monkeypatch, *, top: list[dict],
           promo: list[dict] | None = None,
           target_entries: list[dict] | None = None,
-          promo_found: bool = True) -> dict:
+          promo_found: bool = True,
+          rename_on_copy: bool = False) -> dict:
     """断网假件。**内容是真模型**:复制成功后目标目录里**真的**多出这些条目,
     于是轮询那一步能被真正走到(第一版夹具让复制"看起来成功"但目录永远为空,
-    恰好把轮询这条最重要的判据遮住了)。"""
+    恰好把轮询这条最重要的判据遮住了)。
+
+    `rename_on_copy` 模拟**夸克在同名冲突时的自动改名**(盘上实证:`简介(1).doc`)——
+    改的是**文件名**,大小不变。
+    """
     rec: dict = {"share_ids": None, "order": [], "save_targets": [], "copy_targets": [],
                  "copy_fids": [], "new_fid": {"RES1": "RESNEW"}}
     contents: dict[str, list[dict]] = {
@@ -78,7 +91,12 @@ def _wire(qt: QuarkTransfer, monkeypatch, *, top: list[dict],
             for fid in j.get("filelist") or []:
                 rec["copy_fids"].append(fid)
                 e = next(x for x in contents[PROMO_DIR] if str(x["fid"]) == str(fid))
-                contents.setdefault(to, []).append({**e, "fid": f"COPY::{fid}"})
+                nm = str(e["file_name"])
+                if rename_on_copy:      # 同名冲突 ⇒ 夸克改名成「名字(1).扩展名」
+                    stem, dot, ext = nm.rpartition(".")
+                    nm = f"{stem}(1){dot}{ext}" if dot else f"{nm}(1)"
+                contents.setdefault(to, []).append({**e, "file_name": nm,
+                                                    "fid": f"COPY::{fid}"})
             return {"data": {"task_id": "T1"}}
         raise AssertionError(f"没预期的请求:{method} {path}")
 
@@ -217,3 +235,80 @@ def test_简介失败不毁掉转存(qt, monkeypatch) -> None:
                                intro_dir="/监听宣传")
     assert out["share_url"] == "https://pan.quark.cn/s/NEW"
     assert out["intro"] == 0 and rec["share_ids"] == ["RESNEW"]
+
+
+# ---------------------------------------------------------------------------
+# ③ 目录里**有几个就带几个**(2026-10-13 用户口径:「下次需要自动把里面两个文件都挪进去」)
+# ---------------------------------------------------------------------------
+
+
+def _two_files() -> list[dict]:
+    """用户 2026-10-13 实际放在 `/监听宣传` 里的那两个(**真名、真大小**)。"""
+    return [_f("热点监控第一时间获取.doc", "I1", 3_283_456),
+            _f("招兼职代发日入200-500.jpg", "I2", 1_181_997)]
+
+
+def test_目录里两个文件必须都带进去(qt, monkeypatch) -> None:
+    """★★ **这条就是用户要的那个功能**。`promos` 取的是该目录的**全部文件**(不是白名单),
+    所以文案 + 广告图会**一起**跟着资源走 —— 断言的是"两个都在"而不是"至少有一个"。"""
+    rec = _wire(qt, monkeypatch, top=[_src_dir()], promo=_two_files())
+    out = qt.transfer_and_share("https://pan.quark.cn/s/src", save_dir="/redian监听",
+                               intro_dir="/监听宣传")
+    assert rec["copy_fids"] == ["I1", "I2"], f"两个文件都要复制,实际 {rec['copy_fids']}"
+    assert out["intro"] == 2
+    assert out["intro_names"] == ["热点监控第一时间获取.doc", "招兼职代发日入200-500.jpg"]
+
+
+def test_散文件资源时两个文件也都并进分享清单(qt, monkeypatch) -> None:
+    """★ 散文件那一路最容易只带一个:简介必须**每个都**进分享清单,少一个对方就看不到。"""
+    rec = _wire(qt, monkeypatch, top=[_f("电影.mp4", "F1", 5_000_000)], promo=_two_files())
+    rec["new_fid"] = {"F1": "F1NEW"}
+    out = qt.transfer_and_share("https://pan.quark.cn/s/src", save_dir="/redian监听",
+                               intro_dir="/监听宣传")
+    assert rec["copy_fids"] == ["I1", "I2"]
+    assert rec["share_ids"] == ["F1NEW", "COPY::I1", "COPY::I2"], rec["share_ids"]
+    assert out["intro"] == 2
+
+
+def test_名字变了也不用改代码(qt, monkeypatch) -> None:
+    """⚠️ 防的是"把简介名写死在代码里"那种做法:用户改一次名,写死的名单就静默失效。
+    这里换成一个**完全陌生的名字**,照样必须带上。"""
+    rec = _wire(qt, monkeypatch, top=[_src_dir()],
+                promo=[_f("任意新名字.txt", "X9", 123)])
+    out = qt.transfer_and_share("https://pan.quark.cn/s/src", save_dir="/redian监听",
+                               intro_dir="/监听宣传")
+    assert rec["copy_fids"] == ["X9"] and out["intro_names"] == ["任意新名字.txt"]
+
+
+# ---------------------------------------------------------------------------
+# ④ 同名冲突:夸克会自动改名成 `名字(1).扩展名`(盘上实证 `简介(1).doc`)
+# ---------------------------------------------------------------------------
+
+
+def test_被夸克改名成括号1也算落地_不能抛错(qt, monkeypatch) -> None:
+    """★★ 落地判据原来只认「原名的 (名字,大小)」⇒ 目标里已有同名不同大小的文件时,
+    夸克把新复制的那份改名成 `名字(1).ext`,**永远匹配不上** ⇒ 轮询超时抛错 ⇒
+    简介静默放不进去。改名之后**必须照样算落地**。"""
+    rec = _wire(qt, monkeypatch, top=[_src_dir()], rename_on_copy=True)
+    out = qt.transfer_and_share("https://pan.quark.cn/s/src", save_dir="/redian监听",
+                               intro_dir="/监听宣传")
+    assert out["intro"] == 1, "被改名的那份没被认成落地"
+    assert rec["share_ids"] == ["RESNEW"]
+
+
+def test_上次被改名的那份不再重复复制(qt, monkeypatch) -> None:
+    """★ 反过来也一样:目录里已有 `名字(1).ext`(就是我们上次放进去的那份)⇒ 免复制。
+    否则每次转存都再塞一份,简介自己变成新的空间占用,而且名字会一直 `(1)(2)(3)` 长下去。"""
+    rec = _wire(qt, monkeypatch, top=[_src_dir()],
+                target_entries=[_f("简介(1).doc", "RENAMED", 2_976_256)])
+    assert qt.copy_into(PROMO_FILES, TARGET) == ["RENAMED"]
+    assert rec["copy_targets"] == [], "认不出改名的那份 ⇒ 又复制了一遍"
+
+
+def test_改名匹配也不许把大小放过(qt, monkeypatch) -> None:
+    """⚠️ 名字放宽了(`_collision_re`),**大小这一侧绝不许放宽** ——
+    否则目录里那个"同名不同大小的旧文件"又会被当成新复制落地(2026-10-08 抓到的坑)。"""
+    rec = _wire(qt, monkeypatch, top=[],
+                target_entries=[_f("简介(1).doc", "OLD", 1_000_000)])
+    assert qt.copy_into(PROMO_FILES, TARGET) == ["COPY::I1"]
+    assert rec["copy_targets"] == [TARGET]

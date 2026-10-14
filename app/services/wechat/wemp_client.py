@@ -18,6 +18,8 @@ from app.utils.ua import CHROME_WINDOWS  # 统一 UA(见该模块注释)
 import base64
 import json
 
+from typing import Any
+
 import requests
 
 from app.services.reader_platform_client import PlatformError
@@ -27,6 +29,65 @@ logger = get_logger(__name__)
 
 WEMP_BASE = "https://mp.weixin.qq.com"
 _UA = CHROME_WINDOWS
+
+#: 后台 `appmsgex[*]` 里"阅读量 / 点赞量"的字段名。
+#:
+#: ⚠️⚠️ **这几个名字是"待首次真会话确认"的,不是已验证的事实** ——
+#: 2026-10-14 实测时后台凭据已失效(`200003 invalid session`),**没能验证**。
+#: 所以这里不赌一个名字,而是:(a) 兼容社区通行的几个形态;
+#: (b) **第一次解析成功就把真实字段名打进日志**(`_log_shape_once`)——
+#: 让第一次真会话**自己回答**"它到底叫什么",而不是我猜一个然后静默拿不到数。
+_READ_KEYS = ("read_num", "readNum", "read_count")
+_LIKE_KEYS = ("like_num", "likeNum", "old_like_num", "like_count")
+
+_shape_logged = False
+
+
+def _count(value: Any) -> int:
+    """`"12345"` / `12345` / `"10万+"` / `""` → int。取不出就 **0**。
+
+    ⚠️ **0 在这条链上表示"不知道",不是"没有"** —— 与全仓 `read_num` 的语义一致:
+    `_insert_new_articles` 只在「旧值 0 且新值 > 0」时回填,**从不写 0**。
+    """
+    if value is None or isinstance(value, bool):
+        return 0
+    if isinstance(value, (int, float)):
+        return max(0, int(value))
+    import re as _re
+
+    text = str(value).strip().replace(",", "").replace("+", "")
+    if not text:
+        return 0
+    m = _re.match(r"^(\d+(?:\.\d+)?)\s*([万wW])?", text)
+    if not m:
+        return 0
+    num = float(m.group(1))
+    if m.group(2):
+        num *= 10000
+    return max(0, int(num))
+
+
+def _pick(art: dict, keys: tuple[str, ...]) -> int:
+    """按候选名取第一个"取得出数"的值。"""
+    for k in keys:
+        if k in art:
+            got = _count(art.get(k))
+            if got:
+                return got
+    return 0
+
+
+def _log_shape_once(art: dict) -> None:
+    """**第一次**解析成功时,把后台真实的字段名打出来(每进程一次)。
+
+    这条日志是给"字段名到底叫什么"这个问题留的**唯一权威出口** ——
+    没有它,名字猜错了就是"阅读数一直是 0",而没有任何地方会说出原因。
+    """
+    global _shape_logged
+    if _shape_logged:
+        return
+    _shape_logged = True
+    logger.info("appmsgpublish 文章字段(首次解析,用于确认阅读数键名)= %s", sorted(art.keys()))
 
 
 class WempError(PlatformError):
@@ -115,11 +176,17 @@ class WempClient:
                 url = str(art.get("link") or "").strip()
                 if not title or not url:
                     continue  # 无标题/链接的条目上不了卡片也无法去重
+                _log_shape_once(art)
                 items.append({
                     "id": str(art.get("aid") or url),
                     "title": title,
                     "url": url,
                     "summary": str(art.get("digest") or "").strip(),
                     "publish_at_raw": art.get("create_time") or art.get("update_time"),
+                    # ★ 2026-10-14:后台这个接口**是免费阅读数唯一不受"29 个号额度"限制的来源**
+                    #   (见 `doc/外部接口速查.md` 第 3 节的"还剩什么")。原来这两项被直接丢掉,
+                    #   于是即便后台活着,卡片上阅读数也还是全 `—`。取不到就是 0(=不知道)。
+                    "read_num": _pick(art, _READ_KEYS),
+                    "like_num": _pick(art, _LIKE_KEYS),
                 })
         return items

@@ -1256,6 +1256,18 @@ python scripts/job_liveness.py --strict   # 有"从没跑过/已超期"就退出
 > 不是 `taskkill /IM pythonw.exe` 那种连 MediaCrawler 一起杀的写法);看门狗见到
 > "180 秒内刚优雅关停过"就**不发**告警。实测两个分支:
 > `已推送`(非计划停机)/ `跳过:…优雅关停`(计划内重启)。
+>
+> ⚠️⚠️ **另一类假红灯:「机器自己重启了」(2026-10-13 实测补上)**。当天 `18:03:46` 用户
+> 从开始菜单点了**重启**(`System` 日志 `User32 id=1074`,原因「其他(计划外)」)→ `18:04:35` 开机
+> → `18:05:55` 登录时启动文件夹里的看门狗发现 `/healthz` 还没起来 ⇒ 推了一条
+> **🔴 应用进程失联**。但**进程根本没崩**:`data/app.log` 在 `18:03:00` 之后**一行都没有**
+> (无 traceback、无 uvicorn `Shutting down`)—— 是 Windows 关机把它带走的。
+> **为什么 `last_shutdown.txt` 那层没拦住**:它要**应用自己**在 lifespan 的 `finally` 里写,
+> 而 **Windows 关机不给它这个机会**(实测该文件 mtime 停在两天前)。⇒ 判据必须**与关停方式无关**:
+> `notify_restart.py` 现在先量 `machine_uptime()`(`GetTickCount64`,零依赖),
+> 开机 **`BOOT_GRACE_SECONDS=600`** 秒内**不发**失联告警、只落一行日志。这条**顺带覆盖**
+> 断电/蓝屏/强制关机 —— 不用再逐个补标记。
+> ⚠️ **取不到开机时长 ⇒ 照旧告警**(这层只用于**少报假红**,绝不变成"漏报真崩溃")。
 
 - 启动方式:`scripts/win/app_watchdog.bat` —— 先探 `http://127.0.0.1:8080/healthz`,
   通了就退出(幂等);不通才拉起 uvicorn(隐藏窗口,日志追加到 `data/app.log`)。

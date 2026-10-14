@@ -391,6 +391,63 @@ class TestPartialFailureAlerts:
         assert "小红书" in title, title
         assert "--platform xhs" in detail, f"要给**能照着做的那一步**(平台 id):{detail[:180]}"
 
+    def test_微博失败给的修法不是跑_MediaCrawler(self, session, monkeypatch) -> None:
+        """★★★ 2026-10-13:**微博早在 10-07 就改走纯协议了,根本不经过 MediaCrawler**
+        (`weibo_search` 头注 + `_crawl_platform` 的 `if plat == "weibo"`)。
+
+        而告警原来不分平台一律叫人跑 `main.py --platform wb` —— 跑了也**白跑**:
+        热度采集读的是**我们 cookie 库**里那一枚,MediaCrawler 的 `browser_data/`
+        是**另一份档案**,扫完码库里那枚还是旧的。
+        (与微信读书那条「叫人去开雷电模拟器」是同一类错误:**方向对、动作错**。)
+        """
+        import app.services.alert_service as asvc
+
+        sent: list = []
+        monkeypatch.setattr(asvc, "notify_incident", lambda *a, **k: sent.append(a) or True)
+        self._patch(monkeypatch, boom="weibo", plats=("weibo", "bilibili"))
+
+        rp.probe(session, 1, _PresS())
+
+        assert sent, "微博失败必须推告警"
+        title, detail = sent[0][3], sent[0][4]
+        assert "微博" in title, title
+        assert "weibo_export_cookie" in detail, f"要给**走得通**的那一步:{detail[:240]}"
+        # ⚠️ 判据不能用 `"--platform wb" not in detail` —— 文案里**故意**留了一句
+        #    「别去跑 `main.py --platform wb`」(把已知的错动作明写出来,免得人自己想起它)。
+        #    要钉的是**"没把它当成推荐动作"**,所以看"推荐动作"才会有的那句话在不在。
+        assert "用 App 扫一下即可" not in detail, (
+            f"微博不走 MediaCrawler,不能把它当推荐动作给出去:{detail[:240]}")
+        assert "别去跑" in detail, "要把「跑 MediaCrawler 没用」明写出来"
+
+    def test_微博的风控类失败不该叫人去换cookie(self, session, monkeypatch) -> None:
+        """⚠️ 反向:同样是微博失败,但 `kind=risk` ⇒ 该等,不是去换凭据。
+
+        这条钉的是**判据本身**:告警必须看 `kind`,而不是看文案里有没有"登录"两个字。
+        """
+        import app.services.alert_service as asvc
+        from app.services.mediacrawler_source import MediaCrawlerError
+
+        sent: list = []
+        monkeypatch.setattr(asvc, "notify_incident", lambda *a, **k: sent.append(a) or True)
+        self._patch(monkeypatch, boom=None, plats=("weibo", "bilibili"))
+
+        def _crawl(plat, names, session=None):
+            if plat == "weibo":
+                err = MediaCrawlerError("weibo(纯协议): 接口返回 ok=-100 —— 疑似风控")
+                err.kind = "risk"
+                raise err
+            return [{"keyword": "某个资源", "snippet": "x", "uid": "u1", "name": "n",
+                     "url": "http://x"}]
+        monkeypatch.setattr(rp, "_crawl_platform", _crawl)
+
+        rp.probe(session, 1, _PresS())
+
+        assert sent, "失败必须推告警"
+        detail = sent[0][4]
+        assert "weibo_export_cookie" not in detail, (
+            f"风控不是凭据问题,不该叫人去换 cookie:{detail[:240]}")
+        assert "跳过" in detail, f"风控该「等」,让其余平台照常:{detail[:240]}"
+
     def test_全部失败仍然冒泡(self, session, monkeypatch) -> None:
         """⚠️ 反向:全挂必须抛(不能记成 success 空)—— 别被新加的告警顺手吞掉。"""
         import app.services.alert_service as asvc
@@ -500,3 +557,46 @@ def test_跨盘已有我方链就不另存一份(monkeypatch) -> None:
     assert calls == [], "库里已有 ⇒ **不该再打转存接口**(它占盘、又慢)"
     assert out["reused"] == 1 and out["attempted"] == 0, out
     assert items[0]["link"]["my_link"] == "https://pan.quark.cn/s/HAVE"
+
+
+class TestXhsEgressGuard:
+    """★★ **动用账号之前,先过出口门禁**(2026-10-13)。
+
+    这条是用"一个号都活不过一天"换来的:一天内在一台机器上连登 4 个档案之后,
+    **连游客请求都开始回 `300012`(`IP存在风险`)**。
+    ⇒ 那时候**再换任何新号都没用** —— 号换了,出口没换。
+
+    ⚠️ 判错的根源:把"IP 的**静态属性**"(家宽 / 不漂移 / 非机房)当成了
+    "IP 没被标记"。**前者说明不了后者** —— 只有发一次游客请求才试得出来。
+
+    顺序绝不能反:① 游客探针(零账号成本)② 确认 `-101` ③ **然后**才拿真号试。
+    """
+
+    def test_出口被标记时要拦住(self, monkeypatch) -> None:
+        monkeypatch.setattr("app.services.xhs_net.ip_blocked",
+                            lambda *a, **k: (True, "300012 / IP存在风险"))
+        assert rp._xhs_egress_guard() is False
+
+    def test_出口通时要放行(self, monkeypatch) -> None:
+        monkeypatch.setattr("app.services.xhs_net.ip_blocked",
+                            lambda *a, **k: (False, "-101 无登录信息"))
+        assert rp._xhs_egress_guard() is True
+
+    def test_探测自己失败时不能拦采集(self, monkeypatch) -> None:
+        """⚠️ 门禁的目的是"别撞脏出口",不是"多一个会误报的开关"。
+        网络抖一下就把采集停掉,是**另一种假故障**。
+        """
+        def _boom(*a, **k):
+            raise RuntimeError("网络抖了一下")
+
+        monkeypatch.setattr("app.services.xhs_net.ip_blocked", _boom)
+        assert rp._xhs_egress_guard() is True
+
+    def test_被拦时采集要抛错而不是返回空(self, monkeypatch) -> None:
+        """★ **"被拦"不能混进"真没有"** —— 否则结论就成"小红书没热度"这种假结论。"""
+        from app.services.mediacrawler_source import MediaCrawlerError
+
+        monkeypatch.setattr(rp, "_xhs_egress_guard", lambda: False)
+        with pytest.raises(MediaCrawlerError) as ei:
+            rp._crawl_platform("xiaohongshu", ["美食"], None)
+        assert "出口" in str(ei.value)

@@ -359,3 +359,116 @@ def test_去引流版不是引流_招代发才是() -> None:
     assert is_promo_name("长期招抖音作品代发兼职，每天花2分钟发布一下就行.PNG")
     assert is_promo_name("找抖音代发助手，每天轻松赚奶茶钱.JPG")
     assert is_promo_name("长期招代发简单轻松赚💰.png")
+
+
+# ---------------------------------------------------------------------------
+# 简介保护:从**配置的简介目录**现取,不写死文件名(2026-10-13)
+# ---------------------------------------------------------------------------
+#
+# 背景(全部实测,不是设想):
+# 用户把 `简介.doc` **改名**成 `热点监控第一时间获取.doc`,而保护名单里写死的就是
+# 前一个名字 ⇒ 那份保护**从改名那一刻起就静默失效了**,没有任何地方会报出来。
+# 而简介恰恰是盘上**最容易被判死**的东西 —— 它会被复制进每一个资源,于是:
+#   ① 广告图那种名字**命中强模式**(`代发日入`)⇒ 单家也删;
+#   ② 简介本身在多个家里**同名同大小** ⇒ 判成"跨目录重复",只留最新那个家。
+# 终态就是:资源里的简介被自己的夜间清理一个个吃掉,而日志一切正常。
+
+
+class _IntroQt:
+    """够 `build_plan` 跑通的**离线**假件(不碰网络)。"""
+
+    def __init__(self, promo: tuple[str, ...] = ("/监听宣传",)) -> None:
+        self.homes = [{"file_name": "redian监听_1007", "fid": "H1", "dir": True,
+                       "updated_at": 1_700_000_200},
+                      {"file_name": "redian监听_1004", "fid": "H2", "dir": True,
+                       "updated_at": 1_700_000_100}]
+        # 简介目录里的**两个真名、真大小**
+        self.promo = [{"file_name": "热点监控第一时间获取.doc", "fid": "P1",
+                       "size": 3_283_456, "dir": False},
+                      {"file_name": "招兼职代发日入200-500.jpg", "fid": "P2",
+                       "size": 1_181_997, "dir": False}]
+        # 两份资源(落在两个不同的家)里都已经把简介复制进去了
+        res = [{"file_name": "招兼职代发日入200-500.jpg", "fid": "AD", "size": 1_181_997,
+                "dir": False},
+               {"file_name": "热点监控第一时间获取.doc", "fid": "DOC", "size": 3_283_456,
+                "dir": False}]
+        self.contents = {
+            "H1": [{"file_name": "资源A", "fid": "R1", "size": 0, "dir": True}],
+            "H2": [{"file_name": "资源B", "fid": "R2", "size": 0, "dir": True}],
+            "R1": [{**x, "fid": x["fid"] + "1"} for x in res],
+            "R2": [{**x, "fid": x["fid"] + "2"} for x in res],
+            "PROMO": list(self.promo),
+        }
+        self.dirs = promo
+
+    def search_files(self, keyword, size=50):
+        return list(self.homes)
+
+    def list_dir(self, fid="0"):
+        return list(self.contents.get(fid, []))
+
+    def _list_dir(self, fid="0"):
+        return list(self.contents.get(fid, []))
+
+    def resolve_named_dir(self, name):
+        return "PROMO" if str(name).strip("/") in ("监听宣传",) else ""
+
+    def _request(self, method, path, **kw):
+        assert "mypage/detail" in path, f"意外请求 {path}"
+        return {"data": {"list": []}}          # 短页 ⇒ 保护名单取完
+
+
+def test_简介目录里的文件护得住_尤其那张名字像广告的() -> None:
+    """★★ **改名之后保护必须还在**。两条断言分别对着上面 ① 和 ② 两个死法。"""
+    from app.services.quark_dup import build_plan
+
+    plan = build_plan(_IntroQt(), mmdd_prefix="10", protect_dirs=("/监听宣传",))
+    assert plan["delete"] == [], f"简介被自己的清理判死了:{[d['name'] for d in plan['delete']]}"
+    assert {x["name"] for x in plan["intro_protected"]} == {
+        "热点监控第一时间获取.doc", "招兼职代发日入200-500.jpg"}
+    assert plan["complete"] is True
+
+
+def test_没有简介保护时这两个文件真的会被判死() -> None:
+    """⚠️ **反面**:没有这条保护,上面那两个文件**确实**会被清掉 ——
+    所以上一条断言不是空的(本仓吃过"看着在测其实什么都没测"的亏)。"""
+    from app.services.quark_dup import build_plan
+
+    plan = build_plan(_IntroQt(), mmdd_prefix="10", protect_dirs=())
+    names = {d["name"] for d in plan["delete"]}
+    assert "招兼职代发日入200-500.jpg" in names, "名字命中强模式 ⇒ 单家也会删"
+    assert "热点监控第一时间获取.doc" in names, "两家同名同大小 ⇒ 判成跨目录重复"
+    assert plan["intro_protected"] == []
+
+
+def test_默认从配置取简介目录_不用调用方传(monkeypatch) -> None:
+    """线上是 `pan_auto_clean` / 脚本各调一次 —— **不靠调用方记得传参数**才生效。"""
+    from types import SimpleNamespace
+
+    from app.services import quark_dup
+    from app.services.quark_dup import build_plan
+
+    monkeypatch.setattr("config.settings.get_settings",
+                        lambda: SimpleNamespace(pan_intro_quark_dir="/监听宣传"))
+    assert quark_dup.intro_protect_dirs() == ("/监听宣传",)
+    fids, names, detail = quark_dup.collect_intro_protect(_IntroQt(), ("/监听宣传",))
+    assert names == {"热点监控第一时间获取.doc", "招兼职代发日入200-500.jpg"}
+    assert fids == {"P1", "P2"}, "原件要能按 fid 精确护住"
+    assert len(detail) == 2 and all(x["size"] > 0 for x in detail)
+    plan = build_plan(_IntroQt(), mmdd_prefix="10")       # ← 故意**不传** protect_dirs
+    assert plan["delete"] == [] and len(plan["intro_protected"]) == 2
+
+
+def test_简介目录取不到时不崩也不改判据() -> None:
+    """⚠️ 保护名单只用于**少删**。取不到就回到**旧行为**,绝不许因此多删或整轮失败。"""
+    from app.services.quark_dup import build_plan
+
+    qt = _IntroQt()
+
+    def _boom(name):
+        raise RuntimeError("网络抖了")
+
+    qt.resolve_named_dir = _boom
+    plan = build_plan(qt, mmdd_prefix="10", protect_dirs=("/监听宣传",))
+    assert plan["intro_protected"] == []
+    assert plan["delete"], "取不到简介目录时,判据必须与旧版一致(该删的还是删)"

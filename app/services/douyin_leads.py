@@ -834,6 +834,57 @@ def _cand_names(title: str, limit: int = 5) -> list[str]:
     return uniq[:limit]
 
 
+#: 「窗口候选」的最短长度(2026-10-14)。⚠️ **别调小**:6 字以下的中文短语在资源库里
+#: 天然是通用词 —— 实测 6 字的「免费下载安装」就命中了一条不相干的链。
+_WINDOW_MIN = 6
+#: 每条线索最多试几个窗口(长→短)。它只在**第一遍全空**时才走,每个窗口一次库查询
+#: (实测约 25ms)⇒ 12 个 ≈ 0.3s/条,一轮十几条 = 秒级,可忽略。
+_WINDOW_CAP = 12
+#: 切片段(与 `_cand_names` 同一套分隔符,这里**额外切开 `《》`/`【】`/括号**)——
+#: 因为名字常常紧贴在 `《群名》` 后面(`《来支双喜》我的世界自然之需搜 …`),
+#: 不切开就永远切不出后半段那个真名字。
+_WINDOW_SPLIT = re.compile(r"[，。！?、\s|/【】()（）\[\]《》]+")
+
+#: **通用推广词**:窗口候选里**只要沾上这些字就不算名字**(2026-10-14 实测两次栽在这上面)。
+#: 两个实例:`免费下载安装` 命中一条不相干的链、`免费获取教程` 命中另一条 ——
+#: 它们**都能过"库里标题以它开头"那道护栏**(因为库里那条资源就叫这名),
+#: 所以**必须在这里拦**。
+#: ⚠️ 加词要有分寸:这是**推广行为词**,不是代词 ——
+#: 别写「我的」「你们的」(会把「我的世界自然之需」一起打死,而它正是这条链要救的样本)。
+_GENERIC_WORDS = (
+    "免费", "获取", "教程", "下载", "安装", "在线", "观看", "领取", "分享", "链接",
+    "入口", "最新", "高清", "全集", "完整版", "怎么", "什么", "可以", "来了", "来啦",
+    "找到", "推荐", "关注", "点赞", "私信", "详细", "直接", "点击", "记得",
+)
+
+
+def _window_names(title: str) -> list[str]:
+    """**第二遍**候选:把长片段按「前缀窗口」再切一遍(长→短),捞**名字被夹在长句里**的那种。
+
+    ★ 为什么要它(2026-10-14 实测,用户报「点标题跳网盘」):
+        `《来支双喜》我的世界自然之需搜 模组下载教程,…`
+    而库里**明明有**「我的世界自然之需」的我方链 —— 第一遍那三类候选
+    (`《X》` / `咐置X叩苓` / 整段文字)**一个都配不上**,因为名字后面还粘着一个「搜」字。
+    ⇒ 把每个片段的前缀从长到短各试一次,试到第 8 个字就命中(实测命中率 41% → 48%)。
+
+    ⚠️ **两道护栏**(见 `_library_link`):① 库里标题**必须以它开头**;② 它自己**不许沾通用词**
+    (`_GENERIC_WORDS`)。⚠️ 实测缺任何一道都会配错 —— 通用短语(`免费下载安装`/`免费获取教程`)
+    不但会命中不相干的链,其中一条的**库标题恰好以它开头**,连①都拦不住;
+    而「**给错链比不给链更坏**」是本仓既定口径(用户点开会拿到完全不相干的东西)。
+    """
+    out: list[str] = []
+    for seg in _WINDOW_SPLIT.split(_RE_TAG.sub("", str(title or ""))):
+        seg = seg.strip()
+        for length in range(len(seg), _WINDOW_MIN - 1, -1):
+            win = seg[:length]
+            if win in out or any(w in win for w in _GENERIC_WORDS):
+                continue
+            out.append(win)
+            if len(out) >= _WINDOW_CAP:
+                return out
+    return out
+
+
 def _library_link(db, user_id: int, title: str, *, days: int = 90) -> dict | None:
     """**拿线索标题去我们自己的资源库里找一条现成的我方链**。找不到返回 `None`。
 
@@ -870,6 +921,25 @@ def _library_link(db, user_id: int, title: str, *, days: int = 90) -> dict | Non
                 continue
             return {"name": name, "link": link, "title": first[:80]}
         # 该候选名的命中都过不了护栏 ⇒ 换下一个候选名(不拿"次优"凑数)
+    # ★★ **第二遍:前缀窗口**(2026-10-14)。只在第一遍**全空**时才走。
+    #    与第一遍的差别只有护栏:**窗口候选必须让库里标题「以它开头」**——
+    #    因为它比 `《X》`/变体字那两类弱得多(是机器切出来的,不是人写的),
+    #    实测不加严就会配错(通用短语「免费下载安装」→ 一条不相干的链)。
+    from app.services.resource_library import match_key
+
+    for name in _window_names(title):
+        try:
+            hits = search_resources(db, user_id, name, days=days, limit=5)
+        except Exception:  # noqa: BLE001 - 与第一遍同口径:查不动就算了
+            continue
+        for h in hits:
+            link = str(h.get("my_link") or "").strip()
+            if not link:
+                continue
+            first = str((h.get("titles") or [""])[0] or "")
+            if not match_key(first).startswith(match_key(name)):
+                continue          # 只有"库里的名字**以它开头**"才算命中(反而更严)
+            return {"name": name, "link": link, "title": first[:80]}
     return None
 
 

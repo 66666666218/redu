@@ -10,7 +10,7 @@ os.environ.setdefault("DATABASE_URL", "sqlite://")
 import json
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import sessionmaker
 
 from app.db.database import Base
@@ -232,6 +232,54 @@ def test_sync_group_shares_without_cred_returns_no_cred(session, monkeypatch) ->
     """没配迅雷凭据时给明确状态,不抛异常。"""
     monkeypatch.setattr(xg, "_headers", lambda: None)
     assert xg.sync_group_shares(session, 1)["status"] == "no_cred"
+
+
+def test_每个群单独提交_写事务不许横跨下一轮的网络请求(monkeypatch) -> None:
+    """★★ 2026-10-13 实测修的 bug(写事务横跨网络 I/O)。
+
+    原实现是「循环里 `flush()` + **所有群跑完后**才 `commit()` 一次」,而**每轮迭代开头
+    都要发网络请求**(拉群消息)⇒ **写事务横跨了后面所有群的 HTTP 往返**,写锁实测被持
+    **22~45 秒**(由 `app.db.database` 的写事务看门狗点名,栈正落在这两行)。
+    单写者 sqlite 下后果是真的:当天 370 次「写事务超时」;仅一次重启之后就
+    `database is locked` 42 次、**作业心跳写入失败 10 次**(作业会被误判成"没跑")。
+    ⇒ `flush()` 只发语句、**不结束事务** —— 慢活(HTTP)一律不许留在事务里。
+
+    判据:把「提交」与「拉消息」按**发生顺序**记下来,断言**两次抓取之间必定有一次提交**。
+    这条在旧实现下必红(那时 COMMIT 全挤在最后一次抓取之后)。
+    """
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+    db.add(User(id=1, username="admin", email="a@b.c", password_hash="x", enabled=True))
+    for g in ("g1", "g2", "g3"):
+        # 每群先塞一条"见过的",补翻一次就停 ⇒ 时序干净(每群恰好一次抓取)
+        db.add(XunleiGroupShare(user_id=1, group_id=g, group_name=g,
+                                message_id="0", share_id=f"OLD-{g}", origin_url="u"))
+    db.commit()
+
+    timeline: list[str] = []
+    event.listen(engine, "commit", lambda _conn: timeline.append("COMMIT"))
+
+    monkeypatch.setattr(xg, "list_groups", lambda: [
+        {"group_id": "g1", "name": "群一"},
+        {"group_id": "g2", "name": "群二"},
+        {"group_id": "g3", "name": "群三"}])
+
+    def _records(gid, count=20, record_id=0, direction=0):
+        timeline.append(f"FETCH {gid}")
+        return [_share(30, f"OLD-{gid}"), _share(29, f"NEW-{gid}")]
+
+    monkeypatch.setattr(xg, "group_records", _records)
+
+    out = xg.sync_group_shares(db, 1)
+    assert out["new"] == 3, out
+
+    fetches = [i for i, e in enumerate(timeline) if e.startswith("FETCH")]
+    assert len(fetches) == 3, timeline
+    for prev, nxt in zip(fetches, fetches[1:]):
+        assert "COMMIT" in timeline[prev + 1:nxt], (
+            f"「{timeline[nxt]}」之前没有提交 ⇒ 写事务横跨了网络请求。timeline={timeline}")
+    db.close()
 
 
 # ---------------------------------------------------------------- 转存

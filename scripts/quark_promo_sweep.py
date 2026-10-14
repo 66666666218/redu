@@ -16,7 +16,9 @@
 
 ## 三条硬保护(与 `quark_dup` 同一套)
 1. 我方已发出的分享链指着的那份(`first_fid`)**绝不删**;
-2. 我们自己的 `简介.doc` **绝不删**;
+2. **我们自己的宣传简介目录**(`pan_intro_quark_dir`,`/监听宣传`)里的文件**绝不删**
+   —— 按 **fid + 名字**双维度保护(副本在资源里 fid 与原件不同,只能靠名字)。
+   ⚠️ 原来是写死 `简介.doc` 一个名字,2026-10-13 实测**用户把文件改名后它静默失效**了;
 3. **弱模式一律不碰** —— 只做**强模式**(名字本身就是网盘/加群指令)。
    ⚠️ 弱模式(`教程`/`注意`/`说明`…)在这份盘上会**系统性误判**
    (实测 `高中英语151组最容易拼错的单词，考场上一定要注意！.docx` 是真资源),
@@ -40,14 +42,20 @@ from app.services.quark_dup import (  # noqa: E402
     PROTECT_NAMES,
     STRONG_PATTERNS,
     is_promo_name,
-    protected_fids,
+    refresh_protect,
 )
 
 
 def collect(qt) -> tuple[list[dict], list[dict]]:
     """→ `(要删的, 被保护而跳过的)`。**只读。**"""
-    prot_fids, prot_names, n_shares = protected_fids(qt)
+    # ★ 2026-10-13:`refresh_protect` = 分享链 + **宣传简介目录**里的文件。
+    # 后者必须有:那张推广图的名字**本身就命中强模式**(`代发日入`),
+    # 而它是要**跟着每个资源走**的 —— 不保护就会在这里被自己的清扫删掉。
+    prot_fids, prot_names, n_shares, intro = refresh_protect(qt)
     print(f"我方分享 {n_shares} 条,保护 {len(prot_fids)} 个 fid、{len(prot_names)} 个名字")
+    if intro:
+        print(f"🛡 简介保护:{len(intro)} 个文件来自 {sorted({x['dir'] for x in intro})}"
+              f" → {[x['name'] for x in intro]}")
     seen: dict[str, dict] = {}
     skipped: list[dict] = []
     for pat in STRONG_PATTERNS:

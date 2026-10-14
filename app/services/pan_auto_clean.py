@@ -82,11 +82,18 @@ def clean_quark(db: Session, user_id: int, settings, *, dry_run: bool, left: int
 
     all_del = list(plan.get("delete") or [])
     todo, blocked = _cap(all_del, left)
+    intro = list(plan.get("intro_protected") or [])
     out: dict[str, Any] = {
         "pan": "夸克", "state": "ok", "planned": int(plan.get("n_delete") or 0),
         "scanned": int(plan.get("scanned_homes") or 0), "blocked_by_cap": blocked,
         "scope": scope or "(所有家)", "protected": int(plan.get("protected") or 0),
+        # ★ 宣传简介(会被复制进每个资源)到底护住了几个 —— 护不住要能一眼看见,
+        #   所以这也写进 `runs.detail`(详见 `quark_dup.collect_intro_protect`)。
+        "intro_protected": len(intro),
     }
+    if not intro:
+        logger.warning("夸克自动去重:简介保护名单为**空**(简介目录取不到或本来就是空的)"
+                       "—— 本轮简介文件不在保护范围内")
     if dry_run:
         out["deleted"] = 0
         out["dry_run"] = True
@@ -195,6 +202,8 @@ def _fmt(p: dict) -> str:
     if st == "report_only":
         return f"{p['pan']}**只报告** 强模式{p.get('strong')}条 / 待确认{p.get('weak')}条"
     bits = [f"扫{p.get('scanned', '-')}", f"计划{p.get('planned', 0)}"]
+    if p.get("intro_protected"):
+        bits.append(f"简介护{p['intro_protected']}")
     if p.get("dry_run"):
         bits.append("**dry-run 未删**")
     else:

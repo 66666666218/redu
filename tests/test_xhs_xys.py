@@ -26,6 +26,10 @@ def test_build_enc_ssk_matches_the_documented_formula(monkeypatch):
 
     ⚠️ **时间也必须冻住**:nonce 里带毫秒时间戳,只要跨过一毫秒,重算就对不上 ——
     这测试第一版就是这么"偶发红"的(不是代码坏,是测试自己不确定)。
+
+    ⚠️★ **2026-10-12:公式里的 `u` 是「md5 的 16 个原始字节」**(源码是
+    `hexDecode(e)` 之后再进 sha1),**不是** 32 字符的十六进制串 —— 见下一条
+    `test_enc_ssk_喂的是md5的原始字节_不是hex串`(那是这个真 bug 的回归护栏)。
     """
     ssk = bytes(range(32)) + b"tail-bytes"        # 比 32 长,才能验证 ssk[32:] 那段
     u_hex = "f6a462b6b0226d11b4c461e220029951"
@@ -39,15 +43,54 @@ def test_build_enc_ssk_matches_the_documented_formula(monkeypatch):
     nonce = ((int(1_700_000_000.123 * 1000) & 0xFFFFFFFF) + r & 0xFFFFFFFF).to_bytes(4, "little")
     payload = nonce + hashlib.sha1(ssk + nonce).digest() + ssk[32:]
     assert ssk_v == base64.b64encode(payload).decode()
-    assert sign_v == base64.b64encode(hashlib.sha1(u_hex.encode() + payload).digest()).decode()
+    #: ★ `u` 先进 `hexDecode`(16 原始字节),再与 payload 拼起来算 sha1
+    assert sign_v == base64.b64encode(
+        hashlib.sha1(bytes.fromhex(u_hex) + payload).digest()).decode()
     assert len(base64.b64decode(ssk_v)) == 4 + 20 + len(ssk) - 32
+
+
+def test_enc_ssk_喂的是md5的原始字节_不是hex串(monkeypatch):
+    """★★ **真 bug 的回归护栏**(2026-10-12)。
+
+    站点源码 `buildEncSskSign` 是 `sha1(hexDecode(u) ‖ S)`;旧实现写成了
+    `sha1(u_hex.encode() ‖ S)` —— 输入长度不同(16 vs 32)、内容也不同,算出来的
+    `x6` 就是**错的**(症状是"同一枚 cookie 在页面里明明是登录态,协议请求却回
+    `-100 登录已过期`")。
+
+    这一条把两种写法**同时**算出来:一个是现在要的,一个正是**必须对不上**的旧写法 ——
+    哪天有人"顺手改回去",它会立刻红。
+    """
+    ssk = bytes(range(32)) + b"tail"
+    u_hex = "f6a462b6b0226d11b4c461e220029951"
+    monkeypatch.setattr(X.os, "urandom", lambda n: b"\x01\x02\x03\x04")
+    monkeypatch.setattr(X.time, "time", lambda: 1_700_000_000.123)
+
+    sign_v, _ = X.build_enc_ssk(u_hex, ssk)
+
+    r = int.from_bytes(b"\x01\x02\x03\x04", "little")
+    nonce = ((int(1_700_000_000.123 * 1000) & 0xFFFFFFFF) + r & 0xFFFFFFFF).to_bytes(4, "little")
+    payload = nonce + hashlib.sha1(ssk + nonce).digest() + ssk[32:]
+    want = base64.b64encode(hashlib.sha1(bytes.fromhex(u_hex) + payload).digest()).decode()
+    old = base64.b64encode(hashlib.sha1(u_hex.encode() + payload).digest()).decode()
+
+    assert sign_v == want, "喂的必须是 md5 的 16 个原始字节"
+    assert sign_v != old, "又改回'喂 32 字符 hex 串'了 —— 那算出来的 x6 是错的"
 
 
 def test_build_enc_ssk_rejects_short_ssk():
     """`ssk` 短于 32 字节 ⇒ 回空串(宁可不带 `x6/x7`,也不要发一个半截的)。"""
-    assert X.build_enc_ssk("u", b"") == ("", "")
-    assert X.build_enc_ssk("u", b"x" * 31) == ("", "")
-    assert X.build_enc_ssk("u", b"x" * 32)[0] != ""
+    u = "f6a462b6b0226d11b4c461e220029951"          # 正常的 md5 hex(digest 长度 32)
+    assert X.build_enc_ssk(u, b"") == ("", "")
+    assert X.build_enc_ssk(u, b"x" * 31) == ("", "")
+    assert X.build_enc_ssk(u, b"x" * 32)[0] != ""
+
+
+def test_build_enc_ssk_遇到非法u不抛(monkeypatch):
+    """⚠️ `u` 万一不是合法十六进制串,**宁可不算**(退化成不带 `x6/x7` 的匿名签名,
+    服务端接受),也不要抛出去把整条采集链打挂。"""
+    monkeypatch.setattr(X.os, "urandom", lambda n: b"\x00\x00\x00\x00")
+    monkeypatch.setattr(X.time, "time", lambda: 1_700_000_000.0)
+    assert X.build_enc_ssk("not-hex", b"x" * 32) == ("", "")
 
 
 # --------------------------------------------------------------- ② content 拼法

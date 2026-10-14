@@ -1265,3 +1265,103 @@ class TestMovedStamp:
             assert db.query(DouyinLead).filter_by(aweme_id="a1").one().moved_at is None
         finally:
             db.close()
+
+
+# ------------------------------------------- 资源库匹配:「点标题跳网盘」的数据来源(2026-10-14)
+
+from app.db.models import WechatArticle, WechatPanLink  # noqa: E402
+
+
+def _mk_lib(session, title: str, my: str = "https://pan.quark.cn/s/OUR"):
+    """往库里放一条**带我方向盘链**的资源(公众号那一源:文章 + 盘链)。
+
+    `my_link` 的来源是 `WechatArticle.my_pan_urls`(经 `WechatPanLink` 关联,见
+    `resource_library._my_link_of`)—— 所以两行都要造,只造一行查不出我方链。
+    """
+    a = WechatArticle(user_id=1, title=title, author="号甲",
+                      url=f"https://mp.weixin.qq.com/s/{title}",
+                      pan_urls="https://pan.quark.cn/s/SRC", my_pan_urls=my,
+                      created_at=datetime.now() - timedelta(days=1))
+    session.add(a)
+    session.flush()
+    session.add(WechatPanLink(user_id=1, article_id=a.id,
+                              pan_url="https://pan.quark.cn/s/SRC"))
+    session.commit()
+    return a
+
+
+class TestLibraryLink:
+    """`_library_link` = 卡片上「作品」列**点得动**的前提,此前**零测试覆盖**。"""
+
+    def test_书名号里的名字能配上(self, session) -> None:
+        _mk_lib(session, "《伪装直男》无雾版高清资源")
+        r = dl._library_link(session, 1, "《伪装直男》24集全")
+        assert r and r["link"] == "https://pan.quark.cn/s/OUR"
+        assert r["name"] == "伪装直男"
+
+    def test_名字被夹在长句中间也能配上_前缀窗口(self, session) -> None:
+        """★ 2026-10-14 实测那条(生产卡片里的「慢热失语」行):
+
+            《来支双喜》我的世界自然之需搜 模组下载教程
+
+        第一遍三类候选(`《X》` / `咐置X叩苓` / 整段文字)**一个都配不上** ——
+        因为名字后面还粘着一个「搜」字;而库里**明明有**「我的世界自然之需」的我方链。
+        ⇒ 靠第二遍的**前缀窗口**在第 8 个字上命中。
+        """
+        _mk_lib(session, "我的世界自然之需（pc+手机端）")
+        r = dl._library_link(session, 1, "《来支双喜》我的世界自然之需搜 模组下载教程")
+        assert r and r["link"] == "https://pan.quark.cn/s/OUR"
+        assert r["name"] == "我的世界自然之需"
+
+    def test_通用短语不许配上_窗口护栏更严(self, session) -> None:
+        """❌ **反面用例**(实测踩到过):窗口切出来的「免费下载安装」会命中不相干的链。
+
+        窗口候选只认「**库里的标题以它开头**」⇒ "只是包含它"的一律不算,
+        宁可这行没有链 —— 「给错链比不给链更坏」:用户点开会拿到完全不相干的东西。
+        """
+        _mk_lib(session, "单机游戏合集免费下载安装包大全")
+        assert dl._library_link(
+            session, 1, "《浅蓝宝箱》刺激战场ss4单机版，免费下载安装教程来了") is None
+
+    def test_库里没有就返回None_不硬凑(self, session) -> None:
+        _mk_lib(session, "完全不相干的东西")
+        assert dl._library_link(session, 1, "《水豚法官》水豚法官capybara获取教程") is None
+
+    def test_窗口只取长片段_且长到短_通用词一律不切(self) -> None:
+        names = dl._window_names("我的世界自然之需搜 模组下载教程")
+        assert all(len(w) >= dl._WINDOW_MIN for w in names)
+        assert names[0] == "我的世界自然之需搜"       # 长的在前(越具体越先试)
+        assert dl._window_names("短名 三个字") == []   # 全都不够长 ⇒ 一个都不切
+        # ★ 通用推广词**一出现就整个窗口丢掉**(实测「免费下载安装」「免费获取教程」都配错过)
+        gens = dl._window_names("《浅蓝宝箱》刺激战场ss4单机版，免费下载安装教程来了")
+        assert "免费下载安装" not in gens
+        assert all(not any(w in g for w in dl._GENERIC_WORDS) for g in gens)
+        # ⚠️ 而「我的」这类**代词**绝不能进通用词表 —— 会把要救的样本一起打死
+        assert not any(w in "我的世界自然之需" for w in dl._GENERIC_WORDS)
+
+    def test_第一遍命中就不走窗口(self, session, monkeypatch) -> None:
+        """窗口是**第二遍**:第一遍配上了还去切窗口,纯属白花库查询、还平添配错的机会。"""
+        _mk_lib(session, "《伪装直男》无雾版")
+        called: list[str] = []
+        monkeypatch.setattr(dl, "_window_names", lambda t: called.append(t) or [])
+        assert dl._library_link(session, 1, "《伪装直男》24集") is not None
+        assert called == []
+
+    def test_两道护栏各自都是承重的(self, session) -> None:
+        """把"拦点"摊开证明,而不是靠"改回源码看它变红"(不动工作区文件)。
+
+        护栏①「库里标题**以它开头**」②「窗口**不许沾通用词**」——
+        用**非通用**的词造一个"只是包含、并不以它开头"的库链,就能单独证明①:
+        窗口候选里确实有它、库查询确实命中、差的只有那一道比较。
+        """
+        from app.services.resource_library import match_key, search_resources
+
+        _mk_lib(session, "全网最全单机游戏合集武侠大全新版")   # ⚠️ 每个用例一份内存库,必须自己造
+        title = "《某某剧场》单机游戏合集武侠大全，快来看"
+        assert "单机游戏合集武侠大全" in dl._window_names(title)
+        hits = search_resources(session, 1, "单机游戏合集武侠大全", days=90, limit=5)
+        assert hits, "库里该有那条链,否则这条用例证明不了什么"
+        first = str((hits[0].get("titles") or [""])[0])
+        assert "单机游戏合集武侠大全" in match_key(first)              # 库查询命中它…
+        assert not match_key(first).startswith("单机游戏合集武侠大全")   # …但并不以它开头
+        assert dl._library_link(session, 1, title) is None            # ⇒ 不许配上

@@ -39,7 +39,7 @@ from app.services.quark_dup import (  # noqa: E402
     PROTECT_NAMES,
     apply_plan,
     build_plan,
-    protected_fids,
+    refresh_protect,
 )
 from app.services.quark_dup_cache import ScanCache  # noqa: E402
 
@@ -100,11 +100,18 @@ def main() -> int:
           f"({'**所有月份**' if not month else '只清 ' + month + ' 月'})")
     # ⚠️ **保护名单现场重取**:计划可能是十几分钟前扫的,这期间又发了新链 ——
     # 用旧名单删就是拿一份过期的安全清单去删盘。
-    pf, pn, ns = protected_fids(qt)
-    dropped = [x for x in plan["delete"]
-               if x["fid"] in pf or x["name"] in pn or x["name"] in PROTECT_NAMES]
-    items = [x for x in plan["delete"]
-             if x["fid"] not in pf and x["name"] not in pn and x["name"] not in PROTECT_NAMES]
+    # ★ 2026-10-13 起这里还包含**宣传简介目录里的文件**(见 `refresh_protect`):
+    #   简介会被复制进每个资源、且名字可能命中强模式 ⇒ 不保护就会被这一轮清掉。
+    pf, pn, ns, intro = refresh_protect(qt)
+
+    def _is_protected(x: dict) -> bool:
+        return x["fid"] in pf or x["name"] in pn or x["name"] in PROTECT_NAMES
+
+    dropped = [x for x in plan["delete"] if _is_protected(x)]
+    items = [x for x in plan["delete"] if not _is_protected(x)]
+    if intro:
+        print(f"🛡 简介保护:{len(intro)} 个文件来自 {sorted({x['dir'] for x in intro})}"
+              f" → {[x['name'] for x in intro]}")
     if dropped:
         print(f"🛡 现场保护名单({ns} 条分享)又拦下 {len(dropped)} 个候选"
               f"(计划是早先扫的):{[x['name'] for x in dropped[:5]]}")

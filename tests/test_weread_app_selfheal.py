@@ -116,3 +116,53 @@ class TestVerifyByApi:
                 return None
         v = wat.verify_by_api(_S(), 1)
         assert v("T", "V") is True, "库里没有对标号时不该把整条路判死"
+
+    def test_验活撞额度错误不算_token_坏(self, monkeypatch, caplog) -> None:
+        """★★★ 2026-10-13 实测定性:接口**先校认证、后校额度** ⇒ 走到额度说明认证已过。
+
+        同一本书、同一个号,只换 token(实测):
+            · 库里那枚旧 token ⇒ `-2012 登录超时`(**认证失败**)
+            · 刚铸出来的新 token ⇒ `-2041`(**额度**)
+        ⇒ `-2041` 恰恰**证明这枚 token 是好的**。
+
+        ⚠️ 不区分的真实代价(2026-10-11~13 实际发生):好 token 被**验活自己否掉**
+        ⇒ `refresh_via_http` 报"未成" ⇒ **永远写不回库** ⇒ 库里那枚死 token 永远在用
+        ⇒ 监听每轮回 `-2012` ⇒ 推「App 登录态失效」告警 ⇒ 人跑去开雷电模拟器(**白跑**)。
+        """
+        class _S:
+            def scalar(self, *a, **k):
+                return type("B", (), {"weread_book_id": "MP_WXS_1", "nickname": "x"})()
+
+        class _C:
+            def __init__(self, t, v, **k):
+                pass
+
+            def articles(self, bid, **k):
+                raise RuntimeError("App 接口报错:-2041 -2041")   # 与实测文本逐字一致
+
+        monkeypatch.setattr("app.services.weread_app_client.WereadAppClient", _C)
+        v = wat.verify_by_api(_S(), 1)
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            assert v("T", "V") is True, "额度错 ≠ token 坏:新铸的 token 必须被放行"
+        assert any("额度" in r.message for r in caplog.records), (
+            "放行要留痕 —— 不做静默绿灯(本仓最忌的那种)")
+
+    def test_真登录态错仍然要判死(self, monkeypatch) -> None:
+        """反向:拿到 `-2012` 才说明 token 真不能用,必须抛出去别放行。"""
+        class _S:
+            def scalar(self, *a, **k):
+                return type("B", (), {"weread_book_id": "MP_WXS_1", "nickname": "x"})()
+
+        class _C:
+            def __init__(self, t, v, **k):
+                pass
+
+            def articles(self, bid, **k):
+                raise RuntimeError("App 登录态问题:-2012 登录超时")
+
+        monkeypatch.setattr("app.services.weread_app_client.WereadAppClient", _C)
+        v = wat.verify_by_api(_S(), 1)
+        with pytest.raises(RuntimeError):
+            v("T", "V")

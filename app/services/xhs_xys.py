@@ -92,13 +92,32 @@ def load_ssk(db, user_id: int) -> bytes:
 
 
 def build_enc_ssk(u_hex: str, ssk: bytes) -> tuple[str, str]:
-    """按站点源码算 `(encSskSign, encSsk)`;`ssk` 长度不足 `SSK_HEAD` 时回空串。"""
+    """按站点源码算 `(encSskSign, encSsk)`;`ssk` 长度不足 `SSK_HEAD` 时回空串。
+
+    ⚠️★ **2026-10-12 修正一个真 bug**。站点源码(`vendor-dynamic.js` 的 `buildEncSskSign`)是:
+    ```js
+    var a = hexDecode(e);                      // ★ 16 个原始字节
+    r[appId] = stdB64(sha1(concat(a, S)));     // sha1(md5字节 ‖ S)
+    ```
+    而旧实现写的是 `sha1(u_hex.encode() + payload)` —— 把 **32 字符的十六进制串**喂进了
+    sha1。二者输入长度(32 vs 16)与内容都不同 ⇒ **算出来的 `x6` 是错的**。
+    这一处修掉;`tools/xhs_sign_verify.py` 会核对它(用旧写法必然对不上)。
+    """
     if not ssk or len(ssk) < SSK_HEAD:
         return "", ""
     r = int.from_bytes(os.urandom(4), "little")
     nonce = ((int(time.time() * 1000) & 0xFFFFFFFF) + r & 0xFFFFFFFF).to_bytes(4, "little")
     payload = nonce + hashlib.sha1(ssk + nonce).digest() + ssk[SSK_HEAD:]
-    sign = hashlib.sha1(u_hex.encode() + payload).digest()
+    #: ★ 修:喂 **16 个原始字节**(hex 解码后),不是 32 字符的 hex 串。
+    #: ⚠️ `u_hex` 正常永远是 `md5().hexdigest()`(32 个十六进制字符);万一不是
+    #: (调用方传错),**宁可不算**(回空 ⇒ 退化成不带 `x6/x7` 的匿名签名,服务端接受),
+    #: 也不要抛出去把整条链打挂 —— 与本函数"不够就不带"的一贯原则一致。
+    try:
+        md5_bytes = bytes.fromhex(u_hex)
+    except (ValueError, TypeError):
+        logger.debug("`u` 不是合法的 md5 十六进制串(%r),不带 x6/x7", u_hex)
+        return "", ""
+    sign = hashlib.sha1(md5_bytes + payload).digest()
     return base64.b64encode(sign).decode(), base64.b64encode(payload).decode()
 
 

@@ -209,6 +209,125 @@ class TestMultiAccount:
         assert "xhs_pass_verify" in str(e.value) and "xhs_a" in str(e.value)
 
 
+class TestAccountPoolWiring:
+    """★ **页面路与协议路共用一台状态机**(2026-10-12)。
+
+    原先页面路自己一套"轮换游标 + 需验证名单",协议路只读**单枚** cookie ——
+    两条路健康状态不互通:协议路撞上 `-104` 时**不知道**页面路早就标过"这号别用"。
+    现在都从 `xhs_accounts` 这张池子进出(页面路报的是**档案**
+    `profile:<按仓库根解析的绝对路径>`)。
+    """
+
+    def _profs(self, monkeypatch):
+        profs = [x.Path("data/xhs_a"), x.Path("data/xhs_b")]
+        monkeypatch.setattr(x, "_profiles", lambda s=None: profs)
+        monkeypatch.setattr(x.Path, "exists", lambda self: True)
+        return profs
+
+    def test_频率风控要报进池子并换下一个(self, session, monkeypatch) -> None:
+        """★ 认出「请勿频繁操作」后:①**报进池子**(拿一个**带时刻**的 3h 冷却);
+        ②**换下一个号** —— 而不是把整轮打挂。
+
+        ⚠️ 这一条补的是**本仓一个长期空档**:页面路早就认得出频率风控,
+        但那时**没有地方存"要冷多久"**(旧注释里写着"要另加一个带时间戳的跳过机制"),
+        于是每轮重新撞 —— 而**越撞越久**。
+        """
+        monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+        self._profs(monkeypatch)
+        tried: list[str] = []
+
+        def _fake(p_, prof, kws, wait, headed):
+            tried.append(prof.name)
+            if prof.name == "xhs_a":
+                raise x.XhsPageError("请勿频繁操作,稍后重试", rate_limit=True)
+            return [{"keyword": kws[0], "snippet": "好用的号", "uid": "", "name": "",
+                     "url": "", "pan_link": ""}]
+
+        monkeypatch.setattr(x, "_search_with_profile", _fake)
+        rows = x.search(["甲"])
+        assert tried == ["xhs_a", "xhs_b"], tried                    # 换了号
+        assert rows and rows[0]["snippet"] == "好用的号"
+        from app.services import xhs_accounts as pool
+        assert any(p.endswith("xhs_a") for p in pool.cooling_profiles()), \
+            "频率风控没被报进池子 ⇒ 下一轮还会继续撞它(越撞越久)"
+
+    def test_池里在冷却的档案会被跳过(self, session, monkeypatch) -> None:
+        """★ 池子里"还在冷却"的档案,页面路下一轮要**直接跳过** ——
+        这才是"按时长退避"真正生效的地方。"""
+        monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+        profs = self._profs(monkeypatch)
+        from app.services import xhs_accounts as pool
+        pool.report_profile(profs[0], pool.STATE_RATE_LIMITED, "请勿频繁操作")
+        tried: list[str] = []
+
+        def _fake(p_, prof, kws, wait, headed):
+            tried.append(prof.name)
+            return [{"keyword": kws[0], "snippet": "x", "uid": "", "name": "",
+                     "url": "", "pan_link": ""}]
+
+        monkeypatch.setattr(x, "_search_with_profile", _fake)
+        x.search(["甲"])
+        assert tried == ["xhs_b"], f"该跳过在冷却里的 xhs_a,实际试了 {tried}"
+
+    def test_全在有害冷却里时不该硬试(self, session, monkeypatch) -> None:
+        """★★ **全都在"越试越糟"的冷却里 ⇒ 直接失败,不要"反正都试一遍"**。
+
+        ⚠️ 这是本仓用真账号换来的教训:**在已被风控的账号上反复重试,冷却会被推后**
+        (服务端按账号/IP 记账 ⇒ 越试越久)。所以"全被跳过就退回全试一遍"这条兜底
+        **必须**对这类状态关掉。
+        """
+        monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+        profs = self._profs(monkeypatch)
+        from app.services import xhs_accounts as pool
+        for p in profs:
+            pool.report_profile(p, pool.STATE_RATE_LIMITED, "请勿频繁操作")
+
+        called: list[str] = []
+
+        def _fake(p_, prof, kws, wait, headed):
+            called.append(prof.name)
+            return []
+
+        monkeypatch.setattr(x, "_search_with_profile", _fake)
+        with pytest.raises(x.XhsPageError) as e:
+            x.search(["甲"])
+        assert called == [], f"不该真的去试(越试越久),实际试了 {called}"
+        assert "冷却" in str(e.value) and "越试越久" in str(e.value), str(e.value)
+
+    def test_需人验证的不算有害冷却_仍会放行试一轮(self, session, monkeypatch) -> None:
+        """★ 反例(别把护栏开太大):`need_verify` 硬试一轮**没用但不会更糟** ——
+        所以"全被跳过"时仍要放行;把这类也拦掉会变成"什么都没做就报错"。"""
+        monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+        profs = self._profs(monkeypatch)
+        from app.services import xhs_accounts as pool
+        for p in profs:
+            pool.report_profile(p, pool.STATE_NEED_VERIFY, "安全验证")
+
+        tried: list[str] = []
+
+        def _fake(p_, prof, kws, wait, headed):
+            tried.append(prof.name)
+            raise x.XhsPageError("要安全验证", needs_human=True)
+
+        monkeypatch.setattr(x, "_search_with_profile", _fake)
+        with pytest.raises(x.XhsPageError) as e:
+            x.search(["甲"])
+        assert tried == ["xhs_a", "xhs_b"], tried          # 两个都真去试了
+        #: 报的是"逐个都不可用",**不是**"有害冷却所以不试"
+        assert "所有小红书账号都不可用" in str(e.value), str(e.value)
+
+    def test_成功会清掉池里的冷却(self, session, monkeypatch) -> None:
+        """★ 另一半:成功了要把冷却**清掉** —— 否则好号会被无谓地一直跳过。
+        (`search()` 成功那条路走的就是 `clear_need_verify`。)"""
+        monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+        profs = self._profs(monkeypatch)
+        from app.services import xhs_accounts as pool
+        pool.report_profile(profs[0], pool.STATE_RATE_LIMITED, "请勿频繁操作")
+        assert pool.cooling_profiles(), "前置条件:该档案应在冷却里"
+        x.clear_need_verify(profs[0])
+        assert pool.cooling_profiles() == set(), pool.cooling_profiles()
+
+
 class TestNotLoggedIn:
     """★ **"未登录" 必须报错,不能返回空**(2026-10-07 抓到的假阴性)。
 
@@ -282,6 +401,26 @@ class TestAccountHealth:
         monkeypatch.setattr(x, "_profiles", lambda s=None: [x.Path("data/xhs_a")])
         monkeypatch.setattr(x, "need_verify_profiles", lambda: set())
         assert ch.check_xhs_accounts()[0]["level"] == ch.GREEN
+
+    def test_有号在频率冷却就报黄并说只需等(self, session, monkeypatch) -> None:
+        """★ 2026-10-12 新增的一档:没有"要人"的,但有"在冷却"的。
+
+        ⚠️ **必须与"需人工"分开报**:频率风控**只需等** —— 说成"需人工"会让人去
+        重登/重试,而那正是**最不该做的事**(越试越久)。"""
+        from app.services import chain_health as ch
+        from app.services import xhs_accounts as pool
+
+        monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+        profs = [x.Path("data/xhs_a"), x.Path("data/xhs_b")]
+        monkeypatch.setattr(x, "_profiles", lambda s=None: profs)
+        monkeypatch.setattr(x, "need_verify_profiles", lambda: set())
+        pool.report_profile(profs[0], pool.STATE_RATE_LIMITED, "请勿频繁操作")
+
+        items = ch.check_xhs_accounts()
+        assert items[0]["level"] == ch.YELLOW, items[0]
+        assert "冷却" in items[0]["detail"] and "xhs_a" in items[0]["detail"]
+        assert "只需等" in items[0]["detail"], items[0]["detail"]
+        assert "xhs_b" not in items[0]["detail"], "没冷却的号不该被点名"
 
     def test_一个档位都没配要说出来(self, monkeypatch) -> None:
         from app.services import chain_health as ch
@@ -455,3 +594,352 @@ def test_需验证记号_能清掉历史遗留的相对路径写法(monkeypatch)
         db.commit()
     xp.clear_need_verify(Path("data/xhs_legacy"))
     assert xp.need_verify_profiles() == set(), "历史遗留的相对路径写法清不掉"
+
+
+class _FakeFirst:
+    def __init__(self, href: str | None) -> None:
+        self._href = href
+
+    def get_attribute(self, name: str, timeout=None):
+        return self._href if name == "href" else None
+
+
+class _FakeLocator:
+    def __init__(self, href: str | None) -> None:
+        self.first = _FakeFirst(href)
+
+
+class _FakeCard:
+    """一张笔记卡(或推荐栏)的替身。"""
+
+    def __init__(self, href: str | None, text: str) -> None:
+        self._href, self._text = href, text
+
+    def locator(self, sel: str) -> _FakeLocator:
+        return _FakeLocator(self._href)
+
+    def inner_text(self) -> str:
+        return self._text
+
+
+class _FakeCards:
+    def __init__(self, items: list[_FakeCard]) -> None:
+        self._items = items
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def nth(self, i: int) -> _FakeCard:
+        return self._items[i]
+
+
+class TestKickedOffline:
+    """★ **「未登录」有两种,修法相反** —— 混成一句"去重登"会让人陷入自我加剧的循环。
+
+    实测(2026-10-12):同一台机器连登 4 个号 ⇒ 小红书按**设备**限制同时在线的账号数,
+    刚登完几分钟 `04` 就被降级成 `03`、`webSsk` 归零。此时**重登是最坏的动作** ——
+    每登一个新号就再触发一次设备风控,把新号也踢掉。
+    """
+
+    def _mk(self, tmp_path, name, ws):
+        d = tmp_path / "data"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"xhs_session_{name}.json").write_text(
+            '{"cookies": {"web_session": "%s"}}' % ws, encoding="utf-8")
+
+    def test_存档是真登录却被判未登录_算被踢下线(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(x, "_root", lambda: tmp_path)
+        self._mk(tmp_path, "a", "040069b7366765643da334f0f9384b0899c555")
+        assert x._had_real_session("a") is True
+
+    def test_存档本来就是游客_不算被踢(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(x, "_root", lambda: tmp_path)
+        self._mk(tmp_path, "b", "030037adffffffffffffffffffffffffffff")
+        assert x._had_real_session("b") is False
+
+    def test_没有存档_不算被踢(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(x, "_root", lambda: tmp_path)
+        assert x._had_real_session("没这个档案") is False
+
+    def test_存档坏了也不炸(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(x, "_root", lambda: tmp_path)
+        (tmp_path / "data").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "data" / "xhs_session_c.json").write_text("{坏 JSON",
+                                                              encoding="utf-8")
+        assert x._had_real_session("c") is False
+
+    def test_被踢时给rate_limit而不是叫人重登(self, tmp_path, monkeypatch) -> None:
+        """★ 要害:被踢下线时若报 `needs_human=True`,会叫人去重登 ⇒ 越修越糟。"""
+        monkeypatch.setattr(x, "_root", lambda: tmp_path)
+        self._mk(tmp_path, "a", "040069b7366765643da334f0f9384b0899c555")
+        monkeypatch.setattr(x, "_had_real_session", lambda p: True)
+        try:
+            x._raise_not_logged_in("a", x.Path("data/a"))
+        except x.XhsPageError as e:
+            assert getattr(e, "rate_limit", False) is True, "被踢应判成「只需等」"
+            assert getattr(e, "needs_human", False) is False, "不该叫人去重登"
+            assert "重登" in str(e) and "等" in str(e)
+        else:
+            raise AssertionError("应当抛错")
+
+
+class TestCardRows:
+    """★ 笔记卡解析(2026-10-12 修的那一处)。
+
+    原来 `uid` / `name` / `url` **全是空串**,而且"大家都在搜"的推荐栏会**混进来当第 0 条**。
+    """
+
+    def test_推荐栏没有笔记链接要被滤掉(self) -> None:
+        cards = _FakeCards([
+            _FakeCard(None, "大家都在搜 附近的美食 美食家常菜"),   #: 推荐栏
+            _FakeCard("/explore/6a7582270000000006004c7c",
+                      "大人今天也吃点小孩菜😋\n胃口特派员\n08-07\n4.5万"),
+        ])
+        rows = x._card_rows(cards, "美食")
+        assert len(rows) == 1, "推荐栏不该进结果"
+        assert rows[0]["uid"] == "6a7582270000000006004c7c"
+
+    def test_真笔记要提出_uid_与完整链接(self) -> None:
+        cards = _FakeCards([
+            _FakeCard("/explore/6a9936d8000000002601bb58?xsec_token=ABC",
+                      "天冷来一碗！\n牛牛吃个牛\n2025-11-05\n18.8万"),
+        ])
+        r = x._card_rows(cards, "美食")[0]
+        assert r["uid"] == "6a9936d8000000002601bb58"      #: 查询串要剥掉
+        assert r["url"] == "https://www.xiaohongshu.com/explore/6a9936d8000000002601bb58"
+        assert "天冷来一碗" in r["snippet"]
+
+    def test_次行当作者(self) -> None:
+        cards = _FakeCards([
+            _FakeCard("/explore/aaa", "标题一\n作者甲\n08-07\n123"),
+        ])
+        assert x._card_rows(cards, "k")[0]["name"] == "作者甲"
+
+    def test_只有一行时作者留空不炸(self) -> None:
+        cards = _FakeCards([_FakeCard("/explore/bbb", "只有标题")])
+        r = x._card_rows(cards, "k")[0]
+        assert r["name"] == "" and r["snippet"] == "只有标题"
+
+    def test_关键词要带在每行上(self) -> None:
+        cards = _FakeCards([_FakeCard("/explore/ccc", "t\na")])
+        assert x._card_rows(cards, "网盘资源")[0]["keyword"] == "网盘资源"
+
+    def test_空卡片跳过(self) -> None:
+        cards = _FakeCards([_FakeCard("/explore/ddd", "   ")])
+        assert x._card_rows(cards, "k") == []
+
+    def test_超上限只取_limit_条(self) -> None:
+        cards = _FakeCards([_FakeCard(f"/explore/{i}", f"标题{i}\n作者{i}")
+                            for i in range(50)])
+        assert len(x._card_rows(cards, "k", limit=7)) == 7
+
+    def test_单个卡片抛异常不拖垮整批(self) -> None:
+        class _Boom:
+            def locator(self, sel):
+                raise RuntimeError("卡片炸了")
+
+            def inner_text(self):
+                return ""
+
+        class _Cards:
+            def count(self):
+                return 3
+
+            def nth(self, i):
+                return _Boom() if i == 1 else _FakeCard("/explore/ok", "好卡\n作者")
+        rows = x._card_rows(_Cards(), "k")
+        assert len(rows) == 2, "坏卡片要跳过,其余照收"
+
+
+class TestBrowserStealth:
+    """★ **采集时的浏览器不能自报"我是脚本"**(2026-10-13 实测补上)。
+
+    之前所有指纹自检查的都是**协议路**(存档 UA、curl_cffi 的 `impersonate`),
+    **没人查过页面渲染路真跑起来的浏览器**。一查就出事:
+
+        "webdriver": true
+        "ua": "... HeadlessChrome/154.0.0.0 ... Edg/154.0.0.0"
+
+    `navigator.webdriver === true` 是最低级、最好抓的自动化标记;
+    UA 里的 `HeadlessChrome` 更是**自报家门** —— 会话是**有头**浏览器登录签发的,
+    采集却用**无头** ⇒ **登录设备 ≠ 采集设备**。
+    这正是本项目在协议路上修过一次、还记进 MEMORY 的同一个错配,**换了个位置又犯了一遍**。
+
+    社区口径一致(16k stars 的 `xpzouying/xiaohongshu-mcp`、RedBookC):
+    **Cookie 离开原始浏览器环境就会"设备特征对不上"** ⇒ 采集应尽量与登录
+    处在同一个浏览器环境里。
+    """
+
+    #: 登录脚本(有头)抓到的真 UA
+    REAL_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36 Edg/154.0.0.0")
+
+    @staticmethod
+    def _mk(tmp_path, name="prof1", ua=None):
+        """落一份会话存档(登录脚本就是这么写的)。`ua=None` ⇒ 老存档,没有 UA 字段。"""
+        d = tmp_path / "data"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / name).mkdir(parents=True, exist_ok=True)
+        import json
+
+        meta = {"cookies": {"web_session": "04abc"}}
+        if ua is not None:
+            meta["ua"] = ua
+        (d / f"xhs_session_{name}.json").write_text(
+            json.dumps(meta), encoding="utf-8")
+        return d / name
+
+    def test_读得到登录时那份UA(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(x, "_root", lambda: tmp_path)
+        p = self._mk(tmp_path, ua=self.REAL_UA)
+        assert x._launch_ua(p) == self.REAL_UA
+
+    def test_老存档没有UA时不硬编(self, tmp_path, monkeypatch) -> None:
+        """⚠️ 拿不到就回空 ⇒ **不覆盖**。覆盖成一个错的比不覆盖更糟。"""
+        monkeypatch.setattr(x, "_root", lambda: tmp_path)
+        p = self._mk(tmp_path, ua=None)
+        assert x._launch_ua(p) == ""
+
+    def test_存档文件不存在也不炸(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(x, "_root", lambda: tmp_path)
+        assert x._launch_ua(tmp_path / "data" / "nope") == ""
+
+    def test_无头要用登录时那份UA覆盖(self, tmp_path, monkeypatch) -> None:
+        """★ **要害**:无头 Chromium 默认会写成 `HeadlessChrome/`,必须被覆盖掉。"""
+        monkeypatch.setattr(x, "_root", lambda: tmp_path)
+        p = self._mk(tmp_path, ua=self.REAL_UA)
+        kw = x._launch_kwargs(p, headed=False)
+        assert kw["user_agent"] == self.REAL_UA
+        assert x._HEADLESS_UA_TOKEN not in kw["user_agent"]
+        assert kw["headless"] is True
+
+    def test_有头就不必覆盖(self, tmp_path, monkeypatch) -> None:
+        """有头时浏览器自己那份就是真的 ⇒ 仍然带上也无害,但要保持 `headed` 语义。"""
+        monkeypatch.setattr(x, "_root", lambda: tmp_path)
+        p = self._mk(tmp_path, ua=self.REAL_UA)
+        kw = x._launch_kwargs(p, headed=True)
+        assert kw["headless"] is False
+        assert kw["user_agent"] == self.REAL_UA
+
+    def test_没有存档UA时不塞user_agent(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(x, "_root", lambda: tmp_path)
+        p = self._mk(tmp_path, ua=None)
+        assert "user_agent" not in x._launch_kwargs(p, headed=False)
+
+    def test_要关掉自动化控制特性(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(x, "_root", lambda: tmp_path)
+        p = self._mk(tmp_path, ua=self.REAL_UA)
+        assert x._NO_AUTOMATION_ARG in x._launch_kwargs(p, False)["args"]
+
+    def test_注入脚本要藏住webdriver(self) -> None:
+        """⚠️ 这条最容易**悄悄退化**:脚本还在、但没生效(注入时机晚于页面创建)。"""
+        js = x._STEALTH_JS
+        assert "webdriver" in js
+        assert "defineProperty" in js
+        #: 只藏 webdriver 不够 —— 真浏览器还有 `window.chrome.runtime`
+        assert "chrome" in js and "runtime" in js
+
+    def test_注入脚本不能伪造出矛盾特征(self) -> None:
+        """前人的警告:**伪造出一堆互相矛盾的特征反而更像假环境**
+        (Windows + Safari、分辨率与 GPU 不匹配)。⇒ 这里坚持"只做标准那三条"。
+        """
+        js = x._STEALTH_JS.lower()
+        for bad in ("safari", "firefox", "iphone", "macintel", "webgl", "canvas"):
+            assert bad not in js, f"伪造了 {bad} ⇒ 容易组合出矛盾的指纹"
+
+
+class TestBrowserStealth:
+    """★ **采集时的浏览器不能自报"我是脚本"**(2026-10-13 实测补上)。
+
+    之前所有指纹自检查的都是**协议路**(存档 UA、curl_cffi 的 `impersonate`),
+    **没人查过页面渲染路真跑起来的浏览器**。一查就出事:
+
+        "webdriver": true
+        "ua": "... HeadlessChrome/154.0.0.0 ... Edg/154.0.0.0"
+
+    `navigator.webdriver === true` 是最低级、最好抓的自动化标记;
+    UA 里的 `HeadlessChrome` 更是**自报家门** —— 会话是**有头**浏览器登录签发的,
+    采集却用**无头** ⇒ **登录设备 ≠ 采集设备**。
+    这正是本项目在协议路上修过一次、还记进 MEMORY 的同一个错配,**换了个位置又犯了一遍**。
+
+    社区口径一致(16k stars 的 `xpzouying/xiaohongshu-mcp`、RedBookC):
+    **Cookie 离开原始浏览器环境就会"设备特征对不上"** ⇒ 采集应尽量与登录
+    处在同一个浏览器环境里。
+    """
+
+    #: 登录脚本(有头)抓到的真 UA
+    REAL_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36 Edg/154.0.0.0")
+
+    @staticmethod
+    def _mk(tmp_path, name="prof1", ua=None):
+        """落一份会话存档(登录脚本就是这么写的)。`ua=None` ⇒ 老存档,没有 UA 字段。"""
+        d = tmp_path / "data"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / name).mkdir(parents=True, exist_ok=True)
+        import json
+
+        meta = {"cookies": {"web_session": "04abc"}}
+        if ua is not None:
+            meta["ua"] = ua
+        (d / f"xhs_session_{name}.json").write_text(
+            json.dumps(meta), encoding="utf-8")
+        return d / name
+
+    def test_读得到登录时那份UA(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(x, "_root", lambda: tmp_path)
+        p = self._mk(tmp_path, ua=self.REAL_UA)
+        assert x._launch_ua(p) == self.REAL_UA
+
+    def test_老存档没有UA时不硬编(self, tmp_path, monkeypatch) -> None:
+        """⚠️ 拿不到就回空 ⇒ **不覆盖**。覆盖成一个错的比不覆盖更糟。"""
+        monkeypatch.setattr(x, "_root", lambda: tmp_path)
+        p = self._mk(tmp_path, ua=None)
+        assert x._launch_ua(p) == ""
+
+    def test_存档文件不存在也不炸(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(x, "_root", lambda: tmp_path)
+        assert x._launch_ua(tmp_path / "data" / "nope") == ""
+
+    def test_无头要用登录时那份UA覆盖(self, tmp_path, monkeypatch) -> None:
+        """★ **要害**:无头 Chromium 默认会写成 `HeadlessChrome/`,必须被覆盖掉。"""
+        monkeypatch.setattr(x, "_root", lambda: tmp_path)
+        p = self._mk(tmp_path, ua=self.REAL_UA)
+        kw = x._launch_kwargs(p, headed=False)
+        assert kw["user_agent"] == self.REAL_UA
+        assert x._HEADLESS_UA_TOKEN not in kw["user_agent"]
+        assert kw["headless"] is True
+
+    def test_有头就不必覆盖(self, tmp_path, monkeypatch) -> None:
+        """有头时浏览器自己那份就是真的 ⇒ 仍然带上也无害,但要保持 `headed` 语义。"""
+        monkeypatch.setattr(x, "_root", lambda: tmp_path)
+        p = self._mk(tmp_path, ua=self.REAL_UA)
+        kw = x._launch_kwargs(p, headed=True)
+        assert kw["headless"] is False
+        assert kw["user_agent"] == self.REAL_UA
+
+    def test_没有存档UA时不塞user_agent(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(x, "_root", lambda: tmp_path)
+        p = self._mk(tmp_path, ua=None)
+        assert "user_agent" not in x._launch_kwargs(p, headed=False)
+
+    def test_要关掉自动化控制特性(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(x, "_root", lambda: tmp_path)
+        p = self._mk(tmp_path, ua=self.REAL_UA)
+        assert x._NO_AUTOMATION_ARG in x._launch_kwargs(p, False)["args"]
+
+    def test_注入脚本要藏住webdriver(self) -> None:
+        """⚠️ 这条最容易**悄悄退化**:脚本还在、但没生效(注入时机晚于页面创建)。"""
+        js = x._STEALTH_JS
+        assert "webdriver" in js
+        assert "defineProperty" in js
+        #: 只藏 webdriver 不够 —— 真浏览器还有 `window.chrome.runtime`
+        assert "chrome" in js and "runtime" in js
+
+    def test_注入脚本不能伪造出矛盾特征(self) -> None:
+        """前人的警告:**伪造出一堆互相矛盾的特征反而更像假环境**
+        (Windows + Safari、分辨率与 GPU 不匹配)。⇒ 这里坚持"只做标准那三条"。
+        """
+        js = x._STEALTH_JS.lower()
+        for bad in ("safari", "firefox", "iphone", "macintel", "webgl", "canvas"):
+            assert bad not in js, f"伪造了 {bad} ⇒ 容易组合出矛盾的指纹"

@@ -79,6 +79,47 @@ class TestSearch:
         with pytest.raises(ws.WeiboSearchError):
             ws.search(["甲"], settings=_S(), session=None)
 
+    # ------------------------------------------------------------------
+    # ★★★ 2026-10-13:`ok=-100` 到底是"登录态失效"还是"风控"?—— 靠响应里的 url 分辨
+    #
+    # 实测两种响应:
+    #   cookie 失效 ⇒ HTTP 200 + {"ok": -100, "url": "https://passport.weibo.com/sso/signin?…"}
+    #   不带 cookie ⇒ HTTP 432
+    # 旧文案写的是「登录态**或**风控问题」,两件事并列 —— 而上层告警**只能靠"串里有没有
+    # 『登录』两个字"**决定要不要叫人去重登,于是那句含糊话直接把方向带偏了。
+    # ⇒ 现在:消息说准,**并给出 `kind` 让告警不用再猜**。
+    # ------------------------------------------------------------------
+
+    def test_ok为负且带登录页跳转_判登录态失效(self, monkeypatch) -> None:
+        self._patch(monkeypatch, _Resp(payload={
+            "ok": -100,
+            "url": "https://passport.weibo.com/sso/signin?entry=wapsso&source=wapssowb"}))
+        with pytest.raises(ws.WeiboSearchError) as e:
+            ws.search(["甲"], settings=_S(), session=None)
+        assert e.value.kind == "login_expired", e.value.kind
+        msg = str(e.value)
+        assert "登录态已失效" in msg and "登录页" in msg, msg
+        assert "weibo_export_cookie" in msg, f"要给**走得通**的那一步:{msg}"
+
+    def test_ok为负但没有登录页跳转_说疑似风控(self, monkeypatch) -> None:
+        """反例:同样 `ok != 1`,但没有登录页跳转 ⇒ **不能说成登录态失效**(否则又是白跑)。"""
+        self._patch(monkeypatch, _Resp(payload={"ok": -100, "msg": "系统繁忙"}))
+        with pytest.raises(ws.WeiboSearchError) as e:
+            ws.search(["甲"], settings=_S(), session=None)
+        assert e.value.kind == "risk", e.value.kind
+        msg = str(e.value)
+        assert "疑似风控" in msg, msg
+        assert "系统繁忙" in msg, "接口给的 msg 要带出来(不许吞)"
+        # ⚠️ 这条**专门**钉住"MUST NOT 说成登录问题":措辞会决定告警给什么修法
+        assert "登录态已失效" not in msg, f"没有证据别把它说成登录问题:{msg}"
+
+    def test_不带cookie的432算登录态失效(self, monkeypatch) -> None:
+        """实测:完全不带 cookie 时回 432 ⇒ 也是"要去拿一枚 cookie"。"""
+        self._patch(monkeypatch, _Resp(status=432))
+        with pytest.raises(ws.WeiboSearchError) as e:
+            ws.search(["甲"], settings=_S(), session=None)
+        assert e.value.kind == "login_expired", e.value.kind
+
     def test_真的没搜到返回空(self, monkeypatch) -> None:
         """★ 反例:`ok=1` 但没卡片 = **真的没有**,必须返回空而不是抛错。"""
         self._patch(monkeypatch, _Resp(payload={"ok": 1, "data": {"cards": []}}))
@@ -113,6 +154,19 @@ class TestWiring:
         with pytest.raises(MediaCrawlerError) as e:
             rp._crawl_platform("weibo", ["甲"], session=None)
         assert "weibo" in str(e.value)
+
+    def test_kind要跟着异常传到告警层(self, monkeypatch) -> None:
+        """★ 平台标的 `kind` **必须带上去** —— 告警靠它决定给哪种修法,丢了就只能靠文案猜。"""
+        from app.services import resource_presence as rp
+        from app.services.mediacrawler_source import MediaCrawlerError
+
+        def _boom(names, **k):
+            raise ws.WeiboSearchError("登录态已失效", kind="login_expired")
+        monkeypatch.setattr(ws, "search", _boom)
+        with pytest.raises(MediaCrawlerError) as e:
+            rp._crawl_platform("weibo", ["甲"], session=None)
+        assert getattr(e.value, "kind", "") == "login_expired", (
+            "kind 没传上去 ⇒ 告警又只能靠「登录」两个字猜了")
 
 
 class _S2:

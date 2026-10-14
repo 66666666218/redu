@@ -161,3 +161,86 @@ class TestCheckListSources:
         assert any("凭证" in t for t in titles)
         names = [r["name"] for t, rows in secs if "凭证" in t for r in rows]
         assert any("列表源" in n for n in names), names
+
+
+class TestReadCountSource:
+    """★★ **「源活着」≠「有阅读数」**(2026-10-14)。
+
+    用户当天的报障是「**阅读还是没修好**」,而这份体检当时**全绿** —— 它只测"源能不能答"。
+    阅读数是另一个维度:WeRSS / 读书平台的返回结构里**没有** `read_num` 字段,
+    只有自研 `wemp` 带。⇒ 只要 wemp 不可用,那一列就只能是 `—`,而"全绿"会让人继续以为没问题。
+    """
+
+    def _row(self, session):
+        return _by_name(ch.check_list_sources(session))["公众号·阅读数来源"]
+
+    def test_没有带阅读数的源时要明说阅读列只能是横杠(self, session, monkeypatch) -> None:
+        """只配了 WeRSS(生产现状)⇒ **必须**说出来,不能让"列表源全绿"盖过去。"""
+        _bench(session)
+        _patch(monkeypatch, [("werss", _Be(3))])
+        row = self._row(session)
+        assert row["level"] == ch.YELLOW, "报绿就是假绿:源活着但根本不送阅读数"
+        assert "只能是 `—`" in row["detail"]
+        assert "wemp" in row["detail"], "要指出唯一带阅读数的那条路"
+
+    def test_wemp配了但凭据死了不许报绿(self, session, monkeypatch) -> None:
+        """⚠️ **交叉验活**:只按"配了没有"判绿,就会在 wemp 已死时报一行自相矛盾的绿。"""
+        from app.services.wechat.wemp_client import WempAuthError
+
+        _bench(session)
+        _patch(monkeypatch, [("werss", _Be(3)),
+                             ("wemp", _Be(exc=WempAuthError("会话失效(200003)")))])
+        row = self._row(session)
+        assert row["level"] == ch.YELLOW and "验活没过" in row["detail"]
+        assert "仍然是 `—`" in row["detail"], "得把后果说清楚:阅读列还是空的"
+
+    def test_wemp活着才报绿并给出怎么核对(self, session, monkeypatch) -> None:
+        _bench(session)
+        _patch(monkeypatch, [("werss", _Be(3)), ("wemp", _Be(2))])
+        row = self._row(session)
+        assert row["level"] == ch.GREEN
+        # ★ 光说"绿"不够:得给出**在哪儿核对真的补上了**,否则下次还是只能猜
+        assert "reads(" in row["detail"] and "unmatched" in row["detail"]
+
+    # ---- ★ 2026-10-14 补:同一行"没验活过",但**限流**和**会话死**的处置相反 ----
+    # 旧文案无论什么原因都叫人"修好凭据" —— 而限流时换凭据是无用动作(当天实测:换上一枚
+    # 全新登录的凭据,服务端仍回 200013)。这就是"告警文案通病:方向对、动作错"。
+
+    def test_wemp限流时只许叫人等_绝不许叫人换凭据(self, session, monkeypatch) -> None:
+        """🟡 限流(200013)⇒ 处置是**等**。若文案叫人去重新复制 Cookie,就骗人白干一场。"""
+        from app.services.wechat.wemp_client import WempRateLimited
+
+        _bench(session)
+        _patch(monkeypatch, [("werss", _Be(3)),
+                             ("wemp", _Be(exc=WempRateLimited("appmsgpublish 频率限制(200013)")))])
+        row = self._row(session)
+        assert row["level"] == ch.YELLOW
+        assert "只需等" in row["detail"], "限流的正确动作是等"
+        assert "唯一需要人动手" not in row["detail"], "限流不是人动手的情形,说成要人动手就是给错动作"
+        assert "重跑还会把配额推后" in row["detail"], "要明说重试有害,否则运营者会一直试"
+
+    def test_wemp会话失效才叫人动手(self, session, monkeypatch) -> None:
+        from app.services.wechat.wemp_client import WempAuthError
+
+        _bench(session)
+        _patch(monkeypatch, [("werss", _Be(3)),
+                             ("wemp", _Be(exc=WempAuthError("会话失效(200003)")))])
+        row = self._row(session)
+        assert row["level"] == ch.YELLOW
+        assert "唯一需要人动手" in row["detail"]
+        assert "只需等" not in row["detail"], "会话死是等不来的,说'只需等'就是漏报人工卡点"
+
+    def test_两种失败的处置文案必须不同(self, session, monkeypatch) -> None:
+        """负向对照:退回"一句通用话"就会同时骗两种场景,这条守住它别回退。"""
+        from app.services.wechat.wemp_client import WempAuthError, WempRateLimited
+
+        _bench(session)
+        _patch(monkeypatch, [("werss", _Be(3)),
+                             ("wemp", _Be(exc=WempRateLimited("appmsgpublish 频率限制(200013)")))])
+        limited = self._row(session)["detail"]
+        _patch(monkeypatch, [("werss", _Be(3)),
+                             ("wemp", _Be(exc=WempAuthError("会话失效(200003)")))])
+        dead = self._row(session)["detail"]
+        assert limited != dead, "两种完全相反的处置不能共用一句话"
+        # 两者都必须保留"后果"这半句(否则读者不知道现在还能不能看到阅读数)
+        assert "仍然是 `—`" in limited and "仍然是 `—`" in dead

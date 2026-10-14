@@ -386,7 +386,8 @@ def _weread_app_row() -> dict:
 
 
 def check_xhs_accounts() -> list[dict]:
-    """**小红书账号档位**:几个、有没有需要人工处理的(过验证 / 重新登录)。
+    """**小红书账号档位**:几个、有没有需要人工处理的(过验证 / 重新登录)、
+    有没有**在冷却**的(频率风控,只需等)。
 
     ⚠️ **为什么单列这一条**(2026-10-07 实测):小红书走**页面渲染**之后,
     它最大的失败模式是"**某个号被踢下线**"——实测 `给号2登录之后号1变成
@@ -394,6 +395,11 @@ def check_xhs_accounts() -> list[dict]:
     而这件事**不会自己好**:得人去重登。
     不主动报的话,表现是"小红书这条链悄悄不产出了",要等到有人问才发现。
     ⇒ 把"账号可用性"做成**每天能看见**的一行,而不是等轮次失败反推。
+
+    ★ **2026-10-12 起多报一档「冷却中」**(来自统一账号池 `xhs_accounts`):
+    频率风控(`请勿频繁操作`)的那类失败**只需等**,与"要人过验证"**完全不同** ——
+    不说清楚的话,人看到"没产出"会去重登/重试,而那正是**最不该做**的事
+    (越试越久)。所以这里也顺手把池子里的冷却状态报出来。
     """
     try:
         from config.settings import get_settings
@@ -401,24 +407,67 @@ def check_xhs_accounts() -> list[dict]:
         from app.services import xhs_page_source as xp
 
         profs = xp._profiles(get_settings())
-        bad = xp.need_verify_profiles()
         names = [p.name for p in profs]
-        need = [p.name for p in profs if str(p) in bad]
         if not names:
             return [{"name": "小红书账号", "level": YELLOW,
                      "detail": "**一个档位都没配**(`XHS_BROWSER_PROFILES`)—— "
                                "这条链不会产出"}]
+
+        #: 归一化后比对:配置里可能写相对路径,而名单/池子里存的是绝对路径
+        def _norm(x) -> str:
+            try:
+                return xp._norm_path(x)
+            except Exception:  # noqa: BLE001 - 归不了就退回原样,别让体检自己崩
+                return str(x)
+
+        bad = xp.need_verify_profiles()
+        bad_norm = {_norm(s) for s in bad}
+        need = [p.name for p in profs if str(p) in bad or _norm(p) in bad_norm]
         if need:
             return [{"name": "小红书账号", "level": RED,
                      "detail": f"{len(need)}/{len(names)} 个号**需要人工处理**"
                                f"(被踢下线或要过安全验证):{'、'.join(need)} —— "
                                f"修法:`python tools/xhs_pass_verify.py <档案目录>`"}]
+
+        #: ★ 没有"要人"的,但可能有"在冷却"的(频率风控)—— 也要说出来
+        cooling = _xhs_cooling_by_name(profs, _norm)
+        if cooling:
+            who = "、".join(f"{n}(还有约 {m} 分钟)" for n, m in cooling)
+            return [{"name": "小红书账号", "level": YELLOW,
+                     "detail": f"{len(names)} 个号,**{len(cooling)} 个在频率冷却中**:{who} —— "
+                               f"这一类**只需等**(服务端按账号/IP 记账,到点自愈),"
+                               f"**别重登、别重试、别换档案**;池子会自己把它放出来"}]
+
         return [{"name": "小红书账号", "level": GREEN,
                  "detail": f"{len(names)} 个号({','.join(names)}),没有待处理的"}]
     except Exception as exc:  # noqa: BLE001 - 体检自己挂了要说出来,别静默
         logger.exception("小红书账号体检失败")
         return [{"name": "小红书账号", "level": YELLOW,
                  "detail": f"检查失败:{type(exc).__name__}: {str(exc)[:100]}"}]
+
+
+def _xhs_cooling_by_name(profs, norm) -> list[tuple[str, int]]:
+    """把"池子里在冷却的档案"翻译成 `[(档案名, 剩余分钟), ...]`。
+
+    ⚠️ 池子里存的是 `profile:<绝对路径>`,而体检手上是**配置里的档案对象** ——
+    两边靠**归一化路径**对上(字符串直接相等会永远对不上,本仓踩过)。
+    ⚠️ 用 `profile_cooldowns()`(**直接读库**)而不是 `snapshot()`:体检手上的档案
+    可能**不在**当前配置里(改过配置/多实例共库),那时按 `discover()` 组的快照
+    查不到它 ⇒ **漏报**。读不到池子就回空(体检不能因为池子读不到而变红 —— 那是**假红灯**)。
+    """
+    try:
+        from app.services import xhs_accounts as pool
+
+        cool = pool.profile_cooldowns()
+        out: list[tuple[str, int]] = []
+        for p in profs:
+            key = pool.profile_key(p)[len(pool.PROFILE_PREFIX):]
+            if key in cool:
+                out.append((p.name, cool[key]))
+        return out
+    except Exception:  # noqa: BLE001
+        logger.debug("读小红书账号池冷却失败(当空处理)", exc_info=True)
+        return []
 
 
 #: 协议凭据那一行的名字
@@ -764,11 +813,14 @@ def check_list_sources(db, settings=None) -> list[dict]:
 
     out: list[dict] = []
     alive = 0
+    verified: set[str] = set()   # 本轮**真验活成功**的源名(阅读数那一行要拿它交叉,不能只看"配了没")
+    fail_kind: dict[str, str] = {}   # 源名 → 失败性质(auth/selfheal/unknown),阅读数那行按它给"处置"
     for name, be in backends:
         try:
             items = be.mp_articles(feed, page=1, limit=1)
         except Exception as exc:  # noqa: BLE001 - 一个源失败不能毁掉整份报告
             kind, why = _classify_source_error(exc)
+            fail_kind[name] = kind
             if kind == "auth":
                 out.append({"name": f"公众号·列表源·{name}", "level": RED,
                             "detail": f"**凭据已失效,等多久都不会自己好** —— {why[:110]}。"
@@ -781,11 +833,61 @@ def check_list_sources(db, settings=None) -> list[dict]:
                                       f"不报红:假红会让人忽略整份报告"})
         else:
             alive += 1
+            verified.add(name)
             # ⚠️ 「答了但是 0 条」**算活** —— 不能判黄:WeRSS 空转时每轮都是 0 条(它至今
             #    一篇文章没抓到过),那会变成**恒黄**,而恒黄的项等于没有。
             out.append({"name": f"公众号·列表源·{name}", "level": GREEN,
                         "detail": f"验活 ✓(问「{bm.nickname}」答了 {len(items)} 条;"
                                   f"0 条也可能是该源没收录这个号,不代表它坏了)"})
+    # ★★ **「源活着」≠「有阅读数」**(2026-10-14 补)。
+    # 用户当天的报障是「**阅读还是没修好**」,而这份体检当时**全绿** —— 因为它只测"源能不能答",
+    # 而阅读数是**另一个维度**:WeRSS / 读书平台的返回结构里**根本没有** `read_num` 这个字段,
+    # 唯一带它的是自研 `wemp`(后台 `appmsgpublish`,见 `wemp_client._READ_KEYS`)。
+    # ⇒ 只要 wemp 不可用,卡片上那一列就**只能是 `—`**,而"源验活全绿"会让人一直以为阅读数没问题。
+    # **假绿比红更贵**,所以这里单独说死 —— 而且**必须与验活结果交叉**,不能只按"配了没有"判绿
+    # (wemp 配了但凭据已死时,再报一行绿就是自相矛盾)。
+    _READ_CAPABLE = ("wemp",)
+    capable = [n for n, _ in backends if n in _READ_CAPABLE]
+    live_capable = [n for n in capable if n in verified]
+    if not capable:
+        out.append({"name": "公众号·阅读数来源", "level": YELLOW,
+                    "detail": f"**当前没有任何一个源能提供阅读数** —— 已配的 "
+                              f"{'/'.join(n for n, _ in backends)} 的返回结构里没有 `read_num` 字段"
+                              f"(不是它坏了,是它压根不送)。⇒ 卡片/表格那一列阅读数**只能是 `—`**,"
+                              f"代码怎么改都一样。唯一带阅读数的是自研 `wemp`(公众号后台 "
+                              f"`appmsgpublish`,**不受微信读书 29 个号的会话额度限制**)⇒ 配好它的凭据即可"})
+    elif not live_capable:
+        # ★ 2026-10-14 补:**这一行以前无论什么原因都叫人"修好凭据"** —— 而 200013(限流)
+        #   换凭据是**无用动作**(当天实测:换上一枚全新登录的凭据,服务端仍回 200013)。
+        #   这正是本仓记过的"告警文案通病:方向对、动作错"——照做完没好,下次就会忽略告警。
+        #   ⇒ 按**失败性质**分三种话,且**不在这里复述命令**(与上面那一行同源,别写两份)。
+        _kinds = {fail_kind.get(n) for n in capable} - {None}
+        if _kinds == {"selfheal"}:
+            _detail = (f"带阅读数的源 {'/'.join(capable)} **本轮验活没过,但性质是限流(可等)** ⇒ "
+                       f"本轮阅读列**仍然是 `—`**。**只需等**:配额恢复后自动出数 —— "
+                       f"⚠️ 反复重跑探针、或换一枚新凭据,**对限流都无用**"
+                       f"(实测换新凭据后仍回 `200013`),**重跑还会把配额推后**。"
+                       f"恢复与否只看**下一轮** `runs.detail` 里是否出现 `reads(src=…)`")
+        elif _kinds == {"auth"}:
+            _detail = (f"带阅读数的源 {'/'.join(capable)} **本轮验活没过,性质是凭据已失效** —— "
+                       f"**这是唯一需要人动手的情形** ⇒ 阅读列**仍然是 `—`**。"
+                       f"命令见上面那一行(浏览器登录 mp.weixin.qq.com → 复制整条 Cookie + "
+                       f"地址栏 token → 跑 `scripts/wemp_cred.py`);"
+                       f"补齐后看 `runs.detail` 的 `reads(src/from)` 确认真的在补")
+        else:
+            _detail = (f"带阅读数的源 {'/'.join(capable)} **已配但本轮验活没过**(见上面那一行)"
+                       f" ⇒ 阅读列**仍然是 `—`**。**按上面那行给出的性质处置** —— "
+                       f"限流只需等、会话失效才要换凭据(**给错动作等于白干**);"
+                       f"补齐后看 `runs.detail` 的 `reads(src/from)` 确认真的在补")
+        out.append({"name": "公众号·阅读数来源", "level": YELLOW, "detail": _detail})
+    else:
+        out.append({"name": "公众号·阅读数来源", "level": GREEN,
+                    "detail": f"带阅读数的源 {'/'.join(live_capable)} 验活 ✓ ⇒ 每轮会**横向把它问一遍**"
+                              f"(列表仍以第一个答上话的源为准,只补 read_num/like_num;见 "
+                              f"`_source.mp_articles_with_reads`)。核对是否真补上:看 `runs.detail` 的 "
+                              f"`reads(src/from/via_title/unmatched)` —— `src>0 from=0` = 问到了但没带数"
+                              f"(大概率字段名不对,`wemp_client` 会打一次真实字段名),"
+                              f"`unmatched>0` = 两源链接形态对不上(短链 vs 长链)"})
     # ★ **单点风险单独说**:只剩一个能答的源时降级链实际没有备胎,而"还有源在答"会让
     #    所有产出指标照常绿 —— 只有这一行看得出来。
     if alive <= 1:

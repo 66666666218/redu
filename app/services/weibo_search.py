@@ -13,6 +13,16 @@
 
 ⇒ 省掉一个浏览器:更快、更省内存、**没有风控暴露面**(不开浏览器就没有指纹问题)。
 
+## 失败长什么样(2026-10-13 实测,别再靠猜)
+| 情形 | 现象 |
+|---|---|
+| **cookie 已失效** | `HTTP 200` + `{"ok": -100, "url": "https://passport.weibo.com/sso/signin?…"}` |
+| **完全不带 cookie** | `HTTP 432`(空体) |
+| 登录态是否有效(权威判据) | `GET https://m.weibo.cn/api/config` → `data.login`(true/false) |
+
+⇒ `ok=-100` **要靠响应里的 `url` 才认得出**是"登录态失效"还是别的;所以本模块
+**不再写「登录态或风控问题」这种并列话**(那会让告警只能靠关键词猜方向)。
+
 ## 三条纪律(与 `xhs_page_source` 同一套)
 1. **"没登录/被拦" 与 "真的没搜到" 必须分开**:`ok != 1` / `login` / 空 `data` ⇒
    **抛错**,绝不返回空列表 —— 否则日志会把它说成"微博没热度"(本仓反复栽的假阴性)。
@@ -42,7 +52,19 @@ _GAP = 2.0
 
 
 class WeiboSearchError(Exception):
-    """微博搜索硬失败(没登录 / 被拦 / 网络)。**必须冒泡**,不能当成"没搜到"。"""
+    """微博搜索硬失败(没登录 / 被拦 / 网络)。**必须冒泡**,不能当成"没搜到"。
+
+    ★ `kind` 是给**上层告警**用的**结构化判据**(与 `tieba_search.TiebaSearchError.kind` 同一套)。
+    ⚠️ 为什么非要它(2026-10-13 的真实事故):告警原来靠**关键词**判"要不要叫人去重登" ——
+    只要错误串里出现"登录"两个字就给扫码建议。而旧文案写的是「登录态**或**风控问题」,
+    恰好含"登录"⇒ 一条**措辞含糊**的错误把人引向了一个**错的修法**(微博不走 MediaCrawler)。
+    ⇒ 判据换成枚举值:**别再让文案措辞决定告警说什么**。
+      取值:`login_expired`(要人去换凭据) / `risk`(被挡,该等) / `network`(抖动,重试即可)。
+    """
+
+    def __init__(self, message: str = "", kind: str = "") -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 def _cookie(session=None, user_id: int = 1, settings=None) -> str:
@@ -82,7 +104,8 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
     ck = _cookie(session, user_id, settings)
     if not ck:
         raise WeiboSearchError("没有微博登录态 —— 没有它会搜出空结果,所以这里直接判失败。"
-                               "修法:把登录后的 cookie(含 `SUB=`)存进 cookie 库或 `.env`")
+                               "修法:把登录后的 cookie(含 `SUB=`)存进 cookie 库或 `.env`",
+                               kind="login_expired")
     headers = {"User-Agent": _UA, "Referer": "https://m.weibo.cn/",
                "X-Requested-With": "XMLHttpRequest", "MWeibo-Pwa": "1",
                "Accept": "application/json, text/plain, */*", "Cookie": ck}
@@ -96,16 +119,40 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
                                               "page_type": "searchall", "page": page},
                                  headers=headers, timeout=20)
             except Exception as exc:  # noqa: BLE001
-                raise WeiboSearchError(f"请求失败:{type(exc).__name__}: {str(exc)[:80]}") from exc
+                raise WeiboSearchError(f"请求失败:{type(exc).__name__}: {str(exc)[:80]}",
+                                       kind="network") from exc
+            if r.status_code == 432:
+                # 实测:完全不带 cookie 时回 432(空体)—— 是"没登录/被挡",不是"没热度"
+                raise WeiboSearchError("HTTP 432(未登录或被挡)", kind="login_expired")
             if r.status_code != 200:
-                raise WeiboSearchError(f"HTTP {r.status_code} —— 多半是登录态失效或被限")
+                raise WeiboSearchError(f"HTTP {r.status_code} —— 多半是被限",
+                                       kind="risk")
             try:
                 d = r.json()
             except ValueError as exc:
                 # ⚠️ 返回非 JSON 通常是**被挡了**(风控页),不是"没搜到"
-                raise WeiboSearchError(f"响应不是 JSON(可能被挡):{r.text[:80]}") from exc
+                raise WeiboSearchError(f"响应不是 JSON(可能被挡):{r.text[:80]}",
+                                       kind="risk") from exc
             if d.get("ok") != 1:
-                raise WeiboSearchError(f"接口返回 ok={d.get('ok')} —— 登录态或风控问题")
+                # ★★★ **把"登录态失效"与"风控"分开,并给出证据**(2026-10-13 实测)。
+                # `ok=-100` 的响应体里带一个 `url` 字段,实测它的值就是
+                # `https://passport.weibo.com/sso/signin?...` —— 即**接口把我们重定向到登录页**
+                # ⇒ 这是**登录态失效**,和"被风控"(HTTP 432 / 非 JSON 风控页)不是一回事,
+                # 处置也不同:前者要人去重登,后者该等。
+                # ⚠️ 旧文案是「登录态**或**风控问题」,两件事并列 ⇒ 既没给证据、
+                #    又让告警只能靠"串里有没有『登录』两个字"去猜(见 `resource_presence`)。
+                #    今天这条告警就是这么来的:猜对了方向、却给出了错的修法。
+                url = str(d.get("url") or "")
+                if "passport.weibo.com" in url or "signin" in url:
+                    raise WeiboSearchError(
+                        "微博**登录态已失效** —— 接口把我们重定向到登录页"
+                        f"({url[:70]})。修法:重新登录 `https://m.weibo.cn` 后更新"
+                        "**我们 cookie 库**里 weibo 那一份(一键:`python tools/weibo_export_cookie.py`)",
+                        kind="login_expired")
+                msg = str(d.get("msg") or "").strip()
+                raise WeiboSearchError(
+                    f"接口返回 ok={d.get('ok')} —— **疑似风控**(响应里没有跳转到登录页)"
+                    + (f":{msg[:60]}" if msg else ""), kind="risk")
             cards = ((d.get("data") or {}).get("cards") or [])
             n_before = len(rows)
             for c in cards:

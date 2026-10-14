@@ -33,6 +33,12 @@ def _mark_graceful_shutdown() -> None:
 
     配套:`scripts/win/stop_app.bat`(计划内停机走它 —— 它先写这个标记再停,不依赖本函数
     真被执行:`taskkill /F` 是强杀,不会走 lifespan)。
+
+    ⚠️ **本函数盖不住「机器自己重启」**(2026-10-13 实测):Windows 关机**不给**进程跑
+    lifespan 的机会 ⇒ 标记**不会被写**,看门狗于是把"重启"报成"崩溃"(当晚 18:03:46 点重启、
+    18:05:55 就推了假红灯)。那一类由**看门狗侧**兜底:`notify_restart.py` 的
+    `machine_uptime()` + `BOOT_GRACE_SECONDS` —— 判据与关停方式无关,所以能盖住重启/断电/蓝屏。
+    分工:本函数认「**人主动停应用**」,那边认「**机器级中断**」。
     """
     try:
         (Path("data")).mkdir(parents=True, exist_ok=True)

@@ -31,6 +31,7 @@ MediaCrawler 直连 `/api/sns/web/v1/search/notes` 现在回
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from app.utils import get_logger
@@ -46,17 +47,86 @@ CARD_SEL = "section.note-item"
 #: 搜索结果区**空**时的容器(小红书自己的空态)—— 用它把"真没有"和"被拦"分开
 EMPTY_SEL = ".search-empty-wrapper"
 
+#: ★★ **反自动化痕迹**(2026-10-13 实测补上)
+#: 我们这条页面路实测 `navigator.webdriver === true`、无头时 UA 里还写着
+#: `HeadlessChrome/154.0.0.0` ⇒ 等于举着牌子说"我是脚本"。
+#:
+#: 这不是玄学,是**本项目踩过两次的同一个错配换了位置**:协议路上我们已经修好了
+#: "登录 UA(Edge 154)≠ 请求 UA(硬编码 Chrome 138)";而**页面路上它一直在** ——
+#: 登录脚本用**有头**浏览器、`xhs_page_source` 默认**无头**,于是采集时的 UA
+#: 变成 `HeadlessChrome`,与签发会话的那个浏览器**不是同一个**。
+#:
+#: 社区口径也一致(16k stars 的 `xpzouying/xiaohongshu-mcp`、RedBookC 等):
+#: **Cookie 离开原始浏览器环境就会"设备特征对不上、行为链路断了"** ⇒
+#: 要尽量让采集与登录处在**同一个浏览器环境**里。
+#:
+#: ⚠️ 只做**业界标准那三条**,不做过度伪造:伪造出一堆互相矛盾的特征
+#: (Windows + Safari、分辨率与 GPU 不匹配)反而更像假环境。
+_STEALTH_JS = """(() => {
+  const hide = (obj, prop, val) => {
+    try { Object.defineProperty(obj, prop, { get: () => val }); } catch (e) {}
+  };
+  hide(navigator, 'webdriver', undefined);
+  if (!window.chrome) { window.chrome = {}; }
+  if (!window.chrome.runtime) { window.chrome.runtime = {}; }
+})();"""
+
+#: 无头 Chromium 会在 UA 里写这个 ⇒ 见 `_STEALTH_JS` 的说明
+_HEADLESS_UA_TOKEN = "HeadlessChrome/"
+
+
+def _launch_ua(prof: Path) -> str:
+    """取这个档案**登录时存档里那份真实 UA**(读不到回空 ⇒ 不覆盖,但要记 warning)。
+
+    与 `xhs_accounts.ua_of()` 同源(都是 `data/xhs_session_<档案名>.json` 的 `ua` 字段);
+    这里单独读一遍是为了**不在页面路引入对账号池的模块级依赖**(那边反向依赖本模块)。
+    """
+    try:
+        fp = _root() / "data" / f"xhs_session_{prof.name}.json"
+        got = json.loads(fp.read_text(encoding="utf-8"))
+        return str((got or {}).get("ua") or "").strip()
+    except Exception:  # noqa: BLE001 - 读不到只是"没法对齐",不该让采集起不来
+        return ""
+
+
+#: 关掉 Blink 的"正被自动化控制"特性(与 `_STEALTH_JS` 配套)
+_NO_AUTOMATION_ARG = "--disable-blink-features=AutomationControlled"
+
+
+def _launch_kwargs(prof: Path, headed: bool) -> dict:
+    """组出 `launch_persistent_context` 的参数(**单独抽出来是为了能测**)。
+
+    ★ 无头时要**显式带上登录时那份 UA**:否则 Chromium 会把它写成
+    `HeadlessChrome/<ver>`,与签发会话的那个浏览器**不是同一个**。
+    拿不到存档 UA 就**宁可不覆盖**(覆盖成错的更糟),但调用方会记一条 warning。
+    """
+    kw: dict = {"user_data_dir": str(prof), "headless": not headed,
+                "no_viewport": True, "args": [_NO_AUTOMATION_ARG]}
+    ua = _launch_ua(prof)
+    if ua:
+        kw["user_agent"] = ua
+    return kw
+
 
 class XhsPageError(Exception):
     """页面路硬失败(被拦 / 未登录 / 浏览器起不来)。**必须冒泡**,不能当成"没搜到"。
 
-    `needs_human=True` 表示"这个号要人去处理一下"(过安全验证 **或** 登录)——
-    多账号轮换据此**标记它并换下一个**。
+    调用方(`search`)按这两个标记决定"怎么处理这个号":
+      · `needs_human=True` ⇒ 这号要人去动一下(**过安全验证** 或 **重新登录**)——
+        标进池子(`need_verify`,12 小时冷却)并**换下一个**;
+      · `rate_limit=True`  ⇒ 这是**频率风控**(「请勿频繁操作」)——
+        ⚠️ 与上面**不是一回事**:这一类**不用人做什么,只需要等**。
+        标进池子(`rate_limited`,3 小时冷却)并**换下一个**;
+        **绝不能**复用 `needs_human` 那条(它没有时长概念 ⇒ 会把号**永远**钉在
+        "需验证"上,等不到任何一次"成功"来清它 ⇒ 一盏**永远红的假红灯**)。
+      · 两者都 `False` ⇒ 换个号也没用(如浏览器起不来),直接上抛。
     """
 
-    def __init__(self, msg: str, needs_human: bool = False) -> None:
+    def __init__(self, msg: str, needs_human: bool = False,
+                 rate_limit: bool = False) -> None:
         super().__init__(msg)
         self.needs_human = needs_human
+        self.rate_limit = rate_limit
 
 
 _CURSOR_KEY = "xhs_account_cursor"
@@ -128,7 +198,14 @@ def _pkey(profile) -> str:
 
 
 def mark_need_verify(profile: Path) -> None:
-    """把某个账号标成"要人过一次安全验证",这样轮换会**跳过它**、不继续烧风控。"""
+    """把某个账号标成"要人过一次安全验证 / 重新登录",这样轮换会**跳过它**、不继续烧风控。
+
+    ★ **2026-10-12:同时写进统一账号池**(`xhs_accounts`,状态 `need_verify` / 12h 冷却)。
+      - 老的那张 `xhs_account_need_verify` 名单**继续写**:一是兼容历史读取方,
+        二是它**没有时长**,语义正好等于"要人、且不会自己好" —— 与 `need_verify` 一致。
+      - 池子那份是给**协议路**看的:同一台机器上"这个号要人去弄"这件事,
+        两条路从此**共享**,不用各记一份。
+    """
     try:
         import json
 
@@ -149,10 +226,139 @@ def mark_need_verify(profile: Path) -> None:
             db.commit()
     except Exception:  # noqa: BLE001
         logger.debug("标记'需验证'失败(不影响本轮)", exc_info=True)
+    #: 池子那份**单独 try** —— 上面那张名单写失败不该连累它,反之亦然
+    try:
+        from app.services import xhs_accounts as pool
+
+        pool.report_profile(profile, pool.STATE_NEED_VERIFY, "页面路:需人工过验证/重登")
+    except Exception:  # noqa: BLE001
+        logger.debug("把'需验证'写进账号池失败", exc_info=True)
+
+
+def _raise_not_logged_in(name: str, prof) -> None:
+    """★ 抛"未登录"错 —— **但两种未登录的修法相反,必须分开**(2026-10-12)。
+
+    ① **从来没登过**(存档里没有 `04` 会话)⇒ `needs_human=True` ⇒ 要人去登;
+    ② **登过、但被踢下线**(存档里明明记着 `04`,页面却说未登录)⇒ `rate_limit=True`
+       ⇒ **只需等**。这是**设备维度**的风控:小红书按设备限制同时在线的账号数,
+       同一台机器短时间内连登多个号会把前一个挤掉(实测:刚登完几分钟 `04` 就降级成
+       `03`、`webSsk` 归零)。
+
+    ⚠️ **把 ② 报成"去重登"是本仓最坏的一类错**:它会把人推进一个自我加剧的循环 ——
+    每登一个新号就再触发一次设备风控、又把新号踢掉,于是永远修不好。
+    """
+    if _had_real_session(prof):
+        _report_profile_rate_limited(prof, "会话被踢下线(设备登录超限)")
+        raise XhsPageError(
+            f"账号**被踢下线**(档案 {name} 存档里是 `04` 真登录,"
+            f"但页面提示「登录后查看搜索结果」)—— 这不是没登录,"
+            f"而是**设备维度**的风控:同一台机器短时间内登多个号,"
+            f"小红书会把先前的挤掉(实测刚登完几分钟 `04` 就降级成 `03`)。"
+            f"⚠️ **修法是等,不是重登** —— 此时再登只会再触发一次,"
+            f"把新号也踢掉。等几小时~一天,之后**只用这一个号、别再切换**。",
+            needs_human=False, rate_limit=True)
+    raise XhsPageError(
+        f"账号未登录(搜索页提示「登录后查看搜索结果」)—— 对档案 "
+        f"{name} 跑 `python tools/xhs_pass_verify.py {prof}` 登录一次",
+        needs_human=True)
+
+
+def _had_real_session(profile) -> bool:
+    """这个档案**存档里**是否记着一枚 `04` 真登录会话?
+
+    用来把"未登录"分成两种(修法相反,见调用处):
+      · 存档有 `04`、页面却说未登录 ⇒ **被踢下线**(设备/频率风控)⇒ 该等;
+      · 存档没有 ⇒ 真没登过 ⇒ 该去登。
+
+    只读本地文件,**不发任何请求**。
+    """
+    try:
+        fp = _root() / "data" / f"xhs_session_{Path(profile).name}.json"
+        if not fp.exists():
+            return False
+        d = json.loads(fp.read_text(encoding="utf-8"))
+        ws = str((d.get("cookies") or {}).get("web_session") or "")
+        return ws.startswith("04")
+    except Exception:  # noqa: BLE001 - 读不到就当"没登过",退回原来的修法
+        logger.debug("读档案会话存档失败(按没登过处理)", exc_info=True)
+        return False
+
+
+def _root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _pool_need_verify() -> set[str]:
+    """池里"需验证"的档案集合。**纯读**,读不到就当空(不让体检/轮换因此崩)。"""
+    try:
+        from app.services import xhs_accounts as pool
+
+        return pool.need_verify_profiles()
+    except Exception:  # noqa: BLE001
+        logger.debug("读账号池'需验证'失败(当空处理)", exc_info=True)
+        return set()
+
+
+def _pool_cooling() -> set[str]:
+    """池里"还在冷却"的档案集合(**绝对路径**)。纯读,读不到当空。"""
+    try:
+        from app.services import xhs_accounts as pool
+
+        return pool.cooling_profiles()
+    except Exception:  # noqa: BLE001
+        logger.debug("读账号池冷却失败(当空处理)", exc_info=True)
+        return set()
+
+
+def _pool_harmful() -> dict[str, int]:
+    """池里"**越试越糟**"的冷却档案 `{绝对路径: 剩余分钟}`(频率/账号限制)。纯读,读不到当空。"""
+    try:
+        from app.services import xhs_accounts as pool
+
+        return pool.harmful_cooldowns()
+    except Exception:  # noqa: BLE001
+        logger.debug("读账号池'有害冷却'失败(当空处理)", exc_info=True)
+        return {}
+
+
+def _report_profile_rate_limited(profile, detail: str) -> None:
+    """把"这个号进了频率风控"报进池子 ⇒ 拿一个**带时刻**的冷却(3 小时)。
+
+    ⚠️ 这是原先**缺的那一环**:页面路早就能认出「请勿频繁操作」,但那时**没有地方
+    存"要冷多久"**,只能"如实报出来"然后每轮重新撞(而越撞越久)。
+    现在池子按 `rate_limited` 记 3 小时,到点自己放出来。
+    """
+    try:
+        from app.services import xhs_accounts as pool
+
+        pool.report_profile(profile, pool.STATE_RATE_LIMITED, detail)
+    except Exception:  # noqa: BLE001
+        logger.debug("把'频率冷却'写进账号池失败", exc_info=True)
+
+
+def _norm_path(p) -> str:
+    """路径的**归一化身份**,与 `xhs_accounts.profile_key` 同一套(按仓库根解析)。
+
+    用来把"配置里写的相对路径"与"池子里的绝对路径"对上 —— 不然比对永远为假。
+    """
+    try:
+        from app.services import xhs_accounts as pool
+
+        return pool.profile_key(p)[len(pool.PROFILE_PREFIX):]
+    except Exception:  # noqa: BLE001
+        try:
+            return str(Path(p).resolve())
+        except Exception:  # noqa: BLE001
+            return str(p)
 
 
 def need_verify_profiles() -> set[str]:
-    """哪些账号当前需要人过一次验证(供巡检/告警用)。"""
+    """哪些账号当前需要人过一次验证(供巡检/告警用)。
+
+    返回 **老名单 ∪ 账号池** 的并集 —— 老名单里的历史写法(相对路径)也照旧返回,
+    池子里那份(绝对路径)一并带上。两边都空才是空。
+    """
+    out: set[str] = set()
     try:
         import json
 
@@ -163,13 +369,16 @@ def need_verify_profiles() -> set[str]:
 
         with get_session_local()() as db:
             row = db.scalar(select(SystemConfig).where(SystemConfig.key == _NEED_KEY))
-            return set(json.loads(row.value)) if row is not None and row.value else set()
+            if row is not None and row.value:
+                out |= set(json.loads(row.value))
     except Exception:  # noqa: BLE001
-        return set()
+        logger.debug("读'需验证'名单失败(当空处理)", exc_info=True)
+    out |= _pool_need_verify()
+    return out
 
 
 def clear_need_verify(profile: Path) -> None:
-    """验证过了就把它从"需验证"名单里摘掉。"""
+    """验证过了(或本轮成功)就把它从"需验证"名单里摘掉 —— **两边都摘**。"""
     try:
         import json
 
@@ -181,15 +390,23 @@ def clear_need_verify(profile: Path) -> None:
         with get_session_local()() as db:
             row = db.scalar(select(SystemConfig).where(SystemConfig.key == _NEED_KEY))
             if row is None or not row.value:
-                return
-            # ⚠️ 按**归一化身份**摘,而不是字符串相等:这样**以前用相对路径写下的旧记号
-            #    也能被清掉**(否则历史遗留的那些永远红着)。
-            key = _pkey(profile)
-            cur = {x for x in json.loads(row.value) if _pkey(x) != key}
-            row.value = json.dumps(sorted(cur), ensure_ascii=False)
-            db.commit()
+                pass
+            else:
+                # ⚠️ 按**归一化身份**摘,而不是字符串相等:这样**以前用相对路径写下的旧记号
+                #    也能被清掉**(否则历史遗留的那些永远红着)。
+                key = _pkey(profile)
+                cur = {x for x in json.loads(row.value) if _pkey(x) != key}
+                row.value = json.dumps(sorted(cur), ensure_ascii=False)
+                db.commit()
     except Exception:  # noqa: BLE001
         logger.debug("清'需验证'标记失败", exc_info=True)
+    #: 池子那份也清(报一次"健康" ⇒ 顺手抹掉冷却)—— 单独 try,互不连累
+    try:
+        from app.services import xhs_accounts as pool
+
+        pool.report_profile(profile, pool.STATE_HEALTHY, "验证已通过/本轮成功")
+    except Exception:  # noqa: BLE001
+        logger.debug("清账号池'需验证'失败", exc_info=True)
 
 
 def _profile(settings=None) -> Path:
@@ -254,6 +471,52 @@ def verify_needed(url: str, title: str, body: str = "") -> bool:
             or "xhsCaptcha" in (body or ""))
 
 
+def _card_rows(cards, kw: str, limit: int = 30) -> list[dict]:
+    """★ 从 `section.note-item` 卡片里抽出笔记行(2026-10-12 修)。
+
+    ⚠️ **只收有笔记链接的卡片** —— 页面上"大家都在搜 …"那个推荐栏**也匹配**
+    `section.note-item`,实测它一直当**第 0 条**混在结果里(内容是"附近的美食
+    美食家常菜…"),但它**没有笔记链接** ⇒ 靠这一条滤掉。
+
+    卡片文本形如「标题 / 作者 / 日期 / 点赞数」⇒ 首行当标题、次行当作者。
+    笔记 id 从链接里取(`/explore/<id>`),顺带拼出完整 URL —— 原来这两项都是空的,
+    下游拿不到笔记地址。
+
+    ⚠️ **URL 要去掉 `?xsec_token=…`**:那是**会话级**访问令牌(换一次登录就失效,
+    带在库里过两天再打开就是坏链)⇒ 只存**规范地址**,`uid` 与 `url` 同源,
+    下游要拼链接随时能拼。
+
+    参数 `cards`:任何带 `.count()` / `.nth(i)` 的对象(Playwright locator 或测试替身)。
+    """
+    rows: list[dict] = []
+    for i in range(min(cards.count(), limit)):
+        try:
+            card = cards.nth(i)
+            href = card.locator(
+                'a[href*="/explore/"], a[href*="/search_result/"]'
+            ).first.get_attribute("href", timeout=1500)
+            if not href:
+                continue                      #: 推荐栏之类的非笔记卡片
+            raw = card.inner_text() or ""
+        except Exception:  # noqa: BLE001 - 单卡片读失败不拖垮整词
+            continue
+        lines = [s.strip() for s in raw.split("\n") if s.strip()]
+        if not lines:
+            continue
+        path = href.split("?", 1)[0].rstrip("/")       #: 先剥查询串,再剥尾斜杠
+        uid = path.rsplit("/", 1)[-1]
+        url = (path if path.startswith("http")
+               else f"https://www.xiaohongshu.com{path}")
+        rows.append({
+            "uid": uid,
+            "name": lines[1] if len(lines) > 1 else "",
+            "url": url,
+            "snippet": " ".join(lines)[:255], "pan_link": "",
+            "keyword": kw,
+        })
+    return rows
+
+
 def search(keywords: list[str], settings=None, per_kw_wait_ms: int = 6000,
            headed: bool = True) -> list[dict]:
     """按关键词搜小红书,返回 `[{uid, name, url, snippet, pan_link, keyword}]`。
@@ -288,20 +551,53 @@ def search(keywords: list[str], settings=None, per_kw_wait_ms: int = 6000,
     #   · 万一还是被拦 ⇒ **标记它 + 自动换下一个**,不用等人。
     start = _cursor_index(len(profs))
     order = [profs[(start + i) % len(profs)] for i in range(len(profs))]
-    skip = need_verify_profiles()
-    usable = [p for p in order if str(p) not in skip] or order
+    # ★ 要**跳过**两类号:
+    #   · 老的"需验证"名单(没有时长概念 ⇒ 得人去过一次才会摘);
+    #   · 账号池里的冷却(**带时刻** —— 主要是"频率风控"这类"等着就会好"的失败)。
+    # ⚠️ 两边**都按归一化路径**比对:配置/调用方手上可能是相对路径,而池子里存的是
+    #    绝对路径,直接用字符串相等会**永远对不上**(本仓踩过这种"单向陷阱")。
+    skip_raw = need_verify_profiles()
+    skip_norm = {_norm_path(s) for s in skip_raw}
+    blocked = _pool_need_verify() | _pool_cooling()
+    usable = [p for p in order
+              if str(p) not in skip_raw
+              and _norm_path(p) not in skip_norm
+              and _norm_path(p) not in blocked]
+
+    if not usable:
+        # ★ **全被跳过时,不能一律"硬试一轮"**:
+        #   若它们是在**「越试越糟」**的冷却里(频率风控 / 账号限制),硬试会把冷却
+        #   **推后**(本仓教训:在已被风控的号上反复重试 ⇒ 越试越久)。
+        #   这种情形**直接抛**,让上层等 —— 而不是"反正都试一遍"。
+        #   (其余状态如"需人过验证":硬试一轮没用、但**不会更糟**,所以仍然放行。)
+        harmful = _pool_harmful()
+        if order and all(_norm_path(p) in harmful for p in order):
+            mins = min(harmful[_norm_path(p)] for p in order)
+            raise XhsPageError(
+                f"所有小红书账号都在**频率/账号限制冷却**中(最快还有约 {mins} 分钟)。"
+                f"这一类**只需等** —— ⚠️ 重试会把冷却推后(越试越久),"
+                f"到点池子会自己把它们放出来;别重登、别换档案。", rate_limit=True)
+        usable = order
     tried: list[str] = []
     last_err = ""
     with sync_playwright() as p:
         for prof in usable:
             try:
                 rows = _search_with_profile(p, prof, kws, per_kw_wait_ms, headed)
-                clear_need_verify(prof)
+                clear_need_verify(prof)          # 成功 ⇒ 两边都摘(含池子里的冷却)
                 logger.info("小红书:本轮用账号「%s」,拿到 %d 条", prof.name, len(rows))
                 return rows
             except XhsPageError as exc:
                 tried.append(prof.name)
                 last_err = str(exc)
+                if getattr(exc, "rate_limit", False):
+                    # ★ **频率风控**:报进池子(3 小时冷却)后**换下一个号** ——
+                    #   ⚠️ 关键是**不等人**:这一类只要等就会好,标记成"需人工验证"
+                    #   会把这号钉死(那个标记没有时长)⇒ 一盏永远红的假红灯。
+                    _report_profile_rate_limited(prof, str(exc))
+                    logger.warning("小红书账号「%s」进**频率冷却**(报进池子 3h),换下一个",
+                                   prof.name)
+                    continue
                 if getattr(exc, "needs_human", False):
                     mark_need_verify(prof)
                     logger.warning("小红书账号「%s」需人工处理(过验证/重新登录)"
@@ -311,7 +607,8 @@ def search(keywords: list[str], settings=None, per_kw_wait_ms: int = 6000,
     raise XhsPageError(
         f"所有小红书账号都不可用(试过 {tried})。修法:对每个档案各跑一次 "
         f"`python tools/xhs_pass_verify.py <档案目录>`(**登录 或 过安全验证**)。"
-        f"最后原因:{last_err[:120]}")
+        f"⚠️ 若是「频率风控」导致的,那**只需等**(池子已按 3 小时冷却,到点会自己放出来),"
+        f"别再重试。最后原因:{last_err[:120]}")
 
 
 def _search_with_profile(p, prof, kws: list[str], per_kw_wait_ms: int,
@@ -319,7 +616,16 @@ def _search_with_profile(p, prof, kws: list[str], per_kw_wait_ms: int,
     """**单个账号**跑一轮搜索。被安全验证拦住时抛 `XhsPageError`(由调用方换账号)。"""
     rows: list[dict] = []
     if True:
-        kwargs = {"user_data_dir": str(prof), "headless": not headed, "no_viewport": True}
+        #: ★ 见 `_launch_kwargs`:**UA 对齐 + 关自动化特性**
+        kwargs = _launch_kwargs(prof, headed)
+        ua = kwargs.get("user_agent") or ""
+        if not ua and not headed:
+            logger.warning(
+                "小红书页面路:档案「%s」的存档里**没有 UA**,而无头采集会自带 "
+                "`HeadlessChrome/...` ⇒ 与登录时的浏览器**不是同一个**"
+                "(会被判「登录设备 ≠ 调用设备」)。"
+                "修法:重登一次 `python tools/xhs_browser_login.py %s`",
+                prof.name, prof.name)
         try:
             ctx = p.chromium.launch_persistent_context(channel="msedge",
                                                        executable_path=EDGE, **kwargs)
@@ -327,6 +633,8 @@ def _search_with_profile(p, prof, kws: list[str], per_kw_wait_ms: int,
             logger.info("小红书页面路:未找到 Edge,改用自带 Chromium")
             ctx = p.chromium.launch_persistent_context(**kwargs)
         try:
+            #: ⚠️ **必须在取页面之前**注入:脚本只对**之后创建的文档**生效
+            ctx.add_init_script(_STEALTH_JS)
             pg = ctx.pages[0] if ctx.pages else ctx.new_page()
             # ⚠️⚠️ **不要"先热身 /explore 再跳搜索"**(2026-10-07 实测,踩了两轮):
             # 那样跳过去 URL 会被前端路由改写成 `/search_result/`(**多一个斜杠**),
@@ -375,21 +683,28 @@ def _search_with_profile(p, prof, kws: list[str], per_kw_wait_ms: int,
                     #    而且**不能**复用「需人验证」那个标记 —— 那个标记**没有过期时间**
                     #    (只由"轮次成功"或人跑验证工具清除),拿它去标冷却会让账号
                     #    **永远被跳过**、永远等不到"成功"来清它 ⇒ 一盏永远红的假红灯。
-                    #    ⇒ 这里只**如实报出来**并把原因写清;真正的"按时长退避"要另加一个
-                    #    **带时间戳**的跳过机制(记在这里,别拿现成的标记凑合)。
+                    #    ⇒ 2026-10-12 起:`rate_limit=True` ⇒ 调用方把它报进**账号池**,
+                    #    拿一个**带时刻**的 3 小时冷却(这才是"按时长退避"的正解)。
                     raise XhsPageError(
                         f"小红书**频率风控冷却中**({_body[:60]!r})—— 报「请勿频繁操作/稍后重试」。"
                         f"这类修法是**等**(服务端按账号/IP 记账,几小时~一天自愈),"
                         f"**做什么都没用,而且越试越久**;别重登、别重试、别换档案。",
-                        needs_human=False)
+                        needs_human=False, rate_limit=True)
                 if needs_login(_body):
                     # ⚠️⚠️ **这一条是修一个假阴性**:没有它,搜索页的
                     # 「登录后查看搜索结果」会走进下面的"没卡片 ⇒ 这次没搜到"分支,
                     # 于是**静默返回空** —— 日志里长得像"小红书没热度"。
-                    raise XhsPageError(
-                        f"账号未登录(搜索页提示「登录后查看搜索结果」)—— 对档案 "
-                        f"{prof.name} 跑 `python tools/xhs_pass_verify.py {prof}` 登录一次",
-                        needs_human=True)
+                    #
+                    # ★★ **2026-10-12:「未登录」有两种,修法完全相反,绝不能都叫人去重登**
+                    #   ① **从来没登过**(存档里没有 `04` 会话)⇒ 要人去登 —— 重登是对的;
+                    #   ② **登过、但被踢下线**(存档里明明记着 `04` 真登录,页面却说未登录)
+                    #      ⇒ 这是**设备/频率维度**的风控(小红书按设备限制同时在线的账号数,
+                    #      同一台机器连登多个号会把前一个踢掉 —— 实测:刚登完 5 分钟内
+                    #      `04` 就被降级成 `03`、`webSsk` 归零)。
+                    #      这时**重登是最坏的动作**:每登一个新号就再触发一次设备风控,
+                    #      把刚登的也踢掉 ⇒ 越修越糟。正确的做法是**停下来等**。
+                    #   混成一句"去登录" ⇒ 会把人推成一个**自我加剧的循环**。
+                    _raise_not_logged_in(prof.name, prof)
                 # 兜底:万一被路由改写成 `/search_result/`,用规范 URL 再来一次。
                 # (判据仍是 url/标题,**不是**卡片数 —— 但这里"没卡片"是唯一的信号)
                 if "/search_result/" in pg.url:
@@ -408,16 +723,7 @@ def _search_with_profile(p, prof, kws: list[str], per_kw_wait_ms: int,
                 if n == 0 and pg.locator(EMPTY_SEL).count():
                     logger.info("小红书页面路:「%s」确实没有结果(空态容器在)", kw[:26])
                     continue                      # **真没有** ≠ 被拦
-                for i in range(min(n, 30)):
-                    try:
-                        txt = cards.nth(i).inner_text().replace("\n", " ").strip()
-                    except Exception:  # noqa: BLE001 - 单卡片读失败不拖垮整词
-                        continue
-                    if not txt:
-                        continue
-                    rows.append({"uid": "", "name": "", "url": "",
-                                 "snippet": txt[:255], "pan_link": "",
-                                 "keyword": kw})
+                rows.extend(_card_rows(cards, kw))
                 logger.info("小红书页面路:「%s」拿到 %d 条", kw[:26], n)
         finally:
             ctx.close()                           # 顺序执行的资源不跨调用(见模块头纪律 1)

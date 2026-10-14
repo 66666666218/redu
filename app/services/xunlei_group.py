@@ -317,6 +317,18 @@ def sync_group_shares(session, user_id: int, group_ids: list[str] | None = None,
                 sender=item["sender"], kind=item["kind"], msg_time=item["msg_time"]))
             session.flush()                     # ⚠️ 见 cross_accounts 的教训:同轮去重靠它
             new_count += 1
+        # ★★ **每个群单独提交** —— 原实现是「循环里 `flush()` + **所有群跑完后**才
+        # `commit()` 一次」,而**每轮迭代的开头都要发网络请求**(`_records_with_catchup`
+        # 拉群消息)⇒ 写事务**横跨了后面所有群的 HTTP 往返**,写锁实测被持 **22~45 秒**
+        # (2026-10-13 由 `app.db.database` 的写事务看门狗点名:栈就落在这两行)。
+        # 单写者 sqlite 下后果是真的:当天 370 次「写事务超时」;仅一次重启之后就
+        # `database is locked` 42 次、**作业心跳写入失败 10 次**(作业会被误判成"没跑")、
+        # 调度作业执行失败 4 次。⇒ **慢活(HTTP)一律不许留在事务里。**
+        # ⚠️ 同轮去重靠的是上面的 `known`(Python 集合),**不需要**让事务一直开着。
+        # (同类 bug 在 `wechat/_enrich.py`、`pan_discovery.py` 2026-10-08 已修,这是第三处。)
+        session.commit()
+    # 兜底:某个群 `continue`(拉取失败)或一个群都没新增时,上面那行不会执行;
+    # 这里收尾关掉仍开着的(只读)事务 —— 与原实现「循环后必有一次 commit」一致。
     session.commit()
     if failed_groups and len(failed_groups) == len(groups):
         # **全部群都拉不到** → 不是"今天群里没新分享",是链路坏了。必须冒出去让 tick 记 failed。
