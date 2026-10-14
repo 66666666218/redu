@@ -216,6 +216,13 @@ def _xhs_row(monkeypatch, exc, reheal_ok=True, retry_rows=None):
 
     calls = {"probe": 0, "reheal": 0}
 
+    #: ⚠️ **必须先把"平台开着"钉住**:2026-10-15 起 `_xhs_protocol_row` 会先问
+    #: `_xhs_enabled()`(关掉的平台**不探活** —— 每次协议探测都是"第三方脚本浏览"的证据)。
+    #: 而测试环境读的是真实 `.env`(那里 `xiaohongshu` 是**关的**)⇒ 不钉住它,
+    #: 下面这些用例测的就不是"探活之后怎么判",而是"根本没探"。
+    #: 守卫本身的用例见 `test_小红书平台关掉时_体检不许去探活`。
+    monkeypatch.setattr(ch, "_xhs_enabled", lambda *a, **k: True)
+
     def _search(*a, **k):
         calls["probe"] += 1
         if calls["probe"] == 1:
@@ -380,3 +387,39 @@ def test_B站凭据死了要判红并给对修法(monkeypatch) -> None:
     alive, why = ch._cred_alive("bilibili", "SESSDATA=x", None)
     assert alive is False, "凭据死了必须判红"
     assert "-352" in why and "bili_login.py" in why, why
+
+
+def test_小红书平台关掉时_体检不许去探活(monkeypatch):
+    """★★ **关掉的平台,体检一次都不许打**(2026-10-15)。
+
+    用户从 App 里读到的处罚原文是「**与真人操作习惯不一样**」「**涉及使用第三方脚本或者
+    AI 工具进行浏览**」—— 即**协议路本身就是被处罚的行为**。而体检这条线过去不看开关,
+    每天 09:30 照打协议接口(失败还会重导 + 复验)⇒ **平台明明关了,它还在替我们"自首"**。
+    """
+    from app.services import chain_health as ch
+    from app.services import xhs_protocol_source as xp
+
+    hit: list = []
+    monkeypatch.setattr(xp, "search", lambda *a, **k: hit.append("probe") or [])
+    monkeypatch.setattr(ch, "_xhs_reheal", lambda db: hit.append("reheal") or "已重导")
+    monkeypatch.setattr(ch, "_xhs_enabled", lambda *a, **k: False)
+
+    row = ch._xhs_protocol_row(object())
+    assert hit == [], f"平台关着还去打它 = 自己给自己添证据(打了 {hit})"
+    assert row["level"] == "🟡"
+    #: ⚠️ 要**说明白**,不能静默跳过 —— 静默会让人以为"体检漏了"或"这条链好好的"
+    assert "不探活" in row["detail"] and "PRESENCE_PLATFORMS" in row["detail"]
+
+
+def test_小红书平台开着时_照常探活(monkeypatch):
+    """反向守卫:别把开关做成了"永远不探"。"""
+    from app.services import chain_health as ch
+    from app.services import xhs_protocol_source as xp
+
+    hit: list = []
+    monkeypatch.setattr(xp, "search", lambda *a, **k: hit.append("probe") or [{"url": "u"}])
+    monkeypatch.setattr(ch, "_xhs_enabled", lambda *a, **k: True)
+
+    row = ch._xhs_protocol_row(object())
+    assert hit == ["probe"], "开着就该探活"
+    assert row["level"] == "🟢" and "验活" in row["detail"]

@@ -485,6 +485,25 @@ def _xhs_reheal(db) -> str:
         return f"自动重导失败:{type(exc).__name__}"
 
 
+def _xhs_enabled(settings=None) -> bool:
+    """小红书**现在是开着的吗**(`PRESENCE_PLATFORMS` 里有它)。
+
+    ★ 为什么要问这一句(2026-10-15,用户从 App 里读来的处罚通知):
+    处罚原文是「**与真人操作习惯不一样**」「**涉及使用第三方脚本或者 AI 工具进行浏览**」——
+    即:**我们那条协议路本身就是被处罚的行为**。而体检这条线过去**不看开关**,
+    每天 09:30 照打协议接口(失败还会重导 + 复验)⇒ **平台明明关了,它还在替我们"自首"**。
+    ⇒ 规矩:**关掉的平台,体检不去探活**。「今天没探到」比「探了一次、又留一条证据」好得多。
+    """
+    try:
+        from config.settings import get_settings
+
+        s = settings or get_settings()
+        raw = str(getattr(s, "presence_platforms", "") or "")
+    except Exception:  # noqa: BLE001 - 读不到配置就当"开着"(宁可多报,别假装绿)
+        return True
+    return "xiaohongshu" in {x.strip().lower() for x in raw.split(",") if x.strip()}
+
+
 def _xhs_protocol_row(db) -> dict:
     """小红书**协议凭据**验活 + 失效自动重导(2026-10-08 补)。
 
@@ -497,6 +516,14 @@ def _xhs_protocol_row(db) -> dict:
         而且**反复重试/重登只会延长封锁** ⇒ 只报红、写明"**停手等解封**"。
     把这两件混成一句"小红书挂了",下一个人就会去重登 —— 而那正是最不该做的事。
     """
+    #: ★★ **平台关着就别探活** —— 见 `_xhs_enabled` 的说明:每一次探测都是"第三方脚本浏览"的证据,
+    #: 而账号处罚期内尤其不能自己给自己加证据。这里**报一行说明**,而不是静默跳过
+    #: (静默跳过会让人以为"体检漏了"或"这条链好好的")。
+    if not _xhs_enabled():
+        return {"name": _XHS_PROTO_LABEL, "level": YELLOW,
+                "detail": "小红书已在 `PRESENCE_PLATFORMS` 里**关掉** ⇒ **本行不探活**"
+                          "(关掉的平台不去打它:每次协议探测都是「第三方脚本浏览」的证据,"
+                          "处罚期内尤其如此)。要恢复:把 `xiaohongshu` 加回 `.env` 并重启"}
     from app.services import xhs_protocol_source as xp
 
     try:
