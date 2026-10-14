@@ -579,6 +579,26 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
     webid = _webid(session, user_id)
     rows: list[dict] = []
 
+    # ★ **专用出口代理**(2026-10-14,用户给的隧道代理):抖音按**出口 IP**下发
+    #   「要求过验证」(`verify_check`)—— 本机家用 IP 被自动化搜索打过标记。
+    #   换出口是**唯一还能自己动的杠杆**(重导 cookie 换的是会话,过不了一道**还在生效**的验证要求)。
+    #   ⚠️ **只作用于这一条链**(读 `douyin_search_proxy_url`),不跟全局 `use_proxy` ——
+    #   后者会顺带把 `collector` 那条通用链也拽进代理,那是没必要的连带风险。
+    proxies = None
+    try:
+        from config.settings import get_settings   # 本文件一律函数内导入(见上两处)
+
+        _st = settings or get_settings()
+        _px = str(getattr(_st, "douyin_search_proxy_url", "") or "").strip()
+        if _px:
+            from app.utils.proxy import _normalize_proxy_url
+
+            scheme, host_port = _normalize_proxy_url(_px)
+            proxies = {"http": f"{scheme}://{host_port}", "https": f"{scheme}://{host_port}"}
+            logger.info("抖音纯协议:走专用出口 %s", host_port)
+    except Exception:  # noqa: BLE001 - 代理配置坏了就直连(与"没配代理"同路),别挡住搜索
+        logger.warning("抖音纯协议:专用出口解析失败,本次直连", exc_info=True)
+
     for i, kw in enumerate(kws):
         if i:
             time.sleep(_GAP)
@@ -590,7 +610,7 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
             url = build_url(params, use_abogus=use_abogus)
             headers = build_headers(blob, ck, kw)
             try:
-                r = requests.get(url, headers=headers, timeout=25)
+                r = requests.get(url, headers=headers, timeout=25, proxies=proxies)
             except Exception as exc:  # noqa: BLE001
                 raise DouyinProtocolError(
                     f"请求失败:{type(exc).__name__}: {str(exc)[:90]}",

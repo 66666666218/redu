@@ -847,6 +847,15 @@ def check_list_sources(db, settings=None) -> list[dict]:
     # **假绿比红更贵**,所以这里单独说死 —— 而且**必须与验活结果交叉**,不能只按"配了没有"判绿
     # (wemp 配了但凭据已死时,再报一行绿就是自相矛盾)。
     _READ_CAPABLE = ("wemp",)
+    # ⚠️ **2026-10-14 订正**:"唯一带阅读数的是 wemp"这句话**不完整** ——
+    #    **微信读书的 `mp_articles` 也带精确 `readNum`**(实测当天 14:04 那轮拿到 36 篇读数),
+    #    只是它:① 走 `_listen` 的**直接路径**(不在上面 `backends` 这三个客户端里,
+    #    所以本行以前看不见它);② **受会话额度**(每轮 25 个号 ⇒ 覆盖率 ~16%)。
+    #    ⇒ 本行的准确定位是「**不受额度的那条路(wemp)**」;阅读列实际有没有数,
+    #    看「公众号·精确阅读数」那一行的**覆盖率**(那里才是两条路加起来的真相)。
+    _READ_NOTE = ("。⚠️ 注意:**微信读书那条路也带精确读数**(不在本行统计的源里,"
+                  "且受每轮 25 个号的会话额度)⇒ 阅读列实际有没有数,看「公众号·精确阅读数」"
+                  "那一行的覆盖率")
     capable = [n for n, _ in backends if n in _READ_CAPABLE]
     live_capable = [n for n in capable if n in verified]
     if not capable:
@@ -855,7 +864,8 @@ def check_list_sources(db, settings=None) -> list[dict]:
                               f"{'/'.join(n for n, _ in backends)} 的返回结构里没有 `read_num` 字段"
                               f"(不是它坏了,是它压根不送)。⇒ 卡片/表格那一列阅读数**只能是 `—`**,"
                               f"代码怎么改都一样。唯一带阅读数的是自研 `wemp`(公众号后台 "
-                              f"`appmsgpublish`,**不受微信读书 29 个号的会话额度限制**)⇒ 配好它的凭据即可"})
+                              f"`appmsgpublish`,**不受微信读书 29 个号的会话额度限制**)⇒ 配好它的凭据即可"
+                              + _READ_NOTE})
     elif not live_capable:
         # ★ 2026-10-14 补:**这一行以前无论什么原因都叫人"修好凭据"** —— 而 200013(限流)
         #   换凭据是**无用动作**(当天实测:换上一枚全新登录的凭据,服务端仍回 200013)。
@@ -873,12 +883,14 @@ def check_list_sources(db, settings=None) -> list[dict]:
                        f"**这是唯一需要人动手的情形** ⇒ 阅读列**仍然是 `—`**。"
                        f"命令见上面那一行(浏览器登录 mp.weixin.qq.com → 复制整条 Cookie + "
                        f"地址栏 token → 跑 `scripts/wemp_cred.py`);"
-                       f"补齐后看 `runs.detail` 的 `reads(src/from)` 确认真的在补")
+                       f"补齐后看 `runs.detail` 的 `reads(src/from)` 确认真的在补"
+                       + _READ_NOTE)
         else:
             _detail = (f"带阅读数的源 {'/'.join(capable)} **已配但本轮验活没过**(见上面那一行)"
                        f" ⇒ 阅读列**仍然是 `—`**。**按上面那行给出的性质处置** —— "
                        f"限流只需等、会话失效才要换凭据(**给错动作等于白干**);"
-                       f"补齐后看 `runs.detail` 的 `reads(src/from)` 确认真的在补")
+                       f"补齐后看 `runs.detail` 的 `reads(src/from)` 确认真的在补"
+                       + _READ_NOTE)
         out.append({"name": "公众号·阅读数来源", "level": YELLOW, "detail": _detail})
     else:
         out.append({"name": "公众号·阅读数来源", "level": GREEN,
@@ -887,14 +899,25 @@ def check_list_sources(db, settings=None) -> list[dict]:
                               f"`_source.mp_articles_with_reads`)。核对是否真补上:看 `runs.detail` 的 "
                               f"`reads(src/from/via_title/unmatched)` —— `src>0 from=0` = 问到了但没带数"
                               f"(大概率字段名不对,`wemp_client` 会打一次真实字段名),"
-                              f"`unmatched>0` = 两源链接形态对不上(短链 vs 长链)"})
+                              f"`unmatched>0` = 两源链接形态对不上(短链 vs 长链)"
+                              + _READ_NOTE})
     # ★ **单点风险单独说**:只剩一个能答的源时降级链实际没有备胎,而"还有源在答"会让
     #    所有产出指标照常绿 —— 只有这一行看得出来。
     if alive <= 1:
         out.append({"name": "公众号·列表源兜底", "level": RED if alive == 0 else YELLOW,
                     "detail": f"**能答的源只剩 {alive} 个** ⇒ `MultiSourceClient` 的降级链"
                               f"实际上没有备胎。" + (
-                                  "链路已经完全取不到列表了。" if alive == 0 else
+                                  # ⚠️ 2026-10-14 改准措辞:这句原来写「链路已经完全取不到列表了」,
+                                  #    而当天实测 20:07 那轮**刚抓到 59 篇新文** —— 因为
+                                  #    **微信读书那条路不在这份清单里**(它由 `_listen` 直接调用,
+                                  #    不在 `configured_backends` 的三个源里)。
+                                  #    结论说反了会让人去开 WeRSS/换凭据,而真正该看的是别处。
+                                  "**但这不等于链路死了**:"
+                                  "微信读书那条路**不在本清单里**(`configured_backends` 只有 "
+                                  "werss/wemp/reader_platform)⇒ 去看上面「微信读书(Cookie/书架)」"
+                                  "那一行和「公众号·监听采文」的产出。本条说的是"
+                                  "「**降级链里的备胎用完了**」,不是「取不到列表」。"
+                                  if alive == 0 else
                                   "挂掉的那个源**不影响产出指标**(它答不上时会被静默跳过),"
                                   "所以只能靠这一行看出来。")})
     return out
@@ -1130,12 +1153,26 @@ def check_weread_list_rotation(db, rounds: int = 3) -> list[dict]:
     import re
 
     rows = _rows(db, "wechat_listen", max(rounds, 5))
+    # ⚠️⚠️ **2026-10-14:这条判据曾经整整瞎掉过** —— 原来是一个**认顺序**的正则
+    #     `ok=(\d+) app=(\d+) off=(\d+)[^)]*skipped=(\d+)`,要求 `app=N` **紧挨着** `off=`;
+    #     而当月记账里插进了 `app_fail=` / `app_blocked=`(两条路的失败分账),
+    #     顺序一变 ⇒ **一次都匹配不上** ⇒ 它一直报"最近 N 轮都没有记账(格式变了?)"。
+    #     **工具的怀疑是对的,但没人去看** —— 于是这个专门用来抓"当天全断"的指标,
+    #     自己成了"看起来在跑、其实什么都没看"的那一个(本仓母题)。
+    #     ⇒ 改成**不认顺序的逐字段取数**;新增字段不再会把它打瞎。
+    def _field(detail: str, key: str) -> int | None:
+        # ⚠️ 边界**不能用 ``**:上一版把 `` 直接写进了 f-string ⇒ 成了**退格符 0x08**,
+        #    正则永远匹配不上 ⇒ 又一次"瞎"(与这次要修的 bug 同一族:看着对、其实什么都没看)。
+        m = re.search(rf"(?:^|[^0-9A-Za-z_]){re.escape(key)}=(\d+)", detail)
+        return int(m.group(1)) if m else None
+
     parsed: list[tuple[int, int, int, int]] = []
     for r in rows:
-        m = re.search(r"weread_list\(ok=(\d+) app=(\d+) off=(\d+)[^)]*skipped=(\d+)\)",
-                      str(r.detail or ""))
-        if m:
-            parsed.append(tuple(int(g) for g in m.groups()))   # type: ignore[arg-type]
+        d = str(r.detail or "")
+        ok, app = _field(d, "ok"), _field(d, "app")
+        if ok is None or app is None:
+            continue          # 连这两个都没有 = 这一轮压根没记(与"记了 0"是两回事)
+        parsed.append((ok, app, _field(d, "off") or 0, _field(d, "skipped") or 0))
     name = "公众号·阅读数列表轮转"
     if not rows:
         return [{"name": name, "level": YELLOW, "detail": "最近没有监听轮,无从判断"}]

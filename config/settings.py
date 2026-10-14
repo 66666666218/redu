@@ -597,6 +597,12 @@ class Settings(BaseSettings):
     douhot_window_cron: str = "17,37,57 * * * *"  # 多窗口对比采集频率(默认每20分钟,与榜单采集互补)
     alert_cooldown_hours: int = 6   # 预警规则冷却(小时),避免重复刷
     proxy_url: str = ""             # 隧道代理地址
+    #: ★ **抖音搜索(线索)专用出口**(2026-10-14,用户给的隧道代理,到期 2026-11-13)。
+    #: 形式同 `xianyu_proxy_url`:`http://user:pass@host:port`(**单条固定**,留空=直连)。
+    #: ⚠️ **刻意独立于全局 `use_proxy`**:抖音是按**出口 IP**下发「要求过验证」的
+    #:    (本机家用 IP 被自动化搜索打上了标记),而翻全局开关会**顺带**把 `collector`
+    #:    那条通用采集链也拽进代理 —— 那是没必要的连带风险(`xhs_net` 也特意绕开了全局池)。
+    douyin_search_proxy_url: str = ""
     proxy_user: str = ""            # 隧道代理账号
     proxy_pass: str = ""            # 隧道代理密码
     use_proxy: bool = False         # 是否启用代理(本地调试可关闭)

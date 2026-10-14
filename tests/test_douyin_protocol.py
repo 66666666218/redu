@@ -438,7 +438,7 @@ def test_翻页把上一屏的_logid_当_search_id(monkeypatch):
 
     seen: list[dict] = []
 
-    def fake_get(url, headers=None, timeout=None):
+    def fake_get(url, headers=None, timeout=None, **kw):
         from urllib.parse import parse_qs, urlparse
 
         # ⚠️ `keep_blank_values=True` 不能省:`parse_qs` 默认**丢掉空值参数**,
@@ -463,7 +463,7 @@ def test_某页空就停_不再继续翻(monkeypatch):
 
     calls: list[str] = []
 
-    def fake_get(url, headers=None, timeout=None):
+    def fake_get(url, headers=None, timeout=None, **kw):
         calls.append(url)
         return _FakeResp(payload=_resp([] if len(calls) > 1 else [_video()]))
 

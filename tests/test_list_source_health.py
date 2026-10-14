@@ -244,3 +244,35 @@ class TestReadCountSource:
         assert limited != dead, "两种完全相反的处置不能共用一句话"
         # 两者都必须保留"后果"这半句(否则读者不知道现在还能不能看到阅读数)
         assert "仍然是 `—`" in limited and "仍然是 `—`" in dead
+
+
+# ---------------------- 记账解析的健壮性(2026-10-14:这条判据曾整整瞎掉)
+#
+# 事故形状:解析是**认顺序**的正则(`ok= app= off= … skipped=`),而当月记账里插进了
+# `app_fail=` / `app_blocked=`(两条路的失败分账)⇒ 顺序一变就**一次都匹配不上**
+# ⇒ 这个专门用来抓"当天全断"的指标,自己成了"看起来在跑、其实什么都没看"的那一个。
+
+def test_轮转记账解析不认字段顺序(session) -> None:
+    from app.services.chain_health import check_weread_list_rotation
+    from app.services.tenant_base import _record_run
+
+    # 新格式(中间插了 app_fail / app_blocked)—— 旧正则在这里会失明
+    _record_run(session, 1, "wechat_listen", "success",
+                "accounts=129 new=59 failed=0 weread_list(ok=0 app=0 app_fail=1 "
+                "app_blocked=23 off=1 off_with_new=2 skipped=51)")
+    session.commit()
+    rows = check_weread_list_rotation(session, rounds=1)
+    assert rows, "应该有结论行"
+    detail = rows[0]["detail"]
+    assert "格式变了" not in detail and "都没有" not in detail, f"解析又瞎了:{detail}"
+    assert "网页问成 0" in detail and "App 问成 0" in detail, detail
+
+
+def test_轮转记账真的没记时才报瞎(session) -> None:
+    from app.services.chain_health import check_weread_list_rotation
+    from app.services.tenant_base import _record_run
+
+    _record_run(session, 1, "wechat_listen", "success", "accounts=1 new=0")
+    session.commit()
+    detail = check_weread_list_rotation(session, rounds=1)[0]["detail"]
+    assert "记账" in detail        # 这一轮确实没有那两个数 ⇒ 如实说"没记账"
