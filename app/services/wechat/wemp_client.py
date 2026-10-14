@@ -109,6 +109,22 @@ def mp_id_to_fakeid(mp_id: str) -> str:
     return base64.b64encode(num.encode()).decode()
 
 
+def fakeid_to_mp_id(fakeid: str) -> str:
+    """`fakeid`(base64(数字))→ `MP_WXS_<数字>` —— **就是我们的 `biz` / `weread_book_id`**。
+
+    ⚠️ 与 `mp_id_to_fakeid` 是**同一件事的两个方向**,必须成对维护:WeRSS 当年就是把
+    `MP_WXS_<base64解码(fakeid)>` 当订阅 id 的,微信读书的 bookId 又是同一编号
+    (2026-10-01 用 `mp_cover` 在未关注的号上验过)⇒ 解出它,号就**立刻可监听**
+    (走微信读书那条路,不必等 WeRSS 抓)。
+    解不出(非法 base64 / 空)返回空串 —— **不猜**。
+    """
+    try:
+        num = base64.b64decode(str(fakeid or "").strip(), validate=True).decode()
+    except Exception:  # noqa: BLE001 - 垃圾输入返回""是合法结果
+        return ""
+    return f"MP_WXS_{num}" if num.isdigit() else ""
+
+
 class WempClient:
     """appmsgpublish 直连(读侧);与 WerssClient 的 mp_articles 合同一致。
 
@@ -123,6 +139,68 @@ class WempClient:
         self.token = token
         self.timeout = timeout
 
+    def _headers(self) -> dict:
+        return {"User-Agent": _UA, "Referer": f"{WEMP_BASE}/cgi-bin/appmsg",
+                "Cookie": self.cookie, "X-Requested-With": "XMLHttpRequest"}
+
+    def _get_json(self, path: str, params: dict) -> dict:
+        """打后台 JSON 接口,并把 `base_resp` 的错翻成人话。
+
+        **两个端点共用这一处**(`appmsgpublish` 拉文章 / `searchbiz` 按名找号)——
+        「同一套判据写两遍迟早飘一个」是本仓反复栽过的坑,错误码分流尤其不能有两个版本。
+        """
+        try:
+            resp = requests.get(f"{WEMP_BASE}{path}", params=params,
+                                headers=self._headers(), timeout=self.timeout)
+            msg = resp.json()
+        except requests.RequestException as exc:
+            raise WempError(f"{path} 请求失败:{type(exc).__name__}") from exc
+        except ValueError as exc:
+            raise WempError(f"{path} 响应非 JSON(会话可能已失效)") from exc
+
+        base = msg.get("base_resp") or {}
+        ret = base.get("ret")
+        if ret == 200013:
+            raise WempRateLimited(f"{path} 频率限制(200013)")
+        if ret == 200003:
+            raise WempAuthError("公众号后台会话失效(200003),请重新扫码授权")
+        if ret != 0:
+            raise WempError(f"{path} 错误 ret={ret}:{base.get('err_msg', '')}")
+        return msg
+
+    def search_biz(self, kw: str, limit: int = 10) -> list[dict]:
+        """按名搜**全量公众号**(后台 `searchbiz`)→ `[{fakeid, nickname, alias}]`。
+
+        ★ 为什么要自己实现(2026-10-14 实测):WeRSS 的 `search_mp` 本来就是**转发这个接口**,
+        而**这套凭据我们手里就有** ⇒ 「公众号名 → 可监听标识」不必再依赖那个容器/Docker 镜像。
+        当日实测同一枚凭据:`appmsgpublish` 回 `200013`(**限流**),而 `searchbiz` **回 `ret=0`
+        且命中 3 个号** ⇒ **限流是按端点的**,不是整个后台会话 —— 所以"另一个端点"是一条真正可用的路。
+
+        ⚠️ 两条纪律(与 `_subscribe_by_name` 同源):返回里的 `fakeid` 是 **base64(数字)**,
+        要 `fakeid_to_mp_id()` 才变成 `biz`;而且**同名与形近号会一起返回**
+        (实测搜「小猫爱吃米」回了「小猫咪爱吃米」「爱吃的小猫」)⇒ **必须按昵称精确比对**,
+        重名歧义一律不用(猜错的代价是把 A 号的文章当 B 号推给员工)。
+        """
+        query = str(kw or "").strip()
+        if not query:
+            return []
+        msg = self._get_json("/cgi-bin/searchbiz", {
+            "action": "search_biz", "begin": "0",
+            "count": str(max(1, min(int(limit), 20))), "query": query,
+            "token": self.token, "lang": "zh_CN", "f": "json", "ajax": "1",
+        })
+        out: list[dict] = []
+        for raw in msg.get("list") or []:
+            if not isinstance(raw, dict):
+                continue
+            fakeid = str(raw.get("fakeid") or "").strip()
+            nickname = str(raw.get("nickname") or "").strip()
+            if not fakeid or not nickname:
+                continue      # 没有 fakeid 就没法换 id;没有昵称就没法精确比对
+            out.append({"fakeid": fakeid, "nickname": nickname,
+                        "alias": str(raw.get("alias") or "").strip()})
+        return out
+
     def mp_articles(self, mp_id: str, page: int = 1, limit: int = 20) -> list[dict]:
         """某号文章列表(发布时间降序),归一化为 ReaderPlatformClient 同一结构。"""
         limit = max(1, min(int(limit), 20))  # 后台接口单页上限 20,超了整请求被拒
@@ -133,26 +211,7 @@ class WempClient:
             "fakeid": mp_id_to_fakeid(mp_id), "token": self.token,
             "lang": "zh_CN", "f": "json", "ajax": "1",
         }
-        try:
-            resp = requests.get(
-                f"{WEMP_BASE}/cgi-bin/appmsgpublish", params=params,
-                headers={"User-Agent": _UA, "Referer": f"{WEMP_BASE}/cgi-bin/appmsg",
-                         "Cookie": self.cookie, "X-Requested-With": "XMLHttpRequest"},
-                timeout=self.timeout)
-            msg = resp.json()
-        except requests.RequestException as exc:
-            raise WempError(f"appmsgpublish 请求失败:{type(exc).__name__}") from exc
-        except ValueError as exc:
-            raise WempError("appmsgpublish 响应非 JSON(会话可能已失效)") from exc
-
-        base = msg.get("base_resp") or {}
-        ret = base.get("ret")
-        if ret == 200013:
-            raise WempRateLimited("appmsgpublish 频率限制(200013)")
-        if ret == 200003:
-            raise WempAuthError("公众号后台会话失效(200003),请重新扫码授权")
-        if ret != 0:
-            raise WempError(f"appmsgpublish 错误 ret={ret}:{base.get('err_msg', '')}")
+        msg = self._get_json("/cgi-bin/appmsgpublish", params)
 
         page_raw = msg.get("publish_page")
         if not page_raw:

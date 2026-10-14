@@ -451,6 +451,47 @@ def _subscribe_by_name(plat: object, nickname: str) -> str:
                          avatar=hits[0].get("avatar", ""), intro=hits[0].get("intro", ""))
     fid = str(feed.get("id") or "")
     return fid if fid.startswith(_FEED_BIZ_PREFIX) else ""
+def _biz_from_wemp(session: Session, user_id: int, nickname: str) -> tuple[str, str]:
+    """**自研**的「公众号名 → 可监听标识」:后台 `searchbiz` + 昵称精确比对。
+
+    ★ 为什么必须有它(2026-10-14 实测):按名收录原来**只有一条路** —— WeRSS 的 `search_mp`
+    (它自己就是转发这个接口)。那个容器一停,后果是**静默的**:
+
+        `runs.detail` 里 `listenable=0` **连续四天**;最近 7 天新建 37 个号里 **36 个是哑号**
+        (既无 `biz` 也无 `weread_book_id`)⇒ 每天 8 个收录名额全花在"建一个哑行"上。
+
+    而**这套凭据我们手里就有**(`wemp_cred_{uid}`),接口也**没被 `200013` 压住** ——
+    当日同一枚凭据实测:`appmsgpublish` 回 `200013`,而 `searchbiz` **回 `ret=0` 且命中 3 个号**
+    ⇒ **限流是按端点的**。所以收录**不必再依赖任何容器/镜像**。
+
+    返回 `(biz, hint)`:`biz` 是 `MP_WXS_<数字>`(拿不到就是空串),`hint` 说明卡在哪。
+    ⚠️ 与 WeRSS 那条**同一套纪律**:昵称**精确比对**、**重名歧义一律不用**
+    (实测搜「小猫爱吃米」会一起回「小猫咪爱吃米」「爱吃的小猫」——猜错的代价是把 A 号的文章
+    当 B 号推给员工)。
+    """
+    from app.services.wemp_cred import load as _load_wemp_cred
+
+    cred = _load_wemp_cred(session, user_id) or {}
+    if not cred.get("cookie") or not cred.get("token"):
+        return "", "没有公众号后台凭据(wemp),自研按名解析不可用"
+    from app.services.wechat.wemp_client import WempClient, WempError, fakeid_to_mp_id
+
+    want = _norm_mp_name(nickname)
+    try:
+        hits = [h for h in WempClient(cred["cookie"], cred["token"]).search_biz(nickname, limit=10)
+                if _norm_mp_name(h.get("nickname", "")) == want]
+    except WempError as exc:  # 限流/会话失效都只是"这次没拿到",不挡建号
+        return "", f"自研 searchbiz 失败:{str(exc)[:70]}"
+    if not hits:
+        return "", "自研 searchbiz 没搜到精确同名"
+    if len(hits) > 1:
+        return "", "自研 searchbiz 搜到多个同名(歧义,不猜)"
+    mp_id = fakeid_to_mp_id(hits[0]["fakeid"])
+    if not mp_id:
+        return "", "自研 searchbiz 的 fakeid 解不出 MP_WXS_(接口形态可能变了)"
+    return mp_id, ""
+
+
 def add_benchmark_by_name(session: Session, user_id: int, nickname: str, note: str = "",
                           settings: Settings | None = None) -> dict:
     """候选无文章链接时按公众号名加号:补进 WeRSS 订阅 → 拿到 biz,直接可监听。
@@ -469,6 +510,18 @@ def add_benchmark_by_name(session: Session, user_id: int, nickname: str, note: s
         WechatBenchmark.user_id == user_id, WechatBenchmark.nickname == name))
     if dup is not None:
         listenable = bool(feed_biz(dup) or dup.weread_book_id)
+        if not listenable:
+            # ★★ 2026-10-14:**已存在的"哑号"也要给一次机会**。
+            #    原来的写法是"同名行在 ⇒ 直接返回 listenable=False",于是**存量哑号永远哑着**:
+            #    它们正是列表源停摆那几天建下的(全库 83 个),而每天的收录作业重新挑到它们时
+            #    会走这条早退分支 ⇒ **修好了解析能力也救不回来**(这是"存量死账"那一类)。
+            #    ⇒ 这里补一次自研解析,拿到就**就地回填**。
+            biz, _why = _biz_from_wemp(session, user_id, name)
+            if biz:
+                dup.biz = dup.biz or biz[:64]
+                dup.weread_book_id = dup.weread_book_id or biz[:64]
+                session.commit()
+                listenable = True
         return {"id": dup.id, "nickname": dup.nickname, "biz": dup.biz, "created": False,
                 "listenable": listenable,
                 "hint": "" if listenable else "已存在同名对标号,但仍无可监听标识"}
@@ -476,7 +529,7 @@ def add_benchmark_by_name(session: Session, user_id: int, nickname: str, note: s
     plat = _root._platform_client(settings)
     biz, hint = "", ""
     if plat is None:
-        hint = "未配置列表源(WeRSS),已建号但暂无监听能力"
+        hint = "未配置列表源(WeRSS)"
     else:
         try:
             biz = _subscribe_by_name(plat, name)
@@ -484,7 +537,18 @@ def add_benchmark_by_name(session: Session, user_id: int, nickname: str, note: s
             logger.info("候选订阅 WeRSS 失败:%s", exc)
             hint = f"订阅列表源失败:{exc}"
         if not biz and not hint:
-            hint = "WeRSS 未搜到该号或重名歧义,已建号但暂无监听能力"
+            hint = "WeRSS 未搜到该号或重名歧义"
+    if not biz:
+        # ★ 2026-10-14:**自研那条顶上** —— 列表源停着的时候,"按名收录"不该整条瘫成
+        #   "每天建 8 个哑行"(实测连续四天 `listenable=0`)。判据/纪律与上面完全一致。
+        wemp_biz, why = _biz_from_wemp(session, user_id, name)
+        biz = wemp_biz
+        if not biz:
+            hint = ";".join(p for p in (hint, why) if p) or "没拿到可监听标识"
+    if biz:
+        hint = ""
+    else:
+        hint = f"{hint} —— 已建号但暂无监听能力" if hint else "已建号但暂无监听能力"
     row = WechatBenchmark(user_id=user_id, nickname=name[:128], ghid="", biz=biz[:64],
                           # WeRSS 的订阅 id 是 `MP_WXS_<base64解码(fakeid)>`,与微信读书的
                           # bookId **同一编号**(老号 142 个当初就是拿 book_id 当 feed id 导进去的,
