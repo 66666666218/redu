@@ -1348,6 +1348,35 @@ def _my_pan_link_from_history(my_pan_urls: str) -> tuple[str, str]:
             c = re.search(r"提取码\s*([0-9A-Za-z]{4})", line)
             return m.group(0), (c.group(1) if c else "")
     return "", ""
+def _collapse_repeats(rows: list) -> list[tuple[object, int]]:
+    """同一 **(账号, 标题)** 只留**最新**那条,并带上"这轮一共发了几次"。
+
+    ⚠️ 为什么要收(用户 2026-10-14 报「显示也有问题」):实测有些号**每天在发同名文章**
+    (`xx风味笔记` / `现在就出发` 这类系列天天重发),卡片逐条列出 ⇒ **同一个标题连着出现
+    2~3 次**,读的人第一反应是「卡片重复了 / 去重坏了」。
+    ⚠️ **入库去重没问题**:这些行的 URL 与 `article_keys()` 三级候选键**各不相同**(是不同文章),
+    所以这里收的是**显示**,不是数据 —— 别顺手去改去重。
+    ⚠️ 只按 **(账号, 标题)** 合并:`标题带「最新版」后缀`的那种是**另一篇**,不许并(会丢信息)。
+
+    返回 `[(文章, 次数)]`,**保序**(按首次出现)。
+    """
+    best: dict[tuple[str, str], list] = {}
+    order: list[tuple[str, str]] = []
+    for r in rows:
+        k = (str(getattr(r, "author", "") or ""), str(getattr(r, "title", "") or ""))
+        cur = best.get(k)
+        if cur is None:
+            best[k] = [r, 1]
+            order.append(k)
+            continue
+        cur[1] += 1
+        # 留更新的那条(先 publish_at —— 它才是内容自身时刻;都没有就留先到的)
+        t_new = getattr(r, "publish_at", None) or getattr(r, "created_at", None)
+        t_old = getattr(cur[0], "publish_at", None) or getattr(cur[0], "created_at", None)
+        if t_new and t_old and t_new > t_old:
+            cur[0] = r
+    return [(best[k][0], best[k][1]) for k in order]
+
 def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[WechatArticle],
                  replacements: dict[int, list[tuple[str, str, str]]] | None = None,
                  repush: bool = False) -> int:
@@ -1390,7 +1419,8 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
                 ).group_by(WechatPanLink.pan_url)).all():
             dup_counts[pan_url] = int(cnt)
 
-    def _render_article(r: WechatArticle) -> dict:
+
+    def _render_article(r: WechatArticle, repeat: int = 1) -> dict:
         rep = replacements.get(r.id) or []
         code = ""
         my_link = False          # 标题链接是否指向"我方转存链"(False=点进去是公众号原文)
@@ -1418,6 +1448,10 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
         # 迟到补推)标上日期——盘链时效短,员工该对"点开可能已失效"有预期
         if r.publish_at and r.publish_at.date() < datetime.now().date():
             shown += f" ·{r.publish_at:%m-%d}"
+        if repeat > 1:
+            # 「这轮发了几次」—— 同名重发是真实存在的(有些号每天重发同一篇),
+            # 收成一行但**把次数说出来**,免得被读成"只发了一次"
+            shown += f" ×{repeat}"
         q_badge = ""
         if r.read_num >= 500:
             q_badge = "🔴爆 "
@@ -1453,12 +1487,17 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
         ])
 
     # 按账号分组(员工视角要一眼看清"哪个号发了哪些"),同号内资源文/高阅读优先。
-    groups: "OrderedDict[str, list[WechatArticle]]" = OrderedDict()
-    for r in sorted(rows, key=lambda r: (r.author or "", not r.pan_types, -(r.read_num or 0))):
-        groups.setdefault(r.author or "未知账号", []).append(r)
-    # 展开成 (账号, 文章) 序列,分页时按账号标题切段
-    seq: list[tuple[str, WechatArticle]] = [
-        (author, r) for author, arts in groups.items() for r in arts
+    # ★ 同一(账号,标题)**收敛成一行**(2026-10-14,用户报「显示也有问题」):
+    #   有些号每天重发同名文章 ⇒ 卡片上同一标题连着出现 2~3 次。**入库没问题**(URL/键都不同),
+    #   收的是显示,并把次数标在标题后面(`×3`)。
+    collapsed = _collapse_repeats(list(rows))
+    groups: "OrderedDict[str, list[tuple[WechatArticle, int]]]" = OrderedDict()
+    for r, n in sorted(collapsed, key=lambda t: (t[0].author or "", not t[0].pan_types,
+                                                  -(t[0].read_num or 0))):
+        groups.setdefault(r.author or "未知账号", []).append((r, n))
+    # 展开成 (账号, 文章, 次数) 序列,分页时按账号标题切段
+    seq: list[tuple[str, WechatArticle, int]] = [
+        (author, r, n) for author, arts in groups.items() for r, n in arts
     ]
 
     # LLM 叙事层:盘链文优先交给大模型解读(失败/未配 key 静默降级,不影响推送)
@@ -1507,12 +1546,12 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
         elements.append(_col_set_row(
             [("**公众号**", 3), ("**文章**", 7), ("**网盘**", 2), ("**阅读**", 2)], grey=True))
         last_author: str | None = None
-        for author, r in chunk:
+        for author, r, n in chunk:
             if author != last_author:  # 换账号插入一行账号标题;账号跨卡时下一页重出标题
                 elements.append({"tag": "div", "text": {"tag": "lark_md",
                     "content": f"**📢 {_md_safe(author)} · {len(groups[author])} 篇**"}})
                 last_author = author
-            elements.append(_render_article(r))
+            elements.append(_render_article(r, repeat=n))
         if page_idx == 0 and ai_elements:
             elements.extend(ai_elements)
         card_title = f"📡 公众号监听 · 新发文 {len(rows)} 篇"
@@ -1536,7 +1575,7 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
         # 任一目标群收下即算这一页送达(专属群+总群双推是设计如此;补推时会整批重发,
         # 好的那个群可能再收一次——重复一张卡远好于员工永远没看到这篇)。
         if sent_any:
-            delivered.extend(r.id for _, r in chunk)
+            delivered.extend(r.id for _a, r, _n in chunk)   # chunk 现在带"次数"
     if delivered:
         session.execute(update(WechatArticle).where(WechatArticle.id.in_(delivered))
                         .values(pushed_at=datetime.now()))

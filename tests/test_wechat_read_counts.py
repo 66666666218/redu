@@ -368,3 +368,49 @@ def test_0号分支的投影不许再把阅读数丢掉() -> None:
     block = m.group(1)
     assert '"read_num": it.get("read_num")' in block, "阅读数又在这道门上被丢掉了"
     assert '"like_num": it.get("like_num")' in block, "点赞数又在这道门上被丢掉了"
+
+
+# ---------------------- 卡片按「账号+标题」收敛(2026-10-14:用户报"显示也有问题")
+#
+# 现象:有些号**每天重发同名文章**(`xx风味笔记`/`现在就出发` 这类系列)⇒ 卡片上同一标题
+# 连着出现 2~3 次,读的人第一反应是"卡片重复了/去重坏了"。⚠️ **入库去重没问题**
+# (那些行的 URL 与 `article_keys()` 三级候选键各不相同 ⇒ 是不同文章)⇒ 收的是**显示**。
+
+def _mk_article(author: str, title: str, *, day: int, pan: str = ""):
+    from datetime import datetime, timedelta
+
+    from app.db.models import WechatArticle
+
+    return WechatArticle(user_id=1, author=author, title=title, url=f"https://x/{title}/{day}",
+                         pan_types=pan, created_at=datetime.now() - timedelta(days=3),
+                         publish_at=datetime.now() - timedelta(days=day))
+
+
+class TestCollapseSameTitle:
+    def test_同号同标题只留最新_并带上次数(self) -> None:
+        from app.services.wechat._listen import _collapse_repeats
+
+        rows = [_mk_article("某号", "黄山风味笔记：虾、鱼", day=4),
+                _mk_article("某号", "黄山风味笔记：虾、鱼", day=1),   # 最新
+                _mk_article("某号", "黄山风味笔记：虾、鱼", day=2),
+                _mk_article("某号", "另一种标题", day=1)]
+        out = _collapse_repeats(rows)
+        assert len(out) == 2, f"同标题应收成一行:{[(a.title, n) for a, n in out]}"
+        (first, n1), (second, n2) = out
+        assert (first.title, n1) == ("黄山风味笔记：虾、鱼", 3)
+        assert first.publish_at == max(r.publish_at for r in rows[:3]), "要留最新的那条"
+        assert (second.title, n2) == ("另一种标题", 1)
+
+    def test_标题差一个后缀的不许并(self) -> None:
+        """⚠️ 别过度合并:`xx最新版` 是**另一篇**,并掉就丢信息了。"""
+        from app.services.wechat._listen import _collapse_repeats
+
+        out = _collapse_repeats([_mk_article("某号", "最新可用书源", day=2),
+                                 _mk_article("某号", "最新可用书源最新版", day=1)])
+        assert len(out) == 2 and all(n == 1 for _, n in out)
+
+    def test_不同号同名文章不许并(self) -> None:
+        from app.services.wechat._listen import _collapse_repeats
+
+        out = _collapse_repeats([_mk_article("甲号", "同名资源", day=2), _mk_article("乙号", "同名资源", day=1)])
+        assert len(out) == 2, "跨账号不合并(按账号分组是卡片的核心口径)"
