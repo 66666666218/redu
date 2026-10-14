@@ -251,3 +251,41 @@ class TestEndToEnd:
                                                    settings=_Settings())
         assert out["listenable"] is False
         assert "未搜到" in out["hint"] and "凭据" in out["hint"]
+
+
+# ---------------------------------------------------------------- ⑤ 哑号筛选 + 「停用」标记
+
+class TestDumbAndRetired:
+    """「哪些算哑号、哪些已停用」**只此一处**(`_source.dumb_benchmarks`)。
+
+    两个脚本(回填 / 诊断)都调它 —— 两处各写一套查询迟早飘,而"数字对不上"会让人
+    先怀疑数据而不是怀疑判据(本仓反复吃过这个亏)。
+    """
+
+    def _b(self, session, nickname: str, biz: str = "", book: str = "", note: str = ""):
+        row = WechatBenchmark(user_id=1, nickname=nickname, biz=biz,
+                              weread_book_id=book, note=note)
+        session.add(row)
+        session.commit()
+        return row
+
+    def test_两个标识都空的才算哑号(self, session) -> None:
+        self._b(session, "哑的")
+        self._b(session, "有biz", biz="MP_WXS_1")
+        self._b(session, "有bookid", book="MP_WXS_2")
+        got = [r.nickname for r in src.dumb_benchmarks(session, 1)]
+        assert got == ["哑的"]
+
+    def test_标了停用的默认不再出现_要看全量得显式要(self, session) -> None:
+        """★ 「停用」= 微信侧已无精确同名、别再重试 ⇒ 默认**不该再占诊断/回填的名额**。"""
+        self._b(session, "还在试的")
+        self._b(session, "已放弃的", note="停用:微信侧无精确同名(2026-10-14)")
+        assert [r.nickname for r in src.dumb_benchmarks(session, 1)] == ["还在试的"]
+        assert len(src.dumb_benchmarks(session, 1, include_retired=True)) == 2
+
+    def test_停用判据只认标记词(self, session) -> None:
+        """⚠️ 别用模糊匹配:`note` 里随便提一句"停用"就把它算停用的话,人写备注就会误伤。"""
+        assert src.RETIRED_MARK == "停用"
+        assert src.is_retired(WechatBenchmark(user_id=1, nickname="x", note="停用")) is True
+        assert src.is_retired(WechatBenchmark(user_id=1, nickname="x", note="")) is False
+        assert src.is_retired(WechatBenchmark(user_id=1, nickname="x", note=None)) is False

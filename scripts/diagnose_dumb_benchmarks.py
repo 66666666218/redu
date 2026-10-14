@@ -184,6 +184,10 @@ def main() -> int:
     ap.add_argument("--compare", action="store_true",
                     help="出**内容核对表**:形近号的最新文章标题 vs 我们当初记的文章标题(只打印)")
     ap.add_argument("--per-row", type=int, default=2, help="每行看几个形近号(默认 2)")
+    ap.add_argument("--retire", action="store_true",
+                    help="把「救不回来」的哑号在 note 里标「停用」(不删行、不动历史)")
+    ap.add_argument("--include-retired", action="store_true",
+                    help="连已标停用的也一起诊断(默认跳过)")
     args = ap.parse_args()
 
     from app.services import wechat_monitor as wm      # 门面(子模块直接 import 会循环)
@@ -191,11 +195,7 @@ def main() -> int:
 
     db = get_session_local()()
     try:
-        rows = list(db.scalars(select(WechatBenchmark).where(
-            WechatBenchmark.user_id == args.user,
-            (WechatBenchmark.biz == "") | (WechatBenchmark.biz.is_(None)),
-            (WechatBenchmark.weread_book_id == "") | (WechatBenchmark.weread_book_id.is_(None)),
-        ).order_by(WechatBenchmark.id)))
+        rows = src.dumb_benchmarks(db, args.user, include_retired=args.include_retired)
         todo = rows[:args.limit] if args.limit else rows
         if args.compare:
             compare_renames(db, todo, per_row=args.per_row, sleep=args.sleep)
@@ -206,6 +206,10 @@ def main() -> int:
             kind, ev, action = classify(wm, db, row)
             tally[kind] = tally.get(kind, 0) + 1
             print(f"  [{i}/{len(todo)}] {kind:<12} {row.nickname!r:<26} {ev[:58]}")
+            if args.retire and kind in ("微信侧查无此名", "疑似改名/同名相近"):
+                # 「停用」= 别再重试。**只打标不删行**:历史还在,以后要翻也翻得出来。
+                row.note = f"{(row.note or '')}{src.RETIRED_MARK}:微信侧无精确同名(2026-10-14)"[:255]
+                db.commit()
             if args.apply and kind == "改名":
                 new = ev.split("=", 1)[1].strip()
                 biz, why = src._biz_from_wemp(db, args.user, new)

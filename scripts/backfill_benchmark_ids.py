@@ -35,12 +35,14 @@ from app.db.models import User, WechatBenchmark  # noqa: E402
 
 
 def _dumb_rows(session, user_id: int) -> list[WechatBenchmark]:
-    """`biz` 与 `weread_book_id` **都空**的对标号(实测库里这两种标识是"要么都有、要么都没有")。"""
-    return list(session.scalars(select(WechatBenchmark).where(
-        WechatBenchmark.user_id == user_id,
-        (WechatBenchmark.biz == "") | (WechatBenchmark.biz.is_(None)),
-        (WechatBenchmark.weread_book_id == "") | (WechatBenchmark.weread_book_id.is_(None)),
-    ).order_by(WechatBenchmark.id)))
+    """哑号 = `biz` 与 `weread_book_id` **都空**的对标号。
+
+    ★ 判据**只此一处**(`_source.dumb_benchmarks`):默认**跳过已标「停用」的** ——
+    那些是"微信侧已无精确同名、别再重试"的(2026-10-14 人工核对过),不该再占回填名额。
+    """
+    import app.services.wechat._source as src
+
+    return src.dumb_benchmarks(session, user_id)
 
 
 def main() -> int:

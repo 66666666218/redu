@@ -492,6 +492,37 @@ def _biz_from_wemp(session: Session, user_id: int, nickname: str) -> tuple[str, 
     return mp_id, ""
 
 
+#: 「停用」标记(2026-10-14)。写进 `WechatBenchmark.note`,含义**只有一个**:
+#: **这个号在微信侧已经没有精确同名了**(人工核对过:旁边的形近号只是碰巧共几个字,
+#: 不是改名)⇒ **别再为它重试**。⚠️ 只在 `note` 里打标,**不删行、不动历史**。
+RETIRED_MARK = "停用"
+
+
+def is_retired(row: object) -> bool:
+    """该对标号是否已被标记「停用」(见 `RETIRED_MARK`)。"""
+    return RETIRED_MARK in str(getattr(row, "note", "") or "")
+
+
+def dumb_benchmarks(session: Session, user_id: int, *, include_retired: bool = False) -> list:
+    """**哑号**:`biz` 与 `weread_book_id` **都空**的对标号(实测库里这两种标识"要么都有、要么都没有")。
+
+    ★ 单一事实源:回填脚本(`scripts/backfill_benchmark_ids.py`)与诊断脚本
+    (`scripts/diagnose_dumb_benchmarks.py`)都调它 —— 两处各写一套查询迟早飘,
+    而且"哪些算哑号、哪些已停用"这种判据一旦漂了,两个脚本会给出互相矛盾的数字。
+
+    默认**跳过已标停用的**(那些是"微信侧查无此名、别再重试"的,不该再占诊断/回填的名额);
+    要看全量传 `include_retired=True`。
+    """
+    from app.db.models import WechatBenchmark
+
+    rows = list(session.scalars(select(WechatBenchmark).where(
+        WechatBenchmark.user_id == user_id,
+        (WechatBenchmark.biz == "") | (WechatBenchmark.biz.is_(None)),
+        (WechatBenchmark.weread_book_id == "") | (WechatBenchmark.weread_book_id.is_(None)),
+    ).order_by(WechatBenchmark.id)))
+    return rows if include_retired else [r for r in rows if not is_retired(r)]
+
+
 def add_benchmark_by_name(session: Session, user_id: int, nickname: str, note: str = "",
                           settings: Settings | None = None) -> dict:
     """候选无文章链接时按公众号名加号:补进 WeRSS 订阅 → 拿到 biz,直接可监听。
