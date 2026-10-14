@@ -323,6 +323,19 @@ def _http_post(url: str, body: str, headers: dict, st, timeout: int = 25,
             logger.warning("小红书 curl_cffi 不可用(%s: %s)—— "
                            "**指纹伪装未生效**,本次退回 requests(⇒ 本次的错误结论**不可信**)",
                            type(exc).__name__, str(exc)[:120])
+            # ★★ 诊断(2026-10-14 加):`curl: (16)` 是 **HTTP/2 层**的错,而 h2 对**头部**
+            #    比对 h1 严得多 —— 值里只要有一个**控制字符/非 ASCII**,h1 照过、h2 直接报 16。
+            #    ⚠️ **只打名字与长度 + 异常字符码点,绝不打值**(值里有 cookie 与签名)。
+            try:
+                for _k, _v in (headers or {}).items():
+                    _bad = [hex(ord(_c)) for _c in str(_v) if ord(_c) < 32 or ord(_c) > 126]
+                    if _bad:
+                        logger.warning("  ⚠️ 头部 `%s` 含非常规字符(%s…) 长度 %d —— "
+                                       "h2 会因此报 16,而 h1 照过",
+                                       _k, ",".join(_bad[:6]), len(str(_v)))
+                logger.debug("  本次头部: %s", {k: len(str(v)) for k, v in (headers or {}).items()})
+            except Exception:  # noqa: BLE001 - 诊断本身不许影响主流程
+                pass
     return requests.post(url, data=body, headers=headers, timeout=timeout,
                          proxies=proxies)
 
