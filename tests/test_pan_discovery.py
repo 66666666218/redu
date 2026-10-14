@@ -726,3 +726,57 @@ class TestPublishCutoff:
             content_min_publish_date = "2026-10-01"
             douyin_leads_min_publish_date = ""
         assert pd.find_candidates(session, 1, ["网盘"], settings=_S2()) == []
+
+
+# ---------------------- 专指度护栏(2026-10-14「点开是另一个资源」那场事故换来的)
+#
+# 事故形状:`already_have` 原来拿标题里切出来的**通用短语**(`无删减完整版`/`百度网盘资源免费下载安装`)
+# 回库匹配 —— 而库里克里恰恰**也存着这些贴吧帖本身**,于是把它们那条**已经写错的** `our_url`
+# 又抄一遍:**越滚越错**(实测 428 条复用行里 201 条最终指向同一份 PDF)。
+# ⚠️ 护栏防的是"**新**错配";已经写错的那批由 `scripts/cleanup_reuse_pollution.py` 清。
+
+class TestSpecificityGuard:
+    def test_通用短语一律不算候选名(self) -> None:
+        for bad in ("无删减完整版", "百度网盘资源免费下载安装", "全集", "高清4K"):
+            assert pd._specific_hint(bad) is False, f"{bad} 是通用词,不该当资源名"
+        for good in ("左道陈家村", "伪装直男", "齐民要术"):
+            assert pd._specific_hint(good) is True
+
+    def test_标题必须真的在说这个资源(self) -> None:
+        """以它开头,或标题里用《…》点名 —— **光是"包含"不算**(那正是事故的入口)。"""
+        assert pd._title_claims("左道陈家村🔥【AI漫剧】", "左道陈家村") is True
+        assert pd._title_claims("?《左道陈家村》1-68集全集内容…", "左道陈家村") is True
+        assert pd._title_claims("?《人生大事》无删减完整版4K…", "无删减完整版") is False
+
+    def test_通用短语不再把不相干的库链认成已有(self, session) -> None:
+        """★ **回归用例**:改前这里会返回那条不相干的链(正是"点开是另一个资源")。"""
+        from app.db.models import WechatArticle, WechatPanLink
+
+        art = WechatArticle(user_id=1, author="某吧",
+                            title="?《冥界司机》无删减完整版4K高清资源百度网盘下载链接分享",
+                            url="https://tieba.baidu.com/p/1",
+                            my_pan_urls="https://pan.quark.cn/s/SOMEONE-ELSES")
+        session.add(art)
+        session.flush()
+        session.add(WechatPanLink(user_id=1, article_id=art.id,
+                                  pan_url="https://pan.baidu.com/s/OTHER"))
+        session.commit()
+        # 另一部片子,只共用「无删减完整版」这类通用短语 ⇒ 不许认成"已有"
+        assert pd.already_have(
+            session, 1,
+            "?《人生大事》无删减完整版4K百度网盘资源免费下载安装链接百度网") is None
+
+    def test_真名字对得上时照样复用(self, session) -> None:
+        """护栏只挡通用词,**不许**把"名字真对得上"的复用一起挡掉(否则会白搬一份)。"""
+        from app.db.models import WechatArticle, WechatPanLink
+
+        art = WechatArticle(user_id=1, author="某吧", title="?《左道陈家村》1-68集全集内容来了",
+                            url="https://tieba.baidu.com/p/2",
+                            my_pan_urls="https://pan.quark.cn/s/OURS-LEFT")
+        session.add(art)
+        session.flush()
+        session.add(WechatPanLink(user_id=1, article_id=art.id,
+                                  pan_url="https://pan.baidu.com/s/LEFT"))
+        session.commit()
+        hit = pd.already_have(session, 1, "《左道陈家村》全集完整版 速存")
+        assert hit and hit["my_link"] == "https://pan.quark.cn/s/OURS-LEFT"

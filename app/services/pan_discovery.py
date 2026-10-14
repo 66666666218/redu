@@ -152,6 +152,48 @@ def _resource_name_hints(title: str) -> list[str]:
     return out[:5]
 
 
+#: **通用短语**:这类词在标题里满地都是,拿它回库匹配**必然张冠李戴**。
+#:
+#: ★ 这条是 **2026-10-14 一场真实事故**换来的:一条《人生大事》的贴吧帖被配上
+#:   「高性价比人生指南」的 PDF 链,而它不过是用了「无删减完整版」「百度网盘资源免费下载安装」
+#:   这种词去回查库 —— **而库里恰恰也存着这些贴吧帖本身**(发现链会入库),
+#:   于是把它们那条**已经写错的** `our_url` 又抄了一遍:**越滚越错**。
+#:   实测:`discovered_pan_links` 里 428 条复用行,**201 条最终指向同一份 PDF**。
+#: ⚠️ 与 `douyin_leads._GENERIC_WORDS` 是同一族的护栏(那边也有一次"通用短语配出不相干链")。
+_GENERIC_HINTS = (
+    "网盘", "百度", "夸克", "迅雷", "UC", "蓝奏", "完整版", "无删减", "全集", "免费",
+    "下载", "链接", "资源", "分享", "观看", "高清", "4K", "电影", "短剧", "电视剧",
+    "动漫", "漫剧", "教程", "安装", "在线", "手机", "电脑", "入口", "获取", "自取",
+    "整理", "合集", "最新", "更新", "速存", "保存", "收藏", "推荐", "免费看", "抢先",
+)
+
+
+def _specific_hint(hint: str) -> bool:
+    """这个候选名**够不够专指**?—— 沾通用词的一律不算(见 `_GENERIC_HINTS`)。"""
+    h = str(hint or "").strip()
+    return len(h) >= 3 and not any(w in h for w in _GENERIC_HINTS)
+
+
+def _title_claims(first: str, name: str) -> bool:
+    """库里的那条标题**到底说的是不是这个资源**:
+
+      · **以它开头**(名字就是标题主体,例:`左道陈家村🔥【AI漫剧】`),或
+      · 标题里**用《…》/【…】明确点名**了它(例:`?《左道陈家村》1-68集…`)。
+
+    ⚠️ **只用"包含"是不够的** —— `无删减完整版` 这种词当然"包含"于一大堆标题,
+    那正是当天那场事故的入口。与 `douyin_leads._library_link` 的专指度护栏同一套纪律。
+    ⚠️ 这道护栏**只能防新错配**,防不住"已经写错的 `our_url` 被抄下去" ——
+    那部分要清(见 `scripts/cleanup_reuse_pollution.py`)。
+    """
+    from app.services.resource_library import match_key
+
+    if not first or not name:
+        return False
+    if match_key(first).startswith(match_key(name)):
+        return True
+    return f"《{name}》" in first or f"【{name}】" in first
+
+
 def already_have(session, user_id: int, title: str) -> dict | None:
     """这个资源我们**已经有我方链**了吗(在**任意一个网盘**上)。
 
@@ -175,8 +217,19 @@ def already_have(session, user_id: int, title: str) -> dict | None:
         except Exception:  # noqa: BLE001 - 查库失败就当没有,别挡转存
             continue
         for r in rows:
-            if r.get("my_link"):
-                return r
+            if not r.get("my_link"):
+                continue
+            first = str((r.get("titles") or [""])[0] or "")
+            if not _title_claims(first, name):
+                continue
+            # ★ **护栏只有这一道,而且它够用**(2026-10-14 实测):
+            #   通用短语(「无删减完整版」)之所以能张冠李戴,是因为原来只做**包含**判断;
+            #   而 `_title_claims` 要求"以它开头 或 标题里《它》点名" ⇒ 那句话在
+            #   《冥界司机》的标题里既不在开头、也没被点名 ⇒ 直接落空。
+            # ⚠️ **不要再叠加"通用词黑名单"**:我试过,它会把 `完整版资源合集` 这种
+            #   **正当匹配**一起挡掉(`match_key` 会把 `【…】` 连内容剥掉,那类名字只能靠包含匹配)
+            #   ⇒ 实测让两条既有用例变红。判据越少越不容易误伤。
+            return r
     return None
 
 
