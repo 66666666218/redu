@@ -354,3 +354,60 @@ class TestAccountCarriesFingerprint:
         ref2 = self._ref(tmp_path, "session_file",
                          {"client_hints": {"a": "1", "b": "", "": "x"}})
         assert A.hints_of(ref2) == {"a": "1"}     #: 空键/空值要滤掉
+
+
+class Test反爬头必须发:
+    """★★ **`x-rap-param` 是 `461+300011` 与 `200` 的分水岭**(2026-10-15 定位)。
+
+    本仓 2026-10-10 的实测矩阵(见 `config.settings.xhs_sign_x_rap`):
+
+        | 格式  | x_rap | 结果 |
+        | `xyw` | 否    | **HTTP 461 + code 300011「当前账号存在异常」** |
+        | `xyw` | 是    | **HTTP 200** —— 签名层过了 |
+
+    而 2026-10-12 切到纯 Python 签名器之后,`x_rap` **不在它的参数表里**
+    ⇒ **`x-rap-param` 从那天起就没再发出去过** ⇒ 每一次协议请求都回到 300011,
+    而那句话读起来像"账号被封",把整条排查带偏了两天(实测:两个不同的号、
+    两枚全新会话,回的是**同一个** 300011)。
+
+    ⚠️ 全部用例**不碰网络**。
+    """
+
+    CK = {"a1": "1a0fca0cc34bttwg2zzmwhyoc2389hmsodh4jq62",
+          "web_session": "040069x", "webId": "x"}
+    PAYLOAD = {"keyword": "网盘资源", "page": 1, "page_size": 20, "search_id": "s",
+               "sort": "general", "note_type": 0, "ext_flags": [], "image_formats": ["jpg"]}
+
+    def _h(self, **kw):
+        from app.services.xhs_sign_pure import headers_xyw
+
+        return headers_xyw("/api/sns/web/v1/search/notes", self.CK,
+                           payload=self.PAYLOAD, ua="", **kw)
+
+    def test_默认就发_x_rap_param(self) -> None:
+        h = self._h()
+        assert h.get("x-rap-param"), "★ 少了它服务端回 461/300011(本仓实测矩阵)"
+        assert str(h["x-rap-param"]).startswith("ByQB"), "信封应以 ByQB 开头"
+
+    def test_一起发_xy_direction_与_x_mns(self) -> None:
+        """★ 公开逆向(2026-07)列的真浏览器完整头集是 8 个,我们只剩 4 个 —— 补齐它们。"""
+        h = self._h()
+        assert h.get("xy-direction"), "真浏览器必带"
+        assert h.get("x-mns"), "真浏览器必带(SDK 未加载时是字面量 unload)"
+
+    def test_关掉_x_rap_就不发它(self) -> None:
+        """`xhs_sign_x_rap=False` 必须**真的**让这个头消失(否则配置又是空转的)。"""
+        h = self._h(x_rap=False)
+        assert "x-rap-param" not in h
+        assert h.get("xy-direction"), "另外两个与 x_rap 无关,不该被一起关掉"
+
+    def test_生产路把配置传进来了(self) -> None:
+        """★ 源码级守卫:修好的前提是**调用点真的把 `x_rap` 传进去**。"""
+        from pathlib import Path
+
+        from app.services import xhs_protocol_source as P
+
+        src = Path(P.__file__).read_text(encoding="utf-8")
+        assert "x_rap=_rap" in src, (
+            "纯 Python 分支必须把 `_rap`(来自 `xhs_sign_x_rap`)传给 `headers_xyw`,"
+            "否则那个配置项就是空转 —— 这正是 2026-10-12 → 10-15 的回归")

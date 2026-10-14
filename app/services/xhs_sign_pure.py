@@ -390,9 +390,43 @@ _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36")
 
 
+#: xhshow 那一路产出的**反爬头**(与 `x-s` 相互独立 ⇒ 可以与我们的 `x-s` 混用)
+_ANTISPAM_KEYS = ("x-rap-param", "xy-direction", "x-mns")
+
+
+def _antispam_headers(signer, url: str, cookies: dict, payload: dict | None,
+                      x_rap: bool) -> dict[str, str]:
+    """取**反爬头**:`x-rap-param` / `xy-direction` / `x-mns`(取不到回 `{}`,绝不抛)。
+
+    ## ★★ 为什么必须补:这是 2026-10-15 那一整轮「账号异常」的真因
+    本仓 2026-10-10 的实测矩阵(见 `config/settings.py` 的 `xhs_sign_x_rap`)写得清清楚楚:
+
+        | 格式   | x_rap | 结果 |
+        | `xyw`  | 否    | **HTTP 461 + code 300011「当前账号存在异常」** |
+        | `xyw`  | 是    | **HTTP 200** —— 签名层过了,只剩凭据问题 |
+
+    而 2026-10-12 切到**纯 Python 签名器**(本模块)之后,`x_rap` **根本不在它的参数表里**
+    ⇒ **`x-rap-param` 从那天起就没再发出去过** ⇒ 每一次协议请求都回到
+    `461 + 300011`。⚠️ 那句话读起来像"账号被封了",于是整条排查被带去查账号
+    (**实测:两个不同的小红书号、两枚全新会话,回的都是同一个 300011**)。
+    ⚠️ 与它一起丢的还有 `xy-direction` 与 `x-mns`:一份 2026-07 的公开逆向
+    (`tryna26/xhs-web-reverse`)列出真浏览器的**完整头集是 8 个**,我们只剩 4 个。
+
+    ⚠️ **为什么可以"两个签名器混用"**:`x-rap-param` 是**独立于 `x-s`** 的反爬信封
+    (TLV → gzip → XOR → SM4 变体,内容只与 body 有关) ⇒
+    我们的 `x-s`(逐字节等同站点、且 `x3` 用**我们自己的 a1**)+ 它的反爬头,不冲突。
+    """
+    try:
+        h = signer.sign_headers_post(url, cookies, payload=payload,
+                                     sign_format="xyw", x_rap=bool(x_rap))
+    except Exception:  # noqa: BLE001 - 拿不到就**不发**,由调用方自己决定要不要报警
+        return {}
+    return {k: str(h[k]) for k in _ANTISPAM_KEYS if h.get(k)}
+
+
 def headers_xyw(url: str, cookies: dict[str, str], *, payload: dict | None = None,
                 env_flags: str = "", with_xs_common: bool = True,
-                ua: str = "") -> dict[str, str]:
+                ua: str = "", x_rap: bool = True) -> dict[str, str]:
     """★ **造一份可直接发的请求头** —— `x-s` 用**纯 Python 的 XYW_**(实测逐字节一致)。
 
     为什么它比 oracle 更适合已登录请求:
@@ -404,6 +438,10 @@ def headers_xyw(url: str, cookies: dict[str, str], *, payload: dict | None = Non
     所以它是"锦上添花",不是必需品;合成失败就直接不发,不阻塞。
 
     ⚠️ 返回的头里**已带 `Cookie`**(调用方不用自己加)。
+
+    ★ `x_rap`(2026-10-15 补):**是否发 `x-rap-param` 这个反爬头**。默认 `True`。
+    ⚠️ 它过去**根本不在本函数的参数表里** ⇒ 配置里 `xhs_sign_x_rap=True` 是**空转的**,
+    而实测矩阵里它正是 `461+300011` 与 `200` 的分水岭。详见 `_antispam_headers`。
 
     ★ `ua`(2026-10-12):**这份凭据登录时的真实 UA**,留空才用 `_UA` 兜底。
     为什么:会话是**某个浏览器**签发的 —— 用 Edge 154 登的号却自称 Chrome 138,
@@ -437,6 +475,10 @@ def headers_xyw(url: str, cookies: dict[str, str], *, payload: dict | None = Non
             out["x-s-common"] = s.sign_xs_common(cookies)
             out["x-b3-traceid"] = s.get_b3_trace_id()
             out["x-xray-traceid"] = s.get_xray_trace_id()
+            #: ★★ **反爬头必须一起发** —— 少了 `x-rap-param` 就是 `461 + 300011`
+            #: (本仓 2026-10-10 的矩阵;2026-10-12 换成纯 Python 签名器时**丢过它**)。
+            #: 详见 `_antispam_headers`。
+            out.update(_antispam_headers(s, url, cookies, payload, x_rap))
         except Exception:  # noqa: BLE001 - 指纹头是可选增强,失败不该阻塞
             pass
     return out

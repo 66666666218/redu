@@ -432,8 +432,13 @@ def _search_with(ck: dict, ssk: bytes, kws: list[str], st, pages: int,
                     # ★ 纯 Python XYW_:x-s 逐字节等同站点,且 x3 = 我们自己的 a1
                     from app.services.xhs_sign_pure import headers_xyw as _pure_headers
 
+                    #: ★★ `x_rap` **必须传进来**(2026-10-15 修):配置里
+                    #: `xhs_sign_x_rap=True` 过去在纯 Python 这条路上是**空转的**
+                    #: ⇒ **`x-rap-param` 从 10-12 起就没再发过** ⇒ 每次请求都回到
+                    #: `461 + 300011「当前账号存在异常」`,而那句话会把排查带去查账号
+                    #: (实测:两个不同的号、两枚全新会话,回的是同一个 300011)。
                     headers = _pure_headers(URI_SEARCH, ck, payload=payload,
-                                            ua=fingerprint.ua)
+                                            ua=fingerprint.ua, x_rap=_rap)
                     body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
                 elif _use_oracle:
                     # ★ oracle:页面自己的 JS 算(永远是当前线上版本)。
