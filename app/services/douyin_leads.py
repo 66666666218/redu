@@ -638,6 +638,25 @@ def _enqueue_later(session, user_id: int, info: dict, mark: str) -> None:
     session.commit()
 
 
+def _moved_link_of(session, user_id: int, ld: dict) -> str:
+    """**这条线索以前搬成过没有** —— 按 `aweme_id` 查本地库,返回我方分享链(没有给空串)。
+
+    ★ 为什么必须有这一步(2026-10-14 用户口径:「**有一个解开的就用哪个解开的链接**」
+    「不必说那个解开哪个没解开」):夸克那条链(`quark_kouling`)跑在**远程**(它要签名服务),
+    它的成果由 `quark_link_pull` 同步回这一列;而本地的 `known_kouling_links` **只认迅雷口令**
+    ⇒ 不查库的话,夸克口令那些行会一直显示「没有链」,哪怕**我们早把它搬进盘了**
+    (实测:远程已搬成 236 条 vs 本地只看得到 64 条)。
+    """
+    from app.db.models import DouyinLead
+
+    aid = str(ld.get("aweme_id") or "").strip()
+    if not aid:
+        return ""
+    row = session.scalar(select(DouyinLead).where(
+        DouyinLead.user_id == user_id, DouyinLead.aweme_id == aid))
+    return str(getattr(row, "our_url", "") or "")
+
+
 def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[dict]:
     """把线索里《…》包的口令**真的变成资源**(2026-10-02):解析 → 转存入库 / 加群。
 
@@ -665,6 +684,16 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
         #   放在口令解析**之前**,而且**每条线索都做** —— 因为不管口令解没解出来,
         #   「库里有没有现成的」都决定卡片能不能点得动。匹配不上是 `None`(不影响原流程)。
         ld["library"] = _library_link(session, user_id, str(ld.get("title") or ""))
+        # ★★ 2026-10-14:**先看这条以前搬成过没有**(按 `aweme_id` 查库)。
+        #   用户口径「有一个解开的就用哪个解开的链接」⇒ 只要能拿到的链,**一律先用**:
+        #   ① 本地链已落库(迅雷那条)② **远程夸克链**同步回来的(见 `quark_link_pull`)
+        #   ③ 资源库里现成的那条(`_library_link`,卡片里作次选)。
+        #   ⚠️ 放在"解口令"之前是有意的:能拿到链就**不再去解、不再去花转存额度**。
+        _moved = _moved_link_of(session, user_id, ld)
+        if _moved:
+            ld["kouling"] = {"kind": "share", "status": "already",
+                             "our_url": _moved, "share_url": ""}
+            continue
         mark = (ld.get("mark") or "").strip()
         if not mark:
             continue
@@ -943,22 +972,11 @@ def _library_link(db, user_id: int, title: str, *, days: int = 90) -> dict | Non
     return None
 
 
-def _looks_like_kouling(title: str) -> bool:
-    """标题里**看着就是个口令**(哪怕迅雷解不开)。**只做识别,不做解析。**
-
-    ★ 用户口径(2026-10-11):「**你也没必要去解析口令才能知道是什么资源**,
-    因为你现在口令都可以识别了,而且标题后面肯定带着资源的名字」。
-
-    ⇒ 这条判据的全部意义是**把两种"没有链"分开**:
-      · `看着是口令但没解开` ⇒ **有救**(资源名在标题里,可以去库里配) → 卡片写「📋口令未解析」;
-      · `根本不是口令`         ⇒ 这条线索本来就没有资源   → 卡片写「—」。
-    混成同一个 `—` 的后果:人分不清是**该去配**还是**该放弃**。
-    """
-    t = str(title or "")
-    if _RE_BIANTI.search(t) or _RE_BOOK.search(t):
-        return True
-    # 迅雷的标准口令形态(`/~xxxx~/`,夸克/迅雷都用这一族)
-    return bool(re.search(r"/~[A-Za-z0-9]{6,}~", t))
+# ⚠️ `_looks_like_kouling()`(2026-10-11 加的「看着像口令」识别)已**删除**(2026-10-14):
+# 它唯一的用途是让卡片写「📋口令未解析」,而用户当天的口径是**「不必说那个解开哪个没解开,
+# 有一个解开的就用哪个解开的链接」** ⇒ 拿到链就挂链(见 `push_leads` 的 `our`),拿不到就留 `—`,
+# 不再在客户群里交代"我们在哪个平台解失败了"(那是内部状态)。
+# ⚠️ 而"口令长什么样"的判据本身**还在用** —— 采集侧认夸克口令靠 `quark_kouling.mark_of`。
 
 
 def _pan_name(url: str) -> str:
@@ -1049,6 +1067,11 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin") -> bool:
         pan = _pan_name(info.get("our_url") or info.get("share_url") or "")
         if info.get("kind") == "share" and info.get("status") == "ok":
             res = f"🔴{pan or '已转存'}"
+        elif info.get("status") == "already":
+            # ⚠️ **这一支要排在 `_lib` 前面**(2026-10-14):"以前搬成过"里既有本地链、
+            #    也有**远程夸克链**同步回来的(`quark_link_pull`)—— 都是**我方自己搬的**,
+            #    该说「转过」而不是「库里已有」(后者是复用别人标题下的那份)。
+            res = f"🔴{pan or '已转存'}(转过)"
         elif _lib:
             # ★ **库里已有现成链** ⇒ 用**我方链**,标题直接可点(与公众号同形)。
             # 口径照旧(见 `_pan_name`):资源列写**盘名**,不写"我方链"那三个字。
@@ -1057,21 +1080,18 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin") -> bool:
             res = f"🔴{_pan_name(_lib.get('link') or '') or '已入库'}(库里已有)"
         elif info.get("kind") == "group":
             res = "👥已加群"
-        elif info.get("status") == "already":
-            res = f"🔴{pan or '已转存'}(转过)"
         elif info.get("status") == "disk_full":
             res = f"⏸{pan or '盘'}(网盘已满)"
         elif info.get("status") == "over_budget":
             res = f"⏸{pan or '盘'}(本轮额度)"
         elif info.get("status") == "skipped":
             res = f"⏸{pan or '盘'}(被挡下)"
-        elif _looks_like_kouling(str(ld.get("title") or "")):
-            # ★ **识别出口令 ≠ 解开它**(2026-10-11 用户口径:「你也没必要去解析口令才能知道是什么资源」)。
-            # 标题里明摆着是个口令(变体字《…》/`咐置X叩苓`/`/~…~/`),只是**迅雷不认** ——
-            # 这跟"这条视频根本没有资源"是两回事。写 `—` 会让人以为没东西;
-            # 写清「口令未解析」才知道**这条还有救**(资源名在标题里,可以去库里配)。
-            res = "📋口令未解析"
         else:
+            # ⚠️ **口径变更(2026-10-14,用户原话)**:**不再解释"哪个解开哪个没解开"**。
+            # 原来这里会写「📋口令未解析」(2026-10-11 的口径:让人知道"这条还有救")——
+            # 用户现在要的是「**有一个解开的就用哪个解开的链接**」,也就是:
+            # **拿到链就挂链**(见上面 `our = info.our_url or _lib.link`),拿不到就安静地空着,
+            # 不用在客户群里交代"我们在哪个平台解失败了"(那是我们的内部状态,不是客户要的信息)。
             res = "—"
         elements.append(_col_set_row([
             (author, 3),

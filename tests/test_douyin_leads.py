@@ -1365,3 +1365,69 @@ class TestLibraryLink:
         assert "单机游戏合集武侠大全" in match_key(first)              # 库查询命中它…
         assert not match_key(first).startswith("单机游戏合集武侠大全")   # …但并不以它开头
         assert dl._library_link(session, 1, title) is None            # ⇒ 不许配上
+
+
+# ------------------------------------- 「有一个解开的就用哪个解开的链接」(用户口径 2026-10-14)
+
+class TestMovedLinkWins:
+    """用户原话:「**推的时候不必说那个解开哪个没解开,有一个解开的就用哪个解开的链接**」。
+
+    落地两处:① `apply_kouling` **先按 `aweme_id` 查库**——以前搬成过就直接用那条链
+    (夸克链跑在远程,成果由 `quark_link_pull` 回传);② 卡片不再写「📋口令未解析」。
+    """
+
+    def _lead(self, aid: str, title: str = "咐置某资源叩苓") -> dict:
+        return {"aweme_id": aid, "mark": "咐置某资源叩苓", "title": title,
+                "url": f"https://d/v/{aid}", "author": "a", "keyword": "k",
+                "share_count": 1}
+
+    def test_以前搬成过的直接用它_不再去解口令(self, session, monkeypatch) -> None:
+        """★ 库里已有链 ⇒ ①卡片能挂链 ②**不再花转存额度去解一次**。"""
+        from app.db.models import DouyinLead
+        from app.services import douyin_leads as dl
+        from app.services import xunlei_kouling as kk
+
+        session.add(DouyinLead(user_id=1, aweme_id="a1", found_date="2026-10-14",
+                               our_url="https://pan.quark.cn/s/MOVED"))
+        session.commit()
+        calls: list[str] = []
+        monkeypatch.setattr(kk, "resolve", lambda m: (calls.append(m),
+                                                     {"kind": kk.KIND_NONE})[1])
+        out = dl.apply_kouling([self._lead("a1")], session, 1, _Settings())
+        assert calls == [], "有现成链就不该再去解口令(解一次 = 一次转存额度 + 一次风控输入)"
+        assert out[0]["kouling"] == {"kind": "share", "status": "already",
+                                     "our_url": "https://pan.quark.cn/s/MOVED",
+                                     "share_url": ""}
+
+    def test_没有搬过的照旧走解析(self, session, monkeypatch) -> None:
+        from app.services import douyin_leads as dl
+        from app.services import xunlei_kouling as kk
+
+        calls: list[str] = []
+        monkeypatch.setattr(kk, "resolve", lambda m: (calls.append(m),
+                                                     {"kind": kk.KIND_NONE})[1])
+        dl.apply_kouling([self._lead("a2")], session, 1, _Settings())
+        assert calls == ["咐置某资源叩苓"]
+
+    def test_资源列写转过_作品列挂的是那条链(self, monkeypatch) -> None:
+        """卡片口径:「🔴夸克(转过)」+ 标题可点 —— 全程**不提**"哪个口令没解开"。"""
+        card = TestSixColumnCard()._render(monkeypatch, [
+            {"mark": "咐置某某叩苓", "title": "某资源 22集更新了", "url": "https://d/v/1",
+             "author": "籽***", "keyword": "k", "share_count": 5,
+             "kouling": {"kind": "share", "status": "already",
+                         "our_url": "https://pan.quark.cn/s/MOVED", "share_url": ""}}])
+        row = [e for e in card["elements"] if e.get("tag") == "column_set"][1]
+        work = row["columns"][1]["elements"][0]["text"]["content"]
+        res = row["columns"][2]["elements"][0]["text"]["content"]
+        assert "](" in work and "pan.quark.cn/s/MOVED" in work     # 标题可点 → 我方链
+        assert res == "🔴夸克(转过)"
+
+    def test_解不开的口令只留一个破折号(self, monkeypatch) -> None:
+        """⚠️ **口径变更**:不再写「📋口令未解析」—— 那是我们内部状态,不是客户要的信息。"""
+        card = TestSixColumnCard()._render(monkeypatch, [
+            {"mark": "咐置某某叩苓", "title": "咐置某某叩苓 快来看", "url": "https://d/v/2",
+             "author": "籽***", "keyword": "k", "share_count": 3,
+             "kouling": {"kind": "none"}}])
+        row = [e for e in card["elements"] if e.get("tag") == "column_set"][1]
+        res = row["columns"][2]["elements"][0]["text"]["content"]
+        assert res == "—" and "未解析" not in res

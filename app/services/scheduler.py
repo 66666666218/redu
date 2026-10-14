@@ -486,6 +486,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.cross_accounts import cross_account_tick
     from app.services.bili_account_scan import bili_account_scan_tick
     from app.services.quark_kouling import quark_kouling_tick
+    from app.services.quark_link_pull import quark_link_pull_tick
     from app.services.douyin_leads import douyin_leads_tick
     from app.services.xunlei_sync import xunlei_sync_tick
     from app.services.xunlei_group import xunlei_group_tick
@@ -666,6 +667,12 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         #   (远程没有模拟器),而是**如实失败**并落库原因 —— 见 `_ui_fallback_available`。
         (quark_kouling_tick, _get_settings().quark_kouling_cron, {"minute": 0, "hour": "*/2"},
          "quark_kouling", "hotspot"),
+        # ★ **夸克链成果回传**(2026-10-14):上一条跑在**远程**,而抖音卡片在**本机**生成
+        # ⇒ 不把远程搬成的链拉回来,卡片上那批夸克口令就永远"没有链"(用户口径:
+        # 「有一个解开的就用哪个解开的链接」)。错开 10 分钟,跑在远程那一轮之后;
+        # **只读远程、只写本地** `douyin_leads.our_url/moved_at`(边界见该模块 docstring)。
+        (quark_link_pull_tick, _get_settings().quark_link_pull_cron,
+         {"minute": 41, "hour": "*/2"}, "quark_link_pull", "wechat"),
         (push_timeline_tick, "* * * * *", {"minute": "*"}, "push_timeline", "both"),
         # **跨链先后台账**(2026-10-07):用户口径「抖音基本上是最先开始的,然后公众号,
         # 一些大瓜从微博中可以更快获取到」—— 这是个**关于平台先后的假设**,要样本才能证。
