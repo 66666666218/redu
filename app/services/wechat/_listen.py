@@ -465,7 +465,12 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
             # 这正是兜底的价值。熔断按通道分开记,别让网页的挡牵连唯一还能用的这条路。
             rows = weread_budget.call(
                 session, user_id, lambda: app_client.articles(b.weread_book_id),
-                what=f"app/book/articles({b.nickname})", scope=weread_budget.SCOPE_APP)
+                what=f"app/book/articles({b.nickname})", scope=weread_budget.SCOPE_APP,
+                # ★ 半开探测(2026-10-14):**网页路本轮没拿到列表**(`not listed`)⇒ App 是唯一
+                #   还能出精确读数的那条 ⇒ 允许它在熔断期里**每 10 分钟试一发**;
+                #   成 ⇒ 立刻解除熔断(挡是时限性的,别让 37 个号白等满 30 分钟);
+                #   仍被挡 ⇒ 继续冷静(探针的频次由 `PROBE_MIN` 限着,不是放开了打)。
+                allow_probe=not listed)
             # ⚠️ **不再翻译字段**:App 端产出的形状已与网页端 `flatten_mp_articles` 逐字一致
             # (2026-10-05 收敛)—— 之前这里有一层 `publish_at→create_time` 的映射,
             # 那正是"两处同构、迟早飘一个"的来源。

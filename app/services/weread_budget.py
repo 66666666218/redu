@@ -65,6 +65,40 @@ SCOPE_APP_LIST = "app_list"    # App i.weread.qq.com/book/articles(另一套鉴�
 SCOPE_WEB = SCOPE_WEB_LIST
 SCOPE_APP = SCOPE_APP_LIST
 DEFAULT_BLOCK_MIN = 30          # 被挡后默认冷静多久
+#: ★ **半开探测的间隔**(2026-10-14 加):熔断期内**每 N 分钟允许试一发**。
+#:
+#: 为什么必须有它:冷静期是**按作用域全局**的(一次 `-2041` ⇒ 该作用域 30 分钟不发请求),
+#: 而"App 列表"恰好是**网页关窗时唯一能出精确读数**的那条 ⇒ 一次失败就把整轮(实测 37 个号)
+#: 的读数全吃掉。而这类挡是**时限性**的(当天已证会自愈),等满 30 分钟纯属白等。
+#: ⇒ 探测式恢复:**成功 ⇒ 立刻解除熔断**(不必等满);**仍被挡 ⇒ 继续冷静**。
+#: ⚠️ 频次靠这个间隔限着 —— 是"每 10 分钟一发",**不是"放开了打"**(风控会更深)。
+PROBE_MIN = 10
+_PROBE_KEY = "weread_probe_{uid}_{scope}"
+
+
+def _probe_due(session: Session, user_id: int, scope: str) -> bool:
+    """距上次半开探测是否已过 `PROBE_MIN`(没探测过 = 该探)。顺手记下这次的时间。"""
+    from app.db.models import SystemConfig
+
+    key = _PROBE_KEY.format(uid=user_id, scope=scope)
+    now = datetime.now()
+    try:
+        row = session.scalar(select(SystemConfig).where(SystemConfig.key == key))
+        if row and row.value:
+            try:
+                if now - datetime.fromisoformat(str(row.value)) < timedelta(minutes=PROBE_MIN):
+                    return False
+            except (ValueError, TypeError):
+                pass          # 值坏了就当"该探"(宁可多探一次,也别永远不探)
+        if row:
+            row.value = now.isoformat()
+        else:
+            session.add(SystemConfig(key=key, value=now.isoformat()))
+        session.commit()
+        return True
+    except Exception:  # noqa: BLE001 - 记不上探测时间就别探(保守),不影响别的路径
+        logger.debug("读写额度探测时间失败", exc_info=True)
+        return False
 
 
 def is_quota_error(exc: BaseException | str) -> bool:
@@ -145,7 +179,7 @@ def clear(session: Session, user_id: int, scope: str = SCOPE_WEB) -> None:
 
 def call(session: Session, user_id: int, fn: Callable[[], Any], *,
          what: str = "", block_min: int = DEFAULT_BLOCK_MIN,
-         scope: str = SCOPE_WEB) -> Any:
+         scope: str = SCOPE_WEB, allow_probe: bool = False) -> Any:
     """**打一次微信读书接口的统一入口**。
 
     - 熔断中 ⇒ 抛 `Blocked`,**请求根本不发**(省额度、不加深风控);
@@ -156,15 +190,28 @@ def call(session: Session, user_id: int, fn: Callable[[], Any], *,
     后者是**发出去了被拒**(风控信号,该报警)。
     """
     until = blocked_until(session, user_id, scope)
+    probing = False
     if until is not None:
-        raise Blocked(f"{what or '微信读书'}:额度熔断中(至 {until:%H:%M}),本次不发请求")
+        # ★ **半开探测**(2026-10-14):熔断期内**有限地**试一发 ——
+        #   只在调用方说"这条是唯一来源"(`allow_probe`)且距上次探测 ≥ `PROBE_MIN` 时才放行。
+        #   ⚠️ 默认 `allow_probe=False` ⇒ 没显式要求的路径**行为与从前逐字一致**。
+        if not allow_probe or not _probe_due(session, user_id, scope):
+            raise Blocked(f"{what or '微信读书'}:额度熔断中(至 {until:%H:%M}),本次不发请求")
+        probing = True
+        logger.info("微信读书额度熔断中[%s]:**半开探测**一次(%s)", scope, what or "")
     try:
-        return fn()
+        out = fn()
     except BaseException as exc:
         if is_quota_error(exc):
             note_blocked(session, user_id, why=f"{what}:{exc}", minutes=block_min,
                          scope=scope)
         raise
+    else:
+        if probing:
+            # 探测成功 ⇒ **立刻解除熔断**:挡是时限性的,不必让所有人白等满冷静期
+            clear(session, user_id, scope)
+            logger.info("微信读书额度熔断[%s]经半开探测**已恢复** ⇒ 解除熔断", scope)
+        return out
 
 
 def snapshot(session: Session, user_id: int) -> dict:

@@ -152,3 +152,69 @@ def test_凡是打微信读书列表的地方都要经统一额度入口():
         "这些地方在打微信读书列表却没经统一额度入口 —— 会脱离跨路径熔断,"
         f"重演「监听被挡、别的链照打」那次:{bad}"
     )
+
+
+# ---------------- 半开探测(2026-10-14):冷静期内"有限地"试一发 ----------------
+#
+# 为什么加:冷静期是**按作用域全局**的(一次 -2041 ⇒ 该作用域 30 分钟不发请求),
+# 而 App 列表恰好是**网页关窗时唯一能出精确读数**的那条 ⇒ 一次失败把整轮(实测 37 个号)
+# 的读数全吃掉。这类挡又是**时限性**的(当天已证会自愈)⇒ 等满 30 分钟纯属白等。
+
+
+@pytest.fixture
+def session():
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db import models  # noqa: F401
+    from app.db.database import Base
+
+    eng = create_engine("sqlite://")
+    Base.metadata.create_all(eng)
+    db = sessionmaker(bind=eng, autoflush=False, expire_on_commit=False)()
+    yield db
+    db.close()
+
+
+def _call(session, fn, **kw):
+    return wb.call(session, 1, fn, what="app/book/articles", scope=wb.SCOPE_APP_LIST, **kw)
+
+
+class TestHalfOpenProbe:
+    def test_默认不探测_行为与从前逐字一致(self, session) -> None:
+        """⚠️ 没显式要求探测的路径,**熔断中一律不发**(保护不能被顺手削弱)。"""
+        wb.note_blocked(session, 1, why="x:-2041", scope=wb.SCOPE_APP_LIST)
+        calls: list[int] = []
+        with pytest.raises(wb.Blocked):
+            _call(session, lambda: calls.append(1) or [])
+        assert calls == [], "熔断中不该发请求"
+
+    def test_要求探测且够久_真发一次_成功即解除熔断(self, session) -> None:
+        """★ 核心:熔断期内允许探一发;**成功 ⇒ 立刻解除**(不必等满冷静期)。"""
+        wb.note_blocked(session, 1, why="x:-2041", scope=wb.SCOPE_APP_LIST)
+        assert wb.blocked_until(session, 1, wb.SCOPE_APP_LIST) is not None
+        calls: list[int] = []
+        out = _call(session, lambda: calls.append(1) or ["ok"], allow_probe=True)
+        assert out == ["ok"] and calls == [1], "该探这一发"
+        assert wb.blocked_until(session, 1, wb.SCOPE_APP_LIST) is None, "探测成功应解除熔断"
+
+    def test_探测间隔内不再发(self, session) -> None:
+        """⚠️ 频次由 `PROBE_MIN` 限着 —— 是"每 10 分钟一发",不是放开了打(风控会更深)。"""
+        wb.note_blocked(session, 1, why="x:-2041", scope=wb.SCOPE_APP_LIST)
+        calls: list[int] = []
+        _call(session, lambda: calls.append(1) or [], allow_probe=True)      # 第一次探
+        wb.note_blocked(session, 1, why="x:-2041", scope=wb.SCOPE_APP_LIST)  # 又被挡(重新熔断)
+        with pytest.raises(wb.Blocked):
+            _call(session, lambda: calls.append(2) or [], allow_probe=True)  # 间隔内 → 不发
+        assert calls == [1], f"间隔内不该再探:{calls}"
+
+    def test_探测仍被挡_熔断继续(self, session) -> None:
+        """探测失败(仍 -2041)⇒ **熔断继续**,而且探测时间已经推进(不会变成连发)。"""
+        wb.note_blocked(session, 1, why="x:-2041", scope=wb.SCOPE_APP_LIST)
+        def _boom():
+            raise RuntimeError("微信读书错误 code=-2041:列表预算耗尽")
+        with pytest.raises(RuntimeError):
+            _call(session, _boom, allow_probe=True)
+        assert wb.blocked_until(session, 1, wb.SCOPE_APP_LIST) is not None, "仍被挡就该继续冷静"
+        with pytest.raises(wb.Blocked):
+            _call(session, lambda: [], allow_probe=True)   # 间隔内不再探
