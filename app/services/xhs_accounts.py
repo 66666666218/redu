@@ -524,6 +524,71 @@ def hints_of(ref: AccountRef) -> dict[str, str]:
     return {str(k): str(v) for k, v in got.items() if k and v}
 
 
+def fingerprint_of(ref: AccountRef, session=None) -> tuple[str, dict[str, str]]:
+    """★ 这个账号的 **`(ua, sec-ch-ua*)`** —— **存档优先,库里兜底**。
+
+    ## 为什么需要"兜底"这一半(2026-10-14 定位)
+    `ua_of` / `hints_of` 只认 `data/xhs_session_<档案>.json` 那种**成套存档**。
+    而**租户那条路**(cookie 写进加密库的那条,也正是池里唯一标记可用的那个)
+    过去**没有任何地方记指纹** ⇒ 拿到的 UA 是空串 ⇒ 协议路退回硬编码的
+    `DEFAULT_UA`(`Chrome/138`)。今晚这枚会话是 **Edge** 签发的(证据:cookie 里
+    带着 `pglt-edgeChromium-*`),发 `Chrome/138` 正是本项目已定性过的
+    「登录设备 ≠ 调用设备」(`300011`)—— 只是从存档那条路换到了租户这条路。
+
+    ⇒ 登录/导出时把指纹**跟着 cookie 一起存**(`save_fp`),这里**先读账号自己的存档**,
+    存档里没有(租户那种)才回落到按用户存的这份。**优先级只此一处写死**,别在调用点各判一次。
+    """
+    ua, hints = ua_of(ref), hints_of(ref)
+    if ua or hints or session is None:
+        return ua, hints
+    got = load_fp(session, ref.user_id)
+    return str(got.get("ua") or ""), dict(got.get("hints") or {})
+
+
+def _fp_key(user_id: int) -> str:
+    return f"xhs_fp_{user_id}"
+
+
+def save_fp(db, user_id: int, ua: str, hints: dict | None = None) -> None:
+    """把**这份凭据所属浏览器**的指纹与 cookie **成对**存起来(存 `system_config`)。
+
+    ⚠️ 与 `xhs_xys.save_ssk` 同一条规矩:**每一次重登/重导都要覆盖写**。
+    只写一半(cookie 换了、指纹还是上一个浏览器的)比不写更糟 ——
+    它会让"登录设备 ≠ 调用设备"从一个**能被发现的空值**变成一份**看起来合理的错值**。
+    ⚠️ 空 UA **不写**:宁可让协议路按"没有指纹"处理(它会退回常量并留痕)。
+    """
+    ua = str(ua or "").strip()
+    if not ua:
+        return
+    from sqlalchemy import select
+
+    from app.db.models import SystemConfig
+
+    payload = json.dumps({"ua": ua, "hints": dict(hints or {})}, ensure_ascii=False)
+    row = db.scalar(select(SystemConfig).where(SystemConfig.key == _fp_key(user_id)))
+    if row is None:
+        db.add(SystemConfig(key=_fp_key(user_id), value=payload))
+    else:
+        row.value = payload
+
+
+def load_fp(session, user_id: int) -> dict:
+    """读回 `{"ua": str, "hints": {}}`;**读不到回 `{}`**(不抛 —— 调用方自己兜)。"""
+    try:
+        from sqlalchemy import select
+
+        from app.db.models import SystemConfig
+
+        row = session.scalar(select(SystemConfig).where(SystemConfig.key == _fp_key(user_id)))
+        if row is not None and row.value:
+            got = json.loads(str(row.value))
+            if isinstance(got, dict):
+                return got
+    except Exception:  # noqa: BLE001 - 读不到就当没有
+        logger.debug("读小红书指纹失败(按没有处理)", exc_info=True)
+    return {}
+
+
 # ------------------------------------------------------------------ 档案(浏览器路径)
 #: 页面渲染路(`xhs_page_source`)是**按目录**工作的 —— 它要的不是 cookie 串,
 #: 而是一个**能开起来的浏览器档案目录**。下面这几个函数就是那一路进出池子的门:

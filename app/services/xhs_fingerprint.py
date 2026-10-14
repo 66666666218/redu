@@ -197,6 +197,55 @@ def build_client_hints(brands=None, mobile: bool = False, platform: str = "") ->
     return out
 
 
+# --------------------------------------------------- 从浏览器读(指纹的唯一可信来源)
+#: ⚠️ **只此一处**读浏览器指纹 —— 登录工具、凭据导出、体检都走这三个函数。
+#: 以前 `xhs_browser_login` 自己写了一份(`_read_ua` / `_read_client_hints`),
+#: 而**导出凭据那条路没有** ⇒ 同一次登录,工具写的存档带指纹、自动重导写的库不带,
+#: 两条路的"口径"就分了叉(本仓最贵的一类 bug)。现在谁要读都从这里取。
+
+def read_ua(page) -> str:
+    """★ 读**页面自己**报的 UA 并洗一遍;读不到回**空串**(调用方自己决定怎么兜)。
+
+    ⚠️ 为什么必须"当场从浏览器读",而不是维护一份常量表:会话绑的是**签发它的
+    那个浏览器** —— 登录用 Edge 154、采集自称 Chrome 138,服务端判
+    "登录设备 ≠ 调用设备"(实测 `300011`)。存进凭据、采集时原样发出,才永远不漂。
+
+    ⚠️ 空值**不**在这里兜成 `DEFAULT_UA`:那样等于把一份**编的**指纹写进凭据,
+    比"没有"更糟。兜底是调用方的事(`resolve()`)。
+    """
+    try:
+        raw = str(page.evaluate("() => navigator.userAgent") or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+    return normalize_ua(raw) if raw else ""
+
+
+def read_hints(page) -> dict[str, str]:
+    """★ 读 `navigator.userAgentData` 并转成 `sec-ch-ua*`;抓不到回 `{}`(**不编**)。
+    `{}` 的语义是"这份浏览器没给",调用方据此**不发**这组头。"""
+    try:
+        got = page.evaluate(
+            "() => { const d = navigator.userAgentData; if (!d || !d.brands) return null;"
+            " return {brands: d.brands.map(b => ({brand: b.brand, version: b.version})),"
+            "         mobile: !!d.mobile,"
+            "         platform: d.platform || navigator.platform || ''}; }")
+    except Exception:  # noqa: BLE001
+        return {}
+    if not isinstance(got, dict):
+        return {}
+    return build_client_hints(got.get("brands"), bool(got.get("mobile")),
+                              str(got.get("platform") or ""))
+
+
+def read_from_page(page) -> tuple[str, dict[str, str]]:
+    """**一次读齐** `(ua, sec-ch-ua*)` —— 就是"这份会话长什么样"的两个件。
+
+    ⚠️ 只读 `navigator`,**不导航、不发请求** ⇒ 零风控成本(可以随便对着一个
+    `about:blank` 空白页读)。
+    """
+    return read_ua(page), read_hints(page)
+
+
 def describe(ua: str | None) -> str:
     """一句话说清这份 UA 是什么(给 `doctor` / 日志用)。"""
     u = normalize_ua(ua)

@@ -63,12 +63,25 @@ _IPV4 = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
 #: `myip.ipip.net` / `taobao.com/getip` → 超时),**只有 `http://ip-api.com/json` 通**。
 #: ⇒ 它必须**排第一**:否则每条都要先等 15 秒超时才轮到它,浏览器那侧常常
 #: 还没轮到就已经超时放弃了(实测就这么白跑过一轮)。
-_EGRESS_URLS = (
-    "http://ip-api.com/json",
-    "https://api.ipify.org?format=json",
-    "https://myip.ipip.net",
+#: ★★ **回声服务必须分组,国产的排前面**(2026-10-14 实测踩到,代价是差点把整条
+#: 排查带偏):本机是**分流路由**(国内直连 / 国外走梯子)。拿**境外**回声去量"出口",
+#: 量到的是**梯子那个出口** —— 它反复变、而且是境外机房段(实测 5 次采样出 3 个
+#: Linode IP),读数**与"小红书看到了什么"毫无关系**:小红书是**国内目标、走直连**,
+#: 一直稳定在同一个家宽 IP 上。
+#: ⇒ 先用国产回声(= 国内目标真正看到的那条路),境外的只作兜底,**且要标出来**。
+_EGRESS_URLS_DOMESTIC = (
+    "https://myip.ipip.net",               #: 纯文本 + 省市/ISP,信息量最大,首选
+    "https://ip.3322.net",
     "https://www.taobao.com/help/getip.php",
 )
+#: 兜底(前一组全不通时才用)。⚠️ 它量的是**境外**那条路 ⇒ 可能不是目标看到的那个出口。
+_EGRESS_URLS_FOREIGN = (
+    "http://ip-api.com/json",              #: 只有它带 hosting/proxy 字段(见 egress_profile)
+    "https://api.ipify.org?format=json",
+)
+#: ⚠️ 保持"国产在前"的顺序 —— `xhs_browser_login._probe_egress` 取的是 `[:3]`,
+#: 序号一改,登录时记进凭据存档的那枚 `egress_ip` 就会变成梯子的 IP。
+_EGRESS_URLS = _EGRESS_URLS_DOMESTIC + _EGRESS_URLS_FOREIGN
 
 
 def system_proxy() -> dict[str, str]:
@@ -190,7 +203,14 @@ def egress_ip(settings=None, timeout: int = 15) -> tuple[str, str]:
     ⚠️ **为什么要整体重试一轮**(2026-10-12 修):`ip-api.com` 免费档有速率限制,
     连着量会**偶发**失败。而它排在 `_EGRESS_URLS` 第一位、是本机**唯一**能通的那个,
     它一失败就会顺位掉到 `api.ipify.org`(HTTPS,本网络不通)⇒ 表现为"量不到出口"。
-    那个假象会让人以为"换网络把网搞坏了",非常误导。⇒ 整轮失败后再来一次。
+    那枚假象会让人以为"换网络把网搞坏了",非常误导。⇒ 整轮失败后再来一次。
+
+    ★★ **顺序按"国内 → 境外"**(2026-10-14 修,见 `_EGRESS_URLS` 注释):
+    本机是分流路由(国内直连 / 国外走梯子),境外回声量到的是**梯子**的出口。
+    拿它当"出口"会得出**两个都错**的结论 —— 既会误判"出口在漂"(它是梯子在轮换),
+    也会误判"出口是境外机房段"(小红书看不到那个 IP)。所以:
+      · 国产回声在前,先拿到**目标真正看到的那条路**;
+      · 真回落到境外时,`说明` 里会**明确写出来**,别让它冒充国内读数。
     """
     import requests
 
@@ -212,7 +232,13 @@ def egress_ip(settings=None, timeout: int = 15) -> tuple[str, str]:
                     ip = m.group(0) if m else ""
                 if ip:
                     via = "代理" if proxies else "直连"
-                    return ip, f"{via} · 回声服务 {url.split('//')[-1][:34]}"
+                    #: ★ 说清这是**哪条路**量的 —— 境外回声的读数**不能**当作
+                    #: "小红书看到的出口"(分流路由下它是梯子的 IP,见 `_EGRESS_URLS` 注释)。
+                    if url in _EGRESS_URLS_DOMESTIC:
+                        scope = "国内回声"
+                    else:
+                        scope = "⚠️**境外回声**(报的可能是梯子出口,国内目标看不到它)"
+                    return ip, f"{via} · {scope} · {url.split('//')[-1][:34]}"
                 last = f"{url.split('//')[-1][:34]} 没返回 IP"
             except Exception as exc:  # noqa: BLE001
                 last = f"{type(exc).__name__}: {str(exc)[:60]}"
@@ -261,6 +287,11 @@ def egress_stability(samples: int = 5, settings=None, timeout: int = 15,
 
     ⇒ 本项目只能买**静态**住宅/ISP 代理;买回来第一件事就是用这一条确认
     "它真的不漂"。`len(集合) == 1` 才算静态。
+
+    ⚠️ **读集合之前先看 `说明` 里写的是国内还是境外回声**(2026-10-14 实测):
+    本机是**分流路由**时,境外回声走的是**梯子**那条路,梯子本身常常是轮换池 ⇒
+    集合里出现一堆**境外机房 IP** 时,**不是"出口在漂"**,而是"量的不是目标那条路"。
+    `egress_ip` 已按"国内优先"排序并标注来源,拿它的 `说明` 一起判断,别只看集合大小。
     """
     ips: set[str] = set()
     ok = 0

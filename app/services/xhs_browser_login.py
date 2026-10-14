@@ -116,9 +116,9 @@ def _read_ua(page) -> str:
     一律交给 `xhs_fingerprint.normalize_ua` 洗成正常的 `Chrome/`。
     """
     try:
-        from app.services.xhs_fingerprint import normalize_ua
+        from app.services.xhs_fingerprint import read_ua
 
-        return normalize_ua(page.evaluate("() => navigator.userAgent"))
+        return read_ua(page)
     except Exception:  # noqa: BLE001
         return ""
 
@@ -133,17 +133,9 @@ def _read_client_hints(page) -> dict:
     宁可缺,也绝不编一份(self-report 编错比不发更糟)。
     """
     try:
-        got = page.evaluate(
-            "() => { const d = navigator.userAgentData; if (!d || !d.brands) return null;"
-            " return {brands: d.brands.map(b => ({brand: b.brand, version: b.version})),"
-            "         mobile: !!d.mobile,"
-            "         platform: d.platform || navigator.platform || ''}; }")
-        if not isinstance(got, dict):
-            return {}
-        from app.services.xhs_fingerprint import build_client_hints
+        from app.services.xhs_fingerprint import read_hints
 
-        return build_client_hints(got.get("brands"), bool(got.get("mobile")),
-                                  str(got.get("platform") or ""))
+        return read_hints(page)
     except Exception:  # noqa: BLE001
         return {}
 
@@ -335,6 +327,18 @@ def export_to_store(session, user_id: int, res: LoginResult,
         except Exception as exc:  # noqa: BLE001
             logger.warning("写 ssk 失败(凭据已存,但已登录请求会缺 x6/x7):%s", exc)
 
+    #: ★★ **指纹也必须跟着 cookie 存**(2026-10-14 定位):库里的凭据**只放得下 cookie**,
+    #: 而会话是**这个浏览器**签发的 —— 不存指纹,协议路就会静默退回硬编码 `Chrome/138`,
+    #: 撞上 `300011`"登录设备 ≠ 调用设备"。⚠️ 与 cookie/ssk **同一次登录写入**,
+    #: 否则会出现"cookie 是新号、指纹还是上一个浏览器"这种**看起来合理的错值**。
+    try:
+        from app.services import xhs_accounts
+
+        xhs_accounts.save_fp(db or session, user_id, res.ua, res.client_hints)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("写指纹失败(凭据已存,但协议路会退回硬编码 UA):%s", exc)
+
     n = len(res.cookies)
     return True, (f"已写入 {n} 项 cookie"
-                  f"{' + ssk' if res.ssk_b64 else ' (**缺 ssk**)'}")
+                  f"{' + ssk' if res.ssk_b64 else ' (**缺 ssk**)'}"
+                  f"{' + 指纹' if res.ua else ' (**缺指纹**)'}")

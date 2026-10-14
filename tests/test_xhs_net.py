@@ -163,6 +163,62 @@ class TestEgressIp:
         assert ip == "" and why            # 量不到要**说出原因**,别静默
 
 
+class TestEgressEchoOrder:
+    """★ **回声服务必须"国产优先"** —— 2026-10-14 实测踩到,代价是差点把整条排查带偏。
+
+    本机是**分流路由**(国内直连 / 国外走梯子)。拿**境外**回声量"出口",量到的是
+    **梯子**的出口(实测 5 次采样出 3 个 Linode IP);而小红书是**国内目标、走直连**,
+    出口一直稳定在同一个家宽 IP(山东联通)上。⇒ 顺序一错就会得到**两个都错**的结论:
+    「出口在漂」和「出口是境外机房段」。
+
+    ⚠️ 这几条是护栏,别让顺序悄悄回到"境外优先"。
+    """
+
+    class _R:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    def test_国产回声排在境外之前(self) -> None:
+        head = list(N._EGRESS_URLS[:len(N._EGRESS_URLS_DOMESTIC)])
+        assert head == list(N._EGRESS_URLS_DOMESTIC)
+        for u in N._EGRESS_URLS_FOREIGN:
+            assert u not in head, f"境外回声 {u} 混进了前面 ⇒ 量到的是梯子出口"
+
+    def test_登录探测取的前三个必须是国产(self) -> None:
+        """★ `xhs_browser_login._probe_egress` 取的是 `_EGRESS_URLS[:3]`。
+
+        它记进凭据存档的 `egress_ip` 是"登录时出口"的基准 —— 这里要是切到境外回声,
+        存下来的就是**梯子的 IP**,之后比对"出口有没有变"全在比一个与账号无关的东西。
+        """
+        assert len(N._EGRESS_URLS_DOMESTIC) >= 3, "国产回声至少 3 个,否则 [:3] 会切到境外"
+        assert list(N._EGRESS_URLS[:3]) == list(N._EGRESS_URLS_DOMESTIC[:3])
+
+    def test_命中国产回声时不带境外告警(self, monkeypatch) -> None:
+        import requests
+
+        monkeypatch.setattr(N, "for_requests", lambda s=None: None)
+        monkeypatch.setattr(requests, "get", lambda u, **k: self._R(
+            "当前 IP：112.247.45.87 来自于：中国 山东 菏泽 联通"))
+        ip, via = N.egress_ip()
+        assert ip == "112.247.45.87"
+        assert "国内回声" in via and "境外" not in via
+
+    def test_回落到境外回声时说明里必须标明(self, monkeypatch) -> None:
+        """★ 境外读数是**允许**的兜底,但绝不能冒充"小红书看到的出口"。"""
+        import requests
+
+        def _only_foreign(url, **k):
+            if url in N._EGRESS_URLS_DOMESTIC:
+                raise RuntimeError("国内回声不通(模拟)")
+            return self._R('{"query":"5.6.7.8"}')
+
+        monkeypatch.setattr(N, "for_requests", lambda s=None: None)
+        monkeypatch.setattr(requests, "get", _only_foreign)
+        ip, via = N.egress_ip()
+        assert ip == "5.6.7.8"
+        assert "境外回声" in via, "境外读数必须自报家门"
+
+
 class TestEgressProfile:
     """出口**画像**。⚠️ 全用桩 —— 用例绝不真发请求。"""
 

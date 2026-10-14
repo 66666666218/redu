@@ -41,6 +41,10 @@ _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 _GAP = 1.2
 #: 单页条数(接口实测稳定给 20~22)
 PAGE_SIZE = 20
+#: ★ `Cookie` 头字符数的**报警门槛**(2026-10-14)。按小红书域名正确取的凭据实测
+#: 约 **850 字符**;混进别的域名(Edge 档案里的微软/Bing 项)会到 **5700**。
+#: 取 2500 作门槛:留足余量(小红书将来多发几枚也不会误报),又能把污染抓出来。
+_COOKIE_MAX = 2500
 
 
 class XhsProtocolError(Exception):
@@ -340,6 +344,40 @@ def _http_post(url: str, body: str, headers: dict, st, timeout: int = 25,
                          proxies=proxies)
 
 
+def cookie_bytes(ck: dict) -> int:
+    """这套凭据拼成 `Cookie` 头大约多少字符(每枚多算 `; ` 两个字符)。"""
+    return sum(len(str(k)) + len(str(v)) + 2 for k, v in (ck or {}).items())
+
+
+def _warn_if_cookie_bloated(ck: dict) -> bool:
+    """★★ **Cookie 头体检** —— 凭据里混进**别的域名**就报警。返回是否报了。
+
+    ## 为什么值得单立一个函数(2026-10-14 实测定位)
+    凭据里混进别的域名的 cookie(实测:一个用过的 Edge 档案带回 41 枚 / 5700 字符,
+    其中 `elt` 1886 + `lt` 1673 + 一串 Bing/微软项)会让:
+      ① `Cookie` 头加其余头约 **8 KB** ⇒ 正撞 HTTP/2 的 `MAX_HEADER_LIST_SIZE`
+         ⇒ 服务端 GOAWAY/RST ⇒ `curl_cffi` 报 **`curl: (16)`**,
+         **整条链静默退回裸 `requests`**(JA3 是 python-requests 自己的)——
+         而按本仓规矩,那一层的结论**一句都不能采信**。
+         (> 这就是本次 `(16)` 的真因;修完头从 5700 降到 779 字符,`(16)` 随之消失。)
+      ② 请求本身**自曝**:真实浏览器**绝不会**把 `live.com` 的 cookie 发去
+         `xiaohongshu.com`。
+
+    ⚠️ **只报警,不剪裁** —— 剪裁要按域名判,而拼好的 cookie 串里**没有域名信息**;
+    猜着剪会把真 cookie 剪掉。源头在写入口(`xhs_cookie_export.read_ctx_cookies`)。
+    """
+    n = cookie_bytes(ck)
+    if n <= _COOKIE_MAX:
+        return False
+    logger.warning("小红书凭据异常:Cookie 头约 %d 字符(%d 项),超过 %d 的门槛 —— "
+                   "**多半混进了别的域名的 cookie**(实测:Edge 档案会带 3.5 KB 的"
+                   "微软/Bing 项)⇒ 极易撞 HTTP/2 头表上限而报 `curl: (16)`,"
+                   "并让整条链退回裸 requests(那一层的结论不可信)。"
+                   "修法:按域名重导 `xhs_cookie_export.export_from_profile()`",
+                   n, len(ck or {}), _COOKIE_MAX)
+    return True
+
+
 def _search_with(ck: dict, ssk: bytes, kws: list[str], st, pages: int,
                  session=None, user_id: int = 1, ua: str = "",
                  hints: dict | None = None) -> list[dict]:
@@ -359,6 +397,8 @@ def _search_with(ck: dict, ssk: bytes, kws: list[str], st, pages: int,
 
     #: ★ **一次解析,全程复用** —— `ua` 进 Header,`impersonate` 进 TLS 层,两者同源。
     fingerprint = xhs_fingerprint.resolve(ua, st)
+
+    _warn_if_cookie_bloated(ck)
 
     #: ★ **签名格式必须显式传**(2026-10-10 实测矩阵,见 `config/settings.py` 那段):
     #: 库的默认是 `xys`,而小红书 2026-03 起对数据接口拒 `XYS_` ⇒ 永远 461、
@@ -604,9 +644,11 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
             except Exception:  # noqa: BLE001
                 logger.debug("读 ssk 失败,按没有处理", exc_info=True)
 
-        #: ★ **指纹跟着凭据走** —— cookie / ssk / ua 三者同源(见 `xhs_fingerprint`)
-        _ua = pool.ua_of(ref)
-        _hints = pool.hints_of(ref)
+        #: ★ **指纹跟着凭据走** —— cookie / ssk / ua 三者同源(见 `xhs_fingerprint`)。
+        #: ⚠️ 必须走 `fingerprint_of`(**存档优先、库里兜底**),不能只要 `ua_of`:
+        #: 租户那条路(正是池里唯一可用的那个)的指纹存在库里,`ua_of` 读不到它
+        #: ⇒ 会静默退回硬编码 `Chrome/138`,撞上"登录设备 ≠ 调用设备"。
+        _ua, _hints = pool.fingerprint_of(ref, session)
         try:
             rows = _search_with(ck, ssk, kws, st, pages, session=session,
                                 user_id=user_id, ua=_ua, hints=_hints)
