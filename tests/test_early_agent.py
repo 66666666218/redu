@@ -198,6 +198,11 @@ def test_backtest_handles_xianyu_string_timestamps(session, st) -> None:
     session.add(AgentStage(user_id=1, board="xianyu", norm="某闲鱼待爆词",
                            kw="某闲鱼待爆词", stage="苗头", score=70,
                            parts="增速+150% 量级500", first_seen=push_ts, updated_at=push_ts))
+    # ⚠️ 样本现在是**推送记录**(2026-10-14):补一条**未结算**的推送 ⇒ 走"退回热度标签"那条路,
+    #    这条用例要验的正是那条路上的闲鱼日期字符串(不能崩)。
+    from app.db.models import HotspotSuggestion
+    session.add(HotspotSuggestion(user_id=1, keyword="某闲鱼待爆词", growth=0, kind="llm",
+                                  created_at=push_ts))
     session.commit()
 
     out = backtest_and_learn(session, 1, settings=st)  # 不应抛异常

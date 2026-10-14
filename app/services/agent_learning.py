@@ -168,10 +168,22 @@ def backtest_and_learn(db: Session, user_id: int, settings=None) -> dict:
 
     backtested = hits = 0
     two_days_ago = dt.now() - timedelta(days=2)
-    stages = db.scalars(select(AgentStage).where(
-        AgentStage.user_id == user_id,
-        AgentStage.stage.in_(("苗头", "上升")),
-        AgentStage.updated_at <= two_days_ago)).all()
+    # ★★ 2026-10-14 **改按「推送」配对**(用户口径 A)—— 原实现取 `AgentStage` 里
+    #    stage∈{苗头,上升} 且 2 天前的行,而那张表是**一行一个词、阶段**原地升级**
+    #    (`stage` 记当前、`first_seen` 记首次)⇒ **早期阶段根本存不下来**:远程实测
+    #    **287 行全是「爆发」、苗头/上升 0 行** ⇒ 取样**恒为空** ⇒ `backtested` 恒 0
+    #    ⇒ 权重/命中率/游标**永远写不出来**(作业天天跑、日志无错、指标恒 0 = 静默空转)。
+    #    ⇒ 换成以 `HotspotSuggestion`(**真实推送记录**:词/时间/结算)为样本源:
+    #      样本 0 → ~239;平台从 `platforms` 认,信号归因仍取 `AgentStage.parts`。
+    from app.db.models import HotspotSuggestion
+
+    pushes = db.scalars(select(HotspotSuggestion).where(
+        HotspotSuggestion.user_id == user_id,
+        HotspotSuggestion.created_at <= two_days_ago)).all()
+    #: 词 → 阶段行(只为拿 `parts` 里的信号标签;拿不到也照样回测,只是不记信号归因)
+    stage_by_kw: dict[str, AgentStage] = {}
+    for _st in db.scalars(select(AgentStage).where(AgentStage.user_id == user_id)).all():
+        stage_by_kw.setdefault(_norm_kw(str(_st.norm or _st.kw or "")), _st)
 
     # 已回测游标:同一阶段行(updated_at 未变)只回测一次,防止静止行每日重复记账
     # (旧实现把同一行天天计入 stats,total 虚胖且同一行"昨天 miss 今天 hit"自相矛盾)
@@ -184,46 +196,80 @@ def backtest_and_learn(db: Session, user_id: int, settings=None) -> dict:
         except (ValueError, TypeError):
             seen = {}
 
-    for st in stages:
-        row_sig = f"{st.board}|{st.norm or st.kw}|{st.updated_at.isoformat() if st.updated_at else ''}"
+    for sug in pushes:
+        kw = _norm_kw(str(sug.keyword or ""))
+        if not kw:
+            continue
+        # 游标键尾仍是 ISO 时间戳 ⇒ 与下面的"按保留期剪枝"同一形状,孤儿键能被剪掉
+        row_sig = f"sug|{kw}|{sug.created_at.isoformat() if sug.created_at else ''}"
         if seen.get(row_sig):
             continue
-        series = series_map.get(st.board, {}).get(st.norm or st.kw)
-        if not series or len(series) < 2:
-            continue
-        # 推送时基线:取 updated_at(推送时刻)**之前**的最后一个样本。
-        # 旧实现取 values[-2](=昨天的值),系统性低估增长率 → 命中率虚低 → 权重漂移。
-        cutoff = st.updated_at or (dt.now() - timedelta(days=2))
-        # 时间戳可能是 datetime(微博/百度/抖音)或日期字符串(闲鱼):先归一,
-        # 否则闲鱼行会让 `t <= cutoff` 抛 TypeError,连带打断该用户本轮全部板块回测。
-        base_pts = [v for t, v in series if (td := _to_dt(t)) is not None and td <= cutoff]
-        if not base_pts:
-            continue
-        base = float(base_pts[-1])
-        now_v = float(series[-1][1])
-        if base <= 0:
-            continue
-        growth = (now_v - base) / base
-        hit = growth >= 0.5          # 退路:关键词热度涨了 ≥50%
-        label = "热度"
-        # ★ **有结算就以结算为准** —— 它衡量的是"资源真的传播开了没有",不是"话题热不热"
-        _k = _norm_kw(str(st.norm or st.kw or ""))
-        if _k in settled:
-            hit = settled[_k] > 0
+        # ★★ **顺序很要紧:先看结算,再退回热度**(2026-10-14 实测定的序)——
+        #    结算标签**不需要任何热度序列**;而热度标签需要该词在四路序列里有 ≥2 个点。
+        #    实测:这 198 条建议的词是**资源/需求类**(`下载`/`问卷`/`人格测试`/剧名…),
+        #    与热榜词表**几乎不重叠(只有 2/198 能对到序列)** ⇒ 若先判序列,
+        #    **41 条有结算的样本会被一起挡掉**,`backtested` 还是接近 0(等于没修)。
+        if kw in settled:
+            # 结算口径:`repost_gain` = 发文后**全网新增的该文盘链数** ⇒ "真被传播开了没有"
+            hit = settled[kw] > 0
             label = "结算"
+        else:
+            # 退路:热度涨了 ≥50%。平台从 `platforms` 认(字段为空的老行再挨个板块找一遍)。
+            series = None
+            for _b in [x.strip() for x in str(sug.platforms or "").split(",") if x.strip()]:
+                _c = series_map.get(_b, {}).get(kw)
+                if _c and len(_c) >= 2:
+                    series = _c
+                    break
+            if series is None:
+                for _m in series_map.values():
+                    if _m.get(kw) and len(_m[kw]) >= 2:
+                        series = _m[kw]
+                        break
+            if series is None:
+                continue
+            # 推送时基线:取 created_at(**推送时刻**)之前的最后一个样本。
+            # 旧实现取 values[-2](=昨天的值),系统性低估增长率 → 命中率虚低 → 权重漂移。
+            cutoff = sug.created_at or two_days_ago
+            # 时间戳可能是 datetime(微博/百度/抖音)或日期字符串(闲鱼):先归一,
+            # 否则闲鱼行会让 `t <= cutoff` 抛 TypeError,连带打断该用户本轮全部板块回测。
+            base_pts = [v for t, v in series if (td := _to_dt(t)) is not None and td <= cutoff]
+            if not base_pts:
+                continue
+            base = float(base_pts[-1])
+            now_v = float(series[-1][1])
+            if base <= 0:
+                continue
+            growth = (now_v - base) / base
+            hit = growth >= 0.5
+            label = "热度"
         label_counts[label] += 1
         seen[row_sig] = "1"
         backtested += 1
         if hit:
             hits += 1
-        # 解析该阶段的信号标签,逐信号记账
-        for part in (st.parts or "").split():
+        # 解析**该词**的信号标签,逐信号记账(拿不到阶段行就不记归因,但样本照样算)
+        _stage = stage_by_kw.get(kw)
+        for part in ((_stage.parts if _stage else "") or "").split():
             sig = sig_of_part_name(part)      # 顺序语义见 _SIG_KEYS 的注释
             if sig:
                 bucket = signal_stats.setdefault(sig, {"hits": 0, "total": 0})
                 bucket["total"] += 1
                 if hit:
                     bucket["hits"] += 1
+
+    # ⚠️⚠️ **样本有了、归因没有 ⇒ 权重还是不会动** —— 必须说出来(2026-10-14 实测):
+    #    信号标签只存在 `AgentStage.parts` 里,而**被推送的那些词从没被早期信号打过标签**
+    #    (实测 41 条已结算样本里 **0 条**能在阶段表找到对应行)⇒ 每个信号的 `total` 都是 0
+    #    ⇒ 下面那道 `total >= 5` 永远过不去。**不说的话,这里会静默成"学习在跑、只是没调"**,
+    #    与"没有样本"长得一模一样(本仓母题)。⇒ 计数并告警,让"缺的是哪一环"一眼可见。
+    attributed = sum(int(v.get("total") or 0) for v in signal_stats.values())
+    if backtested and not attributed:
+        logger.warning("Agent 学习:样本 %d 条但**信号归因 0 条** ⇒ 权重不会动。"
+                       "原因:标签只存在 `AgentStage.parts` 里,而**被推送的词没被早期信号打过标签**"
+                       "(2026-10-14 实测 41 条已结算样本里 0 条能对上阶段表)。"
+                       "⇒ 要么在推送时把信号记进建议表,要么改用板块粒度归因(见 CHANGELOG)",
+                       backtested)
 
     # 权重自适应(样本 ≥10 才动,防小样本抖动;幅度 ±30%)
     if backtested >= 10:
@@ -280,4 +326,5 @@ def backtest_and_learn(db: Session, user_id: int, settings=None) -> dict:
         logger.info("Agent 回测:%d 例(结算标签 %d / 热度标签 %d),命中 %d",
                     backtested, label_counts["结算"], label_counts["热度"], hits)
     return {"backtested": backtested, "hits": hits, "weights": weights,
+            "attributed": attributed,   # 有信号归因的样本数(0 = 权重不会动,见上面的告警)
             "labels": label_counts}

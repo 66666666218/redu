@@ -34,6 +34,13 @@ def _seed_rising(db, user_id: int, kw: str) -> None:
     db.add(AgentStage(user_id=user_id, board="weibo", norm=kw, kw=kw, stage="苗头",
                       parts="增速+100%", score=100,
                       updated_at=now - timedelta(days=3)))
+    # ⚠️ 2026-10-14 起**样本源是推送记录**(老取样查"苗头/上升阶段行",而阶段表是一行一个词、
+    #    阶段原地升级 ⇒ 早期阶段存不下来 ⇒ 取样恒为空)。这里补一条**未结算**的推送:
+    #    它走"退回热度标签"那条路,阶段行仍负责提供信号标签(`parts`)。
+    from app.db.models import HotspotSuggestion
+
+    db.add(HotspotSuggestion(user_id=user_id, keyword=kw, growth=0, kind="llm",
+                             created_at=now - timedelta(days=3)))
     db.commit()
 
 
@@ -63,7 +70,6 @@ def test_backtest_seen_cursor_dedups_across_calls() -> None:
     """同一静止阶段行次日再回测应被 seen 游标跳过,命中率样本不重复累加。"""
     db = _session()
     _seed_rising(db, 1, "稳定词")
-
     agent_learning.backtest_and_learn(db, 1)
     after_first = _load_stats(db)
     assert after_first.get("增速", {}).get("total") == 1
