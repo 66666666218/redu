@@ -10,6 +10,8 @@ import os
 os.environ.setdefault("JWT_SECRET", "test_secret_0123456789abcdef0123456789abcdef")
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 
+import io
+
 import pytest  # noqa: E402
 
 from app.services import xhs_protocol_source as xp  # noqa: E402
@@ -299,3 +301,34 @@ class TestSignFormat:
         assert _FakeXhshow.sign_args, "一次都没调签名器?"
         assert all(fmt == "xyw" and rap is True for fmt, rap in _FakeXhshow.sign_args), \
             f"签名参数传错了:{_FakeXhshow.sign_args}"
+
+
+# ---------------------- 指纹层"静默降级"必须写进结论(2026-10-14 那晚的教训)
+#
+# 那晚两次协议单发都被 461/300011 与 -100 打回,而**两次的指纹层都降级了**
+# (curl_cffi 报 HTTP/2 错 16 ⇒ 退回裸 requests)。结论里看不出这件事,
+# 差点又把它当成"账号级、只能换号"。⇒ 降级必须**流进结论**,不能只躺日志。
+
+def test_指纹降级要写进结论里() -> None:
+    from app.services import xhs_protocol_source as X
+
+    X.LAST_FP_OK = True
+    assert "未用指纹" not in X._fp_note()
+    X.LAST_FP_OK = False
+    note = X._fp_note()
+    assert "未用指纹" in note and "别采信" in note, note
+    X.LAST_FP_OK = True          # 复原(模块级状态,别污染别的用例)
+
+
+def test_账号异常的结论会带上指纹注记() -> None:
+    """300011 那族的消息里必须能看见"这次用没用指纹"。"""
+    from app.services import xhs_protocol_source as X
+
+    X.LAST_FP_OK = False
+    import inspect as _ins
+
+    src = _ins.getsource(X._classify_response) if hasattr(X, "_classify_response") else ""
+    if not src:      # 函数名变了就退回"整个模块里必须出现"
+        src = io.open(X.__file__, encoding="utf-8").read()
+    assert "_fp_note()" in src, "构造 300011 结论时没有拼上指纹注记"
+    X.LAST_FP_OK = True

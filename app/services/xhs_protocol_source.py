@@ -239,6 +239,22 @@ def _xhs_proxies(st) -> dict[str, str] | None:
         return None
 
 
+#: ★ **最近一次请求是否真的用上了指纹伪装**(2026-10-14 加)。
+#:
+#: 为什么需要它:curl_cffi 那一层失败时会**静默降级**成 `requests`(那是**有意的** ——
+#: 指纹是增强不是依赖,不能让它断链)。但降级之后,我们手上那些"账号异常/被挡"的结论
+#: **就不再可信** —— 今晚就栽在这上面:一次 461+`300011` 的单发里,指纹层其实降级了,
+#: 而结论里**看不出这件事**,差点又把它当成"账号级、只能换号"。
+#: ⇒ 降级必须**流进结论**里,不能只躺在日志里(日志没人看,本仓母题)。
+LAST_FP_OK: bool = True
+
+
+def _fp_note() -> str:
+    """给"指认不了"的错误补一句:这次**用没用指纹** —— 决定了结论能不能采信。"""
+    return (";⚠️ **本次未用指纹**(降级到 requests)⇒ 这类结论**先别采信**,先修指纹再复测"
+            if not LAST_FP_OK else "")
+
+
 def _http_post(url: str, body: str, headers: dict, st, timeout: int = 25,
                impersonate: str | None = None):
     """★ **按"浏览器形状"发一个 POST** —— 指纹与出口都在这一层收口。
@@ -296,14 +312,16 @@ def _http_post(url: str, body: str, headers: dict, st, timeout: int = 25,
             if ca:
                 kw["verify"] = ca
             resp = cffi.post(url, **kw)
+            globals()["LAST_FP_OK"] = True
             logger.debug("小红书请求:curl_cffi(impersonate=%s%s) → %s",
                          imp, "+代理" if proxies else "", resp.status_code)
             return resp
         except Exception as exc:  # noqa: BLE001
             #: ⚠️ **故意用 warning 而不是 info**:这次事故的根因就是"指纹层悄悄失效了
             #: 却没人看见"。退回 `requests` 是**降级**,必须留痕。
+            globals()["LAST_FP_OK"] = False
             logger.warning("小红书 curl_cffi 不可用(%s: %s)—— "
-                           "**指纹伪装未生效**,本次退回 requests",
+                           "**指纹伪装未生效**,本次退回 requests(⇒ 本次的错误结论**不可信**)",
                            type(exc).__name__, str(exc)[:120])
     return requests.post(url, data=body, headers=headers, timeout=timeout,
                          proxies=proxies)
@@ -410,7 +428,8 @@ def _search_with(ck: dict, ssk: bytes, kws: list[str], st, pages: int,
                 if "300011" in _body or "账号存在异常" in _body:
                     raise XhsProtocolError(
                         f"小红书**账号异常**(HTTP 461;{_body[:110]})—— **账号级,与签名无关**。"
-                        f"修法:换号或过验证 `python tools/xhs_pass_verify.py <档案目录>`",
+                        f"修法:换号或过验证 `python tools/xhs_pass_verify.py <档案目录>`"
+                        + _fp_note(),
                         kind="restricted", needs_human=True)
                 raise XhsProtocolError(
                     f"**HTTP 461** —— 签名/指纹没通过(不是「没搜到」)。"
