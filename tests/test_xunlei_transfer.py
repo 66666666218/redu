@@ -60,7 +60,7 @@ def test_transfer_without_credentials_fails_gracefully(monkeypatch) -> None:
     """没凭据时返回结构化失败,不抛异常(上层要拿它决定是否回落原链推送)。"""
     from app.services import xunlei_transfer as xt
 
-    monkeypatch.setattr(xt, "_credentials", lambda settings=None: {})
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None, **kw: {})
     out = xt.transfer_and_share("https://pan.xunlei.com/s/ABC")
     assert out["status"] == "failed" and "凭据" in out["message"]
     assert xt.verify()["ok"] is False
@@ -150,7 +150,7 @@ def test_transfer_renews_captcha_and_succeeds(monkeypatch) -> None:
             return _FakeResp({"restore_task_id": "T1"})
         return _FakeResp(share_ok)
 
-    monkeypatch.setattr(xt, "_credentials", lambda settings=None: {
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None, **kw: {
         "access_token": "a", "captcha_token": "c", "device_id": "d", "client_id": "x"})
     monkeypatch.setattr(xt, "_drive_headers", lambda cred: {})
     monkeypatch.setattr(xt.requests, "get", fake_get)
@@ -171,7 +171,7 @@ def test_transfer_says_rescan_when_renewal_fails(monkeypatch) -> None:
     def always_invalid(url, **kw):
         return _FakeResp({"error": "captcha_invalid", "error_description": "验证码无效"})
 
-    monkeypatch.setattr(xt, "_credentials", lambda settings=None: {
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None, **kw: {
         "access_token": "a", "captcha_token": "c", "device_id": "d", "client_id": "x"})
     monkeypatch.setattr(xt, "_drive_headers", lambda cred: {})
     monkeypatch.setattr(xt.requests, "get", always_invalid)
@@ -192,7 +192,7 @@ def test_retry_uses_renewed_credentials(monkeypatch) -> None:
     seen: list[str] = []
     store = [{"access_token": "a", "captcha_token": "stale", "device_id": "d1", "client_id": "x"},
              {"access_token": "a", "captcha_token": "fresh", "device_id": "d2", "client_id": "x"}]
-    monkeypatch.setattr(xt, "_credentials", lambda settings=None: store[min(len(seen), 1)])
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None, **kw: store[min(len(seen), 1)])
     monkeypatch.setattr(xt, "_drive_headers",
                         lambda c: (seen.append(c["captcha_token"]) or {}))
     monkeypatch.setattr(xt, "_renew_captcha", lambda: True)
@@ -234,7 +234,7 @@ def test_quota_info_self_heals_captcha_on_400(monkeypatch) -> None:
                              status=400)
         return _FakeResp({"quota": {"limit": "1000", "usage": "950"}})
 
-    monkeypatch.setattr(xt, "_credentials", lambda settings=None: {"access_token": "a"})
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None, **kw: {"access_token": "a"})
     monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
     monkeypatch.setattr(xt.requests, "get", fake_get)
     monkeypatch.setattr(xt, "_renew_captcha",
@@ -260,7 +260,7 @@ def test_trash_files_deletes_each_id_and_reports_partial(monkeypatch) -> None:
             return _FakeResp({"error": "file_not_found"}, status=404)
         return _FakeResp({})
 
-    monkeypatch.setattr(xt, "_credentials", lambda settings=None: {"access_token": "a"})
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None, **kw: {"access_token": "a"})
     monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
     monkeypatch.setattr(xt.requests, "delete", fake_delete)
 
@@ -275,7 +275,7 @@ def test_list_files_filters_trashed(monkeypatch) -> None:
     不过滤的话扫盘会把**已删除的文件当新资源**登记,还去给它建分享链(必失败)。"""
     from app.services import xunlei_transfer as xt
 
-    monkeypatch.setattr(xt, "_credentials", lambda settings=None: {"access_token": "a"})
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None, **kw: {"access_token": "a"})
     monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
     monkeypatch.setattr(xt.requests, "get", lambda url, **kw: _FakeResp({"files": [
         {"id": "A", "name": "活着"},
@@ -335,7 +335,7 @@ def test_transfer_sends_files_into_configured_parent(monkeypatch) -> None:
     from app.services import xunlei_transfer as xt
 
     bodies: list[dict] = []
-    monkeypatch.setattr(xt, "_credentials", lambda settings=None: {
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None, **kw: {
         "access_token": "a", "captcha_token": "c", "device_id": "d", "client_id": "x"})
     monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
     monkeypatch.setattr(xt, "resolve_parent_id", lambda cred=None, **k: "PARENT_DIR")
@@ -506,7 +506,7 @@ def test_oversized_share_is_refused_without_even_attempting_restore(monkeypatch)
     from app.services import xunlei_transfer as xt
 
     posted: list[str] = []
-    monkeypatch.setattr(xt, "_credentials", lambda settings=None: {
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None, **kw: {
         "access_token": "a", "captcha_token": "c", "device_id": "d", "client_id": "x"})
     monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
     monkeypatch.setattr(xt, "resolve_parent_id", lambda cred=None, **k: "P")
@@ -539,7 +539,7 @@ def test_restore_space_error_carries_both_numbers(monkeypatch) -> None:
     """预判漏掉时(文件夹 size 恒 0 ⇒ 下限),转存失败那一步也要把两个数带出来。"""
     from app.services import xunlei_transfer as xt
 
-    monkeypatch.setattr(xt, "_credentials", lambda settings=None: {
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None, **kw: {
         "access_token": "a", "captcha_token": "c", "device_id": "d", "client_id": "x"})
     monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
     monkeypatch.setattr(xt, "resolve_parent_id", lambda cred=None, **k: "P")
@@ -565,7 +565,7 @@ def test_unknown_space_does_not_block_a_transfer(monkeypatch) -> None:
     """⚠️ **不知道 ≠ 满**:配额探针拿不到时**照常转**,不许拿"不知道"去挡(与 `admit_transfer` 同源)。"""
     from app.services import xunlei_transfer as xt
 
-    monkeypatch.setattr(xt, "_credentials", lambda settings=None: {
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None, **kw: {
         "access_token": "a", "captcha_token": "c", "device_id": "d", "client_id": "x"})
     monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
     monkeypatch.setattr(xt, "resolve_parent_id", lambda cred=None, **k: "P")
@@ -609,7 +609,7 @@ def test_quota_probe_is_shared_within_its_ttl(monkeypatch) -> None:
         calls["n"] += 1
         return _FakeResp({"quota": {"limit": "1000", "usage": "800"}})
 
-    monkeypatch.setattr(xt, "_credentials", lambda settings=None: {"access_token": "a"})
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None, **kw: {"access_token": "a"})
     monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
     monkeypatch.setattr(xt.requests, "get", fake_get)
 
@@ -635,7 +635,7 @@ def test_failed_probe_is_cached_too(monkeypatch) -> None:
         calls["n"] += 1
         raise RuntimeError("网络炸了")
 
-    monkeypatch.setattr(xt, "_credentials", lambda settings=None: {"access_token": "a"})
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None, **kw: {"access_token": "a"})
     monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
     monkeypatch.setattr(xt.requests, "get", fake_get)
 
@@ -653,7 +653,7 @@ def test_prejudgment_does_not_probe_quota_per_resource(monkeypatch) -> None:
 
     probe_calls = {"n": 0}
 
-    monkeypatch.setattr(xt, "_credentials", lambda settings=None: {
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None, **kw: {
         "access_token": "a", "captcha_token": "c", "device_id": "d", "client_id": "x"})
     monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
     monkeypatch.setattr(xt, "resolve_parent_id", lambda cred=None, **k: "P")
@@ -698,7 +698,7 @@ def test_fresh_probe_bypasses_the_cache(monkeypatch) -> None:
         calls["n"] += 1
         return _FakeResp({"quota": {"limit": "1000", "usage": str(usage["v"])}})
 
-    monkeypatch.setattr(xt, "_credentials", lambda settings=None: {"access_token": "a"})
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None, **kw: {"access_token": "a"})
     monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
     monkeypatch.setattr(xt.requests, "get", fake_get)
 

@@ -419,7 +419,53 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
             XunleiGroupShare.user_id == user_id,
             XunleiGroupShare.status == "pending",
         ).order_by(XunleiGroupShare.msg_time.desc()).limit(limit)).all()
-    ratio = xt.quota_ratio()               # 只查一次,整批共用(别每条都打一次配额)
+    # ★★ **多账号择一:满了就换下一个**(2026-10-14 用户口径:「一个网盘账号内存不足
+    #   增加多个账号补上」)—— 池里挑**最空的**;它满了**换下一个**;**全满才停**
+    #   (与从前"一个满就停"相比是**严格推广**)。⚠️ 没配池 ⇒ 池只返回一个"默认账号"
+    #   ⇒ **单账号行为与从前逐字一致**。配额**按账号探**(探失败 = None ⇒ 放行,与既有取舍一致)。
+    # ⚠️⚠️ **这里刻意不新增返回路径**:全满时**照旧**让下面行循环里那句 `admit_transfer`
+    #   去判"盘满",走**原来那条** `disk_full` 返回(它带着 `gate_mismatch` 等既有键 ——
+    #   再写一份返回就多一处会飘的地方,本仓为这个栽过很多次)。
+    from app.services import pan_accounts
+
+    limit_ratio = _gate_limit(settings)
+    chosen = pan_accounts.default_ref("xunlei", user_id=user_id)
+    ratio = None
+    tried: list[str] = []
+    _refs = pan_accounts.accounts(session, "xunlei", user_id=user_id)
+    if len(_refs) == 1 and _refs[0].is_default:
+        # ★ **没配池(单账号)= 走老路径,逐字不变**:一次探针、一个账号、一条凭据都不预读。
+        #   这条分支存在的意义就是"上线多账号**不改变**现有部署的行为"(也正因为如此,
+        #   既有的那 10 条用例一行都不用改)。
+        ratio = xt.quota_ratio()
+    else:
+        # ★★ **多账号择一:满了就换下一个**(2026-10-14 用户口径:「一个网盘账号内存不足
+        #   增加多个账号补上」)—— 池里挑**最空的**;它满了**换下一个**;**全满才停**
+        #   (与"一个满就停"相比是**严格推广**)。配额**按账号探**(探失败 = None ⇒ 放行,
+        #   与既有取舍一致)。⚠️ **刻意不新增返回路径**:全满时照旧让下面行循环里那句
+        #   `admit_transfer` 去判盘满,走**原来那条** `disk_full` 返回(带着 `gate_mismatch`
+        #   等既有键 —— 再写一份返回就多一处会飘的地方)。
+        for _ref in pan_accounts.ordered(session, "xunlei", user_id=user_id):
+            # ⚠️ 凭据走 `xt._credentials`(**与转存那一步同一个读法**),别在这里自己解析
+            #    cookie_json —— 两处各读一次,迟早一个认一个不认。
+            cred = xt._credentials(settings, cookie_key=_ref.cookie_key)
+            if not cred:
+                continue                     # 没凭据 ⇒ 不猜,跳过这个账号
+            _r = xt.quota_ratio(cred)
+            chosen, ratio = _ref, _r         # 先记下"最后一个探过的":全满时由行循环按它判盘满
+            if _r is None or _r < limit_ratio:
+                pan_accounts.report(session, _ref, ratio=_r, full=False)
+                break
+            pan_accounts.report(session, _ref, ratio=_r, full=True, why=f"已用 {_r * 100:.0f}%")
+            tried.append(f"{_ref.label} 已用 {_r * 100:.0f}%")
+        if ratio is None:
+            # 池里有账号但**一个都取不到凭据** ⇒ 回落默认账号 + 老探针,让下游用它**自己的**
+            # 错误说清(缺凭据/失效)—— ⚠️"没有凭据" ≠ "盘满",别说错是哪种坏。
+            chosen = pan_accounts.default_ref("xunlei", user_id=user_id)
+            ratio = xt.quota_ratio()
+            logger.info("迅雷多账号:池里没有可用凭据 ⇒ 回落默认账号(按老路径继续)")
+        if tried:
+            logger.info("迅雷多账号:候选都满了(%s)⇒ 按盘满处理", ";".join(tried))
     ok_items: list[dict] = []
     failed = skipped = 0
     # 本轮**跳过但没标终态**的条数:单个资源比剩余空间大(盘没满,是这一个包太大)。
@@ -463,7 +509,9 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
                              "share_url": row.our_url, "code": ""})
             logger.info("迅雷群分享:三盘互通命中,复用已有链 %s", row.title)
             continue
-        out = xt.transfer_and_share(row.origin_url)
+        out = xt.transfer_and_share(row.origin_url,
+                                    cookie_key=chosen.cookie_key)
+        # ↑ 落在**选中的那个账号**的盘上(见上面择一那段)
         if out.get("status") == "ok":
             _had = bool(str(row.our_url or ""))
             row.status, row.our_url = "ok", out.get("share_url") or ""

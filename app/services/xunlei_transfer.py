@@ -106,8 +106,12 @@ def _jwt_sub(access_token: str) -> str:
 
 # ---------------------------------------------------------------- 凭据
 
-def _credentials(settings=None) -> dict:
-    """从 cookie_store 读迅雷凭据(加密存的 JSON)。取第一个启用用户的 —— 与 quark 一致。"""
+def _credentials(settings=None, *, cookie_key: str = "xunlei") -> dict:
+    """从 cookie_store 读迅雷凭据(加密存的 JSON)。取第一个启用用户的 —— 与 quark 一致。
+
+    ★ **多账号**(2026-10-14):`cookie_key` 指定读**哪一枚** —— 账号池用 `xunlei#2`
+    这种名字存第二个账号(见 `pan_accounts`)。默认值就是老名字 ⇒ **单账号行为逐字不变**。
+    """
     from sqlalchemy import select
 
     from app.db import get_session_local
@@ -117,7 +121,7 @@ def _credentials(settings=None) -> dict:
     db = get_session_local()()
     try:
         for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
-            raw = get_cookie(db, uid, "xunlei")
+            raw = get_cookie(db, uid, cookie_key)
             if not raw:
                 continue
             try:
@@ -918,7 +922,8 @@ def _intro_file_ids(h: dict, intro_dir: str, *fallbacks: str) -> list[str]:
 
 
 def transfer_and_share(share_url: str, parent_id: str = "", settings=None,
-                       intro_dir: str | None = None) -> dict:
+                       intro_dir: str | None = None, *,
+                       cookie_key: str = "xunlei") -> dict:
     """`pan.xunlei.com/s/xxx` → 转存到我方盘 → 生成我方分享链。
 
     返回结构与 `quark_transfer.transfer_and_share` 对齐:
@@ -938,7 +943,8 @@ def transfer_and_share(share_url: str, parent_id: str = "", settings=None,
             intro_dir = (getattr(settings or get_settings(), "pan_intro_xunlei_dir", "") or "")
         except Exception:                            # noqa: BLE001 - 读不到配置就当作不做
             intro_dir = ""
-    cred = _credentials(settings)
+    # ★ 多账号(2026-10-14):`cookie_key` 指定**落在哪个账号的盘**(默认 = 老名字 ⇒ 行为不变)
+    cred = _credentials(settings, cookie_key=cookie_key)
     if not cred:
         return {"status": "failed", "message": "未配置迅雷凭据(需先扫码登录)"}
     share_id, pass_code = _extract_share_id(share_url)

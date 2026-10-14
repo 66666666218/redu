@@ -9,6 +9,8 @@ os.environ.setdefault("DATABASE_URL", "sqlite://")
 
 import json
 
+from datetime import datetime
+
 import pytest
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import sessionmaker
@@ -295,7 +297,7 @@ def test_transfer_pending_fills_our_share_and_marks_failed(session, monkeypatch)
                          origin_url="u-B1", title="资源乙", status="pending")])
     session.commit()
 
-    def fake_transfer(url, parent_id="", settings=None):
+    def fake_transfer(url, parent_id="", settings=None, **kw):
         if url == "u-A1":
             return {"status": "ok", "share_url": "https://pan.xunlei.com/s/OUR1?pwd=abcd",
                     "code": "abcd", "fid": "F1"}
@@ -321,7 +323,7 @@ def test_transfer_pending_respects_limit(session, monkeypatch) -> None:
                      for i in range(8)])
     session.commit()
     monkeypatch.setattr(xt, "transfer_and_share",
-                        lambda url, parent_id="", settings=None: {"status": "ok",
+                        lambda url, parent_id="", settings=None, **kw: {"status": "ok",
                                                                   "share_url": "s", "code": "", "fid": "f"})
     assert xg.transfer_pending(session, 1, limit=3)["picked"] == 3
 
@@ -390,7 +392,7 @@ def test_transfer_pending_marks_skipped_instead_of_transferring(session, monkeyp
     monkeypatch.setattr(xt, "quota_ratio", lambda cred=None: 0.3)
     called: list[str] = []
     monkeypatch.setattr(xt, "transfer_and_share",
-                        lambda url, parent_id="", settings=None: (
+                        lambda url, parent_id="", settings=None, **kw: (
                             called.append(url) or {"status": "ok", "share_url": "s",
                                                    "code": "", "fid": "f"}))
     out = xg.transfer_pending(session, 1, limit=5, settings=_GateSettings())
@@ -442,7 +444,7 @@ def test_transfer_pending_stops_and_keeps_pending_on_space_error(session, monkey
     session.commit()
     monkeypatch.setattr(xt, "quota_ratio", lambda cred=None: None)     # 探针失效 → 闸门放行
     monkeypatch.setattr(xt, "transfer_and_share",
-                        lambda url, parent_id="", settings=None: {
+                        lambda url, parent_id="", settings=None, **kw: {
                             "status": "failed",
                             "message": "{'error': 'file_space_not_enough', 'error_description': '空间不足'}"})
     out = xg.transfer_pending(session, 1, limit=5, settings=_GateSettings())
@@ -474,7 +476,7 @@ def test_oversized_single_resource_is_skipped_without_stalling_the_batch(
     session.commit()
     monkeypatch.setattr(xt, "quota_ratio", lambda cred=None: None)     # 探针失效 → 闸门放行
 
-    def fake(url, parent_id="", settings=None):
+    def fake(url, parent_id="", settings=None, **kw):
         if url == "u-BIG":
             return {"status": "failed", "code": "space_insufficient",
                     "required_size": 7_563_939_414_460, "free_size": 6_640_745_233_489,
@@ -507,7 +509,7 @@ def test_space_error_with_roomy_quota_is_flagged_as_gate_mismatch(session, monke
     session.commit()
     monkeypatch.setattr(xt, "quota_ratio", lambda cred=None: 0.799)     # 闸门放行
     monkeypatch.setattr(xt, "transfer_and_share",
-                        lambda url, parent_id="", settings=None: {
+                        lambda url, parent_id="", settings=None, **kw: {
                             "status": "failed",
                             "message": "{'error': 'file_space_not_enough', "
                                        "'error_description': '空间不足'}"})
@@ -558,7 +560,7 @@ def test_transfer_pending_marks_own_share_as_skipped_not_failed(session, monkeyp
     session.commit()
     monkeypatch.setattr(xt, "quota_ratio", lambda cred=None: 0.3)
 
-    def fake_transfer(url, parent_id="", settings=None):
+    def fake_transfer(url, parent_id="", settings=None, **kw):
         if url == "u-A":
             return {"status": "failed",
                     "message": "{'error': 'file_restore_own', 'error_description': '不能转存自己的文件'}"}
@@ -901,3 +903,97 @@ class TestTransferFailuresSurface:
         xg.xunlei_group_tick(self._S())
 
         assert sent == [], "闸门正常挡下也告警 → 告警变噪音"
+
+
+# ---------------------- 多账号:一个盘满了就换下一个(2026-10-14)
+#
+# 用户口径:「一个网盘账号内存不足增加多个账号补上」。
+# 改造点:闸门从**账号级**升成**池级** —— 池里挑最空的,满了换下一个,**全满才停**。
+# ⚠️ 单账号(没配池)必须**行为与从前逐字一致**(那条单独钉了一例)。
+
+class TestPanMultiAccount:
+    def _share(self, session, i: int) -> None:
+        from app.db.models import XunleiGroupShare
+        session.add(XunleiGroupShare(user_id=1, group_id="g", group_name="群",
+                                     share_id=f"s{i}", origin_url=f"https://pan.xunlei.com/s/{i}",
+                                     title=f"资源{i}", status="pending",
+                                     msg_time=datetime.now()))
+        session.commit()
+
+    def _wire(self, monkeypatch, pool: list[tuple[str, str, float | None]]):
+        """`pool` = [(label, cookie_key, ratio)];ratio=None 表示"探不到"。返回记录用的容器。"""
+        import json as _json
+
+        from app.services import pan_accounts
+        from app.services import xunlei_transfer as xt
+
+        rec = {"transfer_keys": [], "probed": []}
+        monkeypatch.setattr(pan_accounts, "_load", lambda s: {
+            "xunlei": [{"label": lb, "cookie_key": ck, "user_id": 1,
+                        "last_ratio": None, "last_check_at": "", "full_until": "", "note": ""}
+                       for lb, ck, _ in pool]})
+        monkeypatch.setattr(pan_accounts, "_save", lambda s, d: True)
+        # ⚠️ 凭据读取**走生产那一处**(`xt._credentials`),别打别的桩 —— 否则就是"替身方言不同"
+        monkeypatch.setattr(xt, "_credentials",
+                            lambda settings=None, *, cookie_key="xunlei":
+                            {"refresh_token": "t", "tag": cookie_key})
+        ratios = {ck: r for _, ck, r in pool}
+        monkeypatch.setattr(xt, "quota_ratio",
+                            lambda cred=None: rec["probed"].append((cred or {}).get("tag"))
+                            or ratios.get((cred or {}).get("tag")))
+
+        def _tas(share_url, parent_id="", settings=None, intro_dir=None, *, cookie_key="xunlei"):
+            rec["transfer_keys"].append(cookie_key)
+            return {"status": "ok", "share_url": f"https://pan.xunlei.com/s/OUR-{cookie_key}",
+                    "code": "", "fid": "f"}
+        monkeypatch.setattr(xt, "transfer_and_share", _tas)
+        return rec
+
+    def test_第一个满了就换第二个_转存落在第二个账号上(self, session, monkeypatch) -> None:
+        """★ **核心断言**:不只是"没停摆",而是**转存真的走了第二个账号的凭据**。"""
+        from app.services import xunlei_group as xg
+
+        self._share(session, 1)
+        rec = self._wire(monkeypatch, [("主号", "xunlei", 0.95), ("小号", "xunlei#2", 0.30)])
+        out = xg.transfer_pending(session, 1, limit=1, settings=_S())
+        assert out["status"] != "disk_full", out
+        assert rec["transfer_keys"] == ["xunlei#2"], f"该换到第二号:{rec['transfer_keys']}"
+        assert rec["probed"] == ["xunlei", "xunlei#2"], "先把主号探满,再探第二号"
+
+    def test_全满才真的停_而且说清是谁满的(self, session, monkeypatch) -> None:
+        from app.services import xunlei_group as xg
+
+        self._share(session, 1)
+        rec = self._wire(monkeypatch, [("主号", "xunlei", 0.95), ("小号", "xunlei#2", 0.99)])
+        out = xg.transfer_pending(session, 1, limit=1, settings=_S())
+        assert out["status"] == "disk_full", out
+        assert rec["transfer_keys"] == [], "全满就不该转存"
+        assert rec["probed"] == ["xunlei", "xunlei#2"], "两个账号都该被探过(才知道全满)"
+        # ⚠️ 刻意**不动**那条既有的盘满返回(它带着 gate_mismatch 等键)—— "试过谁"
+        #    落在日志里(多账号:候选都满了…),不再为文案多写一份返回。
+
+    def test_挑最空的那个_不是捡到就用(self, session, monkeypatch) -> None:
+        """择一按**已知使用率**(最空优先):主号 0.8、小号 0.2 ⇒ 先用小号。"""
+        from app.services import pan_accounts
+        from app.services import xunlei_group as xg
+
+        self._share(session, 1)
+        rec = self._wire(monkeypatch, [("主号", "xunlei", 0.80), ("小号", "xunlei#2", 0.20)])
+        monkeypatch.setattr(pan_accounts, "_load", lambda s: {"xunlei": [
+            {"label": "主号", "cookie_key": "xunlei", "user_id": 1, "last_ratio": 0.80,
+             "last_check_at": "", "full_until": "", "note": ""},
+            {"label": "小号", "cookie_key": "xunlei#2", "user_id": 1, "last_ratio": 0.20,
+             "last_check_at": "", "full_until": "", "note": ""}]})
+        xg.transfer_pending(session, 1, limit=1, settings=_S())
+        assert rec["transfer_keys"] == ["xunlei#2"], f"该先挑最空的:{rec['transfer_keys']}"
+
+    def test_没配池时单账号行为与从前逐字一致(self, session, monkeypatch) -> None:
+        """⚠️ 这条最要紧:**没配池**(单账号)时,cookie_key 必须还是老的 `xunlei`。"""
+        from app.services import xunlei_group as xg
+
+        self._share(session, 1)
+        rec = self._wire(monkeypatch, [("默认", "xunlei", 0.30)])
+        monkeypatch.setattr("app.services.pan_accounts._load", lambda s: {})      # 池 = 空
+        out = xg.transfer_pending(session, 1, limit=1, settings=_S())
+        assert out["status"] != "disk_full"
+        assert rec["transfer_keys"] == ["xunlei"], f"单账号不许换名字:{rec['transfer_keys']}"

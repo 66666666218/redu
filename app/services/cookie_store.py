@@ -106,7 +106,10 @@ def get_cookies(db: Session, user_id: int, settings: object | None = None) -> di
 
 def set_cookie(db: Session, user_id: int, platform: str, cookie: str) -> UserCookie:
     """保存该用户某平台 Cookie(加密;已存在则更新)。"""
-    if platform not in PLATFORMS:
+    # ★ **多账号**(2026-10-14):允许 `xunlei#2` 这种"平台#序号"形态 ——
+    #   网盘账号池要存第二个账号的凭据(见 `pan_accounts`)。
+    #   ⚠️ 校验的是**基础平台名**:别把 `xunlei#2` 当成新平台,那会让 `PLATFORMS` 失去意义。
+    if platform.split("#", 1)[0] not in PLATFORMS:
         raise ValueError(f"不支持的平台:{platform}")
     row = db.scalar(select(UserCookie).where(UserCookie.user_id == user_id, UserCookie.platform == platform))
     if row is None:
