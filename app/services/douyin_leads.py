@@ -803,31 +803,6 @@ def _save_leads(session, user_id: int, leads: list[dict]) -> int:
     return n
 
 
-def _kouling_line(ld: dict) -> str:
-    """把解析/转存结果渲染成卡片上的一行(让运营一眼看出这条线索值不值钱)。"""
-    info = ld.get("kouling") or {}
-    kind, status = info.get("kind"), info.get("status")
-    if kind == "share" and status == "ok":
-        return f"✅ **已自动转存进你的盘**,我方分享链:[▶ 点这里打开]({info.get('our_url') or ''})"
-    if kind == "share" and status == "already":
-        return "✅ 之前已转存过(库里已有)"
-    if kind == "share" and status == "over_budget":
-        return f"⏸ 本轮转存额度用完,未搬(原链 {info.get('share_url') or ''})"
-    if kind == "share" and status == "disk_full":
-        return f"⏸ 盘满未搬({info.get('message') or ''}) —— 清出空间后会再试。原链:{info.get('share_url') or ''}"
-    if kind == "share" and status == "skipped":
-        return f"⏸ 未搬({info.get('message') or '被闸门挡下'}) —— 原链:{info.get('share_url') or ''}"
-    if kind == "share" and status == "failed":
-        return f"⚠️ 转存失败:{info.get('message') or ''}"
-    if kind == "group":
-        return "👥 指向**群组**,已加群(群里的资源由群采集自动收)"
-    if kind == "none":
-        return "· 未解析出资源(可能只是剧名/普通词)"
-    if kind == "error":
-        return f"⚠️ **没能解析/转存**(通常是我方迅雷登录态失效,不是你网络问题):`{info.get('message') or ''}`"
-    if kind == "off":
-        return "· 自动转存已关闭,仅作线索"
-    return ""
 
 
 #: `咐置 X 叩苓` / `/咐置 X 叩苓` —— **变体字**("复制 X 口令",`咐置`/`叩苓`
@@ -1056,43 +1031,21 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin") -> bool:
         # ★ **口令没解出来时的第二来源:资源库里现成的那条**(2026-10-11)。
         #   有它,标题就**点得动** —— 与公众号卡片同形(那边也是"抽到链就挂标题上")。
         _lib = ld.get("library") or {}
-        our = _md_safe(info.get("our_url") or _lib.get("link") or "")
+        #: 这条线索**能用的那条链**(我方链优先,其次库里现成的那条)。它同时决定两列:
+        #: 「作品」列挂它就**可点**,「资源」列写它落在**哪个盘**。
+        _raw_our = info.get("our_url") or _lib.get("link") or ""
+        our = _md_safe(_raw_our)
         work = f"[{shown}]({our})" if our else shown
         # 转发量**独立成列**(原来并进作品列,六列版式下挪出来)。没有就不显示,
         # 不拿 0 冒充有数据 —— 口径见 `DouyinLead` 的注释(它是**别人视频**的转发量)。
         sc = int(ld.get("share_count") or 0)
-        # 「资源」列:**纯文本的网盘名**(不带链接)—— 与「作品」同一口径:
-        # 「资源**不要直接是链接形式**」。链接统一由标题承担,这正是**公众号卡片的做法**
-        # (那边资源列写 `🔴夸克` 也是纯文本)。没搬的写明**为什么**。
-        pan = _pan_name(info.get("our_url") or info.get("share_url") or "")
-        if info.get("kind") == "share" and info.get("status") == "ok":
-            res = f"🔴{pan or '已转存'}"
-        elif info.get("status") == "already":
-            # ⚠️ **这一支要排在 `_lib` 前面**(2026-10-14):"以前搬成过"里既有本地链、
-            #    也有**远程夸克链**同步回来的(`quark_link_pull`)—— 都是**我方自己搬的**,
-            #    该说「转过」而不是「库里已有」(后者是复用别人标题下的那份)。
-            res = f"🔴{pan or '已转存'}(转过)"
-        elif _lib:
-            # ★ **库里已有现成链** ⇒ 用**我方链**,标题直接可点(与公众号同形)。
-            # 口径照旧(见 `_pan_name`):资源列写**盘名**,不写"我方链"那三个字。
-            # 「(库里已有)」是为了说清**这条不是我方刚搬的**,而是复用库里那份 ——
-            # 免得跟"本轮真的转存了"混在一起(本仓"要说清来源"那条)。
-            res = f"🔴{_pan_name(_lib.get('link') or '') or '已入库'}(库里已有)"
-        elif info.get("kind") == "group":
-            res = "👥已加群"
-        elif info.get("status") == "disk_full":
-            res = f"⏸{pan or '盘'}(网盘已满)"
-        elif info.get("status") == "over_budget":
-            res = f"⏸{pan or '盘'}(本轮额度)"
-        elif info.get("status") == "skipped":
-            res = f"⏸{pan or '盘'}(被挡下)"
-        else:
-            # ⚠️ **口径变更(2026-10-14,用户原话)**:**不再解释"哪个解开哪个没解开"**。
-            # 原来这里会写「📋口令未解析」(2026-10-11 的口径:让人知道"这条还有救")——
-            # 用户现在要的是「**有一个解开的就用哪个解开的链接**」,也就是:
-            # **拿到链就挂链**(见上面 `our = info.our_url or _lib.link`),拿不到就安静地空着,
-            # 不用在客户群里交代"我们在哪个平台解失败了"(那是我们的内部状态,不是客户要的信息)。
-            res = "—"
+        # 「资源」列 = **只写盘名**(用户口径 2026-10-14:「**这些提醒没必要可以去掉**」)。
+        # ⚠️ **口径变更**:不再写「(转过)/(库里已有)/👥已加群/⏸网盘已满」这类注释 ——
+        # 那些是**我们的内部状态**(谁搬的、为什么没搬成),客户只需要"这条能不能取用、在哪个盘"。
+        # 于是这一列只剩两种值:**有链 ⇒ `🔴夸克/🔴迅雷/🔴百度`;没链 ⇒ `—`**。
+        # 链接仍统一由「作品」列承担(资源列**不带链接**,与 10-04 口径一致)。
+        _pan = _pan_name(_raw_our)
+        res = f"🔴{_pan}" if _pan else "—"
         elements.append(_col_set_row([
             (author, 3),
             (work, 5),

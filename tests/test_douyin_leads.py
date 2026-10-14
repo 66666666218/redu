@@ -209,9 +209,6 @@ def test_apply_kouling_transfers_share_and_joins_group(session, monkeypatch) -> 
     assert out[0]["kouling"]["status"] == "ok" and "OUR" in out[0]["kouling"]["our_url"]
     assert out[1]["kouling"]["kind"] == "group" and out[1]["kouling"]["group_id"] == "1550069837"
     assert out[2]["kouling"] == {"kind": "none"}
-    assert "已自动转存" in dl._kouling_line(out[0])
-    assert "群组" in dl._kouling_line(out[1])
-    assert "未解析出资源" in dl._kouling_line(out[2])
 
 
 def test_apply_kouling_respects_budget_and_skips_already_done(session, monkeypatch) -> None:
@@ -229,7 +226,9 @@ def test_apply_kouling_respects_budget_and_skips_already_done(session, monkeypat
     assert out[0]["kouling"]["status"] == "already"          # 已搬过 → 跳过
     assert out[1]["kouling"]["status"] == "ok"               # 额度内 → 真搬
     assert out[2]["kouling"]["status"] == "over_budget"      # 超额度 → 只解析
-    assert "额度用完" in dl._kouling_line(out[2])
+    # ⚠️ 原来这里还断言 `_kouling_line()` 里写着「额度用完」—— 那个渲染函数
+    #    2026-10-14 随"卡片不再解释内部状态"一起删了(它当时已零调用,只有单测在引),
+    #    所以这里只钉**状态**(那才是这条链的产出)。
 
 
 def test_apply_kouling_disabled_only_annotates(session, monkeypatch) -> None:
@@ -458,8 +457,9 @@ def test_apply_kouling_survives_dead_xunlei_credentials(session, monkeypatch) ->
     out = dl.apply_kouling(_leads("三岁宝库", "白泽的梦"), session, 1, _Settings())
     assert len(out) == 2                                   # 线索一条没丢
     assert all(x["kouling"]["kind"] == "error" for x in out)
-    line = dl._kouling_line(out[0])
-    assert "迅雷登录态失效" in line and "invalid_grant" in line
+    # ⚠️ 断言的是**条目里的原因**(2026-10-14 起卡片不再渲染这种内部状态,
+    #    `_kouling_line` 已删) —— 但"失败要说得出为什么"这条没变。
+    assert "invalid_grant" in out[0]["kouling"]["message"]
 
 
 # ---------------------------------------------------------------- 线索落库(结算归因)
@@ -642,17 +642,18 @@ class TestResourceColumnShowsPanName:
         assert "夸克" in card and "我方链" not in card
         assert "https://pan.quark.cn/s/OUR" in card        # 链接仍可点
 
-    def test_disk_full_says_why(self, monkeypatch) -> None:
-        """⚠️ 盘满是最该让人看到的一种 —— 只有人能清。"""
-        card = self._render(monkeypatch, kind="share", status="disk_full",
-                            share_url="https://pan.quark.cn/s/S")
-        assert "网盘已满" in card, f"盘满却没说原因:{card[:200]}"
+    def test_没搬成的行只写盘名或破折号_不再解释原因(self, monkeypatch) -> None:
+        """⚠️ **口径变更(2026-10-14,用户原话:「这些提醒没必要可以去掉」)**。
 
-    def test_over_budget_and_skipped_have_distinct_wording(self, monkeypatch) -> None:
-        assert "本轮额度" in self._render(monkeypatch, kind="share", status="over_budget",
-                                        share_url="https://pan.xunlei.com/s/S")
-        assert "被挡下" in self._render(monkeypatch, kind="share", status="skipped",
-                                      share_url="https://pan.baidu.com/s/1S")
+        原来这三种**各有措辞**(`⏸…(网盘已满)` / `(本轮额度)` / `(被挡下)`)—— 目的是
+        "让运营者知道为什么没搬成"。现在卡片**只回答客户的问题**:这条能取用吗、在哪个盘?
+        ⇒ 搬成了写盘名,没搬成写 `—`;至于"是盘满还是被挡",那是我们内部该看运行记录的事。
+        """
+        for st in ("disk_full", "over_budget", "skipped"):
+            card = self._render(monkeypatch, kind="share", status=st,
+                                share_url="https://pan.quark.cn/s/S")
+            for word in ("网盘已满", "本轮额度", "被挡下", "未解析", "转过", "库里已有"):
+                assert word not in card, f"{st} 不该再出现「{word}」:{card[:160]}"
 
 
 class TestSixColumnCard:
@@ -1420,7 +1421,8 @@ class TestMovedLinkWins:
         work = row["columns"][1]["elements"][0]["text"]["content"]
         res = row["columns"][2]["elements"][0]["text"]["content"]
         assert "](" in work and "pan.quark.cn/s/MOVED" in work     # 标题可点 → 我方链
-        assert res == "🔴夸克(转过)"
+        # 2026-10-14 口径再收一次:资源列**只有盘名**,连「(转过)」也不写
+        assert res == "🔴夸克"
 
     def test_解不开的口令只留一个破折号(self, monkeypatch) -> None:
         """⚠️ **口径变更**:不再写「📋口令未解析」—— 那是我们内部状态,不是客户要的信息。"""
