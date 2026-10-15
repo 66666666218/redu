@@ -336,6 +336,31 @@ class Settings(BaseSettings):
     #: 但"能用"比"快"重要,而且慢正好合上"低频"那条纪律。
     #: ⚠️ 设 `False` 只为离线调试协议路,**别在生产开**。
     xhs_prefer_page: bool = True
+    #: ---- ★★★ **小红书:CDP 路**(2026-10-15,比页面路"更像人"的那一层)----
+    #: 页面路是 Playwright **自己 launch** 浏览器,实测 `navigator.webdriver === true`
+    #: (无头时 UA 还写着 `HeadlessChrome/`)。而处罚通知写的正是「与真人操作习惯不一样」
+    #: 「涉及使用第三方脚本或者 AI 工具进行浏览」—— 说的就是"这不是人在用浏览器"。
+    #: CDP 路反过来:**浏览器由人自己开**(专用档案,手动登录一次),我们只**接管**它。
+    #: 实测(2026-10-15,零小红书请求):
+    #:   | 怎么进的浏览器 | `navigator.webdriver` |
+    #:   |---|---|
+    #:   | Playwright 自己 launch(页面路) | `True` |
+    #:   | **CDP 接管(这条路)**            | **`False`** |
+    #:
+    #: 用法(三步,顺序不能反):
+    #:   ① `python tools/xhs_cdp.py launch`  —— 开专用档案的 Edge(**人手动登录一次小红书**);
+    #:   ② 那个窗口**留着别关**(它就是"你真人在用的浏览器");
+    #:   ③ 之后取数走 `xhs_cdp_source.search([...])`。
+    #: ⚠️ **Chrome/Edge ≥136 起禁止用默认 profile 开 `--remote-debugging-port`**
+    #:   (防 cookie 被 CDP 偷)⇒ 必须用**专用档案目录**,并在里面人工登录。
+    #: ⚠️ **我们绝不自己去 launch 那个浏览器** —— 一旦由 Playwright 启动,
+    #:   `webdriver` 就变回 `True`,这条路等于白做(有源码级守卫)。
+    xhs_cdp_url: str = "http://127.0.0.1:9222"
+    #: CDP 专用档案目录(相对仓库根;`data/` 已 gitignore ⇒ 登录态不进仓库)。
+    xhs_cdp_user_data_dir: str = "data/xhs_cdp_profile"
+    #: 词与词之间的**强制休眠**(毫秒)。⚠️ 有下限(见 `xhs_cdp_source._MIN_BETWEEN_MS`):
+    #: 这条路的价值是"像人",连发就把唯一的优势丢掉了。
+    xhs_cdp_between_kw_ms: int = 15000
     #: ---- 小红书**纯协议**的签名格式(2026-10-10 实测定的)----
     #: 实测矩阵(同一个词、同一份 cookie、一次一个变量):
     #:
