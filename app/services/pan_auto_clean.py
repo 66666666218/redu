@@ -109,6 +109,34 @@ def clean_quark(db: Session, user_id: int, settings, *, dry_run: bool, left: int
     if not intro:
         logger.warning("夸克自动去重:简介保护名单为**空**(简介目录取不到或本来就是空的)"
                        "—— 本轮简介文件不在保护范围内")
+    # ★★ **整包重复**(2026-10-16):上面那条抓的是**跨家**的同名同大小**文件**;
+    #    而真占空间的是**同一个家下面的 `X` 与 `X(1)`** —— 夸克给重名**目录**加后缀 ⇒
+    #    **整个资源包多一份**(实测一轮删掉 24 份 / 44.48 GiB)。
+    #    ⚠️ 那批重复 `classify` **一条都抓不到**:它们的目录名不同,不在"同一家/同一目录"下。
+    #    ⚠️ 放在**上面那条之后**:先删文件级重复(便宜),再动整包(要对每个候选列目录)。
+    #    ⚠️ 它**当场列目录**(不吃快照)—— "删"要用当前事实。
+    try:
+        pkg = quark_dup.build_package_plan(
+            qt, protect_dirs=(getattr(settings, "pan_intro_quark_dir", "") or "/监听宣传",))
+    except Exception as exc:  # noqa: BLE001 - 整包那条扫不动不该拖垮上面那条已经删好的
+        logger.warning("夸克整包去重:扫描失败 %s: %s", type(exc).__name__, str(exc)[:110])
+        pkg = {}
+    pkg_groups = list(pkg.get("groups") or [])
+    out["pkg_groups"] = int(pkg.get("n_groups") or 0)
+    out["pkg_planned"] = int(pkg.get("n_drop") or 0)
+    out["pkg_bytes"] = int(pkg.get("bytes") or 0)
+    #: 两个去重**共用**同一个硬上限(`left`):整包那一份也算一次删除。
+    room = max(0, left - int(out["deleted"]))
+    take, blocked_pkg = [], 0
+    used = 0
+    for g in pkg_groups:
+        if used + len(g["drop"]) > room:
+            blocked_pkg += 1
+            continue
+        take.append(g)
+        used += len(g["drop"])
+    if blocked_pkg:
+        out["pkg_blocked_by_cap"] = blocked_pkg
     if dry_run:
         out["deleted"] = 0
         out["dry_run"] = True
@@ -119,6 +147,13 @@ def clean_quark(db: Session, user_id: int, settings, *, dry_run: bool, left: int
     out["freed"] = int(res.get("bytes") or 0)
     if res.get("failed"):
         out["errors"] = res["failed"][:3]
+    if take:
+        res2 = quark_dup.apply_package_plan(qt, {"groups": take, "bytes": out["pkg_bytes"]},
+                                            to_recycle=True)
+        out["pkg_deleted"] = int(res2.get("deleted") or 0)
+        out["freed"] = int(out["freed"]) + int(res2.get("bytes") or 0)
+        if res2.get("failed"):
+            out["errors"] = (out.get("errors") or []) + list(res2["failed"])[:3]
     return out
 
 
@@ -233,6 +268,13 @@ def _fmt(p: dict) -> str:
             bits.append(f"省{int(p['freed']) / 2 ** 30:.2f}GiB")
         if p.get("blocked_by_cap"):
             bits.append(f"撞上限留下{p['blocked_by_cap']}条")
+        #: ★ **整包重复**单独报(2026-10-16):它与上面的"文件级去重"是**两条判据**,
+        #: 合在一起就再也看不出是哪一层在删(与"盘链级 vs 资源级复用"同一条纪律)。
+        if p.get("pkg_groups"):
+            bits.append(f"**整包重复{p['pkg_groups']}组**/删{p.get('pkg_deleted', 0)}份"
+                        f"({int(p.get('pkg_bytes') or 0) / 2 ** 30:.2f}GiB)")
+        if p.get("pkg_blocked_by_cap"):
+            bits.append(f"整包撞上限留下{p['pkg_blocked_by_cap']}组")
         if p.get("blocked_by_limit"):
             bits.append(f"撞限流留下{p['blocked_by_limit']}条")
     if p.get("errors"):
