@@ -741,6 +741,11 @@ class DiscoveredPanLink(Base):
     status: Mapped[str] = mapped_column(String(16), default="pending")  # pending/ok/failed/skipped
     message: Mapped[str] = mapped_column(String(200), default="")
     our_url: Mapped[str] = mapped_column(String(500), default="")       # **我方**分享链
+    #: ★★★ **原帖的发布时间**(2026-10-16,用户口径「资源不在多,**在新在精**」)。
+    #: 贴吧那条**早就把发帖时间抓到手了**(候选里带 `publish_at`),而这张表**没有这个字段**
+    #: ⇒ **抓到了又丢掉**。没有它就**判不了"这条链有多新"** —— `found_at` 只是
+    #: "**我们发现它的时刻**"(热榜那条纪律:抓到的时刻 ≠ 内容发布的时刻,老帖永远显示"刚刚")。
+    publish_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     pass_code: Mapped[str] = mapped_column(String(32), default="")
     found_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 

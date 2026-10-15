@@ -780,3 +780,46 @@ class TestSpecificityGuard:
         session.commit()
         hit = pd.already_have(session, 1, "《左道陈家村》全集完整版 速存")
         assert hit and hit["my_link"] == "https://pan.quark.cn/s/OURS-LEFT"
+
+
+# ---------------------------------------------------------------------------
+# ★★ 「只搬新的」(2026-10-16,用户口径「资源不在多,**在新在精**」)
+#
+# 判据是**原帖发布时间**(`discovered_pan_links.publish_at`)—— 不是 `found_at`
+# (那只是"我们发现的时刻",老帖永远显示"刚刚")。三个源(贴吧/微博/知乎)本来就
+# **把它抓到手了**,而表里没这一列 ⇒ 抓到了又丢掉;2026-10-16 才补上。
+
+
+def test_太老的候选不搬_判不了就放行() -> None:
+    from datetime import datetime, timedelta
+
+    from app.services import pan_discovery as pd
+
+    class _On:
+        pan_discovery_max_age_days = 14
+
+    class _Off:
+        pan_discovery_max_age_days = 0
+
+    old = datetime.now() - timedelta(days=30)
+    fresh = datetime.now() - timedelta(days=1)
+    assert pd._too_old(old, _On()), "30 天前的必须被挡"
+    assert "太老" in pd._too_old(old, _On()), "运行记录里要能读懂是为什么"
+    assert pd._too_old(fresh, _On()) == "", "1 天前的必须放行"
+    assert pd._too_old(None, _On()) == "", \
+        "**判不了必须放行** —— 不少源不给时间,拿'不知道'当'老'会把整条链堵死"
+    assert pd._too_old(old, _Off()) == "", "闸门关着(0)时一律放行"
+
+
+def test_epoch_与文本两种时间形状都认() -> None:
+    """各平台给的"发布时间"有 **epoch 秒**与**文本**两种形状 ⇒ 交给 `hot_time.parse_published`。"""
+    from datetime import datetime, timedelta
+
+    from app.services import pan_discovery as pd
+
+    class _On:
+        pan_discovery_max_age_days = 7
+
+    long_ago = int((datetime.now() - timedelta(days=60)).timestamp())
+    assert pd._too_old(long_ago, _On()), "epoch 形状没认出来"
+    assert pd._too_old("2019-01-01 00:00:00", _On()), "文本形状没认出来"

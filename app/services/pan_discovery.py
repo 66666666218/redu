@@ -597,9 +597,48 @@ def _search_words(session, user_id: int, top: int, settings) -> list[str]:
     return out[:top]
 
 
+def _too_old(published, settings=None) -> str:
+    """这条候选**太老了吗**?太老返回一句原因(给 `runs` 看),否则返回空串。
+
+    ★ 用户口径(2026-10-16):「**资源不在多,在新在精**」。
+    判据用**原帖发布时间**(不是 `found_at` —— 那只是"我们发现的时刻",老帖永远显示"刚刚";
+    见 memory「热榜要区分抓到的时刻与内容发布的时刻」)。
+
+    ⚠️ **判不了就放行**:不少源不给时间 ⇒ 拿"不知道"当"老"会把整条链堵死。
+    ⚠️ 期限 `0` = **关掉这条闸门**(默认如此 —— 换算法前先看清数据)。
+    """
+    if settings is None:
+        from config.settings import get_settings
+
+        settings = get_settings()
+    days = int(getattr(settings, "pan_discovery_max_age_days", 0) or 0)
+    if days <= 0:
+        return ""
+    from app.services.hot_time import parse_published
+
+    #: ⚠️⚠️ **`datetime` 要单独认**(2026-10-16 被自己的测试当场抓到):
+    #: `parse_published` 只认 **int/float/str**,对 `datetime` 返回 **None** ——
+    #: 而从库里读出来的 `publish_at` **就是 datetime** ⇒ 闸门会**对它永远放行**,
+    #: 也就是"这道闸门只挡当场抓到的候选、挡不住存量"。**静默失效**,最坏的那种。
+    from datetime import datetime as _dt
+
+    dt = published if isinstance(published, _dt) else parse_published(published)
+    if dt is None:
+        return ""                      #: **不知道 ⇒ 放行**(见上)
+    from datetime import datetime, timedelta
+
+    if dt < datetime.now() - timedelta(days=days):
+        return f"太老(发布于 {dt:%Y-%m-%d},超过 {days} 天)"
+    return ""
+
+
 def sync(session, user_id: int, settings=None) -> dict:
     """找一轮 → 转存 → 入库。返回 `{"status", "found", "ok", "skipped", "failed", "items"}`。"""
     from config.settings import get_settings
+
+    #: 时间归一化(**单一来源**):各平台给的"发布时间"有 **epoch 与多种文本**两种形状,
+    #: 别在这里另写一份解析(见 `hot_time.parse_published`)。
+    from app.services.hot_time import parse_published
 
     settings = settings or get_settings()
     top = int(getattr(settings, "pan_discovery_keywords", 5) or 5)
@@ -639,6 +678,7 @@ def sync(session, user_id: int, settings=None) -> dict:
     fresh_budget = int(getattr(settings, "pan_discovery_fresh_limit", 3) or 0)
     backlog_urls = {c["origin_url"] for c in backlog}
     ok = skipped = failed = pending = 0
+    skipped_old = 0                #: ★ 「**太老没搬**」单独计数(见 `_too_old`)——不能混进 `skipped`
     reused = 0                     # **复用了别的盘已有的链**(省下一次转存)
     items: list[dict] = []
     for c in cands:
@@ -648,8 +688,16 @@ def sync(session, user_id: int, settings=None) -> dict:
         # **三盘互通**(2026-10-05 用户口径):先看**别的网盘**有没有这个资源。
         # 有 ⇒ **不再转存**,直接把已有那条链推出去 —— 省空间、省额度、少一次写操作。
         # ⚠️ 这一步**不花 transfer 额度**(没调转存接口),所以放在额度判断之前。
-        have = already_have(session, user_id, c["title"])
-        if have:
+        #: ★★ **只搬新的**(2026-10-16,用户口径「资源不在多,**在新在精**」)。
+        #: 发布时间比 `pan_discovery_max_age_days` 还老 ⇒ **不搬**(标 `skipped` 并写明"太老",
+        #: 与"库里已有"**分开记** —— 两者处置不一样)。⚠️ **判不了就放行**:不少源不给时间,
+        #: 拿"不知道"当"老"会把整条链堵死。
+        _too = _too_old(c.get("publish_at"), settings)
+        have = None if _too else already_have(session, user_id, c["title"])
+        if _too:
+            status, message, our, code = "skipped", _too, "", ""
+            skipped_old += 1
+        elif have:
             status = "ok"
             message = f"库里已有(跳过转存,直接复用该盘):{str(have.get('pan_url') or '')[:60]}"
             our, code = str(have.get("my_link") or ""), ""
@@ -680,6 +728,12 @@ def sync(session, user_id: int, settings=None) -> dict:
             exist[c["origin_url"]] = row
         row.platform, row.title = c["platform"], c["title"][:255]
         row.author, row.source_url = c["author"], c["source_url"]
+        #: ★ **原帖发布时间**(2026-10-16):**只往有值的方向写** —— 与"读数只许往高走"同一条纪律
+        #: (不知道就别拿空值盖掉已知的)。`parse_published` 认 **epoch 与各平台文本**两种形状,
+        #: 认不出**返回 None 是合法的**(不少源就是不给时间),别当异常。
+        _pub = parse_published(c.get("publish_at"))
+        if _pub and not row.publish_at:
+            row.publish_at = _pub
         row.status, row.message = status, message[:200]
         row.our_url, row.pass_code = our[:500], code[:32]
         # ★★ **必须是 `commit()`,不能是 `flush()`**(2026-10-08)。
@@ -725,7 +779,10 @@ def sync(session, user_id: int, settings=None) -> dict:
     return {"status": "ok", "found": len(cands), "ok": ok, "skipped": skipped,
             "pending": pending, "failed": failed, "reused": reused, "items": items,
             "backlog_size": len(backlog),        # 本轮开始时**排队等搬**的存量
-            "backlog_left": backlog_left}        # 本轮结束时**仍**在排队的
+            "backlog_left": backlog_left,       # 本轮结束时**仍**在排队的
+            #: ★ 「太老没搬」进运行记录 —— 否则开了闸门之后"候选一大堆、搬的很少"
+            #: 会被读成"链子坏了"(与"积压必须说出来"同一条纪律)。
+            "skipped_old": skipped_old}
 
 
 def push_items(items: list[dict], settings) -> bool:
@@ -791,6 +848,10 @@ def pan_discovery_tick(settings=None) -> int:
                 _record_run(db, uid, "pan_discovery", "success",
                             f"候选{out.get('found', 0)} 转存{out.get('ok', 0)} "
                             f"复用{out.get('reused', 0)} **积压{out.get('backlog_left', 0)}**"
+                            #: ★ 「**太老没搬**」必须看得见(2026-10-16):否则开了"只搬新的"
+                            #: 这道闸门之后,"候选一大堆、搬的很少"会被读成"链子坏了"。
+                            + (f" **太老跳过{out['skipped_old']}**"
+                               if out.get("skipped_old") else "")
                             + (f" 卡片{'已推' if pushed else '未推'}" if pushed is not None else ""))
                 threshold = int(getattr(settings, "pan_discovery_backlog_alert", 60) or 0)
                 left = int(out.get("backlog_left") or 0)
