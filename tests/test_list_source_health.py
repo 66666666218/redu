@@ -168,7 +168,9 @@ class TestReadCountSource:
 
     用户当天的报障是「**阅读还是没修好**」,而这份体检当时**全绿** —— 它只测"源能不能答"。
     阅读数是另一个维度:WeRSS / 读书平台的返回结构里**没有** `read_num` 字段,
-    只有自研 `wemp` 带。⇒ 只要 wemp 不可用,那一列就只能是 `—`,而"全绿"会让人继续以为没问题。
+    只有自研 `wemp` **声称**带(⚠️ **2026-10-15 查实:这件事至今未验证** ——
+    它"首次解析打出真实字段名"那条日志**一次都没出现过**,见 `chain_health._WEMP_READ_UNVERIFIED`)。
+    ⇒ 只要 wemp 不可用,那一列就只能是 `—`,而"全绿"会让人继续以为没问题。
     """
 
     def _row(self, session):
@@ -181,7 +183,7 @@ class TestReadCountSource:
         row = self._row(session)
         assert row["level"] == ch.YELLOW, "报绿就是假绿:源活着但根本不送阅读数"
         assert "只能是 `—`" in row["detail"]
-        assert "wemp" in row["detail"], "要指出唯一带阅读数的那条路"
+        assert "wemp" in row["detail"], "要指出**声称**带阅读数的那条路(而不是说成已成立的事实)"
 
     def test_wemp配了但凭据死了不许报绿(self, session, monkeypatch) -> None:
         """⚠️ **交叉验活**:只按"配了没有"判绿,就会在 wemp 已死时报一行自相矛盾的绿。"""
@@ -401,3 +403,48 @@ class Test单源也要熔断:
 
         S.ask_platform(_WithReads(), "MP_WXS_1", stats={})
         assert seen == {"with_reads": True}
+
+
+# ---------------------------------------------------------------------------
+# ★★★ 阅读数文案**不许误导**(2026-10-15,用户口径「审查一下那些容易误导的」)
+#
+# 审出**四处**,每一处都会**把人指向错误的动作**(照做白跑):
+#   ① 「唯一带阅读数的是自研 wemp…**配好它的凭据即可**」—— 把**未验证**的事写成了结论;
+#   ② 「**唯一**」在同一份体检里出现**两次**(微信读书 App / wemp 各一次)⇒ 两行互相打架;
+#   ③ 「恢复与否只看 `reads(src=…)`」—— 那个计数**只在 ≥2 个源都答上话时才写**,
+#      而现在是**单源** ⇒ **它永远不会出现**,一条**永远等不到**的判据;
+#   ④ 文档里「凭据已死,只能人工重新扫码」—— 而**现在**返回的是 `200013 限流`(会话是好的)。
+
+
+class Test阅读数文案不许误导:
+    def _row(self, session):
+        return _by_name(ch.check_list_sources(session))["公众号·阅读数来源"]
+
+    def test_被限流时要写明未验证与能用得出的判据(self, session, monkeypatch) -> None:
+        from app.services.wechat.wemp_client import WempRateLimited
+
+        _bench(session)
+        _patch(monkeypatch, [("wemp", _Be(exc=WempRateLimited("频率限制(200013)")))])
+        detail = self._row(session)["detail"]
+        assert "未验证" in detail, "wemp 带阅读数这件事**必须标明未验证**,不许写成已成立"
+        assert "appmsgpublish 文章字段" in detail, "要给一个**真能等到**的判据(首次解析那条日志)"
+        assert "reads(src=" in detail, "要点明旧判据在**单源**时永远不会出现"
+
+    def test_不许再把动作指死(self, session, monkeypatch) -> None:
+        """★ 「配好它的凭据即可」/「配额恢复后自动出数」都是**把动作指死**的话 ——
+
+        前者让人白弄凭据(凭据现在本来就是好的),后者断言了没验证过的事。
+        """
+        from app.services.wechat.wemp_client import WempRateLimited
+
+        _bench(session)
+        _patch(monkeypatch, [("wemp", _Be(exc=WempRateLimited("频率限制(200013)")))])
+        detail = self._row(session)["detail"]
+        for bad in ("配好它的凭据即可", "自动出数", "唯一带阅读数"):
+            assert bad not in detail, f"又写成了已经成立的事实:{bad}"
+
+    def test_体检标签不许自称唯一来源(self) -> None:
+        """★ 同一份体检里**两行都自称"唯一"** ⇒ 必有一错,而查的人会挑对他有利的那条信。"""
+        assert "唯一" not in ch._WEREAD_APP_LABEL, (
+            f"另一个「唯一」又回来了:{ch._WEREAD_APP_LABEL!r} —— "
+            "网页路 `/web/mp/articles` 同样带精确读数(10-14 实测 ok=13 app=6)")
