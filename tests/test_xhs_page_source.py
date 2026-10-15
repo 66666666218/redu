@@ -597,26 +597,46 @@ def test_需验证记号_能清掉历史遗留的相对路径写法(monkeypatch)
 
 
 class _FakeFirst:
-    def __init__(self, href: str | None) -> None:
-        self._href = href
+    def __init__(self, href: str | None = None, text: str | None = None) -> None:
+        self._href, self._text = href, text
 
     def get_attribute(self, name: str, timeout=None):
         return self._href if name == "href" else None
 
+    def inner_text(self, timeout=None):
+        """★ `text is None` = **这个节点不存在**(Playwright 的 `inner_text` 会等到超时再抛)。
+
+        让替身**真的抛**,而不是回一个空串 —— 否则"节点没了"和"节点是空的"分不开,
+        `_card_rows` 那条**回退**分支就永远测不到。
+        """
+        if self._text is None:
+            raise TimeoutError("node not found")
+        return self._text
+
 
 class _FakeLocator:
-    def __init__(self, href: str | None) -> None:
-        self.first = _FakeFirst(href)
+    def __init__(self, href: str | None = None, text: str | None = None) -> None:
+        self.first = _FakeFirst(href, text)
 
 
 class _FakeCard:
-    """一张笔记卡(或推荐栏)的替身。"""
+    """一张笔记卡(或推荐栏)的替身。
 
-    def __init__(self, href: str | None, text: str) -> None:
+    `author` / `title` 就是**真实 DOM 里那两个节点**(`a.author .name` / `a.title > span`);
+    不传 = 节点不存在 ⇒ 走 `_card_rows` 的**行序兜底**分支。
+    """
+
+    def __init__(self, href: str | None, text: str,
+                 author: str | None = None, title: str | None = None) -> None:
         self._href, self._text = href, text
+        self._author, self._title = author, title
 
     def locator(self, sel: str) -> _FakeLocator:
-        return _FakeLocator(self._href)
+        if sel == x.AUTHOR_SEL:
+            return _FakeLocator(text=self._author)
+        if sel == x.TITLE_SEL:
+            return _FakeLocator(text=self._title)
+        return _FakeLocator(href=self._href)
 
     def inner_text(self) -> str:
         return self._text
@@ -714,6 +734,49 @@ class TestCardRows:
             _FakeCard("/explore/aaa", "标题一\n作者甲\n08-07\n123"),
         ])
         assert x._card_rows(cards, "k")[0]["name"] == "作者甲"
+
+    def test_作者从_DOM_结构取_不看行序(self) -> None:
+        """★★ 2026-10-15 那个 bug 的回归守卫。
+
+        实测输出里**至少 3/20 条**的「作者」其实是**日期**(`08-13` / `6天前` /
+        `2025-08-03`)—— 有些卡片**没有作者那一行**,行序整体错位。
+        抓真实 DOM 后确认:作者在 `a.author .name` 里。
+        """
+        cards = _FakeCards([
+            _FakeCard("/explore/aaa", "考研网盘在哪里找\n6天前\n7",
+                      author="小红薯6AA33EA1", title="考研网盘在哪里找"),
+        ])
+        r = x._card_rows(cards, "k")[0]
+        assert r["name"] == "小红薯6AA33EA1", "又回去按行序取作者了"
+        assert "6天前" not in r["name"]
+
+    def test_没有作者节点时回退到行序(self) -> None:
+        """老卡片 / 节点没渲染出来时**不能变空** —— 兜底必须留着(上面那条不能把兜底删掉)。"""
+        cards = _FakeCards([_FakeCard("/explore/bbb", "标题一\n作者甲\n08-07\n123")])
+        assert x._card_rows(cards, "k")[0]["name"] == "作者甲"
+
+    def test_作者节点存在但为空时回退行序(self) -> None:
+        cards = _FakeCards([_FakeCard("/explore/ccc", "标题\n日期行\n7", author="")])
+        assert x._card_rows(cards, "k")[0]["name"] == "日期行"
+
+    def test_作者节点读失败不拖垮整批(self) -> None:
+        class _NoAuthor:
+            def locator(self, sel):
+                if sel == x.AUTHOR_SEL:
+                    raise RuntimeError("节点炸了")
+                return _FakeLocator(href="/explore/ddd")
+
+            def inner_text(self):
+                return "标题\n作者丁"
+
+        class _Cards:
+            def count(self):
+                return 1
+
+            def nth(self, i):
+                return _NoAuthor()
+
+        assert x._card_rows(_Cards(), "k")[0]["name"] == "作者丁"
 
     def test_只有一行时作者留空不炸(self) -> None:
         cards = _FakeCards([_FakeCard("/explore/bbb", "只有标题")])

@@ -471,16 +471,51 @@ def verify_needed(url: str, title: str, body: str = "") -> bool:
             or "xhsCaptcha" in (body or ""))
 
 
+#: ★★ 2026-10-15 **抓真实 DOM 定下来的**结构(不是猜的;见 CHANGELOG):
+#:
+#:     section.note-item
+#:       a[href="/explore/<笔记id>"]                                    ← 隐藏锚点,规范地址从这来
+#:       a.cover…[href="/search_result/<id>?xsec_token=…"]
+#:       div.footer
+#:         a.title > span                                               ← **标题**
+#:         div.card-bottom-wrapper
+#:           a.author[href="/user/profile/<作者id>…"]                   ← 作者主页(暂未入库)
+#:             div.name-time-wrapper
+#:               div.name                                               ← **作者名**
+#:               div.time…(已被截断,按位置是日期)
+#:
+#: ⚠️ **为什么必须按结构读**(实测,不是洁癖):改用行序(`lines[1]` 当作者)之前,
+#: 输出里**至少 3/20 条**的"作者"其实是**日期**(`08-13` / `6天前` / `2025-08-03`)——
+#: 有些卡片**没有作者那一行**,行序就整体错位了。本仓推送卡片的「作者列」直接吃这个字段。
+AUTHOR_SEL = ".author .name"
+TITLE_SEL = ".title"
+
+
+def _node_text(card, sel: str, timeout: int = 1500) -> str:
+    """按**结构**读卡片里某个节点的文本;读不到回空串(**不抛** —— 单卡片失败不拖垮整批)。
+
+    ⚠️ 与 `card.inner_text()` 的区别是重点:那个读的是**整张卡的文字**,
+    要靠**行序**猜哪行是作者 —— 实测会猜错(见 `AUTHOR_SEL` 上面那段)。
+    """
+    try:
+        got = card.locator(sel).first.inner_text(timeout=timeout)
+    except Exception:  # noqa: BLE001 - 取不到就回空,由调用方回退
+        return ""
+    return " ".join(str(got or "").split())
+
+
 def _card_rows(cards, kw: str, limit: int = 30) -> list[dict]:
-    """★ 从 `section.note-item` 卡片里抽出笔记行(2026-10-12 修)。
+    """★ 从 `section.note-item` 卡片里抽出笔记行(2026-10-12 建,2026-10-15 改作者取法)。
 
     ⚠️ **只收有笔记链接的卡片** —— 页面上"大家都在搜 …"那个推荐栏**也匹配**
-    `section.note-item`,实测它一直当**第 0 条**混在结果里(内容是"附近的美食
-    美食家常菜…"),但它**没有笔记链接** ⇒ 靠这一条滤掉。
+    `section.note-item`(实测抓 DOM 时它稳定是那批里的**第 7 张**、`href=None`),
+    靠这一条滤掉。
 
-    卡片文本形如「标题 / 作者 / 日期 / 点赞数」⇒ 首行当标题、次行当作者。
-    笔记 id 从链接里取(`/explore/<id>`),顺带拼出完整 URL —— 原来这两项都是空的,
-    下游拿不到笔记地址。
+    卡片文本形如「标题 / 作者 / 日期 / 点赞数」⇒ 首行当标题、**次行当作者(兜底)**。
+    笔记 id 从链接里取(`/explore/<id>`),顺带拼出完整 URL。
+
+    ★ **2026-10-15 改**:作者与标题**先按 DOM 结构读**(`AUTHOR_SEL` / `TITLE_SEL`),
+    读不到才回退"次行当作者"。改的原因见 `AUTHOR_SEL` 上面那段实测。
 
     ⚠️ **URL 要去掉 `?xsec_token=…`**:那是**会话级**访问令牌(换一次登录就失效,
     带在库里过两天再打开就是坏链)⇒ 只存**规范地址**,`uid` 与 `url` 同源,
@@ -509,7 +544,8 @@ def _card_rows(cards, kw: str, limit: int = 30) -> list[dict]:
                else f"https://www.xiaohongshu.com{path}")
         rows.append({
             "uid": uid,
-            "name": lines[1] if len(lines) > 1 else "",
+            #: ★ 结构优先;`lines[1]` 只作**兜底**(老卡片/节点没渲染出来时)
+            "name": _node_text(card, AUTHOR_SEL) or (lines[1] if len(lines) > 1 else ""),
             "url": url,
             "snippet": " ".join(lines)[:255], "pan_link": "",
             "keyword": kw,
