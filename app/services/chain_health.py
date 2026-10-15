@@ -1128,6 +1128,55 @@ _WEREAD_UNKNOWN_ACTION = (
     "(`scripts/weread_app_login.py`;⚠️ 重取回同一个 token 就是空转)。")
 
 
+def _accounting_field(detail: str, key: str) -> int | None:
+    """从 `weread_list(ok=… app=… off=… skipped=…)` 里取一个字段(**不认字段顺序**)。
+
+    ⚠️ 边界**不能用 `\\b`**:上一版把它写进 f-string ⇒ 成了退格符 0x08 ⇒ 正则永不匹配
+    (与那次"指标自己瞎掉"同一族:看着对、其实什么都没看)。
+    """
+    import re
+
+    m = re.search(rf"(?:^|[^0-9A-Za-z_]){re.escape(key)}=(\d+)", detail)
+    return int(m.group(1)) if m else None
+
+
+def _weread_downtime_note(db) -> str:
+    """「上次有读数是什么时候 / 断了多久 / 窗口内自愈过几次」——**让「等」变成可判断的预期**。
+
+    ⚠️ 为什么需要(2026-10-15,用户问「微信阅读还是没好」):`-2041` 是**时限性**的
+    (10-05 / 10-08 / 10-14 三次**自愈**,其中 10-14 那次**同一天内**就是"断 → 好 → 又断")。
+    可报告里只有「🟡 覆盖率 14%」这一档 ⇒ **"刚断两小时"与"断了一周"长得一模一样**,
+    人没法判断"还该不该等" —— 正是本仓那条教训:**一个会长期挂在同一档的指标,等于没有指标。**
+    """
+    rows = _rows(db, "wechat_listen", 60)
+    parsed: list[tuple[bool, bool]] = []          #: (有读数, 是被挡)
+    for r in rows:                                #: 新 → 旧
+        d = str(r.detail or "")
+        ok, app = _accounting_field(d, "ok"), _accounting_field(d, "app")
+        if ok is None or app is None:
+            continue
+        off = _accounting_field(d, "off") or 0
+        parsed.append((ok + app > 0, bool(off)))
+    if not parsed:
+        return ""
+    if parsed[0][0]:
+        return "最近一轮**有读数**"
+    last_ok = next((i for i, (alive, _) in enumerate(parsed) if alive), None)
+    if last_ok is None:
+        return f"本窗口内(最近 {len(parsed)} 轮)**一次都没成过**"
+    #: 自愈次数 = 由"被挡"翻回"有读数"的次数(时间序:旧 → 新)
+    heals = 0
+    prev = None
+    for alive, blocked in reversed(parsed):
+        if prev is not None and not prev and alive and blocked is False:
+            heals += 1
+        prev = alive
+    ts = str(getattr(rows[last_ok], "started_at", "") or "")[:16]
+    return (f"上次有读数:{ts}(**约 {last_ok} 轮前**);"
+            f"本窗口内**自愈过 {heals} 次** —— `-2041` 是时限性的(历史上 10-05 / 10-08 / 10-14"
+            f"三次自己好过),**动作是等**,别换 cookie、别 refresh")
+
+
 def _weread_list_family(db, rounds: int = 5) -> tuple[str, str, str]:
     """★ **阅读数为什么断了** —— 家族判定,**两行体检唯一的出处**。
 
@@ -1143,20 +1192,13 @@ def _weread_list_family(db, rounds: int = 5) -> tuple[str, str, str]:
     ⇒ 纪律:**一个结论只能有一个出处**(与 `xhs_accounts.classify` 那条同源);
     判据本身仍是"看机制、不看产出",所以**一轮就能判**,不必等三天。
     """
-    import re
-
-    def _field(detail: str, key: str) -> int | None:
-        # ⚠️ 边界**不能用 `\b`**:上一版把它写进 f-string ⇒ 成了退格符 0x08 ⇒ 正则永不匹配。
-        m = re.search(rf"(?:^|[^0-9A-Za-z_]){re.escape(key)}=(\d+)", detail)
-        return int(m.group(1)) if m else None
-
     for r in _rows(db, "wechat_listen", max(int(rounds), 5)):
         d = str(r.detail or "")
-        ok, app = _field(d, "ok"), _field(d, "app")
+        ok, app = _accounting_field(d, "ok"), _accounting_field(d, "app")
         if ok is None or app is None:
             continue          #: 连这两个都没有 = 这一轮压根没记(与"记了 0"是两回事)
-        off = _field(d, "off") or 0
-        skipped = _field(d, "skipped") or 0
+        off = _accounting_field(d, "off") or 0
+        skipped = _accounting_field(d, "skipped") or 0
         shape = f"最近一轮:网页问成 {ok} / App 问成 {app} / 被挡 {off} / 窗口外 {skipped}"
         if ok + app:
             return "running", shape, _WEREAD_RUNNING_ACTION
@@ -1250,8 +1292,14 @@ def check_weread_list_rotation(db, rounds: int = 3) -> list[dict]:
     if family == "unknown":
         return [{"name": name, "level": YELLOW,
                  "detail": f"{shape}(格式变了?那就等于这个指标瞎了)"}]
-    return [{"name": name, "level": GREEN if family == "running" else RED,
-             "detail": f"{shape} ⇒ {action}"}]
+    if family in ("running", "window"):
+        return [{"name": name, "level": GREEN if family == "running" else RED,
+                 "detail": f"{shape} ⇒ {action}"}]
+    #: ★ 「断了多久 / 自愈过几次」只加在**被挡**那一支 —— 那是唯一「只需等」的家族;
+    #: 窗口坏了时说这句是误导(见 `_weread_downtime_note`)。
+    note = _weread_downtime_note(db)
+    extra = f";{note}" if note else ""
+    return [{"name": name, "level": RED, "detail": f"{shape} ⇒ {action}{extra}"}]
 
 
 def collect_sections(db) -> list[tuple[str, list[dict]]]:

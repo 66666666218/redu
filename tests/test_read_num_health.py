@@ -283,3 +283,36 @@ class Test两行体检不许给互相矛盾的动作:
         assert "weread_list" in cov["detail"], "要教人先去看记账"
         assert "窗口坏了" in cov["detail"] and "重登" in cov["detail"], \
             "三种形状的处置都要列出来"
+
+
+class Test断供时长与自愈史:
+    """★ `-2041` 是**时限性**的 ⇒ 报告必须说得出「上次什么时候好的、自愈过几次」。
+
+    ⚠️ 为什么(2026-10-15):报告里只有「🟡 覆盖率 14%」这一档
+    ⇒ **「刚断两小时」与「断了一周」长得一模一样**,人没法判断"还该不该等"
+    —— 本仓那条教训:一个会长期挂在同一档的指标,等于没有指标。
+    """
+
+    def test_写出上次有读数与自愈次数(self, session) -> None:
+        from app.services.chain_health import _weread_downtime_note
+
+        _run(session, "weread_list(ok=0 app=0 off=25 skipped=0)")   # 旧:被挡
+        _run(session, "weread_list(ok=13 app=6 off=0 skipped=0)")   # 中间:好了(自愈 1 次)
+        _run(session, "weread_list(ok=0 app=0 off=25 skipped=0)")   # 最新:又被挡
+        note = _weread_downtime_note(session)
+        assert "上次有读数" in note and "1 轮前" in note, note
+        assert "自愈过 1 次" in note, note
+        assert "别换 cookie" in note, "必须把「等」写成动作,否则又会有人去换凭据"
+
+    def test_一直没好要说一次都没成过(self, session) -> None:
+        from app.services.chain_health import _weread_downtime_note
+
+        _run(session, "weread_list(ok=0 app=0 off=25 skipped=0)", n=3)
+        assert "一次都没成过" in _weread_downtime_note(session)
+
+    def test_最近一轮有读数就不用说这些(self, session) -> None:
+        from app.services.chain_health import _weread_downtime_note
+
+        _run(session, "weread_list(ok=0 app=0 off=25 skipped=0)")
+        _run(session, "weread_list(ok=5 app=0 off=0 skipped=0)")
+        assert _weread_downtime_note(session) == "最近一轮**有读数**"
