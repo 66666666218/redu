@@ -77,30 +77,51 @@ class ScanCache:
 
     # ───────────── 对外接口 ─────────────
 
+    #: `check_home` 的判定结果。★ **为什么要把它返回出来**(2026-10-15):
+    #: 运行记录里那三天一字不差的 `已扫19个家,还差9个`,既看不出"是因为**快照过期**"
+    #: 还是"因为**预算不够**" —— 而这两者的修法**完全不同**(改 TTL / 加预算)。
+    #: 只看数字,一个"设计成会收敛"的循环卡住了三天也没人能看出来。
+    FRESH = "fresh"                  #: 有有效快照
+    NO_CACHE = "no_cache"            #: 压根没有这个家的记录
+    STALE = "stale"                  #: **有过期了**(TTL 之外)
+    FID_CHANGED = "fid_changed"      #: 家被重建过(fid 变了)
+    DEPTH_CHANGED = "depth_changed"  #: 扫描深度变了(与旧快照不是一回事)
+
+    def check_home(self, name: str, fid: str, ttl_hours: float,
+                   depth: int) -> tuple[list[dict] | None, str]:
+        """取某个家的缓存文件清单并**说明为什么** —— `(files, reason)`。
+
+        `files is None` = **不可用**(调用方应当重扫);`reason` 是 `FRESH` 之一。
+        """
+        rec = self._read()["homes"].get(name)
+        if not isinstance(rec, dict):
+            return None, self.NO_CACHE
+        if str(rec.get("fid") or "") != str(fid or ""):
+            logger.info("家「%s」的 fid 变了(家被重建过)⇒ 作废重扫", name)
+            return None, self.FID_CHANGED
+        if int(rec.get("depth") or -1) != int(depth):
+            logger.info("家「%s」的扫描深度变了(%s→%s)⇒ 作废重扫",
+                        name, rec.get("depth"), depth)
+            return None, self.DEPTH_CHANGED
+        age_h = (time.time() - float(rec.get("scanned_at") or 0)) / 3600.0
+        if age_h > ttl_hours:
+            #: ⚠️ **这句日志以前没有** —— 而它正是"缓存没起作用"时唯一的信号
+            logger.info("家「%s」的快照已 %.1fh(> TTL %.1fh)⇒ 重扫", name, age_h, ttl_hours)
+            return None, self.STALE
+        files = rec.get("files")
+        return (files, self.FRESH) if isinstance(files, list) else (None, self.NO_CACHE)
+
     def get_home(self, name: str, fid: str, ttl_hours: float,
                  depth: int) -> list[dict] | None:
-        """取某个家的缓存文件清单。
+        """取某个家的缓存文件清单(`None` = 不可用,应当重扫)。
 
-        `None` = **不可用**(没有 / 过期 / `fid` 变了 / **`depth` 变了**)⇒ 调用方应当重扫。
+        ⚠️ 这只是 `check_home(...)[0]` 的旧签名转发。**想知道"为什么不可用"就调
+        `check_home`** —— 只返回 `None` 的话,「快照过期」与「从来没扫过」长得一模一样。
 
         ⚠️ `depth` 必须参与判定:深度不同扫到的东西**不是一回事**,
         拿 depth=2 的旧快照去跑 depth=1 会以为什么都扫过了 —— 判据直接失真。
         """
-        rec = self._read()["homes"].get(name)
-        if not isinstance(rec, dict):
-            return None
-        if str(rec.get("fid") or "") != str(fid or ""):
-            logger.info("家「%s」的 fid 变了(家被重建过)⇒ 作废重扫", name)
-            return None
-        if int(rec.get("depth") or -1) != int(depth):
-            logger.info("家「%s」的扫描深度变了(%s→%s)⇒ 作废重扫",
-                        name, rec.get("depth"), depth)
-            return None
-        age_h = (time.time() - float(rec.get("scanned_at") or 0)) / 3600.0
-        if age_h > ttl_hours:
-            return None
-        files = rec.get("files")
-        return files if isinstance(files, list) else None
+        return self.check_home(name, fid, ttl_hours, depth)[0]
 
     def put_home(self, name: str, fid: str, files: list[dict], depth: int) -> None:
         """记下一个家**扫完**的结果。"""

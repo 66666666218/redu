@@ -372,6 +372,15 @@ def build_plan(qt: Any, *, home_prefix: str = "redian监听", mmdd_prefix: str =
     危险的是"**过期的完整数据**"(快照说两家都有、其实一家已经没了)——
     那由 `ttl_hours` 限窗口,并由「删除永远进回收站」兜底。
 
+    ⚠️⚠️ **`ttl_hours` 有个硬约束:它必须大于"两次调用之间的间隔"**,否则这套缓存
+    **一点用都没有**。2026-10-15 实测的正是这件事:TTL 写死 **8h**、而作业
+    **每天 04:20** 一轮 ⇒ 每轮开始时上一轮的快照**全已过期** ⇒ 每轮从零重扫同样那批家、
+    在**同一处**撞预算、留下**同样几个**家 ⇒ `complete` 恒为 False ⇒
+    **夸克连着三天一个文件都没删**,而运行记录里那三天**一字不差**
+    (`已扫19个家,还差9个`)—— 一个"设计成会收敛"的循环,数字却纹丝不动。
+    ⇒ 定时作业请传 `settings.pan_auto_clean_quark_ttl_hours`(默认 **48h**);
+    手动脚本若要"这次一定要最新",显式传一个小值。
+
     `protect_dirs` = 我们自己的**宣传简介目录**(默认 `None` = 从 settings 现取;
     传 `()` = 刻意不加,离线测试用)。这些目录里的文件**永不删** —— 见
     `collect_intro_protect` 里的说明:它们会被复制进每个资源,而恰恰最容易被判成"引流"或"重复"。
@@ -384,14 +393,19 @@ def build_plan(qt: Any, *, home_prefix: str = "redian监听", mmdd_prefix: str =
     scanned: list[str] = []
     remaining: list[str] = []
     partial: list[str] = []
+    #: ★★「为什么这些家要重扫」(2026-10-15)。**必须统计出来** ——
+    #: 否则运行记录只有 `已扫19个家,还差9个`,看不出该改 TTL 还是该加预算。
+    cache_miss: dict[str, int] = {}
     for h in homes:
         nm = str(h.get("file_name") or "")
         fid = str(h.get("fid") or "")
-        cached = cache.get_home(nm, fid, ttl_hours, depth) if cache else None
-        if cached is not None:
-            files.extend(cached)
-            reused.append(nm)
-            continue
+        if cache:
+            cached, why = cache.check_home(nm, fid, ttl_hours, depth)
+            if cached is not None:
+                files.extend(cached)
+                reused.append(nm)
+                continue
+            cache_miss[why] = cache_miss.get(why, 0) + 1
         if budget["n"] >= budget["cap"]:
             remaining.append(nm)        # ★ 没排上的家**必须记下来** —— 不能当成"扫过了"
             continue
@@ -414,6 +428,7 @@ def build_plan(qt: Any, *, home_prefix: str = "redian监听", mmdd_prefix: str =
                 "intro_protected": intro_detail,
                 "complete": not remaining and budget["n"] < budget["cap"],
                 "reused_homes": reused, "scanned_now": scanned,
+                "cache_miss": cache_miss,
                 "remaining_homes": remaining, "partial_homes": partial})
     return out
 

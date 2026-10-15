@@ -472,3 +472,81 @@ def test_简介目录取不到时不崩也不改判据() -> None:
     plan = build_plan(qt, mmdd_prefix="10", protect_dirs=("/监听宣传",))
     assert plan["intro_protected"] == []
     assert plan["delete"], "取不到简介目录时,判据必须与旧版一致(该删的还是删)"
+
+
+# ---------------------------------------------------------------------------
+# ★★ 快照 TTL 与「多轮收敛」(2026-10-15)
+#
+# 实测事故:TTL 写死 8h、而作业**每天**才一轮 ⇒ 每轮开始时上一轮的快照**全已过期**
+# ⇒ 每轮从零重扫同样那批家、在**同一处**撞预算、留下**同样几个**家
+# ⇒ `complete` 恒 False ⇒ 护栏「没扫完就拒绝删」天天生效
+# ⇒ **夸克连着三天一个文件都没删**,而运行记录里那三天**一字不差**
+# (`已扫19个家,还差9个`)—— 一个设计成"会收敛"的循环,数字却纹丝不动。
+
+
+class Test快照TTL与收敛:
+    def _build(self, cache, ttl):
+        from app.services.quark_dup import build_plan
+
+        return build_plan(_IntroQt(), mmdd_prefix="10", cache=cache, ttl_hours=ttl,
+                          protect_dirs=())
+
+    def test_TTL_之内要复用_第二次不再重扫(self, tmp_path) -> None:
+        from app.services.quark_dup_cache import ScanCache
+
+        cache = ScanCache(tmp_path / "c.json")
+        p1 = self._build(cache, 48)
+        assert p1["complete"] is True and len(p1["scanned_now"]) == 2
+        p2 = self._build(cache, 48)
+        assert len(p2["reused_homes"]) == 2 and p2["cache_miss"] == {}, \
+            "TTL 之内应当复用,不该再扫一遍"
+        assert p2["calls"] == 0, "复用不该产生任何 list_dir 调用"
+
+    def test_快照过期要报_stale_而不是默默重扫(self, tmp_path) -> None:
+        """★ 这条就是那次事故的**判据**:以前过期与「从来没有」都只回 `None`,分不出来。"""
+        from app.services.quark_dup_cache import ScanCache
+
+        cache = ScanCache(tmp_path / "c.json")
+        self._build(cache, 48)
+        p = self._build(cache, -1)          #: 负 TTL = 必然过期(不依赖 sleep)
+        assert p["cache_miss"] == {ScanCache.STALE: 2}, (
+            f"过期必须报 `stale`(那是「该改 TTL」的信号);实际 {p['cache_miss']}")
+
+    def test_没扫完要把重扫原因写进运行记录(self) -> None:
+        from app.services.pan_auto_clean import _fmt
+
+        line = _fmt({"pan": "夸克", "state": "incomplete", "scanned": 19,
+                     "remaining_homes": 9, "planned": 3,
+                     "cache_miss": {"stale": 19}, "calls": 2500, "ttl_hours": 8.0})
+        assert "stale" in line and "TTL" in line and "2500" in line, line
+
+    def test_默认_TTL_要撑得过作业间隔(self) -> None:
+        """★★ **不变量守卫** —— TTL ≤ 作业间隔,缓存就一点用都没有。
+
+        2026-10-15 那个 bug 就是「`build_plan` 默认 8h」对着「作业每天一轮」,
+        而这件事在代码里**没有任何一处写着** ⇒ 只能靠这条守着。
+        """
+        from config.settings import Settings
+
+        ttl = float(Settings.model_fields["pan_auto_clean_quark_ttl_hours"].default)
+        assert ttl > 24 * 2 - 1, (
+            f"TTL 默认 {ttl}h —— 至少要撑过「一天一轮 + 跳过一天」(>24h;取 48h 留余量)。"
+            "短于作业间隔的 TTL 会让这套缓存**永远不起作用**")
+
+    def test_作业真的把_TTL_传给了_build_plan(self) -> None:
+        """配置写了没人传 = **空转**(本仓为这个栽过:`xhs_sign_x_rap` 空转三天)。
+
+        ⚠️ 按 AST 查**真实调用** —— 子串查会被解释性注释打红(今天已栽两次)。
+        """
+        import ast
+        from pathlib import Path
+
+        from app.services import pan_auto_clean as pac
+
+        src = Path(pac.__file__).read_text(encoding="utf-8")
+        fn = next((n for n in ast.walk(ast.parse(src))
+                   if isinstance(n, ast.FunctionDef) and n.name == "clean_quark"), None)
+        assert fn is not None, "找不到 `clean_quark` —— 改名了?守卫要跟着改"
+        kws = {k.arg for c in ast.walk(fn) if isinstance(c, ast.Call)
+               for k in c.keywords if k.arg}
+        assert "ttl_hours" in kws, "`clean_quark` 没把 TTL 传给 `build_plan` ⇒ 配置空转"

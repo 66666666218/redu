@@ -66,10 +66,16 @@ def clean_quark(db: Session, user_id: int, settings, *, dry_run: bool, left: int
     if not ck:
         return {"pan": "夸克", "state": "no_cookie"}
     scope = str(getattr(settings, "pan_auto_clean_quark_month", "") or "")
+    #: ★★ **TTL 必须由作业传进来**(2026-10-15):`build_plan` 自己的默认是 8h,
+    #: 而本作业**每天**才跑一轮 ⇒ 8h 的快照届时**全已过期** ⇒ 缓存形同虚设、
+    #: 每轮从零重扫、在同一处撞预算 ⇒ `complete` 恒 False ⇒ **夸克连着三天没删过东西**。
+    #: 见 `settings.pan_auto_clean_quark_ttl_hours` 与 `quark_dup.build_plan` 的说明。
+    ttl = float(getattr(settings, "pan_auto_clean_quark_ttl_hours", 48.0) or 48.0)
     try:
         qt = QuarkTransfer(ck, fid_store=getattr(settings, "quark_fid_store", "") or None)
         cache = ScanCache()
-        plan = quark_dup.build_plan(qt, mmdd_prefix=scope, depth=2, cache=cache)
+        plan = quark_dup.build_plan(qt, mmdd_prefix=scope, depth=2, cache=cache,
+                                    ttl_hours=ttl)
     except Exception as exc:  # noqa: BLE001 - 扫不动就如实报,别当"没有重复"
         logger.warning("夸克自动去重:扫描失败 %s: %s", type(exc).__name__, str(exc)[:120])
         return {"pan": "夸克", "state": "scan_failed", "reason": f"{type(exc).__name__}: {str(exc)[:100]}"}
@@ -77,8 +83,14 @@ def clean_quark(db: Session, user_id: int, settings, *, dry_run: bool, left: int
     # ★ 护栏 4:没扫完 ⇒ 计划不可信 ⇒ 拒绝删
     if not plan.get("complete", True):
         rem = plan.get("remaining_homes") or []
+        #: ★★ **必须把"为什么没扫完"带出去**(2026-10-15):只报
+        #: `已扫19个家,还差9个` 的话,**看不出是快照过期还是预算不够** ——
+        #: 而这两者的修法完全不同(改 TTL / 加预算)。那三天就是这么卡住的:
+        #: 每天数字一字不差,没人能看出它其实**每天从零重扫**。
         return {"pan": "夸克", "state": "incomplete", "planned": int(plan.get("n_delete") or 0),
-                "remaining_homes": len(rem), "scanned": int(plan.get("scanned_homes") or 0)}
+                "remaining_homes": len(rem), "scanned": int(plan.get("scanned_homes") or 0),
+                "calls": int(plan.get("calls") or 0),
+                "cache_miss": dict(plan.get("cache_miss") or {}), "ttl_hours": ttl}
 
     all_del = list(plan.get("delete") or [])
     todo, blocked = _cap(all_del, left)
@@ -197,8 +209,13 @@ def _fmt(p: dict) -> str:
     if st in ("no_cookie", "scan_failed", "failed", "error", "skipped"):
         return f"{p['pan']}跳过({st}:{str(p.get('reason') or '')[:50]})"
     if st == "incomplete":
+        #: ★ 「**为什么**没扫完」必须写出来(2026-10-15):`stale` = 快照过期(改 TTL),
+        #: 没写 `stale` 才是预算(加预算)。只写计数的话,这两件事长得一模一样。
+        miss = p.get("cache_miss") or {}
+        why = ",".join(f"{k}×{v}" for k, v in sorted(miss.items())) or "无"
         return (f"{p['pan']}跳过(没扫完:已扫{p.get('scanned')}个家,"
-                f"还差{p.get('remaining_homes')}个;计划{p.get('planned')}条不可信)")
+                f"还差{p.get('remaining_homes')}个;计划{p.get('planned')}条不可信;"
+                f"**重扫原因 {why}**;调用{p.get('calls')};TTL {p.get('ttl_hours')}h)")
     if st == "report_only":
         return f"{p['pan']}**只报告** 强模式{p.get('strong')}条 / 待确认{p.get('weak')}条"
     bits = [f"扫{p.get('scanned', '-')}", f"计划{p.get('planned', 0)}"]
