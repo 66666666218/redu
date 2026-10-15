@@ -60,3 +60,29 @@ class TestChangelogNotTruncated:
         first = io.open(path, encoding="utf-8").read().split("\n")[0]
         assert _RE_ENTRY.match(first), (
             f"首行不是条目,像被插了别的东西(开头空行/标题都会让后续 preprend 出错):{first[:80]!r}")
+
+
+def test_最新一条的时间戳不许落在未来() -> None:
+    """★★ 2026-10-15 **我自己栽的**:凭「估」写时间戳,一路写到 `10-16 02:10`,
+    而当时真实时间是 `10-15 22:17` —— **偏了约 4 小时,连续 15 条都落在未来**。
+
+    ⚠️ 上面那条「时间不倒退」**抓不到它**:未来时间完全满足单调递增。
+    而 CHANGELOG 是**运维记录** —— 「什么时候发生的」就是它的全部价值,
+    时间戳跑到未来等于把这条记录作废(排查时会对着一个不存在的时刻找日志)。
+
+    ⇒ 真值来源两个,都别靠估:**`date` 一下**,或者**直接用提交时间**
+    (`git log --date=format:"%m-%d %H:%M"`)。留 5 分钟容差,别让正常的时钟抖动变成假红。
+    """
+    import datetime
+    import io as _io
+
+    path = Path(__file__).resolve().parents[1] / "CHANGELOG"
+    text = _io.open(path, encoding="utf-8").read()
+    m = _RE_ENTRY.match(text.split("\n", 1)[0])
+    assert m, f"第 1 行不是一条记录:{text[:60]!r}"
+    #: ⚠️ 别用 `_entries()` —— 它返回的是 `ln[:16]`(**截断过的**),解析不出时间。
+    newest = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M")
+    now = datetime.datetime.now()
+    assert newest <= now + datetime.timedelta(minutes=5), (
+        f"最新一条写着 {m.group(1)},而现在是 {now:%Y-%m-%d %H:%M} —— 时间戳落在未来。"
+        f"**别估时间**:`date` 一下,或用 `git log` 的提交时间")
