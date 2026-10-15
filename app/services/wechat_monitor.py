@@ -62,8 +62,8 @@ from app.services.wechat._text import (  # noqa: F401
     title_hits,
 )
 from app.services.wechat._source import (  # noqa: F401
-    _FEED_BIZ_PREFIX,
-    _RENEWAL_COOLDOWN_KEY,
+    ask_platform,
+    _FEED_BIZ_PREFIX,    _RENEWAL_COOLDOWN_KEY,
     _RENEWAL_COOLDOWN_MIN,
     _RENEWAL_FAIL_TEXT,
     _cookie_fingerprint,

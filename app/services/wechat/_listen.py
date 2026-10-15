@@ -916,10 +916,10 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                 # 所以这条首选路改用 `mp_articles_with_reads`:列表仍以第一个答上话的源为准,
                 # 其余源只用来补 read_num/like_num(详见 `_source._merge_counts`)。
                 # 单源客户端 / 测试替身没有这个方法 ⇒ 原样退回 `mp_articles`,行为逐字不变。
-                _with_reads = getattr(plat, "mp_articles_with_reads", None)
-                raw_items = (_with_reads(feed_id, page=1, limit=20, stats=wr_stats)
-                             if _with_reads is not None
-                             else plat.mp_articles(feed_id, page=1, limit=20))
+                # ★ **统一入口**:`ask_platform` 既是"横向补阅读数"的优先逻辑所在,
+                # 也是**熔断**所在(单源时裸客户端没有熔断 ⇒ 一层要兜住;见它的说明)。
+                raw_items = _root.ask_platform(plat, feed_id, page=1, limit=20,
+                                               stats=wr_stats)
                 # ⚠️ **阅读/点赞必须往下带**(2026-10-14 修):这里原来只取 title/url/时间,
                 # 把 `read_num` / `like_num` **白丢掉** —— 于是哪怕源(自研 wemp 后台那一路)
                 # 答上了阅读数,`_insert_new_articles` 收到的也是 0,卡片上照样是 `—`。

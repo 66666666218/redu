@@ -340,19 +340,27 @@ def _read(rel: str) -> str:
 
 
 def test_0号分支必须走带阅读数的那条路() -> None:
-    """★ 坏点③的守卫:⓪ 分支若改回 `plat.mp_articles(...)`,
+    """★ 坏点③的守卫:⓪ 分支若改回**普通** `mp_articles(...)`,
     **wemp 的阅读数就永远进不来**(WeRSS 结构里没有这个字段),而**不会有任何测试变红** ——
     因为它照样返回一列文章,只是阅读数全是 0。这种"静默退回去"必须由源码守卫挡住。
+
+    ⚠️ **2026-10-15 这条守卫搬家了,意图一行没变**:那段"优先走带阅读数"的逻辑
+    从 `_listen` 的 ⓪ 分支**搬进了 `_source.ask_platform`**(统一入口 —— 它同时管**熔断**:
+    单源时裸客户端没有熔断,实测一轮会被打 **117 次** `200013`)。
+    ⇒ 守卫跟着**逻辑**走,而不是跟着它当时待的那个文件走。
     """
-    src = _read("app/services/wechat/_listen.py")
+    listen = _read("app/services/wechat/_listen.py")
+    assert "ask_platform" in listen, (
+        "⓪ 分支没走统一入口 `ask_platform` ⇒ 既丢了阅读数、又绕过了熔断")
+    src = _read("app/services/wechat/_source.py")
     assert "mp_articles_with_reads" in src, (
-        "⓪ 分支改回 mp_articles 了:阅读数会**静默**全变 `—`(WeRSS 不带这个字段)")
+        "改了普通 `mp_articles`:阅读数会**静默**全变 `—`(WeRSS 不带这个字段)")
     # 而且必须传 stats —— 不然 `runs.detail` 里没有 reads(...) 那一截,
     # "补没补上 / 为什么没补上"又只能靠猜。
-    assert re.search(r"_with_reads\([^)]*stats=wr_stats", src), \
+    assert re.search(r"_wr\(mp_id[^)]*stats=stats", src), \
         "没把 stats 传进去:运维记录里看不到补阅读数的账"
-    # 单源客户端 / 测试替身没有这个方法 ⇒ 必须留着 `mp_articles` 的退回路径
-    assert re.search(r"else plat\.mp_articles\(feed_id", src), \
+    # 单源客户端 / 测试替身没有这个方法 ⇒ 必须留着普通 `mp_articles` 的退回路径
+    assert re.search(r"return plat\.mp_articles\(", src), \
         "把退回路径删了:单源配置(生产 .env 里 `wechat_reader_*` 为空时就是这样)会直接 AttributeError"
 
 

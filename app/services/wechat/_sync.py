@@ -137,7 +137,8 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
         pages = 0
         try:
             while pages < limit:
-                raw_items = plat.mp_articles(feed_id, page=pages + 1, limit=20)
+                # ⚠️ 走**统一入口**(带熔断;单源时裸客户端没有熔断 —— 见 `ask_platform`)
+                raw_items = _root.ask_platform(plat, feed_id, page=pages + 1, limit=20)
                 if pages == 0 and not raw_items:
                     # 首页就空 = 这个订阅在源里不存在/没抓到,不能算同步成功(否则下面直接 return,
                     # 微信读书兜底路也不会走,用户点「同步文章」永远 0 篇还显示成功)

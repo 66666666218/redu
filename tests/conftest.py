@@ -40,3 +40,20 @@ def _no_shutdown_marker(monkeypatch):
     import app.platform as platform
 
     monkeypatch.setattr(platform, "_mark_graceful_shutdown", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_source_breaker():
+    """★ **列表源的熔断是进程级状态**(2026-10-15 从"实例"搬到"模块级")。
+
+    ⚠️ 不每个用例清一次,前一个用例熔断掉的源会让后一个用例**第一次调用就被跳过** ——
+    于是"通过 / 失败"取决于**执行顺序**。实测(搬完当天就撞上):
+    同一个文件**单跑 1 条红、全量跑 2 条红**,红的那条还换了一个。
+    这正是"进程级状态"必须配"每例重置"的原因;顺带也是那条老教训的又一例:
+    **一个只在特定顺序下才成立的测试,等于没测。**
+    """
+    from app.services.wechat import _source as S
+
+    S._SOURCE_TRIPPED.clear()
+    yield
+    S._SOURCE_TRIPPED.clear()

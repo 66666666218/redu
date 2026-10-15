@@ -117,6 +117,85 @@ def article_keys(url: str) -> tuple[str, ...]:
         if k and k not in uniq:
             uniq.append(k)
     return tuple(uniq)
+#: ---- 列表源的**进程级熔断**(2026-10-15 从 `MultiSourceClient` 提出来)----
+#:
+#: ⚠️⚠️ **为什么必须提到模块级**(实测,不是洁癖):熔断原来是 `MultiSourceClient` 的
+#: **实例状态**,而 `_platform_client()` 在**只有一个源**时直接返回**裸客户端** ——
+#: 于是**熔断器根本不存在**。实测(10-15 20:06 那轮):`configured_backends` 只有 `wemp`,
+#: 每个号都去撞那个已经 `200013` 限流的源 ⇒ **一轮 117 次无效请求**,
+#: 而报告自己写着「重跑还会把配额推后」。
+#: ⇒ 熔断的状态**属于源,不属于持有它的那个对象**;而且**单源与多源必须同一个键**
+#:   (否则换个形态就互不相认 —— 本仓母题:同一件事两套名字,迟早飘)。
+_SOURCE_TRIPPED: dict[str, float] = {}
+_BREAKER_COOLDOWN = 600
+
+#: 裸客户端的类名 → **它在切换链里的源名**。两处必须一致(见上面那段)。
+_BACKEND_KEYS = {
+    "WempClient": "wemp",
+    "WerssClient": "werss",
+    "ReaderPlatformClient": "reader_platform",
+}
+
+
+def source_key(backend) -> str:
+    """一个源在熔断器里的键(**裸客户端与它在切换链里的名字用同一个键**)。"""
+    cls = type(backend).__name__
+    return _BACKEND_KEYS.get(cls, cls)
+
+
+def source_cooling(name: str) -> bool:
+    """这个源**现在**在熔断冷却里吗。"""
+    import time as _time
+
+    return _SOURCE_TRIPPED.get(name, 0.0) > _time.time()
+
+
+def trip_source(name: str, why: str = "") -> None:
+    """熔断一个源(`_BREAKER_COOLDOWN` 秒)。
+
+    ⚠️ **只在"刚熔断"时喊一声,冷却期内重复熔断静默** ——
+    否则单源那一路会**每个号一行 warning**(实测一轮 117 行),把日志淹掉,
+    而"淹掉"的后果正是没人看得见真正的那一条。
+    """
+    import time as _time
+
+    already = source_cooling(name)
+    _SOURCE_TRIPPED[name] = _time.time() + _BREAKER_COOLDOWN
+    if not already:
+        logger.warning("列表源[%s]已熔断 %d 秒(本轮剩余号不再问它):%s",
+                       name, _BREAKER_COOLDOWN, str(why)[:120])
+
+
+def ask_platform(plat, mp_id: str, *, page: int = 1, limit: int = 20,
+                 stats: dict | None = None) -> list[dict]:
+    """**问列表源的唯一入口**(带熔断;单源 / 多源都走这条)。
+
+    ⚠️ **为什么要这一层**(2026-10-15 实测):`MultiSourceClient` 那套 600 秒熔断只在
+    **多源**时才存在 —— 只剩一个源时 `_platform_client` 返回裸客户端,
+    **没有任何熔断**,于是"已经限流的源"会被每个号撞一遍(一轮 117 次)。
+    ⇒ 在这一层按**源名**兜住;多源那条**自带**熔断(逐源),这里不重复管它。
+
+    调用点只有两个(`_listen` 的 ⓪ 分支、`_sync`),**别再各写一遍** ——
+    `mp_articles_with_reads` 的优先逻辑也收在这里(见它自己的说明)。
+    """
+    if plat is None:
+        return []
+    has_own_breaker = hasattr(plat, "_cooling")     #: `MultiSourceClient` 走它自己那套
+    key = source_key(plat)
+    if not has_own_breaker and source_cooling(key):
+        logger.debug("列表源[%s]冷却中,本轮跳过", key)
+        return []
+    try:
+        _wr = getattr(plat, "mp_articles_with_reads", None)
+        if _wr is not None:
+            return _wr(mp_id, page=page, limit=limit, stats=stats)
+        return plat.mp_articles(mp_id, page=page, limit=limit)
+    except PlatformError as exc:
+        if not has_own_breaker:
+            trip_source(key, str(exc))
+        raise
+
+
 class MultiSourceClient:
     """免费列表源的多后端故障切换组合器(2026-10-01 抗停维升级)。
 
@@ -127,23 +206,25 @@ class MultiSourceClient:
     监听轮 ⓪ 分支的 `except PlatformError` 降级逻辑照常衔接。
     """
 
-    _COOLDOWN_SEC = 600
+    #: ⚠️ 熔断状态**不在实例上**(2026-10-15 搬到模块级,见 `source_cooling`)——
+    #: "实例状态"在**每次新建一个客户端**的地方,等于没有。
+    #: (`_COOLDOWN_SEC` 保留只为兼容旧引用;真正的时长在 `_BREAKER_COOLDOWN`。)
+    _COOLDOWN_SEC = _BREAKER_COOLDOWN
 
     def __init__(self, backends: list[tuple[str, object]]) -> None:
         self._backends = [(n, b) for n, b in backends if b is not None]
-        self._fail_until: dict[str, float] = {}
 
     @property
     def names(self) -> list[str]:
         return [n for n, _ in self._backends]
 
     def _cooling(self, name: str) -> bool:
-        import time as _time
-        return self._fail_until.get(name, 0) > _time.time()
+        #: ★ 走**模块级**注册表 —— 与 `ask_platform` 共用同一份状态,
+        #: 所以"裸客户端"与"切换链里的同一个源"**互认**(见 `source_key`)。
+        return source_cooling(name)
 
     def _trip(self, name: str) -> None:
-        import time as _time
-        self._fail_until[name] = _time.time() + self._COOLDOWN_SEC
+        trip_source(name)
 
     def mp_articles(self, mp_id: str, page: int = 1, limit: int = 20) -> list[dict]:
         last_exc: Exception | None = None

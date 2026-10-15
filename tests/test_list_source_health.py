@@ -276,3 +276,128 @@ def test_轮转记账真的没记时才报瞎(session) -> None:
     session.commit()
     detail = check_weread_list_rotation(session, rounds=1)[0]["detail"]
     assert "记账" in detail        # 这一轮确实没有那两个数 ⇒ 如实说"没记账"
+
+
+# ---------------------------------------------------------------------------
+# ★★★ 列表源熔断:**单源时也必须生效**(2026-10-15)
+#
+# 实测事故:熔断原来是 `MultiSourceClient` 的**实例状态**,而 `_platform_client` 在
+# **只有一个源**时直接返回**裸客户端** ⇒ 熔断器**根本不存在**
+# ⇒ 每个号都去撞那个已经 `200013` 限流的源 ⇒ 一轮 **117 次无效请求**
+# (而报告自己写着「重跑还会把配额推后」)。
+# 现在状态提到**模块级**(按源名),`ask_platform` 是唯一入口。
+
+
+#: ⚠️ 熔断器是**进程级**状态,每个用例前要清 —— 由 `tests/conftest.py` 的
+#: `_reset_source_breaker` **全局**负责(不在这里再写一份:那正是"同一件事两处")。
+
+
+class WempClient:  # noqa: N801 - 名字**故意**与真类一致:`source_key` 按类名映射
+    """假的 wemp 客户端:每次调用都抛限流,并数自己被打了几次。"""
+
+    def __init__(self, boom: bool = True) -> None:
+        self.calls = 0
+        self._boom = boom
+
+    def mp_articles(self, mp_id: str, page: int = 1, limit: int = 20) -> list[dict]:
+        self.calls += 1
+        if self._boom:
+            from app.services.reader_platform_client import PlatformError
+
+            raise PlatformError("/cgi-bin/appmsgpublish 频率限制(200013)")
+        return [{"title": "t", "url": "u"}]
+
+
+class Test单源也要熔断:
+    def test_裸客户端与切换链的源名必须是同一个键(self) -> None:
+        """★ 否则"单源"与"多源"两种形态下熔断**互不相认**,换个形态就绕过护栏。"""
+        from app.services.wechat import _source as S
+        from app.services.wechat.wemp_client import WempClient as 真
+
+        assert S.source_key(真("a=b", "tk")) == "wemp"
+
+    def test_第一次失败就熔断_后续不再请求(self) -> None:
+        from app.services.reader_platform_client import PlatformError
+        from app.services.wechat import _source as S
+
+        be = WempClient()
+        with pytest.raises(PlatformError):
+            S.ask_platform(be, "MP_WXS_1")
+        assert be.calls == 1, "第一次应当真的打出去"
+        #: 冷却期内:**一次都不问**(与 `MultiSourceClient` 的语义一致)
+        for _ in range(5):
+            assert S.ask_platform(be, "MP_WXS_1") == []
+        assert be.calls == 1, f"冷却期内又打了 {be.calls - 1} 次 —— 这正是那次 117 次请求的形状"
+
+    def test_熔断是进程级的_换个客户端实例也认(self) -> None:
+        from app.services.reader_platform_client import PlatformError
+        from app.services.wechat import _source as S
+
+        first, second = WempClient(), WempClient()
+        with pytest.raises(PlatformError):
+            S.ask_platform(first, "MP_WXS_1")
+        assert S.ask_platform(second, "MP_WXS_1") == []
+        assert second.calls == 0, "换了实例就当没熔断过 —— 而生产里正是每次新建"
+
+    def test_冷却到期后重新放行(self) -> None:
+        from app.services.wechat import _source as S
+
+        be = WempClient(boom=False)
+        S.trip_source("wemp")
+        assert S.ask_platform(be, "MP_WXS_1") == [] and be.calls == 0
+        S._SOURCE_TRIPPED["wemp"] = 0.0            #: 把冷却拨到过去
+        assert S.ask_platform(be, "MP_WXS_1") == [{"title": "t", "url": "u"}]
+        assert be.calls == 1
+
+    def test_熔断只喊一次_不刷屏(self, monkeypatch) -> None:
+        """★ 单源那一路会**每个号一行**。117 行 warning 会把真正的那条淹掉。"""
+        from app.services.wechat import _source as S
+
+        said: list[str] = []
+        monkeypatch.setattr(S.logger, "warning",
+                            lambda msg, *a, **k: said.append(str(msg)), raising=False)
+        for _ in range(10):
+            S.trip_source("wemp", "频率限制(200013)")
+        assert len(said) == 1, f"喊了 {len(said)} 次 —— 应当只在'刚熔断'时喊一次"
+
+    def test_多源那条不受本层影响(self, monkeypatch) -> None:
+        """`MultiSourceClient` 自带**逐源**熔断 ⇒ `ask_platform` 不该在它之外再熔断整条链。
+
+        (否则一个源坏了会把整条链都判冷 —— 那是**倒退**。)
+        """
+        from app.services.wechat import _source as S
+
+        class _Multi:
+            names = ["werss", "wemp"]
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def _cooling(self, name: str) -> bool:      #: 有它 = 自带熔断
+                return False
+
+            def mp_articles(self, mp_id: str, page: int = 1, limit: int = 20):
+                self.calls += 1
+                return [{"title": "t", "url": "u"}]
+
+        be = _Multi()
+        assert S.ask_platform(be, "MP_WXS_1") == [{"title": "t", "url": "u"}]
+        assert S._SOURCE_TRIPPED == {}, "不该给'整条切换链'记一笔熔断"
+
+    def test_有_mp_articles_with_reads_时优先用它(self) -> None:
+        """`ask_platform` 要保住原来 `_listen` 里那段两分支逻辑(单一出处,别再写两遍)。"""
+        from app.services.wechat import _source as S
+
+        seen: dict = {}
+
+        class _WithReads:
+            def mp_articles_with_reads(self, mp_id, page=1, limit=20, stats=None):
+                seen["with_reads"] = True
+                return []
+
+            def mp_articles(self, mp_id, page=1, limit=20):
+                seen["plain"] = True
+                return []
+
+        S.ask_platform(_WithReads(), "MP_WXS_1", stats={})
+        assert seen == {"with_reads": True}
