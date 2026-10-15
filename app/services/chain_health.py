@@ -1102,6 +1102,70 @@ def check_job_liveness(db) -> list[dict]:
     return items
 
 
+#: 阅读数断供时**该做什么** —— 按「家族」分开写,别再合成一句话。
+_WEREAD_BLOCKED_ACTION = (
+    "**两条路都被额度/风控挡掉了** —— 这是**外因**,与「窗口坏了」那种**内因不是一回事**"
+    "(**别去改代码**)。⇒ **动作只有一个:等** —— `-2041` 是**时限性**的限"
+    "(2026-10-05 / 10-08 / 10-14 三次**自愈**),**换新会话也没用**"
+    "(2026-10-06 实测:刚续期、验证通过,第 1 个号就被挡);"
+    "**别换账号、别换出口、别重登、别反复探测**(反复探测只会把窗口推后)。"
+    "认证本身是好的(对照端点 `/web/shelf/sync` 回 200)。"
+    "恢复判据**只看下一轮** `runs.detail` 的 `weread_list(ok=/app=)` 非 0。")
+_WEREAD_WINDOW_ACTION = (
+    "**谁都没问过**(ok/app/off 全 0 而窗口外满员)⇒ **轮转窗口坏了**(**要改代码**)。"
+    "2026-10-08 那次就是这个形状:`_list_window` 的窗口被**没有 bookId 的号**占满"
+    "(它们不可能被问列表),于是真有 bookId 的号**恒在窗口外**、两条路一次都没被调用。"
+    "查 `_listen._list_window` 与 `_list_key`。")
+_WEREAD_RUNNING_ACTION = (
+    "**至少一条路在跑** ⇒ 断供另有原因(看「精确阅读数」那条的产出明细),"
+    "既不是「谁都没问过」、也不是「被额度挡」。")
+_WEREAD_UNKNOWN_ACTION = (
+    "两条路:① 网页 `/web/mp/articles`;② App `i.weread.qq.com/book/articles`。"
+    "⚠️ **先看 `runs.detail` 的 `weread_list(...)` 再决定动作** —— "
+    "`off>0` = 被额度/风控挡(动作是**等**;`-2041` 时**换新会话也没用**);"
+    "全 0 而窗口外满员 = **窗口坏了**(改代码);"
+    "只有 `-2012/-2010` 那族才轮到**重登**"
+    "(`scripts/weread_app_login.py`;⚠️ 重取回同一个 token 就是空转)。")
+
+
+def _weread_list_family(db, rounds: int = 5) -> tuple[str, str, str]:
+    """★ **阅读数为什么断了** —— 家族判定,**两行体检唯一的出处**。
+
+    返回 `(family, shape, action)`;`family ∈ {blocked, window, running, unknown}`。
+
+    ⚠️⚠️ **为什么必须抽出来(2026-10-15 实测)**:同一个事故,两行体检**结论打架**——
+      · `check_read_num_coverage` 报 🟡,并让人**去模拟器里重登微信读书**;
+      · `check_weread_list_rotation` 报 🔴,并说**该等、别动代码**。
+    而其中一行的动作是**错的**:当时两条路都是 `-2041`(**时限性**),
+    **重登不但修不了,还会把窗口推后** —— 本仓正是为此付过代价
+    (2026-10-14:「中途反复探测只会把窗口推后」)。
+
+    ⇒ 纪律:**一个结论只能有一个出处**(与 `xhs_accounts.classify` 那条同源);
+    判据本身仍是"看机制、不看产出",所以**一轮就能判**,不必等三天。
+    """
+    import re
+
+    def _field(detail: str, key: str) -> int | None:
+        # ⚠️ 边界**不能用 `\b`**:上一版把它写进 f-string ⇒ 成了退格符 0x08 ⇒ 正则永不匹配。
+        m = re.search(rf"(?:^|[^0-9A-Za-z_]){re.escape(key)}=(\d+)", detail)
+        return int(m.group(1)) if m else None
+
+    for r in _rows(db, "wechat_listen", max(int(rounds), 5)):
+        d = str(r.detail or "")
+        ok, app = _field(d, "ok"), _field(d, "app")
+        if ok is None or app is None:
+            continue          #: 连这两个都没有 = 这一轮压根没记(与"记了 0"是两回事)
+        off = _field(d, "off") or 0
+        skipped = _field(d, "skipped") or 0
+        shape = f"最近一轮:网页问成 {ok} / App 问成 {app} / 被挡 {off} / 窗口外 {skipped}"
+        if ok + app:
+            return "running", shape, _WEREAD_RUNNING_ACTION
+        if off:
+            return "blocked", shape, _WEREAD_BLOCKED_ACTION
+        return "window", shape, _WEREAD_WINDOW_ACTION
+    return "unknown", "最近 5 轮里都没有可用的 `weread_list(...)` 记账", _WEREAD_UNKNOWN_ACTION
+
+
 def check_read_num_coverage(db, days: int = 3) -> list[dict]:
     """④ **阅读数覆盖** —— 只看**库里的真值**,不看运行记录字符串。
 
@@ -1135,11 +1199,11 @@ def check_read_num_coverage(db, days: int = 3) -> list[dict]:
                  "detail": f"近 {days} 天没有新文,无从判断"}]
     ratio = withnum / total
     detail = f"近 {days} 天入库 {total} 篇,其中有阅读数的 **{withnum}** 篇"
-    broken = ("查两条路:① 网页 `/web/mp/articles` —— 账号级 `-2041` 时**换新会话也没用**"
-              "(2026-10-06 实测:刚续期、验证通过,第 1 个号就被挡);"
-              "② App `i.weread.qq.com/book/articles` —— token 过期时「重取」拿回来的是**同一个值**"
-              "(模拟器里微信读书登录态失效:在雷电里打开 / 重新登录微信读书 App,"
-              "或跑 `scripts/weread_app_login.py` 重取)。")
+    #: ★★ **动作从这里取,不在这里自己写**(2026-10-15)。
+    #: 这里原来是一段写死的 `broken` 文案,内容是「去模拟器里重登微信读书」——
+    #: 而同一时刻隔壁「阅读数列表轮转」那行报的是 🔴「该等、别动代码」。
+    #: **两行结论打架,而这一行的动作是错的**(当时真因是 `-2041`,时限性的)。
+    _fam, _shape, advice = _weread_list_family(db)
     # ⚠️⚠️ **"几乎全丢"必须按红灯报**(2026-10-06 修)。此前只有"**恰好一篇都没有**"才判红,
     # 于是 163 篇里有 2 篇侥幸漏进来就掉到 🟡「偏低」—— 而 🟡 是最容易被忽略的那一档。
     # **实测代价**:阅读数从 09-28 起实际上全断,报告上一直写着"🟡 偏低",**8 天没人发现**,
@@ -1148,10 +1212,11 @@ def check_read_num_coverage(db, days: int = 3) -> list[dict]:
     # 低到 5% 以下时,"还能侥幸漏进来两篇"与"全断"在处置上无从区分。
     if ratio < 0.05:
         return [{"name": "公众号·精确阅读数", "level": RED,
-                 "detail": f"{detail}(覆盖率 {ratio:.0%})⇒ **精确阅读数实质上全丢**。{broken}"}]
+                 "detail": f"{detail}(覆盖率 {ratio:.0%})⇒ **精确阅读数实质上全丢**。"
+                           f"{_shape};{advice}"}]
     if ratio < 0.2:
         return [{"name": "公众号·精确阅读数", "level": YELLOW,
-                 "detail": detail + f"(覆盖率 {ratio:.0%},偏低 —— 通常说明列表额度/兜底有问题。" + broken + ")"}]
+                 "detail": detail + f"(覆盖率 {ratio:.0%},偏低)。{_shape};{advice}"}]
     return [{"name": "公众号·精确阅读数", "level": GREEN,
              "detail": detail + f"(覆盖率 {ratio:.0%})"}]
 
@@ -1177,52 +1242,16 @@ def check_weread_list_rotation(db, rounds: int = 3) -> list[dict]:
 
     ⇒ **一轮就能判**,不必等三天。判据是「**调用过没有**」,不是「调用成没成」。
     """
-    import re
-
-    rows = _rows(db, "wechat_listen", max(rounds, 5))
-    # ⚠️⚠️ **2026-10-14:这条判据曾经整整瞎掉过** —— 原来是一个**认顺序**的正则
-    #     `ok=(\d+) app=(\d+) off=(\d+)[^)]*skipped=(\d+)`,要求 `app=N` **紧挨着** `off=`;
-    #     而当月记账里插进了 `app_fail=` / `app_blocked=`(两条路的失败分账),
-    #     顺序一变 ⇒ **一次都匹配不上** ⇒ 它一直报"最近 N 轮都没有记账(格式变了?)"。
-    #     **工具的怀疑是对的,但没人去看** —— 于是这个专门用来抓"当天全断"的指标,
-    #     自己成了"看起来在跑、其实什么都没看"的那一个(本仓母题)。
-    #     ⇒ 改成**不认顺序的逐字段取数**;新增字段不再会把它打瞎。
-    def _field(detail: str, key: str) -> int | None:
-        # ⚠️ 边界**不能用 ``**:上一版把 `` 直接写进了 f-string ⇒ 成了**退格符 0x08**,
-        #    正则永远匹配不上 ⇒ 又一次"瞎"(与这次要修的 bug 同一族:看着对、其实什么都没看)。
-        m = re.search(rf"(?:^|[^0-9A-Za-z_]){re.escape(key)}=(\d+)", detail)
-        return int(m.group(1)) if m else None
-
-    parsed: list[tuple[int, int, int, int]] = []
-    for r in rows:
-        d = str(r.detail or "")
-        ok, app = _field(d, "ok"), _field(d, "app")
-        if ok is None or app is None:
-            continue          # 连这两个都没有 = 这一轮压根没记(与"记了 0"是两回事)
-        parsed.append((ok, app, _field(d, "off") or 0, _field(d, "skipped") or 0))
+    #: ★★ **判定搬去了 `_weread_list_family`**(2026-10-15):原来这里还有**第二份**判据
+    #: 与第二套文案,而它与 `check_read_num_coverage` 那段写死的文案**互相矛盾** ——
+    #: 一行说「该等」、一行说「去模拟器重登」。**判据与文案都只许有一份。**
     name = "公众号·阅读数列表轮转"
-    if not rows:
-        return [{"name": name, "level": YELLOW, "detail": "最近没有监听轮,无从判断"}]
-    if not parsed:
+    family, shape, action = _weread_list_family(db, rounds=max(int(rounds), 5))
+    if family == "unknown":
         return [{"name": name, "level": YELLOW,
-                 "detail": f"最近 {len(rows)} 轮记录里都没有 `weread_list(...)` 记账"
-                           f"(格式变了?那就等于这个指标瞎了)"}]
-    ok, app, off, skipped = parsed[0]
-    asked = ok + app
-    shape = f"最近一轮:网页问成 {ok} / App 问成 {app} / 被挡 {off} / 窗口外 {skipped}"
-    if asked:
-        return [{"name": name, "level": GREEN, "detail": shape + " —— 至少一条路在跑"}]
-    if off:
-        return [{"name": name, "level": RED,
-                 "detail": f"{shape} ⇒ **两条路都被额度/风控挡掉了**"
-                           f"(与「窗口坏了」不是一回事:这是外因,该等或换会话,别改代码)。"
-                           f"看 `weread_budget` 的熔断记录"}]
-    return [{"name": name, "level": RED,
-             "detail": f"{shape} ⇒ **谁都没问过**(ok/app/off 全 0 而窗口外满员)"
-                       f"⇒ **轮转窗口坏了**。2026-10-08 那次就是这个形状:"
-                       f"`_list_window` 的窗口被**没有 bookId 的号**占满(它们不可能被问列表),"
-                       f"于是真有 bookId 的号**恒在窗口外**、两条路一次都没被调用。"
-                       f"查 `_listen._list_window` 与 `_list_key`"}]
+                 "detail": f"{shape}(格式变了?那就等于这个指标瞎了)"}]
+    return [{"name": name, "level": GREEN if family == "running" else RED,
+             "detail": f"{shape} ⇒ {action}"}]
 
 
 def collect_sections(db) -> list[tuple[str, list[dict]]]:

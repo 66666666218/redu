@@ -231,3 +231,55 @@ class TestListRotationIsTheEarlyDetector:
     def test_最近没有轮次时黄而不是红(self, session) -> None:
         row = ch.check_weread_list_rotation(session)[0]
         assert row["level"] == ch.YELLOW, row
+
+
+class Test两行体检不许给互相矛盾的动作:
+    """★★★ 2026-10-15 真实事故:**同一个断供,两行体检给了相反的动作。**
+
+    用户问「微信阅读还是没好没有阅读」时实跑体检,看到的是:
+
+      · `公众号·精确阅读数`      🟡 —— 让人**去模拟器里重登微信读书**(`scripts/weread_app_login.py`);
+      · `公众号·阅读数列表轮转`  🔴 —— **该等、别改代码**。
+
+    而当时两条路都是 `-2041`(**时限性**的限,已自愈过三次)——
+    ⇒ **那一行「去重登」的动作是错的**:重登修不了,还会把窗口推后
+    (本仓 2026-10-14 正是为此写下「中途反复探测只会把窗口推后」)。
+
+    ⇒ 纪律:**一个结论只能有一个出处**(与 `xhs_accounts.classify` 那条同源)。
+    判据抽到 `chain_health._weread_list_family`,两行都从它取动作。
+    """
+
+    def _today(self, session) -> None:
+        """今天库里的真实形状:两条路都被挡,而产出端一篇带阅读数的都没有。"""
+        _run(session, "accounts=129 new=13 failed=0 weread_list(ok=0 app=0 app_fail=2 "
+                      "app_blocked=25 off=1 off_with_new=13 skipped=65)")
+        _seed(session, 100, 0)
+
+    def test_被挡时两行都要说_等_且都不许叫人去重登(self, session) -> None:
+        self._today(session)
+        cov = ch.check_read_num_coverage(session)[0]
+        rot = ch.check_weread_list_rotation(session)[0]
+        assert rot["level"] == ch.RED and cov["level"] == ch.RED
+        for row in (cov, rot):
+            assert "weread_app_login" not in row["detail"], (
+                f"又把人指去重登了 —— 当时的真因是 `-2041`(时限性),动作是等。{row['detail']}")
+            assert "等" in row["detail"], f"必须说清动作是「等」:{row['detail']}"
+        assert "被挡" in cov["detail"] or "挡" in cov["detail"], "要说清是哪一族"
+
+    def test_窗口坏了时两行都要指向改代码(self, session) -> None:
+        """反面对照:另一族的动作是**改代码** —— 两行同样不许打架。"""
+        _run(session, "weread_list(ok=0 app=0 off=0 off_with_new=1 skipped=79)")
+        _seed(session, 100, 0)
+        cov = ch.check_read_num_coverage(session)[0]
+        rot = ch.check_weread_list_rotation(session)[0]
+        assert rot["level"] == ch.RED
+        for row in (cov, rot):
+            assert "_list_window" in row["detail"], row["detail"]
+
+    def test_没有记账时给的是决策流程而不是单一动作(self, session) -> None:
+        """⚠️ 什么都不记时**不能猜家族**:要给"先看哪个数、再决定动作"的流程。"""
+        _seed(session, 100, 0)
+        cov = ch.check_read_num_coverage(session)[0]
+        assert "weread_list" in cov["detail"], "要教人先去看记账"
+        assert "窗口坏了" in cov["detail"] and "重登" in cov["detail"], \
+            "三种形状的处置都要列出来"
