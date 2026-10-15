@@ -57,3 +57,27 @@ def _reset_source_breaker():
     S._SOURCE_TRIPPED.clear()
     yield
     S._SOURCE_TRIPPED.clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_feishu(monkeypatch):
+    """测试**绝不许**真的往飞书投递消息(2026-10-16 实测踩到)。
+
+    ⚠️ **事故**:`test_续期后刷新失败要告警` 触发了 `notify_incident`,而它**真的发出去了** ——
+    管理员群收到一条「🔴 迅雷 refresh_token 已失效,需重新扫码」,**里面还带着测试替身的
+    traceback**(`_wire.<locals>.<lambda>() takes from 1 to 2 positional arguments but 3 were given`)。
+    后果:用户拿着这条**假告警**去重扫一个**根本没坏**的账号。
+
+    ⇒ **假告警与假成功一样有害**(狼来了:多来几次,真出事时就没人信了)。
+    ⇒ 拦在**唯一的出口**上(`FeishuClient.send` / `send_card`),默认**不可投递**。
+    要断言"发了什么"的用例**自己 monkeypatch**(本仓既有用例一直都是那么写的)。
+    ⚠️ 返回 `False`(而不是抛)是为了不误伤"网络失败返回 False"这类既有语义 ——
+    这次要治的是**真的投递出去了**,不是返回值。
+    """
+    from app.services import feishu_client
+
+    def _blocked(self, *a, **k):  # noqa: ARG001
+        return False
+
+    monkeypatch.setattr(feishu_client.FeishuClient, "send", _blocked, raising=False)
+    monkeypatch.setattr(feishu_client.FeishuClient, "send_card", _blocked, raising=False)

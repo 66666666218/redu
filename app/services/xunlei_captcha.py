@@ -29,7 +29,7 @@ _CREDS_KEY = "xunlei"
 _PAN_HOME = "https://pan.xunlei.com/"
 # 兜底用的分享页(DB 里没有群分享时用它触发网页铸 captcha)
 _FALLBACK_SHARE = "https://pan.xunlei.com/s/VOtw0rXU99xNQ-XD-0vtBexoA1?pwd=gcsk"
-_last_minted: float = 0.0
+_last_minted: dict[str, float] = {}      #: ★ **按账号**记(见 `refresh`)—— 全局一份会让 2 号被 1 号的冷却挡掉
 _last_error: str = ""
 
 
@@ -55,14 +55,14 @@ def _pick_share_url() -> str:
     return _FALLBACK_SHARE
 
 
-def _mint_via_web(share_url: str) -> dict:
+def _mint_via_web(share_url: str, cookie_key: str = _CREDS_KEY) -> dict:
     """开浏览器铸一枚 captcha。返回 `{token, device_id, client_id}` + 可能更新过的 token。
 
     失败返回 `{}`(调用方自己决定怎么办),不抛 —— 它跑在转存重试路径上。
     """
     from app.services import xunlei_transfer as xt
 
-    cred = xt._credentials()
+    cred = xt._credentials(cookie_key=cookie_key)
     if not cred:
         return {}
     try:
@@ -139,17 +139,23 @@ def _mint_via_web(share_url: str) -> dict:
     return minted
 
 
-def refresh(force: bool = False) -> bool:
+def refresh(force: bool = False, cookie_key: str = _CREDS_KEY) -> bool:
     """铸一枚新 captcha 并写回 cookie_store。成功 True;冷却中/失败 False。
 
     `force=True` 跳过冷却(给"已经确定失效、要立刻补"的场景)。
+
+    ★ **2026-10-16:按账号**(`cookie_key`)—— 多账号下必须铸**那一枚**的 captcha,
+    否则 2 号过期后永远自愈不了(铸出来的是 1 号的,它拿去用照样 `captcha_invalid`)。
+    ⚠️ 冷却也**按账号记**(见 `_last_minted`):原来是一份全局时间戳 ⇒ 1 号刚铸过会让
+    **2 号的补铸被冷却挡掉**,而那时 2 号正需要它。
     """
-    global _last_minted, _last_error
-    if not force and time.time() - _last_minted < _MIN_INTERVAL:
-        logger.info("captcha 续期在冷却中(%.0fs 前刚铸过)", time.time() - _last_minted)
+    global _last_error
+    if not force and time.time() - _last_minted.get(cookie_key, 0.0) < _MIN_INTERVAL:
+        logger.info("captcha 续期在冷却中(%s:%.0fs 前刚铸过)", cookie_key,
+                    time.time() - _last_minted.get(cookie_key, 0.0))
         return False
-    minted = _mint_via_web(_pick_share_url())
-    _last_minted = time.time()
+    minted = _mint_via_web(_pick_share_url(), cookie_key)
+    _last_minted[cookie_key] = time.time()
     if not minted.get("token"):
         _last_error = "没铸到 captcha(页面可能被要求登录)"
         logger.warning("captcha 续期失败:%s", _last_error)
@@ -167,13 +173,13 @@ def refresh(force: bool = False) -> bool:
         uid = db.scalar(select(User.id).where(User.enabled.is_(True)).order_by(User.id))
         if not uid:
             return False
-        cur = dict(xt._credentials())
+        cur = dict(xt._credentials(cookie_key=cookie_key))
         for k in ("access_token", "refresh_token", "expires_at"):    # 网页轮换过的优先
             if minted.get(k):
                 cur[k] = minted[k]
         cur.update(captcha_token=minted["token"], device_id=minted["device_id"],
                    client_id=minted["client_id"])
-        set_cookie(db, uid, _CREDS_KEY, json.dumps(cur, ensure_ascii=False))
+        set_cookie(db, uid, cookie_key, json.dumps(cur, ensure_ascii=False))
 
         # ⚠️⚠️ **续期后立刻验一次刷新**(2026-10-05):网页兑换**可能已经把 refresh_token
         # 换掉**,而"**服务端轮换了、页面却没落到 localStorage**"这种情况**我们读不回来** ——
@@ -184,7 +190,7 @@ def refresh(force: bool = False) -> bool:
         # 代价是每次续期多一次刷新调用(续期本身有 `_MIN_INTERVAL` 冷却,很便宜)。
         try:
             xt._refresh_access_token(cur.get("refresh_token") or "",
-                                     cur.get("client_id") or "")
+                                     cur.get("client_id") or "", cookie_key)
             logger.info("captcha 续期后刷新验证通过(凭据已钉死为最新)")
         except Exception as exc:  # noqa: BLE001 - 验活失败**必须说出来**,不能只写日志
             logger.error("captcha 续期后刷新验证失败:%s", str(exc)[:160])
@@ -208,6 +214,11 @@ def refresh(force: bool = False) -> bool:
 
 
 def status() -> dict:
-    """给巡检/接口看的:上次铸造时间与最近一次错误。"""
-    return {"last_minted_at": _last_minted, "last_error": _last_error,
-            "cooldown_seconds": _MIN_INTERVAL}
+    """给巡检/接口看的:上次铸造时间与最近一次错误。
+
+    ⚠️ `last_minted_at` **仍是一个数**(跨账号取最近的那次)—— 保持接口形状不变,
+    免得前端/看板因为改成 dict 而显示不出来;每账号的明细放在 `per_account` 里。
+    """
+    return {"last_minted_at": max(_last_minted.values(), default=0.0),
+            "per_account": dict(_last_minted),
+            "last_error": _last_error, "cooldown_seconds": _MIN_INTERVAL}

@@ -129,6 +129,17 @@ def _credentials(settings=None, *, cookie_key: str = "xunlei") -> dict:
             except ValueError:
                 continue
             if data.get("refresh_token"):
+                #: ★★★ **闸门:凭据内部必须自洽**(2026-10-16)—— 库里的 `sub` 与
+                #: `access_token` 里的 JWT `sub` **不一致**,说明这枚凭据被**别的账号的
+                #: token 覆盖过**(实测就是:`_refresh_access_token` 写死默认 key,给 2 号刷的
+                #: token 落进了 1 号)⇒ 拿它去问,答的是**另一个账号**的数,而**全程不报错**。
+                #: ⇒ **宁可当"没凭据"**(调用方会看到"取不到"),也别把串了号的凭据递出去。
+                _s, _j = str(data.get("sub") or ""), _jwt_sub(str(data.get("access_token") or ""))
+                if _s and _j and _s != _j:
+                    logger.error("迅雷凭据**自相矛盾**:key=%s 记的 sub=%s,而 access_token 的 "
+                                 "sub=%s ⇒ **疑似被别的账号覆盖**,本轮拒用(重新登录那一枚)",
+                                 cookie_key, _s, _j)
+                    return {}
                 #: ★★★ **给凭据盖上"我是哪一枚"**(2026-10-16):见 `_file_key` 的说明 ——
                 #: 否则每个"拿凭据去做别的事"的调用点都得**自己记得**把 `cookie_key` 传下去,
                 #: 而漏传**不报错**、只是悄悄用了别的账号的身份(我一天漏了两次)。
@@ -219,11 +230,18 @@ def iso_expires_at(epoch: float | None = None, *, seconds_from_now: int | None =
             .isoformat(timespec="milliseconds").replace("+00:00", "Z"))
 
 
-def _refresh_access_token(refresh_token: str, client_id: str = "") -> str:
+def _refresh_access_token(refresh_token: str, client_id: str = "",
+                          cookie_key: str = "xunlei") -> str:
     """用 refresh_token 换 access_token(**client_id 必须是网页版那个**)。
 
     ⚠️ **顺手把轮换后的 `refresh_token` 写回**(2026-10-05 修):
     这个端点回的新 `refresh_token` 覆盖旧的,不存回去下次就 `invalid_grant`。
+
+    ⚠️⚠️ **2026-10-16 必须带 `cookie_key`** —— 原来 `_save_credentials(patch)` 写死默认 key
+    ⇒ **给 2 号刷新出来的 token 会被写进 1 号**。实测代价很实在:1 号的记录里
+    `sub` 还是 `1050028885`,而**它那枚 `access_token` 的 JWT sub 已经是 `1579917402`**
+    ⇒ 拿"1 号"去问配额,答的是 2 号的数(两个号都显示 0.74%)。
+    **同一族:凡是"按账号"的东西,一处写死就会串号。**
     """
     resp = requests.post(
         f"{_AUTH}/v1/auth/token",
@@ -251,7 +269,7 @@ def _refresh_access_token(refresh_token: str, client_id: str = "") -> str:
         if new_rt and new_rt != refresh_token:
             patch["refresh_token"] = new_rt
             logger.info("迅雷 refresh_token 已轮换,正在写回")
-        _save_credentials(patch)
+        _save_credentials(patch, cookie_key)
     except Exception:  # noqa: BLE001 - 写回失败不该把这次刷新作废(本次 token 仍可用)
         logger.exception("迅雷凭据写回失败(本次 token 仍可用)")
     return token
@@ -262,7 +280,9 @@ def _access_token(cred: dict) -> str:
     at = cred.get("access_token") or ""
     if at and _jwt_exp(at) > time.time() + 120:
         return at
-    return _refresh_access_token(cred["refresh_token"], cred.get("client_id") or _WEB_CLIENT_ID)
+    #: ★ 用凭据自带的 `_cookie_key`(见 `_file_key`)⇒ 刷新的写回**落在同一个账号**上。
+    return _refresh_access_token(cred["refresh_token"], cred.get("client_id") or _WEB_CLIENT_ID,
+                                 _file_key(cred))
 
 
 def _headers(access_token: str, captcha: str, device_id: str,
@@ -319,28 +339,36 @@ def _fresh_cred(cred: dict, cookie_key: str | None = None) -> dict:
     return _credentials(cookie_key=cookie_key or _file_key(cred)) or cred
 
 
-def _renew_captcha() -> bool:
-    """借网页版铸一枚新 captcha 并写回库(实现在 `app/services/xunlei_captcha.py`)。"""
+def _renew_captcha(cookie_key: str = "xunlei") -> bool:
+    """借网页版铸一枚新 captcha 并写回库(实现在 `app/services/xunlei_captcha.py`)。
+
+    ★ **2026-10-16:必须按账号铸**(`cookie_key`)—— 原来写死默认账号 ⇒
+    **2 号的 captcha 过期后永远自愈不了**(铸的是 1 号那枚)⇒ 它的转存/探配额
+    会一直 `captcha_invalid`,而我们只看到"探不到"。
+    """
     try:
         from app.services import xunlei_captcha
 
-        return xunlei_captcha.refresh(force=True)
+        return xunlei_captcha.refresh(force=True, cookie_key=cookie_key)
     except Exception:  # noqa: BLE001 - 续期失败不该盖住原始错误
         logger.exception("captcha 续期失败")
         return False
 
 
-def _with_captcha_retry(fn):
+def _with_captcha_retry(fn, cred: dict | None = None):
     """跑 `fn()`;命中 `_CaptchaExpired` 就**重铸 captcha 再跑一次**。
 
     captcha 寿命很短(网页给它标的过期时间只有十几分钟),所以"过期 → 重铸 → 重试"必须
     是自动的,否则盘写操作动不动就要人工补。**只重试一次**:再失败就是续期本身有问题。
+
+    ★ **2026-10-16:要带上这一发用的是哪个账号的凭据**(`cred`)—— 续期必须**铸同一个号**的,
+    否则多账号下 2 号的 captcha 永远自愈不了(见 `_renew_captcha`)。
     """
     for attempt in (0, 1):
         try:
             return fn()
         except _CaptchaExpired:
-            if attempt or not _renew_captcha():
+            if attempt or not _renew_captcha(_file_key(cred)):
                 raise
     raise RuntimeError("unreachable")
 
@@ -454,7 +482,7 @@ def verify(settings=None) -> dict:
         return {"ok": True, "message": "ok", "quota": (data.get("quota") or {})}
 
     try:
-        return _with_captcha_retry(_once)
+        return _with_captcha_retry(_once, cred)
     except _CaptchaExpired:
         return {"ok": False, "message": "captcha 失效且自动续期失败 —— 需要重新扫码登录"}
     except Exception as exc:  # noqa: BLE001
@@ -495,7 +523,7 @@ def trash_files(file_ids: list[str], cred: dict | None = None) -> dict:
                 "deleted": deleted, "errors": errors}
 
     try:
-        return _with_captcha_retry(_once)
+        return _with_captcha_retry(_once, cred)
     except _CaptchaExpired:
         return {"status": "failed", "message": "captcha 失效且自动续期失败 —— 需要重新扫码登录",
                 "deleted": 0, "errors": []}
@@ -535,7 +563,7 @@ def move_files(file_ids: list[str], parent_id: str, cred: dict | None = None) ->
                 "moved": moved, "errors": errors}
 
     try:
-        return _with_captcha_retry(_once)
+        return _with_captcha_retry(_once, cred)
     except _CaptchaExpired:
         return {"status": "failed", "message": "captcha 失效且自动续期失败 —— 需要重新扫码登录",
                 "moved": 0, "errors": []}
@@ -625,7 +653,7 @@ def _probe_quota(cred: dict | None = None, cookie_key: str | None = None) -> dic
         # ⚠️ 配额接口**也要 captcha** —— 必须走自愈重试,否则 captcha 一过期,闸门就
         # "什么都不知道"而放行(2026-10-02 实测:闸门刚上线就因为这个漏了一次,
         # 3 条被无条件搬、撞 `file_space_not_enough`)
-        quota = (_with_captcha_retry(_once).get("quota") or {})
+        quota = (_with_captcha_retry(_once, cred).get("quota") or {})
         limit, usage = int(quota.get("limit") or 0), int(quota.get("usage") or 0)
         if not limit:
             return {}
@@ -809,7 +837,7 @@ def share_files(file_ids: list[str], expiration_days: str = "7",
                     "code": share.get("pass_code") or "",
                     "share_id": share.get("share_id") or ""}
 
-        return _with_captcha_retry(_once)
+        return _with_captcha_retry(_once, cred)
     except _CaptchaExpired:
         return {"status": "failed", "message": "captcha 失效且自动续期失败 —— 需要重新扫码登录"}
     except Exception as exc:  # noqa: BLE001
@@ -857,7 +885,7 @@ def list_files(parent_id: str = "", cred: dict | None = None, limit: int = 200,
         return files if include_trashed else [f for f in files if not f.get("trashed")]
 
     try:
-        return _with_captcha_retry(_once)
+        return _with_captcha_retry(_once, cred)
     except XunleiDriveError:
         raise
     except Exception as exc:  # noqa: BLE001 - 包成自己的异常类型,好让调用方区分
@@ -1111,7 +1139,7 @@ def transfer_and_share(share_url: str, parent_id: str = "", settings=None,
                 "code": share.get("pass_code") or "", "fid": ",".join(file_ids)}
 
     try:
-        return _with_captcha_retry(_once)
+        return _with_captcha_retry(_once, cred)
     except _CaptchaExpired:
         return {"status": "failed", "message": "captcha 失效且自动续期失败 —— 需要重新扫码登录"}
     except Exception as exc:  # noqa: BLE001 - 对外只返回结构化失败,不抛

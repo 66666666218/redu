@@ -36,14 +36,14 @@ def session():
 def _wire(session, monkeypatch):
     """把 db 与"已配凭据"接好,并清掉冷却。"""
     monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
-    monkeypatch.setattr(xc, "_last_minted", 0.0)
+    monkeypatch.setattr(xc, "_last_minted", {})
     monkeypatch.setattr(xt, "_credentials",
-                        lambda settings=None: {"access_token": "old", "refresh_token": "r0"})
+                        lambda settings=None, **kw: {"access_token": "old", "refresh_token": "r0"})
     # ⚠️ **必须 mock 掉"续期后立刻验一次刷新"那步**(2026-10-05 加的功能):
     # 它**会真发请求**到 auth.xunlei.com —— 不 mock 的话本文件的测试会变成联网测试
     # (实测单条从 ~0.1s 涨到 1.82s,而且依赖外网)。本仓的纪律是**测试离线**。
     monkeypatch.setattr(xt, "_refresh_access_token",
-                        lambda rt, cid="": "A-VERIFIED-OK")
+                        lambda rt, cid="", cookie_key="xunlei": "A-VERIFIED-OK")
 
 
 def _capture_written(monkeypatch) -> dict:
@@ -60,7 +60,7 @@ def test_refresh_mints_and_persists_all_three(monkeypatch) -> None:
     ⚠️ 只存 token 是不行的:captcha 与 `device_id`/`client_id` **三者绑定**,
     换了 device 就 `captcha_invalid`(2026-10-02 实测踩过)。
     """
-    monkeypatch.setattr(xc, "_mint_via_web", lambda url: {
+    monkeypatch.setattr(xc, "_mint_via_web", lambda url, cookie_key="xunlei": {
         "token": "CK0-NEW", "device_id": "DEV1", "client_id": "CID1"})
     box = _capture_written(monkeypatch)
 
@@ -76,7 +76,7 @@ def test_refresh_keeps_rotated_tokens(monkeypatch) -> None:
 
     不回写 = 跑一次废一次(2026-10-02 就是这么把 refresh_token 用废的)。
     """
-    monkeypatch.setattr(xc, "_mint_via_web", lambda url: {
+    monkeypatch.setattr(xc, "_mint_via_web", lambda url, cookie_key="xunlei": {
         "token": "CK", "device_id": "D", "client_id": "C",
         "access_token": "A-NEW", "refresh_token": "R-NEW"})
     box = _capture_written(monkeypatch)
@@ -89,8 +89,8 @@ def test_refresh_keeps_rotated_tokens(monkeypatch) -> None:
 def test_refresh_respects_cooldown(monkeypatch) -> None:
     """冷却期内**不再开浏览器** —— 连环失败时否则会把浏览器开成串。"""
     called: list[str] = []
-    monkeypatch.setattr(xc, "_mint_via_web", lambda url: called.append(url) or {})
-    monkeypatch.setattr(xc, "_last_minted", time.time())
+    monkeypatch.setattr(xc, "_mint_via_web", lambda url, cookie_key="xunlei": called.append(url) or {})
+    monkeypatch.setattr(xc, "_last_minted", {"xunlei": time.time()})
     assert xc.refresh() is False and called == []
     xc.refresh(force=True)
     assert called == [xc._FALLBACK_SHARE]      # 库里没有群分享 → 用兜底链
@@ -98,7 +98,7 @@ def test_refresh_respects_cooldown(monkeypatch) -> None:
 
 def test_refresh_failure_is_reported_not_raised(monkeypatch) -> None:
     """铸失败(页面被要求登录等)→ 返回 False 并记下原因,**不抛**。"""
-    monkeypatch.setattr(xc, "_mint_via_web", lambda url: {})
+    monkeypatch.setattr(xc, "_mint_via_web", lambda url, cookie_key="xunlei": {})
     assert xc.refresh(force=True) is False
     assert "没铸到" in xc.status()["last_error"]
 
@@ -200,8 +200,8 @@ def test_注入给页面的_expires_at_是_iso_不是整数(monkeypatch) -> None
     monkeypatch.setitem(_s.modules, "playwright.sync_api", fake)
 
     monkeypatch.setattr(xt, "_credentials",
-                        lambda settings=None: {"access_token": "a", "refresh_token": "r0",
-                                               "client_id": "C", "device_id": "D"})
+                        lambda settings=None, **kw: {"access_token": "a", "refresh_token": "r0",
+                                                     "client_id": "C", "device_id": "D"})
     monkeypatch.setattr(xt, "_access_token", lambda cred: "a")
     monkeypatch.setattr(xt, "_jwt_exp", lambda t: 1759700000)
     monkeypatch.setattr(xt, "_jwt_sub", lambda t: "1")
@@ -235,11 +235,11 @@ def test_续期后刷新失败要当场告警(monkeypatch) -> None:
 
     所以续期后**立刻**用一次刷新把状态钉死;失败就**当场告警**。
     """
-    monkeypatch.setattr(xc, "_mint_via_web", lambda url: {
+    monkeypatch.setattr(xc, "_mint_via_web", lambda url, cookie_key="xunlei": {
         "token": "CK", "device_id": "D", "client_id": "C"})
     _capture_written(monkeypatch)
 
-    def _boom(rt, cid=""):
+    def _boom(rt, cid="", cookie_key="xunlei"):
         raise RuntimeError("迅雷刷新 token 失败:{'error': 'invalid_grant'}")
 
     monkeypatch.setattr(xt, "_refresh_access_token", _boom)
@@ -256,7 +256,7 @@ def test_续期后刷新失败要当场告警(monkeypatch) -> None:
 
 def test_续期后刷新成功就不告警(monkeypatch) -> None:
     """反向:验证通过时**不该**打扰人(告警疲劳会让真警报被忽略)。"""
-    monkeypatch.setattr(xc, "_mint_via_web", lambda url: {
+    monkeypatch.setattr(xc, "_mint_via_web", lambda url, cookie_key="xunlei": {
         "token": "CK", "device_id": "D", "client_id": "C"})
     _capture_written(monkeypatch)
     sent: list = []

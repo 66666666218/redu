@@ -114,7 +114,7 @@ def test_with_captcha_retry_renews_once_then_gives_up() -> None:
         return "ok"
 
     orig = xt._renew_captcha
-    xt._renew_captcha = lambda: (tries.__setitem__("renew", tries["renew"] + 1) or True)
+    xt._renew_captcha = lambda cookie_key="xunlei": (tries.__setitem__("renew", tries["renew"] + 1) or True)
     try:
         assert _with_captcha_retry(flaky) == "ok"
         assert (tries["n"], tries["renew"]) == (2, 1)
@@ -156,7 +156,7 @@ def test_transfer_renews_captcha_and_succeeds(monkeypatch) -> None:
     monkeypatch.setattr(xt.requests, "get", fake_get)
     monkeypatch.setattr(xt.requests, "post", fake_post)
     monkeypatch.setattr(xt, "_renew_captcha",
-                        lambda: (calls.__setitem__("renew", calls["renew"] + 1) or True))
+                        lambda cookie_key="xunlei": (calls.__setitem__("renew", calls["renew"] + 1) or True))
 
     out = xt.transfer_and_share("https://pan.xunlei.com/s/S?pwd=p")
     assert out["status"] == "ok", out
@@ -175,7 +175,7 @@ def test_transfer_says_rescan_when_renewal_fails(monkeypatch) -> None:
         "access_token": "a", "captcha_token": "c", "device_id": "d", "client_id": "x"})
     monkeypatch.setattr(xt, "_drive_headers", lambda cred: {})
     monkeypatch.setattr(xt.requests, "get", always_invalid)
-    monkeypatch.setattr(xt, "_renew_captcha", lambda: False)
+    monkeypatch.setattr(xt, "_renew_captcha", lambda cookie_key="xunlei": False)
 
     out = xt.transfer_and_share("https://pan.xunlei.com/s/S?pwd=p")
     assert out["status"] == "failed" and "重新扫码" in out["message"]
@@ -195,7 +195,7 @@ def test_retry_uses_renewed_credentials(monkeypatch) -> None:
     monkeypatch.setattr(xt, "_credentials", lambda settings=None, **kw: store[min(len(seen), 1)])
     monkeypatch.setattr(xt, "_drive_headers",
                         lambda c: (seen.append(c["captcha_token"]) or {}))
-    monkeypatch.setattr(xt, "_renew_captcha", lambda: True)
+    monkeypatch.setattr(xt, "_renew_captcha", lambda cookie_key="xunlei": True)
 
     def fake_get(url, **kw):
         if url.endswith("/drive/v1/share"):
@@ -238,7 +238,7 @@ def test_quota_info_self_heals_captcha_on_400(monkeypatch) -> None:
     monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
     monkeypatch.setattr(xt.requests, "get", fake_get)
     monkeypatch.setattr(xt, "_renew_captcha",
-                        lambda: (calls.__setitem__("renew", calls["renew"] + 1) or True))
+                        lambda cookie_key="xunlei": (calls.__setitem__("renew", calls["renew"] + 1) or True))
 
     xt.reset_quota_cache()          # 探针有 60s 缓存,要"冷的"必须显式清(否则受测试顺序影响)
     info = xt.quota_info()
@@ -432,7 +432,7 @@ def test_list_files_raises_when_captcha_renew_fails(monkeypatch) -> None:
     from app.services import xunlei_transfer as xt
 
     _stub_request_path(monkeypatch, xt)
-    monkeypatch.setattr(xt, "_renew_captcha", lambda: False)     # 续期失败
+    monkeypatch.setattr(xt, "_renew_captcha", lambda cookie_key="xunlei": False)     # 续期失败
 
     class _R:
         status_code = 403
@@ -736,8 +736,8 @@ def test_refresh_writes_back_the_rotated_refresh_token(monkeypatch, session) -> 
         {"access_token": "NEW", "refresh_token": "RT-NEW", "expires_in": 43200}))
     # `_save_credentials` 自己开 session,这里把工厂指到同一个引擎
     monkeypatch.setattr(xt, "_save_credentials",
-                        lambda patch: cookie_store.set_cookie(
-                            session, 1, "xunlei",
+                        lambda patch, cookie_key="xunlei": cookie_store.set_cookie(
+                            session, 1, cookie_key,
                             json.dumps({**old, **{k: v for k, v in patch.items() if v}})))
 
     assert xt._refresh_access_token("RT-OLD", "web") == "NEW"
@@ -756,7 +756,8 @@ def test_refresh_keeps_old_token_when_server_does_not_rotate(monkeypatch) -> Non
     saved: list[dict] = []
     monkeypatch.setattr(xt.requests, "post", lambda *a, **k: _FakeResp(
         {"access_token": "NEW2", "expires_in": 43200}))       # 没回 refresh_token
-    monkeypatch.setattr(xt, "_save_credentials", lambda patch: saved.append(patch))
+    monkeypatch.setattr(xt, "_save_credentials",
+                        lambda patch, cookie_key="xunlei": saved.append(patch))
 
     assert xt._refresh_access_token("RT-KEEP", "web") == "NEW2"
     assert saved and "refresh_token" not in saved[0], "没轮换就不该动 refresh_token"
