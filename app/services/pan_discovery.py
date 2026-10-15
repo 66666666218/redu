@@ -268,7 +268,9 @@ def transfer_pan_url(session, user_id: int, pan_url: str, settings=None,
         if kind == "quark":
             from app.services.quark_transfer import QuarkTransfer
 
-            ck = (get_cookie(session, user_id, "quark")     # 按用户配的
+            from app.services import pan_accounts as _A
+
+            ck = (_A.cookie_for(session, "quark", user_id=user_id)   # ★ 按池取号(没配池=默认 key)
                   or getattr(settings, "quark_cookie", "") or "").strip()   # .env 兜底
             if not ck:
                 # ⚠️ **可重试**:配上 Cookie 就能搬 —— 标 pending 而不是终态,
@@ -289,7 +291,9 @@ def transfer_pan_url(session, user_id: int, pan_url: str, settings=None,
         if kind == "baidu":
             from app.services.baidupan_transfer import BaiduPanClient, extract_pwd
 
-            ck = get_cookie(session, user_id, "baidupan")
+            from app.services import pan_accounts as _A
+
+            ck = _A.cookie_for(session, "baidupan", user_id=user_id)
             if not ck:
                 return {"status": "pending", "message": "未配百度网盘 Cookie(配上后会自动重试)",
                         "our_url": "", "code": ""}

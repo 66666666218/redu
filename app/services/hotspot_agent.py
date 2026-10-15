@@ -1536,10 +1536,11 @@ def _auto_transfer(session, user_id: int, pan_url: str, settings) -> str:
     仅夸克(百度转存是另一套实现,按需再接)。触发频率低——`generate_draft` 按需调用,
     不会像监听轮的批量转存那样打风控。
     """
-    from app.services.cookie_store import get_cookie
     from app.services.quark_transfer import QuarkTransfer
 
-    ck = get_cookie(session, user_id, "quark")
+    from app.services import pan_accounts as _A
+
+    ck = _A.cookie_for(session, "quark", user_id=user_id)
     if not ck:
         logger.info("自动转存跳过:未配夸克 Cookie")
         return ""

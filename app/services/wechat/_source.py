@@ -791,9 +791,12 @@ def _quark_cookie(session: Session, user_id: int, settings: Settings) -> str:
     与 baidupan 对齐(网盘转存是"往 Cookie 主人的盘里写"的个人动作):
     只挂 .env 全局值时,运营者改一次要重启容器,多用户也没法各用自己的盘。
     """
-    from app.services.cookie_store import get_cookie
+    #: ★ **按池取号**(2026-10-16):池里配了多账号就挑「最空的」那一个;没配池 ⇒
+    #: 就是默认 key 那一枚 ⇒ **单账号行为逐字不变**。见 `pan_accounts.cookies_for` 的说明。
+    from app.services import pan_accounts as _A
 
-    return (get_cookie(session, user_id, "quark") or settings.quark_cookie or "").strip()
+    return (_A.cookie_for(session, "quark", user_id=user_id)
+            or settings.quark_cookie or "").strip()
 def _weread_cookie(session: Session, user_id: int, settings: Settings) -> str:
     """微信读书 Cookie:优先用户在平台内配置的「weread」,其次全局 WEREAD_COOKIE。
 

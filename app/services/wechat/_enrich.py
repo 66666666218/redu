@@ -515,7 +515,6 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
         from app.services.alert_service import notify_incident
         from app.services.baidupan_transfer import (BaiduPanAuthError, BaiduPanClient,
                                                     extract_pwd)
-        from app.services.cookie_store import get_cookie
 
         def _baidu_dead_alert(why: str) -> None:
             notify_incident(session, user_id, "wechat", "百度网盘 Cookie 已失效,转存停用",
@@ -523,7 +522,9 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                             "更新到「Cookie 管理」页的 baidupan 平台(监听不受影响,仅转存暂停)",
                             settings=settings)
 
-        bck = get_cookie(session, user_id, "baidupan") or ""
+        from app.services import pan_accounts as _A
+
+        bck = _A.cookie_for(session, "baidupan", user_id=user_id) or ""
         if not bck:
             notify_incident(session, user_id, "wechat", "百度盘链未转存(缺百度网盘 Cookie)",
                             "本轮识别到百度分享链但无可用 Cookie,故只推原文。转存在"

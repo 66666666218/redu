@@ -261,12 +261,13 @@ def drain(session, user_id: int, settings=None, limit: int | None = None) -> dic
     **每条都在自己的事务边界内**:一条失败不影响其余(`rollback` 后继续)。
     """
     from app.db.models import DouyinLead
-    from app.services.cookie_store import get_cookie
     from app.services.quark_transfer import QuarkTransfer
 
     if limit is None:
         limit = int(getattr(settings, "quark_kouling_per_run", 2) or 2)
-    ck = (get_cookie(session, user_id, "quark") or "").strip()
+    from app.services import pan_accounts as _A
+
+    ck = (_A.cookie_for(session, "quark", user_id=user_id) or "").strip()
     if not ck:
         return {"status": "no_cookie", "tried": 0}
 

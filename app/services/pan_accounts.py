@@ -55,10 +55,18 @@ class AccountRef:
 
     @property
     def usable_hint(self) -> float:
-        """择一排序键:越小越该先挑。满了的排到最后(不是排除 —— 全满时还得知道是谁满)。"""
+        """择一排序键:**越小越该先挑**。满了的排到最后(不是排除 —— 全满时还得知道是谁满)。
+
+        ⚠️⚠️ **"未知"必须排在最前,不是最后**(2026-10-16 修)。原来写的是
+        `1.0 if self.last_ratio is None`,而实测到的比例是 `0.9x` ——
+        **0.9x < 1.0 ⇒ "实测 90% 满的老号"排在"刚加、还没探过的新号"前面**
+        ⇒ 与"挑最空的"**正好相反**,而且**新加的号永远轮不到**
+        (用户口径「一个盘满了增加多个账号补上」—— 加进来的那个号就是最该先试的)。
+        ⇒ 未知 = **乐观**(先试它):试错的代价只是浪费一次转存,而漏试的代价是**整个多账号白加**。
+        """
         if self.full_until and self.full_until > datetime.now().isoformat():
             return 2.0
-        return 1.0 if self.last_ratio is None else float(self.last_ratio)
+        return 0.0 if self.last_ratio is None else float(self.last_ratio)
 
 
 def _load(session: Session) -> dict:
@@ -195,3 +203,42 @@ def add_account(session: Session, platform: str, label: str, cookie: str, *,
 
 __all__ = ["AccountRef", "accounts", "ordered", "cookie_of", "report", "add_account", "default_ref",
            "default_cookie_key", "FULL_COOLDOWN_MIN"]
+
+
+# ---------------------------------------------------------------- 按池取号(统一入口)
+
+def cookies_for(session, platform: str, *, user_id: int = 1) -> list[tuple[str, str]]:
+    """★ **按池取号**:返回 `[(label, cookie), …]`,**最空的在前**。
+
+    池里**没配** ⇒ 只返回默认 key 那一枚 ⇒ **单账号行为逐字不变**。
+    取不到 cookie 的账号**跳过**(不让一枚坏凭据挡住后面的)。
+
+    ⚠️⚠️ **为什么必须集中在这里**(2026-10-16 用户口径「先跑通多账户轮换」):
+    取这三个盘 cookie 的地方原本**八处各写一遍** —— 夸克 5 处
+    (`wechat/_source._quark_cookie` / `pan_auto_clean` / `pan_discovery` /
+    `quark_kouling` / `hotspot_agent`)、百度 3 处
+    (`pan_auto_clean` / `pan_discovery` / `wechat/_enrich`)——**没有一处看池**
+    ⇒ **账号登记了也不会被用**,"满了自动换下一个"是句空话。
+    ⇒ 接池只需接这一处;调用方要"换下一个"就拿整个列表循环(见 `xunlei_group` 的择一循环)。
+    """
+    from app.services.cookie_store import get_cookie
+
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for r in ordered(session, platform, user_id=user_id):
+        try:
+            ck = str(get_cookie(session, r.user_id or user_id, r.cookie_key) or "").strip()
+        except Exception:  # noqa: BLE001 - 解不开某一枚不该挡住后面的
+            logger.debug("取账号 %s 的 cookie 失败", r.cookie_key, exc_info=True)
+            ck = ""
+        if not ck or ck in seen:
+            continue
+        seen.add(ck)
+        out.append((r.label or r.cookie_key, ck))
+    return out
+
+
+def cookie_for(session, platform: str, *, user_id: int = 1) -> str:
+    """按池取号的**单个**版本(现在最该用的那一个)。取不到回空串 —— 调用方自己回落到 `.env`。"""
+    got = cookies_for(session, platform, user_id=user_id)
+    return got[0][1] if got else ""

@@ -58,11 +58,14 @@ def _cap(plan_delete: list[dict], left: int) -> tuple[list[dict], int]:
 def clean_quark(db: Session, user_id: int, settings, *, dry_run: bool, left: int) -> dict:
     """夸克:去重(只删**同一份文件出现在 ≥2 个家里**的那种)。返回本轮统计。"""
     from app.services import quark_dup
-    from app.services.cookie_store import get_cookie
     from app.services.quark_dup_cache import ScanCache
     from app.services.quark_transfer import QuarkTransfer
 
-    ck = (get_cookie(db, user_id, "quark") or getattr(settings, "quark_cookie", "") or "").strip()
+    #: ★ **按池取号**(2026-10-16):见 `pan_accounts.cookies_for`(没配池 = 老行为)
+    from app.services import pan_accounts as _A
+
+    ck = (_A.cookie_for(db, "quark", user_id=user_id)
+          or getattr(settings, "quark_cookie", "") or "").strip()
     if not ck:
         return {"pan": "夸克", "state": "no_cookie"}
     scope = str(getattr(settings, "pan_auto_clean_quark_month", "") or "")
@@ -142,10 +145,11 @@ def clean_xunlei(db: Session, user_id: int, settings, *, dry_run: bool, left: in
 def report_baidu(db: Session, user_id: int, settings) -> dict:
     """百度:**只报告,永不自动删**(它没有回收站,删了不可逆)。返回本轮统计。"""
     from app.services import pan_promo_sweep
-    from app.services.cookie_store import get_cookie
 
     # ⚠️ 平台键是 **`baidupan`**(不是 `baidu`)—— 与 `pan_discovery` / `_enrich` 同口径
-    ck = (get_cookie(db, user_id, "baidupan") or "").strip()
+    from app.services import pan_accounts as _A
+
+    ck = (_A.cookie_for(db, "baidupan", user_id=user_id) or "").strip()
     if not ck:
         return {"pan": "百度", "state": "no_cookie"}
     try:
