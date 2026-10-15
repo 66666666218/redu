@@ -175,23 +175,20 @@ def _specific_hint(hint: str) -> bool:
 
 
 def _title_claims(first: str, name: str) -> bool:
-    """库里的那条标题**到底说的是不是这个资源**:
+    """库里的那条标题**到底说的是不是这个资源**(判据见 `resource_library.title_claims`)。
 
-      · **以它开头**(名字就是标题主体,例:`左道陈家村🔥【AI漫剧】`),或
-      · 标题里**用《…》/【…】明确点名**了它(例:`?《左道陈家村》1-68集…`)。
+    ★★ **2026-10-15 收敛成单一出处**:实现搬去了 `resource_library.title_claims`,
+    这里只转发。原因:当天抖音卡片那个 bug,根子就是**这道护栏只加在了 `pan_discovery`、
+    没同步给 `douyin_leads`** —— 于是抖音那边一直是**裸包含**,
+    实测线索标题里的语气词 `啊啊啊` 命中了《镜外 Do or die》。
+    ⇒ **同一套纪律写两处,迟早一处先修、另一处照旧**(本仓母题)。
 
-    ⚠️ **只用"包含"是不够的** —— `无删减完整版` 这种词当然"包含"于一大堆标题,
-    那正是当天那场事故的入口。与 `douyin_leads._library_link` 的专指度护栏同一套纪律。
     ⚠️ 这道护栏**只能防新错配**,防不住"已经写错的 `our_url` 被抄下去" ——
     那部分要清(见 `scripts/cleanup_reuse_pollution.py`)。
     """
-    from app.services.resource_library import match_key
+    from app.services.resource_library import title_claims
 
-    if not first or not name:
-        return False
-    if match_key(first).startswith(match_key(name)):
-        return True
-    return f"《{name}》" in first or f"【{name}】" in first
+    return title_claims(first, name)
 
 
 def already_have(session, user_id: int, title: str) -> dict | None:

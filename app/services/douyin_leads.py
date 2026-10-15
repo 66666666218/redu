@@ -902,7 +902,7 @@ def _library_link(db, user_id: int, title: str, *, days: int = 90) -> dict | Non
 
     ⚠️ 匹配是**我们自己的库**(只读本地表),**不碰任何平台接口** —— 零风控风险。
     """
-    from app.services.resource_library import search_resources
+    from app.services.resource_library import search_resources, title_claims
 
     for name in _cand_names(title):
         try:
@@ -918,10 +918,23 @@ def _library_link(db, user_id: int, title: str, *, days: int = 90) -> dict | Non
             #   「**伪装直男**」的首选命中是一条「**高分双男主精选BL向…500部AI漫剧合集**」,
             #   而正确的专链(标题就是「《伪装直男》无雾版高清资源」)排在**第 2/3 位**。
             #   名字只在**别的标题/正文**里出现过 ⇒ 短名子串匹配**天然模糊**。
-            #   ⇒ 只认「**候选名出现在该链的首个标题里**」的命中;都不满足就**返回 None**。
             #   **给错链比不给链更坏**:用户点开会拿到完全不相干的东西。
-            first = str((h.get("titles") or [""])[0] or "")
-            if name not in first:
+            #
+            # ★★★ **2026-10-15 修「给错链」**:这道护栏原来写的是**裸包含**
+            #   (`if name not in first`),而候选名是**抽出来的** ——
+            #   `_cand_names` 只要 ≥3 字的正文片段都算一个候选 ⇒ **通用语气词也能命中**。
+            #   实测(用户报「同一个资源有的显示库里有、有的显示没有」时复现):
+            #     线索 id=519、标题《冰星漫剧》…!#朝朝入梦…**啊啊啊**
+            #     ⇒ 返回 `name='啊啊啊'`、链是 `pan.quark.cn/s/31e155e6fe75`,
+            #       而**那条链的标题是《镜外 Do or die》** —— 完全不相干。
+            #   ⇒ 改用**专指度护栏** `resource_library.title_claims`
+            #     (**与 `pan_discovery` 同一份实现**,不再各写一套):
+            #     必须「库里的标题**以它开头**」或「标题里 **《它》/【它】点名**」。
+            #   ⚠️ 对**全部** titles 判,不只 `titles[0]` —— `_rows_to_resources` 每条链最多留
+            #     2 条标题,而名字可能只在另一条里(**漏判会变成新的假阴性**)。
+            titles = [str(t or "") for t in (h.get("titles") or [])]
+            first = titles[0] if titles else ""
+            if not any(title_claims(t, name) for t in titles):
                 continue
             return {"name": name, "link": link, "title": first[:80]}
         # 该候选名的命中都过不了护栏 ⇒ 换下一个候选名(不拿"次优"凑数)

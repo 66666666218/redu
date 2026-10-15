@@ -1324,6 +1324,53 @@ class TestLibraryLink:
         assert dl._library_link(
             session, 1, "《浅蓝宝箱》刺激战场ss4单机版，免费下载安装教程来了") is None
 
+    def test_通用语气词不许配上不相干的链(self, session) -> None:
+        """★★★ 2026-10-15 用户报「同一个资源有的显示库里有、有的没有」时复现的形状。
+
+        真名只在 `#话题` 里(`_RE_TAG` 会删掉它),而候选里留下一个**通用语气词** `啊啊啊`;
+        库里那条链的标题里有 `啊啊啊啊啊啊啊` ⇒ **裸包含护栏**于是配上了
+        ⇒ **用户点开拿到的是另一个资源**(生产实测那条链是《镜外 Do or die》)。
+        护栏必须是专指的:**库里的标题以它开头,或《它》/【它】点名**。
+        """
+        _mk_lib(session, "《镜外 Do or die》17集高清版 啊啊啊啊啊啊啊")
+        title = ("《冰星漫剧》朝朝入梦番外宝子们都看过了嘛，哪个宝子还没看过呢真是仙品！"
+                 "啊啊啊！#朝朝入梦 #古言权谋")
+        assert "啊啊啊" in dl._cand_names(title), \
+            "这个例子成立的前提是「语气词进了候选」—— 候选规则变了就要重挑样本"
+        assert dl._library_link(session, 1, title) is None, \
+            "又配上了不相干的链(给错链比不给链更坏:用户点开拿到的是别的资源)"
+
+    def test_两条链共用同一份护栏实现(self) -> None:
+        """★ 这次的根子就是**同一套纪律写了两处、只修了一处**。
+
+        所以除了行为用例,再加一条**源码级**守卫:护栏住在 `resource_library`(单一出处),
+        且 `_library_link` **真的调用了它**。
+
+        ⚠️⚠️ **必须按 AST 查真实调用,不能按子串查** —— 我第一版写的是
+        `assert "if name not in first" not in src`,结果被**解释这次修复的那段注释**
+        当场打红(注释里为了说清"原来写的是什么"当然会提到它)。
+        **说明某件事不做的文档,不该被自己的守卫判红** —— 同一个坑本仓今天已经踩过两次。
+        """
+        import ast
+        from pathlib import Path
+
+        from app.services import pan_discovery as pd
+        from app.services import resource_library as rl
+
+        assert callable(getattr(rl, "title_claims", None)), \
+            "护栏要住在 `resource_library`(两边共用),不许各自实现一份"
+        assert pd._title_claims("《左道陈家村》1-68集", "左道陈家村") is True
+        assert rl.title_claims("《左道陈家村》1-68集", "左道陈家村") is True
+
+        src = Path(dl.__file__).read_text(encoding="utf-8")
+        fn = next((n for n in ast.walk(ast.parse(src))
+                   if isinstance(n, ast.FunctionDef) and n.name == "_library_link"), None)
+        assert fn is not None, "找不到 `_library_link` —— 它改名了?守卫要跟着改"
+        called = {c.func.id for c in ast.walk(fn)
+                  if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
+        assert "title_claims" in called, \
+            "`_library_link` 没有调用专指度护栏 ⇒ 又会退回裸包含(给错链的入口)"
+
     def test_库里没有就返回None_不硬凑(self, session) -> None:
         _mk_lib(session, "完全不相干的东西")
         assert dl._library_link(session, 1, "《水豚法官》水豚法官capybara获取教程") is None

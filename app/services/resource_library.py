@@ -301,6 +301,29 @@ def match_key(text: str) -> str:
     return _MATCH_PUNCT_RE.sub("", t).lower()
 
 
+def title_claims(first: str, name: str) -> bool:
+    """库里的这条标题**到底说的是不是这个资源**:
+
+      · **以它开头**(名字就是标题主体,例:`左道陈家村🔥【AI漫剧】`),或
+      · 标题里**用《…》/【…】明确点名**了它(例:`?《左道陈家村》1-68集…`)。
+
+    ⚠️ **只用「包含」是不够的** —— `无删减完整版` 这种词当然「包含」于一大堆标题,
+    那正是 2026-10-14 那场错配事故的入口。
+
+    ★★ **这一条判据是单一出处**(2026-10-15 收敛):`pan_discovery._title_claims`
+    与 `douyin_leads._library_link` 都用它,**别再各写一份** ——
+    当时 `pan_discovery` 补了这道护栏、抖音那边**没同步**,于是在抖音上留下了
+    **裸包含**的护栏:实测线索标题里的语气词 `啊啊啊` 命中了
+    `《镜外 Do or die》` 那条链 —— **用户点开拿到的是另一个资源**。
+    (本仓母题:同一件事写两处 ⇒ 迟早各飘各的;「给错链比不给链更坏」。)
+    """
+    if not first or not name:
+        return False
+    if match_key(first).startswith(match_key(name)):
+        return True
+    return f"《{name}》" in first or f"【{name}】" in first
+
+
 def resource_key(name: str) -> str:
     """**同一份资源的身份**(用于把不同命名变体合并成一行)。
 
