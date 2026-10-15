@@ -125,3 +125,55 @@ class Test池取号:
             assert [c for _, c in A.cookies_for(db, "quark", user_id=1)] == ["ctoken=NEW"]
         finally:
             db.close()
+
+
+# ---------------------------------------------------------------------------
+# ★★★ 配额探针必须**按账号**各查各的(2026-10-16)
+#
+# 实测:两个**不同**的迅雷号(`sub` 1050028885 / 1579917402)探配额返回
+# **一模一样**的 `usage/limit` —— 不同账号不可能同值。根因**两层**:
+#   ① `_fresh_cred(cred)` 漏传 `cookie_key` ⇒ **永远读默认账号** ⇒ 请求发的是 1 号的身份;
+#   ② 配额缓存是**进程级单份** ⇒ 探 1 号的结果被当成 2 号的。
+# 后果很实在:"挑最空的"**失真**、盘满闸门**拿空号的余量放行满号**。
+# (修完实测:1 号 91.6% 满,而**新加的 2 号只有 0.74%** —— 那个 bug 让我们看不见这件事。)
+
+
+def test_配额探针必须按账号传凭据() -> None:
+    """★ 源码级:`_fresh_cred` 调 `_credentials` 时**必须带 `cookie_key`**。
+
+    漏了它就是"拿 A 号的凭据去问、用的是 B 号的身份" —— 而且**不报错**,
+    只是数字悄悄变成别人的(本仓母题:静默失败=假成功)。
+    """
+    import ast
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "app/services/xunlei_transfer.py"
+           ).read_text(encoding="utf-8")
+    fn = next((n for n in ast.walk(ast.parse(src))
+               if isinstance(n, ast.FunctionDef) and n.name == "_fresh_cred"), None)
+    assert fn is not None, "找不到 `_fresh_cred` —— 改名了?守卫要跟着改"
+    kws = {k.arg for c in ast.walk(fn) if isinstance(c, ast.Call) for k in c.keywords if k.arg}
+    assert "cookie_key" in kws, (
+        "`_fresh_cred` 没把 `cookie_key` 传下去 ⇒ 它会**永远读默认账号**的凭据")
+
+
+def test_两个账号的配额缓存不许共用(monkeypatch) -> None:
+    """★ 缓存按 `cookie_key` 分键 —— 否则第二次调用直接命中第一次的结果。"""
+    from app.services import xunlei_transfer as xt
+
+    monkeypatch.setattr(xt, "_credentials",
+                        lambda settings=None, *, cookie_key="xunlei": {"sub": f"sub-{cookie_key}"})
+    seen: list[str] = []
+
+    def _probe(cred=None, cookie_key="xunlei"):
+        seen.append(xt._quota_key(cred))
+        return {"usage": len(seen), "limit": 100, "ratio": len(seen) / 100}
+
+    monkeypatch.setattr(xt, "_probe_quota", _probe)
+    xt.reset_quota_cache()
+    a = xt.quota_info(cookie_key="xunlei")
+    b = xt.quota_info(cookie_key="xunlei#2")
+    assert a != b, f"两个账号拿到了同一份配额:{a} —— 缓存没按账号分键"
+    #: 再问一次应当**命中缓存**(不再真打)
+    xt.quota_info(cookie_key="xunlei")
+    assert len(seen) == 2, f"缓存没生效(真打了 {len(seen)} 次)"

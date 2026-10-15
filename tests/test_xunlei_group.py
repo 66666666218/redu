@@ -389,7 +389,7 @@ def test_transfer_pending_marks_skipped_instead_of_transferring(session, monkeyp
         XunleiGroupShare(user_id=1, group_id="g", share_id="B", title="蓝河工具箱",
                          origin_url="u-B", status="pending")])
     session.commit()
-    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None: 0.3)
+    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None, **kw: 0.3)
     called: list[str] = []
     monkeypatch.setattr(xt, "transfer_and_share",
                         lambda url, parent_id="", settings=None, **kw: (
@@ -413,7 +413,7 @@ def test_transfer_pending_keeps_rows_pending_when_disk_full(session, monkeypatch
     session.add(XunleiGroupShare(user_id=1, group_id="g", share_id="A", title="蓝河工具箱",
                                  origin_url="u-A", status="pending"))
     session.commit()
-    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None: 1.26)
+    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None, **kw: 1.26)
     monkeypatch.setattr(xt, "transfer_and_share",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("盘满不该转存")))
     out = xg.transfer_pending(session, 1, limit=5, settings=_GateSettings())
@@ -442,7 +442,7 @@ def test_transfer_pending_stops_and_keeps_pending_on_space_error(session, monkey
         XunleiGroupShare(user_id=1, group_id="g", share_id="B", title="警笛模拟器",
                          origin_url="u-B", status="pending")])
     session.commit()
-    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None: None)     # 探针失效 → 闸门放行
+    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None, **kw: None)     # 探针失效 → 闸门放行
     monkeypatch.setattr(xt, "transfer_and_share",
                         lambda url, parent_id="", settings=None, **kw: {
                             "status": "failed",
@@ -474,7 +474,7 @@ def test_oversized_single_resource_is_skipped_without_stalling_the_batch(
         XunleiGroupShare(user_id=1, group_id="g", share_id="OK2", title="正常资源2",
                          origin_url="u-OK2", status="pending")])
     session.commit()
-    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None: None)     # 探针失效 → 闸门放行
+    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None, **kw: None)     # 探针失效 → 闸门放行
 
     def fake(url, parent_id="", settings=None, **kw):
         if url == "u-BIG":
@@ -507,7 +507,7 @@ def test_space_error_with_roomy_quota_is_flagged_as_gate_mismatch(session, monke
     session.add(XunleiGroupShare(user_id=1, group_id="g", share_id="A", title="蓝河工具箱",
                                  origin_url="u-A", status="pending"))
     session.commit()
-    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None: 0.799)     # 闸门放行
+    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None, **kw: 0.799)     # 闸门放行
     monkeypatch.setattr(xt, "transfer_and_share",
                         lambda url, parent_id="", settings=None, **kw: {
                             "status": "failed",
@@ -528,7 +528,7 @@ def test_gate_pre_stop_is_not_a_mismatch(session, monkeypatch) -> None:
     session.add(XunleiGroupShare(user_id=1, group_id="g", share_id="A", title="蓝河工具箱",
                                  origin_url="u-A", status="pending"))
     session.commit()
-    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None: 1.26)
+    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None, **kw: 1.26)
     monkeypatch.setattr(xt, "transfer_and_share",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("闸门挡下不该转存")))
 
@@ -558,7 +558,7 @@ def test_transfer_pending_marks_own_share_as_skipped_not_failed(session, monkeyp
         XunleiGroupShare(user_id=1, group_id="g", share_id="B", title="蓝河工具箱",
                          origin_url="u-B", status="pending")])
     session.commit()
-    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None: 0.3)
+    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None, **kw: 0.3)
 
     def fake_transfer(url, parent_id="", settings=None, **kw):
         if url == "u-A":
@@ -939,7 +939,7 @@ class TestPanMultiAccount:
                             {"refresh_token": "t", "tag": cookie_key})
         ratios = {ck: r for _, ck, r in pool}
         monkeypatch.setattr(xt, "quota_ratio",
-                            lambda cred=None: rec["probed"].append((cred or {}).get("tag"))
+                            lambda cred=None, **kw: rec["probed"].append((cred or {}).get("tag"))
                             or ratios.get((cred or {}).get("tag")))
 
         def _tas(share_url, parent_id="", settings=None, intro_dir=None, *, cookie_key="xunlei"):

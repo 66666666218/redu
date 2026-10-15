@@ -451,7 +451,7 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
             cred = xt._credentials(settings, cookie_key=_ref.cookie_key)
             if not cred:
                 continue                     # 没凭据 ⇒ 不猜,跳过这个账号
-            _r = xt.quota_ratio(cred)
+            _r = xt.quota_ratio(cred, cookie_key=_ref.cookie_key)
             chosen, ratio = _ref, _r         # 先记下"最后一个探过的":全满时由行循环按它判盘满
             if _r is None or _r < limit_ratio:
                 pan_accounts.report(session, _ref, ratio=_r, full=False)

@@ -281,14 +281,19 @@ def _json(resp) -> dict:
     return data
 
 
-def _fresh_cred(cred: dict) -> dict:
-    """重跑前**重新读一遍凭据**。
+def _fresh_cred(cred: dict, cookie_key: str = "xunlei") -> dict:
+    """重跑前**重新读一遍凭据** —— ⚠️ **必须是同一个账号**。
 
     ⚠️ captcha 续期是写回库的,而 `_once()` 闭包里那份 `cred` 是**续期之前**读的快照 ——
     重试时若继续吃它,等于拿着旧 captcha 再打一次,续期就白做了(2026-10-02 实测踩过:
     verify 跑了 28 秒把浏览器都开起来了,重试仍然 captcha_invalid)。
+
+    ★★★ **2026-10-16 修:原来这里写的是 `_credentials() or cred`,漏了 `cookie_key`** ——
+    而 `_credentials()` **默认读 1 号** ⇒ **拿任何账号的凭据去问,发出去的都是 1 号的身份**
+    ⇒ 实测两个**不同**的迅雷号(`sub` 1050028885 / 1579917402)探配额返回**一模一样**的值,
+    "挑最空的"和盘满闸门**全部失真**(拿空号的余量放行满号)。
     """
-    return _credentials() or cred
+    return _credentials(cookie_key=cookie_key) or cred
 
 
 def _renew_captcha() -> bool:
@@ -524,15 +529,30 @@ def move_files(file_ids: list[str], parent_id: str, cred: dict | None = None) ->
 # 别每条都打一次配额"),但"按剩余空间预判单个资源"这件事天然发生在**每一条**转存里 ——
 # 若每次都各自探一次,一批 20 条就是 21 次探针(≈ 把那条纪律反过来做)。缓存让整批共享一次。
 _QUOTA_TTL = 60.0
-_quota_cache: dict = {"at": 0.0, "probed": False, "info": {}}
+#: ★★★ **按账号分键**(2026-10-16 修)。原来是一份**进程级单份**缓存
+#: (`{"at":…, "probed":…, "info":…}`),`quota_info(cred)` **不看 cred 是谁** ⇒
+#: **探 1 号的结果会被当成 2 号的**。多账号下后果很实在:
+#:   · `usable_hint` 的"挑最空的"**失真**(两个号永远是同一个 ratio ⇒ 分不出谁空);
+#:   · 盘满闸门**用错账号的配额判** —— 该拦的不拦(拿空号的 91% 放行一个满号)、或该放的不放。
+#: 实测:两个**不同**的迅雷号(`sub` 1050028885 / 1579917402)返回了**一模一样**的
+#: `usage=30310508020399 limit=33092723015680` —— 不同账号不可能同值。
+#: 键用 `sub`(拿不到再退 `user_id`);都拿不到才用 `"-"`(那种情况下本来也查不出东西)。
+_quota_cache: dict[str, dict] = {}
+
+
+def _quota_key(cred: dict | None) -> str:
+    """这份配额是**哪个账号**的 —— 缓存键(见 `_quota_cache` 的说明)。"""
+    c = cred or {}
+    return str(c.get("sub") or c.get("user_id") or "-")
 
 
 def reset_quota_cache() -> None:
-    """丢掉缓存的配额。测试要"冷的探针"时显式调用(生产不需要)。"""
-    _quota_cache.update({"at": 0.0, "probed": False, "info": {}})
+    """丢掉缓存的配额(全部账号)。测试要"冷的探针"时显式调用(生产不需要)。"""
+    _quota_cache.clear()
 
 
-def quota_info(cred: dict | None = None, fresh: bool = False) -> dict:
+def quota_info(cred: dict | None = None, fresh: bool = False,
+               cookie_key: str = "xunlei") -> dict:
     """盘配额 `{"usage", "limit", "ratio"}`(字节;拿不到就是空 dict)。
 
     转存前的**盘级闸门**要用它:2026-10-02 实测翻过车 —— 群里的大包被自动搬进盘,
@@ -549,24 +569,31 @@ def quota_info(cred: dict | None = None, fresh: bool = False) -> dict:
     调度链里**别传它** —— 那里要的正是"整批共用一次"。
     """
     now = time.monotonic()
-    if (not fresh and _quota_cache["probed"]
-            and (now - _quota_cache["at"]) < _QUOTA_TTL):
-        return _quota_cache["info"]
-    info = _probe_quota(cred)
-    _quota_cache.update({"at": now, "probed": True, "info": info})
+    #: ⚠️⚠️ **`cred is None` 时不许去解析凭据** —— 那会**多打一次库**,而这条路径原来
+    #: 根本不碰库(2026-10-16 我加了一行 `cred = cred or _credentials()`,两条既有用例
+    #: 当场红)。`None` 用固定键 `"-"` 代表"默认账号";**显式传 cred 时按它的 `sub` 分键**。
+    #: ⚠️⚠️ 键**必须带 `cookie_key`**:`quota_info(cookie_key='xunlei#2')` 时 `cred` 是 `None`,
+    #: 只按 `_quota_key(cred)` 算会得到 `"-"` ⇒ **两个账号共用一个键** ⇒ 第二次调用直接命中
+    #: 第一次的缓存(**我自己刚踩的这个**,表现为"改完还是同值")。
+    key = f"{cookie_key}:{_quota_key(cred)}"
+    hit = _quota_cache.get(key)
+    if not fresh and hit and (now - hit["at"]) < _QUOTA_TTL:
+        return hit["info"]
+    info = _probe_quota(cred, cookie_key)
+    _quota_cache[key] = {"at": now, "info": info}
     return info
 
 
-def _probe_quota(cred: dict | None = None) -> dict:
+def _probe_quota(cred: dict | None = None, cookie_key: str = "xunlei") -> dict:
     """真去打一次探针(不读缓存)。"""
     try:
-        cred = cred or _credentials()
+        cred = cred or _credentials(cookie_key=cookie_key)
         if not cred:
             return {}
 
         def _once() -> dict:
             r = requests.get(f"{_API}/drive/v1/about", timeout=_TIMEOUT,
-                             headers=_drive_headers(_fresh_cred(cred)))
+                             headers=_drive_headers(_fresh_cred(cred, cookie_key)))
             # ⚠️ **先解析再判状态码**:`captcha_invalid` 是 400 返回的,若写成
             # "200 才解析",异常就永远不会抛、自愈也就永远不会触发(2026-10-02 实测踩过)
             data = _json(r)
@@ -585,9 +612,9 @@ def _probe_quota(cred: dict | None = None) -> dict:
         return {}
 
 
-def quota_ratio(cred: dict | None = None) -> float | None:
+def quota_ratio(cred: dict | None = None, cookie_key: str = "xunlei") -> float | None:
     """盘的使用率(`usage/limit`)。**拿不到返回 None**(调用方按"不知道"处理,别误判成满)。"""
-    return quota_info(cred).get("ratio")
+    return quota_info(cred, cookie_key=cookie_key).get("ratio")
 
 
 _SPACE_ERROR_HINTS = ("file_space_not_enough", "空间不足", "file_space")

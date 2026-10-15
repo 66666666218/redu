@@ -83,6 +83,20 @@ def _collect(pg) -> dict:
 
 
 def main() -> int:
+    #: ---- 参数(2026-10-16 补)----
+    #: `--cookie-key`:登**第二枚**号时写哪儿。⚠️ 默认 `xunlei` 是**默认位** ——
+    #:   拿它登第二枚号会**覆盖第一枚**(2026-10-16 我在夸克/百度上就这么栽过)。
+    #: `--cookie-file`:一枚**网页 cookie 串**(`k=v; k2=v2`)。给了就先注入进浏览器 ——
+    #:   若那枚会话还活着,页面**自己就是登录态** ⇒ **不用扫码**(脚本照常轮询 localStorage)。
+    argv = sys.argv[1:]
+    cookie_key = "xunlei"
+    cookie_file = ""
+    for i, a in enumerate(argv):
+        if a == "--cookie-key" and i + 1 < len(argv):
+            cookie_key = argv[i + 1]
+        elif a == "--cookie-file" and i + 1 < len(argv):
+            cookie_file = argv[i + 1]
+
     captured: dict = {}
 
     with sync_playwright() as p:
@@ -91,6 +105,20 @@ def main() -> int:
             user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                         "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"))
         pg = ctx.new_page()
+
+        #: ★ 先注入网页 cookie(给了文件才做):让页面自己认出登录态。**必须在 goto 之前**。
+        if cookie_file:
+            from pathlib import Path as _P
+
+            raw = _P(cookie_file).read_text(encoding="utf-8").strip()
+            jar = []
+            for part in raw.split(";"):
+                k, _, v = part.strip().partition("=")
+                if k.strip() and v.strip():
+                    jar.append({"name": k.strip(), "value": v.strip(),
+                                "domain": ".xunlei.com", "path": "/"})
+            ctx.add_cookies(jar)
+            print(f"=== 已注入 {len(jar)} 枚网页 cookie(等页面自己认出登录态)===", flush=True)
 
         def on_req(req) -> None:
             """兜底:captcha 没落 localStorage 时,从请求头里捞。"""
@@ -102,7 +130,7 @@ def main() -> int:
         pg.on("request", on_req)
         pg.goto(HOME, wait_until="domcontentloaded", timeout=60000)
         print("=== 浏览器已打开 pan.xunlei.com ===", flush=True)
-        print("=== 请点「扫码登录」,用迅雷 App 扫码确认(最多等 5 分钟)===", flush=True)
+        print("=== 若没自动进登录态,请点「扫码登录」用迅雷 App 扫码(最多等 5 分钟)===", flush=True)
 
         deadline = time.time() + WAIT_SECONDS
         while time.time() < deadline:
@@ -151,7 +179,21 @@ def main() -> int:
         if not uid:
             print("没有启用的用户", flush=True)
             return 1
-        set_cookie(db, uid, "xunlei", json.dumps(blob, ensure_ascii=False))
+        blob_json = json.dumps(blob, ensure_ascii=False)
+        if cookie_key != "xunlei":
+            #: ★ **第二枚号**:写进它自己的 key,**并登记进账号池** ——
+            #: 只写 cookie_store 不建池条目的话,`pan_accounts.cookies_for('xunlei')` 取不到它
+            #: (池非空时只用池里的),于是"登了也不用"。
+            from app.services import pan_accounts as _A
+
+            _A.add_account(db, "xunlei", cookie_key, blob_json, cookie_key=cookie_key)
+            db.commit()
+            print(f"=== 已加密写入 cookie_store(user={uid}, key={cookie_key})**并登记进账号池** ===",
+                  flush=True)
+            print(f"=== 复核:python scripts/pan_account_add.py --platform xunlei --list ===",
+                  flush=True)
+            return 0
+        set_cookie(db, uid, "xunlei", blob_json)
         print(f"=== 已加密写入 cookie_store(user={uid}, platform=xunlei) ===", flush=True)
         print("=== 验证 ===", flush=True)
         print(json.dumps(xt.verify(), ensure_ascii=False)[:200], flush=True)
