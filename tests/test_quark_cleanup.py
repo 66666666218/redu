@@ -550,3 +550,106 @@ class Test快照TTL与收敛:
         kws = {k.arg for c in ast.walk(fn) if isinstance(c, ast.Call)
                for k in c.keywords if k.arg}
         assert "ttl_hours" in kws, "`clean_quark` 没把 TTL 传给 `build_plan` ⇒ 配置空转"
+
+
+# ---------------------------------------------------------------------------
+# ★★★ **整包重复**(2026-10-16,用户口径「相同的资源只需要保存一份」)
+#
+# 真占空间的重复长这样:夸克给**重名目录**加 `(1)` ⇒ 一条分享链被转存两次、
+# **整个资源包多一份**(实测 36 组 / ~44 GiB)。⚠️ 现有的 `classify` **一条都抓不到** ——
+# 那些文件的目录名不同,不在"同一目录/同一家"下。
+
+
+class _PkgQT:
+    """够 `build_package_plan` 跑通的假盘。"""
+
+    def __init__(self, homes, dirs):
+        self._homes, self._dirs = homes, dirs
+
+    def search_files(self, kw, size=50):  # noqa: ARG002
+        return list(self._homes)
+
+    def list_dir(self, fid="0"):
+        return list(self._dirs.get(fid, []))
+
+    def delete_files(self, fids, to_recycle=True):  # noqa: ARG002
+        self.deleted = list(fids)
+        return {"failed": []}
+
+
+def _pkgfile(name, size, fid="f"):
+    return {"file_name": name, "size": size, "fid": fid, "dir": False}
+
+
+def _mk(homes, dirs):
+    """把 `build_package_plan` 的保护查询短路掉(那不是本条要测的)。"""
+    from app.services import quark_dup as qd
+
+    return qd, _PkgQT(homes, dirs)
+
+
+def test_整包重复_留文件多的那份(monkeypatch) -> None:
+    from app.services import quark_dup as qd
+
+    monkeypatch.setattr(qd, "refresh_protect", lambda qt, dirs: (set(), set(), 0, []))
+    qt = _PkgQT([{"file_name": "redian监听", "fid": "H", "dir": True}], {
+        "H": [{"file_name": "资源A", "fid": "A", "dir": True},
+              {"file_name": "资源A(1)", "fid": "B", "dir": True}],
+        "A": [_pkgfile("1.mp4", 100), _pkgfile("2.mp4", 100)],      #: 2 文件
+        "B": [_pkgfile("1.mp4", 100)],                        #: 1 文件 ⇒ 更不完整
+    })
+    plan = qd.build_package_plan(qt)
+    assert plan["n_groups"] == 1 and plan["n_drop"] == 1
+    g = plan["groups"][0]
+    assert g["keep"]["fid"] == "A", "该留文件更多的那份"
+    assert [d["fid"] for d in g["drop"]] == ["B"]
+
+
+def test_完全打平时留不带后缀的那份(monkeypatch) -> None:
+    """打平时留**第一次转存**的那份(其余都是它的副本)。"""
+    from app.services import quark_dup as qd
+
+    monkeypatch.setattr(qd, "refresh_protect", lambda qt, dirs: (set(), set(), 0, []))
+    qt = _PkgQT([{"file_name": "redian监听", "fid": "H", "dir": True}], {
+        "H": [{"file_name": "资源A", "fid": "A", "dir": True},
+              {"file_name": "资源A(1)", "fid": "B", "dir": True}],
+        "A": [_pkgfile("1.mp4", 100)],
+        "B": [_pkgfile("1.mp4", 100)],
+    })
+    assert qd.build_package_plan(qt)["groups"][0]["keep"]["fid"] == "A"
+
+
+def test_含我方分享链的那份永不删(monkeypatch) -> None:
+    """★ **一票否决**:删掉它 = 已发出的链接立刻失效(本仓既定口径)。"""
+    from app.services import quark_dup as qd
+
+    monkeypatch.setattr(qd, "refresh_protect",
+                        lambda qt, dirs: ({"PROT"}, set(), 1, []))
+    qt = _PkgQT([{"file_name": "redian监听", "fid": "H", "dir": True}], {
+        "H": [{"file_name": "资源A", "fid": "A", "dir": True},
+              {"file_name": "资源A(1)", "fid": "B", "dir": True}],
+        "A": [_pkgfile("1.mp4", 100), _pkgfile("2.mp4", 100)],      #: 文件更多
+        "B": [_pkgfile("1.mp4", 100, fid="PROT")],            #: 但这份被分享链引用
+    })
+    g = qd.build_package_plan(qt)["groups"][0]
+    assert g["keep"]["fid"] == "B", "被分享链引用的那份**必须留**(哪怕它更小)"
+    assert [d["fid"] for d in g["drop"]] == ["A"]
+
+
+def test_只有一个目录时不算重复(monkeypatch) -> None:
+    from app.services import quark_dup as qd
+
+    monkeypatch.setattr(qd, "refresh_protect", lambda qt, dirs: (set(), set(), 0, []))
+    qt = _PkgQT([{"file_name": "redian监听", "fid": "H", "dir": True}], {
+        "H": [{"file_name": "资源A", "fid": "A", "dir": True}], "A": [_pkgfile("1", 1)]})
+    assert qd.build_package_plan(qt)["n_drop"] == 0
+
+
+def test_名字里本来就有括号但无兄弟时不算(monkeypatch) -> None:
+    """`X(1)` **单独存在**不算重复 —— 必须真的有 `X` 与它并存。"""
+    from app.services import quark_dup as qd
+
+    monkeypatch.setattr(qd, "refresh_protect", lambda qt, dirs: (set(), set(), 0, []))
+    qt = _PkgQT([{"file_name": "redian监听", "fid": "H", "dir": True}], {
+        "H": [{"file_name": "资源A(1)", "fid": "B", "dir": True}], "B": [_pkgfile("1", 1)]})
+    assert qd.build_package_plan(qt)["n_drop"] == 0

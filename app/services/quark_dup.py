@@ -462,3 +462,108 @@ def apply_plan(qt: Any, plan: dict, *, batch: int = 100,
         homes = {str(d.get("home") or "") for d in plan.get("delete", [])}
         out["dropped_homes"] = cache.drop_homes(h for h in homes if h)
     return out
+
+
+# ------------------------------------------------------------------ 整包重复(2026-10-16)
+
+#: `X` / `X(1)` / `X(2)` —— 夸克给**重名目录**加的后缀。
+_PKG_SUFFIX_RE = re.compile(r"^(?P<base>.+?)\s*[\(（]\d+[\)）]$")
+
+
+def _pkg_base(name: str) -> str:
+    """去掉夸克给重名目录加的 `(1)`/`(2)` 后缀(只为**配对**用,不改真实名字)。"""
+    m = _PKG_SUFFIX_RE.match(str(name or "").strip())
+    return m.group("base").strip() if m else str(name or "").strip()
+
+
+def build_package_plan(qt: Any, *, home_prefix: str = "redian监听",
+                       protect_dirs: Sequence[str] | None = None,
+                       max_groups: int = 0) -> dict:
+    """★ **整包重复**:同一个「家」下面的 `X` 与 `X(1)`/`X(2)` 并存 ⇒ 一条分享链被转存了多次。
+
+    ## 为什么单列这一条(2026-10-16 用户口径「相同的资源只需要保存一份」「重复的直接删」)
+
+    现有的 `classify` 抓的是**跨家**的同名同大小文件;而**真占空间**的重复长这样:
+    夸克遇到重名**目录**会加 `(1)` ⇒ **整个资源包多一份**(实测快照里 **36 组 /
+    1984 个文件 / 23.30 GiB**,最大一组 3 份 × 10.2 GiB)。
+    ⚠️ 而且这批重复 `quark_dup` **一条都抓不到** —— 它们的目录名不同 ⇒ 文件不在"同一目录"下。
+
+    ## 判据(每一条都对着一个实测)
+
+    · **配对**只用名字(`X` 与 `X(N)` 必须**同在一个家里**);
+    · **留哪份**:文件数**多**、体积**大**的那份(更完整);完全等大等量时留**不带后缀**的
+      (它是第一次转存的那份,别的都是它的副本);
+    · **一票否决**:要删的那份里若有**我方分享链引用的 fid**(`protect_dirs` 那套;
+      默认 `("/监听宣传",)` 那类简介目录)→ **改留它**。删掉 = 已发出的链接立刻失效。
+    · ⚠️ **不依赖历史快照**:本函数**当场列目录**(每个候选 1 次 `list_dir`),
+      因为"删"要用**当前**事实 —— 快照可能是几小时前的。
+
+    ⚠️ 本函数**只读**,不删任何东西;执行是 `apply_package_plan`。
+    """
+    prot_fids, _prot_names, _n_shares, _intro = refresh_protect(
+        qt, tuple(protect_dirs) if protect_dirs is not None else ("/监听宣传",))
+    groups: list[dict] = []
+    for home in list_homes(qt, home_prefix):
+        home_fid = str(home.get("fid") or "")
+        home_name = str(home.get("file_name") or "")
+        kids = [x for x in qt.list_dir(home_fid) if x.get("dir")]
+        by_base: dict[str, list[dict]] = {}
+        for k in kids:
+            by_base.setdefault(_pkg_base(str(k.get("file_name") or "")), []).append(k)
+        for base, members in by_base.items():
+            if len(members) < 2:
+                continue
+            #: 至少要有一个**真的带后缀**(否则只是重名不同目录,不是整包副本)
+            if not any(_pkg_base(str(m.get("file_name") or "")) != str(m.get("file_name") or "")
+                       for m in members):
+                continue
+            stats = []
+            for m in members:
+                mfid = str(m.get("fid") or "")
+                #: ⚠️⚠️ **必须递归**(2026-10-16 实测踩到):资源包通常是
+                #: `包/子目录/文件`,**只数一级会把它们算成 0 字节** —— 于是"留哪份"的比较
+                #: 全瞎、报出来的"能省多少"也小一个数量级(实测 165 MiB vs 真实 23 GiB)。
+                #: 复用主扫描那支 `_walk`(单一来源,别另写一份递归)。
+                budget = {"n": 0, "cap": 20000}
+                fs = _walk(qt, mfid, str(m.get("file_name") or ""),
+                           str(m.get("file_name") or ""), budget, 0, 2)
+                fids = {str(x.get("fid") or "") for x in fs}
+                stats.append({
+                    "name": str(m.get("file_name") or ""), "fid": mfid,
+                    "files": len(fs), "bytes": sum(int(x.get("size") or 0) for x in fs),
+                    "protected": bool(fids & prot_fids),
+                })
+            #: 留哪份(优先级从高到低):**我方分享链保护的** > 文件多的 > 体积大的 > **不带后缀的**
+            #: (最后那条只在完全打平时用:不带后缀的那份是第一次转存的,其余都是它的副本)
+            keep = max(stats, key=lambda s: (
+                int(s["protected"]), s["files"], s["bytes"],
+                int(_pkg_base(s["name"]) == s["name"])))
+            drop = [s for s in stats if s["fid"] != keep["fid"] and not s["protected"]]
+            if not drop:
+                continue
+            groups.append({"home": home_name, "base": base, "keep": keep, "drop": drop,
+                           "bytes": sum(s["bytes"] for s in drop)})
+            if max_groups and len(groups) >= max_groups:
+                return _pkg_out(groups, len(prot_fids))
+    return _pkg_out(groups, len(prot_fids))
+
+
+def _pkg_out(groups: list[dict], n_protected: int) -> dict:
+    return {"groups": groups, "n_groups": len(groups),
+            "n_drop": sum(len(g["drop"]) for g in groups),
+            "bytes": sum(g["bytes"] for g in groups),
+            "protected_fids": n_protected}
+
+
+def apply_package_plan(qt: Any, plan: dict, *, to_recycle: bool = True) -> dict:
+    """执行 `build_package_plan` 的计划:把要删的那些**整包目录**送进回收站。
+
+    ⚠️ **删的是目录本身**(夸克支持),`to_recycle=True` 是硬编码的调用参数 ——
+    本仓的口径是"删除永远可捞回"(见 `pan_auto_clean` 头注)。
+    """
+    fids = [g["drop"][i]["fid"] for g in plan.get("groups") or [] for i in range(len(g["drop"]))]
+    if not fids:
+        return {"deleted": 0, "bytes": 0, "failed": []}
+    res = qt.delete_files(fids, to_recycle=to_recycle)
+    return {"deleted": len(fids), "bytes": int(plan.get("bytes") or 0),
+            "failed": list((res or {}).get("failed") or [])}
