@@ -129,13 +129,29 @@ def _credentials(settings=None, *, cookie_key: str = "xunlei") -> dict:
             except ValueError:
                 continue
             if data.get("refresh_token"):
+                #: ★★★ **给凭据盖上"我是哪一枚"**(2026-10-16):见 `_file_key` 的说明 ——
+                #: 否则每个"拿凭据去做别的事"的调用点都得**自己记得**把 `cookie_key` 传下去,
+                #: 而漏传**不报错**、只是悄悄用了别的账号的身份(我一天漏了两次)。
+                data["_cookie_key"] = cookie_key
                 return data
     finally:
         db.close()
     return {}
 
 
-def _save_credentials(patch: dict) -> None:
+def _file_key(cred: dict | None) -> str:
+    """这份凭据**存在哪个 key 下**(`xunlei` / `xunlei#2` / …)。
+
+    ★★★ 由 `_credentials` 盖在凭据上(`_cookie_key`)。**没有它就退回默认 key** ——
+    ⚠️ 那条退路是**错的但安全**(只影响多账号),所以**下面每处都要优先用它**:
+      · `_fresh_cred`(重试时要"读同一个账号");
+      · `quota_info` 的缓存键(两个账号共用一份缓存 = "挑最空的"全瞎)。
+    """
+    c = cred or {}
+    return str(c.get("_cookie_key") or "xunlei")
+
+
+def _save_credentials(patch: dict, cookie_key: str = "xunlei") -> None:
     """把刷新出来的新凭据**写回加密存储**(与 `xunlei_captcha` 同一套)。
 
     ⚠️ **必须写回,尤其是 `refresh_token`**(2026-10-05 实测踩到):
@@ -146,6 +162,11 @@ def _save_credentials(patch: dict) -> None:
     ⚠️ 项目里 `xunlei_captcha` **早就知道这个坑**(它 docstring 写着
     "那次兑换会轮换 refresh_token,而我们不一定接得住,2026-10-02 踩过")——
     但**直接调 token 端点这条捷径没处理**,于是又踩了一次。
+
+    ⚠️ ★★ **2026-10-16 补:必须按 `cookie_key` 写** —— 原来写死 `"xunlei"` ⇒
+    **多账号下"给 2 号刷新出来的 token"会被写进 1 号**,而 1 号的身份去用它 ⇒
+    下次刷新 `invalid_grant`。**同一族:凡是"按账号"的东西,一处写死就会串号。**
+    ⚠️ 内部标记(`_` 开头的键,如 `_cookie_key`)**不许写回库** —— 那是运行期注记。
     """
     import json as _json
 
@@ -155,10 +176,11 @@ def _save_credentials(patch: dict) -> None:
     from app.db.models import User
     from app.services import cookie_store
 
+    patch = {k: v for k, v in (patch or {}).items() if not str(k).startswith("_")}
     db = get_session_local()()
     try:
         for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
-            raw = cookie_store.get_cookie(db, uid, "xunlei")
+            raw = cookie_store.get_cookie(db, uid, cookie_key)
             if not raw:
                 continue
             try:
@@ -168,7 +190,7 @@ def _save_credentials(patch: dict) -> None:
             if not cur.get("refresh_token"):
                 continue
             cur.update({k: v for k, v in patch.items() if v})   # 只覆盖非空值
-            cookie_store.set_cookie(db, uid, "xunlei", _json.dumps(cur, ensure_ascii=False))
+            cookie_store.set_cookie(db, uid, cookie_key, _json.dumps(cur, ensure_ascii=False))
             return
     finally:
         db.close()
@@ -281,7 +303,7 @@ def _json(resp) -> dict:
     return data
 
 
-def _fresh_cred(cred: dict, cookie_key: str = "xunlei") -> dict:
+def _fresh_cred(cred: dict, cookie_key: str | None = None) -> dict:
     """重跑前**重新读一遍凭据** —— ⚠️ **必须是同一个账号**。
 
     ⚠️ captcha 续期是写回库的,而 `_once()` 闭包里那份 `cred` 是**续期之前**读的快照 ——
@@ -293,7 +315,8 @@ def _fresh_cred(cred: dict, cookie_key: str = "xunlei") -> dict:
     ⇒ 实测两个**不同**的迅雷号(`sub` 1050028885 / 1579917402)探配额返回**一模一样**的值,
     "挑最空的"和盘满闸门**全部失真**(拿空号的余量放行满号)。
     """
-    return _credentials(cookie_key=cookie_key) or cred
+    #: ★ 兜底顺序:`显式传的 key` → **凭据自带的 `_cookie_key`** → 默认。见 `_file_key`。
+    return _credentials(cookie_key=cookie_key or _file_key(cred)) or cred
 
 
 def _renew_captcha() -> bool:
@@ -552,7 +575,7 @@ def reset_quota_cache() -> None:
 
 
 def quota_info(cred: dict | None = None, fresh: bool = False,
-               cookie_key: str = "xunlei") -> dict:
+               cookie_key: str | None = None) -> dict:
     """盘配额 `{"usage", "limit", "ratio"}`(字节;拿不到就是空 dict)。
 
     转存前的**盘级闸门**要用它:2026-10-02 实测翻过车 —— 群里的大包被自动搬进盘,
@@ -575,7 +598,7 @@ def quota_info(cred: dict | None = None, fresh: bool = False,
     #: ⚠️⚠️ 键**必须带 `cookie_key`**:`quota_info(cookie_key='xunlei#2')` 时 `cred` 是 `None`,
     #: 只按 `_quota_key(cred)` 算会得到 `"-"` ⇒ **两个账号共用一个键** ⇒ 第二次调用直接命中
     #: 第一次的缓存(**我自己刚踩的这个**,表现为"改完还是同值")。
-    key = f"{cookie_key}:{_quota_key(cred)}"
+    key = f"{cookie_key or _file_key(cred)}:{_quota_key(cred)}"
     hit = _quota_cache.get(key)
     if not fresh and hit and (now - hit["at"]) < _QUOTA_TTL:
         return hit["info"]
@@ -584,10 +607,10 @@ def quota_info(cred: dict | None = None, fresh: bool = False,
     return info
 
 
-def _probe_quota(cred: dict | None = None, cookie_key: str = "xunlei") -> dict:
+def _probe_quota(cred: dict | None = None, cookie_key: str | None = None) -> dict:
     """真去打一次探针(不读缓存)。"""
     try:
-        cred = cred or _credentials(cookie_key=cookie_key)
+        cred = cred or _credentials(cookie_key=cookie_key or _file_key(cred))
         if not cred:
             return {}
 
@@ -612,7 +635,7 @@ def _probe_quota(cred: dict | None = None, cookie_key: str = "xunlei") -> dict:
         return {}
 
 
-def quota_ratio(cred: dict | None = None, cookie_key: str = "xunlei") -> float | None:
+def quota_ratio(cred: dict | None = None, cookie_key: str | None = None) -> float | None:
     """盘的使用率(`usage/limit`)。**拿不到返回 None**(调用方按"不知道"处理,别误判成满)。"""
     return quota_info(cred, cookie_key=cookie_key).get("ratio")
 
