@@ -367,6 +367,10 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
         # 而不是布尔值,放进 in 的判断里语义含混。
         row_ids = {id(x) for x in rows}
         transfer_rows = list(rows) + [x for x in backfill if id(x) not in row_ids]
+    #: ★ 走了**资源级复用**(三盘互通 —— 按资源名而不是按链)的篇数。
+    #: ⚠️ **必须在 `if` 之外初始化** —— 读它的那句话在函数末尾是**无条件**的,
+    #: 只在分支里赋值会让"关掉转存"的配置直接 `UnboundLocalError`(这次当场被 19 条用例抓住)。
+    reused_have = 0
     if settings.pan_transfer_enabled and quark_ck:
         quark = QuarkTransfer(quark_ck, fid_store=settings.quark_fid_store)
         # 盘链级转存去重:同一资源(相同夸克分享链)只转存一次,后续文章复用首篇的
@@ -408,7 +412,37 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                         logger.info("盘链复用(免重复转存): %s", u[:60])
                         share_url, pwd = reused[u]
                     else:
-                        # ③ 真正首次见到该资源:转存
+                        # ★★★ **资源级复用**(2026-10-16 补,用户口径「相同的资源只需要保存一个」)
+                        #
+                        # 原来这里**只有盘链级复用**(①②,判据是 `pan_url` **相等**)——
+                        # 而盘商「**同一资源换条分享链再发**」是常态(这句就写在
+                        # `quark_transfer` 的注释里)⇒ 同一份 PDF 被几十篇文章带几十条
+                        # **不同的**夸克链 ⇒ 判重**一条都不命中** ⇒ 转存几十次。
+                        # 实测(近 3 天):749 种归一化资源里 **82 种(10.9%)有多份我方链**、
+                        # 多存 198 份,最多的一组同一条资源 **34 份**。
+                        #
+                        # ⇒ 接上**三盘互通的统一入口** `reuse_if_have` ——
+                        #   `quark_kouling` / `xunlei_kouling` / `xunlei_group` / `resource_presence`
+                        #   **四处早都接了,只有这条路漏了**(同一族:统一入口建好了、有一个点没接上)。
+                        # ⚠️ 放在 ①② **之后** ⇒ **纯增量**:那两条判据的行为一字不动,
+                        #   只在它们都不命中时才多问一次「库里有没有这个**资源**」。
+                        # ⚠️ 命中就**只复用、不转存**(省盘空间 + 省一次风控暴露)。
+                        _have = None
+                        try:
+                            from app.services.pan_discovery import reuse_if_have
+
+                            _have = reuse_if_have(session, user_id, r.title or "")
+                        except Exception:  # noqa: BLE001 - 查库失败就当没有,别挡转存
+                            logger.debug("三盘互通查询失败,按没有处理", exc_info=True)
+                        if _have and str(_have.get("my_link") or "").strip():
+                            _link = str(_have["my_link"]).strip()
+                            r.my_pan_urls = _link
+                            reused_have += 1
+                            replacements.setdefault(r.id, []).append((u, _link, ""))
+                            logger.info("三盘互通:复用已有我方链(免重复转存)「%s」← %s",
+                                        (r.title or "")[:36], _link[:56])
+                            continue
+                        # ④ 真正首次见到该资源:转存
                         try:
                             res = quark.transfer_and_share(
                                 u, save_dir=settings.quark_save_dir,
@@ -616,6 +650,10 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                 _relink_notify(session, user_id, settings, r, "迅雷", got, "")
             except Exception:  # noqa: BLE001 - 补链失败不影响转存结果
                 logger.debug("迅雷补链消息失败", exc_info=True)
+    if reused_have:
+        #: ★ **资源级复用**省下的转存次数,单独报一行 —— 它是"相同资源只存一份"的**直接证据**。
+        logger.info("三盘互通:本轮**资源级复用 %d 篇**(按资源名命中已有我方链,免重复转存)",
+                    reused_have)
     # ⚠️⚠️ **转存结果必须在这里落库,别再往下拖**(2026-10-05 生产事故)。
     #
     # 下面那段(资源共振告警 / 交叉提取)是**锦上添花**,而外层 `_listen_round` 把整个
