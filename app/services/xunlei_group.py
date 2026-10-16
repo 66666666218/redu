@@ -516,7 +516,11 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
             _had = bool(str(row.our_url or ""))
             row.status, row.our_url = "ok", out.get("share_url") or ""
             mark_newly_moved(row, _had)  # **首次搬成时刻**(2026-10-07)
-            row.pass_code, row.fid, row.message = out.get("code") or "", out.get("fid") or "", ""
+            row.pass_code, row.fid = out.get("code") or "", out.get("fid") or ""
+            # ★ **功能降级要留在行上**(2026-10-16):原来恒写 "" ⇒ 2 号盘没有「监控简介」时,
+            #   新链静默地没有宣传简介,而运行记录与列表页**全是绿的**。
+            #   (简介缺失不是转存失败 —— 状态照旧 ok,只是把降级写在 message 里。)
+            row.message = str(out.get("intro_note") or "")
             ok_items.append({"title": row.title, "group_name": row.group_name,
                              "share_url": row.our_url, "code": row.pass_code})
         else:

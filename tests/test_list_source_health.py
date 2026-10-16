@@ -124,6 +124,35 @@ class TestCheckListSources:
         note = _by_name(rows)["公众号·列表源兜底"]
         assert note["level"] == ch.YELLOW and "只剩 1 个" in note["detail"]
 
+    def test_单源且只是限流时_兜底这行也不许报红(self, session, monkeypatch) -> None:
+        """★★ **2026-10-16 实测撞到的自相矛盾**。
+
+        生产上只剩 `wemp` 一个源,而它回 `200013 频率限制` ⇒ 上面那行按性质给了 🟡
+        (还特意写了"不报红:假红会让人忽略整份报告"),**下面这行却因为 `alive == 0`
+        立刻给了 🔴**。同一件事两种颜色,报告就没人信了 —— 这正是本文件开头那条纪律
+        ("分'会自愈'和'要人工'")没能贯彻到汇总行的后果。
+        """
+        from app.services.wechat.wemp_client import WempRateLimited
+
+        _bench(session)
+        _patch(monkeypatch, [("wemp", _Be(exc=WempRateLimited("频率限制(200013)")))])
+        rows = ch.check_list_sources(session)
+        assert _by_name(rows)["公众号·列表源·wemp"]["level"] == ch.YELLOW
+        note = _by_name(rows)["公众号·列表源兜底"]
+        assert note["level"] == ch.YELLOW, f"限流是等得来的,判红就是假红:{note}"
+        assert "可等" in note["detail"]
+        assert "别换凭据" in note["detail"], "要给对动作:限流换凭据是白干(实测过)"
+
+    def test_单源且凭据失效时_兜底这行才报红(self, session, monkeypatch) -> None:
+        """反过来:**凭据死了等不来自愈** ⇒ 这一行必须红,而且要点名是哪个源。"""
+        from app.services.wechat.wemp_client import WempAuthError
+
+        _bench(session)
+        _patch(monkeypatch, [("wemp", _Be(exc=WempAuthError("会话失效(200003)")))])
+        note = _by_name(ch.check_list_sources(session))["公众号·列表源兜底"]
+        assert note["level"] == ch.RED
+        assert "wemp" in note["detail"], "判红不给名字,等于只喊了一声"
+
     def test_一个源都没配判红(self, session, monkeypatch) -> None:
         _bench(session)
         _patch(monkeypatch, [])

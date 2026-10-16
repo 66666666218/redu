@@ -295,7 +295,7 @@ def test_resolve_parent_id_finds_folder_by_name(monkeypatch) -> None:
     """
     from app.services import xunlei_transfer as xt
 
-    monkeypatch.setattr(xt, "_parent_cache", {"name": "", "id": "", "at": 0.0})
+    monkeypatch.setattr(xt, "_parent_cache", {})
     monkeypatch.setattr("config.settings.get_settings",
                         lambda: type("S", (), {"xunlei_transfer_parent": "最全文件",
                                                "xunlei_transfer_parent_id": ""})())
@@ -318,7 +318,7 @@ def test_resolve_parent_id_missing_folder_falls_back_to_root(monkeypatch) -> Non
     """目录没找到 → 落根目录(返回 ""),**不能让整条链停摆**。"""
     from app.services import xunlei_transfer as xt
 
-    monkeypatch.setattr(xt, "_parent_cache", {"name": "", "id": "", "at": 0.0})
+    monkeypatch.setattr(xt, "_parent_cache", {})
     monkeypatch.setattr("config.settings.get_settings",
                         lambda: type("S", (), {"xunlei_transfer_parent": "最全文件",
                                                "xunlei_transfer_parent_id": ""})())
@@ -364,20 +364,136 @@ def test_transfer_sends_files_into_configured_parent(monkeypatch) -> None:
 
 
 def test_resolve_parent_id_prefers_configured_id(monkeypatch) -> None:
-    """⚠️ **优先用配置的 id**:实测「最全文件」明明存在(GET by id 返回 200),
-    却不出现在根目录列表里 —— 名字查找靠不住,所以配了 id 就直接用、连目录都不用扫。"""
+    """⚠️ **配置的 id 优先**:实测「最全文件」明明存在(GET by id 返回 200),
+    却不出现在根目录列表里 —— 名字查找靠不住,所以配了 id 且**它在号上存在**就直接用。"""
     from app.services import xunlei_transfer as xt
 
-    monkeypatch.setattr(xt, "_parent_cache", {"name": "", "id": "", "at": 0.0})
+    monkeypatch.setattr(xt, "_parent_cache", {})
     monkeypatch.setattr(xt, "list_files",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("配了 id 不该扫目录")))
     # ★ 代码现在走翻页版 `list_all_files`(2026-10-10),替身也得给
     monkeypatch.setattr(xt, "list_all_files",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("配了 id 不该扫目录")))
+    monkeypatch.setattr(xt, "_folder_exists", lambda fid, cred: True)
     monkeypatch.setattr("config.settings.get_settings",
                         lambda: type("S", (), {"xunlei_transfer_parent": "最全文件",
                                                "xunlei_transfer_parent_id": "FIXED_ID"})())
     assert xt.resolve_parent_id() == "FIXED_ID"
+
+
+def test_配置的落点id在别的账号盘里不存在时要落根目录_而不是整笔转存失败(monkeypatch) -> None:
+    """★★★ **2026-10-16 线上事故的正身**:`XUNLEI_TRANSFER_PARENT_ID` 是**1 号盘**的目录 id。
+
+    账号池换成 2 号之后,原来的 `if fixed: return fixed` 会把这个 id **无条件**发出去 ⇒
+    迅雷回 `file_not_found / error_code 5 / 文件(夹)不存在` ⇒ 每笔转存都失败,
+    报错还长得像"分享已死"(实测当天 39 笔)。**更坏的是它把设计好的兜底短路了。**
+
+    正确行为:该 id 在本号盘里不存在 ⇒ 按名字找这个号自己的目录 ⇒ 找不到才落根目录。
+    """
+    from app.services import xunlei_transfer as xt
+
+    monkeypatch.setattr(xt, "_parent_cache", {})
+    monkeypatch.setattr(xt, "_folder_exists", lambda fid, cred: False)   # 本号盘里没有它
+    monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: [
+        {"id": "MINE", "name": "最全文件", "kind": "drive#folder"}])
+    monkeypatch.setattr("config.settings.get_settings",
+                        lambda: type("S", (), {"xunlei_transfer_parent": "最全文件",
+                                               "xunlei_transfer_parent_id": "ONE_PAN_ID"})())
+    assert xt.resolve_parent_id() == "MINE", "该按**本号自己的**目录走"
+
+    # 连同名目录都没有(2 号盘的真实样子:根目录 5 个目录,没有「最全文件」)
+    monkeypatch.setattr(xt, "_parent_cache", {})
+    monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: [
+        {"id": "X", "name": "我的转存", "kind": "drive#folder"}])
+    assert xt.resolve_parent_id() == "", "找不到就落根目录 —— 但绝不带着别人的 id 去撞"
+
+
+def test_落点探活不能把网络故障当成目录不存在(monkeypatch) -> None:
+    """⚠️ 「探不到」≠「没有」。判错会**悄悄落根目录**,那是本仓最恨的静默退化。"""
+    from app.services import xunlei_transfer as xt
+
+    monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
+    monkeypatch.setattr(xt, "_fresh_cred", lambda cred=None, **k: {"access_token": "a"})
+
+    def _boom(*a, **k):
+        raise TimeoutError("网络抖了")
+    monkeypatch.setattr(xt.requests, "get", _boom)
+    assert xt._folder_exists("FIXED", {"access_token": "a"}) is True
+
+    class _R404:
+        status_code = 404
+
+        def json(self):
+            return {"error": "file_not_found", "error_code": 5}
+    monkeypatch.setattr(xt.requests, "get", lambda *a, **k: _R404())
+    assert xt._folder_exists("FIXED", {"access_token": "a"}) is False
+
+    class _R500:
+        status_code = 500
+
+        def json(self):
+            return {"error": "internal"}
+    monkeypatch.setattr(xt.requests, "get", lambda *a, **k: _R500())
+    assert xt._folder_exists("FIXED", {"access_token": "a"}) is True, "认不出的状态按配置值走"
+
+
+def test_宣传简介缺失要写进返回_而不是只打日志(monkeypatch) -> None:
+    """★ 2026-10-16:切到 2 号盘后那边没有「监控简介」⇒ 新链**静默地没有宣传简介**。
+
+    降级本身不算失败(转存照样成功),但**必须能被看见** —— 原来的处理只有一行
+    `logger.warning`,而**日志没人看**:一个功能降级就这么变成了"全绿"。
+    """
+    from app.services import xunlei_transfer as xt
+
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None, **kw: {
+        "access_token": "a", "captcha_token": "c", "device_id": "d", "client_id": "x"})
+    monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
+    monkeypatch.setattr(xt, "resolve_parent_id", lambda cred=None, **k: "")
+    monkeypatch.setattr(xt, "_intro_file_ids", lambda *a, **k: [])     # 本号盘里没有简介目录
+
+    def fake_get(url, **kw):
+        if url.endswith("/drive/v1/share"):
+            return _FakeResp({"share_status": "OK", "pass_code_token": "t",
+                              "files": [{"id": "F1"}]})
+        return _FakeResp({"progress": 100,
+                          "params": {"trace_file_ids": json.dumps({"F1": "N1"})}})
+
+    def fake_post(url, **kw):
+        if url.endswith("/restore"):
+            return _FakeResp({"restore_task_id": "T1"})
+        return _FakeResp({"share_url": "https://pan.xunlei.com/s/OUR", "pass_code": "9"})
+
+    monkeypatch.setattr(xt.requests, "get", fake_get)
+    monkeypatch.setattr(xt.requests, "post", fake_post)
+    monkeypatch.setattr("config.settings.get_settings",
+                        lambda: type("S", (), {"pan_intro_xunlei_dir": "监控简介",
+                                               "xunlei_transfer_parent": "",
+                                               "xunlei_transfer_parent_id": ""})())
+    out = xt.transfer_and_share("https://pan.xunlei.com/s/S?pwd=p")
+    assert out["status"] == "ok", out
+    assert "监控简介" in out["intro_note"] and "没有宣传简介" in out["intro_note"], out
+
+
+def test_落点目录不在根目录时也要能下探找到(monkeypatch) -> None:
+    """★ **2026-10-16 实测**:2 号盘的「最全文件」**不在根目录**,而在
+    `你想要的都在里面哦/最全文件` ⇒ 只扫根目录会判"没有",于是资源**散落根目录**。
+
+    症状只有日志里一句「没找到,本轮落根目录」—— 又一个静默退化。
+    这里钉住:按名字找要**广度优先下探**。
+    """
+    from app.services import xunlei_transfer as xt
+
+    tree = {"": [{"id": "OUT", "name": "你想要的都在里面哦", "kind": "drive#folder"}],
+            "OUT": [{"id": "FULL", "name": "最全文件", "kind": "drive#folder"}],
+            "FULL": [{"id": "R1", "name": "某个资源", "kind": "drive#folder"}]}
+    monkeypatch.setattr(xt, "_parent_cache", {})
+    monkeypatch.setattr(xt, "_folder_exists", lambda fid, cred: False)
+    monkeypatch.setattr(xt, "list_all_files", lambda pid="", **k: tree.get(pid, []))
+    monkeypatch.setattr("config.settings.get_settings",
+                        lambda: type("S", (), {"xunlei_transfer_parent": "最全文件",
+                                               "xunlei_transfer_parent_id": "ONE_PAN_ID"})())
+    assert xt.resolve_parent_id() == "FULL"
+    assert xt.resolve_parent_id() == "FULL"        # 第二次走缓存,不再扫
 
 
 def test_is_dead_share_error_recognizes_banned_or_expired() -> None:

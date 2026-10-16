@@ -425,43 +425,125 @@ def _captcha_token(cred: dict) -> str:
     return fresh
 
 
-_parent_cache: dict = {"name": "", "id": "", "at": 0.0}
+#: 落点目录缓存 —— **按账号**(2026-10-16 修)。原来是一个全局单槽
+#: (`{"name","id","at"}`):两个账号会互相覆盖,而且**写死的 id 对 2 号永远无效**
+#: (见 `resolve_parent_id` 的说明)。
+_parent_cache: dict[str, dict] = {}
+
+
+def _folder_exists(folder_id: str, cred: dict | None) -> bool:
+    """**这一枚凭据所在的盘里**,这个目录 id 存不存在(一次只读 GET)。
+
+    ⚠️ 只有**明确的 404 / `file_not_found`** 才判「不存在」;网络抖动、限流、
+    以及认不出的状态一律当**存在**(维持配置值)——「探不到」当成「没有」会让转存
+    **悄悄落根目录**,那是本仓最恨的那类静默退化(而带着无效 id 撞出去是**响的**:
+    转存会明确失败)。
+
+    ⚠️⚠️ **captcha 过期必须走重试、不能算"存在"**(2026-10-16 实测踩到):它回的是
+    `400 captcha_invalid` —— 落到"认不出"那一档就会**永远说这个目录在**,
+    于是**别人的** id 被一路发出去,转存全挂、而报错长得像"分享已死"。
+    所以这里用 `_json`(它把 captcha_invalid 转成 `_CaptchaExpired`)+ `_with_captcha_retry`。
+    """
+    def _probe() -> bool:
+        r = requests.get(f"{_API}/drive/v1/files/{folder_id}",
+                         headers=_drive_headers(_fresh_cred(cred)), timeout=_TIMEOUT)
+        data = _json(r)                      # ← captcha_invalid 会在这里抛 `_CaptchaExpired`
+        if r.status_code == 200:
+            return True
+        if r.status_code == 404 or str(data.get("error") or "") == "file_not_found":
+            return False
+        raise RuntimeError(f"认不出的探活结果:{r.status_code} {str(data)[:80]}")
+
+    try:
+        return _with_captcha_retry(_probe, cred)
+    except _CaptchaExpired:
+        logger.warning("落点目录 %s 探活:captcha 续期后仍失效,按配置值使用", folder_id)
+        return True
+    except Exception as exc:  # noqa: BLE001 - 探不到 ≠ 不存在
+        logger.warning("落点目录 %s 探活失败(%s),按配置值使用", folder_id, type(exc).__name__)
+        return True
+
+
+def _find_folder_by_name(name: str, cred: dict | None, *, max_depth: int = 3,
+                         max_folders: int = 200) -> str:
+    """按**名字**在**这一枚凭据所在的盘里**找目录 —— **广度优先**,最多下探 `max_depth` 层。
+
+    ⚠️ **为什么要下探**(2026-10-16 实测):2 号盘的「最全文件」**不在根目录**,
+    而在 `你想要的都在里面哦/最全文件` ⇒ 只扫根目录会判定"没有",于是资源**散落根目录**,
+    而症状只是日志里一句「没找到,本轮落根目录」(静默退化)。
+
+    ⚠️ 同名多个 ⇒ 取**最浅**的那个(BFS 天然如此),并记 warning —— 不猜、也不静默。
+    ⚠️ 某一层列不动**不抛**:找落点失败不该让整条链停摆(调用方会落根目录)。
+    """
+    want = (name or "").strip()
+    if not want:
+        return ""
+    level = [""]                       #: 待查的父目录(第 1 轮 = 根目录)
+    for _depth in range(max(1, int(max_depth))):
+        nxt: list[str] = []
+        for pid in level[:max_folders]:
+            try:
+                entries = list_all_files(pid, cred=cred)
+            except Exception as exc:  # noqa: BLE001 - 列不动就跳过这一支
+                logger.warning("落点目录查找:列 %s 失败(%s)", pid or "/", type(exc).__name__)
+                continue
+            for f in entries:
+                if str(f.get("kind")) != "drive#folder":
+                    continue
+                if str(f.get("name") or "").strip() == want:
+                    return str(f.get("id") or "")
+                nxt.append(str(f.get("id") or ""))
+        level = [p for p in nxt if p][:max_folders]
+        if not level:
+            break
+    return ""
 
 
 def resolve_parent_id(cred: dict | None = None, *, refresh: bool = False) -> str:
-    """**转存落点目录 id**:按 `settings.xunlei_transfer_parent`(默认「最全文件」)在根目录里找。
+    """**转存落点目录 id** —— 按**这一枚凭据所在的账号**解析。
 
-    用户口径(2026-10-02):"以后都存进最全文件里面" —— 所有自动转存的资源统一落那个目录,
-    不再散在根目录。
+    用户口径(2026-10-02):"以后都存进最全文件里面" —— 自动转存的资源统一落那个目录。
 
-    - 按**名字**找而不是写死 id:目录改名/重建都能跟上;
-    - **找不到返回 ""(根目录)并记 warning** —— 目录没了不该让整条链停摆;
-    - 结果缓存 10 分钟,免得每次转存都去扫一遍目录。
+    ★★★ **2026-10-16 修:`XUNLEI_TRANSFER_PARENT_ID` 写死的那个 id 只属于 1 号盘。**
+    账号池里换成 2 号之后,`share/restore` 带着**别的账号的 parent_id** 发出去 ⇒
+    迅雷回 `file_not_found / error_code 5 / 文件(夹)不存在` ⇒ **每一笔转存都打在空气上**。
+    实测当天:39 笔失败、`xunlei_group` 连续多轮 `failed`,而报错长得像"分享已死",
+    极易被误判成上游问题(以 2 号身份 `GET /drive/v1/files/<那个id>` 得到**逐字相同**的 404)。
+    ⚠️ 更坏的是**设计好的兜底被它短路了**:`if fixed: return fixed` 让下面那条
+    "按名字找 / 找不到落根目录"**永远走不到**。
+
+    ⇒ 现在的顺序(**全部按账号**,结果按账号缓存 10 分钟):
+      ① 配置的 id —— 但**先确认它在这一枚凭据的盘里存在**;
+      ② 不在 ⇒ 按**名字**在**这个账号**的根目录里找(目录改名/重建都能跟上);
+      ③ 名字也找不到 ⇒ 返回 `""`(**落根目录**)并记 warning —— 目录没了不该让整条链停摆。
     """
     from config.settings import get_settings
 
     st = get_settings()
-    # **优先用配置的 id**(2026-10-02:名字查找不可靠 —— 「最全文件」存在却不被列表返回)
-    fixed = (getattr(st, "xunlei_transfer_parent_id", "") or "").strip()
-    if fixed:
-        return fixed
-    name = (getattr(st, "xunlei_transfer_parent", "") or "").strip()
-    if not name:
-        return ""
+    key = _file_key(cred)
     now = time.time()
-    if (not refresh and _parent_cache["name"] == name and _parent_cache["id"]
-            and now - _parent_cache["at"] < 600):
-        return str(_parent_cache["id"])
-    # ⚠️ **这里必须翻页**(2026-10-10):根目录原始一页 200 条里 ~197 条是回收站条目,
-    # 活条目可能落在**第 2 页** ⇒ 用单页 `list_files` 会在某天**突然找不到落点目录**,
-    # 而症状只是 logger 里一句「没找到,本轮落根目录」—— 转存会静静地落到根目录去。
-    for f in list_all_files("", cred=cred):
-        if (f.get("name") or "").strip() == name and f.get("kind") == "drive#folder":
-            _parent_cache.update(name=name, id=str(f.get("id") or ""), at=now)
-            return str(f.get("id") or "")
-    logger.warning("转存落点目录「%s」没找到,本轮落根目录", name)
-    _parent_cache.update(name=name, id="", at=now)
-    return ""
+    cached = _parent_cache.get(key)
+    if not refresh and cached and now - cached["at"] < 600:
+        return str(cached["id"])
+
+    def _remember(fid: str) -> str:
+        _parent_cache[key] = {"id": fid, "at": now}
+        return fid
+
+    fixed = (getattr(st, "xunlei_transfer_parent_id", "") or "").strip()
+    if fixed and _folder_exists(fixed, cred):
+        return _remember(fixed)
+    name = (getattr(st, "xunlei_transfer_parent", "") or "").strip()
+    if name:
+        # ⚠️ **按名字找要走"广度优先下探"**(2026-10-16):`list_all_files("")` 只列**根目录**,
+        # 而 2 号盘的「最全文件」在 `你想要的都在里面哦/最全文件` ⇒ 只看根目录 = 判"没有"。
+        fid = _find_folder_by_name(name, cred)
+        if fid:
+            return _remember(fid)
+    if fixed or name:
+        logger.warning("账号 %s 的转存落点目录「%s」没找到(配置的 id=%s 在该账号盘里也不存在)"
+                       " —— 本轮落根目录", key, name or "(未配名)", fixed or "(未配 id)")
+    return _remember("")
 
 
 def verify(settings=None) -> dict:
@@ -1098,10 +1180,16 @@ def transfer_and_share(share_url: str, parent_id: str = "", settings=None,
         #   对方整包保存时自动带走,而且不会在他盘里平铺出一个 `简介.doc`。
         #   ⚠️ 代价:**每个资源目录会真的多存一份**(实测约 2.9 MB)。
         #   资源是**散文件** ⇒ 无处可塞 ⇒ 退回"并进分享清单"(并排顶层,不占空间)。
+        # ★ **简介拿不到要说出来**(2026-10-16):它原来只有一行 `logger.warning`
+        #   —— 而**日志没人看**。切到 2 号盘之后,那边没有「监控简介」目录 ⇒
+        #   新链**静默地没有宣传简介**:功能降级,而所有产出指标全绿。
+        intro_note = ""
         if intro_dir:
             try:
                 intro_ids = _intro_file_ids(h, intro_dir, parent_id)
                 if not intro_ids:
+                    intro_note = (f"⚠️宣传简介目录「{intro_dir}」在本账号盘里没找到 ⇒ "
+                                  f"这条链接**没有宣传简介**(功能降级,不是转存失败)")
                     logger.warning("宣传简介目录没找到或是空的,本轮跳过:%s", intro_dir)
                 else:
                     kinds = _kinds_of(h, file_ids, parent_id)
@@ -1136,7 +1224,8 @@ def transfer_and_share(share_url: str, parent_id: str = "", settings=None,
             return {"status": "failed", "message": f"生成分享失败:{str(share)[:160]}"}
         return {"status": "ok", "message": "转存并分享成功",
                 "share_url": share["share_url"] + "?pwd=" + (share.get("pass_code") or ""),
-                "code": share.get("pass_code") or "", "fid": ",".join(file_ids)}
+                "code": share.get("pass_code") or "", "fid": ",".join(file_ids),
+                "intro_note": intro_note}
 
     try:
         return _with_captcha_retry(_once, cred)

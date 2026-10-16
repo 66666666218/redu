@@ -228,6 +228,26 @@ class TestListRotationIsTheEarlyDetector:
         row = ch.check_weread_list_rotation(session)[0]
         assert row["level"] == ch.YELLOW and "记账" in row["detail"], row
 
+    def test_两条路都被挡_但那轮没记到off_也不许判成窗口坏了(self, session) -> None:
+        """★★ **2026-10-16 实测的真 bug**:`off` 只是好几种结局里的**一种**。
+
+        生产上**同一件事**在相邻两轮里被判成了**两种相反的动作**:
+          · 08:06 `ok=0 app=0 app_fail=2 app_blocked=23 off=0 skipped=69` ⇒ 误判「窗口坏了(改代码)」;
+          · 20:06 `… off=1 …`                                      ⇒ 判成「被挡(等)」。
+        `off` 只统计「**发出去了**、没被挡、也没拿到列表」那一支;被预算熔断拦下
+        (`weread_budget.Blocked` —— 我们**主动没发**)走的是另一个分支 ⇒ 一个字都不记。
+
+        可用判据:`app_fail`/`app_blocked` 只在「**号在 App 窗口里、真的决定去问它**」时才 +1
+        ⇒ 它们 > 0 就**证明窗口非空**。所以「谁都没问过」**必须**要求它们也是 0。
+        """
+        _run(session, "accounts=124 new=21 failed=0 weread_list(ok=0 app=0 app_fail=2 "
+                      "app_blocked=23 off=0 off_with_new=21 skipped=69)")
+        row = ch.check_weread_list_rotation(session)[0]
+        assert row["level"] == ch.RED
+        assert "_list_window" not in row["detail"], (
+            f"把人指去改代码了 —— 而真因是两条路都被挡(动作是**等**):{row['detail']}")
+        assert "等" in row["detail"], row["detail"]
+
     def test_最近没有轮次时黄而不是红(self, session) -> None:
         row = ch.check_weread_list_rotation(session)[0]
         assert row["level"] == ch.YELLOW, row
@@ -275,6 +295,21 @@ class Test两行体检不许给互相矛盾的动作:
         assert rot["level"] == ch.RED
         for row in (cov, rot):
             assert "_list_window" in row["detail"], row["detail"]
+
+    def test_那轮恰好没记到off时_两行也不许翻成改代码(self, session) -> None:
+        """★ 2026-10-16:与 `_today` **只差一个 `off` 计数**,结论必须**不变**。
+
+        同一件事(两条路都被挡)在两轮里分别记成 `off=1` 与 `off=0`,
+        判据若只认 `off`,报告就会在两轮之间**随机翻** —— 比一直判错更坏:
+        人会以为"改代码"是这次的新发现。
+        """
+        _run(session, "accounts=124 new=21 failed=0 weread_list(ok=0 app=0 app_fail=2 "
+                      "app_blocked=23 off=0 off_with_new=21 skipped=69)")
+        _seed(session, 100, 0)
+        for row in (ch.check_read_num_coverage(session)[0],
+                    ch.check_weread_list_rotation(session)[0]):
+            assert "_list_window" not in row["detail"], row["detail"]
+            assert "等" in row["detail"], row["detail"]
 
     def test_没有记账时给的是决策流程而不是单一动作(self, session) -> None:
         """⚠️ 什么都不记时**不能猜家族**:要给"先看哪个数、再决定动作"的流程。"""

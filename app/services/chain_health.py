@@ -85,26 +85,45 @@ def _latest_map(db, days: int = 7) -> dict[str, datetime]:
     return {str(k): v for k, v in rows}
 
 
-def check_dependencies() -> list[dict]:
+def check_dependencies(settings=None) -> list[dict]:
     """① 依赖层:容器 / 库 / venv / 登录档案。**只读探测**。"""
     import importlib
     import os
     import subprocess
 
+    from config.settings import get_settings
+
+    # ⚠️ 一律用 `getattr(cfg, …, 默认值)`,**不要** `cfg.x`:测试里用
+    #    `type("S", (), {...})()` 造的最小假配置只带它关心的那几个字段,
+    #    直接取属性会 AttributeError,把整份体检报告带崩。
+    cfg = settings if settings is not None else get_settings()
     out: list[dict] = []
 
     def add(name: str, ok: bool, detail: str) -> None:
         out.append({"name": name, "level": GREEN if ok else RED, "detail": detail})
 
-    # WeRSS 容器(免费列表源;它同时是"号名→fakeid"的解析器)
-    try:
-        import requests
+    # WeRSS 容器(免费列表源)—— ⚠️ **先看配没配,再探它**(2026-10-16 修)。
+    # 原来这里是**无条件探 `http://127.0.0.1:8001`**,而 WeRSS 已按 `.env` 注释在
+    # **2026-10-15 整体摘除**(容器不再部署;号名解析改走自研 `WempClient.search_biz`)
+    # ⇒ 从那以后**每一轮固定报一次红**,而它其实"本来就该不在"。
+    # ⚠️ 一条**永远红**的项会训练人忽略整份报告 —— 与 newsnow 那条(下面)是同一个病。
+    # ⚠️ 同一个判断在 `app/services/health.check_optional_containers` 里**早就做对了**
+    #    ("未配 WeRSS → 不探它",见 `tests/test_source_health.py`),两个模块说法不一致。
+    _werss_url = str(getattr(cfg, "wechat_werss_url", "") or "").strip()
+    _werss_name = "WeRSS 容器(免费列表源)"
+    if not _werss_url:
+        out.append({"name": _werss_name, "level": GREEN,
+                    "detail": "**未配置** —— 2026-10-15 摘除:容器不再部署,按名收录已自研化"
+                              "(`WempClient.search_biz`)⇒ 它**本来就该不在**,不是故障。"
+                              "要恢复:`.env` 里解开 `WECHAT_WERSS_URL`/`_AK`/`_SK` 三行再重启"})
+    else:
+        try:
+            import requests
 
-        r = requests.get("http://127.0.0.1:8001/", timeout=6)
-        add("WeRSS 容器(列表源 + 号名解析)", r.status_code < 500,
-            f"HTTP {r.status_code}")
-    except Exception as exc:  # noqa: BLE001
-        add("WeRSS 容器(列表源 + 号名解析)", False, f"连不上:{type(exc).__name__}")
+            r = requests.get(_werss_url, timeout=6)
+            add(_werss_name, r.status_code < 500, f"HTTP {r.status_code}")
+        except Exception as exc:  # noqa: BLE001
+            add(_werss_name, False, f"连不上:{type(exc).__name__}")
 
     # aiotieba(贴吧点赞)
     try:
@@ -126,9 +145,7 @@ def check_dependencies() -> list[dict]:
     # newsnow(热榜长尾)—— ⚠️ **按实例角色判断**:它只服务于 `hot_source`(role=hotspot),
     # 而本机是 role=wechat ⇒ **本来就不该有它**,报红是**误报**。
     # (一条永远红的项会训练人忽略整份报告 —— 与"闸门失准"告警同一条教训。)
-    from config.settings import get_settings
-
-    role = str(getattr(get_settings(), "scheduler_role", "all") or "all")
+    role = str(getattr(cfg, "scheduler_role", "all") or "all")
     if role not in ("all", "hotspot"):
         out.append({"name": "newsnow 容器(热榜长尾)", "level": GREEN,
                     "detail": f"本机 role={role} **不该跑热榜**,不需要它"
@@ -959,23 +976,35 @@ def check_list_sources(db, settings=None) -> list[dict]:
                               + _READ_NOTE})
     # ★ **单点风险单独说**:只剩一个能答的源时降级链实际没有备胎,而"还有源在答"会让
     #    所有产出指标照常绿 —— 只有这一行看得出来。
+    # ⚠️ **2026-10-16 改颜色判据**:原来 `alive == 0` **一律判红**,而 `wemp` 被
+    #    `200013 频率限制`挡下时同样会走到这里 ⇒ **上面那行刚说过"不报红:假红会让人
+    #    忽略整份报告",下面这行立刻报红** —— 自己跟自己打架,还正好犯了它要防的那个病。
+    #    现在按**失败性质**给色:有 `auth`(凭据死了,等不来自愈)才红,否则黄。
     if alive <= 1:
-        out.append({"name": "公众号·列表源兜底", "level": RED if alive == 0 else YELLOW,
+        hard = [n for n, k in fail_kind.items() if k == "auth"]
+        if alive == 0:
+            level = RED if hard else YELLOW
+            _why = (f"**凭据已失效,等多久都不会自己好** —— 见上面 {'/'.join(hard)} 那一行;"
+                    if hard else
+                    "**本轮一个都没答上,但性质是限流/网络(可等)** —— 别换凭据、别重跑探针,"
+                    "那只会把工作窗口继续推后;")
+            # ⚠️ 2026-10-14 改准措辞:这句原来写「链路已经完全取不到列表了」,
+            #    而当天实测 20:07 那轮**刚抓到 59 篇新文** —— 因为
+            #    **微信读书那条路不在这份清单里**(它由 `_listen` 直接调用,
+            #    不在 `configured_backends` 的三个源里)。
+            #    结论说反了会让人去开 WeRSS/换凭据,而真正该看的是别处。
+            _tail = ("**但这不等于链路死了**:微信读书那条路**不在本清单里**"
+                     "(`configured_backends` 只有 werss/wemp/reader_platform)⇒ 去看上面"
+                     "「微信读书(Cookie/书架)」那一行和「公众号·监听采文」的产出。本条说的是"
+                     "「**降级链里的备胎用完了**」,不是「取不到列表」。")
+        else:
+            level = YELLOW
+            _why = ""
+            _tail = ("挂掉的那个源**不影响产出指标**(它答不上时会被静默跳过),"
+                     "所以只能靠这一行看出来。")
+        out.append({"name": "公众号·列表源兜底", "level": level,
                     "detail": f"**能答的源只剩 {alive} 个** ⇒ `MultiSourceClient` 的降级链"
-                              f"实际上没有备胎。" + (
-                                  # ⚠️ 2026-10-14 改准措辞:这句原来写「链路已经完全取不到列表了」,
-                                  #    而当天实测 20:07 那轮**刚抓到 59 篇新文** —— 因为
-                                  #    **微信读书那条路不在这份清单里**(它由 `_listen` 直接调用,
-                                  #    不在 `configured_backends` 的三个源里)。
-                                  #    结论说反了会让人去开 WeRSS/换凭据,而真正该看的是别处。
-                                  "**但这不等于链路死了**:"
-                                  "微信读书那条路**不在本清单里**(`configured_backends` 只有 "
-                                  "werss/wemp/reader_platform)⇒ 去看上面「微信读书(Cookie/书架)」"
-                                  "那一行和「公众号·监听采文」的产出。本条说的是"
-                                  "「**降级链里的备胎用完了**」,不是「取不到列表」。"
-                                  if alive == 0 else
-                                  "挂掉的那个源**不影响产出指标**(它答不上时会被静默跳过),"
-                                  "所以只能靠这一行看出来。")})
+                              f"实际上没有备胎。" + _why + _tail})
     return out
 
 
@@ -1141,10 +1170,13 @@ _WEREAD_BLOCKED_ACTION = (
     "认证本身是好的(对照端点 `/web/shelf/sync` 回 200)。"
     "恢复判据**只看下一轮** `runs.detail` 的 `weread_list(ok=/app=)` 非 0。")
 _WEREAD_WINDOW_ACTION = (
-    "**谁都没问过**(ok/app/off 全 0 而窗口外满员)⇒ **轮转窗口坏了**(**要改代码**)。"
+    "**谁都没问过**(ok/app/off 全 0、App 路**一次都没被调用**(`app_fail`/`app_blocked` "
+    "也是 0)、而窗口外满员)⇒ **轮转窗口坏了**(**要改代码**)。"
     "2026-10-08 那次就是这个形状:`_list_window` 的窗口被**没有 bookId 的号**占满"
     "(它们不可能被问列表),于是真有 bookId 的号**恒在窗口外**、两条路一次都没被调用。"
-    "查 `_listen._list_window` 与 `_list_key`。")
+    "查 `_listen._list_window` 与 `_list_key`。"
+    "⚠️ 判「没问过」必须**连 App 路一起看**:只看 `off=0` 会把「两条路都被挡」误判成窗口坏了"
+    "(2026-10-16 实测,见 `_weread_list_family`)。")
 _WEREAD_RUNNING_ACTION = (
     "**至少一条路在跑** ⇒ 断供另有原因(看「精确阅读数」那条的产出明细),"
     "既不是「谁都没问过」、也不是「被额度挡」。")
@@ -1152,7 +1184,9 @@ _WEREAD_UNKNOWN_ACTION = (
     "两条路:① 网页 `/web/mp/articles`;② App `i.weread.qq.com/book/articles`。"
     "⚠️ **先看 `runs.detail` 的 `weread_list(...)` 再决定动作** —— "
     "`off>0` = 被额度/风控挡(动作是**等**;`-2041` 时**换新会话也没用**);"
-    "全 0 而窗口外满员 = **窗口坏了**(改代码);"
+    "`ok=app=off=0` **且 `app_fail`/`app_blocked` 也全是 0** = 真的**没问过**、窗口坏了"
+    "(改代码);⚠️ 若 `ok=app=off=0` 而 `app_fail`/`app_blocked` > 0,那是**被挡**不是窗口坏了"
+    "(App 路只在「号在窗口里」时才会被调用 ⇒ 有调用就证明窗口非空);"
     "只有 `-2012/-2010` 那族才轮到**重登**"
     "(`scripts/weread_app_login.py`;⚠️ 重取回同一个 token 就是空转)。")
 
@@ -1185,7 +1219,11 @@ def _weread_downtime_note(db) -> str:
         if ok is None or app is None:
             continue
         off = _accounting_field(d, "off") or 0
-        parsed.append((ok + app > 0, bool(off)))
+        #: ⚠️ 「是不是被挡」与 `_weread_list_family` **共用同一判据**(2026-10-16):
+        #: 只看 `off` 会把"被熔断拦下"记成"窗口坏了",自愈次数就跟着虚高。
+        app_seen = ((_accounting_field(d, "app_fail") or 0)
+                    + (_accounting_field(d, "app_blocked") or 0))
+        parsed.append((ok + app > 0, bool(off) or app_seen > 0))
     if not parsed:
         return ""
     if parsed[0][0]:
@@ -1228,10 +1266,28 @@ def _weread_list_family(db, rounds: int = 5) -> tuple[str, str, str]:
             continue          #: 连这两个都没有 = 这一轮压根没记(与"记了 0"是两回事)
         off = _accounting_field(d, "off") or 0
         skipped = _accounting_field(d, "skipped") or 0
-        shape = f"最近一轮:网页问成 {ok} / App 问成 {app} / 被挡 {off} / 窗口外 {skipped}"
+        #: ★ **2026-10-16:窗口非空的硬证据**。`app_fail`/`app_blocked` 只在
+        #: "这个号**在 App 窗口里**、我们**真的决定去问它**"时才 +1
+        #: (被熔断的 `weread_budget.Blocked` 也算"决定要发、被拦下")。
+        #: ⇒ 它 > 0 就**证明窗口非空**,那一轮不可能是「窗口坏了」。
+        app_seen = ((_accounting_field(d, "app_fail") or 0)
+                    + (_accounting_field(d, "app_blocked") or 0))
+        shape = (f"最近一轮:网页问成 {ok} / App 问成 {app} / 被挡 {off} / 窗口外 {skipped}"
+                 f"(App 路真去问了 {app_seen} 次)")
         if ok + app:
             return "running", shape, _WEREAD_RUNNING_ACTION
         if off:
+            return "blocked", shape, _WEREAD_BLOCKED_ACTION
+        # ⚠️⚠️ **2026-10-16 修:`off == 0` 就直接判「窗口坏了」是个真 bug。**
+        #    `off` 只统计"**发出去了**、没被挡、也没拿到列表"那**一种**结局;
+        #    被预算熔断拦下(`weread_budget.Blocked` —— 我们主动没发)与 `-2041`
+        #    走的**都不是**这个分支 ⇒ 于是**「两条路都被挡」与「窗口坏了」长得一模一样**,
+        #    而两者的动作**正相反**(一个要改代码、一个要等着)。
+        #    实测(2026-10-16):同一件事在相邻两轮里,
+        #      08:06 `ok=0 app=0 app_fail=2 app_blocked=23 off=0 skipped=69` ⇒ 误判"改代码";
+        #      20:06 `… off=1 …` ⇒ 判成"该等"。
+        #    **同一个病情,报告在两种相反动作之间随机翻** —— 比一直判错更坏。
+        if app_seen:
             return "blocked", shape, _WEREAD_BLOCKED_ACTION
         return "window", shape, _WEREAD_WINDOW_ACTION
     return "unknown", "最近 5 轮里都没有可用的 `weread_list(...)` 记账", _WEREAD_UNKNOWN_ACTION
@@ -1307,9 +1363,16 @@ def check_weread_list_rotation(db, rounds: int = 3) -> list[dict]:
 
     | 形状 | 含义 | 处置 |
     |---|---|---|
-    | `ok`/`app` 全 0、`skipped` 满员、`off=0` | **谁都没问过** ⇒ **轮转窗口坏了** | 查 `_list_window` 及其入参 |
+    | `ok`/`app` 全 0、`skipped` 满员、`off=0`、**且 `app_fail`/`app_blocked` 也全 0** | **谁都没问过** ⇒ **轮转窗口坏了** | 查 `_list_window` 及其入参 |
     | `ok`/`app` 全 0、`off>0` | 两条路**被额度/风控挡掉** | 外因:等 / 换会话,别改代码 |
+    | `ok`/`app` 全 0、`off=0`,**但 `app_fail`/`app_blocked` > 0** | 也是**被挡**(App 路真去问过 ⇒ 窗口非空) | 同上:**等**,别改代码 |
     | `ok`/`app` 有非 0 | 至少一条路在跑 | 绿(拿不到读数另有原因,看覆盖率那条) |
+
+    ⚠️ **第三行是 2026-10-16 补的**(实测):`off` 只统计"**发出去了**、没被挡、也没拿到
+    列表"那**一种**结局,而**被预算熔断拦下**(我们主动没发)与 `-2041` 都不走那个分支
+    ⇒ 「两条路都被挡」与「窗口坏了」**会撞成同一个形状**,而动作正相反。当天同一件事在
+    相邻两轮里被判成两种相反动作(`off=0` 那轮说"改代码"、`off=1` 那轮说"等")。
+    可用判据:`app_fail`/`app_blocked` 只在"号在 App 窗口里、真的决定去问它"时才 +1。
 
     ⇒ **一轮就能判**,不必等三天。判据是「**调用过没有**」,不是「调用成没成」。
     """

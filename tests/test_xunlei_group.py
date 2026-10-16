@@ -314,6 +314,27 @@ def test_transfer_pending_fills_our_share_and_marks_failed(session, monkeypatch)
     assert rows["B1"].status == "failed" and "未知错误" in rows["B1"].message
 
 
+def test_简介缺失这种功能降级要写在行上_而不是看起来全绿(session, monkeypatch) -> None:
+    """★ **2026-10-16**:切到 2 号盘之后那边**没有「监控简介」**目录 ⇒ 新链静默没有简介。
+
+    降级**不是失败**(转存照样成功、`status=ok`),但必须**看得见** —— 原来成功后
+    `message` 恒写 `""`,于是「这条链接没有宣传简介」在列表页与运行记录里**全是绿的**。
+    """
+    from app.services import xunlei_transfer as xt
+
+    session.add(XunleiGroupShare(user_id=1, group_id="g", share_id="A1",
+                                 origin_url="u-A1", title="资源甲", status="pending"))
+    session.commit()
+    monkeypatch.setattr(xt, "transfer_and_share",
+                        lambda url, parent_id="", settings=None, **kw: {
+                            "status": "ok", "share_url": "s", "code": "c", "fid": "f",
+                            "intro_note": "⚠️宣传简介目录「监控简介」在本账号盘里没找到 ⇒ "
+                                          "这条链接**没有宣传简介**(功能降级,不是转存失败)"})
+    xg.transfer_pending(session, 1, limit=5)
+    row = session.scalars(select(XunleiGroupShare)).one()
+    assert row.status == "ok" and "没有宣传简介" in row.message
+
+
 def test_transfer_pending_respects_limit(session, monkeypatch) -> None:
     """限量:库里 pending 再多,一轮也只转 `limit` 条(转存慢且占盘)。"""
     from app.services import xunlei_transfer as xt

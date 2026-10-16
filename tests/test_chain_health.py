@@ -79,6 +79,57 @@ def test_newsnow_is_checked_on_a_hotspot_instance(monkeypatch) -> None:
     assert row["level"] in (RED, YELLOW), f"hotspot 侧必须真查,实际 {row}"
 
 
+def test_未配WeRSS就不探它也不报红(monkeypatch) -> None:
+    """★ **2026-10-16 修的一条"永远红"**。
+
+    WeRSS 已在 2026-10-15 按 `.env` 注释**整体摘除**(容器不再部署;按名收录改走自研的
+    `WempClient.search_biz`),而这一段原来**无条件探 `127.0.0.1:8001`** ⇒ 从那以后每轮
+    体检固定报一次 `🔴 连不上:ConnectionError`,而它其实是**我们自己的配置**造成的。
+    与 newsnow 那条同一条教训:**一条永远红的项会训练人忽略整份报告**。
+    ⚠️ 同一个判断在 `app/services/health.check_optional_containers` 里早就做对了
+    ("未配 WeRSS → 不探它"),两个模块说法不一致本身就是 bug。
+    """
+    import config.settings as cs
+    import requests
+
+    from app.services import chain_health as ch
+
+    monkeypatch.setattr(cs, "get_settings",
+                        lambda: type("S", (), {"wechat_werss_url": "",
+                                               "scheduler_role": "wechat"})())
+    hit: list = []
+    monkeypatch.setattr(requests, "get", lambda *a, **kw: hit.append(a))
+    row = [r for r in ch.check_dependencies() if "WeRSS" in r["name"]][0]
+    assert hit == [], "未配就不该发请求(探不到网会被当成红,而那正是这个 bug)"
+    assert row["level"] == GREEN, f"未配是正常态,不该报红,实际 {row}"
+    assert "未配置" in row["detail"] and "search_biz" in row["detail"]
+
+
+def test_配了WeRSS就真去探它(monkeypatch) -> None:
+    """反向:配了就必须真探 —— 别把"没配"那条豁免顺手变成"永远不探"。"""
+    import config.settings as cs
+    import requests
+
+    from app.services import chain_health as ch
+
+    monkeypatch.setattr(cs, "get_settings",
+                        lambda: type("S", (), {"wechat_werss_url": "http://127.0.0.1:8001",
+                                               "scheduler_role": "wechat"})())
+    hit: list = []
+
+    class _R:
+        status_code = 200
+
+    def _get(url, **kw):
+        hit.append(url)
+        return _R()
+
+    monkeypatch.setattr(requests, "get", _get)
+    row = [r for r in ch.check_dependencies() if "WeRSS" in r["name"]][0]
+    assert hit == ["http://127.0.0.1:8001"], "配了就该拿**配的那个地址**去探"
+    assert row["level"] == GREEN and "HTTP 200" in row["detail"]
+
+
 def test_remote_side_chain_is_not_flagged_red_locally(session) -> None:
     """★ **远程侧的链不能按本地标准判红**(2026-10-05 补)。
 
