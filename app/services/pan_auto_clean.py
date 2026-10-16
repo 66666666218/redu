@@ -126,7 +126,15 @@ def clean_quark(db: Session, user_id: int, settings, *, dry_run: bool, left: int
     out["pkg_planned"] = int(pkg.get("n_drop") or 0)
     out["pkg_bytes"] = int(pkg.get("bytes") or 0)
     #: 两个去重**共用**同一个硬上限(`left`):整包那一份也算一次删除。
-    room = max(0, left - int(out["deleted"]))
+    #: 两个去重**共用**同一个硬上限(`left`):文件级先删 ⇒ 整包那一遍的余量要**减去**
+    #: 这次将要删掉的条数。
+    #: ⚠️⚠️ **这里原来写的是 `out["deleted"]`,而那个键要到下面才被赋值** ⇒
+    #:   `KeyError: 'deleted'` **把整个夜间清理打挂了**(2026-10-16 04:32 那一轮记成
+    #:   「异常,见日志」,三盘**一件没做**;10-14 之前一直好,10-16 我加的这段之后才坏)。
+    #:   教训:**新加的那段要用"手上已经有的量"算**,别去读"稍后才会写的键"。
+    #:   ⚠️ 而且用 `len(todo)` 本来就更对:`left` 是"这一轮总共只许删这么多",
+    #:   文件级已经占掉 `len(todo)` 个名额了。
+    room = max(0, left - len(todo))
     take, blocked_pkg = [], 0
     used = 0
     for g in pkg_groups:

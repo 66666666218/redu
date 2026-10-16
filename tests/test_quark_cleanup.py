@@ -653,3 +653,53 @@ def test_名字里本来就有括号但无兄弟时不算(monkeypatch) -> None:
     qt = _PkgQT([{"file_name": "redian监听", "fid": "H", "dir": True}], {
         "H": [{"file_name": "资源A(1)", "fid": "B", "dir": True}], "B": [_pkgfile("1", 1)]})
     assert qd.build_package_plan(qt)["n_drop"] == 0
+
+
+def test_删路径要能跑通_且整包那遍共用同一个上限(monkeypatch) -> None:
+    """★★ **这条是补的:删除路径原来根本没被测过** —— 而 2026-10-16 04:32
+    `clean_quark` 就在那条路上抛了 `KeyError: 'deleted'`,把**整个夜间清理打挂**
+    (夸克/迅雷/百度三盘**一件没做**,运行记录只写「异常,见日志」)。
+
+    起因是我当天新加的"整包重复"那段用了 `out["deleted"]` —— 而那个键**要到下面才赋值**。
+    ⇒ 这里把删除路径整条跑通,并把「两遍去重**共用同一个硬上限**」钉住。
+    """
+    from types import SimpleNamespace
+
+    from app.services import pan_auto_clean as pac
+    from app.services import quark_dup as qd
+
+    monkeypatch.setattr("app.services.pan_accounts.cookie_for", lambda *a, **k: "ck")
+    monkeypatch.setattr("app.services.quark_transfer.QuarkTransfer",
+                        lambda *a, **k: SimpleNamespace(name="fake-qt"))
+    monkeypatch.setattr(qd, "build_plan", lambda *a, **k: {
+        "complete": True, "delete": [{"fid": "d1", "size": 10}, {"fid": "d2", "size": 10}],
+        "n_delete": 2, "scanned_homes": 3, "intro_protected": []})
+    monkeypatch.setattr(qd, "apply_plan",
+                        lambda qt, plan, **k: {"deleted": len(plan["delete"]), "bytes": 20})
+    monkeypatch.setattr(qd, "build_package_plan", lambda *a, **k: {
+        "groups": [{"drop": [{"fid": "p1"}], "keep": {"fid": "k1"}}],
+        "n_groups": 1, "n_drop": 1, "bytes": 100})
+    seen: dict = {}
+
+    def _apply_pkg(qt, plan, **k):
+        seen["n"] = len(plan["groups"])
+        return {"deleted": 1, "bytes": 100}
+
+    monkeypatch.setattr(qd, "apply_package_plan", _apply_pkg)
+    st = SimpleNamespace(quark_cookie="ck", pan_intro_quark_dir="/监听宣传")
+
+    # ① 上限 2 已被文件级那两件占满 ⇒ **整包那遍一件都不许再删**
+    out = pac.clean_quark(object(), 1, st, dry_run=False, left=2)
+    assert out["deleted"] == 2, out
+    assert seen == {}, f"上限已被占满,整包那遍不该执行:{seen}"
+    assert out.get("pkg_blocked_by_cap") == 1
+
+    # ② 上限给足 ⇒ 两遍都跑,且体积**相加**(别只报一半)
+    out2 = pac.clean_quark(object(), 1, st, dry_run=False, left=9)
+    assert seen.get("n") == 1 and out2["deleted"] == 2 and out2["pkg_deleted"] == 1, out2
+    assert out2["freed"] == 120, f"20(文件级)+100(整包) 要相加:{out2}"
+
+    # ③ dry-run:一次都不许真的删
+    seen.clear()
+    out3 = pac.clean_quark(object(), 1, st, dry_run=True, left=9)
+    assert seen == {} and out3["deleted"] == 0 and out3.get("dry_run") is True, out3
