@@ -948,8 +948,9 @@ class Settings(BaseSettings):
     #: CDP 路 = 脚本 `connect_over_cdp` 接管**真人开着的那个浏览器**(实测
     #: `navigator.webdriver=False`),比 Playwright 自己开的"脚本形状"更像人。
     #: ⚠️ **窗口没开时自动回落页面路**,不是失败(`xhs_cdp_source.available()` 只问 CDP 端点)。
-    #: ⚠️ `xhs_max_keywords` **故意是 2**:小红书的命门是**频次**,连发会杀会话 / 进 `300011`
-    #: (2026-10-14 那次压测的教训:代价是账号)。想调大之前先问用户。
+    #: ⚠️ `xhs_max_keywords` 代码默认 **2** 是保守值;`.env` 里按用户口径设成 **8**
+    #: (2026-10-16)。**实测有害的是协议路请求与压测连发,不是「页面路/CDP 路搜 8 个词」**
+    #: ⇒ 这个闸门留着是**为了能一行退回去**:出现「要重新登录」/`300011`/连续空结果就调回 2。
     xhs_max_keywords: int = 2
     #: **同行作品群**(2026-10-16 用户新建):抖音/微博**监控到的同行作品**发这两个新群。
     #: ⚠️ 与 `feishu_webhook_douhot` / `feishu_webhook_weibo` **分开**是必须的 ——
