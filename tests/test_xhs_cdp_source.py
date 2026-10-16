@@ -416,3 +416,33 @@ class Test按需自启:
         assert "--remote-debugging-port" in argv_src, f"CDP 端口是前提:{argv_src}"
         assert "--enable-automation" not in argv_src, (
             f"⚠️ 带上它 webdriver 就变 True,与页面路没区别了:{argv_src}")
+
+    def test_进程在跑就绝不再起第二个(self, monkeypatch) -> None:
+        """★★ **2026-10-16 用户报「开了好几个小红书窗口」的回归守卫**。
+
+        机理:Edge/Chrome 拿**同一个档案**再起一次**不开新实例**,而是把 URL **转发给现有窗口**
+        ⇒ **多一个 `/explore` 标签**。而幂等判据若只看 CDP 端口,"端口还没监听的那几秒"
+        就判成"没在跑" ⇒ 再起一次 ⇒ 又多一个标签。
+        ⇒ 起之前**先问进程**(`_profile_browser_running`),进程在就只等/只探、**绝不再起**。
+        """
+        import subprocess
+        from types import SimpleNamespace
+
+        from app.services import xhs_cdp_source as C
+
+        monkeypatch.setattr(C, "available", lambda settings=None: (False, "端口还没通"))
+        monkeypatch.setattr(C, "_profile_browser_running", lambda d: True)
+        monkeypatch.setattr(subprocess, "Popen",
+                            lambda *a, **k: pytest.fail("已经有进程在跑,绝不许再起第二个"))
+        ok, why = C.ensure_running(SimpleNamespace(xhs_cdp_user_data_dir="data/_t_prof"),
+                                   wait_s=1.0)
+        assert ok is False and "不再起第二个" in why, why
+
+    def test_查不到进程时退化成只看端口(self, monkeypatch) -> None:
+        """⚠️ 非 Windows / 命令失败 ⇒ 一律按"没在跑"(退化成旧行为),别因为查不动就不敢起。"""
+        from pathlib import Path
+
+        from app.services import xhs_cdp_source as C
+
+        monkeypatch.setattr("sys.platform", "linux")
+        assert C._profile_browser_running(Path("data/x")) is False

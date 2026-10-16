@@ -113,6 +113,36 @@ EDGE_CANDIDATES = (
 )
 
 
+def _profile_browser_running(d: Path) -> bool:
+    """**有没有"带着我们这个档案"的浏览器进程在跑** —— 不依赖 CDP 端口通不通。
+
+    ⚠️ **为什么必须问进程、不能只问端口**(2026-10-16 用户报「开了好几个小红书窗口」):
+    Edge/Chrome **用同一个 `--user-data-dir` 再起一次时不会开新实例** —— 它把 URL
+    **转发给已在跑的那个窗口、于是多出一个标签**。而 `ensure_running` 的幂等判据是
+    `available()`(**CDP 端口**),端口**没在监听的那几秒**(刚启动 / 端点卡了一下)
+    就会判"没在跑" ⇒ **再起一次** ⇒ **多一个 `/explore` 标签**。⇒ 判据要加这一条:
+    进程在 ⇒ **绝不再起**,只等/只探。
+
+    ⚠️ 查不到(非 Windows / 命令失败)一律按 **False** —— 退化成旧行为(只靠端口),别因为
+    "查不动"就不敢起。⚠️ 只看**命令行里带我们这个档案目录**的进程:机器上还有用户自己的
+    浏览器,数错了会得出"我们开了一堆窗口"这种离谱结论(与本仓 `check_leaked_browsers`
+    同一条教训)。
+    """
+    import subprocess
+    import sys
+
+    if sys.platform != "win32":
+        return False
+    try:
+        ps = ("(Get-CimInstance Win32_Process -Filter \"Name='msedge.exe' or Name='chrome.exe'\" | "
+              f"Where-Object {{ $_.CommandLine -like '*{d}*' }} | Measure-Object).Count")
+        p = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                           capture_output=True, timeout=30)
+        return int((p.stdout or b"0").decode("utf-8", "ignore").strip() or 0) > 0
+    except Exception:  # noqa: BLE001 - 查不到就当没在跑(退化成"只看端口")
+        return False
+
+
 def ensure_running(settings=None, *, wait_s: float = 15.0) -> tuple[bool, str]:
     """CDP 不可达时**起一个**(普通 Edge + 专用档案);**已经在跑就不重复起**。返回 `(ok, 说明)`。
 
@@ -141,14 +171,27 @@ def ensure_running(settings=None, *, wait_s: float = 15.0) -> tuple[bool, str]:
         port = int(url.rstrip("/").rsplit(":", 1)[-1])
     except ValueError:
         return False, f"`xhs_cdp_url` 不像 URL:{url!r}"
-    exe = next((p for p in EDGE_CANDIDATES if Path(p).exists()), "")
-    if not exe:
-        return False, f"没找到 Edge/Chrome(找过:{EDGE_CANDIDATES})"
     raw = str(getattr(st, "xhs_cdp_user_data_dir", "") or "data/xhs_cdp_profile")
     d = Path(raw)
     if not d.is_absolute():
         d = Path(__file__).resolve().parents[2] / d
     d.mkdir(parents=True, exist_ok=True)
+    # ★★ **进程在跑 ⇒ 绝不再起**(2026-10-16 用户报「开了好几个小红书窗口」的根因):
+    #    Edge/Chrome 拿**同一个档案**再起一次**不开新实例**,而是把 URL **转发给现有窗口**
+    #    ⇒ 用户看到的就是**又多一个 `/explore` 标签**。而幂等判据如果只看 CDP 端口,
+    #    "端口还没监听的那几秒"就会判成"没在跑" ⇒ 再起一次 ⇒ 多一个标签。
+    #    ⚠️ 这一步**排在"找 exe"之前**:已经有个进程在跑时,压根不需要浏览器可执行文件。
+    if _profile_browser_running(d):
+        deadline = time.time() + max(1.0, wait_s)
+        while time.time() < deadline:
+            time.sleep(1.0)
+            if available(st)[0]:
+                return True, f"已有进程在跑,等它把 CDP 端口开出来(档案 {d.name})"
+        return False, (f"有进程在跑,但 {int(wait_s)}s 内 CDP 还没通(档案 {d.name})"
+                       f" —— **不再起第二个**(那只会多一个标签)")
+    exe = next((p for p in EDGE_CANDIDATES if Path(p).exists()), "")
+    if not exe:
+        return False, f"没找到 Edge/Chrome(找过:{EDGE_CANDIDATES})"
     try:
         # ⚠️ **绝不能加 `--enable-automation`** —— 那一个参数就会把 webdriver 变成 True,
         #    整条路的价值当场归零(见上面那张表)。
@@ -165,6 +208,43 @@ def ensure_running(settings=None, *, wait_s: float = 15.0) -> tuple[bool, str]:
         if available(st)[0]:
             return True, f"已自启(档案 {d.name})"
     return False, f"起了但 {int(wait_s)}s 内 CDP 还没通(档案 {d.name})"
+
+
+def tidy_extra_explore_tabs(settings=None, *, apply: bool = False) -> tuple[list[str], str]:
+    """列出(**并可关掉**)**多余的** `/explore` 标签,只留一个。返回 `(多余的那些 url, 说明)`。
+
+    ⚠️⚠️ **这是"人喊才做"的动作**(`apply=False` 默认只列) —— 本模块纪律 2:**别人的浏览器、
+    别人的标签,绝不自动关**。但同一个 `/explore` 开 4 个是**"重复拉起"留下的垃圾**:
+    Edge/Chrome 拿**同一个档案**再起一次**不开新实例**,而是把 URL 转发给现有窗口。
+    ⚠️ **根因已在 `ensure_running` 堵住**(起之前先问**进程**,不只问端口)⇒ 正常不会再增。
+    """
+    urls: list[str] = []
+    try:
+        from playwright.sync_api import sync_playwright   #: 与 `search` 同一处导入(不在模块顶层)
+
+        with sync_playwright() as p:
+            br = p.chromium.connect_over_cdp(endpoint(settings))
+            try:
+                ctx = br.contexts[0]
+                hits = [pg for pg in ctx.pages if "/explore" in (pg.url or "")]
+                extra = hits[1:]
+                urls = [(pg.url or "") for pg in extra]
+                if apply:
+                    for pg in extra:
+                        try:
+                            pg.close()
+                        except Exception:  # noqa: BLE001 - 关不掉就留着(别把整条命令搞崩)
+                            logger.debug("小红书 CDP 路:tidy 关标签失败", exc_info=True)
+            finally:
+                try:
+                    br.close()               #: 只**断开** CDP,不关浏览器(见 `search` 里的说明)
+                except Exception:  # noqa: BLE001
+                    pass
+    except Exception as exc:  # noqa: BLE001 - 连不上就如实说
+        return [], f"连不上 CDP:{type(exc).__name__}: {str(exc)[:80]}"
+    if not urls:
+        return [], "没有多余的 /explore 标签"
+    return urls, (f"关掉 {len(urls)} 个(留 1 个)" if apply else f"有 {len(urls)} 个多余的(只列未关)")
 
 
 def _warn_if_headless(ctx) -> None:

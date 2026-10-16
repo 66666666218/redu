@@ -100,6 +100,10 @@ def _no_real_xhs_cdp(monkeypatch):
     #: (与之前替换 `available` 是同一个坑)。⇒ **清空可执行文件候选**:真代码照跑、
     #: 只是永远找不到浏览器 ⇒ 起不来 ✓。
     monkeypatch.setattr(C, "EDGE_CANDIDATES", ())
+    #: ⚠️ 同理:**进程检查**也要按死 —— 它会真的去问 PowerShell(`Get-CimInstance`,超时 30 秒),
+    #: 于是一个用例能拖 30 秒(实测:两个文件从 18 秒涨到 82 秒)。
+    #: 返回 False = "查不到" ⇒ 退化成"只看端口"(正是文档里写的降级路径)。
+    monkeypatch.setattr(C, "_profile_browser_running", lambda d: False)
     yield
 
 
