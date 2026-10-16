@@ -823,3 +823,33 @@ def test_epoch_与文本两种时间形状都认() -> None:
     long_ago = int((datetime.now() - timedelta(days=60)).timestamp())
     assert pd._too_old(long_ago, _On()), "epoch 形状没认出来"
     assert pd._too_old("2019-01-01 00:00:00", _On()), "文本形状没认出来"
+
+
+def test_推送卡要同时给出原帖与我方链(monkeypatch) -> None:
+    """★ 2026-10-16 用户口径:「别的平台也应该保持这个模式 —— **有原文,有网盘**」。
+
+    `source_url`(这条资源是从哪个帖子发现的)**本来就在 items 里**,只是从来没渲染出来
+    ⇒ 员工看得到"有资源",却**核对不了对标作品的出处**。
+    """
+    from app.services import feishu_client
+
+    sent: list[dict] = []
+
+    class _C:
+        def __init__(self, hook, secret=None):
+            self.hook = hook
+
+        def send_card(self, card):
+            sent.append(card)
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+    ok = pd.push_items([{"title": "某资源", "author": "某作者",
+                         "source_url": "https://www.zhihu.com/question/1/answer/2",
+                         "share_url": "https://pan.quark.cn/s/OUR", "code": "ab12"}],
+                       _S())
+    assert ok is True and len(sent) == 1
+    blob = str(sent[0])
+    assert "**原帖**" in blob, "列头要有「原帖」,否则看不出这一格是干什么的"
+    assert "https://www.zhihu.com/question/1/answer/2" in blob, "原帖要能点"
+    assert "https://pan.quark.cn/s/OUR" in blob and "🔑ab12" in blob, "我方链照旧"

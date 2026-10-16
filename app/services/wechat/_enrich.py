@@ -748,7 +748,11 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                             return pair
                 return None
 
-            elements = [_col_set_row([("**我的分享链**", 5), ("**同发文章数**", 2), ("**示例标题**", 5)], grey=True)]
+            # ★ **两处可点**(2026-10-16 用户口径「**有原文,有网盘**」)。
+            #   原来整行**只有一处可点**,而"未转存"那一支指向的是**原文** ⇒
+            #   **有链时看不到原文、没链时看不到网盘** —— 与公众号卡是同一个毛病。
+            elements = [_col_set_row([("**我的分享链**", 4), ("**示例标题(原文)**", 4),
+                                      ("**同发文章数**", 2)], grey=True)]
             for u, r, cnt in res_hits:
                 mine = _my_pan(u)
                 if mine:
@@ -757,10 +761,13 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                     # 提取码是员工打开资源的关键,单独明文展示,不做长度截断;链接一律我方转存链
                     cell = f"🔴 [{kind}·我的转存]({_md_safe(link)})" + (f" 提取码 {code}" if code else "")
                 else:
-                    # 本轮没转出我方链(未开转存/转存失败):宁可指向公众号原文,也不推他人盘链
-                    cell = "🔴 [未转存·看原文](" + _md_safe(r.url) + ")"
+                    # 本轮没转出我方链(未开转存/转存失败):**如实说没有** ——
+                    # 原文的入口在右边那一列,不必再挤在这一格里
+                    cell = "—(未转存)"
                 elements.append(_col_set_row([
-                    (cell, 5), (str(cnt) + " 篇", 2), (_md_safe(r.title)[:30], 5)]))
+                    (cell, 4),
+                    (f"[{_md_safe(r.title)[:30]}]({_md_safe(r.url)})", 4),
+                    (str(cnt) + " 篇", 2)]))
             card = {"config": {"wide_screen_mode": True},
                     "header": {"template": "red", "title": {"tag": "plain_text",
                                "content": "🔴 资源共振 · 多号同发(" + str(len(res_hits)) + " 个资源)"}},

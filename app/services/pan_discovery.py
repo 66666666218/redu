@@ -258,8 +258,6 @@ def transfer_pan_url(session, user_id: int, pan_url: str, settings=None,
 
     ⚠️ **百度链要提取码**:知乎回答里常把码写在附近,所以把整段文字传进来一起找。
     """
-    from app.services.cookie_store import get_cookie
-
     kind = _kind_of(pan_url)
     if not kind:
         return {"status": "skipped", "message": f"不认识的盘链:{pan_url[:60]}",
@@ -801,14 +799,21 @@ def push_items(items: list[dict], settings) -> bool:
 
     brand = (getattr(settings, "brand_name", "") or "").strip()
     elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
-        f"公开平台(知乎)新发现 **{len(items)}** 个资源,已转存成我方分享链:"}},
-        _col_set_row([("**作者**", 3), ("**资源**", 5), ("**我方分享链**", 4)], grey=True)]
+        f"公开平台(知乎/贴吧)新发现 **{len(items)}** 个资源,已转存成我方分享链:"
+        f"「**资源**」点开是我方链、可直接取用;「**原帖**」点开是对标作品的出处。"}},
+        # ★ **「原帖」独立成列**(2026-10-16 用户口径「别的平台也应该保持这个模式:
+        #   **有原文,有网盘**」)。`source_url` **本来就在 items 里**(见上面 append),
+        #   只是从来没渲染出来 ⇒ 员工看不到"这条资源是从哪个帖子里发现的",无法核对对标作品。
+        _col_set_row([("**作者**", 3), ("**资源**", 5), ("**原帖**", 2),
+                      ("**我方分享链**", 3)], grey=True)]
     for it in items:
+        _src = _md_safe(it.get("source_url") or "")
         elements.append(_col_set_row([
             (_md_safe(it.get("author") or "—"), 3),
             (_md_safe(strip_others(it.get("title") or "")[:40]), 5),
+            (f"[▶ 原帖]({_src})" if _src else "—", 2),
             (f"[▶ 打开]({_md_safe(it.get('share_url') or '')})"
-             + (f" 🔑{_md_safe(it.get('code') or '')}" if it.get("code") else ""), 4)]))
+             + (f" 🔑{_md_safe(it.get('code') or '')}" if it.get("code") else ""), 3)]))
     card = {"config": {"wide_screen_mode": True},
             "header": {"template": "turquoise", "title": {"tag": "plain_text",
                                                           "content": f"🔎 {brand + ' · ' if brand else ''}"

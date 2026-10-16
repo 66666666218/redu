@@ -145,6 +145,7 @@ def push_new_resources(items: list[dict], settings) -> bool:
     if not webhook:
         return False
 
+    from app.services.feishu._cards import _md_safe
     from app.services.feishu_client import FeishuClient
 
     elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
@@ -155,7 +156,11 @@ def push_new_resources(items: list[dict], settings) -> bool:
         icon = "📁" if it.get("kind") == "drive#folder" else "📄"
         elements.append({"tag": "hr"})
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content":
-            f"{icon} **{it['name']}**\n{it['share_url']}"}})
+            # ★ 链接写成**可点、带文字**的样子(2026-10-16):原来是把裸 URL 直接贴上去 ——
+            #   手机上是一长串看不出是什么东西,而裸 URL 里的 `?pwd=` / `~` 在客户端容易被截断。
+            #   ⚠️ 这一张**没有"别人的原文"**:资源本来就在**我们自己的盘**里 ⇒ 只有网盘一处可点。
+            f"{icon} **{it['name']}** · " + (f"[▶ 打开]({_md_safe(str(it.get('share_url') or ''))})"
+                                            if it.get("share_url") else "—(无链)")}})
     card = {"config": {"wide_screen_mode": True},
             "header": {"template": "green", "title": {"tag": "plain_text",
                                                        "content": f"📦 迅雷资源入库 · {len(items)} 个"}},
