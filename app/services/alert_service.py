@@ -439,6 +439,34 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
         for uid, kind, cnt in rows:
             if (uid, kind) not in currently_broken or cnt < threshold:
                 continue
+            # ★★ **2026-10-16:加两道闸,别再被"单次抖动"骗到**(假红会训练人忽略告警)。
+            #   起因:用户收到一条 `xunlei_sync failed: HTTP 502: {}` —— 而它 **30 分钟后就自愈了**。
+            #   原来只要「最近一轮仍失败 + 24h 失败 ≥ 阈值」就报;对一个**每 30 分钟一轮**的作业
+            #   (48 轮/天),3 次 = **6%** —— 一次上游抖动正好卡在"评估时它是最新一轮"就够触发。
+            #   ⇒ 现在还须满足其中之一:
+            #     ⒜ **连续失败 ≥ 2**(最近两轮都挂 = **现在真的断着**);
+            #     ⒝ **24h 失败率 ≥ 50%**(低频作业每次都挂那种,连续条件会漏掉它)。
+            #   ⚠️ **不比原来松**:真坏的链至少满足一条(一直挂 ⇒ 两条都满足)——
+            #      被滤掉的只有"零星几次(低失败率)+ 恰好被撞上评估时刻"的那类。
+            streak = 0
+            #: ⚠️ `limit(20)` 而不是 `limit(2)`:判据只要"≥2",但**消息里要报得准**
+            #: (第一版写 2,于是连着挂 3 轮也只说"连续2轮" —— 那句话自己就不准)。
+            for _st in db.scalars(select(RunRecord.status).where(
+                    RunRecord.user_id == uid, RunRecord.kind == kind)
+                    .order_by(RunRecord.id.desc()).limit(20)).all():
+                if _st == "failed":
+                    streak += 1
+                else:
+                    break
+            total = db.scalar(select(func.count()).select_from(RunRecord).where(
+                RunRecord.user_id == uid, RunRecord.kind == kind,
+                RunRecord.started_at >= since)) or 0
+            rate = (cnt / total) if total else 0.0
+            if streak < 2 and rate < 0.5:
+                logger.info(
+                    "采集失败但**看着是抖动**,本轮不告警:板块[%s] 近24h %d/%d(%.0f%%),连续失败 %d 轮",
+                    kind, cnt, total, rate * 100, streak)
+                continue
             existing = db.scalar(
                 select(FeishuAlert).where(
                     FeishuAlert.section == "collect_fail", FeishuAlert.user_id == uid, FeishuAlert.title == kind
@@ -446,11 +474,13 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
             )
             if existing and (datetime.now() - existing.alerted_at).total_seconds() < settings.feishu_alert_cooldown_hours * 3600:
                 continue
-            hits.append((uid, kind, cnt))
+            #: 理由里**带上分母与连续轮数** —— 只写"失败3次"看不出是 3/48 还是 3/3。
+            reason = f"近24h失败{cnt}/{total}次(连续{streak}轮)"
+            hits.append((uid, kind, cnt, total, streak))
             if existing:
-                existing.reason, existing.alerted_at = f"近24h失败{cnt}次", datetime.now()
+                existing.reason, existing.alerted_at = reason, datetime.now()
             else:
-                db.add(FeishuAlert(section="collect_fail", user_id=uid, title=kind, reason=f"近24h失败{cnt}次"))
+                db.add(FeishuAlert(section="collect_fail", user_id=uid, title=kind, reason=reason))
         # 恢复确认(2026-09-30,对齐闲鱼"✅已恢复"惯例):之前告过警、现在已不在
         # "仍断"名单的 (用户,板块) → 发 ✅ 并清冷却。否则"失败 N 次"的旧告警
         # 挂在群里成孤魂,恢复后用户看到旧告警+新数据并存会误判还在坏(实测困惑×2)。
@@ -486,7 +516,7 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
 
         if hits:
             sent = 0
-            for uid, kind, cnt in hits:
+            for uid, kind, cnt, total, streak in hits:
                 # 带上最近一次失败的具体原因(如"XianyuVerify: 闲鱼人机验证(滑块),需人工处理"),
                 # 让运维一眼知道该做什么(人工过滑块/换出口 IP),而非只看到"失败 N 次"。
                 detail = db.scalar(
@@ -504,8 +534,9 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
                 # 带评估时间戳(2026-09-30):历史消息与新消息并存时,一眼分清新旧——
                 # 用户三次把凌晨/上午的旧告警当成新告警发回来问(误判恢复状态)
                 msg = (f"{head}采集持续失败(近24h) · 评估于 {datetime.now():%m-%d %H:%M} · "
-                       f"用户#{uid} 板块[{kind}] 失败 {cnt} 次{extra}{long_txt}")
-                # 按板块路由:主群 + 该平台专属群 都发(互不替代)
+                       f"用户#{uid} 板块[{kind}] 失败 **{cnt}/{total} 次(连续{streak}轮)**"
+                       f"{extra}{long_txt}")
+                # 去向 = **管理群**(2026-10-16 用户口径「所有的警告都发到管理群」;见 `_ops_targets`)
                 for wh in _ops_targets(settings):
                     if FeishuClient(wh, settings.feishu_secret).send(msg):
                         sent += 1

@@ -553,7 +553,10 @@ def transfer_missing_links(session, user_id: int, items: list[dict],
         session.commit()
         # 把名字一起传进去:百度链的提取码常写在附近文字里(`transfer_pan_url` 会去找)
         res = transfer_pan_url(session, user_id, pan_url, settings,
-                               snippet=str(it.get("name") or ""))
+                               snippet=str(it.get("name") or ""),
+                               #: ★ 同一个名字也当 `title` 传:转存后**核对"里面装的是不是它"**
+                               #: (2026-10-16 那道新闸,见 `transfer_pan_url` 的说明)
+                               title=str(it.get("name") or ""))
         if res.get("status") == "ok" and res.get("our_url"):
             link["my_link"] = res["our_url"]
             link["moved"] = True

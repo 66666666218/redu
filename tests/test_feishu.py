@@ -616,7 +616,8 @@ def test_collect_failures_alert_and_cooldown(monkeypatch, session) -> None:
     monkeypatch.setattr(feishu_client, "FeishuClient", lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
     n = alert_service.check_collect_failures(_settings(fail_alert_threshold=3), db=session)
     assert n == 1
-    assert "douhot" in sent[0] and "失败 3 次" in sent[0]
+    #: ★ 2026-10-16 起消息**带分母与连续轮数**(只写"失败3次"看不出是 3/48 还是 3/3)
+    assert "douhot" in sent[0] and "失败 **3/3 次(连续3轮)**" in sent[0], sent[0]
     # 冷却期内再跑 → 不重推
     assert alert_service.check_collect_failures(_settings(fail_alert_threshold=3), db=session) == 0
 
@@ -1082,3 +1083,78 @@ def test_health_stalls_wechat_only_success_counts(monkeypatch, session) -> None:
     monkeypatch.setattr(feishu_client, "FeishuClient",
                         lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
     assert alert_service.check_health_stalls(_settings(health_stall_hours=24), db=session) == 1
+
+
+def test_单次抖动不许告警_两次连续才报(monkeypatch, session) -> None:
+    """★★★ **2026-10-16 用户收到一条假红**:`xunlei_sync failed: HTTP 502: {}` ——
+    而它 **30 分钟后就自愈了**。
+
+    原来只要「最近一轮仍失败 + 24h 失败 ≥ 3」就报 —— 对一个**每 30 分钟一轮**的作业
+    (48 轮/天),3 次 = **6%**,一次上游抖动正好卡在"评估时它是最新一轮"就够触发。
+    ⇒ 现在还要满足:**连续失败 ≥ 2**(真的断着)**或** 失败率 ≥ 50%(低频作业每次都挂)。
+    """
+    from datetime import datetime, timedelta
+
+    from app.services import alert_service
+    from app.db.models import RunRecord
+
+    #: 48 轮里失败 3 次(6%),而且**最近一轮失败、前一轮成功** ⇒ 连续只有 1 轮
+    now = datetime.now()
+    #: ⚠️ 代码按 **id** 取"最近一轮" ⇒ 失败的必须落在**最后插入的那几条**上
+    for i in range(48):
+        session.add(RunRecord(user_id=1, run_id=f"r{i}", kind="xunlei_sync",
+                              status="failed" if i in (47, 30, 20) else "success",
+                              detail="failed: HTTP 502: {}" if i in (47, 30, 20) else "扫9 新0",
+                              started_at=now - timedelta(minutes=30 * (47 - i))))
+    session.commit()
+    sent: list = []
+    monkeypatch.setattr(feishu_client, "FeishuClient",
+                        lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
+    n = alert_service.check_collect_failures(
+        _settings(feishu_webhook_admin="admin", fail_alert_threshold=3), db=session)
+    assert n == 0 and sent == [], f"单次抖动不该告警:{sent}"
+
+
+def test_连续两轮失败就要报(monkeypatch, session) -> None:
+    """反面对照:**真断着**必须报(否则这个告警就废了)。"""
+    from datetime import datetime, timedelta
+
+    from app.services import alert_service
+    from app.db.models import RunRecord
+
+    now = datetime.now()
+    for i in range(48):
+        session.add(RunRecord(user_id=1, run_id=f"r{i}", kind="xunlei_sync",
+                              status="failed" if i >= 46 else "success",
+                              detail="failed: HTTP 502: {}" if i >= 46 else "扫9 新0",
+                              started_at=now - timedelta(minutes=30 * (47 - i))))
+    session.commit()
+    sent: list = []
+    monkeypatch.setattr(feishu_client, "FeishuClient",
+                        lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
+    n = alert_service.check_collect_failures(
+        _settings(feishu_webhook_admin="admin", fail_alert_threshold=2), db=session)
+    assert n == 1 and "连续2轮" in sent[0], f"连挂两轮必须报,且要说清连着几轮:{sent}"
+
+
+def test_低频作业每次挂_靠失败率也要报(monkeypatch, session) -> None:
+    """⚠️ 连续条件会漏掉"**隔一轮挂一次**"那种 —— 失败率那条闸补上它。"""
+    from datetime import datetime, timedelta
+
+    from app.services import alert_service
+    from app.db.models import RunRecord
+
+    now = datetime.now()
+    #: 4 轮,最新一条(i=3)失败、紧邻的 i=2 成功 ⇒ 连续只有 1 轮;但 3/4 = 75% ⇒ 靠**率**报
+    for i in range(4):
+        session.add(RunRecord(user_id=1, run_id=f"r{i}", kind="some_job",
+                              status="success" if i == 2 else "failed",
+                              detail="ok" if i == 2 else "炸了",
+                              started_at=now - timedelta(hours=(3 - i))))
+    session.commit()
+    sent: list = []
+    monkeypatch.setattr(feishu_client, "FeishuClient",
+                        lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
+    n = alert_service.check_collect_failures(
+        _settings(feishu_webhook_admin="admin", fail_alert_threshold=3), db=session)
+    assert n == 1 and "3/4" in sent[0], f"失败率高也要报,且要带分母:{sent}"

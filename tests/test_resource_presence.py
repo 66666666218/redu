@@ -292,7 +292,7 @@ def test_transfer_missing_links_only_touches_ones_without_our_link(monkeypatch) 
     sess = _Sess()
     commits_at_transfer: list[int] = []
 
-    def _transfer(s, u, url, st, snippet=""):
+    def _transfer(s, u, url, st, snippet="", **k):
         # 转存的那一刻,commit 必须**已经发生过** —— 否则写锁还握在手里
         commits_at_transfer.append(sess.commits)
         calls.append(url)
@@ -557,8 +557,8 @@ def test_跨盘已有我方链就不另存一份(monkeypatch) -> None:
     calls: list[str] = []
     monkeypatch.setattr(
         pan_discovery, "transfer_pan_url",
-        lambda s, u, url, st, snippet="": (calls.append(url),
-                                          {"status": "ok", "our_url": "our:" + url})[1])
+        lambda s, u, url, st, snippet="", **k: (calls.append(url),
+                                                {"status": "ok", "our_url": "our:" + url})[1])
     monkeypatch.setattr(pan_discovery, "reuse_if_have",
                         lambda s, u, t: {"my_link": "https://pan.quark.cn/s/HAVE"})
 

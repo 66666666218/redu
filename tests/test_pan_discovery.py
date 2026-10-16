@@ -385,7 +385,7 @@ def test_sync_transfers_within_budget_and_persists(session, monkeypatch) -> None
         {"platform": "zhihu", "origin_url": f"https://pan.quark.cn/s/{i}",
          "title": f"资源{i}", "author": "作者", "source_url": "u"} for i in range(3)])
     monkeypatch.setattr(pd, "transfer_pan_url",
-                        lambda s, u, url, st=None, snip="": {
+                        lambda s, u, url, st=None, snip="", **k: {
                             "status": "ok", "our_url": f"OUR-{url[-1]}",
                             "code": "1", "message": ""})
 
@@ -434,7 +434,7 @@ def test_积压与新发现各吃各的额度_互不饿死(session, monkeypatch)
          "title": "新2", "author": "a", "source_url": "u"}])
     calls: list[str] = []
     monkeypatch.setattr(pd, "transfer_pan_url",
-                        lambda s, u, url, st=None, snip="": (
+                        lambda s, u, url, st=None, snip="", **k: (
                             calls.append(url) or
                             {"status": "ok", "our_url": "OUR", "code": "", "message": ""}))
 
@@ -882,3 +882,61 @@ def test_盘链发现卡也要带对标数据(monkeypatch) -> None:
     assert "**对标数据**" in blob, "列头要有「对标数据」"
     assert "♥12" in blob and "💬3" in blob, f"热度要进卡:{blob[-400:]}"
     assert "https://pan.quark.cn/s/OUR" in blob, "我方链照旧"
+
+
+class Test转存后核对:
+    """★★ **2026-10-16 实测的一次真事故**:别人的**原链内容是对的**,而**我们转存后新建的
+    分享里却是另一个资源**(中医古籍);那条链被当 `our_url` 用了 **69 次**、还经「回库复用」
+    扩散到 **68 个不同标题** ⇒ **客户点开拿到完全不相干的东西**。
+
+    ⇒ 这道闸:**转存之后、写库之前**,核对"里面装的是不是这个资源";对不上就**不写链**。
+    ⚠️ **判不了(限流/超时)必须放行** —— 别拿"我们探不动"当"资源有问题"。
+    """
+
+    def _stub(self, monkeypatch, verdict):
+        from app.services import link_audit as la
+
+        monkeypatch.setattr(la, "check_share_matches",
+                            lambda url, title, settings=None, **k: verdict)
+
+    def test_内容对不上就不写链(self, monkeypatch) -> None:
+        from app.services import pan_discovery as pd
+
+        monkeypatch.setattr(pd, "_transfer_pan_url_raw",
+                            lambda *a, **k: {"status": "ok", "our_url": "https://pan.x/OUR",
+                                             "code": "x", "message": ""})
+        self._stub(monkeypatch, (False, "中医古籍"))
+        out = pd.transfer_pan_url(None, 1, "https://pan.quark.cn/s/abc",
+                                  None, "标题", title="标题")
+        assert out["status"] == "mismatch" and out["our_url"] == "", out
+        assert "对不上" in out["message"]
+
+    def test_内容对得上就照常(self, monkeypatch) -> None:
+        from app.services import pan_discovery as pd
+
+        monkeypatch.setattr(pd, "_transfer_pan_url_raw",
+                            lambda *a, **k: {"status": "ok", "our_url": "https://pan.x/OUR",
+                                             "code": "x", "message": ""})
+        self._stub(monkeypatch, (True, "三千年等一口将军气"))
+        out = pd.transfer_pan_url(None, 1, "u", None, "t", title="t")
+        assert out["status"] == "ok" and out["our_url"] == "https://pan.x/OUR"
+
+    def test_判不了要放行(self, monkeypatch) -> None:
+        """⚠️ 限流/超时 ⇒ **照旧放行**(丢链的代价比留一条可疑的长链大得多)。"""
+        from app.services import pan_discovery as pd
+
+        monkeypatch.setattr(pd, "_transfer_pan_url_raw",
+                            lambda *a, **k: {"status": "ok", "our_url": "https://pan.x/OUR",
+                                             "code": "x", "message": ""})
+        self._stub(monkeypatch, (None, "待人工看:疑似限流"))
+        assert pd.transfer_pan_url(None, 1, "u", None, "t", title="t")["status"] == "ok"
+
+    def test_没给标题就不核对(self, monkeypatch) -> None:
+        """别的调用点还没传标题 ⇒ 行为**逐字不变**(不核对、不报错)。"""
+        from app.services import pan_discovery as pd
+
+        monkeypatch.setattr(pd, "_transfer_pan_url_raw",
+                            lambda *a, **k: {"status": "ok", "our_url": "https://pan.x/OUR",
+                                             "code": "x", "message": ""})
+        self._stub(monkeypatch, (False, "不该被调到"))
+        assert pd.transfer_pan_url(None, 1, "u", None, "t")["status"] == "ok"

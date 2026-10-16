@@ -250,6 +250,36 @@ def _verdict(title: str, probe: dict) -> tuple[str, str]:
     return "货不对版", f"{match_key(names[0])[:30]} | 库里:{match_key(title)[:24]}"
 
 
+def check_share_matches(url: str, title: str, settings=None,
+                        prober: "Prober | None" = None) -> tuple[bool | None, str]:
+    """**这条链里装的是不是这个资源** → `(是否对得上, 说明)`;判不了给 `None`。
+
+    ★★ **2026-10-16:给"转存之后、入库之前"用的一道闸** —— 实测出过一次**真事故**:
+    别人的**原链内容是对的**(`602ff5fc5865` 里就是「三千年等一口将军气（更至77集）」),
+    而**我们转存后新建的分享里却是另一个资源(中医古籍)**;那条链被当 `our_url` 用了 **69 次**,
+    还经「回库复用」扩散到 **68 个不同标题** ⇒ **客户点开会拿到完全不相干的东西**。
+    ⇒ **不管上游是哪条子路径**(口令解析 / 转存取错 fid / 盘商抽风),这一道核对都拦得住。
+
+    ⚠️ 判不了(限流/超时/认不出盘)返回 `None` —— 调用方**不许当成"对不上"**去丢链
+    (那是拿"我们探不动"当"资源有问题");**对上才放行、对不上才拦、判不了照旧放行并留痕**。
+    """
+    t = str(title or "").strip()
+    if not t:
+        return None, "没给标题,跳过核对"
+    try:
+        pr = prober or Prober()
+        p = pr.probe(url)
+    except Exception as exc:  # noqa: BLE001 - 探不动不该毁掉转存本身
+        return None, f"核对探不动:{type(exc).__name__}"
+    verdict, why = _verdict(t, p)
+    if verdict == "对齐":
+        return True, why
+    if verdict in ("打不开", "空分享", "待人工看"):
+        #: 这几档**不是**"内容对不上" —— 交回调用方按原逻辑处理(它们各有各的处置)
+        return None, f"{verdict}:{why}"
+    return False, why
+
+
 def audit_rows(db: Any, user_id: int = 1, *, per_source: int = 15, gap: float = 0.6,
                sources: tuple[str, ...] = (), prober: "Prober | None" = None) -> list[dict]:
     """按来源抽样探活 + 判对齐。返回每条一行,**不写库、不推消息**。"""

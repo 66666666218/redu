@@ -251,7 +251,37 @@ def reuse_if_have(session, user_id: int, title: str) -> dict | None:
 
 
 def transfer_pan_url(session, user_id: int, pan_url: str, settings=None,
-                     snippet: str = "") -> dict:
+                     snippet: str = "", title: str = "") -> dict:
+    """**按链分发转存** + ★ **转存后立刻核对"里面装的是不是这个资源"**。
+
+    `title` 给了就核对(多一次只读请求);**对不上 ⇒ 不写链**(返回 `status="mismatch"`)。
+
+    ⚠️⚠️ **为什么加这道核对**(2026-10-16 实测的一次真事故):别人的**原链内容是对的**
+    (`pan.quark.cn/s/602ff5fc5865` 里就是「三千年等一口将军气（更至77集）」),
+    而**我们转存后新建的分享里却是另一个资源(中医古籍)**。那条链被当 `our_url` 用了 **69 次**,
+    还经「回库复用」扩散到 **68 个不同标题** ⇒ **客户点开拿到完全不相干的东西**。
+    ⇒ 不管上游是哪条子路径,这道核对都让它到不了库、更到不了卡。
+
+    ⚠️ **判不了就放行**(限流/超时)并只在日志留痕 —— 别拿"我们探不动"当"资源有问题"。
+    """
+    out = _transfer_pan_url_raw(session, user_id, pan_url, settings=settings, snippet=snippet)
+    if out.get("status") == "ok" and str(title or "").strip() and out.get("our_url"):
+        from app.services import link_audit as _la
+
+        ok, why = _la.check_share_matches(str(out["our_url"]), title, settings)
+        if ok is False:
+            logger.warning("网盘发现:转存出来的内容**与标题对不上** ⇒ 不写链(title=%s / %s)",
+                           str(title)[:40], why[:80])
+            return {"status": "mismatch", "our_url": "", "code": "",
+                    "message": (f"**转存出来的内容与标题对不上**(实际:{why[:60]})⇒ 不写链"
+                                f"(见 doc/链接体检.md 里 2026-10-16 那次错链扩散)")}
+        if ok is None:
+            logger.info("网盘发现:转存后核对**判不了**(%s),按原样放行", why[:80])
+    return out
+
+
+def _transfer_pan_url_raw(session, user_id: int, pan_url: str, settings=None,
+                          snippet: str = "") -> dict:
     """**按链分发转存**:夸克走 `QuarkTransfer`、百度走 `BaiduPanClient`、迅雷走 `xunlei_transfer`。
 
     返回 `{"status", "our_url", "code", "message"}`;任何失败都返回结构化结果,不抛。
@@ -714,7 +744,10 @@ def sync(session, user_id: int, settings=None) -> dict:
             # 的「作业心跳写入失败」成批出现**;`14:19–14:23` 我手动跑 drain 时又来一批。
             # 纪律:**慢活(网络/浏览器/模拟器)一律不要在事务里做**。
             session.commit()
-            res = transfer_pan_url(session, user_id, c["origin_url"], settings, c["title"])
+            #: ⚠️ 第 5 个位置参数是 **`snippet`**(百度要从这段文字里找提取码)——
+            #: 所以 `title` **必须再用关键字传一次**,否则"转存后核对"拿不到标题 = 形同没接。
+            res = transfer_pan_url(session, user_id, c["origin_url"], settings, c["title"],
+                                   title=c["title"])
             status, message = res["status"], res["message"]
             our, code = res["our_url"], res["code"]
             if status == "ok":
