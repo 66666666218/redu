@@ -944,6 +944,13 @@ class Settings(BaseSettings):
     link_audit_cron: str = "8 6 * * *"
     link_audit_per_source: int = 6
     link_audit_alert: bool = True            # 有坏链就推管理群(链腐是每天在发生的)
+    #: **小红书 CDP 路**(2026-10-16 用户拍板「接 CDP 路」+「每轮 1~2 词」)。
+    #: CDP 路 = 脚本 `connect_over_cdp` 接管**真人开着的那个浏览器**(实测
+    #: `navigator.webdriver=False`),比 Playwright 自己开的"脚本形状"更像人。
+    #: ⚠️ **窗口没开时自动回落页面路**,不是失败(`xhs_cdp_source.available()` 只问 CDP 端点)。
+    #: ⚠️ `xhs_max_keywords` **故意是 2**:小红书的命门是**频次**,连发会杀会话 / 进 `300011`
+    #: (2026-10-14 那次压测的教训:代价是账号)。想调大之前先问用户。
+    xhs_max_keywords: int = 2
     #: **同行作品群**(2026-10-16 用户新建):抖音/微博**监控到的同行作品**发这两个新群。
     #: ⚠️ 与 `feishu_webhook_douhot` / `feishu_webhook_weibo` **分开**是必须的 ——
     #:   那两个 section 不只给内容卡用,**`alert_service` 的采集失败告警也走它们**

@@ -77,6 +77,25 @@ def _reset_douyin_verify_cooldown():
 
 
 @pytest.fixture(autouse=True)
+def _no_real_xhs_cdp(monkeypatch):
+    """测试**绝不许**走真实的小红书 CDP 路(2026-10-16 实测踩到)。
+
+    ⚠️ **事故形状**:`resource_presence` 的小红书分支现在**先试 CDP**,而那条路问的是
+    `http://127.0.0.1:9222` —— **开发机上那个 Edge 窗口正好开着** ⇒ 单测里 `available()`
+    回 True、于是**真的对着小红书搜了一遍**(整个测试文件从 3 秒涨到 **71 秒**,而且
+    **拿真账号发了真实请求**)。与"测试发了真飞书"是同一类:**测试碰真世界**。
+    ⇒ 默认把 **CDP 端点指向一个死端口** —— `available()` 照旧跑它自己的真代码,
+    只是永远连不上(于是回落页面路,而页面路各用例本来就自己桩着)。
+    ⚠️ **不桩 `available` 本身**:那会连"测 `available()` 自己"的用例一起按死
+    (实测踩到:`test_available_连不上时的提示要指向_launch` 当场变红)。
+    """
+    from app.services import xhs_cdp_source as C
+
+    monkeypatch.setattr(C, "endpoint", lambda settings=None: "http://127.0.0.1:9")
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _no_real_feishu(monkeypatch):
     """测试**绝不许**真的往飞书投递消息(2026-10-16 实测踩到)。
 

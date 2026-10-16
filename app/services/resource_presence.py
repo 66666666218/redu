@@ -169,6 +169,36 @@ def _crawl_platform(plat: str, names: list[str], session=None) -> list[dict]:
                 "`tools/xhs_guest_probe.py` 确认回 `-101`。"
                 "⚠️ **不要**靠换号/重登绕过 —— 那是同一条出口。")
 
+        # ★★★ **CDP 路优先**(2026-10-16 用户拍板:「**接 CDP 路**」+「**每轮 1~2 词**」)。
+        # 它排在页面路**前面**的理由:CDP 路**用真人开着的那个浏览器**(脚本只
+        # `connect_over_cdp` 接管),实测 `navigator.webdriver=False`;
+        # 而页面路是 **Playwright 自己开**的(脚本形状)—— 历史上被 `461/300011`
+        # 打过的正是"脚本形状/设备特征对不上"这件事。**谁更像人谁先走。**
+        # ⚠️ **窗口没开 = 回落,不是失败**:`available()` 只问 CDP 端点、不发小红书请求;
+        #   回落时**必须把原因说出来**(那模块的纪律 3:静默回落等于"这条链没跑,却像跑了")。
+        # ⚠️ **每轮只喂 1~2 个词**(用户口径):小红书这条链的命门是**频次** —— 连发会
+        #   杀会话 / 进 `300011`,而"想多拿点"正是最容易把账号送出去的动作。
+        try:
+            from app.services import xhs_cdp_source as _cdp
+            # ⚠️ 这里**不能直接写 `settings`** —— 本函数是内层的 `_crawl_platform(plat, names)`,
+            #    外层 `probe(..., settings=)` 的参数**不在作用域里**(我第一版就这么写的,
+            #    被自己写的测试当场打红:`NameError: name 'settings' is not defined`)。
+            #    与下面那段页面路同一个办法:用 `get_settings()` 现取。
+            from config.settings import get_settings as _get_settings
+
+            _st = _get_settings()
+            _ok, _why = _cdp.available(_st)
+            if _ok:
+                _kws = list(names)[:max(1, int(getattr(_st, "xhs_max_keywords", 2) or 2))]
+                _rows = _cdp.search(_kws, settings=_st)
+                logger.info("小红书 **CDP 路**:%s → %d 条(本轮 %d 个词)",
+                            _why, len(_rows), len(_kws))
+                return _rows
+            logger.info("小红书 CDP 路跳过(%s)⇒ 回落页面路", str(_why)[:120])
+        except Exception as exc:  # noqa: BLE001 - CDP 路坏了不该拖垮下面那条
+            logger.warning("小红书 CDP 路失败(%s),回落页面路:%s",
+                           type(exc).__name__, str(exc)[:120])
+
         # ★★★ **默认「页面渲染优先」**(2026-10-13 改,原来是"协议优先、页面兜底")。
         # 旧顺序是 2026-10-07 为了快 18 倍定的(协议 ~0.85s/词 vs 页面 ~15s/词),
         # 但**纯协议每发一次请求都在杀会话** —— 实测时间线:

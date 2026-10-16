@@ -691,3 +691,58 @@ def test_对标数据为0时写破折号而不是0() -> None:
     assert rp._metrics_md({}) == "—"
     assert rp._metrics_md({"share_count": 0}) == "—"
     assert rp._metrics_md({"share_count": 3}) == "↗3"
+
+
+def test_小红书优先走CDP路_且每轮只喂两个词(session, monkeypatch) -> None:
+    """★ 用户 2026-10-16 拍板:「**接 CDP 路**」+「**每轮 1~2 词**」。
+
+    为什么 CDP 排在页面路**前面**:CDP 用**真人开着的那个浏览器**(脚本只 `connect_over_cdp`,
+    实测 `navigator.webdriver=False`);而页面路是 **Playwright 自己开**的(脚本形状)——
+    历史上被 `461/300011` 打过的正是"设备特征对不上"这件事。**谁更像人谁先走。**
+    ⚠️ 词数上限是**账号安全**问题,不是性能问题(2026-10-14 压测的代价就是账号)。
+    """
+    from app.services import xhs_cdp_source as cdp
+    from app.services import xhs_page_source as _xhs
+
+    called: dict = {}
+    monkeypatch.setattr(cdp, "available", lambda settings=None: (True, "CDP 可达"))
+
+    def _search(kws, settings=None, **k):
+        called["kws"] = list(kws)
+        return [{"uid": "u", "name": "作者", "snippet": "甲", "keyword": kws[0],
+                 "url": "", "pan_link": ""}]
+
+    monkeypatch.setattr(cdp, "search", _search)
+    monkeypatch.setattr(rp, "library_names", lambda s, u, top: ["甲", "乙", "丙", "丁"])
+    monkeypatch.setattr(_xhs, "search",
+                        lambda *a, **k: pytest.fail("CDP 通了就不该再走页面路"))
+    monkeypatch.setattr(rp, "_xhs_egress_guard", lambda: True)
+    out = rp.probe(session, 1, settings=_S(), platforms=["xiaohongshu"])
+    assert called.get("kws") == ["甲", "乙"], f"每轮最多 2 个词,实际 {called.get('kws')}"
+    assert out["items"], "CDP 路的产物要能走到 items"
+
+
+def test_小红书_CDP窗口没开时回落页面路(session, monkeypatch) -> None:
+    """⚠️ **窗口没开是"回落",不是"失败"** —— 但**必须把原因说出来**(别静默)。
+
+    这正是这条路的生产形态:人开着窗口时走 CDP(更像人),关着时退回页面路(能用但形状差)。
+    """
+    from app.services import xhs_cdp_source as cdp
+    from app.services import xhs_page_source as _xhs
+
+    monkeypatch.setattr(cdp, "available",
+                        lambda settings=None: (False, "CDP 不可达:先由人把浏览器开起来"))
+    monkeypatch.setattr(cdp, "search", lambda *a, **k: pytest.fail("不可达就不该调它"))
+    monkeypatch.setattr(rp, "library_names", lambda s, u, top: ["甲"])
+    hit = {"n": 0}
+
+    def _page(kws, *a, **k):
+        hit["n"] += 1
+        return [{"uid": "u", "name": "作者", "snippet": "甲", "keyword": "甲",
+                 "url": "", "pan_link": ""}]
+
+    monkeypatch.setattr(_xhs, "search", _page)
+    monkeypatch.setattr(rp, "_xhs_egress_guard", lambda: True)
+    out = rp.probe(session, 1, settings=_S(), platforms=["xiaohongshu"])
+    assert hit["n"] == 1, "CDP 不可达 ⇒ 该回落页面路"
+    assert out["items"]
