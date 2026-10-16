@@ -481,6 +481,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.wechat_digest import run_wechat_digest_all_users
     from app.services.remote_sync import remote_sync_tick
     from app.services.chain_health import chain_report_tick
+    from app.services.link_audit import link_audit_tick
     from app.services.push_timeline import tick as push_timeline_tick
     from app.services.telegram_source import collect_tick as tg_collect_tick
     from app.services.cross_accounts import cross_account_tick
@@ -596,6 +597,15 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # 之前只有公众号有周期总结,其余几条链全靠人手动跑脚本看 —— 等于没有主动通报。
         (chain_report_tick, _get_settings().chain_report_cron, {"minute": 30, "hour": 9},
          "chain_report", "wechat"),
+        # **链接体检**(2026-10-16):抽样探活我方分享链 + 判"货不对版/空分享"。
+        # ⚠️ 为什么要有它:首轮实测 75 条里 **货不对版 14 / 空分享 10** —— 这两种**都会打到
+        #   客户脸上**(点开拿到别的资源 / 点开是空的),而在此之前**没有任何一行报告看它们**
+        #   (体检只看"链有没有生成",不看"链对不对、还活着吗")。详见 `doc/链接体检.md`。
+        # ⚠️ 样本故意小(`link_audit_per_source`,默认 6 ⇒ 约 30 次探活):这是**日常盯趋势**;
+        #   全量排查手动跑 `python scripts/link_audit.py --n 50`。
+        # ⚠️ 角色 wechat:它读本机库里的链接、并用本机那几枚盘凭据去探活。
+        (link_audit_tick, _get_settings().link_audit_cron, {"minute": 8, "hour": 6},
+         "link_audit", "wechat"),
         # 跨实例健康可见(2026-10-03):远端每天推一张**板块健康卡**到管理员群。
         # 为什么推卡而不是本机轮询远端库:两边**库是独立的**,推飞书零配置、零新增暴露面;
         # 远端整机挂了这张卡就断,"该来没来"本身是信号(本机另有 peer_status 探活兜底)。

@@ -1,4 +1,7 @@
-"""`scripts/link_audit.py` 的**对齐判据**(2026-10-16)。
+"""`app/services/link_audit.py` 的**对齐判据**(2026-10-16)。
+
+⚠️ **判据主体在 service 里**(定时作业要调它),`scripts/link_audit.py` 只是命令行壳
+—— 所以这里 from `app.services.link_audit` 取,别去 import 那个壳。
 
 **为什么单独立文件**:这条判据当天被**实测校准过两次** ——
 第一版只做「归一化后互含」,跑出来 `对齐 0/15`,而**肉眼一看大半是对的**
@@ -19,7 +22,7 @@ os.environ.setdefault("JWT_SECRET", "test_secret_0123456789abcdef0123456789abcde
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scripts.link_audit import _aligned, _first_url, _lcs, _platform, _verdict  # noqa: E402
+from app.services.link_audit import _aligned, _first_url, _lcs, _platform, _verdict  # noqa: E402
 
 
 class TestAligned:

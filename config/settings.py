@@ -938,6 +938,12 @@ class Settings(BaseSettings):
     #: (`/redian百度转存`,即 `BaiduPanClient.transfer_and_share` 的默认落点)。
     #: ⚠️ 百度**删了捞不回来**(没有回收站)⇒ 这一档**只识别 + 落清单**,不删。
     pan_auto_clean_baidu_root: str = ""
+    #: **链接体检**(2026-10-16):抽样探活我方分享链 + 判"货不对版/空分享"。
+    #: 样本故意小(默认每来源 6 条 ≈ 30 次探活)—— 这是**日常盯趋势**;
+    #: 全量排查手动跑 `python scripts/link_audit.py --n 50`(见 `doc/链接体检.md`)。
+    link_audit_cron: str = "8 6 * * *"
+    link_audit_per_source: int = 6
+    link_audit_alert: bool = True            # 有坏链就推管理群(链腐是每天在发生的)
 
     # ---- 拉新周录提醒(2026-10-03)----
     # `pan_recruit_weekly` 是**转化回路唯一的真值入口**,但至今 0 行 —— 入口(接口/前端)早就有,
