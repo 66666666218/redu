@@ -517,6 +517,22 @@ def _retry_blocked(res: object) -> bool:
     return isinstance(res, dict) and res.get("status") == "skipped" and res.get("reason") == "running"
 
 
+def _fresh_failed_since(db: Session, kind: str, since_id: int) -> bool:
+    """这一轮 runner 有没有**自己落下一条新的 `failed`** —— 有就说明"它其实失败了"。
+
+    ⚠️ **为什么只能这么判**(2026-10-16 实测):runner 的返回类型**不统一**
+    (`int` / `dict` / `None`),而**多平台 runner 会把单平台失败吞掉后正常返回**
+    (`run_douyin_leads` 就是这么写的)⇒ **"抛异常"不是失败的唯一形状**。
+    运行记录是**它自己写的、最可信的那份证据** —— 本仓的老规矩是"看它记了什么,
+    别猜"(与 `_retry_blocked` 同一条道理:没有正面证据,就不许标 recovered)。
+
+    ⚠️ 窗口按 **id** 而不是时间:`started_at` 同秒多次写入时分不开。
+    """
+    row = db.scalars(select(RunRecord).where(RunRecord.kind == kind)
+                     .order_by(RunRecord.id.desc()).limit(1)).first()
+    return bool(row is not None and int(row.id) > int(since_id) and row.status == "failed")
+
+
 def retry_run(db: Session, run_id: str, settings=None) -> dict:
     from config.settings import get_settings
 
@@ -640,9 +656,23 @@ def retry_failed_runs(max_retry: int = 3) -> dict:
                 kwargs["category"] = m.group(1) if m else None
                 kwargs["advance"] = False
             try:
+                # ⚠️⚠️ **"没抛异常"不等于"重试成功"**(2026-10-16 实测撞到)。
+                #    `run_douyin_leads` 这类**多平台** runner 会把单平台失败**吞进
+                #    `_record_run(..., "failed")` 然后正常返回**(它自己的注释写着
+                #    "单平台失败不影响其余")—— 于是"重试又失败了",老记录却被标成
+                #    `recovered → retry_ok`,而 `recovered` 的语义正是
+                #    **"这条不用再试了"** ⇒ **一次假成功把这条链的自愈关掉**。
+                #    实测:12:10 抖音失败 → 13:30 自动重试**又失败** → 却记成
+                #    `retry_ok`,而它从此不再被重试。
+                #    ⇒ 判据改成**看这一轮的运行记录自己怎么说**(与 `_retry_blocked`
+                #      同一条道理:**没有正面证据说它成了,就不许标 recovered**)。
+                _mark = db.scalar(select(func.max(RunRecord.id))
+                                  .where(RunRecord.kind == run.kind)) or 0
                 res = runner(db, run.user_id, settings, **kwargs)
                 if _retry_blocked(res):
                     continue    # 撞上在跑的一轮:保持 failed,等下一次扫描再试,不关闭记录
+                if _fresh_failed_since(db, run.kind, _mark):
+                    continue    # 它自己记了失败 ⇒ 如实保留(新记录会成为下一次候选)
                 # 采集成功:关闭旧失败记录,阻止同一失败被反复重试
                 run.status = "recovered"
                 run.detail = f"{run.detail} → retry_ok"

@@ -160,6 +160,43 @@ class TestRetryConvergence:
         assert admin_svc.retry_failed_runs(max_retry=3)["retried"] == 0
 
 
+    def test_重试又失败时不许标成已恢复(self, session, monkeypatch):
+        """★★ **2026-10-16 实测撞到的假成功,而它正好把自愈关掉了**。
+
+        `run_douyin_leads` 这类**多平台** runner 会把单平台失败**吞进
+        `_record_run(..., "failed")` 然后正常返回**(它自己的注释写着"单平台失败不影响其余")
+        —— 而这里原来用「没抛异常」当成功 ⇒ 老记录被标成 `recovered → retry_ok`,
+        而 `recovered` 的语义正是**「这条不用再试了」**。
+
+        ⚠️ 实测代价:12:10 抖音失败 → **13:30 自动重试**又失败 → 却记成 `retry_ok`,
+        看起来"自己好了"。⇒ 判据改成**看这一轮的运行记录自己怎么说**。
+        """
+        import app.admin as admin_svc
+        import app.db as appdb
+
+        monkeypatch.setattr(appdb, "get_session_local", lambda: (lambda: session))
+        monkeypatch.setattr(session, "close", lambda: None)
+
+        session.add(User(id=1, username="a", email="a@b.c", password_hash="x", role="admin"))
+        session.add(RunRecord(run_id="1", user_id=1, kind="weibo", status="failed",
+                              started_at=datetime.now() - timedelta(hours=2), retry_count=0))
+        session.commit()
+
+        def _swallow(db, uid, st=None):
+            """替身与真身**同形**:自己记一条 failed,然后**正常返回**(不抛)。"""
+            db.add(RunRecord(run_id="2", user_id=1, kind="weibo", status="failed",
+                             detail="又炸了", started_at=datetime.now(), retry_count=0))
+            db.commit()
+            return {"platform": "weibo", "count": 0}
+
+        from app.services import tenant as tenant_mod
+        monkeypatch.setattr(tenant_mod, "run_weibo", _swallow)
+        assert admin_svc.retry_failed_runs(max_retry=3)["retried"] == 0
+        old = session.scalars(select(RunRecord).where(RunRecord.run_id == "1")).one()
+        assert old.status == "failed", f"重试明明又失败了,却标成了 {old.status}"
+        assert "retry_ok" not in (old.detail or ""), old.detail
+
+
 class TestFixedTimeDigestHonest:
     def test_send_failure_does_not_burn_daily_flag(self, session, monkeypatch):
         """定时总结发送失败必须诚实:不置 last_alert_at、不计 sent(与 evaluate 同款)。"""
