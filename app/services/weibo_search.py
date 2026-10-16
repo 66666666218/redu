@@ -163,11 +163,29 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
                         continue
                     who = ((m.get("user") or {}).get("screen_name") or "")
                     hot = int(m.get("reposts_count") or 0)
-                    rows.append({"uid": str((m.get("user") or {}).get("id") or ""),
-                                 "name": who[:60], "url": "",
+                    uid = str((m.get("user") or {}).get("id") or "")
+                    # ★★ **原帖链接必须给出来**(2026-10-16 用户报「对标作品 显示
+                    #   `—(源未给链接)`」)。原来这里**写死 `url: ""`** —— 而帖子 id 就在手上。
+                    #   卡片的「对标作品」列靠它可点,空串就等于**那一列永远点不动**。
+                    #   优先 `mblogid`(微博的标准短 id,组成 `weibo.com/<uid>/<mblogid>`);
+                    #   拿不到就退到 `m.weibo.cn/detail/<mid>`(数字 id 的移动端详情页,一样能开)。
+                    mblogid = str(m.get("mblogid") or "")
+                    mid = str(m.get("mid") or m.get("id") or "")
+                    post_url = (f"https://weibo.com/{uid}/{mblogid}" if (uid and mblogid)
+                                else (f"https://m.weibo.cn/detail/{mid}" if mid else ""))
+                    # ★ **互动数单独带出来**(用户口径:5 要素里要有「对标数据」)。
+                    #   ⚠️ 实测**上游大多给 0**(「网盘资源」10 条全 0;「夸克网盘」9 条里只有 3 条有)
+                    #   —— 那是上游的事,不是我们没接;为 0 就**不放进 `metrics`**
+                    #   (与 `cross_accounts._weibo_metrics` 同一条口径:填 0 会被读成"没人看")。
+                    metrics = {k: v for k, v in (("share_count", hot),
+                                                 ("comment_count", int(m.get("comments_count") or 0)),
+                                                 ("liked_count", int(m.get("attitudes_count") or 0)))
+                               if v > 0}
+                    rows.append({"uid": uid,
+                                 "name": who[:60], "url": post_url,
                                  # 转发数是"这条有多少人在传"的代理 —— 与其它平台一致
                                  "snippet": f"{txt[:200]}(转{hot})" if hot else txt[:200],
-                                 "pan_link": "", "keyword": kw})
+                                 "pan_link": "", "metrics": metrics, "keyword": kw})
             logger.info("微博纯协议:「%s」第 %d 页 +%d 条", kw[:24], page, len(rows) - n_before)
             if not cards:
                 break                      # 没卡片 = 翻到底了

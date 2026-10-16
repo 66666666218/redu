@@ -1507,3 +1507,75 @@ class TestMovedLinkWins:
         row = [e for e in card["elements"] if e.get("tag") == "column_set"][1]
         res = row["columns"][2]["elements"][0]["text"]["content"]
         assert res == "—" and "未解析" not in res
+
+
+def test_抖音同行作品发新群_没配才回落(monkeypatch) -> None:
+    """★ **2026-10-16 用户新建了「抖音同行」群**:抖音监控到的同行作品发那个新群。
+
+    ⚠️ 为什么是**单独一个键**而不是改 `feishu_webhook_douhot`:那个 section 同时被
+    `alert_service` 的**采集失败告警**用着 —— 直接改它会把**运维告警挪进客户群**。
+    """
+    from app.services import douyin_leads as dl
+    from app.services import feishu_client
+
+    sent = {}
+
+    class _C:
+        def __init__(self, webhook, secret):
+            sent["webhook"] = webhook
+
+        def send_card(self, card):
+            return True
+
+    class _S(_Settings):
+        feishu_webhook_douyin_peer = "https://example.com/peer"
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+    dl.push_leads([{"mark": "甲", "title": "t", "url": "u", "author": "", "keyword": ""}], _S())
+    assert sent["webhook"] == "https://example.com/peer", "配了同行群就该发那儿"
+
+    # 反面对照:**没配**同行群 ⇒ 回落 `douhot`(旧行为,一行都不许变)
+    class _S2(_Settings):
+        feishu_webhook_douyin_peer = ""
+
+    dl.push_leads([{"mark": "甲", "title": "t", "url": "u", "author": "", "keyword": ""}], _S2())
+    assert sent["webhook"] == "https://example.com/douhot"
+
+
+def test_发布时间标记_一小时内是新的(monkeypatch) -> None:
+    """★ 用户口径(2026-10-16):「**一个钟内**他这个资源有他的名字」+ 拍板「**标时间 + 按新排序**」。
+
+    ⚠️ **顺序本来就已经是新→旧**(`find_leads` 按 `-publish_at` 排)——所以这里只补**标记**,
+    同一件事写两处迟早各飘各的(本仓母题)。
+    """
+    import time
+
+    from app.services.douyin_leads import _publish_mark
+
+    assert _publish_mark(int(time.time()) - 60) == "🆕", "一小时内要给 🆕"
+    mark = _publish_mark(int(time.time()) - 7200)
+    assert mark.startswith("·") and "-" in mark, f"两小时前要给到分钟:{mark}"
+    assert _publish_mark(0) == "" and _publish_mark(None) == "" and _publish_mark("x") == ""
+
+
+def test_卡上作品那一格带发布时间标记(monkeypatch) -> None:
+    """标记必须**真的进到卡片里**(算得出但没渲染 = 没做)。"""
+    import time
+
+    from app.services import douyin_leads as dl
+    from app.services import feishu_client
+
+    sent = {}
+
+    class _C:
+        def __init__(self, webhook, secret):
+            sent["webhook"] = webhook
+
+        def send_card(self, card):
+            sent["card"] = card
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+    dl.push_leads([{"mark": "甲", "title": "《甲》资源", "url": "u", "author": "某人",
+                    "keyword": "", "publish_at": int(time.time()) - 30}], _Settings())
+    assert "🆕" in str(sent["card"])

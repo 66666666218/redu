@@ -171,3 +171,45 @@ class TestWiring:
 
 class _S2:
     presence_platforms = "xiaohongshu,kuaishou,tieba,weibo,bilibili"
+
+
+class Test原帖链接与互动数:
+    """★★ **2026-10-16 用户报的**:「微博的有些东西没给啊不显示数据」——
+    卡片上「对标作品」显示 `—(源未给链接)`、「对标数据」显示 `—`。
+
+    真因是**两处都没往外带**(而数据本来就在手上):
+      · `url` 写死成 `""`(帖子 id 就在响应里)⇒ 「对标作品」那一列**永远点不动**；
+      · 互动数只塞进 `snippet` 文字里(`(转N)`),没进 `metrics` ⇒ 「对标数据」永远 `—`。
+    """
+
+    def _one(self, mblog: dict, monkeypatch):
+        # ⚠️ 必须 patch **全局 `requests`**(`search()` 内部是函数内 `import requests`)
+        #    —— patch `ws.requests` 会 AttributeError(模块顶层没这个名字)。
+        import requests
+        monkeypatch.setattr(requests, "get", lambda *a, **k: _Resp(
+            payload={"ok": 1, "data": {"cards": [{"mblog": mblog}]}}))
+        monkeypatch.setattr(ws, "_GAP", 0.0)
+        return ws.search(["甲"], settings=_S(), session=None)[0]
+
+    def test_原帖链接要出来_优先短_id(self, monkeypatch) -> None:
+        r = self._one({"text": "资源[网盘链接]", "mblogid": "AbC123",
+                       "user": {"screen_name": "某人", "id": 7}}, monkeypatch)
+        assert r["url"] == "https://weibo.com/7/AbC123"
+
+    def test_没有短_id时退到数字_id的详情页(self, monkeypatch) -> None:
+        r = self._one({"text": "资源", "mid": "5354630474107703",
+                       "user": {"screen_name": "某人", "id": 7}}, monkeypatch)
+        assert r["url"] == "https://m.weibo.cn/detail/5354630474107703", "退路也要能开"
+
+    def test_互动数要进_metrics(self, monkeypatch) -> None:
+        r = self._one({"text": "资源", "mid": "1", "user": {"id": 7, "screen_name": "某人"},
+                       "reposts_count": 27, "comments_count": 4, "attitudes_count": 116},
+                      monkeypatch)
+        assert r["metrics"] == {"share_count": 27, "comment_count": 4, "liked_count": 116}
+
+    def test_互动数为0时不放进_metrics(self, monkeypatch) -> None:
+        """⚠️ 填 0 会被读成"没人看" ⇒ 与 `cross_accounts._weibo_metrics` 同一条口径。"""
+        r = self._one({"text": "资源", "mid": "1", "user": {"id": 7, "screen_name": "某人"},
+                       "reposts_count": 0, "comments_count": 0, "attitudes_count": 0},
+                      monkeypatch)
+        assert r["metrics"] == {}

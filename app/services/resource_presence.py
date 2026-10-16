@@ -401,6 +401,12 @@ def probe(session, user_id: int, settings=None, platforms: list[str] | None = No
                           #   各源的 hit 都带 `url`(见 `cross_accounts._search_weibo` 的实测注:
                           #   `{uid, name, url, snippet, pan_link, metrics}`)⇒ 直接带上,不另取一次。
                           "sample_urls": [str(h.get("url") or "") for h in hits[:3]],
+                          # ★ **对标账号 + 对标数据**(2026-10-16 用户口径:网盘监控只看 5 个东西 ——
+                          #   对标账号 / 对标作品 / 对标数据 / 资源 / 可用链)。
+                          #   采集层本来就有 `name`(账号)与 `metrics`(转发·评论·赞),只是**没带上来**
+                          #   ⇒ 卡上原来看不到"是谁在推、热度多少"。
+                          "author": str((hits[0] or {}).get("name") or ""),
+                          "metrics": dict((hits[0] or {}).get("metrics") or {}),
                           "link": _library_link(session, user_id, name)})
         logger.info("跨平台热度:%s 命中资源 %d 个(合并前 %d 个关键词)",
                     plat, len(merged), len({r.get("keyword") for r in rows}))
@@ -479,6 +485,23 @@ def transfer_missing_links(session, user_id: int, items: list[dict],
             "reused": reused}
 
 
+def _metrics_md(m: dict) -> str:
+    """那条原帖的互动指标 → 一小串(`↗转发 💬评论 ♥赞`,**只显示非 0 的**)。
+
+    ⚠️ 缺失/为 0 就整串回 `—` —— **别填 0**(那会被读成"没人看")。
+    口径来自采集层 `_weibo_metrics`(它也是"为 0 就不放进去")。
+    """
+    bits = []
+    for k, ico in (("share_count", "↗"), ("comment_count", "💬"), ("liked_count", "♥")):
+        try:
+            v = int((m or {}).get(k) or 0)
+        except (TypeError, ValueError):
+            v = 0
+        if v:
+            bits.append(f"{ico}{v}")
+    return " ".join(bits) or "—"
+
+
 def push_items(items: list[dict], settings) -> bool:
     """推飞书(**各平台自己的群**,未配回落主群)。版式与其他推送一致:四列网格。
 
@@ -494,7 +517,14 @@ def push_items(items: list[dict], settings) -> bool:
     for plat in sorted({it["platform"] for it in items}):
         group = [it for it in items if it["platform"] == plat]
         # 内容卡:未配专属群的平台回落**客户主群**是对的(同上,管理群只接维护信息)
-        hook = webhook_for(settings, PLATFORMS.get(plat, {}).get("section", ""))
+        section = PLATFORMS.get(plat, {}).get("section", "")
+        # ★ **微博·同行资料群**(2026-10-16 用户新建):微博上推的资源发那个新群。
+        # ⚠️ 与 `weibo` section **分开**是必须的 —— 那个 section 同时被
+        #    `alert_service` 的**采集失败告警**用着,直接改它会把运维告警挪进客户群。
+        # 没配 = 回落旧行为(该 section 的群)。
+        peer = ((getattr(settings, "feishu_webhook_weibo_peer", "") or "").strip()
+                if plat == "weibo" else "")
+        hook = peer or webhook_for(settings, section)
         if not hook:
             continue
         label = PLATFORMS.get(plat, {}).get("label", plat)
@@ -505,9 +535,13 @@ def push_items(items: list[dict], settings) -> bool:
         #      ⇒ 员工看得到"有资源",却**核对不了这资源是谁在推、推成什么样**。
         elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
             f"{label}上也在推的资源 **{len(group)}** 个:"
-            f"「**资源**」点开是我方链、可直接取用;「**对标作品**」点开是那条原帖。"}},
-            _col_set_row([("**资源**", 5), ("**对标作品**", 4), ("**平台**", 2),
-                          ("**内容数**", 2)], grey=True)]
+            f"「**资源**」点开是我方链、可直接取用;「**对标作品**」点开是那条原帖;"
+            f"「**对标账号**/「**对标数据**」= 谁在推、热度多少。"}},
+            # ★ **对标账号 / 对标数据 两列是 2026-10-16 补的**(用户口径:网盘监控只看 5 个东西 ——
+            #   对标账号 / 对标作品 / 对标数据 / 资源 / 可用链)。原来只有前两个 + 平台 + 内容数。
+            #   ⚠️ **平台列去掉**:这张卡本来就是**按平台分开发**的,表头已经写明是哪个平台。
+            _col_set_row([("**资源**", 4), ("**对标作品**", 4), ("**对标账号**", 3),
+                          ("**对标数据**", 2), ("**内容数**", 1)], grey=True)]
         from app.services.douyin_leads import _pan_name
         for it in group:
             link = it.get("link") or {}
@@ -522,10 +556,11 @@ def push_items(items: list[dict], settings) -> bool:
             su = [u for u in (it.get("sample_urls") or []) if u]
             work = f"[▶ 看作品]({_md_safe(su[0])})" if su else "—(源未给链接)"
             elements.append(_col_set_row([
-                (cell, 5),
+                (cell, 4),
                 (work, 4),
-                (_md_safe(it["label"]), 2),
-                (str(it["count"]), 2)]))
+                (_md_safe(str(it.get("author") or ""))[:12] or "—", 3),
+                (_metrics_md(it.get("metrics") or {}), 2),
+                (str(it["count"]), 1)]))
         card = {"config": {"wide_screen_mode": True},
                 "header": {"template": "wathet", "title": {"tag": "plain_text",
                                                            "content": f"🔎 {brand + ' · ' if brand else ''}"

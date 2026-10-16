@@ -1000,6 +1000,26 @@ def _pan_name(url: str) -> str:
     return ""
 
 
+def _publish_mark(pub) -> str:
+    """发布时间标记:**一小时内 = 🆕**,其余 `·MM-DD HH:MM`;拿不到就空串。
+
+    用户口径(2026-10-16):「**一个钟内**他这个资源有他的名字」,并拍板「**标时间 + 按新排序**」——
+    卡上要一眼看出"这条是刚出的"。
+    ⚠️ **顺序本来就已经是新→旧**(`find_leads` 按 `-publish_at` 排,见那边的注释),
+    所以这里**只补标记、不动顺序** —— 同一件事写两处迟早各飘各的。
+    """
+    try:
+        ts = int(pub or 0)
+    except (TypeError, ValueError):
+        return ""
+    if ts <= 0:
+        return ""
+    from datetime import datetime
+
+    dt = datetime.fromtimestamp(ts)
+    return "🆕" if (datetime.now() - dt).total_seconds() <= 3600 else f"·{dt:%m-%d %H:%M}"
+
+
 def push_leads(leads: list[dict], settings, platform: str = "douyin") -> bool:
     """把线索推飞书。
 
@@ -1012,9 +1032,14 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin") -> bool:
     from app.services.feishu_client import webhook_for
 
     section = (PLATFORMS.get(platform) or {}).get("section", "douhot")
+    # ★ **同行作品群**(2026-10-16 用户新建):抖音监控到的**同行作品**发那个新群。
+    # ⚠️ 与 `douhot` 那个 section **分开**是必须的:那个 section 同时被
+    #    `alert_service` 的**采集失败告警**用着 ⇒ 直接改它会把运维告警挪进客户群。
+    # 没配就回落旧行为(内容卡 → 该 section 的群)。
+    peer = (getattr(settings, "feishu_webhook_douyin_peer", "") or "").strip()
     # 抖音线索也是**内容卡** → 未配专属群时落客户群是对的。
     # (末尾那个 `or feishu_webhook_admin` 是够不到的死代码:主群已配时 webhook_for 永不返回空串)
-    webhook = webhook_for(settings, section) or getattr(settings, "feishu_webhook_admin", "")
+    webhook = peer or webhook_for(settings, section) or getattr(settings, "feishu_webhook_admin", "")
     if not webhook:
         logger.info("抖音线索:未配飞书 webhook,跳过推送")
         return False
@@ -1050,6 +1075,11 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin") -> bool:
         author = _md_safe(ld.get("author") or "—")
         title = _md_safe(strip_others(ld.get("title") or ""))
         shown = title[:22] + ("…" if len(title) > 22 else "")
+        # ★ **发布时间标记**(2026-10-16 用户口径:一个钟内的 = 🆕,其余给到分钟)——
+        #   顺序本来就新→旧(`find_leads` 排好了),这里只补标记。
+        _when = _publish_mark(ld.get("publish_at"))
+        if _when:
+            shown = f"{shown} {_when}"
         vurl = _md_safe(ld.get("url") or "")
         # 「作品」列:标题可点 → **我方网盘链**(不是抖音视频!)
         # ⚠️⚠️ **2026-10-06 修,这是一次实现错误**:`26b6d69`(10-04)那条提交的说明里

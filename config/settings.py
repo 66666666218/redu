@@ -944,6 +944,13 @@ class Settings(BaseSettings):
     link_audit_cron: str = "8 6 * * *"
     link_audit_per_source: int = 6
     link_audit_alert: bool = True            # 有坏链就推管理群(链腐是每天在发生的)
+    #: **同行作品群**(2026-10-16 用户新建):抖音/微博**监控到的同行作品**发这两个新群。
+    #: ⚠️ 与 `feishu_webhook_douhot` / `feishu_webhook_weibo` **分开**是必须的 ——
+    #:   那两个 section 不只给内容卡用,**`alert_service` 的采集失败告警也走它们**
+    #:   ⇒ 直接改值会把**运维告警挪进客户群**。这里是**内容专用**出口。
+    #: 留空 = 回落原来那个 section 的群(旧行为)。
+    feishu_webhook_douyin_peer: str = ""     # 抖音·同行作品
+    feishu_webhook_weibo_peer: str = ""      # 微博·同行资料
 
     # ---- 拉新周录提醒(2026-10-03)----
     # `pan_recruit_weekly` 是**转化回路唯一的真值入口**,但至今 0 行 —— 入口(接口/前端)早就有,

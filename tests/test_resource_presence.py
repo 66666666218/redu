@@ -611,3 +611,83 @@ class TestXhsEgressGuard:
         with pytest.raises(MediaCrawlerError) as ei:
             rp._crawl_platform("xiaohongshu", ["美食"], None)
         assert "出口" in str(ei.value)
+
+
+def test_微博走同行资料群_没配才回落(monkeypatch) -> None:
+    """★ **2026-10-16 用户新建了「微博同行资料」群**:微博上推的资源发那个新群。
+
+    ⚠️ 与 `feishu_webhook_weibo` **分开**的原因同抖音那条:那个 section 也被
+    `alert_service` 的采集失败告警用着。另外**只对微博生效** —— 别的平台不许被带走。
+    """
+    from app.services import feishu_client
+
+    sent = []
+
+    class _C:
+        def __init__(self, webhook, secret):
+            self.hook = webhook
+
+        def send_card(self, card):
+            sent.append((self.hook, card))
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+
+    class _S2:
+        feishu_webhook_weibo_peer = "https://example.com/wb-peer"
+        feishu_webhook_kuaishou = "https://example.com/ks"
+        feishu_webhook_weibo = "https://example.com/wb"
+        feishu_secret = ""
+        brand_name = ""
+
+    rp.push_items([{"name": "某资源", "platform": "weibo", "label": "微博", "count": 1,
+                    "samples": [], "sample_urls": [], "link": {}},
+                   {"name": "另一个", "platform": "kuaishou", "label": "快手", "count": 1,
+                    "samples": [], "sample_urls": [], "link": {}}], _S2())
+    hooks = {h for h, _ in sent}
+    assert "https://example.com/wb-peer" in hooks, "微博该发同行群"
+    assert "https://example.com/wb" not in hooks, "旧的微博群不该再收到内容卡"
+    assert "https://example.com/ks" in hooks, "⚠️ 别的平台不许被带走"
+
+
+def test_卡片要带对标账号与对标数据(monkeypatch) -> None:
+    """★ 用户口径(2026-10-16):**网盘监控只看 5 个东西** ——
+    对标账号 / 对标作品 / 对标数据 / 资源 / 可用链。
+
+    采集层本来就有 `name`(账号)与 `metrics`(转发·评论·赞),只是**没被带到卡上**
+    ⇒ 卡上原来看不到"是谁在推、热度多少"。这里钉住它俩必须进卡。
+    """
+    from app.services import feishu_client
+
+    sent: list[dict] = []
+
+    class _C:
+        def __init__(self, webhook, secret):
+            self.hook = webhook
+
+        def send_card(self, card):
+            sent.append(card)
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+
+    class _S3:
+        feishu_webhook_weibo = "https://example.com/wb"      # ⚠️ `_S` 里没有这一条 ⇒ 卡片根本发不出去
+        feishu_secret = ""
+        brand_name = ""
+
+    rp.push_items([{"name": "花少2", "platform": "weibo", "label": "微博", "count": 2,
+                    "samples": [], "sample_urls": ["https://weibo.com/1/2"],
+                    "author": "某博主", "metrics": {"share_count": 8, "liked_count": 12},
+                    "link": {"my_link": "https://pan.quark.cn/s/OUR", "pan_url": ""}}], _S3())
+    blob = str(sent[0])
+    assert "**对标账号**" in blob and "**对标数据**" in blob, "列头要有这两个"
+    assert "某博主" in blob, "账号要进卡"
+    assert "↗8" in blob and "♥12" in blob, f"热度要进卡:{blob[-400:]}"
+
+
+def test_对标数据为0时写破折号而不是0() -> None:
+    """⚠️ 0 会被读成"没人看" —— 拿不到就 `—`(与采集层"为 0 就不放进去"同一条口径)。"""
+    assert rp._metrics_md({}) == "—"
+    assert rp._metrics_md({"share_count": 0}) == "—"
+    assert rp._metrics_md({"share_count": 3}) == "↗3"

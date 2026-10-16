@@ -66,20 +66,28 @@ def _pad_cell(s: str, width: int) -> str:
 def _aligned_row(prefix: str, cols: list[tuple[str, int]]) -> str:
     """按 (文本, 列宽) 左对齐拼接成一行,`prefix` 置于行首(不作列对齐)。"""
     return prefix + "".join(_pad_cell(t, w) for t, w in cols)
-def _col_set_row(cells: list[tuple[str, int]], *, grey: bool = False) -> dict:
+def _col_set_row(cells: list[tuple[str, int]], *, grey: bool = False,
+                 flex_mode: str = "none") -> dict:
     """飞书卡片 column_set 行:cells = [(lark_md 文本, 权重)]。
 
     同一组权重连成多行 → 客户端按网格对齐,与字体宽窄无关(lark_md 是比例字体,
     空格补齐永远对不齐——闲鱼推送"乱"的根因,这是正解)。
     列内元素用 **div/lark_md**(自定义机器人老 schema 兼容);
     不要用 `{"tag":"markdown"}`——那是卡片 schema 2.0 元素,自定义 bot.webhook 不渲染,会变空白。
+
+    ★ **`flex_mode`(2026-10-16 加,为手机端)**:用户口径「有些需要看手机…现在手机端就是不太方便看」。
+    默认 `"none"` = 按权重分栏(**一成不变**,PC 上是表格感);
+    传 `"flow"` 时改成**流式**:列宽按内容,**放不下就换行** ⇒ 窄屏(手机)不会把
+    N 列挤成每格两三个字。⚠️ `flow` 下**权重不再有意义**,列宽用 `auto`。
     """
+    flow = flex_mode == "flow"
     return {
         "tag": "column_set",
-        "flex_mode": "none",
+        "flex_mode": flex_mode,
         "background_style": "grey" if grey else "default",
         "columns": [
-            {"tag": "column", "width": "weighted", "weight": weight,
+            {"tag": "column", **({"width": "auto"} if flow else {"width": "weighted",
+                                                                 "weight": weight}),
              "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": text}}]}
             for text, weight in cells
         ],
