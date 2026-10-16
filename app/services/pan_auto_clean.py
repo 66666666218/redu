@@ -178,7 +178,14 @@ def clean_xunlei(db: Session, user_id: int, settings, *, dry_run: bool, left: in
 
 
 def report_baidu(db: Session, user_id: int, settings) -> dict:
-    """百度:**只报告,永不自动删**(它没有回收站,删了不可逆)。返回本轮统计。"""
+    """百度:**只报告,永不自动删**(它没有回收站,删了不可逆)。返回本轮统计。
+
+    ★ **2026-10-16 起报两件事**(用户口径「先做识别 + 清单」):
+      ① **引流文件**(`pan_promo_sweep`,原样保留);
+      ② **跨目录重复**(`baidu_dup`,判据与夸克那边同一条:同名+同大小、出现在不同目录)。
+    ⚠️ 重复清单**落到 `data/pan_dedupe_baidu.json`** 供人工过目 —— **默认不删**是有意的:
+    百度删了捞不回来(`baidupan_transfer.delete_paths` 的文档写着「调用方必须自己确认路径」)。
+    """
     from app.services import pan_promo_sweep
 
     # ⚠️ 平台键是 **`baidupan`**(不是 `baidu`)—— 与 `pan_discovery` / `_enrich` 同口径
@@ -187,16 +194,48 @@ def report_baidu(db: Session, user_id: int, settings) -> dict:
     ck = (_A.cookie_for(db, "baidupan", user_id=user_id) or "").strip()
     if not ck:
         return {"pan": "百度", "state": "no_cookie"}
+    out: dict = {"pan": "百度", "state": "report_only"}
     try:
         # ⚠️ `BaiduAdapter(cookie)` 只收 cookie(它自己造客户端)—— 与夸克那边的 `QuarkTransfer` 同形
         ad = pan_promo_sweep.BaiduAdapter(ck)
         plan = pan_promo_sweep.build_plan(ad, words=_BAIDU_WORDS)
+        out["strong"] = len(plan.get("delete") or [])
+        out["weak"] = len(plan.get("review") or [])
     except Exception as exc:  # noqa: BLE001 - 百度凭据失效/被挡都不该拖垮整轮
         logger.info("百度清引流(只报告)跳过:%s: %s", type(exc).__name__, str(exc)[:100])
-        return {"pan": "百度", "state": "skipped", "reason": f"{type(exc).__name__}: {str(exc)[:80]}"}
-    return {"pan": "百度", "state": "report_only",
-            "strong": len(plan.get("delete") or []), "weak": len(plan.get("review") or []),
-            "note": "不可逆,只报告;要删请人工跑 scripts/pan_dedupe_apply.py"}
+        return {"pan": "百度", "state": "skipped",
+                "reason": f"{type(exc).__name__}: {str(exc)[:80]}"}
+    # ⚠️ 这一段用 **`BaiduPanClient`**(它有 `list_dir`),不是 `BaiduAdapter`
+    #    (那个只有 `search_by_name`,列不了目录 ⇒ 判不了"跨目录")
+    try:
+        import json
+        from pathlib import Path
+
+        from app.services import baidu_dup
+        from app.services.baidupan_transfer import BaiduPanClient
+
+        root = (getattr(settings, "pan_auto_clean_baidu_root", "") or "").strip() \
+            or baidu_dup.DEFAULT_ROOT
+        dup = baidu_dup.build_plan(
+            BaiduPanClient(ck), roots=(root,),
+            intro_dir=(getattr(settings, "pan_intro_baidu_dir", "") or ""))
+        p = Path("data/pan_dedupe_baidu.json")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"root": root, **dup}, ensure_ascii=False, indent=1),
+                     encoding="utf-8")
+        out.update({"dup_groups": dup["n_groups"], "dup_files": dup["n_dup"],
+                    "dup_bytes": dup["bytes"], "dup_scanned": dup["scanned"],
+                    "dup_truncated": dup["truncated"],
+                    "dup_errors": dup.get("n_errors", 0),
+                    "intro_protected": dup["intro_protected"],
+                    "dup_list": str(p)})
+    except Exception as exc:  # noqa: BLE001 - 识别失败不该让上面那份引流报告也白做
+        logger.info("百度跨目录重复识别跳过:%s: %s", type(exc).__name__, str(exc)[:100])
+        out["dup_error"] = f"{type(exc).__name__}: {str(exc)[:80]}"
+    out["note"] = ("不可逆,只报告;**删除开关故意还没做** —— 等你看过一份真实清单、"
+                   "确认判据没误判再开;清单见 data/pan_dedupe_baidu.json,"
+                   "重扫用 `python scripts/baidu_dedupe.py`(只读)")
+    return out
 
 
 def auto_clean_tick(settings=None) -> int:
@@ -256,7 +295,22 @@ def _fmt(p: dict) -> str:
                 f"还差{p.get('remaining_homes')}个;计划{p.get('planned')}条不可信;"
                 f"**重扫原因 {why}**;调用{p.get('calls')};TTL {p.get('ttl_hours')}h)")
     if st == "report_only":
-        return f"{p['pan']}**只报告** 强模式{p.get('strong')}条 / 待确认{p.get('weak')}条"
+        bits = [f"引流 强模式{p.get('strong')}条/待确认{p.get('weak')}条"]
+        #: ★ **跨目录重复单独报**(2026-10-16):与"引流文件"是**两条判据**,
+        #: 合在一起就再也看不出是"有人在硬塞广告"还是"我们自己存重了"。
+        if p.get("dup_groups") is not None:
+            bits.append(f"**跨目录重复{p['dup_groups']}组/多出{p.get('dup_files', 0)}份"
+                        f"({int(p.get('dup_bytes') or 0) / 2 ** 30:.2f}GiB)**")
+            if p.get("dup_truncated"):
+                bits.append("⚠️重复扫没列完(撞上限),数字偏小")
+            if p.get("dup_errors"):
+                bits.append(f"⚠️{p['dup_errors']}个目录没列成")
+            if p.get("intro_protected"):
+                bits.append(f"简介护{p['intro_protected']}")
+            bits.append(f"清单{p.get('dup_list')}")
+        elif p.get("dup_error"):
+            bits.append(f"⚠️重复识别失败({str(p['dup_error'])[:40]})")
+        return f"{p['pan']}**只报告(不删)** " + " | ".join(bits)
     bits = [f"扫{p.get('scanned', '-')}", f"计划{p.get('planned', 0)}"]
     if p.get("intro_protected"):
         bits.append(f"简介护{p['intro_protected']}")

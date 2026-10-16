@@ -934,6 +934,10 @@ class Settings(BaseSettings):
     pan_auto_clean_quark_ttl_hours: float = 48.0
     pan_auto_clean_xunlei_days: int = 7            # 迅雷:闲置超过这么多天的转存视为过期
     pan_auto_clean_baidu_report: bool = True       # 百度只报告(永不自动删)
+    #: 百度**跨目录重复**识别的扫描根(2026-10-16)。空 = 用 `baidu_dup.DEFAULT_ROOT`
+    #: (`/redian百度转存`,即 `BaiduPanClient.transfer_and_share` 的默认落点)。
+    #: ⚠️ 百度**删了捞不回来**(没有回收站)⇒ 这一档**只识别 + 落清单**,不删。
+    pan_auto_clean_baidu_root: str = ""
 
     # ---- 拉新周录提醒(2026-10-03)----
     # `pan_recruit_weekly` 是**转化回路唯一的真值入口**,但至今 0 行 —— 入口(接口/前端)早就有,
