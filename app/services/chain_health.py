@@ -56,7 +56,18 @@ CHAINS: tuple[tuple[str, str, str | None, str, str], ...] = (
     # 那段"雷电里读剪贴板"是 **UI 兜底**的走法,而兜底**已默认关闭**
     # (`quark_kouling_ui_fallback=False`)⇒ 它**不再需要模拟器**。原描述留着会让人
     # 以为这条链还挂在模拟器上(本仓"看着像"的老毛病)。
-    ("网盘·夸克口令转存", "quark_kouling", "成功", "纯协议(签名服务 + utoken 兑换)→ 转存;UI 兜底已默认关"),
+    # ⚠️ **侧标记 2026-10-16 补**(漏了,于是本机报了个**永远不会好的黄**):
+    #   它 2026-10-10 起注册在 **hotspot**,本机(`SCHEDULER_ROLE=wechat`)**不再跑它**
+    #   ⇒ 本机库里那条 10-10 的记录是**化石**,永远不更新 ⇒ 报告写成
+    #   「🟡 最近 141h 前 · success · 成功0 …主因:ADBKeyboard 没装」,还顺手给出
+    #   **过时的修法**(`adb install ADBKeyboard` —— 而 UI 兜底早已默认关闭、
+    #   **根本不需要模拟器**)。与 newsnow / 闸门失准同一条教训:
+    #   **一条永远不会好的黄/红项会训练人忽略整份报告**。
+    # ⚠️ **本机仍有观测口**:`quark_link_pull`(wechat,:41)把远程搬成的链拉回来 ——
+    #   它写的是「远程已搬成 N」,2026-10-16 实测 N=287 且仍在涨 ⇒ 那条链是好的。
+    ("网盘·夸克口令转存", "quark_kouling", "成功",
+     "纯协议(签名服务 + utoken 兑换)→ 转存;UI 兜底已默认关;"
+     "**本机观测口 = `quark_link_pull`(每 2 小时 :41,报「远程已搬成 N」)**", "remote"),
     # - B站对标号扫描:今天撞过 `-352` 限流;指标取 `标题`(扫到多少有资源标题的号)。
     ("B站·对标号扫描", "bili_account_scan", "标题", "B站 API 搜账号 → 抽网盘号"),
     ("闲鱼·深采", "xianyu_deep", "items", "闲鱼商品深采(详情页)"),
@@ -285,6 +296,16 @@ def check_credentials(db) -> list[dict]:
 
             ck = get_cookie(db, 1, plat) or ""
             alive, why = _cred_alive(plat, ck, db)
+            if alive is False and plat in ("zhihu", "weibo"):
+                # ⚠️⚠️ **一次失败不足以判"凭据死了"**(2026-10-16 实测):知乎搜索探针
+                #   **会偶发失败** —— 同一份报告隔几分钟跑两次,一次 🔴、一次 🟡「验活 ✓(搜到 3 条)」;
+                #   而拿同一枚 cookie 连测 **3/3 全过**。那是**假红**,而假红会训练人忽略整份报告
+                #   (与"限流只判黄不判红"同一条纪律)。⇒ **再探一次才认**。
+                # ⚠️ **只对这两家做**:它们的"验活"都是**搜索端点**(会偶发限流/超时)。
+                #   抖音**不在这里**,它那档有自己的恢复链(自动重导 + 复验,见下)——
+                #   在这儿多吃一次会把那条链的第一次尝试吃掉;
+                #   B站的 `nav` 是**权威**失败判定(HTTP 200 里带 `isLogin`),不需要复探。
+                alive, why = _cred_alive(plat, ck, db)
             if alive is True:
                 detail += f" · 验活 ✓({why})"
             elif alive is False:
@@ -1055,16 +1076,25 @@ def check_chains(db, days: int = 3) -> list[dict]:
     for entry in CHAINS:
         label, kind, metric = entry[0], entry[1], entry[2]
         side = entry[4] if len(entry) > 4 else "local"
+        desc = entry[3] if len(entry) > 3 else ""
+        # ⚠️⚠️ **远程侧的链一律不看本机记录**(2026-10-16 修)。原实现只在「**一条记录都没有**」
+        # 时才走"跑在远程"那支 —— 而本机往往留着**化石**:夸克口令 10-10 从 wechat 改挂
+        # hotspot 之后,本机那条 10-10 的记录**永远不会再更新**,于是被判成
+        # 「🟡 最近 141h 前」并带出**过时的修法**(叫人去装 ADBKeyboard)。
+        # 按定义,`remote` 就是"跑在远程、本机库看不到它的运行记录" ⇒ 本地行一律不算证据。
+        if side == "remote":
+            #: 把 `desc` 一并带出来 —— 远程侧的链**没法用本机记录判产出**,那这份报告
+            #: 至少得告诉读的人**上哪儿看**(夸克口令那条的 `desc` 就写着本机观测口
+            #: 是 `quark_link_pull`)。否则"跑在远程"之后就没有下文了。
+            out.append({"name": label, "level": YELLOW,
+                        "detail": "跑在**远程**,本机库看不到它的运行记录(属正常;"
+                                  "要查它得登录远程)" + (f";{desc}" if desc else "")})
+            continue
         rows = _rows(db, kind)
         if not rows:
-            # ⚠️ **远程侧的链不能按本地标准判红**:两库独立,本机查不到它的运行记录是**正常的** ——
-            # 报红就是误报,而"一条永远红的项会训练人忽略整份报告"(与"闸门失准"同一条教训)。
-            if side == "remote":
-                out.append({"name": label, "level": YELLOW,
-                            "detail": "跑在**远程**,本机库看不到它的运行记录(属正常;"
-                                      "要查它得登录远程)"})
-            else:
-                out.append({"name": label, "level": RED, "detail": "没有任何运行记录"})
+            # 本地链**一条运行记录都没有** ⇒ 它压根没跑过,该红
+            # (远程侧在上面就 continue 了,走不到这里)
+            out.append({"name": label, "level": RED, "detail": "没有任何运行记录"})
             continue
         last = rows[0]
         age_h = (datetime.now() - last.started_at).total_seconds() / 3600

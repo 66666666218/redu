@@ -169,6 +169,45 @@ def test_体检在冷却期内绝不许自动重导(monkeypatch):
     assert "没通过" in row["detail"] and "验活失败" not in row["detail"], row["detail"]
 
 
+def test_探活偶发失败要复探一次再判红(monkeypatch):
+    """★★ **2026-10-16 实测的假红**:知乎搜索探针**会偶发失败** ——
+    同一份报告隔几分钟跑两次,一次 🔴、一次 🟡「验活 ✓(搜到 3 条)」;
+    而拿同一枚 cookie 连测 **3/3 全过**。⇒ **一次失败不足以判"凭据死了"**。
+
+    ⚠️ 假红与假绿一样有害:一条**会自己翻**的红会训练人忽略整份报告
+    (与"限流只判黄不判红"同一条纪律)。
+    """
+    from app.services import cookie_store
+
+    monkeypatch.setattr(cookie_store, "get_cookie", lambda *a, **k: "ck")
+    calls = {"zhihu": 0}
+
+    def _alive(plat, ck, db):
+        if plat != "zhihu":
+            return True, "非本次目标"
+        calls["zhihu"] += 1
+        return ((False, "HTTPSConnectionPool: 读超时") if calls["zhihu"] == 1
+                else (True, "搜到 3 条"))
+
+    monkeypatch.setattr(ch, "_cred_alive", _alive)
+    row = [r for r in ch.check_credentials(_FakeDB()) if r["name"].startswith("知乎")][0]
+    assert calls["zhihu"] == 2, "判红之前必须复探一次"
+    assert row["level"] != "🔴", f"第一次失败就判红 = 假红:{row}"
+    assert "搜到 3 条" in row["detail"]
+
+
+def test_复探也失败才判红(monkeypatch):
+    """反向:**复探仍然失败**就必须判红 —— 不能因为加了复探,把"真的死了"也一起放过。"""
+    from app.services import cookie_store
+
+    monkeypatch.setattr(cookie_store, "get_cookie", lambda *a, **k: "ck")
+    monkeypatch.setattr(ch, "_cred_alive",
+                        lambda p, c, d: ((True, "非本次目标") if p != "zhihu"
+                                         else (False, "会话确实失效了")))
+    row = [r for r in ch.check_credentials(_FakeDB()) if r["name"].startswith("知乎")][0]
+    assert row["level"] == "🔴" and "会话确实失效了" in row["detail"]
+
+
 class _FakeDB:
     """`check_credentials` 只用它跑几个 SELECT —— 给最小替身即可。"""
 

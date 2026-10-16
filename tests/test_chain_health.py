@@ -145,6 +145,36 @@ def test_remote_side_chain_is_not_flagged_red_locally(session) -> None:
     assert agent[0]["level"] != ch.RED, "远程侧不该判红"
     assert "远程" in agent[0]["detail"]
 
+
+def test_远程侧那条链_本机留着化石记录也不许按本地标准判(session) -> None:
+    """★★ **2026-10-16 修**:原实现只在「**一条记录都没有**」时才走"跑在远程"那支 ——
+    而本机往往留着**化石**。
+
+    实测:夸克口令 2026-10-10 从 `wechat` 改挂 `hotspot`(解析改走纯协议、不再需要模拟器),
+    本机那条 10-10 的记录**永远不会再更新** ⇒ 报告写成「🟡 最近 **141h** 前 · success ·
+    成功0 …主因:ADBKeyboard 没装」,还顺手给出**过时的修法**
+    (`adb install ADBKeyboard` —— 而 UI 兜底早已默认关闭)。
+    ⚠️ 那条链其实**是好的**:本机观测口 `quark_link_pull` 写着「远程已搬成 **287**」。
+    ⇒ 与 newsnow / 闸门失准同一条教训:**一条永远不会好的黄/红项会训练人忽略整份报告**。
+    """
+    from datetime import datetime, timedelta
+
+    from app.db.models import RunRecord
+
+    from app.services import chain_health as ch
+
+    #: 化石:一条很久以前的成功记录(正是本机库里的形状)
+    session.add(RunRecord(user_id=1, run_id="f1", kind="quark_kouling", status="success",
+                          detail="试8 成功0 失败2;主因:口令喂入失败:客机里没装 ADBKeyboard",
+                          started_at=datetime.now() - timedelta(hours=141)))
+    session.commit()
+    row = [r for r in ch.check_chains(session, days=3) if "夸克口令" in r["name"]][0]
+    assert row["level"] == ch.YELLOW, f"远程侧照旧是黄,但不该按本地陈旧度判:{row}"
+    assert "远程" in row["detail"], f"要说清它跑在远程,别拿化石当证据:{row['detail']}"
+    assert "ADBKeyboard" not in row["detail"], (
+        f"那条**过时的修法**不许再出现在报告里(UI 兜底早已默认关闭):{row['detail']}")
+    assert "quark_link_pull" in row["detail"], "要指向**本机真正的观测口**"
+
 @pytest.fixture()
 def session():
     """这个脚本的 `check_chains` 要查库(虽然只读)。"""
@@ -308,17 +338,25 @@ class TestUnwatchedChainsAreNowWatched:
     """★ 洞二:这几条链**以前根本不在体检里** —— 有运行记录、也有失败,
     但**没有任何一行报告会读到它们**("埋了但没人看")。"""
 
-    def test_夸克口令在体检里且能解析无等号指标(self) -> None:
-        """★ 它状态是 `success`,而 detail 写着 `试8 成功0 失败2;主因:雷电窗口不在前台` ——
-        **作业没崩 ≠ 事情做成了**,实测白跑一整天(23 轮)没人知道。"""
+    def test_夸克口令在体检里_但改按远程侧报(self) -> None:
+        """★ 它状态是 `success`,而 detail 写着 `试8 成功0 失败2` ——
+        **作业没崩 ≠ 事情做成了**,实测白跑一整天(23 轮)没人知道 ⇒ 2026-10-08 加进体检。
+
+        ⚠️ **2026-10-10 它改挂 `hotspot`**(解析改走纯协议、不再需要模拟器)⇒ 本机那条记录
+        成了**化石**:按本地标准判就会写成「🟡 最近 **141h** 前 · 成功0 …主因:ADBKeyboard
+        没装」,还带出**过时的修法**。⇒ 现在报「跑在**远程**」,并指向**本机真正的观测口**
+        `quark_link_pull`(2026-10-16 实测写着「远程已搬成 **287**」)。
+        ⚠️ **原来那条教训没有被删** —— 它现在只能在**远程那份报告**里成立("埋了但没人看"
+        这件事换成远程视角依然存在)。
+        """
         db = _chain_session()
         try:
             assert "quark_kouling" in {c[1] for c in CHAINS}
             _add_run(db, "quark_kouling",
                      "试8 成功0 (其中**三盘互通复用0**) 失败2;主因:环境前置检查未过:雷电窗口不在前台")
             r = _row(db, "网盘·夸克口令转存")
-            assert "成功=0" in r["detail"], f"无等号写法没解析出来:{r['detail']}"
-            assert r["level"] != GREEN, "一整轮一点都没成功,不许判绿"
+            assert r["level"] == YELLOW and "远程" in r["detail"], r
+            assert "quark_link_pull" in r["detail"], f"要给本机的观测口:{r['detail']}"
         finally:
             db.close()
 
@@ -341,7 +379,22 @@ def test_指标解析要容忍无等号写法() -> None:
     try:
         _add_run(db, "bili_account_scan", "扫9个号 标题0条 冷却跳过36个")
         assert "标题=0" in _row(db, "B站·对标号扫描")["detail"]
-        _add_run(db, "quark_kouling", "试8 成功0 失败2")
-        assert "成功=0" in _row(db, "网盘·夸克口令转存")["detail"]
+    finally:
+        db.close()
+
+
+def test_无等号解析规则本身也要有守卫(monkeypatch) -> None:
+    """⚠️ **2026-10-16**:上面那条原来还用**夸克口令**当例子(它的 detail 是 `成功0`)——
+    而它改按**远程侧**报之后,本机不再解析它的记录(见
+    `test_远程侧那条链_本机留着化石记录也不许按本地标准判`)。
+    ⇒ 用一条**合成链**把"无等号也要能解析"这条**通用规则**单独钉住,
+    免得它因为"例子换人"而**没人守**。"""
+    from app.services import chain_health as ch
+
+    monkeypatch.setattr(ch, "CHAINS", (("合成链", "synth_kind", "成功", "测试用"),))
+    db = _chain_session()
+    try:
+        _add_run(db, "synth_kind", "试8 成功0 失败2")
+        assert "成功=0" in _row(db, "合成链")["detail"]
     finally:
         db.close()
