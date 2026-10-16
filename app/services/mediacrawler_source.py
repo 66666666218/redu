@@ -291,6 +291,17 @@ _LABEL_ALIASES: dict[str, str] = {
     "total_replay_num": "comment_count", "replay_num": "comment_count",
 }
 
+#: **认不出 URL 字段时,按平台由 id 拼出作品地址**(2026-10-16,见 `_derive_url`)。
+#: 只放"地址与 id 一一对应、且我们真见过 id 字段"的平台;拿不准的宁可不放
+#: (`—(源未给链接)`至少是**诚实的空**,拼错了是**错的链**)。
+_DERIVE_URL: dict[str, tuple[tuple[str, str], ...]] = {
+    "douyin": (("aweme_id", "https://www.douyin.com/video/{v}"),),
+    "kuaishou": (("video_id", "https://www.kuaishou.com/short-video/{v}"),),
+    "xiaohongshu": (("note_id", "https://www.xiaohongshu.com/explore/{v}"),),
+    "bilibili": (("bvid", "https://www.bilibili.com/video/{v}"),),
+    "tieba": (("tid", "https://tieba.baidu.com/p/{v}"),),
+}
+
 
 def _metric_int(v: object) -> int | None:
     """指标值 → 非负整数;**缺失/解析不出/负数一律返回 `None`**(= 没有这个数据,不是 0)。
@@ -324,6 +335,25 @@ def _metric_int(v: object) -> int | None:
     return n if n >= 0 else None
 
 
+def _derive_url(rec: dict, platform: str) -> str:
+    """**从记录里的 id 拼出作品地址** —— URL 字段认不出来时的兜底(2026-10-16 加)。
+
+    为什么要它:本仓一天之内踩了**两次同一族**的坑 —— 「那个平台的『对标作品』列**恒为空**」,
+    而根因都是**字段名对不上**(快手 `video_url`、微博 `mblogid`/`url`)。逐字段打补丁
+    是**打地鼠**:上游改一次名,那一列就再空一次,而且**空得毫无提示**(卡片上只是 `—`,
+    看起来像"这条没有作品")。⇒ 兜底改成"**从 id 拼**":这些平台的规范地址与 id
+    **一一对应**,而 id 字段比 URL 字段稳得多。
+
+    ⚠️ 只按**该平台自己的 id** 拼(`_DERIVE_URL` 按平台分),不做跨平台猜测 ——
+    「给错链比不给链更坏」。
+    """
+    for key, tpl in _DERIVE_URL.get(platform, ()):
+        v = str(rec.get(key) or "").strip()
+        if v:
+            return tpl.format(v=v)
+    return ""
+
+
 def _parse_record(rec: dict, platform: str) -> dict | None:
     """把各平台**字段名不同**的记录归一化成统一结构。
 
@@ -354,6 +384,9 @@ def _parse_record(rec: dict, platform: str) -> dict | None:
     #    (症状就是用户看到的 `—(源未给链接)`)。
     url = str(rec.get("note_url") or rec.get("url") or rec.get("aweme_url")
               or rec.get("video_url") or "").strip()
+    if not url:
+        #: ★ **兜底:由 id 拼**(见 `_derive_url`)—— 上游再改一次字段名也不会让那一列变空。
+        url = _derive_url(rec, platform)
     # **全部曝光/互动指标**(2026-10-04):原版只取 `share_count`,其余(尤其**播放量**)全丢。
     # 归一成 `metrics` 字典 ⇒ **直接喂给 `conversion.estimate(platform, metrics)`**,
     # 省得每个调用方各写一遍字段名映射(那是"两处真相"的开始)。

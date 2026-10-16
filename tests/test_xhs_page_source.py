@@ -622,20 +622,24 @@ class _FakeLocator:
 class _FakeCard:
     """一张笔记卡(或推荐栏)的替身。
 
-    `author` / `title` 就是**真实 DOM 里那两个节点**(`a.author .name` / `a.title > span`);
+    `author` / `title` / `like` 就是**真实 DOM 里那三个节点**(`a.author .name` /
+    `a.title > span` / `.like-wrapper .count`);
     不传 = 节点不存在 ⇒ 走 `_card_rows` 的**行序兜底**分支。
     """
 
     def __init__(self, href: str | None, text: str,
-                 author: str | None = None, title: str | None = None) -> None:
+                 author: str | None = None, title: str | None = None,
+                 like: str | None = None) -> None:
         self._href, self._text = href, text
-        self._author, self._title = author, title
+        self._author, self._title, self._like = author, title, like
 
     def locator(self, sel: str) -> _FakeLocator:
         if sel == x.AUTHOR_SEL:
             return _FakeLocator(text=self._author)
         if sel == x.TITLE_SEL:
             return _FakeLocator(text=self._title)
+        if sel == x.LIKE_SEL:
+            return _FakeLocator(text=self._like)
         return _FakeLocator(href=self._href)
 
     def inner_text(self) -> str:
@@ -786,6 +790,47 @@ class TestCardRows:
     def test_关键词要带在每行上(self) -> None:
         cards = _FakeCards([_FakeCard("/explore/ccc", "t\na")])
         assert x._card_rows(cards, "网盘资源")[0]["keyword"] == "网盘资源"
+
+    def test_点赞数要从_DOM_节点取(self) -> None:
+        """★ 「对标数据」列(2026-10-16 用户报「**小红书没有具体的数据**」)。
+
+        在那之前 `_card_rows` **一个指标都不产出** ⇒ 推送卡的「对标数据」列**恒为 `—`**,
+        而它看起来像"这条没人看"。⚠️ 17:55 那次修的 `_metric_int`/`万` 是 **MediaCrawler
+        那条路**的 —— 小红书 10-07 起就走页面/CDP 路,**根本不过** `_parse_record`,
+        所以那条修法碰不到这里,列照样是空的。
+        """
+        cards = _FakeCards([_FakeCard("/explore/aaa", "标题\n作者甲\n08-07\n4.5万",
+                                      author="作者甲", like="4.5万")])
+        assert x._card_rows(cards, "k")[0]["metrics"] == {"liked_count": 45000}
+
+    def test_点赞数_DOM_取不到时回退卡片末行(self) -> None:
+        """兜底**是实测的**:两次真实 DOM dump 里卡片文本末行就是点赞数
+        (`4.5万` / `18.8万` / `123` / `7`)。⚠️ `LIKE_SEL` 那个选择器**没有被 dump 验证过**
+        ⇒ 它只当首选,没有这一步就是"首选不中 ⇒ 整列空"。
+        """
+        cards = _FakeCards([_FakeCard("/explore/bbb", "天冷来一碗！\n牛牛吃个牛\n18.8万",
+                                      author="牛牛吃个牛")])
+        assert x._card_rows(cards, "k")[0]["metrics"] == {"liked_count": 188000}
+
+    def test_末行不是数字就不填(self) -> None:
+        """**不许瞎填** —— 末行是标题/日期时必须是空 `metrics`(渲染成 `—`),
+        而不是 0 或某个解析出来的怪数。填 0 会被读成"没人看"。
+        """
+        cards = _FakeCards([
+            _FakeCard("/explore/ccc", "只有标题"),
+            _FakeCard("/explore/ddd", "标题\n作者\n2025-11-05"),
+            _FakeCard("/explore/eee", "标题\n作者\n6天前"),
+        ])
+        assert [r["metrics"] for r in x._card_rows(cards, "k")] == [{}, {}, {}]
+
+    def test_某张卡取不到点赞数不拖垮整批(self) -> None:
+        cards = _FakeCards([
+            _FakeCard("/explore/fff", "标题\n作者\n123", author="作者", like="123"),
+            _FakeCard("/explore/ggg", "标题二\n作者二"),
+        ])
+        rows = x._card_rows(cards, "k")
+        assert rows[0]["metrics"] == {"liked_count": 123}
+        assert rows[1]["metrics"] == {}, "第二张没有就不填,不是 0"
 
     def test_空卡片跳过(self) -> None:
         cards = _FakeCards([_FakeCard("/explore/ddd", "   ")])

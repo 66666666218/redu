@@ -301,3 +301,45 @@ class Test指标与链接的别名:
         """`None`/空串 = 平台没给 ⇒ 不放进 metrics(填 0 会被读成"没人看")。"""
         r = mc._parse_record(self._rec(liked_count=None, viewd_count=""), "kuaishou")
         assert r and "liked_count" not in r["metrics"] and "play_count" not in r["metrics"]
+
+
+class Test认不出字段就由_id_拼链接:
+    """★ 2026-10-16:**同一天踩了两次同一族** —— 「那个平台的『对标作品』列恒为空」,
+    根因都是**字段名对不上**(快手 `video_url`、微博 `mblogid`)。逐字段打补丁是**打地鼠**:
+    上游改一次名,那一列就再空一次,而且**空得毫无提示**(卡片上只是 `—`)。
+
+    ⇒ 兜底改成"**从 id 拼**":这些平台的规范地址与 id 一一对应,而 id 字段比 URL 字段稳得多。
+    ⚠️ 只按**该平台自己的 id** 拼 —— 「给错链比不给链更坏」。
+    """
+
+    def _rec(self, **kw):
+        base = {"nickname": "某人", "user_id": "7", "title": "某资源"}
+        base.update(kw)
+        return base
+
+    def test_快手_认不出_url_字段时由_video_id_拼(self) -> None:
+        r = mc._parse_record(self._rec(video_id="3xabc"), "kuaishou")
+        assert r and r["url"] == "https://www.kuaishou.com/short-video/3xabc"
+
+    def test_抖音_由_aweme_id_拼(self) -> None:
+        r = mc._parse_record(self._rec(aweme_id="7300000000000000000"), "douyin")
+        assert r and r["url"] == "https://www.douyin.com/video/7300000000000000000"
+
+    def test_贴吧_由_tid_拼(self) -> None:
+        r = mc._parse_record(self._rec(tid="10210510154"), "tieba")
+        assert r and r["url"] == "https://tieba.baidu.com/p/10210510154"
+
+    def test_认得出的_url_字段优先_不许被拼出来的顶掉(self) -> None:
+        r = mc._parse_record(self._rec(video_id="3xabc",
+                                       video_url="https://www.kuaishou.com/short-video/REAL"),
+                             "kuaishou")
+        assert r and r["url"] == "https://www.kuaishou.com/short-video/REAL"
+
+    def test_不跨平台拼(self) -> None:
+        """⚠️ 快手记录只有 `aweme_id`(**不是它的 id**)时**不许**拼出抖音地址。"""
+        r = mc._parse_record(self._rec(aweme_id="7300"), "kuaishou")
+        assert r and r["url"] == ""
+
+    def test_一个_id_都没有就留空(self) -> None:
+        r = mc._parse_record(self._rec(), "kuaishou")
+        assert r and r["url"] == "", "拼不出就老实留空(`—(源未给链接)`),别编一个"

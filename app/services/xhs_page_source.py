@@ -490,6 +490,11 @@ def verify_needed(url: str, title: str, body: str = "") -> bool:
 AUTHOR_SEL = ".author .name"
 TITLE_SEL = ".title"
 
+#: 点赞数节点(2026-10-16 补)。⚠️ **与上面两个不同:这个选择器没有被真实 DOM dump 验证过**
+#: —— 所以它**只当首选**,`_card_rows` 里必须留着**实测过的兜底**(卡片文本末行)。
+#: 宁可"首选不中、兜底中",也不要一个没验过的选择器把整列弄成空的还看不出来。
+LIKE_SEL = ".like-wrapper .count"
+
 
 def _node_text(card, sel: str, timeout: int = 1500) -> str:
     """按**结构**读卡片里某个节点的文本;读不到回空串(**不抛** —— 单卡片失败不拖垮整批)。
@@ -511,11 +516,17 @@ def _card_rows(cards, kw: str, limit: int = 30) -> list[dict]:
     `section.note-item`(实测抓 DOM 时它稳定是那批里的**第 7 张**、`href=None`),
     靠这一条滤掉。
 
-    卡片文本形如「标题 / 作者 / 日期 / 点赞数」⇒ 首行当标题、**次行当作者(兜底)**。
-    笔记 id 从链接里取(`/explore/<id>`),顺带拼出完整 URL。
+    卡片文本形如「标题 / 作者 / 日期 / 点赞数」⇒ 首行当标题、**次行当作者(兜底)**、
+    **末行当点赞数(兜底)**。
 
     ★ **2026-10-15 改**:作者与标题**先按 DOM 结构读**(`AUTHOR_SEL` / `TITLE_SEL`),
     读不到才回退"次行当作者"。改的原因见 `AUTHOR_SEL` 上面那段实测。
+
+    ★ **2026-10-16 补「点赞数」**(用户报「**小红书没有具体的数据**」):在那之前本函数
+    **一个指标都不产出** ⇒ 推送卡的「对标数据」列**恒为 `—`**,而它看起来像"这条没人看"
+    (同一天我在 17:55 修的是 **MediaCrawler 那条路**的 `_metric_int`/`万` 解析 ——
+    可小红书 2026-10-07 起就走**页面/CDP 路**,根本不过 `_parse_record` ⇒ 那条修法
+    **碰不到这里**,列照样是空的)。⇒ 采集层要自己把 `metrics` 建出来。
 
     ⚠️ **URL 要去掉 `?xsec_token=…`**:那是**会话级**访问令牌(换一次登录就失效,
     带在库里过两天再打开就是坏链)⇒ 只存**规范地址**,`uid` 与 `url` 同源,
@@ -523,7 +534,12 @@ def _card_rows(cards, kw: str, limit: int = 30) -> list[dict]:
 
     参数 `cards`:任何带 `.count()` / `.nth(i)` 的对象(Playwright locator 或测试替身)。
     """
+    #: 点赞数的解析**借用采集层那一个实现**(`mediacrawler_source._metric_int`):
+    #: 它认 `4.5万`/`18.8万`/`123` 三种形态,而"同一件事写两处迟早各飘各的"是本仓母题。
+    from app.services.mediacrawler_source import _metric_int
+
     rows: list[dict] = []
+    like_by_dom = 0
     for i in range(min(cards.count(), limit)):
         try:
             card = cards.nth(i)
@@ -542,6 +558,19 @@ def _card_rows(cards, kw: str, limit: int = 30) -> list[dict]:
         uid = path.rsplit("/", 1)[-1]
         url = (path if path.startswith("http")
                else f"https://www.xiaohongshu.com{path}")
+        #: ★「对标数据」:`liked_count` 就是小红书的主指标(见 `conversion.PLATFORM_PRIMARY`)。
+        #: ⚠️ **取不到就不放进去** —— 渲染成 `—`。填 0 会被读成"没人看"(与采集层同口径)。
+        likes = _metric_int(_node_text(card, LIKE_SEL))
+        if likes is not None:
+            like_by_dom += 1
+        else:
+            #: 兜底**是实测过的,不是猜的**:卡片文本末行就是点赞数 ——
+            #: `4.5万` / `18.8万` / `123` / `7`(2026-10-12、10-15 两次真实 DOM dump 都长这样;
+            #: `tests/test_xhs_page_source.py` 里那些 `_FakeCard` 的文本就是那两次的记录)。
+            #: ⚠️ 只认**裸数字或带中文量词**的末行 ⇒ 标题、日期(`08-07`/`6天前`)一律解析成
+            #: `None`,不会瞎填一个数上去。
+            likes = _metric_int(lines[-1])
+        metrics = {"liked_count": likes} if likes is not None else {}
         rows.append({
             "uid": uid,
             #: ★ 结构优先;`lines[1]` 只作**兜底**(老卡片/节点没渲染出来时)
@@ -549,7 +578,15 @@ def _card_rows(cards, kw: str, limit: int = 30) -> list[dict]:
             "url": url,
             "snippet": " ".join(lines)[:255], "pan_link": "",
             "keyword": kw,
+            "metrics": metrics,
         })
+    if rows:
+        #: ★ **把"取到几张"喊出来**(本仓母题:静默失败=假成功)。若某天 DOM 改了、
+        #: 兜底也不认了,这一行会变成 `0/N` —— 那才是"采集层没给数",与"这条没人看"
+        #: 分得开;不报的话两种情况在卡片上长得一模一样(都是 `—`)。
+        got = sum(1 for r in rows if r["metrics"])
+        logger.info("小红书:点赞数取到 %d/%d 张卡(DOM 节点 %d 张,末行兜底 %d 张)",
+                    got, len(rows), like_by_dom, got - like_by_dom)
     return rows
 
 
@@ -755,7 +792,6 @@ def _search_with_profile(p, prof, kws: list[str], per_kw_wait_ms: int,
                 pg.wait_for_timeout(2000)
                 cards = pg.locator(CARD_SEL)
                 n = cards.count()
-                title_text = (pg.inner_text("body") or "")
                 if n == 0 and pg.locator(EMPTY_SEL).count():
                     logger.info("小红书页面路:「%s」确实没有结果(空态容器在)", kw[:26])
                     continue                      # **真没有** ≠ 被拦

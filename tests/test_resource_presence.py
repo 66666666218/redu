@@ -769,3 +769,102 @@ def test_小红书的词要轮转_不是每天重复同一批(session) -> None:
     # 没有会话(离线/单测)⇒ 退回前 n 个,不许抛也不许空
     assert rp._xhs_rotating_slice(None, 1, names, 2) == ["甲", "乙"]
     assert rp._xhs_rotating_slice(None, 1, [], 2) == []
+
+
+def test_词序游标要把写事务交掉() -> None:
+    """★★★ 2026-10-16 21:13 实测的那次 **181 秒撞锁**。
+
+    `flush()` 只把语句发出去、**事务还开着**,而紧接着跑的是 **CDP 爬取**
+    (8 个词 × ~30 秒 ≈ 4 分钟)⇒ 这一轮**抱着 SQLite 的写锁**整整 181 秒,
+    把同一时刻的 `bili_account_scan` 与 `runs` 自己的 INSERT 全打成 `database is locked`
+    (app.log:`SQLite 撞锁…当前持有写锁的是 … _xhs_rotating_slice`,持锁 120.9s → 181.0s)。
+    ⇒ 游标写进去之后**必须 commit**(本仓老纪律:**慢活一律不要在事务里做**)。
+    """
+    calls: list[str] = []
+
+    class _Sess:
+        def get(self, *a):
+            return None
+
+        def add(self, obj):
+            calls.append("add")
+
+        def commit(self):
+            calls.append("commit")
+
+        def rollback(self):
+            calls.append("rollback")
+
+        def flush(self):
+            calls.append("flush")
+
+    rp._xhs_rotating_slice(_Sess(), 1, ["甲", "乙"], 1)
+    assert "commit" in calls, f"只 flush ⇒ 写锁会被抱到爬取结束(实测 181 秒):{calls}"
+
+
+def test_慢爬之前先放掉写事务(monkeypatch) -> None:
+    """同一条纪律的**结构性**守卫:`_crawl_platform` 一进门就要把写事务交掉。
+
+    为什么放在**门槛**上而不只放在游标那里:这一层爬的是浏览器/爬虫(几分钟),
+    只要调用方的会话里挂着**任何**未提交的写(游标、告警、别的平台的余量…),
+    这整段时间写锁都在我们手里 ⇒ 别的作业只能 `database is locked`。
+    """
+    from app.services import mediacrawler_source as mcs
+
+    order: list[str] = []
+
+    class _Sess:
+        def commit(self):
+            order.append("commit")
+
+        def rollback(self):
+            order.append("rollback")
+
+    def _crawl(plat, names, **k):
+        order.append("crawl")
+        return []
+
+    monkeypatch.setattr(mcs, "crawl", _crawl)
+    rp._crawl_platform("kuaishou", ["甲"], session=_Sess())
+    assert order[:2] == ["commit", "crawl"], f"慢活之前没交写事务:{order}"
+
+
+def test_push_items_逐平台结局要留痕(monkeypatch) -> None:
+    """★★ 2026-10-16(用户报「快手…」时暴露的那条口径)。
+
+    `push_items` **按平台各发一张卡**,而返回值只是"**至少有一个平台成功**"
+    ⇒ 「快手那张没到、其余都到了」在 `runs.detail` 里与「全都到了」**长得一模一样**
+    —— 而用户看的正是**那一个群**。⇒ `detail` 把每个平台的结局单独留下来。
+    """
+    from app.services import feishu_client
+
+    class _C:
+        def __init__(self, webhook, secret):
+            self.hook = webhook
+
+        def send_card(self, card):
+            return "ks" not in self.hook                  #: 快手那个群**明确拒绝**
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+    detail: dict = {}
+    ok = rp.push_items([
+        {"name": "甲", "platform": "xiaohongshu", "label": "小红书", "count": 1,
+         "samples": [], "sample_urls": [], "link": {}},
+        {"name": "乙", "platform": "kuaishou", "label": "快手", "count": 1,
+         "samples": [], "sample_urls": [], "link": {}},
+    ], _S(), detail=detail)
+    assert ok is True, "整体返回值仍是「至少有一个成功」——契约不变"
+    assert detail == {"xiaohongshu": "已推", "kuaishou": "未推"}, detail
+
+
+def test_没配群的平台也要留痕() -> None:
+    """⚠️ `无群` 与 `未推` 是两件事:前者是**我们没配**,后者是**飞书没收**。"""
+    class _S4:
+        brand_name = ""
+        feishu_secret = ""
+        feishu_webhook = ""
+
+    detail: dict = {}
+    rp.push_items([{"name": "甲", "platform": "weibo", "label": "微博", "count": 1,
+                    "samples": [], "sample_urls": [], "link": {}}], _S4(), detail=detail)
+    assert detail == {"weibo": "无群"}, detail

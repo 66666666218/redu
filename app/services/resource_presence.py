@@ -156,12 +156,24 @@ def _xhs_rotating_slice(session, user_id: int, names: list[str], n: int) -> list
             session.add(row)
         else:
             row.value = str((start + n) % len(kws))
-        #: ⚠️ **必须 flush**(2026-10-16 测试抓到的):本仓的会话多配 `autoflush=False`,
-        #: 光 `add` 不落库 ⇒ **同一会话里的下一次调用仍读不到**游标 ⇒ 每轮都从 0 开始,
-        #: 轮转**等于没转**(而它看起来"什么都做了")。不 commit 是有意的:游标随本轮事务走。
-        session.flush()
+        #: ⚠️⚠️ **必须 `commit()`,不能只 `flush()`**(2026-10-16 21:13 实测代价)。
+        #: 本仓的会话多配 `autoflush=False`,光 `add` 不落库 ⇒ 同一会话里的下一次调用
+        #: 仍读不到游标 ⇒ 每轮都从 0 开始,轮转**等于没转**(而它看起来"什么都做了")。
+        #: 但 `flush()` 只把语句**发出去**,事务**还开着** —— 而紧接着要跑的是
+        #: **CDP 爬取(8 个词 × ~30 秒 ≈ 4 分钟)** ⇒ 这一轮**抱着 SQLite 的写锁**整整
+        #: **181 秒**(app.log:`SQLite 撞锁…当前持有写锁的是 … _xhs_rotating_slice`,
+        #: 持锁 120.9s → 181.0s),把同一时刻的别的作业全部打挂
+        #: (`bili_account_scan` 记 failed、`runs` 的 INSERT 自己也 `database is locked`)。
+        #: ⇒ **慢活(网络/浏览器)之前必须把写事务交掉** —— 这正是本仓那条老纪律
+        #: "慢活一律不要在事务里做"(`pan_discovery` / `resource_presence` 转存那两处
+        #: 早就这么写了,只有这条游标是新加的、漏了)。
+        session.commit()
     except Exception:  # noqa: BLE001 - 写游标失败不该挡住这一轮
         logger.info("小红书词序游标写失败(不影响本轮)", exc_info=True)
+        try:
+            session.rollback()          #: 交不掉就把锁放掉,别让它挂到爬取结束
+        except Exception:  # noqa: BLE001
+            pass
     return picked
 
 
@@ -174,6 +186,21 @@ def _crawl_platform(plat: str, names: list[str], session=None) -> list[dict]:
       风控**按频率**(连发即 -352),所以逐词之间要隔开。
     · 其余:MediaCrawler(要浏览器、要登录态)。
     """
+    # ⚠️ **慢活之前先把写事务交掉**(2026-10-16,用一次 181 秒的撞锁换来的)。
+    # 本函数里跑的是**浏览器/爬虫**:MediaCrawler 一轮几分钟、CDP 8 个词约 4 分钟。
+    # 只要调用方的会话里**还挂着一条没提交的写事务**(哪怕只是一次 `flush`),
+    # 这整段时间里 SQLite 的**写锁就被我们抱着**,同一时刻别的作业只能
+    # `database is locked`(实测:21:11-21:15 那轮把 `bili_account_scan` 与
+    # `runs` 自己的 INSERT 一起打挂)。本仓那条纪律原话是「**慢活一律不要在事务里做**」。
+    if session is not None:
+        try:
+            session.commit()
+        except Exception:  # noqa: BLE001 - 交不掉也必须放锁,否则爬取期间一直抱着
+            logger.info("热度采集:开跑前提交失败,改为回滚放锁", exc_info=True)
+            try:
+                session.rollback()
+            except Exception:  # noqa: BLE001
+                pass
     # ⚠️ **小红书改走"页面渲染"这条路**(2026-10-07):MediaCrawler 直连它的搜索接口
     # 回 `461 CAPTCHA`(`code 300011 检测到账号异常`),而上游"集成 xhshow 修好"那条路
     # 要升级整个 MediaCrawler,我们本地是**脱敏教学版**(许可证禁商用),不合适。
@@ -580,10 +607,16 @@ def _metrics_md(m: dict) -> str:
     return metrics_md(m)
 
 
-def push_items(items: list[dict], settings) -> bool:
+def push_items(items: list[dict], settings, detail: dict | None = None) -> bool:
     """推飞书(**各平台自己的群**,未配回落主群)。版式与其他推送一致:四列网格。
 
-    列 = 资源 / 平台 / 内容数 / **可用链**(库里匹配出来的,点开即用)。
+    列 = 资源 / **对标作品** / 对标账号 / 对标数据 / 内容数(**5 要素**,用户 2026-10-16 口径)。
+
+    ★ **`detail`:逐平台留痕**(2026-10-16 补,可选、不改变返回值契约)。
+    为什么要它:本函数**按平台各发一张卡**,而返回值只是"**至少有平台成功**" ⇒
+    「快手那张没到、其余到了」在 `runs.detail` 里看起来与「全都到了」**一模一样**
+    —— 而用户看的正是**那一个群**(本仓母题:别让「没做成」与「没做」长得一样)。
+    于是把每个平台的结局(`已推` / `未推` / `无群`)写进调用方给的 dict,由它落进运行记录。
     """
     if not items:
         return False
@@ -604,6 +637,8 @@ def push_items(items: list[dict], settings) -> bool:
                 if plat == "weibo" else "")
         hook = peer or webhook_for(settings, section)
         if not hook:
+            if detail is not None:
+                detail[plat] = "无群"
             continue
         label = PLATFORMS.get(plat, {}).get("label", plat)
         # ★ **与抖音卡同形:两个独立可点的格**(2026-10-16 用户口径
@@ -647,8 +682,16 @@ def push_items(items: list[dict], settings) -> bool:
         try:
             if FeishuClient(hook, getattr(settings, "feishu_secret", "")).send_card(card):
                 sent_any = True
+                if detail is not None:
+                    detail[plat] = "已推"
+            elif detail is not None:
+                #: ⚠️ `send_card` 回 False = 飞书**明确拒绝**(它自己会记 code/msg),
+                #: 别把它和"发了、没成"混成一句 —— 详情在 `feishu_client` 的告警里。
+                detail[plat] = "未推"
         except Exception:  # noqa: BLE001 - 单平台推送失败不影响其余
             logger.exception("跨平台热度推送失败(%s)", plat)
+            if detail is not None:
+                detail[plat] = "未推(异常)"
     return sent_any
 
 
@@ -702,7 +745,11 @@ def presence_tick(settings=None, platforms: list[str] | None = None) -> int:
                 # 而它在「该平台没配 webhook」时是**静默 `return False`** 的
                 # ⇒ 「这一轮卡片到底推出去没有」事后**查不出来**(用户提过这条)。
                 # 同一条纪律:别让「没做成」与「没做」长得一样。
-                pushed = push_items(items, settings) if items else None
+                # ★ **逐平台留痕**(见 `push_items` 的 `detail`):返回值只说明"至少有平台成功",
+                #   而用户看的往往是**某一个群** ⇒ 把那一个平台的结局写进运行记录。
+                _push_detail: dict = {}
+                pushed = (push_items(items, settings, detail=_push_detail)
+                          if items else None)
                 # ⚠️ **把失败平台写进运行记录**:`probe` 只在"全平台都失败"时才抛错,
                 # 所以"小红书成了、快手挂了"这种**部分失败**本来查不出来。
                 failed = out.get("failed") or []
@@ -715,7 +762,10 @@ def presence_tick(settings=None, platforms: list[str] | None = None) -> int:
                 if failed:
                     note += f" 失败:{','.join(failed)}"
                 if pushed is not None:               # 有东西可推 ⇒ 必须报告推成没成
+                    _miss = sorted(k for k, v in _push_detail.items() if v != "已推")
                     note += f" 卡片{'已推' if pushed else '未推'}"
+                    if _miss:                        #: 「快手那张卡没到」不许与「全到了」同形
+                        note += f"(**未到:{','.join(_miss)}**)"
                 _record_run(db, uid, "resource_presence", "success", note)
                 # ★ 用**会量等待时长**的提交(2026-10-09):撞锁时它会报"等了多久",
                 #   那能一刀切开「持有者真抱了 30 秒」与「这是不遵守 busy_timeout 的那类锁」——
