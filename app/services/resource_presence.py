@@ -124,6 +124,47 @@ def _library_link(session, user_id: int, name: str) -> dict:
     return {}
 
 
+def _xhs_rotating_slice(session, user_id: int, names: list[str], n: int) -> list[str]:
+    """给小红书挑**这一轮的**词 —— **轮转**,不是固定的前 `n` 个。
+
+    ⚠️ 为什么必须轮转(2026-10-16 自查发现,答用户「一天几轮几个词」时顺出来的):
+    小红书每轮只喂 2 个词(低频是**账号安全**,不是性能),可如果每次都取 `names[:2]`,
+    那**一天 6 轮搜的就是同 2 个词** —— 既没覆盖新资源,又让**同一批请求重复 6 次**,
+    对风控比"搜不同词"更糟。⇒ 用一个游标每轮前进 `n`,一天正好把 12 个词走一遍。
+    ⚠️ **拿不到游标/没有会话 ⇒ 退回前 `n` 个**(绝不因为"转不动"就不发 —— 宁可覆盖窄)。
+    """
+    kws = [str(x) for x in (names or []) if str(x).strip()]
+    if not kws:
+        return []
+    n = max(1, min(int(n or 1), len(kws)))
+    if session is None:
+        return kws[:n]
+    key = f"xhs_presence_cursor_{user_id}"
+    from app.db.models import SystemConfig
+
+    row = None
+    try:
+        row = session.get(SystemConfig, key)
+        cur = int(str(row.value)) if row and str(row.value).strip().isdigit() else 0
+    except Exception:  # noqa: BLE001 - 游标读不到就当 0,别挡住采集
+        cur = 0
+    start = cur % len(kws)
+    picked = [kws[(start + i) % len(kws)] for i in range(n)]
+    try:
+        if row is None:
+            row = SystemConfig(key=key, value=str((start + n) % len(kws)))
+            session.add(row)
+        else:
+            row.value = str((start + n) % len(kws))
+        #: ⚠️ **必须 flush**(2026-10-16 测试抓到的):本仓的会话多配 `autoflush=False`,
+        #: 光 `add` 不落库 ⇒ **同一会话里的下一次调用仍读不到**游标 ⇒ 每轮都从 0 开始,
+        #: 轮转**等于没转**(而它看起来"什么都做了")。不 commit 是有意的:游标随本轮事务走。
+        session.flush()
+    except Exception:  # noqa: BLE001 - 写游标失败不该挡住这一轮
+        logger.info("小红书词序游标写失败(不影响本轮)", exc_info=True)
+    return picked
+
+
 def _crawl_platform(plat: str, names: list[str], session=None) -> list[dict]:
     """抓一个平台的内容 —— **按平台选路**。
 
@@ -189,10 +230,14 @@ def _crawl_platform(plat: str, names: list[str], session=None) -> list[dict]:
             _st = _get_settings()
             _ok, _why = _cdp.available(_st)
             if _ok:
-                _kws = list(names)[:max(1, int(getattr(_st, "xhs_max_keywords", 2) or 2))]
+                # ⚠️ **轮转取词,不是 `names[:2]`**(见 `_xhs_rotating_slice` 的说明):
+                #    固定取前 2 个 ⇒ 一天 6 轮搜的是**同一批词**,既没覆盖又重复打同一批请求。
+                _kws = _xhs_rotating_slice(
+                    session, 1, list(names),
+                    max(1, int(getattr(_st, "xhs_max_keywords", 2) or 2)))
                 _rows = _cdp.search(_kws, settings=_st)
-                logger.info("小红书 **CDP 路**:%s → %d 条(本轮 %d 个词)",
-                            _why, len(_rows), len(_kws))
+                logger.info("小红书 **CDP 路**:%s → %d 条(本轮 %d 个词:%s)",
+                            _why, len(_rows), len(_kws), "/".join(_kws))
                 return _rows
             logger.info("小红书 CDP 路跳过(%s)⇒ 回落页面路", str(_why)[:120])
         except Exception as exc:  # noqa: BLE001 - CDP 路坏了不该拖垮下面那条

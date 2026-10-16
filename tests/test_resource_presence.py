@@ -746,3 +746,21 @@ def test_小红书_CDP窗口没开时回落页面路(session, monkeypatch) -> No
     out = rp.probe(session, 1, settings=_S(), platforms=["xiaohongshu"])
     assert hit["n"] == 1, "CDP 不可达 ⇒ 该回落页面路"
     assert out["items"]
+
+
+def test_小红书的词要轮转_不是每天重复同一批(session) -> None:
+    """★★ **2026-10-16 自查出来的坑**:小红书每轮只喂 2 个词(低频=账号安全),
+    可如果每次都取 `names[:2]`,那**一天 6 轮搜的是同 2 个词** ——
+    既没覆盖新资源,又让**同一批请求重复 6 次**(对风控比"搜不同词"更糟)。
+
+    ⇒ 用游标每轮前进 n,一天把整份词表走一遍。
+    ⚠️ **拿不到游标/没有会话 ⇒ 退回前 n 个**(绝不因为"转不动"就不发)。
+    """
+    names = ["甲", "乙", "丙", "丁", "戊", "己"]
+    seen = [rp._xhs_rotating_slice(session, 1, names, 2) for _ in range(3)]
+    assert seen == [["甲", "乙"], ["丙", "丁"], ["戊", "己"]], f"没轮转起来:{seen}"
+    # 走完一圈要**绕回开头**(不是越界变空)
+    assert rp._xhs_rotating_slice(session, 1, names, 2) == ["甲", "乙"]
+    # 没有会话(离线/单测)⇒ 退回前 n 个,不许抛也不许空
+    assert rp._xhs_rotating_slice(None, 1, names, 2) == ["甲", "乙"]
+    assert rp._xhs_rotating_slice(None, 1, [], 2) == []
