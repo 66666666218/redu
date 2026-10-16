@@ -1020,7 +1020,8 @@ def _publish_mark(pub) -> str:
     return "🆕" if (datetime.now() - dt).total_seconds() <= 3600 else f"·{dt:%m-%d %H:%M}"
 
 
-def push_leads(leads: list[dict], settings, platform: str = "douyin") -> bool:
+def push_leads(leads: list[dict], settings, platform: str = "douyin",
+               session=None, user_id: int = 0) -> bool:
     """把线索推飞书。
 
     **推抖音专属群**(`FEISHU_WEBHOOK_DOUHOT`,未配则回落主群)——用户口径(2026-10-02):
@@ -1125,10 +1126,19 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin") -> bool:
         "elements": elements,
     }
     try:
-        return FeishuClient(webhook, getattr(settings, "feishu_secret", "")).send_card(card)
+        ok = FeishuClient(webhook, getattr(settings, "feishu_secret", "")).send_card(card)
     except Exception:  # noqa: BLE001 - 推送失败不该影响采集
         logger.exception("抖音线索推送失败")
         return False
+    if ok and session is not None and user_id:
+        # ★ **推送台账**(2026-10-16):板块日结/周结(`board_digest`)读它。
+        #   ⚠️ 记的是**落地的那个群**:走同行群时就记 `douyin_peer`,而不是 `douhot`
+        #   —— 日结要发回"内容实际出现的那个群",否则总结会落到没人看过内容的群里。
+        from app.services import push_ledger
+
+        push_ledger.record(session, user_id,
+                           "douyin_peer" if peer else section, leads)
+    return ok
 
 
 def _kouling_summary(leads: list[dict]) -> str:
@@ -1201,7 +1211,7 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
                 # 口令 → 资源(分享链直接转存入库 / 群则加群),结果一并写进卡片
                 apply_kouling(leads, db, user_id, settings)
                 _save_leads(db, user_id, leads)      # 落库:转发量只在这一次有效(结算要用)
-                push_leads(leads, settings, platform=plat)
+                push_leads(leads, settings, platform=plat, session=db, user_id=user_id)
             # ⚠️ **按词源分开报**(2026-10-05):只报总数看不出"哪档在起作用" ——
             # 而实测两档差了 86 个百分点(资源名 86% / 热榜种子 0%)。
             # 不分开就永远发现不了"四成预算花在 0% 有效率的词上"这件事。

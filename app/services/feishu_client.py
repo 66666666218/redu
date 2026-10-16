@@ -42,6 +42,12 @@ _SECTION_WEBHOOK = {
     "tieba": "feishu_webhook_tieba",
     # 多平台"雷达"卡(热榜速览)专属群(2026-10-06)
     "multiplatform": "feishu_webhook_multiplatform",
+    # ★★ **两个"同行群"**(2026-10-16 用户新建):抖音/微博监控到的**同行作品**发这里。
+    # ⚠️ 与 `douhot`/`weibo` **分开**是必须的 —— 那两个 section 同时被
+    #    `alert_service` 的**采集失败告警**用着,直接改它们的值会把运维告警挪进客户群。
+    # 这里补进映射表是为了让**日结/周结**也能按 section 解析出群(`board_digest`)。
+    "douyin_peer": "feishu_webhook_douyin_peer",
+    "weibo_peer": "feishu_webhook_weibo_peer",
 }
 
 

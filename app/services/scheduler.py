@@ -479,6 +479,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.hot_sources import hot_source_tick_all_users
     from app.services.wechat_monitor import retire_dormant_tick_all_users
     from app.services.wechat_digest import run_wechat_digest_all_users
+    from app.services.board_digest import run_board_digest_daily, run_board_digest_weekly
     from app.services.remote_sync import remote_sync_tick
     from app.services.chain_health import chain_report_tick
     from app.services.link_audit import link_audit_tick
@@ -553,6 +554,16 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # 每周一轮(阅读数 ~2 天轮一圈,日推只会重复);放周一 09:50,早于复盘周报。
         (run_wechat_digest_all_users, _get_settings().wechat_digest_cron,
          {"minute": 50, "hour": 9, "day_of_week": "mon"}, "wechat_digest", "wechat"),
+        # ★★ **板块日结 / 周结**(2026-10-16,用户口径「客户反馈信息太多看不过来」)——
+        # 读**推送台账**(`push_ledger`),按板块群发「昨天 / 过去 7 天收到了什么」。
+        # ⚠️ role 必须是 **both**:两台实例的库是**分开的**(本机 wechat 侧 / 远程 hotspot 侧),
+        # 台账在本地 —— 各侧只能总结**自己推过内容的那几个板块**;合并到一边会把另一侧整片漏掉。
+        # ⚠️ 与 `wechat_digest` 的分工:那条进**管理群**(含阅读数覆盖率等内部数字),
+        # 这两条进**各板块客户群**且**只讲「有什么」** —— 两套口径,别互相串。
+        (run_board_digest_daily, _get_settings().board_digest_daily_cron,
+         {"minute": 32, "hour": 8}, "board_digest_daily", "both"),
+        (run_board_digest_weekly, _get_settings().board_digest_weekly_cron,
+         {"minute": 3, "hour": 9, "day_of_week": "mon"}, "board_digest_weekly", "both"),
         # 跨平台同类资源号发现(2026-10-01):拿资源库的**已验证资源名**去知乎等平台搜,
         # 只收录内容里真含网盘链的账号(各平台门槛见 cross_platform.py 头注)
         (cross_account_tick, _get_settings().cross_discover_cron, {"minute": 0, "hour": 9}, "cross_account_discover", "wechat"),

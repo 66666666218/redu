@@ -822,7 +822,7 @@ def sync(session, user_id: int, settings=None) -> dict:
             "skipped_old": skipped_old}
 
 
-def push_items(items: list[dict], settings) -> bool:
+def push_items(items: list[dict], settings, session=None, user_id: int = 0) -> bool:
     """把新转存的资源推飞书(**知乎专属群**,未配回落主群)。版式与公众号一致:四列网格。"""
     if not items:
         return False
@@ -862,10 +862,17 @@ def push_items(items: list[dict], settings) -> bool:
                                                                      f"新发现资源 · {len(items)} 个"}},
             "elements": elements}
     try:
-        return FeishuClient(webhook, getattr(settings, "feishu_secret", "")).send_card(card)
+        ok = FeishuClient(webhook, getattr(settings, "feishu_secret", "")).send_card(card)
     except Exception:  # noqa: BLE001
         logger.exception("网盘发现推送失败")
         return False
+    if ok and session is not None and user_id:
+        # ★ **推送台账**(2026-10-16):板块日结/周结读它。这条卡落在**知乎群**,
+        #   所以 section 记 `zhihu`(台账记的是"落地那个群",不是"从哪个平台抓的")。
+        from app.services import push_ledger
+
+        push_ledger.record(session, user_id, "zhihu", items)
+    return ok
 
 
 def pan_discovery_tick(settings=None) -> int:
@@ -889,7 +896,8 @@ def pan_discovery_tick(settings=None) -> int:
                 # ⚠️ **卡片推没推出去必须留痕**(2026-10-10,同 `resource_presence` 那处):
                 # `push_items` 在「没配 webhook」时**静默 return False**,返回值又被丢掉
                 # ⇒ 「这轮卡片到底推出去没有」事后查不出来。
-                pushed = push_items(out["items"], settings) if out.get("items") else None
+                pushed = (push_items(out["items"], settings, session=db, user_id=uid)
+                          if out.get("items") else None)
                 # 运行记录里**必须带上积压数** —— 只写「候选N 转存M」的话,一个持续
                 # 堆积的系统看起来和健康的系统一模一样(2026-10-05 实测踩到)。
                 _record_run(db, uid, "pan_discovery", "success",

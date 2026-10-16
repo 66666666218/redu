@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import (Boolean, DateTime, Float, ForeignKey, Integer, String, Text,
-                       UniqueConstraint, text)
+from sqlalchemy import (Boolean, DateTime, Float, ForeignKey, Index, Integer, String,
+                       Text, UniqueConstraint, text)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.database import Base
@@ -990,3 +990,38 @@ class NotificationLog(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=1)           # 重试次数
     error: Mapped[str] = mapped_column(String(255), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+
+
+class PushLedger(Base):
+    """**推送台账**(2026-10-16,用户口径「客户反馈信息太多看不过来,加日结/周结,每个板块都配上」)。
+
+    记的是**某个群那天真的收到了什么** —— 日结/周结的**唯一数据源**。
+
+    **为什么必须有这张表**(不是把业务数据再存一遍):
+      · `resource_presence`(小红书/快手/贴吧/B站/知乎)那张卡**从来不落库** ⇒
+        想按板块日结,先得知道昨天到底推出去了什么;
+      · 而且日结要回答的是「**客户昨天收到了什么**」,业务表答不了 ——
+        **采到了但没发出去的**(被去重掉、那个板块没配群、卡片发送失败)都在业务表里,
+        客户却**从没见过**;拿业务表当日结 = 把没发的东西算成"发过了"。
+
+    ⚠️ **一次推送写一行**(写的时候不聚合):同一资源昨天推了 3 轮就是 3 行,
+    聚合成 `pushes=3` 放到**读**的时候做 —— 窗口计数与"谁被反复推"才有干净语义。
+    """
+
+    __tablename__ = "push_ledger"
+    __table_args__ = (Index("ix_push_ledger_win", "user_id", "section", "pushed_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    #: **落地的那个群**(不是逻辑板块):抖音线索走同行群、热榜走 douhot,
+    #: 日结必须发回**内容实际出现的那个群**,所以键取"群",不取"平台"。
+    section: Mapped[str] = mapped_column(String(32), default="", index=True)
+    #: 聚合键(资源名 / 文章 id / 作品 id)—— 日结靠它把"同一资源推了 3 次"并成一条
+    item_key: Mapped[str] = mapped_column(String(255), default="")
+    title: Mapped[str] = mapped_column(String(255), default="")
+    url: Mapped[str] = mapped_column(String(500), default="")        # 「对标作品」/原帖
+    pan_url: Mapped[str] = mapped_column(String(500), default="")    # 我方链(有才写)
+    pan_type: Mapped[str] = mapped_column(String(16), default="")    # 夸克 / 百度 / 迅雷
+    author: Mapped[str] = mapped_column(String(64), default="")      # 对标账号
+    metrics: Mapped[str] = mapped_column(String(255), default="")    # 热度(JSON 串)
+    pushed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)

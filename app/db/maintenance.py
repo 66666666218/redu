@@ -41,6 +41,7 @@ from app.db.models import (
     WechatPanLink,
     WechatRewrite,
     WechatTrafficSample,
+    PushLedger,
     AgentStage,
     XianyuDaily,
     XianyuItem,
@@ -73,6 +74,10 @@ _TABLES = [
     (HotspotEvent, "last_seen", False),       # 每 15 分钟归并只增;按最后活跃时间滚动
     (EventMembership, "last_seen", False),
     (WechatRewrite, "created_at", False),     # 每次改写插一行,单篇最多 2 万字符 Text
+    # 推送台账(2026-10-16):每次推送**每条内容一行** ⇒ 只增不删必然膨胀。
+    # ⚠️ 保留期**必须 ≥ 8 天**:周结看的是"过去 7 天",而默认 30 天已经够宽
+    # (清理按 `data_retention_days` 统一走,这里不需要单独一档)。
+    (PushLedger, "pushed_at", False),
 ]
 
 

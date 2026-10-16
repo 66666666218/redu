@@ -1593,6 +1593,23 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
         # 好的那个群可能再收一次——重复一张卡远好于员工永远没看到这篇)。
         if sent_any:
             delivered.extend(r.id for _a, r, _n in chunk)   # chunk 现在带"次数"
+            # ★ **推送台账**(2026-10-16):这一页真的送到了 ⇒ 记进台账。
+            #   板块日结/周结(`board_digest`)读的就是它 —— 客户抱怨"信息太多"的正是这个板块。
+            #   ⚠️ **按"页"记一次,不按"目标群"记**:双推(专属群 + 总群)是设计如此,
+            #   记两遍会把日结的「推了几条」直接翻倍(台账的语义是"有东西送到了")。
+            try:
+                from app.services import push_ledger
+
+                push_ledger.record(session, user_id, "wechat", [
+                    {"item_key": f"art{r.id}", "title": r.title, "url": r.url or "",
+                     "author": r.author or "",
+                     # 有我方链就记我方链(客户点开能直接取),没有就留空(别记别人的盘链)
+                     "pan_url": ((replacements.get(r.id) or [("", "", "")])[0][1]
+                                 or _my_pan_link_from_history(r.my_pan_urls)[0] or ""),
+                     "metrics": {"read_num": r.read_num} if r.read_num else {}}
+                    for _a, r, _n in chunk])
+            except Exception:  # noqa: BLE001 - 旁路,绝不许它挡住下面 pushed_at 的落库
+                logger.warning("公众号卡片入台账失败(不影响推送)", exc_info=True)
     if delivered:
         session.execute(update(WechatArticle).where(WechatArticle.id.in_(delivered))
                         .values(pushed_at=datetime.now()))

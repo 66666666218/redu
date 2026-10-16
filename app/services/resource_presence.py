@@ -607,7 +607,8 @@ def _metrics_md(m: dict) -> str:
     return metrics_md(m)
 
 
-def push_items(items: list[dict], settings, detail: dict | None = None) -> bool:
+def push_items(items: list[dict], settings, detail: dict | None = None,
+               session=None, user_id: int = 0) -> bool:
     """推飞书(**各平台自己的群**,未配回落主群)。版式与其他推送一致:四列网格。
 
     列 = 资源 / **对标作品** / 对标账号 / 对标数据 / 内容数(**5 要素**,用户 2026-10-16 口径)。
@@ -617,6 +618,11 @@ def push_items(items: list[dict], settings, detail: dict | None = None) -> bool:
     「快手那张没到、其余到了」在 `runs.detail` 里看起来与「全都到了」**一模一样**
     —— 而用户看的正是**那一个群**(本仓母题:别让「没做成」与「没做」长得一样)。
     于是把每个平台的结局(`已推` / `未推` / `无群`)写进调用方给的 dict,由它落进运行记录。
+
+    ★ **`session`/`user_id`:推成功的那些写进「推送台账」**(2026-10-16)——
+    板块日结/周结(`board_digest`)读的就是它。⚠️ **只记真的发出去的那些**
+    (发送失败、那个平台没配群的都不记):台账的语义是「**客户收到了什么**」,
+    不是「我们打算发什么」。
     """
     if not items:
         return False
@@ -636,6 +642,9 @@ def push_items(items: list[dict], settings, detail: dict | None = None) -> bool:
         peer = ((getattr(settings, "feishu_webhook_weibo_peer", "") or "").strip()
                 if plat == "weibo" else "")
         hook = peer or webhook_for(settings, section)
+        #: 台账记**落地的那个群** —— 微博走同行群时它就不是 `weibo` 了,
+        #: 而日结必须发回"内容实际出现的那个群"(见 `board_digest` 的说明)。
+        led_sec = "weibo_peer" if (peer and plat == "weibo") else section
         if not hook:
             if detail is not None:
                 detail[plat] = "无群"
@@ -684,6 +693,12 @@ def push_items(items: list[dict], settings, detail: dict | None = None) -> bool:
                 sent_any = True
                 if detail is not None:
                     detail[plat] = "已推"
+                # ★ **推成功的才入台账**(2026-10-16):板块日结读的就是它,
+                #   而它的语义是「客户收到了什么」⇒ 失败的、没配群的**都不算**。
+                if session is not None and user_id:
+                    from app.services import push_ledger
+
+                    push_ledger.record(session, user_id, led_sec, group)
             elif detail is not None:
                 #: ⚠️ `send_card` 回 False = 飞书**明确拒绝**(它自己会记 code/msg),
                 #: 别把它和"发了、没成"混成一句 —— 详情在 `feishu_client` 的告警里。
@@ -748,7 +763,8 @@ def presence_tick(settings=None, platforms: list[str] | None = None) -> int:
                 # ★ **逐平台留痕**(见 `push_items` 的 `detail`):返回值只说明"至少有平台成功",
                 #   而用户看的往往是**某一个群** ⇒ 把那一个平台的结局写进运行记录。
                 _push_detail: dict = {}
-                pushed = (push_items(items, settings, detail=_push_detail)
+                pushed = (push_items(items, settings, detail=_push_detail,
+                                     session=db, user_id=uid)
                           if items else None)
                 # ⚠️ **把失败平台写进运行记录**:`probe` 只在"全平台都失败"时才抛错,
                 # 所以"小红书成了、快手挂了"这种**部分失败**本来查不出来。
