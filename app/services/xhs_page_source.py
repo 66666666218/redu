@@ -490,9 +490,12 @@ def verify_needed(url: str, title: str, body: str = "") -> bool:
 AUTHOR_SEL = ".author .name"
 TITLE_SEL = ".title"
 
-#: 点赞数节点(2026-10-16 补)。⚠️ **与上面两个不同:这个选择器没有被真实 DOM dump 验证过**
-#: —— 所以它**只当首选**,`_card_rows` 里必须留着**实测过的兜底**(卡片文本末行)。
-#: 宁可"首选不中、兜底中",也不要一个没验过的选择器把整列弄成空的还看不出来。
+#: 点赞数节点(2026-10-16 补)。**2026-10-16 21:55 从小红书自己的前端 bundle 坐实**
+#: (`data/xhs_sign_dump/index.5890f478.js`,零新请求;那条 `Like` 组件的根节点
+#: `class:["like-wrapper", {…}]`,数字那一格是 `T={key:0,class:"count"}` /
+#: `x={key:1,class:"count"}` ⇒ `<span class="like-wrapper"><span class="count">4.5万</span>`);
+#: ⚠️ 但它**仍然只算首选** —— bundle 与线上 DOM 之间还隔着一层(灰度/版本),所以
+#: `_card_rows` 里**必须留着实测过的末行兜底**(那条有两份真 DOM dump 作证)。
 LIKE_SEL = ".like-wrapper .count"
 
 
@@ -569,6 +572,9 @@ def _card_rows(cards, kw: str, limit: int = 30) -> list[dict]:
             #: `tests/test_xhs_page_source.py` 里那些 `_FakeCard` 的文本就是那两次的记录)。
             #: ⚠️ 只认**裸数字或带中文量词**的末行 ⇒ 标题、日期(`08-07`/`6天前`)一律解析成
             #: `None`,不会瞎填一个数上去。
+            #: ★ **「没有数字」时那一格渲染的是字面量 `赞`**(站点 bundle 里原文是
+            #: `likeCountDisplayText || "赞"`)⇒ 解析不出 → 空 `metrics` → 卡上 `—`,
+            #: 与采集层口径一致(**不许变成 0**)。
             likes = _metric_int(lines[-1])
         metrics = {"liked_count": likes} if likes is not None else {}
         rows.append({

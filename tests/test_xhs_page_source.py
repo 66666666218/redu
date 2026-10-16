@@ -805,12 +805,23 @@ class TestCardRows:
 
     def test_点赞数_DOM_取不到时回退卡片末行(self) -> None:
         """兜底**是实测的**:两次真实 DOM dump 里卡片文本末行就是点赞数
-        (`4.5万` / `18.8万` / `123` / `7`)。⚠️ `LIKE_SEL` 那个选择器**没有被 dump 验证过**
-        ⇒ 它只当首选,没有这一步就是"首选不中 ⇒ 整列空"。
+        (`4.5万` / `18.8万` / `123` / `7`)。
+
+        ★ 首选那个选择器后来也从站点自己的 bundle 里**坐实**了(见 `LIKE_SEL` 注释),
+        但**兜底照样要留**:bundle 与线上 DOM 之间还隔着灰度/版本一层 ⇒
+        这一步测的就是「首选不中时整列不许变空」。
         """
         cards = _FakeCards([_FakeCard("/explore/bbb", "天冷来一碗！\n牛牛吃个牛\n18.8万",
                                       author="牛牛吃个牛")])
         assert x._card_rows(cards, "k")[0]["metrics"] == {"liked_count": 188000}
+
+    def test_显示成赞的那一格不算数(self) -> None:
+        """★ 站点 bundle 的原文:`likeCountDisplayText || '赞'` ——
+        **没有数字时那一格渲染的是字面量 `赞`** ⇒ 必须是空 `metrics`(卡上 `—`),
+        **不许变成 0**(0 会被读成「没人看」)。
+        """
+        cards = _FakeCards([_FakeCard("/explore/hhh", "标题\n作者\n赞", like="赞")])
+        assert x._card_rows(cards, "k")[0]["metrics"] == {}
 
     def test_末行不是数字就不填(self) -> None:
         """**不许瞎填** —— 末行是标题/日期时必须是空 `metrics`(渲染成 `—`),
