@@ -938,6 +938,12 @@ class Settings(BaseSettings):
     #: (`/redian百度转存`,即 `BaiduPanClient.transfer_and_share` 的默认落点)。
     #: ⚠️ 百度**删了捞不回来**(没有回收站)⇒ 这一档**只识别 + 落清单**,不删。
     pan_auto_clean_baidu_root: str = ""
+    #: ★★ **百度重复的删除开关**(2026-10-16)。**默认关** —— 用户口径是「先做识别 + 清单,
+    #: 看过再决定要不要开」。⚠️⚠️ **百度没有回收站,这一步不可逆**:开之前请先看
+    #: `data/pan_dedupe_baidu.json` 那份清单(首轮实测 186 组 / 多出 1398 份 / 106.40 GiB)。
+    #: 开了之后:只删**重复的那几份**(`keep` 那份永不删)、排除宣传简介、共用
+    #: `pan_auto_clean_max_deletes` 那个硬上限,并把删了几份/省了多少写进 `runs.detail`。
+    pan_auto_clean_baidu_delete: bool = False
     #: **链接体检**(2026-10-16):抽样探活我方分享链 + 判"货不对版/空分享"。
     #: 样本故意小(默认每来源 6 条 ≈ 30 次探活)—— 这是**日常盯趋势**;
     #: 全量排查手动跑 `python scripts/link_audit.py --n 50`(见 `doc/链接体检.md`)。

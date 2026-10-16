@@ -185,7 +185,7 @@ def clean_xunlei(db: Session, user_id: int, settings, *, dry_run: bool, left: in
             "errors": (res.get("errors") or [])[:3]}
 
 
-def report_baidu(db: Session, user_id: int, settings) -> dict:
+def report_baidu(db: Session, user_id: int, settings, *, left: int = 0) -> dict:
     """百度:**只报告,永不自动删**(它没有回收站,删了不可逆)。返回本轮统计。
 
     ★ **2026-10-16 起报两件事**(用户口径「先做识别 + 清单」):
@@ -237,6 +237,27 @@ def report_baidu(db: Session, user_id: int, settings) -> dict:
                     "dup_errors": dup.get("n_errors", 0),
                     "intro_protected": dup["intro_protected"],
                     "dup_list": str(p)})
+        # ★★★ **删除开关**(默认关;2026-10-16 用户口径「先做识别 + 清单,看过再决定」)。
+        if dup.get("n_dup") and bool(getattr(settings, "pan_auto_clean_baidu_delete", False)):
+            out["auto_delete"] = True
+            cap = max(0, int(left or 0))
+            todo = list(dup["dup_files"])[:cap]
+            #: ⚠️ **余量要记账**(不管删没删成):只写"删了 N 份"看不出"还剩多少没删"
+            blocked = int(dup["n_dup"]) - len(todo)
+            if blocked > 0:
+                out["baidu_blocked_by_cap"] = blocked
+            if todo:
+                try:
+                    #: ⚠️⚠️ **不可逆**:百度没有回收站(`delete_paths` 的文档原话是
+                    #: 「调用方必须自己确认路径」)⇒ 这里**只删清单里那些重复副本**、
+                    #: `keep` 那份永不删(它不在 `dup_files` 里)、且只收**绝对路径**。
+                    #: 任何异常**如实报**,绝不静默(静默 = 客户以为清了而其实没清)。
+                    _paths = [str(x["path"]) for x in todo if str(x.get("path") or "").startswith("/")]
+                    out["baidu_deleted"] = int(BaiduPanClient(ck).delete_paths(_paths))
+                    out["baidu_freed"] = sum(int(x.get("size") or 0) for x in todo)
+                except Exception as exc:  # noqa: BLE001 - 删失败要让报告看见,不是吞掉
+                    out["baidu_delete_error"] = f"{type(exc).__name__}: {str(exc)[:80]}"
+                    logger.warning("百度重复删除失败:%s", str(exc)[:120])
     except Exception as exc:  # noqa: BLE001 - 识别失败不该让上面那份引流报告也白做
         logger.info("百度跨目录重复识别跳过:%s: %s", type(exc).__name__, str(exc)[:100])
         out["dup_error"] = f"{type(exc).__name__}: {str(exc)[:80]}"
@@ -270,7 +291,8 @@ def auto_clean_tick(settings=None) -> int:
                 left -= int(q.get("deleted") or 0)          # ★ 两个盘**共用**这个硬上限
                 parts.append(clean_xunlei(db, uid, settings, dry_run=dry, left=left))
                 if getattr(settings, "pan_auto_clean_baidu_report", True):
-                    parts.append(report_baidu(db, uid, settings))
+                    #: ⚠️ 把**剩余删除额度**传进去:百度那条(若开了删除)与夸克/迅雷**共用**上限
+                    parts.append(report_baidu(db, uid, settings, left=left))
             except Exception:  # noqa: BLE001 - 单盘失败不该拖垮其余
                 logger.exception("自动清理失败 user=%s", uid)
                 db.rollback()
@@ -313,6 +335,15 @@ def _fmt(p: dict) -> str:
                 bits.append("⚠️重复扫没列完(撞上限),数字偏小")
             if p.get("dup_errors"):
                 bits.append(f"⚠️{p['dup_errors']}个目录没列成")
+            #: ★ **真的删了才报** —— 且把「省了多少」一起给(只报份数看不出值不值得)
+            if p.get("baidu_deleted"):
+                bits.append(f"**已删{p['baidu_deleted']}份"
+                            f"(省{int(p.get('baidu_freed') or 0) / 2 ** 30:.2f}GiB)"
+                            f"(⚠️不可逆)**")
+            if p.get("baidu_blocked_by_cap"):
+                bits.append(f"撞上限留下{p['baidu_blocked_by_cap']}份")
+            if p.get("baidu_delete_error"):
+                bits.append(f"⚠️删除失败:{str(p['baidu_delete_error'])[:40]}")
             if p.get("intro_protected"):
                 bits.append(f"简介护{p['intro_protected']}")
             bits.append(f"清单{p.get('dup_list')}")

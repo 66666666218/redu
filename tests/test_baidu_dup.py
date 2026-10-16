@@ -102,3 +102,76 @@ class TestWalk:
         s = bd.summary({"n_groups": 1, "n_dup": 2, "bytes": 0, "scanned": 3,
                         "dirs": 1, "truncated": True, "n_errors": 2, "errors": ["/x: E"]})
         assert "没列完" in s and "没列成" in s
+
+
+class Test百度删除开关:
+    """★★ 用户口径「**先做识别 + 清单**」⇒ 开关**默认关**;开了才删,且只删重复的那几份。
+
+    ⚠️⚠️ **百度没有回收站,删了不可逆** —— 所以这条链的每一道边界都要有测试盯着:
+    ① 默认不删;② 只删重复副本(**`keep` 那份永不删**);③ **共用夸克/迅雷那个硬上限**;
+    ④ 只收**绝对路径**;⑤ 删失败要**如实报**而不是静默。
+    """
+
+    class _S:
+        pan_intro_baidu_dir = ""
+        pan_auto_clean_baidu_root = "" 
+
+    def _dup(self, n_extras: int = 3):
+        return {"n_groups": 1, "n_dup": n_extras, "bytes": n_extras * 100,
+                "dup_files": [{"path": f"/来自资源批量转存/dup{i}.apk", "name": f"dup{i}.apk",
+                               "size": 100, "dir": "/来自资源批量转存", "keep": "/来自资源批量转存/x.apk",
+                               "why": "重复"} for i in range(n_extras)],
+                "scanned": 9, "dirs": 2, "truncated": False, "errors": [],
+                "n_errors": 0, "intro_protected": 0, "groups": []}
+
+    def _patch(self, monkeypatch, dup, called: list):
+        from app.services import baidu_dup as bd
+        from app.services import pan_auto_clean as pac
+        from app.services import pan_accounts as pa
+        from app.services import pan_promo_sweep as pps
+
+        monkeypatch.setattr(pa, "cookie_for", lambda *a, **k: "ck")
+        monkeypatch.setattr(pps, "build_plan", lambda *a, **k: {"delete": [], "review": []})
+        monkeypatch.setattr(pps, "BaiduAdapter", lambda *a, **k: object())
+        monkeypatch.setattr(bd, "build_plan", lambda *a, **k: dup)
+        monkeypatch.setattr(
+            "app.services.baidupan_transfer.BaiduPanClient",
+            lambda ck: type("C", (), {
+                "delete_paths": lambda self, paths, **k: (called.append(list(paths)),
+                                                          len(paths))[1]})())
+        return pac
+
+    def test_默认关_只报告绝不删(self, monkeypatch) -> None:
+        called: list = []
+        pac = self._patch(monkeypatch, self._dup(), called)
+        out = pac.report_baidu(object(), 1, self._S(), left=10)
+        assert called == [], "**默认关**就一个字节都不许删"
+        assert out["dup_files"] == 3 and out["state"] == "report_only"
+
+    def test_开了才删_且只删重复副本并共用上限(self, monkeypatch) -> None:
+        class _S2(self._S):
+            pan_auto_clean_baidu_delete = True
+
+        called: list = []
+        pac = self._patch(monkeypatch, self._dup(3), called)
+        out = pac.report_baidu(object(), 1, _S2(), left=2)
+        assert len(called[0]) == 2, f"上限 2 ⇒ 只删 2 份:{called}"
+        assert out["baidu_deleted"] == 2 and out["baidu_freed"] == 200
+        assert out["baidu_blocked_by_cap"] == 1, "撞上限的那份要留下(下轮再来)"
+        #: ⚠️ **`keep` 那份永不在删除清单里** —— 它是我们在用的那份
+        assert not any("x.apk" in p for p in called[0]), f"把自己留的那份也删了:{called[0]}"
+
+    def test_删失败要如实报(self, monkeypatch) -> None:
+        class _S2(self._S):
+            pan_auto_clean_baidu_delete = True
+
+        called: list = []
+        pac = self._patch(monkeypatch, self._dup(1), called)
+
+        def _boom(self, paths, **k):
+            raise RuntimeError("errno=-9 文件不存在")
+        monkeypatch.setattr("app.services.baidupan_transfer.BaiduPanClient",
+                            lambda ck: type("C", (), {"delete_paths": _boom})())
+        out = pac.report_baidu(object(), 1, _S2(), left=5)
+        assert "baidu_delete_error" in out and "errno" in out["baidu_delete_error"]
+        assert out.get("baidu_deleted") is None, "没删成就不许报删了"
