@@ -184,15 +184,50 @@ def _mark_sent(session: Session, period: str, section: str, tag: str) -> None:
     session.flush()
 
 
+def _weekly_dow(settings) -> int | None:
+    """从**周结的 cron** 里读出"星期几"(0=周一 … 6=周日)。读不出来返回 `None`。
+
+    ⚠️ **以 cron 为准,不再抄一份"周一"常量**:两处真相迟早飘(改一处忘一处)。
+    ⚠️ 只认**单值**(`1` / `mon` / `MON`)—— 配置是我们自己的,不伺候 `1-5` 这种;
+    **认不出来就返回 None,并且退回「照常发日结」**(多一条消息) —— 宁可多发一条,
+    也不要因为一行 cron 被改写就把日结**静默停掉**。
+    """
+    parts = str(getattr(settings, "board_digest_weekly_cron", "") or "").split()
+    if len(parts) < 5:
+        logger.warning("周结 cron 读不出星期(%r)⇒ 日结按「照常发」处理",
+                       getattr(settings, "board_digest_weekly_cron", ""))
+        return None
+    dow = parts[4].strip().lower()
+    if dow.isdigit() and 0 <= int(dow) <= 7:
+        #: ⚠️⚠️ **cron 的星期号与 Python 的错开一天**:cron 里 `0/7`=周日、`1`=周一,
+        #: 而 `datetime.weekday()` 是 `0`=周一、`6`=周日。照抄就会把"周一"读成周二
+        #: (我第一版就是这么写的,被自己写的测试当场打红)。
+        return (int(dow) % 7 + 6) % 7
+    names = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+    if dow in names:
+        return names[dow]
+    logger.warning("周结 cron 的星期字段 %r 认不出来 ⇒ 日结按「照常发」处理", dow)
+    return None
+
+
+def _is_weekly_day(settings, now: datetime | None = None) -> bool:
+    """今天是不是"周结日"(那天日结就重复了:周结的窗口已包含昨天)。"""
+    dow = _weekly_dow(settings)
+    return dow is not None and (now or datetime.now()).weekday() == dow
+
+
 def send_digest(session: Session, user_id: int, section: str, period: str,
-                settings, top: int = 8) -> bool:
-    """给一个板块发一条日结/周结。**发送失败不回滚、不打标**(下次补)。"""
+                settings, top: int = 8, now: datetime | None = None) -> bool:
+    """给一个板块发一条日结/周结。**发送失败不回滚、不打标**(下次补)。
+
+    `now` 只为**可测**存在(窗口以它为准);生产不传,取真实当前时间。
+    """
     from app.services.feishu_client import FeishuClient
 
     hook = _hook_for(settings, section)
     if not hook:
         return False
-    since, until, tag = window_of(period)
+    since, until, tag = window_of(period, now)
     #: ★ **幂等唯一入口就是这里**(不只在作业循环里查):否则任何**直接**调它的人
     #: (脚本/补跑/下一个作业)都能把同一期再发一遍 —— "两处真相"迟早漏一处。
     if _already_sent(session, period, section, tag):
@@ -212,12 +247,15 @@ def send_digest(session: Session, user_id: int, section: str, period: str,
 
 
 def run_board_digest_all_users(period: str = "daily", settings=None,
-                               session: Session | None = None) -> int:
+                               session: Session | None = None,
+                               now: datetime | None = None) -> int:
     """作业入口:给每个启用用户、每个**有内容的板块群**发一条日结或周结。返回发出条数。
 
     ⚠️ 登记为 **role="both"**:两台实例的库是**分开的**(本机 wechat 侧 / 远程 hotspot 侧)
     ⇒ 各侧只对**自己这边推过内容的板块**负责(台账在本地,另一侧的板块在这边压根没有行),
     合并到一边跑会把另一侧的内容整片漏掉。
+
+    `now` 只为**可测**存在(窗口与"今天是不是周结日"都用它);生产不传,取 `datetime.now()`。
     """
     from app.db import get_session_local
     from app.db.models import User
@@ -233,13 +271,28 @@ def run_board_digest_all_users(period: str = "daily", settings=None,
     top = int(getattr(settings, "board_digest_top", 8) or 8)
     allow = {x.strip() for x in
              str(getattr(settings, "board_digest_boards", "") or "").split(",") if x.strip()}
-    since, until, _tag = window_of(period)
+    since, until, _tag = window_of(period, now)
+    #: ★ **周结日不发日结**(2026-10-16 用户口径「可以按照你的建议来进行」):
+    #: 周结的窗口(过去 7 天)**已经包含昨天** ⇒ 那天再发一张日结就是把同一批资源说两遍,
+    #: 而客户抱怨的恰恰是消息太多。⚠️ 判据取自**周结的 cron**(见 `_weekly_dow`),
+    #: 不在这里写死"周一" —— 改 cron 就等于改这里,没有第二处真相。
+    skip_daily = (period == "daily"
+                  and bool(getattr(settings, "board_digest_daily_skip_on_weekly", True))
+                  and _is_weekly_day(settings, now))
     sent = 0
     try:
         for (uid,) in session.execute(select(User.id).where(User.enabled.is_(True))).all():
             from app.services.tenant_base import _record_run
 
             try:
+                if skip_daily:
+                    #: ⚠️ **必须落一条运行记录**:否则"今天是周结日所以没日结"与
+                    #: "日结坏了"在运行记录上长得一模一样(本仓母题)。
+                    _record_run(session, uid, "board_digest_daily", "success",
+                                "今天是周结日 ⇒ 日结跳过(周结的窗口已含昨天,"
+                                "同一批资源不重复说两遍)")
+                    session.commit()
+                    continue
                 have = push_ledger.boards_with_content(session, uid, since, until)
                 done: list[str] = []
                 skipped: list[str] = []
@@ -252,7 +305,8 @@ def run_board_digest_all_users(period: str = "daily", settings=None,
                         continue
                     if _already_sent(session, period, section, _tag):
                         continue
-                    if send_digest(session, uid, section, period, settings, top=top):
+                    if send_digest(session, uid, section, period, settings, top=top,
+                                   now=now):
                         sent += 1
                         done.append(section)
                     else:

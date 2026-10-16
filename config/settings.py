@@ -276,7 +276,12 @@ class Settings(BaseSettings):
     board_digest_enabled: bool = True
     board_digest_daily_cron: str = "32 8 * * *"
     board_digest_weekly_cron: str = "3 9 * * 1"
-    board_digest_top: int = 8          # 汇总里最多列几个(客户反馈"信息太多",别又堆一屏)
+    board_digest_top: int = 8          # 汇总里最多列几个(客户反馈「信息太多」,别又堆一屏)
+    #: **周结日不发日结**(2026-10-16 用户口径「可以按照你的建议来进行」):周结的窗口
+    #: (过去 7 天)已经包含昨天 ⇒ 那天两张卡是同一批资源说两遍,而客户抱怨的正是消息太多。
+    #: ⚠️ "哪天是周结日"取自 `board_digest_weekly_cron`(不在这里再写一份「周一」);
+    #: 想回到「每天都发日结」= 把它改 False 即可。
+    board_digest_daily_skip_on_weekly: bool = True
     #: 板块白名单(逗号分隔,留空 = **自动**:台账里有多少个有群的板块就发多少个)
     board_digest_boards: str = ""
     # ---- Telegram 频道资源源(2026-10-01):公众号之外的第二路盘链 feed ----

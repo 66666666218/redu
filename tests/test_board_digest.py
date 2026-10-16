@@ -43,6 +43,8 @@ class _S:
     board_digest_enabled = True
     board_digest_top = 8
     board_digest_boards = ""
+    board_digest_weekly_cron = "3 9 * * 1"      #: 周一 = 周结日(那天不发日结)
+    board_digest_daily_skip_on_weekly = True
 
 
 def _yesterday() -> datetime:
@@ -304,3 +306,89 @@ class Test作业入口:
         _seed(session, "xiaohongshu", "u1 的", user_id=1)
         _seed(session, "xiaohongshu", "u2 的", user_id=2)
         assert bd.run_board_digest_all_users("daily", settings=_S(), session=session) == 1
+
+
+def _patch_send(monkeypatch, fail_hooks=()) -> list[str]:
+    """打桩飞书,返回被调到的 webhook 列表(`fail_hooks` 里的返回失败)。"""
+    from app.services import feishu_client
+
+    calls: list[str] = []
+
+    class _C:
+        def __init__(self, webhook, secret):
+            self.hook = webhook
+
+        def send_card(self, card):
+            calls.append(self.hook)
+            return self.hook not in fail_hooks
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+    return calls
+
+
+class Test周结日不发日结:
+    """★ 用户口径(2026-10-16)「**可以按照你的建议来进行**」:周结日**不发**日结 ——
+    周结的窗口(过去 7 天)已经包含昨天 ⇒ 那天两张卡是把同一批资源说两遍,
+    而客户抱怨的恰恰是消息太多。
+    """
+
+    MON = datetime(2026, 10, 19, 8, 32)     # 2026-10-19 是周一(周结日)
+    TUE = datetime(2026, 10, 20, 8, 32)
+    SUN = datetime(2026, 10, 18, 12, 0)
+
+    def test_星期从周结的_cron_读_不写死周一(self) -> None:
+        """⚠️ 判据只能有一处:改 cron 就等于改行为,别再抄一份"周一"常量。"""
+        class _S1(_S):
+            board_digest_weekly_cron = "3 9 * * 1"
+
+        class _S2(_S):
+            board_digest_weekly_cron = "3 9 * * sun"
+
+        assert bd._weekly_dow(_S1()) == 0
+        assert bd._weekly_dow(_S2()) == 6
+        assert bd._is_weekly_day(_S1(), self.MON) is True
+        assert bd._is_weekly_day(_S1(), self.TUE) is False
+
+    def test_cron_读不出来就照常发_不许静默停掉日结(self) -> None:
+        """⚠️ 宁可多发一条消息,也不要因为一行 cron 被改写就把日结**静默停掉**。"""
+        class _S4(_S):
+            board_digest_weekly_cron = "写坏了"
+
+        assert bd._weekly_dow(_S4()) is None
+        assert bd._is_weekly_day(_S4(), self.MON) is False
+
+    def test_周一日结不发_但要留下原因(self, session, monkeypatch) -> None:
+        calls = _patch_send(monkeypatch)
+        pl.record(session, 1, "xiaohongshu", [{"title": "周日的资源"}], when=self.SUN)
+        assert bd.run_board_digest_all_users("daily", settings=_S(), session=session,
+                                             now=self.MON) == 0
+        assert calls == []
+        note = session.query(models.RunRecord).filter_by(
+            kind="board_digest_daily", user_id=1).one().detail
+        assert "周结日" in note, f"「没日结」必须与「日结坏了」分得开:{note}"
+
+    def test_周二日结照常发(self, session, monkeypatch) -> None:
+        calls = _patch_send(monkeypatch)
+        pl.record(session, 1, "xiaohongshu", [{"title": "周一的资源"}],
+                  when=datetime(2026, 10, 19, 12))
+        assert bd.run_board_digest_all_users("daily", settings=_S(), session=session,
+                                             now=self.TUE) == 1
+        assert calls == ["https://example.com/xhs"]
+
+    def test_周结日那天周结自己照发(self, session, monkeypatch) -> None:
+        calls = _patch_send(monkeypatch)
+        pl.record(session, 1, "xiaohongshu", [{"title": "周日的资源"}], when=self.SUN)
+        assert bd.run_board_digest_all_users("weekly", settings=_S(), session=session,
+                                             now=self.MON) == 1
+        assert calls == ["https://example.com/xhs"]
+
+    def test_开关关掉就回到天天发(self, session, monkeypatch) -> None:
+        """可回退:不想"周一少一条"就把它改 False。"""
+        class _S5(_S):
+            board_digest_daily_skip_on_weekly = False
+
+        calls = _patch_send(monkeypatch)
+        pl.record(session, 1, "xiaohongshu", [{"title": "周日的资源"}], when=self.SUN)
+        assert bd.run_board_digest_all_users("daily", settings=_S5(), session=session,
+                                            now=self.MON) == 1
+        assert calls == ["https://example.com/xhs"]
