@@ -229,6 +229,13 @@ def _crawl_platform(plat: str, names: list[str], session=None) -> list[dict]:
 
             _st = _get_settings()
             _ok, _why = _cdp.available(_st)
+            if not _ok:
+                # ★ **按需自启**(2026-10-16 用户口径「关机再开机是否可以自启」):
+                #   CDP 不可达就**自己起一个** —— 起的是**普通 Edge**(只带 `--remote-debugging-port`,
+                #   **没有** `--enable-automation`)⇒ 与手开的窗口**等价**(webdriver 由**启动参数**决定,
+                #   不是"谁敲的命令"),所以自启**不引入新风险**;窗口被关掉也不用人来管。
+                #   ⚠️ `ensure_running` **幂等**:已经在跑就一个字节都不做(重复开会抢同一个档案)。
+                _ok, _why = _cdp.ensure_running(_st)
             if _ok:
                 # ⚠️ **轮转取词,不是 `names[:2]`**(见 `_xhs_rotating_slice` 的说明):
                 #    固定取前 2 个 ⇒ 一天 6 轮搜的是**同一批词**,既没覆盖又重复打同一批请求。

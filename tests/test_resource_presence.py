@@ -717,6 +717,11 @@ def test_小红书优先走CDP路_且每轮只喂两个词(session, monkeypatch)
     monkeypatch.setattr(_xhs, "search",
                         lambda *a, **k: pytest.fail("CDP 通了就不该再走页面路"))
     monkeypatch.setattr(rp, "_xhs_egress_guard", lambda: True)
+    #: ⚠️ 词数上限是**从 settings 现取**的(那条分支在内层函数里,拿不到外层的 `settings`)
+    #: ⇒ 用例必须**自己给一份 settings**,否则会读到 `.env` 里的真值
+    #: (实测:`.env` 改成 8 之后这条用例就会变红 —— 而它测的是"上限生效",不是"上限是几")。
+    monkeypatch.setattr("config.settings.get_settings",
+                        lambda: type("S", (), {"xhs_max_keywords": 2})())
     out = rp.probe(session, 1, settings=_S(), platforms=["xiaohongshu"])
     assert called.get("kws") == ["甲", "乙"], f"每轮最多 2 个词,实际 {called.get('kws')}"
     assert out["items"], "CDP 路的产物要能走到 items"

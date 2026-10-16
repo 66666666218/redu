@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import urllib.request
+from pathlib import Path
 
 from app.utils import get_logger
 
@@ -103,8 +104,71 @@ def available(settings=None) -> tuple[bool, str]:
                        f"在里面登录一次小红书,再回来跑这条")
 
 
+#: 普通 Edge / Chrome 的候选路径(**单一出处**:`tools/xhs_cdp.py` 也 import 这一份,别抄两份)
+EDGE_CANDIDATES = (
+    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+)
+
+
+def ensure_running(settings=None, *, wait_s: float = 15.0) -> tuple[bool, str]:
+    """CDP 不可达时**起一个**(普通 Edge + 专用档案);**已经在跑就不重复起**。返回 `(ok, 说明)`。
+
+    ★ **2026-10-16 用户问「关机再开机是否可以自启」** —— 这里给出的答案:
+    **可以,而且不引入新风险**。判据是**启动参数**、不是"谁敲的命令":
+
+        Playwright 启的        → 带 `--enable-automation` ⇒ `navigator.webdriver = True`  ✗
+        我们这个(人手敲/脚本起都一样) → 只带 `--remote-debugging-port` ⇒ **False**      ✓
+
+    ⚠️ **幂等**:先探一次端点,已经有带 CDP 的浏览器就**一个字节都不做**(重复开会两个实例抢
+    **同一个档案**,互相踢登录态 —— 那比不开更糟)。
+    ⚠️ **登录态在专用档案里** ⇒ 起起来自带登录,重启机器**不用重新扫码**(除非服务端把会话作废)。
+    ⚠️ 起完**要等一会儿**再探:`Popen` 返回时端口往往还没监听。
+    """
+    import subprocess
+    import time
+
+    from config.settings import get_settings
+
+    st = settings or get_settings()
+    ok, _why = available(st)
+    if ok:
+        return True, "已经在跑(不重复开)"
+    url = endpoint(st)
+    try:
+        port = int(url.rstrip("/").rsplit(":", 1)[-1])
+    except ValueError:
+        return False, f"`xhs_cdp_url` 不像 URL:{url!r}"
+    exe = next((p for p in EDGE_CANDIDATES if Path(p).exists()), "")
+    if not exe:
+        return False, f"没找到 Edge/Chrome(找过:{EDGE_CANDIDATES})"
+    raw = str(getattr(st, "xhs_cdp_user_data_dir", "") or "data/xhs_cdp_profile")
+    d = Path(raw)
+    if not d.is_absolute():
+        d = Path(__file__).resolve().parents[2] / d
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        # ⚠️ **绝不能加 `--enable-automation`** —— 那一个参数就会把 webdriver 变成 True,
+        #    整条路的价值当场归零(见上面那张表)。
+        subprocess.Popen(  # noqa: S603 - 参数是我们自己拼的固定串
+            [exe, f"--remote-debugging-port={port}", f"--user-data-dir={d}",
+             "--no-first-run", "--no-default-browser-check",
+             "https://www.xiaohongshu.com/explore"],
+            cwd=str(Path(__file__).resolve().parents[2]))
+    except Exception as exc:  # noqa: BLE001 - 起不来就如实说,别假装起来了
+        return False, f"起浏览器失败:{type(exc).__name__}: {str(exc)[:80]}"
+    deadline = time.time() + max(1.0, wait_s)
+    while time.time() < deadline:
+        time.sleep(1.0)
+        if available(st)[0]:
+            return True, f"已自启(档案 {d.name})"
+    return False, f"起了但 {int(wait_s)}s 内 CDP 还没通(档案 {d.name})"
+
+
 def _warn_if_headless(ctx) -> None:
-    """接了 CDP 也别掉进"无头"这个坑:无头 UA 会自报 `HeadlessChrome/`(自曝自动化)。
+    """接了 CDP 也别掉进「无头」这个坑:无头 UA 会自报 `HeadlessChrome/`(自曝自动化)。
 
     ⚠️ 只在**连上之后**顺手探一次,不额外导航。
     """

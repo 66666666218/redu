@@ -369,3 +369,50 @@ class Test无头告警:
                             lambda msg, *a, **k: seen.append(str(msg)), raising=False)
         C._warn_if_headless(_Ctx([_Page(ua="Mozilla/5.0 Edg/155.0.0.0")]))
         assert seen == []
+
+
+class Test按需自启:
+    """★★ **2026-10-16 用户问「以后都必须开着浏览器了吗 / 关机再开机能否自启」**。
+
+    答案:**不必,而且自启不引入新风险** —— 判据是**启动参数**、不是「谁敲的命令」:
+
+        Playwright 启的            → 带 `--enable-automation` ⇒ `navigator.webdriver=True` ✗
+        人手开的 / `ensure_running` 起的 → 只带 `--remote-debugging-port` ⇒ **False** ✓
+    """
+
+    def test_已经在跑就一个字节都不做(self, monkeypatch) -> None:
+        """⚠️ **幂等**:重复开会两个实例抢**同一个档案**、互相踢登录态 —— 比不开更糟。"""
+        import subprocess
+        from types import SimpleNamespace
+
+        from app.services import xhs_cdp_source as C
+
+        monkeypatch.setattr(C, "available", lambda settings=None: (True, "可达"))
+        monkeypatch.setattr(subprocess, "Popen",
+                            lambda *a, **k: pytest.fail("已经在跑就不该再起一个"))
+        ok, why = C.ensure_running(SimpleNamespace())
+        assert ok and "不重复开" in why
+
+    def test_起浏览器绝不许带_enable_automation(self) -> None:
+        """★★ **这条最要紧**:那一个参数就会把 `webdriver` 变成 True、整条路价值归零。
+
+        ⚠️ **判据用 AST 查"真实传进去的参数",不查源码文本** —— 第一版我写的是
+        `assert "--enable-automation" not in src`,结果**被我自己那段解释性注释打红**
+        (注释里当然会写这个词)。这正是本仓那条老教训:**子串守卫会自噬**。
+        """
+        import ast
+        import inspect
+
+        from app.services import xhs_cdp_source as C
+
+        fn = ast.parse(inspect.getsource(C.ensure_running))
+        popen = [n for n in ast.walk(fn)
+                 if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "Popen"]
+        assert popen, "找不到 `Popen` —— 改名了?守卫要跟着改"
+        #: ⚠️ 用 `ast.unparse` 拿**那段参数表达式的源码**:里面混着 f-string
+        #: (`f"--remote-debugging-port={port}"`),只取 `ast.Constant` 会把 CDP 那个参数漏掉
+        #: (第一版就是这么写的,于是"找不到 --remote-debugging-port"假红)。
+        argv_src = ast.unparse(popen[0].args[0])
+        assert "--remote-debugging-port" in argv_src, f"CDP 端口是前提:{argv_src}"
+        assert "--enable-automation" not in argv_src, (
+            f"⚠️ 带上它 webdriver 就变 True,与页面路没区别了:{argv_src}")

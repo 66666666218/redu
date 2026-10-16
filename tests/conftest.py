@@ -92,6 +92,14 @@ def _no_real_xhs_cdp(monkeypatch):
     from app.services import xhs_cdp_source as C
 
     monkeypatch.setattr(C, "endpoint", lambda settings=None: "http://127.0.0.1:9")
+    #: ⚠️ **连"按需自启"也要按死**(2026-10-16 又踩):CDP 连不上时那条代码会**真的去起一个
+    #: Edge** 并等它起来 —— 于是单测**开真浏览器、整个文件从 3 秒涨到 79 秒**
+    #: (第二次同类事故:测试碰了真世界)。
+    #: ⚠️⚠️ **但不要替换 `ensure_running` 本身** —— 那会让 `inspect.getsource(ensure_running)`
+    #: 拿到**替身的半个 lambda**,于是"查启动参数"那条守卫 `ast.parse` 直接 IndentationError
+    #: (与之前替换 `available` 是同一个坑)。⇒ **清空可执行文件候选**:真代码照跑、
+    #: 只是永远找不到浏览器 ⇒ 起不来 ✓。
+    monkeypatch.setattr(C, "EDGE_CANDIDATES", ())
     yield
 
 
