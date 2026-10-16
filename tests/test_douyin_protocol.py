@@ -520,8 +520,9 @@ def test_要求过验证时要抛_而不是返回空列表(monkeypatch):
     #    ⇒ 这条人工动作**不保证存在**,不能标成"要人动手"(标了就会有人去做无效动作)。
     assert not e.value.needs_human, "没有确定可执行的人工动作 ⇒ 不许标成「要人动手」"
     assert "过验证" in str(e.value)
-    # 修法必须**带前提**:在哪台设备打开、用哪个号 —— 否则"过验证"这三个字等于没验证到
-    assert "本机" in str(e.value) and "同一个抖音号" in str(e.value), str(e.value)
+    # 修法必须写明**已证伪**(用户**在本机、同一个号**上都试过了:没有滑块)
+    assert "证伪" in str(e.value) and "本机" in str(e.value) \
+        and "同一个抖音号" in str(e.value), str(e.value)
 
 
 def test_真的零结果不许被当成要求过验证(monkeypatch):

@@ -371,9 +371,10 @@ def test_抖音要求过验证_判红_且修法必须带前提(monkeypatch):
     alive, why = ch._cred_alive("douyin", "ck", None)
     assert alive is False, "要求过验证是**断源**,不能报成「不作判定」"
     assert "过验证" in why
-    assert "本机" in why and "出口 IP" in why, f"修法没写「在哪打开」这个前提:{why}"
-    assert "同一个抖音号" in why, f"修法没写「用哪个号」这个前提:{why}"
-    assert "不存在" in why, f"得说清「满足前提后仍无滑块 ⇒ 那条路当前不存在」:{why}"
+    assert "证伪" in why, f"要写明这条路**已证伪**(用户在本机、同一个号上都试过了):{why}"
+    assert "本机" in why and "同一个抖音号" in why, \
+        f"证伪的**证据**要带上 —— 只写「已证伪」下一个人还会再试一遍:{why}"
+    assert "别再让人去试" in why, why
     assert "值得" not in why, f"又把「自动重导值得一试」写回来了(代码这一档明确不重导):{why}"
 
 
