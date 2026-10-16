@@ -8,6 +8,7 @@ os.environ.setdefault("JWT_SECRET", "test_secret_0123456789abcdef0123456789abcde
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 
 import pytest
+from datetime import datetime
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
@@ -940,3 +941,62 @@ class Test转存后核对:
                                              "code": "x", "message": ""})
         self._stub(monkeypatch, (False, "不该被调到"))
         assert pd.transfer_pan_url(None, 1, "u", None, "t")["status"] == "ok"
+
+
+class Test积压告警按证据说话:
+    """★★ 2026-10-17:那条告警**一直在指错方向**。
+
+    它原来把积压一律说成「多半是**额度用完**」并建议调大 `PAN_DISCOVERY_TRANSFER_LIMIT`,
+    而真去查库:139 条里 **失败 138 / 排队 4**,前两类是
+    `转存失败(errno=2 转存路径不存在)`(百度盘上那个目标目录**不在了**)与
+    `提取码验证失败(errno=105)` —— **一条都不是额度问题**。
+    照着那条建议调额度,等于让同一批没有落点的链多跑几遍,然后发现没用。
+
+    本仓纪律原话:**给错动作比不给动作更坏**。这组用例就是钉住"动作必须与证据一致"。
+    """
+
+    def _mk(self, session, status, message, n=1, platform="tieba"):
+        for i in range(n):
+            session.add(DiscoveredPanLink(
+                user_id=1, platform=platform, origin_url=f"https://pan.baidu.com/s/{platform}{status}{i}",
+                title=f"某资源{i}", author="", source_url="", status=status, message=message,
+                our_url="", pass_code="", found_at=datetime(2026, 10, 16, 12)))
+        session.commit()
+
+    def _alert(self, session, monkeypatch, left=139) -> str:
+        import app.services.alert_service as als
+
+        box: list[str] = []
+        monkeypatch.setattr(als, "notify_incident",
+                            lambda s, u, sec, title, reason, settings=None: box.append(f"{title}\n{reason}"))
+        pd._alert_backlog(session, 1, left, {"found": 141, "ok": 2})
+        assert box, "该发的告警没发"
+        return box[0]
+
+    def test_构成与失败原因要写出来(self, session) -> None:
+        self._mk(session, "failed", "转存失败(errno=2 转存路径不存在)", 3)
+        self._mk(session, "pending", "", 2)
+        bk = pd._backlog_breakdown(session, 1)
+        assert bk["failed"] == 3 and bk["pending"] == 2
+        assert bk["top"][0][0].startswith("转存失败(errno=2")
+
+    def test_目录不在就叫人去建目录_不许叫人调额度(self, session, monkeypatch) -> None:
+        self._mk(session, "failed", "转存失败(errno=2 转存路径不存在)", 58)
+        self._mk(session, "pending", "", 4)
+        msg = self._alert(session, monkeypatch)
+        assert "新建" in msg and "/redian百度转存" in msg, msg
+        assert "PAN_DISCOVERY_TRANSFER_LIMIT" not in msg, "不许把「调额度」当成修法"
+        assert "失败 58 / 排队 4" in msg or ("失败 58" in msg and "排队 4" in msg)
+
+    def test_排队占多数才提额度(self, session, monkeypatch) -> None:
+        self._mk(session, "pending", "", 60)
+        self._mk(session, "failed", "转存被限制(errno=105),稍后重试", 2)
+        msg = self._alert(session, monkeypatch)
+        assert "PAN_DISCOVERY_TRANSFER_LIMIT" in msg, "额度不足就该说调额度"
+
+    def test_失败占多数且不是目录问题就明说额度不是瓶颈(self, session, monkeypatch) -> None:
+        self._mk(session, "failed", "提取码验证失败(errno=105)", 50)
+        self._mk(session, "pending", "", 3)
+        msg = self._alert(session, monkeypatch)
+        assert "额度不是瓶颈" in msg, msg
+        assert "PAN_DISCOVERY_TRANSFER_LIMIT" not in msg

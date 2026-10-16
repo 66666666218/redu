@@ -102,8 +102,37 @@ def _alert_auth_expired(session, user_id: int, kind: str, message: str) -> None:
         logger.exception("登录态失效告警推送失败")
 
 
+def _backlog_breakdown(session, user_id: int) -> dict:
+    """积压的**构成**:排队等搬 vs 已失败,以及失败原因的前几名。
+
+    ⚠️ **为什么必须拆开**(2026-10-17 实测):`_alert_backlog` 原来把 139 条一律说成
+    「多半是**额度用完**」并建议调大 `PAN_DISCOVERY_TRANSFER_LIMIT` —— 而真去查库,
+    **失败 138 / 排队 4**,前两类原因清一色是
+      · `转存失败(errno=2 转存路径不存在)` 58 条(百度盘上那个目标目录**不在了**)
+      · `提取码验证失败(errno=105)` 50 条(分享本身的问题)
+    ⇒ **一条都不是额度问题**。那条告警把人指向"调额度"这个**没用的旋钮**,
+    而真正该做的是**在百度盘上把目录建回来**(代码里没有建目录的能力)。
+    这正是本仓那条纪律:**给错动作比不给动作更坏** —— 照着做完没用,下次就没人看告警了。
+    """
+    from app.db.models import DiscoveredPanLink
+
+    counts = {s: int(c or 0) for s, c in session.execute(
+        select(DiscoveredPanLink.status, func.count()).where(
+            DiscoveredPanLink.user_id == user_id,
+            DiscoveredPanLink.status.in_(("pending", "failed")),
+        ).group_by(DiscoveredPanLink.status)).all()}
+    top = [(str(m or "")[:44], int(c or 0)) for m, c in session.execute(
+        select(func.substr(DiscoveredPanLink.message, 1, 44), func.count()).where(
+            DiscoveredPanLink.user_id == user_id,
+            DiscoveredPanLink.status == "failed",
+        ).group_by(func.substr(DiscoveredPanLink.message, 1, 44))
+        .order_by(func.count().desc()).limit(3)).all()]
+    return {"pending": counts.get("pending", 0), "failed": counts.get("failed", 0),
+            "top": top}
+
+
 def _alert_backlog(session, user_id: int, backlog_left: int, out: dict) -> None:
-    """积压超过阈值 → 推**管理员群**。
+    """积压超过阈值 → 推**管理员群**,并且**按证据给出该做的那件事**。
 
     ⚠️ **为什么必须报**(2026-10-05 生产实测):一轮 **候选 44 条、只转存 3 条**,
     库里堆了 **41 条 pending**,理由清一色「本轮转存额度用完」——**它们是健康的、能搬的链**,
@@ -114,12 +143,26 @@ def _alert_backlog(session, user_id: int, backlog_left: int, out: dict) -> None:
     try:
         from app.services.alert_service import notify_incident
 
+        bk = _backlog_breakdown(session, user_id)
+        why = " · ".join(f"{m}({c} 条)" for m, c in bk["top"] if m) or "(失败原因未记)"
+        #: ★ **动作按证据给** —— 三种构成对应三件完全不同的事,别一律甩"调额度"
+        if "转存路径不存在" in why:
+            act = ("⇒ **百度盘上那个转存目录不在**(`/redian百度转存`):请在网页版**新建**它;"
+                   "代码里没有建目录的能力。目录回来后,这批候选**立刻就能搬**"
+                   "(它们本身是好的,只是没有落点)。")
+        elif bk["pending"] >= bk["failed"]:
+            act = ("⇒ 多半是「**额度用完**」而非链失效:可调大 `PAN_DISCOVERY_TRANSFER_LIMIT`"
+                   "(积压额度)或 `PAN_DISCOVERY_FRESH_LIMIT`(新发现额度)加快清空。")
+        else:
+            act = ("⇒ **额度不是瓶颈**(失败比排队多):这些是**链本身**的问题,"
+                   "调额度只会让同一批死链多跑几遍 —— 先看上面的失败原因。")
         notify_incident(session, user_id, "pan_discovery",
-                        f"网盘发现积压 {backlog_left} 条(转存额度跟不上发现)",
+                        f"网盘发现积压 {backlog_left} 条"
+                        f"(失败 {bk['failed']} / 排队 {bk['pending']})",
                         f"本轮候选 {out.get('found', 0)} 条、成功 {out.get('ok', 0)} 条,"
-                        f"仍积压 **{backlog_left}** 条(pending/failed)。"
-                        f"积压多半是「额度用完」而非链失效 —— 可调大 `PAN_DISCOVERY_TRANSFER_LIMIT`"
-                        f"(积压额度)或 `PAN_DISCOVERY_FRESH_LIMIT`(新发现额度)加快清空。")
+                        f"仍积压 **{backlog_left}** 条。"
+                        f"**构成**:排队等搬 {bk['pending']} 条 · 已失败 {bk['failed']} 条。"
+                        f"**失败原因**:{why}。{act}")
     except Exception:  # noqa: BLE001 - 告警自身失败不该影响本轮结果
         logger.exception("积压告警推送失败")
 
