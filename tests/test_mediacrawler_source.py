@@ -112,10 +112,16 @@ def test_read_results_accepts_file_written_this_run(monkeypatch, tmp_path) -> No
 
 
 def test_crawl_raises_when_every_keyword_came_back_empty(monkeypatch) -> None:
-    """全部关键词都返回 `aweme_list:[]` → 报"登录态失效",**不能安静地交 0 条**。
+    """全部关键词都返回 `aweme_list:[]` → 必须报出来,**不能安静地交 0 条**。
 
     实测 2026-10-03:抖音对 `网盘资源` 这种必然有结果的泛词也返回空,而 10-02 同一档案能出
     40 条 —— 那就是扫码登录过期。不报出来的话,这条链会每天安静地交出 0 条、你毫无察觉。
+
+    ★★ **2026-10-16 订正:不能再只报"登录态失效"。** 同一天实测 08:10 全空、
+    **09:30 同一档案、同一出口 IP 又搜到了 8 条** —— 这种"时好时坏"是**风控**,
+    而风控的动作是**等**,重扫档案**什么都不会变**。
+    ⇒ 两种原因**动作相反**,消息必须**都说到**,并给出**怎么分**
+    (否则又是一次"报告喊重导 → 人照做 → 无效",本仓为此栽过多次)。
     """
     class _P:
         returncode = 0
@@ -127,7 +133,10 @@ def test_crawl_raises_when_every_keyword_came_back_empty(monkeypatch) -> None:
     monkeypatch.setattr(mc, "_read_results", lambda platform, since=None: [])
     with pytest.raises(mc.MediaCrawlerError) as ei:
         mc.crawl("douyin", ["网盘资源", "ps教程"])
-    assert "登录态失效" in str(ei.value)
+    msg = str(ei.value)
+    assert "登录态过期" in msg and "重扫" in msg, f"①（登录态)要说:{msg}"
+    assert "过验证" in msg and "没用" in msg, f"②（风控）要说清「重扫没用」:{msg}"
+    assert "怎么分" in msg, f"两种原因动作相反 ⇒ 必须给出判别方法:{msg}"
 
 
 def test_crawl_returns_empty_when_only_some_keywords_empty(monkeypatch) -> None:

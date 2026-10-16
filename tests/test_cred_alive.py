@@ -141,6 +141,34 @@ def test_微博失效不许假装有自动重导(monkeypatch):
     assert "人工重新复制" in row["detail"]
 
 
+def test_体检在冷却期内绝不许自动重导(monkeypatch):
+    """★★ **行为守卫**(2026-10-16):冷却期内**一次重导都不许发生**。
+
+    实测:重导补的是"登录态",而 `verify_check` **不是登录态问题**(消不掉);
+    更糟的是**重导会把冷却闸解开**(重导 = 「人动过了」的信号)⇒
+    「失败 → 自动重导 → 解冻 → 再撞」**自己把闸打开**,正是闸要防的那件事。
+
+    ⚠️ 判据用**行为**(替身有没有被调用),**不是源码子串** ——
+    那种守卫在判据一换的时候就假绿了(本仓刚栽过:`'"过验证" not in why' in src`)。
+    """
+    from app.services import cookie_store
+
+    monkeypatch.setattr(cookie_store, "get_cookie", lambda *a, **k: "ck")
+    monkeypatch.setattr(ch, "_cred_alive",
+                        lambda p, c, d: ((False, "**协议路本轮没探**(在冷却期内)")
+                                         if p == "douyin" else (True, "非本次目标")))
+    #: 判据取自**冷却状态本身**(不解析错误文案)⇒ 这里直接把它按成"在冷却中"
+    monkeypatch.setattr("app.services.douyin_protocol_source.in_verify_cooldown",
+                        lambda session=None, user_id=1: True)
+    monkeypatch.setattr(ch, "_douyin_reheal",
+                        lambda db: pytest.fail("冷却期内不许自动重导(它会把闸解开)"))
+    row = [r for r in ch.check_credentials(_FakeDB()) if r["name"].startswith("抖音")][0]
+    assert row["level"] == "🔴"
+    assert "不自动重导" in row["detail"], row["detail"]
+    # ⚠️ 头衔也不许写成"验活失败":冷却期里我们**一个请求都没发**
+    assert "没通过" in row["detail"] and "验活失败" not in row["detail"], row["detail"]
+
+
 class _FakeDB:
     """`check_credentials` 只用它跑几个 SELECT —— 给最小替身即可。"""
 
@@ -318,13 +346,18 @@ def test_快手没跑过要报黄():
     assert row["level"] == "🟡" and "没有跑过" in row["detail"]
 
 
-def test_抖音要求过验证_判红并给对修法(monkeypatch):
+def test_抖音要求过验证_判红_且修法必须带前提(monkeypatch):
     """★ 2026-10-08 新增这一档。在此之前它落进"零结果,不作判定"那支 ⇒
     报告上既不红也不黄,而实际上**整条链是断的**(实测连空 8 小时)。
 
-    ⚠️ 修法必须是「**人在浏览器里过一次验证**」,不能是「重导 cookie」——
-    重导只是复制 cookie,**过不了验证**。给错的修法 = 让下一个人把同样无效的动作
-    再试一遍(本仓最恨的"假装有自动化")。
+    ★★ **2026-10-16 把修法改准**:旧文案是一句「在浏览器里过一次验证(滑块/验证码)」
+    —— 用户照做之后**根本没看到滑块**,而那句话**没写"在哪台设备、用哪个号"**。
+    抖音的 `verify_check` 是对**出口 IP / 会话**下发的 ⇒ 在手机上打开等于**没验证到**。
+    修法必须带上这两个前提,否则又是一句"看起来能照做、照做了什么都没发生"的话。
+
+    ⚠️ 同时**不许**再写「先让自动重导试一次」:代码这一档**明确不自动重导**
+    (重导 = 「人动过了」的信号,会把冷却闸**解开**)——
+    **文案与代码打架时,人信文案**,然后把无效动作再试一遍。
     """
     from app.services import chain_health as ch
     from app.services import douyin_protocol_source as dps
@@ -332,15 +365,16 @@ def test_抖音要求过验证_判红并给对修法(monkeypatch):
     def _boom(*a, **k):
         raise dps.DouyinProtocolError(
             "抖音要求**过验证**(search_nil_info.search_nil_type=verify_check)",
-            kind="verify", needs_human=True)
+            kind="verify", needs_human=False)
 
     monkeypatch.setattr(dps, "search", _boom)
     alive, why = ch._cred_alive("douyin", "ck", None)
     assert alive is False, "要求过验证是**断源**,不能报成「不作判定」"
-    assert "过验证" in why and "过一次验证" in why, why
-    # ⚠️ 措辞要准:重导 cookie **本身过不了验证**(它只是复制登录态),但"先让自动重导试一次"
-    # 是值得的(换个会话有可能不再被拦)⇒ 消息里**不许**把它说成万能的、也不许说成毫无用处。
-    assert "本身过不了验证" in why and "值得" in why, why
+    assert "过验证" in why
+    assert "本机" in why and "出口 IP" in why, f"修法没写「在哪打开」这个前提:{why}"
+    assert "同一个抖音号" in why, f"修法没写「用哪个号」这个前提:{why}"
+    assert "不存在" in why, f"得说清「满足前提后仍无滑块 ⇒ 那条路当前不存在」:{why}"
+    assert "值得" not in why, f"又把「自动重导值得一试」写回来了(代码这一档明确不重导):{why}"
 
 
 def test_抖音jar缺项时只提示不判级() -> None:

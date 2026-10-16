@@ -516,8 +516,12 @@ def test_要求过验证时要抛_而不是返回空列表(monkeypatch):
             "search_nil_info": {"search_nil_type": "verify_check",
                                 "search_nil_item": "verify_check", "text_type": 9}}))
     assert e.value.kind == "verify", f"要单列 verify 档,实际 {e.value.kind}"
-    assert e.value.needs_human, "过验证只能靠人,必须标成要人工"
+    # ⚠️ **2026-10-16 改**:原来标 `needs_human=True`,而用户照做之后**根本没看到滑块**
+    #    ⇒ 这条人工动作**不保证存在**,不能标成"要人动手"(标了就会有人去做无效动作)。
+    assert not e.value.needs_human, "没有确定可执行的人工动作 ⇒ 不许标成「要人动手」"
     assert "过验证" in str(e.value)
+    # 修法必须**带前提**:在哪台设备打开、用哪个号 —— 否则"过验证"这三个字等于没验证到
+    assert "本机" in str(e.value) and "同一个抖音号" in str(e.value), str(e.value)
 
 
 def test_真的零结果不许被当成要求过验证(monkeypatch):
@@ -615,7 +619,10 @@ def test_撞到验证后再打要直接抛_一个请求都不发(monkeypatch, fp
     dp.note_verify(fp_session, 1)                      # 相当于刚才撞到了 verify_check
     with pytest.raises(dp.DouyinProtocolError) as e:
         dp.search(["夸克口令"], session=fp_session, user_id=1)
-    assert e.value.kind == "verify" and e.value.needs_human
+    # ⚠️ **冷却自成一档**(2026-10-16):必须与"真撞到 verify_check"分开 ——
+    #    这一档我们**一个请求都没发**,体检不能把它报成"验活失败"
+    #    (它会让人读成"刚测过、凭据坏了",与「跳过不等于通过」同一条纪律)。
+    assert e.value.kind == "verify_cooldown" and not e.value.needs_human
     assert "冷却" in str(e.value), str(e.value)
     assert calls == [], f"冷却期内居然发了 {len(calls)} 个请求"
 
@@ -646,12 +653,24 @@ def test_重新导出会解冻_接线守卫() -> None:
 def test_体检的过验证档不许自动重导_接线守卫() -> None:
     """⚠️ 实测:补全 jar 消不掉滑块,而**重导会解掉冷却** ⇒
     「失败→自动重导→解冻→再撞一次」会**自己把闸打开**,正是冷却闸要防的事。
-    ⇒ 体检遇到 verify 档只报红 + 说清修法。"""
+    ⇒ 体检遇到这一档只报红 + 说清修法。
+
+    ★ **2026-10-16:守卫的"判据"换过,这条也跟着换**。上一版是**查源码子串**
+    (`'"过验证" not in why' in src`) —— 而判据一从"看错误文案"改成"看在不在冷却期",
+    它**立刻变成假绿**(子串还在、语义已经变了)。⇒ 改成 **AST 查真实调用**:
+    必须**真的调用** `in_verify_cooldown`(**写在注释里不算**)。
+    行为的另一半("一次重导都不许发生")在
+    `tests/test_cred_alive.py::test_体检在冷却期内绝不许自动重导`。
+    """
+    import ast
     import inspect
 
     from app.services import chain_health as ch
 
     src = inspect.getsource(ch.check_credentials)
-    assert '"过验证" not in why' in src or "'过验证' not in why" in src, \
-        "verify 档必须跳过重导(否则重导会解冻冷却)"
+    fn = ast.parse(src)
+    called = {n.func.attr for n in ast.walk(fn)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+    assert "in_verify_cooldown" in called, (
+        "判「要不要自动重导」必须落在**冷却状态**上 —— 不能解析错误文案(文案一改守卫就假绿)")
     assert "不自动重导" in src, "要把它说清,别让人以为重导能修"

@@ -60,6 +60,23 @@ def _reset_source_breaker():
 
 
 @pytest.fixture(autouse=True)
+def _reset_douyin_verify_cooldown():
+    """★ **抖音的验证冷却也是进程级状态**(2026-10-16 接线时发现)。
+
+    `douyin_protocol_source._VERIFY_CACHE` 是**按 user_id 缓存、且从不主动过期**的
+    (只有 `note_verify` / `clear_verify` 会动它)。而 `check_credentials` 现在要**读它**
+    来决定"这一档到底探没探、能不能自动重导" ⇒ 前一个用例设过冷却,后一个用例就会
+    走进"冷却分支" —— 于是**通过与否取决于执行顺序**(与 `_reset_source_breaker`
+    是同一条教训:**一个只在特定顺序下才成立的测试,等于没测**)。
+    """
+    from app.services import douyin_protocol_source as D
+
+    D._VERIFY_CACHE.clear()
+    yield
+    D._VERIFY_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
 def _no_real_feishu(monkeypatch):
     """测试**绝不许**真的往飞书投递消息(2026-10-16 实测踩到)。
 

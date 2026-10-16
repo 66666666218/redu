@@ -207,19 +207,32 @@ def _explain(tail: str) -> str:
 
 
 def _raise_if_all_keywords_empty(platform: str, proc, keywords: list[str]) -> None:
-    """**一个词都没搜到** → 多半是登录态失效,必须报出来而不是安静地交出 0 条。
+    """**一个词都没搜到** → 必须报出来,不能安静地交出 0 条。
 
     2026-10-03 实测:抖音对 `网盘资源` 这种必然有结果的泛词也返回 `aweme_list:[]`,
     而 10-02 同一工具、同一档案能出 40 条 —— 这就是**扫码登录过期**的样子。
     MediaCrawler 的日志里每个词打一行 `keyword:<词>, aweme_list:[…]`,全空即是该信号。
+
+    ⚠️⚠️ **但"全空"不止这一个原因**(2026-10-16 订正)。同一天的实测:
+      · 08:10 全空 ⇒ **09:30 同一档案、同一出口 IP 又搜到了 8 条线索**;
+      · 协议路把同一件事**明说**成 `verify_check`(服务端要求过验证)。
+    ⇒ 原来这里直接断言「**多半是登录态失效,需要重扫一次码**」是**给错动作**:
+    若真因是风控,重扫一遍**什么都不会变**(本仓为这种"喊错方向"栽过多次:
+    报告喊重导、人照做、无效,而真问题被这句话盖住)。
+    两个原因**动作相反** ⇒ 必须**分开说,并给出怎么分**。
     """
     text = ((proc.stdout or b"") + (proc.stderr or b"")).decode("utf-8", "ignore")
     total = len(re.findall(r"aweme_list:\[", text))
     empty = len(re.findall(r"aweme_list:\[\]", text))
     if total and empty == total:
         raise MediaCrawlerError(
-            f"{platform} 的 {total} 个关键词全部无结果(词:{','.join(keywords[:3])})——"
-            f"多半是**登录态失效**,需要重扫一次码(实测连泛词都返回空)")
+            f"{platform} 的 {total} 个关键词全部无结果(词:{','.join(keywords[:3])})—— "
+            f"⚠️ **两种原因、动作相反,别先猜一个**:"
+            f"① **登录态过期** ⇒ 档案要重扫一次码;"
+            f"② **被要求过验证**(风控) ⇒ 重扫**没用**,动作是**等 + 别再打**"
+            f"(同一天 08:10 全空、09:30 同一档案又搜到 8 条 —— 这种「时好时坏」就是②)。"
+            f"怎么分:**先看体检报告「抖音(线索搜索)」那一行**;"
+            f"协议路会把②明说成 `search_nil_info.search_nil_type=verify_check`。")
 
 
 def _read_results(platform: str, since: float | None = None) -> list[dict]:

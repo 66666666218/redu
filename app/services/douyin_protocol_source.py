@@ -444,6 +444,26 @@ _VERIFY_KEY = "douyin_verify_until_{uid}"
 _VERIFY_CACHE: dict[int, float] = {}
 
 
+def in_verify_cooldown(session=None, user_id: int = 1) -> bool:
+    """**现在是不是在验证冷却期里**(公开只读查询,给体检/别的调用方用)。
+
+    ⚠️ 为什么值得单独开一个:**「在冷却中」正好等价于「这个号正被风控要求过验证」**
+    —— 因为真实撞到 `verify_check` 时会**顺手把冷却设上**(`note_verify`),而冷却期内
+    我们连探针都不发。于是需要一个**不靠解析错误文案**的判据来回答两件事:
+      ① 体检这一轮到底"探没探"(没探就不能报成"验活失败");
+      ② **此刻绝不许自动重导** —— 重导 = 「人动过了」的信号,会把冷却闸**解开**,
+         于是"失败 → 重导 → 解冻 → 再撞"自己把闸打开(2026-10-08 实测)。
+    读不到就当"没在冷却"(宁可多打一次,也别永远停死 —— 与 `_verify_until` 同一条)。
+    """
+    try:
+        until = _verify_until(session, user_id)
+    except Exception:  # noqa: BLE001 - 查不到状态不该让调用方崩
+        return False
+    import time as _time
+
+    return bool(until) and _time.time() < until
+
+
 def verify_cooldown_hours() -> float:
     """冷却时长(小时)。默认 6 —— 过验证是**人的动作**,不是等一等就好;
     定短了等于催着人去点,定长了会拖过一整天。"""
@@ -560,9 +580,21 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
 
         raise DouyinProtocolError(
             f"抖音**验证冷却中**(至 {_dt.fromtimestamp(until):%m-%d %H:%M}),本次不发请求 —— "
-            f"滑块绕不过去,反复打只会加深风控。修法:**在浏览器里过一次验证**,"
-            f"再重新导出 cookie(那一步会自动解冻)",
-            kind="verify", needs_human=True)
+            f"风控响应就是答案:动作是**等**,别重试、别重跑探针(探针也在打)。"
+            # ⚠️⚠️ **2026-10-16 实测把原来那句修法打掉了一半**:用户照做去打开浏览器,
+            #    **根本没有滑块**。但这**不能**推断成"这个要求不存在"——
+            #    抖音的 verify_check 是**对着出口 IP / 会话**下发的,在哪台设备上打开差别极大。
+            #    ⇒ 所以这里**必须把前提写在命令旁边**,否则又是一句"看起来能照做、
+            #    照做了什么都没发生"的话(本仓最恨的那种)。
+            f"⚠️ **人工那条路要先满足两个前提,否则等于没验证**:① 在**本机**打开"
+            f"(必须与采集**同出口 IP** —— 手机上打开是另一个 IP,看不到任何东西);"
+            f"② 用**同一个抖音号**(cookie 对应的那个)。"
+            f"若满足前提后**仍然没有滑块**,就说明这条路**当前不存在**,别再试第三次:"
+            f"那是**服务端只对自动化搜索下发**的要求(2026-10-16 同日 09:30 浏览器兜底"
+            f"还能搜到 8 条线索 ⇒ 同一出口 IP 上真人形状的请求是通的)。",
+            kind="verify_cooldown",
+            #: 没有**确定可执行**的人工动作 ⇒ 不标"要人动手"(标了就会有人去试无效动作)
+            needs_human=False)
     if stats is not None:
         stats["kw_total"] = len(kws)
         stats["kw_hit"] = 0
@@ -677,10 +709,19 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
                 raise DouyinProtocolError(
                     "抖音要求**过验证**(search_nil_info.search_nil_type=verify_check)"
                     "——它把搜索结果整页换成了验证页,**不是「没人推这个资源」**。"
-                    "修法:**在浏览器里打开抖音、过一次验证(滑块/验证码)**,再重新导出 cookie;"
+                    # ⚠️ 2026-10-16 用户照这句去做了,**根本没看到滑块** —— 而这句话当时
+                    #    没写前提。"在哪打开"是这条修法的**必要前提**,必须写在命令旁边。
+                    "⚠️ **人工那条路要先满足两个前提**:① 在**本机**打开(必须与采集"
+                    "**同出口 IP** —— 手机上打开是另一个 IP,等于没验证到);"
+                    "② 用**同一个抖音号**。"
+                    "⚠️ 满足前提后**仍然没有滑块** ⇒ 这条路**当前不存在**,别试第三次:"
+                    "那是服务端**只对自动化搜索**下发的要求(2026-10-16 同日 09:30 浏览器兜底"
+                    "在**同一出口 IP** 上还能搜到 8 条线索 ⇒ 真人形状的请求是通的)。"
                     "在此之前每一个关键词都会返回空 —— 换词、拉长间隔、等自愈**都没用**"
-                    "(实测已连续空 8 小时)。见 doc/抖音纯协议-链路拆解.md §6",
-                    kind="verify", needs_human=True)
+                    "(2026-10-08 实测已连续空 8 小时)。见 doc/抖音纯协议-链路拆解.md §6",
+                    kind="verify",
+                    #: 人工动作**不保证存在** ⇒ 不标"要人动手"(标了就会有人去做无效动作)
+                    needs_human=False)
 
             page_rows, logid = _parse(d, kw)
             rows.extend(page_rows)
