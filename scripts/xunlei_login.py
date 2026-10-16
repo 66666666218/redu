@@ -180,17 +180,20 @@ def main() -> int:
             print("没有启用的用户", flush=True)
             return 1
         blob_json = json.dumps(blob, ensure_ascii=False)
-        if cookie_key != "xunlei":
-            #: ★ **第二枚号**:写进它自己的 key,**并登记进账号池** ——
-            #: 只写 cookie_store 不建池条目的话,`pan_accounts.cookies_for('xunlei')` 取不到它
-            #: (池非空时只用池里的),于是"登了也不用"。
-            from app.services import pan_accounts as _A
+        #: ★ **该不该登记进账号池** —— 判据是「**池里已经用起来了没**」,不是「key 是不是默认位」。
+        #: 2026-10-16 修:原来写死 `cookie_key != "xunlei"`,而**池非空时默认位那张凭据根本不被用**
+        #: (`pan_accounts.accounts`:池里配了就用池里的)⇒ 用默认位重新登 1 号会
+        #: **写进去了却没人用**(登了等于没登),而"1 号救回来了"这件事**看起来是成功的**。
+        from app.services import pan_accounts as _A
 
+        in_pool = any(not r.is_default for r in _A.accounts(db, "xunlei"))
+        if cookie_key != "xunlei" or in_pool:
+            #: 第二枚号,或**池已经用起来了**(此时默认位也必须进池,否则取不到)。
             _A.add_account(db, "xunlei", cookie_key, blob_json, cookie_key=cookie_key)
             db.commit()
             print(f"=== 已加密写入 cookie_store(user={uid}, key={cookie_key})**并登记进账号池** ===",
                   flush=True)
-            print(f"=== 复核:python scripts/pan_account_add.py --platform xunlei --list ===",
+            print("=== 复核:python scripts/pan_account_add.py --platform xunlei --list ===",
                   flush=True)
             return 0
         set_cookie(db, uid, "xunlei", blob_json)
