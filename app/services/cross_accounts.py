@@ -381,9 +381,17 @@ def search_bilibili_videos(keyword: str, limit: int = 20, cookie: str = "") -> l
         if not bvid or not title:
             continue
         author = str(item.get("author") or "").strip()
+        # ★ **B站把互动数给全了**(2026-10-16 补):`play`(播放)/`danmaku`(弹幕)/
+        #   `favorites`(收藏)/`review`(评论)。原来**一个都没读** ⇒ 卡上「对标数据」恒 `—`,
+        #   看起来像"没人看"。⚠️ 为 0 不放进(与 `_weibo_metrics` 同一条口径)。
+        metrics = {k: v for k, v in (("play_count", int(item.get("play") or 0)),
+                                     ("comment_count", int(item.get("review") or 0)),
+                                     ("collected_count", int(item.get("favorites") or 0)))
+                   if v > 0}
         out.append({"uid": bvid, "name": author or "—",
                     "url": f"https://www.bilibili.com/video/{bvid}",
                     "snippet": title[:255], "pan_link": _pan_of(title),
+                    "metrics": metrics,
                     # ⚠️ **必须回填 `keyword`**:调用方(`resource_presence.probe`)按它把结果
                     # 归到"是搜哪个资源名搜出来的";少了这个字段 → 匹配不上 → **永远出 0 条**
                     # (2026-10-03 单测抓到的静默归零)。

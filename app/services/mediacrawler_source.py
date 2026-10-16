@@ -280,18 +280,43 @@ def _read_results(platform: str, since: float | None = None) -> list[dict]:
 _METRIC_KEYS: tuple[str, ...] = ("play_count", "liked_count", "collected_count",
                                  "comment_count", "share_count")
 
+#: 各平台**字段名不同**的指标 → 归一成 `_METRIC_KEYS` 里的名字(2026-10-16 实测补齐)。
+#: ⚠️ 不映射的话**那个平台永远没有互动数** —— 卡上「对标数据」那一列恒 `—`,
+#:   而看起来像"这条没人看"(用户报的原话:「微博的有些东西没给啊不显示数据」)。
+#: 实测来源:
+#:   · 快手 `viewd_count` = 1310138(播放量) —— 不是 `play_count`,所以原来读不到;
+#:   · 贴吧 `total_replay_num` = 39(回复数,就是它的"评论")。
+_LABEL_ALIASES: dict[str, str] = {
+    "viewd_count": "play_count", "play_num": "play_count", "view_count": "play_count",
+    "total_replay_num": "comment_count", "replay_num": "comment_count",
+}
+
 
 def _metric_int(v: object) -> int | None:
     """指标值 → 非负整数;**缺失/解析不出/负数一律返回 `None`**(= 没有这个数据,不是 0)。
 
     ⚠️ **空串也算缺失** —— `""` 与 `"0"` 是两回事:前者是"平台没给",后者是"确实是 0"。
     混在一起会让"字段缺失"被读成"没人看"。
+    ⚠️ **要认"1.3万"这种中文量词**(2026-10-16):小红书实测 `liked_count = "1.3万"`,
+    而 `int(float("1.3万"))` 抛 ValueError ⇒ 那个平台的互动数**一直被静默丢掉**。
     """
     if v is None:
         return None
     text = str(v).strip()
-    if not text:                       # "" / "  " / "None" 之外的空白 ⇒ 缺失
+    if not text or text in ("None", "null"):     # "" / "None" ⇒ 缺失
         return None
+    import re
+
+    m = re.match(r"^([\d.]+)\s*([万亿千万wWkK]?)$", text)
+    if m:
+        try:
+            num = float(m.group(1))
+        except ValueError:
+            return None
+        mult = {"万": 1e4, "w": 1e4, "W": 1e4, "亿": 1e8,
+                "千": 1e3, "k": 1e3, "K": 1e3}.get(m.group(2), 1)
+        n = int(num * mult)
+        return n if n >= 0 else None
     try:
         n = int(float(text))
     except (TypeError, ValueError):
@@ -324,11 +349,24 @@ def _parse_record(rec: dict, platform: str) -> dict | None:
     parts = [str(rec.get(k) or "").strip() for k in ("title", "desc", "content", "text")]
     text = " ".join(dict.fromkeys(p for p in parts if p))   # dict.fromkeys = 保序去重
     urls = _extract_pan_urls("", text)
-    url = str(rec.get("note_url") or rec.get("url") or rec.get("aweme_url") or "").strip()
+    # ⚠️ **URL 的键各平台不同**(2026-10-16 实测补齐):抖音 `aweme_url`、小红书/贴吧
+    #    `note_url`、**快手 `video_url`** —— 少认一个,那个平台的「对标作品」列就**恒为空**
+    #    (症状就是用户看到的 `—(源未给链接)`)。
+    url = str(rec.get("note_url") or rec.get("url") or rec.get("aweme_url")
+              or rec.get("video_url") or "").strip()
     # **全部曝光/互动指标**(2026-10-04):原版只取 `share_count`,其余(尤其**播放量**)全丢。
     # 归一成 `metrics` 字典 ⇒ **直接喂给 `conversion.estimate(platform, metrics)`**,
     # 省得每个调用方各写一遍字段名映射(那是"两处真相"的开始)。
-    metrics = {k: n for k in _METRIC_KEYS if (n := _metric_int(rec.get(k))) is not None}
+    # ★ 2026-10-16:过一层 `_LABEL_ALIASES`(快手 `viewd_count` / 贴吧 `total_replay_num`),
+    #   否则**那两个平台的互动数永远读不到**。
+    metrics: dict[str, int] = {}
+    for key, val in rec.items():
+        want = _LABEL_ALIASES.get(key, key)
+        if want not in _METRIC_KEYS or want in metrics:
+            continue
+        n = _metric_int(val)
+        if n is not None:
+            metrics[want] = n
     return {"uid": uid, "name": name, "url": url[:500], "snippet": text[:255],
             "pan_link": (urls[0] if urls else "")[:500],
             # 兼容既有调用方(douyin_leads 读它):缺了就 0 —— 它的列本来就是这么定义的

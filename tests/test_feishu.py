@@ -74,8 +74,13 @@ def test_webhooks_for_additive_main_and_group() -> None:
     assert webhooks_for(s, "") == ["main"]               # 无板块 → 主群
 
 
-def test_collect_failures_sends_when_only_platform_hook(monkeypatch, session) -> None:
-    """主群为空但闲鱼专属群已配时,闲鱼失败告警仍应发送(守卫不再只看主群)。"""
+def test_collect_failures_sends_when_only_admin_hook(monkeypatch, session) -> None:
+    """★★ **2026-10-16 改口径**:采集失败是**运维**告警 ⇒ 出口是**管理群**。
+
+    这条原来叫 `..._sends_when_only_platform_hook`,钉的是"主群为空但**平台专属群**已配
+    也要发" ⇒ 于是运维告警**发进了客户群**。现在守卫只看**运维出口**
+    (`_ops_targets` = 管理群,没配才回落主群) —— 平台群配不配都**与它无关**。
+    """
     from datetime import datetime, timedelta
 
     from app.services import alert_service
@@ -88,9 +93,18 @@ def test_collect_failures_sends_when_only_platform_hook(monkeypatch, session) ->
     sent = []
     monkeypatch.setattr(feishu_client, "FeishuClient",
                         lambda w, s: type("F", (), {"send": lambda self, t: (sent.append((w, t)), True)[1]})())
-    n = alert_service.check_collect_failures(_settings(feishu_webhook="", feishu_webhook_xianyu="xy"), db=session)
+    n = alert_service.check_collect_failures(
+        _settings(feishu_webhook="", feishu_webhook_admin="admin",
+                  feishu_webhook_xianyu="xy"), db=session)
     assert n == 1
-    assert sent[0][0] == "xy"  # 推到闲鱼专属群(主群为空也不拦)
+    assert sent[0][0] == "admin", f"运维告警该进管理群,实际 {sent[0][0]}"
+
+    # 对照:**一个运维出口都没有** ⇒ 不发(而不是退而求其次发客户群)
+    sent.clear()
+    n2 = alert_service.check_collect_failures(
+        _settings(feishu_webhook="", feishu_webhook_admin="", feishu_webhook_xianyu="xy"),
+        db=session)
+    assert n2 == 0 and sent == [], "只有平台群时**不许**发运维告警"
 
 
 def test_daily_splits_to_platform_groups(monkeypatch, session) -> None:
@@ -660,8 +674,15 @@ def test_health_stalls_alert_and_cooldown(monkeypatch, session) -> None:
     assert alert_service.check_health_stalls(_settings(health_stall_hours=24), db=session) == 0
 
 
-def test_health_stalls_fans_out_to_main_and_section_group(monkeypatch, session) -> None:
-    """停摆告警也要主群 + 专属群都发:回归 any(... for wh in whs) 短路漏发专属群。"""
+def test_health_stalls_goes_to_admin_not_the_platform_group(monkeypatch, session) -> None:
+    """★★ **2026-10-16 用户口径:「所有的警告都发到管理群」**。
+
+    这条原来叫 `..._fans_out_to_main_and_section_group`,钉的是
+    `webhooks_for` = **主群 + 平台专属群** ⇒ **运维告警直接发进了客户群**
+    (采集停摆是**我们的**运维问题,客户看到只会困惑;管理群才是"要人干活"的去处,
+    `notify_incident` 一直是那么发的)。
+    ⇒ 现在只发**管理群**,而且**不许**再落到平台群。
+    """
     from datetime import datetime, timedelta
 
     from app.services import alert_service
@@ -677,9 +698,11 @@ def test_health_stalls_fans_out_to_main_and_section_group(monkeypatch, session) 
         feishu_client, "FeishuClient",
         lambda w, s: type("F", (), {"send": lambda self, t: (called.append(w), True)[1]})())
     n = alert_service.check_health_stalls(
-        _settings(health_stall_hours=24, feishu_webhook="main", feishu_webhook_xianyu="xy"), db=session)
+        _settings(health_stall_hours=24, feishu_webhook="main",
+                  feishu_webhook_admin="admin", feishu_webhook_xianyu="xy"), db=session)
     assert n == 1
-    assert called == ["main", "xy"]  # 主群送达后仍继续发专属群
+    assert called == ["admin"], f"运维告警只发管理群,实际 {called}"
+    assert "xy" not in called, "**平台群(客户群)不许再收到运维告警**"
 
 
 def test_health_stalls_escalates_long_term(monkeypatch, session) -> None:

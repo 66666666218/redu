@@ -486,20 +486,13 @@ def transfer_missing_links(session, user_id: int, items: list[dict],
 
 
 def _metrics_md(m: dict) -> str:
-    """那条原帖的互动指标 → 一小串(`↗转发 💬评论 ♥赞`,**只显示非 0 的**)。
-
-    ⚠️ 缺失/为 0 就整串回 `—` —— **别填 0**(那会被读成"没人看")。
-    口径来自采集层 `_weibo_metrics`(它也是"为 0 就不放进去")。
+    """互动指标 → 一小串。**实现搬去 `feishu._cards.metrics_md`**(2026-10-16:
+    `pan_discovery` 那张卡也要它 —— 同一件事写两处迟早各飘各的)。
+    ⚠️ 这里保留薄壳名,免得改动散到每个调用点。
     """
-    bits = []
-    for k, ico in (("share_count", "↗"), ("comment_count", "💬"), ("liked_count", "♥")):
-        try:
-            v = int((m or {}).get(k) or 0)
-        except (TypeError, ValueError):
-            v = 0
-        if v:
-            bits.append(f"{ico}{v}")
-    return " ".join(bits) or "—"
+    from app.services.feishu._cards import metrics_md
+
+    return metrics_md(m)
 
 
 def push_items(items: list[dict], settings) -> bool:

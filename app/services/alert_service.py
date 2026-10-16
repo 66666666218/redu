@@ -367,16 +367,35 @@ def _last_success_days(db: Session, uid: int, kind: str) -> int | None:
     return int((datetime.now() - last_ok).total_seconds() // 86400)
 
 
+def _ops_targets(settings) -> list[str]:
+    """**运维告警的出口 = 管理群**(2026-10-16 用户口径:「**所有的警告都发到管理群**」)。
+
+    ⚠️ 原来 `check_collect_failures` / `check_health_stalls` 走的是
+    `webhooks_for(settings, kind)` = **主群 + 平台专属群** ⇒ 采集失败/停摆/恢复这类
+    **运维告警直接发进了客户群**。客户看到"某板块采集持续失败"只会困惑,
+    而这类消息的去向一直是**管理群**(`notify_incident` 就是这么发的)。
+    ⚠️ 管理群没配时**回落主群**(老行为)—— 宁可发错群,也别把告警静默丢掉。
+    """
+    from app.services.feishu_client import webhook_for
+
+    admin = webhook_for(settings, "admin")
+    #: ⚠️ **有管理群就只发管理群** —— 别写成"[admin, main] 都发"(我第一版就是这么写的,
+    #: 结果**客户主群照样收到运维告警**,与口径正好相反)。
+    #: 没配管理群才回落主群:宁可发错群,也别把告警静默丢掉。
+    return [admin] if admin else list(filter(None, [getattr(settings, "feishu_webhook", "")]))
+
+
 def check_collect_failures(settings: Settings | None = None, db: Session | None = None) -> int:
     """采集持续失败告警:某用户某板块近 24h 失败 >= 阈值,推送飞书并去重。
 
     解决"Cookie 过期/接口异常,只有日志没有主动提醒"的运维盲区。
     返回本次告警条数;未配置飞书 webhook 时跳过。`db` 供测试注入。
+
+    ★ **去向 = 管理群**(2026-10-16):这是**运维**告警,不该进客户群 —— 见 `_ops_targets`。
     """
     settings = settings or get_settings()
-    from app.services.feishu_client import FeishuClient, platform_webhook, webhooks_for
-    if not settings.feishu_webhook and not any(
-            platform_webhook(settings, s) for s in ("weibo", "xianyu", "douhot", "baidu", "wechat")):
+    from app.services.feishu_client import FeishuClient
+    if not _ops_targets(settings):
         return 0
     from sqlalchemy import func
 
@@ -445,7 +464,7 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
         if recovered and not hits:
             _ok = 0
             for uid, kind in recovered:
-                for wh in webhooks_for(settings, kind):
+                for wh in _ops_targets(settings):
                     if FeishuClient(wh, settings.feishu_secret).send(
                             f"✅ 采集已恢复 · 用户#{uid} 板块[{kind}]——此前「持续失败」告警作废,以本条为准"):
                         _ok += 1
@@ -487,7 +506,7 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
                 msg = (f"{head}采集持续失败(近24h) · 评估于 {datetime.now():%m-%d %H:%M} · "
                        f"用户#{uid} 板块[{kind}] 失败 {cnt} 次{extra}{long_txt}")
                 # 按板块路由:主群 + 该平台专属群 都发(互不替代)
-                for wh in webhooks_for(settings, kind):
+                for wh in _ops_targets(settings):
                     if FeishuClient(wh, settings.feishu_secret).send(msg):
                         sent += 1
             # 全部发送失败 → 丢弃冷却门(否则飞书故障期"持续失败"告警被静默一个冷却窗)
@@ -509,9 +528,8 @@ def check_health_stalls(settings: Settings | None = None, db: Session | None = N
     被风控全挡却未记为失败,如磁盘满导致整站 502)。返回告警条数;未配 webhook 返回 0。`db` 供测试注入。
     """
     settings = settings or get_settings()
-    from app.services.feishu_client import FeishuClient, platform_webhook, webhooks_for
-    if not settings.feishu_webhook and not any(
-            platform_webhook(settings, s) for s in ("weibo", "xianyu", "douhot", "baidu", "wechat")):
+    from app.services.feishu_client import FeishuClient
+    if not _ops_targets(settings):
         return 0
     from sqlalchemy import func
 
@@ -625,7 +643,7 @@ def check_health_stalls(settings: Settings | None = None, db: Session | None = N
                      f"{'轮次成功' if p == 'wechat' else '数据'} {when}{long_txt}",
                      cause]
             # 按板块路由:主群 + 该平台专属群 都发(互不替代),任一送达即算成功
-            whs = webhooks_for(settings, p)
+            whs = _ops_targets(settings)     # ★ 停摆/失败告警:管理群,不是平台群
             msg = "\n".join(lines)
             delivered = False
             for wh in whs:

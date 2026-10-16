@@ -358,6 +358,9 @@ def _candidates_from_zhihu(ck: str, keywords: list[str], limit: int) -> list[dic
                         "title": _clean(r.get("snippet") or "")[:255] or kw[:60],
                         "author": str(r.get("name") or "")[:64],
                         "source_url": str(r.get("url") or "")[:500],
+                        # ★ **互动数一路带到卡上**(2026-10-16 用户口径:5 要素里要有「对标数据」)
+                        #   —— 知乎的搜索命中本来就有 `metrics`,只是**候选这里没接**。
+                        "metrics": dict(r.get("metrics") or {}),
                         "publish_at": int(r.get("publish_at") or 0)})
     if keywords and failed == len(keywords):
         raise SearchSourceError(f"{len(keywords)} 个词全部搜索失败:{last_err}")
@@ -753,7 +756,10 @@ def sync(session, user_id: int, settings=None) -> dict:
         if status == "ok":
             ok += 1
             items.append({"title": c["title"], "author": c["author"],
-                          "source_url": c["source_url"], "share_url": our, "code": code})
+                          "source_url": c["source_url"], "share_url": our, "code": code,
+                          # ★ 互动数带进卡(2026-10-16):三个候选源(知乎/微博/贴吧)都给了,
+                          #   只是这一步没接 ⇒ 卡上「对标数据」恒空。
+                          "metrics": dict(c.get("metrics") or {})})
         elif status == "skipped":
             skipped += 1
         elif status == "pending":
@@ -794,24 +800,27 @@ def push_items(items: list[dict], settings) -> bool:
     webhook = webhook_for(settings, "zhihu")
     if not webhook:
         return False
-    from app.services.feishu._cards import _col_set_row, _md_safe, strip_others
+    from app.services.feishu._cards import _col_set_row, _md_safe, metrics_md, strip_others
     from app.services.feishu_client import FeishuClient
 
     brand = (getattr(settings, "brand_name", "") or "").strip()
     elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
         f"公开平台(知乎/贴吧)新发现 **{len(items)}** 个资源,已转存成我方分享链:"
-        f"「**资源**」点开是我方链、可直接取用;「**原帖**」点开是对标作品的出处。"}},
+        f"「**资源**」点开是我方链、可直接取用;「**原帖**」点开是对标作品的出处;"
+        f"「**对标数据**」= 那条原帖的热度。"}},
         # ★ **「原帖」独立成列**(2026-10-16 用户口径「别的平台也应该保持这个模式:
         #   **有原文,有网盘**」)。`source_url` **本来就在 items 里**(见上面 append),
         #   只是从来没渲染出来 ⇒ 员工看不到"这条资源是从哪个帖子里发现的",无法核对对标作品。
+        # ★ **「对标数据」也是 2026-10-16 补的**(用户那 5 要素:对标账号/对标作品/对标数据/资源/可用链)。
         _col_set_row([("**作者**", 3), ("**资源**", 5), ("**原帖**", 2),
-                      ("**我方分享链**", 3)], grey=True)]
+                      ("**对标数据**", 2), ("**我方分享链**", 3)], grey=True)]
     for it in items:
         _src = _md_safe(it.get("source_url") or "")
         elements.append(_col_set_row([
             (_md_safe(it.get("author") or "—"), 3),
             (_md_safe(strip_others(it.get("title") or "")[:40]), 5),
             (f"[▶ 原帖]({_src})" if _src else "—", 2),
+            (metrics_md(it.get("metrics") or {}), 2),
             (f"[▶ 打开]({_md_safe(it.get('share_url') or '')})"
              + (f" 🔑{_md_safe(it.get('code') or '')}" if it.get("code") else ""), 3)]))
     card = {"config": {"wide_screen_mode": True},

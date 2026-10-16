@@ -853,3 +853,32 @@ def test_推送卡要同时给出原帖与我方链(monkeypatch) -> None:
     assert "**原帖**" in blob, "列头要有「原帖」,否则看不出这一格是干什么的"
     assert "https://www.zhihu.com/question/1/answer/2" in blob, "原帖要能点"
     assert "https://pan.quark.cn/s/OUR" in blob and "🔑ab12" in blob, "我方链照旧"
+
+
+def test_盘链发现卡也要带对标数据(monkeypatch) -> None:
+    """★ 用户那 5 要素(对标账号/对标作品/对标数据/资源/可用链)推到这张卡上。
+
+    三个候选源(知乎/微博/贴吧)**本来就给了 `metrics`** —— 知乎那条只是候选这里没接,
+    于是卡上「对标数据」恒空(看起来像"这条没人看")。
+    """
+    from app.services import feishu_client
+
+    sent: list[dict] = []
+
+    class _C:
+        def __init__(self, hook, secret=None):
+            self.hook = hook
+
+        def send_card(self, card):
+            sent.append(card)
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+    pd.push_items([{"title": "某资源", "author": "某作者",
+                    "source_url": "https://www.zhihu.com/question/1/answer/2",
+                    "share_url": "https://pan.quark.cn/s/OUR", "code": "ab12",
+                    "metrics": {"liked_count": 12, "comment_count": 3}}], _S())
+    blob = str(sent[0])
+    assert "**对标数据**" in blob, "列头要有「对标数据」"
+    assert "♥12" in blob and "💬3" in blob, f"热度要进卡:{blob[-400:]}"
+    assert "https://pan.quark.cn/s/OUR" in blob, "我方链照旧"

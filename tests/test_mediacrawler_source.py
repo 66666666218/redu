@@ -262,3 +262,42 @@ class TestKillStaleBrowsers:
         monkeypatch.setattr("sys.platform", "win32")
         monkeypatch.setattr(subprocess, "run", boom)
         assert mc.kill_stale_browsers() == 0
+
+
+class Test指标与链接的别名:
+    """★★ **2026-10-16 用户问「知乎快手是否可以做到这样了,可以看到作品,链接,互动数」**。
+
+    实测四个平台**字段名各不同**,少认一个那个平台就**永远是空** —— 而看起来像"没人看/没这条":
+
+        douyin   aweme_url           liked/collected/comment/share ✓
+        xhs      note_url            liked_count = **"1.3万"**(字符串带量词)
+        tieba    note_url            **total_replay_num**(回复数,从没被读)
+        kuaishou **video_url**       **viewd_count**(播放量 1310138,从没被读)
+    """
+
+    def _rec(self, **kw):
+        base = {"nickname": "某人", "user_id": "7", "title": "某资源[网盘链接]"}
+        base.update(kw)
+        return base
+
+    def test_快手的作品链接键是_video_url(self) -> None:
+        r = mc._parse_record(self._rec(video_url="https://www.kuaishou.com/short-video/x"), "kuaishou")
+        assert r and r["url"] == "https://www.kuaishou.com/short-video/x"
+
+    def test_快手的播放量键是_viewd_count(self) -> None:
+        r = mc._parse_record(self._rec(viewd_count=1310138), "kuaishou")
+        assert r and r["metrics"].get("play_count") == 1310138
+
+    def test_贴吧的回复数当评论(self) -> None:
+        r = mc._parse_record(self._rec(total_replay_num=39), "tieba")
+        assert r and r["metrics"].get("comment_count") == 39
+
+    def test_带万字的点赞数要认得(self) -> None:
+        """小红书实测 `liked_count = "1.3万"`;`int(float(...))` 会抛 ValueError ⇒ 被静默丢掉。"""
+        r = mc._parse_record(self._rec(note_url="https://x/1", liked_count="1.3万"), "xhs")
+        assert r and r["metrics"].get("liked_count") == 13000
+
+    def test_缺失还是缺失_不许变成0(self) -> None:
+        """`None`/空串 = 平台没给 ⇒ 不放进 metrics(填 0 会被读成"没人看")。"""
+        r = mc._parse_record(self._rec(liked_count=None, viewd_count=""), "kuaishou")
+        assert r and "liked_count" not in r["metrics"] and "play_count" not in r["metrics"]
