@@ -1467,8 +1467,18 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
         elif r.quality <= 2 and r.pan_types:
             q_badge = "⚠️疑 "
         # href 只放干净链接(旧实现把" (提取码 xxxx)"拼进 URL → 链接点不开),提取码明文附后
-        article_md = (f"[{hot}{q_badge}{shown}]({_md_safe(link)})" if link else shown) \
+        # ★★ **2026-10-16:原文独立成列**(用户报「虽然有链接了但**没办法看对标的作品**」)。
+        #    原来整行**只有一处可点**,而它在有网盘链时指向的是**我方链**
+        #    ⇒ 员工**永远进不去原文**,没法核对"对标作品到底长什么样、值不值得跟"。
+        #    现在与抖音卡**同形**(那边是「作品」→网盘、「▶视频」→视频,**两个独立格**):
+        #      「文章」→ 取资源(我方链);「原文」→ 看内容(公众号原文)。
+        #    ⚠️ 有链时「文章」**不再回落到原文** —— 否则同一行两个格指向同一处,
+        #       看起来像"这里有两篇文章"。
+        _titled = f"{hot}{q_badge}{shown}"
+        article_md = (f"[{_titled}]({_md_safe(link)})" if (link and my_link) else _titled) \
             + (f" 🔑{code}" if code else "")
+        # 「原文」列:对标作品的入口。**永远指向公众号原文**(不因有没有转存而变)。
+        orig_md = f"[原文]({_md_safe(r.url)})" if r.url else "—"
         # 网盘列同时交代"点标题会去哪":🔴=我方转存链;⏳=有源链但还没转好(点进去是原文);
         # ⛔=对方分享已被封,永远转不了。员工不必点开才发现进的是公众号文章。
         types = _md_safe(r.pan_types)[:8] if r.pan_types else ""
@@ -1488,7 +1498,8 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
         if r.traffic_at:
             read += "*"  # 有采样点的历史文章:标注为采样口径
         return _col_set_row([
-            (_md_safe(r.author)[:10] or "—", 3), (article_md, 7), (pan, 2), (read, 2),
+            (_md_safe(r.author)[:10] or "—", 3), (article_md, 6), (orig_md, 2),
+            (pan, 2), (read, 2),
         ])
 
     # 按账号分组(员工视角要一眼看清"哪个号发了哪些"),同号内资源文/高阅读优先。
@@ -1549,7 +1560,8 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
                 "content": f"本轮共 {len(rows)} 篇新发文(按账号分组),"
                            f"其中 {n_pan} 篇带网盘资源"}]})
         elements.append(_col_set_row(
-            [("**公众号**", 3), ("**文章**", 7), ("**网盘**", 2), ("**阅读**", 2)], grey=True))
+            [("**公众号**", 3), ("**文章**", 6), ("**原文**", 2),
+             ("**网盘**", 2), ("**阅读**", 2)], grey=True))
         last_author: str | None = None
         for author, r, n in chunk:
             if author != last_author:  # 换账号插入一行账号标题;账号跨卡时下一页重出标题

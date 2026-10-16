@@ -14,7 +14,8 @@
           处理(见 wechat_monitor);**别再为它编排续期时机**(见 doc/外部接口速查.md §3.2)
 - 正文:  GET /web/mp/content?reviewId=MP_WXS_...  → HTML(#js_content)
 - reviewId 形如 `MP_WXS_<bookId>_<articleToken>`,末段即 mp.weixin.qq.com/s/ 原文短链
-  的 token(token 可能含 `~`,必须原样保留,见 build_mp_url)
+  的 token。⚠️ **上游给的 token 里 `~` 要换回 `_`**(2026-10-16 实测:不换就是微信的
+  「参数错误」页)—— 详见 `build_mp_url`。
 
 鉴权:仅靠 Cookie(完整微信读书登录 Cookie);x-wr-ticket 已弃用。
 错误:-2012/-2010 登录失效(→ WereadAuthError;可用 refresh_skey 用 wr_rt 续期);-2041 接口废弃/被拦截;
@@ -74,11 +75,28 @@ def to_count(value) -> int:
 
 
 def build_mp_url(original_id: str) -> str:
-    """公众号原文短链;token 可能含 `~`(合法字符,quote 须原样保留)。"""
-    token = str(original_id or "").strip()
+    """公众号原文短链。
+
+    ★★★ **2026-10-16 修:`~` 必须换回 `_`** —— 这一处曾让库里 **26%(531/2041)的原文链
+    点不开**,而症状被读成"卡片没做好"。
+
+    **判据不是猜的**(用户报「打开一个链接会显示**参数错误**」之后做的控制变量):
+      · 库里那条 `…/s/rGQaA4S~OmBCyR0kJcj0qw` ⇒ 真浏览器打开是 **微信的「参数错误」页**;
+      · **同一个位置换成 `_`**              ⇒ **真实文章**(标题「国考、省考——27公考天晓…」);
+      · 换成 `-`                            ⇒ 又是参数错误(所以不是"随便换一个就行");
+      · **5/5 条 `~` 链全部如此**。
+    ⇒ 而且这条规则**无歧义**:微信短链 id 是 **base64url**(字母表只有 `A-Za-z0-9-_`),
+    **`~` 根本不在里面** ⇒ 上游串里出现的 `~` 只能是 `_` 被**按另一个字母表**编码过。
+    全库扫过:**唯一的非 base64url 字符就是 `~`**(618 处),没有第二种需要映射的。
+
+    ⚠️ 旧注释写的是「token 可能含 `~`(**合法字符**,quote 须原样保留)」—— 那句是**错的**,
+    而它正是这个 bug 的来源:**观察到一个字符就当作合法的,没去验证它在目标系统里成不成立**。
+    """
+    token = str(original_id or "").strip().replace("~", "_")
     if not token:
         return ""
-    return f"https://mp.weixin.qq.com/s/{quote(token, safe='~')}"
+    # `safe=''` 就够:base64url 的 `-` `_` 都在 `quote` 的 always-safe 里,不会被百分号化
+    return f"https://mp.weixin.qq.com/s/{quote(token, safe='')}"
 
 
 def review_to_url(review_id: str, book_id: str = "") -> str:

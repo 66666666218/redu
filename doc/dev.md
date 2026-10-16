@@ -360,7 +360,9 @@ redian/
   实测校准)——书架 `/web/shelf/sync?userVid=`(**空**,非空 -2012)、最新一篇 `/api/mp/cover?bookId=MP_WXS_*`
   (列表 `/web/mp/articles` **有会话额度**——实测前 ~29 个号可用,超出回 `-10100`;
    2026-10-04 二次定案,见 `doc/外部接口速查.md §3.2`)、正文 `/web/mp/content?reviewId=`(#js_content);
-  reviewId=`MP_WXS_<bookId>_<token>` 推导 mp.weixin 原文链(token 含 `~` 原样保留)。
+  reviewId=`MP_WXS_<bookId>_<token>` 推导 mp.weixin 原文链。⚠️ 上游 token 里的 `~`
+  **必须换回 `_`**(2026-10-16 实测:不换就是微信的「参数错误」页,库里 26% 的链因此点不开;
+  微信短链 id 是 base64url,`~` 不在字母表里 ⇒ 见 `weread_client.build_mp_url`)。
   监听逐号先走微信读书(免费,书架导入 `import_benchmarks_from_shelf`),失效(-2012/-2010)自动降级
   dajiala;正文盘链确认优先微信读书 content、其次自抓原文页。Cookie:平台内「weread」按用户配置优先,
   全局 `WEREAD_COOKIE` 兜底;客户端内置 2s 限速(社区实测单日 30+ 次密集请求即触发风控)——

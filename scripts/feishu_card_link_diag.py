@@ -139,16 +139,98 @@ def build_card2() -> dict:
             "elements": elements}
 
 
+def _wechat_real_links() -> dict:
+    """从库里取**真实**的公众号原文链 / 我方转存链 —— 诊断必须用"用户真会点的那几条"。
+
+    ⚠️ 为什么不用假链接:10-14 那次"点不动"的教训就是**假链接把变量换掉了**
+    (诊断卡里全点得动、生产卡点不动)。所以这里逐字用库里的值。
+
+    2026-10-16 用户报:「公众号打开一个链接显示**参数错误**」——
+    ⚠️ 可疑点:库里 **26%(531/2041)** 的原文链带 `~`
+    (`/s/rGQaA4S~OmBCyR0kJcj0qw`),而 `~` 在飞书 markdown 里是**删除线**标记。
+    但**本地探不了**:微信对非浏览器客户端一律回空壳页(4 条对照全 200、全无 title)⇒
+    只能做成控制变量卡让**人点一次**。
+    """
+    out = {"tilde": "", "plain": "", "quark": ""}
+    try:
+        import sqlite3
+
+        con = sqlite3.connect("data/platform.db")
+        row = con.execute("select url from wechat_articles where url like '%~%' "
+                          "order by id desc limit 1").fetchone()
+        out["tilde"] = (row or [""])[0] or ""
+        row = con.execute("select url from wechat_articles where url not like '%~%' "
+                          "order by id desc limit 1").fetchone()
+        out["plain"] = (row or [""])[0] or ""
+        row = con.execute("select my_pan_urls from wechat_articles "
+                          "where coalesce(my_pan_urls,'') like '%pan.quark.cn%' "
+                          "order by id desc limit 1").fetchone()
+        raw = (row or [""])[0] or ""
+        out["quark"] = next((x.strip() for x in raw.splitlines() if x.strip()), "")
+        con.close()
+    except Exception:  # noqa: BLE001 - 读不到就退回常量,别让工具自己崩
+        pass
+    return out
+
+
+def build_card3() -> dict:
+    """**第 3 张:公众号链接诊断(2026-10-16)**。
+
+    用户报「打开一个链接会显示**参数错误**,看不了公众号文章、也看不了网盘链接」。
+    本地探不了(微信对非浏览器客户端回空壳页)⇒ 用**库里真实的链**做控制变量:
+
+        W① 原文(普通短链)          = 对照
+        W② 原文(带 `~`)            ← 主要嫌疑(26% 的原文链长这样)
+        W③ 同 W②,但 `~` → `%7E`    = 若 ② 死③活 ⇒ 就是那个字符
+        W④ 我方夸克链(库里真链)    = 排除"网盘链本身坏了"
+        W⑤ 一行放**两个**链(标题→网盘 + 原文→原文)= 验证我要改的版式能不能用
+
+    读法:回「哪几个点得动」。
+    """
+    L = _wechat_real_links()
+    tilde, plain, quark = L["tilde"], L["plain"], L["quark"]
+    tilde_enc = tilde.replace("~", "%7E")
+    rows: list[tuple[str, str, str]] = [
+        ("W①", "公众号原文 · **普通短链**(对照)", f"[点这里]({plain})" if plain else "—"),
+        ("W②", "公众号原文 · **带 `~`**(库里 26% 长这样)", f"[点这里]({tilde})" if tilde else "—"),
+        ("W③", "同 W②,但 `~` → `%7E`", f"[点这里]({tilde_enc})" if tilde else "—"),
+        ("W④", "**我方夸克链**(库里真链)", f"[点这里]({quark})" if quark else "—"),
+        ("W⑤", "**一行两个链**(标题→网盘 + 原文→原文)= 打算改成的版式",
+         (f"[资源标题]({quark})" if quark else "资源标题")
+         + " · " + (f"[原文]({plain})" if plain else "原文")),
+    ]
+    elements: list[dict] = [
+        {"tag": "div", "text": {"tag": "lark_md", "content":
+            "🔧 **公众号链接诊断(一次性测试,可忽略)**\n"
+            "你报了「打开链接显示**参数错误**」。我这边**探不了**(微信对脚本一律回空壳页),"
+            "所以麻烦你**逐个点**下面 5 行,回一句「**哪几个编号点得动 / 哪几个报参数错误**」"
+            "—— 只有那串编号有用,不用截图。"}},
+        {"tag": "note", "elements": [{"tag": "plain_text",
+            "content": "每行只变一处;W①/②/④ 都是**库里真实存在的那几条链**"}]},
+        _col_set_row([("**编号**", 1), ("**说明**", 5), ("**点这里**", 3)], grey=True),
+    ]
+    for no, desc, cell in rows:
+        elements.append(_col_set_row([(no, 1), (desc, 5), (cell, 3)]))
+    elements.append({"tag": "note", "elements": [{"tag": "plain_text",
+        "content": "回「哪几个点得动」即可;这张只发一次"}]})
+    return {"config": {"wide_screen_mode": True},
+            "header": {"template": "orange",
+                       "title": {"tag": "plain_text",
+                                 "content": "🔧 公众号链接诊断 · 请回「哪几个点得动」"}},
+            "elements": elements}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--send", action="store_true", help="真发(默认只打印)")
     ap.add_argument("--section", default="admin",
                     help="发到哪个群:admin(默认,管理员群)/ douhot(抖音群)…")
-    ap.add_argument("--card", choices=("links", "text"), default="links",
-                    help="links=第 1 张(域名/写法);text=第 2 张(文字/版式)")
+    ap.add_argument("--card", choices=("links", "text", "wechat"), default="links",
+                    help="links=第 1 张(域名/写法);text=第 2 张(文字/版式);"
+                         "wechat=第 3 张(公众号原文/网盘链)")
     args = ap.parse_args()
-    card = build_card2() if args.card == "text" else build_card()
+    card = {"text": build_card2, "wechat": build_card3}.get(args.card, build_card)()
     if not args.send:
         print(json.dumps(card, ensure_ascii=False, indent=1))
         print("\n[dry-run] 加 --send 才真发(默认不碰任何群)")

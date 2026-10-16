@@ -396,6 +396,11 @@ def probe(session, user_id: int, settings=None, platforms: list[str] | None = No
             items.append({"name": name, "platform": plat,
                           "label": PLATFORMS[plat]["label"], "count": len(hits),
                           "samples": [(h.get("snippet") or "")[:60] for h in hits[:2]],
+                          # ★ **对标作品的入口**(2026-10-16 用户报「有链接了但**没办法看对标的作品**」)。
+                          #   原来只留了摘要**文字**、把 URL **丢掉了** ⇒ 卡片上根本无处可点。
+                          #   各源的 hit 都带 `url`(见 `cross_accounts._search_weibo` 的实测注:
+                          #   `{uid, name, url, snippet, pan_link, metrics}`)⇒ 直接带上,不另取一次。
+                          "sample_urls": [str(h.get("url") or "") for h in hits[:3]],
                           "link": _library_link(session, user_id, name)})
         logger.info("跨平台热度:%s 命中资源 %d 个(合并前 %d 个关键词)",
                     plat, len(merged), len({r.get("keyword") for r in rows}))
@@ -493,19 +498,34 @@ def push_items(items: list[dict], settings) -> bool:
         if not hook:
             continue
         label = PLATFORMS.get(plat, {}).get("label", plat)
+        # ★ **与抖音卡同形:两个独立可点的格**(2026-10-16 用户口径
+        #   「都做成抖音推广格式,**既有网盘,也能看到对标的作品**」):
+        #     「资源」→ 取资源(我方链);「对标作品」→ 看那条**人在推的原帖**。
+        #   ⚠️ 原来**只有一处可点**(可用链),而且 `sample_urls` 根本没被带出来
+        #      ⇒ 员工看得到"有资源",却**核对不了这资源是谁在推、推成什么样**。
         elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
-            f"{label}上也在推的资源 **{len(group)}** 个(链接取自我方资源库,点开即用):"}},
-            _col_set_row([("**资源**", 5), ("**平台**", 3), ("**内容数**", 2),
-                          ("**可用链**", 4)], grey=True)]
+            f"{label}上也在推的资源 **{len(group)}** 个:"
+            f"「**资源**」点开是我方链、可直接取用;「**对标作品**」点开是那条原帖。"}},
+            _col_set_row([("**资源**", 5), ("**对标作品**", 4), ("**平台**", 2),
+                          ("**内容数**", 2)], grey=True)]
+        from app.services.douyin_leads import _pan_name
         for it in group:
             link = it.get("link") or {}
             url = link.get("my_link") or link.get("pan_url") or ""
-            cell = f"[▶ 打开]({_md_safe(url)})" if url else "—(库内暂无链)"
+            name = _md_safe(strip_others(it["name"]))
+            _pan = _pan_name(url)
+            # 「资源」:名字可点 → **我方链**,顺带写**盘名**
+            # (用户 10-04 口径:只写网盘名 —— 「我方链」那三个字在客户群里会暴露运营方身份)
+            cell = (f"[{name}]({_md_safe(url)})" + (f" · 🔴{_pan}" if _pan else "")
+                    if url else f"{name} · —")
+            # 「对标作品」:第一条原帖。**带文字**才看得出点了会去哪(纯 URL 在手机上看不清域名)
+            su = [u for u in (it.get("sample_urls") or []) if u]
+            work = f"[▶ 看作品]({_md_safe(su[0])})" if su else "—(源未给链接)"
             elements.append(_col_set_row([
-                (_md_safe(strip_others(it["name"])), 5),
-                (_md_safe(it["label"]), 3),
-                (str(it["count"]), 2),
-                (cell, 4)]))
+                (cell, 5),
+                (work, 4),
+                (_md_safe(it["label"]), 2),
+                (str(it["count"]), 2)]))
         card = {"config": {"wide_screen_mode": True},
                 "header": {"template": "wathet", "title": {"tag": "plain_text",
                                                            "content": f"🔎 {brand + ' · ' if brand else ''}"

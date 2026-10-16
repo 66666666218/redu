@@ -462,11 +462,23 @@ class FakeWeread:
         return self.shelf_value
 
 
-def test_review_to_url_preserves_tilde() -> None:
-    """reviewId → 原文短链:token 中的 `~` 必须原样保留(微信 302 坑)。"""
+def test_review_to_url_fixes_the_tilde_that_breaks_the_link() -> None:
+    """reviewId → 原文短链:token 里的 `~` **必须换回 `_`**(2026-10-16 订正)。
+
+    ⚠️ 这条测试原来叫 `..._preserves_tilde`,断言的是**相反**的行为,理由写在一句
+    「微信 302 坑」里 —— 而 **CHANGELOG 与 doc 里都找不到那条坑的实验记录**。
+    真发生的是:用户报「打开一个链接会显示**参数错误**」,随后用**真浏览器**做的对照:
+
+        …/s/rGQaA4S~OmBCyR0kJcj0qw  ⇒ 微信「参数错误」页
+        …/s/rGQaA4S_OmBCyR0kJcj0qw  ⇒ **真实文章**(5/5 条全部如此)
+        …/s/rGQaA4S-OmBCyR0kJcj0qw  ⇒ 又是参数错误(不是"随便换一个就行")
+
+    ⇒ 与 `tests/test_weread_mp_url.py` 同一判据:**微信短链 id 是 base64url,
+    `~` 不在字母表里** ⇒ 出现的 `~` 只能是 `_` 被按另一个字母表编码过。
+    """
     rid = "MP_WXS_2_abc_4OcS7~rrtk2Lwe4P0YPiGg"
-    assert review_to_url(rid, book_id="MP_WXS_2_abc") == "https://mp.weixin.qq.com/s/4OcS7~rrtk2Lwe4P0YPiGg"
-    assert review_to_url(rid) == "https://mp.weixin.qq.com/s/4OcS7~rrtk2Lwe4P0YPiGg"
+    assert review_to_url(rid, book_id="MP_WXS_2_abc") == "https://mp.weixin.qq.com/s/4OcS7_rrtk2Lwe4P0YPiGg"
+    assert review_to_url(rid) == "https://mp.weixin.qq.com/s/4OcS7_rrtk2Lwe4P0YPiGg"
     assert review_to_url("") == ""
 
 
@@ -3354,10 +3366,39 @@ def test_repush_card_uses_history_baidu_link(session, monkeypatch) -> None:
 
     wechat_monitor._push_listen(session, 1, _settings(), [art], replacements={})
     blob = json.dumps(cards, ensure_ascii=False)
-    assert "pan.baidu.com/s/1MineDoc" in blob          # 点进去是我方链
+    assert "pan.baidu.com/s/1MineDoc" in blob          # 点「文章」那格进的是我方盘
     assert "🔑8888" in blob
     assert "🔴百度网盘" in blob
-    assert "mp.weixin.qq.com/s/bd" not in blob         # 不再回落原文
+    # ★ **2026-10-16 改口径**:原文**另立一列**(用户报「虽然有链接了但**没办法看对标的作品**」)
+    #   ⇒ 它**应该**在卡里,但**必须带「原文」两个字** —— 否则读起来就像
+    #   "文章那格指向了原文",而那正是这次要修掉的旧形态。
+    assert "[原文](https://mp.weixin.qq.com/s/bd)" in blob
+
+
+def test_没有我方链时_原文那一列照样能看对标的作品(session, monkeypatch) -> None:
+    """★★ **2026-10-16 用户报的原话**:「虽然有链接了但是**没办法看对标的作品**」
+    「**看不了公众号文章**,也看不了网盘链接」。
+
+    真因:原来整行**只有一处可点** ——
+      · 有网盘链 ⇒ 它指向我方链 ⇒ **原文永远进不去**;
+      · 没有网盘链 ⇒ 它指向原文 ⇒ 又变成"看不到网盘"。
+    ⇒ 现在「原文」独立成列,**不论有没有转存都指向公众号原文**(与抖音卡的
+      「作品」→网盘 / 「▶视频」→视频 同形:两个独立格,各司其职)。
+    """
+    import json
+
+    art = WechatArticle(user_id=1, title="纯内容文", author="号A", read_num=0,
+                        url="https://mp.weixin.qq.com/s/plain", source="listen",
+                        pan_urls="", pan_types="", my_pan_urls="")
+    session.add(art)
+    session.commit()
+    cards: list[dict] = []
+    _fake_feishu(monkeypatch, cards)
+
+    wechat_monitor._push_listen(session, 1, _settings(), [art], replacements={})
+    blob = json.dumps(cards, ensure_ascii=False)
+    assert "[原文](https://mp.weixin.qq.com/s/plain)" in blob, "没有我方链时也必须能看原文"
+    assert "**原文**" in blob, "列头要有「原文」,否则这一格看不出是干什么的"
 
 
 def test_self_share_marker_stays_out_of_href(session, monkeypatch) -> None:

@@ -111,7 +111,12 @@ def test_library_link_prefers_wechat_then_discovered(session) -> None:
 
 
 def test_push_items_cards_per_platform(monkeypatch) -> None:
-    """**每个平台推自己的群**,卡片里给出**库里匹配到的可用链**(点开即用)。"""
+    """**每个平台推自己的群**;卡片**两处可点**:「资源」→我方链、「对标作品」→原帖。
+
+    ★ 2026-10-16 用户口径:「都做成抖音推广格式,**既有网盘,也能看到对标的作品**」。
+    原来**只有一处可点**(可用链),而「对标作品」既没有列、连 URL 都没被带出来
+    ⇒ 员工看得到"有资源",却**核对不了这资源是谁在推、推成什么样**。
+    """
     from app.services import feishu_client
 
     sent = []
@@ -127,17 +132,23 @@ def test_push_items_cards_per_platform(monkeypatch) -> None:
     monkeypatch.setattr(feishu_client, "FeishuClient", _C)
     ok = rp.push_items([
         {"name": "花少2人格测试", "platform": "xiaohongshu", "label": "小红书", "count": 2,
-         "samples": [], "link": {"my_link": "https://pan.quark.cn/s/OUR", "pan_url": ""}},
+         "samples": [], "sample_urls": ["https://www.xiaohongshu.com/explore/abc"],
+         "link": {"my_link": "https://pan.quark.cn/s/OUR", "pan_url": ""}},
         {"name": "车机软件", "platform": "kuaishou", "label": "快手", "count": 1,
-         "samples": [], "link": {}},
+         "samples": [], "sample_urls": [], "link": {}},
     ], _S())
     assert ok is True and len(sent) == 2
     hooks = {h for h, _ in sent}
     assert hooks == {"https://example.com/xhs", "https://example.com/ks"}
     xhs_card = next(c for h, c in sent if h == "https://example.com/xhs")
-    assert "https://pan.quark.cn/s/OUR" in str(xhs_card)      # 可用链在卡片里
+    # ★ 两处可点,且分工说清:资源 → 我方链(**写盘名**),对标作品 → 原帖
+    assert "https://pan.quark.cn/s/OUR" in str(xhs_card)
+    assert "🔴夸克" in str(xhs_card), "用户 10-04 口径:写网盘名,别写「我方链」"
+    assert "https://www.xiaohongshu.com/explore/abc" in str(xhs_card)
+    assert "看作品" in str(xhs_card), "那一列得看得出点进去是什么"
     ks_card = next(c for h, c in sent if h == "https://example.com/ks")
-    assert "库内暂无链" in str(ks_card)                        # 库里没有就如实说
+    assert "pan." not in str(ks_card)                        # 库里没有就**不许**有链
+    assert "源未给链接" in str(ks_card), "源没给链接也要如实说,别装成有"
 
 
 def test_probe_reports_partial_platform_failure(session, monkeypatch) -> None:
