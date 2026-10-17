@@ -222,3 +222,110 @@ def test_其它errno保持原措辞不误判死链() -> None:
     msg = str(ei.value)
     assert "提取码验证失败(errno=-9)" == msg, msg
     assert pd._fail(msg)["status"] == "failed"
+
+
+class _PostSession:
+    """只做 `post` 的假会话:按队列依次回载荷(只剩一个时一直回它)。"""
+
+    def __init__(self, payloads: list[dict]) -> None:
+        self.payloads = list(payloads)
+        self.posts: list[tuple[str, dict]] = []
+
+    def post(self, url, **kw):
+        self.posts.append((url, kw.get("data") or {}))
+        p = self.payloads.pop(0) if len(self.payloads) > 1 else self.payloads[0]
+        return type("R", (), {"json": lambda self: p, "status_code": 200})()
+
+
+class Test自动建目录:
+    """★★ 2026-10-17:目标目录被删 ⇒ 58 条候选每轮 `errno=2 转存路径不存在`,**断了 5 天**
+    才被体检顺出来(积压从 67 涨到 139)。根因是**代码没有建目录的能力** ⇒ 只能等人。
+
+    现在:**撞到「路径不存在」就建一次再重试一回**(happy path 一次额外请求都不多发)。
+    接口是**实测**出来的(2026-10-17 可逆探测:建 → `list_dir` 立刻可见 → `delete_paths` 删掉)。
+    """
+
+    def _c(self, payloads, monkeypatch):
+        c = BaiduPanClient("BDUSS=x")
+        sess = _PostSession(payloads)
+        c._browser = lambda: sess                       # type: ignore[method-assign]
+        monkeypatch.setattr(c, "get_bdstoken", lambda: "TOK")
+        return c, sess
+
+    def test_建成功(self, monkeypatch) -> None:
+        c, sess = self._c([{"errno": 0, "fs_id": 1}], monkeypatch)
+        assert c.ensure_dir("/redian百度转存") is None, "不返回值:建没建百度不告诉我们"
+        url, data = sess.posts[0]
+        assert "/api/create" in url and data.get("path") == "/redian百度转存"
+        assert data.get("isdir") == "1", "必须显式说这是目录"
+
+    def test_已存在算成功不许抛(self, monkeypatch) -> None:
+        """并发/两台实例同时建是正常情况 ⇒ 撞名不是错误。"""
+        c, _ = self._c([{"errno": -8, "show_msg": "文件已存在"}], monkeypatch)
+        assert c.ensure_dir("/redian百度转存") is None
+
+    def test_登录态失效要单独抛(self, monkeypatch) -> None:
+        """⚠️ 混进"建目录失败"就会把人指向错的修法(该做的是重粘 Cookie)。"""
+        c, _ = self._c([{"errno": -6, "show_msg": "用户未登录"}], monkeypatch)
+        with pytest.raises(BaiduPanAuthError):
+            c.ensure_dir("/redian百度转存")
+
+    def test_别的错误要说清_errno(self, monkeypatch) -> None:
+        c, _ = self._c([{"errno": -7, "show_msg": "空间不足"}], monkeypatch)
+        with pytest.raises(Exception) as ei:
+            c.ensure_dir("/redian百度转存")
+        assert "errno=-7" in str(ei.value) and "空间不足" in str(ei.value)
+
+    def _xfer(self, c, monkeypatch, ensure_raises: bool = False):
+        monkeypatch.setattr(c, "_verify", lambda *a, **k: None)
+        monkeypatch.setattr(c, "_share_meta",
+                            lambda *a, **k: ("uk", "sid", "tok",
+                                             [{"fs_id": 1, "server_filename": "a.txt"}]))
+        seen: list[str] = []
+
+        def _ens(path, **k):
+            seen.append(path)
+            if ensure_raises:
+                raise RuntimeError("建目录被拒(权限)")
+
+        monkeypatch.setattr(c, "ensure_dir", _ens)
+        return seen
+
+    def test_路径不存在会建一次再重试(self, monkeypatch) -> None:
+        c, sess = self._c([{"errno": 2, "show_msg": "转存路径不存在"}], monkeypatch)
+        seen = self._xfer(c, monkeypatch)
+        with pytest.raises(Exception) as ei:
+            c.transfer_and_share("https://pan.baidu.com/s/1abc")
+        assert seen == ["/redian百度转存"], "没去建目录"
+        assert len(sess.posts) == 2, "没重试那一回"
+        assert "转存路径不存在" in str(ei.value), "两次都失败就该如实报原错误"
+
+    def test_建不出来要如实报_不许伪装成链坏了(self, monkeypatch) -> None:
+        """★ 建不出来(权限/只读)时,错误串必须**指向目录**,不能变成"这条链转存失败" ——
+        否则这 58 条本来能搬的链会被记成失败/死链,而人还在查分享本身。"""
+        c, sess = self._c([{"errno": 2, "show_msg": "转存路径不存在"}], monkeypatch)
+        seen = self._xfer(c, monkeypatch, ensure_raises=True)
+        with pytest.raises(Exception) as ei:
+            c.transfer_and_share("https://pan.baidu.com/s/1abc")
+        assert seen == ["/redian百度转存"]
+        assert "建不出来" in str(ei.value) and "/redian百度转存" in str(ei.value), ei.value
+        assert len(sess.posts) == 1, "建都建不出来,别再打一次(那是白打)"
+
+    def test_对已存在的目录百度也回_errno_0(self, monkeypatch) -> None:
+        """★★ **真机行为(2026-10-17 实测)**:对**已存在**的目录,`/api/create` 回 `errno:0`,
+        既不是 `-8` 也不带"已存在" ⇒ **调用方不许拿返回值判断"原来在不在"**
+        (我第一版就返回布尔值,还被自己写的替身"验证"通过 —— 那是个**假判据**,
+        真机一调就露:它回 True,而目录根本没被新建)。"""
+        c, _ = self._c([{"errno": 0, "fs_id": 653594014991471,
+                         "path": "/redian百度转存", "isdir": 1}], monkeypatch)
+        assert c.ensure_dir("/redian百度转存") is None
+
+    def test_别的_errno_2_不许触发自愈(self, monkeypatch) -> None:
+        """⚠️ 本文件头注有实测:`opera=copy` 恒回 `errno=2` —— 那是**这条路由不可用**,
+        不是目录缺失。盲目重试只会多打一次。"""
+        c, sess = self._c([{"errno": 2, "show_msg": "文件已存在"}], monkeypatch)
+        seen = self._xfer(c, monkeypatch)
+        with pytest.raises(Exception):
+            c.transfer_and_share("https://pan.baidu.com/s/1abc")
+        assert seen == [], "show_msg 不是「路径不存在」就不许去建目录"
+        assert len(sess.posts) == 1

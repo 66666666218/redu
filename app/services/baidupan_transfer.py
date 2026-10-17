@@ -130,6 +130,50 @@ class BaiduPanClient:
             raise BaiduPanAuthError(f"取 bdstoken 失败(errno={j.get('errno')})—— 多半是会话失效")
         return tok
 
+    def ensure_dir(self, dir_path: str, *, bdstoken: str = "") -> None:
+        """确保这个目录存在(**幂等**)。建不出来就抛 —— **不返回值**,因为百度不告诉我们"建没建"。
+
+        ★ 2026-10-17:为那次 **5 天的静默断链**而加 —— 目标目录 `/redian百度转存` 被删后,
+        58 条候选每轮都回 `errno=2 转存路径不存在`,而代码**没有建目录的能力** ⇒ 只能等人。
+        现在转存撞到这个错误会**先确保目录存在、再重试一次**(调用点见 `transfer_and_share`)。
+
+        **接口是实测出来的**(2026-10-17,可逆探测:建 → `list_dir` 立刻可见 → `delete_paths` 删掉):
+        `POST /api/create?a=commit` + `path` / `size=0` / `isdir=1` / `block_list=[]` / `method=add`
+        ⇒ `{"errno":0,"fs_id":…}`。
+
+        ⚠️⚠️ **`errno=0` 不代表"我建了"**:对**已存在**的目录它也回 `errno=0`(实测;
+        既不是 `-8` 也不带"已存在")⇒ **调用方不许根据它判断"目录原来在不在"**
+        (我第一版就返回了布尔值并被自己写的替身测试"验证"通过 —— 那是个假判据)。
+        撞名那两条(`errno=-8` / `show_msg` 含"已存在")照旧当成功,因为不同账号/版本表现不一。
+
+        ⚠️ 用的是**本盘**的 `bdstoken`(`get_bdstoken`),不是从分享页抠的那个(两个不通用)。
+        ⚠️ 只建**最后一级**(`/a/b` 的前提是 `/a` 在)—— 我们用的都是根目录下的单层目录。
+        """
+        tok = bdstoken or self.get_bdstoken()
+        r = self._browser().post(
+            f"{PAN_API}/api/create",
+            params={"a": "commit", "bdstoken": tok, "clienttype": "0",
+                    "app_id": "250528", "web": "1", "channel": "chunlei"},
+            data={"path": dir_path, "size": "0", "isdir": "1",
+                  "block_list": "[]", "method": "add"},
+            headers={"X-Requested-With": "XMLHttpRequest",
+                     "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                     "Origin": PAN_API, "Referer": f"{PAN_API}/disk/main"},
+            timeout=self.timeout)
+        try:
+            j = r.json()
+        except ValueError as exc:
+            raise BaiduPanError(f"建目录失败({dir_path}):HTTP {r.status_code}") from exc
+        errno = j.get("errno", -1)
+        why = str(j.get("show_msg") or "")
+        if errno == 0 or errno == -8 or "已存在" in why:
+            return                      #: 可用(新建 or 本来就在 —— **两者分不出**,别声称)
+        #: ⚠️ 登录态失效要单独抛(与转存那边同一条道理):它是"重粘 Cookie 就好",
+        #:  不是"这个目录建不了",混在一起又会把人指向错的修法。
+        if _looks_like_auth_issue(why):
+            raise BaiduPanAuthError(f"百度网盘登录态失效({why.strip()[:40]})")
+        raise BaiduPanError(f"建目录失败({dir_path}):errno={errno} {why[:60]}")
+
     def list_dir(self, dir_path: str = "/") -> list[dict]:
         """列目录(分页到 200/页,np 上跟到列完)。条目含 `server_filename`/`path`/`isdir`/`size`。"""
         out: list[dict] = []
@@ -298,21 +342,50 @@ class BaiduPanClient:
         names = [f.get("server_filename", "") for f in files]
 
         S = self._browser()
-        r = S.post(f"{PAN_API}/share/transfer",
-                   params={"shareid": shareid, "from": uk, "bdstoken": bdstoken,
-                           "channel": "chunlei", "clienttype": "0", "web": "1"},
-                   data={"fsidlist": json.dumps(fs_ids), "path": target_dir},
-                   headers={"X-Requested-With": "XMLHttpRequest",
-                            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                            "Origin": PAN_API, "Referer": share_url},
-                   timeout=60)
-        t = r.json()
-        if t.get("info") and isinstance(t["info"], list) and t["info"][0].get("errno"):
-            t["errno"] = t["info"][0]["errno"]
-            # ⚠️ **show_msg 必须一起带出来**(2026-10-03 实测踩到):只留 `errno=-6` 时
-            # **看不出是"分享已失效"(终态,别再重试)还是"转存被限制"(等一会就好)** ——
-            # 这两者对下游的意义完全相反。第 165 行创建分享时本来就带了 `show_msg`,这里漏了。
-            t["show_msg"] = t["info"][0].get("show_msg") or t.get("show_msg") or ""
+
+        def _post_transfer() -> dict:
+            """打一次 `/share/transfer` 并**把 `info[0]` 里的 errno/show_msg 提上来**。
+
+            抽成闭包是为了**自愈重试**(见下面那段):重试必须打**同一个请求**,
+            复制一份参数迟早两边飘。
+            """
+            r = S.post(f"{PAN_API}/share/transfer",
+                       params={"shareid": shareid, "from": uk, "bdstoken": bdstoken,
+                               "channel": "chunlei", "clienttype": "0", "web": "1"},
+                       data={"fsidlist": json.dumps(fs_ids), "path": target_dir},
+                       headers={"X-Requested-With": "XMLHttpRequest",
+                                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                                "Origin": PAN_API, "Referer": share_url},
+                       timeout=60)
+            t = r.json()
+            if t.get("info") and isinstance(t["info"], list) and t["info"][0].get("errno"):
+                t["errno"] = t["info"][0]["errno"]
+                # ⚠️ **show_msg 必须一起带出来**(2026-10-03 实测踩到):只留 `errno=-6` 时
+                # **看不出是"分享已失效"(终态,别再重试)还是"转存被限制"(等一会就好)** ——
+                # 这两者对下游的意义完全相反。第 165 行创建分享时本来就带了 `show_msg`,这里漏了。
+                t["show_msg"] = t["info"][0].get("show_msg") or t.get("show_msg") or ""
+            return t
+
+        t = _post_transfer()
+        # ★★★ **按需自愈:目标目录不在就建一次再重试**(2026-10-17)。
+        # 实测代价:2026-10-12 00:36 起 `/redian百度转存` 被删 ⇒ **58 条候选每轮都失败**
+        # (`转存失败(errno=2 转存路径不存在)`),积压涨到 139,而代码**没有建目录的能力**
+        # ⇒ 只能等人发现。断了 **5 天**才被体检顺出来。
+        # ⚠️ **只在真撞到时才建**(happy path 一次额外请求都不多发);
+        # ⚠️ **只认 `errno=2` + `路径不存在` 这个组合**:本文件头注里有实测 ——
+        #    别的 `errno=2` 是「这条路由不可用」(`opera=copy` 恒回 2),盲目重试只会多打一次。
+        if str(t.get("errno", -1)) == "2" and "路径不存在" in str(t.get("show_msg") or ""):
+            try:
+                self.ensure_dir(target_dir)
+            except BaiduPanAuthError:
+                raise                      #: 登录态问题要原样抛(下游按它决定"重粘 Cookie")
+            except Exception as exc:  # noqa: BLE001
+                #: 建不出来 ⇒ **如实说**是"目录建不出来",别让它伪装成"这条链坏了"
+                #: (否则下游会把一批本来能搬的链记成失败/死链)。
+                raise BaiduPanError(
+                    f"转存目标目录不存在且**建不出来**({target_dir}):{str(exc)[:100]}") from exc
+            logger.warning("转存目标目录不存在,**已确保它存在**并重试一次:%s", target_dir)
+            t = _post_transfer()
         errno = t.get("errno", -1)
         if errno not in (0, 4):  # 4=文件已存在,复用
             why = str(t.get("show_msg") or "")

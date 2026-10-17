@@ -146,10 +146,11 @@ def _alert_backlog(session, user_id: int, backlog_left: int, out: dict) -> None:
         bk = _backlog_breakdown(session, user_id)
         why = " · ".join(f"{m}({c} 条)" for m, c in bk["top"] if m) or "(失败原因未记)"
         #: ★ **动作按证据给** —— 三种构成对应三件完全不同的事,别一律甩"调额度"
-        if "转存路径不存在" in why:
-            act = ("⇒ **百度盘上那个转存目录不在**(`/redian百度转存`):请在网页版**新建**它;"
-                   "代码里没有建目录的能力。目录回来后,这批候选**立刻就能搬**"
-                   "(它们本身是好的,只是没有落点)。")
+        if "转存路径不存在" in why or "建不出来" in why:
+            act = ("⇒ **百度盘上那个转存目录不在**(`/redian百度转存`)。"
+                   "⚠️ 2026-10-17 起**代码会自己补建**(转存撞到这个错就建一次再重试);"
+                   "**若连续两轮仍报同一句**,说明这个账号**建不了目录**(权限/只读)⇒ "
+                   "请人工在网页版新建。这批候选本身是好的,只是没有落点。")
         elif bk["pending"] >= bk["failed"]:
             act = ("⇒ 多半是「**额度用完**」而非链失效:可调大 `PAN_DISCOVERY_TRANSFER_LIMIT`"
                    "(积压额度)或 `PAN_DISCOVERY_FRESH_LIMIT`(新发现额度)加快清空。")
