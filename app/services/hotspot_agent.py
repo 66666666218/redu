@@ -461,6 +461,24 @@ def _library_tag(h: dict) -> str:
 #   —— 有人已经在靠它拉新,而且不止一处。
 CROSS_PLATFORM_BOOST: dict[int, float] = {3: 1.6, 2: 1.3}   # 平台数 → 倍数(<2 不加)
 
+#: **平台代码 → 中文名**(单一出处)。用户口径(2026-10-17):「**应该发的平台用中文不要用英文**」——
+#: 建议里写 `tieba+wechat` 没人看得懂。⚠️ 任何往**人看的地方**拼平台名的,都必须过这张表
+#: (库里/字段里仍存代码,那是数据)。
+PLATFORM_CN: dict[str, str] = {
+    "wechat": "公众号", "weibo": "微博", "zhihu": "知乎", "tieba": "贴吧",
+    "xiaohongshu": "小红书", "kuaishou": "快手", "douyin": "抖音", "bilibili": "B站",
+    "douyin-kouling": "抖音口令", "douyin-lead": "抖音线索", "xunlei": "迅雷",
+    "baidu": "百度", "quark": "夸克", "goofish": "闲鱼", "xianyu": "闲鱼",
+}
+
+
+def plat_cn(code: str) -> str:
+    """平台代码 → 中文名(`tieba+wechat` → `贴吧+公众号`);不认识的**原样留着**。"""
+    raw = str(code or "").strip()
+    if not raw:
+        return ""
+    return "+".join(PLATFORM_CN.get(p, p) for p in raw.split("+") if p)
+
 
 def _cross_platform_evidence(db: Session, user_id: int, hotspots: list[dict],
                              days: int = 14) -> None:
@@ -567,9 +585,7 @@ def _cross_platform_tag(h: dict) -> str:
     plats = h.get("platforms_found") or []
     if len(plats) < 2:
         return ""
-    _cn = {"wechat": "公众号", "weibo": "微博", "zhihu": "知乎", "tieba": "贴吧",
-           "xiaohongshu": "小红书", "kuaishou": "快手", "douyin": "抖音", "bilibili": "B站"}
-    return f" 🌍跨平台资源同现({'+'.join(_cn.get(p, p) for p in plats)})"
+    return f" 🌍跨平台资源同现({plat_cn('+'.join(plats))})"
 
 
 def _window_factor(db: Session, user_id: int, hotspots: list[dict],
@@ -1200,7 +1216,7 @@ def _evidence_plans(db: Session, user_id: int, hotspots: list[dict],
         lib_title = _clean_name(titles[0], kw)[:24] if titles else ""
         lib_link = str(lib.get("my_link") or "")
         cross = [str(p) for p in (h.get("platforms_found") or []) if str(p or "").strip()]
-        plats = "+".join(cross[:3]) or str(h.get("platforms") or "抖音")
+        plats = plat_cn("+".join(cross[:3])) or plat_cn(str(h.get("platforms") or "")) or "抖音"
         growth = float(h.get("growth") or 0)
         fit = float(getattr(h.get("fit"), "score", 0) or 0)
         cat = str(h.get("category") or "").strip() or "可资料化"
@@ -1398,11 +1414,22 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
     #: ⚠️ 放在 `if not matched and not llm_plans` **之前**,否则"现成资源 0 + LLM 未配"时
     #:    整轮直接 `no_suggestions` —— 那正是远程 14:10 那轮「选题0」的样子。
     #: ⚠️ LLM 的计划**优先**(它更会写文案),证据型只补空位(`setdefault`)。
-    try:
-        for _kw, _plan in _evidence_plans(db, user_id, fresh, settings).items():
-            llm_plans.setdefault(_kw, _plan)
-    except Exception:  # noqa: BLE001 - 这一档失败不该让整轮一条建议都没有
-        logger.exception("证据型选题生成失败(本轮只剩现成资源/LLM 两档)")
+    #: ⚠️ **默认关**(2026-10-17 用户口径「**agent需要智能化决策,不应该放弃 llm 层的决策**」):
+    #: 这是**确定性模板**,不是智能决策 —— 只在 `hotspot_agent_evidence_plans=True` 时才补位。
+    if bool(getattr(settings, "hotspot_agent_evidence_plans", False)):
+        try:
+            for _kw, _plan in _evidence_plans(db, user_id, fresh, settings).items():
+                llm_plans.setdefault(_kw, _plan)
+        except Exception:  # noqa: BLE001 - 这一档失败不该让整轮一条建议都没有
+            logger.exception("证据型选题生成失败(本轮只剩现成资源/LLM 两档)")
+    else:
+        #: ★ **把 LLM 那一跳的**输入/输出**喊出来**(2026-10-17):远程 14:10 那轮「选题 0」时,
+        #: 日志里**一个字都没有** —— 分不清"没送进去 / 送了模型没给 / 给了但被丢"。
+        #: 这三种的修法完全不同(选热点 / 改提示词 / 查解析),不能长得一样。
+        logger.info("选题 LLM:送进 %d 条热点(例:%s)⇒ 匹配 %d / 计划 %d",
+                    len(llm_hotspots),
+                    "、".join(str(x.get("keyword"))[:12] for x in llm_hotspots[:3]) or "-",
+                    len(llm_matches), len(llm_plans))
 
     if not matched and not llm_plans:
         return {"status": "no_suggestions", "hotspots": len(fresh)}

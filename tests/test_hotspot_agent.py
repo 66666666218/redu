@@ -866,12 +866,40 @@ def test_没有现成资源也能出建议_库里有链就够(session, monkeypat
                                   our_url="https://pan.quark.cn/s/OURS",
                                   found_at=dt.datetime.now()))
     session.commit()
-    out = _run(session, monkeypatch)          # deepseek_api_key=""
+    #: ⚠️ 这套模板**默认关**(用户 2026-10-17 口径「不应该放弃 llm 层的决策」)⇒ 这里显式打开,
+    #: 验的是"应急开关确实还能用"。
+    out = _run(session, monkeypatch, hotspot_agent_evidence_plans=True)
     assert out["status"] == "ok" and out["plans"] >= 1, out
     assert out["evidence"] >= 1
     row = session.scalars(select(HotspotSuggestion)).first()
     assert row is not None and row.kind == "evidence"
     assert "OURS" in (row.plan or ""), row.plan
+
+
+def test_默认不拿模板替代LLM(session, monkeypatch, agent_env) -> None:
+    """★ 用户口径(2026-10-17):「**agent需要智能化决策,不应该放弃 llm 层的决策**」。
+
+    ⇒ 没有 LLM 输出时**不许**用确定性模板冒充选题(默认 `hotspot_agent_evidence_plans=False`)。
+    ⚠️ 代价是这条链会真的"空手" —— 但那是**诚实**的空手,而不是拿模板凑数。
+    """
+    from app.db.models import DiscoveredPanLink
+
+    _snap(session, "某某短剧", growth=180)
+    session.add(DiscoveredPanLink(user_id=1, platform="tieba",
+                                  origin_url="https://pan.baidu.com/s/o2",
+                                  title="某某短剧 全集资源", status="ok",
+                                  our_url="https://pan.quark.cn/s/OURS2",
+                                  found_at=dt.datetime.now()))
+    session.commit()
+    out = _run(session, monkeypatch)          # 模板开关 = 默认 False,LLM 没 key
+    assert out["status"] == "no_suggestions", out
+
+
+def test_平台名要给中文() -> None:
+    """用户口径:「**应该发的平台用中文不要用英文**」—— 建议里写 `tieba+wechat` 没人看得懂。"""
+    assert hotspot_agent.plat_cn("tieba+wechat") == "贴吧+公众号"
+    assert hotspot_agent.plat_cn("douyin-kouling") == "抖音口令"
+    assert hotspot_agent.plat_cn("unknown-plat") == "unknown-plat", "不认识的别吞掉"
 
 
 def _ev_h(**kw):
