@@ -348,3 +348,61 @@ class TestProxyCredRedaction:
         assert "9.9.9.9:3128" in res["msg"]
 
 
+
+
+class Test抖音验证冷却期不许重试:
+    """★ 2026-10-17:用户收到「**douyin_leads 近 24h 失败 9/24 次(连续 2 轮)**」告警。
+
+    查原文判定是 `search_nil_info.search_nil_type=verify_check`(**平台要求过验证**),
+    **不是**登录态过期 ⇒ 那条告警自己给的两个动作里,该做的是 **②「等 + 别再打」**。
+    而 `retry_failed_runs` 每 30 分钟就把这个作业重跑一遍 —— 协议路在冷却里不发请求,
+    **但浏览器兜底那一跳照样打 8 次抖音搜索**。
+    ⚠️ 拿真实运行记录量的代价:那 6 次重试成功一共只换来 **3 个新群 / 0 条新搬**,
+    却花了约 **72 次额外搜索** ⇒ 冷却期内不该重试。
+    """
+
+    def _setup(self, session, monkeypatch, *, cooldown: bool, switch: bool = True):
+        import app.admin as admin_svc
+        import app.db as appdb
+        from app.services import douyin_protocol_source as dps
+
+        monkeypatch.setattr(appdb, "get_session_local", lambda: (lambda: session))
+        monkeypatch.setattr(session, "close", lambda: None)
+        monkeypatch.setattr(dps, "in_verify_cooldown", lambda *a, **k: cooldown)
+
+        class _S:
+            douyin_retry_skip_in_cooldown = switch
+            douyin_verify_cooldown_hours = 6.0
+
+        monkeypatch.setattr("config.settings.get_settings", lambda: _S())
+        session.add(User(id=1, username="a", email="a@b.c", password_hash="x", role="admin"))
+        session.add(RunRecord(run_id="1", user_id=1, kind="douyin_leads", status="failed",
+                              detail="douyin: 8 个关键词全部无结果", retry_count=0,
+                              started_at=datetime.now() - timedelta(hours=2)))
+        session.commit()
+        calls: list[str] = []
+
+        def _runner(db, uid, st=None, **kw):
+            calls.append("ran")
+            return {"platform": "douyin", "count": 0}
+
+        from app.services import douyin_leads as dl
+        monkeypatch.setattr(dl, "run_douyin_leads", _runner)
+        return admin_svc, calls
+
+    def test_冷却期内不重试(self, session, monkeypatch) -> None:
+        admin_svc, calls = self._setup(session, monkeypatch, cooldown=True)
+        assert admin_svc.retry_failed_runs(max_retry=3)["retried"] == 0
+        assert calls == [], "冷却期内不该再打那 8 次搜索"
+        run = session.scalar(select(RunRecord))
+        assert run.status == "failed", "跳过 ≠ 恢复:记录必须留着,冷却结束还能再试"
+
+    def test_不在冷却期就照旧重试(self, session, monkeypatch) -> None:
+        admin_svc, calls = self._setup(session, monkeypatch, cooldown=False)
+        admin_svc.retry_failed_runs(max_retry=3)
+        assert calls == ["ran"], "冷却结束了还不重试,就等于把这条链放弃了"
+
+    def test_开关关掉就照旧重试(self, session, monkeypatch) -> None:
+        admin_svc, calls = self._setup(session, monkeypatch, cooldown=True, switch=False)
+        admin_svc.retry_failed_runs(max_retry=3)
+        assert calls == ["ran"], "可回退:配置置 False 就该恢复旧行为"

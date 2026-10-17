@@ -575,6 +575,29 @@ def retry_run(db: Session, run_id: str, settings=None) -> dict:
         return {"ok": False, "msg": redact_proxy_creds(str(exc))[:200]}
 
 
+def _douyin_verify_cooldown_active(db, user_id: int, settings) -> bool:
+    """抖音现在是不是处于「被要求过验证」的冷却期(判不出来就当**不在**,照旧重试)。
+
+    ★ 2026-10-17:用户收到「douyin_leads 近 24h 失败 **9/24 次**」告警。查原文判定是
+    `search_nil_info.search_nil_type=verify_check`(**平台要求过验证**),**不是**登录态过期
+    ⇒ 平台侧那条的动作只有一个:**等 + 别再打**(本仓原话:每试一次都是一次风控输入)。
+    而本函数每 30 分钟就会重跑一次该作业 —— **每次都会真的打 8 次抖音搜索**
+    (协议路在冷却里不发请求,但**浏览器兜底那一跳照样跑**)。
+    ⚠️ 代价是**量出来的**:那 6 次重试成功一共只换来 **3 个新群 / 0 条新搬**,
+    却花了约 **72 次额外搜索** ⇒ 不值得。⇒ 冷却期内**不重试**;
+    **自然轮次(每 4 小时)照跑** —— 那点兜底产出不至于整段丢掉。
+    """
+    if not bool(getattr(settings, "douyin_retry_skip_in_cooldown", True)):
+        return False
+    try:
+        from app.services import douyin_protocol_source as dps
+
+        return bool(dps.in_verify_cooldown(db, user_id))
+    except Exception:  # noqa: BLE001 - 判不出来就照旧重试(宁可多试一次)
+        logger.info("重试:查抖音验证冷却失败,按「不在冷却」处理", exc_info=True)
+        return False
+
+
 def retry_failed_runs(max_retry: int = 3) -> dict:
     """调度器自动重试:重试近 24h 失败且重试次数 < max_retry 的运行。"""
     from datetime import datetime, timedelta
@@ -634,6 +657,12 @@ def retry_failed_runs(max_retry: int = 3) -> dict:
         for run in recent:
             runner = runners.get(run.kind)
             if not runner:
+                continue
+            if (run.kind == "douyin_leads"
+                    and _douyin_verify_cooldown_active(db, run.user_id, settings)):
+                #: ★ 见 `_douyin_verify_cooldown_active`:平台要求过验证时**别重试**
+                #: (每次重试都要打 8 次搜索,而换回来的几乎全是已见过的线索)。
+                logger.info("重试跳过:douyin_leads 在验证冷却期(平台要求过验证,动作是等)")
                 continue
             kwargs: dict = {}
             if run.kind == "wechat_listen":

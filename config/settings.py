@@ -147,6 +147,15 @@ class Settings(BaseSettings):
     #: 「每试一次都是一次风控输入」,而滑块**绕不过去**(GitHub 调研:无开源项目解决过)。
     #: 解冻只有一条路:**重新导出 cookie**(说明人已经在浏览器里过完验证了)。
     douyin_verify_cooldown_hours: float = 6.0
+    #: **验证冷却期内不再"重试"抖音线索**(2026-10-17,按实测数据定的)。
+    #: 起因:用户收到告警「douyin_leads 近24h 失败 **9/24 次(连续2轮)**」。查原文判定是
+    #: `search_nil_info.search_nil_type=verify_check`(**被要求过验证**,不是登录态过期)
+    #: ⇒ 动作只有一个:**等 + 别再打**。而 `retry_failed_runs` 每 30 分钟就会重跑一次
+    #: ⇒ **每次重试都真的打 8 次抖音搜索**(浏览器兜底那一跳)。
+    #: ⚠️ **代价是量出来的**:那 6 次重试成功一共只换来 **3 个新群 / 0 条新搬**
+    #: (线索 30 条几乎全是已见过的),却花了约 **72 次额外搜索** ⇒ 不值得。
+    #: 置 False 可回到"重试照打"(若哪天需要那份兜底产出)。
+    douyin_retry_skip_in_cooldown: bool = True
     pan_transfer_enabled: bool = True      # 是否自动转存(需 quark_cookie;失败回落原链接推送)
     pan_transfer_backfill_limit: int = 8   # 每轮监听额外补转存的历史文章数
                                            # (同步当场转存失败/早于该逻辑入库的旧文,靠这个队列慢慢补)

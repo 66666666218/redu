@@ -385,6 +385,31 @@ def _ops_targets(settings) -> list[str]:
     return [admin] if admin else list(filter(None, [getattr(settings, "feishu_webhook", "")]))
 
 
+def _collect_verdict(db: Session, user_id: int, kind: str) -> str:
+    """给「两种原因、动作相反」这类失败**补一句判定**(2026-10-17)。
+
+    起因:用户收到「douyin_leads 近 24h 失败 **9/24 次**」的告警 —— 而告警正文里那两条
+    (**① 登录态过期 ⇒ 重扫码** / **② 被要求过验证 ⇒ 等,重扫没用**)**动作相反**,
+    用户只能回来问我是哪一种。**问一次就说明告警没把话说清。**
+
+    ⇒ 能**确定**的时候直接把判定写进告警(判据是协议路自己的 `verify_cooldown` ——
+    它只有在**真的见过 `search_nil_info.search_nil_type=verify_check`** 之后才会被打开);
+    **判不出来就一个字都不写** —— 猜错比不写更坏(会让人去重扫一次码 = 一次设备信号)。
+    """
+    if kind != "douyin_leads":
+        return ""
+    try:
+        from app.services import douyin_protocol_source as dps
+
+        if dps.in_verify_cooldown(db, user_id):
+            return ("  ✅ **判定:平台要求过验证(verify_check)** —— **不是登录态过期**"
+                    " ⇒ 动作是**等**,别重扫、别重登(登录态是好的);"
+                    "协议路在冷却里一个请求都不发,自然轮次由浏览器兜底照跑。")
+    except Exception:  # noqa: BLE001 - 判不出来就**不写判定**(不猜)
+        logger.info("采集失败告警:查抖音验证冷却失败,不写判定", exc_info=True)
+    return ""
+
+
 def check_collect_failures(settings: Settings | None = None, db: Session | None = None) -> int:
     """采集持续失败告警:某用户某板块近 24h 失败 >= 阈值,推送飞书并去重。
 
@@ -531,11 +556,14 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
                 long = days is not None and days >= escalate_days
                 long_txt = f"  【长期】已 {days} 天未成功,建议人工处理" if long else ""
                 head = "🔴 " if long else "⚠️ "
+                #: ★ 能确定就**把判定写进告警**(见 `_collect_verdict`) —— 否则正文里那两条
+                #:   「动作相反」的原因会让人回来问我们,而猜错就要白重扫一次码。
+                verdict = _collect_verdict(db, uid, kind)
                 # 带评估时间戳(2026-09-30):历史消息与新消息并存时,一眼分清新旧——
                 # 用户三次把凌晨/上午的旧告警当成新告警发回来问(误判恢复状态)
                 msg = (f"{head}采集持续失败(近24h) · 评估于 {datetime.now():%m-%d %H:%M} · "
                        f"用户#{uid} 板块[{kind}] 失败 **{cnt}/{total} 次(连续{streak}轮)**"
-                       f"{extra}{long_txt}")
+                       f"{extra}{long_txt}{verdict}")
                 # 去向 = **管理群**(2026-10-16 用户口径「所有的警告都发到管理群」;见 `_ops_targets`)
                 for wh in _ops_targets(settings):
                     if FeishuClient(wh, settings.feishu_secret).send(msg):

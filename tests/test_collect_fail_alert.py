@@ -105,3 +105,55 @@ def test_two_recoveries_each_delete_its_own_row(session, stub_send) -> None:
     alert_service.check_collect_failures(_s(), session)
     left = session.scalars(select(FeishuAlert).where(FeishuAlert.section == "collect_fail")).all()
     assert left == [], f"还有没清掉的恢复告警:{[(r.title) for r in left]}"
+
+
+class Test抖音的判据要写进告警:
+    """★ 2026-10-17:用户收到「douyin_leads 近 24h 失败 **9/24 次**」之后,**只能回来问我**
+    是哪一种原因 —— 而告警正文里那两条**动作相反**:
+    ① 登录态过期 ⇒ 重扫一次码;② 被要求过验证 ⇒ 等(重扫没用)。
+    **问一次就说明告警没把话说清** ⇒ 能确定的时候直接写进告警;判不出来**一个字都不写**(不猜)。
+    """
+
+    def _fail(self, session, n: int = 3) -> None:
+        from datetime import datetime, timedelta
+        base = datetime.now() - timedelta(minutes=30 * (n + 1))
+        for i in range(n):
+            session.add(RunRecord(
+                user_id=1, run_id=f"dl{i}", kind="douyin_leads", status="failed",
+                detail="douyin: 8 个关键词全部无结果 —— ① 登录态过期 ② 被要求过验证",
+                started_at=base + timedelta(minutes=i * 30)))
+        session.commit()
+
+    def test_冷却期内把判定写进告警(self, session, stub_send, monkeypatch) -> None:
+        from app.services import douyin_protocol_source as dps
+
+        monkeypatch.setattr(dps, "in_verify_cooldown", lambda *a, **k: True)
+        self._fail(session, 3)
+        alert_service.check_collect_failures(_s(), session)
+        msg = next(m for m in stub_send if "douyin_leads" in m)
+        assert "判定" in msg and "平台要求过验证" in msg
+        assert "不是登录态过期" in msg and "别重扫" in msg, msg
+
+    def test_判不出来就不写_不许猜(self, session, stub_send, monkeypatch) -> None:
+        """猜错 = 让人白重扫一次码(一次设备/账号信号)⇒ 宁可不写。"""
+        from app.services import douyin_protocol_source as dps
+
+        monkeypatch.setattr(dps, "in_verify_cooldown", lambda *a, **k: False)
+        self._fail(session, 3)
+        alert_service.check_collect_failures(_s(), session)
+        msg = next(m for m in stub_send if "douyin_leads" in m)
+        assert "判定" not in msg, msg
+
+    def test_别的板块不会出现抖音那句(self, session, stub_send, monkeypatch) -> None:
+        from app.services import douyin_protocol_source as dps
+
+        monkeypatch.setattr(dps, "in_verify_cooldown", lambda *a, **k: True)   # 冷却开着也不该串台
+        from datetime import datetime, timedelta
+        base = datetime.now() - timedelta(minutes=90)
+        for i in range(3):
+            session.add(RunRecord(user_id=1, run_id=f"tb{i}", kind="tieba", status="failed",
+                                  detail="贴吧: 搜索失败", started_at=base + timedelta(minutes=i * 30)))
+        session.commit()
+        alert_service.check_collect_failures(_s(), session)
+        msg = next(m for m in stub_send if "tieba" in m)
+        assert "判定" not in msg, msg
