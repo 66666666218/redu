@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 
+import re
 import requests
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -469,6 +470,7 @@ PLATFORM_CN: dict[str, str] = {
     "xiaohongshu": "小红书", "kuaishou": "快手", "douyin": "抖音", "bilibili": "B站",
     "douyin-kouling": "抖音口令", "douyin-lead": "抖音线索", "xunlei": "迅雷",
     "baidu": "百度", "quark": "夸克", "goofish": "闲鱼", "xianyu": "闲鱼",
+    "library": "资源库",
 }
 
 
@@ -870,6 +872,10 @@ def _llm_plan(settings: Settings, hotspots: list[dict],
 
     def _hline(i: int, h: dict) -> str:
         """热点输入行:带多平台证据(共振 = 全网真实需求,单平台 = 待观察)。"""
+        if h.get("from_library"):
+            #: 资源侧候选(2026-10-17):直说「我们手里有这条路」,别把它伪装成热点 ——
+            #: 模型据此该给的是「怎么包装/发哪个平台」,不是「这个热点值不值得做」。
+            return f"{i}. 《{h['keyword']}》【**我们库里已有现成的链**,可直接发】"
         line = f"{i}. 《{h['keyword']}》抖音热度增长 +{h['growth']:.0f}%"
         if h.get("weibo"):
             line += f" [微博热搜第{h['weibo']['rank']}名·热度{h['weibo']['heat']}]"
@@ -1131,6 +1137,129 @@ def _auto_watch_keywords(db: Session, user_id: int, plan_by_kw: dict[str, dict],
     return added
 
 
+def _too_generic(kw: str) -> bool:
+    """这个热点词**是不是纯泛词**(「下载」「全集」「免费」这种热搜词)?
+
+    ⚠️ 2026-10-17 用远程真数据出样板时**当场抓到**:`下载`(热度 +357%)被当成资源名,
+    产出「《下载》全套资源整理」—— 这种建议发出去只会消耗信任。
+    判据:把泛词**整词**去掉后剩不到 2 个字 ⇒ 它本身没有指代对象。
+    ⚠️ 只**整词**判(`JOJO的奇妙冒险全集` 去掉「全集」还剩一串 ⇒ 保留)。
+    """
+    from app.services.pan_discovery import _GENERIC_HINTS
+
+    rest = str(kw or "")
+    for g in _GENERIC_HINTS:
+        rest = rest.replace(g, "")
+    return len(rest.strip()) < 2
+
+
+def _clean_name(raw: str, kw: str = "") -> str:
+    """库里那条资源的**可读名**(给建议用)。
+
+    实测原样搬出来是 `?《蒸蒸日上》全集4K高清完整版百度云网盘资源下载链接??` ——
+    直接用 `resource_key` 会把它**绞碎**(那个函数是给"清洗过的名字"设计的,
+    对原始标题会误剥中段)。⇒ 这里的顺序是:
+      ① **书名号/方括号里点名的那一段**优先(那是引流号自己标的资源名);
+      ② 否则去括号组 / 链接 / 通用词,取最长的一段;
+      ③ 剥掉**与热点词重复的前缀**(避免「《蒸蒸日上》蒸蒸日上…」)。
+    """
+    import re as _re
+
+    from app.services.pan_discovery import _GENERIC_HINTS
+
+    t = str(raw or "")
+    ents = _re.findall(r"[《【「]([^》】」]{2,24})[》】」]", t)
+    if ents:
+        name = ents[0]
+    else:
+        rest = _re.sub(r"[（(\[【《「{][^）)\]】》」}]{0,30}[）)\]】》」}]", " ", t)
+        rest = _re.sub(r"https?://\S+", " ", rest)
+        for g in _GENERIC_HINTS:
+            rest = rest.replace(g, "")
+        runs = _re.findall(r"[一-鿿A-Za-z0-9]{2,24}", rest)
+        name = max(runs, key=len) if runs else ""
+    name = name.strip(" -_·｜|/、,，。.:：?!")
+    if kw and name.startswith(kw):
+        _rest = name[len(kw):].strip(" -_·｜|/、,，。.:：?!")
+        if _rest:                     #: 剥完变空就别剥 —— 「蒸蒸日上」不该被剥成空
+            name = _rest
+    return name or ""
+
+#: **看起来根本不是资源名**的关键词(保底不许拿它们凑数)。
+#: 实测(2026-10-17 远程 20:40 那轮):保底挑中了「一天一个宝藏网站/~33723bUPNs」与
+#: 「《南方剧场》朝朝入梦番外宝子们都看过了嘛」—— 前者是**口令短码**,后者是**一句口语**
+#: ⇒ 拿它们当关键词只会产出「没法执行」的建议。
+_JUNK_KW_RE = re.compile(r"(https?://|www\.|[/~][A-Za-z0-9]{5,}|\d{6,}|[A-Za-z]{12,})")
+_SPOKEN_TAIL_RE = re.compile(r"[了嘛吖呀吧哦呢哈啊]$")
+
+
+def _not_a_resource_name(kw: str) -> bool:
+    """这个「关键词」**像不像资源名**?(不像 ⇒ 保底不要它)
+
+    ⚠️ 与 `_too_generic` 分工:`_too_generic` 管「**泛词**」(`下载`/`全集`),
+    这里管「**根本不是一个名字**」—— 带链接/口令短码/长英文串,或是一句口语,
+    或长度超过 20 字(资源名很少这么长)。
+    """
+    t = str(kw or "").strip()
+    if not t or len(t) > 20:
+        return True
+    if _JUNK_KW_RE.search(t) or _SPOKEN_TAIL_RE.search(t):
+        return True
+    return False
+
+
+def _library_candidates(db: Session, user_id: int, settings: Settings | None = None,
+                        stats: dict | None = None) -> list[dict]:
+    """**资源侧**候选:最近拿到、**已有我方链**的资源 —— 最可执行的选题来源(2026-10-17)。
+
+    起因(远程 20:40 那轮实测):只喂热榜词时,LLM 拿到的素材**全是热度** ——
+    那批热点是「好好看的吖」「一天一个宝藏网站/~33723bUPNs」这种垃圾词 ⇒
+    它只能判「不值得做」(送 10 条 ⇒ 匹配 0 / 计划 0)。
+    而**我们手里已经有链的资源**才是真能直接发的东西 ⇒ 单独作为一档候选进池,
+    让 LLM 去决定「怎么包装 / 发哪个平台 / 什么时机」。
+
+    来源:近 `hotspot_agent_library_days` 天 `discovered_pan_links` 里 `status=ok`
+    且 `our_url` 非空的,按 `resource_key` 去重后取最新 `hotspot_agent_library_top` 条。
+
+    ⚠️ **不去重就等着刷屏**:同一资源每天被搬多次,不去重 LLM 会连着几天建议同一条。
+    ⚠️ 名字过两道闸(`_too_generic` / `_not_a_resource_name`)—— 垃圾名不进池。
+    """
+    from app.db.models import DiscoveredPanLink
+    from app.services.resource_library import resource_key
+
+    days = int(getattr(settings, "hotspot_agent_library_days", 3) or 3)
+    cap = int(getattr(settings, "hotspot_agent_library_top", 4) or 4)
+    since = datetime.now() - timedelta(days=days)
+    rows = db.execute(
+        select(DiscoveredPanLink.title, DiscoveredPanLink.our_url)
+        .where(DiscoveredPanLink.user_id == user_id,
+               DiscoveredPanLink.status == "ok",
+               DiscoveredPanLink.our_url.isnot(None),
+               DiscoveredPanLink.our_url != "",
+               DiscoveredPanLink.found_at >= since)
+        .order_by(DiscoveredPanLink.id.desc()).limit(300)).all()
+    out: list[dict] = []
+    seen: set[str] = set()
+    for title, link in rows:
+        name = _clean_name(str(title or ""))
+        if not name or _too_generic(name) or _not_a_resource_name(name):
+            continue
+        key = resource_key(name) or name
+        if key in seen:
+            continue
+        seen.add(key)
+        #: ⚠️ `auto=False` **有意**:`auto=True` 的候选会被"品类适配 <0.1"那道闸丢掉 ——
+        #:  而资源侧候选不是"自动发现的热词",是**我们手里已有的资源** ⇒
+        #:  合不合适该由 LLM 判(它有链接、有标题),不该被适配度分挡在门外。
+        out.append({"keyword": name[:24], "growth": 0.0, "platforms": "library",
+                    "auto": False, "from_library": True, "our_link": str(link or "")})
+        if len(out) >= cap:
+            break
+    if stats is not None:
+        stats["library"] = {"池": len(rows), "入选": len(out)}
+    return out
+
+
 #: 「**证据型选题**」的最小适配度门(2026-10-17):低于它只当热点播报,不给选题。
 #: 用 `niche_fit` 的分数(0~1,越接近 1 越"能资料化")。
 EVIDENCE_PLAN_MIN_FIT = 0.5
@@ -1156,58 +1285,16 @@ def _evidence_plans(db: Session, user_id: int, hotspots: list[dict],
     ⚠️ **纯新闻热点**(无资源证据、适配度也不够)不产选题 —— 给一条没动作的建议,
     比不给更消耗注意力。
     """
-    from app.services.pan_discovery import _GENERIC_HINTS
     from app.services.resource_library import resource_key
 
-    def _too_generic(kw: str) -> bool:
-        """这个热点词**是不是纯泛词**(「下载」「全集」「免费」这种热搜词)?
 
-        ⚠️ 2026-10-17 用远程真数据出样板时**当场抓到**:`下载`(热度 +357%)被当成资源名,
-        产出「《下载》全套资源整理」—— 这种建议发出去只会消耗信任。
-        判据:把泛词**整词**去掉后剩不到 2 个字 ⇒ 它本身没有指代对象。
-        ⚠️ 只**整词**判(`JOJO的奇妙冒险全集` 去掉「全集」还剩一串 ⇒ 保留)。
-        """
-        rest = kw
-        for g in _GENERIC_HINTS:
-            rest = rest.replace(g, "")
-        return len(rest.strip()) < 2
-
-    def _clean_name(raw: str, kw: str = "") -> str:
-        """库里那条资源的**可读名**(给建议用)。
-
-        实测原样搬出来是 `?《蒸蒸日上》全集4K高清完整版百度云网盘资源下载链接??` ——
-        直接用 `resource_key` 会把它**绞碎**(那个函数是给"清洗过的名字"设计的,
-        对原始标题会误剥中段)。⇒ 这里的顺序是:
-          ① **书名号/方括号里点名的那一段**优先(那是引流号自己标的资源名);
-          ② 否则去括号组 / 链接 / 通用词,取最长的一段;
-          ③ 剥掉**与热点词重复的前缀**(避免「《蒸蒸日上》蒸蒸日上…」)。
-        """
-        import re as _re
-
-        t = str(raw or "")
-        ents = _re.findall(r"[《【「]([^》】」]{2,24})[》】」]", t)
-        if ents:
-            name = ents[0]
-        else:
-            rest = _re.sub(r"[（(\[【《「{][^）)\]】》」}]{0,30}[）)\]】》」}]", " ", t)
-            rest = _re.sub(r"https?://\S+", " ", rest)
-            for g in _GENERIC_HINTS:
-                rest = rest.replace(g, "")
-            runs = _re.findall(r"[一-鿿A-Za-z0-9]{2,24}", rest)
-            name = max(runs, key=len) if runs else ""
-        name = name.strip(" -_·｜|/、,，。.:：?!")
-        if kw and name.startswith(kw):
-            _rest = name[len(kw):].strip(" -_·｜|/、,，。.:：?!")
-            if _rest:                     #: 剥完变空就别剥 —— 「蒸蒸日上」不该被剥成空
-                name = _rest
-        return name or ""
 
     out: dict[str, dict] = {}
     fit_min = float(getattr(settings, "hotspot_agent_probe_fit", EVIDENCE_PLAN_MIN_FIT)
                     or EVIDENCE_PLAN_MIN_FIT)
     for h in hotspots:
         kw = str(h.get("keyword") or "").strip()
-        if not kw or kw in out or _too_generic(kw):
+        if not kw or kw in out or _too_generic(kw) or _not_a_resource_name(kw):
             continue
         lib = h.get("library") or {}
         titles = [str(t) for t in (lib.get("titles") or []) if str(t or "").strip()]
@@ -1301,6 +1388,24 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
         except Exception:  # noqa: BLE001 - 线索链出问题不该拖垮整轮选题
             logger.exception("抖音线索进池失败,本轮跳过(其余来源照常)")
             lead_stats["lead_state"] = "异常"
+    #: ★★ **资源侧进池**(2026-10-17,用户口径「agent需要分析的在具体点」)——
+    #: 只喂热榜词时,LLM 拿到的素材**全是热度**;那批热词一旦是垃圾(实测 20:40 那轮:
+    #: 「好好看的吖」「一天一个宝藏网站/~33723bUPNs」),它只能判「不值得做」⇒ 选题 0。
+    #: 而**我们库里已有链的资源**才是真能直接发的东西 ⇒ 作为一档独立候选进池。
+    #: ⚠️ 放在 `if not hotspots` **之前**:安静的日子(没有新热点)也应当有资源侧建议。
+    if bool(getattr(settings, "hotspot_agent_library_enabled", True)):
+        _lib_stats: dict = {}
+        try:
+            for _c in _library_candidates(db, user_id, settings, stats=_lib_stats):
+                _k = _norm(_c["keyword"])
+                if _k and _k not in _seen:
+                    hotspots.append(_c)
+                    _seen.add(_k)
+            if _lib_stats.get("library"):
+                logger.info("资源侧候选进池:%s", _lib_stats["library"])
+        except Exception:  # noqa: BLE001 - 这一档失败不该拖垮整轮选题
+            logger.exception("资源侧候选进池失败(其余来源照常)")
+
     if not hotspots:
         # 晨间/冷却期兜底(2026-09-30):涨幅>=50% 的口径在热点冷却时段会空手——
         # 一级:微博/百度"新上榜"(上升信号最干净的代理);二级:douhot 降阈值取正增长词。
@@ -1376,7 +1481,14 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
     _opportunity(db, user_id, fresh, supply)
 
     top_n = max(1, int(getattr(settings, "hotspot_agent_top_n", 8) or 8))
-    fresh = fresh[:top_n]
+    #: ⚠️ **资源侧候选要优先占位**(2026-10-17):它们的涨幅恒为 0,而 `_opportunity` 是**热度驱动**
+    #: 的 ⇒ 不保底占位就永远被挤出 top_n,LLM 还是收不到它们(那正是「只喂热词」的老样子)。
+    _lib_keep = max(0, int(getattr(settings, "hotspot_agent_library_top", 4) or 0))
+    _lib_part = [h for h in fresh if h.get("from_library")][:_lib_keep]
+    if _lib_part:
+        fresh = (_lib_part + [h for h in fresh if not h.get("from_library")])[:top_n]
+    else:
+        fresh = fresh[:top_n]
 
     # 第一层:标题子串精确匹配(零成本,字面命中绝不漏)
     matched: list[tuple[dict, WechatArticle, str]] = []
@@ -1588,7 +1700,7 @@ def hotspot_agent_tick_all_users(settings: Settings | None = None) -> int:
                     _record_run(db, uid, "hotspot_agent", "success",
                                 f"热点{out.get('hotspots', 0)} 现成资源{out.get('matched', 0)} "
                                 f"选题{out.get('plans', out.get('llm', 0))}"
-                                f"(证据型{out.get('evidence', 0)}) "
+                                f"(保底{out.get('evidence', 0)}) "
                                 f"| {out.get('evidence_tally', '')}")
                 db.commit()
             except Exception:  # noqa: BLE001 - 单用户失败不影响其余

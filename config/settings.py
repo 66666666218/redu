@@ -194,6 +194,13 @@ class Settings(BaseSettings):
     #: ⚠️ 与「LLM 优先」不矛盾:LLM 给了就一条都不用;关掉它就是「宁可空手」。
     hotspot_agent_fallback_plans: bool = True
     hotspot_agent_fallback_max: int = 2      # 保底最多几条(别让它变成模板刷屏)
+    #: **资源侧候选**(2026-10-17,用户口径「agent需要分析的在具体点,现在已经有足够的数据支持了」):
+    #: 只喂热榜词时 LLM 拿到的素材**全是热度**;那批热词一旦是垃圾(实测远程 20:40 那轮:
+    #: 「好好看的吖」「一天一个宝藏网站/~33723bUPNs」),它只能判「不值得做」⇒ 选题 0。
+    #: ⇒ 把**我们库里已有我方链的资源**也作为候选喂进去,让 LLM 决定「怎么包装/发哪/何时」。
+    hotspot_agent_library_enabled: bool = True
+    hotspot_agent_library_top: int = 4       # 每轮最多几条资源侧候选(它们**优先占 top_n 的名额**)
+    hotspot_agent_library_days: int = 3      # 只取近 N 天搬成的(老的已经错过窗口)
     hotspot_agent_top_n: int = 15        # 单轮最多产出几条选题建议(2026-10-01 由 8 上调)
     hotspot_agent_llm_top: int = 10      # 没现成资源的热点里,最多几个交给 LLM 生成选题
                                          # (2026-10-01 由 3 上调:实测 430 条候选里只有 3 条能进

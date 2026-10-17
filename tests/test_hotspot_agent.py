@@ -969,3 +969,75 @@ def test_标题要带上资源名() -> None:
         library={"titles": ["《恋爱调查问卷/男朋友调查问卷》入口链接自取"],
                  "my_link": "https://pan.quark.cn/s/Q"})])
     assert "恋爱调查问卷" in plans["某某短剧"]["title"], plans["某某短剧"]["title"]
+
+
+def test_保底不许拿垃圾关键词凑数() -> None:
+    """★ 2026-10-17(远程 20:40 那轮实测):保底挑中了
+    「一天一个宝藏网站/~33723bUPNs」(口令短码)与
+    「《南方剧场》朝朝入梦番外宝子们都看过了嘛」(一句口语)——
+    拿它们当关键词只会产出**没法执行**的建议。"""
+    bad = ("一天一个宝藏网站/~33723bUPNs",
+           "《南方剧场》朝朝入梦番外宝子们都看过了嘛",
+           "https://pan.quark.cn/s/abc",
+           "123456789")
+    for t in bad:
+        assert hotspot_agent._not_a_resource_name(t) is True, t
+    good = ("嫁金钗全集", "电子问卷", "JOJO的奇妙冒险/飙马野郎")
+    for t in good:
+        assert hotspot_agent._not_a_resource_name(t) is False, t
+
+
+def test_库里有链的资源会进池_按资源身份去重(session) -> None:
+    """资源侧候选 = **我们库里已有我方链**的资源(最可执行的选题来源)。"""
+    from app.db.models import DiscoveredPanLink
+
+    for i, t in enumerate(("《伪装直男》全集资源", "伪装直男 更20集", "《嫁金钗》全集资源")):
+        session.add(DiscoveredPanLink(user_id=1, platform="tieba",
+                                      origin_url=f"https://pan.baidu.com/s/x{i}",
+                                      title=t, status="ok",
+                                      our_url=f"https://pan.quark.cn/s/L{i}",
+                                      found_at=dt.datetime.now()))
+    session.add(DiscoveredPanLink(user_id=1, platform="tieba",
+                                  origin_url="https://pan.baidu.com/s/junk",
+                                  title="一天一个宝藏网站/~33723bUPNs", status="ok",
+                                  our_url="https://pan.quark.cn/s/J", found_at=dt.datetime.now()))
+    session.commit()
+
+    class _S:
+        hotspot_agent_library_days = 3
+        hotspot_agent_library_top = 4
+
+    stats: dict = {}
+    got = hotspot_agent._library_candidates(session, 1, _S(), stats=stats)
+    names = [c["keyword"] for c in got]
+    assert "伪装直男" in names and len([n for n in names if "伪装直男" in n]) == 1, names
+    assert all("宝藏网站" not in n for n in names), f"垃圾名进了池:{names}"
+    assert all(c.get("from_library") and c.get("our_link") for c in got)
+    assert stats["library"]["入选"] == len(got)
+
+
+def test_资源侧候选必须进到LLM输入里(session, monkeypatch, agent_env) -> None:
+    """★ 远程 20:40 的教训:只喂热榜词 ⇒ 素材全是热度 ⇒ LLM 只能判"不值得做"。
+
+    ⇒ 库里**已有链**的资源必须作为候选喂进去(而且它涨幅恒 0,得**优先占位**才进得了 top_n)。
+    """
+    from app.db.models import DiscoveredPanLink
+
+    session.add(DiscoveredPanLink(user_id=1, platform="tieba",
+                                  origin_url="https://pan.baidu.com/s/lib1",
+                                  title="《嫁金钗》全集资源", status="ok",
+                                  our_url="https://pan.quark.cn/s/LIB1",
+                                  found_at=dt.datetime.now()))
+    session.commit()
+    seen: dict = {}
+
+    def _fake_llm(settings, hotspots, supply, proven):
+        seen["hots"] = list(hotspots)
+        return {"matches": {}, "plans": {}}
+
+    import app.services.hotspot_agent as ha
+    monkeypatch.setattr(ha, "_llm_plan", _fake_llm)
+    ha.run_hotspot_agent(session, 1, _agent_settings(deepseek_api_key="sk-x"))
+    libs = [h for h in (seen.get("hots") or []) if h.get("from_library")]
+    assert libs, f"资源侧候选没进 LLM 输入:{[h.get('keyword') for h in (seen.get('hots') or [])]}"
+    assert "嫁金钗" in libs[0]["keyword"]
