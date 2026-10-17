@@ -84,17 +84,43 @@ def _my_link_of(session: Session, user_id: int, pan_url: str) -> str:
 
     两处都查:公众号链存 `WechatArticle.my_pan_urls`,**公开平台发现的**存
     `discovered_pan_links.our_url`(2026-10-02 并入)。
+
+    ★★ **必须按「盘种类」配对,而且同盘多条就不许猜**(2026-10-17)。
+    起因:用户报「搬运的很多重复」,顺查发现 `discovered_pan_links` 里 **39 行共用同一条
+    我方链**(`pan.xunlei.com/s/VP42…`),而且**同一天新增的两行匹配的是两条不同的百度链、
+    却都被贴上了同一个迅雷链** —— 那是**错链**(比多搬一份严重得多)。
+    根因就在这一行:原来取的是**整篇文章的第一条**我方链,而
+      · 一篇文章可以有**多条**盘链(`pan_urls`),我方链(`my_pan_urls`)是**另一个数量**
+        (实测 6 条原链 → 3 条我方链)⇒ **根本不是位置对应**;
+      · 于是「第一条」只对第一类盘恰好正确,其余全张冠李戴;而抄错一次之后,
+        后续「复用」还会把错值继续传下去(越滚越错)。
+    ⇒ 现在的规则(两步):
+      ① **整篇只有一对**(只有 1 条原链、只有 1 条我方链)⇒ 映射**唯一**,直接用 ——
+         **哪怕盘种类不同也算**(实测存在:原链是百度、我们搬进的是夸克);
+      ② 否则**只看与查询链同盘的我方链**:同盘恰好一条 ⇒ 用它;**同盘多条 ⇒ 返回空**
+         (分不清,宁可不给)。空会继续落到 `_discovered_my_link`
+         (那里按 `origin_url` **精确**对,可信)。
     """
-    blobs = session.scalars(select(WechatArticle.my_pan_urls).join(
+    kind = _pan_kind(pan_url)
+    rows = session.execute(select(WechatArticle.pan_urls, WechatArticle.my_pan_urls).join(
         WechatPanLink, WechatPanLink.article_id == WechatArticle.id).where(
         WechatPanLink.pan_url == pan_url, WechatArticle.user_id == user_id,
         WechatArticle.my_pan_urls.isnot(None), WechatArticle.my_pan_urls != ""
     ).limit(3)).all()
-    for blob in blobs:
-        for line in (blob or "").splitlines():
-            link = _clean_link(line)
-            if link:
-                return link
+    for pan_blob, my_blob in rows:          # 逐篇看:某一篇能**唯一**对上就算数
+        links = [x for x in (_clean_link(line) for line in (my_blob or "").splitlines()) if x]
+        pans = {x for x in str(pan_blob or "").split() if x.startswith("http")}
+        if len(set(links)) == 1 and len(pans) <= 1:
+            return links[0]                 #: ① 唯一的一对(跨盘也认 —— 映射是确定的)
+        same: list[str] = []
+        for link in links:
+            if _pan_kind(link) == kind and link not in same:
+                same.append(link)
+        if len(same) == 1:
+            return same[0]
+        if len(same) > 1:
+            logger.info("资源库:%s 同一篇里有 %d 条同盘(%s)我方链,分不清对应谁 —— 不猜",
+                        pan_url[:44], len(same), kind)
     return _discovered_my_link(session, user_id, pan_url)
 
 

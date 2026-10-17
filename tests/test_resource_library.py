@@ -342,3 +342,50 @@ def test_同一份资源的命名变体归到同一个身份() -> None:
     b = resource_key("伪装直男【更至19】(1)等2个文件")
     assert a == b == "伪装直男", (a, b)
     assert resource_key("完全不相干的另一个资源") != a
+
+
+class Test匹配链要按盘种类配对:
+    """★★ 2026-10-17:用户报「搬运的很多重复」,顺查发现 `discovered_pan_links` 里 **39 行
+    共用同一条我方链**,而且同一天新增的两行**匹配的是两条不同的百度链、却都被贴上了同一个
+    迅雷链** ⇒ **错链**(比多搬一份严重得多)。
+
+    根因:`_my_link_of` 取的是**整篇文章的第一条**我方链 —— 而一篇文章可以有 6 条原链、
+    3 条我方链(实测),**根本不是位置对应**;于是「第一条」只对第一类盘恰好正确,其余全张冠李戴,
+    抄错一次之后「复用」还会把错值继续传下去(越滚越错)。
+    """
+
+    def _art(self, session, pan_urls: list[str], my: str):
+        a = _mk(session, "多链文章", "号甲", pan_urls[0], my=my)
+        for u in pan_urls[1:]:
+            session.add(WechatPanLink(user_id=1, article_id=a.id, pan_url=u))
+        session.commit()
+        return a
+
+    def test_百度原链要配百度我方链_不许拿夸克的顶(self, session) -> None:
+        from app.services.resource_library import _my_link_of
+
+        self._art(session, ["https://pan.quark.cn/s/qui", "https://pan.baidu.com/s/baidu"],
+                  "https://pan.quark.cn/s/OURQ\nhttps://pan.baidu.com/s/OURB")
+        assert _my_link_of(session, 1, "https://pan.baidu.com/s/baidu") == "https://pan.baidu.com/s/OURB"
+        assert _my_link_of(session, 1, "https://pan.quark.cn/s/qui") == "https://pan.quark.cn/s/OURQ"
+
+    def test_同盘多条就交白卷_不许猜(self, session) -> None:
+        """6 条原链 → 3 条我方链是**真实数据**;哪条对应哪条无从得知 ⇒ **不给总比给错好**。"""
+        from app.services.resource_library import _my_link_of
+
+        self._art(session, ["https://pan.quark.cn/s/a1", "https://pan.quark.cn/s/a2"],
+                  "https://pan.quark.cn/s/OUR1\nhttps://pan.quark.cn/s/OUR2")
+        assert _my_link_of(session, 1, "https://pan.quark.cn/s/a1") == "", \
+            "同盘多条还硬指一条 = 错链(那 39 行就是这么来的)"
+
+    def test_整篇只有一对时_跨盘也认(self, session) -> None:
+        """⚠️ **别把判据收得比数据还紧**:整篇只有 1 条原链、1 条我方链时,映射是**唯一确定**的
+        —— 哪怕盘种类不同(实测存在:原链是百度、我们搬进的是夸克)。
+
+        这条是既有用例 `test_真名字对得上时照样复用` 把我第一次的改法打红之后补的
+        (它构造的正是"百度原链 + 夸克我方链")。
+        """
+        from app.services.resource_library import _my_link_of
+
+        self._art(session, ["https://pan.baidu.com/s/baidu"], "https://pan.quark.cn/s/OURQ")
+        assert _my_link_of(session, 1, "https://pan.baidu.com/s/baidu") == "https://pan.quark.cn/s/OURQ"

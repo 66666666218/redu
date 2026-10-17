@@ -35,7 +35,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import or_, select  # noqa: E402
 
 from app.db import get_session_local  # noqa: E402
 from app.db.models import DiscoveredPanLink, WechatArticle, XunleiResource  # noqa: E402
@@ -52,6 +52,21 @@ def _independent_links(session, user_id: int) -> dict[str, list[str]]:
                 out[u].append(str(title))
     for link, title in session.execute(select(XunleiResource.share_url, XunleiResource.name)
                                        .where(XunleiResource.user_id == user_id)).all():
+        u = str(link or "").strip()
+        if u.startswith("http") and title:
+            out[u].append(str(title))
+    #: ★★ **「发现链自己搬成的」那一行同样是独立来源**(2026-10-17,抽查换来的):
+    #: 这些行的 `our_url` 是 `transfer_pan_url` **真写进去的**(不是复用抄的)——
+    #: 只要它**不是复用行**,就能作证「这条链真的是这个资源」。
+    #: ⚠️ **只收非复用行**:复用行之间会**互相作证**(循环证据),那是污染本身的回路。
+    #: ⚠️ 不加这一条,判据会把**合法链判成错配** —— 实测抽查 4 条"要清掉"里,3 条都能被
+    #:    自己的非复用孪生行(同标题同链)作证 ⇒ 真 apply 会让它们**白重搬一遍**。
+    for link, title in session.execute(
+            select(DiscoveredPanLink.our_url, DiscoveredPanLink.title)
+            .where(DiscoveredPanLink.user_id == user_id,
+                   DiscoveredPanLink.our_url.isnot(None), DiscoveredPanLink.our_url != "",
+                   or_(DiscoveredPanLink.message.is_(None),
+                       DiscoveredPanLink.message.notlike("库里已有%")))).all():
         u = str(link or "").strip()
         if u.startswith("http") and title:
             out[u].append(str(title))
