@@ -806,3 +806,69 @@ class TestLoadsLlmJson:
         from app.services.hotspot_agent import loads_llm_json
 
         assert loads_llm_json('{"matches": [{"hotspot": "A"') is None
+
+
+class Test证据型选题_不依赖LLM:
+    """★ 2026-10-17(远程实测「**热点15 现成资源2 选题0**」):原来能出选题的只有两条路 ——
+    ① 热点词**字面**出现在文章标题里;② **LLM 语义匹配**(没配 key 就整条跳过)。
+    而库里 2000+ 条盘链、跨平台同现这些证据**没被用来出选题**。
+    用户口径:「**agent需要分析的在具体点,现在已经有足够的数据支持了**」。
+    """
+
+    def _h(self, **kw):
+        base = {"keyword": "某某短剧", "growth": 180.0, "platforms": "douyin",
+                "fit": type("F", (), {"score": 0.2})(), "category": "影视"}
+        base.update(kw)
+        return base
+
+    def test_库里已有链_给出可直接发的动作(self) -> None:
+        plans = hotspot_agent._evidence_plans(None, 1, [self._h(
+            library={"titles": ["某某短剧 全集"], "my_link": "https://pan.quark.cn/s/A"})])
+        p = plans["某某短剧"]
+        assert p["kind"] == "evidence" and p["_cls"] == "库里已有链"
+        assert "https://pan.quark.cn/s/A" in p["steps"], "最可执行的那一步必须带链"
+        assert "某某短剧" in p["title"]
+
+    def test_库里有但还没搬_先搬再发(self) -> None:
+        plans = hotspot_agent._evidence_plans(None, 1, [self._h(
+            library={"titles": ["某某短剧 全集"], "my_link": ""})])
+        p = plans["某某短剧"]
+        assert p["_cls"] == "库里待搬" and "还没搬" in p["why_doable"]
+        assert "搬成我方链" in p["steps"]
+
+    def test_跨平台同现也出选题(self) -> None:
+        plans = hotspot_agent._evidence_plans(None, 1, [self._h(
+            platforms_found=["weibo", "tieba", "zhihu"])])
+        p = plans["某某短剧"]
+        assert p["_cls"] == "跨平台同现" and "3 个平台" in p["why_doable"]
+
+    def test_高适配但库里没有_把缺口说成搜索动作(self) -> None:
+        plans = hotspot_agent._evidence_plans(None, 1, [self._h(
+            fit=type("F", (), {"score": 0.8})())])
+        p = plans["某某短剧"]
+        assert p["kind"] == "probe" and p["_cls"] == "缺口待找"
+        assert "搜「" in p["steps"], "没有资源时要给**去搜什么词**"
+
+    def test_纯新闻热点不给选题(self) -> None:
+        """⚠️ 给一条没有动作的建议,比不给更消耗注意力。"""
+        assert hotspot_agent._evidence_plans(None, 1, [self._h()]) == {}
+
+
+def test_没有现成资源也能出建议_库里有链就够(session, monkeypatch, agent_env) -> None:
+    """★ 端到端:热点词**不在任何文章标题里**、**LLM 没配**,但库里已有我方链
+    ⇒ 必须给出**具体**建议(旧行为:整轮 `no_suggestions` = 远程那 12 轮「选题0」)。"""
+    from app.db.models import DiscoveredPanLink
+
+    _snap(session, "某某短剧", growth=180)
+    session.add(DiscoveredPanLink(user_id=1, platform="tieba",
+                                  origin_url="https://pan.baidu.com/s/o1",
+                                  title="某某短剧 全集资源", status="ok",
+                                  our_url="https://pan.quark.cn/s/OURS",
+                                  found_at=dt.datetime.now()))
+    session.commit()
+    out = _run(session, monkeypatch)          # deepseek_api_key=""
+    assert out["status"] == "ok" and out["plans"] >= 1, out
+    assert out["evidence"] >= 1
+    row = session.scalars(select(HotspotSuggestion)).first()
+    assert row is not None and row.kind == "evidence"
+    assert "OURS" in (row.plan or ""), row.plan

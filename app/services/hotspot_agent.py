@@ -1115,6 +1115,98 @@ def _auto_watch_keywords(db: Session, user_id: int, plan_by_kw: dict[str, dict],
     return added
 
 
+#: 「**证据型选题**」的最小适配度门(2026-10-17):低于它只当热点播报,不给选题。
+#: 用 `niche_fit` 的分数(0~1,越接近 1 越"能资料化")。
+EVIDENCE_PLAN_MIN_FIT = 0.5
+
+
+def _evidence_plans(db: Session, user_id: int, hotspots: list[dict],
+                    settings: Settings | None = None) -> dict[str, dict]:
+    """**不依赖 LLM** 的选题计划 —— 证据够硬就直接给出**具体**建议(2026-10-17)。
+
+    用户口径:「**agent需要分析的在具体点,现在已经有足够的数据支持了应该**」。
+    远程实测(2026-10-17 14:10):`热点15 现成资源2 **选题0** | 证据触发…资源库0 跨平台同现3`
+    —— 原来能出选题的只有两条路:① 热点词**字面**出现在文章标题里;② **LLM 语义匹配**
+    (没配 key 就整条跳过)。而库里已经有 2000+ 条盘链、跨平台同现、抖音线索
+    —— **这些证据都没被用来出选题**。
+
+    ⇒ 现在按证据强弱给每条热点产出一条**可执行**建议(字段与 LLM 那一档同形,
+    直接复用 `_plan_text` 渲染):
+      ① 库里**已有我方链** ⇒ 用哪条链、发到哪、标题扣什么(**最可执行**);
+      ② 库里有但**还没搬** ⇒ 先搬哪一条;
+      ③ **跨平台同现 ≥2** ⇒ 有人在不止一处靠它拉新,跟着发;
+      ④ 以上都没有、但**品类适配够高** ⇒ 给出「**去哪个平台、搜哪几个词**」的探测计划
+         (把"缺口"变成动作)。
+    ⚠️ **纯新闻热点**(无资源证据、适配度也不够)不产选题 —— 给一条没动作的建议,
+    比不给更消耗注意力。
+    """
+    from app.services.resource_library import resource_key
+
+    out: dict[str, dict] = {}
+    fit_min = float(getattr(settings, "hotspot_agent_probe_fit", EVIDENCE_PLAN_MIN_FIT)
+                    or EVIDENCE_PLAN_MIN_FIT)
+    for h in hotspots:
+        kw = str(h.get("keyword") or "").strip()
+        if not kw or kw in out:
+            continue
+        lib = h.get("library") or {}
+        titles = [str(t) for t in (lib.get("titles") or []) if str(t or "").strip()]
+        lib_title = (titles[0][:40] if titles else "")
+        lib_link = str(lib.get("my_link") or "")
+        cross = [str(p) for p in (h.get("platforms_found") or []) if str(p or "").strip()]
+        plats = "+".join(cross[:3]) or str(h.get("platforms") or "抖音")
+        growth = float(h.get("growth") or 0)
+        fit = float(getattr(h.get("fit"), "score", 0) or 0)
+        cat = str(h.get("category") or "").strip() or "可资料化"
+        heat = f"热度 +{growth:.0f}%" if growth else "新上榜"
+        if lib_link:
+            out[kw] = {
+                "kind": "evidence", "_cls": "库里已有链",
+                "why_doable": (f"资源库**已有现成链**(「{lib_title}」);{heat}"
+                               + (f";跨平台同现 {len(cross)}({plats})" if len(cross) >= 2 else "")),
+                "resource": lib_title or kw,
+                "title": f"《{kw}》全套资源整理(附网盘,直接存)",
+                "audience": f"搜「{kw}」的人",
+                "hook": "开头先给结果,再给链接",
+                "timing": "趁热 48 小时内",
+                "steps": f"① 直接用库里这条链:{lib_link};② 标题扣住「{kw}」;③ 发到 {plats}",
+            }
+            continue
+        if lib_title:
+            out[kw] = {
+                "kind": "evidence", "_cls": "库里待搬",
+                "why_doable": f"库里有「{lib_title}」但**还没搬成我方链**;{heat}",
+                "resource": lib_title,
+                "title": f"《{kw}》资源整理(附网盘)",
+                "audience": f"搜「{kw}」的人", "hook": "先给结果再给链接",
+                "timing": "趁热 48 小时内",
+                "steps": f"① 先把「{lib_title}」搬成我方链;② 标题扣住「{kw}」;③ 发到 {plats}",
+            }
+            continue
+        if len(cross) >= 2:
+            out[kw] = {
+                "kind": "evidence", "_cls": "跨平台同现",
+                "why_doable": f"**跨 {len(cross)} 个平台**都有人在贴({plats});{heat}",
+                "resource": f"{kw} 相关资源", "title": f"《{kw}》资源合集(附网盘)",
+                "audience": f"搜「{kw}」的人", "hook": "合集形式,先给目录",
+                "timing": "本周内(多平台同现通常只有 1~2 周窗口)",
+                "steps": f"① 去 {plats} 找这几条帖子里的盘链;② 搬进夸克;③ 标题扣住「{kw}」",
+            }
+            continue
+        if fit >= fit_min:
+            core = resource_key(kw) or kw
+            out[kw] = {
+                "kind": "probe", "_cls": "缺口待找",
+                "why_doable": f"品类适配 {fit:.2f}({cat})但**库里暂无** —— 这是个缺口;{heat}",
+                "resource": f"{kw} 相关资源(需先找)", "title": f"《{kw}》整理合集(附网盘)",
+                "audience": f"搜「{kw}」的人", "hook": "先给结果再给链接",
+                "timing": "趁热 48 小时内",
+                "steps": (f"① 去 抖音/贴吧 搜「{core} 网盘」「{core} 资源」;"
+                          f"② 命中就搬进夸克;③ 标题扣住「{kw}」发到 {plats}"),
+            }
+    return out
+
+
 def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = None) -> dict:
     """跑一轮热点选题建议;返回统计。站内通知,24h 内同热点不重复推。"""
     settings = settings or get_settings()
@@ -1251,6 +1343,17 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
                 if plan:
                     llm_plans[h["keyword"]] = plan
 
+    #: ★★ **证据型选题**(2026-10-17,用户口径「分析在具体点,现在已经有足够的数据支持了」)
+    #: —— **不依赖 LLM**:库里已有链 / 跨平台同现 / 品类缺口,都能直接给出可执行建议。
+    #: ⚠️ 放在 `if not matched and not llm_plans` **之前**,否则"现成资源 0 + LLM 未配"时
+    #:    整轮直接 `no_suggestions` —— 那正是远程 14:10 那轮「选题0」的样子。
+    #: ⚠️ LLM 的计划**优先**(它更会写文案),证据型只补空位(`setdefault`)。
+    try:
+        for _kw, _plan in _evidence_plans(db, user_id, fresh, settings).items():
+            llm_plans.setdefault(_kw, _plan)
+    except Exception:  # noqa: BLE001 - 这一档失败不该让整轮一条建议都没有
+        logger.exception("证据型选题生成失败(本轮只剩现成资源/LLM 两档)")
+
     if not matched and not llm_plans:
         return {"status": "no_suggestions", "hotspots": len(fresh)}
 
@@ -1272,7 +1375,10 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
     for kw, plan in plan_by_kw.items():
         h = by_kw.get(kw, {"growth": 0, "platforms": "douyin"})
         row = HotspotSuggestion(
-            user_id=user_id, keyword=kw, growth=h.get("growth", 0), kind="llm",
+            user_id=user_id, keyword=kw, growth=h.get("growth", 0),
+            #: ⚠️ `kind` 不能写死成 `llm`(2026-10-17):证据型选题(`evidence`/`probe`)
+            #: 不是 LLM 产的,结算回看时**必须分得开是谁给的建议**(否则"LLM 的效果"被污染)。
+            kind=str(plan.get("kind") or "llm"),
             resource_title="", link="", plan=_plan_text(plan),
             platforms=str(h.get("platforms") or "douyin"),
             category=str(h.get("category") or "")[:16],
@@ -1312,6 +1418,16 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
     # ⚠️ 恒为 0 的那几档是"接了但没生效"的信号(数据源没接上 / 阈值太高),不是"今天恰好没有"。
     tally = _evidence_tally(fresh)
     lines = ["🎯 优先发货(机会分 top):", tally]
+    #: ★ **证据型选题的构成**(2026-10-17):只报「N 条拉新选题」看不出它们**靠什么证据**产出来的
+    #: —— 而调参要看的正是这个(库里链多 ⇒ 资源库在起作用;缺口多 ⇒ 该去搬/去搜)。
+    _cls: dict[str, int] = {}
+    for _p in plan_by_kw.values():
+        _c = str((_p or {}).get("_cls") or "")
+        if _c:
+            _cls[_c] = _cls.get(_c, 0) + 1
+    if _cls:
+        lines.append("🧩 证据型选题:" + "、".join(
+            f"{k} {v}" for k, v in sorted(_cls.items(), key=lambda kv: -kv[1])))
     lines.extend(e[1] for e in entries[:push_top])
     if len(entries) > push_top:
         lines.append("📋 备选(已落库,机会分靠后):")
@@ -1342,8 +1458,12 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
         detail="近 24h 监控词热度达标,可执行动作:\n" + "\n".join(lines)[:2000]
         + "\n💡 做完之后什么都不用做——系统会自动识别发文并结算这条建议带了多少拉新",
         settings=settings, push_feishu=False)
+    _ev_n = sum(1 for _p in plan_by_kw.values() if (_p or {}).get("_cls"))
     return {"status": "ok", "hotspots": len(fresh), "matched": len(matched),
-            "llm": len(plan_by_kw), "notified": len(matched) + len(plan_by_kw),
+            #: ⚠️ `llm` 这个键**现在含证据型选题**(名字是历史包袱,不要据此判断"LLM 产了几条");
+            #: 真正分开的计数用 `plans` / `evidence`(2026-10-17)。
+            "llm": len(plan_by_kw), "plans": len(plan_by_kw), "evidence": _ev_n,
+            "notified": len(matched) + len(plan_by_kw),
             # 把"各档证据各触发几次"带出去 —— 调用方写进运行记录,链路体检就能读到
             # (不用等推送;而且**恒为 0 的档**一眼可见,那是"接了但没生效"的信号)
             "evidence_tally": tally,
@@ -1377,7 +1497,9 @@ def hotspot_agent_tick_all_users(settings: Settings | None = None) -> int:
                     from app.services.tenant_base import _record_run
                     _record_run(db, uid, "hotspot_agent", "success",
                                 f"热点{out.get('hotspots', 0)} 现成资源{out.get('matched', 0)} "
-                                f"选题{out.get('llm', 0)} | {out.get('evidence_tally', '')}")
+                                f"选题{out.get('plans', out.get('llm', 0))}"
+                                f"(证据型{out.get('evidence', 0)}) "
+                                f"| {out.get('evidence_tally', '')}")
                 db.commit()
             except Exception:  # noqa: BLE001 - 单用户失败不影响其余
                 db.rollback()
