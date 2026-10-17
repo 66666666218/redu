@@ -1140,18 +1140,64 @@ def _evidence_plans(db: Session, user_id: int, hotspots: list[dict],
     ⚠️ **纯新闻热点**(无资源证据、适配度也不够)不产选题 —— 给一条没动作的建议,
     比不给更消耗注意力。
     """
+    from app.services.pan_discovery import _GENERIC_HINTS
     from app.services.resource_library import resource_key
+
+    def _too_generic(kw: str) -> bool:
+        """这个热点词**是不是纯泛词**(「下载」「全集」「免费」这种热搜词)?
+
+        ⚠️ 2026-10-17 用远程真数据出样板时**当场抓到**:`下载`(热度 +357%)被当成资源名,
+        产出「《下载》全套资源整理」—— 这种建议发出去只会消耗信任。
+        判据:把泛词**整词**去掉后剩不到 2 个字 ⇒ 它本身没有指代对象。
+        ⚠️ 只**整词**判(`JOJO的奇妙冒险全集` 去掉「全集」还剩一串 ⇒ 保留)。
+        """
+        rest = kw
+        for g in _GENERIC_HINTS:
+            rest = rest.replace(g, "")
+        return len(rest.strip()) < 2
+
+    def _clean_name(raw: str, kw: str = "") -> str:
+        """库里那条资源的**可读名**(给建议用)。
+
+        实测原样搬出来是 `?《蒸蒸日上》全集4K高清完整版百度云网盘资源下载链接??` ——
+        直接用 `resource_key` 会把它**绞碎**(那个函数是给"清洗过的名字"设计的,
+        对原始标题会误剥中段)。⇒ 这里的顺序是:
+          ① **书名号/方括号里点名的那一段**优先(那是引流号自己标的资源名);
+          ② 否则去括号组 / 链接 / 通用词,取最长的一段;
+          ③ 剥掉**与热点词重复的前缀**(避免「《蒸蒸日上》蒸蒸日上…」)。
+        """
+        import re as _re
+
+        t = str(raw or "")
+        ents = _re.findall(r"[《【「]([^》】」]{2,24})[》】」]", t)
+        if ents:
+            name = ents[0]
+        else:
+            rest = _re.sub(r"[（(\[【《「{][^）)\]】》」}]{0,30}[）)\]】》」}]", " ", t)
+            rest = _re.sub(r"https?://\S+", " ", rest)
+            for g in _GENERIC_HINTS:
+                rest = rest.replace(g, "")
+            runs = _re.findall(r"[一-鿿A-Za-z0-9]{2,24}", rest)
+            name = max(runs, key=len) if runs else ""
+        name = name.strip(" -_·｜|/、,，。.:：?!")
+        if kw and name.startswith(kw):
+            _rest = name[len(kw):].strip(" -_·｜|/、,，。.:：?!")
+            if _rest:                     #: 剥完变空就别剥 —— 「蒸蒸日上」不该被剥成空
+                name = _rest
+        return name or ""
 
     out: dict[str, dict] = {}
     fit_min = float(getattr(settings, "hotspot_agent_probe_fit", EVIDENCE_PLAN_MIN_FIT)
                     or EVIDENCE_PLAN_MIN_FIT)
     for h in hotspots:
         kw = str(h.get("keyword") or "").strip()
-        if not kw or kw in out:
+        if not kw or kw in out or _too_generic(kw):
             continue
         lib = h.get("library") or {}
         titles = [str(t) for t in (lib.get("titles") or []) if str(t or "").strip()]
-        lib_title = (titles[0][:40] if titles else "")
+        #: ⚠️ **展示要用"可读名"**,不是库里的原始标题(那带着一串装饰/重复剧名):
+        #: 实测原样搬出来是 `?《蒸蒸日上》全集4K高清完整版百度云网盘资源下载链接?? ?《蒸蒸日上》更新至`。
+        lib_title = _clean_name(titles[0], kw)[:24] if titles else ""
         lib_link = str(lib.get("my_link") or "")
         cross = [str(p) for p in (h.get("platforms_found") or []) if str(p or "").strip()]
         plats = "+".join(cross[:3]) or str(h.get("platforms") or "抖音")
@@ -1162,10 +1208,11 @@ def _evidence_plans(db: Session, user_id: int, hotspots: list[dict],
         if lib_link:
             out[kw] = {
                 "kind": "evidence", "_cls": "库里已有链",
-                "why_doable": (f"资源库**已有现成链**(「{lib_title}」);{heat}"
+                "why_doable": (f"资源库**已有现成链**(「{lib_title or kw}」);{heat}"
                                + (f";跨平台同现 {len(cross)}({plats})" if len(cross) >= 2 else "")),
                 "resource": lib_title or kw,
-                "title": f"《{kw}》全套资源整理(附网盘,直接存)",
+                "title": (f"《{kw}》{lib_title}｜附网盘" if lib_title and lib_title != kw
+                          else f"《{kw}》资源整理(附网盘)"),
                 "audience": f"搜「{kw}」的人",
                 "hook": "开头先给结果,再给链接",
                 "timing": "趁热 48 小时内",
@@ -1177,7 +1224,8 @@ def _evidence_plans(db: Session, user_id: int, hotspots: list[dict],
                 "kind": "evidence", "_cls": "库里待搬",
                 "why_doable": f"库里有「{lib_title}」但**还没搬成我方链**;{heat}",
                 "resource": lib_title,
-                "title": f"《{kw}》资源整理(附网盘)",
+                "title": (f"《{kw}》{lib_title}｜附网盘" if lib_title and lib_title != kw
+                          else f"《{kw}》资源整理(附网盘)"),
                 "audience": f"搜「{kw}」的人", "hook": "先给结果再给链接",
                 "timing": "趁热 48 小时内",
                 "steps": f"① 先把「{lib_title}」搬成我方链;② 标题扣住「{kw}」;③ 发到 {plats}",
@@ -1187,7 +1235,8 @@ def _evidence_plans(db: Session, user_id: int, hotspots: list[dict],
             out[kw] = {
                 "kind": "evidence", "_cls": "跨平台同现",
                 "why_doable": f"**跨 {len(cross)} 个平台**都有人在贴({plats});{heat}",
-                "resource": f"{kw} 相关资源", "title": f"《{kw}》资源合集(附网盘)",
+                "resource": f"{kw} 相关资源",
+                "title": f"《{kw}》资源合集(附网盘)",
                 "audience": f"搜「{kw}」的人", "hook": "合集形式,先给目录",
                 "timing": "本周内(多平台同现通常只有 1~2 周窗口)",
                 "steps": f"① 去 {plats} 找这几条帖子里的盘链;② 搬进夸克;③ 标题扣住「{kw}」",
@@ -1198,7 +1247,8 @@ def _evidence_plans(db: Session, user_id: int, hotspots: list[dict],
             out[kw] = {
                 "kind": "probe", "_cls": "缺口待找",
                 "why_doable": f"品类适配 {fit:.2f}({cat})但**库里暂无** —— 这是个缺口;{heat}",
-                "resource": f"{kw} 相关资源(需先找)", "title": f"《{kw}》整理合集(附网盘)",
+                "resource": f"{kw} 相关资源(需先找)",
+                "title": f"《{kw}》整理合集(附网盘)",
                 "audience": f"搜「{kw}」的人", "hook": "先给结果再给链接",
                 "timing": "趁热 48 小时内",
                 "steps": (f"① 去 抖音/贴吧 搜「{core} 网盘」「{core} 资源」;"

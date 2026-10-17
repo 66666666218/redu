@@ -872,3 +872,37 @@ def test_没有现成资源也能出建议_库里有链就够(session, monkeypat
     row = session.scalars(select(HotspotSuggestion)).first()
     assert row is not None and row.kind == "evidence"
     assert "OURS" in (row.plan or ""), row.plan
+
+
+def _ev_h(**kw):
+    """证据型选题的单条热点(与类里那个 `_h` 同形;模块级测试不能借类的 self)。"""
+    base = {"keyword": "某某短剧", "growth": 180.0, "platforms": "douyin",
+            "fit": type("F", (), {"score": 0.2})(), "category": "影视"}
+    base.update(kw)
+    return base
+
+
+def test_纯泛词热点不出选题() -> None:
+    """⚠️ 2026-10-17 远程真数据出样板时**当场抓到**:热点词「下载」(热度 +357%)被当成
+    资源名,产出「《下载》全套资源整理」—— 这种建议发出去只消耗信任。"""
+    for bad in ("下载", "全集", "免费", "资源"):
+        assert hotspot_agent._evidence_plans(None, 1, [_ev_h(
+            keyword=bad, library={"titles": ["某资源"], "my_link": "https://x/1"})]) == {}, bad
+
+
+def test_库里的标题要洗成可读名() -> None:
+    """原文是 `?《蒸蒸日上》全集4K高清完整版百度云网盘资源下载链接??` ——
+    直接搬进建议里没法看;要用**书名号里点名的那段**。"""
+    plans = hotspot_agent._evidence_plans(None, 1, [_ev_h(
+        library={"titles": ["?《蒸蒸日上》全集4K高清完整版百度云网盘资源下载链接??"],
+                 "my_link": "https://pan.xunlei.com/s/X"})])
+    p = plans["某某短剧"]
+    assert p["resource"] == "蒸蒸日上", p["resource"]
+    assert "4K" not in p["title"] and "百度云" not in p["title"], p["title"]
+
+
+def test_标题要带上资源名() -> None:
+    plans = hotspot_agent._evidence_plans(None, 1, [_ev_h(
+        library={"titles": ["《恋爱调查问卷/男朋友调查问卷》入口链接自取"],
+                 "my_link": "https://pan.quark.cn/s/Q"})])
+    assert "恋爱调查问卷" in plans["某某短剧"]["title"], plans["某某短剧"]["title"]
