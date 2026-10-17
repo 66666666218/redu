@@ -1414,22 +1414,35 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
     #: ⚠️ 放在 `if not matched and not llm_plans` **之前**,否则"现成资源 0 + LLM 未配"时
     #:    整轮直接 `no_suggestions` —— 那正是远程 14:10 那轮「选题0」的样子。
     #: ⚠️ LLM 的计划**优先**(它更会写文案),证据型只补空位(`setdefault`)。
-    #: ⚠️ **默认关**(2026-10-17 用户口径「**agent需要智能化决策,不应该放弃 llm 层的决策**」):
-    #: 这是**确定性模板**,不是智能决策 —— 只在 `hotspot_agent_evidence_plans=True` 时才补位。
-    if bool(getattr(settings, "hotspot_agent_evidence_plans", False)):
-        try:
-            for _kw, _plan in _evidence_plans(db, user_id, fresh, settings).items():
-                llm_plans.setdefault(_kw, _plan)
-        except Exception:  # noqa: BLE001 - 这一档失败不该让整轮一条建议都没有
-            logger.exception("证据型选题生成失败(本轮只剩现成资源/LLM 两档)")
-    else:
-        #: ★ **把 LLM 那一跳的**输入/输出**喊出来**(2026-10-17):远程 14:10 那轮「选题 0」时,
-        #: 日志里**一个字都没有** —— 分不清"没送进去 / 送了模型没给 / 给了但被丢"。
-        #: 这三种的修法完全不同(选热点 / 改提示词 / 查解析),不能长得一样。
+    #: ★ **把 LLM 那一跳的**输入/输出**喊出来**(2026-10-17):远程 14:10 那轮「选题 0」时,
+    #: 日志里**一个字都没有** —— 分不清"没送进去 / 送了模型没给 / 给了但被丢"。
+    #: 这三种的修法完全不同(选热点 / 改提示词 / 查解析),不能长得一样。
+    if llm_hotspots:
         logger.info("选题 LLM:送进 %d 条热点(例:%s)⇒ 匹配 %d / 计划 %d",
                     len(llm_hotspots),
                     "、".join(str(x.get("keyword"))[:12] for x in llm_hotspots[:3]) or "-",
                     len(llm_matches), len(llm_plans))
+
+    #: ★★ **保底决策**(2026-10-17 用户口径「**是否有加上保底了决策**」):LLM 是**主决策**
+    #: (它不满意就空手,是对的),但**整轮一条选题都没有**不可接受 —— 客户/运营看到的就是
+    #: 「选题 0」。⇒ **只有 LLM 没给计划时**,才从现有证据里挑最多 N 条、给出具体动作,
+    #: 并在文案里**明确标注「保底判断」**(`kind=fallback`) —— **绝不冒充 LLM 的判断**
+    #: (结算/回看按 `kind` 分得开 `fallback` 与 `llm`)。
+    if not llm_plans and bool(getattr(settings, "hotspot_agent_fallback_plans", True)):
+        try:
+            _fb = _evidence_plans(db, user_id, fresh, settings)
+            _cap = max(1, int(getattr(settings, "hotspot_agent_fallback_max", 2) or 2))
+            for _kw, _plan in list(_fb.items())[:_cap]:
+                _p = dict(_plan)
+                _p["kind"] = "fallback"
+                _p["_cls"] = "保底·" + str(_p.get("_cls") or "")
+                _p["why_doable"] = ("**保底判断**(本轮 LLM 没给建议):"
+                                    + str(_p.get("why_doable") or ""))
+                llm_plans[_kw] = _p
+            if llm_plans:
+                logger.info("选题 LLM 没给建议 ⇒ **保底 %d 条**(只在有证据的热点上)", len(llm_plans))
+        except Exception:  # noqa: BLE001 - 保底失败不该让整轮崩
+            logger.exception("保底选题生成失败(本轮可能空手)")
 
     if not matched and not llm_plans:
         return {"status": "no_suggestions", "hotspots": len(fresh)}

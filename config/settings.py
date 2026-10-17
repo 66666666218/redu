@@ -187,9 +187,13 @@ class Settings(BaseSettings):
     # 下一个人照它去改调度、改了却不生效。
     hotspot_agent_enabled: bool = True   # 热点→网盘选题 Agent(监控词热度 × 供应商新资源 → 发货建议,站内推送)
     hotspot_min_growth: float = 50.0     # 热点词 24h 涨幅达标线(低于此值不生成建议)
-    #: **证据型模板选题 —— 默认关**(2026-10-17 用户口径:「**agent需要智能化决策,不应该放弃 llm 层的决策**」)。开着它会在 LLM 没产出时用**确定性模板**补位;
-    #: 实测那样能出建议,但**不是智能决策** ⇒ 默认只让 LLM 决定。应急时可临时打开。
-    hotspot_agent_evidence_plans: bool = False
+    #: **保底决策**(2026-10-17 用户口径「**是否有加上保底了决策**」):LLM 是**主决策**,
+    #: 但**整轮一条选题都没有**不可接受(客户/运营看到的就是「选题 0」)⇒
+    #: **只有 LLM 没给计划时**,才从现有证据里挑最多 `hotspot_agent_fallback_max` 条给出
+    #: 具体动作,并在文案里**明确标注「保底判断」**(`kind=fallback`)—— 不冒充 LLM 的判断。
+    #: ⚠️ 与「LLM 优先」不矛盾:LLM 给了就一条都不用;关掉它就是「宁可空手」。
+    hotspot_agent_fallback_plans: bool = True
+    hotspot_agent_fallback_max: int = 2      # 保底最多几条(别让它变成模板刷屏)
     hotspot_agent_top_n: int = 15        # 单轮最多产出几条选题建议(2026-10-01 由 8 上调)
     hotspot_agent_llm_top: int = 10      # 没现成资源的热点里,最多几个交给 LLM 生成选题
                                          # (2026-10-01 由 3 上调:实测 430 条候选里只有 3 条能进

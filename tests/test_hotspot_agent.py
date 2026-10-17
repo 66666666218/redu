@@ -866,21 +866,21 @@ def test_没有现成资源也能出建议_库里有链就够(session, monkeypat
                                   our_url="https://pan.quark.cn/s/OURS",
                                   found_at=dt.datetime.now()))
     session.commit()
-    #: ⚠️ 这套模板**默认关**(用户 2026-10-17 口径「不应该放弃 llm 层的决策」)⇒ 这里显式打开,
-    #: 验的是"应急开关确实还能用"。
-    out = _run(session, monkeypatch, hotspot_agent_evidence_plans=True)
+    #: ★ 2026-10-17 起这是**保底决策**:LLM 没给计划时才补位(默认开)。
+    out = _run(session, monkeypatch)
     assert out["status"] == "ok" and out["plans"] >= 1, out
     assert out["evidence"] >= 1
     row = session.scalars(select(HotspotSuggestion)).first()
-    assert row is not None and row.kind == "evidence"
+    assert row is not None and row.kind == "fallback", "保底必须与 LLM 的判断分得开"
     assert "OURS" in (row.plan or ""), row.plan
 
 
-def test_默认不拿模板替代LLM(session, monkeypatch, agent_env) -> None:
-    """★ 用户口径(2026-10-17):「**agent需要智能化决策,不应该放弃 llm 层的决策**」。
+def test_LLM空手时要有保底_而且要标明是保底(session, monkeypatch, agent_env) -> None:
+    """★ 用户口径(2026-10-17):「**是否有加上保底了决策**」。
 
-    ⇒ 没有 LLM 输出时**不许**用确定性模板冒充选题(默认 `hotspot_agent_evidence_plans=False`)。
-    ⚠️ 代价是这条链会真的"空手" —— 但那是**诚实**的空手,而不是拿模板凑数。
+    LLM 是**主决策**(它不满意就空手是对的),但**整轮一条选题都没有**不可接受 ——
+    客户/运营看到的就是「选题 0」。⇒ LLM 没给计划时补**保底**,
+    而且**必须标明「保底判断」**(`kind=fallback`),绝不冒充 LLM 的判断。
     """
     from app.db.models import DiscoveredPanLink
 
@@ -891,8 +891,43 @@ def test_默认不拿模板替代LLM(session, monkeypatch, agent_env) -> None:
                                   our_url="https://pan.quark.cn/s/OURS2",
                                   found_at=dt.datetime.now()))
     session.commit()
-    out = _run(session, monkeypatch)          # 模板开关 = 默认 False,LLM 没 key
+    out = _run(session, monkeypatch)          # LLM 没 key ⇒ 必然走保底
+    assert out["status"] == "ok" and out["plans"] >= 1, out
+    row = session.scalars(select(HotspotSuggestion)).first()
+    assert row is not None and row.kind == "fallback", row.kind
+    assert "保底判断" in (row.plan or ""), row.plan
+
+
+def test_保底关掉就真的空手(session, monkeypatch, agent_env) -> None:
+    """保底是可关的:关掉 = 「宁可空手」,不再拿模板凑数(这条把开关的语义钉死)。"""
+    from app.db.models import DiscoveredPanLink
+
+    _snap(session, "某某短剧", growth=180)
+    session.add(DiscoveredPanLink(user_id=1, platform="tieba",
+                                  origin_url="https://pan.baidu.com/s/o3",
+                                  title="某某短剧 全集资源", status="ok",
+                                  our_url="https://pan.quark.cn/s/OURS3",
+                                  found_at=dt.datetime.now()))
+    session.commit()
+    out = _run(session, monkeypatch, hotspot_agent_fallback_plans=False)
     assert out["status"] == "no_suggestions", out
+
+
+def test_保底最多两条_不许变成模板刷屏(session, monkeypatch, agent_env) -> None:
+    from app.db.models import DiscoveredPanLink
+
+    #: ⚠️ 关键词必须**过得了泛词过滤**(`_too_generic`):「短剧甲」剥掉「短剧」只剩 1 字 ⇒ 会被判纯泛词
+    #: (那是**对的** —— 没有指代对象),所以这里用「某某短剧一/二/三」。
+    for i, kw in enumerate(("某某短剧一", "某某短剧二", "某某短剧三")):
+        _snap(session, kw, growth=180 + i)
+        session.add(DiscoveredPanLink(user_id=1, platform="tieba",
+                                      origin_url=f"https://pan.baidu.com/s/c{i}",
+                                      title=f"{kw} 全集资源", status="ok",
+                                      our_url=f"https://pan.quark.cn/s/C{i}",
+                                      found_at=dt.datetime.now()))
+    session.commit()
+    out = _run(session, monkeypatch, hotspot_agent_fallback_max=1)
+    assert out.get("plans") == 1, out
 
 
 def test_平台名要给中文() -> None:
