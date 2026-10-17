@@ -197,6 +197,10 @@ def _resource_name_hints(title: str) -> list[str]:
     # ② 连续中文片段(先去掉 #话题# 与链接,免得把推广词当资源名)
     body = re.sub(r"#\s*[^#]{1,30}\s*#", " ", t)
     body = re.sub(r"https?://\S+", " ", body)
+    #: ★ **先把"很短的括号组"剥掉再切**:`伪装[心] 直男` 会被切成「伪装」「直男」两个
+    #: 2 字段(都过不了 3 字下限)⇒ 那个资源**一个候选名都提不出来**(2026-10-17 实测)。
+    #: 只剥**内容 ≤2 字**的组(`[心]` / `[1]`);长组留给实体提取那一档(《…》/【…】)。
+    body = _SHORT_BRACKET_RE.sub("", body)
     for seg in re.findall(r"[一-鿿]{4,12}", body):
         if seg[0] in _PARTICLE_HEADS:
             #: ★ **残片**(2026-10-17):正则在**拉丁字母/数字/标点**处会切断,
@@ -214,6 +218,10 @@ def _resource_name_hints(title: str) -> list[str]:
             out.append(h)
     return out[:5]
 
+
+#: **很短的括号组**(内容 ≤2 字):`[心]` / `(1)` / `【更】` —— 切词前先剥掉,
+#: 否则 `伪装[心]直男` 会被切成两个 2 字段,那个资源**一个候选名都提不出来**。
+_SHORT_BRACKET_RE = re.compile(r"[（(\[【《「{][^）)\]】》」}]{1,2}[）)\]】》」}]")
 
 #: 以这些字开头的 CJK 片段**不可能是资源名**(虚词/连词/副词 —— 它们是正则从
 #: 拉丁字母/标点处切断后留下的**残片**)。
@@ -302,7 +310,23 @@ def already_have(session, user_id: int, title: str) -> dict | None:
             #   **正当匹配**一起挡掉(`match_key` 会把 `【…】` 连内容剥掉,那类名字只能靠包含匹配)
             #   ⇒ 实测让两条既有用例变红。判据越少越不容易误伤。
             return r
-    return None
+    #: ★★ **近似名兜底**(2026-10-17 用户口径:「有些资源是同一个资源,但名字可能有繁体字
+    #: 或者多音字写的;很多可能是标题字数上就个别不一样但是是同一个资源」)。
+    #: 上面按**精确命中**找完了还没有 ⇒ 再用宽松判据(`same_resource`)扫一遍库 ——
+    #: 没有这一层,同一份资源换个写法就会被**再搬一份**。
+    #: ⚠️ 它只用于"**要不要再搬**";给客户出链仍走 `_title_claims` 那套严格判据。
+    #: ⚠️ 兜底本身失败就当没有(照常转存)—— 它是省一次转存的旁路,不许变成新故障源。
+    try:
+        from app.services.resource_library import fuzzy_have
+
+        #: ⚠️ **只把"专指名"交给近似名兜底**(`_specific_hint`):宽松判据没有
+        #: `_title_claims` 那道护栏,拿通用短语(「无删减完整版」)去比会把
+        #: **完全不相干**的资源认成已有 —— 实测让 `test_通用短语不再把不相干的库链认成已有` 打红。
+        _names = [n for n in _resource_name_hints(title) if _specific_hint(n)]
+        return fuzzy_have(session, user_id, _names) if _names else None
+    except Exception:  # noqa: BLE001
+        logger.info("资源库近似名兜底失败(忽略,照常转存)", exc_info=True)
+        return None
 
 
 def reuse_if_have(session, user_id: int, title: str) -> dict | None:

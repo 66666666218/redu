@@ -1066,3 +1066,32 @@ def test_真资源名不许被误挡() -> None:
     for t in ("《我的人间烟火》全集百度网盘", "《不完美的她》4K资源"):
         hints = pd._resource_name_hints(t)
         assert any(("人间烟火" in h) or ("不完美的她" in h) for h in hints), (t, hints)
+
+
+def test_换个写法的同一个资源也不许再搬(session) -> None:
+    """★ 2026-10-17 用户口径:「**有些资源是同一个资源,但是名字可能有繁体字或者多音字写的**;
+    很多可能是**标题字数上就个别不一样**但是是同一个资源」。
+
+    没有这一层,同一份资源换个写法就会被**再搬一份** —— 那正是客户抱怨的"重复"。
+    ⚠️ 判据只用于"要不要再搬",**不用于给客户出链**(出链仍走 `_title_claims`)。
+    """
+    from datetime import datetime
+
+    from app.db.models import WechatArticle, WechatPanLink
+
+    art = WechatArticle(user_id=1, title="伪装直男", author="号甲",
+                        url="https://mp.weixin.qq.com/s/aaa",
+                        pan_urls="https://pan.quark.cn/s/W",
+                        my_pan_urls="https://pan.quark.cn/s/OURS",
+                        created_at=datetime.now())
+    session.add(art)
+    session.flush()
+    session.add(WechatPanLink(user_id=1, article_id=art.id,
+                              pan_url="https://pan.quark.cn/s/W"))
+    session.commit()
+
+    #: 用**真实数据里的形状**(实测 row #458 就是 `《伪装Z男》更21集无🌫️`)——
+    #: 裸写「伪装Z男 更新22集」提不出候选名(两字段都过不了 3 字下限),那不是判据的问题。
+    assert pd.already_have(session, 1, "《伪装Z男》更22集无删减") is not None, "个别字不同没认出来"
+    assert pd.already_have(session, 1, "《偽裝直男》更23集") is not None, "繁体没认出来"
+    assert pd.already_have(session, 1, "穿成短命炮灰") is None, "把不相干的并进来了"

@@ -389,3 +389,48 @@ class Test匹配链要按盘种类配对:
 
         self._art(session, ["https://pan.baidu.com/s/baidu"], "https://pan.quark.cn/s/OURQ")
         assert _my_link_of(session, 1, "https://pan.baidu.com/s/baidu") == "https://pan.quark.cn/s/OURQ"
+
+
+class Test同一资源的宽松判据:
+    """★ 2026-10-17 用户口径:「**有些资源是同一个资源,但是名字可能有繁体字或者多音字写的**;
+    很多可能是**标题字数上就个别不一样**但是是同一个资源」。
+
+    没有这一档,同一份资源会被**反复搬**(精确匹配对不上),而这正是客户抱怨的那部分重复。
+    ⚠️ 判据只用于「要不要再搬」,**不用于给客户展示链**。
+    """
+
+    def test_繁简与个别字要认成一个(self) -> None:
+        from app.services.resource_library import same_resource
+
+        assert same_resource("偽裝直男", "伪装直男"), "繁简"
+        assert same_resource("伪装Z男", "伪装直男"), "个别字不同(实测数据里就有)"
+        assert same_resource("後宮", "后宫"), "繁简"
+        assert same_resource("伪装 直男", "伪装直男"), "空格"
+
+    def test_集数不同不许合并(self) -> None:
+        """⚠️ `第三季`/`第四季`、`更20集`/`更22集` 只差一个字符却是**两个资源**。"""
+        from app.services.resource_library import same_resource
+
+        assert not same_resource("第三季", "第四季")
+        assert not same_resource("更20集", "更22集")
+
+    def test_裸名要能在带装饰的标题里认出来(self) -> None:
+        """库里的标题是**带装饰**的(带剧名号/前缀/集数后缀),拿整条比距离永远差很多。"""
+        from app.services.resource_library import same_resource
+
+        assert same_resource("伪装直男", "AI漫剧《伪装直男》全集22集无雾")
+        assert same_resource("AI漫剧《伪装直男》全集22集无雾", "伪装直男")
+
+    def test_完全不同的不许合并(self) -> None:
+        from app.services.resource_library import same_resource
+
+        assert not same_resource("伪装直男", "穿成短命炮灰")
+        assert not same_resource("伪装直男", "伪装")
+
+
+def test_匹配键会把繁体字折成简体() -> None:
+    """`match_key` 是**所有匹配**的入口 ⇒ 繁简在那一层就归一,下游不必各写一遍。"""
+    from app.services.resource_library import match_key
+
+    assert match_key("偽裝直男") == match_key("伪装直男")
+    assert match_key("後宮") == match_key("后宫")

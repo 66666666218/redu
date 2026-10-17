@@ -324,7 +324,32 @@ def match_key(text: str) -> str:
     迟早会出现这条缝。
     """
     t = _MATCH_BRACKET_RE.sub("", strip_vendor_suffix(text))
-    return _MATCH_PUNCT_RE.sub("", t).lower()
+    return _MATCH_PUNCT_RE.sub("", _to_simplified(t)).lower()
+
+
+_SIMPLIFY_CACHE: dict[str, str] = {}
+
+
+def _to_simplified(text: str) -> str:
+    """**繁 → 简**(2026-10-17 用户口径:「同一个资源可能有繁体字或者多音字写的」)。
+
+    ⚠️ 依赖 `zhconv` 但**它是可选的**:没装就原样返回 —— 不许因为缺一个可选依赖
+    就让整条匹配链**抛异常**(比"匹配不上"更糟)。装了就自动生效(带进程内缓存)。
+    """
+    if not text:
+        return text
+    hit = _SIMPLIFY_CACHE.get(text)
+    if hit is not None:
+        return hit
+    try:
+        import zhconv
+
+        out = str(zhconv.convert(text, "zh-cn") or text)
+    except Exception:  # noqa: BLE001 - 没装/转换失败 ⇒ 原样返回
+        out = text
+    if len(_SIMPLIFY_CACHE) < 20000:      #: 别无限长(标题千变万化)
+        _SIMPLIFY_CACHE[text] = out
+    return out
 
 
 def title_claims(first: str, name: str) -> bool:
@@ -358,6 +383,164 @@ def resource_key(name: str) -> str:
     """
     return core_resource_name(match_key(name))
 
+
+#: 数字串(集数/季数/年份/页数)—— 「身份的一部分」,两边**都有**且不一致就**不是**同一个资源。
+_DIGITS_RE = re.compile(r"\d+")
+#: 中文数字 + 单位(第三季 / 十二集 / 上下册)—— 同上,`第三季` 与 `第四季` 是**两个资源**。
+_CN_NUM_RE = re.compile(r"[零一二三四五六七八九十百千两]+(?=[季集册部期话章回])")
+
+
+def _num_sig(s: str) -> tuple[list[str], list[str]]:
+    return _DIGITS_RE.findall(s), _CN_NUM_RE.findall(s)
+
+
+def _edit_distance(a: str, b: str, limit: int) -> int:
+    """Levenshtein 距离(**超过 limit 就提前返回** —— 名字都很短,不必算完)。"""
+    if abs(len(a) - len(b)) > limit:
+        return limit + 1
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        best = i
+        for j, cb in enumerate(b, 1):
+            v = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb))
+            cur.append(v)
+            best = min(best, v)
+        if best > limit:                  #: 这一行已经不可能压到 limit 以内
+            return limit + 1
+        prev = cur
+    return prev[-1]
+
+
+def _contains_fuzzy(hay: str, needle: str, limit: int) -> bool:
+    """`hay`(库里那条标题)里有没有**一段**与 `needle` 编辑距离 ≤ limit 的片段。
+
+    ⚠️ 必须有这一档:库里的标题是**带装饰**的(`AI漫剧《伪装直男》全集22集无雾`),
+    拿整条去和候选名比距离永远是"差很多"；而真正该比的是**标题里的那一段**。
+    """
+    n = len(needle)
+    if not n or not hay:
+        return False
+    lo, hi = max(1, n - limit), n + limit
+    for start in range(0, max(1, len(hay) - lo + 1)):
+        for size in range(lo, hi + 1):
+            seg = hay[start:start + size]
+            if not seg or seg[0] != needle[0]:
+                continue
+            if _edit_distance(seg, needle, limit) <= limit:
+                return True
+    return False
+
+
+def same_resource(a: str, b: str) -> bool:
+    """这两个名字**是不是同一个资源**?(2026-10-17 用户口径:
+
+    「**有些资源是同一个资源,但是名字可能有繁体字或者多音字写的**…很多可能是标题字数上
+    就个别不一样但是是同一个资源」)
+
+    判据(故意保守,每一条都对着本仓踩过的坑):
+      ① 归一化后相等(繁→简、剥括号/尾巴/标点/通用前后缀)⇒ **是**;
+      ② **数字不一致 ⇒ 不是**,但只在**两边都有**数字时才算数 ——
+         `第三季`/`第四季`、`20集`/`22集` 是两个资源;而「裸名」vs「带集数的标题」
+         应当**认成同一个**(只有一边给了数字,不算冲突);
+      ③ **首字不同 ⇒ 不是** —— 中文资源名首字极少漂移;
+      ④ 长度差 ≤ limit 且整体编辑距离 ≤ limit(短名容 1 字、长名容 2 字),**或**
+      ⑤ 短名能**近似地出现**在长标题里(`_contains_fuzzy`)—— 库里的标题是带装饰的。
+
+    ⚠️ 它**只用于"要不要再搬一份"与"算不算同一个资源"**;
+    **不用于给客户展示链**(展示仍走 `_title_claims` 那套严格判据)——「给错链比不给链更坏」。
+    """
+    x, y = resource_key(a), resource_key(b)
+    if not x or not y:
+        return False
+    if x == y:
+        return True
+    dx, nx = _num_sig(x)
+    dy, ny = _num_sig(y)
+    if (dx and dy and dx != dy) or (nx and ny and nx != ny):
+        return False                      #: ② 集数/季数/年份冲突
+    limit = 1 if min(len(x), len(y)) <= 6 else 2
+    if abs(len(x) - len(y)) <= limit:
+        #: ③ 长度接近 ⇒ 才谈"首字必须一样"(长标题常以拉丁/装饰开头,不能拿它首字来卡)
+        if x[0] != y[0]:
+            return False
+        return _edit_distance(x, y, limit) <= limit       #: ④
+    #: ⑤ 长度差得远 ⇒ 短名要能**近似地出现在**长标题里(库里的标题是带装饰的)
+    #: ⚠️ 但**短于 3 个字不做近似匹配**:2 个字太泛(`伪装` / `后宫` 这种裸词满地都是),
+    #:    一定会把"某个长名字的前缀"误并成同一资源 —— 与 `_specific_hint` 的 3 字下限同一口径。
+    short, long_ = (x, y) if len(x) <= len(y) else (y, x)
+    if len(short) < 3:
+        return False
+    return _contains_fuzzy(long_, short, limit)
+
+
+
+def fuzzy_have(session: Session, user_id: int, names: list[str], days: int = 180,
+               scan: int = 3000) -> dict | None:
+    """按「**同一个资源**」的宽松判据(`same_resource`)找一条**已有我方链**的条目。
+
+    ★ 2026-10-17 用户口径:繁简 / 异体 / 个别字不同的**同一个资源**要认成一个 ——
+    精确匹配对不上就会被**反复搬**。`names` 传**候选名**(通常来自 `_resource_name_hints`),
+    逐个和库里的标题比。
+
+    ⚠️ 三个来源(公众号盘链 / 发现链的自有链 / 迅雷盘资源)都扫;**多盘都有时优先夸克**
+    (与 `search_resources` 同一套 `_pan_rank`)。
+    ⚠️ 只在 `already_have` 的**最后一步**用它(精确路径都没命中时),**不参与展示/出链给客户**。
+    ⚠️ 扫不到/查询失败一律返回 `None`(照常转存)—— 这是"省一次转存"的旁路,不许变成新故障源。
+    """
+    from app.db.models import DiscoveredPanLink, XunleiResource
+
+    names = [str(n or "").strip() for n in (names or []) if str(n or "").strip()]
+    if not names:
+        return None
+    cutoff = datetime.now() - timedelta(days=days)
+    found: list[dict] = []
+
+    def _add(title: str, link: str, source: str) -> None:
+        if not title or not link:
+            return
+        if not any(same_resource(n, title) for n in names):
+            return
+        clean = _clean_link(link)
+        if not clean:
+            return
+        found.append({"pan_url": clean, "my_link": clean, "pan_type": _pan_kind(clean),
+                      "titles": [str(title)[:60]], "accounts": 0, "first_seen": "",
+                      "last_seen": "", "source": source, "fuzzy": True})
+
+    rows = session.execute(select(WechatArticle.title, WechatArticle.my_pan_urls)
+                           .join(WechatPanLink, WechatPanLink.article_id == WechatArticle.id)
+                           .where(WechatArticle.user_id == user_id,
+                                  WechatArticle.created_at >= cutoff,
+                                  WechatArticle.my_pan_urls.isnot(None),
+                                  WechatArticle.my_pan_urls != "").limit(scan)).all()
+    for title, blob in rows:
+        for line in str(blob or "").splitlines():
+            _add(str(title or ""), line, "公众号(近似名)")
+            break                          #: 一篇只取第一条我方链(多链时链本身已不可信)
+
+    rows = session.execute(select(DiscoveredPanLink.title, DiscoveredPanLink.our_url)
+                           .where(DiscoveredPanLink.user_id == user_id,
+                                  DiscoveredPanLink.our_url.isnot(None),
+                                  DiscoveredPanLink.our_url != "",
+                                  DiscoveredPanLink.found_at >= cutoff).limit(scan)).all()
+    for title, link in rows:
+        _add(str(title or ""), str(link or ""), "发现链(近似名)")
+
+    rows = session.execute(select(XunleiResource.name, XunleiResource.share_url)
+                           .where(XunleiResource.user_id == user_id,
+                                  XunleiResource.share_url != "").limit(scan)).all()
+    for title, link in rows:
+        _add(str(title or ""), str(link or ""), "迅雷盘(近似名)")
+
+    if not found:
+        return None
+    #: 多盘都有 ⇒ **优先夸克**(盘空间最多,用户 2026-10-11 口径)
+    best = sorted(found, key=lambda r: _pan_rank(str(r.get("my_link") or "")))[0]
+    logger.info("资源库:**近似名**命中「%s」→ 库里「%s」(%s)",
+                (names[0] if names else "")[:30], str((best.get("titles") or [""])[0])[:30],
+                best.get("source"))
+    return best
 
 def search_resources(session: Session, user_id: int, query: str,
                      days: int = 90, limit: int = 20) -> list[dict]:
