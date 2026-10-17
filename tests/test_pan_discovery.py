@@ -1000,3 +1000,43 @@ class Test积压告警按证据说话:
         msg = self._alert(session, monkeypatch)
         assert "额度不是瓶颈" in msg, msg
         assert "PAN_DISCOVERY_TRANSFER_LIMIT" not in msg
+
+
+def test_运行记录的转存数要剔掉复用(session, monkeypatch) -> None:
+    """★★ 2026-10-17:用户转来的告警写着「转存24 复用11」,读起来像 24+11=35 ——
+
+    而**真实只搬了 13 条**(24−11),正好等于额度上限(10 积压 + 3 新发现)⇒
+    「**额度满了**」这件事**被数字藏住了**(一读就是"搬了 24 条还不错")。
+    本仓母题:两种事混成一个数 ⇒ 结论必错。
+    """
+    import app.db as appdb
+    import app.services.alert_service as als
+    from app.db.models import RunRecord
+
+    monkeypatch.setattr(appdb, "get_session_local", lambda: (lambda: session))
+    monkeypatch.setattr(als, "notify_incident", lambda *a, **k: True)
+    monkeypatch.setattr(pd, "sync", lambda db, uid, settings=None: {
+        "found": 188, "ok": 24, "reused": 11, "items": [], "backlog_left": 163,
+        "skipped_old": 0})
+
+    class _S:
+        pan_discovery_backlog_alert = 60
+
+    pd.pan_discovery_tick(settings=_S())
+    note = session.query(RunRecord).filter_by(kind="pan_discovery").one().detail
+    assert "转存13" in note and "(复用11)" in note, note
+    assert "转存24" not in note, f"又把复用算进转存了:{note}"
+
+
+def test_积压告警里的成功数也要剔掉复用(session, monkeypatch) -> None:
+    import app.services.alert_service as als
+
+    box: list[str] = []
+    monkeypatch.setattr(als, "notify_incident",
+                        lambda s, u, sec, title, reason, settings=None: box.append(reason))
+    pd._alert_backlog(session, 1, 163, {"found": 188, "ok": 24, "reused": 11})
+    assert "成功 13 条" in box[0] and "另复用 11 条" in box[0], box[0]
+
+    box.clear()
+    pd._alert_backlog(session, 1, 70, {"found": 20, "ok": 5})     # 没有复用字段
+    assert "成功 5 条" in box[0] and "复用" not in box[0], box[0]

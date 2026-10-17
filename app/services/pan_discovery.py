@@ -157,10 +157,15 @@ def _alert_backlog(session, user_id: int, backlog_left: int, out: dict) -> None:
         else:
             act = ("⇒ **额度不是瓶颈**(失败比排队多):这些是**链本身**的问题,"
                    "调额度只会让同一批死链多跑几遍 —— 先看上面的失败原因。")
+        #: ⚠️ `ok` **含复用** ⇒ 必须剔掉才配叫「成功」(见 `pan_discovery_tick` 同处);
+        #:   复用为 0 时**不写**那半句(免得每次多一坨 "另复用 0 条")。
+        _real_ok = max(0, int(out.get("ok", 0) or 0) - int(out.get("reused", 0) or 0))
+        _reuse = int(out.get("reused", 0) or 0)
+        _ok_txt = f"**成功 {_real_ok} 条**" + (f"(另复用 {_reuse} 条)" if _reuse else "")
         notify_incident(session, user_id, "pan_discovery",
                         f"网盘发现积压 {backlog_left} 条"
                         f"(失败 {bk['failed']} / 排队 {bk['pending']})",
-                        f"本轮候选 {out.get('found', 0)} 条、成功 {out.get('ok', 0)} 条,"
+                        f"本轮候选 {out.get('found', 0)} 条、{_ok_txt},"
                         f"仍积压 **{backlog_left}** 条。"
                         f"**构成**:排队等搬 {bk['pending']} 条 · 已失败 {bk['failed']} 条。"
                         f"**失败原因**:{why}。{act}")
@@ -944,9 +949,15 @@ def pan_discovery_tick(settings=None) -> int:
                           if out.get("items") else None)
                 # 运行记录里**必须带上积压数** —— 只写「候选N 转存M」的话,一个持续
                 # 堆积的系统看起来和健康的系统一模一样(2026-10-05 实测踩到)。
+                #: ★★ **「转存」必须剔掉「复用」(2026-10-17)**:`out["ok"]` 里**含复用**
+                #: (复用那条也走 `status="ok"` 分支)⇒ 原来写「转存24 复用11」,读起来像
+                #: 24+11=35,而**真实只搬了 13 条**(24−11)—— 正好等于额度上限(10+3),
+                #: 于是「**额度满了**」这件事被数字藏住了(一读就是「搬了 24 条还不错」)。
+                #: 本仓母题:两种事混成一个数 ⇒ 结论必错。改成「转存13(复用11)」。
+                _real = max(0, int(out.get("ok", 0) or 0) - int(out.get("reused", 0) or 0))
                 _record_run(db, uid, "pan_discovery", "success",
-                            f"候选{out.get('found', 0)} 转存{out.get('ok', 0)} "
-                            f"复用{out.get('reused', 0)} **积压{out.get('backlog_left', 0)}**"
+                            f"候选{out.get('found', 0)} 转存{_real} "
+                            f"(复用{out.get('reused', 0)}) **积压{out.get('backlog_left', 0)}**"
                             #: ★ 「**太老没搬**」必须看得见(2026-10-16):否则开了"只搬新的"
                             #: 这道闸门之后,"候选一大堆、搬的很少"会被读成"链子坏了"。
                             + (f" **太老跳过{out['skipped_old']}**"
