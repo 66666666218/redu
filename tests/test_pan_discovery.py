@@ -1040,3 +1040,29 @@ def test_积压告警里的成功数也要剔掉复用(session, monkeypatch) -> 
     box.clear()
     pd._alert_backlog(session, 1, 70, {"found": 20, "ok": 5})     # 没有复用字段
     assert "成功 5 条" in box[0] and "复用" not in box[0], box[0]
+
+
+def test_书名号实体在带拉丁字母的标题里也要提得出来() -> None:
+    """★★ 2026-10-17:这一档原来**会静默失效** —— `_candidates` 的 import 在某些进程里
+    循环导入失败,而 `except` 一吞 ⇒ 只剩碎片档。
+
+    实测后果(用户报"很多重复"里的一条):候选《JOJO的奇妙冒险:飙马野郎》只提出
+    「的奇妙冒险」⇒ 库里明明有同一资源却判「没有」⇒ **重复搬了一份**。
+    """
+    hints = pd._resource_name_hints("《JOJO的奇妙冒险：飙马野郎》动漫HD1080P全集百度网盘")
+    assert hints[0] == "JOJO的奇妙冒险：飙马野郎", f"整句实体该排第一:{hints}"
+    assert "的奇妙冒险" not in hints, f"被拉丁字母切断的残片不该进候选:{hints}"
+
+
+def test_分享话术与虚词残片不许当资源名() -> None:
+    hints = pd._resource_name_hints("美美哒 我用夸克网盘给你分享了「」的奇妙冒险")
+    assert not any(h.startswith("的") for h in hints), hints
+    assert not any("给你分享" in h or "我用夸克" in h for h in hints), hints
+
+
+def test_真资源名不许被误挡() -> None:
+    """`我的人间烟火` / `不完美的她` 都是**真剧名** ⇒ 挡虚词时**不能把它们一起挡掉**
+    (给错拒绝比不拒绝更坏:漏判只是多搬一份,误挡会让真资源**永远匹配不回去**)。"""
+    for t in ("《我的人间烟火》全集百度网盘", "《不完美的她》4K资源"):
+        hints = pd._resource_name_hints(t)
+        assert any(("人间烟火" in h) or ("不完美的她" in h) for h in hints), (t, hints)

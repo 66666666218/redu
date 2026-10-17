@@ -184,14 +184,28 @@ def _resource_name_hints(title: str) -> list[str]:
     t = str(title or "")
     hints: list[str] = []
     try:
-        from app.services.wechat._candidates import mine_title_entities
-        hints += mine_title_entities([t], top=3)
-    except Exception:  # noqa: BLE001 - 抽不出来不影响主流程
-        pass
+        #: ⚠️⚠️ **必须走门面**(2026-10-17 实测):直接 `from app.services.wechat._candidates import …`
+        #: 在"**先 import 了 pan_discovery**"的进程里会**循环导入失败**,而下面那个
+        #: `except` 一吞 ⇒ **最准的《…》实体名静默消失**,只剩碎片档。
+        #: 实测后果:候选标题 `《JOJO的奇妙冒险：飙马野郎》…` 只提出「的奇妙冒险」「飙马野郎」,
+        #: 而库里明明有同一资源 ⇒ `already_have` 判「没有」⇒ **又搬了一份**(用户报的"很多重复")。
+        from app.services import wechat_monitor as _wm
+
+        hints += _wm.mine_title_entities([t], top=3)
+    except Exception:  # noqa: BLE001 - 抽不出来不影响主流程,但**不许静默**
+        logger.warning("资源名提取:书名号实体那一档取不到(本轮只剩碎片档)", exc_info=True)
     # ② 连续中文片段(先去掉 #话题# 与链接,免得把推广词当资源名)
     body = re.sub(r"#\s*[^#]{1,30}\s*#", " ", t)
     body = re.sub(r"https?://\S+", " ", body)
     for seg in re.findall(r"[一-鿿]{4,12}", body):
+        if seg[0] in _PARTICLE_HEADS:
+            #: ★ **残片**(2026-10-17):正则在**拉丁字母/数字/标点**处会切断,
+            #: 于是 `JOJO的奇妙冒险` 被切成 `的奇妙冒险`。这类以虚词开头的片段
+            #: **不可能是资源名**(没有哪个资源叫「的奇妙冒险」),留着只会
+            #: ① 白查询;② 万一同上名就张冠李戴。⇒ 直接丢。
+            continue
+        if any(p in seg for p in _SHARE_PHRASES):
+            continue          #: 分享话术(「我用夸克网盘给你分享了」)—— 不是资源名
         hints.append(seg)
     out: list[str] = []
     for h in hints:                       # 保序去重 + 去掉过短的
@@ -199,6 +213,18 @@ def _resource_name_hints(title: str) -> list[str]:
         if len(h) >= 3 and h not in out:
             out.append(h)
     return out[:5]
+
+
+#: 以这些字开头的 CJK 片段**不可能是资源名**(虚词/连词/副词 —— 它们是正则从
+#: 拉丁字母/标点处切断后留下的**残片**)。
+#: ⚠️ **故意不收 `我/你/他/不/有/这/那`**:`我的人间烟火`、`不完美的她`、`有翡`
+#: 都是**真资源名** ⇒ 宁可漏挡,也不要把真名字一起挡掉("给错拒绝比不拒绝更坏")。
+_PARTICLE_HEADS = ("的", "了", "是", "在", "和", "与", "及", "把", "被", "让", "就",
+                   "都", "也", "而", "但", "又", "还", "再", "很", "太", "更", "最")
+
+#: 分享**话术**片段:整段是"我怎么把链接给你"的句子,不是资源名。
+_SHARE_PHRASES = ("我给你分享", "给你分享", "网盘给你", "我用夸克", "我用百度",
+                  "我用迅雷", "分享的文件", "复制这段", "复制链接")
 
 
 #: **通用短语**:这类词在标题里满地都是,拿它回库匹配**必然张冠李戴**。
