@@ -1219,7 +1219,10 @@ def _library_candidates(db: Session, user_id: int, settings: Settings | None = N
     让 LLM 去决定「怎么包装 / 发哪个平台 / 什么时机」。
 
     来源:近 `hotspot_agent_library_days` 天 `discovered_pan_links` 里 `status=ok`
-    且 `our_url` 非空的,按 `resource_key` 去重后取最新 `hotspot_agent_library_top` 条。
+    且 `our_url` 非空的,按 `resource_key` 去重。
+    ⚠️ **按 `top × 3` 返回**(2026-10-17 自查):如果只返回"最新 top 条",这 4 条一旦被
+    24h 记忆剔掉,**之后的轮次就一条都不剩**(看起来"接了"其实只生效一次)⇒
+    多取几倍,让调用方的**记忆去重 + 占位**去决定这一轮用哪几条。
 
     ⚠️ **不去重就等着刷屏**:同一资源每天被搬多次,不去重 LLM 会连着几天建议同一条。
     ⚠️ 名字过两道闸(`_too_generic` / `_not_a_resource_name`)—— 垃圾名不进池。
@@ -1253,7 +1256,7 @@ def _library_candidates(db: Session, user_id: int, settings: Settings | None = N
         #:  合不合适该由 LLM 判(它有链接、有标题),不该被适配度分挡在门外。
         out.append({"keyword": name[:24], "growth": 0.0, "platforms": "library",
                     "auto": False, "from_library": True, "our_link": str(link or "")})
-        if len(out) >= cap:
+        if len(out) >= cap * 3:      #: 多取几倍:24h 记忆会剔掉已建议过的,别一轮就用光
             break
     if stats is not None:
         stats["library"] = {"池": len(rows), "入选": len(out)}

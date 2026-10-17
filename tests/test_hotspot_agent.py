@@ -1041,3 +1041,27 @@ def test_资源侧候选必须进到LLM输入里(session, monkeypatch, agent_env
     libs = [h for h in (seen.get("hots") or []) if h.get("from_library")]
     assert libs, f"资源侧候选没进 LLM 输入:{[h.get('keyword') for h in (seen.get('hots') or [])]}"
     assert "嫁金钗" in libs[0]["keyword"]
+
+
+def test_资源侧候选要多取几倍_否则只生效一轮(session) -> None:
+    """★ 2026-10-17 自查:如果每轮都只返回"最新 top 条",那这几条一旦被 24h 记忆剔掉,
+
+    **之后的轮次就一条都不剩** —— 看起来"接了资源侧",其实只生效一次。
+    ⇒ 按 `top × 3` 返回,让调用方的记忆去重 + 占位决定这一轮用哪几条。
+    """
+    from app.db.models import DiscoveredPanLink
+
+    for i in range(10):
+        session.add(DiscoveredPanLink(user_id=1, platform="tieba",
+                                      origin_url=f"https://pan.baidu.com/s/r{i}",
+                                      title=f"某某漫剧{i}全集", status="ok",
+                                      our_url=f"https://pan.quark.cn/s/R{i}",
+                                      found_at=dt.datetime.now()))
+    session.commit()
+
+    class _S:
+        hotspot_agent_library_days = 3
+        hotspot_agent_library_top = 2
+
+    got = hotspot_agent._library_candidates(session, 1, _S())
+    assert len(got) > 2, f"只返回 top 条 ⇒ 之后的轮次会空窗:{len(got)}"
