@@ -1065,3 +1065,14 @@ def test_资源侧候选要多取几倍_否则只生效一轮(session) -> None:
 
     got = hotspot_agent._library_candidates(session, 1, _S())
     assert len(got) > 2, f"只返回 top 条 ⇒ 之后的轮次会空窗:{len(got)}"
+
+
+def test_资源池只收像名字的() -> None:
+    """★ 2026-10-17 空跑远程真数据时抓到:资源侧池里混进了「打开」(动词)与「AI漫」(品类碎片)。
+
+    ⇒ 第三道闸 `_name_like`:太短、或本身就是品类/动作词 ⇒ 不进池。
+    """
+    for bad in ("打开", "AI漫", "下载", "资料", "ab"):
+        assert hotspot_agent._name_like(bad) is False, bad
+    for good in ("袅袅心动", "Folia音乐播放器", "穿成短命炮灰我靠反派贴贴续命"):
+        assert hotspot_agent._name_like(good) is True, good

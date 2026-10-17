@@ -1208,6 +1208,24 @@ def _not_a_resource_name(kw: str) -> bool:
     return False
 
 
+#: 资源侧候选里**根本不是名字**的词(2026-10-17 用远程真数据空跑时抓到池里出现过
+#: 「打开」「AI漫」—— 一个动词、一个品类碎片)。⇒ 池子只收**像名字**的。
+#: ⚠️ 与 `_not_a_resource_name` 分工:那个管"带着链接/短码/口语的长串",
+#: 这里管"**太短或是品类词本身**"。
+_NOT_NAME_WORDS = frozenset((
+    "打开", "分享", "链接", "复制", "下载", "观看", "免费", "资源", "网盘", "合集",
+    "ai漫", "漫剧", "短剧", "电影", "动漫", "全集", "资料", "教程", "壁纸", "模板",
+))
+
+
+def _name_like(name: str) -> bool:
+    """这个名字**像不像一个具体资源**?(资源侧候选的第三道闸)"""
+    t = str(name or "").strip()
+    if len(t) < 3:
+        return False
+    return t.lower() not in _NOT_NAME_WORDS
+
+
 def _library_candidates(db: Session, user_id: int, settings: Settings | None = None,
                         stats: dict | None = None) -> list[dict]:
     """**资源侧**候选:最近拿到、**已有我方链**的资源 —— 最可执行的选题来源(2026-10-17)。
@@ -1245,7 +1263,7 @@ def _library_candidates(db: Session, user_id: int, settings: Settings | None = N
     seen: set[str] = set()
     for title, link in rows:
         name = _clean_name(str(title or ""))
-        if not name or _too_generic(name) or _not_a_resource_name(name):
+        if not name or _too_generic(name) or _not_a_resource_name(name) or not _name_like(name):
             continue
         key = resource_key(name) or name
         if key in seen:
