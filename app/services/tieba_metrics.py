@@ -55,7 +55,12 @@ async def _detail_of(tids: list[int], limit: int) -> dict[str, dict]:
             if first is None:
                 continue
             out[str(tid)] = {"agree": int(getattr(first, "agree", 0) or 0),
-                             "text": flatten_contents(getattr(first, "contents", None))}
+                             "text": flatten_contents(getattr(first, "contents", None)),
+                             #: ★ **发帖时间**(2026-10-18):贴吧**搜索接口不给** `create_time`
+                             #: (实测 57% 无发布时间),而**首楼对象上有** ⇒ **白拿**
+                             #: (这次请求本来就在打,不额外花一次)。取值可能是 int 或 datetime,
+                             #: 由调用方 `to_dt` 归一。
+                             "create_time": getattr(first, "create_time", 0)}
     return out
 
 

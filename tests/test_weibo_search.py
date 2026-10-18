@@ -213,3 +213,24 @@ class Test原帖链接与互动数:
                        "reposts_count": 0, "comments_count": 0, "attitudes_count": 0},
                       monkeypatch)
         assert r["metrics"] == {}
+
+
+def test_发帖时间要带出来(monkeypatch) -> None:
+    """★ 2026-10-18:微博那条链的「只搬新的」一直**形同虚设** —— 条目里**根本没带**
+    `publish_at`(实测 42% 为空),而接口的 `mblog.created_at` 一直都在。
+
+    ⚠️ 它的格式是 **RFC 风格** `Sun Oct 18 10:51:12 +0800 2026`,`fromisoformat` 认不了
+    ⇒ `to_dt` 专门补了这一档(否则加了字段还是空)。
+    """
+    import requests
+
+    from app.utils.timeutil import to_dt
+
+    card = {"ok": 1, "data": {"cards": [{"mblog": {
+        "text": "某资源 自取", "user": {"screen_name": "某人", "id": 7},
+        "reposts_count": 3, "created_at": "Sun Oct 18 10:51:12 +0800 2026"}}]}}
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _Resp(payload=card))
+    monkeypatch.setattr(ws, "_GAP", 0.0)
+    rows = ws.search(["甲"], settings=_S(), session=None)
+    assert rows and rows[0]["publish_at"] > 0, rows
+    assert to_dt(rows[0]["publish_at"]) == to_dt("2026-10-18 10:51:12")

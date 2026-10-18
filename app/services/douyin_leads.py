@@ -609,7 +609,8 @@ def search_keywords(session, user_id: int, top: int, settings,
     return kws
 
 
-def _enqueue_later(session, user_id: int, info: dict, mark: str) -> None:
+def _enqueue_later(session, user_id: int, info: dict, mark: str,
+                   publish_at: int = 0) -> None:
     """**把"能搬、但现在搬不了"的链入队**,等条件好了再重试(2026-10-04 加)。
 
     用户口径:"**可以加上**"(指给"未搬"加待办队列)。场景正是他自己遇到的:
@@ -625,16 +626,23 @@ def _enqueue_later(session, user_id: int, info: dict, mark: str) -> None:
     url = str(info.get("share_url") or "").strip()
     if not url:
         return
+    #: ★ **顺手把发帖时间带进来**(2026-10-18):这张表的行此前 **100% 没有 `publish_at`**
+    #: (平台都是 `douyin`),于是「只搬新的」对它们**完全不起作用** —— 而手上这条线索本来就有时间。
+    from app.utils.timeutil import to_dt
+
+    _pub = to_dt(publish_at)
     row = session.scalar(select(DiscoveredPanLink).where(
         DiscoveredPanLink.user_id == user_id, DiscoveredPanLink.origin_url == url))
     if row is None:
         session.add(DiscoveredPanLink(
             user_id=user_id, platform="douyin", origin_url=url[:500],
-            title=str(mark)[:255], status="pending",
+            title=str(mark)[:255], status="pending", publish_at=_pub,
             message="抖音线索:转存未成(盘满/超额度),等下一轮重试"))
     elif row.status not in ("ok", "skipped"):
         row.status = "pending"
         row.message = "抖音线索:转存未成,等下一轮重试"
+        if _pub and not row.publish_at:      #: 只往有值的方向写(不知道别拿空值盖掉已知的)
+            row.publish_at = _pub
     session.commit()
 
 
@@ -733,7 +741,8 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
             continue
         if budget <= 0:
             # ⚠️ **超额度也要入队**:不然它只是"这轮没搬",下一轮同样不会自动补
-            _enqueue_later(session, user_id, info, mark)
+            _enqueue_later(session, user_id, info, mark,
+                           publish_at=int(ld.get("publish_at") or 0))
             ld["kouling"] = {"kind": "share", "status": "over_budget",
                              "share_url": info["share_url"]}
             continue
@@ -746,7 +755,8 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
             continue
         if res.get("status") in ("disk_full", "failed"):
             # **盘满 / 单次失败** → 入队,等条件好了由 `pan_discovery` 的存量待办优先重试
-            _enqueue_later(session, user_id, info, mark)
+            _enqueue_later(session, user_id, info, mark,
+                           publish_at=int(ld.get("publish_at") or 0))
         ld["kouling"] = {"kind": "share", "status": res.get("status"),
                          "our_url": res.get("our_url") or "",
                          "share_url": info["share_url"],

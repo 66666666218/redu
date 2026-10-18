@@ -1579,3 +1579,16 @@ def test_卡上作品那一格带发布时间标记(monkeypatch) -> None:
     dl.push_leads([{"mark": "甲", "title": "《甲》资源", "url": "u", "author": "某人",
                     "keyword": "", "publish_at": int(time.time()) - 30}], _Settings())
     assert "🆕" in str(sent["card"])
+
+
+def test_入队时把发帖时间带上(session) -> None:
+    """★ 2026-10-18:抖音写进「发现链」的那些行（`platform=douyin`）**100% 没有 `publish_at`**
+
+    ⇒ 「只搬新的（14 天）」对它们**完全不生效** —— 而手上这条线索本来就有时间。
+    """
+    from app.db.models import DiscoveredPanLink
+
+    dl._enqueue_later(session, 1, {"share_url": "https://pan.quark.cn/s/T"},
+                      "某口令", publish_at=1791358442)
+    row = session.scalar(select(DiscoveredPanLink))
+    assert row is not None and row.publish_at is not None, "入队没带时间"

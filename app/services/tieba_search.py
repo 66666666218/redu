@@ -87,6 +87,25 @@ def _pan_links(text: str) -> list[str]:
         return []
 
 
+def _pub_ts(raw: object) -> int:
+    """任意时间形态 → epoch 秒(取不到 0);`to_dt` 认 epoch / ISO / 微博的 RFC 风格。
+
+    ⚠️ **`0` 要当成"没有"提前返回**:`to_dt(0)` 会给出 1970-01-01,而 **Windows 上**
+    `.timestamp()` 对那个本地时刻会抛 `OSError: [Errno 22]`(实测被测试当场打红)。
+    """
+    from app.utils.timeutil import to_dt
+
+    if raw in (None, "", 0, "0"):
+        return 0
+    dt = to_dt(raw)
+    if not dt:
+        return 0
+    try:
+        return int(dt.timestamp())
+    except (OSError, ValueError, OverflowError):
+        return 0
+
+
 def _row(obj: object, keyword: str, detail: dict | None) -> dict | None:
     """`SearchGlobal`(+ 首楼详情)→ 统一记录形状(与 `mediacrawler_source._parse_record` 对齐)。"""
     tid = str(getattr(obj, "tid", "") or "").strip()
@@ -117,7 +136,10 @@ def _row(obj: object, keyword: str, detail: dict | None) -> dict | None:
             "metrics": metrics,                 # 交给 conversion 算曝光
             "keyword": keyword,
             # ★ 比 MediaCrawler 那条**多**给的:发帖时间(新鲜度的真值)
-            "publish_at": int(getattr(obj, "create_time", 0) or 0),
+            #: ★ **搜索对象常常没有** `create_time`(aiotieba 的搜索结果不给它)⇒
+            #: 用**首楼详情**的时间兜底(2026-10-18:贴吧那条链 57% 无发布时间,多半能在这里补上)。
+            "publish_at": (_pub_ts(getattr(obj, "create_time", 0))
+                           or _pub_ts((detail or {}).get("create_time"))),
             "forum_name": str(getattr(obj, "forum_name", "") or ""),
             "tid": tid}
 

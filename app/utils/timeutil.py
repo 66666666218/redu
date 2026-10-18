@@ -41,6 +41,12 @@ def to_dt(value: object) -> datetime | None:
             return None
         if s.isdigit():
             return datetime.fromtimestamp(int(s))
-        return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
+        except ValueError:
+            #: ★ **微博的 `created_at` 不是 ISO**:`Sun Oct 18 10:51:12 +0800 2026`
+            #: (2026-10-18 实测:`fromisoformat` 认不出来 ⇒ 微博那条链的发布时间**一直是空**,
+            #:  也就让「只搬新的」在微博上完全不生效)。RFC-2822 风格单独认一档。
+            return datetime.strptime(s, "%a %b %d %H:%M:%S %z %Y").astimezone().replace(tzinfo=None)
     except (ValueError, OSError, TypeError):
         return None

@@ -205,3 +205,19 @@ def test_编码过的链也能抽出来():
     """首楼里的链常常是 `tiebaclient://…url=https%3A%2F%2F…` 这种**编码过**的深链。"""
     enc = "tiebaclient://x?url=https%3A%2F%2Fpan.baidu.com%2Fs%2F1cpqLxmrFGsgLSD1uOinFgQ"
     assert ts._pan_links(enc), "反转义之后应当能抽到链"
+
+
+def test_搜索对象没时间时用首楼详情兜底() -> None:
+    """★ 2026-10-18:aiotieba 的**搜索结果不给** `create_time`(贴吧那条链 57% 无发布时间),
+
+    而**首楼详情里有** ⇒ 用详情兜底(那次请求本来就在打,不额外花一次)。
+    """
+    obj = _Obj(tid=1, title="某剧全集", content="", create_time=0)
+    row = ts._row(obj, "某词", {"agree": 1, "text": "", "create_time": 1791358442})
+    assert row and row["publish_at"] == 1791358442
+
+
+def test_搜索对象有时间就直接用() -> None:
+    obj = _Obj(tid=2, title="某剧", create_time=1791000000)
+    row = ts._row(obj, "某词", None)
+    assert row and row["publish_at"] == 1791000000

@@ -35,6 +35,7 @@ import re
 import time
 
 from app.utils import get_logger
+from app.utils.timeutil import to_dt
 
 logger = get_logger(__name__)
 
@@ -181,11 +182,18 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
                                                  ("comment_count", int(m.get("comments_count") or 0)),
                                                  ("liked_count", int(m.get("attitudes_count") or 0)))
                                if v > 0}
+                    #: ★ **发帖时间**(2026-10-18):发现链的「只搬新的」判据要它
+                    #: (`discovered_pan_links.publish_at`)—— 接口的 `mblog.created_at` 一直都在
+                    #: (`Sun Oct 18 10:51:12 +0800 2026`),而这里**从来没带出来**
+                    #: ⇒ 微博那条链的发布时间 **42% 为空**、闸门形同虚设。
+                    #: ⚠️ 解析走单一出处 `to_dt`(它认得 epoch / ISO / 微博这种 RFC 风格)。
+                    _pub = to_dt(m.get("created_at"))
                     rows.append({"uid": uid,
                                  "name": who[:60], "url": post_url,
                                  # 转发数是"这条有多少人在传"的代理 —— 与其它平台一致
                                  "snippet": f"{txt[:200]}(转{hot})" if hot else txt[:200],
-                                 "pan_link": "", "metrics": metrics, "keyword": kw})
+                                 "pan_link": "", "metrics": metrics, "keyword": kw,
+                                 "publish_at": int(_pub.timestamp()) if _pub else 0})
             logger.info("微博纯协议:「%s」第 %d 页 +%d 条", kw[:24], page, len(rows) - n_before)
             if not cards:
                 break                      # 没卡片 = 翻到底了
