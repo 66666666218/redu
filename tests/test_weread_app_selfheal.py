@@ -62,7 +62,7 @@ class TestRefreshWithWake:
 
     def test_第一次就成就一次收工(self, monkeypatch) -> None:
         calls = self._patch(monkeypatch, [{"ok": True, "accessToken": "T1", "vid": "V"}])
-        out = wat.refresh_with_wake(None, 1)
+        out = wat.refresh_with_wake(None, 1, prefer_emulator=True)
         assert out["ok"] is True and out["accessToken"] == "T1"
         assert calls["n"] == 1
 
@@ -73,16 +73,36 @@ class TestRefreshWithWake:
             {"ok": False, "reason": "还是旧值"},
             {"ok": True, "accessToken": "T3", "vid": "V"},
         ])
-        out = wat.refresh_with_wake(None, 1)
+        out = wat.refresh_with_wake(None, 1, prefer_emulator=True)
         assert out["ok"] is True and out["accessToken"] == "T3"
         assert calls["n"] == 3, f"应当重试到第 3 次,实际 {calls['n']} 次"
 
     def test_全失败才报错并给出人工步骤(self, monkeypatch) -> None:
         calls = self._patch(monkeypatch, [{"ok": False, "reason": "旧值"}])
-        out = wat.refresh_with_wake(None, 1, attempts=3)
+        out = wat.refresh_with_wake(None, 1, attempts=3, prefer_emulator=True)
         assert out["ok"] is False
         assert calls["n"] == 3, "三次都要试满"
         assert "人工" in out["reason"], f"全失败时要给出人要做的那一步:{out['reason']}"
+
+    def test_模拟器不在就直接走纯HTTP(self, monkeypatch) -> None:
+        """模拟器不在 ⇒ **不浪费**三次唤醒,直接走 HTTP。
+
+        依据(2026-10-18):只有 **App 自己签发**的 token 能打 `/book/articles`
+        (实测 60 发连打全成功);纯 HTTP 铸的那枚(身份档 `eink`)会被 `-2041` 拒。
+        所以"在"时优先 App、"不在"时 HTTP 仍是有效回落(至少认证是活的)。
+        """
+        def _boom(*a, **k):
+            raise AssertionError("模拟器不在时不该尝试唤醒 App")
+        monkeypatch.setattr(wat, "wake_app", _boom)
+        called = {"http": 0}
+
+        def _http(session, user_id, **k):
+            called["http"] += 1
+            return {"ok": True, "via": "http"}
+        monkeypatch.setattr(wat, "refresh_via_http", _http)
+        out = wat.refresh_with_wake(None, 1, prefer_emulator=False)
+        assert out["ok"] is True and out.get("via") == "http"
+        assert called["http"] == 1
 
 
 class TestVerifyByApi:

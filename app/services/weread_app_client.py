@@ -29,6 +29,8 @@
 """
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any
 
 import requests
@@ -38,6 +40,14 @@ from app.utils import get_logger
 logger = get_logger(__name__)
 
 BASE = "https://i.weread.qq.com"
+#: 类级节流(2026-10-18)。**原来完全没有限速** —— 监听轮一旦放量(见
+#: `WECHAT_LISTEN_APP_EXTRA`),122 个号会**连喷**出去。
+#: 实测(2026-10-18,App 铸的 token):间隔 **0.8 秒** 连打 **60 发全成功**(3948 篇带读数),
+#: 所以这里取 0.7 秒 —— 一轮 122 号约 85 秒,不拖垮监听(定点间隔 4~6 小时)。
+#: ⚠️ 与网页端 `WereadClient._throttle` 同款:类级共享,所有实例同一起跑线。
+_MIN_GAP = 0.7
+_last_request = 0.0
+_throttle_lock = threading.Lock()
 # 与抓包实测一致(App 版本 8.2.6 / Android 14);服务端未对版本做严格校验,
 # 但**缺 `accessToken`/`vid` 必被拒**,所以这两个是硬要求。
 _DEFAULT_HEADERS = {
@@ -163,6 +173,13 @@ class WereadAppClient:
         url = f"{BASE}/book/articles"
         params = {"count": str(count), "offset": str(offset),
                   "bookId": book_id, "synckey": "0"}
+        # 类级节流(见文件头 `_MIN_GAP` 的实测依据)
+        global _last_request
+        with _throttle_lock:
+            gap = time.time() - _last_request
+            if gap < _MIN_GAP:
+                time.sleep(_MIN_GAP - gap)
+            _last_request = time.time()
         try:
             r = requests.get(url, headers=self._headers(), params=params, timeout=self._timeout)
         except Exception as exc:  # noqa: BLE001 - 包成自己的异常类型

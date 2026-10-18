@@ -360,6 +360,46 @@ def test_push_listen_renders_my_link_with_clean_href(session, monkeypatch) -> No
     assert "s/RAW" not in blob               # 他人原始盘链不外泄
 
 
+def test_push_listen_read_column_has_no_asterisk(session, monkeypatch) -> None:
+    """阅读列**只显示数字**,不加 `*`(2026-10-18 用户当场报「刚补推的阅读数后面都带*」)。
+
+    那个 `*` 原本标的是「dajiala 采样口径」,而 dajiala 2026-09-29 已摘除;
+    `traffic_at` 现在的语义是 **`read_trend` 最近一次采到读数的时刻**(observe 每次都写 now)
+    ⇒ 每篇被观察过的文章都会带 `*`,读起来像"这数是估算的",而它本来是精确的 `readNum`。
+    判据要**精确到数字串**:`363` 必须出现,`363*` 必须不出现。
+    """
+    import json
+    from datetime import datetime
+
+    import app.services.feishu as feishu_mod
+
+    r = WechatArticle(user_id=1, title="资源文", author="号A", read_num=363,
+                      url="https://mp.weixin.qq.com/s/x", source="listen",
+                      traffic_at=datetime.now())
+    session.add(r)
+    session.commit()
+    monkeypatch.setattr(feishu_mod, "webhook_for",
+                        lambda settings, section: "https://open.feishu.cn/hook/x")
+    cards: list[dict] = []
+
+    class _FakeFeishu:
+        def __init__(self, webhook, secret="") -> None:
+            pass
+
+        def send(self, msg: str) -> bool:
+            return True
+
+        def send_card(self, card: dict) -> bool:
+            cards.append(card)
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
+    wechat_monitor._push_listen(session, 1, _settings(), [r])
+    blob = json.dumps(cards, ensure_ascii=False)
+    assert "363" in blob, f"阅读数丢了:{blob[:400]}"
+    assert "363*" not in blob, "阅读数后面不该再带 `*`(dajiala 采样口径的标记早已作废)"
+
+
 def test_push_listen_ignores_quiet_hours(session, monkeypatch) -> None:
     """免打扰时段(默认23~8点)不再丢弃普通新发文:飞书是员工查看入口,任何时段全推。
 

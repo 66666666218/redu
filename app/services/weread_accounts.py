@@ -96,6 +96,8 @@ class WereadPool:
         self.used: dict[str, int] = {}
         #: 本轮已确认**登录态坏**的账号(cover 用;见 `latest_article`)。
         self._cover_dead: set[str] = set()
+        #: 上一次 cover 的登录态错误(全部账号都坏时原样抛出,不改异常语义)。
+        self._cover_last: BaseException | None = None
 
     # ---- 基本 ----
     def __bool__(self) -> bool:
@@ -216,12 +218,19 @@ class WereadPool:
         last: BaseException | None = None
         # **本轮已确认登录态坏的账号不再重试**:cover 是"每个号每轮都打一次"的高频动作,
         # 不记住的话,基础账号一过期就会让**每个号**都多打一发注定失败的请求(整轮成本翻倍)。
-        keys = [k for k in self.keys if k not in self._cover_dead] or self.keys
+        # ⚠️ 全部账号都坏时**直接抛上一次的错**,不要用 `or self.keys` 把它们放回来重试 ——
+        # 那等于"记住"白记(2026-10-18 当场发现:网页 cookie 过期时 122 个号各打了一发 -2012)。
+        keys = [k for k in self.keys if k not in self._cover_dead]
+        if not keys:
+            if self._cover_last is not None:
+                raise self._cover_last
+            return None
         for key in keys:
             try:
                 return self.client(key).latest_article(book_id)
             except WereadAuthError as exc:
                 last = exc
+                self._cover_last = exc
                 self._cover_dead.add(key)
                 logger.debug("cover 账号 %s 登录态失效,换下一个", key)
                 continue

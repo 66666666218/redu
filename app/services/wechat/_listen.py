@@ -418,8 +418,21 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
     # ★ 账号池(2026-10-18):cover 不花列表额度,但它**依赖账号的登录态** ——
     #   基础账号的 cookie 在两次续期之间有窗口会失效(`-2012 登录超时`),
     #   池里还有别的账号时就不必整轮等续期(续期失败还会把本号记成 failed)。
-    item = (pool.latest_article(b.weread_book_id) if pool is not None
-            else weread.latest_article(b.weread_book_id))
+    # ★★ 2026-10-18:**cover 登录态失效不许让整个号判死**。
+    #    cover 走的是**网页 cookie**,列表(App 路)是**另一套鉴权**;网页 cookie 在
+    #    两次续期之间会有一段 `-2012`(今天就有一段)。原来的写法让 cover 先抛
+    #    `WereadAuthError` ⇒ 调用方直接去续期(还可能撞冷却)⇒ **唯一能用的 App 路根本没被调用**
+    #    ⇒ 整轮 `new=0`、阅读数全 0。现在:cover 失败只记下来,**继续走列表**;
+    #    只有列表也没答上时,才把那个登录态错抛回去(续期仍然照旧触发)。
+    cover_auth: Exception | None = None
+    try:
+        item = (pool.latest_article(b.weread_book_id) if pool is not None
+                else weread.latest_article(b.weread_book_id))
+    except WereadAuthError as exc:
+        cover_auth, item = exc, None
+        if not getattr(_weread_collect, "_cover_auth_warned", False):
+            _weread_collect._cover_auth_warned = True
+            logger.info("cover 登录态失效(%s)—— 本轮改由列表路(App/网页)回答", str(exc)[:80])
     cover_ok = bool(item and item.get("url"))
     if cover_ok:
         items.append({"title": item["title"], "url": item["url"],
@@ -635,7 +648,14 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
         else:
             key = "weread_list_off"
         stats[key] = stats.get(key, 0) + 1
+    # ★ **两条都没答上、且 cover 是登录态错** ⇒ 抛回去让调用方续期(与旧行为一致)。
+    #   区别只有一处:列表(App)**答上了就不抛** —— 那正是修复的目的
+    #   (网页 cookie 过期不该连累唯一能出阅读数的 App 路)。
+    if cover_auth is not None and not listed:
+        raise cover_auth
     return got, (cover_ok or listed)
+
+
 def _listen_lock_key(user_id: int) -> str:
     return f"wechat_listen_running_{user_id}"
 _SHELF_REVIEW_KEYS = ("reviewId", "review_id", "lastReviewId", "latestReviewId", "mpReviewId")
@@ -1549,9 +1569,14 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
             pan = types or "—"
         # 阅读数来源:微信读书 cover/列表自带站内阅读(免费,2026-09-30 起);
         # dajiala 采样摘除后 traffic_at 恒空,不能再当显示条件(否则永远显示"—")
+        #
+        # ★ **2026-10-18 去掉 `*` 后缀**(用户当场报「刚补推的阅读数后面都带*」):
+        #   它原来标的是「dajiala 采样口径」,而 dajiala **2026-09-29 已摘除**;
+        #   `traffic_at` 现在的语义是 **`read_trend` 最近一次采到读数的时刻**
+        #   (`read_trend.observe` 每观察到一次就写 now)⇒ **每篇被观察过的文章都会带 `*`**,
+        #   员工读到的是"这个数是估算的",而它本来是**精确**的 `readNum`。
+        #   ⇒ 读数只显示数字,不加任何口径符号。
         read = str(r.read_num) if r.read_num else "—"
-        if r.traffic_at:
-            read += "*"  # 有采样点的历史文章:标注为采样口径
         return _col_set_row([
             (_md_safe(r.author)[:10] or "—", 3), (article_md, 6), (orig_md, 2),
             (pan, 2), (read, 2),

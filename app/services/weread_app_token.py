@@ -91,6 +91,24 @@ def _run(adb: str, *args: str, timeout: int = 120) -> str:
     return (p.stdout + p.stderr).decode("utf-8", "replace").strip()
 
 
+def emulator_ready(adb: str = "") -> bool:
+    """模拟器现在能不能读到账号库(只看 `adb devices`)。**不抛异常**。
+
+    为什么会需要这个判断:2026-10-18 实测 —— **只有 App 自己铸的 token** 能打通
+    `i.weread.qq.com/book/articles`;纯 HTTP 铸出来的那枚(身份档 `eink`)打同一个端点
+    仍然 `-2041`。而 `refresh_with_wake` 原来**先试 HTTP**,于是"HTTP 成功"就把
+    唯一真能用的那条路挡在后面 ⇒ 生产里每轮 `app_blocked` 十几发、阅读数全 0。
+    """
+    exe = _find_adb(adb)
+    if not exe:
+        return False
+    try:
+        dev = _run(exe, "devices", timeout=15)
+    except Exception:  # noqa: BLE001 - adb 卡住/没装都算"不在"
+        return False
+    return "emulator" in dev or "127.0.0.1" in dev
+
+
 def pull_from_emulator(adb: str = "", tmpdir: str | None = None) -> dict[str, Any]:
     """从雷电模拟器里把 `accessToken` / `vid` 读出来。**失败抛异常**,别返回空。
 
@@ -350,7 +368,7 @@ def refresh_via_http(session: Session, user_id: int, *, verify=None) -> dict[str
 
 
 def refresh_with_wake(session: Session, user_id: int, *, adb: str = "",
-                      attempts: int = 3) -> dict[str, Any]:
+                      attempts: int = 3, prefer_emulator: bool | None = None) -> dict[str, Any]:
     """**唤醒 App → 重取 → 立刻验活**,不行就重试。返回 `{ok, ...}`。
 
     ⚠️ 这是"阅读数自愈"的入口。原来的 `_reget` 只是"重取一次、拿到**同一个值**、再失败"
@@ -359,30 +377,45 @@ def refresh_with_wake(session: Session, user_id: int, *, adb: str = "",
     ⚠️ 全部尝试都失败才返回 `ok=False` —— 那时才该惊动人工。
     """
     last: dict[str, Any] = {"ok": False, "reason": "未尝试"}
-    # ★★ ① **先试纯 HTTP**(2026-10-10 打通)—— **不需要模拟器**。
-    #    这条路一通,模拟器对微信读书就**彻底退休**了;下面那段唤醒 App 只在
-    #    (a) 凭据里还没有 deviceId(没做过一次性读取)或 (b) HTTP 这条路被拒时才走。
+    # ★★★ **顺序在 2026-10-18 反转了**(原来是"先 HTTP、失败才唤醒 App")。
+    #
+    # 今天的硬证据:
+    #   · 模拟器里读出、App 自己签发的 token → `/book/articles` **60 发连打全成功**
+    #     (3948 篇带精确阅读数);
+    #   · 同一时刻,纯 HTTP 铸出来的 token(身份档 `eink`)→ 同一个端点 **`-2041`**。
+    # 而 `refresh_via_http` 的验活(`verify_by_api`)把 `-2041` 当成"认证已过、只是额度",
+    # 于是**判 ok=True** ⇒ 它永远"成功" ⇒ 那段唤醒模拟器的代码**永远轮不到**
+    # ⇒ 库里存的始终是一枚打不通这个端点的 token ⇒ 生产每轮 `app_blocked` 十几发、阅读数全 0。
+    #
+    # ⇒ 现在:**模拟器在,就先走 App 那一路**(那才是能用的身份);模拟器不在,才回落 HTTP
+    #   (它至少能让认证活着,虽然 `/book/articles` 仍会被拒)。
+    http_reason = "未尝试(模拟器可用,已先走 App 那一路)"
+    # `prefer_emulator` 可显式注入(None = 现场探一次 `adb devices`)——
+    # 测试必须能钉死走哪条,否则"开发机恰好开着模拟器"会让用例变成看环境。
+    use_emu = emulator_ready(adb) if prefer_emulator is None else bool(prefer_emulator)
+    if use_emu:
+        for i in range(max(1, attempts)):
+            wake_app(adb)
+            last = refresh(session, user_id, adb=adb)   # 它自己按 app 档验活
+            if last.get("ok"):
+                if i:
+                    logger.info("微信读书 App token 第 %d 次唤醒后取到有效值", i + 1)
+                return last
+            logger.info("第 %d 次唤醒+重取仍无效:%s", i + 1, str(last.get("reason"))[:80])
+            time.sleep(3)
+    else:
+        logger.info("模拟器不在,跳过 App 那一路(它才是 /book/articles 能用的身份档)")
+    # ② 回落:纯 HTTP(**不需要模拟器**;铸出来的是 `eink` 档)
     http_out = refresh_via_http(session, user_id)   # 它自己按 eink 档验活
     if http_out.get("ok"):
         return http_out
-    logger.info("纯 HTTP 续期未成(%s)—— 回落唤醒 App(需要模拟器)",
-                str(http_out.get("reason"))[:90])
-    # ② 回落:唤醒 App 重读账号库(**要模拟器开着**;没开就一定失败,这是常态不是故障)
-    for i in range(max(1, attempts)):
-        wake_app(adb)
-        last = refresh(session, user_id, adb=adb)   # 它自己按 app 档验活
-        if last.get("ok"):
-            if i:
-                logger.info("微信读书 App token 第 %d 次唤醒后取到有效值", i + 1)
-            return last
-        logger.info("第 %d 次唤醒+重取仍无效:%s", i + 1, str(last.get("reason"))[:80])
-        time.sleep(3)
+    http_reason = str(http_out.get("reason"))[:60]
     return {"ok": False,
             # ⚠️ **全失败时必须给出"人要做的那一步"**(这条被 `test_全失败才报错并给出人工步骤` 守着):
             #    我 2026-10-11 加纯 HTTP 那条路时,把消息改成了"两条路都没成 —— …",
             #    **信息更全了、却把"该人工做什么"弄丢了** —— 而那才是这条消息存在的理由。
-            "reason": f"两条路都没成(纯 HTTP:{str(http_out.get('reason'))[:60]};"
-                      f"唤醒 App:{str(last.get('reason'))[:60]})—— **需要人工**:"
+            "reason": f"两条路都没成(App:{str(last.get('reason'))[:60]};"
+                      f"纯 HTTP:{http_reason})—— **需要人工**:"
                       f"开一次雷电模拟器、在微信读书 App 里确认登录态(必要时重登),"
                       f"再跑 `scripts/weread_app_token.py` 重取凭据"}
 
