@@ -185,14 +185,20 @@ def clean_xunlei(db: Session, user_id: int, settings, *, dry_run: bool, left: in
             "errors": (res.get("errors") or [])[:3]}
 
 
-def report_baidu(db: Session, user_id: int, settings, *, left: int = 0) -> dict:
+def report_baidu(db: Session, user_id: int, settings, *, left: int = 0,
+                 report_path: str | None = None) -> dict:
     """百度:**只报告,永不自动删**(它没有回收站,删了不可逆)。返回本轮统计。
 
     ★ **2026-10-16 起报两件事**(用户口径「先做识别 + 清单」):
       ① **引流文件**(`pan_promo_sweep`,原样保留);
       ② **跨目录重复**(`baidu_dup`,判据与夸克那边同一条:同名+同大小、出现在不同目录)。
-    ⚠️ 重复清单**落到 `data/pan_dedupe_baidu.json`** 供人工过目 —— **默认不删**是有意的:
-    百度删了捞不回来(`baidupan_transfer.delete_paths` 的文档写着「调用方必须自己确认路径」)。
+    ⚠️ 重复清单**落到 `settings.pan_auto_clean_baidu_report_path`** 供人工过目 ——
+    **默认不删**是有意的:百度删了捞不回来
+    (`baidupan_transfer.delete_paths` 的文档写着「调用方必须自己确认路径」)。
+
+    ⚠️ **`report_path` 是给测试用的**(2026-10-19):原来路径写死 `data/...`,
+    而 `tests/test_baidu_dup.py` 调的就是这个真实函数 ⇒ 跑一次测试就把**生产清单**
+    覆盖成 `dup0.apk` 那种造出来的数据。测试必须显式传临时路径。
     """
     from app.services import pan_promo_sweep
 
@@ -227,7 +233,9 @@ def report_baidu(db: Session, user_id: int, settings, *, left: int = 0) -> dict:
         dup = baidu_dup.build_plan(
             BaiduPanClient(ck), roots=(root,),
             intro_dir=(getattr(settings, "pan_intro_baidu_dir", "") or ""))
-        p = Path("data/pan_dedupe_baidu.json")
+        p = Path(report_path
+                 or getattr(settings, "pan_auto_clean_baidu_report_path", "")
+                 or "data/pan_dedupe_baidu.json")
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps({"root": root, **dup}, ensure_ascii=False, indent=1),
                      encoding="utf-8")
@@ -261,8 +269,9 @@ def report_baidu(db: Session, user_id: int, settings, *, left: int = 0) -> dict:
     except Exception as exc:  # noqa: BLE001 - 识别失败不该让上面那份引流报告也白做
         logger.info("百度跨目录重复识别跳过:%s: %s", type(exc).__name__, str(exc)[:100])
         out["dup_error"] = f"{type(exc).__name__}: {str(exc)[:80]}"
-    out["note"] = ("不可逆,只报告;**删除开关故意还没做** —— 等你看过一份真实清单、"
-                   "确认判据没误判再开;清单见 data/pan_dedupe_baidu.json,"
+    out["note"] = ("不可逆,只报告;删除开关默认关闭(`PAN_AUTO_CLEAN_BAIDU_DELETE=false`),"
+                   "看过真实清单、确认判据没误判再开;"
+                   f"清单见 {out.get('dup_list') or 'data/pan_dedupe_baidu.json'},"
                    "重扫用 `python scripts/baidu_dedupe.py`(只读)")
     return out
 

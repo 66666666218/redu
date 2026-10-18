@@ -216,15 +216,20 @@ def pan_dedupe_tick(settings=None) -> int:
 
     depth = int(getattr(settings, "xunlei_dedupe_depth", 3) or 3)
     cap = int(getattr(settings, "xunlei_dedupe_max_per_run", 30) or 30)
+    #: ★ 预算必须由作业传进来(2026-10-19):模块级 `BUDGET` 只在**导入时**读一次
+    #: `PAN_DEDUPE_BUDGET` 环境变量,而 `.env` 不会进 `os.environ`(pydantic 只读进
+    #: Settings 对象)⇒ 在 `.env` 里写它**根本不会生效**。实测 10-18 那轮扫 2581 个
+    #: 目录、800 次调用就撞上限 ⇒「没扫完不删」weekly 空转。现在走 Settings(可配)。
+    budget = int(getattr(settings, "xunlei_dedupe_budget", BUDGET) or BUDGET)
     db = get_session_local()()
     total = 0
     try:
         for (uid,) in db.execute(__import__("sqlalchemy").select(User.id)
                                  .where(User.enabled.is_(True))).all():
             try:
-                out = build_plan(depth)
+                out = build_plan(depth, budget=budget)
                 groups, risky = out["plan"], [p for p in out["plan"] if p["risky"]]
-                note = (f"扫{out['scanned_dirs']}目录 {out['calls']}次调用;"
+                note = (f"扫{out['scanned_dirs']}目录 {out['calls']}/{budget}次调用;"
                         f"重复组{len(groups)}(跳过risky{len(risky)})")
                 if not out["complete"]:
                     # **撞预算 ⇒ 一个都不删**(见 docstring 的硬规矩 1)

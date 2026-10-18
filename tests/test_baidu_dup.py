@@ -11,6 +11,8 @@
    这组测试里的 `test_同目录里的重复也要认得出来` 就是那次订正的守卫。
 """
 import os
+import tempfile
+from pathlib import Path
 
 os.environ.setdefault("JWT_SECRET", "test_secret_0123456789abcdef0123456789abcdef")
 os.environ.setdefault("DATABASE_URL", "sqlite://")
@@ -114,7 +116,13 @@ class Test百度删除开关:
 
     class _S:
         pan_intro_baidu_dir = ""
-        pan_auto_clean_baidu_root = "" 
+        pan_auto_clean_baidu_root = ""
+        #: ⚠️ **必须指向临时目录**(2026-10-19):`report_baidu` 原来写死
+        #: `data/pan_dedupe_baidu.json`,而本文件调的是**真实函数** ⇒ 跑一次测试就把
+        #: 生产清单覆盖成 `dup0.apk`(10-18 23:40 实测发生)。清单是决定"要不要开百度删除"
+        #: 的唯一依据,污染它比没有清单更坏。
+        pan_auto_clean_baidu_report_path = os.path.join(
+            tempfile.gettempdir(), "redian_test_pan_dedupe_baidu.json")
 
     def _dup(self, n_extras: int = 3):
         return {"n_groups": 1, "n_dup": n_extras, "bytes": n_extras * 100,
@@ -147,6 +155,20 @@ class Test百度删除开关:
         out = pac.report_baidu(object(), 1, self._S(), left=10)
         assert called == [], "**默认关**就一个字节都不许删"
         assert out["dup_files"] == 3 and out["state"] == "report_only"
+
+    def test_报告只写临时路径_绝不碰生产清单(self, monkeypatch) -> None:
+        """★ 回归守卫:跑测试不许覆盖 `data/pan_dedupe_baidu.json`。
+
+        2026-10-18 23:40 实测发生:一次测试把生产清单写成了 `dup0.apk / 100 字节`
+        的造数据。清单是人工决定「要不要开百度删除」的唯一依据。
+        """
+        real = Path("data/pan_dedupe_baidu.json")
+        before = real.stat().st_mtime_ns if real.exists() else None
+        pac = self._patch(monkeypatch, self._dup(), [])
+        out = pac.report_baidu(object(), 1, self._S(), left=10)
+        after = real.stat().st_mtime_ns if real.exists() else None
+        assert before == after, "测试把生产百度清单覆盖了"
+        assert Path(out["dup_list"]).parent == Path(tempfile.gettempdir()), out["dup_list"]
 
     def test_开了才删_且只删重复副本并共用上限(self, monkeypatch) -> None:
         class _S2(self._S):

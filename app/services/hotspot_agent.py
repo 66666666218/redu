@@ -1935,12 +1935,27 @@ def settle_suggestions_all_users(settings: Settings | None = None) -> int:
     return total
 
 
-def _auto_transfer(session, user_id: int, pan_url: str, settings) -> str:
+def _auto_transfer(session, user_id: int, pan_url: str, settings, title: str = "") -> str:
     """把别人的原始链转存成**我方分享链**;任何失败都返回空串(文案照常生成,只是没我方链)。
 
     仅夸克(百度转存是另一套实现,按需再接)。触发频率低——`generate_draft` 按需调用,
     不会像监听轮的批量转存那样打风控。
+
+    ★ **先问资源库**(2026-10-19,用户口径「资源库有的就不再新转存」):`title` 给了就先走
+    三盘互通的统一入口 —— 同一资源别的盘已有我方链时,**直接复用、不再搬一份**。
+    查库失败/没命中都照常转存(复用是省一次搬,不许变成新故障源)。
     """
+    if title:
+        try:
+            from app.services.pan_discovery import reuse_if_have
+
+            _have = reuse_if_have(session, user_id, title)
+            if _have and str(_have.get("my_link") or "").strip():
+                logger.info("选题自动转存:三盘互通命中,复用已有链 %s", str(_have["my_link"])[:56])
+                return str(_have["my_link"]).strip()
+        except Exception:  # noqa: BLE001 - 查库失败就当没有,别挡转存
+            logger.debug("选题三盘互通查询失败,按没有处理", exc_info=True)
+
     from app.services.quark_transfer import QuarkTransfer
 
     from app.services import pan_accounts as _A
@@ -1998,7 +2013,8 @@ def generate_draft(session, user_id: int, suggestion_id: int, settings=None) -> 
     except Exception:  # noqa: BLE001 - 资源库查询失败不挡文案生成
         logger.debug("文案生成查资源库失败", exc_info=True)
     if not my_link and raw_link:
-        my_link = _auto_transfer(session, user_id, raw_link, settings)
+        my_link = _auto_transfer(session, user_id, raw_link, settings,
+                                 title=sug.keyword or "")
 
     out = llm_client.draft_article(
         settings.deepseek_base_url, settings.deepseek_api_key, settings.deepseek_model,

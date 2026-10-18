@@ -35,6 +35,21 @@ def admin_collection_health(user: User = Depends(require_perm("logs.view")), db:
     return admin_svc.collection_health(db)
 
 
+@router.get("/api/admin/pan/self-check")
+def admin_pan_self_check(user_id: int | None = None,
+                         user: User = Depends(require_perm("logs.view")),
+                         db: Session = Depends(get_db)):
+    """网盘链路自检(**只读**):清理作业时效/空转、盘容量、资源库复用、百度清单、配置。
+
+    不传 `user_id` 就查当前管理员自己的数据。与每天 05:10 的自动自检**同一套判据**
+    (`app/services/pan_self_check.py`),不会另写一份 —— 两份判据迟早会飘。
+    """
+    from config.settings import get_settings
+    from app.services.pan_self_check import run_checks
+
+    return run_checks(db, int(user_id or user.id), get_settings())
+
+
 @router.get("/api/admin/users")
 def admin_users(q: str = "", user: User = Depends(require_perm("users.view")), db: Session = Depends(get_db)):
     return admin_svc.list_users(db, q)

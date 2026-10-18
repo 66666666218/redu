@@ -558,25 +558,52 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                             share_url_b = picked.split(" (提取码")[0].strip()
                             m = re.search(r"(?:提取码\s*([0-9A-Za-z]{4}))", picked)
                             code_b = m.group(1) if m else ""
+                            did_transfer = False
                         else:
-                            pwd_b = extract_pwd(getattr(r, "content", "") or "", u) or extract_pwd(r.title or "", u)
-                            res_b = baidu_client.transfer_and_share(
-                                u, password=pwd_b,
-                                intro_dir=getattr(settings, "pan_intro_baidu_dir", "") or "")
-                            share_url_b = res_b["share_url"]
-                            code_b = res_b.get("password", "") or ""
-                            mine_b = f"{share_url_b} (提取码 {code_b}) [百度]" if code_b else f"{share_url_b} [百度]"
+                            # ★★★ **资源级复用**(三盘互通,2026-10-19):上面那条按**链相等**
+                            # 只挡住「同一条分享链」;而盘商「同一资源换条链再发」是常态 ⇒
+                            # 同一份资源换个百度链就会被**再搬一份**。先问资源库。
+                            # ⚠️ 命中就**只复用、不转存** —— 这是用户口径
+                            # 「资源库有的就不再新转存,用资源库里面的」。
+                            from app.services.pan_discovery import reuse_if_have
+
+                            _have_b = None
+                            try:
+                                _have_b = reuse_if_have(session, user_id, r.title or "")
+                            except Exception:  # noqa: BLE001 - 查库失败就当没有,别挡转存
+                                logger.debug("百度三盘互通查询失败,按没有处理", exc_info=True)
+                            _pick_b = str((_have_b or {}).get("my_link") or "").strip()
+                            did_transfer = not _pick_b
+                            if _pick_b:
+                                # 已有链可能落在**别的盘**(正是三盘互通的收益)⇒ 原样保留标记
+                                mine_b = _pick_b
+                                share_url_b = _pick_b.split(" (提取码")[0].strip()
+                                m = re.search(r"(?:提取码\s*([0-9A-Za-z]{4}))", _pick_b)
+                                code_b = m.group(1) if m else ""
+                                logger.info("百度三盘互通:复用已有我方链(免重复转存)「%s」← %s",
+                                            (r.title or "")[:36], _pick_b[:56])
+                            else:
+                                pwd_b = extract_pwd(getattr(r, "content", "") or "", u) or extract_pwd(r.title or "", u)
+                                res_b = baidu_client.transfer_and_share(
+                                    u, password=pwd_b,
+                                    intro_dir=getattr(settings, "pan_intro_baidu_dir", "") or "")
+                                share_url_b = res_b["share_url"]
+                                code_b = res_b.get("password", "") or ""
+                                mine_b = f"{share_url_b} (提取码 {code_b}) [百度]" if code_b else f"{share_url_b} [百度]"
                         mine = [x for x in (r.my_pan_urls or "").splitlines() if x.strip()]
-                        mine.append(mine_b)
-                        r.my_pan_urls = chr(10).join(mine)[:2000]
+                        if mine_b not in mine:
+                            mine.append(mine_b)
+                            r.my_pan_urls = chr(10).join(mine)[:2000]
                         replacements.setdefault(r.id, []).append((u, share_url_b, code_b))
                         # ⚠️ 百度这边同理:**转存已经真花了,记录不能挂在轮末那次 commit 上**。
                         _commit_now(session, "百度转存")
-                        # 已推送过的历史行:补一条轻量链接消息(百度转存常晚于推送)
-                        try:
-                            _relink_notify(session, user_id, settings, r, "百度", share_url_b, code_b)
-                        except Exception:  # noqa: BLE001 - 补链失败不影响转存结果
-                            logger.debug("百度补链消息失败", exc_info=True)
+                        # 已推送过的历史行:补一条轻量链接消息(百度转存常晚于推送);
+                        # 复用来的链早就存在,不再重复通知。
+                        if did_transfer:
+                            try:
+                                _relink_notify(session, user_id, settings, r, "百度", share_url_b, code_b)
+                            except Exception:  # noqa: BLE001 - 补链失败不影响转存结果
+                                logger.debug("百度补链消息失败", exc_info=True)
                     except BaiduPanAuthError as exc:
                         logger.error("百度网盘 Cookie 失效,本轮停止百度链转存:%s", exc)
                         _baidu_dead_alert(str(exc))
@@ -614,6 +641,7 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
             if not urls:
                 continue
             got = ""
+            did_transfer_x = False
             for u in urls:
                 # ① 历史复用:库里已有别人转好的**同一条链**,直接用,别重复搬一份
                 hist = session.execute(
@@ -627,11 +655,28 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                                if "pan.xunlei.com" in x), "")
                 if picked:
                     got = picked.split(" (提取码")[0].strip()
+                    did_transfer_x = False
                     break
-                # ② 首次见到该资源:转存(统一入口**不抛**,失败也是结构化返回)
+                # ② ★ **资源级复用**(三盘互通,2026-10-19):按链相等只挡住「同一条分享链」;
+                #    盘商「同一资源换条链再发」是常态 ⇒ 先问资源库,有就**不再搬**。
+                from app.services.pan_discovery import reuse_if_have
+
+                _have_x = None
+                try:
+                    _have_x = reuse_if_have(session, user_id, r.title or "")
+                except Exception:  # noqa: BLE001 - 查库失败就当没有,别挡转存
+                    logger.debug("迅雷三盘互通查询失败,按没有处理", exc_info=True)
+                if _have_x and str(_have_x.get("my_link") or "").strip():
+                    got = str(_have_x["my_link"]).strip()
+                    did_transfer_x = False
+                    logger.info("迅雷三盘互通:复用已有我方链(免重复转存)「%s」← %s",
+                                (r.title or "")[:36], got[:56])
+                    break
+                # ③ 首次见到该资源:转存(统一入口**不抛**,失败也是结构化返回)
                 # ⚠️ **网络活之前先放掉写锁**(与夸克/百度同一条纪律,由
                 # `tests/test_slowwork_guard.py` 守着):迅雷转存要走 captcha 续期,
                 # **可能几十秒**,而 SQLite 是单写者、别的作业 `busy_timeout` 只有 30 秒。
+                did_transfer_x = True
                 session.commit()
                 res = transfer_pan_url(session, user_id, u, settings,
                                        snippet=f"{r.title or ''} {(r.content or '')[:200]}")
@@ -643,14 +688,17 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
             if not got:
                 continue
             mine = [x for x in (r.my_pan_urls or "").splitlines() if x.strip()]
-            mine.append(f"{got} [迅雷]")
-            r.my_pan_urls = chr(10).join(mine)[:2000]
+            line = f"{got} [迅雷]" if "pan.xunlei.com" in got else got
+            if line not in mine:
+                mine.append(line)
+                r.my_pan_urls = chr(10).join(mine)[:2000]
             replacements.setdefault(r.id, []).append((urls[0], got, ""))
             _commit_now(session, "迅雷转存")     # 外部副作用已发生 ⇒ 当场落盘
-            try:
-                _relink_notify(session, user_id, settings, r, "迅雷", got, "")
-            except Exception:  # noqa: BLE001 - 补链失败不影响转存结果
-                logger.debug("迅雷补链消息失败", exc_info=True)
+            if did_transfer_x:
+                try:
+                    _relink_notify(session, user_id, settings, r, "迅雷", got, "")
+                except Exception:  # noqa: BLE001 - 补链失败不影响转存结果
+                    logger.debug("迅雷补链消息失败", exc_info=True)
     if reused_have:
         #: ★ **资源级复用**省下的转存次数,单独报一行 —— 它是"相同资源只存一份"的**直接证据**。
         logger.info("三盘互通:本轮**资源级复用 %d 篇**(按资源名命中已有我方链,免重复转存)",

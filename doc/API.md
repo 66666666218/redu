@@ -1463,6 +1463,33 @@ GET `/api/admin/insights`(perm `data.view`)→ 跨用户关键词趋势/预测�
 ### 13.4 采集健康度
 GET `/api/admin/health`(perm `logs.view`)→ 各平台最近采集状态 + 数据写入 + 飞书推送 + Cookie 配置,运维一键看。
 
+### 13.4.1 网盘链路自检(2026-10-19)
+
+GET `/api/admin/pan/self-check?user_id=1`(perm `logs.view`)
+
+**只读**:不列盘、不转存、不删除,只查库/查文件/查配置。与每天 05:10 的自动自检
+(`pan_self_check` 作业)共用**同一套判据**。
+
+检查项:清理作业时效、最近一轮是否空转(没扫完/撞上限/撞预算)、盘容量(≥95% 警告、
+≥99% 错误)、资源库复用率、百度清单是否缺失/过期/被测试数据覆盖、清理配置状态。
+
+```json
+{
+  "status": "error",
+  "user_id": 1,
+  "checked_at": "2026-10-19 00:56:19",
+  "checks": [
+    {"name": "三盘自动清理时效", "level": "ok", "detail": "最近一轮 2026-10-18 04:48(success),20.1h 前"},
+    {"name": "迅雷整包去重结果", "level": "error", "detail": "命中「failed/撞 API 预算」:扫2581目录 800次调用……"},
+    {"name": "盘容量", "level": "error", "detail": "迅雷/xunlei#2 已用 99.2% —— 转存随时会因盘满停摆"},
+    {"name": "资源库复用", "level": "ok", "detail": "近 7 天:公开发现 400 条(复用 250)、迅雷群 361 条(复用 128)"}
+  ],
+  "warnings": ["仅列 level=warn/error 的项"]
+}
+```
+
+`status` ∈ `ok` / `warn` / `error`。不传 `user_id` 时查当前管理员自己的数据。
+
 ### 13.5 用户管理
 | 动作 | 方式 | 路径 | 说明 |
 |---|---|---|---|

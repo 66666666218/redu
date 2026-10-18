@@ -507,6 +507,9 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     # 百度只报告。边界(硬上限/没扫完拒绝删/弱判据不删/我方分享链一票否决/dry-run 默认开)
     # 全在 `pan_auto_clean` 的头注里 —— 那些不是装饰,每条都对着一个踩过的坑。
     from app.services.pan_auto_clean import auto_clean_tick as pan_auto_clean_tick
+    #: 网盘链路自检(2026-10-19,用户口径「增加一道自检功能」):只读查库/查文件,
+    #: 不碰盘。异常才推管理群;正常也写一行 `runs`,别让"自检没跑"变成新的静默点。
+    from app.services.pan_self_check import self_check_all_users as pan_self_check_tick
     from app.services.lead_settlement import record_reminder_tick as recruit_reminder_tick
 
     jobs = [
@@ -651,6 +654,12 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # 默认**关**(自动删盘不该在新部署上默认生效);`dry_run` 默认**开**(先只看数字)。
         (pan_auto_clean_tick, _get_settings().pan_auto_clean_cron, {"minute": 20, "hour": 4},
          "pan_auto_clean", "wechat"),
+        # **网盘链路自检**(2026-10-19):每天 05:10 —— 在清理(04:20)与周去重(04:50)之后,
+        # 检查作业是否真跑、最近一轮有没有空转、盘是否快满、资源库复用是否生效、
+        # 百度清单是否被污染。⚠️ 它**只读**,所以 role=wechat(与三个盘的本机 cookie 同侧),
+        # 但即使某些数据在别的侧,读库也不会造成副作用。
+        (pan_self_check_tick, _get_settings().pan_self_check_cron, {"minute": 10, "hour": 5},
+         "pan_self_check", "wechat"),
         # Telegram 频道资源源(2026-10-01):公众号之外的第二路盘链 feed。
         # 默认关闭——本机直连 t.me 不通;能出网的机器把 TG_ENABLED 打开即可(见 settings)。
         (tg_collect_tick, _get_settings().tg_cron, {"minute": "*/30"}, "tg_collect", "both"),

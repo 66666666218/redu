@@ -945,6 +945,12 @@ class Settings(BaseSettings):
     # ⚠️ 两套的"留哪份"规则不同,同时跑会互相删掉对方那份 ⇒ 旧的**不再排定**。
     xunlei_dedupe_depth: int = 3          # 扫到第几层(3 层够覆盖 /最全文件 与 /资源✨/X开头游戏)
     xunlei_dedupe_max_per_run: int = 30   # **单轮删除上限**:一次删太多难复核,余下下周继续
+    #: ★ **扫描 API 预算**(2026-10-19):默认 800 次调用只够扫 ~1235 个目录;
+    #: 盘长到 2581 个目录后**每周都撞预算** ⇒ `complete=False` ⇒ 护栏「没扫完不删」
+    #: 每周生效、去重**空转**。`.env` 设 `XUNLEI_DEDUPE_BUDGET=4000`。
+    #: ⚠️ 它与 `scripts/` 里那个 `PAN_DEDUPE_BUDGET` 环境变量是**同一个旋钮**:
+    #: 排定作业用本配置,离线脚本用环境变量,两处都别写成第三个默认值。
+    xunlei_dedupe_budget: int = 800
                # 每周日 04:00(重名积累得慢,不用每天)
 
     # ---- 三盘的**自动**去重 / 清理(2026-10-10,用户口径「做第二档,严格规定好边界」)----
@@ -991,6 +997,18 @@ class Settings(BaseSettings):
     #: 开了之后:只删**重复的那几份**(`keep` 那份永不删)、排除宣传简介、共用
     #: `pan_auto_clean_max_deletes` 那个硬上限,并把删了几份/省了多少写进 `runs.detail`。
     pan_auto_clean_baidu_delete: bool = False
+    #: 百度去重**清单的落盘路径**(2026-10-19):原来写死 `data/pan_dedupe_baidu.json`,
+    #: 而 `tests/test_baidu_dup.py` 会调用真实的 `report_baidu` ⇒ **跑一次测试就把生产
+    #: 清单覆盖成造出来的 `dup0.apk`**(10-18 23:40 实测发生)。测试现在传临时路径,
+    #: 这里保留可配置是为了让"清单放哪"只有一个出处。
+    pan_auto_clean_baidu_report_path: str = "data/pan_dedupe_baidu.json"
+    #: ★ **网盘链路自检**(2026-10-19,用户口径「增加一道自检功能」):每天检查
+    #: 清理/去重作业是否真跑、有没有静默空转、盘是否快满、资源库复用是否生效、
+    #: 百度清单是否被污染。**只读**,不碰盘、不发转存请求;异常才推管理群。
+    pan_self_check_enabled: bool = True
+    pan_self_check_cron: str = "10 5 * * *"        # 每天 05:10(清理 04:20、周去重 04:50 之后)
+    #: 资源库复用率统计窗口(天):近 N 天「复用已有链」/「成功搬链」的占比。
+    pan_self_check_reuse_days: int = 7
     #: **链接体检**(2026-10-16):抽样探活我方分享链 + 判"货不对版/空分享"。
     #: 样本故意小(默认每来源 6 条 ≈ 30 次探活)—— 这是**日常盯趋势**;
     #: 全量排查手动跑 `python scripts/link_audit.py --n 50`(见 `doc/链接体检.md`)。
