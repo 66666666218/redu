@@ -1076,3 +1076,43 @@ def test_资源池只收像名字的() -> None:
         assert hotspot_agent._name_like(bad) is False, bad
     for good in ("袅袅心动", "Folia音乐播放器", "穿成短命炮灰我靠反派贴贴续命"):
         assert hotspot_agent._name_like(good) is True, good
+
+
+def test_敏感话题一律不做() -> None:
+    """★ 2026-10-18(部署后 14:10 那轮实测):LLM **真的**给《高市早苗向靖国神社献祭品》
+    出了方案(还想做「历史资料包」)—— 这类平台合规/账号风险不可控,且与拉新无关。
+
+    ⚠️ 词表**故意很窄**(不收「总统/战争/地震」这种):`死亡搁浅`、`战争雷霆` 都是真游戏资源,
+    拿它们当判据会误杀正经选题 —— 语义判断交给提示词(`_llm_plan` 的 system prompt)。
+    """
+    for bad in ("高市早苗向靖国神社献祭品", "台独势力", "侵华日军", "法轮功", "六四事件"):
+        assert hotspot_agent._sensitive(bad) is True, bad
+    for good in ("死亡搁浅", "战争雷霆", "总统套房婚礼", "JOJO的奇妙冒险"):
+        assert hotspot_agent._sensitive(good) is False, good
+
+
+def test_LLM_吐了敏感方案也要拦下(session, monkeypatch, agent_env) -> None:
+    """提示词写了「一律不做」,但模型偶尔会忽略 ⇒ **输出端必须再筛一次**。"""
+    _snap(session, "某时政热点", growth=180)
+
+    def _fake_llm(settings, hotspots, supply, proven):
+        return {"matches": {}, "plans": {"某时政热点": {
+            "resource": "靖国神社相关历史资料包", "title": "靖国神社资料",
+            "why_doable": "x", "audience": "y", "hook": "z", "timing": "t", "steps": "s"}}}
+
+    import app.services.hotspot_agent as ha
+    monkeypatch.setattr(ha, "_llm_plan", _fake_llm)
+    ha.run_hotspot_agent(session, 1, _agent_settings(deepseek_api_key="sk-x"))
+    rows = session.scalars(select(HotspotSuggestion)).all()
+    assert all("靖国神社" not in (r.plan or "") + (r.keyword or "") for r in rows), \
+        [(r.keyword, r.plan) for r in rows]
+
+
+def test_垃圾关键词不许凭字面算现成资源(session, monkeypatch, agent_env) -> None:
+    """★ 2026-10-18 实测:热点词「打开」字面命中了某篇供给文章 ⇒ 卡上出现「现成资源:《打开》」。
+
+    ⇒ 垃圾/敏感关键词**不做字面命中**(仍可进 `rest` 交给 LLM 判)。"""
+    _snap(session, "打开", growth=180)
+    _supply(session, 21, "点开就能打开的文件包")
+    out = _run(session, monkeypatch)
+    assert out.get("status") == "no_suggestions", out

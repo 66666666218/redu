@@ -908,7 +908,11 @@ def _llm_plan(settings: Settings, hotspots: list[dict],
                        "必须能落到网盘资源上——问自己「这群人此刻会搜什么、要什么文件」;"
                        "③该资源若已被同行大量跟发(竞争密度高),给出差异化角度而不是放弃。"
                        "④多平台共振(抖音+微博/百度同现)的热点是全网级真实需求,优先出方案;"
-                       "单平台热点仅供参考,方案要更保守。"},
+                       "单平台热点仅供参考,方案要更保守。"
+                       #: ★ 2026-10-18:14:10 那轮模型真的给《高市早苗向靖国神社献祭品》出了方案
+                       #: (还想做「历史资料包」)—— 这类**平台合规/账号风险不可控**,必须写死。
+                       "⛔**绝对不做**:时政 / 军事 / 民族 / 宗教 / 重大灾难 / 涉法涉诉 类热点 ——"
+                       "一律**跳过,不出方案**(连 matches 也别给);这类内容风险不可控,且与拉新无关。"},
                       {"role": "user", "content":
                        "rising 热点如下(平台证据已标注):\n" + "\n".join(hs)
                        + "\n\n我们近 72h 已采集到的资源文(id. 标题;语义相关即可匹配,"
@@ -1226,6 +1230,25 @@ def _name_like(name: str) -> bool:
     return t.lower() not in _NOT_NAME_WORDS
 
 
+#: **敏感话题兜底词表** —— 时政 / 民族 / 历史(2026-10-18)。
+#: 起因:部署后 14:10 那轮 LLM **真的吐了**《**高市早苗向靖国神社献祭品**》的方案(还想做
+#: 「历史资料包」)—— 这类内容**平台合规与账号风险不可控**,而且与「网盘拉新」无关。
+#: ⚠️ **词表只兜最明显的一类,语义判断交给提示词**(见 `_llm_plan` 的 system prompt:
+#:   「时政/军事/民族/宗教/灾难/涉法一律不做」)—— 词表永远不完整,别指望它挡全部。
+#: ⚠️ 这里**故意只收不会误伤的词**(不收「总统/首相/战争/地震」这种 —— `死亡搁浅`
+#:   `战争雷霆` 都是真游戏资源,拿它们当判据会误杀正经选题)。
+_SENSITIVE_WORDS = (
+    "靖国神社", "侵华", "抗日", "慰安妇", "台独", "港独", "疆独", "藏独",
+    "法轮", "六四", "涉台", "涉疆", "涉藏", "涉港",
+)
+
+
+def _sensitive(text: str) -> bool:
+    """这条热点/方案是否**碰到敏感话题**?(窄表兜底,语义判断靠提示词)"""
+    t = str(text or "")
+    return any(w in t for w in _SENSITIVE_WORDS)
+
+
 def _library_candidates(db: Session, user_id: int, settings: Settings | None = None,
                         stats: dict | None = None) -> list[dict]:
     """**资源侧**候选:最近拿到、**已有我方链**的资源 —— 最可执行的选题来源(2026-10-17)。
@@ -1427,6 +1450,14 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
         except Exception:  # noqa: BLE001 - 这一档失败不该拖垮整轮选题
             logger.exception("资源侧候选进池失败(其余来源照常)")
 
+    #: ★ **敏感话题一律不做**(2026-10-18):**词表兜底** + 提示词规则 + 输出端复查,三道。
+    #: 起因:部署后 14:10 那轮 LLM 真的给《高市早苗向靖国神社献祭品》出了方案。
+    #: ⚠️ 这里只挡**窄表**里那几类(见 `_SENSITIVE_WORDS` 的注释),语义靠提示词。
+    _n0 = len(hotspots)
+    hotspots = [h for h in hotspots if not _sensitive(str(h.get("keyword") or ""))]
+    if len(hotspots) < _n0:
+        logger.info("敏感话题剔除 %d 条(时政/民族/历史类一律不做)", _n0 - len(hotspots))
+
     if not hotspots:
         # 晨间/冷却期兜底(2026-09-30):涨幅>=50% 的口径在热点冷却时段会空手——
         # 一级:微博/百度"新上榜"(上升信号最干净的代理);二级:douhot 降阈值取正增长词。
@@ -1515,6 +1546,16 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
     matched: list[tuple[dict, WechatArticle, str]] = []
     rest: list[dict] = []
     for h in fresh:
+        _kw0 = str(h.get("keyword") or "")
+        #: ⚠️ **垃圾/敏感关键词不做「字面命中」**(2026-10-18):实测「打开」字面命中了某篇供给
+        #: 文章 ⇒ 卡上出现一行「现成资源:《打开》」。⇒ 它仍可进 `rest` 交给 LLM 判,
+        #: 但**不许**凭字面就给「已有现成资源」的结论。
+        #: ⚠️ 三道闸都要过(**含 `_name_like`**:「打开」不在泛词表里、也不像链接,
+        #:   只有"像不像名字"那道能挡住它 —— 实测就是这么漏出去的)。
+        if (_too_generic(_kw0) or _not_a_resource_name(_kw0)
+                or not _name_like(_kw0) or _sensitive(_kw0)):
+            rest.append(h)
+            continue
         art = _match_supply(h["keyword"], supply)
         if art:
             matched.append((h, art, "标题字面命中"))
@@ -1547,6 +1588,18 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
     #: ⚠️ 放在 `if not matched and not llm_plans` **之前**,否则"现成资源 0 + LLM 未配"时
     #:    整轮直接 `no_suggestions` —— 那正是远程 14:10 那轮「选题0」的样子。
     #: ⚠️ LLM 的计划**优先**(它更会写文案),证据型只补空位(`setdefault`)。
+    #: ★ **输出端复查**(2026-10-18):提示词里写死了「时政/军事/民族/宗教/灾难/涉法一律不做」,
+    #: 但模型**偶尔会忽略**(实测 14:10 那轮就给了《高市早苗向靖国神社献祭品》)⇒ 再筛一次。
+    if llm_plans or llm_matches:
+        _bad = [k for k in list(llm_plans) if _sensitive(k) or _sensitive(str(llm_plans[k]))]
+        for _k in _bad:
+            llm_plans.pop(_k, None)
+        _badm = [k for k in list(llm_matches) if _sensitive(k)]
+        for _k in _badm:
+            llm_matches.pop(_k, None)
+        if _bad or _badm:
+            logger.info("敏感话题方案被拦下 %d 条(输出端复查)", len(_bad) + len(_badm))
+
     #: ★ **把 LLM 那一跳的**输入/输出**喊出来**(2026-10-17):远程 14:10 那轮「选题 0」时,
     #: 日志里**一个字都没有** —— 分不清"没送进去 / 送了模型没给 / 给了但被丢"。
     #: 这三种的修法完全不同(选热点 / 改提示词 / 查解析),不能长得一样。
