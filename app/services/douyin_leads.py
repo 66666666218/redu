@@ -142,7 +142,47 @@ def _try_protocol(keywords: list[str], session, stats: dict | None = None
         return [], exc
 
 
-def _collect(platform: str, keywords: list[str], session=None) -> tuple[list[dict], str]:
+#: 验证冷却期内"浏览器兜底是否已经探过"的标记(每个冷却窗口只探一次)。
+_PROBE_KEY = "douyin_browser_probe_until_{uid}"
+
+
+def _browser_probe_allowed(session, user_id: int = 1) -> bool:
+    """验证冷却期内,**这一轮还允不允许开浏览器兜底**?
+
+    ⚠️ 为什么不是一刀切禁掉:协议被 `verify_check` 挡住时,**真人形状的浏览器那一跳
+    有时还能搜到**(代码注释里 09:30 的实测案例)⇒ 完全禁掉会丢掉这条唯一的恢复路。
+    ⚠️ 为什么也不能每轮都探:16:10 / 20:10 / 22:30 / 00:10 连续四轮浏览器也空,
+    而代码自己的告警写着「探针也在打」⇒ 反复探只会延长风控。
+    ⇒ **每个冷却窗口只探一次**:记下"这个截止时间已经探过",同一窗口再来就跳过;
+    冷却被重新设置(截止时间变了)或多轮之后解冻,才会再探。
+    """
+    if session is None:
+        return True
+    try:
+        from app.db.models import SystemConfig
+
+        until_row = session.scalar(select(SystemConfig).where(
+            SystemConfig.key == f"douyin_verify_until_{user_id}"))
+        until = str(until_row.value or "") if until_row else ""
+        if not until:
+            return True
+        key = _PROBE_KEY.format(uid=user_id)
+        probe = session.scalar(select(SystemConfig).where(SystemConfig.key == key))
+        if probe and str(probe.value or "") == until:
+            return False
+        if probe:
+            probe.value = until
+        else:
+            session.add(SystemConfig(key=key, value=until))
+        session.commit()      # 先把写锁放掉 —— 后面是几分钟的浏览器慢活
+        return True
+    except Exception:  # noqa: BLE001 - 状态读不到就当允许(宁可多探一次,也别永远停死)
+        logger.debug("读取浏览器兜底探针状态失败,按允许处理", exc_info=True)
+        return True
+
+
+def _collect(platform: str, keywords: list[str], session=None,
+             user_id: int = 1) -> tuple[list[dict], str]:
     """取搜索结果 → `(记录列表, 来源标签)`。
 
     **抖音走纯协议优先**(2026-10-08),其余平台照旧走 MediaCrawler。
@@ -158,6 +198,7 @@ def _collect(platform: str, keywords: list[str], session=None) -> tuple[list[dic
     ⚠️ **回落一定要留痕**(日志 + 来源标签进运行记录)。它本来就是"没搜到"的生产者,
     不说话的话,"协议挂了"就会被读成"抖音上没人在推资源" —— 本仓最忌讳的假阴性。
     """
+    cooldown = False
     if platform == "douyin":
         from config.settings import get_settings
 
@@ -191,13 +232,42 @@ def _collect(platform: str, keywords: list[str], session=None) -> tuple[list[dic
                 #    后者是硬失败。两种都回落,但日志里得看出是哪一种。
                 logger.warning("抖音纯协议**一条都没搜到**(没报错)—— 可能是限流"
                                "(见 doc/抖音纯协议-链路拆解.md §5),本轮回落浏览器")
+        #: 协议层刚撞过 `verify_check` 时,浏览器兜底**不能每轮都打**(探针也会加重风控)。
+        from app.services import douyin_protocol_source as dps
+
+        cooldown = dps.in_verify_cooldown(session, user_id)
+    if cooldown and not _browser_probe_allowed(session, user_id):
+        logger.warning("抖音验证冷却中且本窗口已探过浏览器 —— 本轮不再打"
+                       "(动作是等;反复探针只会延长风控)")
+        return [], "浏览器兜底(冷却内已探过,跳过)"
     from app.services import mediacrawler_source as mc
 
-    return mc.crawl(platform, keywords), "浏览器兜底"
+    #: ★ 浏览器兜底也带**协议路的登录 cookie**(2026-10-19):档案登录是第一条退路,
+    #: cookie 注入是第二条 —— 档案被锁/损坏时仍然是登录态,不会空跑一圈。
+    cookie = ""
+    if platform == "douyin" and session is not None:
+        try:
+            from app.services import cookie_store
+
+            cookie = (cookie_store.get_cookie(session, user_id, "douyin") or "").strip()
+        except Exception:  # noqa: BLE001 - 读不到就交给档案登录
+            logger.debug("浏览器兜底读取抖音 cookie 失败,交给档案登录", exc_info=True)
+    rows = mc.crawl(platform, keywords, cookie=cookie, user_id=user_id)
+    if cooldown and rows and session is not None:
+        #: ★ **浏览器兜底成功 = 真人形状的会话是通的** ⇒ 从档案重导凭据并解冻,
+        #: 下一轮就能回到更便宜的协议路。失败只告警,绝不把已经拿到的线索作废。
+        try:
+            from app.services.douyin_cookie_export import export_from_profile
+
+            note = export_from_profile(session, user_id)
+            logger.info("抖音浏览器兜底成功,已重导凭据并解冻验证冷却:%s", note)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("抖音浏览器兜底成功,但重导凭据失败:%s", str(exc)[:120])
+    return rows, "浏览器兜底"
 
 
 def collect_leads(keywords: list[str], limit: int = 30, platform: str = "douyin",
-                  session=None) -> tuple[list[dict], str]:
+                  session=None, user_id: int = 1) -> tuple[list[dict], str]:
     """`find_leads` 的完整版:**连来源标签一起返回**(运行记录要写它)。
 
     其余行为完全一致 —— `find_leads` 就是它的薄封装。
@@ -216,7 +286,7 @@ def collect_leads(keywords: list[str], limit: int = 30, platform: str = "douyin"
 
     min_pub_ts = _min_publish_ts(get_settings())
     n_old = n_notime = 0
-    rows, source = _collect(platform, keywords, session)
+    rows, source = _collect(platform, keywords, session, user_id=user_id)
     logger.info("线索取数:平台=%s 来源=%s 原始 %d 条", platform, source or "-", len(rows))
     for h in rows:
         text = (h.get("snippet") or "").strip()
@@ -265,14 +335,15 @@ def collect_leads(keywords: list[str], limit: int = 30, platform: str = "douyin"
 
 
 def find_leads(keywords: list[str], limit: int = 30, platform: str = "douyin",
-               session=None) -> list[dict]:
+               session=None, user_id: int = 1) -> list[dict]:
     """搜抖音 → 挑出带**口令**的推广线索(薄封装,保留既有调用方的形状)。
 
     返回 `[{mark, title, url, keyword}]`;`mark` 是《…》里那段 —— **迅雷分享口令**。
     ⚠️ 抖音现在走**纯协议**(约 1 秒/词),只有协议失败或全空时才回落浏览器(几分钟)。
     想同时拿到**来源标签**,用 `collect_leads`。
     """
-    return collect_leads(keywords, limit=limit, platform=platform, session=session)[0]
+    return collect_leads(keywords, limit=limit, platform=platform, session=session,
+                         user_id=user_id)[0]
 
 
 def _min_publish_ts(settings) -> int:
@@ -1215,7 +1286,7 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
         try:
             # ⚠️ **必须传 `session`** —— 纯协议要从加密库读凭据;不传就是静默不带登录态
             # (实测表现:回 `status_code=2483 请先登录`,而**看起来只是"没搜到"**)。
-            leads, source = collect_leads(kws, platform=plat, session=db)
+            leads, source = collect_leads(kws, platform=plat, session=db, user_id=user_id)
             total += len(leads)
             if leads:
                 # 口令 → 资源(分享链直接转存入库 / 群则加群),结果一并写进卡片

@@ -280,7 +280,7 @@ class TestFindLeadsAcceptsQuark:
 
         class _MC:
             @staticmethod
-            def crawl(platform, keywords):
+            def crawl(platform, keywords, **kw):
                 import datetime as _dt
                 # ⚠️ **必须带发布时间的近期值** —— `find_leads` 现在会按
                 # `douyin_leads_min_publish_date`(默认 2026-10-01)过滤,缺时间的会被丢掉。

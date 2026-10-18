@@ -105,13 +105,32 @@ def kill_stale_browsers() -> int:
     return n
 
 
-def _login_cookie(platform: str) -> str:
-    """该平台的**登录 cookie**(来自 `.env`;没有就返回空串 = 退回扫码)。
+def _login_cookie(platform: str, user_id: int = 1) -> str:
+    """该平台的**登录 cookie**(没有就返回空串 = 退回扫码)。
 
-    小红书走 MediaCrawler 的 `login_by_cookies`,而它**只认 `web_session` 一个值**
+    ★ **2026-10-19 起抖音也走 cookie 登录**:
+    协议路与浏览器档案是**同一个账号、同一个会话**(实测 `sid_guard` 都到 2026-12-02),
+    档案里的 `sessionid` 虽然有效,但档案一旦被锁/损坏,浏览器兜底就会在**未登录**状态下
+    空跑一圈(看起来和"风控空结果"一模一样)。直接把协议路的 cookie 注进浏览器,
+    这条路就不再依赖档案的完好性 —— 这是"档案登录"之外的**第二条退路**。
+
+    小红书走 MediaCrawler 的 `login_by_cookies`,它**只认 `web_session` 一个值**
     (见 `media_platform/xhs/login.py::login_by_cookies`),所以 `.env` 里存的就是那一行。
     取值方式见 `tools/xhs_export_cookie.py`。
     """
+    if platform == "douyin":
+        try:
+            from app.db import get_session_local
+            from app.services import cookie_store
+
+            db = get_session_local()()
+            try:
+                return (cookie_store.get_cookie(db, user_id, "douyin") or "").strip()
+            finally:
+                db.close()
+        except Exception:  # noqa: BLE001 - 读不到就当没配,退回档案登录(不影响采集)
+            logger.debug("读取抖音 cookie 失败(退回档案登录)", exc_info=True)
+            return ""
     if platform != "xiaohongshu":
         return ""
     try:
@@ -125,33 +144,86 @@ def _login_cookie(platform: str) -> str:
 def _write_config(keywords: list[str], cookie: str = "") -> None:
     """把关键词、输出格式、**登录方式**写进它的 base_config.py(原地改几行,其余不动)。
 
-    ⚠️ **登录方式也在这里定**(2026-10-06):有我们自己的 `web_session` 就写
+    ⚠️ **登录方式也在这里定**(2026-10-06):有我们自己的 cookie 就写
     `LOGIN_TYPE="cookie"` + `COOKIES="<…>"` —— **不再弹二维码等人扫**。
     为什么这件事值得改:扫码是**无人值守流程里最脆的一环**(等 120s 没人扫就整轮失败,
     而失败长得像"接口挂了"),而 cookie 存进 `.env` 之后它和其他平台凭据一样可管理、
     可验活、失效能报警。
+
+    ⚠️ **值一律用 `repr()`**(2026-10-19):抖音的完整 jar 有 53 个 cookie、5000+ 字符,
+    里面可能出现引号/反斜杠 —— 手工拼 `COOKIES = "…"` 会把配置文件写坏,
+    而下一轮只会报一个莫名其妙的语法错。`repr()` 同时保留 emoji,不会再触发 GBK 问题。
     """
     text = CONFIG.read_text(encoding="utf-8")
     kw = ",".join(k.strip() for k in keywords if k.strip())
+    lt = "cookie" if cookie else "qrcode"
     out = []
     for line in text.splitlines():
         if line.startswith("KEYWORDS = "):
-            line = f'KEYWORDS = "{kw}"'
+            line = f"KEYWORDS = {kw!r}"
         elif line.startswith("SAVE_DATA_OPTION = "):
             line = 'SAVE_DATA_OPTION = "jsonl"'
         elif line.startswith("LOGIN_TYPE = "):
-            line = f'LOGIN_TYPE = "{"cookie" if cookie else "qrcode"}"'
+            line = f"LOGIN_TYPE = {lt!r}"
         elif line.startswith("COOKIES = "):
-            line = f'COOKIES = "{cookie}"'
+            line = f"COOKIES = {cookie!r}"
         out.append(line)
     CONFIG.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
-def crawl(platform: str, keywords: list[str], timeout: int = 600) -> list[dict]:
+def profile_login_state(platform: str) -> bool | None:
+    """MediaCrawler 档案里**还有没有登录核心 cookie**(只读 SQLite,不启动浏览器)。
+
+    返回 `True` / `False` / `None`(查不到,别据此判死)。
+    只查 **cookie 名**,不解密值 —— 我们只需要回答"档案是不是登着",
+    而"值是否还有效"由实际请求决定。
+    """
+    pid = PLATFORM_IDS.get(platform)
+    if not pid:
+        return None
+    prof = ROOT / "browser_data" / f"cdp_{pid}_user_data_dir"
+    if not prof.exists():
+        return False
+    dbs = list(prof.glob("**/Network/Cookies"))
+    if not dbs:
+        return None
+    import sqlite3
+
+    try:
+        c = sqlite3.connect(f"file:{dbs[0].as_posix()}?mode=ro", uri=True, timeout=2)
+        try:
+            n = c.execute(
+                "SELECT COUNT(*) FROM cookies WHERE name IN ('sessionid','sessionid_ss')"
+            ).fetchone()[0]
+        finally:
+            c.close()
+        return bool(n)
+    except Exception:  # noqa: BLE001 - 档案被锁/结构变了 ⇒ "查不到",不是"没登录"
+        return None
+
+
+#: 这些尾巴代表**瞬时**故障:重试一次通常就好,与"登录失效/风控空结果"不是一回事。
+_TRANSIENT_HINTS = ("timeout", "timed out", "err_", "net::", "targetclosed",
+                    "connection", "econn", "socket")
+
+
+def _is_transient(tail: str) -> bool:
+    low = (tail or "").lower()
+    return any(h in low for h in _TRANSIENT_HINTS)
+
+
+def crawl(platform: str, keywords: list[str], timeout: int = 600,
+          cookie: str = "", user_id: int = 1) -> list[dict]:
     """跑一轮关键词搜索 → `[{uid, name, url, snippet, pan_link}]`。
 
     `platform` 用我们的名字(xiaohongshu/douyin/…),内部转成 MediaCrawler 的 id。
     **硬失败抛 `MediaCrawlerError`**(不再返回空列表冒充"没搜到");跑通但没结果才返回 `[]`。
+
+    ★ **2026-10-19 的三处加固**(起因:抖音 16:10 之后浏览器兜底也空了):
+      ① `--lt` 跟着 cookie 走 —— MediaCrawler 的 CLI 会覆盖 `base_config` 里的
+         `LOGIN_TYPE`,以前恒传 `--lt qrcode`,于是**写了 cookie 登录也没用**;
+      ② **瞬时故障重试一次** —— 00:10 那次的真因是 `Page.goto` 30s 超时(不是登录/风控);
+      ③ **档案未登录要单独报** —— 别把它和"风控空结果"混成一句"全部无结果"。
     """
     ok, why = available()
     if not ok:
@@ -159,30 +231,59 @@ def crawl(platform: str, keywords: list[str], timeout: int = 600) -> list[dict]:
     pid = PLATFORM_IDS.get(platform)
     if not pid or not keywords:
         return []
+    login_cookie = (cookie or _login_cookie(platform, user_id=user_id)).strip()
     try:
-        _write_config(keywords, _login_cookie(platform))
+        _write_config(keywords, login_cookie)
     except OSError as exc:
         raise MediaCrawlerError(f"写配置失败:{exc}") from exc
-    cmd = [str(VENV_PY), "main.py", "--platform", pid, "--lt", "qrcode", "--type", "search"]
+    if platform == "douyin":
+        state = profile_login_state(platform)
+        if state is False and not login_cookie:
+            raise MediaCrawlerError(
+                "MediaCrawler 抖音档案未登录(缺 sessionid),且没有可注入的 cookie —— "
+                "跑 `tools/MediaCrawler/.venv/Scripts/python.exe scripts/mc_login.py dy`,"
+                "或检查 cookie_store 里的 douyin 凭据")
+        if state is False:
+            logger.info("MediaCrawler 抖音档案未登录,本轮改用 cookie 注入")
+        elif state is True:
+            logger.info("MediaCrawler 抖音档案登录态齐全")
+    #: ⚠️ **`--lt` 必须与 cookie 一致**:`cmd_arg/arg.py` 最后一行是
+    #: `config.LOGIN_TYPE = lt.value` ⇒ 只要还在传 `--lt qrcode`,base_config 里写的
+    #: `LOGIN_TYPE="cookie"` 就会被**当场覆盖**,扫码登录照旧。这是本仓母题
+    #: 「配置写了没人用」的又一例。
+    lt = "cookie" if login_cookie else "qrcode"
+    cmd = [str(VENV_PY), "main.py", "--platform", pid, "--lt", lt, "--type", "search"]
     started = time.time()          # ⚠️ 必须在**起进程之前**取:用来判"哪个文件是本轮写的"
-    # ⚠️ **开跑前先清残留**(2026-10-05):上一轮的 Edge 若没退,会占着同一个 profile,
-    # 这次起来就撞锁 —— 失败于是**自我延续**(实测小红书就这么连挂几天)。
-    kill_stale_browsers()
+    last_error = ""
     try:
-        try:
-            proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, timeout=timeout)
-        except subprocess.TimeoutExpired as exc:
-            # 最常见的无人值守失败:等扫码等到超时(600s)。必须冒泡,否则这轮会被当成"没线索"。
-            raise MediaCrawlerError(f"{platform} 超时({timeout}s)——多半卡在扫码登录") from exc
-        except OSError as exc:
-            raise MediaCrawlerError(f"{platform} 启动失败:{exc}") from exc
-        if proc.returncode != 0:
-            tail = (proc.stderr or b"")[-300:].decode("utf-8", "ignore")
-            raise MediaCrawlerError(f"{platform} 退出码 {proc.returncode}:{_explain(tail)}")
-        out = _read_results(platform, since=started)
-        if not out:
-            _raise_if_all_keywords_empty(platform, proc, keywords)
-        return out
+        for attempt in (1, 2):
+            # ⚠️ **每次起进程前都清残留**(2026-10-05):上一轮的 Edge 若没退,会占着同一个
+            # profile,这次起来就撞锁 —— 失败于是**自我延续**。
+            kill_stale_browsers()
+            try:
+                proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, timeout=timeout)
+            except subprocess.TimeoutExpired as exc:
+                # 最常见的无人值守失败:等扫码等到超时(600s)。必须冒泡,否则这轮会被当成"没线索"。
+                raise MediaCrawlerError(f"{platform} 超时({timeout}s)——多半卡在扫码登录") from exc
+            except OSError as exc:
+                raise MediaCrawlerError(f"{platform} 启动失败:{exc}") from exc
+            if proc.returncode == 0:
+                out = _read_results(platform, since=started)
+                if not out:
+                    _raise_if_all_keywords_empty(platform, proc, keywords)
+                return out
+            tail = ((proc.stderr or b"") + (proc.stdout or b""))[-400:].decode("utf-8", "ignore")
+            last_error = f"{platform} 退出码 {proc.returncode}:{_explain(tail)}"
+            #: ★ **只重试"瞬时故障"**(2026-10-19 实测):`Page.goto: Timeout` 属于这类;
+            #: 而"全空/登录失效"**不重试** —— 重试只会对同一个账号多打一次风控。
+            if attempt == 1 and _is_transient(tail):
+                logger.warning("MediaCrawler %s 瞬时失败,清理后重试一次:%s",
+                               platform, tail[-160:])
+                time.sleep(3)
+                started = time.time()     # ⚠️ 重试的产出必须晚于新的 started,别读上次的文件
+                continue
+            raise MediaCrawlerError(last_error)
+        raise MediaCrawlerError(last_error or f"{platform} 失败")
     finally:
         # ⚠️ **不论成败都清**:`subprocess.run(timeout=)` 只杀直接子进程,
         # 而 Edge 是 `main.py` **另起**的、不在它的进程树里 ⇒ 超时那轮**必然**留下它们。

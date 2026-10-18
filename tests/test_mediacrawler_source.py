@@ -13,8 +13,9 @@ import pytest
 
 from app.services import mediacrawler_source as mc
 
-# 自动 fixture 会把 `_read_results` 打成假的;下面两条要测**真**的那个,先留个引用。
+# 自动 fixture 会把 `_read_results` / `_write_config` 打成假的;下面要测**真**的那个,先留个引用。
 _REAL_READ_RESULTS = mc._read_results
+_REAL_WRITE_CONFIG = mc._write_config
 
 
 @pytest.fixture(autouse=True)
@@ -24,6 +25,11 @@ def _stub_io(monkeypatch):
     # ⚠️ `_write_config` 现在多一个参数(登录 cookie,2026-10-06 起支持 --lt cookie);
     # 桩要跟着收宽,否则报 `lambda() takes 1 positional argument but 2 were given`。
     monkeypatch.setattr(mc, "_write_config", lambda kws, cookie="": None)
+    #: 2026-10-19:抖音也走 cookie 登录 ⇒ 别让单测去碰真库/真档案。
+    monkeypatch.setattr(mc, "_login_cookie", lambda platform, user_id=1: "")
+    monkeypatch.setattr(mc, "profile_login_state", lambda platform: True)
+    #: 重试之间的 sleep 不该真的等 3 秒。
+    monkeypatch.setattr(mc.time, "sleep", lambda s: None)
     monkeypatch.setattr(mc, "_read_results", lambda platform, since=None: [{"uid": "u"}])
     monkeypatch.setattr(mc, "PLATFORM_IDS", {"douyin": "dy"})
 
@@ -59,6 +65,81 @@ def test_crawl_raises_on_nonzero_exit(monkeypatch) -> None:
     with pytest.raises(mc.MediaCrawlerError) as ei:
         mc.crawl("douyin", ["ps教程"])
     assert "退出码 1" in str(ei.value) and "login failed" in str(ei.value)
+
+
+def test_瞬时超时要重试一次(monkeypatch) -> None:
+    """★ 2026-10-19:00:10 那次浏览器兜底的真因是 `Page.goto` 30s 超时。
+
+    这类**瞬时故障**重试一次通常就好;它和"登录失效 / 风控全空"不是一回事。
+    """
+    class _Bad:
+        returncode = 1
+        stderr = b"playwright._impl._errors.TimeoutError: Page.goto: Timeout 30000ms exceeded"
+        stdout = b""
+
+    calls = {"n": 0}
+
+    def _run(cmd, *a, **k):
+        #: ⚠️ `kill_stale_browsers()` 也走 `subprocess.run`(PowerShell)——只数真采集那一次。
+        if not (isinstance(cmd, list) and any("main.py" in str(x) for x in cmd)):
+            return _Proc()
+        calls["n"] += 1
+        return _Bad() if calls["n"] == 1 else _Proc()
+
+    monkeypatch.setattr(mc.subprocess, "run", _run)
+    assert mc.crawl("douyin", ["x"]) == [{"uid": "u"}]
+    assert calls["n"] == 2, "瞬时超时应当重试一次"
+
+
+def test_全空不重试(monkeypatch) -> None:
+    """空结果**不是**瞬时故障 —— 重试只会对同一个账号多打一次风控。"""
+    class _Empty:
+        returncode = 0
+        stderr = b""
+        stdout = b"keyword:a, aweme_list:[]\n"
+
+    calls = {"n": 0}
+
+    def _run(cmd, *a, **k):
+        if not (isinstance(cmd, list) and any("main.py" in str(x) for x in cmd)):
+            return _Proc()
+        calls["n"] += 1
+        return _Empty()
+
+    monkeypatch.setattr(mc.subprocess, "run", _run)
+    monkeypatch.setattr(mc, "_read_results", lambda platform, since=None: [])
+    with pytest.raises(mc.MediaCrawlerError):
+        mc.crawl("douyin", ["a"])
+    assert calls["n"] == 1, "空结果不该重试"
+
+
+def test_档案未登录且无cookie要给出可照做的错(monkeypatch) -> None:
+    """把"档案没登录"与"风控空结果"分开 —— 前者要人能直接照做。"""
+    monkeypatch.setattr(mc, "profile_login_state", lambda platform: False)
+    monkeypatch.setattr(mc, "_login_cookie", lambda platform, user_id=1: "")
+    with pytest.raises(mc.MediaCrawlerError) as ei:
+        mc.crawl("douyin", ["x"])
+    assert "mc_login.py dy" in str(ei.value)
+
+
+def test_write_config_用repr避免引号把配置写坏(monkeypatch, tmp_path) -> None:
+    """抖音完整 jar 有 5000+ 字符,可能带引号/反斜杠/emoji —— 手工拼引号会写出语法错。"""
+    import ast
+
+    cfg = tmp_path / "base_config.py"
+    cfg.write_text('KEYWORDS = "x"\nSAVE_DATA_OPTION = "csv"\n'
+                   'LOGIN_TYPE = "qrcode"\nCOOKIES = ""\n', encoding="utf-8")
+    monkeypatch.setattr(mc, "CONFIG", cfg)
+    cookie = 'sessionid=a"b\\c; sid_tt=x'
+    _REAL_WRITE_CONFIG(['词"quote', "emoji🥩"], cookie)
+    vals: dict[str, object] = {}
+    for line in cfg.read_text(encoding="utf-8").splitlines():
+        if " = " in line and not line.lstrip().startswith("#"):
+            k, v = line.split(" = ", 1)
+            vals[k] = ast.literal_eval(v)
+    assert vals["COOKIES"] == cookie
+    assert vals["LOGIN_TYPE"] == "cookie"
+    assert "🥩" in str(vals["KEYWORDS"])
 
 
 def test_crawl_returns_empty_when_it_ran_but_found_nothing(monkeypatch) -> None:

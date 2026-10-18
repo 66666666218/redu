@@ -230,6 +230,68 @@ def test_两条路都挂就抛错不吞(monkeypatch, use_protocol):
 
 
 # ---------------------------------------------------------------------------
+# ★ 验证冷却期内的浏览器兜底(2026-10-19)
+# ---------------------------------------------------------------------------
+
+
+def test_冷却内已探过浏览器本轮跳过(monkeypatch, use_protocol, mc_spy, caplog):
+    """16:10~00:10 连续四轮浏览器也空 ⇒ **同一冷却窗口只探一次**。
+
+    探针本身也在打同一个账号 —— 反复探只会延长风控(代码自己的告警就是这么写的)。
+    """
+    from app.services import douyin_leads as dl
+    from app.services import douyin_protocol_source as dps
+
+    class _Boom(Exception):
+        kind = "verify_cooldown"
+
+    _patch_protocol(monkeypatch, err=_Boom("验证冷却中"))
+    monkeypatch.setattr(dps, "in_verify_cooldown", lambda *a, **k: True)
+    monkeypatch.setattr(dl, "_browser_probe_allowed", lambda *a, **k: False)
+    with caplog.at_level("WARNING"):
+        _, source = dl.collect_leads(["词"])
+    assert source.startswith("浏览器兜底(冷却内已探过"), source
+    assert mc_spy == [], "同一冷却窗口不该再开浏览器"
+    assert any("不再打" in r.message for r in caplog.records), "跳过必须留痕"
+
+
+def test_冷却内第一次仍允许探一次浏览器(monkeypatch, use_protocol, mc_spy):
+    """09:30 的实测证明真人形状的浏览器那一跳有时还能搜到 ⇒ 不能一刀切禁掉。"""
+    from app.services import douyin_leads as dl
+    from app.services import douyin_protocol_source as dps
+
+    class _Boom(Exception):
+        kind = "verify_cooldown"
+
+    _patch_protocol(monkeypatch, err=_Boom("验证冷却中"))
+    monkeypatch.setattr(dps, "in_verify_cooldown", lambda *a, **k: True)
+    monkeypatch.setattr(dl, "_browser_probe_allowed", lambda *a, **k: True)
+    _, source = dl.collect_leads(["词"])
+    assert source == "浏览器兜底"
+    assert len(mc_spy) == 1
+
+
+def test_浏览器兜底带上协议cookie(monkeypatch, use_protocol):
+    """档案登录是第一条退路,cookie 注入是第二条 —— 档案被锁时不能空跑。"""
+    from app.services import douyin_leads as dl
+    from app.services import mediacrawler_source as mc
+
+    seen: dict = {}
+
+    def fake_crawl(platform, keywords, **kw):
+        seen.update(kw)
+        return []
+
+    monkeypatch.setattr(mc, "crawl", fake_crawl)
+    monkeypatch.setattr("app.services.cookie_store.get_cookie",
+                        lambda s, u, p: "sessionid=abc; sid_tt=x")
+    _patch_protocol(monkeypatch, err=RuntimeError("协议挂"))
+    dl.collect_leads(["词"], session=object())
+    assert seen.get("cookie") == "sessionid=abc; sid_tt=x"
+    assert seen.get("user_id") == 1
+
+
+# ---------------------------------------------------------------------------
 # session 透传(不传就是静默不带凭据)
 # ---------------------------------------------------------------------------
 

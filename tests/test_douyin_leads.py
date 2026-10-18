@@ -57,7 +57,7 @@ def test_find_leads_keeps_only_book_prefix_and_dedupes(monkeypatch) -> None:
     from app.services import mediacrawler_source as mc
 
     monkeypatch.setattr(mc, "available", lambda: (True, "ok"))
-    monkeypatch.setattr(mc, "crawl", lambda p, ks, timeout=600: [
+    monkeypatch.setattr(mc, "crawl", lambda p, ks, **kw: [
         {"uid": "u1", "url": "https://www.douyin.com/video/1",
          "snippet": "《白泽的梦》diplay软件下载教程", "keyword": "diplay"},
         {"uid": "u2", "url": "https://www.douyin.com/video/1",              # 同一视频
@@ -86,7 +86,7 @@ def test_find_leads_takes_bracket_anywhere_in_title(monkeypatch) -> None:
     from app.services import mediacrawler_source as mc
 
     monkeypatch.setattr(mc, "available", lambda: (True, "ok"))
-    monkeypatch.setattr(mc, "crawl", lambda p, ks, timeout=600: [
+    monkeypatch.setattr(mc, "crawl", lambda p, ks, **kw: [
         {"uid": "a", "url": "https://d/1", "name": "玩***人",
          "snippet": "苹果安卓手车互联更新《玩车不求人》新版本", "keyword": "k"},
         {"uid": "b", "url": "https://d/2", "name": "睡***着",
@@ -405,7 +405,7 @@ def test_find_leads_passes_platform_to_crawler(monkeypatch) -> None:
     seen = {}
     monkeypatch.setattr(mc, "available", lambda: (True, "ok"))
     monkeypatch.setattr(mc, "crawl",
-                        lambda plat, kws: seen.update(plat=plat, kws=kws) or [])
+                        lambda plat, kws, **kw: seen.update(plat=plat, kws=kws) or [])
     dl.find_leads(["词"], platform="kuaishou")
     assert seen["plat"] == "kuaishou" and seen["kws"] == ["词"]
 
@@ -1131,7 +1131,7 @@ class TestPublishCutoff:
     def _leads(self, monkeypatch, rows):
         class _MC:
             @staticmethod
-            def crawl(platform, keywords):
+            def crawl(platform, keywords, **kw):
                 return rows
         monkeypatch.setattr("app.services.mediacrawler_source.crawl", _MC.crawl)
         from app.services import douyin_leads as dl

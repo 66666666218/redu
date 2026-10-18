@@ -654,11 +654,10 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # 默认**关**(自动删盘不该在新部署上默认生效);`dry_run` 默认**开**(先只看数字)。
         (pan_auto_clean_tick, _get_settings().pan_auto_clean_cron, {"minute": 20, "hour": 4},
          "pan_auto_clean", "wechat"),
-        # **网盘链路自检**(2026-10-19):每天 05:10 —— 在清理(04:20)与周去重(04:50)之后,
-        # 检查作业是否真跑、最近一轮有没有空转、盘是否快满、资源库复用是否生效、
-        # 百度清单是否被污染。⚠️ 它**只读**,所以 role=wechat(与三个盘的本机 cookie 同侧),
-        # 但即使某些数据在别的侧,读库也不会造成副作用。
-        (pan_self_check_tick, _get_settings().pan_self_check_cron, {"minute": 10, "hour": 5},
+        # **网盘链路自检**(2026-10-19):每天 05:45 —— 在清理(04:20)、周去重(04:50)、
+        # 资源存在性(05:10)之后。⚠️ **不能放 05:10**:那是 `resource_presence` 的定点
+        # (它要开三个浏览器),既会被 `test_job_stagger` 拦下,真撞上也是 DB 写锁 + 浏览器争抢。
+        (pan_self_check_tick, _get_settings().pan_self_check_cron, {"minute": 45, "hour": 5},
          "pan_self_check", "wechat"),
         # Telegram 频道资源源(2026-10-01):公众号之外的第二路盘链 feed。
         # 默认关闭——本机直连 t.me 不通;能出网的机器把 TG_ENABLED 打开即可(见 settings)。
