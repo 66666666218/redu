@@ -86,45 +86,71 @@ def _find_adb(explicit: str = "") -> str:
     return ""
 
 
-def _run(adb: str, *args: str, timeout: int = 120) -> str:
-    p = subprocess.run([adb, *args], capture_output=True, timeout=timeout)
+def _run(adb: str, *args: str, timeout: int = 120, serial: str = "") -> str:
+    """跑一次 adb。`serial` 非空时插 `-s <serial>`(**多开时必须指定**,见 `pull_from_emulator`)。"""
+    prefix = ("-s", serial) if serial else ()
+    p = subprocess.run([adb, *prefix, *args], capture_output=True, timeout=timeout)
     return (p.stdout + p.stderr).decode("utf-8", "replace").strip()
 
 
-def emulator_ready(adb: str = "") -> bool:
+def platform_for(account_key: str) -> str:
+    """账号 key(`weread` / `weread#2`)→ 它的 **App 凭据** key(`weread_app` / `weread_app#2`)。
+
+    ⚠️ 网页 cookie(`weread#N`)与 App token(`weread_app#N`)是**两套独立鉴权**
+    (见 `cookie_store.PLATFORMS`),但**同属一个账号** —— 这个映射就是它俩的对应关系。
+    """
+    key = str(account_key or "").strip() or "weread"
+    if "#" not in key:
+        return PLATFORM
+    return f"{PLATFORM}#{key.split('#', 1)[1]}"
+
+
+def emulator_ready(adb: str = "", serial: str = "") -> bool:
     """模拟器现在能不能读到账号库(只看 `adb devices`)。**不抛异常**。
 
     为什么会需要这个判断:2026-10-18 实测 —— **只有 App 自己铸的 token** 能打通
     `i.weread.qq.com/book/articles`;纯 HTTP 铸出来的那枚(身份档 `eink`)打同一个端点
     仍然 `-2041`。而 `refresh_with_wake` 原来**先试 HTTP**,于是"HTTP 成功"就把
     唯一真能用的那条路挡在后面 ⇒ 生产里每轮 `app_blocked` 十几发、阅读数全 0。
+
+    `serial` 非空时**只认这一台**(多开:一个号一个实例,别拿到别人的库)。
     """
     exe = _find_adb(adb)
     if not exe:
         return False
     try:
+        if serial:
+            out = _run(exe, "devices", timeout=15)
+            return serial in out and "device" in out
         dev = _run(exe, "devices", timeout=15)
     except Exception:  # noqa: BLE001 - adb 卡住/没装都算"不在"
         return False
     return "emulator" in dev or "127.0.0.1" in dev
 
 
-def pull_from_emulator(adb: str = "", tmpdir: str | None = None) -> dict[str, Any]:
+def pull_from_emulator(adb: str = "", tmpdir: str | None = None,
+                       serial: str = "") -> dict[str, Any]:
     """从雷电模拟器里把 `accessToken` / `vid` 读出来。**失败抛异常**,别返回空。
 
     ⚠️ **必须连 `-wal` 一起拉**:token 的最新值在 WAL 里,只拉主库会读到**上一轮**的旧值
     (实测踩过:主库给 `slJzpb3p`、带上 WAL 才是当前值)。
+
+    ⚠️ **多开时必须给 `serial`**(`emulator-5554` / `emulator-5556` / …):
+    不给就"连上哪台读哪台",而**两台里是不同账号** ⇒ 会把 A 的 token 当成 B 的写进库。
     """
     exe = _find_adb(adb)
     if not exe:
         raise RuntimeError(f"找不到 adb(试过 {DEFAULT_ADB}、$WEREAD_ADB_PATH、PATH)")
     dev = _run(exe, "devices")
-    if "emulator" not in dev and "127.0.0.1" not in dev:
+    if serial:
+        if serial not in dev:
+            raise RuntimeError(f"没有已连接的实例 {serial}(`adb devices` 里没它)")
+    elif "emulator" not in dev and "127.0.0.1" not in dev:
         raise RuntimeError("没有已连接的模拟器 —— 需要开雷电(并打开设置里的 ADB 开关)")
-    _run(exe, "root", timeout=60)
+    _run(exe, "root", timeout=60, serial=serial)
     _run(exe, "shell",
          f"cp {DB_REL} /sdcard/_wa.db; cp {DB_REL}-wal /sdcard/_wa.db-wal 2>/dev/null; "
-         f"cp {DB_REL}-shm /sdcard/_wa.db-shm 2>/dev/null; echo ok")
+         f"cp {DB_REL}-shm /sdcard/_wa.db-shm 2>/dev/null; echo ok", serial=serial)
 
     own = tmpdir is None
     td = tmpdir or tempfile.mkdtemp(prefix="wracc_")
@@ -133,7 +159,8 @@ def pull_from_emulator(adb: str = "", tmpdir: str | None = None) -> dict[str, An
         for src, dst in (("/sdcard/_wa.db", local),
                          ("/sdcard/_wa.db-wal", local + "-wal"),
                          ("/sdcard/_wa.db-shm", local + "-shm")):
-            subprocess.run([exe, "pull", src, dst], capture_output=True, timeout=180)
+            subprocess.run([exe, *(("-s", serial) if serial else ()), "pull", src, dst],
+                           capture_output=True, timeout=180)
         if not Path(local).exists():
             raise RuntimeError("拉取账号库失败(微信读书可能没登录)")
         con = sqlite3.connect(local)
@@ -165,6 +192,9 @@ def pull_from_emulator(adb: str = "", tmpdir: str | None = None) -> dict[str, An
             #: 这枚 token 是**安卓 App** 签发的 ⇒ 调用时要用安卓 App 的身份头
             #: (与 HTTP 铸出来的 eink token 不能混用,见 `EINK_HEADERS` 上面的实测)
             "profile": "app",
+            #: ★ **这枚凭据属于哪台模拟器**(2026-10-18 多开):续期时按它找对实例,
+            #: 否则"连上哪台读哪台"会把 A 的 token 写到 B 的凭据里。
+            "adb_serial": serial or "",
             "pulled_at": datetime.now().isoformat(" ", "seconds")}
 
 
@@ -227,17 +257,46 @@ def mint_access_token_http(device_id: str, refresh_token: str, *,
             "profile": "eink"}
 
 
-def load(session: Session, user_id: int) -> dict[str, Any] | None:
-    """读已存的 App 凭据(JSON);没有/坏了都返回 `None` 并**留一条 warning**。"""
+def app_keys(session: Session, user_id: int) -> list[str]:
+    """已配置的 **App 凭据** key,顺序稳定:`weread_app` → `weread_app#2` → …。
+
+    多开用(一个微信读书账号 = 一台雷电实例 = 一枚 App 凭据)。
+    ⚠️ 定时续期与监听轮**必须用同一份枚举** —— 两处各写一遍迟早飘一个
+    (2026-10-18:定时续期只续了基础那枚,第二个号的 token 会自己烂掉)。
+    """
+    from sqlalchemy import or_, select
+
+    from app.db.models import UserCookie
+
+    try:
+        rows = session.execute(select(UserCookie.platform).where(
+            UserCookie.user_id == user_id,
+            or_(UserCookie.platform == PLATFORM,
+                UserCookie.platform.like(PLATFORM + "#%")))).scalars().all()
+    except Exception:  # noqa: BLE001 - 读不到就当只有基础那枚
+        return [PLATFORM]
+
+    def _order(p: str) -> tuple[int, str]:
+        suffix = p.split("#", 1)[1] if "#" in p else "1"
+        return (int(suffix) if suffix.isdigit() else 999, p)
+
+    return sorted(set(rows), key=_order) or [PLATFORM]
+
+
+def load(session: Session, user_id: int, platform: str = PLATFORM) -> dict[str, Any] | None:
+    """读已存的 App 凭据(JSON);没有/坏了都返回 `None` 并**留一条 warning**。
+
+    `platform` 默认基础账号(`weread_app`);多开时传 `weread_app#2`(见 `platform_for`)。
+    """
     from app.services.cookie_store import get_cookie
 
     try:
-        raw = get_cookie(session, user_id, PLATFORM)
+        raw = get_cookie(session, user_id, platform)
         if not raw:
             return None
         return json.loads(raw)
     except Exception as exc:  # noqa: BLE001 - 坏凭据 = 当没配,但要说出来
-        logger.warning("App 侧凭据不可用(%s):%s", PLATFORM, str(exc)[:120])
+        logger.warning("App 侧凭据不可用(%s):%s", platform, str(exc)[:120])
         return None
 
 
@@ -248,7 +307,7 @@ def load(session: Session, user_id: int) -> dict[str, Any] | None:
 WEREAD_ACT = "com.tencent.weread/.LauncherActivity"
 
 
-def wake_app(adb: str = "", wait: float = 8.0) -> bool:
+def wake_app(adb: str = "", wait: float = 8.0, serial: str = "") -> bool:
     """用 adb 把微信读书 App **拉到前台** —— 目的是**让它刷新会话**。
 
     ## 为什么这一步是必须的(2026-10-07 实测)
@@ -264,7 +323,8 @@ def wake_app(adb: str = "", wait: float = 8.0) -> bool:
     if not exe:
         return False
     try:
-        subprocess.run([exe, "shell", "am", "start", "-n", WEREAD_ACT],
+        subprocess.run([exe, *(("-s", serial) if serial else ()),
+                        "shell", "am", "start", "-n", WEREAD_ACT],
                        capture_output=True, timeout=60)
         time.sleep(wait)
         return True
@@ -327,7 +387,8 @@ def verify_by_api(session: Session, user_id: int, *, profile: str = ""):
     return _verify
 
 
-def refresh_via_http(session: Session, user_id: int, *, verify=None) -> dict[str, Any]:
+def refresh_via_http(session: Session, user_id: int, *, verify=None,
+                     platform: str = PLATFORM) -> dict[str, Any]:
     """**纯 HTTP** 重取并写回(不需要模拟器)。返回 `{ok, reason?, ...}` —— **不抛异常**。
 
     与 `refresh()`(唤醒 App 重读账号库)是**两条并列的路**,这里**不碰 adb**。
@@ -335,7 +396,7 @@ def refresh_via_http(session: Session, user_id: int, *, verify=None) -> dict[str
     """
     from app.services.cookie_store import set_cookie
 
-    cur = load(session, user_id)
+    cur = load(session, user_id, platform=platform)
     if not cur:
         return {"ok": False, "reason": "没配过 App 凭据"}
     device_id = str(cur.get("deviceId") or "")
@@ -359,7 +420,7 @@ def refresh_via_http(session: Session, user_id: int, *, verify=None) -> dict[str
     # ⚠️ **`refreshToken` 可能轮换** ⇒ `blob` 里带回来的那枚要**写回**(否则用一次就废,
     #    与迅雷那条「网页兑换会轮换 refresh_token 必须读回」是同一个教训)。
     try:
-        set_cookie(session, user_id, PLATFORM, json.dumps(payload, ensure_ascii=False))
+        set_cookie(session, user_id, platform, json.dumps(payload, ensure_ascii=False))
         session.commit()
     except Exception as exc:  # noqa: BLE001 - 写回失败要**说出来**,别当作成功
         return {"ok": False, "reason": f"写回凭据失败:{type(exc).__name__}: {str(exc)[:120]}"}
@@ -368,7 +429,8 @@ def refresh_via_http(session: Session, user_id: int, *, verify=None) -> dict[str
 
 
 def refresh_with_wake(session: Session, user_id: int, *, adb: str = "",
-                      attempts: int = 3, prefer_emulator: bool | None = None) -> dict[str, Any]:
+                      attempts: int = 3, prefer_emulator: bool | None = None,
+                      serial: str = "", platform: str = PLATFORM) -> dict[str, Any]:
     """**唤醒 App → 重取 → 立刻验活**,不行就重试。返回 `{ok, ...}`。
 
     ⚠️ 这是"阅读数自愈"的入口。原来的 `_reget` 只是"重取一次、拿到**同一个值**、再失败"
@@ -392,11 +454,13 @@ def refresh_with_wake(session: Session, user_id: int, *, adb: str = "",
     http_reason = "未尝试(模拟器可用,已先走 App 那一路)"
     # `prefer_emulator` 可显式注入(None = 现场探一次 `adb devices`)——
     # 测试必须能钉死走哪条,否则"开发机恰好开着模拟器"会让用例变成看环境。
-    use_emu = emulator_ready(adb) if prefer_emulator is None else bool(prefer_emulator)
+    use_emu = (emulator_ready(adb, serial=serial)
+               if prefer_emulator is None else bool(prefer_emulator))
     if use_emu:
         for i in range(max(1, attempts)):
-            wake_app(adb)
-            last = refresh(session, user_id, adb=adb)   # 它自己按 app 档验活
+            wake_app(adb, serial=serial)
+            last = refresh(session, user_id, adb=adb, serial=serial,
+                           platform=platform)   # 它自己按 app 档验活
             if last.get("ok"):
                 if i:
                     logger.info("微信读书 App token 第 %d 次唤醒后取到有效值", i + 1)
@@ -406,7 +470,7 @@ def refresh_with_wake(session: Session, user_id: int, *, adb: str = "",
     else:
         logger.info("模拟器不在,跳过 App 那一路(它才是 /book/articles 能用的身份档)")
     # ② 回落:纯 HTTP(**不需要模拟器**;铸出来的是 `eink` 档)
-    http_out = refresh_via_http(session, user_id)   # 它自己按 eink 档验活
+    http_out = refresh_via_http(session, user_id, platform=platform)   # 它自己按 eink 档验活
     if http_out.get("ok"):
         return http_out
     http_reason = str(http_out.get("reason"))[:60]
@@ -420,7 +484,8 @@ def refresh_with_wake(session: Session, user_id: int, *, adb: str = "",
                       f"再跑 `scripts/weread_app_token.py` 重取凭据"}
 
 
-def refresh(session: Session, user_id: int, *, adb: str = "", verify=None) -> dict[str, Any]:
+def refresh(session: Session, user_id: int, *, adb: str = "", verify=None,
+            serial: str = "", platform: str = PLATFORM) -> dict[str, Any]:
     """**重取并写回** App 凭据。返回 `{ok, reason?, ...}` —— **不抛异常**。
 
     为什么不抛:它的调用点在监听轮里,**取不到 token 只是"这次没有兜底",
@@ -428,11 +493,14 @@ def refresh(session: Session, user_id: int, *, adb: str = "", verify=None) -> di
 
     `verify` 可注入一个 `(token, vid) -> bool` 的校验函数(默认走真实接口,
     测试注入桩避免联网)。
+
+    `serial` / `platform` 是**多开**用的(2026-10-18):每个号一个雷电实例,
+    `platform='weread_app#2'` 的凭据只从 `serial='emulator-5556'` 读。
     """
     from app.services.cookie_store import set_cookie
 
     try:
-        blob = pull_from_emulator(adb)
+        blob = pull_from_emulator(adb, serial=serial)
     except Exception as exc:  # noqa: BLE001 - 模拟器没开是常态,不是故障
         return {"ok": False, "reason": f"{type(exc).__name__}: {str(exc)[:120]}"}
 
@@ -444,6 +512,6 @@ def refresh(session: Session, user_id: int, *, adb: str = "", verify=None) -> di
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": f"验活异常 {type(exc).__name__}", **blob}
 
-    set_cookie(session, user_id, PLATFORM, json.dumps(blob, ensure_ascii=False))
-    logger.info("App 侧凭据已重取并写回(用户 %s,vid=%s)", user_id, blob.get("vid"))
+    set_cookie(session, user_id, platform, json.dumps(blob, ensure_ascii=False))
+    logger.info("App 侧凭据已重取并写回(用户 %s,%s vid=%s)", user_id, platform, blob.get("vid"))
     return {"ok": True, **blob}

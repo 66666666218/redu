@@ -48,7 +48,7 @@ def wat(monkeypatch):
     state = {"has": True, "out": {"ok": True, "accessToken": "t", "vid": "1"},
              "raise": None, "calls": 0}
 
-    def _load(_s, _u):
+    def _load(_s, _u, **kw):
         return {"accessToken": "old", "vid": "1"} if state["has"] else None
 
     def _refresh(_s, _u, **kw):
@@ -131,7 +131,7 @@ def test_定时续期作业必须同时续_App(monkeypatch, session):
 def _patch_app_blob(monkeypatch, blob):
     from app.services import weread_app_token as wat
 
-    monkeypatch.setattr(wat, "load", lambda _s, _u: blob)
+    monkeypatch.setattr(wat, "load", lambda _s, _u, **kw: blob)
 
 
 def _row():

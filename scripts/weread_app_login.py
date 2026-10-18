@@ -38,6 +38,11 @@ def main() -> int:
     ap.add_argument("--adb", default=os.getenv("WEREAD_ADB_PATH", ""))
     ap.add_argument("--user", type=int, default=0, help="租户 id(默认取第一个启用用户)")
     ap.add_argument("--no-verify", action="store_true", help="只取不验活")
+    # ★ **多开**(2026-10-18):一个微信读书账号 = 一台雷电实例 = 一枚 App 凭据。
+    ap.add_argument("--serial", default=os.getenv("WEREAD_ADB_SERIAL", ""),
+                    help="实例序列号(多开时必须给):adb devices 里的 emulator-5556")
+    ap.add_argument("--key", default="weread",
+                    help="账号 key:weread / weread#2 …(App 凭据存到 weread_app / weread_app#2)")
     args = ap.parse_args()
 
     from sqlalchemy import select
@@ -45,6 +50,9 @@ def main() -> int:
     from app.db import get_session_local, init_db
     from app.db.models import User
     from app.services import weread_app_token as wat
+
+    account_key = (args.key or "weread").strip()
+    platform = wat.platform_for(account_key)
 
     init_db()
     db = get_session_local()()
@@ -66,7 +74,8 @@ def main() -> int:
 
             verify_fn = _probe
 
-        out = wat.refresh(db, uid, adb=args.adb, verify=verify_fn)
+        out = wat.refresh(db, uid, adb=args.adb, verify=verify_fn,
+                          serial=args.serial, platform=platform)
         if not out.get("ok"):
             print(f"✗ 取凭据失败:{out.get('reason')}")
             print("  · 模拟器没开?先开雷电,并把设置里的 ADB 开关打开")
@@ -74,7 +83,7 @@ def main() -> int:
             return 1
         print(f"取到:{out.get('userName')} vid={out['vid']} "
               f"token={out['accessToken'][:4]}…(len={len(out['accessToken'])})")
-        print(f"=== ✓ 已加密写入 cookie_store(user={uid}, platform=weread_app) ===")
+        print(f"=== ✓ 已加密写入 cookie_store(user={uid}, platform={platform}) ===")
     finally:
         db.close()
     return 0

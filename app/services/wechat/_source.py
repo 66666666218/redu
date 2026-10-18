@@ -1057,20 +1057,34 @@ def _renew_weread_app(db: Session, user_id: int) -> bool:
     from app.services import weread_app_token as wat
 
     try:
-        if not wat.load(db, user_id):
-            return False          # 没配过 App 凭据是**正常分支**,不是失败
-        out = wat.refresh_with_wake(db, user_id)
-    except Exception:  # noqa: BLE001 - 模拟器没开/没装 adb 都不该影响网页续期
-        logger.warning("App 凭据定时续期异常(模拟器可能没开)", exc_info=True)
-        return False
-    if not out.get("ok"):
+        keys = wat.app_keys(db, user_id)
+    except Exception:  # noqa: BLE001
+        keys = [wat.PLATFORM]
+    if not any(wat.load(db, user_id, platform=k) for k in keys):
+        return False              # 没配过 App 凭据是**正常分支**,不是失败
+
+    ok_any = False
+    for key in keys:
+        try:
+            blob = wat.load(db, user_id, platform=key) or {}
+            # ★ **按这枚凭据自己的模拟器续**(多开):不传 serial 就会"连上哪台读哪台"
+            #   (2026-10-18:第二个号接进来之后才补的这一处)。
+            out = wat.refresh_with_wake(db, user_id,
+                                        serial=str(blob.get("adb_serial") or ""),
+                                        platform=key)
+        except Exception:  # noqa: BLE001 - 模拟器没开/没装 adb 都不该影响网页续期
+            logger.warning("App 凭据定时续期异常(%s,模拟器可能没开)", key, exc_info=True)
+            continue
+        if out.get("ok"):
+            ok_any = True
+            continue
         # ⚠️ 留痕但**不推飞书**:它的后果是"阅读数慢慢全变成 —",不是断源;
         # 而"模拟器没开"是**常态**(那台机器不是一直开着),推了会变噪音。
-        logger.warning("App 凭据定时续期未成功(阅读数会退化):用户 %s —— %s",
-                       user_id, str(out.get("reason"))[:120])
-        return False
-    logger.info("微信读书 App 凭据已定时续期(用户 %s)", user_id)
-    return True
+        logger.warning("App 凭据定时续期未成功(%s,阅读数会退化):用户 %s —— %s",
+                       key, user_id, str(out.get("reason"))[:120])
+    if ok_any:
+        logger.info("微信读书 App 凭据已定时续期(用户 %s,%d 枚)", user_id, len(keys))
+    return ok_any
 
 
 def weread_refresh_tick(settings: Settings | None = None) -> int:

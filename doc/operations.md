@@ -213,6 +213,15 @@ UC / 迅雷只有 `pan_types` 标签、没有我方链(卡片上是 `—`),要�
     真要多账号时用 `python scripts/weread_accounts.py add --key weread#2 --cookie '<粘贴>'`
     (**先验后存**)。它**不是**本次的答案 —— 换账号那条已被实测证伪。
   - ⚠️ **续期不会重置额度**(旧注释里"续期=新会话、额度重算"已证伪,`_listen` 那条注释已改)。
+- ★ **多账号 = 多开雷电实例**(2026-10-18 落地,`app/services/wechat/_listen.py::_WereadAppPool`)
+  - **不能切号**:同实例里登录第二个号会把第一个号的 token 作废。一个号一台实例。
+  - 克隆:`ldconsole.exe copy --name weread2 --from 0` → `launch --name weread2`
+    (新实例 adb 序列号 `emulator-5556`;原实例 `emulator-5554`)→ 在新实例里登录第二个微信号
+  - 取 token:`python scripts/weread_app_login.py --serial emulator-5556 --key weread#2`
+    (存 `cookie_store[weread_app#2]`,并记下 `adb_serial`)
+  - 运行:池子按轮转分发,某个号被限就换下一个,全挂才报错;实测 23:12 那轮
+    `app=30 app_fail=0 app_blocked=0`。两个号时 `WECHAT_LISTEN_APP_EXTRA=25`(合计 50/轮)。
+  - ⚠️ **两台实例都要开着**,否则 `weread_refresh_tick` 只能续到开着的那台。
 
 看三处就知道本轮有没有兑现(不要把"success + new=2"当成"全推到了"):
 

@@ -337,6 +337,62 @@ def _append_listed(items: list, rows, cutoff) -> None:
                       "publish_at": pub, "review_id": str(it.get("review_id") or "")})
 
 
+def _weread_app_keys(session: Session, user_id: int) -> list[str]:
+    """已配置的 **App 凭据** key,顺序稳定:`weread_app` → `weread_app#2` → …。
+
+    「多开」用:一个微信读书账号 = 一台雷电实例 = 一枚 App 凭据
+    (见 `weread_app_token.platform_for`:网页 `weread#2` ↔ App `weread_app#2`)。
+
+    ⚠️ 枚举逻辑**只在 `weread_app_token.app_keys` 一处** —— 定时续期要用同一份,
+    两处各写一遍就会重演今晚那个漏点(定时只续了基础那枚)。
+    """
+    from app.services import weread_app_token as wat
+
+    return wat.app_keys(session, user_id)
+
+
+class _WereadAppPool:
+    """多开:**每个微信读书账号一枚 App 凭据**,按轮转分配请求。
+
+    - **单凭据时与旧行为逐字一致**(只打那一枚,异常也原样冒泡);
+    - 多凭据时把整轮的 App 窗口轮转到各账号 —— 额度是**按账号**记的
+      (2026-10-18 实测:一轮硬打 80+ 发就把一个号打进 `-2041`),所以 N 个号 ≈ N 份预算;
+    - 某一枚报错(**登录态或额度**)就换下一枚;**全挂才抛**,绝不吞成"这个号没发文"。
+    """
+
+    def __init__(self, items: list) -> None:
+        self._clients = items
+        self._i = 0
+        #: 本轮已确认**用不了**的账号(额度/登录态/网络)—— 不在一发上反复撞。
+        #: ⚠️ 这一轮内有效(pool 每轮新建),下一轮会重新试 —— 与 `weread_budget` 的
+        #:   30 分钟冷静期不同:这里只是"别在同一次轮询里连撞 N 次"。
+        self._dead: set[int] = set()
+        self._last_error: BaseException | None = None
+
+    def __len__(self) -> int:
+        return len(self._clients)
+
+    def articles(self, book_id: str, **kw):
+        n = len(self._clients)
+        alive = [i for i in range(n) if i not in self._dead]
+        if not alive:
+            # 全用不了:抛上一次的错(不改异常语义),而不是死等
+            if self._last_error is not None:
+                raise self._last_error
+            raise RuntimeError("没有可用的 App 凭据")
+        for off in range(len(alive)):
+            idx = alive[(self._i + off) % len(alive)]
+            try:
+                out = self._clients[idx].articles(book_id, **kw)
+            except Exception as exc:  # noqa: BLE001 - 换下一枚账号(与账号池同一条纪律)
+                self._dead.add(idx)
+                self._last_error = exc
+                continue
+            self._i = (idx + 1) % n
+            return out
+        raise self._last_error if self._last_error is not None else RuntimeError("App 调用失败")
+
+
 def _weread_app_client(session: Session, user_id: int):
     """取本租户的 **App 侧**客户端(不配就返回 `None`,不报错)。
 
@@ -345,34 +401,45 @@ def _weread_app_client(session: Session, user_id: int):
     静默当成"没配"会让"token 坏了"表现为"阅读数又是 0",正是本仓最怕的那种。
 
     **自愈**:`accessToken` 会随 App 会话轮换,轮换后即失效。这里挂上
-    `weread_app_token.refresh` 作回调 —— 遇到登录态错误时**自动重取并重试一次**,
+    `weread_app_token.refresh_with_wake` 作回调 —— 遇到登录态错误时**自动重取并重试一次**,
     不用人记得去跑脚本(那是靠不住的)。
+
+    ★ **多账号**(2026-10-18):按 `weread_app` / `weread_app#2` / … 各建一枚,
+    返回 `_WereadAppPool`(单枚时直接返回客户端,行为与旧版逐字一致)。
     """
     try:
         from app.services.weread_app_client import WereadAppClient
         from app.services import weread_app_token as wat
 
-        blob = wat.load(session, user_id)
-        if not blob:
+        clients = []
+        for key in _weread_app_keys(session, user_id):
+            blob = wat.load(session, user_id, platform=key)
+            if not blob:
+                continue
+            #: 这枚凭据属于哪台模拟器(多开时**必须**按它取,否则会读到别人的库)。
+            serial = str(blob.get("adb_serial") or "")
+
+            def _reget(_key=key, _serial=serial):
+                """重取凭据;返回 `(token, vid, profile)` 或 `None`(取不到就 None,不抛)。"""
+                # ⚠️ **走"唤醒+验活"那条,不是裸 refresh**(2026-10-07):
+                # 裸 refresh 只是"重取一次、拿到**同一个值**、再失败"——**空转**。
+                # 实测 App 长时间不动时数据库里就是旧 token,而 `am start` 唤醒它之后
+                # 才会写新的有效值(实测 `3sg_FVG7` 失败 → 唤醒后 `HbVEHrVJ` 连试 4 次全通)。
+                out = wat.refresh_with_wake(session, user_id, serial=_serial, platform=_key)
+                if not out.get("ok"):
+                    logger.warning("App 凭据自愈失败(%s,两条路都没成):%s",
+                                   _key, str(out.get("reason"))[:120])
+                    return None
+                # ★ 第三项是**身份档**(2026-10-10):纯 HTTP 自愈铸出来的是 eink 身份的 token,
+                #   客户端必须跟着换头,否则下一次调用仍然 `-2012`。
+                return out["accessToken"], out["vid"], out.get("profile") or ""
+
+            clients.append(WereadAppClient(blob.get("accessToken") or "", blob.get("vid") or "",
+                                           on_auth_error=_reget,
+                                           profile=blob.get("profile") or ""))
+        if not clients:
             return None
-
-        def _reget():
-            """重取凭据;返回 `(token, vid)` 或 `None`(取不到就 None,不抛)。"""
-            # ⚠️ **走"唤醒+验活"那条,不是裸 refresh**(2026-10-07):
-            # 裸 refresh 只是"重取一次、拿到**同一个值**、再失败"——**空转**。
-            # 实测 App 长时间不动时数据库里就是旧 token,而 `am start` 唤醒它之后
-            # 才会写新的有效值(实测 `3sg_FVG7` 失败 → 唤醒后 `HbVEHrVJ` 连试 4 次全通)。
-            out = wat.refresh_with_wake(session, user_id)
-            if not out.get("ok"):
-                logger.warning("App 凭据自愈失败(两条路都没成,可能需人工打开/重登):%s",
-                               str(out.get("reason"))[:120])
-                return None
-            # ★ 第三项是**身份档**(2026-10-10):纯 HTTP 自愈铸出来的是 eink 身份的 token,
-            #   客户端必须跟着换头,否则下一次调用仍然 `-2012`。
-            return out["accessToken"], out["vid"], out.get("profile") or ""
-
-        return WereadAppClient(blob.get("accessToken") or "", blob.get("vid") or "",
-                               on_auth_error=_reget, profile=blob.get("profile") or "")
+        return clients[0] if len(clients) == 1 else _WereadAppPool(clients)
     except Exception as exc:  # noqa: BLE001 - 不能因为兜底坏了就停掉整轮监听
         logger.warning("App 侧凭据不可用(跳过列表兜底):%s", str(exc)[:120])
         return None

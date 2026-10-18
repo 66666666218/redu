@@ -53,7 +53,7 @@ class TestRefreshWithWake:
         monkeypatch.setattr(wat, "verify_by_api", lambda s, u: (lambda t, v: True))
         calls = {"n": 0}
 
-        def _refresh(session, user_id, *, adb="", verify=None):
+        def _refresh(session, user_id, *, adb="", verify=None, serial="", platform=""):
             i = calls["n"]
             calls["n"] += 1
             return outcomes[i] if i < len(outcomes) else outcomes[-1]

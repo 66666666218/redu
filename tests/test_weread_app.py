@@ -269,3 +269,47 @@ def test_产出形状必须与网页端逐字一致():
     assert set(web) <= set(app), f"App 端缺网页端的字段:{set(web) - set(app)}"
     for k in ("title", "original_id", "review_id", "read_num", "like_num", "create_time"):
         assert app[k] == web[k], f"字段 `{k}` 两端对不上:{app[k]!r} vs {web[k]!r}"
+
+
+def test_app_pool_换账号且不重复撞死号():
+    """多开:一个号被限就换下一个,而且**同一次轮询里不再反复撞它**。
+
+    依据(2026-10-18):一个号一轮硬打 80+ 发就被打进 `-2041`;两个号各有一份预算,
+    所以"一个挂了换另一个"是唯一能继续出阅读数的办法。
+    判据:`a` 只被撞 **1 次**(之后记进本轮 dead),4 次调用全部由 `b` 答。
+    """
+    from app.services.wechat._listen import _WereadAppPool
+
+    calls: list[str] = []
+
+    class _C:
+        def __init__(self, name: str, fail: bool) -> None:
+            self.name, self.fail = name, fail
+
+        def articles(self, book_id: str, **kw):
+            calls.append(self.name)
+            if self.fail:
+                raise RuntimeError("App 接口报错:-2041 -2041")
+            return [{"title": "t"}]
+
+    pool = _WereadAppPool([_C("a", True), _C("b", False)])
+    for _ in range(4):
+        assert pool.articles("MP_WXS_1")
+    assert calls.count("a") == 1, f"死号被反复撞了:{calls}"
+    assert calls.count("b") == 4, calls
+
+
+def test_app_pool_全挂要抛错不吞():
+    from app.services.wechat._listen import _WereadAppPool
+
+    class _C:
+        def articles(self, book_id: str, **kw):
+            raise RuntimeError("App 接口报错:-2041 -2041")
+
+    pool = _WereadAppPool([_C(), _C()])
+    try:
+        pool.articles("MP_WXS_1")
+    except RuntimeError as exc:
+        assert "-2041" in str(exc)
+    else:
+        raise AssertionError("全挂时必须抛,不能返回空 —— 那会被读成'这个号没发文'")
