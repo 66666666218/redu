@@ -1157,6 +1157,13 @@ def _too_generic(kw: str) -> bool:
     return len(rest.strip()) < 2
 
 
+#: 贴吧/微博里最常见的**模板话术** —— 它们不是资源名的一部分(2026-10-18:资源池里
+#: 出现过「**超级会员V2**」,来源就是标题里的「【超级会员V1】通过百度网盘分享的文件：…」)。
+_BOILERPLATE_RE = re.compile(
+    r"(【?超级会员\s*[Vv]?\d*】?|通过百度网盘分享的文件[:：]?|百度网盘分享[:：]?"
+    r"|点击链接|提取码[:：]?\s*[A-Za-z0-9]{0,6})")
+
+
 def _clean_name(raw: str, kw: str = "") -> str:
     """库里那条资源的**可读名**(给建议用)。
 
@@ -1171,7 +1178,7 @@ def _clean_name(raw: str, kw: str = "") -> str:
 
     from app.services.pan_discovery import _GENERIC_HINTS
 
-    t = str(raw or "")
+    t = _BOILERPLATE_RE.sub(" ", str(raw or ""))   #: 先剥模板话术(超级会员/分享的文件…)
     ents = _re.findall(r"[《【「]([^》】」]{2,24})[》】」]", t)
     if ents:
         name = ents[0]

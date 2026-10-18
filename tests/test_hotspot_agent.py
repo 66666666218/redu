@@ -1116,3 +1116,14 @@ def test_垃圾关键词不许凭字面算现成资源(session, monkeypatch, age
     _supply(session, 21, "点开就能打开的文件包")
     out = _run(session, monkeypatch)
     assert out.get("status") == "no_suggestions", out
+
+
+def test_模板话术不许当资源名() -> None:
+    """★ 2026-10-18:资源池里出现过「超级会员V2」—— 来源是标题里的
+
+    「【超级会员V1】通过百度网盘分享的文件：…」这类**模板话术**。
+    ⇒ `_clean_name` 先剥模板,再取书名号里点名的资源名。
+    """
+    assert hotspot_agent._clean_name(
+        "【超级会员V1】通过百度网盘分享的文件：【嫁金钗】全集资源") == "嫁金钗"
+    assert hotspot_agent._clean_name("《小青好漫》孤渔后劲太大了") == "小青好漫"
