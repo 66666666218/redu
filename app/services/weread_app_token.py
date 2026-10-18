@@ -198,20 +198,21 @@ def pull_from_emulator(adb: str = "", tmpdir: str | None = None,
             "pulled_at": datetime.now().isoformat(" ", "seconds")}
 
 
-def read_device_id_from_emulator(adb: str = "") -> str:
+def read_device_id_from_emulator(adb: str = "", serial: str = "") -> str:
     """从模拟器 `shared_prefs/device.xml` 读 `deviceid`(实测 **38 位数字**)。
 
     ⚠️ **只需读一次**:拿到之后纯 HTTP 续期就不再需要模拟器了。
     ⚠️ 记忆里曾把它记成「38 位 hex」——**不准**,它是纯数字(实测
     `35165432967079520699752786780101783056`)。
+    ⚠️ **多开时必须给 `serial`**(和 `pull_from_emulator` 同一条纪律)。
     """
     import re
 
     exe = _find_adb(adb)
     if not exe:
         raise RuntimeError(f"找不到 adb(试过 {DEFAULT_ADB}、$WEREAD_ADB_PATH、PATH)")
-    _run(exe, "root", timeout=60)
-    txt = _run(exe, "shell", f"cat {DEVICE_XML_REL}", timeout=60)
+    _run(exe, "root", timeout=60, serial=serial)
+    txt = _run(exe, "shell", f"cat {DEVICE_XML_REL}", timeout=60, serial=serial)
     m = re.search(r'name="deviceid"[^>]*>\s*([0-9A-Za-z]+)\s*<', txt or "")
     if not m:
         raise RuntimeError(f"device.xml 里没有 deviceid(拿到 {len(txt or '')} 字节)")
@@ -439,24 +440,32 @@ def refresh_with_wake(session: Session, user_id: int, *, adb: str = "",
     ⚠️ 全部尝试都失败才返回 `ok=False` —— 那时才该惊动人工。
     """
     last: dict[str, Any] = {"ok": False, "reason": "未尝试"}
-    # ★★★ **顺序在 2026-10-18 反转了**(原来是"先 HTTP、失败才唤醒 App")。
+    # ★★★ **顺序在 2026-10-18 深夜第三次定稿:先纯 HTTP**。
     #
-    # 今天的硬证据:
-    #   · 模拟器里读出、App 自己签发的 token → `/book/articles` **60 发连打全成功**
-    #     (3948 篇带精确阅读数);
-    #   · 同一时刻,纯 HTTP 铸出来的 token(身份档 `eink`)→ 同一个端点 **`-2041`**。
-    # 而 `refresh_via_http` 的验活(`verify_by_api`)把 `-2041` 当成"认证已过、只是额度",
-    # 于是**判 ok=True** ⇒ 它永远"成功" ⇒ 那段唤醒模拟器的代码**永远轮不到**
-    # ⇒ 库里存的始终是一枚打不通这个端点的 token ⇒ 生产每轮 `app_blocked` 十几发、阅读数全 0。
-    #
-    # ⇒ 现在:**模拟器在,就先走 App 那一路**(那才是能用的身份);模拟器不在,才回落 HTTP
-    #   (它至少能让认证活着,虽然 `/book/articles` 仍会被拒)。
-    http_reason = "未尝试(模拟器可用,已先走 App 那一路)"
-    # `prefer_emulator` 可显式注入(None = 现场探一次 `adb devices`)——
-    # 测试必须能钉死走哪条,否则"开发机恰好开着模拟器"会让用例变成看环境。
-    use_emu = (emulator_ready(adb, serial=serial)
-               if prefer_emulator is None else bool(prefer_emulator))
-    if use_emu:
+    # 当天两次反转,把证据按时间摆清(免得下次再翻):
+    #   ① 20:16 模拟器读出 App token → `/book/articles` **60 发连打全成功**;
+    #   ② 20:46 同一账号被 80+ 发打满额度 ⇒ 之后任何 token 都回 `-2041`;
+    #   ③ 我当时据此写成「HTTP 铸的 eink token 不能用」—— **那是把额度当成了身份**;
+    #   ④ 23:45 用**正在工作的账号 2** 做干净对照:纯 HTTP 铸的 token 配 `eink` 头
+    #      ⇒ **29 篇、读数正常(200)**;同一个 token 配 `app` 头才 `-2012`(身份档不配套)。
+    #      `refreshToken` **没有轮换**。
+    # ⇒ 结论:**模拟器只在两件事上需要** ——(a) 每个账号**首次**读 `deviceId` +
+    #   `refreshToken`;(b) `refreshToken` 被吊销后重新登录再读一次。
+    #   之后纯 HTTP 就能一直铸 token,**不需要长期开着模拟器**。
+    http_reason = "未尝试(只走 App 那一路)"
+    if prefer_emulator is not True:
+        http_out = refresh_via_http(session, user_id, platform=platform)  # 自己按 eink 档验活
+        if http_out.get("ok"):
+            return http_out
+        http_reason = str(http_out.get("reason"))[:60]
+        if prefer_emulator is False:
+            return {"ok": False,
+                    "reason": f"纯 HTTP 续期未成:{http_reason} —— **需要人工**:"
+                              f"开一次雷电模拟器、确认 App 登录态,再跑 "
+                              f"`scripts/weread_app_login.py` 重取凭据"}
+        logger.info("纯 HTTP 续期未成(%s)—— 回落唤醒 App(需要模拟器)", http_reason)
+    # ② 回落:唤醒 App 重读账号库(**要模拟器开着**;没开就一定失败,这是常态不是故障)
+    if (prefer_emulator is True or emulator_ready(adb, serial=serial)):
         for i in range(max(1, attempts)):
             wake_app(adb, serial=serial)
             last = refresh(session, user_id, adb=adb, serial=serial,
@@ -468,12 +477,7 @@ def refresh_with_wake(session: Session, user_id: int, *, adb: str = "",
             logger.info("第 %d 次唤醒+重取仍无效:%s", i + 1, str(last.get("reason"))[:80])
             time.sleep(3)
     else:
-        logger.info("模拟器不在,跳过 App 那一路(它才是 /book/articles 能用的身份档)")
-    # ② 回落:纯 HTTP(**不需要模拟器**;铸出来的是 `eink` 档)
-    http_out = refresh_via_http(session, user_id, platform=platform)   # 它自己按 eink 档验活
-    if http_out.get("ok"):
-        return http_out
-    http_reason = str(http_out.get("reason"))[:60]
+        last = {"ok": False, "reason": "模拟器不在,而纯 HTTP 也没成"}
     return {"ok": False,
             # ⚠️ **全失败时必须给出"人要做的那一步"**(这条被 `test_全失败才报错并给出人工步骤` 守着):
             #    我 2026-10-11 加纯 HTTP 那条路时,把消息改成了"两条路都没成 —— …",
@@ -481,7 +485,7 @@ def refresh_with_wake(session: Session, user_id: int, *, adb: str = "",
             "reason": f"两条路都没成(App:{str(last.get('reason'))[:60]};"
                       f"纯 HTTP:{http_reason})—— **需要人工**:"
                       f"开一次雷电模拟器、在微信读书 App 里确认登录态(必要时重登),"
-                      f"再跑 `scripts/weread_app_token.py` 重取凭据"}
+                      f"再跑 `scripts/weread_app_login.py --key <账号> --serial <实例>` 重取凭据"}
 
 
 def refresh(session: Session, user_id: int, *, adb: str = "", verify=None,

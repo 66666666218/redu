@@ -221,7 +221,9 @@ UC / 迅雷只有 `pan_types` 标签、没有我方链(卡片上是 `—`),要�
     (存 `cookie_store[weread_app#2]`,并记下 `adb_serial`)
   - 运行:池子按轮转分发,某个号被限就换下一个,全挂才报错;实测 23:12 那轮
     `app=30 app_fail=0 app_blocked=0`。两个号时 `WECHAT_LISTEN_APP_EXTRA=25`(合计 50/轮)。
-  - ⚠️ **两台实例都要开着**,否则 `weread_refresh_tick` 只能续到开着的那台。
+  - ★ **日常不需要一直开着模拟器**:token 走**纯 HTTP** 铸(实测能直接打 `/book/articles`,
+    29 篇带读数)。模拟器只在**每个账号首次读 `deviceId`+`refreshToken`**、
+    以及 **refreshToken 被吊销后重新登录**时需要。
 
 看三处就知道本轮有没有兑现(不要把"success + new=2"当成"全推到了"):
 

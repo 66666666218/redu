@@ -84,6 +84,27 @@ class TestRefreshWithWake:
         assert calls["n"] == 3, "三次都要试满"
         assert "人工" in out["reason"], f"全失败时要给出人要做的那一步:{out['reason']}"
 
+    def test_默认先走纯HTTP_不再依赖模拟器(self, monkeypatch) -> None:
+        """★ 2026-10-18 深夜定稿的**默认顺序**:HTTP 优先。
+
+        证据:用**正在工作的账号**做干净对照 —— 纯 HTTP 铸的 token 配 `eink` 头
+        打 `/book/articles` ⇒ **29 篇、读数正常(200)**;同一 token 配 `app` 头才 `-2012`。
+        (此前那句「HTTP token 不能用」是把**额度**当成了**身份**:当时账号刚好被打满。)
+        ⇒ 模拟器只在「首次读 deviceId/refreshToken」与「refreshToken 被吊销」时需要。
+        """
+        called = {"http": 0, "wake": 0}
+
+        def _http(session, user_id, **k):
+            called["http"] += 1
+            return {"ok": True, "via": "http"}
+        monkeypatch.setattr(wat, "refresh_via_http", _http)
+        monkeypatch.setattr(wat, "wake_app",
+                            lambda *a, **k: (called.__setitem__("wake", called["wake"] + 1), True)[1])
+        out = wat.refresh_with_wake(None, 1)          # 默认(prefer_emulator=None)
+        assert out["ok"] is True and out.get("via") == "http"
+        assert called["http"] == 1
+        assert called["wake"] == 0, "HTTP 成功就不该去唤醒模拟器"
+
     def test_模拟器不在就直接走纯HTTP(self, monkeypatch) -> None:
         """模拟器不在 ⇒ **不浪费**三次唤醒,直接走 HTTP。
 
