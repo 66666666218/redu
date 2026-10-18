@@ -220,7 +220,21 @@ def _list_attempts(stats: dict) -> int:
                ("weread_list_ok", "weread_list_app_ok", "weread_list_off_new", "weread_list_off"))
 
 
-def _list_windows(session: Session, user_id: int, rows: list, *, extra: int = 0) -> tuple[set[str], set[str]]:
+def _acct_brief(pool, stats: dict | None) -> str:
+    """运行记录里的「各账号答了几个号」:`weread:18/weread#2:0`。
+
+    ⚠️ **单账号时返回空串**(调用方据此整段不写)—— 运行记录的 detail 是被人和守卫
+    逐字比对的,只配了一枚账号时它必须与旧版**逐字相同**(2026-10-18 测试当场逼出来的)。
+    """
+    keys = list(getattr(pool, "keys", []) or [])
+    if len(keys) <= 1:
+        return ""
+    by = (stats or {}).get("weread_list_ok_by_acct") or {}
+    return "/".join(f"{k}:{int(by.get(k, 0))}" for k in keys)
+
+
+def _list_windows(session: Session, user_id: int, rows: list, *, extra: int = 0,
+                  window: int | None = None) -> tuple[set[str], set[str]]:
     """一轮里**两条路各自的窗口**:`(网页窗口, App 额外窗口)`。
 
     ⚠️ **一份次序切两段**(2026-10-10):两条路**共用同一个"最久没轮到"的排序**,
@@ -246,8 +260,12 @@ def _list_windows(session: Session, user_id: int, rows: list, *, extra: int = 0)
     marks = _list_marks(session, user_id)
     # 次序里带 bookId 做次键:并列时结果**确定**(否则同一批号的顺序每次不同,难复现)
     ordered = sorted(keyed, key=lambda b: (marks.get(_list_key(b), 0.0), _list_key(b)))
-    web = {_list_key(b) for b in ordered[:_LIST_WINDOW]}
-    app = {_list_key(b) for b in ordered[_LIST_WINDOW:_LIST_WINDOW + max(0, int(extra))]}
+    # ★ 窗口宽度可配(2026-10-18):**微信读书账号池**有 N 个账号就有 N 份额度
+    #   (见 `app/services/weread_accounts.py`)⇒ 窗口应开成 `25 × N`。
+    #   不传 = `_LIST_WINDOW`(旧行为逐字一致)。
+    width = _LIST_WINDOW if window is None else max(_LIST_WINDOW, int(window))
+    web = {_list_key(b) for b in ordered[:width]}
+    app = {_list_key(b) for b in ordered[width:width + max(0, int(extra))]}
     return web, app
 
 
@@ -364,7 +382,7 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
                     session: Session, stats: dict | None = None,
                     breaker: dict | None = None, shelf_ts: str | int | None = None,
                     banned_out: dict[str, str] | None = None, list_allow: bool = True,
-                    app_client=None, app_allow: bool | None = None
+                    app_client=None, app_allow: bool | None = None, pool=None
                     ) -> tuple[list[WechatArticle], bool]:
     """微信读书单号采集:**cover 最新一篇(始终可用)+ 窗口内的号才拉精确列表**。
 
@@ -397,7 +415,11 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
     cutoff = datetime.now() - timedelta(days=3)
     items = []
     # 主路径:cover 最新一篇(始终可用);发布时间用书架时间戳盖(封面文=最新一篇)
-    item = weread.latest_article(b.weread_book_id)
+    # ★ 账号池(2026-10-18):cover 不花列表额度,但它**依赖账号的登录态** ——
+    #   基础账号的 cookie 在两次续期之间有窗口会失效(`-2012 登录超时`),
+    #   池里还有别的账号时就不必整轮等续期(续期失败还会把本号记成 failed)。
+    item = (pool.latest_article(b.weread_book_id) if pool is not None
+            else weread.latest_article(b.weread_book_id))
     cover_ok = bool(item and item.get("url"))
     if cover_ok:
         items.append({"title": item["title"], "url": item["url"],
@@ -416,9 +438,20 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
     list_skipped = (not list_allow) or bool(breaker is not None and breaker.get("list_off"))
     if not list_skipped:
         try:
-            payload = weread_budget.call(
-                session, user_id, lambda: weread.mp_articles(b.weread_book_id),
-                what=f"mp/articles({b.nickname})")
+            # ★ **账号池**(2026-10-18):一直打同一枚账号,它被 `-2041` 限掉之后整条链归零
+            # (10-11 起连续 8 天 `ok=0`)。池里只有一个账号时,`ask_list` 与下面那句旧写法
+            # **逐字等价**(同一个 scope `web_list`、同一个 `allow_probe=False`、同一个异常)。
+            if pool is not None:
+                payload, _acct = pool.ask_list(
+                    session, user_id, b.weread_book_id,
+                    what=f"mp/articles({b.nickname})")
+                if stats is not None and len(pool) > 1:
+                    by = stats.setdefault("weread_list_ok_by_acct", {})
+                    by[_acct] = by.get(_acct, 0) + 1
+            else:
+                payload = weread_budget.call(
+                    session, user_id, lambda: weread.mp_articles(b.weread_book_id),
+                    what=f"mp/articles({b.nickname})")
             _append_listed(items, _WC.flatten_mp_articles(payload), cutoff)
             listed, list_via = True, "web"
         except weread_budget.Blocked as exc:
@@ -428,7 +461,8 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
                 breaker["list_off"] = True
             logger.debug("%s", exc)
         except Exception as exc:  # noqa: BLE001 - 限权/废弃不影响 cover 主路径
-            # -2041 是新版微信读书对该接口的永久限权,每进程只记一次,避免每账号刷屏
+            # -2041 = **这个微信读书账号**在该接口上被限(账号级,2026-10-18 三种上下文复验);
+            # 每进程只记一次,避免每账号刷屏。换号能否解决见 `weread_accounts`。
             if not getattr(_weread_collect, "_mp_articles_warned", False):
                 _weread_collect._mp_articles_warned = True
                 logger.warning("mp/articles 不可用(%s),全部账号仅用 cover 最新一篇", exc)
@@ -847,6 +881,15 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                     "no_source(无微信读书 Cookie,免费列表源未配置或不可用)")
         session.commit()
         return {"platform": "wechat", "status": "skipped", "reason": "no_source"}
+    # ★ **微信读书账号池**(2026-10-18):精确阅读数唯一来源 `/web/mp/articles` 的额度
+    #   **按账号**记,且会被账号级 `-2041` 限死(10-11 起连续 8 天 `ok=0`,而同一份
+    #   刚续期的 cookie 下 shelf/cover 全 200)。所以要"很全的阅读数",只能多账号。
+    #   只配了一枚时,**池里就是这一枚**,与旧行为逐字一致。
+    from app.services import weread_accounts as _wa
+
+    # ⚠️ **调用方显式注入了客户端 ⇒ 不建池**(测试替身/手动指定):那条路的每个请求都该
+    #   打到注入的那个对象上;建池会让它绕过替身去打真网络(第一次跑测试就是这么红的)。
+    pool = None if weread is not None else _wa.build(session, user_id, settings).with_base(cookie)
 
     plat = platform or _root._platform_client(settings, session=session, user_id=user_id)
     # 书架粗筛(1 次书架请求换"谁没更新"的答案):把每轮 60~77 次白问省下来。
@@ -892,7 +935,10 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     #   ⚠️ 默认 0 = **与旧行为完全一致**(App 只服务网页窗口内的号)。加量请改
     #   `wechat_listen_app_extra` 并**盯 `runs.detail` 的 `app_fail`/`app_blocked`**。
     _extra = int(getattr(settings, "wechat_listen_app_extra", 0) or 0)
-    _web_allow, _app_extra_allow = _list_windows(session, user_id, rows, extra=_extra)
+    # 窗口宽度 = 25 × 账号数(账号池见 `weread_accounts`);单账号时就是 25(旧行为)。
+    _web_allow, _app_extra_allow = _list_windows(
+        session, user_id, rows, extra=_extra,
+        window=(pool.window_size() if (pool is not None and len(pool) > 1) else None))
     list_allow = _web_allow
     app_allow = _web_allow | _app_extra_allow
     # **App 侧客户端**(2026-10-05):整轮只建一次;没配就 None,兜底自动跳过。
@@ -970,7 +1016,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                                                 app_client=app_client,
                                                 # ★ App 的窗口**比网页宽**:还包含"窗口外
                                                 # 最该被问"的那批(见 `_list_windows`)
-                                                app_allow=_list_key(b) in app_allow)
+                                                app_allow=_list_key(b) in app_allow,
+                                                pool=pool)
                 if _list_attempts(wr_stats) > _seen:
                     listed_keys.add(_list_key(b))          # 问过就记号(成败都算,见 _list_attempts)
                 # 只有免费源真答了才算"本号已被消费":答不上按 failed 计,如实暴露。
@@ -996,8 +1043,11 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                 refreshed = _root.refresh_weread_cookie(session, user_id, settings)
                 if refreshed.get("status") == "success":
                     cookie = refreshed["cookie"]
-                    # 续期=换了一把新会话,列表额度按新会话重新计(见 weread_client 头注释:
-                    # mp/articles 仅在会话建立/续期后初期可用)→ 熔断重新合上再试
+                    # ⚠️ **旧注释说"续期=新会话、列表额度重算"—— 2026-10-18 实测证伪**:
+                    #    就是刚续期 1 分钟的活 cookie,三种上下文打 `/web/mp/articles`
+                    #    仍然 `-2041`。所以这里**不再指望**续期把额度换回来;
+                    #    列表能不能问,由 `pool` 按账号逐个判(见 `weread_accounts`)。
+                    pool = pool.with_base(cookie)
                     breaker.update(list_off=False, cover_quota_fails=0, off=False)
                     try:
                         _seen = _list_attempts(wr_stats)
@@ -1007,7 +1057,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                                                         banned_out=banned,
                                                         list_allow=_list_key(b) in list_allow,
                                                         app_client=app_client,
-                                                        app_allow=_list_key(b) in app_allow)
+                                                        app_allow=_list_key(b) in app_allow,
+                                                        pool=pool)
                         if _list_attempts(wr_stats) > _seen:
                             listed_keys.add(_list_key(b))
                         used = answered  # 答上了就消费掉本号(答不上按 failed 计,如实暴露)
@@ -1168,7 +1219,11 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                    # 我们正是因此**漏看了这条路连续几周 `app=0`**。
                    f" app_fail={wr_stats.get('weread_list_app_fail', 0)}"
                    f" app_blocked={wr_stats.get('weread_list_app_blocked', 0)}"
-                   f" off={wr_stats.get('weread_list_off', 0)}"
+                   # ★ **按账号分开记**(2026-10-18):池里"谁还能答"是"要不要再加一个号"
+                   #   的唯一依据;合成一个数就又看不出是新号在扛、还是老号自己活了。
+                   #   ⚠️ 单账号时这里是空串 —— detail 必须与旧版逐字一致(见 `_acct_brief`)。
+                   + (f" accts={_acct}" if (_acct := _acct_brief(pool, wr_stats)) else "")
+                   + f" off={wr_stats.get('weread_list_off', 0)}"
                    f" off_with_new={off_new} skipped={wr_stats.get('weread_list_skipped', 0)})")
     if gate["ok"]:
         # `skip` 是**计划**跳过数,`saved` 是**实际**跳过数(wr_stats 里那个计数)。

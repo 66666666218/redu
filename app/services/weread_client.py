@@ -5,20 +5,21 @@
           ⚠️ userVid 必须传**空字符串**,非空会 -2012「登录超时」
 - 最新一篇: GET /api/mp/cover?bookId=MP_WXS_XXX  → {name,title,pic,reviewId,digest}
           ⚠️ 返回体里**没有 readNum**(只有 avatar/name/title/pic/reviewId/template/coverBoxInfo)
-- 列表:  GET /web/mp/articles → 我们的会话恒 -2041(2026-10-04 实测)
+- 列表:  GET /web/mp/articles → **精确阅读数的唯一来源**,但额度**按账号**记,会被账号级 `-2041` 挡
+          (2026-10-09/10-10 单账号一天还能成功 58 次;10-11 起连续 8 天全灭)。
           旧注释写"仅在会话续期后初期可用" —— **那条是错的**:续期 success+verified
-          之后**立刻**再拉,书架前 5 个号仍全部 -2041。因为**续期 = 同会话换 skey,
-          不是新会话**,它开不出窗口。
-          ⚠️ 但**别据此断言"永久关死"**:本仓 09-27 另见过 -2014(新建立的会话),
-          两种定性尚未定案(见 doc/operations.md §9.2)。故调用方按"只取 cover 最新一篇"
-          处理(见 wechat_monitor);**别再为它编排续期时机**(见 doc/外部接口速查.md §3.2)
+          之后**立刻**再拉,仍然 `-2041`。因为**续期 = 同会话换 skey,不是新会话**,它开不出窗口。
+          (2026-10-18 复验:三种请求上下文、刚续期的活 cookie,全部 `-2041`
+           ⇒ 不是上下文/不是 cookie 新旧,是**账号**;见 `doc/外部接口速查.md` §3.2.4)
+          故调用方按"只取 cover 最新一篇"处理(见 wechat_monitor);
+          **别再为它编排续期时机**;要扩容走**账号池** `weread_accounts`(`weread#2` …)
 - 正文:  GET /web/mp/content?reviewId=MP_WXS_...  → HTML(#js_content)
 - reviewId 形如 `MP_WXS_<bookId>_<articleToken>`,末段即 mp.weixin.qq.com/s/ 原文短链
   的 token。⚠️ **上游给的 token 里 `~` 要换回 `_`**(2026-10-16 实测:不换就是微信的
   「参数错误」页)—— 详见 `build_mp_url`。
 
 鉴权:仅靠 Cookie(完整微信读书登录 Cookie);x-wr-ticket 已弃用。
-错误:-2012/-2010 登录失效(→ WereadAuthError;可用 refresh_skey 用 wr_rt 续期);-2041 接口废弃/被拦截;
+错误:-2012/-2010 登录失效(→ WereadAuthError;可用 refresh_skey 用 wr_rt 续期);-2041 **该账号**在列表接口被限;
       -2014 请求频率过高(限流)。⚠️ cover 把错误码包在 HTTP 499 的 `data.errcode` 里而非顶层
       `errCode`,顶层-only 的判定会把限流当成"成功但无文章",整轮静默 new=0(2026-09-22 实测)。
 限频:内置 2s 串行间隔(社区实测单日 30+ 次密集请求即触发风控,宁慢勿封)。
