@@ -358,10 +358,27 @@ class _WereadAppPool:
     - 多凭据时把整轮的 App 窗口轮转到各账号 —— 额度是**按账号**记的
       (2026-10-18 实测:一轮硬打 80+ 发就把一个号打进 `-2041`),所以 N 个号 ≈ N 份预算;
     - 某一枚报错(**登录态或额度**)就换下一枚;**全挂才抛**,绝不吞成"这个号没发文"。
+
+    ★★ **2026-10-19:额度熔断按账号分开**(`app_list@weread_app#2`)。
+    以前整个池共用一个 `app_list` scope:1 号被 `-2041` 挡下后,外层
+    `weread_budget.call` 在调用池**之前**就抛 `Blocked` ⇒ **2 号根本没机会被试**。
+    这正是"明明有两个号,整轮却 `app=0`"的直接原因。现在 pool 自己按账号记熔断,
+    一个号被挡,下一个号照常发。
     """
 
+    #: 告诉调用方"本对象的额度由自己按账号管",别再在外面套一层共享 scope。
+    scoped_budget = True
+
     def __init__(self, items: list) -> None:
-        self._clients = items
+        norm: list[tuple[str, object]] = []
+        for i, it in enumerate(items):
+            #: 旧测试/旧调用只传 client ⇒ 给一个稳定的默认 key(第一枚=基础账号)。
+            if isinstance(it, tuple) and len(it) == 2:
+                key, client = it
+            else:
+                key, client = ("weread_app" if i == 0 else f"weread_app#{i + 1}"), it
+            norm.append((str(key), client))
+        self._clients = norm
         self._i = 0
         #: 本轮已确认**用不了**的账号(额度/登录态/网络)—— 不在一发上反复撞。
         #: ⚠️ 这一轮内有效(pool 每轮新建),下一轮会重新试 —— 与 `weread_budget` 的
@@ -372,7 +389,14 @@ class _WereadAppPool:
     def __len__(self) -> int:
         return len(self._clients)
 
-    def articles(self, book_id: str, **kw):
+    @staticmethod
+    def _scope(key: str) -> str:
+        """某个 App 账号的额度 scope。基础账号保持 `app_list`(历史熔断键不变)。"""
+        return (weread_budget.SCOPE_APP if key == "weread_app"
+                else f"{weread_budget.SCOPE_APP}@{key}")
+
+    def articles(self, book_id: str, *, session=None, user_id: int = 1,
+                 allow_probe: bool = False, **kw):
         n = len(self._clients)
         alive = [i for i in range(n) if i not in self._dead]
         if not alive:
@@ -382,8 +406,16 @@ class _WereadAppPool:
             raise RuntimeError("没有可用的 App 凭据")
         for off in range(len(alive)):
             idx = alive[(self._i + off) % len(alive)]
+            key, client = self._clients[idx]
             try:
-                out = self._clients[idx].articles(book_id, **kw)
+                if session is None:
+                    #: 测试/裸调用:不碰额度表,行为与旧版一致。
+                    out = client.articles(book_id, **kw)
+                else:
+                    out = weread_budget.call(
+                        session, user_id, lambda c=client: c.articles(book_id, **kw),
+                        what=f"app/book/articles[{key}]", scope=self._scope(key),
+                        allow_probe=allow_probe)
             except Exception as exc:  # noqa: BLE001 - 换下一枚账号(与账号池同一条纪律)
                 self._dead.add(idx)
                 self._last_error = exc
@@ -405,7 +437,8 @@ def _weread_app_client(session: Session, user_id: int):
     不用人记得去跑脚本(那是靠不住的)。
 
     ★ **多账号**(2026-10-18):按 `weread_app` / `weread_app#2` / … 各建一枚,
-    返回 `_WereadAppPool`(单枚时直接返回客户端,行为与旧版逐字一致)。
+    返回 `_WereadAppPool`。2026-10-19 起**单枚也返回池**(池内只有一枚,行为不变)——
+    因为额度熔断要按账号分开记,统一走池才不会漏掉那一层。
     """
     try:
         from app.services.weread_app_client import WereadAppClient
@@ -434,12 +467,13 @@ def _weread_app_client(session: Session, user_id: int):
                 #   客户端必须跟着换头,否则下一次调用仍然 `-2012`。
                 return out["accessToken"], out["vid"], out.get("profile") or ""
 
-            clients.append(WereadAppClient(blob.get("accessToken") or "", blob.get("vid") or "",
-                                           on_auth_error=_reget,
-                                           profile=blob.get("profile") or ""))
+            clients.append((key, WereadAppClient(
+                blob.get("accessToken") or "", blob.get("vid") or "",
+                on_auth_error=_reget, profile=blob.get("profile") or "")))
         if not clients:
             return None
-        return clients[0] if len(clients) == 1 else _WereadAppPool(clients)
+        #: 单枚也走池:额度 scope 按账号分开(`app_list` / `app_list@weread_app#2`)。
+        return _WereadAppPool(clients)
     except Exception as exc:  # noqa: BLE001 - 不能因为兜底坏了就停掉整轮监听
         logger.warning("App 侧凭据不可用(跳过列表兜底):%s", str(exc)[:120])
         return None
@@ -577,14 +611,19 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
         try:
             # ⚠️ **scope=app**:App 是另一套鉴权与配额,网页被 `-2041` 拦了它照样能取 ——
             # 这正是兜底的价值。熔断按通道分开记,别让网页的挡牵连唯一还能用的这条路。
-            rows = weread_budget.call(
-                session, user_id, lambda: app_client.articles(b.weread_book_id),
-                what=f"app/book/articles({b.nickname})", scope=weread_budget.SCOPE_APP,
-                # ★ 半开探测(2026-10-14):**网页路本轮没拿到列表**(`not listed`)⇒ App 是唯一
-                #   还能出精确读数的那条 ⇒ 允许它在熔断期里**每 10 分钟试一发**;
-                #   成 ⇒ 立刻解除熔断(挡是时限性的,别让 37 个号白等满 30 分钟);
-                #   仍被挡 ⇒ 继续冷静(探针的频次由 `PROBE_MIN` 限着,不是放开了打)。
-                allow_probe=not listed)
+            if getattr(app_client, "scoped_budget", False):
+                #: ★ 2026-10-19:池内**按账号**分别记熔断(`app_list` / `app_list@weread_app#2`)。
+                #: 以前整个池共用一个 scope:1 号被 `-2041` 挡下后,外层 `call` 在调用池
+                #: **之前**就抛 `Blocked` ⇒ 2 号根本没机会 —— 这就是"两个号却整轮 app=0"。
+                rows = app_client.articles(
+                    b.weread_book_id, session=session, user_id=user_id,
+                    allow_probe=not listed)
+            else:
+                #: 测试替身/裸客户端没有 `scoped_budget` ⇒ 保持旧的共享 scope 行为。
+                rows = weread_budget.call(
+                    session, user_id, lambda: app_client.articles(b.weread_book_id),
+                    what=f"app/book/articles({b.nickname})", scope=weread_budget.SCOPE_APP,
+                    allow_probe=not listed)
             # ⚠️ **不再翻译字段**:App 端产出的形状已与网页端 `flatten_mp_articles` 逐字一致
             # (2026-10-05 收敛)—— 之前这里有一层 `publish_at→create_time` 的映射,
             # 那正是"两处同构、迟早飘一个"的来源。

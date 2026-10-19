@@ -74,6 +74,8 @@ DEFAULT_BLOCK_MIN = 30          # 被挡后默认冷静多久
 #: ⚠️ 频次靠这个间隔限着 —— 是"每 10 分钟一发",**不是"放开了打"**(风控会更深)。
 PROBE_MIN = 10
 _PROBE_KEY = "weread_probe_{uid}_{scope}"
+#: 连续探测失败的计数(指数退避用)。见 `_bump_probe_fail` 的说明。
+_PROBE_FAIL_KEY = "weread_probe_fail_{uid}_{scope}"
 
 
 def _probe_due(session: Session, user_id: int, scope: str) -> bool:
@@ -99,6 +101,32 @@ def _probe_due(session: Session, user_id: int, scope: str) -> bool:
     except Exception:  # noqa: BLE001 - 记不上探测时间就别探(保守),不影响别的路径
         logger.debug("读写额度探测时间失败", exc_info=True)
         return False
+
+
+def _bump_probe_fail(session: Session, user_id: int, scope: str, *,
+                     reset: bool = False) -> int:
+    """连续探测失败次数(**指数退避**用)。返回本次的计数(重置后为 0)。
+
+    ⚠️ 为什么必须有(2026-10-19):`PROBE_MIN=10` + `DEFAULT_BLOCK_MIN=30` ⇒
+    每次探针失败都把熔断**重置成 30 分钟**,而 10 分钟后又能探 ⇒ **熔断永远不自然到期**。
+    App 路今天整天空(`app=0 / app_blocked=48~88`)就是这个"探针把闸门一直续上"的形状。
+    ⇒ 连续失败时把冷静期按 30/60/120/240/360 分钟退避(封顶 6h),别再无脑重置 30。
+    """
+    from app.db.models import SystemConfig
+
+    key = _PROBE_FAIL_KEY.format(uid=user_id, scope=scope)
+    try:
+        row = session.scalar(select(SystemConfig).where(SystemConfig.key == key))
+        n = 0 if reset else (int(str(row.value or "0")) if row else 0) + 1
+        if row:
+            row.value = str(n)
+        else:
+            session.add(SystemConfig(key=key, value=str(n)))
+        session.commit()
+        return n
+    except Exception:  # noqa: BLE001 - 记不上就按 1 次处理,不挡主流程
+        logger.debug("读写探测失败计数失败", exc_info=True)
+        return 0 if reset else 1
 
 
 def is_quota_error(exc: BaseException | str) -> bool:
@@ -203,12 +231,24 @@ def call(session: Session, user_id: int, fn: Callable[[], Any], *,
         out = fn()
     except BaseException as exc:
         if is_quota_error(exc):
+            if probing:
+                #: ★ **连续探测失败要退避**(2026-10-19):否则 10 分钟一次的探针
+                #: 每次都把熔断重置成 30 分钟 ⇒ 闸门永远不自然到期,App 路整天 `app=0`。
+                fails = _bump_probe_fail(session, user_id, scope)
+                block_min = min(
+                    max(block_min, DEFAULT_BLOCK_MIN * (2 ** min(fails - 1, 4))), 360)
+                logger.warning("微信读书额度探测连续失败 %d 次[%s] ⇒ 冷静 %d 分钟",
+                               fails, scope, block_min)
+            else:
+                #: 非探测路径撞到额度 ⇒ 这是一段新故障,计数从 0 开始。
+                _bump_probe_fail(session, user_id, scope, reset=True)
             note_blocked(session, user_id, why=f"{what}:{exc}", minutes=block_min,
                          scope=scope)
         raise
     else:
         if probing:
             # 探测成功 ⇒ **立刻解除熔断**:挡是时限性的,不必让所有人白等满冷静期
+            _bump_probe_fail(session, user_id, scope, reset=True)
             clear(session, user_id, scope)
             logger.info("微信读书额度熔断[%s]经半开探测**已恢复** ⇒ 解除熔断", scope)
         return out

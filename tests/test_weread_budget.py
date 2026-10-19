@@ -218,3 +218,29 @@ class TestHalfOpenProbe:
         assert wb.blocked_until(session, 1, wb.SCOPE_APP_LIST) is not None, "仍被挡就该继续冷静"
         with pytest.raises(wb.Blocked):
             _call(session, lambda: [], allow_probe=True)   # 间隔内不再探
+
+    def test_连续探测失败要指数退避_不能把熔断永久续上(self, session, monkeypatch) -> None:
+        """★ 2026-10-19:App 路整天 `app=0 / app_blocked=48~88` 的直接原因之一。
+
+        `PROBE_MIN=10` + `DEFAULT_BLOCK_MIN=30` ⇒ 每次探针失败都把熔断**重置成 30 分钟**,
+        而 10 分钟后又能探 ⇒ **熔断永远不自然到期**。连续失败必须退避到 60/120/…
+        """
+        from datetime import datetime
+
+        monkeypatch.setattr(wb, "_probe_due", lambda *a, **k: True)
+        wb.note_blocked(session, 1, why="x:-2041", scope=wb.SCOPE_APP_LIST)
+
+        def _boom():
+            raise RuntimeError("微信读书错误 code=-2041:列表预算耗尽")
+
+        with pytest.raises(RuntimeError):
+            _call(session, _boom, allow_probe=True)
+        first = wb.blocked_until(session, 1, wb.SCOPE_APP_LIST)
+        first_min = (first - datetime.now()).total_seconds() / 60
+        assert 25 <= first_min <= 35, f"第一次探测失败仍应是 30 分钟,实际 {first_min:.1f}"
+
+        with pytest.raises(RuntimeError):
+            _call(session, _boom, allow_probe=True)
+        second = wb.blocked_until(session, 1, wb.SCOPE_APP_LIST)
+        second_min = (second - datetime.now()).total_seconds() / 60
+        assert second_min > 55, f"第二次探测失败应退避到 60 分钟,实际 {second_min:.1f}"
