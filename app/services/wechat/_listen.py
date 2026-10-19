@@ -931,6 +931,15 @@ def run_wechat_listen(session: Session, user_id: int, settings: Settings | None 
                              platform=platform, push=push, batch_index=batch_index,
                              batch_size=batch_size)
     finally:
+        #: ⚠️ **失败后先恢复 session 再解锁**(2026-10-19):`database is locked` 会让
+        #: session 进入「必须 rollback」状态,而 `_release_listen_slot` 也要写库 ⇒
+        #: 解锁失败 ⇒ 该用户在整个 TTL 内**不能再起一轮**(04:02 就是这么被锁死的)。
+        #: 只在 `is_active=False`(确实处在失败事务)时回滚,正常轮次的未提交写不受影响。
+        if not session.is_active:
+            try:
+                session.rollback()
+            except Exception:  # noqa: BLE001
+                logger.debug("释放监听标记前回滚失败", exc_info=True)
         _release_listen_slot(session, user_id, token)
 def _listen_round(session: Session, user_id: int, settings: Settings | None = None,
                   weread: WereadClient | None = None,
@@ -950,6 +959,13 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
             repushed = repush_unpushed(session, user_id, settings)
     except Exception:  # noqa: BLE001 - 补推失败不影响本轮监听
         logger.exception("补推上轮欠推失败 user=%s", user_id)
+        #: ⚠️⚠️ **必须 rollback**(2026-10-19 04:02/08:02 的实际事故):补推里的
+        #: `database is locked` 会把 session 标成「必须回滚」,不恢复的话后面**采集第一步**
+        #: 就抛 `PendingRollbackError`,整轮监听被一条旁路任务带崩(而且释放"在跑"标记也失败)。
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001 - 回滚本身失败只能记下来,别盖住原异常
+            logger.debug("补推失败后回滚会话失败", exc_info=True)
     all_rows = session.scalars(select(WechatBenchmark).where(
         WechatBenchmark.user_id == user_id, WechatBenchmark.active.is_(True))
         .order_by(WechatBenchmark.id)).all()
@@ -1758,6 +1774,13 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
             except Exception:  # noqa: BLE001 - 旁路,绝不许它挡住下面 pushed_at 的落库
                 logger.warning("公众号卡片入台账失败(不影响推送)", exc_info=True)
     if delivered:
+        #: ⚠️ 台账写失败会把 session 打成「必须 rollback」(2026-10-19 的锁冲突)。
+        #: 不先恢复的话这一批 `pushed_at` 落不下去 ⇒ 下一轮重复补推同一批。
+        if not session.is_active:
+            try:
+                session.rollback()
+            except Exception:  # noqa: BLE001
+                logger.debug("落 pushed_at 前回滚会话失败", exc_info=True)
         session.execute(update(WechatArticle).where(WechatArticle.id.in_(delivered))
                         .values(pushed_at=datetime.now()))
         session.commit()

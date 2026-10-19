@@ -225,6 +225,44 @@ def test_listen_inserts_new_and_dedupes(session, monkeypatch: pytest.MonkeyPatch
     assert out2["new"] == 0  # 第二轮按链接去重
 
 
+def test_补推失败后要回滚会话再继续采集(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """★ 2026-10-19 04:02 / 08:02 的实际事故。
+
+    补推里的 `database is locked` 会把 session 打成「必须回滚」;若不显式恢复,
+    后面的采集第一步就抛 `PendingRollbackError`,**整轮监听被一条旁路任务带崩**,
+    连"监听在跑"标记都释放失败(该用户在整个 TTL 内不能再起一轮)。
+    """
+    from app.services.wechat import _listen as L
+
+    _set_cookie(session, 1, "weread", "vid=1; skey=x")
+    session.add(WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1",
+                                anchor_url="https://mp.weixin.qq.com/s/A"))
+    session.commit()
+    fake = FakeWeread(cover={"title": "补推失败也该采到的新文",
+                             "url": "https://mp.weixin.qq.com/s/n-new",
+                             "review_id": "MP_WXS_1_n1", "digest": ""},
+                      content="正文")
+    monkeypatch.setattr(wechat_monitor, "fetch_article_content", lambda url, timeout=15: "")
+
+    def _boom(*a, **k):
+        raise RuntimeError("(sqlite3.OperationalError) database is locked")
+
+    monkeypatch.setattr(L, "repush_unpushed", _boom)
+    rollbacks = {"n": 0}
+    real_rollback = session.rollback
+
+    def _rollback():
+        rollbacks["n"] += 1
+        return real_rollback()
+
+    monkeypatch.setattr(session, "rollback", _rollback)
+
+    out = wechat_monitor.run_wechat_listen(
+        session, 1, settings=_settings(pan_transfer_enabled=False), weread=fake)
+    assert rollbacks["n"] >= 1, "补推失败后必须显式 session.rollback()"
+    assert out["status"] == "success" and out["new"] == 1, "补推失败不该挡住本轮采集"
+
+
 def test_listen_records_miss_and_skips(monkeypatch: pytest.MonkeyPatch, session) -> None:
     # 无对标号 → skipped,并写运维记录(否则后台看不到"公众号情况")
     out = wechat_monitor.run_wechat_listen(session, 1, settings=_settings())

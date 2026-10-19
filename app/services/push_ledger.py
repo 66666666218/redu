@@ -118,6 +118,11 @@ def record(session: Session, user_id: int, section: str, items: list[dict],
 
     ⚠️ **由推送点自己调用**(它手上才有"推了哪几条");不要试图在 `FeishuClient`
     那一层做 —— 那里只有渲染好的卡片 JSON,从中反解出行结构比每个点加一行更脆。
+
+    ⚠️ **写失败会让调用方的 session 进入「必须 rollback」状态**(锁冲突时)。
+    本函数按纪律**不吞掉调用方未提交的数据**,所以这里只撤销保存点、返回 0;
+    **调用方必须在继续用这个 session 之前 `rollback()`** —— 监听轮已按此修
+    (`_listen_round` 的补推兜底、`_push_listen` 的落库前自愈),见 2026-10-19 的事故。
     """
     from app.db.models import PushLedger
     from app.db.tx import savepoint
