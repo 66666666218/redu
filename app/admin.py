@@ -706,6 +706,26 @@ def retry_failed_runs(max_retry: int = 3) -> dict:
                 run.status = "recovered"
                 run.detail = f"{run.detail} → retry_ok"
                 db.commit()
+                #: ★★ **一次成功要把更早的失败一起关掉**(2026-10-19 的实际事故):
+                #: 这里原来只关闭当前这条;而 `recent` 每个 (user, kind) 只取**最新一条**
+                #: failed ⇒ 下一条更早的 failed 会在 30 分钟后成为新候选、被**逐条重放**。
+                #: 实测:10-18 留下的 4 条抖音失败,在 10-19 04:31 / 05:01 / 05:31 / 06:01
+                #: 被连续重跑(每轮 8 个搜索),随后 12:10 就撞上 `verify_check`。
+                #: 它们本就是**同一段故障史**;一次成功重试已经证明链路恢复,旧的失败记录
+                #: 不该再各自跑一遍。⇒ 统一标成 recovered(superseded),正常 4h 轮转照旧覆盖。
+                older = db.scalars(select(RunRecord).where(
+                    RunRecord.user_id == run.user_id,
+                    RunRecord.kind == run.kind,
+                    RunRecord.status == "failed",
+                    RunRecord.id < run.id,
+                )).all()
+                if older:
+                    for old in older:
+                        old.status = "recovered"
+                        old.detail = f"{old.detail} → superseded_by_retry#{run.id}"
+                    db.commit()
+                    logger.info("重试成功:%s 同链更早的 %d 条失败一并关闭(不再逐条重放)",
+                                run.kind, len(older))
                 n += 1
             except Exception:  # noqa: BLE001
                 db.rollback()

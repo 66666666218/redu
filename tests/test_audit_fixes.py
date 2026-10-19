@@ -159,6 +159,44 @@ class TestRetryConvergence:
         # 第二轮:不再有 eligible failed 记录
         assert admin_svc.retry_failed_runs(max_retry=3)["retried"] == 0
 
+    def test_一次成功重试后更早的失败一起关闭_不再逐条重放(self, session, monkeypatch):
+        """★★ 2026-10-19 的实际事故:10-18 留下的 4 条抖音失败被**逐条重放**。
+
+        `recent` 每个 (user, kind) 只取最新一条 failed;只关闭当前这条的话,
+        下一条更早的会在 30 分钟后成为新候选 —— 实测 04:31 / 05:01 / 05:31 / 06:01
+        连续 4 次重跑(每次 8 个搜索),随后 12:10 撞上 `verify_check`。
+        ⇒ 一次成功重试已经证明链路恢复,同链更早的失败记录应一起关闭。
+        """
+        import app.admin as admin_svc
+        import app.db as appdb
+        from app.services import tenant as tenant_mod
+
+        monkeypatch.setattr(appdb, "get_session_local", lambda: (lambda: session))
+        monkeypatch.setattr(session, "close", lambda: None)
+
+        session.add(User(id=1, username="a", email="a@b.c", password_hash="x", role="admin"))
+        base = datetime.now() - timedelta(hours=8)
+        for i in range(3):
+            session.add(RunRecord(run_id=str(i), user_id=1, kind="weibo", status="failed",
+                                  started_at=base + timedelta(hours=i), retry_count=0))
+        session.commit()
+
+        calls: list[int] = []
+
+        def _ok(db, uid, st=None):
+            calls.append(1)
+            return {"platform": "weibo", "count": 5}
+
+        monkeypatch.setattr(tenant_mod, "run_weibo", _ok)
+        assert admin_svc.retry_failed_runs(max_retry=3)["retried"] == 1
+        assert len(calls) == 1, "只该跑一次,不许把历史失败逐条重放"
+        rows = session.scalars(select(RunRecord).order_by(RunRecord.id)).all()
+        assert all(r.status == "recovered" for r in rows), \
+            [(r.run_id, r.status, r.detail) for r in rows]
+        assert any("superseded_by_retry" in (r.detail or "") for r in rows), \
+            "更早的失败要留痕(不是静默消失)"
+        assert admin_svc.retry_failed_runs(max_retry=3)["retried"] == 0, "关闭后不该再被重试"
+
 
     def test_重试又失败时不许标成已恢复(self, session, monkeypatch):
         """★★ **2026-10-16 实测撞到的假成功,而它正好把自愈关掉了**。

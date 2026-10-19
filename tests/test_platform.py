@@ -1025,10 +1025,13 @@ def test_retry_failed_runs_dedups_per_user_kind(session, monkeypatch: pytest.Mon
     retry_failed_runs(max_retry=3)
     # 用户1 的 3 条同板块记录合并为一次重试(仅最新那条入选);用户2 douhot 一次
     assert listen_calls == [1]
-    # 旧/中两条仍保持 failed(未被误重试也不被误关闭)
+    # ★ 2026-10-19:一次成功重试后,同链**更早的 failed 一并关闭** ——
+    # 否则下一条会在 30 分钟后成为新候选、被逐条重放(抖音 04:31/05:01/05:31/06:01
+    # 连续 4 次重试、随后 12:10 触发 verify_check 就是这么来的)。
     from sqlalchemy import select as _select
     old = session.scalar(_select(RunRecord).where(RunRecord.run_id == "old"))
-    assert old.status == "failed"
+    assert old.status == "recovered"
+    assert "superseded_by_retry" in (old.detail or ""), "关闭要留痕,不许静默消失"
 
 
 def test_retry_run_marks_recovered(session, monkeypatch: pytest.MonkeyPatch) -> None:
