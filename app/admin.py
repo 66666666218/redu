@@ -598,6 +598,18 @@ def _douyin_verify_cooldown_active(db, user_id: int, settings) -> bool:
         return False
 
 
+def _douyin_risk_control_failure(run) -> bool:
+    """这条抖音失败是不是**平台风控/空结果**,而不是瞬时故障?
+
+    ★ 2026-10-19 20:10 的实际事故:12:10 撞 `verify_check` → 冷却到 18:10;
+    18:30 的**自动重试**又撞了一次 ⇒ 冷却被推到 **00:30**,而 20:10 的 4h 定点轮
+    因为"本窗口唯一那次浏览器探针已被 18:30 用掉"只能跳过 —— **重试偷走了定点的恢复机会**。
+    ⇒ 风控/空结果类失败**永不自动重试**;交给 4h 定点轮(它才是设计上该用探针的那一轮)。
+    """
+    text = str(getattr(run, "detail", "") or "")
+    return any(k in text for k in ("全部无结果", "verify_check", "verify_cooldown"))
+
+
 def retry_failed_runs(max_retry: int = 3) -> dict:
     """调度器自动重试:重试近 24h 失败且重试次数 < max_retry 的运行。"""
     from datetime import datetime, timedelta
@@ -657,6 +669,12 @@ def retry_failed_runs(max_retry: int = 3) -> dict:
         for run in recent:
             runner = runners.get(run.kind)
             if not runner:
+                continue
+            if run.kind == "douyin_leads" and _douyin_risk_control_failure(run):
+                #: ★ 2026-10-19:风控/空结果失败**永不自动重试** —— 重试会消耗
+                #: "冷却窗口里唯一那次浏览器探针",把 4h 定点轮的恢复机会偷走
+                #: (18:30 重试 → 冷却推到 00:30,20:10 定点轮只能跳过)。
+                logger.info("重试跳过:douyin_leads 是平台风控/空结果(交给 4h 定点轮,别偷走探针)")
                 continue
             if (run.kind == "douyin_leads"
                     and _douyin_verify_cooldown_active(db, run.user_id, settings)):

@@ -399,7 +399,8 @@ class Test抖音验证冷却期不许重试:
     却花了约 **72 次额外搜索** ⇒ 冷却期内不该重试。
     """
 
-    def _setup(self, session, monkeypatch, *, cooldown: bool, switch: bool = True):
+    def _setup(self, session, monkeypatch, *, cooldown: bool, switch: bool = True,
+               detail: str = "douyin: 8 个关键词全部无结果"):
         import app.admin as admin_svc
         import app.db as appdb
         from app.services import douyin_protocol_source as dps
@@ -415,7 +416,7 @@ class Test抖音验证冷却期不许重试:
         monkeypatch.setattr("config.settings.get_settings", lambda: _S())
         session.add(User(id=1, username="a", email="a@b.c", password_hash="x", role="admin"))
         session.add(RunRecord(run_id="1", user_id=1, kind="douyin_leads", status="failed",
-                              detail="douyin: 8 个关键词全部无结果", retry_count=0,
+                              detail=detail, retry_count=0,
                               started_at=datetime.now() - timedelta(hours=2)))
         session.commit()
         calls: list[str] = []
@@ -435,12 +436,27 @@ class Test抖音验证冷却期不许重试:
         run = session.scalar(select(RunRecord))
         assert run.status == "failed", "跳过 ≠ 恢复:记录必须留着,冷却结束还能再试"
 
-    def test_不在冷却期就照旧重试(self, session, monkeypatch) -> None:
+    def test_风控空结果永不自动重试(self, session, monkeypatch) -> None:
+        """★ 2026-10-19:风控空结果**连冷却结束后也不重试**。
+
+        18:30 的自动重试把冷却推到 00:30,而 20:10 的定点轮因为"探针已被用掉"只能跳过。
+        ⇒ 这类失败交给 4h 定点轮,自动重试不许偷走探针。
+        """
         admin_svc, calls = self._setup(session, monkeypatch, cooldown=False)
+        assert admin_svc.retry_failed_runs(max_retry=3)["retried"] == 0
+        assert calls == [], "风控/空结果不是瞬时故障,重试只会再撞一次"
+
+    def test_不在冷却期就照旧重试(self, session, monkeypatch) -> None:
+        """非风控类失败(如 Playwright 退出码)仍按指数退避正常重试。"""
+        admin_svc, calls = self._setup(
+            session, monkeypatch, cooldown=False,
+            detail="douyin 退出码 1:playwright Page.goto timeout")
         admin_svc.retry_failed_runs(max_retry=3)
         assert calls == ["ran"], "冷却结束了还不重试,就等于把这条链放弃了"
 
     def test_开关关掉就照旧重试(self, session, monkeypatch) -> None:
-        admin_svc, calls = self._setup(session, monkeypatch, cooldown=True, switch=False)
+        admin_svc, calls = self._setup(
+            session, monkeypatch, cooldown=True, switch=False,
+            detail="douyin 退出码 1:playwright Page.goto timeout")
         admin_svc.retry_failed_runs(max_retry=3)
         assert calls == ["ran"], "可回退:配置置 False 就该恢复旧行为"
