@@ -539,6 +539,14 @@ def clear_verify(session=None, user_id: int = 1) -> None:
         if row:
             row.value = ""
             session.commit()
+        #: ★ 重导 = 人已经在浏览器里动过了 ⇒ **连"本冷却窗口已探过浏览器"的标记也清掉**。
+        #: 否则冷却虽然解冻,下一轮仍会因标记与旧截止时间相等而跳过一次正常探针
+        #: (键名与 `douyin_leads._PROBE_KEY` 保持一致;这里不 import 它,避免循环依赖)。
+        probe = session.scalar(select(SystemConfig).where(
+            SystemConfig.key == f"douyin_browser_probe_until_{user_id}"))
+        if probe:
+            probe.value = ""
+            session.commit()
     except Exception:  # noqa: BLE001
         logger.debug("清验证冷却失败", exc_info=True)
 
