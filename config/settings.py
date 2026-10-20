@@ -1062,6 +1062,17 @@ class Settings(BaseSettings):
     disk_guard_cron: str = "45 9 * * *"      # 与 health_push(9:20) 错开,别挤在一起
     disk_warn_ratio: float = 0.85
     disk_crit_ratio: float = 0.95
+    # ---- 出口 IP 变化自检(2026-10-20,用户出差/换网络)----
+    # 每 15 分钟记录一次公网出口 IP;变化时推管理员群,并附上近 N 小时各链失败摘要。
+    # ⚠️ 时间点故意错开 0/30 网格(xunlei_group 占 7/27/47、各定点作业占 0/30),
+    #    避免和重活挤在同一分钟(本仓的 `test_job_stagger` 会拦)。
+    network_guard_enabled: bool = True
+    network_guard_cron: str = "13,28,43,58 * * * *"
+    network_guard_ip_urls: str = "https://api.ipify.org,https://ifconfig.me/ip"
+    network_guard_failure_window_hours: int = 2
+    #: 同一小时内反复换 IP(酒店 Wi-Fi ↔ 热点)时,只推第一条,避免刷屏;
+    #: 变化本身仍会写进 `runs`,不会静默丢失。
+    network_guard_alert_cooldown_minutes: int = 60
     feishu_secret: str = ""         # 机器人签名校验密钥(为空则不签名)
     own_account_names: str = "天一项目拆解"  # 自营号名单(逗号分隔):飞书推送一律脱敏为「内部号」,防自营身份暴露(2026-09-29)
     feishu_hot_rank_jump: int = 3          # 排名跳升 ≥ 该名次即实时推送

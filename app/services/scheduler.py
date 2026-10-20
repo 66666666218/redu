@@ -495,6 +495,9 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.pan_discovery import pan_discovery_tick
     from app.services.health import health_push_tick
     from app.services.disk_guard import disk_guard_tick
+    #: 出口 IP 变化自检(2026-10-20,用户出差/换网络):每 15 分钟记录公网 IP,
+    #: 变化时推管理群并附近 2h 各链失败摘要。role=both:两台实例各查自己的出口。
+    from app.services.network_guard import network_guard_tick
     from app.services.resource_presence import presence_bili_tick, presence_tick
     from app.services.resource_library import cross_resonance_tick
     from app.services.chain_ordering import chain_ordering_tick
@@ -629,6 +632,10 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # 远在崩溃前就有征兆 —— 属"本可以预警却没预警"的典型。角色 **both**:两端机器各有各的盘,
         # 各查自己的(不是"同一件事两边都推")。超阈值推管理员群,标题不含数字以免冷却门失效。
         (disk_guard_tick, _get_settings().disk_guard_cron, {"minute": 40, "hour": 9}, "disk_guard", "both"),
+        # 出口 IP 变化自检(2026-10-20):每 15 分钟一次,角色 both(两端各查自己的出口)。
+        # 时间避开 0/30 网格与 xunlei_group(7/27/47),见 `test_job_stagger`。
+        (network_guard_tick, _get_settings().network_guard_cron,
+         {"minute": "13,28,43,58"}, "network_guard", "both"),
         # 迅雷盘同步(2026-10-02):扫用户迅雷盘 → 新转存进来的资源自动生成我方分享链 → 入库。
         # "用口令找资源并转存"那步只有手机 App 能做(服务端搜索接口不对外 + 部分口令是群组口令),
         # 所以人工只在 App 里搜+转存,本作业接手扫盘/二次分享/入库。
