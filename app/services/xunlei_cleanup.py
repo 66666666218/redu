@@ -127,7 +127,10 @@ def plan(db: Session, user_id: int, days: int = 7, settings=None,
             return out
     parent = (xt.resolve_parent_id(cred) if cred
               else str(getattr(settings, "xunlei_transfer_parent_id", "") or ""))
-    if not parent:
+    #: ★ 新号 `xunlei#3/#4` 还没有「最全文件」目录,`resolve_parent_id` 会落根目录。
+    #: 默认号仍要求配 id(旧行为);非默认号允许扫根目录 —— 只删匹配到监控源的条目。
+    allow_root = bool(cookie_key and cookie_key not in ("", "xunlei"))
+    if not parent and not allow_root:
         out["error"] = "未配 xunlei_transfer_parent_id(不知道该扫哪个目录)"
         return out
     try:
@@ -137,6 +140,10 @@ def plan(db: Session, user_id: int, days: int = 7, settings=None,
         items = xt.list_all_files(parent, cred=cred)
     except Exception as exc:  # noqa: BLE001 - 列目录失败要给明确原因,别当"没有过期资源"
         out["error"] = f"列目录失败:{type(exc).__name__}: {str(exc)[:120]}"
+        return out
+    if not items and allow_root:
+        #: 新号根目录为空是正常状态,不是"接口失败";别把它记成错误。
+        out["note"] = "empty_root"
         return out
     if not items:
         # ⚠️ 空列表可能是"目录真空"也可能是"凭据失效/网络失败"(迅雷接口失败即返回 [])

@@ -65,13 +65,15 @@ class _FakeQuark:
 
 
 class _FakeBaidu:
-    items: list = []
+    items: list | dict = []
     deleted: list[str] = []
 
     def __init__(self, *a, **k):
         pass
 
     def list_dir(self, path):
+        if isinstance(self.items, dict):
+            return self.items.get(path, [])
         return self.items
 
     def delete_paths(self, paths, **k):
@@ -134,6 +136,24 @@ class TestBaidu:
         _FakeBaidu.deleted = []
         monkeypatch.setattr("app.services.pan_accounts.cookie_for", lambda *a, **k: "ck")
         monkeypatch.setattr("app.services.baidupan_transfer.BaiduPanClient", _FakeBaidu)
+
+    def test_批次目录只下钻不删(self, session, monkeypatch) -> None:
+        """★ 2026-10-20 干跑抓到:百度顶层是 `来自资源批量转存_*` 批次目录。
+
+        直接拿批次名匹配会**误把整批当成一个资源** ⇒ 批次目录只下钻,资源是里面的条目。
+        """
+        _source(session, "旧资源A", 5)
+        self._patch(monkeypatch, {
+            "/root": [{"server_filename": "来自资源批量转存_20261009_143619",
+                       "path": "/root/batch", "isdir": True}],
+            "/root/batch": [{"server_filename": "旧资源A",
+                             "path": "/root/batch/旧资源A", "isdir": True,
+                             "server_mtime": int(_old(10).timestamp())}],
+        })
+        p = pr.plan_baidu(session, 1, _S(), days=3)
+        assert p["stale"] == 1
+        assert p["rows"][0]["fid"] == "/root/batch/旧资源A", \
+            "不能把批次目录本身当资源"
 
     def test_默认只报告不删(self, session, monkeypatch) -> None:
         _source(session, "旧资源A", 5)

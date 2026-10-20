@@ -54,6 +54,20 @@ def _parse_ts(value: Any) -> datetime | None:
         return None
 
 
+_WEAK_NAME_PATTERNS = ("测试", "限流实验", "screenshot", "截图", "未命名", "副本", "复制")
+
+
+def _is_weak(name: str) -> bool:
+    """名字像**测试/截图/副本**的条目 ⇒ 只报告、不自动删。
+
+    ⚠️ 2026-10-20 干跑抓到:百度批次里混着 `测试组2_2026...`、夸克里有一条
+    `Screenshot_20261012_...jpg` —— 它们不是资源本体。按"监控到"匹配也许能命中,
+    但把测试残留/截图当资源删掉没有收益,风险却不小。
+    """
+    low = str(name or "").lower()
+    return any(p in low for p in _WEAK_NAME_PATTERNS)
+
+
 def _match(name: str, sources: list[tuple[str, datetime]]) -> tuple[bool, datetime | None]:
     """条目名 → (是否监控到, 最近一次被提到的时间)。"""
     from app.services import xunlei_cleanup as xc
@@ -69,13 +83,16 @@ def _match(name: str, sources: list[tuple[str, datetime]]) -> tuple[bool, dateti
 def _row(pan: str, name: str, fid_or_path: str, *, sources, now: datetime,
          days: int, updated: datetime | None, protected: bool) -> dict:
     monitored, last = _match(name, sources)
+    weak = _is_weak(name)
     if monitored and last is None:
         last = updated
     idle = (now - last).days if last else None
-    stale = bool(monitored and not protected and idle is not None and idle > days)
+    stale = bool(monitored and not protected and not weak
+                 and idle is not None and idle > days)
     return {"pan": pan, "name": name[:100], "fid": str(fid_or_path),
             "last_seen": last.isoformat()[:16] if last else "",
-            "days_idle": idle, "monitored": monitored, "protected": protected,
+            "days_idle": idle, "monitored": monitored,
+            "protected": bool(protected or weak), "weak": weak,
             "stale": stale}
 
 
@@ -165,7 +182,8 @@ def run_quark(db: Session, user_id: int, settings=None, *, days: int = 3,
     out = {"pan": "夸克", "planned": plan["stale"], "deleted": 0,
            "unmatched": plan["unmatched"], "protected": plan["protected"],
            "dry_run": dry_run, "errors": list(plan.get("errors") or []),
-           "blocked_by_cap": max(0, plan["stale"] - len(todo))}
+           "blocked_by_cap": max(0, plan["stale"] - len(todo)),
+           "items": [r["name"] for r in todo][:10]}
     if dry_run or not todo:
         return out
     ck = _A.cookie_for(db, "quark", user_id=user_id) or ""
@@ -188,7 +206,13 @@ def run_quark(db: Session, user_id: int, settings=None, *, days: int = 3,
 # ---------------------------------------------------------------- 百度
 def plan_baidu(db: Session, user_id: int, settings=None, *, days: int = 3,
                keep_shared: bool = True) -> dict:
-    """百度:**只读**列出超期资源。删除默认关闭(见 `run_baidu`)。"""
+    """百度:**只读**列出超期资源。删除默认关闭(见 `run_baidu`)。
+
+    ⚠️ **2026-10-20 干跑发现**:百度落点的顶层是 `来自资源批量转存_YYYYMMDD_HHMMSS`
+    **批次目录**,不是资源名。直接拿批次名去匹配监控源会**误把整批当成一个资源**
+    (干跑里真的匹配到了 2 个批次目录)。⇒ 批次目录**只下钻、不删**;
+    真正的资源是它里面的条目。
+    """
     from app.services import baidu_dup
     from app.services import pan_accounts as _A
     from app.services.baidupan_transfer import BaiduPanClient
@@ -198,8 +222,9 @@ def plan_baidu(db: Session, user_id: int, settings=None, *, days: int = 3,
         return {"pan": "百度", "error": "no_cookie", "rows": [], "stale": 0}
     root = (getattr(settings, "pan_auto_clean_baidu_root", "") or "").strip() \
         or baidu_dup.DEFAULT_ROOT
+    client = BaiduPanClient(ck)
     try:
-        items = BaiduPanClient(ck).list_dir(root)
+        root_items = client.list_dir(root)
     except Exception as exc:  # noqa: BLE001
         return {"pan": "百度", "error": f"列目录失败:{type(exc).__name__}: {str(exc)[:100]}",
                 "rows": [], "stale": 0}
@@ -207,17 +232,32 @@ def plan_baidu(db: Session, user_id: int, settings=None, *, days: int = 3,
     now = datetime.now()
     intro = str(getattr(settings, "pan_intro_baidu_dir", "") or "")
     rows: list[dict] = []
-    for it in items:
+    errors: list[str] = []
+
+    def _process(it: dict) -> None:
         name = str(it.get("server_filename") or "")
         path = str(it.get("path") or "")
         if not name or not path:
-            continue
+            return
         if intro and (path == intro or path.startswith(intro.rstrip("/") + "/")):
-            continue                      # 简介目录不参与
+            return                      # 简介目录不参与
         rows.append(_row("百度", name, path, sources=sources, now=now, days=days,
                          updated=_parse_ts(it.get("server_mtime") or it.get("local_mtime")),
                          protected=False))
-    return {"pan": "百度", "rows": rows, "root": root,
+
+    for it in root_items:
+        name = str(it.get("server_filename") or "")
+        path = str(it.get("path") or "")
+        #: 批次目录只下钻,绝不把整批当资源删。
+        if it.get("isdir") and name.startswith("来自资源批量转存"):
+            try:
+                for child in client.list_dir(path):
+                    _process(child)
+            except Exception as exc:  # noqa: BLE001 - 单批列不动不影响其余
+                errors.append(f"{name}:{type(exc).__name__}")
+            continue
+        _process(it)
+    return {"pan": "百度", "rows": rows, "root": root, "errors": errors,
             "stale": sum(1 for r in rows if r["stale"]),
             "unmatched": sum(1 for r in rows if not r["monitored"]),
             "protected": 0}
@@ -288,6 +328,8 @@ def retention_tick(settings=None) -> int:
                 + (f" 护{p.get('protected', 0)}" if p.get("protected") else "")
                 + (f" 错误{len(p.get('errors') or [])}" if p.get("errors") else "")
                 + (f" 原因{p.get('error')}" if p.get("error") else "")
+                + (f" 候选:{','.join((p.get('items') or [])[:5])}"
+                   if p.get("items") else "")
                 for p in parts)
             _record_run(db, uid, "pan_retention", "success", detail[:900])
             db.commit()
