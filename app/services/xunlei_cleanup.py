@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.db.models import DiscoveredPanLink, DouyinLead, XunleiGroupShare
+from app.db.models import DiscoveredPanLink, DouyinLead, WechatArticle, XunleiGroupShare
 from app.utils import get_logger
 
 logger = get_logger(__name__)
@@ -80,6 +80,15 @@ def _source_latest(db: Session, user_id: int) -> list[tuple[str, datetime | None
             .where(DiscoveredPanLink.user_id == user_id,
                    DiscoveredPanLink.found_at >= since)).all():
         out.append((_norm(title), ts))
+    #: ★ 公众号文章也是「外面有人在发」的来源(用户口径「监控到的才算」)。
+    #: 优先用发布时间;没有发布时间用入库时间。
+    for title, pub, created in db.execute(
+            select(WechatArticle.title, WechatArticle.publish_at, WechatArticle.created_at)
+            .where(WechatArticle.user_id == user_id,
+                   WechatArticle.created_at >= since)).all():
+        ts = pub or created
+        if ts and ts >= since:
+            out.append((_norm(title), ts))
     return [(k, t) for k, t in out if k]
 
 
@@ -96,22 +105,28 @@ def _parse_time(v) -> datetime | None:
 
 
 def plan(db: Session, user_id: int, days: int = 7, settings=None,
-         max_list: int = 2000) -> dict:
+         max_list: int = 2000, cookie_key: str = "") -> dict:
     """**只看不删**:算出哪些转存文件夹已过期,连"为什么"一起给出来。
 
-    返回 `{"days", "folders": [{name, id, created, last_seen, days_idle, matched_by}],
-    "stale": N, "keep": N, "scanned": N, "error": ""}`。
-
-    ⚠️ `max_list` **已不再生效**(2026-10-10 改翻页后没有"最多列几条"这个概念了);
-    保留只是为了不改调用方的签名 —— **别再照它去理解"扫了多少"**,看返回的 `scanned`。
+    ★ 2026-10-20:`cookie_key` 支持**多账号各自扫自己的落地目录** ——
+    新增的 `xunlei#3/#4` 与默认号各有各的 `parent_id`,不能拿默认号的 id 去列别人的盘。
+    空串 = 旧行为(默认账号 + `settings.xunlei_transfer_parent_id`)。
     """
     from config.settings import get_settings
 
     settings = settings or get_settings()
     from app.services import xunlei_transfer as xt
 
-    out = {"days": days, "folders": [], "stale": 0, "keep": 0, "scanned": 0, "error": ""}
-    parent = str(getattr(settings, "xunlei_transfer_parent_id", "") or "")
+    out = {"days": days, "folders": [], "stale": 0, "keep": 0, "scanned": 0,
+           "unmatched": 0, "error": "", "cookie_key": cookie_key or "xunlei"}
+    cred = None
+    if cookie_key:
+        cred = xt._credentials(cookie_key=cookie_key)
+        if not cred:
+            out["error"] = f"账号 {cookie_key} 凭据不可用"
+            return out
+    parent = (xt.resolve_parent_id(cred) if cred
+              else str(getattr(settings, "xunlei_transfer_parent_id", "") or ""))
     if not parent:
         out["error"] = "未配 xunlei_transfer_parent_id(不知道该扫哪个目录)"
         return out
@@ -119,7 +134,7 @@ def plan(db: Session, user_id: int, days: int = 7, settings=None,
         # ⚠️ **必须翻页**(2026-10-10):单页 `list_files` 在条目 >200 时会**静默只扫第一页**
         # ⇒ 过期项被判成"还新鲜"、永远清不掉,而报告看起来一切正常。
         # 落地目录实测现在 54 项(完整),但这只是"还没长到 200"而已。
-        items = xt.list_all_files(parent)
+        items = xt.list_all_files(parent, cred=cred)
     except Exception as exc:  # noqa: BLE001 - 列目录失败要给明确原因,别当"没有过期资源"
         out["error"] = f"列目录失败:{type(exc).__name__}: {str(exc)[:120]}"
         return out
@@ -137,17 +152,29 @@ def plan(db: Session, user_id: int, days: int = 7, settings=None,
         out["scanned"] += 1
         key = _norm(f.get("name"))
         created = _parse_time(f.get("created_time"))
-        last_seen, matched_by = created, "转存时间"
+        #: ★ 2026-10-20 用户口径:「**监控到的文件才适合这个规则**」。
+        #: 因此 last_seen 不再用"转存时间"兜底 —— 只有**匹配到某个监控源**才算 monitored;
+        #: 没匹配到的文件夹一律保留(它们可能是用户人工收藏/不属于本流水线)。
+        last_seen, matched_by = None, ""
         for skey, ts in sources:
             if ts and _matches(key, skey) and (last_seen is None or ts > last_seen):
                 last_seen, matched_by = ts, "外部又有人发"
+        monitored = bool(matched_by)
+        if monitored and last_seen is None:
+            #: 匹配到了但来源没有时间 ⇒ 用转存时间兜底(只在已确认监控到时)。
+            last_seen, matched_by = created, "转存时间(已匹配)"
         idle = (now - last_seen).days if last_seen else None
         row = {"name": str(f.get("name"))[:80], "id": str(f.get("id")),
                "created": created.isoformat()[:16] if created else "",
                "last_seen": last_seen.isoformat()[:16] if last_seen else "",
-               "days_idle": idle, "matched_by": matched_by}
+               "days_idle": idle, "matched_by": matched_by or "未匹配监控源",
+               "monitored": monitored}
         out["folders"].append(row)
-        if idle is None or idle > days:
+        if not monitored:
+            #: 没匹配到监控源 ⇒ **永不删**,单独计数让人看见"盘里还有一批非监控文件"。
+            out["unmatched"] += 1
+            out["keep"] += 1
+        elif idle is not None and idle > days:
             out["stale"] += 1
         else:
             out["keep"] += 1
@@ -156,18 +183,19 @@ def plan(db: Session, user_id: int, days: int = 7, settings=None,
 
 
 def run_cleanup(db: Session, user_id: int, days: int = 7, settings=None,
-                dry_run: bool = True) -> dict:
+                dry_run: bool = True, cookie_key: str = "") -> dict:
     """执行清理:**移入回收站**(不是永久删),留一条后悔路。
 
     `dry_run=True` 时只回清单不落手 —— 删盘是难逆操作,默认就该是预览。
+    `cookie_key` 非空时只清理该账号的落地目录(多账号各自扫)。
     ⚠️ `trash_files` **没有批量接口**,得逐个删;所以这里按 `max_delete` 限流,
     免得一次几百个把接口打爆。
     """
-    out = plan(db, user_id, days=days, settings=settings)
+    out = plan(db, user_id, days=days, settings=settings, cookie_key=cookie_key)
     if out.get("error"):
         return {**out, "deleted": 0, "dry_run": dry_run}
     stale = [f for f in out["folders"]
-             if f["days_idle"] is None or f["days_idle"] > days]
+             if f.get("monitored") and f["days_idle"] is not None and f["days_idle"] > days]
     limit = int(getattr(settings, "xunlei_cleanup_max_per_run", 20) or 20)
     todo = stale[:limit]
     result = {**out, "to_delete": len(stale), "deleted": 0, "errors": [],
@@ -176,9 +204,10 @@ def run_cleanup(db: Session, user_id: int, days: int = 7, settings=None,
         return result
     from app.services import xunlei_transfer as xt
 
+    cred = xt._credentials(cookie_key=cookie_key) if cookie_key else None
     for f in todo:
         try:
-            r = xt.trash_files([f["id"]])
+            r = xt.trash_files([f["id"]], cred=cred)
         except Exception as exc:  # noqa: BLE001 - 单个失败不该中断整批
             result["errors"].append(f"{f['name']}: {type(exc).__name__}")
             continue
@@ -230,6 +259,7 @@ def cleanup_tick(settings=None) -> int:
                 total += int(out.get("deleted") or 0)
                 note = (f"候选{out.get('to_delete', 0)} 移入回收站{out.get('deleted', 0)}"
                         + (f" 超限{out['skipped_by_limit']}" if out.get("skipped_by_limit") else "")
+                        + (f" 未匹配监控源{out['unmatched']}" if out.get("unmatched") else "")
                         + (f" 错误{len(out['errors'])}" if out.get("errors") else ""))
                 if out.get("error"):
                     note = f"跳过:{out['error'][:120]}"

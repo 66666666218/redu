@@ -929,7 +929,9 @@ class Settings(BaseSettings):
     # ⚠️ **默认关**:删盘难逆,先让人看过清单(`GET /api/xunlei/cleanup/plan`)再开。
     # ⚠️ 它**解决不了"盘快满"**:实测本流水线在盘里只有 ~0.9TB,配额 24TB 的大头在别处。
     xunlei_cleanup_enabled: bool = False
-    xunlei_cleanup_days: int = 7                        # 闲置超过这么多天视为过期
+    #: 2026-10-20 用户口径:「3 天内如果没人再发这个资源就可以删除了」。
+    #: ⚠️ 只删**匹配到监控源**的文件夹(见 `xunlei_cleanup.plan` 的 `monitored`)。
+    xunlei_cleanup_days: int = 3                        # 闲置超过这么多天视为过期
     xunlei_cleanup_max_per_run: int = 20                # 单轮最多移入回收站几个(接口无批量)
     xunlei_cleanup_cron: str = "34 3 * * *"             # 每天 03:30(避开 04:00 那波重活)
     # ---- 同名去重(2026-10-04,用户:"里面我发现一些重名的文件你去删除吧" + "做成定时作业")----
@@ -987,7 +989,7 @@ class Settings(BaseSettings):
     #: ⚠️ 这条不是**唯一**的安全层:删除永远**进回收站**(可捞回),且
     #: **删过东西的家立刻作废**(`drop_homes`)。TTL 放宽的是"窗口",不是"兜底"。
     pan_auto_clean_quark_ttl_hours: float = 48.0
-    pan_auto_clean_xunlei_days: int = 7            # 迅雷:闲置超过这么多天的转存视为过期
+    pan_auto_clean_xunlei_days: int = 3            # 迅雷:闲置超过这么多天的转存视为过期(用户 2026-10-20 定 3 天)
     pan_auto_clean_baidu_report: bool = True       # 百度只报告(永不自动删)
     #: 百度**跨目录重复**识别的扫描根(2026-10-16)。空 = 用 `baidu_dup.DEFAULT_ROOT`
     #: (`/redian百度转存`,即 `BaiduPanClient.transfer_and_share` 的默认落点)。
@@ -1004,6 +1006,20 @@ class Settings(BaseSettings):
     #: 清单覆盖成造出来的 `dup0.apk`**(10-18 23:40 实测发生)。测试现在传临时路径,
     #: 这里保留可配置是为了让"清单放哪"只有一个出处。
     pan_auto_clean_baidu_report_path: str = "data/pan_dedupe_baidu.json"
+    # ---- 保留期清理(2026-10-20,用户口径「3 天内没人再发就可以删」)----
+    # ⚠️ **只删匹配到监控源的文件**(公众号/抖音/群/公开平台),未匹配的永不删。
+    # 夸克/迅雷走回收站;百度默认只报告(无回收站,删了不可逆)。
+    pan_retention_enabled: bool = False          # 默认关,`.env` 显式打开
+    pan_retention_days: int = 3
+    pan_retention_dry_run: bool = True           # 先看计划,确认后再关
+    pan_retention_max_per_run: int = 50          # 单轮删除上限(夸克/百度各自)
+    #: 我方分享链 `first_fid` 指向的条目不删(删了 = 已发链接立刻失效)。
+    #: ⚠️ 只对夸克能精确映射到盘内 fid;百度分享链无法反查路径,靠 `baidu_delete` 开关把关。
+    pan_retention_keep_shared: bool = True
+    pan_retention_quark_enabled: bool = True
+    pan_retention_baidu_enabled: bool = True
+    pan_retention_baidu_delete: bool = False     # 百度无回收站 ⇒ 默认只报告
+    pan_retention_cron: str = "45 4 * * *"       # 04:45(避开 04:40 的 keyword_article;在 04:20 清理之后)
     #: ★ **网盘链路自检**(2026-10-19,用户口径「增加一道自检功能」):每天检查
     #: 清理/去重作业是否真跑、有没有静默空转、盘是否快满、资源库复用是否生效、
     #: 百度清单是否被污染。**只读**,不碰盘、不发转存请求;异常才推管理群。

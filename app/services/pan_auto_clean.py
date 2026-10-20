@@ -166,23 +166,43 @@ def clean_quark(db: Session, user_id: int, settings, *, dry_run: bool, left: int
 
 
 def clean_xunlei(db: Session, user_id: int, settings, *, dry_run: bool, left: int) -> dict:
-    """迅雷:**过期转存**清理(判据 = 7 天内没人再提到它)。返回本轮统计。"""
+    """迅雷:**过期转存**清理(判据 = N 天内没人再提到它)。返回本轮统计。
+
+    ★ 2026-10-20:按**账号池逐个扫各自的落地目录** —— 新加的 `xunlei#3/#4`
+    的 `parent_id` 与默认号不同,不能拿一个 id 去列别人的盘。
+    """
+    from app.services import pan_accounts as _A
     from app.services import xunlei_cleanup
 
-    days = int(getattr(settings, "pan_auto_clean_xunlei_days", 7) or 7)
+    days = int(getattr(settings, "pan_auto_clean_xunlei_days", 3) or 3)
     try:
-        # `run_cleanup` 自带 `xunlei_cleanup_max_per_run` 限流与 `dry_run`,不重写
-        res = xunlei_cleanup.run_cleanup(db, user_id, days=days, settings=settings, dry_run=dry_run)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("迅雷自动清理失败 %s: %s", type(exc).__name__, str(exc)[:120])
-        return {"pan": "迅雷", "state": "failed", "reason": f"{type(exc).__name__}: {str(exc)[:100]}"}
-    if res.get("error"):
-        return {"pan": "迅雷", "state": "error", "reason": str(res["error"])[:100]}
-    return {"pan": "迅雷", "state": "ok", "days": days,
-            "planned": int(res.get("to_delete") or 0), "deleted": int(res.get("deleted") or 0),
-            "blocked_by_limit": int(res.get("skipped_by_limit") or 0),
-            "dry_run": bool(res.get("dry_run")),
-            "errors": (res.get("errors") or [])[:3]}
+        refs = _A.accounts(db, "xunlei", user_id=user_id)
+    except Exception:  # noqa: BLE001 - 池读不到就退回默认账号,不挡清理
+        refs = []
+    keys = [r.cookie_key for r in refs if getattr(r, "cookie_key", "")] or [""]
+    planned = deleted = unmatched = blocked = 0
+    errors: list[str] = []
+    for key in keys:
+        try:
+            # `run_cleanup` 自带 `xunlei_cleanup_max_per_run` 限流与 `dry_run`,不重写
+            res = xunlei_cleanup.run_cleanup(
+                db, user_id, days=days, settings=settings, dry_run=dry_run,
+                cookie_key=key)
+        except Exception as exc:  # noqa: BLE001 - 单账号失败不影响其余
+            errors.append(f"{key or 'xunlei'}:{type(exc).__name__}")
+            continue
+        if res.get("error"):
+            errors.append(f"{key or 'xunlei'}:{str(res['error'])[:60]}")
+            continue
+        planned += int(res.get("to_delete") or 0)
+        deleted += int(res.get("deleted") or 0)
+        unmatched += int(res.get("unmatched") or 0)
+        blocked += int(res.get("skipped_by_limit") or 0)
+        errors.extend(f"{key or 'xunlei'}:{e}" for e in (res.get("errors") or [])[:2])
+    return {"pan": "迅雷", "state": "ok", "days": days, "accounts": len(keys),
+            "planned": planned, "deleted": deleted, "blocked_by_limit": blocked,
+            "unmatched": unmatched, "dry_run": bool(dry_run),
+            "errors": errors[:3]}
 
 
 def report_baidu(db: Session, user_id: int, settings, *, left: int = 0,
@@ -360,6 +380,10 @@ def _fmt(p: dict) -> str:
             bits.append(f"⚠️重复识别失败({str(p['dup_error'])[:40]})")
         return f"{p['pan']}**只报告(不删)** " + " | ".join(bits)
     bits = [f"扫{p.get('scanned', '-')}", f"计划{p.get('planned', 0)}"]
+    if p.get("accounts", 1) > 1:
+        bits.append(f"账号{p['accounts']}")
+    if p.get("unmatched"):
+        bits.append(f"未匹配监控源{p['unmatched']}")
     if p.get("intro_protected"):
         bits.append(f"简介护{p['intro_protected']}")
     if p.get("dry_run"):

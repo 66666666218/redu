@@ -43,17 +43,35 @@ def _folder(name: str, days_ago: int, fid: str = "") -> dict:
             "created_time": t, "size": "0"}
 
 
-def test_plan_flags_by_transfer_time_when_nobody_reposts(session, monkeypatch) -> None:
-    """没人再发 → 按**转存时间**算闲置:超过 days 天即过期。"""
+def test_plan_keeps_unmatched_folder(session, monkeypatch) -> None:
+    """★ 2026-10-20 用户口径:「**监控到的文件才适合这个规则**」。
+
+    没匹配到任何监控源的文件夹 —— 哪怕转存很久 —— **一律保留**:
+    它可能是人工收藏,或不属于本流水线。只统计 `unmatched`,绝不判 stale。
+    """
     monkeypatch.setattr(xt, "list_files", lambda *a, **k: [
         _folder("亚麻壁纸", 17), _folder("新资源A", 1)])
-    # ★ 代码现在走翻页版 `list_all_files`(2026-10-10),替身也得给
     monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: [
         _folder("亚麻壁纸", 17), _folder("新资源A", 1)])
     p = xc.plan(session, 1, days=7, settings=_S())
-    assert p["scanned"] == 2 and p["stale"] == 1 and p["keep"] == 1
-    stale = next(f for f in p["folders"] if f["name"] == "亚麻壁纸")
-    assert stale["days_idle"] >= 17 and stale["matched_by"] == "转存时间"
+    assert p["scanned"] == 2 and p["stale"] == 0 and p["keep"] == 2
+    assert p["unmatched"] == 2
+    f = next(f for f in p["folders"] if f["name"] == "亚麻壁纸")
+    assert f["monitored"] is False and f["matched_by"] == "未匹配监控源"
+
+
+def test_plan_flags_matched_folder_when_nobody_reposts(session, monkeypatch) -> None:
+    """匹配到监控源、但**最近一次提到也已超过 days 天** ⇒ 才判过期。"""
+    session.add(XunleiGroupShare(
+        user_id=1, share_id="s-old", group_id="g", title="亚麻壁纸",
+        msg_time=datetime.now() - timedelta(days=17)))
+    session.commit()
+    monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: [_folder("亚麻壁纸", 30)])
+    p = xc.plan(session, 1, days=7, settings=_S())
+    assert p["stale"] == 1
+    f = p["folders"][0]
+    assert f["monitored"] is True and f["matched_by"] == "外部又有人发"
+    assert f["days_idle"] >= 16
 
 
 def test_plan_keeps_resource_that_someone_reposted_recently(session, monkeypatch) -> None:
@@ -110,9 +128,13 @@ def test_matches_requires_min_length_to_avoid_overmatch() -> None:
 def test_run_cleanup_dry_run_never_deletes(session, monkeypatch) -> None:
     """默认只预览 —— 删盘难逆,不该被一个误点触发。"""
     called = {"n": 0}
-    monkeypatch.setattr(xt, "list_files", lambda *a, **k: [_folder("旧资源", 30)])
+    session.add(XunleiGroupShare(
+        user_id=1, share_id="s-dry", group_id="g", title="旧资源包",
+        msg_time=datetime.now() - timedelta(days=29)))
+    session.commit()
+    monkeypatch.setattr(xt, "list_files", lambda *a, **k: [_folder("旧资源包", 30)])
     # ★ 代码现在走翻页版 `list_all_files`(2026-10-10),替身也得给
-    monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: [_folder("旧资源", 30)])
+    monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: [_folder("旧资源包", 30)])
     monkeypatch.setattr(xt, "trash_files", lambda ids: called.__setitem__("n", called["n"] + 1) or {})
     out = xc.run_cleanup(session, 1, days=7, settings=_S(), dry_run=True)
     assert out["to_delete"] == 1 and out["deleted"] == 0 and called["n"] == 0
@@ -121,13 +143,18 @@ def test_run_cleanup_dry_run_never_deletes(session, monkeypatch) -> None:
 def test_run_cleanup_moves_to_trash_and_respects_limit(session, monkeypatch) -> None:
     """真执行时:走 `trash_files`(**移入回收站**,留后悔路),并按单轮上限限流。"""
     deleted: list[str] = []
+    for i, name in enumerate(("旧资源A", "旧资源B", "旧资源C")):
+        session.add(XunleiGroupShare(
+            user_id=1, share_id=f"s-limit-{i}", group_id="g", title=name,
+            msg_time=datetime.now() - timedelta(days=29)))
+    session.commit()
     monkeypatch.setattr(xt, "list_files", lambda *a, **k: [
-        _folder("旧A", 30), _folder("旧B", 30), _folder("旧C", 30)])
+        _folder("旧资源A", 30), _folder("旧资源B", 30), _folder("旧资源C", 30)])
     # ★ 代码现在走翻页版 `list_all_files`(2026-10-10),替身也得给
     monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: [
-        _folder("旧A", 30), _folder("旧B", 30), _folder("旧C", 30)])
+        _folder("旧资源A", 30), _folder("旧资源B", 30), _folder("旧资源C", 30)])
     monkeypatch.setattr(xt, "trash_files",
-                        lambda ids: deleted.extend(ids) or {"status": "ok", "deleted": len(ids)})
+                        lambda ids, **k: deleted.extend(ids) or {"status": "ok", "deleted": len(ids)})
     out = xc.run_cleanup(session, 1, days=7, settings=_S(), dry_run=False)
     assert out["to_delete"] == 3 and out["deleted"] == 2      # _S.max_per_run = 2
     assert out["skipped_by_limit"] == 1 and len(deleted) == 2
@@ -141,16 +168,51 @@ def test_run_cleanup_also_unlists_from_resource_library(session, monkeypatch) ->
     """
     from app.db.models import XunleiResource
 
-    session.add(XunleiResource(user_id=1, fid="id-旧资源", name="旧资源",
+    session.add(XunleiResource(user_id=1, fid="id-旧资源包", name="旧资源包",
                                share_url="https://pan.xunlei.com/s/DEAD", synced_at=None))
+    session.add(XunleiGroupShare(
+        user_id=1, share_id="s-unlist", group_id="g", title="旧资源包",
+        msg_time=datetime.now() - timedelta(days=29)))
     session.commit()
-    monkeypatch.setattr(xt, "list_files", lambda *a, **k: [_folder("旧资源", 30, fid="id-旧资源")])
+    monkeypatch.setattr(xt, "list_files", lambda *a, **k: [_folder("旧资源包", 30, fid="id-旧资源包")])
     # ★ 代码现在走翻页版 `list_all_files`(2026-10-10),替身也得给
-    monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: [_folder("旧资源", 30, fid="id-旧资源")])
-    monkeypatch.setattr(xt, "trash_files", lambda ids: {"status": "ok", "deleted": len(ids)})
+    monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: [_folder("旧资源包", 30, fid="id-旧资源包")])
+    monkeypatch.setattr(xt, "trash_files", lambda ids, **k: {"status": "ok", "deleted": len(ids)})
     out = xc.run_cleanup(session, 1, days=7, settings=_S(), dry_run=False)
     assert out["deleted"] == 1 and out["unlisted"] == 1
     assert session.query(XunleiResource).count() == 0
+
+
+def test_clean_xunlei_iterates_all_accounts(session, monkeypatch) -> None:
+    """★ 2026-10-20:新加的 `xunlei#3/#4` 各有各的落地目录。
+
+    `pan_auto_clean.clean_xunlei` 必须按账号池**逐个**调用 `run_cleanup`;
+    否则新号上的资源永远不会被 3 天规则扫到。
+    """
+    from app.services import pan_accounts as pa
+    from app.services import pan_auto_clean as pac
+    from app.services import xunlei_cleanup as xcl
+
+    class _R:
+        def __init__(self, key: str) -> None:
+            self.cookie_key = key
+
+    monkeypatch.setattr(pa, "accounts", lambda *a, **k: [_R("xunlei"), _R("xunlei#3")])
+    seen: list[str] = []
+
+    def _fake_run(db, uid, days, settings, dry_run, cookie_key=""):
+        seen.append(cookie_key)
+        return {"to_delete": 1, "deleted": 1, "unmatched": 0,
+                "skipped_by_limit": 0, "errors": []}
+
+    monkeypatch.setattr(xcl, "run_cleanup", _fake_run)
+
+    class _S:
+        pan_auto_clean_xunlei_days = 3
+
+    out = pac.clean_xunlei(session, 1, _S(), dry_run=False, left=0)
+    assert seen == ["xunlei", "xunlei#3"], f"没有逐账号扫:{seen}"
+    assert out["deleted"] == 2 and out["accounts"] == 2
 
 
 def test_dry_run_does_not_touch_resource_library(session, monkeypatch) -> None:

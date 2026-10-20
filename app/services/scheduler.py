@@ -510,6 +510,9 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     # 百度只报告。边界(硬上限/没扫完拒绝删/弱判据不删/我方分享链一票否决/dry-run 默认开)
     # 全在 `pan_auto_clean` 的头注里 —— 那些不是装饰,每条都对着一个踩过的坑。
     from app.services.pan_auto_clean import auto_clean_tick as pan_auto_clean_tick
+    #: 保留期清理(2026-10-20,用户口径「3 天内没人再发就删」):夸克/百度按监控源匹配,
+    #: 只删监控到的、且 N 天无人重发的资源;百度默认只报告。与 04:20 的清理错开 20 分钟。
+    from app.services.pan_retention import retention_tick as pan_retention_tick
     #: 网盘链路自检(2026-10-19,用户口径「增加一道自检功能」):只读查库/查文件,
     #: 不碰盘。异常才推管理群;正常也写一行 `runs`,别让"自检没跑"变成新的静默点。
     from app.services.pan_self_check import self_check_all_users as pan_self_check_tick
@@ -661,6 +664,11 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # 默认**关**(自动删盘不该在新部署上默认生效);`dry_run` 默认**开**(先只看数字)。
         (pan_auto_clean_tick, _get_settings().pan_auto_clean_cron, {"minute": 20, "hour": 4},
          "pan_auto_clean", "wechat"),
+        # **保留期清理**(2026-10-20):夸克/百度按「N 天无人重发」清理,**只删监控到的资源**;
+        # 夸克进回收站,百度默认只报告(无回收站)。默认 `dry_run=True`,先看计划再关。
+        # 04:45:避开 04:40 的 `keyword_article`(test_job_stagger 守着)。
+        (pan_retention_tick, _get_settings().pan_retention_cron, {"minute": 45, "hour": 4},
+         "pan_retention", "wechat"),
         # **网盘链路自检**(2026-10-19):每天 05:45 —— 在清理(04:20)、周去重(04:50)、
         # 资源存在性(05:10)之后。⚠️ **不能放 05:10**:那是 `resource_presence` 的定点
         # (它要开三个浏览器),既会被 `test_job_stagger` 拦下,真撞上也是 DB 写锁 + 浏览器争抢。
