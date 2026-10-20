@@ -517,7 +517,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     #: 不碰盘。异常才推管理群;正常也写一行 `runs`,别让"自检没跑"变成新的静默点。
     from app.services.pan_self_check import self_check_all_users as pan_self_check_tick
     #: 我方自有分享登记(2026-10-20):拉每个夸克账号创建过的分享,推送前按 pwd_id 判归属。
-    #: 每天 04:15 增量刷新;首次自动全量。⚠️ 不在推送路径里打接口(2000+ 条 / 40+ 页)。
+    #: 每天 04:15 增量刷新;首次自动全量(实测 5152 条 / 约 104 页)。⚠️ 不在推送路径里打接口。
     from app.services.pan_owned_shares import refresh_tick as pan_owned_shares_tick
     from app.services.lead_settlement import record_reminder_tick as recruit_reminder_tick
 
