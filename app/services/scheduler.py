@@ -516,6 +516,9 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     #: 网盘链路自检(2026-10-19,用户口径「增加一道自检功能」):只读查库/查文件,
     #: 不碰盘。异常才推管理群;正常也写一行 `runs`,别让"自检没跑"变成新的静默点。
     from app.services.pan_self_check import self_check_all_users as pan_self_check_tick
+    #: 我方自有分享登记(2026-10-20):拉每个夸克账号创建过的分享,推送前按 pwd_id 判归属。
+    #: 每天 04:15 增量刷新;首次自动全量。⚠️ 不在推送路径里打接口(2000+ 条 / 40+ 页)。
+    from app.services.pan_owned_shares import refresh_tick as pan_owned_shares_tick
     from app.services.lead_settlement import record_reminder_tick as recruit_reminder_tick
 
     jobs = [
@@ -674,6 +677,12 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # (它要开三个浏览器),既会被 `test_job_stagger` 拦下,真撞上也是 DB 写锁 + 浏览器争抢。
         (pan_self_check_tick, _get_settings().pan_self_check_cron, {"minute": 45, "hour": 5},
          "pan_self_check", "wechat"),
+        # **我方自有分享登记**(2026-10-20):每天 04:15 增量拉每个夸克账号的分享清单。
+        # 用途:推飞书前判「这条链是不是我们的」(多账号并集;同行转发我们的链也认得出)。
+        # ⚠️ 只认 pwd_id,不按资源名 —— 同名资源满街都是,按名字会把别人的链误判成我们的。
+        # 04:15:避开 :10(抖音线索每 4h)与 04:20 的自动清理。
+        (pan_owned_shares_tick, _get_settings().pan_owned_shares_cron,
+         {"minute": 15, "hour": 4}, "pan_owned_shares", "wechat"),
         # Telegram 频道资源源(2026-10-01):公众号之外的第二路盘链 feed。
         # 默认关闭——本机直连 t.me 不通;能出网的机器把 TG_ENABLED 打开即可(见 settings)。
         (tg_collect_tick, _get_settings().tg_cron, {"minute": "*/30"}, "tg_collect", "both"),

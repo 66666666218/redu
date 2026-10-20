@@ -654,6 +654,37 @@ class WechatPanLink(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
+class PanOwnedShare(Base):
+    """我方**各网盘账号自己创建过的分享**(2026-10-20,按账号汇总)。
+
+    用途:公众号推送前判断「这条盘链是不是我们自己发出去的」——
+    同行/对标号转发了我们的链时,文章的 `my_pan_urls` 是空的,只看它必漏。
+
+    ⚠️ **只认分享 id(pwd_id / URL),不按资源名**:同名资源满街都是,
+    同行转存后连文件名都一样;按名字判会把**别人的链**误判成我们的,
+    代价是整类文章不再推飞书(静默少推比漏判更难发现)。
+    `title` 只用于人工排查,不参与归属判断。
+    """
+
+    __tablename__ = "pan_owned_shares"
+    __table_args__ = (
+        UniqueConstraint("user_id", "platform", "pwd_id", name="uq_owned_share_pwd"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    platform: Mapped[str] = mapped_column(String(16), default="quark", index=True)
+    account_key: Mapped[str] = mapped_column(String(64), default="")   # 哪个账号创建的(多账号排障)
+    pwd_id: Mapped[str] = mapped_column(String(64), index=True)        # 分享路径段 = 归属判据
+    share_id: Mapped[str] = mapped_column(String(64), default="")      # 平台内部 share id
+    url: Mapped[str] = mapped_column(String(500), default="")          # 规范化后的分享链
+    title: Mapped[str] = mapped_column(String(500), default="")        # 仅展示/排查
+    first_fid: Mapped[str] = mapped_column(String(64), default="")
+    status: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # 平台侧创建时间
+    refreshed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
 class XunleiResource(Base):
     """迅雷网盘资源(2026-10-02):扫盘登记 + 自动生成我方分享链。
 

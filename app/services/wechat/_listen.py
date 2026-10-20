@@ -1635,6 +1635,23 @@ def _our_share_keys(session: Session, user_id: int) -> set[str]:
     return out
 
 
+def _owned_share_keys(session: Session, user_id: int) -> set[str]:
+    """`pan_owned_shares` 里登记的**我方自有分享链**(多夸克账号的并集)。
+
+    ★ 2026-10-20:用户口径「看夸克名字来分辨」—— 名字只能人工看,**判据必须是分享 id**。
+    这张表由 `pan_owned_shares.refresh` 每天 04:15 从各账号的
+    `/share/mypage/detail` 拉下来,覆盖两类 `my_pan_urls` 漏掉的:
+    **App 里手工建的分享**、**同行转发我们的链**(对方文章 `my_pan_urls` 为空)。
+    """
+    try:
+        from app.services.pan_owned_shares import owned_urls
+
+        return owned_urls(session, user_id)
+    except Exception:  # noqa: BLE001 - 登记表读不到就回落旧判据,别挡推送
+        logger.debug("读取我方自有分享登记失败,按没有处理", exc_info=True)
+        return set()
+
+
 def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[WechatArticle],
                  replacements: dict[int, list[tuple[str, str, str]]] | None = None,
                  repush: bool = False) -> int:
@@ -1666,7 +1683,7 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
         own_names = {x.strip() for x in
                      str(getattr(settings, "own_account_names", "") or "").split(",")
                      if x.strip()}
-        own_keys = _our_share_keys(session, user_id)
+        own_keys = _our_share_keys(session, user_id) | _owned_share_keys(session, user_id)
 
         def _is_ours(r: WechatArticle) -> bool:
             if replacements.get(r.id):

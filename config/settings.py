@@ -1020,6 +1020,14 @@ class Settings(BaseSettings):
     pan_retention_baidu_enabled: bool = True
     pan_retention_baidu_delete: bool = False     # 百度无回收站 ⇒ 默认只报告
     pan_retention_cron: str = "45 4 * * *"       # 04:45(避开 04:40 的 keyword_article;在 04:20 清理之后)
+    # ---- 我方自有分享登记(2026-10-20)----
+    #: 每天拉一次**每个夸克账号自己创建过的分享**(share/mypage/detail),按 `pwd_id`
+    #: 登记。推送前用它判「这条链是不是我们发出去的」—— 多账号也成立(表是并集)。
+    #: ⚠️ 不按资源名判:同名资源满街都是,会把别人的链误判成我们的(静默少推)。
+    pan_owned_shares_enabled: bool = True
+    #: 04:15 —— 在 04:20 清理之前;避开 :10(抖音线索每 4h 的定点)、
+    #: 04:40 keyword_article / 04:45 retention。首次全量约 40 秒(2000+ 条),之后增量通常 1 页。
+    pan_owned_shares_cron: str = "15 4 * * *"
     #: ★ **网盘链路自检**(2026-10-19,用户口径「增加一道自检功能」):每天检查
     #: 清理/去重作业是否真跑、有没有静默空转、盘是否快满、资源库复用是否生效、
     #: 百度清单是否被污染。**只读**,不碰盘、不发转存请求;异常才推管理群。

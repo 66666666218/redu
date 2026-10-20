@@ -365,11 +365,14 @@ def test_push_listen_skips_our_own_pan(session, monkeypatch) -> None:
     """★ 2026-10-20 用户口径:「我们发公众号的网盘资源不要推送进飞书」。
 
     判定三选一:本轮转存链 / 历史 `my_pan_urls` / 自营号且带盘链。
+    另有 **`pan_owned_shares` 登记表**(权威判据):App 里手工建的分享、
+    同行转发我们的链(`my_pan_urls` 为空)也认得出。
     命中要**盖 pushed_at**(不再补推)但不发飞书;别人的盘链照常推。
     """
     import json
 
     import app.services.feishu as feishu_mod
+    from app.db.models import PanOwnedShare
 
     ours = WechatArticle(user_id=1, title="我方资源", author="号A",
                          url="https://mp.weixin.qq.com/s/o1", source="listen",
@@ -381,10 +384,17 @@ def test_push_listen_skips_our_own_pan(session, monkeypatch) -> None:
     reposted = WechatArticle(user_id=1, title="别人转发我方链", author="号C",
                              url="https://mp.weixin.qq.com/s/o3", source="listen",
                              pan_urls="https://pan.quark.cn/s/OUR", my_pan_urls="")
+    #: 只靠登记表才认得出的那种:链是我们手工建的,全库任何文章都没转过,
+    #: 转发者文章 `my_pan_urls` 也为空 ⇒ 旧判据必漏。
+    only_registry = WechatArticle(user_id=1, title="登记表才认得出", author="号D",
+                                  url="https://mp.weixin.qq.com/s/o4", source="listen",
+                                  pan_urls="https://pan.quark.cn/s/MANUAL", my_pan_urls="")
     normal = WechatArticle(user_id=1, title="普通外号资源", author="号B",
                            url="https://mp.weixin.qq.com/s/n1", source="listen",
                            pan_urls="https://pan.baidu.com/s/OTHER", my_pan_urls="")
-    session.add_all([ours, own_acct, reposted, normal])
+    session.add_all([ours, own_acct, reposted, only_registry, normal])
+    session.add(PanOwnedShare(user_id=1, platform="quark", account_key="quark#2",
+                              pwd_id="MANUAL", url="https://pan.quark.cn/s/MANUAL"))
     session.commit()
 
     monkeypatch.setattr(feishu_mod, "webhook_for",
@@ -404,19 +414,22 @@ def test_push_listen_skips_our_own_pan(session, monkeypatch) -> None:
 
     monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
     out = wechat_monitor._push_listen(session, 1, _settings(),
-                                      [ours, own_acct, reposted, normal])
+                                      [ours, own_acct, reposted, only_registry, normal])
 
     blob = json.dumps(cards, ensure_ascii=False)
     assert "我方资源" not in blob and "自营号资源" not in blob, \
         "我方网盘/自营号资源不该进飞书"
     assert "别人转发我方链" not in blob, "别人转发我们的链也算我方盘,不该推"
+    assert "登记表才认得出" not in blob, "登记表里的分享链(手工建的)不该推"
     assert "普通外号资源" in blob, "别人的盘链照常推"
     assert out == 1
     session.refresh(ours)
     session.refresh(own_acct)
     session.refresh(reposted)
+    session.refresh(only_registry)
     assert (ours.pushed_at is not None and own_acct.pushed_at is not None
-            and reposted.pushed_at is not None), \
+            and reposted.pushed_at is not None
+            and only_registry.pushed_at is not None), \
         "跳过也要盖 pushed_at,否则 repush 每轮重试"
 
 

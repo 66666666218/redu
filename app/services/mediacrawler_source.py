@@ -150,23 +150,28 @@ def _write_config(keywords: list[str], cookie: str = "") -> None:
     而失败长得像"接口挂了"),而 cookie 存进 `.env` 之后它和其他平台凭据一样可管理、
     可验活、失效能报警。
 
-    ⚠️ **值一律用 `repr()`**(2026-10-19):抖音的完整 jar 有 53 个 cookie、5000+ 字符,
-    里面可能出现引号/反斜杠 —— 手工拼 `COOKIES = "…"` 会把配置文件写坏,
-    而下一轮只会报一个莫名其妙的语法错。`repr()` 同时保留 emoji,不会再触发 GBK 问题。
+    ⚠️ **值一律用 `json.dumps`**(2026-10-19 首版用 `repr()`,2026-10-20 订正):抖音的
+    完整 jar 有 53 个 cookie、5000+ 字符,里面可能出现引号/反斜杠 —— 手工拼
+    `COOKIES = "…"` 会把配置文件写坏,而下一轮只会报一个莫名其妙的语法错。
+    `json.dumps` 与 `repr()` 一样能安全转义、保留 emoji,但输出**双引号**(与文件原有
+    写法一致,测试也按这个形状断言);`repr()` 会写成单引号,虽然 Python 能读,
+    却让「原样保留其余行」与「改写行」看起来像两种方言。
     """
     text = CONFIG.read_text(encoding="utf-8")
     kw = ",".join(k.strip() for k in keywords if k.strip())
     lt = "cookie" if cookie else "qrcode"
+    def _s(v: str) -> str:
+        return json.dumps(v, ensure_ascii=False)
     out = []
     for line in text.splitlines():
         if line.startswith("KEYWORDS = "):
-            line = f"KEYWORDS = {kw!r}"
+            line = f"KEYWORDS = {_s(kw)}"
         elif line.startswith("SAVE_DATA_OPTION = "):
             line = 'SAVE_DATA_OPTION = "jsonl"'
         elif line.startswith("LOGIN_TYPE = "):
-            line = f"LOGIN_TYPE = {lt!r}"
+            line = f"LOGIN_TYPE = {_s(lt)}"
         elif line.startswith("COOKIES = "):
-            line = f"COOKIES = {cookie!r}"
+            line = f"COOKIES = {_s(cookie)}"
         out.append(line)
     CONFIG.write_text("\n".join(out) + "\n", encoding="utf-8")
 
