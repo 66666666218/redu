@@ -61,7 +61,8 @@ class _FakeQuark:
 
     def delete_files(self, fids, *, to_recycle=True):
         self.deleted.extend(fids)
-        return {"deleted": len(fids), "status": "ok"}
+        #: 真实形状是 `{"ok","message","count"}`(2026-10-20 第一次真删踩到)
+        return {"ok": True, "message": "已移入回收站", "count": len(fids)}
 
 
 class _FakeBaidu:

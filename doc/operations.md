@@ -835,6 +835,8 @@ print(sorted(j.id for j in s.get_jobs()))"
 - **夸克/百度**:新作业 `pan_retention`(每天 04:45)。
   `PAN_RETENTION_DRY_RUN=true` 先看计划;`KEEP_SHARED=true` 保护我方分享链 `first_fid`
   (仅夸克能精确映射);百度无回收站,`PAN_RETENTION_BAIDU_DELETE=false` **默认只报告**。
+  ★ **本机 2026-10-20 已按用户口径切真删**:`DRY_RUN=false`、百度 `BAIDU_DELETE=true`;
+  `KEEP_SHARED=true` 仍护住 546 个夸克条目;百度单轮 500(4394 条积压约 9 天清完)。
 - **判据单一出处**:复用 `xunlei_cleanup` 的 `_norm` / `_matches` / `_source_latest`,
   来源含公众号、抖音线索、迅雷群、公开平台发现链。
 - **干跑实测(2026-10-20)**:夸克 计划 7 / 未匹配 482 / 护 541;百度 计划 2 / 未匹配 52。

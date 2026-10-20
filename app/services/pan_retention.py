@@ -194,8 +194,12 @@ def run_quark(db: Session, user_id: int, settings=None, *, days: int = 3,
     for r in todo:
         try:
             res = qt.delete_files([r["fid"]], to_recycle=True)
-            if (res or {}).get("deleted") or (res or {}).get("status") == "ok":
-                out["deleted"] += 1
+            #: ⚠️ `QuarkTransfer.delete_files` 的真实形状是 `{"ok", "message", "count"}`;
+            #: 2026-10-20 第一次真删时这里只认 `deleted`/`status`,于是 **6 个已经删成功
+            #: 却被记成 6 个错误**(下一轮 plan 变 0 才看出来)。三种形状都认。
+            if ((res or {}).get("ok") or (res or {}).get("deleted")
+                    or (res or {}).get("status") == "ok"):
+                out["deleted"] += int((res or {}).get("count") or 1)
             else:
                 out["errors"].append(f"{r['name']}:{str((res or {}).get('message'))[:50]}")
         except Exception as exc:  # noqa: BLE001 - 单个失败不中断整批
@@ -286,10 +290,19 @@ def run_baidu(db: Session, user_id: int, settings=None, *, days: int = 3,
     if not ck:
         out["errors"] = ["no_cookie"]
         return out
-    try:
-        out["deleted"] = int(BaiduPanClient(ck).delete_paths([r["fid"] for r in todo]))
-    except Exception as exc:  # noqa: BLE001
-        out["errors"] = [f"{type(exc).__name__}: {str(exc)[:100]}"]
+    client = BaiduPanClient(ck)
+    #: 分块删:一次 500 条对百度接口太大;100 条一块,失败只影响这一块。
+    deleted = 0
+    errors: list[str] = []
+    for i in range(0, len(todo), 100):
+        chunk = [r["fid"] for r in todo[i:i + 100]]
+        try:
+            deleted += int(client.delete_paths(chunk))
+        except Exception as exc:  # noqa: BLE001 - 单块失败不挡其余
+            errors.append(f"{type(exc).__name__}: {str(exc)[:60]}")
+    out["deleted"] = deleted
+    if errors:
+        out["errors"] = errors[:5]
     return out
 
 
