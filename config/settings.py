@@ -1091,6 +1091,11 @@ class Settings(BaseSettings):
     network_guard_alert_cooldown_minutes: int = 60
     feishu_secret: str = ""         # 机器人签名校验密钥(为空则不签名)
     own_account_names: str = "天一项目拆解"  # 自营号名单(逗号分隔):飞书推送一律脱敏为「内部号」,防自营身份暴露(2026-09-29)
+    #: ★ 2026-10-20 用户口径:「以后我们发公众号的网盘资源不要推送进飞书」。
+    #: 判定(任一命中):本轮有新转存链 / 历史 `my_pan_urls` 有真实我方链 /
+    #: 作者在自营号名单且文章带盘链。命中 ⇒ 盖 `pushed_at`(不再补推)但**不发飞书**。
+    #: 置 False 可回退到"照常推"。
+    wechat_push_skip_own_pan: bool = True
     feishu_hot_rank_jump: int = 3          # 排名跳升 ≥ 该名次即实时推送
     feishu_hot_ratio: float = 0.30         # 分值环比涨幅 ≥ 该比例即实时推送
     feishu_burst_min_confidence: str = "高"  # 实时推送"预测爆发"所需最低置信度(高/中/低);中低置信只进日报与洞察、不实时推,减少噪音

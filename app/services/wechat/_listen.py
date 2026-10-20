@@ -1610,6 +1610,31 @@ def _collapse_repeats(rows: list) -> list[tuple[object, int]]:
             cur[0] = r
     return [(best[k][0], best[k][1]) for k in order]
 
+def _our_share_keys(session: Session, user_id: int) -> set[str]:
+    """本租户**已生成过的我方分享链**(URL 本体集合)。
+
+    ★ 2026-10-20 用户口径「根据网盘来判别」:别的号**转发我们的链**时，
+    该文章的 `my_pan_urls` 是空的 —— 只看 `my_pan_urls` 会漏掉这种。
+    所以从全库 `my_pan_urls` 里抽出 URL 本体，和文章的 `pan_urls` 比。
+    """
+    out: set[str] = set()
+    try:
+        rows = session.execute(
+            select(WechatArticle.my_pan_urls).where(
+                WechatArticle.user_id == user_id,
+                WechatArticle.my_pan_urls != "",
+            )
+        ).scalars()
+        for blob in rows:
+            for line in (blob or "").splitlines():
+                m = _MY_LINK_RE.search(line)
+                if m:
+                    out.add(m.group(0))
+    except Exception:  # noqa: BLE001 - 判别失败就当没有(照常推),别挡推送
+        logger.debug("收集我方分享链失败,按没有处理", exc_info=True)
+    return out
+
+
 def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[WechatArticle],
                  replacements: dict[int, list[tuple[str, str, str]]] | None = None,
                  repush: bool = False) -> int:
@@ -1634,6 +1659,40 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
     if not targets:
         return 0
     replacements = replacements or {}
+    #: ★ 2026-10-20 用户口径:「我们发公众号的网盘资源不要推送进飞书」。
+    #: 判定(任一命中):本轮有新转存链 / 历史 `my_pan_urls` 有真实我方链 /
+    #: 作者在自营号名单且文章带盘链。命中 ⇒ 盖 `pushed_at`(不再补推)但**不发飞书**。
+    if getattr(settings, "wechat_push_skip_own_pan", True) and rows:
+        own_names = {x.strip() for x in
+                     str(getattr(settings, "own_account_names", "") or "").split(",")
+                     if x.strip()}
+        own_keys = _our_share_keys(session, user_id)
+
+        def _is_ours(r: WechatArticle) -> bool:
+            if replacements.get(r.id):
+                return True                       # 本轮刚转存出来的就是我们的盘
+            link, _code = _my_pan_link_from_history(r.my_pan_urls)
+            if link:
+                return True                       # 历史已持久化的我方链
+            #: 别的号转发我们的链:my_pan_urls 为空,但 pan_urls 里就是我方 share id。
+            for line in (r.pan_urls or "").splitlines():
+                m = _MY_LINK_RE.search(line)
+                if m and m.group(0) in own_keys:
+                    return True
+            has_pan = bool((r.pan_urls or "").strip() or (r.my_pan_urls or "").strip())
+            return bool(has_pan and own_names and (r.author or "") in own_names)
+
+        suppressed = [r for r in rows if _is_ours(r)]
+        if suppressed:
+            session.execute(update(WechatArticle).where(
+                WechatArticle.id.in_([r.id for r in suppressed])
+            ).values(pushed_at=datetime.now()))
+            session.commit()
+            logger.info("公众号推送:跳过 %d 篇(我方网盘资源,不推飞书):%s",
+                        len(suppressed),
+                        "、".join((r.title or "")[:18] for r in suppressed[:5]))
+            _ids = {r.id for r in suppressed}
+            rows = [r for r in rows if r.id not in _ids]
     # 免打扰过滤后可能清空(理论上上面已 return,这里再兜一层,避免推空卡)
     if not rows:
         return 0

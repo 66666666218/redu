@@ -361,6 +361,65 @@ def test_push_listen_sends_all_articles_grouped_by_account(session, monkeypatch)
     assert "📢 号A" in blob and "📢 号B" in blob
 
 
+def test_push_listen_skips_our_own_pan(session, monkeypatch) -> None:
+    """★ 2026-10-20 用户口径:「我们发公众号的网盘资源不要推送进飞书」。
+
+    判定三选一:本轮转存链 / 历史 `my_pan_urls` / 自营号且带盘链。
+    命中要**盖 pushed_at**(不再补推)但不发飞书;别人的盘链照常推。
+    """
+    import json
+
+    import app.services.feishu as feishu_mod
+
+    ours = WechatArticle(user_id=1, title="我方资源", author="号A",
+                         url="https://mp.weixin.qq.com/s/o1", source="listen",
+                         pan_urls="https://pan.quark.cn/s/src1",
+                         my_pan_urls="https://pan.quark.cn/s/OUR")
+    own_acct = WechatArticle(user_id=1, title="自营号资源", author="天一项目拆解",
+                             url="https://mp.weixin.qq.com/s/o2", source="listen",
+                             pan_urls="https://pan.quark.cn/s/src2", my_pan_urls="")
+    reposted = WechatArticle(user_id=1, title="别人转发我方链", author="号C",
+                             url="https://mp.weixin.qq.com/s/o3", source="listen",
+                             pan_urls="https://pan.quark.cn/s/OUR", my_pan_urls="")
+    normal = WechatArticle(user_id=1, title="普通外号资源", author="号B",
+                           url="https://mp.weixin.qq.com/s/n1", source="listen",
+                           pan_urls="https://pan.baidu.com/s/OTHER", my_pan_urls="")
+    session.add_all([ours, own_acct, reposted, normal])
+    session.commit()
+
+    monkeypatch.setattr(feishu_mod, "webhook_for",
+                        lambda settings, section: "https://open.feishu.cn/hook/x")
+    cards: list[dict] = []
+
+    class _FakeFeishu:
+        def __init__(self, webhook, secret="") -> None:
+            pass
+
+        def send(self, msg: str) -> bool:
+            return True
+
+        def send_card(self, card: dict) -> bool:
+            cards.append(card)
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
+    out = wechat_monitor._push_listen(session, 1, _settings(),
+                                      [ours, own_acct, reposted, normal])
+
+    blob = json.dumps(cards, ensure_ascii=False)
+    assert "我方资源" not in blob and "自营号资源" not in blob, \
+        "我方网盘/自营号资源不该进飞书"
+    assert "别人转发我方链" not in blob, "别人转发我们的链也算我方盘,不该推"
+    assert "普通外号资源" in blob, "别人的盘链照常推"
+    assert out == 1
+    session.refresh(ours)
+    session.refresh(own_acct)
+    session.refresh(reposted)
+    assert (ours.pushed_at is not None and own_acct.pushed_at is not None
+            and reposted.pushed_at is not None), \
+        "跳过也要盖 pushed_at,否则 repush 每轮重试"
+
+
 def test_push_listen_renders_my_link_with_clean_href(session, monkeypatch) -> None:
     """监听卡的网盘链接:href 必须是干净的我方转存链,提取码明文附后。
 
@@ -389,7 +448,9 @@ def test_push_listen_renders_my_link_with_clean_href(session, monkeypatch) -> No
             return True
 
     monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
-    wechat_monitor._push_listen(session, 1, _settings(), [r], replacements={
+    #: 本条测**渲染**;新规则默认会跳过我方盘,所以显式关掉过滤来测 href 写法。
+    wechat_monitor._push_listen(session, 1, _settings(wechat_push_skip_own_pan=False), [r],
+                                replacements={
         r.id: [("https://pan.quark.cn/s/RAW", "https://pan.quark.cn/s/MINE", "ab12")]})
     blob = json.dumps(cards, ensure_ascii=False)
     assert "pan.quark.cn/s/MINE)" in blob   # href 是我方干净链
@@ -2513,11 +2574,11 @@ def _fake_quark(monkeypatch, out_map: dict[str, str], calls: list) -> None:
     monkeypatch.setattr(QuarkTransfer, "transfer_and_share", _transfer)
 
 
-def test_sync_transfers_then_pushes_my_link(session, monkeypatch) -> None:
-    """同步入库 → 先夸克转存 → 再推飞书;相同盘链只保存一次、只推一篇。
+def test_sync_transfers_but_skips_our_pan_push(session, monkeypatch) -> None:
+    """同步入库 → 先夸克转存 → **我方盘资源不推飞书**(2026-10-20 新规则)。
 
-    回归:旧实现同步只入库,卡片永远等监听的下一轮才带上我的链,
-    且同资源被搬运两次就会推两张卡、转存两次。"""
+    回归:旧实现同步只入库,卡片永远等监听的下一轮才带上我的链;
+    现在转存仍然要做(资源要进我方盘),但**不再把结果推进飞书群**。"""
     import json
 
     from app.services.feishu import _md_safe
@@ -2539,11 +2600,13 @@ def test_sync_transfers_then_pushes_my_link(session, monkeypatch) -> None:
 
     st = _settings(quark_cookie="ck=x", pan_transfer_enabled=True, wechat_sync_push_limit=20)
     out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=st, platform=plat)
-    assert out["new"] == 2 and out["deduped"] == 1 and out["pushed"] == 1
+    assert out["new"] == 2 and out["deduped"] == 1
     assert calls == ["https://pan.quark.cn/s/RAW1"]      # 相同链接不再重复转存
-    blob = json.dumps(cards, ensure_ascii=False)
-    assert "pan.quark.cn/s/MINE1" in blob and "🔑ab12" in blob   # 点文章名进我的盘
-    assert f"]({_md_safe('https://pan.quark.cn/s/RAW1')}" not in blob  # 不把他人原链做成链接
+    assert cards == [], "我方盘转存后不该再推飞书"
+    arts = session.scalars(select(WechatArticle)).all()
+    assert all(a.pushed_at is not None for a in arts), \
+        "跳过的文章也要盖 pushed_at,否则补推每轮重试"
+    assert f"]({_md_safe('https://pan.quark.cn/s/RAW1')}" not in json.dumps(cards, ensure_ascii=False)
 
 
 def test_sync_push_skips_resource_already_announced(session, monkeypatch) -> None:
@@ -2614,7 +2677,8 @@ def test_sync_pushes_every_article_within_24h_regardless_of_cap(session, monkeyp
     cards: list[dict] = []
     _fake_feishu(monkeypatch, cards)
 
-    st = _settings(quark_cookie="ck=x", pan_transfer_enabled=True, wechat_sync_push_limit=2)
+    st = _settings(quark_cookie="ck=x", pan_transfer_enabled=True,
+                   wechat_sync_push_limit=2, wechat_push_skip_own_pan=False)
     out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=st, platform=plat)
     assert out["pushed"] == 4 and out["truncated"] == 4  # 近24h 4 篇全推;历史 4 篇让给窗口外
     blob = str(cards)
@@ -3442,7 +3506,9 @@ def test_repush_card_uses_history_baidu_link(session, monkeypatch) -> None:
     cards: list[dict] = []
     _fake_feishu(monkeypatch, cards)
 
-    wechat_monitor._push_listen(session, 1, _settings(), [art], replacements={})
+    #: 本条测**历史百度链的渲染**;新规则默认会跳过我方盘,显式关掉过滤。
+    wechat_monitor._push_listen(session, 1, _settings(wechat_push_skip_own_pan=False),
+                                [art], replacements={})
     blob = json.dumps(cards, ensure_ascii=False)
     assert "pan.baidu.com/s/1MineDoc" in blob          # 点「文章」那格进的是我方盘
     assert "🔑8888" in blob
@@ -3492,7 +3558,9 @@ def test_self_share_marker_stays_out_of_href(session, monkeypatch) -> None:
     _fake_feishu(monkeypatch, cards)
     session.add(art)
     session.commit()
-    wechat_monitor._push_listen(session, 1, _settings(), [art], replacements={})
+    #: 本条测**标记不粘进 href**;新规则默认会跳过我方盘,显式关掉过滤。
+    wechat_monitor._push_listen(session, 1, _settings(wechat_push_skip_own_pan=False),
+                                [art], replacements={})
     blob = str(cards)
     # markdown 里 `[标题](URL)` 的 URL 到 `)` 为止:旧实现把标记留在串里 → 点开创盘打不开
     assert "https://pan.quark.cn/s/SELF)" in blob
