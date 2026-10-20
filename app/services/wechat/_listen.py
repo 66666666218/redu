@@ -17,7 +17,7 @@ from config.settings import Settings
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 
 from sqlalchemy.exc import IntegrityError
 
@@ -826,6 +826,40 @@ def _shelf_ts_to_dt(value) -> datetime | None:
     if not 1_500_000_000 <= n <= 4_000_000_000:
         return None
     return datetime.fromtimestamp(n)
+
+
+def _needs_reads_24h(session: Session, b: WechatBenchmark, gate: dict,
+                     cutoff: datetime) -> bool:
+    """这个号近 **24h** 有没有新文?有才值得花列表额度(精确阅读数)。
+
+    ★ 2026-10-20 用户口径:「**新文优先,24 小时之内的都算新文**」。
+    判据按"最便宜 → 最贵":
+      ① 书架信号 `lastChapterCreateTime` ≥ 24h 前 ⇒ 有更新,直接查;
+      ② 信号是旧的 ⇒ 再查库(免费列表可能已经先入库);近 24h 入库/发布也算新;
+      ③ 信号缺失/认不出 ⇒ **查**(判不了就不判死 —— 宁可多一次,也别让新文永远没读数)。
+    """
+    sig = (gate or {}).get("signals", {}).get(b.weread_book_id)
+    dt = _shelf_ts_to_dt(sig)
+    if dt is not None and dt >= cutoff:
+        return True
+    if dt is None:
+        #: 书架没这个号/字段认不出 ⇒ 不能证明它旧,查一次。
+        return True
+    #: 书架说旧 ⇒ 查库兜底:免费列表/同步可能已经把新文写进来了。
+    try:
+        n = session.scalar(
+            select(func.count()).select_from(WechatArticle).where(
+                WechatArticle.benchmark_id == b.id,
+                or_(WechatArticle.publish_at >= cutoff,
+                    and_(WechatArticle.publish_at.is_(None),
+                         WechatArticle.created_at >= cutoff)),
+            )
+        ) or 0
+        return bool(n)
+    except Exception:  # noqa: BLE001 - 查库失败就保守地查(宁可多一次)
+        return True
+
+
 def _shelf_gate_plan(session: Session, user_id: int, rows: list[WechatBenchmark],
                      weread: WereadClient | None, settings: Settings) -> dict:
     """书架粗筛(降频主刀):1 次书架请求回答「哪些号自上次问到之后没有更新」。
@@ -1067,22 +1101,11 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                         _blk.strftime("%H:%M"))
     except Exception:  # noqa: BLE001 - 查不到就当没熔断(宁可多打一次,也别把整轮卡死)
         logger.debug("读共享额度熔断失败", exc_info=True)
-    # 列表额度的**轮转**:本轮只让"最久没轮到"的 `_LIST_WINDOW` 个号问
-    # `/web/mp/articles`(带精确阅读数),其余号只取 cover。挑法与批子集、排序**都无关** ——
-    # 详见 `_list_window` 上方注释。
-    # ★ **两条路各自的窗口**(2026-10-10):网页窗口受**会话额度(实测 29)**限制,
-    #   所以每轮只能问 `_LIST_WINDOW` 个号;App 路是**另一套鉴权与配额**,
-    #   再吃紧跟其后的 `wechat_listen_app_extra` 个 —— 那些号**网页吃不到**,
-    #   正是精确阅读数覆盖率只有 44% 的原因。
-    #   ⚠️ 默认 0 = **与旧行为完全一致**(App 只服务网页窗口内的号)。加量请改
-    #   `wechat_listen_app_extra` 并**盯 `runs.detail` 的 `app_fail`/`app_blocked`**。
-    _extra = int(getattr(settings, "wechat_listen_app_extra", 0) or 0)
-    # 窗口宽度 = 25 × 账号数(账号池见 `weread_accounts`);单账号时就是 25(旧行为)。
-    _web_allow, _app_extra_allow = _list_windows(
-        session, user_id, rows, extra=_extra,
-        window=(pool.window_size() if (pool is not None and len(pool) > 1) else None))
-    list_allow = _web_allow
-    app_allow = _web_allow | _app_extra_allow
+    #: ★★ 2026-10-20 **新文优先**(用户口径:「24 小时之内的都算新文」):
+    #: 列表额度不再按"轮转窗口"平均分,而是**只花在有新文的号上**。
+    #: 旧窗口(`_list_windows` / `wechat_listen_app_extra`)保留函数供体检/测试使用,
+    #: 但本轮不再用它决定"问不问列表" —— 判据见 `_needs_reads_24h`。
+    cutoff24 = datetime.now() - timedelta(hours=24)
     # **App 侧客户端**(2026-10-05):整轮只建一次;没配就 None,兜底自动跳过。
     # 兜底存在的理由:网页 `/web/mp/articles` 被账号级拦截,而它是**精确阅读数**的唯一来源
     # (见 weread_app_client.py 头注释)。不建这一步,阅读数就永远是 0。
@@ -1147,6 +1170,11 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
             used = True
             b.miss_count = (b.miss_count or 0) + 1
         elif wr_eligible:
+            #: ★ 24h 新文闸门(2026-10-20):没有新文就不花列表额度,只取 cover。
+            need_reads = _needs_reads_24h(session, b, gate, cutoff24)
+            if not need_reads:
+                wr_stats["weread_list_new_skipped"] = \
+                    wr_stats.get("weread_list_new_skipped", 0) + 1
             try:
                 weread = weread or _root.WereadClient(cookie)
                 _seen = _list_attempts(wr_stats)
@@ -1154,11 +1182,13 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                                                 stats=wr_stats, breaker=breaker,
                                                 shelf_ts=gate["signals"].get(b.weread_book_id),
                                                 banned_out=banned,
-                                                list_allow=_list_key(b) in list_allow,
+                                                #: ★ 2026-10-20 用户口径「新文优先」:
+                                                #: **有 24h 新文就查列表**(不再受轮转窗口限制);
+                                                #: 没有新文的号只取 cover —— 这是省额度
+                                                #: 的主刀,窗口只负责给"判不了/首次见到"的号兜底。
+                                                list_allow=need_reads,
                                                 app_client=app_client,
-                                                # ★ App 的窗口**比网页宽**:还包含"窗口外
-                                                # 最该被问"的那批(见 `_list_windows`)
-                                                app_allow=_list_key(b) in app_allow,
+                                                app_allow=need_reads,
                                                 pool=pool)
                 if _list_attempts(wr_stats) > _seen:
                     listed_keys.add(_list_key(b))          # 问过就记号(成败都算,见 _list_attempts)
@@ -1197,9 +1227,9 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                                                         stats=wr_stats, breaker=breaker,
                                                         shelf_ts=gate["signals"].get(b.weread_book_id),
                                                         banned_out=banned,
-                                                        list_allow=_list_key(b) in list_allow,
+                                                        list_allow=need_reads,
                                                         app_client=app_client,
-                                                        app_allow=_list_key(b) in app_allow,
+                                                        app_allow=need_reads,
                                                         pool=pool)
                         if _list_attempts(wr_stats) > _seen:
                             listed_keys.add(_list_key(b))
@@ -1366,7 +1396,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                    #   ⚠️ 单账号时这里是空串 —— detail 必须与旧版逐字一致(见 `_acct_brief`)。
                    + (f" accts={_acct}" if (_acct := _acct_brief(pool, wr_stats)) else "")
                    + f" off={wr_stats.get('weread_list_off', 0)}"
-                   f" off_with_new={off_new} skipped={wr_stats.get('weread_list_skipped', 0)})")
+                   f" off_with_new={off_new} skipped={wr_stats.get('weread_list_skipped', 0)}"
+                   f" new_skip={wr_stats.get('weread_list_new_skipped', 0)})")
     if gate["ok"]:
         # `skip` 是**计划**跳过数,`saved` 是**实际**跳过数(wr_stats 里那个计数)。
         # ⚠️ 加 `saved` 是因为 2026-10-05 审计发现 `weread_cover_shelf_skipped`
