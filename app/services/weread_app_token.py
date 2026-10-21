@@ -440,32 +440,20 @@ def refresh_with_wake(session: Session, user_id: int, *, adb: str = "",
     ⚠️ 全部尝试都失败才返回 `ok=False` —— 那时才该惊动人工。
     """
     last: dict[str, Any] = {"ok": False, "reason": "未尝试"}
-    # ★★★ **顺序在 2026-10-18 深夜第三次定稿:先纯 HTTP**。
+    # ★★★ **顺序在 2026-10-22 再改一次:模拟器在线时先走 App**。
     #
-    # 当天两次反转,把证据按时间摆清(免得下次再翻):
-    #   ① 20:16 模拟器读出 App token → `/book/articles` **60 发连打全成功**;
-    #   ② 20:46 同一账号被 80+ 发打满额度 ⇒ 之后任何 token 都回 `-2041`;
-    #   ③ 我当时据此写成「HTTP 铸的 eink token 不能用」—— **那是把额度当成了身份**;
-    #   ④ 23:45 用**正在工作的账号 2** 做干净对照:纯 HTTP 铸的 token 配 `eink` 头
-    #      ⇒ **29 篇、读数正常(200)**;同一个 token 配 `app` 头才 `-2012`(身份档不配套)。
-    #      `refreshToken` **没有轮换**。
-    # ⇒ 结论:**模拟器只在两件事上需要** ——(a) 每个账号**首次**读 `deviceId` +
-    #   `refreshToken`;(b) `refreshToken` 被吊销后重新登录再读一次。
-    #   之后纯 HTTP 就能一直铸 token,**不需要长期开着模拟器**。
-    http_reason = "未尝试(只走 App 那一路)"
-    if prefer_emulator is not True:
-        http_out = refresh_via_http(session, user_id, platform=platform)  # 自己按 eink 档验活
-        if http_out.get("ok"):
-            return http_out
-        http_reason = str(http_out.get("reason"))[:60]
-        if prefer_emulator is False:
-            return {"ok": False,
-                    "reason": f"纯 HTTP 续期未成:{http_reason} —— **需要人工**:"
-                              f"开一次雷电模拟器、确认 App 登录态,再跑 "
-                              f"`scripts/weread_app_login.py` 重取凭据"}
-        logger.info("纯 HTTP 续期未成(%s)—— 回落唤醒 App(需要模拟器)", http_reason)
-    # ② 回落:唤醒 App 重读账号库(**要模拟器开着**;没开就一定失败,这是常态不是故障)
-    if (prefer_emulator is True or emulator_ready(adb, serial=serial)):
+    # 2026-10-18 曾定成「先纯 HTTP」,依据是账号 2 上 HTTP 铸的 eink token 能拿 29 篇。
+    # 但 2026-10-22 00:40 在同一账号、同一本书上做了干净对照:
+    #   · 库里 HTTP 铸的 `eink` token ⇒ `-2012 登录超时`(换 app 头也一样);
+    #   · 模拟器里 App 签发的 token 配 `app` 头 ⇒ **27 篇、read_num 正常**。
+    #   ⇒ 至少在当前账号/接口上,**App 签发的 token 才是能用的那枚**;
+    #     HTTP 铸的 token 只能证明"认证可过"(运气好时 `-2041`),不能保证能取数。
+    # 所以:模拟器在线 ⇒ 先唤醒 App 取 App token;不在线 ⇒ 才回落纯 HTTP。
+    # `prefer_emulator=True/False` 仍然强制单走某一条(体检/排障用)。
+    http_reason = "未尝试"
+    emu_online = prefer_emulator is True or (
+        prefer_emulator is None and emulator_ready(adb, serial=serial))
+    if emu_online:
         for i in range(max(1, attempts)):
             wake_app(adb, serial=serial)
             last = refresh(session, user_id, adb=adb, serial=serial,
@@ -476,8 +464,22 @@ def refresh_with_wake(session: Session, user_id: int, *, adb: str = "",
                 return last
             logger.info("第 %d 次唤醒+重取仍无效:%s", i + 1, str(last.get("reason"))[:80])
             time.sleep(3)
-    else:
-        last = {"ok": False, "reason": "模拟器不在,而纯 HTTP 也没成"}
+        if prefer_emulator is True:
+            http_reason = "未尝试(只走 App 那一路)"
+        else:
+            logger.info("App 路未成(%s)—— 回落纯 HTTP", str(last.get("reason"))[:80])
+    elif prefer_emulator is None:
+        last = {"ok": False, "reason": "模拟器不在"}
+    if prefer_emulator is not True:
+        http_out = refresh_via_http(session, user_id, platform=platform)  # 自己按 eink 档验活
+        if http_out.get("ok"):
+            return http_out
+        http_reason = str(http_out.get("reason"))[:60]
+        if prefer_emulator is False:
+            return {"ok": False,
+                    "reason": f"纯 HTTP 续期未成:{http_reason} —— **需要人工**:"
+                              f"开一次雷电模拟器、确认 App 登录态,再跑 "
+                              f"`scripts/weread_app_login.py` 重取凭据"}
     return {"ok": False,
             # ⚠️ **全失败时必须给出"人要做的那一步"**(这条被 `test_全失败才报错并给出人工步骤` 守着):
             #    我 2026-10-11 加纯 HTTP 那条路时,把消息改成了"两条路都没成 —— …",

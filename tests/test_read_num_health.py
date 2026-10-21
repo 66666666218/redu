@@ -210,6 +210,22 @@ class TestListRotationIsTheEarlyDetector:
         assert row["level"] == ch.RED and "额度" in row["detail"], row["detail"]
         assert "窗口坏了" in row["detail"], "要说清它和「窗口坏了」不是一回事"
 
+    def test_app_err_2012_要判token失效而不是额度(self, session) -> None:
+        """★ 2026-10-22 对照:同一账号,HTTP eink token 回 -2012,模拟器 App token 拉到 27 篇
+        ⇒ `-2012` 的修法是**开模拟器重取**,不是等。"""
+        _run(session, "weread_list(ok=0 app=0 app_fail=3 app_err=-2012 off=0 skipped=20)")
+        row = ch.check_weread_list_rotation(session)[0]
+        assert row["level"] == ch.RED
+        assert "weread_app_login" in row["detail"], row["detail"]
+        assert "别等" in row["detail"], row["detail"]
+        assert "动作只有一个:等" not in row["detail"], "token 失效不能被说成额度"
+
+    def test_有读数时即使有app_err也判绿(self, session) -> None:
+        """反面对照:只要有一条路在跑,就不该因为另一个号的 -2012 判红。"""
+        _run(session, "weread_list(ok=5 app=0 app_fail=1 app_err=-2012 off=0 skipped=2)")
+        row = ch.check_weread_list_rotation(session)[0]
+        assert row["level"] == ch.GREEN
+
     def test_有一条路在跑就是绿(self, session) -> None:
         """反面对照 —— 不然它永远红,报告会被人忽略(本仓反复讲过的教训)。"""
         from app.db.models import RunRecord

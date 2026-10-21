@@ -1011,6 +1011,37 @@ print(sorted(j.id for j in s.get_jobs()))"
 > **教训**:废弃一条链时,除了删后端,还要把"读它的前端"和"描述它的文档"一起摘干净 ——
 > 2026-09-30 那次只删了后端路由,前端按钮(调一个已不存在的路由)与本节说明都留了下来。
 
+### 5d. 2026-10-22 阅读数为什么断:**模拟器里的 App token 才是能用的那枚**
+
+**对照实验(同一账号、同一本书、同一接口)**:
+
+| token 来源 | 身份档 | `/book/articles` 结果 |
+| --- | --- | --- |
+| 库里旧凭据(**纯 HTTP 铸**) | `eink` | `-2012 登录超时` |
+| 同一枚、换 `app` 头 | `app` | 仍然 `-2012` |
+| **模拟器里 App 签发** | `app` | **27 篇,`read_num` 正常** |
+
+⇒ 2026-10-18 定的「续期先纯 HTTP」**被这次对照推翻**:HTTP 只能证明"认证可过"
+(运气好时回 `-2041` 额度),**不保证能取数**。现在的顺序是
+**模拟器在线时先唤醒 App 取 App token**,不在线才回落纯 HTTP。
+
+**两种错误码的修法正相反**(运行记录现在会写 `app_err=`):
+- `-2012 / -2010` = **token / 身份档失效** ⇒ **别等**,开模拟器重取;
+- `-2041 / -2014` = **额度/端点级** ⇒ 等,重登没用。
+
+**操作**:
+```bash
+# 1) 两台实例(一个号一台;账号库在各自的模拟器里)
+"D:\leidian\LDPlayer14\ldconsole.exe" launch --index 0   # → emulator-5554(默认号)
+"D:\leidian\LDPlayer14\ldconsole.exe" launch --index 1   # → emulator-5556(第二号)
+
+# 2) 从对应实例重取 App token(会唤醒 App 刷新会话,并验活)
+python scripts/weread_app_login.py --serial emulator-5554 --key weread
+python scripts/weread_app_login.py --serial emulator-5556 --key weread#2
+```
+⚠️ 模拟器里的**微信读书 App 必须登录着**;App 长时间在后台时 `accessToken` 会失效,
+"唤醒一次"就能刷新(WAL 里才是当前值,脚本会连 `-wal` 一起拉)。
+
 ## 6. 推送重复(总群和专属群都收到)
 
 - 设计如此:公众号监听双推(专属群+总群);不想收总群可在飞书总群关闭该机器人

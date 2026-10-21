@@ -119,6 +119,7 @@ def login_and_capture(wait_s: int = 300, profile: str = "") -> tuple[str, str]:
                 print("(首屏导航异常,继续等登录):", exc, flush=True)
             token = ""
             deadline = time.time() + wait_s
+            _last_note = 0.0
             while time.time() < deadline:
                 time.sleep(3)
                 url = pg.url or ""
@@ -129,6 +130,14 @@ def login_and_capture(wait_s: int = 300, profile: str = "") -> tuple[str, str]:
                     token = m.group(1) if m else ""
                 if token:
                     break
+                #: 每 15 秒说一次"现在停在哪" —— 扫码后如果停在「请确认登录」,
+                #: 从输出就能看出来(否则只能靠猜)。
+                if time.time() - _last_note >= 15:
+                    _last_note = time.time()
+                    try:
+                        print(f"… 当前页面:{url[:80]} | {pg.title()[:24]}", flush=True)
+                    except Exception:  # noqa: BLE001 - 页面切换瞬间取标题会抛
+                        pass
             if not token:
                 raise WempError(f"等了 {wait_s} 秒仍未登录(URL 里没有 token)")
             cookie = "; ".join(f"{c['name']}={c['value']}"

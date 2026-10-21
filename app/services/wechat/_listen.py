@@ -648,6 +648,10 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
             # ⇒ 现在**失败也计数**,汇总行进 detail。
             if stats is not None:
                 stats["weread_list_app_fail"] = stats.get("weread_list_app_fail", 0) + 1
+                #: ★ **把错误码写进运行记录**(2026-10-22):`-2012`(token/身份档失效,
+                #: 该开模拟器重取)与 `-2041`(额度,该等)修法正相反,原来都只记成 `app_fail+1`。
+                if not stats.get("weread_list_app_err"):
+                    stats["weread_list_app_err"] = weread_budget.error_mark(exc)
             if not (stats or {}).get("weread_app_fail_logged"):
                 if stats is not None:
                     stats["weread_app_fail_logged"] = 1
@@ -1413,7 +1417,11 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                    # 「App 路整轮没动」与「这轮不需要问 App」看起来一模一样 ——
                    # 我们正是因此**漏看了这条路连续几周 `app=0`**。
                    f" app_fail={wr_stats.get('weread_list_app_fail', 0)}"
-                   f" app_blocked={wr_stats.get('weread_list_app_blocked', 0)}"
+                   #: ★ 首个错误码(2026-10-22):`-2012`=token/身份档失效(开模拟器重取),
+                   #: `-2041`=额度(等)。没有就不写,保持旧版 detail 逐字不变。
+                   + (f" app_err={wr_stats.get('weread_list_app_err')}"
+                      if wr_stats.get("weread_list_app_err") else "")
+                   + f" app_blocked={wr_stats.get('weread_list_app_blocked', 0)}"
                    # ★ **按账号分开记**(2026-10-18):池里"谁还能答"是"要不要再加一个号"
                    #   的唯一依据;合成一个数就又看不出是新号在扛、还是老号自己活了。
                    #   ⚠️ 单账号时这里是空串 —— detail 必须与旧版逐字一致(见 `_acct_brief`)。

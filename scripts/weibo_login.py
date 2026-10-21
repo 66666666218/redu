@@ -36,18 +36,36 @@ HOME = ("https://passport.weibo.com/sso/signin?entry=wapsso&source=wapssowb"
 _UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
        "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148")
 
+#: 验活只发**登录核心项**。⚠️ 2026-10-21 实测:档案里有几十个 cookie 时,
+#: 整条 `Cookie:` 头会把请求打回 HTML(脚本只看到 `JSONDecodeError`,像"没登录",
+#: 其实是头太长/带了无关项)。`m.weibo.cn` 判登录只看这几项。
+_CORE_COOKIES = ("SUB", "SUBP", "SSOLoginState", "XSRF-TOKEN", "SRT", "_T_WM",
+                 "WEIBOCN_FROM", "ALF", "SCF", "MQTT_SID", "MLOGIN")
 
-def _verify(cookie_blob: str) -> tuple[bool, str]:
+
+def _cookie_header(ck: dict[str, str]) -> str:
+    core = {k: v for k, v in ck.items() if k in _CORE_COOKIES}
+    use = core or ck
+    return "; ".join(f"{k}={v}" for k, v in use.items())
+
+
+def _verify(ck: dict[str, str]) -> tuple[bool, str]:
     """真问一次 `m.weibo.cn/api/config`。**只有 `data.login` 为 true 才算登录。**"""
     import requests
 
     try:
-        r = requests.get("https://m.weibo.cn/api/config", timeout=20,
+        r = requests.get("https://m.weibo.cn/api/config", timeout=20, allow_redirects=False,
                          headers={"User-Agent": _UA, "Referer": "https://m.weibo.cn/",
-                                  "Cookie": cookie_blob})
+                                  "Cookie": _cookie_header(ck)})
+        if r.status_code != 200:
+            return False, f"HTTP {r.status_code}:{(r.text or '')[:80]}"
         d = r.json()
+    except ValueError:
+        #: 非 JSON 通常是被打回登录页/风控页 —— **把状态码和片段带出来**,
+        #: 别再只写一句 `JSONDecodeError`(那会让人误判成"没登录")。
+        return False, f"非 JSON(HTTP {r.status_code}):{(r.text or '')[:100]}"
     except Exception as exc:  # noqa: BLE001 - 验活失败只影响判定
-        return False, f"校验请求异常:{type(exc).__name__}"
+        return False, f"校验请求异常:{type(exc).__name__}: {str(exc)[:70]}"
     login = bool((d.get("data") or {}).get("login"))
     return login, "服务端确认已登录" if login else "服务端说未登录(cookie 可能是旧的)"
 
@@ -62,7 +80,8 @@ def _read_cookies(profile: Path) -> dict[str, str]:
             channel="msedge", executable_path=EDGE)
         try:
             jar: list[dict] = []
-            for url in ("https://m.weibo.cn", "https://weibo.com"):
+            for url in ("https://m.weibo.cn", "https://weibo.com",
+                        "https://passport.weibo.com"):
                 try:
                     jar.extend(ctx.cookies(url))
                 except Exception:  # noqa: BLE001 - 单域取不到不影响其余
@@ -97,8 +116,13 @@ def _wait_login(profile: Path, wait_s: int) -> dict[str, str]:
                 ck = {c["name"]: c["value"] for c in ctx.cookies() if c.get("name")}
                 if "SUB" not in ck:
                     continue
-                ok, why = _verify("; ".join(f"{k}={v}" for k, v in ck.items()))
+                ok, why = _verify(ck)
                 if ok:
+                    #: ★ 扫码成功后再等 3 秒重读一次:2026-10-21 实测,
+                    #: `passport.weibo.com` 域上的 `SRT` / `MQTT_SID` 会**晚一步**落盘;
+                    #: 立刻返回会漏掉它们 ⇒ `api/config` 说登录了,而**搜索接口**回 `ok:-100`。
+                    time.sleep(3)
+                    ck = {c["name"]: c["value"] for c in ctx.cookies() if c.get("name")}
                     print(f"✓ {why}", flush=True)
                     return ck
                 print(f"… 档案里有 SUB,但{why};继续等(可能还没扫完码)", flush=True)
@@ -125,7 +149,7 @@ def main() -> int:
         print("✗ 一个 cookie 都没读到(档案可能没登录)", flush=True)
         return 1
     blob = "; ".join(f"{k}={v}" for k, v in ck.items())
-    ok, why = _verify(blob)
+    ok, why = _verify(ck)
     if not ok:
         print(f"✗ 不写库:{why}(用 --import-only 前请先在档案里登录)", flush=True)
         return 1

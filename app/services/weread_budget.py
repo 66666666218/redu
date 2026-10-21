@@ -141,6 +141,20 @@ def is_auth_error(exc: BaseException | str) -> bool:
     return any(m in text for m in AUTH_MARKS)
 
 
+def error_mark(exc: BaseException | str) -> str:
+    """取异常里**第一个已知错误码**(`-2012` / `-2041` …),取不到返回空串。
+
+    ⚠️ 给**运行记录**用(2026-10-22):原来 `runs.detail` 只有 `app_fail=N`,
+    体检看不出是**额度**(该等)还是**身份档/token 失效**(该开模拟器重取) ——
+    两件事的修法正相反,而报告长得一样。把错误码写进 detail,判据就有证据了。
+    """
+    text = str(exc or "")
+    for m in AUTH_MARKS + QUOTA_MARKS:
+        if m in text:
+            return m
+    return ""
+
+
 class Blocked(RuntimeError):
     """熔断中 —— **请求根本没发出去**。
 

@@ -1226,6 +1226,16 @@ _WEREAD_BLOCKED_ACTION = (
     "**别换账号、别换出口、别重登、别反复探测**(反复探测只会把窗口推后)。"
     "认证本身是好的(对照端点 `/web/shelf/sync` 回 200)。"
     "恢复判据**只看下一轮** `runs.detail` 的 `weread_list(ok=/app=)` 非 0。")
+#: ★ **token/身份档失效**(2026-10-22 对照定案):与"额度"是**两种修法**,不能混。
+#: 实测:同一账号、同一本书,库里 HTTP 铸的 `eink` token 回 `-2012`,
+#: 而模拟器里 App 签发的 token 配 `app` 头拉到 **27 篇** ⇒ 这条**不是等能好的**。
+_WEREAD_AUTH_ACTION = (
+    "**App token / 身份档失效**(`-2012`/`-2010`)—— **这不是额度,别等**。"
+    "2026-10-22 实测:同一账号、同一本书,库里 HTTP 铸的 `eink` token 回 `-2012`,"
+    "而模拟器里 App 签发的 token 配 `app` 头 ⇒ **27 篇、read_num 正常**。"
+    "⇒ 动作:**让雷电模拟器在线**,跑 "
+    "`scripts/weread_app_login.py --serial <实例>` 重取 App token"
+    "(续期顺序已改成**模拟器在线时先走 App**)。")
 _WEREAD_WINDOW_ACTION = (
     "**谁都没问过**(ok/app/off 全 0、App 路**一次都没被调用**(`app_fail`/`app_blocked` "
     "也是 0)、而窗口外满员)⇒ **轮转窗口坏了**(**要改代码**)。"
@@ -1258,6 +1268,14 @@ def _accounting_field(detail: str, key: str) -> int | None:
 
     m = re.search(rf"(?:^|[^0-9A-Za-z_]){re.escape(key)}=(\d+)", detail)
     return int(m.group(1)) if m else None
+
+
+def _accounting_text(detail: str, key: str) -> str:
+    """取一个**字符串型**记账字段(如 `app_err=-2012`);没有返回空串。"""
+    import re
+
+    m = re.search(rf"(?:^|[^0-9A-Za-z_]){re.escape(key)}=([^\s)]+)", detail)
+    return m.group(1) if m else ""
 
 
 def _weread_downtime_note(db) -> str:
@@ -1329,10 +1347,16 @@ def _weread_list_family(db, rounds: int = 5) -> tuple[str, str, str]:
         #: ⇒ 它 > 0 就**证明窗口非空**,那一轮不可能是「窗口坏了」。
         app_seen = ((_accounting_field(d, "app_fail") or 0)
                     + (_accounting_field(d, "app_blocked") or 0))
+        #: ★ 首个 App 错误码(2026-10-22):`-2012/-2010` = token/身份档失效,
+        #: 与 `-2041`(额度)的修法**正相反** —— 判据必须有证据,不能靠"两条路都被挡"概括。
+        app_err = _accounting_text(d, "app_err")
         shape = (f"最近一轮:网页问成 {ok} / App 问成 {app} / 被挡 {off} / 窗口外 {skipped}"
-                 f"(App 路真去问了 {app_seen} 次)")
+                 f"(App 路真去问了 {app_seen} 次)"
+                 + (f";app_err={app_err}" if app_err else ""))
         if ok + app:
             return "running", shape, _WEREAD_RUNNING_ACTION
+        if app_err in ("-2012", "-2010"):
+            return "auth", shape, _WEREAD_AUTH_ACTION
         if off:
             return "blocked", shape, _WEREAD_BLOCKED_ACTION
         # ⚠️⚠️ **2026-10-16 修:`off == 0` 就直接判「窗口坏了」是个真 bug。**
@@ -1444,6 +1468,10 @@ def check_weread_list_rotation(db, rounds: int = 3) -> list[dict]:
     if family in ("running", "window"):
         return [{"name": name, "level": GREEN if family == "running" else RED,
                  "detail": f"{shape} ⇒ {action}"}]
+    #: ★ token/身份档失效(2026-10-22):**不要**再附「断了多久、动作是等」那段 ——
+    #: 那不是额度,等不会好;附上去就把人引向"继续等"。
+    if family == "auth":
+        return [{"name": name, "level": RED, "detail": f"{shape} ⇒ {action}"}]
     #: ★ 「断了多久 / 自愈过几次」只加在**被挡**那一支 —— 那是唯一「只需等」的家族;
     #: 窗口坏了时说这句是误导(见 `_weread_downtime_note`)。
     note = _weread_downtime_note(db)
