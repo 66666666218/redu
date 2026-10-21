@@ -91,10 +91,14 @@ def create_app() -> FastAPI:
 
     _settings = get_settings()
     # 生产隐藏 /docs /openapi(完整接口清单不对外暴露);IS_DEV=true 时保留便于调试
-    _docs = None if not _settings.is_dev else "docs"
+    #: ⚠️ 路径**必须带前导 `/`**:Starlette 的 `add_route` 会断言 `path.startswith("/")`,
+    #: 写成 `"docs"` 会在 `create_app()` 里**直接抛 AssertionError**(服务根本起不来)。
+    #: 而 `IS_DEV` 的默认值就是 **true**(`.env.example` 也这么写)⇒ 任何**没显式关掉**
+    #: 的开发/新部署都会撞上(2026-10-21 在测试环境实测)。
+    _docs = None if not _settings.is_dev else "/docs"
     app = FastAPI(title="热点监控平台", version=APP_VERSION, lifespan=_lifespan,
                   docs_url=_docs, redoc_url=None,
-                  openapi_url=("openapi.json" if _settings.is_dev else None))
+                  openapi_url=("/openapi.json" if _settings.is_dev else None))
     # 漏配 DATABASE_URL 时到启动日志说清楚,避免服务照常起、直到有人点注册才 500。
     if _settings.database_url == Settings.model_fields["database_url"].default:
         from urllib.parse import urlsplit

@@ -88,6 +88,17 @@ def _commit_now(session: Session, why: str) -> None:
         # 落不下盘 = 这份转存结果白花了(下一轮会重转)。**必须显式喊一声**,
         # 不能让"转存成功"的日志成为这件事的最后一句话。
         logger.exception("转存结果落盘失败(%s)—— 这一份会丢,下一轮会重转", why)
+        #: ★★ **必须 rollback**(2026-10-21,由 `⚠️enrich_failed=PendingRollbackError` 反查):
+        #: `commit()` 失败后 SQLAlchemy 会话进入"待回滚"状态,下一个 DB 操作会抛
+        #: `PendingRollbackError` —— 那不是"这一份结果丢了",而是**整段后处理当场全废**
+        #: (回填/转存/阅读数一并不做),外面只看到一句 `enrich_failed=…`。
+        #: 实测 10-21 14:05 / 10-18 等轮次都是这个形状(根因是别人抱着 SQLite 写锁,
+        #: 见 `xunlei_cleanup.run_cleanup` 的注释)。commit 失败本来就已经没落盘,
+        #: 回滚不会再丢更多;交掉会话才能让**其余文章**继续处理。
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001 - 会话可能已关闭,回滚失败不该再抛
+            logger.debug("落盘失败后回滚会话也失败(%s)", why, exc_info=True)
 
 
 def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchmark,
@@ -349,20 +360,29 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
     transfer_rows = list(rows)
     if settings.pan_transfer_enabled and run_backfill:
         try:
-            backfill = session.scalars(select(WechatArticle).where(
-                WechatArticle.user_id == user_id, WechatArticle.pan_urls != "",
-                # ⚠️ **队列要收"能转的盘",不是"只有夸克"**(2026-10-06 扩到**百度 + 迅雷**)。
-                # 原来写死 `like("%pan.quark.cn%")` ⇒ **只带百度/迅雷链的文章永远进不了队列**,
-                # 于是它们从入库那轮起就永久停在"⏳待转存"—— 用户口径:「百度链和迅雷也需要
-                # 设置上补链」。这三条转存路径**本来就有**(下面各一段),只是队列不收它们。
-                or_(WechatArticle.pan_urls.like("%pan.quark.cn%"),
-                    WechatArticle.pan_urls.like("%pan.baidu.com/s/%"),
-                    WechatArticle.pan_urls.like("%pan.xunlei.com%")),
-                or_(WechatArticle.my_pan_urls.is_(None), WechatArticle.my_pan_urls == "")
-            ).order_by(WechatArticle.id).limit(
-                max(1, int(getattr(settings, "pan_transfer_backfill_limit", 8) or 8)))).all()
+            #: ★ **放进保存点**(2026-10-21):这里只读,失败本来靠 `except` 吞掉;
+            #: 但**裸吞 DB 异常会把会话留在"待回滚"状态** ⇒ 后面第一个查询就抛
+            #: `PendingRollbackError`,整段后处理(含转存)全废,外面只看到
+            #: `⚠️enrich_failed=PendingRollbackError`。保存点失败只撤销这一段。
+            with savepoint(session):
+                backfill = session.scalars(select(WechatArticle).where(
+                    WechatArticle.user_id == user_id, WechatArticle.pan_urls != "",
+                    # ⚠️ **队列要收"能转的盘",不是"只有夸克"**(2026-10-06 扩到**百度 + 迅雷**)。
+                    # 原来写死 `like("%pan.quark.cn%")` ⇒ **只带百度/迅雷链的文章永远进不了队列**,
+                    # 于是它们从入库那轮起就永久停在"⏳待转存"—— 用户口径:「百度链和迅雷也需要
+                    # 设置上补链」。这三条转存路径**本来就有**(下面各一段),只是队列不收它们。
+                    or_(WechatArticle.pan_urls.like("%pan.quark.cn%"),
+                        WechatArticle.pan_urls.like("%pan.baidu.com/s/%"),
+                        WechatArticle.pan_urls.like("%pan.xunlei.com%")),
+                    or_(WechatArticle.my_pan_urls.is_(None), WechatArticle.my_pan_urls == "")
+                ).order_by(WechatArticle.id).limit(
+                    max(1, int(getattr(settings, "pan_transfer_backfill_limit", 8) or 8)))).all()
         except Exception:  # noqa: BLE001 - 兜底失败不影响本轮新文
+            logger.debug("补转存队列查询失败,按空处理", exc_info=True)
             backfill = []
+            #: 保存点自己都建不起来(会话已被上游污染)时,只有整段回滚能救回可用会话。
+            if not session.is_active:
+                session.rollback()
         # 按对象身份(而非 `x not in rows`)排除重复:SQLAlchemy 实体的 == 会生成 SQL 表达式
         # 而不是布尔值,放进 in 的判断里语义含混。
         row_ids = {id(x) for x in rows}

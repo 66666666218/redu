@@ -301,6 +301,63 @@ def test_撞锁要量出等待时长_并区分两种真因(caplog) -> None:
         lg.removeHandler(h)
 
 
+def test_有待写又不给redo时不许谎报重试成功() -> None:
+    """★★ 2026-10-21:``rollback()`` 会**丢掉待提交的写**。
+
+    原实现撞锁后 rollback → 再 commit,遇到"有待写"的会话时**什么都没提交**,
+    却打印「重试成功」—— 一次静默假成功(运行记录/转存结果会无声消失)。
+    ⇒ 现在:**有待写且没给 redo ⇒ 照实抛**,绝不伪装成成功。
+    """
+    from app.db.database import commit_with_lock_report
+
+    class _WithPending:
+        def __init__(self):
+            self.calls = 0
+            self.new = [object()]        # 有待写
+
+        def commit(self):
+            self.calls += 1
+            raise RuntimeError("(sqlite3.OperationalError) database is locked")
+
+        def rollback(self):
+            pass
+
+        def connection(self):
+            raise RuntimeError("no conn")
+
+    s = _WithPending()
+    with pytest.raises(RuntimeError):
+        commit_with_lock_report(s, "测试")
+    assert s.calls == 1, "有待写时**不许**空重试(重试只会提交一个空事务)"
+
+
+def test_给了redo就回滚后重建再提交() -> None:
+    """撞锁后 rollback 丢掉待写 ⇒ **必须用 `redo` 重建**,这次重试才算数。"""
+    from app.db.database import commit_with_lock_report
+
+    class _WithPending:
+        def __init__(self):
+            self.calls = 0
+            self.new = [object()]
+
+        def commit(self):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("(sqlite3.OperationalError) database is locked")
+            self.new = []
+
+        def rollback(self):
+            self.new = []
+
+        def connection(self):
+            raise RuntimeError("no conn")
+
+    s = _WithPending()
+    redone: list[int] = []
+    assert commit_with_lock_report(s, "测试", redo=lambda: redone.append(1)) is True
+    assert s.calls == 2 and redone == [1], "回滚后要把待写重建一次再提交"
+
+
 def test_等了很久的那一档要说去找长持有者(monkeypatch, caplog) -> None:
     """反面对照:等了 ≈busy_timeout 的那种,报法必须**完全不同**(要去找长持有者),
     否则两种真因会被同一句话糊在一起,下一次又是瞎修。"""
@@ -337,3 +394,23 @@ def test_等了很久的那一档要说去找长持有者(monkeypatch, caplog) -
         lg.removeHandler(h)
     joined = chr(10).join(logs)
     assert "持有者真抱着" in joined, "等满 30 秒时必须说去找长持有者:" + joined
+
+
+def test_内存sqlite建引擎不炸(monkeypatch) -> None:
+    """★ 2026-10-21:`DATABASE_URL=sqlite://`(内存库)时 `pool_size/max_overflow` 会
+    直接 `TypeError` —— 内存库用的是 `SingletonThreadPool`,不接受 `max_overflow`。
+
+    实测:测试/临时部署用内存库时 `init_db()` 连建表都做不到(服务起不来)。
+    """
+    import app.db.database as d
+
+    monkeypatch.setattr(d, "_engine", None)
+    monkeypatch.setattr(d, "get_settings",
+                        lambda: type("S", (), {"database_url": "sqlite://"})())
+    try:
+        assert d.get_engine() is not None
+    finally:
+        d._engine = None      # 别把内存引擎留给后面的用例
+    assert d._is_memory_sqlite("sqlite://")
+    assert d._is_memory_sqlite("sqlite:///:memory:")
+    assert not d._is_memory_sqlite("sqlite:///./data/platform.db")

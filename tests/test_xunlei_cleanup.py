@@ -183,6 +183,37 @@ def test_run_cleanup_also_unlists_from_resource_library(session, monkeypatch) ->
     assert session.query(XunleiResource).count() == 0
 
 
+def test_run_cleanup_releases_write_lock_between_deletes(session, monkeypatch) -> None:
+    """★★ **每删一条就要把写事务交掉**(2026-10-21,由写事务看门狗点名)。
+
+    实测代价:10-21 04:55 这一处把 SQLite 写锁**抱了 156.4 秒**
+    (第一次 DELETE 拿到锁后,循环还要跑完一批**网络删除**才 commit);
+    期间别人的心跳 / 抢占 / 转存结果落盘等满 30 秒后成批 `database is locked`。
+
+    断言方式不是"数 commit 次数",而是**下一次网络删除开始时会话是否还在事务里** ——
+    这正是锁有没有被交掉的那个事实。
+    """
+    for i, name in enumerate(("旧资源A", "旧资源B")):
+        session.add(XunleiGroupShare(
+            user_id=1, share_id=f"s-tx-{i}", group_id="g", title=name,
+            msg_time=datetime.now() - timedelta(days=29)))
+    session.commit()
+    monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: [
+        _folder("旧资源A", 30), _folder("旧资源B", 30)])
+    in_tx_at_call: list[bool] = []
+
+    def _trash(ids, **k):
+        #: 进入一次**网络删除**时若还在事务里 ⇒ 写锁一直抱到了这里
+        in_tx_at_call.append(bool(session.in_transaction()))
+        return {"status": "ok", "deleted": len(ids)}
+
+    monkeypatch.setattr(xt, "trash_files", _trash)
+    out = xc.run_cleanup(session, 1, days=7, settings=_S(), dry_run=False)
+    assert out["deleted"] == 2, out
+    assert in_tx_at_call == [False, False], (
+        f"网络删除时仍持有写事务:{in_tx_at_call} ⇒ 别人会等满 30 秒撞锁")
+
+
 def test_clean_xunlei_iterates_all_accounts(session, monkeypatch) -> None:
     """★ 2026-10-20:新加的 `xunlei#3/#4` 各有各的落地目录。
 

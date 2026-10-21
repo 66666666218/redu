@@ -212,6 +212,10 @@ def run_cleanup(db: Session, user_id: int, days: int = 7, settings=None,
     from app.services import xunlei_transfer as xt
 
     cred = xt._credentials(cookie_key=cookie_key) if cookie_key else None
+    #: ★★ **循环开始前先交掉前面 `plan()` 留下的读事务**(2026-10-21)。
+    #: 下面每删成一条就 `commit()` 一次 —— 写锁只在这几毫秒里被拿着,
+    #: 而不是像从前那样从第一条 DELETE 一直抱到整批网络删除结束。
+    db.commit()
     for f in todo:
         try:
             r = xt.trash_files([f["id"]], cred=cred)
@@ -230,8 +234,19 @@ def run_cleanup(db: Session, user_id: int, days: int = 7, settings=None,
                     XunleiResource.user_id == user_id,
                     XunleiResource.fid == str(f["id"]))).rowcount
                 result["unlisted"] = int(result.get("unlisted", 0)) + n
+                #: ★★ **每条删完立刻提交**(2026-10-21,由写事务看门狗点名)。
+                #: 实测代价:10-21 04:55 这一处把 SQLite 写锁**抱了 156.4 秒**
+                #: (栈:`pan_auto_clean → clean_xunlei → xunlei_cleanup.run_cleanup:229`)——
+                #: 第一次 DELETE 拿到写锁后,循环还要跑完最多 20×N 个**网络删除**才 commit,
+                #: 期间别人的 `_beat` / `claim_schedule` / 转存结果落盘等满 30 秒后成批
+                #: `database is locked`;公众号那一轮还会因会话被污染而整段后处理失败。
+                #: 每条独立、且 DELETE 本身按 fid 精确、可重复执行 ⇒ 逐条提交是安全的。
+                db.commit()
             except Exception:  # noqa: BLE001 - 联动失败不该让清理算失败
                 logger.exception("清理后同步资源清单失败:%s", f["name"])
+                #: 单条失败也要 rollback:否则会话进入失败状态,后面每条都会
+                #: `PendingRollbackError`(静默丢清单同步),锁也可能继续挂着。
+                db.rollback()
         else:
             result["errors"].append(f"{f['name']}: {str((r or {}).get('message'))[:60]}")
     db.commit()

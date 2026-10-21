@@ -64,6 +64,66 @@ class TestListAllFiles:
         assert xt.list_all_files("") == []
         assert len(seen) == 1, f"空页还继续翻 = 死循环,实际发了 {len(seen)} 次"
 
+    def test_一次断连不该让整轮扫盘作废(self, monkeypatch) -> None:
+        """★★ 2026-10-21:实测 `xunlei_sync` 近 3 天 **21 轮**因**一次**
+        `ConnectionResetError(10054)` 整轮判 failed(白天成簇、晚上自愈)。
+
+        递归扫盘动辄几千个请求,任何一个抖一下就整轮作废太脆 —— 瞬时网络错误
+        要退避重试;但**凭据失效 / 业务错不许重试**(那只会白打接口)。
+        """
+        monkeypatch.setattr(xt, "_credentials", lambda *a, **k: {"access_token": "x"})
+        monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
+        monkeypatch.setattr(xt, "_fresh_cred", lambda c: c)
+        monkeypatch.setattr(xt, "_with_captcha_retry", lambda fn: fn())
+        monkeypatch.setattr(xt.time, "sleep", lambda s: None)
+        calls = {"n": 0}
+
+        def _get(url, headers=None, timeout=None, params=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise xt.requests.exceptions.ConnectionError("Connection reset by peer")
+            return _Resp({"files": [{"id": "1", "name": "a"}], "next_page_token": ""})
+
+        monkeypatch.setattr(xt.requests, "get", _get)
+        assert [f["id"] for f in xt.list_all_files("")] == ["1"]
+        assert calls["n"] == 2, "第一次断连后应当重试一次"
+
+    def test_持续断连照实抛不假装成功(self, monkeypatch) -> None:
+        """重试也有上限:**一直断就要失败**,不能吞成空列表(静默假成功的母题)。"""
+        monkeypatch.setattr(xt, "_credentials", lambda *a, **k: {"access_token": "x"})
+        monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
+        monkeypatch.setattr(xt, "_fresh_cred", lambda c: c)
+        monkeypatch.setattr(xt, "_with_captcha_retry", lambda fn: fn())
+        monkeypatch.setattr(xt.time, "sleep", lambda s: None)
+        calls = {"n": 0}
+
+        def _get(*a, **k):
+            calls["n"] += 1
+            raise xt.requests.exceptions.ConnectionError("down")
+
+        monkeypatch.setattr(xt.requests, "get", _get)
+        with pytest.raises(xt.XunleiDriveError):
+            xt.list_all_files("")
+        assert calls["n"] == xt._TRANSIENT_ATTEMPTS, f"重试次数不对:{calls['n']}"
+
+    def test_凭据失效不重试(self, monkeypatch) -> None:
+        """401/403 属于"重试也没用",必须**一次就抛**。"""
+        monkeypatch.setattr(xt, "_credentials", lambda *a, **k: {"access_token": "x"})
+        monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
+        monkeypatch.setattr(xt, "_fresh_cred", lambda c: c)
+        monkeypatch.setattr(xt, "_with_captcha_retry", lambda fn: fn())
+        monkeypatch.setattr(xt.time, "sleep", lambda s: None)
+        calls = {"n": 0}
+
+        def _get(*a, **k):
+            calls["n"] += 1
+            return _Resp({"error": "forbidden"}, status=403)
+
+        monkeypatch.setattr(xt.requests, "get", _get)
+        with pytest.raises(xt.XunleiDriveError):
+            xt.list_all_files("")
+        assert calls["n"] == 1, f"403 被重试了 {calls['n']} 次"
+
     def test_撞翻页上限要留痕(self, monkeypatch, caplog) -> None:
         """⚠️ **绝不能让"没列完"和"列完了"长得一样** —— 撞上限必须 warning。"""
         import logging

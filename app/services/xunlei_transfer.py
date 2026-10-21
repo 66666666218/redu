@@ -373,6 +373,41 @@ def _with_captcha_retry(fn, cred: dict | None = None):
     raise RuntimeError("unreachable")
 
 
+#: 网络层瞬时错误的重试次数。**只重试"重试有意义"的那几类**:
+#: `ConnectionReset` / 超时 / 5xx —— 凭据失效(401/403)、captcha 耗尽、业务错一律照实抛。
+_TRANSIENT_ATTEMPTS = 3
+
+
+def _with_transient_retry(fn, what: str = "请求"):
+    """跑 `fn()`;遇到**瞬时网络错误**退避重试(最多 `_TRANSIENT_ATTEMPTS` 次)。
+
+    ★ 2026-10-21:实测 `xunlei_sync` 近 3 天有 21 轮因**一次** `ConnectionResetError(10054)`
+    整轮判 failed(白天成簇出现、晚上自愈),而下一轮往往就好了 —— 一次读完几千个目录的
+    递归扫描里,任何一个请求抖一下就整轮作废太脆。这里只对"重试一次大概率就过"的错误
+    兜底,并且**把重试写进日志**(不会把持续故障伪装成正常)。
+
+    ⚠️ 别把 `XunleiDriveError` 一刀切重试:它同时承载 401/403(凭据失效)与业务错误,
+    那类重试只会白打接口。只有 `HTTP 5xx` 才当瞬时故障。
+    """
+    last: Exception | None = None
+    for attempt in range(_TRANSIENT_ATTEMPTS):
+        try:
+            return fn()
+        except XunleiDriveError as exc:
+            if not str(exc).startswith("HTTP 5"):
+                raise
+            last = exc
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+            last = exc
+        if attempt + 1 < _TRANSIENT_ATTEMPTS:
+            delay = float(2 ** attempt)
+            logger.warning("迅雷%s瞬时失败(%s),%.0fs 后重试(%d/%d)",
+                           what, type(last).__name__, delay, attempt + 1, _TRANSIENT_ATTEMPTS)
+            time.sleep(delay)
+    assert last is not None
+    raise last
+
+
 # ---------------------------------------------------------------- captcha 自续
 # ⚠️ **2026-10-02 修正一条旧结论**:此前记的是"captcha_token 自取不行",错的 —— 那次
 # 是拿 **android 盐值**去算 **web client_id** 的签名。用 android 身份(我们本来就是拿
@@ -967,7 +1002,7 @@ def list_files(parent_id: str = "", cred: dict | None = None, limit: int = 200,
         return files if include_trashed else [f for f in files if not f.get("trashed")]
 
     try:
-        return _with_captcha_retry(_once, cred)
+        return _with_transient_retry(lambda: _with_captcha_retry(_once, cred), "列目录")
     except XunleiDriveError:
         raise
     except Exception as exc:  # noqa: BLE001 - 包成自己的异常类型,好让调用方区分
@@ -1010,7 +1045,7 @@ def list_all_files(parent_id: str = "", cred: dict | None = None, page_size: int
                 raise XunleiDriveError(f"HTTP {r.status_code}: {str(data)[:120]}")
             return data
         try:
-            data = _with_captcha_retry(_once)
+            data = _with_transient_retry(lambda: _with_captcha_retry(_once), "翻页列目录")
         except XunleiDriveError:
             raise
         except Exception as exc:  # noqa: BLE001

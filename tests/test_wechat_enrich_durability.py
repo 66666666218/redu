@@ -289,3 +289,27 @@ class TestChosenPan:
         assert len(_rows_for("quark", rows)) == 1
         assert len(_rows_for("xunlei", rows)) == 1, "夸克那篇不该再进迅雷块(否则又各存一份)"
         assert _rows_for("baidu", rows) == []
+
+
+def test_commit_now_失败后必须回滚会话() -> None:
+    """★★ 2026-10-21:提交撞锁后不 rollback 会把**整段后处理**带崩。
+
+    实测形状:`_commit_now` 的 `session.commit()` 撞锁被吞掉(只写一行日志),
+    但会话从此进入"待回滚"状态 ⇒ 后面第一个查询抛 `PendingRollbackError`
+    ⇒ `_listen.py` 把它记成 `⚠️enrich_failed=PendingRollbackError`,
+    回填/转存/阅读数**一并不做**。commit 已经失败、本来就没落盘,
+    回滚不会再丢更多;交掉会话才能让其余文章继续处理。
+    """
+    class _S:
+        def __init__(self) -> None:
+            self.rolled = 0
+
+        def commit(self) -> None:
+            raise RuntimeError("(sqlite3.OperationalError) database is locked")
+
+        def rollback(self) -> None:
+            self.rolled += 1
+
+    s = _S()
+    EN._commit_now(s, "测试")           # 不抛:这一份结果丢了,但不能拖垮整轮
+    assert s.rolled == 1, "提交失败后必须 rollback,否则下一个 DB 操作就是 PendingRollbackError"

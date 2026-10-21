@@ -10,7 +10,7 @@ import os
 import threading
 import time
 import traceback
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -37,7 +37,8 @@ _SELF_FRAME = os.path.join("app", "db", "database.py")
 WRITE_TX_WARN_SEC = 20.0
 
 
-def commit_with_lock_report(session, what: str = "", retries: int = 1) -> bool:
+def commit_with_lock_report(session, what: str = "", retries: int = 1,
+                            redo: Callable[[], None] | None = None) -> bool:
     """提交;撞锁时**量出等了多久**、报现场,并**重试一次**。返回是否成功。
 
     ⚠️⚠️ **为什么要量"等了多久"**(2026-10-09):这能一刀切开两种完全不同的真因 ——
@@ -52,6 +53,15 @@ def commit_with_lock_report(session, what: str = "", retries: int = 1) -> bool:
 
     **重试为什么是合理的、不是掩盖**:这类锁是**事务级的瞬时冲突**,换一个新事务通常就能过
     (重试后仍失败会照实往上抛)。**日志里会明写"重试成功/仍失败"**,不会把问题藏起来。
+
+    ★★★ **2026-10-21:``redo`` 不是可选项,而是重试能否成立的先决条件**。
+    ``rollback()`` 会**丢弃待提交的写** —— 原来这里 rollback 完直接再 commit,
+    遇到"有待写"的会话时**什么都没提交,却打印"重试提交成功"**(静默假成功)。
+    ⇒ 现在的规则:
+      · 传了 ``redo``:回滚后调它把待写**重新做一遍**,再提交;
+      · 没传、且会话**确实有待写**(new/dirty/deleted):不重试,照实抛 ——
+        宁可让调用方看见失败,也不许报一个空提交的成功;
+      · 没传、也没有待写:重试是安全的(只是重新提交一个空事务)。
     """
     import time as _t
 
@@ -76,8 +86,20 @@ def commit_with_lock_report(session, what: str = "", retries: int = 1) -> bool:
                        "持有者只需抱一瞬** —— 看门狗看不到它正是必然" % dt)
             logger.error("SQLite 撞锁(%s):%s · %s", what or "?", verdict,
                          lock_diagnostics(session))
+            #: ⚠️ 判断"有没有待写"必须在 rollback **之前** —— 回滚会把这些状态清空。
+            pending = bool(getattr(session, "new", ()) or getattr(session, "dirty", ())
+                           or getattr(session, "deleted", ()))
             session.rollback()
             if attempt >= retries:
+                raise
+            if redo is not None:
+                redo()
+            elif pending:
+                logger.error(
+                    "SQLite 撞锁(%s):**放弃重试** —— 会话里还有待提交的写,"
+                    "而重试前必须先 rollback(会把它们丢掉)。请给 "
+                    "commit_with_lock_report 传 `redo` 重建这批写,"
+                    "否则「重试成功」只是一次空提交。", what or "?")
                 raise
             _t.sleep(0.5)
     return False
@@ -267,6 +289,16 @@ _engine = None
 _SessionLocal: sessionmaker[Session] | None = None
 
 
+def _is_memory_sqlite(url: str) -> bool:
+    """这个 SQLite URL 是不是**内存库**(`sqlite://` / `sqlite:///:memory:`)。
+
+    内存库由 SQLAlchemy 选 `SingletonThreadPool`,它与文件库的 `QueuePool` 参数集不同
+    (尤其**不接受 `max_overflow`**),所以建引擎前必须先分清。
+    """
+    rest = str(url or "").split("://", 1)[1] if "://" in str(url or "") else ""
+    return (not rest.strip("/")) or rest.startswith("/:memory:") or rest.startswith(":memory:")
+
+
 def get_engine():
     """延迟创建并缓存 SQLAlchemy 引擎。"""
     global _engine
@@ -283,6 +315,13 @@ def get_engine():
             # SQLite 本地部署:开启 WAL(读写不互斥)+ busy_timeout(写锁冲突时等待
             # 而非立即抛 database is locked——白天高峰 collect_tick 连续 4 分钟
             # 撞锁的 2026-09-19 实战)。MySQL 无此问题(行锁)。
+            if _is_memory_sqlite(url):
+                #: ★ 内存库(`sqlite://` / `sqlite:///:memory:`)用的是
+                #: **SingletonThreadPool**,它**不接受 `max_overflow`** ——
+                #: 传了就是 `TypeError: Invalid argument(s) 'max_overflow'`
+                #: (2026-10-21 实测:测试/临时部署用内存库时服务连建表都做不到)。
+                #: 内存库本来也没有"连接池溢出"这回事,去掉即可。
+                engine_kwargs.pop("max_overflow", None)
             engine_kwargs["connect_args"] = {"timeout": 30}  # sqlite3 busy_timeout 秒
             _engine = create_engine(url, **engine_kwargs)
 

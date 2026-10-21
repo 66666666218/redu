@@ -786,8 +786,12 @@ def presence_tick(settings=None, platforms: list[str] | None = None) -> int:
                 # ★ 用**会量等待时长**的提交(2026-10-09):撞锁时它会报"等了多久",
                 #   那能一刀切开「持有者真抱了 30 秒」与「这是不遵守 busy_timeout 的那类锁」——
                 #   我们过去三次撞锁**从没量过这个数**,才会在"看门狗不响"上自相矛盾一整天。
-                #   它还会**重试一次**(瞬时冲突换个新事务通常就过;重试仍失败会照实抛)。
-                commit_with_lock_report(db, "跨平台热度(resource_presence)")
+                #   ★★ 2026-10-21:`redo` 必传 —— 撞锁后它要先 rollback 才能重试,而 rollback
+                #   会丢掉上面 `_record_run` 那行；不重建就是「重试成功」的空提交
+                #   (运行记录静默消失)。这个 lambda 在重试前把同一条记录重新放回会话。
+                commit_with_lock_report(
+                    db, "跨平台热度(resource_presence)",
+                    redo=lambda: _record_run(db, uid, "resource_presence", "success", note))
             except Exception as exc:  # noqa: BLE001 - 单用户失败不影响其余
                 db.rollback()
                 logger.exception("跨平台热度失败 user=%s", uid)
