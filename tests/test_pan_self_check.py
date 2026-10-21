@@ -150,3 +150,50 @@ class TestRunChecks:
         out = psc.run_checks(None, 1, _S())
         # `_check_run_detail` 对 3 个作业各调一次(3 个 warn)+ 1 个 error = 4 项
         assert out["status"] == "error" and len(out["warnings"]) == 4
+
+
+class TestQuotaPool:
+    """盘容量判据:**看池里最空的号**,不是全池最满的那个(2026-10-21)。"""
+
+    def _patch(self, monkeypatch, by_platform: dict) -> None:
+        from app.services import pan_accounts as pa
+
+        def fake_accounts(db, platform, *, user_id=1):
+            return by_platform.get(platform, [])
+
+        monkeypatch.setattr(pa, "accounts", fake_accounts)
+        monkeypatch.setattr(psc, "_probe_ratio", lambda *a, **k: None)
+
+    def test_有空号时不该报盘满(self, monkeypatch) -> None:
+        from app.services.pan_accounts import AccountRef
+
+        self._patch(monkeypatch, {"xunlei": [
+            AccountRef("xunlei#2", "xunlei", "xunlei#2", last_ratio=102.5343),
+            AccountRef("xunlei#3", "xunlei", "xunlei#3", last_ratio=0.097),
+            AccountRef("xunlei#4", "xunlei", "xunlei#4", last_ratio=0.048),
+        ]})
+        out = psc._check_quota(None, 1)
+        assert out["level"] == "ok"
+        assert "xunlei#4" in out["detail"] and "停摆" not in out["detail"]
+        #: 免费小号仍要留痕,但它只是附注、不是告警
+        assert "xunlei#2" in out["detail"] and "不可用" in out["detail"]
+
+    def test_全满才报错(self, monkeypatch) -> None:
+        from app.services.pan_accounts import AccountRef
+
+        self._patch(monkeypatch, {"baidupan": [
+            AccountRef("百度2", "baidupan", "baidupan", last_ratio=0.9999),
+            AccountRef("百度3", "baidupan", "baidupan#2", last_ratio=0.995),
+        ]})
+        out = psc._check_quota(None, 1)
+        assert out["level"] == "error" and "所有号" in out["detail"]
+
+    def test_全在95以上但没到99算警告(self, monkeypatch) -> None:
+        from app.services.pan_accounts import AccountRef
+
+        self._patch(monkeypatch, {"baidupan": [
+            AccountRef("百度2", "baidupan", "baidupan", last_ratio=0.999),
+            AccountRef("百度3", "baidupan", "baidupan#2", last_ratio=0.97),
+        ]})
+        out = psc._check_quota(None, 1)
+        assert out["level"] == "warn" and "所有号" in out["detail"]

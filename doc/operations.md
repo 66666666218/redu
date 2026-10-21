@@ -496,9 +496,17 @@ TG_LIMIT=30                      # 单频道每轮取最近几条
 **录入(自带探针,当场告诉你行不行)**:
 ```bash
 cd /d/code/redian
+# 推荐:开浏览器扫码,自动抓 cookie/token(2026-10-21 加)
+python scripts/wemp_cred.py --login
+# 也可以手动复制
 python scripts/wemp_cred.py --cookie "<整条Cookie>" --token "<token>"
 python scripts/wemp_cred.py --check          # 以后想确认还能不能用
 ```
+
+> 📌 **「自研」自研的是客户端,不是认证**(2026-10-21 用户问)。`wemp_client` 直连
+> `appmsgpublish`,不再依赖 WeRSS 那个开源项目;但**后台会话仍要运营者用微信扫码换一次**
+> —— 微信没有给我们别的入口。`--login` 就是把「扫码」和「自动抓 cookie/token」接起来,
+> 省掉 F12 手抄。
 
 探针结果三种,含义明确:
 - `✓ 探针成功:拿到 N 篇` → 凭据有效,下一轮监听(4/8/14/20 点)自动走 ⓪ 分支
@@ -895,6 +903,19 @@ print(sorted(j.id for j in s.get_jobs()))"
 不在推送路径里打接口。单账号拉取失败只记 `errors`,不拖垮其它账号。
 41017 本身已经落在文章的 `my_pan_urls` 里(同一 URL 会进 `_our_share_keys`),
 登记表次日刷新会把它并入;`record_owned` 保留给脚本/手工补登记。
+
+### 4t. 凭据/清理的四个一键脚本(2026-10-21)
+
+| 场景 | 命令 | 说明 |
+| --- | --- | --- |
+| 微博登录态失效(`ok:-100` / 重定向登录页) | `python scripts/weibo_login.py` | 开 Edge 扫码;写库前**真问** `m.weibo.cn/api/config` 的 `data.login`,防「档案里有死 SUB」的假绿灯 |
+| 公众号后台凭据(自研 Wemp) | `python scripts/wemp_cred.py --login` | 扫码后自动抓 cookie/token 并存入加密库(见 §4i) |
+| **抖音第二个号**(多账号轮换) | `python scripts/douyin_account_add.py --key douyin#2` | 开**新档案**登录第二个号;抖音 `verify_check` 按账号下发,一个号被风控时 `douyin_leads` 会自动换下一个号 |
+| 百度重复副本清理 | `python scripts/baidu_dedupe.py`(只读清单)<br>`python scripts/baidu_clean_apply.py`(默认 dry-run)<br>`python scripts/baidu_clean_apply.py --yes --max 200` | ⚠️ **百度没有回收站,删了不可逆**;`keep` 那份永不删。2026-10-21 实测盘 **99.95% / 仅剩 2.75 GiB**,28 条候选卡在 `-32` |
+
+> **抖音为什么需要第二个号**:`verify_check` 是服务端按**账号/会话**下发的,单账号撞上后
+> 只能等(6h 冷却),而浏览器兜底用的还是**同一个号**。冷却已改成**按账号存**,
+> 第二个号被风控不会连累第一个。没有第二个号时,协议路一被风控就只剩「等 + 低频浏览器」。
 
 ## 5. 阅读量显示 "—"
 

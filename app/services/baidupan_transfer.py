@@ -317,8 +317,21 @@ class BaiduPanClient:
         uk = grab("share_uk") or grab("uk")
         shareid = grab("shareid")
         bdstoken = grab("bdstoken")
-        m = re.search(r'"file_list":\s*(\[[^\]]*\])', html, re.S)
-        files = json.loads(m.group(1)) if m else []
+        # ⚠️ **不能再用 `r'"file_list":\s*(\[[^\]]*\])'`**(2026-10-21 修)。
+        # 那个字符类遇到**嵌套数组**(`thumbs`/`file_list` 里的子项)或字符串里的 `]`
+        # 就**提前截断**,`json.loads` 抛 `Unterminated string starting at: …`。
+        # 实测代价:积压里 12 条贴吧链**每轮都失败**,错误文案正是这一句,
+        # 被当成"链坏了",其实是**我们自己的正则切歪了**。
+        # `raw_decode` 从 `[` 开始按 JSON 语法吃到配对的 `]`,嵌套/转义都能正确处理。
+        files: list[dict] = []
+        m = re.search(r'"file_list"\s*:\s*(\[)', html)
+        if m:
+            try:
+                _parsed, _end = json.JSONDecoder().raw_decode(html, m.start(1))
+                files = _parsed if isinstance(_parsed, list) else []
+            except ValueError:
+                #: 页面本身被截断(而不是我们切歪)⇒ 这条**可重试**,别记成终态。
+                files = []
         if not (uk and shareid and files):
             # -12/-2 类: 链接失效或需要密码而未提供
             raise BaiduPanError(f"分享页解析失败(链接失效或需提取码): uk={bool(uk)} files={len(files)}")
@@ -456,3 +469,26 @@ class BaiduPanClient:
                 "百度网盘**网页登录态**失效(常见原因:Cookie 里缺 `STOKEN`)—— "
                 "请打开 pan.baidu.com 确认已登录后,重新复制**整份** Cookie")
         return True
+
+    def quota_ratio(self) -> float | None:
+        """盘使用率 `used/total`;**拿不到返回 `None`**(调用方按"不知道"处理)。
+
+        同一个 `/api/quota` 端点(与 `keepalive` 共用),只是这里**取数**而不判登录。
+        ⚠️ 字段名做过兼容:Baidu 不同客户端回的是 `total` 或 `quota` 两种形态之一;
+        两个都取不到就返回 None,**不猜**。失败也返回 None —— 探查失败不等于盘满了。
+        """
+        try:
+            r = self._browser().get(f"{PAN_API}/api/quota",
+                                    params={"clienttype": "0", "web": "1"},
+                                    timeout=self.timeout)
+            d = r.json()
+            if d.get("errno") not in (0, None):
+                return None
+            total = int(d.get("total") or d.get("quota") or 0)
+            used = int(d.get("used") or 0)
+            if total <= 0:
+                return None
+            return used / total
+        except Exception:  # noqa: BLE001 - 探针失败只说"不知道"
+            logger.debug("百度配额查询失败", exc_info=True)
+            return None

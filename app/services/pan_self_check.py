@@ -147,12 +147,50 @@ def _check_run_detail(db: Session, user_id: int, kind: str) -> dict:
                  f"命中「{'/'.join(hits)}」:{text[:180]}")
 
 
+def _probe_ratio(db: Session, platform: str, ref) -> float | None:
+    """**补探**一个还没使用率数据的号(2026-10-21)。
+
+    为什么需要:百度池里那唯一的号 `last_ratio` 恒为 `null` —— 因为只有**转存成功路径**
+    会写回池,而百度那条链从来没报过配额 ⇒ 盘容量自检对百度是**瞎的**,
+    而积压里 28 条正是被「转存空间不足(-32)」卡住的。
+    只探**已知有空缺**的号(不是每轮全探),失败返回 None(不知道 ≠ 满)。
+    """
+    try:
+        from app.services import pan_accounts
+
+        #: 隐式"默认账号"(没配池)不写回池 —— 探到了也没地方存,白打一次接口。
+        if getattr(ref, "is_default", False):
+            return None
+        ck = pan_accounts.cookie_of(ref, db)
+        if not ck:
+            return None
+        if platform == "baidupan":
+            from app.services.baidupan_transfer import BaiduPanClient
+
+            return BaiduPanClient(ck).quota_ratio()
+        if platform == "xunlei":
+            from app.services import xunlei_transfer as xt
+
+            cred = xt._credentials(cookie_key=ref.cookie_key)   # noqa: SLF001 - 与转存同一读法
+            return xt.quota_ratio(cred, cookie_key=ref.cookie_key)
+    except Exception:  # noqa: BLE001 - 探针失败只是"不知道",不该让自检挂掉
+        return None
+    return None
+
+
 def _check_quota(db: Session, user_id: int) -> dict:
-    """账号池里最满的那个号:≥95% 警告、≥99% 错误(转存随时会停)。"""
+    """盘容量:按**每个盘池里最空的号**判,而不是取全池最满的那个。
+
+    ⚠️ **为什么改**(2026-10-21 实测):旧实现取**全池最大值** ⇒ 每天报
+    `迅雷/xunlei#2 已用 10253% —— 转存随时会因盘满停摆`。
+    而 xunlei#2 是**免费号,配额只有 10 GiB**,池里早就没人用它;
+    同一池的 #3 只用了 9.7%、#4 只用了 4.8%,转存一直落在这两个号上。
+    ⇒ 这条告警**给的是错动作**(让人去清一个根本没人用的号),而真正的落点有余量。
+    判据改成:**某个盘池里只剩 ≥95% 的号**才算这个盘有问题;
+    只要有一个号低于 95%,转存就有落点(最满的那个只在附注里提)。"""
     from app.services import pan_accounts
 
-    worst: tuple[float, str] | None = None
-    checked = 0
+    by_platform: dict[str, list[tuple[float, str]]] = {}
     for platform, label in (("quark", "夸克"), ("baidupan", "百度"), ("xunlei", "迅雷")):
         try:
             refs = pan_accounts.accounts(db, platform, user_id=user_id)
@@ -160,21 +198,49 @@ def _check_quota(db: Session, user_id: int) -> dict:
             return _item("盘容量", "warn",
                          f"账号池读取失败({label}):{type(exc).__name__}: {str(exc)[:80]}")
         for ref in refs:
+            #: 池里从没探到过的号(百度那条链从来不写回池)⇒ 自检这里**补探一次**。
+            #: 只探缺数据的号,不是每轮全探;探到就写回池,下次不必再探。
             if ref.last_ratio is None:
-                continue
-            checked += 1
-            ratio = float(ref.last_ratio)
-            if worst is None or ratio > worst[0]:
-                worst = (ratio, f"{label}/{ref.label}")
-    if not checked or worst is None:
+                fresh = _probe_ratio(db, platform, ref)
+                if fresh is None:
+                    continue
+                ref.last_ratio = fresh
+                try:
+                    pan_accounts.report(db, ref, ratio=fresh, full=False,
+                                        why=f"已用 {fresh * 100:.1f}%")
+                except Exception:  # noqa: BLE001 - 写不回池只影响下次择号,别让自检挂
+                    pass
+        vals = [(float(ref.last_ratio), f"{label}/{ref.label}")
+                for ref in refs if ref.last_ratio is not None]
+        if vals:
+            by_platform[label] = vals
+    if not by_platform:
         return _item("盘容量", "info", "账号池里还没有使用率数据(等下一次转存/巡检)")
-    ratio, who = worst
-    pct = ratio * 100
-    if pct >= 99:
-        return _item("盘容量", "error", f"{who} 已用 {pct:.1f}% —— 转存随时会因盘满停摆")
-    if pct >= 95:
-        return _item("盘容量", "warn", f"{who} 已用 {pct:.1f}% —— 建议尽快清理/加号")
-    return _item("盘容量", "ok", f"最满的是 {who} {pct:.1f}%")
+
+    problems: list[tuple[str, str]] = []
+    usable: list[str] = []
+    notes: list[str] = []
+    for label, vals in by_platform.items():
+        best = min(vals)          # 最空的号 = 转存真正的落点
+        worst = max(vals)
+        best_pct, worst_pct = best[0] * 100, worst[0] * 100
+        if best_pct >= 99:
+            problems.append(("error", f"{label} 池里**所有号**都 ≥99%"
+                                      f"(最空 {best[1]} {best_pct:.1f}%)—— 转存随时停摆"))
+        elif best_pct >= 95:
+            problems.append(("warn", f"{label} 池里**所有号**都 ≥95%"
+                                     f"(最空 {best[1]} {best_pct:.1f}%)—— 建议尽快清理/加号"))
+        else:
+            usable.append(f"{label} 最空 {best[1]} {best_pct:.1f}%")
+            if worst_pct >= 95 and worst[1] != best[1]:
+                #: 超配额/免费小号会长期停在 >100%,它们**不是落点**,不该当告警。
+                notes.append(f"{worst[1]} {worst_pct:.0f}%(不可用号,已不参与转存)")
+
+    extra = (";" + ";".join(notes)) if notes else ""
+    if problems:
+        level = "error" if any(p[0] == "error" for p in problems) else "warn"
+        return _item("盘容量", level, ";".join(p[1] for p in problems) + extra)
+    return _item("盘容量", "ok", ";".join(usable) + extra)
 
 
 def _check_reuse(db: Session, user_id: int, days: int) -> dict:

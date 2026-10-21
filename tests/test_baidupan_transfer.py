@@ -39,6 +39,33 @@ def _client_with(payload: dict) -> tuple[BaiduPanClient, _FakeSession]:
     return c, sess
 
 
+class _FakeText:
+    """假会话:回一段 HTML(`_share_meta` 只读 `.text`)。"""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def get(self, url, **kw):
+        return self
+
+
+def test_share_meta_parses_nested_file_list_without_truncating() -> None:
+    """★ 2026-10-21:旧正则 `\\[[^\\]]*\\]` 遇到嵌套数组/字符串里的 `]` 就提前截断,
+    `json.loads` 抛 `Unterminated string starting at: …` —— 积压里 12 条贴吧链
+    **每轮都失败**,却是我们自己的解析切歪了,不是链坏了。这里钉住"嵌套也能整段解析"。
+    """
+    html = (
+        '<script>var yunData = {"share_uk":"123","shareid":"456","bdstoken":"tok",'
+        '"file_list":[{"fs_id":1,"server_filename":"a]b.mkv","size":10,'
+        '"thumbs":[{"url":"https://x/1"}]}]};</script>'
+    )
+    c = BaiduPanClient("BDUSS=x")
+    c._browser = lambda: _FakeText(html)      # type: ignore[method-assign]
+    uk, shareid, tok, files = c._share_meta("surl")
+    assert (uk, shareid, tok) == ("123", "456", "tok")
+    assert len(files) == 1 and files[0]["server_filename"] == "a]b.mkv"
+
+
 def test_keepalive_probes_the_web_session_not_login_status() -> None:
     """⚠️ **必须探网页会话**(`/api/quota`),不能探 `/api/loginStatus`(2026-10-04 实测)。
 

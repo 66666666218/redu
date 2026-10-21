@@ -127,19 +127,49 @@ def _aweme_id(url: str) -> str:
     return m.group(1) if m else ""
 
 
-def _try_protocol(keywords: list[str], session, stats: dict | None = None
-                  ) -> tuple[list[dict], Exception | None]:
+def _try_protocol(keywords: list[str], session, stats: dict | None = None,
+                  user_id: int = 1) -> tuple[list[dict], Exception | None]:
     """走抖音纯协议取一批;返回 `(记录, 异常)`。**异常不在这里抛** —— 留给调用方决定回落。
 
     `stats` 会被 `douyin_protocol_source.search` 填进 `kw_total` / `kw_hit`
     (几个词、其中几个有结果)—— **判"是不是被限流"就靠这两个数**。
+
+    ★ **多账号轮换**(2026-10-21):抖音的 `verify_check` 是**按账号/会话**下发的。
+    库里配了 `douyin#2`(及更多)时,当前号被风控就**换下一个号**继续取,
+    而不是让整条线索链停摆等 6 小时。
+    ⚠️ 没配第二个号时 `account_keys` 只返回 `douyin` ⇒ 行为与改造前逐字一致。
     """
     from app.services import douyin_protocol_source as dps
 
-    try:
-        return dps.search(keywords, session=session, stats=stats), None
-    except Exception as exc:  # noqa: BLE001 - 回落是设计的一部分,这里就是它的入口
-        return [], exc
+    keys = dps.account_keys(session, user_id)
+    last_exc: Exception | None = None
+    tried = 0
+    #: 这几个 kind 都是"**这个号**不可用",换号有意义;网络故障换号也一样会失败,
+    #: 但换一下的代价很小(一次请求),所以一并跳过,只是不再重试同一个号。
+    _switchable = {"verify", "verify_cooldown", "need_login", "restricted", "argus", "blocked"}
+    for key in keys:
+        if dps.in_verify_cooldown(session, user_id, cookie_key=key):
+            continue
+        tried += 1
+        try:
+            rows = dps.search(keywords, session=session, stats=stats,
+                              user_id=user_id, cookie_key=key)
+        except Exception as exc:  # noqa: BLE001 - 回落是设计的一部分,这里就是它的入口
+            last_exc = exc
+            if getattr(exc, "kind", "") in _switchable:
+                continue
+            return [], exc
+        if rows:
+            if tried > 1:
+                logger.info("抖音纯协议:本轮由第 %d 个号(%s)取到 %d 条", tried, key, len(rows))
+            return rows, None
+        #: 这个号**没报错但一条没搜到** —— 形态与限流一致。有下一个号就换,没有就交回上层判。
+        logger.info("抖音纯协议:%s 本轮 0 条,尝试下一个号(如有)", key)
+    if tried == 0:
+        return [], dps.DouyinProtocolError(
+            "抖音**所有号都在验证冷却中**,本次不发请求(动作是等或补一个号)",
+            kind="verify_cooldown")
+    return [], last_exc
 
 
 #: 验证冷却期内"浏览器兜底是否已经探过"的标记(每个冷却窗口只探一次)。
@@ -204,7 +234,7 @@ def _collect(platform: str, keywords: list[str], session=None,
 
         if getattr(get_settings(), "douyin_leads_use_protocol", True):
             stats: dict = {}
-            rows, err = _try_protocol(keywords, session, stats)
+            rows, err = _try_protocol(keywords, session, stats, user_id=user_id)
             total = int(stats.get("kw_total") or 0)
             hit = int(stats.get("kw_hit") or 0)
             # ★★ **"只有少数词有结果"要当成可疑,回落浏览器**(2026-10-08 实测逼出来的)。
@@ -235,7 +265,10 @@ def _collect(platform: str, keywords: list[str], session=None,
         #: 协议层刚撞过 `verify_check` 时,浏览器兜底**不能每轮都打**(探针也会加重风控)。
         from app.services import douyin_protocol_source as dps
 
-        cooldown = dps.in_verify_cooldown(session, user_id)
+        #: 只有**所有号都在冷却**才算"整体冷却" —— 还有一个号能用就不该放弃协议路。
+        _keys = dps.account_keys(session, user_id)
+        cooldown = bool(_keys) and all(
+            dps.in_verify_cooldown(session, user_id, cookie_key=k) for k in _keys)
     if cooldown and not _browser_probe_allowed(session, user_id):
         logger.warning("抖音验证冷却中且本窗口已探过浏览器 —— 本轮不再打"
                        "(动作是等;反复探针只会延长风控)")

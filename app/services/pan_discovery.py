@@ -60,6 +60,11 @@ _DEAD_LINK_HINTS = (
     "分享文件已被删除", "文件不存在", "已被和谐", "违规内容", "含违规",
     "41011",                      # 夸克:分享地址已失效
     "get_share_user_banned",      # 迅雷:分享者被封
+    #: ★ 2026-10-21:迅雷分享详情里的**终态状态**(`share_status != OK`)。
+    #: 积压里 21 条 `PASS_CODE_EMPTY`(分享要求提取码而我们没有) + 1 条
+    #: `SENSITIVE_RESOURCE`(敏感资源)一直当 `failed` 每轮重试 —— 重试一万次也不会变。
+    #: 只收**状态码原文**,不把整句「分享状态异常」当判据(那会把可重试的也判死)。
+    "PASS_CODE_EMPTY", "SENSITIVE_RESOURCE",
 )
 
 

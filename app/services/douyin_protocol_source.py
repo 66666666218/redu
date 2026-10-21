@@ -104,8 +104,11 @@ class DouyinProtocolError(Exception):
 # ---------------------------------------------------------------------------
 
 
-def _cookie(session=None, user_id: int = 1, settings=None) -> str:
+def _cookie(session=None, user_id: int = 1, settings=None,
+            cookie_key: str = "douyin") -> str:
     """登录态:优先**加密 cookie 库**,回落 `.env` 的 `douyin_cookie`。
+
+    `cookie_key` = `douyin`(默认)/ `douyin#2` …(多账号轮换时指定)。
 
     ⚠️ **必须有登录态** —— 2026-10-07 匿名实跑实测:不带登录凭据时抖音搜索
     **一律回 `status_code=2483`「请先登录,再继续搜索吧」**(带不带签名都一样),
@@ -127,7 +130,7 @@ def _cookie(session=None, user_id: int = 1, settings=None) -> str:
         try:
             from app.services.cookie_store import get_cookie
 
-            blob = (get_cookie(session, user_id, PLATFORM) or "").strip()
+            blob = (get_cookie(session, user_id, cookie_key) or "").strip()
         except Exception:  # noqa: BLE001
             logger.debug("读抖音 cookie 失败(回落 .env)", exc_info=True)
     if not blob:
@@ -441,10 +444,51 @@ def _is_argus_block(text: str) -> bool:
 #: 并把"要人去过验证"直接摆在报告里。**解冻只有一条路:重新导出 cookie**
 #: (即"人已经在浏览器里动过了")。
 _VERIFY_KEY = "douyin_verify_until_{uid}"
-_VERIFY_CACHE: dict[int, float] = {}
+#: ⚠️ 缓存键是 **(user_id, cookie_key)**(2026-10-21):冷却从"按用户"改成"**按账号**",
+#: 否则一个号被风控会把同用户下所有号一起冻住 —— 多账号轮换也就没有意义了。
+_VERIFY_CACHE: dict[tuple[int, str], float] = {}
 
 
-def in_verify_cooldown(session=None, user_id: int = 1) -> bool:
+def _verify_key_name(user_id: int, cookie_key: str = "douyin") -> str:
+    """冷却状态在 `system_config` 里的键名。
+
+    **默认账号(`douyin`)沿用旧键** —— 不迁移、不换名,旧部署的冷却状态照样生效;
+    第二个号(`douyin#2`)用独立键,两个号的冷却互不牵连。
+    """
+    if cookie_key == "douyin":
+        return _VERIFY_KEY.format(uid=user_id)
+    safe = "".join(ch if ch.isalnum() else "_" for ch in cookie_key)
+    return f"douyin_verify_until_{user_id}_{safe}"
+
+
+def account_keys(session=None, user_id: int = 1) -> list[str]:
+    """抖音**可用的账号凭据键**(`douyin`、`douyin#2` …),默认账号排第一。
+
+    为什么要它(2026-10-21):抖音的 `verify_check` 是**按账号/会话**下发的。
+    只有一个号时,撞上就只能等;有两个号时,可以在**当前号被风控时换另一个号继续取数**,
+    而不是让整条线索链停摆。凭据仍走 `cookie_store`(加密库,支持 `平台#序号`)。
+
+    ⚠️ 没配第二个号时**只返回 `douyin`** —— 单账号行为与改造前逐字一致。
+    """
+    keys = ["douyin"]
+    if session is None:
+        return keys
+    try:
+        from sqlalchemy import select
+
+        from app.db.models import UserCookie
+
+        rows = session.scalars(select(UserCookie.platform).where(
+            UserCookie.user_id == user_id,
+            UserCookie.platform.like("douyin#%"))).all()
+        keys.extend(sorted(k for k in rows if k and k != "douyin"))
+    except Exception:  # noqa: BLE001 - 查不到第二号 ≠ 没号,按单账号继续
+        logger.debug("读取抖音多账号列表失败,按单账号处理", exc_info=True)
+    return keys
+
+
+def in_verify_cooldown(session=None, user_id: int = 1,
+                       cookie_key: str = "douyin") -> bool:
     """**现在是不是在验证冷却期里**(公开只读查询,给体检/别的调用方用)。
 
     ⚠️ 为什么值得单独开一个:**「在冷却中」正好等价于「这个号正被风控要求过验证」**
@@ -456,7 +500,7 @@ def in_verify_cooldown(session=None, user_id: int = 1) -> bool:
     读不到就当"没在冷却"(宁可多打一次,也别永远停死 —— 与 `_verify_until` 同一条)。
     """
     try:
-        until = _verify_until(session, user_id)
+        until = _verify_until(session, user_id, cookie_key=cookie_key)
     except Exception:  # noqa: BLE001 - 查不到状态不该让调用方崩
         return False
     import time as _time
@@ -475,10 +519,12 @@ def verify_cooldown_hours() -> float:
         return 6.0
 
 
-def _verify_until(session=None, user_id: int = 1) -> float:
+def _verify_until(session=None, user_id: int = 1,
+                  cookie_key: str = "douyin") -> float:
     """冷却截止的 epoch 秒(0 = 没在冷却)。"""
-    if user_id in _VERIFY_CACHE:
-        return _VERIFY_CACHE[user_id]
+    cache_key = (user_id, cookie_key)
+    if cache_key in _VERIFY_CACHE:
+        return _VERIFY_CACHE[cache_key]
     val = 0.0
     if session is not None:
         try:
@@ -487,24 +533,25 @@ def _verify_until(session=None, user_id: int = 1) -> float:
             from app.db.models import SystemConfig
 
             row = session.scalar(select(SystemConfig).where(
-                SystemConfig.key == _VERIFY_KEY.format(uid=user_id)))
+                SystemConfig.key == _verify_key_name(user_id, cookie_key)))
             if row and row.value:
                 from datetime import datetime
 
                 val = datetime.fromisoformat(str(row.value)).timestamp()
         except Exception:  # noqa: BLE001 - 读不到就当没冷却(**宁可多打一次,也别永远停死**)
             val = 0.0
-    _VERIFY_CACHE[user_id] = val
+    _VERIFY_CACHE[cache_key] = val
     return val
 
 
-def note_verify(session=None, user_id: int = 1) -> None:
-    """记下"撞到验证了" ⇒ 进入冷却。"""
+def note_verify(session=None, user_id: int = 1,
+                cookie_key: str = "douyin") -> None:
+    """记下"这个号撞到验证了" ⇒ 只冻**这个号**,别的号还能用。"""
     import time as _t
     from datetime import datetime
 
     until = _t.time() + verify_cooldown_hours() * 3600
-    _VERIFY_CACHE[user_id] = until
+    _VERIFY_CACHE[(user_id, cookie_key)] = until
     if session is None:
         return
     try:
@@ -512,7 +559,7 @@ def note_verify(session=None, user_id: int = 1) -> None:
 
         from app.db.models import SystemConfig
 
-        key = _VERIFY_KEY.format(uid=user_id)
+        key = _verify_key_name(user_id, cookie_key)
         val = datetime.fromtimestamp(until).isoformat(timespec="seconds")
         row = session.scalar(select(SystemConfig).where(SystemConfig.key == key))
         if row:
@@ -524,9 +571,10 @@ def note_verify(session=None, user_id: int = 1) -> None:
         logger.debug("写验证冷却失败", exc_info=True)
 
 
-def clear_verify(session=None, user_id: int = 1) -> None:
+def clear_verify(session=None, user_id: int = 1,
+                 cookie_key: str = "douyin") -> None:
     """解冻(重新导出 cookie 时调)—— 那说明**人已经在浏览器里动过了**。"""
-    _VERIFY_CACHE.pop(user_id, None)
+    _VERIFY_CACHE.pop((user_id, cookie_key), None)
     if session is None:
         return
     try:
@@ -535,7 +583,7 @@ def clear_verify(session=None, user_id: int = 1) -> None:
         from app.db.models import SystemConfig
 
         row = session.scalar(select(SystemConfig).where(
-            SystemConfig.key == _VERIFY_KEY.format(uid=user_id)))
+            SystemConfig.key == _verify_key_name(user_id, cookie_key)))
         if row:
             row.value = ""
             session.commit()
@@ -553,7 +601,7 @@ def clear_verify(session=None, user_id: int = 1) -> None:
 
 def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
            pages: int = 1, use_abogus: bool = False,
-           stats: dict | None = None) -> list[dict]:
+           stats: dict | None = None, cookie_key: str = "douyin") -> list[dict]:
     """按关键词搜抖音。返回 `{uid, name, url, snippet, pan_link, ...}`。
 
     形状与 `mediacrawler_source.crawl` 一致,上层(`douyin_leads.find_leads`)不用改。
@@ -582,7 +630,7 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
     # 只会把风控越打越深,而且**体检探针也在打**。
     import time as _time
 
-    until = _verify_until(session, user_id)
+    until = _verify_until(session, user_id, cookie_key=cookie_key)
     if until and _time.time() < until:
         from datetime import datetime as _dt
 
@@ -605,7 +653,7 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
     if stats is not None:
         stats["kw_total"] = len(kws)
         stats["kw_hit"] = 0
-    blob = _cookie(session, user_id, settings)
+    blob = _cookie(session, user_id, settings, cookie_key=cookie_key)
     ck = _cookie_dict(blob)
     if not blob or not _uifid(ck):
         # ⚠️ **不抛错,但要留痕**:缺凭据时站点回的是 `status_code=2483`「请先登录」
@@ -712,7 +760,7 @@ def search(keywords: list[str], settings=None, session=None, user_id: int = 1,
             nil = d.get("search_nil_info") or {}
             nil_type = str(nil.get("search_nil_type") or "")
             if nil_type == "verify_check":
-                note_verify(session, user_id)          # ★ 立刻进冷却,别让下一轮再撞
+                note_verify(session, user_id, cookie_key=cookie_key)   # ★ 只冻这个号
                 raise DouyinProtocolError(
                     "抖音要求**过验证**(search_nil_info.search_nil_type=verify_check)"
                     "——它把搜索结果整页换成了验证页,**不是「没人推这个资源」**。"

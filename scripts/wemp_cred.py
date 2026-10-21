@@ -9,13 +9,16 @@
   - `token` :登录后地址栏里的 `?token=xxxxxxxx`(每次登录变,有效期通常几天)
 
 **用法**:
-    # 1) 手动录入(从浏览器复制)
+    # 1) **推荐**:开浏览器扫码,自动抓 cookie/token(2026-10-21 加)
+    python scripts/wemp_cred.py --login
+
+    # 2) 手动录入(从浏览器复制)
     python scripts/wemp_cred.py --cookie "..." --token "..."
 
-    # 2) 从 WeRSS 的 wx.lic 提取(先在 WeRSS 界面扫码登录过)
+    # 3) 从 WeRSS 的 wx.lic 提取(先在 WeRSS 界面扫码登录过)
     python scripts/wemp_cred.py --from-werss
 
-    # 3) 只看看当前存的凭据还能不能用
+    # 4) 只看看当前存的凭据还能不能用
     python scripts/wemp_cred.py --check
 
 录入后会**立刻打一次探针**(拉一个真实对标号的文章列表),结果直接告诉你:
@@ -83,10 +86,69 @@ def probe(db, user_id: int, cookie: str, token: str) -> int:
     return int(out.get("items") or 0)
 
 
+def login_and_capture(wait_s: int = 300, profile: str = "") -> tuple[str, str]:
+    """**开浏览器扫码登录**,自动把 `cookie` / `token` 抓回来(2026-10-21)。
+
+    ⚠️ 自研的是**客户端**(`wemp_client` 直连 `appmsgpublish`),
+    **认证**仍然只能由运营者用微信扫码换一个后台会话 —— 微信没有给我们第三条路。
+    这一步就是"人扫码"与"程序拿凭据"之间缺的那只手:扫完自动抓,不用再 F12 手抄。
+
+    返回 `(cookie, token)`;**不打印凭据值**。
+    """
+    import re
+    import time
+    from pathlib import Path
+    from urllib.parse import parse_qs, urlparse
+
+    from playwright.sync_api import sync_playwright
+
+    prof = Path(profile or "data/_wemp_profile")
+    prof.mkdir(parents=True, exist_ok=True)
+    edge = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+    print("=== 打开 mp.weixin.qq.com —— 请用**绑定的微信扫码**登录 ===", flush=True)
+    with sync_playwright() as p:
+        ctx = p.chromium.launch_persistent_context(
+            user_data_dir=str(prof), headless=False, no_viewport=True,
+            channel="msedge", executable_path=edge)
+        try:
+            pg = ctx.pages[0] if ctx.pages else ctx.new_page()
+            try:
+                pg.goto("https://mp.weixin.qq.com/", wait_until="domcontentloaded",
+                        timeout=60000)
+            except Exception as exc:  # noqa: BLE001 - 首屏慢不影响后续轮询
+                print("(首屏导航异常,继续等登录):", exc, flush=True)
+            token = ""
+            deadline = time.time() + wait_s
+            while time.time() < deadline:
+                time.sleep(3)
+                url = pg.url or ""
+                q = parse_qs(urlparse(url).query)
+                token = (q.get("token") or [""])[0]
+                if not token:
+                    m = re.search(r"[?&]token=(\d+)", url)
+                    token = m.group(1) if m else ""
+                if token:
+                    break
+            if not token:
+                raise WempError(f"等了 {wait_s} 秒仍未登录(URL 里没有 token)")
+            cookie = "; ".join(f"{c['name']}={c['value']}"
+                               for c in ctx.cookies() if c.get("name"))
+        finally:
+            ctx.close()
+    if not cookie.strip():
+        raise WempError("登录成功但一个 cookie 都没抓到")
+    print(f"✓ 已捕获 cookie({len(cookie)} 字符) / token({len(token)} 字符)", flush=True)
+    return cookie, token
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="公众号后台凭据录入/校验")
     ap.add_argument("--cookie", help="公众号后台 Cookie(整条)")
     ap.add_argument("--token", help="后台 URL 里的 token")
+    ap.add_argument("--login", action="store_true",
+                    help="开浏览器扫码登录并自动抓取(推荐,不用手抄)")
+    ap.add_argument("--wait", type=int, default=300, help="等扫码的秒数(--login 用)")
+    ap.add_argument("--profile", default="", help="--login 用的 Edge 档案目录")
     ap.add_argument("--from-werss", action="store_true", help=f"从 {WERSS_LIC} 提取")
     ap.add_argument("--lic", default=str(WERSS_LIC), help="wx.lic 路径")
     ap.add_argument("--check", action="store_true", help="只校验已存凭据")
@@ -100,7 +162,15 @@ def main() -> int:
             print(f"✗ 用户 {args.user} 不存在")
             return 1
 
-        if args.check:
+        if args.login:
+            try:
+                cookie, token = login_and_capture(args.wait, args.profile)
+            except Exception as exc:  # noqa: BLE001 - 把原因打给人看
+                print(f"✗ 登录失败:{type(exc).__name__}: {exc}")
+                return 1
+            save_cred(db, args.user, cookie, token)
+            print("✓ 已保存")
+        elif args.check:
             cred = load_cred(db, args.user)
             if not cred:
                 print("✗ 还没录入凭据(见本文件头部的用法)")

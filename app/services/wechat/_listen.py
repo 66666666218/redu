@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import and_, delete, func, or_, select, update
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError, PendingRollbackError
 
 from sqlalchemy.orm import Session
 
@@ -1330,16 +1330,39 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
         session.rollback()
 
     enrich_failed = ""
-    try:
-        with savepoint(session):
-            replacements = _root._enrich_new_articles(session, user_id, settings, new_rows)
-    except Exception as exc:  # noqa: BLE001 - 转存炸了也要推(标题回落原文)
-        # ⚠️ **别只写日志**:外面看到的是"轮次 success、卡片照常推送",
-        # 而后处理可能已经废了一半(2026-10-05 就是转存全被回滚、卡片显示"⏳待转存")。
-        # 所以**必须进运行记录**,否则运维永远只能靠翻日志偶然撞见。
-        logger.exception("监听后处理失败 user=%s(本轮推送回落原文)", user_id)
-        replacements = {}
-        enrich_failed = type(exc).__name__
+    # ★★ **撞 SQLite 写锁时回滚重试一次**(2026-10-21)。
+    # 实测 04:05 / 14:05 两轮:`_enrich` 里 `UPDATE wechat_articles SET my_pan_urls=…`
+    # 撞 `database is locked`,会话进入「**待回滚**」状态后 ——
+    # `Session.is_active` **仍是 True**(上面那道预检拦不住),而 `savepoint()` 入口
+    # 直接抛 `PendingRollbackError` ⇒ 整段后处理(转存/复用/阅读数)陪葬,
+    # 运行记录只留一句 `⚠️enrich_failed=…`。
+    # 锁是**瞬时**的(SQLite 单写者),所以先回滚再重试一次,比直接放弃划算。
+    # ⚠️ 只对**锁**重试;别的异常重试只会把同一份失败再做一遍。
+    for _attempt in (1, 2):
+        try:
+            with savepoint(session):
+                replacements = _root._enrich_new_articles(session, user_id, settings, new_rows)
+            enrich_failed = ""
+            break
+        except Exception as exc:  # noqa: BLE001 - 转存炸了也要推(标题回落原文)
+            # ⚠️ **别只写日志**:外面看到的是"轮次 success、卡片照常推送",
+            # 而后处理可能已经废了一半(2026-10-05 就是转存全被回滚、卡片显示"⏳待转存")。
+            # 所以**必须进运行记录**,否则运维永远只能靠翻日志偶然撞见。
+            _locked = isinstance(exc, PendingRollbackError) or (
+                isinstance(exc, OperationalError) and "database is locked" in str(exc))
+            if _locked and _attempt == 1:
+                logger.warning("监听后处理撞 SQLite 写锁,回滚后重试一次 user=%s:%s",
+                               user_id, str(exc)[:120])
+                try:
+                    session.rollback()
+                except Exception:  # noqa: BLE001 - 回滚都失败就别再硬试
+                    logger.exception("监听后处理撞锁后回滚失败 user=%s", user_id)
+                replacements = {}
+                continue
+            logger.exception("监听后处理失败 user=%s(本轮推送回落原文)", user_id)
+            replacements = {}
+            enrich_failed = type(exc).__name__
+            break
 
     session.commit()
 

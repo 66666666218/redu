@@ -88,6 +88,17 @@ def _commit_now(session: Session, why: str) -> None:
         # 落不下盘 = 这份转存结果白花了(下一轮会重转)。**必须显式喊一声**,
         # 不能让"转存成功"的日志成为这件事的最后一句话。
         logger.exception("转存结果落盘失败(%s)—— 这一份会丢,下一轮会重转", why)
+        # ★★ **必须立刻回滚**(2026-10-21):commit 撞 `database is locked` 之后,
+        # 会话进入「**待回滚**」状态,而它**不是** `Session.is_active == False`
+        # (监听侧那道预检拦不住)⇒ 后面任何一条 SQL 都抛 `PendingRollbackError`。
+        # 实测代价:04:05 / 14:05 两轮,同一句 UPDATE 撞锁后,
+        # `_listen._enrich_new_articles` 入口直接抛 PendingRollbackError ⇒
+        # **整段转存/复用陪葬**(运行记录 `⚠️enrich_failed=…`)。
+        # 回滚只丢掉**本次没落成的**那份写(它本来也已经丢了),换来会话还能用。
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001 - 回滚都失败就只能让上层兜底
+            logger.exception("转存结果落盘失败后回滚也失败(%s)", why)
 
 
 def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchmark,

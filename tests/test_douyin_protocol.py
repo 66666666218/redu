@@ -640,6 +640,26 @@ def test_重导之后解冻_请求恢复(monkeypatch, fp_session) -> None:
     assert dp.search(["夸克口令"], session=fp_session, user_id=1) == []
 
 
+def test_冷却按账号隔离_一个号被冻不影响另一个(fp_session) -> None:
+    """★ 2026-10-21:多账号轮换的前提。
+
+    抖音的 `verify_check` 是**按账号/会话**下发的。冷却若仍按用户存,
+    一个号被风控就会把同用户下所有号一起冻住 —— 轮换形同虚设。
+    """
+    dp._VERIFY_CACHE.clear()
+    dp.note_verify(fp_session, 1, cookie_key="douyin")
+    assert dp.in_verify_cooldown(fp_session, 1, cookie_key="douyin")
+    assert not dp.in_verify_cooldown(fp_session, 1, cookie_key="douyin#2")
+
+    dp.note_verify(fp_session, 1, cookie_key="douyin#2")
+    assert dp.in_verify_cooldown(fp_session, 1, cookie_key="douyin#2")
+
+    dp.clear_verify(fp_session, 1, cookie_key="douyin")
+    assert not dp.in_verify_cooldown(fp_session, 1, cookie_key="douyin")
+    assert dp.in_verify_cooldown(fp_session, 1, cookie_key="douyin#2"), \
+        "解冻默认号不许连带解冻另一个号"
+
+
 def test_重新导出会解冻_接线守卫() -> None:
     """⚠️ 这条是**接线守卫**:`export_from_profile` 里那句 `clear_verify` 一旦被删,
     就会出现"冷却永远解不掉"或者更糟 —— 体检的自动重导**把闸自己打开**。"""

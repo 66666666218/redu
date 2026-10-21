@@ -77,29 +77,34 @@ def read_profile_cookies(profile: Path | str | None = None) -> dict[str, str]:
     return out
 
 
-def export_from_profile(db, user_id: int = 1, profile: Path | str | None = None) -> str:
+def export_from_profile(db, user_id: int = 1, profile: Path | str | None = None,
+                        cookie_key: str = "") -> str:
     """读档案 → 写加密库。返回一句**人话**(给体检/日志用);凭据值不返回。
+
+    `cookie_key` 留空 = 默认账号(`douyin`);显式给 `douyin#2` 时把这个档案导成
+    **第二个号**(2026-10-21 多账号轮换用,见 `douyin_protocol_source.account_keys`)。
 
     ⚠️ **缺 `sessionid` 系列时照样写下去但返回警告** —— 不静默成功:
     那正是"导了个空壳、还以为修好了"的形状。
     """
     from app.services.cookie_store import set_cookie
 
+    store_key = (cookie_key or "").strip() or PLATFORM
     ck = read_profile_cookies(profile)
     if not ck:
         raise RuntimeError("一个 cookie 都没读到(档案可能没登录)")
     blob = "; ".join(f"{k}={v}" for k, v in ck.items())
-    set_cookie(db, user_id, PLATFORM, blob)
+    set_cookie(db, user_id, store_key, blob)
     # ★ **重导 = 人已经在浏览器里动过了** ⇒ 解掉"验证冷却"(2026-10-08)。
     # 实测:补全 jar 消不掉滑块,**人过完验证再重导才是恢复路径** ——
     # 所以这个动作是"人可以试了"的信号,不是"jar 变了"的信号。
     try:
         from app.services.douyin_protocol_source import clear_verify
 
-        clear_verify(db, user_id)
+        clear_verify(db, user_id, cookie_key=store_key)
     except Exception:  # noqa: BLE001 - 解冻失败不该让导出本身失败
         logger.debug("清抖音验证冷却失败", exc_info=True)
     missing = [k for k in LOGIN_CORE if k not in ck]
     if missing:
         return f"{len(ck)} 个 cookie,但**缺 {'/'.join(missing)}** —— 档案里多半没登录"
-    return f"{len(ck)} 个 cookie(登录态核心齐全)"
+    return f"{len(ck)} 个 cookie(登录态核心齐全,账号键 {store_key})"
