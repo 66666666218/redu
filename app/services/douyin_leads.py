@@ -262,6 +262,12 @@ def _collect(platform: str, keywords: list[str], session=None,
                 #    后者是硬失败。两种都回落,但日志里得看出是哪一种。
                 logger.warning("抖音纯协议**一条都没搜到**(没报错)—— 可能是限流"
                                "(见 doc/抖音纯协议-链路拆解.md §5),本轮回落浏览器")
+        else:
+            #: ★ 2026-10-21:纯协议上线(10-08)**之前**浏览器路从没出过 verify_check;
+            #: 上线后按日出现(10-17/18/19 分别 20/28/25 次),而同一账号的浏览器路
+            #: 同期还能一轮拿 25~30 条 ⇒ 触发风控的是**协议那种机器人形状的请求**。
+            #: 关掉它 = 回到「真人形状的本地 Edge + 已登录档案」,与小红书同一条路。
+            logger.info("抖音:纯协议已关闭(DOUYIN_LEADS_USE_PROTOCOL=false)—— 走本地浏览器")
         #: 协议层刚撞过 `verify_check` 时,浏览器兜底**不能每轮都打**(探针也会加重风控)。
         from app.services import douyin_protocol_source as dps
 
@@ -286,16 +292,19 @@ def _collect(platform: str, keywords: list[str], session=None,
         except Exception:  # noqa: BLE001 - 读不到就交给档案登录
             logger.debug("浏览器兜底读取抖音 cookie 失败,交给档案登录", exc_info=True)
     rows = mc.crawl(platform, keywords, cookie=cookie, user_id=user_id)
-    if cooldown and rows and session is not None:
-        #: ★ **浏览器兜底成功 = 真人形状的会话是通的** ⇒ 从档案重导凭据并解冻,
-        #: 下一轮就能回到更便宜的协议路。失败只告警,绝不把已经拿到的线索作废。
+    if rows and session is not None:
+        #: ★ **浏览器成功 = 真人形状的会话是通的** ⇒ 从档案重导凭据。
+        #: 2026-10-21:不再只在「冷却中」才重导 —— 纯协议关闭后浏览器是**唯一**取数路,
+        #: 库里的 cookie 必须跟着档案走;否则它会越来越旧,下次注入浏览器时
+        #: 反而可能用旧会话盖掉档案里的新会话。
+        #: 重导失败只告警,绝不把已经拿到的线索作废。
         try:
             from app.services.douyin_cookie_export import export_from_profile
 
             note = export_from_profile(session, user_id)
-            logger.info("抖音浏览器兜底成功,已重导凭据并解冻验证冷却:%s", note)
+            logger.info("抖音浏览器取数成功,已从档案重导凭据:%s", note)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("抖音浏览器兜底成功,但重导凭据失败:%s", str(exc)[:120])
+            logger.warning("抖音浏览器取数成功,但重导凭据失败:%s", str(exc)[:120])
     return rows, "浏览器兜底"
 
 
