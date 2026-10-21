@@ -37,6 +37,7 @@ DB_REL = f"/data/data/{PKG}/databases/WRAccount"
 #: `deviceid` 在这里(XML,不是数据库)。**只需读一次**,读完就能纯 HTTP 续期。
 DEVICE_XML_REL = f"/data/data/{PKG}/shared_prefs/device.xml"
 DEFAULT_ADB = r"D:\leidian\LDPlayer14\adb.exe"
+DEFAULT_LDCONSOLE = r"D:\leidian\LDPlayer14\ldconsole.exe"
 
 #: ★★ **纯 HTTP 续期**(2026-10-10 实测打通)**——这是"模拟器可以彻底退休"的那一步**。
 #:
@@ -126,6 +127,92 @@ def emulator_ready(adb: str = "", serial: str = "") -> bool:
     except Exception:  # noqa: BLE001 - adb 卡住/没装都算"不在"
         return False
     return "emulator" in dev or "127.0.0.1" in dev
+
+
+def _ldconsole(explicit: str = "") -> str:
+    """找雷电的 `ldconsole.exe`(启停实例用)。找不到返回空串。"""
+    for cand in (explicit, os.getenv("WEREAD_LDCONSOLE_PATH", ""), DEFAULT_LDCONSOLE):
+        if cand and Path(cand).exists():
+            return cand
+    return ""
+
+
+def emulator_index(serial: str = "") -> int | None:
+    """`emulator-5554` → 0、`emulator-5556` → 1 ……(雷电/安卓模拟器的端口规律)。
+
+    只用于"按需启停"时把 `adb` 的 serial 翻成 `ldconsole --index`。
+    不是这个形状 → 返回 None(调用方按"不知道该启哪台"处理,不猜)。
+    """
+    import re
+
+    m = re.search(r"emulator-(\d+)", serial or "")
+    if not m:
+        return None
+    port = int(m.group(1))
+    return (port - 5554) // 2 if port >= 5554 else None
+
+
+def ensure_emulator(serial: str = "", *, adb: str = "", timeout: float = 120.0) -> bool:
+    """模拟器不在时**按需拉起来**(仅当 `weread_emulator_autostart` 打开)。
+
+    ⚠️ 为什么可以"不用一直开着"(2026-10-22):能用的 token 只有 App 签发的,
+    但**监听轮本身不碰模拟器** —— 它只读库里存好的 token。模拟器只需要在**续期那一刻**
+    开一会儿:唤醒 App 刷新会话 → 读出 token → 就可以关。
+    ⇒ 本函数在续期时把实例拉起来,`quit_emulator` 在取到 token 后关掉;
+    一天只开 4 次(03:52 / 07:52 / 13:52 / 19:52),每次约 1 分钟。
+
+    返回是否就绪;**关闭开关/找不到 ldconsole/启不来一律返回 False**,
+    调用方回落纯 HTTP(与"模拟器本来就没开"同一条路)。
+    """
+    if emulator_ready(adb, serial=serial):
+        return True
+    try:
+        from config.settings import get_settings
+
+        st = get_settings()
+        if not getattr(st, "weread_emulator_autostart", False):
+            return False
+        exe = _ldconsole(str(getattr(st, "weread_ldconsole_path", "") or ""))
+        idx = emulator_index(serial)
+        if not exe or idx is None:
+            logger.info("按需启动模拟器跳过:找不到 ldconsole 或实例号(serial=%s)", serial or "-")
+            return False
+        logger.info("按需启动模拟器:index=%s(serial=%s)", idx, serial or "-")
+        subprocess.run([exe, "launch", "--index", str(idx)],
+                       capture_output=True, timeout=60)
+        deadline = time.time() + max(10.0, timeout)
+        while time.time() < deadline:
+            time.sleep(3)
+            if emulator_ready(adb, serial=serial):
+                return True
+        logger.warning("按需启动模拟器超时(%ss):index=%s", timeout, idx)
+    except Exception:  # noqa: BLE001 - 启停失败只影响"这次能不能重取"
+        logger.exception("按需启动模拟器失败")
+    return False
+
+
+def quit_emulator(serial: str = "", *, adb: str = "") -> bool:
+    """关掉**我们自己拉起来**的实例(仅当 `weread_emulator_quit_after`)。
+
+    ⚠️ 只该在 `ensure_emulator` 确实**由本次拉起**时调用 —— 用户本来就开着的实例不要动。
+    """
+    try:
+        from config.settings import get_settings
+
+        st = get_settings()
+        if not getattr(st, "weread_emulator_quit_after", True):
+            return False
+        exe = _ldconsole(str(getattr(st, "weread_ldconsole_path", "") or ""))
+        idx = emulator_index(serial)
+        if not exe or idx is None:
+            return False
+        subprocess.run([exe, "quit", "--index", str(idx)],
+                       capture_output=True, timeout=60)
+        logger.info("模拟器已按需关闭:index=%s", idx)
+        return True
+    except Exception:  # noqa: BLE001 - 关不掉不影响本次已取到的 token
+        logger.exception("关闭模拟器失败")
+        return False
 
 
 def pull_from_emulator(adb: str = "", tmpdir: str | None = None,
@@ -451,19 +538,32 @@ def refresh_with_wake(session: Session, user_id: int, *, adb: str = "",
     # 所以:模拟器在线 ⇒ 先唤醒 App 取 App token;不在线 ⇒ 才回落纯 HTTP。
     # `prefer_emulator=True/False` 仍然强制单走某一条(体检/排障用)。
     http_reason = "未尝试"
-    emu_online = prefer_emulator is True or (
-        prefer_emulator is None and emulator_ready(adb, serial=serial))
+    #: ★ **按需启停**(2026-10-22):模拟器不必一直开着 —— 续期这一刻拉起来,
+    #: 取到 token 就关掉;`started_here` 保证**只关我们自己拉起的**实例。
+    started_here = False
+    if prefer_emulator is True:
+        emu_online = True
+    elif prefer_emulator is False:
+        emu_online = False
+    else:
+        was_ready = emulator_ready(adb, serial=serial)
+        emu_online = was_ready or ensure_emulator(serial, adb=adb)
+        started_here = emu_online and not was_ready
     if emu_online:
         for i in range(max(1, attempts)):
             wake_app(adb, serial=serial)
             last = refresh(session, user_id, adb=adb, serial=serial,
                            platform=platform)   # 它自己按 app 档验活
             if last.get("ok"):
+                if started_here:
+                    quit_emulator(serial, adb=adb)
                 if i:
                     logger.info("微信读书 App token 第 %d 次唤醒后取到有效值", i + 1)
                 return last
             logger.info("第 %d 次唤醒+重取仍无效:%s", i + 1, str(last.get("reason"))[:80])
             time.sleep(3)
+        if started_here:
+            quit_emulator(serial, adb=adb)
         if prefer_emulator is True:
             http_reason = "未尝试(只走 App 那一路)"
         else:

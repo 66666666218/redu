@@ -241,6 +241,14 @@ class Settings(BaseSettings):
                                      # ——① skey 恒新,轮内 auth 兜底几乎不用出手;② renewal=换新会话,
                                      # mp/articles 列表只在会话初期可用,每轮都跑在窗口 freshly 重开的会话上,
                                      # 同日多篇枚举机会最大化(2026-09-28 定稿)
+    # ---- 微信读书模拟器**按需启停**(2026-10-22)----
+    #: 续期时模拟器不在 ⇒ 用 `ldconsole launch --index N` **自动拉起来**(默认关)。
+    #: 背景:能用的 token 只有 App 签发的($-2012$ 那条对照),但**不需要一直开着** ——
+    #: 只要在续期这一刻开 ~1 分钟,取到 token 就能关;监听轮本身不碰模拟器。
+    weread_emulator_autostart: bool = False
+    #: 是我们自己拉起来的实例 ⇒ 取到 token 后**自动关掉**(别人本来就开着的不要动)。
+    weread_emulator_quit_after: bool = True
+    weread_ldconsole_path: str = r"D:\leidian\LDPlayer14\ldconsole.exe"
     candidate_search_terms: str = ""   # 候选发现搜索词(逗号分隔;空=仅用对标号标题画像词)
     keyword_search_terms: str = "夸克网盘资源,百度网盘资源,Switch模拟器,PS5游戏资源,剪映模板"  # 关键词文章监控搜索词(逗号分隔,每4h一轮)
     candidate_mine_terms: int = 6      # 标题画像词上限(从已入库标题挖高频内容词)

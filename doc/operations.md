@@ -1042,6 +1042,24 @@ python scripts/weread_app_login.py --serial emulator-5556 --key weread#2
 ⚠️ 模拟器里的**微信读书 App 必须登录着**;App 长时间在后台时 `accessToken` 会失效,
 "唤醒一次"就能刷新(WAL 里才是当前值,脚本会连 `-wal` 一起拉)。
 
+#### 5d.1 不必一直开着:续期时自动启停(2026-10-22)
+
+**监听轮本身不碰模拟器** —— 它只读库里存好的 token。所以模拟器只需要在**续期那一刻**
+开一会儿。打开这两个开关后(`.env`):
+
+```ini
+WEREAD_EMULATOR_AUTOSTART=true   # 续期时模拟器不在 ⇒ ldconsole launch --index N
+WEREAD_EMULATOR_QUIT_AFTER=true  # 取到 token 后关掉(**只关我们自己拉起的**)
+```
+
+- 续期是 **03:52 / 07:52 / 13:52 / 19:52**(每天 4 次)⇒ **一天只开 4 次,每次约 1 分钟**;
+- `serial` 与实例号的换算:`emulator-5554 → index 0`、`emulator-5556 → index 1`(雷电的端口规律);
+- 用户**本来就开着**的实例不会被关(代码只关 `ensure_emulator` 这次拉起的);
+- 找不到 `ldconsole` / 启不来 ⇒ 回落纯 HTTP(与"模拟器没开"同一条路,不会把监听搞挂)。
+
+> 想再少开几次:先观察 token 的实际有效期(看两轮续期之间 `weread_list(ok=…)` 有没有掉)。
+> 如果撑得过 24h,可以把 `WEREAD_REFRESH_CRON` 从 4 次/天降到 1~2 次/天。
+
 ## 6. 推送重复(总群和专属群都收到)
 
 - 设计如此:公众号监听双推(专属群+总群);不想收总群可在飞书总群关闭该机器人

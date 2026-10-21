@@ -111,8 +111,13 @@ class TestRefreshWithWake:
         assert called["http"] == 0, "App 成功就不该再碰 HTTP"
 
     def test_默认模拟器不在才走纯HTTP(self, monkeypatch) -> None:
-        """默认顺序的另一半:模拟器不在 ⇒ 回落纯 HTTP,不浪费三次唤醒。"""
+        """默认顺序的另一半:模拟器不在 ⇒ 回落纯 HTTP,不浪费三次唤醒。
+
+        ⚠️ 测试里必须把 `ensure_emulator` 也钉死 —— 否则开了
+        `WEREAD_EMULATOR_AUTOSTART` 的部署跑测试时会**真的去拉模拟器**。
+        """
         monkeypatch.setattr(wat, "emulator_ready", lambda *a, **k: False)
+        monkeypatch.setattr(wat, "ensure_emulator", lambda *a, **k: False)
 
         def _boom(*a, **k):
             raise AssertionError("模拟器不在时不该尝试唤醒 App")
@@ -126,6 +131,42 @@ class TestRefreshWithWake:
         out = wat.refresh_with_wake(None, 1)
         assert out["ok"] is True and out.get("via") == "http"
         assert called["http"] == 1
+
+    def test_按需启动_取到token后关掉实例(self, monkeypatch) -> None:
+        """★ 2026-10-22:模拟器**不必一直开着** —— 续期这一刻拉起来,取到就关。"""
+        monkeypatch.setattr(wat, "emulator_ready", lambda *a, **k: False)
+        monkeypatch.setattr(wat, "ensure_emulator", lambda *a, **k: True)
+        monkeypatch.setattr(wat.time, "sleep", lambda s: None)
+        monkeypatch.setattr(wat, "wake_app", lambda *a, **k: True)
+        monkeypatch.setattr(wat, "refresh",
+                            lambda *a, **k: {"ok": True, "accessToken": "T", "vid": "V"})
+        quit_calls: list[int] = []
+        monkeypatch.setattr(wat, "quit_emulator",
+                            lambda *a, **k: (quit_calls.append(1), True)[1])
+        out = wat.refresh_with_wake(None, 1)
+        assert out["ok"] is True
+        assert quit_calls == [1], "是我们自己拉起的实例 ⇒ 取到 token 后必须关掉"
+
+    def test_本来就开着的实例不许关(self, monkeypatch) -> None:
+        """反面对照:用户本来就开着模拟器 ⇒ 取完 token 不能把人家的窗口关了。"""
+        monkeypatch.setattr(wat, "emulator_ready", lambda *a, **k: True)
+        monkeypatch.setattr(wat, "ensure_emulator",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                AssertionError("已经在跑,不该再启")))
+        monkeypatch.setattr(wat.time, "sleep", lambda s: None)
+        monkeypatch.setattr(wat, "wake_app", lambda *a, **k: True)
+        monkeypatch.setattr(wat, "refresh",
+                            lambda *a, **k: {"ok": True, "accessToken": "T", "vid": "V"})
+        quit_calls: list[int] = []
+        monkeypatch.setattr(wat, "quit_emulator",
+                            lambda *a, **k: (quit_calls.append(1), True)[1])
+        out = wat.refresh_with_wake(None, 1)
+        assert out["ok"] is True and quit_calls == []
+
+    def test_serial到雷电实例号的换算(self) -> None:
+        assert wat.emulator_index("emulator-5554") == 0
+        assert wat.emulator_index("emulator-5556") == 1
+        assert wat.emulator_index("127.0.0.1:5555") is None
 
     def test_模拟器不在就直接走纯HTTP(self, monkeypatch) -> None:
         """模拟器不在 ⇒ **不浪费**三次唤醒,直接走 HTTP。
