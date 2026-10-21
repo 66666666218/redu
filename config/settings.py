@@ -241,10 +241,11 @@ class Settings(BaseSettings):
                                      # ——① skey 恒新,轮内 auth 兜底几乎不用出手;② renewal=换新会话,
                                      # mp/articles 列表只在会话初期可用,每轮都跑在窗口 freshly 重开的会话上,
                                      # 同日多篇枚举机会最大化(2026-09-28 定稿)
-    # ---- 微信读书模拟器**按需启停**(2026-10-22)----
-    #: 续期时模拟器不在 ⇒ 用 `ldconsole launch --index N` **自动拉起来**(默认关)。
-    #: 背景:能用的 token 只有 App 签发的($-2012$ 那条对照),但**不需要一直开着** ——
-    #: 只要在续期这一刻开 ~1 分钟,取到 token 就能关;监听轮本身不碰模拟器。
+    # ---- 微信读书模拟器**只做回落**(2026-10-22)----
+    #: 续期默认纯 HTTP 现铸;只有 HTTP 失败(refreshToken 被吊销)且模拟器不在 ⇒
+    #: 用 `ldconsole launch --index N` **自动拉起来**(默认关)。
+    #: 背景:HTTP token 新鲜时可用(实测 15 篇),寿命约 4~5h;续期在监听前 10 分钟
+    #: ⇒ 正常情况下模拟器**一次都不用开**。
     weread_emulator_autostart: bool = False
     #: 是我们自己拉起来的实例 ⇒ 取到 token 后**自动关掉**(别人本来就开着的不要动)。
     weread_emulator_quit_after: bool = True

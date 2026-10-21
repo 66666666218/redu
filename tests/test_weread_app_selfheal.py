@@ -84,20 +84,17 @@ class TestRefreshWithWake:
         assert calls["n"] == 3, "三次都要试满"
         assert "人工" in out["reason"], f"全失败时要给出人要做的那一步:{out['reason']}"
 
-    def test_默认模拟器在线就先走App(self, monkeypatch) -> None:
-        """★ 2026-10-22 对照定案:模拟器在线时**先走 App**。
+    def test_默认先走HTTP_模拟器在线也不碰(self, monkeypatch) -> None:
+        """★ 2026-10-22 最终对照:**HTTP 新鲜时能用**,而且最便宜。
 
-        同一账号、同一本书:
-          · 库里 HTTP 铸的 `eink` token ⇒ `-2012 登录超时`(换 app 头也一样);
-          · 模拟器里 App 签发的 token 配 `app` 头 ⇒ **27 篇、read_num 正常**。
-        ⇒ 2026-10-18 的「先纯 HTTP」被这次对照推翻:HTTP 只能证明"认证可过"
-        (运气好时 `-2041`),不能保证能取数。
+        证据:同一账号的 `refreshToken` **现铸** eink token ⇒ **15 篇、read_num 正常**;
+        模拟器 App token 也 ⇒ 27 篇。此前判"HTTP 不能用"是拿**19:52 铸的过期 token**
+        当样本(到 00:30 已 >4.5h,回 `-2012`)。
+        ⇒ 默认顺序:**先 HTTP**;HTTP 失败才按需拉起模拟器。
         """
         called = {"http": 0, "wake": 0}
         monkeypatch.setattr(wat, "emulator_ready", lambda *a, **k: True)
         monkeypatch.setattr(wat.time, "sleep", lambda s: None)
-        monkeypatch.setattr(wat, "refresh",
-                            lambda *a, **k: {"ok": True, "accessToken": "T", "vid": "V"})
         monkeypatch.setattr(wat, "wake_app",
                             lambda *a, **k: (called.__setitem__("wake", called["wake"] + 1), True)[1])
 
@@ -106,36 +103,29 @@ class TestRefreshWithWake:
             return {"ok": True, "via": "http"}
         monkeypatch.setattr(wat, "refresh_via_http", _http)
         out = wat.refresh_with_wake(None, 1)          # 默认(prefer_emulator=None)
-        assert out["ok"] is True and out.get("accessToken") == "T"
-        assert called["wake"] == 1, "模拟器在线就该先唤醒 App"
-        assert called["http"] == 0, "App 成功就不该再碰 HTTP"
+        assert out["ok"] is True and out.get("via") == "http"
+        assert called["http"] == 1
+        assert called["wake"] == 0, "HTTP 成功就不该碰模拟器(哪怕它开着)"
 
-    def test_默认模拟器不在才走纯HTTP(self, monkeypatch) -> None:
-        """默认顺序的另一半:模拟器不在 ⇒ 回落纯 HTTP,不浪费三次唤醒。
-
-        ⚠️ 测试里必须把 `ensure_emulator` 也钉死 —— 否则开了
-        `WEREAD_EMULATOR_AUTOSTART` 的部署跑测试时会**真的去拉模拟器**。
-        """
+    def test_默认模拟器不在且HTTP失败_不浪费唤醒(self, monkeypatch) -> None:
+        """HTTP 失败 + 模拟器不在 + 自动启停关 ⇒ 直接报错,不空转唤醒。"""
         monkeypatch.setattr(wat, "emulator_ready", lambda *a, **k: False)
         monkeypatch.setattr(wat, "ensure_emulator", lambda *a, **k: False)
 
         def _boom(*a, **k):
             raise AssertionError("模拟器不在时不该尝试唤醒 App")
         monkeypatch.setattr(wat, "wake_app", _boom)
-        called = {"http": 0}
-
-        def _http(session, user_id, **k):
-            called["http"] += 1
-            return {"ok": True, "via": "http"}
-        monkeypatch.setattr(wat, "refresh_via_http", _http)
+        monkeypatch.setattr(wat, "refresh_via_http",
+                            lambda *a, **k: {"ok": False, "reason": "http fail"})
         out = wat.refresh_with_wake(None, 1)
-        assert out["ok"] is True and out.get("via") == "http"
-        assert called["http"] == 1
+        assert out["ok"] is False and "两条路都没成" in out["reason"]
 
     def test_按需启动_取到token后关掉实例(self, monkeypatch) -> None:
-        """★ 2026-10-22:模拟器**不必一直开着** —— 续期这一刻拉起来,取到就关。"""
+        """★ 2026-10-22:HTTP 失败 → 按需拉起模拟器;**取到就关**。"""
         monkeypatch.setattr(wat, "emulator_ready", lambda *a, **k: False)
         monkeypatch.setattr(wat, "ensure_emulator", lambda *a, **k: True)
+        monkeypatch.setattr(wat, "refresh_via_http",
+                            lambda *a, **k: {"ok": False, "reason": "http fail"})
         monkeypatch.setattr(wat.time, "sleep", lambda s: None)
         monkeypatch.setattr(wat, "wake_app", lambda *a, **k: True)
         monkeypatch.setattr(wat, "refresh",
@@ -148,11 +138,13 @@ class TestRefreshWithWake:
         assert quit_calls == [1], "是我们自己拉起的实例 ⇒ 取到 token 后必须关掉"
 
     def test_本来就开着的实例不许关(self, monkeypatch) -> None:
-        """反面对照:用户本来就开着模拟器 ⇒ 取完 token 不能把人家的窗口关了。"""
+        """反面对照:HTTP 失败、模拟器本来就开着 ⇒ 取完 token 不能把人家的窗口关了。"""
         monkeypatch.setattr(wat, "emulator_ready", lambda *a, **k: True)
         monkeypatch.setattr(wat, "ensure_emulator",
                             lambda *a, **k: (_ for _ in ()).throw(
                                 AssertionError("已经在跑,不该再启")))
+        monkeypatch.setattr(wat, "refresh_via_http",
+                            lambda *a, **k: {"ok": False, "reason": "http fail"})
         monkeypatch.setattr(wat.time, "sleep", lambda s: None)
         monkeypatch.setattr(wat, "wake_app", lambda *a, **k: True)
         monkeypatch.setattr(wat, "refresh",
