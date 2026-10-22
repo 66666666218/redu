@@ -27,6 +27,8 @@ import json
 
 import re
 
+import time
+
 import uuid
 
 import zlib
@@ -380,10 +382,12 @@ class _WereadAppPool:
             norm.append((str(key), client))
         self._clients = norm
         self._i = 0
-        #: 本轮已确认**用不了**的账号(额度/登录态/网络)—— 不在一发上反复撞。
-        #: ⚠️ 这一轮内有效(pool 每轮新建),下一轮会重新试 —— 与 `weread_budget` 的
-        #:   30 分钟冷静期不同:这里只是"别在同一次轮询里连撞 N 次"。
-        self._dead: set[int] = set()
+        #: 本轮已确认**用不了**的账号(**到期时刻**,epoch 秒)—— 不在一发上反复撞。
+        #: ⚠️ 2026-10-22 从"永久 dead"改成"冷静 `PROBE_MIN` 分钟":额度挡是**时限性**的
+        #:    (10-18 实测 `-2041` → 20 分钟后同一账号 OK:94 篇),而一轮监听要跑 20~30 分钟
+        #:    ⇒ 原来一旦失败,本轮**剩余号全部直接抛错**,即使 10 分钟后额度已恢复也不再试。
+        #:    现在到期自动复活,配合 `weread_budget.call` 的半开探测,恢复的那一刻就能用上。
+        self._dead_until: dict[int, float] = {}
         self._last_error: BaseException | None = None
 
     def __len__(self) -> int:
@@ -398,9 +402,10 @@ class _WereadAppPool:
     def articles(self, book_id: str, *, session=None, user_id: int = 1,
                  allow_probe: bool = False, **kw):
         n = len(self._clients)
-        alive = [i for i in range(n) if i not in self._dead]
+        now = time.time()
+        alive = [i for i in range(n) if self._dead_until.get(i, 0.0) <= now]
         if not alive:
-            # 全用不了:抛上一次的错(不改异常语义),而不是死等
+            # 全在冷静期:抛上一次的错(不改异常语义),而不是死等
             if self._last_error is not None:
                 raise self._last_error
             raise RuntimeError("没有可用的 App 凭据")
@@ -417,7 +422,8 @@ class _WereadAppPool:
                         what=f"app/book/articles[{key}]", scope=self._scope(key),
                         allow_probe=allow_probe)
             except Exception as exc:  # noqa: BLE001 - 换下一枚账号(与账号池同一条纪律)
-                self._dead.add(idx)
+                #: 冷静 `PROBE_MIN` 分钟 —— 到点自动复活(额度挡是时限性的,见 `_dead_until`)
+                self._dead_until[idx] = time.time() + weread_budget.PROBE_MIN * 60
                 self._last_error = exc
                 continue
             self._i = (idx + 1) % n
@@ -832,6 +838,28 @@ def _shelf_ts_to_dt(value) -> datetime | None:
     return datetime.fromtimestamp(n)
 
 
+def _reads_budget(settings, app_client) -> int:
+    """本轮**列表请求总预算** = `每账号份额 × App 账号数`(2026-10-22)。
+
+    抽成函数是为了能单测(内联在 300 行的监听轮里就没法单独钉住)。
+    - 没配 App 凭据 ⇒ 按 1 份算(网页路照旧按同一份额度口径);
+    - `len()` 不可用(测试替身)⇒ 按 1 份算,**不抛**;
+    - 每账号份额取自 `wechat_listen_reads_budget_per_acct`,非法值回落 20(与默认值一致)。
+
+    ⚠️ 这是"**这一轮最多发几次列表请求**",不是"最多问几个号":失败请求同样花额度、
+    同样加深风控,所以调用方用 `_list_attempts`(成功/失败都算)去对账。
+    """
+    try:
+        n = len(app_client) if app_client is not None else 1
+    except Exception:  # noqa: BLE001 - 替身没有 __len__
+        n = 1
+    try:
+        per = int(getattr(settings, "wechat_listen_reads_budget_per_acct", 20) or 20)
+    except (TypeError, ValueError):
+        per = 20
+    return max(1, per) * max(1, int(n))
+
+
 def _needs_reads_24h(session: Session, b: WechatBenchmark, gate: dict,
                      cutoff: datetime) -> bool:
     """这个号近 **24h** 有没有新文?有才值得花列表额度(精确阅读数)。
@@ -1080,7 +1108,13 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     if gate["ok"]:
         # 稳定排序把"可能有更新/无水位"的号排到队头:额度/熔断真触发时,稀缺的请求
         # 先花在最可能吐新文的号上(书架说没更新、仅到强制问询期的号殿后)
-        rows = sorted(rows, key=lambda b: gate["tier"].get(b.id, 0))
+        #
+        # ★ **同档内按"最久没问过列表"排**(2026-10-22):列表预算有限,若每轮都按固定
+        #   顺序问前 N 个,后面那些号**永远轮不到**。次键用 `_list_marks`(问过就记,
+        #   失败也记,见 `_list_attempts`)⇒ 预算是"轮转"而不是"按 id 切片"。
+        _marks = _list_marks(session, user_id)
+        rows = sorted(rows, key=lambda b: (gate["tier"].get(b.id, 0),
+                                           _marks.get(_list_key(b), 0.0)))
     now = datetime.now()
     new_rows: list[WechatArticle] = []
     failed = 0
@@ -1114,6 +1148,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     # 兜底存在的理由:网页 `/web/mp/articles` 被账号级拦截,而它是**精确阅读数**的唯一来源
     # (见 weread_app_client.py 头注释)。不建这一步,阅读数就永远是 0。
     app_client = _weread_app_client(session, user_id)
+    #: ★ **本轮列表请求的总预算**(2026-10-22):见 `_reads_budget` 的说明。
+    reads_budget = _reads_budget(settings, app_client)
     listed_keys: set[str] = set()      # 本轮**真问到**列表的号 → 轮末记号(问不到的不记)
     quota_skipped = 0
     no_free_source = 0
@@ -1179,6 +1215,13 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
             if not need_reads:
                 wr_stats["weread_list_new_skipped"] = \
                     wr_stats.get("weread_list_new_skipped", 0) + 1
+            elif _list_attempts(wr_stats) >= reads_budget:
+                #: ★ **预算闸门**(2026-10-22):有额度就一次打穿,正是"当天读数全没"的成因。
+                #: 超出预算的号本轮只取 cover,下轮由「最久没问过」排序优先轮到。
+                #: ⚠️ 与"没有新文"分开计数 —— 两者在运维记录里必须能区分。
+                need_reads = False
+                wr_stats["weread_list_budget_skipped"] = \
+                    wr_stats.get("weread_list_budget_skipped", 0) + 1
             try:
                 weread = weread or _root.WereadClient(cookie)
                 _seen = _list_attempts(wr_stats)
@@ -1428,7 +1471,10 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                    + (f" accts={_acct}" if (_acct := _acct_brief(pool, wr_stats)) else "")
                    + f" off={wr_stats.get('weread_list_off', 0)}"
                    f" off_with_new={off_new} skipped={wr_stats.get('weread_list_skipped', 0)}"
-                   f" new_skip={wr_stats.get('weread_list_new_skipped', 0)})")
+                   f" new_skip={wr_stats.get('weread_list_new_skipped', 0)}"
+                   # ★ 2026-10-22:「有新文但**预算用完**没问」必须与「没新文」分开报 ——
+                   #   前者是覆盖不足(该加账号/调预算),后者是正常省额度。
+                   f" budget_skip={wr_stats.get('weread_list_budget_skipped', 0)})")
     if gate["ok"]:
         # `skip` 是**计划**跳过数,`saved` 是**实际**跳过数(wr_stats 里那个计数)。
         # ⚠️ 加 `saved` 是因为 2026-10-05 审计发现 `weread_cover_shelf_skipped`

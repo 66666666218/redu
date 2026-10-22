@@ -110,12 +110,22 @@ class TestForPlaywright:
         class S(_S):
             xhs_use_proxy = False
         assert N.for_playwright(S()) is None
-        #: ⚠️ 直连**必须**配 `--no-proxy-server`,光"不传 proxy"没用
-        assert "--no-proxy-server" in N.playwright_direct_args()
+        #: ⚠️ 直连**必须**配启动参数,光"不传 proxy"没用(Chromium 仍会探测系统代理)
+        assert N.playwright_direct_args(), "直连时必须给浏览器显式参数"
 
-    def test_direct_写法不生效所以只能用启动参数(self) -> None:
-        """实测 `proxy={"server": "direct://"}` **不生效**(仍走系统代理探测)。"""
-        assert N.playwright_direct_args() == ["--no-proxy-server"]
+    def test_direct_写法才是有效的那个启动参数(self) -> None:
+        """★ **2026-10-22 实测订正**:
+
+        | 方式                        | 结果                            |
+        |-----------------------------|---------------------------------|
+        | 不指定(走系统代理)          | ❌ `ERR_PROXY_CONNECTION_FAILED` |
+        | `--no-proxy-server`         | ❌ **仍然** `ERR_PROXY_CONNECTION_FAILED` |
+        | `--proxy-server=direct://`  | ✅ HTTP 200                      |
+
+        旧断言写的是相反结论(`--no-proxy-server` 可靠、`direct://` 无效),
+        当天用 Playwright 1.61 与 1.63 各跑一遍、连续三组对照,结果一致 ⇒ 以它为准。
+        """
+        assert N.playwright_direct_args() == ["--proxy-server=direct://"]
 
 
 class TestEgressIp:
@@ -427,3 +437,37 @@ class TestCaBundle:
         assert got.get("_used") == "cffi", "应当走 curl_cffi,而不是退回 requests"
         assert got.get("verify"), "★ 必须把 CA 证书包传进去,否则 HTTPS 全失败"
         assert all(ord(c) < 128 for c in got["verify"])
+
+
+# ------------------------------------------------ 死代理回落(2026-10-22)
+
+class TestSystemProxyDeadPort:
+    """系统代理**还活着吗** —— 死了就必须回落直连。
+
+    2026-10-22 事故:代理软件退出后注册表残留 `127.0.0.1:7892`,
+    而 `system_proxy()` 原来无条件把它交给浏览器 ⇒ 小红书页面路与 CDP 路
+    一起 `ERR_PROXY_CONNECTION_FAILED`,整平台失败。
+    """
+
+    @staticmethod
+    def _patch(monkeypatch, url: str, alive: bool) -> None:
+        #: ⚠️ 读的是 `urllib.request`,不是 `requests.utils` —— 后者没导出
+        #: `getproxies_registry`(requests 2.34),旧写法因此恒返 `{}`(2026-10-22)。
+        import urllib.request as ur
+
+        monkeypatch.setattr(ur, "getproxies_environment", lambda: {})
+        monkeypatch.setattr(ur, "getproxies_registry",
+                            lambda: {"http": url, "https": url})
+        import app.utils.proxy as P
+
+        monkeypatch.setattr(P, "system_proxy_alive", lambda u, **kw: alive)
+
+    def test_死代理返回空字典(self, monkeypatch) -> None:
+        self._patch(monkeypatch, "http://127.0.0.1:7892", alive=False)
+        assert N.system_proxy() == {}
+        assert N.for_playwright() is None          # → 调用方会带直连参数
+        assert N.for_requests() is None
+
+    def test_活着的代理照旧返回(self, monkeypatch) -> None:
+        self._patch(monkeypatch, "http://127.0.0.1:7892", alive=True)
+        assert N.system_proxy().get("https") == "http://127.0.0.1:7892"

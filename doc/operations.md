@@ -256,6 +256,28 @@ UC / 迅雷只有 `pan_types` 标签、没有我方链(卡片上是 `—`),要�
   - ★ **日常不需要一直开着模拟器**:token 走**纯 HTTP** 铸(实测能直接打 `/book/articles`,
     29 篇带读数)。模拟器只在**每个账号首次读 `deviceId`+`refreshToken`**、
     以及 **refreshToken 被吊销后重新登录**时需要。
+- ★★ **2026-10-22:"24h 新文优先"必须叠加额度预算,否则一天只够一轮**
+  - **量到的形状**(当天 `runs.detail`):
+    `04:24 ok=25 app=39 new=420` → `08:04 app_fail=59 app_err=-2041` →
+    `14:05 app_fail=65 app_err=-2041` → 17:20 手工实测仍 `-2041`。
+    即**凌晨那一轮把当天额度打光,白天发布的新文一整天拿不到精确阅读数**。
+  - **成因不是"额度没了"**,是闸门只判"有没有新文"、不判"这一轮花不花得起":
+    2026-10-20 改成 `_needs_reads_24h` 之后,积压多的一轮(04:24 `new=420`)会
+    把 60+ 个号**一次问完**;`-2041` 在历史探测里会自愈(10-18 20:06 `-2041`
+    → 20:27 同一账号 `OK:94 篇`),但当天剩下的轮次已经没有余额可用。
+  - **修复**(三处,互相配套):
+    ① `wechat_listen_reads_budget_per_acct`(默认 **20**)= 每账号每轮预算,
+       总预算 × App 账号数;超出的号**只取 cover**,不花额度;
+    ② 轮内排序在同档(tier)内再按「**最久没问过列表**」排 ⇒ 覆盖靠**轮转**兑现,
+       不会每轮都问固定的前 N 个号;
+    ③ App 账号池的冷静期从"本轮永久 dead"改成 **10 分钟**
+       (`PROBE_MIN`)。额度挡是时限性的,一轮监听跑 20~30 分钟,
+       原来一旦失败剩余号全部直接抛错,即使额度已恢复也不再试。
+  - **怎么看**:detail 里 `budget_skip=N` = 本轮"有新文但预算用完"没问的号数,
+    与 `new_skip`(没新文,正常省额度)**必须分开看**;
+    `budget_skip` 长期偏高 ⇒ 该加账号,而不是调高单个账号的预算。
+  - ⚠️ **"单号 60~80 发/窗口"这个旧数字与今天的实测不符**:04:24 那轮合计 39 次
+    成功之后就 `-2041`(两个账号分担,约 20/号)。所以默认取 20,别按旧数字放大。
 
 看三处就知道本轮有没有兑现(不要把"success + new=2"当成"全推到了"):
 
@@ -1649,6 +1671,46 @@ python scripts/job_liveness.py --strict   # 有"从没跑过/已超期"就退出
 
 显式代理不受影响:闲鱼专用代理(`xianyu_proxy_url`)、隧道/提取式代理池
 (`get_proxies()`)都走显式 `proxies=` 参数,与本开关无关。
+
+### 13a-2. 同一事故 **2026-10-22 复发**,而上面那层"免疫"只覆盖了 requests
+
+现场:代理软件再次退出,`127.0.0.1:7892` 无监听,`ProxyEnable=1` 残留。表现为:
+
+| 路径 | 症状 |
+|---|---|
+| 微信读书(App 路,requests) | `ProxyError`(独立脚本;生产进程有 `disable_env_proxies()` 所以不受影响) |
+| 小红书页面路 / CDP 路 | `Page.goto: net::ERR_PROXY_CONNECTION_FAILED` |
+| 快手(MediaCrawler 子进程) | 退出码 1,堆栈只给 Playwright 的 `wrap_api_call` |
+
+⇒ **"系统代理免疫"必须分进程/分客户端看**:
+`disable_env_proxies()` 只 patch 当前 Python 进程里的 `requests.utils`;
+Playwright 的 Chromium、以及独立 venv 里跑的 MediaCrawler **完全不听话**。
+
+修复(2026-10-22,三处):
+
+1. `app/utils/proxy.py::system_proxy_alive()` —— TCP 探活 + 60 秒缓存
+   (`system_proxy_alive_now` 用于刚启停的场景)。死端口判死,**不据此报故障**,
+   只让调用方决定"要不要改走直连"。
+2. `xhs_net.system_proxy()` 读完系统代理**先探活**,死了返回 `{}` ⇒
+   `for_requests/for_playwright` 自然回落直连。顺带修掉一个静默 bug:
+   `requests` 2.34 的 `requests.utils` **没有导出 `getproxies_registry`**,
+   旧写法对 `getattr` 抛异常被宽 `except` 吞掉,结果该函数**恒返 `{}`**
+   (与本模块"读浏览器那份系统代理"的设计正好相反)。现在直接问 `urllib.request`。
+3. `xhs_page_source._launch_kwargs()` 显式给浏览器出口;MediaCrawler 的
+   7 个平台 launch 加 `--proxy-server=direct://`(见
+   `patches/mediacrawler-direct-proxy.md`)。
+
+⚠️ **`--no-proxy-server` 不生效、`--proxy-server=direct://` 才生效**
+(Playwright 1.61 与 1.63 各测一遍、三组对照)。`xhs_net` 里 2026-10-12 的
+旧对照表写的是相反结论,已按实测订正 —— 下次别再照旧表改回去。
+
+### 13a-3. 死代理修好之后暴露的第二个独立故障:浏览器 channel
+
+快手修完代理后报 `Chromium distribution 'chrome' is not found at
+...\Google\Chrome\Application\chrome.exe` —— 本机**只装了 Edge**。
+MediaCrawler 的 bilibili/kuaishou/tieba/weibo/zhihu 硬编码 `channel="chrome"`。
+⇒ `tools/utils.py::browser_channel()` 按 Chrome → Edge → None 探测,
+各 launch 改用它。**这两个故障原本叠在同一条报错里**,先修哪个都能让另一个露出来。
 
 ### 事故时间线备注
 

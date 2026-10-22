@@ -90,21 +90,39 @@ def system_proxy() -> dict[str, str]:
     ⚠️ 这里**故意绕开** `requests.utils.getproxies` —— 那个函数被
     `disable_env_proxies()` 打成了恒返 `{}`(全局策略)。而我们要的恰恰是
     **浏览器正在用的那个**系统代理,只能自己去读。
+
+    ★★ **2026-10-22:读完必须探活**。代理软件退出后注册表 `ProxyEnable=1` 会残留
+    一条死端口(实测 `127.0.0.1:7892`)—— 而本模块原来的口径是"浏览器用它,所以我们也用",
+    于是小红书两条页面路一起 `ERR_PROXY_CONNECTION_FAILED`。
+    死代理**不是**"出口不一致"那种隐性伤害,而是让整条链明明白白地发不出去:
+    此时**直连**永远是更正确的选择(目标全是国内站)。
+    ⇒ 探活不通就返回 `{}`,调用方自然回落直连。
+
+    ★ **2026-10-22 二次修正:必须读 `urllib.request`,不是 `requests.utils`**。
+    `requests` 2.34 里 `requests.utils.getproxies` 只是 `urllib.request.getproxies`
+    的别名,而 `getproxies_registry` **根本没被导出到 `requests.utils`**
+    (实测 `dir()` 里没有它)。旧写法对它 `getattr(...)` 抛异常、被宽 `except` 吞掉,
+    结果**恒返 `{}`** —— 与"这里读的是系统代理"的注释正好相反。
+    改成直接问 `urllib.request`:它不受 `disable_env_proxies()` 影响
+    (那个 patch 只改 `requests.utils` 命名空间里的名字),正是本函数要的语义。
     """
     try:
-        import requests.utils as ru
+        import urllib.request as ur
 
-        got: dict[str, str] = {}
-        for fn in ("getproxies_environment", "getproxies_registry"):
-            try:
-                got = dict(getattr(ru, fn)() or {})
-            except Exception:  # noqa: BLE001 - 非 Windows 没有 registry 那个
-                got = {}
-            if got:
-                break
-        return {k: v for k, v in got.items() if v}
-    except Exception:  # noqa: BLE001
+        got: dict[str, str] = dict(ur.getproxies_environment() or {})
+        if not got:
+            got = dict(ur.getproxies_registry() or {})
+    except Exception:  # noqa: BLE001 - 非 Windows 没有 registry 那个
         return {}
+    out = {k: v for k, v in got.items() if v}
+    url = out.get("https") or out.get("http") or ""
+    if url:
+        from app.utils.proxy import system_proxy_alive
+
+        if not system_proxy_alive(url):
+            logger.warning("系统代理 %s 不可达(代理软件已退出?)⇒ 小红书改直连", url)
+            return {}
+    return out
 
 
 def _normalize(u: str) -> str:
@@ -188,10 +206,20 @@ def for_playwright(settings=None) -> dict[str, str] | None:
 def playwright_direct_args() -> list[str]:
     """`for_playwright()` 返回 `None`(走直连)时,**必须**一并给浏览器的启动参数。
 
-    ⚠️ 为什么不能用 `proxy={"server": "direct://"}`:实测**不生效**,Chromium 仍会
-    去探测系统代理 ⇒ 照样 `ERR_PROXY_CONNECTION_FAILED`。只有 `--no-proxy-server` 可靠。
+    ★★ **2026-10-22 实测把这里的结论改了过来(别再照抄旧注释)**。
+    同一台机器、同一条死代理(`127.0.0.1:7892`)、Playwright 1.61 与 1.63 各测一遍:
+
+    | 给浏览器的方式                          | 结果                             |
+    |-----------------------------------------|----------------------------------|
+    | 不指定(让它自己走系统代理)              | ❌ `ERR_PROXY_CONNECTION_FAILED`  |
+    | `--no-proxy-server`                     | ❌ **仍是** `ERR_PROXY_CONNECTION_FAILED` |
+    | `--proxy-server=direct://`              | ✅ HTTP 200                       |
+
+    旧注释写的正好相反(说 `direct://` 不生效、`--no-proxy-server` 可靠)。
+    当时为什么测出相反结果已无从复现,但**这次是两套 Playwright、连续三组对照**,
+    以它为准 —— 判据统一成 `direct://`。
     """
-    return ["--no-proxy-server"]
+    return ["--proxy-server=direct://"]
 
 
 def egress_ip(settings=None, timeout: int = 15) -> tuple[str, str]:

@@ -134,3 +134,45 @@ def test_disable_env_proxies_blocks_env_proxy(monkeypatch) -> None:
         assert s.proxies["http"] == "http://explicit.example:9"
     finally:
         requests.utils.getproxies = original  # 不泄漏到其他测试
+
+
+# ------------------------------------------------ 系统代理探活(2026-10-22)
+# 死代理(代理软件退出后注册表残留 `ProxyEnable=1`)会让 requests 抛 ProxyError、
+# 让 Chromium 回 `ERR_PROXY_CONNECTION_FAILED`、让 MediaCrawler 整平台退出码 1。
+# `disable_env_proxies()` 只治得了本进程的 requests ⇒ 需要一个"这条代理还活着吗"的判据。
+
+def test_proxy_host_port_解析三种写法() -> None:
+    from app.utils.proxy import _proxy_host_port
+
+    assert _proxy_host_port("http://127.0.0.1:7892") == ("127.0.0.1", 7892)
+    assert _proxy_host_port("127.0.0.1:7892") == ("127.0.0.1", 7892)      # 无 scheme
+    assert _proxy_host_port("http://u:p@proxy.example:8080") == ("proxy.example", 8080)
+    assert _proxy_host_port("https://proxy.example") == ("proxy.example", 443)
+    assert _proxy_host_port("") == ("", 0)
+
+
+def test_探活能认出已经关掉的端口() -> None:
+    """死端口必须判死 —— 这是整条修复的判据。"""
+    import socket
+
+    from app.utils.proxy import system_proxy_alive_now
+
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()                       # 立刻释放 ⇒ 这个端口现在没人听
+    assert system_proxy_alive_now(f"http://127.0.0.1:{port}") is False
+
+
+def test_探活能认出活着的端口() -> None:
+    import socket
+
+    from app.utils.proxy import system_proxy_alive_now
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    try:
+        assert system_proxy_alive_now(f"http://127.0.0.1:{srv.getsockname()[1]}") is True
+    finally:
+        srv.close()

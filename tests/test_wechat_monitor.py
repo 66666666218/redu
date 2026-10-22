@@ -2770,7 +2770,10 @@ def test_listen_exposes_unenumerable_accounts_and_alerts(session, monkeypatch) -
     # `app=` 是 **App 侧兜底**的计数(2026-10-05):单独记才看得出"网页路恢复了没"
     # ⚠️ `app_fail`/`app_blocked` 是 2026-10-10 补的 —— 只统计成功时,
     #    「App 路整轮没动」与「这轮不需要问 App」长得一模一样(实测因此漏看了几周 `app=0`)
-    assert "weread_list(ok=0 app=0 app_fail=0 app_blocked=0 off=0 off_with_new=2 skipped=0 new_skip=0)" in run.detail
+    # ⚠️ `budget_skip` 是 2026-10-22 补的:"有新文但预算用完没问"与"没新文"必须分得开,
+    #    否则覆盖不足会被读成"今天没新文"(当天 04:24 一轮打光额度的直接后果)
+    assert ("weread_list(ok=0 app=0 app_fail=0 app_blocked=0 off=0 off_with_new=2 "
+            "skipped=0 new_skip=0 budget_skip=0)") in run.detail
     alert = next((a for a in alerts if a[2].startswith("⚠️ 微信读书")), None)
     assert alert is not None and alert[2] == "⚠️ 微信读书只能拿到最新一篇,同日其它篇可能漏推"
     assert "列不出却采到新文的号:2" in alert[3]  # 数字放正文,标题稳定才冷却去重有效

@@ -99,9 +99,31 @@ def _launch_kwargs(prof: Path, headed: bool) -> dict:
     ★ 无头时要**显式带上登录时那份 UA**:否则 Chromium 会把它写成
     `HeadlessChrome/<ver>`,与签发会话的那个浏览器**不是同一个**。
     拿不到存档 UA 就**宁可不覆盖**(覆盖成错的更糟),但调用方会记一条 warning。
+
+    ★★ **出口必须显式给浏览器**(2026-10-22):这里原来**完全不管代理** ——
+    浏览器只会去探测系统代理。代理软件退出后注册表残留死端口(实测
+    `127.0.0.1:7892`)⇒ 两条页面路一起 `ERR_PROXY_CONNECTION_FAILED`,
+    表现为"小红书整平台失败",而协议路看起来又是"账号被限",极难归因。
+    ⇒ 统一用 `xhs_net.for_playwright()` 判出口:
+      · 有可用出口(专用代理/活着的系统代理)→ 显式 `proxy=`;
+      · 没有 → `--proxy-server=direct://`(**实测有效**;`--no-proxy-server` 无效,
+        见 `xhs_net.playwright_direct_args` 的对照表)。
     """
     kw: dict = {"user_data_dir": str(prof), "headless": not headed,
                 "no_viewport": True, "args": [_NO_AUTOMATION_ARG]}
+    try:
+        from app.services import xhs_net
+
+        proxy = xhs_net.for_playwright()
+    except Exception:  # noqa: BLE001 - 判出口失败时**按直连**走,别让浏览器自作主张
+        logger.debug("小红书页面路:解析出口失败,按直连处理", exc_info=True)
+        proxy = None
+        kw["args"] = [_NO_AUTOMATION_ARG, "--proxy-server=direct://"]
+    else:
+        if proxy:
+            kw["proxy"] = proxy
+        else:
+            kw["args"] = [_NO_AUTOMATION_ARG, *xhs_net.playwright_direct_args()]
     ua = _launch_ua(prof)
     if ua:
         kw["user_agent"] = ua

@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import random
 import re
+import socket
 import threading
 import time
+from urllib.parse import urlsplit
 
 import requests
 
@@ -25,6 +27,89 @@ from config import Settings
 _pool_cache: dict[str, "ProxyPool"] = {}
 _pool_lock = threading.Lock()
 _IP_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+
+#: 系统代理探活结果缓存(`url -> (是否可达, 采样时刻)`)。
+#: ⚠️ 必须缓存:探活是一次 TCP 连接,而调用方可能每轮/每号都问一次;
+#: 也不能缓存太久 —— 代理软件是**随时可能启停**的,缓存过了头就会拿着旧结论做事。
+_ALIVE_TTL = 60.0
+_alive_cache: dict[str, tuple[bool, float]] = {}
+_alive_lock = threading.Lock()
+
+
+def _proxy_host_port(url: str) -> tuple[str, int]:
+    """`http://user:pass@127.0.0.1:7892` → `("127.0.0.1", 7892)`。
+
+    没写 scheme 时按 http 处理(与 `_normalize_proxy_url` 同口径);
+    没写端口时按 scheme 的默认端口(80/443/1080)——
+    **不能当成"没有代理"**,否则死代理会被静默放过。
+    """
+    text = (url or "").strip()
+    if not text:
+        return "", 0
+    if "://" not in text:
+        text = "http://" + text
+    try:
+        parts = urlsplit(text)
+        host = parts.hostname or ""
+        port = parts.port
+    except ValueError:
+        return "", 0
+    if not host:
+        return "", 0
+    if port is None:
+        port = {"https": 443, "socks5": 1080, "socks5h": 1080,
+                "socks4": 1080}.get((parts.scheme or "http").lower(), 80)
+    return host, int(port)
+
+
+def system_proxy_alive(url: str, *, timeout: float = 1.5) -> bool:
+    """系统代理**现在**还有进程在听吗?空 URL 视为"没有代理"→ False。
+
+    ## 为什么必须有这一条(2026-10-22 实测事故)
+    Windows 上代理软件(Clash 等)退出时**不会还原注册表** `ProxyEnable=1`,
+    于是系统里留着一条指向死端口(实测 `127.0.0.1:7892`)的代理:
+
+        requests               → ProxyError
+        Playwright/Chromium    → net::ERR_PROXY_CONNECTION_FAILED
+        MediaCrawler(子进程)   → 整条平台采集退出码 1
+
+    而 `disable_env_proxies()` 只 patch 得到**本进程里的 requests**;
+    浏览器、子进程、以及 `xhs_net` 那条"故意读系统代理"的路**都不听它的**。
+    ⇒ 需要一个能回答"这条代理还活着吗"的判据,让调用方**回落直连**而不是硬撞死端口。
+
+    ⚠️ 探活失败 ≠ 代理一定不可用(也可能是本机防火墙慢),所以调用方只该用它
+    决定"要不要显式改走直连",**不该据此报故障**;真正的失败仍由业务请求本身暴露。
+    """
+    host, port = _proxy_host_port(url)
+    if not host or not port:
+        return False
+    key = f"{host}:{port}"
+    now = time.time()
+    with _alive_lock:
+        hit = _alive_cache.get(key)
+        if hit and now - hit[1] < _ALIVE_TTL:
+            return hit[0]
+    ok = False
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            ok = True
+    except OSError:
+        ok = False
+    with _alive_lock:
+        _alive_cache[key] = (ok, now)
+    return ok
+
+
+def system_proxy_alive_now(url: str, *, timeout: float = 1.5) -> bool:
+    """不做缓存地探一次(代理**刚启动/刚退出**时用它,别拿 60 秒前的结论)。"""
+    host, port = _proxy_host_port(url)
+    if not host or not port:
+        return False
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 def _normalize_proxy_url(url: str) -> tuple[str, str]:
