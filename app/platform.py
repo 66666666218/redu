@@ -87,6 +87,14 @@ def create_app() -> FastAPI:
     setup_logging()
     # 忽略系统代理(2026-09-29 事故加固,详见 proxy.disable_env_proxies docstring)
     disable_env_proxies()
+    # ★ 2026-10-22:只治 requests 不够 —— Playwright(十几个启动点)与 MediaCrawler
+    # 子进程都听系统代理。代理软件退出后注册表残留死端口时,在这里一次性关掉它。
+    try:
+        from app.utils import disable_dead_system_proxy
+
+        disable_dead_system_proxy()
+    except Exception:  # noqa: BLE001 - 启动自愈失败不影响启动
+        get_logger(__name__).debug("关闭死系统代理失败", exc_info=True)
     from config.settings import Settings, get_settings
 
     _settings = get_settings()

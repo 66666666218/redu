@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import logging
 import random
 import re
 import socket
@@ -22,6 +23,8 @@ from urllib.parse import urlsplit
 import requests
 
 from config import Settings
+
+logger = logging.getLogger(__name__)
 
 # 提取式代理池缓存(按提取 URL 隔离)。
 _pool_cache: dict[str, "ProxyPool"] = {}
@@ -110,6 +113,77 @@ def system_proxy_alive_now(url: str, *, timeout: float = 1.5) -> bool:
             return True
     except OSError:
         return False
+
+
+def _first_proxy_url(server: str) -> str:
+    """Windows `ProxyServer` 的两种写法 → 一条可探活的 URL。
+
+    · `127.0.0.1:7892`;
+    · `http=127.0.0.1:7892;https=127.0.0.1:7892`(按协议分段)。
+
+    后一种取**第一个映射值**(通常就是 http/https 同一个端口);解不出返回空串。
+    """
+    text = (server or "").strip()
+    if not text:
+        return ""
+    if "=" in text:
+        for part in text.split(";"):
+            if "=" in part:
+                return part.split("=", 1)[1].strip()
+        return ""
+    return text
+
+
+def disable_dead_system_proxy(*, timeout: float = 1.5) -> bool:
+    """★ **启动自愈**:系统代理指向死端口时,把 `ProxyEnable` 关掉。返回是否改过。
+
+    ## 为什么必须在这里做,而不是逐个给 chromium 传直连参数
+    2026-10-22 第二次踩同一个坑(第一次是 09-29)。`disable_env_proxies()` 只治
+    **本进程的 requests**;而项目里 Playwright 的启动点有 **十几处**
+    (`xhs_page_source` / `xunlei_captcha` / `xianyu_browser` / `douyin_cookie_export` /
+    登录脚本……),MediaCrawler 还在**独立 venv 的子进程**里跑。
+    逐个加 `--proxy-server=direct://` 一定会漏 —— 当天先修了小红书,迅雷 captcha 紧接着
+    原地报 `ERR_PROXY_CONNECTION_FAILED`,就是证据。
+
+    系统代理**指向一个没人监听的端口**时,它不保护任何请求,只会毒杀所有
+    "自己不会显式绕开"的客户端。关掉它是**恢复净状态**,不是改变用户配置:
+    代理软件下次启动通常会自己写回 `ProxyEnable=1`。
+
+    ## 边界
+    - 只在 Windows、只在**确实探不通**时改;探测失败/读不到注册表 → 什么都不做(返回 False);
+    - 只写 `HKCU`(**不需要管理员**);
+    - 不动 `ProxyServer` 的值 —— 用户重开代理软件时那条地址还在;
+    - 失败不抛(启动流程不能被它带崩)。
+    """
+    import sys
+
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+    except Exception:  # noqa: BLE001
+        return False
+    path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0,
+                            winreg.KEY_READ | winreg.KEY_SET_VALUE) as key:
+            try:
+                enabled = int(winreg.QueryValueEx(key, "ProxyEnable")[0] or 0)
+                server = str(winreg.QueryValueEx(key, "ProxyServer")[0] or "")
+            except FileNotFoundError:
+                return False
+            if not enabled or not server:
+                return False
+            url = _first_proxy_url(server)
+            if not url or system_proxy_alive_now(url, timeout=timeout):
+                return False
+            winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+    except Exception as exc:  # noqa: BLE001 - 启动自愈失败只记一行,别挡住启动
+        logger.warning("关闭死系统代理失败(不影响启动):%s", str(exc)[:120])
+        return False
+    logger.warning("系统代理 %s **无监听**(代理软件已退出?,注册表残留 ProxyEnable=1)"
+                   " ⇒ 已关闭系统代理,浏览器/子进程改直连", url)
+    return True
 
 
 def _normalize_proxy_url(url: str) -> tuple[str, str]:

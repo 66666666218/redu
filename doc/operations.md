@@ -1718,7 +1718,7 @@ python scripts/job_liveness.py --strict   # 有"从没跑过/已超期"就退出
 `disable_env_proxies()` 只 patch 当前 Python 进程里的 `requests.utils`;
 Playwright 的 Chromium、以及独立 venv 里跑的 MediaCrawler **完全不听话**。
 
-修复(2026-10-22,三处):
+修复(2026-10-22,四处):
 
 1. `app/utils/proxy.py::system_proxy_alive()` —— TCP 探活 + 60 秒缓存
    (`system_proxy_alive_now` 用于刚启停的场景)。死端口判死,**不据此报故障**,
@@ -1731,6 +1731,18 @@ Playwright 的 Chromium、以及独立 venv 里跑的 MediaCrawler **完全不�
 3. `xhs_page_source._launch_kwargs()` 显式给浏览器出口;MediaCrawler 的
    7 个平台 launch 加 `--proxy-server=direct://`(见
    `patches/mediacrawler-direct-proxy.md`)。
+4. ★★ **启动自愈(最终兜底)**:`app/utils/proxy.py::disable_dead_system_proxy()`,
+   在 `app/platform.py::create_app` 与 `app/main.py` 两个入口调用 ——
+   探测系统代理端口,不通就把 `HKCU\...\ProxyEnable` 置 0。
+
+   **为什么必须有第 4 条**:第 3 条那种"逐个给 launch 传直连参数"一定会漏。
+   当天先修了小红书,紧接着 `xunlei_captcha` 原地报
+   `ERR_PROXY_CONNECTION_FAILED at https://pan.xunlei.com/` ——
+   项目里 Playwright 启动点有十几处(`xianyu_browser` / `douyin_cookie_export` /
+   `xhs_browser_login` / 各登录脚本……),MediaCrawler 还在独立 venv 子进程里。
+   系统代理指向死端口时,它**不保护任何请求**,只会毒杀所有"自己不会显式绕开"的客户端
+   ⇒ 关掉是恢复净状态。代理软件下次启动通常会自己写回 `ProxyEnable=1`。
+   边界:只写 `HKCU`(免管理员)、只在不通时改、不动 `ProxyServer` 的值、失败不抛。
 
 ⚠️ **`--no-proxy-server` 不生效、`--proxy-server=direct://` 才生效**
 (Playwright 1.61 与 1.63 各测一遍、三组对照)。`xhs_net` 里 2026-10-12 的

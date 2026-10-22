@@ -176,3 +176,78 @@ def test_探活能认出活着的端口() -> None:
         assert system_proxy_alive_now(f"http://127.0.0.1:{srv.getsockname()[1]}") is True
     finally:
         srv.close()
+
+
+# ------------------------------------------------ 启动自愈:关掉死系统代理(2026-10-22)
+# 只给单个 chromium 传直连参数一定会漏(项目里有十几个 Playwright 启动点 +
+# MediaCrawler 子进程)。系统代理指向死端口时,在启动处一次性关掉它。
+
+
+def test_解析_Windows_ProxyServer_的两种写法() -> None:
+    from app.utils.proxy import _first_proxy_url
+
+    assert _first_proxy_url("127.0.0.1:7892") == "127.0.0.1:7892"
+    assert _first_proxy_url("http=127.0.0.1:7892;https=127.0.0.1:7892") == "127.0.0.1:7892"
+    assert _first_proxy_url("") == ""
+
+
+class _FakeKey:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _fake_winreg(monkeypatch, *, enabled: int, server: str, alive: bool):
+    """注入一个假 winreg,返回 SetValueEx 收到的键值。"""
+    import sys
+    import types
+
+    calls: dict = {}
+    mod = types.ModuleType("winreg")
+    mod.HKEY_CURRENT_USER = object()
+    mod.KEY_READ = 1
+    mod.KEY_SET_VALUE = 2
+    mod.REG_DWORD = 4
+    mod.OpenKey = lambda *a, **k: _FakeKey()
+
+    def _query(key, name):
+        return (enabled if name == "ProxyEnable" else server, 1)
+
+    def _set(key, name, reserved, typ, value):
+        calls[name] = value
+
+    mod.QueryValueEx = _query
+    mod.SetValueEx = _set
+    monkeypatch.setitem(sys.modules, "winreg", mod)
+    monkeypatch.setattr(sys, "platform", "win32")
+    import app.utils.proxy as P
+
+    monkeypatch.setattr(P, "system_proxy_alive_now", lambda *a, **k: alive)
+    return calls
+
+
+def test_死代理在启动时被关掉(monkeypatch) -> None:
+    from app.utils.proxy import disable_dead_system_proxy
+
+    calls = _fake_winreg(monkeypatch, enabled=1, server="127.0.0.1:7892", alive=False)
+    assert disable_dead_system_proxy() is True
+    assert calls.get("ProxyEnable") == 0, "死代理必须被关掉,否则浏览器/子进程一起发不出去"
+
+
+def test_活着的代理不动(monkeypatch) -> None:
+    from app.utils.proxy import disable_dead_system_proxy
+
+    calls = _fake_winreg(monkeypatch, enabled=1, server="127.0.0.1:7892", alive=True)
+    assert disable_dead_system_proxy() is False
+    assert "ProxyEnable" not in calls, "代理活着时不许动用户配置"
+
+
+def test_非Windows平台什么也不做(monkeypatch) -> None:
+    import sys
+
+    from app.utils.proxy import disable_dead_system_proxy
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert disable_dead_system_proxy() is False
