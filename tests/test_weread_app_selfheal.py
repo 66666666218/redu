@@ -84,28 +84,38 @@ class TestRefreshWithWake:
         assert calls["n"] == 3, "三次都要试满"
         assert "人工" in out["reason"], f"全失败时要给出人要做的那一步:{out['reason']}"
 
-    def test_默认先走HTTP_模拟器在线也不碰(self, monkeypatch) -> None:
-        """★ 2026-10-22 最终对照:**HTTP 新鲜时能用**,而且最便宜。
+    def test_默认先走模拟器_App_token优先(self, monkeypatch) -> None:
+        """★★ 2026-10-22 17:45 实测定案:**App token 才能取数**,HTTP 只兜底。
 
-        证据:同一账号的 `refreshToken` **现铸** eink token ⇒ **15 篇、read_num 正常**;
-        模拟器 App token 也 ⇒ 27 篇。此前判"HTTP 不能用"是拿**19:52 铸的过期 token**
-        当样本(到 00:30 已 >4.5h,回 `-2012`)。
-        ⇒ 默认顺序:**先 HTTP**;HTTP 失败才按需拉起模拟器。
+        同一分钟、同一本书、两个身份档:
+
+            纯 HTTP 现铸 eink token + eink 头  ⇒ `-2041`(**换新铸也一样**)
+            模拟器 App 签发 token  + app 头   ⇒ **97 篇 / 93 篇带读数**
+
+        当天 00:40 曾按"HTTP 新鲜也能用"把顺序改成 HTTP 优先 —— 那个对照只证明了
+        **认证**能过,没证明**能取数**。白天 08:04 / 14:05 / 17:20 全 `-2041`,
+        正是因为库里的凭据是 eink 档。⇒ 默认顺序:**模拟器优先**,HTTP 只在取不到时兜底。
         """
-        called = {"http": 0, "wake": 0}
+        calls = self._patch(monkeypatch, [{"ok": True, "accessToken": "APP",
+                                           "profile": "app"}])
         monkeypatch.setattr(wat, "emulator_ready", lambda *a, **k: True)
-        monkeypatch.setattr(wat.time, "sleep", lambda s: None)
-        monkeypatch.setattr(wat, "wake_app",
-                            lambda *a, **k: (called.__setitem__("wake", called["wake"] + 1), True)[1])
 
         def _http(*a, **k):
-            called["http"] += 1
-            return {"ok": True, "via": "http"}
+            raise AssertionError("模拟器已取到 App token,不该再走纯 HTTP")
         monkeypatch.setattr(wat, "refresh_via_http", _http)
+
         out = wat.refresh_with_wake(None, 1)          # 默认(prefer_emulator=None)
+        assert out["ok"] is True and out["accessToken"] == "APP"
+        assert calls["n"] == 1
+
+    def test_模拟器不在才回落HTTP并标明只有eink档(self, monkeypatch) -> None:
+        """模拟器不可用时 HTTP 兜底仍要写回(认证可用),但必须留下"取不到读数"的痕迹。"""
+        monkeypatch.setattr(wat, "emulator_ready", lambda *a, **k: False)
+        monkeypatch.setattr(wat, "ensure_emulator", lambda *a, **k: False)
+        monkeypatch.setattr(wat, "refresh_via_http",
+                            lambda *a, **k: {"ok": True, "via": "http", "profile": "eink"})
+        out = wat.refresh_with_wake(None, 1)
         assert out["ok"] is True and out.get("via") == "http"
-        assert called["http"] == 1
-        assert called["wake"] == 0, "HTTP 成功就不该碰模拟器(哪怕它开着)"
 
     def test_默认模拟器不在且HTTP失败_不浪费唤醒(self, monkeypatch) -> None:
         """HTTP 失败 + 模拟器不在 + 自动启停关 ⇒ 直接报错,不空转唤醒。"""

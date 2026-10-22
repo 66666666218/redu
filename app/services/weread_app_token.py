@@ -537,32 +537,25 @@ def refresh_with_wake(session: Session, user_id: int, *, adb: str = "",
     ⚠️ 全部尝试都失败才返回 `ok=False` —— 那时才该惊动人工。
     """
     last: dict[str, Any] = {"ok": False, "reason": "未尝试"}
-    # ★★★ **顺序在 2026-10-22 定案:HTTP 优先,模拟器只做回落(按需启停)**。
+    # ★★★ **顺序在 2026-10-22 17:50 二次定案:模拟器 App token 优先,HTTP 只做兜底**。
     #
-    # 当天做过两次对照,别再把结论记反:
-    #   ① 库里那枚 HTTP token 回 `-2012` —— 但它是 **19:52 铸的、到 00:30 已过期**(>4.5h);
-    #      拿**过期样本**判"HTTP 不能用"是错的;
-    #   ② 用同一账号的 `refreshToken` **现铸一枚** eink token ⇒ **15 篇、read_num 正常**;
-    #      模拟器 App token 也 ⇒ 27 篇。**两条路新鲜时都能用**。
-    # ⇒ 纯 HTTP 最便宜(一次请求、不用开模拟器);模拟器只在 HTTP 失败
-    #   (`refreshToken` 被吊销)时按需拉起,取到就关。
+    # 当天 00:40 曾把顺序改成"HTTP 优先、模拟器只回落",理由是"19:52 铸的 token 回 -2012
+    # 是过期,不是 HTTP 不能用"。那个理由只证明了**认证**能过,**没有证明能取数** ——
+    # 17:45 的干净对照(同一分钟、同一本书、两个身份档):
+    #
+    #     纯 HTTP 现铸 eink token + eink 头  ⇒ `-2041`(恒定,换新铸也一样)
+    #     模拟器里 App 签发 token  + app 头   ⇒ **97 篇 / 93 篇带精确读数**
+    #
+    # ⇒ `-2041` 在 eink 档上是**身份档不被接受**,不是"额度被打光"。白天所有轮次
+    #   (08:04 / 14:05 / 17:20 / 17:42)全 `-2041`,正是因为这半天库里的凭据是 eink 档。
+    # ⚠️ **别再按"额度"处理这条**:加预算只能少发几次,拿不到读数还是拿不到。
+    #   eink 档只在**模拟器起不来**时兜底(它至少能证明认证通过,能触续期);
+    #   一旦取了 App token,就以 App 档为准(`profile="app"`)。
     http_reason = "未尝试"
-    if prefer_emulator is not True:
-        http_out = refresh_via_http(session, user_id, platform=platform)  # 自己按 eink 档验活
-        if http_out.get("ok"):
-            return http_out
-        http_reason = str(http_out.get("reason"))[:60]
-        if prefer_emulator is False:
-            return {"ok": False,
-                    "reason": f"纯 HTTP 续期未成:{http_reason} —— **需要人工**:"
-                              f"开一次雷电模拟器、确认 App 登录态,再跑 "
-                              f"`scripts/weread_app_login.py` 重取凭据"}
-        logger.info("纯 HTTP 续期未成(%s)—— 回落唤醒 App(按需启停)", http_reason)
-    #: ★ **按需启停**:只有 HTTP 失败才会走到这里;模拟器不必一直开着。
+    emu_online = False
     started_here = False
-    if prefer_emulator is True:
-        emu_online = True
-    else:
+    if prefer_emulator is not False:
+        #: ★ **按需启停**:模拟器不必一直开着,续期这一刻拉起来、取到就关。
         was_ready = emulator_ready(adb, serial=serial)
         emu_online = was_ready or ensure_emulator(serial, adb=adb)
         started_here = emu_online and not was_ready
@@ -585,6 +578,18 @@ def refresh_with_wake(session: Session, user_id: int, *, adb: str = "",
             http_reason = "未尝试(只走 App 那一路)"
     else:
         last = {"ok": False, "reason": "模拟器不在"}
+    #: 模拟器取不到(没装/起不来/App 未登录)才回落纯 HTTP。
+    #: ⚠️ 这条路铸出来的是 **eink 档**:能过认证,但列表接口实测恒 `-2041`
+    #: (见上面的对照)。**不要**因为它 ok=True 就以为阅读数恢复了。
+    #: `prefer_emulator=False` = 明确只走 HTTP(测试/特殊场景),行为与旧版一致。
+    if prefer_emulator is not True:
+        http_out = refresh_via_http(session, user_id, platform=platform)  # 自己按 eink 档验活
+        if http_out.get("ok"):
+            logger.warning("本次只有 **eink 档** token(模拟器不可用)—— 认证可用,"
+                           "但列表接口实测会回 -2041,精确阅读数取不到;"
+                           "下次续期必须在模拟器可用时重取 App token")
+            return http_out
+        http_reason = str(http_out.get("reason"))[:60]
     return {"ok": False,
             # ⚠️ **全失败时必须给出"人要做的那一步"**(这条被 `test_全失败才报错并给出人工步骤` 守着):
             #    我 2026-10-11 加纯 HTTP 那条路时,把消息改成了"两条路都没成 —— …",
