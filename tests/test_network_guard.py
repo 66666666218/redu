@@ -86,6 +86,24 @@ class TestCheck:
             RunRecord.kind == "network_guard")).all()
         assert len(runs) == 1 and "IP 变化" in runs[0].detail
 
+    def test_变化告警要说明它会影响绑_IP_的会话(self, session, alerts, monkeypatch) -> None:
+        """★ 2026-10-22:IP 漂移不是"网络小告警",而是**跨平台会话批量失效的共同原因**。
+
+        当天真因:Windows IPv6 临时地址(RFC 4941)定期换随机后缀 + 随身 WiFi/热点切换
+        ⇒ 一天出口变 10 次;微博/小红书/闲鱼/抖音/微信读书的会话都绑出口 IP
+        ⇒ 同一账号在服务端看来"不停换地方登录"。
+        旧文案只说"IP 变了",没说要去找谁 —— 于是我们一直在单条链上调 cookie/签名。
+        """
+        monkeypatch.setattr(ng, "current_ip", lambda s: "1.1.1.1")
+        ng.check(session, 1, _S())
+        monkeypatch.setattr(ng, "current_ip", lambda s: "2.2.2.2")
+        ng.check(session, 1, _S())
+        detail = alerts[0][1]
+        assert "绑出口 IP" in detail, "必须点明会连带哪些平台"
+        assert "微博" in detail and "小红书" in detail
+        assert "临时地址" in detail, "要给出排查入口(netsh interface ipv6 show privacy)"
+        assert "近 24 小时出口变化" in detail
+
     def test_冷却期内只记_runs_不重复推(self, session, alerts, monkeypatch) -> None:
         monkeypatch.setattr(ng, "current_ip", lambda s: "1.1.1.1")
         ng.check(session, 1, _S())

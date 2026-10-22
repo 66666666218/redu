@@ -122,11 +122,36 @@ def check(db: Session, user_id: int = 1, settings=None) -> dict:
     _set_cfg(db, _LAST_IP_KEY, ip)
     fails = _failure_summary(
         db, int(getattr(settings, "network_guard_failure_window_hours", 2) or 2))
+    #: ★ 2026-10-22:把"IP 漂移"与"跨平台会话批量失效"绑在一起报。
+    #: 当天查到的真因:Windows **IPv6 临时地址**(RFC 4941)会定期换随机后缀
+    #: (`netsh interface ipv6 show privacy` → Use Temporary Addresses: enabled),
+    #: 加随身 WiFi/热点切换 ⇒ 一天内出口变 10 次。而微博/小红书/闲鱼/抖音/微信读书
+    #: 的会话**都绑出口 IP** ⇒ 同一账号在服务端看来"不停换地方登录"。
+    #: ⚠️ 之前这条告警只说"IP 变了",没说要去找谁 —— 于是我们一直在单条链上
+    #:    调 cookie/签名/代理,而根因在它们共同的前提上。
+    changes_24h = 0
+    try:
+        from app.db.models import RunRecord
+
+        changes_24h = int(db.scalar(
+            select(func.count()).select_from(RunRecord).where(
+                RunRecord.kind == "network_guard",
+                RunRecord.started_at >= now - timedelta(hours=24),
+                RunRecord.detail.like("%IP 变化%"))
+        ) or 0) + 1          # 本次也算一次(它还没写进 runs)
+    except Exception:  # noqa: BLE001 - 数不出来不影响告警本身
+        logger.debug("统计近 24h 出口变化次数失败", exc_info=True)
+
     detail = (f"出口 IP 已变化:{old} → {ip}\n"
               f"时间:{now:%Y-%m-%d %H:%M}\n")
     detail += ("近时段失败:" + " | ".join(fails)) if fails else "近时段各链无失败记录。"
-    detail += ("\n⚠️ IP 敏感链:小红书/闲鱼/抖音/公众号/迅雷;"
-               "若随后出现验证/失效,先等冷却,别连续重登。")
+    detail += (f"\n近 24 小时出口变化 **{changes_24h}** 次"
+               + ("(≥3 次 ⇒ **出口不稳定**)" if changes_24h >= 3 else "") + "\n")
+    detail += ("⚠️ 绑出口 IP 的会话(微博/小红书/闲鱼/抖音/微信读书)可能随后批量失效。"
+               "**先确认网络,别在单条链上调 cookie/签名**。常见来源:"
+               "① Windows IPv6 临时地址定期轮换(`netsh interface ipv6 show privacy` "
+               "看 Use Temporary Addresses);② 随身 WiFi/热点切换;③ 双栈下 IPv4/IPv6 交替。"
+               "采集机应固定单一出口后再重登。")
 
     #: 变化本身必须留痕 —— 即使飞书冷却/发送失败,也不能只剩一行 debug。
     from app.services.tenant_base import _record_run
