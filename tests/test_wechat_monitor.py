@@ -472,6 +472,56 @@ def test_push_listen_renders_my_link_with_clean_href(session, monkeypatch) -> No
     assert "s/RAW" not in blob               # 他人原始盘链不外泄
 
 
+def test_push_listen_title_always_clickable(session, monkeypatch) -> None:
+    """★ 2026-10-22 用户口径:**点文章标题要能拿到网盘**。
+
+    优先级:**我方链 > 原作者盘链 > 公众号原文**。
+    旧实现在"没有我方链"时**不给标题加链接**(只有「原文」列可点)——
+    当天 515 篇推送里 290 篇没有我方链,用户看到的就是"为什么不能点文章名拿网盘了"。
+    ⚠️ 原作者盘链不是"冒充我们的":网盘列会标 `⏳待转存`,本方链仍最优先。
+    """
+    import json
+
+    import app.services.feishu as feishu_mod
+
+    src = WechatArticle(user_id=1, title="有源盘链", author="外号A", read_num=0,
+                        url="https://mp.weixin.qq.com/s/a", source="listen",
+                        pan_urls="https://pan.quark.cn/s/src1")
+    plain = WechatArticle(user_id=1, title="没有盘链", author="外号B", read_num=0,
+                          url="https://mp.weixin.qq.com/s/b", source="listen",
+                          pan_urls="")
+    ours = WechatArticle(user_id=1, title="我方链", author="外号C", read_num=0,
+                         url="https://mp.weixin.qq.com/s/c", source="listen",
+                         my_pan_urls="https://pan.baidu.com/s/our1 (提取码 abcd)")
+    session.add_all([src, plain, ours])
+    session.commit()
+
+    monkeypatch.setattr(feishu_mod, "webhook_for",
+                        lambda settings, section: "https://open.feishu.cn/hook/x")
+    cards: list[dict] = []
+
+    class _FakeFeishu:
+        def __init__(self, webhook, secret="") -> None:
+            pass
+
+        def send(self, msg: str) -> bool:
+            return True
+
+        def send_card(self, card: dict) -> bool:
+            cards.append(card)
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
+    wechat_monitor._push_listen(session, 1, _settings(wechat_push_skip_own_pan=False),
+                                [src, plain, ours])
+    blob = json.dumps(cards, ensure_ascii=False)
+    assert "](https://pan.baidu.com/s/our1)" in blob, "有我方链时标题必须指向我方链"
+    assert "](https://pan.quark.cn/s/src1)" in blob, \
+        "没有我方链时要退到**原作者盘链**,否则标题点不动"
+    assert "](https://mp.weixin.qq.com/s/b)" in blob, \
+        "连源盘链都没有时标题回落原文——**标题始终可点**"
+
+
 def test_push_listen_read_column_has_no_asterisk(session, monkeypatch) -> None:
     """阅读列**只显示数字**,不加 `*`(2026-10-18 用户当场报「刚补推的阅读数后面都带*」)。
 

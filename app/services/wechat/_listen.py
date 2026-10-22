@@ -1644,6 +1644,21 @@ def repush_unpushed(session: Session, user_id: int, settings: Settings | None = 
             "剩余欠推会在下一轮监听继续补,超过窗口后不再补。",
             settings=settings, push_feishu=False)
     return pushed
+def _first_pan_link(urls: str) -> tuple[str, str]:
+    """从多行文本里取**第一条盘链** → (干净 URL, 提取码);没有给 ("", "")。
+
+    文本可以是**我方链**(`my_pan_urls`)或**原作者的源链**(`pan_urls`)——
+    两者格式相同(一行一条,常带 `(提取码 abcd)` / `[百度]` / `(自分享)`),
+    所以判据只该有一份。`_my_pan_link_from_history` 是它的旧名字/旧入口。
+    """
+    for line in (urls or "").splitlines():
+        m = _MY_LINK_RE.search(line)
+        if m:
+            c = re.search(r"提取码\s*([0-9A-Za-z]{4})", line)
+            return m.group(0), (c.group(1) if c else "")
+    return "", ""
+
+
 def _my_pan_link_from_history(my_pan_urls: str) -> tuple[str, str]:
     """从已持久化的 `my_pan_urls` 里取第一条可用我方链 → (干净 URL, 提取码),没有给 ("", "")。
 
@@ -1652,12 +1667,7 @@ def _my_pan_link_from_history(my_pan_urls: str) -> tuple[str, str]:
     同步重推)上百度文一律退回公众号原文,网盘列却还标着盘商名,员工点开才发现是文章。
     用盘链正则取 URL 本体,顺带把 `(自分享)`/`[百度]`/提取码这些附属标记留在外面。
     """
-    for line in (my_pan_urls or "").splitlines():
-        m = _MY_LINK_RE.search(line)
-        if m:
-            c = re.search(r"提取码\s*([0-9A-Za-z]{4})", line)
-            return m.group(0), (c.group(1) if c else "")
-    return "", ""
+    return _first_pan_link(my_pan_urls)
 def _collapse_repeats(rows: list) -> list[tuple[object, int]]:
     """同一 **(账号, 标题)** 只留**最新**那条,并带上"这轮一共发了几次"。
 
@@ -1809,18 +1819,27 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
     def _render_article(r: WechatArticle, repeat: int = 1) -> dict:
         rep = replacements.get(r.id) or []
         code = ""
-        my_link = False          # 标题链接是否指向"我方转存链"(False=点进去是公众号原文)
+        my_link = False          # 标题链接是否指向"我方转存链"
+        src_link = False         # 标题链接是否指向"原作者的网盘链"(还没转存成我们的)
         if rep:
             link, code = rep[0][1], rep[0][2]
             my_link = True
         else:
-            # 只展示我方网盘链接(本轮转存链 > 历史我方链);绝不回落到别人的盘链——
-            # 未转存时点标题打开公众号原文。历史 my_pan_urls 常自带提取码,拆出来明文显示。
+            # ★★ **2026-10-22 用户口径:标题总是可点**。优先级:
+            #    ① 本轮转存链 → ② 历史我方链 → ③ **原作者盘链** → ④ 公众号原文。
+            #    旧写法在 ③ 之前就回落到原文、而且**只有我方链时才给标题加链接**
+            #    ⇒ 没有我方链的文章(当天 515 篇里 290 篇)标题是**纯文本,点不动**,
+            #    用户看到的就是"为什么不能点文章名拿网盘了"。
+            # ⚠️ ③ 指向的是**别人的**盘链,网盘列会标 `⏳待转存`,说明里也写明了;
+            #    这不是"回落到别人的盘链冒充我们的"——我方链仍然最优先,标记也分开。
             link, code = _my_pan_link_from_history(r.my_pan_urls)
             if link:
                 my_link = True
             else:
-                link = r.url
+                link, code = _first_pan_link(r.pan_urls)
+                src_link = bool(link)
+                if not link:
+                    link = r.url          # 什么盘链都没有 ⇒ 点标题看原文
         # 重复资源标记: 同盘链已被其他文章推过 → 🔥N(同行都在发的确认级资源)
         hot = ""
         first_pan = pan_of.get(r.id, "")
@@ -1856,7 +1875,9 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
         #    ⚠️ 有链时「文章」**不再回落到原文** —— 否则同一行两个格指向同一处,
         #       看起来像"这里有两篇文章"。
         _titled = f"{hot}{q_badge}{shown}"
-        article_md = (f"[{_titled}]({_md_safe(link)})" if (link and my_link) else _titled) \
+        #: ★ 2026-10-22:**标题总是可点**(我方链 → 原作者盘链 → 原文)。旧条件是
+        #: `link and my_link`,只有我方链时才加链接 ⇒ 没转存成功的文章标题点不动。
+        article_md = (f"[{_titled}]({_md_safe(link)})" if link else _titled) \
             + (f" 🔑{code}" if code else "")
         # 「原文」列:对标作品的入口。**永远指向公众号原文**(不因有没有转存而变)。
         orig_md = f"[原文]({_md_safe(r.url)})" if r.url else "—"
@@ -1935,8 +1956,10 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
             # ⚠️ 这段是**外部可见文案**:措辞按用户口径去掉了会暴露内部动作的字眼
             # (2026-10-02 "不要暴露我")——不再提"转存链 / 识别到的 / 补采 / 投诉"。
             {"tag": "note", "elements": [{"tag": "plain_text",
-                "content": "点文章标题看原文 · 网盘列=该文带的网盘链接,"
-                           "—=这篇没带(仍照常推) · 阅读未采样为 —"
+                "content": "点文章标题=该文带的资源(🔴我方链优先;⏳原作者盘链,点开可自取)"
+                           " · 「原文」列=公众号原文"
+                           " · 网盘列=该文带的网盘,—=这篇没带(仍照常推)"
+                           " · 阅读未采样为 —"
                            " · 标题后 ·MM-DD=发文日期(旧文链接可能已失效)"
                            " · ⛔=原文已被下架,别点"}]},
         ]
