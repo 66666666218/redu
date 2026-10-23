@@ -50,6 +50,10 @@ class TestRefreshWithWake:
         """outcomes: 每次 refresh 的返回(依次取)。"""
         monkeypatch.setattr(wat, "wake_app", lambda *a, **k: True)
         monkeypatch.setattr(wat.time, "sleep", lambda s: None)
+        #: ⚠️ 2026-10-23:`refresh_with_wake` 现在**总是**先判 `emulator_ready`
+        #: (2026-10-22 把顺序改回"模拟器 App token 优先"时加的)。不 mock 它,
+        #: 测试就会去问真实 adb —— 机器上模拟器开/关会让断言随机变红。
+        monkeypatch.setattr(wat, "emulator_ready", lambda *a, **k: True)
         monkeypatch.setattr(wat, "verify_by_api", lambda s, u: (lambda t, v: True))
         calls = {"n": 0}
 

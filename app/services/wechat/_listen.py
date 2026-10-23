@@ -489,7 +489,8 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
                     session: Session, stats: dict | None = None,
                     breaker: dict | None = None, shelf_ts: str | int | None = None,
                     banned_out: dict[str, str] | None = None, list_allow: bool = True,
-                    app_client=None, app_allow: bool | None = None, pool=None
+                    app_client=None, app_allow: bool | None = None, pool=None,
+                    require_pan: bool = True
                     ) -> tuple[list[WechatArticle], bool]:
     """微信读书单号采集:**cover 最新一篇(始终可用)+ 窗口内的号才拉精确列表**。
 
@@ -740,10 +741,10 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
             return ""
         return alt
 
-    # require_pan=False:不再丢弃无盘链文——"标题不含网盘词"≠"没价值",
-    # 此前这道闸把 15 个对标号 10 天的新文全部静默丢弃(用户看到"停更在 9.7"的根因)
+    # ★ 2026-10-23 用户口径变更:正文/阅读原文里都没有盘链 ⇒ 不是网盘文章、不入库。
+    # 旧注释(「找不到链接的也必须推送名称」)已作废,见 `Settings.wechat_require_pan`。
     got = _insert_new_articles(session, user_id, b, items, source="listen",
-                               content_resolver=_resolve, require_pan=False)
+                               content_resolver=_resolve, require_pan=require_pan)
     if banned_out and got:
         for r in got:
             if r.url in banned_out:
@@ -1144,6 +1145,9 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     #: 旧窗口(`_list_windows` / `wechat_listen_app_extra`)保留函数供体检/测试使用,
     #: 但本轮不再用它决定"问不问列表" —— 判据见 `_needs_reads_24h`。
     cutoff24 = datetime.now() - timedelta(hours=24)
+    #: ★ 2026-10-23:正文/阅读原文里都没有盘链 ⇒ 不是网盘文章、不入库
+    #: (用户口径;见 `Settings.wechat_require_pan` 的说明与边界)
+    _require_pan = bool(getattr(settings, "wechat_require_pan", True))
     # **App 侧客户端**(2026-10-05):整轮只建一次;没配就 None,兜底自动跳过。
     # 兜底存在的理由:网页 `/web/mp/articles` 被账号级拦截,而它是**精确阅读数**的唯一来源
     # (见 weread_app_client.py 头注释)。不建这一步,阅读数就永远是 0。
@@ -1184,7 +1188,7 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                     b.miss_count = 0
                     b.last_item_at = now
                     got = _insert_new_articles(session, user_id, b, norm, source="listen",
-                                               fetch_content=True, require_pan=False)
+                                               fetch_content=True, require_pan=_require_pan)
                     if got:
                         new_rows.extend(got)
                 else:
@@ -1236,7 +1240,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                                                 list_allow=need_reads,
                                                 app_client=app_client,
                                                 app_allow=need_reads,
-                                                pool=pool)
+                                                pool=pool,
+                                                require_pan=_require_pan)
                 if _list_attempts(wr_stats) > _seen:
                     listed_keys.add(_list_key(b))          # 问过就记号(成败都算,见 _list_attempts)
                 # 只有免费源真答了才算"本号已被消费":答不上按 failed 计,如实暴露。
@@ -1277,7 +1282,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                                                         list_allow=need_reads,
                                                         app_client=app_client,
                                                         app_allow=need_reads,
-                                                        pool=pool)
+                                                        pool=pool,
+                                                        require_pan=_require_pan)
                         if _list_attempts(wr_stats) > _seen:
                             listed_keys.add(_list_key(b))
                         used = answered  # 答上了就消费掉本号(答不上按 failed 计,如实暴露)

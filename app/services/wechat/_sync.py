@@ -146,7 +146,10 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
                     break
                 norm = [{"title": it["title"], "url": it["url"],
                          "publish_at": _parse_time(it.get("publish_at_raw"))} for it in raw_items]
-                got = _insert_new_articles(session, user_id, b, norm, source="sync", require_pan=False)
+                #: ★ 2026-10-23:没有 content_resolver 的源也要抓正文才能判"是不是网盘文章"
+                got = _insert_new_articles(
+                    session, user_id, b, norm, source="sync", fetch_content=True,
+                    require_pan=bool(getattr(settings, "wechat_require_pan", True)))
                 new_rows.extend(got)
                 pages += 1
                 if not raw_items or len(got) < len(raw_items):
@@ -247,8 +250,9 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
 
     new_rows = []
     if items:
-        new_rows = _insert_new_articles(session, user_id, b, items, source="sync",
-                                        content_resolver=_resolve, require_pan=False)
+        new_rows = _insert_new_articles(
+            session, user_id, b, items, source="sync", content_resolver=_resolve,
+            require_pan=bool(getattr(settings, "wechat_require_pan", True)))
         b.last_item_at = datetime.now()
     push = _sync_push_after_transfer(session, user_id, settings, new_rows)
     _record_run(session, user_id, "wechat_sync",

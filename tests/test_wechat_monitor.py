@@ -241,7 +241,8 @@ def test_补推失败后要回滚会话再继续采集(session, monkeypatch: pyt
     fake = FakeWeread(cover={"title": "补推失败也该采到的新文",
                              "url": "https://mp.weixin.qq.com/s/n-new",
                              "review_id": "MP_WXS_1_n1", "digest": ""},
-                      content="正文")
+                      #: ★ 2026-10-23:正文里要有盘链才入库(用户口径:都没有 ⇒ 不是网盘文章)
+                      content="正文 https://pan.quark.cn/s/n1")
     monkeypatch.setattr(wechat_monitor, "fetch_article_content", lambda url, timeout=15: "")
 
     def _boom(*a, **k):
@@ -261,6 +262,42 @@ def test_补推失败后要回滚会话再继续采集(session, monkeypatch: pyt
         session, 1, settings=_settings(pan_transfer_enabled=False), weread=fake)
     assert rollbacks["n"] >= 1, "补推失败后必须显式 session.rollback()"
     assert out["status"] == "success" and out["new"] == 1, "补推失败不该挡住本轮采集"
+
+
+def test_require_pan_filters_pure_non_pan_articles(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """★ 2026-10-23 用户口径:**正文/阅读原文里都没有盘链 ⇒ 不是网盘文章,不入库**。
+
+    用户原话:「有一些文章里会有盘链,有一些会在阅读原文里,如果都没有的就可以判定
+    不是属于网盘的文章了」。三条边界都要钉住:
+      · 正文有盘链 ⇒ 入库;
+      · **确实看过**正文、没有盘链 ⇒ 丢弃;
+      · 正文抓不到(风控壳页/网络失败)⇒ **保守入库**——不知道 ≠ 没有,
+        误杀真资源比多存几篇噪音贵得多。
+    """
+    b = WechatBenchmark(user_id=1, nickname="号A", weread_book_id="MP_WXS_1")
+    session.add(b)
+    session.commit()
+    items = [
+        {"title": "有盘链的文", "url": "https://mp.weixin.qq.com/s/pan1"},
+        {"title": "一篇新闻", "url": "https://mp.weixin.qq.com/s/news2"},
+        {"title": "抓不到正文", "url": "https://mp.weixin.qq.com/s/dead3"},
+    ]
+    bodies = {
+        "pan1": "正文 https://pan.quark.cn/s/abc123",
+        "news2": "今天大盘低开高走,深V反弹,本文不构成投资建议。",
+        "dead3": "",
+    }
+
+    def _fetch(url: str, timeout: int = 15) -> str:
+        return bodies[url.rsplit("/", 1)[-1]]
+
+    monkeypatch.setattr(wechat_monitor, "fetch_article_content", _fetch)
+    got = wechat_monitor._insert_new_articles(
+        session, 1, b, items, source="listen", fetch_content=True, require_pan=True)
+    titles = {r.title for r in got}
+    assert "有盘链的文" in titles, "正文里有盘链的必须入库"
+    assert "一篇新闻" not in titles, "确实看过正文、没有盘链 ⇒ 不是网盘文章"
+    assert "抓不到正文" in titles, "抓不到正文是『不知道』,不能据此判死(保守入库)"
 
 
 def test_listen_records_miss_and_skips(monkeypatch: pytest.MonkeyPatch, session) -> None:

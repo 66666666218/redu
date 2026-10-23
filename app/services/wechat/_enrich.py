@@ -182,7 +182,13 @@ def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchm
                 undated += 1
         types = detect_pan_types(title)
         content = ""
-        if _root.title_hits(title):
+        # ★★ 2026-10-23 用户口径:**正文(含「阅读原文」外链)里都没有盘链 ⇒ 不是网盘文章**。
+        #    判定必须基于正文,所以**不再按标题词表决定抓不抓**:
+        #    「课程/资料/图纸/剧本」这类标题不在 `TITLE_HINTS` 里,旧逻辑**根本不抓正文**
+        #    ⇒ 被判成"无盘链"丢掉(实测当天 330 篇无盘链里,大部分是这类真资源)。
+        #    `require_pan=False`(旧行为)仍只在标题命中时抓,避免无谓网络开销。
+        want_fetch = bool(require_pan or _root.title_hits(title))
+        if want_fetch and (content_resolver or fetch_content):
             if content_resolver:  # 免费源注入(微信读书正文);传 url 让实现方能对上本篇 reviewId
                 content = content_resolver(it["title"], url) or ""
             elif fetch_content:
@@ -191,7 +197,11 @@ def _insert_new_articles(session: Session, user_id: int, benchmark: WechatBenchm
                 types = detect_pan_types(content) or types
         pan_urls = _extract_pan_urls(title, content)
         if require_pan and not pan_urls and not types:
-            continue  # 无盘链 → 不监控
+            if content:
+                #: 确实看过正文(含「阅读原文」)都没有盘链 ⇒ 非网盘文章,不入库。
+                continue
+            #: ⚠️ 抓不到正文 ⇒ **不知道**,保守入库 —— 别把资源当噪音杀掉。
+            logger.debug("正文抓不到,无法判定是否网盘文章,保守入库:%s", title[:40])
         quality = assess_quality(content, pan_urls, preset_read)
         row = WechatArticle(user_id=user_id, author=(benchmark.nickname or "未命名")[:128],
                             title=title[:500], url=url[:500], content=content,
