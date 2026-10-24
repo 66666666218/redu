@@ -334,6 +334,39 @@ def already_have(session, user_id: int, title: str) -> dict | None:
         return None
 
 
+def strict_have(session, user_id: int, title: str) -> dict | None:
+    """**只要精确命中**的「库内已有我方链」——给**客户出链**用,不含近似名兜底。
+
+    ## 为什么单列,不复用 `already_have`
+    `already_have` 末尾有一段**近似名兜底**(`fuzzy_have`),它的用途是"**要不要再搬一份**";
+    那段自己的注释就写着:「它只用于'要不要再搬';给客户出链仍走 `_title_claims` 那套严格判据」。
+    卡片上的标题链接是**给客户点开拿资源**的 ⇒ 必须走严格判据,
+    否则近似名可能把 A 资源的链挂到 B 资源上(内容事故,见 2026-10-16 那次错链扩散)。
+
+    ## 它解决什么(2026-10-25 用户报)
+    推文卡片上大量 `⏳待转存`,但那些资源**我们库里早就有了**(`pan_owned_shares` 5367 条)。
+    旧渲染只看文章自己的 `my_pan_urls`,不从库里按名称反查 ⇒ 客户以为还得自己搬,
+    实际点开原文拿到的还是别人的链。
+    """
+    try:
+        from app.services.resource_library import search_resources
+    except Exception:  # noqa: BLE001
+        return None
+    for name in _resource_name_hints(title):
+        try:
+            rows = search_resources(session, user_id, name, limit=3)
+        except Exception:  # noqa: BLE001 - 查库失败就当没有,别挡渲染
+            continue
+        for r in rows:
+            if not r.get("my_link"):
+                continue
+            first = str((r.get("titles") or [""])[0] or "")
+            if not _title_claims(first, name):
+                continue
+            return r
+    return None
+
+
 def reuse_if_have(session, user_id: int, title: str) -> dict | None:
     """★ **三盘互通**的统一入口:**这个资源我们盘里已经有了吗?有就把那条链给你,别再搬一份。**
 

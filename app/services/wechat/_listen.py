@@ -1842,10 +1842,30 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
             if link:
                 my_link = True
             else:
-                link, code = _first_pan_link(r.pan_urls)
-                src_link = bool(link)
-                if not link:
-                    link = r.url          # 什么盘链都没有 ⇒ 点标题看原文
+                # ★★ **2026-10-25:先查「资源库里是不是已经有了」**。
+                #    用户报:卡片上大量 `⏳待转存`,而那些资源我们库里**早就有了**
+                #    (`pan_owned_shares` 实测 5367 条) —— 旧渲染只看文章自己的
+                #    `my_pan_urls`,从不按**资源名称**反查库,于是客户以为还得自己搬。
+                #    ⚠️ 只用 `strict_have`(**精确名 + `_title_claims`)——
+                #    近似名兜底是"要不要再搬"的判据,拿来给客户出链会挂错资源。
+                have = None
+                try:
+                    from app.services.pan_discovery import strict_have
+
+                    have = strict_have(session, r.user_id, r.title)
+                except Exception:  # noqa: BLE001 - 查库失败就退到原逻辑,别挡推送
+                    have = None
+                if have and have.get("my_link"):
+                    _raw = str(have["my_link"])
+                    link, code = _first_pan_link(_raw)
+                    if not link:
+                        link, code = _raw, ""
+                    my_link = bool(link)
+                if not my_link:
+                    link, code = _first_pan_link(r.pan_urls)
+                    src_link = bool(link)
+                    if not link:
+                        link = r.url          # 什么盘链都没有 ⇒ 点标题看原文
         # 重复资源标记: 同盘链已被其他文章推过 → 🔥N(同行都在发的确认级资源)
         hot = ""
         first_pan = pan_of.get(r.id, "")

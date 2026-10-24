@@ -559,6 +559,52 @@ def test_push_listen_title_always_clickable(session, monkeypatch) -> None:
         "连源盘链都没有时标题回落原文——**标题始终可点**"
 
 
+def test_push_listen_uses_library_link_instead_of_pending(session, monkeypatch) -> None:
+    """★ 2026-10-25 用户报:卡片上 `⏳待转存`,但资源库里**早就有了**。
+
+    旧渲染只看文章自己的 `my_pan_urls`,从不按**资源名称**反查库
+    (`pan_owned_shares` 实测 5367 条) ⇒ 客户以为还得自己搬。
+    现在:文章没有我方链时,先问 `strict_have`;命中就用**库内我方链**、网盘列标 🔴。
+    ⚠️ 必须用严格判据(`strict_have`),不能用近似名兜底 —— 那是"要不要再搬"的判据,
+    拿来给客户出链会挂错资源(见 `pan_discovery.strict_have` 的说明)。
+    """
+    import json
+
+    import app.services.feishu as feishu_mod
+    from app.services import pan_discovery as pd
+
+    r = WechatArticle(user_id=1, title="演唱会座位模拟器【免费版】", author="外号A",
+                      read_num=0, url="https://mp.weixin.qq.com/s/a", source="listen",
+                      pan_urls="https://pan.quark.cn/s/src1")
+    session.add(r)
+    session.commit()
+    monkeypatch.setattr(pd, "strict_have",
+                        lambda s, u, t: {"my_link": "https://pan.quark.cn/s/ours1",
+                                         "titles": [t]})
+    monkeypatch.setattr(feishu_mod, "webhook_for",
+                        lambda settings, section: "https://open.feishu.cn/hook/x")
+    cards: list[dict] = []
+
+    class _FakeFeishu:
+        def __init__(self, webhook, secret="") -> None:
+            pass
+
+        def send(self, msg: str) -> bool:
+            return True
+
+        def send_card(self, card: dict) -> bool:
+            cards.append(card)
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
+    wechat_monitor._push_listen(session, 1, _settings(wechat_push_skip_own_pan=False), [r])
+    blob = json.dumps(cards, ensure_ascii=False)
+    assert "](https://pan.quark.cn/s/ours1)" in blob, \
+        "库内已有该资源时,标题要指向**我方链**,不能还指向原作者链"
+    assert "⏳待转存" not in blob, "库里已经有了却标『待转存』,正是用户报的误会"
+    assert "🔴" in blob, "网盘列要标成我方链"
+
+
 def test_push_listen_read_column_has_no_asterisk(session, monkeypatch) -> None:
     """阅读列**只显示数字**,不加 `*`(2026-10-18 用户当场报「刚补推的阅读数后面都带*」)。
 
