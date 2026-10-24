@@ -317,7 +317,12 @@ class TestVerifyLogin:
         assert bas.verify_login("")["is_login"] is False
 
     def test_网络异常与失效要分开报(self, monkeypatch) -> None:
-        """网络抖一下 ≠ cookie 失效 —— 报错里要能区分,否则会误报"去重扫"。"""
+        """网络抖一下 ≠ cookie 失效 —— 报错里要能区分,否则会误报"去重扫"。
+
+        ★ 2026-10-24:`network_error` 这个标记是**给上层用的判据**,不只是文案。
+        当天 12:12 `ConnectionError: Max retries exceeded`(换出口 IP 的瞬间)
+        被记成"凭据失效,本轮跳过",而 11:12 / 13:12 两轮都是 success。
+        """
         import requests
 
         def _boom(*a, **k):
@@ -325,6 +330,7 @@ class TestVerifyLogin:
         monkeypatch.setattr(requests, "get", _boom)
         st = bas.verify_login("SESSDATA=x")
         assert st["is_login"] is False and "ConnectionError" in st["reason"]
+        assert st.get("network_error") is True, "网络异常必须带标记,上层才能不报『去重扫』"
 
     def test_失效时推告警(self, session, monkeypatch) -> None:
         sent: list[tuple] = []

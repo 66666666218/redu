@@ -463,6 +463,24 @@ def test_B站凭据死了要判红并给对修法(monkeypatch) -> None:
     assert "-352" in why and "bili_login.py" in why, why
 
 
+def test_B站验活没发出去时_不许判成凭据失效(monkeypatch) -> None:
+    """★ 2026-10-24:网络错误 ≠ cookie 失效。
+
+    当天 12:12 换出口 IP 的瞬间 `ConnectionError: Max retries exceeded`,
+    旧实现把它报成「不是登录态,去重新扫码」—— 而前后两轮都 success。
+    判据与 `network_guard.ip_blocked` 同口径:**探测没发出去 ⇒ 说不清,别当封了**。
+    """
+    from app.services import bili_account_scan as bas
+    from app.services import chain_health as ch
+
+    monkeypatch.setattr(bas, "verify_login", lambda ck="": {
+        "is_login": False, "uname": "", "mid": 0,
+        "network_error": True, "reason": "ConnectionError: Max retries exceeded"})
+    alive, why = ch._cred_alive("bilibili", "SESSDATA=x", None)
+    assert alive is None, "网络错误必须判『说不清』(None),不能判红"
+    assert "没发出去" in why and "bili_login.py" not in why, why
+
+
 def test_小红书平台关掉时_体检不许去探活(monkeypatch):
     """★★ **关掉的平台,体检一次都不许打**(2026-10-15)。
 

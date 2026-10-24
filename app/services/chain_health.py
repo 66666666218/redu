@@ -739,6 +739,12 @@ def _cred_alive(platform: str, cookie: str, db) -> tuple[bool | None, str]:
             st = bas.verify_login(cookie)
             if st.get("is_login"):
                 return True, f"已登录({st.get('uname') or st.get('mid')})"
+            if st.get("network_error"):
+                #: ★ 2026-10-24:验活请求**没发出去**(ConnectionError/超时)⇒ 说不清,
+                #: 别报成"不是登录态、去重新扫码" —— 当天 12:12 就是这么误诊的
+                #: (`Max retries exceeded`,而前后两轮都 success)。
+                return None, (f"**验活请求没发出去**({st.get('reason')})⇒ 说不清,"
+                              f"不是凭据失效;下一轮再判")
             return False, (f"**不是登录态**({st.get('reason') or 'SESSDATA 未被接受'})—— "
                            f"此后每一轮扫描都会匿名去撞 `space` 端点、**必然 -352**、零产出;"
                            f"修法:`python scripts/bili_login.py` 扫码重登")

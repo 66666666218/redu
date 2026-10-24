@@ -203,7 +203,11 @@ def verify_login(cookie: str = "") -> dict:
         return {"is_login": bool(d.get("isLogin")), "uname": str(d.get("uname") or ""),
                 "mid": int(d.get("mid") or 0), "reason": ""}
     except Exception as exc:  # noqa: BLE001 - 网络问题≠失效,分开报
-        return {"is_login": False, "uname": "", "mid": 0,
+        #: ★ 2026-10-24:必须带 `network_error`,否则上层只能看到 `is_login=False`,
+        #:   会把「换 IP 瞬间的连接失败」报成「cookie 已失效」并叫人去重新扫码。
+        #:   当天 12:12 实测:`ConnectionError: Max retries exceeded` 被记成"凭据失效",
+        #:   而 11:12 与 13:12 两轮都是 success ⇒ 根本没失效,只是一次网络抖动。
+        return {"is_login": False, "uname": "", "mid": 0, "network_error": True,
                 "reason": f"{type(exc).__name__}: {str(exc)[:80]}"}
 
 
@@ -535,6 +539,15 @@ def bili_account_scan_tick(settings=None) -> int:
                 if ck:
                     st = verify_login(ck)
                     if not st["is_login"]:
+                        if st.get("network_error"):
+                            #: ★ 2026-10-24:**网络抖动不是凭据失效**。
+                            #: 不推"cookie 已失效"告警(那会让人白扫一次码),也不标凭据失效;
+                            #: 下一轮照常尝试。典型场景:换出口 IP 的瞬间连接被重置。
+                            _record_run(db, uid, "bili_account_scan", "partial",
+                                        f"**网络瞬时失败,本轮跳过**:{str(st.get('reason'))[:100]}"
+                                        f" —— 不是凭据失效(下轮照常;别去重新扫码)")
+                            db.commit()
+                            continue
                         _alert_cookie_dead(db, uid, str(st.get("reason") or ""))
                         _record_run(db, uid, "bili_account_scan", "partial",
                                     f"**凭据失效,本轮跳过、不发请求**:{str(st.get('reason'))[:80]}"
