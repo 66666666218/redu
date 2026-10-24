@@ -80,11 +80,17 @@ def _dir_stats(ls, fid: str, budget: dict, depth: int = 0) -> tuple[int, int]:
     return n, sz
 
 
-def build_plan(max_depth: int = 3, budget: int = BUDGET) -> dict:
+def build_plan(max_depth: int = 3, budget: int = BUDGET, root_id: str = "") -> dict:
     """扫盘 → 找同级同名重复 → 定"留谁删谁"。返回 `{"plan", "freed", "n_drop", ...}`。
 
     ⚠️ **撞 API 预算时 `complete=False`** —— 调用方必须把这件事说出来:
     "没扫完"和"扫完了没重复"长得一样,正是本仓最忌讳的那种失败。
+
+    `root_id` 非空时**从该目录开始扫**(2026-10-24 加)。
+    ⚠️ **为什么需要它**:从根目录(`""`)扫时,迅雷根目录里混着大量回收站条目
+    (实测 197/200 是 `trashed`),`list_all_files` 翻到**页数上限(20 页)**都扫不完
+    ⇒ 一个子目录都拿不到、整轮 `calls=5` 就结束(实测),**看起来像"盘里没有重复"**。
+    真实资源都在落地目录(「最全文件」)下,从那里扫才既有意义又省调用。
     """
     calls = {"n": 0}
     dirs: list[dict] = []
@@ -112,7 +118,7 @@ def build_plan(max_depth: int = 3, budget: int = BUDGET) -> dict:
                              "path": f"{path}/{name}"})
                 walk(str(x.get("id")), depth + 1, f"{path}/{name}")
 
-    walk("", 1, "")
+    walk(root_id or "", 1, "")
 
     groups: dict[tuple, list[dict]] = collections.defaultdict(list)
     for d in dirs:
@@ -227,7 +233,16 @@ def pan_dedupe_tick(settings=None) -> int:
         for (uid,) in db.execute(__import__("sqlalchemy").select(User.id)
                                  .where(User.enabled.is_(True))).all():
             try:
-                out = build_plan(depth, budget=budget)
+                #: ★ 2026-10-24:**必须从落地目录扫,不能从根目录**。
+                #: 根目录里混着大量回收站条目(实测 197/200),`list_all_files` 翻到页数上限
+                #: 都列不完 ⇒ 一个子目录都拿不到、`calls=5` 就结束,于是周作业**一直在空转**,
+                #: 而它在运行记录里长得像"扫完了、盘里没重复"。实测从落地目录扫 600 次调用
+                #: 就找出 9 组重复 / 可省 28.64 GiB。
+                from app.services import xunlei_transfer as xt
+
+                _cred = xt._credentials()
+                _root = xt.resolve_parent_id(_cred) if _cred else ""
+                out = build_plan(depth, budget=budget, root_id=_root)
                 groups, risky = out["plan"], [p for p in out["plan"] if p["risky"]]
                 note = (f"扫{out['scanned_dirs']}目录 {out['calls']}/{budget}次调用;"
                         f"重复组{len(groups)}(跳过risky{len(risky)})")
