@@ -1018,3 +1018,42 @@ class TestPanMultiAccount:
         out = xg.transfer_pending(session, 1, limit=1, settings=_S())
         assert out["status"] != "disk_full"
         assert rec["transfer_keys"] == ["xunlei"], f"单账号不许换名字:{rec['transfer_keys']}"
+
+
+def test_file_count_limit_switches_to_next_account(session, monkeypatch) -> None:
+    """★ 2026-10-24:某个号「转存文件数达上限」时**换下一个号重试**。
+
+    为什么必须单独测:多账号池按**空间**择一,而"文件数满"不影响空间比例 ⇒
+    空间探针永远挑同一个号、撞同一个错(实测连续 7 轮 partial)。
+    这里钉住三件事:① 该号被标记 full;② 下一条请求换了 cookie_key;③ 成功就用新号。
+    """
+    from types import SimpleNamespace
+
+    from app.services import pan_accounts
+    from app.services import xunlei_group as xg
+    from app.services import xunlei_transfer as xt
+
+    row = SimpleNamespace(origin_url="https://pan.xunlei.com/s/S1", title="资源")
+    a = pan_accounts.AccountRef(label="号1", platform="xunlei", cookie_key="xunlei")
+    b = pan_accounts.AccountRef(label="号2", platform="xunlei", cookie_key="xunlei#3")
+    monkeypatch.setattr(pan_accounts, "ordered",
+                        lambda s, p, user_id=1: [b])
+    reported: list[tuple] = []
+    monkeypatch.setattr(pan_accounts, "report",
+                        lambda s, ref, **kw: reported.append((ref.cookie_key, kw)))
+    calls: list[str] = []
+
+    def fake(url, *, cookie_key="xunlei", **kw):
+        calls.append(cookie_key)
+        if cookie_key == "xunlei":
+            return {"status": "failed", "code": "file_count_limit",
+                    "message": "转存文件数达上限(需超级会员提升至 5 万)"}
+        return {"status": "ok", "share_url": "https://pan.xunlei.com/s/OUR", "code": "ab12"}
+
+    monkeypatch.setattr(xt, "transfer_and_share", fake)
+    out, used = xg._transfer_with_account_fallback(session, 1, row, a)
+
+    assert out["status"] == "ok" and used.cookie_key == "xunlei#3"
+    assert calls == ["xunlei", "xunlei#3"], f"应当在文件数满时换号重试:{calls}"
+    assert any(k == "xunlei" and v.get("full") is True for k, v in reported), \
+        "满掉的号要标 full(带冷静期),否则下一轮还会挑到它"

@@ -144,11 +144,17 @@ def cookie_of(ref: AccountRef, session: Session) -> str:
 
 
 def report(session: Session, ref: AccountRef, *, ratio: float | None = None,
-           full: bool | None = None, why: str = "") -> None:
+           full: bool | None = None, why: str = "",
+           full_minutes: int | None = None) -> None:
     """把**这一号的探测结果**写回池子(择一就靠它;`full` 只对这种账号加冷静期)。
 
     ⚠️ 默认账号(`is_default`)**不写池** —— 单账号部署时池子是空的,别凭空写出一条
     "配置",那会让人以为池配过了。
+
+    `full_minutes` 可覆盖默认冷静期(`FULL_COOLDOWN_MIN`=30 分钟)。
+    ★ 2026-10-24:**"空间满"会自行缓解(清理即可),"文件数满"不会** ——
+    后者是账号级长期配额(迅雷 5 万),30 分钟后又会被挑中白撞一次。
+    ⇒ 调用方对文件数满传 `full_minutes=24*60`,一天试一次就够。
     """
     if ref.is_default:
         return
@@ -163,8 +169,8 @@ def report(session: Session, ref: AccountRef, *, ratio: float | None = None,
             item["last_ratio"] = round(float(ratio), 4)
         item["last_check_at"] = datetime.now().isoformat(sep=" ", timespec="seconds")
         if full is True:
-            item["full_until"] = (datetime.now() + timedelta(minutes=FULL_COOLDOWN_MIN)
-                                  ).isoformat(sep=" ", timespec="seconds")
+            item["full_until"] = (datetime.now() + timedelta(
+                minutes=full_minutes or FULL_COOLDOWN_MIN)).isoformat(sep=" ", timespec="seconds")
         elif full is False:
             item["full_until"] = ""
         if why:

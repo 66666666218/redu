@@ -677,6 +677,38 @@ def test_restore_space_error_carries_both_numbers(monkeypatch) -> None:
     assert "还差 0.84 TiB" in out["message"], "缺口要算出来(6.88 - 6.04),这才是用户要的答案"
 
 
+def test_file_count_limit_is_its_own_code(monkeypatch) -> None:
+    """★ 2026-10-24:迅雷「转存文件数达上限」必须单独成 `code`,不能混进"转存失败"。
+
+    实测 detail:`share_upgrade_to_vip_super_file_count` / `error_code=9` /
+    「开通超级会员提升转存文件数至5万」。它与**盘满**是两件事 ——
+    空间探针看不见它,所以上层只能靠这个 code 去**换下一个账号**。
+    """
+    from app.services import xunlei_transfer as xt
+
+    assert xt.is_file_count_limit("share_upgrade_to_vip_super_file_count") is True
+    assert xt.is_file_count_limit("开通超级会员提升转存文件数至5万") is True
+    assert xt.is_file_count_limit("file_space_not_enough") is False
+
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None, **kw: {
+        "access_token": "a", "captcha_token": "c", "device_id": "d", "client_id": "x"})
+    monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
+    monkeypatch.setattr(xt, "resolve_parent_id", lambda cred=None, **k: "P")
+    monkeypatch.setattr(xt, "list_files", lambda *a, **k: [])
+    monkeypatch.setattr(xt, "list_all_files", lambda *a, **k: [])
+    monkeypatch.setattr(xt, "quota_info", lambda cred=None: {
+        "usage": 1, "limit": 100, "ratio": 0.01})
+    monkeypatch.setattr(xt.requests, "get", lambda url, **kw: _FakeResp(
+        {"share_status": "OK", "pass_code_token": "t", "files": [{"id": "F1", "size": 0}]}))
+    monkeypatch.setattr(xt.requests, "post", lambda url, **kw: _FakeResp({
+        "error": "share_upgrade_to_vip_super_file_count", "error_code": 9,
+        "error_description": "开通超级会员提升转存文件数至5万"}))
+
+    out = xt.transfer_and_share("https://pan.xunlei.com/s/S?pwd=p")
+    assert out["status"] == "failed" and out["code"] == "file_count_limit"
+    assert "5 万" in out["message"], f"要说清是文件数上限,不是空间不足:{out['message']}"
+
+
 def test_unknown_space_does_not_block_a_transfer(monkeypatch) -> None:
     """⚠️ **不知道 ≠ 满**:配额探针拿不到时**照常转**,不许拿"不知道"去挡(与 `admit_transfer` 同源)。"""
     from app.services import xunlei_transfer as xt

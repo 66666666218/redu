@@ -403,6 +403,45 @@ def admit_transfer(name: str, cred: dict | None = None, settings=None,
 
 # ---------------------------------------------------------------- 限量转存
 
+def _transfer_with_account_fallback(session, user_id: int, row, chosen):
+    """转存一条群资源;**遇到「转存文件数达上限」就换下一个账号**。返回 `(out, 实际账号)`。
+
+    ## 为什么必须单独处理(2026-10-24 实测)
+    多账号池是按**空间**择一的(最空的优先),而迅雷的「转存文件数达上限(5 万)」
+    **不影响空间比例** ⇒ 空间探针永远看不出它,每一轮都会挑同一个号、撞同一个错。
+    当天群转存连续 **7 轮 partial**,detail 全是
+    `share_upgrade_to_vip_super_file_count / error_code=9`。
+
+    处置:
+      1. 把该号标成 `full`(带 120 分钟冷静期,`pan_accounts.ordered` 会把它排到最后);
+      2. 依次换池里**未满**的号重试同一资源;
+      3. 全池都达上限 ⇒ 返回**第一条**错误(不吞,也不假装成功)。
+    """
+    from app.services import pan_accounts
+    from app.services import xunlei_transfer as xt
+
+    out = xt.transfer_and_share(row.origin_url, cookie_key=chosen.cookie_key)
+    if out.get("code") != "file_count_limit":
+        return out, chosen
+    pan_accounts.report(session, chosen, full=True, why="转存文件数达上限(5 万)",
+                          full_minutes=24 * 60)
+    logger.warning("迅雷账号 %s 转存文件数达上限(5 万),换下一个账号重试", chosen.label)
+    first = out
+    for ref in pan_accounts.ordered(session, "xunlei", user_id=user_id):
+        if ref.cookie_key == chosen.cookie_key or ref.is_default:
+            continue
+        if ref.full_until and ref.full_until > datetime.now().isoformat():
+            continue                      # 已在冷静期(空间满或文件数满)
+        retry = xt.transfer_and_share(row.origin_url, cookie_key=ref.cookie_key)
+        if retry.get("code") == "file_count_limit":
+            pan_accounts.report(session, ref, full=True, why="转存文件数达上限(5 万)",
+                    full_minutes=24 * 60)
+            continue
+        logger.info("迅雷账号 %s 文件数已满,改用 %s 转存成功", chosen.label, ref.label)
+        return retry, ref
+    return first, chosen
+
+
 def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> dict:
     """把 pending 的群分享**限量转存**到我方盘,回填我方分享链。
 
@@ -509,8 +548,8 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
                              "share_url": row.our_url, "code": ""})
             logger.info("迅雷群分享:三盘互通命中,复用已有链 %s", row.title)
             continue
-        out = xt.transfer_and_share(row.origin_url,
-                                    cookie_key=chosen.cookie_key)
+        # ★ 2026-10-24:文件数达上限时**换下一个账号**(见 helper 的说明)
+        out, chosen = _transfer_with_account_fallback(session, user_id, row, chosen)
         # ↑ 落在**选中的那个账号**的盘上(见上面择一那段)
         if out.get("status") == "ok":
             _had = bool(str(row.our_url or ""))
@@ -525,6 +564,11 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
                              "share_url": row.our_url, "code": row.pass_code})
         else:
             msg = out.get("message") or ""
+            if out.get("code") == "file_count_limit":
+                #: ★ 2026-10-24:给出**能照做**的下一步 —— 这条不是代码能修的,
+                #: 是账号侧的配额(迅雷普通账号转存文件数上限 5 万)。
+                msg += (" —— **所有可用迅雷账号的转存文件数都已达上限**;"
+                        "恢复转存需:升级超级会员 / 清理盘内文件 / 再扫码加一个迅雷号")
             if xt.is_own_share_error(msg):
                 # **我们自己发的分享**:转存自己必然失败,重试也是白试 → 直接终态
                 row.status, row.message = "skipped", "这是我们自己的分享(转存自己的文件),不搬"

@@ -875,6 +875,23 @@ def is_dead_share_error(message: str) -> bool:
     return any(h in text for h in _DEAD_SHARE_HINTS)
 
 
+def is_file_count_limit(message: str) -> bool:
+    """这条失败是不是「**转存文件数达上限**」(迅雷:开通超级会员提升至 5 万)。
+
+    2026-10-24 实测(群转存连续 7 轮 partial):
+        {"error": "share_upgrade_to_vip_super_file_count", "error_code": 9,
+         "error_description": "开通超级会员提升转存文件数至5万"}
+
+    ⚠️ 它**与"盘满"是两件事**:空间探针看到还有空余、闸门照常放行,只有真正转存时才被拒。
+    所以判据必须单独一条 —— 否则多账号池会一直拿这个号去撞(它按"最空"排序,而文件数满了
+    并不影响它的空间比例)。
+    """
+    text = message or ""
+    return ("share_upgrade_to_vip_super_file_count" in text
+            or "提升转存文件数" in text
+            or ("文件数" in text and "上限" in text))
+
+
 
 def _extract_share_id(url: str) -> tuple[str, str]:
     """`pan.xunlei.com/s/<id>?pwd=xxxx` → (share_id, pass_code)。"""
@@ -1147,6 +1164,12 @@ def transfer_and_share(share_url: str, parent_id: str = "", settings=None,
                                             "file_ids": files}))
         task_id = restore.get("restore_task_id") or ""
         if not task_id:
+            # ★ 2026-10-24:转存文件数达上限 —— 与"盘满"分开成独立的 code,
+            #   让上层能**换账号重试**(多账号池按空间择一,文件数满了它看不出来)。
+            _raw = str(restore)[:200]
+            if is_file_count_limit(_raw):
+                return {"status": "failed", "code": "file_count_limit",
+                        "message": f"转存文件数达上限(需超级会员提升至 5 万):{_raw[:140]}"}
             # 🔎 迅雷**自己报**的所需空间 —— 比"使用率闸门"准得多,用来把"盘满"拆成
             #    「按设计挡下」还是「单个资源就是比剩余空间大」(2026-10-04 用户口径)。
             need = required_size_from_error(restore)
