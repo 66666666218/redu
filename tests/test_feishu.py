@@ -675,6 +675,36 @@ def test_health_stalls_alert_and_cooldown(monkeypatch, session) -> None:
     assert alert_service.check_health_stalls(_settings(health_stall_hours=24), db=session) == 0
 
 
+def test_health_stalls_skips_sections_this_role_does_not_run(monkeypatch, session) -> None:
+    """★ 2026-10-24:分体部署下,**本实例不跑的板块不许报停摆**。
+
+    现场:远程实例(角色 `hotspot`)的库里没有本机的 `wechat_listen` 记录 ——
+    它按**自己的库**判出「公众号:最近轮次成功 09-28,已 26 天」并推了红警,
+    而本机(角色 `wechat`)当天每轮都 success。
+    ⇒ 判据与 `health.py::_SECTION_ROLE` 同一套:远程不管公众号/闲鱼,本机不管热点。
+    """
+    from app.services import alert_service
+    from app.db.models import UserCookie, UserSchedule
+
+    session.add(UserSchedule(user_id=1, section="wechat", interval_minutes=60, enabled=True))
+    session.add(UserCookie(user_id=1, platform="weread", cookie="x"))
+    session.commit()
+    sent: list[str] = []
+    monkeypatch.setattr(
+        feishu_client, "FeishuClient",
+        lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
+
+    # 远程角色:不跑公众号 ⇒ 一条都不报(它的库里本来就没有本机的轮次记录)
+    n = alert_service.check_health_stalls(
+        _settings(health_stall_hours=24, scheduler_role="hotspot"), db=session)
+    assert n == 0 and not sent, f"远程实例不该报公众号停摆:{sent}"
+
+    # 本机角色:确实没有成功的轮次记录 ⇒ 该报
+    n = alert_service.check_health_stalls(
+        _settings(health_stall_hours=24, scheduler_role="wechat"), db=session)
+    assert n == 1 and "公众号" in sent[0]
+
+
 def test_health_stalls_goes_to_admin_not_the_platform_group(monkeypatch, session) -> None:
     """★★ **2026-10-16 用户口径:「所有的警告都发到管理群」**。
 

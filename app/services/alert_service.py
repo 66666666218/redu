@@ -623,6 +623,20 @@ def check_health_stalls(settings: Settings | None = None, db: Session | None = N
         .where(User.enabled.is_(True), UserSchedule.enabled.is_(True)).distinct()
     ).scalars().all())
     in_use = {cookie_to_data.get(c, c) for c in raw} & sched_on
+    #: ★★ 2026-10-24:**本实例不跑的板块不许报停摆**(分体部署)。
+    #: 远程实例(角色 `hotspot`)库里没有本机的 `wechat_listen` 记录 —— 它按**自己的库**判,
+    #: 会报「公众号:最近轮次成功 09-28,已 26 天」,而那 09-28 只是**远程自己**最后一次跑公众号
+    #: (分工后公众号只在本机跑)。本机当天每轮都 success,却收到一条"停摆 26 天"的红警。
+    #: 映射与 `health.py::_SECTION_ROLE` 同一份,别各写一套。
+    _section_role = {"weibo": "hotspot", "douhot": "hotspot", "baidu": "hotspot",
+                     "xianyu": "wechat", "wechat": "wechat"}
+    _role = (getattr(settings, "scheduler_role", "all") or "all").strip().lower()
+
+    def _role_owns(section: str) -> bool:
+        want = _section_role.get(section, "both")
+        return _role in ("all", "both") or _role == want
+
+    in_use = {p for p in in_use if _role_owns(p)}
     stalled = []
     for p, (model, col) in data_tables.items():
         if p not in in_use:
@@ -650,7 +664,7 @@ def check_health_stalls(settings: Settings | None = None, db: Session | None = N
     # 连丢两格才说明调度真出事了 —— 宁可晚 8 小时,也不要在正常运行时报假警。
     from app.services.schedule_service import wechat_listen_gap_hours
 
-    if "wechat" in sched_on and "weread" in raw:
+    if "wechat" in sched_on and "weread" in raw and _role_owns("wechat"):
         _gap_h = wechat_listen_gap_hours()
         _last_listen = db.scalar(select(func.max(RunRecord.started_at)).where(
             RunRecord.kind.in_(("wechat_listen", "wechat_sync")),
