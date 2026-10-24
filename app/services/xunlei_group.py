@@ -427,11 +427,21 @@ def _transfer_with_account_fallback(session, user_id: int, row, chosen):
                           full_minutes=24 * 60)
     logger.warning("迅雷账号 %s 转存文件数达上限(5 万),换下一个账号重试", chosen.label)
     first = out
+    gate = _gate_limit()
     for ref in pan_accounts.ordered(session, "xunlei", user_id=user_id):
         if ref.cookie_key == chosen.cookie_key or ref.is_default:
             continue
         if ref.full_until and ref.full_until > datetime.now().isoformat():
             continue                      # 已在冷静期(空间满或文件数满)
+        #: ★★ 2026-10-24 修:换号时**必须跳过空间已满的号**。
+        #: 实测当天三个主号都撞了文件数上限,换号逻辑落到了 `xunlei#2`
+        #: —— 那是**免费 10 GiB 小号(已用 10253%)**,它的 `full_until` 早已过期,
+        #: 于是被当成可用落点,"转存成功"了一条小资源。
+        #: 空间闸门(`_gate_limit`,与 `admit_transfer` 同一事实源)对**换号**同样适用。
+        if ref.last_ratio is not None and float(ref.last_ratio) >= gate:
+            logger.info("迅雷换号:跳过 %s(空间已用 %.0f%% ≥ 闸门 %.0f%%)",
+                        ref.label, float(ref.last_ratio) * 100, gate * 100)
+            continue
         retry = xt.transfer_and_share(row.origin_url, cookie_key=ref.cookie_key)
         if retry.get("code") == "file_count_limit":
             pan_accounts.report(session, ref, full=True, why="转存文件数达上限(5 万)",

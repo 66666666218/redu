@@ -1057,3 +1057,40 @@ def test_file_count_limit_switches_to_next_account(session, monkeypatch) -> None
     assert calls == ["xunlei", "xunlei#3"], f"应当在文件数满时换号重试:{calls}"
     assert any(k == "xunlei" and v.get("full") is True for k, v in reported), \
         "满掉的号要标 full(带冷静期),否则下一轮还会挑到它"
+
+
+def test_file_count_limit_skips_full_space_accounts(session, monkeypatch) -> None:
+    """★ 2026-10-24:**换号时也要跳过空间已满的号**。
+
+    现场:三个主号都撞文件数上限后,换号逻辑落到了 `xunlei#2` ——
+    那是免费 10 GiB 小号(ratio=102.5%),`full_until` 早已过期,于是被当成可用落点。
+    空间闸门(`_gate_limit`,与 `admit_transfer` 同一事实源)对**换号**同样适用。
+    """
+    from types import SimpleNamespace
+
+    from app.services import pan_accounts
+    from app.services import xunlei_group as xg
+    from app.services import xunlei_transfer as xt
+
+    row = SimpleNamespace(origin_url="https://pan.xunlei.com/s/S2", title="资源")
+    a = pan_accounts.AccountRef(label="主号", platform="xunlei", cookie_key="xunlei")
+    tiny = pan_accounts.AccountRef(label="免费小号", platform="xunlei",
+                                   cookie_key="xunlei#2", last_ratio=1.025, is_default=False)
+    good = pan_accounts.AccountRef(label="可用号", platform="xunlei", cookie_key="xunlei#3")
+    #: `ordered` 会把"满的排最后",但这里故意让免费小号排在可用号前面 ——
+    #: 要钉的是**helper 自己按空间跳过**,不能依赖上游排序。
+    monkeypatch.setattr(pan_accounts, "ordered", lambda s, p, user_id=1: [tiny, good])
+    monkeypatch.setattr(pan_accounts, "report", lambda s, ref, **kw: None)
+    calls: list[str] = []
+
+    def fake(url, *, cookie_key="xunlei", **kw):
+        calls.append(cookie_key)
+        if cookie_key == "xunlei":
+            return {"status": "failed", "code": "file_count_limit", "message": "上限"}
+        return {"status": "ok", "share_url": "https://pan.xunlei.com/s/OUR", "code": "ab12"}
+
+    monkeypatch.setattr(xt, "transfer_and_share", fake)
+    out, used = xg._transfer_with_account_fallback(session, 1, row, a)
+
+    assert "xunlei#2" not in calls, f"空间 102.5% 的免费小号不该被当成落点:{calls}"
+    assert used.cookie_key == "xunlei#3" and out["status"] == "ok"
