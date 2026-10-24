@@ -37,7 +37,13 @@ class Settings(BaseSettings):
     # 本字段只作兜底(临时手工指定),平时留空。
     bili_cookie: str = ""
     goofish_cookie_file: str = "data/goofish_cookie.txt"  # 闲鱼登录 Cookie 文件(gitignored)
-    xianyu_keywords: str = "ps教程,网盘资源,代充,剪映会员,软件,素材,cad,ae,pr,office,会员,课程,影视,源码"  # 虚拟商品关键词
+    #: 闲鱼监控关键词(2026-10-25 用户口径:只留「虚拟资料 + 下载安装包」)。
+    #: 旧表(`ps教程,网盘资源,代充,剪映会员,软件,素材,cad,ae,pr,office,会员,课程,影视,源码`)
+    #: 太宽泛:近 7 天 4385 条里 **会员/代充/剪映会员占 925 条**,那是"卖服务"不是"卖资料";
+    #: `软件` 也太泛。现按产出重选 11 个词(素材 816 / 课程 543 / 网盘资源 228 …),
+    #: 砍掉:会员、代充、剪映会员、影视、源码,以及 pr/ae/office/cad 这类具体软件名。
+    xianyu_keywords: str = ("网盘资源,素材,课程,教程,模板,电子书,学习资料,考试资料,"
+                            "软件下载,安装包,apk")
     xianyu_top_n: int = 100         # 前 N 虚拟商品榜(搜索级,无风控)
     xianyu_detail_limit: int = 10   # 慢速抓详情(想要数)的商品数;详情是触发 mtop 风控的最大爆发点,默认降到 10
     xianyu_deep_interval_hours: int = 6  # 闲鱼深采自动跑的最小间隔(小时):搜索接力深采时,距上次成功深采≥该值才跑,防风控

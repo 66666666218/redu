@@ -212,8 +212,8 @@ redian/
 | 微博 Cookie | `WEIBO_COOKIE` | 空 | 微博登录态,失效会触发告警 |
 | 百度指数 Cookie | `BAIDU_COOKIE` | 空 | 百度指数降级源登录态 |
 | 抖音指数 Cookie | `DOUYIN_COOKIE` | 空 | 抖音创作者中心/巨量算数登录态 |
-| 闲鱼热榜关键词 | `XIANYU_KEYWORDS` | `ps教程,网盘资源,代充...` | 虚拟商品搜索关键词(逗号分隔) |
-| 闲鱼热榜条数 | `XIANYU_TOP_N` | `50` | 热榜条数上限 |
+| 闲鱼热榜关键词 | `XIANYU_KEYWORDS` | `网盘资源,素材,课程,教程,模板,电子书,学习资料,考试资料,软件下载,安装包,apk` | **只覆盖「虚拟资料 + 下载安装包」**(2026-10-25 用户口径;旧的会员/代充/影视/源码已移除),逗号分隔 |
+| 闲鱼热榜条数 | `XIANYU_TOP_N` | `100` | 热榜条数上限 |
 | 闲鱼 Cookie 文件 | `GOOFISH_COOKIE_FILE` | `data/goofish_cookie.txt` | 闲鱼登录 Cookie 文件(gitignored) |
 | 代理入口 | `PROXY_URL` | 空 | 隧道代理地址(HTTP/SOCKS) |
 | 代理账号 | `PROXY_USER` | 空 | 隧道代理鉴权账号 |
