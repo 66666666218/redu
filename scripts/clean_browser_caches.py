@@ -20,7 +20,7 @@ CDP 那条路每多一个平台就多一份 Edge 档案,而每份档案稳定吃
 实测(2026-10-26):`xhs_cdp_profile` 991MB 里 `Default/Cache` 375MB + `Code Cache` 89MB;
 三个档案合计 2.0GB,可回收约 **1.7GB**。
 
-## 四条安全纪律
+## 五条安全纪律
 
 1. **默认 dry-run**,不加 `--yes` 一个文件都不删。
 2. **只删白名单内的缓存目录**,白名单是**相对路径的精确匹配**(不是前缀、不是正则)——
@@ -28,6 +28,8 @@ CDP 那条路每多一个平台就多一份 Edge 档案,而每份档案稳定吃
 3. **有浏览器正在用这个档案就跳过** —— 边跑边删档案会把它搞坏(宁可少清一个)。
 4. **档案目录必须长得像"我们自己的档案"**:在 `data/` 下、且含 `Local State` 或 `Default/`,
    别把随便一个路径当档案清了。
+5. ★ **常驻 CDP 档案默认不清**(`xhs_cdp_profile` / `_douyin_profile`):它们是
+   "一直登着、模拟真人"的资产,用户要的是**连风险都不冒**;要清必须显式 `--include-kept`。
 """
 from __future__ import annotations
 
@@ -63,6 +65,12 @@ _CACHE_PATHS = (
 #: 登录态所在 —— **只用于报告**,永远不会被删(不在白名单里)
 _KEEP = ("Default/Network/Cookies", "Default/Local Storage", "Default/Preferences",
          "Default/Login Data", "Local State")
+
+#: ★ **常驻 CDP 档案:默认一个字节都不清**(用户 2026-10-26 明确要求)。
+#: 这两份是"一直登着、模拟真人"的资产 —— 虽然清缓存本身不会掉登录(夸克那份实测清完
+#: 仍是登录态),但用户要的是**连这点风险都不冒**:把"绝不会被顺手清掉"变成代码里的默认,
+#: 而不是靠每次记得加参数。要清必须显式 `--include-kept`。
+_DEFAULT_KEEP = ("xhs_cdp_profile", "_douyin_profile")
 
 
 class CleanError(RuntimeError):
@@ -142,19 +150,42 @@ def discover(root: Path) -> list[Path]:
     return sorted(p for p in root.iterdir() if looks_like_profile(p))
 
 
+def select_profiles(profiles: list[Path], *, only: str = "",
+                    include_kept: bool = False) -> tuple[list[Path], list[Path]]:
+    """分流成 `(本次要处理的, 因"常驻档案"被跳过的)`。
+
+    ⚠️ 常驻 CDP 档案(`_DEFAULT_KEEP`)默认**不清**,除非显式 `include_kept=True`。
+    """
+    targets: list[Path] = []
+    kept: list[Path] = []
+    for p in profiles:
+        if only and only not in p.name:
+            continue
+        if not include_kept and p.name in _DEFAULT_KEEP:
+            kept.append(p)
+            continue
+        targets.append(p)
+    return targets, kept
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="清浏览器档案缓存(默认 dry-run)")
     ap.add_argument("--yes", action="store_true", help="真的删(不加只统计)")
     ap.add_argument("--root", default="data", help="档案所在根目录")
     ap.add_argument("--only", default="", help="只处理名字包含该串的档案")
+    ap.add_argument("--include-kept", action="store_true",
+                    help="连常驻 CDP 档案也清(默认跳过 xhs_cdp_profile / _douyin_profile)")
     args = ap.parse_args()
 
     root = Path(args.root)
-    profiles = discover(root)
-    if args.only:
-        profiles = [p for p in profiles if args.only in p.name]
+    targets, kept = select_profiles(discover(root), only=args.only,
+                                    include_kept=args.include_kept)
+    for p in kept:
+        print(f"跳过(常驻 CDP 档案,默认不清):{p.name}({_dir_mb(p):.0f} MB)")
+    profiles = targets
     if not profiles:
-        print(f"✗ {root} 下没找到浏览器档案(Local State / Default/ 都没有)")
+        print(f"✗ {root} 下没有可处理的浏览器档案"
+              f"(常驻档案都已跳过;要清它们加 --include-kept)")
         return 1
 
     total = 0.0

@@ -47,6 +47,35 @@ def test_只有真档案才被认出来(tmp_path):
     assert cb.looks_like_profile(real2) is True
 
 
+def test_常驻CDP档案默认不清(tmp_path):
+    """★ 用户 2026-10-26 明确要求:`xhs_cdp_profile` / `_douyin_profile` 是
+    "一直登着、模拟真人"的资产 —— **默认一个字节都不清**,要清必须显式加参数。
+
+    这不只是"少清一个":它把"绝不会被顺手清掉"变成**代码里的默认**,
+    而不是靠每次记得加 `--only`。
+    """
+    cb = _mod()
+    ps = [tmp_path / "xhs_cdp_profile", tmp_path / "_douyin_profile",
+          tmp_path / "_quark_profile", tmp_path / "xhs_2"]
+    targets, kept = cb.select_profiles(ps)
+    assert [p.name for p in kept] == ["xhs_cdp_profile", "_douyin_profile"]
+    assert [p.name for p in targets] == ["_quark_profile", "xhs_2"]
+
+
+def test_显式要求才连常驻档案一起清(tmp_path):
+    cb = _mod()
+    ps = [tmp_path / "xhs_cdp_profile", tmp_path / "_quark_profile"]
+    targets, kept = cb.select_profiles(ps, include_kept=True)
+    assert kept == [] and len(targets) == 2
+
+
+def test_only_按名字过滤(tmp_path):
+    cb = _mod()
+    ps = [tmp_path / "xhs_1", tmp_path / "xhs_2", tmp_path / "_quark_profile"]
+    targets, _ = cb.select_profiles(ps, only="xhs_")
+    assert [p.name for p in targets] == ["xhs_1", "xhs_2"]
+
+
 def test_默认只统计不删(tmp_path, monkeypatch):
     cb = _mod()
     prof = tmp_path / "p"
