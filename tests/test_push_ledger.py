@@ -129,11 +129,11 @@ class Test读窗口:
         w = pl.window(session, 1, "wechat", datetime(2026, 10, 16), datetime(2026, 10, 17))
         assert w["rows"] == 1 and w["items"][0]["pushes"] == 1
 
-    def test_按热度排_热度相同才看推送次数(self, session) -> None:
+    def test_热度优先_推得多的不一定排前面(self, session) -> None:
         """★ 2026-10-26 用户口径:「每日总结里按热度排序,让用户更好的观看」。
 
         原来是 `pushes`(我们推了几次)主导 —— 那是**我们自己**的行为,
-        不是"这件事有多火"。现在**热度优先**,同热度时才看 pushes。
+        不是"这件事有多火"。现在热度说了算,推得多只在**同热度**时做次序。
         """
         pl.record(session, 1, "wechat", [{"title": "没人推的", "metrics": {"read_num": 99999}}],
                   when=datetime(2026, 10, 16, 7))
@@ -144,14 +144,33 @@ class Test读窗口:
         assert [g["title"] for g in w["items"]] == ["没人推的", "被推两次的"], \
             "热的那条必须排前面,哪怕它只被推过一次"
 
-    def test_都没有互动数据时_被反复推的排前面(self, session) -> None:
-        """两条都拿不到指标(heat 都是 0)⇒ 退回用 pushes 排 —— 那仍是有意义的次序。"""
-        pl.record(session, 1, "wechat", [{"title": "只推一次"}], when=datetime(2026, 10, 16, 7))
-        for h in (8, 9):
-            pl.record(session, 1, "wechat", [{"title": "被推两次的"}],
+    def test_有数据按热度排_没数据按原顺序沉底(self, session) -> None:
+        """★ 2026-10-26 用户口径订正:**有数据的按热度排,没数据的按原顺序排**。
+
+        没有互动数据的那种(贴吧/部分源)不该被 `pushes`/标题拼音编出一个**假次序** ——
+        它们整体沉底,内部保持**首次出现**的顺序。
+        """
+        pl.record(session, 1, "wechat", [{"title": "冷的-先出现"}], when=datetime(2026, 10, 16, 7))
+        pl.record(session, 1, "wechat", [{"title": "热的-小", "metrics": {"liked_count": 100}}],
+                  when=datetime(2026, 10, 16, 8))
+        pl.record(session, 1, "wechat", [{"title": "冷的-后出现", "metrics": {}}],
+                  when=datetime(2026, 10, 16, 9))
+        for h in (10, 11):
+            pl.record(session, 1, "wechat", [{"title": "热的-大", "metrics": {"liked_count": 500}}],
                       when=datetime(2026, 10, 16, h))
         w = pl.window(session, 1, "wechat", datetime(2026, 10, 16), datetime(2026, 10, 17))
-        assert w["items"][0]["title"] == "被推两次的"
+        assert [g["title"] for g in w["items"]] == [
+            "热的-大", "热的-小", "冷的-先出现", "冷的-后出现"], \
+            "有数据按热度降序在前;没数据的按首次出现顺序沉底"
+
+    def test_都没数据时完全保持首次出现顺序(self, session) -> None:
+        """两条都没指标 ⇒ **只看谁先出现**;被推三次也不许插到前面去。"""
+        pl.record(session, 1, "wechat", [{"title": "先出现的"}], when=datetime(2026, 10, 16, 7))
+        for h in (8, 9, 10):
+            pl.record(session, 1, "wechat", [{"title": "后出现但推了三次"}],
+                      when=datetime(2026, 10, 16, h))
+        w = pl.window(session, 1, "wechat", datetime(2026, 10, 16), datetime(2026, 10, 17))
+        assert [g["title"] for g in w["items"]] == ["先出现的", "后出现但推了三次"]
 
     def test_没有互动数据的不许插队到有数据的前面(self, session) -> None:
         """⚠️ 贴吧/部分源本来就没有点赞播放(heat=0)⇒ 它们会落到最后。

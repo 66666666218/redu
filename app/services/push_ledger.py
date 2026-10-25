@@ -185,7 +185,7 @@ def window(session: Session, user_id: int, section: str, since: datetime,
       · `resources` = **不同资源个数**(聚合后)—— 两者都给,是因为
         「推了 30 行」与「有 30 个资源」是**两件事**,而客户抱怨的正是前者;
       · `repeats` = 被推 ≥2 次的那种资源有几个(等于「刷屏了多少」);
-      · `items` 按 **`(热度 desc, pushes desc)`** 排 —— 见下面那段注释。
+      · `items`:有互动数据的按**热度降序**排在前;**没有数据的按首次出现顺序沉底**。
     """
     from app.db.models import PushLedger
 
@@ -215,15 +215,21 @@ def window(session: Session, user_id: int, section: str, since: datetime,
         for f in ("title", "url", "pan_url", "pan_type", "author", "metrics"):
             if not g.get(f) and r.__getattribute__(f):
                 g[f] = r.__getattribute__(f)
-    items = list(agg.values())
+    items = list(agg.values())          #: 字典保序 = **首次出现顺序**(rows 已按 pushed_at asc 取)
     #: ★★ 2026-10-26 **排序改成热度优先**(用户口径:「每日总结里按热度排序,让用户更好的观看」)。
     #: 原来是 `pushes` 主导 —— 但 `pushes` 是**我们自己推送了几次**(自家行为),
     #: 不是"这件事有多火";客户翻日结想看的是「昨天什么在火」,不是「我们重复推了谁」。
-    #: ⚠️ `_heat` 拿不到互动指标时是 0(贴吧/部分源本来就没有点赞播放)⇒ 这些会落到**最后**。
-    #: 所以卡片上必须**显式写明"按热度排序"**,否则"排在后面"会被读成"不重要"
-    #: (这与「静默失败=假成功」是同一类问题:排序本身在传递一个我们没说明的结论)。
-    items.sort(key=lambda g: (-_heat(str(g.get("metrics") or "")),
-                              -int(g["pushes"]), str(g.get("title") or "")))
+    #:
+    #: ★ 同日订正(用户口径):**有数据的按热度排,没数据的按原顺序排**。
+    #: 贴吧/部分源本来就没有点赞播放(`_heat` 恒 0)—— 把它们也丢进 heat 排序里比,
+    #: 等于拿"没有的指标"编出一个次序(先被 `pushes` 决定、再被标题拼音决定),
+    #: 那个次序**没有任何含义**。所以:热的排前面按热度降序;**没有数据的整体沉底,
+    #: 内部保持首次出现的顺序**(谁先被发现谁在前)。
+    hot = [g for g in items if _heat(str(g.get("metrics") or "")) > 0]
+    cold = [g for g in items if _heat(str(g.get("metrics") or "")) <= 0]
+    hot.sort(key=lambda g: (-_heat(str(g.get("metrics") or "")),
+                            -int(g["pushes"]), str(g.get("title") or "")))
+    items = hot + cold
     out = {"rows": len(rows), "resources": len(items),
            "repeats": sum(1 for g in items if int(g["pushes"]) > 1), "items": items}
     if top:
