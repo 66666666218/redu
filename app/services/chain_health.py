@@ -808,6 +808,37 @@ def _cred_alive(platform: str, cookie: str, db) -> tuple[bool | None, str]:
         if platform == "douyin":
             from app.services import douyin_protocol_source as dps
 
+            from config.settings import get_settings
+
+            #: ★★★ 2026-10-25:**协议路关掉时,体检不许拿它探活**。
+            #: 与 `_xhs_enabled` 完全同一条纪律(那里写着「关掉的平台,体检不去探活」——
+            #: 每次协议探测都是「第三方脚本浏览」的证据)。今天实测 `.env` 里
+            #: `DOUYIN_LEADS_USE_PROTOCOL=false`(生产走浏览器),而这一行**照样每天
+            #: 打一次协议搜索**并撞回 `verify_check` ⇒ 等于每天替我们"自首"一次,
+            #: 还会把冷却闸重置成 6 小时后(闸内浏览器探针被限流,一起受影响)。
+            #: 关掉之后判据改成**看生产那条路的真实产出**(今天的运行记录),
+            #: 与小红书的 CDP 判据同一个思路:谁在跑就判谁。
+            if not bool(getattr(get_settings(), "douyin_leads_use_protocol", True)):
+                from datetime import datetime as _dt
+
+                from sqlalchemy import func, select
+
+                from app.db.models import RunRecord
+
+                _today = _dt.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                _base = (RunRecord.kind == "douyin_leads",
+                         RunRecord.started_at >= _today)
+                n_all = int(db.scalar(
+                    select(func.count()).select_from(RunRecord).where(*_base)) or 0)
+                n_ok = int(db.scalar(
+                    select(func.count()).select_from(RunRecord).where(
+                        *_base, RunRecord.status.in_(("success", "partial")))) or 0)
+                if n_all and n_ok == n_all:
+                    return True, f"今日 {n_ok}/{n_all} 轮都有产出(浏览器路;协议已关,不探)"
+                return None, ("⚠️ 纯协议已关闭(`DOUYIN_LEADS_USE_PROTOCOL=false`)⇒ "
+                              f"**不用协议探活**;今日 {n_ok}/{n_all} 轮有产出 ⇒ "
+                              "**不作判定**,看告警正文里的判定"
+                              "(已按库里的闸门自动收敛)")
             rows = dps.search(["网盘资源"], session=db)
             if rows:
                 return True, f"搜到 {len(rows)} 条 · {_douyin_jar_note(cookie)}"

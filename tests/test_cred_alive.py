@@ -30,6 +30,20 @@ def db():
     return object()
 
 
+@pytest.fixture(autouse=True)
+def _douyin_protocol_on(monkeypatch):
+    """单测默认钉成「协议开」。
+
+    ⚠️ 真实 `.env` 里 `DOUYIN_LEADS_USE_PROTOCOL=false`(生产走浏览器),而本文件多数
+    用例验的正是**协议探活**的判据 —— 不钉住就会随 `.env` 漂(2026-10-25 实测:
+    4 条用例因此变红)。「协议关 ⇒ 不许拿协议探活」由
+    `test_抖音_协议关闭时_不许拿协议探活` 专门验。
+    """
+    from config.settings import get_settings
+
+    monkeypatch.setattr(get_settings(), "douyin_leads_use_protocol", True, raising=False)
+
+
 # ---------------------------------------------------------------------------
 # 判据
 # ---------------------------------------------------------------------------
@@ -528,6 +542,40 @@ def test_快手整轮失败比如撞锁_要报黄而不是红():
 def test_快手没跑过要报黄():
     row = ch._kuaishou_row(_RecDB(None))
     assert row["level"] == "🟡" and "没有跑过" in row["detail"]
+
+
+def test_抖音_协议关闭时_不许拿协议探活(monkeypatch):
+    """★★ 2026-10-25:`.env` 里 `DOUYIN_LEADS_USE_PROTOCOL=false`(生产走浏览器),
+    而体检那一行**照样每天打一次协议搜索**并撞回 `verify_check` ——
+    等于每天替我们"自首"一次,还会把冷却闸重置成 6 小时后。
+    与 `_xhs_enabled` 同一条纪律:**关掉的路,体检不许拿它探活**。
+
+    判据改成看**生产那条路的真实产出**(今天的运行记录):有成功轮 ⇒ 绿;
+    全失败 ⇒ 说不清(`None`),别硬判。
+    """
+    from app.services import douyin_protocol_source as dps
+
+    from config.settings import get_settings
+
+    monkeypatch.setattr(get_settings(), "douyin_leads_use_protocol", False, raising=False)
+    monkeypatch.setattr(dps, "search",
+                        lambda *a, **k: pytest.fail("协议已关闭还去探活 —— 又是一次自首"))
+
+    class _Db:
+        def __init__(self, vals):
+            self.vals = list(vals)
+
+        def scalar(self, *a, **k):
+            return self.vals.pop(0)
+
+    alive, why = ch._cred_alive("douyin", "ck", _Db([4, 4]))     # 今日 4 轮**全部**有产出
+    assert alive is True and "4/4" in why, why
+
+    alive, why = ch._cred_alive("douyin", "ck", _Db([4, 2]))     # 只有一半有产出 ⇒ 不判绿
+    assert alive is None and "2/4" in why, why
+
+    alive, why = ch._cred_alive("douyin", "ck", _Db([3, 0]))     # 今天 3 轮全失败
+    assert alive is None and "0/3" in why, why
 
 
 def test_抖音要求过验证_判红_且修法必须带前提(monkeypatch):
