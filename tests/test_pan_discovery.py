@@ -598,6 +598,10 @@ def test_find_candidates_raises_when_all_keywords_fail(session, monkeypatch) -> 
     """
     from app.services import cross_accounts as ca
 
+    #: ⚠️ 词间间隔是**限速**,不是被测行为 —— 不改成 0 这个用例要**真睡 9 秒**
+    #: (2026-10-26 从 durations 里抓出来的:全量测试 7 分 22 秒里有它一份)
+    monkeypatch.setattr(pd, "_REQ_GAP", 0)
+
     def boom(ck, kw, limit=20):
         raise ca.SearchSourceError("HTTP 403(登录态失效或被限流)")
 
@@ -611,6 +615,9 @@ def test_find_candidates_raises_when_all_keywords_fail(session, monkeypatch) -> 
 def test_find_candidates_keeps_going_when_one_keyword_fails(session, monkeypatch) -> None:
     """**部分**词失败要保住其余词的产出(限速是常态,不能一失败就整轮白跑)。"""
     from app.services import cross_accounts as ca
+
+    #: 同上:间隔只为限速,不该让用例真睡(本用例实测 9.4 秒)
+    monkeypatch.setattr(pd, "_REQ_GAP", 0)
 
     def flaky(ck, kw, limit=20):
         if kw == "甲":

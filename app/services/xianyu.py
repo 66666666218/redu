@@ -497,7 +497,12 @@ def collect_hot(settings: Settings, client: XianyuClient | None = None, start_of
     picked = [keywords[(start_offset + i) % n] for i in range(min(batch, n))] if n else []
 
     buckets: dict[str, dict] = {}
-    base_delay = getattr(settings, "xianyu_request_delay", None) or getattr(settings, "request_delay_seconds", 2.5)
+    #: ⚠️ **别用 `or` 兜底**(2026-10-26):`XIANYU_REQUEST_DELAY=0` 的本意是"不限速",
+    #: 写成 `x or 2.5` 会把 0 悄悄变成 2.5 —— 与本仓 `board_digest_top or 8`
+    #: 是同一个坑(配置里写 0 = 关掉,结果被 `or` 吞回去)。`None` 才代表"没配"。
+    base_delay = getattr(settings, "xianyu_request_delay", None)
+    if base_delay is None:
+        base_delay = getattr(settings, "request_delay_seconds", 2.5)
     saw_verify = False
     saw_rate = False
     saw_waf = False

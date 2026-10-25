@@ -86,7 +86,7 @@ class TestEmptyParseNotSuccess:
         with pytest.raises(collector.CollectionError):
             collector.fetch_hot_search(st, session=object())
 
-    def test_xianyu_all_keywords_fail_raises(self):
+    def test_xianyu_all_keywords_fail_raises(self, monkeypatch):
         from app.services import xianyu
         from config.settings import get_settings
 
@@ -95,6 +95,10 @@ class TestEmptyParseNotSuccess:
                 raise xianyu.XianyuError("网络错误")
 
         st = get_settings()
+        #: ⚠️ `.env` 里 `XIANYU_REQUEST_DELAY=15`(**生产的**风控限速)。不改 0 的话,
+        #: 这个"全部关键词都失败"的用例会**真睡 40 秒**(2026-10-26 实测 40.7s,
+        #: 全量测试里最长的一条)。测的是"抛不抛错",不是"退避多久"。
+        monkeypatch.setattr(st, "xianyu_request_delay", 0.0, raising=False)
         with pytest.raises(xianyu.XianyuError, match="全部关键词"):
             xianyu.collect_hot(st, client=_C(), start_offset=0)
 
