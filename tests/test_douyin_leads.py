@@ -32,6 +32,20 @@ def _browser_path_only(monkeypatch):
     monkeypatch.setattr(get_settings(), "douyin_leads_use_protocol", False, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_cdp_by_default(monkeypatch):
+    """**单测默认关掉 CDP 路**(2026-10-25)。
+
+    ⚠️ CDP 在生产里是**第一优先**且默认开;不钉住的话,本文件那些"只桩了 `mc.crawl`"
+    的用例会走到 `douyin_cdp_source.search` 里**真的去启动浏览器**(实测一次跑出 39 秒,
+    之前是 3 秒)。CDP 自己的用例在 `tests/test_douyin_cdp_source.py` 与
+    `test_douyin_leads_protocol.py` 里显式打开。
+    """
+    from config.settings import get_settings
+
+    monkeypatch.setattr(get_settings(), "douyin_cdp_enabled", False, raising=False)
+
+
 class _Settings:
     """最小 settings 替身(只覆盖 push_leads 用到的字段)。"""
     feishu_webhook_admin = "https://example.com/hook"

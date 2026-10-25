@@ -342,6 +342,26 @@ def _collect(platform: str, keywords: list[str], session=None,
         _keys = dps.account_keys(session, user_id)
         cooldown = bool(_keys) and all(
             dps.in_verify_cooldown(session, user_id, cookie_key=k) for k in _keys)
+    #: ★★ **CDP 路优先**(2026-10-25):用**普通命令行启动**的浏览器 + CDP 接管,
+    #: 打开搜索页读 DOM。实测同一个号同一条 cookie:MediaCrawler 路 **0 条**、
+    #: CDP 路 **16 条**(`webdriver=false`)⇒ 卡住的是**自动化形态**,不是账号/IP。
+    #: ⚠️ 失败**必须留痕**并回落 —— 静默回落会让"CDP 挂了"读成"抖音没人推"。
+    if platform == "douyin":
+        from config.settings import get_settings as _gs
+
+        _s = _gs()
+        if bool(getattr(_s, "douyin_cdp_enabled", True)):
+            try:
+                from app.services import douyin_cdp_source as _dcdp
+
+                _n = max(1, int(getattr(_s, "douyin_cdp_max_keywords", 4) or 4))
+                _rows = _dcdp.search(keywords[:_n], session=session,
+                                     user_id=user_id, settings=_s)
+                if _rows:
+                    return _rows, "CDP"
+            except Exception as exc:  # noqa: BLE001 - 回落是设计的一部分
+                logger.warning("抖音CDP 路失败(%s),回落 MediaCrawler:%s",
+                               type(exc).__name__, str(exc)[:180])
     if cooldown and not _browser_probe_allowed(session, user_id):
         logger.warning("抖音验证冷却中且本窗口已探过浏览器 —— 本轮不再打"
                        "(动作是等;反复探针只会延长风控)")

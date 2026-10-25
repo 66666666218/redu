@@ -27,6 +27,19 @@ def use_protocol(monkeypatch):
     monkeypatch.setattr(get_settings(), "douyin_leads_use_protocol", True, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_cdp_by_default(monkeypatch):
+    """**单测默认关掉 CDP 路**。
+
+    ⚠️ 它默认是**开**的(生产第一优先),而本文件多数用例只桩了 `mc.crawl` ——
+    不钉住的话那些用例会走到 `douyin_cdp_source.search` 里**真的去启动浏览器**。
+    CDP 自己的用例(以及接线用例)在内部显式打开。
+    """
+    from config.settings import get_settings
+
+    monkeypatch.setattr(get_settings(), "douyin_cdp_enabled", False, raising=False)
+
+
 def _row(**kw) -> dict:
     d = {"uid": "u1", "name": "某推广号", "share_count": 5, "metrics": {},
          "pan_link": "", "keyword": "词",
@@ -413,6 +426,45 @@ def test_浏览器空结果时_抛出的错误要带判定(monkeypatch, use_prot
         dl.collect_leads(["词"], session=db)
     assert "verify_check" in str(ei.value), f"判定没接上:{ei.value}"
     db.close()
+
+
+def test_抖音优先走CDP(monkeypatch, mc_spy):
+    """★★ 2026-10-25:CDP 路是**第一优先** —— 实测同一个号同一条 cookie,
+    MediaCrawler 路 0 条、CDP 路 16 条。走通了就不该再去开 MediaCrawler。"""
+    from config.settings import get_settings
+
+    from app.services import douyin_cdp_source as dc
+    from app.services import douyin_leads as dl
+
+    monkeypatch.setattr(get_settings(), "douyin_leads_use_protocol", False, raising=False)
+    monkeypatch.setattr(get_settings(), "douyin_cdp_enabled", True, raising=False)
+    monkeypatch.setattr(dc, "search", lambda *a, **k: [_row(uid="from-cdp")])
+
+    rows, source = dl.collect_leads(["词"], session=None)
+    assert source == "CDP" and rows, (source, rows)
+    assert mc_spy == [], "CDP 通了就不该再开 MediaCrawler"
+
+
+def test_CDP失败要回落并留痕(monkeypatch, mc_spy, caplog):
+    """⚠️ 静默回落会把「CDP 挂了」读成「抖音没人推」—— 必须留痕。"""
+    from config.settings import get_settings
+
+    from app.services import douyin_cdp_source as dc
+    from app.services import douyin_leads as dl
+
+    monkeypatch.setattr(get_settings(), "douyin_leads_use_protocol", False, raising=False)
+    monkeypatch.setattr(get_settings(), "douyin_cdp_enabled", True, raising=False)
+
+    def _boom(*a, **k):
+        raise dc.DouyinCdpError("CDP 不可达")
+
+    monkeypatch.setattr(dc, "search", _boom)
+    with caplog.at_level("WARNING"):
+        _, source = dl.collect_leads(["词"], session=None)
+    assert source == "浏览器兜底", source
+    assert len(mc_spy) == 1
+    assert any("抖音CDP 路失败" in r.message for r in caplog.records), \
+        [r.message for r in caplog.records]
 
 
 def test_浏览器兜底带上协议cookie(monkeypatch, use_protocol):

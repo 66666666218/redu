@@ -636,6 +636,18 @@ class Settings(BaseSettings):
     # ⚠️ 出问题时**先看运行记录里的来源标签**(`[协议]` / `[浏览器兜底]`),
     # 别把"协议挂了"读成"抖音上没人在推资源"。
     douyin_leads_use_protocol: bool = True
+    # ---- 抖音 **CDP 路**(2026-10-25)----
+    # 用**普通命令行启动**的浏览器 + CDP 接管,打开搜索页读 DOM。实测(`webdriver=false`):
+    # 同一个账号、同一条 cookie,MediaCrawler 路 0 条、**CDP 路 16 条** ⇒ 卡住的是自动化形态。
+    # ⚠️ 它是**第一优先**:可用就走它,不可用/失败才回落 MediaCrawler(回落必须留痕)。
+    douyin_cdp_enabled: bool = True
+    douyin_cdp_url: str = "http://127.0.0.1:9333"
+    #: 专用档案(**故意不复用** MediaCrawler 那份:那份本身是未登录的,登着的是注入的 cookie)
+    douyin_cdp_profile: str = "data/_douyin_profile"
+    #: 词间休眠;硬下限 5000ms(这条路唯一的优势是"像人",连发就丢掉了)
+    douyin_cdp_between_kw_ms: int = 5000
+    #: 每轮最多搜几个词 —— 小红书那条的实测口径是「每轮 1~2 词」,这里留一点余量
+    douyin_cdp_max_keywords: int = 4
     # **群里新冒出来的资源名**贡献几个词。它是**资源名称的一种来源**(另一种是资源库)。
     #
     # ⚠️ **别再把它当成"词源方向错了"**(2026-10-04 一度这么改并默认关掉,用户当即纠正)。
