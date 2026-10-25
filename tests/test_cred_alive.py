@@ -99,6 +99,79 @@ def test_网络抖动不许报成凭据失效(db, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+class _FakeDBTwoPans:
+    """只有夸克/百度两行凭据的替身 —— 专门验这两行的**验活**分支。
+
+    ⚠️ 别的平台**不给行**:`check_credentials` 遇到 `at is None` 会 `continue`,
+    于是不会去探微信读书/抖音/微博那几条(否则单测会真联网)。
+    """
+
+    def __init__(self, age_days: int = 9) -> None:
+        self.age_days = age_days
+
+    def scalars(self, *a, **k):
+        from datetime import datetime, timedelta
+
+        from app.db.models import UserCookie
+
+        at = datetime.now() - timedelta(days=self.age_days)
+
+        class _R:
+            def all(self_inner):
+                return [UserCookie(user_id=1, platform=p, cookie="x", updated_at=at)
+                        for p in ("quark", "baidupan")]
+
+        return _R()
+
+
+def _pan_row(monkeypatch, plat_label, alive):
+    from app.services import chain_health as ch
+    from app.services import pan_accounts
+
+    monkeypatch.setattr(pan_accounts, "cookie_for", lambda *a, **k: "ck")
+    monkeypatch.setattr(ch, "_pan_alive", lambda plat, ck: alive)
+    return [r for r in ch.check_credentials(_FakeDBTwoPans())
+            if r["name"].startswith(plat_label)][0]
+
+
+def test_夸克百度这两行要真的验活_不能只看几天前粘的(monkeypatch):
+    """★★★ 2026-10-25:体检里 `夸克(转存) 更新于 10-16(9 天前)` 被读成故障。
+
+    那行只读 `UserCookie.updated_at`(人最后一次粘贴的时间),与"现在还能不能用"无关。
+    一个不验证的指标,黄灯红灯都没有意义(与微信读书那行同一条教训)。
+    """
+    row = _pan_row(monkeypatch, "夸克", (True, "根目录可列"))
+    assert row["level"] == "🟢", f"验活通过就该是绿,别拿 9 天前吓人:{row}"
+    assert "验活 ✓" in row["detail"] and "根目录可列" in row["detail"], row["detail"]
+
+
+def test_转存凭据真失效时要报红并说清修法(monkeypatch):
+    row = _pan_row(monkeypatch, "百度网盘", (False, "百度网盘**网页登录态**失效"))
+    assert row["level"] == "🔴", row
+    assert "验活失败" in row["detail"] and "Cookie 管理" in row["detail"], row["detail"]
+
+
+def test_验活探不动时不许说成失效(monkeypatch):
+    """⚠️ **说不清 ≠ 失效**:一次超时不该被报成"凭据死了"。"""
+    row = _pan_row(monkeypatch, "夸克", (None, "Timeout: 读取超时"))
+    assert row["level"] != "🔴", f"探不动不是失效:{row}"
+    assert "验活跳过" in row["detail"] and "没有验证过" in row["detail"], row["detail"]
+
+
+def test_夸克验活只发一次请求_别拿keepalive翻50页(monkeypatch):
+    """⚠️ 2026-10-25 实测:`keepalive()` 是 `_list_dir("0")`,按 `_size=200` **逐页翻到
+    最多 50 页** —— 本仓根目录上万条,跑一次 **67.5 秒**,而 `timeout=8.0` 完全没用
+    (超时是**每个请求**的)。拿它当验活会把体检整个拖住。
+    """
+    from app.services.quark_transfer import QuarkTransfer
+
+    calls: list = []
+    q = QuarkTransfer("ck", timeout=8.0)
+    monkeypatch.setattr(q, "_request", lambda *a, **k: calls.append(a) or {"data": {}})
+    assert q.probe_alive() is True
+    assert len(calls) == 1, f"验活只该发 1 个请求,实际 {len(calls)} 个"
+
+
 def test_体检必须包含抖音和微博这两行():
     """★ **函数写得再好,没接上去等于没做** —— 这三家此前正是"库里凭据在、体检不看它"。"""
     import inspect
@@ -307,7 +380,16 @@ def _xhs_row(monkeypatch, exc, reheal_ok=True, retry_rows=None):
 def test_小红书_账号被限制时_绝对不许去重导(monkeypatch):
     """★★ **这是拿真账号换来的那条分寸**:`-104 账号被限制` 时**重导没有任何用**
     (凭据能认证,是账号没权限),而**反复重登/重试只会延长封锁**。
-    把"被踢"和"被限制"混成一句"小红书挂了",下一个人就会去重登 —— 那正是最不该做的。"""
+    把"被踢"和"被限制"混成一句"小红书挂了",下一个人就会去重登 —— 那正是最不该做的。
+
+    ⚠️ 2026-10-25 起这条红还多了个前提:**CDP 那条路也不可达、今天也没有产出**
+    (协议只是最后兜底;产出还在时不该报红)。这里把两个前提都钉死,
+    否则这条用例就变成"看跑测试时本机有没有开着带 CDP 的浏览器"。
+    """
+    from app.services import xhs_cdp_source as _cdp
+
+    monkeypatch.setattr(_cdp, "available", lambda *a, **k: (False, "CDP 不可达"))
+
     class _R(_Boom):
         pass
 
@@ -321,6 +403,69 @@ def test_小红书_账号被限制时_绝对不许去重导(monkeypatch):
     assert "重导凭据通常没用" in row["detail"], row["detail"]
     assert "停手等解封" in row["detail"], row["detail"]
     assert "过度归因" in row["detail"], "要如实记下这句话被订正过,别让下一个人再当它是实测结论"
+
+
+def test_小红书_协议被限但采集在跑_不许报红(monkeypatch):
+    """★★★ 2026-10-25 实测抓到的一次**假红**:体检说「小红书账号全在冷却中」,
+    而当天推送台账里 `xiaohongshu` **每 4 小时 8 条**(01/05/09/13 各 8),用户也在问
+    「小红书我看上午也在跑」。
+
+    根因:生产取数是 **CDP → 页面渲染 → 纯协议**(协议只是最后兜底),而这一行探的
+    正是**协议** ⇒ 协议红着、产出却一直在。报成"账号级限制/等解封"就是**给错动作**。
+    ⇒ 判据改成:**先看真正在跑的那条路**(CDP 可达性 = 零请求,只问本地端点)
+    与**今天的实际产出**;两者有一个成立,就降成黄并说清"别动它"。
+    """
+    from app.services import chain_health as ch
+    from app.services import xhs_cdp_source as _cdp
+    from app.services import xhs_protocol_source as xp
+
+    class _R(_Boom):
+        pass
+
+    class _Db:
+        """只提供 `scalar()` —— 够 `_xhs_protocol_row` 查今日台账即可。"""
+
+        def __init__(self, n):
+            self.n = n
+
+        def scalar(self, *a, **k):
+            return self.n
+
+    monkeypatch.setattr(ch, "_xhs_enabled", lambda *a, **k: True)
+    monkeypatch.setattr(xp, "search", lambda *a, **k: (_ for _ in ()).throw(
+        _R("-104 账号被限制", kind="restricted")))
+    monkeypatch.setattr(_cdp, "available", lambda *a, **k: (True, "CDP 可达:Chrome/153"))
+    monkeypatch.setattr(ch, "_xhs_reheal",
+                        lambda db: pytest.fail("产出还在时更不该去重导凭据"))
+
+    row = ch._xhs_protocol_row(_Db(8))
+    assert row["level"] == "🟡", f"产出还在就不许报红:{row}"
+    assert "产出没停" in row["detail"], row["detail"]
+    assert "别去重导" in row["detail"], row["detail"]
+
+
+def test_小红书_协议被限且CDP不可达但有产出_也按黄报(monkeypatch):
+    """CDP 端点没开、但今天确实推过东西(可能是别的路推的)⇒ 仍不该报红。"""
+    from app.services import chain_health as ch
+    from app.services import xhs_cdp_source as _cdp
+    from app.services import xhs_protocol_source as xp
+
+    class _R(_Boom):
+        pass
+
+    class _Db:
+        def __init__(self, n):
+            self.n = n
+
+        def scalar(self, *a, **k):
+            return self.n
+
+    monkeypatch.setattr(ch, "_xhs_enabled", lambda *a, **k: True)
+    monkeypatch.setattr(xp, "search", lambda *a, **k: (_ for _ in ()).throw(
+        _R("-104 账号被限制", kind="restricted")))
+    monkeypatch.setattr(_cdp, "available", lambda *a, **k: (False, "CDP 不可达"))
+    row = ch._xhs_protocol_row(_Db(3))
+    assert row["level"] == "🟡" and "已推 3 条" in row["detail"], row
 
 
 def test_小红书_被踢下线时要自动重导并复验(monkeypatch):

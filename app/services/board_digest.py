@@ -96,8 +96,16 @@ def build(session: Session, user_id: int, section: str, since: datetime, until: 
     return data
 
 
-def render_card(data: dict, period: str, top: int = 8) -> dict:
-    """渲染成飞书卡片。**客户口径**:只有"有什么"、几处可点、一行怎么用。"""
+def render_card(data: dict, period: str, top: int = 8,
+                part: tuple[int, int] = (1, 1)) -> dict:
+    """渲染成飞书卡片。**客户口径**:只有"有什么"、几处可点、一行怎么用。
+
+    `top` = 最多列几行(**0 = 全部**,2026-10-25 起日结默认走这条);
+    `part` = 分卡时的 `(第几, 共几)` —— 只有真的分卡了才会出现在标题上。
+
+    ⚠️ **`top=0` 不许再退化成 `items[:0]`**(那是空卡)。2026-10-25 之前
+    这个切片没防 0,而新的默认值就是 0 ⇒ 不修就会把「完整版」发成一张空壳。
+    """
     from app.services.feishu._cards import _col_set_row, _md_safe, metrics_md, strip_others
 
     spec = PERIODS.get(period) or PERIODS["daily"]
@@ -106,6 +114,8 @@ def render_card(data: dict, period: str, top: int = 8) -> dict:
     head = f"📊 **{label} · {spec['title']}** —— {when}一共 **{n_res} 个资源**"
     if int(data.get("repeats") or 0):
         head += f"(其中 {data['repeats']} 个被反复推荐)"
+    if int(part[1]) > 1:
+        head += f" · 第 {int(part[0])}/{int(part[1])} 部分"
     howto = ("资源名点开即取用(标注的是网盘);「**看作品**」点开是那条原帖,"
              "可以先看别人推成什么样。")
     elements: list[dict] = [
@@ -114,7 +124,8 @@ def render_card(data: dict, period: str, top: int = 8) -> dict:
     ]
     from app.services.douyin_leads import _pan_name
 
-    items = list(data.get("items") or [])[:top]
+    _all = list(data.get("items") or [])
+    items = _all if int(top or 0) <= 0 else _all[:int(top)]
     if not items:
         #: ⚠️ 调用方本来就不该为空窗口调这里(纪律 1);真到了这里也要**说人话**,别发一张空壳
         elements.append({"tag": "div", "text": {"tag": "lark_md",
@@ -135,7 +146,9 @@ def render_card(data: dict, period: str, top: int = 8) -> dict:
         elements.append(_col_set_row([(cell, 5), (work, 3), (metrics_md(_metrics_of(g)), 2)]))
     #: ⚠️ 这里比的是**资源数**,不是"推送行数" —— 拿行数比会算出"还有 1 条"这种鬼话
     #: (2 个资源、其中一个推了 2 次 ⇒ 3 行),而客户要的是"还有几个资源没列出来"。
-    if n_res > len(items):
+    #: ★ **分卡时不许说这句**(2026-10-25):第 1/n 部分本来就没列全,再说一句
+    #: 「还有 N 个资源」既不符合事实,也会让人以为被省略了 —— 而那正是这次要修掉的东西。
+    if int(part[1]) <= 1 and n_res > len(items):
         elements.append({"tag": "div", "text": {
             "tag": "lark_md", "content": f"…还有 {n_res - len(items)} 个资源,想看完整列表回一句就行。"}})
     return _card(elements, label)
@@ -216,8 +229,25 @@ def _is_weekly_day(settings, now: datetime | None = None) -> bool:
     return dow is not None and (now or datetime.now()).weekday() == dow
 
 
+def _split_even(items: list, per: int) -> list[list]:
+    """把一列资源**均分**成若干张卡(每张不超过 `per` 行);`per<=0` = 一张卡装完。
+
+    ⚠️ **为什么要均分,不是"切满再切余"**(2026-10-25):36 个资源按 35 切会得到
+    **35 + 1** 两张卡 —— 第 2 张只孤零零一行,客户看到的就是"这条消息没内容"。
+    改成按张数均分(36 ⇒ 18 + 18、58 ⇒ 29 + 29)后,张数不变、观感正常。
+    """
+    n = len(items)
+    if n == 0:
+        return [[]]
+    if per <= 0 or n <= per:
+        return [items]
+    parts = (n + per - 1) // per                 # 需要的张数
+    size = (n + parts - 1) // parts              # 每张实际拿几行(向上取整,均分)
+    return [items[i:i + size] for i in range(0, n, size)]
+
+
 def send_digest(session: Session, user_id: int, section: str, period: str,
-                settings, top: int = 8, now: datetime | None = None) -> bool:
+                settings, top: int = 0, now: datetime | None = None) -> bool:
     """给一个板块发一条日结/周结。**发送失败不回滚、不打标**(下次补)。
 
     `now` 只为**可测**存在(窗口以它为准);生产不传,取真实当前时间。
@@ -236,13 +266,25 @@ def send_digest(session: Session, user_id: int, section: str, period: str,
     data = build(session, user_id, section, since, until, top=top)
     if not data["items"]:
         return False                       #: 纪律 1:空窗口不发
-    card = render_card(data, period, top=top)
-    if not FeishuClient(hook, getattr(settings, "feishu_secret", "")).send_card(card):
-        return False
+    #: ★★ **完整发送,但按卡切分**(2026-10-25 用户口径「每日总结发完整的,不要再省略了」)。
+    #: `top` 默认已是 0(全部);切分**不是为了省略**,而是飞书交互卡片有体积上限 ——
+    #: 一个板块一天 60~80 个资源塞一张会被服务端拒,那时就变成"一条都发不出去"。
+    #: 所以:内容一条不少,只是分几张卡(标题带「第 k/n 部分」)。
+    #: ⚠️ **全部发成功才打标** —— 中途失败就留着重发,别让客户收到"第 1/3 部分"后再也等不到后两张。
+    items = list(data["items"])
+    per = int(getattr(settings, "board_digest_max_rows_per_card", 35) or 0)
+    chunks = _split_even(items, per)
+    client = FeishuClient(hook, getattr(settings, "feishu_secret", ""))
+    for k, chunk in enumerate(chunks, 1):
+        card = render_card({**data, "items": chunk}, period, top=top, part=(k, len(chunks)))
+        if not client.send_card(card):
+            logger.warning("板块%s:%s 第 %d/%d 张卡发送失败 ⇒ 不打标,下次整期重发",
+                           period, section, k, len(chunks))
+            return False
     _mark_sent(session, period, section, tag)
-    logger.info("板块%s:%s 发出(%d 行 / %d 个资源)",
+    logger.info("板块%s:%s 发出(%d 行 / %d 个资源 / %d 张卡)",
                 PERIODS.get(period, {}).get("title", period), section,
-                data["rows"], data["resources"])
+                data["rows"], data["resources"], len(chunks))
     return True
 
 
@@ -268,7 +310,7 @@ def run_board_digest_all_users(period: str = "daily", settings=None,
         return 0
     own = session is None
     session = session or get_session_local()()
-    top = int(getattr(settings, "board_digest_top", 8) or 8)
+    top = int(getattr(settings, "board_digest_top", 0) or 0)   #: ⚠️ 别写成 `or 8` —— 那会把「0=全部」变回 8
     allow = {x.strip() for x in
              str(getattr(settings, "board_digest_boards", "") or "").split(",") if x.strip()}
     since, until, _tag = window_of(period, now)

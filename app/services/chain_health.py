@@ -221,6 +221,39 @@ def check_leaked_browsers() -> list[dict]:
                        f"**有进程逃出了清理**"}]
 
 
+def _pan_alive(plat: str, cookie: str) -> tuple[bool | None, str]:
+    """夸克/百度**转存凭据**的轻量验活 → `(活没活, 说明)`;`None` = 说不清。
+
+    ★ 2026-10-25 加,起因就是体检里那两行:`夸克(转存) 更新于 10-16(9 天前)`。
+    那行**只读 `UserCookie.updated_at`** —— 也就是"人最后一次粘贴的时间",
+    与"现在还能不能用"**没有关系**。9 天没粘不等于坏了,而报告读起来像坏了;
+    反过来,昨天刚粘的也可能今天就被踢 —— **一个不验证的指标,黄灯红灯都没有意义**
+    (与微信读书那行同一条教训:只看更新时间就是假绿)。
+
+    两个探针都是**只读、便宜**的:
+      · 夸克 = **只列 1 条**根目录(`probe_alive()`,`keepalive()` 会翻最多 50 页、实测 67 秒);
+      · 百度 = `/api/quota`(与转存前的配额探针同一个端点)。
+    超时/网络错误返回 `None`(**说不清 ≠ 失效**),别把一次抖动报成凭据死了。
+    """
+    try:
+        if plat == "quark":
+            from app.services.quark_transfer import QuarkTransfer
+
+            QuarkTransfer(cookie, timeout=8.0).probe_alive()
+            return True, "根目录可列(1 条)"
+        if plat == "baidupan":
+            from app.services.baidupan_transfer import BaiduPanClient
+
+            BaiduPanClient(cookie, timeout=8.0).keepalive()
+            return True, "网页会话通"
+    except Exception as exc:  # noqa: BLE001 - 分类交给调用方
+        name = type(exc).__name__
+        if "Auth" in name or "auth" in str(exc).lower():
+            return False, str(exc)[:120]
+        return None, f"{name}: {str(exc)[:100]}"
+    return None, "这个盘没有实现验活"
+
+
 def check_credentials(db) -> list[dict]:
     """② 凭证层:各平台 Cookie 在不在、最后一次更新是什么时候。
 
@@ -294,6 +327,26 @@ def check_credentials(db) -> list[dict]:
                           f"续期作业会单独推飞书告警。更新于 {str(at)[:16]}")
             else:
                 detail += f" · 验活跳过({why})"
+        elif plat in ("quark", "baidupan"):
+            #: ★★ 2026-10-25:这两行原来**只看"多久前粘的"** —— 于是 `9 天前` 被读成故障。
+            #: 实际上"没粘过"与"不能用"是两件事(见 `_pan_alive`)。
+            try:
+                from app.services import pan_accounts
+
+                ck = pan_accounts.cookie_for(db, plat, user_id=1) or ""
+            except Exception:  # noqa: BLE001 - 取不到凭据就按"不知道"处理
+                ck = ""
+            alive, why = _pan_alive(plat, ck) if ck else (None, "取不到 cookie")
+            label_cn = "夸克" if plat == "quark" else "百度网盘"
+            if alive is True:
+                level = GREEN
+                detail = f"更新于 {str(at)[:16]}({age} 天前)· 验活 ✓({why})"
+            elif alive is False:
+                level = RED
+                detail = (f"**验活失败**:{why} ⇒ 去「Cookie 管理」重粘 {label_cn} Cookie"
+                          f"(更新于 {str(at)[:16]})")
+            else:
+                detail += f" · 验活跳过({why};⚠️ 这一行**没有验证过**能不能用,别把天数当故障)"
         elif plat in ("douyin", "weibo", "zhihu", "bilibili"):
             # ★ **协议验活**(2026-10-08):三家都做得到 —— 各发一次搜索即可。
             # ⚠️ 但**只有抖音能自动接回**(它有浏览器档案);微博/知乎的 Cookie 是人粘的,
@@ -608,8 +661,43 @@ def _xhs_protocol_row(db) -> dict:
             return {"name": _XHS_PROTO_LABEL, "level": RED,
                     "detail": f"{healed} ⇒ 复验仍零结果"}
         if kind == "restricted":
-            # ⚠️ 异常文案里已经写了"停手等解封",**别再拼一遍**(重复的告警会让人跳读)。
-            #    这行只需补上**异常里没有**的那条信息:**重导没用**。
+            #: ★★ **协议被限 ≠ 小红书停了**(2026-10-25 实测定性)。
+            #: 生产取数顺序是 **CDP → 页面渲染 → 纯协议**(见 `resource_presence`),
+            #: 协议只是最后兜底。而这一行探的恰恰是**协议**,于是它红着、产出却一直在:
+            #: 当天台账 `xiaohongshu` 每 4 小时 8 条(01/05/09/13 各 8 条),
+            #: 用户也在问「小红书我看上午也在跑」。把这种情形报成「账号级限制、全在冷却中」,
+            #: 又是一次**给错动作**(让人去等解封/加号,而链根本没停)。
+            #: ⇒ 先看**真正在跑的那条路**(CDP 可达性,**零请求**,只问本地端点)与
+            #:   **今天的实际产出**(推送台账)。两个都有 ⇒ 降成黄并说清"别动它"。
+            _cdp_ok, _cdp_note = False, ""
+            try:
+                from app.services import xhs_cdp_source as _cdp
+
+                _cdp_ok, _cdp_note = _cdp.available()
+            except Exception:  # noqa: BLE001 - 探不到就按"不知道"处理,别把它算成红
+                _cdp_ok = False
+            _n_today = 0
+            try:
+                from sqlalchemy import func, select
+
+                from app.db.models import PushLedger
+
+                _today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                _n_today = int(db.scalar(
+                    select(func.count()).select_from(PushLedger).where(
+                        PushLedger.user_id == 1,
+                        PushLedger.section == "xiaohongshu",
+                        PushLedger.pushed_at >= _today)) or 0)
+            except Exception:  # noqa: BLE001 - 台账读不到只是少一条佐证
+                logger.debug("读小红书今日台账失败", exc_info=True)
+            if _cdp_ok or _n_today > 0:
+                return {"name": _XHS_PROTO_LABEL, "level": YELLOW,
+                        "detail": (f"**协议路被账号级限制**(只影响最后那道兜底)"
+                                   f"—— 采集走的是 CDP/页面路,"
+                                   f"{'CDP 现在可达' if _cdp_ok else 'CDP 不可达'}"
+                                   f"{f'(今天已推 {_n_today} 条)' if _n_today else ''} ⇒ "
+                                   f"**产出没停,别去重导/重登/加号**(那些只会多留证据);"
+                                   f"协议路的解封按「停手等」处理即可")}
             head = str(exc).split("——")[0].strip()
             return {"name": _XHS_PROTO_LABEL, "level": RED,
                     "detail": f"**账号级限制**:{head[:110]} —— ⚠️ **重导凭据通常没用**"

@@ -526,6 +526,19 @@ class QuarkTransfer:
         self._list_dir("0")
         return True
 
+    def probe_alive(self) -> bool:
+        """**只要一次请求**的验活(给体检用):列根目录**1 条**。认证失败抛 `QuarkAuthError`。
+
+        ⚠️⚠️ **不要拿 `keepalive()` 当验活**(2026-10-25 实测):它内部是 `_list_dir("0")`,
+        按 `_size=200` **逐页翻到最多 50 页** —— 本仓根目录上万条,实测跑一次 **67.5 秒**,
+        而 `timeout=8.0` 一点用都没有(超时是**每个请求**的,它发了十几个)。
+        体检因此被一个"验活"拖住,比不验还糟。这里只发 **1 个请求**,拿得到列表头就算通。
+        """
+        self._request("GET", "/1/clouddrive/file/sort", api=QUARK_FILE_API,
+                      params={"pdir_fid": "0", "_page": 1, "_size": 1,
+                              "_sort": "file_name:asc"})
+        return True
+
     def _save_share_files(self, files: list[dict], share_id: str, stoken: str,
                           target_fid: str, save_dir: str = "") -> tuple[list[str], list[str]]:
         """把分享内这些条目**存进 `target_fid`** → `(新存的 fid, 复用的 fid)`。

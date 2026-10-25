@@ -161,6 +161,102 @@ class Test卡片口径:
         assert "本周汇总" in self._card(session, period="weekly")
 
 
+class Test完整发送:
+    """★★ 2026-10-25 用户口径改判:「**每日总结发完整的,不要再省略了**」。
+
+    2026-10-16 定的是「列 top 个 + 一句『还有 N 个资源』」(当时抱怨信息太多)。
+    现在反过来:**宁可长,不许缺**。所以这里钉三件事 ——
+      ① `board_digest_top=0` 真的等于"全部",**不会被 `or 8` 吃掉**(那是本仓的老坑);
+      ② 一个板块塞不下一张卡时**分成多张**,但内容一条不少;
+      ③ 分卡时**全部发成功才打标**,否则客户会收到「第 1/3 部分」后再也等不到后两张。
+    """
+
+    def _rows(self, card) -> list[str]:
+        """卡片里**数据行**的第一列(资源名)。⚠️ 表头那一行也是 column_set,要剔掉。"""
+        out = [c["elements"][0]["text"]["content"].split("]")[0].lstrip("[")
+               for row in card["elements"] if row.get("tag") == "column_set"
+               for c in row["columns"][:1]]
+        return [x for x in out if x != "**资源**"]
+
+    def test_top_0_等于全部_而且不会被_or_8_吃掉(self, session, monkeypatch) -> None:
+        from app.services import feishu_client
+
+        box: list[dict] = []
+
+        class _C:
+            def __init__(self, webhook, secret):
+                pass
+
+            def send_card(self, card):
+                box.append(card)
+                return True
+
+        class _S0(_S):
+            board_digest_top = 0          #: ★ 就是这一行 —— 旧代码 `or 8` 会把它变成 8
+
+        monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+        for i in range(12):
+            _seed(session, "xiaohongshu", f"资源{i}")
+        bd.run_board_digest_all_users("daily", settings=_S0(), session=session)
+        assert len(box) == 1, f"12 个资源该在一张卡里发完,实际 {len(box)} 张"
+        names = self._rows(box[0])
+        assert len(names) == 12, f"只发了 {len(names)} 条 ⇒ 又被截断了:{names}"
+        blob = json.dumps(box[0], ensure_ascii=False)
+        assert "还有" not in blob, "完整发送时不该再说「还有 N 个资源」"
+
+    def test_超过每卡行数就分多张_但一条不少(self, session, monkeypatch) -> None:
+        from app.services import feishu_client
+
+        box: list[dict] = []
+
+        class _C:
+            def __init__(self, webhook, secret):
+                pass
+
+            def send_card(self, card):
+                box.append(card)
+                return True
+
+        class _S2(_S):
+            board_digest_top = 0
+            board_digest_max_rows_per_card = 5
+
+        monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+        for i in range(12):
+            _seed(session, "xiaohongshu", f"资源{i}")
+        assert bd.run_board_digest_all_users("daily", settings=_S2(), session=session) == 1
+        assert len(box) == 3, f"12 条 / 每卡 5 条 ⇒ 该分 3 张,实际 {len(box)}"
+        names = [n for card in box for n in self._rows(card)]
+        assert len(names) == 12 and len(set(names)) == 12, f"分卡后内容缺了/重了:{names}"
+        heads = [json.dumps(card, ensure_ascii=False) for card in box]
+        assert all("第 " in h and "部分" in h for h in heads), "分卡必须在标题上写清第几部分"
+        assert "还有" not in "".join(heads), "分卡不等于省略,不许出现「还有 N 个」"
+
+    def test_分卡中途失败就不打标_下次整期重发(self, session, monkeypatch) -> None:
+        from app.services import feishu_client
+
+        calls = {"n": 0}
+
+        class _C:
+            def __init__(self, webhook, secret):
+                pass
+
+            def send_card(self, card):
+                calls["n"] += 1
+                return calls["n"] < 2          #: 第 2 张失败
+
+        class _S2(_S):
+            board_digest_top = 0
+            board_digest_max_rows_per_card = 5
+
+        monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+        for i in range(12):
+            _seed(session, "xiaohongshu", f"资源{i}")
+        assert bd.send_digest(session, 1, "xiaohongshu", "daily", _S2()) is False
+        assert session.get(SystemConfig, "bd_sent_daily_xiaohongshu") is None, (
+            "只发了第 1/3 部分就打标 ⇒ 客户永远收不到后两张")
+
+
 class Test发送与幂等:
     @pytest.fixture
     def sent(self, monkeypatch):

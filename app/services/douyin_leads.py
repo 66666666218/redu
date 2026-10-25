@@ -211,6 +211,35 @@ def _browser_probe_allowed(session, user_id: int = 1) -> bool:
         return True
 
 
+def _release_browser_probe(session, user_id: int = 1) -> None:
+    """浏览器兜底**成功**了 ⇒ 把「本窗口已探过」的标记清掉。
+
+    ⚠️⚠️ **不清会怎样(2026-10-25 实测的 8 小时停摆)**:今天的复盘 ——
+    `04:12` 浏览器兜底**成功**(运行记录带 `[浏览器兜底]`),但那次探针把
+    `douyin_browser_probe_until_<uid>` 写成了当前冷却窗口的截止时间 ⇒
+    同一窗口内 `08:10`/`12:10` 两轮**连浏览器都不开**,直接记"全部无结果"。
+    也就是说:**唯一还通的那条路,被一次成功给关掉了**。
+    这正是本仓母题「静默失败 = 假成功」的一种:链说自己失败,其实是我们自己不出手。
+
+    冷却的本意是"**别打协议**"(协议那种机器人形状才是触发 `verify_check` 的),
+    它不该顺带把**真人形状的浏览器**也禁掉 —— 何况那次浏览器刚刚证明它是通的。
+    所以这里只清**探针标记**,**不动** `douyin_verify_until`(协议照旧冷却,别去撞)。
+    """
+    if session is None:
+        return
+    try:
+        from app.db.models import SystemConfig
+
+        key = _PROBE_KEY.format(uid=user_id)
+        row = session.scalar(select(SystemConfig).where(SystemConfig.key == key))
+        if row is not None:
+            row.value = ""
+            session.commit()
+            logger.info("抖音浏览器兜底成功 ⇒ 释放本窗口的探针标记(下一轮仍可用浏览器)")
+    except Exception:  # noqa: BLE001 - 标记清不掉只影响"下一轮能不能再开",别影响本轮结果
+        logger.debug("释放抖音浏览器探针标记失败", exc_info=True)
+
+
 def _collect(platform: str, keywords: list[str], session=None,
              user_id: int = 1) -> tuple[list[dict], str]:
     """取搜索结果 → `(记录列表, 来源标签)`。
@@ -293,6 +322,9 @@ def _collect(platform: str, keywords: list[str], session=None,
             logger.debug("浏览器兜底读取抖音 cookie 失败,交给档案登录", exc_info=True)
     rows = mc.crawl(platform, keywords, cookie=cookie, user_id=user_id)
     if rows and session is not None:
+        #: ★ **浏览器既然通了,就别把它自己关掉**(2026-10-25):见 `_release_browser_probe`。
+        if cooldown:
+            _release_browser_probe(session, user_id)
         #: ★ **浏览器成功 = 真人形状的会话是通的** ⇒ 从档案重导凭据。
         #: 2026-10-21:不再只在「冷却中」才重导 —— 纯协议关闭后浏览器是**唯一**取数路,
         #: 库里的 cookie 必须跟着档案走;否则它会越来越旧,下次注入浏览器时

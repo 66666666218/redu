@@ -271,6 +271,84 @@ def test_冷却内第一次仍允许探一次浏览器(monkeypatch, use_protocol
     assert len(mc_spy) == 1
 
 
+def test_浏览器兜底成功后要释放探针标记(monkeypatch, use_protocol, mc_spy):
+    """★★★ 2026-10-25 实测的一次**8 小时停摆**:
+
+    今天 `04:12` 浏览器兜底**成功**,而那次探针把「本窗口已探过」的标记写死了 ⇒
+    同一窗口的 `08:10` / `12:10` 两轮**连浏览器都不开**,直接记"全部无结果"。
+    ⇒ **唯一还通的那条路,被它自己的一次成功关掉了**(静默失败的一种)。
+
+    冷却的本意是"别打**协议**"(机器人形状才是触发 `verify_check` 的),
+    不该顺带禁掉刚被证明可用的**真人形状浏览器**。所以成功后释放标记,
+    但**不动** `douyin_verify_until` —— 协议照旧冷却。
+    """
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db import models  # noqa: F401
+    from app.db.database import Base
+    from app.db.models import SystemConfig
+    from app.services import douyin_leads as dl
+    from app.services import douyin_protocol_source as dps
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+    db.add(SystemConfig(key="douyin_browser_probe_until_1", value="2026-10-25T15:34:05"))
+    db.commit()
+
+    class _Boom(Exception):
+        kind = "verify_cooldown"
+
+    _patch_protocol(monkeypatch, err=_Boom("验证冷却中"))
+    monkeypatch.setattr(dps, "in_verify_cooldown", lambda *a, **k: True)
+    monkeypatch.setattr(dl, "_browser_probe_allowed", lambda *a, **k: True)
+    monkeypatch.setattr("app.services.douyin_cookie_export.export_from_profile",
+                        lambda *a, **k: "已重导")
+
+    _, source = dl.collect_leads(["词"], session=db)
+    assert source == "浏览器兜底" and len(mc_spy) == 1
+    row = db.scalar(select(SystemConfig).where(
+        SystemConfig.key == "douyin_browser_probe_until_1"))
+    assert (row.value or "") == "", (
+        "浏览器成功了还留着「本窗口已探过」⇒ 下一轮又不开了(今天就是这么停摆 8 小时的)")
+    db.close()
+
+
+def test_浏览器兜底空手而归时_不许释放探针标记(monkeypatch, use_protocol):
+    """反向守卫:**没掉到鱼就别充数** —— 空手也要重置,就变成每轮都开浏览器,
+    把一个已经被风控的号再打一遍(那正是"反复探只会延长风控"说的)。"""
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db import models  # noqa: F401
+    from app.db.database import Base
+    from app.db.models import SystemConfig
+    from app.services import douyin_leads as dl
+    from app.services import douyin_protocol_source as dps
+    from app.services import mediacrawler_source as mc
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+    db.add(SystemConfig(key="douyin_browser_probe_until_1", value="2026-10-25T15:34:05"))
+    db.commit()
+
+    class _Boom(Exception):
+        kind = "verify_cooldown"
+
+    _patch_protocol(monkeypatch, err=_Boom("验证冷却中"))
+    monkeypatch.setattr(dps, "in_verify_cooldown", lambda *a, **k: True)
+    monkeypatch.setattr(dl, "_browser_probe_allowed", lambda *a, **k: True)
+    monkeypatch.setattr(mc, "crawl", lambda *a, **k: [])
+
+    dl.collect_leads(["词"], session=db)
+    row = db.scalar(select(SystemConfig).where(
+        SystemConfig.key == "douyin_browser_probe_until_1"))
+    assert (row.value or "") == "2026-10-25T15:34:05", "空结果不该释放探针"
+    db.close()
+
+
 def test_浏览器兜底带上协议cookie(monkeypatch, use_protocol):
     """档案登录是第一条退路,cookie 注入是第二条 —— 档案被锁时不能空跑。"""
     from app.services import douyin_leads as dl
