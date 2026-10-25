@@ -240,6 +240,44 @@ def _release_browser_probe(session, user_id: int = 1) -> None:
         logger.debug("释放抖音浏览器探针标记失败", exc_info=True)
 
 
+def _verify_until_text(session, user_id: int = 1) -> str:
+    """库里记录的**上次 `verify_check` 闸门截止时间**(没有就空串)。
+
+    ⚠️ 只**读**,不发请求 —— 反复探只会延长风控(本仓为这个栽过)。
+    """
+    if session is None:
+        return ""
+    try:
+        from app.db.models import SystemConfig
+
+        row = session.scalar(select(SystemConfig).where(
+            SystemConfig.key == f"douyin_verify_until_{user_id}"))
+        return str(row.value or "") if row else ""
+    except Exception:  # noqa: BLE001 - 读不到就不说,别编
+        logger.debug("读取抖音验证闸门失败", exc_info=True)
+        return ""
+
+
+def _with_douyin_verdict(msg: str, session, user_id: int = 1) -> str:
+    """把「**两种原因、动作相反**」收敛成**已知的那一种**。
+
+    ★ 2026-10-25 加。起因:这条告警连续三轮都只给"① 登录过期 / ② 要求过验证,
+    别先猜一个",而**判据其实就在库里** —— 上次协议探测撞到 `verify_check` 时
+    顺手写了 `douyin_verify_until_<uid>`。于是每一轮都要人(或我)去手工探一次才能定性,
+    而本仓的教训正是:**别让人去做判别实验**。
+
+    判据是**已有的闸门记录**,不是猜:有闸 ⇒ 这个号被要求过验证(②);
+    没有闸 ⇒ 保持原来的"两种原因"说法(那才是真的不知道)。
+    """
+    until = _verify_until_text(session, user_id)
+    if not until:
+        return msg
+    return msg + (
+        f"\n**本次判定(据库里上次协议探测留下的闸门)**:② **平台要求过验证"
+        f"(`verify_check`),闸到 {until}** ⇒ 动作 = **等 + 别再打**;"
+        f"重扫/重登**没用**(人工也没有滑块可过)。")
+
+
 def _collect(platform: str, keywords: list[str], session=None,
              user_id: int = 1) -> tuple[list[dict], str]:
     """取搜索结果 → `(记录列表, 来源标签)`。
@@ -320,7 +358,14 @@ def _collect(platform: str, keywords: list[str], session=None,
             cookie = (cookie_store.get_cookie(session, user_id, "douyin") or "").strip()
         except Exception:  # noqa: BLE001 - 读不到就交给档案登录
             logger.debug("浏览器兜底读取抖音 cookie 失败,交给档案登录", exc_info=True)
-    rows = mc.crawl(platform, keywords, cookie=cookie, user_id=user_id)
+    try:
+        rows = mc.crawl(platform, keywords, cookie=cookie, user_id=user_id)
+    except mc.MediaCrawlerError as exc:
+        #: ★ **空结果的那句话必须带上判定**(2026-10-25):见 `_with_douyin_verdict`。
+        if platform != "douyin":
+            raise
+        raise mc.MediaCrawlerError(
+            _with_douyin_verdict(str(exc), session, user_id)) from exc
     if rows and session is not None:
         #: ★ **浏览器既然通了,就别把它自己关掉**(2026-10-25):见 `_release_browser_probe`。
         if cooldown:

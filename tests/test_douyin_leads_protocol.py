@@ -349,6 +349,72 @@ def test_浏览器兜底空手而归时_不许释放探针标记(monkeypatch, us
     db.close()
 
 
+def test_空结果告警要带上已知的判定_别让人再做判别实验(monkeypatch):
+    """★★★ 2026-10-25:这条告警连续三轮都只给「① 登录过期 / ② 要求过验证,别先猜一个」,
+    而**判据其实就在库里** —— 上次协议探测撞到 `verify_check` 时会写
+    `douyin_verify_until_<uid>`。于是每轮都要人(或我)手工探一次才能定性。
+
+    本仓的教训是:**别让人去做判别实验**。有闸 ⇒ 直接说②并给出动作;没闸 ⇒ 保持原话。
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db import models  # noqa: F401
+    from app.db.database import Base
+    from app.db.models import SystemConfig
+    from app.services import douyin_leads as dl
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+
+    base = "douyin 的 8 个关键词全部无结果 —— ① 登录态过期 ⇒ 重扫;② 风控 ⇒ 等"
+    assert dl._with_douyin_verdict(base, db) == base, "没有闸门时不该编结论"
+
+    db.add(SystemConfig(key="douyin_verify_until_1", value="2026-10-25T15:34:05"))
+    db.commit()
+    msg = dl._with_douyin_verdict(base, db)
+    assert "verify_check" in msg and "等 + 别再打" in msg, msg
+    assert "重扫/重登**没用**" in msg, msg
+    assert "2026-10-25T15:34:05" in msg, "要把闸门时间写出来(判断是不是老账)"
+    db.close()
+
+
+def test_浏览器空结果时_抛出的错误要带判定(monkeypatch, use_protocol):
+    """接线检查:判定必须真的**接进错误串**(函数写得再好,没接上等于没做)。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db import models  # noqa: F401
+    from app.db.database import Base
+    from app.db.models import SystemConfig
+    from app.services import douyin_leads as dl
+    from app.services import douyin_protocol_source as dps
+    from app.services import mediacrawler_source as mc
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+    db.add(SystemConfig(key="douyin_verify_until_1", value="2026-10-25T15:34:05"))
+    db.commit()
+
+    class _Boom(Exception):
+        kind = "verify_cooldown"
+
+    _patch_protocol(monkeypatch, err=_Boom("验证冷却中"))
+    monkeypatch.setattr(dps, "in_verify_cooldown", lambda *a, **k: True)
+    monkeypatch.setattr(dl, "_browser_probe_allowed", lambda *a, **k: True)
+
+    def _empty(*a, **k):
+        raise mc.MediaCrawlerError("douyin 的 8 个关键词全部无结果 —— ①/②")
+
+    monkeypatch.setattr(mc, "crawl", _empty)
+    with pytest.raises(mc.MediaCrawlerError) as ei:
+        dl.collect_leads(["词"], session=db)
+    assert "verify_check" in str(ei.value), f"判定没接上:{ei.value}"
+    db.close()
+
+
 def test_浏览器兜底带上协议cookie(monkeypatch, use_protocol):
     """档案登录是第一条退路,cookie 注入是第二条 —— 档案被锁时不能空跑。"""
     from app.services import douyin_leads as dl
