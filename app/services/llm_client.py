@@ -301,3 +301,67 @@ def draft_article(base_url: str, api_key: str, model: str, *,
         _record_usage(None, ok=False)
         logger.warning("AI 文案生成异常:%s", exc)
         return None
+
+
+#: 吃瓜资料的**硬约束**。写在这里而不是散在提示词里:它是"能不能发"的底线,
+#: 不是措辞偏好 —— 编一句就是造谣,而造谣是这条链唯一会**直接违法**的地方。
+_GOSSIP_SYSTEM = (
+    "你是娱乐资讯整理助手。你只做**整理**,不做**创作**:"
+    "① 只能使用用户提供的素材里**已经出现**的信息,素材里没有的一律不写,"
+    "禁止用你自己的记忆补充任何细节(人物、时间、金额、聊天记录、动机);"
+    "② 未经证实的内容必须原样标注「网传」或「据<来源>报道,未经证实」;"
+    "③ 不写未成年人、住址/电话/身份证/账号等隐私,不写未经公开的私人信息;"
+    "④ 不下道德或法律结论(不写「渣男/实锤/违法」这类定性),只陈述公开报道与当事方回应;"
+    "⑤ 用简体中文,中性克制的资讯口吻。"
+)
+
+
+def compose_gossip_doc(base_url: str, api_key: str, model: str, *,
+                       title: str, sources: str, timeout: int = 150) -> str | None:
+    """把**公开素材**整理成一份吃瓜资料(markdown),用于生成 PDF/Word 拉新物料。
+
+    ⚠️ `sources` 必须是**真实素材**(热搜标题、报道正文、当事方声明)。本函数**不允许**
+    模型凭记忆写 —— 吃瓜内容里编一个细节就是造谣,这是这条链唯一会直接违法的环节
+    (见 `_GOSSIP_SYSTEM`)。
+
+    返回 markdown(`# 标题` + 若干 `## 小节`);失败返回 None。
+    """
+    if not api_key or not title or not (sources or "").strip():
+        return None
+    nl = chr(10)
+    user_prompt = (
+        f"热点标题:{title}{nl}{nl}"
+        f"==== 素材开始 ===={nl}{sources[:12000]}{nl}==== 素材结束 ===={nl}{nl}"
+        "请把素材整理成一份可发布的《吃瓜资料》,严格用下面的结构(**只输出 markdown,不要解释**):"
+        f"{nl}# <一句中性标题,不夸张不标题党>{nl}"
+        f"## 事件概览{nl}<2~4 句,只写素材里有的>"
+        f"{nl}## 时间线{nl}<按时间列,每条一行,格式 '- YYYY-MM-DD:事实' ;素材没给日期就写「时间未明确」>"
+        f"{nl}## 涉及人物{nl}<每人一行 '- 姓名/称呼:公开身份 + 素材里提到的关系;不要推测动机'>"
+        f"{nl}## 当事方与相关方回应{nl}<谁说了什么,注明是「官方声明/工作室回应/本人发文/经纪人回应/网传」>"
+        f"{nl}## 争议焦点{nl}<网友/媒体在争什么,写成中性提问式,不要站队>"
+        f"{nl}## 信息来源{nl}<逐条列出素材里出现过的来源名;没有就写「素材未注明来源」>"
+        f"{nl}## 免责声明{nl}本资料仅整理自公开报道,不代表对任何事实的认定;"
+        f"未经证实的内容已标注,请读者自行判断。"
+    )
+    try:
+        resp = requests.post(
+            base_url.rstrip("/") + "/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": model,
+                  "messages": [{"role": "system", "content": _GOSSIP_SYSTEM},
+                               {"role": "user", "content": user_prompt}],
+                  "temperature": 0.3, "max_tokens": 2200},
+            timeout=timeout,
+        )
+        if resp.status_code >= 400:
+            _record_usage(None, ok=False)
+            logger.warning("吃瓜资料生成失败 HTTP %s:%s", resp.status_code, resp.text[:200])
+            return None
+        payload = resp.json()
+        _record_usage(payload, ok=True)
+        text = (payload.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+        return text or None
+    except Exception as exc:  # noqa: BLE001
+        _record_usage(None, ok=False)
+        logger.warning("吃瓜资料生成异常:%s", exc)
+        return None
