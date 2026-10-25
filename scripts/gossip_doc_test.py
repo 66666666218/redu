@@ -58,6 +58,8 @@ def main() -> int:
     ap.add_argument("--source", action="append", default=[],
                     help="素材(可多次):网址 / 文件路径 / 直接文字")
     ap.add_argument("--from-md", help="已有 markdown,只重新排版(不调模型)")
+    ap.add_argument("--auto-material", action="store_true",
+                    help="按标题**自动**从微博/抖音采素材(不用手给 --source)")
     ap.add_argument("--out", default=str(OUT_DIR), help="输出目录")
     args = ap.parse_args()
 
@@ -68,10 +70,18 @@ def main() -> int:
     else:
         if not args.title:
             print("✗ 缺 --title"); return 2
-        parts = [t for t in (_load_source(s) for s in args.source) if t.strip()]
+        if args.auto_material:
+            from app.services import gossip_material
+
+            got = gossip_material.gather(args.title)
+            print(f"… 自动采素材:{got['counts']}", end="")
+            print(f" · ⚠️ 失败:{got['fails']}" if got["fails"] else "")
+            parts = [got["text"]] if got["text"] else []
+        else:
+            parts = [t for t in (_load_source(s) for s in args.source) if t.strip()]
         if not parts:
             print("✗ 没有任何素材 —— **不让模型凭记忆编**(吃瓜内容编一句就是造谣)。\n"
-                  "  请用 --source 给报道正文/文件/网址。")
+                  "  请用 --source 给报道正文/文件/网址,或加 --auto-material 自动采。")
             return 2
         from config.settings import get_settings
 

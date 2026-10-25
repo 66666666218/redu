@@ -200,6 +200,9 @@ _GRAB_JS = """() => {
         rows: rows,
         logged_out: /登录后即可搜索/.test(body),
         verify: /请完成.{0,6}验证|拖动.{0,6}滑块|安全验证/.test(body),
+        //: ★ 2026-10-25 实测:`/search/<词>` 有时直接返回一张**「验证码中间页」**
+        //: (HTTP 200、body 几乎为空)—— 那时 `rows` 为 0,与"这个词没人发过"**完全同形**。
+        captcha: /验证码中间页/.test(document.title || '') || /验证码/.test(body),
     };
 }"""
 
@@ -279,6 +282,10 @@ def search(keywords: list[str], *, session=None, user_id: int = 1,
                     raise DouyinCdpError(
                         "抖音搜索页显示**未登录**(「登录后即可搜索更多精彩视频」)"
                         "—— 库里的 cookie 不被接受,需要人重登一次")
+                if last.get("captcha"):
+                    raise DouyinCdpError(
+                        "抖音返回的是**「验证码中间页」**(HTTP 200、页面近乎空白)"
+                        "—— 这是风控要求过验证,**不是「这个词没人发」**;先停手别再打")
                 if last.get("verify"):
                     raise DouyinCdpError(
                         "抖音要求**过验证**(页面出现安全验证/滑块)—— 本轮停手,别再打")
