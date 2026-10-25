@@ -97,11 +97,13 @@ def build(session: Session, user_id: int, section: str, since: datetime, until: 
 
 
 def render_card(data: dict, period: str, top: int = 8,
-                part: tuple[int, int] = (1, 1)) -> dict:
+                part: tuple[int, int] = (1, 1), start_rank: int = 1) -> dict:
     """渲染成飞书卡片。**客户口径**:只有"有什么"、几处可点、一行怎么用。
 
     `top` = 最多列几行(**0 = 全部**,2026-10-25 起日结默认走这条);
-    `part` = 分卡时的 `(第几, 共几)` —— 只有真的分卡了才会出现在标题上。
+    `part` = 分卡时的 `(第几, 共几)` —— 只有真的分卡了才会出现在标题上;
+    `start_rank` = 这一张卡的**第一条是总榜第几名**(分卡时序号要接着上一张走,
+    否则每张卡都从 1 开始,客户会以为有三份不同的榜单)。
 
     ⚠️ **`top=0` 不许再退化成 `items[:0]`**(那是空卡)。2026-10-25 之前
     这个切片没防 0,而新的默认值就是 0 ⇒ 不修就会把「完整版」发成一张空壳。
@@ -114,6 +116,10 @@ def render_card(data: dict, period: str, top: int = 8,
     head = f"📊 **{label} · {spec['title']}** —— {when}一共 **{n_res} 个资源**"
     if int(data.get("repeats") or 0):
         head += f"(其中 {data['repeats']} 个被反复推荐)"
+    if n_res >= 2:
+        #: ★ 2026-10-26:排序规则**必须写在脸上**。清单按热度降序,
+        #: 但没有互动数的那种源会落到最后 —— 不说的话,"排后面"会被读成"不重要"。
+        head += "\n**按热度排序**(👍/▶ 高的在前;没有互动数据的排后面)"
     if int(part[1]) > 1:
         head += f" · 第 {int(part[0])}/{int(part[1])} 部分"
     howto = ("资源名点开即取用(标注的是网盘);「**看作品**」点开是那条原帖,"
@@ -131,12 +137,14 @@ def render_card(data: dict, period: str, top: int = 8,
         elements.append({"tag": "div", "text": {"tag": "lark_md",
                                                 "content": f"{when}没有新的内容。"}})
         return _card(elements, label)
-    for g in items:
+    for idx, g in enumerate(items, int(start_rank or 1)):
         name = _md_safe(strip_others(str(g.get("title") or "")))[:28] or "—"
         pan_url = str(g.get("pan_url") or "")
         pan = str(g.get("pan_type") or "") or _pan_name(pan_url)
         cell = (f"[{name}]({_md_safe(pan_url)})" + (f" · 🔴{pan}" if pan else "")
                 if pan_url else f"{name} · —")
+        #: ★ 2026-10-26:**带序号**,让"按热度排"这件事在卡片上看得见(否则只是一串没有次序感的行)
+        cell = f"**{idx}.** {cell}"
         #: ★ 被反复推荐的那个要有**看得见的标记**:客户抱怨的就是"同一条反复出现"。
         #: 挂在**资源**那一格(它最宽),而不是挤在「对标作品」里 —— 那里本来就有链接。
         if int(g.get("pushes") or 1) > 1:
@@ -275,12 +283,15 @@ def send_digest(session: Session, user_id: int, section: str, period: str,
     per = int(getattr(settings, "board_digest_max_rows_per_card", 35) or 0)
     chunks = _split_even(items, per)
     client = FeishuClient(hook, getattr(settings, "feishu_secret", ""))
+    rank = 1
     for k, chunk in enumerate(chunks, 1):
-        card = render_card({**data, "items": chunk}, period, top=top, part=(k, len(chunks)))
+        card = render_card({**data, "items": chunk}, period, top=top,
+                           part=(k, len(chunks)), start_rank=rank)
         if not client.send_card(card):
             logger.warning("板块%s:%s 第 %d/%d 张卡发送失败 ⇒ 不打标,下次整期重发",
                            period, section, k, len(chunks))
             return False
+        rank += len(chunk)
     _mark_sent(session, period, section, tag)
     logger.info("板块%s:%s 发出(%d 行 / %d 个资源 / %d 张卡)",
                 PERIODS.get(period, {}).get("title", period), section,

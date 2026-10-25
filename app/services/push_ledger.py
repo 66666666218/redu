@@ -185,7 +185,7 @@ def window(session: Session, user_id: int, section: str, since: datetime,
       · `resources` = **不同资源个数**(聚合后)—— 两者都给,是因为
         「推了 30 行」与「有 30 个资源」是**两件事**,而客户抱怨的正是前者;
       · `repeats` = 被推 ≥2 次的那种资源有几个(等于「刷屏了多少」);
-      · `items` 按 `(pushes desc, 热度 desc)` 排 —— **被反复推的排前面**。
+      · `items` 按 **`(热度 desc, pushes desc)`** 排 —— 见下面那段注释。
     """
     from app.db.models import PushLedger
 
@@ -216,8 +216,14 @@ def window(session: Session, user_id: int, section: str, since: datetime,
             if not g.get(f) and r.__getattribute__(f):
                 g[f] = r.__getattribute__(f)
     items = list(agg.values())
-    items.sort(key=lambda g: (-int(g["pushes"]), -_heat(str(g.get("metrics") or "")),
-                              str(g.get("title") or "")))
+    #: ★★ 2026-10-26 **排序改成热度优先**(用户口径:「每日总结里按热度排序,让用户更好的观看」)。
+    #: 原来是 `pushes` 主导 —— 但 `pushes` 是**我们自己推送了几次**(自家行为),
+    #: 不是"这件事有多火";客户翻日结想看的是「昨天什么在火」,不是「我们重复推了谁」。
+    #: ⚠️ `_heat` 拿不到互动指标时是 0(贴吧/部分源本来就没有点赞播放)⇒ 这些会落到**最后**。
+    #: 所以卡片上必须**显式写明"按热度排序"**,否则"排在后面"会被读成"不重要"
+    #: (这与「静默失败=假成功」是同一类问题:排序本身在传递一个我们没说明的结论)。
+    items.sort(key=lambda g: (-_heat(str(g.get("metrics") or "")),
+                              -int(g["pushes"]), str(g.get("title") or "")))
     out = {"rows": len(rows), "resources": len(items),
            "repeats": sum(1 for g in items if int(g["pushes"]) > 1), "items": items}
     if top:

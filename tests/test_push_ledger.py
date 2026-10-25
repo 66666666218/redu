@@ -129,14 +129,40 @@ class Test读窗口:
         w = pl.window(session, 1, "wechat", datetime(2026, 10, 16), datetime(2026, 10, 17))
         assert w["rows"] == 1 and w["items"][0]["pushes"] == 1
 
-    def test_被反复推的排最前(self, session) -> None:
+    def test_按热度排_热度相同才看推送次数(self, session) -> None:
+        """★ 2026-10-26 用户口径:「每日总结里按热度排序,让用户更好的观看」。
+
+        原来是 `pushes`(我们推了几次)主导 —— 那是**我们自己**的行为,
+        不是"这件事有多火"。现在**热度优先**,同热度时才看 pushes。
+        """
         pl.record(session, 1, "wechat", [{"title": "没人推的", "metrics": {"read_num": 99999}}],
                   when=datetime(2026, 10, 16, 7))
         for h in (6, 8):
             pl.record(session, 1, "wechat", [{"title": "被推两次的"}],
                       when=datetime(2026, 10, 16, h))
         w = pl.window(session, 1, "wechat", datetime(2026, 10, 16), datetime(2026, 10, 17))
+        assert [g["title"] for g in w["items"]] == ["没人推的", "被推两次的"], \
+            "热的那条必须排前面,哪怕它只被推过一次"
+
+    def test_都没有互动数据时_被反复推的排前面(self, session) -> None:
+        """两条都拿不到指标(heat 都是 0)⇒ 退回用 pushes 排 —— 那仍是有意义的次序。"""
+        pl.record(session, 1, "wechat", [{"title": "只推一次"}], when=datetime(2026, 10, 16, 7))
+        for h in (8, 9):
+            pl.record(session, 1, "wechat", [{"title": "被推两次的"}],
+                      when=datetime(2026, 10, 16, h))
+        w = pl.window(session, 1, "wechat", datetime(2026, 10, 16), datetime(2026, 10, 17))
         assert w["items"][0]["title"] == "被推两次的"
+
+    def test_没有互动数据的不许插队到有数据的前面(self, session) -> None:
+        """⚠️ 贴吧/部分源本来就没有点赞播放(heat=0)⇒ 它们会落到最后。
+        卡片上必须写明"按热度排序、没有互动数据的排后面",否则会被读成"这些不重要"。"""
+        pl.record(session, 1, "wechat", [{"title": "有数据的", "metrics": {"liked_count": 5}}],
+                  when=datetime(2026, 10, 16, 7))
+        for h in (8, 9, 10):
+            pl.record(session, 1, "wechat", [{"title": "没数据但推了三次"}],
+                      when=datetime(2026, 10, 16, h))
+        w = pl.window(session, 1, "wechat", datetime(2026, 10, 16), datetime(2026, 10, 17))
+        assert w["items"][0]["title"] == "有数据的"
 
     def test_后来的行只补空位不覆盖(self, session) -> None:
         """第一次那条通常就是"**第一次发现它**"时的原话 —— 后一轮缺链时不该把标题抹掉。"""

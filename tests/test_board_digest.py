@@ -44,7 +44,11 @@ class _S:
     board_digest_top = 8
     board_digest_boards = ""
     board_digest_weekly_cron = "3 9 * * 1"      #: 周一 = 周结日(那天不发日结)
-    board_digest_daily_skip_on_weekly = True
+    #: ⚠️ **默认关掉「周结日跳过日结」**(2026-10-26 实测踩到):不关的话,
+    #: 这些验"日结怎么发"的用例**每逢周一必红** —— 因为今天正好是周一,
+    #: `_is_weekly_day()` 为真 ⇒ 日结全跳过。**时间相关的判据必须在用例里钉死**,
+    #: 否则它测的不是代码,是日历。要验跳过逻辑的用例自己打开。
+    board_digest_daily_skip_on_weekly = False
 
 
 def _yesterday() -> datetime:
@@ -172,8 +176,8 @@ class Test完整发送:
     """
 
     def _rows(self, card) -> list[str]:
-        """卡片里**数据行**的第一列(资源名)。⚠️ 表头那一行也是 column_set,要剔掉。"""
-        out = [c["elements"][0]["text"]["content"].split("]")[0].lstrip("[")
+        """卡片里**数据行**的第一列原始文本(含序号前缀)。表头那一行也要剔掉。"""
+        out = [c["elements"][0]["text"]["content"]
                for row in card["elements"] if row.get("tag") == "column_set"
                for c in row["columns"][:1]]
         return [x for x in out if x != "**资源**"]
@@ -203,6 +207,50 @@ class Test完整发送:
         assert len(names) == 12, f"只发了 {len(names)} 条 ⇒ 又被截断了:{names}"
         blob = json.dumps(box[0], ensure_ascii=False)
         assert "还有" not in blob, "完整发送时不该再说「还有 N 个资源」"
+
+    def test_卡片按热度排序并带序号(self, session) -> None:
+        """★ 2026-10-26 用户口径:「每日总结里按热度排序,让用户更好的观看」。
+
+        ① 热的那条排第一(哪怕它只被推过一次);② 每行带序号,读起来像榜单;
+        ③ 排序规则**写在脸上**(不然"排后面"会被读成"不重要")。
+        """
+        _seed(session, "xiaohongshu", "很火的资源", metrics={"liked_count": 100000})
+        _seed(session, "xiaohongshu", "没人看的资源")
+        since, until, _ = bd.window_of("daily")
+        card = bd.render_card(bd.build(session, 1, "xiaohongshu", since, until),
+                              "daily", top=0)
+        blob = json.dumps(card, ensure_ascii=False)
+        assert "按热度排序" in blob, "排序规则必须写在卡片上"
+        rows = self._rows(card)
+        assert rows[0].startswith("**1.**") and "很火的资源" in rows[0], rows
+        assert rows[1].startswith("**2.**") and "没人看的资源" in rows[1], rows
+
+    def test_分卡时序号要接着上一张走(self, session, monkeypatch) -> None:
+        """分 3 张卡时序号应是 1-4 / 5-8 / 9-12,而不是每张都从 1 开始
+        (否则客户会以为有三份不同的榜单)。"""
+        from app.services import feishu_client
+
+        cards: list[dict] = []
+
+        class _C:
+            def __init__(self, webhook, secret):
+                pass
+
+            def send_card(self, card):
+                cards.append(card)
+                return True
+
+        class _S2(_S):
+            board_digest_top = 0
+            board_digest_max_rows_per_card = 5
+
+        monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+        for i in range(12):
+            _seed(session, "xiaohongshu", f"资源{i}")
+        bd.run_board_digest_all_users("daily", settings=_S2(), session=session)
+        assert len(cards) == 3, len(cards)
+        firsts = [self._rows(c)[0].split(".")[0].strip("*") for c in cards]
+        assert firsts == ["1", "5", "9"], firsts
 
     def test_超过每卡行数就分多张_但一条不少(self, session, monkeypatch) -> None:
         from app.services import feishu_client
@@ -455,8 +503,13 @@ class Test周结日不发日结:
 
     def test_周一日结不发_但要留下原因(self, session, monkeypatch) -> None:
         calls = _patch_send(monkeypatch)
+
+        class _Skip(_S):
+            #: 本用例验的就是"周结日跳过日结"这条开关 —— 显式打开(`_S` 默认已关)
+            board_digest_daily_skip_on_weekly = True
+
         pl.record(session, 1, "xiaohongshu", [{"title": "周日的资源"}], when=self.SUN)
-        assert bd.run_board_digest_all_users("daily", settings=_S(), session=session,
+        assert bd.run_board_digest_all_users("daily", settings=_Skip(), session=session,
                                              now=self.MON) == 0
         assert calls == []
         note = session.query(models.RunRecord).filter_by(
