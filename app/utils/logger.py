@@ -59,11 +59,41 @@ class _MaskFilter(logging.Filter):
         return True
 
 
+def _utf8_stream(stream):
+    """把输出流切成 **UTF-8**;切不动就原样返回(不抛)。
+
+    ⚠️⚠️ **为什么必须做**(2026-10-26 实测):Windows 上服务由 `pythonw` 启动、
+    stdout 重定向到 `data/app.log`,此时流的编码是**系统 locale = GBK**。
+    任何带 emoji / `⇒` / `⚠️` 的日志消息都会在 `stream.write()` 处抛
+    `UnicodeEncodeError`;logging 捕获后把「--- Logging error ---」+ **30 行调用栈**
+    写进 stderr(也进同一个文件)⇒ **真正的那句日志没了**,换来一堆噪声。
+
+    实测代价:`67MB` 的 `app.log` 里 **2056 个 traceback**,绝大多数就是它 ——
+    也就是说,**我们最想看的那些带箭头/emoji 的诊断句,恰恰是最容易被丢掉的那批**。
+    """
+    try:
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+            return stream
+    except Exception:  # noqa: BLE001 - 切不动就退到下面的包装
+        pass
+    try:
+        import io
+
+        return io.TextIOWrapper(stream.buffer, encoding="utf-8",
+                                errors="replace", line_buffering=True)
+    except Exception:  # noqa: BLE001 - 连 buffer 都没有:原样用,别让日志系统起不来
+        return stream
+
+
 def setup_logging(level: int = logging.INFO) -> None:
     """初始化根日志。重复调用是幂等的。"""
     root = logging.getLogger()
     if root.handlers:
         return
+    #: 先切编码再建 handler —— 顺序反了那第一行就可能丢(见 `_utf8_stream`)
+    sys.stdout = _utf8_stream(sys.stdout)
+    sys.stderr = _utf8_stream(sys.stderr)
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(
         logging.Formatter(

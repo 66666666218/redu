@@ -37,6 +37,9 @@ set /a tries+=1
 if %tries% GEQ 20 goto stuck
 goto wait
 :start_it
+rem ---- rotate app.log (2026-10-26) ----
+rem Same rule as app_watchdog.bat: keep the two launch paths identical.
+if exist data\app.log for %%A in (data\app.log) do if %%~zA GTR 52428800 move /y data\app.log data\app.log.1 >NUL 2>&1
 start "" /b "C:\Python314\pythonw.exe" -m uvicorn app.platform:app --host 127.0.0.1 --port 8080 >> data\app.log 2>&1
 echo.
 echo  Restart issued. Give it ~5 s, then verify it really came back:

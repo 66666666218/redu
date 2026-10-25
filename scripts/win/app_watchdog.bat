@@ -26,4 +26,9 @@ rem this). The watchdog is the only thing still alive, so IT must report the
 rem outage. Secrets stay out of this git-tracked file: the script reads .env
 rem itself. Failure there must never delay the restart (the script swallows it).
 "C:\Python314\pythonw.exe" scripts\win\notify_restart.py
+rem ---- rotate app.log (2026-10-26) ----
+rem It reached 67 MB with no rotation at all; 2056 of its tracebacks were just
+rem "Logging error" noise from GBK encoding (fixed separately in utils/logger.py).
+rem The running app HOLDS the handle, so this must run BEFORE the new process starts.
+if exist data\app.log for %%A in (data\app.log) do if %%~zA GTR 52428800 move /y data\app.log data\app.log.1 >NUL 2>&1
 start "" /b "C:\Python314\pythonw.exe" -m uvicorn app.platform:app --host 127.0.0.1 --port 8080 >> data\app.log 2>&1
