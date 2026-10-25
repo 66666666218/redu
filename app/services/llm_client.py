@@ -365,3 +365,70 @@ def compose_gossip_doc(base_url: str, api_key: str, model: str, *,
         _record_usage(None, ok=False)
         logger.warning("吃瓜资料生成异常:%s", exc)
         return None
+
+
+_GOSSIP_JUDGE_SYSTEM = (
+    "你在帮运营从各平台热搜里挑**娱乐吃瓜**选题。判断标准:这条是否属于"
+    "**公众人物(明星/演员/歌手/网红/主播/偶像/知名企业家/体育明星)的私生活、"
+    "感情关系或争议事件**,并且是**多数人愿意当瓜吃**的那种。"
+    "**明确不算(一律判否)**:活动出图/红毯造型/穿搭、新剧新歌新综艺的**宣传**、"
+    "商务代言、正常社交(参加婚礼、合照、聚会)、单纯夸演技或颜值、粉丝应援、"
+    "比赛比分、社会新闻与普通人纠纷、时政与财经。"
+    "**拿不准就判否** —— 错收一条会让整张候选表失去可信度。"
+)
+
+
+def judge_gossip_titles(base_url: str, api_key: str, model: str,
+                        titles: list[str], timeout: int = 90) -> list[dict] | None:
+    """让模型逐条判断「这是不是娱乐吃瓜选题」→ `[{title, is_gossip, reason}]`。
+
+    为什么需要它(2026-10-25 实测):**纯关键词会把社会新闻收进来** ——
+    当天榜上「老板回应南开大学学生时薪高10元」「妈妈给儿子准备40万结婚钱 女儿报警」
+    都因为命中「回应/结婚」被判成候选,而它们跟吃瓜毫无关系。
+    关键词分不清"公众人物"与"普通人",这件事模型分得清。
+
+    ⚠️ 只判**题材**,不判**事实**(素材真实性由 `compose_gossip_doc` 那条链负责)。
+    失败返回 None,调用方退回"只按关键词"并**把这件事说出来**。
+    """
+    if not api_key or not titles:
+        return None
+    nl = chr(10)
+    numbered = nl.join(f"{i}. {t}" for i, t in enumerate(titles, 1))
+    prompt = (f"下面是各平台热搜标题:{nl}{numbered}{nl}{nl}"
+              "请逐条判断,严格每行一条,格式:`序号|是/否|不超过 20 字理由`。"
+              "不要输出别的任何内容。")
+    try:
+        resp = requests.post(
+            base_url.rstrip("/") + "/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": model,
+                  "messages": [{"role": "system", "content": _GOSSIP_JUDGE_SYSTEM},
+                               {"role": "user", "content": prompt}],
+                  "temperature": 0.1, "max_tokens": 1500},
+            timeout=timeout,
+        )
+        if resp.status_code >= 400:
+            _record_usage(None, ok=False)
+            logger.warning("吃瓜判定失败 HTTP %s:%s", resp.status_code, resp.text[:160])
+            return None
+        payload = resp.json()
+        _record_usage(payload, ok=True)
+        text = (payload.get("choices", [{}])[0].get("message", {}).get("content") or "")
+    except Exception as exc:  # noqa: BLE001
+        _record_usage(None, ok=False)
+        logger.warning("吃瓜判定异常:%s", exc)
+        return None
+
+    out: list[dict] = []
+    for line in text.splitlines():
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 2 or not parts[0].isdigit():
+            continue
+        idx = int(parts[0]) - 1
+        if not (0 <= idx < len(titles)):
+            continue
+        verdict = parts[1]
+        out.append({"title": titles[idx],
+                    "is_gossip": verdict.startswith("是"),
+                    "reason": parts[2] if len(parts) > 2 else ""})
+    return out or None
