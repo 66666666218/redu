@@ -67,8 +67,63 @@ def _douyin(title: str, session, user_id: int, limit: int) -> tuple[list[str], s
     return out, ""
 
 
+_BAIDU_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
+             "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1")
+#: 移动版百度是**服务端渲染**,正文能直接读;但页面里混着**结构化字段残渣**和**评论区**,
+#: 不剔掉会把 `"}]…isEncoding` 这种垃圾当素材喂给模型。
+_BAIDU_NOISE = ('"}]', "isEncoding", "not_struct", "isSingleLine", "[网易", "网友]",
+                "百度一下", "- 百度", "点击即刻体验", "排序方式", "发布时间",
+                #: 评论区留言被当成"资讯"喂进去,资料里就会出现一堆"网友猜测"(实测 2026-10-25)
+                "评论区", "网友留言", "有态度网友")
+
+
+def _baidu_news(title: str, limit: int) -> tuple[list[str], str]:
+    """百度资讯(移动版)→ `(["【百度资讯】正文", ...], 失败原因)`。
+
+    ⚠️ 为什么用 **m.baidu.com** 而不是 PC 版:PC 版结果是**客户端渲染**,
+    HTML 里只有哈希类名(`news-title_1YtI1`),抓不到正文;移动版是服务端渲染。
+    """
+    import re
+
+    import requests
+
+    try:
+        r = requests.get("https://m.baidu.com/s", params={"word": title, "tn": "news"},
+                         headers={"User-Agent": _BAIDU_UA}, timeout=15)
+        if r.status_code >= 400:
+            return [], f"HTTP {r.status_code}"
+        html = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", r.text)
+        #: 先把**块级标签**换成换行,否则整页会粘成一行、所有条目没法逐条取
+        html = re.sub(r"(?i)</(div|p|li|h\d|section|article)>|<br\s*/?>", "\n", html)
+        text = re.sub(r"(?s)<[^>]+>", " ", html)
+    except Exception as exc:  # noqa: BLE001 - 失败原因要带回去
+        return [], f"{type(exc).__name__}: {str(exc)[:100]}"
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in text.splitlines():
+        ln = " ".join(raw.split())
+        if not (18 <= len(ln) <= 300):
+            continue
+        if any(n in ln for n in _BAIDU_NOISE):
+            continue
+        #: 百度把命中词包进 `<em>`,剥标签后会在中文之间留下空格 ⇒ 收掉
+        ln = re.sub(r"(?<=[一-鿿])\s+(?=[一-鿿])", "", ln).lstrip(".。 ")
+        #: `A |B |C` 这种是**相关搜索词**堆叠,不是正文,别当素材
+        if ln.count("|") >= 2 or len(ln) < 18:
+            continue
+        key = ln[:40]
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(f"【百度资讯】{ln}")
+        if len(out) >= limit:
+            break
+    return out, ("" if out else "页面里没提取到可用正文")
+
+
 def gather(title: str, *, session=None, user_id: int = 1, limit: int = 8,
-           use_douyin: bool = True) -> dict:
+           use_douyin: bool = True, use_baidu: bool = True) -> dict:
     """按标题采素材 → `{"text", "counts", "fails"}`。
 
     `text` 为空 ⇒ 调用方**必须拒绝生成**(没有素材就不许让模型编)。
@@ -85,6 +140,13 @@ def gather(title: str, *, session=None, user_id: int = 1, limit: int = 8,
     counts: dict[str, int] = {}
     fails: dict[str, str] = {}
     try:
+        #: **报道类素材放最前** —— 模型写「事件概览」时优先看到它,而不是微博网友发言
+        if use_baidu:
+            got, why = _baidu_news(title, limit)
+            counts["百度资讯"] = len(got)
+            blocks.extend(got)
+            if why:
+                fails["百度资讯"] = why
         got, why = _weibo(title, session, user_id, limit)
         counts["微博"] = len(got)
         blocks.extend(got)

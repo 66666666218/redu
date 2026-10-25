@@ -25,7 +25,7 @@ def test_两个来源都成功时_每条都带来源标签(monkeypatch):
     monkeypatch.setattr(douyin_cdp_source, "search", lambda *a, **k: [
         {"name": "某号", "snippet": "两人因红酒结缘"},
     ])
-    got = gm.gather("廖碧儿承认恋情", session=_Db())
+    got = gm.gather("廖碧儿承认恋情", session=_Db(), use_baidu=False)
     assert got["counts"] == {"微博": 2, "抖音": 1}, got["counts"]
     assert "【微博】@某博主:" in got["text"]
     assert "【抖音】某号:" in got["text"]
@@ -41,7 +41,7 @@ def test_一个平台挂了另一个还能用_且失败要说出来(monkeypatch)
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("微博 401")))
     monkeypatch.setattr(douyin_cdp_source, "search", lambda *a, **k: [
         {"name": "某号", "snippet": "抖音那边的内容"}])
-    got = gm.gather("某热点", session=_Db())
+    got = gm.gather("某热点", session=_Db(), use_baidu=False)
     assert got["counts"]["抖音"] == 1 and "微博" in got["fails"]
     assert "微博 401" in got["fails"]["微博"]
     assert "抖音那边的内容" in got["text"]
@@ -59,7 +59,7 @@ def test_抖音撞验证码要如实报_不许当成没内容(monkeypatch):
         raise douyin_cdp_source.DouyinCdpError("抖音返回的是**「验证码中间页」**")
 
     monkeypatch.setattr(douyin_cdp_source, "search", _captcha)
-    got = gm.gather("某热点", session=_Db())
+    got = gm.gather("某热点", session=_Db(), use_baidu=False)
     assert "验证码" in got["fails"]["抖音"]
     assert got["text"].strip(), "别因为抖音失败就把微博素材也丢了"
 
@@ -69,12 +69,38 @@ def test_两个平台都空就返回空素材_调用方据此拒绝生成(monkey
 
     monkeypatch.setattr(weibo_search, "search", lambda *a, **k: [])
     monkeypatch.setattr(douyin_cdp_source, "search", lambda *a, **k: [])
-    got = gm.gather("某热点", session=_Db())
+    got = gm.gather("某热点", session=_Db(), use_baidu=False)
     assert got["text"] == ""
 
 
+def test_百度资讯也要带标签_且排在微博前面(monkeypatch):
+    """报道类素材放最前 —— 模型写「事件概览」时应先看到报道,而不是网友发言。"""
+    from app.services import douyin_cdp_source, weibo_search
+
+    monkeypatch.setattr(gm, "_baidu_news",
+                        lambda title, limit: (["【百度资讯】某媒体报道正文"], ""))
+    monkeypatch.setattr(weibo_search, "search", lambda *a, **k: [
+        {"name": "甲", "snippet": "微博网友说法"}])
+    monkeypatch.setattr(douyin_cdp_source, "search", lambda *a, **k: [])
+    got = gm.gather("某热点", session=_Db())
+    assert got["counts"]["百度资讯"] == 1 and got["counts"]["微博"] == 1
+    first = [ln for ln in got["text"].splitlines() if ln.strip()][0]
+    assert first.startswith("【百度资讯】"), got["text"][:120]
+
+
+def test_百度抓不到要记进_fails(monkeypatch):
+    from app.services import douyin_cdp_source, weibo_search
+
+    monkeypatch.setattr(gm, "_baidu_news", lambda title, limit: ([], "页面里没提取到可用正文"))
+    monkeypatch.setattr(weibo_search, "search", lambda *a, **k: [
+        {"name": "甲", "snippet": "微博素材"}])
+    monkeypatch.setattr(douyin_cdp_source, "search", lambda *a, **k: [])
+    got = gm.gather("某热点", session=_Db())
+    assert "百度资讯" in got["fails"] and got["text"].strip()
+
+
 def test_空标题直接拒(monkeypatch):
-    got = gm.gather("   ", session=_Db())
+    got = gm.gather("   ", session=_Db(), use_baidu=False)
     assert got["text"] == "" and "标题为空" in got["fails"]["输入"]
 
 
