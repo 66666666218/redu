@@ -25,6 +25,11 @@ TARGETS = {"transfer_and_share", "transfer_pan_url"}
 REUSE = {"reuse_if_have", "already_have"}
 #: 这些文件是"转存实现/统一分发器",不要求在本文件内自查
 ALLOW = {"pan_discovery.py", "quark_transfer.py", "baidupan_transfer.py", "xunlei_transfer.py"}
+#: 这些**函数**是纯"换号重试"的薄包装:资源库检查在**调用方**做过了,
+#: 包装里再查一遍只是多一次库查询(而且它手里没有判重要用的那个标题来源)。
+#: ⚠️ 只在**有测试钉住调用方确实查了**的前提下才能加进来 —— 见
+#: `test_换号包装的调用方仍然先查资源库`(2026-10-25 加)。
+ALLOW_FUNCS = {"_transfer_with_account_fallback"}
 
 
 def _call_name(node: ast.Call) -> str:
@@ -75,12 +80,32 @@ def test_every_transfer_call_site_checks_library_first() -> None:
             if fn is None:
                 problems.append(f"{path}:{calls[0].lineno} 模块级 {name}() 没有资源库前置检查")
                 continue
+            if getattr(fn, "name", "") in ALLOW_FUNCS:
+                continue
             called = {_call_name(c) for c in ast.walk(fn) if isinstance(c, ast.Call)}
             if not (called & REUSE):
                 problems.append(
                     f"{path}:{calls[0].lineno} {fn.name}() 调了 {name}() 却没先查资源库")
     assert not problems, (
         "转存前必须先查资源库(三盘互通):\n  " + "\n  ".join(problems))
+
+
+def test_换号包装的调用方仍然先查资源库() -> None:
+    """`_transfer_with_account_fallback` 被 `ALLOW_FUNCS` 豁免 —— 这个豁免**必须**由
+    "调用方查过库"来兜底,否则豁免就成了一个后门:哪天调用方的那句 `reuse_if_have` 被
+    删掉/挪走,守卫会**继续全绿**,而重复转存悄悄回来。
+
+    (本仓母题:守卫与被守的对象之间要有一条真的链,不能靠"我当时写过"。)
+    """
+    src = (SERVICES / "xunlei_group.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    caller = next((n for n in ast.walk(tree)
+                   if isinstance(n, ast.FunctionDef) and n.name == "transfer_pending"), None)
+    assert caller is not None, "transfer_pending 不见了 —— 豁免的前提没了,请复核 ALLOW_FUNCS"
+    called = {_call_name(c) for c in ast.walk(caller) if isinstance(c, ast.Call)}
+    assert called & REUSE, (
+        "`transfer_pending` 不再查资源库了 ⇒ `_transfer_with_account_fallback` 的豁免失效,"
+        "必须把检查加回去或撤销豁免")
 
 
 def test_scheduler_registers_self_check() -> None:

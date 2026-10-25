@@ -81,6 +81,30 @@ def extract_baidu_urls(text: str) -> list[str]:
     return out
 
 
+def surl_of(share_url: str) -> str:
+    """从分享链接里取出 **`surl`(只有路径那一段)** —— 这是所有协议接口的入参形态。
+
+    ⚠️⚠️ **原来写的是 `share_url.split("/s/1")[1]`**(2026-10-25 修),它会把
+    `?pwd=xxxx` **一起带进 surl**。实测 A/B(同一条链、同一个 Cookie、相隔 1 秒):
+        surl=`Ftzp5KvW7tYegpsm48Qu_w?pwd=0000` → `/share/verify` 回 **errno=105**
+        surl=`Ftzp5KvW7tYegpsm48Qu_w`            → 回 **errno=0**(验码通过、读得出文件列表)
+    ⇒ 凡是**链里自带提取码**(`pan.baidu.com/s/1xxx?pwd=abcd`)的候选,每一轮都死在验码这一步,
+    并被记成「提取码验证失败」—— 库里 35 条失败**全属这一类**。而且因为分享页本身是活的
+    (`_share_page_gone` 正确地判了 False),它们**永远不会被判终态**,于是每轮重试一遍。
+    **链一点问题都没有,是我们自己把 surl 切歪了。**
+    """
+    m = SURL_RE.search(share_url or "")
+    if m:
+        return m.group(1)
+    #: 兜底:认不出的形状退回老切法,但**手工剥掉 `?`/`#` 之后的部分**,
+    #: 并且没有 `/s/1` 段就返回空串(让调用方明确报"不是有效的百度分享链接",
+    #: 而不是拿一整条网址去打接口 —— 那种失败会被记成"链坏了",方向就错了)。
+    parts = (share_url or "").split("/s/1")
+    if len(parts) < 2:
+        return ""
+    return re.split(r"[?#]", parts[1])[0]
+
+
 def extract_pwd(text: str, url: str) -> str:
     """提取码: 优先 URL ?pwd= 参数,否则文本内 提取码/密码 标记。"""
     m = re.search(r"[?&]pwd=([0-9A-Za-z]{4})", url or "")
@@ -290,11 +314,12 @@ class BaiduPanClient:
             timeout=self.timeout)
         errno = r.json().get("errno", -1)
         if errno != 0:
-            # ★★★ **这一步的 `errno=105` = 分享已死**,既不是"提取码错"、也不是"转存被限制"
-            # (2026-10-13 实测定性)。证据:库里 9 条 `failed` 全是
-            # `提取码验证失败(errno=105)`,逐条去 GET 它们的分享页 ⇒ **恒回 HTTP 404**。
-            # 旧措辞("提取码验证失败")下游 `_is_dead_link` 认不出 ⇒ 一律记 `failed`
-            # ⇒ **每天重试同一批死链**:日志里 294 条「盘链转存失败」、积压恒卡 17 条不退。
+            # ★★★ 这一步的 `105` **至少有两种成因**,别只记一种(2026-10-25 订正):
+            #   ① **分享已死**(2026-10-13 定性):当时库里 9 条逐条 GET 分享页 ⇒ **恒回 404**;
+            #   ② **surl 形状不对**(2026-10-25 受控 A/B 证实):把 `?pwd=xxxx` 一起塞进 surl
+            #      就恒回 105,而同一秒用**裸 surl** 打同一个接口回 **0**。
+            #      ⇒ 那是**我们自己的切法错了**,不是链坏了(见 `surl_of`)。
+            # 这两种的处置相反,所以判终态**必须**有分享页证据(下面这行),不能凭 errno 猜。
             # ⚠️ 与 `_transfer_error` 里那个 105 **不是一回事**(那是 `/share/transfer` 步骤),
             #    两处别合并 —— 合并就会把这个终态又变回可重试。
             # ⚠️ 判终态前必须**拿到确凿证据**(分享页 404):探测不到就照旧留可重试,
@@ -346,7 +371,9 @@ class BaiduPanClient:
         先建链再放简介,链子快照的就是没有简介的那份 —— 对方保存下来永远看不到它。
         `intro_dir` = **我们盘里**那个装着简介的目录(如 `/redian宣传`),留空 = 不做。
         """
-        surl = share_url.split("/s/1")[1]
+        surl = surl_of(share_url)
+        if not surl:
+            raise BaiduPanError(f"不是有效的百度分享链接:{share_url[:80]}")
         self._verify(surl, password)
         uk, shareid, bdstoken, files = self._share_meta(surl)
         if not files:
@@ -470,8 +497,13 @@ class BaiduPanClient:
                 "请打开 pan.baidu.com 确认已登录后,重新复制**整份** Cookie")
         return True
 
-    def quota_ratio(self) -> float | None:
-        """盘使用率 `used/total`;**拿不到返回 `None`**(调用方按"不知道"处理)。
+    def quota_usage(self) -> dict | None:
+        """盘容量的**原始数字** `{used, total, ratio}`;拿不到返回 `None`。
+
+        `ratio` **会大于 1**(2026-10-25 实测:唯一那个百度号
+        `used=5_573_035_305_813`(≈5.07 TiB)/ `total=128_849_018_880`(≈120 GiB)
+        ⇒ `ratio≈43.2`)—— 也就是**超额 43 倍**,不是"用了 43%"。
+        调用方必须按 `used >= total` 判"满",别拿百分比直觉读这个数。
 
         同一个 `/api/quota` 端点(与 `keepalive` 共用),只是这里**取数**而不判登录。
         ⚠️ 字段名做过兼容:Baidu 不同客户端回的是 `total` 或 `quota` 两种形态之一;
@@ -488,7 +520,15 @@ class BaiduPanClient:
             used = int(d.get("used") or 0)
             if total <= 0:
                 return None
-            return used / total
+            return {"used": used, "total": total, "ratio": used / total}
         except Exception:  # noqa: BLE001 - 探针失败只说"不知道"
             logger.debug("百度配额查询失败", exc_info=True)
             return None
+
+    def quota_ratio(self) -> float | None:
+        """盘使用率 `used/total`;**拿不到返回 `None`**(调用方按"不知道"处理)。
+
+        ⚠️ 可能 **> 1**(超额)。判"满"要看 `quota_usage()` 的原始数字。
+        """
+        u = self.quota_usage()
+        return u["ratio"] if u else None

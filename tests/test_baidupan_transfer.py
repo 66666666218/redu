@@ -356,3 +356,53 @@ class Test自动建目录:
             c.transfer_and_share("https://pan.baidu.com/s/1abc")
         assert seen == [], "show_msg 不是「路径不存在」就不许去建目录"
         assert len(sess.posts) == 1
+
+
+# ---------------------------------------------------------------------------
+# ★★★ 2026-10-25:`surl` 必须**只取路径段** —— 链接自带 `?pwd=` 时不许把查询串一起塞进去。
+#
+# 受控 A/B(同一条链、同一个 Cookie、相隔 1 秒,真机):
+#     surl=`Ftzp5KvW7tYegpsm48Qu_w?pwd=0000` → `/share/verify` 回 **errno=105**
+#     surl=`Ftzp5KvW7tYegpsm48Qu_w`            → 回 **errno=0**(验码通过、能列出文件)
+# ⇒ 生产积压里那 35 条 `提取码验证失败(errno=105)` **全是这个切法造成的**:
+#   `share_url.split("/s/1")[1]` 把 `?pwd=0000` 一起带进去,每轮都死在验码;
+#   而分享页本身是活的 ⇒ `_share_page_gone` 正确地判 False ⇒ **永远判不了终态**,
+#   于是每天重试、每天同样失败。
+# ---------------------------------------------------------------------------
+
+
+class TestSurlShape:
+    def test_只取路径段(self) -> None:
+        from app.services.baidupan_transfer import surl_of
+
+        assert surl_of("https://pan.baidu.com/s/1Ftzp5KvW7tYegpsm48Qu_w?pwd=0000") == (
+            "Ftzp5KvW7tYegpsm48Qu_w")
+        assert surl_of("https://pan.baidu.com/s/1abc?pwd=1234&x=1") == "abc"
+        assert surl_of("https://pan.baidu.com/s/1abc#pwd=1234") == "abc"
+        assert surl_of("https://pan.baidu.com/s/1abc") == "abc"
+
+    def test_转存时验码与解析都用裸_surl(self, monkeypatch) -> None:
+        c = BaiduPanClient("BDUSS=x")
+        seen: dict[str, str] = {}
+        monkeypatch.setattr(c, "_verify", lambda surl, pwd: seen.update(verify=surl))
+
+        def _stop(surl):
+            seen["meta"] = surl
+            raise RuntimeError("停在这里,后面不需要")
+
+        monkeypatch.setattr(c, "_share_meta", _stop)
+        with pytest.raises(RuntimeError):
+            c.transfer_and_share(
+                "https://pan.baidu.com/s/1Ftzp5KvW7tYegpsm48Qu_w?pwd=0000",
+                password="0000")
+        #: 两个步骤**都**得是裸 surl:`/share/init?surl=` 与 `/s/1{surl}` 同样不吃查询串
+        assert seen == {"verify": "Ftzp5KvW7tYegpsm48Qu_w",
+                        "meta": "Ftzp5KvW7tYegpsm48Qu_w"}, seen
+
+    def test_认不出的形状要明确报错而不是拿整串去打接口(self, monkeypatch) -> None:
+        c = BaiduPanClient("BDUSS=x")
+        monkeypatch.setattr(c, "_verify", lambda *a, **k: pytest.fail("不该走到验码"))
+        with pytest.raises(Exception) as ei:
+            c.transfer_and_share("https://example.com/not-baidu")
+        assert "不是有效的百度分享链接" in str(ei.value), ei.value
+

@@ -347,6 +347,69 @@ def test_transfer_baidu_extracts_pwd_from_snippet(session, monkeypatch) -> None:
     assert seen["pwd"] == "abcd" and out["code"] == "abcd"
 
 
+def test_transfer_baidu_skips_when_disk_is_over_quota(session, monkeypatch) -> None:
+    """★ 2026-10-25:盘**已超额**时一条都不许再撞 —— 直接记 `pending` 并说清真正该做的事。
+
+    实测那个百度号 `used≈5.07 TiB / total≈120 GiB`(超额 43 倍),而积压里 40 条候选
+    每轮都要走完「验码 → 解析 → 转存」三次请求,再吃回一个 `errno=-32 剩余空间不足`。
+    探一次配额就能把这 40 轮空转全省掉,而且**失败原因终于指向"清理/换号"**,
+    不再被归类成"链本身的问题"(那是**错动作**)。
+    """
+    from app.services import baidupan_transfer as bt
+
+    called: list[int] = []
+
+    class _B:
+        def __init__(self, ck):
+            pass
+
+        def quota_usage(self):
+            return {"used": 5_573_035_305_813, "total": 128_849_018_880, "ratio": 43.25}
+
+        def transfer_and_share(self, *a, **k):
+            called.append(1)
+            return {"share_url": "https://pan.baidu.com/s/OUR"}
+
+    monkeypatch.setattr(bt, "BaiduPanClient", _B)
+    monkeypatch.setattr(cookie_store, "get_cookie", lambda s, u, p: "BD-OVER-QUOTA")
+    pd._baidu_quota_cache.clear()          # 探针缓存按 Cookie 分键,别被别的用例污染
+
+    out = pd.transfer_pan_url(session, 1, "https://pan.baidu.com/s/1xyz", _S())
+    assert out["status"] == "pending", out
+    assert out["code"] == "", "`code` 会被写进 `pass_code`(分享提取码),不许塞状态词"
+    assert "空间不足" in out["message"] and "5.07 TB" in out["message"], out["message"]
+    assert called == [], "盘都超额了,不许再逐条去撞转存"
+
+
+def test_transfer_baidu_probe_failure_does_not_block_transfer(session, monkeypatch) -> None:
+    """⚠️ **探不到 ≠ 盘满了**:配额探针一旦失败,必须照旧去搬那一条。
+
+    把"不知道"当成"满"会把整条百度链堵死(与 `space_insufficient` 那条纪律同源)。
+    """
+    from app.services import baidupan_transfer as bt
+
+    called: list[int] = []
+
+    class _B:
+        def __init__(self, ck):
+            pass
+
+        def quota_usage(self):
+            raise RuntimeError("配额接口超时")
+
+        def transfer_and_share(self, url, password="", **k):
+            called.append(1)
+            return {"share_url": "https://pan.baidu.com/s/OUR", "password": "abcd"}
+
+    monkeypatch.setattr(bt, "BaiduPanClient", _B)
+    monkeypatch.setattr(cookie_store, "get_cookie", lambda s, u, p: "BD-PROBE-FAIL")
+    pd._baidu_quota_cache.clear()
+
+    out = pd.transfer_pan_url(session, 1, "https://pan.baidu.com/s/1xyz", _S())
+    assert called == [1], "探针挂了也要照常尝试转存"
+    assert out["status"] == "ok", out
+
+
 def test_find_candidates_needs_zhihu_cookie(session, monkeypatch) -> None:
     """这条路靠知乎搜索,**没配 Cookie 就没有候选**(不报错)。"""
     monkeypatch.setattr(cookie_store, "get_cookie", lambda s, u, p: "")
@@ -994,8 +1057,34 @@ class Test积压告警按证据说话:
         msg = self._alert(session, monkeypatch)
         assert "PAN_DISCOVERY_TRANSFER_LIMIT" in msg, "额度不足就该说调额度"
 
-    def test_失败占多数且不是目录问题就明说额度不是瓶颈(self, session, monkeypatch) -> None:
-        self._mk(session, "failed", "提取码验证失败(errno=105)", 50)
+    def test_盘满的候选挂在pending里也要被数出来(self, session, monkeypatch) -> None:
+        """★★ 盘满被记成 `pending`(链是好的,清了盘就能搬)⇒ 它们**从 `failed` 里消失**,
+        告警会掉进「排队 ≥ 失败 ⇒ 多半是额度用完」那一支 —— 又是一次**错动作**。
+        ⇒ 判据不能只看 `failed`,必须按措辞把"盘满"单独数出来。"""
+        self._mk(session, "pending", "百度盘空间不足(已用 5.07 TB / 配额 120.00 GB,超额 43 倍)"
+                                    "—— 本轮**未尝试**转存;清理百度盘或换一个号后会自动重试", 40)
+        bk = pd._backlog_breakdown(session, 1)
+        assert bk["pending"] == 40 and bk["failed"] == 0
+        assert bk["space"] == 40, bk
+        msg = self._alert(session, monkeypatch, left=40)
+        assert "盘满" in msg and "链坏了" in msg, msg
+        assert "PAN_DISCOVERY_TRANSFER_LIMIT" not in msg, "盘满不是额度问题"
+
+    def test_盘满就叫人清盘或换号_不许叫人去查链(self, session, monkeypatch) -> None:
+        """★ 2026-10-25:积压全是 `errno=-32 剩余空间不足` 时,原来落到最后的
+        「**这些是链本身的问题**」那一支 —— 而真相是**盘超额 43 倍**。
+        又一次「给错动作」:让人去查链,链却一条都没坏。"""
+        self._mk(session, "failed", "转存失败(errno=-32 剩余空间不足，无法转存)", 40)
+        msg = self._alert(session, monkeypatch, left=77)
+        assert "盘满" in msg and "不是链坏了" in msg, msg
+        assert "链本身的问题" not in msg, "盘满不是链的问题"
+        assert "PAN_DISCOVERY_TRANSFER_LIMIT" not in msg
+
+    def test_提取码验证失败_已不再是通用样例(self, session, monkeypatch) -> None:
+        """⚠️ 2026-10-25 起 `提取码验证失败(errno=105)` **不再是"链的问题"的代表**:
+        那是我们自己把 `?pwd=` 塞进 surl 造成的(见 `test_baidupan_transfer.py::TestSurlShape`)。
+        这条分支改用真正的通用失败措辞来钉"额度不是瓶颈"。"""
+        self._mk(session, "failed", "转存未返回我方链", 50)
         self._mk(session, "pending", "", 3)
         msg = self._alert(session, monkeypatch)
         assert "额度不是瓶颈" in msg, msg

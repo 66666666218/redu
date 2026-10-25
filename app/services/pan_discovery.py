@@ -132,8 +132,17 @@ def _backlog_breakdown(session, user_id: int) -> dict:
             DiscoveredPanLink.status == "failed",
         ).group_by(func.substr(DiscoveredPanLink.message, 1, 44))
         .order_by(func.count().desc()).limit(3)).all()]
+    #: ★ **盘满要单独数,不能只看 `failed`**(2026-10-25 加)。盘满的候选会被记成
+    #: `pending`(链是好的,清了盘就能搬),于是它们**从 `failed` 里消失了** ⇒
+    #: 告警会掉进「排队 ≥ 失败 ⇒ 多半是额度用完」那一支,又给一次**错动作**。
+    space_blocked = int(session.scalar(
+        select(func.count()).select_from(DiscoveredPanLink).where(
+            DiscoveredPanLink.user_id == user_id,
+            DiscoveredPanLink.status.in_(("pending", "failed")),
+            DiscoveredPanLink.message.like("%空间不足%"),
+        )) or 0)
     return {"pending": counts.get("pending", 0), "failed": counts.get("failed", 0),
-            "top": top}
+            "top": top, "space": space_blocked}
 
 
 def _alert_backlog(session, user_id: int, backlog_left: int, out: dict) -> None:
@@ -149,9 +158,23 @@ def _alert_backlog(session, user_id: int, backlog_left: int, out: dict) -> None:
         from app.services.alert_service import notify_incident
 
         bk = _backlog_breakdown(session, user_id)
-        why = " · ".join(f"{m}({c} 条)" for m, c in bk["top"] if m) or "(失败原因未记)"
+        why = " · ".join(f"{m}({c} 条)" for m, c in bk["top"] if m)
+        if not why and bk.get("space"):
+            #: 盘满的候选都挂在 `pending` 里 ⇒ `failed` 可能一条都没有,
+            #: 别让告警在此处退化成「(失败原因未记)」。
+            why = f"百度盘空间不足({bk['space']} 条,已挂起等空间)"
+        why = why or "(失败原因未记)"
         #: ★ **动作按证据给** —— 三种构成对应三件完全不同的事,别一律甩"调额度"
-        if "转存路径不存在" in why or "建不出来" in why:
+        if bk.get("space") or "空间不足" in why or "超额" in why or "-32" in why:
+            #: ★ 2026-10-25 加。原来这两类**落到最后的"链本身的问题"**那一支 ——
+            #: 「给错动作比不给动作更坏」:让人去查链,而真相是**盘超额 43 倍**。
+            _n = f"(其中 {bk['space']} 条已按「盘满」挂起等空间)" if bk.get("space") else ""
+            act = ("⇒ **落点是盘满,不是链坏了**:这批候选本身是好的,只是百度盘"
+                   "**已用远超配额**(2026-10-25 实测 5.07 TiB / 120 GiB)⇒ 清理百度盘,"
+                   "或在「Cookie 管理」加一个还有空间的号;**空间一出来它们会自动重试**"
+                   f"{_n}。"
+                   "⚠️ 代码已改为**先探配额再决定要不要逐条转存**,所以不会再拿同一批去空撞。")
+        elif "转存路径不存在" in why or "建不出来" in why:
             act = ("⇒ **百度盘上那个转存目录不在**(`/redian百度转存`)。"
                    "⚠️ 2026-10-17 起**代码会自己补建**(转存撞到这个错就建一次再重试);"
                    "**若连续两轮仍报同一句**,说明这个账号**建不了目录**(权限/只读)⇒ "
@@ -417,6 +440,51 @@ def transfer_pan_url(session, user_id: int, pan_url: str, settings=None,
     return out
 
 
+#: 百度盘的**配额探针缓存**。`/api/quota` 一次就够 —— 但转存是**逐条**调用的,
+#: 40 条百度候选各探一次 = 40 次多余请求(与迅雷那边「配额探针必须限流」同一条纪律)。
+#: ★ **按 Cookie 分键**(本仓 2026-10-16 在迅雷那条链上吃过"探 1 号的结果被当成 2 号"的亏)。
+_BAIDU_QUOTA_TTL = 60.0
+_baidu_quota_cache: dict[str, dict] = {}
+
+
+def _size_text(n: int | float | None) -> str:
+    """字节数 → 人能读的两档单位(只用于告警文案,不需要精确)。"""
+    try:
+        v = float(n or 0)
+    except (TypeError, ValueError):
+        return "?"
+    for unit in ("B", "KB", "MB", "GB"):
+        if v < 1024:
+            return f"{v:.0f} {unit}" if unit == "B" else f"{v:.2f} {unit}"
+        v /= 1024
+    return f"{v:.2f} TB"
+
+
+def _baidu_quota(cookie: str) -> dict | None:
+    """这份 Cookie 对应账号的 `{used,total,ratio}`(60 秒内复用);拿不到回 `None`。
+
+    `ratio` **可能远大于 1** —— 2026-10-25 实测那个百度号 `used≈5.07 TiB / total≈120 GiB`
+    (超额 43 倍)。**判"满"用 `used >= total`,不要用百分比直觉。**
+    """
+    import hashlib
+    import time as _t
+
+    key = hashlib.sha256((cookie or "").encode()).hexdigest()[:16]
+    hit = _baidu_quota_cache.get(key)
+    now = _t.time()
+    if hit and now - float(hit.get("at") or 0) < _BAIDU_QUOTA_TTL:
+        return hit.get("usage")
+    from app.services.baidupan_transfer import BaiduPanClient
+
+    try:
+        usage = BaiduPanClient(cookie).quota_usage()
+    except Exception:  # noqa: BLE001 - **探不到 ≠ 盘满了**,照旧去试那一条
+        logger.debug("百度配额探针失败", exc_info=True)
+        usage = None
+    _baidu_quota_cache[key] = {"at": now, "usage": usage}
+    return usage
+
+
 def _transfer_pan_url_raw(session, user_id: int, pan_url: str, settings=None,
                           snippet: str = "") -> dict:
     """**按链分发转存**:夸克走 `QuarkTransfer`、百度走 `BaiduPanClient`、迅雷走 `xunlei_transfer`。
@@ -462,6 +530,21 @@ def _transfer_pan_url_raw(session, user_id: int, pan_url: str, settings=None,
             if not ck:
                 return {"status": "pending", "message": "未配百度网盘 Cookie(配上后会自动重试)",
                         "our_url": "", "code": ""}
+            # ★★ **盘已经超额就别再一条条去撞**(2026-10-25 加)。
+            # 实测:唯一那个百度号 `used≈5.07 TiB / total≈120 GiB`(超额 **43 倍**),
+            # 积压里 40 条候选每轮都走完「验码 → 解析 → 转存」三次请求再吃一个
+            # `errno=-32 剩余空间不足`。探一次配额就能省掉这 40 轮空转,
+            # 而且能让失败原因**说出真正该做的事**(清理 / 换号),而不是"链本身的问题"。
+            # ⚠️ 记 `pending` 而不是 `skipped`:链是**好的**,清了盘就能搬。
+            _q = _baidu_quota(ck)
+            if _q and _q["total"] > 0 and _q["used"] >= _q["total"]:
+                #: ⚠️ `code` 留空 —— 它会**原样写进 `pass_code`**(那一列放的是分享提取码),
+                #: 塞个 `space_exhausted` 进去会污染卡片上的"提取码"。判据只用 message 措辞。
+                return {"status": "pending", "our_url": "", "code": "",
+                        "message": (f"百度盘空间不足(已用 {_size_text(_q['used'])} / "
+                                    f"配额 {_size_text(_q['total'])},超额 "
+                                    f"{_q['ratio']:.0f} 倍)—— 本轮**未尝试**转存;"
+                                    f"清理百度盘或换一个号后会自动重试")}
             pwd = extract_pwd(snippet or "", pan_url) or ""
             res = BaiduPanClient(ck).transfer_and_share(
                 pan_url, password=pwd,
