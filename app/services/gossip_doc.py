@@ -29,6 +29,11 @@ _FONT_CANDIDATES: tuple[tuple[str, str, int | None], ...] = (
 
 _DISCLAIMER_HINT = "免责声明"
 
+#: ★ **AI 创作标识** —— 2026-10-26 用户口径:「提醒用户是 AI 创作的就可以了」。
+#: ⚠️ 这一行**由渲染器写死**,不交给模型 —— 模型漏写一次,我们就发出了一份
+#: "看起来像人工整理"的资料;而这种"我是 AI"的声明恰恰不能靠运气。
+AI_NOTICE = "本资料由 AI 根据公开报道自动整理生成,仅供参考"
+
 
 class GossipDocError(RuntimeError):
     """渲染失败(字体缺失 / 目录不可写 / 内容不合规)。"""
@@ -95,6 +100,7 @@ def _check(md: str) -> None:
 
 def render_pdf(md: str, path: Path) -> Path:
     """markdown → PDF(A4,中文字体)。"""
+    from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle
     from reportlab.lib.units import mm
@@ -110,12 +116,17 @@ def render_pdf(md: str, path: Path) -> Path:
     h2 = ParagraphStyle("h2", fontName=font, fontSize=13, leading=20,
                         spaceBefore=10, spaceAfter=4)
     body = ParagraphStyle("body", fontName=font, fontSize=10.5, leading=17)
+    foot = ParagraphStyle("foot", fontName=font, fontSize=8.5, leading=13,
+                          textColor=colors.HexColor("#888888"))
     story = [Paragraph(escape(title), h1), Spacer(1, 6)]
     for head, lines in sections:
         story.append(Paragraph(escape(head), h2))
         for ln in lines:
             text = ln[2:] if ln.startswith("- ") else ln
             story.append(Paragraph("· " + escape(text), body))
+    #: ★ AI 标识**由渲染器写死**(不靠模型),每份文件都有
+    story.append(Spacer(1, 12))
+    story.append(Paragraph(escape(AI_NOTICE), foot))
     doc.build(story)
     return path
 
@@ -140,6 +151,11 @@ def render_docx(md: str, path: Path) -> Path:
         for ln in lines:
             d.add_paragraph(ln[2:] if ln.startswith("- ") else ln, style="List Bullet"
                             if ln.startswith("- ") else None)
+    #: ★ 同上:AI 标识写死,Word 里也要有(转发出去时它是独立可读的一行)
+    tail = d.add_paragraph(AI_NOTICE)
+    if tail.runs:
+        tail.runs[0].italic = True
+        tail.runs[0].font.size = Pt(8.5)
     d.save(str(path))
     return path
 

@@ -66,3 +66,17 @@ def test_没有素材就不让模型编(monkeypatch):
 
     assert llm_client.compose_gossip_doc("http://x", "k", "m", title="某瓜", sources="") is None
     assert llm_client.compose_gossip_doc("http://x", "k", "m", title="", sources="素材") is None
+
+
+def test_AI标识写死在渲染器里(tmp_path):
+    """★ 2026-10-26 用户口径:「提醒用户是 AI 创作的就可以了」。
+
+    ⚠️ 这句话**不能交给模型写** —— 模型漏一次,我们就发出一份"看起来像人工整理"的资料。
+    Word 那份可以直接读回来验;PDF 的文字是子集字体编码,读不出明文,所以只验 docx。
+    """
+    from docx import Document
+
+    out = gd.build(_MD, tmp_path, stem="ai_notice")
+    text = "\n".join(p.text for p in Document(out["docx"]).paragraphs)
+    assert gd.AI_NOTICE in text, "Word 里必须有 AI 创作标识"
+    assert "AI" in gd.AI_NOTICE and "仅供参考" in gd.AI_NOTICE

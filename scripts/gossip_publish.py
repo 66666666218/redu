@@ -16,7 +16,8 @@
 1. **上传完必须自己确认文件真在盘里**(`search_files` 轮询到 fid 才算数)——
    "点了上传"不等于"传上去了"。
 2. **建链失败要如实抛**,不许拿一个猜出来的链接发出去。
-3. 发群是**对外动作**,所以默认发**管理群**(不是客户群),且文案里写明"测试物料"。
+3. 发群是**对外动作**:默认发**管理群**;要发客户群显式 `--to <名字>`
+   (`feishu_webhook_<名字>` 的那个名字,如 `douyin_peer`)。**文案里必须带 AI 创作标识**。
 """
 from __future__ import annotations
 
@@ -173,18 +174,31 @@ def share(name: str, fid: str, session, user_id: int = 1) -> dict:
     return res
 
 
-def notify(settings, title: str, share_url: str, password: str, fname: str) -> bool:
-    """发**管理群**(测试物料,不发客户群)。"""
-    from app.services.feishu_client import FeishuClient
+def _hook_of(settings, to: str) -> str:
+    """目标群 → webhook。`admin` 是管理群,其余按 `feishu_webhook_<名字>` 取。"""
+    if to in ("", "admin"):
+        return str(getattr(settings, "feishu_webhook_admin", "") or "").strip()
+    return str(getattr(settings, f"feishu_webhook_{to}", "") or "").strip()
 
-    hook = str(getattr(settings, "feishu_webhook_admin", "") or "").strip()
+
+def notify(settings, title: str, share_url: str, password: str, fname: str,
+           to: str = "admin") -> bool:
+    """发到指定群(默认**管理群**)。
+
+    ⚠️ **必须带 AI 创作标识**(2026-10-26 用户口径):资料是模型整理的,收的人
+    有权知道 —— 这句话写在文案里,**不是**靠模型自己在正文里写。
+    """
+    from app.services.feishu_client import FeishuClient
+    from app.services.gossip_doc import AI_NOTICE
+
+    hook = _hook_of(settings, to)
     if not hook:
-        raise PublishError("未配置 FEISHU_WEBHOOK_ADMIN")
+        raise PublishError(f"没有配置 {to} 群的 webhook")
     pwd = f"(提取码 `{password}`)" if password else ""
-    text = (f"**【吃瓜资料·测试】{title}**\n"
+    text = (f"**【吃瓜资料】{title}**\n"
             f"网盘:夸克 · 文件:{fname}\n"
             f"链接:{share_url} {pwd}\n"
-            f"—— 这是用热搜自动生成的测试物料,点开看看内容和排版,有问题告诉我")
+            f"⚠️ {AI_NOTICE};未经证实的内容已在文中标注,请自行判断。")
     ok = FeishuClient(hook, getattr(settings, "feishu_secret", "")).send(text)
     if not ok:
         raise PublishError("飞书发送失败")
@@ -195,6 +209,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="吃瓜资料 → 夸克 → 分享链 → 管理群")
     ap.add_argument("--pdf", default="", help="要发的 PDF(默认取最新的一份)")
     ap.add_argument("--no-notify", action="store_true", help="只上传+建链,不发群")
+    ap.add_argument("--to", default="admin",
+                    help="发到哪个群:admin(默认)或 feishu_webhook_<名字> 的 <名字>")
     ap.add_argument("--user", type=int, default=1)
     args = ap.parse_args()
 
@@ -216,8 +232,9 @@ def main() -> int:
         res = share(got["name"], got["fid"], db, args.user)
         print(f"✓ 分享链:{res['share_url']}" + (f" 提取码 {res['password']}" if res.get('password') else ""))
         if not args.no_notify:
-            notify(get_settings(), pdf.stem, res["share_url"], res.get("password", ""), got["name"])
-            print("✓ 已发管理群")
+            notify(get_settings(), pdf.stem, res["share_url"], res.get("password", ""),
+                   got["name"], to=args.to)
+            print(f"✓ 已发到「{args.to}」群")
     except PublishError as exc:
         print(f"✗ {exc}")
         return 1
