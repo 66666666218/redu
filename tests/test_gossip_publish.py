@@ -149,3 +149,32 @@ def test_夸克的同名_N_后缀也算同一份():
     assert gp._same_doc("a(12).pdf", "a.pdf")
     assert not gp._same_doc("b.pdf", "a.pdf")
     assert not gp._same_doc("a.pdf", "")
+
+
+class _ClientUploadDir:
+    """模拟真实盘:根目录只有**目录**,文件落在「夸克上传文件」子目录里。"""
+
+    def __init__(self):
+        self.list_dir_calls = []
+
+    def search_files(self, name, size=20):
+        return []                                   #: 搜索索引对刚传的文件不命中(实测)
+
+    def list_recent(self, size=30):
+        return [{"file_name": "夸克上传文件", "fid": "dir-upload", "dir": True},
+                {"file_name": "redian监听", "fid": "dir-2", "dir": True}]
+
+    def list_dir(self, fid):
+        self.list_dir_calls.append(fid)
+        return [{"file_name": "a.pdf", "fid": "F1", "dir": False},
+                {"file_name": "a(1).pdf", "fid": "F2", "dir": False}]
+
+
+def test_网页上传落在子目录也要能找到():
+    """★ 2026-10-26 实测踩到的假结论:文件**传上去了**,但落在「夸克上传文件」子目录;
+    而搜索索引不命中、`list_recent` 只列顶层目录 ⇒ 我们白等 120 秒,以为上传失败。"""
+    gp = _mod()
+    c = _ClientUploadDir()
+    got = gp._find_file(c, "a.pdf")
+    assert got and got["fid"] in ("F1", "F2"), got
+    assert c.list_dir_calls == ["dir-upload"], "必须去上传目录里找"
