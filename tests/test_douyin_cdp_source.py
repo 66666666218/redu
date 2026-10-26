@@ -68,3 +68,15 @@ def test_词间休眠有硬下限():
         douyin_cdp_between_kw_ms = 1        #: 配成 1ms 也不许生效
 
     assert dc.between_kw_ms(_S()) >= 5000
+
+
+def test_没有监听就返回没关掉():
+    """`_close_browser` 在没有监听时应如实返回 False(别假装关了)。"""
+    assert dc._close_browser(59998) is False
+
+
+def test_端口从端点解析():
+    class _S:
+        douyin_cdp_url = "http://127.0.0.1:9444"
+
+    assert dc._port(_S()) == 9444

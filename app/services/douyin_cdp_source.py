@@ -119,6 +119,29 @@ def _edge_exe() -> str:
     raise DouyinCdpError("找不到 Edge/Chrome 可执行文件")
 
 
+def _port(settings=None) -> int:
+    return urllib.parse.urlparse(endpoint(settings)).port or 9333
+
+
+def _close_browser(port: int) -> bool:
+    """关掉浏览器(按端口找 PID)。
+
+    ⚠️ 不能用 Playwright 的 `browser.close()`:CDP 连接上它**只是断开连接**,
+    浏览器照旧开着(实测)。
+    """
+    try:
+        out = subprocess.run(["netstat", "-ano"], capture_output=True, timeout=15)
+        text = (out.stdout or b"").decode("utf-8", "ignore")
+    except Exception:  # noqa: BLE001 - 查不到就当没关掉
+        return False
+    pids = {line.split()[-1] for line in text.splitlines()
+            if f":{port}" in line and "LISTENING" in line.upper()}
+    for pid in pids:
+        if pid.isdigit():
+            subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True, timeout=10)
+    return bool(pids)
+
+
 def ensure_running(settings=None) -> tuple[bool, str]:
     """端点不通就用**普通命令行**拉起浏览器(不是 Playwright launch),再等它就绪。
 
@@ -246,6 +269,7 @@ def search(keywords: list[str], *, session=None, user_id: int = 1,
     kws = [str(k).strip() for k in (keywords or []) if str(k).strip()]
     if not kws:
         return []
+    pre_up, _ = available(settings)          #: 之前就在跑吗?(决定收尾要不要关)
     ok, why = ensure_running(settings)
     if not ok:
         raise DouyinCdpError(why)
@@ -299,6 +323,13 @@ def search(keywords: list[str], *, session=None, user_id: int = 1,
                 page.close()                      #: 只关自己开的那个标签
             except Exception:  # noqa: BLE001 - 关标签失败不该影响已取到的结果
                 logger.debug("关闭 CDP 标签失败", exc_info=True)
+            #: ★ **本轮是我们自己起的浏览器 ⇒ 收尾把它关掉**(2026-10-26 用户口径:
+            #: 「开了好多的 about:blank,如果没用的可以自动关闭」)。
+            #: 只关标签的话,那台浏览器会**停在 about:blank 挂几个小时**等下一轮 ——
+            #: 桌面上就是一堆空窗口。下一次采集再起,冷启动约 1~2 秒,代价很低。
+            #: ⚠️ 本来就在跑的(比如人工开着调试用)**不许关**。
+            if not pre_up:
+                _close_browser(_port(settings))
 
     if not out:
         raise DouyinCdpError(
