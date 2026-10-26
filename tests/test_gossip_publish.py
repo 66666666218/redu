@@ -117,3 +117,35 @@ def test_没配置的群要报错_不许静默发到别处(monkeypatch):
         assert "没有配置" in str(exc)
     else:
         raise AssertionError("发到不存在的群必须报错")
+
+
+def test_按来源平台路由_哪个平台的热点就发哪个群():
+    """用户口径:「哪个平台的热点信息写的就发哪个群里」。
+
+    ⚠️ **认不出来时走全平台群,不许静默丢弃** —— 发错群比不发更糟,
+    但"悄悄不发"同样糟(你会以为发了)。
+    """
+    gp = _mod()
+    assert gp.resolve_targets(["auto"], "微博") == ["weibo_peer"]
+    assert gp.resolve_targets(["auto"], "抖音") == ["douyin_peer"]
+    assert gp.resolve_targets(["auto"], "百度") == ["baidu"]
+    assert gp.resolve_targets(["auto"], "小红书") == ["multiplatform"], "认不出来要给个兜底"
+    assert gp.resolve_targets(["auto"], "") == ["multiplatform"]
+
+
+def test_可以一次发多个群_并去重保序():
+    gp = _mod()
+    assert gp.resolve_targets(["douyin_peer", "weibo_peer"], "") == ["douyin_peer", "weibo_peer"]
+    assert gp.resolve_targets(["a,b", "b"], "") == ["a", "b"], "逗号+重复要去重"
+    assert gp.resolve_targets([], "") == ["admin"], "不指定默认发管理群"
+
+
+def test_夸克的同名_N_后缀也算同一份():
+    """⚠️ 实测:夸克遇到同名会存成 `名字(1).pdf`。只按原名精确匹配 ⇒ 认不出刚传的那份
+    ⇒ 误报"没传上去"然后**再传一份**(越传越多)。"""
+    gp = _mod()
+    assert gp._same_doc("a.pdf", "a.pdf")
+    assert gp._same_doc("a(1).pdf", "a.pdf")
+    assert gp._same_doc("a(12).pdf", "a.pdf")
+    assert not gp._same_doc("b.pdf", "a.pdf")
+    assert not gp._same_doc("a.pdf", "")

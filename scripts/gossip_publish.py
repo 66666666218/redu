@@ -50,27 +50,105 @@ def _edge() -> str:
     raise PublishError("找不到 Edge 可执行文件")
 
 
-def _endpoint_up() -> bool:
+def _endpoint_up(port: int = PORT) -> bool:
     try:
-        urllib.request.urlopen(f"http://127.0.0.1:{PORT}/json/version", timeout=2)
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=2)
         return True
     except Exception:  # noqa: BLE001 - 没起来是预期
         return False
 
 
-def _ensure_browser() -> None:
-    """端点不通就用**普通命令行**拉起 Edge(不是 Playwright launch)。"""
-    if _endpoint_up():
-        return
+def _existing_port() -> int | None:
+    """同一档案**已经**有一份带调试端口的 Edge 在跑吗?有就返回它的端口。
+
+    ⚠️ 2026-10-26 实测踩到的:档案被上一次的浏览器占着(比如跑在 9336),
+    `subprocess.Popen` 起的新实例会**把启动交给老实例然后自己退出** ——
+    于是我们死等 9335 永远等不到。**Edge 是按档案单实例的**,所以这里必须先复用。
+    """
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "(Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" "
+             "| Select-Object -ExpandProperty CommandLine) -join \"`n\""],
+            capture_output=True, timeout=20)
+        text = (out.stdout or b"").decode("utf-8", "ignore")
+    except Exception:  # noqa: BLE001 - 查不到就当没有
+        return None
+    key = str(PROFILE).lower()
+    for line in text.splitlines():
+        low = line.lower()
+        if key not in low or "--remote-debugging-port=" not in low:
+            continue
+        try:
+            port = int(low.split("--remote-debugging-port=")[1].split()[0].strip('"'))
+        except (IndexError, ValueError):
+            continue
+        if _endpoint_up(port):
+            return port
+    return None
+
+
+def _profile_pids() -> list[int]:
+    """正在使用**我们这个档案**的 Edge 进程 PID(不管它有没有调试端口)。"""
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "(Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" "
+             "| Where-Object { $_.CommandLine -like '*" + PROFILE.name + "*' } "
+             "| Select-Object -ExpandProperty ProcessId) -join ','"],
+            capture_output=True, timeout=20)
+        text = (out.stdout or b"").decode("utf-8", "ignore").strip()
+    except Exception:  # noqa: BLE001 - 查不到就当没有
+        return []
+    return [int(x) for x in text.split(",") if x.strip().isdigit()]
+
+
+def _kill_profile_browsers() -> int:
+    """杀掉占用这个档案的 Edge —— **否则新启动会被"接管"而永远开不出调试端口**。
+
+    ⚠️ 2026-10-26 实测:Edge 启动时发现同档案已有实例在跑,会打印
+    「正在现有浏览器会话中打开」然后**自己退出**;而那个老实例可能根本
+    **没有**带 `--remote-debugging-port`(比如上一次被别的方式起的)⇒ 死等端口必失败。
+    这个档案是**我们自己的自动化档案**,没有人在里面工作,杀掉是安全的。
+    """
+    pids = _profile_pids()
+    for pid in pids:
+        try:
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                           capture_output=True, timeout=10)
+        except Exception:  # noqa: BLE001 - 杀不掉就继续试下一个
+            pass
+    if pids:
+        time.sleep(2)
+    return len(pids)
+
+
+def _ensure_browser() -> int:
+    """确保有可用的 CDP 端点,**返回端口**(可能是复用别人的)。"""
+    port = _existing_port()
+    if port:
+        print(f"… 复用已在运行的浏览器(端口 {port})", flush=True)
+        return port
+    if _endpoint_up(PORT):
+        return PORT
+    killed = _kill_profile_browsers()
+    if killed:
+        print(f"… 清理了 {killed} 个占用该档案、但没开调试端口的 Edge", flush=True)
     PROFILE.mkdir(parents=True, exist_ok=True)
+    #: ⚠️ **不要用 `stdout/stderr=DEVNULL`**(2026-10-26 实测):那样起的 Edge 会**直接退出**,
+    #: 端口永远不就绪(同一命令改成重定向到文件就秒起)。到底为什么不确定,但现象稳定复现 ——
+    #: 而且重定向到文件还有个好处:浏览器自己报的错能留着看。
+    log = Path("data/_cdp_browser.log")
+    log.parent.mkdir(parents=True, exist_ok=True)
+    sink = open(log, "ab")
     subprocess.Popen([_edge(), f"--remote-debugging-port={PORT}", f"--user-data-dir={PROFILE}",
                       "--no-first-run", "--no-default-browser-check", "--start-minimized",
                       "about:blank"],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                     stdout=sink, stderr=sink)
     for _ in range(60):
         time.sleep(0.5)
-        if _endpoint_up():
-            return
+        if _endpoint_up(PORT):
+            return PORT
     raise PublishError(
         f"浏览器已启动但 CDP 端口 {PORT} 没就绪 —— 常见原因是**同一档案已有 Edge 在跑**"
         f"(Edge 会把新启动交给老实例然后自己退出),或档案被锁。"
@@ -86,22 +164,41 @@ def _quark_cookie(session, user_id: int = 1) -> str:
     return ck
 
 
+def _same_doc(existing: str, wanted: str) -> bool:
+    """盘里这个名字算不算"同一份文件"?
+
+    ⚠️ 夸克遇到同名会存成 `名字(1).pdf`(实测 2026-10-26),只按原名精确匹配会
+    认不出刚传上去的那份 ⇒ 会误报"没传上去",然后**再传一份**(越传越多)。
+    """
+    existing = str(existing or "").strip()
+    if existing == wanted:
+        return True
+    if not wanted or "." not in wanted:
+        return False
+    stem, _, ext = wanted.rpartition(".")
+    #: `名字(1).pdf` / `名字(12).pdf`
+    for n in range(1, 20):
+        if existing == f"{stem}({n}).{ext}":
+            return True
+    return False
+
+
 def _find_file(client, name: str) -> dict | None:
-    """在盘里找同名文件 → `{name, fid}`。
+    """在盘里找同名文件 → `{name, fid}`(接受夸克加的 `(N)` 后缀)。
 
     ⚠️ **搜索索引有延迟**(2026-10-25 实测:文件已经传上去了,`search_files` 120 秒都没命,
     而 `list_recent` 立刻就看到了)⇒ 两条路都要查,别只信一个。
     """
     try:
         for f in client.search_files(name, size=20):
-            if str(f.get("file_name") or "") == name:
-                return {"name": name, "fid": str(f.get("fid"))}
+            if _same_doc(str(f.get("file_name") or ""), name):
+                return {"name": str(f.get("file_name") or name), "fid": str(f.get("fid"))}
     except Exception:  # noqa: BLE001 - 搜索失败就用最近列表兜
         pass
     try:
         for f in client.list_recent(size=30):
-            if str(f.get("file_name") or "") == name and not f.get("dir"):
-                return {"name": name, "fid": str(f.get("fid"))}
+            if not f.get("dir") and _same_doc(str(f.get("file_name") or ""), name):
+                return {"name": str(f.get("file_name") or name), "fid": str(f.get("fid"))}
     except Exception:  # noqa: BLE001
         pass
     return None
@@ -122,7 +219,7 @@ def upload(pdf: Path, session, user_id: int = 1, wait_s: int = 120) -> dict:
         print(f"✓ 盘里已有同名文件,跳过上传:{pdf.name}", flush=True)
         return hit
 
-    _ensure_browser()
+    port = _ensure_browser()
     jars = []
     for part in ck.split(";"):
         part = part.strip()
@@ -133,7 +230,7 @@ def upload(pdf: Path, session, user_id: int = 1, wait_s: int = 120) -> dict:
                      "domain": ".quark.cn", "path": "/"})
 
     with sync_playwright() as p:
-        br = p.chromium.connect_over_cdp(f"http://127.0.0.1:{PORT}")
+        br = p.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
         ctx = br.contexts[0]
         ctx.add_cookies(jars)
         pg = ctx.new_page()
@@ -141,10 +238,18 @@ def upload(pdf: Path, session, user_id: int = 1, wait_s: int = 120) -> dict:
             pg.goto("https://pan.quark.cn/list#/list/all", wait_until="domcontentloaded",
                     timeout=60000)
             time.sleep(5)
-            inp = pg.query_selector("input[type=file]")
-            if inp is None:
-                raise PublishError("夸克网盘页面里找不到上传输入框(可能未登录/改版)")
-            inp.set_input_files(str(pdf))
+            #: ⚠️ **必须走"文件选择器"**（2026-10-26 实测）：页面上那个隐藏的
+            #: `input[type=file]` 用 `set_input_files` 塞进去**不会触发上传** ——
+            #: 看起来投递成功，文件却永远不出现（我第一次就是这么"成功"了 120 秒）。
+            #: 正确做法：点「上传文件」并拦截它弹出的文件选择器。
+            try:
+                with pg.expect_file_chooser(timeout=15000) as fc:
+                    pg.get_by_text("上传文件", exact=True).first.click()
+                fc.value.set_files(str(pdf))
+            except Exception as exc:  # noqa: BLE001 - 选择器拦不到要如实报
+                raise PublishError(
+                    f"打不开上传文件的对话框({type(exc).__name__}):{str(exc)[:100]}"
+                    f" —— 夸克网页可能改版了") from exc
             print(f"… 已投递浏览器上传:{pdf.name}", flush=True)
         finally:
             try:
@@ -174,11 +279,37 @@ def share(name: str, fid: str, session, user_id: int = 1) -> dict:
     return res
 
 
+#: 热搜来源 → 该发哪个群(**按平台路由**,2026-10-26 用户口径:
+#: 「哪个平台的热点信息写的就发哪个群里」)。认不出来就走全平台群。
+_PLATFORM_GROUP = {"微博": "weibo_peer", "抖音": "douyin_peer", "百度": "baidu"}
+
+
 def _hook_of(settings, to: str) -> str:
     """目标群 → webhook。`admin` 是管理群,其余按 `feishu_webhook_<名字>` 取。"""
     if to in ("", "admin"):
         return str(getattr(settings, "feishu_webhook_admin", "") or "").strip()
     return str(getattr(settings, f"feishu_webhook_{to}", "") or "").strip()
+
+
+def resolve_targets(to: list[str], platform: str = "") -> list[str]:
+    """把 `--to` 摊成**实际要发的群列表**。
+
+    · 空 ⇒ `admin`(管理群);
+    · `auto` ⇒ 按 `platform` 路由(微博→weibo_peer / 抖音→douyin_peer / 百度→baidu),
+      认不出来走 `multiplatform` —— **绝不静默丢弃**(发错群比不发更糟)。
+    · 其余原样,去重保序。
+    """
+    out: list[str] = []
+    for t in (to or []):
+        t = (t or "").strip()
+        if not t:
+            continue
+        names = ([_PLATFORM_GROUP.get(platform, "multiplatform")]
+                 if t == "auto" else [x.strip() for x in t.split(",") if x.strip()])
+        for n in names:
+            if n not in out:
+                out.append(n)
+    return out or ["admin"]
 
 
 def notify(settings, title: str, share_url: str, password: str, fname: str,
@@ -209,8 +340,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="吃瓜资料 → 夸克 → 分享链 → 管理群")
     ap.add_argument("--pdf", default="", help="要发的 PDF(默认取最新的一份)")
     ap.add_argument("--no-notify", action="store_true", help="只上传+建链,不发群")
-    ap.add_argument("--to", default="admin",
-                    help="发到哪个群:admin(默认)或 feishu_webhook_<名字> 的 <名字>")
+    ap.add_argument("--to", action="append", default=[],
+                    help="发到哪个群(可多次/逗号分隔):admin(默认)|auto|feishu_webhook_<名字> 的名字")
+    ap.add_argument("--platform", default="",
+                    help="配合 `--to auto`:热搜来源平台(微博/抖音/百度)")
     ap.add_argument("--user", type=int, default=1)
     args = ap.parse_args()
 
@@ -232,9 +365,11 @@ def main() -> int:
         res = share(got["name"], got["fid"], db, args.user)
         print(f"✓ 分享链:{res['share_url']}" + (f" 提取码 {res['password']}" if res.get('password') else ""))
         if not args.no_notify:
-            notify(get_settings(), pdf.stem, res["share_url"], res.get("password", ""),
-                   got["name"], to=args.to)
-            print(f"✓ 已发到「{args.to}」群")
+            targets = resolve_targets(args.to, args.platform)
+            for t in targets:
+                notify(get_settings(), pdf.stem, res["share_url"], res.get("password", ""),
+                       got["name"], to=t)
+                print(f"✓ 已发到「{t}」群")
     except PublishError as exc:
         print(f"✗ {exc}")
         return 1
