@@ -80,3 +80,8 @@ def test_端口从端点解析():
         douyin_cdp_url = "http://127.0.0.1:9444"
 
     assert dc._port(_S()) == 9444
+
+
+def test_抖音档案也是绝对路径():
+    """同一条教训:相对 `--user-data-dir` 会让 Edge 退回默认档案(动到用户的浏览器)。"""
+    assert dc.profile_dir().is_absolute()

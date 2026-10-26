@@ -178,3 +178,15 @@ def test_网页上传落在子目录也要能找到():
     got = gp._find_file(c, "a.pdf")
     assert got and got["fid"] in ("F1", "F2"), got
     assert c.list_dir_calls == ["dir-upload"], "必须去上传目录里找"
+
+
+def test_浏览器档案必须是绝对路径():
+    """★★ 2026-10-26 血的教训:`--user-data-dir` 用**相对路径**时,Edge 会**退回默认档案**,
+    于是它"加入"用户正在用的那个浏览器、在里面开 about:blank,而我们的端口永远不就绪
+    (受控对照:相对 FAIL / 绝对 OK)。
+
+    ⚠️ 这个坑的代价不只是脚本失败 —— 它会**动到用户自己的浏览器**。所以钉死:
+    常量必须是绝对路径。
+    """
+    gp = _mod()
+    assert gp.PROFILE.is_absolute(), f"PROFILE 必须是绝对路径:{gp.PROFILE}"
