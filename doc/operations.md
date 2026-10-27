@@ -1014,6 +1014,41 @@ python scripts/douyin_proto_probe.py --words 3
 要重新启用协议,**不要恢复 8 词/轮** —— 建议 ≤3 词/轮、间隔 ≥15 秒、保留 6h 冷却;
 **连续 24 小时探针干净**后再考虑切回。
 
+### 4v. 百度盘满了怎么加号:扫码登录(2026-10-27)
+
+**症状**:`discovered_pan_links` 里 **96 条 pending**(贴吧 60 / 微博 35 / 知乎 1),message 全是
+「百度盘空间不足(已用 ≈5.05 TiB / 配额 ≈120 GiB,超额 43 倍)」。链是好的,是**没地方存**。
+
+**先看该加哪个盘**(实测,别凭印象):
+
+| 盘 | 账号 | 用量 | 处置 |
+| --- | --- | --- | --- |
+| 百度 | baidupan | 5.05 TiB / 120 GiB(**超额 43 倍**) | **加号** |
+| 夸克 | quark / quark#2 | 71.1 / 86.0 TiB(82.7%)、≈0% | 够用 |
+| 迅雷 | xunlei / #3 / #4 | 85.6% / 63.1% / 92.4% | 够用(#4 偏高) |
+
+**两条扫码登录路**(都把凭据加密写进 `cookie_store` 并登记进账号池):
+
+```bash
+python scripts/baidu_browser_login.py --label 百度3 --cookie-key baidupan#2   # ★ 实测有效
+python scripts/baidu_qr_login.py     --label 百度4 --cookie-key baidupan#3   # 纯协议,备用
+```
+
+- **浏览器窗口路**(`baidu_browser_login`):弹 Edge 打开百度网盘登录页,人扫窗口里的码;
+  等 `BDUSS` + `STOKEN` **同时出现**才取凭据。用**一次性档案**(系统临时目录)——
+  固定档案可能已登着上一个号,会一打开就"已登录",把旧号再存一遍。
+- **纯协议路**(`baidu_qr_login`):getqrcode → 长轮询 `channel/unicast` → 确认后取码。
+  ⚠️ 2026-10-27 实测:那张码**被扫到**(status 1)但 2 秒后**退回 0**,手机端没走到
+  「确认登录」⇒ **优先用浏览器窗口路**。轮询里 `errno:1` 是**正常的"继续等"**,不是错误。
+
+**硬约束(两条路都执行)**:
+1. 缺 `STOKEN` 的「半登录」**一律不写库** —— 登录检查能过、转存/分享全失败(2026-10-04 踩过);
+2. 写库前打 `pan.baidu.com/api/quota` **验活**,并把使用率回写池;转存择号**最空优先**,
+   所以新号(未知=乐观)会先被选中。
+
+**加完怎么确认**:`python scripts/pan_account_add.py --platform baidupan --list`,
+或直接看 `system_config['pan_account_pool']`;新号的 `last_ratio` 应接近 0。
+
 ## 5. 阅读量显示 "—"
 
 ⚠️ **本条在 2026-10-04 被改过两次** —— 上午写成"全平台断供、接口永久废弃",**那是错的**。
