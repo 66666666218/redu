@@ -118,9 +118,13 @@ class Test卡片口径:
         for bad in ("失败", "覆盖率", "限流", "风控", "未登录", "我方链", "采集", "重试"):
             assert bad not in blob, f"客户口径的卡片里不该出现「{bad}」:{blob[-300:]}"
 
-    def test_没有链也要如实留破折号(self, session) -> None:
+    def test_混合清单里没链的那条要留破折号(self, session) -> None:
+        """★ 2026-10-27:整块都没链时改「线索」表(见下一条),但**混合**清单里那条没链的
+        仍要留「· —」—— 否则会被读成"我们忘了给它配链"。"""
+        _seed(session, "xiaohongshu", "有链的资源", pan_url="https://pan.quark.cn/s/X")
         _seed(session, "xiaohongshu", "没找到链的资源")
-        assert "没找到链的资源 · —" in self._card(session)
+        blob = self._card(session)
+        assert "没找到链的资源 · —" in blob, blob[-400:]
 
     def test_超过_top_要说明还有多少(self, session) -> None:
         for i in range(5):
@@ -180,7 +184,8 @@ class Test完整发送:
         out = [c["elements"][0]["text"]["content"]
                for row in card["elements"] if row.get("tag") == "column_set"
                for c in row["columns"][:1]]
-        return [x for x in out if x != "**资源**"]
+        return [x for x in out if x not in ("**资源**", "**线索**")]
+
 
     def test_top_0_等于全部_而且不会被_or_8_吃掉(self, session, monkeypatch) -> None:
         from app.services import feishu_client
@@ -303,6 +308,35 @@ class Test完整发送:
         assert bd.send_digest(session, 1, "xiaohongshu", "daily", _S2()) is False
         assert session.get(SystemConfig, "bd_sent_daily_xiaohongshu") is None, (
             "只发了第 1/3 部分就打标 ⇒ 客户永远收不到后两张")
+
+
+class Test零盘链板块用线索表:
+    """★ 2026-10-27 用户口径:「一个有内容一个无内容的」。
+
+    实测:`douyin_peer` 昨日 61 条 / 本周 285 条,**有盘链 0 条** —— 而 `weibo_peer` 是
+    82% / 69%。用「资源表」渲染它,资源列就是一整列「· —」,客户看到的是**一张空卡**。
+    ⇒ 整块都没有盘链时,表头改「线索」、行里不挂破折号、并明说「暂无盘链、点看作品」。
+    """
+
+    def _blob(self, session, section="douyin_peer") -> str:
+        since, until, _ = bd.window_of("daily")
+        card = bd.render_card(bd.build(session, 1, section, since, until), "daily", top=0)
+        return json.dumps(card, ensure_ascii=False)
+
+    def test_整块没盘链就改成线索表(self, session) -> None:
+        _seed(session, "douyin_peer", "某剧的推广视频", url="https://www.douyin.com/video/1")
+        _seed(session, "douyin_peer", "另一个推广视频", url="https://www.douyin.com/video/2")
+        blob = self._blob(session)
+        assert "**线索**" in blob, "表头必须是「线索」而不是「资源」"
+        assert "个线索" in blob, "头部计数也要跟着改"
+        assert "本板块本轮是线索" in blob and "暂无盘链" in blob, blob[:400]
+        assert "· —" not in blob, "整列破折号正是「看起来没内容」的来源"
+
+    def test_有盘链的板块仍然用资源表(self, session) -> None:
+        _seed(session, "douyin_peer", "带链的资源", pan_url="https://pan.quark.cn/s/A")
+        blob = self._blob(session)
+        assert "**资源**" in blob and "个线索" not in blob
+
 
 
 class Test发送与幂等:

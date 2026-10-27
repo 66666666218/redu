@@ -113,25 +113,36 @@ def render_card(data: dict, period: str, top: int = 8,
     spec = PERIODS.get(period) or PERIODS["daily"]
     label, when = data["label"], spec["label"]
     n_res = int(data["resources"])
-    head = f"📊 **{label} · {spec['title']}** —— {when}一共 **{n_res} 个资源**"
+    _all = list(data.get("items") or [])
+    items = _all if int(top or 0) <= 0 else _all[:int(top)]
+    #: ★★ 2026-10-27 用户口径:**"0 盘链"的板块不能用资源表去渲染**。
+    #: 抖音同行群的线索是《群名》口子,没转存就没有盘链 ⇒ 资源列会拉成一片「—」,
+    #: 客户看到的就是"一张没有内容的汇总"(实测:douyin_peer 昨日 61 条 / 本周 285 条,
+    #: **有盘链 0 条**;同期的 weibo_peer 是 82% / 69%)。
+    #: ⇒ 这种板块改叫「**线索**」:表头换掉、行里不再挂「· —」,并明说"暂无盘链、点看作品"。
+    lead_mode = bool(items) and not any(str(g.get("pan_url") or "") for g in items)
+    head = (f"📊 **{label} · {spec['title']}** —— {when}一共 "
+            f"**{n_res} 个{'线索' if lead_mode else '资源'}**")
     if int(data.get("repeats") or 0):
         head += f"(其中 {data['repeats']} 个被反复推荐)"
     if n_res >= 2:
         #: ★ 2026-10-26:排序规则**必须写在脸上**。清单按热度降序,
         #: 但没有互动数的那种源会落到最后 —— 不说的话,"排后面"会被读成"不重要"。
         head += "\n**按热度排序**(👍/▶ 高的在前;没有互动数据的按发现顺序排在后面)"
+    if lead_mode:
+        head += ("\n**本板块本轮是线索(暂无盘链)** —— 点「看作品」可以看原帖,"
+                 "盘链要等转存成功后才有")
     if int(part[1]) > 1:
         head += f" · 第 {int(part[0])}/{int(part[1])} 部分"
     howto = ("资源名点开即取用(标注的是网盘);「**看作品**」点开是那条原帖,"
              "可以先看别人推成什么样。")
+    first_col = "**线索**" if lead_mode else "**资源**"
     elements: list[dict] = [
         {"tag": "div", "text": {"tag": "lark_md", "content": f"{head}\n{howto}"}},
-        _col_set_row([("**资源**", 5), ("**对标作品**", 3), ("**热度**", 2)], grey=True),
+        _col_set_row([(first_col, 5), ("**对标作品**", 3), ("**热度**", 2)], grey=True),
     ]
     from app.services.douyin_leads import _pan_name
 
-    _all = list(data.get("items") or [])
-    items = _all if int(top or 0) <= 0 else _all[:int(top)]
     if not items:
         #: ⚠️ 调用方本来就不该为空窗口调这里(纪律 1);真到了这里也要**说人话**,别发一张空壳
         elements.append({"tag": "div", "text": {"tag": "lark_md",
@@ -141,8 +152,10 @@ def render_card(data: dict, period: str, top: int = 8,
         name = _md_safe(strip_others(str(g.get("title") or "")))[:28] or "—"
         pan_url = str(g.get("pan_url") or "")
         pan = str(g.get("pan_type") or "") or _pan_name(pan_url)
+        #: ⚠️ 没有盘链时:整块都是线索的板块**只写名字**(一整列破折号就是"这张卡没内容"的观感);
+        #: 但**混合**清单里那条没链的仍要留「· —」—— 否则会被读成"我们忘了给它配链"。
         cell = (f"[{name}]({_md_safe(pan_url)})" + (f" · 🔴{pan}" if pan else "")
-                if pan_url else f"{name} · —")
+                if pan_url else (name if lead_mode else f"{name} · —"))
         #: ★ 2026-10-26:**带序号**,让"按热度排"这件事在卡片上看得见(否则只是一串没有次序感的行)
         cell = f"**{idx}.** {cell}"
         #: ★ 被反复推荐的那个要有**看得见的标记**:客户抱怨的就是"同一条反复出现"。
