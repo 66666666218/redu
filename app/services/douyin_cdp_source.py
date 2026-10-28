@@ -535,7 +535,14 @@ def search(keywords: list[str], *, session=None, user_id: int = 1,
                     f"**问题不在档案**(先查出口 IP / 账号风控),不再隔离",
                     profile_suspect=True) from exc
             moved = quarantine_profile(settings)
-            logger.warning("抖音CDP:换全新档案重试一次(旧档案 → %s)", moved or "隔离失败")
+            if not moved:
+                #: ⚠️ **不许把"隔离失败"说成"换了新档案也没用"** —— 那是两个不同的结论,
+                #: 下一个动作也不同(前者要人手去腾目录,后者是等风控过去)。
+                raise DouyinCdpError(
+                    f"{exc}\n⚠️ 档案**隔离失败**(目录被占用/没权限)⇒ 换空档案这一步"
+                    f"**根本没做成**,别当成「换新档案也没用」。请手工把 "
+                    f"{profile_dir(settings)} 改名或删掉后重试", profile_suspect=True) from exc
+            logger.warning("抖音CDP:换全新档案重试一次(旧档案 → %s)", moved)
             ok, why = ensure_running(settings)   #: 新档案目录是空的,这里会新建
             if not ok:
                 raise DouyinCdpError(f"{exc}\n换空档案重试时起不来:{why}") from exc

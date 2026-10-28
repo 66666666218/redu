@@ -254,6 +254,25 @@ def test_隔离后重试成功就返回(monkeypatch):
     assert marked == [], "重试成功就不该记冷却"
 
 
+def test_隔离失败要说隔离失败_不许说成换了新档案也没用(monkeypatch):
+    """两个结论的动作不同:前者要人去腾目录,后者是等风控过去。"""
+    monkeypatch.setattr(dc, "available", lambda *a, **k: (False, ""))
+    monkeypatch.setattr(dc, "ensure_running", lambda *a, **k: (True, "ok"))
+    monkeypatch.setattr(dc, "_cookies_of", lambda *a, **k: [{"name": "a", "value": "b"}])
+
+    def fake_round(*a, **k):
+        raise dc.DouyinCdpError("验证码中间页", profile_suspect=True)
+
+    monkeypatch.setattr(dc, "_one_round", fake_round)
+    monkeypatch.setattr(dc, "quarantine_profile", lambda *a, **k: "")
+
+    with pytest.raises(dc.DouyinCdpError) as ei:
+        dc.search(["词"], session=_Db("x"), settings=_Settings())
+    msg = str(ei.value)
+    assert "隔离失败" in msg
+    assert "一样被挡" not in msg
+
+
 def test_非档案原因的失败不触发隔离(monkeypatch):
     monkeypatch.setattr(dc, "available", lambda *a, **k: (False, ""))
     monkeypatch.setattr(dc, "ensure_running", lambda *a, **k: (True, "ok"))
