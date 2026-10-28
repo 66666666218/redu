@@ -337,8 +337,8 @@ def _raise_if_all_keywords_empty(platform: str, proc, keywords: list[str]) -> No
             f"① **登录态过期** ⇒ 档案要重扫一次码;"
             f"② **被要求过验证**(风控) ⇒ 重扫**没用**,动作是**等 + 别再打**"
             f"(同一天 08:10 全空、09:30 同一档案又搜到 8 条 —— 这种「时好时坏」就是②)。"
-            f"怎么分:**先看体检报告「抖音(线索搜索)」那一行**;"
-            f"协议路会把②明说成 `search_nil_info.search_nil_type=verify_check`。")
+            f"怎么分:抖音那轮**先跑的 CDP 路**看的是真实页面,它若报了「验证码中间页」"
+            f"就是②(见 `douyin_leads._with_douyin_verdict`);协议路已默认关闭。")
 
 
 def _read_results(platform: str, since: float | None = None) -> list[dict]:

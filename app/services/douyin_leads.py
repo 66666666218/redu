@@ -258,7 +258,8 @@ def _verify_until_text(session, user_id: int = 1) -> str:
         return ""
 
 
-def _with_douyin_verdict(msg: str, session, user_id: int = 1) -> str:
+def _with_douyin_verdict(msg: str, session, user_id: int = 1,
+                         cdp_verdict: str = "") -> str:
     """把「**两种原因、动作相反**」收敛成**已知的那一种**。
 
     ★ 2026-10-25 加。起因:这条告警连续三轮都只给"① 登录过期 / ② 要求过验证,
@@ -266,9 +267,20 @@ def _with_douyin_verdict(msg: str, session, user_id: int = 1) -> str:
     顺手写了 `douyin_verify_until_<uid>`。于是每一轮都要人(或我)去手工探一次才能定性,
     而本仓的教训正是:**别让人去做判别实验**。
 
-    判据是**已有的闸门记录**,不是猜:有闸 ⇒ 这个号被要求过验证(②);
-    没有闸 ⇒ 保持原来的"两种原因"说法(那才是真的不知道)。
+    ★ 2026-10-28 补:纯协议已关(`DOUYIN_LEADS_USE_PROTOCOL=false`),那句
+    「协议路会把②明说成 verify_check」**已经没人能兑现**;真正还在说真话的是 **CDP 路**
+    (它见到的是「验证码中间页」这一页面级证据)。所以把**本轮 CDP 的原话**接进来 ——
+    有它就不用再让人去看体检报告。
+
+    判据是**已有的证据**(本轮 CDP 的结论 / 库里的闸门记录),不是猜:
+    有其一 ⇒ 这个号被要求过验证(②);都没有 ⇒ 保持原来的"两种原因"说法。
     """
+    if cdp_verdict:
+        return msg + (
+            "\n**本次判定(据本轮 CDP 路的页面证据)**:② **平台要求过验证** —— "
+            f"CDP 原话:{cdp_verdict[:160]}\n"
+            "⇒ 动作 = **等 + 别再打**(重扫/重登**没用**;这也解释了同一份 cookie "
+            "换个浏览器身份就能搜到)。")
     until = _verify_until_text(session, user_id)
     if not until:
         return msg
@@ -296,6 +308,9 @@ def _collect(platform: str, keywords: list[str], session=None,
     不说话的话,"协议挂了"就会被读成"抖音上没人在推资源" —— 本仓最忌讳的假阴性。
     """
     cooldown = False
+    #: ★ 本轮 **CDP 路**的原话(失败时才有)。它比 MediaCrawler 那句"全部无结果"精确,
+    #: 回落时把它接进最终告警 —— 见 `_with_douyin_verdict`。
+    cdp_verdict = ""
     if platform == "douyin":
         from config.settings import get_settings
 
@@ -358,10 +373,21 @@ def _collect(platform: str, keywords: list[str], session=None,
                 _rows = _dcdp.search(keywords[:_n], session=session,
                                      user_id=user_id, settings=_s)
                 if _rows:
+                    #: ⚠️ **覆盖不足要说出来**(2026-10-28):CDP 每轮只搜前 N 个词,
+                    #: 而它一旦成功就**不再回落** MediaCrawler ⇒ 后面的词这一轮**没搜**。
+                    #: 不说的话,下一轮看到"线索少了"只会以为"抖音上没人推"。
+                    if len(keywords) > _n:
+                        logger.info("抖音CDP:本轮只搜了 %d/%d 个词(上限 "
+                                    "DOUYIN_CDP_MAX_KEYWORDS=%d)—— 其余 %d 个**本轮没搜**,"
+                                    "不是没结果", _n, len(keywords), _n, len(keywords) - _n)
                     return _rows, "CDP"
             except Exception as exc:  # noqa: BLE001 - 回落是设计的一部分
+                #: ★ **把 CDP 的原话留下来**(2026-10-28):它是回落之后唯一还说真话的地方 ——
+                #: 「验证码中间页」比 MediaCrawler 那句"全部无结果"精确得多(后者自己都
+                #: 承认"两种原因、别先猜一个")。见 `_with_douyin_verdict`。
+                cdp_verdict = str(exc)[:200]
                 logger.warning("抖音CDP 路失败(%s),回落 MediaCrawler:%s",
-                               type(exc).__name__, str(exc)[:180])
+                               type(exc).__name__, cdp_verdict[:180])
     if cooldown and not _browser_probe_allowed(session, user_id):
         logger.warning("抖音验证冷却中且本窗口已探过浏览器 —— 本轮不再打"
                        "(动作是等;反复探针只会延长风控)")
@@ -385,7 +411,7 @@ def _collect(platform: str, keywords: list[str], session=None,
         if platform != "douyin":
             raise
         raise mc.MediaCrawlerError(
-            _with_douyin_verdict(str(exc), session, user_id)) from exc
+            _with_douyin_verdict(str(exc), session, user_id, cdp_verdict)) from exc
     if rows and session is not None:
         #: ★ **浏览器既然通了,就别把它自己关掉**(2026-10-25):见 `_release_browser_probe`。
         if cooldown:

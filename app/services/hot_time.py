@@ -143,3 +143,68 @@ def parse_published(value) -> datetime | None:
         # ⚠️ **不做静默**:源里明明有值、我们却没读懂 —— 留一条痕,别让它无声消失
         logger.debug("发布时间解析失败(字段名或格式可能变了):raw=%r", value)
     return dt
+
+
+#: **粗粒度**相对时间(抖音搜索卡上的那种):`1周前` / `3月前` / `5年前`。
+#: ⚠️ 与 `_RE_REL` 分开写,因为两者的精度承诺**不同**(见 `parse_published_coarse`)。
+_RE_REL_COARSE = re.compile(
+    r"^(\d+)\s*(秒|分钟|分|小时|天|周|个月|月|年)前$")
+_RE_DAY_WORD = {"昨天": 1, "前天": 2}
+_RE_MD = re.compile(r"^(\d{1,2})月(\d{1,2})日$")
+_RE_YMD = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})$")
+
+#: 粗粒度换算用的近似长度。**只用于"比某个日期更早吗"这种二分判断**,
+#: 30 天/365 天这种近似在阈值上不会改变结论(实测抖音卡片只给到周/月/年)。
+_COARSE_UNIT = {"秒": timedelta(seconds=1), "分钟": timedelta(minutes=1),
+                "分": timedelta(minutes=1), "小时": timedelta(hours=1),
+                "天": timedelta(days=1), "周": timedelta(days=7),
+                "个月": timedelta(days=30), "月": timedelta(days=30),
+                "年": timedelta(days=365)}
+
+
+def parse_published_coarse(value) -> datetime | None:
+    """**粗粒度**版本:能读懂 `N周前` / `N月前` / `N年前` / `昨天` / `M月D日`。
+
+    ## 为什么不并进 `parse_published`
+
+    那个函数是**精度承诺**:"宁可留空,不给一个错的时刻"(`前天`/`上周`/`一个月前`
+    一律返回 None)。而抖音搜索卡**只给这种粗粒度** —— 卡片上是 `1小时前`/`2天前`/`5年前`,
+    没有精确时刻。若也返回 None,下游的新鲜度闸会把**每一条**都当成"判不出时间"丢掉。
+
+    ⇒ 这个函数**只用于阈值比较**("是不是早于 2026-10-01"),**不许用于展示**:
+    `3月前` 的真实含义是 3~4 个月,拿它当"发布日期"印在卡上会是错的。
+
+    ## 为什么近似不会改变结论
+
+    新鲜度闸问的是"早于 2026-10-01 吗"。30 天/365 天这类近似带来的误差(几天)
+    全部落在**同一个日期两侧**,不会把 10 月的内容判成 9 月、反之亦然。
+    ⚠️ 一旦哪天要用它做**精确判断**,这个前提就不成立了 —— 那时该去拿绝对时间。
+    """
+    if not isinstance(value, str):
+        return None
+    s = value.strip()
+    if not s:
+        return None
+    now = datetime.now()
+    if s in ("刚刚", "刚才"):
+        return now
+    m = _RE_REL_COARSE.match(s)
+    if m:
+        return now - int(m.group(1)) * _COARSE_UNIT[m.group(2)]
+    for word, days in _RE_DAY_WORD.items():
+        if s.startswith(word):
+            return now - timedelta(days=days)
+    m = _RE_YMD.match(s)
+    if m:                                   # 卡片上偶尔给绝对日期
+        try:
+            return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return None
+    m = _RE_MD.match(s)                     # `9月30日`:补当年;若因此变成未来,退回上一年
+    if m:
+        try:
+            dt = datetime(now.year, int(m.group(1)), int(m.group(2)))
+        except ValueError:
+            return None
+        return dt if dt <= now + _MAX_FUTURE else dt.replace(year=now.year - 1)
+    return None
