@@ -369,7 +369,7 @@ def _collect(platform: str, keywords: list[str], session=None,
             try:
                 from app.services import douyin_cdp_source as _dcdp
 
-                _n = max(1, int(getattr(_s, "douyin_cdp_max_keywords", 4) or 4))
+                _n = max(1, int(getattr(_s, "douyin_cdp_max_keywords", 8) or 8))
                 _rows = _dcdp.search(keywords[:_n], session=session,
                                      user_id=user_id, settings=_s)
                 if _rows:
