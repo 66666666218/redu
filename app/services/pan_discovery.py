@@ -1083,6 +1083,13 @@ def push_items(items: list[dict], settings, session=None, user_id: int = 0) -> b
     if not _ai.items:
         return False
     items = _ai.items
+    #: ★ **客户第一眼要的答案**(2026-10-29):这一批发出去的全部**可直接取用**,还分落在哪个盘。
+    from collections import Counter as _Counter
+
+    from app.services.douyin_leads import _pan_name as _pn
+
+    _pan_cnt = _Counter(_pn(it.get("share_url") or "") or "网盘" for it in items)
+    _pan_txt = " / ".join(f"{k} {v}" for k, v in _pan_cnt.most_common())
     from app.services.feishu._cards import _col_set_row, _md_safe, metrics_md, strip_others
     from app.services.feishu_client import FeishuClient
 
@@ -1091,6 +1098,7 @@ def push_items(items: list[dict], settings, session=None, user_id: int = 0) -> b
         f"公开平台(知乎/贴吧)新发现 **{len(items)}** 个资源,已转存成我方分享链:"
         f"「**资源**」点开是我方链、可直接取用;「**原帖**」点开是对标作品的出处;"
         f"「**对标数据**」= 那条原帖的热度。"
+        + f"\n**可直取 {len(items)} 条**({_pan_txt})"
         + (f"\n**{_ai.summary()}**:已挡掉纯广告 / 无具体资源 / 过时的那些。"
            if _ai.summary() else "")
         + (f"\n已跳过 {_dup} 条 {int(getattr(settings, 'push_dedupe_hours', 24) or 0)} 小时内推过的。"

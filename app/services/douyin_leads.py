@@ -1605,6 +1605,16 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
         return category_topics.display_niche(
             f"{ld_.get('title') or ''} {ld_.get('mark') or ''}")
 
+    def _link_of(ld_: dict) -> str:
+        """这条线索**能直接取用**的链(我方链 > 库里现成链 > 正文直链);没有返回空串。
+
+        ★ 客户做拉新时最关心"这条能不能直接拿来用" —— 卡片摘要与排序都按它来。
+        """
+        info_ = ld_.get("kouling") or {}
+        return str(info_.get("our_url")
+                   or (ld_.get("library") or {}).get("link")
+                   or ld_.get("pan_url") or "")
+
     _groups: dict[str, list[dict]] = {}
     for ld in leads:
         _groups.setdefault(_niche_of(ld), []).append(ld)
@@ -1613,6 +1623,14 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
                     key=lambda n: (n == category_topics.NICHE_OTHER, len(_groups[n]), n))
     _intro = (f"{label}上发现 **{len(leads)}** 条在推同类资源的视频。"
               "已自动解析并把能拿到的**转存进我方网盘**,可直接取用。")
+    #: ★ **客户第一眼要的答案**(2026-10-29 用户「客户角度…更快速找到有用信息」):
+    #: 有几条能**直接取用**、分别落在哪个盘;剩下的只能看对标、需自己找。
+    _n_link = sum(1 for _x in leads if _link_of(_x))
+    _pan_cnt = Counter(_pan_name(_link_of(_x)) for _x in leads if _link_of(_x))
+    _pan_txt = " / ".join(f"{k or '网盘'} {v}" for k, v in _pan_cnt.most_common())
+    _intro += ("\n**可直取 " + str(_n_link) + " 条**"
+               + (f"({_pan_txt})" if _pan_txt else "")
+               + f" · 需自己找 {len(leads) - _n_link} 条")
     if _ai.summary():
         #: 只在模型**真的筛过**时才写(`off/fallback` 返回空串,不给自己贴金)。
         _intro += f"\n**{_ai.summary()}**:已挡掉纯广告 / 无具体资源 / 过时的那些。"
@@ -1659,7 +1677,7 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
         _lib = ld.get("library") or {}
         #: 这条线索**能用的那条链**(我方链优先,其次库里现成的那条)。它同时决定两列:
         #: 「作品」列挂它就**可点**,「资源」列写它落在**哪个盘**。
-        _raw_our = info.get("our_url") or _lib.get("link") or str(ld.get("pan_url") or "")
+        _raw_our = _link_of(ld)
         our = _md_safe(_raw_our)
         work = f"[{shown}]({our})" if our else shown
         # 转发量**独立成列**(原来并进作品列,六列版式下挪出来)。没有就不显示,
@@ -1686,7 +1704,9 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
             #: 混进网格会让"表头 + N 行"的判据失真(`tests/test_douyin_leads.py` 靠它)。
             elements.append({"tag": "div", "text": {"tag": "lark_md",
                 "content": f"**▍{niche}** · {len(_groups[niche])} 条"}})
-        for ld in _groups[niche]:
+        #: ★ 组内**可直取的排前面**(同档再按发布时间新→旧)—— 客户先拿到能用的。
+        for ld in sorted(_groups[niche],
+                         key=lambda x: (not _link_of(x), -(int(x.get("publish_at") or 0)))):
             elements.append(_lead_row(ld))
     card = {
         "config": {"wide_screen_mode": True},
@@ -1710,8 +1730,12 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
         #   —— 日结要发回"内容实际出现的那个群",否则总结会落到没人看过内容的群里。
         from app.services import push_ledger
 
+        #: ★ **台账要带解析后的链**(2026-10-29 修):线索的链在 `kouling.our_url` /
+        #: `library.link` 里**嵌套**着,而台账只认顶层的 `pan_url` ⇒ 实测 1,495 行
+        #: douyin_peer **pan_url 全空**,日结/周结里「资源」整列是「—」,客户以为没链。
+        _led = [{**ld, "pan_url": _link_of(ld)} for ld in leads]
         push_ledger.record(session, user_id,
-                           "douyin_peer" if peer else section, leads)
+                           "douyin_peer" if peer else section, _led)
     return ok
 
 

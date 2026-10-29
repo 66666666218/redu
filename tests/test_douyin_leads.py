@@ -1940,3 +1940,62 @@ def test_push_leads_drops_stale_items(monkeypatch) -> None:
                          "publish_at": int(time.time()) - 10 * 86400}],
                        _S(), session=None, user_id=1)
     assert ok is False and "card" not in sent
+
+
+def test_push_leads_summary_counts_actionable_links(session, monkeypatch) -> None:
+    """★ 2026-10-29 客户视角:卡片第一眼要看到**几条能直接取用、在哪个盘**。"""
+    from app.services import feishu_client
+
+    sent: dict = {}
+
+    class _C:
+        def __init__(self, webhook, secret):
+            pass
+
+        def send_card(self, card):
+            sent["card"] = card
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+    leads = [
+        {"mark": "无链资源", "title": "《无链资源》第2集", "url": "https://d/1",
+         "author": "甲", "keyword": "k"},
+        {"mark": "有链资源", "title": "《有链资源》第3集", "url": "https://d/2",
+         "author": "乙", "keyword": "k",
+         "kouling": {"kind": "share", "status": "ok",
+                     "our_url": "https://pan.quark.cn/s/AAA"}},
+    ]
+    dl.push_leads(leads, _Settings(), session=session, user_id=1)
+    intro = sent["card"]["elements"][0]["text"]["content"]
+    assert "可直取 1 条" in intro and "夸克 1" in intro and "需自己找 1 条" in intro
+
+    #: 组内**可直取的排前面**
+    import json
+
+    blob = json.dumps(sent["card"], ensure_ascii=False)
+    #: ⚠️ 卡片会把别人的《…》删掉,所以按**去掉书名号后的标题**看顺序
+    assert blob.index("第3集") < blob.index("第2集")
+
+
+def test_push_leads_ledger_records_the_resolved_link(session, monkeypatch) -> None:
+    """★ 2026-10-29 修:线索的链在 `kouling.our_url` / `library.link` 里**嵌套**着,
+    台账只认顶层 `pan_url` ⇒ 实测 1,495 行 douyin_peer **pan_url 全空**,
+    日结/周结「资源」整列是「—」。推卡时必须把解析后的链一起记进台账。"""
+    from app.db.models import PushLedger
+    from app.services import feishu_client
+
+    class _C:
+        def __init__(self, webhook, secret):
+            pass
+
+        def send_card(self, card):
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+    dl.push_leads([{
+        "mark": "库里有", "title": "《库里有》下载", "url": "https://d/1", "author": "甲",
+        "keyword": "k", "library": {"link": "https://pan.xunlei.com/s/LIB"}}],
+        _Settings(), session=session, user_id=1)
+    row = session.query(PushLedger).filter(PushLedger.section == "douhot").one()
+    assert row.pan_url == "https://pan.xunlei.com/s/LIB"
+    assert row.pan_type == "迅雷"

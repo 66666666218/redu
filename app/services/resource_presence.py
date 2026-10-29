@@ -692,6 +692,8 @@ def push_items(items: list[dict], settings, detail: dict | None = None,
                 detail[plat] = "AI 筛后无内容"
             continue
         group = _ai.items
+        #: ★ **客户第一眼要的答案**(2026-10-29):有几个**能直接取用**、哪些只能看对标。
+        _n_link = sum(1 for it in group if (it.get("link") or {}).get("my_link"))
         # ★ **与抖音卡同形:两个独立可点的格**(2026-10-16 用户口径
         #   「都做成抖音推广格式,**既有网盘,也能看到对标的作品**」):
         #     「资源」→ 取资源(我方链);「对标作品」→ 看那条**人在推的原帖**。
@@ -701,6 +703,8 @@ def push_items(items: list[dict], settings, detail: dict | None = None,
             f"{label}上也在推的资源 **{len(group)}** 个:"
             f"「**资源**」点开是我方链、可直接取用;「**对标作品**」点开是那条原帖;"
             f"「**对标账号**/「**对标数据**」= 谁在推、热度多少。"
+            + (f"\n**可直取 {_n_link} 条** · 其余 {len(group) - _n_link} 条只有对标作品"
+               if _n_link < len(group) else f"\n**可直取 {_n_link} 条**")
             + (f"\n**{_ai.summary()}**:已挡掉纯广告 / 无具体资源 / 过时的那些。"
                if _ai.summary() else "")
             + (f"\n已跳过 {_dup} 条 {int(getattr(settings, 'push_dedupe_hours', 24) or 0)} 小时内推过的。"
