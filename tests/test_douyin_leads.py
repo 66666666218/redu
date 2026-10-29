@@ -1760,3 +1760,62 @@ def test_push_leads_links_a_direct_pan_url(monkeypatch) -> None:
     text = str(sent["card"])
     assert "https://pan.baidu.com/s/abc123" in text     # 点标题就能到盘
     assert "百度" in text                               # 资源列写盘名
+
+
+# ---------------------------------------------------------------- 用网盘里的游戏名搜(2026-10-29)
+
+def test_game_search_words_uses_game_dirs_and_appends_download(session) -> None:
+    """用户口径:「可以搜**已经网盘里面的小游戏**去搜搜看」。
+
+    实测形态:裸游戏名搜 64 条**带盘 0**;`<游戏名> 下载` 48 条**带盘 2** ⇒ 统一加「下载」。
+    ⚠️ 只认**盘里的游戏目录**(`parent_name` 含 游戏/手机和电脑):
+    按 `name like '%游戏%'` 会把**短剧**捞进来(`《猎心游戏》11` 只是剧名带"游戏")。
+    """
+    from datetime import datetime
+
+    from app.db.models import XunleiResource
+
+    session.add_all([
+        XunleiResource(user_id=1, fid="1", name="泰拉瑞亚灾厄最新汉化版（手游+电脑端）",
+                       parent_name="T开头游戏", synced_at=datetime.now()),
+        #: 占位条目 ⇒ 父目录才是游戏名
+        XunleiResource(user_id=1, fid="2", name="游戏本体",
+                       parent_name="赛博朋克2077(豪华版全DLC)", synced_at=datetime.now()),
+        #: 短剧目录(父目录不含"游戏")⇒ 不该进来
+        XunleiResource(user_id=1, fid="3", name="《猎心游戏》11",
+                       parent_name="最全文件", synced_at=datetime.now()),
+        #: 游戏目录里的非游戏条目
+        XunleiResource(user_id=1, fid="4", name="附件",
+                       parent_name="S开头游戏", synced_at=datetime.now()),
+        XunleiResource(user_id=1, fid="5", name="v1.0.0.5",
+                       parent_name="S开头游戏", synced_at=datetime.now()),
+    ])
+    session.commit()
+    got = dl.game_search_words(session, 1, top=5)
+    assert "泰拉瑞亚灾厄 下载" in got
+    assert "赛博朋克2077 下载" in got
+    assert not any("猎心" in w for w in got), got
+    assert not any(w.startswith("附件") or w.startswith("v1") for w in got), got
+
+
+def test_search_keywords_minigame_round_puts_library_games_first(session, monkeypatch) -> None:
+    from datetime import datetime
+
+    from app.db.models import SystemConfig, XunleiResource
+
+    session.add(SystemConfig(key="lead_word_category", value="小游戏"))
+    session.add(XunleiResource(user_id=1, fid="1", name="泰拉瑞亚灾厄最新汉化版",
+                               parent_name="T开头游戏", synced_at=datetime.now()))
+    session.commit()
+    monkeypatch.setattr("app.services.cross_accounts._keywords_from_library",
+                        lambda s, u, top: [])
+
+    class _S:
+        douyin_leads_group_keywords = 0
+        douyin_leads_category_min_words = 1
+        douyin_leads_quark_keywords = ""
+        douyin_leads_quark_slots = 0
+
+    kws = dl.search_keywords(session, 1, top=4, settings=_S())
+    assert kws[0] == "泰拉瑞亚灾厄 下载", kws
+    assert len(kws) <= 4

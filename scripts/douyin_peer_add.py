@@ -95,6 +95,7 @@ def _discover(args) -> int:
     try:
         cands = discover_candidates(args.discover, get_settings(), niche=args.niche,
                                     limit=args.limit, min_share=args.min_share,
+                                    require_pan=args.require_pan,
                                     user_id=args.user_id)
     except Exception as exc:  # noqa: BLE001 - 命令行工具:把原因说清楚,别抛栈
         print(f"发现失败:{exc}")
@@ -113,11 +114,11 @@ def _discover(args) -> int:
     finally:
         session.close()
 
-    print(f"\n{'名字':<18} {'sec_uid':<46} {'作品':>4} {'赛道占比':>8}  示例")
+    print(f"\n{'名字':<18} {'sec_uid':<46} {'作品':>4} {'赛道占比':>8} {'带盘':>4}  示例")
     for c in cands:
         flag = "[已存在]" if c["uid"] in have else "[新]"
-        print(f"{c['name'][:16]:<18} {c['uid']:<46} {c['works']:>4} {c['share']:>8.0%}  "
-              f"{flag} {' / '.join(c['samples'][:1])}")
+        print(f"{c['name'][:16]:<18} {c['uid']:<46} {c['works']:>4} {c['share']:>8.0%} "
+              f"{c.get('pans', 0):>4}  {flag} {' / '.join(c['samples'][:1])}")
 
     if not args.apply:
         hint = (f"python scripts/douyin_peer_add.py --discover {args.discover}"
@@ -155,6 +156,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--limit", type=int, default=8, help="配合 --discover:最多看几个候选")
     ap.add_argument("--min-share", type=float, default=0.5,
                     help="配合 --discover:赛道占比下限(默认 0.5)")
+    ap.add_argument("--require-pan", action="store_true",
+                    help="配合 --discover:只收**主页里带网盘**的号(直链/口令);"
+                         "小游戏这类赛道建议加上")
     ap.add_argument("--apply", action="store_true",
                     help="配合 --discover:真的入库(不给就只打印)")
     ap.add_argument("--list", action="store_true", help="列出已配置的对标号")

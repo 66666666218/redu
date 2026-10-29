@@ -506,6 +506,11 @@ class DouyinPeerWork(Base):
     url: Mapped[str] = mapped_column(String(500), default="")
     niche: Mapped[str] = mapped_column(String(16), default="")         # 赛道(`category_topics.niche_of`)
     likes: Mapped[int] = mapped_column(Integer, default=0)
+    #: ★ **网盘凭据**(2026-10-29 用户口径「这些小游戏也是都需要带网盘的」):
+    #: `pan_url` = 正文里的**直链**(quark/baidu/xunlei);`mark` = 《》/`咐置…叩苓` 里的**口令**。
+    #: 两者都空 = 这条作品**不带网盘** —— 默认不推(`douyin_peer_require_pan`)。
+    mark: Mapped[str] = mapped_column(String(64), default="")
+    pan_url: Mapped[str] = mapped_column(String(500), default="")
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     #: 推出去的时刻。`None` = **建基线时见过、但没推**(首次扫描只记不推,见 `record_new`)。
     pushed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -620,7 +625,12 @@ class CrossPlatformAccount(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     platform: Mapped[str] = mapped_column(String(16), index=True)      # zhihu / bilibili …
-    uid: Mapped[str] = mapped_column(String(64), default="")           # 平台内账号 ID
+    uid: Mapped[str] = mapped_column(String(128), default="")          # 平台内账号 ID
+    #: ⚠️ **128 不是 64**(2026-10-29):抖音的 `sec_uid` 形如 `MS4wLjABAAAA…`,实测 **80+ 字符**。
+    #: 原来这里写 `String(64)` —— SQLite 不校验长度所以本机毫无症状,而**远程 MySQL 直接
+    #: `Data too long for column 'uid'`**,`remote_sync` 每轮报一次错、这批号也永远同步不过去。
+    #: 现在 ① 模型放宽到 128;② `remote_sync` **只同步非抖音**的行(远程不扫抖音对标号,
+    #: 那边也没有对应的扫描作业)。B站 mid / 知乎 token 都远短于 64,不受影响。
     name: Mapped[str] = mapped_column(String(128), default="")
     url: Mapped[str] = mapped_column(String(500), default="")          # 账号主页/代表内容
     hit_keyword: Mapped[str] = mapped_column(String(128), default="")  # 由哪个资源词发现

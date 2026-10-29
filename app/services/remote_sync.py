@@ -361,7 +361,12 @@ def sync_once(local: Session, remote_url: str, days: int = DEFAULT_DAYS,
             local_accts = local.execute(
                 text("SELECT user_id, platform, uid, name, url, hit_keyword, snippet, "
                      "pan_link, status, discovered_at FROM cross_platform_accounts "
-                     "WHERE discovered_at >= :s LIMIT :n"), {"s": since, "n": limit}).all()
+                     #: ⚠️ **抖音对标号不同步**(2026-10-29):它们的 `uid` 是 **sec_uid(80+ 字符)**,
+                     #: 而远程 MySQL 这一列是 `VARCHAR(64)` ⇒ 每轮 `Data too long for column 'uid'`,
+                     #: 本地日志里一条 WARNING、这批号也永远到不了远程。
+                     #: 远程**不扫抖音对标号**(扫描作业挂在 wechat 侧),所以直接不发。
+                     "WHERE discovered_at >= :s AND platform <> 'douyin' LIMIT :n"),
+                {"s": since, "n": limit}).all()
             if local_accts:
                 have_a = {tuple(str(x) for x in row) for row in conn.execute(text(
                     "SELECT user_id, platform, uid FROM cross_platform_accounts "

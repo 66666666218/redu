@@ -799,6 +799,80 @@ def _words_already_resolved_to_group(session, user_id: int, days: int = 21) -> s
     return {str(k) for (k,) in rows}
 
 
+#: 资源库里**不是游戏名**的条目(文件夹占位/泛称)—— 当搜索词毫无意义。
+#: ⚠️ 这类行的**父目录名才是游戏名**(如 `赛博朋克2077(豪华版全DLC)/游戏本体`),见下。
+_GAME_NAME_JUNK = ("游戏本体", "更多好玩的游戏", "游戏位置", "游戏BUG", "游戏合集",
+                   "QQ群", "群文件",
+                   #: 游戏目录里的**非游戏**条目(实测这些出现在"X开头游戏"下面)
+                   "手机想玩", "附件", "升级档", "补丁", "教程", "说明", "安装",
+                   "解压", "存档", "修改器")
+#: 游戏名后面常挂的**说明后缀**,搜之前要剥掉(实测带后缀的长名字搜不到资源帖)。
+_NAME_SUFFIX = re.compile(
+    r"(最新汉化版|汉化版|手机版|电脑端|安装包|单机版|手游|手机|端|免安装版|破解版)$")
+#: 剧集形态的排除(`《猎心游戏》11` / `狩猎游戏完结`)—— 它们是**短剧**,不是游戏资源。
+_DRAMA_LIKE = re.compile(r"完结|第\s*\d+\s*集|\d+\s*集|全集")
+
+
+def game_search_words(session, user_id: int, top: int = 3) -> list[str]:
+    """从**资源库里的游戏名**生成搜索词:`<核心名> 下载`(2026-10-29)。
+
+    用户口径:「可以搜**已经网盘里面的小游戏**去搜搜看」。
+
+    **形态是实测定的,不是拍脑袋**:
+      · 裸游戏名(泰拉瑞亚/苏丹的游戏/米塔/蛊界)→ **64 条,带盘 0** —— 全是玩法视频;
+      · **`<游戏名> 下载 / 手机版`** → **48 条,带盘 2**(`咐置…叩苓` 与 `/~token~:/`);
+      · 资源型词(`游戏合集 下载`)→ 46 条,带盘 6。
+    ⇒ 游戏名必须**带上「下载」**才会搜到资源帖;长名字先剥掉「最新汉化版/手机版/安装包」这类后缀。
+
+    ⚠️ **只认盘里的"游戏目录"**(`parent_name` 含 游戏/手机和电脑):
+    否则按 `name like '%游戏%'` 会把**短剧**捞进来 —— 实测最近 6 条全是
+    `《沉溺游戏》75` / `《猎心游戏》11` / `狩猎游戏完结`(它们只是剧名里带"游戏")。
+    """
+    from sqlalchemy import desc, or_
+
+    from app.db.models import XunleiResource
+
+    budget = max(0, int(top or 0))
+    if budget <= 0:
+        return []
+    rows = session.execute(
+        select(XunleiResource.name, XunleiResource.parent_name).where(
+            XunleiResource.user_id == user_id,
+            or_(XunleiResource.parent_name.like("%游戏%"),
+                XunleiResource.parent_name.like("%手机和电脑%"),
+                XunleiResource.parent_name.like("%手游%"),
+                #: 占位条目(`游戏本体`)的**父目录**往往就是游戏名(且不含"游戏"二字),
+                #: 所以这三类也要选进来,再用父目录名当词。
+                XunleiResource.name.in_(("游戏本体", "更多好玩的游戏", "游戏位置"))))
+        .order_by(desc(XunleiResource.synced_at)).limit(500)).all()
+    out: list[str] = []
+    for name, parent in rows:
+        src = str(name or "").strip()
+        par = str(parent or "").strip()
+        if any(j in src for j in _GAME_NAME_JUNK):
+            #: 占位条目(`游戏本体`)⇒ 父目录才是游戏名;父目录是"X开头游戏"这种分类名就跳过。
+            if not par or "开头游戏" in par or par in _GAME_NAME_JUNK:
+                continue
+            src = par
+        core = re.sub(r"[《》【】\[\]]", " ", src)                 # 去掉书名号/方括号本身
+        core = re.split(r"[（(]", core)[0].strip()
+        core = re.sub(r"^[A-Za-z]{1,3}(\s*[-－]\s*|\s+)", "", core).strip()   # `Z 咒语旅团` / `E-恶搞之家`
+        core = _NAME_SUFFIX.sub("", core).strip()
+        #: 版本号/整合包/本体 这类**不是游戏名**,搜了也只会撞到一堆无关更新贴。
+        if (len(core) < 2 or _DRAMA_LIKE.search(core)
+                or re.match(r"^v?\d", core)
+                or any(j in core for j in ("版本", "整合包", "本体", "MOD", "mod", "重制版"))):
+            continue
+        if not re.search(r"[一-鿿]", core):               # 至少含中文
+            continue
+        word = f"{core} 下载"
+        if word not in out:
+            out.append(word)
+        if len(out) >= budget:
+            break
+    return out
+
+
 def search_keywords(session, user_id: int, top: int, settings,
                     hot: list[str] | None = None) -> list[str]:
     """本轮抖音反查用的搜索词 = **资源库词**(新鲜优先) + **热榜外部种子**。
@@ -835,6 +909,10 @@ def search_keywords(session, user_id: int, top: int, settings,
     from app.services.cross_accounts import _keywords_from_library
 
     cat = category_topics.current_category(session)
+    #: ★ **小游戏轮先把资源库里的游戏名当主体词**(2026-10-29,见 `game_search_words`):
+    #: 实测裸游戏名搜不到带盘帖,`<游戏名> 下载` 才有。占掉至多 3 个名额。
+    game_words = (game_search_words(session, user_id, top=min(3, int(top)))
+                  if cat == "小游戏" else [])
     n_group = int(getattr(settings, "douyin_leads_group_keywords", 3) or 0)
     # 先取**全部**候选(群里的资源名 + 资源库名称),再按类目挑 —— 挑不够会自动补本类目话题词
     cand = group_keywords(session, user_id, top=n_group)
@@ -867,15 +945,22 @@ def search_keywords(session, user_id: int, top: int, settings,
         if category_topics.classify(w) == "大瓜":
             category_topics.learn_names(session, w)      # 用户口径:"大瓜**慢慢的学习**可以"
     kws = category_topics.pick(
-        cand, cat, int(top), names,
+        cand, cat, max(0, int(top) - len(game_words)), names,
         # ★ 2026-10-29:本类目**保底几个词**(见 `pick` 的 `min_mine`)。
         # 0 = 关掉保底(回到 10-05 的行为:证据多的那个类目永远霸榜)。
         min_mine=int(getattr(settings, "douyin_leads_category_min_words", 1) or 0))
+    if game_words:
+        #: 游戏名 + 「下载」排在前面(它们才是这一轮要找的东西),其余词补足名额。
+        kws = game_words + [w for w in kws if w not in game_words]
     # 两个判据都要,**顺序不能反**:
     #   ① `seen`(已经解出过群)排后 —— 用户口径:「而不是一直用着一个口令进群」;
     #   ② 有效率(高→低) —— 同类之间的排序依据。
     seen = _words_already_resolved_to_group(session, user_id)
     kws.sort(key=lambda w: (w in seen, -scores.get(w, _YIELD_PRIOR)))
+    if game_words:
+        #: ⚠️ 上面那条 sort 按**历史有效率**重排,而游戏词没有历史 ⇒ 会被挤到后面。
+        #: 但这一轮**就是为它们来的** ⇒ 排回最前(总词数 ≤ CDP 上限 8,不会互相挤掉)。
+        kws = [w for w in game_words if w in kws] + [w for w in kws if w not in game_words]
     for w in (hot or []):
         if w and w not in kws:
             kws.append(w)

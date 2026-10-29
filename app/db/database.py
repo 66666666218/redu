@@ -370,6 +370,10 @@ def db_status() -> dict:
 # ⚠️ 每条形如 `列名 类型 [DEFAULT ...]` —— **第一个词是列名,不是类型**。
 # ⚠️ TEXT 类的 `DEFAULT` 在 MySQL 上不合法(报 1101),由 `_coldef_for_mysql` 摘掉并补空串。
 ADDITIONS: dict[str, list[str]] = {
+    # 对标号作品要带**网盘凭据**(2026-10-29):`mark`=《》/咐置口令,`pan_url`=正文直链。
+    # 存量行两列都空 ⇒ 按"不带网盘"处理(正好与人想要的"只推带网盘的"一致)。
+    "douyin_peer_works": ["mark VARCHAR(64) DEFAULT ''",
+                          "pan_url VARCHAR(500) DEFAULT ''"],
     "users": [
         "email VARCHAR(128)", "role VARCHAR(16) DEFAULT 'user'", "enabled INTEGER DEFAULT 1",
         "smtp_host VARCHAR(128)", "smtp_port INTEGER", "smtp_user VARCHAR(128)",
