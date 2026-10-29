@@ -93,7 +93,8 @@ _GRAB_USERS_JS = r"""() => {
         users.push({uid: m[1], name: (a.innerText || '').trim().split('\n')[0]});
     }
     return {users: users, title: document.title || '',
-            captcha: /验证码/.test(document.title || '')};
+            captcha: /验证码/.test(document.title || ''),
+            body_len: (document.body ? document.body.innerText : '').trim().length};
 }"""
 
 #: `1.7万` / `9217` / `2.3亿` / `12w` —— 主页卡片上的点赞数写法。
@@ -192,11 +193,14 @@ def target_accounts(session, user_id: int, settings) -> list[dict]:
 
 # ---------------------------------------------------------------- 去重 / 落库
 
-def record_new(session, user_id: int, works: list[dict], *, baseline: bool) -> list[dict]:
-    """把作品落库;返回**需要推送**的那些(首次扫描返回空)。
+def record_new(session, user_id: int, works: list[dict], *, baseline: bool,
+               keep: int = 0) -> list[dict]:
+    """把作品落库;返回**需要推送**的那些(首次扫描默认返回空)。
 
     `baseline=True`(这个号一条记录都没有)⇒ 全部记下、`pushed_at` 直接填上、**不推**。
     `baseline=False` ⇒ 只插没见过的,`pushed_at=None` 留给推成功后打戳。
+    `keep` = 建基线时**顺手推前几条**(`douyin_peer_baseline_push`,0 = 不推)——
+    新加一个号时不用干等它发新作品;⚠️ 作品是**新→旧**排好的,所以取的是**最新的那几条**。
     """
     from app.db.models import DouyinPeerWork
 
@@ -209,14 +213,19 @@ def record_new(session, user_id: int, works: list[dict], *, baseline: bool) -> l
             DouyinPeerWork.aweme_id.in_(ids))).all())
     fresh = [w for w in works if w["aweme_id"] not in known]
     now = datetime.now()
-    for w in fresh:
+    n_keep = max(0, int(keep or 0)) if baseline else 0
+    for i, w in enumerate(fresh):
+        #: 建基线 ⇒ 只有**前 n_keep 条**留空(要被推),其余直接打戳;非基线 ⇒ 全部留空。
+        pushed_at = now if (baseline and i >= n_keep) else None
         session.add(DouyinPeerWork(
             user_id=user_id, aweme_id=w["aweme_id"], account_uid=w["account_uid"],
             account_name=w["account_name"], title=w["title"], url=w["url"],
             niche=w["niche"], likes=int(w.get("likes") or 0),
-            first_seen_at=now, pushed_at=now if baseline else None))
+            first_seen_at=now, pushed_at=pushed_at))
     session.flush()
-    return [] if baseline else fresh
+    if not baseline:
+        return fresh
+    return fresh[:n_keep]
 
 
 def pending(session, user_id: int) -> list[dict]:
@@ -344,6 +353,148 @@ def resolve_user(name: str, settings=None, *, user_id: int = 1) -> list[dict]:
 
 # ---------------------------------------------------------------- 推送
 
+def resolve_users(names: list[str], settings=None, *, user_id: int = 1,
+                  gap: float = 3.0) -> list[dict]:
+    """一次浏览器里解析**多个**名字(用户搜索),返回 `[{uid, name, query}]`。
+
+    ⚠️ 同名号很多,这里**照样全返回** —— 选择/去重由调用方按 `query` 判(`discover_candidates`
+    只收**完全同名**的);一次开一个浏览器跑完所有名字,而不是每个名字各起一次。
+    """
+    names = [str(n).strip() for n in (names or []) if str(n).strip()]
+    if not names:
+        return []
+    from app.services import douyin_cdp_source as cdp
+
+    def _run(page) -> list[dict]:
+        out: list[dict] = []
+        seen: set[str] = set()
+        blank = 0
+        for i, name in enumerate(names):
+            if i:
+                time.sleep(gap)
+            page.goto(_USER_SEARCH_URL.format(q=urllib.parse.quote(name)),
+                      wait_until="domcontentloaded", timeout=_GOTO_TIMEOUT_MS)
+            time.sleep(_PAGE_WAIT_S)
+            raw = page.evaluate(_GRAB_USERS_JS) or {}
+            _guard(raw, f"用户搜索({name})")
+            if int(raw.get("body_len") or 0) < 50:
+                blank += 1
+            for u in raw.get("users") or []:
+                uid = str(u.get("uid") or "").strip()
+                if uid and uid not in seen:
+                    seen.add(uid)
+                    out.append({"uid": uid, "name": u.get("name") or "", "query": name})
+        if not out:
+            #: ⚠️ 两种原因**判据不同、动作也不同**,别混成一句"没有这些号":
+            #: 页面空白 = 验证码/风控中间页(停手,别再打);页面有内容 = 名字确实搜不到。
+            if blank == len(names):
+                raise cdp.DouyinCdpError(
+                    f"用户搜索 {len(names)} 个名字**一个号都没读到**,而且页面近乎空白 "
+                    "—— 很可能是**验证码/风控中间页**,不是「没有这些号」;先停手别再打")
+            raise cdp.DouyinCdpError(
+                f"用户搜索 {len(names)} 个名字**一个号都没读到**(页面有内容但无 /user/ 链接)"
+                "—— 要么这些名字没有对应账号,要么页面没渲染完(可调大 `_PAGE_WAIT_S`)")
+        return out
+
+    return _with_page(settings, _run, user_id=user_id)
+
+
+#: 搜索结果行里的视频 id —— **发现环节的身份凭据**(见 `discover_candidates`)。
+_RE_VIDEO_URL = re.compile(r"/video/(\d+)")
+
+
+def discover_candidates(keyword: str, settings, *, niche: str = "", limit: int = 6,
+                        min_share: float = 0.5, min_works: int = 3, max_try: int = 3,
+                        user_id: int = 1, session=None) -> list[dict]:
+    """**从关键词结果里找对标号**(2026-10-29,账号池自增长)。**不写库**。
+
+    ## 身份怎么认:**用作品 id,不用名字**
+
+    实测(2026-10-29):搜索页与视频页**都不给作者的 sec_uid**(DOM 里 `/user/` 只有「我的」),
+    所以只能按昵称去「用户搜索」——而**同名号一大堆**:「阿杰」解析出 8 个、
+    「罗二姐1」5 个,前 3 个主页全是别的内容(英语语法/电动车…)。
+
+    但搜索结果**带着视频 id** ⇒ 哪个同名号的主页里出现了**这条视频**,哪个才是本人。
+    这比"名字像"硬得多,而且不需要走协议接口(那条会招风控)。
+
+    ## 两道闸门
+
+      · **身份校验**:候选号前 `min_works` 条作品里必须含搜索到的那条 vid;
+      · **内容校验**:主页里 `niche` 赛道占比 ≥ `min_share`(为空则只看作品数)。
+    ⚠️ 视频若是很久以前的、已经掉出主页前 N 条(默认 12),会**认不出**(假阴性)——
+    宁可漏,不可错加。
+    """
+    from app.services import douyin_cdp_source as cdp
+
+    kw = str(keyword or "").strip()
+    if not kw:
+        return []
+    own = session is None
+    if own:
+        from app.db import get_session_local
+
+        session = get_session_local()()
+    try:
+        rows = cdp.search([kw], session=session, user_id=user_id)
+    finally:
+        #: ⚠️ 只关**自己开的**那个会话;传进来的由调用方管(`douyin_cdp_source.search` 同一条纪律)。
+        if own:
+            session.close()
+
+    #: 作者昵称 → 它在搜索结果里的视频 id(按出现顺序)。**同名不同人靠视频 id 区分**。
+    reps: dict[str, list[str]] = {}
+    for r in rows:
+        name = str(r.get("name") or "").strip()
+        m = _RE_VIDEO_URL.search(str(r.get("url") or ""))
+        if name and m:
+            reps.setdefault(name, []).append(m.group(1))
+    names = list(reps)[:max(1, int(limit))]
+    if not names:
+        return []
+
+    resolved = resolve_users(names, settings, user_id=user_id)
+    by_query: dict[str, list[dict]] = {}
+    for u in resolved:
+        #: 只认**完全同名** —— 「抖音小游戏推荐」会被解析成「抖音小游戏」,不挡就加错号。
+        if u["name"].strip() == u["query"].strip():
+            by_query.setdefault(u["query"], []).append(u)
+
+    #: 每个名字最多看 `max_try` 个同名号(开主页是慢活;通常第 1~2 个就对上了)。
+    cands: list[dict] = []
+    for n in names:
+        for u in by_query.get(n, [])[:max(1, int(max_try))]:
+            cands.append({"uid": u["uid"], "name": u["name"], "query": n})
+    if not cands:
+        return []
+    uniq: dict[str, dict] = {}
+    for c in cands:
+        uniq.setdefault(c["uid"], c)
+    accts = list(uniq.values())
+
+    fetched = fetch_accounts(accts, settings, user_id=user_id)
+    out: list[dict] = []
+    for n in names:
+        wanted = set(reps[n])
+        for c in [x for x in accts if x["query"] == n]:
+            works = fetched.get(c["uid"]) or []
+            #: ① 身份:主页里必须出现**搜索结果里的那条作品**
+            if not (wanted & {w["aweme_id"] for w in works}):
+                continue
+            if len(works) < int(min_works):
+                continue
+            #: ② 内容:赛道占比
+            share = (sum(1 for w in works if w["niche"] == niche) / len(works)
+                     if niche else 1.0)
+            if share < float(min_share):
+                continue
+            out.append({"uid": c["uid"], "name": c["name"], "works": len(works),
+                        "share": round(share, 2),
+                        "samples": [w["title"][:40] for w in works[:3]]})
+            break            #: 一个名字只收一个(本人);同名的其余号一律不算
+    out.sort(key=lambda x: (-x["share"], -x["works"]))
+    return out
+
+
 def push_works(works: list[dict], settings, session=None, user_id: int = 0) -> bool:
     """把**新作品**推飞书(走抖音同行群,未配回落主群)。返回是否发出。"""
     if not works:
@@ -429,6 +580,8 @@ def run_for_user(session, user_id: int, settings) -> dict:
     new_works: list[dict] = []
     baselines: list[str] = []
     failed: list[str] = []
+    #: 建基线时顺手推几条(0 = 不推,见 `record_new` 的 `keep`)。
+    baseline_push = int(getattr(settings, "douyin_peer_baseline_push", 0) or 0)
     for acct in accts:
         got = fetched.get(acct["uid"])
         if got is None:                      # 这个号失败了,不推进 last_scan_at
@@ -440,7 +593,8 @@ def run_for_user(session, user_id: int, settings) -> dict:
             select(DouyinPeerWork.id).where(
                 DouyinPeerWork.user_id == user_id,
                 DouyinPeerWork.account_uid == acct["uid"]).limit(1)) is not None
-        new_works.extend(record_new(session, user_id, got, baseline=not seen_before))
+        new_works.extend(record_new(session, user_id, got, baseline=not seen_before,
+                                    keep=baseline_push))
         if not seen_before and got:
             baselines.append(acct.get("name") or acct["uid"])
         row = session.get(CrossPlatformAccount, acct["id"])

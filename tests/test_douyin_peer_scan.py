@@ -298,3 +298,102 @@ def test_push_works_links_the_account_profile(monkeypatch) -> None:
         "likes": 5, "niche": "小游戏", "account_name": "阿德",
         "account_uid": "MS4wLjABAAAAx", "author": "阿德"}], _S())
     assert "https://www.douyin.com/user/MS4wLjABAAAAx" in str(sent["card"])
+
+
+def test_baseline_can_push_the_newest_few(session) -> None:
+    """`douyin_peer_baseline_push=N`:新建基线时**顺手推最新 N 条**(作品是新→旧排好的)。
+
+    默认 0(不推)防刷屏;设 3 就是「加号后立刻能看到它在推什么」。
+    """
+    works = [{"aweme_id": str(i), "url": f"u{i}", "title": f"t{i}", "likes": 0,
+              "niche": "小游戏", "account_uid": "a", "account_name": "A", "author": "A"}
+             for i in range(1, 5)]
+    got = dps.record_new(session, 1, works, baseline=True, keep=2)
+    assert [w["aweme_id"] for w in got] == ["1", "2"]
+    rows = {r.aweme_id: r for r in session.scalars(select(DouyinPeerWork)).all()}
+    assert rows["1"].pushed_at is None and rows["2"].pushed_at is None
+    assert rows["3"].pushed_at is not None and rows["4"].pushed_at is not None
+
+
+# ---------------------------------------------------------------- 账号池自增长
+
+def _search_row(name: str, vid: str) -> dict:
+    return {"name": name, "url": f"https://www.douyin.com/video/{vid}"}
+
+
+def _profile(vid: str, niche: str = "小游戏", extra_same: int = 2,
+             extra_other: int = 0) -> list[dict]:
+    """一个主页:第一条是**搜索结果里那条作品**,其余用来凑条数与赛道占比。
+
+    (`extra_same` 默认给 2 —— `min_works` 默认是 3,只给 1 条会被数量闸门挡掉。)
+    """
+    works = [{"aweme_id": vid, "url": f"https://d/{vid}", "title": f"#{niche} 命中",
+              "likes": 1, "niche": niche, "account_uid": "x", "account_name": "A",
+              "author": "A"}]
+    works += [{"aweme_id": f"{vid}-s{i}", "url": f"https://d/{vid}-s{i}",
+               "title": f"#{niche} 同类{i}", "likes": 0, "niche": niche,
+               "account_uid": "x", "account_name": "A", "author": "A"}
+              for i in range(extra_same)]
+    works += [{"aweme_id": f"{vid}-o{i}", "url": f"https://d/{vid}-o{i}",
+               "title": "别的内容", "likes": 0, "niche": "其他",
+               "account_uid": "x", "account_name": "A", "author": "A"}
+              for i in range(extra_other)]
+    return works
+
+
+def test_discover_identifies_the_account_by_the_video_id(monkeypatch) -> None:
+    """★ 2026-10-29 **身份靠作品 id,不靠名字**。
+
+    实测:搜索页/视频页都不给作者 sec_uid,按名字去用户搜索会撞一堆同名号
+    (「阿杰」8 个、「罗二姐1」5 个,前几个主页全是别的内容)。而搜索结果带着视频 id ——
+    **哪个同名号的主页里有这条视频,哪个才是本人**。
+
+    这里 u3 名字对、赛道也对,但主页里**没有那条视频** ⇒ 必须丢掉。
+    """
+    from app.services import douyin_cdp_source as cdp
+
+    monkeypatch.setattr(cdp, "search", lambda kws, **kw: [
+        _search_row("阿德", "100"), _search_row("阿德", "100"),
+        _search_row("小游戏推广", "101"), {"name": "", "url": ""}])
+    monkeypatch.setattr(dps, "resolve_users", lambda names, *a, **k: [
+        {"uid": "u1", "name": "阿德", "query": "阿德"},
+        {"uid": "u2", "name": "小游戏推广", "query": "小游戏推广"},
+        {"uid": "u3", "name": "小游戏推广", "query": "小游戏推广"},   # 同名不同号
+        {"uid": "u9", "name": "小游戏推广旗舰", "query": "小游戏推广"},  # 名字对不上 → 丢
+    ])
+    monkeypatch.setattr(dps, "fetch_accounts", lambda accts, s, **k: {
+        "u1": _profile("100"),
+        "u2": _profile("101"),
+        "u3": _profile("999"),          # 名字/赛道都对,但不是本人
+    })
+    got = dps.discover_candidates("小游戏", _S(), session=object(), niche="小游戏", limit=5)
+    assert [c["uid"] for c in got] == ["u1", "u2"]
+
+
+def test_discover_filters_by_niche_share_and_volume(monkeypatch) -> None:
+    """身份对上了还要看**内容**:主页赛道占比不够的不收(实测有号主页全是别的东西)。"""
+    from app.services import douyin_cdp_source as cdp
+
+    monkeypatch.setattr(cdp, "search", lambda kws, **kw: [
+        _search_row("甲", "201"), _search_row("乙", "202")])
+    monkeypatch.setattr(dps, "resolve_users", lambda names, *a, **k: [
+        {"uid": "u1", "name": "甲", "query": "甲"},
+        {"uid": "u2", "name": "乙", "query": "乙"}])
+    monkeypatch.setattr(dps, "fetch_accounts", lambda accts, s, **k: {
+        "u1": _profile("201"),                        # 3/3 = 100% → 收
+        "u2": _profile("202", niche="其他"),  # 0% → 丢
+    })
+    got = dps.discover_candidates("小游戏", _S(), session=object(), niche="小游戏", limit=5)
+    assert [c["uid"] for c in got] == ["u1"]
+    assert got[0]["share"] == 1.0
+
+
+def test_discover_skips_accounts_with_too_few_works(monkeypatch) -> None:
+    from app.services import douyin_cdp_source as cdp
+
+    monkeypatch.setattr(cdp, "search", lambda kws, **kw: [_search_row("甲", "301")])
+    monkeypatch.setattr(dps, "resolve_users", lambda names, *a, **k: [
+        {"uid": "u1", "name": "甲", "query": "甲"}])
+    monkeypatch.setattr(dps, "fetch_accounts", lambda accts, s, **k: {
+        "u1": _profile("301", extra_same=0)})        # 只有 1 条 < min_works
+    assert dps.discover_candidates("小游戏", _S(), session=object(), niche="小游戏") == []

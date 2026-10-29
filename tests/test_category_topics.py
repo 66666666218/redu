@@ -392,3 +392,25 @@ def test_current_index_follows_the_cursor(session) -> None:
     assert ct.current_index(session) == 0
     ct.advance_category(session)
     assert ct.current_index(session) == 1
+
+
+class TestSerialDramaBeatsPlotWords:
+    """★ **2026-10-29**:`大瓜` 的剧情词(恋爱/分手/道歉/官宣)在**短剧标题**里也会出现。
+
+    实测把 `《独宠作废》 第2集 …谈恋爱…这恋爱脑…` 判成了**大瓜**(大瓜"恋爱"×2=4 分,
+    影视"动漫"=2 分)。而 `第N集/全N集/番外/大结局` 是"这是连载剧"的**结构性证据**,
+    比剧情词硬 —— 两者同时出现时按影视算。
+
+    ⚠️ 只修 **大瓜 vs 影视** 这一对,不动其他类目之间验过的平票规则。
+    """
+
+    def test_episode_marker_wins(self) -> None:
+        assert ct.classify(
+            "《独宠作废》 第2集 让我拿皇位谈恋爱？这恋爱脑谁爱当谁当！#原创动漫") == "影视"
+        # 道歉 ×2 = 4 分 > 番外 2 分,但番外是结构证据 ⇒ 影视
+        assert ct.classify("《某某》番外 第3集 昨天道歉了今天又道歉") == "影视"
+
+    def test_real_gossip_is_untouched(self) -> None:
+        assert ct.classify("张三李四分手") == "大瓜"
+        assert ct.classify("某明星官宣恋情") == "大瓜"
+        assert ct.classify("某网红塌房 道歉") == "大瓜"

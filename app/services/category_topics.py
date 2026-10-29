@@ -180,6 +180,13 @@ def known_names(session, min_hits: int = 2) -> set[str]:
         select(NameLexicon).where(NameLexicon.hits >= min_hits))}
 
 
+#: 「这是**连载剧**」的结构性证据(`第12集` / `全80集` / `1-29集` / `番外` / `大结局`)。
+#: ⚠️ 它不是新类目、也不是新词表,只是 `classify` 里**大瓜 vs 影视**这一对的优先判据:
+#: 剧情词(恋爱/道歉)会同时出现在瓜和短剧标题里,而"集数"几乎只出现在短剧里。
+_SERIAL_RE = re.compile(
+    r"第\s*\d+\s*集|全\s*\d+\s*集|共\s*\d+\s*集|\d+\s*[-–~至]\s*\d+\s*集|番外|大结局")
+
+
 def classify(text: str, names: set[str] | None = None) -> str:
     """文本属于哪个类目?认不出返回空串(**不猜** —— 猜错会把词出到错的类里去)。
 
@@ -196,11 +203,20 @@ def classify(text: str, names: set[str] | None = None) -> str:
     """
     word = text or ""
     best, best_score = "", 0
+    scores: dict[str, int] = {}
     for cat, hints in categories().items():
         score = sum(word.count(h) * (1 if h in GENERIC_HINTS else 2) for h in hints)
+        scores[cat] = score
         if score > best_score:
             best, best_score = cat, score
     if best:
+        # ★ **2026-10-29 补一条结构性优先**:`大瓜` 的"恋爱/分手/道歉"这些**剧情词**
+        # 在短剧标题里也满天飞,于是实测把 `《独宠作废》第2集…谈恋爱…` 判成了大瓜
+        # (影视为 2 分、大瓜 4 分)。而 **`第N集/全N集/番外/大结局` 是"这是连载剧"的
+        # 结构性证据**,比剧情词硬 —— 两者同时出现时按影视算。
+        # ⚠️ **只在 大瓜 vs 影视 这一对上生效**,不动其他类目间的平票规则(那套 10-04 验过)。
+        if best == "大瓜" and scores.get("影视", 0) > 0 and _SERIAL_RE.search(word):
+            return "影视"
         return best
     # **弱信号**:话题词一个都没命中,但标题里带**已学到的人名** → 它是瓜的候选。
     # ⚠️ 用户原话是"如果带人名就**可去判断一下**" —— 是"去看看",**不是"直接收"**,
