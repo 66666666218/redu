@@ -1527,6 +1527,9 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
     _ai = ai_filter.filter_items(
         "douyin_peer" if peer else section, leads, settings,
         extra_context=_prior_note,
+        #: ★ 判定落库(供分数线校准):key 用 aweme_id,能和 `douyin_leads` 直接 join 出搬成结果。
+        session=session, user_id=user_id,
+        key_of=lambda ld_: str(ld_.get("aweme_id") or ld_.get("mark") or ""),
         text_of=lambda ld_: (
             f"{ld_.get('title') or ''} 作者:{ld_.get('author') or ''} "
             f"转发:{ld_.get('share_count') or 0} "

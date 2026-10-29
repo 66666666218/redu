@@ -224,6 +224,17 @@ class Settings(BaseSettings):
     #: 一次最多判多少条(超出的**原样放行**)—— 控制单次 token 成本。
     ai_filter_max_items: int = 40
     ai_filter_timeout: int = 45
+    # ---- AI 分数线**自动校准**(2026-10-29)见 app/services/ai_calibration.py ----
+    # 用「AI 分数 ↔ 真实搬成」的配对挑选阈值,平滑写入 `system_config: ai_min_score:<板块>`。
+    # ⚠️ 样本 < `ai_calibration_min_samples` 不调;一次最多动 1 分。
+    ai_calibration_enabled: bool = True
+    ai_calibration_cron: str = "11 10 * * 1"     # 每周一 10:11(避开 :05 member/:07 xunlei_group/:09 remote_sync)
+    ai_calibration_days: int = 21
+    ai_calibration_min_samples: int = 40
+    #: 「高热」门槛(转发数 ≥ N 算一条好资源)—— 校准的**标签**。
+    #: ⚠️ **别用"搬成"当标签**:实测 975 条里各分数档搬成率都是 64~65%(取决于口令机制,
+    #: 与内容价值无关);而 AI 分数与转发数强相关(0 → 均分 2.5,1000+ → 7.3)。
+    ai_calibration_hot_share: int = 100
     llm_narrate_limit: int = 3               # 每轮推送最多交给 LLM 解读的文章数
     focus_alert_enabled: bool = True   # 重点关键词告警(跨板块共振/板块内反复)开关
     focus_repeat_rounds: int = 3       # 板块内"反复出现"的轮数阈值(近24h同关键词出现≥N轮)

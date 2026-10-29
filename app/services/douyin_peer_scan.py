@@ -665,6 +665,8 @@ def push_works(works: list[dict], settings, session=None, user_id: int = 0) -> b
 
     _ai = ai_filter.filter_items(
         "douyin_peer", works, settings,
+        #: 判定落库(供分数线校准);作品没有"搬成"标签,但同 section 的线索有,按 aweme_id 区分。
+        session=session, user_id=user_id, key_of=lambda w: str(w.get("aweme_id") or ""),
         text_of=lambda w: (f"{w.get('title') or ''} 作者:{w.get('account_name') or ''} "
                            f"点赞:{w.get('likes') or 0}"))
     if not _ai.items:

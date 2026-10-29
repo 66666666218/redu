@@ -76,8 +76,81 @@ def _sections(settings) -> set[str]:
     return {x.strip() for x in raw.split(",") if x.strip()}
 
 
+def _effective_min_score(session, settings, section: str) -> int:
+    """分数线:**校准作业写的库值优先**,否则用配置默认值。
+
+    校准见 `ai_calibration`:它不是"拍脑袋调参",而是用**历史分数 ↔ 真实搬成**
+    算出来的(用户口径「可以根据之前的数据来进行策略决策」)。
+    ⚠️ 库值只接受 0~10 的整数;脏值/读不到一律回默认(绝不让配置把筛选弄挂)。
+    """
+    base = int(getattr(settings, "ai_filter_min_score", 6) or 0)
+    if session is None:
+        return base
+    try:
+        from app.db.models import SystemConfig
+
+        row = session.get(SystemConfig, f"ai_min_score:{section}")
+        if row is not None:
+            v = str(row.value or "").strip()
+            if v.isdigit():
+                return max(0, min(10, int(v)))
+    except Exception:  # noqa: BLE001 - 读配置失败不该挡住筛选
+        logger.debug("读 AI 分数线失败,用默认 %d", base, exc_info=True)
+    return base
+
+
+def _record_decisions(session, user_id: int, section: str, items: list[dict],
+                      texts: list[str], decisions: dict[int, dict], key_of) -> None:
+    """把**模型真的判过**的分数落库(`ai_filter_decisions`),供校准使用。
+
+    ⚠️ 只记 `llm` 判定;已存在的行只更新分数/理由/时间(同一 item 可能被再次判到)。
+    ⚠️ 用 **SAVEPOINT**(`begin_nested`):落库失败**不许连坐**调用方的事务
+    (与 `push_ledger.record` 同一条纪律 —— 台账是旁路)。
+    """
+    from datetime import datetime
+
+    if session is None or not user_id or not decisions:
+        return
+    from sqlalchemy import select
+
+    from app.db.models import AiFilterDecision
+
+    rows = []
+    for i, it in enumerate(items):
+        d = decisions.get(i)
+        if d is None:
+            continue
+        key = str(key_of(it) if key_of else "").strip()[:128] or _hash(texts[i])
+        rows.append({"key": key, "title": (texts[i] or "")[:255],
+                     "score": int(d.get("score") or 0), "keep": bool(d.get("keep")),
+                     "why": str(d.get("why") or "")[:64], "at": datetime.now()})
+    if not rows:
+        return
+    try:
+        with session.begin_nested():
+            keys = [r["key"] for r in rows]
+            have = {x.item_key: x for x in session.scalars(select(AiFilterDecision).where(
+                AiFilterDecision.user_id == user_id,
+                AiFilterDecision.section == section,
+                AiFilterDecision.item_key.in_(keys))).all()}
+            for r in rows:
+                row = have.get(r["key"])
+                if row is None:
+                    session.add(AiFilterDecision(
+                        user_id=user_id, section=section, item_key=r["key"],
+                        title=r["title"], score=r["score"], keep=r["keep"],
+                        why=r["why"], decided_at=r["at"]))
+                else:
+                    row.score, row.keep, row.why, row.decided_at = (
+                        r["score"], r["keep"], r["why"], r["at"])
+            session.flush()
+    except Exception:  # noqa: BLE001 - 旁路:落库失败不许挡住推送
+        logger.warning("AI 判定落库失败(不影响筛选)", exc_info=True)
+
+
 def filter_items(section: str, items: list[dict], settings=None, *,
-                 text_of=None, extra_context: str = "") -> Result:
+                 text_of=None, extra_context: str = "", session=None,
+                 user_id: int = 0, key_of=None) -> Result:
     """按 AI 判断筛一遍;失败/没开/不在名单时**原样返回**。
 
     `text_of(item) -> str` 用来构造喂给模型的文本(**标题优先**,可带作者/热度);
@@ -158,7 +231,10 @@ def filter_items(section: str, items: list[dict], settings=None, *,
             if len(_CACHE) > _CACHE_MAX:
                 _CACHE.clear()          # 简单粗暴:满了就清,语义上只是"多花一次钱"
 
-    min_score = int(getattr(settings, "ai_filter_min_score", 6) or 0)
+    #: ★ 先落库再按分数线筛 —— 被筛掉的分数同样是校准样本(它们的真实结果由来源表回填)。
+    _record_decisions(session, user_id, section, items, texts, decisions, key_of)
+
+    min_score = _effective_min_score(session, settings, section)
     min_keep = max(0, int(getattr(settings, "ai_filter_min_keep", 1) or 0))
 
     kept_with: list[tuple[int, dict | None, dict, int]] = []

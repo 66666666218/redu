@@ -481,6 +481,37 @@ class DouyinLead(Base):
     publish_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+class AiFilterDecision(Base):
+    """**AI 筛选的每次判定**(2026-10-29)—— 用来把「分数」和「真实结果」对起来校准分数线。
+
+    为什么必须落库:AI 分数本身没有对错,**只有"高分的那批是不是真的更容易搬成/更值得推"
+    能检验**。不存分数,下一次调整阈值就还是拍脑袋。
+
+    `item_key` = 该条在来源系统里的身份:`douyin` 用 `aweme_id`(能和
+    `douyin_leads.aweme_id` 直接 join 出"搬成没搬成");其它板块用标题哈希(暂时没有结果标签)。
+
+    ⚠️ 只记**模型真的判过**的(`source="llm"`);失败降级/没配 key 的一律不记 ——
+    否则"没筛过"会被当成"筛过且低分"。
+    """
+
+    __tablename__ = "ai_filter_decisions"
+    __table_args__ = (UniqueConstraint("user_id", "section", "item_key",
+                                       name="uq_ai_decision"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    section: Mapped[str] = mapped_column(String(32), index=True)
+    item_key: Mapped[str] = mapped_column(String(128), index=True)
+    title: Mapped[str] = mapped_column(String(255), default="")
+    score: Mapped[int] = mapped_column(Integer, default=0)
+    keep: Mapped[bool] = mapped_column(Boolean, default=False)
+    why: Mapped[str] = mapped_column(String(64), default="")
+    decided_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    #: 结果标签(`moved` / `""` 未判定)—— 由校准作业按来源表回填。
+    outcome: Mapped[str] = mapped_column(String(16), default="")
+    outcome_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class DouyinPeerWork(Base):
     """抖音**对标号**扫到的新作品(2026-10-29)。
 
