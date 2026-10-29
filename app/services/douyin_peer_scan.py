@@ -293,7 +293,7 @@ def _guard(raw: dict, where: str) -> None:
 
 def fetch_accounts(accounts: list[dict], settings, *, user_id: int = 1) -> dict[str, list[dict]]:
     """依次打开每个号的主页,返回 `{uid: 作品列表}`。**慢活,不做任何写库**。"""
-    limit = int(getattr(settings, "douyin_peer_max_works", 6) or 6)
+    limit = int(getattr(settings, "douyin_peer_max_works", 12) or 12)
 
     def _run(page) -> dict[str, list[dict]]:
         out: dict[str, list[dict]] = {}
@@ -381,8 +381,14 @@ def push_works(works: list[dict], settings, session=None, user_id: int = 0) -> b
             url = _md_safe(w.get("url") or "")
             work = f"[{title}]({url})" if url else title
             likes = int(w.get("likes") or 0)
+            #: ★ 账号名**可点主页**(2026-10-29):看到一个新号想追,点一下就到它的主页,
+            #: 不用再去抖音里搜名字(同名号还一堆)。
+            acct = _md_safe(w.get("account_name") or "—") or "—"
+            uid = str(w.get("account_uid") or "").strip()
+            if uid:
+                acct = f"[{acct}](https://www.douyin.com/user/{_md_safe(uid)})"
             elements.append(_col_set_row([
-                (_md_safe(w.get("account_name") or "—"), 3),
+                (acct, 3),
                 (work, 6),
                 (_md_safe(niche), 2),
                 (f"↗{likes}" if likes else "—", 1)]))
@@ -422,9 +428,11 @@ def run_for_user(session, user_id: int, settings) -> dict:
     works_total = 0
     new_works: list[dict] = []
     baselines: list[str] = []
+    failed: list[str] = []
     for acct in accts:
         got = fetched.get(acct["uid"])
         if got is None:                      # 这个号失败了,不推进 last_scan_at
+            failed.append(acct.get("name") or acct["uid"])
             continue
         works_total += len(got)
         #: 基线判据 = **这个号在作品表里一条都没有**(不是"本轮没扫到"),见纪律 1。
@@ -448,7 +456,7 @@ def run_for_user(session, user_id: int, settings) -> dict:
         mark_pushed(session, user_id, todo)
     return {"accounts": len(accts), "works": works_total, "new": len(new_works),
             "pushed": pushed, "pushed_n": len(todo) if pushed else 0,
-            "baselines": baselines, "pending": len(todo)}
+            "baselines": baselines, "failed": failed, "pending": len(todo)}
 
 
 def douyin_peer_tick(settings=None) -> int:
@@ -477,6 +485,10 @@ def douyin_peer_tick(settings=None) -> int:
                 if res.get("baselines"):
                     #: ⚠️ **必须写出来**:首次扫描只建基线、不推,不说就会被读成"没扫到"。
                     note += f" **建基线:{','.join(res['baselines'])}**"
+                if res.get("failed"):
+                    #: ⚠️ 逐号失败要**点名**(格式对齐 `chain_health._partial_failures` 的
+                    #: `失败:…`)—— 否则"3 个号里 1 个读不到"会被总数掩盖,体检也不会判黄。
+                    note += f" 失败:{','.join(res['failed'])}"
                 if res.get("note"):
                     note += f" · {res['note']}"
                 sent_total += int(res.get("pushed_n") or 0)

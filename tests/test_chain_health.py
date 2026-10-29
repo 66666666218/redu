@@ -398,3 +398,25 @@ def test_无等号解析规则本身也要有守卫(monkeypatch) -> None:
         assert "成功=0" in _row(db, "合成链")["detail"]
     finally:
         db.close()
+
+
+def test_抖音对标号按作品判_不按新判() -> None:
+    """★ 2026-10-29:对标号监控上线时**没进体检**,补上时指标选了 `作品` 而不是 `新`。
+
+    理由:`号4 作品24 新0` 是**常态**(号不是每轮都发东西)——
+    拿 `新` 当指标,连着几轮 `新0` 就会被判黄,把「安静」报成「坏了」;
+    而 `作品0` 才说明主页读不到内容(验证码/改版/登录态失效),那是真该查的。
+    """
+    db = _chain_session()
+    try:
+        for i in range(5):
+            _add_run(db, "douyin_peer", "号4 作品24 新0 推送无", minutes_ago=10 + i)
+        row = _row(db, "抖音·对标号")
+        assert "作品=24" in row["detail"]
+        assert row["level"] == GREEN, row
+
+        for i in range(5):
+            _add_run(db, "douyin_peer", "号4 作品0 新0 推送无", minutes_ago=i + 1)
+        assert _row(db, "抖音·对标号")["level"] == YELLOW, "连续读不到作品要判黄"
+    finally:
+        db.close()

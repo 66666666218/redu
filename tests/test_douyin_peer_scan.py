@@ -260,3 +260,41 @@ def test_fetch_accounts_all_failed_raises(monkeypatch) -> None:
     monkeypatch.setattr(dps, "_with_page", _fake_with_page)
     with pytest.raises(DouyinCdpError):
         dps.fetch_accounts([{"uid": "u1", "name": "A"}], _S())
+
+
+def test_run_for_user_names_failed_accounts(session, monkeypatch) -> None:
+    """★ 逐号失败要**点名** —— 否则「3 个号里 1 个读不到」会被总数掩盖,
+    体检的 `失败:…` 判据也看不到(`chain_health._partial_failures`)。"""
+    _acct(session, uid="u1", name="甲")
+    _acct(session, uid="u2", name="乙")
+
+    monkeypatch.setattr(dps, "fetch_accounts", lambda *a, **k: {
+        "u1": [{"aweme_id": "w1", "url": "https://d/w1", "title": "#抖音小游戏 新玩法",
+                "likes": 1, "niche": "小游戏", "account_uid": "u1",
+                "account_name": "甲", "author": "甲"}]})
+    monkeypatch.setattr(dps, "push_works", lambda *a, **k: True)
+
+    res = dps.run_for_user(session, 1, _S())
+    assert res["failed"] == ["乙"]
+
+
+def test_push_works_links_the_account_profile(monkeypatch) -> None:
+    """账号名要**可点主页** —— 看到新号想追时不用再去抖音里搜名字(同名号一堆)。"""
+    from app.services import feishu_client
+
+    sent: dict = {}
+
+    class _C:
+        def __init__(self, webhook, secret):
+            pass
+
+        def send_card(self, card):
+            sent["card"] = card
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+    dps.push_works([{
+        "aweme_id": "1", "url": "https://d/1", "title": "#抖音小游戏 新玩法",
+        "likes": 5, "niche": "小游戏", "account_name": "阿德",
+        "account_uid": "MS4wLjABAAAAx", "author": "阿德"}], _S())
+    assert "https://www.douyin.com/user/MS4wLjABAAAAx" in str(sent["card"])
