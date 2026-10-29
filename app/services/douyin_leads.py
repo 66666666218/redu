@@ -1494,6 +1494,17 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
 
     _counts = Counter(_res_key(x) for x in leads)
 
+    # ★ **推送去重**(2026-10-29 数据驱动):12 天台账里抖音 **62%** 的推送行是同一作品
+    # 在 24 小时内被重推 —— 这既是"群信息杂乱"的主因,也在白烧 AI 筛选的钱。
+    # ⚠️ 只在**本板块**内去重(不同板块的群不是一批人);`push_dedupe_hours=0` 关闭。
+    from app.services import push_ledger
+
+    _led_sec = "douyin_peer" if peer else section
+    leads, _dup = push_ledger.drop_recent(session, user_id, _led_sec, leads, settings)
+    if not leads:
+        logger.info("抖音线索:%d 条全部落在去重窗口内,本轮不推", _dup)
+        return False
+
     # ★ **AI 价值筛选**(2026-10-29,用户口径「每个板块都加上 AI 筛选」)。
     # **价值口径(用户原话)**:「有用的也就是意味着**资源发的多、转存人数多**」
     # ⇒ 把「同一资源本轮被几条视频在推」+ 转发数一起喂给模型。
@@ -1570,6 +1581,10 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
     if _ai.summary():
         #: 只在模型**真的筛过**时才写(`off/fallback` 返回空串,不给自己贴金)。
         _intro += f"\n**{_ai.summary()}**:已挡掉纯广告 / 无具体资源 / 过时的那些。"
+    if _dup:
+        #: 去重跳过多少也要说出来 —— 否则"这轮怎么只有 2 条"会让人以为漏采了。
+        _intro += (f"\n已跳过 {_dup} 条 "
+                   f"{int(getattr(settings, 'push_dedupe_hours', 24) or 0)} 小时内推过的。")
     if len(_groups) > 1:
         #: ⚠️ 只有一个赛道时不写这一行 —— 那会变成"一句话把卡片标题又说一遍"
         _intro += "\n**本轮赛道**:" + " · ".join(

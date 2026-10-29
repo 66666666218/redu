@@ -32,7 +32,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -110,6 +110,50 @@ def _norm_item(it: dict, section: str) -> dict[str, Any] | None:
         "metrics": mj[: _LIMITS["metrics"]],
     }
     return row
+
+
+def _key_of(it: dict) -> str:
+    """条目的**身份**,必须与 `_norm_item` 的 `item_key` 一致(去重要按同一把尺子)。"""
+    return (_first(it, _KEY_KEYS) or _first(it, _TITLE_KEYS) or _first(it, _URL_KEYS))[:255]
+
+
+def recent_keys(session: Session, user_id: int, section: str,
+                hours: float = 24) -> set[str]:
+    """这个板块最近 N 小时**已经推过**的 `item_key` 集合(`hours<=0` = 空集)。"""
+    if session is None or hours <= 0:
+        return set()
+    from sqlalchemy import select
+
+    from app.db.models import PushLedger
+
+    cutoff = datetime.now() - timedelta(hours=float(hours))
+    return set(session.scalars(select(PushLedger.item_key).where(
+        PushLedger.user_id == user_id,
+        PushLedger.section == section,
+        PushLedger.pushed_at >= cutoff)).all())
+
+
+def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
+                settings=None, hours: float | None = None) -> tuple[list[dict], int]:
+    """按**推送台账**去掉最近已经推过的条目 → `(保留, 去掉的条数)`。
+
+    ★ 2026-10-29 数据驱动的决定:12 天台账里同一 item 在 **24 小时内重推**的比例
+      —— B站 **53%**、抖音 **62%**、微博 43%、小红书/快手 38%、贴吧 33%。
+      这既是"群信息杂乱"的主因,也在白烧 AI 筛选的钱(同一句话反复判)。
+    ⇒ 推送前统一按 `push_dedupe_hours`(默认 24h,0=关)去重,**同一板块内**才去重
+      (不同板块的群不是一批人,跨板块去重会把别的群饿死)。
+    """
+    if settings is not None and hours is None:
+        hours = float(getattr(settings, "push_dedupe_hours", 24) or 0)
+    if hours is None:
+        hours = 24.0
+    if session is None or not items or float(hours) <= 0:
+        return list(items or []), 0
+    seen = recent_keys(session, user_id, section, float(hours))
+    if not seen:
+        return list(items), 0
+    kept = [it for it in items if _key_of(it) not in seen]
+    return kept, len(items) - len(kept)
 
 
 def record(session: Session, user_id: int, section: str, items: list[dict],

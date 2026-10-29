@@ -1881,3 +1881,34 @@ def test_historical_mark_counts_uses_past_rounds(session) -> None:
     session.commit()
     got = dl._historical_mark_counts(session, 1, {"甲", "乙", "丙"})
     assert got == {"甲": 2, "乙": 1}
+
+
+def test_push_leads_skips_items_within_dedupe_window(session, monkeypatch) -> None:
+    """★ 2026-10-29:同一板块 24h 内推过的作品不再推 —— 台账实测抖音 62% 的行是重推。"""
+    from datetime import datetime
+
+    from app.db.models import PushLedger
+    from app.services import feishu_client
+
+    session.add(PushLedger(user_id=1, section="douhot", item_key="aweme-1",
+                           title="t", pushed_at=datetime.now()))
+    session.commit()
+    sent: dict = {}
+
+    class _C:
+        def __init__(self, webhook, secret):
+            pass
+
+        def send_card(self, card):
+            sent["card"] = card
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+
+    class _S(_Settings):
+        push_dedupe_hours = 24
+
+    ok = dl.push_leads([{"mark": "某资源", "title": "《某资源》下载", "url": "https://d/1",
+                         "author": "甲", "keyword": "k", "aweme_id": "aweme-1"}],
+                       _S(), session=session, user_id=1)
+    assert ok is False and "card" not in sent

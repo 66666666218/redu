@@ -1053,6 +1053,13 @@ def push_items(items: list[dict], settings, session=None, user_id: int = 0) -> b
     webhook = webhook_for(settings, "zhihu")
     if not webhook:
         return False
+    # ★ **推送去重**(2026-10-29):同一板块内 24 小时内推过的不再推(数据:知乎重推率
+    # 只有 3%,但统一口径;真正的价值在 B站 53% / 抖音 62% 那几个板块)。
+    from app.services import push_ledger
+
+    items, _dup = push_ledger.drop_recent(session, user_id, "zhihu", items, settings)
+    if not items:
+        return False
     # ★ **AI 价值筛选**(2026-10-29,用户口径「每个板块都加上 AI 筛选」)。
     from app.services import ai_filter
 

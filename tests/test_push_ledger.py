@@ -199,3 +199,30 @@ class Test读窗口:
         pl.record(session, 1, "kuaishou", [{"title": "b"}], when=datetime(2026, 10, 14, 9))
         have = pl.boards_with_content(session, 1, datetime(2026, 10, 16), datetime(2026, 10, 17))
         assert have == {"wechat": 1}
+
+
+def test_drop_recent_filters_same_section_within_window(session) -> None:
+    """★ 2026-10-29 数据驱动:同一板块 24h 内推过的不再推(跨板块不去重)。"""
+    from datetime import datetime, timedelta
+
+    from app.db.models import PushLedger
+    from app.services import push_ledger as pl
+
+    now = datetime.now()
+    session.add_all([
+        PushLedger(user_id=1, section="bilibili", item_key="甲", title="甲",
+                   pushed_at=now - timedelta(hours=2)),
+        PushLedger(user_id=1, section="bilibili", item_key="乙", title="乙",
+                   pushed_at=now - timedelta(hours=30)),
+        PushLedger(user_id=1, section="kuaishou", item_key="丙", title="丙",
+                   pushed_at=now - timedelta(hours=2)),
+    ])
+    session.commit()
+
+    class _S:
+        push_dedupe_hours = 24
+
+    kept, dropped = pl.drop_recent(session, 1, "bilibili",
+                                   [{"name": "甲"}, {"name": "乙"}, {"name": "丙"}], _S())
+    assert [x["name"] for x in kept] == ["乙", "丙"]
+    assert dropped == 1
