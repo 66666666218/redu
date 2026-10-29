@@ -477,6 +477,40 @@ class DouyinLead(Base):
     publish_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+class DouyinPeerWork(Base):
+    """抖音**对标号**扫到的新作品(2026-10-29)。
+
+    **为什么单独一张表,而不是塞进 `douyin_leads`**:
+      · 线索表的口径是「标题里带《口令》/夸克标记的推广视频」,`lead_settlement`
+        还拿它算**线索级转化** —— 把**没有口令**的对标作品混进去会污染那套口径;
+      · 这张表只需要回答两件事:① **这个 vid 见没见过**(新作品判定/去重);
+        ② **哪一轮推出去的**(排查"为什么没收到")。
+
+    **为什么要有账号维度**:用户口径是「有很多小游戏的对标账号,**他们发了你就能看到**」
+    —— 关键词搜索返回的是"当前最热的作品"(实测大量是 1 周前/3 个月前的),
+    账号维度才有"新"的语义:同一个号这次没发,就一条都不该推。
+
+    `likes` 是主页卡片上的点赞数(拿不到就 0,**不编**);它只是给运营看热度,
+    **不参与任何结算**(线索那条口径在 `DouyinLead`)。
+    """
+
+    __tablename__ = "douyin_peer_works"
+    __table_args__ = (UniqueConstraint("user_id", "aweme_id", name="uq_douyin_peer_work"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    aweme_id: Mapped[str] = mapped_column(String(64), index=True)      # 去重键
+    account_uid: Mapped[str] = mapped_column(String(128), index=True)  # 对标号的 sec_uid
+    account_name: Mapped[str] = mapped_column(String(128), default="")
+    title: Mapped[str] = mapped_column(String(255), default="")
+    url: Mapped[str] = mapped_column(String(500), default="")
+    niche: Mapped[str] = mapped_column(String(16), default="")         # 赛道(`category_topics.niche_of`)
+    likes: Mapped[int] = mapped_column(Integer, default=0)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    #: 推出去的时刻。`None` = **建基线时见过、但没推**(首次扫描只记不推,见 `record_new`)。
+    pushed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class QuarkShareStat(Base):
     """夸克「我的分享」统计快照(share/update_list 接口采集)。
 

@@ -490,6 +490,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.quark_kouling import quark_kouling_tick
     from app.services.quark_link_pull import quark_link_pull_tick
     from app.services.douyin_leads import douyin_leads_tick
+    from app.services.douyin_peer_scan import douyin_peer_tick
     from app.services.xunlei_sync import xunlei_sync_tick
     from app.services.xunlei_group import xunlei_group_tick
     from app.services.pan_discovery import pan_discovery_tick
@@ -583,6 +584,11 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # → 推卡片(标题+视频链接+我方分享链)。搜索词来自**群组新资源 + 公众号已验证资源**;
         # **每天** 11:00 一轮(低频——它要开浏览器,一次几分钟)。
         (douyin_leads_tick, _get_settings().douyin_leads_cron, {"minute": 0, "hour": 11}, "douyin_leads", "wechat"),
+        # ★ **抖音对标号监控**(2026-10-29,用户口径「有很多小游戏的对标账号,他们发了你就能看到」):
+        # 按 **sec_uid** 打开主页看新作品 —— 只推"没见过"的 vid(首次扫描只建基线)。
+        # ⚠️ 必须与 `douyin_leads` **同侧**(都用本机那个 CDP 浏览器/登录态),且错开 :10。
+        (douyin_peer_tick, _get_settings().douyin_peer_cron, {"minute": 20, "hour": "*/3"},
+         "douyin_peer", "wechat"),
         # 网盘资源发现(2026-10-02):**直链型**那条 —— 按资源词搜知乎 → 抽夸克/百度盘链 →
         # 转存成我方链 → 推知乎群。与抖音(口令型)**形态不同但互补**,错开半小时跑。
         (pan_discovery_tick, _get_settings().pan_discovery_cron, {"minute": 30, "hour": 11}, "pan_discovery", "wechat"),
