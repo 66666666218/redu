@@ -1615,79 +1615,24 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
                    or (ld_.get("library") or {}).get("link")
                    or ld_.get("pan_url") or "")
 
-    _groups: dict[str, list[dict]] = {}
-    for ld in leads:
-        _groups.setdefault(_niche_of(ld), []).append(ld)
-    #: 组顺序:**非「其他」在前、条数少的在前**(稀缺赛道先看到),同类按名字稳定排序
-    _order = sorted(_groups,
-                    key=lambda n: (n == category_topics.NICHE_OTHER, len(_groups[n]), n))
-    _intro = (f"{label}上发现 **{len(leads)}** 条在推同类资源的视频。"
-              "已自动解析并把能拿到的**转存进我方网盘**,可直接取用。")
-    #: ★ **客户第一眼要的答案**(2026-10-29 用户「客户角度…更快速找到有用信息」):
-    #: 有几条能**直接取用**、分别落在哪个盘;剩下的只能看对标、需自己找。
-    _n_link = sum(1 for _x in leads if _link_of(_x))
-    _pan_cnt = Counter(_pan_name(_link_of(_x)) for _x in leads if _link_of(_x))
-    _pan_txt = " / ".join(f"{k or '网盘'} {v}" for k, v in _pan_cnt.most_common())
-    _intro += ("\n**可直取 " + str(_n_link) + " 条**"
-               + (f"({_pan_txt})" if _pan_txt else "")
-               + f" · 需自己找 {len(leads) - _n_link} 条")
-    if _ai.summary():
-        #: 只在模型**真的筛过**时才写(`off/fallback` 返回空串,不给自己贴金)。
-        _intro += f"\n**{_ai.summary()}**:已挡掉纯广告 / 无具体资源 / 过时的那些。"
-    if _dup:
-        #: 去重跳过多少也要说出来 —— 否则"这轮怎么只有 2 条"会让人以为漏采了。
-        _intro += (f"\n已跳过 {_dup} 条 "
-                   f"{int(getattr(settings, 'push_dedupe_hours', 24) or 0)} 小时内推过的。")
-    _fresh = freshness_gate.summary(len(leads), _stale, _unknown)
-    if _fresh:
-        _intro += f"\n{_fresh}"
-    if len(_groups) > 1:
-        #: ⚠️ 只有一个赛道时不写这一行 —— 那会变成"一句话把卡片标题又说一遍"
-        _intro += "\n**本轮赛道**:" + " · ".join(
-            f"{n} {len(_groups[n])}" for n in _order)
-
-    elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content": _intro}},
-        # **六列网格**(用户口径 2026-10-04):作者 / 作品 / 资源 / 视频 / 转发数 / 条数
-        # ⚠️ 两处可点(**照公众号那套**):「作品」点开是**抖音视频**、「资源」点开是**我方链**;
-        #    「资源」写的是**网盘名**(夸克/百度/迅雷)而**不是链接文本** —— 见 `_pan_name`。
-        _col_set_row([("**作者**", 3), ("**作品**", 5), ("**资源**", 2), ("**视频**", 2),
-                      ("**转发数**", 2), ("**条数**", 1)], grey=True)]
-
     def _lead_row(ld: dict) -> dict:
         """一条线索 → 六列网格行(拆出来只为让 `push_leads` 保持可读)。"""
-        info = ld.get("kouling") or {}
         author = _md_safe(ld.get("author") or "—")
         title = _md_safe(strip_others(ld.get("title") or ""))
         shown = title[:22] + ("…" if len(title) > 22 else "")
-        # ★ **发布时间标记**(2026-10-16 用户口径:一个钟内的 = 🆕,其余给到分钟)——
-        #   顺序本来就新→旧(`find_leads` 排好了),这里只补标记。
+        # ★ **发布时间标记**(2026-10-16 用户口径:一个钟内的 = 🆕,其余给到分钟)。
         _when = _publish_mark(ld.get("publish_at"))
         if _when:
             shown = f"{shown} {_when}"
         vurl = _md_safe(ld.get("url") or "")
-        # 「作品」列:标题可点 → **我方网盘链**(不是抖音视频!)
-        # ⚠️⚠️ **2026-10-06 修,这是一次实现错误**:`26b6d69`(10-04)那条提交的说明里
-        # 用户原话是「资源不要直接是链接形式,**跟公众号一样点作品就能跳转**」——
-        # 而公众号卡片里标题跳的**正是我方转存链**(见 `_listen.py::_push_listen` 的 `article_md`)。
-        # 当时却实现成"标题 → 抖音视频",后果:① **点标题拿不到网盘**(用户报的就是这个);
-        # ② 同一张卡上视频被链**两次**(这里一次 + 后面「▶视频」列一次),纯冗余。
-        # 现在两处分工:标题 → 网盘,**▶视频** → 视频。
-        # ★ **口令没解出来时的第二来源:资源库里现成的那条**(2026-10-11)。
-        #   有它,标题就**点得动** —— 与公众号卡片同形(那边也是"抽到链就挂标题上")。
-        _lib = ld.get("library") or {}
-        #: 这条线索**能用的那条链**(我方链优先,其次库里现成的那条)。它同时决定两列:
+        #: 这条线索**能用的那条链**(我方链 > 库里现成链 > 正文直链)。它同时决定两列:
         #: 「作品」列挂它就**可点**,「资源」列写它落在**哪个盘**。
         _raw_our = _link_of(ld)
         our = _md_safe(_raw_our)
         work = f"[{shown}]({our})" if our else shown
-        # 转发量**独立成列**(原来并进作品列,六列版式下挪出来)。没有就不显示,
-        # 不拿 0 冒充有数据 —— 口径见 `DouyinLead` 的注释(它是**别人视频**的转发量)。
+        # 转发量**独立成列**;没有就不显示,不拿 0 冒充有数据。
         sc = int(ld.get("share_count") or 0)
-        # 「资源」列 = **只写盘名**(用户口径 2026-10-14:「**这些提醒没必要可以去掉**」)。
-        # ⚠️ **口径变更**:不再写「(转过)/(库里已有)/👥已加群/⏸网盘已满」这类注释 ——
-        # 那些是**我们的内部状态**(谁搬的、为什么没搬成),客户只需要"这条能不能取用、在哪个盘"。
-        # 于是这一列只剩两种值:**有链 ⇒ `🔴夸克/🔴迅雷/🔴百度`;没链 ⇒ `—`**。
-        # 链接仍统一由「作品」列承担(资源列**不带链接**,与 10-04 口径一致)。
+        # 「资源」列 = **只写盘名**(有链 ⇒ 🔴夸克/🔴迅雷/🔴百度;没链 ⇒ —)。
         _pan = _pan_name(_raw_our)
         res = f"🔴{_pan}" if _pan else "—"
         return _col_set_row([
@@ -1698,45 +1643,84 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
             (f"↗{sc}" if sc else "—", 2),
             (str(_counts.get(_res_key(ld), 1)), 1)])
 
-    for niche in _order:
-        if len(_groups) > 1:
-            #: ⚠️ 用 `div` 而不是 `column_set` —— 分组标题**不是数据行**,
-            #: 混进网格会让"表头 + N 行"的判据失真(`tests/test_douyin_leads.py` 靠它)。
-            elements.append({"tag": "div", "text": {"tag": "lark_md",
-                "content": f"**▍{niche}** · {len(_groups[niche])} 条"}})
-        #: ★ 组内**可直取的排前面**(同档再按发布时间新→旧)—— 客户先拿到能用的。
-        for ld in sorted(_groups[niche],
-                         key=lambda x: (not _link_of(x), -(int(x.get("publish_at") or 0)))):
-            elements.append(_lead_row(ld))
-    card = {
-        "config": {"wide_screen_mode": True},
-        # ⚠️ **不带头部品牌名**(用户口径 2026-10-04:"**不要带念飞思雪**")。
-        # 这是对 2026-10-02 那条"品牌词只进标题"口径的**变更** —— 当时想让品牌露个脸,
-        # 但实操下来:① 卡片是发到**客户群/抖音群**的,头部挂运营方品牌**没有给客户的价值**;
-        # ② 与「资源」列**同一动机** —— 客户群里不该暴露"这是谁在运营"。
-        # (真正需要品牌的地方是**作品标题里的替换**(`_rebrand`),那套没动。)
-        "header": {"template": "purple", "title": {"tag": "plain_text",
-                                                   "content": f"🎯 {label}推广线索 · {len(leads)} 条"}},
-        "elements": elements,
-    }
-    try:
-        ok = FeishuClient(webhook, getattr(settings, "feishu_secret", "")).send_card(card)
-    except Exception:  # noqa: BLE001 - 推送失败不该影响采集
-        logger.exception("抖音线索推送失败")
-        return False
-    if ok and session is not None and user_id:
-        # ★ **推送台账**(2026-10-16):板块日结/周结(`board_digest`)读它。
-        #   ⚠️ 记的是**落地的那个群**:走同行群时就记 `douyin_peer`,而不是 `douhot`
-        #   —— 日结要发回"内容实际出现的那个群",否则总结会落到没人看过内容的群里。
-        from app.services import push_ledger
 
-        #: ★ **台账要带解析后的链**(2026-10-29 修):线索的链在 `kouling.our_url` /
-        #: `library.link` 里**嵌套**着,而台账只认顶层的 `pan_url` ⇒ 实测 1,495 行
-        #: douyin_peer **pan_url 全空**,日结/周结里「资源」整列是「—」,客户以为没链。
-        _led = [{**ld, "pan_url": _link_of(ld)} for ld in leads]
-        push_ledger.record(session, user_id,
-                           "douyin_peer" if peer else section, _led)
-    return ok
+    #: ★ **按"能不能直接用"分批**(2026-10-30,客户视角):可直取的先发一张、
+    #: 只能对标的另发一张 —— 客户先拿货、再看行情,不必在长卡里自己挑。
+    _with_link = [x for x in leads if _link_of(x)]
+    _no_link = [x for x in leads if not _link_of(x)]
+
+    def _build_card(subset: list[dict], suffix: str) -> dict:
+        groups: dict[str, list[dict]] = {}
+        for ld in subset:
+            groups.setdefault(_niche_of(ld), []).append(ld)
+        order = sorted(groups, key=lambda n: (n == category_topics.NICHE_OTHER,
+                                              len(groups[n]), n))
+        n_link = sum(1 for x in subset if _link_of(x))
+        pan_cnt = Counter(_pan_name(_link_of(x)) for x in subset if _link_of(x))
+        pan_txt = " / ".join(f"{k or '网盘'} {v}" for k, v in pan_cnt.most_common())
+        intro = f"{label}上发现 **{len(subset)}** 条在推同类资源的视频。"
+        if n_link:
+            intro += (f"\n**可直取 {n_link} 条**" + (f"({pan_txt})" if pan_txt else "")
+                      + " —— 点作品标题即可打开对应网盘。")
+        else:
+            intro += ("\n**这些条暂无可直取链,只能看对标作品**(「资源」列全为 —);"
+                      "先看别人怎么推,等转存成功再取用。")
+        if _ai.summary():
+            intro += f"\n**{_ai.summary()}**:已挡掉纯广告 / 无具体资源 / 过时的那些。"
+        if _dup:
+            intro += (f"\n已跳过 {_dup} 条 "
+                      f"{int(getattr(settings, 'push_dedupe_hours', 24) or 0)} 小时内推过的。")
+        n_unknown = sum(1 for x in subset if not int(x.get("publish_at") or 0))
+        fresh = freshness_gate.summary(len(subset), 0, n_unknown)
+        if fresh:
+            intro += f"\n{fresh}"
+        if len(groups) > 1:
+            #: ⚠️ 只有一个赛道时不写这一行 —— 那会变成"一句话把卡片标题又说一遍"
+            intro += "\n**本轮赛道**:" + " · ".join(
+                f"{n} {len(groups[n])}" for n in order)
+        els: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content": intro}},
+            # **六列网格**(用户口径 2026-10-04):作者 / 作品 / 资源 / 视频 / 转发数 / 条数
+            _col_set_row([("**作者**", 3), ("**作品**", 5), ("**资源**", 2), ("**视频**", 2),
+                          ("**转发数**", 2), ("**条数**", 1)], grey=True)]
+        for niche in order:
+            if len(groups) > 1:
+                #: ⚠️ 用 `div` 而不是 `column_set` —— 分组标题**不是数据行**,
+                #: 混进网格会让"表头 + N 行"的判据失真(`tests/test_douyin_leads.py` 靠它)。
+                els.append({"tag": "div", "text": {"tag": "lark_md",
+                    "content": f"**▍{niche}** · {len(groups[niche])} 条"}})
+            for ld in sorted(groups[niche],
+                             key=lambda x: -(int(x.get("publish_at") or 0))):
+                els.append(_lead_row(ld))
+        return {
+            "config": {"wide_screen_mode": True},
+            # ⚠️ **不带头部品牌名**(用户口径 2026-10-04:"**不要带念飞思雪**")。
+            "header": {"template": "purple", "title": {"tag": "plain_text",
+                "content": f"🎯 {label}推广线索 · {len(subset)} 条{suffix}"}},
+            "elements": els,
+        }
+
+    sent_any = False
+    for subset, suffix in ((_with_link, " · 可直取"),
+                           (_no_link, " · 只能对标(暂无盘链)")):
+        if not subset:
+            continue
+        try:
+            ok = FeishuClient(webhook, getattr(settings, "feishu_secret", "")).send_card(
+                _build_card(subset, suffix))
+        except Exception:  # noqa: BLE001 - 推送失败不该影响采集
+            logger.exception("抖音线索推送失败")
+            ok = False
+        if ok and session is not None and user_id:
+            # ★ **推送台账**(2026-10-16):板块日结/周结(`board_digest`)读它。
+            #   ⚠️ 记的是**落地的那个群**;⚠️ 链在 `kouling.our_url`/`library.link` 里嵌套,
+            #   台账只认顶层 `pan_url` ⇒ 必须在这里展开(2026-10-29 修,实测 1,495 行全空)。
+            from app.services import push_ledger
+
+            _led = [{**ld, "pan_url": _link_of(ld)} for ld in subset]
+            push_ledger.record(session, user_id,
+                               "douyin_peer" if peer else section, _led)
+        sent_any = sent_any or ok
+    return sent_any
 
 
 def _freshness_summary(leads: list[dict]) -> str:

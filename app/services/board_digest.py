@@ -121,6 +121,16 @@ def render_card(data: dict, period: str, top: int = 8,
     #: **有盘链 0 条**;同期的 weibo_peer 是 82% / 69%)。
     #: ⇒ 这种板块改叫「**线索**」:表头换掉、行里不再挂「· —」,并明说"暂无盘链、点看作品"。
     lead_mode = bool(items) and not any(str(g.get("pan_url") or "") for g in items)
+    #: ★ **按赛道分组**(2026-10-30 用户「日结也按赛道分组」)。
+    #: 日结是客户看"昨天给了什么"的主入口;不分赛道时,漫剧/短剧会把资料和软件淹掉。
+    from app.services import category_topics
+
+    _groups: dict[str, list] = {}
+    for g in items:
+        _groups.setdefault(
+            category_topics.display_niche(str(g.get("title") or "")), []).append(g)
+    _order = sorted(_groups, key=lambda n: (n == category_topics.NICHE_OTHER,
+                                            len(_groups[n]), n))
     head = (f"📊 **{label} · {spec['title']}** —— {when}一共 "
             f"**{n_res} 个{'线索' if lead_mode else '资源'}**")
     if int(data.get("repeats") or 0):
@@ -132,6 +142,9 @@ def render_card(data: dict, period: str, top: int = 8,
     if lead_mode:
         head += ("\n**本板块本轮是线索(暂无盘链)** —— 点「看作品」可以看原帖,"
                  "盘链要等转存成功后才有")
+    if len(_groups) > 1:
+        #: 赛道构成写在脸上 —— 客户一眼看出"昨天这批里漫剧/短剧各多少"。
+        head += "\n**赛道**:" + " · ".join(f"{n} {len(_groups[n])}" for n in _order)
     if int(part[1]) > 1:
         head += f" · 第 {int(part[0])}/{int(part[1])} 部分"
     howto = ("资源名点开即取用(标注的是网盘);「**看作品**」点开是那条原帖,"
@@ -148,23 +161,31 @@ def render_card(data: dict, period: str, top: int = 8,
         elements.append({"tag": "div", "text": {"tag": "lark_md",
                                                 "content": f"{when}没有新的内容。"}})
         return _card(elements, label)
-    for idx, g in enumerate(items, int(start_rank or 1)):
-        name = _md_safe(strip_others(str(g.get("title") or "")))[:28] or "—"
-        pan_url = str(g.get("pan_url") or "")
-        pan = str(g.get("pan_type") or "") or _pan_name(pan_url)
-        #: ⚠️ 没有盘链时:整块都是线索的板块**只写名字**(一整列破折号就是"这张卡没内容"的观感);
-        #: 但**混合**清单里那条没链的仍要留「· —」—— 否则会被读成"我们忘了给它配链"。
-        cell = (f"[{name}]({_md_safe(pan_url)})" + (f" · 🔴{pan}" if pan else "")
-                if pan_url else (name if lead_mode else f"{name} · —"))
-        #: ★ 2026-10-26:**带序号**,让"按热度排"这件事在卡片上看得见(否则只是一串没有次序感的行)
-        cell = f"**{idx}.** {cell}"
-        #: ★ 被反复推荐的那个要有**看得见的标记**:客户抱怨的就是"同一条反复出现"。
-        #: 挂在**资源**那一格(它最宽),而不是挤在「对标作品」里 —— 那里本来就有链接。
-        if int(g.get("pushes") or 1) > 1:
-            cell += f" · 🔁{g['pushes']}次"
-        url = str(g.get("url") or "")
-        work = f"[▶ 看作品]({_md_safe(url)})" if url else "—"
-        elements.append(_col_set_row([(cell, 5), (work, 3), (metrics_md(_metrics_of(g)), 2)]))
+    idx = int(start_rank or 1)
+    for niche in _order:
+        if len(_groups) > 1:
+            #: ⚠️ 分组标题用 `div`(不是 column_set)—— 与实时卡同一手法,
+            #: 混进网格会让"表头 + N 行"的判据失真。
+            elements.append({"tag": "div", "text": {"tag": "lark_md",
+                "content": f"**▍{niche}** · {len(_groups[niche])} 条"}})
+        for g in _groups[niche]:
+            name = _md_safe(strip_others(str(g.get("title") or "")))[:28] or "—"
+            pan_url = str(g.get("pan_url") or "")
+            pan = str(g.get("pan_type") or "") or _pan_name(pan_url)
+            #: ⚠️ 没有盘链时:整块都是线索的板块**只写名字**(一整列破折号就是"这张卡没内容"的观感);
+            #: 但**混合**清单里那条没链的仍要留「· —」—— 否则会被读成"我们忘了给它配链"。
+            cell = (f"[{name}]({_md_safe(pan_url)})" + (f" · 🔴{pan}" if pan else "")
+                    if pan_url else (name if lead_mode else f"{name} · —"))
+            #: ★ 2026-10-26:**带序号**,让"按热度排"这件事在卡片上看得见。
+            cell = f"**{idx}.** {cell}"
+            #: ★ 被反复推荐的那个要有**看得见的标记**:客户抱怨的就是"同一条反复出现"。
+            if int(g.get("pushes") or 1) > 1:
+                cell += f" · 🔁{g['pushes']}次"
+            url = str(g.get("url") or "")
+            work = f"[▶ 看作品]({_md_safe(url)})" if url else "—"
+            elements.append(_col_set_row([(cell, 5), (work, 3),
+                                          (metrics_md(_metrics_of(g)), 2)]))
+            idx += 1
     #: ⚠️ 这里比的是**资源数**,不是"推送行数" —— 拿行数比会算出"还有 1 条"这种鬼话
     #: (2 个资源、其中一个推了 2 次 ⇒ 3 行),而客户要的是"还有几个资源没列出来"。
     #: ★ **分卡时不许说这句**(2026-10-25):第 1/n 部分本来就没列全,再说一句

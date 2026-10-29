@@ -575,3 +575,17 @@ class Test周结日不发日结:
         assert bd.run_board_digest_all_users("daily", settings=_S5(), session=session,
                                             now=self.MON) == 1
         assert calls == ["https://example.com/xhs"]
+
+
+def test_digest_groups_rows_by_niche(session) -> None:
+    """★ 2026-10-30 用户「日结也按赛道分组」:漫剧/短剧不能把资料软件淹掉。"""
+    _seed(session, "douyin_peer", "《某剧》第2集")
+    _seed(session, "douyin_peer", "四级真题 pdf")
+    since, until, _ = bd.window_of("daily", datetime.now())
+    data = bd.build(session, 1, "douyin_peer", since, until, top=0)
+    card = bd.render_card(data, "daily", top=0)
+    blob = json.dumps(card, ensure_ascii=False)
+    assert "**赛道**" in blob, "卡头要写赛道构成"
+    assert "**▍" in blob, "每组要有小标题(div,不是 column_set)"
+    #: 序号连续,不因分组重来
+    assert "**1.**" in blob and "**2.**" in blob

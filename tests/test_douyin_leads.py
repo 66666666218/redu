@@ -1942,18 +1942,18 @@ def test_push_leads_drops_stale_items(monkeypatch) -> None:
     assert ok is False and "card" not in sent
 
 
-def test_push_leads_summary_counts_actionable_links(session, monkeypatch) -> None:
-    """★ 2026-10-29 客户视角:卡片第一眼要看到**几条能直接取用、在哪个盘**。"""
+def test_push_leads_splits_actionable_and_benchmark_cards(session, monkeypatch) -> None:
+    """★ 2026-10-30 客户视角:**按"能不能直接用"分批** —— 可直取先发一张、只能对标另发一张。"""
     from app.services import feishu_client
 
-    sent: dict = {}
+    cards: list[dict] = []
 
     class _C:
         def __init__(self, webhook, secret):
             pass
 
         def send_card(self, card):
-            sent["card"] = card
+            cards.append(card)
             return True
 
     monkeypatch.setattr(feishu_client, "FeishuClient", _C)
@@ -1966,15 +1966,10 @@ def test_push_leads_summary_counts_actionable_links(session, monkeypatch) -> Non
                      "our_url": "https://pan.quark.cn/s/AAA"}},
     ]
     dl.push_leads(leads, _Settings(), session=session, user_id=1)
-    intro = sent["card"]["elements"][0]["text"]["content"]
-    assert "可直取 1 条" in intro and "夸克 1" in intro and "需自己找 1 条" in intro
-
-    #: 组内**可直取的排前面**
-    import json
-
-    blob = json.dumps(sent["card"], ensure_ascii=False)
-    #: ⚠️ 卡片会把别人的《…》删掉,所以按**去掉书名号后的标题**看顺序
-    assert blob.index("第3集") < blob.index("第2集")
+    assert len(cards) == 2, "应拆成两张卡:可直取 / 只能对标"
+    first, second = str(cards[0]), str(cards[1])
+    assert "可直取 1 条" in first and "夸克 1" in first and "第3集" in first
+    assert "只能对标" in second and "第2集" in second and "第3集" not in second
 
 
 def test_push_leads_ledger_records_the_resolved_link(session, monkeypatch) -> None:
