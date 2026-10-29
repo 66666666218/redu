@@ -1504,6 +1504,15 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
     if not leads:
         logger.info("抖音线索:%d 条全部落在去重窗口内,本轮不推", _dup)
         return False
+    # ★ **新鲜度闸门**(2026-10-29):采集侧已有 7 天窗口,这里**再兜一道** ——
+    # 采集窗口可配置、推送窗口也要可配置;两处口径同源(`PUSH_FRESH_DAYS`)。
+    from app.services import freshness_gate
+
+    leads, _stale, _unknown = freshness_gate.split_fresh(leads, settings)
+    if not leads:
+        logger.info("抖音线索:%d 条全是 %d 天前的旧内容,本轮不推", _stale,
+                    int(getattr(settings, "push_fresh_days", 7) or 0))
+        return False
 
     # ★ **AI 价值筛选**(2026-10-29,用户口径「每个板块都加上 AI 筛选」)。
     # **价值口径(用户原话)**:「有用的也就是意味着**资源发的多、转存人数多**」
@@ -1585,6 +1594,9 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
         #: 去重跳过多少也要说出来 —— 否则"这轮怎么只有 2 条"会让人以为漏采了。
         _intro += (f"\n已跳过 {_dup} 条 "
                    f"{int(getattr(settings, 'push_dedupe_hours', 24) or 0)} 小时内推过的。")
+    _fresh = freshness_gate.summary(len(leads), _stale, _unknown)
+    if _fresh:
+        _intro += f"\n{_fresh}"
     if len(_groups) > 1:
         #: ⚠️ 只有一个赛道时不写这一行 —— 那会变成"一句话把卡片标题又说一遍"
         _intro += "\n**本轮赛道**:" + " · ".join(

@@ -1010,6 +1010,8 @@ def sync(session, user_id: int, settings=None) -> dict:
             ok += 1
             items.append({"title": c["title"], "author": c["author"],
                           "source_url": c["source_url"], "share_url": our, "code": code,
+                          # ★ **原帖发布时间**(2026-10-29):推送侧新鲜度闸门要用它。
+                          "publish_at": c.get("publish_at"),
                           # ★ 互动数带进卡(2026-10-16):三个候选源(知乎/微博/贴吧)都给了,
                           #   只是这一步没接 ⇒ 卡上「对标数据」恒空。
                           "metrics": dict(c.get("metrics") or {})})
@@ -1060,6 +1062,15 @@ def push_items(items: list[dict], settings, session=None, user_id: int = 0) -> b
     items, _dup = push_ledger.drop_recent(session, user_id, "zhihu", items, settings)
     if not items:
         return False
+    # ★ **新鲜度闸门**(2026-10-29 用户口径「所有板块都要新鲜度检查」)。
+    # ⚠️ 它**只决定推什么**,不改上面的转存闸门(`pan_discovery_max_age_days`)。
+    from app.services import freshness_gate
+
+    items, _stale, _unknown = freshness_gate.split_fresh(items, settings)
+    if not items:
+        logger.info("公开平台:%d 条全是 %d 天前的旧内容,本轮不推", _stale,
+                    int(getattr(settings, "push_fresh_days", 7) or 0))
+        return False
     # ★ **AI 价值筛选**(2026-10-29,用户口径「每个板块都加上 AI 筛选」)。
     from app.services import ai_filter
 
@@ -1081,7 +1092,11 @@ def push_items(items: list[dict], settings, session=None, user_id: int = 0) -> b
         f"「**资源**」点开是我方链、可直接取用;「**原帖**」点开是对标作品的出处;"
         f"「**对标数据**」= 那条原帖的热度。"
         + (f"\n**{_ai.summary()}**:已挡掉纯广告 / 无具体资源 / 过时的那些。"
-           if _ai.summary() else "")}},
+           if _ai.summary() else "")
+        + (f"\n已跳过 {_dup} 条 {int(getattr(settings, 'push_dedupe_hours', 24) or 0)} 小时内推过的。"
+           if _dup else "")
+        + (f"\n{freshness_gate.summary(len(items), _stale, _unknown)}"
+           if freshness_gate.summary(len(items), _stale, _unknown) else "")}},
         # ★ **「原帖」独立成列**(2026-10-16 用户口径「别的平台也应该保持这个模式:
         #   **有原文,有网盘**」)。`source_url` **本来就在 items 里**(见上面 append),
         #   只是从来没渲染出来 ⇒ 员工看不到"这条资源是从哪个帖子里发现的",无法核对对标作品。

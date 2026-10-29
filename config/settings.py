@@ -241,6 +241,14 @@ class Settings(BaseSettings):
     #    小红书/快手 38%、贴吧 33%。这是"群信息杂乱"的主因,也在白烧 AI 筛选的钱。
     # ⚠️ **只在同一板块内去重**:不同板块的群不是一批人,跨板块去重会把别的群饿死。
     push_dedupe_hours: int = 24
+    # ---- 推送新鲜度闸门(2026-10-29)见 app/services/freshness_gate.py ----
+    # 用户口径:「**全部都需要新鲜度检查,所有板块不要都跟知乎一样占比这么少**」。
+    # 推送前按**发布时间**裁:`PUSH_FRESH_DAYS` 天以外的不给客户看(0=关)。
+    # ⚠️ 只影响"推什么",**不动采集/转存的存量**(`pan_discovery_max_age_days` 是另一道闸)。
+    push_fresh_days: int = 7
+    #: 判不了时间的条目是否放行(默认放行):不少源就是不给时间,
+    #: 拿"不知道"当"老"会把整条板堵死;卡片上会单列「无时间 N」。
+    push_fresh_allow_unknown: bool = True
     llm_narrate_limit: int = 3               # 每轮推送最多交给 LLM 解读的文章数
     focus_alert_enabled: bool = True   # 重点关键词告警(跨板块共振/板块内反复)开关
     focus_repeat_rounds: int = 3       # 板块内"反复出现"的轮数阈值(近24h同关键词出现≥N轮)

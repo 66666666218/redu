@@ -516,6 +516,11 @@ def probe(session, user_id: int, settings=None, platforms: list[str] | None = No
                           #   ⇒ 卡上原来看不到"是谁在推、热度多少"。
                           "author": str((hits[0] or {}).get("name") or ""),
                           "metrics": dict((hits[0] or {}).get("metrics") or {}),
+                          # ★ **发布时间**(2026-10-29 用户口径「所有板块都要新鲜度检查」):
+                          # 取**最新那一条命中**的时间 —— 这个资源本轮还在被发,就算新鲜。
+                          # 各源给不给时间不一样(微博/B站给),不给就是 0 → 闸门按"不知道"处理。
+                          "publish_at": max((int(h.get("publish_at") or 0) for h in hits),
+                                            default=0),
                           "link": _library_link(session, user_id, name)})
         logger.info("跨平台热度:%s 命中资源 %d 个(合并前 %d 个关键词)",
                     plat, len(merged), len({r.get("keyword") for r in rows}))
@@ -660,6 +665,16 @@ def push_items(items: list[dict], settings, detail: dict | None = None,
             if detail is not None:
                 detail[plat] = f"{int(getattr(settings, 'push_dedupe_hours', 24) or 0)}h 内已推过"
             continue
+        # ★ **新鲜度闸门**(2026-10-29 用户口径「所有板块都要新鲜度检查」):
+        # 按**发布时间**裁,`PUSH_FRESH_DAYS` 天以外的不给客户看;判不了时间的放行并单列。
+        from app.services import freshness_gate
+
+        group, _stale, _unknown = freshness_gate.split_fresh(group, settings)
+        if not group:
+            if detail is not None:
+                detail[plat] = (f"全是 {int(getattr(settings, 'push_fresh_days', 7) or 0)} "
+                                f"天前的旧内容")
+            continue
         # ★ **AI 价值筛选**(2026-10-29,用户口径「每个板块都加上 AI 筛选」)。
         # 一个平台一个平台判;模型失败/没配 key ⇒ 原样全推,`summary()` 为空不贴金。
         from app.services import ai_filter
@@ -689,7 +704,9 @@ def push_items(items: list[dict], settings, detail: dict | None = None,
             + (f"\n**{_ai.summary()}**:已挡掉纯广告 / 无具体资源 / 过时的那些。"
                if _ai.summary() else "")
             + (f"\n已跳过 {_dup} 条 {int(getattr(settings, 'push_dedupe_hours', 24) or 0)} 小时内推过的。"
-               if _dup else "")}},
+               if _dup else "")
+            + (f"\n{freshness_gate.summary(len(group), _stale, _unknown)}"
+               if freshness_gate.summary(len(group), _stale, _unknown) else "")}},
             # ★ **对标账号 / 对标数据 两列是 2026-10-16 补的**(用户口径:网盘监控只看 5 个东西 ——
             #   对标账号 / 对标作品 / 对标数据 / 资源 / 可用链)。原来只有前两个 + 平台 + 内容数。
             #   ⚠️ **平台列去掉**:这张卡本来就是**按平台分开发**的,表头已经写明是哪个平台。

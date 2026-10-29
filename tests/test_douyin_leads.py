@@ -1912,3 +1912,31 @@ def test_push_leads_skips_items_within_dedupe_window(session, monkeypatch) -> No
                          "author": "甲", "keyword": "k", "aweme_id": "aweme-1"}],
                        _S(), session=session, user_id=1)
     assert ok is False and "card" not in sent
+
+
+def test_push_leads_drops_stale_items(monkeypatch) -> None:
+    """★ 2026-10-29「所有板块都要新鲜度检查」:10 天前的线索不给客户看。"""
+    import time
+
+    from app.services import feishu_client
+
+    sent: dict = {}
+
+    class _C:
+        def __init__(self, webhook, secret):
+            pass
+
+        def send_card(self, card):
+            sent["card"] = card
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+
+    class _S(_Settings):
+        push_fresh_days = 7
+
+    ok = dl.push_leads([{"mark": "老资源", "title": "《老资源》下载", "url": "https://d/1",
+                         "author": "甲", "keyword": "k",
+                         "publish_at": int(time.time()) - 10 * 86400}],
+                       _S(), session=None, user_id=1)
+    assert ok is False and "card" not in sent
