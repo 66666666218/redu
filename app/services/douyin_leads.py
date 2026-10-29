@@ -1575,8 +1575,8 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
     from app.services import category_topics
 
     def _niche_of(ld_: dict) -> str:
-        """这条线索属于哪个赛道 —— **标题**为主、口令名为辅(标题常只有剧名、没有类目词)。"""
-        return category_topics.niche_of(
+        """这条线索属于哪个赛道 —— **影视再细分**(漫剧/短剧/…),卡片分组一眼看得出类型。"""
+        return category_topics.display_niche(
             f"{ld_.get('title') or ''} {ld_.get('mark') or ''}")
 
     _groups: dict[str, list[dict]] = {}
@@ -1719,7 +1719,7 @@ def _niche_summary(leads: list[dict]) -> str:
 
     from app.services import category_topics
 
-    cnt = Counter(category_topics.niche_of(
+    cnt = Counter(category_topics.display_niche(
         f"{ld.get('title') or ''} {ld.get('mark') or ''}") for ld in leads)
     return "/".join(f"{k}{v}" for k, v in sorted(
         cnt.items(), key=lambda kv: (kv[0] == category_topics.NICHE_OTHER, kv[1], kv[0])))

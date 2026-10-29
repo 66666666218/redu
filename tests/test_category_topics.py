@@ -414,3 +414,33 @@ class TestSerialDramaBeatsPlotWords:
         assert ct.classify("张三李四分手") == "大瓜"
         assert ct.classify("某明星官宣恋情") == "大瓜"
         assert ct.classify("某网红塌房 道歉") == "大瓜"
+
+
+class TestResourceType:
+    """★ 2026-10-29 用户问「不同类型的资源是否能做到分类」。
+
+    资源库 **88% 的名字判不出类**(`《烟疤》02`/`塞雷卡2`…):它们本身没有类目词,
+    但**放在哪个文件夹里**就是答案(`男频《漫剧合集》` / `X开头游戏`)。
+    `type_of` 把父目录用起来;`subtype_of` 再把影视细分成 漫剧/短剧/…
+    """
+
+    def test_parent_folder_gives_the_type(self) -> None:
+        assert ct.type_of("《烟疤》02", "【热门ai】均更至最新集数") == "影视"
+        assert ct.type_of("塞雷卡2", "S开头游戏") == "小游戏"
+        assert ct.type_of("恶搞之家游戏（Warped-Kart-Racers）", "E开头游戏") == "小游戏"
+
+    def test_generic_word_in_parent_does_not_hijack_to_materials(self) -> None:
+        """⚠️ 父目录 `摆烂系列合集` 里的「合集」会给资料白送 1 分 —— 实测把整批剧判成资料。
+        `type_of` 先把父目录里的通用词剥掉再看。"""
+        assert ct.type_of("摆烂系列第二十八集.mp4", "B-《摆烂系列合集》111") == "影视"
+
+    def test_subtype_splits_manju_and_duanju(self) -> None:
+        assert ct.subtype_of("15.摆烂系列第二十八集.mp4", "男频《漫剧合集》🔥🔥") == "漫剧"
+        assert ct.subtype_of("《某剧》短剧 全集") == "短剧"
+        assert ct.subtype_of("《某电影》") == "电影"
+        assert ct.subtype_of("四级真题") == ""          # 不是影视
+
+    def test_display_niche_uses_subtype(self) -> None:
+        assert ct.display_niche("《朝朝入梦》漫剧 更新") == "漫剧"
+        assert ct.display_niche("《某剧》短剧 全集") == "短剧"
+        assert ct.display_niche("四级真题") == "资料"

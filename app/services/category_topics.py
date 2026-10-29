@@ -243,6 +243,68 @@ def niche_of(text: str, names: set[str] | None = None) -> str:
     return classify(text, names) or NICHE_OTHER
 
 
+#: **父目录 → 类目**的兜底规则(2026-10-29)。
+#: 起因:资源库里 **88% 的名字判不出类**(`《烟疤》02`/`《侍君》5`/`塞雷卡2`…),
+#: 它们本身没有类目词,但**放在哪个文件夹里**就是答案:
+#: `男频《漫剧合集》` 下面 169 条全是漫剧、`X开头游戏` 下面全是游戏。
+_PARENT_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("影视", ("漫剧", "短剧", "剧集", "热门ai", "男频", "女频", "深夜档", "国漫",
+              "动漫", "系列", "合集》", "摆烂")),
+    ("小游戏", ("游戏", "宝可梦", "植物大战僵尸", "gta", "GTA", "sprunki", "侠盗猎车")),
+    ("软件", ("软件", "模拟器", "解压", "安装教程")),
+)
+
+
+def type_of(text: str, parent: str = "") -> str:
+    """**资源类型**:先按 `classify(名字 + 父目录)`,认不出再看**父目录**。
+
+    与 `classify` 同源(同一个类目表),只是多给了一条"文件夹就是类型"的证据 ——
+    **不是第二套口径**:能分类目词时永远以 `classify` 为准。
+    """
+    #: ⚠️ 父目录里的**通用词要先剥掉**(`摆烂系列合集` 的「合集」会给资料白送 1 分,
+    #: 把一整批剧判成资料;实测 2026-10-29)。剥掉后仍能靠「漫剧/男频/系列」定向。
+    p_clean = str(parent or "")
+    for g in GENERIC_HINTS:
+        p_clean = p_clean.replace(g, " ")
+    c = classify(f"{text or ''} {p_clean}")
+    if c:
+        return c
+    p = str(parent or "")
+    for cat, hints in _PARENT_HINTS:
+        if any(h in p for h in hints):
+            return cat
+    return ""
+
+
+#: 影视的**细分**(2026-10-29,用户问「不同类型的资源是否能分类」):
+#: 漫剧 / 动漫 / 短剧 / 电影 / 电视剧。只看**词面**,与类目表无关(不影响轮换)。
+_SUBTYPES: tuple[tuple[str, str], ...] = (
+    ("漫剧", "漫剧"), ("国漫", "动漫"), ("动漫", "动漫"), ("番剧", "动漫"),
+    ("短剧", "短剧"), ("电影", "电影"), ("电视剧", "电视剧"),
+)
+
+
+def subtype_of(text: str, parent: str = "") -> str:
+    """影视类资源的**细分类型**(漫剧/动漫/短剧/电影/电视剧);非影视返回空串。"""
+    t = f"{text or ''} {parent or ''}"
+    for word, label in _SUBTYPES:
+        if word in t:
+            return label
+    return "影视" if type_of(text, parent) == "影视" else ""
+
+
+def display_niche(text: str, parent: str = "") -> str:
+    """**卡片分组用**的赛道名:影视再细分(漫剧/短剧/…),其余同 `niche_of`。
+
+    用户问「不同类型的资源是否能分类」—— 光分到「影视」不够:漫剧和短剧是两条生意。
+    实测资源库:漫剧 183 条、短剧 9 条、其余影视 638 条(没有明确细分词)。
+    """
+    base = niche_of(f"{text or ''} {parent or ''}")
+    if base == "影视":
+        return subtype_of(text, parent) or base
+    return base
+
+
 def current_category(session) -> str:
     """本轮该类目 —— 读轮换游标;没设过(或表已变)就从第一个开始。
 
