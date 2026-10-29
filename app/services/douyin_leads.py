@@ -963,11 +963,37 @@ def search_keywords(session, user_id: int, top: int, settings,
     for w in cand:
         if category_topics.classify(w) == "大瓜":
             category_topics.learn_names(session, w)      # 用户口径:"大瓜**慢慢的学习**可以"
+    #: ★ **同批次类型覆盖**(2026-10-29 用户「可以开始」):资源库里的裸剧名单独看判不出,
+    #: 但**同目录兄弟条目的多数类型**就是答案(`最全文件` 下 83/87 是影视)。
+    #: 这里把库里的名字按 `type_of(名字, 父目录, siblings=同目录)` 判一次,交给 `pick` ——
+    #: 于是「影视轮」会优先出剧名、「小游戏轮」优先出游戏名,而不是把裸名当"未分类"混进去。
+    _cat_of = None
+    try:
+        from app.db.models import XunleiResource
+
+        _rows = session.execute(select(XunleiResource.name, XunleiResource.parent_name).where(
+            XunleiResource.user_id == user_id,
+            XunleiResource.name.in_(list(cand)))).all() if cand else []
+        if _rows:
+            _by_parent: dict[str, list[str]] = {}
+            for _nm, _par in _rows:
+                _by_parent.setdefault(str(_par or ""), []).append(str(_nm or ""))
+            _map = {
+                str(_nm or ""): category_topics.type_of(
+                    str(_nm or ""), str(_par or ""),
+                    siblings=_by_parent.get(str(_par or "")))
+                for _nm, _par in _rows
+            }
+            _cat_of = lambda w: _map.get(w) or category_topics.classify(w, names)
+    except Exception:  # noqa: BLE001 - 覆盖失败就用旧口径,别让出词整条崩
+        logger.debug("资源库类型覆盖失败,退回纯名字判据", exc_info=True)
+
     kws = category_topics.pick(
         cand, cat, max(0, int(top) - len(game_words)), names,
         # ★ 2026-10-29:本类目**保底几个词**(见 `pick` 的 `min_mine`)。
         # 0 = 关掉保底(回到 10-05 的行为:证据多的那个类目永远霸榜)。
-        min_mine=int(getattr(settings, "douyin_leads_category_min_words", 1) or 0))
+        min_mine=int(getattr(settings, "douyin_leads_category_min_words", 1) or 0),
+        cat_of=_cat_of)
     if game_words:
         #: 游戏名 + 「下载」排在前面(它们才是这一轮要找的东西),其余词补足名额。
         kws = game_words + [w for w in kws if w not in game_words]

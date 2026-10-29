@@ -271,11 +271,23 @@ _PARENT_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
-def type_of(text: str, parent: str = "") -> str:
-    """**资源类型**:先按 `classify(名字 + 父目录)`,认不出再看**父目录**。
+#: **附件/说明类**名字:它们不是资源内容,别用"同目录多数"去套类型
+#: (实测 `简介.doc`/`压缩包怎么使用.mp4` 会被邻居带成影视 —— 归错不如不归)。
+_ATTACHMENT_HINTS = ("简介", "使用说明", "使用方法", "压缩包", "解压", "教程", "说明",
+                     "密码", "必看", "安装", "文档说明")
 
-    与 `classify` 同源(同一个类目表),只是多给了一条"文件夹就是类型"的证据 ——
-    **不是第二套口径**:能分类目词时永远以 `classify` 为准。
+
+def type_of(text: str, parent: str = "", siblings=None) -> str:
+    """**资源类型**:先按 `classify(名字 + 父目录)`,再看父目录提示,最后看**同批次**。
+
+    ## 同批次(2026-10-29 用户「可以开始」)
+
+    资源库里那 245 条判不出的裸名,单独看没有任何证据 —— 但**同一个文件夹**里的兄弟条目
+    大多判得出。实测:`最全文件` 下 87 条可判的里 **83 条是影视(95%)**,而该目录还有
+    124 条判不出(全是剧名)。⇒ 用**同目录多数类型**补判,门槛 `≥3 票 且 ≥70%`。
+
+    ⚠️ **附件/说明类不参与**(`简介.doc`/`压缩包怎么使用.mp4`):它们不是资源内容,
+    被邻居带成影视只会让统计变脏。
     """
     #: ⚠️ 父目录里的**通用词要先剥掉**(`摆烂系列合集` 的「合集」会给资料白送 1 分,
     #: 把一整批剧判成资料;实测 2026-10-29)。剥掉后仍能靠「漫剧/男频/系列」定向。
@@ -289,6 +301,16 @@ def type_of(text: str, parent: str = "") -> str:
     for cat, hints in _PARENT_HINTS:
         if any(h in p for h in hints):
             return cat
+    # ---- 同批次:同目录兄弟条目的多数类型 ----
+    if siblings and not any(j in str(text or "") for j in _ATTACHMENT_HINTS):
+        from collections import Counter
+
+        votes = Counter(t for t in (type_of(s, p) for s in siblings if s != text) if t)
+        total = sum(votes.values())
+        if total >= 3:
+            top, k = votes.most_common(1)[0]
+            if k / total >= 0.7:
+                return top
     return ""
 
 
@@ -367,7 +389,7 @@ def advance_category(session) -> str:
 
 
 def pick(words: list[str], cat: str, need: int, names: set[str] | None = None,
-         other_max: int | None = None, min_mine: int = 1) -> list[str]:
+         other_max: int | None = None, min_mine: int = 1, cat_of=None) -> list[str]:
     """挑出本轮该搜的词。**优先顺序**(2026-10-05 修订):
 
         ① 当前类目的**资源名**   ← 主料(用户口径:"搜索词应该是资源名称")
@@ -400,7 +422,9 @@ def pick(words: list[str], cat: str, need: int, names: set[str] | None = None,
         return []
     mine, unknown, other = [], [], []
     for w in words:
-        c = classify(w, names)
+        #: `cat_of` = 调用方给的**类型覆盖**(带父目录/同批次的判断,见 `type_of`);
+        #: 没给就退回纯名字判据 —— 与旧行为完全一致。
+        c = cat_of(w) if cat_of else classify(w, names)
         if c == cat:
             mine.append(w)
         elif c == "":

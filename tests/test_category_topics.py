@@ -469,3 +469,32 @@ class TestStructuralWords:
         游戏要先判,否则整个游戏系列会被判成影视。"""
         assert ct.type_of("王国保卫战一", "王国保卫战全系列版本") == "小游戏"
         assert ct.type_of("摆烂系列第二十八集.mp4", "B-《摆烂系列合集》111") == "影视"
+
+
+class TestSiblingContext:
+    """★ 2026-10-29「同批次上下文」:同一文件夹里兄弟条目的多数类型,用来补判裸名。
+
+    实测:`最全文件` 下 87 条可判的里 **83 条是影视(95%)**,而该目录还有 124 条判不出。
+    """
+
+    def test_majority_of_siblings_fills_the_blank(self) -> None:
+        sibs = ["《某剧》第2集", "《另一剧》全80集", "某电影", "《烟疤》02"]
+        assert ct.type_of("《烟疤》02", "最全文件", siblings=sibs) == "影视"
+
+    def test_attachment_names_are_not_inferred(self) -> None:
+        """`简介.doc` / `压缩包怎么使用.mp4` 不是资源内容,别被邻居带成影视。"""
+        sibs = ["《某剧》第2集", "《另一剧》全80集", "某电影"]
+        assert ct.type_of("简介.doc", "最全文件", siblings=sibs) == ""
+        assert ct.type_of("压缩包怎么使用.mp4", "最全文件", siblings=sibs) == ""
+
+    def test_too_few_or_mixed_siblings_abstains(self) -> None:
+        assert ct.type_of("裸名", "p", siblings=["《a》第1集", "《b》第2集"]) == ""
+        mixed = ["《某剧》第1集", "四级真题", "某软件安装包", "纪录片第2集"]
+        assert ct.type_of("裸名", "p", siblings=mixed) == ""
+
+
+def test_pick_accepts_type_override() -> None:
+    """`pick(cat_of=...)`:调用方给的**类型覆盖**要生效(否则同批次判断进不了轮换)。"""
+    words = ["某个裸名", "四级真题"]
+    got = ct.pick(words, "小游戏", 2, cat_of=lambda w: "小游戏" if w == "某个裸名" else "资料")
+    assert got[0] == "某个裸名"
