@@ -1499,20 +1499,41 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
     # ⇒ 把「同一资源本轮被几条视频在推」+ 转发数一起喂给模型。
     # 模型失败/没配 key ⇒ 原样全推(`source != "llm"`,卡片上不写 `AI筛x/y`)。
     # 放在这里是因为**后面所有计数/台账都该按筛后的算**。
-    from app.services import ai_filter
+    from app.services import ai_filter, value_prior
+    from app.services import category_topics as _ct
 
-    #: ★ **历史数据进决策**(2026-10-29 用户口径「可以根据之前的数据来进行策略决策」):
-    #: 这个口令过去 7 天被几条线索命中过(跨轮次的"还在被推")+ 我们库里有没有这份资源。
+    #: ★ **数据先验**(2026-10-29 用户口径「可以根据之前的数据来进行策略决策」):
+    #: 近 30 天各赛道真实搬成率(软件 93% / 资料 87% / 影视 57% / 小游戏 54%…)
+    #: 与每条线索自己的关键词历史有效率,一起喂给模型 —— 让它按数据评分。
+    _rates = value_prior.niche_rates(session, user_id)
+    _prior_note = value_prior.prompt_note(_rates)
+    _kw_yield = keyword_yield(session, user_id) if session is not None else {}
+
+    def _prior_of(ld_: dict) -> str:
+        k = _ct.niche_of(f"{ld_.get('title') or ''} {ld_.get('mark') or ''}")
+        st = _rates.get(k) or {}
+        bits = []
+        if st:
+            bits.append(f"赛道历史{float(st.get('rate') or 0) * 100:.0f}%(n={st.get('n')})")
+        ny = _kw_yield.get(str(ld_.get("keyword") or ""))
+        if ny:
+            n, ok = int(ny[0]), int(ny[1])
+            bits.append(f"词历史{ok}/{n}")
+        return " ".join(bits)
+
+    #: ★ 历史口令计数(跨轮次「还在被推」)。
     _hist = _historical_mark_counts(
         session, user_id, {str(x.get("mark") or "") for x in leads})
     _ai = ai_filter.filter_items(
         "douyin_peer" if peer else section, leads, settings,
+        extra_context=_prior_note,
         text_of=lambda ld_: (
             f"{ld_.get('title') or ''} 作者:{ld_.get('author') or ''} "
             f"转发:{ld_.get('share_count') or 0} "
             f"同资源条数:{_counts.get(_res_key(ld_), 1)} "
             f"历史7天:{_hist.get(str(ld_.get('mark') or ''), 0)} "
-            f"库内:{'有' if (ld_.get('library') or {}).get('link') else '无'}"))
+            f"库内:{'有' if (ld_.get('library') or {}).get('link') else '无'} "
+            f"{_prior_of(ld_)}"))
     if not _ai.items:
         logger.info("抖音线索:AI 筛选后无内容可推(原 %d 条)", _ai.total)
         return False

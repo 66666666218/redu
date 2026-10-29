@@ -44,7 +44,7 @@ def _clear_cache():
 def test_keeps_only_high_value_and_sorts_by_score(monkeypatch) -> None:
     from app.services import llm_client
 
-    def _fake(base, key, model, section, items, timeout=45):
+    def _fake(base, key, model, section, items, timeout=45, extra=""):
         #: 标题里带"真题"的高分;"广告"低分
         out = []
         for it in items:
@@ -99,7 +99,7 @@ def test_result_is_cached_by_title(monkeypatch) -> None:
 
     calls: list[list] = []
 
-    def _fake(base, key, model, section, items, timeout=45):
+    def _fake(base, key, model, section, items, timeout=45, extra=""):
         calls.append([it["text"] for it in items])
         return [{"i": it["i"], "score": 8, "keep": True, "why": ""} for it in items]
 
@@ -129,9 +129,25 @@ def test_max_items_passes_the_rest_through(monkeypatch) -> None:
     class _S2(_S):
         ai_filter_max_items = 2
 
-    monkeypatch.setattr(llm_client, "judge_value", lambda b, k, m, s, items, timeout=45: [
+    monkeypatch.setattr(llm_client, "judge_value", lambda b, k, m, s, items, timeout=45, extra="": [
         {"i": it["i"], "score": 0, "keep": False, "why": ""} for it in items])
     items = _items("甲", "乙", "丙", "丁")
     res = ai_filter.filter_items("wechat", items, _S2())
     #: 前两条判了且被挡;后两条**没判 ⇒ 放行**
     assert {x["title"] for x in res.items} == {"丙", "丁"}
+
+
+def test_extra_context_is_passed_to_the_model(monkeypatch) -> None:
+    """数据先验(各赛道历史搬成率)要**真的进提示词** —— 否则"按历史数据决策"只是口号。"""
+    from app.services import llm_client
+
+    seen: dict = {}
+
+    def _fake(base, key, model, section, items, timeout=45, extra=""):
+        seen["extra"] = extra
+        return [{"i": it["i"], "score": 9, "keep": True, "why": ""} for it in items]
+
+    monkeypatch.setattr(llm_client, "judge_value", _fake)
+    ai_filter.filter_items("douyin_peer", _items("真题"), _S(),
+                           extra_context="历史经验:软件93% 影视57%")
+    assert seen["extra"] == "历史经验:软件93% 影视57%"

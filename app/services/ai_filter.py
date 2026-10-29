@@ -77,11 +77,13 @@ def _sections(settings) -> set[str]:
 
 
 def filter_items(section: str, items: list[dict], settings=None, *,
-                 text_of=None) -> Result:
+                 text_of=None, extra_context: str = "") -> Result:
     """按 AI 判断筛一遍;失败/没开/不在名单时**原样返回**。
 
     `text_of(item) -> str` 用来构造喂给模型的文本(**标题优先**,可带作者/热度);
     默认按 `title/name/word/resource/entry_title` 取。
+    `extra_context` = **数据先验**(如各赛道历史搬成率,见 `value_prior`),
+    直接拼进提示词 —— 用户口径「可以根据之前的数据来进行策略决策」。
     """
     items = list(items or [])
     total = len(items)
@@ -140,7 +142,8 @@ def filter_items(section: str, items: list[dict], settings=None, *,
             api_key,
             str(getattr(settings, "deepseek_model", "deepseek-chat")),
             section_label, to_judge,
-            timeout=int(getattr(settings, "ai_filter_timeout", 45) or 45))
+            timeout=int(getattr(settings, "ai_filter_timeout", 45) or 45),
+            extra=extra_context)
         if got is None:
             #: ⚠️ 模型失败 ⇒ **全放行**并说出这件事(纪律 1)。
             logger.warning("AI筛选[%s]失败 ⇒ 本轮**不筛**,%d 条全部照推", section, total)

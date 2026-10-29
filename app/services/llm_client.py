@@ -447,7 +447,7 @@ _VALUE_SYSTEM = (
 
 
 def judge_value(base_url: str, api_key: str, model: str, section: str,
-                items: list[dict], timeout: int = 45) -> list[dict] | None:
+                items: list[dict], timeout: int = 45, extra: str = "") -> list[dict] | None:
     """逐条判断「这条内容对网盘拉新有没有价值」→ `[{i, score, keep, why}]`。
 
     `items`: `[{"i": 序号, "text": "标题/作者/热度"}]`;`section` = 板块中文名(给模型上下文)。
@@ -463,8 +463,9 @@ def judge_value(base_url: str, api_key: str, model: str, section: str,
     nl = chr(10)
     numbered = nl.join(f"{it['i']}|{str(it.get('text') or '')[:120]}" for it in items)
     prompt = (
-        f"板块:{section}{nl}{numbered}{nl}{nl}"
-        "请逐条输出,严格每行一条:`序号|0-10|是/否|不超过 20 字理由`。"
+        f"板块:{section}{nl}{numbered}{nl}"
+        + (f"{nl}{extra}{nl}" if extra else nl)
+        + "请逐条输出,严格每行一条:`序号|0-10|是/否|不超过 20 字理由`。"
         "分数 = 价值(**资源发的多、转存人数多**):同一资源被很多号在发 / 转发·转存·想要数高 / "
         "有具体文件可交付 / 不过时 = 高分;纯广告、没有具体资源、无人转存、过时 = 低分。"
         "不要输出别的任何内容。"
