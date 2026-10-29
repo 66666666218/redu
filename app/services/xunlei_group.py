@@ -37,10 +37,10 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.db.models import XunleiGroupShare
 from app.utils import get_logger
@@ -463,11 +463,39 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
     """
     from app.services import xunlei_transfer as xt
 
-    rows = session.scalars(
-        select(XunleiGroupShare).where(
+    # ★★ **过期分诊**(2026-10-29 用户「先做 1+2」):pending 里积了 **11,312 条**、
+    # 最老到 08-30,而每轮只搬几条 ⇒ 队列永远清不完,还让"待办 11k"看起来像工作量。
+    # 先把**超过 `xunlei_group_pending_expire_days`(默认 14 天)**的统一标 `skipped`,
+    # 打标不删(留痕:为什么没搬)。⚠️ `msg_time` 为 NULL 的不动(判不了就别当过期)。
+    expire_days = int(getattr(settings, "xunlei_group_pending_expire_days", 14) or 0)
+    expired = 0
+    if expire_days > 0:
+        _cut = datetime.now() - timedelta(days=expire_days)
+        stale = list(session.scalars(select(XunleiGroupShare).where(
             XunleiGroupShare.user_id == user_id,
             XunleiGroupShare.status == "pending",
-        ).order_by(XunleiGroupShare.msg_time.desc()).limit(limit)).all()
+            XunleiGroupShare.msg_time.is_not(None),
+            XunleiGroupShare.msg_time < _cut)))
+        for _r in stale:
+            _r.status, _r.message = "skipped", f"过期未搬(超过 {expire_days} 天,只搬新鲜的)"[:200]
+        if stale:
+            session.commit()
+            expired = len(stale)
+            logger.info("迅雷群:过期分诊 %d 条 pending → skipped(>%d 天)", expired, expire_days)
+
+    # ★ **新鲜优先**(同日):只挑最近 `xunlei_group_transfer_max_age_days`(默认 7 天)的;
+    # 更老的永远轮不到,留给上面的分诊处理。判不了时间(NULL)的照旧放行。
+    age_days = int(getattr(settings, "xunlei_group_transfer_max_age_days", 7) or 0)
+    _stmt = select(XunleiGroupShare).where(
+        XunleiGroupShare.user_id == user_id,
+        XunleiGroupShare.status == "pending",
+    )
+    if age_days > 0:
+        _stmt = _stmt.where(or_(
+            XunleiGroupShare.msg_time.is_(None),
+            XunleiGroupShare.msg_time >= datetime.now() - timedelta(days=age_days)))
+    rows = session.scalars(
+        _stmt.order_by(XunleiGroupShare.msg_time.desc()).limit(limit)).all()
     # ★★ **多账号择一:满了就换下一个**(2026-10-14 用户口径:「一个网盘账号内存不足
     #   增加多个账号补上」)—— 池里挑**最空的**;它满了**换下一个**;**全满才停**
     #   (与从前"一个满就停"相比是**严格推广**)。⚠️ 没配池 ⇒ 池只返回一个"默认账号"
@@ -537,7 +565,7 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
                 logger.info("迅雷群分享暂停转存(盘满):%s", why)
                 session.commit()
                 return {"status": "disk_full", "picked": 0, "ok": 0, "failed": 0, "skipped": 0,
-                        "quota_ratio": ratio, "quota_limit": _gate_limit(settings),
+                        "expired": expired, "quota_ratio": ratio, "quota_limit": _gate_limit(settings),
                         "gate_mismatch": False,      # 预闸门**按设计**挡下的,不是失准
                         "message": why, "items": []}
             row.status, row.message = "skipped", why[:200]      # 策略性不搬 → 终态留痕
@@ -621,6 +649,7 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
                 gate = _gate_limit(settings)
                 return {"status": "disk_full", "picked": len(rows), "ok": len(ok_items),
                         "failed": failed, "skipped": skipped, "too_large": too_large,
+                        "expired": expired,
             "too_large_names": too_large_names,
                         "too_large_names": too_large_names,
                         "blocked_names": [str(r.title or "")[:60] for r in rows
@@ -639,6 +668,7 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
     session.commit()
     return {"status": "ok", "picked": len(rows), "ok": len(ok_items),
             "failed": failed, "skipped": skipped, "too_large": too_large,
+            "expired": expired,
             "required_size": too_large_need, "free_size": too_large_free,
             "message": first_err, "items": ok_items}
 
@@ -755,6 +785,9 @@ def xunlei_group_tick(settings=None) -> int:
                 t_bad = int(out.get("failed", 0) or 0)
                 note = (f"群{got.get('groups', 0)} 新{got.get('new', 0)} "
                         f"转存{t_ok} 跳过{out.get('skipped', 0)} 失败{t_bad}")
+                if out.get("expired"):
+                    #: 过期分诊了多少条要写出来 —— 否则"队列怎么突然少了 7000 条"没人解释得了。
+                    note += f" 过期{int(out.get('expired') or 0)}"
                 if got.get("failed_groups"):
                     note += f" 失败群{len(got['failed_groups'])}"
                 # ⚠️ **"单个资源太大"必须留痕,否则会被读成"今天群里真没这条"**(2026-10-04):

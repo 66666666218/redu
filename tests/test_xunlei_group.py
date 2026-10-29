@@ -1114,3 +1114,44 @@ def test_new_shares_card_respects_ai_filter(monkeypatch) -> None:
     assert "有用的资源" in blob and "https://p/s/A" in blob
     assert "https://p/s/B" not in blob, "被 AI 挡掉的那条不该出现在卡里"
     assert "AI筛1/2" in blob
+
+
+def test_transfer_pending_expires_old_and_skips_stale(session, monkeypatch) -> None:
+    """★ 2026-10-29「先做 1+2」:① 只搬最近 7 天;② pending 超过 14 天标过期。
+
+    背景:队列积到 **11,312 条 pending**、最老 08-30,而每轮只搬 2 条 —— 永远清不完。
+    """
+    from datetime import datetime, timedelta
+
+    from app.services import xunlei_transfer as xt
+
+    now = datetime.now()
+    session.add_all([
+        XunleiGroupShare(user_id=1, group_id="g", share_id="OLD", title="很老的资源",
+                         origin_url="u-OLD", status="pending",
+                         msg_time=now - timedelta(days=30)),
+        XunleiGroupShare(user_id=1, group_id="g", share_id="MID", title="中间的资源",
+                         origin_url="u-MID", status="pending",
+                         msg_time=now - timedelta(days=10)),
+        XunleiGroupShare(user_id=1, group_id="g", share_id="NEW", title="新资源",
+                         origin_url="u-NEW", status="pending",
+                         msg_time=now - timedelta(days=1)),
+    ])
+    session.commit()
+    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None, **kw: 0.3)
+    called: list[str] = []
+    monkeypatch.setattr(xt, "transfer_and_share",
+                        lambda url, parent_id="", settings=None, **kw: (
+                            called.append(url) or {"status": "ok", "share_url": "s",
+                                                   "code": "", "fid": "f"}))
+
+    class _S(_GateSettings):
+        xunlei_group_pending_expire_days = 14
+        xunlei_group_transfer_max_age_days = 7
+
+    out = xg.transfer_pending(session, 1, limit=5, settings=_S())
+    rows = {r.share_id: r for r in session.scalars(select(XunleiGroupShare)).all()}
+    assert rows["OLD"].status == "skipped" and "过期" in rows["OLD"].message
+    assert rows["MID"].status == "pending", "7~14 天的还没过期,但也轮不到搬"
+    assert rows["NEW"].status == "ok"
+    assert out["expired"] == 1 and out["picked"] == 1 and called == ["u-NEW"]
