@@ -638,12 +638,27 @@ def push_works(works: list[dict], settings, session=None, user_id: int = 0) -> b
         logger.info("对标号作品:未配飞书 webhook,跳过推送")
         return False
 
+    # ★ **AI 价值筛选**(2026-10-29,用户口径「每个板块都加上 AI 筛选」)。
+    # 模型失败/没配 key ⇒ 原样全推(`source != "llm"` 时 summary() 为空,卡片不贴金)。
+    from app.services import ai_filter
+
+    _ai = ai_filter.filter_items(
+        "douyin_peer", works, settings,
+        text_of=lambda w: (f"{w.get('title') or ''} 作者:{w.get('account_name') or ''} "
+                           f"点赞:{w.get('likes') or 0}"))
+    if not _ai.items:
+        logger.info("对标号作品:AI 筛选后无内容可推(原 %d 条)", _ai.total)
+        return False
+    works = _ai.items
+
     groups: dict[str, list[dict]] = {}
     for w in works:
         groups.setdefault(w.get("niche") or category_topics.NICHE_OTHER, []).append(w)
     order = sorted(groups, key=lambda n: (n == category_topics.NICHE_OTHER,
                                           len(groups[n]), n))
     intro = f"对标号本轮发了 **{len(works)}** 条新作品。"
+    if _ai.summary():
+        intro += f" **{_ai.summary()}**:已挡掉纯广告 / 无具体资源 / 过时的那些。"
     if len(groups) > 1:
         intro += "\n**本轮赛道**:" + " · ".join(f"{n} {len(groups[n])}" for n in order)
 

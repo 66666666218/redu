@@ -209,6 +209,21 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""               # DeepSeek API key(LLM 叙事层,OpenAI 兼容)
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
+    # ---- AI 价值筛选(2026-10-29)见 app/services/ai_filter.py ----
+    # 用户口径:「群信息有点杂乱…让 AI 筛选出有价值的热点出来,**每个板块都加上 AI 筛选**」。
+    # 推送前给每条内容打 0~10 分(能不能变成值得转存的网盘资源),低于分数线的不推。
+    # ⚠️ **模型失败/没配 key ⇒ 原样全推**(绝不静默丢),卡片上也不写 `AI筛x/y`。
+    ai_filter_enabled: bool = True
+    #: 只对这些板块生效(用推送侧的 section 名,如 `douyin_peer,weibo,zhihu`);
+    #: **留空 = 所有已接入的板块**。
+    ai_filter_sections: str = ""
+    #: 分数线(0~10)。6 = 默认:纯广告/无具体资源/过时帖会被挡掉,资料/资源帖能过。
+    ai_filter_min_score: int = 6
+    #: 至少留几条(全被挡光时按分数补)—— 不让客户收到空卡。
+    ai_filter_min_keep: int = 1
+    #: 一次最多判多少条(超出的**原样放行**)—— 控制单次 token 成本。
+    ai_filter_max_items: int = 40
+    ai_filter_timeout: int = 45
     llm_narrate_limit: int = 3               # 每轮推送最多交给 LLM 解读的文章数
     focus_alert_enabled: bool = True   # 重点关键词告警(跨板块共振/板块内反复)开关
     focus_repeat_rounds: int = 3       # 板块内"反复出现"的轮数阈值(近24h同关键词出现≥N轮)

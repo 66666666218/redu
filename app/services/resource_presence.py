@@ -650,6 +650,19 @@ def push_items(items: list[dict], settings, detail: dict | None = None,
                 detail[plat] = "无群"
             continue
         label = PLATFORMS.get(plat, {}).get("label", plat)
+        # ★ **AI 价值筛选**(2026-10-29,用户口径「每个板块都加上 AI 筛选」)。
+        # 一个平台一个平台判;模型失败/没配 key ⇒ 原样全推,`summary()` 为空不贴金。
+        from app.services import ai_filter
+
+        _ai = ai_filter.filter_items(
+            led_sec, group, settings,
+            text_of=lambda it: (f"{it.get('name') or ''} 作者:{it.get('author') or ''} "
+                                f"平台:{label}"))
+        if not _ai.items:
+            if detail is not None:
+                detail[plat] = "AI 筛后无内容"
+            continue
+        group = _ai.items
         # ★ **与抖音卡同形:两个独立可点的格**(2026-10-16 用户口径
         #   「都做成抖音推广格式,**既有网盘,也能看到对标的作品**」):
         #     「资源」→ 取资源(我方链);「对标作品」→ 看那条**人在推的原帖**。
@@ -658,7 +671,9 @@ def push_items(items: list[dict], settings, detail: dict | None = None,
         elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
             f"{label}上也在推的资源 **{len(group)}** 个:"
             f"「**资源**」点开是我方链、可直接取用;「**对标作品**」点开是那条原帖;"
-            f"「**对标账号**/「**对标数据**」= 谁在推、热度多少。"}},
+            f"「**对标账号**/「**对标数据**」= 谁在推、热度多少。"
+            + (f"\n**{_ai.summary()}**:已挡掉纯广告 / 无具体资源 / 过时的那些。"
+               if _ai.summary() else "")}},
             # ★ **对标账号 / 对标数据 两列是 2026-10-16 补的**(用户口径:网盘监控只看 5 个东西 ——
             #   对标账号 / 对标作品 / 对标数据 / 资源 / 可用链)。原来只有前两个 + 平台 + 内容数。
             #   ⚠️ **平台列去掉**:这张卡本来就是**按平台分开发**的,表头已经写明是哪个平台。

@@ -223,10 +223,21 @@ def run_feishu(session: Session, user_id: int, settings: Settings | None = None)
     notable = [r for r in rows if r["signal"] in ("burst", "fall")]
     if not notable:
         return 0
+    # ★ **AI 价值筛选**(2026-10-29,用户口径「每个板块都加上 AI 筛选」)。
+    from app.services import ai_filter
+
+    _ai = ai_filter.filter_items(
+        "douhot", notable, settings,
+        text_of=lambda r: (f"{r.get('entry_title') or r.get('keyword') or ''} "
+                           f"趋势:{r.get('label')} 近1h:{r.get('h1_score')}"))
+    if not _ai.items:
+        return 0
+    notable = _ai.items
     pushed = 0
+    _note = ("关键词多窗口对比 · 近1h vs 近1天 · 🔥爆发 → 及时跟进 · 📉回落 → 别追过时"
+             + (f" · **{_ai.summary()}**" if _ai.summary() else ""))
     elements: list[dict] = [
-        {"tag": "note", "elements": [{"tag": "plain_text",
-            "content": "关键词多窗口对比 · 近1h vs 近1天 · 🔥爆发 → 及时跟进 · 📉回落 → 别追过时"}]},
+        {"tag": "note", "elements": [{"tag": "plain_text", "content": _note}]},
         _col_set_row([("**话题**", 6), ("**近1h**", 2), ("**近1天**", 2), ("**趋势**", 2)], grey=True),
     ]
     for r in notable[:15]:

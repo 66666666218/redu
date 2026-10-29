@@ -432,3 +432,71 @@ def judge_gossip_titles(base_url: str, api_key: str, model: str,
                     "is_gossip": verdict.startswith("是"),
                     "reason": parts[2] if len(parts) > 2 else ""})
     return out or None
+
+
+# ---------------------------------------------------------------- 板块价值筛选(2026-10-29)
+
+_VALUE_SYSTEM = (
+    "你是网盘资源推广运营的筛选员。唯一目标:判断一条内容能不能变成一份**让人愿意转存的网盘资源**"
+    "(资料/软件/游戏/影视/课程/模板/安装包…)。噪声要挡掉:纯广告、没有具体资源、纯情绪/八卦、"
+    "已经过时的旧帖。只按要求的格式输出,不要解释。"
+)
+
+
+def judge_value(base_url: str, api_key: str, model: str, section: str,
+                items: list[dict], timeout: int = 45) -> list[dict] | None:
+    """逐条判断「这条内容对网盘拉新有没有价值」→ `[{i, score, keep, why}]`。
+
+    `items`: `[{"i": 序号, "text": "标题/作者/热度"}]`;`section` = 板块中文名(给模型上下文)。
+    输出行格式:`序号|0-10|是/否|不超过20字理由`。
+
+    ⚠️ **失败返回 None** —— 调用方(`ai_filter`)必须退回"全部放行并说出这件事",
+    绝不允许因为模型挂了就把整批内容静默丢掉(本仓最忌讳的假成功)。
+    成本:每批(≤40 条)约 1~2K tokens;`ai_filter` 侧还有按标题的进程内缓存,
+    同一标题在热榜重复出现**不会重复计费**。
+    """
+    if not api_key or not items:
+        return None
+    nl = chr(10)
+    numbered = nl.join(f"{it['i']}|{str(it.get('text') or '')[:120]}" for it in items)
+    prompt = (
+        f"板块:{section}{nl}{numbered}{nl}{nl}"
+        "请逐条输出,严格每行一条:`序号|0-10|是/否|不超过 20 字理由`。"
+        "分数 = 做成网盘资源的价值:有具体文件/可搜/不过时 = 高分;纯广告/无具体资源/过时 = 低分。"
+        "不要输出别的任何内容。"
+    )
+    try:
+        resp = requests.post(
+            base_url.rstrip("/") + "/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": model,
+                  "messages": [{"role": "system", "content": _VALUE_SYSTEM},
+                               {"role": "user", "content": prompt}],
+                  "temperature": 0.1, "max_tokens": 1200},
+            timeout=timeout,
+        )
+        if resp.status_code >= 400:
+            _record_usage(None, ok=False)
+            logger.warning("AI 价值筛选失败 HTTP %s:%s", resp.status_code, resp.text[:160])
+            return None
+        payload = resp.json()
+        _record_usage(payload, ok=True)
+        text = (payload.get("choices", [{}])[0].get("message", {}).get("content") or "")
+    except Exception as exc:  # noqa: BLE001
+        _record_usage(None, ok=False)
+        logger.warning("AI 价值筛选异常:%s", exc)
+        return None
+
+    out: list[dict] = []
+    for line in text.splitlines():
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 3 or not parts[0].isdigit():
+            continue
+        try:
+            score = max(0, min(10, int(float(parts[1]))))
+        except ValueError:
+            continue
+        keep = parts[2] in ("是", "yes", "Y", "y", "1", "true", "True")
+        out.append({"i": int(parts[0]), "score": score, "keep": keep,
+                    "why": (parts[3] if len(parts) > 3 else "")[:40]})
+    return out or None

@@ -1053,6 +1053,15 @@ def push_items(items: list[dict], settings, session=None, user_id: int = 0) -> b
     webhook = webhook_for(settings, "zhihu")
     if not webhook:
         return False
+    # ★ **AI 价值筛选**(2026-10-29,用户口径「每个板块都加上 AI 筛选」)。
+    from app.services import ai_filter
+
+    _ai = ai_filter.filter_items(
+        "zhihu", items, settings,
+        text_of=lambda it: f"{it.get('title') or ''} 作者:{it.get('author') or ''}")
+    if not _ai.items:
+        return False
+    items = _ai.items
     from app.services.feishu._cards import _col_set_row, _md_safe, metrics_md, strip_others
     from app.services.feishu_client import FeishuClient
 
@@ -1060,7 +1069,9 @@ def push_items(items: list[dict], settings, session=None, user_id: int = 0) -> b
     elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
         f"公开平台(知乎/贴吧)新发现 **{len(items)}** 个资源,已转存成我方分享链:"
         f"「**资源**」点开是我方链、可直接取用;「**原帖**」点开是对标作品的出处;"
-        f"「**对标数据**」= 那条原帖的热度。"}},
+        f"「**对标数据**」= 那条原帖的热度。"
+        + (f"\n**{_ai.summary()}**:已挡掉纯广告 / 无具体资源 / 过时的那些。"
+           if _ai.summary() else "")}},
         # ★ **「原帖」独立成列**(2026-10-16 用户口径「别的平台也应该保持这个模式:
         #   **有原文,有网盘**」)。`source_url` **本来就在 items 里**(见上面 append),
         #   只是从来没渲染出来 ⇒ 员工看不到"这条资源是从哪个帖子里发现的",无法核对对标作品。

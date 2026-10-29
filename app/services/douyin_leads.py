@@ -1449,6 +1449,20 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
         logger.info("抖音线索:未配飞书 webhook,跳过推送")
         return False
 
+    # ★ **AI 价值筛选**(2026-10-29,用户口径「每个板块都加上 AI 筛选」)。
+    # 只留"能变成值得转存的资源"的线索;模型失败/没配 key ⇒ 原样全推(`source != "llm"`,
+    # 卡片上也不会写 `AI筛x/y`)。放在这里是因为**后面所有计数/台账都该按筛后的算**。
+    from app.services import ai_filter
+
+    _ai = ai_filter.filter_items(
+        "douyin_peer" if peer else section, leads, settings,
+        text_of=lambda ld_: (f"{ld_.get('title') or ''} 作者:{ld_.get('author') or ''} "
+                             f"转发:{ld_.get('share_count') or 0}"))
+    if not _ai.items:
+        logger.info("抖音线索:AI 筛选后无内容可推(原 %d 条)", _ai.total)
+        return False
+    leads = _ai.items
+
     from app.services.feishu._cards import _col_set_row, _md_safe, strip_others
     from app.services.feishu_client import FeishuClient
 
@@ -1491,6 +1505,9 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
                     key=lambda n: (n == category_topics.NICHE_OTHER, len(_groups[n]), n))
     _intro = (f"{label}上发现 **{len(leads)}** 条在推同类资源的视频。"
               "已自动解析并把能拿到的**转存进我方网盘**,可直接取用。")
+    if _ai.summary():
+        #: 只在模型**真的筛过**时才写(`off/fallback` 返回空串,不给自己贴金)。
+        _intro += f"\n**{_ai.summary()}**:已挡掉纯广告 / 无具体资源 / 过时的那些。"
     if len(_groups) > 1:
         #: ⚠️ 只有一个赛道时不写这一行 —— 那会变成"一句话把卡片标题又说一遍"
         _intro += "\n**本轮赛道**:" + " · ".join(
