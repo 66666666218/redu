@@ -15,8 +15,13 @@ import pytest  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _no_publish_cutoff(monkeypatch):
-    """发布时间过滤与本文件无关,关掉它免得干扰。"""
+    """发布时间过滤与本文件无关,关掉它免得干扰。
+
+    ⚠️ 2026-10-29:新鲜度还有第二道闸(`douyin_leads_max_age_days`,默认 7 天)——
+    这里的样例 `publish_at=1759800000`(2025-10)会被它挡光,所以**两道都关**。
+    """
     monkeypatch.setattr("app.services.douyin_leads._min_publish_ts", lambda s: 0)
+    monkeypatch.setattr("app.services.douyin_leads._max_age_ts", lambda s: 0)
 
 
 @pytest.fixture

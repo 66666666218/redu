@@ -480,11 +480,15 @@ def collect_leads(keywords: list[str], limit: int = 30, platform: str = "douyin"
     out: list[dict] = []
     seen: set[str] = set()
     # **发布时间下限**(用户口径:「2026年10月份之前的不要再保存进来了」)。
+    # ★ **再加一道"最近 N 天"的新鲜度窗口**(2026-10-29,用户口径「监控的内容我们需要新鲜度,
+    #   太老旧的不需要」):两者取**更严**的那个。实测游戏名 + 「下载」能搜到带口令的帖,
+    #   但都是 2025-10 / 2026-07 的 —— 只有窗口挡得住它们。
     # ⚠️ **没有发布时间的也跳过** —— 判不了就宁可不收;但**逐条记账、最后打出来**,
     # 绝不静默丢(本仓最忌讳的就是"看着没产出、其实是我们在丢")。
     from config.settings import get_settings
 
-    min_pub_ts = _min_publish_ts(get_settings())
+    _s = get_settings()
+    min_pub_ts = max(_min_publish_ts(_s), _max_age_ts(_s))
     n_old = n_notime = 0
     rows, source = _collect(platform, keywords, session, user_id=user_id)
     logger.info("线索取数:平台=%s 来源=%s 原始 %d 条", platform, source or "-", len(rows))
@@ -549,6 +553,21 @@ def find_leads(keywords: list[str], limit: int = 30, platform: str = "douyin",
     """
     return collect_leads(keywords, limit=limit, platform=platform, session=session,
                          user_id=user_id)[0]
+
+
+def _max_age_ts(settings) -> int:
+    """`douyin_leads_max_age_days` → 最早的允许时间戳(epoch 秒);0 = 不设窗口。
+
+    ★ 2026-10-29 用户口径「监控的内容我们需要新鲜度,太老旧的不需要」。
+    与 `_min_publish_ts`(一次性历史门槛)**取更严的那个**。
+    ⚠️ 单独成函数是为了**可被测试钉死**(与 `_min_publish_ts` 同一条手法)。
+    """
+    from datetime import datetime, timedelta
+
+    days = int(getattr(settings, "douyin_leads_max_age_days", 0) or 0)
+    if days <= 0:
+        return 0
+    return int((datetime.now() - timedelta(days=days)).timestamp())
 
 
 def _min_publish_ts(settings) -> int:
@@ -1564,6 +1583,24 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
     return ok
 
 
+def _freshness_summary(leads: list[dict]) -> str:
+    """本轮线索的**新鲜度**:`最新10-29 10:12 中位10-28`(2026-10-29)。
+
+    用户口径「监控的内容我们需要新鲜度,太老旧的不需要」—— 只设时间窗还不够,
+    **每轮都得能看见产出到底有多新**,否则"窗口挡掉了多少"与"这批本来就是旧的"分不清。
+    ⚠️ 没有发布时间的线索不参与(判不了就不编)。
+    """
+    from datetime import datetime as _dt
+
+    ts = sorted(int(x.get("publish_at") or 0) for x in leads
+                if int(x.get("publish_at") or 0) > 0)
+    if not ts:
+        return "无时间"
+    newest = _dt.fromtimestamp(ts[-1]).strftime("%m-%d %H:%M")
+    med = _dt.fromtimestamp(ts[len(ts) // 2]).strftime("%m-%d")
+    return f"最新{newest} 中位{med}"
+
+
 def _niche_summary(leads: list[dict]) -> str:
     """本轮线索的**赛道构成**(2026-10-29) —— 例:`小游戏1/影视3/其他2`。
 
@@ -1670,6 +1707,7 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
             _record_run(db, user_id, "douyin_leads", "success",
                         f"{plat}[{source or '-'}] 类目{cat} 词{len(kws)}(其中外部{n_hot_used}) "
                         f"线索{len(leads)} 赛道{_niche_summary(leads) or '-'} "
+                        f"新鲜{_freshness_summary(leads)} "
                         f"{_kouling_summary(leads)} "
                         f"[外部命中{n_hot}/产出{n_hot_ok}]")
             db.commit()

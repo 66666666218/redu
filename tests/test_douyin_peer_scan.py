@@ -345,30 +345,25 @@ def _profile(vid: str, niche: str = "小游戏", extra_same: int = 2,
     return works
 
 
-def test_discover_identifies_the_account_by_the_video_id(monkeypatch) -> None:
-    """★ 2026-10-29 **身份靠作品 id,不靠名字**。
+def test_discover_identifies_the_author_via_video_page(monkeypatch) -> None:
+    """★ 2026-10-29:**视频页 JSON-LD 里有作者 sec_uid** —— 不再按昵称猜同名号
+    (实测「阿杰」8 个同名号、前几个主页全是别的内容)。
 
-    实测:搜索页/视频页都不给作者 sec_uid,按名字去用户搜索会撞一堆同名号
-    (「阿杰」8 个、「罗二姐1」5 个,前几个主页全是别的内容)。而搜索结果带着视频 id ——
-    **哪个同名号的主页里有这条视频,哪个才是本人**。
-
-    这里 u3 名字对、赛道也对,但主页里**没有那条视频** ⇒ 必须丢掉。
+    这里两个作者,视频页各自给出 uid;主页内容对得上的收。
     """
     from app.services import douyin_cdp_source as cdp
 
     monkeypatch.setattr(cdp, "search", lambda kws, **kw: [
-        _search_row("阿德", "100"), _search_row("阿德", "100"),
-        _search_row("小游戏推广", "101"), {"name": "", "url": ""}])
-    monkeypatch.setattr(dps, "resolve_users", lambda names, *a, **k: [
-        {"uid": "u1", "name": "阿德", "query": "阿德"},
-        {"uid": "u2", "name": "小游戏推广", "query": "小游戏推广"},
-        {"uid": "u3", "name": "小游戏推广", "query": "小游戏推广"},   # 同名不同号
-        {"uid": "u9", "name": "小游戏推广旗舰", "query": "小游戏推广"},  # 名字对不上 → 丢
-    ])
+        {"name": "阿德", "url": "https://www.douyin.com/video/100",
+         "snippet": "《蛊界游戏》下载"},
+        {"name": "小游戏推广", "url": "https://www.douyin.com/video/101",
+         "snippet": "《某游戏》下载"}])
+    monkeypatch.setattr(dps, "fetch_work_pan", lambda ws, s, **k: {
+        "100": {"mark": "", "pan_url": "", "author_uid": "u1", "author_name": "阿德"},
+        "101": {"mark": "", "pan_url": "", "author_uid": "u2", "author_name": "小游戏推广"}})
     monkeypatch.setattr(dps, "fetch_accounts", lambda accts, s, **k: {
         "u1": _profile("100"),
         "u2": _profile("101"),
-        "u3": _profile("999"),          # 名字/赛道都对,但不是本人
     })
     got = dps.discover_candidates("小游戏", _S(), session=object(), niche="小游戏", limit=5)
     assert [c["uid"] for c in got] == ["u1", "u2"]
@@ -380,12 +375,12 @@ def test_discover_filters_by_niche_share_and_volume(monkeypatch) -> None:
 
     monkeypatch.setattr(cdp, "search", lambda kws, **kw: [
         _search_row("甲", "201"), _search_row("乙", "202")])
-    monkeypatch.setattr(dps, "resolve_users", lambda names, *a, **k: [
-        {"uid": "u1", "name": "甲", "query": "甲"},
-        {"uid": "u2", "name": "乙", "query": "乙"}])
+    monkeypatch.setattr(dps, "fetch_work_pan", lambda ws, s, **k: {
+        "201": {"author_uid": "u1", "author_name": "甲"},
+        "202": {"author_uid": "u2", "author_name": "乙"}})
     monkeypatch.setattr(dps, "fetch_accounts", lambda accts, s, **k: {
         "u1": _profile("201"),                        # 3/3 = 100% → 收
-        "u2": _profile("202", niche="其他"),  # 0% → 丢
+        "u2": _profile("202", niche="其他"),           # 0% → 丢
     })
     got = dps.discover_candidates("小游戏", _S(), session=object(), niche="小游戏", limit=5)
     assert [c["uid"] for c in got] == ["u1"]
@@ -396,8 +391,8 @@ def test_discover_skips_accounts_with_too_few_works(monkeypatch) -> None:
     from app.services import douyin_cdp_source as cdp
 
     monkeypatch.setattr(cdp, "search", lambda kws, **kw: [_search_row("甲", "301")])
-    monkeypatch.setattr(dps, "resolve_users", lambda names, *a, **k: [
-        {"uid": "u1", "name": "甲", "query": "甲"}])
+    monkeypatch.setattr(dps, "fetch_work_pan", lambda ws, s, **k: {
+        "301": {"author_uid": "u1", "author_name": "甲"}})
     monkeypatch.setattr(dps, "fetch_accounts", lambda accts, s, **k: {
         "u1": _profile("301", extra_same=0)})        # 只有 1 条 < min_works
     assert dps.discover_candidates("小游戏", _S(), session=object(), niche="小游戏") == []
@@ -502,9 +497,9 @@ def test_discover_accepts_author_with_token_and_requires_pan(monkeypatch) -> Non
          "snippet": "杀手3合集 免费下载 /~abcdef123~:/"},
         {"name": "纯游戏号", "url": "https://www.douyin.com/video/402",
          "snippet": "纯游戏推广 #抖音小游戏"}])
-    monkeypatch.setattr(dps, "resolve_users", lambda names, *a, **k: [
-        {"uid": "u1", "name": "未来C", "query": "未来C"},
-        {"uid": "u2", "name": "纯游戏号", "query": "纯游戏号"}])
+    monkeypatch.setattr(dps, "fetch_work_pan", lambda ws, s, **k: {
+        "401": {"mark": "", "pan_url": "", "author_uid": "u1", "author_name": "未来C"},
+        "402": {"mark": "", "pan_url": "", "author_uid": "u2", "author_name": "纯游戏号"}})
     monkeypatch.setattr(dps, "fetch_accounts", lambda accts, s, **k: {
         "u1": [{"aweme_id": "401", "url": "u", "title": "杀手3合集 免费下载 #游戏",
                 "likes": 1, "niche": "小游戏", "mark": "/~abc~:/", "pan_url": "",
@@ -531,24 +526,29 @@ def test_discover_accepts_author_with_token_and_requires_pan(monkeypatch) -> Non
     assert got[0]["pans"] == 1          # 搜索行里该作者带盘的条数(主页卡片没有文案)
 
 
-def test_fetch_work_pan_reads_description(monkeypatch) -> None:
-    """★ 网盘凭据在**作品描述**里,主页卡片只有标题 —— 富化这一步就是去视频页读描述。
+def test_fetch_work_pan_reads_description_and_author(monkeypatch) -> None:
+    """★ 网盘凭据在**作品描述**里,主页卡片只有标题 —— 富化这一步就是去视频页读描述;
+    同时从 HTML 的 JSON-LD 里拿到**作者 sec_uid**(发现环节靠它,不再猜同名号)。
 
     实测:未来C 的主页卡片一条都判不出带盘,而它的视频页正文里就写着 `/~7fda3YJwIo~:/`。
     """
     class _Page:
         def __init__(self):
             self.n = 0
-            self.bodies = ["/~7fda3YJwIo~:/ 杀手3合集 免费下载",
-                           "纯游戏推广 #抖音小游戏"]
+            self.pages = [
+                {"body": "/~7fda3YJwIo~:/ 杀手3合集 免费下载",
+                 "html": '"name":"未来C","item":"https://www.douyin.com/user/MS4wLjABAAAA6GPDxxx"'},
+                {"body": "纯游戏推广 #抖音小游戏",
+                 "html": '"name":"纯游戏号","item":"https://www.douyin.com/user/MS4wLjABAAAApure"'},
+            ]
 
         def goto(self, *a, **k):
             return None
 
         def evaluate(self, js):
-            body = self.bodies[self.n]
+            p = self.pages[self.n]
             self.n += 1
-            return body
+            return p
 
         def close(self):
             pass
@@ -559,4 +559,24 @@ def test_fetch_work_pan_reads_description(monkeypatch) -> None:
     monkeypatch.setattr(dps, "_BETWEEN_ACCOUNTS_S", 0)
     got = dps.fetch_work_pan([{"aweme_id": "1"}, {"aweme_id": "2"}], _S())
     assert got["1"]["mark"].startswith("/~")
-    assert "2" not in got, "不带盘的那条不该出现在结果里"
+    assert got["1"]["author_uid"] == "MS4wLjABAAAA6GPDxxx"
+    #: 不带盘也要带回**作者 uid** —— 发现环节要用它
+    assert got["2"]["mark"] == "" and got["2"]["author_uid"] == "MS4wLjABAAAApure"
+
+
+def test_author_of_html_reads_sec_uid_from_jsonld() -> None:
+    html = ('"position": 2, "name": "阿德·游戏解说", '
+            '"item": "https://www.douyin.com/user/MS4wLjABAAAAp4Yjn3MhM6lhP1PnizJlcB1E"')
+    got = dps.author_of_html(html)
+    assert got["uid"] == "MS4wLjABAAAAp4Yjn3MhM6lhP1PnizJlcB1E"
+    assert got["name"] == "阿德·游戏解说"
+    assert dps.author_of_html("没有作者信息") == {"uid": "", "name": ""}
+
+
+def test_discover_without_author_uid_does_not_guess(monkeypatch) -> None:
+    """视频页拿不到作者 uid(改版/风控)⇒ **不收** —— 宁可漏,不可拿同名号去猜。"""
+    from app.services import douyin_cdp_source as cdp
+
+    monkeypatch.setattr(cdp, "search", lambda kws, **kw: [_search_row("甲", "501")])
+    monkeypatch.setattr(dps, "fetch_work_pan", lambda ws, s, **k: {})
+    assert dps.discover_candidates("小游戏", _S(), session=object(), niche="小游戏") == []

@@ -16,6 +16,9 @@ def _no_publish_cutoff(monkeypatch):
     **过滤本身在 `TestPublishCutoff` 里专门验**。
     """
     monkeypatch.setattr("app.services.douyin_leads._min_publish_ts", lambda s: 0)
+    #: ★ 同时关掉"最近 N 天"窗口 —— 否则只验判据/去重的用例会被新鲜度闸挡成 0 条。
+    #: (窗口本身在 `test_collect_leads_drops_posts_older_than_max_age` 里专门验。)
+    monkeypatch.setattr("app.services.douyin_leads._max_age_ts", lambda s: 0)
 
 
 @pytest.fixture(autouse=True)
@@ -1819,3 +1822,43 @@ def test_search_keywords_minigame_round_puts_library_games_first(session, monkey
     kws = dl.search_keywords(session, 1, top=4, settings=_S())
     assert kws[0] == "泰拉瑞亚灾厄 下载", kws
     assert len(kws) <= 4
+
+
+# ---------------------------------------------------------------- 新鲜度(2026-10-29)
+
+def test_collect_leads_drops_posts_older_than_max_age(monkeypatch) -> None:
+    """用户口径「监控的内容我们需要新鲜度,太老旧的不需要」。
+
+    `douyin_leads_max_age_days` 与「2026-10-01 之前不收」取**更严**的那个;
+    这条用 1 天内 / 10 天前两条对比(10 天前那条必须被挡)。
+    """
+    import time
+
+    from app.services import douyin_leads as dlm
+    from app.services import mediacrawler_source as mc
+
+    now = int(time.time())
+    monkeypatch.setattr(mc, "available", lambda: (True, "ok"))
+    monkeypatch.setattr(mc, "crawl", lambda p, ks, **kw: [
+        {"uid": "a", "url": "https://d/new", "name": "甲",
+         "snippet": "《新资源》下载教程", "publish_at": now - 86400, "keyword": "k"},
+        {"uid": "b", "url": "https://d/old", "name": "乙",
+         "snippet": "《旧资源》下载教程", "publish_at": now - 10 * 86400, "keyword": "k"},
+    ])
+    #: 直接钉住"窗口起点 = 7 天前"(autouse fixture 默认把它关成 0)
+    monkeypatch.setattr(dlm, "_max_age_ts", lambda s: now - 7 * 86400)
+    leads = dlm.find_leads(["k"])
+    assert [x["url"] for x in leads] == ["https://d/new"]
+
+
+def test_freshness_summary_is_visible() -> None:
+    """每轮运行记录要写**最新/中位发布时间** —— 只看"窗口挡掉多少"分不清
+    "这批本来就是旧的"与"窗口在起作用"。"""
+    import time
+
+    now = int(time.time())
+    s = dl._freshness_summary([{"publish_at": now - 3600},
+                               {"publish_at": now - 3 * 86400},
+                               {"publish_at": 0}])
+    assert s.startswith("最新") and "中位" in s
+    assert dl._freshness_summary([]) == "无时间"

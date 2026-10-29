@@ -456,14 +456,19 @@ def discover_candidates(keyword: str, settings, *, niche: str = "", limit: int =
     但搜索结果**带着视频 id** ⇒ 哪个同名号的主页里出现了**这条视频**,哪个才是本人。
     这比"名字像"硬得多,而且不需要走协议接口(那条会招风控)。
 
+    ## 身份:**从视频页的 JSON-LD 拿作者 sec_uid**(2026-10-29 起,取代"按昵称猜")
+
+    搜索页的 `<a href>` 里只有「我的」,按昵称去用户搜索会撞一堆同名号
+    (「阿杰」8 个、「罗二姐1」5 个,前几个主页全是别的内容)。
+    ★ 但**视频页 HTML 的 JSON-LD** 里就写着
+    `"name":"作者","item":"https://www.douyin.com/user/MS4w…"` —— 拿这一条,
+    谁是本人**没有歧义**。所以现在:搜索行 → 该作者的一条作品 → 视频页拿 sec_uid → 看主页校验。
+
     ## 三道闸门
 
-      · **身份校验**:候选号前 `min_works` 条作品里必须含搜索到的那条 vid;
-      · **内容校验**:主页里 `niche` 赛道占比 ≥ `min_share`(为空则只看作品数);
-      · **带网盘校验**(`require_pan`):主页里至少一条作品带直链/口令 ——
-        纯游戏推广号(官方号/解说号)主页里一条盘链都没有,加了只会推空气。
-    ⚠️ 视频若是很久以前的、已经掉出主页前 N 条(默认 12),会**认不出**(假阴性)——
-    宁可漏,不可错加。
+      · **身份**:视频页 JSON-LD 给出的 `sec_uid`(不是昵称匹配);
+      · **内容**:主页里 `niche` 赛道占比 ≥ `min_share`(为空则只看作品数);
+      · **带网盘**(`require_pan`):搜索结果里该作者至少一条带直链/口令。
     """
     from app.services import douyin_cdp_source as cdp
 
@@ -482,74 +487,98 @@ def discover_candidates(keyword: str, settings, *, niche: str = "", limit: int =
         if own:
             session.close()
 
-    #: 作者昵称 → 它在搜索结果里的视频 id(按出现顺序)。**同名不同人靠视频 id 区分**。
+    #: 作者昵称 → 它在搜索结果里的视频 id(按出现顺序)。
     reps: dict[str, list[str]] = {}
-    #: 作者昵称 → 搜索结果里**带网盘**的条数。⚠️ 盘链在**搜索结果卡片**里就有(文案),
-    #: 而**主页卡片只有标题** ⇒ 网盘校验必须用搜索行,不能用主页行(实测主页一条都判不出)。
+    #: 作者昵称 → 搜索结果里**带网盘**的条数(主页卡片没有文案,盘链只能在搜索行里判)。
     pans_by_name: dict[str, int] = {}
     for r in rows:
         name = _clean_author(r.get("name"))
         m = _RE_VIDEO_URL.search(str(r.get("url") or ""))
-        if name and m:
-            reps.setdefault(name, []).append(m.group(1))
-            p = pan_of(str(r.get("snippet") or ""))
-            if p["mark"] or p["pan_url"]:
-                pans_by_name[name] = pans_by_name.get(name, 0) + 1
-    names = list(reps)[:max(1, int(limit))]
+        if not (name and m):
+            continue
+        reps.setdefault(name, []).append(m.group(1))
+        p = pan_of(str(r.get("snippet") or ""))
+        if p["mark"] or p["pan_url"]:
+            pans_by_name[name] = pans_by_name.get(name, 0) + 1
+
+    names = [n for n in reps if (not require_pan or pans_by_name.get(n))]
+    names = names[:max(1, int(limit))]
     if not names:
         return []
 
-    resolved = resolve_users(names, settings, user_id=user_id)
-    by_query: dict[str, list[dict]] = {}
-    for u in resolved:
-        #: 只认**完全同名** —— 「抖音小游戏推荐」会被解析成「抖音小游戏」,不挡就加错号。
-        #: ⚠️ 用户搜索返回的名字也要过 `_clean_author`(同一套清洗,别只清一边)。
-        if _clean_author(u["name"]) == u["query"]:
-            by_query.setdefault(u["query"], []).append(u)
-
-    #: 每个名字最多看 `max_try` 个同名号(开主页是慢活;通常第 1~2 个就对上了)。
-    cands: list[dict] = []
+    #: 看视频页拿作者 uid(每个名字最多试 `max_try` 条,总量封顶 —— 开页面是慢活)。
+    todo: list[dict] = []
     for n in names:
-        for u in by_query.get(n, [])[:max(1, int(max_try))]:
-            cands.append({"uid": u["uid"], "name": u["name"], "query": n})
-    if not cands:
+        for vid in reps[n][:max(1, int(max_try))]:
+            todo.append({"aweme_id": vid})
+    todo = todo[:max(1, int(limit)) * max(1, int(max_try))]
+    infos = fetch_work_pan(todo, settings, user_id=user_id, limit=len(todo)) if todo else {}
+
+    #: vid → uid,再把 uid 归到作者名下(一个作者只收一个号)。
+    uid_by_name: dict[str, dict] = {}
+    extra_pan: dict[str, bool] = {}
+    for n in names:
+        for vid in reps[n][:max(1, int(max_try))]:
+            info = infos.get(vid) or {}
+            uid = str(info.get("author_uid") or "").strip()
+            if info.get("mark") or info.get("pan_url"):
+                extra_pan[n] = True
+            if uid and n not in uid_by_name:
+                #: ⚠️ JSON-LD 的 name 有时会和口令粘在一起(`未来C /~xxx~:/`)—— 存库前清洗。
+                uid_by_name[n] = {"uid": uid,
+                                  "name": _clean_author(info.get("author_name") or n)}
+    if not uid_by_name:
         return []
+
     uniq: dict[str, dict] = {}
-    for c in cands:
-        uniq.setdefault(c["uid"], c)
+    for n, a in uid_by_name.items():
+        uniq.setdefault(a["uid"], {**a, "query": n})
     accts = list(uniq.values())
 
     fetched = fetch_accounts(accts, settings, user_id=user_id)
     out: list[dict] = []
-    for n in names:
-        wanted = set(reps[n])
-        for c in [x for x in accts if x["query"] == n]:
-            works = fetched.get(c["uid"]) or []
-            #: ① 身份:主页里必须出现**搜索结果里的那条作品**
-            if not (wanted & {w["aweme_id"] for w in works}):
-                continue
-            if len(works) < int(min_works):
-                continue
-            #: ② 内容:赛道占比
-            share = (sum(1 for w in works if w["niche"] == niche) / len(works)
-                     if niche else 1.0)
-            if share < float(min_share):
-                continue
-            #: ③ **带网盘**(可选):用户口径「这些小游戏也是都需要带网盘的」——
-            #: 判据用**搜索结果里该作者的带盘条数**(主页卡片没有文案,见 `pans_by_name`)。
-            if require_pan and not pans_by_name.get(n):
-                continue
-            out.append({"uid": c["uid"], "name": c["name"], "works": len(works),
-                        "share": round(share, 2),
-                        "pans": pans_by_name.get(n, 0),
-                        "samples": [w["title"][:40] for w in works[:3]]})
-            break            #: 一个名字只收一个(本人);同名的其余号一律不算
+    for c in accts:
+        works = fetched.get(c["uid"]) or []
+        if len(works) < int(min_works):
+            continue
+        share = (sum(1 for w in works if w["niche"] == niche) / len(works)
+                 if niche else 1.0)
+        if share < float(min_share):
+            continue
+        n = c["query"]
+        if require_pan and not (pans_by_name.get(n) or extra_pan.get(n)):
+            continue
+        out.append({"uid": c["uid"], "name": c["name"] or n, "works": len(works),
+                    "share": round(share, 2), "pans": pans_by_name.get(n, 0),
+                    "samples": [w["title"][:40] for w in works[:3]]})
     out.sort(key=lambda x: (-x["share"], -x["works"]))
     return out
 
 
-#: 视频页正文(作品描述里才是**网盘直链/口令**;主页卡片只有标题)。
-_GRAB_DESC_JS = "() => (document.body ? document.body.innerText : '')"
+#: 视频页正文 + 整页 HTML(HTML 里才有作者 sec_uid,见 `author_of_html`)。
+_GRAB_DESC_JS = ("() => ({body: (document.body ? document.body.innerText : ''), "
+                 "html: document.documentElement.innerHTML})")
+
+
+#: 视频页 HTML 里的作者(JSON-LD `ListItem`):
+#: `"name": "阿德·游戏解说", "item": "https://www.douyin.com/user/MS4wLjABAAAA…"`。
+#: ★ **2026-10-29 实测**:搜索页/视频页的 `<a href>` 里只有「我的」,但这段 **JSON-LD**
+#: 带着作者的**真实 sec_uid** —— 于是发现环节不必再靠"昵称 → 用户搜索"去猜同名号。
+_RE_AUTHOR_IN_HTML = re.compile(
+    r'"name"\s*:\s*"([^"]{1,40})"\s*,\s*"item"\s*:\s*"https://www\.douyin\.com/user/'
+    r'([A-Za-z0-9_-]{10,})"')
+
+
+def author_of_html(html: str) -> dict:
+    """从视频页 HTML 里取作者 `{uid, name}`;取不到返回空串。
+
+    ⚠️ 页面上有多条 `ListItem`(相关推荐里也有别人的号)—— 这里**只取第一条**,
+    实测它就是**本条视频的作者**(用已知账号「阿德·游戏解说」对照验证过 uid 一致)。
+    """
+    m = _RE_AUTHOR_IN_HTML.search(str(html or ""))
+    if not m:
+        return {"uid": "", "name": ""}
+    return {"uid": m.group(2), "name": m.group(1)}
 
 
 def fetch_work_pan(works: list[dict], settings, *, user_id: int = 1,
@@ -578,10 +607,15 @@ def fetch_work_pan(works: list[dict], settings, *, user_id: int = 1,
                 page.goto(f"https://www.douyin.com/video/{vid}",
                           wait_until="domcontentloaded", timeout=_GOTO_TIMEOUT_MS)
                 time.sleep(_PAGE_WAIT_S)
-                body = str(page.evaluate(_GRAB_DESC_JS) or "")
+                info = page.evaluate(_GRAB_DESC_JS) or {}
+                body = str(info.get("body") or "") if isinstance(info, dict) else str(info)
+                auth = author_of_html(str(info.get("html") or "")) if isinstance(info, dict) else {}
                 p = pan_of(body[:20_000])
-                if p["mark"] or p["pan_url"]:
-                    out[vid] = p
+                #: 即使这条不带盘,也要把**作者 uid** 带回去 —— 发现环节靠它把号加准
+                #: (`discover_candidates`),不再靠同名昵称猜。
+                if p["mark"] or p["pan_url"] or auth.get("uid"):
+                    out[vid] = {**p, "author_uid": auth.get("uid", ""),
+                                "author_name": auth.get("name", "")}
             except Exception as exc:  # noqa: BLE001 - 单条失败不影响其余
                 logger.debug("读作品描述失败 %s:%s", vid, str(exc)[:120])
         return out

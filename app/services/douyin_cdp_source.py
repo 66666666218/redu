@@ -319,8 +319,18 @@ def _cookies_of(session, user_id: int) -> list[dict]:
 
 
 def _search_url(keyword: str) -> str:
+    """搜索页地址。★ **按最新发布排序**(`sort_type=2`,2026-10-29)。
+
+    用户口径「监控的内容我们需要新鲜度,太老旧的不需要」。
+    实测同一关键词:
+      · 默认(综合/热度)最新一条 **2026-08-30**,大头是 2025-10;
+      · `sort_type=2` 最新一条 **2026-09-29**;
+      · `sort_type=2&publish_time=7` 直接 **0 行**(该词近一周确实没有新帖 —— 参数本身有效,
+        只是别拿它当默认:没新帖时返回空,与"被挡"同形)。
+    ⇒ 默认只加 `sort_type=2`;时间窗交给 `douyin_leads_max_age_days` 统一裁。
+    """
     return ("https://www.douyin.com/search/"
-            f"{urllib.parse.quote(keyword)}?type=video")
+            f"{urllib.parse.quote(keyword)}?type=video&sort_type=2")
 
 
 #: 从页面里抽结果。**判据写在 JS 里**(DOM 才是这条路的事实源)。
