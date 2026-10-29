@@ -541,7 +541,11 @@ def _search_with(ck: dict, ssk: bytes, kws: list[str], st, pages: int,
                 rows.append({"uid": str(user.get("user_id") or ""),
                              "name": str(user.get("nickname") or "")[:60],
                              "url": f"https://www.xiaohongshu.com/explore/{it.get('id')}",
-                             "snippet": title[:255], "pan_link": "", "keyword": kw})
+                             "snippet": title[:255], "pan_link": "", "keyword": kw,
+                             #: ★ 发布时间(2026-10-29):搜索响应**不一定**给,给了就用;
+                             #: 给不了就是 0 ⇒ 推送侧新鲜度闸门按"不知道"处理。
+                             "publish_at": int(it.get("time") or nc.get("time")
+                                               or nc.get("last_update_time") or 0)})
             logger.info("小红书纯协议:「%s」第 %d 页 +%d 条", kw[:24], page, len(items))
             if not items:
                 break

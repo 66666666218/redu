@@ -579,6 +579,23 @@ def _card_rows(cards, kw: str, limit: int = 30) -> list[dict]:
         lines = [s.strip() for s in raw.split("\n") if s.strip()]
         if not lines:
             continue
+        # ★ **发布时间**(2026-10-29 用户口径「所有板块都要新鲜度检查」)。
+        # 卡片文字里本来就有日期(`08-13` / `6天前` / `2025-08-03`),之前**读出来就扔了**
+        # ⇒ 小红书的条目在推送侧永远显示「无时间」,新鲜度闸门对它形同虚设。
+        # 从**末尾往前**找(日期在后面,标题里偶尔也有像日期的串);认不出就给 0(闸门按"不知道"处理)。
+        pub = 0
+        try:
+            from datetime import datetime as _dt
+
+            from app.services.hot_time import parse_published, parse_published_coarse
+
+            for ln in reversed(lines):
+                got = parse_published(ln) or parse_published_coarse(ln)
+                if isinstance(got, _dt):
+                    pub = int(got.timestamp())
+                    break
+        except Exception:  # noqa: BLE001 - 时间解析失败不该拖垮采集
+            pub = 0
         path = href.split("?", 1)[0].rstrip("/")       #: 先剥查询串,再剥尾斜杠
         uid = path.rsplit("/", 1)[-1]
         url = (path if path.startswith("http")
@@ -606,6 +623,8 @@ def _card_rows(cards, kw: str, limit: int = 30) -> list[dict]:
             "url": url,
             "snippet": " ".join(lines)[:255], "pan_link": "",
             "keyword": kw,
+            #: ★ 卡片上读出来的**发布日期**(0 = 读不出,闸门按"不知道"放行)
+            "publish_at": pub,
             "metrics": metrics,
         })
     if rows:

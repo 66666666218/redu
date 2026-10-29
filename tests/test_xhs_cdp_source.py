@@ -318,7 +318,9 @@ class Test形状与低频:
         rows = C.search(["网盘资源"], settings=_S())
         assert len(rows) == 2
         assert set(rows[0]) == {"uid", "name", "url", "snippet", "pan_link", "keyword",
-                                "metrics"}, "两条路的形状必须一致(CDP 只是接管同一个页面)"
+                                #: ★ 2026-10-29 新增:卡片日期 → 发布时间(推送侧新鲜度闸门要用)
+                                "publish_at", "metrics"}, \
+            "两条路的形状必须一致(CDP 只是接管同一个页面)"
         #: ★ CDP 路也要带「对标数据」(2026-10-16:两条路**共用** `_card_rows`,
         #:   所以点赞数在这一层就该有;用户报的「小红书没有具体的数据」正是这里)
         assert rows[0]["metrics"] == {"liked_count": 12}

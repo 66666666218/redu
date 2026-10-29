@@ -312,7 +312,7 @@ def test_search_bilibili_videos_strips_em_and_keeps_keyword(monkeypatch) -> None
         def json(self):
             return {"code": 0, "data": {"result": [
                 {"bvid": "BV1", "title": '<em class="keyword">网盘资源</em>火影忍者720集',
-                 "author": "4K超清臻享版"}]}}
+                 "author": "4K超清臻享版", "pubdate": 1759800000}]}}
 
     import requests
     monkeypatch.setattr(cp, "_bili_signed_get", lambda *a, **k: _R().json())
@@ -321,6 +321,8 @@ def test_search_bilibili_videos_strips_em_and_keeps_keyword(monkeypatch) -> None
     assert "<em" not in out[0]["snippet"] and "火影忍者" in out[0]["snippet"]
     assert out[0]["keyword"] == "网盘资源"
     assert out[0]["url"] == "https://www.bilibili.com/video/BV1"
+    #: ★ 2026-10-29:发布时间要带出来 —— 推送侧的新鲜度闸门靠它
+    assert out[0]["publish_at"] == 1759800000
 
 
 def test_search_bilibili_videos_raises_on_risk_control(monkeypatch) -> None:

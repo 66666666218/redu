@@ -1062,3 +1062,16 @@ class TestBrowserStealth:
         js = x._STEALTH_JS.lower()
         for bad in ("safari", "firefox", "iphone", "macintel", "webgl", "canvas"):
             assert bad not in js, f"伪造了 {bad} ⇒ 容易组合出矛盾的指纹"
+
+
+def test_card_rows_reads_publish_time() -> None:
+    """★ 2026-10-29:小红书卡片上的日期(`6天前`)要读成 `publish_at` ——
+    在此之前读出来就扔了 ⇒ 推送侧永远显示「无时间」,新鲜度闸门对它形同虚设。"""
+    import time as _t
+
+    card = _FakeCard(href="/explore/abc", text="某标题\n某作者\n6天前\n123",
+                     author="某作者", title="某标题", like="123")
+    rows = x._card_rows(_FakeCards([card]), "k")
+    assert rows and rows[0]["publish_at"] > 0
+    age_days = (_t.time() - rows[0]["publish_at"]) / 86400
+    assert 5 <= age_days <= 7, age_days

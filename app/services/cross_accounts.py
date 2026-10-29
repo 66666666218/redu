@@ -392,6 +392,9 @@ def search_bilibili_videos(keyword: str, limit: int = 20, cookie: str = "") -> l
                     "url": f"https://www.bilibili.com/video/{bvid}",
                     "snippet": title[:255], "pan_link": _pan_of(title),
                     "metrics": metrics,
+                    # ★ **发布时间**(2026-10-29):B站搜索接口一直给 `pubdate`(epoch),
+                    #   之前没读 ⇒ 资源热度的条目"无时间",推送侧的新鲜度闸门对它不起作用。
+                    "publish_at": int(item.get("pubdate") or 0),
                     # ⚠️ **必须回填 `keyword`**:调用方(`resource_presence.probe`)按它把结果
                     # 归到"是搜哪个资源名搜出来的";少了这个字段 → 匹配不上 → **永远出 0 条**
                     # (2026-10-03 单测抓到的静默归零)。
