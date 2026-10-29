@@ -289,3 +289,16 @@ def test_非档案原因的失败不触发隔离(monkeypatch):
         dc.search(["词"], session=_Db("x"), settings=_Settings())
     assert "未登录" in str(ei.value)
     assert q == [], "登录过期不是档案问题,不许丢档案"
+
+
+def test_token_on_the_author_line_is_kept() -> None:
+    """★ 2026-10-29:实测有一批单机游戏号把夸克令牌写在作者同一行 ——
+    `@未来C /~7fda3YJwIo~:/`。原来整行剔掉 ⇒ `collect_leads` 看不到口令,
+    这批**带网盘的帖子一条都进不来**。现在剔作者名,但**行内令牌/链接要留下**。"""
+    from app.services.douyin_cdp_source import _rows_of
+
+    raw = {"rows": [{"vid": "1", "author": "未来C",
+                     "text": "00:33 17 杀手3合集 免费下载\n@未来C /~7fda3YJwIo~:/"}]}
+    rows = _rows_of(raw, "kw")
+    assert "/~7fda3YJwIo~" in rows[0]["snippet"]
+    assert "@未来C" not in rows[0]["snippet"]

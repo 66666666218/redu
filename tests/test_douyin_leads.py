@@ -1715,3 +1715,48 @@ def test_niche_summary_is_ordered_rare_first() -> None:
     leads += [{"title": "《蛊界游戏》兑换码"}]
     leads += [{"title": "某个认不出赛道的东西"}]
     assert dl._niche_summary(leads) == "小游戏1/影视3/其他1"
+
+
+def test_find_leads_accepts_direct_pan_link(monkeypatch) -> None:
+    """★ 2026-10-29:正文**直接贴网盘链**(没有《》/令牌)也算线索 —— 用户口径
+    「这些小游戏也是都需要带网盘的」。实测搜 `游戏合集 下载`,46 条里 6 条带盘,
+    其中一批是百度网盘直链,原来会被全部丢掉。"""
+    from app.services import mediacrawler_source as mc
+
+    monkeypatch.setattr(mc, "available", lambda: (True, "ok"))
+    monkeypatch.setattr(mc, "crawl", lambda p, ks, **kw: [
+        {"uid": "u1", "url": "https://www.douyin.com/video/9", "name": "夏雪宜",
+         "snippet": "【梦幻龙族2】单机版 免费分享 https://pan.baidu.com/s/abc123 提取码 4r2t",
+         "keyword": "游戏合集 下载", "publish_at": 0},
+        {"uid": "u2", "url": "https://www.douyin.com/video/10", "name": "某号",
+         "snippet": "纯游戏推广 #抖音小游戏", "keyword": "k", "publish_at": 0},
+    ])
+    leads = dl.find_leads(["游戏合集 下载"])
+    assert len(leads) == 1
+    assert leads[0]["pan_url"].startswith("https://pan.baidu.com/s/abc123")
+    assert leads[0]["mark"] == ""
+
+
+def test_push_leads_links_a_direct_pan_url(monkeypatch) -> None:
+    """★ 2026-10-29:没有口令、正文直接贴盘链的线索,卡片上**标题要点得动**(链到那个盘),
+    「资源」列写盘名 —— 用户口径「这些小游戏也是都需要带网盘的」。"""
+    from app.services import feishu_client
+
+    sent: dict = {}
+
+    class _C:
+        def __init__(self, webhook, secret):
+            pass
+
+        def send_card(self, card):
+            sent["card"] = card
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+    dl.push_leads([{
+        "mark": "", "title": "【梦幻龙族2】单机版 免费分享 提取码 4r2t",
+        "url": "https://www.douyin.com/video/9", "author": "夏雪宜", "keyword": "游戏合集 下载",
+        "pan_url": "https://pan.baidu.com/s/abc123"}], _Settings())
+    text = str(sent["card"])
+    assert "https://pan.baidu.com/s/abc123" in text     # 点标题就能到盘
+    assert "百度" in text                               # 资源列写盘名

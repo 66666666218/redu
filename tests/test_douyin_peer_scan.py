@@ -39,6 +39,10 @@ class _S:
     douyin_peer_enabled = True
     douyin_peer_max_accounts = 6
     douyin_peer_max_works = 6
+    #: 这几个用例验的是"新作品判定"，不是"带不带网盘"；带盘过滤另有专门用例。
+    douyin_peer_require_pan = False
+    #: 不开视频页富化(单测里不碰浏览器);富化本身另有专门用例。
+    douyin_peer_max_enrich = 0
     feishu_webhook_douyin_peer = "https://example.com/peer"
     feishu_secret = ""
     feishu_webhook_admin = ""
@@ -397,3 +401,162 @@ def test_discover_skips_accounts_with_too_few_works(monkeypatch) -> None:
     monkeypatch.setattr(dps, "fetch_accounts", lambda accts, s, **k: {
         "u1": _profile("301", extra_same=0)})        # 只有 1 条 < min_works
     assert dps.discover_candidates("小游戏", _S(), session=object(), niche="小游戏") == []
+
+
+def test_run_for_user_surfaces_push_failure(session, monkeypatch) -> None:
+    """★ 推送失败**必须显形**:`todo` 非空但没发出去时,运行记录要写「推送失败:N条」。
+
+    ⚠️ 否则它与「本轮没有新作品」**同形**(都是 新0/推送无),而 `pushed_at` 还留空 ——
+    这正是本仓最恨的那类"看着正常、其实没做成"。
+    """
+    _acct(session, uid="u1", name="甲")
+    monkeypatch.setattr(dps, "fetch_accounts", lambda *a, **k: {
+        "u1": [{"aweme_id": "old", "url": "https://d/old", "title": "老作品",
+                "likes": 0, "niche": "小游戏", "account_uid": "u1",
+                "account_name": "甲", "author": "甲"}]})
+    monkeypatch.setattr(dps, "push_works", lambda *a, **k: True)
+    dps.run_for_user(session, 1, _S())          # 建基线
+
+    monkeypatch.setattr(dps, "fetch_accounts", lambda *a, **k: {
+        "u1": [{"aweme_id": "new", "url": "https://d/new", "title": "#抖音小游戏 新",
+                "likes": 0, "niche": "小游戏", "account_uid": "u1",
+                "account_name": "甲", "author": "甲"}]})
+    monkeypatch.setattr(dps, "push_works", lambda *a, **k: False)
+    res = dps.run_for_user(session, 1, _S())
+    assert res["push_failed"] is True and res["pushed"] is False
+    assert [w["aweme_id"] for w in dps.pending(session, 1)] == ["new"]
+
+
+# ---------------------------------------------------------------- 带网盘(2026-10-29 用户口径)
+
+def test_pan_of_finds_direct_link_and_kouling() -> None:
+    """「这些小游戏也是都需要带网盘的」—— 先把"带不带"判出来。
+
+    直链:三种盘;口令:复用线索链的 `_lead_mark` / 夸克 `mark_of`(不另写正则)。
+    """
+    p = dps.pan_of("《蛊界游戏》资源 https://pan.quark.cn/s/abc123 提取码 4r2t")
+    assert p["pan_url"].startswith("https://pan.quark.cn/s/abc123")
+
+    assert dps.pan_of("《抖音小游戏》咐置包塘模拟器叩苓")["mark"] != ""
+    assert dps.pan_of("《朝朝入梦》全80集")["mark"] == ""        # 书名号≠口令:这条是剧名
+    #: ⚠️ 只有《…》不算;但旁边写了"口令/资源自取"这类词时,《…》才是口令
+    assert dps.pan_of("《蛊界游戏》复制口令 资源自取")["mark"] == "蛊界游戏"
+    assert dps.pan_of("纯游戏推广 #抖音小游戏") == {"mark": "", "pan_url": ""}
+
+
+def test_require_pan_drops_and_marks_handled(session, monkeypatch) -> None:
+    """**不带网盘的一律不推**,但必须记成"已处理" —— 否则它会永远挂在 pending 里每轮重试。"""
+    from app.services import category_topics as ct
+
+    _acct(session, uid="u1", name="甲")
+
+    def _fetch(*a, **k):
+        return {"u1": [
+            {"aweme_id": "nopan", "url": "https://d/1", "title": "纯游戏推广 #抖音小游戏",
+             "likes": 1, "niche": ct.niche_of("纯游戏推广 #抖音小游戏"), "mark": "",
+             "pan_url": "", "account_uid": "u1", "account_name": "甲", "author": "甲"},
+            {"aweme_id": "withpan", "url": "https://d/2",
+             "title": "#抖音小游戏 https://pan.quark.cn/s/x", "likes": 2,
+             "niche": ct.niche_of("#抖音小游戏"), "mark": "",
+             "pan_url": "https://pan.quark.cn/s/x", "account_uid": "u1",
+             "account_name": "甲", "author": "甲"}]}
+
+    monkeypatch.setattr(dps, "fetch_accounts", _fetch)
+    monkeypatch.setattr(dps, "push_works",
+                        lambda ws, s, **k: getattr(push_works, "seen", []).extend(ws) or True)
+    push_works = dps.push_works
+
+    class _Pan(_S):
+        douyin_peer_require_pan = True
+
+    res = dps.run_for_user(session, 1, _Pan())      # 建基线:两条都记,不推
+    assert res["new"] == 0
+    # 第二轮把两条都当新作品(基线已处理过,所以先清掉)
+    from app.db.models import DouyinPeerWork
+    for r in session.scalars(select(DouyinPeerWork)).all():
+        r.pushed_at = None
+    session.commit()
+
+    push_works.seen = []
+    res = dps.run_for_user(session, 1, _Pan())
+    assert res["no_pan"] == 1, "无盘链那条要被挡下"
+    assert [w["aweme_id"] for w in getattr(push_works, "seen", [])] == ["withpan"]
+    row = session.scalar(select(DouyinPeerWork).where(DouyinPeerWork.aweme_id == "nopan"))
+    assert row.pushed_at is not None, "被挡下的也要记成已处理,不能永远挂在待推里"
+
+
+def test_clean_author_strips_quark_token() -> None:
+    """实测(2026-10-29):搜索结果卡会把夸克令牌和 `@昵称` 放同一行,
+    作者名变成 `未来C /~7fda3YJwIo~:/` —— 不清洗就永远匹配不上用户搜索里的「未来C」。"""
+    assert dps._clean_author("未来C /~7fda3YJwIo~:/") == "未来C"
+    assert dps._clean_author("阿德·游戏解说") == "阿德·游戏解说"
+
+
+def test_discover_accepts_author_with_token_and_requires_pan(monkeypatch) -> None:
+    """作者名带令牌也能认出来;开了 `require_pan` 时,主页一条盘链都没有的号不收。"""
+    from app.services import douyin_cdp_source as cdp
+
+    #: ⚠️ 网盘判据用**搜索行**(那里有文案);主页卡片只有标题,`snippet` 为空 ⇒ 不带盘
+    monkeypatch.setattr(cdp, "search", lambda kws, **kw: [
+        {"name": "未来C /~7fda3YJwIo~:/", "url": "https://www.douyin.com/video/401",
+         "snippet": "杀手3合集 免费下载 /~abcdef123~:/"},
+        {"name": "纯游戏号", "url": "https://www.douyin.com/video/402",
+         "snippet": "纯游戏推广 #抖音小游戏"}])
+    monkeypatch.setattr(dps, "resolve_users", lambda names, *a, **k: [
+        {"uid": "u1", "name": "未来C", "query": "未来C"},
+        {"uid": "u2", "name": "纯游戏号", "query": "纯游戏号"}])
+    monkeypatch.setattr(dps, "fetch_accounts", lambda accts, s, **k: {
+        "u1": [{"aweme_id": "401", "url": "u", "title": "杀手3合集 免费下载 #游戏",
+                "likes": 1, "niche": "小游戏", "mark": "/~abc~:/", "pan_url": "",
+                "account_uid": "u1", "account_name": "未来C", "author": "未来C"},
+               {"aweme_id": "401b", "url": "u", "title": "英雄连合集 #游戏", "likes": 1,
+                "niche": "小游戏", "mark": "/~def~:/", "pan_url": "",
+                "account_uid": "u1", "account_name": "未来C", "author": "未来C"},
+               {"aweme_id": "401c", "url": "u", "title": "禁闭求生 #游戏", "likes": 1,
+                "niche": "小游戏", "mark": "/~ghi~:/", "pan_url": "",
+                "account_uid": "u1", "account_name": "未来C", "author": "未来C"}],
+        #: 身份对上、赛道也对,但**一条盘链都没有** → require_pan 挡掉
+        "u2": [{"aweme_id": "402", "url": "u", "title": "#抖音小游戏 纯推广", "likes": 1,
+                "niche": "小游戏", "mark": "", "pan_url": "",
+                "account_uid": "u2", "account_name": "纯游戏号", "author": "纯游戏号"},
+               {"aweme_id": "402b", "url": "u", "title": "#抖音小游戏 再来", "likes": 1,
+                "niche": "小游戏", "mark": "", "pan_url": "",
+                "account_uid": "u2", "account_name": "纯游戏号", "author": "纯游戏号"},
+               {"aweme_id": "402c", "url": "u", "title": "#抖音小游戏 三连", "likes": 1,
+                "niche": "小游戏", "mark": "", "pan_url": "",
+                "account_uid": "u2", "account_name": "纯游戏号", "author": "纯游戏号"}]})
+    got = dps.discover_candidates("游戏合集", _S(), session=object(), niche="小游戏",
+                                  require_pan=True)
+    assert [c["uid"] for c in got] == ["u1"]
+    assert got[0]["pans"] == 1          # 搜索行里该作者带盘的条数(主页卡片没有文案)
+
+
+def test_fetch_work_pan_reads_description(monkeypatch) -> None:
+    """★ 网盘凭据在**作品描述**里,主页卡片只有标题 —— 富化这一步就是去视频页读描述。
+
+    实测:未来C 的主页卡片一条都判不出带盘,而它的视频页正文里就写着 `/~7fda3YJwIo~:/`。
+    """
+    class _Page:
+        def __init__(self):
+            self.n = 0
+            self.bodies = ["/~7fda3YJwIo~:/ 杀手3合集 免费下载",
+                           "纯游戏推广 #抖音小游戏"]
+
+        def goto(self, *a, **k):
+            return None
+
+        def evaluate(self, js):
+            body = self.bodies[self.n]
+            self.n += 1
+            return body
+
+        def close(self):
+            pass
+
+    page = _Page()
+    monkeypatch.setattr(dps, "_with_page", lambda s, fn, **k: fn(page))
+    monkeypatch.setattr(dps, "_PAGE_WAIT_S", 0)
+    monkeypatch.setattr(dps, "_BETWEEN_ACCOUNTS_S", 0)
+    got = dps.fetch_work_pan([{"aweme_id": "1"}, {"aweme_id": "2"}], _S())
+    assert got["1"]["mark"].startswith("/~")
+    assert "2" not in got, "不带盘的那条不该出现在结果里"

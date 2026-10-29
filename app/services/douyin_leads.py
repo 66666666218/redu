@@ -74,6 +74,41 @@ def _lead_mark(text: str, masked_name: str = "") -> str:
     return ""
 
 
+#: 正文里的**网盘直链**(夸克/百度/迅雷;`drive.uc.cn` 也算夸克系)。
+#: ★ 2026-10-29:用户口径「这些小游戏也是都需要带网盘的」—— 抖音上有一批单机游戏号
+#: 直接把**百度网盘链接**写在文案里(实测搜 `游戏合集 下载` 46 条里 6 条带盘),
+#: 这类帖子**没有《口令》** ⇒ 原来会被 `collect_leads` 全部丢掉。
+_RE_PAN_URL = re.compile(
+    r"https?://[^\s\"'<>]*?(?:pan\.quark\.cn|drive\.uc\.cn|pan\.baidu\.com|pan\.xunlei\.com)[^\s\"'<>]*")
+
+#: 出现这些词才把《…》当成**口令**(而不是剧名)。见 `pan_of`。
+_KOU_HINTS = ("口令", "咐置", "付置", "叩苓", "网盘", "提取码", "复制这段", "复制链接",
+              "链接自取", "资源自取", "自取")
+
+
+def pan_of(text: str) -> dict:
+    """标题/正文里的**网盘凭据** → `{mark, pan_url}`;两样都没有就是两个空串。
+
+    ⚠️ **《…》本身不算网盘凭据**(2026-10-29 当场踩到):短剧/漫剧标题里
+    `《朝朝入梦》全80集` 遍地都是,拿 `_lead_mark` 一律收下会让**每条剧名都变成"带网盘"**。
+    所以只有两种才算:
+      · **正文里的网盘直链**(夸克/百度/迅雷);
+      · **真口令**:`/~token~/` 或 `咐置…叩苓`(复用 `quark_kouling.mark_of`),
+        或者**附近有"口令/网盘/提取码"这类词**时,《…》才算口令。
+
+    ★ **单一出处**:线索卡与对标号卡都用这一份判据(对标号那边 `import` 它),
+    别各写一份 —— 两处口径迟早飘。
+    """
+    from app.services.quark_kouling import mark_of
+
+    t = str(text or "")
+    m = _RE_PAN_URL.search(t)
+    mark = mark_of(t)
+    if not mark and any(h in t for h in _KOU_HINTS):
+        mark = _lead_mark(t)
+    return {"mark": mark[:64], "pan_url": (m.group(0) if m else "")[:500]}
+
+
 def _lead_rank(text: str, masked_name: str) -> int:
     """线索排序优先级(越小越靠前):开头《》 0 / 与昵称吻合 1 / 其它 2。"""
     if _LEAD_RE.match(text):
@@ -474,10 +509,15 @@ def collect_leads(keywords: list[str], limit: int = 30, platform: str = "douyin"
             # 实测搜「夸克口令」一次就捞到 15 条,全被这条判据挡在门外。
             from app.services.quark_kouling import mark_of
             mark = mark_of(text)
-        if not mark:
-            continue          # 既没有《…》也没有夸克标记 → 不是线索
+        # ★ **正文里直接贴网盘链**也算线索(2026-10-29,用户口径「这些小游戏也是都需要带网盘的」)。
+        # 实测搜 `游戏合集 下载`:46 条里 6 条带盘,其中一批是**百度网盘直链**、没有《》/令牌
+        # ⇒ 原来会被下面那道 `if not mark: continue` 全部丢掉。
+        pan_url = "" if mark else pan_of(text)["pan_url"]
+        if not mark and not pan_url:
+            continue          # 既没有口令、也没有盘链 → 不是线索
         seen.add(url)
-        out.append({"mark": mark, "title": text[:120], "url": url,
+        out.append({"mark": mark, "pan_url": pan_url,
+                    "title": text[:120], "url": url,
                     # 账号名。⚠️ **取决于来源**(2026-10-08):纯协议给的是**真实昵称**,
                     # MediaCrawler 那条是**脱敏**的(如「籽***」)—— 推送卡片的"作者列"
                     # 因此可能显示星号;看到星号先看运行记录的来源标签,别以为解析坏了。
@@ -1319,7 +1359,11 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
 
     def _res_key(ld_: dict) -> str:
         info_ = ld_.get("kouling") or {}
-        return str(info_.get("share_url") or "") or f"mark:{ld_.get('mark') or ''}"
+        #: ★ 加了 `pan_url`(2026-10-29):**没有口令、正文直接贴盘链**的帖子
+        #: 原来会全部落到 `mark:` 空串上、被当成**同一个资源**(「条数」列恒等于总数)。
+        return (str(info_.get("share_url") or "")
+                or str(ld_.get("pan_url") or "")
+                or f"mark:{ld_.get('mark') or ''}")
 
     _counts = Counter(_res_key(x) for x in leads)
 
@@ -1379,7 +1423,7 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
         _lib = ld.get("library") or {}
         #: 这条线索**能用的那条链**(我方链优先,其次库里现成的那条)。它同时决定两列:
         #: 「作品」列挂它就**可点**,「资源」列写它落在**哪个盘**。
-        _raw_our = info.get("our_url") or _lib.get("link") or ""
+        _raw_our = info.get("our_url") or _lib.get("link") or str(ld.get("pan_url") or "")
         our = _md_safe(_raw_our)
         work = f"[{shown}]({our})" if our else shown
         # 转发量**独立成列**(原来并进作品列,六列版式下挪出来)。没有就不显示,

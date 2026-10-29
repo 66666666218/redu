@@ -114,6 +114,16 @@ def parse_metric(text: str) -> int:
     return int(round(float(m.group(1)) * _UNIT.get(m.group(2), 1)))
 
 
+#: ★ **网盘判据的单一出处在线索链**(`douyin_leads.pan_of`,2026-10-29 移过去)——
+#: 线索卡与对标号卡必须同一口径。这里只保留"作品 dict 版"的薄封装。
+from app.services.douyin_leads import pan_of  # noqa: E402  (放在常量之后:见模块头)
+
+
+def _has_pan(w: dict) -> bool:
+    """这条作品带**网盘凭据**吗(直链或口令)—— 不带就默认不推,见 `run_for_user`。"""
+    return bool(str(w.get("pan_url") or "").strip() or str(w.get("mark") or "").strip())
+
+
 def parse_work(text: str) -> dict:
     """主页卡片文字 → `{title, likes, pinned}`。
 
@@ -148,12 +158,15 @@ def _rows_to_works(rows: list[dict], account: dict, limit: int) -> list[dict]:
         parsed = parse_work(str(r.get("text") or ""))
         if not parsed["title"]:
             continue
+        pan = pan_of(parsed["title"])
         out.append({
             "aweme_id": vid,
             "url": f"https://www.douyin.com/video/{vid}",
             "title": parsed["title"],
             "likes": parsed["likes"],
             "niche": niche_of(parsed["title"]),
+            "mark": pan["mark"],
+            "pan_url": pan["pan_url"],
             "account_uid": account["uid"],
             "account_name": account.get("name") or "",
             #: 台账(`push_ledger`)认的键叫 `author` —— 在这里就映射好,
@@ -221,11 +234,26 @@ def record_new(session, user_id: int, works: list[dict], *, baseline: bool,
             user_id=user_id, aweme_id=w["aweme_id"], account_uid=w["account_uid"],
             account_name=w["account_name"], title=w["title"], url=w["url"],
             niche=w["niche"], likes=int(w.get("likes") or 0),
+            mark=str(w.get("mark") or "")[:64],
+            pan_url=str(w.get("pan_url") or "")[:500],
             first_seen_at=now, pushed_at=pushed_at))
     session.flush()
     if not baseline:
         return fresh
     return fresh[:n_keep]
+
+
+def _unseen_ids(session, user_id: int, aweme_ids: list[str]) -> set[str]:
+    """这些 vid 里**还没落过库**的(**只读**,不写库)—— 富化只对新作品做。"""
+    from app.db.models import DouyinPeerWork
+
+    ids = [str(x).strip() for x in (aweme_ids or []) if str(x).strip()]
+    if not ids:
+        return set()
+    known = set(session.scalars(select(DouyinPeerWork.aweme_id).where(
+        DouyinPeerWork.user_id == user_id,
+        DouyinPeerWork.aweme_id.in_(ids))).all())
+    return set(ids) - known
 
 
 def pending(session, user_id: int) -> list[dict]:
@@ -238,6 +266,7 @@ def pending(session, user_id: int) -> list[dict]:
     return [{"aweme_id": r.aweme_id, "url": r.url, "title": r.title, "likes": r.likes,
              "niche": r.niche, "account_uid": r.account_uid,
              "account_name": r.account_name, "author": r.account_name,
+             "mark": r.mark or "", "pan_url": r.pan_url or "",
              "liked_count": r.likes} for r in rows]
 
 
@@ -403,8 +432,18 @@ def resolve_users(names: list[str], settings=None, *, user_id: int = 1,
 _RE_VIDEO_URL = re.compile(r"/video/(\d+)")
 
 
+#: 作者名里混进来的**夸克令牌**(`未来C /~7fda3YJwIo~:/`)—— 搜索结果卡把令牌和 `@昵称`
+#: 放在同一行,`_rows_of` 按整行取作者名,于是名字被污染。发现环节要**先清洗再比对**。
+_RE_AUTHOR_TOKEN = re.compile(r"/~[^~\s]+~:?/?")
+
+
+def _clean_author(name: str) -> str:
+    return _RE_AUTHOR_TOKEN.sub("", str(name or "")).strip()
+
+
 def discover_candidates(keyword: str, settings, *, niche: str = "", limit: int = 6,
                         min_share: float = 0.5, min_works: int = 3, max_try: int = 3,
+                        require_pan: bool = False,
                         user_id: int = 1, session=None) -> list[dict]:
     """**从关键词结果里找对标号**(2026-10-29,账号池自增长)。**不写库**。
 
@@ -417,10 +456,12 @@ def discover_candidates(keyword: str, settings, *, niche: str = "", limit: int =
     但搜索结果**带着视频 id** ⇒ 哪个同名号的主页里出现了**这条视频**,哪个才是本人。
     这比"名字像"硬得多,而且不需要走协议接口(那条会招风控)。
 
-    ## 两道闸门
+    ## 三道闸门
 
       · **身份校验**:候选号前 `min_works` 条作品里必须含搜索到的那条 vid;
-      · **内容校验**:主页里 `niche` 赛道占比 ≥ `min_share`(为空则只看作品数)。
+      · **内容校验**:主页里 `niche` 赛道占比 ≥ `min_share`(为空则只看作品数);
+      · **带网盘校验**(`require_pan`):主页里至少一条作品带直链/口令 ——
+        纯游戏推广号(官方号/解说号)主页里一条盘链都没有,加了只会推空气。
     ⚠️ 视频若是很久以前的、已经掉出主页前 N 条(默认 12),会**认不出**(假阴性)——
     宁可漏,不可错加。
     """
@@ -443,11 +484,17 @@ def discover_candidates(keyword: str, settings, *, niche: str = "", limit: int =
 
     #: 作者昵称 → 它在搜索结果里的视频 id(按出现顺序)。**同名不同人靠视频 id 区分**。
     reps: dict[str, list[str]] = {}
+    #: 作者昵称 → 搜索结果里**带网盘**的条数。⚠️ 盘链在**搜索结果卡片**里就有(文案),
+    #: 而**主页卡片只有标题** ⇒ 网盘校验必须用搜索行,不能用主页行(实测主页一条都判不出)。
+    pans_by_name: dict[str, int] = {}
     for r in rows:
-        name = str(r.get("name") or "").strip()
+        name = _clean_author(r.get("name"))
         m = _RE_VIDEO_URL.search(str(r.get("url") or ""))
         if name and m:
             reps.setdefault(name, []).append(m.group(1))
+            p = pan_of(str(r.get("snippet") or ""))
+            if p["mark"] or p["pan_url"]:
+                pans_by_name[name] = pans_by_name.get(name, 0) + 1
     names = list(reps)[:max(1, int(limit))]
     if not names:
         return []
@@ -456,7 +503,8 @@ def discover_candidates(keyword: str, settings, *, niche: str = "", limit: int =
     by_query: dict[str, list[dict]] = {}
     for u in resolved:
         #: 只认**完全同名** —— 「抖音小游戏推荐」会被解析成「抖音小游戏」,不挡就加错号。
-        if u["name"].strip() == u["query"].strip():
+        #: ⚠️ 用户搜索返回的名字也要过 `_clean_author`(同一套清洗,别只清一边)。
+        if _clean_author(u["name"]) == u["query"]:
             by_query.setdefault(u["query"], []).append(u)
 
     #: 每个名字最多看 `max_try` 个同名号(开主页是慢活;通常第 1~2 个就对上了)。
@@ -487,12 +535,58 @@ def discover_candidates(keyword: str, settings, *, niche: str = "", limit: int =
                      if niche else 1.0)
             if share < float(min_share):
                 continue
+            #: ③ **带网盘**(可选):用户口径「这些小游戏也是都需要带网盘的」——
+            #: 判据用**搜索结果里该作者的带盘条数**(主页卡片没有文案,见 `pans_by_name`)。
+            if require_pan and not pans_by_name.get(n):
+                continue
             out.append({"uid": c["uid"], "name": c["name"], "works": len(works),
                         "share": round(share, 2),
+                        "pans": pans_by_name.get(n, 0),
                         "samples": [w["title"][:40] for w in works[:3]]})
             break            #: 一个名字只收一个(本人);同名的其余号一律不算
     out.sort(key=lambda x: (-x["share"], -x["works"]))
     return out
+
+
+#: 视频页正文(作品描述里才是**网盘直链/口令**;主页卡片只有标题)。
+_GRAB_DESC_JS = "() => (document.body ? document.body.innerText : '')"
+
+
+def fetch_work_pan(works: list[dict], settings, *, user_id: int = 1,
+                   limit: int = 8) -> dict[str, dict]:
+    """**只为新作品**打开视频页,读描述里的网盘凭据。返回 `{aweme_id: {mark, pan_url}}`。
+
+    ★ **为什么必须有这一步**(2026-10-29 实测):主页卡片的 `innerText` **只有标题**,
+    口令/盘链在**作品描述**里 —— 实测「未来C」的主页卡片一条都判不出带盘,
+    而它的视频页正文里就写着 `/~7fda3YJwIo~:/`。
+    不补这一步,`douyin_peer_require_pan` 会把**所有**作品都判成"不带网盘"。
+
+    ⚠️ **只对新作品开页**(每轮通常 0~3 条),并且**上限 `limit`** ——
+    首次建基线时不走这里(那 12 条不推,没必要为它们多开 12 个页面)。
+    """
+    todo = [w for w in (works or []) if str(w.get("aweme_id") or "").strip()][:max(0, int(limit))]
+    if not todo:
+        return {}
+
+    def _run(page) -> dict[str, dict]:
+        out: dict[str, dict] = {}
+        for i, w in enumerate(todo):
+            if i:
+                time.sleep(_BETWEEN_ACCOUNTS_S)
+            vid = str(w["aweme_id"])
+            try:
+                page.goto(f"https://www.douyin.com/video/{vid}",
+                          wait_until="domcontentloaded", timeout=_GOTO_TIMEOUT_MS)
+                time.sleep(_PAGE_WAIT_S)
+                body = str(page.evaluate(_GRAB_DESC_JS) or "")
+                p = pan_of(body[:20_000])
+                if p["mark"] or p["pan_url"]:
+                    out[vid] = p
+            except Exception as exc:  # noqa: BLE001 - 单条失败不影响其余
+                logger.debug("读作品描述失败 %s:%s", vid, str(exc)[:120])
+        return out
+
+    return _with_page(settings, _run, user_id=user_id)
 
 
 def push_works(works: list[dict], settings, session=None, user_id: int = 0) -> bool:
@@ -521,8 +615,20 @@ def push_works(works: list[dict], settings, session=None, user_id: int = 0) -> b
 
     elements: list[dict] = [
         {"tag": "div", "text": {"tag": "lark_md", "content": intro}},
-        _col_set_row([("**账号**", 3), ("**新作品**", 6), ("**赛道**", 2), ("**点赞**", 1)],
-                     grey=True)]
+        _col_set_row([("**账号**", 3), ("**新作品**", 5), ("**资源**", 2), ("**赛道**", 1),
+                      ("**点赞**", 1)], grey=True)]
+    from app.services.douyin_leads import _pan_name
+
+    def _resource_cell(w: dict) -> str:
+        """这条作品**带没带网盘** —— 直链写盘名可点;只有口令就写`🔑口令`。"""
+        url = str(w.get("pan_url") or "").strip()
+        if url:
+            pan = _pan_name(url) or "网盘"
+            return f"[🔴{pan}]({_md_safe(url)})"
+        mark = str(w.get("mark") or "").strip()
+        if mark:
+            return f"🔑{_md_safe(mark[:16])}"
+        return "—"
     for niche in order:
         if len(groups) > 1:
             elements.append({"tag": "div", "text": {"tag": "lark_md",
@@ -540,8 +646,9 @@ def push_works(works: list[dict], settings, session=None, user_id: int = 0) -> b
                 acct = f"[{acct}](https://www.douyin.com/user/{_md_safe(uid)})"
             elements.append(_col_set_row([
                 (acct, 3),
-                (work, 6),
-                (_md_safe(niche), 2),
+                (work, 5),
+                (_resource_cell(w), 2),
+                (_md_safe(niche), 1),
                 (f"↗{likes}" if likes else "—", 1)]))
     card = {"config": {"wide_screen_mode": True},
             "header": {"template": "purple",
@@ -576,6 +683,33 @@ def run_for_user(session, user_id: int, settings) -> dict:
 
     from app.db.models import DouyinPeerWork
 
+    #: 每个号是不是"已有历史"(基线判定)。**先算出来** —— 富化只对非基线号做。
+    seen_map = {
+        acct["uid"]: session.scalar(
+            select(DouyinPeerWork.id).where(
+                DouyinPeerWork.user_id == user_id,
+                DouyinPeerWork.account_uid == acct["uid"]).limit(1)) is not None
+        for acct in accts if acct["uid"] in fetched
+    }
+    #: ★ **网盘凭据在作品描述里,主页卡片只有标题**(2026-10-29 实测)——
+    #: 只给"非基线 + 没见过的 + 标题本身没盘"的作品开视频页;首次建基线不富化(那些不推)。
+    enrich: list[dict] = []
+    for acct in accts:
+        got = fetched.get(acct["uid"]) or []
+        if not got or not seen_map.get(acct["uid"]):
+            continue
+        unseen = _unseen_ids(session, user_id, [w["aweme_id"] for w in got])
+        enrich += [w for w in got if w["aweme_id"] in unseen and not _has_pan(w)]
+    enriched_n = 0
+    if enrich:
+        limit = int(getattr(settings, "douyin_peer_max_enrich", 8) or 0)
+        found = fetch_work_pan(enrich, settings, user_id=user_id, limit=limit)
+        for w in enrich:
+            p = found.get(w["aweme_id"])
+            if p and (p.get("mark") or p.get("pan_url")):
+                w.update(mark=p.get("mark") or "", pan_url=p.get("pan_url") or "")
+                enriched_n += 1
+
     works_total = 0
     new_works: list[dict] = []
     baselines: list[str] = []
@@ -589,10 +723,7 @@ def run_for_user(session, user_id: int, settings) -> dict:
             continue
         works_total += len(got)
         #: 基线判据 = **这个号在作品表里一条都没有**(不是"本轮没扫到"),见纪律 1。
-        seen_before = session.scalar(
-            select(DouyinPeerWork.id).where(
-                DouyinPeerWork.user_id == user_id,
-                DouyinPeerWork.account_uid == acct["uid"]).limit(1)) is not None
+        seen_before = seen_map.get(acct["uid"], False)
         new_works.extend(record_new(session, user_id, got, baseline=not seen_before,
                                     keep=baseline_push))
         if not seen_before and got:
@@ -605,11 +736,26 @@ def run_for_user(session, user_id: int, settings) -> dict:
     #: 上一轮没推成的也一起补(不许静默丢)。去重键仍是 aweme_id。
     seen_ids = {x["aweme_id"] for x in new_works}
     todo = new_works + [w for w in pending(session, user_id) if w["aweme_id"] not in seen_ids]
+    #: ★ **不带网盘的不推**(用户口径「这些小游戏也是都需要带网盘的」,2026-10-29)。
+    #: ⚠️ 但**必须记成"已处理"**,否则它们会一直挂在 `pushed_at IS NULL` 里、每轮重试 ——
+    #: 那不是"等一下再推",而是"永远等不到还被反复捞"。
+    no_pan = 0
+    if bool(getattr(settings, "douyin_peer_require_pan", True)):
+        drop = [w for w in todo if not _has_pan(w)]
+        no_pan = len(drop)
+        if drop:
+            mark_pushed(session, user_id, drop)
+        todo = [w for w in todo if _has_pan(w)]
     pushed = push_works(todo, settings, session=session, user_id=user_id) if todo else False
     if pushed:
         mark_pushed(session, user_id, todo)
     return {"accounts": len(accts), "works": works_total, "new": len(new_works),
             "pushed": pushed, "pushed_n": len(todo) if pushed else 0,
+            #: ⚠️ **推送失败要显形**:`todo` 非空却没发出去,运行记录必须写「推送失败:N条」,
+            #: 否则它与「本轮没有新作品」长得一模一样(本仓最恨的假成功)。
+            "push_failed": bool(todo) and not pushed,
+            "no_pan": no_pan,
+            "enriched": enriched_n,
             "baselines": baselines, "failed": failed, "pending": len(todo)}
 
 
@@ -634,8 +780,13 @@ def douyin_peer_tick(settings=None) -> int:
             try:
                 res = run_for_user(db, uid, settings)
                 db.commit()
-                note = (f"号{res['accounts']} 作品{res['works']} 新{res['new']} "
-                        f"推送{'成' if res['pushed'] else '无'}")
+                #: ⚠️ **没配号时不要把 `作品0` 写进记录** —— 体检把「连续几轮 作品=0」判黄,
+                #: 而"还没配号"是正常状态,一个永远黄的项会训练人忽略整份报告。
+                if res["accounts"]:
+                    note = (f"号{res['accounts']} 作品{res['works']} 新{res['new']} "
+                            f"推送{'成' if res['pushed'] else '无'}")
+                else:
+                    note = "未配对标号(还没加号,本轮没扫)"
                 if res.get("baselines"):
                     #: ⚠️ **必须写出来**:首次扫描只建基线、不推,不说就会被读成"没扫到"。
                     note += f" **建基线:{','.join(res['baselines'])}**"
@@ -643,6 +794,15 @@ def douyin_peer_tick(settings=None) -> int:
                     #: ⚠️ 逐号失败要**点名**(格式对齐 `chain_health._partial_failures` 的
                     #: `失败:…`)—— 否则"3 个号里 1 个读不到"会被总数掩盖,体检也不会判黄。
                     note += f" 失败:{','.join(res['failed'])}"
+                if res.get("push_failed"):
+                    #: 同理:**推送失败**必须点名,不能被"新0"混过去(`pushed_at` 留空、下轮补推)。
+                    note += f" 推送失败:{res['pending']}条"
+                if res.get("no_pan"):
+                    #: **不带网盘的不推**,但要说出来 —— 否则"扫到 12 条只推了 1 条"会让人以为丢了。
+                    note += f" 无盘链{res['no_pan']}条(未推)"
+                if res.get("enriched"):
+                    #: 读作品描述补到的盘链条数(主页卡片看不到描述,这一步是 require_pan 的前提)。
+                    note += f" 补盘链{res['enriched']}条"
                 if res.get("note"):
                     note += f" · {res['note']}"
                 sent_total += int(res.get("pushed_n") or 0)

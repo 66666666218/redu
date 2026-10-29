@@ -394,8 +394,13 @@ def _rows_of(raw: dict, keyword: str) -> list[dict]:
         text = str(r.get("text") or "")
         publish_at = _publish_at(text)          #: ⚠️ 必须在剔掉作者行**之前**取(时间在它后面)
         if name:
-            #: 把作者那一行 `@昵称` 从正文里剔掉(它已经在 `name` 里了,卡片会单独显示)
-            text = _RE_AUTHOR_LINE.sub("", text)
+            #: 把作者那一行 `@昵称` 从正文里剔掉(它已经在 `name` 里了,卡片会单独显示)。
+            #: ⚠️⚠️ **但行里的口令/盘链必须留下**(2026-10-29 实测):实测有一批单机游戏号
+            #: 的夸克令牌就长在作者同一行 —— `@未来C /~7fda3YJwIo~:/`。整行剔掉后,
+            #: `collect_leads` 只看到"没有口令"的正文 ⇒ **这批带网盘的帖子一条都进不来**。
+            am = _RE_AUTHOR_LINE.search(text)
+            keep = " ".join(re.findall(r"/~[^~\s]+~:?/?|https?://\S+", am.group(0))) if am else ""
+            text = _RE_AUTHOR_LINE.sub(keep, text)
         out.append({
             "uid": vid,
             "name": name,
