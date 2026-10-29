@@ -444,3 +444,28 @@ class TestResourceType:
         assert ct.display_niche("《朝朝入梦》漫剧 更新") == "漫剧"
         assert ct.display_niche("《某剧》短剧 全集") == "短剧"
         assert ct.display_niche("四级真题") == "资料"
+
+
+class TestStructuralWords:
+    """★ 2026-10-29「结构词」这一步:一个类目词都没有的**裸剧名**,靠结构证据归到影视。
+
+    典型:`《侍君》更至133`、`253.驼驼的怪物攻略（57集）`、`某某 第3季` ——
+    它们此前一律落「其他」,是资源库未分类的大头。
+    """
+
+    def test_serial_markers_imply_drama(self) -> None:
+        assert ct.classify("《侍君》更至133") == "影视"
+        assert ct.classify("253.驼驼的怪物攻略（57集）") == "影视"
+        assert ct.classify("某某 第3季") == "影视"
+        assert ct.classify("Q-囚岛日记（第二季更至9）") == "影视"
+
+    def test_season_word_alone_is_not_a_drama_marker(self) -> None:
+        """⚠️ 裸 `N季` 会把 `2026赛季`/`四季度` 误判成影视 —— 只认「第N季」。"""
+        assert ct.classify("2026赛季 赛程 对阵") != "影视"
+        assert ct.classify("四季度 财报 汇总") != "影视"
+
+    def test_game_series_parent_beats_series_word(self) -> None:
+        """父目录 `王国保卫战全系列版本` 同时含「系列」(影视提示)与「全系列版本」——
+        游戏要先判,否则整个游戏系列会被判成影视。"""
+        assert ct.type_of("王国保卫战一", "王国保卫战全系列版本") == "小游戏"
+        assert ct.type_of("摆烂系列第二十八集.mp4", "B-《摆烂系列合集》111") == "影视"
