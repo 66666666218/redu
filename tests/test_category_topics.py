@@ -333,3 +333,62 @@ class TestNameLearning:
         ct.learn_names(session, "孙宇晨回应")
         names = ct.known_names(session)
         assert ct.classify("孙宇晨的PS教程", names) == "软件"
+
+
+class TestMiniGameNiche:
+    """★ **2026-10-29 新增「小游戏」赛道**。用户口径:
+
+    > 「抖音同行监控我感觉短剧比重太大了,因为**也有做小游戏的**,但每轮推送基本都是短剧相关的,
+    >  是否能找一个平衡点每个板块都能监测到」
+
+    在此之前类目表里**根本没有这一档**:库里 38 个游戏资源(`游戏本体`/`瑟瑟游戏`/…)
+    全被判成「未分类」⇒ 轮换永远轮不到它们,这条赛道一次都没被搜过。
+    """
+
+    def test_game_titles(self) -> None:
+        assert ct.classify("《蛊界游戏》持续更新") == "小游戏"
+        assert ct.classify("小游戏推广 兑换码") == "小游戏"
+        assert ct.classify("恶搞之家游戏(手机和电脑)") == "小游戏"
+
+    def test_short_drama_is_not_stolen_by_game_words(self) -> None:
+        """⚠️ 「仙侠/武侠/传奇」**刻意没进小游戏词表**:短剧标题里到处都是,
+        放进来会把短剧抢成小游戏(短剧目前是主要产出,误伤代价最大)。"""
+        assert ct.classify("仙侠短剧《朝朝入梦》全80集") == "影视"
+        assert ct.classify("武侠传奇剧集 第3集") == "影视"
+
+    def test_rotation_includes_it(self, session) -> None:
+        """它必须**真的进入轮换**,否则等于没加。"""
+        order = list(ct.DEFAULT_CATEGORIES)
+        assert "小游戏" in order
+        seen = set()
+        for _ in range(len(order)):
+            seen.add(ct.current_category(session))
+            ct.advance_category(session)
+        assert "小游戏" in seen
+
+
+class TestPickReservesOwnCategorySlot:
+    """★ **2026-10-29**:别的类目的真资源名可以占一半名额,但不能把**本类目话题词**挤光。
+
+    实测起因:轮到大瓜/问卷/软件那几轮,实际搜的词仍然是清一色短剧资源名 + 通用口令词
+    ⇒ `小游戏` 从头到尾没被搜过一次(用户报「每轮推送基本都是短剧相关的」)。
+    """
+
+    def test_reserves_one_slot_when_category_has_no_resource_words(self) -> None:
+        words = ["韩剧全集", "动漫资源", "性格测试", "某某冷门资源"]  # 影视/影视/问卷/未分类
+        got = ct.pick(words, "小游戏", 3)
+        assert len(got) == 3
+        assert any(ct.classify(w) == "小游戏" for w in got), f"本类目话题词被挤光了:{got}"
+
+    def test_no_reservation_when_the_category_has_its_own_names(self) -> None:
+        """本类目**有真资源名**时不需要保底 —— 那才是主料(用户口径"搜索词应该是资源名称")。"""
+        got = ct.pick(["小游戏礼包", "韩剧全集", "四级真题"], "小游戏", 2)
+        assert got[0] == "小游戏礼包"
+        assert len(got) == 2
+
+
+def test_current_index_follows_the_cursor(session) -> None:
+    """`current_index` 给"跟着类目一起轮换"的别处用(夸克专搜词),必须与游标同源。"""
+    assert ct.current_index(session) == 0
+    ct.advance_category(session)
+    assert ct.current_index(session) == 1

@@ -1606,3 +1606,112 @@ def test_入队时把发帖时间带上(session) -> None:
                       "某口令", publish_at=1791358442)
     row = session.scalar(select(DiscoveredPanLink))
     assert row is not None and row.publish_at is not None, "入队没带时间"
+
+
+# ---------------------------------------------------------------- 赛道平衡(2026-10-29)
+
+def test_quark_keywords_are_capped_and_rotated(session, monkeypatch) -> None:
+    from app.services import douyin_leads as dl
+    """★ 2026-10-29:通用口令词**每轮只占 1 个名额**,且起点跟着类目轮换。
+
+    原来三个词**每轮无条件全加**(4 类目词 + 1 热榜 + 3 夸克 = 8 个里占 3 个),
+    而它们不携带赛道信息,搜回来几乎全是短剧推广(实测 `咐置` 一个词 204 条线索)
+    —— 用户口径「每轮推送基本都是短剧相关的」。现在:1 个名额、三个词轮流用。
+    """
+    from app.services import category_topics as ct
+
+    monkeypatch.setattr("app.services.cross_accounts._keywords_from_library",
+                        lambda s, u, top: ["四级真题 网盘"])
+
+    class _S:
+        douyin_leads_group_keywords = 0
+        douyin_leads_quark_keywords = "夸克口令,咐置,网盘口令"
+        douyin_leads_quark_slots = 1
+
+    def _quark_used(kws):
+        return [w for w in kws if w in ("夸克口令", "咐置", "网盘口令")]
+
+    first = dl.search_keywords(session, 1, top=1, settings=_S())
+    assert _quark_used(first) == ["夸克口令"], f"类目游标在 0 ⇒ 只用第 1 个:{first}"
+
+    ct.advance_category(session)                      # 游标 → 1
+    second = dl.search_keywords(session, 1, top=1, settings=_S())
+    assert _quark_used(second) == ["咐置"], f"游标前进 ⇒ 换下一个词:{second}"
+
+
+def test_quark_slots_zero_means_none(session, monkeypatch) -> None:
+    from app.services import douyin_leads as dl
+    """`0` = 一个都不要(比"把配置清空"更好用:清空会回落默认值)。"""
+    monkeypatch.setattr("app.services.cross_accounts._keywords_from_library",
+                        lambda s, u, top: ["四级真题 网盘"])
+
+    class _S:
+        douyin_leads_group_keywords = 0
+        douyin_leads_quark_keywords = "夸克口令,咐置,网盘口令"
+        douyin_leads_quark_slots = 0
+
+    assert dl.search_keywords(session, 1, top=1, settings=_S()) == ["四级真题 网盘"]
+
+
+def _push_capture(monkeypatch):
+    from app.services import feishu_client
+
+    sent: dict = {}
+
+    class _C:
+        def __init__(self, webhook, secret):
+            pass
+
+        def send_card(self, card):
+            sent["card"] = card
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+    return sent
+
+
+def test_push_leads_groups_rows_by_niche(monkeypatch) -> None:
+    from app.services import douyin_leads as dl
+    """★ 2026-10-29 用户口径「推送的时候进行分类」。
+
+    行按赛道分组(**稀缺赛道排前面**)、卡头写出本轮构成 —— 短剧占多数的时候,
+    小游戏那几条不会再被淹在一串同质的短剧行里。
+    ⚠️ 分组**不改变逐条口径**:六列、点标题跳网盘都一样,只是把顺序与标题补上。
+    """
+    sent = _push_capture(monkeypatch)
+    dl.push_leads([
+        {"mark": "爆漫宝库", "title": "《爆漫宝库》全126集《顶级差距》完结 追剧",
+         "url": "https://d/1", "author": "甲", "keyword": "k"},
+        {"mark": "蛊界游戏", "title": "《蛊界游戏》入口 兑换码",
+         "url": "https://d/2", "author": "乙", "keyword": "k"},
+    ], _Settings())
+
+    elements = sent["card"]["elements"]
+    markers = [e["text"]["content"] for e in elements
+               if e.get("tag") == "div" and "▍" in str(e["text"]["content"])]
+    assert markers == ["**▍小游戏** · 1 条", "**▍影视** · 1 条"], markers
+    intro = elements[0]["text"]["content"]
+    assert "本轮赛道" in intro and "小游戏 1" in intro and "影视 1" in intro
+
+
+def test_push_leads_single_niche_has_no_group_headers(monkeypatch) -> None:
+    from app.services import douyin_leads as dl
+    """只有一个赛道时不打小标题、也不写"本轮赛道" —— 那是把标题又说一遍。"""
+    sent = _push_capture(monkeypatch)
+    dl.push_leads([
+        {"mark": "爆漫宝库", "title": "《爆漫宝库》全126集 追剧", "url": "https://d/1",
+         "author": "甲", "keyword": "k"},
+    ], _Settings())
+
+    elements = sent["card"]["elements"]
+    assert not [e for e in elements if "▍" in str(e.get("text"))]
+    assert "本轮赛道" not in elements[0]["text"]["content"]
+
+
+def test_niche_summary_is_ordered_rare_first() -> None:
+    from app.services import douyin_leads as dl
+    """运行记录里的赛道构成与卡片同一顺序(稀缺在前、其他垫底)—— 两处读起来是一份东西。"""
+    leads = [{"title": "《爆漫宝库》全126集 追剧"} for _ in range(3)]
+    leads += [{"title": "《蛊界游戏》兑换码"}]
+    leads += [{"title": "某个认不出赛道的东西"}]
+    assert dl._niche_summary(leads) == "小游戏1/影视3/其他1"

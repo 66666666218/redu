@@ -39,7 +39,11 @@ DEFAULT_CATEGORIES: dict[str, tuple[str, ...]] = {
              "物理", "化学", "模板", "表格", "PPT", "简历", "素材", "字体", "笔刷",
              "壁纸", "头像", "表情包", "图标", "报告", "手册", "指南", "学习资料", "资料",
              "文档", "PDF", "pdf", "电子书", "书单", "清单", "论文", "合集"),
-    "影视": ("短剧", "漫剧", "电影", "电视剧", "剧集", "全集", "解说", "番剧", "动漫", "剧"),
+    "影视": ("短剧", "漫剧", "电影", "电视剧", "剧集", "全集", "解说", "番剧", "动漫", "剧",
+             # ★ 2026-10-29:补两个**短剧标题里稳定出现**的结构词。
+             #   起因:推送要按赛道分组,而实测大量短剧标题只有剧名 + `番外`/`大结局`,
+             #   一个类目词都判不出来(近 3 天 150 条线索里 64 条落进「其他」)。
+             "番外", "大结局"),
     # ⚠️ **别把"入口"这类通用词放进来**(2026-10-04 实测踩到):资源名里
     # "…入口链接直达" 到处都是,会把一堆非问卷的东西误判进本类。
     "问卷": ("问卷", "调研", "测评", "量表", "测试"),
@@ -61,7 +65,21 @@ DEFAULT_CATEGORIES: dict[str, tuple[str, ...]] = {
              "辟谣", "澄清", "退圈", "封杀", "被抓", "被捕", "判刑", "起诉", "和解",
              "分手", "离婚", "恋情", "恋爱", "官宣", "复合", "出轨", "绯闻", "撕破脸",
              "喊话", "diss", "打脸", "人设", "出圈", "翻旧账"),
+    # ★ **2026-10-29 新增**:用户口径「**也有做小游戏的**,但每轮推送基本都是短剧相关的」
+    # —— 此前**根本没有这个类目**,库里 38 个游戏资源(`游戏本体`/`瑟瑟游戏`/…)全被判成
+    # 「未分类」⇒ 轮换**永远轮不到**它们,小游戏这条赛道一次都没被搜过。
+    #
+    # ⚠️ **词表刻意避开「仙侠/武侠/传奇」**:短剧标题里这些词满天飞,放进来会把短剧抢成小游戏。
+    # ⚠️ 位置放在**最后**:`classify` 平票时**按表序**取先命中的 ⇒ 放最后 = 平票永远让给别人,
+    #    宁可漏判小游戏,也不要误伤短剧(短剧目前是主要产出)。
+    "小游戏": ("游戏", "小游戏", "手游", "端游", "页游", "单机游戏", "主机游戏",
+               "捕鱼", "消除", "塔防", "棋牌", "卡牌", "私服", "首充", "代充",
+               "兑换码", "礼包码", "游戏礼包", "游戏推荐", "游戏下载", "搬砖", "打金",
+               "Steam", "steam", "switch", "Switch"),
 }
+
+#: 认不出类目时,推送/统计里用的兜底标签(**不参与搜索** —— 它不是一个类目)。
+NICHE_OTHER = "其他"
 
 _CONFIG_KEY = "lead_word_category"          # 轮换游标(存在 system_config,重启不丢)
 
@@ -192,6 +210,17 @@ def classify(text: str, names: set[str] | None = None) -> str:
     return ""
 
 
+def niche_of(text: str, names: set[str] | None = None) -> str:
+    """**推送/统计用**的赛道标签:`classify` 认不出时给 `NICHE_OTHER`(而不是空串)。
+
+    ⚠️ 与 `classify` **不是两套口径** —— 就是它加一个兜底标签。分不开的后果见模块说明
+    (两处各有一套口径,本项目已经栽过);推送卡按赛道分组时用它当 key。
+    ⚠️ 认不出 ≠ 出错:`大瓜`/`资料` 的词表都是**收窄**的,大量标题本来就没有任何类目词,
+    把它们硬塞进某个类目才是错的。
+    """
+    return classify(text, names) or NICHE_OTHER
+
+
 def current_category(session) -> str:
     """本轮该类目 —— 读轮换游标;没设过(或表已变)就从第一个开始。
 
@@ -204,6 +233,18 @@ def current_category(session) -> str:
     cur = (row.value if row else "") or ""
     # 表改了(类目被删/改名)时游标可能失效 → 回落到第一个,别让整条链崩在 KeyError 上
     return cur if cur in order else order[0]
+
+
+def current_index(session) -> int:
+    """当前类目在轮换表里的**位置**(0 起)。给"跟着类目一起轮换"的别处用(如夸克专搜词)。
+
+    ⚠️ 取不到就回 0 —— 调用方都是"轮换起点",不是关键判据,别为一个越界抛异常。
+    """
+    order = list(categories())
+    try:
+        return order.index(current_category(session))
+    except ValueError:                       # pragma: no cover - current_category 已挡过
+        return 0
 
 
 def advance_category(session) -> str:
@@ -226,7 +267,7 @@ def advance_category(session) -> str:
 
 
 def pick(words: list[str], cat: str, need: int, names: set[str] | None = None,
-         other_max: int | None = None) -> list[str]:
+         other_max: int | None = None, min_mine: int = 1) -> list[str]:
     """挑出本轮该搜的词。**优先顺序**(2026-10-05 修订):
 
         ① 当前类目的**资源名**   ← 主料(用户口径:"搜索词应该是资源名称")
@@ -248,6 +289,12 @@ def pick(words: list[str], cat: str, need: int, names: set[str] | None = None,
 
     ⚠️ **但给 ③ 限流**(`other_max`,默认一半名额):全放开就成了代码注释担心的那样 ——
     每个类目出的都是同一批词、轮换作废。留一半给"本类目那套",**广度靠轮换、深度靠证据**。
+
+    ★ **2026-10-29 加保底 `min_mine`**:上面③留了"一半名额",可**名额是先到先得的** ——
+    `mine + unknown` 一旦先占满 `need`,本类目的话题词**一个都进不去**。实测就是这个后果:
+    轮到大瓜/问卷/软件那几轮,实际搜的词仍然全是短剧资源名和通用口令词,`小游戏` 从头到尾
+    没被搜过一次(用户口径「每轮推送基本都是短剧相关的」)。所以现在**本类目没有资源名时,
+    至少留 1 个名额给它自己的话题词** —— 广度由轮换保证,而不是"证据多的那个永远霸榜"。
     """
     if need <= 0:
         return []
@@ -262,9 +309,12 @@ def pick(words: list[str], cat: str, need: int, names: set[str] | None = None,
             # **别的类目的真资源名** —— 不再直接丢(见 docstring ③)
             other.append(w)
     cap = need // 2 if other_max is None else max(0, int(other_max))
-    out = (mine + unknown)[:need]
-    if len(out) < need:
-        out += other[:min(cap, need - len(out))]
+    # ★ 本类目保底(2026-10-29):没有本类目资源名 ⇒ 留一个名额给**本类目话题词**
+    reserve = 1 if (int(min_mine or 0) > 0 and not mine) else 0
+    out = (mine + unknown)[:max(0, need - reserve)]
+    room = need - len(out) - reserve
+    if room > 0:
+        out += other[:min(cap, room)]
     if len(out) >= need:
         return out
     hints = [h for h in categories().get(cat, ()) if h not in out]

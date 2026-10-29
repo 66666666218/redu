@@ -826,7 +826,11 @@ def search_keywords(session, user_id: int, top: int, settings,
     for w in cand:
         if category_topics.classify(w) == "大瓜":
             category_topics.learn_names(session, w)      # 用户口径:"大瓜**慢慢的学习**可以"
-    kws = category_topics.pick(cand, cat, int(top), names)
+    kws = category_topics.pick(
+        cand, cat, int(top), names,
+        # ★ 2026-10-29:本类目**保底几个词**(见 `pick` 的 `min_mine`)。
+        # 0 = 关掉保底(回到 10-05 的行为:证据多的那个类目永远霸榜)。
+        min_mine=int(getattr(settings, "douyin_leads_category_min_words", 1) or 0))
     # 两个判据都要,**顺序不能反**:
     #   ① `seen`(已经解出过群)排后 —— 用户口径:「而不是一直用着一个口令进群」;
     #   ② 有效率(高→低) —— 同类之间的排序依据。
@@ -838,10 +842,20 @@ def search_keywords(session, user_id: int, top: int, settings,
     # ⚠️ **夸克口令专搜词**(2026-10-06):上面的词都来自**我们自己的资源库**,
     # 搜出来的自然是"我们已有的"、而且**几乎全是迅雷形态**;实测补上这几个词后
     # **一次捞到 15 条夸克口令帖** —— 它们此前**一条都进不来**(`find_leads` 只认《》)。
-    for w in str(getattr(settings, "douyin_leads_quark_keywords", "") or "").split(","):
-        w = w.strip()
-        if w and w not in kws:
-            kws.append(w)
+    # ★ **2026-10-29 改:限量 + 跟着类目轮换**。原来这三个词**每轮无条件全部追加**
+    #   (4 个类目词 + 1 热榜 + 3 夸克 = 8 词里的 3 个),而它们**本身不携带赛道信息**,
+    #   搜回来的几乎全是短剧推广(实测 `咐置` 一个词 204 条线索)→ 用户报的
+    #   「每轮推送基本都是短剧相关的」。现在每轮只取 `douyin_leads_quark_slots` 个,
+    #   且**起点跟着类目游标走** ⇒ 几个词轮流出现,不是「夸克口令」永远霸着名额。
+    qs = [w.strip() for w in
+          str(getattr(settings, "douyin_leads_quark_keywords", "") or "").split(",")
+          if w.strip()]
+    slots = max(0, int(getattr(settings, "douyin_leads_quark_slots", 1) or 0))
+    if qs and slots:
+        start = category_topics.current_index(session) % len(qs)
+        for w in (qs[start:] + qs[:start])[:slots]:
+            if w not in kws:
+                kws.append(w)
     return kws
 
 
@@ -1309,15 +1323,40 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
 
     _counts = Counter(_res_key(x) for x in leads)
 
-    elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
-        f"{label}上发现 **{len(leads)}** 条在推同类资源的视频。"
-        "已自动解析并把能拿到的**转存进我方网盘**,可直接取用。"}},
+    # ★ **按赛道分组**(2026-10-29,用户口径「推送的时候进行分类…每个板块都能监测到」)。
+    # 之前一张卡就是一串按时间排的行,短剧占绝大多数的时候,小游戏那几条会被淹在里面
+    # ——客户看到的观感就是"这轮又全是短剧"。现在:① 卡头写出**本轮赛道构成**;
+    # ② 行按赛道分组、每组带小标题;③ **稀缺赛道排前面**、`其他` 垫底。
+    # ⚠️ 分组**不改变逐条的展示口径**(六列、点标题跳网盘都一样),只是把顺序与标题补上。
+    from app.services import category_topics
+
+    def _niche_of(ld_: dict) -> str:
+        """这条线索属于哪个赛道 —— **标题**为主、口令名为辅(标题常只有剧名、没有类目词)。"""
+        return category_topics.niche_of(
+            f"{ld_.get('title') or ''} {ld_.get('mark') or ''}")
+
+    _groups: dict[str, list[dict]] = {}
+    for ld in leads:
+        _groups.setdefault(_niche_of(ld), []).append(ld)
+    #: 组顺序:**非「其他」在前、条数少的在前**(稀缺赛道先看到),同类按名字稳定排序
+    _order = sorted(_groups,
+                    key=lambda n: (n == category_topics.NICHE_OTHER, len(_groups[n]), n))
+    _intro = (f"{label}上发现 **{len(leads)}** 条在推同类资源的视频。"
+              "已自动解析并把能拿到的**转存进我方网盘**,可直接取用。")
+    if len(_groups) > 1:
+        #: ⚠️ 只有一个赛道时不写这一行 —— 那会变成"一句话把卡片标题又说一遍"
+        _intro += "\n**本轮赛道**:" + " · ".join(
+            f"{n} {len(_groups[n])}" for n in _order)
+
+    elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content": _intro}},
         # **六列网格**(用户口径 2026-10-04):作者 / 作品 / 资源 / 视频 / 转发数 / 条数
         # ⚠️ 两处可点(**照公众号那套**):「作品」点开是**抖音视频**、「资源」点开是**我方链**;
         #    「资源」写的是**网盘名**(夸克/百度/迅雷)而**不是链接文本** —— 见 `_pan_name`。
         _col_set_row([("**作者**", 3), ("**作品**", 5), ("**资源**", 2), ("**视频**", 2),
                       ("**转发数**", 2), ("**条数**", 1)], grey=True)]
-    for ld in leads:
+
+    def _lead_row(ld: dict) -> dict:
+        """一条线索 → 六列网格行(拆出来只为让 `push_leads` 保持可读)。"""
         info = ld.get("kouling") or {}
         author = _md_safe(ld.get("author") or "—")
         title = _md_safe(strip_others(ld.get("title") or ""))
@@ -1353,13 +1392,22 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
         # 链接仍统一由「作品」列承担(资源列**不带链接**,与 10-04 口径一致)。
         _pan = _pan_name(_raw_our)
         res = f"🔴{_pan}" if _pan else "—"
-        elements.append(_col_set_row([
+        return _col_set_row([
             (author, 3),
             (work, 5),
             (res, 2),
             (f"[▶视频]({vurl})" if vurl else "—", 2),
             (f"↗{sc}" if sc else "—", 2),
-            (str(_counts.get(_res_key(ld), 1)), 1)]))
+            (str(_counts.get(_res_key(ld), 1)), 1)])
+
+    for niche in _order:
+        if len(_groups) > 1:
+            #: ⚠️ 用 `div` 而不是 `column_set` —— 分组标题**不是数据行**,
+            #: 混进网格会让"表头 + N 行"的判据失真(`tests/test_douyin_leads.py` 靠它)。
+            elements.append({"tag": "div", "text": {"tag": "lark_md",
+                "content": f"**▍{niche}** · {len(_groups[niche])} 条"}})
+        for ld in _groups[niche]:
+            elements.append(_lead_row(ld))
     card = {
         "config": {"wide_screen_mode": True},
         # ⚠️ **不带头部品牌名**(用户口径 2026-10-04:"**不要带念飞思雪**")。
@@ -1385,6 +1433,24 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
         push_ledger.record(session, user_id,
                            "douyin_peer" if peer else section, leads)
     return ok
+
+
+def _niche_summary(leads: list[dict]) -> str:
+    """本轮线索的**赛道构成**(2026-10-29) —— 例:`小游戏1/影视3/其他2`。
+
+    ⚠️ **为什么非要有这个数**:用户报「每轮推送基本都是短剧相关的」,而在此之前
+    **没有任何一处记录**"这一轮到底出了哪些赛道" —— 只能去翻飞书卡片。
+    现在运行记录里一眼能看出轮换有没有真的覆盖到别的赛道(恒为「影视N」= 没覆盖)。
+    顺序与卡片一致:稀缺赛道在前、`其他` 垫底,所以两处读起来是同一份东西。
+    """
+    from collections import Counter
+
+    from app.services import category_topics
+
+    cnt = Counter(category_topics.niche_of(
+        f"{ld.get('title') or ''} {ld.get('mark') or ''}") for ld in leads)
+    return "/".join(f"{k}{v}" for k, v in sorted(
+        cnt.items(), key=lambda kv: (kv[0] == category_topics.NICHE_OTHER, kv[1], kv[0])))
 
 
 def _kouling_summary(leads: list[dict]) -> str:
@@ -1474,7 +1540,8 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
             # "协议挂了被回落"还是"真没人在推资源" —— 正是本仓最忌讳的那种含糊。
             _record_run(db, user_id, "douyin_leads", "success",
                         f"{plat}[{source or '-'}] 类目{cat} 词{len(kws)}(其中外部{n_hot_used}) "
-                        f"线索{len(leads)} {_kouling_summary(leads)} "
+                        f"线索{len(leads)} 赛道{_niche_summary(leads) or '-'} "
+                        f"{_kouling_summary(leads)} "
                         f"[外部命中{n_hot}/产出{n_hot_ok}]")
             db.commit()
         except Exception as exc:  # noqa: BLE001 - 单平台失败不影响其余
