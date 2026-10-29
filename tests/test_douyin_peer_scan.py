@@ -580,3 +580,22 @@ def test_discover_without_author_uid_does_not_guess(monkeypatch) -> None:
     monkeypatch.setattr(cdp, "search", lambda kws, **kw: [_search_row("甲", "501")])
     monkeypatch.setattr(dps, "fetch_work_pan", lambda ws, s, **k: {})
     assert dps.discover_candidates("小游戏", _S(), session=object(), niche="小游戏") == []
+
+
+def test_target_accounts_prefers_accounts_with_pan_history(session) -> None:
+    """★ 2026-10-29 用户口径「可以根据之前的数据来进行策略决策」:
+    近 30 天**产出过带盘作品**的号优先扫,而不是谁最近没扫谁先(会让真产出的号等好几轮)。"""
+    from datetime import datetime
+
+    from app.db.models import DouyinPeerWork
+
+    _acct(session, uid="u-idle", name="最近扫过但没产出", last_scan_at=datetime.now())
+    _acct(session, uid="u-productive", name="有产出", last_scan_at=datetime.now())
+    session.add_all([
+        DouyinPeerWork(user_id=1, aweme_id=f"w{i}", account_uid="u-productive",
+                       account_name="有产出", title="t", url="u", niche="小游戏",
+                       mark="某个口令", pan_url="", first_seen_at=datetime.now())
+        for i in range(2)])
+    session.commit()
+    got = dps.target_accounts(session, 1, _S())
+    assert got[0]["uid"] == "u-productive"

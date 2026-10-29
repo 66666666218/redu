@@ -341,6 +341,27 @@ def run_feishu_realtime(
             if reason and not _in_cooldown(db, user_id, section, title, settings):
                 pushed_items.append((title, reason))  # 冷却标记移到发送成功后(发送失败不烧冷却)
         if pushed_items:
+            # ★ **AI 价值筛选**(2026-10-29,用户口径「每个板块都加上 AI 筛选」)。
+            # 价值口径:「有用的也就是意味着**资源发的多、转存人数多**」——
+            # 闲鱼用「想要数」、热榜类用「涨幅/排名」当代理信号(都在 `reason` 里)。
+            # ⚠️ 挡掉的要**落冷却** `_mark_alerted`:否则下一轮它仍是"新条目",
+            #    会反复判、反复推(冷却语义本来就是"这条已经处理过了")。
+            from app.services import ai_filter
+
+            _items = [{"title": t, "reason": r} for t, r in pushed_items]
+            _ai = ai_filter.filter_items(
+                section, _items, settings,
+                text_of=lambda it: f"{it['title']} 触发:{it['reason']}")
+            if _ai.source == "llm":
+                keep = {(x["title"], x["reason"]) for x in _ai.items}
+                dropped = [(t, rsn) for t, rsn in pushed_items if (t, rsn) not in keep]
+                for t, rsn in dropped:
+                    _mark_alerted(db, user_id, section, t, rsn)
+                pushed_items = [(t, rsn) for t, rsn in pushed_items if (t, rsn) in keep]
+                logger.info("飞书实时 %s:AI 筛掉 %d 条(原 %d)", section,
+                            len(dropped), _ai.total)
+            if not pushed_items:
+                return 0
             head = f"⚡ {SECTION_LABELS[section]} 实时热点"
             if section == "xianyu":
                 # 闲鱼专属:column_set 网格列(标题可点开商品页;🔥=想要数较昨日 +50% 以上)
@@ -350,7 +371,8 @@ def run_feishu_realtime(
                 y_daily = {str(d.item_id): d for d in repository.xianyu_daily_by_date(db, user_id, yday)}
                 elements: list[dict[str, Any]] = [
                     {"tag": "note", "elements": [{"tag": "plain_text",
-                     "content": "触发:新增 / 排名跳升 · 🔥=想要数较昨日 +50% 以上 · 点标题看商品"}]},
+                     "content": "触发:新增 / 排名跳升 · 🔥=想要数较昨日 +50% 以上 · 点标题看商品"
+                                + (f" · {_ai.summary()}" if _ai.summary() else "")}]},
                     _col_set_row([("**标题**", 6), ("**价格**", 2), ("**想要数**", 2), ("**变化**", 2)], grey=True),
                 ]
                 for title, reason in pushed_items:
@@ -394,7 +416,8 @@ def run_feishu_realtime(
                 series = _SERIES.get(section, lambda db, uid: {})(db, user_id)
                 elements: list[dict[str, Any]] = [
                     {"tag": "note", "elements": [{"tag": "plain_text",
-                     "content": "触发:新增 / 排名跳升 ≥3 / 涨幅 ≥30%"}]},
+                     "content": "触发:新增 / 排名跳升 ≥3 / 涨幅 ≥30%"
+                                + (f" · {_ai.summary()}" if _ai.summary() else "")}]},
                     _col_set_row([("**名称**", 6), ("**变化**", 2), ("**预测**", 2),
                                   ("**置信**", 1), ("**趋势**", 1)], grey=True),
                 ]

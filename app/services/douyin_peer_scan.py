@@ -183,25 +183,46 @@ def _rows_to_works(rows: list[dict], account: dict, limit: int) -> list[dict]:
 # ---------------------------------------------------------------- 账号目标
 
 def target_accounts(session, user_id: int, settings) -> list[dict]:
-    """本轮要看的对标号:**库里的 active douyin 账号**,没扫过的优先。
+    """本轮要看的对标号:**库里的 active douyin 账号**。
 
-    ⚠️ 每次只取 `douyin_peer_max_accounts` 个(开页面是慢活);按
-    `last_scan_at` 升序轮转,所以号多了也会轮到,不会永远只扫前几个。
+    ★ **按历史产出排**(2026-10-29 用户口径「可以根据之前的数据来进行策略决策」):
+    近 30 天**产出过带盘作品**的号优先,其次没扫过的(轮转),最后按 `last_scan_at` 最旧优先。
+    只按"没扫过的优先"会让刚加的号抢走名额,而真正持续出盘的号要等好几轮。
+
+    ⚠️ 每次只取 `douyin_peer_max_accounts` 个(开页面是慢活);号多了也会轮转。
     """
-    from app.db.models import CrossPlatformAccount
+    from app.db.models import CrossPlatformAccount, DouyinPeerWork
 
     limit = max(0, int(getattr(settings, "douyin_peer_max_accounts", 6) or 0))
     if limit <= 0:
         return []
-    stmt = (select(CrossPlatformAccount)
-            .where(CrossPlatformAccount.user_id == user_id,
-                   CrossPlatformAccount.platform == "douyin",
-                   CrossPlatformAccount.status == "active")
-            .order_by(CrossPlatformAccount.last_scan_at.is_(None).desc(),
-                      CrossPlatformAccount.last_scan_at.asc(),
-                      CrossPlatformAccount.id.asc())
-            .limit(limit))
-    return [{"id": a.id, "uid": a.uid, "name": a.name} for a in session.scalars(stmt)]
+    rows = list(session.scalars(select(CrossPlatformAccount).where(
+        CrossPlatformAccount.user_id == user_id,
+        CrossPlatformAccount.platform == "douyin",
+        CrossPlatformAccount.status == "active")))
+    if not rows:
+        return []
+    #: 历史产出:近 30 天**带盘**作品数(只读一次,别在排序里逐号查)。
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import func, or_
+
+    cutoff = datetime.now() - timedelta(days=30)
+    try:
+        pan = dict(session.execute(
+            select(DouyinPeerWork.account_uid, func.count()).where(
+                DouyinPeerWork.user_id == user_id,
+                DouyinPeerWork.first_seen_at >= cutoff,
+                or_(DouyinPeerWork.mark != "", DouyinPeerWork.pan_url != ""))
+            .group_by(DouyinPeerWork.account_uid)).all())
+    except Exception:  # noqa: BLE001 - 统计失败不该挡住扫描,退回纯轮转
+        logger.warning("对标号历史产出统计失败,退回按扫描时间轮转", exc_info=True)
+        pan = {}
+    rows.sort(key=lambda a: (-int(pan.get(a.uid, 0)),
+                             a.last_scan_at is not None,
+                             a.last_scan_at or datetime.min,
+                             a.id))
+    return [{"id": a.id, "uid": a.uid, "name": a.name} for a in rows[:limit]]
 
 
 # ---------------------------------------------------------------- 去重 / 落库

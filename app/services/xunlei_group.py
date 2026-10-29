@@ -675,6 +675,17 @@ def push_new_shares(items: list[dict], settings) -> bool:
     webhook = str(getattr(settings, "feishu_webhook", "") or "").strip()
     if not webhook:
         return False
+    # ★ **AI 价值筛选**(2026-10-29,用户口径「每个板块都加上 AI 筛选」)。
+    # 价值口径:「有用的也就是意味着**资源发的多、转存人数多**」;群资源这一批已经
+    # 全部转存成功,模型只判"这份资源是否值得客户现在看"。失败/没配 key ⇒ 全推。
+    from app.services import ai_filter
+
+    _ai = ai_filter.filter_items(
+        "xunlei", items, settings,
+        text_of=lambda it: str(it.get("title") or ""))
+    if not _ai.items:
+        return False
+    items = _ai.items
 
     from app.services.feishu._cards import _col_set_row, _md_safe, strip_others
     from app.services.feishu_client import FeishuClient
@@ -684,7 +695,9 @@ def push_new_shares(items: list[dict], settings) -> bool:
         # **结论先行**(用户口径"推送是为了用户更好总结"):先说"这批是什么、能直接干什么",
         # 再上列表 —— 光甩一张表,看的人还要自己数、自己猜能不能用。
         f"**本批 {len(items)} 个资源,已全部转存并生成分享链,点开即用。**\n"
-        f"已归入「{getattr(settings, 'xunlei_transfer_parent', '') or '最全文件'}」。"}},
+        f"已归入「{getattr(settings, 'xunlei_transfer_parent', '') or '最全文件'}」。"
+        + (f"\n**{_ai.summary()}**:已挡掉纯广告 / 无具体资源 / 过时的那些。"
+           if _ai.summary() else "")}},
         # ⚠️ **不列来源群**:那是**别人的群名**,卡片是发到客户群看的(2026-10-02 用户口径
         # "不要带别人的关键词")—— 露出别人的群等于把人往别人那儿送。
         # ⚠️⚠️ **也不加「原文」列**(2026-10-16 用户拍板「**不露**」):这一张的"原文"

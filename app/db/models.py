@@ -350,6 +350,10 @@ class WechatArticle(Base):
     #: 与 `DouyinLead.share_count` 一模一样的 confound)。判读见 `wechat/read_trend.py`。
     first_read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     trend_flag: Mapped[str] = mapped_column(String(16), default="")     # 爆点苗头 / 回落 / 空
+    #: ★ **AI 筛选挡掉的时刻**(2026-10-29)。挡掉 ≠ 推过 —— 所以**不能**塞进 `pushed_at`:
+    #: 后者是「真的到过飞书」(补推逻辑/日结都读它)。`repush_unpushed` 要把这一列非空的排除,
+    #: 否则被 AI 挡掉的文章会**每轮重判、永远补推**(既烧 token 又永远补不完)。
+    ai_skipped_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     quality: Mapped[int] = mapped_column(Integer, default=0)            # 内容质量分 0~10
     # 成功进过飞书卡片的时间。NULL = 采到却从未推出去(飞书抖动/超时/进程被杀),
     # 由 `repush_unpushed` 在下一轮监听开头补推——"近24h全推"是铁律,静默少推不能存在。

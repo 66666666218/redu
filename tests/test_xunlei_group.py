@@ -1094,3 +1094,23 @@ def test_file_count_limit_skips_full_space_accounts(session, monkeypatch) -> Non
 
     assert "xunlei#2" not in calls, f"空间 102.5% 的免费小号不该被当成落点:{calls}"
     assert used.cookie_key == "xunlei#3" and out["status"] == "ok"
+
+
+def test_new_shares_card_respects_ai_filter(monkeypatch) -> None:
+    """★ 2026-10-29:AI 筛选挡掉的资源不进卡(用户口径「每个板块都加上 AI 筛选」)。"""
+    from app.services import ai_filter
+    from app.services import feishu_client as fc
+    from app.services import xunlei_group as xg
+
+    monkeypatch.setattr(fc, "FeishuClient", _FakeFeishu)
+    monkeypatch.setattr(ai_filter, "filter_items", lambda section, its, settings, **k: (
+        ai_filter.Result([its[0]], len(its), 1, "llm")))
+    ok = xg.push_new_shares([
+        {"title": "有用的资源", "share_url": "https://p/s/A", "code": ""},
+        {"title": "纯广告", "share_url": "https://p/s/B", "code": ""},
+    ], _S())
+    assert ok
+    blob = str(_FakeFeishu.last_card)
+    assert "有用的资源" in blob and "https://p/s/A" in blob
+    assert "https://p/s/B" not in blob, "被 AI 挡掉的那条不该出现在卡里"
+    assert "AI筛1/2" in blob

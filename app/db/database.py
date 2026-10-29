@@ -464,7 +464,10 @@ ADDITIONS: dict[str, list[str]] = {
                         "first_read_at DATETIME",
                         "trend_flag VARCHAR(16) DEFAULT ''", "quality INTEGER DEFAULT 0",
                         # 进过飞书卡片的时间;NULL=从未推出去,由监听开头的补推扫回
-                        "pushed_at DATETIME"],
+                        "pushed_at DATETIME",
+                        # AI 筛选挡掉的时刻(2026-10-29):补推要排除它,否则被挡的文章
+                        # 每轮重判、永远补推(挡掉 ≠ 推过,所以不能塞进 `pushed_at`)。
+                        "ai_skipped_at DATETIME"],
 }
 
 

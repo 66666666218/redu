@@ -1424,6 +1424,33 @@ def _publish_mark(pub) -> str:
     return "🆕" if (datetime.now() - dt).total_seconds() <= 3600 else f"·{dt:%m-%d %H:%M}"
 
 
+def _historical_mark_counts(session, user_id: int, marks: set[str],
+                            days: int = 7) -> dict[str, int]:
+    """过去 N 天**同一口令**被几条线索命中 —— 跨轮次的「资源发的多」信号。
+
+    ★ 2026-10-29 用户口径「**可以根据之前的数据来进行策略决策**」:
+    AI 单次只看得到这一轮;而"这个资源是不是很多号在推、还在被推"必须看**历史**。
+    ⚠️ 只按 `mark` 统计(跨轮次唯一稳定的身份);`pan_url` 类线索没有 mark,不参与。
+    """
+    if session is None or not marks:
+        return {}
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import func
+
+    from app.db.models import DouyinLead
+
+    cutoff = datetime.now() - timedelta(days=max(1, int(days)))
+    rows = session.execute(
+        select(DouyinLead.mark, func.count()).where(
+            DouyinLead.user_id == user_id,
+            DouyinLead.mark.in_(sorted(m for m in marks if m)),
+            DouyinLead.found_at >= cutoff,
+            DouyinLead.mark != "",
+        ).group_by(DouyinLead.mark)).all()
+    return {str(m): int(n) for m, n in rows}
+
+
 def push_leads(leads: list[dict], settings, platform: str = "douyin",
                session=None, user_id: int = 0) -> bool:
     """把线索推飞书。
@@ -1449,24 +1476,6 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
         logger.info("抖音线索:未配飞书 webhook,跳过推送")
         return False
 
-    # ★ **AI 价值筛选**(2026-10-29,用户口径「每个板块都加上 AI 筛选」)。
-    # 只留"能变成值得转存的资源"的线索;模型失败/没配 key ⇒ 原样全推(`source != "llm"`,
-    # 卡片上也不会写 `AI筛x/y`)。放在这里是因为**后面所有计数/台账都该按筛后的算**。
-    from app.services import ai_filter
-
-    _ai = ai_filter.filter_items(
-        "douyin_peer" if peer else section, leads, settings,
-        text_of=lambda ld_: (f"{ld_.get('title') or ''} 作者:{ld_.get('author') or ''} "
-                             f"转发:{ld_.get('share_count') or 0}"))
-    if not _ai.items:
-        logger.info("抖音线索:AI 筛选后无内容可推(原 %d 条)", _ai.total)
-        return False
-    leads = _ai.items
-
-    from app.services.feishu._cards import _col_set_row, _md_safe, strip_others
-    from app.services.feishu_client import FeishuClient
-
-    label = (PLATFORMS.get(platform) or {}).get("label", platform)
     # 「条数」= **这个资源本轮被几条视频在推** —— 用户口径(2026-10-04):
     # 一眼看出"大家都在抢这个"。
     # ⚠️ **按"资源身份"分组,不是按口令**:同一个资源会被不同推广号起**不同口令**
@@ -1484,6 +1493,35 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
                 or f"mark:{ld_.get('mark') or ''}")
 
     _counts = Counter(_res_key(x) for x in leads)
+
+    # ★ **AI 价值筛选**(2026-10-29,用户口径「每个板块都加上 AI 筛选」)。
+    # **价值口径(用户原话)**:「有用的也就是意味着**资源发的多、转存人数多**」
+    # ⇒ 把「同一资源本轮被几条视频在推」+ 转发数一起喂给模型。
+    # 模型失败/没配 key ⇒ 原样全推(`source != "llm"`,卡片上不写 `AI筛x/y`)。
+    # 放在这里是因为**后面所有计数/台账都该按筛后的算**。
+    from app.services import ai_filter
+
+    #: ★ **历史数据进决策**(2026-10-29 用户口径「可以根据之前的数据来进行策略决策」):
+    #: 这个口令过去 7 天被几条线索命中过(跨轮次的"还在被推")+ 我们库里有没有这份资源。
+    _hist = _historical_mark_counts(
+        session, user_id, {str(x.get("mark") or "") for x in leads})
+    _ai = ai_filter.filter_items(
+        "douyin_peer" if peer else section, leads, settings,
+        text_of=lambda ld_: (
+            f"{ld_.get('title') or ''} 作者:{ld_.get('author') or ''} "
+            f"转发:{ld_.get('share_count') or 0} "
+            f"同资源条数:{_counts.get(_res_key(ld_), 1)} "
+            f"历史7天:{_hist.get(str(ld_.get('mark') or ''), 0)} "
+            f"库内:{'有' if (ld_.get('library') or {}).get('link') else '无'}"))
+    if not _ai.items:
+        logger.info("抖音线索:AI 筛选后无内容可推(原 %d 条)", _ai.total)
+        return False
+    leads = _ai.items
+
+    from app.services.feishu._cards import _col_set_row, _md_safe, strip_others
+    from app.services.feishu_client import FeishuClient
+
+    label = (PLATFORMS.get(platform) or {}).get("label", platform)
 
     # ★ **按赛道分组**(2026-10-29,用户口径「推送的时候进行分类…每个板块都能监测到」)。
     # 之前一张卡就是一串按时间排的行,短剧占绝大多数的时候,小游戏那几条会被淹在里面

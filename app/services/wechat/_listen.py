@@ -1625,6 +1625,9 @@ def repush_unpushed(session: Session, user_id: int, settings: Settings | None = 
     rows = list(session.scalars(select(WechatArticle).where(
         WechatArticle.user_id == user_id,
         WechatArticle.pushed_at.is_(None),
+        #: ★ **AI 挡掉的不补推**(2026-10-29):它没推过,但已经"处理过"了。
+        #: 不排除的话,每轮补推都会把同一批重新判一遍、永远补不完(还烧 token)。
+        WechatArticle.ai_skipped_at.is_(None),
         WechatArticle.source.in_(("listen", "sync")),
         WechatArticle.created_at >= cutoff,
         # 发布时间也要在窗口内:「同步文章」被封顶窗口砍掉的 24h 之前的历史补采文
@@ -1803,6 +1806,31 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
                         "、".join((r.title or "")[:18] for r in suppressed[:5]))
             _ids = {r.id for r in suppressed}
             rows = [r for r in rows if r.id not in _ids]
+    # ★ **AI 价值筛选**(2026-10-29,用户口径「每个板块都加上 AI 筛选」)。
+    # **价值口径(用户原话)**:「有用的也就是意味着**资源发的多、转存人数多**」——
+    # 这里把「同一条盘链被几个号发」的结果(`dup_counts` 稍后才算,先用阅读数+网盘类型)
+    # 交给模型;模型失败/没配 key ⇒ 原样全推。
+    # ⚠️ 挡掉的打 **`ai_skipped_at`**,不是 `pushed_at` —— 后者是「真的到过飞书」,
+    #    `repush_unpushed` 读它;打错会把没发过的文章算成发过,还会让补推永远不触发。
+    if rows:
+        from app.services import ai_filter
+
+        _items = [{"title": r.title or "", "author": r.author or "",
+                   "pan": (r.pan_types or ""), "read": int(r.read_num or 0),
+                   "_r": r} for r in rows]
+        _ai = ai_filter.filter_items(
+            "wechat", _items, settings,
+            text_of=lambda it: (f"{it['title']} 公众号:{it['author']} "
+                                f"网盘:{it['pan']} 阅读:{it['read']}"))
+        if _ai.source == "llm":
+            keep = {id(x) for x in _ai.items}
+            now = datetime.now()
+            dropped = [it["_r"] for it in _items if id(it) not in keep]
+            for r in dropped:
+                r.ai_skipped_at = now
+            rows = [it["_r"] for it in _items if id(it) in keep]
+            logger.info("公众号推送:AI 筛掉 %d 篇(原 %d 篇)",
+                        len(dropped), _ai.total)
     # 免打扰过滤后可能清空(理论上上面已 return,这里再兜一层,避免推空卡)
     if not rows:
         return 0
@@ -1993,7 +2021,8 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
             n_pan = sum(1 for r in rows if (r.pan_urls or "").strip())
             elements.append({"tag": "note", "elements": [{"tag": "plain_text",
                 "content": f"本轮共 {len(rows)} 篇新发文(按账号分组),"
-                           f"其中 {n_pan} 篇带网盘资源"}]})
+                           f"其中 {n_pan} 篇带网盘资源"
+                           + (f" · {_ai.summary()}" if _ai.summary() else "")}]})
         elements.append(_col_set_row(
             [("**公众号**", 3), ("**文章**", 6), ("**原文**", 2),
              ("**网盘**", 2), ("**阅读**", 2)], grey=True))

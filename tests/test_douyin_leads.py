@@ -1862,3 +1862,22 @@ def test_freshness_summary_is_visible() -> None:
                                {"publish_at": 0}])
     assert s.startswith("最新") and "中位" in s
     assert dl._freshness_summary([]) == "无时间"
+
+
+def test_historical_mark_counts_uses_past_rounds(session) -> None:
+    """★ 2026-10-29「可以根据之前的数据来进行策略决策」:
+    AI 只看得到本轮,而"这个资源还在被推"要看**过去 N 天同一口令**被多少条线索命中。"""
+    from datetime import datetime, timedelta
+
+    from app.db.models import DouyinLead
+
+    now = datetime.now()
+    session.add_all([
+        DouyinLead(user_id=1, aweme_id="1", mark="甲", found_at=now - timedelta(days=1)),
+        DouyinLead(user_id=1, aweme_id="2", mark="甲", found_at=now - timedelta(days=3)),
+        DouyinLead(user_id=1, aweme_id="3", mark="甲", found_at=now - timedelta(days=30)),
+        DouyinLead(user_id=1, aweme_id="4", mark="乙", found_at=now - timedelta(days=1)),
+    ])
+    session.commit()
+    got = dl._historical_mark_counts(session, 1, {"甲", "乙", "丙"})
+    assert got == {"甲": 2, "乙": 1}

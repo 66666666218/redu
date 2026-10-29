@@ -1058,7 +1058,10 @@ def push_items(items: list[dict], settings, session=None, user_id: int = 0) -> b
 
     _ai = ai_filter.filter_items(
         "zhihu", items, settings,
-        text_of=lambda it: f"{it.get('title') or ''} 作者:{it.get('author') or ''}")
+        text_of=lambda it: (
+            f"{it.get('title') or ''} 作者:{it.get('author') or ''} "
+            #: 价值口径(用户 2026-10-29):「资源发的多、转存人数多」——带热度一起判。
+            + " ".join(f"{k}={v}" for k, v in (it.get("metrics") or {}).items())))
     if not _ai.items:
         return False
     items = _ai.items

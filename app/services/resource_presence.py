@@ -656,8 +656,12 @@ def push_items(items: list[dict], settings, detail: dict | None = None,
 
         _ai = ai_filter.filter_items(
             led_sec, group, settings,
-            text_of=lambda it: (f"{it.get('name') or ''} 作者:{it.get('author') or ''} "
-                                f"平台:{label}"))
+            text_of=lambda it: (
+                f"{it.get('name') or ''} 作者:{it.get('author') or ''} 平台:{label} "
+                #: 价值口径(用户 2026-10-29):「资源发的多、转存人数多」——
+                #: `count` = 本轮有几条内容在推这个资源;metrics = 转发/评论等热度。
+                f"同资源内容数:{it.get('count') or 1} "
+                + " ".join(f"{k}={v}" for k, v in (it.get("metrics") or {}).items())))
         if not _ai.items:
             if detail is not None:
                 detail[plat] = "AI 筛后无内容"

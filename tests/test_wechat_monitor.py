@@ -5118,3 +5118,44 @@ def test_xunlei_failure_leaves_it_retryable(session, monkeypatch) -> None:
     st = _settings(quark_cookie="", pan_transfer_enabled=True, wechat_listen_sample_new=False)
     wechat_monitor._enrich_new_articles(session, 1, st, [r])
     assert not (r.my_pan_urls or "").strip(), "没转成就不该落链,好让下轮重试"
+
+
+def test_push_listen_ai_skipped_is_handled_but_not_repushed(session, monkeypatch) -> None:
+    """★ 2026-10-29:公众号也接 AI 筛选;挡掉的标 `ai_skipped_at`(**不是** `pushed_at`),
+    补推 `repush_unpushed` 必须跳过它们 —— 否则每轮重判、永远补推。
+    """
+    import app.services.feishu as feishu_mod
+    from app.services import ai_filter, feishu_client
+
+    a = WechatArticle(user_id=1, title="A文 四级真题", author="号A",
+                      url="https://mp.weixin.qq.com/s/a", source="listen")
+    b = WechatArticle(user_id=1, title="B文 加V领红包", author="号B",
+                      url="https://mp.weixin.qq.com/s/b", source="listen")
+    session.add_all([a, b])
+    session.commit()
+
+    cards: list[dict] = []
+
+    class _FakeFeishu:
+        def __init__(self, webhook, secret="") -> None:
+            pass
+
+        def send_card(self, card: dict) -> bool:
+            cards.append(card)
+            return True
+
+    monkeypatch.setattr(feishu_mod, "webhook_for", lambda s, sec: "https://open.feishu.cn/hook/x")
+    monkeypatch.setattr(feishu_client, "FeishuClient", _FakeFeishu)
+    monkeypatch.setattr(ai_filter, "filter_items", lambda section, its, settings, **k: (
+        ai_filter.Result([it for it in its if it["title"].startswith("A文")],
+                         len(its), 1, "llm")))
+
+    wechat_monitor._push_listen(session, 1, _settings(wechat_push_skip_own_pan=False), [a, b])
+    session.expire_all()
+    blob = str(cards)
+    assert "A文" in blob and "B文" not in blob
+    assert a.pushed_at is not None, "推出去的要有 pushed_at"
+    assert b.ai_skipped_at is not None and b.pushed_at is None, "挡掉的只打 ai_skipped_at"
+
+    #: 补推不许把 AI 挡掉的翻出来
+    assert wechat_monitor.repush_unpushed(session, 1, _settings()) == 0
