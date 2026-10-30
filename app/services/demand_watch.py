@@ -110,9 +110,15 @@ _GENERIC = frozenset({
 })
 
 
-def _clean(raw: str) -> str:
-    """把抽出来的那段**剥成名字**:去掉首尾空白/标点与尾巴泛词。"""
+def _clean(raw: str, *, strip_tails: bool = True) -> str:
+    """把抽出来的那段**剥成名字**:去掉首尾空白/标点,以及(可选)尾巴泛词。
+
+    ⚠️ `strip_tails=False` 给**标签**用:标签本身就是一个整体,
+    剥尾巴会把 `新名字` 剥成 `新`、`小小绘` 不受影响 —— 实测因此丢掉过候选名。
+    """
     s = str(raw or "").strip().strip("《》「」\"'“”‘’,,。.!！?？:：;；、")
+    if not strip_tails:
+        return s.strip()
     changed = True
     while changed and s:            # 尾巴可能叠着两三个(`的资源完整版`),剥到不动为止
         changed = False
@@ -286,18 +292,8 @@ def best_tag(title: str, exclude: str = "") -> str:
     ⚠️ `exclude` = **作者名**:实测用户样本的标签里最长的是 `#阿玛特拉斯`,那正是**作者自己**
     (2026-10-30),把它当"大瓜名字"推出去毫无意义。
     """
-    cands: list[str] = []
-    #: ⚠️ 分享文案里常见 `# 范小勤`(井号后有空格),所以 `\s*` 不能省 ——
-    #: 严格匹配 `#([^\s#]+)` 会一个标签都取不到(2026-10-30 实测)。
-    for m in re.finditer(r"#\s*([^\s#]{2,16})", str(title or "")):
-        n = _clean(m.group(1))
-        if not is_name_like(n, quoted=True):
-            continue
-        if n.lower() in _TAG_JUNK or n in _TAG_JUNK:
-            continue
-        if exclude and n == str(exclude).strip():
-            continue
-        cands.append(n)
+    cands = [n for n in _tags_of(title)
+             if not (exclude and n == str(exclude).strip())]
     if cands:
         return max(cands, key=len)
     #: 兜底:**标签前的那句正文**往往就是作品名(`智慧蛊回来了# 范小勤 …`)。
@@ -341,6 +337,11 @@ _TAG_JUNK = frozenset({
     "合作", "互关", "点赞", "高壮男", "宽肩窄腰", "薄肌", "青筋", "青筋暴起",
     "卡点舞", "肌肉男", "胸肌", "手臂", "摆胯舞", "男妈妈", "纯欲感", "暴力美学",
     "动漫", "二次元", "搞笑", "颜值", "身材", "腹肌", "健身", "跳舞", "舞蹈",
+    # ★ 2026-10-30 第一次跑 `--expand` 实际冒出来的**风格词**(不是名字,
+    #   但同一个作者会在几十条作品里反复打,靠"出现次数"筛不掉):
+    "禁欲系", "锐评", "交流", "手势舞", "慢摇", "卡点", "变装", "氛围感", "御姐",
+    "纯欲", "反差感", "甜妹", "高颜值", "美女", "帅哥", "颜值担当", "表情包",
+    "火影忍者", "火影忍者手游", "游戏", "手游", "王者荣耀", "和平精英",
 })
 
 
@@ -556,6 +557,7 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
     # ① 参考作品名(有就先用) —— 每轮轮着搜 3 个,避免连发触发抖音限流
     seeds = [w.strip() for w in
              str(getattr(settings, "demand_seed_words", "") or "").split(",") if w.strip()]
+    authors: dict[str, str] = {}
     if seeds:
         from app.services import douyin_protocol_source as dps
 
@@ -563,6 +565,9 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
                               int(getattr(settings, "demand_seeds_per_round", 3) or 3))
         min_c = int(getattr(settings, "demand_min_comments", 20) or 0)
         vids = dps.search(seeds, settings=settings, session=db, user_id=user_id, pages=1)
+        for v in vids:                                  # 顺手记下同款作者,下一步用
+            if v.get("uid"):
+                authors.setdefault(str(v["uid"]), str(v.get("name") or ""))
         #: 评论数太少就没有统计意义;按评论数从多到少取
         vids = [v for v in vids
                 if int((v.get("metrics") or {}).get("comment_count") or 0) >= min_c]
@@ -575,6 +580,27 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
             #: 名字还得靠库内推广线索那半;全被搜索占满 ⇒ 这一轮一个名字都抽不到。
             if len(out) >= max(1, need // 2):
                 break
+
+    # ★ **同款作者的新作品**也要进候选池(2026-10-30 用户:「根据这些来找方法去**发现新的大瓜**」)。
+    # 参考作品 → 作者 → 他们的近期作品,这些才是"**最新的**求1型视频"的来源;
+    # 只看我们自己的线索池永远发现不了新号。
+    if len(out) < need:
+        from datetime import timedelta
+
+        since_ts = int((datetime.now() - timedelta(
+            days=int(getattr(settings, "demand_latest_days", 3) or 3))).timestamp())
+        for sec, name in list(authors.items()):
+            if len(out) >= need:
+                break
+            res = fetch_author_posts(sec, session=db, user_id=user_id, count=20)
+            if not res["ok"]:
+                continue
+            for it in res["items"]:
+                if it["publish_at"] and it["publish_at"] < since_ts:
+                    continue
+                _add(it["aweme_id"], it["url"], it["desc"], 0, it["author"] or name)
+                if len(out) >= need:
+                    break
 
     # ② 我们自己的线索(推广视频,评论区天然是「求资源」的)
     leads = db.scalars(select(DouyinLead).where(
@@ -904,6 +930,88 @@ def push_request(items: list[dict], settings) -> bool:
         build_request_card(items))
 
 
+def _tags_of(title: str) -> list[str]:
+    """标题里的标签(按出现顺序,已去通用词)。`best_tag` 与扩展开销都用它。"""
+    out: list[str] = []
+    for m in re.finditer(r"#\s*([^\s#]{2,16})", str(title or "")):
+        n = _clean(m.group(1), strip_tails=False)
+        if not is_name_like(n, quoted=True):
+            continue
+        if n.lower() in _TAG_JUNK or n in _TAG_JUNK:
+            continue
+        out.append(n)
+    return out
+
+
+def discover_names(db, user_id: int = 1, settings=None) -> list[dict]:
+    """**顺着参考作品扩展名字**(2026-10-30 用户:「根据这些来找方法去**发现新的大瓜**」)。
+
+    方法:参考作品 → 搜到的**同款作者** → 拉他们最近的 30 条作品 → 从标题的**标签**里
+    统计哪些名字**反复出现**(≥ `demand_expand_min` 条不同作品) → 这些就是"这一类"的
+    名字候选;排除:参考作品本身、作者名、通用词。
+
+    ⚠️ 为什么用"**跨作品反复出现**"而不是"出现一次就算":实测标签里绝大多数是描述词
+    (`#覆面系`/`#高壮男`),而**真正的名字**(如 `#小小绘`/`#范小勤`)会在他**多条**作品里重复。
+    """
+    settings = settings or _settings()
+    seeds = [w.strip() for w in
+             str(getattr(settings, "demand_seed_words", "") or "").split(",") if w.strip()]
+    if not seeds:
+        return []
+    from app.services import douyin_protocol_source as dps
+
+    min_hits = int(getattr(settings, "demand_expand_min", 2) or 2)
+    max_authors = int(getattr(settings, "demand_latest_authors", 3) or 3)
+
+    authors: dict[str, str] = {}
+    for kw in _rotate_seeds(db, seeds, int(getattr(settings, "demand_seeds_per_round", 3) or 3)):
+        for v in dps.search([kw], settings=settings, session=db, user_id=user_id, pages=1):
+            sec = str(v.get("uid") or "")
+            if sec:
+                authors.setdefault(sec, str(v.get("name") or ""))
+    stats: dict[str, dict] = {}
+    for sec, author in list(authors.items())[: max_authors * max(1, len(seeds))]:
+        res = fetch_author_posts(sec, session=db, user_id=user_id, count=30)
+        if not res["ok"]:
+            continue
+        for it in res["items"]:
+            names = _tags_of(it["desc"]) + names_from_title(it["desc"])
+            for n in names:
+                if n in seeds or n == author:
+                    continue
+                rec = stats.setdefault(n, {"hits": 0, "author": author, "url": it["url"]})
+                rec["hits"] += 1
+    out = [{"name": n, **rec} for n, rec in stats.items() if rec["hits"] >= min_hits]
+    out.sort(key=lambda x: x["hits"], reverse=True)
+    return out[: int(getattr(settings, "demand_expand_limit", 10) or 10)]
+
+
+def build_expand_card(items: list[dict]) -> dict:
+    lines = [f"**{i}. {it['name']}** — 出现在 {it['hits']} 条作品里(作者 {it['author']})"
+             for i, it in enumerate(items, 1)]
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "turquoise",
+                   "title": {"tag": "plain_text",
+                             "content": f"🆕 顺着参考作品发现的新名字({len(items)})"}},
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}},
+            {"tag": "note", "elements": [{"tag": "plain_text",
+                                          "content": "判据:同款作者的多条作品标题里反复出现;只记名称,不保存资源"}]},
+        ],
+    }
+
+
+def push_expand(items: list[dict], settings) -> bool:
+    from app.services.feishu_client import FeishuClient, webhook_for
+
+    webhook = webhook_for(settings, "douyin")
+    if not webhook or not items:
+        return False
+    return FeishuClient(webhook, getattr(settings, "feishu_secret", "")).send_card(
+        build_expand_card(items))
+
+
 def _settings():
     from config.settings import get_settings
 
@@ -932,6 +1040,12 @@ def demand_watch_tick(settings=None) -> int:
                     kept, _dropped = drop_recent(db, int(uid), "douyin", items, settings)
                     if kept and push_latest(kept, settings):
                         record(db, int(uid), "douyin", kept)
+                        n += 1
+                # ★ 顺着参考作品**发现新名字**(用户「根据这些来找方法去发现新的大瓜」)。
+                # 判据是"同款作者的多条作品里反复出现",一次出现不算。
+                if bool(getattr(settings, "demand_expand_enabled", True)):
+                    names = discover_names(db, int(uid), settings)
+                    if names and push_expand(names, settings):
                         n += 1
             except Exception:  # noqa: BLE001 - 一个用户失败不影响其他用户
                 logger.exception("需求名监控失败 user=%s", uid)

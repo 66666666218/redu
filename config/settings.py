@@ -1024,6 +1024,12 @@ class Settings(BaseSettings):
     demand_latest_authors: int = 3
     #: 一张卡最多列几条。
     demand_latest_limit: int = 15
+    # ---- 顺着参考作品**发现新名字**(2026-10-30)----
+    demand_expand_enabled: bool = True
+    #: 一个名字要在同款作者的**几条不同作品**里出现才算候选(1 条太容易是描述词)。
+    demand_expand_min: int = 2
+    #: 一张卡最多几个新名字。
+    demand_expand_limit: int = 10
     #: 一张卡最多放几个名字。
     demand_push_limit: int = 10
     #: 执行时刻。⚠️ 与 `douyin_leads`(`:10 */4`)错开 40 分钟 ——

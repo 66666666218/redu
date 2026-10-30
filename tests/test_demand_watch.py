@@ -486,6 +486,60 @@ def test_最新大瓜卡片带时间作者与链接():
     assert "https://www.douyin.com/video/9" in body
 
 
+# ---------------------------------------------------------------- 发现新名字
+
+def test_同款作者的新作品也进候选池(session, monkeypatch):
+    """用户口径「根据这些来找方法去发现新的大瓜」:参考作品 → 作者 → 他们的新作品。"""
+    import time as _t
+
+    now = int(_t.time())
+
+    class S(_S):
+        demand_seed_words = "小小绘"
+        demand_max_videos = 2
+        demand_latest_days = 3
+
+    monkeypatch.setattr("app.services.douyin_protocol_source.search", lambda *a, **k: [
+        {"uid": "sec1", "name": "作者A", "aweme_id": "aaa", "url": "u",
+         "snippet": "#小小绘", "metrics": {"comment_count": 100}}])
+    monkeypatch.setattr(dw, "fetch_author_posts", lambda *a, **k: {"ok": True, "error": "", "items": [
+        {"aweme_id": "bbb", "desc": "新作品 #新名字", "publish_at": now,
+         "author": "作者A", "url": "https://www.douyin.com/video/bbb"}]})
+
+    vids = dw.source_videos(session, 1, S())
+
+    ids = [v["aweme_id"] for v in vids]
+    assert "bbb" in ids, ids
+
+
+def test_发现新名字_要同款作者多条作品都出现(session, monkeypatch):
+    """判据:一个名字在他**多条**作品里反复出现;只出现一次的多半是描述词。"""
+    class S(_S):
+        demand_seed_words = "小小绘"
+        demand_expand_min = 2
+        demand_expand_limit = 10
+
+    monkeypatch.setattr("app.services.douyin_protocol_source.search",
+                        lambda *a, **k: [{"uid": "sec1", "name": "作者A", "aweme_id": "1"}])
+    monkeypatch.setattr(dw, "fetch_author_posts", lambda *a, **k: {"ok": True, "error": "", "items": [
+        {"aweme_id": "1", "desc": "合集 #小小绘 #覆面系", "publish_at": 1, "author": "作者A", "url": "u1"},
+        {"aweme_id": "2", "desc": "又一条 #小小绘 #新名字", "publish_at": 2, "author": "作者A", "url": "u2"},
+        {"aweme_id": "3", "desc": "第三条 #新名字", "publish_at": 3, "author": "作者A", "url": "u3"},
+    ]})
+
+    out = dw.discover_names(session, 1, S())
+    names = {x["name"] for x in out}
+
+    assert names == {"新名字"}, names          # 小小绘是参考作品本身,不该再报
+    #: `#覆面系` 是通用词、只出现一次,不该进来
+    assert "覆面系" not in names
+
+
+def test_新名字卡片列出出现次数():
+    card = dw.build_expand_card([{"name": "新名字", "hits": 3, "author": "作者A", "url": "u"}])
+    assert "新名字" in str(card) and "3" in str(card)
+
+
 # ---------------------------------------------------------------- 入口
 
 def _lead(session, aweme_id="111", title="求《狗爹和小桃》全集"):

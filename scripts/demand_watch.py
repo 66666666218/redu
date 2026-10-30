@@ -31,6 +31,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry", action="store_true", help="不推飞书卡片,只打印结果")
     ap.add_argument("--latest", action="store_true",
                     help="只跑「最新的大瓜」:顺参考作品找同款账号,列他们最近的作品")
+    ap.add_argument("--expand", action="store_true",
+                    help="只跑「发现新名字」:同款作者多条作品里反复出现的名字")
     args = ap.parse_args(argv)
 
     from app.db.database import get_session_local, init_db
@@ -41,6 +43,7 @@ def main(argv: list[str] | None = None) -> int:
         demand_watch.push_card = lambda rows, settings: False   # noqa: ARG005
         demand_watch.push_latest = lambda items, settings: False  # noqa: ARG005
         demand_watch.push_request = lambda items, settings: False  # noqa: ARG005
+        demand_watch.push_expand = lambda items, settings: False  # noqa: ARG005
 
     init_db()
     db = get_session_local()()
@@ -57,6 +60,15 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"          {it['url']}")
             if not args.dry and items:
                 print("推送:", demand_watch.push_latest(items, get_settings()))
+            return 0
+        if args.expand:
+            items = demand_watch.discover_names(db, args.user, get_settings())
+            print(f"发现新名字 {len(items)} 个")
+            for it in items:
+                print(f"  {it['name'][:18]:20} 出现 {it['hits']} 条作品 · 作者 {it['author'][:10]}")
+                print(f"          {it['url']}")
+            if not args.dry and items:
+                print("推送:", demand_watch.push_expand(items, get_settings()))
             return 0
         out = demand_watch.run_user(db, args.user, get_settings())
     finally:
