@@ -53,3 +53,68 @@ def test_关掉开关就不碰浏览器(monkeypatch):
 
     monkeypatch.setattr(X, "available", lambda settings=None: pytest.fail("关了开关不该探活"))
     assert dw.scan_xhs(None, 1, S())["skipped"] == "disabled"
+
+
+# ---------------------------------------------------------------- 小样本不判
+
+class _Page:
+    def close(self):
+        pass
+
+
+class _Ctx:
+    def new_page(self):
+        return _Page()
+
+
+class _Browser:
+    contexts = [_Ctx()]
+
+    def close(self):
+        pass
+
+
+class _P:
+    def stop(self):
+        pass
+
+
+@pytest.fixture
+def session():
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db import models  # noqa: F401
+    from app.db.database import Base
+    from app.db.models import User
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+    db.add(User(id=1, username="u1", email="u1@b.c", password_hash="x", enabled=True))
+    db.commit()
+    yield db
+    db.close()
+
+
+def test_评论太少只记不判(session, monkeypatch):
+    """用户给的「小马云」那条只有 4 条评论 —— 样本太小时密度是噪音。"""
+    from app.db.models import DemandScan
+    from app.services import demand_watch as dw
+
+    class S(_S):
+        demand_xhs_min_comments = 8
+        demand_xhs_notes_per_seed = 1
+
+    monkeypatch.setattr(X, "available", lambda settings=None: (True, "ok"))
+    monkeypatch.setattr(X, "_connect", lambda: (_P(), _Browser()))
+    monkeypatch.setattr(X, "search_notes", lambda *a, **k: [
+        {"id": "n1", "token": "t", "title": "小马云也是放飞自我了#范小勤", "author": "A"}])
+    monkeypatch.setattr(X, "note_comments", lambda *a, **k: ["求🥹", "好看", "有", "好新鲜"])
+    monkeypatch.setattr(dw, "push_request", lambda *a, **k: pytest.fail("样本不足不该推"))
+
+    out = dw.scan_xhs(session, 1, S())
+
+    assert out["scanned"] == 1 and out["flagged"] == 0
+    row = session.query(DemandScan).one()
+    assert row.why == "样本不足" and row.flagged is False

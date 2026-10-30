@@ -154,9 +154,9 @@ def is_name_like(name: str, *, quoted: bool = False) -> bool:
     (`真实有效的`/`有没有的`),把它当名字推给客户就是噪音 —— 宁可漏。
     """
     n = str(name or "").strip()
-    #: 书名号里的放宽到 24 字;靠句式猜出来的限 12 字 ——
+    #: 书名号里的放宽到 30 字(小红书笔记标题常是一整句);靠句式猜出来的限 12 字 ——
     #: 实测(`叫什么`/`求…`)长句子会整段被吃进来,而真名字通常不长。
-    if not (2 <= len(n) <= (24 if quoted else 12)):
+    if not (2 <= len(n) <= (30 if quoted else 12)):
         return False
     if n in _GENERIC:
         return False
@@ -297,9 +297,11 @@ def best_tag(title: str, exclude: str = "") -> str:
     if cands:
         return max(cands, key=len)
     #: 兜底:**标签前的那句正文**往往就是作品名(`智慧蛊回来了# 范小勤 …`)。
+    #: ⚠️ 上限 **30** 字(不是 16):小红书笔记标题常是一整句
+    #: (`大耳朵图图 & 小美睡前情头|晚安太治愈啦`),16 字门槛会把它整条丢掉(2026-10-30 实测)。
     head = str(title or "").split("#")[0].strip()
     head = _clean(head)
-    return head if 2 <= len(head) <= 16 and is_name_like(head, quoted=True) else ""
+    return head if 2 <= len(head) <= 30 and is_name_like(head, quoted=True) else ""
 
 
 def match_seed(title: str, seeds: list[str]) -> str:
@@ -1093,6 +1095,19 @@ def scan_xhs(db, user_id: int = 1, settings=None) -> dict:
                 if not st["total"]:
                     continue
                 scanned += 1
+                #: ⚠️ 小红书单篇评论常常只有几条(用户给的「小马云」那条**只有 4 条**),
+                #: 样本太小时密度是噪音 ⇒ 少于 `DEMAND_XHS_MIN_COMMENTS` 只记不判。
+                min_total = int(getattr(settings, "demand_xhs_min_comments", 8) or 0)
+                if st["total"] < max(1, min_total):
+                    _record_scan(
+                        db, user_id,
+                        {"aweme_id": note["id"], "title": note.get("title") or "",
+                         "author": note.get("author") or "",
+                         "url": f"https://www.xiaohongshu.com/explore/{note['id']}"},
+                        total=st["total"], ones=st["ones"], demand=st["demand"],
+                        dup=st["dup_ratio"], flagged=False, why="样本不足",
+                        name="", platform="xiaohongshu")
+                    continue
                 ratio = (st["ones"] + st["demand"]) / st["total"]
                 by_density = (ratio >= float(getattr(settings, "demand_request_density", 0.1) or 0)
                               and (st["ones"] + st["demand"]) >= 3)

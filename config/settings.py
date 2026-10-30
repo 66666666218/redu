@@ -1043,7 +1043,11 @@ class Settings(BaseSettings):
     #: 每轮搜几个参考作品名(小红书风控更狠,默认只 2 个)。
     demand_xhs_seeds_per_round: int = 2
     #: 每个词最多开几篇笔记读评论。
-    demand_xhs_notes_per_seed: int = 2
+    #: ⚠️ 默认 **5**(不是 2):实测小红书单篇评论常常只有几条(用户给的「小马云」那条只有 **4 条**),
+    #: 扫太少篇根本凑不出样本。
+    demand_xhs_notes_per_seed: int = 5
+    #: 单篇评论少于这么多条**只记不判** —— 样本太小时"密度"是噪音。
+    demand_xhs_min_comments: int = 8
     #: 一张卡最多放几个名字。
     demand_push_limit: int = 10
     #: 执行时刻。⚠️ 与 `douyin_leads`(`:10 */4`)错开 40 分钟 ——
