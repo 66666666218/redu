@@ -331,6 +331,43 @@ def test_run_user把标题名与扣1一起入库(session, monkeypatch):
     assert row.title_hits == 1
 
 
+# ---------------------------------------------------------------- 求1型识别
+
+def test_评论区在求在扣1的视频会被识别并推卡(session, monkeypatch):
+    """用户口径:「特点就是评论区都在发求**和1**」。
+
+    判据 = (整条 `1` + 带求语气) / 已拉评论数 ≥ `DEMAND_REQUEST_DENSITY`(默认 0.2)。
+    """
+    _lead(session, "111", title="扣1看《反差直男》")
+    monkeypatch.setattr(dw, "collect_for_video", lambda *a, **k: {
+        "error": "", "names": {}, "ones": 4, "no_name": 1, "total": 10})
+
+    sent = []
+    monkeypatch.setattr(dw, "push_request",
+                        lambda items, settings: sent.append(list(items)) or True)
+
+    dw.run_user(session, 1, _S())
+
+    assert sent, "求1型视频应单独推一张卡"
+    assert sent[0][0]["name"] == "反差直男"
+    assert sent[0][0]["ones"] == 4 and sent[0][0]["demand"] == 1
+
+
+def test_求1密度不够就不算这类视频(session, monkeypatch):
+    _lead(session, "111", title="扣1看《反差直男》")
+    monkeypatch.setattr(dw, "collect_for_video", lambda *a, **k: {
+        "error": "", "names": {}, "ones": 1, "no_name": 0, "total": 40})
+    monkeypatch.setattr(dw, "push_request",
+                        lambda items, settings: pytest.fail("密度不够不该推"))
+
+    dw.run_user(session, 1, _S())
+
+
+def test_没有书名号时取最像名字的标签_通用词挡掉():
+    assert dw.best_tag("#覆面系 #高壮男 #狗爹和小桃") == "狗爹和小桃"
+    assert dw.best_tag("#反差 #覆面 #高壮男") == ""
+
+
 # ---------------------------------------------------------------- 最新的大瓜
 
 def _latest_cfg():

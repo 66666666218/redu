@@ -1004,6 +1004,10 @@ class Settings(BaseSettings):
     #: 同一个名字两次推送的冷却(小时)。作业 4 小时一轮,不加冷却就是一天推 6 次。
     demand_push_cooldown_hours: int = 48
     # ---- 「最新的大瓜」:顺参考作品找同款账号,拿他们最近的作品(2026-10-30)----
+    #: ★ **「求1型」判据**(用户「特点就是评论区都在发求和1」):
+    #: (整条 `1` 的条数 + 带求语气的评论数) / 已拉评论数 ≥ 这个比例,就认它是这类视频。
+    demand_request_density: float = 0.2
+    #: 同一板块的「最新大瓜」两次推送之间的去重窗口(走 `push_ledger`,单位小时)。
     demand_latest_enabled: bool = True
     #: 只看最近几天的作品(再老就不叫"最新"了)。
     demand_latest_days: int = 3

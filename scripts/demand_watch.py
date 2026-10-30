@@ -40,6 +40,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry:
         demand_watch.push_card = lambda rows, settings: False   # noqa: ARG005
         demand_watch.push_latest = lambda items, settings: False  # noqa: ARG005
+        demand_watch.push_request = lambda items, settings: False  # noqa: ARG005
 
     init_db()
     db = get_session_local()()

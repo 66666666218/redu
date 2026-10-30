@@ -262,11 +262,40 @@ def names_from_replies(replies) -> list[str]:
     return out
 
 
+def best_tag(title: str) -> str:
+    """**求1型视频**的标题里挑一个最像名字的标签(只在已判定为该类型时用)。
+
+    这一类的标题常常没有书名号,只有一串标签(用户给的参考作品就是这种)。
+    挑法:**最长**的、不在通用词表里的拉丁/中文标签 —— 通用词(`#反差`/`#覆面`/`#fyp`)
+    一律丢掉;挑不出来就返回空串(宁可没有名字,也别把描述词当名字)。
+    """
+    cands: list[str] = []
+    for m in re.finditer(r"#([^\s#]{2,16})", str(title or "")):
+        n = _clean(m.group(1))
+        if not is_name_like(n, quoted=True):
+            continue
+        if n.lower() in _TAG_JUNK or n in _TAG_JUNK:
+            continue
+        cands.append(n)
+    return max(cands, key=len) if cands else ""
+
+
+#: 标签里的**通用词**,不是名字(平台标签、形态词)
+_TAG_JUNK = frozenset({
+    "fyp", "ootd", "vlog", "日常", "反差", "覆面", "覆面系", "覆面肌肉男", "手控",
+    "手控党", "甜妹", "穿搭", "女大学生", "推荐", "热门", "上热门", "涨粉", "流量",
+    "情感", "故事", "短剧", "古风", "汉服", "直播", "直播日常分享", "直播回放",
+    "合作", "互关", "点赞", "高壮男", "宽肩窄腰", "薄肌", "青筋", "青筋暴起",
+    "卡点舞", "肌肉男", "胸肌", "手臂", "摆胯舞", "男妈妈", "纯欲感", "暴力美学",
+    "动漫", "二次元", "搞笑", "颜值", "身材", "腹肌", "健身", "跳舞", "舞蹈",
+})
+
+
 def collect_for_video(aweme_id: str, *, session=None, user_id: int = 1,
                       pages: int = 2, count: int = 20) -> dict:
     """把一个视频的评论扫一遍。返回 `{name: {"demand":n,"mention":n,"samples":[…]}}`。"""
     found: dict[str, dict] = defaultdict(lambda: {"demand": 0, "mention": 0, "samples": []})
-    cursor, err, no_name, ones = 0, "", 0, 0
+    cursor, err, no_name, ones, total = 0, "", 0, 0, 0
     for page in range(max(1, int(pages))):
         res = fetch_comments(aweme_id, cursor=cursor, count=count,
                              session=session, user_id=user_id)
@@ -274,6 +303,7 @@ def collect_for_video(aweme_id: str, *, session=None, user_id: int = 1,
             err = res["error"] or "拉评论失败"
             break
         for c in res["comments"]:
+            total += 1
             if _ONES_RE.match(c["text"]):        # 「扣1」跟帖 = 热度信号,不是名字
                 ones += 1
                 continue
@@ -298,7 +328,8 @@ def collect_for_video(aweme_id: str, *, session=None, user_id: int = 1,
         if not res["has_more"]:
             break
         cursor += count
-    return {"names": dict(found), "error": err, "no_name": no_name, "ones": ones}
+    return {"names": dict(found), "error": err, "no_name": no_name, "ones": ones,
+            "total": total}
 
 
 # ---------------------------------------------------------------------------
@@ -519,6 +550,7 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
     errors: list[str] = []
     scanned = 0
     no_name = 0
+    request_videos: list[dict] = []
     for v in videos:
         res = collect_for_video(str(v.get("aweme_id") or ""), session=db, user_id=user_id,
                                 pages=int(getattr(settings, "demand_comment_pages", 2) or 2))
@@ -530,6 +562,22 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
         ones = int(res.get("ones") or 0)
         heat = int(v.get("comment_count") or 0)
         url = str(v.get("url") or "")
+        # ★★ **求1型识别**(用户「特点就是评论区都在发求和1」):
+        # 判据 = 评论区里(整条 `1` + 带求语气的评论)占已拉评论的比例。
+        total = int(res.get("total") or 0)
+        demand_cnt = int(res.get("no_name") or 0) + sum(
+            int(rec.get("demand") or 0) for rec in res["names"].values())
+        if total >= 5:
+            ratio = (ones + demand_cnt) / total
+            if ratio >= float(getattr(settings, "demand_request_density", 0.2) or 0) \
+                    and (ones + demand_cnt) >= 3:
+                tnames = names_from_title(v.get("title") or "")
+                request_videos.append({
+                    "name": (tnames[0] if tnames else best_tag(v.get("title") or "")),
+                    "desc": v.get("title") or "",
+                    "author": v.get("author") or "",
+                    "url": url,
+                    "demand": demand_cnt, "ones": ones, "total": total})
         # ★ **名字主要来自作品标题**(用户:「基本上作品名都有资源名」);
         # 而「扣1」的热度是**整条视频**级别的,归给这条视频标题里的名字。
         for tname in names_from_title(v.get("title") or ""):
@@ -555,6 +603,17 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
             if not a["video"]:
                 a["video"] = url
 
+    # ★ 「求1型」单独一张卡(判据见上),**即使一个名字都没抽到也要推** ——
+    #: 用户要的就是"这类视频"本身;名字取不到时卡上写「(标题里没名字)」。
+    request_pushed = 0
+    if request_videos:
+        from app.services.push_ledger import drop_recent, record
+
+        kept, _dropped = drop_recent(db, user_id, "douyin", request_videos, settings)
+        if kept and push_request(kept, settings):
+            record(db, user_id, "douyin", kept)
+            request_pushed = len(kept)
+
     if not agg:
         #: ⚠️ **扫了却一个名字都没抽到,要标 partial 而不是 success** ——
         #: 否则「链路坏了」和「这轮评论没人求」在 `runs` 里长得一模一样(本仓最忌的假成功)。
@@ -562,9 +621,10 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
         #: 它 =0 说明这批素材的评论区压根不是"求资源"的场景。
         _record_run(db, user_id, "demand_watch", "partial" if videos else "success",
                     f"视频{len(videos)} 扫{scanned} 名字0 求{no_name}(无名)"
+                    f" 求1型{len(request_videos)}(推{request_pushed})"
                     + (f" 失败:{errors[0][:60]}" if errors else ""))
         db.commit()
-        return {"videos": len(videos), "names": 0}
+        return {"videos": len(videos), "names": 0, "request": len(request_videos)}
 
     for name, a in agg.items():
         _upsert(db, user_id, name, a["demand"], a["mention"], a["video_hits"],
@@ -589,14 +649,15 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
         db.commit()
         pushed = len(chosen)
 
-    detail = (f"视频{len(videos)} 扫{scanned} 名字{len(agg)} 求{no_name}(无名) 推{pushed}")
+    detail = (f"视频{len(videos)} 扫{scanned} 名字{len(agg)} 求{no_name}(无名) 推{pushed}"
+              f" 求1型{len(request_videos)}(推{request_pushed})")
     if errors:
         detail += f" 失败:{errors[0][:60]}"
     _record_run(db, user_id, "demand_watch",
                 "success" if not errors else "partial", detail)
     db.commit()
     return {"videos": len(videos), "names": len(agg), "pushed": pushed,
-            "no_name": no_name}
+            "no_name": no_name, "request": len(request_videos)}
 
 
 # ---------------------------------------------------------------------------
@@ -733,6 +794,39 @@ def push_latest(items: list[dict], settings) -> bool:
         return False
     return FeishuClient(webhook, getattr(settings, "feishu_secret", "")).send_card(
         build_latest_card(items))
+
+
+def build_request_card(items: list[dict]) -> dict:
+    """**求1型**大瓜卡:被判为"评论区在求/扣1"的视频 + 能取到的名字。"""
+    lines = []
+    for it in items:
+        name = it.get("name") or "(标题里没名字)"
+        desc = (it.get("desc") or "")[:30]
+        link = f" [{desc}]({it['url']})" if it.get("url") else ""
+        lines.append(
+            f"**{name}** — 求 {it['demand']} · 扣1 {it['ones']} / 共 {it['total']} 条"
+            f" · 作者 {it.get('author') or '—'}" + link)
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "red",
+                   "title": {"tag": "plain_text",
+                             "content": f"🔥 求1型大瓜 · 抖音({len(items)})"}},
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}},
+            {"tag": "note", "elements": [{"tag": "plain_text",
+                                          "content": "判据:评论区里「求…」与整条「1/扣1」的占比;只记录名称,不保存资源"}]},
+        ],
+    }
+
+
+def push_request(items: list[dict], settings) -> bool:
+    from app.services.feishu_client import FeishuClient, webhook_for
+
+    webhook = webhook_for(settings, "douyin")
+    if not webhook or not items:
+        return False
+    return FeishuClient(webhook, getattr(settings, "feishu_secret", "")).send_card(
+        build_request_card(items))
 
 
 def _settings():
