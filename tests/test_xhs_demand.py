@@ -109,7 +109,8 @@ def test_评论太少只记不判(session, monkeypatch):
     monkeypatch.setattr(X, "available", lambda settings=None: (True, "ok"))
     monkeypatch.setattr(X, "_connect", lambda: (_P(), _Browser()))
     monkeypatch.setattr(X, "search_notes", lambda *a, **k: [
-        {"id": "n1", "token": "t", "title": "小马云也是放飞自我了#范小勤", "author": "A"}])
+        {"id": "n1", "token": "t", "title": "小马云也是放飞自我了#范小勤", "author": "A",
+         "comments": 20}])
     monkeypatch.setattr(X, "note_comments", lambda *a, **k: ["求🥹", "好看", "有", "好新鲜"])
     monkeypatch.setattr(dw, "push_request", lambda *a, **k: pytest.fail("样本不足不该推"))
 

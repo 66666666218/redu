@@ -1084,12 +1084,16 @@ def scan_xhs(db, user_id: int = 1, settings=None) -> dict:
 
     items: list[dict] = []
     scanned = flagged_n = 0
+    min_total = int(getattr(settings, "demand_xhs_min_comments", 8) or 0)
     p = browser = page = None
     try:
         p, browser = X._connect()
         page = browser.contexts[0].new_page()
         for kw in seeds:
             for note in X.search_notes(page, kw, limit=per_seed):
+                #: 搜索结果自带 `commentCount` ⇒ **评论太少就别开页**(省额度也省风控)
+                if int(note.get("comments") or 0) < max(1, min_total):
+                    continue
                 texts = X.note_comments(page, note["id"], note.get("token", ""))
                 st = X.stats_from_texts(texts)
                 if not st["total"]:
@@ -1097,7 +1101,6 @@ def scan_xhs(db, user_id: int = 1, settings=None) -> dict:
                 scanned += 1
                 #: ⚠️ 小红书单篇评论常常只有几条(用户给的「小马云」那条**只有 4 条**),
                 #: 样本太小时密度是噪音 ⇒ 少于 `DEMAND_XHS_MIN_COMMENTS` 只记不判。
-                min_total = int(getattr(settings, "demand_xhs_min_comments", 8) or 0)
                 if st["total"] < max(1, min_total):
                     _record_scan(
                         db, user_id,

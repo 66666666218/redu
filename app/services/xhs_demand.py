@@ -69,11 +69,16 @@ def search_notes(page, keyword: str, limit: int = 2) -> list[dict]:
       return arr.map(it => {
         const card = it.noteCard || it.note || {};
         const user = card.user || it.user || {};
+        const it0 = card.interactInfo || it.interactInfo || {};
         return {id: card.noteId || it.id, token: it.xsecToken || card.xsecToken || '',
                 title: (card.displayTitle || it.displayTitle || '').slice(0, 80),
-                author: user.nickname || user.nickName || ''};
+                author: user.nickname || user.nickName || '',
+                comments: parseInt(it0.commentCount || '0', 10) || 0};
       }).filter(x => x.id);
     }""")
+    #: ★ 2026-10-30:搜索结果里**直接带 `commentCount`** ⇒ 按评论数从多到少开,
+    #: 别把额度浪费在 0 评论的笔记上(用户给的两条样本,一条 4 条评论、一条**评论为空**)。
+    rows.sort(key=lambda x: x.get("comments") or 0, reverse=True)
     return rows[:max(1, int(limit))]
 
 
