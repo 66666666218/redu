@@ -98,6 +98,18 @@ def note_comments(page, note_id: str, token: str = "", scrolls: int = 3) -> list
         return []
 
 
+def page_has_group(page) -> bool:
+    """这一页有没有**群聊入口**(用户:「小红书大多都会有加入群聊」)。
+
+    ⚠️ 只是**判存在**:群消息在 App 的 IM 里,网页端只有二维码入口,读不到内容。
+    """
+    try:
+        body = page.inner_text("body")
+    except Exception:  # noqa: BLE001 - 读不到就当没有
+        return False
+    return ("群聊" in body) or ("加入群" in body) or ("群号" in body)
+
+
 def stats_from_texts(texts: list[str]) -> dict:
     """同一套判据(与抖音**共用** `demand_watch` 的归一化与匹配),算密度/重复率。"""
     from app.services.demand_watch import _DEMAND_WORDS, _ONES_RE, _norm_comment

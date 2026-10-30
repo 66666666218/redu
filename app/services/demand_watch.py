@@ -1033,7 +1033,7 @@ def push_expand(items: list[dict], settings) -> bool:
 
 def _record_scan(db, user_id: int, v: dict, *, total: int, ones: int, demand: int,
                  dup: float, flagged: bool, why: str, name: str,
-                 platform: str = "douyin") -> None:
+                 platform: str = "douyin", has_group: bool = False) -> None:
     """把这一条视频的扫描结果落库(同一天同一条只留一行,以最新一次为准)。"""
     from app.db.models import DemandScan
 
@@ -1054,6 +1054,7 @@ def _record_scan(db, user_id: int, v: dict, *, total: int, ones: int, demand: in
     row.total, row.ones, row.demand = int(total), int(ones), int(demand)
     row.dup_ratio = float(dup or 0)
     row.flagged, row.why, row.name = bool(flagged), str(why or "")[:32], str(name or "")[:128]
+    row.has_group = bool(has_group)
     row.scanned_at = datetime.now()
 
 
@@ -1074,8 +1075,15 @@ def scan_xhs(db, user_id: int = 1, settings=None) -> dict:
         #: `navigator.webdriver=True`,那条路就废了(见 `tools/xhs_cdp.py` 头注)。
         return {"skipped": why}
 
-    seeds = [w.strip() for w in
-             str(getattr(settings, "demand_seed_words", "") or "").split(",") if w.strip()]
+    #: ★ 小红书**用自己的种子词**(2026-10-30 实测):抖音那套参考作品名在小红书
+    #: 命中率极低(评论 26~35 条、求只有 0~1);而 `吃瓜群` 一轮就命中 2/2 篇
+    #: (两篇都挂着群聊入口)。留空则回落到通用 `DEMAND_SEED_WORDS`。
+    xhs_seeds = [w.strip() for w in
+                 str(getattr(settings, "demand_xhs_seed_words", "") or "").split(",")
+                 if w.strip()]
+    seeds = xhs_seeds or [w.strip() for w in
+                          str(getattr(settings, "demand_seed_words", "") or "").split(",")
+                          if w.strip()]
     if not seeds:
         return {"skipped": "no_seed_words"}
     seeds = _rotate_seeds(db, seeds,
@@ -1090,15 +1098,23 @@ def scan_xhs(db, user_id: int = 1, settings=None) -> dict:
         p, browser = X._connect()
         page = browser.contexts[0].new_page()
         for kw in seeds:
-            for note in X.search_notes(page, kw, limit=per_seed):
-                #: 搜索结果自带 `commentCount` ⇒ **评论太少就别开页**(省额度也省风控)
-                if int(note.get("comments") or 0) < max(1, min_total):
+            for idx, note in enumerate(X.search_notes(page, kw, limit=per_seed)):
+                #: 搜索结果自带 `commentCount` ⇒ **评论太少就别开页**(省额度也省风控)。
+                #: ⚠️ 但每个词**第一篇照开**:群聊型的帖子常常评论很少(用户:「小红书大多都会
+                #: 有加入群聊」),而"挂没挂群"只有打开才知道。
+                if idx > 0 and int(note.get("comments") or 0) < max(1, min_total):
                     continue
                 texts = X.note_comments(page, note["id"], note.get("token", ""))
+                has_group = X.page_has_group(page)
                 st = X.stats_from_texts(texts)
-                if not st["total"]:
+                if not st["total"] and not has_group:
                     continue
                 scanned += 1
+                tnames = names_from_title(note.get("title") or "")
+                note_name = (tnames[0] if tnames else
+                             (best_tag(note.get("title") or "",
+                                       exclude=note.get("author") or "")
+                              or match_seed(note.get("title") or "", seeds)))
                 #: ⚠️ 小红书单篇评论常常只有几条(用户给的「小马云」那条**只有 4 条**),
                 #: 样本太小时密度是噪音 ⇒ 少于 `DEMAND_XHS_MIN_COMMENTS` 只记不判。
                 if st["total"] < max(1, min_total):
@@ -1108,8 +1124,9 @@ def scan_xhs(db, user_id: int = 1, settings=None) -> dict:
                          "author": note.get("author") or "",
                          "url": f"https://www.xiaohongshu.com/explore/{note['id']}"},
                         total=st["total"], ones=st["ones"], demand=st["demand"],
-                        dup=st["dup_ratio"], flagged=False, why="样本不足",
-                        name="", platform="xiaohongshu")
+                        dup=st["dup_ratio"], flagged=False,
+                        why=("群聊入口" if has_group else "样本不足"),
+                        name=note_name, platform="xiaohongshu", has_group=has_group)
                     continue
                 ratio = (st["ones"] + st["demand"]) / st["total"]
                 by_density = (ratio >= float(getattr(settings, "demand_request_density", 0.1) or 0)
@@ -1118,10 +1135,7 @@ def scan_xhs(db, user_id: int = 1, settings=None) -> dict:
                     getattr(settings, "demand_repeat_ratio", 0.25) or 0)
                     and st["total"] >= 10)
                 flagged = bool(by_density or by_repeat)
-                name = names_from_title(note.get("title") or "")
-                name = name[0] if name else (best_tag(note.get("title") or "",
-                                                      exclude=note.get("author") or "")
-                                             or match_seed(note.get("title") or "", seeds))
+                name = note_name
                 _record_scan(
                     db, user_id,
                     {"aweme_id": note["id"], "title": note.get("title") or "",
@@ -1130,7 +1144,7 @@ def scan_xhs(db, user_id: int = 1, settings=None) -> dict:
                     total=st["total"], ones=st["ones"], demand=st["demand"],
                     dup=st["dup_ratio"], flagged=flagged,
                     why=("求/1密度" if by_density else ("重复评论" if by_repeat else "")),
-                    name=name, platform="xiaohongshu")
+                    name=name, platform="xiaohongshu", has_group=has_group)
                 if flagged:
                     flagged_n += 1
                     items.append({"name": name, "desc": note.get("title") or "",
@@ -1190,7 +1204,8 @@ def digest_stats(db, user_id: int = 1, hours: int = 24) -> dict:
         rs = [r for r in rows if (getattr(r, "platform", "") or "douyin") == p]
         if rs:
             by_platform[p] = {"scanned": len(rs),
-                              "flagged": sum(1 for r in rs if r.flagged)}
+                              "flagged": sum(1 for r in rs if r.flagged),
+                              "group": sum(1 for r in rs if getattr(r, "has_group", False))}
     names = db.scalars(select(DemandName).where(
         DemandName.user_id == user_id,
         DemandName.last_seen_at >= since).order_by(
@@ -1220,7 +1235,9 @@ def build_digest_card(st: dict) -> dict:
     if bp:
         label = {"douyin": "抖音", "xiaohongshu": "小红书"}
         lines.append("分平台:" + " · ".join(
-            f"{label.get(k, k)} 扫{v['scanned']}/命中{v['flagged']}" for k, v in bp.items()))
+            f"{label.get(k, k)} 扫{v['scanned']}/命中{v['flagged']}"
+            + (f"/有群{v['group']}" if v.get("group") else "")
+            for k, v in bp.items()))
     if st["names"]:
         lines.append("名字 TOP:" + " · ".join(f"{n}(求{d}/1{o})" for n, d, o in st["names"]))
     else:

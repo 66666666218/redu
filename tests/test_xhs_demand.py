@@ -97,6 +97,31 @@ def session():
     db.close()
 
 
+def test_挂了群聊入口的笔记也要记一笔(session, monkeypatch):
+    """用户:「小红书大多都会有加入群聊」—— 群消息读不到,但**挂没挂群**是个信号。"""
+    from app.db.models import DemandScan
+    from app.services import demand_watch as dw
+
+    class S(_S):
+        demand_xhs_min_comments = 8
+        demand_xhs_notes_per_seed = 1
+
+    monkeypatch.setattr(X, "available", lambda settings=None: (True, "ok"))
+    monkeypatch.setattr(X, "_connect", lambda: (_P(), _Browser()))
+    monkeypatch.setattr(X, "search_notes", lambda *a, **k: [
+        {"id": "n2", "token": "t", "title": "刚创了一个八卦群，想进就进", "author": "A",
+         "comments": 0}])
+    monkeypatch.setattr(X, "note_comments", lambda *a, **k: [])   # 评论为空
+    monkeypatch.setattr(X, "page_has_group", lambda page: True)
+    monkeypatch.setattr(dw, "push_request", lambda *a, **k: pytest.fail("不该推"))
+
+    dw.scan_xhs(session, 1, S())
+
+    row = session.query(DemandScan).one()
+    assert row.has_group is True
+    assert row.why == "群聊入口"
+
+
 def test_评论太少只记不判(session, monkeypatch):
     """用户给的「小马云」那条只有 4 条评论 —— 样本太小时密度是噪音。"""
     from app.db.models import DemandScan

@@ -1166,6 +1166,10 @@ class DemandScan(Base):
     demand: Mapped[int] = mapped_column(Integer, default=0)     # 带求语气的
     dup_ratio: Mapped[float] = mapped_column(Float, default=0.0)
     flagged: Mapped[bool] = mapped_column(Boolean, default=False)   # 是否判为求1型
+    #: ★ 2026-10-30 用户:「小红书大多都会有**加入群聊**」—— 网页端拿不到群消息
+    #: (只有二维码入口 + 要 App 加入),但**挂没挂群聊**本身是个信号:挂了群的帖子
+    #: 往往是吃瓜/资源集散地。这里只记录这个事实,不假装能读群内容。
+    has_group: Mapped[bool] = mapped_column(Boolean, default=False)
     why: Mapped[str] = mapped_column(String(32), default="")        # 求/1密度 | 重复评论
     name: Mapped[str] = mapped_column(String(128), default="")      # 取到的名字(可能空)
     scanned_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
