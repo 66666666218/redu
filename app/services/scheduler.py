@@ -491,6 +491,9 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.quark_link_pull import quark_link_pull_tick
     from app.services.douyin_leads import douyin_leads_tick
     from app.services.douyin_peer_scan import douyin_peer_tick
+    #: ★ **评论区在求的名字**(2026-10-30,用户口径:只看名字、不落网盘)。
+    #: 与 `douyin_leads` 共用抖音登录态/额度,所以错开 40 分钟跑。
+    from app.services.demand_watch import demand_watch_tick
     from app.services.ai_calibration import ai_calibrate_tick
     from app.services.xunlei_sync import xunlei_sync_tick
     from app.services.xunlei_group import xunlei_group_tick
@@ -590,6 +593,11 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # ⚠️ 必须与 `douyin_leads` **同侧**(都用本机那个 CDP 浏览器/登录态),且错开 :10。
         (douyin_peer_tick, _get_settings().douyin_peer_cron, {"minute": 20, "hour": "*/3"},
          "douyin_peer", "wechat"),
+        # ★ **评论区在求的名字**(2026-10-30,用户口径「监控评论区都在求的大瓜名称,只监控名称」)。
+        # 搜种子词 → 挑高评论视频 → 拉评论 → 抽名字 → 入库并推卡(**只存名字,不落网盘**)。
+        # ⚠️ 与 `douyin_leads` 共用登录态与额度,所以默认 `:50 */4` 与它(`:10 */4`)错开。
+        (demand_watch_tick, _get_settings().demand_watch_cron, {"minute": 50, "hour": "*/4"},
+         "demand_watch", "wechat"),
         # ★ **AI 分数线自动校准**(2026-10-29):用「AI 分数 ↔ 真实搬成」的配对挑阈值。
         # 每周一次就够(滚动 21 天、一次最多动 1 分);样本不足时只记「跳过」。
         (ai_calibrate_tick, _get_settings().ai_calibration_cron,

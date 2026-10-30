@@ -1135,3 +1135,38 @@ class PushLedger(Base):
     author: Mapped[str] = mapped_column(String(64), default="")      # 对标账号
     metrics: Mapped[str] = mapped_column(String(255), default="")    # 热度(JSON 串)
     pushed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+
+
+class DemandName(Base):
+    """**评论区在求的资源名**(2026-10-30,用户口径:监控「大瓜」名称,**只存名字、不落网盘**)。
+
+    ## 为什么单独一张表
+    这张表回答的是**需求侧**问题:「观众在评论区反复问的那个名字是什么」——
+    与 `douyin_leads`(供给侧:谁的视频在推、带了什么盘链)是两条不同的口径。
+    混在一起会把"有人求"读成"有人在卖"(反过来也一样)。
+
+    ## 一行 = 一个名字(同一平台)
+    `demand_hits` 只统计**带"求"语气**的评论条数(`求/在哪看/叫什么/谁有/想要…`),
+    `mention_hits` 统计**提到该名字**的评论条数(不问也算)。
+    两个数一起看才能区分"很多人点名要"与"很多人只是顺口提到"。
+
+    `samples` 存 JSON:`{"comments": ["求《X》…", …], "video": "https://…"}`
+    —— 名字是从哪条评论里抽出来的,要能回溯(否则没法判断抽取是不是抽歪了)。
+    """
+
+    __tablename__ = "demand_names"
+    __table_args__ = (UniqueConstraint("user_id", "platform", "name",
+                                       name="uq_demand_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    platform: Mapped[str] = mapped_column(String(16), default="douyin", index=True)
+    name: Mapped[str] = mapped_column(String(128), index=True)
+    demand_hits: Mapped[int] = mapped_column(Integer, default=0)
+    mention_hits: Mapped[int] = mapped_column(Integer, default=0)
+    video_hits: Mapped[int] = mapped_column(Integer, default=0)   # 出现在几个视频的评论里
+    samples: Mapped[str] = mapped_column(Text, default="{}")      # JSON: 例子 + 出处
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    #: 上次推送时间 —— 用来避免每轮把同一批名字反复推到群里(默认 48 小时内不重推)
+    last_pushed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
