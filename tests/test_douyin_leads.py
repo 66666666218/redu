@@ -2049,4 +2049,49 @@ def test_push_leads_links_the_authors_share_when_not_transferred(session, monkey
     assert len(cards) == 1
     blob = str(cards[0])
     assert "https://pan.xunlei.com/s/ORIG" in blob, "标题要能点到作者的盘链"
-    assert "迅雷" in blob and "可直取 1 条" in blob
+    assert "⏳迅雷" in blob, "未转存的作者链要标 ⏳"
+    assert "可直取 1 条" in blob
+
+
+def test_only_real_pan_domains_count_as_links() -> None:
+    """★ 2026-10-30 用户「一定要确保是网盘的链接」:只认夸克/UC/百度/迅雷四个域名。
+
+    推广页、公众号文章、短链**不算** —— 客户点开拿不到资源。
+    """
+    assert dl._is_pan_url("https://pan.quark.cn/s/abc") is True
+    assert dl._is_pan_url("https://pan.xunlei.com/s/X?pwd=1") is True
+    assert dl._is_pan_url("https://pan.baidu.com/s/1abc") is True
+    assert dl._is_pan_url("https://drive.uc.cn/s/abc") is True
+    assert dl._pan_name("https://drive.uc.cn/s/abc") == "UC"
+    assert dl._is_pan_url("https://example.com/resource") is False
+    assert dl._is_pan_url("https://mp.weixin.qq.com/s/abc") is False
+    assert dl._is_pan_url("") is False
+    #: 库里那条不是网盘 ⇒ 不算可用链
+    assert dl._has_usable_pan(
+        {"library": {"link": "https://example.com/x"}}) is False
+
+
+def test_card_marks_our_link_vs_author_link(session, monkeypatch) -> None:
+    """🔴 = 我方链;⏳ = 作者原始链(未转存但可用)。"""
+    from app.services import feishu_client
+
+    cards: list[dict] = []
+
+    class _C:
+        def __init__(self, webhook, secret):
+            pass
+
+        def send_card(self, card):
+            cards.append(card)
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+    dl.push_leads([
+        {"mark": "a", "title": "《a》第1集", "url": "https://d/1", "author": "甲",
+         "kouling": {"kind": "share", "our_url": "https://pan.xunlei.com/s/OUR"}},
+        {"mark": "b", "title": "《b》第1集", "url": "https://d/2", "author": "乙",
+         "kouling": {"kind": "share", "share_url": "https://pan.baidu.com/s/AUTH"}},
+    ], _Settings(), session=session, user_id=1)
+    blob = str(cards[0])
+    assert "🔴迅雷" in blob and "⏳百度" in blob
+    assert "🔴我方 1 · ⏳作者 1" in blob

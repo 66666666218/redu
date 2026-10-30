@@ -1423,6 +1423,8 @@ def _pan_name(url: str) -> str:
     u = (url or "").lower()
     if "quark.cn" in u:
         return "夸克"
+    if "drive.uc.cn" in u or "uc.cn" in u:
+        return "UC"
     if "baidu.com" in u:
         return "百度"
     if "xunlei.com" in u:
@@ -1430,18 +1432,38 @@ def _pan_name(url: str) -> str:
     return ""
 
 
-def _has_usable_pan(ld: dict) -> bool:
-    """这条线索有没有**可用网盘链**(我方链 / 库里现成链 / 正文直链)。
+#: **只认真正的网盘域名**(2026-10-30 用户「一定要确保是网盘的链接」)。
+#: ⚠️ 不要退化成"任何 http 都算" —— `library.link`/正文里可能出现推广页、公众号文章、
+#: 短链,它们不是网盘,客户点开拿不到资源。
+_PAN_HOSTS = ("pan.quark.cn", "drive.uc.cn", "pan.baidu.com", "pan.xunlei.com")
 
-    ⚠️ **群口令不算**:它能进群,但卡片上没有可直接点的链 —— 用户口径是「带网盘**链接**」。
+
+def _is_pan_url(url) -> bool:
+    """这个 URL 是不是**网盘分享链**(夸克/UC/百度/迅雷)。"""
+    u = str(url or "").strip().lower()
+    return bool(u) and any(h in u for h in _PAN_HOSTS)
+
+
+def _pan_link_of(ld: dict) -> tuple[str, str]:
+    """取这条线索**可用的网盘链** → `(url, kind)`;`kind` = `our`(我方/库里)/`author`(作者原始)。
+
+    优先级:我方转存链 > 资源库现成链 > **作者原始分享链** > 正文直链。
+    ⚠️ 每一步都过 `_is_pan_url`;不是网盘域名的直接跳过(2026-10-30 用户口径)。
     """
     info = ld.get("kouling") or {}
-    return bool(str(info.get("our_url") or "").strip()
-                #: ★ **作者原始分享链**(2026-10-30 用户「带链只是没有转存也可以推送」):
-                #: 我们没搬成 / 超额度时 `share_url` 仍然在 —— 它就是可用的网盘链。
-                or str(info.get("share_url") or "").strip()
-                or (ld.get("library") or {}).get("link")
-                or str(ld.get("pan_url") or "").strip())
+    lib = (ld.get("library") or {}).get("link")
+    for url, kind in ((info.get("our_url"), "our"),
+                      (lib, "our"),
+                      (info.get("share_url"), "author"),
+                      (ld.get("pan_url"), "author")):
+        if _is_pan_url(url):
+            return str(url).strip(), kind
+    return "", ""
+
+
+def _has_usable_pan(ld: dict) -> bool:
+    """这条线索有没有**可用网盘链**(只认真正的网盘域名;群口令不算)。"""
+    return bool(_pan_link_of(ld)[0])
 
 
 def _drop_panless(leads: list[dict]) -> list[dict]:
@@ -1638,16 +1660,8 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
             f"{ld_.get('title') or ''} {ld_.get('mark') or ''}")
 
     def _link_of(ld_: dict) -> str:
-        """这条线索**能直接取用**的链(我方链 > 库里现成链 > 正文直链);没有返回空串。
-
-        ★ 客户做拉新时最关心"这条能不能直接拿来用" —— 卡片摘要与排序都按它来。
-        """
-        info_ = ld_.get("kouling") or {}
-        return str(info_.get("our_url")
-                   or (ld_.get("library") or {}).get("link")
-                   #: ★ **没搬成但带链**也推:用作者原始分享链(2026-10-30 用户口径)
-                   or info_.get("share_url")
-                   or ld_.get("pan_url") or "")
+        """这条线索**能直接取用**的网盘链(只认网盘域名;见 `_pan_link_of`)。"""
+        return _pan_link_of(ld_)[0]
 
     def _lead_row(ld: dict) -> dict:
         """一条线索 → 六列网格行(拆出来只为让 `push_leads` 保持可读)。"""
@@ -1661,14 +1675,16 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
         vurl = _md_safe(ld.get("url") or "")
         #: 这条线索**能用的那条链**(我方链 > 库里现成链 > 正文直链)。它同时决定两列:
         #: 「作品」列挂它就**可点**,「资源」列写它落在**哪个盘**。
-        _raw_our = _link_of(ld)
+        _raw_our, _kind = _pan_link_of(ld)
         our = _md_safe(_raw_our)
         work = f"[{shown}]({our})" if our else shown
         # 转发量**独立成列**;没有就不显示,不拿 0 冒充有数据。
         sc = int(ld.get("share_count") or 0)
         # 「资源」列 = **只写盘名**(有链 ⇒ 🔴夸克/🔴迅雷/🔴百度;没链 ⇒ —)。
         _pan = _pan_name(_raw_our)
-        res = f"🔴{_pan}" if _pan else "—"
+        #: ★ **区分我方链 / 作者链**(2026-10-30 用户「可以加上,但一定要确保是网盘链接」):
+        #: 🔴 = 我方转存链或资源库现成链;⏳ = 作者原始分享链(还没搬成,但可以直接取)。
+        res = (("🔴" if _kind == "our" else "⏳") + _pan) if _pan else "—"
         return _col_set_row([
             (author, 3),
             (work, 5),
@@ -1694,7 +1710,10 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
         pan_txt = " / ".join(f"{k or '网盘'} {v}" for k, v in pan_cnt.most_common())
         intro = f"{label}上发现 **{len(subset)}** 条在推同类资源的视频。"
         if n_link:
-            intro += (f"\n**可直取 {n_link} 条**" + (f"({pan_txt})" if pan_txt else "")
+            kinds = Counter(_pan_link_of(x)[1] for x in subset if _link_of(x))
+            intro += (f"\n**可直取 {n_link} 条**"
+                      f"(🔴我方 {kinds.get('our', 0)} · ⏳作者 {kinds.get('author', 0)})"
+                      + (f" {pan_txt}" if pan_txt else "")
                       + " —— 点作品标题即可打开对应网盘。")
         else:
             intro += ("\n**这些条暂无可直取链,只能看对标作品**(「资源」列全为 —);"
