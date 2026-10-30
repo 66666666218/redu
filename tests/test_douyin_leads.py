@@ -1996,15 +1996,18 @@ def test_push_leads_ledger_records_the_resolved_link(session, monkeypatch) -> No
     assert row.pan_type == "迅雷"
 
 
-def test_minigame_leads_without_pan_are_dropped() -> None:
-    """★ 2026-10-30 用户口径「我们不要监控到不带网盘的」:
+def test_leads_without_pan_are_dropped_for_all_niches() -> None:
+    """★ 2026-10-30 用户口径「把带网盘链的推广规则带到所有赛道」:
 
-    小游戏线索**没有可用网盘链**就不入库、不推送;其它赛道不受影响(仍可进"只能对标"卡)。
+    任何赛道的线索**没有可用网盘链**都不入库、不推送。
     ⚠️ **群口令不算可用链** —— 能进群,但卡片上没有可直接点的链接。
     """
     assert dl._has_usable_pan({"kouling": {"kind": "group", "group_id": "1"}}) is False
     assert dl._has_usable_pan({"kouling": {"kind": "share",
                                            "our_url": "https://pan.xunlei.com/s/A"}}) is True
+    #: ★ **没转存但带作者原始链也算**(2026-10-30 用户「带链只是没有转存也可以推送」)
+    assert dl._has_usable_pan({"kouling": {"kind": "share", "status": "over_budget",
+                                           "share_url": "https://pan.xunlei.com/s/X"}}) is True
     assert dl._has_usable_pan({"pan_url": "https://pan.quark.cn/s/B"}) is True
 
     leads = [
@@ -2012,8 +2015,38 @@ def test_minigame_leads_without_pan_are_dropped() -> None:
         {"title": "《蛊界游戏》兑换码", "mark": "y",
          "kouling": {"kind": "share", "our_url": "https://pan.xunlei.com/s/A"}},
         {"title": "《某剧》第2集", "mark": "z", "kouling": {"kind": "none"}},
+        {"title": "《某剧》第3集", "mark": "v",
+         "kouling": {"kind": "share", "status": "over_budget",
+                     "share_url": "https://pan.xunlei.com/s/X"}},
         {"title": "《某游戏》资源", "mark": "w", "pan_url": "https://pan.quark.cn/s/B"},
     ]
-    kept = dl._drop_panless_games(leads)
+    kept = dl._drop_panless(leads)
     marks = [x["mark"] for x in kept]
-    assert marks == ["y", "z", "w"], f"只该丢第一条(小游戏无链):{marks}"
+    assert marks == ["y", "v", "w"], f"无链的全部丢掉(含影视那条);带链未搬的保留:{marks}"
+
+
+def test_push_leads_links_the_authors_share_when_not_transferred(session, monkeypatch) -> None:
+    """★ 2026-10-30:「带链只是没有转存**也可以推送**」—— 标题要挂作者原始链、资源列写盘名。"""
+    from app.services import feishu_client
+
+    cards: list[dict] = []
+
+    class _C:
+        def __init__(self, webhook, secret):
+            pass
+
+        def send_card(self, card):
+            cards.append(card)
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+    dl.push_leads([{
+        "mark": "某剧", "title": "《某剧》第3集", "url": "https://d/1", "author": "甲",
+        "keyword": "k",
+        "kouling": {"kind": "share", "status": "over_budget",
+                    "share_url": "https://pan.xunlei.com/s/ORIG?pwd=abcd", "our_url": ""}}],
+        _Settings(), session=session, user_id=1)
+    assert len(cards) == 1
+    blob = str(cards[0])
+    assert "https://pan.xunlei.com/s/ORIG" in blob, "标题要能点到作者的盘链"
+    assert "迅雷" in blob and "可直取 1 条" in blob

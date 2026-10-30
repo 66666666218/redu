@@ -1437,32 +1437,28 @@ def _has_usable_pan(ld: dict) -> bool:
     """
     info = ld.get("kouling") or {}
     return bool(str(info.get("our_url") or "").strip()
+                #: ★ **作者原始分享链**(2026-10-30 用户「带链只是没有转存也可以推送」):
+                #: 我们没搬成 / 超额度时 `share_url` 仍然在 —— 它就是可用的网盘链。
+                or str(info.get("share_url") or "").strip()
                 or (ld.get("library") or {}).get("link")
                 or str(ld.get("pan_url") or "").strip())
 
 
-def _drop_panless_games(leads: list[dict]) -> list[dict]:
-    """**小游戏**这条赛道:没有可用网盘链的线索一律丢掉(2026-10-30 用户口径)。
+def _drop_panless(leads: list[dict]) -> list[dict]:
+    """**所有赛道**:没有可用网盘链的线索一律丢掉(2026-10-30 用户口径)。
 
-    > 「我们监控的抖音小游戏是否都是带网盘链接的,**我们不要监控到不带网盘的**」
+    > 「把**带网盘链的推广规则带到所有赛道**里面」
 
-    实测(近 14 天):小游戏线索 8 条里 **3 条无链**(1 条 share 没搬成、2 条没解出来)。
-    它们在卡片上只能进「只能对标」那一张 —— 对小游戏这条赛道,用户明确不要这种。
-    ⚠️ **只对小游戏生效**:其它赛道仍保留"只能对标"卡(上一版刚按客户视角做的)。
+    ⚠️ **判据是"可直接取用"**(`_has_usable_pan`):我方链 / 库里现成链 / 正文直链;
+    **群口令不算**(能进群,但卡片上没有可直接点的链接)。
+    实测(近 14 天):小游戏线索 8 条里 3 条无链、其它赛道同样有无链项 ——
+    它们在卡片上只能进「只能对标」那一张,而用户明确不要这种。
     """
     if not leads:
         return leads
-    from app.services import category_topics
-
-    kept = [
-        ld for ld in leads
-        if _has_usable_pan(ld)
-        or category_topics.display_niche(
-            f"{ld.get('title') or ''} {ld.get('mark') or ''}") != "小游戏"
-    ]
+    kept = [ld for ld in leads if _has_usable_pan(ld)]
     if len(kept) != len(leads):
-        logger.info("抖音线索:小游戏里 %d 条**没有可用网盘链**,已丢弃(不监控)",
-                    len(leads) - len(kept))
+        logger.info("抖音线索:%d 条**没有可用网盘链**,已丢弃(不监控)", len(leads) - len(kept))
     return kept
 
 
@@ -1649,6 +1645,8 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
         info_ = ld_.get("kouling") or {}
         return str(info_.get("our_url")
                    or (ld_.get("library") or {}).get("link")
+                   #: ★ **没搬成但带链**也推:用作者原始分享链(2026-10-30 用户口径)
+                   or info_.get("share_url")
                    or ld_.get("pan_url") or "")
 
     def _lead_row(ld: dict) -> dict:
@@ -1864,8 +1862,8 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
             if leads:
                 # 口令 → 资源(分享链直接转存入库 / 群则加群),结果一并写进卡片
                 apply_kouling(leads, db, user_id, settings)
-                # ★ **小游戏必须带网盘**(2026-10-30 用户口径):没有可用链的不入库、不推。
-                leads = _drop_panless_games(leads)
+                # ★ **所有赛道都必须带网盘**(2026-10-30 用户口径):没有可用链的不入库、不推。
+                leads = _drop_panless(leads)
                 if leads:
                     _save_leads(db, user_id, leads)  # 落库:转发量只在这一次有效(结算要用)
                     push_leads(leads, settings, platform=plat, session=db, user_id=user_id)
