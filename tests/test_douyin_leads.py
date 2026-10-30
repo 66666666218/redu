@@ -2095,3 +2095,30 @@ def test_card_marks_our_link_vs_author_link(session, monkeypatch) -> None:
     blob = str(cards[0])
     assert "🔴迅雷" in blob and "⏳百度" in blob
     assert "🔴我方 1 · ⏳作者 1" in blob
+
+
+def test_search_keywords_uses_each_directions_own_library_words(session, monkeypatch) -> None:
+    """★ 2026-10-30 用户「影视、软件下载、游戏下载等方向」:
+
+    每个方向轮到时,词表**先放该方向自己的资源名**(从对应类型的文件夹里取),
+    而不是同一批剧名。这里验「软件」方向。"""
+    from datetime import datetime
+
+    from app.db.models import SystemConfig, XunleiResource
+
+    session.add(SystemConfig(key="lead_word_category", value="软件"))
+    session.add(XunleiResource(
+        user_id=1, fid="s1", name="joi模拟器(手机玩电脑游戏的)",
+        parent_name="解压安装教程，手机电脑解压软件", synced_at=datetime.now()))
+    session.commit()
+    monkeypatch.setattr("app.services.cross_accounts._keywords_from_library",
+                        lambda s, u, top: [])
+
+    class _S:
+        douyin_leads_group_keywords = 0
+        douyin_leads_category_min_words = 1
+        douyin_leads_quark_keywords = ""
+        douyin_leads_quark_slots = 0
+
+    kws = dl.search_keywords(session, 1, top=4, settings=_S())
+    assert kws[0] == "joi模拟器 下载", kws

@@ -498,3 +498,8 @@ def test_pick_accepts_type_override() -> None:
     words = ["某个裸名", "四级真题"]
     got = ct.pick(words, "小游戏", 2, cat_of=lambda w: "小游戏" if w == "某个裸名" else "资料")
     assert got[0] == "某个裸名"
+
+
+def test_hanhua_suffix_does_not_steal_games() -> None:
+    """⚠️ 游戏名里的「最新汉化版」曾和「游戏」平票、按表序把游戏判成软件。"""
+    assert ct.type_of("泰拉瑞亚灾厄最新汉化版", "T开头游戏") == "小游戏"

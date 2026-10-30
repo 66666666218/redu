@@ -50,7 +50,9 @@ DEFAULT_CATEGORIES: dict[str, tuple[str, ...]] = {
     # ⚠️ 补常见**主题词**(2026-10-04):光有"软件/安装包"判不出 `PS教程` 这类 ——
     # 主题词才是决定性的("教程"已降为通用词,见 `GENERIC_HINTS`)。
     "软件": ("软件", "安装包", "绿色版", "激活", "工具", "客户端", "补丁", "模拟器", "插件",
-             "脚本", "源码", "代码", "APP", "app", "破解", "汉化", "免安装", "便携版",
+             "脚本", "源码", "代码", "APP", "app", "破解", "免安装", "便携版",
+             #: ⚠️ **「汉化」已移除**(2026-10-30):游戏名里到处都是「最新汉化版」,
+             #: 它和「游戏」平票时按表序会把**游戏**判成软件(实测泰拉瑞亚灾厄最新汉化版)。
              "PS", "ps", "PR", "AE", "Office", "office", "Excel", "excel", "WPS", "wps",
              "剪辑", "修图", "抠图", "投屏", "车机", "刷机", "驱动", "系统"),
     # ⚠️ 这批词是**用户给的真实例子**倒推出来的(2026-10-04):`孙宇晨小作文` → 大瓜 ——
@@ -329,6 +331,35 @@ def subtype_of(text: str, parent: str = "") -> str:
         if word in t:
             return label
     return "影视" if type_of(text, parent) == "影视" else ""
+
+
+def type_map(rows: list[tuple[str, str]]) -> dict[str, str]:
+    """**批量**判类型:`[(name, parent)]` → `{name: type}`。
+
+    与 `type_of(..., siblings=...)` 同一口径,但**两遍算**(先逐条、再按父目录多数),
+    避免逐条带 siblings 的 O(n²)(资源库 1600+ 条时会慢到不可用)。
+    ⚠️ 附件/说明类不参与"同批次多数"(与 `type_of` 一致)。
+    """
+    from collections import Counter
+
+    base: dict[str, str] = {}
+    by_parent: dict[str, list[str]] = {}
+    for name, parent in rows:
+        n = str(name or "")
+        by_parent.setdefault(str(parent or ""), []).append(n)
+        base[n] = type_of(n, str(parent or ""))
+    out: dict[str, str] = {}
+    for parent, names in by_parent.items():
+        votes = Counter(base.get(n) for n in names if base.get(n))
+        maj, maj_n = ("", 0)
+        if votes:
+            maj, maj_n = votes.most_common(1)[0]
+        total = sum(votes.values())
+        good = bool(maj) and total >= 3 and maj_n / total >= 0.7
+        for n in names:
+            t = base.get(n) or (maj if good and not any(j in n for j in _ATTACHMENT_HINTS) else "")
+            out[n] = t
+    return out
 
 
 def display_niche(text: str, parent: str = "") -> str:

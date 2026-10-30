@@ -832,64 +832,126 @@ _NAME_SUFFIX = re.compile(
 _DRAMA_LIKE = re.compile(r"完结|第\s*\d+\s*集|\d+\s*集|全集")
 
 
-def game_search_words(session, user_id: int, top: int = 3) -> list[str]:
-    """从**资源库里的游戏名**生成搜索词:`<核心名> 下载`(2026-10-29)。
+#: **不是资源名**的通用/公告/目录标签(2026-10-30 实测:它们会被当成搜索词)。
+_WORD_JUNK = ("简介", "使用说明", "使用方法", "二维码", "请勿相信", "更新一次",
+              "寻找资源不易", "更多好玩的游戏", "均更至最新集数",
+              "资源内的联系", "防失联", "公告", "群公告", "免责声明", "注意事项",
+              "切勿", "如果资源", "和谐", "同步更新", "凌晨", "卸载网盘", "教程")
 
-    用户口径:「可以搜**已经网盘里面的小游戏**去搜搜看」。
 
-    **形态是实测定的,不是拍脑袋**:
-      · 裸游戏名(泰拉瑞亚/苏丹的游戏/米塔/蛊界)→ **64 条,带盘 0** —— 全是玩法视频;
-      · **`<游戏名> 下载 / 手机版`** → **48 条,带盘 2**(`咐置…叩苓` 与 `/~token~:/`);
-      · 资源型词(`游戏合集 下载`)→ 46 条,带盘 6。
-    ⇒ 游戏名必须**带上「下载」**才会搜到资源帖;长名字先剥掉「最新汉化版/手机版/安装包」这类后缀。
+def _search_word_for(cat: str, name: str, parent: str) -> str:
+    """资源名 → 该**方向**的搜索词;不适合当词返回空串。
 
-    ⚠️ **只认盘里的"游戏目录"**(`parent_name` 含 游戏/手机和电脑):
-    否则按 `name like '%游戏%'` 会把**短剧**捞进来 —— 实测最近 6 条全是
-    `《沉溺游戏》75` / `《猎心游戏》11` / `狩猎游戏完结`(它们只是剧名里带"游戏")。
+    · 小游戏 / 软件:清理后加「下载」(实测 `<游戏名> 下载` 才搜得到资源帖);
+    · 影视 / 资料 / 大瓜:直接用清理后的名字(剧名/资料名本身就是推广号标题里的词)。
+    ⚠️ 小游戏只认**游戏目录**(父目录含 游戏/手机和电脑/手游…):否则 `《猎心游戏》11`
+      这种**剧名带"游戏"**会被当成游戏名(2026-10-29 实测踩过)。
+    """
+    src = str(name or "").strip()
+    par = str(parent or "").strip()
+    if any(j in src for j in _WORD_JUNK):
+        return ""
+    if cat == "小游戏":
+        if any(j in src for j in _GAME_NAME_JUNK):
+            #: 占位条目(`游戏本体`)⇒ 父目录才是游戏名;父目录是"X开头游戏"这种分类名就跳过。
+            if not par or "开头游戏" in par or par in _GAME_NAME_JUNK:
+                return ""
+            src = par
+        elif not any(h in par for h in ("游戏", "手机和电脑", "手游", "全系列版本", "所有版本")):
+            return ""
+    core = re.sub(r"[《》【】\[\]]", " ", src)                 # 去掉书名号/方括号本身
+    core = re.split(r"[（(]", core)[0].strip()
+    core = re.sub(r"^[A-Za-z]{1,3}(\s*[-－]\s*|\s+)", "", core).strip()   # `Z 咒语旅团` / `E-恶搞之家`
+    core = _NAME_SUFFIX.sub("", core).strip()
+    #: 文件名后缀 / 尾部集数(`《某剧》75` → `某剧`)
+    core = re.sub(
+        r"\.(mp4|mkv|avi|mov|docx?|pdf|rar|zip|7z|png|jpe?g|webp|gif|bmp|txt)$", "",
+        core, flags=re.I).strip()
+    core = re.sub(r"\s+\d+$", "", core).strip()
+    if len(core) < 2 or len(core) > 20 or any(p in core for p in "！。！?"):
+        return ""
+    if cat in ("小游戏", "软件"):
+        #: 版本号/整合包/本体/剧集形态 都**不是资源名**,搜了只会撞无关结果。
+        if (_DRAMA_LIKE.search(core) or re.match(r"^v?\d", core)
+                or any(j in core for j in ("版本", "整合包", "本体", "MOD", "mod", "重制版"))):
+            return ""
+        if not re.search(r"[一-鿿]", core):               # 至少含中文
+            return ""
+        return f"{core} 下载"
+    #: 影视/资料/大瓜:名字本身就是词;纯数字/英文多半是噪音。
+    if not re.search(r"[一-鿿]", core):
+        return ""
+    return core
+
+
+#: 每个方向**可信的文件夹**(2026-10-30):只有父目录属于这个方向的目录,里面的名字才当词。
+#: ⚠️ **不能只看名字分类**:短剧标题里的「系统/指南/离婚」会把剧判成软件/资料/大瓜
+#: (实测取出来的是 `末世求生却绑定了dm系统 下载`、`幸福指南 完结`、`没有用的离婚协议`)。
+_CAT_PARENT_HINTS: dict[str, tuple[str, ...]] = {
+    "小游戏": ("游戏", "手机和电脑", "手游", "全系列版本", "所有版本"),
+    #: ⚠️ **不含「模拟器」**:`手机玩电脑游戏的模拟器` 目录里装的是**游戏**,
+    #: 放在软件方向会把一批游戏当软件(实测 樱花校园模拟器)。
+    "软件": ("软件", "解压", "安装教程", "工具"),
+    "影视": ("漫剧", "短剧", "剧集", "热门ai", "男频", "女频", "深夜档", "国漫",
+             "动漫", "系列", "合集》", "摆烂"),
+}
+
+
+def category_search_words(session, user_id: int, cat: str, top: int = 3) -> list[str]:
+    """从资源库**按方向**取资源名当搜索词(2026-10-30)。
+
+    用户口径:「影视、软件下载、游戏下载,等别的网盘方向」都要能被监测到。
+    之前每轮都用**同一批最近资源名**(几乎全是剧名)⇒ 轮到大瓜/资料/软件时,
+    搜出去的词仍是影视名。现在按 `category_topics.type_map` 判出的**方向**取该方向的资源名。
+    ⚠️ 方向供给天然不均(资源库:影视 1112 / 小游戏 318 / 软件 81 / 资料 10),
+    不够时 `pick` 仍会用它自己的话题词兜底。
     """
     from sqlalchemy import desc, or_
 
     from app.db.models import XunleiResource
+    from app.services import category_topics
 
     budget = max(0, int(top or 0))
     if budget <= 0:
         return []
+    hints = _CAT_PARENT_HINTS.get(cat)
+    if not hints:
+        #: 资料/大瓜/问卷没有可信的"库内目录" ⇒ 不硬凑,交给 `pick` 的话题词兜底。
+        return []
+    #: ⚠️ **在 SQL 里按父目录过滤**:不然 limit 800 会被最近同步的剧名占满,
+    #: 老的游戏目录(10-07 同步)根本查不到(实测第一版就是这么返回空的)。
+    conds = [XunleiResource.parent_name.like(f"%{h}%") for h in hints]
+    if cat == "小游戏":
+        #: 占位条目(`游戏本体`)的父目录往往**不含"游戏"**(如 `赛博朋克2077(豪华版全DLC)`)——
+        #: 它们是游戏,要一起选进来,再用父目录名当词(与旧 `game_search_words` 一致)。
+        conds.append(XunleiResource.name.in_(("游戏本体", "更多好玩的游戏", "游戏位置")))
     rows = session.execute(
         select(XunleiResource.name, XunleiResource.parent_name).where(
-            XunleiResource.user_id == user_id,
-            or_(XunleiResource.parent_name.like("%游戏%"),
-                XunleiResource.parent_name.like("%手机和电脑%"),
-                XunleiResource.parent_name.like("%手游%"),
-                #: 占位条目(`游戏本体`)的**父目录**往往就是游戏名(且不含"游戏"二字),
-                #: 所以这三类也要选进来,再用父目录名当词。
-                XunleiResource.name.in_(("游戏本体", "更多好玩的游戏", "游戏位置"))))
-        .order_by(desc(XunleiResource.synced_at)).limit(500)).all()
+            XunleiResource.user_id == user_id, or_(*conds))
+        .order_by(desc(XunleiResource.synced_at)).limit(800)).all()
+    types = category_topics.type_map(
+        [(str(n or ""), str(p or "")) for n, p in rows])
     out: list[str] = []
     for name, parent in rows:
-        src = str(name or "").strip()
-        par = str(parent or "").strip()
-        if any(j in src for j in _GAME_NAME_JUNK):
-            #: 占位条目(`游戏本体`)⇒ 父目录才是游戏名;父目录是"X开头游戏"这种分类名就跳过。
-            if not par or "开头游戏" in par or par in _GAME_NAME_JUNK:
+        nm = str(name or "")
+        if types.get(nm) != cat:
+            continue
+        if not any(h in str(parent or "") for h in hints):
+            #: ⚠️ 小游戏的**占位条目**(`游戏本体`)父目录往往不含"游戏" —— 交给
+            #: `_search_word_for` 用父目录名当词,别在这里拦掉。
+            if not (cat == "小游戏" and any(j in nm for j in _GAME_NAME_JUNK)):
                 continue
-            src = par
-        core = re.sub(r"[《》【】\[\]]", " ", src)                 # 去掉书名号/方括号本身
-        core = re.split(r"[（(]", core)[0].strip()
-        core = re.sub(r"^[A-Za-z]{1,3}(\s*[-－]\s*|\s+)", "", core).strip()   # `Z 咒语旅团` / `E-恶搞之家`
-        core = _NAME_SUFFIX.sub("", core).strip()
-        #: 版本号/整合包/本体 这类**不是游戏名**,搜了也只会撞到一堆无关更新贴。
-        if (len(core) < 2 or _DRAMA_LIKE.search(core)
-                or re.match(r"^v?\d", core)
-                or any(j in core for j in ("版本", "整合包", "本体", "MOD", "mod", "重制版"))):
-            continue
-        if not re.search(r"[一-鿿]", core):               # 至少含中文
-            continue
-        word = f"{core} 下载"
-        if word not in out:
+        word = _search_word_for(cat, nm, str(parent or ""))
+        if word and word not in out:
             out.append(word)
         if len(out) >= budget:
             break
     return out
+
+
+def game_search_words(session, user_id: int, top: int = 3) -> list[str]:
+    """小游戏的搜索词(`<游戏名> 下载`)—— `category_search_words` 的薄壳。"""
+    return category_search_words(session, user_id, "小游戏", top=top)
 
 
 def search_keywords(session, user_id: int, top: int, settings,
@@ -930,8 +992,9 @@ def search_keywords(session, user_id: int, top: int, settings,
     cat = category_topics.current_category(session)
     #: ★ **小游戏轮先把资源库里的游戏名当主体词**(2026-10-29,见 `game_search_words`):
     #: 实测裸游戏名搜不到带盘帖,`<游戏名> 下载` 才有。占掉至多 3 个名额。
-    game_words = (game_search_words(session, user_id, top=min(3, int(top)))
-                  if cat == "小游戏" else [])
+    #: ★ **每个方向都从资源库取自己的资源名**(2026-10-30,用户「影视/软件下载/游戏下载等方向」):
+    #: 之前只有小游戏有专属词,其它方向轮到时搜的仍是同一批剧名(`类目大瓜 → 线索13 全是影视`)。
+    own_words = category_search_words(session, user_id, cat, top=min(3, int(top)))
     n_group = int(getattr(settings, "douyin_leads_group_keywords", 3) or 0)
     # 先取**全部**候选(群里的资源名 + 资源库名称),再按类目挑 —— 挑不够会自动补本类目话题词
     cand = group_keywords(session, user_id, top=n_group)
@@ -971,41 +1034,34 @@ def search_keywords(session, user_id: int, top: int, settings,
     try:
         from app.db.models import XunleiResource
 
+        #: ⚠️ 用**全库**算 `type_map`(同批次多数需要全部兄弟),只取候选词的映射。
         _rows = session.execute(select(XunleiResource.name, XunleiResource.parent_name).where(
-            XunleiResource.user_id == user_id,
-            XunleiResource.name.in_(list(cand)))).all() if cand else []
+            XunleiResource.user_id == user_id).limit(2000)).all()
         if _rows:
-            _by_parent: dict[str, list[str]] = {}
-            for _nm, _par in _rows:
-                _by_parent.setdefault(str(_par or ""), []).append(str(_nm or ""))
-            _map = {
-                str(_nm or ""): category_topics.type_of(
-                    str(_nm or ""), str(_par or ""),
-                    siblings=_by_parent.get(str(_par or "")))
-                for _nm, _par in _rows
-            }
-            _cat_of = lambda w: _map.get(w) or category_topics.classify(w, names)
+            _types = category_topics.type_map(
+                [(str(n or ""), str(p or "")) for n, p in _rows])
+            _cat_of = lambda w: _types.get(w) or category_topics.classify(w, names)
     except Exception:  # noqa: BLE001 - 覆盖失败就用旧口径,别让出词整条崩
         logger.debug("资源库类型覆盖失败,退回纯名字判据", exc_info=True)
 
     kws = category_topics.pick(
-        cand, cat, max(0, int(top) - len(game_words)), names,
+        cand, cat, max(0, int(top) - len(own_words)), names,
         # ★ 2026-10-29:本类目**保底几个词**(见 `pick` 的 `min_mine`)。
         # 0 = 关掉保底(回到 10-05 的行为:证据多的那个类目永远霸榜)。
         min_mine=int(getattr(settings, "douyin_leads_category_min_words", 1) or 0),
         cat_of=_cat_of)
-    if game_words:
-        #: 游戏名 + 「下载」排在前面(它们才是这一轮要找的东西),其余词补足名额。
-        kws = game_words + [w for w in kws if w not in game_words]
+    if own_words:
+        #: 本方向的资源名排在前面(它们才是这一轮要找的东西),其余词补足名额。
+        kws = own_words + [w for w in kws if w not in own_words]
     # 两个判据都要,**顺序不能反**:
     #   ① `seen`(已经解出过群)排后 —— 用户口径:「而不是一直用着一个口令进群」;
     #   ② 有效率(高→低) —— 同类之间的排序依据。
     seen = _words_already_resolved_to_group(session, user_id)
     kws.sort(key=lambda w: (w in seen, -scores.get(w, _YIELD_PRIOR)))
-    if game_words:
-        #: ⚠️ 上面那条 sort 按**历史有效率**重排,而游戏词没有历史 ⇒ 会被挤到后面。
+    if own_words:
+        #: ⚠️ 上面那条 sort 按**历史有效率**重排,而本方向词没有历史 ⇒ 会被挤到后面。
         #: 但这一轮**就是为它们来的** ⇒ 排回最前(总词数 ≤ CDP 上限 8,不会互相挤掉)。
-        kws = [w for w in game_words if w in kws] + [w for w in kws if w not in game_words]
+        kws = [w for w in own_words if w in kws] + [w for w in kws if w not in own_words]
     for w in (hot or []):
         if w and w not in kws:
             kws.append(w)
