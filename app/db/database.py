@@ -372,7 +372,8 @@ def db_status() -> dict:
 ADDITIONS: dict[str, list[str]] = {
     # 需求名表(2026-10-30 当天加的两列):名字主要来自**作品标题**,热度还要看**「扣1」跟帖**。
     # 存量行两列都是 0 ⇒ 按「还没用新口径统计过」处理,不影响读取。
-    "demand_names": ["ones_hits INTEGER DEFAULT 0", "title_hits INTEGER DEFAULT 0"],
+    "demand_names": ["ones_hits INTEGER DEFAULT 0", "title_hits INTEGER DEFAULT 0",
+                     "heat_score INTEGER DEFAULT 0"],
     # 对标号作品要带**网盘凭据**(2026-10-29):`mark`=《》/咐置口令,`pan_url`=正文直链。
     # 存量行两列都空 ⇒ 按"不带网盘"处理(正好与人想要的"只推带网盘的"一致)。
     "douyin_peer_works": ["mark VARCHAR(64) DEFAULT ''",

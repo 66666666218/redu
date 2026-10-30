@@ -1170,6 +1170,10 @@ class DemandName(Base):
     ones_hits: Mapped[int] = mapped_column(Integer, default=0)
     #: **名字出自几个作品标题** —— 名字的主要来源是标题(「基本上作品名都有资源名」)。
     title_hits: Mapped[int] = mapped_column(Integer, default=0)
+    #: **这些作品的评论总数之和** —— 「1」拿不到时的**火爆度代理**:
+    #: 2026-10-30 实测 17,961 条评论的视频,按热度排序的前 3 页 60 条里 **0 条「1」**
+    #: (零赞的跟帖排在很后面),所以「扣1」只能作辅助,**评论总量才是可得的火爆度**。
+    heat_score: Mapped[int] = mapped_column(Integer, default=0)
     video_hits: Mapped[int] = mapped_column(Integer, default=0)   # 出现在几个视频的评论里
     samples: Mapped[str] = mapped_column(Text, default="{}")      # JSON: 例子 + 出处
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)

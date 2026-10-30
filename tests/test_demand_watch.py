@@ -82,6 +82,8 @@ def test_在哪看前面的名字():
     "《合集》",
     #: ★ 实跑抓到的假名字:聊「给孩子起名」的评论里有「…你爷爷叫什么」
     "现在父母起名字有没有什么大气之类的，等到你年纪大了之后，别人问你孙子你爷爷叫什么，",
+    #: 实跑抓到的另一个:承接词开头的半句话
+    "还有一部叫什么来着",
 ])
 def test_泛词与半句话不许当名字(text):
     assert dw.extract_names(text) == [], f"{text!r} 不应抽出名字"
@@ -240,6 +242,40 @@ def test_标题里的长名字不因为超过12字被丢掉():
     assert dw.names_from_title("《sunny水水水/水子哥下海vlog》") == ["sunny水水水/水子哥下海vlog"]
 
 
+def test_标签不是名字(session):
+    """实跑教训:把 `#青筋`/`#vlog日常` 当名字,榜里全是描述词。
+
+    名字只认书名号 —— 推广号的标题用 `《反差直男》`,标签只是描述。
+    """
+    assert dw.names_from_title("扣1看反差 #覆面肌肉男 #狗爹和小桃") == []
+    assert dw.names_from_title("《反差直男》#覆面 #青筋") == ["反差直男"]
+
+
+def test_种子词按轮换取_避免连发被限流(session):
+    seeds = ["a", "b", "c", "d"]
+    assert dw._rotate_seeds(session, seeds, 2) == ["a", "b"]
+    assert dw._rotate_seeds(session, seeds, 2) == ["c", "d"]
+    assert dw._rotate_seeds(session, seeds, 2) == ["a", "b"]   # 游标跨轮保存
+
+
+def test_参考作品名优先作为素材源(session, monkeypatch):
+    """用户口径「我上个对话给你的就是参考作品」⇒ 配了种子词就先按名字搜。"""
+    _lead(session, "111", title="《库里随便一条》")
+
+    class S2(_S):
+        demand_seed_words = "狗爹和小桃"
+
+    monkeypatch.setattr("app.services.douyin_protocol_source.search", lambda *a, **k: [
+        {"aweme_id": "999", "url": "https://www.douyin.com/video/999",
+         "snippet": "#狗爹和小桃", "metrics": {"comment_count": 500}},
+    ])
+
+    vids = dw.source_videos(session, 1, S2())
+
+    assert vids[0]["aweme_id"] == "999"
+    assert vids[0]["comment_count"] == 500
+
+
 @pytest.mark.parametrize("text", ["1", "1111", "扣1", " 1！！", "1。"])
 def test_扣1跟帖算热度不算名字(text):
     pages = [{"ok": True, "has_more": False, "error": "", "comments": [
@@ -293,6 +329,46 @@ def test_run_user把标题名与扣1一起入库(session, monkeypatch):
     assert row.name == "狗爹和小桃"
     assert row.ones_hits == 30
     assert row.title_hits == 1
+
+
+# ---------------------------------------------------------------- 最新的大瓜
+
+def _latest_cfg():
+    class S(_S):
+        demand_seed_words = "狗爹和小桃"
+        demand_latest_days = 3
+        demand_latest_authors = 1
+        demand_latest_limit = 5
+    return S()
+
+
+def test_最新大瓜_顺参考作品找同款账号_只要最近几天的(session, monkeypatch):
+    import time as _t
+
+    now = int(_t.time())
+    monkeypatch.setattr("app.services.douyin_protocol_source.search", lambda *a, **k: [
+        {"uid": "sec1", "name": "某号", "aweme_id": "1", "url": "u", "snippet": "x"}])
+    monkeypatch.setattr(dw, "fetch_author_posts", lambda sec, **k: {"ok": True, "error": "", "items": [
+        {"aweme_id": "9", "desc": "最新一条 狗爹和小桃", "publish_at": now,
+         "author": "某号", "url": "https://www.douyin.com/video/9"},
+        {"aweme_id": "8", "desc": "十天前 狗爹和小桃", "publish_at": now - 10 * 86400,
+         "author": "某号", "url": "https://www.douyin.com/video/8"},
+    ]})
+
+    items = dw.discover_latest(session, 1, _latest_cfg())
+
+    assert [i["aweme_id"] for i in items] == ["9"]
+
+
+def test_最新大瓜卡片带时间作者与链接():
+    import time as _t
+
+    card = dw.build_latest_card([{"aweme_id": "9", "desc": "新瓜",
+                                  "publish_at": int(_t.time()), "author": "某号",
+                                  "url": "https://www.douyin.com/video/9"}])
+    body = str(card)
+    assert "最新大瓜" in body and "某号" in body
+    assert "https://www.douyin.com/video/9" in body
 
 
 # ---------------------------------------------------------------- 入口

@@ -987,6 +987,9 @@ class Settings(BaseSettings):
     #: 「8折外卖」「姓龙比较适合」**—— 真需求,但不是这一类。所以默认留空,
     #: 只有当库里近 N 天没有素材时才值得填几个**具体的名字**去搜。
     demand_seed_words: str = ""
+    #: 每轮**只搜几个**参考作品名(轮换)。抖音连发会进「空成功」限流(~35 分钟自愈),
+    #: 所以 9 个名字不是一次打完,而是每轮 3 个、轮着来。
+    demand_seeds_per_round: int = 3
     #: 素材视频至少要有的评论数(评论太少,「求」信号没有统计意义)。
     demand_min_comments: int = 20
     #: 每轮最多扫几个视频(每个视频还要翻评论页,额度按它线性增长)。
@@ -1000,6 +1003,14 @@ class Settings(BaseSettings):
     demand_min_ones: int = 20
     #: 同一个名字两次推送的冷却(小时)。作业 4 小时一轮,不加冷却就是一天推 6 次。
     demand_push_cooldown_hours: int = 48
+    # ---- 「最新的大瓜」:顺参考作品找同款账号,拿他们最近的作品(2026-10-30)----
+    demand_latest_enabled: bool = True
+    #: 只看最近几天的作品(再老就不叫"最新"了)。
+    demand_latest_days: int = 3
+    #: 每个种子词最多顺着几个作者拉主页(每个作者 = 1 次请求)。
+    demand_latest_authors: int = 3
+    #: 一张卡最多列几条。
+    demand_latest_limit: int = 15
     #: 一张卡最多放几个名字。
     demand_push_limit: int = 10
     #: 执行时刻。⚠️ 与 `douyin_leads`(`:10 */4`)错开 40 分钟 ——

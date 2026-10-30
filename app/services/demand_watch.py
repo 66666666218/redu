@@ -53,8 +53,10 @@ _ONES_RE = re.compile(r"^\s*扣?\s*1{1,8}[!！.。,，~～]*\s*$")
 def names_from_title(title: str) -> list[str]:
     """**作品名里的资源名** —— 用户口径:「基本上作品名都有资源名」。
 
-    推广视频的标题就是「…《资源名》…」,所以标题本身是**名字的稳定来源**;
-    评论区只提供「求 / 扣1」这两个热度信号。
+    ⚠️ **只认书名号 `《…》`,不认标签 `#…`**(2026-10-30 实跑后改回来的):
+    试过把标签也当名字,结果抽出来的是 `青筋`/`小桃`/`锐评`/`交流`/`vlog日常`/
+    `vlog十亿流量扶持计划` —— 标签是**描述词**,不是资源名,放进榜里比没名字更糟。
+    推广号的标题用的是书名号(`《反差直男》`),那才是名字。
     """
     out: list[str] = []
     for m in _QUOTED_RE.finditer(str(title or "")):
@@ -119,7 +121,10 @@ _NOT_NAME_PARTS = ("一下", "分享", "有效", "真实", "可以", "帮忙", "
                    "你", "我", "他", "她", "咱", "们", "啥",
                    #: ★ 第三次:`这女的叫什么` 会被抽成「这女」——
                    #: 指示代词开头的片段不是名字(真名字极少以「这/那」开头)。
-                   "这", "那", "知道")
+                   "这", "那", "知道",
+                   #: ★ 第四次实跑:`…还有一部叫什么` 抽出「还有一部叫」——
+                   #: 承接词开头的片段不是名字。
+                   "还有", "一部", "另外", "这是", "就是")
 
 
 def is_name_like(name: str, *, quoted: bool = False) -> bool:
@@ -302,7 +307,7 @@ def collect_for_video(aweme_id: str, *, session=None, user_id: int = 1,
 
 
 def _upsert(db, user_id: int, name: str, demand: int, mention: int, video_hits: int,
-            samples: dict, ones: int = 0, title: int = 0) -> object:
+            samples: dict, ones: int = 0, title: int = 0, heat: int = 0) -> object:
     """把一个名字的**本轮观测**并进表里(累计值 + 最近样例)。"""
     from app.db.models import DemandName
 
@@ -319,6 +324,7 @@ def _upsert(db, user_id: int, name: str, demand: int, mention: int, video_hits: 
     row.video_hits = int(row.video_hits or 0) + int(video_hits)
     row.ones_hits = int(getattr(row, "ones_hits", 0) or 0) + int(ones)
     row.title_hits = int(getattr(row, "title_hits", 0) or 0) + int(title)
+    row.heat_score = int(getattr(row, "heat_score", 0) or 0) + int(heat)
     row.last_seen_at = now
     row.samples = json.dumps(samples, ensure_ascii=False)[:4000]
     return row
@@ -362,7 +368,8 @@ def build_card(rows) -> dict:
         url = str(meta.get("video") or "")
         head = (f"**{i}. {r.name}** — 求 {int(r.demand_hits or 0)} 次 · "
                 f"扣1 {int(getattr(r, 'ones_hits', 0) or 0)} 条 · "
-                f"提及 {int(r.mention_hits or 0)} 次")
+                f"提及 {int(r.mention_hits or 0)} 次 · "
+                f"评论热度 {int(getattr(r, 'heat_score', 0) or 0)}")
         tail = f"「{sample[:40]}」" if sample else ""
         lines.append(f"{head}\n{tail}" + (f" [原视频]({url})" if url else ""))
     return {
@@ -388,18 +395,49 @@ def push_card(rows, settings) -> bool:
     return FeishuClient(webhook, getattr(settings, "feishu_secret", "")).send_card(build_card(rows))
 
 
+def _rotate_seeds(db, seeds: list[str], n: int) -> list[str]:
+    """每轮只搜 `n` 个参考作品名,**轮着来**(2026-10-30)。
+
+    ⚠️ 为什么不一次搜完 9 个:抖音**连发会进「空成功」限流**(实测 ~35 分钟自愈),
+    而且这套作业 4 小时一轮 —— 一轮 3 个名字 × 4 小时 = 一天把 9 个名字各过 2~3 遍,
+    比"一次打 9 个搜索再被限"划算。游标记在 `system_config`,重启不丢
+    (与类目轮换 `lead_word_category` 同一套做法)。
+    """
+    from app.db.models import SystemConfig
+
+    if not seeds:
+        return []
+    n = max(1, int(n or 1))
+    if len(seeds) <= n:
+        return list(seeds)
+    key = "demand_seed_cursor"
+    row = db.scalar(select(SystemConfig).where(SystemConfig.key == key))
+    cur = int(row.value) if row and str(row.value).isdigit() else 0
+    cur %= len(seeds)
+    picked = [seeds[(cur + i) % len(seeds)] for i in range(n)]
+    nxt = str((cur + n) % len(seeds))
+    if row is None:
+        db.add(SystemConfig(key=key, value=nxt))
+    else:
+        row.value = nxt
+    db.commit()
+    return picked
+
+
 def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
-    """挑要扫评论的视频 —— **优先我们自己收的推广视频**,搜索只作补充。
+    """挑要扫评论的视频。
 
-    ## 为什么不再"搜 `吃瓜`/`大瓜` 就开扫"(2026-10-30 第一版实跑的教训)
+    ## 优先级(2026-10-30 定)
 
-    按种子词搜出来的头几条是**亲子起名**和**外卖折扣群**的视频,评论区里抽出来的是
-    「姓龙比较适合」「8折外卖」—— 全是真需求,但**不是我们要的那一类**。
-    「吃瓜/大瓜」在抖音上首先命中"八卦八卦"的大众内容,不是网盘推广那一挂。
+    ① **用户给的参考作品名**(`DEMAND_SEED_WORDS`)。用户口径:「我上个对话给你的
+       就是参考作品」—— 那几个名字**就是这一类**,按名字搜到的视频才是同款
+       (实测 `狗爹和小桃` 搜到 13 条同款,而泛词 `吃瓜` 搜到的是亲子起名/外卖群)。
+    ② 没配种子词时,用**库内素材**:`douyin_leads`(推广视频)与 `douyin_peer_works`(对标号)。
+    ③ 两种都能补位 —— 谁先用完名额就停。
 
-    而 `douyin_leads`(标题带《口令》的推广视频)与 `douyin_peer_works`(对标号带盘作品)
-    **本身就是"这一类"** —— 它们的评论区里才会有人问「求《X》全集」。
-    搜索结果只在**库里素材不够**时补位,而且只留**标题带书名号**的(那是推广贴的形状)。
+    ⚠️ **不再按"标题里有没有书名号"筛搜索结果**:用户给的参考作品是"标题 + 一堆标签"的
+    形状(没有书名号),那条筛选会把它们全挡掉。名字改用 `names_from_title` 从
+    **书名号 + 标签**两处取。
     """
     from datetime import timedelta
 
@@ -413,51 +451,55 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
     out: list[dict] = []
     seen: set[str] = set()
 
-    def _add(vid: str, url: str, title: str) -> None:
+    def _add(vid: str, url: str, title: str, comments: int = 0) -> None:
         vid = str(vid or "").strip()
         if not vid or vid in seen:
             return
         seen.add(vid)
         out.append({"aweme_id": vid, "url": url or f"https://www.douyin.com/video/{vid}",
-                    "title": title or ""})
+                    "title": title or "", "comment_count": int(comments or 0)})
 
-    # ① 我们自己的线索(推广视频,评论区天然是「求资源」的)
+    # ① 参考作品名(有就先用) —— 每轮轮着搜 3 个,避免连发触发抖音限流
+    seeds = [w.strip() for w in
+             str(getattr(settings, "demand_seed_words", "") or "").split(",") if w.strip()]
+    if seeds:
+        from app.services import douyin_protocol_source as dps
+
+        seeds = _rotate_seeds(db, seeds,
+                              int(getattr(settings, "demand_seeds_per_round", 3) or 3))
+        min_c = int(getattr(settings, "demand_min_comments", 20) or 0)
+        vids = dps.search(seeds, settings=settings, session=db, user_id=user_id, pages=1)
+        #: 评论数太少就没有统计意义;按评论数从多到少取
+        vids = [v for v in vids
+                if int((v.get("metrics") or {}).get("comment_count") or 0) >= min_c]
+        vids.sort(key=lambda v: int((v.get("metrics") or {}).get("comment_count") or 0),
+                  reverse=True)
+        for v in vids:
+            _add(v.get("aweme_id"), v.get("url"), v.get("snippet"),
+                 (v.get("metrics") or {}).get("comment_count") or 0)
+            #: 参考作品只占**一半名额**:它们通常没有书名号(标题是"标签流"),
+            #: 名字还得靠库内推广线索那半;全被搜索占满 ⇒ 这一轮一个名字都抽不到。
+            if len(out) >= max(1, need // 2):
+                break
+
+    # ② 我们自己的线索(推广视频,评论区天然是「求资源」的)
     leads = db.scalars(select(DouyinLead).where(
         DouyinLead.user_id == user_id,
         DouyinLead.found_at >= since).order_by(DouyinLead.found_at.desc())).all()
     for r in leads:
         _add(r.aweme_id, r.url, r.title)
-        if len(out) >= need * 2:
+        if len(out) >= need:
+            return out[:need]
+
+    # ③ 对标号作品(带网盘的那些)
+    works = db.scalars(select(DouyinPeerWork).where(
+        DouyinPeerWork.user_id == user_id,
+        DouyinPeerWork.first_seen_at >= since).order_by(
+        DouyinPeerWork.first_seen_at.desc())).all()
+    for w in works:
+        _add(w.aweme_id, w.url, w.title)
+        if len(out) >= need:
             break
-
-    # ② 对标号作品(带网盘的那些)
-    if len(out) < need:
-        works = db.scalars(select(DouyinPeerWork).where(
-            DouyinPeerWork.user_id == user_id,
-            DouyinPeerWork.first_seen_at >= since).order_by(
-            DouyinPeerWork.first_seen_at.desc())).all()
-        for w in works:
-            _add(w.aweme_id, w.url, w.title)
-            if len(out) >= need:
-                break
-
-    # ③ 搜索补位:只留**标题带《》**的(推广贴的形状),按评论数挑
-    if len(out) < need:
-        seeds = [w.strip() for w in
-                 str(getattr(settings, "demand_seed_words", "") or "").split(",") if w.strip()]
-        if seeds:
-            from app.services import douyin_protocol_source as dps
-
-            vids = dps.search(seeds, settings=settings, session=db, user_id=user_id, pages=1)
-            min_c = int(getattr(settings, "demand_min_comments", 20) or 0)
-            vids = [v for v in vids if "《" in str(v.get("snippet") or "")
-                    and int((v.get("metrics") or {}).get("comment_count") or 0) >= min_c]
-            vids.sort(key=lambda v: int((v.get("metrics") or {}).get("comment_count") or 0),
-                      reverse=True)
-            for v in vids:
-                _add(v.get("aweme_id"), v.get("url"), v.get("snippet"))
-                if len(out) >= need:
-                    break
 
     return out[:need]
 
@@ -486,20 +528,24 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
         scanned += 1
         no_name += int(res.get("no_name") or 0)
         ones = int(res.get("ones") or 0)
+        heat = int(v.get("comment_count") or 0)
         url = str(v.get("url") or "")
         # ★ **名字主要来自作品标题**(用户:「基本上作品名都有资源名」);
         # 而「扣1」的热度是**整条视频**级别的,归给这条视频标题里的名字。
         for tname in names_from_title(v.get("title") or ""):
             a = agg.setdefault(tname, {"demand": 0, "mention": 0, "video_hits": 0,
-                                       "ones": 0, "title": 0, "comments": [], "video": ""})
+                                       "ones": 0, "title": 0, "heat": 0,
+                                       "comments": [], "video": ""})
             a["title"] += 1
             a["mention"] += 1
             a["ones"] += ones
+            a["heat"] += heat
             if not a["video"]:
                 a["video"] = url
         for name, rec in res["names"].items():
             a = agg.setdefault(name, {"demand": 0, "mention": 0, "video_hits": 0,
-                                      "ones": 0, "title": 0, "comments": [], "video": ""})
+                                      "ones": 0, "title": 0, "heat": 0,
+                                      "comments": [], "video": ""})
             a["demand"] += rec["demand"]
             a["mention"] += rec["mention"]
             a["video_hits"] += 1
@@ -523,7 +569,7 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
     for name, a in agg.items():
         _upsert(db, user_id, name, a["demand"], a["mention"], a["video_hits"],
                 {"comments": a["comments"], "video": a["video"]},
-                ones=a["ones"], title=a["title"])
+                ones=a["ones"], title=a["title"], heat=a["heat"])
     db.commit()
 
     rows = db.scalars(select(DemandName).where(
@@ -553,6 +599,142 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
             "no_name": no_name}
 
 
+# ---------------------------------------------------------------------------
+# 「最新的大瓜」:顺着参考作品找同款账号,再拿他们**最近发布**的作品
+# ---------------------------------------------------------------------------
+
+#: 作者主页作品接口(与评论接口一样**必须带 `a_bogus`**;实测 200 + 17 条,
+#: 每条都带 `create_time` 与 `desc`)
+POSTS_API = "https://www.douyin.com/aweme/v1/web/aweme/post/"
+
+
+def fetch_author_posts(sec_uid: str, count: int = 20, cursor: int = 0,
+                       session=None, user_id: int = 1) -> dict:
+    """拉一个作者主页的作品(最近的在前由调用方排序)。返回 `{ok, items, error}`。"""
+    import requests
+
+    from app.services import douyin_protocol_source as dp
+    from app.services.douyin_sign import ABogus, BrowserFingerprintGenerator
+
+    blob = dp._cookie(session, user_id)
+    if not blob or not sec_uid:
+        return {"ok": False, "items": [], "error": "缺少登录态或 sec_uid"}
+    ck = dp._cookie_dict(blob)
+    params = {"device_platform": "webapp", "sec_user_id": str(sec_uid),
+              "max_cursor": str(int(cursor)), "count": str(int(count)), "aid": "6383"}
+    query = "&".join(f"{k}={v}" for k, v in params.items())
+    fp = BrowserFingerprintGenerator.generate_fingerprint("Chrome")
+    signed = ABogus(fp=fp, user_agent=dp._UA).generate_abogus(params=query)[0]
+    headers = dp.build_headers(blob, ck, "")
+    headers["Referer"] = "https://www.douyin.com/"
+    try:
+        r = requests.get(f"{POSTS_API}?{signed}", headers=headers, timeout=20)
+        d = r.json()
+    except Exception as exc:  # noqa: BLE001 - 网络/解析失败按"这号没拿到"处理
+        return {"ok": False, "items": [], "error": f"{type(exc).__name__}: {str(exc)[:60]}"}
+    if r.status_code != 200 or d.get("status_code") not in (0, None):
+        return {"ok": False, "items": [],
+                "error": f"HTTP {r.status_code} status={d.get('status_code')}"}
+    out = []
+    for a in (d.get("aweme_list") or []):
+        vid = str(a.get("aweme_id") or "")
+        if not vid:
+            continue
+        author = a.get("author") if isinstance(a.get("author"), dict) else {}
+        out.append({"aweme_id": vid,
+                    "desc": str(a.get("desc") or "").strip(),
+                    "publish_at": int(a.get("create_time") or 0),
+                    "author": str(author.get("nickname") or ""),
+                    "url": f"https://www.douyin.com/video/{vid}"})
+    return {"ok": True, "items": out, "error": ""}
+
+
+def discover_latest(db, user_id: int = 1, settings=None) -> list[dict]:
+    """顺着**参考作品**找同款账号,再拿他们最近 `demand_latest_days` 天的新作品。
+
+    用户口径:「**根据这些去找最新的大瓜**」—— 参考作品给出"这一类"的坐标,
+    顺着它们找到在发同一类的号,这些号的**新作品**就是最新的大瓜。
+    """
+    from datetime import timedelta
+
+    settings = settings or _settings()
+    seeds = [w.strip() for w in
+             str(getattr(settings, "demand_seed_words", "") or "").split(",") if w.strip()]
+    if not seeds:
+        return []
+    days = int(getattr(settings, "demand_latest_days", 3) or 3)
+    since = int((datetime.now() - timedelta(days=max(1, days))).timestamp())
+    max_authors = int(getattr(settings, "demand_latest_authors", 3) or 3)
+    limit = int(getattr(settings, "demand_latest_limit", 15) or 15)
+
+    from app.services import douyin_protocol_source as dps
+
+    seeds = _rotate_seeds(db, seeds, int(getattr(settings, "demand_seeds_per_round", 3) or 3))
+    authors: dict[str, str] = {}
+    author_seed: dict[str, str] = {}
+    for kw in seeds:
+        for v in dps.search([kw], settings=settings, session=db, user_id=user_id, pages=1):
+            sec = str(v.get("uid") or "")
+            if sec and sec not in authors:
+                authors[sec] = str(v.get("name") or "")
+                author_seed[sec] = kw
+            if len(authors) >= max_authors * len(seeds):
+                break
+
+    items: dict[str, dict] = {}
+    for sec, name in list(authors.items())[: max_authors * max(1, len(seeds))]:
+        res = fetch_author_posts(sec, session=db, user_id=user_id)
+        if not res["ok"]:
+            logger.debug("拉作者作品失败 %s: %s", name, res["error"])
+            continue
+        #: ★ **相关性闸门**(2026-10-30 实跑教训):抖音搜索很"松",
+        #: 种子 `兔兔图图` 会返回儿童动画号 —— 跟着这些号拉主页,拿到的是
+        #: 电影解说/美食之类,与"大瓜"毫无关系。所以要求该号的作品里**至少有一条
+        #: 提到这个种子名**,才认为它属于这一类。
+        kw = author_seed.get(sec, "")
+        related = any(kw and kw in (it.get("desc") or "") for it in res["items"])
+        if kw and not related:
+            logger.debug("作者 %s 的作品里没有 %s,跳过", name, kw)
+            continue
+        for it in res["items"]:
+            if it["publish_at"] and it["publish_at"] < since:
+                continue
+            it["author"] = it["author"] or name
+            items.setdefault(it["aweme_id"], it)
+    out = sorted(items.values(), key=lambda x: x["publish_at"], reverse=True)
+    return out[:limit]
+
+
+def build_latest_card(items: list[dict]) -> dict:
+    """「最新大瓜」卡:时间 + 作者 + 标题(点标题看原视频)。"""
+    lines = []
+    for it in items:
+        ts = datetime.fromtimestamp(it["publish_at"]) if it.get("publish_at") else None
+        when = ts.strftime("%m-%d %H:%M") if ts else "—"
+        desc = (it.get("desc") or "").replace("\n", " ")[:52] or "(无描述)"
+        lines.append(f"`{when}` **{it.get('author') or '—'}**  [{desc}]({it.get('url')})")
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "red",
+                   "title": {"tag": "plain_text", "content": f"⏰ 最新大瓜 · 抖音({len(items)})"}},
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}},
+            {"tag": "note", "elements": [{"tag": "plain_text",
+                                          "content": "顺着参考作品找到的同款账号的新作品;只列名称与链接,不保存资源"}]},
+        ],
+    }
+
+
+def push_latest(items: list[dict], settings) -> bool:
+    from app.services.feishu_client import FeishuClient, webhook_for
+
+    webhook = webhook_for(settings, "douyin")
+    if not webhook or not items:
+        return False
+    return FeishuClient(webhook, getattr(settings, "feishu_secret", "")).send_card(
+        build_latest_card(items))
+
+
 def _settings():
     from config.settings import get_settings
 
@@ -572,6 +754,16 @@ def demand_watch_tick(settings=None) -> int:
             try:
                 out = run_user(db, int(uid), settings)
                 n += 1 if out.get("pushed") else 0
+                # ★ 「最新的大瓜」:顺参考作品找同款账号 → 他们最近的作品。
+                # ⚠️ 过 `push_ledger` 去重:4 小时一轮,同一批新作品不该每轮都推一遍。
+                if bool(getattr(settings, "demand_latest_enabled", True)):
+                    from app.services.push_ledger import drop_recent, record
+
+                    items = discover_latest(db, int(uid), settings)
+                    kept, _dropped = drop_recent(db, int(uid), "douyin", items, settings)
+                    if kept and push_latest(kept, settings):
+                        record(db, int(uid), "douyin", kept)
+                        n += 1
             except Exception:  # noqa: BLE001 - 一个用户失败不影响其他用户
                 logger.exception("需求名监控失败 user=%s", uid)
                 db.rollback()

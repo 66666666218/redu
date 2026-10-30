@@ -26,9 +26,11 @@ sys.path.insert(0, str(ROOT))
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="评论区在求什么 —— 跑一轮")
+    ap = argparse.ArgumentParser(description="需求名监控 / 最新大瓜")
     ap.add_argument("--user", type=int, default=1)
     ap.add_argument("--dry", action="store_true", help="不推飞书卡片,只打印结果")
+    ap.add_argument("--latest", action="store_true",
+                    help="只跑「最新的大瓜」:顺参考作品找同款账号,列他们最近的作品")
     args = ap.parse_args(argv)
 
     from app.db.database import get_session_local, init_db
@@ -37,10 +39,24 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.dry:
         demand_watch.push_card = lambda rows, settings: False   # noqa: ARG005
+        demand_watch.push_latest = lambda items, settings: False  # noqa: ARG005
 
     init_db()
     db = get_session_local()()
     try:
+        if args.latest:
+            items = demand_watch.discover_latest(db, args.user, get_settings())
+            print(f"最近新作品 {len(items)} 条")
+            for it in items:
+                from datetime import datetime as _dt
+
+                ts = _dt.fromtimestamp(it["publish_at"]).strftime("%m-%d %H:%M") \
+                    if it.get("publish_at") else "—"
+                print(f"  {ts}  {it.get('author','—')[:10]:12} {(it.get('desc') or '')[:44]}")
+                print(f"          {it['url']}")
+            if not args.dry and items:
+                print("推送:", demand_watch.push_latest(items, get_settings()))
+            return 0
         out = demand_watch.run_user(db, args.user, get_settings())
     finally:
         db.close()
