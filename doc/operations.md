@@ -951,7 +951,7 @@ print(sorted(j.id for j in s.get_jobs()))"
 
 | 场景 | 命令 | 说明 |
 | --- | --- | --- |
-| 微博登录态失效(`ok:-100` / 重定向登录页) | ① `tools/MediaCrawler/.venv/Scripts/python.exe tools/mc_login.py weibo 900`<br>② `python tools/weibo_export_cookie.py` | 两步都要:①用 **MediaCrawler 的 venv** 开 Edge 登录窗口;②用**本项目 python** 导出写库(写前真问 `m.weibo.cn/api/config` 的 `data.login`)。⚠️ **2026-10-22 踩坑**:`passport.weibo.com` 会给**未登录访客**也下发一枚 `SUB`,所以**不能"看到 SUB 就判登录成功"**——旧判据会让脚本 2 秒后自己关窗口(连试两次都是这样);现在循环内每 5 秒问一次服务端,`login=true` 才退出。⚠️ 出口 IP 在漂时,重登通常只能维持很短时间,见 §13a-4 |
+| 微博登录态失效(`ok:-100` / 重定向登录页) | `python scripts/weibo_login.py`(**一条命令**:开窗→扫码→验活→写库) | 旧的两步(`tools/mc_login.py weibo` → `tools/weibo_export_cookie.py`)已废弃:它俩原来读**两个不同的档案目录**(`cdp_weibo_…` vs `cdp_wb_…`),照着做必然"扫完码、库里还是旧 cookie"(2026-10-30 修)。⚠️ **2026-10-22**:`passport.weibo.com` 会给**未登录访客**也下发 `SUB` ⇒ 不能"看到 SUB 就判登录";现在循环内反复问服务端,`login=true` 才退出。⚠️ **2026-10-30**:验活通过也**不等于**能用 —— 实测登录 2 分钟后被服务端主动注销(`SUB=deleted`),所以现在**验活后再等 30 秒复验一次**(`--settle`,0 = 关闭)才写库。⚠️ 出口 IP 在漂时,重登通常只能维持很短时间,见 §13a-4。⚠️ 写库时**只存 `_CORE_COOKIES` 那几项**:把档案里全部 cookie(38 项)串成一条请求头会得到 `400 Request Header Or Cookie Too Large`(看起来像被限,其实是自己的头太大) |
 | 公众号后台凭据(自研 Wemp) | `python scripts/wemp_cred.py --login` | 扫码后自动抓 cookie/token 并存入加密库(见 §4i) |
 | **抖音第二个号**(多账号轮换) | `python scripts/douyin_account_add.py --key douyin#2` | 开**新档案**登录第二个号;抖音 `verify_check` 按账号下发,一个号被风控时 `douyin_leads` 会自动换下一个号 |
 | 百度重复副本清理 | `python scripts/baidu_dedupe.py`(只读清单)<br>`python scripts/baidu_clean_apply.py`(默认 dry-run)<br>`python scripts/baidu_clean_apply.py --yes --max 200` | ⚠️ **百度没有回收站,删了不可逆**;`keep` 那份永不删。2026-10-21 实测盘 **99.95% / 仅剩 2.75 GiB**,28 条候选卡在 `-32` |

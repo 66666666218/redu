@@ -422,7 +422,13 @@ class TestPartialFailureAlerts:
         assert sent, "微博失败必须推告警"
         title, detail = sent[0][3], sent[0][4]
         assert "微博" in title, title
-        assert "weibo_export_cookie" in detail, f"要给**走得通**的那一步:{detail[:240]}"
+        #: ★ 2026-10-30:修法改成**一条命令** `scripts/weibo_login.py`(开窗→扫码→验活→写库)。
+        #: 原来给的是两步(`tools/mc_login.py weibo` → `tools/weibo_export_cookie.py`),
+        #: 而那两个工具当时读**两个不同的档案目录**(`cdp_weibo_…` vs `cdp_wb_…`)⇒
+        #: 照着做必然"扫完码、库里还是旧 cookie"。
+        assert "scripts/weibo_login.py" in detail, f"要给**走得通**的那一步:{detail[:240]}"
+        assert "weibo_export_cookie" not in detail, (
+            f"两步那条已废弃(两个工具读两个档案),不能当推荐动作:{detail[:240]}")
         # ⚠️ 判据不能用 `"--platform wb" not in detail` —— 文案里**故意**留了一句
         #    「别去跑 `main.py --platform wb`」(把已知的错动作明写出来,免得人自己想起它)。
         #    要钉的是**"没把它当成推荐动作"**,所以看"推荐动作"才会有的那句话在不在。

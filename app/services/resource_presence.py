@@ -471,16 +471,21 @@ def probe(session, user_id: int, settings=None, platforms: list[str] | None = No
                 # 这是一次**"白跑"**(与微信读书那条"叫人去开模拟器"是同一类错误:
                 # 方向对、动作不对),而运营者按提示做完却没好,下次就会开始忽略告警。
                 if plat == "weibo" and _need:
+                    #: ★ 2026-10-30 改成**一条命令**:原来写的是「mc_login 开窗 → export 导库」
+                    #: 两步,而这两步用的是**两个不同的档案目录**
+                    #: (`tools/mc_login.py` → `cdp_weibo_user_data_dir`,
+                    #:  `tools/weibo_export_cookie.py` → `cdp_wb_user_data_dir`)——
+                    #: 照着做必然"扫完码、库里还是旧 cookie"。`scripts/weibo_login.py`
+                    #: 一条命令就把「开窗 → 验活 → 写库」串起来,且用 MediaCrawler 认的 `cdp_wb` 档案。
                     _how = (
-                        "**微博走的是纯协议(不开浏览器)**,所以要换的是**我们 cookie 库**里那一枚,"
-                        "不是 MediaCrawler 的档案 —— 两步:\n"
-                        "  ① 登录:`tools/MediaCrawler/.venv/Scripts/python.exe tools/mc_login.py weibo`"
-                        "(它会开一个 Edge 窗口,在里面登录 `m.weibo.cn` 即可);\n"
-                        "  ② 入库存:`python tools/weibo_export_cookie.py`"
-                        "(⚠️ 用**本项目**的 python,**别用 MediaCrawler 的 venv**"
-                        " —— 它缺 `pydantic_settings`,`import app.*` 会直接失败)"
-                        " —— 它会先问一次 `m.weibo.cn/api/config` 确认**真登录了**才写库。\n"
-                        "  ⚠️ 别去跑 `main.py --platform wb`:那条路微博已经不用了,跑完库里照样是旧 cookie。")
+                        "**微博走的是纯协议(不开浏览器)**,所以要换的是**我们 cookie 库**里那一枚:\n"
+                        "  跑 `python scripts/weibo_login.py`(本项目 python,不要用 MediaCrawler 的 venv)"
+                        " —— 它会开一个 Edge 窗口,你在里面扫码登录 `m.weibo.cn`;"
+                        "脚本**自己**问 `m.weibo.cn/api/config`,`login=true` 才写库,"
+                        "所以**看到「✓ 已写入 weibo 凭据」就算真的好了**。\n"
+                        "  ⚠️ 别去跑 `main.py --platform wb`:那条路微博已经不用了,跑完库里照样是旧 cookie。\n"
+                        "  ⚠️ 扫完码后**先别急着用其它客户端去试**(新会话 + 立刻被多种 UA 打,"
+                        "微博可能直接把会话销掉,实测 2026-10-30 90 秒内就被 `SUB=deleted`)。")
                 elif _need:
                     _how = (
                         f"**多半是登录态过期,需要扫码重登**:浏览器会弹二维码 —— 跑 "
