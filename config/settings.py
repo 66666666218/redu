@@ -995,6 +995,9 @@ class Settings(BaseSettings):
     demand_comment_pages: int = 2
     #: 够格推送的门槛:至少被「求」到几次。
     demand_min_hits: int = 2
+    #: ★ **「扣1」跟帖门槛**(用户口径「判断是根据作品里面的**求和1**来判断火爆程度」):
+    #: 一条视频被「扣1」到这么多次,它的资源名就够格上卡(即使没人直接"求")。
+    demand_min_ones: int = 20
     #: 同一个名字两次推送的冷却(小时)。作业 4 小时一轮,不加冷却就是一天推 6 次。
     demand_push_cooldown_hours: int = 48
     #: 一张卡最多放几个名字。

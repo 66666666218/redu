@@ -44,6 +44,7 @@ class _S:
     demand_max_videos = 2
     demand_comment_pages = 1
     demand_min_hits = 2
+    demand_min_ones = 20
     demand_push_cooldown_hours = 48
     demand_push_limit = 10
     feishu_webhook = ""
@@ -183,7 +184,7 @@ def test_拉了评论却一个名字都没有时记partial(session, monkeypatch)
     """链路坏了 / 这轮没人求 —— 两种都要留下痕迹,不能都写成 success。"""
     from app.db.models import RunRecord
 
-    _lead(session, "111")
+    _lead(session, "111", title="一条没有书名号的普通视频")
     monkeypatch.setattr(dw, "collect_for_video", lambda *a, **k: {"error": "", "names": {}})
 
     dw.run_user(session, 1, _S())
@@ -224,6 +225,74 @@ def test_有求但抽不到名字要计数(monkeypatch):
 
     assert out["names"] == {}
     assert out["no_name"] == 1
+
+
+# ---------------------------------------------------------------- 作品名 / 扣1 热度
+
+def test_作品名里的资源名会被抽出来():
+    """用户口径:「**基本上作品名都有资源名**」—— 标题是名字最稳的来源。"""
+    assert dw.names_from_title("终于找到《反差直男》完整版了 #反差") == ["反差直男"]
+    assert dw.names_from_title("扣1看《狗爹和小桃》和《小小绘》合集") == ["狗爹和小桃", "小小绘"]
+    assert dw.names_from_title("日常vlog #无资源") == []
+
+
+def test_标题里的长名字不因为超过12字被丢掉():
+    assert dw.names_from_title("《sunny水水水/水子哥下海vlog》") == ["sunny水水水/水子哥下海vlog"]
+
+
+@pytest.mark.parametrize("text", ["1", "1111", "扣1", " 1！！", "1。"])
+def test_扣1跟帖算热度不算名字(text):
+    pages = [{"ok": True, "has_more": False, "error": "", "comments": [
+        {"text": text, "like": 0, "user": "a", "cid": "1", "replies": []},
+    ]}]
+    import unittest.mock as mock
+
+    with mock.patch.object(dw, "fetch_comments", lambda *a, **k: pages[0]):
+        out = dw.collect_for_video("1", session=None, pages=1)
+    assert out["ones"] == 1
+    assert out["names"] == {}
+
+
+def test_句子里的1不算扣1():
+    pages = [{"ok": True, "has_more": False, "error": "", "comments": [
+        {"text": "第1集真好看", "like": 0, "user": "a", "cid": "1", "replies": []},
+    ]}]
+    import unittest.mock as mock
+
+    with mock.patch.object(dw, "fetch_comments", lambda *a, **k: pages[0]):
+        out = dw.collect_for_video("1", session=None, pages=1)
+    assert out["ones"] == 0
+
+
+def test_扣1够多也能上卡_不需要有人求(session):
+    r = DemandName(user_id=1, platform="douyin", name="狗爹和小桃",
+                   demand_hits=0, ones_hits=50, title_hits=1,
+                   last_seen_at=datetime.now())
+    session.add(r)
+    session.commit()
+
+    chosen = dw.pick_pushable(session.query(DemandName).all(),
+                              min_demand=2, min_ones=20, cooldown_hours=48, limit=10)
+    assert [x.name for x in chosen] == ["狗爹和小桃"]
+
+
+def test_run_user把标题名与扣1一起入库(session, monkeypatch):
+    from app.db.models import DouyinLead
+
+    session.add(DouyinLead(user_id=1, aweme_id="111", title="扣1看《狗爹和小桃》合集",
+                           author="a", url="https://www.douyin.com/video/111",
+                           found_at=datetime.now(), found_date="2026-10-30"))
+    session.commit()
+    monkeypatch.setattr(dw, "collect_for_video",
+                        lambda *a, **k: {"error": "", "names": {}, "ones": 30, "no_name": 0})
+    monkeypatch.setattr(dw, "push_card", lambda rows, settings: True)
+
+    dw.run_user(session, 1, _S())
+
+    row = session.query(DemandName).one()
+    assert row.name == "狗爹和小桃"
+    assert row.ones_hits == 30
+    assert row.title_hits == 1
 
 
 # ---------------------------------------------------------------- 入口
@@ -274,7 +343,7 @@ def test_run_user_把名字写进库并推一次(session, monkeypatch):
 
 
 def test_没有名字时既不建行也不推(session, monkeypatch):
-    _lead(session, "111")
+    _lead(session, "111", title="一条没有书名号的普通视频")
     monkeypatch.setattr(dw, "collect_for_video", lambda *a, **k: {"error": "", "names": {}})
     monkeypatch.setattr(dw, "push_card", lambda rows, settings: pytest.fail("不该推空卡"))
 

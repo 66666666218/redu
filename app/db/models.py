@@ -1164,6 +1164,12 @@ class DemandName(Base):
     name: Mapped[str] = mapped_column(String(128), index=True)
     demand_hits: Mapped[int] = mapped_column(Integer, default=0)
     mention_hits: Mapped[int] = mapped_column(Integer, default=0)
+    #: ★ **「扣1」跟帖数**(2026-10-30,用户口径「根据作品里面的**求和1**来判断火爆程度」):
+    #: 推广号用「扣1看完整版」拉互动,评论区整条回复 `1` 的数量就是**热度**。
+    #: 它和 `demand_hits`(有人求)是两种信号:一个是"想要",一个是"被勾住了"。
+    ones_hits: Mapped[int] = mapped_column(Integer, default=0)
+    #: **名字出自几个作品标题** —— 名字的主要来源是标题(「基本上作品名都有资源名」)。
+    title_hits: Mapped[int] = mapped_column(Integer, default=0)
     video_hits: Mapped[int] = mapped_column(Integer, default=0)   # 出现在几个视频的评论里
     samples: Mapped[str] = mapped_column(Text, default="{}")      # JSON: 例子 + 出处
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)

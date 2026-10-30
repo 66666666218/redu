@@ -43,6 +43,28 @@ PLATFORM = "douyin"
 #: 拉评论的接口(实测:必须带 `a_bogus`,不带回**空体**)
 COMMENT_API = "https://www.douyin.com/aweme/v1/web/comment/list/"
 
+#: 「扣 1」类跟帖:整条评论就是一个/一串 `1`(或 `扣1`)。这是推广号的**互动口令**
+#: (「扣1看完整版」),评论区的 `1` 越多 = 这条越火 —— 用户口径:
+#: 「判断是根据作品里面的**求和1**来判断火爆程度」(2026-10-30)。
+#: ⚠️ 只认**整条就是 1**,不做子串匹配:正常句子里的「1」("第1集")不能算。
+_ONES_RE = re.compile(r"^\s*扣?\s*1{1,8}[!！.。,，~～]*\s*$")
+
+
+def names_from_title(title: str) -> list[str]:
+    """**作品名里的资源名** —— 用户口径:「基本上作品名都有资源名」。
+
+    推广视频的标题就是「…《资源名》…」,所以标题本身是**名字的稳定来源**;
+    评论区只提供「求 / 扣1」这两个热度信号。
+    """
+    out: list[str] = []
+    for m in _QUOTED_RE.finditer(str(title or "")):
+        n = _clean(m.group(1))
+        #: 标题里的书名号经常写全名(如 `《sunny水水水/水子哥下海vlog》`),所以放宽到 24 字
+        if is_name_like(n, quoted=True) and n not in out:
+            out.append(n)
+    return out
+
+
 #: 「这是在要东西」的语气词。命中任意一个,这条评论的提及就算一次 **demand**。
 _DEMAND_WORDS = ("求", "想要", "想看", "谁有", "有没有", "在哪看", "哪里看", "叫什么",
                  "求出处", "出处", "有吗", "求资源", "求个", "求一个", "求名字")
@@ -239,7 +261,7 @@ def collect_for_video(aweme_id: str, *, session=None, user_id: int = 1,
                       pages: int = 2, count: int = 20) -> dict:
     """把一个视频的评论扫一遍。返回 `{name: {"demand":n,"mention":n,"samples":[…]}}`。"""
     found: dict[str, dict] = defaultdict(lambda: {"demand": 0, "mention": 0, "samples": []})
-    cursor, err, no_name = 0, "", 0
+    cursor, err, no_name, ones = 0, "", 0, 0
     for page in range(max(1, int(pages))):
         res = fetch_comments(aweme_id, cursor=cursor, count=count,
                              session=session, user_id=user_id)
@@ -247,6 +269,9 @@ def collect_for_video(aweme_id: str, *, session=None, user_id: int = 1,
             err = res["error"] or "拉评论失败"
             break
         for c in res["comments"]:
+            if _ONES_RE.match(c["text"]):        # 「扣1」跟帖 = 热度信号,不是名字
+                ones += 1
+                continue
             hits = extract_names(c["text"])
             #: 问了但没说名字(`这女的叫什么` / `求个链接`) ⇒ 去**回复**里找答案
             if not hits and any(w in c["text"] for w in _DEMAND_WORDS):
@@ -268,7 +293,7 @@ def collect_for_video(aweme_id: str, *, session=None, user_id: int = 1,
         if not res["has_more"]:
             break
         cursor += count
-    return {"names": dict(found), "error": err, "no_name": no_name}
+    return {"names": dict(found), "error": err, "no_name": no_name, "ones": ones}
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +302,7 @@ def collect_for_video(aweme_id: str, *, session=None, user_id: int = 1,
 
 
 def _upsert(db, user_id: int, name: str, demand: int, mention: int, video_hits: int,
-            samples: dict) -> object:
+            samples: dict, ones: int = 0, title: int = 0) -> object:
     """把一个名字的**本轮观测**并进表里(累计值 + 最近样例)。"""
     from app.db.models import DemandName
 
@@ -292,14 +317,20 @@ def _upsert(db, user_id: int, name: str, demand: int, mention: int, video_hits: 
     row.demand_hits = int(row.demand_hits or 0) + int(demand)
     row.mention_hits = int(row.mention_hits or 0) + int(mention)
     row.video_hits = int(row.video_hits or 0) + int(video_hits)
+    row.ones_hits = int(getattr(row, "ones_hits", 0) or 0) + int(ones)
+    row.title_hits = int(getattr(row, "title_hits", 0) or 0) + int(title)
     row.last_seen_at = now
     row.samples = json.dumps(samples, ensure_ascii=False)[:4000]
     return row
 
 
-def pick_pushable(rows, *, min_demand: int = 2, cooldown_hours: int = 48,
-                  limit: int = 10) -> list:
-    """够格且**冷却期外**的名字。按 (求的次数, 提及数) 降序。
+def pick_pushable(rows, *, min_demand: int = 2, min_ones: int = 20,
+                  cooldown_hours: int = 48, limit: int = 10) -> list:
+    """够格且**冷却期外**的名字。按 (被求次数, 扣1数) 降序。
+
+    ★ 两条门槛满足**任意一条**就算够格(用户口径「判断是根据作品里面的**求和1**」):
+      · 有人**求**(`demand_hits ≥ min_demand`);
+      · 或者**扣1跟帖够多**(`ones_hits ≥ min_ones`)—— 它说明这条被勾得很紧。
 
     ⚠️ **加冷却**:本作业 4 小时一轮,不加冷却的话同一个名字一天会推 6 次 ——
     群里会把它当成噪音(`push_ledger` 那套冷却的同一个道理)。
@@ -307,12 +338,15 @@ def pick_pushable(rows, *, min_demand: int = 2, cooldown_hours: int = 48,
     now = datetime.now()
     out = []
     for r in rows:
-        if int(r.demand_hits or 0) < int(min_demand):
+        demand = int(r.demand_hits or 0)
+        ones = int(getattr(r, "ones_hits", 0) or 0)
+        if demand < int(min_demand) and ones < int(min_ones):
             continue
         if r.last_pushed_at and (now - r.last_pushed_at) < timedelta(hours=cooldown_hours):
             continue
         out.append(r)
-    out.sort(key=lambda r: (int(r.demand_hits or 0), int(r.mention_hits or 0)), reverse=True)
+    out.sort(key=lambda r: (int(r.demand_hits or 0), int(getattr(r, "ones_hits", 0) or 0),
+                            int(r.mention_hits or 0)), reverse=True)
     return out[:max(0, int(limit))]
 
 
@@ -326,7 +360,9 @@ def build_card(rows) -> dict:
             meta = {}
         sample = ((meta.get("comments") or [""])[0] or "").replace("\n", " ")
         url = str(meta.get("video") or "")
-        head = f"**{i}. {r.name}** — 求 {int(r.demand_hits or 0)} 次 / 提及 {int(r.mention_hits or 0)} 次"
+        head = (f"**{i}. {r.name}** — 求 {int(r.demand_hits or 0)} 次 · "
+                f"扣1 {int(getattr(r, 'ones_hits', 0) or 0)} 条 · "
+                f"提及 {int(r.mention_hits or 0)} 次")
         tail = f"「{sample[:40]}」" if sample else ""
         lines.append(f"{head}\n{tail}" + (f" [原视频]({url})" if url else ""))
     return {
@@ -449,9 +485,21 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
             continue
         scanned += 1
         no_name += int(res.get("no_name") or 0)
+        ones = int(res.get("ones") or 0)
+        url = str(v.get("url") or "")
+        # ★ **名字主要来自作品标题**(用户:「基本上作品名都有资源名」);
+        # 而「扣1」的热度是**整条视频**级别的,归给这条视频标题里的名字。
+        for tname in names_from_title(v.get("title") or ""):
+            a = agg.setdefault(tname, {"demand": 0, "mention": 0, "video_hits": 0,
+                                       "ones": 0, "title": 0, "comments": [], "video": ""})
+            a["title"] += 1
+            a["mention"] += 1
+            a["ones"] += ones
+            if not a["video"]:
+                a["video"] = url
         for name, rec in res["names"].items():
             a = agg.setdefault(name, {"demand": 0, "mention": 0, "video_hits": 0,
-                                      "comments": [], "video": ""})
+                                      "ones": 0, "title": 0, "comments": [], "video": ""})
             a["demand"] += rec["demand"]
             a["mention"] += rec["mention"]
             a["video_hits"] += 1
@@ -459,7 +507,7 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
                 if len(a["comments"]) < 3 and s not in a["comments"]:
                     a["comments"].append(s)
             if not a["video"]:
-                a["video"] = str(v.get("url") or "")
+                a["video"] = url
 
     if not agg:
         #: ⚠️ **扫了却一个名字都没抽到,要标 partial 而不是 success** ——
@@ -474,7 +522,8 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
 
     for name, a in agg.items():
         _upsert(db, user_id, name, a["demand"], a["mention"], a["video_hits"],
-                {"comments": a["comments"], "video": a["video"]})
+                {"comments": a["comments"], "video": a["video"]},
+                ones=a["ones"], title=a["title"])
     db.commit()
 
     rows = db.scalars(select(DemandName).where(
@@ -483,6 +532,7 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
     chosen = pick_pushable(
         rows,
         min_demand=int(getattr(settings, "demand_min_hits", 2) or 2),
+        min_ones=int(getattr(settings, "demand_min_ones", 20) or 0),
         cooldown_hours=int(getattr(settings, "demand_push_cooldown_hours", 48) or 48),
         limit=int(getattr(settings, "demand_push_limit", 10) or 10))
     pushed = 0
