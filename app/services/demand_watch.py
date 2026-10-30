@@ -306,6 +306,33 @@ def best_tag(title: str, exclude: str = "") -> str:
     return head if 2 <= len(head) <= 16 and is_name_like(head, quoted=True) else ""
 
 
+def match_seed(title: str, seeds: list[str]) -> str:
+    """标题里如果出现**参考作品名**,就用那个名字(容忍语序不同)。
+
+    第三条样本实测(2026-10-30):《我的天呐!!! 小桃和狗爹简直是仙品啊啊啊》——
+    标题**没有书名号、没有标签**,名字是句子里的「小桃和狗爹」。
+    按二元组覆盖率匹配(`狗爹和小桃` 的 4 个二元组命中 3 个)就能认出来。
+    """
+    t = str(title or "")
+    if not t or not seeds:
+        return ""
+    best, best_score = "", 0.0
+    for seed in seeds:
+        s = str(seed or "").strip()
+        if len(s) < 2:
+            continue
+        grams = {s[i:i + 2] for i in range(len(s) - 1)}
+        if not grams:
+            continue
+        hit = sum(1 for g in grams if g in t)
+        score = hit / len(grams)
+        if score > best_score:
+            best, best_score = s, score
+    #: 阈值 0.5:实测「小桃和狗爹」这种**语序反过来**的写法只命中 2/4 个二元组,
+    #: 0.6 就漏了(第三条样本);而完全不相关的标题覆盖率是 0,不会误伤。
+    return best if best_score >= 0.5 else ""
+
+
 #: 标签里的**通用词**,不是名字(平台标签、形态词)
 _TAG_JUNK = frozenset({
     "fyp", "ootd", "vlog", "日常", "反差", "覆面", "覆面系", "覆面肌肉男", "手控",
@@ -615,9 +642,12 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
                          and total >= 10)
             if by_density or by_repeat:
                 tnames = names_from_title(v.get("title") or "")
+                all_seeds = [w.strip() for w in str(
+                    getattr(settings, "demand_seed_words", "") or "").split(",") if w.strip()]
                 request_videos.append({
                     "name": (tnames[0] if tnames else
-                             best_tag(v.get("title") or "", exclude=v.get("author") or "")),
+                             (best_tag(v.get("title") or "", exclude=v.get("author") or "")
+                              or match_seed(v.get("title") or "", all_seeds))),
                     "desc": v.get("title") or "",
                     "author": v.get("author") or "",
                     "url": url,

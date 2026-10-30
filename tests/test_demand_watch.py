@@ -413,6 +413,31 @@ def test_重复短句按归一后比对(monkeypatch):
     assert out["dup_ratio"] >= 0.35, out
 
 
+def test_标题里出现参考作品名_语序反了也认(monkeypatch):
+    """第三条样本:《我的天呐!!! **小桃和狗爹**简直是仙品》—— 没书名号、没标签。"""
+    seeds = ["狗爹和小桃", "小小绘"]
+    assert dw.match_seed("我的天呐！！！ 小桃和狗爹简直是仙品啊啊啊", seeds) == "狗爹和小桃"
+    assert dw.match_seed("今天天气不错", seeds) == ""
+
+
+def test_求1型名字取不到标签时用参考作品名(session, monkeypatch):
+    _lead(session, "111", title="我的天呐！！！ 小桃和狗爹简直是仙品啊啊啊")
+
+    class S(_S):
+        demand_seed_words = "狗爹和小桃"
+
+    monkeypatch.setattr("app.services.douyin_protocol_source.search", lambda *a, **k: [])
+    monkeypatch.setattr(dw, "collect_for_video", lambda *a, **k: {
+        "error": "", "names": {}, "ones": 1, "no_name": 34, "total": 60, "dup_ratio": 0.52})
+    sent = []
+    monkeypatch.setattr(dw, "push_request",
+                        lambda items, settings: sent.append(list(items)) or True)
+
+    dw.run_user(session, 1, S())
+
+    assert sent and sent[0][0]["name"] == "狗爹和小桃"
+
+
 def test_没有书名号时取最像名字的标签_通用词挡掉():
     assert dw.best_tag("#覆面系 #高壮男 #狗爹和小桃") == "狗爹和小桃"
     assert dw.best_tag("#反差 #覆面 #高壮男") == ""
