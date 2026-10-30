@@ -262,22 +262,34 @@ def names_from_replies(replies) -> list[str]:
     return out
 
 
-def best_tag(title: str) -> str:
+def best_tag(title: str, exclude: str = "") -> str:
     """**求1型视频**的标题里挑一个最像名字的标签(只在已判定为该类型时用)。
 
     这一类的标题常常没有书名号,只有一串标签(用户给的参考作品就是这种)。
     挑法:**最长**的、不在通用词表里的拉丁/中文标签 —— 通用词(`#反差`/`#覆面`/`#fyp`)
     一律丢掉;挑不出来就返回空串(宁可没有名字,也别把描述词当名字)。
+
+    ⚠️ `exclude` = **作者名**:实测用户样本的标签里最长的是 `#阿玛特拉斯`,那正是**作者自己**
+    (2026-10-30),把它当"大瓜名字"推出去毫无意义。
     """
     cands: list[str] = []
-    for m in re.finditer(r"#([^\s#]{2,16})", str(title or "")):
+    #: ⚠️ 分享文案里常见 `# 范小勤`(井号后有空格),所以 `\s*` 不能省 ——
+    #: 严格匹配 `#([^\s#]+)` 会一个标签都取不到(2026-10-30 实测)。
+    for m in re.finditer(r"#\s*([^\s#]{2,16})", str(title or "")):
         n = _clean(m.group(1))
         if not is_name_like(n, quoted=True):
             continue
         if n.lower() in _TAG_JUNK or n in _TAG_JUNK:
             continue
+        if exclude and n == str(exclude).strip():
+            continue
         cands.append(n)
-    return max(cands, key=len) if cands else ""
+    if cands:
+        return max(cands, key=len)
+    #: 兜底:**标签前的那句正文**往往就是作品名(`智慧蛊回来了# 范小勤 …`)。
+    head = str(title or "").split("#")[0].strip()
+    head = _clean(head)
+    return head if 2 <= len(head) <= 16 and is_name_like(head, quoted=True) else ""
 
 
 #: 标签里的**通用词**,不是名字(平台标签、形态词)
@@ -296,6 +308,7 @@ def collect_for_video(aweme_id: str, *, session=None, user_id: int = 1,
     """把一个视频的评论扫一遍。返回 `{name: {"demand":n,"mention":n,"samples":[…]}}`。"""
     found: dict[str, dict] = defaultdict(lambda: {"demand": 0, "mention": 0, "samples": []})
     cursor, err, no_name, ones, total = 0, "", 0, 0, 0
+    texts: list[str] = []
     for page in range(max(1, int(pages))):
         res = fetch_comments(aweme_id, cursor=cursor, count=count,
                              session=session, user_id=user_id)
@@ -304,6 +317,7 @@ def collect_for_video(aweme_id: str, *, session=None, user_id: int = 1,
             break
         for c in res["comments"]:
             total += 1
+            texts.append(c["text"].strip())
             if _ONES_RE.match(c["text"]):        # 「扣1」跟帖 = 热度信号,不是名字
                 ones += 1
                 continue
@@ -328,8 +342,14 @@ def collect_for_video(aweme_id: str, *, session=None, user_id: int = 1,
         if not res["has_more"]:
             break
         cursor += count
+    #: ★ **重复评论占比**(2026-10-30 用户给的样本算出来的第二个信号):
+    #: 用户给的那条「范小勤」图文,59 条评论里 `刚看完`×8、`冰露`×5、`1`×6 ——
+    #: 满屏重复短句是**引流/刷**的形状,比"求"更常见。
+    dup_ratio = 0.0
+    if total >= 5:
+        dup_ratio = 1 - (len(set(texts)) / total)
     return {"names": dict(found), "error": err, "no_name": no_name, "ones": ones,
-            "total": total}
+            "total": total, "dup_ratio": round(dup_ratio, 3)}
 
 
 # ---------------------------------------------------------------------------
@@ -482,13 +502,14 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
     out: list[dict] = []
     seen: set[str] = set()
 
-    def _add(vid: str, url: str, title: str, comments: int = 0) -> None:
+    def _add(vid: str, url: str, title: str, comments: int = 0, author: str = "") -> None:
         vid = str(vid or "").strip()
         if not vid or vid in seen:
             return
         seen.add(vid)
         out.append({"aweme_id": vid, "url": url or f"https://www.douyin.com/video/{vid}",
-                    "title": title or "", "comment_count": int(comments or 0)})
+                    "title": title or "", "comment_count": int(comments or 0),
+                    "author": str(author or "")})
 
     # ① 参考作品名(有就先用) —— 每轮轮着搜 3 个,避免连发触发抖音限流
     seeds = [w.strip() for w in
@@ -507,7 +528,7 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
                   reverse=True)
         for v in vids:
             _add(v.get("aweme_id"), v.get("url"), v.get("snippet"),
-                 (v.get("metrics") or {}).get("comment_count") or 0)
+                 (v.get("metrics") or {}).get("comment_count") or 0, v.get("name"))
             #: 参考作品只占**一半名额**:它们通常没有书名号(标题是"标签流"),
             #: 名字还得靠库内推广线索那半;全被搜索占满 ⇒ 这一轮一个名字都抽不到。
             if len(out) >= max(1, need // 2):
@@ -518,7 +539,7 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
         DouyinLead.user_id == user_id,
         DouyinLead.found_at >= since).order_by(DouyinLead.found_at.desc())).all()
     for r in leads:
-        _add(r.aweme_id, r.url, r.title)
+        _add(r.aweme_id, r.url, r.title, 0, r.author)
         if len(out) >= need:
             return out[:need]
 
@@ -528,7 +549,7 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
         DouyinPeerWork.first_seen_at >= since).order_by(
         DouyinPeerWork.first_seen_at.desc())).all()
     for w in works:
-        _add(w.aweme_id, w.url, w.title)
+        _add(w.aweme_id, w.url, w.title, 0, w.account_name)
         if len(out) >= need:
             break
 
@@ -569,14 +590,23 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
             int(rec.get("demand") or 0) for rec in res["names"].values())
         if total >= 5:
             ratio = (ones + demand_cnt) / total
-            if ratio >= float(getattr(settings, "demand_request_density", 0.2) or 0) \
-                    and (ones + demand_cnt) >= 3:
+            dup = float(res.get("dup_ratio") or 0)
+            by_density = (ratio >= float(getattr(settings, "demand_request_density", 0.1) or 0)
+                          and (ones + demand_cnt) >= 3)
+            #: 第二个信号:**满屏重复短句**(用户给的样本:59 条里 `刚看完`×8、`冰露`×5、`1`×6)。
+            #: 实算那条的「求/1 密度」只有 **12%**(6 个 1 + 1 个求),按 20% 的门槛会被漏掉 ——
+            #: 所以补这条:重复率 ≥ 30% 且评论 ≥ 10 也算这一类。
+            by_repeat = (dup >= float(getattr(settings, "demand_repeat_ratio", 0.3) or 0)
+                         and total >= 10)
+            if by_density or by_repeat:
                 tnames = names_from_title(v.get("title") or "")
                 request_videos.append({
-                    "name": (tnames[0] if tnames else best_tag(v.get("title") or "")),
+                    "name": (tnames[0] if tnames else
+                             best_tag(v.get("title") or "", exclude=v.get("author") or "")),
                     "desc": v.get("title") or "",
                     "author": v.get("author") or "",
                     "url": url,
+                    "why": "求/1密度" if by_density else "重复评论",
                     "demand": demand_cnt, "ones": ones, "total": total})
         # ★ **名字主要来自作品标题**(用户:「基本上作品名都有资源名」);
         # 而「扣1」的热度是**整条视频**级别的,归给这条视频标题里的名字。
@@ -805,7 +835,7 @@ def build_request_card(items: list[dict]) -> dict:
         link = f" [{desc}]({it['url']})" if it.get("url") else ""
         lines.append(
             f"**{name}** — 求 {it['demand']} · 扣1 {it['ones']} / 共 {it['total']} 条"
-            f" · 作者 {it.get('author') or '—'}" + link)
+            f" · {it.get('why') or '求/1密度'} · 作者 {it.get('author') or '—'}" + link)
     return {
         "config": {"wide_screen_mode": True},
         "header": {"template": "red",

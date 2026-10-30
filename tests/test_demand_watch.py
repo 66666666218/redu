@@ -363,9 +363,33 @@ def test_求1密度不够就不算这类视频(session, monkeypatch):
     dw.run_user(session, 1, _S())
 
 
+def test_满屏重复短句也算求1型(session, monkeypatch):
+    """用户给的样本(范小勤那条)实算:59 条评论、6 个 `1`、重复率 36%。
+
+    按"求/1 密度 20%"会被漏掉(实际只有 12%),所以补了**重复短句**这条路。
+    """
+    _lead(session, "111", title="智慧蛊回来了 #范小勤 #范马宇宙 #唯有蹦迪")
+    #: 密度只有 2/59≈3%(不够 10%),但重复率 40% ⇒ 只能靠**重复短句**这条路命中
+    monkeypatch.setattr(dw, "collect_for_video", lambda *a, **k: {
+        "error": "", "names": {}, "ones": 2, "no_name": 0, "total": 59, "dup_ratio": 0.4})
+
+    sent = []
+    monkeypatch.setattr(dw, "push_request",
+                        lambda items, settings: sent.append(list(items)) or True)
+
+    dw.run_user(session, 1, _S())
+
+    assert sent, "重复评论占比 ≥ 30% 时应判为求1型"
+    assert sent[0][0]["why"] == "重复评论"
+    assert sent[0][0]["name"] == "范马宇宙"
+
+
 def test_没有书名号时取最像名字的标签_通用词挡掉():
     assert dw.best_tag("#覆面系 #高壮男 #狗爹和小桃") == "狗爹和小桃"
     assert dw.best_tag("#反差 #覆面 #高壮男") == ""
+    #: 作者自己也是标签时不能当名字(实测用户的样本里最长标签 `#阿玛特拉斯` 就是作者)
+    assert dw.best_tag("智慧蛊回来了# 范小勤 # 范马宇宙 # 阿玛特拉斯",
+                       exclude="阿玛特拉斯") == "范马宇宙"
 
 
 # ---------------------------------------------------------------- 最新的大瓜
