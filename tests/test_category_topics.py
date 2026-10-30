@@ -503,3 +503,13 @@ def test_pick_accepts_type_override() -> None:
 def test_hanhua_suffix_does_not_steal_games() -> None:
     """⚠️ 游戏名里的「最新汉化版」曾和「游戏」平票、按表序把游戏判成软件。"""
     assert ct.type_of("泰拉瑞亚灾厄最新汉化版", "T开头游戏") == "小游戏"
+
+
+def test_pick_reserves_multiple_own_topic_words() -> None:
+    """★ 2026-10-30 用户「问卷和大瓜不用去掉」:
+
+    没有库内资源名的方向,保底**2 个话题词** —— 只给 1 个时这一轮基本等于没搜这个方向。
+    """
+    got = ct.pick(["四级真题", "韩剧全集"], "问卷", 2, min_mine=2)
+    assert len(got) == 2
+    assert all(ct.classify(w) == "问卷" for w in got), got

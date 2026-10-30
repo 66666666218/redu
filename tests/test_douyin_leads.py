@@ -2122,3 +2122,25 @@ def test_search_keywords_uses_each_directions_own_library_words(session, monkeyp
 
     kws = dl.search_keywords(session, 1, top=4, settings=_S())
     assert kws[0] == "joi模拟器 下载", kws
+
+
+def test_empty_direction_gets_two_topic_words(session, monkeypatch) -> None:
+    """问卷/大瓜库内没有目录 ⇒ 本轮至少出 **2 个本方向话题词**(否则等于白跑)。"""
+    from app.db.models import SystemConfig
+
+    session.add(SystemConfig(key="lead_word_category", value="问卷"))
+    session.commit()
+    monkeypatch.setattr("app.services.cross_accounts._keywords_from_library",
+                        lambda s, u, top: [])
+
+    class _S:
+        douyin_leads_group_keywords = 0
+        douyin_leads_category_min_words = 1
+        douyin_leads_quark_keywords = ""
+        douyin_leads_quark_slots = 0
+
+    kws = dl.search_keywords(session, 1, top=4, settings=_S())
+    from app.services import category_topics as ct
+
+    hints = [w for w in kws if w in ct.categories()["问卷"]]
+    assert len(hints) >= 2, kws

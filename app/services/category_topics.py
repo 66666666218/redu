@@ -464,8 +464,11 @@ def pick(words: list[str], cat: str, need: int, names: set[str] | None = None,
             # **别的类目的真资源名** —— 不再直接丢(见 docstring ③)
             other.append(w)
     cap = need // 2 if other_max is None else max(0, int(other_max))
-    # ★ 本类目保底(2026-10-29):没有本类目资源名 ⇒ 留一个名额给**本类目话题词**
-    reserve = 1 if (int(min_mine or 0) > 0 and not mine) else 0
+    # ★ 本类目保底(2026-10-29,2026-10-30 支持多个):没有本类目资源名 ⇒
+    # 留 `min_mine` 个名额给**本类目话题词**。
+    # ⚠️ 为什么可以 >1:问卷/大瓜这类**库内没有目录**的方向,只给 1 个话题词时
+    # 这一轮基本等于白跑(实测「类目大瓜」产出全是影视);给 2 个才算真的搜了这个方向。
+    reserve = min(need, int(min_mine or 0)) if (int(min_mine or 0) > 0 and not mine) else 0
     out = (mine + unknown)[:max(0, need - reserve)]
     room = need - len(out) - reserve
     if room > 0:

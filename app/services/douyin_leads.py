@@ -1046,9 +1046,11 @@ def search_keywords(session, user_id: int, top: int, settings,
 
     kws = category_topics.pick(
         cand, cat, max(0, int(top) - len(own_words)), names,
-        # ★ 2026-10-29:本类目**保底几个词**(见 `pick` 的 `min_mine`)。
-        # 0 = 关掉保底(回到 10-05 的行为:证据多的那个类目永远霸榜)。
-        min_mine=int(getattr(settings, "douyin_leads_category_min_words", 1) or 0),
+        # ★ 本类目**保底几个词**(见 `pick` 的 `min_mine`)。
+        # ⚠️ **没有库内资源名的方向(资料/问卷/大瓜)保底 2 个话题词**(2026-10-30 用户
+        # 「问卷和大瓜不用去掉」):只给 1 个时,这一轮实际搜的仍是别的方向的资源名。
+        min_mine=max(int(getattr(settings, "douyin_leads_category_min_words", 1) or 0),
+                     2 if not own_words else 0),
         cat_of=_cat_of)
     if own_words:
         #: 本方向的资源名排在前面(它们才是这一轮要找的东西),其余词补足名额。
