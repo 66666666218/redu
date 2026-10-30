@@ -1430,6 +1430,42 @@ def _pan_name(url: str) -> str:
     return ""
 
 
+def _has_usable_pan(ld: dict) -> bool:
+    """这条线索有没有**可用网盘链**(我方链 / 库里现成链 / 正文直链)。
+
+    ⚠️ **群口令不算**:它能进群,但卡片上没有可直接点的链 —— 用户口径是「带网盘**链接**」。
+    """
+    info = ld.get("kouling") or {}
+    return bool(str(info.get("our_url") or "").strip()
+                or (ld.get("library") or {}).get("link")
+                or str(ld.get("pan_url") or "").strip())
+
+
+def _drop_panless_games(leads: list[dict]) -> list[dict]:
+    """**小游戏**这条赛道:没有可用网盘链的线索一律丢掉(2026-10-30 用户口径)。
+
+    > 「我们监控的抖音小游戏是否都是带网盘链接的,**我们不要监控到不带网盘的**」
+
+    实测(近 14 天):小游戏线索 8 条里 **3 条无链**(1 条 share 没搬成、2 条没解出来)。
+    它们在卡片上只能进「只能对标」那一张 —— 对小游戏这条赛道,用户明确不要这种。
+    ⚠️ **只对小游戏生效**:其它赛道仍保留"只能对标"卡(上一版刚按客户视角做的)。
+    """
+    if not leads:
+        return leads
+    from app.services import category_topics
+
+    kept = [
+        ld for ld in leads
+        if _has_usable_pan(ld)
+        or category_topics.display_niche(
+            f"{ld.get('title') or ''} {ld.get('mark') or ''}") != "小游戏"
+    ]
+    if len(kept) != len(leads):
+        logger.info("抖音线索:小游戏里 %d 条**没有可用网盘链**,已丢弃(不监控)",
+                    len(leads) - len(kept))
+    return kept
+
+
 def _publish_mark(pub) -> str:
     """发布时间标记:**一小时内 = 🆕**,其余 `·MM-DD HH:MM`;拿不到就空串。
 
@@ -1828,8 +1864,11 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
             if leads:
                 # 口令 → 资源(分享链直接转存入库 / 群则加群),结果一并写进卡片
                 apply_kouling(leads, db, user_id, settings)
-                _save_leads(db, user_id, leads)      # 落库:转发量只在这一次有效(结算要用)
-                push_leads(leads, settings, platform=plat, session=db, user_id=user_id)
+                # ★ **小游戏必须带网盘**(2026-10-30 用户口径):没有可用链的不入库、不推。
+                leads = _drop_panless_games(leads)
+                if leads:
+                    _save_leads(db, user_id, leads)  # 落库:转发量只在这一次有效(结算要用)
+                    push_leads(leads, settings, platform=plat, session=db, user_id=user_id)
             # ⚠️ **按词源分开报**(2026-10-05):只报总数看不出"哪档在起作用" ——
             # 而实测两档差了 86 个百分点(资源名 86% / 热榜种子 0%)。
             # 不分开就永远发现不了"四成预算花在 0% 有效率的词上"这件事。

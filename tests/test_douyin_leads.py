@@ -1994,3 +1994,26 @@ def test_push_leads_ledger_records_the_resolved_link(session, monkeypatch) -> No
     row = session.query(PushLedger).filter(PushLedger.section == "douhot").one()
     assert row.pan_url == "https://pan.xunlei.com/s/LIB"
     assert row.pan_type == "迅雷"
+
+
+def test_minigame_leads_without_pan_are_dropped() -> None:
+    """★ 2026-10-30 用户口径「我们不要监控到不带网盘的」:
+
+    小游戏线索**没有可用网盘链**就不入库、不推送;其它赛道不受影响(仍可进"只能对标"卡)。
+    ⚠️ **群口令不算可用链** —— 能进群,但卡片上没有可直接点的链接。
+    """
+    assert dl._has_usable_pan({"kouling": {"kind": "group", "group_id": "1"}}) is False
+    assert dl._has_usable_pan({"kouling": {"kind": "share",
+                                           "our_url": "https://pan.xunlei.com/s/A"}}) is True
+    assert dl._has_usable_pan({"pan_url": "https://pan.quark.cn/s/B"}) is True
+
+    leads = [
+        {"title": "《蛊界游戏》兑换码", "mark": "x", "kouling": {"kind": "none"}},
+        {"title": "《蛊界游戏》兑换码", "mark": "y",
+         "kouling": {"kind": "share", "our_url": "https://pan.xunlei.com/s/A"}},
+        {"title": "《某剧》第2集", "mark": "z", "kouling": {"kind": "none"}},
+        {"title": "《某游戏》资源", "mark": "w", "pan_url": "https://pan.quark.cn/s/B"},
+    ]
+    kept = dl._drop_panless_games(leads)
+    marks = [x["mark"] for x in kept]
+    assert marks == ["y", "z", "w"], f"只该丢第一条(小游戏无链):{marks}"
