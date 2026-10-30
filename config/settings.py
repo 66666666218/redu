@@ -1036,6 +1036,14 @@ class Settings(BaseSettings):
     demand_digest_hours: int = 24
     #: 每天几点发。⚠️ 放在 `douyin_leads`/`demand_watch` 之后,数据才齐。
     demand_digest_cron: str = "20 21 * * *"
+    # ---- 小红书(2026-10-30,用户「小红书上的热点大瓜应该更好监控」)----
+    #: 开关。⚠️ 它要求**人**开着那个 CDP 浏览器(`python tools/xhs_cdp.py launch`)并登录过;
+    #: 不可达时本轮自动跳过,不会自己拉起浏览器(脚本拉起会让 `navigator.webdriver=True`)。
+    demand_xhs_enabled: bool = True
+    #: 每轮搜几个参考作品名(小红书风控更狠,默认只 2 个)。
+    demand_xhs_seeds_per_round: int = 2
+    #: 每个词最多开几篇笔记读评论。
+    demand_xhs_notes_per_seed: int = 2
     #: 一张卡最多放几个名字。
     demand_push_limit: int = 10
     #: 执行时刻。⚠️ 与 `douyin_leads`(`:10 */4`)错开 40 分钟 ——

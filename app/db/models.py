@@ -1153,6 +1153,9 @@ class DemandScan(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    #: ★ 2026-10-30:抖音之外**还有小红书**(用户「小红书上的热点大瓜应该更好监控」)。
+    #: 两个平台进同一张表,汇总时**分开列**,别混成一个命中率。
+    platform: Mapped[str] = mapped_column(String(16), default="douyin", index=True)
     aweme_id: Mapped[str] = mapped_column(String(64), index=True)
     scanned_date: Mapped[str] = mapped_column(String(16), index=True, default="")  # YYYY-MM-DD
     author: Mapped[str] = mapped_column(String(64), default="")

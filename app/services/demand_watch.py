@@ -909,8 +909,9 @@ def push_latest(items: list[dict], settings) -> bool:
         build_latest_card(items))
 
 
-def build_request_card(items: list[dict]) -> dict:
+def build_request_card(items: list[dict], platform: str = "douyin") -> dict:
     """**求1型**大瓜卡:被判为"评论区在求/扣1"的视频 + 能取到的名字。"""
+    label = "小红书" if platform == "xiaohongshu" else "抖音"
     lines = []
     for it in items:
         name = it.get("name") or "(标题里没名字)"
@@ -923,7 +924,7 @@ def build_request_card(items: list[dict]) -> dict:
         "config": {"wide_screen_mode": True},
         "header": {"template": "red",
                    "title": {"tag": "plain_text",
-                             "content": f"🔥 求1型大瓜 · 抖音({len(items)})"}},
+                             "content": f"🔥 求1型大瓜 · {label}({len(items)})"}},
         "elements": [
             {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}},
             {"tag": "note", "elements": [{"tag": "plain_text",
@@ -932,7 +933,7 @@ def build_request_card(items: list[dict]) -> dict:
     }
 
 
-def push_request(items: list[dict], settings) -> bool:
+def push_request(items: list[dict], settings, platform: str = "douyin") -> bool:
     from app.services.feishu_client import FeishuClient, webhook_for
 
     #: ★ 2026-10-30 用户口径「先收集数据**发到管理群**,再根据数据改策略」——
@@ -941,7 +942,7 @@ def push_request(items: list[dict], settings) -> bool:
     if not webhook or not items:
         return False
     return FeishuClient(webhook, getattr(settings, "feishu_secret", "")).send_card(
-        build_request_card(items))
+        build_request_card(items, platform))
 
 
 def _tags_of(title: str) -> list[str]:
@@ -1029,7 +1030,8 @@ def push_expand(items: list[dict], settings) -> bool:
 
 
 def _record_scan(db, user_id: int, v: dict, *, total: int, ones: int, demand: int,
-                 dup: float, flagged: bool, why: str, name: str) -> None:
+                 dup: float, flagged: bool, why: str, name: str,
+                 platform: str = "douyin") -> None:
     """把这一条视频的扫描结果落库(同一天同一条只留一行,以最新一次为准)。"""
     from app.db.models import DemandScan
 
@@ -1043,6 +1045,7 @@ def _record_scan(db, user_id: int, v: dict, *, total: int, ones: int, demand: in
     if row is None:
         row = DemandScan(user_id=user_id, aweme_id=vid, scanned_date=today)
         db.add(row)
+    row.platform = platform
     row.author = str(v.get("author") or "")[:64]
     row.title = str(v.get("title") or "")[:255]
     row.url = str(v.get("url") or "")[:500]
@@ -1050,6 +1053,104 @@ def _record_scan(db, user_id: int, v: dict, *, total: int, ones: int, demand: in
     row.dup_ratio = float(dup or 0)
     row.flagged, row.why, row.name = bool(flagged), str(why or "")[:32], str(name or "")[:128]
     row.scanned_at = datetime.now()
+
+
+def scan_xhs(db, user_id: int = 1, settings=None) -> dict:
+    """**小红书**求1型扫描(2026-10-30,用户「小红书上的热点大瓜应该更好监控」)。
+
+    种子词仍用抖音那套参考作品名;判据与抖音**同一套**(`xhs_demand.stats_from_texts`
+    直接复用本模块的归一化与匹配)。频率刻意压得很低:每轮 ≤2 个词、每词 ≤2 篇笔记。
+    """
+    from app.services import xhs_demand as X
+
+    settings = settings or _settings()
+    if not bool(getattr(settings, "demand_xhs_enabled", True)):
+        return {"skipped": "disabled"}
+    ok, why = X.available(settings)
+    if not ok:
+        #: CDP 不可达 = 浏览器没开/没登录。**不自己 launch** —— 脚本拉起的浏览器
+        #: `navigator.webdriver=True`,那条路就废了(见 `tools/xhs_cdp.py` 头注)。
+        return {"skipped": why}
+
+    seeds = [w.strip() for w in
+             str(getattr(settings, "demand_seed_words", "") or "").split(",") if w.strip()]
+    if not seeds:
+        return {"skipped": "no_seed_words"}
+    seeds = _rotate_seeds(db, seeds,
+                          int(getattr(settings, "demand_xhs_seeds_per_round", 2) or 2))
+    per_seed = int(getattr(settings, "demand_xhs_notes_per_seed", 2) or 2)
+
+    items: list[dict] = []
+    scanned = flagged_n = 0
+    p = browser = page = None
+    try:
+        p, browser = X._connect()
+        page = browser.contexts[0].new_page()
+        for kw in seeds:
+            for note in X.search_notes(page, kw, limit=per_seed):
+                texts = X.note_comments(page, note["id"], note.get("token", ""))
+                st = X.stats_from_texts(texts)
+                if not st["total"]:
+                    continue
+                scanned += 1
+                ratio = (st["ones"] + st["demand"]) / st["total"]
+                by_density = (ratio >= float(getattr(settings, "demand_request_density", 0.1) or 0)
+                              and (st["ones"] + st["demand"]) >= 3)
+                by_repeat = (st["dup_ratio"] >= float(
+                    getattr(settings, "demand_repeat_ratio", 0.25) or 0)
+                    and st["total"] >= 10)
+                flagged = bool(by_density or by_repeat)
+                name = names_from_title(note.get("title") or "")
+                name = name[0] if name else (best_tag(note.get("title") or "",
+                                                      exclude=note.get("author") or "")
+                                             or match_seed(note.get("title") or "", seeds))
+                _record_scan(
+                    db, user_id,
+                    {"aweme_id": note["id"], "title": note.get("title") or "",
+                     "author": note.get("author") or "",
+                     "url": f"https://www.xiaohongshu.com/explore/{note['id']}"},
+                    total=st["total"], ones=st["ones"], demand=st["demand"],
+                    dup=st["dup_ratio"], flagged=flagged,
+                    why=("求/1密度" if by_density else ("重复评论" if by_repeat else "")),
+                    name=name, platform="xiaohongshu")
+                if flagged:
+                    flagged_n += 1
+                    items.append({"name": name, "desc": note.get("title") or "",
+                                  "author": note.get("author") or "",
+                                  "url": f"https://www.xiaohongshu.com/explore/{note['id']}",
+                                  "why": "求/1密度" if by_density else "重复评论",
+                                  "demand": st["demand"], "ones": st["ones"],
+                                  "total": st["total"]})
+    except Exception as exc:  # noqa: BLE001 - 浏览器/页面异常不该把整轮带崩
+        logger.exception("小红书扫描失败")
+        return {"error": f"{type(exc).__name__}: {str(exc)[:80]}", "scanned": scanned}
+    finally:
+        try:
+            if page is not None:
+                page.close()
+        finally:
+            try:
+                if browser is not None:
+                    browser.close()
+            finally:
+                if p is not None:
+                    p.stop()
+
+    db.commit()
+    pushed = len(items) if items and push_request(items, settings, "xiaohongshu") else 0
+    _record_run_quiet(db, user_id, f"小红书 扫{scanned} 命中{flagged_n} 推{pushed}")
+    return {"scanned": scanned, "flagged": flagged_n, "pushed": pushed}
+
+
+def _record_run_quiet(db, user_id: int, detail: str) -> None:
+    """写一行运行记录(小红书那条链自己的可观测性)。"""
+    from app.services.tenant_base import _record_run
+
+    try:
+        _record_run(db, user_id, "demand_watch_xhs", "success", detail)
+        db.commit()
+    except Exception:  # noqa: BLE001 - 记录失败不影响结果
+        db.rollback()
 
 
 def digest_stats(db, user_id: int = 1, hours: int = 24) -> dict:
@@ -1065,6 +1166,13 @@ def digest_stats(db, user_id: int = 1, hours: int = 24) -> dict:
     n = len(rows)
     flagged = [r for r in rows if r.flagged]
     authors = Counter(r.author for r in flagged if r.author)
+    #: 分平台看:抖音/小红的量级差很多,混成一个命中率就看不出来了。
+    by_platform: dict[str, dict] = {}
+    for p in ("douyin", "xiaohongshu"):
+        rs = [r for r in rows if (getattr(r, "platform", "") or "douyin") == p]
+        if rs:
+            by_platform[p] = {"scanned": len(rs),
+                              "flagged": sum(1 for r in rs if r.flagged)}
     names = db.scalars(select(DemandName).where(
         DemandName.user_id == user_id,
         DemandName.last_seen_at >= since).order_by(
@@ -1076,6 +1184,7 @@ def digest_stats(db, user_id: int = 1, hours: int = 24) -> dict:
         if n else 0.0,
         "avg_dup": (sum(float(r.dup_ratio or 0) for r in rows) / n) if n else 0.0,
         "authors": authors.most_common(3),
+        "by_platform": by_platform,
         "names": [(r.name, int(r.demand_hits or 0), int(getattr(r, "ones_hits", 0) or 0))
                   for r in names],
     }
@@ -1089,6 +1198,11 @@ def build_digest_card(st: dict) -> dict:
     ]
     if st["authors"]:
         lines.append("命中最多作者:" + " · ".join(f"{a} {n}" for a, n in st["authors"]))
+    bp = st.get("by_platform") or {}
+    if bp:
+        label = {"douyin": "抖音", "xiaohongshu": "小红书"}
+        lines.append("分平台:" + " · ".join(
+            f"{label.get(k, k)} 扫{v['scanned']}/命中{v['flagged']}" for k, v in bp.items()))
     if st["names"]:
         lines.append("名字 TOP:" + " · ".join(f"{n}(求{d}/1{o})" for n, d, o in st["names"]))
     else:
@@ -1176,6 +1290,10 @@ def demand_watch_tick(settings=None) -> int:
                     names = discover_names(db, int(uid), settings)
                     if names and push_expand(names, settings):
                         n += 1
+                # ★ **小红书**那条链(CDP 页面路,需要人开着那个浏览器)。
+                # 不可达时 `scan_xhs` 自己返回 skip,不会把整轮带崩。
+                if bool(getattr(settings, "demand_xhs_enabled", True)):
+                    scan_xhs(db, int(uid), settings)
             except Exception:  # noqa: BLE001 - 一个用户失败不影响其他用户
                 logger.exception("需求名监控失败 user=%s", uid)
                 db.rollback()

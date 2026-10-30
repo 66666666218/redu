@@ -374,6 +374,9 @@ ADDITIONS: dict[str, list[str]] = {
     # 存量行两列都是 0 ⇒ 按「还没用新口径统计过」处理,不影响读取。
     "demand_names": ["ones_hits INTEGER DEFAULT 0", "title_hits INTEGER DEFAULT 0",
                      "heat_score INTEGER DEFAULT 0"],
+    # 扫描记录加平台(2026-10-30):小红书的数据也进这张表,汇总时分开算。
+    # 存量行默认 douyin —— 它们确实都是抖音扫出来的。
+    "demand_scans": ["platform VARCHAR(16) DEFAULT 'douyin'"],
     # 对标号作品要带**网盘凭据**(2026-10-29):`mark`=《》/咐置口令,`pan_url`=正文直链。
     # 存量行两列都空 ⇒ 按"不带网盘"处理(正好与人想要的"只推带网盘的"一致)。
     "douyin_peer_works": ["mark VARCHAR(64) DEFAULT ''",
