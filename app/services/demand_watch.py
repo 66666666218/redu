@@ -47,7 +47,21 @@ COMMENT_API = "https://www.douyin.com/aweme/v1/web/comment/list/"
 #: (「扣1看完整版」),评论区的 `1` 越多 = 这条越火 —— 用户口径:
 #: 「判断是根据作品里面的**求和1**来判断火爆程度」(2026-10-30)。
 #: ⚠️ 只认**整条就是 1**,不做子串匹配:正常句子里的「1」("第1集")不能算。
-_ONES_RE = re.compile(r"^\s*扣?\s*1{1,8}[!！.。,，~～]*\s*$")
+_ONES_RE = re.compile(r"^扣?[1一]{1,8}$")
+#: 表情占位符(`[捂脸]`/`[宕机]`)—— 比对前要剥掉,否则 `111[尴尬流汗]` 认不出是「1」。
+_EMOJI_RE = re.compile(r"\[[^\]]{1,10}\]")
+
+
+def _norm_comment(text: str) -> str:
+    """评论的**归一形态**:去表情占位符、去空白与标点。
+
+    用途有两个,都是用户样本逼出来的(2026-10-30 第二条样本):
+      · `111[尴尬流汗]` 要能被认成「1」;
+      · `刚看完` / `刚看完[宕机]` / `刚看完。` 要能被当成**同一条重复评论** ——
+        按原文比对时它们的重复率只有 22%,归一后才是真实的"满屏一样"。
+    """
+    s = _EMOJI_RE.sub("", str(text or ""))
+    return re.sub(r"[\s\W_]+", "", s)
 
 
 def names_from_title(title: str) -> list[str]:
@@ -317,8 +331,9 @@ def collect_for_video(aweme_id: str, *, session=None, user_id: int = 1,
             break
         for c in res["comments"]:
             total += 1
-            texts.append(c["text"].strip())
-            if _ONES_RE.match(c["text"]):        # 「扣1」跟帖 = 热度信号,不是名字
+            norm = _norm_comment(c["text"])
+            texts.append(norm or c["text"].strip())
+            if _ONES_RE.match(norm):             # 「扣1」跟帖 = 热度信号,不是名字
                 ones += 1
                 continue
             hits = extract_names(c["text"])

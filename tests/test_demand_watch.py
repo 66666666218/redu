@@ -384,6 +384,35 @@ def test_满屏重复短句也算求1型(session, monkeypatch):
     assert sent[0][0]["name"] == "范马宇宙"
 
 
+def test_带表情的1也算跟帖(monkeypatch):
+    """实测样本里 `111[尴尬流汗]` 是真实形状 —— 不剥表情就认不出。"""
+    pages = [{"ok": True, "has_more": False, "error": "", "comments": [
+        {"text": "111[尴尬流汗]", "like": 0, "user": "a", "cid": "1", "replies": []},
+        {"text": "1秒", "like": 0, "user": "b", "cid": "2", "replies": []},
+    ]}]
+    monkeypatch.setattr(dw, "fetch_comments", lambda *a, **k: pages.pop(0))
+
+    out = dw.collect_for_video("1", session=None, pages=1)
+
+    assert out["ones"] == 1, "`111[尴尬流汗]` 要算 1,`1秒` 不算"
+
+
+def test_重复短句按归一后比对(monkeypatch):
+    """`刚看完` / `刚看完[宕机]` / `刚看完。` 是同一条重复评论(第二条样本实测)。"""
+    pages = [{"ok": True, "has_more": False, "error": "", "comments": [
+        {"text": "刚看完", "like": 0, "user": "a", "cid": "1", "replies": []},
+        {"text": "刚看完[宕机]", "like": 0, "user": "b", "cid": "2", "replies": []},
+        {"text": "刚看完。", "like": 0, "user": "c", "cid": "3", "replies": []},
+        {"text": "冰露", "like": 0, "user": "d", "cid": "4", "replies": []},
+        {"text": "好看", "like": 0, "user": "e", "cid": "5", "replies": []},
+    ]}]
+    monkeypatch.setattr(dw, "fetch_comments", lambda *a, **k: pages.pop(0))
+
+    out = dw.collect_for_video("1", session=None, pages=1)
+
+    assert out["dup_ratio"] >= 0.35, out
+
+
 def test_没有书名号时取最像名字的标签_通用词挡掉():
     assert dw.best_tag("#覆面系 #高壮男 #狗爹和小桃") == "狗爹和小桃"
     assert dw.best_tag("#反差 #覆面 #高壮男") == ""
