@@ -33,6 +33,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="只跑「最新的大瓜」:顺参考作品找同款账号,列他们最近的作品")
     ap.add_argument("--expand", action="store_true",
                     help="只跑「发现新名字」:同款作者多条作品里反复出现的名字")
+    ap.add_argument("--digest", action="store_true",
+                    help="只看近 24 小时的数据汇总(扫描/命中/平均密度)并发管理群")
     args = ap.parse_args(argv)
 
     from app.db.database import get_session_local, init_db
@@ -44,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
         demand_watch.push_latest = lambda items, settings: False  # noqa: ARG005
         demand_watch.push_request = lambda items, settings: False  # noqa: ARG005
         demand_watch.push_expand = lambda items, settings: False  # noqa: ARG005
+        demand_watch.push_digest = lambda st, settings: False      # noqa: ARG005
 
     init_db()
     db = get_session_local()()
@@ -69,6 +72,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"          {it['url']}")
             if not args.dry and items:
                 print("推送:", demand_watch.push_expand(items, get_settings()))
+            return 0
+        if args.digest:
+            st = demand_watch.digest_stats(
+                db, args.user, int(get_settings().demand_digest_hours or 24))
+            print("数据汇总:", st)
+            if not args.dry:
+                print("推送:", demand_watch.push_digest(st, get_settings()))
             return 0
         out = demand_watch.run_user(db, args.user, get_settings())
     finally:

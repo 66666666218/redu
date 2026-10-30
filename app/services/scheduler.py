@@ -493,7 +493,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.douyin_peer_scan import douyin_peer_tick
     #: ★ **评论区在求的名字**(2026-10-30,用户口径:只看名字、不落网盘)。
     #: 与 `douyin_leads` 共用抖音登录态/额度,所以错开 40 分钟跑。
-    from app.services.demand_watch import demand_watch_tick
+    from app.services.demand_watch import demand_watch_tick, demand_digest_tick
     from app.services.ai_calibration import ai_calibrate_tick
     from app.services.xunlei_sync import xunlei_sync_tick
     from app.services.xunlei_group import xunlei_group_tick
@@ -598,6 +598,10 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # ⚠️ 与 `douyin_leads` 共用登录态与额度,所以默认 `:50 */4` 与它(`:10 */4`)错开。
         (demand_watch_tick, _get_settings().demand_watch_cron, {"minute": 50, "hour": "*/4"},
          "demand_watch", "wechat"),
+        # ★ **求1型数据汇总**(2026-10-30,用户「先收集数据发到管理群,再根据数据改策略」):
+        # 每天一次,把近 24 小时的**分母**(扫描条数/命中条数/平均密度)发管理群。
+        (demand_digest_tick, _get_settings().demand_digest_cron,
+         {"minute": 20, "hour": 21}, "demand_digest", "wechat"),
         # ★ **AI 分数线自动校准**(2026-10-29):用「AI 分数 ↔ 真实搬成」的配对挑阈值。
         # 每周一次就够(滚动 21 天、一次最多动 1 分);样本不足时只记「跳过」。
         (ai_calibrate_tick, _get_settings().ai_calibration_cron,

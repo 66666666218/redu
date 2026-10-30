@@ -540,6 +540,54 @@ def test_新名字卡片列出出现次数():
     assert "新名字" in str(card) and "3" in str(card)
 
 
+# ---------------------------------------------------------------- 数据回传管理群
+
+def test_每条扫过的视频都落一行_不管命不命中(session, monkeypatch):
+    """用户口径「先收集数据…再根据数据改策略」:没有分母,阈值只能靠猜。"""
+    from app.db.models import DemandScan
+
+    _lead(session, "111", title="《甲》")
+    _lead(session, "222", title="《乙》")
+    calls = {"n": 0}
+
+    def fake_collect(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:      # 命中
+            return {"error": "", "names": {}, "ones": 6, "no_name": 1, "total": 20,
+                    "dup_ratio": 0.4}
+        return {"error": "", "names": {}, "ones": 0, "no_name": 0, "total": 20,
+                "dup_ratio": 0.05}
+
+    monkeypatch.setattr(dw, "collect_for_video", fake_collect)
+    monkeypatch.setattr(dw, "push_request", lambda items, settings: True)
+
+    dw.run_user(session, 1, _S())
+
+    rows = session.query(DemandScan).all()
+    assert len(rows) == 2
+    assert sum(1 for r in rows if r.flagged) == 1
+
+
+def test_汇总给出分母与命中率(session):
+    from app.db.models import DemandScan
+
+    now = datetime.now()
+    session.add_all([
+        DemandScan(user_id=1, aweme_id="1", scanned_date="2026-10-30", total=20, ones=6,
+                   demand=1, dup_ratio=0.4, flagged=True, why="求/1密度", scanned_at=now),
+        DemandScan(user_id=1, aweme_id="2", scanned_date="2026-10-30", total=20, ones=0,
+                   demand=0, dup_ratio=0.05, flagged=False, scanned_at=now),
+    ])
+    session.commit()
+
+    st = dw.digest_stats(session, 1, hours=24)
+
+    assert st["scanned"] == 2 and st["flagged"] == 1
+    assert abs(st["rate"] - 0.5) < 1e-6
+    card = str(dw.build_digest_card(st))
+    assert "扫描" in card and "求1型" in card
+
+
 # ---------------------------------------------------------------- 入口
 
 def _lead(session, aweme_id="111", title="求《狗爹和小桃》全集"):

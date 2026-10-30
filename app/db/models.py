@@ -1137,6 +1137,37 @@ class PushLedger(Base):
     pushed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
 
 
+class DemandScan(Base):
+    """**每一次扫评论的记录**(2026-10-30,用户口径:「先收集数据发到管理群,再根据数据改策略」)。
+
+    为什么不只靠 `demand_names`:那张表只留"抽到名字的",而**策略调整最需要的是分母** ——
+    扫了多少条视频、其中多少条是求1型、平均密度多少、哪些号一直不命中。
+    没有这张表,"命中率 5%"和"根本没扫到东西"在库里长得一样(本仓最忌的假成功)。
+
+    一行 = 一条被扫过评论的视频(含未命中)。
+    """
+
+    __tablename__ = "demand_scans"
+    __table_args__ = (UniqueConstraint("user_id", "aweme_id", "scanned_date",
+                                       name="uq_demand_scan_day"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    aweme_id: Mapped[str] = mapped_column(String(64), index=True)
+    scanned_date: Mapped[str] = mapped_column(String(16), index=True, default="")  # YYYY-MM-DD
+    author: Mapped[str] = mapped_column(String(64), default="")
+    title: Mapped[str] = mapped_column(String(255), default="")
+    url: Mapped[str] = mapped_column(String(500), default="")
+    total: Mapped[int] = mapped_column(Integer, default=0)      # 拉到的评论数
+    ones: Mapped[int] = mapped_column(Integer, default=0)       # 整条就是 1 的
+    demand: Mapped[int] = mapped_column(Integer, default=0)     # 带求语气的
+    dup_ratio: Mapped[float] = mapped_column(Float, default=0.0)
+    flagged: Mapped[bool] = mapped_column(Boolean, default=False)   # 是否判为求1型
+    why: Mapped[str] = mapped_column(String(32), default="")        # 求/1密度 | 重复评论
+    name: Mapped[str] = mapped_column(String(128), default="")      # 取到的名字(可能空)
+    scanned_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+
+
 class DemandName(Base):
     """**评论区在求的资源名**(2026-10-30,用户口径:监控「大瓜」名称,**只存名字、不落网盘**)。
 

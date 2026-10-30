@@ -482,7 +482,9 @@ def build_card(rows) -> dict:
 def push_card(rows, settings) -> bool:
     from app.services.feishu_client import FeishuClient, webhook_for
 
-    webhook = webhook_for(settings, "douyin")
+    #: ★ 2026-10-30 用户口径「先收集数据**发到管理群**,再根据数据改策略」——
+    #: 这一整套(需求名/最新/求1型/新名字)都先发**管理群**,不打扰客户群。
+    webhook = webhook_for(settings, "admin")
     if not webhook:
         logger.info("没配抖音板块 webhook,需求名卡片不推")
         return False
@@ -666,14 +668,22 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
             #: 所以补这条:重复率 ≥ 30% 且评论 ≥ 10 也算这一类。
             by_repeat = (dup >= float(getattr(settings, "demand_repeat_ratio", 0.3) or 0)
                          and total >= 10)
-            if by_density or by_repeat:
-                tnames = names_from_title(v.get("title") or "")
-                all_seeds = [w.strip() for w in str(
-                    getattr(settings, "demand_seed_words", "") or "").split(",") if w.strip()]
+            flagged = bool(by_density or by_repeat)
+            tnames = names_from_title(v.get("title") or "")
+            all_seeds = [w.strip() for w in str(
+                getattr(settings, "demand_seed_words", "") or "").split(",") if w.strip()]
+            vname = (tnames[0] if tnames else
+                     (best_tag(v.get("title") or "", exclude=v.get("author") or "")
+                      or match_seed(v.get("title") or "", all_seeds)))
+            #: ★ **不管命不命中都落一行** —— 用户要「先收集数据,再根据数据改策略」;
+            #: 只记命中的话,分母(扫了多少条)就没了,阈值调起来全靠猜。
+            _record_scan(db, user_id, v, total=total, ones=ones, demand=demand_cnt,
+                         dup=dup, flagged=flagged,
+                         why=("求/1密度" if by_density else ("重复评论" if by_repeat else "")),
+                         name=vname)
+            if flagged:
                 request_videos.append({
-                    "name": (tnames[0] if tnames else
-                             (best_tag(v.get("title") or "", exclude=v.get("author") or "")
-                              or match_seed(v.get("title") or "", all_seeds))),
+                    "name": vname,
                     "desc": v.get("title") or "",
                     "author": v.get("author") or "",
                     "url": url,
@@ -890,7 +900,9 @@ def build_latest_card(items: list[dict]) -> dict:
 def push_latest(items: list[dict], settings) -> bool:
     from app.services.feishu_client import FeishuClient, webhook_for
 
-    webhook = webhook_for(settings, "douyin")
+    #: ★ 2026-10-30 用户口径「先收集数据**发到管理群**,再根据数据改策略」——
+    #: 这一整套(需求名/最新/求1型/新名字)都先发**管理群**,不打扰客户群。
+    webhook = webhook_for(settings, "admin")
     if not webhook or not items:
         return False
     return FeishuClient(webhook, getattr(settings, "feishu_secret", "")).send_card(
@@ -923,7 +935,9 @@ def build_request_card(items: list[dict]) -> dict:
 def push_request(items: list[dict], settings) -> bool:
     from app.services.feishu_client import FeishuClient, webhook_for
 
-    webhook = webhook_for(settings, "douyin")
+    #: ★ 2026-10-30 用户口径「先收集数据**发到管理群**,再根据数据改策略」——
+    #: 这一整套(需求名/最新/求1型/新名字)都先发**管理群**,不打扰客户群。
+    webhook = webhook_for(settings, "admin")
     if not webhook or not items:
         return False
     return FeishuClient(webhook, getattr(settings, "feishu_secret", "")).send_card(
@@ -1005,11 +1019,126 @@ def build_expand_card(items: list[dict]) -> dict:
 def push_expand(items: list[dict], settings) -> bool:
     from app.services.feishu_client import FeishuClient, webhook_for
 
-    webhook = webhook_for(settings, "douyin")
+    #: ★ 2026-10-30 用户口径「先收集数据**发到管理群**,再根据数据改策略」——
+    #: 这一整套(需求名/最新/求1型/新名字)都先发**管理群**,不打扰客户群。
+    webhook = webhook_for(settings, "admin")
     if not webhook or not items:
         return False
     return FeishuClient(webhook, getattr(settings, "feishu_secret", "")).send_card(
         build_expand_card(items))
+
+
+def _record_scan(db, user_id: int, v: dict, *, total: int, ones: int, demand: int,
+                 dup: float, flagged: bool, why: str, name: str) -> None:
+    """把这一条视频的扫描结果落库(同一天同一条只留一行,以最新一次为准)。"""
+    from app.db.models import DemandScan
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    vid = str(v.get("aweme_id") or "")
+    if not vid:
+        return
+    row = db.scalar(select(DemandScan).where(
+        DemandScan.user_id == user_id, DemandScan.aweme_id == vid,
+        DemandScan.scanned_date == today))
+    if row is None:
+        row = DemandScan(user_id=user_id, aweme_id=vid, scanned_date=today)
+        db.add(row)
+    row.author = str(v.get("author") or "")[:64]
+    row.title = str(v.get("title") or "")[:255]
+    row.url = str(v.get("url") or "")[:500]
+    row.total, row.ones, row.demand = int(total), int(ones), int(demand)
+    row.dup_ratio = float(dup or 0)
+    row.flagged, row.why, row.name = bool(flagged), str(why or "")[:32], str(name or "")[:128]
+    row.scanned_at = datetime.now()
+
+
+def digest_stats(db, user_id: int = 1, hours: int = 24) -> dict:
+    """近 N 小时的**分母数据**:扫了多少、命中多少、平均密度、TOP 名字/作者。"""
+    from collections import Counter
+    from datetime import timedelta
+
+    from app.db.models import DemandName, DemandScan
+
+    since = datetime.now() - timedelta(hours=max(1, int(hours)))
+    rows = db.scalars(select(DemandScan).where(
+        DemandScan.user_id == user_id, DemandScan.scanned_at >= since)).all()
+    n = len(rows)
+    flagged = [r for r in rows if r.flagged]
+    authors = Counter(r.author for r in flagged if r.author)
+    names = db.scalars(select(DemandName).where(
+        DemandName.user_id == user_id,
+        DemandName.last_seen_at >= since).order_by(
+        (DemandName.demand_hits + DemandName.ones_hits).desc()).limit(5)).all()
+    return {
+        "hours": int(hours), "scanned": n, "flagged": len(flagged),
+        "rate": (len(flagged) / n) if n else 0.0,
+        "avg_density": (sum((r.ones + r.demand) / r.total for r in rows if r.total) / n)
+        if n else 0.0,
+        "avg_dup": (sum(float(r.dup_ratio or 0) for r in rows) / n) if n else 0.0,
+        "authors": authors.most_common(3),
+        "names": [(r.name, int(r.demand_hits or 0), int(getattr(r, "ones_hits", 0) or 0))
+                  for r in names],
+    }
+
+
+def build_digest_card(st: dict) -> dict:
+    lines = [
+        f"扫描 **{st['scanned']}** 条 · 判为求1型 **{st['flagged']}** 条"
+        f"({st['rate']:.0%})",
+        f"平均求/1密度 **{st['avg_density']:.0%}** · 平均重复率 **{st['avg_dup']:.0%}**",
+    ]
+    if st["authors"]:
+        lines.append("命中最多作者:" + " · ".join(f"{a} {n}" for a, n in st["authors"]))
+    if st["names"]:
+        lines.append("名字 TOP:" + " · ".join(f"{n}(求{d}/1{o})" for n, d, o in st["names"]))
+    else:
+        lines.append("近 {h} 小时没有新增名字".format(h=st["hours"]))
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "blue",
+                   "title": {"tag": "plain_text",
+                             "content": f"📊 求1型监控数据 · 近{st['hours']}小时"}},
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}},
+            {"tag": "note", "elements": [{"tag": "plain_text",
+                                          "content": "这是**分母**:扫描条数、命中条数、平均密度;策略就按这张表调"}]},
+        ],
+    }
+
+
+def push_digest(st: dict, settings) -> bool:
+    from app.services.feishu_client import FeishuClient, webhook_for
+
+    webhook = webhook_for(settings, "admin")
+    if not webhook:
+        return False
+    return FeishuClient(webhook, getattr(settings, "feishu_secret", "")).send_card(
+        build_digest_card(st))
+
+
+def demand_digest_tick(settings=None) -> int:
+    """每天一次:把近 24 小时的数据发管理群。返回推了几张。"""
+    from app.db import get_session_local
+    from app.db.models import User
+
+    settings = settings or _settings()
+    if not bool(getattr(settings, "demand_digest_enabled", True)):
+        return 0
+    db = get_session_local()()
+    n = 0
+    try:
+        for uid in db.scalars(select(User.id)).all():
+            try:
+                st = digest_stats(db, int(uid),
+                                  int(getattr(settings, "demand_digest_hours", 24) or 24))
+                if push_digest(st, settings):
+                    n += 1
+            except Exception:  # noqa: BLE001 - 一个用户失败不影响其他
+                logger.exception("求1型数据汇总失败 user=%s", uid)
+                db.rollback()
+        return n
+    finally:
+        db.close()
 
 
 def _settings():

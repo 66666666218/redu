@@ -1030,6 +1030,12 @@ class Settings(BaseSettings):
     demand_expand_min: int = 2
     #: 一张卡最多几个新名字。
     demand_expand_limit: int = 10
+    # ---- 数据回传管理群(2026-10-30 用户:「先收集数据发到管理群,再根据数据改策略」)----
+    demand_digest_enabled: bool = True
+    #: 汇总窗口(小时)。
+    demand_digest_hours: int = 24
+    #: 每天几点发。⚠️ 放在 `douyin_leads`/`demand_watch` 之后,数据才齐。
+    demand_digest_cron: str = "20 21 * * *"
     #: 一张卡最多放几个名字。
     demand_push_limit: int = 10
     #: 执行时刻。⚠️ 与 `douyin_leads`(`:10 */4`)错开 40 分钟 ——
