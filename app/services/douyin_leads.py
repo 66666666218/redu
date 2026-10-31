@@ -1280,6 +1280,8 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
                 continue
             ld["kouling"] = {"kind": "group", "status": res.get("status"),
                              "group_id": info["group_id"],
+                             #: 群聊链接(2026-10-31):用户口径里它**算可用网盘链接**
+                             "group_url": info.get("group_url") or "",
                              # 见 `xunlei_kouling.ingest`:区分"新加了个群"与"口令指向已有的群"
                              "newly_joined": bool(res.get("newly_joined"))}
             continue
@@ -1582,11 +1584,17 @@ def _pan_link_of(ld: dict) -> tuple[str, str]:
                       (ld.get("pan_url"), "author")):
         if _is_pan_url(url):
             return str(url).strip(), kind
+    #: ★ **迅雷群聊链接也算"带网盘链接"**(2026-10-31 用户明确):
+    #: 「带网盘链接的也包括**进群聊的迅雷链接**」。它没有 `/s/` 分享码、只有 `group_id`,
+    #: 所以过不了 `_is_pan_url` —— 单独作为 `kind="group"` 返回。
+    gurl = str(info.get("group_url") or "").strip()
+    if gurl.startswith("http") and "group_id=" in gurl:
+        return gurl, "group"
     return "", ""
 
 
 def _has_usable_pan(ld: dict) -> bool:
-    """这条线索有没有**可用网盘链**(只认真正的网盘域名;群口令不算)。"""
+    """这条线索有没有**可用网盘链**(真网盘域名,**或**迅雷群聊链接)。"""
     return bool(_pan_link_of(ld)[0])
 
 
@@ -1808,7 +1816,9 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
         _pan = _pan_name(_raw_our)
         #: ★ **区分我方链 / 作者链**(2026-10-30 用户「可以加上,但一定要确保是网盘链接」):
         #: 🔴 = 我方转存链或资源库现成链;⏳ = 作者原始分享链(还没搬成,但可以直接取)。
-        res = (("🔴" if _kind == "our" else "⏳") + _pan) if _pan else "—"
+        #: 🟢 = **迅雷群聊链接**(2026-10-31 用户:进群聊的链接也算带网盘)。
+        _icon = {"our": "🔴", "group": "🟢"}.get(_kind, "⏳")
+        res = (_icon + _pan) if _pan else "—"
         return _col_set_row([
             (author, 3),
             (work, 5),
@@ -1836,7 +1846,8 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
         if n_link:
             kinds = Counter(_pan_link_of(x)[1] for x in subset if _link_of(x))
             intro += (f"\n**可直取 {n_link} 条**"
-                      f"(🔴我方 {kinds.get('our', 0)} · ⏳作者 {kinds.get('author', 0)})"
+                      f"(🔴我方 {kinds.get('our', 0)} · ⏳作者 {kinds.get('author', 0)}"
+                      + (f" · 🟢群 {kinds.get('group', 0)}" if kinds.get('group') else "") + ")"
                       + (f" {pan_txt}" if pan_txt else "")
                       + " —— 点作品标题即可打开对应网盘。")
         else:

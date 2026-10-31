@@ -58,6 +58,17 @@ def _headers() -> tuple[dict, str] | None:
         cred.get("device_id") or ""
 
 
+def _extract_http(raw: str) -> str:
+    """从 `xunleiapp://…?url=https://sj-m-ssl.xunlei.com/group-invite?…` 里取出**真正的 https 链接**。
+
+    实测(2026-10-31):群口令解析出来的 `action_url` 是**自定义 scheme 包着一层**,
+    真正的邀请链接在 `url=` 后面 —— 不剥出来的话,下游判"不是 http 链接",
+    这类线索还是会进"无链"黑洞(用户明确:进群聊的迅雷链接**也算带网盘链接**)。
+    """
+    m = re.search(r"https?://\S+", str(raw or ""))
+    return m.group(0) if m else str(raw or "")
+
+
 def resolve(kouling: str) -> dict:
     """口令 → 资源入口。
 
@@ -91,6 +102,10 @@ def resolve(kouling: str) -> dict:
     group = _GROUP_ID_RE.search(url)
     if group:
         return {"kind": KIND_GROUP, "share_url": "", "pass_code": "",
+                #: ★ **群链接本身也要带出来**(2026-10-31 用户:「带网盘链接的也包括
+                #: 进群聊的迅雷链接」)—— 原来这里只留 `group_id`,链接被丢掉,
+                #: 下游就判成"没有可用网盘链"。
+                "group_url": _extract_http(url),
                 "group_id": group.group(1), "title": kouling, "raw_type": raw_type}
     share = _SHARE_ID_RE.search(url)
     if share:

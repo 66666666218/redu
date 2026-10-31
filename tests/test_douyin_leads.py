@@ -2249,3 +2249,47 @@ def _settings_like():
 
     return Settings(_env_file=None, is_dev=True, use_proxy=False,
                     request_delay_seconds=0.0, xianyu_request_delay=0.0)
+
+
+class TestGroupChatLinkCountsAsPan:
+    """★ **迅雷群聊链接也算"带网盘链接"**(2026-10-31 用户明确)。
+
+    > 「带网盘链接的也包括**进群聊的迅雷链接**」
+
+    原来只认 4 个网盘域名 + 分享链,**群链接因为没有 `/s/` 分享码被丢掉** ⇒
+    这类线索全进了"无链"黑洞,漏斗长期是 0。
+    """
+
+    def _lead(self):
+        #: 真实形状(2026-10-31 实测):`resolve` 解析出来的是 `sj-m-ssl.xunlei.com/group-invite`
+        return {"aweme_id": "g1", "title": "《大瓜群》最新", "url": "https://v.douyin.com/x",
+                "kouling": {"kind": "group", "group_id": "123",
+                            "group_url": ("https://sj-m-ssl.xunlei.com/group-invite"
+                                          "?from_uid=1&group_id=123&type=cmd&from=qr")}}
+
+    def test_群链接算可用链(self) -> None:
+        from app.services import douyin_leads as dl
+
+        url, kind = dl._pan_link_of(self._lead())
+
+        assert kind == "group"
+        assert "group_id=123" in url
+        assert dl._has_usable_pan(self._lead()) is True
+
+    def test_群链接的线索不会被无链规则丢掉(self) -> None:
+        from app.services import douyin_leads as dl
+
+        assert dl._drop_panless([self._lead()]) == [self._lead()]
+
+
+def test_群链接要从自定义scheme里剥出来():
+    """`xunleiapp://…?url=https://sj-m-ssl.xunlei.com/group-invite?…`
+
+    实测:群口令解析出来的 `action_url` 被**自定义 scheme 包了一层**,
+    不剥出来下游会判"不是 http 链接" ⇒ 又回到"无链"黑洞。
+    """
+    from app.services.xunlei_kouling import _extract_http
+
+    raw = ("xunleiapp://xunlei.com/webAdCheck?url=https://sj-m-ssl.xunlei.com/group-invite"
+           "?from_uid=1&group_id=123&type=cmd&from=qr&content=绿绿剧场")
+    assert _extract_http(raw).startswith("https://sj-m-ssl.xunlei.com/group-invite")

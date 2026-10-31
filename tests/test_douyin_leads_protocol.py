@@ -75,7 +75,10 @@ def _patch_protocol(monkeypatch, rows=None, err=None):
 
     seen: list[object] = []
 
-    def fake(keywords, session, stats=None, user_id=1):
+    #: ⚠️ 桩要跟着**生产签名**走:2026-10-31 `_try_protocol` 多了 `pages`
+    #: (每词翻页数),桩不接就会 `TypeError: unexpected keyword argument`
+    #: —— 这正是本仓踩过多次的「替身变方言」。
+    def fake(keywords, session, stats=None, user_id=1, pages=1, **kw):
         seen.append(session)
         if stats is not None:          # ⚠️ 桩也要接 `stats`(它现在被用来判"命中词占比")
             stats["kw_total"] = len(keywords)
@@ -148,7 +151,7 @@ def _patch_protocol_ratio(monkeypatch, hit: int, total: int, per_kw: int = 14):
     """协议桩:`total` 个词里 `hit` 个有结果,每个 `per_kw` 条。"""
     from app.services import douyin_leads as dl
 
-    def fake(keywords, session, stats=None, user_id=1):
+    def fake(keywords, session, stats=None, user_id=1, pages=1, **kw):
         if stats is not None:
             stats["kw_total"] = total
             stats["kw_hit"] = hit
