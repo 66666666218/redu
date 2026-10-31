@@ -2165,3 +2165,55 @@ class TestSearchWordDeObfuscation:
 
         w = _to_search_word("伪装Z男 🔥🔥")
         assert "🔥" not in w and w == "伪装Z男"
+
+
+class TestPromoWords:
+    """★ **方案 B**:用"正在被推广的名字"当搜索词(2026-10-31,用户选定)。
+
+    词源 = 最近线索里的《口令》名。理由:那是别人**此刻正在发**的,
+    命中推广号的概率远高于"群里存着的老资源名";用户口径「新鲜资源优先于转存」。
+    """
+
+    def test_取最近的线索名_越新越前(self, session) -> None:
+        from datetime import datetime, timedelta
+
+        from app.db.models import DouyinLead
+        from app.services.douyin_leads import promo_search_words
+
+        now = datetime.now()
+        for i, (mark, age_h) in enumerate([("老名字", 96), ("新名字", 1)]):
+            session.add(DouyinLead(user_id=1, aweme_id=f"v{i}", mark=mark, title=f"《{mark}》",
+                                   found_at=now - timedelta(hours=age_h),
+                                   found_date=(now - timedelta(hours=age_h)).strftime("%Y-%m-%d")))
+        session.commit()
+
+        assert promo_search_words(session, 1, top=2, days=7) == ["新名字", "老名字"]
+
+    def test_太老的推广名不要(self, session) -> None:
+        from datetime import datetime, timedelta
+
+        from app.db.models import DouyinLead
+        from app.services.douyin_leads import promo_search_words
+
+        session.add(DouyinLead(user_id=1, aweme_id="old", mark="过期名", title="《过期名》",
+                               found_at=datetime.now() - timedelta(days=30),
+                               found_date="2026-09-30"))
+        session.commit()
+
+        assert promo_search_words(session, 1, top=2, days=7) == []
+
+    def test_推广名排在本轮词最前(self, session) -> None:
+        from datetime import datetime
+
+        from app.db.models import DouyinLead
+        from app.services.douyin_leads import search_keywords
+
+        session.add(DouyinLead(user_id=1, aweme_id="p1", mark="正在推的名字",
+                               title="《正在推的名字》", found_at=datetime.now(),
+                               found_date=datetime.now().strftime("%Y-%m-%d")))
+        session.commit()
+
+        from config.settings import Settings
+
+        kws = search_keywords(session, 1, 8, Settings(_env_file=None), hot=[])
+        assert kws and kws[0] == "正在推的名字", kws

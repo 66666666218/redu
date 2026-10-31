@@ -618,6 +618,39 @@ def _to_search_word(title: str) -> str:
     return word[:12]
 
 
+def promo_search_words(session, user_id: int, top: int = 2, days: int = 7) -> list[str]:
+    """**正在被推广的名字** → 下一轮的搜索词(2026-10-31,用户选定「方案 B」)。
+
+    词源 = 我们**最近自己收到的线索**里的《口令》名(`douyin_leads.mark`)。
+    为什么这条路对:这些名字是**别人此刻正在抖音上发口令推广的**,拿它们去搜,
+    命中推广号的概率远高于"群里存着的老资源名"(历史有效率 86% vs 20%~40%)。
+
+    ⚠️ 必须**按找到时间倒序**:用户口径「新鲜资源优先级大于转存」——
+    我们只要"最新冒出来的名字",越新越可能还在被推。
+    ⚠️ 名字里的**空白/emoji/书名号**要先清掉(它们是标题语法,不是搜索词的一部分)。
+    """
+    from datetime import datetime, timedelta
+
+    from app.db.models import DouyinLead
+
+    since = datetime.now() - timedelta(days=max(1, int(days or 7)))
+    rows = session.execute(
+        select(DouyinLead.mark, DouyinLead.found_at)
+        .where(DouyinLead.user_id == user_id, DouyinLead.found_at >= since,
+               DouyinLead.mark != "")
+        .order_by(DouyinLead.found_at.desc()).limit(max(4, int(top) * 10))).all()
+    out: list[str] = []
+    for mark, _at in rows:
+        w = re.sub(r"[《》「」\s]+", "", str(mark or ""))
+        w = re.sub(r"[🌀-🫿☀-➿️]", "", w).strip()
+        if len(w) < 2 or w in out:
+            continue
+        out.append(w)
+        if len(out) >= max(0, int(top)):
+            break
+    return out
+
+
 def group_keywords(session, user_id: int, top: int = 3, days: int = 7) -> list[str]:
     """**群组里新出现的资源** → 抖音搜索词。
 
@@ -1092,6 +1125,15 @@ def search_keywords(session, user_id: int, top: int, settings,
     #   搜回来的几乎全是短剧推广(实测 `咐置` 一个词 204 条线索)→ 用户报的
     #   「每轮推送基本都是短剧相关的」。现在每轮只取 `douyin_leads_quark_slots` 个,
     #   且**起点跟着类目游标走** ⇒ 几个词轮流出现,不是「夸克口令」永远霸着名额。
+    # ★ **正在被推广的名字排最前**(2026-10-31,方案 B):它们是"此刻有人在发"的,
+    #: 比群里的老资源名更可能搜到**正在推广**的内容;用户口径「新鲜优先于转存」。
+    promo = promo_search_words(
+        session, user_id,
+        top=int(getattr(settings, "douyin_leads_promo_words", 2) or 0),
+        days=int(getattr(settings, "douyin_leads_promo_days", 7) or 7))
+    if promo:
+        keep = max(0, int(top) - len(promo))
+        kws = promo + [w for w in kws if w not in promo][:keep]
     qs = [w.strip() for w in
           str(getattr(settings, "douyin_leads_quark_keywords", "") or "").split(",")
           if w.strip()]
@@ -1101,6 +1143,13 @@ def search_keywords(session, user_id: int, top: int, settings,
         for w in (qs[start:] + qs[:start])[:slots]:
             if w not in kws:
                 kws.append(w)
+    #: ★ **按归一形态去重**(2026-10-31):列表里同时出现过 `D 顶级C距1` 与 `D顶级C距1`
+    #: —— 同一资源的不同写法各占一个名额,等于白烧一次搜索。保留**先出现的那个**
+    #: (新鲜/高产的排在前,见上面的排序)。
+    _uniq: dict[str, str] = {}
+    for w in kws:
+        _uniq.setdefault(_norm_word(w), w)
+    kws = list(_uniq.values())
     return kws
 
 
