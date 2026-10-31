@@ -1031,6 +1031,25 @@ def push_expand(items: list[dict], settings) -> bool:
         build_expand_card(items))
 
 
+#: **主题词** —— 用来区分"大瓜/资源"与"交流群/扩列群"(2026-10-30 数据暴露的问题)。
+#: 实测小红书的命中里 6/14 是 `英语学习群`/`扩列群`/`聊天`/`招聘` 这类**纯社交群**,
+#: 求/1 密度一样高,但**不是大瓜**。这里只做**记录**,不改变推送 ——
+#: 先攒"主题相关命中率",再用数据决定要不要拿它当闸门。
+_TOPIC_WORDS = ("瓜", "八卦", "爆料", "塌房", "资源", "网盘", "剧", "视频", "网红", "主播",
+                "合集", "电影", "动漫", "漫画", "小说", "图")
+#: 纯社交群的标志词(出现这些且没有主题词 ⇒ 判为非主题)
+_SOCIAL_WORDS = ("群", "扩列", "互赞", "涨粉", "聊天", "交友", "招聘", "学习", "红包",
+                 "搭子", "互关", "粉丝", "直播间")
+
+
+def topic_hit(title: str) -> bool:
+    """这条是不是**主题相关**(大瓜/资源),而不是纯社交群。"""
+    t = str(title or "")
+    if any(w in t for w in _TOPIC_WORDS):
+        return True
+    return not any(w in t for w in _SOCIAL_WORDS)
+
+
 def _record_scan(db, user_id: int, v: dict, *, total: int, ones: int, demand: int,
                  dup: float, flagged: bool, why: str, name: str,
                  platform: str = "douyin", has_group: bool = False) -> None:
@@ -1055,6 +1074,7 @@ def _record_scan(db, user_id: int, v: dict, *, total: int, ones: int, demand: in
     row.dup_ratio = float(dup or 0)
     row.flagged, row.why, row.name = bool(flagged), str(why or "")[:32], str(name or "")[:128]
     row.has_group = bool(has_group)
+    row.topic_ok = topic_hit(v.get("title") or "")
     row.scanned_at = datetime.now()
 
 
@@ -1205,7 +1225,11 @@ def digest_stats(db, user_id: int = 1, hours: int = 24) -> dict:
         if rs:
             by_platform[p] = {"scanned": len(rs),
                               "flagged": sum(1 for r in rs if r.flagged),
-                              "group": sum(1 for r in rs if getattr(r, "has_group", False))}
+                              "group": sum(1 for r in rs if getattr(r, "has_group", False)),
+                              #: 命中里**主题相关**的条数 —— 用来回答"命中率高是不是因为
+                              #: 混进了一堆交流群/扩列群"(2026-10-30 数据里 6/14 就是这类)。
+                              "topic": sum(1 for r in rs if r.flagged
+                                           and getattr(r, "topic_ok", True))}
     names = db.scalars(select(DemandName).where(
         DemandName.user_id == user_id,
         DemandName.last_seen_at >= since).order_by(
@@ -1236,6 +1260,7 @@ def build_digest_card(st: dict) -> dict:
         label = {"douyin": "抖音", "xiaohongshu": "小红书"}
         lines.append("分平台:" + " · ".join(
             f"{label.get(k, k)} 扫{v['scanned']}/命中{v['flagged']}"
+            + (f"(主题{v['topic']})" if v.get("topic") is not None else "")
             + (f"/有群{v['group']}" if v.get("group") else "")
             for k, v in bp.items()))
     if st["names"]:

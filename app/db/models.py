@@ -1170,6 +1170,9 @@ class DemandScan(Base):
     #: (只有二维码入口 + 要 App 加入),但**挂没挂群聊**本身是个信号:挂了群的帖子
     #: 往往是吃瓜/资源集散地。这里只记录这个事实,不假装能读群内容。
     has_group: Mapped[bool] = mapped_column(Boolean, default=False)
+    #: 这条是不是**主题相关**(大瓜/资源),而不是"英语学习群/扩列群"这类纯社交群。
+    #: 只记录、暂不参与推送 —— 先攒数据决定要不要拿它当闸门(2026-10-30)。
+    topic_ok: Mapped[bool] = mapped_column(Boolean, default=True)
     why: Mapped[str] = mapped_column(String(32), default="")        # 求/1密度 | 重复评论
     name: Mapped[str] = mapped_column(String(128), default="")      # 取到的名字(可能空)
     scanned_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
