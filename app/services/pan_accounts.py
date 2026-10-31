@@ -38,6 +38,51 @@ _POOL_KEY = "pan_account_pool"
 #: 盘满后的**冷静期** —— 满了的账号短时间内别再探(省一次接口,也免得反复撞风控)
 FULL_COOLDOWN_MIN = 30
 
+#: ★ **百度账号登录态探活**(2026-10-31):`baidupan#2` / `#3` 的 cookie 早已失效,
+#: 但在池里它们"最空"(各 ~5TiB) ⇒ **永远排第一** ⇒ 每个百度动作都吃
+#: `errno=-6`,而**主号明明是好的**(能列目录,只是超额 43 倍)。实测当天:
+#: `pan_retention` 的百度分支连续多轮「列目录失败(errno=-6 /)」。
+#: ⇒ 取号时先探一次活(缓存 30 分钟),**死的跳过并打日志**,别让坏凭据挡住好的。
+_ALIVE_TTL_S = 1800
+_alive_cache: dict[str, tuple[float, bool]] = {}
+_BAIDU_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+             "(KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36 Edg/156.0.0.0")
+
+
+def _alive_key(cookie: str) -> str:
+    """缓存键 = cookie 的哈希(**不拿明文当键**,免得凭据进内存 dump/日志)。"""
+    import hashlib
+
+    return hashlib.sha1(str(cookie or "").encode("utf-8")).hexdigest()
+
+
+def _baidu_alive(cookie: str) -> bool:
+    """这个百度 cookie 还能用吗?`/api/quota` 的 `errno==0` 才算活。
+
+    ⚠️ **探活失败(网络/超时)不判死** —— 否则一次抖动会把好号踢出池子,
+    那是"因为查不到所以判死"的老毛病(见 `absence-of-evidence` 那条教训)。
+    """
+    import time
+
+    import requests
+
+    key = _alive_key(cookie)
+    hit = _alive_cache.get(key)
+    now = time.time()
+    if hit and now - hit[0] < _ALIVE_TTL_S:
+        return hit[1]
+    try:
+        r = requests.get("https://pan.baidu.com/api/quota",
+                         params={"checkfree": 1, "checkexpire": 1},
+                         headers={"User-Agent": _BAIDU_UA, "Cookie": str(cookie),
+                                  "Referer": "https://pan.baidu.com/"}, timeout=12)
+        ok = r.json().get("errno") == 0
+    except Exception:  # noqa: BLE001 - 探不到 ≠ 死了
+        logger.debug("百度账号探活失败(网络),暂不判死", exc_info=True)
+        return True
+    _alive_cache[key] = (now, bool(ok))
+    return bool(ok)
+
 
 @dataclass
 class AccountRef:
@@ -241,6 +286,16 @@ def cookies_for(session, platform: str, *, user_id: int = 1) -> list[tuple[str, 
             continue
         seen.add(ck)
         out.append((r.label or r.cookie_key, ck))
+    #: ★ 百度:把**登录态已死**的账号召回后面(2026-10-31 实测:`baidupan#2/#3` 失效,
+    #: 却因"最空"永远排第一 ⇒ 每个百度动作都 errno=-6,而主号是好的)。
+    #: ⚠️ **只在还有活号时**才滤掉死号:全死就原样返回 —— 否则调用方会看到"没凭据",
+    #: 把"cookie 过期"误诊成"没配置账号"。
+    if platform == "baidupan" and len(out) > 1:
+        alive = [(lb, ck) for lb, ck in out if _baidu_alive(ck)]
+        if alive and len(alive) < len(out):
+            dead = [lb for lb, _ in out if lb not in {a[0] for a in alive}]
+            logger.warning("百度账号池里有 %d 个登录态失效,已跳过:%s", len(dead), dead)
+            out = alive
     return out
 
 

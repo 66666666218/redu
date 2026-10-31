@@ -52,6 +52,25 @@ logger = get_logger(__name__)
 #: 把没排上的家记进 `remaining_homes`,下一轮接着扫(见 `quark_dup_cache`)。
 BUDGET = int(os.environ.get("QUARK_CLEANUP_BUDGET") or 2500)
 
+
+def scan_budget() -> int:
+    """这一轮允许多少次 API 调用。
+
+    ⚠️ **2026-10-31 修**:原来只读 `os.environ`,而本项目的配置**全在 `.env`**
+    (由 pydantic 读,**不会**进 `os.environ`)⇒ 在 `.env` 里写 `QUARK_CLEANUP_BUDGET`
+    **完全不生效**,于是"加预算让它扫完"这个动作做了等于没做。
+    现在优先读 settings,**再**回落到环境变量。
+    """
+    try:
+        from config.settings import get_settings
+
+        v = int(getattr(get_settings(), "quark_cleanup_budget", 0) or 0)
+        if v > 0:
+            return v
+    except Exception:  # noqa: BLE001 - 配置读不到就回落,别让清理链整个崩
+        logger.debug("读取 quark_cleanup_budget 失败,回落环境变量", exc_info=True)
+    return BUDGET
+
 #: 重复检测的体积下限(引流不限)。删小的重复省不到空间,却一样承担误删风险。
 DUP_MIN_BYTES = 1 * 1024 * 1024
 
@@ -385,7 +404,7 @@ def build_plan(qt: Any, *, home_prefix: str = "redian监听", mmdd_prefix: str =
     传 `()` = 刻意不加,离线测试用)。这些目录里的文件**永不删** —— 见
     `collect_intro_protect` 里的说明:它们会被复制进每个资源,而恰恰最容易被判成"引流"或"重复"。
     """
-    budget = {"n": 0, "cap": budget_cap or BUDGET}
+    budget = {"n": 0, "cap": budget_cap or scan_budget()}
     homes = list_homes(qt, home_prefix)
     order = [str(h.get("file_name")) for h in homes]
     files: list[dict] = []

@@ -34,6 +34,20 @@ import os
 #: ⚠️ 试过 14 种"服务端排除回收站"的参数名,接口**一个都不认** —— 原始列表里约 197/200
 #: 是 trashed 条目,只能在客户端过滤,所以**每个目录都要多翻十几页**。这是扫描慢的根因。
 BUDGET = int(os.environ.get("PAN_DEDUPE_BUDGET") or 800)
+
+
+def scan_budget() -> int:
+    """预算**优先读 settings**(2026-10-31 修):`.env` 由 pydantic 读、**不进** `os.environ`,
+    只读 environ 的旋钮等于"在 `.env` 里写它不生效"(与 `quark_dup` 同一处坑)。"""
+    try:
+        from config.settings import get_settings
+
+        v = int(getattr(get_settings(), "pan_dedupe_budget", 0) or 0)
+        if v > 0:
+            return v
+    except Exception:  # noqa: BLE001 - 读不到就回落
+        pass
+    return BUDGET
 #: 扫描**最多用掉**预算的这个比例,剩下的**留给"数每组内容量"** ——
 #: 不留的话统计会撞上限,**每组都数出 0 项 0 字节**,于是"留内容多的那份"
 #: 这条规则**静默失效**(实测踩到:4 组的 ✔留/✂删 全是 0.0 MiB,等于没判)。
@@ -66,7 +80,7 @@ def _is_notice(name: str) -> bool:
 
 def _dir_stats(ls, fid: str, budget: dict, depth: int = 0) -> tuple[int, int]:
     """递归数一个资源包的 (条目数, 总字节)。预算共用,**撞上限就返回已数到的部分**。"""
-    if depth > 4 or budget["n"] >= BUDGET:
+    if depth > 4 or budget["n"] >= scan_budget():
         return 0, 0
     n = sz = 0
     for x in ls(fid):
@@ -80,7 +94,7 @@ def _dir_stats(ls, fid: str, budget: dict, depth: int = 0) -> tuple[int, int]:
     return n, sz
 
 
-def build_plan(max_depth: int = 3, budget: int = BUDGET, root_id: str = "") -> dict:
+def build_plan(max_depth: int = 3, budget: int | None = None, root_id: str = "") -> dict:
     """扫盘 → 找同级同名重复 → 定"留谁删谁"。返回 `{"plan", "freed", "n_drop", ...}`。
 
     ⚠️ **撞 API 预算时 `complete=False`** —— 调用方必须把这件事说出来:
@@ -93,6 +107,7 @@ def build_plan(max_depth: int = 3, budget: int = BUDGET, root_id: str = "") -> d
     真实资源都在落地目录(「最全文件」)下,从那里扫才既有意义又省调用。
     """
     calls = {"n": 0}
+    budget = int(budget or scan_budget())      #: 没传就用 settings/环境里的预算
     dirs: list[dict] = []
 
     def ls(pid: str) -> list[dict]:
