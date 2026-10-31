@@ -2217,3 +2217,35 @@ class TestPromoWords:
 
         kws = search_keywords(session, 1, 8, Settings(_env_file=None), hot=[])
         assert kws and kws[0] == "正在推的名字", kws
+
+
+class TestGroupOnlyLeads:
+    """★ **群口令型只入库、不进客户卡**(2026-10-31)。
+
+    用户口径:「新鲜资源优先级大于转存」「我们不需要全部的转存」。
+    原来这类**直接丢掉** ⇒ 库里看不到"今天其实发现了 2 条新的",漏斗长期显示 0。
+    """
+
+    def test_群口令型入库但不推送(self, session, monkeypatch) -> None:
+        from app.db.models import DouyinLead
+        from app.services import douyin_leads as dl
+
+        lead = {"aweme_id": "g1", "title": "《大瓜群》最新资源", "url": "https://v.douyin.com/x",
+                "mark": "大瓜群", "author": "a",
+                "kouling": {"kind": "group", "group_id": "123"}}
+        monkeypatch.setattr(dl, "collect_leads", lambda *a, **k: ([dict(lead)], "CDP"))
+        monkeypatch.setattr(dl, "apply_kouling", lambda *a, **k: None)
+        pushed = []
+        monkeypatch.setattr(dl, "push_leads", lambda *a, **k: pushed.append(1))
+
+        dl.run_douyin_leads(session, 1, _settings_like(), category="影视", advance=False)
+
+        assert session.query(DouyinLead).filter(DouyinLead.aweme_id == "g1").count() == 1
+        assert pushed == [], "群口令型不该进客户卡"
+
+
+def _settings_like():
+    from config.settings import Settings
+
+    return Settings(_env_file=None, is_dev=True, use_proxy=False,
+                    request_delay_seconds=0.0, xianyu_request_delay=0.0)

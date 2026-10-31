@@ -2007,13 +2007,27 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
                 stats=funnel)
             total += len(leads)
             n_panless = 0
+            n_grouponly = 0
             if leads:
                 # 口令 → 资源(分享链直接转存入库 / 群则加群),结果一并写进卡片
                 apply_kouling(leads, db, user_id, settings)
                 # ★ **所有赛道都必须带网盘**(2026-10-30 用户口径):没有可用链的不入库、不推。
                 before = len(leads)
-                leads = _drop_panless(leads)
-                n_panless = before - len(leads)
+                kept = _drop_panless(leads)
+                n_panless = before - len(kept)
+                #: ★ **群口令型:只入库、不进客户卡**(2026-10-31 用户「新鲜资源优先级大于转存,
+                #: 我们不需要全部的转存」)。原来这类**直接丢掉** ⇒ 数据库里根本看不到
+                #: "今天其实发现了 2 条新的",漏斗长期显示 0,像"没人发"。
+                #: 现在它们进 `douyin_leads`(卡片口径不变:客户群仍然只发**可直取**的),
+                #: 供观察与后续决定"要不要单独出一张『需加群』的卡"。
+                kept_ids = {str(x.get("aweme_id") or "") for x in kept}
+                group_only = [x for x in leads
+                              if str(x.get("aweme_id") or "") not in kept_ids
+                              and (x.get("kouling") or {}).get("kind") == "group"]
+                n_grouponly = len(group_only)
+                if group_only:
+                    _save_leads(db, user_id, group_only)
+                leads = kept
                 if leads:
                     _save_leads(db, user_id, leads)  # 落库:转发量只在这一次有效(结算要用)
                     push_leads(leads, settings, platform=plat, session=db, user_id=user_id)
@@ -2040,7 +2054,7 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
                         #: ★ 漏斗(2026-10-31):原始→时间挡→无时间→口令→无链,一眼看出哪道闸在掉量。
                         f"漏斗 原始{funnel.get('raw', 0)} 挡{funnel.get('old', 0)}"
                         f" 无时{funnel.get('notime', 0)} 口令{funnel.get('kept', 0)}"
-                        f" 无链{n_panless}")
+                        f" 无链{n_panless} 群令{n_grouponly}")
             db.commit()
         except Exception as exc:  # noqa: BLE001 - 单平台失败不影响其余
             db.rollback()
