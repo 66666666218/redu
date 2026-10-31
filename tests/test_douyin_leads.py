@@ -2144,3 +2144,24 @@ def test_empty_direction_gets_two_topic_words(session, monkeypatch) -> None:
 
     hints = [w for w in kws if w in ct.categories()["问卷"]]
     assert len(hints) >= 2, kws
+
+
+class TestSearchWordDeObfuscation:
+    """★ 群标题的**拆字**必须合回去再搜(2026-10-31)。
+
+    实测:群里写 `伪丨装丨Z丨男 🔥`,拿原串搜抖音**一条都对不上**;
+    合回 `伪装Z男` 后,同样一页结果里**近 7 天有 6 条**(原串只有 1~2 条)。
+    这一条直接决定了"搜回来的帖子是不是老帖"。
+    """
+
+    def test_竖线拆字要合回去(self) -> None:
+        from app.services.douyin_leads import _to_search_word
+
+        assert _to_search_word("伪丨装丨Z丨男 🔥") == "伪装Z男"
+        assert _to_search_word("顶丨级丨沦丨陷 🔥") == "顶级沦陷"
+
+    def test_emoji不留在词里(self) -> None:
+        from app.services.douyin_leads import _to_search_word
+
+        w = _to_search_word("伪装Z男 🔥🔥")
+        assert "🔥" not in w and w == "伪装Z男"

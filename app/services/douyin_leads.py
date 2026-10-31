@@ -163,7 +163,7 @@ def _aweme_id(url: str) -> str:
 
 
 def _try_protocol(keywords: list[str], session, stats: dict | None = None,
-                  user_id: int = 1) -> tuple[list[dict], Exception | None]:
+                  user_id: int = 1, pages: int = 1) -> tuple[list[dict], Exception | None]:
     """走抖音纯协议取一批;返回 `(记录, 异常)`。**异常不在这里抛** —— 留给调用方决定回落。
 
     `stats` 会被 `douyin_protocol_source.search` 填进 `kw_total` / `kw_hit`
@@ -188,7 +188,7 @@ def _try_protocol(keywords: list[str], session, stats: dict | None = None,
         tried += 1
         try:
             rows = dps.search(keywords, session=session, stats=stats,
-                              user_id=user_id, cookie_key=key)
+                              user_id=user_id, cookie_key=key, pages=max(1, int(pages or 1)))
         except Exception as exc:  # noqa: BLE001 - 回落是设计的一部分,这里就是它的入口
             last_exc = exc
             if getattr(exc, "kind", "") in _switchable:
@@ -326,7 +326,7 @@ def _with_douyin_verdict(msg: str, session, user_id: int = 1,
 
 
 def _collect(platform: str, keywords: list[str], session=None,
-             user_id: int = 1) -> tuple[list[dict], str]:
+             user_id: int = 1, pages: int = 1) -> tuple[list[dict], str]:
     """取搜索结果 → `(记录列表, 来源标签)`。
 
     **抖音走纯协议优先**(2026-10-08),其余平台照旧走 MediaCrawler。
@@ -351,7 +351,7 @@ def _collect(platform: str, keywords: list[str], session=None,
 
         if getattr(get_settings(), "douyin_leads_use_protocol", True):
             stats: dict = {}
-            rows, err = _try_protocol(keywords, session, stats, user_id=user_id)
+            rows, err = _try_protocol(keywords, session, stats, user_id=user_id, pages=pages)
             total = int(stats.get("kw_total") or 0)
             hit = int(stats.get("kw_hit") or 0)
             # ★★ **"只有少数词有结果"要当成可疑,回落浏览器**(2026-10-08 实测逼出来的)。
@@ -467,7 +467,8 @@ def _collect(platform: str, keywords: list[str], session=None,
 
 
 def collect_leads(keywords: list[str], limit: int = 30, platform: str = "douyin",
-                  session=None, user_id: int = 1) -> tuple[list[dict], str]:
+                  session=None, user_id: int = 1, pages: int = 1,
+                  stats: dict | None = None) -> tuple[list[dict], str]:
     """`find_leads` 的完整版:**连来源标签一起返回**(运行记录要写它)。
 
     其余行为完全一致 —— `find_leads` 就是它的薄封装。
@@ -490,7 +491,7 @@ def collect_leads(keywords: list[str], limit: int = 30, platform: str = "douyin"
     _s = get_settings()
     min_pub_ts = max(_min_publish_ts(_s), _max_age_ts(_s))
     n_old = n_notime = 0
-    rows, source = _collect(platform, keywords, session, user_id=user_id)
+    rows, source = _collect(platform, keywords, session, user_id=user_id, pages=pages)
     logger.info("线索取数:平台=%s 来源=%s 原始 %d 条", platform, source or "-", len(rows))
     for h in rows:
         text = (h.get("snippet") or "").strip()
@@ -540,6 +541,11 @@ def collect_leads(keywords: list[str], limit: int = 30, platform: str = "douyin"
     # ↑ **越新越靠前**(发布时间倒序),同档内仍按强信号排(开头《》> 与昵称吻合 > 其它)
     for x in out:
         x.pop("_rank", None)
+    #: ★ 漏斗数字留给运行记录(2026-10-31):没有它们,"产出少"到底是
+    #: **原始量少**、**被时间挡光**还是**没口令**,在库里长得一样。
+    if stats is not None:
+        stats.update({"raw": len(rows), "old": n_old, "notime": n_notime,
+                      "kept": len(out)})
     return out[:limit], source
 
 
@@ -595,6 +601,13 @@ def _to_search_word(title: str) -> str:
     from app.services.xunlei_group import is_bulk_resource
 
     text = re.sub(r"[（(【\[][^)）】\]]*[)）】\]]", " ", title or "")
+    #: ★ **把"拆字"合回去**(2026-10-31 实测):群里大量标题写成 `伪丨装丨Z丨男 🔥`、
+    #: `顶丨级丨沦丨陷 🔥` —— 中间那些竖线是**防屏蔽的拆字**,拿原串去抖音搜**一条都对不上**
+    #: (实测这两个词搜回来的 28 条里,最近的也只有 10-30 的 4 条,其余全是 4~9 月的老帖)。
+    #: 同一条资源在抖音上写的是 `伪装Z男` / `顶级沦陷`。
+    text = re.sub(r"[丨｜]", "", text)
+    #: 顺带剥掉 emoji / 装饰符号(🔥 这类)—— 它们不进搜索词
+    text = re.sub(r"[\U0001F300-\U0001FAFF☀-➿️]", " ", text)
     text = re.split(r"[|｜\-—·,，、:：!！?？]", text)[0]
     # 再丢掉**版本号式的尾串**(「2.0版」「v3」「2024版」)—— 它们搜不出东西
     tokens = [t for t in text.split()
@@ -994,7 +1007,11 @@ def search_keywords(session, user_id: int, top: int, settings,
     #: 实测裸游戏名搜不到带盘帖,`<游戏名> 下载` 才有。占掉至多 3 个名额。
     #: ★ **每个方向都从资源库取自己的资源名**(2026-10-30,用户「影视/软件下载/游戏下载等方向」):
     #: 之前只有小游戏有专属词,其它方向轮到时搜的仍是同一批剧名(`类目大瓜 → 线索13 全是影视`)。
-    own_words = category_search_words(session, user_id, cat, top=min(3, int(top)))
+    #: ★ **库内词只占 1 个名额**(2026-10-31):这些名字多是**老资源**,搜回来的帖子自然老,
+    #: 被 7 天新鲜度挡光(实测 04:11 轮 38 条挡 33 条)。名额还给"群组新资源名"。
+    lib_n = int(getattr(settings, "douyin_leads_library_words", 1) or 0)
+    own_words = category_search_words(session, user_id, cat,
+                                      top=max(0, min(lib_n, int(top))))
     n_group = int(getattr(settings, "douyin_leads_group_keywords", 3) or 0)
     # 先取**全部**候选(群里的资源名 + 资源库名称),再按类目挑 —— 挑不够会自动补本类目话题词
     cand = group_keywords(session, user_id, top=n_group)
@@ -1934,13 +1951,20 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
         try:
             # ⚠️ **必须传 `session`** —— 纯协议要从加密库读凭据;不传就是静默不带登录态
             # (实测表现:回 `status_code=2483 请先登录`,而**看起来只是"没搜到"**)。
-            leads, source = collect_leads(kws, platform=plat, session=db, user_id=user_id)
+            funnel: dict = {}
+            leads, source = collect_leads(
+                kws, platform=plat, session=db, user_id=user_id,
+                pages=int(getattr(settings, "douyin_leads_pages", 1) or 1),
+                stats=funnel)
             total += len(leads)
+            n_panless = 0
             if leads:
                 # 口令 → 资源(分享链直接转存入库 / 群则加群),结果一并写进卡片
                 apply_kouling(leads, db, user_id, settings)
                 # ★ **所有赛道都必须带网盘**(2026-10-30 用户口径):没有可用链的不入库、不推。
+                before = len(leads)
                 leads = _drop_panless(leads)
+                n_panless = before - len(leads)
                 if leads:
                     _save_leads(db, user_id, leads)  # 落库:转发量只在这一次有效(结算要用)
                     push_leads(leads, settings, platform=plat, session=db, user_id=user_id)
@@ -1963,7 +1987,11 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
                         f"线索{len(leads)} 赛道{_niche_summary(leads) or '-'} "
                         f"新鲜{_freshness_summary(leads)} "
                         f"{_kouling_summary(leads)} "
-                        f"[外部命中{n_hot}/产出{n_hot_ok}]")
+                        f"[外部命中{n_hot}/产出{n_hot_ok}] "
+                        #: ★ 漏斗(2026-10-31):原始→时间挡→无时间→口令→无链,一眼看出哪道闸在掉量。
+                        f"漏斗 原始{funnel.get('raw', 0)} 挡{funnel.get('old', 0)}"
+                        f" 无时{funnel.get('notime', 0)} 口令{funnel.get('kept', 0)}"
+                        f" 无链{n_panless}")
             db.commit()
         except Exception as exc:  # noqa: BLE001 - 单平台失败不影响其余
             db.rollback()
