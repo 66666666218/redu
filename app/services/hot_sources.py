@@ -38,6 +38,11 @@ _RE_WS = re.compile(r"\s+")
 _UA = CHROME_WINDOWS
 
 
+#: 风控兜底开关(2026-10-31):`curl_cffi` 的指纹偶尔被针对时,用普通 requests 再兜一次。
+#: 测试里会把它关掉 —— 那种用例本该**只**验证"业务码当错误",不该偷偷发真请求。
+PLAIN_FALLBACK_ENABLED = True
+
+
 class HotSourceError(Exception):
     """热榜源异常(网络/解析/上游变更)。"""
 
@@ -68,17 +73,71 @@ class BilibiliSource(HotSource):
 
     id = "bilibili"
 
-    def fetch(self, limit: int = 30) -> list[dict]:
+    #: ★ **`buvid3` 缓存**(2026-10-31):远程每小时都吃 `code=-352`,48 小时 **65 次**,
+    #: 而 43 个其它源都正常 —— 风控是按"没有浏览器指纹"判的。加一枚 `buvid3/buvid4`
+    #: 就相当于先当一次"新访客",这是 B站 自己的 `finger/spi` 接口给的,不需要登录。
+    _fp_cache: dict = {}
+
+    def _fp_cookie(self) -> str:
+        import time as _t
+
+        hit = self._fp_cache
+        if hit.get("at") and _t.time() - hit["at"] < 6 * 3600:
+            return str(hit.get("cookie") or "")
         try:
-            r = creq.get("https://api.bilibili.com/x/web-interface/ranking/v2",
-                         params={"rid": "0", "type": "all"},
-                         impersonate="chrome", timeout=15,
+            r = creq.get("https://api.bilibili.com/x/frontend/finger/spi",
+                         impersonate="chrome", timeout=12,
                          headers={"User-Agent": _UA, "Referer": "https://www.bilibili.com/"})
-            payload = r.json()
-        except Exception as exc:  # noqa: BLE001
-            raise HotSourceError(f"B站排行请求失败:{type(exc).__name__}") from exc
+            d = (r.json() or {}).get("data") or {}
+            b3, b4 = str(d.get("b_3") or ""), str(d.get("b_4") or "")
+            ck = "; ".join(x for x in (f"buvid3={b3}" if b3 else "",
+                                       f"buvid4={b4}" if b4 else "") if x)
+            if ck:
+                self._fp_cache.update({"at": _t.time(), "cookie": ck})
+                return ck
+        except Exception:  # noqa: BLE001 - 指纹拿不到就照旧直接请求
+            pass
+        return ""
+
+    def fetch(self, limit: int = 30) -> list[dict]:
+        payload: dict = {}
+        for attempt in (1, 2):
+            headers = {"User-Agent": _UA, "Referer": "https://www.bilibili.com/"}
+            ck = self._fp_cookie()
+            if ck:
+                headers["Cookie"] = ck
+            try:
+                r = creq.get("https://api.bilibili.com/x/web-interface/ranking/v2",
+                             params={"rid": "0", "type": "all"},
+                             impersonate="chrome", timeout=15, headers=headers)
+                payload = r.json()
+            except Exception as exc:  # noqa: BLE001
+                raise HotSourceError(f"B站排行请求失败:{type(exc).__name__}") from exc
+            code = payload.get("code")
+            if code in (0, None):
+                break
+            #: 被风控 ⇒ **换一枚新指纹重试一次**(旧的可能已被标记)
+            self._fp_cache.clear()
         # ⚠️ **业务码要当错误看**:HTTP 200 不等于成功
         code = payload.get("code")
+        if PLAIN_FALLBACK_ENABLED and code in ("-352", "-412", -352, -412):
+            #: ★ 2026-10-31:`curl_cffi` 的 TLS 指纹偶尔被 B站 针对,而**普通 requests 从同一台机
+            #: 同一时刻是 code=0**(远程容器实测)。所以最后再兜一次普通请求,
+            #: 别让"某个 HTTP 客户端被拦"变成"整条热榜源挂了"。
+            try:
+                import requests as _rq
+
+                h2 = {"User-Agent": _UA, "Referer": "https://www.bilibili.com/"}
+                ck2 = self._fp_cookie()
+                if ck2:
+                    h2["Cookie"] = ck2
+                alt = _rq.get("https://api.bilibili.com/x/web-interface/ranking/v2",
+                              params={"rid": "0", "type": "all"}, headers=h2, timeout=15).json()
+                if alt.get("code") in (0, None):
+                    payload = alt
+                    code = alt.get("code")
+            except Exception:  # noqa: BLE001 - 兜底失败就照原样报错
+                pass
         if code not in (0, None):
             raise HotSourceError(
                 f"B站排行被拒:code={code} {str(payload.get('message') or '')[:60]}"

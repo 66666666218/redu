@@ -200,6 +200,34 @@ def test_moved_sources_are_self_built_not_newsnow() -> None:
     assert len(own) >= 6, own
 
 
+def test_bilibili_风控时用普通requests兜一次(monkeypatch) -> None:
+    """2026-10-31:远程每小时吃 -352(48 小时 65 次),而同机普通 requests 是 code=0。
+
+    ⇒ 被风控时用**普通 requests** 再兜一次;兜通了就正常返回,不把整条源判死。
+    """
+    from app.services import hot_sources as hs
+
+    class _R:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._p = payload
+
+        def json(self):
+            return self._p
+
+    monkeypatch.setattr(hs, "PLAIN_FALLBACK_ENABLED", True)
+    monkeypatch.setattr(hs.creq, "get",
+                        lambda *a, **k: _R({"code": -352, "data": {"list": []}}))
+    monkeypatch.setattr("requests.get", lambda *a, **k: _R({
+        "code": 0, "data": {"list": [{"title": "兜底成功", "bvid": "BV1", "tname": "动画",
+                                      "stat": {"view": 1}}]}}))
+
+    rows = hs.BilibiliSource().fetch()
+
+    assert [r["title"] for r in rows] == ["兜底成功"]
+
+
 def test_bilibili_business_code_is_treated_as_an_error(monkeypatch) -> None:
     """★★ **HTTP 200 不等于成功** —— B站被风控时返回的是 **200 + `code:-352` + 空 list**。
 
@@ -219,6 +247,7 @@ def test_bilibili_business_code_is_treated_as_an_error(monkeypatch) -> None:
             return self._p
 
     # 风控:-352
+    monkeypatch.setattr(hs, "PLAIN_FALLBACK_ENABLED", False)   # 本用例只验"业务码当错误",别发真请求
     monkeypatch.setattr(hs.creq, "get",
                         lambda *a, **k: _R({"code": -352, "message": "risk control",
                                             "data": {"list": []}}))
