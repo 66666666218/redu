@@ -1647,23 +1647,10 @@ def _drop_panless(leads: list[dict]) -> list[dict]:
 
 
 def _publish_mark(pub) -> str:
-    """发布时间标记:**一小时内 = 🆕**,其余 `·MM-DD HH:MM`;拿不到就空串。
+    """发布时间标记 —— **实现只有一份**,在 `hot_time.publish_mark`(2026-10-31 起共用)。"""
+    from app.services.hot_time import publish_mark
 
-    用户口径(2026-10-16):「**一个钟内**他这个资源有他的名字」,并拍板「**标时间 + 按新排序**」——
-    卡上要一眼看出"这条是刚出的"。
-    ⚠️ **顺序本来就已经是新→旧**(`find_leads` 按 `-publish_at` 排,见那边的注释),
-    所以这里**只补标记、不动顺序** —— 同一件事写两处迟早各飘各的。
-    """
-    try:
-        ts = int(pub or 0)
-    except (TypeError, ValueError):
-        return ""
-    if ts <= 0:
-        return ""
-    from datetime import datetime
-
-    dt = datetime.fromtimestamp(ts)
-    return "🆕" if (datetime.now() - dt).total_seconds() <= 3600 else f"·{dt:%m-%d %H:%M}"
+    return publish_mark(pub)
 
 
 def _historical_mark_counts(session, user_id: int, marks: set[str],

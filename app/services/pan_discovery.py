@@ -1111,11 +1111,16 @@ def push_items(items: list[dict], settings, session=None, user_id: int = 0) -> b
         # ★ **「对标数据」也是 2026-10-16 补的**(用户那 5 要素:对标账号/对标作品/对标数据/资源/可用链)。
         _col_set_row([("**作者**", 3), ("**资源**", 5), ("**原帖**", 2),
                       ("**对标数据**", 2), ("**我方分享链**", 3)], grey=True)]
+    from app.services.hot_time import publish_mark as _pub_mark
+
     for it in items:
         _src = _md_safe(it.get("source_url") or "")
+        #: ★ 每条都带发布时间(2026-10-31 用户:「没看到资源时间的新鲜度」)
+        _pm = _pub_mark(it.get("publish_at"))
         elements.append(_col_set_row([
             (_md_safe(it.get("author") or "—"), 3),
-            (_md_safe(strip_others(it.get("title") or "")[:40]), 5),
+            (_md_safe(strip_others(it.get("title") or "")[:40])
+             + (f" {_pm}" if _pm else ""), 5),
             (f"[▶ 原帖]({_src})" if _src else "—", 2),
             (metrics_md(it.get("metrics") or {}), 2),
             (f"[▶ 打开]({_md_safe(it.get('share_url') or '')})"

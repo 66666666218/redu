@@ -181,6 +181,15 @@ def render_card(data: dict, period: str, top: int = 8,
             #: ★ 被反复推荐的那个要有**看得见的标记**:客户抱怨的就是"同一条反复出现"。
             if int(g.get("pushes") or 1) > 1:
                 cell += f" · 🔁{g['pushes']}次"
+            #: ★ **日结也标时间**(2026-10-31 用户:「没看到资源时间的新鲜度」)。
+            #: 台账里没有"视频发布时间",但有**首次推送时间**(`first`) ——
+            #: 对客户来说它回答的是"这条是什么时候开始出现在这批里的"。
+            _first = g.get("first")
+            if _first is not None:
+                try:
+                    cell += f" · {_first:%m-%d}"
+                except (TypeError, ValueError):
+                    pass
             url = str(g.get("url") or "")
             work = f"[▶ 看作品]({_md_safe(url)})" if url else "—"
             elements.append(_col_set_row([(cell, 5), (work, 3),

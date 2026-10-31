@@ -729,8 +729,12 @@ def push_items(items: list[dict], settings, detail: dict | None = None,
             _pan = _pan_name(url)
             # 「资源」:名字可点 → **我方链**,顺带写**盘名**
             # (用户 10-04 口径:只写网盘名 —— 「我方链」那三个字在客户群里会暴露运营方身份)
+            #: ★ **每条都带发布时间**(2026-10-31 用户:「今天看的时候没有看到资源时间的新鲜度」)
+            from app.services.hot_time import publish_mark
+
+            _when = publish_mark(it.get("publish_at"))
             cell = (f"[{name}]({_md_safe(url)})" + (f" · 🔴{_pan}" if _pan else "")
-                    if url else f"{name} · —")
+                    if url else f"{name} · —") + (f" {_when}" if _when else "")
             # 「对标作品」:第一条原帖。**带文字**才看得出点了会去哪(纯 URL 在手机上看不清域名)
             su = [u for u in (it.get("sample_urls") or []) if u]
             work = f"[▶ 看作品]({_md_safe(su[0])})" if su else "—(源未给链接)"

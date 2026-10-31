@@ -707,6 +707,14 @@ def push_works(works: list[dict], settings, session=None, user_id: int = 0) -> b
                 "content": f"**▍{niche}** · {len(groups[niche])} 条"}})
         for w in groups[niche]:
             title = _md_safe((w.get("title") or "")[:30]) or "—"
+            #: ★ 对标卡也标时间(2026-10-31「每个板块都要看得到新鲜度」):
+            #: 这张表没有"视频发布时间",只有 `first_seen_at` ⇒ 标**发现时间**。
+            _seen = w.get("first_seen_at")
+            if _seen is not None:
+                try:
+                    title += f" · {_seen:%m-%d}"
+                except (TypeError, ValueError):
+                    pass
             url = _md_safe(w.get("url") or "")
             work = f"[{title}]({url})" if url else title
             likes = int(w.get("likes") or 0)

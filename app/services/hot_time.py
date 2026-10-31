@@ -208,3 +208,20 @@ def parse_published_coarse(value) -> datetime | None:
             return None
         return dt if dt <= now + _MAX_FUTURE else dt.replace(year=now.year - 1)
     return None
+
+
+def publish_mark(ts) -> str:
+    """发布时间标记:**一小时内 = 🆕**,其余 `·MM-DD HH:MM`;拿不到就空串。
+
+    用户口径(2026-10-16):「一个钟内他这个资源有他的名字」,并拍板「标时间 + 按新排序」。
+    2026-10-31 起这是**所有板块共用的一份**(抖音线索、跨平台热度、知乎盘链…),
+    原来只在 `douyin_leads._publish_mark` 里有,别的卡上根本看不到时间。
+    """
+    try:
+        t = int(ts or 0)
+    except (TypeError, ValueError):
+        return ""
+    if t <= 0:
+        return ""
+    dt = datetime.fromtimestamp(t)
+    return "🆕" if (datetime.now() - dt).total_seconds() <= 3600 else f"·{dt:%m-%d %H:%M}"
