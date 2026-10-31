@@ -490,22 +490,41 @@ def collect_leads(keywords: list[str], limit: int = 30, platform: str = "douyin"
 
     _s = get_settings()
     min_pub_ts = max(_min_publish_ts(_s), _max_age_ts(_s))
-    n_old = n_notime = 0
+    n_old = n_notime = n_cont = 0
     rows, source = _collect(platform, keywords, session, user_id=user_id, pages=pages)
     logger.info("线索取数:平台=%s 来源=%s 原始 %d 条", platform, source or "-", len(rows))
+    #: ★ **"同一资源的老剧集"不该按视频发布时间挡掉**(2026-10-31 用户提示:
+    #: 「一个资源可能分很多剧集」)。实测搜 `伪装Z男` 回来的是**同一部作品**的
+    #: 10-12 → 10-30 十几条(番外3/大结局/21集…) —— 资源正热,老的是**剧集**,不是内容过期。
+    #: 判据:**这个资源名最近 7 天已经被我们收到过**,或它历史上是**群口令型**
+    #: (群资源本来就靠"进群拿最新")⇒ 老视频也放行,只用来排序。
+    active_marks: set[str] = set()
+    group_marks: set[str] = set()
+    if session is not None and platform == "douyin":
+        try:
+            from datetime import datetime as _dt
+            from datetime import timedelta as _td
+
+            from sqlalchemy import select as _select
+
+            from app.db.models import DouyinLead
+
+            active_marks = {m for m in session.scalars(_select(DouyinLead.mark).where(
+                DouyinLead.user_id == user_id,
+                DouyinLead.found_at >= _dt.now() - _td(days=7),
+                DouyinLead.mark != "")).all() if m}
+            group_marks = {m for m in session.scalars(_select(DouyinLead.mark).where(
+                DouyinLead.user_id == user_id, DouyinLead.kind == "group",
+                DouyinLead.found_at >= _dt.now() - _td(days=30),
+                DouyinLead.mark != "")).all() if m}
+        except Exception:  # noqa: BLE001 - 查不到就退回旧口径(按时间硬挡)
+            logger.debug("预取活跃资源名失败,退回按发布时间硬挡", exc_info=True)
     for h in rows:
         text = (h.get("snippet") or "").strip()
         url = (h.get("url") or "").strip()
         if not url or url in seen:
             continue          # 拿不到视频链 / 同一个视频(多词命中)去重
         pub = int(h.get("publish_at") or 0)
-        if min_pub_ts:
-            if pub <= 0:
-                n_notime += 1
-                continue
-            if pub < min_pub_ts:
-                n_old += 1
-                continue
         name = h.get("name") or ""
         mark = _lead_mark(text, name)
         if not mark:
@@ -514,6 +533,17 @@ def collect_leads(keywords: list[str], limit: int = 30, platform: str = "douyin"
             # 实测搜「夸克口令」一次就捞到 15 条,全被这条判据挡在门外。
             from app.services.quark_kouling import mark_of
             mark = mark_of(text)
+        if min_pub_ts:
+            if pub <= 0:
+                n_notime += 1
+                continue
+            if pub < min_pub_ts:
+                #: 同一资源的老剧集 / 群资源 ⇒ 放行(见上面 `active_marks` 的说明)
+                if mark and (mark in active_marks or mark in group_marks):
+                    n_cont += 1
+                else:
+                    n_old += 1
+                    continue
         # ★ **正文里直接贴网盘链**也算线索(2026-10-29,用户口径「这些小游戏也是都需要带网盘的」)。
         # 实测搜 `游戏合集 下载`:46 条里 6 条带盘,其中一批是**百度网盘直链**、没有《》/令牌
         # ⇒ 原来会被下面那道 `if not mark: continue` 全部丢掉。
@@ -535,8 +565,8 @@ def collect_leads(keywords: list[str], limit: int = 30, platform: str = "douyin"
                     "aweme_id": _aweme_id(url),         # 去重键(同一视频会被多个词命中)
                     "_rank": _lead_rank(text, name)})
     if min_pub_ts and (n_old or n_notime):
-        logger.info("抖音线索:按发布时间过滤掉 %d 条(早于下限)+ %d 条(没有发布时间)",
-                    n_old, n_notime)
+        logger.info("抖音线索:按发布时间过滤掉 %d 条(早于下限)+ %d 条(没有发布时间)"
+                    " ·同一资源的老剧集放行 %d 条", n_old, n_notime, n_cont)
     out.sort(key=lambda x: (-int(x.get("publish_at") or 0), x["_rank"]))
     # ↑ **越新越靠前**(发布时间倒序),同档内仍按强信号排(开头《》> 与昵称吻合 > 其它)
     for x in out:
@@ -545,7 +575,7 @@ def collect_leads(keywords: list[str], limit: int = 30, platform: str = "douyin"
     #: **原始量少**、**被时间挡光**还是**没口令**,在库里长得一样。
     if stats is not None:
         stats.update({"raw": len(rows), "old": n_old, "notime": n_notime,
-                      "kept": len(out)})
+                      "kept": len(out), "cont": n_cont})
     return out[:limit], source
 
 
@@ -2064,7 +2094,7 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
                         f"[外部命中{n_hot}/产出{n_hot_ok}] "
                         #: ★ 漏斗(2026-10-31):原始→时间挡→无时间→口令→无链,一眼看出哪道闸在掉量。
                         f"漏斗 原始{funnel.get('raw', 0)} 挡{funnel.get('old', 0)}"
-                        f" 无时{funnel.get('notime', 0)} 口令{funnel.get('kept', 0)}"
+                        f" 无时{funnel.get('notime', 0)} 续{funnel.get('cont', 0)} 口令{funnel.get('kept', 0)}"
                         f" 无链{n_panless} 群令{n_grouponly}")
             db.commit()
         except Exception as exc:  # noqa: BLE001 - 单平台失败不影响其余

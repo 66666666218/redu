@@ -2293,3 +2293,41 @@ def test_群链接要从自定义scheme里剥出来():
     raw = ("xunleiapp://xunlei.com/webAdCheck?url=https://sj-m-ssl.xunlei.com/group-invite"
            "?from_uid=1&group_id=123&type=cmd&from=qr&content=绿绿剧场")
     assert _extract_http(raw).startswith("https://sj-m-ssl.xunlei.com/group-invite")
+
+
+class TestContinuationEpisodes:
+    """★ **同一资源的老剧集不该按视频发布时间挡掉**(2026-10-31)。
+
+    用户提示:「一个资源可能分很多剧集」。实测搜 `伪装Z男` 回来的是**同一部作品**
+    10-12 → 10-30 的十几条(番外3/大结局/21集…)—— 资源正热,老的是**剧集**不是内容过期。
+    判据:该资源最近 7 天已被我们收过(或历史上是群口令型)⇒ 老视频放行,只用来排序。
+    """
+
+    def test_活跃资源的老剧集放行_无关的老帖子仍挡(self, session, monkeypatch) -> None:
+        from datetime import datetime, timedelta
+
+        from app.db.models import DouyinLead
+        from app.services import douyin_leads as dl
+
+        session.add(DouyinLead(user_id=1, aweme_id="old1", mark="伪装直男",
+                               title="《伪装直男》", found_at=datetime.now() - timedelta(days=1),
+                               found_date="2026-10-30"))
+        session.commit()
+
+        #: ⚠️ 本文件有 autouse fixture 把时间窗**清零**了(见文件头);这条用例要**真的**启用窗口
+        monkeypatch.setattr(dl, "_max_age_ts",
+                            lambda s: int((datetime.now() - timedelta(days=7)).timestamp()))
+        monkeypatch.setattr(dl, "_min_publish_ts", lambda s: 0)
+        old_ts = int((datetime.now() - timedelta(days=20)).timestamp())
+        monkeypatch.setattr(dl, "_collect", lambda *a, **k: ([
+            {"snippet": "《伪装直男》第21集", "url": "https://www.douyin.com/video/1",
+             "publish_at": old_ts, "name": "a"},
+            {"snippet": "《无关资源》第3集", "url": "https://www.douyin.com/video/2",
+             "publish_at": old_ts, "name": "b"},
+        ], "CDP"))
+
+        stats: dict = {}
+        leads, _ = dl.collect_leads(["词"], session=session, stats=stats)
+
+        assert [x["mark"] for x in leads] == ["伪装直男"]
+        assert stats["cont"] == 1 and stats["old"] == 1
