@@ -1282,3 +1282,40 @@ def test_retry_douyin_leads_重跑同一个类目(session, monkeypatch: pytest.M
 
     retry_failed_runs(max_retry=3)
     assert calls and calls[0].get("category") == "影视", f"应当重跑失败那个类目:{calls}"
+
+
+def test_run_douhot_用文件里的新cookie自愈(session, tmp_path, monkeypatch) -> None:
+    """★ **库里的 cookie 过期时,自动改用 `DOUHOT_COOKIE_FILE` 里那份并重试**(2026-11-01)。
+
+    当天实况:运维把新 cookie **写进了文件**,可 `get_cookies` 优先读**加密库**,
+    库里还躺着 09-09 的旧凭据 ⇒ 连续 24 轮 `DouhotAuthError`,而用文件那份手工一跑就通。
+    """
+    from config.settings import Settings
+
+    from app.db.models import DouhotWord
+    from app.services import alert_service as alert_mod
+    from app.services import douhot as douhot_mod
+    from app.services.cookie_store import get_cookie
+
+    f = tmp_path / "douhot_cookie.txt"
+    f.write_text("FRESH-COOKIE", encoding="utf-8")
+    settings = Settings(_env_file=None, douhot_cookie_file=str(f))
+
+    cookie_store.set_cookie(session, 1, "douyin", "STALE-COOKIE")
+    calls: list[str] = []
+
+    def _fetch(cookie, settings_=None):
+        calls.append(cookie)
+        if cookie == "STALE-COOKIE":
+            raise douhot_mod.DouhotAuthError("热点宝 Cookie 已失效:用户未登录")
+        return [{"title": "新词", "score": 1.0}]
+
+    monkeypatch.setattr(douhot_mod, "fetch_content_words", _fetch)
+    monkeypatch.setattr(alert_mod, "evaluate", lambda *a, **k: 0)
+    monkeypatch.setattr(tenant, "_record_douhot_watch_snaps", lambda *a, **k: None)
+
+    tenant.run_douhot(session, 1, settings=settings)
+
+    assert calls == ["STALE-COOKIE", "FRESH-COOKIE"]
+    assert get_cookie(session, 1, "douyin") == "FRESH-COOKIE"
+    assert {r.title for r in session.scalars(select(DouhotWord)).all()} == {"新词"}

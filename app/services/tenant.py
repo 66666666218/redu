@@ -390,6 +390,45 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
         _XIANYU_ROUND_LOCK.release()
 
 
+def _douhot_cookie_from_file(settings: Settings | None = None) -> str:
+    """读 `DOUHOT_COOKIE_FILE` 里的热点宝 cookie(读不到就空串)。
+
+    ⚠️ 路径是**相对当前工作目录**的(容器里 `/app/data/douhot_cookie.txt`),
+    与 `cookie_store._fallback_plain` 同一口径 —— 别另写一套路径解析。
+    """
+    from pathlib import Path
+
+    path = str(getattr(settings, "douhot_cookie_file", "") or "")
+    if not path:
+        return ""
+    try:
+        return Path(path).read_text("utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _douhot_fetch_words(session, user_id: int, cookie: str, settings) -> list[dict]:
+    """取内容词榜;**凭据失效时用文件里那份自愈一次**(2026-11-01)。
+
+    当天实况:运维把新 cookie **写进了文件**,而运行时读的是**加密库**,
+    库里还躺着 09-09 的旧凭据 ⇒ 连续 24 轮 `DouhotAuthError`,用文件那份手工一跑就通。
+    ⇒ 文件是"凭据更新入口",库是"运行时读取口",两者必须能对接:
+    库里的失效、且文件里那份**不一样**时,覆盖库并重试一次;否则原样抛出。
+    """
+    try:
+        return douhot.fetch_content_words(cookie, settings)
+    except douhot.DouhotAuthError:
+        fresh = _douhot_cookie_from_file(settings)
+        if not fresh or fresh == cookie:
+            raise
+        from app.services.cookie_store import set_cookie
+
+        set_cookie(session, user_id, "douyin", fresh)
+        session.commit()
+        logger.warning("热点宝 Cookie 库里那份已失效,已用 `douhot_cookie_file` 的新凭据覆盖并重试")
+        return douhot.fetch_content_words(fresh, settings)
+
+
 def run_douhot(session: Session, user_id: int, settings: Settings | None = None) -> dict:
     settings = _base(settings)
     cookies = get_cookies(session, user_id)
@@ -397,7 +436,7 @@ def run_douhot(session: Session, user_id: int, settings: Settings | None = None)
     if not douyin_cookie:
         raise ValueError("未配置抖音(热点宝) Cookie")
     try:
-        words = douhot.fetch_content_words(douyin_cookie, settings)
+        words = _douhot_fetch_words(session, user_id, douyin_cookie, settings)
         now = datetime.now()
         # 72h 窗口:与 weibo/baidu 同款(见上方注释),否则该表只增不减,
         # 每轮把用户全部历史词名载入内存。
