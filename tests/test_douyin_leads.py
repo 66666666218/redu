@@ -2331,3 +2331,21 @@ class TestContinuationEpisodes:
 
         assert [x["mark"] for x in leads] == ["伪装直男"]
         assert stats["cont"] == 1 and stats["old"] == 1
+
+
+def test_大瓜轮用大瓜向的词(session, monkeypatch) -> None:
+    """★ 2026-11-02:十二轮「类目大瓜」共 232 条线索,赛道几乎全是漫剧 —— 词源不对。
+
+    大瓜方向没有库内目录,原名额被别的方向的资源名占满 ⇒ 这里给它**自己的**词表。
+    """
+    from config.settings import Settings
+
+    from app.services import category_topics as ct
+    from app.services.douyin_leads import search_keywords
+
+    monkeypatch.setattr(ct, "current_category", lambda sess: "大瓜")
+
+    kws = search_keywords(session, 1, 8, Settings(_env_file=None), hot=[])
+
+    assert kws and all(w in ("吃瓜群", "吃瓜", "反差", "爆料", "实锤", "塌房", "小作文")
+                       for w in kws), kws

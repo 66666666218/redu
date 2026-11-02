@@ -658,3 +658,22 @@ def test_没有名字时既不建行也不推(session, monkeypatch):
 
     assert out["names"] == 0
     assert session.query(DemandName).count() == 0
+
+
+@pytest.mark.parametrize("name,keep", [
+    ("偷偷跑去女厕所过", False),
+    ("谈过恋爱", False),
+    ("直接买", False),
+    ("可换", False),
+    ("愿意花米", False),
+    ("主包用的柠胶", False),
+    ("反差直男", True),
+    ("仙人指路", True),
+    ("狗爹和小桃", True),
+])
+def test_动词短语不算名字(name, keep):
+    """2026-11-02 数据:16 个名字里 11 个是从评论里截出来的**动词短语**。
+
+    真名字很少以「直接/愿意/偷偷/可/谈过」开头,也很少以「过/买/换」结尾。
+    """
+    assert dw.is_name_like(name) is keep

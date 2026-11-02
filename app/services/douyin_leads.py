@@ -1030,6 +1030,13 @@ def game_search_words(session, user_id: int, top: int = 3) -> list[str]:
     return category_search_words(session, user_id, "小游戏", top=top)
 
 
+#: ★ **「大瓜」轮专用的搜索词**(2026-11-02)。只在**类目=大瓜**时用,不进 `classify` 的词表
+#: (那会影响分类:短剧标题里「反差」满天飞,放进去会把短剧抢成大瓜)。
+#: 起因:最近 12 个「类目大瓜」轮次共 232 条线索,赛道几乎全是漫剧/影视,
+#: 真正相关(标题带 瓜/爆料/反差)的只有 7 条 —— 叫着大瓜、搜的是漫剧名。
+_DA_GUA_WORDS = ("吃瓜群", "吃瓜", "反差", "爆料", "实锤", "塌房", "小作文")
+
+
 def search_keywords(session, user_id: int, top: int, settings,
                     hot: list[str] | None = None) -> list[str]:
     """本轮抖音反查用的搜索词 = **资源库词**(新鲜优先) + **热榜外部种子**。
@@ -1155,6 +1162,27 @@ def search_keywords(session, user_id: int, top: int, settings,
     #   搜回来的几乎全是短剧推广(实测 `咐置` 一个词 204 条线索)→ 用户报的
     #   「每轮推送基本都是短剧相关的」。现在每轮只取 `douyin_leads_quark_slots` 个,
     #   且**起点跟着类目游标走** ⇒ 几个词轮流出现,不是「夸克口令」永远霸着名额。
+    # ★ **类目=大瓜 时,词表换成"大瓜向"**(2026-11-02):
+    #: 大瓜方向**没有库内目录**,原来的名额全被别的方向的资源名(漫剧)占满 ⇒ 搜回来的
+    #: 全是漫剧。这里直接给它 4 个大瓜词 + 至多 2 个"历史上被判成大瓜"的名字。
+    if cat == "大瓜":
+        from datetime import datetime as _dt
+        from datetime import timedelta as _td
+
+        from app.db.models import DouyinLead as _DL
+
+        _recent = session.scalars(select(_DL.mark).where(
+            _DL.user_id == user_id, _DL.mark != "",
+            _DL.found_at >= _dt.now() - _td(days=14)).limit(400)).all()
+        _gua_names: list[str] = []
+        for _m in _recent:
+            if _m and _m not in _gua_names and category_topics.classify(_m) == "大瓜":
+                _gua_names.append(_m)
+            if len(_gua_names) >= 2:
+                break
+        kws = (_gua_names + [w for w in _DA_GUA_WORDS if w not in _gua_names])[:max(1, int(top))]
+        return kws[:max(1, int(top))]
+
     # ★ **正在被推广的名字排最前**(2026-10-31,方案 B):它们是"此刻有人在发"的,
     #: 比群里的老资源名更可能搜到**正在推广**的内容;用户口径「新鲜优先于转存」。
     promo = promo_search_words(

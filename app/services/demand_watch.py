@@ -147,6 +147,13 @@ _NOT_NAME_PARTS = ("一下", "分享", "有效", "真实", "可以", "帮忙", "
                    "还有", "一部", "另外", "这是", "就是")
 
 
+#: ★ **动词短语的开头/结尾**——它们是从评论句子里被"求/叫什么"句式**截出来的半句话**
+#: (2026-11-02 数据:16 个名字里 11 个是这种噪音,如「谈过恋爱」「直接买」「可换」
+#: 「偷偷跑去女厕所过」「愿意花米」「主包用的柠胶」)。真正的资源名很少以动词开头/结尾。
+_BAD_START = ("直接", "愿意", "偷偷", "主包", "可", "谈过", "跑去", "咱们", "所以", "然后")
+_BAD_END = ("过", "买", "换", "时", "掉", "来", "去")
+
+
 def is_name_like(name: str, *, quoted: bool = False) -> bool:
     """像不像一个**资源名**:2~24 字、不是泛词、不以语气词结尾、含汉字或拉丁字母。
 
@@ -161,6 +168,8 @@ def is_name_like(name: str, *, quoted: bool = False) -> bool:
     if n in _GENERIC:
         return False
     if n[-1] in "的了呢吧啊呀吗嘛哦":
+        return False
+    if n.startswith(_BAD_START) or n.endswith(_BAD_END):
         return False
     if any(p in n for p in _NOT_NAME_PARTS):
         return False
