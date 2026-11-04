@@ -454,18 +454,18 @@ def test_push_listen_skips_our_own_pan(session, monkeypatch) -> None:
                                       [ours, own_acct, reposted, only_registry, normal])
 
     blob = json.dumps(cards, ensure_ascii=False)
-    assert "我方资源" not in blob and "自营号资源" not in blob, \
-        "我方网盘/自营号资源不该进飞书"
+    #: ★ 2026-11-04 口径订正:默认 `wechat_skip_own_mode=author` ——
+    #: 「我们**发**的」指**自营号发的**,不是"我们转过的"。转过别人的链不算我们的,
+    #: 否则转存量一大就把 90% 的文章吞掉(实测单轮跳过 156 篇、只推 10 篇)。
+    assert "我方资源" in blob, "只是我们转过 ≠ 我们发的,应照常推"
+    assert "自营号资源" not in blob, "自营号发的资源不该推"
     assert "别人转发我方链" not in blob, "别人转发我们的链也算我方盘,不该推"
     assert "登记表才认得出" not in blob, "登记表里的分享链(手工建的)不该推"
     assert "普通外号资源" in blob, "别人的盘链照常推"
-    assert out == 1
-    session.refresh(ours)
     session.refresh(own_acct)
     session.refresh(reposted)
     session.refresh(only_registry)
-    assert (ours.pushed_at is not None and own_acct.pushed_at is not None
-            and reposted.pushed_at is not None
+    assert (own_acct.pushed_at is not None and reposted.pushed_at is not None
             and only_registry.pushed_at is not None), \
         "跳过也要盖 pushed_at,否则 repush 每轮重试"
 
@@ -2748,10 +2748,11 @@ def test_sync_transfers_but_skips_our_pan_push(session, monkeypatch) -> None:
     out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=st, platform=plat)
     assert out["new"] == 2 and out["deduped"] == 1
     assert calls == ["https://pan.quark.cn/s/RAW1"]      # 相同链接不再重复转存
-    assert cards == [], "我方盘转存后不该再推飞书"
+    #: ★ 2026-11-04 口径订正:默认 `author` —— 同步来的文章作者是**对标号(号A)**,
+    #: 不是自营号 ⇒ 该照常推(转存仍然做,资源进我方盘;推的是这条**别人的资源**)。
+    assert cards, "对标号的文章转存后仍应推送(只是我们转过 ≠ 我们发的)"
     arts = session.scalars(select(WechatArticle)).all()
-    assert all(a.pushed_at is not None for a in arts), \
-        "跳过的文章也要盖 pushed_at,否则补推每轮重试"
+    assert all(a.pushed_at is not None for a in arts), "推过的文章要盖 pushed_at"
     assert f"]({_md_safe('https://pan.quark.cn/s/RAW1')}" not in json.dumps(cards, ensure_ascii=False)
 
 

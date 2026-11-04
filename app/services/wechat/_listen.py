@@ -1781,18 +1781,27 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
                      if x.strip()}
         own_keys = _our_share_keys(session, user_id) | _owned_share_keys(session, user_id)
 
+        #: ★ **"我们的"怎么判**(2026-11-04 订正):用户原话是「**我们发**公众号的网盘资源
+        #: 不要推送」—— 指**自营号发的**。旧实现把"我们转过"也算我们的 ⇒ 转存量一大,
+        #: **90% 文章被吞**(实测单轮跳过 156 篇、只推 10 篇)。默认改走 `author` 口径。
+        _mode = str(getattr(settings, "wechat_skip_own_mode", "author") or "author").lower()
+
         def _is_ours(r: WechatArticle) -> bool:
-            if replacements.get(r.id):
-                return True                       # 本轮刚转存出来的就是我们的盘
-            link, _code = _my_pan_link_from_history(r.my_pan_urls)
-            if link:
-                return True                       # 历史已持久化的我方链
-            #: 别的号转发我们的链:my_pan_urls 为空,但 pan_urls 里就是我方 share id。
+            #: ① **文章贴的就是我方分享链**(别人转发了我们的资源)—— 任何口径都算我们的
             for line in (r.pan_urls or "").splitlines():
                 m = _MY_LINK_RE.search(line)
                 if m and m.group(0) in own_keys:
                     return True
             has_pan = bool((r.pan_urls or "").strip() or (r.my_pan_urls or "").strip())
+            if _mode != "any":
+                #: ② 默认口径:**只看作者是不是自营号**(转过 ≠ 我们发的)
+                return bool(has_pan and own_names and (r.author or "") in own_names)
+            #: ③ 旧口径(`any`):本轮刚转存 / 历史我方链 也算我们的
+            if replacements.get(r.id):
+                return True
+            link, _code = _my_pan_link_from_history(r.my_pan_urls)
+            if link:
+                return True
             return bool(has_pan and own_names and (r.author or "") in own_names)
 
         suppressed = [r for r in rows if _is_ours(r)]
