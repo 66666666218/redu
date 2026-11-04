@@ -677,3 +677,46 @@ def test_动词短语不算名字(name, keep):
     真名字很少以「直接/愿意/偷偷/可/谈过」开头,也很少以「过/买/换」结尾。
     """
     assert dw.is_name_like(name) is keep
+
+
+def test_单条评论里的偶发片段不入库(session, monkeypatch):
+    """2026-11-04 数据:名字表 20 条里大半是评论片段(`抖音号`/`过人`/`有偿`/`去汉中路`…),
+    共同点是**只在一个视频的评论里出现过一次**。规则:标题来的留、≥2 视频留、被求≥2 次留。
+    """
+    _lead(session, "111", title="一条没有书名号的普通视频")
+    monkeypatch.setattr(dw, "collect_for_video", lambda *a, **k: {
+        "error": "", "names": {
+            "偶发片段": {"demand": 1, "mention": 1, "samples": ["求个偶发片段"]},
+            "被求两次": {"demand": 2, "mention": 2, "samples": ["求被求两次", "求被求两次"]},
+        }, "ones": 0, "no_name": 0, "total": 20, "dup_ratio": 0.0})
+    monkeypatch.setattr(dw, "push_request", lambda *a, **k: True)
+    monkeypatch.setattr(dw, "push_card", lambda *a, **k: True)
+
+    dw.run_user(session, 1, _S())
+
+    names = {r.name for r in session.query(DemandName).all()}
+    assert "被求两次" in names
+    assert "偶发片段" not in names
+
+
+def test_和网盘资源库对得上的名字要留(session, monkeypatch):
+    """★ 2026-11-04 用户:「可以结合多个平台和网盘资源来判断」。
+
+    评论里抽到的名字哪怕只出现一次,只要**网盘资源库/线索名/别平台需求名**里也有,
+    就不是偶发片段 —— 留。
+    """
+    from app.db.models import XunleiResource
+
+    session.add(XunleiResource(user_id=1, fid="f1", name="反差直男", parent_name="男频"))
+    session.commit()
+    _lead(session, "111", title="一条没有书名号的普通视频")
+    monkeypatch.setattr(dw, "collect_for_video", lambda *a, **k: {
+        "error": "", "names": {
+            "反差直男": {"demand": 0, "mention": 1, "samples": ["这个是反差直男吧"]},
+        }, "ones": 0, "no_name": 0, "total": 20, "dup_ratio": 0.0})
+    monkeypatch.setattr(dw, "push_request", lambda *a, **k: True)
+    monkeypatch.setattr(dw, "push_card", lambda *a, **k: True)
+
+    dw.run_user(session, 1, _S())
+
+    assert {r.name for r in session.query(DemandName).all()} == {"反差直男"}

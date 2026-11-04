@@ -2347,5 +2347,7 @@ def test_大瓜轮用大瓜向的词(session, monkeypatch) -> None:
 
     kws = search_keywords(session, 1, 8, Settings(_env_file=None), hot=[])
 
-    assert kws and all(w in ("吃瓜群", "吃瓜", "反差", "爆料", "实锤", "塌房", "小作文")
+    #: ★ 2026-11-04:改成**混合**——一半大瓜词、一半高产出资源名兜底,
+    #: 因为纯大瓜词在抖音**两轮都是 口令 0**(泛词搜到的是大众八卦,不是推广帖)。
+    assert kws and any(w in ("吃瓜群", "吃瓜", "反差", "爆料", "实锤", "塌房", "小作文")
                        for w in kws), kws

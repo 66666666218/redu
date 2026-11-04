@@ -411,6 +411,55 @@ def collect_for_video(aweme_id: str, *, session=None, user_id: int = 1,
 # ---------------------------------------------------------------------------
 
 
+def known_name_set(db, user_id: int = 1, days: int = 30) -> set[str]:
+    """**已知的资源名/作品名** —— 用来给评论里抽出的名字做**交叉验证**(2026-11-04 用户:
+    「可以结合多个平台和网盘资源来判断」)。
+
+    来源:① 网盘资源库的条目名(`xunlei_resources`);② 我们自己收到的线索名(`douyin_leads.mark`);
+    ③ **另一个平台**上已经确认过的需求名(`demand_names` 里 platform 不是本平台的)。
+    都做归一(去空格/标点),长度 ≥2 才纳入。
+    """
+    from datetime import timedelta
+
+    from app.db.models import DemandName, DouyinLead, XunleiResource
+
+    out: set[str] = set()
+
+    def _add(x: str) -> None:
+        n = _norm_comment(x)
+        if len(n) >= 2:
+            out.add(n)
+
+    try:
+        for n in db.scalars(select(XunleiResource.name).where(
+                XunleiResource.user_id == user_id).limit(4000)):
+            _add(str(n or ""))
+        for m in db.scalars(select(DouyinLead.mark).where(
+                DouyinLead.user_id == user_id, DouyinLead.mark != "",
+                DouyinLead.found_at >= datetime.now() - timedelta(days=days)).limit(2000)):
+            _add(str(m or ""))
+        for n in db.scalars(select(DemandName.name).where(
+                DemandName.user_id == user_id, DemandName.platform != PLATFORM,
+                DemandName.last_seen_at >= datetime.now() - timedelta(days=days)).limit(500)):
+            _add(str(n or ""))
+    except Exception:  # noqa: BLE001 - 拿不到就不做交叉验证,别挡住主流程
+        logger.debug("构建已知名字集合失败", exc_info=True)
+    return out
+
+
+def corroborated(name: str, known: set[str]) -> bool:
+    """这个名字**在别的来源里也出现过**吗?(完全一致,或一方是另一方的子串,且长度≥3)"""
+    n = _norm_comment(name)
+    if len(n) < 2 or not known:
+        return False
+    if n in known:
+        return True
+    for k in known:
+        if len(k) >= 3 and (k in n or (len(n) >= 3 and n in k)):
+            return True
+    return False
+
+
 def _upsert(db, user_id: int, name: str, demand: int, mention: int, video_hits: int,
             samples: dict, ones: int = 0, title: int = 0, heat: int = 0) -> object:
     """把一个名字的**本轮观测**并进表里(累计值 + 最近样例)。"""
@@ -748,7 +797,23 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
         db.commit()
         return {"videos": len(videos), "names": 0, "request": len(request_videos)}
 
+    kept_names = dropped_names = 0
+    #: ★ **交叉验证用**(2026-11-04 用户「结合多个平台和网盘资源来判断」):
+    #: 网盘资源库 + 我们收到的线索名 + **另一个平台**上确认过的需求名。
+    known = known_name_set(db, user_id)
     for name, a in agg.items():
+        #: ★★ **只留"像名字"的**(2026-11-04 数据):名字表 20 条里大半是**评论片段**
+        #: (`抖音号`/`过人`/`有偿`/`认识女主`/`最后用`/`去汉中路`/`壁纸`),
+        #: 共同点是**只在一条视频的评论里出现过一次**。规则:
+        #:   ① 出自**标题**(作品名)⇒ 留;② 出现在 **≥2 个视频** ⇒ 留;
+        #:   ③ 被求 **≥2 次** ⇒ 留。其余都是单条评论里的偶发片段,丢掉。
+        #: ④ **交叉验证**(2026-11-04):名字在网盘资源库 / 线索名 / 别平台的需求名里出现过
+        #: ⇒ 不是评论里的偶发片段,留。
+        if not (a["title"] >= 1 or a["video_hits"] >= 2 or a["demand"] >= 2
+                or corroborated(name, known)):
+            dropped_names += 1
+            continue
+        kept_names += 1
         _upsert(db, user_id, name, a["demand"], a["mention"], a["video_hits"],
                 {"comments": a["comments"], "video": a["video"]},
                 ones=a["ones"], title=a["title"], heat=a["heat"])
@@ -771,7 +836,7 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
         db.commit()
         pushed = len(chosen)
 
-    detail = (f"视频{len(videos)} 扫{scanned} 名字{len(agg)} 求{no_name}(无名) 推{pushed}"
+    detail = (f"视频{len(videos)} 扫{scanned} 名字{kept_names}(丢{dropped_names}) 求{no_name}(无名) 推{pushed}"
               f" 求1型{len(request_videos)}(推{request_pushed})")
     if errors:
         detail += f" 失败:{errors[0][:60]}"

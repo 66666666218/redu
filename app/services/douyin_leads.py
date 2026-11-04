@@ -1180,8 +1180,22 @@ def search_keywords(session, user_id: int, top: int, settings,
                 _gua_names.append(_m)
             if len(_gua_names) >= 2:
                 break
-        kws = (_gua_names + [w for w in _DA_GUA_WORDS if w not in _gua_names])[:max(1, int(top))]
-        return kws[:max(1, int(top))]
+        #: ★★ **别让整轮 0 产出**(2026-11-04 实测):只用 `吃瓜群/吃瓜/反差…` 搜抖音,
+        #: 两轮(`11-03 04:11`、`11-04 04:11`)都是「原始 39/51、**口令 0**」——
+        #: 泛词搜到的是大众八卦,**没有一条网盘推广帖**。所以改成**混合**:
+        #: 一半名额给大瓜词/大瓜名,另一半仍用高产出资源名兜底 —— 大瓜有就捞,没有也不白跑。
+        _n = max(1, int(top))
+        _half = max(1, _n // 2)
+        kws = _gua_names[:2] + [w for w in _DA_GUA_WORDS if w not in _gua_names][:_half]
+        for w in cand:                       # 兜底:高产出资源名(按历史有效率已排好序)
+            if len(kws) >= _n:
+                break
+            if w not in kws:
+                kws.append(w)
+        _u: dict[str, str] = {}
+        for w in kws:                    # 归一形态去重(`Z 朝朝入梦` / `Z朝朝入梦` 是同一个)
+            _u.setdefault(_norm_word(w), w)
+        return list(_u.values())[:_n]
 
     # ★ **正在被推广的名字排最前**(2026-10-31,方案 B):它们是"此刻有人在发"的,
     #: 比群里的老资源名更可能搜到**正在推广**的内容;用户口径「新鲜优先于转存」。
