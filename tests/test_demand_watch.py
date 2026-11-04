@@ -720,3 +720,41 @@ def test_和网盘资源库对得上的名字要留(session, monkeypatch):
     dw.run_user(session, 1, _S())
 
     assert {r.name for r in session.query(DemandName).all()} == {"反差直男"}
+
+
+def test_大瓜候选名只收作品名_群名不要(session):
+    """2026-11-04:小红书挂群笔记的标题多是**群名**(`欢迎所有爱吃瓜…`/`互助`/`急招男生`),
+    拿去抖音搜一条都对不上 ⇒ 只收像作品名的。
+    """
+    from datetime import datetime
+
+    from app.db.models import DemandScan
+
+    now = datetime.now()
+    session.add_all([
+        DemandScan(user_id=1, platform="xiaohongshu", aweme_id="n1", scanned_date="2026-11-04",
+                   title="欢迎所有爱吃瓜的小伙伴加入", name="欢迎所有爱吃瓜的小伙伴加入",
+                   has_group=True, flagged=True, total=20, scanned_at=now),
+        DemandScan(user_id=1, platform="xiaohongshu", aweme_id="n2", scanned_date="2026-11-04",
+                   title="《反差直男》番外", name="反差直男",
+                   has_group=True, flagged=True, total=20, scanned_at=now),
+    ])
+    session.commit()
+
+    assert dw.guagua_candidates(session, 1, top=5) == ["反差直男"]
+
+
+def test_迅雷群里有同名资源要标出来(session):
+    """用户:「迅雷群里面是否有人发这些资源,因为这种也都会发网盘」。"""
+    from datetime import datetime
+
+    from app.db.models import XunleiGroupShare
+
+    session.add(XunleiGroupShare(user_id=1, group_id="g", share_id="s1",
+                                 title="【反差直男】全套资源", msg_time=datetime.now()))
+    session.add(XunleiGroupShare(user_id=1, group_id="g", share_id="s2",
+                                 title="别的剧", msg_time=datetime.now()))
+    session.commit()
+
+    assert dw.xunlei_group_hits(session, "反差直男") == 1
+    assert dw.xunlei_group_hits(session, "不存在的名字") == 0

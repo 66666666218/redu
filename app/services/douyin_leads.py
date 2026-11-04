@@ -1186,7 +1186,16 @@ def search_keywords(session, user_id: int, top: int, settings,
         #: 一半名额给大瓜词/大瓜名,另一半仍用高产出资源名兜底 —— 大瓜有就捞,没有也不白跑。
         _n = max(1, int(top))
         _half = max(1, _n // 2)
-        kws = _gua_names[:2] + [w for w in _DA_GUA_WORDS if w not in _gua_names][:_half]
+        #: ★★ **小红书串到抖音**(2026-11-04 用户「串起来」):小红书"挂群"笔记的标题名,
+        #: 就是"这一类"的具体坐标;抖音推广号的标题会写《名字》,这才是能命中的形态。
+        try:
+            from app.services.demand_watch import guagua_candidates
+
+            _xhs_names = guagua_candidates(session, user_id, top=3)
+        except Exception:  # noqa: BLE001 - 取不到就退回纯大瓜词
+            _xhs_names = []
+        _gua_names = _xhs_names + [x for x in _gua_names if x not in _xhs_names]
+        kws = _gua_names[:3] + [w for w in _DA_GUA_WORDS if w not in _gua_names][:_half]
         for w in cand:                       # 兜底:高产出资源名(按历史有效率已排好序)
             if len(kws) >= _n:
                 break

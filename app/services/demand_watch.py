@@ -32,7 +32,7 @@ import re
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.utils import get_logger
 
@@ -411,6 +411,79 @@ def collect_for_video(aweme_id: str, *, session=None, user_id: int = 1,
 # ---------------------------------------------------------------------------
 
 
+def guagua_candidates(db, user_id: int = 1, top: int = 3, days: int = 14) -> list[str]:
+    """**大瓜候选名**:从小红书"挂了群聊 + 主题相关"的笔记里取到的名字(2026-11-04 用户:
+    「串起来」)。
+
+    为什么要它:抖音上搜 `吃瓜群/反差` 这类**泛词**只会搜到大众八卦(实测两轮口令 0);
+    而小红书那边**挂群笔记的标题**本身就是"这一类"的坐标。拿这些**具体名字**回抖音搜,
+    才是抖音能命中的形态(推广号标题会写《名字》)。
+    """
+    from datetime import timedelta
+
+    from app.db.models import DemandName, DemandScan
+
+    since = datetime.now() - timedelta(days=max(1, int(days)))
+    out: list[str] = []
+
+    #: ⚠️ **群名不是作品名**(2026-11-04 实测):小红书挂群笔记的标题多是
+    #: `完全女儿国来的…急招男生`、`欢迎所有爱吃瓜的小伙伴加入`、`互助` ——
+    #: 拿这些去抖音搜一条都对不上。只收**像作品名**的:≤12 字、不含群/加入/招/互助…
+    _GROUP_WORDS = ("群", "加入", "欢迎", "互助", "招", "女生", "男生", "扩列", "聊天", "拉我",
+                    "吃瓜", "闲聊", "诚信", "互", "阁", "交友", "搭子")
+
+    def _add(x: str) -> None:
+        n = str(x or "").strip()
+        if not n or n in out:
+            return
+        if any(w in n for w in _GROUP_WORDS):
+            return
+        if is_name_like(n):          # 未加书名号 ⇒ 限 12 字,且过动词短语黑名单
+            out.append(n)
+
+    try:
+        for r in db.scalars(select(DemandScan).where(
+                DemandScan.user_id == user_id, DemandScan.platform == "xiaohongshu",
+                DemandScan.has_group.is_(True), DemandScan.name != "",
+                DemandScan.scanned_at >= since).order_by(
+                DemandScan.scanned_at.desc()).limit(80)):
+            _add(r.name)
+            if len(out) >= top:
+                return out
+        for r in db.scalars(select(DemandName).where(
+                DemandName.user_id == user_id, DemandName.platform == "xiaohongshu",
+                DemandName.last_seen_at >= since).order_by(
+                DemandName.last_seen_at.desc()).limit(40)):
+            _add(r.name)
+            if len(out) >= top:
+                break
+    except Exception:  # noqa: BLE001 - 取不到就返回空,不影响主流程
+        logger.debug("取大瓜候选名失败", exc_info=True)
+    return out[:max(0, int(top))]
+
+
+def xunlei_group_hits(db, name: str, days: int = 30) -> int:
+    """这个名字在**迅雷群消息**里出现过几次(2026-11-04 用户:「迅雷群里也会发这些资源」)。
+
+    只读计数,用来告诉运营"这条大瓜在我们自己的群里也有人发"。
+    """
+    from datetime import timedelta
+
+    from app.db.models import XunleiGroupShare
+
+    n = str(name or "").strip()
+    if len(n) < 2:
+        return 0
+    try:
+        return int(db.scalar(select(func.count()).select_from(XunleiGroupShare).where(
+            XunleiGroupShare.title.like(f"%{n}%"),
+            XunleiGroupShare.msg_time >= datetime.now() - timedelta(days=max(1, int(days))),
+        )) or 0)
+    except Exception:  # noqa: BLE001 - 查不到就当 0
+        logger.debug("迅雷群计数失败", exc_info=True)
+        return 0
+
+
 def known_name_set(db, user_id: int = 1, days: int = 30) -> set[str]:
     """**已知的资源名/作品名** —— 用来给评论里抽出的名字做**交叉验证**(2026-11-04 用户:
     「可以结合多个平台和网盘资源来判断」)。
@@ -743,6 +816,8 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
                          name=vname)
             if flagged:
                 request_videos.append({
+                    #: 迅雷群里有没有人也发过这个名字(用户:「这种也都会发网盘」)
+                    "xunlei": xunlei_group_hits(db, vname) if vname else 0,
                     "name": vname,
                     "desc": v.get("title") or "",
                     "author": v.get("author") or "",
@@ -993,9 +1068,12 @@ def build_request_card(items: list[dict], platform: str = "douyin") -> dict:
         name = it.get("name") or "(标题里没名字)"
         desc = (it.get("desc") or "")[:30]
         link = f" [{desc}]({it['url']})" if it.get("url") else ""
+        #: 迅雷群侧证据(用户「迅雷群里面是否有人发这些资源」):群消息里搜得到就标出来
+        xh = int(it.get("xunlei") or 0)
         lines.append(
             f"**{name}** — 求 {it['demand']} · 扣1 {it['ones']} / 共 {it['total']} 条"
-            f" · {it.get('why') or '求/1密度'} · 作者 {it.get('author') or '—'}" + link)
+            f" · {it.get('why') or '求/1密度'} · 作者 {it.get('author') or '—'}"
+            + (f" · 🧲群内 {xh} 条" if xh else "") + link)
     return {
         "config": {"wide_screen_mode": True},
         "header": {"template": "red",
