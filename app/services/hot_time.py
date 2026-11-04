@@ -217,11 +217,24 @@ def publish_mark(ts) -> str:
     2026-10-31 起这是**所有板块共用的一份**(抖音线索、跨平台热度、知乎盘链…),
     原来只在 `douyin_leads._publish_mark` 里有,别的卡上根本看不到时间。
     """
+    import time as _t
+
     try:
         t = int(ts or 0)
     except (TypeError, ValueError):
         return ""
     if t <= 0:
         return ""
-    dt = datetime.fromtimestamp(t)
+    #: ★★ **越界时间戳必须挡住**(2026-11-04 事故):小红书/快手/贴吧的 `publish_at`
+    #: 有的是**毫秒**(1.7e12),`datetime.fromtimestamp` 在 Windows 上直接抛
+    #: `OSError: [Errno 22] Invalid argument` —— 一行渲染把**整轮 presence 打断**,
+    #: 三个平台的推送从 10-31 起全部归零(用户报「公众号/热度不如以前」的真因之一)。
+    if t > 10 ** 11:                      # 毫秒 → 秒
+        t //= 1000
+    if not (946684800 <= t <= _t.time() + 2 * 86400):   # 2000-01-01 ~ 后天
+        return ""
+    try:
+        dt = datetime.fromtimestamp(t)
+    except (OSError, OverflowError, ValueError):
+        return ""
     return "🆕" if (datetime.now() - dt).total_seconds() <= 3600 else f"·{dt:%m-%d %H:%M}"
