@@ -119,9 +119,28 @@ def parse_metric(text: str) -> int:
 from app.services.douyin_leads import pan_of  # noqa: E402  (放在常量之后:见模块头)
 
 
+#: **"在推网盘资源"的措辞**(2026-11-05 用户口径:不必带链,有口令/在发资源就算)。
+#: ⚠️ 这些词只用于**对标号的准入**,不参与线索卡的"可直取"判定 —— 两件事别混。
+_PAN_PROMO_WORDS = ("网盘", "夸克", "迅雷", "UC网盘", "uc网盘", "百度网盘", "百度云",
+                    "口令", "咐置", "叩苓", "资源", "合集", "全集", "自取", "无偿", "分享")
+
+
 def _has_pan(w: dict) -> bool:
-    """这条作品带**网盘凭据**吗(直链或口令)—— 不带就默认不推,见 `run_for_user`。"""
-    return bool(str(w.get("pan_url") or "").strip() or str(w.get("mark") or "").strip())
+    """这条作品**在推网盘资源**吗?
+
+    ★ **判据按用户口径放宽**(2026-11-05):「作品可能本身不带链但是会有**口令**,
+    主要判断是**别人在推的是网盘资源**就行」。
+    ⇒ 三层任一命中就算:
+      ① 网盘直链 / 真口令(`pan_of` 的 `pan_url` / `mark`);
+      ② 标题或描述里出现**网盘相关词**(网盘/夸克/迅雷/UC/百度网盘);
+      ③ 出现**"资源/合集/全集/自取/无偿/口令"**这类"在发资源"的措辞。
+    ⚠️ 原来只认 ①,于是近 7 天 61 条对标作品里只有 1 条算"带盘" —— 其余全被判死,
+    而它们其实大多是在推资源(只是口令写在描述里/或只写了"合集/自取")。
+    """
+    if str(w.get("pan_url") or "").strip() or str(w.get("mark") or "").strip():
+        return True
+    t = f"{w.get('title') or ''} {w.get('desc') or ''}"
+    return any(k in t for k in _PAN_PROMO_WORDS)
 
 
 def parse_work(text: str) -> dict:

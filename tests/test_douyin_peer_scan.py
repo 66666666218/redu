@@ -599,3 +599,17 @@ def test_target_accounts_prefers_accounts_with_pan_history(session) -> None:
     session.commit()
     got = dps.target_accounts(session, 1, _S())
     assert got[0]["uid"] == "u-productive"
+
+
+def test_不带链但写着资源合集也算在推网盘() -> None:
+    """★ 2026-11-05 用户口径:「作品可能本身不带链但是会有口令,
+    主要判断是**别人在推的是网盘资源**就行」。
+
+    原来只认直链/真口令 ⇒ 近 7 天 61 条对标作品里只有 1 条过闸。
+    """
+    from app.services.douyin_peer_scan import _has_pan
+
+    assert _has_pan({"title": "《伪装直男》全集合集 自取"}) is True
+    assert _has_pan({"title": "夸克网盘最新资源"}) is True
+    assert _has_pan({"title": "口令在评论区"}) is True
+    assert _has_pan({"title": "今天天气不错"}) is False
