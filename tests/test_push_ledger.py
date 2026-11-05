@@ -226,3 +226,45 @@ def test_drop_recent_filters_same_section_within_window(session) -> None:
                                    [{"name": "甲"}, {"name": "乙"}, {"name": "丙"}], _S())
     assert [x["name"] for x in kept] == ["乙", "丙"]
     assert dropped == 1
+
+
+def test_重复但流量好要放行(session) -> None:
+    """★ 2026-11-05 用户:「如果是重复的资源但是流量好也需要推出来」。
+
+    去重只看时间窗会误杀"同一资源突然爆了" —— 那恰恰是客户最想知道的。
+    热度达到门槛就放行,并打 `_dedupe_hot` 标记(卡片上可标 🔥)。
+    """
+    from datetime import datetime, timedelta
+
+    from app.db.models import PushLedger
+    from app.services import push_ledger as pl
+
+    now = datetime.now()
+    session.add_all([
+        PushLedger(user_id=1, section="douyin", item_key="热帖", title="热帖",
+                   pushed_at=now - timedelta(hours=2)),
+        PushLedger(user_id=1, section="douyin", item_key="冷帖", title="冷帖",
+                   pushed_at=now - timedelta(hours=2)),
+    ])
+    session.commit()
+
+    class _S:
+        push_dedupe_hours = 24
+
+    items = [{"key": "热帖", "share_count": 5000},
+             {"key": "冷帖", "share_count": 10}]
+    kept, dropped = pl.drop_recent(session, 1, "douyin", items, _S(),
+                                   hot_of=lambda it: it.get("share_count"),
+                                   hot_min=500)
+
+    assert [it["key"] for it in kept] == ["热帖"]
+    assert kept[0].get("_dedupe_hot") is True
+    assert dropped == 1
+
+
+def test_热度数字带万字的要能解析():
+    from app.services.push_ledger import _num
+
+    assert _num("1.2万") == 12000
+    assert _num("3,000") == 3000
+    assert _num(None) == 0

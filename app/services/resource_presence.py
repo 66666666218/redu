@@ -665,7 +665,11 @@ def push_items(items: list[dict], settings, detail: dict | None = None,
         # 放在 AI 筛选**之前**(先省钱:同一句话不值得再判一次)。
         from app.services import push_ledger
 
-        group, _dup = push_ledger.drop_recent(session, user_id, led_sec, group, settings)
+        group, _dup = push_ledger.drop_recent(
+            session, user_id, led_sec, group, settings,
+            #: 重复但**同资源内容数多**(说明还在被大量推)的仍要推
+            hot_of=lambda it: it.get("count"),
+            hot_min=float(getattr(settings, "push_hot_bypass_count", 3) or 0))
         if not group:
             if detail is not None:
                 detail[plat] = f"{int(getattr(settings, 'push_dedupe_hours', 24) or 0)}h 内已推过"

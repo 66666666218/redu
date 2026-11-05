@@ -1780,7 +1780,11 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
     from app.services import push_ledger
 
     _led_sec = "douyin_peer" if peer else section
-    leads, _dup = push_ledger.drop_recent(session, user_id, _led_sec, leads, settings)
+    leads, _dup = push_ledger.drop_recent(
+        session, user_id, _led_sec, leads, settings,
+        #: 重复但**转发量高**的仍要推(2026-11-05 用户口径)
+        hot_of=lambda it: it.get("share_count"),
+        hot_min=float(getattr(settings, "push_hot_bypass_share", 500) or 0))
     if not leads:
         logger.info("抖音线索:%d 条全部落在去重窗口内,本轮不推", _dup)
         return False

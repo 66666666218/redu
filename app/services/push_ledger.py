@@ -133,8 +133,27 @@ def recent_keys(session: Session, user_id: int, section: str,
         PushLedger.pushed_at >= cutoff)).all())
 
 
+def _num(v) -> float:
+    """把 `metrics` 里的值(可能是 "1.2万"/int/str)转成数字;转不了按 0。"""
+    if isinstance(v, (int, float)):
+        return float(v)
+    t = str(v or "").strip().replace(",", "")
+    if not t:
+        return 0.0
+    mult = 1.0
+    if t.endswith("万"):
+        mult, t = 10000.0, t[:-1]
+    elif t.endswith("亿"):
+        mult, t = 100000000.0, t[:-1]
+    try:
+        return float(t) * mult
+    except ValueError:
+        return 0.0
+
+
 def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
-                settings=None, hours: float | None = None) -> tuple[list[dict], int]:
+                settings=None, hours: float | None = None,
+                hot_of=None, hot_min: float = 0) -> tuple[list[dict], int]:
     """按**推送台账**去掉最近已经推过的条目 → `(保留, 去掉的条数)`。
 
     ★ 2026-10-29 数据驱动的决定:12 天台账里同一 item 在 **24 小时内重推**的比例
@@ -152,7 +171,22 @@ def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
     seen = recent_keys(session, user_id, section, float(hours))
     if not seen:
         return list(items), 0
-    kept = [it for it in items if _key_of(it) not in seen]
+    #: ★★ **重复但"流量好"的仍要推**(2026-11-05 用户:「如果是重复的资源但是流量好也需要推出来」)。
+    #: 只看时间窗会误杀"同一资源突然爆了"——那正是客户最想知道的。
+    #: `hot_of(item)` 由各板块给(点赞/转发/同资源内容数…),`hot_min` 为门槛;
+    #: 命中就**放行**并打标记,卡片上可以标 🔥 复推。
+    kept: list[dict] = []
+    for it in items:
+        if _key_of(it) not in seen:
+            kept.append(it)
+            continue
+        if hot_of is not None and float(hot_min or 0) > 0:
+            try:
+                if _num(hot_of(it)) >= float(hot_min):
+                    it["_dedupe_hot"] = True
+                    kept.append(it)
+            except Exception:  # noqa: BLE001 - 取热度失败就按"已推过"处理
+                continue
     return kept, len(items) - len(kept)
 
 

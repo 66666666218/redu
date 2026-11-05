@@ -1059,7 +1059,11 @@ def push_items(items: list[dict], settings, session=None, user_id: int = 0) -> b
     # 只有 3%,但统一口径;真正的价值在 B站 53% / 抖音 62% 那几个板块)。
     from app.services import push_ledger
 
-    items, _dup = push_ledger.drop_recent(session, user_id, "zhihu", items, settings)
+    items, _dup = push_ledger.drop_recent(
+        session, user_id, "zhihu", items, settings,
+        hot_of=lambda it: (it.get("metrics") or {}).get("liked_count")
+        or (it.get("metrics") or {}).get("view_count"),
+        hot_min=float(getattr(settings, "push_hot_bypass_likes", 1000) or 0))
     if not items:
         return False
     # ★ **新鲜度闸门**(2026-10-29 用户口径「所有板块都要新鲜度检查」)。
