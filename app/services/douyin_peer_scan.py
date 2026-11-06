@@ -43,7 +43,7 @@ from __future__ import annotations
 import re
 import time
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 
@@ -119,28 +119,46 @@ def parse_metric(text: str) -> int:
 from app.services.douyin_leads import pan_of  # noqa: E402  (放在常量之后:见模块头)
 
 
-#: **"在推网盘资源"的措辞**(2026-11-05 用户口径:不必带链,有口令/在发资源就算)。
-#: ⚠️ 这些词只用于**对标号的准入**,不参与线索卡的"可直取"判定 —— 两件事别混。
-_PAN_PROMO_WORDS = ("网盘", "夸克", "迅雷", "UC网盘", "uc网盘", "百度网盘", "百度云",
-                    "口令", "咐置", "叩苓", "资源", "合集", "全集", "自取", "无偿", "分享")
+#: **网盘平台名** —— 出现即"在说网盘"(2026-11-05)。
+_PAN_PLATFORM_WORDS = ("网盘", "夸克", "迅雷", "UC网盘", "uc网盘", "百度网盘", "百度云",
+                       "阿里云盘", "123云盘")
+
+#: **明确的"来拿"措辞** —— 它们是分享动作本身,不是营销套话(2026-11-05)。
+#: ⚠️ 与 `_PAN_PLATFORM_WORDS` 是**或**关系:任一类命中就算在推网盘。
+_PAN_OFFER_WORDS = ("口令", "咐置", "叩苓", "自取", "无偿", "免费获取", "获取教程",
+                    "免费下载", "下载教程", "安装教程", "整合包")
 
 
 def _has_pan(w: dict) -> bool:
-    """这条作品**在推网盘资源**吗?
+    """这条作品**在推网盘资源**吗?—— **准入判据**(2026-11-05 用户口径收紧)。
 
-    ★ **判据按用户口径放宽**(2026-11-05):「作品可能本身不带链但是会有**口令**,
-    主要判断是**别人在推的是网盘资源**就行」。
-    ⇒ 三层任一命中就算:
-      ① 网盘直链 / 真口令(`pan_of` 的 `pan_url` / `mark`);
-      ② 标题或描述里出现**网盘相关词**(网盘/夸克/迅雷/UC/百度网盘);
-      ③ 出现**"资源/合集/全集/自取/无偿/口令"**这类"在发资源"的措辞。
-    ⚠️ 原来只认 ①,于是近 7 天 61 条对标作品里只有 1 条算"带盘" —— 其余全被判死,
-    而它们其实大多是在推资源(只是口令写在描述里/或只写了"合集/自取")。
+    用户口径:「**如果不是推广网盘的就不要推了**」。
+
+    ## 判据(任一命中)
+      ① **真凭据**:网盘直链 / 真口令(`pan_of` 的 `pan_url` / `mark`);
+      ② **网盘平台名**(`_PAN_PLATFORM_WORDS`);
+      ③ **明确的来拿措辞**(`_PAN_OFFER_WORDS`:口令/自取/无偿/免费获取/下载教程…)。
+
+    ## ⚠️ 为什么把上一版的 `资源/合集/全集/分享` 摘掉
+
+    上一版(同日早先)为了"不必带链"把网盘词放宽到 `资源/合集/全集/分享`,
+    实测**全错**:它让 29/121 条过闸,而过闸的全是**营销套话**——
+    `#干货分享`(网站推荐号)、`策略塔防小游戏合集`(纯小游戏推广)、`虐杀原形2（1+2合集）`。
+    用 CDP 读真实作品描述核对过(2026-11-05):
+
+    | 号 | 描述里的网盘凭据 |
+    |---|---|
+    | 未来C(PC 单机游戏资源号) | ✅ `/~7fda3YJwIo~:/` + `pan.quark.cn/s/…` |
+    | 阿德·游戏解说 / 糖糖 / 抖音小游戏 / 小明游戏宅 | ❌ **全空**(纯小游戏推广) |
+
+    ⇒ `分享/合集` 在所有平台上都满天飞,**不携带"在发网盘"的信息**(与
+    `category_topics` 里「入口」被摘掉是同一类错)。收紧后过闸 **16/121**,
+    且正好是"未来C 13 条 + 3 条提到网盘/下载教程的",不再有纯推广号。
     """
     if str(w.get("pan_url") or "").strip() or str(w.get("mark") or "").strip():
         return True
     t = f"{w.get('title') or ''} {w.get('desc') or ''}"
-    return any(k in t for k in _PAN_PROMO_WORDS)
+    return any(k in t for k in _PAN_PLATFORM_WORDS + _PAN_OFFER_WORDS)
 
 
 def parse_work(text: str) -> dict:
@@ -222,8 +240,6 @@ def target_accounts(session, user_id: int, settings) -> list[dict]:
     if not rows:
         return []
     #: 历史产出:近 30 天**带盘**作品数(只读一次,别在排序里逐号查)。
-    from datetime import datetime, timedelta
-
     from sqlalchemy import func, or_
 
     cutoff = datetime.now() - timedelta(days=30)
@@ -307,6 +323,7 @@ def pending(session, user_id: int) -> list[dict]:
              "niche": r.niche, "account_uid": r.account_uid,
              "account_name": r.account_name, "author": r.account_name,
              "mark": r.mark or "", "pan_url": r.pan_url or "",
+             "first_seen_at": r.first_seen_at,          # 判"等太久了"要用(见 `run_for_user`)
              "liked_count": r.likes} for r in rows]
 
 
@@ -651,11 +668,12 @@ def fetch_work_pan(works: list[dict], settings, *, user_id: int = 1,
                 body = str(info.get("body") or "") if isinstance(info, dict) else str(info)
                 auth = author_of_html(str(info.get("html") or "")) if isinstance(info, dict) else {}
                 p = pan_of(body[:20_000])
-                #: 即使这条不带盘,也要把**作者 uid** 带回去 —— 发现环节靠它把号加准
-                #: (`discover_candidates`),不再靠同名昵称猜。
-                if p["mark"] or p["pan_url"] or auth.get("uid"):
-                    out[vid] = {**p, "author_uid": auth.get("uid", ""),
-                                "author_name": auth.get("name", "")}
+                #: ★ `read=True` = **这一页确实打开并读到了**(哪怕没网盘凭据)。
+                #: 准入收紧后这个标记是判"能不能给它定罪"的唯一依据(2026-11-05):
+                #: 没读过的不许判死,否则真正带盘的那条会被静默丢掉。
+                out[vid] = {**p, "read": True,
+                            "author_uid": auth.get("uid", ""),
+                            "author_name": auth.get("name", "")}
             except Exception as exc:  # noqa: BLE001 - 单条失败不影响其余
                 logger.debug("读作品描述失败 %s:%s", vid, str(exc)[:120])
         return out
@@ -774,7 +792,7 @@ def run_for_user(session, user_id: int, settings) -> dict:
 
     accts = target_accounts(session, user_id, settings)
     if not accts:
-        return {"accounts": 0, "works": 0, "new": 0, "pushed": False,
+        return {"accounts": 0, "works": 0, "new": 0, "pushed": False, "deferred": 0,
                 "note": "库里没有对标号(用 scripts/douyin_peer_add.py 加一个)"}
 
     # ⚠️ 慢活先做完(开页面),写库放在后面 —— 见模块纪律 3。
@@ -799,7 +817,13 @@ def run_for_user(session, user_id: int, settings) -> dict:
             continue
         unseen = _unseen_ids(session, user_id, [w["aweme_id"] for w in got])
         enrich += [w for w in got if w["aweme_id"] in unseen and not _has_pan(w)]
+    #: ★ **上一轮留下的待推作品也要读描述**(2026-11-05):它们上一轮没读到描述而被延后,
+    #: 若这里不再读,它们会永远「没读过 ⇒ 继续延后」—— 变成另一种静默积压。
+    enrich_ids = {w["aweme_id"] for w in enrich}
+    enrich += [w for w in pending(session, user_id)
+               if w["aweme_id"] not in enrich_ids and not _has_pan(w)]
     enriched_n = 0
+    found: dict[str, dict] = {}
     if enrich:
         limit = int(getattr(settings, "douyin_peer_max_enrich", 8) or 0)
         found = fetch_work_pan(enrich, settings, user_id=user_id, limit=limit)
@@ -808,6 +832,17 @@ def run_for_user(session, user_id: int, settings) -> dict:
             if p and (p.get("mark") or p.get("pan_url")):
                 w.update(mark=p.get("mark") or "", pan_url=p.get("pan_url") or "")
                 enriched_n += 1
+        #: 读到的凭据要**落回库**(否则 `pending()` 下轮读回来还是空,白开一次页面)。
+        #: 只处理"本来就在库里"的那些(pending 那批);新作品由 `record_new` 写入。
+        got_pan = {k: v for k, v in found.items()
+                   if str(v.get("mark") or "").strip() or str(v.get("pan_url") or "").strip()}
+        if got_pan:
+            for row in session.scalars(select(DouyinPeerWork).where(
+                    DouyinPeerWork.user_id == user_id,
+                    DouyinPeerWork.aweme_id.in_(list(got_pan)))).all():
+                p = got_pan[row.aweme_id]
+                row.mark = str(p.get("mark") or row.mark or "")[:64]
+                row.pan_url = str(p.get("pan_url") or row.pan_url or "")[:500]
 
     works_total = 0
     new_works: list[dict] = []
@@ -835,16 +870,37 @@ def run_for_user(session, user_id: int, settings) -> dict:
     #: 上一轮没推成的也一起补(不许静默丢)。去重键仍是 aweme_id。
     seen_ids = {x["aweme_id"] for x in new_works}
     todo = new_works + [w for w in pending(session, user_id) if w["aweme_id"] not in seen_ids]
-    #: ★ **不带网盘的不推**(用户口径「这些小游戏也是都需要带网盘的」,2026-10-29)。
+    #: ★ **不带网盘的不推**(用户口径「**如果不是推广网盘的就不要推了**」,2026-11-05)。
     #: ⚠️ 但**必须记成"已处理"**,否则它们会一直挂在 `pushed_at IS NULL` 里、每轮重试 ——
     #: 那不是"等一下再推",而是"永远等不到还被反复捞"。
     no_pan = 0
     if bool(getattr(settings, "douyin_peer_require_pan", True)):
-        drop = [w for w in todo if not _has_pan(w)]
+        #: ⚠️ **分两种"不带盘",处置不同**(2026-11-05 收紧判据后新增):
+        #:   · **读过描述**、确认没凭据(`found[vid]["read"]`)⇒ 判死、打戳(上面那条理由);
+        #:   · **没读到**(页面失败 / 超出本轮 `max_enrich` 名额)⇒ **暂不判死**,留 `pushed_at`
+        #:     空、下轮再读。不这样做的话,准入越严、**富化名额越可能漏掉真正带盘的那条**,
+        #:     而它会被静默丢。
+        #: ⚠️ 但延后**必须有上限**(`douyin_peer_defer_days`),否则"页面永远打不开"
+        #: 就变成新的静默积压。到期仍读不到的按"没有网盘"处理,并计入 `no_pan`。
+        read_ok = {vid for vid, p in found.items() if p.get("read")}
+        max_defer_days = int(getattr(settings, "douyin_peer_defer_days", 3) or 0)
+        cutoff = datetime.now() - timedelta(days=max_defer_days) if max_defer_days else None
+
+        def _expired(w: dict) -> bool:
+            seen_at = w.get("first_seen_at")
+            return cutoff is not None and seen_at is not None and seen_at < cutoff
+
+        drop = [w for w in todo
+                if not _has_pan(w) and (str(w["aweme_id"]) in read_ok or _expired(w))]
+        drop_ids = {str(w["aweme_id"]) for w in drop}
+        deferred = [w for w in todo
+                    if not _has_pan(w) and str(w["aweme_id"]) not in drop_ids]
         no_pan = len(drop)
         if drop:
             mark_pushed(session, user_id, drop)
         todo = [w for w in todo if _has_pan(w)]
+    else:
+        deferred = []
     pushed = push_works(todo, settings, session=session, user_id=user_id) if todo else False
     if pushed:
         mark_pushed(session, user_id, todo)
@@ -854,6 +910,8 @@ def run_for_user(session, user_id: int, settings) -> dict:
             #: 否则它与「本轮没有新作品」长得一模一样(本仓最恨的假成功)。
             "push_failed": bool(todo) and not pushed,
             "no_pan": no_pan,
+            #: 没读到描述、留到下轮的条数(要显形,否则"扫到 12 条一条没推"看不出原因)。
+            "deferred": len(deferred),
             "enriched": enriched_n,
             "baselines": baselines, "failed": failed, "pending": len(todo)}
 
@@ -899,6 +957,10 @@ def douyin_peer_tick(settings=None) -> int:
                 if res.get("no_pan"):
                     #: **不带网盘的不推**,但要说出来 —— 否则"扫到 12 条只推了 1 条"会让人以为丢了。
                     note += f" 无盘链{res['no_pan']}条(未推)"
+                if res.get("deferred"):
+                    #: **没读到描述**的留到下轮再读 —— 与"读了、确认没有"必须分开说,
+                    #: 否则这条会被读成"永久丢弃"(2026-11-05 准入收紧后新增的口径)。
+                    note += f" 待补读{res['deferred']}条(下轮再判)"
                 if res.get("enriched"):
                     #: 读作品描述补到的盘链条数(主页卡片看不到描述,这一步是 require_pan 的前提)。
                     note += f" 补盘链{res['enriched']}条"

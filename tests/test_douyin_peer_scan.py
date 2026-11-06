@@ -457,6 +457,10 @@ def test_require_pan_drops_and_marks_handled(session, monkeypatch) -> None:
              "account_name": "甲", "author": "甲"}]}
 
     monkeypatch.setattr(dps, "fetch_accounts", _fetch)
+    #: ★ **必须假读描述**(2026-11-05):真读会走浏览器、返回 `{}` ⇒ 分不清「读过但没盘」
+    #: 与「没读到」。前者才判死打戳;后者延后到下轮补读(见 `douyin_peer_defer_days`)。
+    monkeypatch.setattr(dps, "fetch_work_pan", lambda ws, *a, **k: {
+        str(w["aweme_id"]): {"mark": "", "pan_url": "", "read": True} for w in ws})
     monkeypatch.setattr(dps, "push_works",
                         lambda ws, s, **k: getattr(push_works, "seen", []).extend(ws) or True)
     push_works = dps.push_works

@@ -416,6 +416,32 @@ class TestSerialDramaBeatsPlotWords:
         assert ct.classify("某网红塌房 道歉") == "大瓜"
 
 
+class TestGenericWordAloneDoesNotDecide:
+    """★ **2026-11-05**:只靠**通用词**(合集/资源/资料…)赢的判类**不算数** —— 有连载结构就按影视算。
+
+    实测 `data/platform.db` 1262 条线索里 **71 条**是"仅凭通用词判出类目"(资料 45 / 影视 26)。
+    典型 `《逆徒与逆师》第83-124集大合集`:只命中「合集」一个通用词 ⇒ 判成**资料**,
+    可它带 `第N集` 结构,是**短剧**。通用词本来就不携带类目信息。
+
+    ⚠️ **其余情形保持不变**:没有连载结构的通用词判类照样有效(`壁纸` → 资料),
+    那是用户 2026-10-04 明确的「类目很宽所以可以泛化很多」。
+    """
+
+    def test_generic_plus_serial_becomes_video(self) -> None:
+        assert ct.classify("《逆徒与逆师》第83-124集大合集") == "影视"
+        assert ct.classify("短剧资源合集 全80集") == "影视"
+
+    def test_generic_alone_still_works(self) -> None:
+        #: 没有连载结构 ⇒ 通用词照旧算数(不能一刀切废掉)
+        for t in ("壁纸", "字体包", "简历模板PPT", "4K壁纸合集"):
+            assert ct.classify(t) == "资料", t
+
+    def test_specific_word_still_wins(self) -> None:
+        #: 有具体词命中时不动 —— 那才是真证据
+        assert ct.classify("《某某》第3集 吃瓜爆料合集") == "大瓜"
+        assert ct.classify("PS教程合集 第2集") == "软件"
+
+
 class TestResourceType:
     """★ 2026-10-29 用户问「不同类型的资源是否能做到分类」。
 
