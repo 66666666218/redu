@@ -621,7 +621,7 @@ def guagua_candidates(db, user_id: int = 1, top: int = 3, days: int = 14) -> lis
     #: ⚠️ **群名不是作品名**(2026-11-04 实测):小红书挂群笔记的标题多是
     #: `完全女儿国来的…急招男生`、`欢迎所有爱吃瓜的小伙伴加入`、`互助` ——
     #: 拿这些去抖音搜一条都对不上。只收**像作品名**的:≤12 字、不含群/加入/招/互助…
-    _GROUP_WORDS = ("群", "加入", "欢迎", "互助", "招", "女生", "男生", "扩列", "聊天", "拉我",
+    _GROUP_WORDS = ("群", "裙", "加入", "欢迎", "互助", "招", "女生", "男生", "扩列", "聊天", "拉我",
                     "吃瓜", "闲聊", "诚信", "互", "阁", "交友", "搭子")
 
     def _add(x: str) -> None:
@@ -1413,7 +1413,10 @@ def push_expand(items: list[dict], settings) -> bool:
 _TOPIC_WORDS = ("瓜", "八卦", "爆料", "塌房", "资源", "网盘", "剧", "视频", "网红", "主播",
                 "合集", "电影", "动漫", "漫画", "小说", "图")
 #: 纯社交群的标志词(出现这些且没有主题词 ⇒ 判为非主题)
-_SOCIAL_WORDS = ("群", "扩列", "互赞", "涨粉", "聊天", "交友", "招聘", "学习", "红包",
+#: ⚠️ `裙` 必须单列(2026-11-08 实测):小红书为了避审核把「群」写成「裙」,
+#: `完全女儿国来的,裙里女生超多` 因此**漏过了社交词判定**、被判成主题相关。
+#: `搭子/扩列/互赞` 同理,是"找搭子"帖的高频词,与大瓜/资源无关。
+_SOCIAL_WORDS = ("群", "裙", "扩列", "互赞", "涨粉", "聊天", "交友", "招聘", "学习", "红包",
                  "搭子", "互关", "粉丝", "直播间")
 
 
@@ -1486,7 +1489,7 @@ def scan_xhs(db, user_id: int = 1, settings=None) -> dict:
     per_seed = int(getattr(settings, "demand_xhs_notes_per_seed", 2) or 2)
 
     items: list[dict] = []
-    scanned = flagged_n = 0
+    scanned = flagged_n = skipped_n = 0
     min_total = int(getattr(settings, "demand_xhs_min_comments", 8) or 0)
     p = browser = page = None
     try:
@@ -1531,6 +1534,12 @@ def scan_xhs(db, user_id: int = 1, settings=None) -> dict:
                     and st["total"] >= 10)
                 flagged = bool(by_density or by_repeat)
                 name = note_name
+                #: ★★ **主题闸门**(2026-11-08):`topic_ok=0` 的 19 条里,
+                #: `互帮互助群`/`摸鱼群招人啦`/`90.00后05后宝妈孕妈群`/`正常人聊天群` 全是
+                #: **社交招募帖** —— 求/1 密度一样高(拉群也让人扣1),但**不是大瓜**。
+                #: 此前只"记录不拦",结果每轮都在推这些,真大瓜被淹掉。
+                #: 现在**记录照旧**(密度数据要留着调阈值),**但不再推送**。
+                topic_ok = topic_hit(note.get("title") or "")
                 _record_scan(
                     db, user_id,
                     {"aweme_id": note["id"], "title": note.get("title") or "",
@@ -1542,6 +1551,13 @@ def scan_xhs(db, user_id: int = 1, settings=None) -> dict:
                     name=name, platform="xiaohongshu", has_group=has_group)
                 if flagged:
                     flagged_n += 1
+                    if not topic_ok or not name:
+                        #: 非主题(社交群)或**连名字都取不到** ⇒ 只入表不推。
+                        #: 抖音那条链取不到名字**仍然推**(用户要的是"这类视频"本身),
+                        #: 小红书不同:它的评论区信号本来就弱一个量级(`doc` 9.5),
+                        #: 再推"没名字"的卡片就纯是噪音。
+                        skipped_n += 1
+                        continue
                     items.append({"name": name, "desc": note.get("title") or "",
                                   "author": note.get("author") or "",
                                   "url": f"https://www.xiaohongshu.com/explore/{note['id']}",
@@ -1565,8 +1581,12 @@ def scan_xhs(db, user_id: int = 1, settings=None) -> dict:
 
     db.commit()
     pushed = len(items) if items and push_request(items, settings, "xiaohongshu") else 0
-    _record_run_quiet(db, user_id, f"小红书 扫{scanned} 命中{flagged_n} 推{pushed}")
-    return {"scanned": scanned, "flagged": flagged_n, "pushed": pushed}
+    #: ⚠️ 明细里必须带上 `拦N` —— 否则"扫10 命中3 推0"和"扫10 命中0 推0"
+    #: 在库里长得一样,看不出是**闸门拦掉了**还是**根本没命中**。
+    _record_run_quiet(db, user_id,
+                      f"小红书 扫{scanned} 命中{flagged_n} 拦{skipped_n} 推{pushed}")
+    return {"scanned": scanned, "flagged": flagged_n, "pushed": pushed,
+            "skipped": skipped_n}
 
 
 def _record_run_quiet(db, user_id: int, detail: str) -> None:

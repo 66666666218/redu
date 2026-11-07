@@ -540,7 +540,7 @@ def test_新名字卡片列出出现次数():
     assert "新名字" in str(card) and "3" in str(card)
 
 
-# ---------------------------------------------------------------- 主题闸门(只记录)
+# ---------------------------------------------------------------- 主题闸门
 
 @pytest.mark.parametrize("title,ok", [
     ("英语学习和日常聊天", False),        # 纯社交群
@@ -549,9 +549,107 @@ def test_新名字卡片列出出现次数():
     ("刚创了一个八卦群，想进就进", True),   # 有「瓜」
     ("所有人，瓜主亲友还是吃瓜人，来进群吧", True),
     ("护肤教程（毛孔篇）纯享版教程", True),  # 既无主题也无社交词 ⇒ 先算相关
+    #: ★★ 2026-11-08:小红书**为避审核把「群」写成「裙」** —— 实测这条被判成
+    #: 主题相关(topic_ok=1)并推了出去,是一条纯"招男生进群"的社交帖。
+    ("完全女儿国来的，裙里女生超多，急招男生！", False),
+    ("已婚搭子！摸鱼搭子！聊天搭子！快来！", False),
 ])
 def test_主题相关判定(title, ok):
     assert dw.topic_hit(title) is ok
+
+
+def _xhs_stub(monkeypatch, notes, texts, has_group=False):
+    """把 CDP 那条路整个替掉:不出网,只喂固定的笔记与评论。"""
+    from app.services import xhs_demand as X
+
+    class _P:
+        def stop(self):
+            pass
+
+    class _Ctx:
+        def new_page(self):
+            class _Page:
+                def close(self):
+                    pass
+            return _Page()
+
+    class _Browser:
+        contexts = [_Ctx()]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(X, "_connect", lambda: (_P(), _Browser()))
+    monkeypatch.setattr(X, "available", lambda settings=None: (True, ""))
+    monkeypatch.setattr(X, "search_notes", lambda page, kw, limit=2: notes)
+    monkeypatch.setattr(X, "note_comments", lambda page, nid, token="": texts)
+    monkeypatch.setattr(X, "page_has_group", lambda page: has_group)
+    monkeypatch.setattr(dw, "push_request", lambda items, settings, platform="douyin": True)
+
+
+class _XS(_S):
+    demand_xhs_enabled = True
+    demand_xhs_seed_words = "吃瓜群"
+    demand_xhs_seeds_per_round = 1
+    demand_xhs_notes_per_seed = 5
+    demand_xhs_min_comments = 8
+    demand_request_density = 0.1
+    demand_repeat_ratio = 0.25
+
+
+def _notes(*titles):
+    return [{"id": f"n{i}", "token": "t", "title": t, "author": "a", "comments": 30}
+            for i, t in enumerate(titles)]
+
+
+def test_小红书纯社交群不推送_但仍入库当分母(session, monkeypatch):
+    """2026-11-08 实测:近 14 条推出去的小红书卡片里,`互帮互助群`/`摸鱼群招人啦`/
+    `90.00后05后宝妈孕妈群` 这类**社交招募帖**占了大半 —— 它们求/1 密度一样高
+    (拉群也让人扣1),但**不是大瓜**。
+
+    改为:照旧落 `demand_scans`(阈值要靠这些数据调),但**不推送**。
+    """
+    from app.db.models import DemandScan
+
+    _xhs_stub(monkeypatch, _notes("摸鱼群招人啦"), ["1"] * 30)
+    pushed: list = []
+    monkeypatch.setattr(dw, "push_request",
+                        lambda items, settings, platform="douyin": pushed.append(items) or True)
+
+    res = dw.scan_xhs(session, 1, _XS())
+
+    assert res["flagged"] == 1 and res["pushed"] == 0, res
+    assert res["skipped"] == 1, "被闸门拦下的条数必须单独计数,否则'没命中'和'拦掉了'分不清"
+    assert session.query(DemandScan).count() == 1, "分母要留"
+
+
+def test_小红书取不到名字的也不推送_与抖音不同(session, monkeypatch):
+    """抖音那条链**取不到名字仍然推**(用户要的是"这类视频"本身);
+
+    小红书不同:它的评论区「求/1」信号本来就弱一个量级(`doc` 9.5),
+    再推一张"没名字"的卡就纯是噪音 —— 而且实测推出去的多是空串名。
+    """
+    _xhs_stub(monkeypatch, _notes("这次真的要替我们猫一样的文吉儿说两句话了"), ["1"] * 30)
+    pushed: list = []
+    monkeypatch.setattr(dw, "push_request",
+                        lambda items, settings, platform="douyin": pushed.append(items) or True)
+
+    res = dw.scan_xhs(session, 1, _XS())
+
+    assert res["flagged"] == 1 and res["skipped"] == 1 and not pushed, res
+
+
+def test_小红书主题相关且取得到名字的照常推送(session, monkeypatch):
+    """闸门只拦"社交群/没名字",**不许把真大瓜一起拦掉**。"""
+    _xhs_stub(monkeypatch, _notes("《小小绘》全集资源"), ["1"] * 30)
+    pushed: list = []
+    monkeypatch.setattr(dw, "push_request",
+                        lambda items, settings, platform="douyin": pushed.append(items) or True)
+
+    res = dw.scan_xhs(session, 1, _XS())
+
+    assert res["pushed"] == 1 and res["skipped"] == 0, res
+    assert pushed[0][0]["name"] == "小小绘"
 
 
 # ---------------------------------------------------------------- 数据回传管理群

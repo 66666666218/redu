@@ -1195,7 +1195,15 @@ def search_keywords(session, user_id: int, top: int, settings,
         except Exception:  # noqa: BLE001 - 取不到就退回纯大瓜词
             _xhs_names = []
         _gua_names = _xhs_names + [x for x in _gua_names if x not in _xhs_names]
-        kws = _gua_names[:3] + [w for w in _DA_GUA_WORDS if w not in _gua_names][:_half]
+        #: ★★ **热榜词要排最前**(2026-11-08 修):这个分支在 1207 行就 `return` 了,
+        #: 而"把 `hot` 追加到 `kws` 末尾"的那段(第 1154 行)**在 return 之后** ——
+        #: 于是**大瓜轮 100% 拿不到热榜词**(`外部命中0` 那 40 轮全含大瓜轮)。
+        #: 而大瓜恰恰是最该用"今天大家在聊什么"的类目:用户给的样本
+        #: (`白雪公主1995`/`墨尔本七个小矮人`)就是**当日热点事件**形态,
+        #: 靠库内资源名/群名永远搜不出来。
+        kws = ([w for w in (hot or []) if w]
+               + _gua_names[:3]
+               + [w for w in _DA_GUA_WORDS if w not in _gua_names][:_half])
         for w in cand:                       # 兜底:高产出资源名(按历史有效率已排好序)
             if len(kws) >= _n:
                 break
@@ -2069,10 +2077,19 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
 
         settings = get_settings()
     plats = platforms_of(settings)
+    cat = category or category_topics.current_category(db)   # 本轮搜哪个类目(轮换)
     # 词来自**群组新资源 + 公众号已验证资源**(见 search_keywords 的注释);各平台共用。
     # **热榜外部种子**只喂给抖音:小红书/快手没有口令,拿热榜词去搜只是白开一次浏览器。
-    hot = hot_seed_words(settings) if "douyin" in plats else []
-    cat = category or category_topics.current_category(db)   # 本轮搜哪个类目(轮换)
+    #: ★★ **大瓜轮多要几个热榜词**(2026-11-08):全局只给 1 个(`douyin_leads_hot_keywords`),
+    #: 而大瓜是**唯一**该用"今天大家在聊什么"的类目 —— 用户给的样本
+    #: (`白雪公主1995`/`墨尔本七个小矮人`)是**当日热点事件**,库内资源名永远搜不出来。
+    #: 热榜词对大瓜轮不占已知词名额(见 `search_keywords` 的大瓜分支:热榜排最前、只占额度外的补充位)。
+    #: ⚠️ `douyin_leads_hot_keywords=0` 是**明确的关闭开关** —— 那种情况不放大瓜轮的名额
+    #: (否则"关掉热榜"这个动作会在大瓜轮失效)。
+    _hot_n = int(getattr(settings, "douyin_leads_hot_keywords", 0) or 0)
+    if cat == "大瓜" and _hot_n > 0:
+        _hot_n = max(_hot_n, int(getattr(settings, "douyin_leads_dagua_hot_words", 3) or 0))
+    hot = hot_seed_words(settings, limit=_hot_n) if "douyin" in plats else []
     kws = search_keywords(db, user_id,
                           int(getattr(settings, "douyin_leads_keywords", 3) or 3),
                           settings, hot=hot)

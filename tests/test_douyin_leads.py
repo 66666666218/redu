@@ -2351,3 +2351,27 @@ def test_大瓜轮用大瓜向的词(session, monkeypatch) -> None:
     #: 因为纯大瓜词在抖音**两轮都是 口令 0**(泛词搜到的是大众八卦,不是推广帖)。
     assert kws and any(w in ("吃瓜群", "吃瓜", "反差", "爆料", "实锤", "塌房", "小作文")
                        for w in kws), kws
+
+def test_大瓜轮热榜词必须排最前(session, monkeypatch) -> None:
+    """★★ 2026-11-08 修的真 bug:**大瓜分支在追加 `hot` 之前就 return 了**。
+
+    `search_keywords` 把热榜词追加到 `kws` 末尾的那段在函数尾部,而大瓜分支
+    (`if cat == "大瓜": ... return`)在它**之前**就返回 —— 于是大瓜轮
+    **100% 拿不到热榜词**(历史 40 轮 `外部命中0` 全含大瓜轮)。
+
+    大瓜恰恰是最该用"今天大家在聊什么"的类目:用户给的样本
+    (`白雪公主1995`/`墨尔本七个小矮人`)是**当日热点事件**,库内资源名和群名
+    永远搜不出来 —— 它们只覆盖"已经在推广的老资源"。
+    """
+    from config.settings import Settings
+
+    from app.services import category_topics as ct
+    from app.services.douyin_leads import search_keywords
+
+    monkeypatch.setattr(ct, "current_category", lambda sess: "大瓜")
+
+    kws = search_keywords(session, 1, 8, Settings(_env_file=None),
+                          hot=["墨尔本七个小矮人", "白雪公主1995"])
+
+    assert kws[:2] == ["墨尔本七个小矮人", "白雪公主1995"], f"热榜词要排最前:{kws}"
+    assert len(kws) <= 8, "热榜词不许把名额撑爆(CDP 一次最多 8 词)"
