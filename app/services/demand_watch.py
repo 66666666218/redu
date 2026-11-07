@@ -31,6 +31,7 @@ import json
 import re
 from collections import defaultdict
 from datetime import datetime, timedelta
+from typing import NamedTuple
 
 from sqlalchemy import func, select
 
@@ -62,6 +63,182 @@ def _norm_comment(text: str) -> str:
     """
     s = _EMOJI_RE.sub("", str(text or ""))
     return re.sub(r"[\s\W_]+", "", s)
+
+
+#: 连续中文片段 —— 高频名抽取只在中文串里切 n-gram(数字/拉丁/标点在评论区太杂)
+_CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]+")
+
+#: **高频名**的最短/最长长度。2 字(`甜甜`/`蕉妹`)到 6 字(`香香公主与爱犬`)。
+_ENTITY_MIN_LEN = 2
+_ENTITY_MAX_LEN = 6
+
+#: 「边界出现」的最低占比(见 `Entity.edge`)。0.3 是实测出来的:
+#: 真名字 `水子哥`(0.56)/`面具`(0.33) 在线上,句中切出来的 `子哥`(0.11)/`是水`(≈0) 在线下。
+_ENTITY_EDGE_MIN = 0.3
+
+#: **不能出现在名字首/尾的虚字**(2026-11-06 实测残留的噪音全是这种形状):
+#: `潘甜甜是`/`是谁`/`不烧心`/`都是`/`是水` —— 它们恰好落在中文串边界上,
+#: 边界率过关,但**起止落在虚词上**,说明它是从句子里切出来的半句,不是名字。
+#: 真名字(`林予曦`/`潘甜甜`/`水子哥`/`蕉妹`)首尾都是实词。
+#:
+#: ⚠️ 故意**不含**「上/下/前/后/里/外/看/说」这类能起头的实词(《上海滩》《下雨天》);
+#: 也不追求覆盖全部 —— `你/我/他/她/这/那` 早在 `_NOT_NAME_PARTS` 里被 `is_name_like` 挡了。
+_ENTITY_EDGE_BAD = frozenset(
+    "是 的 了 也 都 就 还 在 和 与 有 没 不 要 会 能 想 个 些 很 太 最 又 再 才 被 把 给 对 "
+    "从 到 但 而 且 因 所 如 若 虽 却 只 更 挺 好 真 可 谁 什 怎 哪 为 以 于 之 其 此 该 每 各".split())
+
+
+class Entity(NamedTuple):
+    """一个候选片段:文本、文档频率(出现在多少条不同评论里)、边界率。"""
+    text: str
+    df: int
+    edge: float
+
+
+def frequent_entities(texts: list[str], *, min_docs: int = 3) -> list[Entity]:
+    """★ **评论区里反复出现的实体名**(2026-11-06)。
+
+    ## 为什么需要它
+    原有的抽取只认两种形状:**书名号 `《…》`** 与 **「求 X / X 叫什么」句式**。
+    实测(2026-11-06,生产评论原文)这两种**全都抓不到真实场景**:
+
+    | 视频 | 评论区原文 | 原抽取器 |
+    |---|---|---|
+    | 「两位巅峰王者」 | `林予曦就两部 甜甜三部` / `蕉妹第二部` | **0 个** |
+    | 「水逆塌方」 | `水子哥略显青涩` / `我有水子哥了` / `声音像水子哥`… | **0 个** |
+
+    —— 观众**不会**写书名号,也**不会**说「求 XX」;他们直接**说这个名字**
+    (`水子哥`×9 条、`甜甜`×8 条)。所以判据要换成 **"在很多条不同评论里重复出现的短中文串"**。
+
+    ## 怎么算
+    对每条评论的连续中文串切 2~6 字 n-gram,统计 **DF(出现在多少条不同评论里)** ——
+    注意是文档频率不是总次数:同一句刷 100 遍只算 1,防刷屏。
+
+    ## 另算一个「边界率」
+    光看重复次数会把**从句中间切出来的碎片**也捞上来(实测 `个面具`/`是水`/`人都`/`都是`
+    都进了榜)。所以同时统计每个片段的**边界出现占比**:
+    该片段落在中文串**首或尾**的次数 ÷ 出现总次数。
+
+    ⚠️ 「边界」包含**整条中文串就是它**的情形:实测 `水子哥` 有相当一部分评论
+    就是这两个字本身,那是**最强**的边界证据。早先版本要求 `len(run) > len(gram)`
+    才计边界,把这批全漏了(edge 从 0.56 掉到 0.25) —— 已去掉。
+    短 run 会给碎片刷出 1.0 的假高值(`是男的` 切出 `是男`/`男的`),
+    那类由 `_ENTITY_EDGE_BAD`(虚字起止)与 `_ENTITY_STOP` 兜住,不靠这条。
+
+    ## 这一步**必定**混进泛词
+    实测 `电影`(4 个视频)、`什么`(7 个)、`名字`(3 个) 都会上榜 ——
+    它们本来就是评论区的高频词。所以本函数**只负责"重复"这一个信号**,
+    "是不是名字"由调用方用 `is_name_like` + **跨视频分布** + 库内交叉验证来收口
+    (见 `run_user` 里 `_ENTITY_*` 那段)。
+
+    返回 `[Entity(text, df, edge)]`,已按 DF 降序。
+    """
+    from collections import Counter
+
+    df: Counter[str] = Counter()
+    edge: Counter[str] = Counter()
+    #: ⚠️ **先去重再统计**(2026-11-06):文档频率的含义是"多少条**不同**评论提到它"。
+    #: 同一句话被刷 100 遍(`水子哥` 复制粘贴)在这条路上只能算 1 —— 否则刷屏就能
+    #: 把一个短语顶成"高频实体"。
+    for t in dict.fromkeys(_norm_comment(x) for x in texts):
+        seen: set[str] = set()
+        #: 边界命中**也按评论去重**:一条评论里同一片段在开头和结尾各出现一次,
+        #: 只能说明"这条评论说了两次",不能把边界率推到 >1。
+        edged: set[str] = set()
+        for run in _CJK_RUN_RE.findall(_norm_comment(t)):
+            for n in range(_ENTITY_MIN_LEN, min(_ENTITY_MAX_LEN, len(run)) + 1):
+                for i in range(len(run) - n + 1):
+                    g = run[i:i + n]
+                    seen.add(g)
+                    if i == 0 or i + n == len(run):
+                        edged.add(g)
+        df.update(seen)
+        edge.update(edged)
+    out = [Entity(g, c, round(edge[g] / c, 3))
+           for g, c in df.items() if c >= int(min_docs)]
+    return sorted(out, key=lambda e: (-e.df, -len(e.text)))
+
+
+def _drop_subsumed(cands: list[Entity]) -> list[Entity]:
+    """去掉**被更长的近似同频片段包含**的候选。
+
+    实测(2026-11-06,真实评论):
+      · `林予`(6) 与 `林予曦`(5)、`豆包什`(3) 与 `豆包什么电影`(3) 会同时上榜 ——
+        短的那个是被句子**切断的半截**,留着就是噪音;
+      · 而 `甜甜`(7) 与 `潘甜甜`(3) **都要留**:前者是观众对这个名字的简称,DF 更高。
+
+    判据用 **`kc >= c * 0.7`**(长的那个出现得差不多多)而不是 `kc >= c`:
+    后者太松(半截 vs 全名常常差 1 条评论),前者仍能把 `甜甜`/`潘甜甜` 这一对区分开。
+
+    ⚠️ 只认**前缀/后缀**包含,不认"出现在中间"(2026-11-06 实测):
+    被切成半截的碎片**总是**全名的前缀或后缀(`林予`/`予曦`→`林予曦`,`来早`→`来早了`);
+    而中间包含常常是另一个词(`潘甜甜` 里含 `甜甜`,那是简称不是碎片)。
+    用中间包含会误伤,而且 `_entity_names` 的边界率已经能挡住它在句中的形态。
+    """
+    out: list[Entity] = []
+    for e in cands:
+        if any(e.text != k.text and k.df >= e.df * 0.7
+               and (k.text.startswith(e.text) or k.text.endswith(e.text))
+               for k in cands):
+            continue
+        out.append(e)
+    return out
+
+
+#: **评论区高频但不可能是资源名**的词(2026-11-06 从真实评论里逐条看过来的)。
+#:
+#: ⚠️ 这是"高频实体"这条路**必然**带来的代价:评论区的填充词(`电影`/`什么`/`名字`)DF 天然很高。
+#: 词表以**实测噪音**为准,不靠想象补 —— 加得太宽会把真名字挡掉(如 `面具` 在某条视频里
+#: 确实是观众在说的东西,但它不是资源名,所以仍在表内)。
+_ENTITY_STOP = frozenset({
+    "电影", "电影名", "电影名字", "片名", "剧名", "名字", "什么", "怎么", "多少", "知道",
+    "一部", "两部", "第一", "第二", "第三", "第四", "一个", "两个", "三个", "这部",
+    "这部片", "那个", "这个", "片子", "视频", "评论", "抖音", "快手", "表情", "声音",
+    "男的", "女的", "男生", "女生", "厕所", "面具", "前面", "后面", "上面", "下面",
+    "真的", "可以", "没有", "不是", "我们", "你们", "他们", "自己", "时候", "东西",
+    "感觉", "觉得", "好看", "一般", "正常", "衣服", "裙子", "黑色", "白色", "今天",
+    "昨天", "明天", "好可爱", "来早了", "豆包", "还有", "这是", "就是", "然后", "所以",
+    #: 2026-11-06 第二轮实测补的**虚词/量词碎片**(逐个看过原文才加):
+    #: `辨识度`(4)/`但是`(4)/`确实`(3) 来自「水子哥」那条;
+    #: `已经`(3) 来自「古见同学」;`有个`(4)/`同学`(3)/`部作品`(3) 来自「兽人」与「两位巅峰王者」。
+    #: 它们在**任何**话题下都会高频出现,不带任何资源语义。
+    "辨识度", "但是", "确实", "已经", "有个", "同学", "部作品", "听说", "为什",
+})
+
+
+def _entity_names(cands: list[Entity], *, title: str = "") -> list[Entity]:
+    """把 `frequent_entities` 的原始候选收成**能当名字的**:先并碎片,再过泛词/噪音词。
+
+    ⚠️ **顺序很关键**(2026-11-06 实测):必须先 `_drop_subsumed` 再 `is_name_like`。
+    反过来会留下**碎片**:`什么电影` 含 `什么`(在 `_NOT_NAME_PARTS` 里)⇒ 被 `is_name_like`
+    挡掉,而它的碎片 `么电影`(DF 一样高)**不**含 `什么` ⇒ 反而活下来。
+    实测那轮结果里排第一的就是 `么电影`(8 条)。
+
+    ⚠️ **边界率**是必要不充分条件(见 `_ENTITY_EDGE_MIN`):
+    实测 `个面具`/`是水`/`人都`/`都是`/`下海` 这类从句中切出的碎片边界率≈0,被它挡掉;
+    而泛词(`电影`/`什么电影`)边界率高达 1.0 —— 所以泛词仍必须靠 `_ENTITY_STOP`
+    与 `run_user` 的**跨视频**判据来收口,这条闸门替代不了它们。
+
+    ⚠️ `title`:出现在**视频标题**里的片段一律跳过。实测 `古见`(标题「猫系古见同学」)、
+    `兽人`(标题里就有)都上了榜 —— 那不是"评论区在议论谁",而是**视频本身在讲什么**;
+    而且标题里的书名号名字走的是 `names_from_title` 那条路,不需要在这里重复发现。
+    """
+    kept = _drop_subsumed(list(cands))
+    title = _norm_comment(title)
+    out: list[Entity] = []
+    for e in kept:
+        g = e.text
+        if title and g in title:
+            continue
+        if e.edge < _ENTITY_EDGE_MIN:
+            continue
+        if g[0] in _ENTITY_EDGE_BAD or g[-1] in _ENTITY_EDGE_BAD:
+            continue
+        if g in _ENTITY_STOP or len(set(g)) <= 1 or not is_name_like(g, quoted=True):
+            continue
+        out.append(e)
+    return out
+
 
 
 def names_from_title(title: str) -> list[str]:
@@ -357,7 +534,8 @@ _TAG_JUNK = frozenset({
 
 
 def collect_for_video(aweme_id: str, *, session=None, user_id: int = 1,
-                      pages: int = 2, count: int = 20) -> dict:
+                      pages: int = 2, count: int = 20, min_docs: int = 3,
+                      title: str = "") -> dict:
     """把一个视频的评论扫一遍。返回 `{name: {"demand":n,"mention":n,"samples":[…]}}`。"""
     found: dict[str, dict] = defaultdict(lambda: {"demand": 0, "mention": 0, "samples": []})
     cursor, err, no_name, ones, total = 0, "", 0, 0, 0
@@ -402,8 +580,22 @@ def collect_for_video(aweme_id: str, *, session=None, user_id: int = 1,
     dup_ratio = 0.0
     if total >= 5:
         dup_ratio = 1 - (len(set(texts)) / total)
+    #: ★ **评论区高频实体**(2026-11-06):观众直接说名字(`水子哥`×9 / `甜甜`×8),
+    #: 既不写书名号也不写「求 XX」,原抽取器一个都抓不到。详见 `frequent_entities`。
+    #: ⚠️ 这些**只算提及、不算"求"** —— 重复 ≠ 有人在要;它是不是名字由调用方收口。
+    entities = _entity_names(frequent_entities(texts, min_docs=int(min_docs or 3)),
+                             title=title)
+    for e in entities:
+        rec = found[e.text]
+        rec["mention"] += e.df
+        #: ★ 打标:`entity=True` 告诉调用方"这个名字是**靠重复**来的,不是靠句式" ——
+        #: 两者在**跨视频**上的含义正好相反(见 `run_user` 的收口判据)。
+        rec["entity"] = True
+        if len(rec["samples"]) < 3:
+            rec["samples"].append(f"(评论区出现 {e.df} 条)")
     return {"names": dict(found), "error": err, "no_name": no_name, "ones": ones,
-            "total": total, "dup_ratio": round(dup_ratio, 3)}
+            "total": total, "dup_ratio": round(dup_ratio, 3),
+            "entities": [(e.text, e.df) for e in entities], "texts": texts}
 
 
 # ---------------------------------------------------------------------------
@@ -558,12 +750,18 @@ def _upsert(db, user_id: int, name: str, demand: int, mention: int, video_hits: 
 
 
 def pick_pushable(rows, *, min_demand: int = 2, min_ones: int = 20,
-                  cooldown_hours: int = 48, limit: int = 10) -> list:
+                  cooldown_hours: int = 48, limit: int = 10,
+                  min_mention: int = 6) -> list:
     """够格且**冷却期外**的名字。按 (被求次数, 扣1数) 降序。
 
-    ★ 两条门槛满足**任意一条**就算够格(用户口径「判断是根据作品里面的**求和1**」):
+    ★ 三条门槛满足**任意一条**就算够格(用户口径「判断是根据作品里面的**求和1**」):
       · 有人**求**(`demand_hits ≥ min_demand`);
-      · 或者**扣1跟帖够多**(`ones_hits ≥ min_ones`)—— 它说明这条被勾得很紧。
+      · 或者**扣1跟帖够多**(`ones_hits ≥ min_ones`)—— 它说明这条被勾得很紧;
+      · 或者**评论区把它念了很多遍**(`mention_hits ≥ min_mention`,2026-11-06 新增)。
+        这一类(`水子哥`×9 / `甜甜`×8)观众**根本没在"求"** —— 他们是在**议论这个人**,
+        所以 `demand`/`ones` 都是 0,前两条永远不放行。实测这类视频恰恰是**大瓜**本身
+        (某人塌方,评论区满屏叫他的名字),漏掉它等于漏掉整条链最想要的东西。
+        ⚠️ 门槛设 6 而不是 3:重复 3 次的常常还是短语(`好可爱`),6 次以上才像真名。
 
     ⚠️ **加冷却**:本作业 4 小时一轮,不加冷却的话同一个名字一天会推 6 次 ——
     群里会把它当成噪音(`push_ledger` 那套冷却的同一个道理)。
@@ -573,7 +771,9 @@ def pick_pushable(rows, *, min_demand: int = 2, min_ones: int = 20,
     for r in rows:
         demand = int(r.demand_hits or 0)
         ones = int(getattr(r, "ones_hits", 0) or 0)
-        if demand < int(min_demand) and ones < int(min_ones):
+        mention = int(r.mention_hits or 0)
+        if (demand < int(min_demand) and ones < int(min_ones)
+                and mention < int(min_mention)):
             continue
         if r.last_pushed_at and (now - r.last_pushed_at) < timedelta(hours=cooldown_hours):
             continue
@@ -777,7 +977,8 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
     request_videos: list[dict] = []
     for v in videos:
         res = collect_for_video(str(v.get("aweme_id") or ""), session=db, user_id=user_id,
-                                pages=int(getattr(settings, "demand_comment_pages", 2) or 2))
+                                pages=int(getattr(settings, "demand_comment_pages", 2) or 2),
+                                title=str(v.get("title") or ""))
         if res["error"]:
             errors.append(res["error"])
             continue
@@ -829,8 +1030,10 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
         for tname in names_from_title(v.get("title") or ""):
             a = agg.setdefault(tname, {"demand": 0, "mention": 0, "video_hits": 0,
                                        "ones": 0, "title": 0, "heat": 0,
-                                       "comments": [], "video": ""})
+                                       "comments": [], "video": "",
+                                       "entity_only": False})
             a["title"] += 1
+            a["entity_only"] = False          #: 标题里有书名号 ⇒ 它本来就是个作品名
             a["mention"] += 1
             a["ones"] += ones
             a["heat"] += heat
@@ -839,10 +1042,14 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
         for name, rec in res["names"].items():
             a = agg.setdefault(name, {"demand": 0, "mention": 0, "video_hits": 0,
                                       "ones": 0, "title": 0, "heat": 0,
-                                      "comments": [], "video": ""})
+                                      "comments": [], "video": "",
+                                      "entity_only": True})
             a["demand"] += rec["demand"]
             a["mention"] += rec["mention"]
             a["video_hits"] += 1
+            #: 只要有一条视频里它是靠**句式**(书名号/「求 X」)抽到的,就不再是"纯重复词"
+            if not rec.get("entity"):
+                a["entity_only"] = False
             for s in rec["samples"][:2]:
                 if len(a["comments"]) < 3 and s not in a["comments"]:
                     a["comments"].append(s)
@@ -872,7 +1079,7 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
         db.commit()
         return {"videos": len(videos), "names": 0, "request": len(request_videos)}
 
-    kept_names = dropped_names = 0
+    kept_names = dropped_names = dropped_common = 0
     #: ★ **交叉验证用**(2026-11-04 用户「结合多个平台和网盘资源来判断」):
     #: 网盘资源库 + 我们收到的线索名 + **另一个平台**上确认过的需求名。
     known = known_name_set(db, user_id)
@@ -884,8 +1091,22 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
         #:   ③ 被求 **≥2 次** ⇒ 留。其余都是单条评论里的偶发片段,丢掉。
         #: ④ **交叉验证**(2026-11-04):名字在网盘资源库 / 线索名 / 别平台的需求名里出现过
         #: ⇒ 不是评论里的偶发片段,留。
-        if not (a["title"] >= 1 or a["video_hits"] >= 2 or a["demand"] >= 2
-                or corroborated(name, known)):
+        #: ⑤ ⚠️ **纯重复词的方向与 ② 相反**(2026-11-06):只靠"评论区重复出现"拿到的名字
+        #: (`entity_only`),**跨视频反而是泛词的证据** —— 实测 `电影` 出现在 4 个视频、
+        #: `什么` 7 个,而真名字(`水子哥`/`甜甜`/`林予曦`)**只在一个视频**里刷屏。
+        #: 所以这一类要求 `video_hits == 1`,并靠 ③④ 兜底(重复够多、或被库里别处印证)。
+        # 先取快照:下面的准入条件在**几轮之间会改**,两条分支的含义不一样,别写成一行。
+        entity_only = bool(a.get("entity_only"))
+        video_hits = int(a["video_hits"])
+        is_signal = (a["title"] >= 1 or video_hits >= 2 or a["demand"] >= 2
+                     or corroborated(name, known))
+        #: 纯重复词的准入:**只在一个视频里刷屏** + 重复 ≥3 条(它没有"被求"语义,
+        #: `demand>=2` 对它永远不成立) —— 见 ⑤。
+        entity_ok = entity_only and video_hits == 1 and int(a["mention"]) >= 3
+        if entity_only and video_hits > 1:
+            dropped_common += 1
+            continue
+        if not (is_signal or entity_ok):
             dropped_names += 1
             continue
         kept_names += 1
@@ -902,7 +1123,8 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
         min_demand=int(getattr(settings, "demand_min_hits", 2) or 2),
         min_ones=int(getattr(settings, "demand_min_ones", 20) or 0),
         cooldown_hours=int(getattr(settings, "demand_push_cooldown_hours", 48) or 48),
-        limit=int(getattr(settings, "demand_push_limit", 10) or 10))
+        limit=int(getattr(settings, "demand_push_limit", 10) or 10),
+        min_mention=int(getattr(settings, "demand_min_mention", 6) or 6))
     pushed = 0
     if chosen and push_card(chosen, settings):
         now = datetime.now()
@@ -911,7 +1133,8 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
         db.commit()
         pushed = len(chosen)
 
-    detail = (f"视频{len(videos)} 扫{scanned} 名字{kept_names}(丢{dropped_names}) 求{no_name}(无名) 推{pushed}"
+    detail = (f"视频{len(videos)} 扫{scanned} 名字{kept_names}(丢{dropped_names}"
+              f"/泛词{dropped_common}) 求{no_name}(无名) 推{pushed}"
               f" 求1型{len(request_videos)}(推{request_pushed})")
     if errors:
         detail += f" 失败:{errors[0][:60]}"

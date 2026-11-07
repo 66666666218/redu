@@ -20,6 +20,11 @@ from app.utils import get_logger
 logger = get_logger(__name__)
 
 PLATFORMS = ("weibo", "baidu", "douyin", "goofish", "weread", "baidupan", "quark",
+             # douhot(2026-11-06):**抖音热点宝是独立 OAuth 站点**(`douhot.douyin.com`),
+             # 抖音档案里没有它的会话 ⇒ 拿 `douyin` 那枚打榜单接口一律 `code=8 用户未登录`。
+             # 两者**必须分开存**:`douyin` 是抖音搜索在生产里用的,不能被热点宝覆盖。
+             # 取法见 `scripts/douhot_login.py`。
+             "douhot",
              "zhihu",   # zhihu:跨平台同类资源号发现用(2026-10-01,带登录 Cookie 即可搜)
              "bilibili",  # bilibili:同上(2026-10-02,**匿名也能搜**,配了 Cookie 风控更宽松)
              "xunlei",  # xunlei:迅雷网盘(2026-10-02,搜口令→转存→分享)

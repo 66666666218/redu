@@ -407,7 +407,8 @@ def _douhot_cookie_from_file(settings: Settings | None = None) -> str:
         return ""
 
 
-def _douhot_fetch_words(session, user_id: int, cookie: str, settings) -> list[dict]:
+def _douhot_fetch_words(session, user_id: int, cookie: str, settings,
+                        platform: str = "douyin") -> list[dict]:
     """取内容词榜;**凭据失效时用文件里那份自愈一次**(2026-11-01)。
 
     当天实况:运维把新 cookie **写进了文件**,而运行时读的是**加密库**,
@@ -423,7 +424,9 @@ def _douhot_fetch_words(session, user_id: int, cookie: str, settings) -> list[di
             raise
         from app.services.cookie_store import set_cookie
 
-        set_cookie(session, user_id, "douyin", fresh)
+        #: ⚠️ 自愈写回的是**它自己那个平台键**,不是写死 `douyin`(2026-11-06):
+        #: 热点宝与抖音搜索是两套登录态,写进 `douyin` 会把搜索打挂。
+        set_cookie(session, user_id, platform, fresh)
         session.commit()
         logger.warning("热点宝 Cookie 库里那份已失效,已用 `douhot_cookie_file` 的新凭据覆盖并重试")
         return douhot.fetch_content_words(fresh, settings)
@@ -432,11 +435,17 @@ def _douhot_fetch_words(session, user_id: int, cookie: str, settings) -> list[di
 def run_douhot(session: Session, user_id: int, settings: Settings | None = None) -> dict:
     settings = _base(settings)
     cookies = get_cookies(session, user_id)
-    douyin_cookie = cookies.get("douyin", "")
+    #: **优先 `douhot`,回落 `douyin`**(2026-11-06)。
+    #: 起因:热点宝是独立 OAuth 站点(`douhot.douyin.com`),抖音档案里**没有**它的会话,
+    #: 拿 `douyin` 那枚打榜单接口一律 `code=8 用户未登录` —— 而 `douyin` 那枚
+    #: 是**抖音搜索**在生产里用的,不能被热点宝覆盖。所以拆成两个平台键。
+    #: 回落保留:老库只有 `douyin` 也能跑(历史行为不变)。
+    platform = "douhot" if cookies.get("douhot") else "douyin"
+    douyin_cookie = cookies.get(platform, "")
     if not douyin_cookie:
         raise ValueError("未配置抖音(热点宝) Cookie")
     try:
-        words = _douhot_fetch_words(session, user_id, douyin_cookie, settings)
+        words = _douhot_fetch_words(session, user_id, douyin_cookie, settings, platform)
         now = datetime.now()
         # 72h 窗口:与 weibo/baidu 同款(见上方注释),否则该表只增不减,
         # 每轮把用户全部历史词名载入内存。

@@ -758,3 +758,145 @@ def test_迅雷群里有同名资源要标出来(session):
 
     assert dw.xunlei_group_hits(session, "反差直男") == 1
     assert dw.xunlei_group_hits(session, "不存在的名字") == 0
+
+
+# ---------------------------------------------------------------- 评论区高频实体
+#
+# 2026-11-06 实测发现:观众**不写书名号、也不说「求 XX」**,他们直接**说名字**。
+# 例:「水逆塌方」那条的 39 条评论里 `水子哥` 出现在 14 条,原抽取器抓到 **0 个**。
+
+def test_高频实体_观众直接说名字也能捞出来():
+    """真实评论原文(`水子哥` 那条视频,截取代表样本)。"""
+    texts = [
+        "水子哥略显青涩", "我有水子哥了", "声音像水子哥", "水子哥真下海了",
+        "水子哥这颜值", "水子哥是谁啊", "第一次看水子哥",
+    ]
+    ents = dw.frequent_entities(texts, min_docs=3)
+    assert any(e.text == "水子哥" for e in ents), ents
+
+
+def test_高频实体按评论去重_同一条刷一百遍只算一次():
+    """防刷屏:同一句复制 100 次不能让它的 DF 变成 100。"""
+    texts = ["水子哥好帅"] * 100
+    ents = dw.frequent_entities(texts, min_docs=1)
+    assert [e.df for e in ents if e.text == "水子哥"] == [1]
+    assert all(e.df <= 1 for e in ents), "所有片段的 DF 都不该超过评论条数"
+
+
+def test_边界率_句中切出的碎片低_名字高():
+    """`水子哥` 常常整条评论就是它(边界出现);`个面具` 只出现在句中。"""
+    texts = ["水子哥", "水子哥", "我有水子哥了", "水子哥真下海了",
+             "他戴个面具出镜", "她戴个面具直播"]
+    by = {e.text: e for e in dw.frequent_entities(texts, min_docs=2)}
+    assert by["水子哥"].edge > by["个面具"].edge
+    assert by["水子哥"].edge >= dw._ENTITY_EDGE_MIN
+
+
+def test_虚字开头或结尾的片段不算名字():
+    """实测残留:`潘甜甜是`(DF 3,edge 1.0)/`是谁`/`不烧心` —— 边界率过关但起止是虚词。"""
+    cands = [dw.Entity("潘甜甜是", 3, 1.0), dw.Entity("是谁", 3, 1.0),
+             dw.Entity("潘甜甜", 11, 0.727)]
+    assert [e.text for e in dw._entity_names(cands)] == ["潘甜甜"]
+
+
+def test_碎片只在前后缀上被判为半截_简称要留():
+    """`林予`/`林予曦`:前者是全名的前缀 ⇒ 丢;`甜甜`/`潘甜甜`:中间包含 ⇒ 两个都留。"""
+    cands = [dw.Entity("林予曦", 15, 0.867), dw.Entity("林予", 16, 0.812),
+             dw.Entity("潘甜甜", 11, 0.727), dw.Entity("甜甜", 18, 0.222)]
+    kept = {e.text for e in dw._drop_subsumed(cands)}
+    assert "林予" not in kept and "林予曦" in kept
+    assert {"甜甜", "潘甜甜"} <= kept
+
+
+def test_标题里出现的片段不算_那是视频本身在讲什么():
+    """实测 `古见`(标题「猫系古见同学」)上榜 —— 评论区在讨论剧情,不是新资源名。"""
+    cands = [dw.Entity("古见", 7, 0.5), dw.Entity("水子哥", 4, 0.5)]
+    names = [e.text for e in dw._entity_names(cands, title="猫系古见同学！")]
+    assert names == ["水子哥"]
+
+
+def test_泛词仍然要靠词表挡_边界率挡不住它们():
+    """`电影` 在评论区整句就是「什么电影」⇒ 边界率 1.0,属于必要不充分条件。"""
+    cands = [dw.Entity("电影", 7, 1.0), dw.Entity("水子哥", 14, 0.56)]
+    assert [e.text for e in dw._entity_names(cands)] == ["水子哥"]
+
+
+def test_重复名够多也能推_不需要有人求(session):
+    """`水子哥`×9 观众根本没在「求」,是在议论这个人 —— demand/ones 恒为 0。"""
+    r = DemandName(user_id=1, platform="douyin", name="水子哥",
+                   demand_hits=0, mention_hits=9, last_seen_at=datetime.now())
+    session.add(r)
+    session.commit()
+
+    chosen = dw.pick_pushable(session.query(DemandName).all(),
+                              min_demand=2, min_ones=20, min_mention=6,
+                              cooldown_hours=48, limit=10)
+    assert [x.name for x in chosen] == ["水子哥"]
+
+
+def test_重复3次还不够_那通常还是短语(session):
+    r = DemandName(user_id=1, platform="douyin", name="好可爱",
+                   demand_hits=0, mention_hits=3, last_seen_at=datetime.now())
+    session.add(r)
+    session.commit()
+
+    assert dw.pick_pushable(session.query(DemandName).all(),
+                           min_demand=2, min_ones=20, min_mention=6,
+                           cooldown_hours=48, limit=10) == []
+
+
+def test_纯重复词跨多个视频反而是泛词证据(session, monkeypatch):
+    """实测 `电影` 出现在 4 个视频、`什么` 7 个;而真名字**只在一个视频**里刷屏。"""
+    _lead(session, "111", title="视频一")
+    _lead(session, "222", title="视频二")
+    collect = {
+        "111": {"error": "", "names": {"电影": {"demand": 0, "mention": 5, "samples": [],
+                                                "entity": True}}, "ones": 0, "no_name": 0,
+                "total": 20, "dup_ratio": 0.0},
+        "222": {"error": "", "names": {"电影": {"demand": 0, "mention": 5, "samples": [],
+                                                "entity": True}}, "ones": 0, "no_name": 0,
+                "total": 20, "dup_ratio": 0.0},
+    }
+    monkeypatch.setattr(dw, "collect_for_video", lambda vid, **k: collect[vid])
+    monkeypatch.setattr(dw, "push_card", lambda *a, **k: False)
+    monkeypatch.setattr(dw, "push_request", lambda *a, **k: False)
+
+    dw.run_user(session, 1, _S())
+
+    assert session.query(DemandName).count() == 0
+
+
+def test_只在一个视频里刷屏的真名字入库(session, monkeypatch):
+    _lead(session, "111", title="我超，啊水逆咋塌方了啊")
+    monkeypatch.setattr(dw, "collect_for_video", lambda vid, **k: {
+        "error": "", "names": {"水子哥": {"demand": 0, "mention": 14, "samples": [],
+                                        "entity": True}}, "ones": 0, "no_name": 0,
+        "total": 39, "dup_ratio": 0.0})
+    monkeypatch.setattr(dw, "push_card", lambda *a, **k: False)
+    monkeypatch.setattr(dw, "push_request", lambda *a, **k: False)
+
+    dw.run_user(session, 1, _S())
+
+    row = session.query(DemandName).one()
+    assert row.name == "水子哥"
+
+
+def test_同一名字既有句式又有重复时不算纯重复词(session, monkeypatch):
+    """只要有一条视频里它是靠书名号/「求 X」抽到的,`entity_only` 就该翻成 False。"""
+    _lead(session, "111", title="视频一")
+    _lead(session, "222", title="视频二")
+    collect = {
+        "111": {"error": "", "names": {"反差直男": {"demand": 2, "mention": 2,
+                                                    "samples": []}}, "ones": 0,
+                "no_name": 0, "total": 20, "dup_ratio": 0.0},
+        "222": {"error": "", "names": {"反差直男": {"demand": 0, "mention": 5,
+                                                    "samples": [], "entity": True}},
+                "ones": 0, "no_name": 0, "total": 20, "dup_ratio": 0.0},
+    }
+    monkeypatch.setattr(dw, "collect_for_video", lambda vid, **k: collect[vid])
+    monkeypatch.setattr(dw, "push_card", lambda *a, **k: False)
+    monkeypatch.setattr(dw, "push_request", lambda *a, **k: False)
+
+    dw.run_user(session, 1, _S())
+
+    assert {r.name for r in session.query(DemandName).all()} == {"反差直男"}
