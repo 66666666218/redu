@@ -863,6 +863,8 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
        (实测 `狗爹和小桃` 搜到 13 条同款,而泛词 `吃瓜` 搜到的是亲子起名/外卖群)。
     ② 没配种子词时,用**库内素材**:`douyin_leads`(推广视频)与 `douyin_peer_works`(对标号)。
     ③ 两种都能补位 —— 谁先用完名额就停。
+    ④ 还有余量时,补 **今天才冒出来的热点**(`hot_cycle`,无种子全榜);
+       **永远排在库内素材之后** —— 库内是已知能出货的,热点是赌新事件。
 
     ⚠️ **不再按"标题里有没有书名号"筛搜索结果**:用户给的参考作品是"标题 + 一堆标签"的
     形状(没有书名号),那条筛选会把它们全挡掉。名字改用 `names_from_title` 从
@@ -955,6 +957,44 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
         _add(w.aweme_id, w.url, w.title, 0, w.account_name)
         if len(out) >= need:
             break
+
+    # ④ ★ **今天才冒出来的热点**(2026-11-08 用户:「每次都会有新的热点出来,
+    # 你需要总结这些规律来完成监控和预测」)。
+    #: 用户 2026-11-08 纠正:「**热点事件名称是没有关联性的,每一个都是独立的事件**」
+    #: ⇒ 取词**不能靠已知名字扩展**(那只出同一事件的不同说法),主通路是热点宝
+    #: **1 小时搜索榜全榜**(`hot_cycle.board_words`,不带任何关键词)。
+    #: 判据 = 序列点数少(**刚上榜几小时**)且末值 >= 20 万,见 `doc/热点规律与监控-2026-11-09.md`。
+    #:
+    #: ⚠️ **排在所有库内素材之后**:库内线索/对标号是**已知能出货**的那批,热点是
+    #: **赌新事件**,不许把前者挤掉(单测 `test_素材优先取我们自己的线索_而不是搜吃瓜`
+    #: 就是守这一条的)。
+    #: ⚠️ 这些词**只拿来扫评论找名字**,不拿去搜网盘 —— 实测 7 个爆发词共 93 条搜索结果
+    #: 里**带网盘链 0 条**,塞给 `douyin_leads` 就是 0% 有效率。
+    hot_budget = min(need - len(out),
+                     int(getattr(settings, "demand_hot_videos", 2) or 0))
+    if hot_budget > 0:
+        from app.services import hot_cycle
+
+        hot_words = hot_cycle.hot_video_seeds(settings, seeds, limit=hot_budget)
+        if hot_words:
+            from app.services import douyin_protocol_source as dps
+
+            min_c = int(getattr(settings, "demand_min_comments", 20) or 0)
+            try:
+                hv = dps.search(hot_words, settings=settings, session=db,
+                                user_id=user_id, pages=1)
+            except Exception:  # noqa: BLE001 - 热点视频搜不到就退回原有素材
+                logger.warning("新热点视频搜索失败:%s", "、".join(hot_words), exc_info=True)
+                hv = []
+            hv = [v for v in hv
+                  if int((v.get("metrics") or {}).get("comment_count") or 0) >= min_c]
+            hv.sort(key=lambda v: int((v.get("metrics") or {}).get("comment_count") or 0),
+                    reverse=True)
+            for i, v in enumerate(hv):
+                if i >= hot_budget:
+                    break
+                _add(v.get("aweme_id"), v.get("url"), v.get("snippet"),
+                     (v.get("metrics") or {}).get("comment_count") or 0, v.get("name"))
 
     return out[:need]
 

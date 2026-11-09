@@ -42,6 +42,9 @@ class _S:
     demand_seed_words = ""
     demand_min_comments = 20
     demand_max_videos = 2
+    #: ⚠️ 替身里**关掉热点取词**:它会读热点宝 Cookie 并真的出网(生产里是预期行为,
+    #: 单测里会让整条链变慢、结果还取决于当天榜单)。测热点的用例自己打开。
+    demand_hot_videos = 0
     demand_comment_pages = 1
     demand_min_hits = 2
     demand_min_ones = 20
