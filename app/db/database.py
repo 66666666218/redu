@@ -381,8 +381,13 @@ ADDITIONS: dict[str, list[str]] = {
                      "topic_ok BOOLEAN DEFAULT 1"],
     # 对标号作品要带**网盘凭据**(2026-10-29):`mark`=《》/咐置口令,`pan_url`=正文直链。
     # 存量行两列都空 ⇒ 按"不带网盘"处理(正好与人想要的"只推带网盘的"一致)。
+    # `publish_at`(2026-11-09):**作品发布时间**。加它之前只有 `first_seen_at`(我们第一次
+    # 扫到它的时刻)—— 于是主页上一堆**几个月前的老作品**,第一次被扫到就算"新作品"推出去,
+    # 用户反映「好多都是老资源」。存量行 NULL = **当时没记**,读取端当"没记"处理,不许拿
+    # `first_seen_at` 顶(那正是把老货当新货的根因)。⚠️ 同理见 `douyin_leads` 那段注释。
     "douyin_peer_works": ["mark VARCHAR(64) DEFAULT ''",
-                          "pan_url VARCHAR(500) DEFAULT ''"],
+                          "pan_url VARCHAR(500) DEFAULT ''",
+                          "publish_at DATETIME"],
     "users": [
         "email VARCHAR(128)", "role VARCHAR(16) DEFAULT 'user'", "enabled INTEGER DEFAULT 1",
         "smtp_host VARCHAR(128)", "smtp_port INTEGER", "smtp_user VARCHAR(128)",

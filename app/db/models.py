@@ -547,6 +547,11 @@ class DouyinPeerWork(Base):
     mark: Mapped[str] = mapped_column(String(64), default="")
     pan_url: Mapped[str] = mapped_column(String(500), default="")
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    #: ★ **作品发布时间**(2026-11-09)。之前只有 `first_seen_at`,而那是「我们第一次扫到它」
+    #: —— 主页上几个月前的老作品被首次扫到,照样算"新作品"推出去(用户反映「好多都是老资源」)。
+    #: 只用**权威来源**填:纯协议 `/aweme/v1/web/aweme/post/` 的 `create_time`;
+    #: 取不到就留 `None`(读数端按"不知道"处理),**绝不拿 `first_seen_at` 顶**。
+    publish_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     #: 推出去的时刻。`None` = **建基线时见过、但没推**(首次扫描只记不推,见 `record_new`)。
     pushed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 

@@ -35,6 +35,19 @@ def session():
     db.close()
 
 
+@pytest.fixture(autouse=True)
+def _no_publish_time_lookup(monkeypatch):
+    """单测**不许真去拉发布时间**(那要出网、还依赖 `.env` 里的 cookie)。
+
+    默认返回空字典 ⇒ 所有作品 `publish_at=None`;要验新鲜度的用例自己覆盖它。
+    """
+    monkeypatch.setattr(dps, "fetch_publish_times", lambda *a, **k: {})
+
+
+#: 绕过上面那个 autouse 替身的**真函数**(验它本身时用)。
+_REAL_FETCH_PUBLISH_TIMES = dps.fetch_publish_times
+
+
 class _S:
     douyin_peer_enabled = True
     douyin_peer_max_accounts = 6
@@ -43,6 +56,12 @@ class _S:
     douyin_peer_require_pan = False
     #: 不开视频页富化(单测里不碰浏览器);富化本身另有专门用例。
     douyin_peer_max_enrich = 0
+    #: ★ 新鲜度闸门默认**关**(2026-11-09):这几个用例验的是"新作品判定",不是新鲜度;
+    #: 闸门本身有专门用例(见文件末尾)。不关掉的话,fake 作品没有 `publish_at`,
+    #: 结果就取决于 `douyin_peer_fresh_allow_unknown` 的默认值 —— 那种"靠默认值才绿"
+    #: 的用例最脆。
+    douyin_peer_fresh_hours = 0
+    douyin_peer_fresh_allow_unknown = True
     feishu_webhook_douyin_peer = "https://example.com/peer"
     feishu_secret = ""
     feishu_webhook_admin = ""
@@ -617,3 +636,130 @@ def test_不带链但写着资源合集也算在推网盘() -> None:
     assert _has_pan({"title": "夸克网盘最新资源"}) is True
     assert _has_pan({"title": "口令在评论区"}) is True
     assert _has_pan({"title": "今天天气不错"}) is False
+
+
+# ------------------------------------------------ 新鲜度闸门(2026-11-09 用户口径)
+
+def test_fresh_gate_drops_and_marks_old_works(session, monkeypatch) -> None:
+    """★ 用户口径:「有用户反映好多都是老资源,想要一天内的资源能否做到」。
+
+    判据是**权威发布时间**(`create_time`),不是 `first_seen_at` —— 一条 3 个月前的
+    老作品首次被扫到,后者照样说"刚发现",那正是老资源的来源。
+
+    ⚠️ 被裁的必须**打戳记成已处理**,否则它每轮都挂在 `pushed_at IS NULL` 里重捞。
+    """
+    from datetime import datetime, timedelta
+
+    _acct(session, uid="u1", name="甲")
+
+    def _it(vid, age_h):
+        return {"aweme_id": vid, "url": f"https://d/{vid}", "title": f"作品{vid}",
+                "likes": 1, "niche": "小游戏", "account_uid": "u1",
+                "account_name": "甲", "author": "甲",
+                "publish_at": datetime.now() - timedelta(hours=age_h)}
+
+    monkeypatch.setattr(dps, "fetch_accounts", lambda *a, **k: {"u1": [_it("base", 500)]})
+    monkeypatch.setattr(dps, "push_works", lambda *a, **k: True)
+    dps.run_for_user(session, 1, _S())              # 建基线
+
+    monkeypatch.setattr(dps, "fetch_accounts", lambda *a, **k: {
+        "u1": [_it("base", 500), _it("fresh", 2), _it("old", 26)]})
+    monkeypatch.setattr(dps, "fetch_publish_times", lambda *a, **k: {
+        w["aweme_id"]: w["publish_at"]
+        for w in [_it("base", 500), _it("fresh", 2), _it("old", 26)]})
+
+    seen: list = []
+
+    class _F(_S):
+        douyin_peer_fresh_hours = 24
+
+    monkeypatch.setattr(dps, "push_works", lambda ws, s, **k: seen.extend(ws) or True)
+    res = dps.run_for_user(session, 1, _F())
+
+    assert [w["aweme_id"] for w in seen] == ["fresh"]
+    #: ★ 这个数必须显形 —— 否则「扫到 3 条只推 1 条」分不清是过老、无盘还是漏了。
+    assert res["stale"] == 1 and res["stale_unknown"] == 0
+    session.flush()      #: ⚠️ 生产 session 是 `autoflush=False`,`mark_pushed` 的 UPDATE
+                         #: 要等下一位 flush 才落到库里 —— 断言前先刷,别把"没刷"当成"没打戳"。
+    old_row = session.scalar(select(DouyinPeerWork).where(DouyinPeerWork.aweme_id == "old"))
+    assert old_row.pushed_at is not None, "过老的必须打戳,否则每轮重捞"
+    assert dps.pending(session, 1) == []
+
+
+def test_fresh_gate_unknown_time_follows_switch(session, monkeypatch) -> None:
+    """**取不到发布时间 ≠ 老**:默认放行(`allow_unknown=True`),严格模式才拦。
+
+    实测很多作品拿不到 `create_time`(号被限/作品被删),拿"不知道"当"老"
+    会把整条链堵死 —— 那比推几条老资源更糟。
+    """
+    _acct(session, uid="u1", name="甲")
+    monkeypatch.setattr(dps, "push_works", lambda *a, **k: True)
+    monkeypatch.setattr(dps, "fetch_accounts", lambda *a, **k: {
+        "u1": [{"aweme_id": "base", "url": "u", "title": "基线作品", "likes": 0,
+                "niche": "小游戏", "account_uid": "u1", "account_name": "甲",
+                "author": "甲"}]})
+    dps.run_for_user(session, 1, _S())
+
+    def _fetch(*a, **k):
+        return {"u1": [{"aweme_id": "notime", "url": "https://d/n", "title": "没时间",
+                        "likes": 0, "niche": "小游戏", "account_uid": "u1",
+                        "account_name": "甲", "author": "甲"}]}
+
+    monkeypatch.setattr(dps, "fetch_accounts", _fetch)
+    #: 替身已经在 fixture 里返回 {},这里显式再说一次:取不到时间。
+    monkeypatch.setattr(dps, "fetch_publish_times", lambda *a, **k: {})
+    seen: list = []
+
+    class _Loose(_S):
+        douyin_peer_fresh_hours = 24
+        douyin_peer_fresh_allow_unknown = True
+
+    monkeypatch.setattr(dps, "push_works", lambda ws, s, **k: seen.extend(ws) or True)
+    res = dps.run_for_user(session, 1, _Loose())
+    assert [w["aweme_id"] for w in seen] == ["notime"] and res["stale"] == 0
+
+    #: 严格模式:把 `notime` 放回待推(模拟"上一轮没推成"),再跑一轮应当被拦。
+    #: ⚠️ **只放回这一条** —— 基线那行也是 `publish_at=None`,一起放回会让 `stale`
+    #: 变成 2,断言就测不到"这一条被拦"了。
+    session.scalars(select(DouyinPeerWork)).all()      #: 载入 identity map
+    row = session.scalar(select(DouyinPeerWork).where(DouyinPeerWork.aweme_id == "notime"))
+    row.pushed_at = None
+    session.commit()
+    seen.clear()
+
+    class _Strict(_Loose):
+        douyin_peer_fresh_allow_unknown = False
+
+    res = dps.run_for_user(session, 1, _Strict())
+    assert seen == []
+    assert res["stale"] == 1 and res["stale_unknown"] == 1, "拦的原因要写明是'不知道时间'"
+    session.flush()      #: 同上:`autoflush=False`,断言前先刷
+    assert dps.pending(session, 1) == [], "严格模式下被拦的也要打戳,不许无限重试"
+
+
+def test_fetch_publish_times_reads_create_time(monkeypatch) -> None:
+    """`fetch_publish_times` 把协议返回的 `create_time` 转成本地 `datetime`。
+
+    ⚠️ 一个号失败**不许拖垮整轮** —— 它的作品留空,由 `allow_unknown` 决定。
+    """
+    from app.services import demand_watch
+
+    calls: list = []
+
+    def _fake(uid, **kw):
+        calls.append((uid, kw.get("count")))
+        if uid == "bad":
+            raise RuntimeError("boom")
+        return {"ok": True, "items": [
+            {"aweme_id": "v1", "publish_at": 1_700_000_000},
+            {"aweme_id": "v2", "publish_at": 0},          # 0 = 没有,不许当 1970 年
+        ]}
+
+    monkeypatch.setattr(demand_watch, "fetch_author_posts", _fake)
+    monkeypatch.setattr(dps.time, "sleep", lambda *_: None)
+    got = _REAL_FETCH_PUBLISH_TIMES(
+        [{"uid": "ok", "name": "甲"}, {"uid": "bad", "name": "乙"},
+         {"uid": "", "name": "空"}], _S(), None, user_id=1, count=30)
+    assert set(got) == {"v1"}                 # v2 的 0 被丢掉;bad 失败不影响 ok
+    assert got["v1"].year >= 2023
+    assert calls and calls[0] == ("ok", 30)

@@ -292,6 +292,9 @@ def record_new(session, user_id: int, works: list[dict], *, baseline: bool,
             niche=w["niche"], likes=int(w.get("likes") or 0),
             mark=str(w.get("mark") or "")[:64],
             pan_url=str(w.get("pan_url") or "")[:500],
+            #: ★ 权威发布时间(来自纯协议 `create_time`);取不到就是 `None`,
+            #: **绝不拿 `first_seen_at` 顶** —— 那正是"老货当新货"的根因。
+            publish_at=w.get("publish_at"),
             first_seen_at=now, pushed_at=pushed_at))
     session.flush()
     if not baseline:
@@ -323,6 +326,7 @@ def pending(session, user_id: int) -> list[dict]:
              "niche": r.niche, "account_uid": r.account_uid,
              "account_name": r.account_name, "author": r.account_name,
              "mark": r.mark or "", "pan_url": r.pan_url or "",
+             "publish_at": r.publish_at,               # 新鲜度闸门用它(不看 `first_seen_at`)
              "first_seen_at": r.first_seen_at,          # 判"等太久了"要用(见 `run_for_user`)
              "liked_count": r.likes} for r in rows]
 
@@ -681,6 +685,47 @@ def fetch_work_pan(works: list[dict], settings, *, user_id: int = 1,
     return _with_page(settings, _run, user_id=user_id)
 
 
+def fetch_publish_times(accounts: list[dict], settings, session, *, user_id: int = 1,
+                        count: int = 30) -> dict[str, datetime]:
+    """`{aweme_id: 发布时间}` —— **纯协议**拉每个号的作品列表,拿权威 `create_time`。
+
+    ## 为什么必须补这一步(2026-11-09 用户反映「好多都是老资源」)
+
+    CDP 抓的主页卡片里**只有标题和点赞数,没有发布时间**(见 `_GRAB_PROFILE_JS`),
+    所以"新作品"只能拿 `first_seen_at`(我们第一次扫到的时刻)判 —— 一个号主页上
+    躺着几个月前的老作品,第一次扫到就算"新",全推出去。
+
+    ## 为什么走协议而不是页面
+
+    实测(2026-11-09,13 个对标号):`/aweme/v1/web/aweme/post/` 一次就能拿 30 条,
+    **库里 CDP 抓到的 12 条全部命中**(6 个号各 12/12),比开页快一个量级、
+    也不占 CDP 浏览器。⚠️ 必须传 `session` —— 否则只有 `.env` 里的空 cookie。
+
+    ⚠️ **拿不到 ≠ 老**:失败的号直接跳过,它们的作品留 `publish_at=None`,
+    由调用方按 `douyin_peer_fresh_allow_unknown` 决定推不推(默认放行)。
+    """
+    from app.services import demand_watch
+
+    out: dict[str, datetime] = {}
+    for i, acct in enumerate(accounts or []):
+        if i:
+            time.sleep(_BETWEEN_ACCOUNTS_S)
+        uid = str(acct.get("uid") or "").strip()
+        if not uid:
+            continue
+        try:
+            res = demand_watch.fetch_author_posts(uid, count=count, user_id=user_id,
+                                                  session=session)
+        except Exception:  # noqa: BLE001 - 一个号失败不影响其余
+            logger.warning("取发布时间失败 %s", acct.get("name") or uid, exc_info=True)
+            continue
+        for it in res.get("items") or []:
+            ts = int(it.get("publish_at") or 0)
+            if ts > 0:
+                out[str(it["aweme_id"])] = datetime.fromtimestamp(ts)
+    return out
+
+
 def push_works(works: list[dict], settings, session=None, user_id: int = 0) -> bool:
     """把**新作品**推飞书(走抖音同行群,未配回落主群)。返回是否发出。"""
     if not works:
@@ -744,14 +789,18 @@ def push_works(works: list[dict], settings, session=None, user_id: int = 0) -> b
                 "content": f"**▍{niche}** · {len(groups[niche])} 条"}})
         for w in groups[niche]:
             title = _md_safe((w.get("title") or "")[:30]) or "—"
-            #: ★ 对标卡也标时间(2026-10-31「每个板块都要看得到新鲜度」):
-            #: 这张表没有"视频发布时间",只有 `first_seen_at` ⇒ 标**发现时间**。
+            #: ★ 标**发布时间**(2026-11-09):以前只有 `first_seen_at`(我们第一次扫到),
+            #: 一条 3 个月前的旧作品首次被扫到会显示成"今天" —— 那正是"老资源"的来源。
+            #: 现在优先用权威 `publish_at`;确实取不到才退回"发现时间"并**加前缀区分**。
+            _pub = w.get("publish_at")
             _seen = w.get("first_seen_at")
-            if _seen is not None:
-                try:
-                    title += f" · {_seen:%m-%d}"
-                except (TypeError, ValueError):
-                    pass
+            try:
+                if _pub is not None:
+                    title += f" · {_pub:%m-%d %H:%M}"
+                elif _seen is not None:
+                    title += f" · 发现{_seen:%m-%d}"
+            except (TypeError, ValueError):
+                pass
             url = _md_safe(w.get("url") or "")
             work = f"[{title}]({url})" if url else title
             likes = int(w.get("likes") or 0)
@@ -797,6 +846,10 @@ def run_for_user(session, user_id: int, settings) -> dict:
 
     # ⚠️ 慢活先做完(开页面),写库放在后面 —— 见模块纪律 3。
     fetched = fetch_accounts(accts, settings, user_id=user_id)
+    #: ★ **发布时间**(2026-11-09):主页卡片没有它,只能先写 `first_seen_at` ⇒ 老作品
+    #: 首次被扫到就算"新"。这里用纯协议补一次权威时间,送给 `record_new`。
+    #: ⚠️ 同样属于"慢活",必须在这里(写库之前)做完。
+    pub_times = fetch_publish_times(accts, settings, session, user_id=user_id)
 
     from app.db.models import DouyinPeerWork
 
@@ -858,6 +911,9 @@ def run_for_user(session, user_id: int, settings) -> dict:
         works_total += len(got)
         #: 基线判据 = **这个号在作品表里一条都没有**(不是"本轮没扫到"),见纪律 1。
         seen_before = seen_map.get(acct["uid"], False)
+        #: ★ 把权威发布时间挂到作品上(取不到的留空,不编)。
+        for w in got:
+            w["publish_at"] = pub_times.get(str(w["aweme_id"]))
         new_works.extend(record_new(session, user_id, got, baseline=not seen_before,
                                     keep=baseline_push))
         if not seen_before and got:
@@ -870,6 +926,34 @@ def run_for_user(session, user_id: int, settings) -> dict:
     #: 上一轮没推成的也一起补(不许静默丢)。去重键仍是 aweme_id。
     seen_ids = {x["aweme_id"] for x in new_works}
     todo = new_works + [w for w in pending(session, user_id) if w["aweme_id"] not in seen_ids]
+    #: ★ **只推最近 N 小时的作品**(2026-11-09 用户「有用户反映好多都是老资源,想要一天内的资源」)。
+    #: 判据是**权威发布时间** `publish_at`,不是 `first_seen_at` —— 后者是"我们第一次扫到",
+    #: 老作品首次被扫到照样是"刚发现"。⚠️ 判不了时间的按 `douyin_peer_fresh_allow_unknown`
+    #: 处理(默认**放行**):很多作品取不到 `create_time`,拿"不知道"当"老"会把整条板堵死。
+    #: ⚠️ 与 `no_pan` 一样,**不新鲜的要打戳记成"已处理"**,否则每轮重捞、永远补推。
+    #: ⚠️ **两种"不推"分开报数**:超龄的(`stale`)与**取不到时间被严格模式拦掉的**
+    #: (`stale_unknown`)。只报前者的话,严格模式下会出现「扫到 5 条、一条没推、
+    #: 过老 0 条」—— 那正是本仓最恨的假成功。
+    stale = 0
+    stale_unknown = 0
+    fresh_hours = int(getattr(settings, "douyin_peer_fresh_hours", 24) or 0)
+    if fresh_hours > 0 and todo:
+        allow_unknown = bool(getattr(settings, "douyin_peer_fresh_allow_unknown", True))
+        cutoff_dt = datetime.now() - timedelta(hours=fresh_hours)
+
+        def _stale(w: dict) -> bool:
+            pa = w.get("publish_at")
+            if isinstance(pa, datetime):
+                return pa < cutoff_dt
+            return not allow_unknown        #: 不知道时间的,按开关决定
+
+        dropped = [w for w in todo if _stale(w)]
+        stale = len(dropped)
+        stale_unknown = sum(1 for w in dropped
+                            if not isinstance(w.get("publish_at"), datetime))
+        if dropped:
+            mark_pushed(session, user_id, dropped)   #: 打戳 = 处理过,不再每轮重试
+        todo = [w for w in todo if not _stale(w)]
     #: ★ **不带网盘的不推**(用户口径「**如果不是推广网盘的就不要推了**」,2026-11-05)。
     #: ⚠️ 但**必须记成"已处理"**,否则它们会一直挂在 `pushed_at IS NULL` 里、每轮重试 ——
     #: 那不是"等一下再推",而是"永远等不到还被反复捞"。
@@ -909,6 +993,11 @@ def run_for_user(session, user_id: int, settings) -> dict:
             #: ⚠️ **推送失败要显形**:`todo` 非空却没发出去,运行记录必须写「推送失败:N条」,
             #: 否则它与「本轮没有新作品」长得一模一样(本仓最恨的假成功)。
             "push_failed": bool(todo) and not pushed,
+            #: ★ **过老被裁的条数**(2026-11-09):必须显形,否则「扫到 12 条只推 1 条」
+            #: 看不出是新鲜度闸门拦的还是漏了(本仓最忌的假成功)。
+            "stale": stale,
+            #: 严格模式下**取不到发布时间**被拦的条数(与超龄分开,见闸门那段注释)。
+            "stale_unknown": stale_unknown,
             "no_pan": no_pan,
             #: 没读到描述、留到下轮的条数(要显形,否则"扫到 12 条一条没推"看不出原因)。
             "deferred": len(deferred),
@@ -957,6 +1046,13 @@ def douyin_peer_tick(settings=None) -> int:
                 if res.get("no_pan"):
                     #: **不带网盘的不推**,但要说出来 —— 否则"扫到 12 条只推了 1 条"会让人以为丢了。
                     note += f" 无盘链{res['no_pan']}条(未推)"
+                if res.get("stale"):
+                    #: ★ **过老的不推**(2026-11-09「好多都是老资源,想要一天内的」)——
+                    #: 与 `no_pan` 一样**打戳记成已处理**,但必须单独报数:不然
+                    #: 「扫12 推1」到底是"过老"还是"没盘"完全分不出来。
+                    extra = (f",含取不到时间{res['stale_unknown']}条"
+                             if res.get("stale_unknown") else "")
+                    note += f" 过老{res['stale']}条(未推{extra})"
                 if res.get("deferred"):
                     #: **没读到描述**的留到下轮再读 —— 与"读了、确认没有"必须分开说,
                     #: 否则这条会被读成"永久丢弃"(2026-11-05 准入收紧后新增的口径)。
