@@ -961,9 +961,13 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
     # ④ ★ **今天才冒出来的热点**(2026-11-08 用户:「每次都会有新的热点出来,
     # 你需要总结这些规律来完成监控和预测」)。
     #: 用户 2026-11-08 纠正:「**热点事件名称是没有关联性的,每一个都是独立的事件**」
-    #: ⇒ 取词**不能靠已知名字扩展**(那只出同一事件的不同说法),主通路是热点宝
-    #: **1 小时搜索榜全榜**(`hot_cycle.board_words`,不带任何关键词)。
-    #: 判据 = 序列点数少(**刚上榜几小时**)且末值 >= 20 万,见 `doc/热点规律与监控-2026-11-09.md`。
+    #: ⇒ 取词**不能靠已知名字扩展**(那只出同一事件的不同说法)。
+    #: 主通路现在是**形态词探针**(`hot_cycle.carrier_words`,2026-11-10):
+    #: 用「后续/回应/通报/事件…」这类事件语法壳子查热点宝**全量词库**,能捞到榜单
+    #: 盲区里的新事件(实测「只忍五次」16 万量,榜第 50 名是 217 万,差 13 倍进不了榜)。
+    #: 探针不给力时自动退回「1 小时搜索榜全榜」(`board_words`)→ 种子族扩展(`emerging`)。
+    #: 判据 = 序列点数 <23(**刚起量**,满 24 点是常青词)且峰值 >=15 万,
+    #: 见 `doc/热点规律与监控-2026-11-09.md` 与 `hot_cycle.CARRIER_*` 的注释。
     #:
     #: ⚠️ **排在所有库内素材之后**:库内线索/对标号是**已知能出货**的那批,热点是
     #: **赌新事件**,不许把前者挤掉(单测 `test_素材优先取我们自己的线索_而不是搜吃瓜`
@@ -975,7 +979,13 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
     if hot_budget > 0:
         from app.services import hot_cycle
 
-        hot_words = hot_cycle.hot_video_seeds(settings, seeds, limit=hot_budget)
+        #: ⚠️ 这里用**带差分**的 `new_hot_words`(2026-11-10),不是 `hot_video_seeds`:
+        #: 形态词探针每轮都会捞到同一批还在发酵的事件,不差分就是一天推 6 次同一件事。
+        #: 它内部**自己开短会话**记账(写完立刻提交关闭),**不借这里的 `db`** ——
+        #: 这个 `db` 后面还要跨搜索/评论那些慢活,拿它记账会把写锁抱到慢活结束
+        #: (本仓在 `new-write-point-holds-lock-over-slowwork` 上栽过两次)。
+        hot_words = [h.word for h in hot_cycle.new_hot_words(
+            settings, seeds, user_id=user_id, limit=hot_budget)]
         if hot_words:
             from app.services import douyin_protocol_source as dps
 

@@ -94,6 +94,7 @@ from __future__ import annotations
 
 import re
 import statistics
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
 
@@ -144,6 +145,64 @@ _BOARD_STOP = frozenset({
     "晋级", "晋级半决赛", "晋级决赛", "半决赛", "决赛", "赛程", "直播",
     "最新消息", "现场观战", "三周年", "完整版", "在线观看", "免费观看",
 })
+
+
+# ---------------------------------------------------------------- 形态词探针(2026-11-10)
+
+#: ★ **不靠固定词条找新热点** —— 探的是「事件名被填进哪几种语法外壳」。
+#:
+#: ## 为什么必须是这条路(实测,2026-11-10)
+#:
+#: 搜索榜是**策展式**的,不是全量排序:实测「只忍五次」系列近 1 小时 16 万,
+#: 而 3001 榜第 50 名是 **217 万**;即使翻到第 8 页(分数线已降到 6.8 万,**比它还低**)
+#: 仍然找不到 ⇒ **它从头到尾没进过榜**。翻页、调阈值都救不了这条路。
+#:
+#: 但 `hot_search(keyword=…)` 查的是**全量词库**:`keyword='直播'` 回的 50 条全带「直播」,
+#: 其中就有 `只忍老板五次直播视频`(16 万,低于榜底线 13 倍)。
+#:
+#: ## 为什么是"形态词"而不是"内容词"
+#:
+#: 用户的口径是「每个词条都不一样,没办法给固定词条」。事件名确实是任意的,
+#: **但它必须被填进固定的几种壳子**才能被搜索和传播 —— 「后续 / 回应 / 通报 / 离职 /
+#: 处罚…」描述的是**事件被命名的方式**,不是事件本身。所以这张表比内容词稳定得多。
+#:
+#: ## 实测产出(2026-11-10,12 个词 × 1 次请求)
+#:
+#: | 指标 | 结果 |
+#: |---|---|
+#: | 候选(非满序列) | **275** 个 |
+#: | 常数词被滤掉(24 点满序列) | 177 个 |
+#: | 峰值 ≥15 万 | **117** 个 |
+#: | 峰值 <1 万(长尾噪音) | 仅 10 个 |
+#:
+#: 且**确实捞到了目标**:`彻底疯狂泼粪离职事件回放`(270 万,`彻底疯狂` 正是原作者)、
+#: `老板处理泼粪事件方法`、`泼粪离职事件忍5次视频`、`f8fe直播泼粪完整版`。
+CARRIER_WORDS = (
+    "后续", "回应", "通报", "事件", "离职", "处罚",
+    "被罚", "警方", "最新", "完整版", "来龙去脉", "原因",
+)
+
+#: 序列点数**小于**它 = 这个小时内才起量 ⇒ 今天新起的事件。
+#: 小时窗口最多 24 个点;**满 24 点的是常青词**(实测 `财经直播`/`东方甄选直播间`/`台球直播`
+#: 全是 24 点),而目标 `只忍老板五次直播视频` 是 **13** 点、`医院老奶奶被打后续` 是 **3** 点。
+#: ⚠️ 这就是为什么不能用榜单那条 `FRESH_POINTS = 5`:只忍 13 点会被直接漏掉。
+CARRIER_FULL_POINTS = 23
+
+#: 形态词探针的量门槛。实测峰值分布:≥15 万有 117 个、≥5 万有 195 个、<1 万只有 10 个。
+#: 取 **15 万** —— 再往下进的是「小事件的不同说法」,而本模块只取前几个名额。
+CARRIER_MIN_PEAK = 150_000
+
+#: 同一事件的不同说法要归并(Jaccard 二元组相似度)。
+#: 实测校准(只忍一族 10 种说法两两比):
+#: `泼粪离职事件处理`~`泼粪离职事件处理方法` = **0.78**、~`忍5次视频` = 0.42、
+#: ~`彻底疯狂…回放` = 0.38、~`老板处理泼粪事件方法` = 0.29。
+#: 取 **0.3**:能串起整族(靠传递闭包),而 `只忍老板五次直播视频`~`只忍五次满了直播账号` 只有 0.20
+#: 仍能靠中间词连上,不会把不相关的并进来。
+CARRIER_MERGE_JACCARD = 0.3
+
+#: 形态词探针每轮最多交几个**归并后的事件**。一个事件通常有 3~7 种说法,取多了是同义反复。
+CARRIER_TOP_N = 5
+
 
 
 def _lcs_len(a: str, b: str) -> int:
@@ -377,29 +436,332 @@ def board_words(cookie: str, settings: Settings | None = None,
     return out
 
 
+# ---------------------------------------------------------------- 形态词探针
+
+def _bigrams(text: str) -> set[str]:
+    """中文串切二元组(去掉标点空白),用于判「两个词是不是同一件事的不同说法」。"""
+    chars = [c for c in text if c.isalnum()]
+    if len(chars) < 2:
+        return set(chars)
+    return {chars[i] + chars[i + 1] for i in range(len(chars) - 1)}
+
+
+def _same_event(a: str, b: str, threshold: float = CARRIER_MERGE_JACCARD) -> bool:
+    """两个搜索词是不是**同一个事件的不同说法**(Jaccard 二元组相似度)。
+
+    ⚠️ 刻意**不做"一个包含另一个"就判同** —— `泼粪离职事件处理` 与
+    `老板处理泼粪事件方法` 是同一件事但不互相包含,靠相似度才连得上。
+    """
+    ba, bb = _bigrams(a), _bigrams(b)
+    if not ba or not bb:
+        return False
+    return len(ba & bb) / len(ba | bb) >= threshold
+
+
+def _group_events(words: list[HotWord],
+                  threshold: float = CARRIER_MERGE_JACCARD) -> list[list[HotWord]]:
+    """把同一事件的不同说法**分组**(每组内按峰值降序)。差分的正确性靠它。
+
+    ⚠️ **为什么要交分组而不是只交代表**:只忍一族实测有 10 种说法。若差分只记
+    "今天那条代表词",明天另一种说法涨过它就又成了"新事件"⇒ 同一件事会被反复推。
+    调用方必须把**整组词**都记进 `hot_word_seen`,判"新"时只要组里有**任一个**见过
+    就整组算旧。
+    """
+    n = len(words)
+    if n <= 1:
+        return [[w] for w in words]
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if _same_event(words[i].word, words[j].word, threshold):
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    parent[rj] = ri
+    groups: dict[int, list[HotWord]] = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(words[i])
+    out = [sorted(g, key=lambda h: -h.peak) for g in groups.values()]
+    out.sort(key=lambda g: -g[0].peak)
+    return out
+
+
+def _merge_events(words: list[HotWord]) -> list[HotWord]:
+    """把**同一事件的不同说法**归并,每个事件留一条代表(量最大的那条当名字)。
+
+    实测必要性(2026-11-10,只忍一族):同一次探针里 10 种说法全被捞到
+    (`泼粪离职事件处理`/`…处理方法`/`…忍5次视频`/`直播泼粪离职满五次直播`/
+    `彻底疯狂泼粪离职事件回放`/`老板处理泼粪事件方法`…),不归并就是同一件事刷满一张卡。
+
+    做法:**并查集**(传递闭包)—— A~B、B~C 都相似时三条并成一组。
+    ⚠️ 传递闭包会把"链式相近"的也并进来,所以阈值不能定太低(实测 0.3 刚好)。
+
+    ⚠️ 实测确实会并掉**同一事件的不同地点**(`常州地震官方通报`~`泰州地震官方通报`
+    =0.75、`乐平/弋阳/江西巨响官方通报`)。这在本模块是**对的** —— 我们要的是一个
+    能去抖音搜的搜索词,江苏多地地震/江西多地巨响本就是同一轮新闻。
+    """
+    return [g[0] for g in _group_events(words)]
+
+
+def carrier_words(cookie: str, settings: Settings | None = None,
+                  *, carriers: tuple[str, ...] | None = None,
+                  min_peak: int | None = None,
+                  full_points: int | None = None,
+                  top: int | None = None,
+                  merge_jaccard: float | None = None,
+                  return_groups: bool = False):
+    """**不靠固定词条**找新事件:用「事件语法壳子」去查全量词库。
+
+    见上方 `CARRIER_WORDS` 的注释(为什么是形态词、为什么榜单那条路救不了)。
+
+    判据三件:
+      1. **序列点数 < `full_points`** —— 满 24 点的是常青词(`财经直播`),
+         半截序列说明它是这一小时内才起量的;
+      2. **峰值 ≥ `min_peak`** —— 太小的多半是小事件的各种说法;
+      3. 不在 `_BOARD_STOP` 里,且**能匹配到形态词本身**(接口有时会放宽匹配)。
+
+    ⚠️ 这条路**不读也不写数据库** —— 它只负责"捞"。差分的状态由调用方
+    (`seen_before` / `remember`)管,这样纯函数可测、也不会在慢活的循环里写库
+    (本仓在 `new-write-point-holds-lock-over-slowwork` 上栽过两次)。
+
+    :param carriers: 覆盖默认形态词表(单测用)。
+    :param top: 归并后最多交几个事件。
+    :param return_groups: 为真时返回 `(representatives, groups)`。`groups` 是
+        **同一事件的全部说法**(每组代表排第一),差分要用它 —— 只记代表词的话,
+        明天另一种说法涨过代表词就会被当成"新事件"重复推(只忍一族实测有 10 种说法)。
+    """
+    from app.services.douhot_client import DouhotClient, DouhotError
+
+    #: 参数优先级:显式传参(单测) > settings > 模块常量。全用 `None` 兜底是为了
+    #: **不把默认值在定义时就固化成常量** —— 那样配置项改了也不生效。
+    if min_peak is None:
+        min_peak = int(getattr(settings, "hot_carrier_min_peak", CARRIER_MIN_PEAK))
+    if full_points is None:
+        full_points = int(getattr(settings, "hot_carrier_full_points",
+                                  CARRIER_FULL_POINTS))
+    if top is None:
+        top = int(getattr(settings, "hot_carrier_top_n", CARRIER_TOP_N))
+    if merge_jaccard is None:
+        merge_jaccard = float(getattr(settings, "hot_carrier_merge_jaccard",
+                                      CARRIER_MERGE_JACCARD))
+
+    client = DouhotClient(cookie, settings)
+    found: dict[str, HotWord] = {}
+    for carrier in (carriers or CARRIER_WORDS):
+        try:
+            raw = client.hot_search(limit=50, date_window=1, sub_type=3001,
+                                    keyword=carrier)
+        except DouhotError as exc:
+            logger.warning("形态词探针失败 %s: %s", carrier, exc)
+            continue
+        for it in raw or []:
+            word = str(it.get("key_word") or "").strip()
+            if not word or word in found or word in _BOARD_STOP:
+                continue
+            #: 接口声称按 keyword 过滤,但**不假定它一定照做** —— 不沾形态词的直接丢,
+            #: 否则一次探针就会把整张榜塞进来(实测返回 50 条全带该词,但那是当前行为,
+            #: 不是契约)。
+            if carrier not in word:
+                continue
+            vals = _values(it.get("trends"))
+            if not vals:
+                continue
+            peak = max(vals)
+            if len(vals) >= full_points or peak < min_peak:
+                continue
+            found[word] = HotWord(word=word, last=vals[-1], peak=peak,
+                                  days=len(vals), emerge=0, source=f"形态词:{carrier}")
+    #: `_group_events` 已按每组峰值降序排好,组内代表在 `g[0]`。
+    groups = _group_events(list(found.values()), threshold=merge_jaccard)
+    top_groups = groups[:top]
+    reps = [g[0] for g in top_groups]
+    if return_groups:
+        return reps, top_groups
+    return reps
+
+
+def seen_before(session, user_id: int, words: list[str]) -> set[str]:
+    """这批词里**以前见过**的(差分用)。
+
+    ⚠️ 没有这一步,每轮探到的 200+ 个词会原样重推 —— 4 小时一轮就是一天 6 次。
+    """
+    from sqlalchemy import select
+
+    from app.db.models import HotWordSeen
+
+    ids = [str(w).strip() for w in (words or []) if str(w).strip()]
+    if not ids or session is None:
+        return set()
+    return set(session.scalars(
+        select(HotWordSeen.word).where(
+            HotWordSeen.user_id == user_id,
+            HotWordSeen.word.in_(ids))).all())
+
+
+def remember(session, user_id: int, rows: list[HotWord]) -> int:
+    """把这些词记进 `hot_word_seen`(已存在的只更新 `last_at`)。返回新增条数。
+
+    ⚠️ 调用方必须**在慢活之后**调它(本仓栽过"循环里写一次 + 调外部接口 156 秒")。
+    """
+    from sqlalchemy import select
+
+    from app.db.models import HotWordSeen
+
+    if session is None or not rows:
+        return 0
+    now = datetime.now()
+    words = [h.word for h in rows]
+    known = {r.word: r for r in session.scalars(
+        select(HotWordSeen).where(
+            HotWordSeen.user_id == user_id,
+            HotWordSeen.word.in_(words))).all()}
+    added = 0
+    for h in rows:
+        row = known.get(h.word)
+        if row is not None:
+            row.last_at = now
+            row.peak = max(float(row.peak or 0), float(h.peak or 0))
+            continue
+        session.add(HotWordSeen(
+            user_id=user_id, word=h.word, seen_at=now, last_at=now,
+            peak=float(h.peak or 0), carrier=str(h.source or "")[:32]))
+        added += 1
+    session.flush()
+    return added
+
+
+def prune_seen(session, user_id: int, *, keep_days: int = 14) -> int:
+    """删掉 `keep_days` 天没再出现的词,返回删除条数(这张表会一直变大)。"""
+    from sqlalchemy import delete
+
+    from app.db.models import HotWordSeen
+
+    if session is None or keep_days <= 0:
+        return 0
+    cutoff = datetime.now() - timedelta(days=keep_days)
+    res = session.execute(delete(HotWordSeen).where(
+        HotWordSeen.user_id == user_id, HotWordSeen.last_at < cutoff))
+    session.flush()
+    return int(res.rowcount or 0)
+
+
+
 def hot_video_seeds(settings: Settings, seeds: list[str], *,
                     limit: int = 3) -> list[str]:
     """给「扫评论区」用的**新热点搜索词**(按首现新→旧取前 `limit` 个)。
 
-    **优先无种子通路**(`board_words`:全榜独立事件);它取不到时才退回种子族扩展
-    (`emerging`:已知事件的变体)。读 Cookie、吞掉一切失败 —— 调用方(定时作业)
-    不该因为热点宝挂了就整轮不跑。
+    降级链见 `_candidates`(形态词探针 → 1 小时榜 → 种子族扩展)。读 Cookie、
+    吞掉一切失败 —— 调用方(定时作业)不该因为热点宝挂了就整轮不跑。
+
+    ⚠️ 这里**不做差分**(每次都交同一批还在发酵的事件)。要"只交新的"用
+    `new_hot_words`。
     """
     cookie = read_cookie(settings)
     if not cookie:
         return []
-    rows: list[HotWord] = []
-    try:
-        rows = board_words(cookie, settings)
-    except Exception:  # noqa: BLE001 - 热点是"加分项",拿不到就退回原有素材
-        logger.warning("无种子热点取词失败", exc_info=True)
-    if not rows and seeds:
-        try:
-            rows = emerging(cookie, seeds, settings)
-        except Exception:  # noqa: BLE001
-            logger.warning("新热点取词失败", exc_info=True)
-            return []
+    #: ⚠️ **取多再截**:下游还要差分/再取前 N ⇒ 这里多要一点,别让它先被截断。
+    rows = _candidates(settings, seeds, cookie, limit=max(limit, CARRIER_TOP_N))
     out = [h.word for h in rows][:limit]
     if out:
         logger.info("新热点搜索词:%s", "、".join(f"{h.word}({h.source})" for h in rows[:limit]))
     return out
+
+
+def new_hot_words(settings: Settings, seeds: list[str], *, session=None,
+                  user_id: int = 0, limit: int = 3,
+                  keep_days: int | None = None) -> list[HotWord]:
+    """**带差分**的热点取词:只交**以前没见过**的事件,并把见过的记下来。
+
+    这是真正决定"产出"的那一层 —— `carrier_words` 每轮都会捞到同一批还在发酵的事件,
+    不差分的话 4 小时一轮就是**一天推 6 次同一件事**。
+
+    ## 差分是按**事件组**做的,不是按词
+
+    只忍一族实测一句话能有 10 种写法(`泼粪离职事件处理`/`…忍5次视频`/`彻底疯狂…回放`…)。
+    若只把"代表词"记进库,明天另一种写法涨过它就会被判成"新事件"再推一次。
+    所以:组里**任何一个写法**见过 ⇒ **整组**都算旧;记账时**整组所有写法**都写进去。
+
+    ## 写锁纪律(2026-11-10)
+
+    ⚠️ 本函数**不能**借调用方的长事务记账(本仓栽过"循环里写一次 + 调外部接口 156 秒")。
+    `session=None` 时**自己开一个短会话**,写完立刻 `commit()` + `close()`,锁只拿几毫秒;
+    取数(12 个 HTTP 请求)在**开会话之前**就做完了。调用方要复盘时传自己的 session
+    (单测就是这样注入的)。
+
+    ⚠️ `session=None` 且 `user_id=0` 时**不做差分**,原样返回 —— 手工脚本要能单独跑探针。
+    """
+    cookie = read_cookie(settings)
+    if not cookie:
+        return []
+    #: ⚠️ 这里**故意多取一些**:差分之后可能一条不剩,得多留余量。
+    reps, groups = _candidates(settings, seeds, cookie,
+                               limit=max(limit * 4, 12), return_groups=True)
+    if not reps:
+        return []
+    if not user_id:
+        return reps[:limit]
+    if keep_days is None:
+        keep_days = int(getattr(settings, "hot_word_keep_days", 14))
+    every = [h for g in groups for h in g]
+
+    #: 取数已完成,从这里开始才碰库。
+    own = session is None
+    if own:
+        from app.db import get_session_local
+        session = get_session_local()()
+    try:
+        seen = seen_before(session, user_id, [h.word for h in every])
+        fresh = [g[0] for g in groups if not any(h.word in seen for h in g)]
+        #: **整组**都记账(见过的写法也要更新 `last_at`,否则清理会把还热的事件删掉)。
+        remember(session, user_id, every)
+        prune_seen(session, user_id, keep_days=keep_days)
+        if own:
+            session.commit()
+    finally:
+        if own:
+            session.close()
+    logger.info("热点差分:候选%d事件/说法%d 其中新%d → %s", len(groups), len(every),
+                len(fresh),
+                "、".join(h.word for h in fresh[:limit]) or "(无新事件)")
+    return fresh[:limit]
+
+
+def _candidates(settings: Settings, seeds: list[str], cookie: str,
+                *, limit: int, return_groups: bool = False):
+    """降级链:形态词探针 → 1 小时榜 → 种子族扩展。
+
+    返回代表词列表(`HotWord`);`return_groups=True` 时返回
+    `(代表词, 事件组列表)`,组里是同一事件的全部说法 —— 差分要靠它。
+    """
+    reps: list[HotWord] = []
+    groups: list[list[HotWord]] = []
+    if bool(getattr(settings, "hot_carrier_enabled", True)):
+        try:
+            #: ⚠️ **必须把 limit 传下去**:`carrier_words` 默认只交配置的 `top_n` 个,
+            #: 不传的话调用方要的"多取一点给差分留余量"就白写了(实测差分会退化成 0)。
+            reps, groups = carrier_words(
+                cookie, settings, top=max(limit, CARRIER_TOP_N), return_groups=True)
+        except Exception:  # noqa: BLE001 - 探针挂了不影响榜单那条
+            logger.warning("形态词探针取词失败", exc_info=True)
+    if not reps:
+        try:
+            reps = board_words(cookie, settings)
+            groups = [[h] for h in reps]
+        except Exception:  # noqa: BLE001
+            logger.warning("无种子热点取词失败", exc_info=True)
+    if not reps and seeds:
+        try:
+            reps = emerging(cookie, seeds, settings)
+            groups = [[h] for h in reps]
+        except Exception:  # noqa: BLE001
+            logger.warning("新热点取词失败", exc_info=True)
+            reps, groups = [], []
+    reps, groups = reps[:limit], groups[:limit]
+    return (reps, groups) if return_groups else reps
+

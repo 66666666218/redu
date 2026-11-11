@@ -154,6 +154,34 @@ class DouhotAlerted(Base):
     alerted_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
+class HotWordSeen(Base):
+    """「形态词探针」见过的**搜索词**(2026-11-10)。
+
+    用途只有一个:**差分** —— 新事件必须靠"这个词我们以前没见过"认出来。
+    没有这张表,每轮扫到的 200+ 个词会原样重推,4 小时一轮就是一天 6 次。
+
+    ⚠️ 为什么不用 `douhot_words`:那张表存的是**榜内**内容词日快照(`query_day` 日级),
+    而这里的词绝大多数**从没进过榜**(实测「只忍」系列一直在榜外),两者语义不同。
+
+    ⚠️ **保留期由调用方控制**(按 `seen_at` 删旧行),这张表会持续变大。
+    """
+
+    __tablename__ = "hot_word_seen"
+    __table_args__ = (UniqueConstraint("user_id", "word", name="uq_hot_word_seen_user_word"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    word: Mapped[str] = mapped_column(String(128), index=True)
+    #: 第一次见到它的时刻 = **这个事件的发现时间**(不是它的发布时间)。
+    seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    #: 最近一次见到(用来判"它还活着吗",以及清理)。
+    last_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    #: 第一次见到时的峰值量,便于回看"当时多大"。
+    peak: Mapped[float] = mapped_column(Float, default=0)
+    #: 靠哪个形态词捞到的(`后续`/`回应`…),可回溯。
+    carrier: Mapped[str] = mapped_column(String(32), default="")
+
+
 class AlertRecord(Base):
     __tablename__ = "alerts"
 

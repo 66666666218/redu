@@ -7,7 +7,37 @@
 """
 from __future__ import annotations
 
+import pytest
+
 from app.services import hot_cycle
+
+#: 模块导入时就抓住真函数 —— 后面的 autouse fixture 会把它替掉,
+#: 探针自身的用例靠这份引用装回来(见 `_real_carrier_words`)。
+_ORIG_CARRIER_WORDS = hot_cycle.carrier_words
+
+
+@pytest.fixture(autouse=True)
+def _no_carrier_probe(monkeypatch):
+    """**默认关掉形态词探针**。
+
+    `_candidates` 的第一条路就是探针,而 `getattr(object(), "hot_carrier_enabled", True)`
+    是 True ⇒ 不管这些老用例本来想测什么,都会先去打 12 次真实 HTTP。
+    老用例各自要测的是「榜单/种子族」那条,所以这里统一把探针替成空。
+    探针本身的用例用 `_real_carrier_words` 这个 fixture 把真函数装回去。
+    """
+    monkeypatch.setattr(hot_cycle, "carrier_words",
+                        lambda *a, **kw: ([], []) if kw.get("return_groups") else [])
+
+
+@pytest.fixture
+def _real_carrier_words(monkeypatch):
+    """把被 `_no_carrier_probe` 替掉的 `carrier_words` **换回真函数**。
+
+    ⚠️ 必须从模块里重新取:`from app.services import hot_cycle` 拿到的模块对象上,
+    属性已经被 fixture 覆盖了 ⇒ 只有 `importlib.reload` 或事先留一份原始引用才行。
+    这里用 `_ORIG` 保存的原始引用(模块导入时就抓下来的那个函数对象)。
+    """
+    monkeypatch.setattr(hot_cycle, "carrier_words", _ORIG_CARRIER_WORDS)
 
 
 def _trend(points: int, last: int, start: int = 1000) -> list[dict]:
@@ -188,3 +218,308 @@ def test_整条链挂了也不抛(monkeypatch):
     monkeypatch.setattr(hot_cycle, "board_words", _boom)
     monkeypatch.setattr(hot_cycle, "emerging", _boom)
     assert hot_cycle.hot_video_seeds(object(), ["小小绘"]) == []
+
+
+# ---- 形态词探针(2026-11-10)---------------------------------------------
+#
+# 这些 case 的两两相似度、序列点数、峰值**全部来自 2026-11-10 的真实探针结果**,
+# 不是拍的。校准依据见 `hot_cycle.CARRIER_MERGE_JACCARD` 的注释。
+
+class _KeywordClient:
+    """替身:按 `keyword` 回条目(形状照抄真实接口:`key_word` + 小时级 `trends`)。"""
+
+    def __init__(self, by_kw: dict[str, list[dict]]) -> None:
+        self.by_kw = by_kw
+        self.calls: list[str] = []
+
+    def hot_search(self, limit: int = 50, date_window: int = 1,
+                   sub_type: int = 3001, keyword: str = "") -> list[dict]:
+        self.calls.append(keyword)
+        return self.by_kw.get(keyword, [])
+
+
+def _item(word: str, peak: int, points: int = 10) -> dict:
+    return {"key_word": word, "trends": _trend(points, peak)}
+
+
+def _use_client(monkeypatch, client) -> None:
+    monkeypatch.setattr("app.services.douhot_client.DouhotClient",
+                        lambda *a, **kw: client)
+
+
+def test_同事件判据_实测的只忍一族能连上():
+    """真实校准样本(2026-11-10)。"""
+    #: 这三个是同一族里能连上的那一簇
+    assert hot_cycle._same_event("泼粪离职事件处理", "泼粪离职事件忍5次视频")       # 0.417
+    assert hot_cycle._same_event("泼粪离职事件处理", "彻底疯狂泼粪离职事件回放")     # 0.385
+    assert hot_cycle._same_event("彻底疯狂泼粪离职事件回放", "离职泼粪事件回放")     # 0.385
+    #: `老板骂我5次就离职后续` 那一簇
+    assert hot_cycle._same_event("老板骂我5次就离职后续", "老板骂我5次就离职直播回放")  # 0.571
+    assert hot_cycle._same_event("老板骂我5次就离职后续", "老板骂5次就离职回放")       # 0.462
+
+
+def test_同事件判据_不同事件不许连():
+    """实测:两簇之间最高只有 0.273/0.231 ⇒ 0.3 正好把它们分开。"""
+    assert not hot_cycle._same_event("泼粪离职事件处理", "老板骂我5次就离职后续")   # 0.062
+    assert not hot_cycle._same_event("泼粪离职事件处理", "只忍老板五次直播视频")     # 0.000
+    assert not hot_cycle._same_event("中方回应黄乐", "滑县婚礼照搬事件")
+    #: 空串/单字不该炸,也不该判同
+    assert not hot_cycle._same_event("", "事件")
+    assert not hot_cycle._same_event("a", "b")
+
+
+def test_二元组去掉标点():
+    assert hot_cycle._bigrams("a b") == {"ab"}
+    assert hot_cycle._bigrams("删,除") == {"删除"}
+    assert hot_cycle._bigrams("") == set()
+
+
+def test_归并_传递闭包把一族的全部说法并成一组():
+    """`_group_events` 是差分的底座:**整组**要一起记,代表只取峰值最大那条。
+
+    只忍一族实测 10 种说法,`_merge_events` 只交代表;`_group_events` 交全组。
+    """
+    words = [hot_cycle.HotWord(w, p, p, 10, 0, "形态词:离职") for w, p in [
+        ("泼粪离职事件处理", 100), ("泼粪离职事件忍5次视频", 500),
+        ("彻底疯狂泼粪离职事件回放", 300), ("离职泼粪事件回放", 200),
+        ("完全无关的事件", 900),
+    ]]
+    groups = hot_cycle._group_events(words)
+    assert len(groups) == 2
+    #: 组按峰值降序
+    assert groups[0][0].word == "完全无关的事件"
+    fam = groups[1]
+    assert fam[0].word == "泼粪离职事件忍5次视频"          #: 峰值 500 当代表
+    assert {h.word for h in fam} == {
+        "泼粪离职事件处理", "泼粪离职事件忍5次视频",
+        "彻底疯狂泼粪离职事件回放", "离职泼粪事件回放"}
+
+
+def test_归并_代表就是峰值最大的那条():
+    words = [hot_cycle.HotWord("滑县婚礼照搬事件", 300, 300, 8, 0, "形态词:事件"),
+             hot_cycle.HotWord("滑县婚礼照搬原因", 100, 100, 5, 0, "形态词:原因")]
+    assert [h.word for h in hot_cycle._merge_events(words)] == ["滑县婚礼照搬事件"]
+
+
+def test_探针_常青词按序列点数挡掉(monkeypatch, _real_carrier_words):
+    """满 24 点是常青词(`财经直播`);只忍那条是 13 点。"""
+    _use_client(monkeypatch, _KeywordClient({"后续": [
+        _item("财经直播后续", 5_000_000, points=24),
+        _item("只忍老板五次直播视频后续", 160_000, points=13),
+    ]}))
+    rows = hot_cycle.carrier_words("cookie", None, carriers=("后续",))
+    assert [h.word for h in rows] == ["只忍老板五次直播视频后续"]
+
+
+def test_探针_峰值太低挡掉(monkeypatch, _real_carrier_words):
+    _use_client(monkeypatch, _KeywordClient({"后续": [
+        _item("小事件后续", 9_000),
+        _item("大事件后续", 2_000_000),
+    ]}))
+    rows = hot_cycle.carrier_words("cookie", None, carriers=("后续",))
+    assert [h.word for h in rows] == ["大事件后续"]
+
+
+def test_探针_不沾形态词的条目丢掉(monkeypatch, _real_carrier_words):
+    """接口声称按 keyword 过滤,但**不假定它一定照做**。"""
+    _use_client(monkeypatch, _KeywordClient({"后续": [
+        _item("完全不沾边的词", 5_000_000),
+        _item("真事件后续", 800_000),
+    ]}))
+    rows = hot_cycle.carrier_words("cookie", None, carriers=("后续",))
+    assert [h.word for h in rows] == ["真事件后续"]
+
+
+def test_探针_一个词挂了不影响其余(monkeypatch, _real_carrier_words):
+    from app.services.douhot_client import DouhotError
+
+    class _Half(_KeywordClient):
+        def hot_search(self, limit=50, date_window=1, sub_type=3001, keyword=""):
+            if keyword == "回应":
+                raise DouhotError("boom")
+            return self.by_kw.get(keyword, [])
+
+    _use_client(monkeypatch, _Half({"事件": [_item("滑县婚礼照搬事件", 3_000_000)]}))
+    rows = hot_cycle.carrier_words("cookie", None, carriers=("回应", "事件"))
+    assert [h.word for h in rows] == ["滑县婚礼照搬事件"]
+
+
+def test_探针_返回分组且代表在组首(monkeypatch, _real_carrier_words):
+    _use_client(monkeypatch, _KeywordClient({"离职": [
+        _item("老板骂我5次就离职后续", 600_000),
+        _item("老板骂我5次就离职直播回放", 400_000),
+        _item("另一个事件离职", 900_000),
+    ]}))
+    reps, groups = hot_cycle.carrier_words("cookie", None, carriers=("离职",),
+                                           return_groups=True)
+    assert len(groups) == 2
+    assert [h.word for h in reps] == [g[0].word for g in groups]
+    assert {h.word for h in groups[1]} == {"老板骂我5次就离职后续", "老板骂我5次就离职直播回放"}
+
+
+def test_探针_top只截事件数_不截说法(monkeypatch, _real_carrier_words):
+    _use_client(monkeypatch, _KeywordClient({"离职": [
+        _item("老板骂我5次就离职后续", 600_000),
+        _item("老板骂我5次就离职直播回放", 400_000),
+        _item("另一个事件离职", 900_000),
+    ]}))
+    reps, groups = hot_cycle.carrier_words("cookie", None, carriers=("离职",),
+                                           top=1, return_groups=True)
+    assert len(reps) == 1 and reps[0].word == "另一个事件离职"
+    assert len(groups) == 1
+
+
+def test_探针_阈值走配置项(monkeypatch, _real_carrier_words):
+    """配置项必须真生效(参数默认是 None,不能把常量固化在函数签名里)。"""
+    _use_client(monkeypatch, _KeywordClient({"后续": [_item("某事件后续", 200_000)]}))
+
+    class _S:
+        hot_carrier_min_peak = 500_000
+        hot_carrier_full_points = 23
+        hot_carrier_top_n = 5
+        hot_carrier_merge_jaccard = 0.3
+
+    assert hot_cycle.carrier_words("cookie", _S(), carriers=("后续",)) == []
+    assert hot_cycle.carrier_words("cookie", None, carriers=("后续",)) != []
+
+
+# ---- 差分 / 记账 / 清理 ---------------------------------------------------
+
+@pytest.fixture
+def _mem_db():
+    """内存库(带上 `hot_word_seen` 表)。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db.models import Base
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+    yield db
+    db.close()
+
+
+def _hw(word: str, peak: int = 200_000) -> "hot_cycle.HotWord":
+    return hot_cycle.HotWord(word, peak, peak, 10, 0, "形态词:后续")
+
+
+def test_差分_第一次全是新的_第二次一条不剩(_mem_db, monkeypatch):
+    """这是本模块存在的意义:不差分就是 4 小时推一次同一件事。"""
+    monkeypatch.setattr(hot_cycle, "read_cookie", lambda s: "cookie")
+    monkeypatch.setattr(hot_cycle, "_candidates", lambda *a, **kw: (
+        [_hw("某事件后续"), _hw("另一个事件后续")],
+        [[_hw("某事件后续")], [_hw("另一个事件后续")]]))
+    first = hot_cycle.new_hot_words(object(), [], session=_mem_db, user_id=1, limit=5)
+    assert [h.word for h in first] == ["某事件后续", "另一个事件后续"]
+    second = hot_cycle.new_hot_words(object(), [], session=_mem_db, user_id=1, limit=5)
+    assert second == []
+
+
+def test_差分按事件组判_换一种说法也不算新的(_mem_db, monkeypatch):
+    """只忍一族实测 10 种说法:记了代表词之后,变体涨上来不许再当新事件。"""
+    monkeypatch.setattr(hot_cycle, "read_cookie", lambda s: "cookie")
+    rep = _hw("老板骂我5次就离职后续", 600_000)
+    variant = _hw("老板骂我5次就离职直播回放", 400_000)
+    #: 第一轮:组里代表是 A
+    monkeypatch.setattr(hot_cycle, "_candidates", lambda *a, **kw: (
+        [rep, variant], [[rep, variant]]))
+    assert [h.word for h in hot_cycle.new_hot_words(
+        object(), [], session=_mem_db, user_id=1, limit=5)] == [rep.word]
+    #: 第二轮:同名事件,但变体涨成了代表 ⇒ 仍然是旧事件
+    monkeypatch.setattr(hot_cycle, "_candidates", lambda *a, **kw: (
+        [variant, rep], [[variant, rep]]))
+    assert hot_cycle.new_hot_words(object(), [], session=_mem_db, user_id=1, limit=5) == []
+
+
+def test_记账把整组说法都写进去(_mem_db):
+    rows = [_hw("泼粪离职事件处理"), _hw("泼粪离职事件忍5次视频")]
+    assert hot_cycle.remember(_mem_db, 1, rows) == 2
+    got = hot_cycle.seen_before(_mem_db, 1, ["泼粪离职事件处理", "泼粪离职事件忍5次视频"])
+    assert got == {"泼粪离职事件处理", "泼粪离职事件忍5次视频"}
+
+
+def test_记账重复调用只更新不新增(_mem_db):
+    assert hot_cycle.remember(_mem_db, 1, [_hw("某事件后续", 100)]) == 1
+    #: 第二次峰值更高 ⇒ 更新 peak,不新增行
+    assert hot_cycle.remember(_mem_db, 1, [_hw("某事件后续", 900)]) == 0
+    from sqlalchemy import select
+
+    from app.db.models import HotWordSeen
+    row = _mem_db.scalars(select(HotWordSeen)).one()
+    assert row.peak == 900
+
+
+def test_差分按用户隔离(_mem_db):
+    """两个用户的 `hot_word_seen` 不能互相污染。"""
+    hot_cycle.remember(_mem_db, 1, [_hw("某事件后续")])
+    assert hot_cycle.seen_before(_mem_db, 2, ["某事件后续"]) == set()
+
+
+def test_清理只删过期的(_mem_db):
+    from datetime import datetime, timedelta
+
+    hot_cycle.remember(_mem_db, 1, [_hw("还热的后续"), _hw("凉了的后续")])
+    from sqlalchemy import select
+
+    from app.db.models import HotWordSeen
+    old = _mem_db.scalars(
+        select(HotWordSeen).where(HotWordSeen.word == "凉了的后续")).one()
+    old.last_at = datetime.now() - timedelta(days=30)
+    _mem_db.flush()
+    assert hot_cycle.prune_seen(_mem_db, 1, keep_days=14) == 1
+    assert hot_cycle.seen_before(_mem_db, 1, ["还热的后续"]) == {"还热的后续"}
+    assert hot_cycle.seen_before(_mem_db, 1, ["凉了的后续"]) == set()
+
+
+def test_不传session也能跑_自己开短会话(monkeypatch):
+    """⚠️ 写锁纪律:`session=None` 时不能借调用方的长事务。"""
+    opened = []
+
+    class _S:
+        def __init__(self): self.committed = False
+        def commit(self): self.committed = True
+        def close(self): pass
+
+    inst = _S()
+
+    class _Maker:
+        def __call__(self):
+            opened.append(1)
+            return inst
+
+    monkeypatch.setattr("app.db.get_session_local", lambda: _Maker())
+    monkeypatch.setattr(hot_cycle, "read_cookie", lambda s: "cookie")
+    rep = _hw("某事件后续")
+    monkeypatch.setattr(hot_cycle, "_candidates", lambda *a, **kw: (
+        [rep], [[rep]]))
+    monkeypatch.setattr(hot_cycle, "seen_before", lambda *a: set())
+    monkeypatch.setattr(hot_cycle, "remember", lambda *a, **kw: 1)
+    monkeypatch.setattr(hot_cycle, "prune_seen", lambda *a, **kw: 0)
+
+    out = hot_cycle.new_hot_words(object(), [], user_id=1, limit=5)
+    assert [h.word for h in out] == ["某事件后续"]
+    assert opened, "必须自己开会话"
+    assert inst.committed, "自己开的会话必须提交(否则下一轮又判成新事件)"
+
+
+def test_没登录态时不做差分也不碰库(monkeypatch):
+    monkeypatch.setattr(hot_cycle, "read_cookie", lambda s: "")
+
+    def _boom(*a, **kw):
+        raise AssertionError("没有 Cookie 不该碰库")
+
+    monkeypatch.setattr(hot_cycle, "seen_before", _boom)
+    assert hot_cycle.new_hot_words(object(), [], session=object(), user_id=1) == []
+
+
+def test_新热点入口走降级链_探针有结果就不看榜单(monkeypatch):
+    monkeypatch.setattr(hot_cycle, "read_cookie", lambda s: "cookie")
+    called = []
+    monkeypatch.setattr(hot_cycle, "board_words", lambda *a: called.append("board") or [])
+    rep = _hw("探针来的后续")
+    monkeypatch.setattr(hot_cycle, "carrier_words", lambda *a, **kw: (
+        [rep], [[rep]]) if kw.get("return_groups") else [rep])
+    out = hot_cycle._candidates(object(), [], "cookie", limit=5)
+    assert [h.word for h in out] == ["探针来的后续"]
+    assert called == []
