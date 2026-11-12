@@ -166,7 +166,7 @@ _BOARD_STOP = frozenset({
 #: **但它必须被填进固定的几种壳子**才能被搜索和传播 —— 「后续 / 回应 / 通报 / 离职 /
 #: 处罚…」描述的是**事件被命名的方式**,不是事件本身。所以这张表比内容词稳定得多。
 #:
-#: ## 实测产出(2026-11-10,12 个词 × 1 次请求)
+#: ## 实测产出(2026-11-10,12 个词 × 1 次请求;2026-11-12 起收敛为 6 个)
 #:
 #: | 指标 | 结果 |
 #: |---|---|
@@ -177,9 +177,18 @@ _BOARD_STOP = frozenset({
 #:
 #: 且**确实捞到了目标**:`彻底疯狂泼粪离职事件回放`(270 万,`彻底疯狂` 正是原作者)、
 #: `老板处理泼粪事件方法`、`泼粪离职事件忍5次视频`、`f8fe直播泼粪完整版`。
+#:
+#: ## 2026-11-12 收敛:12 → 6(砍 通报/离职/处罚/被罚/警方/完整版)
+#:
+#: **依据是对照实测,不是拍的**:同一天逐词跑探针,被砍的 6 个词里
+#: `处罚/被罚/警方` 各只有 0~2 条原始返回、**有效命中 0 条**;`通报/离职/完整版`
+#: 的有效命中全在长尾(43 万/87 万/59 万以下)。把它们**全部砍掉后重跑**:
+#: 归并事件组数、top10 代表词列表**逐字不变** —— 那些词的命中要么与保留词
+#: 归并进同组,要么排序后根本进不了 top。⇒ 请求从 12 次降到 **6 次**,
+#: 产出零损失。砍掉的词如果哪天又起量,`hot_carrier_enabled` 的配置项
+#: 仍然兜底(表本身可改)。
 CARRIER_WORDS = (
-    "后续", "回应", "通报", "事件", "离职", "处罚",
-    "被罚", "警方", "最新", "完整版", "来龙去脉", "原因",
+    "后续", "回应", "事件", "最新", "来龙去脉", "原因",
 )
 
 #: 序列点数**小于**它 = 这个小时内才起量 ⇒ 今天新起的事件。
@@ -604,6 +613,72 @@ def seen_before(session, user_id: int, words: list[str]) -> set[str]:
             HotWordSeen.word.in_(ids))).all())
 
 
+def unfed_search_words(session, user_id: int, *, top: int = 3,
+                       max_len: int = 12) -> list[str]:
+    """★ **取「还没喂过搜索」的探针词**(2026-11-12)喂 `douyin_leads`。
+
+    ## 为什么需要这一层
+
+    探针词此前只有一条去处:`demand_watch` 评论扫描 —— 实测**空转**(名字恒 0):
+    探针捞的是新闻/剧情解说类热点,评论区是「围观/追剧」不是「求资源」。
+    而库里真正搬成功的名字全是短剧/小说名,来自 `douyin_leads` 的**搜索词**。
+    ⇒ 探针词该同时进搜索词表:抖音推广号标题写《口令》,**只有搜索能命中**。
+
+    ## 为什么从 `hot_word_seen` 读而不是再打一次探针
+
+    `new_hot_words` 每轮已经差分记账(6 个 HTTP);这里只是**换一个消费者**,
+    再打一次探针就是 6 个重复请求。读库不读网,零额外成本。
+
+    ## 判据
+
+    - `fed_search_at IS NULL` —— 还没喂过(**喂过没产出**的不再喂,那会烧搜索额度;
+      词本身还热的话探针下轮会刷新 `last_at`,但 `fed_search_at` 不重置);
+    - `last_at` 近 24h —— 还在发酵的才值得搜,凉词不占名额;
+    - 词长 ≤ `max_len` —— 与 `douyin_leads._HOT_MAX_LEN` 同一取舍(事件句太长,
+      推广号标题写不下,搜了也命不中),但放宽到 12:探针词天然带形态词后缀
+      (`…后续`/`…事件`),按 8 会把好词挡掉一半;
+    - 按峰值降序 —— 大事件优先。
+    """
+    from sqlalchemy import select
+
+    from app.db.models import HotWordSeen
+
+    if session is None or top <= 0:
+        return []
+    since = datetime.now() - timedelta(hours=24)
+    rows = session.execute(
+        select(HotWordSeen.word, HotWordSeen.peak).where(
+            HotWordSeen.user_id == user_id,
+            HotWordSeen.fed_search_at.is_(None),
+            HotWordSeen.last_at >= since).order_by(
+            HotWordSeen.peak.desc()).limit(top * 4)).all()
+    out = [str(w).strip() for w, _ in rows
+           if str(w).strip() and len(str(w).strip()) <= max_len]
+    return out[:top]
+
+
+def mark_fed_search(session, user_id: int, words: list[str]) -> int:
+    """给这批词打上「已喂过搜索」的戳(`fed_search_at`)。返回打戳条数。
+
+    ⚠️ **由调用方在搜索完成后打**(不是取词时):搜索挂了词没消耗,下轮还能再喂。
+    """
+    from sqlalchemy import select
+
+    from app.db.models import HotWordSeen
+
+    if session is None or not words:
+        return 0
+    now = datetime.now()
+    ids = [str(w).strip() for w in words if str(w).strip()]
+    rows = session.scalars(select(HotWordSeen).where(
+        HotWordSeen.user_id == user_id,
+        HotWordSeen.word.in_(ids))).all()
+    for r in rows:
+        r.fed_search_at = now
+    session.flush()
+    return len(rows)
+
+
 def remember(session, user_id: int, rows: list[HotWord]) -> int:
     """把这些词记进 `hot_word_seen`(已存在的只更新 `last_at`)。返回新增条数。
 
@@ -691,8 +766,8 @@ def new_hot_words(settings: Settings, seeds: list[str], *, session=None,
 
     ⚠️ 本函数**不能**借调用方的长事务记账(本仓栽过"循环里写一次 + 调外部接口 156 秒")。
     `session=None` 时**自己开一个短会话**,写完立刻 `commit()` + `close()`,锁只拿几毫秒;
-    取数(12 个 HTTP 请求)在**开会话之前**就做完了。调用方要复盘时传自己的 session
-    (单测就是这样注入的)。
+    取数(6 个 HTTP 请求,2026-11-12 起词表收敛到 6)在**开会话之前**就做完了。
+    调用方要复盘时传自己的 session(单测就是这样注入的)。
 
     ⚠️ `session=None` 且 `user_id=0` 时**不做差分**,原样返回 —— 手工脚本要能单独跑探针。
     """

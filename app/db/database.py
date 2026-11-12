@@ -437,6 +437,9 @@ ADDITIONS: dict[str, list[str]] = {
     # 那一列每轮采集都刷新,减出来的"搬成耗时"会随重跑次数变大。
     "xunlei_group_shares": ["moved_at DATETIME"],
     "alerts": ["section VARCHAR(32) DEFAULT ''"],
+    # 探针词**喂给 douyin_leads 搜索的时刻**(2026-11-12):NULL=还没喂过。
+    # 存量行 NULL 语义正确(旧词确实没走过搜索链)。
+    "hot_word_seen": ["fed_search_at DATETIME"],
     "douhot_watch": ["section VARCHAR(16) DEFAULT 'douhot'", "filter_keyword VARCHAR(64) DEFAULT ''",
                      "date_window INTEGER"],
     "douhot_watch_snap": ["section VARCHAR(16) DEFAULT 'douhot'", "entry_title VARCHAR(255) DEFAULT ''",

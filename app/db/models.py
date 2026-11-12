@@ -180,6 +180,10 @@ class HotWordSeen(Base):
     peak: Mapped[float] = mapped_column(Float, default=0)
     #: 靠哪个形态词捞到的(`后续`/`回应`…),可回溯。
     carrier: Mapped[str] = mapped_column(String(32), default="")
+    #: ★ **拿去过 `douyin_leads` 当搜索词的时刻**(2026-11-12)。NULL = 还没喂过搜索。
+    #: 没有 它,"探针词喂搜索"就分不清"喂过没产出"与"从没喂过"—— 而这两者的下一步
+    #: 完全不同(前者是换词,后者是接线没生效)。
+    fed_search_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class AlertRecord(Base):

@@ -21,7 +21,7 @@ def _no_carrier_probe(monkeypatch):
     """**默认关掉形态词探针**。
 
     `_candidates` 的第一条路就是探针,而 `getattr(object(), "hot_carrier_enabled", True)`
-    是 True ⇒ 不管这些老用例本来想测什么,都会先去打 12 次真实 HTTP。
+    是 True ⇒ 不管这些老用例本来想测什么,都会先去打真实 HTTP(词表 2026-11-12 起 6 个)。
     老用例各自要测的是「榜单/种子族」那条,所以这里统一把探针替成空。
     探针本身的用例用 `_real_carrier_words` 这个 fixture 把真函数装回去。
     """
@@ -523,3 +523,56 @@ def test_新热点入口走降级链_探针有结果就不看榜单(monkeypatch)
     out = hot_cycle._candidates(object(), [], "cookie", limit=5)
     assert [h.word for h in out] == ["探针来的后续"]
     assert called == []
+
+
+# ---- 探针词喂 douyin_leads 搜索(2026-11-12)--------------------------------
+
+def _seen_row(db, word: str, peak: float = 1000.0, *, fed=None, last_hours=0.0):
+    from datetime import datetime, timedelta
+
+    from app.db.models import HotWordSeen
+
+    #: `fed` 直接收 datetime(传字符串 SQLAlchemy 会拒)
+    if isinstance(fed, str):
+        fed = datetime.fromisoformat(fed)
+    db.add(HotWordSeen(user_id=1, word=word, seen_at=datetime.now(),
+                       last_at=datetime.now() - timedelta(hours=last_hours),
+                       peak=peak, fed_search_at=fed))
+    db.flush()
+
+
+def test_取词只拿没喂过且还热的(_mem_db):
+    _seen_row(_mem_db, "没喂过的大事件", 3000.0)
+    _seen_row(_mem_db, "没喂过的小事件", 100.0)
+    _seen_row(_mem_db, "喂过的旧词", 9000.0, fed="2026-11-12 10:00:00")
+    _seen_row(_mem_db, "凉掉的词", 8000.0, last_hours=48)
+    words = hot_cycle.unfed_search_words(_mem_db, 1, top=3)
+    assert "没喂过的大事件" in words and "没喂过的小事件" in words
+    assert "喂过的旧词" not in words, "喂过没产出的不再喂,否则烧搜索额度"
+    assert "凉掉的词" not in words, "凉词不占名额"
+
+
+def test_取词按峰值降序_长词挡掉(_mem_db):
+    _seen_row(_mem_db, "小峰值", 100.0)
+    _seen_row(_mem_db, "大峰值", 9999.0)
+    #: 13 字:探针词带形态词后缀,放宽到 12;超长的事件句搜了也命不中
+    _seen_row(_mem_db, "特别特别特别长的事件句子后续", 5000.0)
+    assert hot_cycle.unfed_search_words(_mem_db, 1, top=3) == ["大峰值", "小峰值"]
+
+
+def test_取词按用户隔离(_mem_db):
+    _seen_row(_mem_db, "别人的词", 100.0)
+    assert hot_cycle.unfed_search_words(_mem_db, 2, top=3) == []
+
+
+def test_打戳只动喂过的那些(_mem_db):
+    from datetime import datetime
+
+    _seen_row(_mem_db, "词甲", 100.0)
+    _seen_row(_mem_db, "词乙", 100.0)
+    n = hot_cycle.mark_fed_search(_mem_db, 1, ["词甲"])
+    assert n == 1
+    #: 词乙的戳必须还是 None(下轮还该被喂)
+    assert hot_cycle.unfed_search_words(_mem_db, 1, top=5) == ["词乙"]
+    #: 重复打戳幂等(值刷新,不新增行)
+    assert hot_cycle.mark_fed_search(_mem_db, 1, ["词甲", "不存在的词"]) == 1

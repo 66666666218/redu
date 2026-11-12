@@ -973,7 +973,10 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
     #: **赌新事件**,不许把前者挤掉(单测 `test_素材优先取我们自己的线索_而不是搜吃瓜`
     #: 就是守这一条的)。
     #: ⚠️ 这些词**只拿来扫评论找名字**,不拿去搜网盘 —— 实测 7 个爆发词共 93 条搜索结果
-    #: 里**带网盘链 0 条**,塞给 `douyin_leads` 就是 0% 有效率。
+    #: 里**带网盘链 0 条**。
+    #: ⚠️ **2026-11-12 起这条注释的前半句已松动**:探针词**同时**会进 `douyin_leads`
+    #: 的搜索词表(`unfed_search_words`,找的是推广号《口令》标题,不是网盘直链,
+    #: 与上面说的「搜网盘 0%」是两条不同的路);这条评论扫描路照旧保留。
     hot_budget = min(need - len(out),
                      int(getattr(settings, "demand_hot_videos", 2) or 0))
     if hot_budget > 0:

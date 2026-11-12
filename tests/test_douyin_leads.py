@@ -2375,3 +2375,92 @@ def test_大瓜轮热榜词必须排最前(session, monkeypatch) -> None:
 
     assert kws[:2] == ["墨尔本七个小矮人", "白雪公主1995"], f"热榜词要排最前:{kws}"
     assert len(kws) <= 8, "热榜词不许把名额撑爆(CDP 一次最多 8 词)"
+
+
+class TestProbeWordsToSearch:
+    """★ **探针词进搜索**(2026-11-12):`hot_word_seen` 里没喂过的词,并进 `hot` 词表。
+
+    起因:探针词此前只有 `demand_watch` 评论扫描一条去处,实测空转(名字恒 0);
+    而库里搬成功的名字全是短剧/小说名,**来自搜索词** —— 推广号的《口令》标题
+    只有搜索能命中。
+    """
+
+    def _seed(self, session, word="只忍老板五次直播视频后续", peak=160_000.0):
+        from datetime import datetime
+
+        from app.db.models import HotWordSeen
+
+        session.add(HotWordSeen(user_id=1, word=word, seen_at=datetime.now(),
+                                last_at=datetime.now(), peak=peak))
+        session.commit()
+
+    def test_探针词并进hot列表且去重(self, session, monkeypatch) -> None:
+        from app.services import douyin_leads as dl
+        from app.services import hot_cycle as hc
+
+        self._seed(session)
+        monkeypatch.setattr(dl, "hot_seed_words", lambda *a, **k: ["热榜词", "只忍老板五次直播视频后续"])
+        #: 直接钉 unfed_search_words,隔离"hot_seed_words 与取词的先后"
+        monkeypatch.setattr(hc, "unfed_search_words",
+                            lambda db, uid, top=2: ["只忍老板五次直播视频后续"][:top])
+        got = {}
+
+        def fake_run(db, uid, settings=None, category=None, advance=True):
+            # 抓不到内部变量,改为验证 search_keywords 收到的 hot —— 用 wrapper 思路:
+            # run_douyin_leads 内部调 search_keywords,这里直接替身抓参
+            return 0
+
+        #: 更简单:替 search_keywords 抓 hot 参数
+        orig = dl.search_keywords
+        monkeypatch.setattr(dl, "search_keywords",
+                            lambda db, uid, top, settings, hot=None: got.update(hot=hot) or [])
+        monkeypatch.setattr(dl, "collect_leads", lambda *a, **k: ([], "CDP"))
+        dl.run_douyin_leads(session, 1, _settings_like(), category="影视", advance=False)
+        assert "只忍老板五次直播视频后续" in (got.get("hot") or []), got
+
+    def test_搜索完成才打戳_搜索挂了不消耗词(self, session, monkeypatch) -> None:
+        """打戳必须在 collect_leads 之后:搜索挂了词没消耗,下轮还能再喂。"""
+        from app.db.models import HotWordSeen
+        from app.services import douyin_leads as dl
+
+        self._seed(session, word="没被消耗的词")
+        monkeypatch.setattr(dl, "hot_seed_words", lambda *a, **k: [])
+        monkeypatch.setattr(dl, "collect_leads", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+        monkeypatch.setattr(dl, "push_leads", lambda *a, **k: None)
+
+        try:
+            dl.run_douyin_leads(session, 1, _settings_like(), category="影视", advance=False)
+        except Exception:
+            pass  # 单平台失败被内部捕获;打戳在 collect 之后,不该被执行
+        row = session.query(HotWordSeen).filter_by(word="没被消耗的词").one()
+        assert row.fed_search_at is None, "搜索挂了就打戳 = 白丢一个词"
+
+    def test_搜索完成后词被打上戳(self, session, monkeypatch) -> None:
+        from datetime import datetime
+
+        from app.db.models import HotWordSeen
+        from app.services import douyin_leads as dl
+
+        self._seed(session, word="搜过的词")
+        monkeypatch.setattr(dl, "hot_seed_words", lambda *a, **k: [])
+        monkeypatch.setattr(dl, "collect_leads", lambda *a, **k: ([], "CDP"))
+        monkeypatch.setattr(dl, "push_leads", lambda *a, **k: None)
+
+        dl.run_douyin_leads(session, 1, _settings_like(), category="影视", advance=False)
+        row = session.query(HotWordSeen).filter_by(word="搜过的词").one()
+        assert row.fed_search_at is not None and row.fed_search_at <= datetime.now()
+
+    def test_名额走配置且0即关闭(self, session, monkeypatch) -> None:
+        from app.services import douyin_leads as dl
+
+        self._seed(session)
+        called = []
+        monkeypatch.setattr(dl, "hot_seed_words", lambda *a, **k: [])
+        monkeypatch.setattr(dl, "search_keywords",
+                            lambda db, uid, top, settings, hot=None: called.append(hot) or [])
+        monkeypatch.setattr(dl, "collect_leads", lambda *a, **k: ([], "CDP"))
+
+        s0 = _settings_like()
+        object.__setattr__(s0, "douyin_leads_probe_words", 0)
+        dl.run_douyin_leads(session, 1, s0, category="影视", advance=False)
+        assert called and (called[0] or []) == [], called

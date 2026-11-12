@@ -2090,6 +2090,24 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
     if cat == "大瓜" and _hot_n > 0:
         _hot_n = max(_hot_n, int(getattr(settings, "douyin_leads_dagua_hot_words", 3) or 0))
     hot = hot_seed_words(settings, limit=_hot_n) if "douyin" in plats else []
+    #: ★★ **探针词进搜索**(2026-11-12):形态词探针捞到的新事件词,此前只喂
+    #: `demand_watch` 评论扫描 —— 实测**空转**(名字恒 0:新闻/剧情解说的评论区是
+    #: 围观不是求资源)。而库里搬成功的名字(`恶女得宠`/`嫁金钗`…)全是**短剧/小说名**,
+    #: 来自搜索词 ⇒ 探针词该同时进词表,推广号的《口令》标题只有搜索能命中。
+    #: ⚠️ 词从 `hot_word_seen` 读(**已被 new_hot_words 差分记账**),不打新请求;
+    #: `search_keywords` 会把 `hot` 追加到词表末尾(大瓜分支排最前),不挤已知词名额。
+    #: ⚠️ 打戳在**搜索完成后**(词没被消耗,下轮还能再喂)。
+    probe_words: list[str] = []
+    if "douyin" in plats:
+        try:
+            from app.services import hot_cycle as _hc
+
+            probe_words = _hc.unfed_search_words(
+                db, user_id, top=int(getattr(
+                    settings, "douyin_leads_probe_words", 2) or 0))
+        except Exception:  # noqa: BLE001 - 取词失败不挡这一轮
+            logger.debug("探针词取词失败", exc_info=True)
+    hot = (hot + [w for w in probe_words if w not in hot]) if probe_words else hot
     kws = search_keywords(db, user_id,
                           int(getattr(settings, "douyin_leads_keywords", 3) or 3),
                           settings, hot=hot)
@@ -2106,6 +2124,15 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
                 pages=int(getattr(settings, "douyin_leads_pages", 1) or 1),
                 stats=funnel)
             total += len(leads)
+            #: ★ **搜索完成才打戳**(2026-11-12):`fed_search_at` 标记"这个词已经拿去搜过"。
+            #: 放在取词时打会把"搜索挂了"记成"词消耗了",下轮白丢一批词。
+            if probe_words and plat == "douyin":
+                try:
+                    from app.services import hot_cycle as _hc
+
+                    _hc.mark_fed_search(db, user_id, probe_words)
+                except Exception:  # noqa: BLE001 - 打戳失败不挡这轮结果
+                    logger.debug("探针词打戳失败", exc_info=True)
             n_panless = 0
             n_grouponly = 0
             if leads:
@@ -2142,6 +2169,14 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
             n_hot_ok = sum(1 for x in leads
                            if (x.get("keyword") or "") in hs
                            and (x.get("kouling") or {}).get("kind") in ("group", "share"))
+            #: ★ 探针词的产出**单独计量**(2026-11-12)—— 与「外部」分开口径:
+            #: 热榜种子是"大家在聊什么"(历史有效率 0%),探针词是"刚起量的新事件",
+            #: 两条路的有效率要各自攒样本,别混在一起看不出哪条在起作用。
+            ps = set(probe_words or [])
+            n_probe = sum(1 for x in leads if (x.get("keyword") or "") in ps)
+            n_probe_ok = sum(1 for x in leads
+                             if (x.get("keyword") or "") in ps
+                             and (x.get("kouling") or {}).get("kind") in ("group", "share"))
             # ⚠️ **来源标签要进运行记录**(2026-10-08):抖音现在"协议优先、浏览器兜底",
             # 而两条路都会产出"0 条"。不标来源的话,看到 0 就分不清是
             # "协议挂了被回落"还是"真没人在推资源" —— 正是本仓最忌讳的那种含糊。
@@ -2151,6 +2186,7 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
                         f"新鲜{_freshness_summary(leads)} "
                         f"{_kouling_summary(leads)} "
                         f"[外部命中{n_hot}/产出{n_hot_ok}] "
+                        f"[探针{len(probe_words)} 命中{n_probe}/产出{n_probe_ok}] "
                         #: ★ 漏斗(2026-10-31):原始→时间挡→无时间→口令→无链,一眼看出哪道闸在掉量。
                         f"漏斗 原始{funnel.get('raw', 0)} 挡{funnel.get('old', 0)}"
                         f" 无时{funnel.get('notime', 0)} 续{funnel.get('cont', 0)} 口令{funnel.get('kept', 0)}"
