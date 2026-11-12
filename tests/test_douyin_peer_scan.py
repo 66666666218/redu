@@ -39,9 +39,10 @@ def session():
 def _no_publish_time_lookup(monkeypatch):
     """单测**不许真去拉发布时间**(那要出网、还依赖 `.env` 里的 cookie)。
 
-    默认返回空字典 ⇒ 所有作品 `publish_at=None`;要验新鲜度的用例自己覆盖它。
+    默认返回空 `(times, vids)` ⇒ 所有作品 `publish_at=None` 且雪花锚点失效;
+    要验新鲜度的用例自己覆盖它。
     """
-    monkeypatch.setattr(dps, "fetch_publish_times", lambda *a, **k: {})
+    monkeypatch.setattr(dps, "fetch_publish_times", lambda *a, **k: ({}, {}))
 
 
 #: 绕过上面那个 autouse 替身的**真函数**(验它本身时用)。
@@ -664,9 +665,10 @@ def test_fresh_gate_drops_and_marks_old_works(session, monkeypatch) -> None:
 
     monkeypatch.setattr(dps, "fetch_accounts", lambda *a, **k: {
         "u1": [_it("base", 500), _it("fresh", 2), _it("old", 26)]})
-    monkeypatch.setattr(dps, "fetch_publish_times", lambda *a, **k: {
-        w["aweme_id"]: w["publish_at"]
-        for w in [_it("base", 500), _it("fresh", 2), _it("old", 26)]})
+    monkeypatch.setattr(dps, "fetch_publish_times", lambda *a, **k: (
+        {w["aweme_id"]: w["publish_at"]
+         for w in [_it("base", 500), _it("fresh", 2), _it("old", 26)]},
+        {}))
 
     seen: list = []
 
@@ -706,8 +708,8 @@ def test_fresh_gate_unknown_time_follows_switch(session, monkeypatch) -> None:
                         "account_name": "甲", "author": "甲"}]}
 
     monkeypatch.setattr(dps, "fetch_accounts", _fetch)
-    #: 替身已经在 fixture 里返回 {},这里显式再说一次:取不到时间。
-    monkeypatch.setattr(dps, "fetch_publish_times", lambda *a, **k: {})
+    #: 替身已经在 fixture 里返回 `(空, 空)`,这里显式再说一次:取不到时间、锚点也失效。
+    monkeypatch.setattr(dps, "fetch_publish_times", lambda *a, **k: ({}, {}))
     seen: list = []
 
     class _Loose(_S):
@@ -717,6 +719,9 @@ def test_fresh_gate_unknown_time_follows_switch(session, monkeypatch) -> None:
     monkeypatch.setattr(dps, "push_works", lambda ws, s, **k: seen.extend(ws) or True)
     res = dps.run_for_user(session, 1, _Loose())
     assert [w["aweme_id"] for w in seen] == ["notime"] and res["stale"] == 0
+    #: ★ 反方向也要显形(2026-11-12):**无时间却放行**的条数。它长期等于扫描量,
+    #: 就说明新鲜度闸门已失效(1203/1209 那次就是这样静默失效的)。
+    assert res["fresh_unknown"] == 1, res
 
     #: 严格模式:把 `notime` 放回待推(模拟"上一轮没推成"),再跑一轮应当被拦。
     #: ⚠️ **只放回这一条** —— 基线那行也是 `publish_at=None`,一起放回会让 `stale`
@@ -757,9 +762,105 @@ def test_fetch_publish_times_reads_create_time(monkeypatch) -> None:
 
     monkeypatch.setattr(demand_watch, "fetch_author_posts", _fake)
     monkeypatch.setattr(dps.time, "sleep", lambda *_: None)
-    got = _REAL_FETCH_PUBLISH_TIMES(
+    times, vids = _REAL_FETCH_PUBLISH_TIMES(
         [{"uid": "ok", "name": "甲"}, {"uid": "bad", "name": "乙"},
          {"uid": "", "name": "空"}], _S(), None, user_id=1, count=30)
-    assert set(got) == {"v1"}                 # v2 的 0 被丢掉;bad 失败不影响 ok
-    assert got["v1"].year >= 2023
+    assert set(times) == {"v1"}                 # v2 的 0 被丢掉;bad 失败不影响 ok
+    assert times["v1"].year >= 2023
     assert calls and calls[0] == ("ok", 30)
+    #: 雪花 vid 集合同步返回(锚点判老要用)。⚠️ v1 不是数字 vid ⇒ 进不了集合,
+    #: 但**不许抛**(脏数据只是拿不到锚点,不是失败)。
+    assert "v1" not in vids
+
+
+def test_snowflake_anchor_judges_old_without_time(session, monkeypatch) -> None:
+    """★ **雪花锚点**(2026-11-12):协议只看得见最新 ~30 条,CDP 抓 50~80 条 ——
+    交集极小(实测土豆号 77 条里只 1 条),其余全靠 `allow_unknown` 放行 = 老资源全推。
+
+    雪花 `aweme_id` 单调(数值降序=发布降序,全站统一):**vid 低于「已知 create_time
+    已过老的最大 vid」⇒ 必更老**,无需拿到 `create_time` 就能判老。
+    当天实测:77 条里 62 条被这条规则收掉。
+
+    ⚠️ vid 必须是**数字雪花**(`int()` 能解析)—— 非数字 id 进不了锚点比较,只走
+    `allow_unknown`(脏数据不是失败,但也不该悄悄吃掉判定)。
+    """
+    from datetime import datetime, timedelta
+
+    V_OLD, V_STALE, V_NEW = ("7000000000000000001", "7000000000000000005",
+                             "7000000000000000009")
+    _acct(session, uid="u1", name="甲")
+    monkeypatch.setattr(dps, "push_works", lambda *a, **k: True)
+    #: ⚠️ 基线用**另一个 vid**(比 V_OLD 还高) —— 撞了的话 V_OLD 会算"已落库",
+    #: 压根不进 `todo`,用例就测不到锚点。
+    monkeypatch.setattr(dps, "fetch_accounts", lambda *a, **k: {
+        "u1": [{"aweme_id": "7000000000000000099", "url": "u",
+                "title": "基线", "likes": 0, "niche": "小游戏", "account_uid": "u1",
+                "account_name": "甲", "author": "甲"}]})
+    dps.run_for_user(session, 1, _S())
+
+    #: CDP 这轮抓到:1 条真新鲜的(V_NEW) + 1 条窗口外的老作品(V_OLD,没时间)。
+    monkeypatch.setattr(dps, "fetch_accounts", lambda *a, **k: {
+        "u1": [{"aweme_id": V_NEW, "url": "u9", "title": "窗口内新作", "likes": 0,
+                "niche": "小游戏", "account_uid": "u1", "account_name": "甲",
+                "author": "甲"},
+               {"aweme_id": V_OLD, "url": "u1", "title": "窗口外老作", "likes": 0,
+                "niche": "小游戏", "account_uid": "u1", "account_name": "甲",
+                "author": "甲"}]})
+    #: 协议回 V_STALE(48 小时前,已过老)+ V_NEW(刚发)。锚点 = V_STALE ⇒
+    #: 低于它的 V_OLD 直接判老;V_NEW 有真时间,走时间判定。
+    monkeypatch.setattr(dps, "fetch_publish_times", lambda *a, **k: (
+        {V_STALE: datetime.now() - timedelta(hours=48), V_NEW: datetime.now()},
+        {V_STALE: int(V_STALE), V_NEW: int(V_NEW)}))
+
+    seen: list = []
+
+    class _F(_S):
+        douyin_peer_fresh_hours = 24
+        douyin_peer_fresh_allow_unknown = True    #: 宽松模式:老锚点也必须拦
+
+    monkeypatch.setattr(dps, "push_works", lambda ws, s, **k: seen.extend(ws) or True)
+    res = dps.run_for_user(session, 1, _F())
+    assert [w["aweme_id"] for w in seen] == [V_NEW], seen
+    assert res["stale"] == 1 and res["stale_anchor"] == 1, res
+    session.flush()
+    old_row = session.scalar(select(DouyinPeerWork).where(DouyinPeerWork.aweme_id == V_OLD))
+    assert old_row.pushed_at is not None, "锚点判老的也要打戳,不许每轮重捞"
+
+
+def test_anchor_does_not_use_protocol_window_min(session, monkeypatch) -> None:
+    """★ 锚点**不许**拿"协议窗口最小 vid"当墙(2026-11-12 修掉的误杀)。
+
+    日更 30+ 条的号,协议最新 30 条可能全在几小时内 —— 窗口最早那条**仍是新作**,
+    低于它的作品也可能仍在 24h 内。只有「已知 create_time 已过老」的 vid 才配当天花板。
+    """
+    from datetime import datetime
+
+    _acct(session, uid="u1", name="甲")
+    monkeypatch.setattr(dps, "push_works", lambda *a, **k: True)
+    monkeypatch.setattr(dps, "fetch_accounts", lambda *a, **k: {
+        "u1": [{"aweme_id": "7000000000000000001", "url": "u",
+                "title": "基线", "likes": 0, "niche": "小游戏", "account_uid": "u1",
+                "account_name": "甲", "author": "甲"}]})
+    dps.run_for_user(session, 1, _S())
+
+    V_MID, V_HI = "7000000000000000007", "7000000000000000009"
+    #: CDP 抓到一条 vid 比协议窗口**还低**、但没时间的作品(高频号的常见情形)。
+    monkeypatch.setattr(dps, "fetch_accounts", lambda *a, **k: {
+        "u1": [{"aweme_id": "7000000000000000006", "url": "u6", "title": "低位无时间",
+                "likes": 0, "niche": "小游戏", "account_uid": "u1",
+                "account_name": "甲", "author": "甲"}]})
+    #: 协议这两条**都新鲜** ⇒ 没有"已知过老"的 vid ⇒ 锚点为空,不许按窗口最小 vid 判老。
+    monkeypatch.setattr(dps, "fetch_publish_times", lambda *a, **k: (
+        {V_MID: datetime.now(), V_HI: datetime.now()},
+        {V_MID: int(V_MID), V_HI: int(V_HI)}))
+
+    seen: list = []
+
+    class _F(_S):
+        douyin_peer_fresh_hours = 24
+        douyin_peer_fresh_allow_unknown = True
+
+    monkeypatch.setattr(dps, "push_works", lambda ws, s, **k: seen.extend(ws) or True)
+    res = dps.run_for_user(session, 1, _F())
+    assert [w["aweme_id"] for w in seen] == ["7000000000000000006"], "窗口外的无时间作品不许被误杀"
+    assert res["stale"] == 0 and res["stale_anchor"] == 0, res

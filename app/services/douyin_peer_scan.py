@@ -686,8 +686,8 @@ def fetch_work_pan(works: list[dict], settings, *, user_id: int = 1,
 
 
 def fetch_publish_times(accounts: list[dict], settings, session, *, user_id: int = 1,
-                        count: int = 30) -> dict[str, datetime]:
-    """`{aweme_id: 发布时间}` —— **纯协议**拉每个号的作品列表,拿权威 `create_time`。
+                        count: int = 30) -> tuple[dict[str, datetime], dict[str, int]]:
+    """`({aweme_id: 发布时间}, {aweme_id: 雪花 vid})` —— **纯协议**拉每个号的作品列表。
 
     ## 为什么必须补这一步(2026-11-09 用户反映「好多都是老资源」)
 
@@ -701,12 +701,34 @@ def fetch_publish_times(accounts: list[dict], settings, session, *, user_id: int
     **库里 CDP 抓到的 12 条全部命中**(6 个号各 12/12),比开页快一个量级、
     也不占 CDP 浏览器。⚠️ 必须传 `session` —— 否则只有 `.env` 里的空 cookie。
 
+    ## ★ 2026-11-12:协议只看得见「最新 ~30 条」,但 CDP 每轮渲染 50~80 条 —— 怎么办
+
+    实测(土豆号当天):协议第一页 28 条(`has_more=1` 但 `max_cursor` 续翻也只
+    再给 2 条,**接口对老作品的可见深度就是 ~30**);CDP 同轮抓了 77 条,
+    与协议交集**只有 1** —— 即 97% 的 CDP 作品拿不到 `create_time`,
+    `allow_unknown=True` 把它们**全放行了**,「只推一天内」形同虚设。
+
+    **解法靠雪花 vid**:抖音的 `aweme_id` 是雪花 ID,**数值降序 == 发布时间降序**
+    (28 条带 `create_time` 的样本验证全单调)。于是:
+
+    - 有真 `create_time` 的直接用它判;
+    - **vid 低于「已知 create_time 已过老的那批里的最大 vid」⇒ 必更老**,无需时间
+      (当天实测:土豆号 77 条里 62 条被这一条规则收掉)。
+
+    ⚠️ **不能拿"协议窗口最小 vid"当墙**:日更 30 条以上的号,窗口最早那条可能只在
+    2 小时前,低于它的作品仍在新鲜期内 —— 那样会把 24h 内的真新作误判成老。
+    只认**已知已过老**的 vid 当天花板才既充分又安全;协议最新 30 条全在新鲜期内时
+    天花板为空,锚点自动失效(退回 `allow_unknown` 口径)。
+
+    返回的第二个 dict(`vids`)就是给调用方做这个比较用的。
+
     ⚠️ **拿不到 ≠ 老**:失败的号直接跳过,它们的作品留 `publish_at=None`,
     由调用方按 `douyin_peer_fresh_allow_unknown` 决定推不推(默认放行)。
     """
     from app.services import demand_watch
 
-    out: dict[str, datetime] = {}
+    times: dict[str, datetime] = {}
+    vids: dict[str, int] = {}
     for i, acct in enumerate(accounts or []):
         if i:
             time.sleep(_BETWEEN_ACCOUNTS_S)
@@ -722,8 +744,12 @@ def fetch_publish_times(accounts: list[dict], settings, session, *, user_id: int
         for it in res.get("items") or []:
             ts = int(it.get("publish_at") or 0)
             if ts > 0:
-                out[str(it["aweme_id"])] = datetime.fromtimestamp(ts)
-    return out
+                times[str(it["aweme_id"])] = datetime.fromtimestamp(ts)
+            try:
+                vids[str(it["aweme_id"])] = int(it["aweme_id"])
+            except (TypeError, ValueError):
+                pass
+    return times, vids
 
 
 def push_works(works: list[dict], settings, session=None, user_id: int = 0) -> bool:
@@ -849,7 +875,10 @@ def run_for_user(session, user_id: int, settings) -> dict:
     #: ★ **发布时间**(2026-11-09):主页卡片没有它,只能先写 `first_seen_at` ⇒ 老作品
     #: 首次被扫到就算"新"。这里用纯协议补一次权威时间,送给 `record_new`。
     #: ⚠️ 同样属于"慢活",必须在这里(写库之前)做完。
-    pub_times = fetch_publish_times(accts, settings, session, user_id=user_id)
+    #: ★ 2026-11-12:同时取**协议里带 create_time 的 vid 集合** —— 协议只看得见最新
+    #:   ~30 条,CDP 抓的 50~80 条大多没有时间;用「已知过老的 vid」当天花板
+    #:   (雪花 vid 单调),低于它的**必是更老的作品**,不再靠 `allow_unknown` 放行。
+    pub_times, proto_vids = fetch_publish_times(accts, settings, session, user_id=user_id)
 
     from app.db.models import DouyinPeerWork
 
@@ -930,30 +959,60 @@ def run_for_user(session, user_id: int, settings) -> dict:
     #: 判据是**权威发布时间** `publish_at`,不是 `first_seen_at` —— 后者是"我们第一次扫到",
     #: 老作品首次被扫到照样是"刚发现"。⚠️ 判不了时间的按 `douyin_peer_fresh_allow_unknown`
     #: 处理(默认**放行**):很多作品取不到 `create_time`,拿"不知道"当"老"会把整条板堵死。
+    #: ★★ **2026-11-12 补「雪花锚点」**:协议只看得见每个号**最新 ~30 条**,而 CDP
+    #: 每轮渲染 50~80 条(实测土豆号 77 条里协议交集只 1 条)⇒ 97% 的作品取不到
+    #: `create_time`,`allow_unknown` 把老作品全放行 —— 「一天内」形同虚设。
+    #: 雪花 `aweme_id` 单调(数值降序=发布降序,28 条样本全单调,**全站统一**):
+    #: **vid 低于「已知 create_time 已过老的最大 vid」⇒ 必更老 ⇒ 直接判老**。
+    #: 当天实测:77 条里 62 条被这条规则收掉、15 条用真时间判。
+    #: ⚠️ 锚点**只能是"已知过老"的天花板**,不能是"协议窗口最小 vid" —— 后者在
+    #: 日更 30+ 条的号上会落到 2 小时前,低于它的作品可能仍在 24h 内,会误杀真新作。
     #: ⚠️ 与 `no_pan` 一样,**不新鲜的要打戳记成"已处理"**,否则每轮重捞、永远补推。
     #: ⚠️ **两种"不推"分开报数**:超龄的(`stale`)与**取不到时间被严格模式拦掉的**
     #: (`stale_unknown`)。只报前者的话,严格模式下会出现「扫到 5 条、一条没推、
     #: 过老 0 条」—— 那正是本仓最恨的假成功。
     stale = 0
     stale_unknown = 0
+    stale_anchor = 0          #: 被雪花锚点判老的(2026-11-12)
+    fresh_unknown = 0         #: 无时间、锚点也判不了、被**放行**的(2026-11-12)
     fresh_hours = int(getattr(settings, "douyin_peer_fresh_hours", 24) or 0)
     if fresh_hours > 0 and todo:
         allow_unknown = bool(getattr(settings, "douyin_peer_fresh_allow_unknown", True))
         cutoff_dt = datetime.now() - timedelta(hours=fresh_hours)
+        #: 锚点 = 协议里**已知过老**的那批 vid 的最大值(雪花全站单调 ⇒ 低于它必更老)。
+        #: 协议一个号都没拿到 / 最新 30 条全在新鲜期内 ⇒ 为空,锚点失效,退回旧口径。
+        real_stale_vids = [vid for aid, vid in (proto_vids or {}).items()
+                           if isinstance(pub_times.get(aid), datetime)
+                           and pub_times[aid] < cutoff_dt]
+        anchor_vid = max(real_stale_vids) if real_stale_vids else None
 
-        def _stale(w: dict) -> bool:
+        def _stale(w: dict) -> str:
+            """返回 `fresh` / `stale`(有或推定的时间)/ `unknown`(真不知道)。"""
             pa = w.get("publish_at")
             if isinstance(pa, datetime):
-                return pa < cutoff_dt
-            return not allow_unknown        #: 不知道时间的,按开关决定
+                return "stale" if pa < cutoff_dt else "fresh"
+            if anchor_vid is not None:
+                try:
+                    if int(w["aweme_id"]) < anchor_vid:
+                        return "stale"          #: 雪花锚点:必早于已过老那条
+                except (KeyError, TypeError, ValueError):
+                    pass
+            return "fresh" if allow_unknown else "unknown"
 
-        dropped = [w for w in todo if _stale(w)]
-        stale = len(dropped)
-        stale_unknown = sum(1 for w in dropped
-                            if not isinstance(w.get("publish_at"), datetime))
+        verdicts = [_stale(w) for w in todo]
+        dropped = [w for w, v in zip(todo, verdicts) if v != "fresh"]
+        stale = len(dropped)          #: 全部被裁的(真时间 + 锚点推定),见上面报数口径
+        stale_unknown = sum(1 for v in verdicts if v == "unknown")
+        #: 有真时间的旧作 + 锚点判老的都算"确定老";`unknown` 是严格模式拦下的。
+        stale_anchor = sum(1 for w, v in zip(todo, verdicts)
+                           if v == "stale" and not isinstance(w.get("publish_at"), datetime))
+        #: ★ 宽松模式下**无时间又被放行**的必须显形(2026-11-12):本次 bug 的另一半
+        #: 就是它 —— 97% 的作品走这条路静默进推送,「只推一天内」看着正常其实失效。
+        fresh_unknown = sum(1 for w, v in zip(todo, verdicts)
+                            if v == "fresh" and not isinstance(w.get("publish_at"), datetime))
         if dropped:
             mark_pushed(session, user_id, dropped)   #: 打戳 = 处理过,不再每轮重试
-        todo = [w for w in todo if not _stale(w)]
+        todo = [w for w, v in zip(todo, verdicts) if v == "fresh"]
     #: ★ **不带网盘的不推**(用户口径「**如果不是推广网盘的就不要推了**」,2026-11-05)。
     #: ⚠️ 但**必须记成"已处理"**,否则它们会一直挂在 `pushed_at IS NULL` 里、每轮重试 ——
     #: 那不是"等一下再推",而是"永远等不到还被反复捞"。
@@ -998,6 +1057,12 @@ def run_for_user(session, user_id: int, settings) -> dict:
             "stale": stale,
             #: 严格模式下**取不到发布时间**被拦的条数(与超龄分开,见闸门那段注释)。
             "stale_unknown": stale_unknown,
+            #: ★ 雪花锚点判老的条数(2026-11-12):没拿到 `create_time`、但 vid 低于
+            #: 「已知过老的 vid」⇒ 必是老作品。显形是为了看锚点真的在干活(不是又一处静默)。
+            "stale_anchor": stale_anchor,
+            #: ★ 无时间又被**放行**的条数(2026-11-12):宽松模式下的"不知道就推"。
+            #: 这个数长期很大 = 新鲜度闸门形同虚设(本次 bug 的原始症状:1203/1209)。
+            "fresh_unknown": fresh_unknown,
             "no_pan": no_pan,
             #: 没读到描述、留到下轮的条数(要显形,否则"扫到 12 条一条没推"看不出原因)。
             "deferred": len(deferred),
@@ -1052,7 +1117,16 @@ def douyin_peer_tick(settings=None) -> int:
                     #: 「扫12 推1」到底是"过老"还是"没盘"完全分不出来。
                     extra = (f",含取不到时间{res['stale_unknown']}条"
                              if res.get("stale_unknown") else "")
+                    #: 雪花锚点判老的那部分也单独说(2026-11-12):它没有真时间,
+                    #: 是靠「vid 低于已过老那条 ⇒ 必更早」判的 —— 拆开才看得出锚点在干活。
+                    extra += (f",锚点判老{res['stale_anchor']}条"
+                              if res.get("stale_anchor") else "")
                     note += f" 过老{res['stale']}条(未推{extra})"
+                if res.get("fresh_unknown"):
+                    #: ★ 反方向也要显形(2026-11-12):**没有时间却被放行**的条数。
+                    #: 它长期等于"扫到的条数"就说明闸门已失效(锚点没生效 / 协议没取到时间),
+                    #: 而表面上「只推一天内」还一切正常 —— 本仓最恨的那种假成功。
+                    note += f" 无时间放行{res['fresh_unknown']}条"
                 if res.get("deferred"):
                     #: **没读到描述**的留到下轮再读 —— 与"读了、确认没有"必须分开说,
                     #: 否则这条会被读成"永久丢弃"(2026-11-05 准入收紧后新增的口径)。
