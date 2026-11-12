@@ -168,6 +168,14 @@ def _probe_ratio(db: Session, platform: str, ref) -> float | None:
             from app.services.baidupan_transfer import BaiduPanClient
 
             return BaiduPanClient(ck).quota_ratio()
+        if platform == "quark":
+            #: ★ 2026-11-11 补:此前**没有这一支**,夸克两个号的 `last_ratio` 永远是 `None`
+            #: ⇒ `pan_accounts.ordered()` 的 `usable_hint` 都退化成 0.0 ⇒ 按 label 排序
+            #: ⇒ **超容 123% 的 1 号永远排第一,空着的 2 号永远轮不到**。
+            #: 实测代价:近 7 天 67 条「夸克网盘容量不足」转存失败,积压从 235 涨到 269。
+            from app.services.quark_transfer import QuarkTransfer
+
+            return QuarkTransfer(ck).quota_ratio()
         if platform == "xunlei":
             from app.services import xunlei_transfer as xt
 

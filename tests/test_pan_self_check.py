@@ -197,3 +197,46 @@ class TestQuotaPool:
         ]})
         out = psc._check_quota(None, 1)
         assert out["level"] == "warn" and "所有号" in out["detail"]
+
+
+class TestProbeRatio:
+    """★ 2026-11-11:夸克那一支**此前根本不存在**。
+
+    后果实测:池里两个号的 `last_ratio` 恒为 `None` ⇒ `pan_accounts.ordered()` 的
+    `usable_hint` 都退化成 0.0 ⇒ 按 label 排序 ⇒ **超容 123% 的 1 号永远排第一**,
+    空着的 2 号永远轮不到(近 7 天 67 条「夸克容量不足」,积压 235→269)。
+    """
+
+    def test_夸克要能探到比例(self, monkeypatch) -> None:
+        from app.services import pan_accounts, quark_transfer
+
+        class _Q:
+            def __init__(self, ck, **kw) -> None:
+                assert ck == "QK"
+
+            def quota_ratio(self):
+                return 1.2327
+
+        monkeypatch.setattr(quark_transfer, "QuarkTransfer", _Q)
+        monkeypatch.setattr(pan_accounts, "cookie_of", lambda ref, db: "QK")
+        ref = pan_accounts.AccountRef("夸克1", "quark", "quark")
+        assert psc._probe_ratio(None, "quark", ref) == 1.2327
+
+    def test_探不到时返回None而不是判满(self, monkeypatch) -> None:
+        from app.services import pan_accounts, quark_transfer
+
+        class _Q:
+            def __init__(self, ck, **kw) -> None: ...
+            def quota_ratio(self):
+                raise RuntimeError("network")
+
+        monkeypatch.setattr(quark_transfer, "QuarkTransfer", _Q)
+        monkeypatch.setattr(pan_accounts, "cookie_of", lambda ref, db: "QK")
+        ref = pan_accounts.AccountRef("夸克1", "quark", "quark")
+        assert psc._probe_ratio(None, "quark", ref) is None
+
+    def test_默认号不补探(self, monkeypatch) -> None:
+        """没配池时那个隐式默认号探到了也没地方存 —— 白打一次接口。"""
+        from app.services import pan_accounts
+        assert psc._probe_ratio(
+            None, "quark", pan_accounts.default_ref("quark")) is None

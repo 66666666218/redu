@@ -284,3 +284,48 @@ class TestTransferFileDedup:
         qt = self._qt(monkeypatch, [{"fid": "oldFID", "file_name": "资源.mp4"}], save_calls)
         qt.transfer_and_share("https://pan.quark.cn/s/abc123", save_dir="/x")
         assert save_calls == [["sf1"]]
+
+
+class TestQuotaUsage:
+    """盘容量探针(2026-11-11)。数字来自当日实测:1 号 `106.01/86.00 TiB = 1.233`。
+
+    ⚠️ `ratio` **可能远大于 1** —— 判"满"用 `used >= total` 或 `ratio >= 阈值`,
+    别拿百分比直觉读。
+    """
+
+    def _patch(self, monkeypatch, payload):
+        qt = QuarkTransfer("cookie=test")
+        resp = payload if isinstance(payload, Exception) else payload
+
+        def fake_request(method, path, api="", params=None, json=None, timeout=30.0):
+            assert path == "/1/clouddrive/member"
+            if isinstance(resp, Exception):
+                raise resp
+            return resp
+
+        monkeypatch.setattr(qt, "_request", fake_request)
+        return qt
+
+    def test_正常读出比例(self, monkeypatch):
+        qt = self._patch(monkeypatch, {"data": {
+            "use_capacity": 116_562_708_307_090,
+            "total_capacity": 94_558_125_817_856}})
+        u = qt.quota_usage()
+        assert u["used"] == 116_562_708_307_090
+        assert u["total"] == 94_558_125_817_856
+        assert 1.23 < u["ratio"] < 1.24
+        assert qt.quota_ratio() == u["ratio"]
+
+    def test_字段缺失返回None(self, monkeypatch):
+        assert self._patch(monkeypatch, {"data": {"use_capacity": 1}}).quota_usage() is None
+        assert self._patch(monkeypatch, {"data": {}}).quota_usage() is None
+        assert self._patch(monkeypatch, {}).quota_usage() is None
+
+    def test_配额为0返回None而不是除零(self, monkeypatch):
+        qt = self._patch(monkeypatch, {"data": {"use_capacity": 100, "total_capacity": 0}})
+        assert qt.quota_usage() is None and qt.quota_ratio() is None
+
+    def test_接口异常返回None而不是抛(self, monkeypatch):
+        """探针失败只说"不知道" —— 探不到 ≠ 盘满(与百度/迅雷同一取舍)。"""
+        qt = self._patch(monkeypatch, RuntimeError("boom"))
+        assert qt.quota_usage() is None

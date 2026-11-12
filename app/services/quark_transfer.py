@@ -539,6 +539,44 @@ class QuarkTransfer:
                               "_sort": "file_name:asc"})
         return True
 
+    def quota_usage(self) -> dict | None:
+        """盘容量原始数字 `{used, total, ratio}`;拿不到返回 `None`。
+
+        ⚠️ `ratio` **可能远大于 1**(2026-11-11 实测:夸克 1 号盘
+        `used=116_562_708_307_090`(106.01 TiB)/ `total=94_558_125_817_856`(86.00 TiB)
+        ⇒ `ratio≈1.233`,即**超容 23%**)。判"满"用 `used >= total`,别拿百分比直觉读。
+
+        **为什么需要它**:转存失败文案「夸克网盘容量不足」只出现在**撞上去之后**,
+        而 `pan_discovery` 每轮要逐条撞 —— 有探测就能在开撞前换号。
+        `pan_accounts.ordered()` 也靠 `last_ratio` 决定先试谁,这个字段此前
+        **从来没被写过**(`pan_self_check._probe_ratio` 只有 baidu/xunlei 两个分支)
+        ⇒ 池里两个号的 `usable_hint` 都是 0.0,退化成按 label 排序,
+        **超容的 1 号永远排第一、空着的 2 号永远轮不到**。
+
+        失败返回 `None` —— 探不到 ≠ 满了(与百度/迅雷两条探针同一取舍)。
+        """
+        try:
+            d = self._request("GET", "/1/clouddrive/member", api=QUARK_SHARE_API)
+        except Exception:  # noqa: BLE001 - 探针失败只说"不知道"
+            logger.debug("夸克配额查询失败", exc_info=True)
+            return None
+        data = d.get("data") if isinstance(d, dict) else None
+        if not isinstance(data, dict):
+            return None
+        try:
+            used = int(data.get("use_capacity") or 0)
+            total = int(data.get("total_capacity") or 0)
+        except (TypeError, ValueError):
+            return None
+        if total <= 0:
+            return None
+        return {"used": used, "total": total, "ratio": used / total}
+
+    def quota_ratio(self) -> float | None:
+        """盘使用率 `used/total`;**拿不到返回 `None`**。可能 **> 1**(超额)。"""
+        u = self.quota_usage()
+        return u["ratio"] if u else None
+
     def _save_share_files(self, files: list[dict], share_id: str, stoken: str,
                           target_fid: str, save_dir: str = "") -> tuple[list[str], list[str]]:
         """把分享内这些条目**存进 `target_fid`** → `(新存的 fid, 复用的 fid)`。

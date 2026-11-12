@@ -446,6 +446,12 @@ def transfer_pan_url(session, user_id: int, pan_url: str, settings=None,
 _BAIDU_QUOTA_TTL = 60.0
 _baidu_quota_cache: dict[str, dict] = {}
 
+#: 夸克配额缓存(2026-11-11)。比百度长得多 —— 夸克这边**每条链**都要先判一次满不满,
+#: 不缓存等于每条候选多打两个请求;而 5 分钟内的变化(盘从 99% 到 100%)由
+#: 转存失败的第二层兜底(`容量不足` ⇒ 换号)接住。
+_QUARK_QUOTA_TTL = 300.0
+_quark_quota_cache: dict[str, dict] = {}
+
 
 def _size_text(n: int | float | None) -> str:
     """字节数 → 人能读的两档单位(只用于告警文案,不需要精确)。"""
@@ -458,6 +464,28 @@ def _size_text(n: int | float | None) -> str:
             return f"{v:.0f} {unit}" if unit == "B" else f"{v:.2f} {unit}"
         v /= 1024
     return f"{v:.2f} TB"
+
+
+def _fid_store_for(settings, ref, platform: str = "quark") -> str | None:
+    """**按账号分文件**的目录 fid 缓存路径(`quark_fid_store` 的每账号副本)。
+
+    ⚠️⚠️ **不能两个号共用一份**(2026-11-11 加多账号轮换时发现):fid 是**账号内**的标识,
+    A 号的 `/redian监听` fid 拿到 B 号去用必然报错 ⇒ `_ensure_dir` 会 `invalidate_dir()`,
+    而那个动作会往**共享的** fid_store 里写**墓碑**(`_dropped`),把 A 号正确的映射一起删掉。
+    结果是两边互相作废、每轮都新建 `_MMDD` 目录 —— 正是"同一资源重复占空间"的根因。
+
+    默认号(`cookie_key == 平台名`)沿用原路径,所以**单账号部署的行为逐字不变**。
+    """
+    base = str(getattr(settings, "quark_fid_store", "") or "")
+    if not base:
+        return None
+    key = str(getattr(ref, "cookie_key", "") or "")
+    if not key or key == platform:
+        return base
+    import os
+
+    stem, ext = os.path.splitext(base)
+    return f"{stem}.{key.replace('#', '_')}{ext}"
 
 
 def _baidu_quota(cookie: str) -> dict | None:
@@ -485,6 +513,149 @@ def _baidu_quota(cookie: str) -> dict | None:
     return usage
 
 
+def _quark_quota(cookie: str) -> dict | None:
+    """这份 Cookie 对应夸克账号的 `{used,total,ratio}`(5 分钟内复用);拿不到回 `None`。
+
+    ⚠️ 与 `_baidu_quota` 同一取舍:**探不到 ≠ 盘满了** ⇒ 返回 `None`,调用方照旧去试。
+    """
+    import hashlib
+    import time as _t
+
+    key = hashlib.sha256((cookie or "").encode()).hexdigest()[:16]
+    hit = _quark_quota_cache.get(key)
+    now = _t.time()
+    if hit and now - float(hit.get("at") or 0) < _QUARK_QUOTA_TTL:
+        return hit.get("usage")
+    from app.services.quark_transfer import QuarkTransfer
+
+    try:
+        usage = QuarkTransfer(cookie).quota_usage()
+    except Exception:  # noqa: BLE001 - 探针失败只说"不知道",照旧去试那一条
+        logger.debug("夸克配额探针失败", exc_info=True)
+        usage = None
+    _quark_quota_cache[key] = {"at": now, "usage": usage}
+    return usage
+
+
+def _transfer_quark(session, user_id: int, pan_url: str, settings=None) -> dict:
+    """夸克转存:**按池择一,满了换下一个**(2026-11-11)。
+
+    ## 为什么要有这一段
+
+    实测两个号:
+
+    | 号 | 等级 | 已用 / 配额 | 比例 |
+    |---|---|---|---|
+    | `quark`(1 号) | SUPER_VIP | 106.01 / 86.00 TiB | **123%** |
+    | `quark#2`(2 号) | NORMAL | 0.00 / 21.01 TiB | **0.02%** |
+
+    但 `pan_discovery` 一直用的是 `cookie_for()` —— **只取第一个,不轮换**
+    ⇒ 每条链都撞 1 号 ⇒ 近 7 天 **67 条**「夸克网盘容量不足」失败,积压 235 → 269。
+    ⇒ 与迅雷群侧(`xunlei_group.py` 的择一循环)对齐:**先判满,满了换号,全满才停**。
+
+    ## 单账号行为不变
+
+    池里没配 ⇒ `cookies_for()` 只返回默认 key 那一枚 ⇒ 循环跑一次,与旧代码逐字等价
+    (包括 `.env` 的 `quark_cookie` 兜底 与 缺凭据返回 `pending` 的措辞)。
+
+    ## 两层判满
+
+    1. **开撞前**:`_quark_quota()` 探一次(5 分钟缓存),`used >= total` 就换号 ——
+       不消耗一次转存请求;
+    2. **撞上后**:`transfer_and_share` 抛「容量不足」时也换号继续试(探针可能滞后)。
+       这正是"空着的 2 号永远轮不到"的兜底。
+    """
+    from app.services import pan_accounts as _A
+    from app.services.quark_transfer import QuarkAuthError, QuarkError, QuarkTransfer
+
+    quota_limit = float(getattr(settings, "quark_quota_limit", 0.98) or 0.98)
+    pool = _A.cookies_for(session, "quark", user_id=user_id)
+    #: ⚠️ `cookies_for()` 返回的是 `(label, cookie)`,而 `report()` 要的是 `AccountRef`
+    #: ⇒ 按 label 反查(池里 label 唯一;不是 `cookie_key` —— 那个是 `quark`/`quark#2`)。
+    by_label = {}
+    for r in _A.accounts(session, "quark", user_id=user_id):
+        by_label.setdefault(r.label or r.cookie_key, r)
+    if not pool:
+        #: `.env` 兜底:池里一个凭据都取不到时,旧实现读的那一枚。
+        ck = str(getattr(settings, "quark_cookie", "") or "").strip()
+        if not ck:
+            # ⚠️ **可重试**:配上 Cookie 就能搬 —— 标 pending 而不是终态,
+            # 否则"发现过一次"就把这条资源永久钉死(2026-10-02 实测踩过)
+            return {"status": "pending", "message": "未配夸克 Cookie(配上后会自动重试)",
+                    "our_url": "", "code": ""}
+        pool = [("quark(.env)", ck)]
+
+    tried: list[str] = []
+    full: list[str] = []
+    auth_err: str = ""
+    save_dir = getattr(settings, "quark_save_dir", "") or "/来自发现"
+    password = getattr(settings, "quark_share_password", "") or ""
+    intro_dir = getattr(settings, "pan_intro_quark_dir", "") or ""
+    fid_base = getattr(settings, "quark_fid_store", "") or None
+
+    for label, ck in pool:
+        ref = by_label.get(label)
+        usage = _quark_quota(ck)
+        #: ⚠️ 判满用 `ratio >= limit`,**不用 `used >= total`** —— 转存是先落文件再判,
+        #: 98% 的盘常常正好装不下一个几 GiB 的包(实测失败文案就是 capacity limit)。
+        if usage and float(usage["ratio"]) >= quota_limit:
+            full.append(f"{label} 已用 {usage['ratio'] * 100:.1f}%")
+            if ref is not None:
+                try:
+                    _A.report(session, ref, ratio=float(usage["ratio"]), full=True,
+                              why=f"已用 {usage['ratio'] * 100:.0f}%")
+                except Exception:  # noqa: BLE001 - 写不回池只影响下次择号
+                    logger.debug("夸克配额写回池失败", exc_info=True)
+            continue
+        if usage and ref is not None:
+            try:
+                _A.report(session, ref, ratio=float(usage["ratio"]), full=False)
+            except Exception:  # noqa: BLE001
+                logger.debug("夸克配额写回池失败", exc_info=True)
+        #: ★ **fid 是账号内标识**:共享一个 fid_store 会让 A 号的「目录不存在」墓碑
+        #: 把 B 号的正确映射一起删掉(`invalidate_dir`),两边互相作废、每轮新建 `_MMDD` 目录。
+        #: ⇒ 非默认号用**自己的**缓存文件。
+        store = _fid_store_for(settings, ref, "quark") if ref is not None else fid_base
+        quark = QuarkTransfer(ck, fid_store=store)
+        try:
+            res = quark.transfer_and_share(
+                pan_url, save_dir=save_dir, password=password, intro_dir=intro_dir)
+        except QuarkAuthError as exc:
+            #: 登录态失效是**账号级**的:换下一个号试,全都不行由调用方判 pending + 告警。
+            auth_err = str(exc)[:200]
+            tried.append(f"{label} 登录态失效")
+            continue
+        except QuarkError as exc:
+            if "容量不足" in str(exc):
+                #: 探针滞后(5 分钟缓存)或这一包本身太大废掉了余量 ⇒ 第二层兜底。
+                full.append(f"{label}: {str(exc)[:60]}")
+                if ref is not None:
+                    try:
+                        _A.report(session, ref, full=True, why=str(exc)[:60])
+                    except Exception:  # noqa: BLE001
+                        logger.debug("夸克配额写回池失败", exc_info=True)
+                continue
+            raise
+        if res.get("share_url"):
+            return {"status": "ok", "our_url": str(res.get("share_url")),
+                    "code": str(res.get("password") or ""), "message": ""}   # ⚠️ 夸克返回的键是 password
+        return _fail("转存未返回我方链")
+
+    if auth_err and not full:
+        #: 池里每个号都是登录态失效 ⇒ 交给调用方统一判 pending + 推管理员群。
+        raise QuarkAuthError(auth_err)
+    if full:
+        #: 记 `pending`(不是终态):清了盘/加了号就会自动重试。
+        #: ⚠️ `code` 留空 —— 它会原样写进 `pass_code` 那一列(见百度那段同样的注释)。
+        return {"status": "pending", "our_url": "", "code": "",
+                "message": ("夸克盘空间不足(" + ";".join(full) + ")"
+                            "—— 本轮**未尝试**转存;清理或加号后会自动重试")}
+    if tried:
+        return {"status": "pending", "our_url": "", "code": "",
+                "message": "夸克账号全部不可用(" + ";".join(tried) + ")"}
+    return _fail("夸克池里没有可用账号")
+
+
 def _transfer_pan_url_raw(session, user_id: int, pan_url: str, settings=None,
                           snippet: str = "") -> dict:
     """**按链分发转存**:夸克走 `QuarkTransfer`、百度走 `BaiduPanClient`、迅雷走 `xunlei_transfer`。
@@ -499,27 +670,7 @@ def _transfer_pan_url_raw(session, user_id: int, pan_url: str, settings=None,
                 "our_url": "", "code": ""}
     try:
         if kind == "quark":
-            from app.services.quark_transfer import QuarkTransfer
-
-            from app.services import pan_accounts as _A
-
-            ck = (_A.cookie_for(session, "quark", user_id=user_id)   # ★ 按池取号(没配池=默认 key)
-                  or getattr(settings, "quark_cookie", "") or "").strip()   # .env 兜底
-            if not ck:
-                # ⚠️ **可重试**:配上 Cookie 就能搬 —— 标 pending 而不是终态,
-                # 否则"发现过一次"就把这条资源永久钉死(2026-10-02 实测踩过)
-                return {"status": "pending", "message": "未配夸克 Cookie(配上后会自动重试)",
-                        "our_url": "", "code": ""}
-            quark = QuarkTransfer(ck, fid_store=getattr(settings, "quark_fid_store", "") or None)
-            res = quark.transfer_and_share(
-                pan_url,
-                save_dir=getattr(settings, "quark_save_dir", "") or "/来自发现",
-                password=getattr(settings, "quark_share_password", "") or "",
-                intro_dir=getattr(settings, "pan_intro_quark_dir", "") or "")
-            if res.get("share_url"):
-                return {"status": "ok", "our_url": str(res.get("share_url")),
-                        "code": str(res.get("password") or ""), "message": ""}   # ⚠️ 夸克返回的键是 password
-            return _fail("转存未返回我方链")
+            return _transfer_quark(session, user_id, pan_url, settings)
 
         if kind == "baidu":
             from app.services.baidupan_transfer import BaiduPanClient, extract_pwd

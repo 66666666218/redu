@@ -1191,3 +1191,140 @@ def test_换个写法的同一个资源也不许再搬(session) -> None:
     assert pd.already_have(session, 1, "《伪装Z男》更22集无删减") is not None, "个别字不同没认出来"
     assert pd.already_have(session, 1, "《偽裝直男》更23集") is not None, "繁体没认出来"
     assert pd.already_have(session, 1, "穿成短命炮灰") is None, "把不相干的并进来了"
+
+
+class TestQuarkPoolFallback:
+    """★ 2026-11-11:夸克转存**按池择一,满了换下一个**。
+
+    事故形状:池里两个号,1 号超容 123%、2 号空着 0.02%,而 `pan_discovery` 用的是
+    `cookie_for()`(**只取第一个,不轮换**)⇒ 每条链都撞 1 号 ⇒ 近 7 天 67 条
+    「夸克网盘容量不足」,积压 235→269。
+    """
+
+    REFS = [("夸克1", "quark", "CK1"), ("夸克2", "quark#2", "CK2")]
+
+    def _pool(self, monkeypatch, ratios: dict[str, float | None], cookie_by_label=None):
+        """把池钉成两个号;`ratios` 用 **label** 索引(和 `cookies_for` 的返回值对齐)。"""
+        from app.services import pan_accounts as pa
+
+        cookie_by_label = cookie_by_label or {"夸克1": "CK1", "夸克2": "CK2"}
+        refs = [pa.AccountRef(lb, "quark", key) for lb, key, _ in self.REFS]
+        monkeypatch.setattr(pa, "accounts", lambda *a, **k: refs)
+        monkeypatch.setattr(pa, "cookies_for", lambda *a, **k: [
+            (lb, cookie_by_label[lb]) for lb, _, _ in self.REFS if cookie_by_label.get(lb)])
+        reported = []
+        monkeypatch.setattr(pa, "report",
+                            lambda s, r, **kw: reported.append((r.label, kw)))
+        monkeypatch.setattr(pd, "_quark_quota", lambda ck: (
+            None if ratios.get(ck) is None else
+            {"used": int(ratios[ck] * 100), "total": 100, "ratio": ratios[ck]}))
+        return reported
+
+    def _qt(self, monkeypatch, seen: list, fail: dict | None = None,
+            inits: list | None = None):
+        """替身:`seen` 记**转存**用的 cookie;`inits` 记 `(ck, fid_store)` 构造参数。"""
+        from app.services import quark_transfer as qt
+
+        class _Q:
+            def __init__(self, ck, fid_store=None) -> None:
+                self.ck = ck
+                self.fid_store = fid_store
+                if inits is not None:
+                    inits.append((ck, fid_store))
+
+            def transfer_and_share(self, url, **kw):
+                seen.append(self.ck)
+                if fail:
+                    raise fail[0](fail[1])
+                return {"share_url": "https://pan.quark.cn/s/OUR", "password": "1a2b"}
+
+        monkeypatch.setattr(qt, "QuarkTransfer", _Q)
+
+    def test_一号满自动换二号(self, session, monkeypatch) -> None:
+        reported = self._pool(monkeypatch, {"CK1": 1.2327, "CK2": 0.0002})
+        seen: list = []
+        self._qt(monkeypatch, seen)
+        out = pd.transfer_pan_url(session, 1, "https://pan.quark.cn/s/xyz", _S())
+        assert out["status"] == "ok"
+        #: 1 号连构造都不该构造(开撞前就判满了,省一次请求)
+        assert seen == ["CK2"], seen
+        assert any(lb == "夸克1" and kw.get("full") is True for lb, kw in reported), reported
+
+    def test_两个都满返回pending且一次都不转存(self, session, monkeypatch) -> None:
+        self._pool(monkeypatch, {"CK1": 1.2327, "CK2": 0.99})
+        seen: list = []
+        self._qt(monkeypatch, seen)
+        out = pd.transfer_pan_url(session, 1, "https://pan.quark.cn/s/xyz", _S())
+        assert out["status"] == "pending" and "空间不足" in out["message"]
+        assert seen == [], seen
+        #: ⚠️ `code` 必须留空 —— 它会原样写进 `pass_code` 那一列
+        assert out["code"] == ""
+        assert "夸克1" in out["message"] and "夸克2" in out["message"]
+
+    def test_探针拿不到照旧去试(self, session, monkeypatch) -> None:
+        """探不到 ≠ 盘满:与百度那条同一取舍,不能因为探针挂了就不搬。"""
+        self._pool(monkeypatch, {"CK1": None, "CK2": None})
+        seen: list = []
+        self._qt(monkeypatch, seen)
+        out = pd.transfer_pan_url(session, 1, "https://pan.quark.cn/s/xyz", _S())
+        assert out["status"] == "ok"
+        assert seen == ["CK1"], seen
+
+    def test_撞上容量不足也换号(self, session, monkeypatch) -> None:
+        """探针有 5 分钟缓存 ⇒ 第二层兜底:抛「容量不足」时换下一个号继续试。"""
+        from app.services.quark_transfer import QuarkError
+
+        self._pool(monkeypatch, {"CK1": 0.5, "CK2": 0.0002})
+        seen: list = []
+        calls = {"n": 0}
+
+        from app.services import quark_transfer as qt
+
+        class _Q:
+            def __init__(self, ck, fid_store=None) -> None:
+                self.ck = ck
+
+            def transfer_and_share(self, url, **kw):
+                seen.append(self.ck)
+                if self.ck == "CK1":
+                    raise QuarkError("夸克网盘容量不足,请清理空间或更换账号")
+                return {"share_url": "https://pan.quark.cn/s/OUR", "password": "1a2b"}
+
+        monkeypatch.setattr(qt, "QuarkTransfer", _Q)
+        out = pd.transfer_pan_url(session, 1, "https://pan.quark.cn/s/xyz", _S())
+        assert out["status"] == "ok" and seen == ["CK1", "CK2"]
+
+    def test_非默认号用独立的fid缓存(self, session, monkeypatch) -> None:
+        """fid 是账号内标识:共用一份缓存会让两号的目录映射互相作废。"""
+        self._pool(monkeypatch, {"CK1": 1.5, "CK2": 0.0002})
+        seen: list = []
+        inits: list = []
+        self._qt(monkeypatch, seen, inits=inits)
+
+        class _S2(_S):
+            quark_fid_store = "data/quark_fid_cache.json"
+
+        pd.transfer_pan_url(session, 1, "https://pan.quark.cn/s/xyz", _S2())
+        stores = dict(inits)
+        assert stores["CK2"] == "data/quark_fid_cache.quark_2.json", stores
+
+    def test_两个号登录态都失效才抛给上层(self, session, monkeypatch) -> None:
+        """单个号失效 ⇒ 换下一个;全失效 ⇒ 由调用方判 pending + 推管理员群。"""
+        from app.services.quark_transfer import QuarkAuthError
+
+        self._pool(monkeypatch, {"CK1": 0.1, "CK2": 0.1})
+        from app.services import quark_transfer as qt
+
+        class _Q:
+            def __init__(self, ck, fid_store=None) -> None:
+                self.ck = ck
+
+            def transfer_and_share(self, url, **kw):
+                raise QuarkAuthError(f"{self.ck} 已失效")
+
+        monkeypatch.setattr(qt, "QuarkTransfer", _Q)
+        alerts: list = []
+        monkeypatch.setattr("app.services.alert_service.notify_incident",
+                            lambda *a, **k: alerts.append(a[3]) or True)
+        out = pd.transfer_pan_url(session, 1, "https://pan.quark.cn/s/xyz", _S())
+        assert out["status"] == "pending" and alerts and "夸克" in alerts[0]
