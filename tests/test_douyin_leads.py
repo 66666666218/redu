@@ -2464,3 +2464,124 @@ class TestProbeWordsToSearch:
         object.__setattr__(s0, "douyin_leads_probe_words", 0)
         dl.run_douyin_leads(session, 1, s0, category="影视", advance=False)
         assert called and (called[0] or []) == [], called
+
+
+class TestDemandNamesToSearch:
+    """★ **「评论区在求的名字」回灌搜索**(2026-11-13)。
+
+    起因:`demand_names` 推过的名字**从没进过 `douyin_leads` 词表** ——
+    近 7 天 10 个名字(`水子哥`/`林予曦`/`蕉妹`…)0 个搜过,转化仅 1/10。
+    而库里搬成功的名字全来自搜索词(推广号标题写《口令》,只有搜索能命中)。
+    """
+
+    def _seed(self, session, name, demand=0, mention=10, days_ago=0, fed=None):
+        from datetime import datetime, timedelta
+
+        from app.db.models import DemandName
+
+        session.add(DemandName(
+            user_id=1, platform="douyin", name=name, demand_hits=demand,
+            mention_hits=mention, video_hits=2,
+            last_seen_at=datetime.now() - timedelta(days=days_ago),
+            fed_search_at=fed))
+        session.commit()
+
+    def test_取没喂过的_按被求次数降序(self, session) -> None:
+        from app.services import demand_watch as dw
+
+        self._seed(session, "低分名字", demand=2, mention=2)
+        self._seed(session, "高分名字", demand=9, mention=1)
+        self._seed(session, "已喂过的", demand=20, mention=20, fed=__import__("datetime").datetime.now())
+        got = dw.unfed_demand_names(session, 1, top=2)
+        assert got == ["高分名字", "低分名字"], got
+
+    def test_三道闸各挡一类(self, session) -> None:
+        """时间闸 / 名字闸 / 门槛闸 —— 必须分别验,别混成一条。"""
+        from app.services import demand_watch as dw
+
+        self._seed(session, "凉掉的事件", demand=9, days_ago=30)      #: 时间闸
+        self._seed(session, "求一个", demand=9)                       #: 名字闸(`is_name_like`)
+        #: 门槛闸:真实库里 `第二部` 就是 demand=0/mention=3 —— `is_name_like` 放行它,
+        #: 挡住它的是「与 pick_pushable 同一组门槛」,这样测的才是那道闸。
+        self._seed(session, "第二部", demand=0, mention=3)
+        self._seed(session, "水子哥", demand=0, mention=17)
+        got = dw.unfed_demand_names(session, 1, top=5)
+        assert got == ["水子哥"], got
+
+    def test_打戳幂等且只动喂过的(self, session) -> None:
+        from app.services import demand_watch as dw
+
+        self._seed(session, "甲名字", demand=5)
+        self._seed(session, "乙名字", demand=4)
+        assert dw.mark_demand_names_fed(session, 1, ["甲名字"]) == 1
+        session.flush()
+        assert dw.unfed_demand_names(session, 1, top=5) == ["乙名字"]
+        assert dw.mark_demand_names_fed(session, 1, ["甲名字"]) == 1   #: 重复打戳不报错
+        assert dw.mark_demand_names_fed(session, 1, []) == 0
+
+    def test_只有大瓜轮才回灌(self, session, monkeypatch) -> None:
+        """这些是事件/人物名,放到影视/资料轮是跑题 —— 大瓜轮才没有库内目录、最缺坐标。"""
+        from app.services import douyin_leads as dl
+
+        self._seed(session, "水子哥", mention=17)
+        called = []
+        monkeypatch.setattr(dl, "hot_seed_words", lambda *a, **k: [])
+        monkeypatch.setattr(dl, "search_keywords",
+                            lambda db, uid, top, settings, hot=None: called.append(list(hot or [])) or [])
+        monkeypatch.setattr(dl, "collect_leads", lambda *a, **k: ([], "CDP"))
+        monkeypatch.setattr(dl, "push_leads", lambda *a, **k: None)
+
+        dl.run_douyin_leads(session, 1, _settings_like(), category="影视", advance=False)
+        assert "水子哥" not in called[0], called
+
+        called.clear()
+        dl.run_douyin_leads(session, 1, _settings_like(), category="大瓜", advance=False)
+        assert "水子哥" in called[0], called
+
+    def test_搜索完成才打戳_名字没被白丢(self, session, monkeypatch) -> None:
+        from app.db.models import DemandName
+        from app.services import douyin_leads as dl
+
+        self._seed(session, "没被消耗的名字", demand=5)
+        monkeypatch.setattr(dl, "hot_seed_words", lambda *a, **k: [])
+        monkeypatch.setattr(dl, "collect_leads",
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+        monkeypatch.setattr(dl, "push_leads", lambda *a, **k: None)
+        try:
+            dl.run_douyin_leads(session, 1, _settings_like(), category="大瓜", advance=False)
+        except Exception:
+            pass
+        row = session.query(DemandName).filter_by(name="没被消耗的名字").one()
+        assert row.fed_search_at is None, "搜索挂了就打戳 = 这个名字再也不会被搜"
+
+
+class TestKeywordListFitsCdpCap:
+    """★★ **词表总长必须 ≤ CDP 上限**(2026-11-13 修的两个静默丢词)。
+
+    ① 夸克词原来**追加在 `top` 之外** ⇒ 词表恒为 9、`keywords[:8]` 每轮切掉末位,
+       被切的恰好是 `咐置`(全库最高产:208 条线索/187 条搬成);
+    ② 热榜/探针词原来**追加到末尾** ⇒ 同样落在第 9/10 位,非大瓜类目**从来没搜过它们**
+       (运行记录 `其中外部0` 连中几十轮,日志「只搜了 8/9 个词」从 10-31 起 40 次)。
+    """
+
+    def test_词表不超过上限且外部词进窗口(self, session) -> None:
+        from app.services import douyin_leads as dl
+
+        st = _settings_like()
+        cap = int(st.douyin_cdp_max_keywords)
+        kws = dl.search_keywords(session, 1, int(st.douyin_leads_keywords), st,
+                                 hot=["热榜词X", "探针词Y"])
+        assert len(kws) <= cap, f"词表 {len(kws)} 超过 CDP 上限 {cap}:{kws}"
+        assert "热榜词X" in kws[:cap] and "探针词Y" in kws[:cap], f"外部词被切掉了:{kws}"
+
+    def test_夸克词不再溢出名额(self, session) -> None:
+        """夸克口令词仍然要搜,但必须**在预算内**,不是追加在 top 之外。"""
+        from app.services import douyin_leads as dl
+
+        st = _settings_like()
+        cap = int(st.douyin_cdp_max_keywords)
+        kws = dl.search_keywords(session, 1, int(st.douyin_leads_keywords), st, hot=[])
+        assert len(kws) <= cap, kws
+        qs = [w.strip() for w in str(st.douyin_leads_quark_keywords or "").split(",") if w.strip()]
+        if qs:
+            assert any(w in kws for w in qs), f"夸克口令词被整条挤掉了:{kws}"

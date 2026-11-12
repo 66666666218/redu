@@ -1054,8 +1054,10 @@ def search_keywords(session, user_id: int, top: int, settings,
     `hot` 由 `hot_seed_words()` 取好传进来,**不在这里取**:那是网络调用,而本函数是**纯 DB**
     的(`pan_discovery` 也用它),别让一个本地函数偷偷出网。
 
-    `top` 只管**已知词**那条路的额度;热榜种子**额外附加**在末尾 —— 抖音搜一个词只要几秒
-    (实测 3 个词一轮 83 秒),没必要让外部种子和已知词互相挤位置。
+    `top` 是**整张词表的额度**(= CDP 上限),外部种子和已知词**在同一个预算里**分配 ——
+    外部词(正在推广的名字 / 热榜 / 探针 / 被求名字)先占位,夸克口令词预留,已知词补足。
+    ⚠️ 2026-11-13 之前不是这样:外部词**追加在 `top` 之外**,而 `collect_leads` 只取
+    `keywords[:8]` ⇒ 每轮固定丢末位一个词,详见下面的组装段注释。
 
     ⚠️ **按类目轮换出词**(2026-10-04,见 `category_topics`):本轮只出**当前类目**的词,
     下一轮换一类 —— 广度由**轮换**保证,而不是"永远搜最热的那个"。
@@ -1151,17 +1153,13 @@ def search_keywords(session, user_id: int, top: int, settings,
         #: ⚠️ 上面那条 sort 按**历史有效率**重排,而本方向词没有历史 ⇒ 会被挤到后面。
         #: 但这一轮**就是为它们来的** ⇒ 排回最前(总词数 ≤ CDP 上限 8,不会互相挤掉)。
         kws = [w for w in own_words if w in kws] + [w for w in kws if w not in own_words]
-    for w in (hot or []):
-        if w and w not in kws:
-            kws.append(w)
-    # ⚠️ **夸克口令专搜词**(2026-10-06):上面的词都来自**我们自己的资源库**,
-    # 搜出来的自然是"我们已有的"、而且**几乎全是迅雷形态**;实测补上这几个词后
-    # **一次捞到 15 条夸克口令帖** —— 它们此前**一条都进不来**(`find_leads` 只认《》)。
-    # ★ **2026-10-29 改:限量 + 跟着类目轮换**。原来这三个词**每轮无条件全部追加**
-    #   (4 个类目词 + 1 热榜 + 3 夸克 = 8 词里的 3 个),而它们**本身不携带赛道信息**,
-    #   搜回来的几乎全是短剧推广(实测 `咐置` 一个词 204 条线索)→ 用户报的
-    #   「每轮推送基本都是短剧相关的」。现在每轮只取 `douyin_leads_quark_slots` 个,
-    #   且**起点跟着类目游标走** ⇒ 几个词轮流出现,不是「夸克口令」永远霸着名额。
+    #: ★ **正在被推广的名字**也是外部词(2026-10-31,方案 B):它们是"此刻有人在发"的,
+    #: 比群里的老资源名更可能搜到**正在推广**的内容;用户口径「新鲜优先于转存」。
+    #: 与 hot 一起在函数末尾按 `top` 组装(见 `extras`)。
+    promo = promo_search_words(
+        session, user_id,
+        top=int(getattr(settings, "douyin_leads_promo_words", 2) or 0),
+        days=int(getattr(settings, "douyin_leads_promo_days", 7) or 7))
     # ★ **类目=大瓜 时,词表换成"大瓜向"**(2026-11-02):
     #: 大瓜方向**没有库内目录**,原来的名额全被别的方向的资源名(漫剧)占满 ⇒ 搜回来的
     #: 全是漫剧。这里直接给它 4 个大瓜词 + 至多 2 个"历史上被判成大瓜"的名字。
@@ -1195,12 +1193,14 @@ def search_keywords(session, user_id: int, top: int, settings,
         except Exception:  # noqa: BLE001 - 取不到就退回纯大瓜词
             _xhs_names = []
         _gua_names = _xhs_names + [x for x in _gua_names if x not in _xhs_names]
-        #: ★★ **热榜词要排最前**(2026-11-08 修):这个分支在 1207 行就 `return` 了,
-        #: 而"把 `hot` 追加到 `kws` 末尾"的那段(第 1154 行)**在 return 之后** ——
-        #: 于是**大瓜轮 100% 拿不到热榜词**(`外部命中0` 那 40 轮全含大瓜轮)。
+        #: ★★ **热榜词要排最前**(2026-11-08 修):这个分支会**直接 `return`**,
+        #: 而"把 `hot` 追加到 `kws`"的那段写在 `return` 之后 ⇒ 大瓜轮曾 **100% 拿不到热榜词**
+        #: (`外部命中0` 那 40 轮全含大瓜轮)。改成在这里显式排最前,不再依赖位置。
         #: 而大瓜恰恰是最该用"今天大家在聊什么"的类目:用户给的样本
         #: (`白雪公主1995`/`墨尔本七个小矮人`)就是**当日热点事件**形态,
         #: 靠库内资源名/群名永远搜不出来。
+        #: ⚠️ 本条也是「外部词被挤到窗口外」的一个变体 —— 2026-11-13 统一后在末尾
+        #: (非大瓜分支)按 `top` 组装;这里保持"热榜在最前"的既有口径。
         kws = ([w for w in (hot or []) if w]
                + _gua_names[:3]
                + [w for w in _DA_GUA_WORDS if w not in _gua_names][:_half])
@@ -1209,6 +1209,9 @@ def search_keywords(session, user_id: int, top: int, settings,
                 break
             if w not in kws:
                 kws.append(w)
+        #: ⚠️ **大瓜轮不带夸克口令词**(有意为之):那些词搜回来的是短剧推广,
+        #: 与"今天的大瓜"跑题。这不是漏掉 —— 2026-11-13 统一组装后其它类目都带,
+        #: 唯独这里显式不带;要改的话得同时想清楚"挤掉哪个大瓜词"。
         _u: dict[str, str] = {}
         for w in kws:                    # 归一形态去重(`Z 朝朝入梦` / `Z朝朝入梦` 是同一个)
             _u.setdefault(_norm_word(w), w)
@@ -1220,18 +1223,37 @@ def search_keywords(session, user_id: int, top: int, settings,
         session, user_id,
         top=int(getattr(settings, "douyin_leads_promo_words", 2) or 0),
         days=int(getattr(settings, "douyin_leads_promo_days", 7) or 7))
-    if promo:
-        keep = max(0, int(top) - len(promo))
-        kws = promo + [w for w in kws if w not in promo][:keep]
+    # ⚠️ **夸克口令专搜词**(2026-10-06):上面的词都来自**我们自己的资源库**,
+    # 搜出来的自然是"我们已有的"、而且**几乎全是迅雷形态**;实测补上这几个词后
+    # **一次捞到 15 条夸克口令帖** —— 它们此前**一条都进不来**(`find_leads` 只认《》)。
+    # ★ **2026-10-29 改:限量 + 跟着类目轮换**。原来这三个词**每轮无条件全部追加**
+    #   (4 个类目词 + 1 热榜 + 3 夸克 = 8 词里的 3 个),而它们**本身不携带赛道信息**,
+    #   搜回来的几乎全是短剧推广(实测 `咐置` 一个词 204 条线索)→ 用户报的
+    #   「每轮推送基本都是短剧相关的」。现在每轮只取 `douyin_leads_quark_slots` 个,
+    #   且**起点跟着类目游标走** ⇒ 几个词轮流出现,不是「夸克口令」永远霸着名额。
     qs = [w.strip() for w in
           str(getattr(settings, "douyin_leads_quark_keywords", "") or "").split(",")
           if w.strip()]
     slots = max(0, int(getattr(settings, "douyin_leads_quark_slots", 1) or 0))
+    quark_words: list[str] = []
     if qs and slots:
         start = category_topics.current_index(session) % len(qs)
-        for w in (qs[start:] + qs[:start])[:slots]:
-            if w not in kws:
-                kws.append(w)
+        quark_words = [w for w in (qs[start:] + qs[:start])[:slots]
+                       if w not in kws and w not in promo]
+    #: ★★ **总长必须 ≤ `top`(=CDP 上限)**(2026-11-13 修):原来夸克词是
+    #: **追加在 `top` 之外**的 ⇒ 词表恒为 `top+slots` = **9 个**,而
+    #: `collect_leads` 只取 `keywords[:douyin_cdp_max_keywords]` = **8 个** ⇒
+    #: **每轮固定有一个词被静默丢掉**,而被丢的永远是末位那个 —— 实测就是
+    #: `咐置`(全库最高产:208 条线索/187 条搬成),日志「本轮只搜了 8/9 个词」
+    #: 从 10-31 起 40 次,它的日产出从 7 条掉到 1~2 条。
+    #: 现在**统一按 `top` 组装**:外部词(正在推广的名字 → 热榜/探针/被求名)
+    #: 先占位,夸克口令词在预算内**预留**名额,剩下的才轮到已知词。
+    extras: list[str] = []
+    for w in list(promo) + list(hot or []):
+        if w and w not in extras:
+            extras.append(w)
+    room = max(0, int(top) - len(quark_words))
+    kws = (extras + [w for w in kws if w not in extras])[:room] + quark_words
     #: ★ **按归一形态去重**(2026-10-31):列表里同时出现过 `D 顶级C距1` 与 `D顶级C距1`
     #: —— 同一资源的不同写法各占一个名额,等于白烧一次搜索。保留**先出现的那个**
     #: (新鲜/高产的排在前,见上面的排序)。
@@ -2098,6 +2120,13 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
     #: `search_keywords` 会把 `hot` 追加到词表末尾(大瓜分支排最前),不挤已知词名额。
     #: ⚠️ 打戳在**搜索完成后**(词没被消耗,下轮还能再喂)。
     probe_words: list[str] = []
+    #: ★★ **「评论区在求的名字」回灌搜索**(2026-11-13):`demand_names` 里推过的名字
+    #: 此前**从没进过搜索词表**(近 7 天 10 个名字 0 个搜过,转化仅 1/10)——
+    #: 需求侧信号没有回流到供给侧的发现链。与探针词同一条纪律:读库不打新请求、
+    #: 搜索完成后才打戳(**同一个名字只搜一次**)。
+    #: ⚠️ **只在大瓜轮生效**:这些是事件/人物名(`水子哥`/`林予曦`),放到影视/资料轮
+    #: 是跑题;而大瓜轮恰恰没有库内目录、最缺具体坐标。
+    demand_words: list[str] = []
     if "douyin" in plats:
         try:
             from app.services import hot_cycle as _hc
@@ -2107,7 +2136,18 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
                     settings, "douyin_leads_probe_words", 2) or 0))
         except Exception:  # noqa: BLE001 - 取词失败不挡这一轮
             logger.debug("探针词取词失败", exc_info=True)
+        if cat == "大瓜":
+            try:
+                from app.services import demand_watch as _dw
+
+                demand_words = _dw.unfed_demand_names(
+                    db, user_id, top=int(getattr(
+                        settings, "douyin_leads_demand_names", 2) or 0),
+                    settings=settings)
+            except Exception:  # noqa: BLE001 - 取词失败不挡这一轮
+                logger.debug("被求名字取词失败", exc_info=True)
     hot = (hot + [w for w in probe_words if w not in hot]) if probe_words else hot
+    hot = (hot + [w for w in demand_words if w not in hot]) if demand_words else hot
     kws = search_keywords(db, user_id,
                           int(getattr(settings, "douyin_leads_keywords", 3) or 3),
                           settings, hot=hot)
@@ -2133,6 +2173,14 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
                     _hc.mark_fed_search(db, user_id, probe_words)
                 except Exception:  # noqa: BLE001 - 打戳失败不挡这轮结果
                     logger.debug("探针词打戳失败", exc_info=True)
+            #: ★ 被求名字同样**搜索完成才打戳**(2026-11-13):同一个名字只搜一次。
+            if demand_words and plat == "douyin":
+                try:
+                    from app.services import demand_watch as _dw
+
+                    _dw.mark_demand_names_fed(db, user_id, demand_words)
+                except Exception:  # noqa: BLE001 - 打戳失败不挡这轮结果
+                    logger.debug("被求名字打戳失败", exc_info=True)
             n_panless = 0
             n_grouponly = 0
             if leads:
@@ -2177,6 +2225,14 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
             n_probe_ok = sum(1 for x in leads
                              if (x.get("keyword") or "") in ps
                              and (x.get("kouling") or {}).get("kind") in ("group", "share"))
+            #: ★ 被求名字的产出同样**单独计量**(2026-11-13):它是"观众在求"这条
+            #: 需求侧信号的回流,有效率必须与「热榜(0%)」「探针」分开攒样本 ——
+            #: 混在一起就分不出是哪条路在起作用。
+            ds = set(demand_words or [])
+            n_demand = sum(1 for x in leads if (x.get("keyword") or "") in ds)
+            n_demand_ok = sum(1 for x in leads
+                              if (x.get("keyword") or "") in ds
+                              and (x.get("kouling") or {}).get("kind") in ("group", "share"))
             # ⚠️ **来源标签要进运行记录**(2026-10-08):抖音现在"协议优先、浏览器兜底",
             # 而两条路都会产出"0 条"。不标来源的话,看到 0 就分不清是
             # "协议挂了被回落"还是"真没人在推资源" —— 正是本仓最忌讳的那种含糊。
@@ -2187,6 +2243,7 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
                         f"{_kouling_summary(leads)} "
                         f"[外部命中{n_hot}/产出{n_hot_ok}] "
                         f"[探针{len(probe_words)} 命中{n_probe}/产出{n_probe_ok}] "
+                        f"[被求名{len(demand_words)} 命中{n_demand}/产出{n_demand_ok}] "
                         #: ★ 漏斗(2026-10-31):原始→时间挡→无时间→口令→无链,一眼看出哪道闸在掉量。
                         f"漏斗 原始{funnel.get('raw', 0)} 挡{funnel.get('old', 0)}"
                         f" 无时{funnel.get('notime', 0)} 续{funnel.get('cont', 0)} 口令{funnel.get('kept', 0)}"

@@ -603,6 +603,88 @@ def collect_for_video(aweme_id: str, *, session=None, user_id: int = 1,
 # ---------------------------------------------------------------------------
 
 
+def unfed_demand_names(db, user_id: int = 1, top: int = 2, days: int = 7,
+                       settings=None) -> list[str]:
+    """★ **「评论区在求的名字」→ 抖音搜索词**(2026-11-13)。返回还没喂过搜索的那批。
+
+    ## 为什么需要这一层
+
+    这条链一直是**单向死路**:`demand_watch` 把名字推给客户,然后就结束了 ——
+    那些名字**从没进过 `douyin_leads` 的搜索词表**。实测近 7 天推过的 10 个名字
+    (`水子哥`/`林予曦`/`潘甜甜`/`蕉妹`/`香蕉`/`三水`/`男生宿舍`/`片名`/`豆包 女主`/
+    `听图图的话`)**0 个**搜过,转化成真资源 1/10。
+
+    而库里真正搬成功的名字(`恶女得宠`/`嫁金钗`/`走马上任`)**全部来自搜索词** ——
+    推广号的标题写《口令》,只有搜索能命中。所以"有人在求"的名字必须回灌搜索。
+
+    ## 判据
+
+    - **够格推送的那些**才进词表(与 `pick_pushable` **同一组门槛**:被求 / 扣1 /
+      被反复提及,满足任意一条)—— 不是所有抽出来的碎片。否则 `第二部`/`一样`/`片名`
+      这种半句话会占掉名额,搜了只是白烧一次额度;
+    - `fed_search_at IS NULL` —— **同一个名字只搜一次**(与探针词同一纪律)。
+      喂过没产出的不再喂,否则每个名字每轮都占名额;
+    - `last_seen_at` 近 `days` 天 —— 凉掉的事件搜不到东西;
+    - `is_name_like(quoted=True)` —— 再过一遍名字判据(表里可能有历史脏数据);
+    - 按 (被求次数, 提及次数) 降序。
+
+    ⚠️ **只读,不写**。打戳由调用方在**搜索完成后**做(见 `mark_demand_names_fed`)。
+    """
+    from app.db.models import DemandName
+
+    if db is None or top <= 0:
+        return []
+    if settings is None:
+        from config.settings import get_settings
+
+        settings = get_settings()
+    min_demand = int(getattr(settings, "demand_min_hits", 2) or 0)
+    min_ones = int(getattr(settings, "demand_min_ones", 20) or 0)
+    min_mention = int(getattr(settings, "demand_min_mention", 6) or 0)
+    since = datetime.now() - timedelta(days=max(1, int(days or 7)))
+    rows = db.scalars(select(DemandName).where(
+        DemandName.user_id == user_id,
+        DemandName.platform == PLATFORM,
+        DemandName.fed_search_at.is_(None),
+        DemandName.last_seen_at >= since).order_by(
+        DemandName.demand_hits.desc(), DemandName.mention_hits.desc()).limit(top * 5)).all()
+    out: list[str] = []
+    for r in rows:
+        n = str(r.name or "").strip()
+        if not n or n in out or not is_name_like(n, quoted=True):
+            continue
+        #: 与 `pick_pushable` 同一组门槛 —— 推给客户的标准就是"够格"的标准,
+        #: 一个连推都不够格的名字不值得占一次搜索额度。
+        if (int(r.demand_hits or 0) < min_demand
+                and int(getattr(r, "ones_hits", 0) or 0) < min_ones
+                and int(r.mention_hits or 0) < min_mention):
+            continue
+        out.append(n)
+        if len(out) >= top:
+            break
+    return out
+
+
+def mark_demand_names_fed(db, user_id: int, names: list[str]) -> int:
+    """给这批名字打上「已喂过搜索」的戳。返回打戳条数。
+
+    ⚠️ **由调用方在搜索完成后打**:搜索挂了名字没消耗,下轮还能再喂。
+    """
+    from app.db.models import DemandName
+
+    if db is None or not names:
+        return 0
+    now = datetime.now()
+    ids = [str(w).strip() for w in names if str(w).strip()]
+    rows = db.scalars(select(DemandName).where(
+        DemandName.user_id == user_id, DemandName.platform == PLATFORM,
+        DemandName.name.in_(ids))).all()
+    for r in rows:
+        r.fed_search_at = now
+    db.flush()
+    return len(rows)
+
+
 def guagua_candidates(db, user_id: int = 1, top: int = 3, days: int = 14) -> list[str]:
     """**大瓜候选名**:从小红书"挂了群聊 + 主题相关"的笔记里取到的名字(2026-11-04 用户:
     「串起来」)。

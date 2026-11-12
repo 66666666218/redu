@@ -373,7 +373,11 @@ ADDITIONS: dict[str, list[str]] = {
     # 需求名表(2026-10-30 当天加的两列):名字主要来自**作品标题**,热度还要看**「扣1」跟帖**。
     # 存量行两列都是 0 ⇒ 按「还没用新口径统计过」处理,不影响读取。
     "demand_names": ["ones_hits INTEGER DEFAULT 0", "title_hits INTEGER DEFAULT 0",
-                     "heat_score INTEGER DEFAULT 0"],
+                     "heat_score INTEGER DEFAULT 0",
+                     # `fed_search_at`(2026-11-13):这个名字**拿去过抖音搜索**的时刻。
+                     # 存量行 NULL = 从没喂过搜索 —— 语义正确(它们确实一次都没搜过),
+                     # 所以上线后第一批会把库里攒下的名字都喂一遍,之后靠打戳去重。
+                     "fed_search_at DATETIME"],
     # 扫描记录加平台(2026-10-30):小红书的数据也进这张表,汇总时分开算。
     # 存量行默认 douyin —— 它们确实都是抖音扫出来的。
     "demand_scans": ["platform VARCHAR(16) DEFAULT 'douyin'",

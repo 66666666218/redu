@@ -1258,3 +1258,8 @@ class DemandName(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
     #: 上次推送时间 —— 用来避免每轮把同一批名字反复推到群里(默认 48 小时内不重推)
     last_pushed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    #: ★ **拿去过 `douyin_leads` 当搜索词的时刻**(2026-11-13)。NULL = 还没喂过搜索。
+    #: 「推给客户了」和「去抖音找过它」是两件事:没有这一列,`demand_names` 里的名字
+    #: 永远只在推送侧循环,从没进过搜索 —— 实测近 7 天 10 个名字 **0 个**进过词表。
+    #: 与 `HotWordSeen.fed_search_at` 同一口径(**搜索完成后才打戳**,挂了不消耗)。
+    fed_search_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
