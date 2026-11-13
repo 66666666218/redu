@@ -945,8 +945,16 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
        (实测 `狗爹和小桃` 搜到 13 条同款,而泛词 `吃瓜` 搜到的是亲子起名/外卖群)。
     ② 没配种子词时,用**库内素材**:`douyin_leads`(推广视频)与 `douyin_peer_works`(对标号)。
     ③ 两种都能补位 —— 谁先用完名额就停。
-    ④ 还有余量时,补 **今天才冒出来的热点**(`hot_cycle`,无种子全榜);
-       **永远排在库内素材之后** —— 库内是已知能出货的,热点是赌新事件。
+    ④ 补 **今天才冒出来的热点**(`hot_cycle`,形态词探针)。
+
+    ⚠️ **④ 的名额是「预留」的,不是「剩下多少用多少」**(2026-11-13 修):
+    库内素材永远是满的(近 7 天 332 条线索),原来的写法让 ② 一填满就 `return`,
+    **④ 一次都轮不到** —— 实测 40 轮运行记录全是 `视频4 扫4`,`hot_word_seen`
+    停在 `2026-11-11 09:49`、日志里「热点差分」**零次出现**;而探针词的另一个
+    消费者 `douyin_leads.unfed_search_words` 读的就是那张表 ⇒ **两个消费者同时断供**,
+    运行记录里的 `[探针0]` 不是"没搜到"而是"根本没取过词"。
+    现在先扣掉 `demand_hot_videos`,库内素材只能用剩下的 `need - hot_budget`。
+    顺序上的原意(**库内优先于热点**)不变:热点仍排在最后,只是名额不再被吃光。
 
     ⚠️ **不再按"标题里有没有书名号"筛搜索结果**:用户给的参考作品是"标题 + 一堆标签"的
     形状(没有书名号),那条筛选会把它们全挡掉。名字改用 `names_from_title` 从
@@ -960,18 +968,24 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
     days = int(getattr(settings, "demand_source_days", 7) or 7)
     since = datetime.now() - timedelta(days=max(1, days))
     need = max(1, int(getattr(settings, "demand_max_videos", 6) or 6))
+    #: ★ **热点先扣名额**(2026-11-13):见 docstring 里那段实测。留 1 个给库内素材
+    #: (库内是已知能出货的那批,不能被热点全挤掉)。
+    hot_budget = min(int(getattr(settings, "demand_hot_videos", 2) or 0), need - 1)
+    hot_budget = max(0, hot_budget)
+    lib_need = need - hot_budget
 
     out: list[dict] = []
     seen: set[str] = set()
 
-    def _add(vid: str, url: str, title: str, comments: int = 0, author: str = "") -> None:
+    def _add(vid: str, url: str, title: str, comments: int = 0, author: str = "",
+             src: str = "") -> None:
         vid = str(vid or "").strip()
         if not vid or vid in seen:
             return
         seen.add(vid)
         out.append({"aweme_id": vid, "url": url or f"https://www.douyin.com/video/{vid}",
                     "title": title or "", "comment_count": int(comments or 0),
-                    "author": str(author or "")})
+                    "author": str(author or ""), "src": src})
 
     # ① 参考作品名(有就先用) —— 每轮轮着搜 3 个,避免连发触发抖音限流
     seeds = [w.strip() for w in
@@ -997,19 +1011,19 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
                  (v.get("metrics") or {}).get("comment_count") or 0, v.get("name"))
             #: 参考作品只占**一半名额**:它们通常没有书名号(标题是"标签流"),
             #: 名字还得靠库内推广线索那半;全被搜索占满 ⇒ 这一轮一个名字都抽不到。
-            if len(out) >= max(1, need // 2):
+            if len(out) >= max(1, lib_need // 2):
                 break
 
     # ★ **同款作者的新作品**也要进候选池(2026-10-30 用户:「根据这些来找方法去**发现新的大瓜**」)。
     # 参考作品 → 作者 → 他们的近期作品,这些才是"**最新的**求1型视频"的来源;
     # 只看我们自己的线索池永远发现不了新号。
-    if len(out) < need:
+    if len(out) < lib_need:
         from datetime import timedelta
 
         since_ts = int((datetime.now() - timedelta(
             days=int(getattr(settings, "demand_latest_days", 3) or 3))).timestamp())
         for sec, name in list(authors.items()):
-            if len(out) >= need:
+            if len(out) >= lib_need:
                 break
             res = fetch_author_posts(sec, session=db, user_id=user_id, count=20)
             if not res["ok"]:
@@ -1018,7 +1032,7 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
                 if it["publish_at"] and it["publish_at"] < since_ts:
                     continue
                 _add(it["aweme_id"], it["url"], it["desc"], 0, it["author"] or name)
-                if len(out) >= need:
+                if len(out) >= lib_need:
                     break
 
     # ② 我们自己的线索(推广视频,评论区天然是「求资源」的)
@@ -1027,8 +1041,8 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
         DouyinLead.found_at >= since).order_by(DouyinLead.found_at.desc())).all()
     for r in leads:
         _add(r.aweme_id, r.url, r.title, 0, r.author)
-        if len(out) >= need:
-            return out[:need]
+        if len(out) >= lib_need:
+            break
 
     # ③ 对标号作品(带网盘的那些)
     works = db.scalars(select(DouyinPeerWork).where(
@@ -1037,7 +1051,7 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
         DouyinPeerWork.first_seen_at.desc())).all()
     for w in works:
         _add(w.aweme_id, w.url, w.title, 0, w.account_name)
-        if len(out) >= need:
+        if len(out) >= lib_need:
             break
 
     # ④ ★ **今天才冒出来的热点**(2026-11-08 用户:「每次都会有新的热点出来,
@@ -1059,8 +1073,9 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
     #: ⚠️ **2026-11-12 起这条注释的前半句已松动**:探针词**同时**会进 `douyin_leads`
     #: 的搜索词表(`unfed_search_words`,找的是推广号《口令》标题,不是网盘直链,
     #: 与上面说的「搜网盘 0%」是两条不同的路);这条评论扫描路照旧保留。
-    hot_budget = min(need - len(out),
-                     int(getattr(settings, "demand_hot_videos", 2) or 0))
+    #: 名额已在函数开头**预留**给热点(`lib_need = need - hot_budget`),这里直接用。
+    #: 仍取 `min(need - len(out), ...)` 兜底:种子/作者那两步可能没填满 `lib_need`。
+    hot_budget = max(0, min(need - len(out), hot_budget))
     if hot_budget > 0:
         from app.services import hot_cycle
 
@@ -1089,7 +1104,8 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
                 if i >= hot_budget:
                     break
                 _add(v.get("aweme_id"), v.get("url"), v.get("snippet"),
-                     (v.get("metrics") or {}).get("comment_count") or 0, v.get("name"))
+                     (v.get("metrics") or {}).get("comment_count") or 0, v.get("name"),
+                     src="hot")
 
     return out[:need]
 
@@ -1271,6 +1287,12 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
     detail = (f"视频{len(videos)} 扫{scanned} 名字{kept_names}(丢{dropped_names}"
               f"/泛词{dropped_common}) 求{no_name}(无名) 推{pushed}"
               f" 求1型{len(request_videos)}(推{request_pushed})")
+    #: ★ **热点素材的条数必须显形**(2026-11-13):40 轮 `视频4 扫4` 看着一切正常,
+    #: 而热点那条路**一次都没跑过** —— 只报总数的话,"4 条都来自库内"和
+    #: "3 条库内 + 1 条热点"在记录里长得一模一样。长期恒为 0 ⇒ 名额又被吃光了。
+    n_hot = sum(1 for v in videos if v.get("src") == "hot")
+    if n_hot:
+        detail += f" 其中热点{n_hot}"
     if errors:
         detail += f" 失败:{errors[0][:60]}"
     _record_run(db, user_id, "demand_watch",

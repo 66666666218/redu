@@ -731,6 +731,74 @@ def test_素材优先取我们自己的线索_而不是搜吃瓜(session, monkey
     assert {v["aweme_id"] for v in vids} == {"111", "222"}
 
 
+def test_热点名额不被库内线索吃光(session, monkeypatch):
+    """★ **库内素材永远是满的,热点名额必须预留**(2026-11-13 实测的断供)。
+
+    改了之前:近 7 天 332 条线索 ⇒ ② 一填满就 `return`,③④ 一次都轮不到 ——
+    40 轮运行记录全是 `视频4 扫4`,`hot_word_seen` 停在 11-11、
+    日志里「热点差分」**零次出现**;而探针词的另一个消费者
+    (`douyin_leads.unfed_search_words`)读的就是那张表 ⇒ **两条路同时断供**。
+    """
+    for i in range(10):                       # 库内素材远多于名额
+        _lead(session, f"lead{i:03d}")
+
+    class _S3(_S):
+        demand_max_videos = 4
+        demand_hot_videos = 1                 #: 留 1 个给热点
+
+    from app.services import hot_cycle
+
+    asked: list[list[str]] = []
+
+    def _fake_new_hot_words(settings, seeds, *, session=None, user_id=0, limit=3, **k):
+        asked.append(list(seeds))
+        return [hot_cycle.HotWord(word="新热点词", last=1, peak=200000,
+                                  days=3, emerge=0, source="形态词:后续")]
+
+    monkeypatch.setattr(hot_cycle, "new_hot_words", _fake_new_hot_words)
+    monkeypatch.setattr("app.services.douyin_protocol_source.search",
+                        lambda words, **k: [{
+                            "aweme_id": "hot1", "url": "https://x/hot1",
+                            "snippet": "某事件后续", "name": "a",
+                            "metrics": {"comment_count": 500}}])
+
+    vids = dw.source_videos(session, 1, _S3())
+
+    assert asked, "热点取词根本没被调用 —— 名额又被库内线索吃光了"
+    ids = [v["aweme_id"] for v in vids]
+    assert "hot1" in ids, f"热点视频没进来:{ids}"
+    assert len(ids) == 4, f"总名额应当是 4:{ids}"
+    assert ids[-1] == "hot1", "热点应排在库内素材之后(顺序口径不变)"
+    assert [v["src"] for v in vids].count("hot") == 1, "热点来源没打标,运行记录就数不出来"
+
+
+def test_运行记录写出热点条数_否则看不出这条路有没有跑(session, monkeypatch):
+    """`视频4 扫4` 在"全来自库内"和"3 库内 + 1 热点"两种情况下长得一模一样。"""
+    from app.db.models import RunRecord
+
+    _lead(session, "111")
+
+    class _S3(_S):
+        demand_max_videos = 2
+        demand_hot_videos = 1
+
+    from app.services import hot_cycle
+
+    monkeypatch.setattr(hot_cycle, "new_hot_words", lambda *a, **k: [
+        hot_cycle.HotWord(word="新热点词", last=1, peak=200000,
+                          days=3, emerge=0, source="形态词:后续")])
+    monkeypatch.setattr("app.services.douyin_protocol_source.search", lambda *a, **k: [
+        {"aweme_id": "hot1", "url": "u", "snippet": "某事件后续",
+         "metrics": {"comment_count": 500}}])
+    monkeypatch.setattr(dw, "collect_for_video",
+                        lambda *a, **k: {"error": "", "names": {}})
+
+    dw.run_user(session, 1, _S3())
+    session.flush()
+    detail = session.query(RunRecord).filter_by(kind="demand_watch").one().detail
+    assert "其中热点1" in detail, detail
+
+
 def test_run_user_把名字写进库并推一次(session, monkeypatch):
     _lead(session, "111")
     monkeypatch.setattr(dw, "collect_for_video", lambda *a, **k: {
