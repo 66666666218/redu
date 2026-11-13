@@ -56,112 +56,168 @@ def _cap(plan_delete: list[dict], left: int) -> tuple[list[dict], int]:
 
 
 def clean_quark(db: Session, user_id: int, settings, *, dry_run: bool, left: int) -> dict:
-    """夸克:去重(只删**同一份文件出现在 ≥2 个家里**的那种)。返回本轮统计。"""
+    """夸克:去重(只删**同一份文件出现在 ≥2 个家里**的那种)。返回本轮统计。
+
+    ★★ **按池遍历所有账号**(2026-11-13):此前这里是 `cookie_for()` —— **只取一个号**。
+    而 `cookie_for` 返回的是**最空**的那个(转存要挑最空的写,清理不是):
+    实测 `夸克2` 只有 **1 个家**、`夸克1` 有 **19 个家**,于是清理**永远只扫 1 个家**、
+    `计划0 删0` 连挂 8 天(11-05 ~ 11-12),而真正该清的 1 号已用 **123%** 却从没被扫过。
+    ⇒ 与 `clean_xunlei` 同一个形状:**逐号扫各自的盘**,单号失败不挡其余。
+    """
     from app.services import quark_dup
     from app.services.quark_dup_cache import ScanCache
-    from app.services.quark_transfer import QuarkTransfer
+    from app.services.quark_transfer import QuarkAuthError, QuarkTransfer
 
-    #: ★ **按池取号**(2026-10-16):见 `pan_accounts.cookies_for`(没配池 = 老行为)
     from app.services import pan_accounts as _A
 
-    ck = (_A.cookie_for(db, "quark", user_id=user_id)
-          or getattr(settings, "quark_cookie", "") or "").strip()
-    if not ck:
+    #: ⚠️ **不能用 `cookie_for`**(只给最空的一个)。`refs_for` 给整个池(最空在前),
+    #: 且**连 `AccountRef` 一起给** —— 下面按账号分家文件要用 `ref.cookie_key`,
+    #: 拿 `label`(中文显示名)去反推是猜。
+    try:
+        pool = _A.refs_for(db, "quark", user_id=user_id)
+    except Exception:  # noqa: BLE001 - 池读不到就退回 `.env` 那一枚(单账号老行为)
+        logger.debug("读夸克账号池失败,回落 .env", exc_info=True)
+        pool = []
+    if not pool:
+        ck = str(getattr(settings, "quark_cookie", "") or "").strip()
+        pool = [(_A.default_ref("quark", user_id=user_id), ck)] if ck else []
+    if not pool:
         return {"pan": "夸克", "state": "no_cookie"}
+
     scope = str(getattr(settings, "pan_auto_clean_quark_month", "") or "")
     #: ★★ **TTL 必须由作业传进来**(2026-10-15):`build_plan` 自己的默认是 8h,
     #: 而本作业**每天**才跑一轮 ⇒ 8h 的快照届时**全已过期** ⇒ 缓存形同虚设、
     #: 每轮从零重扫、在同一处撞预算 ⇒ `complete` 恒 False ⇒ **夸克连着三天没删过东西**。
     #: 见 `settings.pan_auto_clean_quark_ttl_hours` 与 `quark_dup.build_plan` 的说明。
     ttl = float(getattr(settings, "pan_auto_clean_quark_ttl_hours", 48.0) or 48.0)
-    try:
-        qt = QuarkTransfer(ck, fid_store=getattr(settings, "quark_fid_store", "") or None)
-        cache = ScanCache()
-        plan = quark_dup.build_plan(qt, mmdd_prefix=scope, depth=2, cache=cache,
-                                    ttl_hours=ttl)
-    except Exception as exc:  # noqa: BLE001 - 扫不动就如实报,别当"没有重复"
-        logger.warning("夸克自动去重:扫描失败 %s: %s", type(exc).__name__, str(exc)[:120])
-        return {"pan": "夸克", "state": "scan_failed", "reason": f"{type(exc).__name__}: {str(exc)[:100]}"}
+    fid_base = str(getattr(settings, "quark_fid_store", "") or "")
+    cache_base = str(getattr(settings, "pan_auto_clean_quark_cache", "") or "") \
+        or "data/quark_dup_cache.json"
 
-    # ★ 护栏 4:没扫完 ⇒ 计划不可信 ⇒ 拒绝删
-    if not plan.get("complete", True):
-        rem = plan.get("remaining_homes") or []
-        #: ★★ **必须把"为什么没扫完"带出去**(2026-10-15):只报
-        #: `已扫19个家,还差9个` 的话,**看不出是快照过期还是预算不够** ——
-        #: 而这两者的修法完全不同(改 TTL / 加预算)。那三天就是这么卡住的:
-        #: 每天数字一字不差,没人能看出它其实**每天从零重扫**。
-        return {"pan": "夸克", "state": "incomplete", "planned": int(plan.get("n_delete") or 0),
-                "remaining_homes": len(rem), "scanned": int(plan.get("scanned_homes") or 0),
-                "calls": int(plan.get("calls") or 0),
-                "cache_miss": dict(plan.get("cache_miss") or {}), "ttl_hours": ttl}
-
-    all_del = list(plan.get("delete") or [])
-    todo, blocked = _cap(all_del, left)
-    intro = list(plan.get("intro_protected") or [])
-    out: dict[str, Any] = {
-        "pan": "夸克", "state": "ok", "planned": int(plan.get("n_delete") or 0),
-        "scanned": int(plan.get("scanned_homes") or 0), "blocked_by_cap": blocked,
-        "scope": scope or "(所有家)", "protected": int(plan.get("protected") or 0),
-        # ★ 宣传简介(会被复制进每个资源)到底护住了几个 —— 护不住要能一眼看见,
-        #   所以这也写进 `runs.detail`(详见 `quark_dup.collect_intro_protect`)。
-        "intro_protected": len(intro),
-    }
-    if not intro:
-        logger.warning("夸克自动去重:简介保护名单为**空**(简介目录取不到或本来就是空的)"
-                       "—— 本轮简介文件不在保护范围内")
-    # ★★ **整包重复**(2026-10-16):上面那条抓的是**跨家**的同名同大小**文件**;
-    #    而真占空间的是**同一个家下面的 `X` 与 `X(1)`** —— 夸克给重名**目录**加后缀 ⇒
-    #    **整个资源包多一份**(实测一轮删掉 24 份 / 44.48 GiB)。
-    #    ⚠️ 那批重复 `classify` **一条都抓不到**:它们的目录名不同,不在"同一家/同一目录"下。
-    #    ⚠️ 放在**上面那条之后**:先删文件级重复(便宜),再动整包(要对每个候选列目录)。
-    #    ⚠️ 它**当场列目录**(不吃快照)—— "删"要用当前事实。
-    try:
-        pkg = quark_dup.build_package_plan(
-            qt, protect_dirs=(getattr(settings, "pan_intro_quark_dir", "") or "/监听宣传",))
-    except Exception as exc:  # noqa: BLE001 - 整包那条扫不动不该拖垮上面那条已经删好的
-        logger.warning("夸克整包去重:扫描失败 %s: %s", type(exc).__name__, str(exc)[:110])
-        pkg = {}
-    pkg_groups = list(pkg.get("groups") or [])
-    out["pkg_groups"] = int(pkg.get("n_groups") or 0)
-    out["pkg_planned"] = int(pkg.get("n_drop") or 0)
-    out["pkg_bytes"] = int(pkg.get("bytes") or 0)
-    #: 两个去重**共用**同一个硬上限(`left`):整包那一份也算一次删除。
-    #: 两个去重**共用**同一个硬上限(`left`):文件级先删 ⇒ 整包那一遍的余量要**减去**
-    #: 这次将要删掉的条数。
-    #: ⚠️⚠️ **这里原来写的是 `out["deleted"]`,而那个键要到下面才被赋值** ⇒
-    #:   `KeyError: 'deleted'` **把整个夜间清理打挂了**(2026-10-16 04:32 那一轮记成
-    #:   「异常,见日志」,三盘**一件没做**;10-14 之前一直好,10-16 我加的这段之后才坏)。
-    #:   教训:**新加的那段要用"手上已经有的量"算**,别去读"稍后才会写的键"。
-    #:   ⚠️ 而且用 `len(todo)` 本来就更对:`left` 是"这一轮总共只许删这么多",
-    #:   文件级已经占掉 `len(todo)` 个名额了。
-    room = max(0, left - len(todo))
-    take, blocked_pkg = [], 0
-    used = 0
-    for g in pkg_groups:
-        if used + len(g["drop"]) > room:
-            blocked_pkg += 1
+    per: list[dict] = []          #: 每个号一段,汇总时**分号列出**(否则看不出是哪个号在动)
+    totals = {"planned": 0, "deleted": 0, "blocked_by_cap": 0, "scanned": 0,
+              "intro_protected": 0, "pkg_groups": 0, "pkg_planned": 0, "pkg_bytes": 0,
+              "pkg_deleted": 0, "pkg_blocked_by_cap": 0}
+    freed = 0
+    errors: list[str] = []
+    budget = left
+    for ref, ck in pool:
+        if not ck:
             continue
-        take.append(g)
-        used += len(g["drop"])
-    if blocked_pkg:
-        out["pkg_blocked_by_cap"] = blocked_pkg
-    if dry_run:
-        out["deleted"] = 0
-        out["dry_run"] = True
-        return out
-    plan["delete"] = todo                     # 只喂截断后的清单给执行器
-    res = quark_dup.apply_plan(qt, plan, cache=cache)
-    out["deleted"] = int(res.get("deleted") or 0)
-    out["freed"] = int(res.get("bytes") or 0)
-    if res.get("failed"):
-        out["errors"] = res["failed"][:3]
-    if take:
-        res2 = quark_dup.apply_package_plan(qt, {"groups": take, "bytes": out["pkg_bytes"]},
-                                            to_recycle=True)
-        out["pkg_deleted"] = int(res2.get("deleted") or 0)
-        out["freed"] = int(out["freed"]) + int(res2.get("bytes") or 0)
-        if res2.get("failed"):
-            out["errors"] = (out.get("errors") or []) + list(res2["failed"])[:3]
+        label, key = (ref.label or ref.cookie_key), str(ref.cookie_key or "quark")
+        #: ★ **fid / 快照都按账号分家**(2026-11-13):两个号都有 `redian监听` 这个家,
+        #: 但 **fid 不同** ⇒ 共用一份快照时 `check_home` 每轮都判 `FID_CHANGED`,
+        #: 两边轮流作废对方的缓存,谁都不收敛(和 fid_store 那个坑是同一个)。
+        store = _A.scoped_path(fid_base, key, platform="quark") if fid_base else None
+        cache = ScanCache(_A.scoped_path(cache_base, key, platform="quark"))
+        try:
+            qt = QuarkTransfer(ck, fid_store=store)
+            plan = quark_dup.build_plan(qt, mmdd_prefix=scope, depth=2, cache=cache,
+                                        ttl_hours=ttl)
+        except QuarkAuthError as exc:
+            errors.append(f"{label}:登录态失效({str(exc)[:40]})")
+            continue
+        except Exception as exc:  # noqa: BLE001 - 扫不动就如实报,别当"没有重复"
+            logger.warning("夸克自动去重(%s):扫描失败 %s: %s", label, type(exc).__name__,
+                           str(exc)[:120])
+            errors.append(f"{label}:扫描失败({type(exc).__name__})")
+            continue
+
+        # ★ 护栏 4:没扫完 ⇒ 计划不可信 ⇒ **这个号**拒绝删(其余号照常)
+        if not plan.get("complete", True):
+            per.append({"label": label, "state": "incomplete",
+                        "planned": int(plan.get("n_delete") or 0),
+                        "remaining_homes": len(plan.get("remaining_homes") or []),
+                        "scanned": int(plan.get("scanned_homes") or 0),
+                        "calls": int(plan.get("calls") or 0),
+                        "cache_miss": dict(plan.get("cache_miss") or {}), "ttl_hours": ttl})
+            continue
+
+        all_del = list(plan.get("delete") or [])
+        todo, blocked = _cap(all_del, budget)
+        intro = list(plan.get("intro_protected") or [])
+        one: dict[str, Any] = {
+            "label": label, "state": "ok", "planned": int(plan.get("n_delete") or 0),
+            "scanned": int(plan.get("scanned_homes") or 0), "blocked_by_cap": blocked,
+            "scope": scope or "(所有家)", "protected": int(plan.get("protected") or 0),
+            # ★ 宣传简介(会被复制进每个资源)到底护住了几个 —— 护不住要能一眼看见,
+            #   所以这也写进 `runs.detail`(详见 `quark_dup.collect_intro_protect`)。
+            "intro_protected": len(intro),
+        }
+        if not intro:
+            logger.warning("夸克自动去重(%s):简介保护名单为**空**(简介目录取不到或本来就是空的)"
+                           "—— 本轮简介文件不在保护范围内", label)
+        # ★★ **整包重复**(2026-10-16):上面那条抓的是**跨家**的同名同大小**文件**;
+        #    而真占空间的是**同一个家下面的 `X` 与 `X(1)`** —— 夸克给重名**目录**加后缀 ⇒
+        #    **整个资源包多一份**(实测一轮删掉 24 份 / 44.48 GiB)。
+        #    ⚠️ 那批重复 `classify` **一条都抓不到**:它们的目录名不同,不在"同一家/同一目录"下。
+        #    ⚠️ 放在**上面那条之后**:先删文件级重复(便宜),再动整包(要对每个候选列目录)。
+        #    ⚠️ 它**当场列目录**(不吃快照)—— "删"要用当前事实。
+        try:
+            pkg = quark_dup.build_package_plan(
+                qt, protect_dirs=(getattr(settings, "pan_intro_quark_dir", "") or "/监听宣传",))
+        except Exception as exc:  # noqa: BLE001 - 整包那条扫不动不该拖垮上面那条已经删好的
+            logger.warning("夸克整包去重(%s):扫描失败 %s: %s", label, type(exc).__name__,
+                           str(exc)[:110])
+            pkg = {}
+        pkg_groups = list(pkg.get("groups") or [])
+        one["pkg_groups"] = int(pkg.get("n_groups") or 0)
+        one["pkg_planned"] = int(pkg.get("n_drop") or 0)
+        one["pkg_bytes"] = int(pkg.get("bytes") or 0)
+        #: 两个去重**共用**同一个硬上限(`left`):整包那一份也算一次删除。
+        #: 文件级先删 ⇒ 整包那一遍的余量要**减去**这次将要删掉的条数。
+        #: ⚠️⚠️ **这里原来写的是 `out["deleted"]`,而那个键要到下面才被赋值** ⇒
+        #:   `KeyError: 'deleted'` **把整个夜间清理打挂了**(2026-10-16 04:32 那一轮记成
+        #:   「异常,见日志」,三盘**一件没做**;10-14 之前一直好,10-16 我加的这段之后才坏)。
+        #:   教训:**新加的那段要用"手上已经有的量"算**,别去读"稍后才会写的键"。
+        room = max(0, budget - len(todo))
+        take, blocked_pkg = [], 0
+        used = 0
+        for g in pkg_groups:
+            if used + len(g["drop"]) > room:
+                blocked_pkg += 1
+                continue
+            take.append(g)
+            used += len(g["drop"])
+        if blocked_pkg:
+            one["pkg_blocked_by_cap"] = blocked_pkg
+        if dry_run:
+            one["deleted"] = 0
+            one["dry_run"] = True
+            per.append(one)
+            continue
+        plan["delete"] = todo                     # 只喂截断后的清单给执行器
+        res = quark_dup.apply_plan(qt, plan, cache=cache)
+        one["deleted"] = int(res.get("deleted") or 0)
+        one["freed"] = int(res.get("bytes") or 0)
+        if res.get("failed"):
+            one["errors"] = res["failed"][:3]
+        if take:
+            res2 = quark_dup.apply_package_plan(qt, {"groups": take, "bytes": one["pkg_bytes"]},
+                                                to_recycle=True)
+            one["pkg_deleted"] = int(res2.get("deleted") or 0)
+            one["freed"] = int(one["freed"]) + int(res2.get("bytes") or 0)
+            if res2.get("failed"):
+                one["errors"] = (one.get("errors") or []) + list(res2["failed"])[:3]
+        per.append(one)
+        budget -= int(one.get("deleted") or 0) + int(one.get("pkg_deleted") or 0)
+
+    for one in per:
+        for k in totals:
+            totals[k] += int(one.get(k) or 0)
+        freed += int(one.get("freed") or 0)
+    #: ⚠️ **单号的结果不能被汇总吃掉**:以前只回一个 dict,于是"扫了哪个号"根本无法表达。
+    #: ⚠️ 顶层 `dry_run` **必须留着**:`_fmt` 靠它区分「演练没删」与「真删了 0 件」——
+    #: 少了它,演练轮会被打成 `删0`,和"扫完了但确实没重复"长得一模一样。
+    out: dict[str, Any] = {"pan": "夸克", "accounts": len(per), "per_account": per,
+                           "state": "ok" if per else "no_account", "freed": freed,
+                           "dry_run": bool(dry_run), **totals}
+    if errors:
+        out["errors"] = errors[:3]
+    #: 全都没扫成 ⇒ 沿用旧口径的 `state`,让 `_fmt` 打出"跳过(为什么)"
+    if not per and errors:
+        out["state"] = "scan_failed"
+        out["reason"] = ";".join(errors[:2])
     return out
 
 
@@ -345,6 +401,8 @@ def _fmt(p: dict) -> str:
     st = p.get("state")
     if st in ("no_cookie", "scan_failed", "failed", "error", "skipped"):
         return f"{p['pan']}跳过({st}:{str(p.get('reason') or '')[:50]})"
+    if st == "no_account":
+        return f"{p['pan']}跳过(池里没有可用账号)"
     if st == "incomplete":
         #: ★ 「**为什么**没扫完」必须写出来(2026-10-15):`stale` = 快照过期(改 TTL),
         #: 没写 `stale` 才是预算(加预算)。只写计数的话,这两件事长得一模一样。
@@ -382,6 +440,21 @@ def _fmt(p: dict) -> str:
     bits = [f"扫{p.get('scanned', '-')}", f"计划{p.get('planned', 0)}"]
     if p.get("accounts", 1) > 1:
         bits.append(f"账号{p['accounts']}")
+    #: ★★ **每个号单独列一段**(2026-11-13)。只报汇总的话,"两个号都没删"与
+    #: 「1 号扫了 19 个家但是 0 重复 / 2 号压根没扫」长得一模一样 ——
+    #: 而后者正是这次要修的那个 bug(清理只扫最空的 2 号、1 个家)。
+    for one in (p.get("per_account") or []):
+        seg = [f"{one.get('label') or '?'} 扫{one.get('scanned', '-')}"
+               f" 计划{one.get('planned', 0)}"]
+        if one.get("state") != "ok":
+            seg.append(f"**{one.get('state')}**(还差{one.get('remaining_homes', '?')}个家)")
+        elif one.get("dry_run"):
+            seg.append("dry-run")
+        else:
+            seg.append(f"删{one.get('deleted', 0)}")
+            if one.get("pkg_deleted"):
+                seg.append(f"整包删{one['pkg_deleted']}")
+        bits.append("(" + " ".join(seg) + ")")
     if p.get("unmatched"):
         bits.append(f"未匹配监控源{p['unmatched']}")
     if p.get("intro_protected"):

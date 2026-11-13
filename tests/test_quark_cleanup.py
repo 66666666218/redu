@@ -703,3 +703,68 @@ def test_删路径要能跑通_且整包那遍共用同一个上限(monkeypatch)
     seen.clear()
     out3 = pac.clean_quark(object(), 1, st, dry_run=True, left=9)
     assert seen == {} and out3["deleted"] == 0 and out3.get("dry_run") is True, out3
+
+
+def test_清理要扫遍池里的每个号_且各自用各自的快照(monkeypatch) -> None:
+    """★★ 2026-11-13 修的那个真 bug:`clean_quark` 只取 `cookie_for`(最空的号)⇒
+    **只扫了 1 个家、连挂 8 天 `计划0 删0`**,而真正占满的 1 号(123%)从没被扫过。
+
+    这条钉三件事:
+    ① 池里**每个**能取到 cookie 的号都要被扫(**不能只扫最空的那个**);
+    ② 每号的快照/索引**按 `cookie_key` 分家**(两个号都有 `redian监听`,fid 不同,
+       共用一份会互相作废 —— 所以路径里必须出现各自的 key,且互不相同);
+    ③ 单号**扫不动不挡其余**(解析失败的那个记进 `errors`,后面的照扫)。
+
+    ⚠️ 这里必须打桩 `refs_for`(不是 `cookie_for`):`cookie_for` 现在已经不被
+    `clean_quark` 调用了 —— 只打桩它的话,测试会**静默回落到 `.env` 单号路径**,
+    看着绿、其实新分支一行没测(这个坑本项目栽过多次,见 `test-double-drift`)。
+    """
+    from types import SimpleNamespace
+    from pathlib import Path
+
+    from app.services import pan_accounts as pa
+    from app.services import pan_auto_clean as pac
+    from app.services import quark_dup as qd
+
+    refs = [pa.AccountRef(label="夸克2", platform="quark", cookie_key="quark#2", last_ratio=0.05),
+            pa.AccountRef(label="夸克1", platform="quark", cookie_key="quark", last_ratio=1.23),
+            pa.AccountRef(label="夸克坏", platform="quark", cookie_key="quark#9")]
+    monkeypatch.setattr(pa, "refs_for", lambda *a, **k: [(r, f"ck-{r.cookie_key}") for r in refs])
+
+    built: list[str] = []          #: 哪些 cookie 真的被拿去建了连接
+    cache_paths: list[str] = []    #: 每号用的快照文件
+
+    class _QT:
+        def __init__(self, cookie, **k):
+            built.append(cookie)
+
+    def _build(qt, **k):
+        cache_paths.append(str(k["cache"].path))
+        if qt is None:                                   # pragma: no cover
+            raise AssertionError
+        if cache_paths[-1].endswith("quark_9.json"):     # 3 号:模拟登录态坏了
+            raise RuntimeError("boom")
+        return {"complete": True, "delete": [], "n_delete": 0, "scanned_homes": 2,
+                "intro_protected": []}
+
+    monkeypatch.setattr("app.services.quark_transfer.QuarkTransfer", _QT)
+    monkeypatch.setattr(qd, "build_plan", _build)
+    monkeypatch.setattr(qd, "build_package_plan", lambda *a, **k: {})
+    st = SimpleNamespace(quark_cookie="ck-env", pan_intro_quark_dir="/监听宣传",
+                         quark_fid_store="", pan_auto_clean_quark_cache="data/_t_cache.json",
+                         pan_auto_clean_quark_ttl_hours=48)
+
+    out = pac.clean_quark(object(), 1, st, dry_run=True, left=9)
+
+    # ① 池里三个号**都试过**(按池给的顺序),`.env` 那枚不该被用到
+    assert built == ["ck-quark#2", "ck-quark", "ck-quark#9"], f"没扫遍池:{built}"
+    #: 但**只数成功的**:坏号在图里存在、扫不动 ⇒ 不进 `per_account`
+    assert out["accounts"] == 2, out
+    # ② 快照按 `cookie_key` 分家:2 号带后缀,**默认号仍是原路径**(单账号行为不变)
+    #: ⚠️ 用 `Path.name` 比 —— Windows 上 `str(Path)` 给的是反斜杠,拿正斜杠比会假红
+    names = [Path(p).name for p in cache_paths]
+    assert names == ["_t_cache.quark_2.json", "_t_cache.json", "_t_cache.quark_9.json"], names
+    # ③ 坏号记进 errors,但不挡好号
+    assert any("夸克坏" in e for e in out.get("errors") or []), out
+    # ④ 演练轮要能一眼看出"没删"(否则 `删0` 与"真删了 0 件"长得一样)
+    assert out.get("dry_run") is True

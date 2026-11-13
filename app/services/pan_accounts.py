@@ -253,7 +253,8 @@ def add_account(session: Session, platform: str, label: str, cookie: str, *,
 
 
 __all__ = ["AccountRef", "accounts", "ordered", "cookie_of", "report", "add_account", "default_ref",
-           "default_cookie_key", "FULL_COOLDOWN_MIN"]
+           "default_cookie_key", "FULL_COOLDOWN_MIN", "cookies_for", "refs_for", "cookie_for",
+           "scoped_path"]
 
 
 # ---------------------------------------------------------------- 按池取号(统一入口)
@@ -271,10 +272,26 @@ def cookies_for(session, platform: str, *, user_id: int = 1) -> list[tuple[str, 
     (`pan_auto_clean` / `pan_discovery` / `wechat/_enrich`)——**没有一处看池**
     ⇒ **账号登记了也不会被用**,"满了自动换下一个"是句空话。
     ⇒ 接池只需接这一处;调用方要"换下一个"就拿整个列表循环(见 `xunlei_group` 的择一循环)。
+
+    ⚠️ **只给 `label` 的代价**(2026-11-13):要用 `scoped_path()` 按账号分家文件的
+    调用方需要的是 **`cookie_key`**(路径就按它命名),拿 `label`(中文显示名)去
+    还原 `cookie_key` 是**猜**——所以那种场景请用 `refs_for()`。
+    """
+    return [(r.label or r.cookie_key, ck) for r, ck in refs_for(
+        session, platform, user_id=user_id)]
+
+
+def refs_for(session, platform: str, *, user_id: int = 1) -> list[tuple[AccountRef, str]]:
+    """★ 与 `cookies_for` 同一套择一/过滤,但**连同 `AccountRef` 一起给出**。
+
+    需要"按账号分家"的调用方(清理快照 / fid 索引 / 缓存文件)必须用这个 ——
+    文件名要用 `ref.cookie_key`,不能拿 `label` 去反推(`scoped_path` 的约定就是
+    `cookie_key`,与 `pan_discovery._fid_store_for` 同一套;拿错就等于同一个号
+    有两份索引,`FID_CHANGED` 那个坑会以另一种形式回来)。
     """
     from app.services.cookie_store import get_cookie
 
-    out: list[tuple[str, str]] = []
+    out: list[tuple[AccountRef, str]] = []
     seen: set[str] = set()
     for r in ordered(session, platform, user_id=user_id):
         try:
@@ -285,15 +302,19 @@ def cookies_for(session, platform: str, *, user_id: int = 1) -> list[tuple[str, 
         if not ck or ck in seen:
             continue
         seen.add(ck)
-        out.append((r.label or r.cookie_key, ck))
+        out.append((r, ck))
     #: ★ 百度:把**登录态已死**的账号召回后面(2026-10-31 实测:`baidupan#2/#3` 失效,
     #: 却因"最空"永远排第一 ⇒ 每个百度动作都 errno=-6,而主号是好的)。
     #: ⚠️ **只在还有活号时**才滤掉死号:全死就原样返回 —— 否则调用方会看到"没凭据",
     #: 把"cookie 过期"误诊成"没配置账号"。
     if platform == "baidupan" and len(out) > 1:
-        alive = [(lb, ck) for lb, ck in out if _baidu_alive(ck)]
+        alive = [(r, ck) for r, ck in out if _baidu_alive(ck)]
         if alive and len(alive) < len(out):
-            dead = [lb for lb, _ in out if lb not in {a[0] for a in alive}]
+            #: ⚠️ `AccountRef` 是 dataclass(**不可哈希**),不能塞进 set 比 ——
+            #: 这里按 `cookie_key`(它就等于账号身份)比。2026-11-13 我第一版写的就是
+            #: `set(alive的ref)`,只要池里 ≥2 个百度号就 `TypeError` ⇒ 取号整条挂掉。
+            _alive = {r.cookie_key for r, _ in alive}
+            dead = [r.label for r, _ in out if r.cookie_key not in _alive]
             logger.warning("百度账号池里有 %d 个登录态失效,已跳过:%s", len(dead), dead)
             out = alive
     return out
@@ -303,3 +324,25 @@ def cookie_for(session, platform: str, *, user_id: int = 1) -> str:
     """按池取号的**单个**版本(现在最该用的那一个)。取不到回空串 —— 调用方自己回落到 `.env`。"""
     got = cookies_for(session, platform, user_id=user_id)
     return got[0][1] if got else ""
+
+
+def scoped_path(base: str, cookie_key: str, *, platform: str) -> str:
+    """把**共享的**缓存/索引文件路径**按账号分家**;默认号原样返回(单账号行为不变)。
+
+    ★ 为什么必须有这一处(2026-11-13):这类文件的键都是**账号内**的标识 ——
+    `quark_fid_store` 里是目录 fid,`quark_dup_cache` 里是家名+fid。
+    两个号共用一份会互相作废:
+
+    * fid_store:A 号的「目录不存在」墓碑(`invalidate_dir`)会把 B 号正确的映射删掉
+      (2026-11-11 实测,见 `pan_discovery._fid_store_for`);
+    * 扫描快照:两个号都有 `redian监听` 这个家,**同名不同 fid** ⇒
+      `check_home` 每轮都判 `FID_CHANGED` ⇒ 两边轮流把对方的快照作废,谁都不收敛。
+    """
+    import os
+
+    base = str(base or "")
+    key = str(cookie_key or "")
+    if not base or not key or key == platform:
+        return base
+    stem, ext = os.path.splitext(base)
+    return f"{stem}.{key.replace('#', '_')}{ext}"

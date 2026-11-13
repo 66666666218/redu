@@ -896,6 +896,75 @@ def test_epoch_与文本两种时间形状都认() -> None:
     assert pd._too_old("2019-01-01 00:00:00", _On()), "文本形状没认出来"
 
 
+def test_存量待办也要过只搬新的这道闸门(session, monkeypatch) -> None:
+    """★★ **存量待办必须带上 `publish_at`**(2026-11-13 修)。
+
+    `_too_old` 的 docstring 明写"闸门要挡得住存量"、甚至为此单独认了 `datetime` ——
+    但 `sync()` 构造 backlog 字典时**只搬 5 个字段**,`publish_at` 根本没传下去 ⇒
+    `_too_old(None)` 按"判不了就放行"处理 ⇒ **45 条超龄待办每轮排在 fresh 前面空转**
+    (实测 2026-11-13:38 百度 + 7 夸克)。
+
+    这条测试用**一个 30 天前的 pending 行**守住它:闸门开着时**绝不能**去转存。
+    """
+    from datetime import datetime, timedelta
+
+    session.add(DiscoveredPanLink(
+        user_id=1, platform="tieba", origin_url="https://pan.quark.cn/s/OLD-BACKLOG",
+        title="陈年待办", status="pending",
+        publish_at=datetime.now() - timedelta(days=30)))
+    session.commit()
+
+    class _S:
+        pan_discovery_max_age_days = 14
+        pan_discovery_keywords = 5
+        pan_discovery_transfer_limit = 10
+        pan_discovery_fresh_limit = 3
+
+    called: list[str] = []
+    monkeypatch.setattr(pd, "_search_words", lambda *a, **k: ["某词"])
+    monkeypatch.setattr(pd, "find_candidates", lambda *a, **k: [])
+    monkeypatch.setattr(pd, "transfer_pan_url",
+                        lambda *a, **k: called.append("x") or {
+                            "status": "ok", "our_url": "OUR-OLD", "code": "", "message": ""})
+
+    out = pd.sync(session, 1, settings=_S())
+    assert called == [], (
+        "30 天前的存量待办**不该被转存** —— backlog 没把 publish_at 传给 _too_old,"
+        "「只搬新的」对存量失效了")
+    #: 「太老」单独计数(`skipped_old`),不混进 `skipped` —— 运行记录里另有一处渲染
+    assert out["skipped_old"] == 1, f"应单独记为「太老跳过」:{out}"
+    row = session.scalar(select(DiscoveredPanLink).where(
+        DiscoveredPanLink.origin_url == "https://pan.quark.cn/s/OLD-BACKLOG"))
+    assert row.status == "skipped", "超龄待办要落终态,否则下一轮还会被捞出来"
+
+
+def test_存量待办没有发布时间时照旧放行(session, monkeypatch) -> None:
+    """⚠️ **判不了就放行**这条不能因为上一条修过头。
+
+    不少源压根不给发布时间 —— 拿"不知道"当"老"会把整条链堵死
+    (`_too_old` 的既有约定)。存量待办同样适用:没 `publish_at` 的照常转存。
+    """
+    session.add(DiscoveredPanLink(user_id=1, platform="tieba",
+                                  origin_url="https://pan.quark.cn/s/NO-PUB",
+                                  title="没时间的待办", status="pending"))
+    session.commit()
+
+    class _S:
+        pan_discovery_max_age_days = 14
+        pan_discovery_keywords = 5
+        pan_discovery_transfer_limit = 10
+        pan_discovery_fresh_limit = 3
+
+    monkeypatch.setattr(pd, "_search_words", lambda *a, **k: ["某词"])
+    monkeypatch.setattr(pd, "find_candidates", lambda *a, **k: [])
+    monkeypatch.setattr(pd, "transfer_pan_url",
+                        lambda *a, **k: {"status": "ok", "our_url": "OUR-NO-PUB",
+                                         "code": "", "message": ""})
+
+    out = pd.sync(session, 1, settings=_S())
+    assert out["ok"] == 1, f"没有发布时间的存量待办必须照常搬:{out}"
+
+
 def test_推送卡要同时给出原帖与我方链(monkeypatch) -> None:
     """★ 2026-10-16 用户口径:「别的平台也应该保持这个模式 —— **有原文,有网盘**」。
 

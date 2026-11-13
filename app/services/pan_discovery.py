@@ -475,17 +475,16 @@ def _fid_store_for(settings, ref, platform: str = "quark") -> str | None:
     结果是两边互相作废、每轮都新建 `_MMDD` 目录 —— 正是"同一资源重复占空间"的根因。
 
     默认号(`cookie_key == 平台名`)沿用原路径,所以**单账号部署的行为逐字不变**。
+
+    ★ 2026-11-13:具体拼法搬进 `pan_accounts.scoped_path` —— 夸克扫描快照
+    (`quark_dup_cache`)踩的是同一个坑(两个号家名相同、fid 不同),两处共用一份实现。
     """
+    from app.services import pan_accounts as _A
+
     base = str(getattr(settings, "quark_fid_store", "") or "")
     if not base:
         return None
-    key = str(getattr(ref, "cookie_key", "") or "")
-    if not key or key == platform:
-        return base
-    import os
-
-    stem, ext = os.path.splitext(base)
-    return f"{stem}.{key.replace('#', '_')}{ext}"
+    return _A.scoped_path(base, str(getattr(ref, "cookie_key", "") or ""), platform=platform)
 
 
 def _baidu_quota(cookie: str) -> dict | None:
@@ -1063,8 +1062,16 @@ def sync(session, user_id: int, settings=None) -> dict:
     # 而**盘满恰恰是最常见的停摆原因**(用户当天亲身遇到:抖音那轮 5 条全卡在盘满,
     # 盘一清出来却没有任何机制会去重搬它们)。
     # 复用本表当**待办队列**:**不新建表、不新增作业**,抖音那条链也把搬不动的往这里入队。
+    #: ★★ **`publish_at` 必须带进来**(2026-11-13 修)。此前这里只搬 5 个字段,
+    #: 而下面 `_too_old(c.get("publish_at"))` 读的正是它 ⇒ 对**每一条存量待办**都拿到
+    #: `None` ⇒ `_too_old` 按"不知道就放行"处理 ⇒ **「只搬新的」对存量完全失效**。
+    #: 实测(2026-11-13):221 条待办里 **45 条**(38 百度 + 7 夸克)发布时间已超过 14 天,
+    #: 每轮都排在 fresh 前面空转,吃的是同一份额度。
+    #: ⚠️ 这正是 `_too_old` 的 docstring 里写着"闸门要挡得住存量"的那个场景 ——
+    #: 那边把 `datetime` 认出来了,这边却**根本没把值传下去**。
     backlog = [{"platform": r.platform, "origin_url": r.origin_url, "title": r.title or "",
-                "author": r.author or "", "source_url": r.source_url or ""}
+                "author": r.author or "", "source_url": r.source_url or "",
+                "publish_at": r.publish_at}
                for r in exist.values() if r.status in ("pending", "failed")]
     fresh = [c for c in find_candidates(session, user_id, keywords, settings=settings)
              if c["origin_url"] not in known]

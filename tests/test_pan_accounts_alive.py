@@ -102,3 +102,30 @@ def test_非百度不探活(monkeypatch):
                         lambda ck: pytest.fail("夸克不该走百度探活"))
 
     assert pa.cookies_for(None, "quark") == [("q2", "cq")]
+
+
+def test_真AccountRef也要能滤死号(monkeypatch):
+    """★★ **替身与真类型不是一回事**(2026-11-13 现场抓到)。
+
+    上面几条用的是 `_fake_pool` 里那个普通类 `_R` —— **按 identity 可哈希**。
+    而真实池子给的是 `AccountRef`(**dataclass,带 list 字段 ⇒ 不可哈希**)。
+    我重构 `refs_for` 时写了一句 `r not in {a[0] for a in alive}`:
+    在 `_R` 下绿得好好的,**真实池子里只要 ≥2 个百度号就 `TypeError`**
+    ⇒ 取号整条挂掉(还被调用方的 `except` 吞成"没凭据",看起来像"盘满/没配账号")。
+
+    ⇒ 守卫必须**用真的 `AccountRef`** 跑一遍,否则测的是替身的方言
+    (同一个坑见 `test-double-drift-and-safe-editing`)。
+    """
+    refs = [pa.AccountRef(label="百度3", platform="baidupan", cookie_key="baidupan#2"),
+            pa.AccountRef(label="百度2", platform="baidupan", cookie_key="baidupan")]
+    monkeypatch.setattr(pa, "ordered", lambda session, platform, user_id=1: list(refs))
+    monkeypatch.setattr("app.services.cookie_store.get_cookie",
+                        lambda session, uid, key: f"ck-{key}")
+    monkeypatch.setattr(pa, "_baidu_alive", lambda ck: ck == "ck-baidupan")
+
+    out = pa.cookies_for(None, "baidupan")
+    assert [lb for lb, _ in out] == ["百度2"], out
+
+    #: `refs_for` 是同一套逻辑的另一半 —— 它得把**整个 ref** 带出来(路径要靠 cookie_key)
+    got = pa.refs_for(None, "baidupan")
+    assert len(got) == 1 and got[0][0].cookie_key == "baidupan", got
