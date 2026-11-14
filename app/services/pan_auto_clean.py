@@ -236,7 +236,7 @@ def clean_xunlei(db: Session, user_id: int, settings, *, dry_run: bool, left: in
     except Exception:  # noqa: BLE001 - 池读不到就退回默认账号,不挡清理
         refs = []
     keys = [r.cookie_key for r in refs if getattr(r, "cookie_key", "")] or [""]
-    planned = deleted = unmatched = blocked = 0
+    planned = deleted = unmatched = blocked = kept_shared = 0
     errors: list[str] = []
     for key in keys:
         try:
@@ -254,10 +254,11 @@ def clean_xunlei(db: Session, user_id: int, settings, *, dry_run: bool, left: in
         deleted += int(res.get("deleted") or 0)
         unmatched += int(res.get("unmatched") or 0)
         blocked += int(res.get("skipped_by_limit") or 0)
+        kept_shared += int(res.get("kept_shared") or 0)
         errors.extend(f"{key or 'xunlei'}:{e}" for e in (res.get("errors") or [])[:2])
     return {"pan": "迅雷", "state": "ok", "days": days, "accounts": len(keys),
             "planned": planned, "deleted": deleted, "blocked_by_limit": blocked,
-            "unmatched": unmatched, "dry_run": bool(dry_run),
+            "unmatched": unmatched, "kept_shared": kept_shared, "dry_run": bool(dry_run),
             "errors": errors[:3]}
 
 
@@ -457,6 +458,10 @@ def _fmt(p: dict) -> str:
         bits.append("(" + " ".join(seg) + ")")
     if p.get("unmatched"):
         bits.append(f"未匹配监控源{p['unmatched']}")
+    #: ★ **护住了几个已发分享的文件夹**(2026-11-14):不写出来的话,
+    #: "没删"与"根本没扫到 / 保护没生效"在运行记录里长得一模一样。
+    if p.get("kept_shared"):
+        bits.append(f"分享保护{p['kept_shared']}")
     if p.get("intro_protected"):
         bits.append(f"简介护{p['intro_protected']}")
     if p.get("dry_run"):

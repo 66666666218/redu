@@ -165,11 +165,15 @@ def test_run_cleanup_also_unlists_from_resource_library(session, monkeypatch) ->
 
     `xunlei_resources` 是 `resource_library` 的取链来源 —— 盘上删了却留着行,
     **资源库就会给出已经失效的分享链**(比"没有链"更糟:用户点了打不开)。
+
+    ⚠️ 2026-11-14:这里**不能再造 `share_url` 是我方迅雷链的行** —— 那种行现在归
+    `_shared_fids` 保护、根本不该被删(见下面 `test_run_cleanup_does_not_trash_shared_folder`)。
+    这条测的是"登记过但没链"的那类(扫盘失败/链没建成),它们照旧要联动清理。
     """
     from app.db.models import XunleiResource
 
     session.add(XunleiResource(user_id=1, fid="id-旧资源包", name="旧资源包",
-                               share_url="https://pan.xunlei.com/s/DEAD", synced_at=None))
+                               share_url="", synced_at=None))
     session.add(XunleiGroupShare(
         user_id=1, share_id="s-unlist", group_id="g", title="旧资源包",
         msg_time=datetime.now() - timedelta(days=29)))
@@ -410,3 +414,114 @@ def test_suffix_regex_catches_the_mid_name_form() -> None:
     # ⚠️ 正常名字**不许误伤**(前瞻: `(N)` 后面只能只剩最后一段、或直接结束)
     assert xc._SUFFIX_RE.sub("", "套装(1)张").strip() == "套装(1)张"
     assert xc._SUFFIX_RE.sub("", "第2.0版教程").strip() == "第2.0版教程"
+
+
+# ------------------------------------ 我方已发分享链的 fid 永不删(2026-11-14)
+#
+# ★ 事故:**清理作业按「3 天没人再提」删文件夹,但它不知道那个文件夹
+#   正被我们自己的分享链指着** —— 删掉 = 已发出的链立刻变成"已失效"。
+#   实测 `xunlei_resources` 12/12 源文件 `file_not_found`。
+#   夸克那边从 2026-10-20 就有 `KEEP_SHARED`,迅雷这边一直缺这道边界。
+
+def test_shared_fids_reads_both_tables(session) -> None:
+    """⚠️ 两张表都要查 —— 实测 `xunlei_group_shares.fid` 与 `xunlei_resources.fid`
+    的交集只有 **45** 条,只查一张会漏掉绝大多数。"""
+    from app.db.models import XunleiResource
+
+    session.add(XunleiGroupShare(user_id=1, share_id="s", group_id="g", title="t",
+                                 fid="F-group", our_url="https://pan.xunlei.com/s/AAA"))
+    session.add(XunleiGroupShare(user_id=1, share_id="s2", group_id="g", title="t2",
+                                 fid="F-quark", our_url="https://pan.quark.cn/s/BBB"))
+    session.add(XunleiGroupShare(user_id=1, share_id="s3", group_id="g", title="t3",
+                                 fid="F-nourl", our_url=""))
+    session.add(XunleiResource(user_id=1, fid="F-res", name="n",
+                               share_url="https://pan.xunlei.com/s/CCC"))
+    session.add(XunleiResource(user_id=1, fid="F-res-nolink", name="n2", share_url=""))
+    session.commit()
+
+    assert xc._shared_fids(session, 1) == {"F-group", "F-res"}
+
+
+def test_plan_never_marks_shared_folder_stale(session, monkeypatch) -> None:
+    """★★ **核心边界**:匹配到监控源、闲置 30 天,但**我方分享链指着它** ⇒ 不判过期。
+
+    没有这一条,每天 36~81 个文件夹被删,其中就包括正被发出去的链。
+    """
+    from app.db.models import XunleiResource
+
+    session.add(XunleiGroupShare(user_id=1, share_id="s-old", group_id="g",
+                                 title="亚麻壁纸",
+                                 msg_time=datetime.now() - timedelta(days=29)))
+    session.add(XunleiResource(user_id=1, fid="id-亚麻壁纸", name="亚麻壁纸",
+                               share_url="https://pan.xunlei.com/s/LIVE"))
+    session.commit()
+    monkeypatch.setattr(xt, "list_all_files",
+                        lambda *a, **k: [_folder("亚麻壁纸", 30, fid="id-亚麻壁纸")])
+
+    p = xc.plan(session, 1, days=7, settings=_S())
+    assert p["stale"] == 0, "我方分享链指着的文件夹被判过期 = 自己把已发出去的链打死"
+    assert p["kept_shared"] == 1
+    assert p["folders"][0]["shared"] is True
+
+
+def test_run_cleanup_does_not_trash_shared_folder(session, monkeypatch) -> None:
+    """⚠️ 执行清单要**再排一次** —— 只靠 `plan` 里的计数,保护的条目照样被删。"""
+    from app.db.models import XunleiResource
+
+    session.add(XunleiGroupShare(user_id=1, share_id="s-old", group_id="g",
+                                 title="旧资源包",
+                                 msg_time=datetime.now() - timedelta(days=29)))
+    session.add(XunleiResource(user_id=1, fid="id-旧资源包", name="旧资源包",
+                               share_url="https://pan.xunlei.com/s/LIVE"))
+    session.commit()
+    monkeypatch.setattr(xt, "list_all_files",
+                        lambda *a, **k: [_folder("旧资源包", 30, fid="id-旧资源包")])
+    trashed: list[str] = []
+    monkeypatch.setattr(xt, "trash_files",
+                        lambda ids, **k: trashed.extend(ids) or {"status": "ok"})
+    out = xc.run_cleanup(session, 1, days=7, settings=_S(), dry_run=False)
+    assert out["to_delete"] == 0 and out["deleted"] == 0 and trashed == []
+
+
+def test_dedupe_never_trashes_shared_copy(session, monkeypatch) -> None:
+    """同名去重留"无后缀"的那份 —— **万一分出去的是带 `(1)` 的那份**,按后缀删就把活链删了。"""
+    from app.db.models import XunleiResource
+
+    session.add(XunleiResource(user_id=1, fid="B", name="甲",
+                               share_url="https://pan.xunlei.com/s/LIVE"))
+    session.commit()
+    tree = {
+        "P": [{"name": "甲", "id": "A", "kind": "drive#folder", "created_time": "0"},
+              {"name": "甲(1)", "id": "B", "kind": "drive#folder", "created_time": "0"}],
+        "A": [{"name": "x", "size": 9}], "B": [{"name": "x", "size": 9}],
+    }
+    monkeypatch.setattr(xt, "list_all_files", lambda fid, **k: tree.get(str(fid), []))
+
+    class _S:
+        xunlei_transfer_parent_id = "P"
+
+    out = xc.plan_duplicates(session, 1, settings=_S())
+    assert out["dups"] == [], "正被分享的那份不该进删除清单"
+    assert out["groups"][0]["skipped_shared"] == 1
+
+
+# ------------------------------------ 链接有效期:永久(2026-11-14)
+
+def test_share_expiration_defaults_to_permanent() -> None:
+    """★★ 事故本体:原来两处建链都写死 `"7"` ⇒ 每条迅雷链 7 天后必然失效。
+
+    实测同一文件夹: `"7"` → `expiration_at=2026-11-21`;`"-1"` → `expiration_at="-1"`(永久)。
+    ⚠️ 回退值**绝不能是正数** —— 那正是这次事故的口径。
+    """
+    class _Empty:
+        pass
+
+    assert xt.SHARE_EXPIRATION_DAYS == "-1"
+    assert xt.share_expiration_days(_Empty()) == "-1"
+
+
+def test_share_expiration_can_be_overridden() -> None:
+    class _S:
+        xunlei_share_expiration_days = "365"
+
+    assert xt.share_expiration_days(_S()) == "365"

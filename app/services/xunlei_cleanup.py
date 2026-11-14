@@ -94,6 +94,38 @@ def _source_latest(db: Session, user_id: int) -> list[tuple[str, datetime | None
 
 _LOOKBACK_DAYS = 30          # 只回看 30 天:更早的来源记录对"近一周有没有人发"无意义
 
+#: 我方分享链指向的 fid(**永不删**)。
+#:
+#: 两个来源都收,少一个都会漏 —— 它们记的是**不同批次**的转存:
+#:   · `xunlei_group_shares.fid`  = 群消息流转存进来的(带我们建好的链);
+#:   · `xunlei_resources.fid`     = 扫盘登记时给盘里已有资源开的链。
+#: 实测两表 fid 交集只有 **45** 条(2026-11-14),所以**不能只查一张表**。
+#:
+#: ⚠️ 只收 `our_url` 确实是我方迅雷链的行:`our_url` 为空/是夸克链的,fid 不代表"已发出"。
+#: ⚠️ 读失败 ⇒ 返回**空集并记日志**。这里的取舍与夸克那边相反:**空集 = 不保护**,
+#: 所以必须让人看见 —— 但也不能因为读不到就整轮不清理(那会让清理永远停摆)。
+def _shared_fids(db: Session, user_id: int) -> set[str]:
+    from app.db.models import XunleiResource
+
+    out: set[str] = set()
+    try:
+        for (fid,) in db.execute(
+                select(XunleiGroupShare.fid).where(
+                    XunleiGroupShare.user_id == user_id,
+                    XunleiGroupShare.fid != "",
+                    XunleiGroupShare.our_url.like("%pan.xunlei.com%"))).all():
+            out.add(str(fid))
+        for (fid,) in db.execute(
+                select(XunleiResource.fid).where(
+                    XunleiResource.user_id == user_id,
+                    XunleiResource.fid != "",
+                    XunleiResource.share_url.like("%pan.xunlei.com%"))).all():
+            out.add(str(fid))
+    except Exception:  # noqa: BLE001 - 读不到就退化成"不保护",但必须留痕
+        logger.exception("读我方迅雷分享链失败 ⇒ 本轮**没有**加上分享保护")
+        return set()
+    return out
+
 
 def _parse_time(v) -> datetime | None:
     if not v:
@@ -152,6 +184,18 @@ def plan(db: Session, user_id: int, days: int = 7, settings=None,
         return out
 
     sources = _source_latest(db, user_id)
+    #: ★★ **我方已发出分享链保护的 fid —— 永不删**(2026-11-14 加,与夸克 `KEEP_SHARED` 同一道边界)。
+    #:
+    #: ⚠️ **为什么非加不可**:这个作业按「N 天没人再提」删文件夹,但它**不知道那个文件夹
+    #: 正被我们自己的分享链指着**。删掉 = 已发出去的链立刻变成"已失效",
+    #: 而对方打开看到的那句话不会告诉我们原因。
+    #:
+    #: 实测(2026-11-14):`xunlei_resources` 里 6 条随机抽样的源文件
+    #: **12/12 全部 `file_not_found`** —— 这些资源包在盘上已经被删了,
+    #: 而库里那 1886 条分享链还留着、资源库还在往外给。
+    #: 同期 `xunlei_group_shares` 里带我方迅雷链的行有 **3167 条**,
+    #: 每天清理会删掉 `计划36~81 条`,与上面那个"源文件大面积消失"完全吻合。
+    protected_fids = _shared_fids(db, user_id)
     now = datetime.now()
     for f in items:
         if f.get("kind") != "drive#folder":
@@ -171,12 +215,23 @@ def plan(db: Session, user_id: int, days: int = 7, settings=None,
             #: 匹配到了但来源没有时间 ⇒ 用转存时间兜底(只在已确认监控到时)。
             last_seen, matched_by = created, "转存时间(已匹配)"
         idle = (now - last_seen).days if last_seen else None
+        #: ★ 我方分享链指着它 ⇒ 不管多久没人提都**不许删**(见 `_shared_fids`)。
+        #: 这一条要**独立于 `monitored`** 判:被分享的文件可能因为标题归一匹配不上
+        #: 而落进 `unmatched`(本来就不删),也可能匹配上了却"很久没人提" —— 后者正是会误删的那类。
+        shared = str(f.get("id") or "") in protected_fids
         row = {"name": str(f.get("name"))[:80], "id": str(f.get("id")),
                "created": created.isoformat()[:16] if created else "",
                "last_seen": last_seen.isoformat()[:16] if last_seen else "",
                "days_idle": idle, "matched_by": matched_by or "未匹配监控源",
-               "monitored": monitored}
+               "monitored": monitored, "shared": shared}
         out["folders"].append(row)
+        if shared:
+            #: 单列一个计数:运行记录里要能看见"护住了几个" —— 否则"没删"和"根本没扫到"一样。
+            #: ⚠️ 必须 `continue`:下面的 `unmatched`/`stale`/`keep` 分支各自会再加一次
+            #: `keep`,不跳过就**同一个文件夹记两遍**(总数对不上,而数字对不上时没人查得出来)。
+            out["kept_shared"] = int(out.get("kept_shared") or 0) + 1
+            out["keep"] += 1
+            continue
         if not monitored:
             #: 没匹配到监控源 ⇒ **永不删**,单独计数让人看见"盘里还有一批非监控文件"。
             out["unmatched"] += 1
@@ -201,8 +256,12 @@ def run_cleanup(db: Session, user_id: int, days: int = 7, settings=None,
     out = plan(db, user_id, days=days, settings=settings, cookie_key=cookie_key)
     if out.get("error"):
         return {**out, "deleted": 0, "dry_run": dry_run}
+    #: ⚠️ **`shared` 必须在这里再排一次**,不能只靠 `plan` 里那个计数:
+    #: `stale` 是**执行清单**,`plan` 里的 `keep` 只是统计 —— 少排这一下,保护的条目照样被删。
+    #: (这类"报告里算对了、执行器没照着做"的错本仓栽过:quark 的 report/apply 默认范围不一致。)
     stale = [f for f in out["folders"]
-             if f.get("monitored") and f["days_idle"] is not None and f["days_idle"] > days]
+             if f.get("monitored") and not f.get("shared")
+             and f["days_idle"] is not None and f["days_idle"] > days]
     limit = int(getattr(settings, "xunlei_cleanup_max_per_run", 20) or 20)
     todo = stale[:limit]
     result = {**out, "to_delete": len(stale), "deleted": 0, "errors": [],
@@ -352,6 +411,10 @@ def plan_duplicates(db: Session, user_id: int, settings=None) -> dict:
             continue
         out["scanned"] += 1
         groups[_SUFFIX_RE.sub("", str(f.get("name") or "")).strip()].append(f)
+    #: ★ 我方分享链指着的 fid 永不删(2026-11-14,与 `plan()` 同一道边界):
+    #: 这里"留无后缀的那份"是个启发式 —— 万一我们当初分享的恰好是带 `(1)` 的那份,
+    #: 按后缀删就会把我们**正发着的链**删掉。
+    protected_fids = _shared_fids(db, user_id)
 
     for base, fs in sorted(groups.items()):
         if len(fs) < 2:
@@ -366,9 +429,16 @@ def plan_duplicates(db: Session, user_id: int, settings=None) -> dict:
         if not same:
             logger.info("同名但**内容不同**,不动:%s", base)
             continue
+        #: 我方分享链指着的那份**不进删除清单**(它可能恰好是带 `(1)` 的那份)。
+        removable = [o for o in same if str(o["id"]) not in protected_fids]
+        skipped_shared = len(same) - len(removable)
+        if skipped_shared:
+            logger.info("同名去重**跳过 %d 份**:仍被我方分享链引用(%s)", skipped_shared, base)
         out["groups"].append({"base": base, "keep": keep.get("name"),
-                              "same": len(same), "total": len(fs)})
-        out["dups"].extend({"name": o.get("name"), "id": str(o["id"]), "base": base} for o in same)
+                              "same": len(removable), "total": len(fs),
+                              "skipped_shared": skipped_shared})
+        out["dups"].extend({"name": o.get("name"), "id": str(o["id"]), "base": base}
+                           for o in removable)
     return out
 
 

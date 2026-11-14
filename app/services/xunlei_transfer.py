@@ -29,6 +29,7 @@ import base64
 import hashlib
 import json
 import time
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import requests
@@ -906,15 +907,59 @@ def _extract_share_id(url: str) -> tuple[str, str]:
     return share_id, pwd
 
 
-def share_files(file_ids: list[str], expiration_days: str = "7",
+#: 我方发出的迅雷分享链的**有效期**(天)。`"-1"` = **永久**。
+#:
+#: ⚠️⚠️ **2026-11-14 实测定案**:这里原本写死 `"7"` —— 于是**我们发出去的每一条迅雷链
+#: 7 天后必然失效**。而夸克那边是 `expired_type=1`(永久),两边口径根本不一致。
+#:
+#: 实测证据(同一个文件夹 `B-不二定律 85`,同一个号,只改这一个参数):
+#:
+#: ```
+#: expiration_days="7"   → expiration_at=2026-11-21T17:22:37+08:00   (7 天后)
+#: expiration_days="-1"  → expiration_at="-1"                        (永久)
+#: ```
+#:
+#: 按 7 天口径算存量:`xunlei_resources` **1886/1886 全部已过期**、
+#: `xunlei_group_shares` 里迅雷链 **2578/3167 已过期** —— 这些链早就打不开了,
+#: 而库里一直留着它们、资源库还在往外给。**这不是"某条链坏了",是整批按设计到期。**
+#:
+#: 为什么不直接在每个调用点写 `"-1"`:`transfer_and_share`(转存后建链)与
+#: `share_files`(扫盘建链)是**同一个病**,做成**显式常量 + 可配**才能一处改、两处生效;
+#: 而"两个地方各写死一份 7"正是这次事故的形状。
+SHARE_EXPIRATION_DAYS = "-1"
+
+
+def share_expiration_days(settings: Any = None) -> str:
+    """本轮**新建分享链**该用多久的有效期(`"-1"` = 永久)。
+
+    `settings.xunlei_share_expiration_days` 可覆盖(默认 `"-1"`)。空/非法 ⇒ 回退默认 ——
+    **绝不能回退成 7**:那正是这次事故的口径。
+    """
+    if settings is None:
+        try:
+            from config.settings import get_settings
+
+            settings = get_settings()
+        except Exception:  # noqa: BLE001 - 读不到配置就用默认,不挡建链
+            settings = None
+    v = str(getattr(settings, "xunlei_share_expiration_days", "") or "").strip()
+    return v or SHARE_EXPIRATION_DAYS
+
+
+def share_files(file_ids: list[str], expiration_days: str | None = None,
                 cred: dict | None = None) -> dict:
     """把盘里已有的文件**生成我方分享链**。
 
     与 `transfer_and_share` 的区别:那个是"从别人的分享转存进来",这个是"盘里已经有了,
     给它开个分享" —— 扫盘登记(`xunlei_sync`)走这条。
 
+    `expiration_days=None` ⇒ 走 `share_expiration_days()`(**默认永久**,见上面那段实测)。
+    显式传值则照用(测试/一次性脚本要短链时)。
+
     返回 `{"status", "message", "share_url", "code"}`。
     """
+    if expiration_days is None:
+        expiration_days = share_expiration_days()
     cred = cred or _credentials()
     if not cred:
         return {"status": "failed", "message": "未配置迅雷凭据(需先扫码登录)"}
@@ -1242,7 +1287,10 @@ def transfer_and_share(share_url: str, parent_id: str = "", settings=None,
                                           "params": {"subscribe_push": "false",
                                                      "WithPassCodeInLink": "true"},
                                           "title": "云盘资源分享", "restore_limit": "-1",
-                                          "expiration_days": "7"}))
+                                          #: ⚠️ 这里原来也写死 "7" —— 与 `share_files` 同一个病
+                                          #: (我们发出去的链 7 天后必然失效)。见
+                                          #: `SHARE_EXPIRATION_DAYS` 那段实测。
+                                          "expiration_days": share_expiration_days()}))
         if not share.get("share_url"):
             return {"status": "failed", "message": f"生成分享失败:{str(share)[:160]}"}
         return {"status": "ok", "message": "转存并分享成功",
