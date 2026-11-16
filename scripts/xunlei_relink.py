@@ -121,8 +121,13 @@ def main() -> int:
         if not creds:
             print("没有可用凭据 —— 先扫码登录")
             return 2
-        #: 默认号优先:实测存活的源文件**全部**在默认号上(fid 与转存它的号绑定),
-        #: 所以先探它,命中就不必再问其余三个号(省 3 倍请求)。
+        #: 默认号优先(fid 与转存它的号绑定,大多数存量是默认号转的)。
+        #: ⚠️ **但绝不是"全部在默认号上"**(2026-11-16 订正):全量探活实测
+        #: `exists` 678 条里 **668 在 `xunlei`、10 在 `xunlei#2`**;受控复核那 10 条,
+        #: **只有 `xunlei#2` 说 exists、其余三号全 `not_found`** —— 即"只在某一个号上",
+        #: 少问一个号就会把它误判成源已丢。
+        #: 下面的循环只在 `exists` 时 break;`not_found` **会继续问下一个号**,
+        #: 所以"默认号优先"只影响**请求顺序**,不改变判死口径(四号全否才判 not_found)。
         order = ["xunlei"] + [k for k in creds if k != "xunlei"]
 
         cache = _load_cache(a.cache) if a.resume else {}
