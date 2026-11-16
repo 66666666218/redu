@@ -194,6 +194,26 @@ def test_xunlei_resources_skips_rows_without_share_url(session) -> None:
     assert search_resources(session, 1, "没链的资源", days=365, limit=10) == []
 
 
+def test_xunlei_resources_skips_dead_rows(session) -> None:
+    """⚠️ **`status='dead'` 的行不进库**(2026-11-16)。
+
+    那批是已实测"源文件不在盘上、链也重建不了"的。留着它们 = 资源库会回答
+    **一条必然打不开的链**,比回答"没有"更糟 —— 会让人以为已有、不再去搬。
+    """
+    from app.db.models import XunleiResource
+    from app.services.resource_library import search_resources
+
+    _mk_xl(session, "已死的资源", "https://pan.xunlei.com/s/DEAD?pwd=x")
+    session.add(XunleiResource(user_id=1, fid="fid-dead", name="已死的资源2",
+                               kind="drive#folder", share_url="https://pan.xunlei.com/s/DEAD2",
+                               pass_code="x", status="dead",
+                               synced_at=datetime.now() - timedelta(days=1)))
+    session.commit()
+    assert search_resources(session, 1, "已死的资源2", days=365, limit=10) == []
+    #: 对照组:同一批里活着的那条**照旧能搜到** —— 否则这条测试可能只是"什么都没搜到"
+    assert len(search_resources(session, 1, "已死的资源", days=365, limit=10)) == 1
+
+
 def test_search_dedupes_across_sources(session) -> None:
     """同一条链既在公众号、又在我们迅雷盘里 → **只出一次**(公众号优先,它带"多少号同发")。"""
     from app.services.resource_library import search_resources

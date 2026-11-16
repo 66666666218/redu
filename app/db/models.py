@@ -823,6 +823,12 @@ class XunleiResource(Base):
     parent_name: Mapped[str] = mapped_column(String(128), default="")  # 所在目录名(看来源)
     share_url: Mapped[str] = mapped_column(String(500), default="")   # **我方**分享链
     pass_code: Mapped[str] = mapped_column(String(32), default="")    # 提取码
+    #: ★ 2026-11-16:源的**存活状态**。'dead' = 已实测源文件不在盘上、链也无法重建
+    #: (那批 7 天到期的存量里,约 2/3 的源文件已经被清理作业删掉了)。
+    #: 资源库/发现链**不再把 dead 行当成"已有链"** —— 否则会拿一条必然打不开的链
+    #: 去回答"我们有没有这个资源",那是比"没有"更糟的答案。
+    #: 空串 = 正常(老行没有这一列时的语义,按正常处理)。
+    status: Mapped[str] = mapped_column(String(16), default="")
     synced_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 

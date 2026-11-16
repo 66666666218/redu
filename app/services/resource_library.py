@@ -211,8 +211,12 @@ def _xunlei_resources(session: Session, user_id: int, query: str = "",
     """
     from app.db.models import XunleiResource
 
+    #: ⚠️ **跳过 `status='dead'`**(2026-11-16):那批是已实测"源文件不在盘上、链也重建不了"
+    #: 的行。留着它们 = 资源库会对"我们有没有这个资源"回答**一条必然打不开的链**,
+    #: 比回答"没有"更糟(会让人以为已有、不再去搬)。空串 = 正常情况下同一条 SQL 照旧。
     stmt = select(XunleiResource).where(XunleiResource.user_id == user_id,
-                                       XunleiResource.share_url != "")
+                                       XunleiResource.share_url != "",
+                                       XunleiResource.status != "dead")
     if days:
         stmt = stmt.where(XunleiResource.synced_at >= datetime.now() - timedelta(days=days))
     rows = session.scalars(stmt.order_by(XunleiResource.synced_at.desc())).all()
@@ -527,9 +531,12 @@ def fuzzy_have(session: Session, user_id: int, names: list[str], days: int = 180
     for title, link in rows:
         _add(str(title or ""), str(link or ""), "发现链(近似名)")
 
+    #: 同 `_xunlei_resources`:dead 行不许当"我们已有"的证据(否则会拿一条必死的链
+    #: 去回答"已有",让人不再去搬)
     rows = session.execute(select(XunleiResource.name, XunleiResource.share_url)
                            .where(XunleiResource.user_id == user_id,
-                                  XunleiResource.share_url != "").limit(scan)).all()
+                                  XunleiResource.share_url != "",
+                                  XunleiResource.status != "dead").limit(scan)).all()
     for title, link in rows:
         _add(str(title or ""), str(link or ""), "迅雷盘(近似名)")
 

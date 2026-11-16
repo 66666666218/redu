@@ -383,6 +383,9 @@ ADDITIONS: dict[str, list[str]] = {
     "demand_scans": ["platform VARCHAR(16) DEFAULT 'douyin'",
                      "has_group BOOLEAN DEFAULT 0",
                      "topic_ok BOOLEAN DEFAULT 1"],
+    # 网盘资源的存活状态(2026-11-16):'dead' = 源文件已不在盘上、链也重建不了。
+    # 存量行空串 = 正常(老行没这一列时的语义,读取端按 `or ""` 处理)。
+    "xunlei_resources": ["status VARCHAR(16) DEFAULT ''"],
     # 对标号作品要带**网盘凭据**(2026-10-29):`mark`=《》/咐置口令,`pan_url`=正文直链。
     # 存量行两列都空 ⇒ 按"不带网盘"处理(正好与人想要的"只推带网盘的"一致)。
     # `publish_at`(2026-11-09):**作品发布时间**。加它之前只有 `first_seen_at`(我们第一次
