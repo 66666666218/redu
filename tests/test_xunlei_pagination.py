@@ -31,7 +31,7 @@ class TestListAllFiles:
         monkeypatch.setattr(xt, "_credentials", lambda *a, **k: {"access_token": "x"})
         monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
         monkeypatch.setattr(xt, "_fresh_cred", lambda c: c)
-        monkeypatch.setattr(xt, "_with_captcha_retry", lambda fn: fn())
+        monkeypatch.setattr(xt, "_with_captcha_retry", lambda fn, cred=None: fn())
         seen: list[str] = []
 
         def _get(url, headers=None, timeout=None, params=None):
@@ -70,7 +70,7 @@ class TestListAllFiles:
         monkeypatch.setattr(xt, "_credentials", lambda *a, **k: {"access_token": "x"})
         monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
         monkeypatch.setattr(xt, "_fresh_cred", lambda c: c)
-        monkeypatch.setattr(xt, "_with_captcha_retry", lambda fn: fn())
+        monkeypatch.setattr(xt, "_with_captcha_retry", lambda fn, cred=None: fn())
         monkeypatch.setattr(xt.requests, "get", lambda *a, **k: _Resp(
             {"files": [{"id": "x", "name": "n"}], "next_page_token": "永远有下一页"}))
         with caplog.at_level(logging.WARNING):
@@ -78,3 +78,21 @@ class TestListAllFiles:
         assert len(out) == 3
         assert any("没列完" in r.message or "上限" in r.message for r in caplog.records), \
             "撞上限必须说出来,否则读的人会以为列完了"
+
+    def test_翻页要把凭据传给captcha重试(self, monkeypatch) -> None:
+        """★ 2026-11-17:`list_all_files` 曾漏传 `cred` —— 2 号盘 captcha 过期时铸的是 1 号的,
+        续期白做、症状只是"列目录失败"。断言第二个参数**就是**调用方传进来的那份凭据。"""
+        mine = {"access_token": "2号的"}
+        monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
+        monkeypatch.setattr(xt, "_fresh_cred", lambda c: c)
+        got: list[object] = []
+
+        def _retry(fn, cred=None):
+            got.append(cred)
+            return fn()
+
+        monkeypatch.setattr(xt, "_with_captcha_retry", _retry)
+        monkeypatch.setattr(xt.requests, "get", lambda *a, **k: _Resp(
+            {"files": [], "next_page_token": ""}))
+        xt.list_all_files("", cred=mine)
+        assert got == [mine], f"续期必须铸这个号的 captcha,实际拿到:{got}"

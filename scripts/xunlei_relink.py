@@ -57,6 +57,13 @@ def _probe(xt, fid: str, cred: dict) -> str:
     `{"kind": "drive#folder", "id": …, "name": "H 回乡BL44", …}` —— **没有 `file` 键**。
     11-14 有个一次性作业用 `'在' if r.get('file') else '无'` 判存活 ⇒ 恒为假 ⇒
     它打印的「源文件=无」**连"存在"都表达不出来**(那份输出还被误当成证据用了两天)。
+
+    ⚠️⚠️ **`_once()` 里的响应必须过一遍 `xt._json(r)`**(2026-11-17 又踩一次):
+    `_with_captcha_retry` 只捕 `_CaptchaExpired`,而**只有 `_json()` 会把它抛出来** ——
+    写成裸 `requests.get(...)` 再自己 `.json()`,`_with_captcha_retry` 就**全程空转**:
+    captcha 过期时它不会续期、直接把这发 `400 captcha_invalid` 当成结果返回
+    (实测:同一个号同一个 fid,裸请求 400、强制铸新 captcha 后立刻 200)。
+    ⇒ 这个包装**看起来在防护、实际一条都没护住**,是本仓最忌讳的那种静默失效。
     """
     import requests
 
@@ -64,7 +71,7 @@ def _probe(xt, fid: str, cred: dict) -> str:
         r = requests.get(f"{xt._API}/drive/v1/files/{fid}",
                          headers=xt._drive_headers(xt._fresh_cred(cred)),
                          timeout=xt._TIMEOUT)
-        d = xt._json(r)               # captcha_invalid 会在这里抛 → 走重试
+        d = xt._json(r)               # ★ 必须在 try 里调用:captcha_invalid 会在这里抛 → 走重试
         if r.status_code == 200:
             return "exists"
         if r.status_code == 404 or str(d.get("error") or "") == "file_not_found":

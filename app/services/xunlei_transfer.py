@@ -1072,7 +1072,11 @@ def list_all_files(parent_id: str = "", cred: dict | None = None, page_size: int
                 raise XunleiDriveError(f"HTTP {r.status_code}: {str(data)[:120]}")
             return data
         try:
-            data = _with_captcha_retry(_once)
+            #: ⚠️ **必须把 `cred` 传进去**(2026-11-17 修):`_with_captcha_retry` 的第二个参数
+            #: 决定"续期时铸**哪个号**的 captcha"。漏了它就退回默认号 —— 于是**用 2 号的凭据
+            #: 列目录、captcha 过期时铸的是 1 号的**,续期等于白做,而症状只是"列目录失败"
+            #: (本仓母题:静默失效)。`list_files`(1032 行)一直传了,这里漏了。
+            data = _with_captcha_retry(_once, cred)
         except XunleiDriveError:
             raise
         except Exception as exc:  # noqa: BLE001
