@@ -113,7 +113,7 @@ def clean_quark(db: Session, user_id: int, settings, *, dry_run: bool, left: int
         try:
             qt = QuarkTransfer(ck, fid_store=store)
             plan = quark_dup.build_plan(qt, mmdd_prefix=scope, depth=2, cache=cache,
-                                        ttl_hours=ttl)
+                                        ttl_hours=ttl, label=label)
         except QuarkAuthError as exc:
             errors.append(f"{label}:登录态失效({str(exc)[:40]})")
             continue

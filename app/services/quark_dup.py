@@ -135,8 +135,29 @@ def intro_protect_dirs(settings: Any = None) -> tuple[str, ...]:
     return tuple(out)
 
 
+def _label_of(qt: Any, label: str = "") -> str:
+    """账号标签,只为让日志能分清**是哪个号**说的。
+
+    ⚠️ **为什么必须带上**(2026-11-16 我亲自被坑):`pan_auto_clean` 逐号跑,
+    日志里 `简介目录「…」找不到` 与 `简介护2` 并排出现,看着像自相矛盾 ——
+    实际是**夸克2 没有这个目录(护 0)**、**夸克1 有(护 2)** 两句话拼在一起。
+    没有号名,读者只能猜,而"猜"在这个仓已经产出过好几次假结论。
+
+    优先用调用方显式传的 `label`(`QuarkTransfer` **没有**账号身份,只有一个 cookie);
+    真拿不到就退化成空串 —— **绝不去猜**(拿 cookie 前几位当号名比不写更糟)。
+    """
+    if str(label or "").strip():
+        return str(label).strip()
+    for attr in ("cookie_key", "label", "account_label"):
+        v = str(getattr(qt, attr, "") or "").strip()
+        if v:
+            return v
+    return ""
+
+
 def collect_intro_protect(qt: Any, dirs: Sequence[str], *,
-                          settings: Any = None) -> tuple[set[str], set[str], list[dict]]:
+                          settings: Any = None,
+                          label: str = "") -> tuple[set[str], set[str], list[dict]]:
     """把简介目录**里面的文件**收进保护名单 → `(fids, names, 明细)`。**只读。**
 
     ⚠️ **名字与 fid 两个维度都要收,少一个都漏**:
@@ -151,16 +172,20 @@ def collect_intro_protect(qt: Any, dirs: Sequence[str], *,
     fids: set[str] = set()
     names: set[str] = set()
     detail: list[dict] = []
+    #: 日志必须带**号名**:`pan_auto_clean` 逐号调本函数,两个号的结果并排看时
+    #: 「找不到」与「护 N」会像同一句话自相矛盾(2026-11-16 实际坑了我一次)。
+    label = _label_of(qt, label)
+    who = f"({label})" if label else ""
     for d in dirs:
         try:
             fid = qt.resolve_named_dir(d)
             items = qt._list_dir(fid) if fid else []
         except Exception as exc:  # noqa: BLE001 - 取不到简介目录不该拖垮整轮清理
-            logger.warning("取简介目录「%s」失败,本轮**没有**加上简介保护:%s",
-                           d, str(exc)[:100])
+            logger.warning("取简介目录「%s」失败%s,本轮**没有**加上简介保护:%s",
+                           d, who, str(exc)[:100])
             continue
         if not fid:
-            logger.warning("简介目录「%s」在盘里找不到,本轮**没有**加上简介保护", d)
+            logger.warning("简介目录「%s」在盘里找不到,本轮**没有**加上简介保护%s", d, who)
             continue
         for it in items:
             nm = str(it.get("file_name") or "")
@@ -175,17 +200,19 @@ def collect_intro_protect(qt: Any, dirs: Sequence[str], *,
 
 
 def refresh_protect(qt: Any, dirs: Sequence[str] | None = None, *,
-                    settings: Any = None
+                    settings: Any = None, label: str = ""
                     ) -> tuple[set[str], set[str], int, list[dict]]:
     """**现场**重取保护名单 = 我方分享链 + 我方简介目录 → `(fids, names, 分享条数, 简介明细)`。
 
     ⚠️ **执行前必须重取一次**:计划可能是十几分钟前扫的,这期间可能又发了新链、
     也可能像 2026-10-13 那样刚把简介换了个名字 —— 拿一份过期名单去删,
     就是拿一份已经失效的安全清单动手(而"失效"这件事在结果里看不出来)。
+
+    `label` = 账号标签,只用于日志(见 `collect_intro_protect`)。
     """
     fids, names, n = protected_fids(qt)
     use = intro_protect_dirs(settings) if dirs is None else tuple(dirs)
-    i_fids, i_names, detail = collect_intro_protect(qt, use, settings=settings)
+    i_fids, i_names, detail = collect_intro_protect(qt, use, settings=settings, label=label)
     if detail:
         logger.info("简介保护名单:%d 个文件(来自 %s)→ %s",
                     len(detail), list(use), [x["name"] for x in detail])
@@ -372,7 +399,8 @@ def classify(files: list[dict], prot_fids: set[str], prot_names: set[str], *,
 def build_plan(qt: Any, *, home_prefix: str = "redian监听", mmdd_prefix: str = "",
                depth: int = 2, budget_cap: int | None = None,
                cache: ScanCache | None = None, ttl_hours: float = 8.0,
-               protect_dirs: Sequence[str] | None = None) -> dict:
+               protect_dirs: Sequence[str] | None = None,
+               label: str = "") -> dict:
     """扫描并给出清理计划。**本函数只读,不删任何东西。**
 
     `depth=2`(家 → 资源目录 → 文件):实测跨目录重复都出现在这一层,而每深一层
@@ -403,6 +431,10 @@ def build_plan(qt: Any, *, home_prefix: str = "redian监听", mmdd_prefix: str =
     `protect_dirs` = 我们自己的**宣传简介目录**(默认 `None` = 从 settings 现取;
     传 `()` = 刻意不加,离线测试用)。这些目录里的文件**永不删** —— 见
     `collect_intro_protect` 里的说明:它们会被复制进每个资源,而恰恰最容易被判成"引流"或"重复"。
+
+    `label` = 账号标签,只用于日志。⚠️ `QuarkTransfer` **不带账号身份**(它只有一个
+    cookie 串),所以"这个号盘里没有简介目录"这句话不带 label 就分不清是谁说的 ——
+    2026-11-16 实测:夸克2 没有(护 0)、夸克1 有(护 2),两条日志并排看像自相矛盾。
     """
     budget = {"n": 0, "cap": budget_cap or scan_budget()}
     homes = list_homes(qt, home_prefix)
@@ -439,7 +471,8 @@ def build_plan(qt: Any, *, home_prefix: str = "redian监听", mmdd_prefix: str =
         scanned.append(nm)
         if cache:
             cache.put_home(nm, fid, got, depth)
-    prot_fids, prot_names, n_shares, intro_detail = refresh_protect(qt, protect_dirs)
+    prot_fids, prot_names, n_shares, intro_detail = refresh_protect(
+        qt, protect_dirs, label=label)
     out = classify(files, prot_fids, prot_names, mmdd_prefix=mmdd_prefix, home_order=order)
     out.update({"scanned_homes": len(homes), "scanned_files": len(files),
                 "calls": budget["n"], "protected": len(prot_fids), "shares": n_shares,

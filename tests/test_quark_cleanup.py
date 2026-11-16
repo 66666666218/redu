@@ -474,6 +474,50 @@ def test_简介目录取不到时不崩也不改判据() -> None:
     assert plan["delete"], "取不到简介目录时,判据必须与旧版一致(该删的还是删)"
 
 
+def test_简介目录找不到时日志要带号名(caplog) -> None:
+    """★★ 2026-11-16 被这条坑过:`pan_auto_clean` **逐号**跑,两个号的日志并排出现 ——
+
+        简介目录「…」在盘里找不到,本轮**没有**加上简介保护
+        夸克自动去重(夸克1):简介保护名单为**空**…
+
+    看起来像「同一句话自相矛盾」。真实情况是**夸克2 盘里没有这个目录(护 0)**、
+    **夸克1 有(护 2)**,两句话说的是不同的号。没有号名,读者只能猜 ——
+    而在这个仓,"猜"已经产出过好几次假结论(`falsification-needs-control-variables`)。
+    """
+    import logging
+
+    from app.services import quark_dup
+
+    class _NoDirQt(_IntroQt):
+        cookie_key = "quark#2"
+
+        def resolve_named_dir(self, name):
+            return ""            # 这个号盘里**没有**简介目录
+
+    with caplog.at_level(logging.WARNING, logger=quark_dup.logger.name):
+        quark_dup.collect_intro_protect(_NoDirQt(), ("/监听宣传",), label="夸克2")
+    msg = " ".join(r.getMessage() for r in caplog.records)
+    assert "找不到" in msg and "夸克2" in msg, f"日志里没有号名,分不清是哪个号:{msg}"
+
+
+def test_取简介目录抛错时日志也要带号名(caplog) -> None:
+    """同上:异常那条路径也一样,否则"哪个号挂了"同样看不出来。"""
+    import logging
+
+    from app.services import quark_dup
+
+    class _BoomQt(_IntroQt):
+        cookie_key = "quark#3"
+
+        def resolve_named_dir(self, name):
+            raise RuntimeError("网络抖了")
+
+    with caplog.at_level(logging.WARNING, logger=quark_dup.logger.name):
+        quark_dup.collect_intro_protect(_BoomQt(), ("/监听宣传",))
+    msg = " ".join(r.getMessage() for r in caplog.records)
+    assert "失败" in msg and "quark#3" in msg, f"日志里没有号名:{msg}"
+
+
 # ---------------------------------------------------------------------------
 # ★★ 快照 TTL 与「多轮收敛」(2026-10-15)
 #
