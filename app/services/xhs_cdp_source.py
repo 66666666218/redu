@@ -42,6 +42,7 @@ import urllib.request
 from pathlib import Path
 
 from app.utils import get_logger
+from app.utils import winproc
 
 #: ★ **单一来源**:常量与解析全部从页面路借,不复制第二份
 #: (本仓母题:同一件事写两处 ⇒ 迟早各飘各的)。
@@ -137,7 +138,8 @@ def _profile_browser_running(d: Path) -> bool:
         ps = ("(Get-CimInstance Win32_Process -Filter \"Name='msedge.exe' or Name='chrome.exe'\" | "
               f"Where-Object {{ $_.CommandLine -like '*{d}*' }} | Measure-Object).Count")
         p = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                           capture_output=True, timeout=30)
+                           capture_output=True, timeout=30,
+                           creationflags=winproc.flags())
         return int((p.stdout or b"0").decode("utf-8", "ignore").strip() or 0) > 0
     except Exception:  # noqa: BLE001 - 查不到就当没在跑(退化成"只看端口")
         return False
@@ -199,7 +201,8 @@ def ensure_running(settings=None, *, wait_s: float = 15.0) -> tuple[bool, str]:
             [exe, f"--remote-debugging-port={port}", f"--user-data-dir={d}",
              "--no-first-run", "--no-default-browser-check",
              "https://www.xiaohongshu.com/explore"],
-            cwd=str(Path(__file__).resolve().parents[2]))
+            cwd=str(Path(__file__).resolve().parents[2]),
+            creationflags=winproc.flags())  # GUI 程序用不上,但守卫要一条无例外的规则
     except Exception as exc:  # noqa: BLE001 - 起不来就如实说,别假装起来了
         return False, f"起浏览器失败:{type(exc).__name__}: {str(exc)[:80]}"
     deadline = time.time() + max(1.0, wait_s)

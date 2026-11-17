@@ -1683,6 +1683,31 @@ python scripts/job_liveness.py --strict   # 有"从没跑过/已超期"就退出
 - 启动方式:`scripts/win/app_watchdog.bat` —— 先探 `http://127.0.0.1:8080/healthz`,
   通了就退出(幂等);不通才拉起 uvicorn(隐藏窗口,日志追加到 `data/app.log`)。
   `scripts/win/start_hidden.vbs` 是无窗口包装,给计划任务用。
+- ★ **子进程不许弹黑框(2026-11-17,用户口径「能否在运行的时候终端不要在显示出来在后台」)**:
+
+  **服务本身早就是无窗口的**(上面那两条: `pythonw.exe` + `wscript`)—— 但**子进程会弹窗**。
+  机理:`pythonw.exe` 自己**不分配控制台**,于是它 `subprocess` 起任何**控制台子系统**程序
+  (`powershell` / `cmd` / `docker` / `adb` / `netstat` / `taskkill` / 另一个 `python.exe`)时,
+  Windows 会**为子进程新建一个可见控制台** ⇒ 用户看到「终端一闪一闪」。
+  ⇒ **不是服务的启动方式错了,是每一处 `subprocess` 少了 `creationflags`。**
+
+  | 判据/做法 | 说明 |
+  |---|---|
+  | 唯一出处 | `app/utils/winproc.flags()`(Windows 上 `0x08000000` = `CREATE_NO_WINDOW`,其它平台 `0`) |
+  | 写法 | `subprocess.run/Popen(..., creationflags=winproc.flags())` |
+  | 守卫 | `tests/test_winproc.py` 用 **AST** 扫 `app/**/*.py` + `scripts/win/*.py` 的**每一条**子进程,漏一条就红 |
+  | ❌ 别用 | `powershell -WindowStyle Hidden` —— 那是**起来之后再隐藏**,窗口仍然闪一下,且管不住 `cmd`/`adb`/`docker` |
+  | ❌ 别用 | 把 `python.exe` 换成 `pythonw.exe` —— 父进程本来就是 `pythonw`,管不到子进程 |
+
+  实测对照(本机 `EnumWindows` 只枚举**可见**窗口,前后做差,只改一个变量):
+
+  ```
+  Popen([cmd, ...])                                  ⇒ 新增可见窗口 CASCADIA_HOSTING_WINDOW_CLASS [cmd.exe]
+  Popen([cmd, ...], creationflags=CREATE_NO_WINDOW)  ⇒ 新增可见窗口 0 个
+  ```
+
+  ⚠️ **别只测「服务能不能起来」**:弹窗**不影响**功能(管道、退出码、日志全都照旧),
+  所以只有**看着屏幕**或者像上面那样枚举窗口才看得见 —— 这类缺陷不会被任何功能测试发现。
 - 计划任务(2026-09-28 实装):**`scripts/win/install_tasks.bat` 一键注册**——
   ① 每小时看门狗 `RedianMonitor_Watchdog`(用户级 schtasks,免管理员,实测可建);
   ② 登录自启走**启动文件夹**(`%APPDATA%\...\Startup\RedianMonitor_AutoStart.vbs`)。

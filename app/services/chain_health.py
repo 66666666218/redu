@@ -22,6 +22,7 @@ import sys
 from datetime import datetime, timedelta
 
 from app.utils import get_logger
+from app.utils import winproc
 
 logger = get_logger(__name__)
 
@@ -178,7 +179,8 @@ def check_dependencies(settings=None) -> list[dict]:
     try:
         r = subprocess.run(["docker", "ps", "-a", "--filter", "name=newsnow",
                             "--format", "{{.Status}}"],
-                           capture_output=True, text=True, timeout=15)
+                           capture_output=True, text=True, timeout=15,
+                           creationflags=winproc.flags())
         st = (r.stdout or "").strip()
         add("newsnow 容器(热榜长尾)", bool(st) and st.startswith("Up"),
             st or "容器不存在 —— 本机 role=hotspot 需要它,且 .env 要配 HOT_NEWSNOW_URL")
@@ -214,7 +216,8 @@ def check_leaked_browsers() -> list[dict]:
               "Where-Object { $_.CommandLine -like '*MediaCrawler*browser_data*' } | "
               "Measure-Object).Count")
         p = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                           capture_output=True, timeout=60)
+                           capture_output=True, timeout=60,
+                           creationflags=winproc.flags())
         n = int((p.stdout or b"0").decode("utf-8", "ignore").strip() or 0)
     except Exception as exc:  # noqa: BLE001 - 查不到就说不知道,别报成"有残留"
         return [{"name": "采集浏览器残留", "level": YELLOW,

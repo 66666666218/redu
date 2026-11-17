@@ -29,6 +29,7 @@ import time
 from pathlib import Path
 
 from app.utils import get_logger
+from app.utils import winproc
 
 logger = get_logger(__name__)
 
@@ -94,7 +95,8 @@ def kill_stale_browsers() -> int:
     )
     try:
         p = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                           capture_output=True, timeout=60)
+                           capture_output=True, timeout=60,
+                           creationflags=winproc.flags())
         n = len([x for x in p.stdout.decode("utf-8", "ignore").split() if x.strip().isdigit()])
     except Exception:  # noqa: BLE001 - 清理失败绝不能挡住采集
         logger.debug("清理残留浏览器失败", exc_info=True)
@@ -266,7 +268,8 @@ def crawl(platform: str, keywords: list[str], timeout: int = 600,
             # profile,这次起来就撞锁 —— 失败于是**自我延续**。
             kill_stale_browsers()
             try:
-                proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, timeout=timeout)
+                proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, timeout=timeout,
+                                      creationflags=winproc.flags())
             except subprocess.TimeoutExpired as exc:
                 # 最常见的无人值守失败:等扫码等到超时(600s)。必须冒泡,否则这轮会被当成"没线索"。
                 raise MediaCrawlerError(f"{platform} 超时({timeout}s)——多半卡在扫码登录") from exc

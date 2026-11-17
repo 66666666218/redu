@@ -42,6 +42,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from app.utils import get_logger
+from app.utils import winproc
 from app.services.chain_delivery import mark_newly_moved
 
 logger = get_logger(__name__)
@@ -155,7 +156,8 @@ def resolve(text: str, *, save: bool = True, timeout: int = _UI_TIMEOUT) -> dict
         cmd = [sys.executable, str(UI_SCRIPT), str(text)]
         if save:
             cmd.append("--save")          # ⚠️ 漏传这个 ⇒ 只会解析出名字、**永远不保存**
-        r = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout,
+                       creationflags=winproc.flags())
     except subprocess.TimeoutExpired:
         return {"ok": False, "reason": f"UI 流程超时({timeout}s) —— 模拟器可能卡住了"}
     except Exception as exc:  # noqa: BLE001
@@ -249,7 +251,7 @@ def _snapshot_failure() -> str:
         r = _sp.run([sys.executable, "-c",
                      "import sys; sys.path.insert(0,'tools');"
                      "from quark_kouling_ui import snapshot; print(snapshot('nosave'))"],
-                    capture_output=True, timeout=90)
+                    capture_output=True, timeout=90, creationflags=winproc.flags())
         return (r.stdout or b"").decode("utf-8", "replace").strip()
     except Exception:  # noqa: BLE001 - 截图是诊断附属品,失败不影响判定
         return ""
@@ -574,7 +576,8 @@ def _adb(args: list[str], timeout: int = 30) -> tuple[bool, str]:
     import subprocess
 
     try:
-        r = subprocess.run([ADB, *args], capture_output=True, timeout=timeout)
+        r = subprocess.run([ADB, *args], capture_output=True, timeout=timeout,
+                          creationflags=winproc.flags())
         out = (r.stdout or b"").decode("utf-8", "replace").strip()
         err = (r.stderr or b"").decode("utf-8", "replace").strip()
         return r.returncode == 0, out or err

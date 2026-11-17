@@ -10,6 +10,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from app.utils import winproc  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[2]           # D:\code\redian(脚本在 scripts/win/ 下,两层)
 BACKUP_DIR = ROOT / "data" / "backups"
 REPO = Path(r"D:\code\redu-backup")
@@ -18,8 +22,10 @@ MARK = ROOT / "data" / ".offsite_backup_done"
 
 
 def git(args: list[str]) -> subprocess.CompletedProcess:
+    """⚠️ `git` 是控制台程序,而本脚本由 `pythonw.exe` 计划任务每半小时拉起一次 ——
+    不加 `creationflags` 就会**每小时**在桌面上闪一个黑框(2026-11-17 实测机理)。"""
     return subprocess.run(["git", *args], cwd=REPO, capture_output=True,
-                          text=True, timeout=300)
+                          text=True, timeout=300, creationflags=winproc.flags())
 
 
 def main() -> int:

@@ -29,6 +29,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.utils import get_logger
+from app.utils import winproc
 
 logger = get_logger(__name__)
 
@@ -90,7 +91,8 @@ def _find_adb(explicit: str = "") -> str:
 def _run(adb: str, *args: str, timeout: int = 120, serial: str = "") -> str:
     """跑一次 adb。`serial` 非空时插 `-s <serial>`(**多开时必须指定**,见 `pull_from_emulator`)。"""
     prefix = ("-s", serial) if serial else ()
-    p = subprocess.run([adb, *prefix, *args], capture_output=True, timeout=timeout)
+    p = subprocess.run([adb, *prefix, *args], capture_output=True, timeout=timeout,
+                       creationflags=winproc.flags())
     return (p.stdout + p.stderr).decode("utf-8", "replace").strip()
 
 
@@ -179,7 +181,7 @@ def ensure_emulator(serial: str = "", *, adb: str = "", timeout: float = 120.0) 
             return False
         logger.info("按需启动模拟器:index=%s(serial=%s)", idx, serial or "-")
         subprocess.run([exe, "launch", "--index", str(idx)],
-                       capture_output=True, timeout=60)
+                       capture_output=True, timeout=60, creationflags=winproc.flags())
         deadline = time.time() + max(10.0, timeout)
         while time.time() < deadline:
             time.sleep(3)
@@ -207,7 +209,7 @@ def quit_emulator(serial: str = "", *, adb: str = "") -> bool:
         if not exe or idx is None:
             return False
         subprocess.run([exe, "quit", "--index", str(idx)],
-                       capture_output=True, timeout=60)
+                       capture_output=True, timeout=60, creationflags=winproc.flags())
         logger.info("模拟器已按需关闭:index=%s", idx)
         return True
     except Exception:  # noqa: BLE001 - 关不掉不影响本次已取到的 token
@@ -247,7 +249,7 @@ def pull_from_emulator(adb: str = "", tmpdir: str | None = None,
                          ("/sdcard/_wa.db-wal", local + "-wal"),
                          ("/sdcard/_wa.db-shm", local + "-shm")):
             subprocess.run([exe, *(("-s", serial) if serial else ()), "pull", src, dst],
-                           capture_output=True, timeout=180)
+                           capture_output=True, timeout=180, creationflags=winproc.flags())
         if not Path(local).exists():
             raise RuntimeError("拉取账号库失败(微信读书可能没登录)")
         con = sqlite3.connect(local)
@@ -423,7 +425,7 @@ def wake_app(adb: str = "", wait: float = 8.0, serial: str = "") -> bool:
     try:
         subprocess.run([exe, *(("-s", serial) if serial else ()),
                         "shell", "am", "start", "-n", WEREAD_ACT],
-                       capture_output=True, timeout=60)
+                       capture_output=True, timeout=60, creationflags=winproc.flags())
         time.sleep(wait)
         return True
     except Exception:  # noqa: BLE001 - 唤醒失败就照旧试一次,别把整轮带崩

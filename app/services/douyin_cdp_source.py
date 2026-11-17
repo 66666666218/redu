@@ -43,6 +43,7 @@ import urllib.request
 from pathlib import Path
 
 from app.utils import get_logger
+from app.utils import winproc
 
 logger = get_logger(__name__)
 
@@ -147,7 +148,8 @@ def _close_browser(port: int) -> bool:
     浏览器照旧开着(实测)。
     """
     try:
-        out = subprocess.run(["netstat", "-ano"], capture_output=True, timeout=15)
+        out = subprocess.run(["netstat", "-ano"], capture_output=True, timeout=15,
+                             creationflags=winproc.flags())
         text = (out.stdout or b"").decode("utf-8", "ignore")
     except Exception:  # noqa: BLE001 - 查不到就当没关掉
         return False
@@ -155,7 +157,8 @@ def _close_browser(port: int) -> bool:
             if f":{port}" in line and "LISTENING" in line.upper()}
     for pid in pids:
         if pid.isdigit():
-            subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True, timeout=10)
+            subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True, timeout=10,
+                           creationflags=winproc.flags())
     return bool(pids)
 
 
@@ -178,7 +181,8 @@ def ensure_running(settings=None) -> tuple[bool, str]:
                           f"--user-data-dir={prof}", "--no-first-run",
                           "--no-default-browser-check", "--start-minimized",
                           "about:blank"],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         creationflags=winproc.flags())  # GUI 程序用不上,守卫要一条无例外规则
     except Exception as exc:  # noqa: BLE001 - 起不来要如实报
         raise DouyinCdpError(f"启动浏览器失败:{type(exc).__name__}: {exc}") from exc
     for _ in range(40):
