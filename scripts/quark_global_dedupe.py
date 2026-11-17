@@ -28,7 +28,8 @@
 
 ## 安全边界
 
-* **只删重复中的多余副本**,每组**留一份**;优先留**不在**受保护目录里的、创建更早的;
+* **只删重复中的多余副本**,每组**留一份**:优先留**不带副本后缀的原件**,
+  其次留**不在**受保护目录里的、创建更早的;
 * 删除**永远进回收站**(`to_recycle=True`),配额当场释放、可捞回;
 * **受保护**:`pan_owned_shares.first_fid`(我方分享的一级 fid)、整名等于分享标题、
   整名在 `push_ledger.title` 里的 —— 命中任一即整组跳过;
@@ -59,7 +60,6 @@ from app.services import quark_dup as qd                         # noqa: E402
 from app.services.quark_transfer import QuarkTransfer            # noqa: E402
 
 SCAN = Path("data/_qk_global_top.json")
-MIN_SIZE = 2 ** 30          # 只处理 ≥1 GiB:小文件由根目录那条链负责,且几万条批量删风险大
 PAGE = 1000
 WINDOW = 10                 # 实测 `_size=1000` 时 page 11 起 `61004`
 
@@ -74,46 +74,66 @@ SORTS = ("size:desc", "created_at:asc", "created_at:desc",
          "updated:asc", "file_name:asc", "file_name:desc", "size:asc")
 
 
+#: 全盘视图看不到的**低端**:全盘 `size:desc` 前 10000 条的下限是 **1.137 GiB**,
+#: 而根目录(`pdir_fid="0"`)的 10200 条窗口能下探到 **0.583 GiB**。⇒ 0.33~1.14 GiB
+#: 这一段只有根目录视图看得见。实测这一段里藏着 **2518+1245+191 个文件 / 2.16 TiB**,
+#: 且 `quark_root_dup_plan_r2.json` 那 7804 份**(旧判据的 3.36 TiB)全部落在里面**。
+ROOT_SORTS = ("size:desc", "created_at:desc", "file_name:asc", "file_name:desc")
+
+#: `(标签, pdir_fid, 排序键)` —— 每一轮扫描都要把这两个视图**取并集**。
+#: ⚠️ 别删任何一个:全盘视图漏低端(下限 1.137 GiB),根目录视图漏深层(窗口 10200 条)。
+VIEWS = (("全盘", "", SORTS), ("根目录", "0", ROOT_SORTS))
+
+
 def scan_global(qt: QuarkTransfer, out: Path) -> list[dict]:
-    """全盘多键并集(`pdir_fid=""` 才是全盘,`"0"` 只是根目录)。"""
+    """全盘多键并集 + 根目录窗口并集(补 0.33~1.14 GiB 这段低端)。
+
+    `pdir_fid=""` 才是全盘,`"0"` 只是根目录 —— 两者的窗口是**各自独立**的,
+    所以取并集能同时拿到「深层的大家伙」和「根目录的中等个头」。
+    """
     items: list[dict] = []
     seen: set[str] = set()
-    for sort in SORTS:
-        page = 1
-        while page <= WINDOW:
-            got = None
-            for _ in range(3):
-                try:
-                    d = qt._request("GET", "/1/clouddrive/file/sort",
-                                    api="https://drive-pc.quark.cn",
-                                    params={"_page": page, "_size": PAGE, "_sort": sort,
-                                            "pdir_fid": "", "file_type": 1, "_fetch_total": 1})
-                    got = (d.get("data") or {}).get("list") or []
-                    break
-                except Exception as exc:              # noqa: BLE001 - 窗口上限不是抖动
-                    msg = str(exc)
-                    if "61004" in msg or "66010" in msg:
-                        got = "CAP"
+    for tag, pdir, sorts in VIEWS:
+        for sort in sorts:
+            page = 1
+            while page <= WINDOW:
+                got = None
+                for _ in range(3):
+                    try:
+                        d = qt._request("GET", "/1/clouddrive/file/sort",
+                                        api="https://drive-pc.quark.cn",
+                                        params={"_page": page, "_size": PAGE, "_sort": sort,
+                                                "pdir_fid": pdir, "file_type": 1,
+                                                "_fetch_total": 1})
+                        got = (d.get("data") or {}).get("list") or []
                         break
-                    print(f"    retry {msg[:56]}", flush=True)
-                    time.sleep(10)
-            if got is None or got == "CAP" or not got:
-                break
-            for x in got:
-                fid = str(x.get("fid") or "")
-                if fid and fid not in seen:
-                    seen.add(fid)
-                    items.append({"name": str(x.get("file_name") or ""), "fid": fid,
-                                  "size": int(x.get("size") or 0),
-                                  "pdir": str(x.get("pdir_fid") or ""),
-                                  "created": int(x.get("l_created_at") or x.get("created_at") or 0)})
-            print(f"  {sort:<11} page {page:<3d} 累计 {len(items):>6d}"
-                  f"  {sum(i['size'] for i in items) / 2 ** 40:.2f} TiB", flush=True)
-            if len(got) < PAGE:
-                break
-            page += 1
-            time.sleep(1.0)
-        out.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+                    except Exception as exc:          # noqa: BLE001 - 窗口上限不是抖动
+                        msg = str(exc)
+                        if "61004" in msg or "66010" in msg:
+                            got = "CAP"
+                            break
+                        print(f"    retry {msg[:56]}", flush=True)
+                        time.sleep(10)
+                if got is None or got == "CAP" or not got:
+                    break
+                added = 0
+                for x in got:
+                    fid = str(x.get("fid") or "")
+                    if fid and fid not in seen:
+                        seen.add(fid)
+                        added += 1
+                        items.append({"name": str(x.get("file_name") or ""), "fid": fid,
+                                      "size": int(x.get("size") or 0),
+                                      "pdir": str(x.get("pdir_fid") or ""),
+                                      "created": int(x.get("l_created_at")
+                                                     or x.get("created_at") or 0)})
+                print(f"  {tag:<6} {sort:<15} p{page:<3d} +{added:<5d} 累计 {len(items):>6d}"
+                      f"  {sum(i['size'] for i in items) / 2 ** 40:>6.2f} TiB", flush=True)
+                if len(got) < PAGE:
+                    break
+                page += 1
+                time.sleep(0.8)
+            out.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
     return items
 
 
@@ -166,7 +186,13 @@ def build_plan(files: list[dict], share_fids: set[str], titles: set[str],
                 or any(n in titles or n in ledger for n in names):
             prot_n += 1
             continue                    # 受保护:整组跳过(宁可留,不可错删)
-        g = sorted(g, key=lambda x: x.get("created") or 0)
+        # ★ **原件优先**:不带副本后缀的那份永远当 `keep`,其次才比创建时间。
+        # 只按 created 排会在**时间戳并列**时按输入顺序选 —— 实测
+        # `超凡蜘蛛侠2…2160p.mp4` 的原件与 `(1)`/`(2)` 三份 created 完全相同
+        # (稳定排序 ⇒ 快照里 `(1)` 在前就被留下),旧计划 8205 份里 **6666 份**
+        # 的 `keep_name` 带着后缀。删是安全的(剥完同 base),但「留最老的原件」
+        # 这个目标失效了,而回收站捞回时按 keep_name 认哪一份。
+        g = sorted(g, key=lambda x: (x["name"] != base, x.get("created") or 0))
         keep = g[0]
         for x in g[1:]:
             plan.append({"fid": x["fid"], "name": x["name"], "size": size,
@@ -184,7 +210,7 @@ def main() -> int:
     ap.add_argument("--rescan", action="store_true")
     ap.add_argument("--plan-out", default="data/quark_global_dup_plan.json")
     ap.add_argument("--batch", type=int, default=200)
-    ap.add_argument("--min-gib", type=float, default=1.0)
+    ap.add_argument("--min-gib", type=float, default=0.1)
     args = ap.parse_args()
 
     db = get_session_local()()

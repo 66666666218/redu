@@ -111,6 +111,38 @@ def test_只差副本后缀也算同一份():
     assert plan[0]["keep_fid"] == "a"
 
 
+def test_时间戳并列时也要留不带后缀的原件():
+    """★ 2026-11-18 实战踩到:`(1)`/`(2)` 和原件的 `created` **完全相同**
+    (`超凡蜘蛛侠2…2160p.mp4` 三份都是 `1786689946501`),`sorted` 是稳定排序
+    ⇒ 谁当 `keep` 取决于输入顺序(快照里 `(1)` 恰好排在原件前面)。
+
+    旧计划 8205 份里 **6666 份的 `keep_name` 带着副本后缀**。
+    删仍然是安全的(剥完同 base),但「留最老的原件」这个目标失效了 ——
+    而回收站捞回时按 `keep_name` 认哪一份。
+    """
+    plan, _ = qgd.build_plan(
+        [_f("b", "课(1).mp4", 100, created=0), _f("c", "课(2).mp4", 100, created=0),
+         _f("a", "课.mp4", 100, created=0)],
+        set(), set(), set())
+    assert {p["keep_fid"] for p in plan} == {"a"}, "时间戳并列时也必须留原件"
+    assert plan[0]["keep_name"] == "课.mp4"
+    assert sorted(p["fid"] for p in plan) == ["b", "c"]
+
+    plan, _ = qgd.build_plan(
+        [_f("b", "课(1).mp4", 100, created=777), _f("a", "课.mp4", 100, created=777)],
+        set(), set(), set())
+    assert [p["keep_fid"] for p in plan] == ["a"], "并列时原文在前也要留原件"
+
+
+def test_原件的创建时间更晚也优先保留():
+    """副本后缀本身就说明「它是后来另存的」,比时间戳更可信。"""
+    plan, _ = qgd.build_plan(
+        [_f("a", "课.mp4", 100, created=900), _f("b", "课(1).mp4", 100, created=100)],
+        set(), set(), set())
+    assert [p["fid"] for p in plan] == ["b"]
+    assert plan[0]["keep_name"] == "课.mp4"
+
+
 def test_中文括号和副本后缀也能归组():
     for suffix in ("（2）", "- 副本"):
         plan, _ = qgd.build_plan(
@@ -160,15 +192,25 @@ def test_单份不成组():
     assert plan == []
 
 
-def test_扫描入口用的是全盘视图而不是根目录():
-    """★ 这是 2026-11-17 之前八轮清理全部做错的那个点。
+def test_扫描入口必须同时有两个视图():
+    """★ 2026-11-17 之前八轮清理全部做错的那个点,以及补上的另一半。
 
-    `pdir_fid` 为 `"0"` 只是**根目录**(窗口 10200 条),空字符串才是**全盘**
-    (1094602 个文件)。谁把这里改成 `"0"`,清理就会重新变回只清皮毛。
+    | 视图 | `pdir_fid` | `size:desc` 窗口下限 |
+    |---|---|---|
+    | 全盘 | `""` | 1.137 GiB |
+    | 根目录 | `"0"` | 0.583 GiB |
+
+    * 只扫根目录 ⇒ 漏掉深层的大文件(19 万条看不到);
+    * 只扫全盘 ⇒ **漏掉 0.33~1.14 GiB 这段**,而旧判据的 3.36 TiB 全在里面。
+
+    两个窗口互相独立,所以**必须取并集**。砍掉任何一个都会静默漏一大块。
     """
-    src = (ROOT / "scripts" / "quark_global_dedupe.py").read_text(encoding="utf-8")
-    assert '"pdir_fid": ""' in src, "全盘扫描必须传 pdir_fid 为空字符串"
-    assert '"pdir_fid": "0"' not in src, "根目录窗口只有 10200 条,会漏掉 19 万条"
+    pd = {p for _, p, _ in qgd.VIEWS}
+    assert pd == {"", "0"}, f"两个视图必须都在(空串=全盘,0=根目录),现在是 {pd}"
+    for tag, pdir, sorts in qgd.VIEWS:
+        assert len(sorts) >= 2, f"{tag}视图只跑 {sorts} —— 单键只看得见 10000 条"
+        assert len(set(sorts)) == len(sorts), f"{tag}视图里有重复的排序键"
+    assert "size:desc" in qgd.VIEWS[0][2], "全盘视图的主力键是 size:desc"
 
 
 def test_删除永远进回收站():
