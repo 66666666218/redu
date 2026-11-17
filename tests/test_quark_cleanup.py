@@ -172,6 +172,44 @@ def test_我们自己的简介永不删() -> None:
     assert plan["delete"] == [] and plan["review"] == []
 
 
+def test_目录型分享要按目录路径护住里面每一个文件() -> None:
+    """★★ 2026-11-17 实测的**真缺陷**:我方绝大多数分享是**目录型**。
+
+    `share/mypage/detail` 给的是 `first_fid` + `title`,**不带你分享的是目录还是文件**。
+    实测:`first_fid` 里 **2836/2890(98%)** 是**目录 fid**,只有 54 个能落进扫描到的文件里
+    ⇒ 目录型分享的保护**整条链都失效**:`classify` 拿文件 fid 去比目录 fid,永远比不上,
+    于是同一个资源在老家与新家各一份时,**老家那份会被删掉** ——
+    **已发出的链接立刻变成「已失效」**,而这是发出去就收不回的。
+
+    判据必须同时看**路径**:`f["path"]` 的二级目录名等于分享标题 ⇒ 这份文件在受保护的目录里。
+    """
+    big = DUP_MIN_BYTES + 1
+    files = [_f("01.mp4", "F_OLD", big, ORDER[2], path=f"{ORDER[2]}/某资源目录"),
+             _f("01.mp4", "F_NEW", big, ORDER[0], path=f"{ORDER[0]}/某资源目录")]
+    plan = _run(files, prot_names={"某资源目录"})
+    assert plan["delete"] == [], "分享的是**目录**,里面每个文件都得护住"
+    assert plan["protected_left"], "护住了要能在报告里看见"
+
+
+def test_目录型分享只护得住同名目录_不误伤别的目录() -> None:
+    """反面:保护必须**精确到目录名**。否则一旦有个叫「其他」/「合集」的分享,
+    盘上所有同名目录都会被连坐保护(清理再也清不动)。"""
+    big = DUP_MIN_BYTES + 1
+    files = [_f("01.mp4", "F_OLD", big, ORDER[2], path=f"{ORDER[2]}/别的资源"),
+             _f("01.mp4", "F_NEW", big, ORDER[0], path=f"{ORDER[0]}/别的资源")]
+    plan = _run(files, prot_names={"某资源目录"})
+    assert [d["fid"] for d in plan["delete"]] == ["F_OLD"]
+
+
+def test_目录型分享要护住子目录里的文件() -> None:
+    """真实资源是 `包/子目录/文件`。保护只看二级目录名 ⇒ **任意深度**都要生效。"""
+    big = DUP_MIN_BYTES + 1
+    files = [_f("01.mp4", "F_OLD", big, ORDER[2], path=f"{ORDER[2]}/某资源目录/第01集"),
+             _f("01.mp4", "F_NEW", big, ORDER[0], path=f"{ORDER[0]}/某资源目录/第01集")]
+    plan = _run(files, prot_names={"某资源目录"})
+    assert plan["delete"] == [], "深层文件同样是那条链的内容"
+
+
 # ---------------------------------------------------------------------------
 # 范围:只动 10 月的账
 # ---------------------------------------------------------------------------
@@ -687,6 +725,28 @@ def test_只有一个目录时不算重复(monkeypatch) -> None:
     qt = _PkgQT([{"file_name": "redian监听", "fid": "H", "dir": True}], {
         "H": [{"file_name": "资源A", "fid": "A", "dir": True}], "A": [_pkgfile("1", 1)]})
     assert qd.build_package_plan(qt)["n_drop"] == 0
+
+
+def test_整包去重也要认目录型分享(monkeypatch) -> None:
+    """★★ 「目录型分享」这条缺陷在**整包那条判据上**有第二个入口(2026-11-17)。
+
+    `build_package_plan` 原来只比**里面的文件 fid**;而分享的是**目录**时
+    `first_fid` 就是**目录自己的 fid**,`_walk` 返回的文件清单里**没有它** ⇒
+    被分享的那份 `protected=False` ⇒ 一旦它恰好文件更少,**会被当成副本删掉**。
+    """
+    from app.services import quark_dup as qd
+
+    #: `B` 就是被分享的那个目录(目录 fid 在保护名单里)
+    monkeypatch.setattr(qd, "refresh_protect", lambda qt, dirs: ({"B"}, set(), 1, []))
+    qt = _PkgQT([{"file_name": "redian监听", "fid": "H", "dir": True}], {
+        "H": [{"file_name": "资源A", "fid": "A", "dir": True},
+              {"file_name": "资源A(1)", "fid": "B", "dir": True}],
+        "A": [_pkgfile("1.mp4", 100), _pkgfile("2.mp4", 100)],      #: 文件更多
+        "B": [_pkgfile("1.mp4", 100)],                          #: 但这条链指着它
+    })
+    g = qd.build_package_plan(qt)["groups"][0]
+    assert g["keep"]["fid"] == "B", "被分享的**目录**必须留,哪怕它里面的文件更少"
+    assert [d["fid"] for d in g["drop"]] == ["A"]
 
 
 def test_名字里本来就有括号但无兄弟时不算(monkeypatch) -> None:

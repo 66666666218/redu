@@ -334,6 +334,17 @@ def _walk(qt: Any, fid: str, home: str, path: str, budget: dict,
     return out
 
 
+def _top_dir_of(path: str) -> str:
+    """`文件` 的 `path` 里那个**二级名字**(`家/资源目录/…` → `资源目录`;一层都没有 → 空)。
+
+    ⚠️ 为什么是"二级"而不是"原名":分享是按**顶层目录**建的,而文件真实落点是
+    `家/资源目录/子目录/文件` ⇒ 只有二级名字能对上分享标题。见 `classify` 里
+    目录级保护那段(2026-11-17 修的真缺陷)。
+    """
+    parts = [p for p in str(path or "").split("/") if p]
+    return parts[1] if len(parts) >= 2 else ""
+
+
 def classify(files: list[dict], prot_fids: set[str], prot_names: set[str], *,
              mmdd_prefix: str = "10", home_order: list[str] | None = None) -> dict:
     """把扫到的文件分成三堆:**删** / **待确认** / **留**。纯函数,可离线测。
@@ -341,6 +352,14 @@ def classify(files: list[dict], prot_fids: set[str], prot_names: set[str], *,
     `home_order` = 「家」的优先序(**越靠前越新**,由 `build_plan` 按 `updated_at` 倒序给出)——
     跨目录重复时**留最靠前那个家里的那份**。"留哪份"必须显式传进来:
     写死成"按名字排序"会让结果随目录名漂(而目录名带日期,等于按日期排,看着对但没依据)。
+
+    ⚠️⚠️ **`prot_names` 同时是「文件名名单」和「目录名名单」**(2026-11-17 修):
+    我方分享绝大多数是**目录型** —— `first_fid` 里 **2836/2890(98%)** 是目录 fid,
+    而本函数比的是**文件** fid,永远比不上 ⇒ 目录型分享的保护**整条链都失效**,
+    跨家重复时老家那份会被删掉、**已发出的链接立刻「已失效」**。
+    所以这里多一层:**文件的二级目录名命中 `prot_names` ⇒ 整个目录内的文件都受保护**。
+    实测(19 个家 928 个顶层目录)`first_fid` 能在顶层目录里找到的只有 822 个(28.4%),
+    剩下 2068 条可能是单文件分享/更深目录 ⇒ 两条判据**都要留着**,少一个就漏。
     """
     rank = {h: i for i, h in enumerate(home_order or [])}
     groups: dict[tuple[str, int], list[dict]] = defaultdict(list)
@@ -358,6 +377,13 @@ def classify(files: list[dict], prot_fids: set[str], prot_names: set[str], *,
         # 保护:名字级(我方某条链的标题)或 fid 级(某条链的 first_fid)
         if name in prot_names or name in PROTECT_NAMES:
             protected_left.append({"name": name, "size": size, "why": "名字在保护名单里"})
+            continue
+        # ★ 目录级保护:分享的是**目录**时,`first_fid` 是目录 fid、永远比不上文件 fid。
+        #   靠 `path` 的二级名字去认 —— 任意深度都算(子目录里的文件同样是那条链的内容)。
+        dir_hit = next((c for c in copies if _top_dir_of(c.get("path", "")) in prot_names), None)
+        if dir_hit is not None:
+            protected_left.append({"name": name, "size": size,
+                                   "why": f"所在目录「{_top_dir_of(dir_hit['path'])}」被分享链指着"})
             continue
         safe = [c for c in copies if c["fid"] not in prot_fids]
         if len(safe) < len(copies):
@@ -583,7 +609,11 @@ def build_package_plan(qt: Any, *, home_prefix: str = "redian监听",
                 stats.append({
                     "name": str(m.get("file_name") or ""), "fid": mfid,
                     "files": len(fs), "bytes": sum(int(x.get("size") or 0) for x in fs),
-                    "protected": bool(fids & prot_fids),
+                    #: ⚠️ **目录自己的 fid 也要比**(2026-11-17):分享的是**目录**时
+                    #: `first_fid` 是目录 fid,`_walk` 只返回**里面文件**的 fid ⇒
+                    #: 只比 `fids` 的话目录型分享**在这条判据上完全不生效**,
+                    #: 被分享的那份一旦文件更少就会被当成副本删掉。
+                    "protected": bool(fids & prot_fids) or mfid in prot_fids,
                 })
             #: 留哪份(优先级从高到低):**我方分享链保护的** > 文件多的 > 体积大的 > **不带后缀的**
             #: (最后那条只在完全打平时用:不带后缀的那份是第一次转存的,其余都是它的副本)
