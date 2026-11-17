@@ -175,3 +175,18 @@ def test_删除永远进回收站():
     src = (ROOT / "scripts" / "quark_global_dedupe.py").read_text(encoding="utf-8")
     assert "to_recycle=True" in src
     assert "to_recycle=False" not in src, "彻底删除不可逆,这个脚本不许用"
+
+
+def test_扫描要跑多个排序键():
+    """★ 单个排序键的翻页上限是 **offset 10000**,与 `_size` 无关。
+
+    实测 `_size=50` 时 page 202(offset 10100)能取、page 205(10250)就 `61004`。
+    而**不同键看到的 10000 条是不同的**,多键取并集才看得见全盘:
+    实测 7 个键把唯一文件数从 10000 抬到 **52156**。
+
+    谁把 `SORTS` 收成一个键,清理就会退回「只清皮毛」。
+    """
+    assert len(qgd.SORTS) >= 5, f"排序键太少({qgd.SORTS}),覆盖会大幅缩水"
+    assert "size:desc" in qgd.SORTS, "按体积倒序是主力键"
+    assert "file_name:desc" in qgd.SORTS, "实测这个键带来的新增最多"
+    assert len(set(qgd.SORTS)) == len(qgd.SORTS), "重复的键只会白跑一遍"

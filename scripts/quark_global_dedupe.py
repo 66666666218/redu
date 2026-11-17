@@ -63,12 +63,22 @@ MIN_SIZE = 2 ** 30          # 只处理 ≥1 GiB:小文件由根目录那条链�
 PAGE = 1000
 WINDOW = 10                 # 实测 `_size=1000` 时 page 11 起 `61004`
 
+#: 每个排序键的**翻页上限都是 offset 10000**,与 `_size` 无关(实测 `_size=50`
+#: 时 page 202 能取、page 205 就 `61004`)。所以单个键只看得到 10000 条。
+#:
+#: ★ 但**不同键看到的 10000 条是不同的** —— 多键取并集能显著扩大覆盖。
+#: 实测这 7 个键:size:desc 10000 → 加 created_at:asc 12998 → desc 22798
+#: → updated:asc 32566 → file_name:asc 42310 → file_name:desc **52156**。
+#: (目录那次 `_qk_alldirs.json` 就是用这个办法拿到 34455/42490 的。)
+SORTS = ("size:desc", "created_at:asc", "created_at:desc",
+         "updated:asc", "file_name:asc", "file_name:desc", "size:asc")
+
 
 def scan_global(qt: QuarkTransfer, out: Path) -> list[dict]:
-    """全盘 `size:desc` 前 N 条(`pdir_fid=""` 才是全盘,`"0"` 只是根目录)。"""
+    """全盘多键并集(`pdir_fid=""` 才是全盘,`"0"` 只是根目录)。"""
     items: list[dict] = []
     seen: set[str] = set()
-    for sort in ("size:desc", "size:asc"):
+    for sort in SORTS:
         page = 1
         while page <= WINDOW:
             got = None
