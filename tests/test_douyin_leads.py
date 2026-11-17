@@ -825,6 +825,42 @@ class TestUnmovedQueue:
         _enqueue_later(session, 1, {"share_url": ""}, "x")
         assert session.scalars(select(DiscoveredPanLink)).all() == []
 
+    def test_enqueued_url_carries_pass_code(self, session) -> None:
+        """★★ **入队必须带提取码**(2026-11-17 修的真 bug)。
+
+        `resolve()` 的 `share_url` 故意不含 `?pwd=`,码在 `pass_code`。旧实现只抄
+        `share_url` ⇒ 重试时 `_extract_share_id` 取不到码 ⇒ 迅雷回 `PASS_CODE_EMPTY`
+        ⇒ `pan_discovery._is_dead_link` 当**终态**标 `skipped` ⇒ `pending` 永远清零。
+
+        实测(生产库):`platform='douyin'` 的 **92 条**全是这个形状,
+        `origin_url` 里带 `pwd=` 的 **0 条**;逐条复验 5 条全是
+        `share_status=PASS_CODE_EMPTY / file_num=0 / user_info=True`
+        —— **分享是活的、只缺我们扔掉的码**。
+        """
+        from app.db.models import DiscoveredPanLink
+        from app.services import xunlei_transfer as xt
+        from app.services.douyin_leads import _enqueue_later
+
+        _enqueue_later(session, 1,
+                       {"share_url": "https://pan.xunlei.com/s/VP5j9fly5reqjlczi00-1H4hA1",
+                        "pass_code": "p537"},
+                       "海鸥小院")
+        row = session.scalar(select(DiscoveredPanLink))
+        assert row is not None
+        #: 真正的判据不是"字符串里有 pwd",而是**下游能拿回来**。
+        sid, pwd = xt._extract_share_id(row.origin_url)
+        assert sid == "VP5j9fly5reqjlczi00-1H4hA1"
+        assert pwd == "p537"
+
+    def test_enqueued_url_without_pass_code_is_unchanged(self, session) -> None:
+        """没码时**不许**造出空 `?pwd=`(那会让日志里凭空多一个"带码"的假象)。"""
+        from app.db.models import DiscoveredPanLink
+        from app.services.douyin_leads import _enqueue_later
+
+        _enqueue_later(session, 1, {"share_url": "https://pan.quark.cn/s/X"}, "某口令")
+        row = session.scalar(select(DiscoveredPanLink))
+        assert row.origin_url == "https://pan.quark.cn/s/X"
+
 
 class TestCountGroupsByResourceNotKouling:
     """⚠️ 「条数」按**资源身份**分组,**不是按口令**(2026-10-04 修正)。

@@ -116,6 +116,37 @@ def resolve(kouling: str) -> dict:
     return {**empty, "raw_type": raw_type}
 
 
+def share_url_with_pwd(share_url: str, pass_code: str) -> str:
+    """`https://pan.xunlei.com/s/<id>` + 提取码 → **带 `?pwd=` 的完整链**。
+
+    ⚠️⚠️ **这是唯一一处该做拼接的地方**(2026-11-17 修)：`resolve()` 返回的
+    `share_url` **故意不带 `?pwd=`**（它要的是"干净的分享地址"），提取码单独放在
+    `pass_code`。而下游凡是拿 `_extract_share_id(url)` 去要提取码的地方，
+    **只能从 URL 的 query 里拿** —— 于是：
+      · `ingest()` 拼了(`url = info["share_url"] + f"?pwd={info['pass_code']}"`) ✅
+      · `douyin_leads._enqueue_later()` **没拼** ❌
+
+    后果实测(2026-11-17，`discovered_pan_links` 里 `platform='douyin'`):
+    **92 条**以 `PASS_CODE_EMPTY` 被 `pan_discovery` 判成**终态 `skipped`**，
+    而 `origin_url` 里带 `pwd=` 的是 **0 条**。逐条复验最近 5 条(走
+    `_with_captcha_retry` 打 `GET /drive/v1/share`)全部是
+    `share_status=PASS_CODE_EMPTY / file_num=0 / user_info=True`
+    ⇒ **分享是活的、只缺提取码**(与 `doc/链接体检.md` 里记的口径一致)，
+    但我们自己把码扔了 ⇒ 一条都搬不成、还会被写成"终态不再重试"。
+
+    ⚠️ **不许在这里再判一遍"是不是迅雷链"**：调用方只该有一份判断
+    （`kind == KIND_SHARE` 那一支）；这里只看"有没有码"。
+    已带 `pwd=` 的不重复追加(幂等)。
+    """
+    url = str(share_url or "").strip()
+    code = str(pass_code or "").strip()
+    if not url or not code:
+        return url
+    if "pwd=" in url:
+        return url
+    return f"{url}{'&' if '?' in url else '?'}pwd={code}"
+
+
 def join_group(group_id: str) -> dict:
     """按群号加群(`group/join`)。**已在群里**也返回 ok(`newly_joined=false`)。"""
     from app.services import xunlei_group
@@ -156,7 +187,9 @@ def ingest(session, user_id: int, kouling: str, settings=None) -> dict:
         out["group_id"] = info["group_id"]
         return out
 
-    url = info["share_url"] + (f"?pwd={info['pass_code']}" if info["pass_code"] else "")
+    #: ⚠️ 走 `share_url_with_pwd` 而不是在这里手拼 —— `douyin_leads._enqueue_later`
+    #: 就是因为自己没拼、把 92 条链的提取码扔了(见那个函数的 docstring)。
+    url = share_url_with_pwd(info["share_url"], info["pass_code"])
     # ⚠️ 转存前过闸门(与群采集同一套判据)。**盘满不写库** —— 否则会被 `known_koulings`
     # 当成"已搬过"而永不重试;留成未搬状态,下一轮(抖音作业每天跑)自然再试一次。
     from app.services import xunlei_group

@@ -94,6 +94,45 @@ def test_resolve_degrades_when_no_cred(monkeypatch) -> None:
     assert kk.resolve("玩车不求人")["kind"] == kk.KIND_NONE
 
 
+# ------------------------------------------------ share_url_with_pwd(2026-11-17)
+#
+# ⚠️ 这一组存在的理由:`resolve()` 的 `share_url` **故意不带 `?pwd=`**,
+# 而下游要提取码的地方只能从 URL 的 query 里拿(`xunlei_transfer._extract_share_id`)。
+# 实测踩到:`douyin_leads._enqueue_later` 自己没拼 ⇒ **92 条**链被
+# `pan_discovery` 判成 `PASS_CODE_EMPTY` 终态、再也不会重试。
+
+@pytest.mark.parametrize("url,code,want", [
+    # 普通情形:码追加成 query
+    ("https://pan.xunlei.com/s/ABC", "p537", "https://pan.xunlei.com/s/ABC?pwd=p537"),
+    # 没码 ⇒ 原样(不能造出一个空 `?pwd=`)
+    ("https://pan.xunlei.com/s/ABC", "", "https://pan.xunlei.com/s/ABC"),
+    # 已带码 ⇒ **幂等**,不许变成 `?pwd=x?pwd=y`
+    ("https://pan.xunlei.com/s/ABC?pwd=x", "y", "https://pan.xunlei.com/s/ABC?pwd=x"),
+    # 空链 ⇒ 空串(调用方据此判"无链可入队")
+    ("", "p537", ""),
+    # 已有别的 query ⇒ 用 `&` 而不是第二个 `?`
+    ("https://pan.quark.cn/s/ABC?foo=1", "p1",
+     "https://pan.quark.cn/s/ABC?foo=1&pwd=p1"),
+])
+def test_share_url_with_pwd_covers_edge_cases(url, code, want) -> None:
+    assert kk.share_url_with_pwd(url, code) == want
+
+
+def test_share_url_with_pwd_roundtrips_through_extract_share_id() -> None:
+    """**闭环**:拼出来的链必须能被 `_extract_share_id` 把码拿回来。
+
+    只测"字符串长对了"不够 —— 真正的判据是**下游拿得到**(本仓栽过
+    "看起来拼好了、下游读的是另一个字段")。
+    """
+    from app.services import xunlei_transfer as xt
+
+    real = "https://pan.xunlei.com/s/VP5j9fly5reqjlczi00-1H4hA1"   # 实测样本
+    got = kk.share_url_with_pwd(real, "p537")
+    sid, pwd = xt._extract_share_id(got)
+    assert sid == "VP5j9fly5reqjlczi00-1H4hA1"
+    assert pwd == "p537"
+
+
 def test_resolve_many_dedupes_and_keeps_order(monkeypatch) -> None:
     """批量解析去重保序。"""
     _patch_search(monkeypatch, "https://pan.xunlei.com/s/ABC?&pwd=1")

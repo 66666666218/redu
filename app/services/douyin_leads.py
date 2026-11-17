@@ -1275,10 +1275,21 @@ def _enqueue_later(session, user_id: int, info: dict, mark: str,
     ⚠️ **不新建表、不新增作业**:复用 `DiscoveredPanLink`(公开发现链那张)——
     它本来就有 `pending/ok/skipped` 的状态机,而 `pan_discovery.sync` **现在优先重试存量待办**。
     这就是"待办队列"该有的样子:**一处状态机,两条链共用**。
+
+    ⚠️⚠️ **`origin_url` 必须带提取码**(2026-11-17 修)。`info["share_url"]` **故意不含
+    `?pwd=`**(见 `xunlei_kouling.resolve`),提取码单独在 `info["pass_code"]`。旧实现
+    直接把 `share_url` 抄进队列 ⇒ 重试时 `xunlei_transfer._extract_share_id` 从 URL 的
+    query 里**取不到码** ⇒ 打 `GET /drive/v1/share` 回 `PASS_CODE_EMPTY` ⇒
+    `pan_discovery._is_dead_link` 把它当**终态**标 `skipped`,`pending` 从此永远清零。
+    实测:`platform='douyin'` 的 **92 条**全是这个形状、`origin_url` 里带 `pwd=` 的 **0 条**;
+    逐条复验最近 5 条(`file_num=0` + `user_info=True`)⇒ **分享是活的、只缺我们扔掉的码**。
     """
     from app.db.models import DiscoveredPanLink
+    from app.services.xunlei_kouling import share_url_with_pwd
 
-    url = str(info.get("share_url") or "").strip()
+    #: ★ **带提取码入队**(2026-11-17):`share_url` 本身不含 `?pwd=`,码在 `pass_code`。
+    #: 不拼的话重试必然 `PASS_CODE_EMPTY` ⇒ 被判终态、永远搬不成(见 docstring)。
+    url = share_url_with_pwd(info.get("share_url") or "", info.get("pass_code") or "")
     if not url:
         return
     #: ★ **顺手把发帖时间带进来**(2026-10-18):这张表的行此前 **100% 没有 `publish_at`**
@@ -1332,6 +1343,8 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
     `parent_name="口令解析"` 的那些)直接跳过,不重复搬。
     """
     from app.services import xunlei_kouling as kk
+    #: ⚠️ 卡片的原链与入队都要拼提取码(2026-11-17 修的真 bug,见 `_enqueue_later`)。
+    from app.services.xunlei_kouling import share_url_with_pwd
 
     if not getattr(settings, "douyin_leads_auto_transfer", True):
         for ld in leads:
@@ -1400,8 +1413,12 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
             # ⚠️ **超额度也要入队**:不然它只是"这轮没搬",下一轮同样不会自动补
             _enqueue_later(session, user_id, info, mark,
                            publish_at=int(ld.get("publish_at") or 0))
+            #: ⚠️ **卡片上的原链也要带提取码**(2026-11-17):`share_url` 不含 `?pwd=`,
+            #: 客户点开只会看到「请输入提取码」而没有码 —— 与入队那一处**同一个病**
+            #: (见 `_enqueue_later` 的 docstring)。`pass_code` 实测 12/12 都有。
             ld["kouling"] = {"kind": "share", "status": "over_budget",
-                             "share_url": info["share_url"]}
+                             "share_url": share_url_with_pwd(info["share_url"],
+                                                             info.get("pass_code") or "")}
             continue
         budget -= 1
         try:
@@ -1416,7 +1433,9 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
                            publish_at=int(ld.get("publish_at") or 0))
         ld["kouling"] = {"kind": "share", "status": res.get("status"),
                          "our_url": res.get("our_url") or "",
-                         "share_url": info["share_url"],
+                         #: 同上:原链带码,否则客户点开只能看到一个空提取框。
+                         "share_url": share_url_with_pwd(info["share_url"],
+                                                         info.get("pass_code") or ""),
                          "message": res.get("message") or ""}
     if down:
         # 同一条原因会重复 N 次 → 只报一次,并说清"是凭据挂了,不是线索没价值"
