@@ -4439,25 +4439,39 @@ def test_默认已改成全量一轮(session) -> None:
 
 
 def test_adaptive_batch_scales_with_pool_size(session) -> None:
-    """自适应分批(2026-10-01 扩建准备):批大小=ceil(池/4) 夹 [8,75];沉睡降频;显式参数兼容。"""
+    """自适应分批(2026-10-01 扩建准备):批大小=ceil(池/K) 夹 [8,75];沉睡降频;显式参数兼容。
+
+    ★ 2026-11-17:`K` 不再是硬编码 4,而是 `len(WECHAT_LISTEN_HOURS)`(加 10 点后 = 5)。
+    所以这里的期望值**也从单一事实源推**,别抄第二份:`ceil(池/K)` 夹到 [8,75]。
+    否则下次再加一个定点,这条会以"池 100 应 25 得 20"这种**看着像 bug、其实是决策**
+    的样子变红(今天就是这样红的)。
+    """
     from types import SimpleNamespace
 
+    from app.services.schedule_service import WECHAT_LISTEN_HOURS
     from app.services.wechat._listen import _select_listen_batch
+
+    K = len(WECHAT_LISTEN_HOURS)
 
     def mk(n, miss=0):
         return [SimpleNamespace(id=i, miss_count=miss) for i in range(n)]
 
+    def want(n: int) -> int:
+        return max(8, min(75, -(-n // K)))
+
     # ⚠️ **显式传 0** —— 2026-10-07 起默认改成 `-1`(全量),自适应分批仍在代码里、
     # 只是不再是默认。这条测的是**行为**,所以把开关显式打开,别依赖默认值。
     st = _settings(wechat_listen_batch_size=0)
-    # 池规模 → 批大小(4 定点;超 75 时天然多日轮转)
-    for n, expect in ((100, 25), (142, 36), (200, 50), (280, 70), (400, 75)):
+    # 池规模 → 批大小(K 个定点;超 75 时天然多日轮转)
+    for n in (100, 142, 200, 280, 400):
         rows, _pos = _select_listen_batch(None, 1, mk(n), st, batch_index=0)
-        assert len(rows) == expect, f"池{n} 应 {expect},得 {len(rows)}"
+        assert len(rows) == want(n), f"池{n} 应 {want(n)}(K={K}),得 {len(rows)}"
+    # 上界仍钉死:75 是**额度安全线**(75 号 ≈150 请求),加定点不许把它顶上去
+    assert want(400) == 75
 
-    # 沉睡降频:沉睡号每 3 轮参与 1 轮(30 活跃 + 20 沉睡 → 本轮约 (30 + 20/3)/4)
+    # 沉睡降频:沉睡号每 3 轮参与 1 轮(30 活跃 + 20 沉睡 → 本轮约 (30 + 20/3)/K)
     rows, pos = _select_listen_batch(None, 1, mk(30) + mk(20, miss=7), st, batch_index=0)
-    assert "dormant=20/3轮" in pos and len(rows) <= 12
+    assert "dormant=20/3轮" in pos and len(rows) <= want(30 + 20 // 3)
 
     # 显式 batch_size:旧语义(全量池顺序切,不叠分层)
     rows2, pos2 = _select_listen_batch(None, 1, mk(30) + mk(20, miss=7), st,

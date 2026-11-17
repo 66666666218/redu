@@ -268,3 +268,107 @@ def test_热度数字带万字的要能解析():
     assert _num("1.2万") == 12000
     assert _num("3,000") == 3000
     assert _num(None) == 0
+
+
+def test_pan_key_归一化同一份资源的写法差异():
+    """★ 2026-11-17:同一条盘链在不同来源里的写法差异不该被当成两个资源。
+
+    `http`/`https`、末尾斜杠、渠道参数(`entry`/`utm_*`)都是噪声;
+    **提取码必须保留** —— 它会改变"能不能打开"。
+    """
+    from app.services.push_ledger import pan_key
+
+    base = "pan.quark.cn/s/752504085d45"
+    assert pan_key("https://pan.quark.cn/s/752504085d45") == base
+    assert pan_key("http://pan.quark.cn/s/752504085d45/") == base
+    assert pan_key("https://www.pan.quark.cn/s/752504085d45?entry=share") == base
+    assert pan_key("https://pan.quark.cn/s/752504085d45?pwd=ab12") == base + "?pwd=ab12"
+    #: 不同资源必须**认得出不一样**(否则去重会把真资源挡掉)
+    assert pan_key("https://pan.quark.cn/s/aaaaaaaaaaaa") != base
+    #: 认不出的给空串 ⇒ 调用方跳过盘链去重,而不是误判成"同一个"
+    assert pan_key("") == ""
+    assert pan_key("不是链接") == ""
+
+
+def test_drop_recent_按盘链去重(session) -> None:
+    """★★ 2026-11-17 用户口径「减少重复资源」。
+
+    实测(近 7 天):带盘推送 1979 行只涉及 **378 个不同盘链**(81% 的行是重复),
+    最极端的 5 个盘链被 **7 个板块各推一遍**。旧闸门只按 `item_key`(=内容身份)去重,
+    同一份资源换个号/换篇文章就全放过。
+    """
+    from datetime import datetime, timedelta
+
+    from app.db.models import PushLedger
+    from app.services import push_ledger as pl
+
+    pan = "https://pan.quark.cn/s/752504085d45"
+    now = datetime.now()
+    session.add(PushLedger(user_id=1, section="zhihu", item_key="旧帖", title="旧帖",
+                           url="https://zhihu.com/q/1", pan_url=pan,
+                           pushed_at=now - timedelta(hours=30)))
+    session.commit()
+
+    class _S:
+        push_dedupe_hours = 24      #: 内容去重的窗口已过 ⇒ item_key 那道闸**不拦**
+        push_pan_dedupe_hours = 72  #: 盘链那道闸还没过 ⇒ 必须拦
+
+        push_hot_bypass_count = 3
+
+    items = [
+        #: 换了内容、换了写法(``http`` + 渠道参数),但**是同一份资源**
+        {"key": "新帖", "url": "https://zhihu.com/q/2",
+         "pan_url": "http://pan.quark.cn/s/752504085d45?entry=share"},
+        #: 真·新资源 ⇒ 要留下
+        {"key": "另一份", "url": "https://zhihu.com/q/3",
+         "pan_url": "https://pan.quark.cn/s/000000000000"},
+        #: 没有盘链的条目只走内容去重 ⇒ 留下
+        {"key": "无盘", "url": "https://zhihu.com/q/4"},
+    ]
+    kept, dropped = pl.drop_recent(session, 1, "zhihu", items, _S())
+    assert [it["key"] for it in kept] == ["另一份", "无盘"]
+    assert dropped == 1
+
+
+def test_drop_recent_同一批里两条同盘链只留一条(session) -> None:
+    """同一批里两条指向同一份资源,后一条也不该推 —— 这是跨板块刷屏的最小形态。"""
+    from app.services import push_ledger as pl
+
+    class _S:
+        push_dedupe_hours = 24
+        push_pan_dedupe_hours = 72
+
+    pan = "https://pan.xunlei.com/s/VP5RHJ4osQZQn3E5RWTCJMFFA"
+    items = [{"key": "甲", "pan_url": pan},
+             #: 同一份资源的另一种写法(渠道参数是噪声,不是提取码)
+             {"key": "乙", "pan_url": pan + "/?entry=share"},
+             {"key": "丙"}]
+    kept, dropped = pl.drop_recent(session=None, user_id=1, section="tieba", items=items,
+                                   settings=_S())
+    #: session=None ⇒ 连库都不查,但**同批内的盘链去重仍然有效**(它不依赖库)
+    assert [it["key"] for it in kept] == ["甲", "丙"]
+    assert dropped == 1
+
+
+def test_盘链重复但热度爆了仍放行(session) -> None:
+    """与内容去重同一条口径(用户 2026-11-05):流量真的爆了的,重复也要推。"""
+    from datetime import datetime, timedelta
+
+    from app.db.models import PushLedger
+    from app.services import push_ledger as pl
+
+    pan = "https://pan.quark.cn/s/752504085d45"
+    session.add(PushLedger(user_id=1, section="bilibili", item_key="旧",
+                           pan_url=pan, pushed_at=datetime.now() - timedelta(hours=2)))
+    session.commit()
+
+    class _S:
+        push_dedupe_hours = 24
+        push_pan_dedupe_hours = 72
+
+    items = [{"key": "新", "pan_url": pan, "count": 9}]
+    kept, dropped = pl.drop_recent(session, 1, "bilibili", items, _S(),
+                                   hot_of=lambda it: it.get("count"), hot_min=3)
+    assert [it["key"] for it in kept] == ["新"]
+    assert kept[0]["_dedupe_hot"] is True
+    assert dropped == 0

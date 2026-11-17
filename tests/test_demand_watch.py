@@ -772,6 +772,56 @@ def test_热点名额不被库内线索吃光(session, monkeypatch):
     assert [v["src"] for v in vids].count("hot") == 1, "热点来源没打标,运行记录就数不出来"
 
 
+def test_对标作品那一步不许多吃一条_否则热点名额永远为0(session, monkeypatch):
+    """★★ 2026-11-17 生产实测定位到的真断供点。
+
+    原写法在 ②③ 两个循环里都是**先 `_add` 再 `break`** ——
+    进入循环时 `len(out)` 已经等于 `lib_need`,仍会**多塞一条**。
+    于是 ② 填满 3 条后 ③ 又加第 4 条 ⇒ `need - len(out) == 0` ⇒
+    **④ 热点段恒被跳过**:`demand_hot_videos=1` 而 `hot_budget` 算出 0,
+    实测 `hot_word_seen` 停在 11-11、日志里「热点差分」零次出现。
+
+    ⚠️ 原来的测试只造了线索(`douyin_leads`)、没造对标作品(`douyin_peer_works`),
+    所以 ② 自己填满就停、**③ 那条多塞的没被触发** —— 测试是绿的,生产是断的。
+    这个用例把 ③ 也填上,才守得住。
+    """
+    from app.db.models import DouyinPeerWork
+
+    for i in range(3):                        # ② 正好填满 lib_need=3
+        _lead(session, f"lead{i:03d}")
+    for i in range(5):                        # ③ 有大量候选,旧写法必然多塞一条
+        session.add(DouyinPeerWork(
+            user_id=1, aweme_id=f"peer{i:03d}", account_uid=f"u{i}",
+            account_name="对标号", title="某个资源", url=f"https://x/peer{i:03d}",
+            first_seen_at=datetime.now()))
+    session.commit()
+
+    class _S3(_S):
+        demand_max_videos = 4
+        demand_hot_videos = 1                 #: 留 1 个给热点
+
+    from app.services import hot_cycle
+
+    limits: list[int] = []
+
+    def _fake_new_hot_words(settings, seeds, *, session=None, user_id=0, limit=3, **k):
+        limits.append(limit)
+        return [hot_cycle.HotWord(word="新热点词", last=1, peak=200000,
+                                  days=3, emerge=0, source="形态词:后续")]
+
+    monkeypatch.setattr(hot_cycle, "new_hot_words", _fake_new_hot_words)
+    monkeypatch.setattr("app.services.douyin_protocol_source.search", lambda *a, **k: [
+        {"aweme_id": "hot1", "url": "https://x/hot1", "snippet": "某事件后续",
+         "name": "a", "metrics": {"comment_count": 500}}])
+
+    vids = dw.source_videos(session, 1, _S3())
+
+    assert limits == [1], f"热点名额被吃掉了(limit={limits})—— 库内那两步又多塞了"
+    ids = [v["aweme_id"] for v in vids]
+    assert "hot1" in ids, f"热点视频没进来:{ids}"
+    assert len(ids) == 4, f"总名额应当是 4,实际 {len(ids)}:{ids}"
+
+
 def test_运行记录写出热点条数_否则看不出这条路有没有跑(session, monkeypatch):
     """`视频4 扫4` 在"全来自库内"和"3 库内 + 1 热点"两种情况下长得一模一样。"""
     from app.db.models import RunRecord
@@ -1069,3 +1119,105 @@ def test_同一名字既有句式又有重复时不算纯重复词(session, monk
     dw.run_user(session, 1, _S())
 
     assert {r.name for r in session.query(DemandName).all()} == {"反差直男"}
+
+# ---------------------------------------------------------------- 公众号事件名(2026-11-17)
+
+def _wa(session, title, author, hours_ago=1.0):
+    from app.db.models import WechatArticle
+
+    session.add(WechatArticle(
+        user_id=1, author=author, title=title,
+        created_at=datetime.now() - timedelta(hours=hours_ago)))
+    session.commit()
+
+
+def test_公众号事件名要抽得出来_大美与高迪(session) -> None:
+    """★ 用户 2026-11-17 问「高迪和大美最近就是大瓜是否监控到了」。
+
+    真实标题形态:「深夜大瓜!大美与高迪视频【完整版】」 —— **没有书名号**,
+    所以 `names_from_title` 抽不出来(近 7 天 1733 条标题全部返回空)。
+    """
+    _wa(session, "深夜大瓜!大美与高迪视频【完整版】", "考研外刊阅读", 40)
+    _wa(session, "大美与高迪出轨对象摄影师聊天记录曝光,太刺激了", "雪儿5025", 30)
+    n = dw.wechat_event_names(session, 1, top=3, hours=48, settings=_S())
+    assert n == 1
+    row = session.query(DemandName).one()
+    assert row.name == "大美与高迪", "载体词(视频/出轨对象…)要被截掉,留下纯实体对"
+    assert row.platform == dw.WEVENT_PLATFORM
+    assert row.demand_hits == 2, "两个作者 = 两个人在写"
+    assert row.mention_hits == 2
+
+
+def test_只有一个作者写过的事件名不许进榜(session) -> None:
+    """单作者的事件名就是"某一篇的标题",不是"在传的瓜" —— 拿它搜是白烧额度。"""
+    _wa(session, "深夜大瓜!某某与某人视频完整版", "独此一家", 5)
+    assert dw.wechat_event_names(session, 1, top=3, hours=48, settings=_S()) == 0
+    assert session.query(DemandName).count() == 0
+
+
+def test_跨作者但没有吃瓜语义的不许进榜(session) -> None:
+    """⚠️ **跨作者只能证明"多人在写",证明不了"这件事是瓜"**。
+
+    实测反例就是这个形状:资料/模板类标题同样是 `X和Y`,而且**也会被多个号反复发**。
+    少了吃瓜语义这一道,每轮都会拿资料模板名去烧一次搜索额度。
+    """
+    _wa(session, "小白与小黑", "秋天5778", 5)
+    _wa(session, "小白与小黑", "洋芋光", 6)
+    assert dw._wevent_name("小白与小黑") == "小白与小黑", "实体对本身抽得出来"
+    assert dw.wechat_event_names(session, 1, top=3, hours=48, settings=_S()) == 0
+
+
+def test_吃瓜语义在_但只有一个作者_也不进榜(session) -> None:
+    """反过来也要验:语义标记**不能替代**跨作者证据。"""
+    _wa(session, "深夜大瓜!小白与小黑视频【完整版】", "独此一家", 5)
+    assert dw.wechat_event_names(session, 1, top=3, hours=48, settings=_S()) == 0
+
+
+def test_半句话不许被当成事件名(session) -> None:
+    """「相处模式与性格契合点是什么」前 6 字像实体对,截断后必须**仍是纯实体对**。"""
+    t = "两人相性卡片测试来了|查看彼此的相处模式与性格契合点是什么"
+    assert dw._wevent_name(t) == "", "截断后还剩整句 ⇒ 不认"
+
+
+def test_公众号事件名的门槛不放行_够格门槛只卡评论区那批(session) -> None:
+    """★ 公众号那批的 `demand_hits` 是**作者数**(2~3),拿 `demand_min_mention=6`
+    去卡会把 48h 窗口里唯一过闸的瓜整个挡掉;而 `douyin` 那批的门槛必须照旧生效。
+    """
+    _wa(session, "深夜大瓜!大美与高迪视频【完整版】", "甲", 40)
+    _wa(session, "大美与高迪出轨聊天记录曝光", "乙", 30)
+    dw.wechat_event_names(session, 1, top=3, hours=48, settings=_S())
+    #: douyin 那批:1 次求 / 1 次提及 —— 三个门槛全不够,不许放行
+    session.add(DemandName(user_id=1, platform="douyin", name="滥竽充数",
+                           demand_hits=1, mention_hits=1,
+                           last_seen_at=datetime.now()))
+    session.commit()
+
+    got = dw.unfed_demand_names(session, 1, top=5, settings=_S(),
+                                platforms=(dw.WEVENT_PLATFORM,))
+    assert got == ["大美与高迪"]
+
+    got2 = dw.unfed_demand_names(session, 1, top=5, settings=_S())
+    assert got2 == [], "douyin 那批仍要被三条门槛挡住"
+
+
+def test_公众号事件名打完戳就不再重复取(session) -> None:
+    """不显式带 platform 打戳的话,这个事件每轮都会被重新抽出来、重新搜一遍。"""
+    _wa(session, "深夜大瓜!大美与高迪视频【完整版】", "甲", 40)
+    _wa(session, "大美与高迪出轨聊天记录曝光", "乙", 30)
+    dw.wechat_event_names(session, 1, top=3, hours=48, settings=_S())
+    words = dw.unfed_demand_names(session, 1, top=3, settings=_S(),
+                                  platforms=(dw.WEVENT_PLATFORM,))
+    assert words == ["大美与高迪"]
+    assert dw.mark_demand_names_fed(session, 1, words,
+                                    platforms=(dw.WEVENT_PLATFORM,)) == 1
+    session.flush()
+    assert dw.unfed_demand_names(session, 1, top=3, settings=_S(),
+                                 platforms=(dw.WEVENT_PLATFORM,)) == []
+
+
+def test_过了窗口的老事件要沉下去(session) -> None:
+    """48h 窗口是实测定的(这次瓜 11-14 首篇、11-16 才有第二个作者);
+    但再老的事件不该继续占搜索名额。"""
+    _wa(session, "深夜大瓜!大美与高迪视频【完整版】", "甲", 80)
+    _wa(session, "大美与高迪出轨聊天记录曝光", "乙", 70)
+    assert dw.wechat_event_names(session, 1, top=3, hours=48, settings=_S()) == 0

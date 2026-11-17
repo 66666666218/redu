@@ -2127,6 +2127,14 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
     #: ⚠️ **只在大瓜轮生效**:这些是事件/人物名(`水子哥`/`林予曦`),放到影视/资料轮
     #: 是跑题;而大瓜轮恰恰没有库内目录、最缺具体坐标。
     demand_words: list[str] = []
+    #: ★★ **公众号事件名也是大瓜轮的具体坐标**(2026-11-17,用户问「高迪/大美
+    #: 那个大瓜监控到了吗」)。实测那次大瓜**只有公众号一路看得见**(8 篇 / 2 作者),
+    #: 抖音线索/对标号/热榜表/demand_names/hot_word_seen **全部 0 条** ——
+    #: 名字从没进过搜索词表,抖音那边连"去搜一下"都没发生过。
+    #: 先抽后取:抽取这一步读的是 `wechat_articles`(本地库,不打网络),
+    #: 每轮重算只会把"还在传的瓜"留在榜上,**搜索完成后**才打戳(同一事件只搜一次)。
+    #: ⚠️ 声明在 `if "douyin" in plats` **之外** —— 下面的 `hot` 组装在块外引用它。
+    wevent_words: list[str] = []
     if "douyin" in plats:
         try:
             from app.services import hot_cycle as _hc
@@ -2137,9 +2145,23 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
         except Exception:  # noqa: BLE001 - 取词失败不挡这一轮
             logger.debug("探针词取词失败", exc_info=True)
         if cat == "大瓜":
-            try:
-                from app.services import demand_watch as _dw
+            from app.services import demand_watch as _dw
 
+            _ev_n = int(getattr(settings, "douyin_leads_wechat_events", 2) or 0)
+            _ev_h = int(getattr(settings, "douyin_leads_wechat_event_hours", 48) or 48)
+            try:
+                _dw.wechat_event_names(db, user_id, top=_ev_n, hours=_ev_h,
+                                       settings=settings)
+                wevent_words = _dw.unfed_demand_names(
+                    db, user_id, top=_ev_n,
+                    #: `days` 是**天**粒度,`hours` 是小时 —— 向上取整,别把 48h 缩成 1 天
+                    days=max(1, _ev_h // 24 + 1),
+                    settings=settings, platforms=(_dw.WEVENT_PLATFORM,))
+            except Exception:  # noqa: BLE001 - 抽不到就退回原有词表
+                logger.debug("公众号事件名取词失败", exc_info=True)
+            try:
+                #: ⚠️ 这里**不传 platforms** ⇒ 只取 `douyin`(评论区在求的);
+                #: 公众号那批已由上面单独取到 `wevent_words`,两批各打各的戳。
                 demand_words = _dw.unfed_demand_names(
                     db, user_id, top=int(getattr(
                         settings, "douyin_leads_demand_names", 2) or 0),
@@ -2148,6 +2170,7 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
                 logger.debug("被求名字取词失败", exc_info=True)
     hot = (hot + [w for w in probe_words if w not in hot]) if probe_words else hot
     hot = (hot + [w for w in demand_words if w not in hot]) if demand_words else hot
+    hot = (hot + [w for w in wevent_words if w not in hot]) if wevent_words else hot
     kws = search_keywords(db, user_id,
                           int(getattr(settings, "douyin_leads_keywords", 3) or 3),
                           settings, hot=hot)
@@ -2181,6 +2204,16 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
                     _dw.mark_demand_names_fed(db, user_id, demand_words)
                 except Exception:  # noqa: BLE001 - 打戳失败不挡这轮结果
                     logger.debug("被求名字打戳失败", exc_info=True)
+            #: ★ 公众号事件名同理,但**要显式带 platform** —— 默认只打 `douyin`
+            #: (见 `mark_demand_names_fed` 的说明),不带就永远打不上、每轮重复搜。
+            if wevent_words and plat == "douyin":
+                try:
+                    from app.services import demand_watch as _dw
+
+                    _dw.mark_demand_names_fed(db, user_id, wevent_words,
+                                              platforms=(_dw.WEVENT_PLATFORM,))
+                except Exception:  # noqa: BLE001 - 打戳失败不挡这轮结果
+                    logger.debug("公众号事件名打戳失败", exc_info=True)
             n_panless = 0
             n_grouponly = 0
             if leads:
@@ -2233,6 +2266,14 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
             n_demand_ok = sum(1 for x in leads
                               if (x.get("keyword") or "") in ds
                               and (x.get("kouling") or {}).get("kind") in ("group", "share"))
+            #: ★ 公众号事件名也要**单独计量**(2026-11-17):它是"别的平台已经有人在写"
+            #: 这条信号的回流,与热榜(0%)/探针/被求名是四条不同的路,混在一起
+            #: 就永远说不清"哪一个在起作用" —— 这正是本仓反复栽的那类含糊。
+            ws = set(wevent_words or [])
+            n_wevent = sum(1 for x in leads if (x.get("keyword") or "") in ws)
+            n_wevent_ok = sum(1 for x in leads
+                              if (x.get("keyword") or "") in ws
+                              and (x.get("kouling") or {}).get("kind") in ("group", "share"))
             # ⚠️ **来源标签要进运行记录**(2026-10-08):抖音现在"协议优先、浏览器兜底",
             # 而两条路都会产出"0 条"。不标来源的话,看到 0 就分不清是
             # "协议挂了被回落"还是"真没人在推资源" —— 正是本仓最忌讳的那种含糊。
@@ -2244,6 +2285,7 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
                         f"[外部命中{n_hot}/产出{n_hot_ok}] "
                         f"[探针{len(probe_words)} 命中{n_probe}/产出{n_probe_ok}] "
                         f"[被求名{len(demand_words)} 命中{n_demand}/产出{n_demand_ok}] "
+                        f"[公众号瓜{len(wevent_words)} 命中{n_wevent}/产出{n_wevent_ok}] "
                         #: ★ 漏斗(2026-10-31):原始→时间挡→无时间→口令→无链,一眼看出哪道闸在掉量。
                         f"漏斗 原始{funnel.get('raw', 0)} 挡{funnel.get('old', 0)}"
                         f" 无时{funnel.get('notime', 0)} 续{funnel.get('cont', 0)} 口令{funnel.get('kept', 0)}"

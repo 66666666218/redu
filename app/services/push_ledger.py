@@ -57,6 +57,10 @@ _FLAT_METRIC_KEYS = ("play_count", "liked_count", "collected_count", "comment_co
 _LIMITS = {"section": 32, "item_key": 255, "title": 255, "url": 500, "pan_url": 500,
            "pan_type": 16, "author": 64, "metrics": 255}
 
+#: 盘链身份判定时**要保留**的查询参数:只有提取码会改变"能不能打开",
+#: 其余(`utm_*`/`entry`/`share_token` 之类)同一份资源的写法差异很大,算噪声。
+_PAN_KEEP_QS = ("pwd", "password", "code", "passcode")
+
 
 def _first(d: dict, keys: tuple[str, ...]) -> str:
     """按优先级取第一个**非空**值(空串/None 都算没给)。"""
@@ -117,6 +121,51 @@ def _key_of(it: dict) -> str:
     return (_first(it, _KEY_KEYS) or _first(it, _TITLE_KEYS) or _first(it, _URL_KEYS))[:255]
 
 
+def pan_key(url: str) -> str:
+    """盘链的**资源身份**(归一化后的字符串;认不出来返回 `""`)。
+
+    ## 为什么不能用原串比
+
+    同一条盘链在不同来源里的写法会有差异(`https://` vs `http://`、末尾 `/`、
+    `pan.quark.cn/s/xxx?entry=...` 这类渠道参数)。原串比 ⇒ 同一个资源被当成几个,
+    **去重就漏了**。反过来,只剩**提取码**类参数会改变"能不能打开",必须保留。
+
+    ## 为什么不只看 `#fid`
+
+    夸克/百度的分享链身份就在 path 里(`/s/<id>`);迅雷在 `/s/<id>`。取
+    `host + path` 已经足够区分资源,再拼提取码就是全部可辨信息。
+
+    ⚠️ **保留原协议无关**:`http`/`https` 指同一份资源。
+    """
+    u = str(url or "").strip()
+    if not u:
+        return ""
+    try:
+        from urllib.parse import parse_qsl, urlencode, urlsplit
+
+        parts = urlsplit(u)
+        host = (parts.netloc or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        path = (parts.path or "").rstrip("/")
+        if not host or not path:
+            return ""
+        keep = sorted((k.lower(), v) for k, v in parse_qsl(parts.query or "", keep_blank_values=True)
+                      if k.lower() in _PAN_KEEP_QS)
+        return f"{host}{path}" + (f"?{urlencode(keep)}" if keep else "")
+    except Exception:  # noqa: BLE001 - 解析不了的当"认不出",退回按原条目不参与盘链去重
+        return ""
+
+
+def _pan_of(it: dict) -> str:
+    """条目身上的盘链(`_PAN_KEYS` 与 `link` 兜底,与 `_norm_item` 同一套认法)。"""
+    pan = _first(it, _PAN_KEYS)
+    if not pan:
+        link = it.get("link") if isinstance(it.get("link"), dict) else {}
+        pan = _first(link, _PAN_KEYS) if link else ""
+    return pan
+
+
 def recent_keys(session: Session, user_id: int, section: str,
                 hours: float = 24) -> set[str]:
     """这个板块最近 N 小时**已经推过**的 `item_key` 集合(`hours<=0` = 空集)。"""
@@ -131,6 +180,30 @@ def recent_keys(session: Session, user_id: int, section: str,
         PushLedger.user_id == user_id,
         PushLedger.section == section,
         PushLedger.pushed_at >= cutoff)).all())
+
+
+def recent_pan_keys(session: Session, user_id: int, section: str,
+                    hours: float = 24) -> set[str]:
+    """这个板块最近 N 小时**已经推过**的盘链身份集合(`hours<=0` = 空集)。
+
+    ⚠️ 库里存的是**原串**(`pan_url` 列),这里必须逐条过 `pan_key()` 归一 ——
+    否则 `http`/`https`、末尾斜杠、渠道参数的差异会让同一个资源认不出来。
+    行数在这个窗口里是**几百量级**(近 7 天带盘 1979 行),逐条归一的开销可以忽略;
+    换成 SQL 里做字符串比较反而会把归一逻辑抄第二遍(本仓最忌)。
+    """
+    if session is None or hours <= 0:
+        return set()
+    from sqlalchemy import select
+
+    from app.db.models import PushLedger
+
+    cutoff = datetime.now() - timedelta(hours=float(hours))
+    rows = session.scalars(select(PushLedger.pan_url).where(
+        PushLedger.user_id == user_id,
+        PushLedger.section == section,
+        PushLedger.pan_url != "",
+        PushLedger.pushed_at >= cutoff)).all()
+    return {k for k in (pan_key(u) for u in rows) if k}
 
 
 def _num(v) -> float:
@@ -153,7 +226,8 @@ def _num(v) -> float:
 
 def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
                 settings=None, hours: float | None = None,
-                hot_of=None, hot_min: float = 0) -> tuple[list[dict], int]:
+                hot_of=None, hot_min: float = 0,
+                pan_hours: float | None = None) -> tuple[list[dict], int]:
     """按**推送台账**去掉最近已经推过的条目 → `(保留, 去掉的条数)`。
 
     ★ 2026-10-29 数据驱动的决定:12 天台账里同一 item 在 **24 小时内重推**的比例
@@ -161,30 +235,64 @@ def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
       这既是"群信息杂乱"的主因,也在白烧 AI 筛选的钱(同一句话反复判)。
     ⇒ 推送前统一按 `push_dedupe_hours`(默认 24h,0=关)去重,**同一板块内**才去重
       (不同板块的群不是一批人,跨板块去重会把别的群饿死)。
+
+    ## ★★ 盘链级去重(`pan_hours`,2026-11-17)
+
+    `item_key` 是**内容的身份**(那条视频/那篇文章),但客户拿到手的是**那份资源**。
+    同一份资源会被不同号、不同文章各推一遍 —— 近 7 天实测:带盘推送 1979 行只涉及
+    **378 个不同盘链**(81% 的行是重复),最极端的 5 个盘链被 **7 个板块各推一遍**。
+
+    ⇒ 再加一道**按盘链身份**的闸:同一板块内,同一个 `pan_key()` 在 `pan_hours`
+      小时内已经推过就不推。默认继承 `push_dedupe_hours`,可用
+      `push_pan_dedupe_hours` 单独调(**它比内容去重该更长**:同一份资源隔一天再推
+      对客户仍然是同一条)。
+
+    ⚠️ **两道闸共用 `hot_of` 的放行口径**:流量真的爆了的,重复也要推。
+    ⚠️ 没有盘链的条目(`pan_key` 为空)只走内容去重 —— 没盘链就无从判"同一份资源"。
     """
     if settings is not None and hours is None:
         hours = float(getattr(settings, "push_dedupe_hours", 24) or 0)
     if hours is None:
         hours = 24.0
-    if session is None or not items or float(hours) <= 0:
-        return list(items or []), 0
-    seen = recent_keys(session, user_id, section, float(hours))
-    if not seen:
-        return list(items), 0
+    if pan_hours is None:
+        pan_hours = float(getattr(settings, "push_pan_dedupe_hours", hours)
+                          if settings is not None else hours)
+    if not items:
+        return [], 0
+    #: ⚠️ **`session=None` 不等于"什么都不能判"**:同一批内部的盘链重复不依赖库。
+    seen: set[str] = set()
+    seen_pan: set[str] = set()
+    if session is not None:
+        if float(hours) > 0:
+            seen = recent_keys(session, user_id, section, float(hours))
+        if float(pan_hours or 0) > 0:
+            seen_pan = recent_pan_keys(session, user_id, section, float(pan_hours))
+    if float(hours) <= 0:
+        seen = set()               #: 内容去重关掉时,库里那份也不该生效
     #: ★★ **重复但"流量好"的仍要推**(2026-11-05 用户:「如果是重复的资源但是流量好也需要推出来」)。
     #: 只看时间窗会误杀"同一资源突然爆了"——那正是客户最想知道的。
     #: `hot_of(item)` 由各板块给(点赞/转发/同资源内容数…),`hot_min` 为门槛;
     #: 命中就**放行**并打标记,卡片上可以标 🔥 复推。
     kept: list[dict] = []
+    _batch_pans: set[str] = set()
     for it in items:
-        if _key_of(it) not in seen:
+        dup_item = _key_of(it) in seen
+        #: 盘链只在**本批里第一次出现**时判重 —— 同一批里两条指向同一份资源,
+        #: 后一条也不该推(这正是"同一个盘链被多个板块各推一遍"的最小形态)。
+        pk = pan_key(_pan_of(it))
+        dup_pan = bool(pk) and (pk in seen_pan or pk in _batch_pans)
+        if not dup_item and not dup_pan:
             kept.append(it)
+            if pk:
+                _batch_pans.add(pk)
             continue
         if hot_of is not None and float(hot_min or 0) > 0:
             try:
                 if _num(hot_of(it)) >= float(hot_min):
                     it["_dedupe_hot"] = True
                     kept.append(it)
+                    if pk:
+                        _batch_pans.add(pk)
             except Exception:  # noqa: BLE001 - 取热度失败就按"已推过"处理
                 continue
     return kept, len(items) - len(kept)

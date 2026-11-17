@@ -108,7 +108,19 @@ def _select_listen_batch(session: Session, user_id: int, all_rows: list,
     dormant_pick = dormant[batch_index % _DORMANT_SKIP::_DORMANT_SKIP] if dormant else []
     pool = active + dormant_pick
 
-    K = 4  # 每日定点数(WECHAT_LISTEN_HOURS);每日覆盖预期 = K × B
+    #: 每日定点数 —— **从单一事实源读**,别再硬编码(2026-11-17)。
+    #: 原来这里写死 `K = 4`,而 `WECHAT_LISTEN_HOURS` 一改轮次数就悄悄失配:
+    #: `B = ceil(pool/K)` 会按旧的 K 算批大小,改轮次的人以为覆盖周期跟着变、其实没变。
+    #: 读不到(循环导入/测试环境)才退回 4 —— 与历史行为一致。
+    try:
+        from app.services.schedule_service import WECHAT_LISTEN_HOURS
+        K = max(1, len(WECHAT_LISTEN_HOURS))
+    except Exception:  # noqa: BLE001 - 读不到就用旧值,不该因为算批大小而卡死整轮
+        K = 4
+    #: ⚠️ 注意:`K` 只在**自适应分批**里有意义。当前生产是 `wechat_listen_batch_size=-1`
+    #:   (全量,2026-10-07 用户口径「时效」),那条分支在 :101 就 return 了,走不到这里
+    #:   —— 也就是说 `K` 目前**不决定覆盖周期**。真实覆盖面由 `_LIST_WINDOW`(列表额度)
+    #:   与书架粗筛共同决定,详见 `_shelf_gate_plan`。
     if cfg and cfg > 0:               # 固定批(旧行为):在全量池上轮转
         B = cfg
         pool = all_rows

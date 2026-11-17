@@ -604,7 +604,8 @@ def collect_for_video(aweme_id: str, *, session=None, user_id: int = 1,
 
 
 def unfed_demand_names(db, user_id: int = 1, top: int = 2, days: int = 7,
-                       settings=None) -> list[str]:
+                       settings=None,
+                       platforms: tuple[str, ...] | None = None) -> list[str]:
     """★ **「评论区在求的名字」→ 抖音搜索词**(2026-11-13)。返回还没喂过搜索的那批。
 
     ## 为什么需要这一层
@@ -629,6 +630,12 @@ def unfed_demand_names(db, user_id: int = 1, top: int = 2, days: int = 7,
     - 按 (被求次数, 提及次数) 降序。
 
     ⚠️ **只读,不写**。打戳由调用方在**搜索完成后**做(见 `mark_demand_names_fed`)。
+
+    ★ `platforms` 默认只取 `douyin`(评论区在求的)。大瓜轮传
+    `("douyin", WEVENT_PLATFORM)` 把**公众号事件名**一起取出来 —— 那批的
+    `demand_hits` 存的是**作者数**,量级比评论数小得多,所以那些"够不够格"的
+    门槛(`demand_min_hits` 等)**只对 douyin 那批生效**,公众号那批按
+    "≥2 作者 + 有吃瓜标记"在写入时就已筛过(`wechat_event_names`)。
     """
     from app.db.models import DemandName
 
@@ -642,9 +649,10 @@ def unfed_demand_names(db, user_id: int = 1, top: int = 2, days: int = 7,
     min_ones = int(getattr(settings, "demand_min_ones", 20) or 0)
     min_mention = int(getattr(settings, "demand_min_mention", 6) or 0)
     since = datetime.now() - timedelta(days=max(1, int(days or 7)))
+    plats = tuple(platforms or (PLATFORM,))
     rows = db.scalars(select(DemandName).where(
         DemandName.user_id == user_id,
-        DemandName.platform == PLATFORM,
+        DemandName.platform.in_(plats),
         DemandName.fed_search_at.is_(None),
         DemandName.last_seen_at >= since).order_by(
         DemandName.demand_hits.desc(), DemandName.mention_hits.desc()).limit(top * 5)).all()
@@ -653,9 +661,12 @@ def unfed_demand_names(db, user_id: int = 1, top: int = 2, days: int = 7,
         n = str(r.name or "").strip()
         if not n or n in out or not is_name_like(n, quoted=True):
             continue
-        #: 与 `pick_pushable` 同一组门槛 —— 推给客户的标准就是"够格"的标准,
-        #: 一个连推都不够格的名字不值得占一次搜索额度。
-        if (int(r.demand_hits or 0) < min_demand
+        #: ★ 「够格」的三条门槛**只对本平台(douyin)那批生效**:它们比的是评论数,
+        #: 而公众号事件名的 `demand_hits` 是**作者数**(2~3 的量级),
+        #: 拿 `demand_min_mention=6` 去卡会把 48h 窗口里唯一过闸的瓜整个挡掉。
+        #: 那一批在写入时已按「≥2 作者 + 有吃瓜标记」筛过(`wechat_event_names`)。
+        if (r.platform == PLATFORM
+                and int(r.demand_hits or 0) < min_demand
                 and int(getattr(r, "ones_hits", 0) or 0) < min_ones
                 and int(r.mention_hits or 0) < min_mention):
             continue
@@ -665,10 +676,15 @@ def unfed_demand_names(db, user_id: int = 1, top: int = 2, days: int = 7,
     return out
 
 
-def mark_demand_names_fed(db, user_id: int, names: list[str]) -> int:
+def mark_demand_names_fed(db, user_id: int, names: list[str],
+                          platforms: tuple[str, ...] | None = None) -> int:
     """给这批名字打上「已喂过搜索」的戳。返回打戳条数。
 
     ⚠️ **由调用方在搜索完成后打**:搜索挂了名字没消耗,下轮还能再喂。
+
+    `platforms` 默认只打本平台(`douyin`)。大瓜轮会把**公众号事件名**
+    (`platform="wechat"`,见 `wechat_event_names`)一并喂搜索,那批也要一起打戳
+    —— 否则同一个事件每轮都会被重新抽出来、重新搜一遍。
     """
     from app.db.models import DemandName
 
@@ -677,12 +693,178 @@ def mark_demand_names_fed(db, user_id: int, names: list[str]) -> int:
     now = datetime.now()
     ids = [str(w).strip() for w in names if str(w).strip()]
     rows = db.scalars(select(DemandName).where(
-        DemandName.user_id == user_id, DemandName.platform == PLATFORM,
+        DemandName.user_id == user_id,
+        DemandName.platform.in_(tuple(platforms or (PLATFORM,))),
         DemandName.name.in_(ids))).all()
     for r in rows:
         r.fed_search_at = now
     db.flush()
     return len(rows)
+
+
+#: 公众号事件名在 `demand_names` 里的 `platform` 取值 —— 与「评论区在求的名字」
+#: (`douyin`)分开放:**一个是"有人在写",一个是"有人在求"**,口径不同,不能混。
+WEVENT_PLATFORM = "wechat"
+
+#: `X与Y` / `X和Y` 的**实体对** —— 八卦标题写两个人就是它(`大美与高迪`/`黄仁勋和小三`)。
+#: ⚠️ 2~4 字是**两端都限**:太短会把「与」前后的半个词粘进来,太长会把整句吃掉。
+_WEVENT_PAIR_RE = re.compile(
+    r"([\u4e00-\u9fffA-Za-z0-9]{2,4})(与|和)([\u4e00-\u9fffA-Za-z0-9]{2,4})")
+
+#: **载体词**:它出现的位置就是"事件名到此为止"。
+#: 实测标题形态:「大美与高迪**视频**」「大美与高迪**出轨**对象摄影师**聊天记录**曝光」。
+_WEVENT_CARRIER = ("视频", "完整版", "聊天记录", "聊天", "记录", "原稿", "流出", "曝光",
+                   "出轨", "事件", "后续", "内容", "全集", "大瓜", "资源", "照片",
+                   "图片", "截图", "真相", "回应", "发声")
+
+#: **吃瓜语义标记** —— 至少一篇标题里要有,否则不算大瓜。
+#: ⚠️ 这一道是**必需**的,不是保险:实测「论答题卡和答题纸」有 2 作者 2 篇,
+#: 完美通过跨作者闸,而它只是公考资料。**跨作者只能证明"多人在写同一件事",
+#: 证明不了"这件事是瓜"** —— 少了这道,每轮都会拿资料模板名去烧搜索额度。
+_WEVENT_GOSSIP = ("大瓜", "吃瓜", "曝光", "出轨", "聊天记录", "流出", "不雅",
+                  "劈腿", "小三", "塌房", "内幕", "揭秘", "实锤", "爆料",
+                  "回应", "翻车", "官宣", "恋情", "绯闻", "骂战", "开撕", "互撕")
+
+
+#: X 前面常会粘上的**连接词/标签词**。⚠️ 与 `_WEVENT_GOSSIP` 分开列:
+#: 这些**不表示"是瓜"**,只表示"X 被多吃了一个字"(`…练习题含答案与解析` → X=`题含答案`)。
+_WEVENT_GLUE = ("以及", "包括", "含", "附", "及")
+
+
+def _strip_label_prefix(x: str) -> str:
+    """剥掉 X 前面**粘上来的标签词**:`深夜大瓜大美` 里的 X 会被正则吃成 `大瓜大美`,
+    真名其实只有 `大美`。
+
+    ⚠️ **只剥已知的标签/载体/连接词前缀,而且剥完必须还剩 ≥2 字** —— 不能用
+    "取最短 X" 这种规则:`黄仁勋和小三…` 的最短切分会把真名截成 `仁勋`(实测真标题)。
+    """
+    changed = True
+    while changed and len(x) > 2:
+        changed = False
+        for w in _WEVENT_GOSSIP + _WEVENT_CARRIER + _WEVENT_GLUE:
+            if len(x) - len(w) >= 2 and x.startswith(w):
+                x = x[len(w):]
+                changed = True
+                break
+    return x
+
+
+def _wevent_name(title: str) -> str:
+    """从一条**公众号标题**里抽出 `X与Y` / `X和Y` 形态的**事件名**;抽不到给空串。
+
+    ⚠️ 截断后必须**仍是一个纯实体对**(`fullmatch`):`相处模式与性格契合点是什么`
+    前半截像实体对、后半截是整句 —— 不 fullmatch 就会把半句话当成事件名。
+
+    ⚠️ X 要先剥标签前缀:实测 `深夜大瓜!大美与高迪视频【完整版】` 会抽出
+    `大瓜大美与高迪`(不是 `大美与高迪`)—— 因为正则贪心往前吃了 4 个字。
+    """
+    t = _norm_comment(str(title or ""))
+    for m in _WEVENT_PAIR_RE.finditer(t):
+        x = _strip_label_prefix(m.group(1))
+        x_end = m.start(1) + len(m.group(1))
+        tail = len(t)
+        for w in _WEVENT_CARRIER:
+            i = t.find(w, x_end)
+            if i != -1:
+                tail = min(tail, i)
+        cand = x + m.group(2) + t[m.end(2):tail]
+        if _WEVENT_PAIR_RE.fullmatch(cand):
+            return cand
+    return ""
+
+
+def wechat_event_names(db, user_id: int = 1, top: int = 3, hours: int = 48,
+                       settings=None) -> int:
+    """★★ **从公众号标题抽「大瓜事件名」**(`X与Y` 形态)并落进 `demand_names`。
+
+    ## 为什么需要这一层(2026-11-17,用户问「高迪和大美最近就是大瓜是否监控到了」)
+
+    实测答案:那次大瓜**只有公众号一路看得见**(8 篇文章 / 2 个作者),
+    而抖音线索、对标号、热榜表、`demand_names`、`hot_word_seen` **全部 0 条** ——
+    这两个名字**从没进过任何搜索词表**,所以抖音那边连"去搜一下"都没发生过。
+
+    根因在标题形态:`names_from_title` 只认书名号 `《…》`(推广号的写法),
+    而资讯号的标题是「深夜大瓜!大美与高迪视频【完整版】」—— **没有书名号**。
+    拿 `names_from_title` 跑近 7 天 1733 条公众号标题,**全部抽出空**。
+
+    ## 判据(全部用 7 天真实标题验过,不是拍脑袋)
+
+    1. `X与Y` / `X和Y` 的实体对(`_WEVENT_PAIR_RE`);
+    2. 从 X 之后**第一处载体词**截断(`_WEVENT_CARRIER`)⇒「大美与高迪出轨对象…」
+       收敛回「大美与高迪」;
+    3. 截断后必须**仍是纯实体对**;
+    4. **≥2 个不同作者**写过 —— 单一来源的事件名是"某一篇的标题",不是"在传的瓜";
+    5. 标题里至少一篇带**吃瓜语义标记**(`_WEVENT_GOSSIP`)。
+
+    ⇒ 24h 窗口过闸 **0** 个、48h 窗口过闸 **1** 个且正是「大美与高迪」。
+    窗口取 48h 而不是 24h 是**实测出来的**:这个事件在 11-14 20:02 首次落地、
+    11-16 04:02 才有第二个作者跟写,24h 窗口会正好错过跨作者证据。
+
+    ## 写库纪律
+
+    - `platform=WEVENT_PLATFORM`(`wechat`),与「评论区在求的名字」分开 ——
+      `known_name_set` 会把它们当**跨平台交叉验证**用,这正是想要的;
+    - **覆盖式更新**(不是累加):这里记的是"这个窗口内几个作者在写",
+      累加会让老事件的分数无限膨胀,把新事件挤掉;
+    - `demand_hits` 存**作者数**、`mention_hits` 存**篇数**(同名字段的既有语义:
+      "多少人在点名");
+    - `samples` 留标题样例,抽歪了一眼能看出。
+
+    ⚠️ **只写不搜**。喂搜索由调用方用 `unfed_demand_names(platforms=(...))` 取、
+       **搜索完成后**用 `mark_demand_names_fed(platforms=(...))` 打戳。
+    """
+    from app.db.models import DemandName, WechatArticle
+
+    if db is None or top <= 0:
+        return 0
+    since = datetime.now() - timedelta(hours=max(1, int(hours)))
+    try:
+        rows = db.execute(select(WechatArticle.title, WechatArticle.author).where(
+            WechatArticle.user_id == user_id,
+            WechatArticle.created_at >= since,
+            WechatArticle.title != "").limit(4000)).all()
+    except Exception:  # noqa: BLE001 - 取不到就返回 0,不影响大瓜轮其余部分
+        logger.debug("公众号事件名取标题失败", exc_info=True)
+        return 0
+    by: dict[str, dict] = {}
+    for title, author in rows:
+        name = _wevent_name(title)
+        if not name:
+            continue
+        g = by.setdefault(name, {"authors": set(), "titles": 0, "gossip": 0,
+                                 "sample": []})
+        if author:
+            g["authors"].add(str(author))
+        g["titles"] += 1
+        if any(w in str(title or "") for w in _WEVENT_GOSSIP):
+            g["gossip"] += 1
+        if len(g["sample"]) < 3:
+            g["sample"].append(str(title or "")[:120])
+    #: ★ 跨作者是**下限 2**,配置只能**调高**不能调成 1 —— 单作者的事件名就是一篇标题。
+    min_authors = max(2, int(getattr(settings, "wechat_event_min_authors", 2) or 0))
+    picked = [(n, g) for n, g in by.items()
+              if len(g["authors"]) >= min_authors and g["gossip"] >= 1]
+    picked.sort(key=lambda kv: (-len(kv[1]["authors"]), -kv[1]["titles"], kv[0]))
+    now = datetime.now()
+    n = 0
+    for name, g in picked[:top]:
+        row = db.scalar(select(DemandName).where(
+            DemandName.user_id == user_id, DemandName.platform == WEVENT_PLATFORM,
+            DemandName.name == name))
+        if row is None:
+            row = DemandName(user_id=user_id, platform=WEVENT_PLATFORM, name=name,
+                             first_seen_at=now, samples="{}")
+            db.add(row)
+        row.demand_hits = len(g["authors"])      #: 「几个作者在写」←→「多少人在点名」
+        row.mention_hits = int(g["titles"])
+        row.last_seen_at = now
+        row.samples = json.dumps({"titles": g["sample"]}, ensure_ascii=False)[:4000]
+        n += 1
+    db.flush()
+    if n:
+        logger.info("公众号事件名:窗口 %.0fh 抽到 %d 个(候选 %d)→ %s",
+                    float(hours), n, len(by), "、".join(x for x, _ in picked[:top]))
+    return n
 
 
 def guagua_candidates(db, user_id: int = 1, top: int = 3, days: int = 14) -> list[str]:
@@ -1040,9 +1222,14 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
         DouyinLead.user_id == user_id,
         DouyinLead.found_at >= since).order_by(DouyinLead.found_at.desc())).all()
     for r in leads:
-        _add(r.aweme_id, r.url, r.title, 0, r.author)
+        #: ⚠️ **先判再 `_add`,不是加完再判**(2026-11-17 修):原写法 `_add` 之后才
+        #: `break` ⇒ 进入循环时 `len(out)` 已经等于 `lib_need` 时仍会**多塞一条**,
+        #: 于是 ② 填满 3 条后 ③ 又加第 4 条 ⇒ `need - len(out) == 0` ⇒
+        #: **④ 热点段的名额被吃掉,一次都轮不到**(实测:`demand_hot_videos=1` 而
+        #: `hot_budget` 恒被算成 0,`hot_word_seen` 停在 11-11、日志里「热点差分」零次)。
         if len(out) >= lib_need:
             break
+        _add(r.aweme_id, r.url, r.title, 0, r.author)
 
     # ③ 对标号作品(带网盘的那些)
     works = db.scalars(select(DouyinPeerWork).where(
@@ -1050,9 +1237,9 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
         DouyinPeerWork.first_seen_at >= since).order_by(
         DouyinPeerWork.first_seen_at.desc())).all()
     for w in works:
-        _add(w.aweme_id, w.url, w.title, 0, w.account_name)
         if len(out) >= lib_need:
             break
+        _add(w.aweme_id, w.url, w.title, 0, w.account_name)
 
     # ④ ★ **今天才冒出来的热点**(2026-11-08 用户:「每次都会有新的热点出来,
     # 你需要总结这些规律来完成监控和预测」)。
@@ -1119,7 +1306,25 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
     if not bool(getattr(settings, "demand_watch_enabled", True)):
         return {"skipped": "disabled"}
 
-    videos = source_videos(db, user_id, settings)
+    # ★★ **没有抖音登录态是「跳过」,不是「故障」**(2026-11-17)。实测:user=2 的加密库里
+    # **没有任何 `douyin` 凭据**(`user_cookies` 里只有 user=1 有),于是每轮 4 小时
+    # 都抛一次 `DouyinProtocolError(kind="need_login")`,栈里写着「要求先登录」——
+    # 而 user=2 这一侧**永远不可能登进来**(那个租户没有采集账号)。
+    # 这既刷 ERROR 噪音(近 7 天 33 次),又让 `runs` 里分不清「链路坏了」与「这个号本来就没号」。
+    # ⚠️ 判据必须落在**响应自己说的原因**上(`kind="need_login"`),不能靠预先检查凭据:
+    # 预先检查会把"凭据刚好过期"也一起吞掉,那才是真的要人动手的那种。
+    try:
+        videos = source_videos(db, user_id, settings)
+    except Exception as exc:  # noqa: BLE001 - 只拦"这个号没登录",其余照旧往上抛
+        from app.services.douyin_protocol_source import DouyinProtocolError
+
+        if not (isinstance(exc, DouyinProtocolError)
+                and getattr(exc, "kind", "") == "need_login"):
+            raise
+        logger.info("需求名监控:user=%s 没有抖音登录态(%s),本轮跳过 —— 不是链路故障",
+                    user_id, str(exc)[:60])
+        db.rollback()
+        return {"skipped": "no_douyin_credential"}
 
     agg: dict[str, dict] = {}
     errors: list[str] = []

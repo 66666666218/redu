@@ -443,10 +443,12 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from config.settings import get_settings as _get_settings
 
     _add_job(scheduler, collect_tick, CronTrigger(minute="*"), "collect_tick", "both")
-    # 公众号监听四定点(用户决策 2026-09-22 调整):4:00/8:00/14:00/20:00——
-    # 白天工作时段与夜间各覆盖一次,相邻间隔 4~6h 更均匀。
-    # 原"每分钟检查+用户频率调度"改为纯定点——每轮全量 81 号约 3 分钟,
-    # 每天仅 4 次主动请求,最大限度降低微信读书风控压力(Cookie 生命周期优先)。
+    # 公众号监听定点(用户决策 2026-09-22 = 4/8/14/20;**2026-11-17 加 10 点**)。
+    # 时刻表本身不在这里写 —— 它读 `schedule_service.WECHAT_LISTEN_HOURS`(单一事实源),
+    # 加点的理由也在那份注释里(07-08 点发文双峰占 41%,旧表有一半要拖到 14 点)。
+    # 原"每分钟检查+用户频率调度"改为纯定点,把请求密度压到最低
+    # (Cookie 生命周期优先);注意**轮次数 ≠ 列表请求数** —— 新加这轮捞新文靠 cover,
+    # 不占 `/web/mp/articles` 那份会话额度,详见 `WECHAT_LISTEN_HOURS` 的说明。
     # misfire_grace_time=3600:定点错过后 1 小时内仍补跑(防止休眠/重启错过窗口)。
     from app.services.schedule_service import WECHAT_LISTEN_HOURS
     # ⚠️⚠️ **挪到整点后 2 分钟**(2026-10-07)—— 起因是今天 04:00 / 08:00 / 14:00

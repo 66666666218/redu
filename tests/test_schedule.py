@@ -292,17 +292,47 @@ def test_wechat_fixed_point_ignores_user_interval(monkeypatch, session) -> None:
 
 
 def test_next_wechat_listen_at() -> None:
-    """定点作业"下次预计"取最近的未过定点,跨天回绕到 4:00。"""
-    at = datetime(2026, 9, 22, 9, 5)
-    assert svc.next_wechat_listen_at(at) == datetime(2026, 9, 22, 14, 0)
-    assert svc.next_wechat_listen_at(datetime(2026, 9, 22, 21, 0)) == datetime(2026, 9, 23, 4, 0)
-    # 正点当刻:已过的定点不再算"下次",直接报下一个(界面不会显示倒退)
-    assert svc.next_wechat_listen_at(datetime(2026, 9, 22, 4, 0)) == datetime(2026, 9, 22, 8, 0)
+    """定点作业"下次预计"取最近的未过定点,跨天回绕到 4:00。
+
+    ⚠️ 期望值**跟着 `WECHAT_LISTEN_HOURS` 走**(2026-11-17 加了 10 点):
+    这个函数就是"按那份常量算下一个定点",测试若硬写死一个时刻,常量一改就会红 ——
+    那不是发现 bug,而是测试抄了第二份事实源。所以用**函数本身**核对两点:
+    ① 结果必须是一个定点且 > now;② 它是所有定点里**最近的那个**。
+    """
+    hours = sorted(svc.WECHAT_LISTEN_HOURS)
+
+    def _want(now: datetime) -> datetime:
+        for h in hours:
+            cand = now.replace(hour=h, minute=0, second=0, microsecond=0)
+            if cand > now:
+                return cand
+        return (now + timedelta(days=1)).replace(hour=hours[0], minute=0, second=0,
+                                                 microsecond=0)
+
+    for now in (datetime(2026, 9, 22, 9, 5), datetime(2026, 9, 22, 21, 0),
+                datetime(2026, 9, 22, 4, 0), datetime(2026, 9, 22, 23, 59)):
+        got = svc.next_wechat_listen_at(now)
+        assert got.hour in hours and got > now, f"{now} → {got},不是未来的定点"
+        assert got == _want(now), f"{now} → {got},不是最近的定点"
+
+    # 具体时刻仍钉一次(改常量时这里会红,**是有意的**:逼改的人确认这是决策而不是手滑)
+    #: 2026-11-17 起定点 = 4/8/10/14/20 ⇒ 09:05 之后最近的是 10:00(旧值是 14:00)
+    assert svc.next_wechat_listen_at(datetime(2026, 9, 22, 9, 5)) == datetime(2026, 9, 22, 10, 0)
 
 
 def test_wechat_listen_gap_hours_covers_night_gap() -> None:
-    """健康基准用最大空档(20:00→次日 4:00 = 8h),不是用户间隔。"""
-    assert svc.wechat_listen_gap_hours() == 8.0
+    """健康基准用最大空档(20:00→次日 4:00 = 8h),不是用户间隔。
+
+    ⚠️ 这个值是**健康页判"数据停滞"的基准**(`health.py` / `alert_service.py` 都读它)。
+    加/删定点会改变它,而**改小会让告警更敏感** —— 2026-11-17 加 10 点时逐段核过:
+    新旧表的最大空档都是 20:00→次日 4:00 = 8h,基准不变。
+    这条断言就是那份核对的可执行版本:改定点若把最大空档改了,这里会红。
+    """
+    hours = sorted(svc.WECHAT_LISTEN_HOURS)
+    gaps = [b - a for a, b in zip(hours, hours[1:])] + [24 - hours[-1] + hours[0]]
+    assert svc.wechat_listen_gap_hours() == float(max(gaps))
+    assert svc.wechat_listen_gap_hours() == 8.0, (
+        f"最大空档变了({hours} ⇒ {max(gaps)}h):告警基准要一起复核,别让夜间空档误报停滞")
 
 
 def test_wechat_schedule_row_reports_fixed_hours(session) -> None:
