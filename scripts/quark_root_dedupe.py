@@ -59,6 +59,12 @@ DEFAULT_SCAN = Path("data/_qk_root_files.json")
 PAGE_SIZE = 100
 GAP = 2.5
 
+#: 快照最多能用多久。**它必须短于「两次清理之间的间隔」**,否则就是在用
+#: 删除前的视图算删除计划 —— `file/sort` 只返回现存文件,被删掉的不会出现在里面
+#: ⇒ 旧快照里的 `keep` 可能早已不在盘上,再按它删就是删掉**仅剩的一份**。
+#: 手工跑的话,超过这个年龄就强制 `--rescan`。
+MAX_SNAPSHOT_AGE_H = 6.0
+
 
 def _key(name: str) -> tuple[str, str]:
     """配对键的左半:`_pkg_base(主段)` + 小写扩展名(大小由调用方拼上)。"""
@@ -190,10 +196,22 @@ def main() -> int:
         print(f"[扫描] 根目录 size:desc,每页 {PAGE_SIZE}、间隔 {GAP}s(约 5 分钟)", flush=True)
         files = scan_root(qt, scan_path, args.max_pages)
     else:
+        # ★ 快照必须晚于上一次删除。`file/sort` 只返回**现存**文件 ⇒ 拿删除前的
+        # 快照算计划,会把「keep 已经不在盘上」的组当成还有留存份 ⇒ **删掉独苗**。
+        # 实测 2026-11-18:`_qk_root_files.json`(11-17 19:08)算出的 961 个 keep 里
+        # **721 个已落在历史已删 fid 里**,而它是这个脚本的默认快照。
+        age_h = (time.time() - scan_path.stat().st_mtime) / 3600
+        if age_h > MAX_SNAPSHOT_AGE_H:
+            print(f"⚠️ 快照 {scan_path} 已 {age_h:.1f} 小时(>{MAX_SNAPSHOT_AGE_H}h)"
+                  f" —— 可能早于上一次删除,拿它算计划会删掉独苗。\n"
+                  f"   加 --rescan 重扫,或改用 scripts/quark_global_dedupe.py"
+                  f"(双视图 + 原件优先)。")
+            db.close()
+            return 3
         raw = json.loads(scan_path.read_text(encoding="utf-8"))
         files = [x for x in (raw.get("items") or []) if not x.get("dir")]
         print(f"[快照] {scan_path} -> {len(files)} 个文件条目"
-              f"({sum(x['size'] for x in files) / 2 ** 30:.1f} GiB)")
+              f"({sum(x['size'] for x in files) / 2 ** 30:.1f} GiB),{age_h:.1f}h 前")
 
     files = [x for x in files if not x.get("dir") and x.get("fid")]
     share_fids, share_titles, ledger = load_protect(db, account)
