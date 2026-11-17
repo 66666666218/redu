@@ -1351,6 +1351,35 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
             ld["kouling"] = {"kind": "off"}
         return leads
     budget = int(getattr(settings, "douyin_leads_transfer_limit", 3) or 0)
+    #: ★★ **盘满要在花额度之前判,而且整轮只探一次**(2026-11-17)。
+    #:
+    #: **起因**:近 14 天 81 轮的 detail 恒定差 3 条 —— `分享链22(新搬0 已搬过3 超额度16)`
+    #: 加起来只有 19,**少的正好是额度 3**。那 3 条是 `disk_full`:
+    #: `budget -= 1` 写在 `ingest` **之前**,盘满时每条都白扣一次额度、然后返回"没搬成";
+    #: 剩下的 19 条只好记 `over_budget`(看起来像"额度不够",其实是**额度被浪费掉了**)。
+    #: 实测默认号 `usage=16.03 TiB / limit=10 GiB → ratio=1640`,这个状态**不会自愈**,
+    #: 于是「新搬」连续 14 天恒为 0,而额度每轮都在为一次注定失败的转存付费。
+    #:
+    #: **修法**:整轮先探一次盘,满了就**一条都不搬**、全部按 `over_budget` 处理
+    #: (卡片照旧带作者原链、照旧推送);没满才进循环花额度。
+    #: ⚠️ 探测失败(`quota_ratio()` 回 `None`)= "不知道" ⇒ **放行** —— 别把探针抖动
+    #: 当成盘满(`admit_transfer` 的 `_UNSET` 注释是同一条纪律)。
+    disk_full_reason = ""
+    if budget > 0:
+        from app.services import xunlei_group as _xg
+
+        try:
+            from app.services import xunlei_transfer as _xt
+
+            _ratio = _xt.quota_ratio()
+        except Exception:  # noqa: BLE001 - 配额探针抖动不该挡住整轮
+            _ratio = None
+        _limit = _xg._gate_limit(settings)
+        if _ratio is not None and float(_ratio) >= _limit:
+            budget = 0
+            disk_full_reason = f"盘快满了(已用 {float(_ratio) * 100:.0f}%,阈值 {_limit * 100:.0f}%)"
+            logger.warning("抖音口令:盘满(%.0f%%),本轮**不转存只推送** —— "
+                           "线索与作者原链照旧出卡", float(_ratio) * 100)
     already = kk.known_koulings(session, user_id)
     # ⚠️ 光有"搬过没"不够,还要"搬成了哪条"(见 `known_kouling_links` 的 docstring)
     already_links = kk.known_kouling_links(session, user_id)
@@ -1416,9 +1445,16 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
             #: ⚠️ **卡片上的原链也要带提取码**(2026-11-17):`share_url` 不含 `?pwd=`,
             #: 客户点开只会看到「请输入提取码」而没有码 —— 与入队那一处**同一个病**
             #: (见 `_enqueue_later` 的 docstring)。`pass_code` 实测 12/12 都有。
-            ld["kouling"] = {"kind": "share", "status": "over_budget",
+            #: ★ **盘满与超额度分开记**(2026-11-17):两者都不搬、卡片行为完全一样,
+            #: 但**内部读数必须分得开** —— 旧实现把盘满记成 `over_budget`,于是运行记录
+            #: 读起来像"额度不够",而真相是"额度被浪费在注定失败的转存上"。
+            #: 这正是本仓反复栽的那种含糊:`disk_full` 是可重试(清理后自然再搬),
+            #: `over_budget` 是下轮再来 —— **修法完全不同,不能合成一个数**。
+            ld["kouling"] = {"kind": "share",
+                             "status": "disk_full" if disk_full_reason else "over_budget",
                              "share_url": share_url_with_pwd(info["share_url"],
-                                                             info.get("pass_code") or "")}
+                                                             info.get("pass_code") or ""),
+                             "message": disk_full_reason}
             continue
         budget -= 1
         try:
@@ -2094,8 +2130,14 @@ def _kouling_summary(leads: list[dict]) -> str:
                   if k.get("our_url") and k.get("status") != "already")
     n_already = sum(1 for k in shares if k.get("status") == "already")
     n_over = sum(1 for k in shares if k.get("status") == "over_budget")
+    #: ★ **盘满单独记一档**(2026-11-17)。见 `apply_kouling` 里 `disk_full_reason` 的说明:
+    #: 旧实现把这一类混进 `超额度`,于是 `分享链22(新搬0 已搬过3 超额度16)` **加起来只有 19**,
+    #: 恒定差 3 条 —— 那个缺口就是"额度被浪费掉的次数"。**一项对不上账的汇总,
+    #: 等于把一整类事实抹掉了**:读的人只会以为额度不够,不会想到去查盘。
+    n_disk = sum(1 for k in shares if k.get("status") == "disk_full")
     return (f"新群{n_new}/群{n_group}/分享链{len(shares)}"
-            f"(新搬{n_moved} 已搬过{n_already} 超额度{n_over})")
+            f"(新搬{n_moved} 已搬过{n_already} 超额度{n_over}"
+            + (f" 盘满{n_disk}" if n_disk else "") + ")")
 
 
 def run_douyin_leads(db, user_id: int, settings=None, category: str | None = None,

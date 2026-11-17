@@ -49,6 +49,20 @@ def _no_cdp_by_default(monkeypatch):
     monkeypatch.setattr(get_settings(), "douyin_cdp_enabled", False, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _quota_not_full(monkeypatch):
+    """**单测里默认"盘没满"**(2026-11-17)。
+
+    ⚠️ `apply_kouling` 现在会**在花额度之前**探一次盘(`xt.quota_ratio()`),那是**真实 HTTP**
+    —— 主仓有凭据 ⇒ 默认号实测 ratio=1640 ⇒ 每条用例都会走 `disk_full` 分支、
+    既有的 `status == "ok"` 断言集体变红,而且红得**像功能坏了**。
+    探盘本身在 `TestDiskFullBeforeBudget` 里专门验,这里只把默认值钉住。
+    """
+    from app.services import xunlei_transfer as xt
+
+    monkeypatch.setattr(xt, "quota_ratio", lambda *a, **k: 0.5)
+
+
 class _Settings:
     """最小 settings 替身(只覆盖 push_leads 用到的字段)。"""
     feishu_webhook_admin = "https://example.com/hook"
@@ -261,6 +275,86 @@ def test_apply_kouling_disabled_only_annotates(session, monkeypatch) -> None:
 
     out = dl.apply_kouling(_leads("三岁宝库"), session, 1, _S())
     assert out[0]["kouling"] == {"kind": "off"}
+
+
+class TestDiskFullBeforeBudget:
+    """**盘满要在花额度之前判**(2026-11-17)。
+
+    近 14 天 81 轮的 detail 恒定差 3 条 —— `分享链22(新搬0 已搬过3 超额度16)` 加起来 19。
+    缺口就是额度本身:`budget -= 1` 写在 `ingest()` 之前,盘满时每条**先扣额度再失败**,
+    额度全被浪费在注定搬不成的转存上,剩下的只好记 `over_budget` —— 读起来像"额度不够"。
+    """
+
+    class _S(_Settings):
+        douyin_leads_transfer_limit = 3
+
+    def test_盘满时不花额度也不调转存(self, session, monkeypatch) -> None:
+        from app.services import xunlei_transfer as xt
+
+        monkeypatch.setattr(xt, "quota_ratio", lambda *a, **k: 0.99)
+        monkeypatch.setattr(kk, "known_koulings", lambda s, u: set())
+        monkeypatch.setattr(kk, "resolve", lambda m: {
+            "kind": "share", "share_url": f"https://pan.xunlei.com/s/{m}",
+            "pass_code": "ab12", "group_id": ""})
+        calls: list[str] = []
+        monkeypatch.setattr(kk, "ingest",
+                            lambda s, u, m, settings=None: calls.append(m) or {"status": "ok"})
+
+        out = dl.apply_kouling(_leads("甲", "乙", "丙", "丁"), session, 1, self._S())
+
+        assert calls == [], f"盘满时一条都不该搬,实际搬了 {calls}"
+        assert [x["kouling"]["status"] for x in out] == ["disk_full"] * 4
+        # 卡片照旧能推:原链仍在,而且**带提取码**(否则客户点开只有空提取框)
+        assert all("pwd=ab12" in x["kouling"]["share_url"] for x in out)
+        assert all("盘快满了" in x["kouling"]["message"] for x in out)
+
+    def test_盘满也要入队等清理后重搬(self, session, monkeypatch) -> None:
+        """盘满**不是终态**:清理完要能自动重搬 ⇒ 必须进 `discovered_pan_links` 的待办。"""
+        from app.db.models import DiscoveredPanLink
+        from app.services import xunlei_transfer as xt
+
+        monkeypatch.setattr(xt, "quota_ratio", lambda *a, **k: 0.95)
+        monkeypatch.setattr(kk, "known_koulings", lambda s, u: set())
+        monkeypatch.setattr(kk, "resolve", lambda m: {
+            "kind": "share", "share_url": "https://pan.xunlei.com/s/A",
+            "pass_code": "p537", "group_id": ""})
+
+        def _boom(*a, **k):
+            raise AssertionError("盘满时不该调 ingest(那会真去打迅雷、白扣额度)")
+
+        monkeypatch.setattr(kk, "ingest", _boom)
+
+        dl.apply_kouling(_leads("甲"), session, 1, self._S())
+        session.commit()
+        rows = session.query(DiscoveredPanLink).all()
+        assert len(rows) == 1 and rows[0].status == "pending"
+        assert rows[0].origin_url.endswith("?pwd=p537")
+
+    def test_探盘失败不挡转存(self, session, monkeypatch) -> None:
+        """`quota_ratio()` 回 `None` = **不知道**,不是"满了" —— 探针抖动不该挡搬。"""
+        from app.services import xunlei_transfer as xt
+
+        monkeypatch.setattr(xt, "quota_ratio", lambda *a, **k: None)
+        monkeypatch.setattr(kk, "known_koulings", lambda s, u: set())
+        monkeypatch.setattr(kk, "resolve", lambda m: {
+            "kind": "share", "share_url": f"s/{m}", "pass_code": "", "group_id": ""})
+        monkeypatch.setattr(kk, "ingest",
+                            lambda s, u, m, settings=None: {"status": "ok", "our_url": "our"})
+
+        out = dl.apply_kouling(_leads("甲"), session, 1, self._S())
+        assert out[0]["kouling"]["status"] == "ok"
+
+    def test_盘满与超额度在汇总里分得开(self) -> None:
+        """两者卡片行为一样,但**修法完全不同**(盘满=等清理,超额度=下轮再来)⇒ 汇总不能合成一个数。"""
+        leads = [{"kouling": {"kind": "share", "status": "disk_full"}},
+                 {"kouling": {"kind": "share", "status": "disk_full"}},
+                 {"kouling": {"kind": "share", "status": "over_budget"}}]
+        got = dl._kouling_summary(leads)
+        assert "盘满2" in got and "超额度1" in got, f"两档要并存:{got}"
+        #: 没有盘满时输出**逐字不变**(既有断言不能被这一档搅动)
+        assert dl._kouling_summary(
+            [{"kouling": {"kind": "share", "status": "over_budget"}}]
+        ) == "新群0/群0/分享链1(新搬0 已搬过0 超额度1)"
 
 
 # ---------------------------------------------------------------- 取词:群组新资源 + 资源库
