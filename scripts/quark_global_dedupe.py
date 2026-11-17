@@ -164,8 +164,9 @@ def build_plan(files: list[dict], share_fids: set[str], titles: set[str],
     """同名(允许只差副本后缀)+ 同字节数的组:留一份,其余进计划。
 
     分组键用**去掉副本后缀**的名字,这样 `课件(1).mp4` 能和 `课件.mp4` 归到一组。
-    但仍要求**至少有一份不带后缀的原件**,否则整组都是 `(1)(2)` —— 认不出哪份是
-    原件,也就无法排除「名字本来就带括号、其实是两份不同资源」,宁可不删。
+    组内名字**完全不相同**时(只差后缀),要求**至少有一份不带后缀的原件**,
+    否则认不出哪份是原件,也排除不掉「名字本来就带括号、其实是两份不同资源」。
+    组内名字**完全相同**则不受这条约束 —— 同名同字节数就是同一份,剥不剥不影响。
     """
     groups: dict[tuple[str, int], list[dict]] = defaultdict(list)
     for x in files:
@@ -179,8 +180,16 @@ def build_plan(files: list[dict], share_fids: set[str], titles: set[str],
         names = {x["name"] for x in g}
         if any(qd.is_promo_name(n) for n in names):
             continue
-        if base not in names:
-            continue                    # 全是 (1)(2) 副本:认不出原件,不删
+        # 「必须有不带后缀的原件」这道闸只管**名字真的不一样**的情形。
+        # ★ 组内名字**完全相同**时(哪怕名字里自带 `（2）` 这种课程编号)剥不剥都在
+        # 同一个 base 上,它到底叫「副本」还是「第 2 讲」**不影响判断** —— 同字节数
+        # 的同名文件本来就是同一份。⚠️ 2026-11-18 回归:上一轮加这道闸时一刀切成
+        # 「base 不在 names 就跳过」,把 `42期预测3（2）.mp4` 这类**自带编号的真资源**
+        # 整组放过了 —— 实测 21 组 / 28 份 / **25.06 GiB** 白留着。而在加副本后缀
+        # 判据之前,这些组本来是能正常去重的。
+        exact = len(names) == 1
+        if base not in names and not exact:
+            continue                    # 名字只差后缀且无原件:认不出原件,不删
         kids = [x for x in g if x["fid"] in share_fids]
         if kids or base in titles or base in ledger \
                 or any(n in titles or n in ledger for n in names):
