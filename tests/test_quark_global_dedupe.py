@@ -98,6 +98,63 @@ def test_三份重复只删两份():
     assert len({p["keep_fid"] for p in plan}) == 1, "三份只能留一份"
 
 
+def test_只差副本后缀也算同一份():
+    """★ 2026-11-18 新增判据:重复下载会让第二份变成 `课(1).mp4`。
+
+    名字不同但字节数**完全相等**(同一份文件),老判据「名字必须完全相同」
+    整批漏掉了 —— 实测 822 组 / 883 GiB。
+    """
+    plan, _ = qgd.build_plan(
+        [_f("a", "课.mp4", 100, created=100), _f("b", "课(1).mp4", 100, created=200)],
+        set(), set(), set())
+    assert [p["fid"] for p in plan] == ["b"], "应删带后缀那份(b),留原件(a)"
+    assert plan[0]["keep_fid"] == "a"
+
+
+def test_中文括号和副本后缀也能归组():
+    for suffix in ("（2）", "- 副本"):
+        plan, _ = qgd.build_plan(
+            [_f("a", "资料.zip", 100, created=100),
+             _f("b", f"资料{suffix}.zip", 100, created=200)],
+            set(), set(), set())
+        assert [p["fid"] for p in plan] == ["b"], f"{suffix} 没被认成副本后缀"
+
+
+def test_全是副本后缀的组不删():
+    """没有不带后缀的原件 ⇒ 认不出哪份是原件,也排除不掉「名字本来就带括号」。
+
+    `广告(1).mp4` / `广告(2).mp4` 若是两份**不同**资源,名字剥完只是巧合。
+    """
+    plan, _ = qgd.build_plan(
+        [_f("a", "课(1).mp4", 100), _f("b", "课(2).mp4", 100)], set(), set(), set())
+    assert plan == []
+
+
+def test_副本后缀组也受保护清单约束():
+    plan, stats = qgd.build_plan(
+        [_f("a", "课.mp4", 100), _f("b", "课(1).mp4", 100)],
+        {"b"}, set(), set())
+    assert plan == [], "带后缀那份是我方分享落点 ⇒ 整组跳过"
+    assert stats["protected_groups"] == 1
+
+
+def test_剥后缀不会误伤带括号的真名字():
+    """`变形金刚(2007).mp4` 的括号是**年份**,不是副本序号。"""
+    assert qgd.strip_copy_suffix("变形金刚(2007).mp4") == "变形金刚(2007).mp4", \
+        "四位数字不是副本序号,不能剥"
+    assert qgd.strip_copy_suffix("课(1).mp4") == "课.mp4"
+    assert qgd.strip_copy_suffix("课(12).mp4") == "课.mp4"
+    assert qgd.strip_copy_suffix("课（3）.zip") == "课.zip"
+    assert qgd.strip_copy_suffix("课 - 副本.rar") == "课.rar"
+    assert qgd.strip_copy_suffix("课.mp4") == "课.mp4", "没有后缀要原样返回"
+    assert qgd.strip_copy_suffix("第1集.mp4") == "第1集.mp4"
+
+
+def test_刮号在名字中间的不能剥():
+    """`课(1) 第二讲.mp4` 的括号不在尾部,不是副本后缀。"""
+    assert qgd.strip_copy_suffix("课(1) 第二讲.mp4") == "课(1) 第二讲.mp4"
+
+
 def test_单份不成组():
     plan, _ = qgd.build_plan([_f("a", "唯一.mp4", 100)], set(), set(), set())
     assert plan == []

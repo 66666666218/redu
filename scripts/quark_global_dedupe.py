@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from collections import defaultdict
@@ -118,29 +119,49 @@ def load_protect(db) -> tuple[set[str], set[str], set[str]]:
             {(r[0] or "").strip() for r in led if r[0]})
 
 
+#: 重复下载时浏览器/网盘追加的副本后缀(`课件(1).mp4`、`资料（2）.zip`、`x - 副本.rar`)。
+#: ⚠️ `(1)` 在**扩展名之前**,不能锚在字符串末尾(第一版就这么写的,0 组命中)。
+COPY_SUFFIX = re.compile(r"\s*(\(\d{1,2}\)|（\d{1,2}）|- 副本)(?=\.[A-Za-z0-9]{1,5}$|$)")
+
+
+def strip_copy_suffix(name: str) -> str:
+    """去掉尾部的副本后缀;没有后缀则原样返回。"""
+    return COPY_SUFFIX.sub("", name).strip()
+
+
 def build_plan(files: list[dict], share_fids: set[str], titles: set[str],
                ledger: set[str]) -> tuple[list[dict], dict]:
-    """同名同字节数的组:留一份,其余进计划。"""
+    """同名(允许只差副本后缀)+ 同字节数的组:留一份,其余进计划。
+
+    分组键用**去掉副本后缀**的名字,这样 `课件(1).mp4` 能和 `课件.mp4` 归到一组。
+    但仍要求**至少有一份不带后缀的原件**,否则整组都是 `(1)(2)` —— 认不出哪份是
+    原件,也就无法排除「名字本来就带括号、其实是两份不同资源」,宁可不删。
+    """
     groups: dict[tuple[str, int], list[dict]] = defaultdict(list)
     for x in files:
-        groups[(x["name"], x["size"])].append(x)
+        groups[(strip_copy_suffix(x["name"]), x["size"])].append(x)
 
     plan: list[dict] = []
     prot_n = 0
-    for (name, size), g in groups.items():
+    for (base, size), g in groups.items():
         if len(g) < 2:
             continue
-        if qd.is_promo_name(name):
+        names = {x["name"] for x in g}
+        if any(qd.is_promo_name(n) for n in names):
             continue
+        if base not in names:
+            continue                    # 全是 (1)(2) 副本:认不出原件,不删
         kids = [x for x in g if x["fid"] in share_fids]
-        if kids or name in titles or name in ledger:
+        if kids or base in titles or base in ledger \
+                or any(n in titles or n in ledger for n in names):
             prot_n += 1
             continue                    # 受保护:整组跳过(宁可留,不可错删)
         g = sorted(g, key=lambda x: x.get("created") or 0)
         keep = g[0]
         for x in g[1:]:
-            plan.append({"fid": x["fid"], "name": name, "size": size,
+            plan.append({"fid": x["fid"], "name": x["name"], "size": size,
                          "pdir": x["pdir"], "keep_fid": keep["fid"],
+                         "keep_name": keep["name"],
                          "keep_pdir": keep["pdir"], "copies": len(g)})
     return plan, {"groups": len(groups), "protected_groups": prot_n}
 
