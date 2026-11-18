@@ -493,6 +493,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.wechat_digest import run_wechat_digest_all_users
     from app.services.board_digest import run_board_digest_daily, run_board_digest_weekly
     from app.services.remote_sync import remote_sync_tick
+    from app.services.remote_pull import remote_pull_tick
     from app.services.chain_health import chain_report_tick
     from app.services.cross_section_report import cross_section_report_tick
     from app.services.link_audit import link_audit_tick
@@ -665,6 +666,20 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # ⚠️ 方向**单向**(本机→远程);没配 `remote_db_url` 时它是空转(不记运行记录)。
         (remote_sync_tick, _get_settings().remote_sync_cron, {"minute": "*/30"},
          "remote_sync", "wechat"),
+        # ★★ **远程 → 本机 拉取**(2026-11-18,档4):热榜与事件层归并结果。
+        # ⚠️ 为什么必须有它:两侧分工是「热榜采集/事件归并在远程、客户推送在本机」,
+        #    而本机对远程那两张表**完全瞎** —— 实测远程 `hotspot_events` 42179 行、
+        #    `event_memberships` 49779 行,本机**都是 0 行**;远程 `hot_source_items`
+        #    近 24h 33140 行,本机只有我们自己推上去的 `bili-pan`。
+        #    结果:前端「热点事件」页永远空、「多平台热榜」页只有 B站对标号一项。
+        # ⚠️⚠️ **只拉到事件层为止,不拉 weibo/baidu/douhot 原始表**:那三张表在本机有
+        #    别的消费者(`focus_alert`/`early_agent`/`cross_platform`),而两端的飞书 webhook
+        #    指纹**完全相同** ⇒ 拉回原始热榜会让「同一词跨 ≥2 板块共振」在本机被**再判一次**,
+        #    往同一个群推第二遍。详见 `remote_pull` 的头注。
+        # ⚠️ 方向与 `remote_sync` 相反,所以是**独立模块**(同 `quark_link_pull` 的理由:
+        #    `remote_sync` 的"只写远程"是安全边界,加反向会让契约变模糊)。
+        (remote_pull_tick, _get_settings().remote_pull_cron, {"minute": 26},
+         "remote_pull", "wechat"),
         # **链路体检推送**(2026-10-05):把**全部链路**(不只公众号)的运行情况推管理群。
         # 之前只有公众号有周期总结,其余几条链全靠人手动跑脚本看 —— 等于没有主动通报。
         (chain_report_tick, _get_settings().chain_report_cron, {"minute": 30, "hour": 9},
@@ -676,8 +691,15 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         #    **0 条** ⇒ 内容级永远看不到这件事。
         # ⚠️ **只通报,不自动合并客户群** —— 不同板块的群不是一批人,合并会饿死别的群;
         #    能真去重的只有**同群**的那几个(`push_ledger.group_of` + `by_group=True`)。
+        # ⚠️⚠️ **角色必须是 `wechat`,不能是 `both`**(2026-11-18 二修):
+        #    `push_ledger`(它的唯一数据源)**只在本机写**(推送全挂 wechat 侧)。
+        #    实测远程那一张表 **0 行** ⇒ `both` 会让远程每天 09:48 往管理群推一句
+        #    「一条盘链都没有 —— 盘链抽取/台账写入断了」——**是假警报**,
+        #    而真正的链路体检(`chain_report`,`wechat`)已经只在本机跑。
+        #    这条与 `board_digest` 的 `both` 不同:那边**有内容也会两边发**;
+        #    这边数据源单边,**放两边就必然有一边是错的**。
         (cross_section_report_tick, _get_settings().cross_section_report_cron,
-         {"minute": 48, "hour": 9}, "cross_section_report", "both"),
+         {"minute": 48, "hour": 9}, "cross_section_report", "wechat"),
         # **链接体检**(2026-10-16):抽样探活我方分享链 + 判"货不对版/空分享"。
         # ⚠️ 为什么要有它:首轮实测 75 条里 **货不对版 14 / 空分享 10** —— 这两种**都会打到
         #   客户脸上**(点开拿到别的资源 / 点开是空的),而在此之前**没有任何一行报告看它们**

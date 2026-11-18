@@ -379,6 +379,16 @@ class Settings(BaseSettings):
     remote_db_password: str = ""
     remote_db_name: str = "redu"
     remote_sync_cron: str = "9,39 * * * *"
+    # **远程 → 本机 拉取**(2026-11-18,档4):把热榜与事件层归并结果镜像回本机。
+    # ⚠️ 方向与 `remote_sync` **相反**,所以是独立模块(`remote_pull`)而不是给它加个参数 ——
+    #    `remote_sync` 的"只写远程、不读不改本机业务数据"是它的安全边界;
+    #    契约一旦有反向例外,后面每人都得先读一遍才知道边界在哪(同 `quark_link_pull` 的理由)。
+    # ⚠️ 排期 **:26** —— 与 `remote_sync`(:09/:39)错开,不同一分钟抢同一条 SSH 隧道;
+    #    也避开已有作业(`test_job_stagger` 会拦 `:00/:30` 网格)。
+    remote_pull_cron: str = "26 * * * *"
+    #: 事件层回看窗口(天)。与 `board_digest` 的周结同口径;事件 `maintenance` 默认留
+    #: `data_retention_days`(30)⇒ 7 天窗口拉过来的行不会被清理作业立刻删掉。
+    remote_pull_event_days: int = 7
     # 链路体检推送(2026-10-05 用户口径:「没有推送小红书、B站、知乎、贴吧多平台的运行情况啊」):
     # 每天把**全部链路**的运行情况推**管理群**。⚠️ 全绿也推 —— "今天全绿"本身是运维要知道的信息,
     # 而且只有每天都来,人才会注意到"今天没来"(与 health_push 同一条)。
