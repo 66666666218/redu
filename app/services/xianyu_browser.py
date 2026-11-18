@@ -68,7 +68,7 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from app.services.xianyu import API, XianyuError, _extract_items
+from app.services.xianyu import API, XianyuError, XianyuVerify, _extract_items
 
 DETAIL_API = "mtop.taobao.idle.pc.detail"      # 商品详情(与 XianyuClient.detail 同一个接口)
 from app.utils import get_logger
@@ -232,25 +232,75 @@ class XianyuBrowserClient:
         而 `idlehome.feed` / `user.page.nav` 都正常返回 → **不是环境被封、也不是登录失效,
         是这一个接口被单独限了**)。手点搜索页也能正常出商品(实测 121 个节点)。
 
-        做法:`add_init_script` 钩住 `window.lib.mtop.request` → 跳到搜索页让**页面自己**发请求
-        → 读回它拿到的**结构化响应**(比解析 DOM 稳,还复用现成的 `_extract_items`)。
+        ### ★★ 2026-11-18 订正:**截获点必须搬到网络层**
+        原来只钩 `window.lib.mtop.request`(`__xy_cap`)。但 11-18 现场抓包(用
+        `page.on("response")` 旁听)**看到搜索请求 9/9 都发了出去、状态 200**,
+        而 `__xy_cap` **一条都没截到**(它截到的 8 条全是 gaia/loginuser 之类)
+        ⇒ 页面已**不再经过那个入口**发搜索。于是首选路**静默返回 0**,
+        再落 `_search_direct` 必拿 `TIMEOUT::接口超时` —— 一次"首选路失效"被伪装成
+        "这个接口被限了",而真正的原因(风控)连报都报不出来。
+
+        现在两路**同时截**:网络层 `page.on("response")`(主)+ `__xy_cap`(兼容旧站点)。
+        网络层还顺带看得见**页面自己被风控**这件事:那时响应体是
+        `{"ret":["FAIL_SYS_USER_VALIDATE","RGV587_ERROR::SM::哎哟喂,被挤爆啦"]}`
+        ⇒ 抛 `XianyuVerify` 而不是返回空,让上层按"需人工过滑块"处理
+        (**别让滑块伪装成 TIMEOUT**:两者修法完全不同)。
         """
         pg = self._pg
-        pg.goto(_SEARCH_URL + urllib.parse.quote(keyword), wait_until="domcontentloaded",
-                timeout=60000)
-        items: list[dict] = []
-        for _ in range(24):                       # 最多等 ~24 秒,等页面把搜索请求发出去
+        net: list[dict] = []          # 网络层截到的搜索结果(解析后)
+        risk: list[str] = []          # 网络层看到的"人机验证/挤爆"原文
+
+        def _on_response(r) -> None:
+            """⚠️ 只认**带 `api` 字段的 mtop 回包**。
+
+            滑块 punish 端点也回 `{"code":0,"dt":"success","ec":200,...}`,拿
+            `"success" in body` 判会把**被拦**读成**恢复**(11-18 实测栽过)。
+            """
             try:
-                caps = json.loads(pg.evaluate("() => JSON.stringify(window.__xy_cap || [])") or "[]")
-            except Exception:  # noqa: BLE001 - 页面在跳转(已知竞态)→ 等一下再来
+                u = r.url
+                if API not in u or "punish" in u or "activate" in u or "shade" in u:
+                    return
+                obj = json.loads(r.text())
+            except Exception:  # noqa: BLE001 - 非 JSON/取不到 body 就不是我们要的
+                return
+            if not isinstance(obj, dict) or obj.get("api") != API:
+                return
+            ret = " ".join(str(x) for x in (obj.get("ret") or []))
+            if "USER_VALIDATE" in ret or "RGV587" in ret:
+                risk.append(ret[:160] or "USER_VALIDATE")
+                return
+            net.append(obj)
+
+        pg.on("response", _on_response)
+        try:
+            pg.goto(_SEARCH_URL + urllib.parse.quote(keyword), wait_until="domcontentloaded",
+                    timeout=60000)
+            items: list[dict] = []
+            for _ in range(24):                   # 最多等 ~24 秒,等页面把搜索请求发出去
+                items = [it for cap in net for it in _extract_items(cap)]
+                if not items:
+                    #: 兼容旧站点:页面若仍走 `window.lib.mtop.request`,这里还能兜到
+                    try:
+                        caps = json.loads(
+                            pg.evaluate("() => JSON.stringify(window.__xy_cap || [])") or "[]")
+                    except Exception:  # noqa: BLE001 - 页面在跳转(已知竞态)→ 等一下再来
+                        caps = []
+                    items = [it for cap in caps for it in _extract_items(cap)]
+                if items:
+                    return items
+                if risk:                          # 已被风控,再等也是白发请求
+                    break
                 pg.wait_for_timeout(1000)
-                continue
-            for cap in caps:
-                items.extend(_extract_items(cap))
-            if items:
-                break
-            pg.wait_for_timeout(1000)
-        return items
+            if risk:
+                #: **必须冒泡**:`collect_hot` 靠 `XianyuVerify` 停轮 + 上报
+                #: "需人工过滑块";吞成空的话它只会当成一次普通失败继续打下一个词。
+                raise XianyuVerify(f"闲鱼人机验证(滑块),页面自己的搜索也被挡:{risk[0]}")
+            return items
+        finally:
+            try:
+                pg.remove_listener("response", _on_response)
+            except Exception:  # noqa: BLE001 - 页面已关时移除会失败,收尾不该冒泡
+                logger.debug("闲鱼网络层监听移除失败", exc_info=True)
 
     def _search_direct(self, pg, keyword: str, page: int, rows: int) -> list[dict]:
         """**直连**路(老做法):在页面上下文里自己调 mtop。
@@ -286,6 +336,12 @@ class XianyuBrowserClient:
         items: list[dict] = []
         try:
             items = self._search_by_page(keyword)
+        except XianyuVerify:
+            #: ⚠️ **不许吞**(2026-11-18):滑块是**账号/IP 级**信号,上层要靠它
+            #: 停轮并上报"需人工过滑块"。吞掉再落 `_search_direct`,拿回的是
+            #: `TIMEOUT::接口超时` ⇒ 真因从"被风控"退化成"接口超时",
+            #: 值班的人会去查网络/接口,而不是去拖滑块。
+            raise
         except Exception as exc:  # noqa: BLE001 - 页面路失败不该直接判死刑,还有直连兜底
             logger.debug("闲鱼页面驱动搜索失败(%s):%s", keyword, str(exc)[:120])
         if not items:

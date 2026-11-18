@@ -12,7 +12,7 @@ import json
 import pytest
 
 from app.services import xianyu_browser as xb
-from app.services.xianyu import XianyuError
+from app.services.xianyu import XianyuError, XianyuVerify
 
 
 class _FakePage:
@@ -188,16 +188,35 @@ def test_get_client_returns_thread_bound_proxy() -> None:
 # ---------------------------------------------------------------- 页面驱动搜索(2026-10-03)
 
 class _PageDrivenPage:
-    """页面驱动路:跳到搜索页后,`evaluate` 读回钩子截获的 `__xy_cap`。"""
+    """页面驱动路:跳到搜索页后,`evaluate` 读回钩子截获的 `__xy_cap`。
 
-    def __init__(self, caps: list, direct_payload: str = ""):
+    ⚠️ 2026-11-18 起**首选路是网络层**(`page.on("response")`)—— 这个替身必须
+    同时扮演"事件发射器":`goto` 时把预设的响应打给监听器。少了 `on`/`remove_listener`,
+    测试会以 `AttributeError` 假红,红的却是**替身太弱**而不是被测代码有问题。
+    """
+
+    def __init__(self, caps: list, direct_payload: str = "",
+                 responses: list | None = None):
         self._caps = caps
         self._direct = direct_payload
+        self._responses = responses or []      #: (url, body) —— goto 时逐个投递
+        self._handlers: dict = {}
         self.goto_url = ""
         self.waited = 0
 
+    # ---- playwright 事件接口 ----
+    def on(self, event, fn):
+        self._handlers.setdefault(event, []).append(fn)
+
+    def remove_listener(self, event, fn):
+        if fn in self._handlers.get(event, []):
+            self._handlers[event].remove(fn)
+
     def goto(self, url, **kw):
         self.goto_url = url
+        for u, body in self._responses:
+            for fn in list(self._handlers.get("response", [])):
+                fn(_FakeResponse(u, body))
 
     def evaluate(self, js, arg=None):
         if "__xy_cap" in js:
@@ -208,6 +227,16 @@ class _PageDrivenPage:
 
     def wait_for_timeout(self, ms):
         self.waited += ms
+
+
+class _FakeResponse:
+    """够用即可:监听器只读 `.url` 与 `.text()`。"""
+
+    def __init__(self, url: str, body: str):
+        self.url, self._body = url, body
+
+    def text(self) -> str:
+        return self._body
 
 
 def _cap_payload(title: str, item_id: str) -> dict:
@@ -222,7 +251,7 @@ def test_search_prefers_page_driven_and_captures_results() -> None:
     同一浏览器同一登录态下,我们自己调 `idlemtopsearch.pc.search` 会被回
     `TIMEOUT::接口超时`,而**页面自己的 JS 发同样的搜索完全正常**
     (同一时刻 `idlehome.feed`/`user.page.nav` 都正常 → 不是环境被封、不是登录失效,
-    **是这一个接口被单独限了**)。所以改成钩住页面的 mtop、截获它拿到的结构化响应。
+    **是这一个接口被单独限了**)。所以改成截获页面自己发出的搜索响应。
     """
     c = xb.XianyuBrowserClient()
     pg = _PageDrivenPage([_cap_payload("剪映会员秒发", "111")])
@@ -230,6 +259,67 @@ def test_search_prefers_page_driven_and_captures_results() -> None:
     items = c.search("剪映会员")
     assert len(items) == 1 and items[0]["title"] == "剪映会员秒发"
     assert "/search?q=" in pg.goto_url and "%E5%89%AA%E6%98%A0" in pg.goto_url   # 词进了 URL
+
+
+def test_search_captures_at_network_layer() -> None:
+    """★★ **2026-11-18 实测定案:截获点必须在网络层**。
+
+    现场用 `page.on("response")` 旁听看到搜索请求 **9/9 都发了出去、状态 200**,
+    而 `window.__xy_cap` **一条都没截到**(它截到的 8 条全是 gaia/loginuser)
+    ⇒ 页面已不再经过 `window.lib.mtop.request` 发搜索。
+
+    只留钩子那条路时,首选路**静默返回 0**、再落直连必拿 `TIMEOUT::接口超时` ——
+    一次「钩子失效」被伪装成「接口被限」。这条用例钉住:钩子全空、只有网络层有回包,
+    也必须解析出商品。
+    """
+    body = json.dumps(_cap_payload("网盘资料合集", "999"))
+    c = xb.XianyuBrowserClient()
+    c._pg = _PageDrivenPage([], responses=[(
+        "https://h5api.m.goofish.com/h5/mtop.taobao.idlemtopsearch.pc.search/1.0/", body)])
+    items = c.search("网盘资料")
+    assert len(items) == 1 and items[0]["title"] == "网盘资料合集"
+
+
+def test_network_layer_ignores_punish_and_non_mtop_bodies() -> None:
+    """⚠️ **判据不许用 `"success" in body`**(2026-11-18 栽过):滑块 punish 端点回的是
+    `{"code":0,"dt":"success","ec":200,...}`,不含 `api`/`ret` —— 按子串判会把
+    **被拦**读成**恢复**。只认 `api` 字段等于搜索接口的 mtop 回包。
+    """
+    punish = json.dumps({"code": 0, "dt": "success", "ec": 200,
+                         "result": {"code": 0, "sig": "from bx"}, "success": True})
+    other = json.dumps({"api": "mtop.taobao.idlehome.feed", "ret": ["SUCCESS::调用成功"],
+                        "data": {"resultList": [{"item": {"main": {"exContent":
+                            {"title": "不该被当成搜索结果", "itemId": "0"}}}}]}})
+    c = xb.XianyuBrowserClient()
+    c._pg = _PageDrivenPage([], direct_payload=json.dumps({"data": {"resultList": []}}),
+                            responses=[
+                                ("https://h5api.m.goofish.com/_____tmd_____/punish?x=1", punish),
+                                ("https://h5api.m.goofish.com/h5/mtop.taobao.idlehome.feed/1.0/", other),
+                            ])
+    #: 两条都该被忽略 ⇒ 页面路 0 条 → 落到直连 → 直连也是空 → 明确报错
+    with pytest.raises(XianyuError) as ei:
+        c.search("ps教程")
+    assert "未解析到商品" in str(ei.value)
+
+
+def test_page_risk_control_raises_verify_instead_of_empty() -> None:
+    """★★ **滑块不许伪装成 TIMEOUT**(2026-11-18)。
+
+    网络层看到页面自己的搜索被回 `FAIL_SYS_USER_VALIDATE` / `RGV587_ERROR` 时,
+    必须抛 `XianyuVerify` —— `collect_hot` 靠它**立刻停轮**并上报"需人工过滑块"。
+    若吞成空结果再落 `_search_direct`,拿回的是 `TIMEOUT::接口超时`,
+    真因从"被风控"退化成"接口超时",值班的人会去查网络而不是去拖滑块。
+    """
+    risk = json.dumps({"api": xb.API,
+                       "ret": ["FAIL_SYS_USER_VALIDATE",
+                               "RGV587_ERROR::SM::哎哟喂,被挤爆啦,请稍后重试"],
+                       "data": {"url": "https://h5api.m.goofish.com/_____tmd_____/punish"}})
+    c = xb.XianyuBrowserClient()
+    c._pg = _PageDrivenPage([], direct_payload="不该走到这里", responses=[(
+        "https://h5api.m.goofish.com/h5/mtop.taobao.idlemtopsearch.pc.search/1.0/", risk)])
+    with pytest.raises(xb.XianyuVerify) as ei:
+        c.search("网盘资源")
+    assert "滑块" in str(ei.value) and "RGV587" in str(ei.value)
 
 
 def test_search_falls_back_to_direct_when_page_yields_nothing() -> None:
