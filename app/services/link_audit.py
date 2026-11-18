@@ -72,7 +72,43 @@ class Prober:
         sid, pwd = q._parse_share(url)
         stoken = q._get_stoken(sid, pwd)
         items = q._list_share_files(sid, stoken)
-        return {"alive": True, "names": [str(x.get("file_name") or "") for x in items][:5]}
+        _is_dir = lambda x: bool(x.get("dir"))                                   # noqa: E731
+        _name = lambda x: x.get("file_name")                                     # noqa: E731
+        only = _only_dir_name(items, _is_dir, _name)
+        out: dict = {"alive": True,
+                     "names": [str(_name(x) or "") for x in items][:5],
+                     "only_dir_name": only}
+        # ★ **夸克能下探**(2026-11-18):`_list_share_files` 有 `pdir_fid`
+        # ⇒ 单一目录时再列一层,把真实内容带回来 —— 这样 `穿成炮灰后…→ 获取链接`
+        # 那种「容器名 vs 真实资源」才判得出,**而不是只能挂在「待人工看」上等人**。
+        # ⚠️ 迅雷没这条路(没有 `pdir_fid` 参数),那边只能继续靠容器名判。
+        # ⚠️ **要逐层下探到底**:实测有 `古装大剧 / 分类整理 / 文字类` 这种**连着两层**
+        #    都是收纳目录的;只下探一层会把「第二层容器名」当成真实内容,硬判成货不对版。
+        containers: list[str] = [only] if only else []
+        cur = items
+        for _ in range(3):
+            fid = str(next((x.get("fid") for x in cur if x.get("fid")), "") or "")
+            if not (only and fid):
+                break
+            try:
+                sub = q._list_share_files(sid, stoken, pdir_fid=fid)
+            except Exception as exc:  # noqa: BLE001 - 下探失败不该把整条判成坏链
+                logger.info("链接体检:夸克分享下探失败(%s)", type(exc).__name__)
+                sub = []
+            sub_names = [str(_name(x) or "") for x in sub if _name(x)]
+            if not sub_names:
+                break
+            cur = sub
+            nxt = _only_dir_name(sub, _is_dir, _name)
+            if not nxt:
+                #: 到这一层**不再是单一目录** ⇒ 这就是真实内容,下探到底了
+                out["inner_names"] = sub_names[:5]
+                break
+            containers.append(nxt)
+            only = nxt
+        if containers:
+            out["container_names"] = containers[:4]
+        return out
 
     def xunlei(self, url: str) -> dict:
         import requests
@@ -98,8 +134,16 @@ class Prober:
                 return {"alive": False, "err": f"share_status={st}"}
             if str(d.get("error") or "") and not d.get("files"):
                 return {"alive": False, "err": str(d.get("error"))[:60]}
-            return {"alive": True, "names": [str(f.get("name") or "")
-                                             for f in (d.get("files") or [])][:5]}
+            files = d.get("files") or []
+            return {"alive": True,
+                    "names": [str(f.get("name") or "") for f in files][:5],
+                    #: 迅雷的分享接口**不支持指定目录**(没有 `pdir_fid` 那样的参数),
+                    #: 所以这里只能标记「顶层是单一目录」,**无法下探** ——
+                    #: 判定会在 `_verdict` 里转成「容器名待核」,而不是硬判货不对版。
+                    "only_dir_name": _only_dir_name(
+                        files,
+                        lambda f: "folder" in str(f.get("kind") or "").lower(),
+                        lambda f: f.get("name"))}
 
         # ⚠️ **必须走 captcha 重试**(2026-10-16 实测踩到):直接裸 GET 会回 `captcha_invalid`,
         #    于是 30 条迅雷链**全被报成"打不开"** —— 而那是**我们这边**没带有效 captcha,
@@ -232,6 +276,28 @@ def _aligned(title: str, name: str) -> bool:
     return False
 
 
+def _only_dir_name(items: list, is_dir, get_name) -> str:
+    """分享顶层**只有一条、且它是目录**时返回那个目录名;否则返回 `""`。
+
+    为什么要它:实测一个迅雷分享的顶层就一个叫 `文字类` 的文件夹(真实内容在下一层),
+    而它被 **6 个不同标题**复用 ⇒ 体检报 6 条「货不对版」,占当轮 11 条里的一半多。
+    `文字类` / `古装大剧` / `分类整理` 这种词是**收纳目录**,不是资源名,
+    拿它跟标题比**注定对不上** —— 那是判据的盲区,不是链坏了。
+
+    ⚠️ 只认「**单一目录**」这一种形状:多条目、或单条但是文件,对不上就是真的对不上。
+    """
+    if len(items) != 1:
+        return ""
+    one = items[0]
+    return str(get_name(one) or "") if is_dir(one) else ""
+
+
+#: 「顶层是单一目录、且目录名与标题对不上」这一档的标记。**公开名**(命令行壳要按它分段)。
+#: ★ **必须与「我们被限流」那种「待人工看」分开**(2026-11-18):后者进 `_BAD` 就是**假红**,
+#: 而前者**恰恰可能是真事故**(`《阳光姐妹淘》→ 中医古籍` 就是这么一种形状)。
+CONTAINER_MARK = "[容器名待核]"
+
+
 def _verdict(title: str, probe: dict) -> tuple[str, str]:
     """→ (判定, 说明)。判定 ∈ {对齐, 货不对版, 空分享, 打不开, 待人工看}。"""
     if probe.get("alive") is False:
@@ -246,6 +312,45 @@ def _verdict(title: str, probe: dict) -> tuple[str, str]:
     for n in names:
         if _aligned(title, n) or title_claims(title, n) or title_claims(n, title):
             return "对齐", n
+    #: 已下探拿到的**真实内容名**(目前只有夸克能下探)。对得上就直接是「对齐」——
+    #: 容器名叫什么已经不重要了(实测 `穿成炮灰后…` 顶层是 `获取链接`,内容在下一层)。
+    inner = [str(n) for n in (probe.get("inner_names") or []) if n]
+    for n in inner:
+        if _aligned(title, n) or title_claims(title, n) or title_claims(n, title):
+            return "对齐", n
+    # ★★ **顶层只有一个「分类目录」时,不能判货不对版**(2026-11-18 实测)。
+    # 实测那个迅雷分享顶层就一个叫 `文字类` 的文件夹,真实内容在下一层 ——
+    # 而它被 **6 个不同标题**(抖音线索 4 + 公众号 2)复用,于是体检里报 6 条「货不对版」,
+    # 占了当轮 11 条里的一半多。名字像 `文字类` / `古装大剧` / `分类整理` 这种,
+    # 是**收纳目录**不是资源名,拿它跟标题比注定对不上。
+    # ⚠️ 判据只放行**单一目录**这一种:多条目或单文件时对不上,仍然是真的对不上。
+    only = probe.get("only_dir_name")
+    #: `only_dir_name` 是**顶层**那个目录名;`container_names` 是下探走到底的整条链
+    #: (只有夸克会给,迅雷恒缺)。文案里印全链路,人才看得出"中间隔了几层收纳目录"。
+    containers = [str(c) for c in (probe.get("container_names") or []) if c]
+    if only:
+        # ⚠️ **不能一律放过**:那样会把**真事故**也埋进「判不了」里。实测同一天里
+        # 既有 `《麦穗与羊》→ 文字类`(容器名,判不出对错),也有
+        # `《阳光姐妹淘》→ 中医古籍`(这条 2026-10-16 就确认过是**真错配**)。
+        # ⇒ 先拿**容器名**跟标题比一次:对得上(说明标题说的就是这层目录)算对齐;
+        #   对不上就把两边都写出来 —— 判不了 ≠ 没问题,文案必须让人能动手查。
+        for c in (containers or [only]):
+            if _aligned(title, c) or title_claims(title, c) or title_claims(c, title):
+                return "对齐", c
+        # ★ **下探过就不再是「判不了」** —— 内容名与容器名都对不上,那就是**货不对版**。
+        # 实测 `穿成炮灰后：不是反派吗？怎么要抱抱` → 容器 `获取链接`,而里面也不是它;
+        # 那条链被 100+ 标题共用。只按容器名判的话它永远停在「待人工看」。
+        if inner:
+            chain = "→".join(match_key(c)[:12] for c in containers) or match_key(only)[:18]
+            return "货不对版", (f"{match_key(inner[0])[:26]} | 库里:{match_key(title)[:24]}"
+                                f" | 容器:{chain}")
+        # ⚠️⚠️ **这一档必须带标记且必须进告警**(2026-11-18):它落「待人工看」是为了不改
+        # 五档判定的口径,而 `_BAD` 里刻意不含「待人工看」(那档还混着"我们被限流")。
+        # 于是实测 11 条里 `《阳光姐妹淘》→ 中医古籍` 这条**真事故**被静默丢出了告警 ——
+        # 与"静默失败=假成功"同族:报告写着"待人工看",实际谁也不会去看。
+        chain = "→".join(match_key(c)[:12] for c in containers)
+        return "待人工看", (f"{CONTAINER_MARK} 顶层是单一目录「{chain or match_key(only)[:24]}」,"
+                            f"与标题不符 | 库里:{match_key(title)[:24]};需人工核对")
     # 一条都对不上 ⇒ 把**分享里真实的名字**带出来,让人一眼判(判据是启发式的,别装成权威)
     return "货不对版", f"{match_key(names[0])[:30]} | 库里:{match_key(title)[:24]}"
 
@@ -311,8 +416,48 @@ def audit_rows(db: Any, user_id: int = 1, *, per_source: int = 15, gap: float = 
     return out
 
 
-#: 出问题才算"要人看";这两档是**链本身**的问题(「待人工看」不算 —— 那是我们自己被限流)
+#: 出问题才算"要人看";这三档是**链本身**的问题
 _BAD = ("打不开", "空分享", "货不对版")
+#: ⚠️ 「待人工看」**整体不进 `_BAD`** —— 那一档大部分是「我们自己被限流/超时」,
+#: 算进去就是 `_BAD` 最怕的**假红**(见 `probe()` 里那段)。
+#: 但里面的「顶层单一目录且目录名与标题不符」是**另一个物种**:它是**链本身**的可疑形状,
+#: 实测 `《阳光姐妹淘》→ 中医古籍` 就是**真错配**。⇒ 靠 `CONTAINER_MARK` 标记**只捞这一小类**。
+
+
+def _needs_eyes(row: dict) -> bool:
+    """这一行要不要进告警:确凿的坏链,**加上**「容器名与标题不符」这一小类。"""
+    return row["verdict"] in _BAD or CONTAINER_MARK in str(row.get("why") or "")
+
+
+def bad_groups(rows: list[dict]) -> list[tuple[str, list[str], str, int]]:
+    """要人看的行**按链聚合** → `[(url, [问题类型...], 说明, 命中行数)]`,行数多的在前。
+
+    ★ **为什么必须聚合**(2026-11-18 实测):一条链被 N 个标题复用是常态 ——
+    实测 `VP6XqobV5vdtY7KuROqmhouKA1` 一个分享被 **6 个抖音/公众号标题**共用,
+    告警里就成了 6 行一模一样的东西,而 `_audit` 的告警只发前 8 行 ⇒
+    **其余链被挤出告警**,读起来像"只有这一条有问题"。按链聚一次,
+    一个坏分享只占一行,「影响 N 个标题」反而成了它的严重度。
+    """
+    from collections import defaultdict
+
+    grouped: dict[str, dict] = defaultdict(lambda: {"titles": [], "kinds": [], "why": ""})
+    for r in rows:
+        if not _needs_eyes(r):
+            continue
+        g = grouped[r["url"]]
+        g["titles"].append(str(r.get("title") or "")[:26])
+        kind = r["verdict"]
+        if CONTAINER_MARK in str(r.get("why") or ""):
+            kind = "容器名待核"
+        if kind not in g["kinds"]:
+            g["kinds"].append(kind)
+        g["why"] = g["why"] or str(r.get("why") or "")
+    #: ⚠️ 说明里**剥掉标记前缀** —— 标记已经进 `kinds` 了,两边都带会读成两件事。
+    out = [(u, g["kinds"], g["why"].replace(CONTAINER_MARK, "").strip(" ,;"), len(g["titles"]))
+           for u, g in grouped.items()]
+    #: 影响面大的排前面 —— 一条链挂 N 个标题的,比单行坏链更该先看
+    out.sort(key=lambda x: -x[3])
+    return out
 
 
 def summary(rows: list[dict]) -> str:
@@ -320,10 +465,18 @@ def summary(rows: list[dict]) -> str:
     from collections import Counter
 
     c = Counter(r["verdict"] for r in rows)
+    #: 「待人工看」里**分两小类报**:容器名不符是要人动手的,限流是我们自己等一等就好。
+    #: ⚠️ 混成一个数字时,后者会把前者淹掉(实测 11 条待人工看里 6 条是容器名、其余是限流)。
+    container = sum(1 for r in rows if CONTAINER_MARK in str(r.get("why") or ""))
+    manual = c.get("待人工看", 0) - container
     return (f"抽{len(rows)} 对齐{c.get('对齐', 0)}/"
             + " ".join(f"{k}{c[k]}" for k in _BAD if c.get(k))
-            + (f" 待人工看{c['待人工看']}" if c.get("待人工看") else "")
-            + ("" if any(c.get(k) for k in _BAD) else " **全对齐**"))
+            + (f" 容器名待核{container}" if container else "")
+            + (f" 待人工看{manual}" if manual else "")
+            # ⚠️ **「全对齐」只许在每一条都真的对齐时说**(2026-11-18):原来按"没有 `_BAD`"
+            # 算,于是「3 条对齐 + 3 条没探成(限流)」也印 **全对齐** —— 拿"我们没看见"
+            # 冒充"看见是好的",正是本仓那条「没看到≠不存在」的反面。
+            + (" **全对齐**" if rows and all(r["verdict"] == "对齐" for r in rows) else ""))
 
 
 def link_audit_tick(settings=None, *, per_source: int = 0) -> int:
@@ -348,18 +501,19 @@ def link_audit_tick(settings=None, *, per_source: int = 0) -> int:
                                  .where(User.enabled.is_(True))).all():
             rows = audit_rows(db, uid, per_source=n)
             s = summary(rows)
-            bad = [r for r in rows if r["verdict"] in _BAD]
-            bad_total += len(bad)
-            detail = s + (f" | 例:{bad[0]['source']}/{bad[0]['title'][:18]}"
-                          if bad else "")
+            groups = bad_groups(rows)
+            bad_total += sum(g[3] for g in groups)
+            detail = s + (f" | 例:{groups[0][0][-18:]}" if groups else "")
             _record_run(db, uid, "link_audit", "success" if rows else "failed", detail[:900])
             db.commit()
-            if bad and getattr(settings, "link_audit_alert", True):
+            if groups and getattr(settings, "link_audit_alert", True):
                 hook = webhook_for(settings, "admin")
                 if hook:
+                    #: ⚠️ **按链聚合后再截断**(见 `bad_groups`) —— 按行截断时,
+                    #: 一条被 6 个标题共用的分享会占满 8 行里的大半,把别的链挤掉。
                     lines = "\n".join(
-                        f"· [{r['source']}] {r['title'][:26]} → 实际:{r['why'][:30]}"
-                        for r in bad[:8])
+                        f"· {'/'.join(k)} 影响{n}个标题 | {why[:34]}\n  {url[:74]}"
+                        for url, k, why, n in groups[:8])
                     FeishuClient(hook, getattr(settings, "feishu_secret", "")).send(
                         f"🔗 **链接体检**:{s}\n{lines}\n"
                         f"⚠️ 只是抽样;复跑:`python scripts/link_audit.py --n 50`")

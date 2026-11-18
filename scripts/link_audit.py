@@ -17,7 +17,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.stdout.reconfigure(encoding="utf-8")
 
-from app.services.link_audit import SOURCES, Prober, _first_url, _verdict  # noqa: E402
+from app.services.link_audit import (  # noqa: E402
+    CONTAINER_MARK, SOURCES, Prober, _first_url, _verdict, bad_groups,
+)
 
 
 def main() -> int:
@@ -66,15 +68,34 @@ def main() -> int:
 
     by_v = Counter(r["verdict"] for r in rows)
     print(f"共探 {len(rows)} 条 | " + " | ".join(f"{k} {v}" for k, v in by_v.most_common()))
+    #: ⚠️ **先给按链聚合的视角**(2026-11-18):一条链被 N 个标题复用是常态,
+    #: 按行看会让人以为"到处都坏",而实际可能只是同一条分享被复用了 N 次。
+    groups = bad_groups(rows)
+    if groups:
+        print(f"\n=== 要人看的链 {len(groups)} 条(按影响面排序)===")
+        for url, kinds, why, n in groups[:12]:
+            print(f"  [{'/'.join(kinds)}] 影响{n}个标题 | {why[:56]}")
+            print(f"      {url[:88]}")
+    #: ⚠️ 「待人工看」里混着两种东西(2026-11-18):容器名不符**要人动手查**,
+    #: 限流只是我们自己等一等 ⇒ 分两段打印,别让后者把前者淹掉。
     for tag in ("打不开", "空分享", "货不对版", "待人工看"):
         bad = [r for r in rows if r["verdict"] == tag]
         if not bad:
             continue
-        print(f"\n=== {tag}({len(bad)})===")
-        for r in bad[:12]:
-            print(f"  [{r['source']}/{r['platform']}] {r['title']}")
-            print(f"      实际顶层: {r['why']}")
-            print(f"      {r['url'][:88]}")
+        groups = [(tag, bad)]
+        if tag == "待人工看":
+            groups = [("待人工看·容器名不符",
+                       [r for r in bad if CONTAINER_MARK in r["why"]]),
+                      ("待人工看·限流/网络",
+                       [r for r in bad if CONTAINER_MARK not in r["why"]])]
+        for name, items in groups:
+            if not items:
+                continue
+            print(f"\n=== {name}({len(items)})===")
+            for r in items[:12]:
+                print(f"  [{r['source']}/{r['platform']}] {r['title']}")
+                print(f"      实际顶层: {r['why']}")
+                print(f"      {r['url'][:88]}")
     print(f"\n对齐 {by_v.get('对齐', 0)}/{len(rows)}" + ("" if rows else " (没抽到样本)"))
     return 0
 
