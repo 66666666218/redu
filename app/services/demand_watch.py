@@ -1650,9 +1650,16 @@ def build_request_card(items: list[dict], platform: str = "douyin") -> dict:
     label = "小红书" if platform == "xiaohongshu" else "抖音"
     lines = []
     for it in items:
-        name = it.get("name") or "(标题里没名字)"
-        desc = (it.get("desc") or "")[:30]
-        link = f" [{desc}]({it['url']})" if it.get("url") else ""
+        raw = (it.get("desc") or "").replace("\n", " ").strip()
+        #: ★ **取不到名字时用视频标题顶上**(2026-11-18):原来一律写「(标题里没名字)」,
+        #: 一张卡上好几行都是一模一样的占位符 ⇒ 管理群里分不出是哪条视频,
+        #: 而**视频标题本来就在 `desc` 里**(实测 `section='douyin'` 的台账 30 行里
+        #: 24 行 title 为空,全是因为这条链没把 `desc` 当名字)。
+        name = it.get("name") or raw[:28] or "(标题里没名字)"
+        #: 只有名字来自 `name` 时才把标题当"补充描述";名字就是标题时别重复写一遍。
+        desc = raw[:30] if it.get("name") else ""
+        link = f" [{desc}]({it['url']})" if (desc and it.get("url")) else (
+            f" [原视频]({it['url']})" if it.get("url") else "")
         #: 迅雷群侧证据(用户「迅雷群里面是否有人发这些资源」):群消息里搜得到就标出来
         xh = int(it.get("xunlei") or 0)
         lines.append(

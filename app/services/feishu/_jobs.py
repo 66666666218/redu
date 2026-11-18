@@ -303,6 +303,20 @@ def _mark_alerted(db: Session, user_id: int, section: str, title: str, reason: s
     else:
         row.reason, row.alerted_at = reason, datetime.now()
     db.commit()
+def _xianyu_want_pct(item, today: dict, yday: dict) -> float | None:
+    """这个商品**想要数较昨日**的涨幅(%);缺任一侧数据时返回 `None`。
+
+    与卡片上的 🔥 判据**同一个数**(`want=(d.want_count-y.want_count)/y.want_count`)——
+    触发口径与展示口径必须是同一个,否则会出现"卡上标了🔥却没被触发"这种自相矛盾。
+    """
+    iid = str(getattr(item, "item_id", "") or "")
+    d, y = today.get(iid), yday.get(iid)
+    y_want = int(getattr(y, "want_count", 0) or 0) if y is not None else 0
+    if d is None or y_want <= 0:
+        return None
+    return (int(getattr(d, "want_count", 0) or 0) - y_want) / y_want * 100
+
+
 def run_feishu_realtime(
     section: str, user_id: int, settings: Settings | None = None, db: Session | None = None
 ) -> int:
@@ -323,6 +337,18 @@ def run_feishu_realtime(
         if not cur:
             return 0
         whs = _pkg.webhooks_for(settings, section)   # 主群 + 该板块专属群
+        #: ★ **闲鱼的"新增"不再是触发条件**(2026-11-18,见 `feishu_xianyu_realtime`)。
+        #: 想要数涨幅要查当日/昨日快照 ⇒ **先查一次**,循环里直接用(别每条查一遍)。
+        xianyu_jump_only = (section == "xianyu"
+                            and str(getattr(settings, "feishu_xianyu_realtime", "jump")
+                                    or "jump").lower() != "all")
+        t_daily: dict = {}
+        y_daily: dict = {}
+        if section == "xianyu":
+            today = datetime.now().date().isoformat()
+            yday = (datetime.now() - timedelta(days=1)).date().isoformat()
+            t_daily = {str(d.item_id): d for d in repository.xianyu_daily_by_date(db, user_id, today)}
+            y_daily = {str(d.item_id): d for d in repository.xianyu_daily_by_date(db, user_id, yday)}
         pushed_items: list[tuple[str, str]] = []
         for title, c in list(cur.items())[:40]:
             tag, extra = _delta(section, c, prev)
@@ -338,6 +364,15 @@ def run_feishu_realtime(
                     up = int(extra.rstrip("名").lstrip("+"))
                     if up >= settings.feishu_hot_rank_jump:
                         reason = str(extra)
+            if section == "xianyu":
+                #: **想要数跳升**永远算触发(它是"有人在抢"的唯一直接证据)。
+                pct = _xianyu_want_pct(c, t_daily, y_daily)
+                if pct is not None and pct >= float(
+                        getattr(settings, "feishu_xianyu_want_jump_ratio", 0.5) or 0) * 100:
+                    reason = f"想要+{pct:.0f}%"
+                elif xianyu_jump_only and reason == "新增":
+                    #: 只调"新增"这一条 —— 排名跳升(有人把商品顶上来了)仍然值得说。
+                    reason = None
             if reason and not _in_cooldown(db, user_id, section, title, settings):
                 pushed_items.append((title, reason))  # 冷却标记移到发送成功后(发送失败不烧冷却)
         if pushed_items:
@@ -365,13 +400,13 @@ def run_feishu_realtime(
             head = f"⚡ {SECTION_LABELS[section]} 实时热点"
             if section == "xianyu":
                 # 闲鱼专属:column_set 网格列(标题可点开商品页;🔥=想要数较昨日 +50% 以上)
-                today = datetime.now().date().isoformat()
-                yday = (datetime.now() - timedelta(days=1)).date().isoformat()
-                t_daily = {str(d.item_id): d for d in repository.xianyu_daily_by_date(db, user_id, today)}
-                y_daily = {str(d.item_id): d for d in repository.xianyu_daily_by_date(db, user_id, yday)}
+                #: ⚠️ 当日/昨日快照**在上面触发判定时已经查过**(`t_daily`/`y_daily`),
+                #: 这里复用 —— 别查第二遍(两张表各一次查询,且两处口径必须同一个数)。
+                _pct_floor = float(getattr(settings, "feishu_xianyu_want_jump_ratio", 0.5) or 0) * 100
+                _trig = ("想要数跳升 / 排名跳升" if xianyu_jump_only else "新增 / 排名跳升")
                 elements: list[dict[str, Any]] = [
                     {"tag": "note", "elements": [{"tag": "plain_text",
-                     "content": "触发:新增 / 排名跳升 · 🔥=想要数较昨日 +50% 以上 · 点标题看商品"
+                     "content": f"触发:{_trig} · 🔥=想要数较昨日 +{_pct_floor:.0f}% 以上 · 点标题看商品"
                                 + (f" · {_ai.summary()}" if _ai.summary() else "")}]},
                     _col_set_row([("**标题**", 6), ("**价格**", 2), ("**想要数**", 2), ("**变化**", 2)], grey=True),
                 ]
@@ -386,7 +421,8 @@ def run_feishu_realtime(
                     if want is not None and y is not None and getattr(y, "want_count", 0):
                         pct = (want - y.want_count) / y.want_count * 100
                         want_txt = f"{want} ({pct:+.0f}%)"
-                        hot = pct >= 50
+                        #: 🔥 与**触发口径同一个数**(配置项),别在这里写死 50
+                        hot = pct >= _pct_floor
                     else:
                         want_txt = str(want) if want is not None else "—"
                         hot = False

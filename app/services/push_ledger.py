@@ -44,7 +44,13 @@ logger = get_logger(__name__)
 
 #: 各推送点 item 的**形状本来就不同**,但它们**本来就带着这些信息**。
 #: 与其在台账里再造一套 DTO(每个推送点都要适配一遍),不如把已知的键**按优先级**认下来。
-_TITLE_KEYS = ("title", "name", "resource", "work", "word")
+#:
+#: ★ **`desc` 是 2026-11-18 补的**,而且是**抖音那两路唯一的标题**:
+#:   `demand_watch.discover_latest`(最新大瓜)与求1型视频的条目只有 `desc`(视频标题),
+#:   没有一个 `title/name` —— 实测近 7 天 `section='douyin'` 的台账 **30 行里 24 行 title 为空**,
+#:   `item_key` 全退化成 aweme_id ⇒ 日结/周结那张表里那批资源**没有名字可显示**。
+#:   ⚠️ 放**末位**:有 `title/name` 时必须优先用它们(`desc` 是"描述",不是全仓的标题主键)。
+_TITLE_KEYS = ("title", "name", "resource", "work", "word", "desc")
 _KEY_KEYS = ("item_key", "key", "uid", "aweme_id", "note_id", "id")
 _URL_KEYS = ("url", "origin_url", "source_url", "work_url")
 _PAN_KEYS = ("my_link", "our_url", "pan_url", "share_url")

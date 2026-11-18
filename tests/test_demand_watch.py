@@ -441,6 +441,24 @@ def test_求1型名字取不到标签时用参考作品名(session, monkeypatch)
     assert sent and sent[0][0]["name"] == "狗爹和小桃"
 
 
+def test_求1型卡片名字为空时用视频标题顶上():
+    """★ 2026-11-18:取不到名字时**不许**整卡都是一模一样的「(标题里没名字)」。
+
+    实测台账 `section='douyin'` 30 行里 24 行 title 为空 —— 管理群看到的一张卡上
+    好几行长得一模一样,分不出是哪条视频;而视频标题本来就在 `desc` 里。
+    """
+    card = str(dw.build_request_card([
+        {"name": "", "desc": "扣1看《反差直男》", "url": "https://www.douyin.com/video/1",
+         "demand": 3, "ones": 9, "total": 30, "author": "某号"},
+        {"name": "", "desc": "", "url": "https://www.douyin.com/video/2",
+         "demand": 2, "ones": 5, "total": 21, "author": "某号"},
+    ]))
+    assert "扣1看《反差直男》" in card, "名字为空时要用视频标题顶上"
+    assert card.count("(标题里没名字)") == 1, "只有连标题都没有的那条才写占位符"
+    assert "[原视频](https://www.douyin.com/video/1)" in card, "名字即标题时仍要能点开原视频"
+    assert "[原视频](https://www.douyin.com/video/2)" in card
+
+
 def test_没有书名号时取最像名字的标签_通用词挡掉():
     assert dw.best_tag("#覆面系 #高壮男 #狗爹和小桃") == "狗爹和小桃"
     assert dw.best_tag("#反差 #覆面 #高壮男") == ""

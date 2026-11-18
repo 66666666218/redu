@@ -58,9 +58,26 @@ class Test记账:
         row = session.query(PushLedger).one()
         assert '"share_count": 88' in row.metrics
 
+    def test_抖音那两路只有_desc_也要落成标题(self, session) -> None:
+        """★ 2026-11-18:`discover_latest`(最新大瓜)与求1型视频的条目**只有 `desc`**。
+
+        实测近 7 天 `section='douyin'` 的台账 30 行里 **24 行 title 为空**、
+        `item_key` 全退化成 aweme_id ⇒ 日结/周结里那批资源没有名字可显示。
+        """
+        pl.record(session, 1, "douyin", [
+            {"desc": "扣1看《反差直男》", "url": "https://www.douyin.com/video/1"}])
+        row = session.query(PushLedger).one()
+        assert row.title == "扣1看《反差直男》"
+        assert row.item_key == "扣1看《反差直男》", "身份也跟着标题走,不再是裸 aweme_id"
+
+    def test_title_优先于_desc(self, session) -> None:
+        """`desc` 是"描述"不是全仓的标题主键 ⇒ 两者都在时必须用 `title`。"""
+        pl.record(session, 1, "douyin", [{"title": "真标题", "desc": "描述"}])
+        assert session.query(PushLedger).one().title == "真标题"
+
     def test_什么都没有的条目跳过(self, session) -> None:
         """记一行**什么都显示不出来**的东西,只会让日结里多一条 `—`。"""
-        assert pl.record(session, 1, "wechat", [{}, {"title": "   "}]) == 0
+        assert pl.record(session, 1, "wechat", [{}, {"title": "   "}, {"desc": "  "}]) == 0
         assert session.query(PushLedger).count() == 0
 
     def test_超长字段要截断_不许让_insert_抛(self, session) -> None:

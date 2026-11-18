@@ -355,6 +355,77 @@ def test_realtime_respects_cooldown(session, monkeypatch) -> None:
     assert first == 2 and second == 0 and n_calls["n"] == 1
 
 
+def _seed_xianyu(session) -> None:
+    """闲鱼两批:上一批 A/B,当前批 A/B/C(只有 C 是新上架)。"""
+    from app.db.models import XianyuDaily
+
+    t1, t2 = datetime.now() - timedelta(minutes=30), datetime.now()
+    for title, rank in [("A", 1), ("B", 2)]:
+        session.add(XianyuItem(user_id=1, item_id=title, title=title, best_rank=rank,
+                               created_at=t1))
+    for title, rank in [("A", 1), ("B", 5), ("C", 3)]:
+        session.add(XianyuItem(user_id=1, item_id=title, title=title, best_rank=rank,
+                               created_at=t2))
+    today = datetime.now().date().isoformat()
+    yday = (datetime.now() - timedelta(days=1)).date().isoformat()
+    #: A 想要数从 10 涨到 20(+100% ⇒ 触发);B 从 10 涨到 11(+10%,不触发);C 昨日没有记录。
+    for iid, want, d in [("A", 20, today), ("B", 11, today),
+                         ("A", 10, yday), ("B", 10, yday)]:
+        session.add(XianyuDaily(user_id=1, item_id=iid, title=iid, want_count=want,
+                                snap_date=d))
+    session.commit()
+
+
+def test_闲鱼默认不再因为新增就推卡(session, monkeypatch) -> None:
+    """★ 2026-11-18:实测近 7 天闲鱼实时卡 **每天 36~54 张** —— 采集 30 分钟一轮,
+    而几乎每轮都有 7~26 个新上架商品。
+
+    当前阶段口径是「**能监控到精准的才是首要目标**」⇒ 闲鱼的精准信号是
+    **想要数跳升**(有人在抢),不是"又上架了一个";新商品仍进库,日报照常给。
+    """
+    _seed_xianyu(session)
+    sent: list[str] = []
+
+    def _fake(w, s):
+        class F:
+            def send_card(self, c): return (sent.append(str(c)), True)[1]
+            def send(self, t): return (sent.append(t), True)[1]
+        return F()
+
+    monkeypatch.setattr(feishu, "FeishuClient", _fake)
+    #: ⚠️ **关掉 AI 筛选**:它默认开着且有 key 时会真调模型(日志 `AI筛1/2`),
+    #: 模型把 C 判掉就变成"1 条",让这条用例随上游模型漂移 —— 这里只测触发口径。
+    n = run_feishu_realtime("xianyu", 1, _settings(ai_filter_enabled=False), db=session)
+    joined = "\n".join(sent)
+    assert n == 1, f"只有 A(想要数 +100%)该推,实际触发 {n} 条"
+    assert "A" in joined and "想要+100%" in joined
+    assert "想要数跳升" in joined, "触发口径的说明要写在卡上"
+    #: B 只涨了 10%、C 昨日无记录(算不出涨幅) ⇒ 都不该出现在这张卡里
+    assert "**C**" not in joined, "C 是新上架但没跳升,不该被推"
+    assert "**B**" not in joined, "B 涨幅只有 10%,低于默认阈值 50%"
+
+
+def test_闲鱼可以调回新增即推(session, monkeypatch) -> None:
+    """`feishu_xianyu_realtime=all` = 旧行为 —— 配置回退路径必须还是通的。"""
+    _seed_xianyu(session)
+    sent: list[str] = []
+
+    def _fake(w, s):
+        class F:
+            def send_card(self, c): return (sent.append(str(c)), True)[1]
+            def send(self, t): return (sent.append(t), True)[1]
+        return F()
+
+    monkeypatch.setattr(feishu, "FeishuClient", _fake)
+    n = run_feishu_realtime(
+        "xianyu", 1,
+        _settings(feishu_xianyu_realtime="all", ai_filter_enabled=False), db=session)
+    joined = "\n".join(sent)
+    #: A(想要 +100%)与 C(新增)都该推;B 既没跳升又不新增 ⇒ 不推
+    assert n == 2, f"all 模式下 C(新增)也要推,实际 {n}"
+    assert "C" in joined and "新增" in joined
+
+
 def test_realtime_message_includes_prediction(session, monkeypatch) -> None:
     """实时提醒给推送词补"预测/置信度/趋势"(历史样本≥2 才预测)。"""
     seed_weibo(session)

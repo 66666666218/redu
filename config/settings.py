@@ -1548,6 +1548,18 @@ class Settings(BaseSettings):
     wechat_skip_own_mode: str = "author"
     feishu_hot_rank_jump: int = 3          # 排名跳升 ≥ 该名次即实时推送
     feishu_hot_ratio: float = 0.30         # 分值环比涨幅 ≥ 该比例即实时推送
+    #: ★ **闲鱼实时卡的触发口径**(2026-11-18)。
+    #: 实测近 7 天:`feishu_alerts` 里按秒聚合的闲鱼卡 **每天 36~54 张** ——
+    #: 采集是 30 分钟一轮,而几乎每轮都有 7~26 个"新上架"商品 ⇒ 每轮一张卡。
+    #: 用户当前阶段的口径是「**能监控到精准的才是首要目标**」,而闲鱼的精准信号
+    #: 是**想要数跳升**(有人在抢),不是"又上架了一个"。
+    #:  · `all`  = 旧行为(新增即推);
+    #:  · `jump` = 只推「想要数较昨日 ≥ `feishu_xianyu_want_jump_ratio`」与排名跳升。
+    #: ⚠️ 不实时推的新商品**没有丢**:它们仍在 `xianyu_items` 里,日报(08:30
+    #: `_section_lines`)每天照常给出该板块 TOP;这是**写在配置里的取舍**,
+    #: 与"静默失败"的区别就在这里 —— 想恢复旧行为把这项改成 `all` 即可。
+    feishu_xianyu_realtime: str = "jump"
+    feishu_xianyu_want_jump_ratio: float = 0.5   # 想要数较昨日涨幅 ≥ 该比例即实时推
     feishu_burst_min_confidence: str = "高"  # 实时推送"预测爆发"所需最低置信度(高/中/低);中低置信只进日报与洞察、不实时推,减少噪音
     feishu_alert_cooldown_hours: int = 6   # 同一话题实时推送冷却(小时),防刷屏
     # 抖音热点宝走代理池:部分服务器 IP 会被抖音风控(直接返回 502 nginx),
