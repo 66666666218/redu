@@ -1,3 +1,16 @@
+- [2026-11-18 19:08] FIX: **本机「立即归属一轮」会把镜像事件误终结 —— 第二个裁判改写远程管生命周期**(档4 上线后暴露)。
+  根因:前端「热点事件」页那个按钮打 `POST /api/events/assign` ⇒ `events.assign_tick`。而归并的输入是
+  `weibo_hot_items`/`baidu_hot_items`/`douhot_words` 三张**原始热榜表**,本机(`scheduler_role=wechat`)
+  **不采它们**(实测本机 `weibo_hot_items` 52 行停在 11-06、`baidu_hot_items` **0 行**)⇒ 该函数扫不到新快照,
+  但**照样跑**后面「`active` 且 >72h 无 seen ⇒ `ended`」那一段。实测本机镜像来的 3843 条事件里
+  **5 条**远程仍判 `active` 而 `last_seen` 超 72h —— 点一次按钮就被置成 `ended`,下一轮 `remote_pull`
+  再按「生命周期以远程为准」纠正回 `active`,来回翻状态,**没有人知道为什么**。
+  修法:该端点在本机直接返回 `{"skipped": "not_hotspot_role", "note": ...}`,并**说清原因**
+  (不静默返回 0 —— 那会被前端 toast 成「归属完成:新建 0 / 归并 0 / 终结 0」,等于假成功)。
+  守卫 `test_wechat侧不跑事件归并` 钉住「事件状态必须仍是 active」。
+  回归:`test_remote_pull + test_job_stagger + test_events + test_remote_sync + test_quark_link_pull +
+  test_push_ledger + test_cross_section_report` **89 passed**。 (Files: app/api/events_api.py, tests/test_remote_pull.py, CHANGELOG)
+
 - [2026-11-18 18:59] FEAT: **档4 落地 + 档3 实测订正 —— 远程→本机单向拉取(只到事件层为止)**,把本机前端「热点事件」与「多平台热榜」两页从**恒空**救回来。
   先量后改,量出来的两个结论直接决定了这次改什么、不改什么:
   ⒜ **档3 不改代码**。事件归并在**远程活着且正确**:`hotspot_events` 42179 行 / `event_memberships` 49779 行,user1 近 24h `platform_count` 1/2/3 分别 578/76/8,最新 `last_seen` 与当前时间同步;多平台来源是 `weibo/baidu/douhot` 及其两两组合 ⇒ 现有四表归并**有效**。所谓「归并没跑起来」是本机视角的误判 —— `event_assign` 的 role 是 `hotspot`,本机本来就不跑。

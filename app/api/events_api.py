@@ -20,7 +20,21 @@ def events_list(status: str = "active", limit: int = Query(50, ge=1, le=200),
 
 @router.post("/api/events/assign")
 def events_assign(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """手动触发一轮归属(调度每 15 分钟自动跑;此接口用于即时刷新)。"""
+    """手动触发一轮归属(调度每 15 分钟自动跑;此接口用于即时刷新)。
+
+    ⚠️ **只在 hotspot 侧有意义**(2026-11-18,档4 副作用):归并的输入是
+    `weibo_hot_items`/`baidu_hot_items`/`douhot_words` 三张原始热榜表,而本机
+    (`scheduler_role=wechat`)**不采那三张表** —— 本机的事件行是 `remote_pull`
+    从远程镜像来的**只读副本**,生命周期归远程管。在本机点这个按钮,`assign_tick`
+    扫不到新快照却照样跑「>72h 无 seen ⇒ ended」那段,实测会把 **5 条**远程仍判 `active`
+    的事件置成 `ended`,下一轮拉取再被远程纠正回来 —— 来回翻状态,而没人知道为什么。
+    ⇒ 本机直接返回空转,并**说清原因**(不静默返回 0,否则前端会以为是"跑完了没变化")。
+    """
+    from config.settings import get_settings
+
+    if (getattr(get_settings(), "scheduler_role", "all") or "").strip().lower() == "wechat":
+        return {"created": 0, "merged": 0, "ended": 0, "skipped": "not_hotspot_role",
+                "note": "本机不跑事件归并(原始热榜表不采集);事件由远程归并后拉取镜像"}
     return events.assign_tick(db, user.id)
 
 

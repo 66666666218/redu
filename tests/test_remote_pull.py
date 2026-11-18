@@ -216,3 +216,32 @@ class TestTickDiscipline:
         assert not seen_tables, (
             f"`remote_pull` 里出现了不该拉的原始热榜表:{sorted(seen_tables)} —— "
             "那三张表本机有别的消费者,拉回来会重复告警(见模块头注)")
+
+
+class TestAssignGuard:
+    def test_wechat侧不跑事件归并(self, session, monkeypatch) -> None:
+        """★ 镜像事件的生命周期归**远程**管,本机不许改写。
+
+        本机 `scheduler_role=wechat` **不采**那三张原始热榜表(`weibo_hot_items`
+        52 行停在 11-06、`baidu_hot_items` 0 行)⇒ 在本机点「立即归属一轮」,
+        `assign_tick` 扫不到新快照却照样跑「>72h 无 seen ⇒ ended」那段。
+        实测(2026-11-18)本机镜像来的 3843 条事件里有 **5 条**远程仍判 `active`
+        但 `last_seen` 超 72h —— 会被置成 ended,下一轮拉取再被远程纠正回来,
+        来回翻状态而没人知道为什么。
+        """
+        from app.api.events_api import events_assign
+        from config.settings import get_settings
+
+        st = get_settings()
+        monkeypatch.setattr(st, "scheduler_role", "wechat", raising=False)
+        session.add(HotspotEvent(user_id=1, primary_title="远程仍活跃", norm_title="远程仍活跃",
+                                 platforms='["weibo"]', platform_count=1,
+                                 first_seen=datetime.now() - timedelta(days=10),
+                                 last_seen=datetime.now() - timedelta(hours=100),
+                                 peak_value=1.0, status="active", sample_count=1))
+        session.commit()
+
+        out = events_assign(user=session.get(User, 1), db=session)
+        assert out.get("skipped") == "not_hotspot_role", "必须说清为什么没跑,不能静默返回 0"
+        ev = session.scalar(select(HotspotEvent))
+        assert ev.status == "active" and ev.ended_at is None
