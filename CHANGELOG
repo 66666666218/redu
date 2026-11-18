@@ -1,3 +1,10 @@
+- [2026-11-18 19:12] FIX: **前端把「跳过」弹成绿色的「新建 0 / 归并 0 / 终结 0」—— 假成功**(接上一条后端守卫)。
+  后端已经在本机返回 `{"skipped": "not_hotspot_role", "note": ...}`,但 `Events.vue` 只读 `created/merged/ended`
+  ⇒ toast 依然是一句绿色的「归属完成:新建 0 / 归并 0 / 终结 0」,人看到的和「真跑了一轮但没变化」**完全一样**。
+  修法:有 `skipped` 就显示后端那句 `note`(「本机不跑事件归并(原始热榜表不采集);事件由远程归并后拉取镜像」)。
+  已 `npm run build` 到 `app/static/spa`(`index-CVJozIYz.js`)。
+  回归:后端 **89 passed**;前端构建通过。 (Files: frontend/src/views/Events.vue, CHANGELOG)
+
 - [2026-11-18 19:08] FIX: **本机「立即归属一轮」会把镜像事件误终结 —— 第二个裁判改写远程管生命周期**(档4 上线后暴露)。
   根因:前端「热点事件」页那个按钮打 `POST /api/events/assign` ⇒ `events.assign_tick`。而归并的输入是
   `weibo_hot_items`/`baidu_hot_items`/`douhot_words` 三张**原始热榜表**,本机(`scheduler_role=wechat`)

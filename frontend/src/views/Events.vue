@@ -17,7 +17,11 @@ async function assign() {
   busy.value = 'assign'
   try {
     const r = await api.eventsAssign()
-    toastOk(`归属完成:新建 ${r.created} / 归并 ${r.merged} / 终结 ${r.ended}`)
+    //: ⚠️ 本机(wechat 侧)**不跑**事件归并 —— 事件是远程归并后拉取来的镜像,
+    //: 生命周期归远程管。这里必须**说清没跑**,不能弹一句绿色的「新建 0 / 归并 0 / 终结 0」
+    //: 让人以为跑过了(假成功,本仓反复栽过)。
+    if (r.skipped) toastOk(r.note || '本机不跑事件归并')
+    else toastOk(`归属完成:新建 ${r.created} / 归并 ${r.merged} / 终结 ${r.ended}`)
     await load()
   } catch (e) { toastError(e.message) } finally { busy.value = '' }
 }
