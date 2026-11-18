@@ -251,10 +251,18 @@ class XianyuBrowserClient:
         risk: list[str] = []          # 网络层看到的"人机验证/挤爆"原文
 
         def _on_response(r) -> None:
-            """⚠️ 只认**带 `api` 字段的 mtop 回包**。
+            """按 **URL** 定位搜索回包,再按 `api`(若有)交叉校验。
 
-            滑块 punish 端点也回 `{"code":0,"dt":"success","ec":200,...}`,拿
-            `"success" in body` 判会把**被拦**读成**恢复**(11-18 实测栽过)。
+            ⚠️ **不许要求 `api` 字段存在**(2026-11-18 抓包订正):真的风控回包是
+            `{"ret":["FAIL_SYS_USER_VALIDATE","RGV587_ERROR::SM::…"],
+               "data":{"url":"…/punish?x5secdata=…"}}`
+            —— **没有 `api`**(`api` 是正常回包才有)。我第一版把
+            `obj.get("api") != API` 当过滤器,于是**风控回包被当成 other 丢掉**,
+            监测读数显示 `RGV587=0`、风控判定形同虚设。URL 已经指明了是哪个接口,
+            `api` 只在**存在时**用来交叉校验。
+
+            同一条 URL 上还会出现**三种不是搜索结果的回包**,都按 URL 排除:
+            `…pc.search.shade` / `…item.search.activate`(激活页)/ punish 跳转。
             """
             try:
                 u = r.url
@@ -263,10 +271,18 @@ class XianyuBrowserClient:
                 obj = json.loads(r.text())
             except Exception:  # noqa: BLE001 - 非 JSON/取不到 body 就不是我们要的
                 return
-            if not isinstance(obj, dict) or obj.get("api") != API:
+            if not isinstance(obj, dict):
+                return
+            api = obj.get("api")
+            if api is not None and api != API:      # 有 api 时必须报到点子上
                 return
             ret = " ".join(str(x) for x in (obj.get("ret") or []))
-            if "USER_VALIDATE" in ret or "RGV587" in ret:
+            #: ⚠️ `SESSION_EXPIRED` **也要进 risk**(不许当"0 条"吞掉):
+            #: 实测它和 `RGV587` 同批出现(平台把未通过风控的请求当匿名),
+            #: 若这里放行,它就会变成"这次搜索没商品" —— 又一个静默失败。
+            #: 但**归到哪一类**由下面的 raise 决定:它**不是**登录失效,是滑块。
+            if "USER_VALIDATE" in ret or "RGV587" in ret or "SESSION_EXPIRED" in ret \
+                    or "USER_NOT_LOGIN" in ret:
                 risk.append(ret[:160] or "USER_VALIDATE")
                 return
             net.append(obj)
@@ -294,6 +310,14 @@ class XianyuBrowserClient:
             if risk:
                 #: **必须冒泡**:`collect_hot` 靠 `XianyuVerify` 停轮 + 上报
                 #: "需人工过滑块";吞成空的话它只会当成一次普通失败继续打下一个词。
+                #:
+                #: ⚠️ **别把 `SESSION_EXPIRED` 当"登录态没了"**(2026-11-18 栽过):
+                #: 实测页面明明登录着(右上角有用户名、`redpoint.query` 回
+                #: `SUCCESS total=14`),而搜索侧回 `RGV587` 的同时,
+                #: `loginuser.get` / `user.page.nav` **也**回 `SESSION_EXPIRED`。
+                #: 我据此判过"登录态失效、拖滑块没用",让用户白等一轮 —— **错的是那个判据**。
+                #: 所以这里 `SESSION_EXPIRED` **照旧归 `XianyuVerify`**(去拖滑块),
+                #: 只有**整页连用户名都没有**时才可能是真过期,那归 `xianyu_login.py` 判。
                 raise XianyuVerify(f"闲鱼人机验证(滑块),页面自己的搜索也被挡:{risk[0]}")
             return items
         finally:

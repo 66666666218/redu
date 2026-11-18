@@ -309,9 +309,12 @@ def test_page_risk_control_raises_verify_instead_of_empty() -> None:
     必须抛 `XianyuVerify` —— `collect_hot` 靠它**立刻停轮**并上报"需人工过滑块"。
     若吞成空结果再落 `_search_direct`,拿回的是 `TIMEOUT::接口超时`,
     真因从"被风控"退化成"接口超时",值班的人会去查网络而不是去拖滑块。
+
+    ⚠️ **回包里没有 `api` 字段** —— 这是现场抓到的真实形状,不是简化。第一版判据
+    要求 `obj["api"] == API` 才往下看,于是**真的风控回包被当成 other 扔掉**,
+    监测脚本读数显示 `RGV587=0`、整条风控判定形同虚设。
     """
-    risk = json.dumps({"api": xb.API,
-                       "ret": ["FAIL_SYS_USER_VALIDATE",
+    risk = json.dumps({"ret": ["FAIL_SYS_USER_VALIDATE",
                                "RGV587_ERROR::SM::哎哟喂,被挤爆啦,请稍后重试"],
                        "data": {"url": "https://h5api.m.goofish.com/_____tmd_____/punish"}})
     c = xb.XianyuBrowserClient()
@@ -320,6 +323,51 @@ def test_page_risk_control_raises_verify_instead_of_empty() -> None:
     with pytest.raises(xb.XianyuVerify) as ei:
         c.search("网盘资源")
     assert "滑块" in str(ei.value) and "RGV587" in str(ei.value)
+
+
+def test_session_expired_on_search_still_means_slider() -> None:
+    """★★ **`SESSION_EXPIRED` 不等于「登录没了」**(2026-11-18 栽过,两次)。
+
+    现场同批读数互相矛盾:搜索接口回 `RGV587 被挤爆啦`,而
+    `loginuser.get` / `user.page.nav` **也**回 `FAIL_SYS_SESSION_EXPIRED::Session过期`。
+    我据此判成「登录态失效、拖滑块没用」,让用户白等一轮 ——
+    而**同一时刻**页面右上角有用户名、`redpoint.query` 回 `SUCCESS total=14`,
+    滑块弹窗也好好地挂在 `baxia-dialog-content` iframe 里。
+
+    ⇒ 搜索侧见到 `SESSION_EXPIRED` **照旧归滑块**(去拖),真过期由
+    `scripts/xianyu_login.py` 用「多个接口交叉验证」去判,别在这里一刀切。
+    """
+    expired = json.dumps({"ret": ["FAIL_SYS_SESSION_EXPIRED::Session过期"], "data": {}})
+    c = xb.XianyuBrowserClient()
+    c._pg = _PageDrivenPage([], direct_payload="不该走到这里", responses=[(
+        "https://h5api.m.goofish.com/h5/mtop.taobao.idlemtopsearch.pc.search/1.0/", expired)])
+    #: 归滑块(去拖),**不是** `XianyuCookieExpired`(去重新登录);
+    #: 也**不许**静默变成"这次没商品" —— 那正是本仓最忌讳的静默失败。
+    with pytest.raises(xb.XianyuVerify) as ei:
+        c.search("网盘资源")
+    assert "滑块" in str(ei.value), f"应归滑块:{ei.value}"
+
+
+def test_shade_and_activate_subpaths_are_not_mistaken_for_search() -> None:
+    """同一条 URL 前缀下还有 `…pc.search.shade` / `…item.search.activate`(激活页),
+    **它们不是搜索结果**;`api` 字段存在时用来交叉校验,把这两个排除掉。
+
+    反例意义:若只看 URL 前缀,`activate` 回包里也有 `cardList` 商品形状,
+    会被误当成搜索结果写进库(=假数据)。
+    """
+    activate = json.dumps({"api": "mtop.taobao.idlemtopsearch.pc.item.search.activate",
+                           "ret": ["SUCCESS::调用成功"],
+                           "data": {"cardList": [{"cardData": {"item": {"main": {"exContent":
+                               {"title": "激活页里的假商品", "itemId": "0"}}}}}]}})
+    c = xb.XianyuBrowserClient()
+    c._pg = _PageDrivenPage([], direct_payload=json.dumps({"data": {"resultList": []}}),
+                            responses=[(
+                                "https://h5api.m.goofish.com/h5/"
+                                "mtop.taobao.idlemtopsearch.pc.item.search.activate/1.0/",
+                                activate)])
+    with pytest.raises(XianyuError) as ei:
+        c.search("ps教程")
+    assert "未解析到商品" in str(ei.value)
 
 
 def test_search_falls_back_to_direct_when_page_yields_nothing() -> None:

@@ -28,6 +28,11 @@ EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 HOME = "https://www.goofish.com/"
 DETAIL_API = "mtop.taobao.idle.pc.detail"
 SEARCH_API = "mtop.taobao.idlemtopsearch.pc.search"
+#: 判登录态用的两个接口 —— ⚠️ **都不单独可信**,见 `_session_state`。
+#: 实测(2026-11-18)页面明明登录着,而 `loginuser.get` / `user.page.nav`
+#: 都回 `FAIL_SYS_SESSION_EXPIRED`,所以要多取一个 `redpoint.query` 交叉验证。
+USER_INFO_API = "mtop.idle.web.user.page.nav"
+REDPOINT_API = "mtop.taobao.idlemessage.pc.redpoint.query"
 
 _JS = """
 async ([api, data]) => {
@@ -40,6 +45,36 @@ async ([api, data]) => {
                 return JSON.stringify({ __err: x }).slice(0, 1500); }
 }
 """
+
+
+def _session_state(pg) -> str:
+    """**真的打一次取用户信息的接口**,别拿 cookie 存在当登录有效。
+
+    ⚠️ 判据取 `user.page.nav`(取当前登录用户),**不是** `loginuser.get` ——
+    2026-11-18 实测:页面明明登录着(右上角有用户名、`redpoint.query` 回
+    `SUCCESS total=14`),而那两条却都回 `FAIL_SYS_SESSION_EXPIRED`。
+    拿 `loginuser.get` 当判据会**把已登录的档案判成"没登录"**,叫用户白登一次。
+    `user.page.nav` 同批里也可能回，要配 `redpoint.query`/页面用户名一起看。
+
+    返回 `ok` / `expired` / `unknown`(**认不出来时不要假装已登录**),
+    `expired` 只在**两道都否**时才成立。
+    """
+    def _hit(api: str) -> str:
+        try:
+            raw = pg.evaluate(_JS, [api, {}])
+        except Exception as exc:  # noqa: BLE001 - 页面在跳转(已知竞态)
+            return f"unknown({type(exc).__name__})"
+        if "SUCCESS" in raw:
+            return "ok"
+        if "SESSION_EXPIRED" in raw or "USER_NOT_LOGIN" in raw:
+            return "expired"
+        return "unknown"
+
+    for api in (USER_INFO_API, REDPOINT_API):
+        st = _hit(api)
+        if st == "ok":
+            return "ok"
+    return "unknown"
 
 
 def main() -> int:
@@ -57,13 +92,21 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             print("(首屏导航异常,继续):", exc, flush=True)
 
-        # 等登录:unb 是淘宝账号 id,cookie2 是登录态核心;两者齐了才算登进去
+        # 等登录:⚠️ **cookie 存在 ≠ 登录有效**(2026-11-18 现场订正)。
+        #
+        # 原来只判 `{"unb", "cookie2"} <= names` —— 而实测档案里 `unb` 是 11-12
+        # 就种下的、一直**留在档案里**,于是脚本会在**登录态早已过期**的档案上
+        # 立刻打印「已登录」并收工。同一次抓包里的证据是硬的:
+        #   mtop.taobao.idlemessage.pc.loginuser.get → FAIL_SYS_SESSION_EXPIRED::Session过期
+        #   mtop.idle.web.user.page.nav              → FAIL_SYS_SESSION_EXPIRED::Session过期
+        # 而搜索侧的回包是 `RGV587_ERROR::SM::哎哟喂,被挤爆啦` —— 匿名请求被当成机器人。
+        # ⇒ 判据必须是**真的打一次需要登录态的接口**,cookie 只是必要条件。
         #
         # ⚠️ **必须用 `ctx.cookies()` 而不是 `document.cookie`**(2026-10-03 修):
         # `document.cookie` **读不到 HttpOnly cookie**,而 `cookie2`(登录态核心,
         # 服务端采集靠的就是它)正是 HttpOnly —— 用它判据会**永远等不到登录**,
-        # 于是"明明已登录"却被判成没登(用户当场指出)。
-        # `ctx.cookies()` 走 CDP,HttpOnly 也拿得到。
+        # 于是"明明已登录"却被判成没登(用户当场指出)。`ctx.cookies()` 走 CDP,
+        # HttpOnly 也拿得到。
         ok = False
         for i in range(80):                     # 最多等 4 分钟
             try:
@@ -71,14 +114,19 @@ def main() -> int:
             except Exception:  # noqa: BLE001
                 names = set()
             if {"unb", "cookie2"} <= names:
-                print(f"=== 已登录(第 {i*3}s)===", flush=True)
-                ok = True
-                break
-            if i % 5 == 0:
+                st = _session_state(pg)
+                if st == "ok":
+                    print(f"=== 已登录且**会话有效**(第 {i*3}s)===", flush=True)
+                    ok = True
+                    break
+                if i % 5 == 0:
+                    print(f"    ...cookie 齐了但会话无效({st})—— 请在窗口里重新登录({i*3}s)",
+                          flush=True)
+            elif i % 5 == 0:
                 print(f"    ...等待登录({i*3}s)", flush=True)
             time.sleep(3)
         if not ok:
-            print("=== 未检测到完整登录态(缺 unb 或 cookie2),仍试一次接口 ===", flush=True)
+            print("=== 未检测到**有效**登录态,仍试一次接口 ===", flush=True)
 
         for _ in range(30):                     # 等 mtop 挂上来
             try:
