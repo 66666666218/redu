@@ -674,7 +674,13 @@ def push_items(items: list[dict], settings, detail: dict | None = None,
             #: 现在改判**互动数是否比上次推它时更高**(`hot_rise_only`)——
             #: "又火了"才是放行理由;"绝对值高"不是。
             hot_of=lambda it: push_ledger.peak_metric(it.get("metrics")),
-            hot_min=1, hot_rise_only=True)
+            hot_min=1, hot_rise_only=True,
+            #: ★★ 2026-11-18:`tieba` 与 `zhihu` **配的是同一个飞书群**(webhook 同为
+            #: `a062026f`)⇒ 客户在同一个群里被两个板块各推一遍同一份资源。
+            #: 近 7 天实测:10 个盘链、**166 行**(占两板块带盘行 37.6%),
+            #: 而 `item_key` 跨板块重复 **0 条** ⇒ 只有盘链闸抓得到。
+            #: `by_group` 只对**显式配成同一个专属群**的板块生效(见 `group_of`)。
+            by_group=True)
         if not group:
             if detail is not None:
                 detail[plat] = f"{int(getattr(settings, 'push_dedupe_hours', 24) or 0)}h 内已推过"

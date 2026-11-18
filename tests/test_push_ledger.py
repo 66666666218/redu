@@ -435,6 +435,69 @@ def test_热度只是绝对值高不算又火了(session) -> None:
     assert kept2[0]["_dedupe_hot"] is True
 
 
+def test_group_of_只认同一个专属群_回落主群的不算() -> None:
+    """★★ 2026-11-18:`tieba`/`zhihu` 配的是**同一个专属群** ⇒ 它们要共用一道闸。
+
+    ⚠️ 判据必须用 `platform_webhook`(**专属**群)而不是 `webhook_for`(会回落主群)——
+    否则所有**没配专属群**的板块都会被判成"同群",按群去重会把它们互相挡死。
+    """
+    from app.services.push_ledger import group_of
+
+    class _S:
+        feishu_webhook = "https://hook/main"
+        feishu_webhook_tieba = "https://hook/shared"
+        feishu_webhook_zhihu = "https://hook/shared"
+        feishu_webhook_bilibili = ""          #: 没配专属群 ⇒ 回落主群
+        feishu_webhook_kuaishou = ""          #: 同上
+
+    assert group_of(_S(), "tieba") == ("tieba", "zhihu")
+    assert group_of(_S(), "zhihu") == ("tieba", "zhihu")
+    #: 没配专属群的两个板块都回落主群,但**不算同群**(否则它们会互相挡内容)
+    assert group_of(_S(), "bilibili") == ("bilibili",)
+    assert group_of(_S(), "kuaishou") == ("kuaishou",)
+    assert group_of(_S(), "") == ()
+
+
+def test_by_group_同群的两个板块共用盘链闸(session) -> None:
+    """★ 贴吧推过的盘,知乎在**同一个群里**不许再推一遍。
+
+    实测近 7 天:10 个盘链在同一群里被两板块各推、**166 行**;
+    而 `item_key` 跨板块重复 **0 条** ⇒ 内容级去重抓不到,只有盘链闸能抓。
+    """
+    from datetime import datetime, timedelta
+
+    from app.db.models import PushLedger
+    from app.services import push_ledger as pl
+
+    class _S:
+        push_dedupe_hours = 24
+        push_pan_dedupe_hours = 72
+        feishu_webhook = "https://hook/main"
+        feishu_webhook_tieba = "https://hook/shared"
+        feishu_webhook_zhihu = "https://hook/shared"
+        feishu_webhook_bilibili = ""
+
+    pan = "https://pan.quark.cn/s/aabbccdd1122"
+    session.add(PushLedger(user_id=1, section="tieba", item_key="贴吧那条",
+                           pan_url=pan, pushed_at=datetime.now() - timedelta(hours=3)))
+    session.commit()
+
+    #: 知乎那条:内容完全不同(new item_key)、盘链还是那一份
+    items = [{"key": "知乎这条", "pan_url": pan}]
+    kept, dropped = pl.drop_recent(session, 1, "zhihu", items, _S(), by_group=True)
+    assert kept == [] and dropped == 1, "同一个群里,贴吧推过的盘链知乎不许再推"
+
+    #: 对照:**不**开 by_group 时(旧行为),它照推 —— 证明这条闸确实是 by_group 起的作用
+    kept2, _ = pl.drop_recent(session, 1, "zhihu", [{"key": "知乎这条", "pan_url": pan}],
+                              _S())
+    assert len(kept2) == 1
+
+    #: 对照:没配专属群的 bilibili **不能被牵连**(它和谁都不是同群)
+    kept3, _ = pl.drop_recent(session, 1, "bilibili", [{"key": "B站这条", "pan_url": pan}],
+                              _S(), by_group=True)
+    assert len(kept3) == 1, "不同群之间跨板块去重会把别的群饿死"
+
+
 def test_peak_metric_混着字符串也能比() -> None:
     """各源指标格式不一(`"1.2万"` 是字符串)—— 直接 `max()` 会在 py3 里当场 TypeError。"""
     from app.services.push_ledger import peak_metric

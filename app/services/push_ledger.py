@@ -172,24 +172,61 @@ def _pan_of(it: dict) -> str:
     return pan
 
 
+def group_of(settings, section: str) -> tuple[str, ...]:
+    """与 `section` 落在**同一个飞书群**的板块集合(含自己;认不出就是 `(section,)`)。
+
+    ## 为什么 section 不等于群
+
+    `drop_recent` 的去重范围一直是 `section`,理由写在它的头注里:「不同板块的群
+    不是一批人,跨板块去重会把别的群饿死」。**但那个前提对 tieba/zhihu 不成立** ——
+    实测(2026-11-18)两者配的是**同一个专属群**(webhook 尾部同为 `a062026f`)。
+    近 7 天这两个 section 有 **10 个盘链在同一个群里各推一遍、涉及 166 行**
+    (占它们带盘行的 37.6%),而 `item_key` **跨板块重复 0 条** ⇒ 内容级去重
+    根本抓不到,只有盘链闸能抓,偏偏闸又被 section 隔开了。
+
+    ## 判据:只认**显式配成同一个专属群**的
+
+    ⚠️ **不许拿 `webhook_for()` 比**:它在没配专属群时会**回落主群** ⇒ 所有没配
+    专属群的板块都会被判成"同群",那时按群去重会把它们的**内容互相挡掉**(灾难)。
+    所以只比 `platform_webhook()`(专属群;未配返回空串),空的一律各管各的。
+    """
+    from app.services.feishu_client import _SECTION_WEBHOOK, platform_webhook
+
+    if not section:
+        return ()
+    mine = platform_webhook(settings, section) if settings is not None else ""
+    if not mine:
+        return (section,)
+    same = [section]
+    for other in _SECTION_WEBHOOK:
+        if other != section and platform_webhook(settings, other) == mine:
+            same.append(other)
+    return tuple(sorted(same))
+
+
 def recent_keys(session: Session, user_id: int, section: str,
-                hours: float = 24) -> set[str]:
-    """这个板块最近 N 小时**已经推过**的 `item_key` 集合(`hours<=0` = 空集)。"""
+                hours: float = 24, sections: tuple[str, ...] | None = None) -> set[str]:
+    """这个板块最近 N 小时**已经推过**的 `item_key` 集合(`hours<=0` = 空集)。
+
+    `sections` 非空时按**那一组板块**查(见 `group_of`:同群的板块要共用一道闸)。
+    """
     if session is None or hours <= 0:
         return set()
     from sqlalchemy import select
 
     from app.db.models import PushLedger
 
+    scope = tuple(sections or (section,))
     cutoff = datetime.now() - timedelta(hours=float(hours))
     return set(session.scalars(select(PushLedger.item_key).where(
         PushLedger.user_id == user_id,
-        PushLedger.section == section,
+        PushLedger.section.in_(scope),
         PushLedger.pushed_at >= cutoff)).all())
 
 
 def recent_pan_keys(session: Session, user_id: int, section: str,
-                    hours: float = 24) -> set[str]:
+                    hours: float = 24,
+                    sections: tuple[str, ...] | None = None) -> set[str]:
     """这个板块最近 N 小时**已经推过**的盘链身份集合(`hours<=0` = 空集)。
 
     ⚠️ 库里存的是**原串**(`pan_url` 列),这里必须逐条过 `pan_key()` 归一 ——
@@ -203,10 +240,11 @@ def recent_pan_keys(session: Session, user_id: int, section: str,
 
     from app.db.models import PushLedger
 
+    scope = tuple(sections or (section,))
     cutoff = datetime.now() - timedelta(hours=float(hours))
     rows = session.scalars(select(PushLedger.pan_url).where(
         PushLedger.user_id == user_id,
-        PushLedger.section == section,
+        PushLedger.section.in_(scope),
         PushLedger.pan_url != "",
         PushLedger.pushed_at >= cutoff)).all()
     return {k for k in (pan_key(u) for u in rows) if k}
@@ -226,7 +264,8 @@ def peak_metric(metrics) -> float:
 
 
 def last_metrics(session: Session, user_id: int, section: str,
-                 hours: float = 24) -> dict[str, dict]:
+                 hours: float = 24,
+                 sections: tuple[str, ...] | None = None) -> dict[str, dict]:
     """窗口内**已被推过的条目** → 它**上一次**记进台账的 `metrics` dict。
 
     ★★ 2026-11-18(档2 前置):`drop_recent` 的 `hot_of/hot_min` 判的是**绝对值**
@@ -244,10 +283,11 @@ def last_metrics(session: Session, user_id: int, section: str,
 
     from app.db.models import PushLedger
 
+    scope = tuple(sections or (section,))
     cutoff = datetime.now() - timedelta(hours=float(hours))
     rows = session.scalars(select(PushLedger).where(
         PushLedger.user_id == user_id,
-        PushLedger.section == section,
+        PushLedger.section.in_(scope),
         PushLedger.pushed_at >= cutoff,
     ).order_by(PushLedger.pushed_at.asc(), PushLedger.id.asc())).all()
     out: dict[str, dict] = {}
@@ -284,7 +324,8 @@ def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
                 settings=None, hours: float | None = None,
                 hot_of=None, hot_min: float = 0,
                 pan_hours: float | None = None,
-                hot_rise_only: bool = False) -> tuple[list[dict], int]:
+                hot_rise_only: bool = False,
+                by_group: bool = False) -> tuple[list[dict], int]:
     """按**推送台账**去掉最近已经推过的条目 → `(保留, 去掉的条数)`。
 
     ★ 2026-10-29 数据驱动的决定:12 天台账里同一 item 在 **24 小时内重推**的比例
@@ -316,6 +357,20 @@ def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
     `True` = 只有当 `hot_of(item)` **严格大于上一轮推它时的热度**才放行。
     这才是「**又火了**」的正确语义 —— 热度原地不动、或者只是绝对值高,都不该再推一遍。
     比较基准取 `last_metrics()`(窗口内该条目**最近一次**的 metrics)。
+
+    ## ★★ `by_group`(2026-11-18)
+
+    `False` = 去重范围是**本 section**(旧行为,大多数板块各管各的群,这是对的)。
+    `True` = 范围放大到**与本 section 同一个飞书群的那几个 section**(见 `group_of`)。
+
+    起因:`tieba` 与 `zhihu` 配的是**同一个专属群** ⇒ 客户在同一个群里看到
+    「贴吧推一遍、知乎再推一遍」,而 section 级去重管不到。实测近 7 天有
+    **10 个盘链在同一群里被两板块各推、涉及 166 行**(`item_key` 跨板块重复 0 条,
+    ⇒ 只有盘链闸抓得到)。
+
+    ⚠️ **别把 `by_group` 一律打开**:不同群之间跨板块去重会把别的群饿死 ——
+    那正是 section 级去重的原始理由。只在**确认同群**时用(`group_of` 只认
+    **显式配成同一个专属群**的;回落主群的那些不算)。
     """
     if settings is not None and hours is None:
         hours = float(getattr(settings, "push_dedupe_hours", 24) or 0)
@@ -326,14 +381,21 @@ def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
                           if settings is not None else hours)
     if not items:
         return [], 0
+    #: 去重范围:默认本 section;`by_group` 时放大到**与本 section 同一个飞书群**的那几个
+    #: (⚠️ `group_of` 只认**显式配成同一个专属群**的 —— 回落主群的不算,否则没配群的
+    #: 板块会被判成"同群"、互相挡内容)。
+    scope: tuple[str, ...] = (section,)
+    if by_group and settings is not None:
+        scope = group_of(settings, section) or (section,)
     #: ⚠️ **`session=None` 不等于"什么都不能判"**:同一批内部的盘链重复不依赖库。
     seen: set[str] = set()
     seen_pan: set[str] = set()
     if session is not None:
         if float(hours) > 0:
-            seen = recent_keys(session, user_id, section, float(hours))
+            seen = recent_keys(session, user_id, section, float(hours), sections=scope)
         if float(pan_hours or 0) > 0:
-            seen_pan = recent_pan_keys(session, user_id, section, float(pan_hours))
+            seen_pan = recent_pan_keys(session, user_id, section, float(pan_hours),
+                                       sections=scope)
     if float(hours) <= 0:
         seen = set()               #: 内容去重关掉时,库里那份也不该生效
     #: ★★ **重复但"流量好"的仍要推**(2026-11-05 用户:「如果是重复的资源但是流量好也需要推出来」)。
@@ -349,7 +411,7 @@ def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
         #: 取**两个窗口里更长的那个** —— 盘链闸(默认 72h)比内容闸(默认 24h)长,
         #: 若按 24h 查基准,会出现"盘链判它是重复的、却查不到它上次的热度"⇒ 退回放行。
         _win = max(float(pan_hours or 0), float(hours or 0)) or 24.0
-        prev_metrics = last_metrics(session, user_id, section, _win)
+        prev_metrics = last_metrics(session, user_id, section, _win, sections=scope)
     for it in items:
         key = _key_of(it)
         dup_item = key in seen
@@ -506,6 +568,89 @@ def window(session: Session, user_id: int, section: str, since: datetime,
            "repeats": sum(1 for g in items if int(g["pushes"]) > 1), "items": items}
     if top:
         out["items"] = items[:top]
+    return out
+
+
+def cross_section_summary(session: Session, user_id: int, since: datetime,
+                          until: datetime, min_sections: int = 2,
+                          top: int = 0) -> dict:
+    """★★ **跨板块全景**(2026-11-18,档2):同一份**资源**(盘链)被几个板块各推了几次。
+
+    ## 它回答的问题
+
+    `window()` / `boards_with_content()` 都是**单板块**视角 —— 于是
+    「同一份盘链在 8 个群里各推一遍」在内部**完全看不见**(每个板块的日结都只说自己
+    那一份,看起来都很正常)。实测近 7 天:带盘 1910 行 / 382 个盘链,其中
+    **82 个盘链跨 ≥2 个板块、涉及 1063 行**(最极端的一个进了 8 个板块)。
+
+    ## 为什么只在**内部**用,不拿去合并客户群
+
+    不同板块的群**不是一批人**(这是 `drop_recent` 只按 section 去重的原始理由),
+    跨群合并会把别的群饿死。跨板块重复的正确用途有两条:
+      · **同群的**几个板块(tieba/zhihu)⇒ 走 `drop_recent(by_group=True)` **真去重**;
+      · **不同群的** ⇒ 只做**内部可见**(运营据此判断资源池是不是太集中),
+        客户群照常各推各的。
+
+    ## ⚠️ 没有盘链的行不参与聚合
+
+    "同一份资源"的判据只能是**盘链身份**(`pan_key`)。`item_key` 是**内容**身份:
+    实测跨板块重复 **0 条**(不同平台抄的是同一份资源,标题各不相同)——
+    拿它聚合会得到一张恒空的表。
+
+    返回 `{"rows","pan_rows","pans","cross","cross_rows","by_section"}`:
+      · `rows` = 窗口内台账总行;`pan_rows` = 其中**带盘**的行;
+      · `pans` = 不同盘链数;`cross` = 跨 ≥`min_sections` 个板块的盘链清单
+        (按板块数降序、行数降序);`cross_rows` = 这些盘链占了多少行;
+      · `by_section` = 各板块的 `{"rows","pans"}`(**pans 是去重后的**,行数会大于它)。
+    """
+    from app.db.models import PushLedger
+
+    rows = session.scalars(
+        select(PushLedger).where(
+            PushLedger.user_id == user_id,
+            PushLedger.pushed_at >= since,
+            PushLedger.pushed_at < until,
+        ).order_by(PushLedger.pushed_at.asc(), PushLedger.id.asc())
+    ).all()
+    agg: dict[str, dict] = {}
+    by_section: dict[str, dict] = {}
+    pan_rows = 0
+    for r in rows:
+        sec = r.section or ""
+        s = by_section.setdefault(sec, {"rows": 0, "pans": set()})
+        s["rows"] += 1
+        k = pan_key(r.pan_url or "")
+        if not k:
+            continue
+        pan_rows += 1
+        s["pans"].add(k)
+        g = agg.get(k)
+        if g is None:
+            agg[k] = g = {
+                "pan_key": k, "title": r.title or r.item_key or "",
+                "pan_type": r.pan_type or "", "url": r.url or "",
+                "pan_url": r.pan_url or "", "sections": {},
+                "total": 0, "first": r.pushed_at, "last": r.pushed_at,
+            }
+        g["sections"][sec] = g["sections"].get(sec, 0) + 1
+        g["total"] += 1
+        g["last"] = r.pushed_at
+        #: 后来的行只补空标题 —— 与 `window()` 同一口径(先出现的那条是"第一次发现它"时的原话)
+        if not g["title"]:
+            g["title"] = r.title or r.item_key or ""
+    cross = [g for g in agg.values() if len(g["sections"]) >= int(min_sections or 2)]
+    cross.sort(key=lambda g: (-len(g["sections"]), -g["total"], g["title"]))
+    out = {
+        "rows": len(rows), "pan_rows": pan_rows, "pans": len(agg),
+        #: ⚠️ `cross_total` / `cross_rows` 必须**在 `top` 截断之前**算好 ——
+        #: 截断后 len(cross) 只是"列了几条",拿它当"有多少个"会把规模说小。
+        "cross": cross, "cross_total": len(cross),
+        "cross_rows": sum(g["total"] for g in cross),
+        "by_section": {k: {"rows": v["rows"], "pans": len(v["pans"])}
+                       for k, v in by_section.items()},
+    }
+    if top:
+        out["cross"] = cross[:int(top)]
     return out
 
 

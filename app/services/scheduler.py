@@ -494,6 +494,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.board_digest import run_board_digest_daily, run_board_digest_weekly
     from app.services.remote_sync import remote_sync_tick
     from app.services.chain_health import chain_report_tick
+    from app.services.cross_section_report import cross_section_report_tick
     from app.services.link_audit import link_audit_tick
     from app.services.push_timeline import tick as push_timeline_tick
     from app.services.telegram_source import collect_tick as tg_collect_tick
@@ -668,6 +669,15 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # 之前只有公众号有周期总结,其余几条链全靠人手动跑脚本看 —— 等于没有主动通报。
         (chain_report_tick, _get_settings().chain_report_cron, {"minute": 30, "hour": 9},
          "chain_report", "wechat"),
+        # ★★ **跨板块重复**内部通报(2026-11-18,档2):「同一份盘链进了几个群」。
+        # ⚠️ 为什么需要它:`board_digest` 是**单板块**视角,于是"同一个资源在 8 个群里
+        #    各推一遍"在内部**完全看不见**(每个板块的日结都显得正常)。实测近 7 天:
+        #    82 个盘链跨 ≥2 板块、1063 行(占带盘行 55.7%);而 `item_key` 跨板块重复
+        #    **0 条** ⇒ 内容级永远看不到这件事。
+        # ⚠️ **只通报,不自动合并客户群** —— 不同板块的群不是一批人,合并会饿死别的群;
+        #    能真去重的只有**同群**的那几个(`push_ledger.group_of` + `by_group=True`)。
+        (cross_section_report_tick, _get_settings().cross_section_report_cron,
+         {"minute": 48, "hour": 9}, "cross_section_report", "both"),
         # **链接体检**(2026-10-16):抽样探活我方分享链 + 判"货不对版/空分享"。
         # ⚠️ 为什么要有它:首轮实测 75 条里 **货不对版 14 / 空分享 10** —— 这两种**都会打到
         #   客户脸上**(点开拿到别的资源 / 点开是空的),而在此之前**没有任何一行报告看它们**
