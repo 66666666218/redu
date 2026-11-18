@@ -2580,6 +2580,45 @@ class TestProbeWordsToSearch:
         row = session.query(HotWordSeen).filter_by(word="搜过的词").one()
         assert row.fed_search_at is not None and row.fed_search_at <= datetime.now()
 
+    def test_打戳后必须先落盘再进慢活(self, session, monkeypatch) -> None:
+        """★★ **打戳与转存之间必须 commit**(2026-11-18 实测)。
+
+        三个 `mark_*_fed` 是本轮**第一次写**,只 `flush()` 不 commit ⇒ SQLite 的写事务
+        从那一刻一直开到函数末尾,中间跨过 `apply_kouling`(网络转存,单条可达几十秒)
+        和 `push_leads`(发飞书)。实测写事务**持有 319.7s**,期间别的作业撞
+        `database is locked` **60 次**。
+
+        这条用例钉住顺序(不是钉"共 commit 几次"):第一次 commit 必须早于
+        `apply_kouling` 被调用。只删掉那句 `db.commit()` 时它会红。
+        """
+        from app.services import douyin_leads as dl
+
+        self._seed(session, word="会被搜的词")
+        monkeypatch.setattr(dl, "hot_seed_words", lambda *a, **k: [])
+        monkeypatch.setattr(dl, "push_leads", lambda *a, **k: None)
+        lead = {"aweme_id": "a1", "title": "《大瓜》最新资源", "url": "https://v.douyin.com/x",
+                "mark": "大瓜", "author": "作者",
+                "kouling": {"kind": "group", "group_id": "123"}}
+        monkeypatch.setattr(dl, "collect_leads", lambda *a, **k: ([dict(lead)], "CDP"))
+
+        events: list[str] = []
+        real_commit = type(session).commit
+
+        def _spy_commit(sess_self):
+            events.append("commit")
+            return real_commit(sess_self)
+
+        monkeypatch.setattr(type(session), "commit", _spy_commit)
+        monkeypatch.setattr(dl, "apply_kouling",
+                            lambda *a, **k: events.append("apply_kouling"))
+
+        dl.run_douyin_leads(session, 1, _settings_like(), category="影视", advance=False)
+
+        assert "apply_kouling" in events, f"前提没成立:没走到转存那一步 {events[:6]}"
+        assert "commit" in events, "整轮一次都没提交?"
+        assert events.index("commit") < events.index("apply_kouling"), (
+            f"打戳后没落盘就进了慢活 —— 写锁会被抱到整段转存结束:{events[:6]}")
+
     def test_名额走配置且0即关闭(self, session, monkeypatch) -> None:
         from app.services import douyin_leads as dl
 

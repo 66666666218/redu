@@ -2275,6 +2275,15 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
                                               platforms=(_dw.WEVENT_PLATFORM,))
                 except Exception:  # noqa: BLE001 - 打戳失败不挡这轮结果
                     logger.debug("公众号事件名打戳失败", exc_info=True)
+            # ★★ **打戳后立刻落盘,别把写锁抱进后面的慢活**(2026-11-18 实测)。
+            # 下面 `apply_kouling` 要转存(网络,单条可达几十秒)、`push_leads` 要发飞书,
+            # 而上面三个 `mark_*_fed` 是本轮**第一次写** ⇒ 若不在这里提交,SQLite 的写事务
+            # 会一直开到函数末尾那个 `db.commit()`,把单写者的锁抱满整段慢活。
+            # 实测代价(app.log 08:17):写事务**持有 319.7s** 才 commit,期间别的作业
+            # 撞 `database is locked` **60 次**(`UPDATE user_cookies` 就是这样被挡的)。
+            # ⚠️ 打戳的语义不受影响:它本来就该在"搜索已经成功"之后落盘,这一步只提前,
+            # 不改"搜索挂了不许打戳"那条判据(见上面三个 `except` 分支)。
+            db.commit()
             n_panless = 0
             n_grouponly = 0
             if leads:
