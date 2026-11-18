@@ -1038,7 +1038,8 @@ _DA_GUA_WORDS = ("吃瓜群", "吃瓜", "反差", "爆料", "实锤", "塌房", 
 
 
 def search_keywords(session, user_id: int, top: int, settings,
-                    hot: list[str] | None = None) -> list[str]:
+                    hot: list[str] | None = None,
+                    cat: str | None = None) -> list[str]:
     """本轮抖音反查用的搜索词 = **资源库词**(新鲜优先) + **热榜外部种子**。
 
     **方向是单向的**(用户 2026-10-04 逐字口径):"**群组只有通过口令进入,而口令就是从
@@ -1064,6 +1065,11 @@ def search_keywords(session, user_id: int, top: int, settings,
     **轮换游标的推进放在 `douyin_leads_tick` 里**(不在这里),免得别的调用方(如 `pan_discovery`)
     也跟着推进、把类目跳掉。
 
+    ★ `cat` 是**显式指定类目**(2026-11-18,给「大瓜专轮」用):不传则仍读轮换游标。
+    专轮必须传 —— 它按自己的节奏(每天 2 轮)跑,而轮换游标是由 6 类轮转推进的,
+    两者不同步:不传的话专轮会按**当时游标停在哪个类目**出词,搜成影视/资料,
+    「大瓜」这个名字就成了空招牌。
+
     ⚠️ **已经解析出过群的词排到最后**(`_words_already_resolved_to_group`):抖音搜索次数有限、
     每轮又慢,名额要优先给**没试过的词** —— 否则就是"一直用着一个口令进群"。
 
@@ -1074,7 +1080,7 @@ def search_keywords(session, user_id: int, top: int, settings,
     from app.services import category_topics
     from app.services.cross_accounts import _keywords_from_library
 
-    cat = category_topics.current_category(session)
+    cat = cat or category_topics.current_category(session)
     #: ★ **小游戏轮先把资源库里的游戏名当主体词**(2026-10-29,见 `game_search_words`):
     #: 实测裸游戏名搜不到带盘帖,`<游戏名> 下载` 才有。占掉至多 3 个名额。
     #: ★ **每个方向都从资源库取自己的资源名**(2026-10-30,用户「影视/软件下载/游戏下载等方向」):
@@ -2141,16 +2147,21 @@ def _kouling_summary(leads: list[dict]) -> str:
 
 
 def run_douyin_leads(db, user_id: int, settings=None, category: str | None = None,
-                     advance: bool = True) -> int:
+                     advance: bool = True, round_tag: str = "") -> int:
     """**单用户**跑一轮抖音线索:定时 tick 与「失败重试」**共用这一条路径**。
 
     ⚠️ **为什么必须共用一个函数**(而不是给重试另写一套):本项目在 `wechat_listen` 上踩过
-    —— 两条路各写各的,迟早飘出两套行为;那边连"重试要重跑同一组"都是**事后单独打补丁**
+    —— 两条路各写各的,迟早飘出两套行为;那边连"重试要重跑同一组"都是**事后单独补丁**
     才补上的(`_retry_runners` 里读 `cursor=` 那段)。
 
     ⚠️ `advance=False` 是给**重试**用的:重试必须**重跑同一个类目**、**不能推进游标** ——
     否则失败那一轮等于白跳过一个类目,而"每类都要覆盖到"正是轮换的意义
     (与 `wechat_listen` 的 `batch_index` 同一条纪律)。
+
+    ★ `round_tag` 写进运行记录的 `detail`(形如 `[专轮]`),2026-11-18 加:
+    大瓜专轮与主轮**共用 `kind="douyin_leads"`**(共用重试、告警、健康度那一整套),
+    不标记的话,运维看 `runs` 只会看到"今天 8 轮抖音",分不清哪两轮是专轮 ——
+    而"专轮到底有没有在跑"正是加它之后唯一要验证的事(静默失败=假成功)。
     """
     from app.services import category_topics
     from app.services.tenant_base import _record_run
@@ -2234,7 +2245,7 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
     hot = (hot + [w for w in wevent_words if w not in hot]) if wevent_words else hot
     kws = search_keywords(db, user_id,
                           int(getattr(settings, "douyin_leads_keywords", 3) or 3),
-                          settings, hot=hot)
+                          settings, hot=hot, cat=cat)
     if not kws:
         return 0
     total = 0
@@ -2348,7 +2359,7 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
             # 而两条路都会产出"0 条"。不标来源的话,看到 0 就分不清是
             # "协议挂了被回落"还是"真没人在推资源" —— 正是本仓最忌讳的那种含糊。
             _record_run(db, user_id, "douyin_leads", "success",
-                        f"{plat}[{source or '-'}] 类目{cat} 词{len(kws)}(其中外部{n_hot_used}) "
+                        f"{round_tag}{plat}[{source or '-'}] 类目{cat} 词{len(kws)}(其中外部{n_hot_used}) "
                         f"线索{len(leads)} 赛道{_niche_summary(leads) or '-'} "
                         f"新鲜{_freshness_summary(leads)} "
                         f"{_kouling_summary(leads)} "
@@ -2364,7 +2375,8 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
         except Exception as exc:  # noqa: BLE001 - 单平台失败不影响其余
             db.rollback()
             logger.exception("线索平台 %s 失败 user=%s", plat, user_id)
-            _record_run(db, user_id, "douyin_leads", "failed", f"{plat}: {str(exc)[:160]}")
+            _record_run(db, user_id, "douyin_leads", "failed",
+                        f"{round_tag}{plat}: {str(exc)[:160]}")
             db.commit()
     if advance:
         # ⚠️ **轮换游标在"整轮跑完之后"才推进**(2026-10-04):放在出词之后就推的话,
@@ -2394,6 +2406,58 @@ def douyin_leads_tick(settings=None) -> int:
     try:
         for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
             total += run_douyin_leads(db, uid, settings)
+    finally:
+        db.close()
+    return total
+
+
+#: 「大瓜专轮」固定搜的类目名 —— 必须与 `category_topics.categories()` 里的键**逐字一致**
+#: (那边可被 `.env` 的 `LEAD_CATEGORIES` 覆盖;改名前先确认键还在,否则专轮会搜成空)。
+DAGUA_CATEGORY = "大瓜"
+
+
+def douyin_leads_dagua_tick(settings=None) -> int:
+    """★★ **「大瓜」专轮**(2026-11-18):不等 6 类轮换轮到,按自己的节奏搜大瓜。
+
+    ## 为什么单开一条(实测数据,不是猜)
+    6 类轮换让「大瓜」**每天只轮到 1 次**(`douyin_leads_cron="10 */4"` ⇒ 6 轮/天)。
+    实测两个洞:
+      · `麦穗与羊` —— 凌晨 **01:10** 起量,我们 **12:12** 才第一次搜,晚 11 小时;
+      · `大美与高迪` —— 公众号 11-14~11-16 已 8 篇在传,抖音这边 **11-18 12:12**
+        才首次搜(`demand_names.fed_search_at` 就是那一刻),当轮 0 产出。
+    吃瓜事件的生命周期是**小时级**的:等一个轮转周期,峰值早过去了。
+
+    ## 三条纪律(缺一条就会变成"加了个作业、什么也没改善")
+    1. **`advance=False`** —— 不推进轮换游标。专轮要是推进了,6 类轮换就被它打乱
+       (`大瓜` 被重复计数,别的类目往后挤),这正是 `advance=False` 原本给"重试"设计的纪律。
+    2. **`category=DAGUA_CATEGORY` 显式传入** —— 不传会读轮换游标,搜成当时的类目。
+       配套:`search_keywords` 新增的 `cat` 参数保证**出词表**也用大瓜那段
+       (热榜词排最前 + 大瓜词 + 高产出资源名兜底),而不是按游标出词。
+    3. **和主轮共用冷却/探针节流** —— 走的是同一个 `collect_leads`,所以
+       `_browser_probe_allowed` / `verify_cooldown` / 多号轮换都自动生效:
+       冷却期内专轮不会去撞第二次,健康窗口里则真的多搜一轮。
+
+    ⚠️ **空 `douyin_leads_dagua_cron` = 关掉**。判在**这里**而不是注册处:
+       `_cron_trigger` 对空/非法表达式会回退到 default 触发器(那是为了"别造出死作业"),
+       所以注册侧拦不住空串 —— 只剩这里能拦住。
+    ⚠️ 与主轮**共用登录态与额度**(同一个 CDP 浏览器档案);
+       每多一轮 = 多 8 次搜索,风控暴露随之上升 —— 这就是只取 2 轮、不取 `*/4` 的原因。
+    """
+    from config.settings import get_settings
+    from app.db import get_session_local
+    from app.db.models import User
+
+    settings = settings or get_settings()
+    if not getattr(settings, "douyin_leads_enabled", True):
+        return 0
+    if not str(getattr(settings, "douyin_leads_dagua_cron", "") or "").strip():
+        return 0
+    db = get_session_local()()
+    total = 0
+    try:
+        for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
+            total += run_douyin_leads(db, uid, settings, category=DAGUA_CATEGORY,
+                                      advance=False, round_tag="[专轮] ")
     finally:
         db.close()
     return total

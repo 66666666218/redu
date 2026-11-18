@@ -2543,7 +2543,8 @@ class TestProbeWordsToSearch:
         #: 更简单:替 search_keywords 抓 hot 参数
         orig = dl.search_keywords
         monkeypatch.setattr(dl, "search_keywords",
-                            lambda db, uid, top, settings, hot=None: got.update(hot=hot) or [])
+                            lambda db, uid, top, settings, hot=None, cat=None:
+                                got.update(hot=hot) or [])
         monkeypatch.setattr(dl, "collect_leads", lambda *a, **k: ([], "CDP"))
         dl.run_douyin_leads(session, 1, _settings_like(), category="影视", advance=False)
         assert "只忍老板五次直播视频后续" in (got.get("hot") or []), got
@@ -2626,7 +2627,8 @@ class TestProbeWordsToSearch:
         called = []
         monkeypatch.setattr(dl, "hot_seed_words", lambda *a, **k: [])
         monkeypatch.setattr(dl, "search_keywords",
-                            lambda db, uid, top, settings, hot=None: called.append(hot) or [])
+                            lambda db, uid, top, settings, hot=None, cat=None:
+                                called.append(hot) or [])
         monkeypatch.setattr(dl, "collect_leads", lambda *a, **k: ([], "CDP"))
 
         s0 = _settings_like()
@@ -2696,7 +2698,8 @@ class TestDemandNamesToSearch:
         called = []
         monkeypatch.setattr(dl, "hot_seed_words", lambda *a, **k: [])
         monkeypatch.setattr(dl, "search_keywords",
-                            lambda db, uid, top, settings, hot=None: called.append(list(hot or [])) or [])
+                            lambda db, uid, top, settings, hot=None, cat=None:
+                                called.append(list(hot or [])) or [])
         monkeypatch.setattr(dl, "collect_leads", lambda *a, **k: ([], "CDP"))
         monkeypatch.setattr(dl, "push_leads", lambda *a, **k: None)
 
@@ -2754,3 +2757,118 @@ class TestKeywordListFitsCdpCap:
         qs = [w.strip() for w in str(st.douyin_leads_quark_keywords or "").split(",") if w.strip()]
         if qs:
             assert any(w in kws for w in qs), f"夸克口令词被整条挤掉了:{kws}"
+
+
+class TestDaguaDedicatedRound:
+    """★★ **「大瓜」专轮**(2026-11-18):不等 6 类轮换轮到,按自己的节奏搜大瓜。
+
+    起因是实测的两个洞:
+      · `麦穗与羊` 凌晨 **01:10** 起量,我们 **12:12** 才第一次搜,晚 11 小时;
+      · `大美与高迪` 公众号 11-14~11-16 已在传 8 篇,抖音 **11-18 12:12** 才首次搜。
+    6 类 × `douyin_leads_cron="10 */4"` ⇒ 每类每天只轮 **1** 次,比事件的寿命还长。
+
+    下面三条钉住"专轮真的在做它该做的事",缺一条都会退化成"加了个作业、什么也没改善"。
+    """
+
+    def _spy(self, monkeypatch, dl, session):
+        """抓 `run_douyin_leads` 收到的 `(category, advance)` 与 `search_keywords` 的 `cat`。
+
+        ⚠️ **必须接管 `get_session_local`**(2026-11-18 栽过):tick 自己 `from app.db import
+        get_session_local` 开会话,不接管就会连到**生产库** `data/platform.db` ——
+        当时那条用例正是从生产库读到游标 `小游戏`,而断言里写的是测试库的 `资料`。
+        那次没写坏数据(词表为空提前返回),但这是**测试偷偷碰生产**的同族毛病,不能留。
+        """
+        got: dict = {}
+        monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
+        monkeypatch.setattr(dl, "hot_seed_words", lambda *a, **k: [])
+        monkeypatch.setattr(dl, "collect_leads", lambda *a, **k: ([], "CDP"))
+
+        def _sk(db, uid, top, settings, hot=None, cat=None):
+            got["cat"] = cat
+            got["hot"] = list(hot or [])
+            #: ⚠️ **必须返回非空词表**(2026-11-18 变异验证抓到):返回 `[]` 时
+            #: `run_douyin_leads` 会在 `if not kws: return 0` 提前返回,**根本走不到
+            #: 推进游标那段** ⇒ 「不推进游标」那条用例是**假绿**(我注入变异后它照样通过)。
+            #: 给一个假词,让它真的跑完一整轮。
+            return [got.setdefault("word", "假词")]
+
+        monkeypatch.setattr(dl, "search_keywords", _sk)
+        return got
+
+    def test_专轮固定搜大瓜且不推进轮换游标(self, session, monkeypatch) -> None:
+        """⚠️ **`advance=False` 是硬要求**:专轮要是推进了游标,6 类轮换就被它打乱 ——
+        `大瓜` 被重复计数、别的类目往后挤。读 `current_category` 前后必须一字不变。
+        """
+        from app.services import category_topics as ct
+        from app.services import douyin_leads as dl
+
+        self._spy(monkeypatch, dl, session)
+        before = ct.current_category(session)
+        dl.douyin_leads_dagua_tick(settings=_settings_like())
+        after = ct.current_category(session)
+        assert after == before, f"专轮推进了轮换游标:{before} → {after}"
+
+    def test_专轮把大瓜这个词传给search_keywords(self, session, monkeypatch) -> None:
+        """⚠️ **必须显式传 `cat`**:不传的话 `search_keywords` 会读轮换游标,
+        专轮就按当时停在哪一类出词 —— 搜成影视/资料,「大瓜」成了空招牌。
+        """
+        from app.services import douyin_leads as dl
+
+        got = self._spy(monkeypatch, dl, session)
+        dl.douyin_leads_dagua_tick(settings=_settings_like())
+        assert got.get("cat") == "大瓜", f"专轮没把类目传进词表:{got}"
+
+    def test_主轮照旧走轮换游标(self, session, monkeypatch) -> None:
+        """反例守卫:主轮(`douyin_leads_tick`)**不许**被这次改动带偏 —— 它必须传游标类目。"""
+        from app.services import category_topics as ct
+        from app.services import douyin_leads as dl
+
+        got = self._spy(monkeypatch, dl, session)
+        cur = ct.current_category(session)
+        dl.douyin_leads_tick(settings=_settings_like())
+        assert got.get("cat") == cur, f"主轮没按轮换游标出词(cur={cur}):{got}"
+
+    def test_search_keywords的cat参数覆盖游标(self, session, monkeypatch) -> None:
+        """`search_keywords(cat=...)` 直接决定**走哪段分支**:显式 `大瓜` ⇒ 大瓜词表;
+        不传 ⇒ 仍读游标(向后兼容,`pan_discovery` 与十余处既有调用不受影响)。
+        """
+        from app.services import category_topics as ct
+        from app.services.douyin_leads import search_keywords
+
+        st = _settings_like()
+        assert ct.current_category(session) != "大瓜", "前提:游标此刻不在大瓜"
+        plain = search_keywords(session, 1, st.douyin_leads_keywords, st, hot=[])
+        kws = search_keywords(session, 1, st.douyin_leads_keywords, st, hot=[],
+                              cat="大瓜")
+        gua = ("吃瓜群", "吃瓜", "反差", "爆料", "实锤", "塌房", "小作文")
+        assert any(w in kws for w in gua), f"显式 cat=大瓜 却没用大瓜词表:{kws}"
+        assert not any(w in plain for w in gua), (
+            f"不传 cat 时按游标出词,却冒出了大瓜词:{plain}")
+
+    def test_空cron即关闭(self, session, monkeypatch) -> None:
+        """`douyin_leads_dagua_cron=""` = 关掉(退回旧行为)。
+
+        ⚠️ 判在 **tick 里**而不是注册处:`_cron_trigger` 对空/非法表达式会回退到
+        default 触发器(那是为了"别造出死作业"),所以注册侧拦不住空串。
+        """
+        from app.services import douyin_leads as dl
+
+        called: list = []
+        monkeypatch.setattr(dl, "run_douyin_leads",
+                            lambda *a, **k: called.append(k) or 0)
+        st = _settings_like()
+        object.__setattr__(st, "douyin_leads_dagua_cron", "")
+        dl.douyin_leads_dagua_tick(settings=st)
+        assert called == [], f"cron 为空却还是跑了:{called}"
+
+    def test_关闭总开关时两种轮都不跑(self, session, monkeypatch) -> None:
+        """`douyin_leads_enabled=False` ⇒ 专轮与主轮一致地跳过(别只关一半)。"""
+        from app.services import douyin_leads as dl
+
+        called: list = []
+        monkeypatch.setattr(dl, "run_douyin_leads",
+                            lambda *a, **k: called.append(k) or 0)
+        st = _settings_like()
+        object.__setattr__(st, "douyin_leads_enabled", False)
+        assert dl.douyin_leads_dagua_tick(settings=st) == 0
+        assert called == [], f"总开关关了却还是跑了:{called}"

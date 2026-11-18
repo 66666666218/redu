@@ -702,6 +702,17 @@ def retry_failed_runs(max_retry: int = 3) -> dict:
                 m = _re.search(r"类目(\S+)", run.detail or "")
                 kwargs["category"] = m.group(1) if m else None
                 kwargs["advance"] = False
+                #: ★ **大瓜专轮的重试必须 still 是大瓜**(2026-11-18)。两件事:
+                #: ① **失败**记录的 detail 里**没有 `类目X`**(它只在成功那行才有),
+                #:    所以 `category` 会是 `None` ⇒ `run_douyin_leads` 回落到**轮换游标**,
+                #:    重试就搜成了当时轮到的那个类目 —— 而专轮的失败恰恰说明"大瓜这条
+                #:    专线断了",重试去搜影视毫无意义。⇒ 从 `[专轮]` 标记认回类目。
+                #: ② 重试后**保留标记**,否则 `runs` 里分不清这次是专轮重试还是主轮重试。
+                if "[专轮]" in (run.detail or ""):
+                    from app.services.douyin_leads import DAGUA_CATEGORY
+
+                    kwargs["category"] = DAGUA_CATEGORY
+                    kwargs["round_tag"] = "[专轮重试] "
             try:
                 # ⚠️⚠️ **"没抛异常"不等于"重试成功"**(2026-10-16 实测撞到)。
                 #    `run_douyin_leads` 这类**多平台** runner 会把单平台失败**吞进

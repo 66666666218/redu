@@ -501,7 +501,7 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.bili_account_scan import bili_account_scan_tick
     from app.services.quark_kouling import quark_kouling_tick
     from app.services.quark_link_pull import quark_link_pull_tick
-    from app.services.douyin_leads import douyin_leads_tick
+    from app.services.douyin_leads import douyin_leads_dagua_tick, douyin_leads_tick
     from app.services.douyin_peer_scan import douyin_peer_tick
     #: ★ **评论区在求的名字**(2026-10-30,用户口径:只看名字、不落网盘)。
     #: 与 `douyin_leads` 共用抖音登录态/额度,所以错开 40 分钟跑。
@@ -600,6 +600,19 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # → 推卡片(标题+视频链接+我方分享链)。搜索词来自**群组新资源 + 公众号已验证资源**;
         # **每天** 11:00 一轮(低频——它要开浏览器,一次几分钟)。
         (douyin_leads_tick, _get_settings().douyin_leads_cron, {"minute": 0, "hour": 11}, "douyin_leads", "wechat"),
+        # ★★ **「大瓜」专轮**(2026-11-18):不等 6 类轮换轮到,按自己的节奏搜大瓜。
+        # 为什么:6 类 × `10 */4` ⇒ 每类每天只轮到 **1** 次,而吃瓜事件是**小时级**的 ——
+        # `麦穗与羊` 凌晨 01:10 起量、我们 12:12 才搜(晚 11h);`大美与高迪` 公众号
+        # 11-14 就在传、抖音 11-18 12:12 才首次搜。详见 `douyin_leads_dagua_tick`。
+        # 取 **01:24 / 09:24**:凌晨那轮接住当晚起量的事件,早间那轮接隔夜第二波。
+        # ⚠️ `advance=False` + `category="大瓜"` 是这条作业的全部意义,别改成走轮换。
+        # ⚠️ 与 `douyin_leads` 共用 CDP 登录态/额度 ⇒ 只取 2 轮;冷却与探针节流共用
+        #    (`_browser_probe_allowed`),所以风控期不会两条轮各撞一次。
+        # `:24` 已用真实触发器枚举确认是空闲分钟(`test_job_stagger` 守着)。
+        # ⚠️ 关掉它的方式是 `douyin_leads_dagua_cron=""`,由 `douyin_leads_dagua_tick`
+        #    内部拦(`_cron_trigger` 对空串会回退到 default,注册侧拦不住)。
+        (douyin_leads_dagua_tick, _get_settings().douyin_leads_dagua_cron,
+         {"minute": 24, "hour": "1,9"}, "douyin_leads_dagua", "wechat"),
         # ★ **抖音对标号监控**(2026-10-29,用户口径「有很多小游戏的对标账号,他们发了你就能看到」):
         # 按 **sec_uid** 打开主页看新作品 —— 只推"没见过"的 vid(首次扫描只建基线)。
         # ⚠️ 必须与 `douyin_leads` **同侧**(都用本机那个 CDP 浏览器/登录态),且错开 :10。

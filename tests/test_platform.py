@@ -653,7 +653,13 @@ def test_collection_health_summary(session) -> None:
     assert h["wechat_monitor"]["benchmarks"] == 1
     assert h["wechat_monitor"]["users"] == 1
     assert h["wechat_monitor"]["articles_24h"] == 1
-    assert h["wechat_monitor"]["fixed_hours"] == "4:00 / 8:00 / 14:00 / 20:00"
+    #: ⚠️ 别把时刻表**写死**在这里(2026-11-18):11-17 加了 10 点,这条断言没跟着改,
+    #: 它红了整整一天没人发现 —— 它验的其实是「健康页照着单一事实源报」,
+    #: 拿 `WECHAT_LISTEN_HOURS` 拼期望值才是这条用例的本意。
+    from app.services.schedule_service import WECHAT_LISTEN_HOURS
+
+    assert h["wechat_monitor"]["fixed_hours"] == " / ".join(
+        f"{x}:00" for x in sorted(WECHAT_LISTEN_HOURS))
     assert {"section": "douhot", "count": 1} in h["feishu"]["pushes_by_section"]
     assert h["feishu"]["last_push"] is not None                  # 飞书推过
     assert h["cookies"].get("goofish") == 1                      # 配了闲鱼 Cookie

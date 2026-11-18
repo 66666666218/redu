@@ -424,17 +424,19 @@ class Test抖音验证冷却期不许重试:
                               started_at=datetime.now() - timedelta(hours=2)))
         session.commit()
         calls: list[str] = []
+        kwargs_seen: list[dict] = []
 
         def _runner(db, uid, st=None, **kw):
             calls.append("ran")
+            kwargs_seen.append(dict(kw))
             return {"platform": "douyin", "count": 0}
 
         from app.services import douyin_leads as dl
         monkeypatch.setattr(dl, "run_douyin_leads", _runner)
-        return admin_svc, calls
+        return admin_svc, calls, kwargs_seen
 
     def test_冷却期内不重试(self, session, monkeypatch) -> None:
-        admin_svc, calls = self._setup(session, monkeypatch, cooldown=True)
+        admin_svc, calls, _kw = self._setup(session, monkeypatch, cooldown=True)
         assert admin_svc.retry_failed_runs(max_retry=3)["retried"] == 0
         assert calls == [], "冷却期内不该再打那 8 次搜索"
         run = session.scalar(select(RunRecord))
@@ -446,21 +448,51 @@ class Test抖音验证冷却期不许重试:
         18:30 的自动重试把冷却推到 00:30,而 20:10 的定点轮因为"探针已被用掉"只能跳过。
         ⇒ 这类失败交给 4h 定点轮,自动重试不许偷走探针。
         """
-        admin_svc, calls = self._setup(session, monkeypatch, cooldown=False)
+        admin_svc, calls, _kw = self._setup(session, monkeypatch, cooldown=False)
         assert admin_svc.retry_failed_runs(max_retry=3)["retried"] == 0
         assert calls == [], "风控/空结果不是瞬时故障,重试只会再撞一次"
 
     def test_不在冷却期就照旧重试(self, session, monkeypatch) -> None:
         """非风控类失败(如 Playwright 退出码)仍按指数退避正常重试。"""
-        admin_svc, calls = self._setup(
+        admin_svc, calls, _kw = self._setup(
             session, monkeypatch, cooldown=False,
             detail="douyin 退出码 1:playwright Page.goto timeout")
         admin_svc.retry_failed_runs(max_retry=3)
         assert calls == ["ran"], "冷却结束了还不重试,就等于把这条链放弃了"
 
     def test_开关关掉就照旧重试(self, session, monkeypatch) -> None:
-        admin_svc, calls = self._setup(
+        admin_svc, calls, _kw = self._setup(
             session, monkeypatch, cooldown=True, switch=False,
             detail="douyin 退出码 1:playwright Page.goto timeout")
         admin_svc.retry_failed_runs(max_retry=3)
         assert calls == ["ran"], "可回退:配置置 False 就该恢复旧行为"
+
+    def test_专轮失败重试仍搜大瓜(self, session, monkeypatch) -> None:
+        """★★ **专轮的重试不许漂成别的类目**(2026-11-18)。
+
+        ⚠️ 失败记录的 detail **没有 `类目X`**(那只有成功那行才有),所以原来的正则
+        取不到类目 ⇒ `category=None` ⇒ `run_douyin_leads` 回落到**轮换游标**,
+        重试就搜成了当时轮到的类目。而专轮失败恰恰说明"大瓜这条专线断了",
+        重试去搜影视毫无意义,还会白烧 8 次搜索额度。
+
+        ⇒ 从 `[专轮]` 标记认回类目,并保留标记(否则 `runs` 里分不清哪条是专轮重试)。
+        """
+        admin_svc, calls, kw = self._setup(
+            session, monkeypatch, cooldown=False,
+            detail="[专轮] douyin: playwright Page.goto timeout")
+        admin_svc.retry_failed_runs(max_retry=3)
+        assert calls == ["ran"], f"非风控类失败应该重试:{calls}"
+        assert kw and kw[0].get("category") == "大瓜", (
+            f"专轮重试漂到了别的类目(会白烧 8 次搜索):{kw[0]}")
+        assert kw[0].get("advance") is False, "重试永远不许推进轮换游标"
+        assert "专轮" in (kw[0].get("round_tag") or ""), f"轮次标记丢了:{kw[0]}"
+
+    def test_主轮失败重试仍按detail里的类目(self, session, monkeypatch) -> None:
+        """反例守卫:主轮的既有行为不许被专轮那条分支带偏。"""
+        admin_svc, calls, kw = self._setup(
+            session, monkeypatch, cooldown=False,
+            detail="douyin: playwright timeout 类目影视 词8")
+        admin_svc.retry_failed_runs(max_retry=3)
+        assert calls == ["ran"]
+        assert kw[0].get("category") == "影视", f"主轮重试丢了类目:{kw[0]}"
+        assert "round_tag" not in kw[0], f"主轮不该带专轮标记:{kw[0]}"
