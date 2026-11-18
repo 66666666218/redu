@@ -150,6 +150,42 @@ def test_old_rows_are_not_pushed(local, remote_url) -> None:
     eng.dispose()
 
 
+def test_上限截断必须丢最老的而不是最新的(local, remote_url) -> None:
+    """★★ **2026-11-18 实测的静默失效**:`_rows` 曾按 `ORDER BY id`(**升序**)取 `limit`。
+
+    14 天窗口里 `wechat_articles` 已有 **4604** 行 > 上限 3000 ⇒ 每轮都取到那批**最老的**
+    3000 行,远端按天然键去重后全是"已经有了" ⇒ 新行**永远排不进前 3000**。
+    实测后果:远程 `wechat_articles` 停在 **11-13**(本地已到 11-18)、
+    `wechat_pan_links` 停在 **11-09**,而每轮 `runs` 都记 `success 文章0` ——
+    **看起来像"这几天确实没新文章"**,正是最怕的那种静默失效。
+
+    所以这里造 `limit+1` 行:最新的那一行**必须**推过去,被丢的必须是**最老**的那行。
+    """
+    n = rs.DEFAULT_LIMIT + 1
+    # ⚠️ 间隔必须小到让 **全部 n 行都落在 days=14 窗口内**(3001 分钟 ≈ 50 小时),
+    #    否则超窗口的行会被 `since` 先切掉,测不到截断方向。
+    base = datetime.now() - timedelta(minutes=n)
+    rows = [WechatArticle(user_id=1, author="A", title=f"第{i}篇",
+                          url=f"https://x/{i:05d}",
+                          created_at=base + timedelta(minutes=i)) for i in range(n)]
+    local.add_all(rows)
+    local.commit()
+
+    out = rs.sync_once(local, remote_url)
+    assert out["status"] == "ok", out
+    assert out["articles"] == rs.DEFAULT_LIMIT, f"单轮应正好推 {rs.DEFAULT_LIMIT} 行:{out}"
+
+    eng = create_engine(remote_url)
+    with eng.connect() as c:
+        got = {str(u) for (u,) in c.execute(text("SELECT url FROM wechat_articles"))}
+    eng.dispose()
+    newest, oldest = f"https://x/{n - 1:05d}", "https://x/00000"
+    assert newest in got, "★ 最新的一行必须推过去 —— 否则就是升序截断的老 bug 复发"
+    assert oldest not in got, "被丢的应该是窗口内**最老**的那行(它快出窗口了)"
+    # fixture 预置了 1 条远程独有文章(`REMOTE-ONLY`),它必须原样还在
+    assert len(got) == rs.DEFAULT_LIMIT + 1, len(got)
+
+
 def test_sync_pushes_cross_platform_accounts(local, remote_url) -> None:
     """★ **2026-10-05 补的洞**:`cross_platform_accounts`(知乎/B站发现的网盘号)
     **只在本机产生**(发现链归 wechat 侧),而选题 Agent 在 **远程** ——

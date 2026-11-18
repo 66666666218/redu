@@ -33,6 +33,19 @@ logger = get_logger(__name__)
 DEFAULT_DAYS = 14          # 每次回看多少天(靠天然键去重,天然幂等,重跑无害)
 DEFAULT_LIMIT = 3000       # 单轮上限,别一次把远程打爆
 
+#: ★★ **单轮上限必须"从最新往回取",不能"从最老往后取"**(2026-11-18 实测的静默失效)。
+#:
+#: 原来的 `_rows` 是 `ORDER BY id LIMIT 3000` —— **升序**,拿到的是窗口里**最老的** 3000 行。
+#: 而 14 天窗口里 `wechat_articles` 已有 **4604** 行、`wechat_pan_links` **6845** 行,
+#: 双双超过 3000 ⇒ 每轮都在重推同一批老行(远端按天然键去重 ⇒ 全被跳过),
+#: **新行永远排不进前 3000**,只能等窗口把老行挤出去才进得来。
+#:
+#: 后果(实测):远程 `wechat_articles` 停在 **11-13**、`wechat_pan_links` 停在 **11-09**,
+#: 而本机每天还在进 200~400 篇;**每轮 `runs` 都记 `success 文章0`** ——
+#: 读起来像"这几天确实没新文章",正是本仓最怕的静默失效。
+#: ⇒ 改成 `ORDER BY <时间列> DESC`,`limit` 的语义从"最老的 3000"变成"**最新的 3000**"。
+#: 窗口内总量超过上限时,丢的是**最老的那头**(那部分要么已推过,要么快出窗口了)。
+
 # 要推的列(**显式列出、不含 id**)。两边列数实测一致(25/12/5),这里再钉一遍免得
 # 将来本地加了列、远程还没迁移时,INSERT 直接报 Unknown column。
 _ARTICLE_COLS = ("user_id", "author", "title", "content", "url", "publish_at", "created_at",
@@ -189,11 +202,12 @@ def _tunnel_engine(settings):
 
 
 def _rows(session: Session, model, since: datetime, limit: int) -> list[Any]:
+    """取窗口内**最新的** `limit` 行(见 `_ROWS_ORDER_COL` 上那段:升序会卡住新数据)。"""
     from sqlalchemy import select
 
     return session.scalars(
         select(model).where(model.created_at >= since)
-        .order_by(model.id).limit(limit)).all()
+        .order_by(model.created_at.desc()).limit(limit)).all()
 
 
 def _push(table: str, cols: tuple[str, ...], values: list[dict], conn) -> int:
@@ -292,7 +306,7 @@ def sync_once(local: Session, remote_url: str, days: int = DEFAULT_DAYS,
                     amap[str(u)] = int(rid)
             link_objs = local.execute(
                 text("SELECT article_id, pan_url, created_at FROM wechat_pan_links "
-                     "WHERE created_at >= :s LIMIT :n"),
+                     "WHERE created_at >= :s ORDER BY created_at DESC LIMIT :n"),
                 {"s": since, "n": limit}).all()
             # 一次取回这些文章的 url(别在循环里逐条 `local.get`,那是 N 次查询)
             aids = sorted({int(r[0]) for r in link_objs})
@@ -338,7 +352,8 @@ def sync_once(local: Session, remote_url: str, days: int = DEFAULT_DAYS,
             local_found = local.execute(
                 text("SELECT user_id, platform, origin_url, title, author, source_url, "
                      "status, message, our_url, pass_code, found_at FROM discovered_pan_links "
-                     "WHERE found_at >= :s LIMIT :n"), {"s": since, "n": limit}).all()
+                     "WHERE found_at >= :s ORDER BY found_at DESC LIMIT :n"),
+                {"s": since, "n": limit}).all()
             if local_found:
                 f_urls = [str(r[2]) for r in local_found if r[2]]
                 have_f: set[str] = set()
@@ -365,7 +380,8 @@ def sync_once(local: Session, remote_url: str, days: int = DEFAULT_DAYS,
                      #: 而远程 MySQL 这一列是 `VARCHAR(64)` ⇒ 每轮 `Data too long for column 'uid'`,
                      #: 本地日志里一条 WARNING、这批号也永远到不了远程。
                      #: 远程**不扫抖音对标号**(扫描作业挂在 wechat 侧),所以直接不发。
-                     "WHERE discovered_at >= :s AND platform <> 'douyin' LIMIT :n"),
+                     "WHERE discovered_at >= :s AND platform <> 'douyin' "
+                     "ORDER BY discovered_at DESC LIMIT :n"),
                 {"s": since, "n": limit}).all()
             if local_accts:
                 have_a = {tuple(str(x) for x in row) for row in conn.execute(text(
@@ -402,7 +418,8 @@ def sync_once(local: Session, remote_url: str, days: int = DEFAULT_DAYS,
                 text("SELECT user_id, aweme_id, mark, title, author, url, keyword, share_count, "
                      "kind, our_url, found_at, found_date, kouling_tried_at, publish_at, "
                      "moved_at, last_error, kouling_tries FROM douyin_leads "
-                     "WHERE found_at >= :s LIMIT :n"), {"s": since, "n": limit}).all()
+                     "WHERE found_at >= :s ORDER BY found_at DESC LIMIT :n"),
+                {"s": since, "n": limit}).all()
             if local_leads:
                 have_l = {str(x) for (x,) in conn.execute(text(
                     "SELECT aweme_id FROM douyin_leads WHERE user_id = 1"))}
