@@ -111,6 +111,24 @@ def _search_weibo(cookie: str, keyword: str, limit: int = 20,
         payload = resp.json()
     except ValueError as exc:
         raise SearchSourceError(f"返回非 JSON:{resp.text[:80]}") from exc
+    # ★★ **`ok:-100` 必须先认出来**(2026-11-18):原来这里只有一句兜底的 `返回体无 statuses`
+    # ⇒ 日志读起来像「对方接口改版了/字段没了」,真实原因(登录态失效)完全看不见。
+    # 实测 11-14 起累计 **118 次**全是这个码,我排查「微博盘链为什么断了」时
+    # 第一眼就被这句话误导到了「接口形状变了」。
+    #
+    # ⚠️ **判据照抄 `app/services/weibo_search.py:139` 那套,不能只看 `ok`**:
+    # `ok=-100` 有两种来源 —— 响应里带 `url=https://passport.weibo.com/sso/signin…`
+    # 是**登录态失效**(换 Cookie 就好),没有跳转(如 `msg=系统繁忙`)是**风控**。
+    # 把它们都说成"登录失效"会让人白跑一趟重登,而说成"接口改版"更糟 —— 会去改代码。
+    # ⇒ 这是「**同一个坑在两条链上各踩一次**」:`weibo_search` 那边 2026-10-13 已修,
+    #   `pan_discovery` 走的正是**这一份**,当时没同步 ⇒ 今天补上。
+    if isinstance(payload, dict) and payload.get("ok") in (-100, "-100"):
+        _u = str(payload.get("url") or "")
+        if "passport.weibo.com" in _u or "signin" in _u:
+            raise SearchSourceError(
+                "微博登录态失效(ok=-100,响应带登录页跳转)—— 需要换一份新 Cookie")
+        raise SearchSourceError(
+            f"微博疑似风控(ok=-100,无登录页跳转):{str(payload.get('msg') or '')[:60]}")
     if not isinstance(payload, dict) or "statuses" not in payload:
         raise SearchSourceError(f"返回体无 statuses:{str(payload)[:100]}")
 

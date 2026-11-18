@@ -152,6 +152,16 @@ def _beat(job_id: str, ok: bool, err: str = "", duration_ms: int | None = None) 
             row.run_count = (row.run_count or 0) + 1
             if ok:
                 row.last_ok_at = now
+                # ★★ **成功时必须把 `last_error` 清掉**(2026-11-18)。
+                # 它语义上是「**最近一次失败的原因**」——不清就会变成「历史上曾经出过的错」,
+                # 于是作业早就自愈了,`pan_self_check._check_run_detail` 还在报
+                # 「心跳里有 N 次错误:…」,人看到的是**假红灯**。
+                # 实测:`collect_failed_alert` 的 `last_ok_at=10:00`(刚刚成功),
+                # 而 `last_error` 里还挂着 09:00 那次 `UnmappedInstanceError` —— 两条读数
+                # **互相矛盾**,值班的人无从判断该信哪一条。
+                # ⚠️ `error_count` **保留累计**(它是"历史失败次数",语义不同,别一起清)——
+                # 判"现在坏没坏"看 `last_ok_at`,判"历史上出过几次"看 `error_count`。
+                row.last_error = ""
             else:
                 row.error_count = (row.error_count or 0) + 1
                 row.last_error = (err or "")[:255]

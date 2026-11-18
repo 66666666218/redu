@@ -69,6 +69,36 @@ def test_repeated_runs_accumulate(patch_db, engine) -> None:
     assert row.run_count == 3 and row.error_count == 0
 
 
+def test_成功后必须清掉_last_error(patch_db, engine) -> None:
+    """★★ **2026-11-18 实测的假红灯**:`last_error` 语义是「**最近一次失败的原因**」,
+    但原来成功分支不碰它 ⇒ 它退化成「历史上曾经出过的错」。
+
+    实测 `collect_failed_alert`:`last_ok_at=10:00`(刚刚成功),而 `last_error` 里
+    还挂着 09:00 那次 `UnmappedInstanceError` —— 两条读数**互相矛盾**,
+    而 `pan_self_check._check_run_detail` 读的正是 `error_count + last_error`,
+    于是一个**已经自愈**的作业被一直报「心跳里有 N 次错误」。
+    值班的人看到心跳红的、却看到作业在跑,只能猜 —— 这正是告警体系最坏的结局。
+    """
+    calls = {"n": 0}
+
+    def _flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("第一次炸了")
+
+    f = sch._safe(_flaky, "flaky_job")
+    f()                                     # 失败一次
+    row = _beat_of(engine, "flaky_job")
+    assert row.error_count == 1 and "第一次炸了" in row.last_error
+
+    f()                                     # 再成功一次
+    row = _beat_of(engine, "flaky_job")
+    assert row.last_ok_at is not None
+    assert row.last_error == "", f"成功后必须清空(否则是假红灯):{row.last_error!r}"
+    # ⚠️ `error_count` 是「历史失败累计」,**保留**(与 `last_error` 的语义不同)
+    assert row.error_count == 1, "历史失败次数不该被清 —— 判'现在坏没坏'看 last_ok_at"
+
+
 def test_no_job_id_means_no_heartbeat(patch_db, engine) -> None:
     """没给 job_id 就不写(避免把无关调用也记成作业)。"""
     sch._safe(lambda: None)()

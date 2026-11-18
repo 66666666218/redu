@@ -300,6 +300,55 @@ def test_search_zhihu_empty_data_is_not_an_error(monkeypatch) -> None:
     assert cp._search_zhihu("ck", "网盘资源") == []
 
 
+def test_微博ok为负带登录页跳转_判登录态失效(monkeypatch) -> None:
+    """★★ **2026-11-18**:同一个坑在两条链上各踩一次。
+
+    `app/services/weibo_search.py:139` 那边 2026-10-13 就把 `ok=-100` 拆成了
+    「登录态失效」vs「疑似风控」两种;但 `pan_discovery` 走的**是这一份**
+    (`cross_accounts._search_weibo`),当时没同步 ⇒ 一直落到兜底的
+    `返回体无 statuses` 上。
+
+    实测 11-14 起累计 **118 次**全是这个码(cookie 是 11-06 存的,早已失效),
+    而那句兜底话让排查方向直接跑偏到「微博接口改版了」——
+    **判据的措辞会决定下一步去修什么**。
+    """
+    class _R:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"ok": -100,
+                    "url": "https://passport.weibo.com/sso/signin?entry=wapsso&source=wapssowb"}
+
+    import requests
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _R())
+    with pytest.raises(cp.SearchSourceError) as ei:
+        cp._search_weibo("ck", "网盘资源")
+    msg = str(ei.value)
+    assert "登录态失效" in msg, msg
+    assert "Cookie" in msg, f"要说清修法是换 Cookie:{msg}"
+    assert "返回体无 statuses" not in msg, "别退回那句含糊话"
+
+
+def test_微博ok为负但没有登录页跳转_说疑似风控(monkeypatch) -> None:
+    """反例:同样 `ok=-100` 但没有跳登录页 ⇒ **不能**说成登录态失效(会让人白重登一次)。"""
+    class _R:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"ok": -100, "msg": "系统繁忙"}
+
+    import requests
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _R())
+    with pytest.raises(cp.SearchSourceError) as ei:
+        cp._search_weibo("ck", "网盘资源")
+    msg = str(ei.value)
+    assert "风控" in msg, msg
+    assert "系统繁忙" in msg, "接口给的 msg 要带出来(不许吞)"
+    assert "登录态失效" not in msg, f"没有证据别把它说成登录问题:{msg}"
+
+
 # ---------------------------------------------------------------- B站搜视频(名字型用)
 
 def test_search_bilibili_videos_strips_em_and_keeps_keyword(monkeypatch) -> None:
