@@ -667,9 +667,14 @@ def push_items(items: list[dict], settings, detail: dict | None = None,
 
         group, _dup = push_ledger.drop_recent(
             session, user_id, led_sec, group, settings,
-            #: 重复但**同资源内容数多**(说明还在被大量推)的仍要推
-            hot_of=lambda it: it.get("count"),
-            hot_min=float(getattr(settings, "push_hot_bypass_count", 3) or 0))
+            #: ★★ 2026-11-18 订正:这里原来判的是 `count`(同资源内容数)的**绝对值**,
+            #: 门槛 `push_hot_bypass_count=3` —— 而实测同一份资源的内容数是 **20~99**
+            #: ⇒ 豁免**每次**都成立,盘链去重**一次都没生效过**(近 30 天知乎同一份
+            #: 资源推了 162 次、B站 61 次、贴吧 25 次)。
+            #: 现在改判**互动数是否比上次推它时更高**(`hot_rise_only`)——
+            #: "又火了"才是放行理由;"绝对值高"不是。
+            hot_of=lambda it: push_ledger.peak_metric(it.get("metrics")),
+            hot_min=1, hot_rise_only=True)
         if not group:
             if detail is not None:
                 detail[plat] = f"{int(getattr(settings, 'push_dedupe_hours', 24) or 0)}h 内已推过"

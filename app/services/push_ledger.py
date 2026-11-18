@@ -212,6 +212,56 @@ def recent_pan_keys(session: Session, user_id: int, section: str,
     return {k for k in (pan_key(u) for u in rows) if k}
 
 
+def peak_metric(metrics) -> float:
+    """一组互动指标里**最高的那个数字**(`{"liked_count": 53, "play_count": "1.2万"}` → 53)。
+
+    给 `drop_recent` 的 `hot_of` 用:`metrics` 的键因平台而异(点赞/播放/评论/转发),
+    取「最高的那项」当"这个资源有多热"的**粗代理** —— 与 `_heat()` 同一套思路。
+    ⚠️ 值可能是 `"1.2万"` 这种**字符串**(各源格式不一),必须过 `_num()` 再比;
+    直接 `max()` 会拿 str 与 int 比较、在 py3 里当场 `TypeError`。
+    """
+    if not isinstance(metrics, dict):
+        return 0.0
+    return max((_num(v) for v in metrics.values()), default=0.0)
+
+
+def last_metrics(session: Session, user_id: int, section: str,
+                 hours: float = 24) -> dict[str, dict]:
+    """窗口内**已被推过的条目** → 它**上一次**记进台账的 `metrics` dict。
+
+    ★★ 2026-11-18(档2 前置):`drop_recent` 的 `hot_of/hot_min` 判的是**绝对值**
+    —— 而"同资源内容数"这个绝对值在 presence 链上**恒远高于门槛**:
+    实测同一份资源的内容数是 20~99,而 `push_hot_bypass_count` 默认 **3**
+    ⇒ 那道"流量好就放行"的口子**永远成立**,盘链去重实际全部失效。
+    后果(实测近 30 天):知乎把同一份资源推了 **162 次**、B站 61 次、贴吧 25 次。
+
+    正确的语义是「**比上次推它时更火了**」,不是「绝对值高」——
+    所以要把上一轮的热度读回来做比较。键与 `item_key` 一致(去重按同一把尺子)。
+    """
+    if session is None or hours <= 0:
+        return {}
+    from sqlalchemy import select
+
+    from app.db.models import PushLedger
+
+    cutoff = datetime.now() - timedelta(hours=float(hours))
+    rows = session.scalars(select(PushLedger).where(
+        PushLedger.user_id == user_id,
+        PushLedger.section == section,
+        PushLedger.pushed_at >= cutoff,
+    ).order_by(PushLedger.pushed_at.asc(), PushLedger.id.asc())).all()
+    out: dict[str, dict] = {}
+    for r in rows:                     # 升序遍历 ⇒ 后写的覆盖 = **最近一次**那条
+        key = r.item_key or r.title or r.url or f"#{r.id}"
+        try:
+            m = json.loads(r.metrics or "{}")
+        except ValueError:
+            m = {}
+        if isinstance(m, dict):
+            out[key] = m
+    return out
+
+
 def _num(v) -> float:
     """把 `metrics` 里的值(可能是 "1.2万"/int/str)转成数字;转不了按 0。"""
     if isinstance(v, (int, float)):
@@ -233,7 +283,8 @@ def _num(v) -> float:
 def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
                 settings=None, hours: float | None = None,
                 hot_of=None, hot_min: float = 0,
-                pan_hours: float | None = None) -> tuple[list[dict], int]:
+                pan_hours: float | None = None,
+                hot_rise_only: bool = False) -> tuple[list[dict], int]:
     """按**推送台账**去掉最近已经推过的条目 → `(保留, 去掉的条数)`。
 
     ★ 2026-10-29 数据驱动的决定:12 天台账里同一 item 在 **24 小时内重推**的比例
@@ -255,6 +306,16 @@ def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
 
     ⚠️ **两道闸共用 `hot_of` 的放行口径**:流量真的爆了的,重复也要推。
     ⚠️ 没有盘链的条目(`pan_key` 为空)只走内容去重 —— 没盘链就无从判"同一份资源"。
+
+    ## ★★ `hot_rise_only`(2026-11-18,档2 前置)
+
+    默认 `False` = 旧行为(绝对门槛)。**但在 presence 那条链上绝对门槛是个笑话**:
+    实测同一份资源的"同资源内容数"是 20~99,而门槛默认 **3** ⇒ 每次判重都命中豁免,
+    盘链去重**一次都没生效过**(近 30 天知乎把同一份资源推了 162 次)。
+
+    `True` = 只有当 `hot_of(item)` **严格大于上一轮推它时的热度**才放行。
+    这才是「**又火了**」的正确语义 —— 热度原地不动、或者只是绝对值高,都不该再推一遍。
+    比较基准取 `last_metrics()`(窗口内该条目**最近一次**的 metrics)。
     """
     if settings is not None and hours is None:
         hours = float(getattr(settings, "push_dedupe_hours", 24) or 0)
@@ -281,8 +342,17 @@ def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
     #: 命中就**放行**并打标记,卡片上可以标 🔥 复推。
     kept: list[dict] = []
     _batch_pans: set[str] = set()
+    #: `hot_rise_only` 的比较基准:窗口内该条目**上一次**推出去时的热度。
+    #: 只在需要时才查(默认路径不付这份开销)。
+    prev_metrics: dict[str, dict] = {}
+    if hot_rise_only and hot_of is not None and session is not None:
+        #: 取**两个窗口里更长的那个** —— 盘链闸(默认 72h)比内容闸(默认 24h)长,
+        #: 若按 24h 查基准,会出现"盘链判它是重复的、却查不到它上次的热度"⇒ 退回放行。
+        _win = max(float(pan_hours or 0), float(hours or 0)) or 24.0
+        prev_metrics = last_metrics(session, user_id, section, _win)
     for it in items:
-        dup_item = _key_of(it) in seen
+        key = _key_of(it)
+        dup_item = key in seen
         #: 盘链只在**本批里第一次出现**时判重 —— 同一批里两条指向同一份资源,
         #: 后一条也不该推(这正是"同一个盘链被多个板块各推一遍"的最小形态)。
         pk = pan_key(_pan_of(it))
@@ -294,11 +364,21 @@ def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
             continue
         if hot_of is not None and float(hot_min or 0) > 0:
             try:
-                if _num(hot_of(it)) >= float(hot_min):
-                    it["_dedupe_hot"] = True
-                    kept.append(it)
-                    if pk:
-                        _batch_pans.add(pk)
+                hot = _num(hot_of(it))
+                if hot_rise_only:
+                    #: ★ **只认"涨了"**:绝对值再高,只要没超过上次记的那个数,就还是同一条。
+                    #: 比较基准也过**同一个 `hot_of`** —— 把上次的 metrics 包成 item 形状喂进去,
+                    #: 两种取法(读 `it["metrics"]` / 读摊平字段)都能对上,口径不会各飘各的。
+                    prev = prev_metrics.get(key) or {}
+                    prev_hot = _num(hot_of({"metrics": prev, **prev})) if prev else 0
+                    if hot <= prev_hot:
+                        continue
+                elif hot < float(hot_min):
+                    continue
+                it["_dedupe_hot"] = True
+                kept.append(it)
+                if pk:
+                    _batch_pans.add(pk)
             except Exception:  # noqa: BLE001 - 取热度失败就按"已推过"处理
                 continue
     return kept, len(items) - len(kept)

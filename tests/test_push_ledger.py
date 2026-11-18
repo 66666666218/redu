@@ -389,3 +389,57 @@ def test_盘链重复但热度爆了仍放行(session) -> None:
     assert [it["key"] for it in kept] == ["新"]
     assert kept[0]["_dedupe_hot"] is True
     assert dropped == 0
+
+
+def test_热度只是绝对值高不算又火了(session) -> None:
+    """★★ 2026-11-18(档2 前置):`hot_of` 判**绝对值**时,presence 那条链的豁免
+    **永远成立** —— 实测同一份资源的"同资源内容数"是 20~99,而门槛默认 **3**。
+
+    后果(近 30 天实测):知乎把同一份资源推了 **162 次**、B站 61 次、贴吧 25 次;
+    贴吧 5 天里同一条链推了 **14 次**,`item_key` 与 `pan_url` 完全相同。
+
+    ⇒ 正确语义是「**比上次推它时更火了**」。`hot_rise_only=True` 只认涨:
+    绝对值高但没涨 ⇒ 仍按重复处理。
+    """
+    from datetime import datetime, timedelta
+
+    from app.db.models import PushLedger
+    from app.services import push_ledger as pl
+
+    pan = "https://pan.quark.cn/s/c2c8b6d058c3"
+    session.add(PushLedger(user_id=1, section="tieba", item_key="犬系人格测试链接",
+                           pan_url=pan, metrics='{"play_count": 3256}',
+                           pushed_at=datetime.now() - timedelta(hours=3)))
+    session.commit()
+
+    class _S:
+        push_dedupe_hours = 24
+        push_pan_dedupe_hours = 72
+
+    #: ⚠️ `hot_of` 吃的是**整个 item**(与 presence 那边的调用形状一致),不是 metrics 字典
+    _hot = lambda it: pl.peak_metric(it.get("metrics"))  # noqa: E731
+
+    #: 同一份资源、同一个 key —— 热度**原地不动**(还是 3256)⇒ 不许再推
+    flat = [{"key": "犬系人格测试链接", "pan_url": pan,
+             "metrics": {"play_count": 3256}}]
+    kept, dropped = pl.drop_recent(session, 1, "tieba", flat, _S(),
+                                   hot_of=_hot, hot_min=1, hot_rise_only=True)
+    assert kept == [] and dropped == 1, "热度没涨就不该再推一遍"
+
+    #: 真的涨了(3256 → 9000)⇒ 放行并打 🔥 标记
+    risen = [{"key": "犬系人格测试链接", "pan_url": pan,
+              "metrics": {"play_count": 9000}}]
+    kept2, dropped2 = pl.drop_recent(session, 1, "tieba", risen, _S(),
+                                     hot_of=_hot, hot_min=1, hot_rise_only=True)
+    assert len(kept2) == 1 and dropped2 == 0
+    assert kept2[0]["_dedupe_hot"] is True
+
+
+def test_peak_metric_混着字符串也能比() -> None:
+    """各源指标格式不一(`"1.2万"` 是字符串)—— 直接 `max()` 会在 py3 里当场 TypeError。"""
+    from app.services.push_ledger import peak_metric
+
+    assert peak_metric({"liked_count": 53, "play_count": "1.2万"}) == 12000
+    assert peak_metric({"share_count": "3,000"}) == 3000
+    assert peak_metric({}) == 0
+    assert peak_metric(None) == 0
