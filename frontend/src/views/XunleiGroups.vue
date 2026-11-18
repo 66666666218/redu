@@ -76,6 +76,11 @@ const pendingCount = computed(() => items.value.filter(i => i.status === 'pendin
 // 盘空间:转存闸门按它判 —— 到 90% 就整批不搬(2026-10-02 被大合集顶爆过一次)
 const quotaText = computed(() => {
   if (!quota.value.ok) return `盘空间:${quota.value.message || '取不到'}`
+  // ★ 2026-11-18:limit 是兜底值时那个百分比是假的(实测 164099%)⇒ 不许说「请先清理」,
+  //   清多少都不会恢复。后端已经把原因放在 note 里,这里只负责别给错动作。
+  if (quota.value.limit_suspect) {
+    return `盘空间:${quota.value.note || '配额读数不可信'}`
+  }
   const pct = (Number(quota.value.ratio || 0) * 100).toFixed(1)
   return `盘空间:已用 ${quota.value.usage_text} / ${quota.value.limit_text}(${pct}%)`
     + (quota.value.full ? ' —— 已达闸门,转存已自动暂停,请先清理' : '')

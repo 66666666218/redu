@@ -772,6 +772,27 @@ def test_quota_probe_is_shared_within_its_ttl(monkeypatch) -> None:
     assert calls["n"] == 2
 
 
+def test_free_bytes_returns_none_when_limit_is_a_fallback(monkeypatch) -> None:
+    """★ 2026-11-18:`limit < usage` 时**不许返回负数**,要返回 None。
+
+    实测四个迅雷号的 `limit` 全是 `10737418240`(10 GiB 免费档兜底值),而主号
+    usage = **16.03 TiB** ⇒ `limit - usage = -16 TiB`。负数一路走到文案里会渲染成
+    「盘上只剩 ?」+「还差 17329.68 GiB」——**一个算得出来、却毫无意义的假缺口**。
+    剩余空间不可能是负的,所以那是"读数不可信",必须按「不知道」处理。
+    """
+    from app.services import xunlei_transfer as xt
+
+    monkeypatch.setattr(xt, "_credentials", lambda settings=None, **kw: {"access_token": "a"})
+    monkeypatch.setattr(xt, "_drive_headers", lambda c: {})
+    monkeypatch.setattr(xt.requests, "get", lambda url, **kw: _FakeResp(
+        {"quota": {"limit": "10737418240", "usage": "17620032999871"}}))
+
+    xt.reset_quota_cache()
+    assert xt.free_bytes() is None, "负的剩余空间不是「还剩多少」,是读数坏了"
+    #: `ratio` 仍照实报(闸门要继续挡) —— 这里改的是「还剩多少」,不是「用了多少」
+    assert xt.quota_info()["ratio"] > 1600
+
+
 def test_failed_probe_is_cached_too(monkeypatch) -> None:
     """⚠️ **失败也要缓存**:一次 captcha 失效若在同一条链里被反复重撞,那正是把 captcha 打爆的写法。
     代价是恢复慢 ≤ TTL —— 比"20 条资源各撞一次"划算得多。"""

@@ -23,7 +23,7 @@
 |---|---|
 | 作业时效 | `pan_auto_clean`/`xunlei_cleanup` ≤26h;`xunlei_dedupe` ≤8d;从未跑过 = 错误 |
 | 最近一轮结果 | `failed` 或 detail 命中「没扫完 / 撞上限 / 撞 API 预算 / 不可信 / 异常」 |
-| 盘容量 | 账号池里任一账号 ≥95% 警告、≥99% 错误（转存随时会停) |
+| 盘容量 | 按**每个盘池里最空的号**判:≥95% 警告、≥99% 错误;**>100%** 单独报「配额降档/读数不可信」,不给"清理"这种错动作 |
 | 资源库复用 | 近 N 天有成功搬链、却**一次复用都没有** ⇒ 复用入口可能没接上 |
 | 百度清单 | 不存在 / 超过 48h / 内容是测试造的(`dup0.apk` 形状) |
 | 配置 | 自动清理关着、dry-run 还开着、单轮上限或周去重预算偏小 |
@@ -186,6 +186,42 @@ def _probe_ratio(db: Session, platform: str, ref) -> float | None:
     return None
 
 
+def _quota_limit_note(platform: str, refs: list) -> str:
+    """整池都超出配额时,**探一次各号的 limit**,看是不是"读数塌陷"而不是"真超额"。
+
+    只在**已经判定整池超额**时才探(正常日零成本)。判据是"**所有号的 limit 逐字节相同**
+    且用量已超出它" —— 实测 2026-11-18 迅雷四个号的 limit 全是 `10737418240`(10 GiB
+    免费档兜底值),而用量从 121 GiB 到 **16.03 TiB** 不等。真实配额不可能让 16 TiB 的
+    数据塞进 10 GiB,也不可能有四个号"恰好"同一个 limit ⇒ **这个 limit 不是真配额**。
+
+    ⚠️ **说不出来就闭嘴**:少于 2 个号、或各号 limit 不同 ⇒ 返回空串(不编证据)。
+    """
+    if platform != "xunlei":
+        return ""
+    try:
+        from app.services import xunlei_transfer as xt
+
+        rows: list[tuple[int, int]] = []
+        for ref in refs:
+            if getattr(ref, "is_default", False):
+                continue
+            cred = xt._credentials(cookie_key=ref.cookie_key)   # noqa: SLF001 - 与转存同一读法
+            if not cred:
+                continue
+            info = xt.quota_info(cred, cookie_key=ref.cookie_key)
+            if int(info.get("limit") or 0) > 0:
+                rows.append((int(info["limit"]), int(info.get("usage") or 0)))
+        if len(rows) < 2 or len({r[0] for r in rows}) != 1:
+            return ""
+        limit = rows[0][0]
+        lo, hi = min(r[1] for r in rows), max(r[1] for r in rows)
+        return (f"{len(rows)} 个号的 limit **完全相同**({xt.human_bytes(limit)}),"
+                f"而用量 {xt.human_bytes(lo)}~{xt.human_bytes(hi)} ⇒ "
+                f"**配额读数不可信**(疑似会员降档/兜底值),")
+    except Exception:  # noqa: BLE001 - 证据探不到就不说,别让自检挂掉
+        return ""
+
+
 def _check_quota(db: Session, user_id: int) -> dict:
     """盘容量:按**每个盘池里最空的号**判,而不是取全池最满的那个。
 
@@ -195,10 +231,22 @@ def _check_quota(db: Session, user_id: int) -> dict:
     同一池的 #3 只用了 9.7%、#4 只用了 4.8%,转存一直落在这两个号上。
     ⇒ 这条告警**给的是错动作**(让人去清一个根本没人用的号),而真正的落点有余量。
     判据改成:**某个盘池里只剩 ≥95% 的号**才算这个盘有问题;
-    只要有一个号低于 95%,转存就有落点(最满的那个只在附注里提)。"""
+    只要有一个号低于 95%,转存就有落点(最满的那个只在附注里提)。
+
+    ⚠️⚠️ **再改一次(2026-11-18):整个池都 >100% 时要换一种说法**。
+    用量超过上限有两种截然不同的成因,**给的动作正好相反**:
+      ① **真的超额** —— 百度主号 5.07 TiB / 120 GiB 配额(43 倍),那是"清理/换号";
+      ② **限额读数塌了** —— 迅雷四个号的 `limit` **逐字节完全相同**,都是
+         `10737418240`(=10 GiB 免费档兜底值),而 `usage` 各是 121 GiB ~ **16.03 TiB**
+         ⇒ ratio 12.17 / **1640.99** / 102.50 / 75.56。真实免费档装不下 16 TiB
+         ⇒ 这个 limit 不可能是真的(主号 `upgrade_type` 当时已是空字符串)。
+    判据**不能靠量级**(4308% 的百度号是真超额,1217% 的迅雷号是假读数),所以这里
+    只做一件事:**当整个池都 >100% 时,不给「清理」这个动作** —— 池里没有任何号能
+    证明还有余量,而"清一下就好"在成因 ② 下是纯误导(清多少都不会恢复)。
+    """
     from app.services import pan_accounts
 
-    by_platform: dict[str, list[tuple[float, str]]] = {}
+    by_platform: dict[str, tuple[str, list[tuple[float, str]], list]] = {}
     for platform, label in (("quark", "夸克"), ("baidupan", "百度"), ("xunlei", "迅雷")):
         try:
             refs = pan_accounts.accounts(db, platform, user_id=user_id)
@@ -218,23 +266,37 @@ def _check_quota(db: Session, user_id: int) -> dict:
                                         why=f"已用 {fresh * 100:.1f}%")
                 except Exception:  # noqa: BLE001 - 写不回池只影响下次择号,别让自检挂
                     pass
+        #: 池的**原始 refs 也留着** —— "整池都超额"时要去探一次 limit 才能分清
+        #: 「真超额」与「limit 是兜底值、读数不可信」(见 `_quota_limit_note`)。
         vals = [(float(ref.last_ratio), f"{label}/{ref.label}")
                 for ref in refs if ref.last_ratio is not None]
+        vals.sort()               # 最空在前:下面 best/worst 直接取首尾
         if vals:
-            by_platform[label] = vals
+            by_platform[label] = (platform, vals, refs)
     if not by_platform:
         return _item("盘容量", "info", "账号池里还没有使用率数据(等下一次转存/巡检)")
 
     problems: list[tuple[str, str]] = []
     usable: list[str] = []
     notes: list[str] = []
-    for label, vals in by_platform.items():
-        best = min(vals)          # 最空的号 = 转存真正的落点
-        worst = max(vals)
+    for label, (platform, vals, refs) in by_platform.items():
+        best = vals[0]            # 最空的号 = 转存真正的落点(已按比例升序)
+        worst = vals[-1]
         best_pct, worst_pct = best[0] * 100, worst[0] * 100
         if best_pct >= 99:
-            problems.append(("error", f"{label} 池里**所有号**都 ≥99%"
-                                      f"(最空 {best[1]} {best_pct:.1f}%)—— 转存随时停摆"))
+            #: ⚠️ **别急着说"清理"**:用量 >100% 有两种成因,动作正好相反(见 docstring)。
+            #: 只有**池里所有号都 >100%** 时才可能是"limit 读数塌陷";此时给出
+            #: 「读数不可信 + 需人工确认配额」,而不是一个清多少都不会恢复的动作。
+            suspect = (_quota_limit_note(platform, refs)
+                       if best_pct > 100 and all(v[0] > 1.0 for v in vals) else "")
+            if suspect:
+                problems.append(("warn", f"{label} 池里**所有号**都超出配额"
+                                          f"(最空 {best[1]} {best_pct:.1f}%)——{suspect}"
+                                          f"转存已被闸门挡住,**清盘不会恢复**;"
+                                          f"先人工确认这些号的实际配额/会员状态"))
+            else:
+                problems.append(("error", f"{label} 池里**所有号**都 ≥99%"
+                                          f"(最空 {best[1]} {best_pct:.1f}%)—— 转存随时停摆"))
         elif best_pct >= 95:
             problems.append(("warn", f"{label} 池里**所有号**都 ≥95%"
                                      f"(最空 {best[1]} {best_pct:.1f}%)—— 建议尽快清理/加号"))

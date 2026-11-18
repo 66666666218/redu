@@ -751,6 +751,29 @@ def quota_ratio(cred: dict | None = None, cookie_key: str | None = None) -> floa
     return quota_info(cred, cookie_key=cookie_key).get("ratio")
 
 
+#: 免费档的 `limit` 兜底值(10 GiB)。2026-11-18 实测:四个迅雷号的 `limit` **逐字节**
+#: 都是它,而主号 usage 已 **16.03 TiB** —— 免费档装不下 16 TiB ⇒ 这个 limit 不是真配额。
+_FREE_TIER_LIMIT = 10 * 1024 ** 3
+
+
+def limit_looks_like_fallback(info: dict | None) -> bool:
+    """这个 `limit` 是不是**兜底值**(而不是真实配额)—— 用来决定"该给人什么动作"。
+
+    ⚠️ **不能只看 `ratio > 1`**:2026-10-02 实测过 `usage 38.08TB / limit 30.10TB = 126%`,
+    那是**真的超额**(会员降档后数据还在),清理确实有用。
+    这里认的是更强的一条:**limit 恰好是免费档 10 GiB,而用量已经是它的十倍以上** ——
+    物理上装不进去,所以那个 limit 不可能是这些数据的真实配额。
+
+    只影响**文案与分级**,不影响闸门:`admit_transfer` 照旧用 `ratio` 挡
+    (读数不可信时"挡"是安全的,"放行"才会真把盘写爆)。
+    """
+    try:
+        limit, usage, ratio = int(info["limit"]), int(info["usage"]), float(info["ratio"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return limit <= _FREE_TIER_LIMIT and ratio > 1 and usage > limit * 10
+
+
 _SPACE_ERROR_HINTS = ("file_space_not_enough", "空间不足", "file_space")
 _OWN_SHARE_HINTS = ("file_restore_own", "转存自己的文件")
 
@@ -808,12 +831,21 @@ def human_bytes(n: int | float | None, ref: int | float | None = None) -> str:
 
 
 def free_bytes(cred: dict | None = None) -> int | None:
-    """盘上还剩多少字节 = `limit - usage`。**拿不到返回 None**(按"不知道"处理)。"""
+    """盘上还剩多少字节 = `limit - usage`。**拿不到返回 None**(按"不知道"处理)。
+
+    ⚠️ **算出负数也返回 None**(2026-11-18):剩余空间不可能是负的 —— 出现负数说明
+    那个 `limit` **不是真实配额**(实测迅雷四个号的 limit 全是 10 GiB 兜底值,而主号
+    已用 16.03 TiB ⇒ 差 -16 TiB)。负数原本能一路走到失败文案里,渲染成
+    「盘上只剩 ?」+「还差 17329.68 GiB」这种**读不懂的假缺口**(那是把"读数不可信"
+    伪装成"算得出缺口")。按"不知道"处理才对:调用方的预判会跳过(与
+    「不知道 ≠ 满」同一条纪律),文案改说「未知」。
+    """
     info = quota_info(cred)
     try:
-        return int(info["limit"]) - int(info["usage"])
+        free = int(info["limit"]) - int(info["usage"])
     except (KeyError, TypeError, ValueError):
         return None
+    return free if free >= 0 else None
 
 
 def required_size_from_error(resp: dict) -> int | None:

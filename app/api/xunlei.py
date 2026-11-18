@@ -100,10 +100,18 @@ def xunlei_quota(user: User = Depends(get_current_user)):
     if not info:
         return {"ok": False, "message": "取不到配额(凭据或网络问题)"}
     gb = 1024 ** 3
-    return {"ok": True, "ratio": round(info["ratio"], 4),
-            "usage_text": f"{info['usage'] / gb / 1024:.2f}TB",
-            "limit_text": f"{info['limit'] / gb / 1024:.2f}TB",
-            "full": info["ratio"] >= 0.9}
+    #: ★ 2026-11-18:`limit` 是免费档兜底值时,`ratio`(可能 164099%)**不是**"用了多少"。
+    #: 前端原来据此说「已达闸门,请先清理」—— 清多少都不会恢复,是**错动作**
+    #: (实测四个迅雷号的 limit 全为 10 GiB,而主号 usage 已 16.03 TiB)。
+    suspect = xt.limit_looks_like_fallback(info)
+    out = {"ok": True, "ratio": round(info["ratio"], 4),
+           "usage_text": f"{info['usage'] / gb / 1024:.2f}TB",
+           "limit_text": f"{info['limit'] / gb / 1024:.2f}TB",
+           "full": info["ratio"] >= 0.9, "limit_suspect": suspect}
+    if suspect:
+        out["note"] = ("配额读数不可信:limit 恒为 10 GiB 兜底值,而用量远大于它 —— "
+                       "疑似会员降档,清盘不会恢复;需先确认该号的实际配额")
+    return out
 
 
 @router.get("/api/xunlei/resources")

@@ -303,6 +303,10 @@ def test_transfer_pending_fills_our_share_and_marks_failed(session, monkeypatch)
                     "code": "abcd", "fid": "F1"}
         return {"status": "failed", "message": "未知错误(非终态)"}
 
+    #: ⚠️ **必须桩掉配额探针**(2026-11-18):这三条用例原来没桩它 ⇒ 会去**打真实的
+    #: 迅雷配额接口** ⇒ 判据随生产盘况漂。11-17 之前盘还有余量,它们一直绿;读数额度
+    #: 塌陷后同一天三条一起红。测试不该依赖生产盘 —— 用 "还有余量" 的确定值。
+    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None, **kw: 0.3)
     monkeypatch.setattr(xt, "transfer_and_share", fake_transfer)
     out = xg.transfer_pending(session, 1, limit=5)
     assert out["picked"] == 2 and out["ok"] == 1 and out["failed"] == 1
@@ -325,6 +329,7 @@ def test_简介缺失这种功能降级要写在行上_而不是看起来全绿(
     session.add(XunleiGroupShare(user_id=1, group_id="g", share_id="A1",
                                  origin_url="u-A1", title="资源甲", status="pending"))
     session.commit()
+    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None, **kw: 0.3)   # 别打真实配额(见上一条)
     monkeypatch.setattr(xt, "transfer_and_share",
                         lambda url, parent_id="", settings=None, **kw: {
                             "status": "ok", "share_url": "s", "code": "c", "fid": "f",
@@ -343,6 +348,7 @@ def test_transfer_pending_respects_limit(session, monkeypatch) -> None:
                                       origin_url=f"u-{i}", title=f"资源{i}", status="pending")
                      for i in range(8)])
     session.commit()
+    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None, **kw: 0.3)   # 别打真实配额(见上)
     monkeypatch.setattr(xt, "transfer_and_share",
                         lambda url, parent_id="", settings=None, **kw: {"status": "ok",
                                                                   "share_url": "s", "code": "", "fid": "f"})

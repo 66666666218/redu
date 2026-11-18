@@ -199,6 +199,123 @@ class TestQuotaPool:
         assert out["level"] == "warn" and "所有号" in out["detail"]
 
 
+class TestQuotaCollapsed:
+    """★★ 2026-11-18:整池 >100% 时**不许给「清理」这个动作**。
+
+    实测四个迅雷号的 `limit` **逐字节相同**(`10737418240` = 10 GiB 免费档兜底值),
+    而用量 121 GiB ~ **16.03 TiB** ⇒ ratio 12.17 / **1640.99** / 102.50 / 75.56。
+    真实免费档装不下 16 TiB ⇒ 这个 limit 不是真配额(主号 `upgrade_type` 当时已空)。
+    「清一下就好」在这种情况下是**清多少都不会恢复**的错动作。
+    """
+
+    def _patch(self, monkeypatch, refs, limits: dict[str, int]) -> None:
+        from app.services import pan_accounts as pa
+        from app.services import xunlei_transfer as xt
+
+        monkeypatch.setattr(pa, "accounts",
+                            lambda db, platform, *, user_id=1:
+                            refs if platform == "xunlei" else [])
+        monkeypatch.setattr(psc, "_probe_ratio", lambda *a, **k: None)
+        monkeypatch.setattr(xt, "_credentials", lambda settings=None, *, cookie_key="xunlei": {
+            "access_token": "a", "_cookie_key": cookie_key})
+        monkeypatch.setattr(xt, "quota_info", lambda cred=None, **k: {
+            "usage": 1, "limit": limits[str((cred or {}).get("_cookie_key"))], "ratio": 1.0})
+
+    def _refs(self):
+        from app.services.pan_accounts import AccountRef
+
+        return [AccountRef("xunlei", "xunlei", "xunlei", last_ratio=1640.9934),
+                AccountRef("迅雷/xunlei#2", "xunlei", "xunlei#2", last_ratio=12.1691),
+                AccountRef("迅雷/xunlei#3", "xunlei", "xunlei#3", last_ratio=102.4951),
+                AccountRef("迅雷/xunlei#4", "xunlei", "xunlei#4", last_ratio=75.5592)]
+
+    def test_限额全都一样时报读数不可信_而不是叫人清理(self, monkeypatch) -> None:
+        self._patch(monkeypatch, self._refs(),
+                    {"xunlei": 10_737_418_240, "xunlei#2": 10_737_418_240,
+                     "xunlei#3": 10_737_418_240, "xunlei#4": 10_737_418_240})
+        out = psc._check_quota(None, 1)
+        assert out["level"] == "warn", "读数不可信不是「盘满了」,不该是 error"
+        assert "读数不可信" in out["detail"] and "配额" in out["detail"]
+        #: ★ 这两句是**错动作** —— 清多少、加多少个号都不会恢复,一个字都不许出现
+        assert "清理" not in out["detail"], f"给错动作了:{out['detail']}"
+        assert "加号" not in out["detail"], f"给错动作了:{out['detail']}"
+
+    def test_限额各不相同就不编证据_照旧报error(self, monkeypatch) -> None:
+        """各号 limit 不同 ⇒ 没有"兜底值"的证据,不许猜;老老实实报盘满。"""
+        self._patch(monkeypatch, self._refs(),
+                    {"xunlei": 30_000_000_000_000, "xunlei#2": 10_737_418_240,
+                     "xunlei#3": 30_000_000_000_000, "xunlei#4": 30_000_000_000_000})
+        out = psc._check_quota(None, 1)
+        assert out["level"] == "error" and "读数不可信" not in out["detail"]
+
+    def test_只有一个号超额时仍按原判据(self, monkeypatch) -> None:
+        """池里还有余量时,超额那个号只是附注 —— 不能把整盘说成"不可信"。"""
+        from app.services.pan_accounts import AccountRef
+
+        from app.services import pan_accounts as pa
+
+        refs = [AccountRef("迅雷/xunlei#2", "xunlei", "xunlei#2", last_ratio=12.1691),
+                AccountRef("迅雷/xunlei#4", "xunlei", "xunlei#4", last_ratio=0.70)]
+        monkeypatch.setattr(pa, "accounts",
+                            lambda db, platform, *, user_id=1:
+                            refs if platform == "xunlei" else [])
+        monkeypatch.setattr(psc, "_probe_ratio", lambda *a, **k: None)
+        out = psc._check_quota(None, 1)
+        assert out["level"] == "ok" and "读数不可信" not in out["detail"]
+
+
+class TestNoWrongActionWhenQuotaIsBogus:
+    """★★★ 源码级守卫:**整池超额时,面板与告警都不许给「清理」这个动作**。
+
+    这一族在本仓栽过两次(2026-10-21 报 `xunlei#2 已用 10253%`,2026-11-18 报
+    「所有号 ≥99%,转存停摆」),两次都是**给错动作** —— 而错动作比不给动作更坏:
+    人会照着去清盘,清完发现毫无变化,下次就不信告警了。
+
+    所以这里钉的不是"文案好看",而是**判据链上有没有那个分叉**:
+    `limit` 是兜底值(`xt.limit_looks_like_fallback`)时必须走进「读数不可信」那一支。
+    """
+
+    def test_兜底limit的判据只认十倍以上超出(self) -> None:
+        """⚠️ 不能只看 `ratio > 1` —— 126% 那种是**真超额**,清理确实有用。"""
+        from app.services import xunlei_transfer as xt
+
+        free_tier = 10 * 1024 ** 3
+        assert xt.limit_looks_like_fallback(
+            {"limit": free_tier, "usage": 17_620_032_999_871, "ratio": 1640.99}) is True
+        #: 真超额(38.08TB / 30.10TB = 126%)⇒ 不是兜底值,照旧说"盘满"
+        assert xt.limit_looks_like_fallback(
+            {"limit": 33_092_723_015_680, "usage": 40_901_000_000_000, "ratio": 1.26}) is False
+        #: limit 是 10 GiB 但用量也没超它 ⇒ 那就是个真的小号,不编"读数不可信"
+        assert xt.limit_looks_like_fallback(
+            {"limit": free_tier, "usage": free_tier // 2, "ratio": 0.5}) is False
+        assert xt.limit_looks_like_fallback({}) is False
+        assert xt.limit_looks_like_fallback(None) is False
+
+    def test_面板接口带上limit_suspect且不给清理建议(self) -> None:
+        """`/api/xunlei/quota` 是「迅雷群组」页显示盘况的那个口子 —— 它也不能教人清盘。"""
+        import inspect
+
+        from app.api import xunlei as api
+
+        src = inspect.getsource(api.xunlei_quota)
+        assert "limit_suspect" in src, "面板必须能区分「真满」与「读数不可信」"
+        assert "limit_looks_like_fallback" in src, "判据要复用同一个,别在路由里再写一份"
+        assert "清盘不会恢复" in src, "要说清这个动作是错的,否则人会照着去清"
+
+    def test_自检_整池超额时不给清理建议(self, monkeypatch) -> None:
+        """与 `TestQuotaCollapsed` 同一判据,这里守的是**真库会走到的那条分支**。"""
+        from app.services import pan_accounts as pa
+
+        refs = [pa.AccountRef(f"迅雷/xunlei#{i}", "xunlei", f"xunlei#{i}",
+                              last_ratio=r) for i, r in ((2, 12.17), (3, 102.5), (4, 75.6))]
+        monkeypatch.setattr(pa, "accounts",
+                            lambda db, platform, *, user_id=1: refs if platform == "xunlei" else [])
+        monkeypatch.setattr(psc, "_probe_ratio", lambda *a, **k: None)
+        monkeypatch.setattr(psc, "_quota_limit_note", lambda platform, refs: "读数不可信,")
+        out = psc._check_quota(None, 1)
+        assert "清盘不会恢复" in out["detail"] and "清理" not in out["detail"]
+
+
 class TestProbeRatio:
     """★ 2026-11-11:夸克那一支**此前根本不存在**。
 

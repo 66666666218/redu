@@ -1,3 +1,21 @@
+- [2026-11-18 21:05] FIX: **盘满告警一直在给「清理」这个错动作 —— 迅雷的 `limit` 是 10 GiB 兜底值,清多少都不会恢复**。
+  实测四个迅雷号的 `/drive/v1/about` 里 `quota.limit` **逐字节完全相同**,都是 `10737418240`(=10 GiB 免费档),
+  而 `usage` 各是 121.7 GiB / **16.03 TiB** / 1025 GiB / 755.6 GiB ⇒ ratio 12.17 / **1640.99** / 102.50 / 75.56。
+  真实免费档装不下 16 TiB ⇒ **这个 limit 不是真配额**(主号 `upgrade_type` 当时已是空字符串)。
+  交叉证据:11-17 19:16 那轮 detail 还写着「当时剩 278.41 GiB」(⇒ limit ≈ 16.7 TiB),19:30 起就变成 164099%。
+  三处一起修(判据只有一份,在 `xt.limit_looks_like_fallback`:**limit 恰为 10 GiB 兜底值且用量超出它十倍以上**):
+  ① `pan_self_check._check_quota`:整池 >100% 时改报「**配额读数不可信** … 清盘不会恢复,需先确认该号的实际配额」,级别 error→warn,
+     且文案里**不许出现「清理/加号」**(错动作比不给动作更坏);limit 各不相同的真超额仍照旧报 error。
+  ② `GET /api/xunlei/quota` 新增 `limit_suspect` + `note`;「迅雷群组」页据此**不再显示「已达闸门,请先清理」**。
+  ③ `free_bytes()` 在 `limit < usage` 时返回 `None`(原来是负数 ⇒ 失败文案渲染成「盘上只剩 ?」+「还差 17329.68 GiB」这种假缺口);
+     `xunlei_group` 的运行记录/告警把 `None` 写成「未知」而不是 `?`。
+  ⚠️ **闸门行为一个字没改**:`admit_transfer` 照旧按 `ratio` 挡(读数不可信时"挡"是安全的,"放行"才会把盘写爆);
+  也**没有**在转存链上新增任何配额探针(那会变成每条资源各打一次接口)。
+  顺带修 3 条**依赖生产盘况**的用例(`test_transfer_pending_*` 没桩 `quota_ratio`,一直在打真实接口)。
+  回归:**212 passed**;前端已 `npm run build`(`index-DiCwWSuK.js`)。 (Files: app/services/pan_self_check.py,
+  app/services/xunlei_transfer.py, app/services/xunlei_group.py, app/api/xunlei.py, frontend/src/views/XunleiGroups.vue,
+  tests/test_pan_self_check.py, tests/test_xunlei_transfer.py, tests/test_xunlei_group.py, doc/API.md, CHANGELOG)
+
 - [2026-11-18 19:12] FIX: **前端把「跳过」弹成绿色的「新建 0 / 归并 0 / 终结 0」—— 假成功**(接上一条后端守卫)。
   后端已经在本机返回 `{"skipped": "not_hotspot_role", "note": ...}`,但 `Events.vue` 只读 `created/merged/ended`
   ⇒ toast 依然是一句绿色的「归属完成:新建 0 / 归并 0 / 终结 0」,人看到的和「真跑了一轮但没变化」**完全一样**。

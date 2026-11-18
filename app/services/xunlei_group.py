@@ -795,8 +795,12 @@ def xunlei_group_tick(settings=None) -> int:
                 # 运行记录里不写,运维就只知道"转存 N 条",不知道有 N 条被这样跳过。
                 if out.get("too_large"):
                     from app.services import xunlei_transfer as xt
+                    #: ⚠️ `free_size` 为 None 时必须写「未知」而不是「?」(2026-11-18):
+                    #: `?` 读起来像"某个数没渲染出来",而真相是**这个数不存在**
+                    #: (limit 是兜底值时 `free_bytes()` 返回 None,见它自己的 docstring)。
+                    _free = out.get("free_size")
                     _sz = (f"(最大那个要 {xt.human_bytes(out.get('required_size'))}"
-                           f"/当时剩 {xt.human_bytes(out.get('free_size'))};"
+                           f"/当时剩 {xt.human_bytes(_free) if _free is not None else '未知'};"
                            if out.get("required_size") is not None else "(")
                     _names = "、".join(out.get("too_large_names") or [])[:90]
                     note += (f" 单个太大跳过{out['too_large']}{_sz}未标终态,清空间后可搬;"
@@ -859,8 +863,9 @@ def xunlei_group_tick(settings=None) -> int:
                 # 只报"跳过 N 条"等于没说 —— 用户没法判断"要不要清空间 / 清多少"。
                 if out.get("too_large_names"):
                     _n = out["too_large_names"]
+                    _free = out.get("free_size")
                     _sz = (f"(最大那条要 {xt.human_bytes(out.get('required_size'))},"
-                           f"当时剩 {xt.human_bytes(out.get('free_size'))})"
+                           f"当时剩 {xt.human_bytes(_free) if _free is not None else '未知'})"
                            if out.get("required_size") is not None else "")
                     ops_bits.append(f"**{len(_n)} 个资源因空间不够没搬成**{_sz}:"
                                     + "、".join(_n[:8]) + ("…" if len(_n) > 8 else ""))
