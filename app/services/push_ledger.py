@@ -250,6 +250,49 @@ def recent_pan_keys(session: Session, user_id: int, section: str,
     return {k for k in (pan_key(u) for u in rows) if k}
 
 
+def last_pan_hot(session: Session, user_id: int, section: str, hours: float,
+                 sections: tuple[str, ...] | None = None, hot_of=None) -> dict[str, float]:
+    """窗口内**每个盘链**最近一次被推出去时的热度 → `{pan_key: hot}`。
+
+    ★★ 2026-11-19:`hot_rise_only` 的基准原来只按 `item_key` 取(`last_metrics`),
+    而 `item_key` 是**内容**身份 —— 同一份资源被不同的号各发一遍时它每次都变
+    (`art{id}` / 各平台各自的 id)。于是**盘链闸挡下来的那次,永远查不到"上次的热度"**,
+    判定退到"没法证明它涨了"、或者(改动前)按 0 算 ⇒ 任何正数都放行。
+
+    盘链闸判的是「**同一份资源**」⇒ 基准必须按**同一份资源**取(见 `pan_key`)。
+    """
+    if session is None or hours <= 0 or hot_of is None:
+        return {}
+    from sqlalchemy import select
+
+    from app.db.models import PushLedger
+
+    scope = tuple(sections or (section,))
+    cutoff = datetime.now() - timedelta(hours=float(hours))
+    rows = session.scalars(select(PushLedger).where(
+        PushLedger.user_id == user_id,
+        PushLedger.section.in_(scope),
+        PushLedger.pan_url != "",
+        PushLedger.pushed_at >= cutoff,
+    ).order_by(PushLedger.pushed_at.asc(), PushLedger.id.asc())).all()
+    out: dict[str, float] = {}
+    for r in rows:                 # 升序遍历 ⇒ 后写的覆盖 = **最近一次**那条
+        k = pan_key(r.pan_url or "")
+        if not k:
+            continue
+        try:
+            m = json.loads(r.metrics or "{}")
+        except ValueError:
+            m = {}
+        if not isinstance(m, dict):
+            continue
+        try:
+            out[k] = _num(hot_of({"metrics": m, **m}))
+        except Exception:  # noqa: BLE001 - 单行算不出来就跳过(基准缺失 = 挡,与下面同一口径)
+            continue
+    return out
+
+
 def peak_metric(metrics) -> float:
     """一组互动指标里**最高的那个数字**(`{"liked_count": 53, "play_count": "1.2万"}` → 53)。
 
@@ -325,7 +368,9 @@ def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
                 hot_of=None, hot_min: float = 0,
                 pan_hours: float | None = None,
                 hot_rise_only: bool = False,
-                by_group: bool = False) -> tuple[list[dict], int]:
+                hot_rise_pct: float | None = None,
+                by_group: bool = False,
+                in_batch: bool = True) -> tuple[list[dict], int]:
     """按**推送台账**去掉最近已经推过的条目 → `(保留, 去掉的条数)`。
 
     ★ 2026-10-29 数据驱动的决定:12 天台账里同一 item 在 **24 小时内重推**的比例
@@ -358,6 +403,22 @@ def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
     这才是「**又火了**」的正确语义 —— 热度原地不动、或者只是绝对值高,都不该再推一遍。
     比较基准取 `last_metrics()`(窗口内该条目**最近一次**的 metrics)。
 
+    ## ★★ `hot_rise_pct`(2026-11-19):只认「涨了」还不够,涨多少得有个下限
+
+    `hot_rise_only` 上线后实测(7 天台账逐条重放,按 `(section, item_key)` 比前后两次):
+
+      · bilibili 里 99 次"涨了"的重复推送,**涨幅全在 10% 以内**;贴吧 32 次里一次
+        涨幅超过 50% 都没有。典型:`pan.quark.cn/s/8fa4f71f7430` 一天推 4 次,
+        播放 `99893 → 100194 → 100382 → 100957`(每次 +0.1%~0.6%),`6473d35f2aba`
+        也是 `466 → 468 → 471 → 478`。这些是**同一个老资源被同一批账号反复顶到**
+        (同资源内容数在涨),不是"资源火了"。
+      · 真爆的涨幅是另一个量级:同窗口有 `play_count 17160 → 226451 → 1001939`。
+
+    ⇒ 涨幅必须**同时**满足 `hot-prev > 0` 与 `(hot-prev)/prev >= hot_rise_pct`。
+    默认值由 `push_hot_rise_pct`(**30%**)给出;显式传 `0` = 退回只看"有没有涨"。
+    ⚠️ 基准 `prev<=0`(上次没有互动数据)时按"**没法证明它涨了**"处理 ⇒ 挡;
+    原来那种把 prev 当 0、于是任何正数都放行的写法,正是本参数要堵的口子。
+
     ## ★★ `by_group`(2026-11-18)
 
     `False` = 去重范围是**本 section**(旧行为,大多数板块各管各的群,这是对的)。
@@ -371,6 +432,15 @@ def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
     ⚠️ **别把 `by_group` 一律打开**:不同群之间跨板块去重会把别的群饿死 ——
     那正是 section 级去重的原始理由。只在**确认同群**时用(`group_of` 只认
     **显式配成同一个专属群**的;回落主群的那些不算)。
+
+    ## ★★ `in_batch`(2026-11-19):同一批内部要不要互相挡
+
+    `True`(默认)= 同一批里两条指向同一份资源,后一条也挡。**公众号那条链必须关掉**:
+    产品硬要求是「监控号近 24h 发的文章**一篇不落**全到飞书」,而 `_enrich` 的
+    「资源级复用」会把同一号连发的系列文(标题只差一位数字、**各自是不同的资源**)
+    判成同一份、复用同一条我方链 —— 实测一次同步 4 篇新文被批内闸吃掉 3 篇。
+    真正的刷屏来自**跨轮次的重复**(同一份资源三天推 17 次),那部分是 `seen_pan`
+    (台账历史)管的,与本开关无关。
     """
     if settings is not None and hours is None:
         hours = float(getattr(settings, "push_dedupe_hours", 24) or 0)
@@ -379,6 +449,12 @@ def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
     if pan_hours is None:
         pan_hours = float(getattr(settings, "push_pan_dedupe_hours", hours)
                           if settings is not None else hours)
+    #: ★ 涨幅下限:只在 `hot_rise_only` 分支用得到。`None` ⇒ 读配置(默认 30%);
+    #: 显式传 `0` ⇒ 退回旧的「涨了就算」(调用方明确要放宽时才这么写)。
+    #: ⚠️ `or 0.30` 会把显式传的 `0` 也吞成 30% —— 逃生门靠的是 `is None` 判断,不是 `or`。
+    if hot_rise_pct is None:
+        hot_rise_pct = (float(getattr(settings, "push_hot_rise_pct", 0.30))
+                        if settings is not None else 0.30)
     if not items:
         return [], 0
     #: 去重范围:默认本 section;`by_group` 时放大到**与本 section 同一个飞书群**的那几个
@@ -407,18 +483,25 @@ def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
     #: `hot_rise_only` 的比较基准:窗口内该条目**上一次**推出去时的热度。
     #: 只在需要时才查(默认路径不付这份开销)。
     prev_metrics: dict[str, dict] = {}
+    prev_hot_by_pan: dict[str, float] = {}
     if hot_rise_only and hot_of is not None and session is not None:
         #: 取**两个窗口里更长的那个** —— 盘链闸(默认 72h)比内容闸(默认 24h)长,
         #: 若按 24h 查基准,会出现"盘链判它是重复的、却查不到它上次的热度"⇒ 退回放行。
         _win = max(float(pan_hours or 0), float(hours or 0)) or 24.0
         prev_metrics = last_metrics(session, user_id, section, _win, sections=scope)
+        #: ★★ 2026-11-19:**按盘链也要有基准**。实测公众号那条链上,同一份资源被
+        #: 不同号各发一遍 ⇒ 每次的 `item_key` 都不一样(`art{id}`) ⇒ 按内容取基准
+        #: 永远查不到"上次同一份资源的热度",于是盘链闸一挡、判定就走到"没法证明涨了"
+        #: ⇒ 每小时重复进一次。盘链闸本来判的就是「**同一份资源**」,基准也必须按盘链取。
+        prev_hot_by_pan = last_pan_hot(session, user_id, section, _win,
+                                       sections=scope, hot_of=hot_of)
     for it in items:
         key = _key_of(it)
         dup_item = key in seen
         #: 盘链只在**本批里第一次出现**时判重 —— 同一批里两条指向同一份资源,
         #: 后一条也不该推(这正是"同一个盘链被多个板块各推一遍"的最小形态)。
         pk = pan_key(_pan_of(it))
-        dup_pan = bool(pk) and (pk in seen_pan or pk in _batch_pans)
+        dup_pan = bool(pk) and (pk in seen_pan or (in_batch and pk in _batch_pans))
         if not dup_item and not dup_pan:
             kept.append(it)
             if pk:
@@ -433,7 +516,24 @@ def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
                     #: 两种取法(读 `it["metrics"]` / 读摊平字段)都能对上,口径不会各飘各的。
                     prev = prev_metrics.get(key) or {}
                     prev_hot = _num(hot_of({"metrics": prev, **prev})) if prev else 0
+                    #: ★★ 2026-11-19:本次是**盘链闸**挡下来的 ⇒ 基准也要取**同一份资源**
+                    #: 上次的热度(按 `pan_key`)。按 item_key 取会让"同一资源换了篇文章"
+                    #: 永远拿不到基准(见 `last_pan_hot` 头注)。
+                    #: ⚠️ **`dup_item` 优先**:同一条内容再推一遍时,基准就取它**自己**
+                    #: 上次的热度(即使那行没记盘链)。只有"内容没推过、但这份资源推过"
+                    #: 时才退到按盘链取基准 —— 别让后者盖掉前者。
+                    if dup_pan and pk and not dup_item:
+                        prev_hot = prev_hot_by_pan.get(pk, 0.0)
+                    #: ★★ 2026-11-19:**涨多少也得有下限**。实测"涨了"的重复里
+                    #: bilibili 99 次涨幅 <10%(播放 99893→100194 这种平台自然波动)、
+                    #: 贴吧 32 次一次都没超 50% —— 它们不是"资源火了",是**同一条又来了一遍**。
+                    #: `prev_hot<=0` ⇒ 没有可比基准 ⇒ 挡(原来按 0 算,任何正数都放行)。
+                    if prev_hot <= 0:
+                        continue
                     if hot <= prev_hot:
+                        continue
+                    if float(hot_rise_pct or 0) > 0 and \
+                            (hot - prev_hot) / prev_hot < float(hot_rise_pct):
                         continue
                 elif hot < float(hot_min):
                     continue

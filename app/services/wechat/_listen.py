@@ -1855,6 +1855,74 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
     # 免打扰过滤后可能清空(理论上上面已 return,这里再兜一层,避免推空卡)
     if not rows:
         return 0
+    # ★★ **盘链级去重**(2026-11-19) —— 这条链此前**只 record 不 drop**:
+    # 全文件只有 `push_ledger.record` 一处、`drop_recent` 零处 ⇒ 公众号板块根本没接盘链闸。
+    # 实测的后果(近 3 天台账,499 行带我方链只涉及 158 个链):
+    # 同一份资源被不同号各发一遍就各推一遍,`pan.quark.cn/s/7ea21dde7fbb` 三天 **17 次**。
+    # 这就是「48% 重推」里占 73% 的那块(近 7 天 wechat 重推 45+76+45 行)。
+    #
+    # 判据:同一 `section` 内,同一个 `pan_key()` 在 `push_pan_dedupe_hours`(默认 72h)
+    # 内推过就不再推。**带我方链用我方链;还没转存的用原作者盘链** —— 客户点开拿到的
+    # 是同一份资源(前者是转好的,后者是源链),内容去重(`art{id}`)对它们完全无效。
+    # ⚠️ 没盘链的文章 `pan_key("")` 为空 ⇒ 这道闸不管它们,行为与改动前一致。
+    # ⚠️ 热点放行口径(`hot_of`=阅读数、`hot_rise_only`)保证"真的火了"的重复仍推。
+    _dedupe_of: dict[int, str] = {}
+    for r in rows:
+        _dedupe_of[r.id] = ((replacements.get(r.id) or [("", "", "")])[0][1]
+                            or _my_pan_link_from_history(r.my_pan_urls)[0]
+                            or _first_pan_link(r.pan_urls)[0])
+    _before_ids = [r.id for r in rows]
+    _before = len(rows)
+    try:
+        from app.services import push_ledger
+
+        _kept, _dup = push_ledger.drop_recent(
+            session, user_id, "wechat",
+            [{"item_key": f"art{r.id}", "title": r.title or "", "url": r.url or "",
+              "pan_url": _dedupe_of.get(r.id, ""),
+              "metrics": {"read_num": int(r.read_num or 0)} if r.read_num else {},
+              "_r": r} for r in rows],
+            settings,
+            hot_of=lambda it: float((it.get("metrics") or {}).get("read_num") or 0),
+            #: 公众号的热度只有阅读数(实测近 3 天带盘行 **read>=1000 的 0 条**)
+            #: ⇒ 门槛取 1 不是"太松",是这条链上根本没有能过门槛的值;
+            #: 真正管住重复的是 `hot_rise_pct`(必须涨 30% 以上才判"又火了")。
+            hot_min=1, hot_rise_only=True,
+            #: ⚠️ **必须关掉批内互挡**:产品硬要求是「近 24h 发的文章一篇不落全推」,
+            #: 而 `_enrich` 的「资源级复用」会把同一号连发的系列文(标题只差一位数字,
+            #: **各自是不同的资源**)判成同一份、复用同一条我方链 —— 实测一次同步
+            #: 4 篇新文被批内闸吃掉 3 篇。刷屏来自**跨轮次**的重复(同一份资源三天推
+            #: 17 次),那部分由台账历史(`seen_pan`)管,与批内开关无关。
+            in_batch=False)
+        _kept_rows = [it["_r"] for it in _kept]
+        _kept_ids = {r.id for r in _kept_rows}
+        _dropped_ids = [i for i in _before_ids if i not in _kept_ids]
+        if _dropped_ids:
+            #: ⚠️ 被挡的**必须当场盖 `pushed_at`**(不是等"全被挡"那个分支):
+            #: 它们不在 `delivered` 里,`repush_unpushed` 下一轮会把它们当成
+            #: "从没到过飞书"重新捞出来、再挡一遍 —— 永远不会被推、却每轮都占一次
+            #: 台账查询与卡片渲染名额(那就是"永远补不完"的另一种形态)。
+            #: ⚠️ 这里的 `commit` 也顺手放掉写锁 —— 后面紧接着是渲染+发飞书(慢活),
+            #: 不许抱着锁等它(见 `new-write-point-holds-lock-over-slowwork`)。
+            session.execute(update(WechatArticle).where(
+                WechatArticle.id.in_(_dropped_ids)).values(pushed_at=datetime.now()))
+            session.commit()
+        #: ⚠️ **打完戳才收窄 `rows`**:上面任一步抛异常 ⇒ 落到 `except` ⇒
+        #: `rows` 保持原样、本批照旧全推(去重失败不该让人少收信息)。
+        rows = _kept_rows
+        if _dup:
+            logger.info("公众号推送:盘链闸挡掉 %d 篇(%d 篇里同一份资源已推过)",
+                        _dup, _before)
+    except Exception:  # noqa: BLE001 - 去重是旁路,查库失败就照旧全推
+        logger.warning("公众号盘链去重失败(本批照旧全推)", exc_info=True)
+    if not rows:
+        #: ⚠️ 全被挡住**也要盖 `pushed_at`** —— 否则 `repush_unpushed` 下一轮把它们
+        #: 当成"从没推过"重新捞出来、再挡一遍,永远补不完(与 `_sync.py` 里那条同理)。
+        #: 补推/同步那两路自己也会先跑这道闸,所以这不是"跳着推",是把"处理过"记下来。
+        session.execute(update(WechatArticle).where(
+            WechatArticle.id.in_(_before_ids)).values(pushed_at=datetime.now()))
+        session.commit()
+        return 0
     from collections import OrderedDict
 
     # 重复资源计数:一次 GROUP BY 批量查本轮全部文章(循环内逐篇 COUNT 是 N+1)。
@@ -2088,7 +2156,15 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
                 push_ledger.record(session, user_id, "wechat", [
                     {"item_key": f"art{r.id}", "title": r.title, "url": r.url or "",
                      "author": r.author or "",
-                     # 有我方链就记我方链(客户点开能直接取),没有就留空(别记别人的盘链)
+                     #: ⚠️ 只记**我方链**(客户点开能直接取),不记别人的源链 —— 台账的 `pan_url`
+                     #: 同时是**日结「资源」列的链接**和 `lead_mode`(「0 盘链板块」)的判据,
+                     #: 记源链会让客户点到别人随时会失效的分享,判据也失真。
+                     #: **取舍**:闸在没我方链时会退回源链判重(同一份内容被别的号
+                     #: 原样复制时撞得上),但那种身份**不落台账** ⇒ "从没转存过"的那批
+                     #: 之间仍可能重复。近 3 天 561 行重放:现状可挡 **340** 行;
+                     #: 若把源链也写进台账是 366 行(多挡的 26 行全是没转存的),
+                     #: ⚠️ 但同一份资源各号自建的源链**互不相同**(`8fa4f71f7430` 这篇的
+                     #: 源链就是 `879d8535e48c`),所以它并不是稳定的资源身份。
                      "pan_url": ((replacements.get(r.id) or [("", "", "")])[0][1]
                                  or _my_pan_link_from_history(r.my_pan_urls)[0] or ""),
                      "metrics": {"read_num": r.read_num} if r.read_num else {}}

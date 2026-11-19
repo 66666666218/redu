@@ -782,6 +782,31 @@ def push_works(works: list[dict], settings, session=None, user_id: int = 0) -> b
         return False
     works = _ai.items
 
+    #: ★★ **盘链级去重**(2026-11-19) —— 这条链此前**只 record 不 drop**
+    #: (`push_ledger.record` 在函数末尾,函数内没有任何去重调用)。
+    #: 后果实测(近 3 天台账):`pan.xunlei.com/s/VP6XqobV5vdtY7KuROqmhouKA1` 推了 **14 次**、
+    #: `...VP5RHJ4osQZQn3E5RWTCJMFFA1` **13 次** —— 同一个对标号反复发同一份资源,
+    #: 每轮扫到就再推一遍(内容身份 `aweme_id` 不同,内容闸也抓不到)。
+    #: ⚠️ `session=None`(纯渲染调用)时盘链闸仍能挡**批内**重复,见 `drop_recent` 头注。
+    #: ⚠️ 没有 `pan_url` 的作品(只有口令/什么都没有)不受这道闸影响,行为与改动前一致。
+    from app.services import push_ledger
+
+    _before = len(works)
+    works, _dup = push_ledger.drop_recent(
+        session, user_id, "douyin_peer", works, settings,
+        #: 热度口径 = 峰值互动数(点赞/转发);`liked_count` 是摊平字段,`peak_metric` 认得。
+        hot_of=lambda w: push_ledger.peak_metric(w.get("metrics") or
+                                                 {"liked_count": w.get("likes") or 0}),
+        hot_min=1, hot_rise_only=True)
+    if not works:
+        logger.info("对标号作品:盘链闸挡掉全部 %d 条(同一份资源已推过)", _before)
+        #: ⚠️ 返回 True = 「这一批**处理过了**」,不是「发出去了」。
+        #: 调用方 `run_for_user` 靠它决定是否 `mark_pushed` —— 返回 False 的话这批
+        #: 会永远留在 `pushed_at IS NULL` 里,下一轮捞出来再挡一遍,永远补不完。
+        return True
+    if _dup:
+        logger.info("对标号作品:盘链闸挡掉 %d 条(%d 条里同一份资源已推过)", _dup, _before)
+
     groups: dict[str, list[dict]] = {}
     for w in works:
         groups.setdefault(w.get("niche") or category_topics.NICHE_OTHER, []).append(w)

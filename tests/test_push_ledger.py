@@ -1,4 +1,5 @@
 """推送台账单测(2026-10-16):"客户昨天真的收到了什么" —— 日结/周结的唯一数据源。"""
+import json
 import os
 
 os.environ.setdefault("JWT_SECRET", "test_secret_0123456789abcdef0123456789abcdef")
@@ -506,3 +507,132 @@ def test_peak_metric_混着字符串也能比() -> None:
     assert peak_metric({"share_count": "3,000"}) == 3000
     assert peak_metric({}) == 0
     assert peak_metric(None) == 0
+
+
+class TestHotRiseFloor:
+    """★★ 2026-11-19:**「涨了」还不够,涨多少要有下限**。
+
+    7 天台账逐条重放(按 `(section, item_key)` 比前后两次):
+      · bilibili **99 次**"涨了"的重复推送涨幅**全在 10% 以内** ——
+        `pan.quark.cn/s/8fa4f71f7430` 一天推 4 次,播放
+        `99893 → 100194 → 100382 → 100957`(+0.3% / +0.2% / +0.6%);
+      · 贴吧 32 次"涨了"里**一次也没超 50%**;
+      · 真爆的是另一个量级:同窗口有 `17160 → 226451 → 1001939`(涨 13 倍)。
+
+    ⇒ `hot_rise_pct`(默认读 `push_hot_rise_pct`=0.30)必须被越过才放行。
+    """
+
+    def _seed(self, session, pan: str, metrics: dict, hours: float = 2) -> None:
+        session.add(PushLedger(user_id=1, section="bilibili", item_key="旧",
+                               pan_url=pan, metrics=json.dumps(metrics),
+                               pushed_at=datetime.now() - timedelta(hours=hours)))
+        session.commit()
+
+    def test_涨一点点不算又火了(self, session) -> None:
+        pan = "https://pan.quark.cn/s/8fa4f71f7430"
+        self._seed(session, pan, {"play_count": 99893})
+
+        class _S:
+            push_dedupe_hours = 24
+            push_pan_dedupe_hours = 72
+
+        #: +0.3%:平台自然波动,不是"资源火了" ⇒ 仍是同一条
+        items = [{"key": "新", "pan_url": pan, "metrics": {"play_count": 100194}}]
+        #: ⚠️ `hot_of` 吃的是**整个 item**,不是 metrics 字典 —— 直接塞
+        #: `peak_metric` 会让它拿到 `{"metrics": {...}}` 外层、恒返回 0,
+        #: 判定退化成"没有基准 ⇒ 一律挡",测试**看着绿、其实没测到涨幅**。
+        kept, dropped = pl.drop_recent(
+            session, 1, "bilibili", items, _S(),
+            hot_of=lambda it: pl.peak_metric(it.get("metrics")),
+            hot_min=1, hot_rise_only=True)
+        assert kept == [] and dropped == 1
+
+    def test_真爆量的仍放行(self, session) -> None:
+        pan = "https://pan.quark.cn/s/9b1c2d3e4f5a"
+        self._seed(session, pan, {"play_count": 17160})
+
+        class _S:
+            push_dedupe_hours = 24
+            push_pan_dedupe_hours = 72
+
+        items = [{"key": "新", "pan_url": pan, "metrics": {"play_count": 226451}}]
+        kept, dropped = pl.drop_recent(
+            session, 1, "bilibili", items, _S(),
+            hot_of=lambda it: pl.peak_metric(it.get("metrics")),
+            hot_min=1, hot_rise_only=True)
+        assert len(kept) == 1 and dropped == 0
+        assert kept[0]["_dedupe_hot"] is True, "放行的重复要打 🔥 标记"
+
+    def test_显式传0退回只看有没有涨(self, session) -> None:
+        """逃生门:调用方明确要放宽时传 `hot_rise_pct=0`,行为与 2026-11-18 一致。
+
+        ⚠️ 判据必须是 `is None` 而不是 `or 0.30` —— 后者会把显式传的 `0` 也吞成 30%,
+        逃生门**看着有、其实永远打不开**(本仓「看着有其实没有」那一族)。
+        """
+        pan = "https://pan.quark.cn/s/0a1b2c3d4e5f"
+        self._seed(session, pan, {"play_count": 1000})
+
+        class _S:
+            push_dedupe_hours = 24
+            push_pan_dedupe_hours = 72
+
+        #: 同一内容、同一盘链、涨 0.1% —— 默认口径挡,`hot_rise_pct=0` 时放行
+        items = [{"key": "旧", "pan_url": pan, "metrics": {"play_count": 1001}}]
+        kept, _ = pl.drop_recent(
+            session, 1, "bilibili", items, _S(),
+            hot_of=lambda it: pl.peak_metric(it.get("metrics")),
+            hot_min=1, hot_rise_only=True, hot_rise_pct=0)
+        assert len(kept) == 1
+
+    def test_上次没有热度数据时按挡处理(self, session) -> None:
+        """⚠️ 旧写法把缺失基准当 0 ⇒ 任何正数都放行 —— 那正是本参数要堵的口子。"""
+        pan = "https://pan.quark.cn/s/ffeeddccbbaa"
+        self._seed(session, pan, {})          # 上次推的时候没有互动数据
+
+        class _S:
+            push_dedupe_hours = 24
+            push_pan_dedupe_hours = 72
+
+        items = [{"key": "新", "pan_url": pan, "metrics": {"play_count": 500}}]
+        kept, dropped = pl.drop_recent(
+            session, 1, "bilibili", items, _S(),
+            hot_of=lambda it: pl.peak_metric(it.get("metrics")),
+            hot_min=1, hot_rise_only=True)
+        assert kept == [] and dropped == 1
+
+
+def test_盘链闸的热度基准按盘链取(session) -> None:
+    """★★ 2026-11-19:同一份资源**换了篇文章**(item_key 不同)时,基准也得取到。
+
+    公众号那条链上同一份资源被不同号各发一遍 ⇒ `item_key` 每次都是新的 `art{id}`,
+    按内容取基准永远查不到"上次同一份资源的热度" ⇒ 盘链闸一挡就退到"没法证明涨了"。
+    盘链闸判的是「同一份资源」,基准就必须按 `pan_key` 取(见 `last_pan_hot`)。
+    """
+    pan = "https://pan.quark.cn/s/7ea21dde7fbb"
+    session.add(PushLedger(user_id=1, section="wechat", item_key="art9001",
+                           pan_url=pan, metrics='{"read_num": 5000}',
+                           pushed_at=datetime.now() - timedelta(hours=3)))
+    session.commit()
+
+    class _S:
+        push_dedupe_hours = 24
+        push_pan_dedupe_hours = 72
+
+    _hot = lambda it: float((it.get("metrics") or {}).get("read_num") or 0)  # noqa: E731
+
+    #: 另一篇文章、同一份资源,阅读 5000 → 20000(涨 4 倍)⇒ 该放行
+    risen = [{"item_key": "art9002", "pan_url": pan,
+              "metrics": {"read_num": 20000}}]
+    kept, dropped = pl.drop_recent(
+        session, 1, "wechat", risen, _S(),
+        hot_of=_hot, hot_min=1, hot_rise_only=True)
+    assert len(kept) == 1 and dropped == 0, "换篇文章不影响'同一份资源'的热度基准"
+
+    #: 同一份资源、阅读 **5000 → 5200**(涨 4%)⇒ 挡
+    flat = [{"item_key": "art9003", "pan_url": pan,
+             "metrics": {"read_num": 5200}}]
+    kept2, dropped2 = pl.drop_recent(
+        session, 1, "wechat", flat, _S(),
+        hot_of=lambda it: float((it.get("metrics") or {}).get("read_num") or 0),
+        hot_min=1, hot_rise_only=True)
+    assert kept2 == [] and dropped2 == 1

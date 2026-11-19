@@ -1,3 +1,31 @@
+- [2026-11-19 16:45] FIX: **公众号/抖音对标号两条推送链接上盘链闸,并给「涨了」加涨幅下限**。
+  起因(近 7 天台账实测):wechat 重推占 **48%**(45+76+45 行),其中 **73% 是同一份资源被不同号各发一遍** ——
+  `pan.quark.cn/s/7ea21dde7fbb` 三天推 **17 次**;抖音对标号同理,`pan.xunlei.com/s/VP6XqobV5vdtY7KuROqmhouKA1` 三天 **14 次**、
+  `...VP5RHJ4osQZQn3E5RWTCJMFFA1` **13 次**。根因:这两条链**只 `record` 不 `drop`**(全文件 `drop_recent` 零调用)。
+  另有一处半成品:`hot_rise_only` 只要求「比上次高」⇒ 平台自然波动也被当成「又火了」——
+  bilibili **99 次**「涨了」的重复推送涨幅**全在 10% 以内**(播放 `99893→100194`),贴吧 32 次一次也没超 50%;
+  真爆的是另一个量级(同窗口 `17160→226451→1001939`)。
+  改动:
+    · `push_ledger.last_pan_hot()` —— `hot_rise_only` 的基准原来只按 `item_key` 取,而它是**内容**身份
+      (同一份资源换篇文章就变),所以盘链闸挡下来的那次永远查不到「上次同一份资源的热度」⇒ 必须按 `pan_key` 取。
+    · `drop_recent(..., hot_rise_pct=)` —— 涨幅下限(默认读 `push_hot_rise_pct`=30%,显式传 `0` = 退回只看有没有涨;
+      判据是 `is None` 而非 `or`,否则逃生门看着有、其实永远打不开)。`prev<=0`(上次无数据)按「挡」处理。
+    · `drop_recent(..., in_batch=)` —— 批内要不要互挡。**公众号链必须关**:`_enrich` 的「资源级复用」会把同一号
+      连发的系列文(标题只差一位数字、各自是不同资源)判成同一份、复用同一条我方链 ⇒ 实测一次同步 4 篇新文被批内闸吃掉 3 篇,
+      违反「近 24h 发的文章一篇不落全推」这条硬要求。跨轮次重复由台账历史管,不受此开关影响。
+    · `wechat/_listen.py` —— 闸接在 AI 筛选之后、渲染之前;判据取链顺序「本轮转存链 → 历史我方链 → 源链」;
+      **被挡的当场盖 `pushed_at`**(只盖「全被挡」那一支是不够的:`repush_unpushed` 会把部分被挡的当成「没到过飞书」
+      每轮重捞、再挡一遍,永远补不完);`commit` 紧跟在打戳后 ⇒ 不抱着 SQLite 写锁去渲染+发飞书。
+      台账 `record` 一侧**只记我方链**(它是日结「资源」列的链接、也是 `lead_mode` 判据;记别人的源链会让客户点到会失效的分享)。
+      近 3 天 561 行重放:可挡 **340** 行(现状口径)。
+    · `douyin_peer_scan.py` —— 闸接在 AI 筛选之后;口径 `hot_min=0.0`(不开热点放行),
+      因为这条链 metrics 大多为空(近 7 天 81 行里 **57 行空**)、点赞常为 0,严格口径会把正常新资源一起挡掉。
+      全部被挡时返回 `True`(「这一批处理过了」),否则调用方 `mark_pushed` 不执行、这批永远重试。
+  测试:`tests/test_push_ledger.py` 补 4 条涨幅下限用例 + 1 条「基准按盘链取」;新增
+  `tests/test_wechat_push_ledger.py`(4 条,含批内系列文回归)、`tests/test_douyin_peer_ledger.py`(4 条)。
+  ⚠️ 跑这几套必须清掉环境里的 `QUARK_COOKIE` / `FEISHU_WEBHOOK` / `DEEPSEEK_API_KEY`
+  (`Settings(_env_file=None)` 仍读环境变量 ⇒ 否则「缺夸克 Cookie」告警不触发、真实 webhook 也会被调用)。
+  (Files: app/services/push_ledger.py, app/services/wechat/_listen.py, app/services/douyin_peer_scan.py, config/settings.py, tests/test_push_ledger.py, tests/test_wechat_push_ledger.py, tests/test_douyin_peer_ledger.py)
 - [2026-11-18 21:05] FIX: **盘满告警一直在给「清理」这个错动作 —— 迅雷的 `limit` 是 10 GiB 兜底值,清多少都不会恢复**。
   实测四个迅雷号的 `/drive/v1/about` 里 `quota.limit` **逐字节完全相同**,都是 `10737418240`(=10 GiB 免费档),
   而 `usage` 各是 121.7 GiB / **16.03 TiB** / 1025 GiB / 755.6 GiB ⇒ ratio 12.17 / **1640.99** / 102.50 / 75.56。
