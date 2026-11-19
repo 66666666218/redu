@@ -636,3 +636,120 @@ def test_盘链闸的热度基准按盘链取(session) -> None:
         hot_of=lambda it: float((it.get("metrics") or {}).get("read_num") or 0),
         hot_min=1, hot_rise_only=True)
     assert kept2 == [] and dropped2 == 1
+
+
+class Test判重身份:
+    """★★ 2026-11-19:**我方链不是稳定的资源身份**,判重不能只看它。
+
+    实测(近 3 天 2011 行带盘台账):310 条我方链里 **67 条(21.6%)挂着 >1 个不同源链**。
+    最典型 `pan.quark.cn/s/7728b469a574` —— 资源库里登记的是「儿童涂色填色模板大全」,
+    台账上却挂着**公考行测答题卡 / 作文稿纸 / 2027 农历日历**三份毫不相干的东西
+    (`_enrich` 的「资源级复用」按标题近似匹配,把不同资源错配到了同一条链)。
+    拿我方链判重,72h 会**挡掉 282 行真实的不同资源** —— 客户口径是
+    「**带网盘链接 + 最新**」,**丢资源比重复推一遍严重得多**。
+
+    ⇒ 判重身份(`pan_id`)取**源链优先**;我方链那一档必须**再过标题判据**才挡。
+    """
+
+    class _S:
+        push_dedupe_hours = 24
+        push_pan_dedupe_hours = 72
+
+    def test_同一条我方链但标题是两份资源_两篇都推(self, session) -> None:
+        """★ 这条就是那 282 行的最小复现。
+
+        书法字帖那条链 `424edbd0f970` 下,「小学语文二年级上册」和「小学必备古诗词」
+        **是两份不同的资源**(各有各的源链) —— 60 多个号在发,挡掉就是真丢资源。
+        """
+        #: ⚠️ 公众号那条链**一定会带 `src_pan_url` 键**(它手上同时有两条链)——
+        #: 少了它,这条用例就落到"没区分两条链的板块"那一档,测的是别的判据。
+        base = {"pan_url": "https://pan.quark.cn/s/OUR_SHARED",
+                "metrics": {"read_num": 0}}
+        first = dict(base, item_key="art1",
+                     src_pan_url="https://pan.quark.cn/s/SRC_A",
+                     title="书法字帖｜小学语文二年级上册硬笔综合训练")
+        assert pl.record(session, 1, "wechat", [first]) == 1
+        session.commit()
+
+        second = dict(base, item_key="art2",
+                      src_pan_url="https://pan.quark.cn/s/SRC_B",
+                      title="小学必备古诗词硬笔字帖——书法字帖分享")
+        kept, dropped = pl.drop_recent(session, 1, "wechat", [second], self._S())
+        assert len(kept) == 1 and dropped == 0, \
+            "同一条我方链下挂着**两份不同的资源**(链被错配了)⇒ 不许互相挡"
+
+    def test_同一条我方链且标题确是同一份_仍然挡(self, session) -> None:
+        """副本要压住:5 个号各转存一份同一 PDF 时,源链各不相同、我方链会收敛。
+
+        此时**标题是同资源的另一种写法** ⇒ 该挡。
+        """
+        assert pl.record(session, 1, "wechat", [
+            {"item_key": "art1", "pan_url": "https://pan.quark.cn/s/OUR_SHARED",
+             "src_pan_url": "https://pan.quark.cn/s/SRC_ONE",
+             "title": "危险人格测试入口链接（自取）"}]) == 1
+        session.commit()
+
+        kept, dropped = pl.drop_recent(session, 1, "wechat", [
+            {"item_key": "art2", "pan_url": "https://pan.quark.cn/s/OUR_SHARED",
+             "src_pan_url": "https://pan.quark.cn/s/SRC_TWO",
+             "title": "危险人格测试 最新入口【链接自取】"}], self._S())
+        assert kept == [] and dropped == 1
+
+    def test_源链相同就挡_哪怕我方链不同(self, session) -> None:
+        """反过来那档:**同一份资源**被不同号各转存一份(我方链不同),源链是同一条。
+
+        这条判据**零误伤**(同一源链就是同一份资源),命中直接挡。
+        """
+        assert pl.record(session, 1, "wechat", [
+            {"item_key": "art1", "pan_url": "https://pan.quark.cn/s/OUR_A",
+             "src_pan_url": "https://pan.quark.cn/s/SRC_SAME",
+             "title": "《高性价比人生指南》PDF电子版（免费保存）"}]) == 1
+        session.commit()
+
+        #: 标题故意写成**看不出是同一份**的串 —— 只要源链一样就必须挡
+        kept, dropped = pl.drop_recent(session, 1, "wechat", [
+            {"item_key": "art2", "pan_url": "https://pan.quark.cn/s/OUR_B",
+             "src_pan_url": "https://pan.quark.cn/s/SRC_SAME",
+             "title": "高性价比人生指南 共338页 pdf/epub电子版【可保存】"}], self._S())
+        assert kept == [] and dropped == 1
+
+    def test_源链不同就放行_哪怕标题撞车(self, session) -> None:
+        """标题相似但源链不同 ⇒ 是两份资源(引流号常把标题写成同一个套路)⇒ 放行。"""
+        assert pl.record(session, 1, "wechat", [
+            {"item_key": "art1", "pan_url": "https://pan.quark.cn/s/OUR_A",
+             "src_pan_url": "https://pan.quark.cn/s/SRC_ONE",
+             "title": "冬天到了，我想问你 19 个问题 pdf完整版（免费获取）"}]) == 1
+        session.commit()
+
+        kept, dropped = pl.drop_recent(session, 1, "wechat", [
+            {"item_key": "art2", "pan_url": "https://pan.quark.cn/s/OUR_B",
+             "src_pan_url": "https://pan.quark.cn/s/SRC_TWO",
+             "title": "《冬天到了，我想问你19个问题》pdf完整版"}], self._S())
+        assert len(kept) == 1 and dropped == 0, \
+            "源链不同 = 两份资源(各号各传一份),不该因为标题像就挡"
+
+    def test_非公众号链没有源链字段_仍按pan_url判重(self, session) -> None:
+        """抖音对标号/资源库那条链给的 `pan_url` **本来就是别人的源链**,不该被削弱。
+
+        ⚠️ 回归:我一度无条件加标题判据,结果抖音"同一份资源换作品 id"立刻不再被挡。
+        """
+        assert pl.record(session, 1, "douyin_peer", [
+            {"item_key": "w1", "pan_url": "https://pan.xunlei.com/s/VP6XqobV5vdt",
+             "title": "第一条"}]) == 1
+        session.commit()
+
+        kept, dropped = pl.drop_recent(session, 1, "douyin_peer", [
+            {"item_key": "w2", "pan_url": "https://pan.xunlei.com/s/VP6XqobV5vdt",
+             "title": "完全不同的标题"}], self._S())
+        assert kept == [] and dropped == 1, \
+            "没有 src_pan_url 这条链的 pan_url 就是资源身份,标题不同也照挡"
+
+    def test_台账把判重身份单独落一列(self, session) -> None:
+        """`pan_url` 必须留我方链(日结的「资源」列要客户能点),身份另存 `pan_id`。"""
+        assert pl.record(session, 1, "wechat", [
+            {"item_key": "art1", "pan_url": "https://pan.quark.cn/s/OUR_A",
+             "src_pan_url": "https://pan.quark.cn/s/SRC_SAME?pwd=abcd",
+             "title": "某资源"}]) == 1
+        row = session.query(PushLedger).one()
+        assert row.pan_url == "https://pan.quark.cn/s/OUR_A", "展示链不许被源链顶掉"
+        assert row.pan_id == "pan.quark.cn/s/SRC_SAME?pwd=abcd", "判重身份取归一后的源链"

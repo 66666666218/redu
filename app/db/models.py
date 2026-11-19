@@ -1174,6 +1174,16 @@ class PushLedger(Base):
     title: Mapped[str] = mapped_column(String(255), default="")
     url: Mapped[str] = mapped_column(String(500), default="")        # 「对标作品」/原帖
     pan_url: Mapped[str] = mapped_column(String(500), default="")    # 我方链(有才写)
+    #: **判重身份**(2026-11-19):`pan_key()` 归一后的串,可能是我方链、也可能是**源链**。
+    #: ⚠️ 为什么不能复用 `pan_url`:那一列同时是**日结「资源」列的链接**与 `lead_mode`
+    #: 判据(必须是客户能点的我方链),而判重需要的是"同一份资源"的身份 —— 两者在
+    #: 「原作者的链」这一档上不同(客户点源链会随对方取消分享而失效)。
+    #: 更关键的是:**我方链不是稳定的资源身份** —— 实测 310 条我方链里 67 条(21.6%)
+    #: 挂着 >1 个不同源链(`7728b469a574` 在资源库里登记的是「儿童涂色填色模板大全」,
+    #: 台账上却挂着公考答题卡/作文稿纸/2027日历三份不相干的东西 ⇒ `_enrich` 的
+    #: 资源级复用错配)。拿它判重 72h 会**误挡 282 行真实的不同资源**。
+    #: 存量行为空串 = 上线前的行,读取端回落到 `pan_url`(见 `recent_pan_keys`)。
+    pan_id: Mapped[str] = mapped_column(String(255), default="")
     pan_type: Mapped[str] = mapped_column(String(16), default="")    # 夸克 / 百度 / 迅雷
     author: Mapped[str] = mapped_column(String(64), default="")      # 对标账号
     metrics: Mapped[str] = mapped_column(String(255), default="")    # 热度(JSON 串)

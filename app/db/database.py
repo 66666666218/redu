@@ -383,6 +383,13 @@ ADDITIONS: dict[str, list[str]] = {
     "demand_scans": ["platform VARCHAR(16) DEFAULT 'douyin'",
                      "has_group BOOLEAN DEFAULT 0",
                      "topic_ok BOOLEAN DEFAULT 1"],
+    # 推送台账的**判重身份**(2026-11-19):`pan_url` 只记我方链(日结的「资源」列要客户能点),
+    # 而判重需要的是"同一份资源"这个身份。实测我方链**不唯一标识资源**:310 条里 67 条
+    # (21.6%)挂着 >1 个不同源链(`7728b469a574` 资源库登记「儿童涂色填色模板大全」,
+    # 台账上却挂公考答题卡/作文稿纸/2027日历三份不相干的东西)⇒ 拿它判重 72h 会
+    # **误挡 282 行真实的不同资源**。单开一列存源链归一后的身份。
+    # 存量行空串 = 上线前的行,读取端回落到 `pan_url`(行为不突变)。
+    "push_ledger": ["pan_id VARCHAR(255) DEFAULT ''"],
     # 网盘资源的存活状态(2026-11-16):'dead' = 源文件已不在盘上、链也重建不了。
     # 存量行空串 = 正常(老行没这一列时的语义,读取端按 `or ""` 处理)。
     "xunlei_resources": ["status VARCHAR(16) DEFAULT ''"],

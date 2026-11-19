@@ -54,6 +54,10 @@ _TITLE_KEYS = ("title", "name", "resource", "work", "word", "desc")
 _KEY_KEYS = ("item_key", "key", "uid", "aweme_id", "note_id", "id")
 _URL_KEYS = ("url", "origin_url", "source_url", "work_url")
 _PAN_KEYS = ("my_link", "our_url", "pan_url", "share_url")
+#: **源链**(原作者分享的那条)—— 判重身份的首选,见 `pan_id_of`。
+#: ⚠️ 与 `_PAN_KEYS` 分开:`pan_url` 那一列必须留我方链(日结要客户能点),
+#: 而判重认的是"同一份资源",原作者的链才是它的稳定身份。
+_SRC_PAN_KEYS = ("src_pan_url", "source_pan_url", "origin_pan_url", "pan_src_url")
 _AUTHOR_KEYS = ("author", "bench_author", "nickname")
 #: 有些推送点把互动数**摊平**在 item 上(`douyin_leads` 的 `share_count` 就是),一并收进 metrics
 _FLAT_METRIC_KEYS = ("play_count", "liked_count", "collected_count", "comment_count",
@@ -61,7 +65,7 @@ _FLAT_METRIC_KEYS = ("play_count", "liked_count", "collected_count", "comment_co
 
 #: 各键的取值长度上限(表字段就这么宽;超了要**截断**而不是让 INSERT 抛)
 _LIMITS = {"section": 32, "item_key": 255, "title": 255, "url": 500, "pan_url": 500,
-           "pan_type": 16, "author": 64, "metrics": 255}
+           "pan_id": 255, "pan_type": 16, "author": 64, "metrics": 255}
 
 #: 盘链身份判定时**要保留**的查询参数:只有提取码会改变"能不能打开",
 #: 其余(`utm_*`/`entry`/`share_token` 之类)同一份资源的写法差异很大,算噪声。
@@ -78,6 +82,81 @@ def _first(d: dict, keys: tuple[str, ...]) -> str:
         if s:
             return s
     return ""
+
+
+def _has_src_key(it: dict) -> bool:
+    """条目**显式带了源链键**吗(哪怕值是空串)?
+
+    只有**公众号**那条链会这么做(它手上同时有"我方转存链"和"原作者的源链")。
+    别的板块给的 `pan_url` 本来就是别人的源链 —— 对它们加标题判据会**漏挡**。
+    """
+    if any(k in it for k in _SRC_PAN_KEYS):
+        return True
+    link = it.get("link")
+    return isinstance(link, dict) and any(k in link for k in _SRC_PAN_KEYS)
+
+
+def _pan_id_of(it: dict) -> str:
+    """条目的**判重身份**:源链优先,没有源链才用我方链。
+
+    ★★ 2026-11-19(实测驱动的取舍)。判重判的是「**这是不是同一份资源**」,
+    而这两条链的可靠性**方向相反**:
+
+      · **源链**(`src_pan_url` 之类)是"原作者分享的那一份"。同一个源链 ⇒ 同一份资源,
+        这条判据**零误伤**(近 3 天 2011 行带盘数据重放:按它挡 1142 行,标题冲突 0)。
+        代价是**压不住副本**:5 个号各转存一份同一 PDF 时源链各不相同。
+      · **我方链**是我们**自己转存出来的**。它在理论上更强(多号转存同一份会收敛到一条),
+        但实测**不成立**:310 条我方链里 **67 条(21.6%)挂着 >1 个不同源链** ——
+        `7728b469a574` 在资源库里登记的是「儿童涂色填色模板大全」,台账上却挂着
+        公考答题卡 / 作文稿纸 / 2027 日历三份**毫不相干**的东西(`_enrich` 的
+        「资源级复用」按标题近似匹配,把不同资源错配到了同一条链)。
+        ⇒ 按我方链判重会**挡掉真实的新资源**(72h 实测 282 行),而客户的判据是
+        「**带网盘链接 + 最新**」——**丢资源比重复推一遍严重得多**。
+
+    ⇒ 所以身份取**源链优先**;`drop_recent(our_chain_check_title=True)` 那边再叠一道
+    "我方链命中 **且** 标题同源"的辅助判据(见 `_same_resource_title`),把副本也压住,
+    但**只在标题确认同源时才压**。
+
+    ## 为什么"有没有给 `src_pan_url`"就是那个开关
+
+    只有**公众号**这条链的 `pan_url` 是**我们自己转存出来的**。别的链
+    (抖音对标号正文直链 / 资源库的 `pan_url` / 发现链)给的**本来就是别人的源链**,
+    它本身就是资源身份,不该再过标题判据 —— 无条件加标题判据会让它们**漏挡**
+    (实测:抖音对标号"同一份资源换作品 id"立刻不再被挡)。
+
+    ⇒ 判据:**条目带了 `src_pan_url` 这个键**(哪怕值是空串)就说明调用方明确区分了
+    「我方链 / 源链」,身份**只认源链**(没有源链就给 `""`,交给标题判据兜);
+    否则身份就用 `pan_url`(它本来就是资源身份)。`_pan_of` 的 `_PAN_KEYS` 顺序
+    保证「我方链优先」,那个语义只对公众号成立,所以只能由调用方显式告诉这里。
+
+    返回 `pan_key()` 归一后的串(认不出给 `""`)。
+    """
+    if _has_src_key(it):
+        link = it.get("link") if isinstance(it.get("link"), dict) else {}
+        return pan_key(_first(it, _SRC_PAN_KEYS)) or pan_key(_first(link, _SRC_PAN_KEYS))
+    return pan_key(_pan_of(it))
+
+
+def _same_resource_title(a: str, b: str) -> bool:
+    """两个标题是不是**同一份资源**(判据复用 `resource_library.same_resource`)。
+
+    ⚠️ 只用于**判重**(要不要再推一遍),不用于给客户出链 —— 那仍走
+    `title_claims` 那套严格判据(见 `same_resource` 自己的头注)。
+    判不了(空标题 / 判据模块不可用)一律按**同一份**处理:判重是旁路,
+    多挡一次只是少推一遍,而放行会刷屏。
+    """
+    x, y = str(a or "").strip(), str(b or "").strip()
+    if not x or not y:
+        return True
+    if x == y:
+        return True
+    try:
+        from app.services.resource_library import same_resource
+
+        return bool(same_resource(x, y))
+    except Exception:  # noqa: BLE001 - 判据不可用就当同一份(与"判不了按同一份"一致)
+        logger.info("判重的标题比较不可用(按同一份处理)", exc_info=True)
+        return True
 
 
 def _norm_item(it: dict, section: str) -> dict[str, Any] | None:
@@ -115,6 +194,9 @@ def _norm_item(it: dict, section: str) -> dict[str, Any] | None:
         "title": title[: _LIMITS["title"]],
         "url": url[: _LIMITS["url"]],
         "pan_url": pan_url[: _LIMITS["pan_url"]],
+        #: 判重身份(源链优先;见 `_pan_id_of` 的取舍)。**没有就留空** ——
+        #: 空串让读取端回落到 `pan_url`,而不是把"没盘链"当成一种身份。
+        "pan_id": _pan_id_of(it)[: _LIMITS["pan_id"]],
         "pan_type": (_pan_name(pan_url) or "")[: _LIMITS["pan_type"]],
         "author": _first(it, _AUTHOR_KEYS)[: _LIMITS["author"]],
         "metrics": mj[: _LIMITS["metrics"]],
@@ -224,30 +306,60 @@ def recent_keys(session: Session, user_id: int, section: str,
         PushLedger.pushed_at >= cutoff)).all())
 
 
-def recent_pan_keys(session: Session, user_id: int, section: str,
-                    hours: float = 24,
-                    sections: tuple[str, ...] | None = None) -> set[str]:
-    """这个板块最近 N 小时**已经推过**的盘链身份集合(`hours<=0` = 空集)。
+def recent_pan_map(session: Session, user_id: int, section: str,
+                   hours: float = 24,
+                   sections: tuple[str, ...] | None = None) -> tuple[set[str], dict[str, str]]:
+    """窗口内已推过的 **①源链身份集合 ②我方链身份 → 当时那行的标题**。
 
-    ⚠️ 库里存的是**原串**(`pan_url` 列),这里必须逐条过 `pan_key()` 归一 ——
-    否则 `http`/`https`、末尾斜杠、渠道参数的差异会让同一个资源认不出来。
-    行数在这个窗口里是**几百量级**(近 7 天带盘 1979 行),逐条归一的开销可以忽略;
-    换成 SQL 里做字符串比较反而会把归一逻辑抄第二遍(本仓最忌)。
+    ★★ 2026-11-19:判重从「只用我方链」改成**双判据**,对应 `_pan_id_of` 的取舍 ——
+      · `srcs`   :**源链**身份。命中就挡(同一份资源,零误伤);
+      · `my_to_title`:**我方链**身份 → 上次推它时的标题。命中**还要**过
+        `_same_resource_title` 才挡,因为实测 21.6% 的我方链挂着多个不同源链
+        (`_enrich` 的资源级复用错配)⇒ 光看链会把不同资源互相挡掉。
+
+    ⚠️ 库里的 `pan_id` 是上线后才有值;存量行(空串)回落到 `pan_url` ——
+    `pan_url` 只记我方链,**没有源链信息**,所以那批行只能走我方链那一档
+    (带上标题判据,不会重演 282 行误伤)。
+    ⚠️ 库里存的是**原串**,这里逐条过 `pan_key()` 归一(管道/末尾斜杠/渠道参数)。
     """
     if session is None or hours <= 0:
-        return set()
+        return set(), {}
     from sqlalchemy import select
 
     from app.db.models import PushLedger
 
     scope = tuple(sections or (section,))
     cutoff = datetime.now() - timedelta(hours=float(hours))
-    rows = session.scalars(select(PushLedger.pan_url).where(
+    rows = session.execute(select(PushLedger.pan_id, PushLedger.pan_url,
+                                  PushLedger.title).where(
         PushLedger.user_id == user_id,
         PushLedger.section.in_(scope),
-        PushLedger.pan_url != "",
         PushLedger.pushed_at >= cutoff)).all()
-    return {k for k in (pan_key(u) for u in rows) if k}
+    srcs: set[str] = set()
+    my_to_title: dict[str, str] = {}
+    for pan_id, pan_url, title in rows:
+        myk = pan_key(pan_url or "")
+        if myk:
+            #: 同一我方链多行时,**后写的覆盖** = 最近一次那行的标题(与本函数语义一致)
+            my_to_title[myk] = (title or "")
+        #: 身份 = `pan_id`(源链优先),存量行/非公众号链回落到 `pan_url`。
+        #: ⚠️ **一律入 `srcs`**:它就是"这份资源的身份",命中即挡。
+        key = (pan_id or "").strip() or myk
+        if key:
+            srcs.add(key)
+    return srcs, my_to_title
+
+
+def recent_pan_keys(session: Session, user_id: int, section: str,
+                    hours: float = 24,
+                    sections: tuple[str, ...] | None = None) -> set[str]:
+    """窗口内已推过的**盘链身份**集合(源链 ∪ 我方链,只做聚合统计用)。
+
+    ⚠️ **不要拿它当判重依据** —— 它把两条可靠性完全不同的链混在一起,
+    丢掉了我方链那档需要的标题判据(见 `recent_pan_map` 与 `_pan_id_of`)。
+    """
+    srcs, my_to_title = recent_pan_map(session, user_id, section, hours, sections)
+    return srcs | set(my_to_title)
 
 
 def last_pan_hot(session: Session, user_id: int, section: str, hours: float,
@@ -272,12 +384,12 @@ def last_pan_hot(session: Session, user_id: int, section: str, hours: float,
     rows = session.scalars(select(PushLedger).where(
         PushLedger.user_id == user_id,
         PushLedger.section.in_(scope),
-        PushLedger.pan_url != "",
         PushLedger.pushed_at >= cutoff,
     ).order_by(PushLedger.pushed_at.asc(), PushLedger.id.asc())).all()
     out: dict[str, float] = {}
     for r in rows:                 # 升序遍历 ⇒ 后写的覆盖 = **最近一次**那条
-        k = pan_key(r.pan_url or "")
+        #: 身份与 `recent_pan_map` 同一把尺子:`pan_id`(源链优先),存量行回落 `pan_url`。
+        k = (r.pan_id or "").strip() or pan_key(r.pan_url or "")
         if not k:
             continue
         try:
@@ -385,13 +497,28 @@ def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
     同一份资源会被不同号、不同文章各推一遍 —— 近 7 天实测:带盘推送 1979 行只涉及
     **378 个不同盘链**(81% 的行是重复),最极端的 5 个盘链被 **7 个板块各推一遍**。
 
-    ⇒ 再加一道**按盘链身份**的闸:同一板块内,同一个 `pan_key()` 在 `pan_hours`
+    ⇒ 再加一道**按盘链身份**的闸:同一板块内,同一个盘链身份在 `pan_hours`
       小时内已经推过就不推。默认继承 `push_dedupe_hours`,可用
       `push_pan_dedupe_hours` 单独调(**它比内容去重该更长**:同一份资源隔一天再推
       对客户仍然是同一条)。
 
+    ## ★★ 盘链身份的口径(2026-11-19 改):源链优先,我方链要过标题判据
+
+    原来只有一把尺子(`pan_url`,也就是**我方链**)。实测它**不唯一标识资源**:
+    310 条我方链里 67 条(21.6%)挂着 >1 个不同源链 —— `7728b469a574` 在资源库里
+    登记的是「儿童涂色填色模板大全」,台账上却挂着公考答题卡 / 作文稿纸 / 2027 日历
+    三份毫不相干的东西(`_enrich` 的「资源级复用」按标题近似匹配错配了链)。
+    拿它判重,72h 重放会**挡掉 282 行真实的不同资源** —— 而客户的判据是
+    「**带网盘链接 + 最新**」,**丢资源比重复推一遍严重得多**。
+
+    ⇒ 现在两条判据并行(见 `_pan_id_of` / `recent_pan_map`):
+      ① **源链身份**(`pan_id`,源链优先)命中 ⇒ 挡。同一源链就是同一份资源,**零误伤**;
+      ② **我方链身份**命中 ⇒ **还要**标题过 `_same_resource_title` 才挡。这一档用来
+         压住"5 个号各转存一份同一 PDF"的副本(它们源链各不相同),但只在标题确认
+         同源时生效,不会重演上面那 282 行。
+
     ⚠️ **两道闸共用 `hot_of` 的放行口径**:流量真的爆了的,重复也要推。
-    ⚠️ 没有盘链的条目(`pan_key` 为空)只走内容去重 —— 没盘链就无从判"同一份资源"。
+    ⚠️ 没有盘链的条目(身份为空)只走内容去重 —— 没盘链就无从判"同一份资源"。
 
     ## ★★ `hot_rise_only`(2026-11-18,档2 前置)
 
@@ -465,13 +592,14 @@ def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
         scope = group_of(settings, section) or (section,)
     #: ⚠️ **`session=None` 不等于"什么都不能判"**:同一批内部的盘链重复不依赖库。
     seen: set[str] = set()
-    seen_pan: set[str] = set()
+    seen_pan: set[str] = set()          #: 源链身份(命中即挡,零误伤)
+    seen_my: dict[str, str] = {}        #: 我方链身份 → 上次推它时的标题
     if session is not None:
         if float(hours) > 0:
             seen = recent_keys(session, user_id, section, float(hours), sections=scope)
         if float(pan_hours or 0) > 0:
-            seen_pan = recent_pan_keys(session, user_id, section, float(pan_hours),
-                                       sections=scope)
+            seen_pan, seen_my = recent_pan_map(session, user_id, section,
+                                               float(pan_hours), sections=scope)
     if float(hours) <= 0:
         seen = set()               #: 内容去重关掉时,库里那份也不该生效
     #: ★★ **重复但"流量好"的仍要推**(2026-11-05 用户:「如果是重复的资源但是流量好也需要推出来」)。
@@ -495,17 +623,51 @@ def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
         #: ⇒ 每小时重复进一次。盘链闸本来判的就是「**同一份资源**」,基准也必须按盘链取。
         prev_hot_by_pan = last_pan_hot(session, user_id, section, _win,
                                        sections=scope, hot_of=hot_of)
+    #: 我方链那一档的批内记录:身份 → 本批第一次推它时的标题(判据同 `seen_my`)
+    _batch_my: dict[str, str] = {}
     for it in items:
         key = _key_of(it)
         dup_item = key in seen
-        #: 盘链只在**本批里第一次出现**时判重 —— 同一批里两条指向同一份资源,
-        #: 后一条也不该推(这正是"同一个盘链被多个板块各推一遍"的最小形态)。
+        title = _first(it, _TITLE_KEYS)
+        #: ★★ **双判据**(2026-11-19,见 `_pan_id_of` 里的实测):
+        #:   ① `pid`(源链优先)命中 ⇒ 同一份资源,**直接挡**;
+        #:   ② 我方链命中 **且标题确认同源** 才挡 —— 我方链有 21.6% 挂着不同资源,
+        #:      光看链会把书法字帖各年级、公考/作文/日历这种**真实的不同资源**互相挡掉。
+        pid = _pan_id_of(it)
         pk = pan_key(_pan_of(it))
-        dup_pan = bool(pk) and (pk in seen_pan or (in_batch and pk in _batch_pans))
+        #: 条目显式给了 `src_pan_url` 键 ⇒ 调用方区分了「我方链 / 源链」(只有公众号那样做)
+        #: ⇒ 这两条链的可靠性不同,必须分档判(见 `_pan_id_of` 头注)。
+        split_chains = _has_src_key(it)
+        #: ★ 第一档:**真正的源链**命中 ⇒ 同一份资源,直接挡(零误伤)。
+        #: ⚠️ `pid != pk` 这个条件不能省:源链为空时 `_pan_id_of` 会退回我方链,
+        #: 那时 `pid == pk`,它是**我方链身份**,必须交给下面那档过标题判据。
+        src_pid = pid if (pid and pid != pk) else ""
+        dup_pan = bool(src_pid) and src_pid in seen_pan
+        if not dup_pan and in_batch and src_pid and src_pid in _batch_pans:
+            dup_pan = True
+        if not split_chains and pk:
+            #: 没区分两条链的板块(抖音对标号 / 资源库 / 发现链):`pan_url` **本来就是**
+            #: 别人的源链、就是资源身份 ⇒ 直接挡(加标题判据会让它们漏挡)。
+            dup_pan = dup_pan or pk in seen_pan or (in_batch and pk in _batch_pans)
+        #: ★ 第二档(**我方链**):同一份资源被几个号各转存一份时源链各不相同(压不住),
+        #: 但我方链会收敛到同一条。这一档**必须**标题确认「确实是同一份」才挡 ——
+        #: 实测我方链有 21.6% 挂着不同资源,光看链会重演 282 行丢资源。
+        if not dup_pan and pk:
+            #: 库里那档:同一我方链上次推的标题,和这条**是不是同一份**
+            prev_title = seen_my.get(pk)
+            if prev_title is not None and _same_resource_title(title, prev_title):
+                dup_pan = True
+            #: 本批那档:同一条我方链的系列文**不许互相挡**(见 `in_batch` 的头注)
+            elif in_batch and pk in _batch_my and _same_resource_title(title, _batch_my[pk]):
+                dup_pan = True
         if not dup_item and not dup_pan:
             kept.append(it)
-            if pk:
+            if pid:
+                _batch_pans.add(pid)
+            if not split_chains and pk:
                 _batch_pans.add(pk)
+            if pk and pk not in _batch_my:
+                _batch_my[pk] = title
             continue
         if hot_of is not None and float(hot_min or 0) > 0:
             try:
@@ -539,8 +701,10 @@ def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
                     continue
                 it["_dedupe_hot"] = True
                 kept.append(it)
-                if pk:
-                    _batch_pans.add(pk)
+                if pid:
+                    _batch_pans.add(pid)
+                if pk and pk not in _batch_my:
+                    _batch_my[pk] = title
             except Exception:  # noqa: BLE001 - 取热度失败就按"已推过"处理
                 continue
     return kept, len(items) - len(kept)

@@ -1866,11 +1866,17 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
     # 是同一份资源(前者是转好的,后者是源链),内容去重(`art{id}`)对它们完全无效。
     # ⚠️ 没盘链的文章 `pan_key("")` 为空 ⇒ 这道闸不管它们,行为与改动前一致。
     # ⚠️ 热点放行口径(`hot_of`=阅读数、`hot_rise_only`)保证"真的火了"的重复仍推。
-    _dedupe_of: dict[int, str] = {}
+    #: 我方链(客户点开能直接取)与源链(原作者分享的那条)**分开给**:
+    #: `pan_url` 进台账的「资源」列,`src_pan_url` 只用于判重身份(`_pan_id_of` 源链优先)。
+    #: ⚠️ 2026-11-19 实测:只用我方链判重会**挡掉真实的不同资源** —— 我方链里有 21.6%
+    #: 挂着多个不同源链(书法字帖各年级、公考/作文/日历),那是 `_enrich` 的
+    #: 资源级复用按标题近似匹配错配出来的,链本身不是稳定的资源身份。
+    _my_of: dict[int, str] = {}
+    _src_of: dict[int, str] = {}
     for r in rows:
-        _dedupe_of[r.id] = ((replacements.get(r.id) or [("", "", "")])[0][1]
-                            or _my_pan_link_from_history(r.my_pan_urls)[0]
-                            or _first_pan_link(r.pan_urls)[0])
+        _my_of[r.id] = ((replacements.get(r.id) or [("", "", "")])[0][1]
+                        or _my_pan_link_from_history(r.my_pan_urls)[0])
+        _src_of[r.id] = _first_pan_link(r.pan_urls)[0]
     _before_ids = [r.id for r in rows]
     _before = len(rows)
     try:
@@ -1879,7 +1885,8 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
         _kept, _dup = push_ledger.drop_recent(
             session, user_id, "wechat",
             [{"item_key": f"art{r.id}", "title": r.title or "", "url": r.url or "",
-              "pan_url": _dedupe_of.get(r.id, ""),
+              "pan_url": _my_of.get(r.id, ""),
+              "src_pan_url": _src_of.get(r.id, ""),
               "metrics": {"read_num": int(r.read_num or 0)} if r.read_num else {},
               "_r": r} for r in rows],
             settings,
@@ -2156,17 +2163,15 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
                 push_ledger.record(session, user_id, "wechat", [
                     {"item_key": f"art{r.id}", "title": r.title, "url": r.url or "",
                      "author": r.author or "",
-                     #: ⚠️ 只记**我方链**(客户点开能直接取),不记别人的源链 —— 台账的 `pan_url`
-                     #: 同时是**日结「资源」列的链接**和 `lead_mode`(「0 盘链板块」)的判据,
+                     #: ⚠️ `pan_url` 只记**我方链**(客户点开能直接取)—— 它同时是
+                     #: **日结「资源」列的链接**和 `lead_mode`(「0 盘链板块」)的判据,
                      #: 记源链会让客户点到别人随时会失效的分享,判据也失真。
-                     #: **取舍**:闸在没我方链时会退回源链判重(同一份内容被别的号
-                     #: 原样复制时撞得上),但那种身份**不落台账** ⇒ "从没转存过"的那批
-                     #: 之间仍可能重复。近 3 天 561 行重放:现状可挡 **340** 行;
-                     #: 若把源链也写进台账是 366 行(多挡的 26 行全是没转存的),
-                     #: ⚠️ 但同一份资源各号自建的源链**互不相同**(`8fa4f71f7430` 这篇的
-                     #: 源链就是 `879d8535e48c`),所以它并不是稳定的资源身份。
                      "pan_url": ((replacements.get(r.id) or [("", "", "")])[0][1]
                                  or _my_pan_link_from_history(r.my_pan_urls)[0] or ""),
+                     #: **判重身份**另记一列(`pan_id`,`_pan_id_of` 源链优先)——
+                     #: 上面那条我方链不唯一标识资源(21.6% 挂着多个源链,见 models 里
+                     #: `PushLedger.pan_id` 的头注),拿它判重会挡掉真实的新资源。
+                     "src_pan_url": _first_pan_link(r.pan_urls)[0],
                      "metrics": {"read_num": r.read_num} if r.read_num else {}}
                     for _a, r, _n in chunk])
             except Exception:  # noqa: BLE001 - 旁路,绝不许它挡住下面 pushed_at 的落库

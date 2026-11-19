@@ -81,17 +81,21 @@ def test_同一份资源的第二篇被挡且当场打戳(session, monkeypatch) 
     cards: list[dict] = []
     _fake_feishu(monkeypatch, cards)
 
+    #: ⚠️ 标题必须**真的像同一份**(这条链上我方链那一档要过标题判据)——
+    #: 用真实的两条同资源标题,而不是「A文/B文」这种测试造的占位串。
     a = _art("https://mp.weixin.qq.com/s/a", "号A",
              pan="https://pan.quark.cn/s/srcA",
-             my="https://pan.quark.cn/s/SAME", title="A文 第一份")
+             my="https://pan.quark.cn/s/SAME",
+             title="危险人格测试入口链接（自取）")
     session.add(a)
     session.commit()
     assert L._push_listen(session, 1, _settings(), [a]) == 1
 
-    #: 另一篇文章、**同一份资源**(我方链相同)
+    #: 另一篇文章、**同一份资源**(我方链相同、源链不同、标题是同资源的另一种写法)
     b = _art("https://mp.weixin.qq.com/s/b", "号B",
              pan="https://pan.quark.cn/s/srcB",
-             my="https://pan.quark.cn/s/SAME", title="B文 同一份资源")
+             my="https://pan.quark.cn/s/SAME",
+             title="危险人格测试 最新入口【链接自取】")
     session.add(b)
     session.commit()
     got = L._push_listen(session, 1, _settings(), [b])
