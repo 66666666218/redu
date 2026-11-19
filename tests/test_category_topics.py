@@ -77,8 +77,13 @@ def test_pick_zero_or_negative_is_empty() -> None:
 
 
 def test_rotation_advances_and_wraps(session) -> None:
-    """轮换:每轮前进一个类目,**走完一圈回到开头**。"""
-    order = list(ct.DEFAULT_CATEGORIES)
+    """轮换:每轮前进一个类目,**走完一圈回到开头**。
+
+    ★ 2026-11-19:主轮轮换**不再包含「大瓜」** —— 它有自己的专轮
+    (`douyin_leads_dagua_tick`),留在主轮里只是白占 1/6 名额(用户口径
+    「我们资源的监控,和大瓜的监控分开,不要互占资源」)。
+    """
+    order = [c for c in ct.DEFAULT_CATEGORIES if c not in ct.SOLO_CATEGORIES]
     first = ct.current_category(session)
     assert first == order[0], "没设过游标时应从第一个开始"
     seen = [first]
@@ -86,6 +91,35 @@ def test_rotation_advances_and_wraps(session) -> None:
         seen.append(ct.advance_category(session))
     assert seen == order, f"轮换顺序不对:{seen}"
     assert ct.advance_category(session) == order[0], "走完一圈应回到开头"
+
+
+def test_solo_category_is_skipped_by_rotation(session) -> None:
+    """★★ 「大瓜」有专轮 ⇒ **主轮一圈里一次都不该轮到它**(2026-11-19)。
+
+    拆开之前:6 类轮换每 6 轮有 1 轮搜大瓜 —— 近 7 天那 9 轮共 72 个词,产出只有 2 条;
+    而资源类目(软件/影视)轮到的次数反而更少。用户口径「不要互占资源」。
+    """
+    seen = set()
+    for _ in range(len(ct.categories()) * 2):        # 两圈,兜住"偶发跳过"
+        seen.add(ct.current_category(session))
+        ct.advance_category(session)
+    assert "大瓜" not in seen, f"主轮仍然轮到了专轮类目:{seen}"
+    assert "小游戏" in seen, "只该跳大瓜一个,别的类目不能一起消失"
+
+
+def test_cursor_停在专轮类目时顺延而不是卡住(session) -> None:
+    """旧库升级上来时游标可能停在 `大瓜`(拆开之前就存了那个值)。
+
+    `current_category` 必须**顺延到下一个资源类目**,而不是原样返回大瓜
+    —— 否则主轮第一轮又搜一遍大瓜,拆分等于没做。
+    """
+    from app.db.models import SystemConfig
+
+    session.add(SystemConfig(key="lead_word_category", value="大瓜"))
+    session.commit()
+    got = ct.current_category(session)
+    assert got == "小游戏", f"大瓜之后的下一个资源类目是小游戏:{got}"
+    assert ct.advance_category(session) == "资料", "从小游戏往后继续正常轮换"
 
 
 def test_cursor_survives_new_session(session) -> None:

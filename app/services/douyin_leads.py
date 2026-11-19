@@ -1823,12 +1823,19 @@ def _historical_mark_counts(session, user_id: int, marks: set[str],
 
 
 def push_leads(leads: list[dict], settings, platform: str = "douyin",
-               session=None, user_id: int = 0) -> bool:
+               session=None, user_id: int = 0, ai_section: str = "") -> bool:
     """把线索推飞书。
 
     **推抖音专属群**(`FEISHU_WEBHOOK_DOUHOT`,未配则回落主群)——用户口径(2026-10-02):
     "既然是抖音的来源就推送到抖音群聊里面"。版式与公众号推送一致:**四列网格**
     (作者 / 作品 / 资源 / 链接),不靠空格对齐。
+
+    ★ `ai_section`(2026-11-19,用户口径「我们资源的监控,和大瓜的监控分开,不要互占资源」):
+    **AI 分数线按来源分家**。默认 `""` = 旧行为(资源线索走 `douyin_peer`);
+    大瓜专轮传 `douyin_dagua` ⇒ 它自己一条线(库值缺省 = `ai_filter_min_score`),
+    **不再被资源线校准出来的分数线挡**(那是按资源线索的搬成率/热度算的,与吃瓜无关)。
+    ⚠️ **只分 AI 这一层**:飞书群与推送台账(`section='douyin_peer'`)仍然共用 ——
+    用户要的是"不互占名额",不是"分成两个群"。
     """
     if not leads:
         return False
@@ -1919,8 +1926,10 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
     #: ★ 历史口令计数(跨轮次「还在被推」)。
     _hist = _historical_mark_counts(
         session, user_id, {str(x.get("mark") or "") for x in leads})
+    #: ★ 2026-11-19:**AI 分数线按来源分家**(见 docstring 的 `ai_section`)。
+    _ai_sec = ai_section or ("douyin_peer" if peer else section)
     _ai = ai_filter.filter_items(
-        "douyin_peer" if peer else section, leads, settings,
+        _ai_sec, leads, settings,
         extra_context=_prior_note,
         #: ★ 判定落库(供分数线校准):key 用 aweme_id,能和 `douyin_leads` 直接 join 出搬成结果。
         session=session, user_id=user_id,
@@ -2172,6 +2181,16 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
         settings = get_settings()
     plats = platforms_of(settings)
     cat = category or category_topics.current_category(db)   # 本轮搜哪个类目(轮换)
+    #: ★★ **主轮不许搜专轮类目**(2026-11-19,用户口径「我们资源的监控,和大瓜的监控分开,
+    #: 不要互占资源」)。`current_category` 已经跳过大瓜,这里挡的是**别的调用方**
+    #: 误把 `category="大瓜"` 传进来(比如未来的批量脚本)—— 那样词表分支会切成大瓜向,
+    #: 等于主轮又替专轮跑了一轮,名额照样互占。**显式传 `advance=False` 的专轮不算主轮**。
+    if advance and cat in category_topics.SOLO_CATEGORIES:
+        logger.warning("抖音线索:主轮不搜专轮类目「%s」,本次改搜轮换表里的下一个资源类目",
+                       cat)
+        cat = category_topics.current_category(db)   # 它会把专轮类目顺延掉
+        #: 游标照常在**本轮跑完**后推进(`advance` 保持 True) —— 本轮搜了哪个资源类目,
+        #: 下一轮就从它的下一个开始,不重复也不跳。
     # 词来自**群组新资源 + 公众号已验证资源**(见 search_keywords 的注释);各平台共用。
     # **热榜外部种子**只喂给抖音:小红书/快手没有口令,拿热榜词去搜只是白开一次浏览器。
     #: ★★ **大瓜轮多要几个热榜词**(2026-11-08):全局只给 1 个(`douyin_leads_hot_keywords`),
@@ -2208,14 +2227,21 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
     #: ⚠️ 声明在 `if "douyin" in plats` **之外** —— 下面的 `hot` 组装在块外引用它。
     wevent_words: list[str] = []
     if "douyin" in plats:
-        try:
-            from app.services import hot_cycle as _hc
+        #: ★★ **探针词只喂资源线**(2026-11-19,用户口径「不要互占资源」)。
+        #: 实测近 9 天:大瓜轮 8 轮探针命中 **0**、产出 **0**;而资料 14 命中/2 产出、
+        #: 小游戏 8 命中。探针词是"新起量的事件"形态,本该进大瓜——可它**照样没产出**,
+        #: 而每取一次就消耗掉(`mark_fed_search` 打戳,同一个词只搜一次) ——
+        #: 大瓜轮把它吃掉,资源线就再也搜不到。两边的口径都该各自干净:
+        #: 资源线用探针词;大瓜线用**自己的**坐标(热榜/被求名/公众号瓜)。
+        if cat != DAGUA_CATEGORY:
+            try:
+                from app.services import hot_cycle as _hc
 
-            probe_words = _hc.unfed_search_words(
-                db, user_id, top=int(getattr(
-                    settings, "douyin_leads_probe_words", 2) or 0))
-        except Exception:  # noqa: BLE001 - 取词失败不挡这一轮
-            logger.debug("探针词取词失败", exc_info=True)
+                probe_words = _hc.unfed_search_words(
+                    db, user_id, top=int(getattr(
+                        settings, "douyin_leads_probe_words", 2) or 0))
+            except Exception:  # noqa: BLE001 - 取词失败不挡这一轮
+                logger.debug("探针词取词失败", exc_info=True)
         if cat == "大瓜":
             from app.services import demand_watch as _dw
 
@@ -2319,7 +2345,10 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
                 leads = kept
                 if leads:
                     _save_leads(db, user_id, leads)  # 落库:转发量只在这一次有效(结算要用)
-                    push_leads(leads, settings, platform=plat, session=db, user_id=user_id)
+                    #: ★ 大瓜专轮用**自己的 AI 分数线**(`douyin_dagua`),与资源线
+                    #: (`douyin_peer`,校准作业调到 7)分开 —— 否则吃瓜线索被资源线的线挡掉。
+                    push_leads(leads, settings, platform=plat, session=db, user_id=user_id,
+                               ai_section=("douyin_dagua" if cat == DAGUA_CATEGORY else ""))
             # ⚠️ **按词源分开报**(2026-10-05):只报总数看不出"哪档在起作用" ——
             # 而实测两档差了 86 个百分点(资源名 86% / 热榜种子 0%)。
             # 不分开就永远发现不了"四成预算花在 0% 有效率的词上"这件事。

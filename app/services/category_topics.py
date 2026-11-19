@@ -91,6 +91,28 @@ NICHE_OTHER = "其他"
 
 _CONFIG_KEY = "lead_word_category"          # 轮换游标(存在 system_config,重启不丢)
 
+#: ★★ **主轮轮换要跳过的类目**(2026-11-19,用户口径「我们资源的监控,和大瓜的监控分开,
+#: 不要互占资源」)。这些类目**有自己的专轮**(大瓜:`douyin_leads_dagua_tick`),
+#: 留在主轮轮换里只会**白占 1/6 的搜索名额** —— 实测近 7 天主轮轮到大瓜共 9 轮(最多)、
+#: 产出只有 2 条,而资源类目(软件/影视)轮到的次数反而更少。
+#: ⚠️ 只影响**轮换**(`current_category` / `advance_category`),不影响 `pick` / `classify` ——
+#: 别的类目照旧按这张表判品类。
+#: ⚠️ 唯一的类目就是「大瓜」时**不跳**(否则轮换没有东西可轮,选词会崩)。
+SOLO_CATEGORIES: tuple[str, ...] = ("大瓜",)
+
+
+def rotation_order(skip_solo: bool = True) -> list[str]:
+    """**主轮轮换顺序**:默认剔除 `SOLO_CATEGORIES`(它们有自己的专轮)。
+
+    `skip_solo=False` 给"要看整张表"的调用方(如预览脚本)用。
+    ⚠️ 剔除后为空 ⇒ 回落到整张表(配置把类目表改得只剩大瓜时,主轮也不能停死)。
+    """
+    order = list(categories())
+    if not skip_solo:
+        return order
+    left = [c for c in order if c not in SOLO_CATEGORIES]
+    return left or order
+
 
 def parse_categories(raw: str) -> dict[str, tuple[str, ...]]:
     """`资料:真题,考公|影视:短剧,漫剧` → `{"资料": ("真题","考公"), "影视": ("短剧","漫剧")}`。
@@ -408,22 +430,37 @@ def current_category(session) -> str:
     """本轮该类目 —— 读轮换游标;没设过(或表已变)就从第一个开始。
 
     游标存 `system_config`,**跨重启不丢**(否则每次重启都从头开始 = 永远只搜第一类)。
+
+    ★ 2026-11-19:游标若停在**有专轮的类目**(`SOLO_CATEGORIES`,目前是「大瓜」),
+    主轮**顺延到下一个** —— 拆开之前主轮每 6 轮里有 1 轮被大瓜占掉(实测那些轮次
+    产出 2 条、资源类目反而搜得更少)。容器刚升上来时游标可能还停在旧值,这里兜住。
     """
     from app.db.models import SystemConfig
 
-    order = list(categories())
+    order = rotation_order()
     row = session.scalar(select(SystemConfig).where(SystemConfig.key == _CONFIG_KEY))
     cur = (row.value if row else "") or ""
-    # 表改了(类目被删/改名)时游标可能失效 → 回落到第一个,别让整条链崩在 KeyError 上
-    return cur if cur in order else order[0]
+    if cur in order:
+        return cur
+    # 表改了(类目被删/改名)或游标停在专轮类目 ⇒ 顺延到轮换表里最近的下一类
+    full = list(categories())
+    if cur in full:
+        step = full.index(cur)
+        for n in range(1, len(full) + 1):
+            nxt = full[(step + n) % len(full)]
+            if nxt in order:
+                return nxt
+    return order[0]
 
 
 def current_index(session) -> int:
     """当前类目在轮换表里的**位置**(0 起)。给"跟着类目一起轮换"的别处用(如夸克专搜词)。
 
     ⚠️ 取不到就回 0 —— 调用方都是"轮换起点",不是关键判据,别为一个越界抛异常。
+    ⚠️ 2026-11-19 起位置按 **`rotation_order()`**(已剔除专轮类目)算 —— 否则下游拿到的
+    下标会把「大瓜」那格也算进去,主轮跳过它之后起点就错一格。
     """
-    order = list(categories())
+    order = rotation_order()
     try:
         return order.index(current_category(session))
     except ValueError:                       # pragma: no cover - current_category 已挡过
@@ -435,11 +472,15 @@ def advance_category(session) -> str:
 
     在**一轮出词之后**调用(而不是之前)—— 这样若本轮中途失败,下次仍然搜同一类,
     不会"跳着跳过某个类目"。
+
+    ★ 2026-11-19:推进的目标是 **`rotation_order()`** —— 有专轮的类目(大瓜)不在轮换圈里,
+    所以主轮**永远不会搜到大瓜**(它只由 `douyin_leads_dagua_tick` 按自己的节奏搜)。
     """
     from app.db.models import SystemConfig
 
-    order = list(categories())
-    nxt = order[(order.index(current_category(session)) + 1) % len(order)]
+    order = rotation_order()
+    cur = current_category(session)          # 已在 `order` 里(见 current_category 的顺延)
+    nxt = order[(order.index(cur) + 1) % len(order)]
     row = session.scalar(select(SystemConfig).where(SystemConfig.key == _CONFIG_KEY))
     if row is None:
         session.add(SystemConfig(key=_CONFIG_KEY, value=nxt))

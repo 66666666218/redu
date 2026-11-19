@@ -2845,6 +2845,77 @@ class TestDaguaDedicatedRound:
         assert not any(w in plain for w in gua), (
             f"不传 cat 时按游标出词,却冒出了大瓜词:{plain}")
 
+    def test_专轮用独立的AI分数线(self, session, monkeypatch) -> None:
+        """★★ AI 分数线**按来源分家**(2026-11-19,用户口径「不要互占资源」)。
+
+        资源线的线是校准作业按**资源线索的搬成率/热度**调出来的(现在 7)——
+        拿它去卡吃瓜线索是两码事(实测近 7 天 5 条大瓜线索、线 7 只过 1 条)。
+        专轮必须传 `ai_section="douyin_dagua"`,主轮传空串(旧行为)。
+        """
+        from app.services import douyin_leads as dl
+
+        self._spy(monkeypatch, dl, session)
+        got: list[str] = []
+        monkeypatch.setattr(dl, "push_leads",
+                            lambda *a, **k: got.append(k.get("ai_section", "<缺参>")))
+
+        lead = {"aweme_id": "d1", "title": "《大瓜》最新", "url": "https://v.douyin.com/x",
+                "mark": "大瓜", "author": "作者",
+                "kouling": {"kind": "share", "share_url": "https://pan.xunlei.com/s/abc"}}
+        monkeypatch.setattr(dl, "collect_leads", lambda *a, **k: ([dict(lead)], "CDP"))
+        #: ⚠️ `apply_kouling` 会去真转存(网络) ⇒ 钉成空实现,只留"有没有链"的判据。
+        monkeypatch.setattr(dl, "apply_kouling", lambda *a, **k: None)
+
+        dl.douyin_leads_dagua_tick(settings=_settings_like())
+        assert got == ["douyin_dagua"], f"专轮没用独立的 AI 分数线:{got}"
+
+        got.clear()
+        dl.run_douyin_leads(session, 1, _settings_like(), category="影视", advance=False)
+        assert got == [""], f"主轮不该传 ai_section(要保持旧行为):{got}"
+
+    def test_探针词只喂资源线(self, session, monkeypatch) -> None:
+        """★★ 探针词**不进大瓜轮**(2026-11-19)。
+
+        实测近 9 天:大瓜轮 8 轮探针命中 0 / 产出 0;资料 14 命中 / 2 产出、
+        小游戏 8 命中。探针词被大瓜轮吃掉(`mark_fed_search` 打戳 ⇒ 同一个词只搜一次)
+        ⇒ 资源线再也搜不到它。大瓜线用**自己的**坐标(热榜/被求名/公众号瓜)。
+        """
+        from app.services import douyin_leads as dl
+        from app.services import hot_cycle as hc
+
+        self._spy(monkeypatch, dl, session)
+        taken: list[int] = []
+        monkeypatch.setattr(
+            hc, "unfed_search_words",
+            lambda db, uid, top=2: taken.append(int(top)) or ["探针词X"])
+        got: dict = {}
+        monkeypatch.setattr(dl, "search_keywords",
+                            lambda db, uid, top, settings, hot=None, cat=None:
+                                got.update(hot=list(hot or [])) or ["假词"])
+        monkeypatch.setattr(dl, "push_leads", lambda *a, **k: None)
+
+        dl.run_douyin_leads(session, 1, _settings_like(), category="大瓜", advance=False)
+        assert taken == [], f"大瓜轮不该去取探针词(取了会打戳吃掉):{taken}"
+        assert "探针词X" not in (got.get("hot") or []), got
+
+        dl.run_douyin_leads(session, 1, _settings_like(), category="影视", advance=False)
+        assert taken, "资源线必须继续取探针词"
+        assert "探针词X" in (got.get("hot") or []), got
+
+    def test_主轮显式传大瓜时也不搜它(self, session, monkeypatch) -> None:
+        """★ 主轮(`advance=True`)**不许**搜专轮类目 —— 就算调用方误传 `category="大瓜"`。
+
+        `current_category` 已经跳过它了,这里挡的是**别的调用方**误传;
+        专轮靠 `advance=False` 区分,不受影响。
+        """
+        from app.services import category_topics as ct
+        from app.services import douyin_leads as dl
+
+        got = self._spy(monkeypatch, dl, session)
+        dl.run_douyin_leads(session, 1, _settings_like(), category="大瓜", advance=True)
+        assert got.get("cat") != "大瓜", f"主轮仍然搜了大瓜:{got}"
+        assert got.get("cat") in ct.rotation_order(), f"改搜的类目不在轮换表里:{got}"
+
     def test_空cron即关闭(self, session, monkeypatch) -> None:
         """`douyin_leads_dagua_cron=""` = 关掉(退回旧行为)。
 

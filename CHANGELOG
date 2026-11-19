@@ -1,3 +1,24 @@
+- [2026-11-19 19:05] REFACTOR: **资源监控与大瓜监控拆开,不再互占名额/词源/分数线**。
+  起因(用户口径):「我们资源的监控,和大瓜的监控分开,不要互占资源」——抖音线索原来只有一条线,
+  「大瓜」挤在 6 类轮换里。实测近 7 天:大瓜 **9 轮(最多)**共 72 个词、产出只有 **2 条**;
+  而资源类目(软件/影视)轮到的次数反而更少。四处「互占」逐一拆开:
+  ① **轮换名额**:新增 `category_topics.SOLO_CATEGORIES`(`大瓜`)+ `rotation_order()`,
+     `current_category`/`advance_category`/`current_index` 全部改走轮换表 ⇒ 主轮 6 轮全是资源类目,
+     大瓜只由专轮(`douyin_leads_dagua_tick`,01:24/09:24)搜;旧游标若停在 `大瓜` 会**顺延**而不卡住。
+  ② **误传兜底**:`run_douyin_leads(advance=True)` 即使被传 `category="大瓜"` 也改搜下一个资源类目
+     (专轮靠 `advance=False` 区分,不受影响)。
+  ③ **词源分家**:探针词(`hot_cycle.unfed_search_words`)**只喂资源线** —— 实测大瓜轮 8 轮探针
+     命中 0/产出 0,而它一取就打戳(`mark_fed_search`),等于把资源线的词白白吃掉;
+     大瓜线继续用**自己的**坐标(热榜/被求名/公众号瓜,大瓜轮分别命中 18/0/0)。
+  ④ **AI 分数线分家**:`push_leads` 新增 `ai_section`;大瓜专轮写 `ai_filter_decisions.section='douyin_dagua'`,
+     **不受**资源线校准出来的 `ai_min_score:douyin_peer=7` 约束(那条线是按资源线索的搬成率算的,
+     实测近 7 天 5 条大瓜线索过线 7 只剩 1 条)。飞书群与推送台账仍**共用** `douyin_peer`
+     —— 用户要的是"不互占名额",不是"分两个群"。
+  单测:`test_category_topics.py` 新增「主轮跳过专轮类目」「旧游标顺延」;`test_douyin_leads.py` 新增
+  「专轮用独立 AI 分数线」「探针词只喂资源线」「主轮误传大瓜时不搜它」。关联套件 276+164 全绿。
+  (Files: app/services/category_topics.py, app/services/douyin_leads.py, config/settings.py,
+  tests/test_category_topics.py, tests/test_douyin_leads.py)
+
 - [2026-11-19 17:20] FIX: **推送台账的判重身份与我方链分离 —— 源链优先,我方链那档要过标题判据**。
   起因(今天那道盘链闸上线前的只读重放):按**我方链**判重,72h 会挡掉 **282 行真实的不同资源**。
   根因是 `_enrich` 的「资源级复用」按标题近似匹配配错了链:310 条我方链里 **67 条(21.6%)** 挂着 >1 个不同源链 ——
