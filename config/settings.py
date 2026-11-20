@@ -1499,6 +1499,18 @@ class Settings(BaseSettings):
     #: ⚠️ 这条不是**唯一**的安全层:删除永远**进回收站**(可捞回),且
     #: **删过东西的家立刻作废**(`drop_homes`)。TTL 放宽的是"窗口",不是"兜底"。
     pan_auto_clean_quark_ttl_hours: float = 48.0
+    #: ★★★ **夸克删重复时是否进回收站**(2026-11-20 事故后新增,默认 True 保持不变)。
+    #:
+    #: 事故现场:夸克1 的配额 86 TiB **一直**是 `ratio=1.0000`,而去重作业每天「成功删 8 个」——
+    #: 因为 `apply_plan` 把 `to_recycle=True` **硬编码**了,删只是挪进回收站。
+    #: 实测该回收站积到 **56,893 条 ≈ 29.1 GiB 可见 / 外推约 53 TiB**(占配额 62%),
+    #: 而 `move_deep_recycle_at` = 回收时间 + 40 天 ⇒ **回收站不会自己腾空间**。
+    #: ⇒ 想靠去重真正解决容量,必须让删除**彻底删**;但那不可恢复,所以做成开关,
+    #: 由人显式打开,且只在「我方分享链没引用它」时才允许(`keep_shared` 那层照旧先跑)。
+    #:
+    #: ⚠️ 默认 **True**(= 保持旧行为「进回收站」)。打开为 False 前请先确认:
+    #: 回收站里没有还想捞回的东西,且 `quark_dup.protected_fids()` 能拉全。
+    pan_auto_clean_quark_to_recycle: bool = True
     pan_auto_clean_xunlei_days: int = 3            # 迅雷:闲置超过这么多天的转存视为过期(用户 2026-10-20 定 3 天)
     pan_auto_clean_baidu_report: bool = True       # 百度只报告(永不自动删)
     #: 百度**跨目录重复**识别的扫描根(2026-10-16)。空 = 用 `baidu_dup.DEFAULT_ROOT`

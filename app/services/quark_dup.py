@@ -512,11 +512,14 @@ def build_plan(qt: Any, *, home_prefix: str = "redian监听", mmdd_prefix: str =
 
 
 def apply_plan(qt: Any, plan: dict, *, batch: int = 100,
-               cache: ScanCache | None = None) -> dict:
-    """按计划**删进回收站**(可捞回)。返回 `{"deleted": n, "bytes": n, "failed": [...]}`。
+               cache: ScanCache | None = None, to_recycle: bool = True) -> dict:
+    """按计划删除。返回 `{"deleted": n, "bytes": n, "failed": [...]}`。
 
-    ⚠️ 只走 `delete_files(..., to_recycle=True)`:**永不彻底删**。
-    清单丢了还能捞,彻底删就真没了 —— 而盘商回收站是现成的兜底,没有理由不用。
+    ⚠️ **默认 `to_recycle=True`(进回收站,可捞回)**;`False` = **彻底删,不可恢复**。
+    2026-11-20 事故后才加这个开关:此前这里是**硬编码** `to_recycle=True`,
+    于是"每天成功删 8 个"却一个字节都没释放(回收站不腾空间,见
+    `settings.pan_auto_clean_quark_to_recycle` 的整段说明)。
+    调用方(自动作业)只在「我方能救回的东西都排除掉了」之后才该传 `False`。
 
     `cache` = 扫描快照。**删完必须把受影响的家作废** —— 那些家的内容已经变了,
     再拿旧快照去判断,就是拿过期数据决定删哪个文件。
@@ -529,13 +532,15 @@ def apply_plan(qt: Any, plan: dict, *, batch: int = 100,
     for i in range(0, len(fids), batch):
         chunk = fids[i:i + batch]
         try:
-            qt.delete_files(chunk, to_recycle=True)
+            #: `confirm=not to_recycle`:彻底删必须显式确认(见 `delete_files` 的头注)。
+            qt.delete_files(chunk, to_recycle=to_recycle, confirm=not to_recycle)
             deleted += len(chunk)
             freed += sum(by_fid[f]["size"] for f in chunk)
         except Exception as exc:                    # noqa: BLE001 - 一批失败不该中断整轮
             failed.append({"n": len(chunk), "error": f"{type(exc).__name__}: {str(exc)[:160]}"})
             logger.warning("删除失败(共 %d 个):%s", len(chunk), str(exc)[:160])
-    out = {"deleted": deleted, "bytes": freed, "failed": failed}
+    out = {"deleted": deleted, "bytes": freed, "failed": failed,
+           "to_recycle": bool(to_recycle)}
     if cache and deleted:
         homes = {str(d.get("home") or "") for d in plan.get("delete", [])}
         out["dropped_homes"] = cache.drop_homes(h for h in homes if h)
@@ -638,14 +643,14 @@ def _pkg_out(groups: list[dict], n_protected: int) -> dict:
 
 
 def apply_package_plan(qt: Any, plan: dict, *, to_recycle: bool = True) -> dict:
-    """执行 `build_package_plan` 的计划:把要删的那些**整包目录**送进回收站。
+    """执行 `build_package_plan` 的计划:把要删的那些**整包目录**删掉。
 
-    ⚠️ **删的是目录本身**(夸克支持),`to_recycle=True` 是硬编码的调用参数 ——
-    本仓的口径是"删除永远可捞回"(见 `pan_auto_clean` 头注)。
+    ⚠️ **删的是目录本身**(夸克支持)。`to_recycle=True`(默认)= 回收站可捞回;
+    `False` = **彻底删,不可恢复**(2026-11-20 起才可配置,原因见 `apply_plan`)。
     """
     fids = [g["drop"][i]["fid"] for g in plan.get("groups") or [] for i in range(len(g["drop"]))]
     if not fids:
         return {"deleted": 0, "bytes": 0, "failed": []}
-    res = qt.delete_files(fids, to_recycle=to_recycle)
+    res = qt.delete_files(fids, to_recycle=to_recycle, confirm=not to_recycle)
     return {"deleted": len(fids), "bytes": int(plan.get("bytes") or 0),
             "failed": list((res or {}).get("failed") or [])}

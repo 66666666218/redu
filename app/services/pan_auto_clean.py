@@ -90,6 +90,9 @@ def clean_quark(db: Session, user_id: int, settings, *, dry_run: bool, left: int
     #: 每轮从零重扫、在同一处撞预算 ⇒ `complete` 恒 False ⇒ **夸克连着三天没删过东西**。
     #: 见 `settings.pan_auto_clean_quark_ttl_hours` 与 `quark_dup.build_plan` 的说明。
     ttl = float(getattr(settings, "pan_auto_clean_quark_ttl_hours", 48.0) or 48.0)
+    #: ★★★ **这一档是否进回收站**(2026-11-20 事故后从硬编码改成配置)。
+    #: 默认 True 保持旧行为;设 False 才会真正释放空间(见 settings 的整段说明)。
+    to_recycle = bool(getattr(settings, "pan_auto_clean_quark_to_recycle", True))
     fid_base = str(getattr(settings, "quark_fid_store", "") or "")
     cache_base = str(getattr(settings, "pan_auto_clean_quark_cache", "") or "") \
         or "data/quark_dup_cache.json"
@@ -187,14 +190,14 @@ def clean_quark(db: Session, user_id: int, settings, *, dry_run: bool, left: int
             per.append(one)
             continue
         plan["delete"] = todo                     # 只喂截断后的清单给执行器
-        res = quark_dup.apply_plan(qt, plan, cache=cache)
+        res = quark_dup.apply_plan(qt, plan, cache=cache, to_recycle=to_recycle)
         one["deleted"] = int(res.get("deleted") or 0)
         one["freed"] = int(res.get("bytes") or 0)
         if res.get("failed"):
             one["errors"] = res["failed"][:3]
         if take:
             res2 = quark_dup.apply_package_plan(qt, {"groups": take, "bytes": one["pkg_bytes"]},
-                                                to_recycle=True)
+                                                to_recycle=to_recycle)
             one["pkg_deleted"] = int(res2.get("deleted") or 0)
             one["freed"] = int(one["freed"]) + int(res2.get("bytes") or 0)
             if res2.get("failed"):

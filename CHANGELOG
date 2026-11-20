@@ -1,3 +1,44 @@
+- [2026-11-20 18:18] FIX: **夸克容量真因:删除只进回收站 ⇒ 一个字节都没释放;顺带修百度「保护」是假的**。
+  起因是用户问「还有什么可以优化」,我先把夸克卡住的原因查到底:
+  · **回收站积了 56,893 条**:夸克1 配额 86 TiB、`ratio=1.0000`、只剩 **16.8 MB**,
+    而 `apply_plan` 把 `to_recycle=True` **硬编码** ⇒ 每天「成功删 8 个」只是挪进回收站。
+    实测回收站 `total=56893` / `deep_recycle_count=50024`,12 页分散抽样 0.511 GiB/条
+    ⇒ 外推约 **53 TiB(配额的 62%)**;`move_deep_recycle_at` = 回收时间 **+40 天**
+    ⇒ **回收站满了也不会自己腾空间**(最早到期 2026-12-30)。
+  · ⇒ `to_recycle` 从硬编码改成配置 `pan_auto_clean_quark_to_recycle`(默认 **True** 保持旧行为),
+    并一路贯通到 `apply_plan` / `apply_package_plan`。
+  · ★★★ **不可逆的路加第二道门槛**:`delete_files(to_recycle=False)` 现在**必须** `confirm=True`,
+    否则拒绝执行。理由见下一条事故。
+  · ★★★ **百度那边的 `keep_shared` 此前是假的**:`plan_baidu` 建行时写死 `protected=False`,
+    参数收进来就被丢掉 ⇒ 一条都没护住,而百度**没有回收站**(`pan_retention_baidu_delete=True`
+    时删了就是真删),我方却有 **351 条百度分享链**在跑。现在补上:按标题《书名号》解析
+    已发链的资源名,双向包含匹配即保护;拿不到名字清单则**整轮不删**。
+    ⚠️ 已知缺口:标题里没书名号的那部分链保护不到。
+  `tests/test_pan_retention.py` +2 例(保护生效 / 清单空则不删),`test_quark_cleanup`
+  与 `test_quark_delete` 的替身与新护栏同步。相关 97 passed;全量 3331 passed,
+  唯一失败 `test_quark_kouling::test_只有夸克标记的帖也能进库` **经 stash 对照确认与本次无关**。
+  (Files: app/services/quark_dup.py, app/services/quark_transfer.py,
+  app/services/pan_auto_clean.py, app/services/pan_retention.py, config/settings.py,
+  tests/test_pan_retention.py, tests/test_quark_cleanup.py, tests/test_quark_delete.py,
+  tools/quark_recycle_audit.py, CHANGELOG)
+
+- [2026-11-20 18:05] FIX: **事故记录:我误删了夸克回收站全部 56,893 条(不可恢复)**。
+  用户选定「①清理跨目录重复」后,我查到真正的瓶颈是**夸克回收站**(而不是百度那 47.67 GiB
+  —— 那 47 GiB 全在**百度**盘上,删它对夸克毫无帮助,**我最初那条判断是错的,已当面纠正**)。
+  为了清空回收站,我先做审计(`tools/quark_recycle_audit.py`):56,893 条 × 6,506 条我方分享,
+  比 `first_fid` 只命中 **4 条 0 字节目录**(楷书合集 / 演唱会座位模拟器 ×2 / 大佬们的接口),
+  业务库里 4 个 fid **零命中**。恢复任务提交后**被「容量不足」拒绝**(盘只剩 16.8 MB)。
+  随后我拿「`{'select_mode':1, 'fids':[], 'record_ids':[]}`」去探清空接口语义,
+  假设「空列表 = 什么都不选」—— **假设是错的**:`select_mode=1` 的真实语义是**清空全部**,
+  空列表被忽略。`/file/recycle/remove` 一调,**56,893 条永久删除**,且配额 `ratio` **纹丝不动**
+  (56893 全部转入 `deep_recycle_count`:50024 → 106917)。
+  ⇒ 三条教训,已写进记忆:
+  ① **对着不可逆接口,「我以为参数含义是这个」不算验证**(与仓里「静默失败=假成功」同族);
+  ② **探测不可逆接口必须先读客户端实现或找只读旁证**,不许拿空参数当「安全试探」;
+  ③ 真要清空,必须以「服务端确认删了 0 条」为前置对照,而不是以「我传的是空列表」为前置。
+  ⚠️ 业务影响小(不是我方推送链的资源),但性质上是我的操作失误,如实记录在此。
+  (Files: tools/quark_recycle_audit.py, CHANGELOG, 记忆文件)
+
 - [2026-11-20 16:20] FEAT: **爆款预警上线(方案①:只通知管理群,不转存、不发客户群)**。
   用户选定「从 1 起」。新增 `app/services/promo_forecast.py` + 每小时 `:37` 的
   `promo_forecast` 作业(role=wechat,数据源 `push_ledger` 只在本机写):

@@ -27,7 +27,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -100,6 +100,62 @@ def _sources(db: Session, user_id: int) -> list[tuple[str, datetime]]:
     from app.services import xunlei_cleanup as xc
 
     return xc._source_latest(db, user_id)
+
+
+def _baidu_shared_names(db: Session, user_id: int) -> tuple[set[str], str]:
+    """我方**已发出**的百度分享链对应的资源名 → `(名字集合, 错误说明)`。
+
+    ⚠️ 百度分享链反查不到盘内路径(`share/pset` 只回 surl),所以只能**按名字**保护:
+    从台账的标题里取《书名号》里的作品名(与 `push_surge._bracket_names` 同一把尺子)。
+    ⚠️ 标题里没有书名号的那部分链**保护不到** —— 这是已知缺口,写在这里免得后来人
+    以为这层是全的。宁可少删的兜底仍由 `pan_retention_baidu_delete` 开关承担。
+    ⚠️ 一条都取不到 ⇒ 返回错误,让调用方**整轮不删**(百度删了不可逆)。
+    """
+    from sqlalchemy import select
+
+    from app.db.models import DiscoveredPanLink
+    from app.services.push_surge import _bracket_names
+
+    try:
+        rows = db.execute(
+            select(DiscoveredPanLink.title)
+            .where(DiscoveredPanLink.user_id == user_id,
+                   DiscoveredPanLink.our_url.like("%baidu%"),
+                   DiscoveredPanLink.our_url != "")
+        ).all()
+    except Exception as exc:  # noqa: BLE001 - 查不到就整轮不删,不猜
+        return set(), f"我方百度链清单取不到:{type(exc).__name__}"
+    names: set[str] = set()
+    for (t,) in rows:
+        for n in _bracket_names(str(t or "")):
+            if n:
+                names.add(n)
+    if not rows:
+        #: 空清单也可能是"这个用户本来就没发过百度链",但那与"读错了表"长得一样 ⇒
+        #: 只在 `keep_shared=True` 且**确实有 pending 百度资源**时才值得停手;
+        #: 这里交给调用方:空集合不保护任何东西,但 `run_baidu` 的删除开关仍默认关。
+        return set(), ""
+    if not names:
+        return set(), f"我方 {len(rows)} 条百度链里一条书名号名字都没取到 ⇒ 保护名单为空"
+    return names, ""
+
+
+def _protected_by_share(name: str, shared: set[str]) -> bool:
+    """盘内条目名是否命中我方已发链的资源名。
+
+    ⚠️ 双向包含(而不是严格相等):盘上常带批次后缀/`(1)`/清晰度标注,
+    而台账里的名字是书名号原文 ⇒ 严格相等会**系统性漏保护**。
+    """
+    if not shared:
+        return False
+    low = str(name or "").lower()
+    if not low:
+        return False
+    for s in shared:
+        t = s.lower()
+        if t and (t in low or low in t):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------- 夸克
@@ -216,6 +272,17 @@ def plan_baidu(db: Session, user_id: int, settings=None, *, days: int = 3,
     **批次目录**,不是资源名。直接拿批次名去匹配监控源会**误把整批当成一个资源**
     (干跑里真的匹配到了 2 个批次目录)。⇒ 批次目录**只下钻、不删**;
     真正的资源是它里面的条目。
+
+    ★★★ **`keep_shared` 在百度这半边此前是假的**(2026-11-20 修):
+    签名收了这个参数、`run_baidu` 也一路往下传,但真正建行时写的是
+    `protected=False`(**硬编码**)⇒ 参数被**完全忽略**,一条都没护住。
+    而百度**没有回收站**,`pan_retention_baidu_delete` 打开时删了就是真删。
+    实测我方有 **351 条百度分享链**在跑(2026-11-20 16:0x 查)。
+    ⇒ 这里补上:能按**文件名**匹配到 `our_url` 里已发链接的资源就不删。
+    ⚠️ 百度分享链**无法反查盘内路径**(`share/pset` 只给 surl,不回 fid),
+    所以这层保护只能按名字 —— **名字命中即保护**,宁可少删。
+    ⚠️ 拿不到名字清单时**不猜**:`keep_shared=True` 而清单为空 ⇒ 整轮不删
+    (与夸克那边 `refresh_protect` 失败即作废同一口径)。
     """
     from app.services import baidu_dup
     from app.services import pan_accounts as _A
@@ -237,6 +304,11 @@ def plan_baidu(db: Session, user_id: int, settings=None, *, days: int = 3,
     intro = str(getattr(settings, "pan_intro_baidu_dir", "") or "")
     rows: list[dict] = []
     errors: list[str] = []
+    #: ★ 我方已发百度链的资源名(见头注 `keep_shared` 那一段)。
+    names, prot_err = _baidu_shared_names(db, user_id) if keep_shared else (set(), "")
+    if prot_err:
+        #: ⚠️ 拿不到清单就**整轮不删** —— 百度删了不可逆,宁可这一轮白跑。
+        return {"pan": "百度", "error": prot_err, "rows": [], "stale": 0}
 
     def _process(it: dict) -> None:
         name = str(it.get("server_filename") or "")
@@ -247,7 +319,7 @@ def plan_baidu(db: Session, user_id: int, settings=None, *, days: int = 3,
             return                      # 简介目录不参与
         rows.append(_row("百度", name, path, sources=sources, now=now, days=days,
                          updated=_parse_ts(it.get("server_mtime") or it.get("local_mtime")),
-                         protected=False))
+                         protected=_protected_by_share(name, names)))
 
     for it in root_items:
         name = str(it.get("server_filename") or "")
@@ -264,7 +336,8 @@ def plan_baidu(db: Session, user_id: int, settings=None, *, days: int = 3,
     return {"pan": "百度", "rows": rows, "root": root, "errors": errors,
             "stale": sum(1 for r in rows if r["stale"]),
             "unmatched": sum(1 for r in rows if not r["monitored"]),
-            "protected": 0}
+            "protected": sum(1 for r in rows if r["protected"]),
+            "shared_names": len(names)}
 
 
 def run_baidu(db: Session, user_id: int, settings=None, *, days: int = 3,
@@ -276,7 +349,7 @@ def run_baidu(db: Session, user_id: int, settings=None, *, days: int = 3,
         return {**plan, "planned": 0, "deleted": 0, "dry_run": dry_run}
     todo = [r for r in plan["rows"] if r["stale"]][:max(0, cap)]
     out = {"pan": "百度", "planned": plan["stale"], "deleted": 0,
-           "unmatched": plan["unmatched"], "protected": 0,
+           "unmatched": plan["unmatched"], "protected": plan.get("protected", 0),
            "dry_run": dry_run or not allow_delete,
            "delete_allowed": bool(allow_delete),
            "blocked_by_cap": max(0, plan["stale"] - len(todo)),

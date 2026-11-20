@@ -232,20 +232,31 @@ def test_只动指定月份的副本() -> None:
 
 def test_删除只走回收站_永不彻底删() -> None:
     """★ 「彻底删」和「回收站」的差别是**能不能捞回来**。
-    判据错了还能从回收站捡回来,彻底删就真没了 —— 盘商回收站是现成的兜底,没有理由不用。"""
+    判据错了还能从回收站捡回来,彻底删就真没了 —— 盘商回收站是现成的兜底,没有理由不用。
+
+    ★ 2026-11-20 事故后:`to_recycle` 从硬编码改成**默认 True 的参数**
+    (回收站不腾空间,想真释放得显式关掉),彻底删另需 `confirm=True`。
+    """
     from app.services.quark_dup import apply_plan
 
     seen: list = []
 
     class _Q:
-        def delete_files(self, fids, *, to_recycle=True):
-            seen.append((list(fids), to_recycle))
+        def delete_files(self, fids, *, to_recycle=True, confirm=False):
+            seen.append((list(fids), to_recycle, confirm))
             return {}
 
     plan = {"delete": [{"fid": "A", "size": 10}, {"fid": "B", "size": 20}]}
     out = apply_plan(_Q(), plan)
-    assert seen == [(["A", "B"], True)], f"必须带 to_recycle=True,实际 {seen}"
+    assert seen == [(["A", "B"], True, False)], \
+        f"默认必须进回收站且不需要 confirm,实际 {seen}"
     assert out["deleted"] == 2 and out["bytes"] == 30 and out["failed"] == []
+
+    #: 显式传 False ⇒ 彻底删,且**必须自动带 confirm=True**(否则服务层会拒绝)
+    seen.clear()
+    out2 = apply_plan(_Q(), plan, to_recycle=False)
+    assert seen == [(["A", "B"], False, True)], f"彻底删必须带 confirm,实际 {seen}"
+    assert out2["to_recycle"] is False
 
 
 def test_一批删除失败要记下来并继续下一批() -> None:
@@ -256,7 +267,7 @@ def test_一批删除失败要记下来并继续下一批() -> None:
         def __init__(self):
             self.n = 0
 
-        def delete_files(self, fids, *, to_recycle=True):
+        def delete_files(self, fids, *, to_recycle=True, confirm=False):
             self.n += 1
             if self.n == 1:
                 raise RuntimeError("夸克接口 500")
@@ -654,7 +665,7 @@ class _PkgQT:
     def list_dir(self, fid="0"):
         return list(self._dirs.get(fid, []))
 
-    def delete_files(self, fids, to_recycle=True):  # noqa: ARG002
+    def delete_files(self, fids, to_recycle=True, confirm=False):  # noqa: ARG002
         self.deleted = list(fids)
         return {"failed": []}
 

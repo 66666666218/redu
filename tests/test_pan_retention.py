@@ -174,3 +174,54 @@ class TestBaidu:
         out = pr.run_baidu(session, 1, _S(), days=3, dry_run=False,
                            allow_delete=True)
         assert out["deleted"] == 1 and _FakeBaidu.deleted == ["/root/旧资源A"]
+
+    def test_我方已发链的资源不删(self, session, monkeypatch) -> None:
+        """★★★ 2026-11-20 修:`keep_shared` 在百度这半边此前是**假的**。
+
+        `plan_baidu` 建行时硬编码 `protected=False`,参数收进来就被丢掉 ⇒
+        删了 = 已发出的客户链接立刻失效,而百度**没有回收站**(删了捞不回来)。
+        判据用**标题里的《书名号》**(百度分享链反查不到盘内路径,只能按名字护)。
+        """
+        from app.db.models import DiscoveredPanLink
+
+        _source(session, "旧资源A", 5)
+        _source(session, "旧资源B", 5, sid="s2")
+        session.add(DiscoveredPanLink(
+            user_id=1, platform="weibo", origin_url="https://pan.baidu.com/s/x",
+            title="《旧资源A》更至第 8 集", our_url="https://pan.baidu.com/s/1abc"))
+        session.commit()
+        self._patch(monkeypatch, [
+            {"server_filename": "旧资源A", "path": "/root/旧资源A", "isdir": True,
+             "server_mtime": int(_old(10).timestamp())},
+            {"server_filename": "旧资源B", "path": "/root/旧资源B", "isdir": True,
+             "server_mtime": int(_old(10).timestamp())},
+        ])
+        p = pr.plan_baidu(session, 1, _S(), days=3)
+        by = {r["name"]: r for r in p["rows"]}
+        assert by["旧资源A"]["protected"] is True, "我方已发链的资源必须被保护"
+        assert by["旧资源A"]["stale"] is False
+        assert by["旧资源B"]["stale"] is True, "没发过链的照常过期"
+        assert p["protected"] == 1
+
+        #: 真跑一遍:只删 B
+        out = pr.run_baidu(session, 1, _S(), days=3, dry_run=False, allow_delete=True)
+        assert out["deleted"] == 1 and _FakeBaidu.deleted == ["/root/旧资源B"]
+
+    def test_保护名单为空时整轮不删(self, session, monkeypatch) -> None:
+        """⚠️ 拿不到我方链的名字清单就**不猜** —— 百度删了不可逆,宁可这轮白跑。
+
+        判据:有我方百度链,但从标题里一条书名号名字都没解析出来 ⇒ 返回错误、不删。
+        """
+        from app.db.models import DiscoveredPanLink
+
+        _source(session, "旧资源A", 5)
+        session.add(DiscoveredPanLink(
+            user_id=1, platform="weibo", origin_url="https://pan.baidu.com/s/x",
+            title="没有书名号的标题", our_url="https://pan.baidu.com/s/1abc"))
+        session.commit()
+        self._patch(monkeypatch, [{"server_filename": "旧资源A",
+                                   "path": "/root/旧资源A", "isdir": True,
+                                   "server_mtime": int(_old(10).timestamp())}])
+        out = pr.run_baidu(session, 1, _S(), days=3, dry_run=False, allow_delete=True)
+        assert out["deleted"] == 0 and _FakeBaidu.deleted == []
+        assert "保护名单为空" in str(out.get("error") or ""), out

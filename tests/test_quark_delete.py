@@ -44,7 +44,19 @@ class TestDeleteFiles:
         assert qt._calls[0]["path"] == "/1/clouddrive/file/delete"
 
     def test_显式要彻底删才用1(self, qt) -> None:
-        qt.delete_files(["fid1"], to_recycle=False)
+        """彻底删必须**两道门槛**:`to_recycle=False` **且** `confirm=True`。
+
+        ★ 2026-11-20 事故后才加的:此前对着不可逆接口,"我以为参数含义是这个"
+        不算验证 —— 那次拿「空列表=什么都不选」去探清空接口,`select_mode=1`
+        的真实语义是**清空全部**,空列表被忽略 ⇒ 56,893 条永久删除。
+        ⇒ 不可逆的这条路,现在少一个参数就**拒绝执行**(宁可报错也不删)。
+        """
+        out = qt.delete_files(["fid1"], to_recycle=False)
+        assert out["ok"] is False and qt._calls == [], \
+            "只传 to_recycle=False 不该发请求(还差 confirm)"
+
+        out = qt.delete_files(["fid1"], to_recycle=False, confirm=True)
+        assert out["ok"] is True
         assert qt._calls[0]["json"]["action_type"] == 1
 
     def test_空列表不发请求(self, qt) -> None:

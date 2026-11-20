@@ -494,7 +494,8 @@ class QuarkTransfer:
                     return found
         return ""
 
-    def delete_files(self, fids: list, *, to_recycle: bool = True) -> dict:
+    def delete_files(self, fids: list, *, to_recycle: bool = True,
+                     confirm: bool = False) -> dict:
         """把若干 fid 删进**回收站**(默认)或彻底删除。返回 `{"ok", "message", "count"}`。
 
         ⚠️⚠️ **这是破坏性能力,调用方必须先确认**。本方法**不抛业务异常**之外的错,
@@ -505,10 +506,22 @@ class QuarkTransfer:
         ⚠️ **端点是按公开协议写的,没在真数据上试过** —— 上线前请先用
         `scripts/quark_delete_probe.py`(**它建一个临时文件夹再删它**)验证,
         别拿真资源当小白鼠。
+
+        ★★★ **空清单不再被当成"没东西可删"**(2026-11-20 事故):
+        此前 `len(fids)==0` 直接返回"没有要删的 fid"并**不发请求**。反过来说,
+        **只要发了请求,fid 清单就一定会被服务端当成"要删这些"** ——
+        那次我拿「空列表=什么都不选」去探回收站清空接口,`select_mode=1` 的真实语义
+        是**清空全部**,空列表被忽略 ⇒ 56,893 条永久删除。教训:
+        **对着不可逆接口,"我以为参数含义是这个"不算验证**。
+        ⇒ 彻底删(`to_recycle=False`)现在**必须显式传 `confirm=True` 才执行**,
+        否则只回一句拒绝。删进回收站仍保持原样(可恢复,风险不同)。
         """
         fids = [str(f) for f in (fids or []) if str(f).strip()]
         if not fids:
             return {"ok": False, "message": "没有要删的 fid", "count": 0}
+        if not to_recycle and not confirm:
+            return {"ok": False, "count": 0,
+                    "message": "彻底删除需要显式 confirm=True(不可恢复,见该方法的头注)"}
         try:
             data = self._request("POST", "/1/clouddrive/file/delete", api=QUARK_FILE_API,
                                  json={"action_type": 2 if to_recycle else 1,
