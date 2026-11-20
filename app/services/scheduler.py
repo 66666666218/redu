@@ -500,6 +500,11 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     #: 是否会有提醒」—— 当时全仓没有任何一条按"推它的人变多"触发的提醒
     #: (见 `push_surge` 头注的对照表)。数据源是**全板块**推送台账 ⇒ 一个作业覆盖所有板块。
     from app.services.push_surge import push_surge_tick
+    #: ★ **爆款预警**(2026-11-20):用户口径「总结规律**主动发现爆款**再自建链」。
+    #: 与 `push_surge` 用的是同一份台账、同一套两层身份,但问的问题不同:
+    #: 那边是「**刚刚**有没有更多人加入」(3h 窗口和上一窗口比增量),
+    #: 这边是「这个新资源**头 24h** 攒到几个人」(绝对人数,与回测同一阈值)。
+    from app.services.promo_forecast import promo_forecast_tick
     from app.services.link_audit import link_audit_tick
     from app.services.push_timeline import tick as push_timeline_tick
     from app.services.telegram_source import collect_tick as tg_collect_tick
@@ -712,6 +717,16 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         #    同一条理由 —— 远程那张表 0 行,放 `both` 会让远程每小时假报警)。
         (push_surge_tick, _get_settings().push_surge_cron,
          {"minute": 33}, "push_surge", "wechat"),
+        # ★ **爆款预警**(2026-11-20):「这个新资源头 24h 攒够人、而我们还没有链」。
+        # ⚠️ 与上一条**不是同一件事**,别合并:`push_surge` 的判据相对上一窗口的**增量**
+        #    (刚起量的那一小时),这一条的判据是**绝对人数**(头 24h 的形状)。
+        #    一个长期每天 6 人的资源不会触发 `push_surge`(没增量),但若它是新出现的,
+        #    这一条会报 —— 那正是「主动发现」要抓的。
+        # ⚠️ 角色 **wechat**:数据源 `push_ledger` 只在本机写(与上一条同一条理由)。
+        # ⚠️ 时刻 `:37` 与 `:33` 错开(两者都写 `FeishuAlert` 冷却门);
+        #    `:41` 被 `quark_link_pull`(`41 */2`,持夸克凭据的重活)占着。
+        (promo_forecast_tick, _get_settings().promo_forecast_cron,
+         {"minute": 37}, "promo_forecast", "wechat"),
         # **链接体检**(2026-10-16):抽样探活我方分享链 + 判"货不对版/空分享"。
         # ⚠️ 为什么要有它:首轮实测 75 条里 **货不对版 14 / 空分享 10** —— 这两种**都会打到
         #   客户脸上**(点开拿到别的资源 / 点开是空的),而在此之前**没有任何一行报告看它们**

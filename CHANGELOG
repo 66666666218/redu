@@ -1,3 +1,28 @@
+- [2026-11-20 16:20] FEAT: **爆款预警上线(方案①:只通知管理群,不转存、不发客户群)**。
+  用户选定「从 1 起」。新增 `app/services/promo_forecast.py` + 每小时 `:37` 的
+  `promo_forecast` 作业(role=wechat,数据源 `push_ledger` 只在本机写):
+  判据直接取 15:48/16:03 两次回测的**同一套**口径 —— 新资源**头 24h** 的不同作者数
+  ≥`promo_forecast_min_hands`(默认 4,对应回测精确率 41.4%/5.4x),
+  且「**当时还没有**自有链」+「当时就有可转存源链」+「作品名不是纯套话」。
+  · **窗口必须走完才判**(`first + 24h <= now`):宁可晚一天,也不把「还没到」当「不会到」;
+    `max_age_hours=72` 之外首次出现的桶不再报(前面批次已看过)。
+  · **自有链按时刻判**(`owned_keys()` 返回最早拿到时刻):写成存在判会把「早窗口之后
+    才搬的链」当成当时已有,可动手量被系统性低估(回测里 153 个达标桶少算 20 个)。
+  · 漏斗每一级进运行记录(窗口完整/达标/已有链/无源链/套话/发出),否则
+    「今天没预警」与「作业看不见数据」在库里长得一样。
+  · 冷却 168h 且**发送成功后才落行**(与 `push_surge` 同一语义);冷却键分段截断。
+  · 判据**单源化**:`is_cta`/`src_type`/`owned_keys` 挪进 `promo_forecast`,
+    `pan_promo_rank` 与 `backtest_promo_forecast` 改为 import —— 三处不许各写一把尺子。
+  · 作业时刻 `:37`:`:33` 是 `push_surge`(同样写 `FeishuAlert`),`:41` 是
+    `quark_link_pull`(`41 */2` 持夸克凭据的重活),都不撞。
+  真实库 dry-run(未发送):可评估 95 桶 · 达标 5 · 已有链 4 ⇒ **候选 1 条**
+  (`麦穗与羊` 11 人 / 迅雷源链)。放宽到 168h 是 3 条(另加 `takuku犬系人格测试`、
+  `病恋风格测试`,各 5 人/夸克)。测试 `tests/test_promo_forecast.py` 16 例。
+  ⚠️ 本轮按用户铁律**未向任何群发送**;作业要先重启服务才会真正开始跑。
+  (Files: app/services/promo_forecast.py, tests/test_promo_forecast.py,
+  app/services/scheduler.py, config/settings.py, scripts/pan_promo_rank.py,
+  scripts/backtest_promo_forecast.py, CHANGELOG)
+
 - [2026-11-20 16:03] FEAT: **爆款提前预测回测:起势早期信号能把命中率从 7.6% 提到 41%~83%**。
   用户问「能否总结规律、自己主动发现爆款然后改写成自建链」。新增
   `scripts/backtest_promo_forecast.py`(纯读,不发任何群、不转存),用真实台账回放三件事:

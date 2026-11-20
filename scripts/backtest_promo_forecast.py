@@ -39,48 +39,16 @@ from datetime import datetime, timedelta
 
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
-from sqlalchemy import or_, select, text                       # noqa: E402
+from sqlalchemy import or_, select                             # noqa: E402
 
 from app.db import get_session_local                           # noqa: E402
 from app.db.models import PushLedger                           # noqa: E402
-from app.services.push_ledger import pan_key                   # noqa: E402
+from app.services.promo_forecast import (                       # noqa: E402
+    is_cta as _is_cta, owned_keys as _owned_keys, src_type as _src_type)
 from app.services.push_surge import _bracket_names, _identity, _work_key  # noqa: E402
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pan_promo_rank import _is_cta, _src_type                  # noqa: E402
 
 DIAG_DAYS = 7            # 至少观察这么久，否则「没爆」可能只是没看够
 RULES = (2, 3, 4, 5, 6, 8)
-
-
-def _owned_keys(session) -> dict[str, datetime]:
-    """自有链身份 → **最早拿到它的时刻**。
-
-    ⚠️ 必须带时刻，不能只用一个 set：回测问的是「**当时**我们有没有」。
-    拿今天的自有链清单去判 30 天前的决策，会把「窗口之后才搬的」也算成当时已有
-    ⇒ ③ 的可动手量被系统性**低估**（前视偏差,前视偏差让数字变小反而容易被当成"保守"放过）。
-    夸克用 `pan_owned_shares.created_at`、迅雷用 `xunlei_group_shares.moved_at`。
-    """
-    from app.db.models import PanOwnedShare, XunleiGroupShare
-
-    out: dict[str, datetime] = {}
-    #: ⚠️ 走 ORM 而不是 `text()`：raw 查询在 sqlite 上回的是**字符串**，
-    #: 直接和 `datetime` 比会抛 `TypeError`（本脚本第一版就栽在这）。
-    for u, ts in session.execute(
-            select(PanOwnedShare.url, PanOwnedShare.created_at)
-            .where(PanOwnedShare.platform == "quark")).all():
-        k = pan_key(str(u or ""))
-        if k and ts is not None and (k not in out or ts < out[k]):
-            out[k] = ts
-    for u, ts in session.execute(
-            select(XunleiGroupShare.our_url, XunleiGroupShare.moved_at)
-            .where(XunleiGroupShare.status == "ok",
-                   XunleiGroupShare.our_url.is_not(None),
-                   XunleiGroupShare.our_url != "")).all():
-        k = pan_key(str(u or ""))
-        if k and ts is not None and (k not in out or ts < out[k]):
-            out[k] = ts
-    return out
 
 
 def _load(session, days: int):

@@ -426,6 +426,28 @@ class Settings(BaseSettings):
     #: ⚠️ 时刻 **:33** —— 不与任何定点作业同分钟,也不落 `:00/:30` 网格
     #: (`test_job_stagger` 是硬守卫;`:33` 已用真实触发器枚举确认空闲)。
     push_surge_cron: str = "33 * * * *"
+    # ---- **爆款预警**(2026-11-20 第二段)----
+    # 用户口径:「能否总结规律**自己主动发现爆款**然后改写成自建链」。
+    # 与 `push_surge` 的区别:`push_surge` 看「**刚刚**有没有更多人加入」(3h 窗口比增量);
+    # 这一条看「这个**新出现**的资源,头 24h 攒了多少人」—— 绝对人数,不跟上一窗口比。
+    #: 阈值来自 `scripts/backtest_promo_forecast.py` 的 30 天回放
+    #: (爆款=观察期内不同作者 ≥10 人,基线精确率 7.6%):
+    #:   ≥4 人 → 41.4%(5.4x) · ≥6 人 → 65.4%(8.6x) · ≥8 人 → 82.6%(10.8x)。
+    #: ⚠️ **改这个默认值必须重跑回测**,否则卡片上的判据就没有依据了。
+    #: ⚠️ `early_hours` 必须是**完整走完**的窗口(作业只在 `first + early <= now` 时才判),
+    #: 所以卡片到达时资源已经起量一天 —— 这是故意的:窗口没走完就下结论等于把"还没到"
+    #: 当成"不会到"(回测里 >40% 的桶 7 天后仍在长,晚一天不影响要不要搬)。
+    promo_forecast_early_hours: int = 24
+    promo_forecast_min_hands: int = 4
+    #: 只看**最近这么久内**首次出现的桶:更老的是前几批已经看过的,重复报没有信息量
+    promo_forecast_max_age_hours: int = 72
+    promo_forecast_top: int = 5
+    #: 冷却 **168h**:一个桶的「头 24h」只有一个,重复报同一件事只是噪音
+    promo_forecast_cooldown_hours: int = 168
+    #: ⚠️ 时刻 **:37** —— 不与 push_surge(:33) 同分钟(两者都会往 FeishuAlert 写),
+    #: 也不撞 `quark_link_pull`(`41 */2`,它持有夸克凭据、是重活,别跟它抢),
+    #: 更不落 `:00/:30` 网格(`test_job_stagger` 是硬守卫)。
+    promo_forecast_cron: str = "37 * * * *"
     remote_sync_days: int = 14         # 每次回看多少天(靠天然键去重,天然幂等)
 
     candidate_auto_import_cron: str = "35 8 * * *"  # 每日自动收录时间(默认 08:30,紧随候选发现之后)

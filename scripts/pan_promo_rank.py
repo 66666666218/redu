@@ -49,37 +49,12 @@ from app.db.models import PushLedger                          # noqa: E402
 from app.services.push_ledger import pan_key                  # noqa: E402
 from app.services.push_surge import _bracket_names, _identity, _work_key  # noqa: E402
 
-#: 推广动作词。
-#: ⚠️ **不能「命中一个就丢」**：`七宗罪测试`(30 人)、`犬系人格测试`(16 人)、
-#: `奶娃冬季礼物获取`(8 人) 都含动作词，却**是**真资源（人格测试/资料本身就是商品）。
-#: 所以只丢**剥掉动作词后什么都不剩**的名字（纯套话）——
-#:   `链接自取可直接打开` → 空 ⇒ 丢；`七宗罪测试` → `七宗罪` ⇒ 留。
-#: 剩下的模糊项（`今天爆火测试来啦`）**故意留着**：宁可多列一条让人划掉，
-#: 也别把真资源静默丢了。
-_CTA_WORDS = ("自取", "直达", "入口", "链接", "获取", "分享", "资料", "最新",
-              "完整版", "合集", "整理", "推荐", "更新", "拿走", "收藏", "关注",
-              "免费", "打开", "直接", "教程", "来啦", "来了", "来咯", "可")
-
-_SRC_PATTERNS = (("夸克", "pan.quark.cn/s/"), ("迅雷", "pan.xunlei.com/s/"),
-                 ("百度", "pan.baidu.com/s/"))
+#: ⚠️ 套话滤网与源链识别**已挪到 `app.services.promo_forecast`**
+#: (`is_cta` / `src_type`)—— 实时作业与这份只读清单必须用**同一套**判据,
+#: 否则「榜单说可搬」和「预警报了」会分成两把尺子。判据原文与反例留在那边。
+from app.services.promo_forecast import is_cta as _is_cta, src_type as _src_type  # noqa: E402
 
 _NUM_RE = re.compile(r'"(?:play_count|liked_count|like_count|read_num|read_count)"\s*:\s*(\d+)')
-
-
-def _is_cta(name: str) -> bool:
-    """剥掉动作词/标点/数字后什么都不剩 ⇒ 它是套话，不是作品名。"""
-    rest = str(name or "")
-    for w in _CTA_WORDS:
-        rest = rest.replace(w, "")
-    return not re.sub(r"[\W\d_]+", "", rest)
-
-
-def _src_type(url: str) -> str:
-    u = str(url or "")
-    for tag, pat in _SRC_PATTERNS:
-        if pat in u:
-            return tag
-    return ""
 
 
 def rank(session, *, days: int = 30, min_hands: int = 5,
