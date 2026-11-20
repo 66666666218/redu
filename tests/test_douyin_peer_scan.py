@@ -508,7 +508,7 @@ def test_客户卡准入只认真凭据_标题套话不算(session, monkeypatch)
     """★★ **「资源」列渲得出来才算有凭据** —— 2026-11-20 用户「先修客户卡的空链问题」。
 
     上一版准入用的是 `_has_pan`(标题里写着 `免费下载`/`教程`/`夸克网盘` 就算带盘),
-    结果是近 14 天 `douyin_peer` 客户卡 **262 行里 44 行(16.8%)** 的「资源」列是 `—`:
+    结果是近 14 天**对标号客户卡 53 行里 42 行(79.2%)** 的「资源」列是 `—`(全历史 73/85):
 
         `漫威蜘蛛侠2全系列合集DLC 免费下载…`(未来C)
         `【374期】yunx云析桌面版使用教程，网盘磁力都行…`
@@ -533,7 +533,7 @@ def test_客户卡准入只认真凭据_标题套话不算(session, monkeypatch)
          "pan_url": dps.pan_of(t)["pan_url"], "account_uid": "u1",
          "account_name": "未来C", "author": "未来C"} for k, t in titles.items()]}
     monkeypatch.setattr(dps, "fetch_accounts", lambda *a, **k: fake)
-    #: 描述读得到、但**抽不出任何凭据** —— 正是那 44 行的形态
+    #: 描述读得到、但**抽不出任何凭据** —— 正是那 42 行空链的形态
     monkeypatch.setattr(dps, "fetch_work_pan", lambda ws, *a, **k: {
         str(w["aweme_id"]): {"mark": "", "pan_url": "", "read": True} for w in ws})
     seen: list[dict] = []
