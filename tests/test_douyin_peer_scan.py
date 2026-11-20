@@ -504,6 +504,106 @@ def test_require_pan_drops_and_marks_handled(session, monkeypatch) -> None:
     assert row.pushed_at is not None, "被挡下的也要记成已处理,不能永远挂在待推里"
 
 
+def test_客户卡准入只认真凭据_标题套话不算(session, monkeypatch) -> None:
+    """★★ **「资源」列渲得出来才算有凭据** —— 2026-11-20 用户「先修客户卡的空链问题」。
+
+    上一版准入用的是 `_has_pan`(标题里写着 `免费下载`/`教程`/`夸克网盘` 就算带盘),
+    结果是近 14 天 `douyin_peer` 客户卡 **262 行里 44 行(16.8%)** 的「资源」列是 `—`:
+
+        `漫威蜘蛛侠2全系列合集DLC 免费下载…`(未来C)
+        `【374期】yunx云析桌面版使用教程，网盘磁力都行…`
+        `卫生间布局及收纳分享 #卫生间设计 #卫生间好物…`
+
+    它们**标题里有营销套话、描述里抽不出任何链接或口令** ⇒ 卡面那格只能渲 `—`,客户点不动。
+    ⇒ 准入改判 `_has_pan_credential`(`pan_url` / `mark` 至少一个非空)。
+
+    ⚠️ 读描述**读过**了(`read=True`)仍抽不到 ⇒ 判死打戳,不许每轮重捞。
+    """
+    from app.services import category_topics as ct
+
+    _acct(session, uid="u1", name="未来C")
+    titles = {
+        "talk": "漫威蜘蛛侠2全系列合集DLC 免费下载",     #: 有营销套话、没真凭据
+        "real": "《某游戏》全DLC https://pan.quark.cn/s/abc",  #: 真直链
+        "kl": "《某短剧》口令在评论区 自取",                #: 真口令
+    }
+    fake = {"u1": [
+        {"aweme_id": k, "url": f"https://d/{k}", "title": t, "likes": 1,
+         "niche": ct.niche_of(t), "mark": dps.pan_of(t)["mark"],
+         "pan_url": dps.pan_of(t)["pan_url"], "account_uid": "u1",
+         "account_name": "未来C", "author": "未来C"} for k, t in titles.items()]}
+    monkeypatch.setattr(dps, "fetch_accounts", lambda *a, **k: fake)
+    #: 描述读得到、但**抽不出任何凭据** —— 正是那 44 行的形态
+    monkeypatch.setattr(dps, "fetch_work_pan", lambda ws, *a, **k: {
+        str(w["aweme_id"]): {"mark": "", "pan_url": "", "read": True} for w in ws})
+    seen: list[dict] = []
+    monkeypatch.setattr(dps, "push_works",
+                        lambda ws, s, **k: seen.extend(ws) or True)
+
+    class _Pan(_S):
+        douyin_peer_require_pan = True
+
+    res = dps.run_for_user(session, 1, _Pan())          #: 基线:全记、不推
+    assert res["new"] == 0 and seen == []
+    for r in session.scalars(select(DouyinPeerWork)).all():
+        r.pushed_at = None
+    session.commit()
+
+    seen.clear()
+    res = dps.run_for_user(session, 1, _Pan())
+    assert sorted(w["aweme_id"] for w in seen) == ["kl", "real"], \
+        f"标题套话那条进了客户卡(卡面会是 —):{[w['aweme_id'] for w in seen]}"
+    assert res["no_pan"] == 1, "无凭据那条要计入 no_pan(不许静默丢)"
+    row = session.scalar(select(DouyinPeerWork).where(DouyinPeerWork.aweme_id == "talk"))
+    assert row.pushed_at is not None, "读过描述确认没凭据的,要打戳(否则每轮重捞)"
+
+
+def test_标题只写套话的也要读描述补真凭据(session, monkeypatch) -> None:
+    """★ **富化名单按「有没有真凭据」排,不按「标题像不像在推网盘」排**。
+
+    主页卡片只有标题,此刻 `pan_url`/`mark` **都是空的**。用 `_has_pan`(标题套话就算过)
+    筛富化名单的话,下面这条**标题写着免费下载、真链在描述里**的作品会被判成「已经带盘」
+    ⇒ 不读描述 ⇒ 永远补不到凭据 ⇒ 到期被当「没网盘」丢掉。**两头都错**:
+    要么进卡是空链(如果它到期前被放行),要么一条真资源被静默扔了(这里是后者)。
+    """
+    from app.services import category_topics as ct
+
+    _acct(session, uid="u1", name="甲")
+    t = "漫威蜘蛛侠2全系列合集DLC 免费下载"
+    fake = {"u1": [{"aweme_id": "nohint", "url": "https://d/1", "title": t,
+                    "likes": 1, "niche": ct.niche_of(t), "mark": "", "pan_url": "",
+                    "account_uid": "u1", "account_name": "甲", "author": "甲"}]}
+    monkeypatch.setattr(dps, "fetch_accounts", lambda *a, **k: fake)
+    asked: list[str] = []
+
+    def _read(ws, *a, **k):
+        asked.extend(str(w["aweme_id"]) for w in ws)
+        #: 描述里才有真凭据(标题只有营销套话)
+        return {"nohint": {"mark": "蜘蛛侠2", "pan_url": "", "read": True}}
+
+    monkeypatch.setattr(dps, "fetch_work_pan", _read)
+    seen: list[dict] = []
+    monkeypatch.setattr(dps, "push_works",
+                        lambda ws, s, **k: seen.extend(ws) or True)
+
+    class _Pan(_S):
+        douyin_peer_require_pan = True
+        douyin_peer_max_enrich = 8
+
+    dps.run_for_user(session, 1, _Pan())                #: 基线
+    for r in session.scalars(select(DouyinPeerWork)).all():
+        r.pushed_at = None
+    session.commit()
+
+    asked.clear()
+    seen.clear()
+    dps.run_for_user(session, 1, _Pan())
+    assert "nohint" in asked, "标题只写套话的作品没去读描述 ⇒ 永远补不到凭据"
+    assert [w["aweme_id"] for w in seen] == ["nohint"], \
+        f"描述里读到的凭据没让它进卡:{[w['aweme_id'] for w in seen]}"
+    assert seen[0]["mark"] == "蜘蛛侠2"
+
+
 def test_clean_author_strips_quark_token() -> None:
     """实测(2026-10-29):搜索结果卡会把夸克令牌和 `@昵称` 放同一行,
     作者名变成 `未来C /~7fda3YJwIo~:/` —— 不清洗就永远匹配不上用户搜索里的「未来C」。"""

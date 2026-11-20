@@ -130,7 +130,10 @@ _PAN_OFFER_WORDS = ("口令", "咐置", "叩苓", "自取", "无偿", "免费获
 
 
 def _has_pan(w: dict) -> bool:
-    """这条作品**在推网盘资源**吗?—— **准入判据**(2026-11-05 用户口径收紧)。
+    """这条作品**像不像**在推网盘资源 —— **富化名单判据**(2026-11-05 用户口径收紧)。
+
+    ⚠️ **它不再是客户卡准入判据**(2026-11-20):准入改用 `_has_pan_credential`。
+    本函数只回答「**值不值得花一次开页去读描述**」,判决范围比准入宽一档。
 
     用户口径:「**如果不是推广网盘的就不要推了**」。
 
@@ -159,6 +162,32 @@ def _has_pan(w: dict) -> bool:
         return True
     t = f"{w.get('title') or ''} {w.get('desc') or ''}"
     return any(k in t for k in _PAN_PLATFORM_WORDS + _PAN_OFFER_WORDS)
+
+
+def _has_pan_credential(w: dict) -> bool:
+    """这条作品**真有能点开的东西**吗 —— **卡片「资源」列写得出来**的判据(2026-11-20)。
+
+    ⚠️ 与 `_has_pan` **是两把尺子**,不能互相替代:
+      · `_has_pan` 判「**像**在推网盘」(标题/描述里写了 `免费下载`/`教程`/`夸克网盘`)。
+        它只够用来决定**要不要花一次开页去读描述**。
+      · 本函数判「**真有**凭据」—— `pan_url` 或 `mark` 至少一个非空。
+        它才决定**能不能进客户卡**:`_resource_cell` 只有这两样写得出来,否则只能填 `—`。
+
+    ## 为什么必须分开(2026-11-20 实测,用户口径「先修客户卡的空链问题」)
+
+    近 14 天 `douyin_peer` 客户卡 **262 行里有 44 行(16.8%)** 的「资源」列是 `—`:
+
+        `漫威蜘蛛侠2全系列合集DLC 免费下载…`(未来C)
+        `【374期】yunx云析桌面版使用教程，网盘磁力都行…`
+        `卫生间布局及收纳分享 #卫生间设计 #卫生间好物…`
+
+    它们全是**标题里有「免费下载/教程/网盘」这类营销套话、描述里抽不出任何链接或口令**的作品。
+    过了 `_has_pan` ⇒ 被推进客户群;而卡面那一格只能是 `—`,客户点不动。
+    用户 2026-11-20:**「信息需要确认是带有网盘链接的和最新的就行」**。
+
+    ⚠️ 判据**只认结构字段,不做文本推断** —— 文本推断正是上面那 44 行的来源。
+    """
+    return bool(str(w.get("pan_url") or "").strip() or str(w.get("mark") or "").strip())
 
 
 def parse_work(text: str) -> dict:
@@ -923,12 +952,21 @@ def run_for_user(session, user_id: int, settings) -> dict:
         if not got or not seen_map.get(acct["uid"]):
             continue
         unseen = _unseen_ids(session, user_id, [w["aweme_id"] for w in got])
-        enrich += [w for w in got if w["aweme_id"] in unseen and not _has_pan(w)]
+        #: ⚠️ 这里用 `_has_pan_credential` 而不是 `_has_pan`(2026-11-20):
+        #: 主页卡片上**只有标题**,所以"标题里写着免费下载/资源"的作品此刻 `pan_url`/`mark`
+        #: 都是空的 —— 它**必须去读描述**,否则真凭据永远读不到。
+        #: 反过来,标题里一个网盘词都没有的作品,读描述也几乎抽不出凭据(实测 44 行里
+        #: 全是这种),但**不能因此跳过**:标题是压缩过的,凭据常在描述里。
+        #: ⇒ 判据仍用宽松的 `_has_pan`(哪些值得花一次开页),只是**已带凭据的不再重读**。
+        enrich += [w for w in got
+                   if w["aweme_id"] in unseen and not _has_pan_credential(w)]
     #: ★ **上一轮留下的待推作品也要读描述**(2026-11-05):它们上一轮没读到描述而被延后,
     #: 若这里不再读,它们会永远「没读过 ⇒ 继续延后」—— 变成另一种静默积压。
     enrich_ids = {w["aweme_id"] for w in enrich}
+    #: ⚠️ 同样用 `_has_pan_credential`(2026-11-20):待推里有**标题写着营销词但没真凭据**的那些
+    #: (正是空链卡的来源),用 `_has_pan` 会把它们排除重读 ⇒ 永远补不到凭据 ⇒ 到期被当"没网盘"丢掉。
     enrich += [w for w in pending(session, user_id)
-               if w["aweme_id"] not in enrich_ids and not _has_pan(w)]
+               if w["aweme_id"] not in enrich_ids and not _has_pan_credential(w)]
     enriched_n = 0
     found: dict[str, dict] = {}
     if enrich:
@@ -1058,15 +1096,22 @@ def run_for_user(session, user_id: int, settings) -> dict:
             seen_at = w.get("first_seen_at")
             return cutoff is not None and seen_at is not None and seen_at < cutoff
 
+        #: ★★ **判据换成 `_has_pan_credential`**(2026-11-20,用户「先修客户卡的空链问题」)。
+        #: 上一版用的是 `_has_pan`(标题里写着 `免费下载`/`教程`/`夸克网盘` 就算带盘),
+        #: 于是「标题有营销套话、描述里抽不出任何链接或口令」的作品**照样进客户卡**,
+        #: 而 `_resource_cell` 那一格只能渲成 `—` —— 近 14 天实测 **262 行里 44 行(16.8%)**:
+        #: `漫威蜘蛛侠2全系列合集DLC 免费下载…`、`卫生间布局及收纳分享 #卫生间好物…`。
+        #: ⚠️ `_has_pan` 仍然有用 —— 它决定**要不要花一次开页去读描述**(见 `enrich`)。
+        #: 两把尺子各管一段,别合并成一把:合并回去就是这次的空链。
         drop = [w for w in todo
-                if not _has_pan(w) and (str(w["aweme_id"]) in read_ok or _expired(w))]
+                if not _has_pan_credential(w) and (str(w["aweme_id"]) in read_ok or _expired(w))]
         drop_ids = {str(w["aweme_id"]) for w in drop}
         deferred = [w for w in todo
-                    if not _has_pan(w) and str(w["aweme_id"]) not in drop_ids]
+                    if not _has_pan_credential(w) and str(w["aweme_id"]) not in drop_ids]
         no_pan = len(drop)
         if drop:
             mark_pushed(session, user_id, drop)
-        todo = [w for w in todo if _has_pan(w)]
+        todo = [w for w in todo if _has_pan_credential(w)]
     else:
         deferred = []
     pushed = push_works(todo, settings, session=session, user_id=user_id) if todo else False
