@@ -406,6 +406,23 @@ class Settings(BaseSettings):
     #: ⚠️ 不落 `:00/:30` 网格(`test_job_stagger` 是硬守卫)。
     cross_section_report_cron: str = "48 9 * * *"
     cross_section_report_days: int = 7
+    # ---- 同资源「推手数突增」提醒(2026-11-20)----
+    # 用户问「如果哪个资源突然推的人变多是否会有提醒」—— 当时答案是"基本没有"
+    # (`push_hot_rise_pct` 只管要不要重复推、`focus_res` 只覆盖公众号、
+    #  `push_viral_alerts` 只读公众号且近 7 天同链最多 2 个号 ⇒ 0 行)。
+    # 数据源是**全板块**的推送台账 ⇒ 一个作业覆盖所有板块,卡片里再拆板块分布。
+    #: 判据三条**同时**成立才算突增(见 `push_surge` 头注:单看任一条都会变成噪音)。
+    #: 默认值经近 7 天真实台账回放标定:窗口 3h + 三条阈值 + 24h 冷却
+    #: ⇒ **7 天 7 张卡(平均每天 1 张)**,且 7 条全是真的跨 2~5 板块同时起量。
+    push_surge_window_hours: int = 3       # 当前窗口;上一窗口取等长紧邻的那段
+    push_surge_min_hands: int = 6          # 当前窗口不同作者数下限
+    push_surge_min_gain: int = 4           # 比上一窗口至少多几个人
+    push_surge_min_ratio: float = 1.8      # 至少几倍(上一窗口为 0 时不适用)
+    push_surge_top: int = 5                # 每轮最多发几条
+    push_surge_cooldown_hours: int = 24    # 同一盘链的冷却
+    #: ⚠️ 时刻 **:33** —— 不与任何定点作业同分钟,也不落 `:00/:30` 网格
+    #: (`test_job_stagger` 是硬守卫;`:33` 已用真实触发器枚举确认空闲)。
+    push_surge_cron: str = "33 * * * *"
     remote_sync_days: int = 14         # 每次回看多少天(靠天然键去重,天然幂等)
 
     candidate_auto_import_cron: str = "35 8 * * *"  # 每日自动收录时间(默认 08:30,紧随候选发现之后)

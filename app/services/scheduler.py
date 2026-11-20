@@ -496,6 +496,10 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.remote_pull import remote_pull_tick
     from app.services.chain_health import chain_report_tick
     from app.services.cross_section_report import cross_section_report_tick
+    #: ★ **同资源「推手数突增」提醒**(2026-11-20):用户问「如果哪个资源突然推的人变多
+    #: 是否会有提醒」—— 当时全仓没有任何一条按"推它的人变多"触发的提醒
+    #: (见 `push_surge` 头注的对照表)。数据源是**全板块**推送台账 ⇒ 一个作业覆盖所有板块。
+    from app.services.push_surge import push_surge_tick
     from app.services.link_audit import link_audit_tick
     from app.services.push_timeline import tick as push_timeline_tick
     from app.services.telegram_source import collect_tick as tg_collect_tick
@@ -700,6 +704,14 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         #    这边数据源单边,**放两边就必然有一边是错的**。
         (cross_section_report_tick, _get_settings().cross_section_report_cron,
          {"minute": 48, "hour": 9}, "cross_section_report", "wechat"),
+        # ★★ **同资源「推手数突增」提醒**(2026-11-20):「这个资源突然有更多人在推」。
+        # ⚠️ 与上面那条**不同**:`cross_section_report` 回答的是"同一份盘链进了几个群"
+        #    (沉淀现象,7 天窗口、每天一次);这一条回答的是"**刚刚**有更多人加入推"
+        #    (3h 窗口、每小时一次),而且判据是**不同作者数**不是板块数。
+        # ⚠️ 角色 **wechat**:数据源 `push_ledger` **只在本机写**(与 cross_section_report
+        #    同一条理由 —— 远程那张表 0 行,放 `both` 会让远程每小时假报警)。
+        (push_surge_tick, _get_settings().push_surge_cron,
+         {"minute": 33}, "push_surge", "wechat"),
         # **链接体检**(2026-10-16):抽样探活我方分享链 + 判"货不对版/空分享"。
         # ⚠️ 为什么要有它:首轮实测 75 条里 **货不对版 14 / 空分享 10** —— 这两种**都会打到
         #   客户脸上**(点开拿到别的资源 / 点开是空的),而在此之前**没有任何一行报告看它们**
