@@ -1407,7 +1407,12 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
         try:
             from app.services import xunlei_transfer as _xt
 
-            _ratio = _xt.quota_ratio()
+            _info = _xt.quota_info()
+            #: ★★ 2026-11-20:`limit` 是兜底值时**不许判满**(`quota_ratio` 已把它折成
+            #: None,这里显式写出来是为了让"为什么放行"可读)。此前正是这一步让
+            #: 抖音口令连续 14 天「新搬 0」—— 读数 1640% 被当真,额度一条都没花出去。
+            _ratio = (None if _xt.limit_looks_like_fallback(_info)
+                      else _info.get("ratio"))
         except Exception:  # noqa: BLE001 - 配额探针抖动不该挡住整轮
             _ratio = None
         _limit = _xg._gate_limit(settings)

@@ -67,14 +67,26 @@ def _probe(platform: str, key: str) -> tuple[object, str]:
 
     ⚠️ **只有迅雷有配额接口** —— 别的盘如实说「探不到」,别假装探过(那会变成假数字)。
     """
+    return _probe_reading(platform, key)[0:2]
+
+
+def _probe_reading(platform: str, key: str) -> tuple[object, str, bool]:
+    """与 `_probe` 同一套,但**把"读数可不可信"一起带出来**(2026-11-20)。
+
+    ⚠️ **原始读数**(2026-11-20):这个脚本写的是池里的 `last_ratio`(记账/排序),
+    不是闸门。`quota_ratio` 现在会把兜底 limit 折成 None ⇒ 用它,"--check" 会在
+    真超额时显示「探不到」,把"读数不可信"伪装成"没有数据"。
+    但**必须同时记下 `suspect`** —— 只写 1640 不记它不可信,下一轮择一照样判满。
+    """
     if platform != "xunlei":
-        return None, f"{platform} 没有配额接口 ⇒ 不探(不是失败)"
+        return None, f"{platform} 没有配额接口 ⇒ 不探(不是失败)", False
     from app.services import xunlei_transfer as xt
 
     cred = xt._credentials(None, cookie_key=key)
     if not cred:
-        return None, "取不到凭据(没登记或解不开)"
-    return xt.quota_ratio(cred), ""
+        return None, "取不到凭据(没登记或解不开)", False
+    return xt.quota_ratio_raw(cred), "", xt.limit_looks_like_fallback(
+        xt.quota_info(cred, cookie_key=key))
 
 
 def main() -> int:
@@ -104,12 +116,14 @@ def main() -> int:
                       f"最近使用率={r.last_ratio if r.last_ratio is not None else '未知'} "
                       f"满到={r.full_until or '-'} {mark}")
                 if args.check and not r.is_default:
-                    ratio, why = _probe(args.platform, r.cookie_key)
+                    ratio, why, suspect = _probe_reading(args.platform, r.cookie_key)
                     if ratio is None:
                         print(f"      {why or '探不到'}")
                         continue
-                    pan_accounts.report(db, r, ratio=ratio, full=False)
-                    print(f"      实测使用率:{ratio * 100:.1f}%")
+                    pan_accounts.report(db, r, ratio=ratio, full=False, suspect=suspect)
+                    print(f"      实测使用率:{ratio * 100:.1f}%"
+                          + ("(⚠️ limit 是兜底值,这个比例只能排序、不能当满)"
+                             if suspect else ""))
             if not (args.cookie or args.cookie_file):
                 return 0
 

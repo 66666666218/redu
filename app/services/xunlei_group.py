@@ -438,7 +438,12 @@ def _transfer_with_account_fallback(session, user_id: int, row, chosen):
         #: —— 那是**免费 10 GiB 小号(已用 10253%)**,它的 `full_until` 早已过期,
         #: 于是被当成可用落点,"转存成功"了一条小资源。
         #: 空间闸门(`_gate_limit`,与 `admit_transfer` 同一事实源)对**换号**同样适用。
-        if ref.last_ratio is not None and float(ref.last_ratio) >= gate:
+        #: ★★ 2026-11-20:这里**刻意不再探一次配额** —— 换号发生在**每条资源**上,
+        #: 探针一加就回到"每条各打一次"的老毛病(见 `_QUOTA_TTL` 的说明)。
+        #: 用池里记的 `known_full`(已把兜底 limit 算出来的比例排除掉,见
+        #: `pan_accounts.AccountRef.known_full`):真超额的跳过,不可信的放它去试 ——
+        #: 试不成由下面的空间不足分支接住并换下一个。
+        if ref.known_full and float(ref.last_ratio) >= gate:
             logger.info("迅雷换号:跳过 %s(空间已用 %.0f%% ≥ 闸门 %.0f%%)",
                         ref.label, float(ref.last_ratio) * 100, gate * 100)
             continue
@@ -447,7 +452,21 @@ def _transfer_with_account_fallback(session, user_id: int, row, chosen):
             pan_accounts.report(session, ref, full=True, why="转存文件数达上限(5 万)",
                     full_minutes=24 * 60)
             continue
-        logger.info("迅雷账号 %s 文件数已满,改用 %s 转存成功", chosen.label, ref.label)
+        #: ★★ 2026-11-20:这一号**真的装不下**(一手证据,不是配额探针的推测)⇒ **继续换
+        #: 下一个**,别拿着第一个空间不足就收工 —— 池里还有空号时,换号是唯一能让这条
+        #: 资源搬成的路。⚠️ **不标 full**:`space_insufficient` 也可能是"这一个包太大"
+        #: (盘还有余量),给它 30 分钟冷静期会把本来能搬的小包也一起挡掉;排序本来就会
+        #: 把更满的号排后面,下一轮自然先挑别的号。
+        if xt.space_insufficient(retry) or xt.is_space_error(str(retry.get("message") or "")):
+            logger.info("迅雷换号:%s 转存报空间不足,继续换下一个", ref.label)
+            continue
+        if retry.get("status") == "ok":
+            logger.info("迅雷账号 %s 文件数已满,改用 %s 转存成功", chosen.label, ref.label)
+            return retry, ref
+        #: ⚠️ 换号也没成功(失效分享/凭据坏了这类)⇒ 把**这一号**的结果交出去,
+        #: 别再往下试:那类错误与账号无关,换多少个号都一样白撞。
+        logger.info("迅雷账号 %s 文件数已满,换到 %s 仍失败:%s",
+                    chosen.label, ref.label, str(retry.get("message") or "")[:80])
         return retry, ref
     return first, chosen
 
@@ -509,6 +528,11 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
     chosen = pan_accounts.default_ref("xunlei", user_id=user_id)
     ratio = None
     tried: list[str] = []
+    #: ⚠️ `ratio is None` 有三种成因,**别混**:①池里一个可用凭据都没有(⇒ 回落默认账号)
+    #: ②选中了号、但它的读数不可信(⇒ **就用它**,放行到"转存自己报空间不足"那一层)
+    #: ③全池都满了(⇒ ratio 是最后一个已满号的比例,照旧由 `admit_transfer` 判盘满)。
+    _picked = False
+    _cred_seen = False
     _refs = pan_accounts.accounts(session, "xunlei", user_id=user_id)
     if len(_refs) == 1 and _refs[0].is_default:
         # ★ **没配池(单账号)= 走老路径,逐字不变**:一次探针、一个账号、一条凭据都不预读。
@@ -528,14 +552,39 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
             cred = xt._credentials(settings, cookie_key=_ref.cookie_key)
             if not cred:
                 continue                     # 没凭据 ⇒ 不猜,跳过这个账号
-            _r = xt.quota_ratio(cred, cookie_key=_ref.cookie_key)
-            chosen, ratio = _ref, _r         # 先记下"最后一个探过的":全满时由行循环按它判盘满
-            if _r is None or _r < limit_ratio:
-                pan_accounts.report(session, _ref, ratio=_r, full=False)
+            _cred_seen = True
+            #: ★★ 2026-11-20:兜底 `limit` 算出来的比例**不能当"满"**(实测四个号全报 10 GiB
+            #: ⇒ 同一块盘读成 1640/1217/10249/7467,闸门连挡 4 天)。判据只有一处
+            #: `limit_looks_like_fallback`;命中时闸门按"不知道"处理,让转存自己报
+            #: `file_space_not_enough`(一手证据)。原始读数照样写回池,外加 `suspect` 标记。
+            _info = xt.quota_info(cred, cookie_key=_ref.cookie_key)
+            #: `suspect=None` = **这次没读到数**(探针失败)⇒ 别去动池里原有的可信度标记。
+            _suspect = xt.limit_looks_like_fallback(_info) if _info else None
+            _raw = _info.get("ratio")
+            #: 读数不可信 ⇒ 闸门按"不知道"放行(与探针失败同一条纪律)。
+            _r = None if _suspect else _raw
+            if _r is None:
+                #: ★ 两种 `None` 都在这里:①探针失败 ②读数不可信(兜底 limit)。
+                #: **两种都选中它** —— 「不知道 ≠ 满」,放到"转存自己报空间不足"那一层去判。
+                #: 原始读数照样写回池(1640 的号下一轮排到后面),同时记下 `suspect`。
+                chosen, ratio, _picked = _ref, None, True
+                pan_accounts.report(session, _ref, ratio=_raw, full=False, suspect=_suspect)
                 break
-            pan_accounts.report(session, _ref, ratio=_r, full=True, why=f"已用 {_r * 100:.0f}%")
+            if _r < limit_ratio:
+                chosen, ratio, _picked = _ref, _r, True
+                pan_accounts.report(session, _ref, ratio=_r, full=False, suspect=False)
+                break
+            pan_accounts.report(session, _ref, ratio=_r, full=True, suspect=False,
+                                why=f"已用 {_r * 100:.0f}%")
+            #: ★ 2026-11-20:**全满时要把"满"带进闸门**。`chosen/ratio` 原来只在
+            #: "选中了能用的号"时赋值 ⇒ 全池都满时 `ratio` 还是 `None` ⇒
+            #: `admit_transfer` 判"不知道"**放行**,一路搬到 `_transfer_with_account_fallback`
+            #: 拿 `chosen`(默认账号,占位)去撞 —— 实测全满那轮把默认号又写了一遍。
+            #: 正确做法:记下最后一个已满号的比例(最满的排在最后 ⇒ 它最像"还差多少"),
+            #: 让**原来那条** `admit_transfer` 的盘满分支去判(不新增返回路径)。
+            chosen, ratio = _ref, _r
             tried.append(f"{_ref.label} 已用 {_r * 100:.0f}%")
-        if ratio is None:
+        if not _picked and not _cred_seen:
             # 池里有账号但**一个都取不到凭据** ⇒ 回落默认账号 + 老探针,让下游用它**自己的**
             # 错误说清(缺凭据/失效)—— ⚠️"没有凭据" ≠ "盘满",别说错是哪种坏。
             chosen = pan_accounts.default_ref("xunlei", user_id=user_id)

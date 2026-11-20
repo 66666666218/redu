@@ -180,10 +180,28 @@ def _probe_ratio(db: Session, platform: str, ref) -> float | None:
             from app.services import xunlei_transfer as xt
 
             cred = xt._credentials(cookie_key=ref.cookie_key)   # noqa: SLF001 - 与转存同一读法
-            return xt.quota_ratio(cred, cookie_key=ref.cookie_key)
+            #: ⚠️ 用**原始读数**(2026-11-20):这里写的是池里的 `last_ratio`,是**记账**,
+            #: 不是闸门。`quota_ratio` 现在会把兜底 limit 折成 None(见它的 docstring),
+            #: 拿它回填等于把这个号的使用率**冻在旧值**上。兜底读数由自检自己按
+            #: `_quota_limit_note` 另外说明,不影响"已用多少"这件事本身的记录。
+            return xt.quota_ratio_raw(cred, cookie_key=ref.cookie_key)
     except Exception:  # noqa: BLE001 - 探针失败只是"不知道",不该让自检挂掉
         return None
     return None
+
+
+def _probe_ratio_suspect(ref) -> bool:
+    """刚才那个迅雷读数是不是**兜底 limit 算出来的**(判据只用 `xt.limit_looks_like_fallback`)。
+
+    读的是 `quota_info` 的**进程内缓存**(与 `_probe_ratio` 刚刚那次同一个键)⇒ 不额外打接口。
+    """
+    try:
+        from app.services import xunlei_transfer as xt
+
+        return xt.limit_looks_like_fallback(
+            xt.quota_info(cookie_key=getattr(ref, "cookie_key", "") or None))
+    except Exception:  # noqa: BLE001 - 判不出来就当"可信",别让自检挂掉
+        return False
 
 
 def _quota_limit_note(platform: str, refs: list) -> str:
@@ -262,7 +280,11 @@ def _check_quota(db: Session, user_id: int) -> dict:
                     continue
                 ref.last_ratio = fresh
                 try:
-                    pan_accounts.report(db, ref, ratio=fresh, full=False,
+                    #: ★ 2026-11-20:迅雷这一支现在回的是**原始读数**,要把可信度一起记 ——
+                    #: 否则自检刚补上的 1640 会被下一轮择一原样当成"满了"。
+                    _suspect = (platform == "xunlei"
+                                and _probe_ratio_suspect(ref))
+                    pan_accounts.report(db, ref, ratio=fresh, full=False, suspect=_suspect,
                                         why=f"已用 {fresh * 100:.1f}%")
                 except Exception:  # noqa: BLE001 - 写不回池只影响下次择号,别让自检挂
                     pass

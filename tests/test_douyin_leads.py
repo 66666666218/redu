@@ -53,14 +53,20 @@ def _no_cdp_by_default(monkeypatch):
 def _quota_not_full(monkeypatch):
     """**单测里默认"盘没满"**(2026-11-17)。
 
-    ⚠️ `apply_kouling` 现在会**在花额度之前**探一次盘(`xt.quota_ratio()`),那是**真实 HTTP**
+    ⚠️ `apply_kouling` 现在会**在花额度之前**探一次盘(`xt.quota_info()`),那是**真实 HTTP**
     —— 主仓有凭据 ⇒ 默认号实测 ratio=1640 ⇒ 每条用例都会走 `disk_full` 分支、
     既有的 `status == "ok"` 断言集体变红,而且红得**像功能坏了**。
     探盘本身在 `TestDiskFullBeforeBudget` 里专门验,这里只把默认值钉住。
+
+    ★ 2026-11-20:`apply_kouling` 改读 `quota_info()` + `limit_looks_like_fallback`
+    (兜底 limit 算出的 1640 不许判满)⇒ **替身必须跟着换成 `quota_info`**,
+    否则这个 fixture 罩不住,用例会打真接口(改实现忘了改替身的典型).
+    这里给的是**可信的小号**:limit 远大于 usage,`limit_looks_like_fallback` 为 False。
     """
     from app.services import xunlei_transfer as xt
 
-    monkeypatch.setattr(xt, "quota_ratio", lambda *a, **k: 0.5)
+    monkeypatch.setattr(xt, "quota_info", lambda *a, **k: {
+        "limit": 30_000_000_000_000, "usage": 15_000_000_000_000, "ratio": 0.5})
 
 
 class _Settings:
@@ -291,7 +297,10 @@ class TestDiskFullBeforeBudget:
     def test_盘满时不花额度也不调转存(self, session, monkeypatch) -> None:
         from app.services import xunlei_transfer as xt
 
-        monkeypatch.setattr(xt, "quota_ratio", lambda *a, **k: 0.99)
+        #: ⚠️ 桩的是 `quota_info`(2026-11-20,`apply_kouling` 的读数入口):
+        #: limit 远大于 usage ⇒ 这是**真超额**,不是兜底 limit 的坏读数。
+        monkeypatch.setattr(xt, "quota_info", lambda *a, **k: {
+            "limit": 10_000_000_000_000, "usage": 9_900_000_000_000, "ratio": 0.99})
         monkeypatch.setattr(kk, "known_koulings", lambda s, u: set())
         monkeypatch.setattr(kk, "resolve", lambda m: {
             "kind": "share", "share_url": f"https://pan.xunlei.com/s/{m}",
@@ -313,7 +322,8 @@ class TestDiskFullBeforeBudget:
         from app.db.models import DiscoveredPanLink
         from app.services import xunlei_transfer as xt
 
-        monkeypatch.setattr(xt, "quota_ratio", lambda *a, **k: 0.95)
+        monkeypatch.setattr(xt, "quota_info", lambda *a, **k: {
+            "limit": 10_000_000_000_000, "usage": 9_500_000_000_000, "ratio": 0.95})
         monkeypatch.setattr(kk, "known_koulings", lambda s, u: set())
         monkeypatch.setattr(kk, "resolve", lambda m: {
             "kind": "share", "share_url": "https://pan.xunlei.com/s/A",
@@ -331,10 +341,10 @@ class TestDiskFullBeforeBudget:
         assert rows[0].origin_url.endswith("?pwd=p537")
 
     def test_探盘失败不挡转存(self, session, monkeypatch) -> None:
-        """`quota_ratio()` 回 `None` = **不知道**,不是"满了" —— 探针抖动不该挡搬。"""
+        """`quota_info()` 回空 = **不知道**,不是"满了" —— 探针抖动不该挡搬。"""
         from app.services import xunlei_transfer as xt
 
-        monkeypatch.setattr(xt, "quota_ratio", lambda *a, **k: None)
+        monkeypatch.setattr(xt, "quota_info", lambda *a, **k: {})
         monkeypatch.setattr(kk, "known_koulings", lambda s, u: set())
         monkeypatch.setattr(kk, "resolve", lambda m: {
             "kind": "share", "share_url": f"s/{m}", "pass_code": "", "group_id": ""})

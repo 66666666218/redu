@@ -95,8 +95,22 @@ class AccountRef:
     last_check_at: str = ""
     full_until: str = ""
     note: str = ""
+    #: ★★ 2026-11-20:`last_ratio` 是不是**从兜底 limit 算出来的**(迅雷四个号的 limit
+    #: 全是 10 GiB ⇒ 同一个盘读成 1640 / 12 / 102 / 75)。这种比例**只能用来排序**,
+    #: **不能当"满"** —— 拿它判满就是连挡 4 天、453 条 pending 的那种停摆。
+    #: 判据出处: `xunlei_transfer.limit_looks_like_fallback`(单一出处,别在这另写一份)。
+    ratio_suspect: bool = False
     is_default: bool = False
     tried: list[str] = field(default_factory=list)
+
+    @property
+    def known_full(self) -> bool:
+        """**读得懂地知道它满了**吗 —— `ratio_suspect` 的比例**不算**(那是坏 limit 算的)。
+
+        ★★ 2026-11-20:择一与换号都该问这个,而不是直接比 `last_ratio`。
+        兜底 limit 下 `last_ratio` 可能是 1640,直接比会把**整池都判满**(实测连挡 4 天)。
+        """
+        return (not self.ratio_suspect) and self.last_ratio is not None
 
     @property
     def usable_hint(self) -> float:
@@ -171,7 +185,8 @@ def accounts(session: Session, platform: str, *, user_id: int = 1) -> list[Accou
                               last_ratio=item.get("last_ratio"),
                               last_check_at=str(item.get("last_check_at") or ""),
                               full_until=str(item.get("full_until") or ""),
-                              note=str(item.get("note") or "")))
+                              note=str(item.get("note") or ""),
+                              ratio_suspect=bool(item.get("ratio_suspect"))))
     return out or [default_ref(platform, user_id=user_id)]
 
 
@@ -190,7 +205,7 @@ def cookie_of(ref: AccountRef, session: Session) -> str:
 
 def report(session: Session, ref: AccountRef, *, ratio: float | None = None,
            full: bool | None = None, why: str = "",
-           full_minutes: int | None = None) -> None:
+           full_minutes: int | None = None, suspect: bool | None = None) -> None:
     """把**这一号的探测结果**写回池子(择一就靠它;`full` 只对这种账号加冷静期)。
 
     ⚠️ 默认账号(`is_default`)**不写池** —— 单账号部署时池子是空的,别凭空写出一条
@@ -212,6 +227,11 @@ def report(session: Session, ref: AccountRef, *, ratio: float | None = None,
             continue
         if ratio is not None:
             item["last_ratio"] = round(float(ratio), 4)
+        #: ★★ 2026-11-20:**必须把"这个比例可不可信"一起记下来** —— 池里只有数字时,
+        #: 400 分钟后的另一次择一会把它原样当"用了多少"(实测整池 1640%/1217%/… 全被判满)。
+        #: `suspect=None`(调用方没说)⇒ **保留原标记**,别顺手清掉。
+        if suspect is not None:
+            item["ratio_suspect"] = bool(suspect)
         item["last_check_at"] = datetime.now().isoformat(sep=" ", timespec="seconds")
         if full is True:
             item["full_until"] = (datetime.now() + timedelta(

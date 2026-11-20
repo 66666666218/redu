@@ -964,10 +964,25 @@ class TestPanMultiAccount:
         monkeypatch.setattr(xt, "_credentials",
                             lambda settings=None, *, cookie_key="xunlei":
                             {"refresh_token": "t", "tag": cookie_key})
+        #: ★ 2026-11-20:择一改为读 `quota_info()` + `limit_looks_like_fallback`(兜底 limit
+        #: 算出的比例不许判满)⇒ 替身跟着换。这里给的是**可信的**读数(limit 远大于 usage),
+        #: 所以 `limit_looks_like_fallback` 走真实实现也是 False。
         ratios = {ck: r for _, ck, r in pool}
+
+        def _quota_info(cred=None, **kw):
+            ck = (cred or {}).get("tag")
+            rec["probed"].append(ck)
+            r = ratios.get(ck)
+            if r is None:                       # 探不到 ⇒ 空 dict(与生产同一个形状)
+                return {}
+            return {"limit": 10_000_000_000_000,
+                    "usage": int(10_000_000_000_000 * r), "ratio": r}
+
+        monkeypatch.setattr(xt, "quota_info", _quota_info)
+        #: **没配池(单账号)**那条老路径仍读 `quota_ratio()` —— 同一个池里"默认号"的桩,
+        #: 否则那条用例会去打真实配额接口(它会拿 `{}` 再走一遍 refresh_token)。
         monkeypatch.setattr(xt, "quota_ratio",
-                            lambda cred=None, **kw: rec["probed"].append((cred or {}).get("tag"))
-                            or ratios.get((cred or {}).get("tag")))
+                            lambda cred=None, **kw: ratios.get("xunlei"))
 
         def _tas(share_url, parent_id="", settings=None, intro_dir=None, *, cookie_key="xunlei"):
             rec["transfer_keys"].append(cookie_key)

@@ -746,8 +746,43 @@ def _probe_quota(cred: dict | None = None, cookie_key: str | None = None) -> dic
         return {}
 
 
+def quota_reading(cred: dict | None = None,
+                  cookie_key: str | None = None) -> tuple[float | None, bool]:
+    """★ **闸门的那一次读数** —— `(拿它判满的比例或 None, 这个比例可不可信)`。
+
+    为什么要成对返回(2026-11-20):择号逻辑除了"能不能搬",还得把**"这个比例可不可信"
+    记进池子**(`pan_accounts.report(suspect=…)`)。只传一个裸 float 时,下一次择一会把
+    1640 原样当成"用了多少" ⇒ 整池被判满、连挡 4 天(453 条 pending、零转存)。
+    可信度判据只有一处:`limit_looks_like_fallback`。
+    """
+    info = quota_info(cred, cookie_key=cookie_key)
+    suspect = limit_looks_like_fallback(info)
+    return (None if suspect else info.get("ratio")), suspect
+
+
 def quota_ratio(cred: dict | None = None, cookie_key: str | None = None) -> float | None:
-    """盘的使用率(`usage/limit`)。**拿不到返回 None**(调用方按"不知道"处理,别误判成满)。"""
+    """**闸门该用的**使用率(`usage/limit`)。拿不到、**或读数不可信** ⇒ 返回 None。
+
+    ★★ 2026-11-20:`limit` 是兜底值(`limit_looks_like_fallback`)时**必须返回 None** ——
+    那个 `limit` 不是真实配额,算出来的 `ratio` 也就不是"用了多少"。实测四个迅雷号
+    全报 10 GiB,于是同一个盘被读成 164099% / 1217% / 10249% / 7467%,闸门连挡
+    **4 天**(453 条 pending、零转存),运行记录每轮写「先清理再搬」—— 清多少都不会变。
+
+    「读数不可信」的正确处置是**当成不知道**(与探针失败同一条纪律),不是当成"满":
+    真实的空间不足由转存自己返回的 `file_space_not_enough` 兜底(那才是一手证据,
+    见 `xunlei_group.transfer_pending` 的第二层)。
+
+    想要**原始读数**(记账/排序/展示)请用 `quota_ratio_raw()`。
+    """
+    return quota_reading(cred, cookie_key=cookie_key)[0]
+
+
+def quota_ratio_raw(cred: dict | None = None, cookie_key: str | None = None) -> float | None:
+    """**原始读数** `usage/limit`,不做可信度折算 —— 给"记账/排序/展示"用。
+
+    账号池的 `last_ratio`(择一排序)、盘容量自检、`pan_account_add --check` 用它。
+    ⚠️ **别拿它当闸门**:`limit` 是兜底值时它照样算出 1640 这种数(见 `quota_ratio`)。
+    """
     return quota_info(cred, cookie_key=cookie_key).get("ratio")
 
 
@@ -764,8 +799,11 @@ def limit_looks_like_fallback(info: dict | None) -> bool:
     这里认的是更强的一条:**limit 恰好是免费档 10 GiB,而用量已经是它的十倍以上** ——
     物理上装不进去,所以那个 limit 不可能是这些数据的真实配额。
 
-    只影响**文案与分级**,不影响闸门:`admit_transfer` 照旧用 `ratio` 挡
-    (读数不可信时"挡"是安全的,"放行"才会真把盘写爆)。
+    ★★ **它现在决定闸门**(2026-11-20 改口):`quota_ratio()` 见到 True 就返回 `None`
+    (= 不知道),闸门于是放行。上一版写着"只影响文案、挡是安全的" —— 实测代价是
+    **整池被误判成满、连挡 4 天、453 条 pending、零转存**。真相是:读数不可信时
+    **既不该挡也不该放**,而是**交给一手证据**(转存自己返回的 `file_space_not_enough`)
+    去判,并由 `_transfer_with_account_fallback` 换号重试。
     """
     try:
         limit, usage, ratio = int(info["limit"]), int(info["usage"]), float(info["ratio"])
@@ -841,6 +879,8 @@ def free_bytes(cred: dict | None = None) -> int | None:
     「不知道 ≠ 满」同一条纪律),文案改说「未知」。
     """
     info = quota_info(cred)
+    if limit_looks_like_fallback(info):
+        return None                  # ★ 2026-11-20:兜底 limit 算出来的"剩余"也是假的
     try:
         free = int(info["limit"]) - int(info["usage"])
     except (KeyError, TypeError, ValueError):
