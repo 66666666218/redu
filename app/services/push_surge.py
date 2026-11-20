@@ -16,7 +16,8 @@
 
 ## 判据
 
-对**同一条盘链**(`pan_id` 源链优先,没有才用 `pan_url`;均为 `pan_key` 归一后的身份):
+对**同一条盘链 + 同一部链内作品**(`pan_id` 源链优先,没有才用 `pan_url`;
+作品名只从标题 `《…》` 取 —— 两层身份的理由见下面「身份是**两层**的」):
 
     当前窗口的不同作者数  n   ≥  `push_surge_min_hands`(默认 6)
     比上一窗口的增量      n-p ≥  `push_surge_min_gain`(默认 4)
@@ -72,7 +73,15 @@
 
 **管理群**(`webhook_for(settings, "admin")`)—— 这是运营情报,不进客户群
 (客户只会看到内容卡,不该收到"这个资源我们内部觉得火")。
-每条盘链 **24h 冷却**(`feishu_alert_gate`);旁路失败只留日志,不抛。
+每条**(盘链+作品)** **24h 冷却**(`_recently_alerted` 纯读预检 +
+`_mark_alerted` 发送成功后才落行);旁路失败只留日志,不抛。
+
+## ⚠️ 冷却门的语义:**已经发出去过**,不是「跑过一次检测」
+
+不用 `feishu_alert_gate` 的「检查并占位」语义,也不用「先占位、失败再 `rollback()`」——
+pysqlite 上 SAVEPOINT 作为最外层事务时 `RELEASE` 就已落盘,`rollback()` 撤不回来
+(2026-11-20 实测:换另一条连接读得到)。一次飞书抖动就会吃掉这条提醒 24h,
+而这 3h 窗口一过推手数再也凑不齐 = **永久丢失**。详见 `_recently_alerted` 的注释。
 """
 from __future__ import annotations
 
@@ -166,7 +175,11 @@ def detect_surges(session: Session, user_id: int, *, window_hours: float = 3.0,
     """找出**这一小时**推手数突增的盘链(按增量降序,最多 `top` 条)。
 
     返回 `[{pan_key, pan_url, pan_type, title, hands, prev_hands,
-             sections:{section: 行数}, first, last}]`。
+             sections:{section: 该板块的**不同作者数**}, first, last}]`。
+
+    ⚠️ `sections` 与 `hands` **同一口径(数人)**:各板块之和 ≤ `hands`
+    (同一个人在多个板块出现会被两边各算一次),但绝不会大于它。
+    数行的话卡片上「微信 7」与头部「7 人」对不上,人一眼就会怀疑整张卡。
 
     ⚠️ **纯读**:不开网络、不写库 —— 冷却门与发送留给 `push_surge_tick`。
     """
@@ -204,6 +217,7 @@ def detect_surges(session: Session, user_id: int, *, window_hours: float = 3.0,
     cur: dict[tuple[str, str], dict] = {}
     prev: dict[tuple[str, str], set] = {}
     n_no_author = 0
+    n_masked = 0
     for r in rows:
         pk = _identity(r)
         if not pk:
@@ -218,6 +232,13 @@ def detect_surges(session: Session, user_id: int, *, window_hours: float = 3.0,
             #: ⚠️ 作者为空 ⇒ 数不出是谁,**不能算一个推手**;但必须记账(不许静默丢)
             n_no_author += 1
             continue
+        if "*" in who:
+            #: ⚠️ **打码作者名是不稳定身份**(2026-11-20 审计):快手的作者名 100% 被打码
+            #: (`水***）`)、抖音对标号 19.5%,同一个号可能出现 `实***库` 与 `实测宝库`
+            #: 两种写法 ⇒ 数成 2 个人;也可能两个不同的号打码后撞成一个 ⇒ 数成 1 个人。
+            #: 7 天里因此错分的桶只有 1 个(实测宝库),**不改判据**;但要记账 ——
+            #: 否则「这条为什么多/少报一个人」在库里查不出来。
+            n_masked += 1
         k = (pk, _work_key(str(r.title or ""), names[pk]))
         g = cur.get(k)
         if g is None:
@@ -226,8 +247,11 @@ def detect_surges(session: Session, user_id: int, *, window_hours: float = 3.0,
                           "hands": set(), "sections": {},
                           "first": r.pushed_at, "last": r.pushed_at}
         g["hands"].add(who)
+        #: ⚠️ 板块分布也要**数人**,不能数行 —— 与卡片头那条 `hands` 同一口径。
+        #: 数行的话同一个人在一个板块重推 3 次就显示"微信 7",而全卡是"7 人",
+        #: 人一加就发现对不上(实测 11-19 麦穗与羊:7 人 / 板块合计 8,差的就是重推)。
         sec = str(r.section or "")
-        g["sections"][sec] = g["sections"].get(sec, 0) + 1
+        g["sections"].setdefault(sec, set()).add(who)
         g["last"] = r.pushed_at
         #: 标题取**最早那条非空的**(与 `window()`/`cross_section_summary` 同一口径:
         #: 先出现的那份通常是"第一次发现它"时的原话)
@@ -244,14 +268,16 @@ def detect_surges(session: Session, user_id: int, *, window_hours: float = 3.0,
             continue
         if p and float(min_ratio or 0) > 0 and n < p * float(min_ratio):
             continue
-        out.append({**g, "work_key": key[1], "hands": n, "prev_hands": p})
+        #: `sections` 内部是 set(按人去重),对外给计数 —— 加起来正好等于 `hands`
+        out.append({**g, "sections": {s: len(v) for s, v in g["sections"].items()},
+                    "work_key": key[1], "hands": n, "prev_hands": p})
     out.sort(key=lambda x: (-(x["hands"] - x["prev_hands"]), -x["hands"],
                             str(x.get("title") or "")))
     if stats is not None:
         #: `pans` = 盘链数,`works` = **链内作品桶数** —— 两个数分开记,
         #: 否则「一条链挂 31 个作品」在运行记录里看不出来
         stats.update({"rows": len(rows), "pans": len(names), "works": len(cur),
-                      "no_author": n_no_author, "cand": len(out)})
+                      "no_author": n_no_author, "masked": n_masked, "cand": len(out)})
     return out[:int(top)] if top else out
 
 
@@ -372,7 +398,8 @@ def push_surge_tick(settings=None) -> int:
                             f"窗口{kw['window_hours']:g}h 台账{stats.get('rows', 0)}行 "
                             f"盘链{stats.get('pans', 0)} 作品{stats.get('works', 0)} "
                             f"候选{stats.get('cand', 0)} 发出{n_sent} "
-                            f"无作者{stats.get('no_author', 0)}行")
+                            f"无作者{stats.get('no_author', 0)}行 "
+                            f"打码名{stats.get('masked', 0)}行")
                 session.commit()
             except Exception:  # noqa: BLE001 - 运行记录失败不挡业务
                 session.rollback()

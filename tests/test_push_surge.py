@@ -212,6 +212,45 @@ def test_渲染里带得出去重后的推手数和板块分布() -> None:
     assert "某作品" in text.split(chr(10))[0]
 
 
+def test_板块分布也数人_不是数行(session) -> None:
+    """★★ **卡片上每个板块的数字必须是「人数」** —— 与头部 `hands` 同一口径。
+
+    实测 11-19「麦穗与羊」那条:卡片写「7 人」,板块合计却是 8,因为
+    `晚霞满天的灵感日记` 在微信里推了 3 条 —— 数行的话「微信 7」是重推次数,
+    而人一眼就会发现 7+1 对不上全卡的 7。**一个数字对不上,整张卡都不可信。**
+    """
+    for i in range(6):
+        _add(session, "wechat", PAN, "《某作品》原稿", hours_ago=1.0, author=f"号{i}")
+    #: 同一个人重推 3 遍 —— 行数会变成 8,人数仍是 6
+    for _ in range(3):
+        _add(session, "wechat", PAN, "《某作品》原稿", hours_ago=0.5, author="号0")
+    session.commit()
+    out = ps.detect_surges(session, 1)
+    assert len(out) == 1
+    assert out[0]["hands"] == 6
+    assert out[0]["sections"] == {"wechat": 6}, \
+        f"板块分布数成了行数(与头部人数对不上):{out[0]['sections']}"
+    assert sum(out[0]["sections"].values()) <= out[0]["hands"]
+
+
+def test_打码作者名要记账_不许静默(session) -> None:
+    """★ **打码名是不稳定身份**,必须写进运行记录(否则「为什么多/少一个人」查不出来)。
+
+    实测:快手作者名 100% 打码、抖音对标号 19.5%;同一个号可能出现
+    `实***库` 与 `实测宝库` 两种写法 ⇒ 数成 2 人。7 天里只错了 1 个桶,
+    **不改判据**(改了反而伤真信号),但必须让人能从运行记录里看到有多少行是这种。
+    """
+    for i in range(3):
+        _add(session, "kuaishou", PAN, f"《某作品》{i}", hours_ago=1.0, author=f"号***{i}")
+    for i in range(3):
+        _add(session, "wechat", PAN, f"《某作品》w{i}", hours_ago=1.0, author=f"真名{i}")
+    session.commit()
+    stats: dict = {}
+    out = ps.detect_surges(session, 1, stats=stats)
+    assert len(out) == 1, f"打码名不该挡掉真信号:{out}"
+    assert stats["masked"] == 3, "打码行被静默丢了(运行记录会说不清原因)"
+
+
 def test_作业按管理员群发_且角色只在本机(session, monkeypatch) -> None:
     """去向必须是**管理群**(运营情报不进客户群),且角色 `wechat`(台账只在本机写)。"""
     from apscheduler.schedulers.background import BackgroundScheduler
