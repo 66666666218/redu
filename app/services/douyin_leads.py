@@ -85,6 +85,36 @@ _RE_PAN_URL = re.compile(
 _KOU_HINTS = ("口令", "咐置", "付置", "叩苓", "网盘", "提取码", "复制这段", "复制链接",
               "链接自取", "资源自取", "自取")
 
+#: ★★ **资源迹象词**(2026-11-20 用户口径:「**并不是所有《》都是网盘也可能是别的标题
+#: 你需要分清**」)。`_cand_names` 把标题里**任何** `《…》` 都当候选名送去库里查,
+#: 于是「郭静杭州演唱会《下一个天亮》直拍」这种**纯音乐视频**被库里
+#: 《下一个天亮》无损音质百度网盘那条挂上了我方夸克链 —— 卡片写「🔴夸克」,
+#: 而这条视频**根本不在推资源**。⇒ 库补链之前先过这道闸。
+#:
+#: ⚠️ 与 `douyin_peer_scan._has_pan` 的**严格档不同**,这里按用户 2026-11-20 点名的口径
+#: 收录了 `资源/合集/完整版/分享/进群/下载/教程`(实测宽松档过 53/87、严格档 27/87)。
+#: 差别在代价方向:对标号那道闸决定**要不要抓**(误收 = 白抓一次),这道闸只决定
+#: **要不要去库里补链** —— 多收了还有 `title_claims` 的专指度护栏兜着,少收了才是漏资源。
+_RESOURCE_SIGNAL_WORDS = (
+    # 网盘平台名(与 `douyin_peer_scan._PAN_PLATFORM_WORDS` 同口径)
+    "网盘", "夸克", "迅雷", "UC网盘", "uc网盘", "百度网盘", "百度云", "阿里云盘", "123云盘",
+    # 真凭据的措辞(与 `_KOU_HINTS` 同口径,不另抄一份)
+    "口令", "咐置", "付置", "叩苓", "提取码", "复制这段", "复制链接", "链接自取", "资源自取", "自取",
+    # 明确的"来拿"措辞
+    "无偿", "免费获取", "获取教程", "免费下载", "下载教程", "安装教程", "整合包", "进群",
+    # 用户 2026-11-20 点名的
+    "资源", "合集", "完整版", "分享", "下载", "教程",
+)
+
+#: **剧集/短剧迹象**:剧名 + 集数本身就是推广号的资源形态 ——
+#: `《伪装直男》24集全` / `《朝朝入梦》番外` 标题里一个网盘词都没有,却**确实在发资源**。
+#: ⚠️ 反过来「《麦穗与羊》成了无数人的意难平」「《今天是太阳雨》播放量破8亿」这类
+#: **剪辑 / 数据播报**不具备这个形态 —— 被闸掉正是用户要的。
+_RE_EPISODE_HINT = re.compile(r"\d+\s*集|全集|番外|大结局|短剧|漫剧")
+
+
+#: （`_has_resource_signal` 的实现在 `_is_pan_url` 之后 —— 它要用它，见文件下方。）
+
 
 def pan_of(text: str) -> dict:
     """标题/正文里的**网盘凭据** → `{mark, pan_url}`;两样都没有就是两个空串。
@@ -1394,7 +1424,21 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
         # ★ **先做一次资源库匹配**(2026-10-11 用户口径「我们资源库里面大部分应该就有这些资源」)。
         #   放在口令解析**之前**,而且**每条线索都做** —— 因为不管口令解没解出来,
         #   「库里有没有现成的」都决定卡片能不能点得动。匹配不上是 `None`(不影响原流程)。
-        ld["library"] = _library_link(session, user_id, str(ld.get("title") or ""))
+        #
+        # ⚠️⚠️ **但库补链之前要先过"这条视频在不在推资源"** (2026-11-20 用户口径:
+        #   「**并不是所有《》都是网盘也可能是别的标题你需要分清**」)。
+        #   反例(用户报的):「00:22 623 郭静杭州演唱会《下一个天亮》直拍!…」——
+        #   纯演出直拍,标题里一个资源词都没有;而库里有一条
+        #   《郭静《下一个天亮》无损音质百度网盘下载》⇒ `_library_link` 按书名号配上,
+        #   卡片于是写着「🔴夸克」、点开是我们**音频**资源的转存链。
+        #   名字对了 ≠ 这条视频在发资源 —— `title_claims` 护栏只管名字准不准,不管意图。
+        #   ⇒ 没有迹象就不补链(`library=None`),这条线索随后会被 `_drop_panless` 丢掉。
+        # ⚠️ 闸只挡**库补链这一路**:作者原链(正文直链)/ 群口令 / 以前搬成过的链
+        #   都是真凭据,走别的分支,不受影响。
+        _sig = _has_resource_signal(str(ld.get("title") or ""),
+                                    str(ld.get("pan_url") or ""))
+        ld["library"] = (_library_link(session, user_id, str(ld.get("title") or ""))
+                         if _sig else None)
         # ★★ 2026-10-14:**先看这条以前搬成过没有**(按 `aweme_id` 查库)。
         #   用户口径「有一个解开的就用哪个解开的链接」⇒ 只要能拿到的链,**一律先用**:
         #   ① 本地链已落库(迅雷那条)② **远程夸克链**同步回来的(见 `quark_link_pull`)
@@ -1556,7 +1600,9 @@ def _cand_names(title: str, limit: int = 7) -> list[str]:
     """从抖音标题里抽出**候选资源名**(按可信度排序、去重、最多 `limit` 个)。
 
     来源按可信度排序(2026-10-15 起第四类):
-      · `《X》`             —— 最可信,直接就是资源/群名;
+      · `《X》`             —— 候选里最强的,但**只是名字、不是资源**:
+        它可能是歌名/剧名/节目名(「郭静杭州演唱会《下一个天亮》直拍」),
+        该不该据它去库里补链由 `_has_resource_signal` 另判(2026-11-20);
       · `咐置X叩苓`          —— 变体字,**X 才是名字**(`咐置`/`叩苓` 是「复制」「口令」的替换字);
       · **`#话题`**          —— 人**故意打的标签**,比随机正文片段可信得多;真名常常只在这里;
       · 其余正文长片段      —— 兜底,质量差但聊胜于无。
@@ -1740,6 +1786,27 @@ def _is_pan_url(url) -> bool:
     """这个 URL 是不是**网盘分享链**(夸克/UC/百度/迅雷)。"""
     u = str(url or "").strip().lower()
     return bool(u) and any(h in u for h in _PAN_HOSTS)
+
+
+def _has_resource_signal(text: str, pan_url: str = "") -> bool:
+    """这个标题**在推资源**吗?—— 库补链的前置闸(`_library_link` 只看名字,不看意图)。
+
+    ## 判据(任一命中)
+      ① **真凭据**:正文网盘直链,或真口令(`pan_of` 的 `pan_url` / `mark`,
+         后者专门覆盖 `/~token~/` 这种**不含任何中文提示词**的令牌);
+      ② **资源迹象词**(`_RESOURCE_SIGNAL_WORDS`);
+      ③ **剧集/短剧形态**(`_RE_EPISODE_HINT`:「24集」「全集」「番外」…)。
+
+    ⚠️ 闸**只管库补链这一路**:作者原链 / 群口令 / 以前搬成过的链是真凭据,
+    不经过这里(见 `apply_kouling` 里这道门的位置)。
+    """
+    if _is_pan_url(pan_url):
+        return True
+    t = str(text or "")
+    info = pan_of(t)
+    if info["mark"] or info["pan_url"]:
+        return True
+    return any(w in t for w in _RESOURCE_SIGNAL_WORDS) or bool(_RE_EPISODE_HINT.search(t))
 
 
 def _pan_link_of(ld: dict) -> tuple[str, str]:
@@ -2323,6 +2390,15 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
             db.commit()
             n_panless = 0
             n_grouponly = 0
+            #: ★ **"标题里没有资源迹象"单独计数**(2026-11-20):这类线索因为不补库链
+            #: 而被 `_drop_panless` 丢掉 —— 不单独报的话,运行记录里它和
+            #: "有迹象但库里没有"混成一个「无链」,看不出是哪道闸在掉量(本仓母题)。
+            #: ⚠️ 直接重算、不靠 `apply_kouling` 落的键 —— 自动转存关闭时它会提前 return,
+            #: 键写不进去,计数就会恒 0(又一种"看着没产出,其实是我们在丢")。
+            n_nosignal = sum(1 for x in leads
+                             if not _has_resource_signal(str(x.get("title") or ""),
+                                                        str(x.get("pan_url") or ""))
+                             and not _has_usable_pan(x))
             if leads:
                 # 口令 → 资源(分享链直接转存入库 / 群则加群),结果一并写进卡片
                 apply_kouling(leads, db, user_id, settings)
@@ -2399,7 +2475,7 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
                         #: ★ 漏斗(2026-10-31):原始→时间挡→无时间→口令→无链,一眼看出哪道闸在掉量。
                         f"漏斗 原始{funnel.get('raw', 0)} 挡{funnel.get('old', 0)}"
                         f" 无时{funnel.get('notime', 0)} 续{funnel.get('cont', 0)} 口令{funnel.get('kept', 0)}"
-                        f" 无链{n_panless} 群令{n_grouponly}")
+                        f" 无链{n_panless} 群令{n_grouponly} 无迹象{n_nosignal}")
             db.commit()
         except Exception as exc:  # noqa: BLE001 - 单平台失败不影响其余
             db.rollback()

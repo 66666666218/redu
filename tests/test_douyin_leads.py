@@ -1569,6 +1569,86 @@ class TestLibraryLink:
         assert dl._library_link(session, 1, "《伪装直男》24集") is not None
         assert called == []
 
+    # ---------------------------------- 资源迹象闸(2026-11-20 用户报的误报)
+
+    def test_纯演出直拍_书名号是歌名_不许补库链(self, session, monkeypatch) -> None:
+        """★★★ **用户报的那条**(2026-11-20 生产卡片):
+
+            00:22 623 郭静杭州演唱会《下一个天亮》直拍!一开口就是满满的回忆~#郭静 #下一个天亮
+
+        库里**确实有**《郭静《下一个天亮》 无损音质 百度网盘下载》这条音频资源 ⇒
+        `_library_link` 按「标题里 **《它》** 点名」的护栏**配得上** —— 名字是对的,
+        **但这条视频根本不在推资源**(演出直拍,623 赞 / 0 转发)。
+
+        用户口径:「**并不是所有《》都是网盘也可能是别的标题你需要分清**」。
+        ⇒ 库补链之前先过资源迹象闸;没迹象 ⇒ `library=None` ⇒ `_drop_panless` 丢掉。
+        """
+        _mk_lib(session, "郭静《下一个天亮》 无损音质 百度网盘下载")
+        title = ("00:22 623 郭静杭州演唱会《下一个天亮》直拍!一开口就是满满的回忆~"
+                 "#郭静 #下一个天亮 12小时前")
+        # 前提:名字确实配得上 —— 去掉闸之后它是会挂上链的(否则这条用例证明不了闸)
+        assert dl._library_link(session, 1, title) is not None, \
+            "名字配不上了?那这条用例的对照失效了(闸变成多余)"
+        assert dl._has_resource_signal(title) is False
+        # 闸生效:走 `apply_kouling` 那条真实入口,库补链必须不生效
+        ld = {"aweme_id": "x1", "mark": "下一个天亮", "title": title,
+              "url": "https://d/v/x1", "author": "达令live", "keyword": "k",
+              "share_count": 0, "publish_at": 0}
+        monkeypatch.setattr(kk, "known_koulings", lambda s, u: {"下一个天亮"})
+        monkeypatch.setattr(kk, "known_kouling_links", lambda s, u: {})
+        out = dl.apply_kouling([ld], session, 1, _Settings())
+        assert out[0]["library"] is None, "纯演出直拍被库里同名音频资源挂了链(用户报的误报)"
+        assert dl._drop_panless(out) == [], "没有可用链就该被丢掉(不进客户群)"
+
+    def test_有资源迹象的仍能补链(self, session, monkeypatch) -> None:
+        """反面对照:真推广标题**一条都不许被这道闸误伤**。"""
+        _mk_lib(session, "《伪装直男》无雾版高清资源")
+        for title in ("《伪装直男》24集全",            # 集数形态
+                      "《伪装直男》资源无偿自取",       # 迹象词
+                      "《伪装直男》完整版"):            # 迹象词
+            assert dl._has_resource_signal(title) is True, f"被误伤:{title}"
+        ld = {"aweme_id": "x2", "mark": "伪装直男", "title": "《伪装直男》24集全",
+              "url": "https://d/v/x2", "author": "a", "keyword": "k",
+              "share_count": 0, "publish_at": 0}
+        monkeypatch.setattr(kk, "known_koulings", lambda s, u: {"伪装直男"})
+        monkeypatch.setattr(kk, "known_kouling_links", lambda s, u: {})
+        out = dl.apply_kouling([ld], session, 1, _Settings())
+        assert out[0]["library"] and out[0]["library"]["link"] == "https://pan.quark.cn/s/OUR"
+        assert dl._drop_panless(out) != []
+
+    def test_真凭据直接算有迹象_不靠词表(self) -> None:
+        """`/~token~/` 令牌**不含任何中文提示词**,`pan_of` 认得它 ⇒ 词表不全也不怕。"""
+        tok = "/~7fda3YJwIo~:/"
+        assert dl._has_resource_signal(tok) is True
+        assert dl._has_resource_signal("随便什么标题", "https://pan.quark.cn/s/abc") is True
+        assert dl._has_resource_signal("《麦穗与羊》成了无数人的意难平#爱情 #剪映") is False
+        assert dl._has_resource_signal("《麦穗与羊》：十七画的穗十七岁的意难平") is False
+
+    def test_资源迹象闸住在库补链入口上_不是别处(self) -> None:
+        """**源码级守卫**:闸必须在 `apply_kouling` 里、且挡的正是 `_library_link` 那一步。
+
+        ⚠️ 按 **AST 查真实调用**(记忆:子串守卫会被解释性注释打红);
+        这里更进一步 —— 要证明 `_library_link` 处在 `_has_resource_signal` 的条件之下。
+        """
+        import ast
+        from pathlib import Path
+
+        src = Path(dl.__file__).read_text(encoding="utf-8")
+        fn = next((n for n in ast.walk(ast.parse(src))
+                   if isinstance(n, ast.FunctionDef) and n.name == "apply_kouling"), None)
+        assert fn is not None, "找不到 `apply_kouling` —— 它改名了?守卫要跟着改"
+        calls = {c.func.id for c in ast.walk(fn)
+                 if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
+        assert "_has_resource_signal" in calls, "库补链没有过资源迹象闸(用户报的误报会回来)"
+        #: 条件表达式里 `_library_link` 是 `body`、`None` 是 `orelse` —— 顺序写反就是
+        #: "有迹象才**不**补链",单测正面用例会红,但这条守卫让源码层面也说清。
+        tern = [n for n in ast.walk(fn) if isinstance(n, ast.IfExp)
+                and isinstance(n.test, ast.Name) and n.test.id == "_sig"]
+        assert tern, "找不到 `... if _sig else None` —— 闸的位置变了?"
+        assert any(isinstance(n.body, ast.Call) and isinstance(n.body.func, ast.Name)
+                   and n.body.func.id == "_library_link" for n in tern), \
+            "`_library_link` 不在 `_sig` 为真的分支里"
+
     def test_两道护栏各自都是承重的(self, session) -> None:
         """把"拦点"摊开证明,而不是靠"改回源码看它变红"(不动工作区文件)。
 
