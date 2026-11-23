@@ -499,7 +499,11 @@ ADDITIONS: dict[str, list[str]] = {
                      "kouling_tries INTEGER DEFAULT 0"],
     # 迅雷群分享的**首次搬成时刻**(2026-10-07)。⚠️ 别用 `synced_at` 顶 ——
     # 那一列每轮采集都刷新,减出来的"搬成耗时"会随重跑次数变大。
-    "xunlei_group_shares": ["moved_at DATETIME"],
+    # `source_pushed_at`(2026-11-23,盘满直推):这条**没转存、但已按源链推给客户**的时刻。
+    # 行仍保持 `pending`(空间出来还要补搬)⇒ **判"推过没"只能靠这一列**;
+    # 没有它,每 20 分钟一轮会把同几条反复推(卡片侧 24h 去重只挡一部分,
+    # 积压几百条时后面的永远轮不到)。存量行 NULL = 上线前没直推过,语义正确。
+    "xunlei_group_shares": ["moved_at DATETIME", "source_pushed_at DATETIME"],
     "alerts": ["section VARCHAR(32) DEFAULT ''"],
     # 探针词**喂给 douyin_leads 搜索的时刻**(2026-11-12):NULL=还没喂过。
     # 存量行 NULL 语义正确(旧词确实没走过搜索链)。

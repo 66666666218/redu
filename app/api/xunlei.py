@@ -46,6 +46,12 @@ def xunlei_sync_now(user: User = Depends(get_current_user), db: Session = Depend
     return xunlei_group.sync_group_shares(db, user.id)
 
 
+#: `transfer_pending` 给条目塞的**内部键**(见 `xunlei_group._source_only_item`)。
+#: ⚠️ 它们只服务于推送点(标记"已推过"要按 id 回写),**不是对外契约** ——
+#: 接口必须剥掉,否则会被前端当成字段用、以后就改不动了。
+_PRIVATE_ITEM_KEYS = ("_row_id", "_reason")
+
+
 @router.post("/api/xunlei/transfer")
 def xunlei_transfer_now(limit: int = 3, user: User = Depends(get_current_user),
                         db: Session = Depends(get_db)):
@@ -53,8 +59,16 @@ def xunlei_transfer_now(limit: int = 3, user: User = Depends(get_current_user),
 
     ⚠️ **会真实写入你的迅雷盘**(转存 + 生成我方分享链),单条最慢约 1 分钟;
     `limit` 限死上限,别一次拉太大。
+
+    ★ 盘满时**不转存、只返回源链条目**(`source_only: true`)—— 这个接口**只转存不推送**,
+    所以**不会**标记"已推送"(标记落在真正的推送点,见 `xunlei_group.mark_source_pushed`)。
     """
-    return xunlei_group.transfer_pending(db, user.id, limit=max(1, min(limit, 10)))
+    out = xunlei_group.transfer_pending(db, user.id, limit=max(1, min(limit, 10)))
+    items = out.get("items")
+    if isinstance(items, list):
+        out["items"] = [{k: v for k, v in it.items() if k not in _PRIVATE_ITEM_KEYS}
+                        for it in items if isinstance(it, dict)]
+    return out
 
 
 @router.post("/api/xunlei/kouling")

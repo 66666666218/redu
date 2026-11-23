@@ -1918,13 +1918,44 @@ GET `/api/admin/pan/self-check?user_id=1`(perm `logs.view`)
 **响应示例 (200)**
 ```json
 { "status": "ok", "picked": 3, "ok": 2, "failed": 1,
+  "source_only": 1, "source_skipped": 0,
   "items": [ { "title": "diplay-车机互联（安卓+苹果）", "group_name": "三岁分享",
                "share_url": "https://pan.xunlei.com/s/VP2uz_O8UT8yOkE4wLQwJbVHA1?pwd=zp47",
-               "code": "zp47" } ] }
+               "code": "zp47" },
+             { "title": "某大包资源", "group_name": "高山3️⃣",
+               "share_url": "https://pan.xunlei.com/s/VOxxxx?pwd=ab12",
+               "code": "ab12", "source_only": true } ] }
 ```
+
+**`status` 取值**(2026-11-23 起):
+
+| status | 含义 | 行状态 |
+| --- | --- | --- |
+| `ok` | 正常跑完(可能有单条失败) | 搬成的 `moved`,失败的 `failed` |
+| `disk_full` | 盘满 / 转存返回空间不足,**本轮整批没搬** | 仍是 `pending`,按下面的直推规则 |
+
+> `source_only` = 本轮**按源链直推**的条数(没转存、不花转存额度);
+> `source_skipped` = 空间受阻但**没推**的条数(窗口内已推过 / 今日额度用完)。
+> ⚠️ 调度端的**运行记录**另有 `partial` 态:盘满但至少推出去一条时记 `partial`
+> (不是停摆,但也不能记 `success`);一条都没推才记 `failed`。
+
+**盘满直推源链(2026-11-23)**:盘满(或单个资源超过剩余空间)时**不再空手返回**,
+而是把群主的**原始分享链**直接放进 `items` 推给客户(用户 2026-11-23 拍板:
+盘满宁可推源链也别一条不推)。三条硬约束:
+- **行仍是 `pending`** —— 空间出来后下一轮继续搬,不丢队列;
+- `source_pushed_at` 记"**真的推出去**的时刻"(标记落在推送点,不是本接口:本接口
+  **只转存不推送**,在这里标就等于"标了没推"),`PUSH_PAN_DEDUPE_HOURS`(默认 72h)
+  窗口内**不重复推**(与其它板块的盘链去重共用同一个旋钮),否则每 20 分钟一轮会
+  一直推同几条、后面的资源永远轮不到;
+- **`XUNLEI_GROUP_SOURCE_PUSH_LIMIT`(默认 15)按天限额** —— 这条链 20 分钟一轮 = 72 轮/天,
+  按轮给额度会刷屏;0 = 关掉(退回"只记 pending、一条不推"的旧行为)。
 
 > ⚠️ **会真实写入用户迅雷盘**,单条最慢约 1 分钟(转存任务轮询),别连点。
 > 单条失败会被标成 `failed` 留痕,**不会每轮重复重试**它。
+> `items` 里带 `source_only: true` 的是**群主原链**(未转存);卡片会逐行标注
+> `(源链,未转存)`,表头在有源链行时写成「可用链」。
+> 本接口返回的条目会**剥掉内部键**(`_row_id`/`_reason`)—— 那些只服务于推送点,
+> 不是对外契约,前端别依赖。
 > **前端入口**:「迅雷群组」页 `/xunlei`(群列表 + 采集/转存按钮 + 分享表格)。
 
 ### 21.5 口令解析(抖音《口令》→ 资源入口)
@@ -2014,6 +2045,7 @@ GET `/api/admin/pan/self-check?user_id=1`(perm `logs.view`)
 >
 > 被挡下时**两种终态要分开**(`admit_transfer` 的第三个返回值 `retryable`):
 > - **盘满** → **可重试**:群采集**整批停下、行保持 `pending`**(`status="disk_full"` 返回给调用方),
+>   **同时按源链直推**(见 21.4,`XUNLEI_GROUP_SOURCE_PUSH_LIMIT` 按天限额),
 >   清理出空间后**下一轮自动接着搬**,不用人工重新排队;口令解析则**不写库**,
 >   下一轮抖音作业自然再试。
 > - **泛化大包** → **不可重试**:标 `status="skipped"` 终态留痕,策略性不搬。

@@ -869,6 +869,13 @@ class XunleiGroupShare(Base):
     # 拿它减 `msg_time` 算"搬成耗时"会得出一个**随重跑次数变大**的假数。
     # 存量行同样是 NULL(没记过),读取端当"没记"不当"没搬成"。
     moved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    #: ★★ **按源链直推出去**的时刻(2026-11-23,盘满直推)。
+    #: 盘满时这条**不转存、直接把群主原链推给客户**(链本身是好的);行仍保持 `pending`,
+    #: 空间出来还要补搬 ⇒ **不能靠 `status` 判"推过没"**,否则每 20 分钟一轮会把
+    #: 同几条反复推(卡片侧的 24h 去重只挡一部分,且积压几百条时后面的永远轮不到)。
+    #: ⚠️ 与 `moved_at` 分开记:`moved_at` = **搬成我国盘**的时刻,这一列 = **没搬但推过**。
+    #: 两件事混成一列,"搬成率"和"直推量"就都算不准了。
+    source_pushed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class DiscoveredPanLink(Base):

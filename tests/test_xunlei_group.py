@@ -9,7 +9,7 @@ os.environ.setdefault("DATABASE_URL", "sqlite://")
 
 import json
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine, event, select
@@ -1176,3 +1176,312 @@ def test_transfer_pending_expires_old_and_skips_stale(session, monkeypatch) -> N
     assert rows["MID"].status == "pending", "7~14 天的还没过期,但也轮不到搬"
     assert rows["NEW"].status == "ok"
     assert out["expired"] == 1 and out["picked"] == 1 and called == ["u-NEW"]
+
+
+# ---------------------------------------------------------------- 盘满直推(2026-11-23)
+
+class _PushSettings(_GateSettings):
+    """盘满直推相关的最小配置面。"""
+    xunlei_group_source_push_limit = 15
+    xunlei_group_pending_expire_days = 0        # 本组用例只看直推,别让过期分诊掺进来
+    xunlei_group_transfer_max_age_days = 0
+    push_pan_dedupe_hours = 72
+    #: 推送侧:没配 webhook 时 `push_new_shares` 会**静默 return False**(也就不会标记
+    #: "已推过"),所以"真的推出去"的用例必须配上它。
+    feishu_webhook = "CUSTOMER"
+    feishu_secret = ""
+    brand_name = "念飞思雪"
+    xunlei_transfer_parent = "最全文件"
+
+
+def test_盘满时按源链直推而不是一条不推(session, monkeypatch) -> None:
+    """★★ **用户口径**(2026-11-23):「盘容量满时进行直接推送不需要再进行转存」。
+
+    旧行为:盘满 → 整批 `return items=[]` ⇒ **客户整天看不到更新**,而链本身是好的。
+    新行为:命中的行**跳过转存、把群主原链推出去**,行仍 `pending`(空间出来补搬)。
+    """
+    from app.services import xunlei_transfer as xt
+
+    session.add(XunleiGroupShare(user_id=1, group_id="g", share_id="A", title="蓝河工具箱",
+                                 origin_url="http://pan.xunlei.com/s/AAA", status="pending"))
+    session.commit()
+    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None, **kw: 1.26)
+    monkeypatch.setattr(xt, "transfer_and_share",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("盘满不该转存")))
+
+    out = xg.transfer_pending(session, 1, limit=5, settings=_PushSettings())
+
+    assert out["status"] == "disk_full"
+    assert out["source_only"] == 1, "盘满时这条**必须**挑出来按源链推"
+    assert len(out["items"]) == 1 and out["items"][0]["source_only"] is True
+    #: ⚠️ 卡片要的是**源链**,不是我方链(这时根本没有我方链)。
+    assert out["items"][0]["share_url"] == "http://pan.xunlei.com/s/AAA"
+    row = session.scalars(select(XunleiGroupShare)).one()
+    #: ⚠️ **行必须仍是 pending** —— 标成终态就等于把这条资源永远丢掉。
+    assert row.status == "pending" and row.our_url == ""
+    #: ★★ **这里只挑候选,不标"已推过"**(2026-11-23):手动接口只转存不推、
+    #: webhook 没配时都在这一步之后 —— 在这里标就等于"标了没推",客户还收不到。
+    assert row.source_pushed_at is None, "标记必须落在**真的发出去**之后"
+
+    #: 走一次推送(webhook 配好 + 发送成功)才留下痕迹。
+    _sent: list[dict] = []
+
+    class _C:
+        def __init__(self, *a, **k):
+            pass
+
+        def send_card(self, card):
+            _sent.append(card)
+            return True
+
+    import app.services.feishu_client as fc
+
+    monkeypatch.setattr(fc, "FeishuClient", _C)
+    assert xg.push_new_shares(out["items"], _PushSettings(), session=session, user_id=1) is True
+    row = session.scalars(select(XunleiGroupShare)).one()
+    assert row.source_pushed_at is not None, "推出去之后要留痕,否则每轮重推"
+    assert row.status == "pending", "推过 ≠ 搬过:空间出来还要补搬"
+    assert "未转存" in row.message and "已按源链推送" in row.message
+
+
+def test_单个资源太大也按源链直推(session, monkeypatch) -> None:
+    """「单个太大」其实是**最常见的空间受阻形态**(实测每轮 5~6 条,最大要 175 GiB)。
+
+    它走的是另一条分支(不拖停整批),旧实现只把它记进「单个太大跳过N」,一条都不推。
+    """
+    from app.services import xunlei_transfer as xt
+
+    session.add_all([
+        XunleiGroupShare(user_id=1, group_id="g", share_id="BIG", title="某大包资源",
+                         origin_url="http://pan.xunlei.com/s/BIG", status="pending"),
+        XunleiGroupShare(user_id=1, group_id="g", share_id="OK1", title="正常资源",
+                         origin_url="http://pan.xunlei.com/s/OK1", status="pending")])
+    session.commit()
+    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None, **kw: None)   # 探针失效→闸门放行
+
+    def fake(url, parent_id="", settings=None, **kw):
+        if url.endswith("BIG"):
+            return {"status": "failed", "code": "space_insufficient",
+                    "required_size": 188_550_109_029, "free_size": 1_000_000,
+                    "message": "空间不足:这个包需要 175.67 GiB,盘上只剩 976.56 KiB"}
+        return {"status": "ok", "share_url": "our-OK1", "code": "9", "fid": "N"}
+
+    monkeypatch.setattr(xt, "transfer_and_share", fake)
+
+    out = xg.transfer_pending(session, 1, limit=5, settings=_PushSettings())
+
+    assert out["status"] == "ok" and out["too_large"] == 1 and out["ok"] == 1
+    #: ★ 关键:大包**也被挑出来**了,而且和"转存成功"分开计数(混一起会让转存数骗人)。
+    assert out["source_only"] == 1
+    srcs = [it for it in out["items"] if it.get("source_only")]
+    assert [it["share_url"] for it in srcs] == ["http://pan.xunlei.com/s/BIG"]
+    rows = {r.share_id: r for r in session.scalars(select(XunleiGroupShare)).all()}
+    #: ⚠️ 大包仍是 pending(**还没推**,见 `mark_source_pushed`);搬成的那条不参与直推。
+    assert rows["BIG"].status == "pending" and rows["BIG"].source_pushed_at is None
+    assert rows["OK1"].status == "ok" and rows["OK1"].source_pushed_at is None
+
+
+def test_窗口内已直推的不再重复推(session, monkeypatch) -> None:
+    """⚠️ 直推过的行**仍是 pending**(下一轮还在队首)。
+
+    不排除的话每轮推的都是同几条,后面的资源永远轮不到 —— 与 `pan_discovery`
+    盘满直推上线当天踩到的是同一个病。
+    """
+    from app.services import xunlei_transfer as xt
+
+    now = datetime.now()
+    session.add_all([
+        XunleiGroupShare(user_id=1, group_id="g", share_id="OLD", title="刚推过的",
+                         origin_url="http://pan.xunlei.com/s/OLD", status="pending",
+                         source_pushed_at=now - timedelta(hours=1),
+                         message="未转存,已按源链推送:盘快满了"),
+        XunleiGroupShare(user_id=1, group_id="g", share_id="NEW", title="没推过的",
+                         origin_url="http://pan.xunlei.com/s/NEW", status="pending")])
+    session.commit()
+    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None, **kw: 1.26)
+
+    out = xg.transfer_pending(session, 1, limit=5, settings=_PushSettings())
+
+    assert out["source_only"] == 1
+    assert [it["title"] for it in out["items"]] == ["没推过的"]
+    #: ⚠️ 被跳过的那条**不改消息** —— 它上一轮已经说过"已按源链推送"了。
+    assert out["source_skipped"] == 1
+
+
+def test_直推有每日额度(session, monkeypatch) -> None:
+    """★ **必须按天限额**:这条链 20 分钟一轮(**72 轮/天**),按轮给额度就是一天几百条刷屏。"""
+    from app.services import xunlei_transfer as xt
+
+    session.add_all([
+        XunleiGroupShare(user_id=1, group_id="g", share_id=f"S{i}", title=f"资源{i}",
+                         origin_url=f"http://pan.xunlei.com/s/S{i}", status="pending")
+        for i in range(5)])
+    session.commit()
+    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None, **kw: 1.26)
+
+    class _S(_PushSettings):
+        xunlei_group_source_push_limit = 2
+
+    out = xg.transfer_pending(session, 1, limit=5, settings=_S())
+
+    assert out["source_only"] == 2, "只许挑 2 条"
+    assert out["source_skipped"] == 3
+    #: ⚠️ 挑候选这一步**不许标"已推过"**(那是推送点的事,见 `mark_source_pushed`)。
+    rows = {r.share_id: r for r in session.scalars(select(XunleiGroupShare)).all()}
+    assert sum(1 for r in rows.values() if r.source_pushed_at) == 0
+
+
+def test_source_push_limit_为零时退回旧行为(session, monkeypatch) -> None:
+    """`0` = 关掉这条路 ⇒ 与从前逐字一致:一条都不推、行保持 pending。"""
+    from app.services import xunlei_transfer as xt
+
+    session.add(XunleiGroupShare(user_id=1, group_id="g", share_id="A", title="蓝河工具箱",
+                                 origin_url="http://pan.xunlei.com/s/AAA", status="pending"))
+    session.commit()
+    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None, **kw: 1.26)
+
+    class _S(_PushSettings):
+        xunlei_group_source_push_limit = 0
+
+    out = xg.transfer_pending(session, 1, limit=5, settings=_S())
+
+    assert out["status"] == "disk_full" and out["items"] == []
+    assert session.scalars(select(XunleiGroupShare)).one().status == "pending"
+
+
+def test_卡面把已转存与源链分开说(monkeypatch) -> None:
+    """★★ **卡面不许撒谎**(2026-11-23):旧头部硬编码「已全部转存并生成分享链」。
+
+    混进源链行之后,那句话就是**假话** —— 客户会以为我们搬过。必须分开写、逐行标。
+    """
+    sent: list[dict] = []
+
+    class _C:
+        def __init__(self, *a, **k):
+            pass
+
+        def send_card(self, card):
+            sent.append(card)
+            return True
+
+    import app.services.feishu_client as fc
+
+    monkeypatch.setattr(fc, "FeishuClient", _C)
+    items = [
+        {"title": "已搬的资源", "share_url": "https://pan.xunlei.com/s/mine", "code": ""},
+        {"title": "没搬的资源", "share_url": "https://pan.xunlei.com/s/src",
+         "code": "", "source_only": True},
+    ]
+    assert xg.push_new_shares(items, _S()) is True
+
+    blob = json.dumps(sent[0], ensure_ascii=False)
+    assert "已全部转存" not in blob, "有源链行时**不许**说「已全部转存」"
+    assert "未转存" in blob and "源链" in blob
+    assert "(源链,未转存)" in blob and "(已转存)" in blob
+    assert "**可用链**" in blob, "这一列里可能放别人的链,列名必须中性"
+
+
+def test_推送接台账去重并记录(monkeypatch) -> None:
+    """这条链此前**一处都没接台账** ⇒ 盘满直推后同样的源链会每轮重推。"""
+    from app.services import push_ledger
+
+    class _C:
+        def __init__(self, *a, **k):
+            pass
+
+        def send_card(self, card):
+            return True
+
+    import app.services.feishu_client as fc
+
+    monkeypatch.setattr(fc, "FeishuClient", _C)
+    calls: list[tuple] = []
+    monkeypatch.setattr(push_ledger, "drop_recent",
+                        lambda s, u, sec, items, st, **k: (calls.append(("drop", sec)) or (items, 0)))
+    monkeypatch.setattr(push_ledger, "record",
+                        lambda s, u, sec, items: calls.append(("record", sec)) or len(items))
+
+    class _Sess:
+        def rollback(self):
+            pass
+
+    ok = xg.push_new_shares([{"title": "x", "share_url": "https://pan.xunlei.com/s/x"}],
+                            _S(), session=_Sess(), user_id=1)
+    assert ok is True
+    assert calls == [("drop", "xunlei_group"), ("record", "xunlei_group")]
+
+
+def test_推送失败就不标已推过(session, monkeypatch) -> None:
+    """★★ **标了没推 = 静默丢资源**(2026-11-23):标记必须落在"真的发出去了"之后。
+
+    两种情况都会走到这里:webhook 没配(静默 `return False`)、发送抛异常。
+    两者若也标记,行就被锁进 72h 窗口,而客户一条都没收到。
+    """
+    row = XunleiGroupShare(user_id=1, group_id="g", share_id="S", title="资源",
+                           origin_url="http://pan.xunlei.com/s/S", status="pending")
+    session.add(row)
+    session.commit()
+    items = [xg._source_only_item(row, "盘快满了")]
+
+    class _C:
+        def __init__(self, *a, **k):
+            pass
+
+        def send_card(self, card):
+            return False                       #: webhook 拒了 / 没配
+
+    import app.services.feishu_client as fc
+
+    monkeypatch.setattr(fc, "FeishuClient", _C)
+    assert xg.push_new_shares(items, _PushSettings(), session=session, user_id=1) is False
+    session.refresh(row)
+    assert row.source_pushed_at is None, "没发出去就不许标 —— 否则 72h 内永远不会再试"
+
+
+def test_台账挡掉的条目不标已推过(session, monkeypatch) -> None:
+    """去重挡掉的条目**没有进卡片**,客户没看到 ⇒ 同样不许标「已推过」。"""
+    row = XunleiGroupShare(user_id=1, group_id="g", share_id="D", title="重复的",
+                           origin_url="http://pan.xunlei.com/s/D", status="pending")
+    session.add(row)
+    session.commit()
+    items = [xg._source_only_item(row, "盘快满了")]
+
+    class _C:
+        def __init__(self, *a, **k):
+            pass
+
+        def send_card(self, card):
+            return True
+
+    import app.services.feishu_client as fc
+    from app.services import push_ledger
+
+    monkeypatch.setattr(fc, "FeishuClient", _C)
+    monkeypatch.setattr(push_ledger, "drop_recent", lambda *a, **k: ([], 1))
+    monkeypatch.setattr(push_ledger, "record", lambda *a, **k: 0)
+    assert xg.push_new_shares(items, _PushSettings(), session=session, user_id=1) is False
+    session.refresh(row)
+    assert row.source_pushed_at is None
+
+
+def test_手动转存接口剥掉内部键(session, monkeypatch) -> None:
+    """`_row_id`/`_reason` 是**推送点用的内部键**,不是对外契约(前端别依赖它)。"""
+    from app.api import xunlei as xunlei_api
+    from app.services import xunlei_transfer as xt
+
+    session.add(XunleiGroupShare(user_id=1, group_id="g", share_id="A",
+                                 title="大的", origin_url="http://pan.xunlei.com/s/A",
+                                 status="pending"))
+    session.commit()
+    monkeypatch.setattr(xt, "quota_ratio", lambda cred=None, **kw: 1.26)
+
+    class _U:
+        id = 1
+
+    out = xunlei_api.xunlei_transfer_now(limit=3, user=_U(), db=session)
+
+    assert out["source_only"] == 1
+    assert out["items"], "接口要能看见源链条目"
+    assert all(not k.startswith("_") for it in out["items"] for k in it), \
+        "内部键必须剥掉,否则会被当成对外字段"
+    assert out["items"][0]["share_url"] == "http://pan.xunlei.com/s/A"

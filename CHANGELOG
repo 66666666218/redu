@@ -1,3 +1,33 @@
+- [2026-11-23 18:13] FEAT: **盘满时迅雷群分享按源链直推,不再一条不推**
+  用户口径:「盘容量满时进行直接推送不需要再进行转存」。此前 `transfer_pending` 遇空间受阻
+  (`admit_transfer` 盘满闸门 / 单个资源比剩余空间大 / 转存返回 `file_space_not_enough`)
+  **一律 `return items: []`** —— 客户那边整天看不到更新,而实测近两天每轮都沉 5~6 条
+  「单个太大跳过」(最大要 175.67 GiB)、601 条 pending 里 112 条 message 写着「空间不足」。
+  · **三条路都接上直推**:盘满预闸门(整批)、「单个太大」(单条后继续整批)、转存返回空间
+    不足(整批停下前);把群主**原链**放进 `items`,卡片逐行标 `(源链,未转存)`,表头在有
+    源链行时写「可用链」,头部按全转存/全源链/混合三种写法(不再硬编码「已全部转存」)。
+  · **行仍保持 `pending`**(空间出来要补搬),新增列 `XunleiGroupShare.source_pushed_at` 专门
+    记「没搬但已推过」,与 `moved_at` 严格分开;`ADDITIONS` 自动加列,无需手工迁移。
+  · **标记落在推送点,不在挑选点**(★ 第一版写错、当场改掉):`transfer_pending` 只**挑出
+    候选**,`push_new_shares` 真的发成功后才由 `mark_source_pushed` 回写 `source_pushed_at`。
+    否则「手动 `POST /api/xunlei/transfer`(只转存不推送)」与「webhook 没配/发送失败」
+    都会变成**标了没推** —— 行被锁进 72h 窗口,客户一条没收到。台账挡掉的条目同理不标。
+    运行记录/管理群文案报的是**真推出去**的条数(tick 里按本轮时间戳数一次),不是候选数。
+  · 条目里的 `_row_id`/`_reason` 是内部键,`POST /api/xunlei/transfer` 返回前**剥掉**。
+  · **两道防刷屏**:窗口内(`push_pan_dedupe_hours`,默认 72h)已推过的不再推 —— 否则每轮
+    推的都是同几条队首、后面几百条永远轮不到(`pan_discovery` 盘满直推上线当天踩过同一个病);
+    `XUNLEI_GROUP_SOURCE_PUSH_LIMIT`(默认 15)**按天**限额 —— 这条链 20 分钟一轮 = 72 轮/天,
+    按轮给额度会一天几百条;`0` = 关掉(退回旧行为)。
+  · **推送台账接上**:`push_new_shares` 此前**完全没接台账**(`push_ledger` 里
+    `xunlei_group` 0 行),现在推前 `drop_recent`、推后 `record`;写台账失败要 `rollback`,
+    否则紧接的 `_record_run` 会一起失败。
+  · **运行记录**:`note` 单列「盘满直推源链N」「(今日额度用完/窗口内已推 M)」;
+    盘满但有直推时**运行记录**记 `partial` 而非 `failed`(接口 `status` 仍是 `disk_full`,
+    客户这一轮确实拿到东西了,但盘真的满了不能记 success)。
+    管理群文案写清「其中 N 条已按源链推给客户,仍待补搬」。
+  · 顺手修 `tests/test_xunlei_group.py` 缺 `timedelta` 导入(新用例 NameError)。
+  (Files: app/services/xunlei_group.py, app/db/models.py, app/db/database.py,
+  config/settings.py, .env.example, tests/test_xunlei_group.py, doc/API.md)
 - [2026-11-23 17:00] FIX: **测试环境被生产环境变量污染 + 归属判据三份副本合并 + 启动误报**
   三件事一起收(前两件是全仓隐患,#3/#4/#1):
   · **测试污染(★ 最危险的一件)**:`Settings(_env_file=None)` **仍读进程环境变量**,

@@ -40,7 +40,7 @@ import json
 from datetime import datetime, timedelta
 
 import requests
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 
 from app.db.models import XunleiGroupShare
 from app.utils import get_logger
@@ -362,6 +362,87 @@ def is_bulk_resource(name: str) -> bool:
 
 _UNSET = object()          # 区分"没传 ratio"与"传了 None(= 不知道)"
 
+#: **源链直推**的窗口判据(2026-11-23)。窗口内已直推过的行不再推 ——
+#: 借用 `push_pan_dedupe_hours` 而不是另开一个旋钮:同一份资源隔多久该重推一次,
+#: 全网只有一个答案(见 `push_ledger.drop_recent` 的盘链闸)。
+def _source_push_cutoff(settings) -> datetime | None:
+    """窗口起点;`None` = 这个窗口关掉了(`push_pan_dedupe_hours<=0`)。"""
+    hours = float(getattr(settings, "push_pan_dedupe_hours", 72) or 72)
+    return datetime.now() - timedelta(hours=hours) if hours > 0 else None
+
+
+def _source_only_item(row, reason: str = "") -> dict:
+    """空间受阻的群分享 → **源链直推**条目(2026-11-23)。
+
+    ⚠️ `share_url` 放的是**群主原链**(别人的分享),不是我们的。卡片靠 `source_only`
+    这个标记逐行标注「源链,未转存」,别让客户以为我们搬过。
+    提取码复用 `pan_discovery._source_pass_code`(**单一出处**:URL 里的 `?pwd=` +
+    正文里的「提取码:xxxx」)—— 取不到就空着,**不猜**。
+
+    `_row_id` / `_reason` 是**内部键**(卡片逐字段取,不会渲染出来):推送成功后由
+    `mark_source_pushed` 按 id 回写 `source_pushed_at` —— 为什么不能在这里就标,
+    见那个函数的头注(手动接口只转存不推送 / 发送失败都会变成"标了没推")。
+    """
+    from app.services.pan_discovery import _source_pass_code
+
+    return {"title": row.title or "", "group_name": row.group_name or "",
+            "share_url": row.origin_url or "",
+            "code": _source_pass_code({"title": row.title or "",
+                                       "origin_url": row.origin_url or ""}),
+            "source_only": True,
+            #: ⚠️ 私有键:API 层要剥掉(见 `api/xunlei.py`),别让它成为对外契约的一部分。
+            "_row_id": row.id, "_reason": reason}
+
+
+def mark_source_pushed(session, items: list[dict]) -> int:
+    """推送**真的成功之后**,把源链行标成"已推过"。返回标记条数。
+
+    ★★ **为什么标记必须落在推送点**(2026-11-23,第一版写法当场废弃):
+      ① **手动接口 `POST /api/xunlei/transfer` 只转存、不推送** —— 在那里标,等于把行
+         "锁"进 72h 窗口,而客户一条都没收到;
+      ② 飞书 **webhook 没配 / 发送失败**时同样:标了没推。
+    ⇒ 「谁真的发出去了,谁才标记」。行仍保持 `pending`(空间出来还要补搬),
+    这里**只写 `source_pushed_at` 与消息**,不改 `status`。
+
+    只处理 `items` 里**带 `_row_id` 的**(即已经过 `drop_recent` 过滤、真进了卡片的那些);
+    被台账挡掉的不在 `items` 里,自然不会标记。
+    """
+    pairs = [(int(it["_row_id"]), str(it.get("_reason") or ""))
+             for it in items
+             if it.get("source_only") and it.get("_row_id") is not None]
+    if not pairs:
+        return 0
+    want = {rid: why for rid, why in pairs}
+    marked = 0
+    for row in session.scalars(
+            select(XunleiGroupShare).where(XunleiGroupShare.id.in_(list(want)))).all():
+        row.source_pushed_at = datetime.now()
+        why = want.get(row.id) or ""
+        #: ⚠️ 消息必须写明「未转存」—— 否则运维看到原来那句「空间不足」会以为仍然没推。
+        row.message = (f"未转存,已按源链推送:{why}" if why else "未转存,已按源链推送")[:200]
+        marked += 1
+    session.commit()
+    return marked
+
+
+def _source_push_budget(session, user_id: int, settings) -> int:
+    """今天还剩几条**源链直推**名额(0 = 这条路关掉 / 今天已用完)。
+
+    ★ **为什么要日额度**(2026-11-23):这条链每 20 分钟跑一轮(一天 72 轮),
+    按"每轮 N 条"配额度会变成**一天几百条**别人的旧链刷客户群。按**天**算才对得上
+    用户口径「盘满时直接推送」——要的是"别停摆",不是"把积压一次倒完"。
+    ⚠️ 窗口内已推过的行不再占名额(它们仍是 `pending`,否则每天推的都是同样那几条)。
+    """
+    limit = int(getattr(settings, "xunlei_group_source_push_limit", 15) or 0)
+    if limit <= 0:
+        return 0
+    day_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    used = session.scalar(select(func.count()).select_from(XunleiGroupShare).where(
+        XunleiGroupShare.user_id == user_id,
+        XunleiGroupShare.source_pushed_at.is_not(None),
+        XunleiGroupShare.source_pushed_at >= day_start)) or 0
+    return max(0, limit - int(used))
+
 
 def _gate_limit(settings=None) -> float:
     """盘级预闸门的阈值(`usage/limit`)。
@@ -605,18 +686,51 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
     too_large_need: int | None = None      # 这些大包里**最大的**那个要多少(留痕用)
     too_large_free: int | None = None      # 当时盘上还剩多少
     first_err = ""          # 第一条失败原因 —— 带出去让运行记录**可照做**(见 tick 的状态判定)
+    # ★★ **盘满直推**(2026-11-23,用户口径「盘容量满时进行直接推送不需要再进行转存」)。
+    # 空间受阻的行不再一条不推地留在队里,而是**跳过转存、把群主原链直接推给客户**。
+    # ⚠️ 行仍保持 `pending`(空间出来要补搬)⇒ 靠 `source_pushed_at` 防重复推。
+    source_items: list[dict] = []
+    source_only = 0
+    source_skipped = 0            #: 窗口内已推过 / 今日额度用完 —— **不是**"没这条"
+    _src_cutoff = _source_push_cutoff(settings)
+    _src_budget = _source_push_budget(session, user_id, settings)
+
+    def _try_source_push(row, reason: str) -> bool:
+        """这一行能不能**按源链推**?能就标好并收进 `source_items`。"""
+        nonlocal source_only, source_skipped, _src_budget
+        #: ⚠️ **本批已经搬成的行不算候选**:它已经有我方链了,再推一遍源链是重复。
+        if str(row.status or "") != "pending":
+            return False
+        if _src_budget <= 0:
+            source_skipped += 1
+            return False
+        #: ⚠️ **窗口内推过的不再推**:它们仍是 `pending`(每轮都在队首),不排除的话
+        #: 今天的名额全被同几条吃掉,后面几百条永远轮不到(与 pan_discovery 同一个病)。
+        pushed = row.source_pushed_at
+        if _src_cutoff is not None and pushed is not None and pushed >= _src_cutoff:
+            source_skipped += 1
+            return False
+        source_items.append(_source_only_item(row, reason))
+        source_only += 1
+        _src_budget -= 1
+        return True
+
     for row in rows:
         allowed, why, retryable = admit_transfer(row.title, settings=settings, ratio=ratio)
         if not allowed:
             if retryable:
                 # ⚠️ 盘满:**整批停下,行保持 pending** —— 清理出空间后下一轮自动继续,
                 # 若标成 skipped,用户清完还得人工重新排队(那是把方便留给了代码、麻烦留给人)
-                logger.info("迅雷群分享暂停转存(盘满):%s", why)
+                # ★★ 但**推**不必等盘:**链本身是好的**,客户点开就能拿(2026-11-23)。
+                # 剩下没推的照旧留在队里,空间出来先补搬。
+                _pushed = sum(1 for r in rows if _try_source_push(r, why))
+                logger.info("迅雷群分享暂停转存(盘满):%s;本轮直推源链 %d 条", why, _pushed)
                 session.commit()
                 return {"status": "disk_full", "picked": 0, "ok": 0, "failed": 0, "skipped": 0,
                         "expired": expired, "quota_ratio": ratio, "quota_limit": _gate_limit(settings),
                         "gate_mismatch": False,      # 预闸门**按设计**挡下的,不是失准
-                        "message": why, "items": []}
+                        "source_only": source_only, "source_skipped": source_skipped,
+                        "message": why, "items": source_items}
             row.status, row.message = "skipped", why[:200]      # 策略性不搬 → 终态留痕
             skipped += 1
             logger.info("迅雷群分享跳过转存 %s:%s", row.title, why)
@@ -681,6 +795,10 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
                     if isinstance(_need, int) and (too_large_need is None or _need > too_large_need):
                         too_large_need, too_large_free = _need, out.get("free_size")
                     too_large_names.append(str(row.title or "")[:60])
+                    # ★ **搬不进 ≠ 推不了**(2026-11-23):这条的源链是好的,客户点开就能拿。
+                    # 原来它只被记进「单个太大跳过N」,一条都不推 —— 实测每轮都有 5~6 条
+                    # 这样沉在队里(最大那个要 175 GiB),而客户那边整天看不到更新。
+                    _try_source_push(row, msg)
                     logger.warning("迅雷群分享跳过(单个资源比剩余空间大,整批继续):%s | %s",
                                    row.title, msg[:100])
                     continue
@@ -696,11 +814,16 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
                 # 这里**不额外打接口** —— `ratio` 是本次批量开头算好的,直接用。
                 # 探针拿不到(None)就**不下结论**,别把"不知道"报成"失准"。
                 gate = _gate_limit(settings)
+                # ★★ **盘满直推**(2026-11-23):这一批搬不进了,但**链是好的** ——
+                # 把本批剩下的(以及后面还没轮到的)pending 按源链推出去,别让客户干等。
+                for _r in rows:
+                    _try_source_push(_r, msg)
+                session.commit()
                 return {"status": "disk_full", "picked": len(rows), "ok": len(ok_items),
                         "failed": failed, "skipped": skipped, "too_large": too_large,
                         "expired": expired,
-            "too_large_names": too_large_names,
                         "too_large_names": too_large_names,
+                        "source_only": source_only, "source_skipped": source_skipped,
                         "blocked_names": [str(r.title or "")[:60] for r in rows
                                           if r.status == "pending"][:10],
                         "quota_ratio": ratio, "quota_limit": gate,
@@ -708,7 +831,7 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
                         "required_size": out.get("required_size"),
                         "free_size": out.get("free_size"),
                         "message": "转存返回空间不足,本轮停止(清理出空间后会继续)",
-                        "items": ok_items}
+                        "items": ok_items + source_items}
             # ⚠️ 单条失败**不重试到底**:标 failed 留痕,避免每轮都拿它空转。
             row.status, row.message = "failed", msg[:200]
             failed += 1
@@ -718,8 +841,11 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
     return {"status": "ok", "picked": len(rows), "ok": len(ok_items),
             "failed": failed, "skipped": skipped, "too_large": too_large,
             "expired": expired,
+            #: ★ **直推的条数单独报**(2026-11-23):它**没转存**、不花转存额度,
+            #: 混进 `ok` 会让「转存 N 条」这个数再次骗人(与 pan_discovery 同一条纪律)。
+            "source_only": source_only, "source_skipped": source_skipped,
             "required_size": too_large_need, "free_size": too_large_free,
-            "message": first_err, "items": ok_items}
+            "message": first_err, "items": ok_items + source_items}
 
 
 def list_group_shares(session, user_id: int, status: str = "", limit: int = 200) -> list[dict]:
@@ -739,15 +865,24 @@ def list_group_shares(session, user_id: int, status: str = "", limit: int = 200)
 
 # ---------------------------------------------------------------- 推送
 
-def push_new_shares(items: list[dict], settings) -> bool:
-    """转存成功的群资源推飞书 —— **客户群**(主群)。
+def push_new_shares(items: list[dict], settings, session=None, user_id: int = 0) -> bool:
+    """群资源推飞书 —— **客户群**(主群)。已转存的给**我方链**,盘满未转存的给**源链**。
 
     版式与公众号推送**一致**(2026-10-02 用户口径"格式按照公众号的格式"):
-    **四列网格** —— 资源 / 我方分享链,不靠空格对齐。
+    **四列网格** —— 资源 / 链接,不靠空格对齐。
 
     ⚠️ **目的地(2026-10-03 用户口径)**:"**内容是给用户看的,推客户群就行;管理群职责是
     接受维护的信息**。" 这张卡是**内容**(资源 + 可直接用的链),所以走**主群** ——
     此前推管理员群是错的。运营侧要看的是另一件事(哪条被闸门挡下/失败),那走 `push_ops_note`。
+
+    ★★ **两种链必须分开说**(2026-11-23,盘满直推)。`pan_discovery` 那条链早就这么做了:
+       · 已转存 ⇒ 链是**我们的**,标「已转存」;
+       · 盘满未转存 ⇒ 链是**别人群的源链**,标「源链,未转存」。
+    混成一句「已全部转存」就是**硬编码的假话**,客户会以为我们搬过。
+    ⚠️ **不列来源群名**(2026-10-02):那是别人的群名,露出去等于把人往别人那儿送。
+    ⚠️⚠️ **仍然不单开「原文」列**(2026-10-16 用户拍板):这一张的"原文"就是别人的群分享链,
+    与公众号/快手那种"内容帖"不是一类东西。盘满直推的源链**必须**落在「链接」这一列里
+    (它正是客户要的那份东西),但**逐行标注 + 头部说明**要写清楚来源性质。
     """
     if not items:
         return False
@@ -766,28 +901,64 @@ def push_new_shares(items: list[dict], settings) -> bool:
         return False
     items = _ai.items
 
+    #: ★ **推送去重**(2026-11-23):这条链此前**一处都没接**台账(全仓只有
+    #: `push_ledger.record` 零处、`drop_recent` 零处)⇒ 盘满直推后同样的源链
+    #: 会每轮重推。去重口径与其它板块一致:同 section 内 24h / 同盘链 72h。
+    #: ⚠️ **没有盘链的条目只走内容去重**(`_pan_id_of` 认不出就给空串)。
+    from app.services import push_ledger
+
+    items, _dup = push_ledger.drop_recent(session, user_id, "xunlei_group", items,
+                                          settings) if session is not None and user_id else (items, 0)
+    if not items:
+        return False
+
     from app.services.feishu._cards import _col_set_row, _md_safe, strip_others
     from app.services.feishu_client import FeishuClient
 
     brand = (getattr(settings, "brand_name", "") or "").strip()
+    #: ★★ **两种链分开说**(2026-11-23):混成一句「已全部转存」是硬编码的假话。
+    _n_src = sum(1 for it in items if it.get("source_only"))
+    _n_mine = len(items) - _n_src
+    _parent = getattr(settings, "xunlei_transfer_parent", "") or "最全文件"
+    if not _n_src:
+        _head = (f"**本批 {_n_mine} 个资源,已全部转存并生成分享链,点开即用。**\n"
+                 f"已归入「{_parent}」。")
+    elif not _n_mine:
+        _head = (f"**本批 {_n_src} 个资源,网盘空间不足、本轮未转存,直接给源链"
+                 f"(点开同样能取)。**\n这些是群主原分享链,不是我们的转存链。")
+    else:
+        _head = (f"**本批 {len(items)} 个资源:{_n_mine} 条已转存成我方分享链、"
+                 f"**{_n_src} 条因网盘空间不足未转存**(给的是群主源链,点开同样能取)。**\n"
+                 f"已转存的已归入「{_parent}」。")
     elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
         # **结论先行**(用户口径"推送是为了用户更好总结"):先说"这批是什么、能直接干什么",
         # 再上列表 —— 光甩一张表,看的人还要自己数、自己猜能不能用。
-        f"**本批 {len(items)} 个资源,已全部转存并生成分享链,点开即用。**\n"
-        f"已归入「{getattr(settings, 'xunlei_transfer_parent', '') or '最全文件'}」。"
+        _head
         + (f"\n**{_ai.summary()}**:已挡掉纯广告 / 无具体资源 / 过时的那些。"
-           if _ai.summary() else "")}},
+           if _ai.summary() else "")
+        + (f"\n已跳过 {_dup} 条 {int(getattr(settings, 'push_dedupe_hours', 24) or 0)} 小时内推过的。"
+           if _dup else "")}},
         # ⚠️ **不列来源群**:那是**别人的群名**,卡片是发到客户群看的(2026-10-02 用户口径
         # "不要带别人的关键词")—— 露出别人的群等于把人往别人那儿送。
         # ⚠️⚠️ **也不加「原文」列**(2026-10-16 用户拍板「**不露**」):这一张的"原文"
         # 与公众号/快手那几张**不是一类东西** —— 那边的原文是**内容帖**(文章/视频),
         # 这里的原文**就是别人的群分享链本身** ⇒ 露出去等于**把客户直接送到别人那儿**,
         # 与上面那条口径同源。⇒ 全网卡片统一成"有原文有网盘"时,**这一张是例外,别顺手改**。
-        _col_set_row([("**资源**", 6), ("**链接**", 4)], grey=True)]
+        # ★ 有源链行时列名必须中性 ——「链接」这一列里可能放的是**别人**的链,
+        # 叫「我方分享链」就是撒谎(与 pan_discovery 同一处取舍)。
+        _col_set_row([("**资源**", 6), (("**可用链**" if _n_src else "**链接**"), 4)],
+                     grey=True)]
     for it in items:
+        _tail = ""
+        if it.get("source_only"):
+            #: ⚠️ **逐行标「源链未转存」**:表头改成中性了,但客户仍要能一眼分出
+            #: 手里这条是**我们的**还是**别人**的 —— 别人的链哪天被撤掉,我们的不会。
+            _tail = " (源链,未转存)"
+        elif _n_src:
+            _tail = " (已转存)"
         elements.append(_col_set_row([
             (_md_safe(strip_others(it.get("title") or "")), 6),
-            (f"[▶ 打开]({_md_safe(it.get('share_url') or '')})"
+            (f"[▶ 打开]({_md_safe(it.get('share_url') or '')})" + _tail
              + (f" 🔑{_md_safe(it.get('code') or '')}" if it.get("code") else ""), 4)]))
     card = {"config": {"wide_screen_mode": True},
             "header": {"template": "blue", "title": {"tag": "plain_text",
@@ -795,10 +966,31 @@ def push_new_shares(items: list[dict], settings) -> bool:
                                                                  f"新资源 · {len(items)} 个"}},
             "elements": elements}
     try:
-        return FeishuClient(webhook, getattr(settings, "feishu_secret", "")).send_card(card)
+        ok = FeishuClient(webhook, getattr(settings, "feishu_secret", "")).send_card(card)
     except Exception:  # noqa: BLE001
         logger.exception("迅雷群资源推送失败")
         return False
+    if ok and session is not None:
+        #: ★★ **真的发出去了才标"已推过"**(2026-11-23)。`transfer_pending` 只负责
+        #: **挑出候选**,标记落在推送点 —— 手动接口只转存不推、webhook 没配/发送失败时,
+        #: 在那里标就等于把行"锁"进 72h 窗口而客户一条没收到(见 `mark_source_pushed`)。
+        #: ⚠️ 台账去重挡掉的那些**不在 `items` 里**,自然不会被误标。
+        try:
+            mark_source_pushed(session, items)
+        except Exception:  # noqa: BLE001 - 卡片已发出,标记失败不该向上抛
+            logger.warning("迅雷群源链直推标记失败(内容已发出)", exc_info=True)
+            session.rollback()
+    if ok and session is not None and user_id:
+        #: **台账落 section=`xunlei_group`**(落地的那个群就是主客户群,不是别的板块)。
+        #: ⚠️ 写失败只警告不抛出:内容已经发出去了,记不上台账不该让调用方以为推送失败。
+        try:
+            push_ledger.record(session, user_id, "xunlei_group", items)
+        except Exception:  # noqa: BLE001
+            #: ⚠️ **必须 rollback**:`record` 在锁冲突时会让 session 进入"必须回滚"状态,
+            #: 不收拾的话调用方紧接着的 `_record_run` 会一起失败(本仓 2026-10-19 栽过)。
+            logger.warning("迅雷群推送台账写入失败(内容已发出)", exc_info=True)
+            session.rollback()
+    return ok
 
 
 # ---------------------------------------------------------------- 定时入口
@@ -821,9 +1013,19 @@ def xunlei_group_tick(settings=None) -> int:
 
             try:
                 got = sync_group_shares(db, uid, settings=settings)
+                #: 本轮起点:`push_new_shares` 里才标"已推过"(见 `mark_source_pushed`),
+                #: 之后数 `source_pushed_at >= 这个时刻` 才是**真的推出去几条** ——
+                #: `out["source_only"]` 只是**挑出的候选**,webhook 没配 / 发送失败 /
+                #: 台账挡掉时那个数会虚高。
+                _round_at = datetime.now()
                 out = transfer_pending(db, uid, limit=limit, settings=settings) if limit else {}
                 total += out.get("ok", 0)
-                push_new_shares(out.get("items") or [], settings)
+                push_new_shares(out.get("items") or [], settings, session=db, user_id=uid)
+                _src_pushed = int(db.scalar(
+                    select(func.count()).select_from(XunleiGroupShare).where(
+                        XunleiGroupShare.user_id == uid,
+                        XunleiGroupShare.source_pushed_at.is_not(None),
+                        XunleiGroupShare.source_pushed_at >= _round_at)) or 0)
                 # ⚠️ 写运行记录:否则健康页**看不到这条链**(2026-10-02 补)
                 # ⚠️ **按 status 区分**(2026-10-03 修):旧实现无条件记 `success`,
                 # 于是"群列表拉不到(凭据失效)"被记成"群0 新0 转存0",跟"今天群里真没新资源"
@@ -834,6 +1036,15 @@ def xunlei_group_tick(settings=None) -> int:
                 t_bad = int(out.get("failed", 0) or 0)
                 note = (f"群{got.get('groups', 0)} 新{got.get('new', 0)} "
                         f"转存{t_ok} 跳过{out.get('skipped', 0)} 失败{t_bad}")
+                #: ★★ **盘满直推单独报**(2026-11-23):它**没转存**、不花转存额度,
+                #: 混进「转存 N」会让这个数再次骗人(与 `pan_discovery` 同一条纪律)。
+                #: ⚠️ 报**真的推出去**的(`_src_pushed`),不是 `out["source_only"]`
+                #: (那只是候选 —— webhook 没配时一条都没发,报候选数就是假绿灯)。
+                #: `source_skipped` = 窗口内已推过 / 今日额度用完 —— **不是**"没这条资源"。
+                if _src_pushed:
+                    note += f" **盘满直推源链{_src_pushed}**"
+                if out.get("source_skipped"):
+                    note += f"(今日额度用完/窗口内已推 {int(out['source_skipped'])})"
                 if out.get("expired"):
                     #: 过期分诊了多少条要写出来 —— 否则"队列怎么突然少了 7000 条"没人解释得了。
                     note += f" 过期{int(out.get('expired') or 0)}"
@@ -870,7 +1081,13 @@ def xunlei_group_tick(settings=None) -> int:
                     _mm, _rr = bool(out.get("gate_mismatch")), out.get("quota_ratio")
                     tag = (f" ⚠️闸门失准(配额只报 {_rr * 100:.0f}%,闸门本该放行)"
                            if _mm and _rr is not None else "")
-                    _record_run(db, uid, "xunlei_group", "failed",
+                    #: ★★ **盘满但已按源链推出去 ⇒ 不是"停摆"**(2026-11-23)。
+                    #: 记 `partial` 而不是 `failed`:客户这一轮**确实拿到东西了**,
+                    #: 只是没进我们的盘。⚖️ 但**也不能记 success** —— 盘真的满了,
+                    #: 补搬仍然堵着,那是运维要处理的事。
+                    #: ⚠️ 一条都没**真推出去**(额度用完 / webhook 没配)才记 `failed`。
+                    _st = "partial" if _src_pushed else "failed"
+                    _record_run(db, uid, "xunlei_group", _st,
                                 f"盘满暂停: {why} {note}{tag}")
                     # 🔔 **闸门失准 → 单独告警**(2026-10-04 用户要求加)。
                     # 预闸门本该在"盘满"之前就把整批挡住;若它**放行了**、转存却仍被迅雷挡回
@@ -916,8 +1133,14 @@ def xunlei_group_tick(settings=None) -> int:
                     _sz = (f"(最大那条要 {xt.human_bytes(out.get('required_size'))},"
                            f"当时剩 {xt.human_bytes(_free) if _free is not None else '未知'})"
                            if out.get("required_size") is not None else "")
-                    ops_bits.append(f"**{len(_n)} 个资源因空间不够没搬成**{_sz}:"
-                                    + "、".join(_n[:8]) + ("…" if len(_n) > 8 else ""))
+                    #: ★ **把"客户其实拿到了"说清楚**(2026-11-23):旧文案只说"没搬成",
+                    #: 运营会以为资源没出去。盘满直推之后,这些**已经按源链推到客户群**了。
+                    #: ⚠️ 用**真的推出去**的 `_src_pushed`(不是候选数 `source_only`)。
+                    ops_bits.append(
+                        f"**{len(_n)} 个资源因空间不够没搬成**{_sz}:"
+                        + "、".join(_n[:8]) + ("…" if len(_n) > 8 else "")
+                        + (f"(其中 {_src_pushed} 条**已按源链推给客户**,仍待补搬)"
+                           if _src_pushed else "(**本轮未推**,空间出来才搬)"))
                 if out.get("failed"):
                     ops_bits.append(f"{out['failed']} 条转存失败")
                 if ops_bits:
