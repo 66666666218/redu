@@ -26,6 +26,21 @@
 三个条件**同时**成立才算突增。只用"绝对值高"会把**长期火**的资源每小时报一次;
 只用"涨了"会把 2→3 也算成突增。三条一起才对应"**突然有很多人加入**"。
 
+## ⚠️⚠️ 窗口必须 **24h**(2026-11-23 订正:3h 等于没接线)
+
+原默认 `window_hours=3` **上线后 76 轮全部 `候选0 发出0`**(`runs` 实测 76/76),
+一次都没报过。回放真实台账后确认**不是没信号,是窗口太短**:
+
+| 量级 | 3h · 6人/4增量 | 24h · 6人/4增量 |
+|---|---|---|
+| 11-21~11-23 低量期(日均 122~183 行) | **0 条** | 4 条(≈1.5/天) |
+| 11-20~11-23 作业上线以来 | 0 条 | 4 条(≈1.3/天) |
+
+绝大多数资源在 3 小时里只有 1 个人推(`{1人:873, 2人:128, 3人:31 …}`),
+3h 窗口凑不出 6 个人是数据形状决定的,不是判据严格。
+⇒ **只放宽窗口,三条阈值一个不动**;降阈值(`hands≥4,gain≥3`)会到 ≈2.7/天,
+且把"长期火"也放进来 —— 那正是三条判据要防的噪音。
+
 ## 「每个板块都加上」怎么落的
 
 数据源是 `push_ledger`(推送台账)—— **它已经是全板块的**(公众号/抖音线索/抖音对标号/
@@ -81,7 +96,8 @@
 不用 `feishu_alert_gate` 的「检查并占位」语义,也不用「先占位、失败再 `rollback()`」——
 pysqlite 上 SAVEPOINT 作为最外层事务时 `RELEASE` 就已落盘,`rollback()` 撤不回来
 (2026-11-20 实测:换另一条连接读得到)。一次飞书抖动就会吃掉这条提醒 24h,
-而这 3h 窗口一过推手数再也凑不齐 = **永久丢失**。详见 `_recently_alerted` 的注释。
+而「今天比昨天多出的这几个人」这个信号一过窗口就再也对不上 = **永久丢失**。
+详见 `_recently_alerted` 的注释。
 """
 from __future__ import annotations
 
@@ -168,11 +184,11 @@ def _work_key(title: str, names) -> str:
     return best or norm
 
 
-def detect_surges(session: Session, user_id: int, *, window_hours: float = 3.0,
+def detect_surges(session: Session, user_id: int, *, window_hours: float = 24.0,
                   min_hands: int = 6, min_gain: int = 4, min_ratio: float = 1.8,
                   top: int = 5, now: datetime | None = None,
                   stats: dict | None = None) -> list[dict]:
-    """找出**这一小时**推手数突增的盘链(按增量降序,最多 `top` 条)。
+    """找出**这个 24h 窗口**推手数突增的盘链(按增量降序,最多 `top` 条)。
 
     返回 `[{pan_key, pan_url, pan_type, title, hands, prev_hands,
              sections:{section: 该板块的**不同作者数**}, first, last}]`。
@@ -184,6 +200,8 @@ def detect_surges(session: Session, user_id: int, *, window_hours: float = 3.0,
     ⚠️ **纯读**:不开网络、不写库 —— 冷却门与发送留给 `push_surge_tick`。
     """
     from app.db.models import PushLedger
+
+    #: ⚠️ 默认 24h 不是随手写的 —— 3h 上线后 76 轮全 0,理由见模块头注「窗口必须 24h」。
 
     now = now or datetime.now()
     w = timedelta(hours=float(window_hours))
@@ -307,8 +325,8 @@ def _recently_alerted(session, user_id: int, key: str, cooldown_hours: float) ->
 
     ⚠️ 为什么不用 `feishu_alert_gate` 做这件事:那个门是「**检查并占位**」的语义,
     它会在返回 True 时就写冷却行。而这里要的是「**发送成功之后**才占位」——
-    先占位再发的话,一次飞书抖动就把这条提醒吃掉 24h,而这 3h 窗口一过
-    推手数再也凑不齐,**等于永久丢失**。
+    先占位再发的话,一次飞书抖动就把这条提醒吃掉 24h,而「今天比昨天多出的这几个人」
+    这个信号一过窗口就再也对不上,**等于永久丢失**。
 
     ⚠️⚠️ 也**不能**靠「先占位、失败再 `rollback()`」:那个门内部用 SAVEPOINT 写,
     而 pysqlite 上 SAVEPOINT 的 `RELEASE` 走在最外层时就会落盘,
@@ -351,7 +369,7 @@ def push_surge_tick(settings=None) -> int:
     hook = webhook_for(settings, "admin")
     if not hook:
         return 0
-    kw = {"window_hours": float(getattr(settings, "push_surge_window_hours", 3) or 3),
+    kw = {"window_hours": float(getattr(settings, "push_surge_window_hours", 24) or 24),
           "min_hands": int(getattr(settings, "push_surge_min_hands", 6) or 6),
           "min_gain": int(getattr(settings, "push_surge_min_gain", 4) or 4),
           "min_ratio": float(getattr(settings, "push_surge_min_ratio", 1.8) or 1.8),
@@ -383,8 +401,8 @@ def push_surge_tick(settings=None) -> int:
                     logger.warning("推手突增冷却预检失败 %s(按未发过处理)", key, exc_info=True)
                     session.rollback()
                 #: ★ **先发、成功后才落冷却行**(见 `_recently_alerted` 的两条 ⚠️):
-                #: 先占位再发 ⇒ 一次网络抖动吃掉这条提醒 24h,而这 3h 窗口一过
-                #: 推手数再也凑不齐 = 永久丢失。发送期间会话里**没有未提交写**。
+                #: 先占位再发 ⇒ 一次网络抖动吃掉这条提醒 24h,而「今天比昨天多出的
+                #: 这几个人」一过窗口就再也对不上 = 永久丢失。发送期间会话里**没有未提交写**。
                 if client.send(_render(a, nl)):
                     sent += 1
                     n_sent += 1

@@ -52,6 +52,23 @@ def _add_hands(session, n, *, section="kuaishou", pan=PAN, hours_ago=1.0, prefix
              author=f"{prefix}{i}")
 
 
+def test_默认窗口必须够长_否则整条链等于没接线() -> None:
+    """★★ **2026-11-23 的真实事故**:`window_hours=3` 上线后 **76 轮全部 `候选0 发出0`**。
+
+    回放真实台账:近 7 天绝大多数资源在 3 小时里只有 **1 个**人推
+    (`{1人:873, 2人:128, 3人:31, 4人:9 …}`)⇒ 3h 窗口**结构上凑不出 6 个人**,
+    不是判据严格,是窗口配错了。低量期(日均 122~183 行)实测 3h = 0 条 / 24h = 4 条。
+
+    这条守卫把默认值钉死:改回 3h 会让整条提醒重新变成"装了没接线",
+    而它在 `runs` 里**一路 success**(静默失败 = 假成功的典型形状)。
+    """
+    import inspect
+
+    sig = inspect.signature(ps.detect_surges)
+    assert sig.parameters["window_hours"].default >= 24, \
+        "默认窗口又变短了 —— 3h 在真实台账上恒为 0 候选(见头注),整条链会静默失效"
+
+
 def test_多人同时起量会被抓到(session) -> None:
     """当前窗口 6 个不同作者、上一窗口 0 ⇒ 三条判据全过。"""
     _add_hands(session, 6)
@@ -79,24 +96,31 @@ def test_我们自己重推多遍只算一个人(session) -> None:
 
 
 def test_增量不够不许报(session) -> None:
-    """当前 7 人、上一窗口 5 人 ⇒ 只多 2 个,是**已经在推**不是**突然变多**。"""
+    """当前 7 人、上一窗口 5 人 ⇒ 只多 2 个,是**已经在推**不是**突然变多**。
+
+    ⚠️ **显式传窗口**(2026-11-23):默认窗口已从 3h 改成 24h,若这里靠默认值,
+    "上一窗口"放在 5h 前就落进了**当前**窗口,这条会变成假通过(实测它就是这么红的)。
+    """
     _add_hands(session, 7, prefix="新")
     _add_hands(session, 5, hours_ago=5.0, prefix="旧")
     session.commit()
-    assert ps.detect_surges(session, 1) == []
+    assert ps.detect_surges(session, 1, window_hours=3) == []
 
 
 def test_倍数不够不许报(session) -> None:
-    """当前 8 人、上一窗口 6 人 ⇒ 增量 2 不够;换成 8→4 也过不了 1.8 倍。"""
+    """当前 8 人、上一窗口 6 人 ⇒ 增量 2 不够;换成 8→4 也过不了 1.8 倍。
+
+    ⚠️ 同样**显式传窗口**,理由见上一条。
+    """
     _add_hands(session, 9, prefix="新")
     _add_hands(session, 6, hours_ago=5.0, prefix="旧")
     session.commit()
     #: 9-6=3 < 4 ⇒ 增量闸挡下(先证增量闸是承重的)
-    assert ps.detect_surges(session, 1) == []
+    assert ps.detect_surges(session, 1, window_hours=3) == []
     #: 放宽增量仍过不了倍数:6→9 只有 1.5 倍
-    assert ps.detect_surges(session, 1, min_gain=1) == []
+    assert ps.detect_surges(session, 1, window_hours=3, min_gain=1) == []
     #: 两条都放宽才放行 —— 证明两个闸各自都在起作用
-    assert len(ps.detect_surges(session, 1, min_gain=1, min_ratio=1.4)) == 1
+    assert len(ps.detect_surges(session, 1, window_hours=3, min_gain=1, min_ratio=1.4)) == 1
 
 
 def test_人数不够不许报(session) -> None:
@@ -120,11 +144,15 @@ def test_作者为空的行不能算推手_但必须记账(session) -> None:
 
 
 def test_窗口外的行不参与(session) -> None:
-    """上一窗口之外(4h 前的 3h 窗口 = 6h 前)的行不该算进任何一档。"""
+    """上一窗口之外(3h 窗口下的 6h 前)的行不该算进任何一档。
+
+    ⚠️ 显式传 `window_hours=3`:默认 24h 时 8h 前的行仍在**当前**窗口里,
+    这条会失去意义(它守的是"窗口边界",不是"默认值是多少")。
+    """
     _add_hands(session, 6)
     _add_hands(session, 20, hours_ago=8.0, prefix="很久前")
     session.commit()
-    out = ps.detect_surges(session, 1)
+    out = ps.detect_surges(session, 1, window_hours=3)
     assert len(out) == 1 and out[0]["prev_hands"] == 0, \
         f"窗口外的行被算进上一窗口:{out}"
 
@@ -328,11 +356,15 @@ def test_发送成功之后冷却才生效(session, monkeypatch) -> None:
 
 
 class _Settings:
-    """`push_surge_tick` 只读这几个开关。"""
+    """`push_surge_tick` 只读这几个开关。
+
+    ⚠️ 窗口与生产默认值保持一致(24h):这条测试要验的是"冷却/发送顺序",
+    如果这里还写 3h,它就在**偷偷测另一套配置**,与线上行为脱节。
+    """
     feishu_secret = ""
     feishu_webhook = ""
     feishu_webhook_admin = "https://example.invalid/hook"
-    push_surge_window_hours = 3
+    push_surge_window_hours = 24
     push_surge_min_hands = 6
     push_surge_min_gain = 4
     push_surge_min_ratio = 1.8

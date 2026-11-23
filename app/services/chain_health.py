@@ -1275,6 +1275,87 @@ def check_chains(db, days: int = 3) -> list[dict]:
     return out
 
 
+def check_streak_failures(db, min_streak: int = 2, max_runs_24h: int = 3) -> list[dict]:
+    """⑥ **低频作业的连续失败** —— `check_collect_failures` 结构上看不到的那一半(2026-11-23)。
+
+    ## 为什么必须单加这一条
+
+    `check_collect_failures`(每 30 分钟跑一次)的第一道门槛是
+    「近 24h 失败 **≥ `fail_alert_threshold`(默认 3)** 次」(`alert_service.py` 里是
+    `if (uid, kind) not in currently_broken or cnt < threshold: continue`)。
+    ⇒ **每天只跑一轮的作业永远凑不满 3 次**,连"最近一轮仍失败"都判不到就被跳过了。
+
+    活证据:`pan_self_check` **连续 9 天 `failed`**(detail 里天天写着
+    「夸克池所有号 ≥99% —— 转存随时停摆」「迅雷 4 个号 limit 完全相同 ⇒ 配额读数不可信,
+    清盘不会恢复」),而告警链一条都没发出来;链路体检里也**没有它**
+    (`CHAINS` 50 个注册作业只覆盖 16 个 kind)。
+
+    ⚠️ 这与 `check_job_liveness`(该**跑**没跑)是两个层次:它天天在跑,
+    **每次都挂** —— 正是本仓母题「静默失败 = 假成功」的形状。
+
+    ## 判据(两条同时,且与上面那条**互补而非重复**)
+
+      · 最近**连续 ≥ `min_streak` 轮**都是 failed;
+      · **近 24h 总轮次 < `max_runs_24h`**(⇒ 低频作业 ⇒ 失败数必然也 < 3
+        ⇒ `check_collect_failures` 的计数门槛看不见它)。
+
+    已被 `CHAINS` 覆盖的 kind **跳过**:同一次体检里它们会各自出红/绿行,
+    重复列一遍只是噪音(而且那 16 条链的判据比"连续失败"更细)。
+
+    ⚠️ **纯读**:只查 `runs`,不发网络、不写库。
+    """
+    from sqlalchemy import func, select
+
+    from app.db.models import RunRecord
+
+    since = datetime.now() - timedelta(hours=24)
+    covered = {c[1] for c in CHAINS}
+    out: list[dict] = []
+    for uid, kind in db.execute(select(RunRecord.user_id, RunRecord.kind).distinct()).all():
+        if kind in covered:
+            continue
+        #: 先看轮次(**最便宜的闸**):24h 内跑够 3 轮的走 `check_collect_failures`
+        total = db.scalar(select(func.count()).select_from(RunRecord).where(
+            RunRecord.user_id == uid, RunRecord.kind == kind,
+            RunRecord.started_at >= since)) or 0
+        if not total or total >= max_runs_24h:
+            continue
+        streak = 0
+        for st in db.scalars(select(RunRecord.status).where(
+                RunRecord.user_id == uid, RunRecord.kind == kind)
+                .order_by(RunRecord.id.desc()).limit(20)).all():
+            if st == "failed":
+                streak += 1
+            else:
+                break
+        if streak < min_streak:
+            continue
+        last_ok = db.scalar(select(func.max(RunRecord.started_at)).where(
+            RunRecord.user_id == uid, RunRecord.kind == kind,
+            RunRecord.status.in_(("success", "partial"))))
+        last_detail = str(db.scalar(select(RunRecord.detail).where(
+            RunRecord.user_id == uid, RunRecord.kind == kind,
+            RunRecord.status == "failed").order_by(RunRecord.id.desc()).limit(1)) or "")
+        #: ⚠️ 不能取前 90 字 —— 这类作业的 detail 是 `[ok] … | [ok] … | [error] 真正的原因`,
+        #: 前 90 字全是 ok 的流水账(实测 `pan_self_check` 前 90 字止于「迅雷过期清理时效」),
+        #: 而真正该看的是那一条 `[error]`。⇒ **优先挑 error 那段**,没有才退回开头。
+        last_msg = next((seg.strip() for seg in last_detail.split("|")
+                         if "[error]" in seg), last_detail)[:120]
+        #: 低频作业的"连续 2 轮"可能已经是**两天**,把最久没成功多久写进 detail ——
+        #: 只写"连续2轮"让人估不出严重程度(与 `check_collect_failures` 的 reason 同一条)
+        since_ok = (f"最近一次成功 {last_ok:%m-%d %H:%M}"
+                    f"({(datetime.now() - last_ok).total_seconds() / 3600:.0f}h 前)"
+                    if last_ok else "**从未成功过**")
+        out.append({
+            "name": f"低频作业连续失败·{kind}",
+            "level": RED,
+            "detail": (f"连续 **{streak} 轮 failed**(近24h 共 {total} 轮;"
+                       f"因轮次 <{max_runs_24h},`采集失败告警`的计数门槛看不到它)"
+                       f" · {since_ok} · 最近一条:{last_msg}"),
+        })
+    return out
+
+
 def render(sections: list[tuple[str, list[dict]]]) -> str:
     lines: list[str] = [f"🔗 链路全检(只读 · {datetime.now():%m-%d %H:%M})", ""]
     for title, rows in sections:
@@ -1625,7 +1706,11 @@ def collect_sections(db) -> list[tuple[str, list[dict]]]:
             ("凭证(Cookie 在不在 / 源活不活)", check_credentials(db) + check_list_sources(db)),
             ("产出(最近几次真跑出来的东西)",
              check_chains(db) + check_read_num_coverage(db)
-             + check_weread_list_rotation(db)),
+             + check_weread_list_rotation(db)
+             #: ★ **低频作业的连续失败**(2026-11-23):`check_collect_failures` 要求
+             #: 24h 内失败 ≥3 次,每天一轮的作业**永远凑不满** ⇒ `pan_self_check`
+             #: 连续 9 天 failed 却零告警。判据见 `check_streak_failures` 头注。
+             + check_streak_failures(db)),
             # ⑤ **"该跑没跑"** —— 与"跑了但没产出"是两个层次的事,分开报(2026-10-07)。
             ("作业落实性(注册的 vs 真跑的)", check_job_liveness(db))]
 

@@ -1397,3 +1397,30 @@ class TestQuarkPoolFallback:
                             lambda *a, **k: alerts.append(a[3]) or True)
         out = pd.transfer_pan_url(session, 1, "https://pan.quark.cn/s/xyz", _S())
         assert out["status"] == "pending" and alerts and "夸克" in alerts[0]
+
+
+def test_积压告警标题不含数字_否则冷却门失效(session, monkeypatch) -> None:
+    """★★ **2026-11-23 的真实事故**:标题里带积压条数 ⇒ 冷却门 100% 失效。
+
+    `notify_incident` 的冷却键是 `title[:80]`,而这里原来写
+    `f"网盘发现积压 {backlog_left} 条(失败 {f} / 排队 {p})"` ⇒ **数字一变就是新键**。
+    实测 `incident_pan_discovery` **106 条告警 / 106 个不同标题**,
+    每 4 小时推一次、连续 8 天,内容只是 327→319→302 这种抖动 —— 人早就当它背景噪音了。
+
+    同仓 `xunlei_group` / `disk_guard` 的标题**故意不含数字**(`test_disk_guard.py`
+    里就有同款守卫),这里漏了。**具体条数必须留在 detail**,人要看数去正文看。
+    """
+    titles: list[str] = []
+    monkeypatch.setattr("app.services.alert_service.notify_incident",
+                        lambda db, uid, kind, title, detail, **kw:
+                        titles.append((title, detail)) or True)
+
+    #: 同一件事、两次不同的积压条数 ⇒ 标题必须**完全一样**(冷却门才认得出来)
+    for left in (327, 319):
+        pd._alert_backlog(session, 1, left, {"found": 1, "ok": 0, "reused": 0})
+    assert len(titles) == 2
+    assert titles[0][0] == titles[1][0], f"标题随积压条数变化了:{titles}"
+    assert not any(ch.isdigit() for ch in titles[0][0]), \
+        f"标题含数字,冷却门会失效:{titles[0][0]}"
+    #: 细节不能丢 —— 条数是运维真正要看的数
+    assert "327" in titles[0][1] and "319" in titles[1][1], titles

@@ -1,3 +1,60 @@
+- [2026-11-23 13:40] FIX: **告警标题里有数字 ⇒ 冷却门 100% 失效,两处一起修**。
+  `notify_incident` 的冷却键是 `title[:80]`,标题里带条数/项数 **数字一变就是新键**:
+  · `pan_discovery._alert_backlog`:旧标题是「网盘发现积压 {N} 条(失败…行)」⇒ 实测
+    `incident_pan_discovery` **106 条告警 / 106 个不同标题**(每 4h 一次、连续 8 天,
+    内容只是 327→319→302 的抖动,人早已当背景噪音);标题改为固定
+    「网盘发现积压(超过阈值)」,条数全部挪进 detail。
+  · `pan_self_check`:旧标题是「网盘自检:{N} 项需要处理」⇒ `pan_clean` 30 条送达、
+    底层只有两类事;标题改为固定「网盘自检:有项需要处理」,项数挪进正文。
+  同仓 `xunlei_group`/`disk_guard` 的标题**故意不含数字**(注释写着同一条纪律),这两处漏了。
+  新增守卫 `test_积压告警标题不含数字_否则冷却门失效` /
+  `test_自检告警标题不含数字_否则冷却门失效`(同一件事跑两遍,断言标题**完全相同**
+  且无数字,同时断言数字确实在 detail 里没丢)。
+  ⚠️ 顺手记一条:`pan_discovery` detail 里「失败 X / 排队 Y」的写法被既有用例沿用,
+  改成「·」分隔会红(`test_目录不在就叫人去建目录`),已回退并加注释。
+  (Files: app/services/pan_discovery.py, app/services/pan_self_check.py,
+  tests/test_pan_discovery.py, tests/test_pan_self_check.py, CHANGELOG)
+- [2026-11-23 13:40] FIX: **推手数突增提醒窗口 3h → 24h(原来 76 轮全 0 = 装了没接线)**。
+  生产 `runs` 实测:上线以来 **76/76 轮全是 `候选0 发出0`**,一次都没报过。
+  回放真实台账确认**不是没信号,是窗口太短**:绝大多数资源 3 小时里只有 1 个人推
+  (`{1人:873, 2人:128, 3人:31 …}`),3h 窗口**结构上凑不出 6 个人**。
+  · 11-21~11-23 低量期(日均 122~183 行):3h = **0 条**,24h = 4 条(≈1.5/天);
+  · 11-20~11-23 上线以来:3h = 0 条,24h = 4 条(≈1.3/天)。
+  ⇒ **只改窗口,三条阈值一个不动**(降阈值到 `hands≥4,gain≥3` 会是 ≈2.7/天,
+  且把「长期火」也报进来 —— 正是三条判据要防的噪音)。
+  `config/settings.py` 的 `push_surge_window_hours` 3→24、`detect_surges` 默认值
+  与 `push_surge_tick` 的 `getattr` 兜底同步改,模块头注新增「窗口必须 24h」整节
+  (含上面这张回放表)。
+  ⚠️ **既有测试跟着修**:`增量不够不许报`/`倍数不够不许报`/`窗口外的行不参与`
+  三条原来靠默认值取 3h,改 24h 后上一窗口的行落进当前窗口 ⇒ 变成假通过/假失败,
+  已改为**显式传 `window_hours=3`**;`_Settings` 的窗口同步改 24(与生产一致)。
+  新增守卫 `test_默认窗口必须够长_否则整条链等于没接线`(用 `inspect.signature`
+  盯死默认值 ≥24 —— 它失效时 `runs` 里**一路 success**,静默失败的典型形状)。
+  (Files: config/settings.py, app/services/push_surge.py, tests/test_push_surge.py, CHANGELOG)
+- [2026-11-23 13:40] FEAT: **链路体检补上「低频作业连续失败」(`check_streak_failures`)**。
+  真实事故:`pan_self_check` **连续 9 天 `failed`**(11-15~11-23),detail 天天写着
+  「夸克 池里所有号都 ≥99% —— 转存随时停摆;迅雷 4 个号 limit 完全相同(10 GiB)⇒
+  配额读数不可信,清盘不会恢复」,而**告警一条都没发**。
+  真因不是没实现告警:`check_collect_failures` 第一道门槛是「近 24h 失败 **≥3** 次」
+  ⇒ **每天只跑一轮的作业结构上永远凑不满 3 次**,连「最近一轮仍失败」都判不到就
+  `continue` 了;而 `CHAINS`(50 个注册作业)只覆盖 16 个 kind,**没有它** ⇒ 全仓无一处看着。
+  新增 `chain_health.check_streak_failures(db, min_streak=2, max_runs_24h=3)`,两条同时:
+  ①最近**连续 ≥2 轮** failed;②**近 24h 总轮次 <3**(⇒ 与 `check_collect_failures`
+  **互补不重复**,高频作业仍归它管)。已被 `CHAINS` 覆盖的 kind 跳过(体检报告里
+  不重复列)。detail 带连续轮数、近 24h 轮次、「因轮次 <3 采集失败告警的门槛看不到它」、
+  `最近一次成功 …(Nh 前)`/`从未成功过`,以及**从 detail 里挑出的 `[error]` 那段**
+  (不能取前 N 字 —— 实测前 90 字全是 `[ok]` 流水账)。已接入 `collect_sections` 的「产出」节。
+  生产库实测输出:`🔴 低频作业连续失败·pan_self_check — 连续 **9 轮 failed**(近24h 共 1 轮…) · 最近一次成功 11-14 05:45(224h 前) · 最近一条:[error] 盘容量: …`。
+  新增 `tests/test_chain_health.py::Test低频作业连续失败` 6 条(每日一轮连挂两天要报红 /
+  已成功的不报 / `CHAINS` 里已覆盖的不重复列 / 高频作业不越权 / 只挂一轮不报 / 接进了报告)。
+  ⚠️ 取证副产物:`xunlei_group` 11-18~11-20 那批**确实报过警** —— 日志里
+  11-18 09:30/15:30、11-19 04:00/10:30/16:30 都有 `采集失败告警推送,条数=1`;
+  `feishu_alerts` 里查不到是因为**恢复确认时 `db.delete` 把行删掉了**。
+  ⚠️ 下次判「报没报过」:**别查 `feishu_alerts`**,查 `notification_logs`
+  (它的 `section` 是裸 kind `pan_clean`,不是 `incident_pan_clean`)或日志
+  `采集失败告警推送,条数=N`。
+  (Files: app/services/chain_health.py, tests/test_chain_health.py,
+  doc/能力清单.md, CHANGELOG)
 - [2026-11-23 10:05] CHORE: **大瓜专轮降频:每天两轮 → 一轮(只留 `09:24`)**。
   用户口径「大瓜降频」。依据是建成以来的 20 轮实测,不是直觉:
   · 「新群0」**20/20 全中**;01 时 5 轮共 7 条线索、09 时 5 轮共 8 条,**产量本来就低且两轮差不多**;

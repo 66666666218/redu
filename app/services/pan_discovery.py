@@ -190,12 +190,18 @@ def _alert_backlog(session, user_id: int, backlog_left: int, out: dict) -> None:
         _real_ok = max(0, int(out.get("ok", 0) or 0) - int(out.get("reused", 0) or 0))
         _reuse = int(out.get("reused", 0) or 0)
         _ok_txt = f"**成功 {_real_ok} 条**" + (f"(另复用 {_reuse} 条)" if _reuse else "")
+        #: ★★ **标题里不许出现数字**(2026-11-23 修)。`notify_incident` 的冷却键是
+        #: `title[:80]`,而这里原先把积压条数写进标题 ⇒ **数字一变就是新键**,
+        #: 冷却门 100% 失效 —— 实测 `incident_pan_discovery` **106 条告警 / 106 个不同标题**,
+        #: 每 4 小时推一次、连续 8 天,内容只是 327→319→302 这种抖动。
+        #: 同仓 `xunlei_group` / `disk_guard` 的标题**故意不含数字**(注释写着同一条纪律),
+        #: 这里漏了。**具体条数全部挪到 detail** —— 人要看数就在正文里看。
         notify_incident(session, user_id, "pan_discovery",
-                        f"网盘发现积压 {backlog_left} 条"
-                        f"(失败 {bk['failed']} / 排队 {bk['pending']})",
-                        f"本轮候选 {out.get('found', 0)} 条、{_ok_txt},"
-                        f"仍积压 **{backlog_left}** 条。"
-                        f"**构成**:排队等搬 {bk['pending']} 条 · 已失败 {bk['failed']} 条。"
+                        "网盘发现积压(超过阈值)",
+                        #: ⚠️ 「失败 X / 排队 Y」这个写法被既有用例与历史告警沿用,
+                        #: 别为了好看改成「·」分隔(改过一次,`test_目录不在就叫人去建目录` 红)
+                        f"仍积压 **{backlog_left}** 条(失败 {bk['failed']} / 排队 {bk['pending']})。"
+                        f"本轮候选 {out.get('found', 0)} 条、{_ok_txt}。"
                         f"**失败原因**:{why}。{act}")
     except Exception:  # noqa: BLE001 - 告警自身失败不该影响本轮结果
         logger.exception("积压告警推送失败")

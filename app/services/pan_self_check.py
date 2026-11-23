@@ -477,11 +477,16 @@ def self_check_all_users(settings=None) -> int:
                     warned += 1
                     from app.services.alert_service import notify_incident
 
+                    #: ★★ **标题里不许出现数字**(2026-11-23 修,与 `pan_discovery` 同一条):
+                    #: 原来写 `f"网盘自检:{len(warnings)} 项需要处理"` ⇒ 项数一变就是新冷却键,
+                    #: `notify_incident` 的去重**完全失效** —— 实测 `pan_clean` 30 条送达,
+                    #: 同一件事(盘满/撞上限)被反复当成新告警推。项数挪进正文。
                     notify_incident(
                         db, uid, "pan_clean",
-                        f"网盘自检:{len(out['warnings'])} 项需要处理",
-                        "\n".join(f"· {c['name']}:{c['detail']}"
-                                  for c in out["warnings"])[:1500],
+                        "网盘自检:有项需要处理",
+                        f"**{len(out['warnings'])} 项**需要处理:"
+                        + "\n".join(f"· {c['name']}:{c['detail']}"
+                                    for c in out["warnings"])[:1500],
                         settings=settings)
             except Exception:  # noqa: BLE001 - 单用户自检失败不影响其余
                 db.rollback()

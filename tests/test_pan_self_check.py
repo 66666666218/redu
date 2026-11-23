@@ -357,3 +357,52 @@ class TestProbeRatio:
         from app.services import pan_accounts
         assert psc._probe_ratio(
             None, "quark", pan_accounts.default_ref("quark")) is None
+
+
+def test_自检告警标题不含数字_否则冷却门失效(monkeypatch) -> None:
+    """★★ **2026-11-23 的真实事故**:标题写 `f"网盘自检:{N} 项需要处理"` ⇒ 项数一变就是新键。
+
+    `notify_incident` 的冷却键是 `title[:80]` ⇒ 同一个问题(盘满/撞上限)每天被当成
+    **新告警**重推。实测 `pan_clean` 30 条送达,而底层就两类事。
+    项数挪进正文;标题固定 ⇒ 冷却门恢复作用。
+
+    ⚠️ 与 `test_disk_guard.py::test_alert_title_has_no_digits_so_cooldown_works`
+    同一条纪律 —— 那个模块守住了,这里当时漏了。
+    """
+    import sqlalchemy
+    from app.services import pan_self_check as psc
+
+    titles: list[tuple[str, str]] = []
+    monkeypatch.setattr("app.services.alert_service.notify_incident",
+                        lambda db, uid, kind, title, detail, **kw:
+                        titles.append((title, detail)) or True)
+
+    #: 造两份"有 N 项要处理"的自检结果,只有项数不同
+    def _out(n: int) -> dict:
+        checks = [{"name": f"检查{i}", "level": "warn", "detail": f"问题{i}"}
+                  for i in range(n)]
+        return {"status": "warn", "user_id": 1, "checked_at": "x",
+                "checks": checks, "warnings": checks}
+
+    for n in (2, 5):
+        monkeypatch.setattr(psc, "run_checks", lambda db, uid, st, _n=n: _out(_n))
+        class _DB:
+            #: `_record_run` 会 `session.add(...)`,替身少这个方法会让告警根本没走到
+            #: —— 而那正是这条测试要验的东西(静默失败 = 假成功)
+            def add(self, *a, **k): pass
+            def commit(self): pass
+            def rollback(self): pass
+            def close(self): pass
+            def execute(self, *a, **k):
+                class _R:
+                    def all(self): return [(1,)]
+                return _R()
+        import app.db as appdb
+        monkeypatch.setattr(appdb, "get_session_local", lambda: (lambda: _DB()))
+        psc.self_check_all_users(settings=type("S", (), {"pan_self_check_enabled": True})())
+
+    assert len(titles) == 2, titles
+    assert titles[0][0] == titles[1][0], f"标题随项数变化了:{titles}"
+    assert not any(ch.isdigit() for ch in titles[0][0]), \
+        f"标题含数字,冷却门会失效:{titles[0][0]}"
+    assert "2 项" in titles[0][1] and "5 项" in titles[1][1], titles

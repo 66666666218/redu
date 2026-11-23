@@ -420,3 +420,95 @@ def test_抖音对标号按作品判_不按新判() -> None:
         assert _row(db, "抖音·对标号")["level"] == YELLOW, "连续读不到作品要判黄"
     finally:
         db.close()
+
+
+class Test低频作业连续失败:
+    """★★ **2026-11-23 的真实事故**:`pan_self_check` 连续 **9 天** failed,零告警。
+
+    根因不是"没实现告警",而是 `check_collect_failures` 的第一道门槛
+    「近 24h 失败 **≥3** 次」对**每天只跑一轮**的作业**结构上不可达** ——
+    它永远凑不满 3 次,连"最近一轮仍失败"都判不到就 `continue` 了。
+    而链路体检的 `CHAINS` 50 个注册作业只覆盖 16 个 kind,**没有它** ⇒ 没有任何一处在看。
+
+    这一组钉死三件事:①能抓到低频连续失败;②**不重复**已覆盖的链;
+    ③高频作业仍归 `check_collect_failures`,这里不越权。
+    """
+
+    def _run(self, db, kind, status, hours_ago=1.0, detail="", uid=1):
+        from datetime import datetime, timedelta
+        from app.db.models import RunRecord
+        db.add(RunRecord(user_id=uid, run_id=f"{kind}-{status}-{hours_ago}",
+                         kind=kind, status=status, detail=detail,
+                         started_at=datetime.now() - timedelta(hours=hours_ago)))
+        db.commit()
+
+    def test_每日一轮连挂两天要报红(self, session) -> None:
+        from app.services.chain_health import check_streak_failures
+
+        for d in (1, 25):        # 每天一轮(24h 内只有 1 轮 ⇒ 达不到 3 次门槛)
+            self._run(session, "pan_self_check", "failed", hours_ago=d,
+                      detail="[error] 盘容量: 夸克池所有号 ≥99%")
+        rows = check_streak_failures(session)
+        assert len(rows) == 1, rows
+        assert rows[0]["level"] == RED
+        #: ⚠️ 别写 `连续 2 轮`:detail 里是 `连续 **2 轮** failed`(markdown 加粗),
+        #: 星号会把整串断言挡住 —— 这条就是这么红过一次的。
+        assert "2 轮 failed" in rows[0]["detail"], rows[0]["detail"]
+        #: ★ detail 里要**挑出 error 那段** —— 整条 detail 是 `[ok]…|[error]…` 的流水账,
+        #: 取前 N 字只会显示一串 ok(实测就是这么没信息量的)
+        assert "盘容量" in rows[0]["detail"], rows[0]["detail"]
+        #: 低频作业的"连续2轮"可能是两天,必须让人估得出严重程度
+        assert "从未成功过" in rows[0]["detail"] or "最近一次成功" in rows[0]["detail"]
+
+    def test_已经成功的作业不报(self, session) -> None:
+        from app.services.chain_health import check_streak_failures
+
+        self._run(session, "pan_self_check", "failed", hours_ago=25)
+        self._run(session, "pan_self_check", "success", hours_ago=1)
+        assert check_streak_failures(session) == [], "最近一轮成功了还报红(会训练人忽略报告)"
+
+    def test_CHAINS_里已覆盖的链不许重复列(self, session) -> None:
+        """`check_chains` 已经给了它们红/绿行 ⇒ 这里再来一条就是纯噪音。
+
+        实测 `CHAINS` 16 个 kind;拿其中每天才跑一轮的那个造连续失败,
+        这里必须**一声不吭**(否则天天一张报告里同一条链出现两次)。
+        """
+        from app.services.chain_health import check_streak_failures
+
+        #: `link_audit` 在 `CHAINS` 里,且现实中就是低频(近12天每天 1 轮)
+        for d in (1, 25):
+            self._run(session, "link_audit", "failed", hours_ago=d)
+        assert check_streak_failures(session) == []
+
+    def test_高频作业仍归采集失败告警_这里不越权(self, session) -> None:
+        """24h 内跑了 ≥3 轮的,`check_collect_failures` 的门槛**够得着** ⇒ 由它管。
+
+        两边都报会造成「同一次故障两条告警」,而本仓已经踩过"噪音化的守卫等于没有守卫"。
+        """
+        from app.services.chain_health import check_streak_failures
+
+        for h in (1, 2, 3):
+            self._run(session, "some_fast_job", "failed", hours_ago=h)
+        assert check_streak_failures(session) == []
+
+    def test_只挂一轮不报(self, session) -> None:
+        """单次失败可能只是一次抖动 —— 与 `check_collect_failures` 的"连续≥2"同一条。"""
+        from app.services.chain_health import check_streak_failures
+
+        self._run(session, "pan_self_check", "failed", hours_ago=1)
+        assert check_streak_failures(session) == []
+
+    def test_接进了体检报告(self, session) -> None:
+        """算得出但没接进 `collect_sections` = 没做(报告里永远看不到)。"""
+        from app.services.chain_health import collect_sections
+
+        for d in (1, 25):
+            self._run(session, "pan_self_check", "failed", hours_ago=d,
+                      detail="[error] 盘容量: 夸克池所有号 ≥99%")
+        #: ⚠️ 只跑"产出"那一节:其它节要探网络/容器,不是这条测试要验的
+        from app.services.chain_health import check_streak_failures as f
+        assert f(session), "前置条件没满足:本该抓到"
+        got = collect_sections(session)
+        names = [r["name"] for _t, rs in got for r in rs]
+        assert any("低频作业连续失败" in n for n in names), \
+            "没接进 collect_sections —— 报告里永远看不到(等于没做)"
