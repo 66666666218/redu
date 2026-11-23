@@ -151,6 +151,68 @@ def test_push_items_cards_per_platform(monkeypatch) -> None:
     assert "源未给链接" in str(ks_card), "源没给链接也要如实说,别装成有"
 
 
+def test_push_items_says_why_link_is_empty(monkeypatch) -> None:
+    """★★ **空链必须写明原因**(2026-11-23)。
+
+    背景:11-17~11-20 盘满 ⇒ 转存停摆 ⇒ 进词表的全是**没转存的标题** ⇒ 回库配不到链。
+    五个板块空链率同一周从 2~8% 跳到 21~31%,而卡片上只有一个 `—`,
+    **客户看不出为什么、我们事后也查不出是哪一档**。
+
+    ⚠️ 与上一行「对标作品」的 `—(源未给链接)` 是**两件事**,别混:
+      - 「资源」空链 = 库里没有这条资源的链(要去补链);
+      - 「对标作品」空  = 平台那条内容本身没给 URL(没法补)。
+    """
+    from app.services import feishu_client
+
+    sent = []
+
+    class _C:
+        def __init__(self, webhook, secret):
+            self.hook = webhook
+
+        def send_card(self, card):
+            sent.append((self.hook, card))
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+    rp.push_items([
+        {"name": "库里没有的资源", "platform": "xiaohongshu", "label": "小红书",
+         "count": 2, "samples": [], "sample_urls": [], "link": {}},
+        # 有 pan_url(原链)也算"有链" —— 渲染与 `_n_link` 必须是同一把尺子
+        {"name": "只有原链的资源", "platform": "xiaohongshu", "label": "小红书",
+         "count": 1, "samples": [], "sample_urls": [],
+         "link": {"pan_url": "https://pan.quark.cn/s/SRC"}},
+    ], _S())
+    card = next(c for h, c in sent if h == "https://example.com/xhs")
+    text = str(card)
+    assert "—(库里没有这条资源)" in text, (
+        f"空链只给一个「—」等于让客户瞎猜、让我们没法定位:\n{text}")
+    assert "https://pan.quark.cn/s/SRC" in text, "原链也是链,不能也被算成空"
+    # 卡片头部那句计数得跟渲染一致:2 条里 1 条可直取
+    assert "可直取 1 条" in text and "其余 1 条" in text, (
+        f"`_n_link` 与渲染的尺子不一致时会自相矛盾:\n{text}")
+
+
+def test_probe_reports_no_link_count(session, monkeypatch) -> None:
+    """命中但回库没链的那些,要能被运行记录看见(`no_link`)。
+    与 `failed` 同一套道理:**静默的部分失败要记名**。
+    """
+    from app.services import mediacrawler_source as mc
+
+    _mk_library(session, "有链的词", "号甲", "https://pan.quark.cn/s/LIB")
+    monkeypatch.setattr(mc, "available", lambda: (True, "ok"))
+    monkeypatch.setattr(rp, "library_names",
+                        lambda s, u, top: ["有链的词", "库里没有的词"])
+    from app.services import xhs_page_source as _xhs
+
+    monkeypatch.setattr(_xhs, "search", lambda kws: [
+        {"keyword": "有链的词", "snippet": "甲", "name": "作者", "url": "u1"},
+        {"keyword": "库里没有的词", "snippet": "乙", "name": "作者", "url": "u2"}])
+    monkeypatch.setattr(mc, "crawl", lambda plat, kws: [])
+    out = rp.probe(session, 1, settings=_S())
+    assert len(out["items"]) == 2 and out["no_link"] == 1, out
+
+
 def test_probe_reports_partial_platform_failure(session, monkeypatch) -> None:
     """**部分**失败(小红书成了、快手挂了)要能被看见。
 

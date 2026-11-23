@@ -1,3 +1,31 @@
+- [2026-11-23 19:40] FIX: **空链率五板块齐涨的根因:词表收了「没转存」的标题**
+  用户口径:「大瓜暂缓,先看别的质量有没有提升」。查出来不是准入放松,是**总量被换成了
+  一批没链的名字** —— 五个板块空链率 8-14 天 vs 近 7 天:bilibili 3.8%→20.7%、
+  kuaishou 7.3%→24.7%、tieba 5.3%→24.8%、weibo_peer 1.8%→30.6%、xiaohongshu 8.5%→23.8%,
+  而**有链行绝对数同期下降**(weibo_peer -53%、tieba -41%、bilibili -30%)。
+  · **根因链**:11-17~11-20 盘满 ⇒ 迅雷群转存停摆(`xunlei_group_shares` 每日 ok
+    119/56/**0**/**0**/23,`runs` 里 11-18 有 69 轮、11-19 有 70 轮写着「盘满暂停」,
+    攒 305 条 pending 且 `message` 为空=根本没尝试)⇒ 但 `recent_source_names` 只按
+    `synced_at` 取标题、**不看有没有链** ⇒ 没转存的标题进了搜索词表 ⇒ 下游
+    `search_resources` 回库(只搜公众号标题)一条也配不到 ⇒ 卡片「资源」列成 `—`。
+    实测近 7 天 78 个空链名:在 `wechat_pan_links` 命中 **0**、`discovered_pan_links` 命中 **0**,
+    在 `xunlei_group_shares` 命中 44(其中 `our_url` 空 42)。
+  · **词表准入对齐**(`resource_library.recent_source_names`):两个源(迅雷群 / 公开平台发现)
+    都加 `our_url` 非空条件 —— 与同文件 `_xunlei_group_resources` 的「没链的放进来只会干扰」
+    同一把尺子。⚠️ **不用 `status='ok'` 代替**:它只表示「登记成功」,实测 78 个空链名在发现表
+    里 `ok` 命中 0 个。代价是盘满期间词表变薄 —— 「薄」好过「假」。
+  · **空链必须说明原因**(`resource_presence.push_items`):「资源」列原来只给一个 `—`,
+    客户看不出为什么、我们事后也查不出是「库里没有」还是「转存失败」(修法完全不同)。
+    现在写 `—(库里没有这条资源)`;`transfer_error` 那档自带 `pan_url`,不走这里。
+  · **统计与渲染同一把尺子**(`_n_link`):原来只数 `my_link`,而渲染写的是
+    `my_link or pan_url` ⇒ 卡头「可直取 N 条」与可点行数自相矛盾。已对齐。
+  · **空链要能被看见**(`probe` 返回值 + `presence_tick` 运行记录):新增 `no_link` 计数,
+    `note` 单列「空链N」。原来它完全不可见 —— 与「部分平台失败」同一类静默失败。
+  · 测试:`test_douyin_keywords_merge_sources` 新增两条(迅雷群/发现表各一条,没 `our_url`
+    不许进词表;并把原「两源都收」那条补上 `our_url` —— 它守的是「两源都收」不是「没链也收」);
+    `test_resource_presence` 新增两条(空链卡面写原因 + 可直取计数与渲染一致;`probe` 报 `no_link`)。
+  (Files: app/services/resource_library.py, app/services/resource_presence.py,
+  tests/test_douyin_keywords_merge_sources.py, tests/test_resource_presence.py, doc/能力清单.md)
 - [2026-11-23 18:13] FEAT: **盘满时迅雷群分享按源链直推,不再一条不推**
   用户口径:「盘容量满时进行直接推送不需要再进行转存」。此前 `transfer_pending` 遇空间受阻
   (`admit_transfer` 盘满闸门 / 单个资源比剩余空间大 / 转存返回 `file_space_not_enough`)

@@ -47,11 +47,17 @@ def session():
 
 class TestRecentSourceNames:
     def test_迅雷群和公开平台发现的都收(self, session) -> None:
+        """⚠️ 两个源都必须带 `our_url` —— 自 2026-11-23 起"有链"是进词表的准入条件
+        (理由见下面 `test_没收转存的标题不许进词表`);本用例守的是「**两个源都收**」,
+        不是"没链也收",所以这里如实造有链的行。
+        """
         session.add(XunleiGroupShare(user_id=1, group_id="g", share_id="s1",
                                      title="冒险岛国际服", status="ok",
+                                     our_url="https://pan.xunlei.com/s/ours",
                                      synced_at=datetime.now()))
         session.add(DiscoveredPanLink(user_id=1, platform="tieba", title="派出所模拟器(手机+电脑）",
                                       origin_url="https://pan.xunlei.com/s/x",
+                                      our_url="https://pan.xunlei.com/s/ours2",
                                       status="ok", found_at=datetime.now()))
         session.commit()
         names = rl.recent_source_names(session, 1)
@@ -61,6 +67,43 @@ class TestRecentSourceNames:
     def test_取不到就返回空而不是抛(self, session, monkeypatch) -> None:
         """反向:某个源坏了**退回**另一个,别让取词整条崩。"""
         assert isinstance(rl.recent_source_names(session, 1), list)
+
+    def test_没收转存的标题不许进词表(self, session) -> None:
+        """★★ **2026-11-23 实测事故**:盘满期间进队的全是**没转存**的标题,
+        而它们当搜索词喂下去,下游 `search_resources` 一条也回不来 ⇒ 卡片「资源」列
+        变成 `—`。五个板块空链率同一周从 2~8% 跳到 21~31%,而**有链行绝对数还降了**
+        (weibo_peer -53%)—— 是"总量被换成了没链的名字"。
+
+        判据必须与 `_xunlei_group_resources` 同一把尺子:**有 `our_url` 才算**。
+        """
+        session.add(XunleiGroupShare(user_id=1, group_id="g", share_id="s1",
+                                     title="已转存的资源", status="ok",
+                                     our_url="https://pan.xunlei.com/s/ours1",
+                                     synced_at=datetime.now()))
+        session.add(XunleiGroupShare(user_id=1, group_id="g", share_id="s2",
+                                     title="没转存的资源", status="pending",
+                                     our_url="", synced_at=datetime.now()))
+        session.commit()
+        names = rl.recent_source_names(session, 1)
+        assert "已转存的资源" in names, names
+        assert "没转存的资源" not in names, (
+            f"没转存的标题进了词表 ⇒ 下游回库必然配不到链:\n{names}")
+
+    def test_发现表同理只收有我方链的(self, session) -> None:
+        """★ 发现表原来也没看 `our_url`。⚠️ **不能用 `status='ok'` 代替** ——
+        `ok` 只表示"登记成功",实测近 7 天 78 个空链名在发现表里命中 **0** 个。
+        """
+        session.add(DiscoveredPanLink(user_id=1, platform="tieba", title="有链的发现",
+                                      origin_url="https://pan.quark.cn/s/a",
+                                      our_url="https://pan.quark.cn/s/ours",
+                                      status="ok", found_at=datetime.now()))
+        session.add(DiscoveredPanLink(user_id=1, platform="tieba", title="没链的发现",
+                                      origin_url="https://pan.quark.cn/s/b",
+                                      our_url="", status="ok", found_at=datetime.now()))
+        session.commit()
+        names = rl.recent_source_names(session, 1)
+        assert "有链的发现" in names, names
+        assert "没链的发现" not in names, names
 
 
 class TestKeywordsMerge:

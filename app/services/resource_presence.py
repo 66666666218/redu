@@ -532,7 +532,14 @@ def probe(session, user_id: int, settings=None, platforms: list[str] | None = No
     if tried and len(failed) == tried:
         # 一个平台都没开起来 → 这不是"没热度",是链路坏了,必须让上层记 failed
         raise MediaCrawlerError(f"{tried} 个平台全部抓取失败:{last_err}")
-    return {"status": "ok", "platforms": len(plats), "items": items, "failed": failed}
+    #: ★★ **空链条数要单独报**(2026-11-23)。`items` 里"命中但回库没链"的那些,
+    #: 卡片上只能显示 `—(库里没有这条资源)` —— 客户看到的是"有热度但拿不到"。
+    #: 这个数**必须进运行记录**:原来它完全不可见,于是"五个板块空链率同时跳到 25%+
+    #: 而我们一周没发现"。与 `failed` 同一套道理:**静默的部分失败要记名**。
+    _no_link = sum(1 for it in items if not ((it.get("link") or {}).get("my_link")
+                                             or (it.get("link") or {}).get("pan_url")))
+    return {"status": "ok", "platforms": len(plats), "items": items, "failed": failed,
+            "no_link": _no_link}
 
 
 def transfer_missing_links(session, user_id: int, items: list[dict],
@@ -713,7 +720,13 @@ def push_items(items: list[dict], settings, detail: dict | None = None,
             continue
         group = _ai.items
         #: ★ **客户第一眼要的答案**(2026-10-29):有几个**能直接取用**、哪些只能看对标。
-        _n_link = sum(1 for it in group if (it.get("link") or {}).get("my_link"))
+        #: ⚠️ 判据必须与下面渲染那一处**同一个**(2026-11-23):渲染写的是
+        #: `my_link or pan_url`(有原链就先给原链),这里原来只数 `my_link`
+        #: ⇒ 卡片上写着「可直取 3 条」而实际可点的是 5 条 —— 同一张卡自相矛盾。
+        #: 本仓那条母题:**准入/统计的判据必须与渲染同源**。
+        _n_link = sum(1 for it in group
+                      if ((it.get("link") or {}).get("my_link")
+                          or (it.get("link") or {}).get("pan_url")))
         # ★ **与抖音卡同形:两个独立可点的格**(2026-10-16 用户口径
         #   「都做成抖音推广格式,**既有网盘,也能看到对标的作品**」):
         #     「资源」→ 取资源(我方链);「对标作品」→ 看那条**人在推的原帖**。
@@ -748,8 +761,20 @@ def push_items(items: list[dict], settings, detail: dict | None = None,
             from app.services.hot_time import publish_mark
 
             _when = publish_mark(it.get("publish_at"))
-            cell = (f"[{name}]({_md_safe(url)})" + (f" · 🔴{_pan}" if _pan else "")
-                    if url else f"{name} · —") + (f" {_when}" if _when else "")
+            if url:
+                cell = (f"[{name}]({_md_safe(url)})"
+                        + (f" · 🔴{_pan}" if _pan else "")) + (f" {_when}" if _when else "")
+            else:
+                # ★★ **空链必须说明原因**(2026-11-23,口径「未搬要说明原因」)。
+                # 原来这里只给一个 `—` —— 客户看到的是"有资源但点不了",我们事后也查不出
+                # 是"库里没有"还是"转存失败"。而这两者的修法**完全不同**(前者要去补链,
+                # 后者是盘满/额度),含糊过去就是白查一天。
+                # ⚠️ 走到这里必然是 `_library_link` 返回了空 dict(有 `pan_url` 就不是空了)
+                # ⇒ 原因只有一个:回库没匹配到这条资源。转存失败的那档自带 `pan_url`,
+                # 会走上面那个分支显示原链,不落这里。
+                _err = str(link.get("transfer_error") or "").strip()
+                _why = _err[:20] if _err else "库里没有这条资源"
+                cell = f"{name} · —({_md_safe(_why)})" + (f" {_when}" if _when else "")
             # 「对标作品」:第一条原帖。**带文字**才看得出点了会去哪(纯 URL 在手机上看不清域名)
             su = [u for u in (it.get("sample_urls") or []) if u]
             work = f"[▶ 看作品]({_md_safe(su[0])})" if su else "—(源未给链接)"
@@ -846,6 +871,9 @@ def presence_tick(settings=None, platforms: list[str] | None = None) -> int:
                 # 所以"小红书成了、快手挂了"这种**部分失败**本来查不出来。
                 failed = out.get("failed") or []
                 note = f"平台{out.get('platforms', 0)} 命中{len(items)}"
+                #: ★ 空链要单独说 —— 见 `probe()` 返回值里 `no_link` 那段注释。
+                if out.get("no_link"):
+                    note += f" **空链{out['no_link']}**(库里没有,卡片标「—」)**"
                 if moved.get("reused"):
                     note += f" **复用{moved['reused']}**(三盘互通,没另存一份)"
                 if moved["attempted"]:

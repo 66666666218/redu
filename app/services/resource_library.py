@@ -728,23 +728,52 @@ def recent_source_names(session: Session, user_id: int, days: int = 30,
     ⚠️ 这里**不做"被几个号验证"的门槛**(用户口径 a:**一视同仁当候选**)——
     它们的"验证"是**"进了别人的群 / 被人发出来了"**,与"多号同发"不是同一个信号,
     但**同样说明有人在推**。排序按**最近发生**,让新鲜的先被搜到。
+
+    ## ★★ 只收**已转存**(有 `our_url`)的那些(2026-11-23)
+
+    这条限制是**必须**的,不是优化。原来这里只按时间取标题,于是盘满期间
+    (`xunlei_group_shares` 11-18/19 连续 139 轮 `盘满暂停`,`ok` 从 119 掉到 **0**)
+    进队的**全是没转存的标题** —— 而它们会被当成搜索词喂给三条下游链,
+    下游再用 `search_resources` 回库找链,自然**一条也找不回来**:
+
+    | 名字来自(近 7 天空链样本) | 在公众号盘链里 | 在发现表里 |
+    |---|---|---|
+    | 迅雷群 44 个 | **0** | **0** |
+    | 两边都查不到 34 个 | **0** | **0** |
+
+    ⇒ 实测后果:五个板块的空链率同一周从 2~8% 跳到 21~31%,而**有链行绝对数下降**
+    (weibo_peer -53%、tieba -41%、bilibili -30%)—— 是"总量被换成了一批没链的名字",
+    不是准入放松。同一文件里的 `_xunlei_group_resources` 早就只收 `our_url != ""`
+    (见它的 docstring「没链的放进来只会干扰」)⇒ **同一个资源库,两个出口两套尺子,
+    这里对齐过去**。
+
+    ⚠️ 代价是有意的:**盘满期间这个词表会变薄**。但"薄"好过"假" ——
+    没转存的名字搜回来也配不到链,只会把卡片上的「资源」列变成 `—`。
     """
     cutoff = datetime.now() - timedelta(days=days)
     out: list[str] = []
     try:
         from app.db.models import DiscoveredPanLink, XunleiGroupShare
 
+        #: 只收**已有我方链**的 —— 理由见 docstring 那张表。
         for title in session.execute(
                 select(XunleiGroupShare.title).where(
                     XunleiGroupShare.user_id == user_id,
-                    XunleiGroupShare.synced_at >= cutoff).order_by(
+                    XunleiGroupShare.synced_at >= cutoff,
+                    XunleiGroupShare.our_url.isnot(None),
+                    XunleiGroupShare.our_url != "").order_by(
                     XunleiGroupShare.synced_at.desc()).limit(limit)).scalars():
             if title:
                 out.append(str(title))
+        #: ★ 发现表同理:没有 `our_url` 的条目在公众号库里也搜不到,喂下去只能造空链。
+        #: ⚠️ **不走 `status='ok'` 那套** —— `ok` 表示"登记成功",不等于"我们有链";
+        #: 判据必须是 `our_url`,与上面那一源、与 `_discovered_resources` 同一把尺子。
         for title in session.execute(
                 select(DiscoveredPanLink.title).where(
                     DiscoveredPanLink.user_id == user_id,
-                    DiscoveredPanLink.found_at >= cutoff).order_by(
+                    DiscoveredPanLink.found_at >= cutoff,
+                    DiscoveredPanLink.our_url.isnot(None),
+                    DiscoveredPanLink.our_url != "").order_by(
                     DiscoveredPanLink.found_at.desc()).limit(limit)).scalars():
             if title:
                 out.append(str(title))
