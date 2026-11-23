@@ -18,6 +18,8 @@ from apscheduler.triggers.cron import CronTrigger
 
 from config.settings import Settings, get_settings
 from app.services import schedule_service
+from app.services.role_scope import (KIND_SECTION, SECTION_ROLE, kind_allowed,
+                                     section_allowed)
 from app.utils import get_logger
 
 logger = get_logger(__name__)
@@ -35,55 +37,22 @@ def _runners() -> dict:
             "wechat": run_wechat_listen}
 
 
-# **板块归哪一侧跑**(与 `doc/operations.md` §4j 的分工一致):
-#   wechat 侧 = 公众号 + 闲鱼   /   hotspot 侧 = 微博/抖音/百度
+# **板块归哪一侧跑**:判据只有一处(`app/services/role_scope.py`),别在这里再抄一份。
+# 本实例不分管的板块直接跳过(不打上游、不消耗配额)。
 #
 # ⚠️ 为什么光有 `SCHEDULER_ROLE` 还不够:`collect_tick` 本身是 **`both` 角色(两端都跑)**,
 # 它的防重复靠 `claim_schedule` 原子抢占 —— 而**两台实例的数据库是独立的**,各自抢占都会成功
 # → 同一个上游账号会被两端同时采集。闲鱼实测"哎哟喂,被挤爆啦"高度疑似与此有关
 # (⚠️ **2026-10-08 订正**:此前这里写"**账号级**限流 —— 换出口也没用、量只有 6 次/小时",
 #  但匿名对照证明**不是账号级**;见 `app/services/xianyu_browser.py`。防重复采集的理由不变)。
-# 所以这里**再按板块分一次侧**:
-# 本实例不分管的板块直接跳过(不打上游、不消耗配额)。
-_SECTION_ROLE = {"wechat": "wechat", "xianyu": "wechat",
-                 "weibo": "hotspot", "douhot": "hotspot", "baidu": "hotspot"}
-
-
-def _section_allowed(section: str, settings: Settings) -> bool:
-    """本实例该不该采这个板块(未登记的板块不拦,向后兼容)。"""
-    want = _SECTION_ROLE.get(section)
-    if not want:
-        return True
-    cur = (getattr(settings, "scheduler_role", "all") or "all").strip().lower()
-    return cur in ("all", "both") or cur == want
-
-
-#: **运行记录 kind → 板块**。`runs.kind` 比 `user_schedules.section` 细
-#: (`xianyu_deep` / `wechat_listen` / `douyin_leads` …),而**归属判断必须能问到 kind 上** ——
-#: 重试、手动采集、失败告警三处拿到的都是 kind,不是 section。
-_KIND_SECTION = {
-    "weibo": "weibo", "douhot": "douhot", "baidu": "baidu",
-    "xianyu": "xianyu", "xianyu_deep": "xianyu",
-    "wechat": "wechat", "wechat_listen": "wechat", "wechat_sync": "wechat",
-    "douyin_leads": "wechat",       # 与本机 CDP 档案/登录态绑定(见 build_jobs 里的归属注释)
-    "douyin_leads_dagua": "wechat",
-}
-
-
-def _kind_allowed(kind: str, settings: Settings) -> bool:
-    """按**运行记录 kind** 判归属;映射表里没有的 kind 不拦(向后兼容)。
-
-    ★★ **2026-11-23 事故**:远程实例(`SCHEDULER_ROLE=hotspot`)上,`collect_tick` 有护栏、
-    但**重试/手动采集/失败告警都没有** —— 用户 4 于 11-13 20:20 注册后,面板手点了一次闲鱼
-    (`POST /api/collect/xianyu`)失败了,此后 `retry_failed_runs` **每 30 分钟**把它捞出来重跑;
-    而远程**从来没装过 Playwright 浏览器**(Dockerfile 明确"纯 requests,无需浏览器")。
-    于是两台机器上"闲鱼失败 16/16、连续 20 轮"的告警,其实全是**远程在自己跑不该它跑的板块**。
-    判据只有一处(`_SECTION_ROLE`),这里是它面向 kind 的入口,别在调用方各写一份。
-    """
-    section = _KIND_SECTION.get(kind)
-    if section is None:
-        return True
-    return _section_allowed(section, settings)
+# 所以**再按板块分一次侧**。
+#
+#: 保留旧名作为别名:`api/misc.py`、各测试与既有文档都按 `scheduler._SECTION_ROLE` 引用。
+_SECTION_ROLE = SECTION_ROLE
+#: 同上,kind → 板块。
+_KIND_SECTION = KIND_SECTION
+_section_allowed = section_allowed
+_kind_allowed = kind_allowed
 
 
 def collect_tick(settings: Settings | None = None, now: datetime | None = None) -> dict:

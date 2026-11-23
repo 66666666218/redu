@@ -50,6 +50,13 @@ def cap():
     lg.removeHandler(h)
 
 
+#: 撞锁报告的开头。⚠️ **必须按开头精确匹配,不能用 `"撞锁" in msg`** ——
+#: 采样告警与长持有告警都会把**整条调用栈**打进去,而栈里有本文件的函数名
+#: `test_撞锁要点名是谁抱着锁` ⇒ 子串判据会把它们也当成撞锁报告,
+#: 于是 `errs[0]` 拿到的是**别人**(2026-11-23 全量 pytest 实测:单跑绿、全量红)。
+_LOCK_REPORT_PREFIX = "SQLite 撞锁"
+
+
 @pytest.fixture
 def engine(tmp_path, monkeypatch):
     """真实文件库 + 看门狗。⚠️ 阈值调小,免得测试真等 20 秒。"""
@@ -146,13 +153,56 @@ def test_撞锁要点名是谁抱着锁(engine, cap):
         holder.rollback()
         holder.close()
 
-    errs = [r for r in cap.records if "撞锁" in r.getMessage()]
+    errs = [r for r in cap.records if r.getMessage().startswith(_LOCK_REPORT_PREFIX)]
     assert errs, "撞锁了却没有点名"
     msg = errs[0].getMessage()
     assert "_hold_write_tx_in_named_function" in msg, (
         f"栈里没指到**开写事务那一处**(多半是 format_stack 的 limit 太小,"
         f"把调用方那几帧截掉了):\n{msg}")
     assert "持有" in msg and "s(线程" in msg, f"没报持有时长/线程:\n{msg}"
+
+
+def test_等锁的写不许被登记成持有者(engine):
+    """★★ **2026-11-23 回归**:登记挂在 `before_cursor_execute` 时,被锁**挡住等待**的
+    那一方也会被登记成"持有者" ⇒ 采样线程把它报成真凶(栈指到 `victim.commit()`),
+    方向正好反了。实测形状:**同一守卫单跑绿、全量 pytest 红**,红的是别人的消息。
+
+    判据很直接:受害者**在等待期间**扫一遍登记表,里面**不许**有它自己的栈。
+    """
+    import threading
+
+    holder = Session(bind=engine)
+    _deep_wrapper(holder, 3)                  # 抱着写事务不放
+    done = threading.Event()
+    blamed: list[str] = []
+
+    def _victim() -> None:
+        v = Session(bind=engine)
+        try:
+            v.add(SystemConfig(key="blocked-victim", value="1", updated_at=None))
+            v.commit()                        # 被 holder 挡住 ⇒ 等满 timeout 后抛锁
+        except Exception:  # noqa: BLE001 - 撞锁是预期结果
+            pass
+        finally:
+            v.close()
+            done.set()
+
+    t = threading.Thread(target=_victim)
+    t.start()
+    try:
+        deadline = time.time() + 5
+        while not done.is_set() and time.time() < deadline:
+            for _t0, stack, _tn in list(dbm._OPEN_WRITE_TX.values()):
+                if "_victim" in stack:
+                    blamed.append(stack)
+            time.sleep(0.02)
+    finally:
+        holder.rollback()
+        holder.close()
+        t.join(timeout=10)
+    assert not blamed, (
+        "被锁挡住的**等待者**被登记成了持有者 —— 报警会指到受害者头上:\n"
+        + blamed[0][-600:])
 
 
 def test_没有别的持有者时要说清是别的进程(engine, cap):
@@ -176,7 +226,7 @@ def test_没有别的持有者时要说清是别的进程(engine, cap):
         s2.rollback()
         s2.close()
         other.dispose()
-    errs = [r for r in cap.records if "撞锁" in r.getMessage()]
+    errs = [r for r in cap.records if r.getMessage().startswith(_LOCK_REPORT_PREFIX)]
     assert errs and "别的进程" in errs[0].getMessage(), (
         f"外部持有时应说清是别的进程,实际:\n{errs[0].getMessage() if errs else '(没报)'}")
 

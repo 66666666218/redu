@@ -444,7 +444,7 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
     #: 下面"恢复确认"走的是 `currently_broken ^ rows`(对称差),而 `rows` 里含被跳过的
     #: 板块、`FeishuAlert` 行又可能早就建过了(本仓任何一次历史告警都会留一行) ⇒
     #: 只在 `hits` 里跳过的话,**每轮都会给一个本机已经好的板块发一条「✅ 采集已恢复」**。
-    from app.services.scheduler import _kind_allowed
+    from app.services.role_scope import kind_allowed as _kind_allowed
     try:
         # 仅当某 (用户,板块) **最近一次运行仍失败**(当前仍断)才告警;
         # 否则中途重试成功过,不算"持续失败"(否则会误报)。
@@ -642,16 +642,11 @@ def check_health_stalls(settings: Settings | None = None, db: Session | None = N
     #: 远程实例(角色 `hotspot`)库里没有本机的 `wechat_listen` 记录 —— 它按**自己的库**判,
     #: 会报「公众号:最近轮次成功 09-28,已 26 天」,而那 09-28 只是**远程自己**最后一次跑公众号
     #: (分工后公众号只在本机跑)。本机当天每轮都 success,却收到一条"停摆 26 天"的红警。
-    #: 映射与 `health.py::_SECTION_ROLE` 同一份,别各写一套。
-    _section_role = {"weibo": "hotspot", "douhot": "hotspot", "baidu": "hotspot",
-                     "xianyu": "wechat", "wechat": "wechat"}
-    _role = (getattr(settings, "scheduler_role", "all") or "all").strip().lower()
+    #: ⚠️ 判据**只此一份**(`app/services/role_scope.py`)—— 这里原本内联了第三份映射,
+    #: 改分工时漏改它 ⇒ 远程继续对公众号报停摆,而那是本仓已经踩过两次的形状。
+    from app.services.role_scope import section_allowed
 
-    def _role_owns(section: str) -> bool:
-        want = _section_role.get(section, "both")
-        return _role in ("all", "both") or _role == want
-
-    in_use = {p for p in in_use if _role_owns(p)}
+    in_use = {p for p in in_use if section_allowed(p, settings)}
     stalled = []
     for p, (model, col) in data_tables.items():
         if p not in in_use:
@@ -679,7 +674,7 @@ def check_health_stalls(settings: Settings | None = None, db: Session | None = N
     # 连丢两格才说明调度真出事了 —— 宁可晚 8 小时,也不要在正常运行时报假警。
     from app.services.schedule_service import wechat_listen_gap_hours
 
-    if "wechat" in sched_on and "weread" in raw and _role_owns("wechat"):
+    if "wechat" in sched_on and "weread" in raw and section_allowed("wechat", settings):
         _gap_h = wechat_listen_gap_hours()
         _last_listen = db.scalar(select(func.max(RunRecord.started_at)).where(
             RunRecord.kind.in_(("wechat_listen", "wechat_sync")),

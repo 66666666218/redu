@@ -1,3 +1,36 @@
+- [2026-11-23 17:00] FIX: **测试环境被生产环境变量污染 + 归属判据三份副本合并 + 启动误报**
+  三件事一起收(前两件是全仓隐患,#3/#4/#1):
+  · **测试污染(★ 最危险的一件)**:`Settings(_env_file=None)` **仍读进程环境变量**,
+    而开发机那个 shell 从生产继承 —— 实测 **115 个**与 `Settings` 字段同名
+    (`DATABASE_URL=sqlite:///./data/platform.db`、`JWT_SECRET`、`SCHEDULER_ROLE=wechat`、
+    `XIANYU_REQUEST_DELAY=15`、约 20 个 `FEISHU_WEBHOOK*` …)。后果是**同一份代码开发机红、
+    CI 绿**:7 个文件对照实测 **21 failed / 294 passed → 摘掉后 315 passed**。
+    最坏情况 `create_app()` 的 `init_db()` 会按 `.env` 连上**生产 sqlite**(`data/backups/`
+    里 `.db-wal` 的 mtime 显示测试确实在碰它)。⇒ `tests/conftest.py` 在**模块导入时**
+    把这批同名变量摘掉,只钉进三个受控值(`sqlite://` / 固定 `JWT_SECRET` /
+    `SCHEDULER_ENABLED=false`),会话结束还回去;`.env` 本身不动。
+  · **启动误报 DATABASE_URL**:旧判据是「值 == `Settings` 默认值」,而远程 compose 注入的
+    串与默认值**逐字相同** ⇒ 每次启动都报「未配置 DATABASE_URL」。改成 pydantic 的
+    `model_fields_set`(**值从哪来**):显式配过就是配过,哪怕值等于默认值。
+  · **归属判据合并成一份**:`scheduler._SECTION_ROLE`、`health.py::_SECTION_ROLE`(多 `pan`)、
+    `alert_service.check_health_stalls` 内联版 —— 三份当时恰好一致,靠人记得同改三处;
+    漏改是静默故障(两端重复采同一上游账号 / 对本实例不管的板块天天报红灯)。
+    新建 `app/services/role_scope.py`(`SECTION_ROLE`/`section_allowed`/`KIND_SECTION`/
+    `kind_allowed`),`scheduler`/`health`/`alert_service`/`api/*`/`admin` 全部改为引用它,
+    旧名保留为别名。新增 AST 守卫 `tests/test_role_scope_single_source.py`:任何模块自带
+    「板块→归属侧」字典字面量即失败(模块级与函数体内都查),并反向校验调度器的每个板块
+    都在表内(漏登记 ⇒ 兼容规则放行 ⇒ 两端都采)。
+  · **顺手修掉了一条真的诊断缺陷**:写事务登记挂在 `before_cursor_execute`(语句**还没执行**),
+    于是**被锁挡住的等待者**也被登记成"持有者" —— 采样线程把它报成真凶,栈指到
+    `victim.commit()`,方向正好反了。改挂 `after_cursor_execute`(写成功才说明锁到手)。
+    这正是全量 pytest 那条 `test_撞锁要点名是谁抱着锁` 单跑绿、全量红的真因;
+    另加 `test_等锁的写不许被登记成持有者` 守住它(旧挂载点下该用例当场红)。
+  · 测试:全量 **3479 passed, 1 skipped**(改动前带污染为 21 failed)。
+  (Files: tests/conftest.py, app/services/role_scope.py, app/services/scheduler.py,
+  app/services/health.py, app/services/alert_service.py, app/admin.py, app/api/misc.py,
+  app/api/collect.py, app/api/wechat.py, app/platform.py, app/db/database.py,
+  tests/test_db_write_tx_watchdog.py, tests/test_platform.py,
+  tests/test_role_scope_single_source.py, doc/operations.md, doc/deploy-checklist.md)
 - [2026-11-23 15:44] FIX: **从落后分支捡回 4 处「静默失败/长写锁」修复**(10-21 那批在
   `fix-sqlite-lock-and-transient-retry` 上验证过,但从未合入 main,183 个提交后 main 仍缺)。
   逐条都是「看起来成功、实际什么都没做」或「把锁抱过整批网络调用」:

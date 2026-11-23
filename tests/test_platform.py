@@ -1273,6 +1273,36 @@ def test_shutdown_closes_browser_singleton(monkeypatch) -> None:
     platform_mod._close_browser_clients()          # 不得外抛
 
 
+# ---- 启动守卫:未配置 DATABASE_URL 的判定 ----
+def test_未配置_DATABASE_URL_的判据按来源而不是按值(monkeypatch) -> None:
+    """★★ **2026-11-23**:远程 compose 里显式注入
+
+        DATABASE_URL=mysql+pymysql://redu:redu@mysql:3306/redu?charset=utf8mb4
+
+    而它**与 `Settings` 的默认值逐字相同** ⇒ 旧判据(`值 == 默认值`)每次启动都误报
+    「未配置 DATABASE_URL」。误报的代价是真正漏配时那条告警已经没人看了。
+
+    ✅ 正确判据是**值从哪来**:`model_fields_set` 里有它 ⇒ 有人配过(env 或 `.env`),
+    哪怕值刚好等于默认值;没有 ⇒ 真的是默认值。
+    """
+    from config.settings import Settings
+
+    from app.platform import _database_url_configured
+
+    default = Settings.model_fields["database_url"].default
+
+    # ① 显式配置成**与默认值逐字相同** —— 这才是远程实例的真实形状,不许报
+    explicit_same = Settings(_env_file=None, database_url=default)
+    assert _database_url_configured(explicit_same) is True, (
+        "显式配了 DATABASE_URL(值恰好等于默认值)却被判成未配置 ⇒ 每次启动都误报")
+
+    # ② 真的一点没配(env 已被 conftest 摘干净,这里再钉死一遍)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    bare = Settings(_env_file=None)
+    assert "database_url" not in bare.model_fields_set
+    assert _database_url_configured(bare) is False, "真没配时必须照旧告警"
+
+
 def test_instance_info_reports_section_ownership() -> None:
     """`GET /api/instance`(2026-10-02):前端据此在导航上标出"不归本机采"的板块 ——
 

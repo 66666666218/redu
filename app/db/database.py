@@ -176,8 +176,18 @@ def _install_write_tx_watchdog(engine) -> None:
     except Exception:  # noqa: BLE001 - 探一下参数而已,失败不该挡住启动
         logger.info("SQLite 写事务看门狗已装(阈值 %.0fs)", WRITE_TX_WARN_SEC)
 
-    @event.listens_for(engine, "before_cursor_execute")
-    def _mark_write_start(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
+    @event.listens_for(engine, "after_cursor_execute")
+    def _mark_write_acquired(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
+        """★ **写成功之后**才登记 —— 登记 = 「这个连接已经拿到写锁」。
+
+        ⚠️⚠️ **原来是挂在 `before_cursor_execute` 的**(2026-11-23 全量 pytest 翻出):
+        语句**还没执行**就先登记成"持有者",于是**被锁挡住的等待者**也是持有者 ——
+        它正卡在 `busy_timeout` 里干等 2 秒,采样线程就报「持有 2s 还没提交」,
+        调用栈指到 `victim.commit()`。**报告的是等锁的人,不是抱锁的人,方向正好反了。**
+        实测形状:同一条守卫单跑绿、全量红,而红的那条 `errs[0]` 的栈尾是受害者自己。
+        ⇒ 只有语句**成功返回**才说明写锁真的到手(撞锁时 SQLAlchemy 走异常路径,
+        `after_cursor_execute` 不触发)。
+        """
         info = conn.info
         if info.get("tx_write_t0") is not None:
             return
@@ -186,7 +196,7 @@ def _install_write_tx_watchdog(engine) -> None:
             # ⚠️⚠️ **`limit` 必须够大**:`format_stack(limit=N)` 取的是**最里面** N 帧
             # (最近的),而这里最里面那十几帧**全是 SQLAlchemy 自己 + 我这个 listener**
             # —— 调用方那一帧在最外层,`limit=14` 直接把它截掉了。
-            # 实测代价:30 条诊断一条都没点到名,栈尾永远停在 `_mark_write_start`,
+            # 实测代价:30 条诊断一条都没点到名,栈尾永远停在 `_mark_write_acquired`,
             # 我得回头把它调大才有用。60 是留足余量(SQLAlchemy flush 链 ≈ 15 层)。
             stack = "".join(traceback.format_stack(limit=60))
             info["tx_write_t0"] = t0

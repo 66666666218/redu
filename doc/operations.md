@@ -659,22 +659,37 @@ python scripts/wemp_cred.py --check          # 以后想确认还能不能用
    the asyncio loop` —— **把"没装浏览器"伪装成"线程问题"**(已在容器内复现)。已修:
    启动失败时 `_shutdown_playwright()` 清掉 `_pw` 再原样抛。
 
-**判据只有一处**:`scheduler._SECTION_ROLE`;`_kind_allowed(kind, settings)` 是它面向
+**判据只有一处**:`app/services/role_scope.py` —— `SECTION_ROLE`(板块→归属侧)+
+`section_allowed(section, settings)`,`KIND_SECTION` + `kind_allowed(kind, settings)` 是它面向
 **运行记录 kind**(`xianyu_deep`/`wechat_listen`/`douyin_leads`…)的入口,别在调用方各写一份。
 
-> ⚠️ **仍然存在两份映射,改分工时两处都要改**:`services/health.py::_SECTION_ROLE`
-> (健康度用,多一个 `pan`)、`alert_service.check_health_stalls` 内联的 `_section_role`
-> (停摆告警用,与 health 那份内容相同)。两处目前与 `scheduler._SECTION_ROLE` **完全一致**,
-> 所以现在不出问题;但它们是**各自维护的副本** —— 新增板块或调整分工时,漏改任一处都会
-> 让"跑的地方不报、不跑的地方乱报"。彻底消除需要一个单一事实源,本次不动(改动面过大)。
+> ★ **2026-11-23:三份副本已合并成这一处**。此前同一张映射有三个副本 ——
+> `scheduler._SECTION_ROLE`、`services/health.py::_SECTION_ROLE`(多一个 `pan`)、
+> `alert_service.check_health_stalls` 内联的 `_section_role`。它们当时**恰好一致**,
+> 但靠的是人记得同时改三处;漏改任何一份都是**静默故障**(调度漏改 ⇒ 两端重复采同一上游账号;
+> 健康页/停摆告警漏改 ⇒ 对本实例不管的板块天天报红灯,10-02、10-24 各踩过一次)。
+> 现在 `scheduler`/`health`/`alert_service`/`api/*` 全部从 `role_scope` 取,旧名保留为
+> **别名**(`scheduler._SECTION_ROLE is role_scope.SECTION_ROLE`),既有引用不用改。
+> 回归守卫:`tests/test_role_scope_single_source.py` —— 用 AST 扫 `app/` 下**任何**自带
+> 「板块→归属侧」字典字面量的模块(模块级与函数体内都查),并反向校验调度器的每个板块都在表内
+> (漏登记 ⇒ `section_allowed` 按兼容规则放行 ⇒ 两端都会采)。
 
 > ⚠️ **归属过滤必须从「当前仍断」就开始**:失败告警的"恢复确认"走
 > `currently_broken ^ rows`(对称差),若只过滤 `hits` 而不过滤 `rows`/`currently_broken`,
 > 历史 `FeishuAlert` 行会让**每轮发一条假的「✅ 采集已恢复」**。
 >
-> ⚠️ **测试里 `Settings(_env_file=None)` 仍读进程环境变量**:开发机 shell 有
-> `SCHEDULER_ROLE=wechat` 时,用 `douhot` 作样本的用例会被护栏静默过滤(本机红、CI 绿)。
-> 凡测失败告警的用例都要**显式钉 `scheduler_role`**。
+> ⚠️ **测试里的进程环境变量污染**(2026-11-23 已从**根上**治掉):`Settings(_env_file=None)`
+> **仍读进程环境变量**。开发机那个 shell 是从生产环境继承的(实测 **115 个**与 `Settings`
+> 字段同名的变量:`SCHEDULER_ROLE=wechat`、`DATABASE_URL`、约 20 个 `FEISHU_WEBHOOK*` …),
+> 于是一个用 `douhot` 做样本的用例会被护栏静默过滤 —— **同一份代码开发机红、CI 绿**。
+> 现在 `tests/conftest.py` 在**模块导入时**就把这批同名变量摘掉、只钉进三个受控值
+> (`DATABASE_URL=sqlite://`、固定 `JWT_SECRET`、`SCHEDULER_ENABLED=false`),
+> 会话结束后再还回去。对照实测(7 个文件):带污染 `21 failed` → 摘掉后 **`315 passed`**。
+>
+> 仍有**两类**需要用例自己钉,conftest 盖不住:
+> ① 用例显式传入的 `scheduler_role`(那是**测试意图**,不是污染);
+> ② `.env` 文件里的值 —— conftest 只治环境变量,`.env` 仍由 `get_settings()` 读
+> (不少用例就是按它写的)。
 
 **历史残留**:远程库里的 249 条 `xianyu failed` 与 `FeishuAlert(title='xianyu')` 行,
 部署后**不会再被重试/告警**,不清理也不影响;要清需单独确认(涉及 DELETE)。

@@ -1,7 +1,70 @@
 """pytest 共用 fixture。"""
+import os
+
 import pytest
 
 from config.settings import Settings
+
+#: 测试进程里**必须有值**的三个配置(见下方 `_isolate_settings_env` 的说明)。
+_TEST_ENV_DEFAULTS = {
+    # 内存库。★ **这一条是本文件的重点**:不钉住它,`get_engine()` 会按 `.env`
+    # 连上**生产的** `sqlite:///./data/platform.db`(`create_app()` 里还有 `init_db()`
+    # 会建表/迁移)。单独跑 `pytest tests/test_shutdown_marker.py` 时没有任何文件
+    # 设过 `DATABASE_URL`,那条路是**真的会走到的**。
+    "DATABASE_URL": "sqlite://",
+    # `app/security.py` 每次签发/校验令牌都读它;钉成固定值,令牌才在用例间可比。
+    "JWT_SECRET": "test_secret_0123456789abcdef0123456789abcdef",
+    # `TestClient(create_app())` 会走 lifespan 里的 `scheduler.start()` ——
+    # 真起一个每分钟触发的后台调度器,可能在本进程里打出网请求。
+    "SCHEDULER_ENABLED": "false",
+}
+
+
+def _isolate_settings_env() -> dict[str, str]:
+    """把**生产环境变量**从测试进程里摘掉,只留下受控的测试值。
+
+    ⚠️ **为什么**(2026-11-23 实测,不是理论风险):
+
+    `Settings` 除了 `.env` 还会读**进程环境变量**,而本机跑测试的那个 shell
+    是从生产环境继承的 —— 实测有 **115 个** 与 `Settings` 字段同名(约 20 个
+    `FEISHU_WEBHOOK*`、`SCHEDULER_ROLE=wechat`、`QUARK_COOKIE`、`WEREAD_COOKIE`、
+    `XHS_BROWSER_PROFILES`、`XIANYU_REQUEST_DELAY=15` …)。
+    `Settings(_env_file=None)` **并不会**因此变干净:它只是不读 `.env`,
+    环境变量照样生效。后果(7 个文件的对照实测):
+
+        带着生产环境变量  → 21 failed, 294 passed
+        摘掉之后(同代码) → **315 passed**
+
+    典型形状:`_settings(feishu_webhook="main")` 里凭空多出一个真实群的
+    `feishu_webhook_baidu/douhot`(本该是空),`SCHEDULER_ROLE=wechat` 让
+    `douhot` 样本被归属护栏静默过滤 —— **同一份代码开发机红、CI 绿**。
+
+    ⚠️ **必须在模块导入时执行**,不能只放进 fixture:各测试文件在**导入时**就
+    用 `os.environ.setdefault(...)` 设那三个值,fixture 跑起来时它们已经设好了。
+    conftest 在测试模块之前导入,所以这里直接 `pop` 掉整批、再写回测试值,
+    那些 `setdefault` 之后就成了空操作(值已经一致)。
+
+    ⚠️ **`.env` 本身不动**:仍由 `get_settings()` 读(不少用例就是按它写的)。
+    本次只治"环境变量污染",这是两件事。
+    """
+    fields = {name.upper() for name in Settings.model_fields}
+    removed = {k: v for k, v in os.environ.items() if k.upper() in fields}
+    for key in removed:
+        os.environ.pop(key, None)
+    os.environ.update(_TEST_ENV_DEFAULTS)
+    return removed
+
+
+_REMOVED_ENV = _isolate_settings_env()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _restore_outer_env():
+    """会话结束把摘掉的环境变量还回去(同进程内再跑别的工具时不留副作用)。"""
+    yield
+    for key in _TEST_ENV_DEFAULTS:
+        os.environ.pop(key, None)
+    os.environ.update(_REMOVED_ENV)
 
 
 @pytest.fixture

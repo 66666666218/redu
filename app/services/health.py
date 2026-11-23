@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from config.settings import get_settings
 from app.db.models import (BaiduHotItem, DouhotWord, RunRecord, UserCookie, UserSchedule,
                            WeiboHotItem, XianyuItem)
+from app.services.role_scope import SECTION_ROLE as _SECTION_ROLE
 from app.services.tenant_base import verify_cooldown_active
 from app.utils import get_logger
 
@@ -28,9 +29,9 @@ _LABELS = {"weibo": "微博", "xianyu": "闲鱼", "douhot": "抖音", "baidu": "
 _SECTIONS = ("weibo", "xianyu", "douhot", "baidu", "wechat", "pan")
 # wechat 板块的运行记录按细粒度 kind 落库(wechat_listen/wechat_sync),
 # 而 section 名是 "wechat"——直接用 section 查恒不命中,健康度里公众号恒显示"从未运行"。
-# 板块归哪一侧跑(见 settings.scheduler_role):分体部署时**本实例不跑的不该报"停滞"**
-_SECTION_ROLE = {"weibo": "hotspot", "douhot": "hotspot", "baidu": "hotspot",
-                 "xianyu": "wechat", "wechat": "wechat", "pan": "wechat"}
+# 板块归哪一侧跑(见 settings.scheduler_role):分体部署时**本实例不跑的不该报"停滞"**。
+# ⚠️ 判据**只此一份**(`app/services/role_scope.py`)。这里原来抄了第二份,且多一个 `pan`
+# —— 合并时把 `pan` 并进了公共表(它是真实存在的板块,只是没有独立调度)。
 _KINDS = {"wechat": ("wechat_listen", "wechat_sync", "wechat"),
           "pan": ("xunlei_group", "xunlei_sync", "douyin_leads",
                   "pan_discovery", "resource_presence")}

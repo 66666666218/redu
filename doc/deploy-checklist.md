@@ -22,6 +22,10 @@ python scripts/check_env.py   # 一键校验(列缺失/空/占位符,不打印�
 |---|---|---|
 | `JWT_SECRET` | ≥32 字节强随机 | 登录态不安全/重启失效 |
 | `DATABASE_URL` | compose 已注入,无需改 | 连不上库 |
+
+> 启动日志里出现「⚠️ 未配置 DATABASE_URL」**只在真的没人配它时**才该发生
+> (判据是**值从哪来**,不是值等于默认值 —— 该默认值恰好等于 compose 注入的串,旧判据会
+> 每次启动都误报,2026-11-23 修)。看到这条告警就说明 env/`.env` 里确实没有这个键。
 | `DOUHOT_USE_PROXY` | `true` | 抖音采集被服务器 IP 风控 → **502** |
 | `PROXY_EXTRACT_URL` | 熊猫代理 glip URL(含 secret/orderNo) | 同上 |
 | `DOUHOT_TOP_N` | `100` | 只采 50 条(覆盖不到 100) |

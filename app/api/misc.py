@@ -26,13 +26,13 @@ def instance_info(user: User = Depends(get_current_user)) -> dict:
 
     背景:两端部署**各有独立数据库**,本机不采微博/抖音/百度 —— 但那些页面照常能打开,
     里面是 **3 天前的旧数据**(实测 73~82 小时),不标出来会被误以为在更新。
-    板块→归属 的映射与调度器护栏**同源**(`scheduler._SECTION_ROLE`),不另立一份。
+    板块→归属 的映射与调度器护栏**同源**(`app/services/role_scope.py`),不另立一份。
     """
-    from app.services.scheduler import _SECTION_ROLE, _section_allowed
+    from app.services.role_scope import SECTION_ROLE, section_allowed
 
     settings = get_settings()
     return {
         "scheduler_role": (getattr(settings, "scheduler_role", "all") or "all").lower(),
-        "sections": {sec: {"owner": owner, "owned": _section_allowed(sec, settings)}
-                     for sec, owner in _SECTION_ROLE.items()},
+        "sections": {sec: {"owner": owner, "owned": section_allowed(sec, settings)}
+                     for sec, owner in SECTION_ROLE.items()},
     }

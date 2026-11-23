@@ -18,6 +18,7 @@ from app.api import all_routers
 from app.db import init_db
 from app.services import scheduler
 from app.utils import disable_env_proxies, get_logger, setup_logging
+from config.settings import Settings
 
 logger = get_logger(__name__)
 
@@ -81,6 +82,22 @@ async def _lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
         _close_browser_clients()
 
 
+def _database_url_configured(settings: Settings) -> bool:
+    """DATABASE_URL 到底**有没有人配过**(env 变量或 `.env` 文件)。
+
+    ⚠️ **为什么不能比"值 == 默认值"**(2026-11-23):远程实例的 compose 里显式注入
+    `DATABASE_URL=mysql+pymysql://redu:redu@mysql:3306/redu?charset=utf8mb4`,
+    而它**与 `Settings` 里的默认值逐字相同** ⇒ 旧判据每次启动都误报
+    「未配置 DATABASE_URL」。误报的代价是:真正漏配时那条告警已经没人看了
+    (本仓反复讲过的"告警变噪音")。
+
+    ✅ 正确判据是 pydantic 的 `model_fields_set` —— **值从哪来**它知道:
+    没被任何来源提供时该字段不在集合里;env 变量与 `.env` 文件都会让它进集合,
+    哪怕值刚好等于默认值。
+    """
+    return "database_url" in settings.model_fields_set
+
+
 def create_app() -> FastAPI:
     # 生产用 `uvicorn app.platform:app` 直启,不经 app/main.py;须先初始化日志,
     # 否则 root logger 无 handler:INFO 全丢、异常堆栈无格式,线上难排查。
@@ -95,7 +112,7 @@ def create_app() -> FastAPI:
         disable_dead_system_proxy()
     except Exception:  # noqa: BLE001 - 启动自愈失败不影响启动
         get_logger(__name__).debug("关闭死系统代理失败", exc_info=True)
-    from config.settings import Settings, get_settings
+    from config.settings import get_settings
 
     _settings = get_settings()
     # 生产隐藏 /docs /openapi(完整接口清单不对外暴露);IS_DEV=true 时保留便于调试
@@ -108,7 +125,7 @@ def create_app() -> FastAPI:
                   docs_url=_docs, redoc_url=None,
                   openapi_url=("/openapi.json" if _settings.is_dev else None))
     # 漏配 DATABASE_URL 时到启动日志说清楚,避免服务照常起、直到有人点注册才 500。
-    if _settings.database_url == Settings.model_fields["database_url"].default:
+    if not _database_url_configured(_settings):
         from urllib.parse import urlsplit
 
         logger.warning(
@@ -120,8 +137,8 @@ def create_app() -> FastAPI:
     init_db()
 
     # 非 dev 却仍用默认 public_base_url(含 localhost):重置密码/日报里的链接
-    # 全指向用户自己机器,忘记密码即锁死、批量推送不可点。DATABASE_URL 有同类
-    # 默认值守卫,这里补齐,避免"服务正常、邮件却全废"的静默生产故障。
+    # 全指向用户自己机器,忘记密码即锁死、批量推送不可点。DATABASE_URL 有同一类
+    # 启动守卫,这里补齐,避免"服务正常、邮件却全废"的静默生产故障。
     if not _settings.is_dev and "localhost" in (_settings.public_base_url or "").lower():
         logger.warning(
             "⚠️ PUBLIC_BASE_URL 仍是默认值 %s(含 localhost),重置密码与推送邮件里的链接"

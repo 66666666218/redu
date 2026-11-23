@@ -551,7 +551,7 @@ def retry_run(db: Session, run_id: str, settings=None) -> dict:
     #: (与 `retry_failed_runs` 一致,见 `scheduler._kind_allowed`)。远程(hotspot)上
     #: 点一次闲鱼,就会在没装浏览器的容器里失败一次,并留下一条会被自动重试反复捞起的
     #: 失败记录 —— 事故就是这么开始的(用户 4,249 条)。
-    from app.services.scheduler import _kind_allowed
+    from app.services.role_scope import kind_allowed as _kind_allowed
 
     if not _kind_allowed(run.kind, settings):
         return {"ok": False,
@@ -626,7 +626,7 @@ def retry_failed_runs(max_retry: int = 3) -> dict:
 
     from config.settings import get_settings
     from app.db import get_session_local
-    from app.services.scheduler import _kind_allowed
+    from app.services.role_scope import kind_allowed as _kind_allowed
 
     settings = get_settings()
     db = get_session_local()()

@@ -25,7 +25,7 @@ def collect(platform: str, user: User = Depends(get_current_user), db: Session =
     #: 每 30 分钟重放,20 天里刷出 249 条失败 + 每轮告警。根子是**这里没有归属判断**
     #: (`collect_tick` 有,面板接口漏了)。返回 409 而不是 500:这不是"采挂了",
     #: 是"这台机器不跑这个板块",前端能据此提示"请到对应实例操作"。
-    from app.services.scheduler import _section_allowed
+    from app.services.role_scope import section_allowed as _section_allowed
     from config.settings import get_settings
 
     settings = get_settings()
@@ -57,7 +57,7 @@ def collect(platform: str, user: User = Depends(get_current_user), db: Session =
 @router.post("/api/xianyu/collect-deep")
 def xianyu_collect_deep(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     #: 同 `/api/collect/{platform}`:闲鱼不归本实例时,深采也不许跑(它同样要开浏览器)。
-    from app.services.scheduler import _section_allowed
+    from app.services.role_scope import section_allowed as _section_allowed
     from config.settings import get_settings
 
     settings = get_settings()
