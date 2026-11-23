@@ -1424,3 +1424,310 @@ def test_积压告警标题不含数字_否则冷却门失效(session, monkeypat
         f"标题含数字,冷却门会失效:{titles[0][0]}"
     #: 细节不能丢 —— 条数是运维真正要看的数
     assert "327" in titles[0][1] and "319" in titles[1][1], titles
+
+
+class TestSpaceBlockedSourcePush:
+    """★★ **盘满直推**(2026-11-23,用户口径「内存不足时不转存直接推送」)。
+
+    实测背景:2026-11-19 起连续 5 天「转存 0」、积压 145→327,其中 **326 条**的理由是
+    「空间不足」(百度超额 43 倍 243 条 / 夸克两份都满 51 条 / 迅雷 若干)。
+    这些链**本身是好的**、客户点开就能拿,却被「必须转存成我方链才推」这条前提整批扣住。
+
+    这一档要钉死四件事:
+      ① 盘满 ⇒ 照样进 `items`,且 `share_url` 是**源链**(没换成我们的);
+      ② 库里**仍记 `pending`**(空间出来要补搬),消息头与普通空间不足**不一样**;
+      ③ 提取码**从源链/标题里补**(别人的分享很多带密码);
+      ④ **非空间类失败**(验码失败 / 死链)绝不走这条路 —— 那些链客户也打不开。
+    """
+
+    def _st(self, **kw):
+        base = {"pan_discovery_source_push_limit": 20}
+        base.update(kw)
+        return type("S", (), base)()
+
+    def test_盘满时进items且share_url是源链_库里仍pending(self, session, monkeypatch) -> None:
+        monkeypatch.setattr("app.services.douyin_leads.search_keywords",
+                            lambda s, u, t, st: ["甲"])
+        monkeypatch.setattr(pd, "already_have", lambda s, u, title: None)
+        monkeypatch.setattr(pd, "find_candidates", lambda *a, **k: [
+            {"platform": "tieba", "origin_url": "https://pan.baidu.com/s/SPACE1",
+             "title": "某剧 提取码: ab12", "author": "甲", "source_url": "u"}])
+        monkeypatch.setattr(pd, "transfer_pan_url", lambda *a, **k: {
+            "status": "pending", "our_url": "", "code": "",
+            "message": "百度盘空间不足(已用 5.02 TB / 配额 120.00 GB,超额 43 倍)"})
+
+        out = pd.sync(session, 1, settings=_S())
+
+        # ① 照样进 items,但放的是**源链**
+        assert len(out["items"]) == 1, out["items"]
+        it = out["items"][0]
+        assert it["share_url"] == "https://pan.baidu.com/s/SPACE1"
+        assert it.get("source_only") is True
+        # ③ 提取码从标题里补上了(转存没跑,拿不到 res["code"])
+        assert it["code"] == "ab12"
+        # ② 库里的状态:仍是 pending(可补搬),消息头必须区别于普通「空间不足」
+        row = session.scalars(select(DiscoveredPanLink)).one()
+        assert row.status == "pending"
+        assert row.message.startswith("**未转存,已按源链推送**"), row.message
+        # 数量必须单独报出来 —— 混进 ok 会让「转存 N」骗人
+        assert out["source_only"] == 1 and out["ok"] == 0
+
+    def test_提取码优先取URL的pwd参数(self, session, monkeypatch) -> None:
+        """`?pwd=xxxx` 比正文里的「提取码」更可信(正文常被 `_clean` 截断)。"""
+        monkeypatch.setattr("app.services.douyin_leads.search_keywords",
+                            lambda s, u, t, st: ["甲"])
+        monkeypatch.setattr(pd, "already_have", lambda s, u, title: None)
+        monkeypatch.setattr(pd, "find_candidates", lambda *a, **k: [
+            {"platform": "tieba",
+             "origin_url": "https://pan.baidu.com/s/SPACE2?pwd=zz99",
+             "title": "正文也写了个 提取码: ab12", "author": "甲", "source_url": "u"}])
+        monkeypatch.setattr(pd, "transfer_pan_url", lambda *a, **k: {
+            "status": "pending", "our_url": "", "code": "",
+            "message": "百度盘空间不足(已用 1 / 配额 0)"})
+
+        out = pd.sync(session, 1, settings=_S())
+
+        assert out["items"][0]["code"] == "zz99", out["items"][0]
+
+    def test_取不到提取码时留空_不猜(self, session, monkeypatch) -> None:
+        """取不到 ⇒ 空串(卡片上就不显示 🔑),**绝不瞎填**。客户端要能看出这个降级。"""
+        monkeypatch.setattr("app.services.douyin_leads.search_keywords",
+                            lambda s, u, t, st: ["甲"])
+        monkeypatch.setattr(pd, "already_have", lambda s, u, title: None)
+        monkeypatch.setattr(pd, "find_candidates", lambda *a, **k: [
+            {"platform": "tieba", "origin_url": "https://pan.baidu.com/s/SPACE3",
+             "title": "没有码的标题", "author": "甲", "source_url": "u"}])
+        monkeypatch.setattr(pd, "transfer_pan_url", lambda *a, **k: {
+            "status": "pending", "our_url": "", "code": "",
+            "message": "百度盘空间不足(已用 1 / 配额 0)"})
+
+        out = pd.sync(session, 1, settings=_S())
+
+        assert out["items"][0]["code"] == ""
+
+    @pytest.mark.parametrize("msg", [
+        "PASS_CODE_EMPTY",                      # 迅雷:分享要码而我们没有 ⇒ 死链族
+        "分享地址已失效(41011)",                  # 夸克死链 ⇒ skipped
+        "验码失败:提取码错误",                    # 码错 ⇒ 客户同样打不开
+        "未配夸克 Cookie(配上后会自动重试)",      # 没凭据 ≠ 盘满
+    ])
+    def test_非空间类失败绝不走直推(self, session, monkeypatch, msg) -> None:
+        """★ 判据必须窄:把死链/验码失败当"盘满"推出去 = **内容事故**。"""
+        monkeypatch.setattr("app.services.douyin_leads.search_keywords",
+                            lambda s, u, t, st: ["甲"])
+        monkeypatch.setattr(pd, "already_have", lambda s, u, title: None)
+        monkeypatch.setattr(pd, "find_candidates", lambda *a, **k: [
+            {"platform": "tieba", "origin_url": "https://pan.quark.cn/s/BAD",
+             "title": "坏的", "author": "甲", "source_url": "u"}])
+        monkeypatch.setattr(pd, "transfer_pan_url", lambda *a, **k: {
+            "status": "skipped" if ("PASS_CODE_EMPTY" in msg or "41011" in msg) else "failed",
+            "our_url": "", "code": "", "message": msg})
+
+        out = pd.sync(session, 1, settings=_S())
+
+        assert out["items"] == [], f"「{msg}」不该被当盘满直推:{out['items']}"
+        assert out["source_only"] == 0
+
+    def test_直推条数受上限约束_超出的留积压(self, session, monkeypatch) -> None:
+        """★ 积压里躺着 300+ 条:一次全推 = 给客户群刷屏 ⇒ 每轮有硬上限。"""
+        monkeypatch.setattr("app.services.douyin_leads.search_keywords",
+                            lambda s, u, t, st: ["甲"])
+        monkeypatch.setattr(pd, "already_have", lambda s, u, title: None)
+        monkeypatch.setattr(pd, "find_candidates", lambda *a, **k: [
+            {"platform": "tieba", "origin_url": f"https://pan.baidu.com/s/S{i}",
+             "title": f"资源{i}", "author": "甲", "source_url": "u"} for i in range(4)])
+        monkeypatch.setattr(pd, "transfer_pan_url", lambda *a, **k: {
+            "status": "pending", "our_url": "", "code": "",
+            "message": "百度盘空间不足(已用 1 / 配额 0)"})
+
+        #: 这 4 条都是**新发现** ⇒ 吃的是「新发现保底」那份,所以把两份都设成 2。
+        out = pd.sync(session, 1, settings=self._st(pan_discovery_source_push_limit=4,
+                                                   pan_discovery_source_push_fresh=2))
+
+        assert out["source_only"] == 2, out
+        assert len(out["items"]) == 2
+        rows = session.scalars(select(DiscoveredPanLink).order_by(DiscoveredPanLink.id)).all()
+        # 超上限的那两条:留在 pending、消息仍是被空间卡住的原文(没有"已按源链推送"字样)
+        assert [r.status for r in rows] == ["pending"] * 4
+        assert not rows[2].message.startswith("**未转存,已按源链推送**"), rows[2].message
+
+    def test_源链直推不写our_url(self, session, monkeypatch) -> None:
+        """⚠️ `our_url` 必须留空:**那条链不是我们的**。写了就污染资源库/去重的口径。"""
+        monkeypatch.setattr("app.services.douyin_leads.search_keywords",
+                            lambda s, u, t, st: ["甲"])
+        monkeypatch.setattr(pd, "already_have", lambda s, u, title: None)
+        monkeypatch.setattr(pd, "find_candidates", lambda *a, **k: [
+            {"platform": "tieba", "origin_url": "https://pan.quark.cn/s/SO1",
+             "title": "资源", "author": "甲", "source_url": "u"}])
+        monkeypatch.setattr(pd, "transfer_pan_url", lambda *a, **k: {
+            "status": "pending", "our_url": "", "code": "", "message":
+            "夸克盘空间不足(夸克1 已用 100.0%;夸克2 已用 163.8%)"})
+
+        pd.sync(session, 1, settings=_S())
+
+        row = session.scalars(select(DiscoveredPanLink)).one()
+        assert row.our_url == "", "源链不是我们的链,不能写进 our_url"
+
+    def test_窗口内已推过的不再占名额_后面那批才轮得到(self, session, monkeypatch) -> None:
+        """★★ **这一条防的是"同一批 20 条永远霸占名额"**(上线当天用真实积压跑出来的)。
+
+        直推过的行**仍是 `pending`** ⇒ 下轮还在队首、仍被判盘满。
+        若不查台账,每轮推的都是同样那 20 条(`drop_recent` 又会把它们从卡上挡掉 ⇒ 空卡),
+        后面三百多条**永远轮不到** —— 与本仓「排序 + 截断把某一类源整批埋掉」同一个病。
+        """
+        from app.db.models import PushLedger
+        from app.services.push_ledger import pan_key
+
+        session.add_all([
+            # 上一轮已经直推过的那条(台账里有它,行仍是 pending)
+            DiscoveredPanLink(user_id=1, platform="tieba", title="推过的",
+                              status="pending",
+                              origin_url="https://pan.baidu.com/s/ALREADY"),
+            PushLedger(user_id=1, section="zhihu", item_key="推过的",
+                       title="推过的", url="u",
+                       pan_url="https://pan.baidu.com/s/ALREADY",
+                       pan_id=pan_key("https://pan.baidu.com/s/ALREADY")),
+            # 还没推过的两条
+            *[DiscoveredPanLink(user_id=1, platform="tieba", title=f"新{i}",
+                                status="pending",
+                                origin_url=f"https://pan.baidu.com/s/NEW{i}")
+              for i in range(2)],
+        ])
+        session.commit()
+
+        monkeypatch.setattr("app.services.douyin_leads.search_keywords",
+                            lambda s, u, t, st: ["甲"])
+        monkeypatch.setattr(pd, "already_have", lambda s, u, title: None)
+        monkeypatch.setattr(pd, "find_candidates", lambda *a, **k: [])
+        monkeypatch.setattr(pd, "transfer_pan_url", lambda *a, **k: {
+            "status": "pending", "our_url": "", "code": "",
+            "message": "百度盘空间不足(已用 1 / 配额 0)"})
+
+        # 名额只有 1:若不排除已推过的,唯一的名额会浪费在那条上(卡片空)
+        out = pd.sync(session, 1, settings=self._st(pan_discovery_source_push_limit=1,
+                                                   pan_discovery_fresh_limit=0))
+
+        assert [it["share_url"] for it in out["items"]] == ["https://pan.baidu.com/s/NEW0"], \
+            f"名额被已推过的那条吃掉了:{out['items']}"
+        assert out["source_only"] == 1
+        assert out["source_only_done"] >= 1, "「因本窗口已推而跳过」必须被报出来"
+
+    def test_已推过那条的提取码不会被擦掉(self, session, monkeypatch) -> None:
+        """再次转存失败时拿回空码 —— **不能覆盖**库里上次直推补到的码。"""
+        from app.db.models import PushLedger
+        from app.services.push_ledger import pan_key
+
+        url = "https://pan.baidu.com/s/KEEPCODE"
+        session.add_all([
+            DiscoveredPanLink(user_id=1, platform="tieba", title="带码的",
+                              status="pending", origin_url=url, pass_code="ab12"),
+            PushLedger(user_id=1, section="zhihu", item_key="带码的", title="带码的",
+                       url="u", pan_url=url, pan_id=pan_key(url)),
+        ])
+        session.commit()
+        monkeypatch.setattr("app.services.douyin_leads.search_keywords",
+                            lambda s, u, t, st: ["甲"])
+        monkeypatch.setattr(pd, "already_have", lambda s, u, title: None)
+        monkeypatch.setattr(pd, "find_candidates", lambda *a, **k: [])
+        monkeypatch.setattr(pd, "transfer_pan_url", lambda *a, **k: {
+            "status": "pending", "our_url": "", "code": "",
+            "message": "百度盘空间不足(已用 1 / 配额 0)"})
+
+        pd.sync(session, 1, settings=_S())
+
+        row = session.scalars(select(DiscoveredPanLink)).one()
+        assert row.pass_code == "ab12", "把上次补到的提取码擦掉了"
+
+
+def test_新发现保底_否则新资源排在327条积压后面吃不到(session, monkeypatch) -> None:
+        """★★ **积压 327 条排在最前,新发现排在队尾** —— 单额度下当天新搜到的资源
+        要 17 天才轮得到,而它恰恰最有时效性(与 2026-10-05 拆转存额度**同一个理由**)。
+
+        这里钉住:积压名额满时,**新发现那份仍然被用上**。
+        """
+        # 库里 3 条积压(排在 cands 最前)
+        session.add_all([
+            DiscoveredPanLink(user_id=1, platform="tieba", title=f"旧{i}", status="pending",
+                              origin_url=f"https://pan.baidu.com/s/OLDB{i}")
+            for i in range(3)])
+        session.commit()
+        monkeypatch.setattr("app.services.douyin_leads.search_keywords",
+                            lambda s, u, t, st: ["甲"])
+        monkeypatch.setattr(pd, "already_have", lambda s, u, title: None)
+        monkeypatch.setattr(pd, "find_candidates", lambda *a, **k: [
+            {"platform": "tieba", "origin_url": "https://pan.baidu.com/s/FRESHB1",
+             "title": "当天新搜到的", "author": "甲", "source_url": "u"}])
+        monkeypatch.setattr(pd, "transfer_pan_url", lambda *a, **k: {
+            "status": "pending", "our_url": "", "code": "",
+            "message": "百度盘空间不足(已用 1 / 配额 0)"})
+
+        _st = type("S", (), {"pan_discovery_source_push_limit": 4,
+                             "pan_discovery_source_push_fresh": 2})()
+        out = pd.sync(session, 1, settings=_st)
+
+        urls = [it["share_url"] for it in out["items"]]
+        assert "https://pan.baidu.com/s/FRESHB1" in urls, \
+            f"新发现被 3 条积压饿死了:{urls}"
+
+
+def test_push_items_盘满直推的卡片不撒谎(monkeypatch) -> None:
+    """★★ 卡面口径(2026-11-23):含 `source_only` 时,**不能说「已转存成我方分享链」**。
+
+    原来那句是**硬编码**的 —— 一旦有源链行混进来,客户会以为我们搬过。
+    另外表头「我方分享链」也得换中性名,逐行再标「源链,未转存」。
+    """
+    from app.services import feishu_client
+
+    sent = {}
+
+    class _C:
+        def __init__(self, webhook, secret):
+            pass
+
+        def send_card(self, card):
+            sent["card"] = card
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+    ok = pd.push_items([
+        {"title": "混合甲", "author": "a", "source_url": "u",
+         "share_url": "https://pan.quark.cn/s/OUR", "code": "1a2b"},
+        {"title": "混合乙", "author": "b", "source_url": "u",
+         "share_url": "https://pan.baidu.com/s/SRC", "code": "zz99",
+         "source_only": True}], _S())
+
+    assert ok is True
+    txt = str(sent["card"])
+    #: 不能出现「全部资源都已转存」那种**不加区分的断言**(原文案的形状是 `个资源,已转存成…`)
+    assert "个资源,已转存成我方分享链" not in txt, txt
+    assert "网盘空间不足未转存" in txt      # 混批时明确说出是哪几条
+    assert "源链,未转存" in txt            # 逐行标记,客户能分出哪条是我们的
+    #: 表头那一行(灰底)必须换中性名 —— 那一列里放着她**别人的**链
+    grey = next(e for e in sent["card"]["elements"]
+                if e.get("tag") == "column_set" and e.get("background_style") == "grey")
+    head = "".join(c["elements"][0]["text"]["content"] for c in grey["columns"])
+    assert "可用链" in head and "我方分享链" not in head, head
+
+
+def test_push_items_全部已转存时保持原文案(monkeypatch) -> None:
+    """没有源链行时必须还是原来那句 —— 别为了新功能把正常卡改得含糊。"""
+    from app.services import feishu_client
+
+    sent = {}
+
+    class _C:
+        def __init__(self, webhook, secret):
+            pass
+
+        def send_card(self, card):
+            sent["card"] = card
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+    pd.push_items([{"title": "全转存", "author": "a", "source_url": "u",
+                    "share_url": "https://pan.quark.cn/s/OUR", "code": "1a2b"}], _S())
+
+    txt = str(sent["card"])
+    assert "个资源,已转存成我方分享链" in txt
+    assert "我方分享链" in txt
+    assert "源链,未转存" not in txt

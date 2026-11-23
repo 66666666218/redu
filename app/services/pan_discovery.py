@@ -74,6 +74,76 @@ def _is_dead_link(message: str) -> bool:
     return any(h in text for h in _DEAD_LINK_HINTS)
 
 
+#: 「**盘没空间**」的措辞。三盘各写各的,但都落在这几个词上(见各盘的返回构造):
+#:   · 夸克 —— `QuarkError("夸克网盘容量不足,请清理空间或更换账号")` → `"夸克盘空间不足(...)"`;
+#:   · 百度 —— `"百度盘空间不足(已用 ... / 配额 ...)"`;
+#:   · 迅雷 —— `"空间不足:这个包需要 ..."`(`xunlei_transfer.is_space_error` 自己也是这么认的)。
+#: ⚠️ **只认这几个词,不要放宽成"任何失败都算"** —— 那会把死链、验证码、限流
+#: 全当成"盘满",于是把一条**打不开的链**当资源推给客户(内容事故)。
+_SPACE_HINTS = ("空间不足", "容量不足", "file_space_not_enough", "space_insufficient")
+
+
+def _is_space_blocked(message: str) -> bool:
+    """这条失败是「**盘没空间**」吗?
+
+    ★★ **为什么单列一个判据**(2026-11-23,用户口径「内存不足时不转存直接推送」):
+
+    盘满时 `sync` 会把候选埋进积压(`pending`),而积压**不推卡** —— 实测 2026-11-19
+    起连续 5 天「转存 0」、积压 145→327,其中 **326 条**是空间不足。这些链**本身是好的、
+    客户点开就能拿**,却被"必须转存成我方链才推"这条前提整批扣住了。
+    ⇒ 盘满时**跳过转存、直接推源链**:客户拿到的东西不变(还是那份资源),
+    我们只是少了"换成自己的链"这一步,而这一步此刻**物理上做不到**。
+
+    ⚠️ 判据必须窄:只有**盘的空间问题**算这一类。「验码失败」「分享已失效」
+    仍然是 `skipped`/`failed`,绝不走这条路(那些链客户也打不开)。
+    """
+    text = message or ""
+    return any(h in text for h in _SPACE_HINTS)
+
+
+def _source_pass_code(c: dict) -> str:
+    """给**源链**(别人贴出来的分享)找提取码 —— 盘满直推时**必须**尽力补上。
+
+    ★ **为什么单列一个函数**(2026-11-23):盘满直推这条路**没有经过转存**,
+    所以拿不到 `res["code"]`(那是我们自己新创建分享的码)。而别人的分享**很多带密码**:
+    实测积压里 326 条空间不足的候选中,**55 条 URL 自带 `?pwd=`、233 条标题里有提取码字样**
+    —— 不带码推给客户 = 推出一堆**点开要密码却不说密码**的链。
+
+    判据与转存时**同一套**(直接复用 `baidupan_transfer.extract_pwd`:先认 URL 里的
+    `?pwd=xxxx`,再认正文里的「提取码/密码:xxxx」)。
+
+    ⚠️ **取不到就返回空串,不猜**:卡片上就不会显示 🔑,客户得回原帖找码。
+    这是**已知的降级**,不隐藏 —— 取码率要能从 `runs.detail` 和卡片上直接看出来。
+    """
+    from app.services.baidupan_transfer import extract_pwd
+
+    return extract_pwd(c.get("title") or "", c.get("origin_url") or "")
+
+
+def _recent_source_pushed(session, user_id: int, settings) -> set[str]:
+    """窗口内**已经推过**的盘链身份(归一化,源链与已有链两档并起来)。
+
+    ★ **为什么必须查台账**(2026-11-23,盘满直推上线当天就发现):
+    直推出去的行**仍然是 `pending`**(空间出来要补搬)⇒ 下一轮它们还在队首、
+    仍被判盘满、**又吃满直推名额**。不查的话每轮推的都是同样那 20 条
+    (推送侧 `drop_recent` 会把它们挡掉,卡片变空),后面三百多条**永远轮不到** ——
+    与本仓「排序 + 截断把某一类源整批埋掉」是同一个病(见 memory「静默失败=假成功」)。
+    查过就跳过,**不消耗名额、也不改消息**(保持原文的空间不足措辞)。
+
+    ⚠️ 读台账失败**只影响"可能少推几条"**(推送侧还有一道 24h 去重兜底),
+    所以这里 warn 后返回空集,不让它挡住整轮发现。
+    """
+    from app.services import push_ledger
+
+    hours = float(getattr(settings, "push_pan_dedupe_hours", 72) or 72)
+    try:
+        srcs, my = push_ledger.recent_pan_map(session, user_id, "zhihu", hours=hours)
+    except Exception:  # noqa: BLE001
+        logger.warning("盘满直推:读推送台账失败,本轮可能重复直推", exc_info=True)
+        return set()
+    return set(srcs) | set(my)
+
+
 def _fail(message: str) -> dict:
     """失败结果:`死链` → `skipped`(**终态,不再重试**),其余 → `failed`(**下轮还会重试**)。
 
@@ -1095,6 +1165,34 @@ def sync(session, user_id: int, settings=None) -> dict:
     ok = skipped = failed = pending = 0
     skipped_old = 0                #: ★ 「**太老没搬**」单独计数(见 `_too_old`)——不能混进 `skipped`
     reused = 0                     # **复用了别的盘已有的链**(省下一次转存)
+    #: ★★ **盘满直推**的条数(2026-11-23)。它**不花 transfer 额度**(根本没转存),
+    #: 所以与 `reused` 一样单独计数 —— 混进 `ok` 会让「转存 N 条」这个数再次骗人
+    #: (同 `pan_discovery_tick` 里「转存必须剔掉复用」那条注释)。
+    source_only = 0
+    #: ★ 直推也**拆两份额度**(理由与上面的转存额度**同源**,2026-11-23 当天用真实积压跑出来):
+    #: 积压 327 条排在最前,按 20/轮要 **17 天**才清完 —— 这期间**当天新搜到的资源
+    #: 排在队尾,一天都轮不到**。而新资源恰恰最有时效性(用户口径「在新在精」)。
+    #: 所以积压直推留给 `pan_discovery_source_push_limit`,新发现保底
+    #: `pan_discovery_source_push_fresh`(默认 5)。`0` 仍表示**整条直推路关掉**。
+    source_only_total = int(getattr(settings, "pan_discovery_source_push_limit", 20) or 0)
+    #: ⚠️ 保底**不许超过总额的一半**:否则总额调小(比如 2)时新发现会把整份吃光、
+    #: 积压一条都推不了 —— 那样「积压慢慢清」这件事就彻底停了(算术上等于把假功能写进来)。
+    source_only_fresh = min(int(getattr(settings, "pan_discovery_source_push_fresh", 5) or 0),
+                            source_only_total // 2)
+    source_only_left = source_only_total - source_only_fresh   # 积压那份
+    source_only_fresh_left = source_only_fresh                 # 新发现那份
+    #: 窗口内**已经直推过**的盘链身份(见 `_recent_source_pushed`)。这批行仍是 `pending`,
+    #: 不排除的话它们每轮都排在队首、吃满名额,后面几百条永远轮不到。
+    _already_pushed = (_recent_source_pushed(session, user_id, settings)
+                       if source_only_total > 0 else set())
+    from app.services.push_ledger import pan_key as _pan_key
+
+    def _source_quota_left(is_backlog_c: bool) -> bool:
+        """这条候选还能不能吃到直推名额(**积压 / 新发现各一份**,理由见上面)。"""
+        return (source_only_left if is_backlog_c else source_only_fresh_left) > 0
+
+    #: 因为「本窗口内已经推过」而被跳过的条数(单独计数 —— 它与"额度用完"不是一回事)
+    source_only_done = 0
     items: list[dict] = []
     for c in cands:
         # 这条候选是**存量待办**还是**本轮新搜到的**?决定吃哪份额度(见上面两行注释)
@@ -1109,6 +1207,10 @@ def sync(session, user_id: int, settings=None) -> dict:
         #: 拿"不知道"当"老"会把整条链堵死。
         _too = _too_old(c.get("publish_at"), settings)
         have = None if _too else already_have(session, user_id, c["title"])
+        #: 这一条是不是「**盘满 ⇒ 只推源链、没转存**」?**必须用显式标记** ——
+        #: 别在后面拿 `message.startswith(...)` 之类反解状态(本仓栽过:子串判据一旦
+        #: 被文案改动或解释性注释命中,就会静默判错,见 `_fail` 那边同样的取舍)。
+        pushed_source_only = False
         if _too:
             status, message, our, code = "skipped", _too, "", ""
             skipped_old += 1
@@ -1139,6 +1241,47 @@ def sync(session, user_id: int, settings=None) -> dict:
                     backlog_budget -= 1
                 else:
                     fresh_budget -= 1
+            elif _is_space_blocked(message) and (_pan_key(c["origin_url"]) in _already_pushed
+                                                 or not _source_quota_left(is_backlog)):
+                #: ★ **这一条本窗口内已经直推过**(它仍是 `pending`,所以还在队首)——
+                #: **不占名额、不改消息、不再进 items**。但转存**照样试过了**(上面那步):
+                #: 空间一旦释放,这里会走 `status == "ok"` 正常搬,不会被这道判断挡住。
+                #: ⚠️ **额度为 0 也走这里**(而不是落到下面的"未转存已推送"分支):
+                #: 那会把没推过的行标成「已推送」——消息与事实不符,下一轮还会被当成
+                #: 已推过的样本(见 `_source_pass_code` 那边同一条纪律:不装作做过)。
+                _ex = exist.get(c["origin_url"])
+                #: ⚠️ **不要把库里已有的提取码擦掉**:上一轮直推时补到的码还在那一列里,
+                #: 这轮转存失败拿回的是空串 ⇒ 直接覆盖等于把码丢了(下轮还得重新找,
+                #: 而标题里的码可能早被上游改掉了)。
+                status, message, our = "pending", message, ""
+                code = str(getattr(_ex, "pass_code", "") or "") or _source_pass_code(c)
+                if _pan_key(c["origin_url"]) in _already_pushed:
+                    source_only_done += 1
+            elif _is_space_blocked(message) and _source_quota_left(is_backlog):
+                # ★★★ **盘满 ⇒ 跳过转存,直接推源链**(2026-11-23,用户口径
+                # 「内存不足时不转存直接推送」)。见 `_is_space_blocked` 的说明:
+                # 这些链**本身是好的**,被"必须换成我方链"这条前提整批扣在积压里 ——
+                # 实测 2026-11-19 起连续 5 天转存 0、积压 327(其中 326 条空间不足)。
+                # ⚠️ **库里仍记 `pending`**(不是新状态):空间一出来它就还得被搬一次,
+                #    记成终态等于把 326 条永远丢掉;
+                # ⚠️ 消息头**必须不一样** —— 否则运维看到「空间不足」会以为还是没推。
+                status = "pending"
+                message = (f"**未转存,已按源链推送**:{message[:120]}"
+                           f"(空间出来后会自动补搬)")
+                #: ⚠️ **提取码必须在这里补**:源链是**别人的**分享,很多带密码;
+                #: 转存那条路拿到的是**我们自己**新链的码,这个分支没有它。
+                #: 判据与转存时同一套(`extract_pwd`,认 `?pwd=` 与「提取码:xxxx」)。
+                #: ⚠️⚠️ **`our_url` 必须留空,不能塞源链**(2026-11-23):那一列的定义是
+                #: 「**我方**分享链」,下游 `ai_calibration` 用 `our_url != ''` 判「搬成」、
+                #: `chain_delivery` 用非空判 `moved` —— 塞进去等于把「没搬」记成「搬了」,
+                #: 搬运统计和交付状态一起骗人。卡片要的源链走 `items["share_url"]`(见下)。
+                our, code = "", _source_pass_code(c)
+                pushed_source_only = True
+                source_only += 1
+                if is_backlog:
+                    source_only_left -= 1
+                else:
+                    source_only_fresh_left -= 1
         row = exist.get(c["origin_url"])
         if row is None:
             row = DiscoveredPanLink(user_id=user_id, origin_url=c["origin_url"][:500])
@@ -1179,6 +1322,20 @@ def sync(session, user_id: int, settings=None) -> dict:
                           # ★ 互动数带进卡(2026-10-16):三个候选源(知乎/微博/贴吧)都给了,
                           #   只是这一步没接 ⇒ 卡上「对标数据」恒空。
                           "metrics": dict(c.get("metrics") or {})})
+        elif pushed_source_only:
+            #: ★★ **盘满直推**(2026-11-23):没转存成我方链,但**这条源链客户能直接用**
+            #: ⇒ 照样进 `items` 推出去。卡片那边靠 `source_only` 这个标记区分
+            #: (列名从「我方分享链」换成「源链(未转存)」,别让客户以为我们搬过)。
+            pending += 1
+            items.append({"title": c["title"], "author": c["author"],
+                          "source_url": c["source_url"],
+                          #: ⚠️ `share_url` 放的是**别人的源链**。`push_ledger` 会把它
+                          #: 当成 `pan_url` 记台账(日结/复盘按盘链聚合),这是**有意的**:
+                          #: 那条链确实是客户点开拿到的那一份。
+                          "share_url": c["origin_url"], "code": code,
+                          "source_only": True,
+                          "publish_at": c.get("publish_at"),
+                          "metrics": dict(c.get("metrics") or {})})
         elif status == "skipped":
             skipped += 1
         elif status == "pending":
@@ -1195,12 +1352,19 @@ def sync(session, user_id: int, settings=None) -> dict:
             DiscoveredPanLink.user_id == user_id,
             DiscoveredPanLink.status.in_(("pending", "failed")))) or 0)
     logger.info("网盘发现:词 %d 个 → 候选 %d 条 → 转存成功 %d(其中复用已有 %d);"
+                "**盘满未转存、直推源链 %d 条**;"
                 "**积压剩 %d 条**(积压额度 %d / 新发现额度 %d)",
-                len(keywords), len(cands), ok, reused, backlog_left,
+                len(keywords), len(cands), ok, reused, source_only, backlog_left,
                 int(getattr(settings, "pan_discovery_transfer_limit", 10) or 0),
                 int(getattr(settings, "pan_discovery_fresh_limit", 3) or 0))
     return {"status": "ok", "found": len(cands), "ok": ok, "skipped": skipped,
             "pending": pending, "failed": failed, "reused": reused, "items": items,
+            #: ★★ **盘满直推**单独报(2026-11-23):它**不花转存额度**、也没转存,
+            #: 和 `reused` 一样必须与 `ok` 分开 —— 否则「转存 N 条」的口径又骗人。
+            "source_only": source_only,
+            #: 因为「本窗口内已经直推过」而跳过的条数。单独报 —— 它与"额度用完"不是一回事:
+            #: 看到 source_only=0 但这里很大,说明**当前窗口已经推过一批**,不是坏了。
+            "source_only_done": source_only_done,
             "backlog_size": len(backlog),        # 本轮开始时**排队等搬**的存量
             "backlog_left": backlog_left,       # 本轮结束时**仍**在排队的
             #: ★ 「太老没搬」进运行记录 —— 否则开了闸门之后"候选一大堆、搬的很少"
@@ -1262,10 +1426,24 @@ def push_items(items: list[dict], settings, session=None, user_id: int = 0) -> b
     from app.services.feishu_client import FeishuClient
 
     brand = (getattr(settings, "brand_name", "") or "").strip()
+    #: ★★ **盘满直推**的说明必须分开写(2026-11-23)。原来这句「已转存成我方分享链」是
+    #: **硬编码的假话** —— 一旦有 `source_only` 的行混进来,客户会以为我们搬过,
+    #: 而实际上那条链是**别人的分享**、我们没动过。两件事不能混成一句话。
+    _n_src = sum(1 for it in items if it.get("source_only"))
+    if not _n_src:
+        _head = (f"公开平台(知乎/贴吧)新发现 **{len(items)}** 个资源,已转存成我方分享链:"
+                 f"「**资源**」点开是我方链、可直接取用;")
+    elif _n_src == len(items):
+        _head = (f"公开平台(知乎/贴吧)新发现 **{len(items)}** 个资源,"
+                 f"**网盘空间不足、本轮未转存**,直接给源链(点开同样能取):")
+    else:
+        _head = (f"公开平台(知乎/贴吧)新发现 **{len(items)}** 个资源:"
+                 f"**{len(items) - _n_src}** 条已转存成我方分享链、"
+                 f"**{_n_src}** 条因**网盘空间不足未转存**(给的是源链,点开同样能取);")
     elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
-        f"公开平台(知乎/贴吧)新发现 **{len(items)}** 个资源,已转存成我方分享链:"
-        f"「**资源**」点开是我方链、可直接取用;「**原帖**」点开是对标作品的出处;"
-        f"「**对标数据**」= 那条原帖的热度。"
+        _head
+        + "「**原帖**」点开是对标作品的出处;"
+        + "「**对标数据**」= 那条原帖的热度。"
         + f"\n**可直取 {len(items)} 条**({_pan_txt})"
         + (f"\n**{_ai.summary()}**:已挡掉纯广告 / 无具体资源 / 过时的那些。"
            if _ai.summary() else "")
@@ -1278,7 +1456,9 @@ def push_items(items: list[dict], settings, session=None, user_id: int = 0) -> b
         #   只是从来没渲染出来 ⇒ 员工看不到"这条资源是从哪个帖子里发现的",无法核对对标作品。
         # ★ **「对标数据」也是 2026-10-16 补的**(用户那 5 要素:对标账号/对标作品/对标数据/资源/可用链)。
         _col_set_row([("**作者**", 3), ("**资源**", 5), ("**原帖**", 2),
-                      ("**对标数据**", 2), ("**我方分享链**", 3)], grey=True)]
+                      #: 有盘满直推的行时,列名必须中性 —— 那一列里可能放的是**别人**的源链,
+                      #: 叫「我方分享链」就是撒谎(逐行再标「源链(未转存)」)。
+                      (("**可用链**" if _n_src else "**我方分享链**"), 3)], grey=True)]
     from app.services.hot_time import publish_mark as _pub_mark
 
     for it in items:
@@ -1292,6 +1472,10 @@ def push_items(items: list[dict], settings, session=None, user_id: int = 0) -> b
             (f"[▶ 原帖]({_src})" if _src else "—", 2),
             (metrics_md(it.get("metrics") or {}), 2),
             (f"[▶ 打开]({_md_safe(it.get('share_url') or '')})"
+             #: ⚠️ **逐行标「源链未转存」**(2026-11-23):表头为了这一档改成了中性
+             #: 「可用链」,但客户仍要能一眼分出手里这条是**我们的**还是**别人**的 ——
+             #: 别人的链可能哪天被撤掉,我们的不会。码取不到时**不显示 🔑**(不猜、不装)。
+             + (" (源链,未转存)" if it.get("source_only") else "")
              + (f" 🔑{_md_safe(it.get('code') or '')}" if it.get("code") else ""), 3)]))
     card = {"config": {"wide_screen_mode": True},
             "header": {"template": "turquoise", "title": {"tag": "plain_text",
@@ -1346,6 +1530,15 @@ def pan_discovery_tick(settings=None) -> int:
                 _record_run(db, uid, "pan_discovery", "success",
                             f"候选{out.get('found', 0)} 转存{_real} "
                             f"(复用{out.get('reused', 0)}) **积压{out.get('backlog_left', 0)}**"
+                            #: ★★ **盘满直推必须报出来**(2026-11-23):这一档**没转存**,
+                            #: 不写的话「转存 0」会看起来像整轮什么都没发生 ——
+                            #: 而实际上客户已经收到 N 条源链(与「积压必须说出来」同一纪律)。
+                            + (f" **盘满直推源链{out['source_only']}**"
+                               if out.get("source_only") else "")
+                            #: 窗口内已推过而跳过的条数:没有它,「直推 0」会被读成"没在推"
+                            #: (而实际是**本窗口已经推过一批、还没到重推时间**)。
+                            + (f" (本窗口已推{out['source_only_done']})"
+                               if out.get("source_only_done") else "")
                             #: ★ 「**太老没搬**」必须看得见(2026-10-16):否则开了"只搬新的"
                             #: 这道闸门之后,"候选一大堆、搬的很少"会被读成"链子坏了"。
                             + (f" **太老跳过{out['skipped_old']}**"
