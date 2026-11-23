@@ -1101,6 +1101,80 @@ def test_retry_run_supports_baidu(session, monkeypatch: pytest.MonkeyPatch) -> N
     assert res["ok"] is True
 
 
+def test_manual_retry_respects_instance_role(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """★★ **2026-11-23**:管理员手点「重试」也走同一道归属护栏。
+
+    事故形状:远程(`SCHEDULER_ROLE=hotspot`)上点一次闲鱼 → 没装浏览器的容器里失败 →
+    留下一条失败记录 → `retry_failed_runs` 每 30 分钟捞起来重跑(用户 4,249 条)。
+    手动重试是这条永动机的**点火开关**,不挡就等于护栏只修了一半。
+
+    钉住性质:本实例不管的 kind **一次都不许调 runner**,并且**要能说清原因**
+    (回给管理端的 `msg` 必须提到角色,不能只说"失败")。
+    """
+    import types
+    from datetime import datetime
+
+    from app.admin import retry_run
+    from app.db.models import RunRecord
+    from app.services import tenant
+
+    run = RunRecord(user_id=1, run_id="x1", kind="xianyu", status="failed",
+                    detail="boom", retry_count=0, started_at=datetime.now())
+    session.add(run)
+    session.commit()
+
+    calls: list[int] = []
+    monkeypatch.setattr(tenant, "run_xianyu", lambda db, uid, settings=None: calls.append(1))
+
+    res = retry_run(session, str(run.id),
+                    settings=types.SimpleNamespace(scheduler_role="hotspot"))
+    assert calls == [], f"热点侧不许手动重试闲鱼:{calls}"
+    assert res["ok"] is False and "hotspot" in res["msg"], res
+    assert session.get(RunRecord, run.id).status == "failed", "别把本机的失败标成 recovered"
+
+    #: 角色对了就该照常跑(别一刀切掉)
+    res = retry_run(session, str(run.id),
+                    settings=types.SimpleNamespace(scheduler_role="wechat"))
+    assert calls == [1] and res["ok"] is True
+
+
+def test_manual_wechat_listen_respects_instance_role(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """★★ **2026-11-23**:`POST /api/wechat/listen` 也要问归属。
+
+    公众号监听靠的是**本机的微信读书凭据与浏览器档案**;远程(`hotspot`)上点一次
+    只会失败一次并留下一条失败记录,而 `retry_failed_runs` 会把它反复捞起来重跑
+    —— 与闲鱼那起事故(用户 4,249 条)完全同形。所以手动入口必须和
+    `collect_tick` 用同一个判据,并回 **409**(不是 500:这不是采挂了)。
+    """
+    import types
+
+    from fastapi import HTTPException
+
+    from app.api import wechat as wechat_api
+    from app.services import wechat_monitor
+
+    called: list[int] = []
+    monkeypatch.setattr(wechat_monitor, "run_wechat_listen",
+                        lambda db, uid: called.append(uid) or {"ok": True})
+
+    import config.settings as settings_mod
+
+    st = types.SimpleNamespace(scheduler_role="hotspot")
+    monkeypatch.setattr(settings_mod, "get_settings", lambda: st)
+
+    user = types.SimpleNamespace(id=1)
+    with pytest.raises(HTTPException) as ei:
+        wechat_api.wechat_listen(user=user, db=session)
+    assert ei.value.status_code == 409 and "hotspot" in str(ei.value.detail)
+    assert called == [], f"热点侧不许手动跑公众号监听:{called}"
+
+    #: 本机角色下照常跑(别把真功能一起挡掉)
+    monkeypatch.setattr(settings_mod, "get_settings",
+                        lambda: types.SimpleNamespace(scheduler_role="wechat"))
+    out = wechat_api.wechat_listen(user=user, db=session)
+    assert out == {"ok": True} and called == [1]
+
+
 def test_admin_data_browse_and_alert_trend_clamp_bounds(session) -> None:
     """管理台 days/limit 整数入参钳制:超大值不再一次性把全表载入内存/建超大数组,
     负数不再触发 MySQL `Incorrect arguments to LIMIT`。"""

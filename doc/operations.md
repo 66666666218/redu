@@ -640,8 +640,10 @@ python scripts/wemp_cred.py --check          # 以后想确认还能不能用
 | --- | --- | --- |
 | `collect_tick`(定时采集) | ✅ 早有 `_section_allowed` | 不变 |
 | `retry_failed_runs`(每 30 分钟重试) | ❌ 无判断 | ✅ `_kind_allowed` 跳过 |
+| `retry_run`(管理台手点重试) | ❌ 无判断 | ✅ 返回 `{"ok": false, "msg": ...}` |
 | `POST /api/collect/{platform}`(面板手点) | ❌ 无判断 | ✅ 返回 **409** |
 | `POST /api/xianyu/collect-deep` | ❌ 无判断 | ✅ 返回 **409** |
+| `POST /api/wechat/listen`(手点监听) | ❌ 无判断 | ✅ 返回 **409** |
 | `check_collect_failures`(失败告警) | ❌ 无判断 | ✅ 按 `_kind_allowed` 过滤 |
 
 **完整链条**(缺任何一环都不成立):
@@ -659,6 +661,12 @@ python scripts/wemp_cred.py --check          # 以后想确认还能不能用
 
 **判据只有一处**:`scheduler._SECTION_ROLE`;`_kind_allowed(kind, settings)` 是它面向
 **运行记录 kind**(`xianyu_deep`/`wechat_listen`/`douyin_leads`…)的入口,别在调用方各写一份。
+
+> ⚠️ **仍然存在两份映射,改分工时两处都要改**:`services/health.py::_SECTION_ROLE`
+> (健康度用,多一个 `pan`)、`alert_service.check_health_stalls` 内联的 `_section_role`
+> (停摆告警用,与 health 那份内容相同)。两处目前与 `scheduler._SECTION_ROLE` **完全一致**,
+> 所以现在不出问题;但它们是**各自维护的副本** —— 新增板块或调整分工时,漏改任一处都会
+> 让"跑的地方不报、不跑的地方乱报"。彻底消除需要一个单一事实源,本次不动(改动面过大)。
 
 > ⚠️ **归属过滤必须从「当前仍断」就开始**:失败告警的"恢复确认"走
 > `currently_broken ^ rows`(对称差),若只过滤 `hits` 而不过滤 `rows`/`currently_broken`,

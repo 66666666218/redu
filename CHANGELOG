@@ -1,3 +1,44 @@
+- [2026-11-23 14:54] FIX: **归属护栏补完剩下两个入口:管理台手点重试、手点公众号监听**。
+  上一提交(14:28)补了 `retry_failed_runs` / `POST /api/collect/{platform}` /
+  `POST /api/xianyu/collect-deep` / `check_collect_failures` 四处,但同一个病的入口还有两个:
+  · `admin.retry_run`(管理台 `POST /api/admin/runs/{id}/retry`)—— **手点重试就是点火开关**,
+    不挡就等于只修了一半。不归本实例时回 `{"ok": false, "msg": "本实例不采集[...](角色=...)"}`
+    (HTTP 200:动作被拒绝,不是请求错),且**不改动原记录状态**。
+  · `POST /api/wechat/listen` —— 公众号监听靠本机的微信读书凭据/浏览器档案,
+    远程点一次失败就会留下会被 `retry_failed_runs` 反复捞起的记录(与闲鱼事故同形)。回 **409**。
+  新增用例 `test_manual_retry_respects_instance_role`、
+  `test_manual_wechat_listen_respects_instance_role`(都断言"不管的 kind 一次都不许调 runner",
+  且角色对了照常跑,不做一刀切)。
+  顺带记一条:`check_health_stalls` 早有 `_role_owns`,不受影响;但它内部那份
+  `_section_role` 与 `scheduler._SECTION_ROLE` 是**两份映射**(前者多一个 `pan`)——
+  目前一致,**将来改分工要两处都改**,已在 doc/operations.md 标出。
+  (Files: app/admin.py, app/api/wechat.py, doc/API.md, doc/operations.md,
+  tests/test_platform.py, CHANGELOG)
+- [2026-11-23 15:05] FEAT: **盘满时跳过转存、直接推源链**(用户口径「内存不足时不转存直接推送」)。
+  实测 11-19 起连续 5 天转存 0、积压 145→327,其中 **326 条**的理由是「空间不足」
+  (百度超额 43 倍 243 / 夸克两号全满 51 / 迅雷 32)—— 这些链**本身是好的、客户点开就能拿**,
+  却被「必须转存成我方链才推」这条前提整批扣住,系统还一路 `success`。
+  · 新增 `_is_space_blocked`(判据窄:只认 `空间不足`/`容量不足`/`file_space_not_enough`/
+    `space_insufficient`;死链/验码失败/没 Cookie **绝不**走这条路 —— 那些链客户也打不开);
+  · 命中时**跳过转存、源链进 items 照推**:库里仍记 `pending` 且消息头改成
+    「**未转存,已按源链推送**」(空间出来自动补搬);`our_url` **保持为空**
+    (下游 `ai_calibration`/`chain_delivery` 拿它判「搬成」,塞源链等于撒谎);
+  · 提取码当场补(`_source_pass_code` → `extract_pwd`,先认 `?pwd=` 再认「提取码:xxxx」),
+    **取不到就空着不猜**,卡面不显示 🔑;
+  · 每轮上限 `PAN_DISCOVERY_SOURCE_PUSH_LIMIT`(默认 20,0=关):积压三百多条一次全推=刷屏;
+  · ★ **窗口内已推过的不再占名额**(`_recent_source_pushed` 查台账):直推过的行仍是
+    `pending`⇒下轮还在队首,不排除的话每轮推的都是同 20 条(卡片被 24h 去重挡空)而
+    后面 307 条永远轮不到 —— 用真实积压快照跑出来的;顺带**不擦掉上次补到的提取码**;
+  · ★ **直推额度也拆积压 / 新发现两份**(`PAN_DISCOVERY_SOURCE_PUSH_FRESH`=5,
+    `min()` 压到不超总额一半):327 条积压在前,单额度下当天新搜到的资源要 17 天才轮得到,
+    与 2026-10-05 拆转存额度**同一个理由**(用户口径「在新在精」);
+  · `runs.detail` 单独报 `**盘满直推源链N**`(+`(本窗口已推M)`,两者都不是「转存N」
+    ——不花转存额度、不计入它;两种事混成一个数结论必错);
+  · 额度用尽时**不把未推过的行标成「已推送」**(消息与事实必须一致);
+  · 卡面不撒谎:含源链行时头部按混合比例写「N 条已转存 / M 条因空间不足未转存」,
+    表头「我方分享链」→ 中性「**可用链**」,逐行标 `(源链,未转存)`
+    (Files: app/services/pan_discovery.py, config/settings.py, .env.example,
+    tests/test_pan_discovery.py, doc/网盘发现-失败分类与积压处置.md, doc/能力清单.md)
 - [2026-11-23 14:28] FIX: **「用户#5 闲鱼 16/16」假告警:远程在自己跑不归它的板块**。
   远程实例是 `SCHEDULER_ROLE=hotspot`(闲鱼归本机),但它**从没装过 Playwright 浏览器**
   (Dockerfile 明确「纯 requests,无需浏览器」);用户 4 于 11-13 20:20 注册后

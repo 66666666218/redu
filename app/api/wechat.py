@@ -480,4 +480,15 @@ def wechat_listen(user: User = Depends(get_current_user), db: Session = Depends(
 
     新发文始终全量推飞书(不受免打扰时段限制,飞书是员工查看入口)。
     """
+    #: ★★ **2026-11-23**:本实例不分管的板块**不许手动采**(与 `/api/collect/{platform}`
+    #: 同一道护栏、同一个 409)。公众号监听依赖**本机的微信读书凭据与浏览器档案**,
+    #: 在远程(hotspot)上被手点一次只会失败一次并留下失败记录,而那条记录会被
+    #: `retry_failed_runs` 反复捞起来重跑 —— 这正是闲鱼那起事故的形状。
+    from app.services.scheduler import _section_allowed
+    from config.settings import get_settings
+
+    settings = get_settings()
+    if not _section_allowed("wechat", settings):
+        raise HTTPException(
+            409, f"本实例不采集[公众号](角色={settings.scheduler_role}),请到对应实例操作")
     return wechat_monitor.run_wechat_listen(db, user.id)

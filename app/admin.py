@@ -547,6 +547,16 @@ def retry_run(db: Session, run_id: str, settings=None) -> dict:
     runner = _retry_runners().get(run.kind)
     if not runner:
         return {"ok": False, "msg": f"未知板块 {run.kind}"}
+    #: ★★ **2026-11-23**:管理员在面板上点「重试」**也是采集**,同一道归属护栏
+    #: (与 `retry_failed_runs` 一致,见 `scheduler._kind_allowed`)。远程(hotspot)上
+    #: 点一次闲鱼,就会在没装浏览器的容器里失败一次,并留下一条会被自动重试反复捞起的
+    #: 失败记录 —— 事故就是这么开始的(用户 4,249 条)。
+    from app.services.scheduler import _kind_allowed
+
+    if not _kind_allowed(run.kind, settings):
+        return {"ok": False,
+                "msg": f"本实例不采集[{run.kind}](角色={getattr(settings, 'scheduler_role', 'all')}),"
+                       "请到对应实例操作"}
     kwargs: dict = {}
     if run.kind == "wechat_listen":
         # 分组轮换:重跑失败轮所在的同一组(cursor 语义见 retry_failed_runs)
