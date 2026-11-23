@@ -469,6 +469,33 @@ def test_section_allowed_is_permissive_for_unlisted_and_all_roles() -> None:
     assert scheduler._section_allowed("别的板块", st) is True
 
 
+def test_kind_allowed_maps_run_kinds_to_owning_side() -> None:
+    """★ **2026-11-23 事故**:`collect_tick` 有板块护栏,而**重试/手动采集/失败告警没有**。
+
+    远程(`hotspot`)从 11-13 起反复重跑用户手点的闲鱼失败(它根本没装浏览器),
+    一个月里刷出 249 条 failed。判据必须能问到 **`runs.kind`** 上 —— 重试与告警
+    拿到的都是 kind,不是 section。
+    """
+    import types
+
+    st = types.SimpleNamespace(scheduler_role="hotspot")
+    for kind in ("xianyu", "xianyu_deep", "wechat_listen", "wechat_sync",
+                 "douyin_leads", "douyin_leads_dagua"):
+        assert scheduler._kind_allowed(kind, st) is False, f"{kind} 归 wechat 侧"
+    for kind in ("weibo", "douhot", "baidu"):
+        assert scheduler._kind_allowed(kind, st) is True
+
+    st = types.SimpleNamespace(scheduler_role="wechat")
+    assert scheduler._kind_allowed("xianyu", st) is True
+    assert scheduler._kind_allowed("weibo", st) is False
+
+    # 未登记的 kind 不拦(向后兼容);all/both 全放行
+    assert scheduler._kind_allowed("某个新作业", st) is True
+    for role in ("all", "both"):
+        st2 = types.SimpleNamespace(scheduler_role=role)
+        assert all(scheduler._kind_allowed(k, st2) for k in scheduler._KIND_SECTION)
+
+
 def test_wechat_digest_runs_on_monday_morning_per_wechat_role(monkeypatch) -> None:
     """公众号板块总结:每周一 09:50、**wechat 侧**。
 

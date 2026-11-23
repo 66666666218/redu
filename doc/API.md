@@ -274,6 +274,16 @@
 > **风险控制(闲鱼 mtop)**:闲鱼为登录态接口,过度请求会触发网关风控。实测 `FAIL_SYS_USER_VALIDATE`(人机验证/滑块)**经退避重试仍无效**,已与真限流区分——前者立即抛 `XianyuVerify`(由运维人工过滑块/换出口 IP,传输层已用 `curl_cffi` 伪 Chrome 指纹降低被标记概率,dock/dev.md §5.8),后者(`FAIL_SYS_RATE_LIMIT`/`FAIL_SYS_USER_LIMIT`)才走指数退避。
 > `POST /api/xianyu/collect-deep` 在**整轮**被验证/限流时返回 **200 + `status:"failed"`**(0 条,不再 500);详情抓取**中途**被验证/限流则停止抓取并保留已采部分,**返回 `status:"partial"`**。`run_xianyu`(`/api/collect/{platform}` 或调度)遇验证则记 `failed`,由既有"采集持续失败"告警提醒运维(告警消息含最近一次失败原因,人工可据"需人工过滑块/换出口 IP"行动)。
 
+> **409「本实例不采集该板块」(2026-11-23 新增)**:`POST /api/collect/{platform}` 与
+> `POST /api/xianyu/collect-deep` 在板块**不归本实例**(与 `SCHEDULER_ROLE` 的
+> `_SECTION_ROLE` 分工不符,如远程 `hotspot` 上手动采闲鱼)时返回 **409**,响应体
+> `{"detail": "本实例不采集[闲鱼](角色=hotspot),请到对应实例操作"}`。
+> **不是 500**:这不是采集失败,是"这台机器不跑这个板块";前端应提示去对应实例操作,
+> 而**不要重试**。读取类接口不受影响。
+> 事故背景:远程实例没装 Playwright 浏览器,面板手点一次闲鱼后,失败记录被
+> `retry_failed_runs` 每 30 分钟重放,20 天里刷出 249 条失败并每轮误报告警 —— 见
+> `doc/operations.md` §4j。
+
 ---
 
 ### 6.4 价位行情(价格=供给热度,想要数=需求热度)

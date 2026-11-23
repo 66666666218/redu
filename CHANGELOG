@@ -1,3 +1,31 @@
+- [2026-11-23 14:28] FIX: **「用户#5 闲鱼 16/16」假告警:远程在自己跑不归它的板块**。
+  远程实例是 `SCHEDULER_ROLE=hotspot`(闲鱼归本机),但它**从没装过 Playwright 浏览器**
+  (Dockerfile 明确「纯 requests,无需浏览器」);用户 4 于 11-13 20:20 注册后
+  `ensure_all_users` 给新用户默认开了 `xianyu`,面板手点一次采集失败 → 记录被
+  `retry_failed_runs` 每 30 分钟重放 → 10 天累计 **249 条 failed**,并由远程自己的
+  `check_collect_failures` 推成「16/16 连续 20 轮」——**而本机同期闲鱼是好的**。
+  四处补归属护栏(判据仍只有 `_SECTION_ROLE` 一处):
+  · `scheduler._KIND_SECTION` + `_kind_allowed(kind, settings)`:`runs.kind` 比 section 细
+    (`xianyu_deep`/`wechat_listen`/`douyin_leads`…),重试/告警拿到的是 kind,需要这个入口。
+  · `admin.retry_failed_runs`:跳过分管外的 kind(**不标 recovered** —— 那条失败在本机仍可能真实)。
+  · `api/collect.py`:`POST /api/collect/{platform}` 与 `/api/xianyu/collect-deep` 不归本实例
+    时返回 **409**(不是 500:不是采挂了,是这台机器不跑这个板块)。
+  · `alert_service.check_collect_failures`:归属过滤**从 `currently_broken` 就开始**
+    (以及 `rows`),不能只跳 `hits` —— 否则「恢复确认」的对称差会给**每轮**发一条假的
+    「✅ 采集已恢复」。
+  另修 `XianyuBrowserClient` 启动失败的脏状态:`_pw` 已 start 但没拿到浏览器时,
+  下一轮 `sync_playwright().start()` 会报 `It looks like you are using Playwright Sync API
+  inside the asyncio loop` —— **把「没装浏览器」伪装成「线程问题」**(已在容器内复现)。
+  新增 `_shutdown_playwright()`,启动失败时收尾再**原样抛出**真实原因。
+  测试:`test_kind_allowed_maps_run_kinds_to_owning_side`、`test_本实例不管的板块不许重试`、
+  `test_collect_failures_skips_kinds_this_role_does_not_run`、
+  `test_launch_failure_releases_playwright_driver`。
+  ⚠️ 顺手修一条被新护栏打红的既有用例:测试里 `Settings(_env_file=None)` **仍读进程环境
+  变量**,开发机 `SCHEDULER_ROLE=wechat` 时用 `douhot` 作样本会被静默过滤 ⇒ 显式钉角色。
+  (Files: app/services/scheduler.py, app/admin.py, app/api/collect.py,
+  app/services/alert_service.py, app/services/xianyu_browser.py, doc/API.md,
+  doc/operations.md, tests/test_schedule.py, tests/test_audit_fixes.py,
+  tests/test_feishu.py, tests/test_xianyu_browser.py, tests/test_undefined_names.py, CHANGELOG)
 - [2026-11-23 13:40] FIX: **告警标题里有数字 ⇒ 冷却门 100% 失效,两处一起修**。
   `notify_incident` 的冷却键是 `title[:80]`,标题里带条数/项数 **数字一变就是新键**:
   · `pan_discovery._alert_backlog`:旧标题是「网盘发现积压 {N} 条(失败…行)」⇒ 实测

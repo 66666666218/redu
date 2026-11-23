@@ -208,8 +208,11 @@ def test_collect_failures_escalates_long_term(monkeypatch, session) -> None:
     monkeypatch.setattr(feishu_client, "FeishuClient",
                         lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
 
+    #: ⚠️ `Settings(_env_file=None)` **仍会读进程环境变量**:开发机上 `SCHEDULER_ROLE=wechat`
+    #: 时 `douhot` 会被失败告警的归属护栏静默过滤 ⇒ 同一份代码 CI 绿、本机红。角色要显式钉住。
     n = alert_service.check_collect_failures(
         Settings(_env_file=None, fail_alert_threshold=3, health_escalate_days=3,
+                 scheduler_role="all",
                  feishu_webhook="https://open.feishu.cn/open-apis/bot/v2/hook/test"), db=session)
     assert n == 1
     assert "🔴" in sent[0] and "长期" in sent[0] and "5 天" in sent[0]

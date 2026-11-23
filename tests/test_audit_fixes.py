@@ -139,6 +139,23 @@ class TestJwtExpiry:
 
 
 class TestRetryConvergence:
+    @pytest.fixture(autouse=True)
+    def _role_neutral(self, monkeypatch):
+        """这些用例测的是**重试收敛**,不是板块归属 —— 角色钉成 `all`。
+
+        ⚠️ 2026-11-23 加归属护栏后,本机 `.env`(`SCHEDULER_ROLE=wechat`)会把样本
+        `weibo` 直接挡在重试之外 ⇒ 它们在开发机上会红成"收敛失效",而那是**测试环境
+        串进了生产配置**,不是代码坏了。归属本身由 `test_本实例不管的板块不许重试`
+        与 `test_kind_allowed_maps_run_kinds_to_owning_side` 覆盖。
+        """
+        import types
+
+        import config.settings as settings_mod
+
+        monkeypatch.setattr(
+            settings_mod, "get_settings",
+            lambda: types.SimpleNamespace(scheduler_role="all", feishu_webhook=""))
+
     def test_success_closes_old_failed_record(self, session, monkeypatch):
         import app.admin as admin_svc
         import app.db as appdb
@@ -237,6 +254,53 @@ class TestRetryConvergence:
         old = session.scalars(select(RunRecord).where(RunRecord.run_id == "1")).one()
         assert old.status == "failed", f"重试明明又失败了,却标成了 {old.status}"
         assert "retry_ok" not in (old.detail or ""), old.detail
+
+    def test_本实例不管的板块不许重试(self, session, monkeypatch):
+        """★★ **2026-11-23 事故**:重试路漏了板块归属判断。
+
+        现场:远程(`SCHEDULER_ROLE=hotspot`)上,用户 4 在 11-13 20:20 注册后**面板手点**
+        了一次闲鱼 —— 远程**从来没装过 Playwright 浏览器**(Dockerfile 明确"纯 requests"),
+        于是失败。此后 `retry_failed_runs` 每 30 分钟把它捞出来重跑,一路重放到 11-23
+        (**249 条 failed**),并向管理群反复报「闲鱼失败 16/16、连续 20 轮」——
+        而闲鱼归本机跑、本机同期健康。
+
+        ⇒ 判据:本实例不管的 kind **一次都不许调 runner**,也不许改它状态
+        (那条失败在本机可能仍然真实,轮不到远程替它标 recovered)。
+        """
+        import types
+
+        import app.admin as admin_svc
+        import app.db as appdb
+        from app.services import tenant as tenant_mod
+
+        monkeypatch.setattr(appdb, "get_session_local", lambda: (lambda: session))
+        monkeypatch.setattr(session, "close", lambda: None)
+        import config.settings as settings_mod
+
+        monkeypatch.setattr(
+            settings_mod, "get_settings",
+            lambda: types.SimpleNamespace(scheduler_role="hotspot", feishu_webhook=""))
+
+        session.add(User(id=1, username="a", email="a@b.c", password_hash="x", role="admin"))
+        session.add(RunRecord(run_id="1", user_id=1, kind="xianyu", status="failed",
+                              started_at=datetime.now() - timedelta(hours=2), retry_count=0))
+        session.commit()
+
+        calls: list[int] = []
+
+        def _boom(db, uid, st=None, **kw):
+            calls.append(1)
+            return {"platform": "xianyu", "count": 9}
+
+        monkeypatch.setattr(tenant_mod, "run_xianyu", _boom)
+        # 顺带钉住:热点侧**自己那几个 kind 照旧能被重试**(别一刀切掉)
+        monkeypatch.setattr(tenant_mod, "run_weibo", lambda db, uid, st=None, **kw: calls.append(2))
+
+        out = admin_svc.retry_failed_runs(max_retry=3)
+        assert calls == [], f"热点侧不许重试闲鱼,却调了 runner:{calls}"
+        assert out["retried"] == 0
+        row = session.scalars(select(RunRecord).where(RunRecord.run_id == "1")).one()
+        assert row.status == "failed", "别替本机把它的失败标成 recovered"
 
 
 class TestFixedTimeDigestHonest:

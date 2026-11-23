@@ -631,6 +631,51 @@ python scripts/wemp_cred.py --check          # 以后想确认还能不能用
 - **两侧合起来必须等于全集**,有测试锁定(`test_instance_role_filters_jobs` 断言
   `wechat | hotspot == all_ids`)——以后新增作业忘了标归属,测试会直接红。
 
+#### 4j.1 归属护栏的第二半:重试/手动采集/失败告警(2026-11-23)
+
+**事故**:管理群收到「用户#5 板块[xianyu] 失败 **16/16** 次(连续 20 轮)」,而**本机同期闲鱼是好的**。
+根因是**远程实例在自己跑不归它的板块**,三处漏了归属判断:
+
+| 入口 | 原状 | 现状 |
+| --- | --- | --- |
+| `collect_tick`(定时采集) | ✅ 早有 `_section_allowed` | 不变 |
+| `retry_failed_runs`(每 30 分钟重试) | ❌ 无判断 | ✅ `_kind_allowed` 跳过 |
+| `POST /api/collect/{platform}`(面板手点) | ❌ 无判断 | ✅ 返回 **409** |
+| `POST /api/xianyu/collect-deep` | ❌ 无判断 | ✅ 返回 **409** |
+| `check_collect_failures`(失败告警) | ❌ 无判断 | ✅ 按 `_kind_allowed` 过滤 |
+
+**完整链条**(缺任何一环都不成立):
+1. 远程 `.env` 是 `SCHEDULER_ROLE=hotspot`(闲鱼归本机),**镜像里从没装过 Playwright 浏览器**
+   (`Dockerfile` 明确"纯 requests,无需浏览器",`/root/.cache/ms-playwright` 不存在)。
+2. 用户 4 于 **2026-11-13 20:20:25** 注册,`ensure_all_users` 给新用户默认开启 `xianyu`
+   (`user_schedules.enabled=1, interval_minutes=120`)—— 这是**第二个漏点**:新用户默认表
+   没考虑本实例角色。
+3. 10 秒后面板手点 `POST /api/collect/xianyu` → `Executable doesn't exist` → 记一条 `failed`。
+4. `retry_failed_runs` 每 30 分钟把它捞出来重跑 → **永动机**,到 11-23 累计 **249 条 failed**。
+5. 第 1 步失败后 `XianyuBrowserClient._pw` 已赋值但 `_pg` 为 None,下一轮再
+   `sync_playwright().start()` 报 `It looks like you are using Playwright Sync API inside
+   the asyncio loop` —— **把"没装浏览器"伪装成"线程问题"**(已在容器内复现)。已修:
+   启动失败时 `_shutdown_playwright()` 清掉 `_pw` 再原样抛。
+
+**判据只有一处**:`scheduler._SECTION_ROLE`;`_kind_allowed(kind, settings)` 是它面向
+**运行记录 kind**(`xianyu_deep`/`wechat_listen`/`douyin_leads`…)的入口,别在调用方各写一份。
+
+> ⚠️ **归属过滤必须从「当前仍断」就开始**:失败告警的"恢复确认"走
+> `currently_broken ^ rows`(对称差),若只过滤 `hits` 而不过滤 `rows`/`currently_broken`,
+> 历史 `FeishuAlert` 行会让**每轮发一条假的「✅ 采集已恢复」**。
+>
+> ⚠️ **测试里 `Settings(_env_file=None)` 仍读进程环境变量**:开发机 shell 有
+> `SCHEDULER_ROLE=wechat` 时,用 `douhot` 作样本的用例会被护栏静默过滤(本机红、CI 绿)。
+> 凡测失败告警的用例都要**显式钉 `scheduler_role`**。
+
+**历史残留**:远程库里的 249 条 `xianyu failed` 与 `FeishuAlert(title='xianyu')` 行,
+部署后**不会再被重试/告警**,不清理也不影响;要清需单独确认(涉及 DELETE)。
+
+**根本处置(需人工)**:按分体设计,闲鱼归本机 ⇒ 远程用户 2/3/4/5 的
+`user_schedules.xianyu` 应关掉(`enabled=0`),否则只要有人手点一次仍会重新积累。
+备选是给远程装浏览器(`playwright install --with-deps chromium` + 图形栈),但那是
+**改架构方向**,不做。
+
 **当前配置**(2026-10-04 **登录远程实测确认**):
 - 本机 `.env`:`SCHEDULER_ROLE=wechat` ✅
 - 远程 `.env`:**`SCHEDULER_ROLE=hotspot` ✅ 已设、`HOT_NEWSNOW_URL=http://172.22.0.1:4444` ✅ 已配**

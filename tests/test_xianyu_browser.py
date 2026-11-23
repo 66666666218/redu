@@ -409,6 +409,54 @@ def test_looks_closed_only_matches_browser_gone() -> None:
     assert not xb._looks_closed(RuntimeError("TIMEOUT::接口超时"))
 
 
+def test_launch_failure_releases_playwright_driver(monkeypatch) -> None:
+    """★★ **2026-11-23 事故**:启动失败后必须把 `_pw` 清掉。
+
+    现场:远程容器**没装 Playwright 浏览器** ⇒ `launch_persistent_context` 报
+    `Executable doesn't exist`。而 `_pw` 已经 start 过、没被清 ⇒ **下一轮**
+    `sync_playwright().start()` 报 `It looks like you are using Playwright Sync API
+    inside the asyncio loop` —— 一句和真实原因**毫无关系**的话,把排障方向带偏
+    (我据此去查过调度器的线程模型)。
+
+    钉的是**性质**:第二次尝试时 `_pw is None`(即会重新 start,而不是复用死驱动);
+    并且**真实原因原样冒泡**(不能被替换成 asyncio 那句)。
+    """
+    calls: list[str] = []
+
+    class _FakeChromium:
+        def launch_persistent_context(self, **kw):
+            calls.append(kw.get("channel") or "chromium")
+            raise RuntimeError("Executable doesn't exist at /root/.cache/ms-playwright/x")
+
+    class _FakePW:
+        chromium = _FakeChromium()
+
+        def start(self):
+            return self
+
+        def stop(self):
+            calls.append("stopped")
+
+    class _FakeSync:
+        def start(self):
+            return _FakePW()
+
+    import playwright.sync_api as sync_api
+
+    monkeypatch.setattr(sync_api, "sync_playwright", lambda: _FakeSync())
+    c = xb.XianyuBrowserClient()
+    with pytest.raises(RuntimeError, match="Executable doesn't exist"):
+        c._ensure_page()
+    assert calls[-1] == "stopped", calls            # 驱动被收尾
+    assert c._pw is None, "启动失败必须清掉 _pw,否则下一轮会报 asyncio loop 的假原因"
+    assert c._pg is None and c._ctx is None
+
+    # 第二轮:能重新 start(如果 _pw 没清,真实 Playwright 在这一步就抛 asyncio loop 错)
+    with pytest.raises(RuntimeError, match="Executable doesn't exist"):
+        c._ensure_page()
+    assert calls.count("stopped") == 2
+
+
 def test_idle_close_seconds_default_and_off_switch() -> None:
     """默认 15 分钟;**配 ≤0 = 不关**(退回旧行为,给不想被关的人留后路)。"""
 

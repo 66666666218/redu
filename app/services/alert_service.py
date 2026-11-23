@@ -434,6 +434,17 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
     own_session = db is None
     db = db or get_session_local()()
     sent = 0
+    #: ★★ **2026-11-23**:**本实例不分管的板块,失败记录不该由它报警**。
+    #: 远程(`hotspot`)的库里有一批"用户注册时手点的闲鱼失败"(见 `retry_failed_runs`
+    #: 的护栏注释与 `_kind_allowed`),它按**自己的库**判出「闲鱼 16/16」并推到管理群 ——
+    #: 而闲鱼归本机跑、本机同期是好的。与 `check_health_stalls` 的那道
+    #: `_role_owns` 是同一条道理,只是那边只挡住了"停摆"、漏了"失败告警"。
+    #:
+    #: ⚠️ **归属过滤必须从 `currently_broken` 就开始**,不能只加在 `hits` 循环里:
+    #: 下面"恢复确认"走的是 `currently_broken ^ rows`(对称差),而 `rows` 里含被跳过的
+    #: 板块、`FeishuAlert` 行又可能早就建过了(本仓任何一次历史告警都会留一行) ⇒
+    #: 只在 `hits` 里跳过的话,**每轮都会给一个本机已经好的板块发一条「✅ 采集已恢复」**。
+    from app.services.scheduler import _kind_allowed
     try:
         # 仅当某 (用户,板块) **最近一次运行仍失败**(当前仍断)才告警;
         # 否则中途重试成功过,不算"持续失败"(否则会误报)。
@@ -453,13 +464,17 @@ def check_collect_failures(settings: Settings | None = None, db: Session | None 
             d = detail or ""
             return status in ("skipped", "partial") and ("XianyuVerify" in d or "verify" in d.lower())
 
-        currently_broken = {(uid, kind) for uid, kind, status, detail in latest_rows if _broken(status, detail)}
+        currently_broken = {(uid, kind) for uid, kind, status, detail in latest_rows
+                            if _broken(status, detail) and _kind_allowed(kind, settings)}
 
         rows = db.execute(
             select(RunRecord.user_id, RunRecord.kind, func.count(RunRecord.id))
             .where(RunRecord.status == "failed", RunRecord.started_at >= since)
             .group_by(RunRecord.user_id, RunRecord.kind)
         ).all()
+        #: 同上:先把本实例不管的 kind 整行剔掉 —— 后面 `rows` 还会参与"恢复确认"
+        #: 的对称差,留在里面就会冒出"✅ 已恢复"的假消息。
+        rows = [r for r in rows if _kind_allowed(r[1], settings)]
         hits = []
         for uid, kind, cnt in rows:
             if (uid, kind) not in currently_broken or cnt < threshold:

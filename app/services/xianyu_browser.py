@@ -155,7 +155,19 @@ class XianyuBrowserClient:
                 channel="msedge", executable_path=EDGE, **kwargs)
         except Exception:  # noqa: BLE001
             logger.info("闲鱼浏览器路径:未找到 Edge,改用自带 Chromium")
-            self._ctx = self._pw.chromium.launch_persistent_context(**kwargs)
+            try:
+                self._ctx = self._pw.chromium.launch_persistent_context(**kwargs)
+            except Exception:
+                #: ★★ **2026-11-23**:启动失败必须**清掉 `self._pw`**。
+                #: Playwright 的 sync 对象**每个实例只能 start 一次**:留着那个已启动、
+                #: 但没拿到浏览器的 `_pw`,下一次 `_ensure_page` 再 `sync_playwright().start()`
+                #: 会报 `It looks like you are using Playwright Sync API inside the asyncio loop`
+                #: —— 一句**和真实原因毫无关系**的话。
+                #: 实测后果:远程容器没装浏览器(`Executable doesn't exist`),第二轮起
+                #: 全部变成"asyncio loop"错误 ⇒ 排障方向被彻底带偏(以为是调度器线程问题)。
+                #: 收尾后**原样抛出**:真实原因(没装浏览器/Edge 起不来)必须留在运行记录里。
+                self._shutdown_playwright()
+                raise
         self._pg = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
         # 装钩子:**必须在 goto 之前**,`add_init_script` 保证每次页面加载都先于站点脚本执行
         try:
@@ -175,6 +187,19 @@ class XianyuBrowserClient:
                 pass
             self._pg.wait_for_timeout(1000)
         return self._pg
+
+    def _shutdown_playwright(self) -> None:
+        """只停 Playwright 驱动、保留业务占位(启动失败时的清场)。
+
+        ⚠️ **必须在 `_pw.stop()` 之后把引用置 None** —— 否则下一轮 `_ensure_page` 判定
+        "还是那个已死的驱动",又走回 `start()` 报 asyncio loop 错(本轮事故的形状)。
+        """
+        pw, self._pw = self._pw, None
+        if pw is not None:
+            try:
+                pw.stop()
+            except Exception:  # noqa: BLE001 - 半启动的驱动 stop 会抛,收尾不该冒泡
+                logger.debug("闲鱼 Playwright 驱动停止异常", exc_info=True)
 
     def close(self) -> None:
         for obj, meth in ((self._ctx, "close"), (self._pw, "stop")):

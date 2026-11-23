@@ -58,6 +58,34 @@ def _section_allowed(section: str, settings: Settings) -> bool:
     return cur in ("all", "both") or cur == want
 
 
+#: **运行记录 kind → 板块**。`runs.kind` 比 `user_schedules.section` 细
+#: (`xianyu_deep` / `wechat_listen` / `douyin_leads` …),而**归属判断必须能问到 kind 上** ——
+#: 重试、手动采集、失败告警三处拿到的都是 kind,不是 section。
+_KIND_SECTION = {
+    "weibo": "weibo", "douhot": "douhot", "baidu": "baidu",
+    "xianyu": "xianyu", "xianyu_deep": "xianyu",
+    "wechat": "wechat", "wechat_listen": "wechat", "wechat_sync": "wechat",
+    "douyin_leads": "wechat",       # 与本机 CDP 档案/登录态绑定(见 build_jobs 里的归属注释)
+    "douyin_leads_dagua": "wechat",
+}
+
+
+def _kind_allowed(kind: str, settings: Settings) -> bool:
+    """按**运行记录 kind** 判归属;映射表里没有的 kind 不拦(向后兼容)。
+
+    ★★ **2026-11-23 事故**:远程实例(`SCHEDULER_ROLE=hotspot`)上,`collect_tick` 有护栏、
+    但**重试/手动采集/失败告警都没有** —— 用户 4 于 11-13 20:20 注册后,面板手点了一次闲鱼
+    (`POST /api/collect/xianyu`)失败了,此后 `retry_failed_runs` **每 30 分钟**把它捞出来重跑;
+    而远程**从来没装过 Playwright 浏览器**(Dockerfile 明确"纯 requests,无需浏览器")。
+    于是两台机器上"闲鱼失败 16/16、连续 20 轮"的告警,其实全是**远程在自己跑不该它跑的板块**。
+    判据只有一处(`_SECTION_ROLE`),这里是它面向 kind 的入口,别在调用方各写一份。
+    """
+    section = _KIND_SECTION.get(kind)
+    if section is None:
+        return True
+    return _section_allowed(section, settings)
+
+
 def collect_tick(settings: Settings | None = None, now: datetime | None = None) -> dict:
     """每分钟执行一次:把到期的 (用户, 板块) 采集跑掉。
 

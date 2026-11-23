@@ -616,6 +616,7 @@ def retry_failed_runs(max_retry: int = 3) -> dict:
 
     from config.settings import get_settings
     from app.db import get_session_local
+    from app.services.scheduler import _kind_allowed
 
     settings = get_settings()
     db = get_session_local()()
@@ -669,6 +670,16 @@ def retry_failed_runs(max_retry: int = 3) -> dict:
         for run in recent:
             runner = runners.get(run.kind)
             if not runner:
+                continue
+            if not _kind_allowed(run.kind, settings):
+                #: ★★ **2026-11-23**:本实例不分管的板块**不许重试**。
+                #: 起因:远程(`hotspot`)上用户 4/5 的闲鱼失败被这里每 30 分钟重跑一次,
+                #: 而远程根本没装浏览器 ⇒ 一条"注册时手点失败"的记录变成永不停止的失败源,
+                #: 还每轮刷一条"采集持续失败"告警。`collect_tick` 早有这道护栏(见
+                #: `_SECTION_ROLE`),重试路是漏掉的那一半 —— **重试也是采集**,同样得问归属。
+                #: 不标 recovered(它在本机仍可能失败),保持原状等本机自己的调度。
+                logger.info("重试跳过:%s 不属于本实例(角色=%s)", run.kind,
+                            getattr(settings, "scheduler_role", "all"))
                 continue
             if run.kind == "douyin_leads" and _douyin_risk_control_failure(run):
                 #: ★ 2026-10-19:风控/空结果失败**永不自动重试** —— 重试会消耗

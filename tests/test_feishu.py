@@ -44,6 +44,11 @@ def _settings(**kw):
 
     return Settings(
         _env_file=None,
+        #: ⚠️ **钉成 `all`**(2026-11-23):`Settings` 除了读 `.env` 还会读**进程环境变量**,
+        #: 而这些用例测的是告警逻辑、不是部署分工。不钉的话,开发机 `SCHEDULER_ROLE=wechat`
+        #: 会让 `douhot` 样本被归属护栏静默过滤 ⇒ 同一份代码在开发机红、在 CI 绿。
+        #: 归属本身由 `test_collect_failures_skips_kinds_this_role_does_not_run` 显式覆盖。
+        scheduler_role=kw.pop("scheduler_role", "all"),
         feishu_webhook=kw.pop("feishu_webhook", "https://open.feishu.cn/open-apis/bot/v2/hook/test"),
         feishu_secret=SECRET,
         feishu_hot_rank_jump=3,
@@ -72,6 +77,46 @@ def test_webhooks_for_additive_main_and_group() -> None:
     assert webhooks_for(s, "xianyu") == ["main", "xy"]   # 主群 + 专属群
     assert webhooks_for(s, "douhot") == ["main"]         # 未配抖音专属 → 仅主群
     assert webhooks_for(s, "") == ["main"]               # 无板块 → 主群
+
+
+def test_collect_failures_skips_kinds_this_role_does_not_run(monkeypatch, session) -> None:
+    """★★ **2026-11-23**:本实例不跑的板块,它的失败**不该由这里报警**。
+
+    现场:远程(`hotspot`)库里有一批"用户注册时手点的闲鱼失败"(远程没装浏览器),
+    它按自己的库报出「闲鱼 16/16、连续 20 轮」推到管理群 —— 而闲鱼归本机跑、同期是好的。
+    与 `check_health_stalls` 的 `_role_owns` 同源;那边只挡了"停摆",这条补上"失败告警"。
+
+    ⚠️ **还要钉住"恢复确认"不会冒出来**:`currently_broken ^ rows` 是对称差,
+    若只把归属判断加在 `hits` 循环里,历史 `FeishuAlert` 行会让这条每轮发一条
+    「✅ 采集已恢复」的假消息。所以下面先塞一行历史告警,断言一条都不发。
+    """
+    from datetime import datetime, timedelta
+
+    from app.db.models import RunRecord
+    from app.services import alert_service
+
+    for i in range(3):
+        session.add(RunRecord(user_id=1, run_id=f"r{i}", kind="xianyu", status="failed",
+                              started_at=datetime.now() - timedelta(hours=i)))
+    session.add(FeishuAlert(section="collect_fail", user_id=1, title="xianyu",
+                            reason="历史告警", alerted_at=datetime.now() - timedelta(hours=12)))
+    session.commit()
+
+    sent: list[str] = []
+    monkeypatch.setattr(
+        feishu_client, "FeishuClient",
+        lambda w, s: type("F", (), {"send": lambda self, t: (sent.append(t), True)[1]})())
+
+    n = alert_service.check_collect_failures(
+        _settings(feishu_webhook_admin="admin", scheduler_role="hotspot"), db=session)
+    assert n == 0, f"远程不该报闲鱼的失败:{sent}"
+    assert sent == [], f"也不该冒出「✅ 已恢复」的假消息:{sent}"
+
+    # 同一份数据,本机角色下**该报**(别把真故障一起静音)
+    sent.clear()
+    n = alert_service.check_collect_failures(
+        _settings(feishu_webhook_admin="admin", scheduler_role="wechat"), db=session)
+    assert n == 1 and sent and "xianyu" in sent[0], f"本机角色该报:{sent}"
 
 
 def test_collect_failures_sends_when_only_admin_hook(monkeypatch, session) -> None:
