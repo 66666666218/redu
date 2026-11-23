@@ -36,6 +36,24 @@ def _isolate_credentials(monkeypatch, tmp_path) -> None:
     from app.services import xhs_accounts as pool
 
     monkeypatch.setattr(pool, "_root", lambda: tmp_path)
+    #: ★★ **账号池状态也要每例清一次**(2026-10-21)。
+    #: 池的冷却/可用状态存在 `SystemConfig(key=xhs_account_pool)` 里 —— 以前
+    #: `DATABASE_URL=sqlite://` 建引擎会直接 TypeError(内存库不接受 `max_overflow`),
+    #: 于是这类写**永远失败**,用例"碰巧"互不干扰;引擎修好后状态真的落库了,
+    #: 前一条用例标成 guest/冷却的号会让后一条走进「全在冷却中」——
+    #: 与它要测的错误分支无关。**与 `_reset_source_breaker` 同一条教训:
+    #: 只在特定顺序下才成立的测试,等于没测。**
+    try:
+        from sqlalchemy import delete
+
+        from app.db import get_session_local
+        from app.db.models import SystemConfig
+
+        with get_session_local()() as db:
+            db.execute(delete(SystemConfig).where(SystemConfig.key == pool._KEY))
+            db.commit()
+    except Exception:  # noqa: BLE001 - 库不可用(比如没建表)就不清,别让隔离本身变红
+        pass
 
 
 class _S:

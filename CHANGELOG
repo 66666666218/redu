@@ -1,3 +1,31 @@
+- [2026-11-23 15:44] FIX: **从落后分支捡回 4 处「静默失败/长写锁」修复**(10-21 那批在
+  `fix-sqlite-lock-and-transient-retry` 上验证过,但从未合入 main,183 个提交后 main 仍缺)。
+  逐条都是「看起来成功、实际什么都没做」或「把锁抱过整批网络调用」:
+  · `commit_with_lock_report` 撞锁后 `rollback()` 会**丢掉待提交的写**,原实现紧接着再
+    commit 并打印「重试成功」—— **提交的是空事务**。新增 `redo` 参数:有 `redo` 就回滚后
+    重建再提交;有待写却没给 `redo` ⇒ **照实抛**,不许伪装成功;
+  · `resource_presence` 调用点补 `redo=`,否则上面那条新守卫会让它的运行记录直接失败;
+  · `xunlei_cleanup.run_cleanup` 每删一条就 `commit()`,并在循环前先交掉 `plan()` 留下的
+    读事务(实测这一处把 SQLite 写锁**抱了 156.4 秒**,别人等满 30 秒成批
+    `database is locked`);单条失败时补 `rollback()`,避免会话进入待回滚态后
+    后续每条都 `PendingRollbackError`;
+  · `xunlei_transfer` 新增 `_with_transient_retry`:只对 `HTTP 5xx` / `ConnectionError` /
+    `Timeout` 退避重试(默认 3 次),401/403/业务错**一次就抛**(实测 `xunlei_sync` 近 3 天
+    有 21 轮因**一次** `ConnectionResetError(10054)` 整轮判 failed);
+  · `wechat/_enrich` 补转存队列查询套 `savepoint`,异常时按空处理并回滚;
+  · `platform.py` 的 `docs_url` 补前导斜杠 —— Starlette 的 `add_route` 断言
+    `path.startswith("/")`,源码里写 `"docs"` 会在 `create_app()` 直接
+    `AssertionError`(`IS_DEV` 默认 true ⇒ 新部署必然撞上);
+  · `app/db/database.py` 新增 `_is_memory_sqlite`:内存库用 `SingletonThreadPool`,
+    不接受 `max_overflow`,`init_db()` 连建表都做不到(测试/临时部署起不来服务)。
+  测试:`test_db_write_tx_watchdog.py`(+3)、`test_xunlei_cleanup.py`(+1)、
+  `test_xunlei_pagination.py`(+3)、`test_wechat_enrich_durability.py`(+1)、
+  `test_xhs_protocol.py`(账号池状态每例清理,修好内存库后状态真的落库了,不清会串例)。
+  (Files: app/db/database.py, app/services/xunlei_cleanup.py, app/services/xunlei_transfer.py,
+  app/services/wechat/_enrich.py, app/services/resource_presence.py, app/platform.py,
+  tests/test_db_write_tx_watchdog.py, tests/test_xunlei_cleanup.py,
+  tests/test_xunlei_pagination.py, tests/test_wechat_enrich_durability.py,
+  tests/test_xhs_protocol.py)
 - [2026-11-23 15:05] FEAT: **盘满时跳过转存、直接推源链**(用户口径「内存不足时不转存直接推送」)。
   实测 11-19 起连续 5 天转存 0、积压 145→327,其中 **326 条**的理由是「空间不足」
   (百度超额 43 倍 243 / 夸克两号全满 51 / 迅雷 32)—— 这些链**本身是好的、客户点开就能拿**,
