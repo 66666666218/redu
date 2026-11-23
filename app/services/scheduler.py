@@ -615,15 +615,18 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # 为什么:6 类 × `10 */4` ⇒ 每类每天只轮到 **1** 次,而吃瓜事件是**小时级**的 ——
         # `麦穗与羊` 凌晨 01:10 起量、我们 12:12 才搜(晚 11h);`大美与高迪` 公众号
         # 11-14 就在传、抖音 11-18 12:12 才首次搜。详见 `douyin_leads_dagua_tick`。
-        # 取 **01:24 / 09:24**:凌晨那轮接住当晚起量的事件,早间那轮接隔夜第二波。
+        # ★★ **2026-11-23 降频:只留 `09:24`**(建制时是 `01:24 / 09:24`)。
+        # 依据:20 轮实测「新群0」20/20;01 时那轮凡有读数都读到**前一日的 01:2x**
+        # ⇒ 搜回来的是同一批 24 小时前的内容,首见权早被白天那轮拿走。
+        # 详见 `config/settings.py` 的 `douyin_leads_dagua_cron` 注释。
         # ⚠️ `advance=False` + `category="大瓜"` 是这条作业的全部意义,别改成走轮换。
-        # ⚠️ 与 `douyin_leads` 共用 CDP 登录态/额度 ⇒ 只取 2 轮;冷却与探针节流共用
+        # ⚠️ 与 `douyin_leads` 共用 CDP 登录态/额度;冷却与探针节流共用
         #    (`_browser_probe_allowed`),所以风控期不会两条轮各撞一次。
         # `:24` 已用真实触发器枚举确认是空闲分钟(`test_job_stagger` 守着)。
         # ⚠️ 关掉它的方式是 `douyin_leads_dagua_cron=""`,由 `douyin_leads_dagua_tick`
         #    内部拦(`_cron_trigger` 对空串会回退到 default,注册侧拦不住)。
         (douyin_leads_dagua_tick, _get_settings().douyin_leads_dagua_cron,
-         {"minute": 24, "hour": "1,9"}, "douyin_leads_dagua", "wechat"),
+         {"minute": 24, "hour": "9"}, "douyin_leads_dagua", "wechat"),
         # ★ **抖音对标号监控**(2026-10-29,用户口径「有很多小游戏的对标账号,他们发了你就能看到」):
         # 按 **sec_uid** 打开主页看新作品 —— 只推"没见过"的 vid(首次扫描只建基线)。
         # ⚠️ 必须与 `douyin_leads` **同侧**(都用本机那个 CDP 浏览器/登录态),且错开 :10。

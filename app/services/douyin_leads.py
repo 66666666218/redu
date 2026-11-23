@@ -2551,7 +2551,9 @@ def douyin_leads_dagua_tick(settings=None) -> int:
        `_cron_trigger` 对空/非法表达式会回退到 default 触发器(那是为了"别造出死作业"),
        所以注册侧拦不住空串 —— 只剩这里能拦住。
     ⚠️ 与主轮**共用登录态与额度**(同一个 CDP 浏览器档案);
-       每多一轮 = 多 8 次搜索,风控暴露随之上升 —— 这就是只取 2 轮、不取 `*/4` 的原因。
+       每多一轮 = 多 8 次搜索,风控暴露随之上升。
+       ★ 2026-11-23 起**每天只留 `09:24` 一轮**(原 `01:24 / 09:24`)——
+       20 轮实测「新群0」20/20,01 时那轮读到的总是**前一日的 01:2x**(重复劳动)。
     """
     from config.settings import get_settings
     from app.db import get_session_local

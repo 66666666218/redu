@@ -148,6 +148,31 @@ def test_守卫本身不能是空跑() -> None:
     assert "wechat_collect_tick" in fixed
 
 
+def test_大瓜专轮每天只跑一轮() -> None:
+    """★ **大瓜专轮一天只许一轮**(2026-11-23 降频)。
+
+    ## 为什么钉这个
+    建制时是 `01:24 / 09:24` 两轮,理由是"凌晨起量高峰"。建成后 **20 轮实测**:
+      · 「新群0」**20/20 全中**,产量本来就低;
+      · 01 时那轮凡有「新鲜最新」读数,读到的都是**前一日的 01:2x**
+        (11-23→11-22 01:25、11-19→11-18 01:24)⇒ 它搜回来的是**同一批 24 小时前
+        的内容**,首见权早被白天那轮拿走;
+      · 09 时那轮读到的是 10~12 小时内的内容,明显更新鲜。
+    ⇒ 砍掉 01:24。这条守卫防的是"以后又觉得凌晨该有一轮"而把它加回去 ——
+    加回去之前请先拿出"01 点那轮捞到了白天那轮没捞到的东西"的实测证据。
+
+    ⚠️ 从 `build_jobs` 的真实触发器算(不是读配置字符串)—— 那才是事实源,
+    理由见模块开头那次"查配置得出无撞车、实际 4 处撞车"的教训。
+    """
+    sched = BackgroundScheduler(timezone="Asia/Shanghai")
+    build_jobs(sched)
+    job = next(j for j in sched.get_jobs() if j.id == "douyin_leads_dagua")
+    slots = _slots(job)
+    assert len(slots) == 7, f"大瓜专轮不是每天一轮:{sorted(slots)}"
+    hours = {h for _, h, _ in slots}
+    assert hours == {9}, f"大瓜专轮只该在 09 时跑,实际 {sorted(hours)}"
+
+
 def test_定点作业不落在半小时网格上() -> None:
     """★ **`:00` 与 `:30` 是 `auto_retry_failed_runs` 和三条告警 tick 的地盘**,别的作业让开。
 
