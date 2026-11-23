@@ -173,6 +173,11 @@ def ensure_all_users(db: Session) -> int:
 
     调度器每轮开头调用:新注册用户、以及本功能上线前的老用户,都能自动纳入定时采集,
     不必等他们打开一次设置页。
+
+    ⚠️ **2026-11-23**:这里**故意不按角色关掉**不归本实例的板块。本实例跑不跑,
+    判据在 `scheduler._section_allowed`(`collect_tick`)与 `_kind_allowed`
+    (重试/手动采集/失败告警),那才是唯一事实源。此处若也按角色把 `enabled` 写死,
+    一旦部署换角色(或本机手工放开某板块),旧行永远停在 `enabled=0`,反而更难查。
     """
     user_ids = db.scalars(select(User.id)).all()
     existing = {tuple(r) for r in db.execute(select(UserSchedule.user_id, UserSchedule.section)).all()}
