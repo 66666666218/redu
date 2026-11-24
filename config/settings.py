@@ -456,6 +456,36 @@ class Settings(BaseSettings):
     #: 也不撞 `quark_link_pull`(`41 */2`,它持有夸克凭据、是重活,别跟它抢),
     #: 更不落 `:00/:30` 网格(`test_job_stagger` 是硬守卫)。
     promo_forecast_cron: str = "37 * * * *"
+    # ---- **破圈前预警**(2026-11-24)----
+    # 用户口径:「热点**刚破圈 / 马上就要破圈的前夕 / 还没有同行入局**的时候能抓吗 ——
+    # 就像《斗破苍穹》几个小时到顶;等同行都一起发的时候再跟风往往就晚了」。
+    # 与 `promo_forecast` 的区别(别合成一条):
+    #   promo_forecast 问「已经很多人在推的东西值不值得搬」(24h 攒 4 人 = 跟风最优解);
+    #   本条问「**还没人推**的东西是不是马上要炸」(先手)。判据出处见
+    #   `app/services/hot_breakout.py` 头注(15 天真实库回放:A 档 2.1 条/天全真作品、
+    #   B 档 6.6 条/天;斗破 11-22 11:05 那条精确命中,当时库内同行 0 人)。
+    hot_breakout_enabled: bool = True
+    #: ⚠️ 时刻 **:42** —— 必须在 `remote_pull`(`:26`,数据从远程拉回来)**之后**,
+    #: 否则读的是上一小时的快照;且不落 `:00/:30` 网格、不与任何定点作业同分钟
+    #: (`test_job_stagger` 是硬守卫,已用真实触发器枚举确认)。
+    hot_breakout_cron: str = "42 * * * *"
+    #: 逗号分隔;空 = 用 `hot_breakout.CONTENT_SOURCES` 那份常量(排除财经/时政线)
+    hot_breakout_content_sources: str = ""
+    hot_breakout_rank_top: int = 15          # 只对**起势档**生效(预告稿常常不在榜首)
+    hot_breakout_first_hours: float = 6      # 「新」的判据:首见距今多久以内
+    hot_breakout_lookback_hours: float = 12  # 看多远的快照来取"当前名次"
+    #: 「首见」的观察窗口,必须**远长于** `first_hours`。**7 天不是随手写的**:
+    #: 资源会反复进出榜(`影之刃零` 11-18 进 → 掉出 → 11-20 又进);用 12h 窗口算首见,
+    #: 第二次就成"全新的" ⇒ 两天为同一个资源发两张「刚起势」卡(回放实测过)。
+    #: 与 `promo_forecast` 的 `history_days` 是同一条纪律。
+    hot_breakout_history_hours: float = 168
+    #: 「同行入局」的观察窗口。**24h 不是 7 天**:斗破 @11-22 11:05 用 7 天窗口是 4 人
+    #: (含 11-18 的完结感慨),24h 窗口是 0 人 —— 后者才是「此刻还有人在推」。
+    hot_breakout_peer_hours: float = 24
+    hot_breakout_max_peer_authors: int = 1
+    hot_breakout_top: int = 5
+    #: 48h:一个作品从预告到起势通常一两天内走完,过了就没先手价值
+    hot_breakout_cooldown_hours: int = 48
     remote_sync_days: int = 14         # 每次回看多少天(靠天然键去重,天然幂等)
 
     candidate_auto_import_cron: str = "35 8 * * *"  # 每日自动收录时间(默认 08:30,紧随候选发现之后)

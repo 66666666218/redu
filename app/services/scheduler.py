@@ -502,6 +502,9 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     #: 那边是「**刚刚**有没有更多人加入」(3h 窗口和上一窗口比增量),
     #: 这边是「这个新资源**头 24h** 攒到几个人」(绝对人数,与回测同一阈值)。
     from app.services.promo_forecast import promo_forecast_tick
+    #: ★ **破圈前预警**(2026-11-24):用户口径「**还没同行入局**时就把热点抓出来」。
+    #: 与 `promo_forecast` 正好相反:那条要「已经 4 个人在推」,这条要「还没人推」。
+    from app.services.hot_breakout import hot_breakout_tick
     from app.services.link_audit import link_audit_tick
     from app.services.push_timeline import tick as push_timeline_tick
     from app.services.telegram_source import collect_tick as tg_collect_tick
@@ -727,6 +730,17 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         #    `:41` 被 `quark_link_pull`(`41 */2`,持夸克凭据的重活)占着。
         (promo_forecast_tick, _get_settings().promo_forecast_cron,
          {"minute": 37}, "promo_forecast", "wechat"),
+        # ★ **破圈前预警**(2026-11-24):「**还没同行入局**时就把热点抓出来」。
+        # 用户口径:「热点刚破圈 / 马上就要破圈的前夕 / 还没人发的时候能抓吗 ——
+        #    等同行都一起发的时候再跟风往往就晚了」。
+        # ⚠️ 与上面 `promo_forecast` **不是一件事,别合并**:那条要**4 个推手**
+        #    (同行已入局 = 跟风信号),这条要**没推手**(先手);两档冷却各一把锁。
+        # ⚠️ 角色 **wechat**:读本机 `hot_source_items`(由 `remote_pull` `:26` 镜像回来)
+        #    + 本机写的 `push_ledger` / `wechat_articles`。
+        # ⚠️ 时刻 `:42` —— **必须在 `remote_pull`(`:26`)之后**,否则读的是上一小时快照;
+        #    已用真实触发器枚举确认不与任何定点作业同分钟。
+        (hot_breakout_tick, _get_settings().hot_breakout_cron,
+         {"minute": 42}, "hot_breakout", "wechat"),
         # **链接体检**(2026-10-16):抽样探活我方分享链 + 判"货不对版/空分享"。
         # ⚠️ 为什么要有它:首轮实测 75 条里 **货不对版 14 / 空分享 10** —— 这两种**都会打到
         #   客户脸上**(点开拿到别的资源 / 点开是空的),而在此之前**没有任何一行报告看它们**
