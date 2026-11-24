@@ -432,7 +432,11 @@ ADDITIONS: dict[str, list[str]] = {
     # 存量行默认 douyin —— 它们确实都是抖音扫出来的。
     "demand_scans": ["platform VARCHAR(16) DEFAULT 'douyin'",
                      "has_group BOOLEAN DEFAULT 0",
-                     "topic_ok BOOLEAN DEFAULT 1"],
+                     "topic_ok BOOLEAN DEFAULT 1",
+                     # `publish_at`(2026-11-24):**这条素材的发布时间**。存量行 NULL =
+                     # 当时没记(不许拿 `scanned_at` 顶 —— 那正是把老货当新货的根因,
+                     # 与 `douyin_peer_works.publish_at` 同一口径)。
+                     "publish_at DATETIME"],
     # 推送台账的**判重身份**(2026-11-19):`pan_url` 只记我方链(日结的「资源」列要客户能点),
     # 而判重需要的是"同一份资源"这个身份。实测我方链**不唯一标识资源**:310 条里 67 条
     # (21.6%)挂着 >1 个不同源链(`7728b469a574` 资源库登记「儿童涂色填色模板大全」,

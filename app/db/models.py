@@ -1280,6 +1280,12 @@ class DemandScan(Base):
     topic_ok: Mapped[bool] = mapped_column(Boolean, default=True)
     why: Mapped[str] = mapped_column(String(32), default="")        # 求/1密度 | 重复评论
     name: Mapped[str] = mapped_column(String(128), default="")      # 取到的名字(可能空)
+    #: ★★ **这条视频的发布时间**(2026-11-24,用户「有的大瓜已经是很久之前的了」)。
+    #: 加它之前这张表只有 `scanned_at`(我们扫它的时刻),于是「这条素材有多老」
+    #: **在库里查不出来** —— 而正是这个缺口让三年前的老视频被反复当新素材扫。
+    #: 取值优先级:`publish_at`(协议 `create_time`)→ 抖音雪花 id 高位 `int(aweme_id)>>32`。
+    #: `None` = 两个来源都判不了(要在汇总里显形,不许静默当"新鲜")。
+    publish_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     scanned_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
 
 

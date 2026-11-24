@@ -59,13 +59,27 @@ def _connect():
 
 
 def search_notes(page, keyword: str, limit: int = 2) -> list[dict]:
-    """搜一个词 → 前 `limit` 篇笔记(带 `xsec_token`)。"""
+    """搜一个词 → 前 `limit` 篇笔记(带 `xsec_token` 与**发布时间**)。
+
+    ★ **`published`(2026-11-24)**:用户投诉「有的大瓜已经是很久之前的了」,而这条链
+    此前**连发布时间都没取** ⇒ 无从过滤。取值点按实测可靠性排:
+      ① `noteCard.time`(毫秒时间戳,搜索结果里就有);
+      ② `noteCard.lastUpdateTime`(同单位);
+      ③ 拿不到 = `0`(由调用方按"判不了"处理并**计数显形**,不静默当"新鲜")。
+    ⚠️ 单位统一在这里化到**秒**:小红书给的是毫秒,原样丢出去会在渲染时间时炸
+    (`publish_mark` 有毫秒兜底,但判新旧用的是 `datetime.fromtimestamp`,必须自己转)。
+    """
     page.goto(SEARCH_URL.format(kw=keyword), wait_until="domcontentloaded", timeout=60000)
     page.wait_for_timeout(4000)
     rows = page.evaluate("""() => {
       const s = window.__INITIAL_STATE__ || {};
       const feeds = (s.search || {}).feeds || {};
       const arr = feeds._rawValue || feeds.value || [];
+      const toSec = (v) => {
+        const n = parseInt(v, 10);
+        if (!n || n <= 0) return 0;
+        return n > 100000000000 ? Math.floor(n / 1000) : n;
+      };
       return arr.map(it => {
         const card = it.noteCard || it.note || {};
         const user = card.user || it.user || {};
@@ -73,7 +87,8 @@ def search_notes(page, keyword: str, limit: int = 2) -> list[dict]:
         return {id: card.noteId || it.id, token: it.xsecToken || card.xsecToken || '',
                 title: (card.displayTitle || it.displayTitle || '').slice(0, 80),
                 author: user.nickname || user.nickName || '',
-                comments: parseInt(it0.commentCount || '0', 10) || 0};
+                comments: parseInt(it0.commentCount || '0', 10) || 0,
+                published: toSec(card.time || it.time || card.lastUpdateTime || it.lastUpdateTime)};
       }).filter(x => x.id);
     }""")
     #: ★ 2026-10-30:搜索结果里**直接带 `commentCount`** ⇒ 按评论数从多到少开,

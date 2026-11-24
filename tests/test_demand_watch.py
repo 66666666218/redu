@@ -50,6 +50,15 @@ class _S:
     demand_min_ones = 20
     demand_push_cooldown_hours = 48
     demand_push_limit = 10
+    #: ⚠️ **替身里默认关掉发布时间闸**(`demand_max_age_days = 0`),而生产是 **3 天**。
+    #: 原因是这组用例的 aweme_id 全是 `111`/`999` 这种假 id —— 没有雪花高位、也没带
+    #: `create_time` ⇒ 一律"判不了时间",闸一开就会把它们全挡掉,**测的就不再是原来的东西**。
+    #: 闸本身由 `test_发布时间闸_*` 那组用例**自己打开**并用真的 19 位雪花 id 验证。
+    #: (生产默认值的守卫在 `test_生产默认值_发布时间闸是开着的`。)
+    demand_max_age_days = 0
+    demand_source_max_age_days = 0
+    demand_age_allow_unknown = False
+    demand_name_max_age_days = 0
     feishu_webhook = ""
     feishu_webhook_douyin = ""
     feishu_secret = ""
@@ -1239,3 +1248,249 @@ def test_过了窗口的老事件要沉下去(session) -> None:
     _wa(session, "深夜大瓜!大美与高迪视频【完整版】", "甲", 80)
     _wa(session, "大美与高迪出轨聊天记录曝光", "乙", 70)
     assert dw.wechat_event_names(session, 1, top=3, hours=48, settings=_S()) == 0
+
+
+# ------------------------------------------------ 内容发布时间闸(2026-11-24)
+#: 用户口径:「我们大瓜监测内容已经能监测到了但是就差新鲜度了有的大瓜已经是很久之前的了」
+#: 这一组钉三件事:
+#:   ① 判新旧用**作品发布时间**,不是 `found_at`/`first_seen_at`(我们抓到的时刻);
+#:   ② 判不了时间**默认不放行**,而且必须计数显形(不许静默当"新鲜");
+#:   ③ 卡片上要**看得见时间**,否则客户只能看到「求 12 · 扣1 30」。
+
+def _snow(ts: int) -> str:
+    """造一个"发布时间 = ts"的抖音 aweme_id(雪花高位就是 Unix 秒,与真实 id 同构)。"""
+    return str((int(ts) << 32) | 0x5A5A)
+
+
+def _age_s(now_days_ago: float) -> int:
+    return int((datetime.now() - timedelta(days=now_days_ago)).timestamp())
+
+
+class _SA(_S):
+    """打开发布时间闸的替身(生产口径:3 天,判不了不放行)。"""
+    demand_max_age_days = 3
+    demand_source_max_age_days = 3
+    demand_age_allow_unknown = False
+
+
+def test_雪花高位就是发布时间_与_create_time_同量级():
+    ts = _age_s(2)
+    assert abs(dw.publish_ts_of(_snow(ts)) - ts) <= 1
+
+
+def test_create_time优先于雪花高位():
+    ts = _age_s(1)
+    assert dw.publish_ts_of(_snow(ts), declared=1700000000) == 1700000000
+
+
+def test_位数不对的id不许当时间用():
+    """`111` 只有 3 位 —— 拿高位当时间会算出 1970 年前后,那是假新鲜度。"""
+    assert dw.publish_ts_of("111") == 0
+    assert dw.publish_ts_of("") == 0
+    assert dw.publish_ts_of(None) == 0
+
+
+def test_三年前的老视频进不了素材池(session):
+    """实测根因:`金智秀flower` 的 aweme 是 2023-04-10,被推了 9 次。"""
+    from app.db.models import DouyinLead
+
+    old = _snow(_age_s(1300))
+    session.add(DouyinLead(user_id=1, aweme_id=old, title="《金智秀flower》",
+                           author="a", url="https://www.douyin.com/video/" + old,
+                           found_at=datetime.now(), found_date="2026-11-24"))
+    session.commit()
+
+    stats = {}
+    vids = dw.source_videos(session, 1, _SA(), stats=stats)
+    assert vids == []
+    assert stats["stale"] == 1
+
+
+def test_近几天的新视频照常进池(session):
+    from app.db.models import DouyinLead
+
+    new = _snow(_age_s(1))
+    session.add(DouyinLead(user_id=1, aweme_id=new, title="《新瓜》",
+                           author="a", url="https://www.douyin.com/video/" + new,
+                           found_at=datetime.now(), found_date="2026-11-24"))
+    session.commit()
+
+    stats = {}
+    vids = dw.source_videos(session, 1, _SA(), stats=stats)
+    assert [v["aweme_id"] for v in vids] == [new]
+    assert stats.get("stale", 0) == 0
+
+
+def test_判不了时间默认不放行_而且要计数显形(session):
+    """`allow_unknown=False` ⇒ 没有 create_time、也不是 19 位雪花 id 的素材不扫。
+    ⚠️ 必须留下 `unknown` 计数 —— 否则"闸门挡了全部"和"今天没素材"长得一样。"""
+    from app.db.models import DouyinLead
+
+    session.add(DouyinLead(user_id=1, aweme_id="111", title="《来路不明》",
+                           author="a", url="https://www.douyin.com/video/111",
+                           found_at=datetime.now(), found_date="2026-11-24"))
+    session.commit()
+
+    stats = {}
+    vids = dw.source_videos(session, 1, _SA(), stats=stats)
+    assert vids == []
+    assert stats["unknown"] == 1
+
+
+def test_同一条老货同时在线索表和对标号表只算一次(session):
+    """两表都命中同一条时,`老N` 不许虚高 —— `_add` 里 `seen` 必须**先记**再判新鲜。"""
+    from app.db.models import DouyinLead, DouyinPeerWork
+
+    old = _snow(_age_s(500))
+    session.add(DouyinLead(user_id=1, aweme_id=old, title="《老货》", author="a",
+                           url="u", found_at=datetime.now(), found_date="2026-11-24"))
+    session.add(DouyinPeerWork(user_id=1, aweme_id=old, account_uid="x",
+                               account_name="甲", title="《老货》", url="u",
+                               first_seen_at=datetime.now()))
+    session.commit()
+
+    stats = {}
+    dw.source_videos(session, 1, _SA(), stats=stats)
+    assert stats["stale"] == 1
+
+
+def test_闸门关掉时无时间也放行_窗口0():
+    """`demand_max_age_days=0` = 整道闸关(退回旧行为)。"""
+    from app.db.models import DouyinLead
+
+    #: 用一次单独构造的会话,免得和别的用例抢行
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+    db.add(User(id=1, username="u1", email="u1@b.c", password_hash="x", enabled=True))
+    db.add(DouyinLead(user_id=1, aweme_id="111", title="《来路不明》", author="a",
+                      url="u", found_at=datetime.now(), found_date="2026-11-24"))
+    db.commit()
+
+    stats = {}
+    vids = dw.source_videos(db, 1, _S(), stats=stats)   #: `_S` 的窗口是 0
+    assert [v["aweme_id"] for v in vids] == ["111"]
+    assert stats.get("unknown", 0) == 0
+    db.close()
+
+
+def test_run_user把发布时间写进运行记录(session, monkeypatch):
+    """拦下的条数不进 `runs` ⇒ 闸门把素材全挡了,看起来和"今天没素材"一模一样。"""
+    from app.db.models import DouyinLead
+    from app.db.models import RunRecord
+
+    old = _snow(_age_s(900))
+    session.add(DouyinLead(user_id=1, aweme_id=old, title="《老货》", author="a",
+                           url="u", found_at=datetime.now(), found_date="2026-11-24"))
+    session.commit()
+
+    dw.run_user(session, 1, _SA())
+    row = session.query(RunRecord).filter(
+        RunRecord.kind == "demand_watch").order_by(RunRecord.id.desc()).first()
+    assert "拦:老1" in (row.detail or "")
+
+
+def test_求1型卡片上带发布时间(session):
+    """用户投诉的就是"很久之前的",卡片上必须一眼可见。"""
+    ts = _age_s(1)
+    card = dw.build_request_card([{
+        "name": "狗爹和小桃", "desc": "扣1看", "author": "甲", "url": "https://x/1",
+        "why": "求/1密度", "demand": 3, "ones": 20, "total": 60, "publish_at": ts}])
+    body = card["elements"][0]["text"]["content"]
+    assert f"{datetime.fromtimestamp(ts):%m-%d}" in body
+
+
+def test_求1型卡片没有时间时不留占位符(session):
+    """拿不到时间就**不写**,别摆一列「—」(那会被读成别的东西)。"""
+    card = dw.build_request_card([{
+        "name": "狗爹和小桃", "desc": "", "author": "甲", "url": "https://x/1",
+        "why": "求/1密度", "demand": 3, "ones": 20, "total": 60, "publish_at": 0}])
+    body = card["elements"][0]["text"]["content"]
+    #: 拆行首的「**名字** — 」那个破折号是**分隔符**(每行都有),不是时间占位符。
+    time_part = body.split(" · 求/1密度", 1)[1]
+    assert "—" not in time_part
+
+
+# ------------------------------------------------- 名字凉了就不再推(同一族)
+
+def test_三天没被提起的名字不再推(session):
+    """实测:`七夕` 11-04 最后一次被见到,11-24 12:50 还在推。"""
+    session.add(DemandName(user_id=1, platform="douyin", name="七夕",
+                           demand_hits=5, last_seen_at=datetime.now() - timedelta(days=20)))
+    session.add(DemandName(user_id=1, platform="douyin", name="在传的",
+                           demand_hits=5, last_seen_at=datetime.now() - timedelta(hours=2)))
+    session.commit()
+
+    dropped = {}
+    chosen = dw.pick_pushable(session.query(DemandName).all(), min_demand=2,
+                              cooldown_hours=48, limit=10, max_age_days=3, dropped=dropped)
+    assert [r.name for r in chosen] == ["在传的"]
+    assert dropped["name_stale"] == 1
+
+
+def test_名字新鲜度闸关掉时照旧推_窗口0():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+    db.add(DemandName(user_id=1, platform="douyin", name="七夕", demand_hits=5,
+                      last_seen_at=datetime.now() - timedelta(days=20)))
+    db.commit()
+    assert [r.name for r in dw.pick_pushable(db.query(DemandName).all(), min_demand=2,
+                                             cooldown_hours=48, limit=10, max_age_days=0)] \
+        == ["七夕"]
+    db.close()
+
+
+# ------------------------------------------------- 生产默认值守卫
+
+def test_生产默认值_发布时间闸是开着的():
+    """⚠️ 测试替身把闸关了(假 id 判不了时间);**生产默认必须开着**,否则这次改动等于没做。"""
+    from config.settings import Settings
+
+    s = Settings()
+    assert s.demand_max_age_days == 7
+    assert s.demand_age_allow_unknown is False
+    assert s.demand_name_max_age_days == 3
+    assert s.demand_xhs_max_age_days == 3
+
+
+def test_最新大瓜_判不了发布时间的作品不推(session, monkeypatch):
+    """⚠️ 原写法 `if it["publish_at"] and ...` 是"判不了就放行" —— 主页接口少给
+    `create_time` 时,几个月前的老作品会被当成「最新的大瓜」推出去(用户投诉的就是这张卡)。"""
+    class S(_S):
+        demand_seed_words = "狗爹和小桃"
+        demand_latest_days = 3
+        demand_latest_authors = 1
+        demand_latest_limit = 5
+
+    monkeypatch.setattr("app.services.douyin_protocol_source.search", lambda *a, **k: [
+        {"uid": "sec1", "name": "某号", "aweme_id": "1", "url": "u", "snippet": "x"}])
+    monkeypatch.setattr(dw, "fetch_author_posts", lambda sec, **k: {"ok": True, "error": "", "items": [
+        #: 主页接口没给 `create_time`,id 也不是雪花(判不了)⇒ 不许推
+        {"aweme_id": "9", "desc": "老作品 狗爹和小桃", "publish_at": 0,
+         "author": "某号", "url": "https://www.douyin.com/video/9"},
+    ]})
+
+    assert dw.discover_latest(session, 1, S()) == []
+
+
+def test_最新大瓜_只有雪花id也能判新旧(session, monkeypatch):
+    """主页接口没给 `create_time` 时,雪花 id 高位就是发布时间 —— 新的照样要推。"""
+    import time as _t
+
+    new = _snow(int(_t.time()) - 3600)
+
+    class S(_S):
+        demand_seed_words = "狗爹和小桃"
+        demand_latest_days = 3
+        demand_latest_authors = 1
+        demand_latest_limit = 5
+
+    monkeypatch.setattr("app.services.douyin_protocol_source.search", lambda *a, **k: [
+        {"uid": "sec1", "name": "某号", "aweme_id": "1", "url": "u", "snippet": "x"}])
+    monkeypatch.setattr(dw, "fetch_author_posts", lambda sec, **k: {"ok": True, "error": "", "items": [
+        {"aweme_id": new, "desc": "新作品 狗爹和小桃", "publish_at": 0,
+         "author": "某号", "url": "https://www.douyin.com/video/" + new},
+    ]})
+
+    assert [i["aweme_id"] for i in dw.discover_latest(session, 1, S())] == [new]

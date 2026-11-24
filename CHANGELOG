@@ -11,6 +11,35 @@
   新增测试 5 条(去向解析/管理群没配回落/端到端只打管理群/中文名/大瓜与同行群别合并)。
   (Files: app/services/board_digest.py, tests/test_board_digest.py, doc/能力清单.md)
 
+- [2026-11-24 17:56] FIX: **大瓜素材从来没有发布时间闸 —— 三年前的老视频被推了 9 次**
+  用户口径:「我们大瓜监测内容已经能监测到了但是**就差新鲜度**了,有的大瓜已经是很久之前的了」。
+  根因:`demand_watch.source_videos` 挑素材只看 `found_at`/`first_seen_at`(我们**抓到的时刻**),
+  **全程没有一道发布时间闸** —— 三年前的老视频今天第一次被扫到照样算"新素材"喂进评论扫描。
+  抖音资源线有 `freshness_gate`、对标号线有 `douyin_peer_fresh_hours`,**只有大瓜这条漏了**,
+  与记忆 `published-at-not-captured-at` 是同一个坑。
+  实测(生产库只读):`push_ledger` 的求1型卡近 7 天 92 行里 **16 行超 7 天**、**8 行约 3.5 年前**;
+  `金智秀flower舞蹈宠物版`(aweme 雪花解码 = **2023-04-10**)被推 **9 次**;
+  `demand_scans` 近 7 天 flagged 的抖音 26 条**只有 6 条在 7 天内**;
+  素材池 `douyin_peer_works` 近 7 天 798 条里 **>365 天 538 条**。
+  改法——判据只写一份 `publish_ts_of`(权威 `create_time` 优先,兜底**雪花 id 高位** `>>32`,
+  实测 400 条样本中位误差 1 秒),落在四处:① `source_videos` 进池前判(**扫评论之前**,
+  不白花额度);② `discover_latest` 原写法 `if it["publish_at"] and ...` 是"判不了就放行"
+  ⇒ 改成判不了直接丢;③ 求1型卡片每行补 `publish_mark` 时间(拿不到就不写);
+  ④ `DemandScan` 加 `publish_at` 列(存量 NULL = 当时没记,不拿 `scanned_at` 顶)。
+  **判不了时间默认不放行**(抖音这条路判得出率实测 100%,判不了=来路不明);
+  拦下的条数写进运行记录 `拦:老N/无时间N` —— 否则"闸门挡了全部"与"今天没素材"长得一样。
+  阈值 **7 天**(不是 3):实测 7 天窗口 1090 条素材保留 260 条,取 3 天只剩 70 条会开始重复扫。
+  同一族第二个漏洞:`demand_names` 侧只看 `last_pushed_at` 冷却、不看 `last_seen_at` 有多旧
+  ⇒ `七夕`(11-04 最后见到)在 **11-24 12:50** 还在推,新增 `demand_name_max_age_days=3`。
+  小红书此前**连发布时间都没取**:`xhs_demand.search_notes` 补 `noteCard.time`(毫秒化秒),
+  `scan_xhs` 在**开页之前**判(开页是最贵的一步,还顶着 461/300011 风控),
+  判不了只计数不拦(字段名是按页面结构取的,先看 `无时间N` 真实比例再决定)。
+  新增测试 20 条(雪花解码/老货进不了池/判不了不放行/两表重复只计一次/运行记录显形/
+  卡片带时间/名字凉了不推/生产默认值守卫)。
+  (Files: app/services/demand_watch.py, app/services/xhs_demand.py, app/db/models.py,
+  app/db/database.py, config/settings.py, tests/test_demand_watch.py,
+  doc/需求名监控-2026-10-30.md)
+
 - [2026-11-24 17:51] FIX: **盘满直推的 20 条里 16 条「标了已推、实际没推」——两道闸门不同宽**
   转存闸门 `PAN_DISCOVERY_MAX_AGE_DAYS`=**14 天**,推送闸门 `PUSH_FRESH_DAYS`=**7 天**。
   7~14 天这段夹在中间:转存放行 → 判定盘满 → 打上「**未转存,已按源链推送**」印记

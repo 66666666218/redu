@@ -1015,7 +1015,8 @@ def _upsert(db, user_id: int, name: str, demand: int, mention: int, video_hits: 
 
 def pick_pushable(rows, *, min_demand: int = 2, min_ones: int = 20,
                   cooldown_hours: int = 48, limit: int = 10,
-                  min_mention: int = 6) -> list:
+                  min_mention: int = 6, max_age_days: int = 3,
+                  dropped: dict | None = None) -> list:
     """够格且**冷却期外**的名字。按 (被求次数, 扣1数) 降序。
 
     ★ 三条门槛满足**任意一条**就算够格(用户口径「判断是根据作品里面的**求和1**」):
@@ -1029,9 +1030,16 @@ def pick_pushable(rows, *, min_demand: int = 2, min_ones: int = 20,
 
     ⚠️ **加冷却**:本作业 4 小时一轮,不加冷却的话同一个名字一天会推 6 次 ——
     群里会把它当成噪音(`push_ledger` 那套冷却的同一个道理)。
+
+    ★★ **还要看这个名字有多久没被提起**(2026-11-24,`max_age_days`):原来只判"够不够格"
+    + 冷却,于是**凉透的名字**照样反复推 —— 实测 `七夕` 最后一次被见到是 11-04,
+    却在 **11-24 12:50** 还在推;`有人`(11-03)11-24 08:51、`有偿`(11-03)11-23 04:51。
+    `last_seen_at` 由 `_upsert` 每次扫到就刷新,所以"三天没再被提起"= 这个名字已经凉了。
+    ⚠️ `last_seen_at` 为 `None`(**从没记录过**,理论上不会有)⇒ **放行**,不拿"不知道"当"凉了"。
     """
     now = datetime.now()
     out = []
+    too_old = 0
     for r in rows:
         demand = int(r.demand_hits or 0)
         ones = int(getattr(r, "ones_hits", 0) or 0)
@@ -1041,7 +1049,16 @@ def pick_pushable(rows, *, min_demand: int = 2, min_ones: int = 20,
             continue
         if r.last_pushed_at and (now - r.last_pushed_at) < timedelta(hours=cooldown_hours):
             continue
+        #: 名字凉了就**不再推** —— 它与素材视频的发布时间闸是同一族问题的第二半。
+        seen = getattr(r, "last_seen_at", None)
+        if (int(max_age_days or 0) > 0 and seen is not None
+                and (now - seen) > timedelta(days=int(max_age_days))):
+            too_old += 1
+            continue
         out.append(r)
+    if dropped is not None:
+        #: ⚠️ 拦了多少要显形 —— 否则「名字全凉了没得推」与「名字表空了」长得一样。
+        dropped["name_stale"] = too_old
     out.sort(key=lambda r: (int(r.demand_hits or 0), int(getattr(r, "ones_hits", 0) or 0),
                             int(r.mention_hits or 0)), reverse=True)
     return out[:max(0, int(limit))]
@@ -1117,7 +1134,74 @@ def _rotate_seeds(db, seeds: list[str], n: int) -> list[str]:
     return picked
 
 
-def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
+def publish_ts_of(aweme_id, declared=None) -> int:
+    """这条素材的**发布时间**(Unix 秒);两个来源都判不了 ⇒ `0`。
+
+    ## 为什么需要它(2026-11-24,用户「有的大瓜已经是很久之前的了」)
+
+    这条链一直是拿 `found_at`/`first_seen_at`(**我们抓到的时刻**)当素材新鲜度 ——
+    于是**三年前的老视频**今天第一次被扫到,照样算"新素材"喂进评论扫描。实测近 7 天:
+    `douyin_peer_works` 831 条里 **707 条发布超过 30 天**;`demand_scans` 里被判求1型的
+    抖音视频 26 条中 **20 条发布超过 7 天**(`金智秀flower` 是 2023-04-10,被推了 9 次)。
+    这与记忆 `published-at-not-captured-at` 记的是**同一个坑**。
+
+    ## 取值优先级
+
+    ① `declared` —— 调用方手上**权威**的 `create_time`(协议搜索 / 作者主页作品接口);
+    ② **抖音雪花 id 高位** `int(aweme_id) >> 32` —— `aweme_id` 是雪花 ID,高 32 位就是
+       发布时的 Unix 秒。实测(400 条有 `publish_at` 的样本)**中位误差 1 秒、p90 = 3 秒、
+       397/400 在 60 秒内** ⇒ 可直接当发布时刻用。这一档是**兜底**,让 `douyin_leads`/
+       `douyin_peer_works` 里那批没记 `publish_at` 的存量行也能判新旧(`douyin_peer_scan`
+       早就用同一个性质做「雪花锚点」,见 `douyin_peer_scan` 1051~1083 行的注释)。
+
+    ⚠️ 雪花高位只在 **19 位、且落在 1e9~2e9**(2001~2033 年)时采信 ——
+    位数不对/越界一律当"判不了",**不许**把一个离谱值当时间用(那是假新鲜度)。
+    """
+    if isinstance(declared, datetime):
+        return int(declared.timestamp())
+    try:
+        if declared is not None and int(declared) > 0:
+            return int(declared)
+    except (TypeError, ValueError):
+        pass
+    s = str(aweme_id or "").strip()
+    if len(s) == 19 and s.isdigit():
+        ts = int(s) >> 32
+        if 1_000_000_000 <= ts <= 2_000_000_000:
+            return ts
+    return 0
+
+
+def _age_days(ts: int, now: datetime | None = None) -> float:
+    """发布时间戳距今天数;`ts<=0`(判不了)返回 `-1`。"""
+    if int(ts or 0) <= 0:
+        return -1.0
+    try:
+        return ((now or datetime.now()) - datetime.fromtimestamp(int(ts))).total_seconds() / 86400.0
+    except (OSError, OverflowError, ValueError):
+        return -1.0
+
+
+def _age_note(stats: dict | None) -> str:
+    """新鲜度闸的一句话(` 老12/无时间3`);没拦过就返回空串。
+
+    ⚠️ 这两个数**必须**出现在运行记录里:拦下全部素材时 `视频0`,而"闸门挡的"与
+    "今天真没素材"在 `runs` 里是同一种写法 —— 本仓最忌的假成功就是这么来的。
+    """
+    st = int((stats or {}).get("stale") or 0)
+    un = int((stats or {}).get("unknown") or 0)
+    if st <= 0 and un <= 0:
+        return ""
+    bits = []
+    if st:
+        bits.append(f"老{st}")
+    if un:
+        bits.append(f"无时间{un}")
+    return " 拦:" + "/".join(bits)
+
+
+def source_videos(db, user_id: int = 1, settings=None,
+                  stats: dict | None = None) -> list[dict]:
     """挑要扫评论的视频。
 
     ## 优先级(2026-10-30 定)
@@ -1159,15 +1243,50 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
     out: list[dict] = []
     seen: set[str] = set()
 
+    #: ★★ **内容发布时间闸**(2026-11-24,用户「有的大瓜已经是很久之前的了」)。
+    #: 闸门**在进池前**判(不是扫完评论再筛):一条三年前的老视频,评论扫描额度花了
+    #: 才发现"太老",那是纯浪费 —— 抖音连发还会进「空成功」限流。
+    #: 两条窗口:`search_days`(搜来的,本来就是当下的)与 `lib_days`(存量线索/对标号,
+    #: 里面老货极多 —— 实测 831 条对标作品 707 条超 30 天)。
+    #: ⚠️ 拦下的条数**必须显形**(`stats` 由调用方写进运行记录):否则「闸门把素材全挡了」
+    #: 与「今天本来就没素材」在 `runs` 里长得一模一样(本仓母题)。
+    age_days = int(getattr(settings, "demand_max_age_days", 7) or 0)
+    lib_days = int(getattr(settings, "demand_source_max_age_days", 0) or 0) or age_days
+    allow_unknown = bool(getattr(settings, "demand_age_allow_unknown", False))
+    counters = stats if stats is not None else {}
+    for _k in ("stale", "unknown"):
+        counters.setdefault(_k, 0)
+
+    def _fresh(vid: str, declared=None, lib: bool = False) -> bool:
+        """这条能不能进池。判不了时间 ⇒ 按 `demand_age_allow_unknown` 处理并计数。"""
+        ts = publish_ts_of(vid, declared)
+        win = lib_days if lib else age_days
+        if win <= 0:
+            return True                  #: 窗口 0 = **整道闸关掉**(连"无时间"也不拦)
+        if ts <= 0:
+            if allow_unknown:
+                return True
+            counters["unknown"] += 1
+            return False
+        if _age_days(ts) > float(win):
+            counters["stale"] += 1
+            return False
+        return True
+
     def _add(vid: str, url: str, title: str, comments: int = 0, author: str = "",
-             src: str = "") -> None:
+             src: str = "", declared=None, lib: bool = False) -> None:
         vid = str(vid or "").strip()
         if not vid or vid in seen:
             return
+        #: ⚠️ **先记 `seen` 再判新不新鲜**:同一条可能同时出现在线索表和对标号表里,
+        #: 判新鲜之前不加 `seen` 的话,一条老货会被**计两次**,运行记录里的 `老N` 就虚高。
         seen.add(vid)
+        if not _fresh(vid, declared, lib=lib):
+            return
         out.append({"aweme_id": vid, "url": url or f"https://www.douyin.com/video/{vid}",
                     "title": title or "", "comment_count": int(comments or 0),
-                    "author": str(author or ""), "src": src})
+                    "author": str(author or ""), "src": src,
+                    "publish_at": publish_ts_of(vid, declared)})
 
     # ① 参考作品名(有就先用) —— 每轮轮着搜 3 个,避免连发触发抖音限流
     seeds = [w.strip() for w in
@@ -1190,7 +1309,8 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
                   reverse=True)
         for v in vids:
             _add(v.get("aweme_id"), v.get("url"), v.get("snippet"),
-                 (v.get("metrics") or {}).get("comment_count") or 0, v.get("name"))
+                 (v.get("metrics") or {}).get("comment_count") or 0, v.get("name"),
+                 declared=v.get("publish_at"))
             #: 参考作品只占**一半名额**:它们通常没有书名号(标题是"标签流"),
             #: 名字还得靠库内推广线索那半;全被搜索占满 ⇒ 这一轮一个名字都抽不到。
             if len(out) >= max(1, lib_need // 2):
@@ -1213,7 +1333,8 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
             for it in res["items"]:
                 if it["publish_at"] and it["publish_at"] < since_ts:
                     continue
-                _add(it["aweme_id"], it["url"], it["desc"], 0, it["author"] or name)
+                _add(it["aweme_id"], it["url"], it["desc"], 0, it["author"] or name,
+                     declared=it["publish_at"])
                 if len(out) >= lib_need:
                     break
 
@@ -1229,7 +1350,7 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
         #: `hot_budget` 恒被算成 0,`hot_word_seen` 停在 11-11、日志里「热点差分」零次)。
         if len(out) >= lib_need:
             break
-        _add(r.aweme_id, r.url, r.title, 0, r.author)
+        _add(r.aweme_id, r.url, r.title, 0, r.author, declared=r.publish_at, lib=True)
 
     # ③ 对标号作品(带网盘的那些)
     works = db.scalars(select(DouyinPeerWork).where(
@@ -1239,7 +1360,8 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
     for w in works:
         if len(out) >= lib_need:
             break
-        _add(w.aweme_id, w.url, w.title, 0, w.account_name)
+        _add(w.aweme_id, w.url, w.title, 0, w.account_name,
+             declared=w.publish_at, lib=True)
 
     # ④ ★ **今天才冒出来的热点**(2026-11-08 用户:「每次都会有新的热点出来,
     # 你需要总结这些规律来完成监控和预测」)。
@@ -1292,7 +1414,7 @@ def source_videos(db, user_id: int = 1, settings=None) -> list[dict]:
                     break
                 _add(v.get("aweme_id"), v.get("url"), v.get("snippet"),
                      (v.get("metrics") or {}).get("comment_count") or 0, v.get("name"),
-                     src="hot")
+                     src="hot", declared=v.get("publish_at"))
 
     return out[:need]
 
@@ -1313,8 +1435,13 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
     # 这既刷 ERROR 噪音(近 7 天 33 次),又让 `runs` 里分不清「链路坏了」与「这个号本来就没号」。
     # ⚠️ 判据必须落在**响应自己说的原因**上(`kind="need_login"`),不能靠预先检查凭据:
     # 预先检查会把"凭据刚好过期"也一起吞掉,那才是真的要人动手的那种。
+
+    #: ★ 新鲜度闸的计数(2026-11-24):`{"stale": 太老被拦, "unknown": 判不了时间被拦}`。
+    #: 由 `source_videos` 原地累加,这里**写进运行记录** —— 拦下的条数不显形的话,
+    #: 「闸门把素材全挡了」与「今天本来就没素材」在 `runs` 里长得一模一样。
+    age_stats: dict[str, int] = {}
     try:
-        videos = source_videos(db, user_id, settings)
+        videos = source_videos(db, user_id, settings, stats=age_stats)
     except Exception as exc:  # noqa: BLE001 - 只拦"这个号没登录",其余照旧往上抛
         from app.services.douyin_protocol_source import DouyinProtocolError
 
@@ -1379,6 +1506,9 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
                     "desc": v.get("title") or "",
                     "author": v.get("author") or "",
                     "url": url,
+                    #: ★ **发布时间**带进卡片(2026-11-24):客户投诉的就是"很久之前的",
+                    #: 卡片上必须能一眼看出这条有多老,而不是只看到「求 12 · 扣1 30」。
+                    "publish_at": int(v.get("publish_at") or 0),
                     "why": "求/1密度" if by_density else "重复评论",
                     "demand": demand_cnt, "ones": ones, "total": total})
         # ★ **名字主要来自作品标题**(用户:「基本上作品名都有资源名」);
@@ -1431,6 +1561,7 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
         _record_run(db, user_id, "demand_watch", "partial" if videos else "success",
                     f"视频{len(videos)} 扫{scanned} 名字0 求{no_name}(无名)"
                     f" 求1型{len(request_videos)}(推{request_pushed})"
+                    + _age_note(age_stats)
                     + (f" 失败:{errors[0][:60]}" if errors else ""))
         db.commit()
         return {"videos": len(videos), "names": 0, "request": len(request_videos)}
@@ -1474,13 +1605,16 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
     rows = db.scalars(select(DemandName).where(
         DemandName.user_id == user_id,
         DemandName.platform == PLATFORM)).all()
+    name_stats: dict[str, int] = {}
     chosen = pick_pushable(
         rows,
         min_demand=int(getattr(settings, "demand_min_hits", 2) or 2),
         min_ones=int(getattr(settings, "demand_min_ones", 20) or 0),
         cooldown_hours=int(getattr(settings, "demand_push_cooldown_hours", 48) or 48),
         limit=int(getattr(settings, "demand_push_limit", 10) or 10),
-        min_mention=int(getattr(settings, "demand_min_mention", 6) or 6))
+        min_mention=int(getattr(settings, "demand_min_mention", 6) or 6),
+        max_age_days=int(getattr(settings, "demand_name_max_age_days", 3) or 0),
+        dropped=name_stats)
     pushed = 0
     if chosen and push_card(chosen, settings):
         now = datetime.now()
@@ -1491,13 +1625,18 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
 
     detail = (f"视频{len(videos)} 扫{scanned} 名字{kept_names}(丢{dropped_names}"
               f"/泛词{dropped_common}) 求{no_name}(无名) 推{pushed}"
-              f" 求1型{len(request_videos)}(推{request_pushed})")
+              f" 求1型{len(request_videos)}(推{request_pushed})"
+              + _age_note(age_stats))
     #: ★ **热点素材的条数必须显形**(2026-11-13):40 轮 `视频4 扫4` 看着一切正常,
     #: 而热点那条路**一次都没跑过** —— 只报总数的话,"4 条都来自库内"和
     #: "3 条库内 + 1 条热点"在记录里长得一模一样。长期恒为 0 ⇒ 名额又被吃光了。
     n_hot = sum(1 for v in videos if v.get("src") == "hot")
     if n_hot:
         detail += f" 其中热点{n_hot}"
+    #: ★ **凉透的名字也要显形**(2026-11-24):`推0` 有两种可能 —— 名字表里没够格的,
+    #: 或者够格的**全都三天没再被人提起了**。不写出来就分不清闸门在拦还是在空转。
+    if name_stats.get("name_stale"):
+        detail += f" 名字凉{name_stats['name_stale']}"
     if errors:
         detail += f" 失败:{errors[0][:60]}"
     _record_run(db, user_id, "demand_watch",
@@ -1605,8 +1744,14 @@ def discover_latest(db, user_id: int = 1, settings=None) -> list[dict]:
             logger.debug("作者 %s 的作品里没有 %s,跳过", name, kw)
             continue
         for it in res["items"]:
-            if it["publish_at"] and it["publish_at"] < since:
+            #: ★ **发布时间闸,判不了也不放行**(2026-11-24,与 `source_videos` 同一口径)。
+            #: 原写法 `if it["publish_at"] and ...` 是"判不了就放行" —— 主页接口若少给
+            #: `create_time`,几个月前的老作品就会被当成"最新的大瓜"推出去(用户投诉的
+            #: 就是这张卡)。这里用 `publish_ts_of`(雪花 id 兜底),判不了直接丢。
+            ts = publish_ts_of(it["aweme_id"], it["publish_at"])
+            if ts <= 0 or ts < since:
                 continue
+            it["publish_at"] = ts
             it["author"] = it["author"] or name
             items.setdefault(it["aweme_id"], it)
     out = sorted(items.values(), key=lambda x: x["publish_at"], reverse=True)
@@ -1646,7 +1791,15 @@ def push_latest(items: list[dict], settings) -> bool:
 
 
 def build_request_card(items: list[dict], platform: str = "douyin") -> dict:
-    """**求1型**大瓜卡:被判为"评论区在求/扣1"的视频 + 能取到的名字。"""
+    """**求1型**大瓜卡:被判为"评论区在求/扣1"的视频 + 能取到的名字。
+
+    ★ **每行带发布时间**(2026-11-24):用户投诉「有的大瓜已经是很久之前的了」——
+    卡片上不写时间,客户只能看到「求 12 · 扣1 30」,看不出这条其实是三年前的。
+    标记统一走 `hot_time.publish_mark`(与别的板块同一套:`🆕` / `·11-20 14:30`),
+    拿不到时间就**不写**,别拿"刚刚"或扫描时刻顶上。
+    """
+    from app.services.hot_time import publish_mark
+
     label = "小红书" if platform == "xiaohongshu" else "抖音"
     lines = []
     for it in items:
@@ -1662,9 +1815,13 @@ def build_request_card(items: list[dict], platform: str = "douyin") -> dict:
             f" [原视频]({it['url']})" if it.get("url") else "")
         #: 迅雷群侧证据(用户「迅雷群里面是否有人发这些资源」):群消息里搜得到就标出来
         xh = int(it.get("xunlei") or 0)
+        #: ★ 发布时间标记(2026-11-24):`🆕` = 一小时内,其余 `·MM-DD HH:MM`;
+        #: 拿不到时间就是空串(**不写占位符** —— 一列「—」会被读成"这条没有时间"之外的意思)。
+        when = publish_mark(it.get("publish_at"))
         lines.append(
             f"**{name}** — 求 {it['demand']} · 扣1 {it['ones']} / 共 {it['total']} 条"
             f" · {it.get('why') or '求/1密度'} · 作者 {it.get('author') or '—'}"
+            + (f" · {when}" if when else "")
             + (f" · 🧲群内 {xh} 条" if xh else "") + link)
     return {
         "config": {"wide_screen_mode": True},
@@ -1822,6 +1979,10 @@ def _record_scan(db, user_id: int, v: dict, *, total: int, ones: int, demand: in
     row.flagged, row.why, row.name = bool(flagged), str(why or "")[:32], str(name or "")[:128]
     row.has_group = bool(has_group)
     row.topic_ok = topic_hit(v.get("title") or "")
+    #: ★ **这条素材的发布时间**(2026-11-24):让"被扫的视频有多老"在库里可查、可回放标定。
+    #: 取不到就留 `None`(**不拿 `scanned_at` 顶** —— 那是假新鲜度,见字段注释)。
+    _ts = publish_ts_of(vid, v.get("publish_at"))
+    row.publish_at = datetime.fromtimestamp(_ts) if _ts > 0 else None
     row.scanned_at = datetime.now()
 
 
@@ -1859,6 +2020,11 @@ def scan_xhs(db, user_id: int = 1, settings=None) -> dict:
 
     items: list[dict] = []
     scanned = flagged_n = skipped_n = 0
+    #: ★ 发布时间闸的计数(2026-11-24):`stale` = 太老被拦,`unknown` = 判不了时间。
+    #: ⚠️ 小红书这条链**此前连发布时间都没取**,取不到的比例可能很高 —— 拦下的条数
+    #: 必须进运行记录,否则「全被闸门挡了」和「没有命中」在库里长得一样。
+    age_stale = age_unknown = 0
+    max_age = int(getattr(settings, "demand_xhs_max_age_days", 3) or 0)
     min_total = int(getattr(settings, "demand_xhs_min_comments", 8) or 0)
     p = browser = page = None
     try:
@@ -1866,6 +2032,18 @@ def scan_xhs(db, user_id: int = 1, settings=None) -> dict:
         page = browser.contexts[0].new_page()
         for kw in seeds:
             for idx, note in enumerate(X.search_notes(page, kw, limit=per_seed)):
+                #: ★★ **发布时间闸**(2026-11-24,用户「有的大瓜已经是很久之前的了」)。
+                #: 位置在**开页之前**:打开笔记要滚 3 次、发 3 次懒加载请求,是最贵的一步 ——
+                #: 三年前的老帖没必要为它花掉风控额度(这条链被 461/300011 罚过,见记忆
+                #: `xhs-461-solved-by-page-render`)。取不到时间按"判不了"处理并计数:
+                #: 这一步**不拦**,只记 —— 拦了会把整条链堵死(搜索结果字段是猜的,
+                #: 得先看到「无时间N」的真实比例再决定要不要拦)。
+                _ts = int(note.get("published") or 0)
+                if max_age > 0 and _ts > 0 and _age_days(_ts) > float(max_age):
+                    age_stale += 1
+                    continue
+                if _ts <= 0:
+                    age_unknown += 1
                 #: 搜索结果自带 `commentCount` ⇒ **评论太少就别开页**(省额度也省风控)。
                 #: ⚠️ 但每个词**第一篇照开**:群聊型的帖子常常评论很少(用户:「小红书大多都会
                 #: 有加入群聊」),而"挂没挂群"只有打开才知道。
@@ -1889,7 +2067,8 @@ def scan_xhs(db, user_id: int = 1, settings=None) -> dict:
                         db, user_id,
                         {"aweme_id": note["id"], "title": note.get("title") or "",
                          "author": note.get("author") or "",
-                         "url": f"https://www.xiaohongshu.com/explore/{note['id']}"},
+                         "url": f"https://www.xiaohongshu.com/explore/{note['id']}",
+                         "publish_at": _ts},
                         total=st["total"], ones=st["ones"], demand=st["demand"],
                         dup=st["dup_ratio"], flagged=False,
                         why=("群聊入口" if has_group else "样本不足"),
@@ -1913,7 +2092,8 @@ def scan_xhs(db, user_id: int = 1, settings=None) -> dict:
                     db, user_id,
                     {"aweme_id": note["id"], "title": note.get("title") or "",
                      "author": note.get("author") or "",
-                     "url": f"https://www.xiaohongshu.com/explore/{note['id']}"},
+                     "url": f"https://www.xiaohongshu.com/explore/{note['id']}",
+                     "publish_at": _ts},
                     total=st["total"], ones=st["ones"], demand=st["demand"],
                     dup=st["dup_ratio"], flagged=flagged,
                     why=("求/1密度" if by_density else ("重复评论" if by_repeat else "")),
@@ -1932,7 +2112,7 @@ def scan_xhs(db, user_id: int = 1, settings=None) -> dict:
                                   "url": f"https://www.xiaohongshu.com/explore/{note['id']}",
                                   "why": "求/1密度" if by_density else "重复评论",
                                   "demand": st["demand"], "ones": st["ones"],
-                                  "total": st["total"]})
+                                  "total": st["total"], "publish_at": _ts})
     except Exception as exc:  # noqa: BLE001 - 浏览器/页面异常不该把整轮带崩
         logger.exception("小红书扫描失败")
         return {"error": f"{type(exc).__name__}: {str(exc)[:80]}", "scanned": scanned}
@@ -1952,10 +2132,15 @@ def scan_xhs(db, user_id: int = 1, settings=None) -> dict:
     pushed = len(items) if items and push_request(items, settings, "xiaohongshu") else 0
     #: ⚠️ 明细里必须带上 `拦N` —— 否则"扫10 命中3 推0"和"扫10 命中0 推0"
     #: 在库里长得一样,看不出是**闸门拦掉了**还是**根本没命中**。
+    age_note = ""
+    if age_stale:
+        age_note += f" 老{age_stale}"
+    if age_unknown:
+        age_note += f" 无时间{age_unknown}"
     _record_run_quiet(db, user_id,
-                      f"小红书 扫{scanned} 命中{flagged_n} 拦{skipped_n} 推{pushed}")
+                      f"小红书 扫{scanned} 命中{flagged_n} 拦{skipped_n} 推{pushed}{age_note}")
     return {"scanned": scanned, "flagged": flagged_n, "pushed": pushed,
-            "skipped": skipped_n}
+            "skipped": skipped_n, "age_stale": age_stale, "age_unknown": age_unknown}
 
 
 def _record_run_quiet(db, user_id: int, detail: str) -> None:
