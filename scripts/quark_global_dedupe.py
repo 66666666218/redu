@@ -33,6 +33,10 @@
 * 删除**永远进回收站**(`to_recycle=True`),配额当场释放、可捞回;
 * **受保护**:`pan_owned_shares.first_fid`(我方分享的一级 fid)、整名等于分享标题、
   整名在 `push_ledger.title` 里的 —— 命中任一即整组跳过;
+* ★★ **落在分享目录树内的文件也受保护**(2026-11-24 补):`first_fid` 只是分享的
+  **一级** fid,而盘上资源是「家/资源目录/子目录/…/文件」的深层结构 ⇒ 子文件
+  **一个都不在** `share_fids` 里。实测 2 号盘 66 份待删项 **66/66 全在存活分享
+  的目录树内**(含 15 份跨分享),删了就是**交付缺文件的分享**。见 `in_share_tree`;
 * `is_promo_name` 命中的不动(引流文件另有职责);
 * 计划先落盘,`--yes` 才真删。
 
@@ -159,8 +163,38 @@ def strip_copy_suffix(name: str) -> str:
     return COPY_SUFFIX.sub("", name).strip()
 
 
+def in_share_tree(fid: str, share_fids: set[str], parent_of: dict[str, str]) -> bool:
+    """这个文件是否落在**某个我方分享的目录树内**(沿 `pdir_fid` 往上走到根)。
+
+    ⚠️ **为什么单靠 `fid in share_fids` 不够**(2026-11-24 实测):`pan_owned_shares.first_fid`
+    是分享的**一级** fid。盘上的资源是「家 / 资源目录 / 子目录 / … / 文件」——
+    分享一个目录时,`first_fid` 指向那个目录,**里面几千个子文件一个都不在保护集里**。
+    2 号盘上 66 份待删项 **66/66 全部**落在我方存活分享的目录树内(其中 15 份跨分享),
+    按老判据 `protected_groups=0`,删下去就是**把客户手里的分享删成缺文件的分享**。
+
+    `parent_of` = `{子 fid: 父 fid}`,由扫描结果与按需 `file/info` 拼出来。
+    只有**沿父链一路走到 `0`(根)**才判「不在分享树内」;中途**查不到父**(断链)
+    或撞上**环**一律当受保护 —— 判不清就别删,与本脚本「宁可留,不可错删」一致。
+    """
+    cur = str(fid or "")
+    seen: set[str] = set()
+    while True:
+        if not cur or cur == "0":
+            return False            # 走到根:这条文件不在任何分享树里
+        if cur in share_fids:
+            return True
+        if cur in seen:
+            return True             # 环:判不清 ⇒ 不动
+        seen.add(cur)
+        nxt = parent_of.get(cur)
+        if nxt is None:
+            return True             # 溯源断链:判不清 ⇒ 不动
+        cur = str(nxt)
+
+
 def build_plan(files: list[dict], share_fids: set[str], titles: set[str],
-               ledger: set[str]) -> tuple[list[dict], dict]:
+               ledger: set[str], *, parent_of: dict[str, str] | None = None
+               ) -> tuple[list[dict], dict]:
     """同名(允许只差副本后缀)+ 同字节数的组:留一份,其余进计划。
 
     分组键用**去掉副本后缀**的名字,这样 `课件(1).mp4` 能和 `课件.mp4` 归到一组。
@@ -190,8 +224,14 @@ def build_plan(files: list[dict], share_fids: set[str], titles: set[str],
         exact = len(names) == 1
         if base not in names and not exact:
             continue                    # 名字只差后缀且无原件:认不出原件,不删
+        #: ★★ 保护要覆盖**整棵分享树**,不能只看一级 fid —— `kids` 只命中
+        #: `first_fid` 那一个,而盘上资源都在深层。`parent_of` 为空时退化成
+        #: 老行为(只认一级 fid),供不联网的单测显式选择;
+        #: **实跑必须传**,否则 66/66 全被判成"不受保护"。
         kids = [x for x in g if x["fid"] in share_fids]
-        if kids or base in titles or base in ledger \
+        deep = [x for x in g if parent_of is not None
+                and in_share_tree(x["fid"], share_fids, parent_of)]
+        if kids or deep or base in titles or base in ledger \
                 or any(n in titles or n in ledger for n in names):
             prot_n += 1
             continue                    # 受保护:整组跳过(宁可留,不可错删)
@@ -246,7 +286,40 @@ def main() -> int:
     db.close()
     print(f"[保护] first_fid {len(share_fids)} / 分享标题 {len(titles)} / 台账 {len(ledger)}")
 
-    plan, stats = build_plan(files, share_fids, titles, ledger)
+    #: ★★ 分享树保护(2026-11-24):`first_fid` 只是分享的**一级** fid,深层子文件
+    #: 一个都不在里面。扫描结果自带每个文件的 `pdir_fid`,先拼出已知的父子边;
+    #: 走不到根的再按需 `file/info` 往上补(只对候选集,不是全盘,实测量级 <200 次)。
+    parent_of: dict[str, str] = {str(x["fid"]): str(x["pdir"])
+                                 for x in files if x.get("pdir")}
+    if share_fids:
+        ask, done = list(parent_of.values()), set(parent_of)
+        hops = 0
+        while ask and hops < 40:
+            nxt: list[str] = []
+            for f in ask:
+                if not f or f == "0" or f in done:
+                    continue
+                done.add(f)
+                try:
+                    d = (qt._request("GET", "/1/clouddrive/file/info",
+                                     api="https://drive-pc.quark.cn",
+                                     params={"fid": f}).get("data") or {})
+                except Exception:               # noqa: BLE001 - 查不到就断链(算受保护)
+                    continue
+                p = str(d.get("pdir_fid") or "")
+                if p:
+                    parent_of[f] = p
+                    nxt.append(p)
+            ask, hops = nxt, hops + 1
+        print(f"[分享树] 父子边 {len(parent_of)} 条 / 补查 {hops} 层")
+
+    plan, stats = build_plan(files, share_fids, titles, ledger, parent_of=parent_of)
+    #: 计划里**每一条**都必须再确认一次「不在分享树内」—— `build_plan` 是纯函数,
+    #: 它的判断依赖上面那张表;这里是最后一道独立复核(两处都不放行才算过)。
+    leaked = [p for p in plan if in_share_tree(p["fid"], share_fids, parent_of)]
+    if leaked:
+        print(f"!! 复核拦下 {len(leaked)} 份仍落在分享树内的文件(已剔除)")
+        plan = [p for p in plan if p not in leaked]
     gib = sum(p["size"] for p in plan) / 2 ** 30
     out = {"generated_at": datetime.now().isoformat(timespec="seconds"),
            "account": args.account, "scanned": len(files),

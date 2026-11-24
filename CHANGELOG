@@ -1,3 +1,22 @@
+- [2026-11-24 16:18] FIX: **夸克全盘去重的分享保护只覆盖了第一层,66/66 待删项全在存活分享树内(已拦下)**
+  `scripts/quark_global_dedupe.py` 的保护判据是 `x 的 fid 在 share_fids 里`,
+  而 `pan_owned_shares.first_fid` 是分享的**一级** fid —— 分享一个目录时它指向
+  那个目录本身,盘上「家/资源目录/子目录/…/文件」里**几千个子文件没有一个 fid 等于它**,
+  保护集对它们完全失效。实测 2 号盘:66 份待删 / 19.83 GiB,**66/66 全部**位于
+  仍存活的我方分享目录树内(51 份同分享跨子目录、**15 份跨分享**),脚本却报
+  `protected_groups: 0`。执行下去 = **把客户手里的分享删成缺文件的分享** ——
+  链还能打开,少文件要到下载时才发现,比死链更隐蔽。
+  ⇒ 新增 `in_share_tree(fid, share_fids, parent_of)`:沿 `pdir_fid` 往上走,
+  链上任意一层命中即受保护;走到 `0` 才判「不在分享树内」;**断链与成环一律
+  按受保护**。`build_plan(..., parent_of=)` 不传时退化成老行为供纯单测,
+  `main()` 实跑必须传,落盘前再独立复核一遍。父子边优先用扫描快照已有的
+  `pdir_fid`,走不到根的**只对候选集**按需 `file/info` 补(实测 4480 条 / 5 层)。
+  修复后同一快照:待删 **66 → 0**,44 组因受保护整组跳过。
+  `tests/test_quark_global_dedupe.py` 22 → **30** 条(含 `main()` 必须传参的源码级守卫)。
+  另:`scripts/quark_prune_old.py` 本轮实删 7 个引流目录 / 87.56 MiB(进回收站,
+  配额实测当场下降,确认 2 号盘回收站不吃配额)。文档「全盘重复 27.9 GiB」那一项**作废**。
+  (Files: scripts/quark_global_dedupe.py, tests/test_quark_global_dedupe.py,
+  doc/夸克盘清理-去重.md, doc/能力清单.md)
 - [2026-11-24 15:06] FIX: **夸克清理清单:快照没扫过的家不再被当成「没人推」整家列进删除计划**
   `scripts/quark_prune_old.py --offline` 从 `quark_dup_cache` 快照里取「目录内文件 fid」,
   再与 `pan_owned_shares.first_fid` 比对来判「这一份有没有被我方分享链指着」。

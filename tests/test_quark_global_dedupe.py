@@ -264,3 +264,82 @@ def test_扫描要跑多个排序键():
     assert "size:desc" in qgd.SORTS, "按体积倒序是主力键"
     assert "file_name:desc" in qgd.SORTS, "实测这个键带来的新增最多"
     assert len(set(qgd.SORTS)) == len(qgd.SORTS), "重复的键只会白跑一遍"
+
+
+# ---------------------------------------------------------------------------
+# 分享树保护(2026-11-24)
+#
+# ⚠️ 这一组钉的是**一次差点发生的交付事故**:`first_fid` 只是分享的**一级** fid,
+# 而盘上资源是「家 / 资源目录 / 子目录 / … / 文件」的深层结构 ⇒ 子文件**一个都不在**
+# `share_fids` 里。实测 2 号盘 66 份待删项 **66/66 全在存活分享的目录树内**
+# (其中 15 份跨分享),按老判据 `protected_groups=0` —— 删了就是**交付缺文件的分享**。
+# ---------------------------------------------------------------------------
+
+def test_子文件落在分享树内也受保护():
+    """★ 本组最重要的一条:`first_fid` 指向目录,里面的文件没一个 fid 等于它。"""
+    # 树:shareDir ← sub ← file ;`shareDir` 是我方分享一级 fid
+    parent_of = {"sub": "shareDir", "file": "sub", "other": "elsewhere"}
+    plan, stats = qgd.build_plan(
+        [_f("file", "课.mp4", 100), _f("other", "课.mp4", 100)],
+        {"shareDir"}, set(), set(), parent_of=parent_of)
+    assert plan == [], "组里有一份在分享树内 ⇒ 整组跳过"
+    assert stats["protected_groups"] == 1
+
+
+def test_两棵树都在分享外才允许删():
+    #: 父链必须**走到 "0"** 才算判清(根/家);停在半路 = 断链 = 受保护
+    parent_of = {"a1": "d1", "d1": "0", "b1": "d2", "d2": "0"}
+    plan, stats = qgd.build_plan(
+        [_f("a1", "课.mp4", 100, created=200),
+         _f("b1", "课.mp4", 100, created=100)],
+        {"shareDir"}, set(), set(), parent_of=parent_of)
+    assert [p["fid"] for p in plan] == ["a1"], "两棵都不在分享树内 ⇒ 正常去重"
+    assert plan[0]["keep_fid"] == "b1"
+    assert stats["protected_groups"] == 0
+
+
+def test_溯源断链时按受保护处理():
+    """查不到父 fid ⇒ **判不清 ⇒ 不删**。这条比「多删」重要得多。"""
+    parent_of = {"a1": "d1", "b1": "0"}   # a1 的父 d1 无父(断链);b1 能走到根
+    plan, _ = qgd.build_plan(
+        [_f("a1", "课.mp4", 100, created=200), _f("b1", "课.mp4", 100, created=100)],
+        {"shareDir"}, set(), set(), parent_of=parent_of)
+    assert plan == [], "a1 断链 ⇒ 受保护;组里有一份受保护就整组跳过"
+
+
+def test_in_share_tree_走到根就不算():
+    parent_of = {"a": "d", "d": "0"}          # 走到 "0" = 家/根
+    assert qgd.in_share_tree("a", {"shareDir"}, parent_of) is False
+
+
+def test_in_share_tree_一级fid直接命中():
+    assert qgd.in_share_tree("shareDir", {"shareDir"}, {}) is True
+
+
+def test_in_share_tree_父链上有一级fid就算():
+    parent_of = {"f": "sub", "sub": "shareDir", "shareDir": "0"}
+    assert qgd.in_share_tree("f", {"shareDir"}, parent_of) is True
+
+
+def test_in_share_tree_防环():
+    parent_of = {"a": "b", "b": "a"}          # 人为造环,不许死循环
+    assert qgd.in_share_tree("a", {"zzz"}, parent_of) is True   # 环 ⇒ 判不清 ⇒ 受保护
+
+
+def test_不传parent_of时退化成只看一级fid():
+    """没有树信息时保持老行为(便于纯单测);一旦传了就必须覆盖深层。"""
+    plan, _ = qgd.build_plan(
+        [_f("a", "课.mp4", 100, created=200), _f("b", "课.mp4", 100, created=100)],
+        {"zzz"}, set(), set())
+    assert [p["fid"] for p in plan] == ["a"]
+
+
+def test_实跑必须传parent_of_源码级守卫():
+    """★ 判据对了但 `main()` 忘了传 = 等于没修。
+
+    与判据本身分开钉,是因为「函数是好的、调用点漏了」在本仓栽过多次。
+    """
+    src = (ROOT / "scripts" / "quark_global_dedupe.py").read_text(encoding="utf-8")
+    assert "parent_of=parent_of" in src, "main() 必须把 parent_of 传给 build_plan"
+    assert "/1/clouddrive/file/info" in src, "深层溯源要调 file/info 补父子边"
+    assert "in_share_tree(p[\"fid\"]" in src, "落盘前必须再独立复核一次"
