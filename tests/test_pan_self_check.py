@@ -145,6 +145,7 @@ class TestRunChecks:
         monkeypatch.setattr(psc, "_check_run_detail", lambda *a, **k: psc._item("b", "warn", ""))
         monkeypatch.setattr(psc, "_check_quota", lambda *a, **k: psc._item("c", "error", ""))
         monkeypatch.setattr(psc, "_check_reuse", lambda *a, **k: psc._item("d", "ok", ""))
+        monkeypatch.setattr(psc, "_check_net_growth", lambda *a, **k: psc._item("d2", "ok", ""))
         monkeypatch.setattr(psc, "_check_baidu_report", lambda *a, **k: psc._item("e", "ok", ""))
         monkeypatch.setattr(psc, "_check_config", lambda *a, **k: psc._item("f", "ok", ""))
         out = psc.run_checks(None, 1, _S())
@@ -357,6 +358,121 @@ class TestProbeRatio:
         from app.services import pan_accounts
         assert psc._probe_ratio(
             None, "quark", pan_accounts.default_ref("quark")) is None
+
+
+class TestNetGrowth:
+    """★ 2026-11-24:自检要看**库在不在长**,不只看复用比例。
+
+    为什么需要:`_check_reuse` 的分母是"成功搬链数" —— 盘满停摆那几天
+    (11-19 起连续 5 天转存 = 0、积压从 0 爬到 327)**它全绿**,因为没有任何东西
+    被搬成,比例根本不成立。而「积压天天涨、库却不长」正是用户最该被告知的那件事。
+    """
+
+    def _db(self, *, found: int, pending: int, ok_urls: list[str]):
+        """**真 SQLite 内存库**造数据,不用替身。
+
+        ⚠️ 第一版是手写的假会话,当场踩了本仓记过两次的那个坑(替身方言 ≠ 真类型):
+        `status == "pending"` 在 SQL 里是**绑定参数**,不在 SQL 文本里 ——
+        按 `"pending" in str(stmt)` 分流永远匹配不到,「积压」被数成「发现」。
+        判据会随 SQL 写法变化,替身不会 ⇒ 用真库才验得到正确性。
+        """
+        from datetime import datetime
+
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        from app.db.database import Base
+        from app.db import models  # noqa: F401 - 建表需要全部模型
+        from app.db.models import DiscoveredPanLink
+
+        eng = create_engine("sqlite://")
+        Base.metadata.create_all(eng)
+        db = sessionmaker(bind=eng, expire_on_commit=False)()
+        now = datetime.now()
+        n_pending = max(0, min(pending, found))
+        rows = []
+        for i in range(found):
+            #: 三段互不重叠:`pending` 占前 `n_pending` 行,`ok` 占最后 `len(ok_urls)` 行。
+            if i < n_pending:
+                status, url = "pending", ""
+            elif i >= found - len(ok_urls):
+                status, url = "ok", ok_urls[i - (found - len(ok_urls))]
+            else:
+                status, url = "skipped", ""
+            rows.append(DiscoveredPanLink(
+                user_id=1, origin_url=f"https://example.com/origin{i}", title=f"资源{i}",
+                found_at=now, status=status, our_url=url))
+        db.add_all(rows)
+        db.commit()
+        return db
+
+    def _dead(self, monkeypatch, dead_urls: set[str]) -> None:
+        """把出链口那份快照换成固定集合(判据必须**复用**它,不许自己再判一遍)。"""
+        from app.services import resource_library as rl
+
+        class _D:
+            def is_dead(self, url: str) -> bool:
+                return url in dead_urls
+
+            def __bool__(self) -> bool:
+                return bool(dead_urls)
+
+        monkeypatch.setattr(rl, "dead_links", lambda *a, **k: _D())
+
+    def test_全部成活时是净增长(self, monkeypatch) -> None:
+        urls = [f"https://pan.quark.cn/s/a{i}" for i in range(12)]
+        self._dead(monkeypatch, set())
+        out = psc._check_net_growth(self._db(found=400, pending=300, ok_urls=urls), 1, 7)
+        assert out["level"] == "ok"
+        assert "净增 12" in out["detail"] and "积压 300" in out["detail"], out["detail"]
+
+    def test_一条都没搬成是错误_不是正常(self, monkeypatch) -> None:
+        """★ 这就是 11-19~11-23 那五天的形态:**出口没了**,不是"最近没资源"。"""
+        self._dead(monkeypatch, set())
+        out = psc._check_net_growth(self._db(found=400, pending=400, ok_urls=[]), 1, 7)
+        assert out["level"] == "error"
+        assert "一条都没搬成" in out["detail"] and "出口" in out["detail"]
+
+    def test_搬成被死链抵消完要报警(self, monkeypatch) -> None:
+        urls = [f"https://pan.quark.cn/s/d{i}" for i in range(12)]
+        self._dead(monkeypatch, set(urls))
+        out = psc._check_net_growth(self._db(found=400, pending=300, ok_urls=urls), 1, 7)
+        assert out["level"] == "warn" and "净增 0" in out["detail"]
+        assert "抵消" in out["detail"]
+
+    def test_存活率过低要报警(self, monkeypatch) -> None:
+        urls = [f"https://pan.quark.cn/s/e{i}" for i in range(20)]
+        self._dead(monkeypatch, set(urls[:15]))     # 存活 5/20 = 25%
+        out = psc._check_net_growth(self._db(found=400, pending=300, ok_urls=urls), 1, 7)
+        assert out["level"] == "warn" and "25%" in out["detail"]
+
+    def test_同一条分享被多个标题复用只算一次(self, monkeypatch) -> None:
+        """★ 实测一条我方链挂过 68 个标题 —— 逐行数会把 129 条分享数成 818 条。"""
+        same = ["https://pan.quark.cn/s/same"] * 30
+        self._dead(monkeypatch, set())
+        out = psc._check_net_growth(self._db(found=400, pending=0, ok_urls=same), 1, 7)
+        assert "搬成 1 条" in out["detail"], out["detail"]
+
+    def test_样本太少时只报数不下结论(self, monkeypatch) -> None:
+        """发现量本来就少的日子,「0 条搬成」不能报成故障(狼来了)。"""
+        self._dead(monkeypatch, set())
+        out = psc._check_net_growth(self._db(found=3, pending=3, ok_urls=[]), 1, 7)
+        assert out["level"] == "ok" and "净增 0" in out["detail"]
+
+    def test_认不出盘的链不当成死链(self, monkeypatch) -> None:
+        """「没看见」≠「坏的」:认不出盘的链既不判死,也不参与去重(见 pan_link_health)。"""
+        urls = [f"https://example.com/x{i}" for i in range(12)]
+        self._dead(monkeypatch, set(urls))
+        out = psc._check_net_growth(self._db(found=400, pending=0, ok_urls=urls), 1, 7)
+        assert "净增 12" in out["detail"] and "认不出盘 12" in out["detail"]
+
+    def test_必须接进run_checks(self) -> None:
+        """★ 源码级守卫:判据写好了却**没接进去** = 每天都不会跑(最安静的失败)。"""
+        import inspect
+
+        src = inspect.getsource(psc.run_checks)
+        assert "_check_net_growth(" in src, "净增长判据没接进 run_checks,等于不存在"
+        assert "pan_self_check_growth_days" in src, "窗口必须可配(与复用率的窗口分开)"
 
 
 def test_自检告警标题不含数字_否则冷却门失效(monkeypatch) -> None:

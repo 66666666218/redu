@@ -25,6 +25,7 @@
 | 最近一轮结果 | `failed` 或 detail 命中「没扫完 / 撞上限 / 撞 API 预算 / 不可信 / 异常」 |
 | 盘容量 | 按**每个盘池里最空的号**判:≥95% 警告、≥99% 错误;**>100%** 单独报「配额降档/读数不可信」,不给"清理"这种错动作 |
 | 资源库复用 | 近 N 天有成功搬链、却**一次复用都没有** ⇒ 复用入口可能没接上 |
+| **资源库净增长** | 近 N 天搬成的我方链**按分享身份去重**后,扣掉**已判死**的还剩多少;一条没搬成 / 净增 ≤0 / 存活率过低各自一种说法 |
 | 百度清单 | 不存在 / 超过 48h / 内容是测试造的(`dup0.apk` 形状) |
 | 配置 | 自动清理关着、dry-run 还开着、单轮上限或周去重预算偏小 |
 """
@@ -372,6 +373,115 @@ def _check_reuse(db: Session, user_id: int, days: int) -> dict:
     return _item("资源库复用", "ok", detail)
 
 
+#: 净增长判据的**最小样本**:少于这么多条时不下结论 —— 样本太小时「0 条」可能只是
+#: 今天本来就没活干,把它报成故障就是**狼来了**(报警体系最坏的结局,见模块头注)。
+_NET_MIN_SAMPLE = 10
+
+
+def _check_net_growth(db: Session, user_id: int, days: int) -> dict:
+    """近 N 天资源库**真的在长吗** —— 搬成多少、死掉多少、净增多少。
+
+    ## 为什么单开一项(2026-11-24)
+    `_check_reuse` 只看「复用比例」:它回答的是"有没有走复用入口",**不回答库在不在长**。
+    盘满停摆那几天(11-19 起连续 5 天转存 = 0、积压从 0 爬到 327)在自检里**全绿** ——
+    作业按时跑了、复用率也没掉,因为**根本没有东西被搬成**,而那个比例的分母正是 0。
+    ⇒ 需要一条**直接看净增**的判据:搬成的数量 **减去已判死的数量**。
+
+    ## 口径(三条都必须对,数字才可信)
+    1. **按分享身份去重**:同一条我方链会被多个标题复用(实测一条挂过 68 个标题),
+       逐行数会把 129 条真实分享数成 818 条 —— 那不是「库长了 818」,是「推了 818 次」。
+    2. **判死用出链口那一份**(`resource_library.dead_links`):账号级封禁(夸克1号 41031)
+       只有它能认出来;拿业务表自己的 `status` 判,那 6596 条死链一条都看不见。
+    3. **认不出盘的链不算死**("没看见"≠"坏的",见 `pan_link_health` 模块头注);
+       但它也没法去重,只能按整条 URL 记一次,并单独报 `认不出盘 N`。
+
+    ## 2026-11-24 首次标定的读数(生产库,只读)
+    近 7 天:发现 1924 条、搬成 **129 条不同分享**、其中 **61 条已判死**(60 条夸克 =
+    已停用的 1 号),净增 **68 条(53%)**;近 14 天净增 417/506(82%)。
+    ⇒ 这正是「积压天天涨、库却不怎么长」的那个形态,而此前没有任何一项在看它。
+    """
+    from app.db.models import DiscoveredPanLink, XunleiGroupShare
+    from app.services.pan_link_health import share_key_of
+
+    since = datetime.now() - timedelta(days=days)
+    found = int(db.scalar(
+        select(func.count()).select_from(DiscoveredPanLink).where(
+            DiscoveredPanLink.user_id == user_id,
+            DiscoveredPanLink.found_at >= since)) or 0)
+    found += int(db.scalar(
+        select(func.count()).select_from(XunleiGroupShare).where(
+            XunleiGroupShare.user_id == user_id,
+            XunleiGroupShare.synced_at >= since)) or 0)
+    backlog = int(db.scalar(
+        select(func.count()).select_from(DiscoveredPanLink).where(
+            DiscoveredPanLink.user_id == user_id,
+            DiscoveredPanLink.found_at >= since,
+            DiscoveredPanLink.status == "pending")) or 0)
+    backlog += int(db.scalar(
+        select(func.count()).select_from(XunleiGroupShare).where(
+            XunleiGroupShare.user_id == user_id,
+            XunleiGroupShare.synced_at >= since,
+            XunleiGroupShare.status == "pending")) or 0)
+
+    urls = [str(u or "") for (u,) in db.execute(
+        select(DiscoveredPanLink.our_url).where(
+            DiscoveredPanLink.user_id == user_id,
+            DiscoveredPanLink.found_at >= since,
+            DiscoveredPanLink.status == "ok",
+            DiscoveredPanLink.our_url != "")).all()]
+    urls += [str(u or "") for (u,) in db.execute(
+        select(XunleiGroupShare.our_url).where(
+            XunleiGroupShare.user_id == user_id,
+            XunleiGroupShare.synced_at >= since,
+            XunleiGroupShare.status == "ok",
+            XunleiGroupShare.our_url != "")).all()]
+
+    from app.services.resource_library import dead_links
+
+    dead = dead_links(db, user_id, fresh=True)
+    seen: set[tuple[str, str]] = set()
+    dead_n = unparsed = 0
+    dead_by_platform: dict[str, int] = {}
+    for u in urls:
+        plat, key = share_key_of(u)
+        ident = (plat, key) if key else ("", u)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        if not key:
+            unparsed += 1
+            continue
+        if dead.is_dead(u):
+            dead_n += 1
+            dead_by_platform[plat] = dead_by_platform.get(plat, 0) + 1
+    moved = len(seen)
+    net = moved - dead_n
+
+    detail = (f"近 {days} 天:发现 {found}(积压 {backlog}),"
+              f"搬成 {moved} 条不同分享,其中已判死 {dead_n}")
+    if dead_by_platform:
+        detail += "(" + "/".join(f"{p} {n}" for p, n in
+                                 sorted(dead_by_platform.items(), key=lambda kv: -kv[1])) + ")"
+    detail += f",**净增 {net}**"
+    if unparsed:
+        detail += f";认不出盘 {unparsed}(未判死)"
+
+    if moved == 0 and found >= _NET_MIN_SAMPLE:
+        #: ★ 这是「盘满停摆 / 转存链没在工作」最直接的形态:整整 N 天一条都没搬成,
+        #: 而发现量还有那么多 —— 不是"最近没资源",是**出口没了**。
+        return _item("资源库净增长", "error",
+                     detail + ";★ **一条都没搬成** —— 出口没在工作(先看盘容量与转存失败原因)")
+    if moved >= _NET_MIN_SAMPLE and net <= 0:
+        return _item("资源库净增长", "warn",
+                     detail + ";搬进来的**被死掉的抵消完了** —— 先看死链集中在哪个号,"
+                             "别急着搬更多")
+    if moved >= _NET_MIN_SAMPLE and net * 2 < moved:
+        return _item("资源库净增长", "warn",
+                     detail + f";**存活率只有 {net * 100 // moved}%** —— "
+                             "死链集中在某几个号时,搬得再多库也长不起来")
+    return _item("资源库净增长", "ok", detail)
+
+
 def _check_baidu_report(path: str | Path) -> dict:
     """百度重复清单:存在、新鲜、且**不是测试造的数据**。
 
@@ -436,6 +546,8 @@ def run_checks(db: Session, user_id: int, settings=None) -> dict:
         *(_check_run_detail(db, user_id, kind) for kind in _JOB_MAX_AGE_H),
         _check_quota(db, user_id),
         _check_reuse(db, user_id, int(getattr(settings, "pan_self_check_reuse_days", 7) or 7)),
+        _check_net_growth(db, user_id,
+                          int(getattr(settings, "pan_self_check_growth_days", 7) or 7)),
         _check_baidu_report(getattr(settings, "pan_auto_clean_baidu_report_path",
                                     "data/pan_dedupe_baidu.json")),
         _check_config(settings),
