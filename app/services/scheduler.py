@@ -505,6 +505,10 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     #: ★ **破圈前预警**(2026-11-24):用户口径「**还没同行入局**时就把热点抓出来」。
     #: 与 `promo_forecast` 正好相反:那条要「已经 4 个人在推」,这条要「还没人推」。
     from app.services.hot_breakout import hot_breakout_tick
+    #: ★ **爆款预判**(2026-11-24):「**提前一天**判出明天会炸的资源型热点,并**备好物料**」。
+    #: 与 `hot_breakout` **不是一件事**:那条读本机最新快照、只认《书名号》;
+    #: 这条直连远程三源 + 抖音趋势确认,判的是"值不值得做网盘",且**不碰上传**。
+    from app.services.hot_forecast import hot_forecast_tick
     from app.services.link_audit import link_audit_tick
     from app.services.push_timeline import tick as push_timeline_tick
     from app.services.telegram_source import collect_tick as tg_collect_tick
@@ -741,6 +745,15 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         #    已用真实触发器枚举确认不与任何定点作业同分钟。
         (hot_breakout_tick, _get_settings().hot_breakout_cron,
          {"minute": 42}, "hot_breakout", "wechat"),
+        # ★ **爆款预判**(2026-11-24):「**提前一天**判出明天会炸的资源型热点 + 备好物料」。
+        # 用户口径:「麦穗 15 号就看到了,17 号才发网盘 —— 16 号发就会占很大先机」。
+        # ⚠️ 与 `hot_breakout`(:42)分工不同,别合并:那条读**本机最新快照**、只认《书名号》;
+        #    这条**直连远程三源**(11-15 那批历史只在远程)+ **抖音热点宝趋势确认**。
+        # ⚠️ 时刻 **08:49 / 20:49** —— 08 时覆盖「昨天白天→今早」(麦穗 11-15 下午三源齐报
+        #    ⇒ 11-16 早上就该报);已用真实触发器枚举确认 49 分空闲,且不落 :00/:30 网格。
+        # ⚠️ 角色 **wechat**:慢活(远程查询/热点宝/LLM/采素材)**全在**本机 session 之外。
+        (hot_forecast_tick, _get_settings().hot_forecast_cron,
+         {"minute": 49, "hour": "8,20"}, "hot_forecast", "wechat"),
         # **链接体检**(2026-10-16):抽样探活我方分享链 + 判"货不对版/空分享"。
         # ⚠️ 为什么要有它:首轮实测 75 条里 **货不对版 14 / 空分享 10** —— 这两种**都会打到
         #   客户脸上**(点开拿到别的资源 / 点开是空的),而在此之前**没有任何一行报告看它们**

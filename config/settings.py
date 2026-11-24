@@ -486,6 +486,40 @@ class Settings(BaseSettings):
     hot_breakout_top: int = 5
     #: 48h:一个作品从预告到起势通常一两天内走完,过了就没先手价值
     hot_breakout_cooldown_hours: int = 48
+    # ---- **爆款预判**(2026-11-24)----
+    # 用户口径:「麦穗和羊我们**最早 15 号就看到了**,但 **17 号才开始发网盘** ——
+    # 能否**自己提前预判适合做网盘的热点**、自己写?**16 号发就会占很大先机**」。
+    # 与 `hot_breakout` 的分工(**别合并**):那条只读本机 `hot_source_items` 的**最新一轮**
+    # 快照(11-15 那批历史根本不在本机),且只认 `《作品名》`(麦穗那条没有书名号);
+    # 本条**直连远程**三源 + **抖音热点宝趋势确认**,并**提前把物料备好**。
+    # 判据与回放出处见 `app/services/hot_forecast.py` 头注。
+    hot_forecast_enabled: bool = True
+    #: ⚠️ 两次:**08:49** 覆盖「昨天白天 → 今早」(**麦穗 11-15 下午三源齐报 ⇒ 11-16 早上就该报**);
+    #: **20:49** 覆盖当天白天起来的,不必等到第二天。不落 `:00/:30` 网格、
+    #: 不与任何定点作业同分钟(`test_job_stagger` 是硬守卫)。
+    hot_forecast_cron: str = "49 8,20 * * *"
+    hot_forecast_lookback_hours: float = 24   # 三源回看多久
+    #: 抖音趋势三条件(回放标定:11-16 当天**只命中麦穗**;
+    #: 「谷雨」2828 万却只有 1 倍自身基线 ⇒ 常驻短剧,正确挡掉)
+    hot_forecast_min_last: int = 5_000_000    # 昨天单日搜索量
+    hot_forecast_min_ratio: float = 30.0      # 相对自身历史最低的倍数
+    hot_forecast_min_points: int = 2          # ≥100 万的天数(排除"一天蹿起来就没了")
+    hot_forecast_min_score: int = 6           # AI 价值分门槛(实测 8 条判对 6 条)
+    #: 热点宝不可达时的降级名次闸:只收已经很靠前的,并在卡上写明「趋势未确认」
+    hot_forecast_degraded_rank_top: int = 10
+    #: 「还没同行入局」的闸门。**默认 0**(一个同行都不能有):
+    #: 这条判的是**明天的爆款**,同行今天已经在推 ⇒ `hot_breakout`/`promo_forecast`
+    #: 才是它的去处,这张卡再说一遍只是噪音。用户原话是「还没有同行入局的时候」。
+    hot_forecast_max_peer_authors: int = 0
+    hot_forecast_top: int = 3
+    #: 20h:两个整点轮之间不重复报 ⇒ 08:49 报过的 20:49 不再报
+    hot_forecast_cooldown_hours: int = 20
+    #: 备料(用户 2026-11-24 拍板「预警 + 备好物料」;⚠️ **不碰上传** —— 盘满)
+    hot_forecast_materials: bool = True
+    hot_forecast_materials_top: int = 2       # 每轮最多备几份(LLM + 采素材是慢活)
+    hot_forecast_material_dir: str = "data/hot_forecast"   # gitignored
+    #: 采素材时是否用抖音 CDP(时好时坏);默认关,百度资讯 + 微博已够
+    hot_forecast_use_douyin: bool = False
     remote_sync_days: int = 14         # 每次回看多少天(靠天然键去重,天然幂等)
 
     candidate_auto_import_cron: str = "35 8 * * *"  # 每日自动收录时间(默认 08:30,紧随候选发现之后)
