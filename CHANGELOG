@@ -23,6 +23,10 @@
     而被封那个号的 key 就叫 `quark` ⇒ **把唯一该停的号挡在门外**。改成「池里有没有这一条」。
   · **本机生产库已执行**:`quark`(label「夸克1」)标 `disabled=true`,死亡集合立刻覆盖 **6596 条**
     分享(归并查询,未物化任何行);`quark#2` 抽样仍判活,不受连累。
+  · **生产端到端验证**(手跑 `audit_rows(per_source=2)`):回写 6 行真实死链(4 条夸克 41031 +
+    **2 条迅雷 `share_status=EXPIRED`** —— 说明缺口不止夸克一个);其中一条迅雷死链挂着
+    `XunleiGroupShare` **16 条**,资源库检索里 `my_link` 已回空、同名的另两条活链照给。
+  · `disable_account` 加**幂等短路**:已停用的号不再每次体检重写池子、重刷一条 warning。
   (Files: app/db/models.py, app/services/pan_link_health.py, app/services/pan_accounts.py,
   app/services/link_audit.py, app/services/resource_library.py, app/services/wechat/_listen.py,
   app/services/wechat/_enrich.py, app/services/douyin_leads.py, app/services/xunlei_kouling.py,

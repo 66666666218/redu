@@ -292,6 +292,10 @@ def disable_account(session: Session, platform: str, cookie_key: str, *, why: st
     #: **真正被封的那个号**挡在门外,而那正是这条护栏存在的唯一理由。
     for item in items:
         if isinstance(item, dict) and str(item.get("cookie_key")) == str(cookie_key):
+            #: ⚠️ 已经停用就别每次体检都重写一遍池子、刷一条 warning ——
+            #: `link_audit` 每天都会探到同一批死链,重复写是纯噪音(改状态才记日志)。
+            if item.get("disabled"):
+                return True
             item["disabled"] = True
             item["disabled_reason"] = str(why or "")[:120]
             item["last_check_at"] = datetime.now().isoformat(sep=" ", timespec="seconds")
