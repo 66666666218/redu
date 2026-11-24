@@ -1,3 +1,19 @@
+- [2026-11-24 17:51] FIX: **盘满直推的 20 条里 16 条「标了已推、实际没推」——两道闸门不同宽**
+  转存闸门 `PAN_DISCOVERY_MAX_AGE_DAYS`=**14 天**,推送闸门 `PUSH_FRESH_DAYS`=**7 天**。
+  7~14 天这段夹在中间:转存放行 → 判定盘满 → 打上「**未转存,已按源链推送**」印记
+  → **扣掉直推名额** → 进 `items` → 在 `push_items` 的 `freshness_gate.split_fresh`
+  被整批丢掉。实测 20 条带印记的行过新鲜度闸门后**保留 4 / 太旧 16** ——
+  客户一条都没收到,而 `runs` 写「盘满直推源链20」、库里写「已按源链推送」。
+  更糟的是积压按 id 升序(`exist.values()`)⇒ 这 137 条老行每轮都在队首吃满那
+  15 个积压直推名额,后面 200+ 条新鲜的**永远轮不到**。
+  ⇒ `sync()` 里新增一档:`_is_space_blocked and not _pushable(publish_at)`
+  **不占名额、不打印记**,只计 `source_only_old`,运行记录报「太老推不到N」;
+  `_pushable` **复用 `freshness_gate.is_stale`**(与推送同一把尺子,不另写天数比较);
+  另加印记保护 —— 直推过的行下一轮仍是 `pending`,本轮原始失败原因不许把印记洗掉
+  (实测 11-23 直推的 37 条到 11-24 只剩 20 条还带印记)。
+  库副本验证:`source_only=15 / source_old=77 / already=13 / items=15`,过闸门 **保留 15 / 太旧 0**。
+  (Files: app/services/pan_discovery.py, tests/test_pan_discovery.py, doc/能力清单.md)
+
 - [2026-11-24 16:18] FIX: **夸克全盘去重的分享保护只覆盖了第一层,66/66 待删项全在存活分享树内(已拦下)**
   `scripts/quark_global_dedupe.py` 的保护判据是 `x 的 fid 在 share_fids 里`,
   而 `pan_owned_shares.first_fid` 是分享的**一级** fid —— 分享一个目录时它指向

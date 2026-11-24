@@ -82,6 +82,11 @@ def _is_dead_link(message: str) -> bool:
 #: 全当成"盘满",于是把一条**打不开的链**当资源推给客户(内容事故)。
 _SPACE_HINTS = ("空间不足", "容量不足", "file_space_not_enough", "space_insufficient")
 
+#: 「**未转存,已按源链推送**」这句前缀是**库内的状态印记**,两处共用:
+#: ① 直推时写进去;② 下一轮重试时**不许把它擦掉**(见 `sync` 里"保留历史标记"那段)。
+#: ⚠️ 别在别处手写这个字面量 —— 改了前缀而漏改判据,等于把印记判据静默废掉。
+_SRC_ONLY_PREFIX = "**未转存,已按源链推送**"
+
 
 def _is_space_blocked(message: str) -> bool:
     """这条失败是「**盘没空间**」吗?
@@ -1182,6 +1187,14 @@ def sync(session, user_id: int, settings=None) -> dict:
     #: 所以与 `reused` 一样单独计数 —— 混进 `ok` 会让「转存 N 条」这个数再次骗人
     #: (同 `pan_discovery_tick` 里「转存必须剔掉复用」那条注释)。
     source_only = 0
+    #: ★★ **「太老、直推了客户也收不到」的条数**(2026-11-24)。转存闸门
+    #: (`pan_discovery_max_age_days`,默认 14 天)比**推送**闸门(`push_fresh_days`,默认 7 天)
+    #: 宽 ⇒ 7~14 天这段夹在中间:转存它放行、推送它丢弃。老实现照样给这些行打
+    #: 「已按源链推送」并**扣掉直推名额**,然后在 `push_items` 里被新鲜度闸门整批丢掉 ——
+    #: 实测 20 条打了印记的行里 **16 条**超过 7 天,客户一条都没收到,而运行记录
+    #: 写的是「盘满直推源链20」(**标了已推、实际没推**,静默失败最难查的一种)。
+    #: 现在这一档**不占名额、不打印记**,只计数,让名额留给真能到客户手里的那批。
+    source_only_old = 0
     #: ★ 直推也**拆两份额度**(理由与上面的转存额度**同源**,2026-11-23 当天用真实积压跑出来):
     #: 积压 327 条排在最前,按 20/轮要 **17 天**才清完 —— 这期间**当天新搜到的资源
     #: 排在队尾,一天都轮不到**。而新资源恰恰最有时效性(用户口径「在新在精」)。
@@ -1203,6 +1216,26 @@ def sync(session, user_id: int, settings=None) -> dict:
     def _source_quota_left(is_backlog_c: bool) -> bool:
         """这条候选还能不能吃到直推名额(**积压 / 新发现各一份**,理由见上面)。"""
         return (source_only_left if is_backlog_c else source_only_fresh_left) > 0
+
+    def _pushable(published) -> bool:
+        """直推出去**客户真的会收到**吗?
+
+        ★ **为什么直推要单独看一眼**(2026-11-24):推送侧 `push_items` 里的
+        `freshness_gate.split_fresh` 按 `push_fresh_days`(默认 **7 天**)裁,
+        而转存闸门 `pan_discovery_max_age_days` 默认 **14 天** —— 7~14 天这段
+        **能转存、能打印记、能扣名额,却在最后一刻被丢掉**。
+        实测:20 条带「已按源链推送」印记的行里 **16 条**落在这段,客户一条没收到,
+        而 `runs` 写的是「直推源链20」。⇒ 直推前先用**推送侧的尺子**量一次,
+        量不过的老行**不占名额、不打印记**(只进 `source_only_old` 计数)。
+
+        ⚠️ 用 `freshness_gate.is_stale` 而**不是自己再写一遍天数比较** ——
+        两把尺子各写一份,改了一处另一处必然漂(本仓母题:同一个事实只能有一个来源)。
+        ⚠️ 判不了时间(`None`)**照样放行**,与 `split_fresh` 的 `allow_unknown` 一致 ——
+        也正因为两边口径一致,这里判"能推"的,那边一定不会丢。
+        """
+        from app.services import freshness_gate
+
+        return not freshness_gate.is_stale(published, settings)
 
     #: 因为「本窗口内已经推过」而被跳过的条数(单独计数 —— 它与"额度用完"不是一回事)
     source_only_done = 0
@@ -1270,6 +1303,17 @@ def sync(session, user_id: int, settings=None) -> dict:
                 code = str(getattr(_ex, "pass_code", "") or "") or _source_pass_code(c)
                 if _pan_key(c["origin_url"]) in _already_pushed:
                     source_only_done += 1
+            elif _is_space_blocked(message) and not _pushable(c.get("publish_at")):
+                # ★★★ **推了也到不了客户手里 ⇒ 不占名额、不打印记**(2026-11-24)。
+                # 转存闸门 14 天、推送闸门 7 天 ⇒ 7~14 天这段能转存、能打印记、能扣名额,
+                # 却在 `push_items` 的新鲜度闸门被整批丢掉。实测 20 条印记行里 **16 条**
+                # 落在这段:客户一条没收到,`runs` 却写「盘满直推源链20」。
+                # ⇒ 这一档**只保留原文的空间不足措辞**(库里仍是 `pending`,空间出来会补搬),
+                #    把名额让给能真正送达的那批。**提取码照旧保住**(不擦库里的值)。
+                _ex = exist.get(c["origin_url"])
+                status, message, our = "pending", message, ""
+                code = str(getattr(_ex, "pass_code", "") or "") or _source_pass_code(c)
+                source_only_old += 1
             elif _is_space_blocked(message) and _source_quota_left(is_backlog):
                 # ★★★ **盘满 ⇒ 跳过转存,直接推源链**(2026-11-23,用户口径
                 # 「内存不足时不转存直接推送」)。见 `_is_space_blocked` 的说明:
@@ -1279,7 +1323,7 @@ def sync(session, user_id: int, settings=None) -> dict:
                 #    记成终态等于把 326 条永远丢掉;
                 # ⚠️ 消息头**必须不一样** —— 否则运维看到「空间不足」会以为还是没推。
                 status = "pending"
-                message = (f"**未转存,已按源链推送**:{message[:120]}"
+                message = (f"{_SRC_ONLY_PREFIX}:{message[:120]}"
                            f"(空间出来后会自动补搬)")
                 #: ⚠️ **提取码必须在这里补**:源链是**别人的**分享,很多带密码;
                 #: 转存那条路拿到的是**我们自己**新链的码,这个分支没有它。
@@ -1308,6 +1352,16 @@ def sync(session, user_id: int, settings=None) -> dict:
         _pub = parse_published(c.get("publish_at"))
         if _pub and not row.publish_at:
             row.publish_at = _pub
+        #: ★ **「已按源链推送」这个印记不许被下一轮洗掉**(2026-11-24)。
+        #: 直推过的行仍是 `pending` ⇒ 下一轮还会被重新判一次盘满,而这里拿到的是
+        #: **本轮刚生成的原始失败原因**(「百度盘空间不足…」)⇒ 直接覆盖等于把
+        #: 「这条已经推给客户了」这条事实抹掉。实测 11-23 直推的 37 条,到 11-24
+        #: 只有 20 条还带印记,其余全被洗回原文 —— 于是「推过没有」只能靠台账回溯,
+        #: 而台账只留 72 小时(见 `push_pan_dedupe_hours`)。
+        #: ⚠️ 只**保留前缀**,后面那段原因仍用本轮的原文(它是最新的盘况)。
+        if row.message and str(row.message).startswith(_SRC_ONLY_PREFIX) \
+                and not message.startswith(_SRC_ONLY_PREFIX):
+            message = f"{_SRC_ONLY_PREFIX}(此前已推过;本轮仍盘满,未能补搬)"
         row.status, row.message = status, message[:200]
         row.our_url, row.pass_code = our[:500], code[:32]
         # ★★ **必须是 `commit()`,不能是 `flush()`**(2026-10-08)。
@@ -1375,6 +1429,10 @@ def sync(session, user_id: int, settings=None) -> dict:
             #: ★★ **盘满直推**单独报(2026-11-23):它**不花转存额度**、也没转存,
             #: 和 `reused` 一样必须与 `ok` 分开 —— 否则「转存 N 条」的口径又骗人。
             "source_only": source_only,
+            #: ★ **「太老,推了客户也收不到」的条数**(2026-11-24)。它**没推**、**没占名额** ——
+            #: 单独报出来,否则这些行会让人以为「积压里还有很多能推的,怎么不推」。
+            #: 它的存在也说明**两道闸门不同宽**(转存 14 天 / 推送 7 天)这件事是真的。
+            "source_only_old": source_only_old,
             #: 因为「本窗口内已经直推过」而跳过的条数。单独报 —— 它与"额度用完"不是一回事:
             #: 看到 source_only=0 但这里很大,说明**当前窗口已经推过一批**,不是坏了。
             "source_only_done": source_only_done,
@@ -1548,6 +1606,12 @@ def pan_discovery_tick(settings=None) -> int:
                             #: 而实际上客户已经收到 N 条源链(与「积压必须说出来」同一纪律)。
                             + (f" **盘满直推源链{out['source_only']}**"
                                if out.get("source_only") else "")
+                            #: ★ **「太老,推了客户也收不到」单独报**(2026-11-24):它们
+                            #: **没推、没占名额**。不写的话,看到「直推 0」会以为
+                            #: 积压里没有能推的,而实际是**这批连推送闸门都过不了**
+                            #: (两道闸门不同宽:转存 14 天 / 推送 7 天)。
+                            + (f" 太老推不到{out['source_only_old']}"
+                               if out.get("source_only_old") else "")
                             #: 窗口内已推过而跳过的条数:没有它,「直推 0」会被读成"没在推"
                             #: (而实际是**本窗口已经推过一批、还没到重推时间**)。
                             + (f" (本窗口已推{out['source_only_done']})"

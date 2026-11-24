@@ -1738,6 +1738,142 @@ def test_新发现保底_否则新资源排在327条积压后面吃不到(sessio
             f"新发现被 3 条积压饿死了:{urls}"
 
 
+class TestSourcePushStaysDeliverable:
+    """★★ **直推名额只给「客户真能收到」的那批**(2026-11-24)。
+
+    两道闸门**不同宽**:转存 `pan_discovery_max_age_days` 默认 **14 天**、
+    推送 `push_fresh_days` 默认 **7 天** ⇒ 7~14 天这段能转存、能打「已按源链推送」印记、
+    能扣直推名额,**却在 `push_items` 的新鲜度闸门被整批丢掉**。
+
+    实测(2026-11-24):20 条带印记的行里 **16 条**落在这段 —— 客户一条没收到,
+    而 `runs.detail` 写「盘满直推源链20」、库里写着「已按源链推送」。
+    这是「**标了已推、实际没推**」,与 `_source_quota_left` 那边禁止的
+    「没推过却标成已推送」正好相反,同一种静默失败。
+    """
+
+    def _st(self, **kw):
+        base = {"pan_discovery_source_push_limit": 4,
+                "pan_discovery_source_push_fresh": 2,
+                "push_fresh_days": 7}
+        base.update(kw)
+        return type("S", (), base)()
+
+    def _row(self, i, days_old):
+        from datetime import datetime, timedelta
+
+        return DiscoveredPanLink(
+            user_id=1, platform="tieba", title=f"资源{i}", status="pending",
+            origin_url=f"https://pan.baidu.com/s/AGE{i}",
+            publish_at=datetime.now() - timedelta(days=days_old))
+
+    def test_太老的行不打印记_不占名额_只计数(self, session, monkeypatch) -> None:
+        """三条积压:20 天(连转存闸门都过不了)、10 天(7~14 天夹层)、1 天(真能推)。
+
+        名额只有 1(且全是积压档)⇒ **唯一的名额必须给 1 天那条**,
+        夹层那条**不许打印记**(打了客户也收不到)。
+        """
+        session.add_all([self._row(0, 20), self._row(1, 10), self._row(2, 1)])
+        session.commit()
+        monkeypatch.setattr("app.services.douyin_leads.search_keywords",
+                            lambda s, u, t, st: ["甲"])
+        monkeypatch.setattr(pd, "already_have", lambda s, u, title: None)
+        monkeypatch.setattr(pd, "find_candidates", lambda *a, **k: [])
+        monkeypatch.setattr(pd, "transfer_pan_url", lambda *a, **k: {
+            "status": "pending", "our_url": "", "code": "",
+            "message": "百度盘空间不足(已用 1 / 配额 0)"})
+
+        out = pd.sync(session, 1, settings=self._st(pan_discovery_source_push_limit=1,
+                                                   pan_discovery_source_push_fresh=0))
+
+        # 唯一名额给了 1 天那条 —— 不是排在队首的 20 天那条
+        assert [it["share_url"] for it in out["items"]] == \
+            ["https://pan.baidu.com/s/AGE2"], out["items"]
+        assert out["source_only"] == 1
+        assert out["source_only_old"] >= 1, "「太老推不到客户」必须单独报出来"
+
+        rows = {r.origin_url: r for r in session.scalars(select(DiscoveredPanLink)).all()}
+        assert rows["https://pan.baidu.com/s/AGE1"].message \
+            == "百度盘空间不足(已用 1 / 配额 0)", \
+            "夹层那条不许打「已按源链推送」印记 —— 打了就是在说一条没送达的推送"
+        assert rows["https://pan.baidu.com/s/AGE2"].message.startswith(pd._SRC_ONLY_PREFIX)
+
+    def test_已推印记不会被下一轮洗掉(self, session, monkeypatch) -> None:
+        """★★ 直推过的行仍是 `pending` ⇒ 下一轮**又被重新判一次盘满**。
+
+        重试拿回的是**本轮刚生成的原始失败原因**,而 `row.message = message[:200]`
+        会直接覆盖 —— 于是「这条已经推给客户了」这条事实被抹掉。实测 11-23 直推的
+        37 条到 11-24 只剩 20 条还带印记,其余全被洗回原文;而台账只留 72 小时,
+        过后就再也查不出"到底推过没有"。
+        """
+        url = "https://pan.baidu.com/s/KEEPMARK"
+        from datetime import datetime
+
+        session.add(DiscoveredPanLink(
+            user_id=1, platform="tieba", title="推过的", status="pending", origin_url=url,
+            publish_at=datetime.now(),
+            message=f"{pd._SRC_ONLY_PREFIX}:百度盘空间不足(已用 1 / 配额 0)(空间出来后会自动补搬)"))
+        session.commit()
+        monkeypatch.setattr("app.services.douyin_leads.search_keywords",
+                            lambda s, u, t, st: ["甲"])
+        monkeypatch.setattr(pd, "already_have", lambda s, u, title: None)
+        monkeypatch.setattr(pd, "find_candidates", lambda *a, **k: [])
+        #: 台账为空(模拟 72 小时窗口已过)⇒ 这一轮会再次"直推"它,走的是正常直推分支
+        monkeypatch.setattr(pd, "transfer_pan_url", lambda *a, **k: {
+            "status": "pending", "our_url": "", "code": "",
+            "message": "百度盘空间不足(已用 1 / 配额 0)"})
+
+        pd.sync(session, 1, settings=self._st())
+
+        row = session.scalars(select(DiscoveredPanLink)).one()
+        assert row.message.startswith(pd._SRC_ONLY_PREFIX), \
+            f"印记被洗掉了:{row.message}"
+
+    def test_印记在额度用完时也保住(self, session, monkeypatch) -> None:
+        """额度为 0 那条分支同样覆盖 `row.message` —— 印记也要活下来。"""
+        url = "https://pan.baidu.com/s/KEEPMARK2"
+        from datetime import datetime
+
+        session.add(DiscoveredPanLink(
+            user_id=1, platform="tieba", title="推过的", status="pending", origin_url=url,
+            publish_at=datetime.now(),
+            message=f"{pd._SRC_ONLY_PREFIX}:夸克盘空间不足"))
+        session.commit()
+        monkeypatch.setattr("app.services.douyin_leads.search_keywords",
+                            lambda s, u, t, st: ["甲"])
+        monkeypatch.setattr(pd, "already_have", lambda s, u, title: None)
+        monkeypatch.setattr(pd, "find_candidates", lambda *a, **k: [])
+        monkeypatch.setattr(pd, "transfer_pan_url", lambda *a, **k: {
+            "status": "pending", "our_url": "", "code": "",
+            "message": "百度盘空间不足(已用 1 / 配额 0)"})
+
+        #: 直推总额 0 ⇒ 整条直推路关掉,只能落到"额度用完"那条分支
+        pd.sync(session, 1, settings=self._st(pan_discovery_source_push_limit=0,
+                                              pan_discovery_source_push_fresh=0))
+
+        row = session.scalars(select(DiscoveredPanLink)).one()
+        assert row.message.startswith(pd._SRC_ONLY_PREFIX), f"印记被洗掉了:{row.message}"
+
+    def test_推送尺子与直推尺子是同一把(self) -> None:
+        """★ 源码级守卫:`sync` 里直推前必须调 `freshness_gate.is_stale`。
+
+        自己再写一遍「now - days」比较 = 两把尺子各写一份 ⇒ 改了一处另一处必然漂,
+        于是「判了能推」和「推送侧会不会丢」再次脱钩(就是这次事故的成因)。
+
+        ⚠️ 用 **AST 查真实调用**,不查子串 —— 子串守卫会被解释性注释打红(本仓栽过三次)。
+        """
+        import ast
+        import inspect
+
+        tree = ast.parse(inspect.getsource(pd.sync))
+        calls = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if node.func.attr == "is_stale":
+                    calls.add(ast.unparse(node.func))
+        assert "freshness_gate.is_stale" in calls, \
+            f"sync() 里没有用推送侧的尺子判「能不能送达」,实际调用:{calls or '（无）'}"
+
+
 def test_push_items_盘满直推的卡片不撒谎(monkeypatch) -> None:
     """★★ 卡面口径(2026-11-23):含 `source_only` 时,**不能说「已转存成我方分享链」**。
 
