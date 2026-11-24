@@ -291,6 +291,46 @@ class TestChosenPan:
         assert _rows_for("baidu", rows) == []
 
 
+def test_百度转存按配置停用时监听链也不再碰它(session, monkeypatch) -> None:
+    """★★ 2026-11-24 用户拍板「**暂时先放弃百度转存**」。
+
+    监听这条链的百度块**不走** `pan_discovery.transfer_pan_url`(它自己 new 了
+    `BaiduPanClient`)⇒ 那个总开关管不到这里,必须在这一块也挡一道。
+    不挡的话:"停了"只对网盘发现那条链停了,监听这条链照样每轮去打超额 43 倍的盘。
+
+    ⚠️ **判据必须是"到底碰没碰"**。第一版靠 `_KilledProcess` 抛 `KeyboardInterrupt`
+    间接判 —— 实测那是**假绿**:上游把 `BaseException` 也吃掉了一半,用例在开关
+    **打开**时照样"通过"。⇒ 改成**直接数客户端构造次数**,并且**同一个用例里跑两次**
+    (关 / 开)做对照:开关打开时必须看到它被碰,否则这条用例证明不了任何事。
+    """
+    import app.services.baidupan_transfer as bp
+
+    touched: list[str] = []
+
+    class _Rec:
+        def __init__(self, ck):
+            touched.append("ok")
+
+        def transfer_and_share(self, url, **k):
+            touched.append("transfer")
+            return {"share_url": "https://pan.baidu.com/s/OUR", "password": "1a2b"}
+
+    monkeypatch.setattr(bp, "BaiduPanClient", _Rec)
+
+    #: ① 开关**关** ⇒ 一次都不许碰
+    r = _art(session, "https://pan.baidu.com/s/BDonly", "只有百度链")
+    EN._enrich_new_articles(session, 1, _settings(pan_transfer_baidu=False),
+                            [r], run_backfill=False)
+    assert touched == [], f"停用后仍去看了百度盘:{touched}"
+    assert not str(r.my_pan_urls or "").strip(), "停用后不该写出任何我方链"
+
+    #: ② 对照组:开关**开** ⇒ 必须看到它被碰(证明上面的"没碰"不是替身没接上)
+    r2 = _art(session, "https://pan.baidu.com/s/BDtwo", "另一条百度链")
+    EN._enrich_new_articles(session, 1, _settings(pan_transfer_baidu=True),
+                            [r2], run_backfill=False)
+    assert touched, "对照组没被触发 ⇒ 这条用例是假绿(替身根本没接上)"
+
+
 def test_commit_now_失败后必须回滚会话() -> None:
     """★★ 2026-10-21:提交撞锁后不 rollback 会把**整段后处理**带崩。
 

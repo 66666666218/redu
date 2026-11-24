@@ -199,6 +199,14 @@ class Settings(BaseSettings):
     #: 置 False 可回到"重试照打"(若哪天需要那份兜底产出)。
     douyin_retry_skip_in_cooldown: bool = True
     pan_transfer_enabled: bool = True      # 是否自动转存(需 quark_cookie;失败回落原链接推送)
+    #: ★★ **百度转存总开关**(2026-11-24,用户拍板「暂时先放弃百度转存,等有空间了再加回来」)。
+    #: 置 False ⇒ **一条百度链都不去试转存**(连配额探针都不打):`pan_discovery` 直接把它
+    #: 记 `pending` + 走「跳过转存、直推源链」那条路(客户照样拿到那条链,只是不是我们的),
+    #: `wechat/_enrich` 的百度转存块整块跳过。
+    #: ⚠️ 与「盘满」是**两件事**,但出口相同:盘满时是**试了才知道搬不动**,这里是
+    #: **按配置不试** —— 消息措辞必须分开(否则运维会去查一个根本没满的盘)。
+    #: ⚠️ 恢复转存**只需把这个值改回 true**(池里的号没被动过),不必重新登录。
+    pan_transfer_baidu: bool = True
     pan_transfer_backfill_limit: int = 8   # 每轮监听额外补转存的历史文章数
                                            # (同步当场转存失败/早于该逻辑入库的旧文,靠这个队列慢慢补)
     wechat_resonance_hours: int = 48         # 资源共振窗口(同一盘链 N 小时内 ≥2 篇文章)

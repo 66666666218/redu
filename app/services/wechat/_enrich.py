@@ -553,8 +553,13 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
     # 不再借用 quark_cookie——此前复制粘贴导致"只配百度未配夸克"时百度链永不转存。
     # 2026-09-26 补提醒:缺 Cookie / Cookie 失效此前都只有一行 info 日志(或静默 break),
     # 运营者看到的是永久的"—",与夸克那套"点名告警"不对等。
-    if settings.pan_transfer_enabled and any(
-            "pan.baidu.com/s/" in (r.pan_urls or "") for r in transfer_rows):
+    if (settings.pan_transfer_enabled
+            #: ★★ **百度转存按配置停用**(2026-11-24,用户拍板「暂时先放弃百度转存」)。
+            #: ⚠️ 这一块**不走** `pan_discovery.transfer_pan_url`(它自己 new 了
+            #: `BaiduPanClient`),所以那个总开关管不到这里 —— 必须在这儿也挡一道,
+            #: 否则"停了"只是对网盘发现那条链停了,监听这条链照样会去打超额 43 倍的盘。
+            and bool(getattr(settings, "pan_transfer_baidu", True))
+            and any("pan.baidu.com/s/" in (r.pan_urls or "") for r in transfer_rows)):
         from app.services.alert_service import notify_incident
         from app.services.baidupan_transfer import (BaiduPanAuthError, BaiduPanClient,
                                                     extract_pwd)

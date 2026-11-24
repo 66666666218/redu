@@ -752,6 +752,19 @@ def _transfer_pan_url_raw(session, user_id: int, pan_url: str, settings=None,
 
             from app.services import pan_accounts as _A
 
+            #: ★★ **百度转存按配置停用**(2026-11-24,用户拍板「暂时先放弃百度转存,等有
+            #: 空间了再加回来」)。放在**取凭据之前**:连 cookie 都不必读,更不打配额探针
+            #: —— 唯一那个百度号超额 43 倍,每轮几十条候选各探一次纯属白烧。
+            #: ⚠️ 记 `pending`(不是 `skipped`):链是好的,配置一改回来就能搬。
+            #: ⚠️ 措辞里**必须出现「空间不足」那组词之一** —— 上游靠 `_is_space_blocked`
+            #: 判「跳过转存、直推源链」,这样客户**照样拿到这条链**(见 `sync` 那段)。
+            #: 同时明写「按配置停用」,否则运维会去查一个根本没满的盘。
+            if not bool(getattr(settings, "pan_transfer_baidu", True)):
+                return {"status": "pending", "our_url": "", "code": "",
+                        "message": ("百度转存已按配置停用(`PAN_TRANSFER_BAIDU=false`;"
+                                    "该号空间不足)—— 本轮**未尝试**转存,"
+                                    "源链照推;配置改回 true 后会自动重试")}
+
             ck = _A.cookie_for(session, "baidupan", user_id=user_id)
             if not ck:
                 return {"status": "pending", "message": "未配百度网盘 Cookie(配上后会自动重试)",

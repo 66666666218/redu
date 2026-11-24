@@ -410,6 +410,74 @@ def test_transfer_baidu_probe_failure_does_not_block_transfer(session, monkeypat
     assert out["status"] == "ok", out
 
 
+def test_baidu_transfer_can_be_switched_off_by_config(session, monkeypatch) -> None:
+    """★★ 2026-11-24 用户拍板「**暂时先放弃百度转存**,等有空间了再加回来」。
+
+    那个百度号超额 **43 倍**,积压里近 3 天 97 条候选全是它的「空间不足」。
+    ⇒ 置 `PAN_TRANSFER_BAIDU=false` 时**一条都不许去试**:连 `BaiduPanClient` 都不构造
+    (它一构造就要读凭据),更不打配额探针 —— 但**状态仍是 `pending`**,
+    链路本身没坏,配置改回来就能搬。
+
+    ⚠️ 措辞必须同时做到两件事:①带「空间不足」那组词(上游靠它走「跳过转存、直推源链」
+    ⇒ 客户照样拿到这条链);②明写「按配置停用」(否则运维会去查一个根本没满的盘)。
+    """
+    from app.services import baidupan_transfer as bt
+
+    built: list[str] = []
+
+    class _B:
+        def __init__(self, ck):
+            built.append(ck)
+
+        def quota_usage(self):
+            raise AssertionError("按配置停用时不该打配额探针")
+
+        def transfer_and_share(self, *a, **k):
+            raise AssertionError("按配置停用时不该去转存")
+
+    monkeypatch.setattr(bt, "BaiduPanClient", _B)
+    monkeypatch.setattr(cookie_store, "get_cookie", lambda s, u, p: "BD-CK")
+
+    st = type("S", (), {"pan_transfer_baidu": False})()
+    out = pd.transfer_pan_url(session, 1, "https://pan.baidu.com/s/1xyz", st)
+
+    assert built == [], "停用时连客户端都不该构造(构造就要读凭据)"
+    assert out["status"] == "pending", out
+    assert out["code"] == "", "`code` 会写进 pass_code(提取码列),不许塞状态词"
+    assert "按配置停用" in out["message"], out["message"]
+    assert "PAN_TRANSFER_BAIDU" in out["message"], "必须告诉运维改哪个旋钮"
+    #: ★ 上游判据:`_is_space_blocked` 命中它 ⇒ 跳过转存、直推源链(客户照样拿得到)
+    assert pd._is_space_blocked(out["message"]), out["message"]
+
+
+def test_baidu_switch_off_defaults_to_on_for_old_settings(monkeypatch, session) -> None:
+    """⚠️ **默认必须是 `True`**:老配置对象(单测替身/旧 `.env`)没有这个字段,
+    若取不到就当停用,等于**悄悄把百度转存关掉却没人知道**(与本仓"默认值即行为"同源)。"""
+    from app.services import baidupan_transfer as bt
+
+    called: list[int] = []
+
+    class _B:
+        def __init__(self, ck):
+            pass
+
+        def quota_usage(self):
+            return {"used": 1, "total": 100, "ratio": 0.01}
+
+        def transfer_and_share(self, url, password="", **k):
+            called.append(1)
+            return {"share_url": "https://pan.baidu.com/s/OUR", "password": "abcd"}
+
+    monkeypatch.setattr(bt, "BaiduPanClient", _B)
+    monkeypatch.setattr(cookie_store, "get_cookie", lambda s, u, p: "BD-CK")
+    pd._baidu_quota_cache.clear()
+
+    #: `_S` 里**没有** `pan_transfer_baidu` 这个字段 ⇒ 走 getattr 默认值
+    out = pd.transfer_pan_url(session, 1, "https://pan.baidu.com/s/1xyz", _S())
+    assert called == [1], "字段缺失时应当照常转存(默认开启)"
+    assert out["status"] == "ok", out
+
+
 def test_find_candidates_needs_zhihu_cookie(session, monkeypatch) -> None:
     """这条路靠知乎搜索,**没配 Cookie 就没有候选**(不报错)。"""
     monkeypatch.setattr(cookie_store, "get_cookie", lambda s, u, p: "")
