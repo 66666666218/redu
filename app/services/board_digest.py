@@ -43,6 +43,10 @@ logger = get_logger(__name__)
 BOARD_LABELS = {
     "wechat": "公众号",
     "douhot": "抖音热榜",
+    #: ⚠️ `douyin` 与 `douyin_peer` **不是一回事**(2026-11-24):`douyin` 是
+    #: `demand_watch` 的大瓜卡(求1型 / 最新大瓜),`douyin_peer` 才是同行资源线索卡。
+    #: 没登记时标题会直接显示英文 `douyin`(实测 08:32 那张就是)。
+    "douyin": "抖音大瓜",
     "douyin_peer": "抖音",
     "weibo": "微博",
     "weibo_peer": "微博同行",
@@ -54,7 +58,18 @@ BOARD_LABELS = {
     "baidu": "百度热榜",
     "multiplatform": "全平台热榜",
     "xianyu": "闲鱼",
+    "xunlei_group": "迅雷群资源",
 }
+
+#: 这些 section 的**内容卡本身**就发管理群(2026-10-30 用户口径「先收集数据**发到管理群**,
+#: 再根据数据改策略」)⇒ 它们的日结也必须去管理群。
+#:
+#: ⚠️⚠️ 不加这一条时 `_hook_for` → `platform_webhook(settings, "douyin")` 查不到映射,
+#: 于是**回落主群 = 客户群** —— 而推送侧(`demand_watch.push_latest/push_request`)
+#: 走的是 `webhook_for(settings, "admin")`。两侧判据不一致的后果不是"去向错位"这么轻:
+#: 内部大瓜汇总会**真的发进客户群**(2026-11-24 实测 08:32 那张已发)。
+#: 判据只此一处;将来哪个板块改成管理群,把它加进来即可。
+ADMIN_SECTIONS = {"douyin"}
 
 #: 日结 / 周结各自的**窗口**与标题用词
 PERIODS = {
@@ -454,9 +469,14 @@ def _hook_for(settings, section: str) -> str:
     ⚠️ **必须同一套判据**,否则会出现"日结发去主群、内容却在专属群"这种去向错位:
     主群的人看不到那个板块的上下文,反而更乱。专属群没配时回落主群,
     与内容卡本身的行为**逐字一致**(用户 2026-10-16 口径:「各板块客户群,**未配回落主群**」)。
+
+    ⚠️⚠️ `ADMIN_SECTIONS` 里的板块**内容卡发管理群**(不是"没配专属群")⇒ 这里也必须
+    走 `admin`,不许经 `platform_webhook` 回落主群 —— 那会把内部数据发进客户群。
     """
     from app.services.feishu_client import webhook_for
 
+    if section in ADMIN_SECTIONS:
+        return webhook_for(settings, "admin")
     return webhook_for(settings, section)
 
 

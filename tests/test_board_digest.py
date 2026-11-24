@@ -589,3 +589,63 @@ def test_digest_groups_rows_by_niche(session) -> None:
     assert "**▍" in blob, "每组要有小标题(div,不是 column_set)"
     #: 序号连续,不因分组重来
     assert "**1.**" in blob and "**2.**" in blob
+
+
+# ---------------------------------------------------------------------------
+# 板块去向:管理群板块 / 中文名(2026-11-24)
+#
+# ⚠️ 钉的是**一次已经发生的错发**:`demand_watch` 的四张卡(需求名/最新大瓜/求1型/
+# 新名字)按用户口径「先收集数据**发到管理群**」走 `webhook_for(settings, "admin")`,
+# 但它们记的台账 `section='douyin'` —— 而 `board_digest._hook_for` 只查
+# `_SECTION_WEBHOOK`(没有 `douyin`)⇒ `platform_webhook` 回空 ⇒ **回落主群 = 客户群**。
+# 2026-11-24 08:32 的运行记录:`已发:…,douyin,…` 那一张就是发进客户群的内部大瓜汇总。
+# ---------------------------------------------------------------------------
+
+class Test板块去向:
+    def test_管理群板块的日结也去管理群(self) -> None:
+        """`douyin`(大瓜)的内容卡发管理群 ⇒ 日结必须同样去管理群,不许回落主群。"""
+        class _SAdmin(_S):
+            feishu_webhook = "https://example.com/main"          #: 客户主群:**已配**
+            feishu_webhook_admin = "https://example.com/admin"
+
+        assert bd._hook_for(_SAdmin(), "douyin") == "https://example.com/admin"
+        #: 不是管理群的板块照旧按专属群 / 主群解析 —— 别把整条规则改成"全都发管理群"
+        assert bd._hook_for(_SAdmin(), "xiaohongshu") == "https://example.com/xhs"
+        assert bd._hook_for(_SAdmin(), "zhihu") == "https://example.com/main"
+
+    def test_管理群没配时才回落主群(self) -> None:
+        """管理群没配 = 老行为(宁可发错群,也别静默丢掉一整天的汇总)。"""
+        class _SNoAdmin(_S):
+            feishu_webhook = "https://example.com/main"
+            feishu_webhook_admin = ""
+
+        assert bd._hook_for(_SNoAdmin(), "douyin") == "https://example.com/main"
+
+    def test_大瓜日结不落主群(self, session, monkeypatch) -> None:
+        """端到端:台账里只有 `douyin` 时,被调到的 webhook 只能是管理群。"""
+        class _SAdmin(_S):
+            feishu_webhook = "https://example.com/main"
+            feishu_webhook_admin = "https://example.com/admin"
+
+        calls = _patch_send(monkeypatch)
+        _seed(session, "douyin", "终于见到网恋男友了 #白虎喵")
+        assert bd.run_board_digest_all_users("daily", settings=_SAdmin(), session=session) == 1
+        assert calls == ["https://example.com/admin"], "内部大瓜汇总发进了客户主群"
+
+    def test_大瓜板块有中文名(self) -> None:
+        """⚠️ 没登记时标题直接显示英文 `douyin`(实测 08:32 那张)。"""
+        assert bd.board_label("douyin") == "抖音大瓜"
+        assert bd.board_label("xunlei_group") == "迅雷群资源"
+        #: 相邻的同行群板块名不许被挤掉
+        assert bd.board_label("douyin_peer") == "抖音"
+
+    def test_大瓜与同行群不是同一条(self, session) -> None:
+        """`douyin`(大瓜,管理群)与 `douyin_peer`(同行资源,客户群)**两个 section**,
+        日结各自一张、各自打标 —— 别合并成一张发给一个群。"""
+        _seed(session, "douyin", "求1型大瓜")
+        _seed(session, "douyin_peer", "《某剧》第2集")
+        since, until, _ = bd.window_of("daily")
+        a = bd.build(session, 1, "douyin", since, until)
+        b = bd.build(session, 1, "douyin_peer", since, until)
+        assert a["label"] == "抖音大瓜" and b["label"] == "抖音"
+        assert a["resources"] == 1 and b["resources"] == 1

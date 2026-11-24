@@ -1,3 +1,16 @@
+- [2026-11-24 18:08] FIX: **内部大瓜日结发进了客户群 —— 板块去向两侧判据不一致**
+  台账里 `section='douyin'` 的那 117 行来自 `demand_watch` 的四张卡(需求名/最新大瓜/
+  求1型/新名字),它们按用户口径「先收集数据**发到管理群**」走 `webhook_for(settings,"admin")`;
+  而 `board_digest._hook_for` 只查 `_SECTION_WEBHOOK`(没有 `douyin` 键)⇒ `platform_webhook`
+  回空 ⇒ **回落主群 = 客户群**。2026-11-24 08:32 运行记录 `已发:…,douyin,…` 就是实证。
+  改法:`board_digest` 新增 `ADMIN_SECTIONS={"douyin"}`,`_hook_for` 对它直接走 `admin`
+  (管理群没配才回落主群,保持"宁可发错群也别静默丢一整天");`BOARD_LABELS` 补
+  `douyin=抖音大瓜` 与 `xunlei_group=迅雷群资源`(原来标题直接显示英文键名)。
+  ⚠️ 这一条与能力清单里「内容→客户群 / 维护→管理群」同源,但**判据必须写在代码里**而不是
+  靠人记得 —— 两侧各写一份才是这次出错的根因。
+  新增测试 5 条(去向解析/管理群没配回落/端到端只打管理群/中文名/大瓜与同行群别合并)。
+  (Files: app/services/board_digest.py, tests/test_board_digest.py, doc/能力清单.md)
+
 - [2026-11-24 17:51] FIX: **盘满直推的 20 条里 16 条「标了已推、实际没推」——两道闸门不同宽**
   转存闸门 `PAN_DISCOVERY_MAX_AGE_DAYS`=**14 天**,推送闸门 `PUSH_FRESH_DAYS`=**7 天**。
   7~14 天这段夹在中间:转存放行 → 判定盘满 → 打上「**未转存,已按源链推送**」印记
