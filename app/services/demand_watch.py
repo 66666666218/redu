@@ -1183,21 +1183,55 @@ def _age_days(ts: int, now: datetime | None = None) -> float:
 
 
 def _age_note(stats: dict | None) -> str:
-    """新鲜度闸的一句话(` 老12/无时间3`);没拦过就返回空串。
+    """素材侧的三段显形:`拦:…` / `已扫N 回填N` / `源:搜N/作N/线N/标N/热N`。
 
-    ⚠️ 这两个数**必须**出现在运行记录里:拦下全部素材时 `视频0`,而"闸门挡的"与
-    "今天真没素材"在 `runs` 里是同一种写法 —— 本仓最忌的假成功就是这么来的。
+    三段都是同一个母题:没有它,"闸门把素材全挡了"/"每轮都在扫同一批"/"素材全来自
+    搜索、库内一条没用"这三种失灵,在 `runs` 里与"今天正常"长得一模一样。
+
+    ⚠️ 全部为 0 时返回空串 —— 运行记录不该被常量填满;要看全貌去 `doc`。
     """
-    st = int((stats or {}).get("stale") or 0)
-    un = int((stats or {}).get("unknown") or 0)
-    if st <= 0 and un <= 0:
-        return ""
-    bits = []
-    if st:
-        bits.append(f"老{st}")
-    if un:
-        bits.append(f"无时间{un}")
-    return " 拦:" + "/".join(bits)
+    s = stats or {}
+    bits: list[str] = []
+    st, un = int(s.get("stale") or 0), int(s.get("unknown") or 0)
+    if st or un:
+        cut = []
+        if st:
+            cut.append(f"老{st}")
+        if un:
+            cut.append(f"无时间{un}")
+        bits.append("拦:" + "/".join(cut))
+    skip, fill = int(s.get("rescanned") or 0), int(s.get("refilled") or 0)
+    if skip or fill:
+        bits.append(f"已扫{skip} 回填{fill}")
+    srcs = [(k, int(s.get(f"src_{k}") or 0))
+            for k in ("search", "author", "lead", "peer", "hot")]
+    if any(n for _k, n in srcs):
+        #: 搜索/作者合并成「搜」与「作」—— 它们是同一条路(抖音搜索出来的),
+        #: 分开写只会让运行记录变长而看不出差别。
+        abbr = {"search": "搜", "author": "作", "lead": "线", "peer": "标", "hot": "热"}
+        bits.append("源:" + "/".join(f"{abbr[k]}{n}" for k, n in srcs))
+    return (" " + " ".join(bits)) if bits else ""
+
+
+def _recently_scanned(db, user_id: int, days: int) -> set[str]:
+    """近 `days` 天已经扫过评论的 `aweme_id` 集合(含今天已扫的)。
+
+    ★ 为什么需要它(2026-11-24 实测):近 7 天 114 行扫描只覆盖 **82 个视频**,
+    **28% 是重复**,单个视频最多**跨 7 天被扫 7 次** —— `source_videos` 按
+    "评论数从多到少"取素材,只要不排除已扫的,每轮都会选中同一批高评论的老视频。
+    `demand_scans` 就是现成的台账(每轮扫完都会落一行),不需要新表。
+    """
+    from app.db.models import DemandScan
+
+    days = int(days or 0)
+    if days <= 0:
+        return set()
+    since = datetime.now() - timedelta(days=days)
+    rows = db.scalars(select(DemandScan.aweme_id).where(
+        DemandScan.user_id == user_id,
+        DemandScan.platform == PLATFORM,
+        DemandScan.scanned_at >= since)).all()
+    return {str(r) for r in rows if r}
 
 
 def source_videos(db, user_id: int = 1, settings=None,
@@ -1242,6 +1276,30 @@ def source_videos(db, user_id: int = 1, settings=None,
 
     out: list[dict] = []
     seen: set[str] = set()
+    #: 已经**进了池**的 id。与 `seen` 分开:被"已扫"跳过的那批也在 `seen` 里
+    #: (防同一条在四段来源里被反复计数),但回填时它们才是**唯一可用的候选** ——
+    #: 拿 `seen` 判重会让回填永远填不进去。
+    out_ids: set[str] = set()
+
+    #: ★★ **库内保底名额**(2026-11-24 实测):`①b 同款作者` 会把 `lib_need` 填满 ⇒
+    #: `②线索`/`③对标号` **永远拿 0 个名额**(历史 263 行扫描里 260 行来自搜索/热点)。
+    #: 但保底**只在库内真有候选时才算** —— 否则会把搜索/作者这两步也饿死
+    #: (`test_同款作者的新作品也进候选池` 那种"库里什么都没有"的场景)。
+    leads = db.scalars(select(DouyinLead).where(
+        DouyinLead.user_id == user_id,
+        DouyinLead.found_at >= since).order_by(DouyinLead.found_at.desc())).all()
+    works = db.scalars(select(DouyinPeerWork).where(
+        DouyinPeerWork.user_id == user_id,
+        DouyinPeerWork.first_seen_at >= since).order_by(
+        DouyinPeerWork.first_seen_at.desc())).all()
+    reserve = max(0, min(int(getattr(settings, "demand_lib_reserve", 2) or 0), lib_need - 1))
+    if not leads and not works:
+        reserve = 0                    #: 库里没货 ⇒ 名额全给搜索/作者(保底无处可用)
+    #: `search_cap` = ①+①b 合起来的上限(给库内让出的那部分是 `reserve`)。
+    search_cap = max(1, lib_need - reserve)
+    #: ② ②③ 共享剩下的名额,但 ③ 有候选时要留 1 个(否则 ② 一填满 ③ 又是 0)。
+    peer_reserve = 1 if (works and reserve >= 1) else 0
+    lead_stop = max(1, lib_need - peer_reserve)
 
     #: ★★ **内容发布时间闸**(2026-11-24,用户「有的大瓜已经是很久之前的了」)。
     #: 闸门**在进池前**判(不是扫完评论再筛):一条三年前的老视频,评论扫描额度花了
@@ -1254,8 +1312,45 @@ def source_videos(db, user_id: int = 1, settings=None,
     lib_days = int(getattr(settings, "demand_source_max_age_days", 0) or 0) or age_days
     allow_unknown = bool(getattr(settings, "demand_age_allow_unknown", False))
     counters = stats if stats is not None else {}
-    for _k in ("stale", "unknown"):
+    for _k in ("stale", "unknown", "rescanned", "refilled"):
         counters.setdefault(_k, 0)
+
+    #: ★ **近 N 天扫过的不再重复扫**(2026-11-24 实测:28% 的扫描行是重复,单个视频
+    #: 最多跨 7 天被扫 7 次)。两段式:`_skip()` 判,`_backfill()` 在候选**全被跳过**时
+    #: 按发布新→旧回填 —— 去重不该把素材池饿死(实测近 7 天池里有 240 条新鲜素材,
+    #: 3 天轮换绰绰有余,但线索池更新慢时会不够)。
+    skip_days = int(getattr(settings, "demand_skip_scanned_days", 3) or 0)
+    scanned_recently = _recently_scanned(db, user_id, skip_days)
+    skipped_cand: list[dict] = []
+
+    def _skip(vid: str, cand: dict) -> bool:
+        """近 N 天扫过 ⇒ 跳过,但**记下来**给回填用(不能静默丢)。"""
+        if skip_days <= 0 or vid not in scanned_recently:
+            return False
+        skipped_cand.append(cand)
+        counters["rescanned"] += 1
+        return True
+
+    def _backfill(room: int) -> None:
+        """候选全被"已扫"跳过时,按发布时间新→旧回填 `room` 条。
+
+        ⚠️ 回填**必须显形**(`refilled`)—— 否则"回填的老货"与"今天真没新素材"
+        在运行记录里长得一样(本仓母题)。
+        """
+        if room <= 0 or not skipped_cand:
+            return
+        pool = sorted(skipped_cand, key=lambda c: int(c.get("publish_at") or 0), reverse=True)
+        for cand in pool:
+            if room <= 0 or len(out) >= lib_need + hot_budget:
+                break
+            #: ⚠️ 判重看 `out_ids` 而不是 `seen` —— 被跳过的那批在 `seen` 里,
+            #: 拿 `seen` 判会让回填**一条都填不进去**(本函数存在的意义就没了)。
+            if cand["aweme_id"] in out_ids:
+                continue
+            out.append(cand)
+            out_ids.add(cand["aweme_id"])
+            counters["refilled"] += 1
+            room -= 1
 
     def _fresh(vid: str, declared=None, lib: bool = False) -> bool:
         """这条能不能进池。判不了时间 ⇒ 按 `demand_age_allow_unknown` 处理并计数。"""
@@ -1275,6 +1370,11 @@ def source_videos(db, user_id: int = 1, settings=None,
 
     def _add(vid: str, url: str, title: str, comments: int = 0, author: str = "",
              src: str = "", declared=None, lib: bool = False) -> None:
+        """进池(被判重/太老/已扫跳过则静默返回,条数各自记在 `counters` 里)。
+
+        ⚠️ 回填**不**走这里:回填本身就是"明知已扫过也要用",而这里会再 `_skip` 一次
+        ⇒ 永远填不进去。见 `_backfill`。
+        """
         vid = str(vid or "").strip()
         if not vid or vid in seen:
             return
@@ -1283,10 +1383,14 @@ def source_videos(db, user_id: int = 1, settings=None,
         seen.add(vid)
         if not _fresh(vid, declared, lib=lib):
             return
-        out.append({"aweme_id": vid, "url": url or f"https://www.douyin.com/video/{vid}",
-                    "title": title or "", "comment_count": int(comments or 0),
-                    "author": str(author or ""), "src": src,
-                    "publish_at": publish_ts_of(vid, declared)})
+        cand = {"aweme_id": vid, "url": url or f"https://www.douyin.com/video/{vid}",
+                "title": title or "", "comment_count": int(comments or 0),
+                "author": str(author or ""), "src": src,
+                "publish_at": publish_ts_of(vid, declared)}
+        if _skip(vid, cand):
+            return
+        out.append(cand)
+        out_ids.add(vid)
 
     # ① 参考作品名(有就先用) —— 每轮轮着搜 3 个,避免连发触发抖音限流
     seeds = [w.strip() for w in
@@ -1310,22 +1414,23 @@ def source_videos(db, user_id: int = 1, settings=None,
         for v in vids:
             _add(v.get("aweme_id"), v.get("url"), v.get("snippet"),
                  (v.get("metrics") or {}).get("comment_count") or 0, v.get("name"),
-                 declared=v.get("publish_at"))
+                 declared=v.get("publish_at"), src="search")
             #: 参考作品只占**一半名额**:它们通常没有书名号(标题是"标签流"),
             #: 名字还得靠库内推广线索那半;全被搜索占满 ⇒ 这一轮一个名字都抽不到。
-            if len(out) >= max(1, lib_need // 2):
+            #: ★ 2026-11-24:`search_cap` 还会给库内素材再让出 `reserve` 个名额。
+            if len(out) >= min(max(1, lib_need // 2), search_cap):
                 break
 
     # ★ **同款作者的新作品**也要进候选池(2026-10-30 用户:「根据这些来找方法去**发现新的大瓜**」)。
     # 参考作品 → 作者 → 他们的近期作品,这些才是"**最新的**求1型视频"的来源;
     # 只看我们自己的线索池永远发现不了新号。
-    if len(out) < lib_need:
+    if len(out) < search_cap:
         from datetime import timedelta
 
         since_ts = int((datetime.now() - timedelta(
             days=int(getattr(settings, "demand_latest_days", 3) or 3))).timestamp())
         for sec, name in list(authors.items()):
-            if len(out) >= lib_need:
+            if len(out) >= search_cap:
                 break
             res = fetch_author_posts(sec, session=db, user_id=user_id, count=20)
             if not res["ok"]:
@@ -1334,34 +1439,32 @@ def source_videos(db, user_id: int = 1, settings=None,
                 if it["publish_at"] and it["publish_at"] < since_ts:
                     continue
                 _add(it["aweme_id"], it["url"], it["desc"], 0, it["author"] or name,
-                     declared=it["publish_at"])
-                if len(out) >= lib_need:
+                     declared=it["publish_at"], src="author")
+                if len(out) >= search_cap:
                     break
 
     # ② 我们自己的线索(推广视频,评论区天然是「求资源」的)
-    leads = db.scalars(select(DouyinLead).where(
-        DouyinLead.user_id == user_id,
-        DouyinLead.found_at >= since).order_by(DouyinLead.found_at.desc())).all()
     for r in leads:
         #: ⚠️ **先判再 `_add`,不是加完再判**(2026-11-17 修):原写法 `_add` 之后才
         #: `break` ⇒ 进入循环时 `len(out)` 已经等于 `lib_need` 时仍会**多塞一条**,
         #: 于是 ② 填满 3 条后 ③ 又加第 4 条 ⇒ `need - len(out) == 0` ⇒
         #: **④ 热点段的名额被吃掉,一次都轮不到**(实测:`demand_hot_videos=1` 而
         #: `hot_budget` 恒被算成 0,`hot_word_seen` 停在 11-11、日志里「热点差分」零次)。
-        if len(out) >= lib_need:
+        if len(out) >= lead_stop:
             break
-        _add(r.aweme_id, r.url, r.title, 0, r.author, declared=r.publish_at, lib=True)
+        _add(r.aweme_id, r.url, r.title, 0, r.author,
+             declared=r.publish_at, lib=True, src="lead")
 
     # ③ 对标号作品(带网盘的那些)
-    works = db.scalars(select(DouyinPeerWork).where(
-        DouyinPeerWork.user_id == user_id,
-        DouyinPeerWork.first_seen_at >= since).order_by(
-        DouyinPeerWork.first_seen_at.desc())).all()
     for w in works:
         if len(out) >= lib_need:
             break
         _add(w.aweme_id, w.url, w.title, 0, w.account_name,
-             declared=w.publish_at, lib=True)
+             declared=w.publish_at, lib=True, src="peer")
+
+    #: ★ **候选全被"近 N 天已扫"跳过时回填**(见 `_backfill` 的注释):
+    #: 去重是为了别每轮扫同一批,**不是**为了把素材池扫空。
+    _backfill(lib_need - len(out))
 
     # ④ ★ **今天才冒出来的热点**(2026-11-08 用户:「每次都会有新的热点出来,
     # 你需要总结这些规律来完成监控和预测」)。
@@ -1415,6 +1518,14 @@ def source_videos(db, user_id: int = 1, settings=None,
                 _add(v.get("aweme_id"), v.get("url"), v.get("snippet"),
                      (v.get("metrics") or {}).get("comment_count") or 0, v.get("name"),
                      src="hot", declared=v.get("publish_at"))
+
+    #: ★ **来源分布必须显形**(2026-11-24):历史 263 行扫描里 260 行来自搜索/热点、
+    #: 库内线索只 3 行 —— 而这个失衡**在运行记录里一个字都没有**,只能靠事后 join
+    #: `douyin_leads`/`douyin_peer_works` 才反推得出来(所以它存在了一个月没人发现)。
+    #: 现在每轮把四个来源的条数直接写进 `stats`,由 `run_user` 落进 `runs.detail`。
+    for _s in ("search", "author", "lead", "peer", "hot"):
+        counters.setdefault(f"src_{_s}", 0)
+        counters[f"src_{_s}"] = sum(1 for v in out if v.get("src") == _s)
 
     return out[:need]
 

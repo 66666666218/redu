@@ -59,6 +59,13 @@ class _S:
     demand_source_max_age_days = 0
     demand_age_allow_unknown = False
     demand_name_max_age_days = 0
+    #: ⚠️ **替身里默认关掉"已扫去重"与"库内保底"**(2026-11-24),而生产是 3 天 / 2 个名额。
+    #: 这两个闸会改变**素材条数与来源**,而下面一大半用例断言的是"原来那套名额分配"
+    #: (比如 `test_热点名额不被库内线索吃光` 要求正好 4 条)。
+    #: 闸本身由 `test_已扫去重_*` / `test_库内保底_*` 那两组**自己打开**验证;
+    #: 生产默认值的守卫在 `test_生产默认值_去重与保底是开着的`。
+    demand_skip_scanned_days = 0
+    demand_lib_reserve = 0
     feishu_webhook = ""
     feishu_webhook_douyin = ""
     feishu_secret = ""
@@ -732,12 +739,12 @@ def test_汇总给出分母与命中率(session):
 
 # ---------------------------------------------------------------- 入口
 
-def _lead(session, aweme_id="111", title="求《狗爹和小桃》全集"):
+def _lead(session, aweme_id="111", title="求《狗爹和小桃》全集", found_at=None):
     from app.db.models import DouyinLead
 
     session.add(DouyinLead(user_id=1, aweme_id=aweme_id, title=title, author="a",
                            url=f"https://www.douyin.com/video/{aweme_id}",
-                           found_at=datetime.now(), found_date="2026-10-30"))
+                           found_at=found_at or datetime.now(), found_date="2026-10-30"))
     session.commit()
 
 
@@ -1494,3 +1501,188 @@ def test_最新大瓜_只有雪花id也能判新旧(session, monkeypatch):
     ]})
 
     assert [i["aweme_id"] for i in dw.discover_latest(session, 1, S())] == [new]
+
+
+# ---------------------------------------------------------------------------
+# 素材侧:已扫去重 + 库内保底 + 来源显形(2026-11-24)
+# ---------------------------------------------------------------------------
+
+
+class _SD(_S):
+    """打开"已扫去重"的替身(生产 3 天)。"""
+    demand_skip_scanned_days = 3
+
+
+class _SD1(_SD):
+    """去重 + **只要 1 条**素材。
+
+    ⚠️ 上面两条用例要验证的是「跳过」和「回填」本身,而 `_SD` 继承来的
+    `demand_max_videos = 2` 会让**回填把空出来的名额填满** —— 那是对的行为,
+    但会把"跳过是否生效"与"回填取谁"两件事混在一条断言里。钉成 1 条更清楚。
+    """
+    demand_max_videos = 1
+
+
+class _SR(_S):
+    """打开"库内保底"的替身(生产 2 个名额)。"""
+    demand_lib_reserve = 2
+    demand_max_videos = 4
+
+
+def _scanned(session, aweme_id, days_ago=0):
+    """造一条"我们今天扫过它"的台账行(去重闸的输入就是这张表)。"""
+    from app.db.models import DemandScan
+
+    ts = datetime.now() - timedelta(days=days_ago)
+    session.add(DemandScan(user_id=1, platform="douyin", aweme_id=aweme_id,
+                           scanned_date=ts.strftime("%Y-%m-%d"),
+                           scanned_at=ts))
+    session.commit()
+
+
+def test_近三天扫过的视频不再重复进池(session):
+    """实测:近 7 天 114 行扫描只覆盖 82 个视频,28% 是重复,单个最多跨 7 天扫 7 次。"""
+    #: 显式给出入库顺序(`ORDER BY found_at DESC`),让「已扫」的那条排最前 ——
+    #: 否则三条同秒入库,谁先被取到取决于数据库的物理顺序,用例会飘。
+    base = datetime.now()
+    _lead(session, "111", found_at=base)
+    _lead(session, "222", found_at=base - timedelta(seconds=1))
+    _lead(session, "333", found_at=base - timedelta(seconds=2))
+    _scanned(session, "111", days_ago=1)
+
+    stats = {}
+    vids = dw.source_videos(session, 1, _SD(), stats=stats)
+
+    assert {v["aweme_id"] for v in vids} == {"222", "333"}, "扫过的 111 又进池了"
+    assert stats["rescanned"] == 1
+    assert stats["refilled"] == 0, "没被跳过的素材够填满名额 ⇒ 不该回填"
+
+
+def test_超过去重窗口的可以再扫(session):
+    """3 天窗口外的不算重复 —— 视频更新慢的时候它还是唯一素材。"""
+    _lead(session, "111")
+    _scanned(session, "111", days_ago=5)
+
+    vids = dw.source_videos(session, 1, _SD())
+    assert [v["aweme_id"] for v in vids] == ["111"]
+
+
+def test_候选全被跳过时按发布时间回填_不许把素材池饿死(session):
+    """去重是为了别每轮扫同一批,**不是**为了把池子扫空。
+
+    ⚠️ 回填必须显形(`回填N`):否则"回填的老素材"与"今天真没新素材"在 `runs` 里
+    长得一模一样 —— 本仓母题(静默失败 = 假成功)。
+    """
+    from app.db.models import DouyinLead
+
+    newer, older = _snow(_age_s(1)), _snow(_age_s(2))
+    for vid in (older, newer):
+        session.add(DouyinLead(user_id=1, aweme_id=vid, title="《老素材》", author="a",
+                               url="u", found_at=datetime.now(), found_date="2026-11-24"))
+        _scanned(session, vid, days_ago=1)
+    session.commit()
+
+    stats = {}
+    vids = dw.source_videos(session, 1, _SD1(), stats=stats)
+
+    assert [v["aweme_id"] for v in vids] == [newer], "回填应当按发布时间新→旧"
+    assert stats["refilled"] == 1
+    assert stats["rescanned"] == 2
+
+
+def test_去重开着也不影响从没扫过的素材(session):
+    _lead(session, "111")
+    stats = {}
+    vids = dw.source_videos(session, 1, _SD(), stats=stats)
+    assert [v["aweme_id"] for v in vids] == ["111"]
+    assert stats["rescanned"] == 0 and stats["refilled"] == 0
+
+
+def test_库内线索和作者作品都能拿到名额(session, monkeypatch):
+    """★★ 2026-11-24 实测的失衡:`①b 同款作者` 把名额填满 ⇒ ②③ **永远 0 个名额**。
+
+    生产:历史 263 行扫描里 260 行来自搜索/热点、`douyin_leads` 只 3 行、
+    `douyin_peer_works` **0 行**;而库内近 7 天有 240 条新鲜素材一条没扫过。
+    """
+    from app.db.models import DouyinPeerWork
+
+    _lead(session, "111")
+    session.add(DouyinPeerWork(user_id=1, aweme_id="peer1", account_uid="u1",
+                               account_name="对标号", title="《对标》", url="u",
+                               first_seen_at=datetime.now()))
+    session.commit()
+
+    class S(_SR):
+        demand_seed_words = "小小绘"
+
+    monkeypatch.setattr("app.services.douyin_protocol_source.search", lambda *a, **k: [
+        {"uid": "sec1", "name": "作者A", "aweme_id": "srch1", "url": "u",
+         "snippet": "#小小绘", "metrics": {"comment_count": 100}}])
+    monkeypatch.setattr(dw, "fetch_author_posts", lambda *a, **k: {"ok": True, "error": "", "items": [
+        {"aweme_id": f"auth{i}", "desc": "新作品 #小小绘", "publish_at": 0,
+         "author": "作者A", "url": "u"} for i in range(10)]})
+
+    vids = dw.source_videos(session, 1, S())
+
+    srcs = [v["src"] for v in vids]
+    assert "lead" in srcs, f"线索没拿到名额:{srcs}"
+    assert "peer" in srcs, f"对标号没拿到名额:{srcs}"
+    assert len(vids) == 4, f"总名额应当是 4:{srcs}"
+
+
+def test_库里没货时保底名额全部让给搜索(session, monkeypatch):
+    """保底**只在库内真有候选时才算** —— 否则会把搜索这条路也饿死。"""
+
+    class S(_SR):
+        demand_seed_words = "小小绘"
+
+    monkeypatch.setattr("app.services.douyin_protocol_source.search", lambda *a, **k: [
+        {"uid": "sec1", "name": "作者A", "aweme_id": "srch1", "url": "u",
+         "snippet": "#小小绘", "metrics": {"comment_count": 100}}])
+    monkeypatch.setattr(dw, "fetch_author_posts", lambda *a, **k: {"ok": True, "error": "", "items": [
+        {"aweme_id": f"auth{i}", "desc": "新作品 #小小绘", "publish_at": 0,
+         "author": "作者A", "url": "u"} for i in range(10)]})
+
+    vids = dw.source_videos(session, 1, S())
+
+    assert len(vids) == 4, f"库里没货时应当用满 4 个名额:{[v['aweme_id'] for v in vids]}"
+    assert all(v["src"] in ("search", "author") for v in vids)
+
+
+def test_运行记录写出素材来源_失衡才看得见(session, monkeypatch):
+    """★★ 历史 263 行扫描里 260 行来自搜索 —— 这个失衡在 `runs` 里**一个字都没有**,
+    只能靠事后 join 两张表反推,所以存在了一个月没人发现。"""
+    from app.db.models import RunRecord
+
+    _lead(session, "111")
+    monkeypatch.setattr(dw, "collect_for_video", lambda *a, **k: {"error": "", "names": {}})
+
+    dw.run_user(session, 1, _S())
+    session.flush()
+    detail = session.query(RunRecord).filter_by(kind="demand_watch").one().detail
+
+    assert "源:" in detail, detail
+    assert "线1" in detail, f"线索来源没写出来:{detail}"
+
+
+def test_运行记录写出已扫去重与回填条数(session, monkeypatch):
+    from app.db.models import RunRecord
+
+    _lead(session, "111")
+    _scanned(session, "111", days_ago=1)
+    monkeypatch.setattr(dw, "collect_for_video", lambda *a, **k: {"error": "", "names": {}})
+
+    dw.run_user(session, 1, _SD())
+    session.flush()
+    detail = session.query(RunRecord).filter_by(kind="demand_watch").one().detail
+
+    assert "已扫1" in detail and "回填1" in detail, detail
+
+
+def test_生产默认值_去重与保底是开着的():
+    """替身把两个闸都关着(为了不改老用例的名额假设),生产默认值必须在这里守。"""
+    from config.settings import Settings
+
+    s = Settings(_env_file=None)
+    assert s.demand_skip_scanned_days == 3
+    assert s.demand_lib_reserve == 2
