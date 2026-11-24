@@ -105,16 +105,24 @@ def _walk_fids(qt, fid: str, cap: int = 3000) -> set[str]:
     return {str(f.get("fid") or "") for f in fs if f.get("fid")}
 
 
-def _fids_from_snapshot(home: str, top: str, snap: dict) -> set[str]:
+def _fids_from_snapshot(home: str, top: str, snap: dict) -> set[str] | None:
     """从 `quark_dup_cache` 快照里取「某个家下某个顶层目录」里的**全部文件 fid**。
 
     ⚠️ **为什么要有这条**:`_walk_fids` 每判一个目录就一次 `list_dir`(实测 1.2 秒),
     非现用家也还有 250 多个候选 ⇒ **一跑就是十几分钟**,而且中途撞到限流
     (`query fail [61004]`)。快照里已经有每个家的递归文件清单(depth=2),
     ⇒ 这一步**零 API 调用**。判的是"这份资源有没有被我方链指着",快照够用。
+
+    ★★ **`None` = 这个家根本不在快照里(没扫过),不是"扫了但里面没有"**(2026-11-24)。
+    快照是**增量**的(`quark_dup_cache` 的 `remaining_homes`,一轮只扫一部分家)——
+    实测 2 号账号的快照里只有 `redian监听` 一个家。拿"没扫过"当"没有已分享文件",
+    就会把那个家里**全部**目录列进删除计划。这两种情况必须分开,见调用方。
     """
+    h = (snap.get("homes") or {}).get(home)
+    if not h or "files" not in h:
+        return None
     out: set[str] = set()
-    for f in ((snap.get("homes") or {}).get(home) or {}).get("files") or []:
+    for f in h.get("files") or []:
         parts = [p for p in str(f.get("path") or "").split("/") if p]
         if len(parts) >= 2 and parts[1] == top and f.get("fid"):
             out.add(str(f["fid"]))
@@ -130,16 +138,8 @@ def main() -> int:
     ap.add_argument("--include-current-home", action="store_true",
                     help="连**现用家**(名字里最新的那个)一起清;默认跳过")
     ap.add_argument("--offline", action="store_true",
-                    help="用 data/quark_dup_cache.json 快照判「内含已分享文件」,零额外 API")
+                    help="用 quark_dup_cache 快照判「内含已分享文件」,零额外 API")
     args = ap.parse_args()
-    snap = {}
-    if args.offline:
-        sp = Path("data/quark_dup_cache.json")
-        if not sp.exists():
-            print("没有快照,先跑一次 pan_auto_clean 或去掉 --offline")
-            return 1
-        snap = json.loads(sp.read_text(encoding="utf-8"))
-        print(f"离线快照 {len(snap.get('homes') or {})} 个家")
 
     db = get_session_local()()
     pool = A.refs_for(db, "quark", user_id=1)
@@ -159,6 +159,18 @@ def main() -> int:
         ledger = _load_ledger_titles(db, key)
         print(f"\n=== {key} / {ref.label}:分享标题 {len(titles)} / first_fid {len(share_fids)}"
               f" / 台账标题 {len(ledger)}", flush=True)
+        #: ★ **快照必须按账号分开读**(2026-11-24 修):文件名与 `pan_auto_clean` 同一套
+        #: (`pan_accounts.scoped_path`)。固定读 `quark_dup_cache.json` 的话,2 号账号会拿
+        #: **1 号的家名+fid** 去比对 —— 同名不同 fid,`_fids_from_snapshot` 一条都取不到
+        #: ⇒ 每个目录都被判成「内含已分享文件 0 个」⇒ **把还在用的资源列进删除计划**。
+        snap: dict = {}
+        if args.offline:
+            sp = Path(A.scoped_path("data/quark_dup_cache.json", key, platform="quark"))
+            if not sp.exists():
+                print(f"  [{key}] 没有快照({sp}),先跑一次 pan_auto_clean 或去掉 --offline")
+                continue
+            snap = json.loads(sp.read_text(encoding="utf-8"))
+            print(f"  离线快照 {len(snap.get('homes') or {})} 个家 ← {sp.name}")
         qt = QuarkTransfer(ck)
         homes = quark_dup.list_homes(qt, "redian监听")
         if not homes:
@@ -174,6 +186,8 @@ def main() -> int:
                 continue
             items = _top_dirs_of_home(qt, str(h.get("fid") or ""))
             kept = drop = 0
+            unscanned = 0
+            reasons: dict[str, int] = {}
             for it in items:
                 if not it["dir"] or not it["fid"] or not it["name"]:
                     continue
@@ -192,15 +206,32 @@ def main() -> int:
                 if not why_stop and share_fids:
                     inner = (_fids_from_snapshot(nm, it["name"], snap) if snap
                              else _walk_fids(qt, it["fid"]))
+                    #: ★ `None` = 这个家**没扫过快照**(增量扫描,一轮只扫一部分家)。
+                    #: 拿它当"没有已分享文件"会把这个家的全部目录列进删除计划 ——
+                    #: 离线模式下遇到没扫过的家,**整家保留**,并把原因打出来。
+                    if inner is None:
+                        unscanned += 1
+                        kept += 1
+                        reasons["没扫过快照"] = reasons.get("没扫过快照", 0) + 1
+                        continue
                     if inner & share_fids:
                         why_stop = f"内含 {len(inner & share_fids)} 个已分享文件"
                 if why_stop:
                     kept += 1
+                    #: 按**主因**归类(去掉括号里的数字,避免同一原因被拆成多行)
+                    k = why_stop.split("(")[0]
+                    reasons[k] = reasons.get(k, 0) + 1
                     continue
                 drop += 1
                 plan_all.append({"account": key, "home": nm, "name": it["name"],
                                  "fid": it["fid"], "age_days": age, "date": it["ts_h"]})
-            print(f"  [{nm}] 顶层 {len(items)} 项 ⇒ 保留 {kept} / **待删 {drop}**", flush=True)
+            tail = (f" (其中 {unscanned} 个**没扫过快照**、整家保留)" if unscanned else "")
+            print(f"  [{nm}] 顶层 {len(items)} 项 ⇒ 保留 {kept} / **待删 {drop}**{tail}",
+                  flush=True)
+            #: ★ 保留原因必须打出来。只报「待删 0」回答不了用户的「为什么没得清」 ——
+            #: 而「待删 0」最常见的真因恰恰是**保护面覆盖了全部目录**(见 §清单口径)。
+            for k, n in sorted(reasons.items(), key=lambda kv: -kv[1]):
+                print(f"     保留原因:{k} × {n}", flush=True)
 
     out = {"generated_at": now.isoformat(timespec="seconds"),
            "min_age_days": args.min_age_days,
