@@ -401,6 +401,17 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
     #: ⚠️ **必须在 `if` 之外初始化** —— 读它的那句话在函数末尾是**无条件**的,
     #: 只在分支里赋值会让"关掉转存"的配置直接 `UnboundLocalError`(这次当场被 19 条用例抓住)。
     reused_have = 0
+    #: ★★ 2026-11-24:**历史复用先剔死链**。下面三段"历史复用"(夸克/百度/迅雷)都是从别的
+    #: 文章的 `my_pan_urls` 里挑一条抄过来 —— 而夸克1号整号被封后,那一串里绝大多数是
+    #: `41031` 死链。挑中死链 = 我们把死链**再写进一篇新文章**,客户点开就是打不开,
+    #: 而且这个动作还会**扩散**(越复用越多)。判据只有一处(`resource_library.dead_links`)。
+    try:
+        from app.services.resource_library import dead_links as _dead_links
+
+        _dead = _dead_links(session, user_id)
+    except Exception:  # noqa: BLE001 - 判不动就当全都算活(不许因为判据故障挡住转存)
+        _dead = None
+
     if settings.pan_transfer_enabled and quark_ck:
         quark = QuarkTransfer(quark_ck, fid_store=settings.quark_fid_store)
         # 盘链级转存去重:同一资源(相同夸克分享链)只转存一次,后续文章复用首篇的
@@ -433,7 +444,9 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                     picked = ""
                     for line in (hist or "").splitlines():
                         line = line.strip()
-                        if line.startswith("https://pan.quark.cn/"):
+                        #: ⚠️ 逐行挑**第一条活的**(见上面 `_dead` 的说明):死链抄过来等于扩散。
+                        if line.startswith("https://pan.quark.cn/") and not (
+                                _dead is not None and _dead.is_dead(line)):
                             picked = line
                             break
                     if picked:
@@ -582,7 +595,8 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                                    WechatArticle.my_pan_urls.like("%[百度]%"),
                                    WechatArticle.id != r.id).limit(1)).scalar()
                         picked = next((x.strip() for x in (hist or "").splitlines()
-                                       if "[百度]" in x and "pan.baidu.com" in x), "")
+                                       if "[百度]" in x and "pan.baidu.com" in x
+                                       and not (_dead is not None and _dead.is_dead(x))), "")
                         if picked:
                             mine_b = picked
                             share_url_b = picked.split(" (提取码")[0].strip()
@@ -682,7 +696,8 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                            WechatArticle.my_pan_urls.like("%pan.xunlei.com%"),
                            WechatArticle.id != r.id).limit(1)).scalar()
                 picked = next((x.strip() for x in (hist or "").splitlines()
-                               if "pan.xunlei.com" in x), "")
+                               if "pan.xunlei.com" in x
+                               and not (_dead is not None and _dead.is_dead(x))), "")
                 if picked:
                     got = picked.split(" (提取码")[0].strip()
                     did_transfer_x = False

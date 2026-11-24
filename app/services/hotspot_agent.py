@@ -1058,6 +1058,11 @@ def burst_plan(db: Session, user_id: int, topics: list[str],
     proven = _proven_titles(db, user_id)
     llm = _llm_plan(settings, hotspots, _supply_articles(db, user_id), proven)
     lines: list[str] = []
+    #: ★ 2026-11-24:`my_pan_urls` 里可能有**已判死**的链(夸克1号整号被封)。
+    #: 死链要比源链**更不该给** —— 源链是别人的、至少还能打开;死链是我们自己的、一定打不开。
+    from app.services.resource_library import dead_links
+
+    _dead = dead_links(db, user_id)
     for t in topics:
         h = by_topic.get(t, {})
         m = (llm.get("matches") or {}).get(t) or {}
@@ -1065,7 +1070,8 @@ def burst_plan(db: Session, user_id: int, topics: list[str],
         if isinstance(aid, int):
             art = db.get(WechatArticle, aid)
             if art:
-                my = next((x.strip() for x in (art.my_pan_urls or "").splitlines() if x.strip()), "")
+                my = next((x.strip() for x in (art.my_pan_urls or "").splitlines()
+                           if x.strip() and not _dead.is_dead(x.strip())), "")
                 src = next((x.strip() for x in (art.pan_urls or "").splitlines() if x.strip()), "")
                 link = my or src
                 lines.append(f"⚡《{t}》爆发{_resonance_tag(h)}{_library_tag(h)}{_cross_platform_tag(h)} → 已有现成资源:「{art.title[:40]}」"
@@ -1291,7 +1297,15 @@ def _library_candidates(db: Session, user_id: int, settings: Settings | None = N
         .order_by(DiscoveredPanLink.id.desc()).limit(300)).all()
     out: list[dict] = []
     seen: set[str] = set()
+    #: ★ 2026-11-24:**已判死的链不进选题池**。这一池的用途就是「**我们手里已经有链**,
+    #: 让 LLM 决定怎么发」—— 拿一条打不开的链进去,它会给出一条发不出去的选题,
+    #: 而失败要到客户点开时才发现。判据只有一处(`resource_library.dead_links`)。
+    from app.services.resource_library import dead_links
+
+    dead = dead_links(db, user_id)
     for title, link in rows:
+        if dead.is_dead(str(link or "")):
+            continue
         name = _clean_name(str(title or ""))
         if not name or _too_generic(name) or _not_a_resource_name(name) or not _name_like(name):
             continue
@@ -1644,11 +1658,18 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
     # flush 取 id:推送行带 [#id],运营一键标记「已发」构成预测→结算闭环。
     by_kw = {h["keyword"]: h for h in fresh}
     plan_by_kw = dict(llm_plans)
+    #: ★ 2026-11-24:死链不当作"已有现成资源"——落库与推送两处都用这一份快照。
+    from app.services.resource_library import dead_links
+
+    _dead = dead_links(db, user_id)
     row_ids: dict[str, int] = {}
     for h, art, why in matched:
         row = HotspotSuggestion(
             user_id=user_id, keyword=h["keyword"], growth=h["growth"], kind="match",
-            resource_title=art.title[:255], link=art.my_pan_urls or art.pan_urls or "",
+            resource_title=art.title[:255],
+            link=next((x.strip() for x in (art.my_pan_urls or "").splitlines()
+                       if x.strip() and not _dead.is_dead(x.strip())), "")
+            or art.pan_urls or "",
             plan=f"{why}·匹配自 {art.author}", platforms=str(h.get("platforms") or "douyin"),
             category=str(h.get("category") or "")[:16],
             opportunity=float(h.get("opportunity") or 0))
@@ -1674,8 +1695,11 @@ def run_hotspot_agent(db: Session, user_id: int, settings: Settings | None = Non
     # 注意力是稀缺资源:全推等于没推,推送额度用确定性公式取舍。
     push_top = max(1, int(getattr(settings, "hotspot_agent_push_top", 3) or 3))
     entries: list[tuple[float, str, str]] = []   # (opportunity, 展示行, 复制块或空)
+    #: ★ 2026-11-24:同 `burst_plan` —— 死链不当作"已有现成资源"给出去
+    #: (快照上面已取,`_dead` 在本函数内共用)。
     for h, art, why in matched:
-        my = next((x.strip() for x in (art.my_pan_urls or "").splitlines() if x.strip()), "")
+        my = next((x.strip() for x in (art.my_pan_urls or "").splitlines()
+                   if x.strip() and not _dead.is_dead(x.strip())), "")
         src = next((x.strip() for x in (art.pan_urls or "").splitlines() if x.strip()), "")
         link = my or src
         level, why_risk = resource_risk(art.title)

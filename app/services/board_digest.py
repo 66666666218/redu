@@ -91,6 +91,22 @@ def build(session: Session, user_id: int, section: str, since: datetime, until: 
     from app.services import push_ledger
 
     data = push_ledger.window(session, user_id, section, since, until, top=top)
+    #: ★★ 2026-11-24:**日结里不许出现已判死的我方链**。台账记的是"当时推的是什么",
+    #: 那张卡当时可能也是死链 —— 但日结是**客户回看今天能点什么**,给一条打不开的链
+    #: 比写「—」更糟(客户会以为是我们这个号被封)。判据只有一个出处
+    #: (`resource_library.dead_links`,60 秒快照);死链**只清 `pan_url`**,
+    #: 标题/原文/热度照旧 —— 资源本身没消失,只是我们这条链不能用了。
+    #: ⚠️ 全板块都死光时 `render_card` 会自动退到「线索」形态(它按 pan_url 判),
+    #: 这正是想要的:一条可用链都没有时,别再摆一张"有资源"的表。
+    try:
+        from app.services.resource_library import dead_links
+
+        dead = dead_links(session, user_id)
+        for g in (data.get("items") or []):
+            if dead.is_dead(str(g.get("pan_url") or "")):
+                g["pan_url"] = ""
+    except Exception:  # noqa: BLE001 - 判不动就照原样发(不许因为判据故障吞掉整天日结)
+        logger.debug("日结:过滤死链失败,按原样输出", exc_info=True)
     data["section"] = section
     data["label"] = board_label(section)
     return data

@@ -260,4 +260,9 @@ def known_kouling_links(session, user_id: int) -> dict[str, str]:
             XunleiResource.user_id == user_id,
             XunleiResource.parent_name == "口令解析",
             XunleiResource.share_url != "")).all()
-    return {str(n): str(u) for n, u in rows if n and u}
+    #: ★ 2026-11-24:**已判死的链不算"搬过"**。这张表是"这个口令搬成过没有"的唯一答案,
+    #: 回一条打不开的链会让调用方以为已完成、客户点开是死链(与 `_moved_link_of` 同一条理由)。
+    from app.services.resource_library import dead_links
+
+    dead = dead_links(session, user_id)
+    return {str(n): str(u) for n, u in rows if n and u and not dead.is_dead(str(u))}

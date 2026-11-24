@@ -68,6 +68,11 @@ def test_探活有缓存(monkeypatch):
 def _fake_pool(monkeypatch, cookies):
     """把 `ordered`/`get_cookie` 换成固定池子。"""
     class _R:
+        #: ⚠️ 替身必须跟上真 `AccountRef` 的字段(2026-11-24 加 `disabled` 时,
+        #: 这里 3 条用例当场 `AttributeError` —— 同一个坑见
+        #: `test-double-drift-and-safe-editing`)。
+        disabled = False
+
         def __init__(self, label, key):
             self.label, self.cookie_key, self.user_id = label, key, 1
 

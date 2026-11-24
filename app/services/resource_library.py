@@ -13,9 +13,9 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-
 import re
+from datetime import datetime, timedelta
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -79,7 +79,8 @@ def _pan_kind(url: str) -> str:
     return "其他"
 
 
-def _my_link_of(session: Session, user_id: int, pan_url: str) -> str:
+def _my_link_of(session: Session, user_id: int, pan_url: str,
+                dead: Any = None) -> str:
     """该链在本租户是否已有我方转存链(可直接复用)。
 
     两处都查:公众号链存 `WechatArticle.my_pan_urls`,**公开平台发现的**存
@@ -101,6 +102,8 @@ def _my_link_of(session: Session, user_id: int, pan_url: str) -> str:
          (分不清,宁可不给)。空会继续落到 `_discovered_my_link`
          (那里按 `origin_url` **精确**对,可信)。
     """
+    if dead is None:
+        dead = dead_links(session, user_id)
     kind = _pan_kind(pan_url)
     rows = session.execute(select(WechatArticle.pan_urls, WechatArticle.my_pan_urls).join(
         WechatPanLink, WechatPanLink.article_id == WechatArticle.id).where(
@@ -108,7 +111,12 @@ def _my_link_of(session: Session, user_id: int, pan_url: str) -> str:
         WechatArticle.my_pan_urls.isnot(None), WechatArticle.my_pan_urls != ""
     ).limit(3)).all()
     for pan_blob, my_blob in rows:          # 逐篇看:某一篇能**唯一**对上就算数
-        links = [x for x in (_clean_link(line) for line in (my_blob or "").splitlines()) if x]
+        #: ★★ 2026-11-24:**死链不算"已有"**。这里原来是先算 `links`(含死链)再按
+        #: "同盘恰好一条"决定用谁 —— 死链留在里面会**两头坏事**:既可能被选中给出,
+        #: 又会让"同盘多条"的判定把一条活链判成"分不清"而不给。
+        #: ⇒ 先在源头剔掉死链,后面对活链的判定才是对的。
+        links = [x for x in (_clean_link(line) for line in (my_blob or "").splitlines())
+                 if x and _alive_link(x, dead)]
         pans = {x for x in str(pan_blob or "").split() if x.startswith("http")}
         if len(set(links)) == 1 and len(pans) <= 1:
             return links[0]                 #: ① 唯一的一对(跨盘也认 —— 映射是确定的)
@@ -121,7 +129,7 @@ def _my_link_of(session: Session, user_id: int, pan_url: str) -> str:
         if len(same) > 1:
             logger.info("资源库:%s 同一篇里有 %d 条同盘(%s)我方链,分不清对应谁 —— 不猜",
                         pan_url[:44], len(same), kind)
-    return _discovered_my_link(session, user_id, pan_url)
+    return _discovered_my_link(session, user_id, pan_url, dead)
 
 
 def _clean_link(line: str) -> str:
@@ -137,17 +145,26 @@ def _clean_link(line: str) -> str:
     return m.group(1) if m else ""
 
 
-def _discovered_my_link(session: Session, user_id: int, pan_url: str) -> str:
-    """公开平台(知乎)发现的那条链,我方是否已转存。"""
+def _discovered_my_link(session: Session, user_id: int, pan_url: str,
+                        dead: Any = None) -> str:
+    """公开平台(知乎)发现的那条链,我方是否已转存。
+
+    ★ 2026-11-24:**已判死的链算"没转存"** —— 返回空串,调用方会继续落到
+    "盘满直推源链"那条已上线的路(客户至少拿到一条能打开的链)。
+    """
     from app.db.models import DiscoveredPanLink
 
-    return str(session.scalar(select(DiscoveredPanLink.our_url).where(
+    if dead is None:
+        dead = dead_links(session, user_id)
+    got = str(session.scalar(select(DiscoveredPanLink.our_url).where(
         DiscoveredPanLink.user_id == user_id, DiscoveredPanLink.origin_url == pan_url,
         DiscoveredPanLink.our_url != "").limit(1)) or "")
+    return _alive_link(got, dead)
 
 
 def _discovered_resources(session: Session, user_id: int, query: str = "",
-                          days: int = 90, limit: int = 20) -> list[dict]:
+                          days: int = 90, limit: int = 20,
+                          dead: Any = None) -> list[dict]:
     """**公开平台发现的**盘链(知乎等),结构对齐 `_rows_to_resources`。
 
     2026-10-02 并入资源库:知乎回答里直接贴的夸克/百度链,和公众号文章里的链**是同一类东西**
@@ -156,6 +173,8 @@ def _discovered_resources(session: Session, user_id: int, query: str = "",
     """
     from app.db.models import DiscoveredPanLink
 
+    if dead is None:
+        dead = dead_links(session, user_id)
     stmt = select(DiscoveredPanLink).where(
         DiscoveredPanLink.user_id == user_id,
         DiscoveredPanLink.found_at >= datetime.now() - timedelta(days=days))
@@ -168,14 +187,18 @@ def _discovered_resources(session: Session, user_id: int, query: str = "",
         ts = r.found_at.isoformat(sep=" ", timespec="seconds") if r.found_at else ""
         out.append({"pan_url": r.origin_url, "pan_type": _pan_kind(r.origin_url),
                     "accounts": 1, "titles": [str(r.title or "")[:60]] if r.title else [],
-                    "first_seen": ts, "last_seen": ts, "my_link": str(r.our_url or ""),
+                    "first_seen": ts, "last_seen": ts,
+                    "my_link": _alive_link(str(r.our_url or ""), dead),
                     "source": label.get(r.platform, r.platform or "发现"),
                     "author": str(r.author or "")})
     return out
 
 
-def _rows_to_resources(session: Session, user_id: int, rows, with_my: bool = True) -> list[dict]:
+def _rows_to_resources(session: Session, user_id: int, rows, with_my: bool = True,
+                       dead: Any = None) -> list[dict]:
     """聚合行 → 资源条目(统一结构;titles 取样例)。"""
+    if with_my and dead is None:
+        dead = dead_links(session, user_id)
     out = []
     for pan_url, accounts, first_seen, last_seen in rows:
         sample = session.scalars(select(WechatArticle.title).join(
@@ -188,14 +211,15 @@ def _rows_to_resources(session: Session, user_id: int, rows, with_my: bool = Tru
             "titles": [str(t or "")[:60] for t in sample],
             "first_seen": first_seen.isoformat(sep=" ", timespec="seconds") if first_seen else "",
             "last_seen": last_seen.isoformat(sep=" ", timespec="seconds") if last_seen else "",
-            "my_link": _my_link_of(session, user_id, pan_url) if with_my else "",
+            "my_link": _my_link_of(session, user_id, pan_url, dead) if with_my else "",
             "source": "公众号",
         })
     return out
 
 
 def _xunlei_resources(session: Session, user_id: int, query: str = "",
-                      days: int = 90, limit: int = 20) -> list[dict]:
+                      days: int = 90, limit: int = 20,
+                      dead: Any = None) -> list[dict]:
     """**我们自己迅雷盘里**的资源(口令转存 + 扫盘),结构对齐 `_rows_to_resources`。
 
     ⚠️ **这条出口此前根本不存在**(2026-10-03 全项目审查发现):`xunlei_resources` 有
@@ -211,6 +235,8 @@ def _xunlei_resources(session: Session, user_id: int, query: str = "",
     """
     from app.db.models import XunleiResource
 
+    if dead is None:
+        dead = dead_links(session, user_id)
     #: ⚠️ **跳过 `status='dead'`**(2026-11-16):那批是已实测"源文件不在盘上、链也重建不了"
     #: 的行。留着它们 = 资源库会对"我们有没有这个资源"回答**一条必然打不开的链**,
     #: 比回答"没有"更糟(会让人以为已有、不再去搬)。空串 = 正常情况下同一条 SQL 照旧。
@@ -229,18 +255,22 @@ def _xunlei_resources(session: Session, user_id: int, query: str = "",
     out: list[dict] = []
     for r in rows:
         url = str(r.share_url or "")
+        #: ★ 2026-11-24:已判死的我方链 ⇒ 不给(`_alive_link` 回空串)。调用方看到"没链"
+        #: 会去搬新的,而不是拿一条打不开的链冒充"已有"。
+        live = _alive_link(url, dead)
         ts = r.synced_at.isoformat(sep=" ", timespec="seconds") if r.synced_at else ""
         out.append({"pan_url": url, "pan_type": _pan_kind(url),
                     "accounts": 1,
                     "titles": [str(r.name or "")[:60]] if r.name else [],
                     "first_seen": ts, "last_seen": ts,
-                    "my_link": url,                  # 本来就是我们自己的链
+                    "my_link": live,                 # 本来就是我们自己的链
                     "source": "迅雷盘"})
     return out
 
 
 def _xunlei_group_resources(session: Session, user_id: int, query: str = "",
-                            days: int = 90, limit: int = 20) -> list[dict]:
+                            days: int = 90, limit: int = 20,
+                            dead: Any = None) -> list[dict]:
     """**迅雷群组里转存进来的**资源(2026-10-05 补的出口)。结构与 `_xunlei_resources` 一致。
 
     ⚠️ **这条出口此前不存在,而缺口比 `XunleiResource` 那次还大**:实测本地库
@@ -257,6 +287,8 @@ def _xunlei_group_resources(session: Session, user_id: int, query: str = "",
     """
     from app.db.models import XunleiGroupShare
 
+    if dead is None:
+        dead = dead_links(session, user_id)
     stmt = select(XunleiGroupShare).where(XunleiGroupShare.user_id == user_id,
                                           XunleiGroupShare.our_url != "")
     if days:
@@ -272,12 +304,14 @@ def _xunlei_group_resources(session: Session, user_id: int, query: str = "",
     out: list[dict] = []
     for r in rows:
         url = str(r.our_url or "")
+        #: ★ 2026-11-24:同 `_xunlei_resources` —— 死链不外给。
+        live = _alive_link(url, dead)
         ts = r.synced_at.isoformat(sep=" ", timespec="seconds") if r.synced_at else ""
         out.append({"pan_url": url, "pan_type": _pan_kind(url),
                     "accounts": 1,
                     "titles": [str(r.title or "")[:60]] if r.title else [],
                     "first_seen": ts, "last_seen": ts,
-                    "my_link": url,                  # 本来就是我们自己的链
+                    "my_link": live,                 # 本来就是我们自己的链
                     "source": "迅雷群"})
     return out
 
@@ -303,6 +337,53 @@ def strip_vendor_suffix(name: str) -> str:
     卡片上就是两行,一行有链一行显示「库内暂无链」。
     """
     return _VENDOR_SUFFIX_RE.sub("", str(name or "")).strip()
+
+
+#: 死链快照的**进程内缓存**(`(user_id) → (取到的时刻, DeadLinks)`)。
+#:
+#: ★ 为什么缓存:资源库是**每次检索都调**的热路径(`already_have` 每条候选 3~5 次 ×
+#: 每轮几十条),而死亡登记只会被**每天 06:08 的体检**改一次 ⇒ 每次重查库是纯浪费。
+#: ⚠️ TTL 故意短(60 秒):真判死了最多再漏 60 秒,而漏一天的代价是 900 次推送。
+#: ⚠️ 测试要能清空(见 `reset_dead_cache`)—— 进程级缓存不清会让用例互相污染。
+_DEAD_CACHE: dict[int, tuple[float, Any]] = {}
+_DEAD_TTL_S = 60.0
+
+
+def reset_dead_cache() -> None:
+    """清空死链快照缓存(**测试与"刚探到死链马上要生效"时用**)。"""
+    _DEAD_CACHE.clear()
+
+
+def dead_links(session: Session, user_id: int, *, fresh: bool = False) -> Any:
+    """该用户的**我方链存活快照**(带 60 秒进程内缓存);读不到就返回一个空快照。"""
+    import time
+
+    from app.services.pan_link_health import DeadLinks
+
+    key = int(user_id or 0)
+    now = time.time()
+    if not fresh:
+        hit = _DEAD_CACHE.get(key)
+        if hit and now - hit[0] < _DEAD_TTL_S:
+            return hit[1]
+    try:
+        snap = DeadLinks(session, user_id)
+    except Exception:  # noqa: BLE001 - 算不出来就"全都算活",别拦客户
+        logger.debug("资源库:读取我方链存活快照失败,按全都算活处理", exc_info=True)
+        return DeadLinks(keys=set())
+    _DEAD_CACHE[key] = (now, snap)
+    return snap
+
+
+def _alive_link(link: str, dead: Any) -> str:
+    """这条我方链**还活着**吗?死链/认不出盘一律... 死链返回空串。"""
+    s = str(link or "")
+    if not s:
+        return ""
+    try:
+        return "" if dead is not None and dead.is_dead(s) else s
+    except Exception:  # noqa: BLE001 - 判不动就当活着(不许因为判据故障丢链接)
+        return s
 
 
 def match_key(text: str) -> str:
@@ -498,6 +579,9 @@ def fuzzy_have(session: Session, user_id: int, names: list[str], days: int = 180
     if not names:
         return None
     cutoff = datetime.now() - timedelta(days=days)
+    #: ★ 2026-11-24:死链**不算"我们已有"**。三个来源(公众号/发现链/迅雷盘)一起剔 ——
+    #: 否则 `already_have` 拿到一条打不开的链就会**跳过转存**,客户最终拿不到能用的链接。
+    dead = dead_links(session, user_id)
     found: list[dict] = []
 
     def _add(title: str, link: str, source: str) -> None:
@@ -505,7 +589,7 @@ def fuzzy_have(session: Session, user_id: int, names: list[str], days: int = 180
             return
         if not any(same_resource(n, title) for n in names):
             return
-        clean = _clean_link(link)
+        clean = _alive_link(_clean_link(link), dead)
         if not clean:
             return
         found.append({"pan_url": clean, "my_link": clean, "pan_type": _pan_kind(clean),
@@ -583,22 +667,25 @@ def search_resources(session: Session, user_id: int, query: str,
             a["last"] = created_at if a["last"] is None else max(a["last"], created_at)
     rows = [(u, len(v["authors"]), v["first"], v["last"])
             for u, v in sorted(agg.items(), key=lambda kv: -len(kv[1]["authors"]))[:limit]]
-    ours = _rows_to_resources(session, user_id, rows)
+    #: ★ 2026-11-24:**一口气取一次死链快照**,四条来源共用 —— 中途判据不变,
+    #: 逐条取会把一次检索变成 N 次查库(这是每条候选 3~5 次的热路径)。
+    dead = dead_links(session, user_id)
+    ours = _rows_to_resources(session, user_id, rows, dead=dead)
     # **并入公开平台发现的链**(2026-10-02):同一条链可能既被公众号发过、又被知乎贴过 ——
     # 以**公众号那条为准**(它带"多少号同发"这个更强的信号),只补公众号没有的。
     seen = {r["pan_url"] for r in ours}
-    extra = [d for d in _discovered_resources(session, user_id, q, days, limit)
+    extra = [d for d in _discovered_resources(session, user_id, q, days, limit, dead=dead)
              if d["pan_url"] not in seen]
     # **并入我们自己迅雷盘里的资源**(2026-10-03):口令转存 + 扫盘进来的那些此前**完全没有出口**,
     # 补上以后 presence「名字型」也能匹配到它们(否则"搬进来了但用不上")。
     seen |= {d["pan_url"] for d in extra}
-    mine = [x for x in _xunlei_resources(session, user_id, q, days, limit)
+    mine = [x for x in _xunlei_resources(session, user_id, q, days, limit, dead=dead)
             if x["pan_url"] not in seen]
     # **并入迅雷群组里转存进来的那些**(2026-10-05):同样是"我方盘里的东西",只是入库路径
     # 不同(群分享转存,而非扫盘/口令)。实测 40 条已转存的群分享此前在库里查不到 ——
     # 直接后果是 `already_have` 判"没有"→ **去别的盘重复搬一份**,白占空间。
     seen |= {d["pan_url"] for d in mine}
-    groups = [x for x in _xunlei_group_resources(session, user_id, q, days, limit)
+    groups = [x for x in _xunlei_group_resources(session, user_id, q, days, limit, dead=dead)
               if x["pan_url"] not in seen]
     # ★★ **同一资源在多个盘里都有时,按「盘的空间」优先**(2026-10-11,用户口径:
     #    「如果夸克和迅雷是相同的资源,**优先保存进夸克**」——因为夸克盘空间最多)。

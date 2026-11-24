@@ -801,6 +801,51 @@ class PanOwnedShare(Base):
     refreshed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
+class PanLinkHealth(Base):
+    """**我方分享链的存活登记**(2026-11-24):哪条链客户点得开、哪条已经死了。
+
+    ## 为什么另开一张表(不加列到各业务表)
+    我方链散在 **5 张表**里(`wechat_articles.my_pan_urls` 一行多链 /
+    `xunlei_group_shares.our_url` / `discovered_pan_links.our_url` /
+    `douyin_leads.our_url` / `xunlei_resources.share_url`),同一条分享会被**多个标题复用**
+    (实测一条链挂过 68 个不同标题)。逐表加 `dead` 列 ⇒ **同一条链要在 5 处各判一次**,
+    漏掉任何一处就继续把死链推给客户 —— 本仓那条"同一套纪律写两处,迟早一处先修"。
+    ⇒ 存活是**分享本身**的属性,按 `(platform, share_key)` 只记一份,所有出链口都读这里。
+
+    ## 为什么必须有(2026-11-24 实测)
+    `quark`(夸克1号)**整个账号被封**:2026-04~11 逐月抽样 16 条分享**全部**回
+    `41031 分享者用户封禁链接查看受限`;而账号本身是好的(配额/列目录都正常)。
+    该账号名下有 **6596 条**自有分享,近 7 天 `push_ledger` 命中 **901 次**、
+    公众号 `my_pan_urls` **1477 条** —— 客户点开的绝大多数是死链。
+    既有的"41031 判死"只加在**源链**侧(`wechat/_enrich.py`),**没有任何一处看**我方链。
+
+    ⚠️ **判定只认一手探活**:`link_audit` 探到 `alive=False` 且错误是**终态**才算死;
+    「限流/超时/探不动」**绝不写死**(那是拿"我们没看见"当"链坏了",`probe()` 里那段)。
+    ⚠️ **可自愈**:再探到 `alive=True` 就把 `dead_at` 清空 —— 申诉解封/重新分享后
+    不用人工改库(与 `XunleiResource.status` 那套"空串 = 正常"同一语义)。
+    """
+
+    __tablename__ = "pan_link_health"
+    __table_args__ = (UniqueConstraint("user_id", "platform", "share_key",
+                                       name="uq_pan_link_health"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    platform: Mapped[str] = mapped_column(String(16), index=True)   # quark/baidu/xunlei
+    #: 分享的**稳定身份**:夸克是 `pwd_id`(URL 路径段),迅雷是 `share_id`,百度是 `surl`。
+    share_key: Mapped[str] = mapped_column(String(64), index=True)
+    #: 判定时那条链的规范形态(带 `?pwd=`,排查/复核用;**不作为判据**)
+    url: Mapped[str] = mapped_column(String(500), default="")
+    #: 判死的时刻;**NULL = 正常**。空值语义与 `XunleiResource.status` 一致
+    #: (老行/没探过 = 按正常处理,不因为"不知道"就拦客户)
+    dead_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    #: 平台原话(如 `41031 分享者用户封禁` / `share_status=EXPIRED`),排查用
+    reason: Mapped[str] = mapped_column(String(200), default="")
+    #: 这条链属于哪个账号 —— **账号级封禁**(41031)靠它一次性判死整个账号的链
+    account_key: Mapped[str] = mapped_column(String(64), default="")
+    checked_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
 class XunleiResource(Base):
     """迅雷网盘资源(2026-10-02):扫盘登记 + 自动生成我方分享链。
 

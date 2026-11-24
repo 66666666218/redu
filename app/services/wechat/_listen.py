@@ -1689,6 +1689,57 @@ def _my_pan_link_from_history(my_pan_urls: str) -> tuple[str, str]:
     用盘链正则取 URL 本体,顺带把 `(自分享)`/`[百度]`/提取码这些附属标记留在外面。
     """
     return _first_pan_link(my_pan_urls)
+
+
+def _dead_links(session: Session, user_id: int) -> "object | None":
+    """本轮推送用的**我方链存活快照**(`pan_link_health.DeadLinks`);拿不到就给 `None`。
+
+    ⚠️ 取不到**必须降级成"全都算活"**(`None` ⇒ `is_dead` 永远 False):
+    存活登记是"别把死链给客户"的护栏,**不许**因为库抖一下就让整张卡片没有链接。
+    """
+    try:
+        from app.services.pan_link_health import DeadLinks
+
+        return DeadLinks(session, user_id)
+    except Exception:  # noqa: BLE001
+        logger.debug("读取我方链存活快照失败,按全都算活处理", exc_info=True)
+        return None
+
+
+def _live_my_entry(rep: list[tuple[str, str, str]] | None, my_pan_urls: str,
+                   dead: "object | None") -> tuple[str, str]:
+    """这一行该给客户的**我方链** + 提取码:本轮转存链 > 历史 `my_pan_urls` 第一条**活的**。
+
+    ★★ 为什么要有它(2026-11-24):夸克1号整号被封后,`my_pan_urls` 里那一串链
+    **全部打不开**,而旧写法只取"第一条"⇒ 客户点开就是 41031。
+    ⇒ 一条链死了就**继续往后找下一条活的**;全死 ⇒ 返回 `("", "")`(调用方退到源链/原文)。
+    ⚠️ 与"给错链比不给链更坏"同一条口径:走不通的链**不叫给链**。
+
+    ⚠️ **必须连同提取码一起回**(2026-11-24 被 `test_repush_card_uses_history_baidu_link`
+    当场抓住):若只回干净 URL,调用方再拿它去 `_first_pan_link` 解析提取码,码**必然丢了**
+    (码在原始那一行的 `(提取码 abcd)` 里,已被 URL 化时剥掉)⇒ 卡片上链能点、
+    `🔑` 却空了。⇒ 从**同一行**里一次取出 URL 与码。
+    """
+    if rep:
+        #: 本轮转存的结果是 `(原链, 我方链, 提取码)` 三元组,码本来就在里面。
+        return (str(rep[0][1] or ""), str(rep[0][2] or ""))
+    is_dead = getattr(dead, "is_dead", None)
+    for line in (my_pan_urls or "").splitlines():
+        url, code = _first_pan_link(line)
+        if not url:
+            continue
+        if is_dead is not None and is_dead(url):
+            continue
+        return url, code
+    return "", ""
+
+
+def _live_my_of(rep: list[tuple[str, str, str]] | None, my_pan_urls: str,
+                dead: "object | None") -> str:
+    """`_live_my_entry` 只要 URL 的那一版(台账 `pan_url` 用:那里只记链本体)。"""
+    return _live_my_entry(rep, my_pan_urls, dead)[0]
+
+
 def _collapse_repeats(rows: list) -> list[tuple[object, int]]:
     """同一 **(账号, 标题)** 只留**最新**那条,并带上"这轮一共发了几次"。
 
@@ -1871,11 +1922,12 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
     #: ⚠️ 2026-11-19 实测:只用我方链判重会**挡掉真实的不同资源** —— 我方链里有 21.6%
     #: 挂着多个不同源链(书法字帖各年级、公考/作文/日历),那是 `_enrich` 的
     #: 资源级复用按标题近似匹配错配出来的,链本身不是稳定的资源身份。
+    #: ★★ **我方链存活快照**(2026-11-24,一轮取一次,逐行判)。见 `_live_my_of`。
+    _dead = _dead_links(session, user_id)
     _my_of: dict[int, str] = {}
     _src_of: dict[int, str] = {}
     for r in rows:
-        _my_of[r.id] = ((replacements.get(r.id) or [("", "", "")])[0][1]
-                        or _my_pan_link_from_history(r.my_pan_urls)[0])
+        _my_of[r.id] = _live_my_of(replacements.get(r.id), r.my_pan_urls, _dead)
         _src_of[r.id] = _first_pan_link(r.pan_urls)[0]
     _before_ids = [r.id for r in rows]
     _before = len(rows)
@@ -1962,7 +2014,9 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
             #    用户看到的就是"为什么不能点文章名拿网盘了"。
             # ⚠️ ③ 指向的是**别人的**盘链,网盘列会标 `⏳待转存`,说明里也写明了;
             #    这不是"回落到别人的盘链冒充我们的"——我方链仍然最优先,标记也分开。
-            link, code = _my_pan_link_from_history(r.my_pan_urls)
+            #: ⚠️ 取 `_live_my_entry` 而**不是**拿 `_live_my_of` 再解析:提取码在同一行里,
+            #: 只回干净 URL 会把 `🔑` 弄丢(2026-11-24 被既有用例当场抓住)。
+            link, code = _live_my_entry(None, r.my_pan_urls, _dead)
             if link:
                 my_link = True
             else:
@@ -2166,8 +2220,9 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
                      #: ⚠️ `pan_url` 只记**我方链**(客户点开能直接取)—— 它同时是
                      #: **日结「资源」列的链接**和 `lead_mode`(「0 盘链板块」)的判据,
                      #: 记源链会让客户点到别人随时会失效的分享,判据也失真。
-                     "pan_url": ((replacements.get(r.id) or [("", "", "")])[0][1]
-                                 or _my_pan_link_from_history(r.my_pan_urls)[0] or ""),
+                     #: ⚠️ 走 `_my_of`(已算好、已剔死链)—— 此处**不许**再裸读
+                     #: `my_pan_urls`,否则台账记的是死链而卡上是源链(两边打架)。
+                     "pan_url": _my_of.get(r.id, ""),
                      #: **判重身份**另记一列(`pan_id`,`_pan_id_of` 源链优先)——
                      #: 上面那条我方链不唯一标识资源(21.6% 挂着多个源链,见 models 里
                      #: `PushLedger.pan_id` 的头注),拿它判重会挡掉真实的新资源。

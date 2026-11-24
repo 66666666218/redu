@@ -1,3 +1,34 @@
+- [2026-11-24 13:16] FEAT: **我方链存活闸:死链不再给客户**(夸克1号整号被封 6596 条分享)
+  体检实测:`quark`(夸克1号)**整个账号的分享被平台封禁** —— 2026-04 到 11-23 逐月抽样
+  16 条分享**全部**回 `41031 分享者用户封禁链接查看受限`,而账号本身是好的(配额、列目录都正常)。
+  该账号名下 **6596 条**自有分享;近 7 天 `push_ledger` 命中 **901 次**、公众号 `my_pan_urls`
+  **1477 条** ⇒ **客户点开的绝大多数是死链**;近 7 天「回库复用」344 次里只有 15 次指向能打开的链。
+  · **代码缺口**:`41031 = 终态` 这条判据早就有,但只加在**源链**侧(`wechat/_enrich.py`);
+    **没有任何一处看我们自己发的链** —— `resource_library`、`reuse_if_have`、`already_have`、
+    卡片渲染还在把同一批死链反复复用、反复推。
+  · **新表 `pan_link_health`**(按**分享**记,身份=路径段):我方链散在 5 张业务表,
+    同一条分享会被多个标题复用(实测一条挂过 68 个标题)⇒ 逐表加 `dead` 列必然一处先修、
+    另一处照旧。判据**只认平台原话**(`41031`/`41011`/`EXPIRED`/`SENSITIVE_RESOURCE` 等);
+    **限流/超时/我们自己的配置问题一律不算死**(`falsification-needs-control-variables`)。
+  · **账号级封禁**:命中 41031 ⇒ 把该账号在池里**标 `disabled`**(不再选它转存),
+    `dead_share_keys()` **动态归并**它名下全部分享 ⇒ 新分享**自动算死**,不必物化 6596 行。
+  · **出链口统一过滤**:`resource_library`(检索/画像/近似名兜底/迅雷盘/迅雷群)、
+    `wechat/_listen`(卡片与台账)、`board_digest`(日结)、`douyin_leads`、`xunlei_kouling`、
+    `hotspot_agent`(选题池与卡片)、`api/wechat`(AI 改写稿)、`wechat/_enrich`(历史复用)
+    —— **死链不算"我们已有"**(否则会跳过转存,客户一条能点的都没有)。
+  · **自愈**:再探到 `alive=True` ⇒ 清 `dead_at`(申诉解封后不必手工改库)。
+  · 测试:`tests/test_pan_link_health.py`(14 条:判据/自愈/账号级归并/出链口/降级);
+    替身 `_R` 补 `disabled` 字段(2026-11-13 那个「替身与真类型不是一回事」的同一个坑)。
+  · **停用判据的订正**:第一版写 `cookie_key == default_cookie_key(platform)` ⇒ 拒绝停用,
+    而被封那个号的 key 就叫 `quark` ⇒ **把唯一该停的号挡在门外**。改成「池里有没有这一条」。
+  · **本机生产库已执行**:`quark`(label「夸克1」)标 `disabled=true`,死亡集合立刻覆盖 **6596 条**
+    分享(归并查询,未物化任何行);`quark#2` 抽样仍判活,不受连累。
+  (Files: app/db/models.py, app/services/pan_link_health.py, app/services/pan_accounts.py,
+  app/services/link_audit.py, app/services/resource_library.py, app/services/wechat/_listen.py,
+  app/services/wechat/_enrich.py, app/services/douyin_leads.py, app/services/xunlei_kouling.py,
+  app/services/hotspot_agent.py, app/services/board_digest.py, app/api/wechat.py,
+  tests/test_pan_link_health.py, tests/test_pan_accounts_alive.py, doc/能力清单.md)
+
 - [2026-11-24 11:17] FEAT: **爆款预判:提前一天判出「明天会炸的资源型热点」+ 备好物料**(新作业 `hot_forecast`)
   用户口径:「我们监控的麦穗和羊**最早 15 号就看到了**,但 **17 号才开始监控到发网盘**的 ——
   能否**自己提前预判适合做网盘的热点**、自己写?**16 号发就会占很大先机**」。

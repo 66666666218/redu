@@ -445,8 +445,13 @@ def wechat_article_rewrite(article_id: int, user: User = Depends(get_current_use
                 logger.warning("改写前微信读书补拉正文失败 article=%s url=%s", article_id, row.url, exc_info=True)
     if not row.content or len(row.content) < 100:
         raise HTTPException(400, "文章正文不足(未抓到),暂不能 AI 改写")
-    # 我的转存链优先
-    my_link = next((x.strip() for x in (row.my_pan_urls or "").splitlines() if x.strip()), "")
+    # 我的转存链优先 —— ★ 2026-11-24:已判死的链**不给**(改写稿里塞一条打不开的链,
+    # 客户点开就是 41031)。判据只有一处(`resource_library.dead_links`)。
+    from app.services.resource_library import dead_links
+
+    _dead = dead_links(db, user.id)
+    my_link = next((x.strip() for x in (row.my_pan_urls or "").splitlines()
+                    if x.strip() and not _dead.is_dead(x.strip())), "")
     out = rewrite_article(st.deepseek_base_url, st.deepseek_api_key, st.deepseek_model,
                           row.title, row.content, my_link=my_link)
     if out is None:

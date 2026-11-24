@@ -102,6 +102,14 @@ class AccountRef:
     ratio_suspect: bool = False
     is_default: bool = False
     tried: list[str] = field(default_factory=list)
+    #: ★★ 2026-11-24:**停用**。实测夸克1号整号被平台封禁(所有分享回 `41031`),
+    #: 而它的配额/列目录都正常 ⇒ "盘满/登录态失效"那两套判据**都拦不住它**,
+    #: 它会被一直选去转存、把自己发的新分享也变成死链。
+    #: 停用 = **不选它转存**(`refs_for`/`cookies_for` 过滤),但它名下的链**仍按账号级
+    #: 封禁判死**(见 `pan_link_health.dead_share_keys`)。
+    #: ⚠️ 与 `full_until` 的区别:那是**临时的**(30 分钟冷静期),这是**要有动作才恢复**的。
+    disabled: bool = False
+    disabled_reason: str = ""
 
     @property
     def known_full(self) -> bool:
@@ -186,14 +194,31 @@ def accounts(session: Session, platform: str, *, user_id: int = 1) -> list[Accou
                               last_check_at=str(item.get("last_check_at") or ""),
                               full_until=str(item.get("full_until") or ""),
                               note=str(item.get("note") or ""),
-                              ratio_suspect=bool(item.get("ratio_suspect"))))
+                              ratio_suspect=bool(item.get("ratio_suspect")),
+                              disabled=bool(item.get("disabled")),
+                              disabled_reason=str(item.get("disabled_reason") or "")))
     return out or [default_ref(platform, user_id=user_id)]
 
 
+def disabled_account_keys(session: Session, platform: str, *,
+                          user_id: int = 1) -> set[str]:
+    """该平台**被停用**的账号 `cookie_key` 集合(**全平台**,不只池里)。
+
+    唯一调用方是 `pan_link_health.dead_share_keys`(账号级封禁 ⇒ 名下分享全算死)。
+    单独给一个函数是因为:"哪些号被停用"必须从**一处**读 —— 池是唯一事实源。
+    """
+    return {r.cookie_key for r in accounts(session, platform, user_id=user_id)
+            if r.disabled and not r.is_default}
+
+
 def ordered(session: Session, platform: str, *, user_id: int = 1) -> list[AccountRef]:
-    """**该按什么顺序试** —— 最空的在前;满的排最后(全满时也要能说出是谁满)。"""
+    """**该按什么顺序试** —— 最空的在前;满的排最后(全满时也要能说出是谁满)。
+
+    ★ 2026-11-24:**停用的排最后**(不排除 —— 全停用时调用方要能说出"全停了",
+    而不是看到"没配账号",那是两种完全不同的故障,修法也不同)。
+    """
     return sorted(accounts(session, platform, user_id=user_id),
-                  key=lambda r: (r.usable_hint, r.label))
+                  key=lambda r: (1 if r.disabled else 0, r.usable_hint, r.label))
 
 
 def cookie_of(ref: AccountRef, session: Session) -> str:
@@ -244,6 +269,61 @@ def report(session: Session, ref: AccountRef, *, ratio: float | None = None,
     _save(session, data)
 
 
+def disable_account(session: Session, platform: str, cookie_key: str, *, why: str = "",
+                    user_id: int = 1) -> bool:
+    """**停用一个账号** —— 不再选它转存。返回是否改到了。
+
+    ★★ 为什么必须有这个动作(2026-11-24 实测):`quark` 整个账号被平台封禁,
+    所有分享回 `41031`;可它**配额正常、列目录正常、登录态也没失效** ——
+    现有的两套护栏(盘满 `full_until` / 百度登录态 `_baidu_alive`)都**看不见**这种状态,
+    于是它会被一直选中去转存,**它新建的分享同样打不开**,死链源源不断。
+
+    ⚠️ 不是 `report(full=True)`:那个 30 分钟就过期,而账号封禁**不会自己好**。
+    ⚠️ 恢复要么重新登录/申诉后手工改池,要么由 `enable_account()` 显式放行 ——
+    **不要**在探活失败时自动恢复(那等于把刚判死的号又放回去)。
+    """
+    data = _load(session)
+    items = data.get(platform)
+    if not isinstance(items, list):
+        items = []
+    #: ⚠️ 判据是「**池里有没有这一条**」,不是「`cookie_key` 看着像不像默认账号」。
+    #: `quark` 这个 key **既可能是没配池时的默认账号,也可能是池里实打实登记的那个号**
+    #: (本机实测就是后者:label「夸克1」、cookie_key `quark`)—— 拿字符串比会把
+    #: **真正被封的那个号**挡在门外,而那正是这条护栏存在的唯一理由。
+    for item in items:
+        if isinstance(item, dict) and str(item.get("cookie_key")) == str(cookie_key):
+            item["disabled"] = True
+            item["disabled_reason"] = str(why or "")[:120]
+            item["last_check_at"] = datetime.now().isoformat(sep=" ", timespec="seconds")
+            _save(session, data)
+            logger.warning("账号池:**停用** %s/%s(%s)", platform, cookie_key, why[:80])
+            return True
+    #: 池里没有这一条 = 单账号部署(池是空的)或 key 写错了。
+    #: ⚠️ **不凭空写一条"配置"**:那会让人以为池配过了,与 `report()` 里 `is_default`
+    #: 的处理同一理由。调用方要停它请先把池配上。
+    logger.warning("账号池:拒绝停用 %s/%s(池里没有这个账号)", platform, cookie_key)
+    return False
+
+
+def enable_account(session: Session, platform: str, cookie_key: str, *,
+                   user_id: int = 1) -> bool:
+    """**恢复**一个被停用的账号(申诉解封/重登之后走这里)。返回是否改到了。"""
+    data = _load(session)
+    items = data.get(platform)
+    if not isinstance(items, list):
+        return False
+    for item in items:
+        if isinstance(item, dict) and str(item.get("cookie_key")) == str(cookie_key):
+            if not item.get("disabled"):
+                return False
+            item["disabled"] = False
+            item["disabled_reason"] = ""
+            _save(session, data)
+            logger.info("账号池:**恢复** %s/%s", platform, cookie_key)
+            return True
+    return False
+
+
 def add_account(session: Session, platform: str, label: str, cookie: str, *,
                 cookie_key: str = "", user_id: int = 1) -> str:
     """**登记一个新账号**(用户给一枚新 cookie 时走这里)。返回它的 `cookie_key`。
@@ -274,7 +354,7 @@ def add_account(session: Session, platform: str, label: str, cookie: str, *,
 
 __all__ = ["AccountRef", "accounts", "ordered", "cookie_of", "report", "add_account", "default_ref",
            "default_cookie_key", "FULL_COOLDOWN_MIN", "cookies_for", "refs_for", "cookie_for",
-           "scoped_path"]
+           "scoped_path", "disable_account", "enable_account", "disabled_account_keys"]
 
 
 # ---------------------------------------------------------------- 按池取号(统一入口)
@@ -323,6 +403,19 @@ def refs_for(session, platform: str, *, user_id: int = 1) -> list[tuple[AccountR
             continue
         seen.add(ck)
         out.append((r, ck))
+    #: ★★ 2026-11-24:**停用的号不参与转存**(账号级封禁,见 `disable_account`)。
+    #: ⚠️ **全停用时原样返回** —— 与下面百度那段同一取舍:调用方看到"没凭据"会把
+    #: "账号被封/停用"误诊成"没配账号",而这两件事的修法完全不同。
+    if out and any(r.disabled for r, _ in out):
+        live = [(r, ck) for r, ck in out if not r.disabled]
+        if live:
+            skipped = [r.label for r, _ in out if r.disabled]
+            logger.warning("账号池里有 %d 个账号**已停用**,已跳过:%s", len(skipped), skipped)
+            out = live
+        else:
+            logger.error("账号池里 %s 的账号**全部停用**(%s)—— 仍原样返回,"
+                         "请检查是被封还是配置错", platform,
+                         [r.label for r, _ in out])
     #: ★ 百度:把**登录态已死**的账号召回后面(2026-10-31 实测:`baidupan#2/#3` 失效,
     #: 却因"最空"永远排第一 ⇒ 每个百度动作都 errno=-6,而主号是好的)。
     #: ⚠️ **只在还有活号时**才滤掉死号:全死就原样返回 —— 否则调用方会看到"没凭据",

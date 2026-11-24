@@ -1364,7 +1364,14 @@ def _moved_link_of(session, user_id: int, ld: dict) -> str:
         return ""
     row = session.scalar(select(DouyinLead).where(
         DouyinLead.user_id == user_id, DouyinLead.aweme_id == aid))
-    return str(getattr(row, "our_url", "") or "")
+    url = str(getattr(row, "our_url", "") or "")
+    #: ★ 2026-11-24:**已判死的我方链等于"没搬成"**。不回空串的后果与本模块那条
+    #: 「有链」判据的教训一致:调用方看到有链就不再去搬,而客户点开是 41031。
+    #: 判据与出链同一处(`resource_library.dead_links`,带 60 秒快照)。
+    if not url:
+        return ""
+    from app.services.resource_library import dead_links
+    return url if not dead_links(session, user_id).is_dead(url) else ""
 
 
 def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[dict]:

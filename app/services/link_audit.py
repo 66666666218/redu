@@ -386,11 +386,22 @@ def check_share_matches(url: str, title: str, settings=None,
 
 
 def audit_rows(db: Any, user_id: int = 1, *, per_source: int = 15, gap: float = 0.6,
-               sources: tuple[str, ...] = (), prober: "Prober | None" = None) -> list[dict]:
-    """按来源抽样探活 + 判对齐。返回每条一行,**不写库、不推消息**。"""
+               sources: tuple[str, ...] = (), prober: "Prober | None" = None,
+               record_health: bool = False) -> list[dict]:
+    """按来源抽样探活 + 判对齐。返回每条一行,**不推消息**。
+
+    `record_health=True` 时**顺手把结果写进我方链存活登记**(`pan_link_health`):
+    一手探实的终态死链写死、探到活的清标记(自愈)。默认**关** ——
+    `scripts/link_audit.py --json` 那种纯诊断跑法不该改库。
+
+    ★ 为什么必须在这里回写(2026-11-24):存活判据的唯一可信来源就是**一手探活**,
+    而它是本项目里唯一会去开分享的只读路径。判据写死在定时作业里、结果留在
+    `runs.detail[:900]` 里 ⇒ 谁也用不上 —— 于是 6596 条死链被复用了 344 次。
+    """
     from sqlalchemy import text
 
     pr = prober or Prober()
+    auditor = _HealthRecorder(db, user_id) if record_health else None
     out: list[dict] = []
     for label, table, name_col, link_col in SOURCES:
         if sources and not any(s in label for s in sources):
@@ -412,8 +423,75 @@ def audit_rows(db: Any, user_id: int = 1, *, per_source: int = 15, gap: float = 
             out.append({"source": label, "title": str(title or "")[:44], "url": url,
                         "platform": p.get("platform") or "", "verdict": verdict,
                         "why": str(why)[:44]})
+            if auditor is not None:
+                auditor.observe(url, p)
             time.sleep(max(0.0, gap))
+        if auditor is not None:
+            #: 每张表提交一次(而不是每条):一期推送的量级很小,但**慢活不许抱着写锁**
+            #: 是本仓的铁律 —— 探活在 `observe()` 之外、提交在这里,网络请求不在事务里。
+            auditor.commit()
     return out
+
+
+class _HealthRecorder:
+    """把探活结果翻译成**存活登记**(`pan_link_health` + 账号池 `disabled`)。
+
+    ⚠️ **只认一手证据**:
+    · `alive is True` ⇒ 清死标记(自愈);
+    · `alive is False` 且措辞是终态 ⇒ 写死;其中**账号级封禁**(41031)额外
+      把该账号在池里标 `disabled`(它发什么都打不开,继续用它转存只会造新死链);
+    · `alive is None`(限流/超时/我们自己的配置问题)⇒ **什么都不做**。
+    """
+
+    def __init__(self, session: Any, user_id: int) -> None:
+        self.session = session
+        self.user_id = user_id
+        #: 已处理过的账号:43031 是整号性质,一条链就够了,不必逐条重复写池
+        self._banned: set[str] = set()
+        self._dirty = False
+
+    def observe(self, url: str, probe: dict) -> None:
+        from app.services import pan_link_health as _h
+
+        try:
+            if probe.get("alive") is True:
+                if _h.mark_alive(self.session, self.user_id, url):
+                    self._dirty = True
+                return
+            if probe.get("alive") is not False:
+                return                      #: 判不了 ⇒ 绝不当成"链死了"
+            err = str(probe.get("err") or "")
+            if not _h.is_terminal_dead(err):
+                return                      #: 非终态(限流等)不写死
+            plat, key = _h.share_key_of(url)
+            account = _h.account_of_share(self.session, self.user_id, plat, key)
+            if _h.mark_dead(self.session, self.user_id, url, err, account_key=account):
+                self._dirty = True
+            if plat == "quark" and account and _h.is_account_ban(err):
+                if account not in self._banned:
+                    self._banned.add(account)
+                    from app.services import pan_accounts as _A
+
+                    if _A.disable_account(self.session, "quark", account,
+                                          why=f"链接体检:{err[:80]}",
+                                          user_id=self.user_id):
+                        logger.warning("链接体检:账号 %s **已被停用**(整号封禁)", account)
+        except Exception:  # noqa: BLE001 - 登记失败绝不许毁掉体检本身
+            logger.warning("链接体检:存活登记失败 url=%s", str(url)[:70], exc_info=True)
+
+    def commit(self) -> None:
+        if not self._dirty:
+            return
+        try:
+            self.session.commit()
+            self._dirty = False
+        except Exception:  # noqa: BLE001
+            logger.warning("链接体检:存活登记提交失败", exc_info=True)
+            try:
+                self.session.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            self._dirty = False
 
 
 #: 出问题才算"要人看";这三档是**链本身**的问题
@@ -499,7 +577,9 @@ def link_audit_tick(settings=None, *, per_source: int = 0) -> int:
     try:
         for (uid,) in db.execute(__import__("sqlalchemy").select(User.id)
                                  .where(User.enabled.is_(True))).all():
-            rows = audit_rows(db, uid, per_source=n)
+            #: ★ 2026-11-24:**定时作业回写存活登记**(诊断跑法不动库)。
+            #: 没有这一步,"这条链打不开"永远只活在 `runs.detail` 里,出链口看不见。
+            rows = audit_rows(db, uid, per_source=n, record_health=True)
             s = summary(rows)
             groups = bad_groups(rows)
             bad_total += sum(g[3] for g in groups)
