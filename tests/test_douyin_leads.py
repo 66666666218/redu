@@ -637,7 +637,35 @@ class TestKoulingSummary:
         ]
         # ⚠️ 2026-10-05 改口径:原来的 `链N` 数的是"口令**是**分享链的条数",
         # 读起来却像"搬成了 N 条" —— 里面一大半是早就搬过、或这轮没搬的。现在摊开。
-        assert dl._kouling_summary(leads) == "新群1/群3/分享链1(新搬0 已搬过0 超额度0)"
+        # ⚠️ 2026-11-25 再改:这一条 share **没带 status**(`{"kind": "share"}`)⇒ 归「其他」。
+        # 旧断言把它当 0 条算,正好是"账目不闭合"的那种写法 —— 见下一条测试。
+        assert dl._kouling_summary(leads) == \
+            "新群1/群3/分享链1(新搬0 已搬过0 超额度0 其他1)"
+
+    def test_汇总必须闭合(self) -> None:
+        """★★ **2026-11-25 实测的缺口**:`分享链5(新搬0 已搬过1 超额度0)` 只解释 1 条。
+
+        另有 4 条落在没被统计的分支里 —— `skipped`/`failed`/`not_kouling`,
+        以及「三盘互通:复用已有链」(`status=ok` 但 `our_url` 为空)。
+        **一项对不上账的汇总等于把一整类事实抹掉**:读的人只会以为"额度不够"。
+
+        判据:四档 + 其他 == 分享链N。这条断言就是账本本身。
+        """
+        from app.services import douyin_leads as dl
+
+        leads = [
+            {"kouling": {"kind": "share", "status": "already", "our_url": "x"}},
+            {"kouling": {"kind": "share", "status": "ok", "our_url": ""}},   # 三盘互通
+            {"kouling": {"kind": "share", "status": "ok", "our_url": ""}},
+            {"kouling": {"kind": "share", "status": "skipped", "our_url": ""}},
+            {"kouling": {"kind": "share", "status": "failed", "our_url": ""}},
+        ]
+        got = dl._kouling_summary(leads)
+        assert "分享链5" in got and "其他4" in got, got
+        #: 没有"其他"时**不出现这一档**(不让既有卡片凭空多一段)
+        assert dl._kouling_summary(
+            [{"kouling": {"kind": "share", "status": "over_budget"}}]
+        ) == "新群0/群0/分享链1(新搬0 已搬过0 超额度1)"
 
     def test_self_loop_shows_new_group_zero(self) -> None:
         from app.services import douyin_leads as dl

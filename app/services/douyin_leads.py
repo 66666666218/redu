@@ -2235,9 +2235,20 @@ def _kouling_summary(leads: list[dict]) -> str:
     #: 恒定差 3 条 —— 那个缺口就是"额度被浪费掉的次数"。**一项对不上账的汇总,
     #: 等于把一整类事实抹掉了**:读的人只会以为额度不够,不会想到去查盘。
     n_disk = sum(1 for k in shares if k.get("status") == "disk_full")
+    #: ★★ **其余几档必须显形**(2026-11-25)。同一天实测 `分享链5(新搬0 已搬过1 超额度0)`
+    #: 只解释了 1 条,另 4 条去向不明 —— 它们落在**既没被这四档统计、也不是新搬**的分支里:
+    #:   · `skipped`(自己的分享 / 分享已死,重试无意义)/ `failed` / `not_kouling`;
+    #:   · **`ok` 但 `our_url` 为空** ——「三盘互通:复用已有链」走的那一支(`xunlei_kouling.ingest`)
+    #:     确实搬成了(`kind=share`),只是我方链在别处的记录里,**不在本轮返回值里**。
+    #: 不单列的话,「分享链N」与「新搬+已搬过+超额度+盘满」的差会被读成"数据丢了",
+    #: 而实际每一类都有确定含义 —— 这是本仓最恨的「对不上账的汇总」。
+    #: ⚠️ 顺序:**先判新搬再判其他**,否则带 `our_url` 的会被重复计入两档(与 `n_moved` 同一判据)。
+    _named = n_moved + n_already + n_over + n_disk
+    n_other = len(shares) - _named
     return (f"新群{n_new}/群{n_group}/分享链{len(shares)}"
             f"(新搬{n_moved} 已搬过{n_already} 超额度{n_over}"
-            + (f" 盘满{n_disk}" if n_disk else "") + ")")
+            + (f" 盘满{n_disk}" if n_disk else "")
+            + (f" 其他{n_other}" if n_other else "") + ")")
 
 
 def run_douyin_leads(db, user_id: int, settings=None, category: str | None = None,
