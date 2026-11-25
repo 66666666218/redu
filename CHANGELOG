@@ -1,3 +1,58 @@
+- [2026-11-25 23:10] FIX: 闲鱼实时告警 11-19 起归零的真因 —— 批口径按 created_at 分批(不是阈值)
+  用户口径「闲鱼调整到最优」。排查后确认:`jump` 阈值不是主因,`_batches` 对闲鱼的**分批方式**才是。
+  ## ★ 根因(结构性,不是调参能救的)
+  `xianyu_items` 是「逐行插入即去重」的流水:每个商品入库各打一个 `created_at`
+  (生产中平均 **1.8 行/时间戳**)。旧 `_batches` 取最近两个 `created_at` 当「当前批/上一批」
+  ⇒ **当前批永远只等于最后插入的 1~2 个新商品**(全是新的、没有基线),`_xianyu_want_pct`
+  恒返回 None ⇒ `jump` 口径把实时卡打成 **0 条/天**(11-15 还有 95 条/天,11-19 起清零)。
+  ⚠️ 测试替身 `_seed_xianyu` 让同批共享 `created_at`,所以**测试一直绿、生产一直是哑的**
+  (典型的替身方言漂移)。日报的闲鱼段同样只显示 1 条,同一个 bug。
+
+  ## 改了什么
+  · `_cards._xianyu_batches`:闲鱼的「批」改走 `xianyu_daily`(每商品每日一行、当日完整热销集)。
+    当前批 = 最新 snap_date 全量;上一批 = 每个商品**自己最近一次**更早快照(窗口
+    `feishu_xianyu_want_baseline_days`=3 天)—— 商品入池日期不同,新品无昨日行,用固定昨日会漏。
+  · `_delta`:闲鱼分支改比 **想要数**(快照里没有 best_rank),与卡片 🔥 同源。
+  · `_jobs._xianyu_want_pct`:基线改用 `_batches` 的 prev,删掉独立的 t_daily/y_daily
+    ⇒ 触发 / 卡片 / 日报三处同一个 prev、同一个涨幅。
+  · 新增 `feishu_xianyu_want_min_delta`=5:小基数 +50% 可能只涨 1 个(1→2),绝对增量闸挡噪声。
+  · 闲鱼 `cur` 是当日全量(上千条),去掉 `[:40]` 截断按想要数降序全扫;单卡硬上限 30(防 all 模式爆版)。
+  · 日报 `_section_lines`/`_trend_summary` 闲鱼按想要数降序、标题截 16 字(卖家话术可达 500 字)。
+
+  ## 标定(近 14 天日快照回放,3 天窗口 + ≥50% + Δ≥5)
+  日均约 16 条/天(11-15 谢胜子/王松傲寒等大课 +2810%~+36% 排前),既有信号又不刷屏。
+
+- [2026-11-25 22:35] FEAT: 贴吧补齐全帖指标(浏览/回复/分享/收藏)+ 修点赞少报 82% 的口径错
+  用户问「贴吧数据能否带上点赞浏览评论这些数据」。实测:**能,匿名、不额外花请求** ——
+  `aiotieba.get_posts(tid)` 的 `posts.thread` 段里 `view_num` / `reply_num` /
+  `share_num` / `agree` / `disagree` / `collect_num` 全有值。
+
+  ## ★ 顺带揪出一个一直在少报的口径错
+  原来 `metrics.liked_count` 取的是**首楼那一层**的 `agree`。实测 tid 10745031844:
+  **全帖 28,344 / 首楼 5,115** ⇒ 热度**少报 82%**,而且看起来完全正常(不为 0、
+  量级也不离谱)。全帖值 `posts.thread.agree` **同一次请求就有**,不用多打。
+  改为:全帖值优先、首楼值仅在缺失/为 0 时兜底。
+
+  ## 接了什么
+  · `tieba_metrics._detail_of` 多取 `thread` 段六项(取不到是 `None`,**不填 0**);
+  · 新增 `detail_to_metrics()`,把详情 → `conversion` 认的 `metrics`;
+  · `tieba_search._row` 用它,并去掉硬编码的 `share_count = 0`(有真值了);
+  · `pan_discovery._candidates_from_tieba` 的浏览器回落路改用 `fetch_posts_detail`
+    (顺带把全帖指标也补上,原来只补 `agree`);
+  · `fetch_agree` 改为返回**全帖**点赞。
+
+  ## 口径影响(用户拍板"全接")
+  贴吧的曝光阶梯从 `engage`(互动总量)升到 **`view_count`(浏览量)**,
+  预估口径变成「浏览量 × 40%」。⚠️ 盘链发现里实际搜到的资源帖**互动几乎全是 0**
+  (浏览十几~几十、赞 0、回复 1~2,疑为机器批量发)⇒ 卡面大概率仍显示 `—`,
+  那不是没接上,是那些帖子真没人看。
+
+  测试:新增 8 条(`test_tieba_metrics.py` 6 / `test_tieba_search.py` 2),
+  含"有浏览量就走 view_count 档"的对照。相关四套 161 条全绿。
+  (Files: app/services/tieba_metrics.py, app/services/tieba_search.py,
+  app/services/pan_discovery.py, tests/test_tieba_metrics.py, tests/test_tieba_search.py,
+  doc/贴吧纯协议-链路拆解.md, doc/外部接口速查.md, CHANGELOG)
+
 - [2026-11-25 21:52] FEAT: 预判命中回验作业 —— 三条预判链发出的每一条,72h 后回查真假
   用户问「**我们大瓜和预测是否能投入客户群里使用了**」,答案是**都不能**,但
   「什么时候能」**没法用数据回答** —— 因为全仓没有任何一处算过"预判准不准":

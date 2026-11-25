@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from app.db import repository
 
-from app.db.models import BaiduHotItem, DouhotWord, WeiboHotItem, XianyuItem
+from app.db.models import BaiduHotItem, DouhotWord, WeiboHotItem, XianyuDaily, XianyuItem
 
 
 from config.settings import Settings, get_settings
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from sqlalchemy.orm import Session
 
@@ -132,13 +132,73 @@ def _md_safe(text: str) -> str:
             .replace("<", "＜").replace(">", "＞")
             .replace("`", "")
             .replace("\n", " ").replace("\r", " "))
+def _xianyu_batches(db: Session, user_id: int, baseline_days: int = 3) -> tuple[dict[str, object], dict[str, object]]:
+    """闲鱼的 (当前批, 上一批)。
+
+    ⚠️ **闲鱼不能用 `xianyu_items` 分批**(2026-11-25)。那张表是"逐行插入即去重"的流水:
+    每个商品入库时各自打一个 `created_at`(生产中平均 1.8 行/时间戳),根本不存在"每轮
+    完整快照"这个语义。旧实现按 `created_at` 取最近两个时间点 ⇒ "当前批"永远只等于最后
+    插入的 1~2 个新商品(全是新的、没有昨日基线),于是想要数涨幅恒为 None —— `jump`
+    口径从 11-19 起把闲鱼实时告警打成 0 条/天,**根因在这里,不是阈值**。
+
+    正确的"批"在 `xianyu_daily`:每商品**每天一行**、当日在售的完整热销集。
+    - 当前批 = 最新 `snap_date` 的全部行;
+    - 上一批 = 当前批每个商品**在其之前最近一次**快照(窗口 `baseline_days` 天内)。
+      用"各自的上一次"而非固定"昨日",是因为商品入池日期不同(新品无昨日行);
+      每个商品仍拿得到自己的真实基线,涨幅才是可比、可信的。
+    """
+    latest = db.scalar(
+        select(func.max(XianyuDaily.snap_date)).where(XianyuDaily.user_id == user_id)
+    )
+    if not latest:
+        return {}, {}
+    cur_rows = db.scalars(
+        select(XianyuDaily).where(
+            XianyuDaily.user_id == user_id, XianyuDaily.snap_date == latest
+        ).order_by(XianyuDaily.id.asc())
+    ).all()
+    cur: dict[str, object] = {}
+    for r in cur_rows:
+        key = str(r.title or r.item_id or "").strip()
+        if key:
+            cur[key] = r
+    if not cur:
+        return {}, {}
+
+    # 基线:每个 item 在其之前、窗口内最近一次快照(一次性取回,再在内存里挑最近)。
+    from datetime import date, timedelta
+
+    try:
+        cutoff = (date.fromisoformat(str(latest)) - timedelta(days=max(baseline_days, 1))).isoformat()
+    except ValueError:
+        cutoff = str(latest)
+    base_rows = db.scalars(
+        select(XianyuDaily).where(
+            XianyuDaily.user_id == user_id,
+            XianyuDaily.snap_date < str(latest),
+            XianyuDaily.snap_date >= cutoff,
+        ).order_by(XianyuDaily.snap_date.asc())
+    ).all()
+    prev: dict[str, object] = {}
+    for r in base_rows:  # snap_date 升序 → 后写覆盖 = 取窗口内最近一次
+        key = str(r.title or r.item_id or "").strip()
+        if key:
+            prev[key] = r
+    return cur, prev
+
+
 def _batches(db: Session, user_id: int, section: str) -> tuple[dict[str, object], dict[str, object]]:
     """返回 (当前批 {title: row}, 上一批 {title: row})。
 
     批次 = 该用户该板块**全局最近一次采集时间点**(当前批)与其**前一个时间点**(上一批)。
     同一标题在不同批各自出现 → 才能做"排名涨跌";只在当前批出现 → 判为新增。
     每批内若同标题出现多次(极少数),取该批最后一次。
+
+    ⚠️ **闲鱼是例外**:它的"批"不是采集时间点,而是每日快照(见 `_xianyu_batches`)——
+    `xianyu_items` 是逐行插入的去重流水,按 `created_at` 分批会得到"当前批只有最后 1~2 行"。
     """
+    if section == "xianyu":
+        return _xianyu_batches(db, user_id)
     table = _TABLES[section]
     # 只取最近两个采集时间点 + 这两批的行,不再整表加载
     # (旧库 20 万行/用户时,每次采集成功后的实时推送都会全量扫一遍,线性劣化)
@@ -185,6 +245,17 @@ def _delta(section: str, cur: object, prev_by_title: dict[str, object]) -> tuple
             return "down", f"-{(pv - cv) / pv * 100:.0f}%"
         return "stay", ""
 
+    if section == "xianyu":
+        #: 闲鱼比的是**想要数**,不是名次(快照里没有 best_rank)。
+        #: 与实时/卡片同一个数(`want=(d-want - y-want)/y-want`),阈值只在触发处卡。
+        cv = float(getattr(cur, "want_count", 0) or 0)
+        pv = float(getattr(prev, "want_count", 0) or 0)
+        if pv > 0 and cv >= pv * 1.05:
+            return "up", f"+{(cv - pv) / pv * 100:.0f}%"
+        if pv > 0 and cv <= pv * 0.95:
+            return "down", f"-{(pv - cv) / pv * 100:.0f}%"
+        return "stay", ""
+
     cr = int(getattr(cur, _RANK_FIELD[section], 0) or 0)
     pr = int(getattr(prev, _RANK_FIELD[section], 0) or 0)
     delta = pr - cr  # 名次从 pr 变到 cr;变正 = 上升(名次更小)
@@ -195,15 +266,23 @@ def _delta(section: str, cur: object, prev_by_title: dict[str, object]) -> tuple
     return "stay", ""
 def _trend_summary(section: str, cur: dict[str, object], prev: dict[str, object], n: int = 5) -> str:
     """分析一段话:上升最多 / 新增 / 回落最多,用于日报的"整体趋势"。"""
+    #: 闲鱼商品标题可达 500 字(卖家把整套话术塞进标题),进"分析"行会爆版 ⇒ 截断。
+    #: 同时按想要数降序取前 60(热门优先),免得按 id 顺序取到一堆长尾新品。
+    cut = 16 if section == "xianyu" else None
+    if section == "xianyu":
+        ordered = sorted(cur.items(), key=lambda kv: -int(getattr(kv[1], "want_count", 0) or 0))[:60]
+    else:
+        ordered = list(cur.items())[:60]
     up, down, new = [], [], []
-    for title, c in list(cur.items())[:60]:
+    for title, c in ordered:
         tag, extra = _delta(section, c, prev)
+        name = (title[:cut] + "…") if (cut and len(title) > cut) else title
         if tag == "up":
-            up.append((title, extra))
+            up.append((name, extra))
         elif tag == "down":
-            down.append((title, extra))
+            down.append((name, extra))
         elif tag == "new":
-            new.append(title)
+            new.append(name)
     parts = []
     if up:
         parts.append("上升:" + "; ".join(f"{t}({e})" for t, e in up[:n]))
@@ -218,8 +297,13 @@ def _section_lines(db: Session, user_id: int, section: str, top_n: int = 10) -> 
     if not cur:
         return [f"  · {SECTION_LABELS[section]}:暂无数据"]
 
-    # douhot 无 rank 列,按 score 逆序得到名次顺序,用于显示与排序
-    order_titles = sorted(cur.keys(), key=lambda t: -float(getattr(cur[t], "score", 0) or 0))
+    # douhot 无 rank 列,按 score 逆序;闲鱼按想要数逆序(日快照 id 升序≠热度序)。
+    if section == "douhot":
+        order_titles = sorted(cur.keys(), key=lambda t: -float(getattr(cur[t], "score", 0) or 0))
+    elif section == "xianyu":
+        order_titles = sorted(cur.keys(), key=lambda t: -int(getattr(cur[t], "want_count", 0) or 0))
+    else:
+        order_titles = list(cur.keys())
     ranked = order_titles[:top_n]
     lines = [f"【{SECTION_LABELS[section]}】"]
     for title in ranked:

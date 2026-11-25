@@ -1914,7 +1914,14 @@ class Settings(BaseSettings):
     #: `_section_lines`)每天照常给出该板块 TOP;这是**写在配置里的取舍**,
     #: 与"静默失败"的区别就在这里 —— 想恢复旧行为把这项改成 `all` 即可。
     feishu_xianyu_realtime: str = "jump"
-    feishu_xianyu_want_jump_ratio: float = 0.5   # 想要数较昨日涨幅 ≥ 该比例即实时推
+    feishu_xianyu_want_jump_ratio: float = 0.5   # 想要数较基线快照涨幅 ≥ 该比例即实时推
+    #: 基线 = 该商品**最近一次更早的日快照**,窗口不超过该天数。
+    #: ⚠️ 不是"固定昨日":商品入池日期各不相同,新上架的没有昨日行,用固定昨日会把
+    #: 它们全判成"算不出涨幅"而漏掉(这正是 2026-11-19 起实时卡归零的直接原因之一)。
+    feishu_xianyu_want_baseline_days: int = 3
+    #: 想要数的**绝对增量**下限(与 ratio 是「与」关系,两个都满足才推)。
+    #: 小基数上 +50% 可能只涨 1 个(1→2),纯比例会放进大量噪声;5 为近 14 天回放标定值。
+    feishu_xianyu_want_min_delta: int = 5
     feishu_burst_min_confidence: str = "高"  # 实时推送"预测爆发"所需最低置信度(高/中/低);中低置信只进日报与洞察、不实时推,减少噪音
     feishu_alert_cooldown_hours: int = 6   # 同一话题实时推送冷却(小时),防刷屏
     # 抖音热点宝走代理池:部分服务器 IP 会被抖音风控(直接返回 502 nginx),

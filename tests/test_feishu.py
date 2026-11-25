@@ -156,12 +156,14 @@ def test_daily_splits_to_platform_groups(monkeypatch, session) -> None:
     """日报拆分:配了专属群的平台段进专属群;总群收聚合段+未配专属群的平台段。"""
     from datetime import datetime, timedelta
 
-    from app.db.models import WeiboHotItem, XianyuItem
+    from app.db.models import WeiboHotItem, XianyuDaily
     from app.services import feishu
 
     now = datetime.now()
     session.add(WeiboHotItem(user_id=1, title="微博热搜A", heat=100, rank=1, captured_at=now))
-    session.add(XianyuItem(user_id=1, item_id="i1", title="闲鱼商品B", created_at=now))
+    #: 闲鱼日报段的"批"来自 `xianyu_daily`(每日快照),不是 `xianyu_items`(逐行流水)。
+    session.add(XianyuDaily(user_id=1, item_id="i1", title="闲鱼商品B", want_count=10,
+                            snap_date=now.date().isoformat()))
     session.commit()
 
     sent = []  # (webhook, text)
@@ -401,21 +403,21 @@ def test_realtime_respects_cooldown(session, monkeypatch) -> None:
 
 
 def _seed_xianyu(session) -> None:
-    """闲鱼两批:上一批 A/B,当前批 A/B/C(只有 C 是新上架)。"""
+    """闲鱼日快照:今日 A/B/C,昨日 A/B(只有 C 是新上架,无基线)。
+
+    ⚠️ 闲鱼的"批"现在来自 `xianyu_daily`(每日快照),不再是 `xianyu_items`
+    (这张表是逐行插入的去重流水,按 `created_at` 分批在生产上"当前批"只有 1~2 行)。
+    """
     from app.db.models import XianyuDaily
 
-    t1, t2 = datetime.now() - timedelta(minutes=30), datetime.now()
-    for title, rank in [("A", 1), ("B", 2)]:
-        session.add(XianyuItem(user_id=1, item_id=title, title=title, best_rank=rank,
-                               created_at=t1))
-    for title, rank in [("A", 1), ("B", 5), ("C", 3)]:
-        session.add(XianyuItem(user_id=1, item_id=title, title=title, best_rank=rank,
-                               created_at=t2))
     today = datetime.now().date().isoformat()
     yday = (datetime.now() - timedelta(days=1)).date().isoformat()
-    #: A 想要数从 10 涨到 20(+100% ⇒ 触发);B 从 10 涨到 11(+10%,不触发);C 昨日没有记录。
-    for iid, want, d in [("A", 20, today), ("B", 11, today),
-                         ("A", 10, yday), ("B", 10, yday)]:
+    #: A 想要数从 10 涨到 20(+100%、Δ10 ⇒ 触发);B 从 10 涨到 11(+10%,不触发);
+    #: E 从 1 涨到 2(+100% 但 Δ1 < min_delta 5 ⇒ 被绝对增量闸挡住);
+    #: C 昨日没有记录(新品,算不出涨幅)。
+    for iid, want, d in [("A", 20, today), ("B", 11, today), ("C", 3, today),
+                         ("E", 2, today),
+                         ("A", 10, yday), ("B", 10, yday), ("E", 1, yday)]:
         session.add(XianyuDaily(user_id=1, item_id=iid, title=iid, want_count=want,
                                 snap_date=d))
     session.commit()
@@ -442,12 +444,13 @@ def test_闲鱼默认不再因为新增就推卡(session, monkeypatch) -> None:
     #: 模型把 C 判掉就变成"1 条",让这条用例随上游模型漂移 —— 这里只测触发口径。
     n = run_feishu_realtime("xianyu", 1, _settings(ai_filter_enabled=False), db=session)
     joined = "\n".join(sent)
-    assert n == 1, f"只有 A(想要数 +100%)该推,实际触发 {n} 条"
+    assert n == 1, f"只有 A(+100%、Δ10)该推,实际触发 {n} 条"
     assert "A" in joined and "想要+100%" in joined
     assert "想要数跳升" in joined, "触发口径的说明要写在卡上"
-    #: B 只涨了 10%、C 昨日无记录(算不出涨幅) ⇒ 都不该出现在这张卡里
+    #: B 只涨了 10%(比例不够);E 比例 +100% 但 Δ1 < 5(绝对增量闸);C 无基线(算不出涨幅)。
     assert "**C**" not in joined, "C 是新上架但没跳升,不该被推"
     assert "**B**" not in joined, "B 涨幅只有 10%,低于默认阈值 50%"
+    assert "**E**" not in joined, "E 只涨 1 个(1→2),被 min_delta 闸挡住"
 
 
 def test_闲鱼可以调回新增即推(session, monkeypatch) -> None:
@@ -469,6 +472,48 @@ def test_闲鱼可以调回新增即推(session, monkeypatch) -> None:
     #: A(想要 +100%)与 C(新增)都该推;B 既没跳升又不新增 ⇒ 不推
     assert n == 2, f"all 模式下 C(新增)也要推,实际 {n}"
     assert "C" in joined and "新增" in joined
+
+
+def test_闲鱼批口径不受created_at分散影响(session, monkeypatch) -> None:
+    """★★ 回归(2026-11-25):`xianyu_items.created_at` 在生产里**每行都不同**
+    (逐行插入即去重,平均 1.8 行/时间戳)。
+
+    旧的 `_batches` 按 `created_at` 取最近两个时间点当"当前批/上一批" ⇒ 当前批永远只有
+    最后插入的 1~2 个新商品(全是新的、没有基线),想要数涨幅恒 None,`jump` 口径把闲鱼
+    实时告警打成 0 条/天。修后闲鱼改走 `xianyu_daily` 日快照,与 `created_at` 无关。
+
+    本用例故意让每个商品/每行有不同的 `created_at`,复现生产形态 —— 若有人把 `_batches`
+    的闲鱼分支改回去按 time 分批,这里会红。
+    """
+    from app.db.models import XianyuDaily, XianyuItem
+
+    now = datetime.now()
+    today = now.date().isoformat()
+    yday = (now - timedelta(days=1)).date().isoformat()
+    #: 商品行:每行独立 created_at(相差微秒),模拟真实插入流水的形态。
+    for i, iid in enumerate(["A", "B", "C", "D"]):
+        session.add(XianyuItem(user_id=1, item_id=iid, title=iid,
+                               created_at=now + timedelta(microseconds=i)))
+    #: 日快照:A 10→20(+100% Δ10,推);B 10→11(不推);C 仅今日(新品,无基线)
+    for iid, want, d in [("A", 20, today), ("B", 11, today), ("C", 3, today),
+                         ("A", 10, yday), ("B", 10, yday)]:
+        session.add(XianyuDaily(user_id=1, item_id=iid, title=iid, want_count=want,
+                                snap_date=d))
+    session.commit()
+
+    sent: list[str] = []
+
+    def _fake(w, s):
+        class F:
+            def send_card(self, c): return (sent.append(str(c)), True)[1]
+            def send(self, t): return (sent.append(t), True)[1]
+        return F()
+
+    monkeypatch.setattr(feishu, "FeishuClient", _fake)
+    n = run_feishu_realtime("xianyu", 1, _settings(ai_filter_enabled=False), db=session)
+    joined = "\n".join(sent)
+    assert n == 1, f"created_at 分散不影响日快照判涨:A(+100%)该推,实际 {n}"
+    assert "A" in joined and "想要+100%" in joined
 
 
 def test_realtime_message_includes_prediction(session, monkeypatch) -> None:
