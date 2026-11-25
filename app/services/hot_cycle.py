@@ -711,6 +711,119 @@ def remember(session, user_id: int, rows: list[HotWord]) -> int:
     return added
 
 
+#: 热榜侧「作品名」的分组判据:**跨 ≥N 个不同源**才算。
+#: ★ 2026-11-25 在生产库上标定(`hot_source_items`,内容型源,标题含 `《》`):
+#: 近 24h 命中名字 39 个、**跨 ≥2 源只剩 2 个**;72h 是 111 → **5 个**。
+#: 也就是说这道闸压掉了绝大多数噪音,而留下的全是真作品
+#: (`GTA6` 4 源 / `饥困荒野` 2 / `两京十五日` 2 / `黑神话:悟空` 2 / `三体短篇集:平行之境` 2)。
+#: ⚠️ **不能改成"单源 + 名次靠前"**:`hot_breakout` 的模块头注里有反例 ——
+#: 斗破那次只有 ithome 一个源、麦穗那次热榜侧比我们晚 38 小时,单源判据两边都抓不住,
+#: 而且单源名字 24h 就有 39 个,直接灌进词表会把搜索额度吃光。
+#: ⚠️ 也不能要求 ≥3 源:那样 72h 只剩 `GTA6` 一个,**真事件几乎全被挡掉**。
+HOT_WORK_MIN_SOURCES = 2
+
+#: 热榜作品名的窗口(小时)。48h:预告稿从首现到被我们搜到通常跨 1~2 天,
+#: 而 48h 的跨源名字实测只有 3 个(`GTA6`/`饥困荒野`/`两京十五日`),喂搜索不会占满词表。
+HOT_WORK_HOURS = 48
+
+#: 名字长度上限 —— 与 `douyin_leads._HOT_MAX_LEN` 一致(推广号标题里的《》写不下更长的)。
+HOT_WORK_MAX_LEN = 12
+
+
+def hot_work_names(session, user_id: int, *, hours: int = HOT_WORK_HOURS,
+                   min_sources: int = HOT_WORK_MIN_SOURCES,
+                   max_len: int = HOT_WORK_MAX_LEN) -> list[tuple[str, int]]:
+    """**热榜里的真作品名** → `[(名字, 跨源数)]`,按跨源数降序。
+
+    ## 为什么要这条(用户口径「也可以结合热点榜加热搜」)
+
+    `hot_breakout` 已经在用同一批数据做「破圈预警」,但它的产出**只发管理群**,
+    不回灌素材池/搜索词 —— 也就是说**发现了热点,却没有把它变成"去搜一下"的动作**。
+
+    ## 判据
+
+    ① 源 ∈ `hot_breakout.CONTENT_SOURCES`(财经/时政线天天命中「《…白皮书》」,是噪音源);
+    ② 标题里 `《…》` 取**最后一个**(与 `hot_breakout._primary_name` 同一把尺子:
+       中文标题主作品在后,前面是"原班人马/前作");
+    ③ 名字里命中政策类词(`白皮书/条例/规划…`)⇒ 是文件名不是作品名,丢;
+    ④ **跨 ≥`min_sources` 个不同源** —— 这是压噪音的主力(见 `HOT_WORK_MIN_SOURCES`);
+    ⑤ 长度 ≤ `max_len`。
+
+    ⚠️ 名字的归一走 `resource_key`(与资源库同一把尺子),返回的是**原文名**
+    (搜索词要原文,不能拿归一后的串去搜)。
+    """
+    from sqlalchemy import select
+
+    from app.db.models import HotSourceItem
+    from app.services.hot_breakout import CONTENT_SOURCES, POLICY_WORDS, _BRACKET_RE
+    from app.services.resource_library import resource_key
+
+    hours = int(hours or HOT_WORK_HOURS)
+    since = datetime.now() - timedelta(hours=max(1, hours))
+    rows = session.execute(
+        select(HotSourceItem.source, HotSourceItem.title).where(
+            HotSourceItem.user_id == user_id,
+            HotSourceItem.source.in_(CONTENT_SOURCES),
+            HotSourceItem.captured_at >= since)).all()
+    #: key → [源集合, 原文名];同一条标题里的多个《》**只认最后一个**(见 ②)。
+    acc: dict[str, tuple[set[str], str]] = {}
+    for src, title in rows:
+        t = str(title or "")
+        if "《" not in t:
+            continue
+        names = [n.strip() for n in _BRACKET_RE.findall(t)]
+        if not names:
+            continue
+        raw = names[-1]
+        if not raw or POLICY_WORDS.search(raw) or len(raw) > max_len:
+            continue
+        k = resource_key(raw)
+        if not k:
+            continue
+        cur = acc.get(k)
+        if cur is None:
+            acc[k] = ({str(src)}, raw)
+        else:
+            cur[0].add(str(src))
+    out = [(raw, len(srcs)) for srcs, raw in acc.values()
+           if len(srcs) >= max(2, int(min_sources))]
+    out.sort(key=lambda t: (-t[1], t[0]))
+    return out
+
+
+def unfed_hot_work_names(session, user_id: int, *, top: int = 2,
+                         hours: int = HOT_WORK_HOURS) -> list[str]:
+    """取**还没喂过搜索**的热榜作品名(喂 `douyin_leads` 用)。
+
+    ★ 为什么不复用 `unfed_search_words`:那张表是**形态词探针**的台账
+    (`hot_word_seen`),存的是"新起量的事件句";而这里流的是**作品名**,
+    两者来源与判据都不同,混一张表会让"喂过没产出"与"从没喂过"又分不开。
+
+    ⇒ **台账直接用 `douyin_leads.keyword`**:某个名字被拿去搜过,那一轮搜回来的线索
+    行就带着它(历史 43/43 行都有 `keyword`)。近 3 天喂过 ⇒ 不再喂。
+    ⚠️ 这条比 `fed_search_at` 弱一点(**搜到 0 条时没有行可留痕**),所以用"近 3 天"
+    而不是"永远":真作品会在榜上持续几天,三天的冷却足以让它重新拿到一次机会。
+
+    ⚠️ **大瓜轮不吃**(与探针词同一条纪律,见 `douyin_leads` 里 `cat != DAGUA_CATEGORY`)。
+    """
+    from sqlalchemy import select
+
+    from app.db.models import DouyinLead
+
+    if session is None or top <= 0:
+        return []
+    names = [n for n, _ in hot_work_names(session, user_id, hours=hours)]
+    if not names:
+        return []
+    since = datetime.now() - timedelta(days=3)
+    fed = {str(k) for k in session.scalars(
+        select(DouyinLead.keyword).where(
+            DouyinLead.user_id == user_id,
+            DouyinLead.found_at >= since,
+            DouyinLead.keyword.in_(names))).all() if k}
+    return [n for n in names if n not in fed][:max(1, int(top))]
+
+
 def prune_seen(session, user_id: int, *, keep_days: int = 14) -> int:
     """删掉 `keep_days` 天没再出现的词,返回删除条数(这张表会一直变大)。"""
     from sqlalchemy import delete

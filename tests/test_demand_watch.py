@@ -1555,18 +1555,20 @@ def _scanned(session, aweme_id, days_ago=0):
 
 def test_近三天扫过的视频不再重复进池(session):
     """实测:近 7 天 114 行扫描只覆盖 82 个视频,28% 是重复,单个最多跨 7 天扫 7 次。"""
-    #: 显式给出入库顺序(`ORDER BY found_at DESC`),让「已扫」的那条排最前 ——
-    #: 否则三条同秒入库,谁先被取到取决于数据库的物理顺序,用例会飘。
-    base = datetime.now()
-    _lead(session, "111", found_at=base)
-    _lead(session, "222", found_at=base - timedelta(seconds=1))
-    _lead(session, "333", found_at=base - timedelta(seconds=2))
-    _scanned(session, "111", days_ago=1)
+    #: ★ 2026-11-25 起线索按**事件轮换**取(`demand_watch._event_groups`):
+    #: 组内按**发布时间新→旧**,所以「已扫」的那条必须是**最新的**才会第一个被取到、
+    #: 第一个被跳过(否则它排在后面,轮不到它 ⇒ 测不到跳过)。
+    #: 判不了发布时间的假 id 会算成 0(垫底),所以这里必须用雪花 id。
+    newest, mid, oldest = _snow(_age_s(1)), _snow(_age_s(2)), _snow(_age_s(3))
+    _lead(session, newest)
+    _lead(session, mid)
+    _lead(session, oldest)
+    _scanned(session, newest, days_ago=1)
 
     stats = {}
     vids = dw.source_videos(session, 1, _SD(), stats=stats)
 
-    assert {v["aweme_id"] for v in vids} == {"222", "333"}, "扫过的 111 又进池了"
+    assert {v["aweme_id"] for v in vids} == {mid, oldest}, "扫过的那条又进池了"
     assert stats["rescanned"] == 1
     assert stats["refilled"] == 0, "没被跳过的素材够填满名额 ⇒ 不该回填"
 
@@ -1930,3 +1932,197 @@ def test_运行记录写出事件合并与碎片条数(session, monkeypatch):
     #: 三个名字都落在同一条视频上(`_lead` 的 url),后两个是 `狗爹` 的加料碎片。
     assert "推1" in detail, detail
     assert "碎片2" in detail, detail
+
+
+# ---------------------------------------------------------------------------
+# 素材按事件轮换 + 品牌降级(2026-11-25)
+# ---------------------------------------------------------------------------
+#
+# ★★ 用户口径:「先重启,然后**找规律**分析出来一个比较好的策略,也可以结合热点榜加热搜」。
+# 生产库(只读)回放近 7 天 236 条线索 / 75 组的结论:
+#   · 原取法是 `ORDER BY found_at DESC` 每轮取 2 条 ⇒ 三个真事件
+#     (`麦穗与羊` 23 人 / `下一个天亮` 18 人 / `斗破苍穹剧场版` 7 人)要到**第 70 轮**才轮到;
+#   · 按事件轮换后**第 1 轮三个全中**;
+#   · 作品 vs 资源号品牌用「获取类动词占比 ≥0.5」能**完整分开**
+#     (真事件组 0.00~0.05,品牌组 1.00)。
+
+
+def test_拿不到书名号时按口令或标题分组(session):
+    """素材分组键:最后一个书名号 > 口令 > 标题归一 —— 三级回落,不许返回空。"""
+    from app.services.resource_library import resource_key
+
+    assert dw._event_name("求《麦穗与羊》全集") == resource_key("麦穗与羊")
+    assert dw._event_name("【附置】东东来了", mark="东东来了") == resource_key("东东来了")
+    assert dw._event_name("随便一条没有书名号也没口令的标题") == \
+        resource_key("随便一条没有书名号也没口令的标题")
+
+
+def test_标题里多个书名号取最后一个(session):
+    """`国漫《斗破苍穹》剧场版《双帝之战》定档` ⇒ 主 = 双帝之战(与 `hot_breakout` 同一把尺子)。"""
+    from app.services.resource_library import resource_key
+
+    assert dw._event_name("国漫《斗破苍穹》剧场版《双帝之战》定档") == \
+        resource_key("双帝之战")
+
+
+def test_获取类动词占比判定资源号品牌():
+    """实测分组:`红日宝库`/`二哈部落`/`百战百胜` 的标题 100% 带「获取类」动词,
+    而 `麦穗与羊`/`下一个天亮`/`斗破苍穹剧场版` 是 0.00~0.05。"""
+    assert dw._is_brand(["XX宝库最新教程 自取", "免费领取安装包"])
+    assert not dw._is_brand(["麦穗与羊最新一集", "麦穗与羊 第 12 集 反转"])
+    #: 一半一半 ⇒ 按阈值 0.5 算品牌(宁可降级,别让它抢真事件的名额)
+    assert dw._is_brand(["XX教程下载", "麦穗与羊"])
+    assert not dw._is_brand([])
+
+
+def test_素材按事件轮换_三个真事件第一轮就全覆盖(session):
+    """★★ 生产库回放的核心结论:按 `found_at desc` 取,真事件要等**第 70 轮**。
+
+    这里造 3 个真事件 + 3 个品牌组,`demand_max_videos=3`(线索段的名额口径是
+    `lead_stop = lib_need`)⇒ 第 1 轮就该买到**三个不同的事件**,而不是同一事件的三条。
+    """
+    base = datetime.now()
+    #: 每个事件两三条(**组内多条**才是关键:按时间取会让同一事件占满全部名额)
+    for ev, n in (("麦穗与羊", 3), ("下一个天亮", 3), ("斗破苍穹剧场版", 3)):
+        for i in range(n):
+            _lead(session, f"{ev}-{i}",
+                  title=f"《{ev}》第 {i + 1} 集",
+                  found_at=base - timedelta(minutes=i))
+
+    class S(_S):
+        demand_max_videos = 3
+
+    vids = dw.source_videos(session, 1, S())
+    names = {dw._event_name(v["title"]) for v in vids}
+
+    assert len(vids) == 3, vids
+    assert len(names) == 3, f"同一事件占了多个名额:{[v['title'] for v in vids]}"
+
+
+def test_品牌组排在真事件之后_但不会消失(session):
+    """品牌素材**降级**,不是丢弃 —— 它们的评论区同样是"求资源"现场。"""
+
+    class S(_S):
+        demand_max_videos = 2
+
+    #: 品牌组更新(按时间取会先拿到它),真事件更旧
+    base = datetime.now()
+    _lead(session, "b1", title="XX宝库 最新教程 自取", found_at=base)
+    _lead(session, "t1", title="《麦穗与羊》第 1 集", found_at=base - timedelta(hours=1))
+
+    vids = dw.source_videos(session, 1, S())
+
+    assert [v["aweme_id"] for v in vids][0] == "t1", [v["title"] for v in vids]
+
+
+def test_运行记录写出事件组数与品牌降级数(session, monkeypatch):
+    """不写的话,「又只扫到那几条」分不清是**素材池只有一个事件**还是**轮换没生效**。"""
+    from app.db.models import RunRecord
+
+    _lead(session, "t1", title="《麦穗与羊》第 1 集")
+    _lead(session, "b1", title="XX宝库 最新教程 自取")
+    monkeypatch.setattr(dw, "collect_for_video", lambda *a, **k: {"error": "", "names": {}})
+
+    dw.run_user(session, 1, _S())
+    session.flush()
+    detail = session.query(RunRecord).filter_by(kind="demand_watch").one().detail
+
+    assert "事件2组" in detail and "品牌1" in detail, detail
+
+
+# ---------------------------------------------------------------------------
+# 热榜里的真作品名 → 素材池 + 搜索词(2026-11-25,「结合热点榜加热搜」)
+# ---------------------------------------------------------------------------
+
+
+def _hot(session, source, title, *, hours_ago=1):
+    from app.db.models import HotSourceItem
+
+    session.add(HotSourceItem(
+        user_id=1, source=source, rank=1, title=title,
+        captured_at=datetime.now() - timedelta(hours=hours_ago)))
+    session.commit()
+
+
+def test_热榜作品名_跨两个源才算(session):
+    """★ 实测:24h 内容源里含《》的名字 39 个,**跨 ≥2 源只剩 2 个** —— 这道闸是压噪音的主力。"""
+    from app.services import hot_cycle
+
+    _hot(session, "tieba", "《两京十五日》官宣定档")
+    _hot(session, "zhihu", "如何评价《两京十五日》的选角")
+    _hot(session, "tieba", "《只有贴吧在说》的破事")     #: 单源 ⇒ 不算
+
+    names = [n for n, _ in hot_cycle.hot_work_names(session, 1)]
+
+    assert names == ["两京十五日"], names
+
+
+def test_热榜作品名_政策文件名与超长名被挡(session):
+    """财经/时政线的《…白皮书》《…条例》是文件名;整句书名号推广号写不下。"""
+    from app.services import hot_cycle
+
+    for src in ("tieba", "zhihu"):
+        _hot(session, src, "《固态电池安全技术规范》发布")
+        _hot(session, src, "《" + "很长的标题" * 5 + "》")
+
+    assert hot_cycle.hot_work_names(session, 1) == []
+
+
+def test_热榜作品名_取标题里最后一个书名号(session):
+    """与 `hot_breakout._primary_name` 同一把尺子:主作品在后,前面是"原班人马/前作"。"""
+    from app.services import hot_cycle
+
+    _hot(session, "tieba", "集结《龙之谷》原班人马 《西游记之真假美猴王》定档")
+    _hot(session, "zhihu", "《西游记之真假美猴王》预告")
+
+    assert [n for n, _ in hot_cycle.hot_work_names(session, 1)] == ["西游记之真假美猴王"]
+
+
+def test_热榜作品名进素材池_并写进运行记录(session, monkeypatch):
+    """热点段除探针词外,还要有**跨源作品名**;不显形就分不清探针词在不在跑。"""
+    from app.db.models import RunRecord
+
+    class S(_S):
+        demand_hot_videos = 1
+
+    from app.services import hot_cycle
+
+    monkeypatch.setattr(hot_cycle, "new_hot_words", lambda *a, **k: [])
+    asked: list[list[str]] = []
+
+    def _fake_search(words, **k):
+        asked.append(list(words))
+        return [{"aweme_id": "hot1", "url": "https://x/hot1", "snippet": "两京十五日 预告",
+                 "name": "a", "metrics": {"comment_count": 500}}]
+
+    monkeypatch.setattr("app.services.douyin_protocol_source.search", _fake_search)
+    _hot(session, "tieba", "《两京十五日》官宣定档")
+    _hot(session, "zhihu", "如何评价《两京十五日》")
+
+    stats = {}
+    vids = dw.source_videos(session, 1, S(), stats=stats)
+
+    assert "两京十五日" in asked[0], asked
+    assert [v["aweme_id"] for v in vids] == ["hot1"]
+    assert stats["hotname"] == 1
+    assert "热榜名1" in dw._age_note(stats)
+
+
+def test_热榜作品名进搜索词表_喂过的不再喂(session):
+    """台账直接用 `douyin_leads.keyword`(历史 43/43 行都有它),不另开一张表。"""
+    from app.db.models import DouyinLead
+    from app.services import hot_cycle
+
+    _hot(session, "tieba", "《两京十五日》官宣定档")
+    _hot(session, "zhihu", "如何评价《两京十五日》")
+    _hot(session, "bilibili", "《饥困荒野》实机")
+    _hot(session, "kuaishou", "《饥困荒野》实机演示")
+
+    assert hot_cycle.unfed_hot_work_names(session, 1, top=5) == ["两京十五日", "饥困荒野"]
+
+    session.add(DouyinLead(user_id=1, aweme_id="9999", keyword="两京十五日",
+                           title="《两京十五日》", found_at=datetime.now(),
+                           found_date="2026-11-25"))
+    session.commit()
+
+    assert hot_cycle.unfed_hot_work_names(session, 1, top=5) == ["饥困荒野"]

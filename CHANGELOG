@@ -16,7 +16,32 @@
   (Files: app/services/weread_client.py, app/services/wechat/_listen.py,
    app/services/wechat/_enrich.py, app/services/board_digest.py,
    tests/test_weread_mp_url.py, tests/test_wechat_monitor.py, tests/test_board_digest.py)
-
+- [2026-11-25 12:48] FEAT: **素材池按「事件」轮换 + 品牌降级 + 热榜跨源作品名回灌搜索**(需求名监控)
+  用户口径:「**找相似**来完成接下来的监控,而不是全部都是这个种类」「**也可以结合热点榜加热搜**」。
+  实证(`data/platform.db` 只读,近 7 天 236 条线索 / 75 组):
+  ① 素材来源仍失衡 —— 全时段抖音扫描 274 行里线索 3、对标号 0, 每天新进的单条素材
+     不断插到 `found_at desc` 队头 ⇒ 三个真事件(麦穗与羊 23 人 / 下一个天亮 18 人 /
+     斗破苍穹剧场版 7 人)要到**第 70 轮**才轮得到。
+  ② 「有没有书名号」分不出作品与资源号品牌(两边都带) —— 真分野是**标题在说什么**:
+     红日宝库/二哈部落/百战百胜/东洋宝库 的「获取类」占比 **1.00**, 真作品 **0.00~0.05**。
+  ③ 热榜侧 `hot_breakout` 每小时发现热点, 但产出**只发管理群**, 不回灌素材池/搜索词 ——
+     **发现了热点却没变成「去搜一下」的动作**; 48h 内容源里跨 ≥2 源的作品名只有 **3 个**。
+  ⇒ 新增 `_event_name`(最后一个书名号→口令→resource_key, 与 `hot_breakout._primary_name`
+  同一把尺子) / `_is_brand`(`_ACQ_RE` 命中率 ≥0.5) / `_event_groups`(组间
+  `(品牌, -跨作者数, -条数, -最新发布)`: 跨作者排在条数前, 因为「缅北温柔陷阱」14 条
+  只有 1 个作者 = 一个号的连载) / `_round_robin`(每轮每组 1 条); 回放三个真事件
+  **第 1 轮全覆盖**。②线索/③对标号先各自轮换收集再统一消费, **名额仍按来源把口**
+  (只改「取谁」不改「几个」)。⚠️ `_round_robin` 的 `room` 必须传**候选总数** ——
+  传名额数会让被「已扫」跳过的候选吃掉一次尝试, 后面的永远轮不到。
+  新增 `hot_cycle.hot_work_names` / `unfed_hot_work_names`(只读库零网络),
+  接进 `source_videos` ④热点段与 `douyin_leads` 的 `hot` 词表(新配置
+  `douyin_leads_hot_work_words=1`); 「喂过没」的台账用 `douyin_leads.keyword`
+  而不是 `hot_word_seen`(后者是形态词探针的表)。同时 `_HOT_MAX_LEN` **8→12**:
+  近 7 天 386 个探针词里 ≤8 档 106 个**产出 0**、9~12 档 223 个**产出 21** ——
+  原闸恰好挡掉了全部有产出的档位。运行记录新增「事件N组(品牌M)」「热榜名N」。
+  (Files: app/services/demand_watch.py, app/services/hot_cycle.py,
+  app/services/douyin_leads.py, config/settings.py, tests/test_demand_watch.py,
+  doc/需求名监控-2026-10-30.md, doc/能力清单.md)
 - [2026-11-25 11:10] FIX: **大瓜正式作品名被「加料版」挤掉 —— 准入放宽到书名号出处, 碎片判据改成书名号优先**
   用户举的真实事件「麦穗与羊」, 回生产库对账(`data/platform.db` 只读):
   `demand_names` 两行**同一条抖音视频** `7706155613260187633` ——

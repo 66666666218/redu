@@ -1319,6 +1319,12 @@ def _age_note(stats: dict | None) -> str:
     skip, fill = int(s.get("rescanned") or 0), int(s.get("refilled") or 0)
     if skip or fill:
         bits.append(f"已扫{skip} 回填{fill}")
+    groups, brand = int(s.get("lead_groups") or 0), int(s.get("brand") or 0)
+    if groups or brand:
+        bits.append(f"事件{groups}组" + (f"(品牌{brand})" if brand else ""))
+    hotnames = int(s.get("hotname") or 0)
+    if hotnames:
+        bits.append(f"热榜名{hotnames}")
     srcs = [(k, int(s.get(f"src_{k}") or 0))
             for k in ("search", "author", "lead", "peer", "hot")]
     if any(n for _k, n in srcs):
@@ -1327,6 +1333,136 @@ def _age_note(stats: dict | None) -> str:
         abbr = {"search": "搜", "author": "作", "lead": "线", "peer": "标", "hot": "热"}
         bits.append("源:" + "/".join(f"{abbr[k]}{n}" for k, n in srcs))
     return (" " + " ".join(bits)) if bits else ""
+
+
+#: 「**获取类**动词」—— 标题里有它,说明这条视频在**卖怎么拿到东西**,不是作品本身。
+#: ★ 2026-11-25 在生产库上标定(近 7 天 236 条线索 / 75 组):
+#: 真事件组(`麦穗与羊` 0.00 / `下一个天亮` 0.05 / `斗破苍穹剧场版` 0.00 / `GTA6` 0.00)
+#: 与资源号品牌组(`红日宝库` / `二哈部落` / `百战百胜` / `东洋宝库` 全 1.00)
+#: 被这一把尺子**完整分开**。⚠️ 词表只放「获取资源」义的字,不放大词
+#: (`推荐/合集/最新` 在真事件标题里也常见,放进去就把事件判成品牌了)。
+_ACQ_RE = re.compile(
+    r"(教程|获取|下载|安装|美化|入口|代码|提取码|链接|自取|领取|安装包|修改器|破解|内购|卡密|资源包)")
+
+#: 一组素材里「获取类」占比达到它 ⇒ 判定为**资源号品牌**(不是作品/事件)。
+_ACQ_BRAND_RATIO = 0.5
+
+#: 事件分组取名的上限:书名号里的名字再长就不是作品名了(与 `is_name_like` 同口径)。
+_EVENT_NAME_MAX = 30
+
+
+def _event_name(title: str, mark: str = "") -> str:
+    """一条素材**在说哪个作品/事件** —— 取标题里**最后一个**书名号,没有就退回口令/标题键。
+
+    ★ 为什么取最后一个:`hot_breakout._primary_name` 已经在一手数据上定过这条 ——
+    中文标题里主作品在后面(`国漫《斗破苍穹》剧场版《双帝之战》定档` ⇒ 主 = 双帝之战),
+    而前面那些书名号常是"原班人马/前作"。两处**必须同一把尺子**,否则素材池与热榜
+    对同一个作品会分成两个组(本仓母题:两处归一不同 ⇒ 计数恒 0)。
+
+    ⚠️ `mark`(口令)是次选:它常常就是资源名本身;最后才退回 `resource_key(标题)`。
+    """
+    from app.services.resource_library import resource_key
+
+    names = _QUOTED_RE.findall(str(title or ""))
+    for raw in reversed(names):
+        n = _clean(raw)
+        if n and len(n) <= _EVENT_NAME_MAX:
+            return resource_key(n)
+    m = _clean(mark) if mark else ""
+    if m:
+        return resource_key(m)
+    return resource_key(title)
+
+
+def _is_brand(titles: list[str], marks: list[str] | None = None) -> bool:
+    """这组素材是不是**资源号品牌**(而不是一个作品/事件)?
+
+    ★★ 2026-11-25 实测(近 7 天线索按事件分组,75 组):光看"有没有书名号"分不出
+    作品与品牌 —— 两边都带书名号。真正的分野是**标题在说什么**:
+      · `红日宝库`/`二哈部落`/`百战百胜`/`东洋宝库`(`教程/获取/链接…` 占比 **1.00**)
+        —— 这是**一个号的名字**,它下面每条视频讲的是不同的软件/资料,不是一个瓜;
+      · `麦穗与羊`/`下一个天亮`/`斗破苍穹剧场版`/`GTA6`(占比 **0.00~0.05**)
+        —— 这是**作品名**,跨作者同时被推,才是要追的事件。
+    资源号品牌的素材**降级**(排到真事件之后),不是丢弃:它们的评论区同样是
+    "求资源"现场,只是不该抢真事件的位子。
+    """
+    ts = [str(t or "") for t in titles if str(t or "").strip()]
+    if not ts:
+        return False
+    ms = [str(m or "") for m in (marks or ()) if str(m or "").strip()]
+    hit = sum(1 for t in ts if _ACQ_RE.search(t))
+    if ms:
+        hit += sum(1 for m in ms if _ACQ_RE.search(m))
+        return hit / float(len(ts) + len(ms)) >= _ACQ_BRAND_RATIO
+    return hit / float(len(ts)) >= _ACQ_BRAND_RATIO
+
+
+class _EventGroup(NamedTuple):
+    """素材池里的**一个事件分组**(见 `_event_groups`)。"""
+    key: str
+    rows: list
+    authors: int
+    brand: bool
+    newest: int
+
+
+def _event_groups(rows, *, title_of, author_of, ts_of, mark_of=None) -> list[_EventGroup]:
+    """把素材候选**按事件分组**,并给每组算好排序用的三项:跨作者数 / 品牌 / 最新发布。
+
+    ## 为什么素材也要按事件轮换(2026-11-25 实测)
+
+    原来的取法是 `ORDER BY found_at DESC` 每轮取前 N 条 —— 在生产库上回放近 7 天的
+    线索:三个真事件(`麦穗与羊` 23 人 / `下一个天亮` 18 人 / `斗破苍穹剧场版` 7 人)
+    要到**第 70 轮**才轮得到,因为每天都有新的单条素材压在它们前面。
+    改成按组轮换后,**第 1 轮三个事件全部覆盖**(每轮每组 1 条,组间真事件优先)。
+
+    ## 组间排序(元组,升序)
+
+    `(品牌, -跨作者数, -条数, -最新发布)` —— 真事件在前;同一档里**跨作者多的先**
+    (跨作者分散度是"这是个真事件"最硬的信号:`缅北温柔陷阱` 14 条但只有 1 个作者,
+    那是**一个号的连载**,不是大家在推的瓜),再比条数,最后比最新发布。
+
+    ## 组内
+
+    由调用方按**发布时间新→旧**取(最新的那一条最可能还在发酵)。
+
+    ⚠️ `rows` 里的行对象形状不统一(`DouyinLead`/`DouyinPeerWork`),所以三个取值器
+    由调用方传进来 —— 这里**不猜属性名**。
+    """
+    groups: dict[str, list] = {}
+    for r in rows:
+        groups.setdefault(_event_name(title_of(r), mark_of(r) if mark_of else ""), []).append(r)
+    out: list[_EventGroup] = []
+    for key, grp in groups.items():
+        authors = {str(author_of(r) or "") for r in grp} - {""}
+        out.append(_EventGroup(
+            key=key, rows=grp, authors=len(authors),
+            brand=_is_brand([title_of(r) for r in grp],
+                            [mark_of(r) for r in grp] if mark_of else None),
+            newest=max((int(ts_of(r) or 0) for r in grp), default=0)))
+    out.sort(key=lambda g: (1 if g.brand else 0, -g.authors, -len(g.rows), -g.newest))
+    return out
+
+
+def _round_robin(groups: list[_EventGroup], room: int, *, pick):
+    """按**组轮换**取 `room` 条:每轮每组最多 1 条,组内先取 `pick` 认为最该取的那条。
+
+    ⚠️ 只影响**顺序**,不在这里判重/判新鲜:那些闸门在 `_add` 里,被挡掉的名额
+    由下一组顺延(所以这里会遍历 `len(groups)` 轮,直到取满或候选耗尽)。
+    """
+    if room <= 0 or not groups:
+        return []
+    ordered = [sorted(g.rows, key=pick) for g in groups]
+    out: list = []
+    depth = max(len(rows) for rows in ordered)
+    for i in range(depth):
+        for rows in ordered:
+            if room <= 0:
+                return out
+            if i < len(rows):
+                out.append(rows[i])
+                room -= 1
+    return out
 
 
 def _recently_scanned(db, user_id: int, days: int) -> set[str]:
@@ -1560,23 +1696,54 @@ def source_videos(db, user_id: int = 1, settings=None,
                     break
 
     # ② 我们自己的线索(推广视频,评论区天然是「求资源」的)
-    for r in leads:
+    #: ★★ **按事件轮换,不按 `found_at`**(2026-11-25 实测):原来的 `found_at desc`
+    #: 让三个真事件排到**第 70 轮**才轮到(见 `_event_groups` 的注释)。现在:
+    #: 组间「真事件优先 → 跨作者多 → 条数多 → 最新发布」,组内按**发布时间新→旧**,
+    #: 每轮每组只出 1 条 ⇒ 3 个真事件在**第 1 轮**就被覆盖。
+    _lead_groups = _event_groups(
+        leads, title_of=lambda r: r.title, author_of=lambda r: r.author,
+        mark_of=lambda r: r.mark,
+        ts_of=lambda r: publish_ts_of(r.aweme_id, r.publish_at))
+    #: ★ **两个数必须显形**(`事件N组`/`品牌降级N`):不写的话,"这一轮又只扫到那几条"
+    #: 分不清是**素材池里只有一个事件**还是**轮换没生效**(本仓母题)。
+    counters["lead_groups"] = len(_lead_groups)
+    counters["brand"] = sum(1 for g in _lead_groups if g.brand)
+    _lib_cand: list[dict] = []          #: 先收集两个来源,再统一按事件轮换(见下)
+    #: ⚠️ `room` 给**候选总数**而不是名额数:轮换只决定**尝试顺序**,真正把口的是
+    #: 下面消费循环里的按来源名额。给名额数的话,被"已扫"跳过的那条会**吃掉一次尝试**,
+    #: 后面的候选永远轮不到(实测:3 条候选只试 2 条,第 3 条白白丢掉)。
+    for r in _round_robin(_lead_groups, len(leads),
+                          pick=lambda r: -publish_ts_of(r.aweme_id, r.publish_at)):
+        _lib_cand.append({"aweme_id": r.aweme_id, "url": r.url, "title": r.title,
+                          "author": r.author, "declared": r.publish_at, "src": "lead"})
+
+    # ③ 对标号作品(带网盘的那些)
+    for w in _round_robin(
+            _event_groups(
+                works, title_of=lambda w: w.title, author_of=lambda w: w.account_name,
+                mark_of=lambda w: w.mark,
+                ts_of=lambda w: publish_ts_of(w.aweme_id, w.publish_at)),
+            len(works),                  #: 同上:只定顺序,名额在消费循环里把
+            pick=lambda w: -publish_ts_of(w.aweme_id, w.publish_at)):
+        _lib_cand.append({"aweme_id": w.aweme_id, "url": w.url, "title": w.title,
+                          "author": w.account_name, "declared": w.publish_at,
+                          "src": "peer"})
+
+    for c in _lib_cand:
         #: ⚠️ **先判再 `_add`,不是加完再判**(2026-11-17 修):原写法 `_add` 之后才
         #: `break` ⇒ 进入循环时 `len(out)` 已经等于 `lib_need` 时仍会**多塞一条**,
         #: 于是 ② 填满 3 条后 ③ 又加第 4 条 ⇒ `need - len(out) == 0` ⇒
         #: **④ 热点段的名额被吃掉,一次都轮不到**(实测:`demand_hot_videos=1` 而
         #: `hot_budget` 恒被算成 0,`hot_word_seen` 停在 11-11、日志里「热点差分」零次)。
-        if len(out) >= lead_stop:
-            break
-        _add(r.aweme_id, r.url, r.title, 0, r.author,
-             declared=r.publish_at, lib=True, src="lead")
-
-    # ③ 对标号作品(带网盘的那些)
-    for w in works:
-        if len(out) >= lib_need:
-            break
-        _add(w.aweme_id, w.url, w.title, 0, w.account_name,
-             declared=w.publish_at, lib=True, src="peer")
+        #: 名额按**来源**各自把口:线索最多 `lead_stop`、对标号最多 `lib_need`,
+        #: 与轮换前的口径完全一致(轮换只改"取谁",不改"各来源几个名额")。
+        if c["src"] == "lead":
+            if sum(1 for v in out if v.get("src") == "lead") >= lead_stop:
+                continue
+        elif len(out) >= lib_need:
+            continue
+        _add(c["aweme_id"], c["url"], c["title"], 0, c["author"],
+             declared=c["declared"], lib=True, src=c["src"])
 
     #: ★ **候选全被"近 N 天已扫"跳过时回填**(见 `_backfill` 的注释):
     #: 去重是为了别每轮扫同一批,**不是**为了把素材池扫空。
@@ -1614,6 +1781,19 @@ def source_videos(db, user_id: int = 1, settings=None,
         #: (本仓在 `new-write-point-holds-lock-over-slowwork` 上栽过两次)。
         hot_words = [h.word for h in hot_cycle.new_hot_words(
             settings, seeds, user_id=user_id, limit=hot_budget)]
+        #: ★★ **热榜里的真作品名也算热点素材**(2026-11-25,用户口径「结合热点榜加热搜」)。
+        #: 探针词是"事件句"(搜回来多是围观/解说),作品名才是评论区真在求的那种素材。
+        #: 判据见 `hot_cycle.hot_work_names`:`hot_source_items` 内容型源、48h
+        #: **跨 ≥2 个源**都出现的 `《作品名》` —— 实测 48h 只有 3 个,不会挤占探针词。
+        #: ⚠️ **只读库、不写库**(不记账、不打戳):这里借的是现成快照,零网络成本;
+        #: 它**不**消费 `douyin_leads` 的搜索额度(那边自己另取一份)。
+        try:
+            _hn = hot_cycle.hot_work_names(db, user_id)
+        except Exception:  # noqa: BLE001 - 读不到就只用探针词
+            logger.warning("热榜作品名读取失败", exc_info=True)
+            _hn = []
+        hot_words = hot_words + [n for n, _ in _hn if n not in hot_words]
+        counters["hotname"] = len(_hn)
         if hot_words:
             from app.services import douyin_protocol_source as dps
 

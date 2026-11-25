@@ -751,7 +751,13 @@ def group_keywords(session, user_id: int, top: int = 3, days: int = 7) -> list[s
 # 热榜里明显不是"可搜的资源"的词:泛词/时事/情绪。**只做便宜且不会误伤的两道**
 # (长度 + 这张小表),剩下的交给**搜索结果自己筛** —— 见 `hot_seed_words` 的说明。
 _HOT_STOP = {"搞笑视频", "今日金价", "手势舞", "新闻", "直播", "热门", "推荐", "视频"}
-_HOT_MAX_LEN = 8          # 作品/资源名一般短;事件句常更长(「张美娥为什么不早说」9 字)
+#: ★ **2026-11-25 从 8 放宽到 12**(数据决策,回生产库量的):近 7 天 386 个探针词里
+#: 词长 ≤8 的 106 个、**喂过搜索后产出 0 条**;9~12 的 223 个产出 21 条(其中 8 个词有命中)。
+#: 也就是说原来那道 8 字的闸**挡掉了全部有产出的档位**,只剩 0 产出的那档能过。
+#: 12 与 `hot_cycle.unfed_search_words` 的 `max_len=12` 对齐(两处必须同一把尺子)。
+#: ⚠️ >12 的 57 个**仍然挡着**:那是「律师解读虞书欣围裙照引讨论事件」这种整句,
+#: 推广号的《》标题写不下,搜了只会白烧额度。
+_HOT_MAX_LEN = 12
 
 
 def hot_seed_words(settings, limit: int | None = None) -> list[str]:
@@ -2345,7 +2351,25 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
                     settings=settings)
             except Exception:  # noqa: BLE001 - 取词失败不挡这一轮
                 logger.debug("被求名字取词失败", exc_info=True)
+    #: ★★ **热榜里的真作品名也进词表**(2026-11-25,用户口径「也可以结合热点榜加热搜」)。
+    #: 与探针词是**两种东西**:探针捞的是"新起量的事件句",这里是"跨 ≥2 个内容源
+    #: 都在说的《作品名》"(`hot_cycle.hot_work_names`,48h 实测只有 3 个,不占词表)。
+    #: 这才是抖音推广号标题会写的形态 —— 事件句搜回来多是围观/解说(实测 9-12 字档
+    #: 66 个词只 8 个有命中),而作品名是《》里能命中的东西。
+    #: ⚠️ **大瓜轮不吃**(与探针词同一条纪律):大瓜线用自己的坐标(热榜/被求名/公众号瓜),
+    #: 作品名会把有限的名额挤到玄幻/游戏上。
+    work_words: list[str] = []
+    if cat != DAGUA_CATEGORY:
+        try:
+            from app.services import hot_cycle as _hc
+
+            work_words = _hc.unfed_hot_work_names(
+                db, user_id, top=int(getattr(
+                    settings, "douyin_leads_hot_work_words", 1) or 0))
+        except Exception:  # noqa: BLE001 - 取不到就退回原有词表
+            logger.debug("热榜作品名取词失败", exc_info=True)
     hot = (hot + [w for w in probe_words if w not in hot]) if probe_words else hot
+    hot = (hot + [w for w in work_words if w not in hot]) if work_words else hot
     hot = (hot + [w for w in demand_words if w not in hot]) if demand_words else hot
     hot = (hot + [w for w in wevent_words if w not in hot]) if wevent_words else hot
     kws = search_keywords(db, user_id,
