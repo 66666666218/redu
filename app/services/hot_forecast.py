@@ -44,13 +44,35 @@
 对候选的**作品名**去热点宝定向查(`hot_search(keyword=...)`,榜外词也能查),
 取出「词 ≈ 作品名」的那一族,截到**昨天**(今天那一格是不完整的),判:
 
-    昨天单日 ≥ 500 万  ∧  昨天 / 自身历史最低 ≥ 30 倍  ∧  ≥100 万的天数 ≥ 2
+    昨天单日 ≥ 500 万  ∧  昨天 / 自身历史最低 ≥ 10 倍  ∧  ≥100 万的天数 ≥ 2
 
-回放实测:11-16 麦穗 3093 万 / 87x / 5 天 ⇒ **当天唯一命中**;
-11-17 麦穗 5741 万 / 162x;11-23 多出一个「双帝之战」15375 万 / 56x(**全是真作品**)。
+回放实测:11-16 麦穗 3093 万 / 30x / 5 天 ⇒ **当天唯一命中**;
+11-17 麦穗 5741 万 / 56x;11-23 多出一个「双帝之战」15375 万 / 56x(**全是真作品**)。
 「谷雨」2828 万却只有 **1 倍**基线 ⇒ 它是常驻短剧,不是"要炸" ⇒ 正确挡掉。
 ⚠️ **同类词取最优**:词族里 `麦穗与羊`/`麦穗与羊原视频`/`麦穗与羊原文` 都指向同一事件,
 只留末值最大的那个;纯品类词(`小说/短剧/合集/…`)直接丢。
+
+### ⚠️ 倍数阈值 30 → 10(2026-11-25 放宽,用户决定「观察几天」)
+
+**上面那句「87x」是事后用完整序列算的,决策当时看不到。** 按线上口径
+(只截到昨天)重放,麦穗 11-16 那一刻只有 **30.0 倍** —— 恰好贴着阈值边。
+于是这个"锚点事件"在真实运行里其实是**勉强过线**,而 11-24~11-25 连续多轮
+`趋势确认 0 ⇒ 卡内 0` 就是同一把尺子的另一面。
+
+`scripts/backtest_hot_forecast.py` 把 10 天、44 个形态作品名逐个查热点宝重放:
+
+| 阈值 | 命中 | 变化 |
+|---|---|---|
+| 30x(原) | 7/10 天 | — |
+| 20x | 8/10 天 | +亚马尔澄清函(2932 万/24x) |
+| **10x(现行)** | **8/10 天** | **+麦穗 11-16(3093 万/30.0x)** |
+| 5x | 8/10 天 | 与 10x **逐字相同**,零新增噪音 |
+
+⇒ 取 10x(**不是 5x**:两者结果一样,10x 更保守、留安全边际)。
+**真正的护栏是 `min_last` 而不是倍数** —— 噪音候选离 10x 极远:
+`丑狐` 1.3x、`我的有罪之人` 1.7x、`谷雨` 1.0x、`吧友锐评GTA6` 1.1x;
+其余靠别的条件挡(「纸质」850x 但有量天 0;「第二十八年春」12.9x 但末值仅 160 万)。
+⇒ **再放宽倍数没有收益,要提召回只能动 `min_last` 或形态词表**,那必须重跑回测。
 
 **③ AI 判「值不值得做网盘」**
 
@@ -490,15 +512,21 @@ def _line_of(a: dict) -> str:
     return chr(10).join(lines)
 
 
-def _render(alerts: list[dict], nl: str, min_last: int = 5_000_000) -> str:
-    """**一轮一张汇总卡** → 飞书纯文本(管理群)。"""
+def _render(alerts: list[dict], nl: str, min_last: int = 5_000_000,
+            min_ratio: float = 10.0) -> str:
+    """**一轮一张汇总卡** → 飞书纯文本(管理群)。
+
+    ⚠️ `min_ratio` 必须由调用方传入 **settings 里的实际值**:卡片上写的判据
+    与 `douhot_confirm` 真正用的阈值必须是同一个数 —— 写死 30 倍的话,
+    2026-11-25 放宽到 10 倍之后卡面会撒谎,运营按卡面复算会觉得判据对不上。
+    """
     lines = [f"🔮 **爆款预判** · {len(alerts)} 条「适合做网盘、还没人动手」的热点"]
     for i, a in enumerate(alerts, 1):
         lines.append("")
         lines.append(f"{i}. " + _line_of(a))
     lines.append("")
     lines.append("— 判据:标题有**资源形态**(原文/全集/大结局…)+ 抖音搜索量 ≥"
-                 f"{min_last / 1e4:.0f} 万且 ≥30 倍自身基线。"
+                 f"{min_last / 1e4:.0f} 万且 ≥{min_ratio:g} 倍自身基线。"
                  "⚠️ 这是**预判**不是确认;「同行 0 人」只代表**我们库内**。"
                  "⚠️ 物料只落本机 `data/hot_forecast/`,**未上传**(盘满)。")
     return nl.join(lines)
@@ -591,6 +619,8 @@ def hot_forecast_tick(settings=None) -> int:
     if not hook:
         return 0
     min_last = int(getattr(settings, "hot_forecast_min_last", 5_000_000) or 0)
+    #: 卡面上写的倍数必须与 `douhot_confirm` 实际用的一致(理由见 `_render` 头注)
+    min_ratio = float(getattr(settings, "hot_forecast_min_ratio", 10.0) or 10.0)
 
     #: ① **全部慢活都在本机 session 之外**:远程查询 → 热点宝 → AI 判定
     stats: dict = {}
@@ -652,7 +682,7 @@ def hot_forecast_tick(settings=None) -> int:
                     a["materials"] = prepare(settings, a, user_id=uid)
             #: ④ 发卡 + **成功后才逐条落冷却**
             n_sent = 0
-            if fresh and client.send(_render(fresh, nl, min_last)):
+            if fresh and client.send(_render(fresh, nl, min_last, min_ratio)):
                 sent += 1
                 n_sent = len(fresh)
                 for a in fresh:

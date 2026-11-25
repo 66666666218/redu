@@ -36,7 +36,8 @@ class _S:
     """够 `detect` 用的最小 settings(全部走模块默认值)。"""
     hot_forecast_lookback_hours = 24
     hot_forecast_min_last = 5_000_000
-    hot_forecast_min_ratio = 30.0
+    #: ⚠️ 2026-11-25 由 30.0 放宽到 10.0(依据 `scripts/backtest_hot_forecast.py`)
+    hot_forecast_min_ratio = 10.0
     hot_forecast_min_points = 2
     hot_forecast_min_score = 6
     hot_forecast_degraded_rank_top = 10
@@ -122,13 +123,39 @@ class Test形态与作品名:
 
 class Test趋势确认:
     def test_谷雨一倍基线要挡掉(self) -> None:
-        """★ 2828 万听着很吓人,但它**只有 1 倍自身基线** —— 那是常驻短剧,不是"要炸"。"""
+        """★ 2828 万听着很吓人,但它**只有 1 倍自身基线** —— 那是常驻短剧,不是"要炸"。
+
+        ⚠️ 2026-11-25 倍数从 30 放宽到 10 之后,这条**仍然是守卫的重点**:
+        噪音离 10 倍极远(实测 `丑狐` 1.3x / `我的有罪之人` 1.7x / `谷雨` 1.0x),
+        所以放宽并没有把它们放进来。这条测试钉的就是「放宽 ≠ 放噪音」。
+        """
         out, stats = _run(
             candidates=[_c("谷雨短剧完整版")],
             confirms={},                      # 热点宝**可达**、只是没达标
         )
         assert out == [], out
         assert not stats.get("douhot_down"), "「没达标」不能算成「热点宝故障」"
+
+    def test_常驻剧低倍数要挡掉(self) -> None:
+        """★★ 放宽到 10 倍之后新加的守卫:这三条是 11-25 实测被挡的真实候选。
+
+        它们的单日量都不低(2203 万 / 3673 万),**只有倍数能救** ——
+        如果哪天有人把 `min_ratio` 再往下调,这条会立刻红。
+        """
+        out, _ = _run(candidates=[
+            _c("丑狐大结局"), _c("我的有罪之人完整版"), _c("吧友锐评GTA6大结局"),
+        ], confirms={})
+        assert out == [], out
+
+    def test_麦穗30倍在放宽后必须过(self) -> None:
+        """★ 放宽的**全部收益**就是这一条。
+
+        按线上口径(只截到昨天)重放,麦穗 11-16 那一刻只有 **30.0 倍** ——
+        在旧阈值 30x 下是贴边过线,**只要数据抖一点就会被挡**。
+        模块头注里那个「87x」是事后用完整序列算的,决策当时看不到。
+        """
+        out, _ = _run(candidates=[MAISUI], confirms={"麦穗与羊": _confirm(ratio=30.0)})
+        assert [a["seed"] for a in out] == ["麦穗与羊"], out
 
     def test_热点宝不可达才降级且只看靠前的(self) -> None:
         """★ 不可达时**不静默**:
