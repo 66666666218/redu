@@ -761,6 +761,13 @@ def test_对标数据为0时写破折号而不是0() -> None:
     assert rp._metrics_md({"share_count": 3}) == "↗3"
 
 
+def test_浏览量要显示出来() -> None:
+    """★ 2026-11-25:贴吧补了 `view_count` —— 渲染器不加这一项,取回来也看不见。"""
+    assert rp._metrics_md({"view_count": 705811}) == "👁705811"
+    # 与真·播放量(`play_count`,B站)是两个键,图标也要分开
+    assert rp._metrics_md({"play_count": 1000, "view_count": 2000}) == "▶1000 👁2000"
+
+
 def test_小红书优先走CDP路_且每轮只喂两个词(session, monkeypatch) -> None:
     """★ 用户 2026-10-16 拍板:「**接 CDP 路**」+「**每轮 1~2 词**」。
 

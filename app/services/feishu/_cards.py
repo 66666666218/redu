@@ -96,17 +96,21 @@ def _col_set_row(cells: list[tuple[str, int]], *, grey: bool = False,
         ],
     }
 def metrics_md(m: dict) -> str:
-    """那条原帖的互动指标 → 一小串(`↗转发 💬评论 ♥赞 ▶播放`),**只显示非 0 的**。
+    """那条原帖的互动指标 → 一小串(`↗转发 💬评论 ♥赞 ▶播放 ⭐收藏 👁浏览`),**只显示非 0 的**。
 
     ★ **单一出处**(2026-10-16):`resource_presence` 与 `pan_discovery` 两张卡都要它,
     而"同一件事写两处 ⇒ 迟早各飘各的"是本仓的母题。
     ⚠️ 缺失/为 0 就整串回 `—` —— **别填 0**(那会被读成"没人看");
     采集层也是这么做的(`_weibo_metrics` / `_metric_int` 都是"为 0 就不放进去")。
+
+    ★ `view_count`(2026-11-25 补):**这里不加,取回来了也看不见** —— 贴吧的
+    `view_num`、知乎的 `visits_count` 都是这个键。`play_count` 与它不同:前者是
+    真·播放量(B站),后者是浏览量,所以两个图标分开。
     """
     bits = []
     for k, ico in (("share_count", "↗"), ("comment_count", "💬"),
                    ("liked_count", "♥"), ("play_count", "▶"),
-                   ("collected_count", "⭐")):
+                   ("view_count", "👁"), ("collected_count", "⭐")):
         try:
             v = int((m or {}).get(k) or 0)
         except (TypeError, ValueError):

@@ -39,18 +39,23 @@
   · `tieba_search._row` 用它,并去掉硬编码的 `share_count = 0`(有真值了);
   · `pan_discovery._candidates_from_tieba` 的浏览器回落路改用 `fetch_posts_detail`
     (顺带把全帖指标也补上,原来只补 `agree`);
-  · `fetch_agree` 改为返回**全帖**点赞。
+  · `fetch_agree` 改为返回**全帖**点赞;
+  · `feishu._cards.metrics_md` 补 `view_count` 图标 `👁`(原来**渲染器根本不渲染它** ——
+    取回来了卡上也是空的;`play_count` 与 `view_count` 是两个键,图标分开)。
 
-  ## 口径影响(用户拍板"全接")
+  ## 口径影响(用户拍板「全接」)
   贴吧的曝光阶梯从 `engage`(互动总量)升到 **`view_count`(浏览量)**,
   预估口径变成「浏览量 × 40%」。⚠️ 盘链发现里实际搜到的资源帖**互动几乎全是 0**
   (浏览十几~几十、赞 0、回复 1~2,疑为机器批量发)⇒ 卡面大概率仍显示 `—`,
-  那不是没接上,是那些帖子真没人看。
+  那不是没接上,是那些帖子真没人看。判据:卡面 `—` 且**有浏览数** ⇒ 正常;
+  连浏览量也缺 ⇒ 才是取数没跑。
 
-  测试:新增 8 条(`test_tieba_metrics.py` 6 / `test_tieba_search.py` 2),
-  含"有浏览量就走 view_count 档"的对照。相关四套 161 条全绿。
+  测试:新增 9 条(`test_tieba_metrics.py` 5 / `test_tieba_search.py` 2 /
+  `test_resource_presence.py` 1,含「有浏览量就走 view_count 档」的对照)。
+  **全量 3727 条通过**。
   (Files: app/services/tieba_metrics.py, app/services/tieba_search.py,
-  app/services/pan_discovery.py, tests/test_tieba_metrics.py, tests/test_tieba_search.py,
+  app/services/pan_discovery.py, app/services/feishu/_cards.py,
+  tests/test_tieba_metrics.py, tests/test_tieba_search.py, tests/test_resource_presence.py,
   doc/贴吧纯协议-链路拆解.md, doc/外部接口速查.md, CHANGELOG)
 
 - [2026-11-25 21:52] FEAT: 预判命中回验作业 —— 三条预判链发出的每一条,72h 后回查真假
