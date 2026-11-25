@@ -845,6 +845,9 @@ def push_works(works: list[dict], settings, session=None, user_id: int = 0) -> b
         #: 热度口径 = 峰值互动数(点赞/转发);`liked_count` 是摊平字段,`peak_metric` 认得。
         hot_of=lambda w: push_ledger.peak_metric(w.get("metrics") or
                                                  {"liked_count": w.get("likes") or 0}),
+        #: 增量下限按 `douyin_peer` 查表(`push_ledger.HOT_RISE_MIN_ABS` = 50 点赞):
+        #: 这条链的 30 天样本少(过 30% 只 26 条),取与 `weibo_peer` 同档;
+        #: 被切掉的最大也只 +34(《豆花空间》),真爆是 `161025→271160`(《麦穗与羊》)。
         hot_min=1, hot_rise_only=True)
     if not works:
         logger.info("对标号作品:盘链闸挡掉全部 %d 条(同一份资源已推过)", _before)

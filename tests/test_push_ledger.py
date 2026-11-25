@@ -577,11 +577,14 @@ class TestHotRiseFloor:
             push_pan_dedupe_hours = 72
 
         #: 同一内容、同一盘链、涨 0.1% —— 默认口径挡,`hot_rise_pct=0` 时放行
+        #: ⚠️ 两个下限是**独立开关**(2026-11-25 加绝对增量后):只关比例的话,
+        #: `bilibili` 的绝对下限(1 万)仍在生效,+1 的涨幅照样被挡 —— 要完全放开
+        #: 必须两个都传 0。这条测试钉的就是"两个都传才真的退回旧行为"。
         items = [{"key": "旧", "pan_url": pan, "metrics": {"play_count": 1001}}]
         kept, _ = pl.drop_recent(
             session, 1, "bilibili", items, _S(),
             hot_of=lambda it: pl.peak_metric(it.get("metrics")),
-            hot_min=1, hot_rise_only=True, hot_rise_pct=0)
+            hot_min=1, hot_rise_only=True, hot_rise_pct=0, hot_rise_min_abs=0)
         assert len(kept) == 1
 
     def test_上次没有热度数据时按挡处理(self, session) -> None:
@@ -599,6 +602,167 @@ class TestHotRiseFloor:
             hot_of=lambda it: pl.peak_metric(it.get("metrics")),
             hot_min=1, hot_rise_only=True)
         assert kept == [] and dropped == 1
+
+
+class TestHotRiseMinAbs:
+    """★★ 2026-11-25:**比例尺在小量级板块上是错的,要卡绝对增量**。
+
+    30 天台账 8553 行按生产口径重放(盘链身份优先、`item_key` 兜底),把「过 30%」
+    的那批再按绝对增量分档 —— 各板块热度口径量级差 4 个数量级:
+
+      · `tieba` 回复数中位 **2** ⇒ 过 30% 的 38 条里 **34 条增量 <20**(`2→16`);
+      · `wechat` 阅读数 ⇒ 过 30% 的 428 条里 **35.6% 增量 ≤5**(`1→2`);
+      · `weibo_peer` 噪音(涨幅 <5%)的增量最大只有 **16**;
+      · 真爆:`bilibili 218676→2947509`、`xiaohongshu 106→17000`。
+
+    门槛是**在候选池(已过 30%)内部按分位数挑的**,不是"天然断点"(只有 `tieba`
+    在 +17 与 +72 之间是空的)。每个值"为什么不是相邻那一档"写在
+    `HOT_RISE_MIN_ABS` 的行内注释里。
+
+    ⚠️ **不能只抬比例**:`277239→497704` 只涨 80%、增量 22 万,是 bilibili 排前几
+    的真爆 —— 抬比例会把它和 `2→3` 一起挡掉。所以卡的是**增量**,不是百分比。
+    """
+
+    def _seed(self, session, section: str, pan: str, metrics: dict) -> None:
+        session.add(PushLedger(user_id=1, section=section, item_key="旧",
+                               pan_url=pan, metrics=json.dumps(metrics),
+                               pushed_at=datetime.now() - timedelta(hours=2)))
+        session.commit()
+
+    def test_个位数基数涨_50_不算又火了(self, session) -> None:
+        """`tieba` 6→23:涨幅 283% 远过 30%,但增量只有 17 < 门槛 20 ⇒ 挡。
+
+        ⚠️ 17 是候选池里**真实被切掉的最大一条**,而空档之上最小的是 +72 ——
+        门槛取 20 与取 50 切掉的行数完全相同(`tieba` 的候选池在那段是空的)。
+        """
+        pan = "https://pan.quark.cn/s/tieba0001"
+        self._seed(session, "tieba", pan, {"total_replay_num": 6})
+
+        class _S:
+            push_dedupe_hours = 24
+            push_pan_dedupe_hours = 72
+
+        items = [{"key": "新", "pan_url": pan, "metrics": {"total_replay_num": 23}}]
+        kept, dropped = pl.drop_recent(
+            session, 1, "tieba", items, _S(),
+            hot_of=lambda it: pl.peak_metric(it.get("metrics")),
+            hot_min=1, hot_rise_only=True)
+        assert kept == [] and dropped == 1, \
+            "贴吧涨 17 个回复是自然波动,不是'资源火了'(比例 283% 会误放行)"
+
+    def test_同一份增量在大板块算真爆(self, session) -> None:
+        """**同一个 `6→23` 放 bilibili 也挡** —— 门槛是按板块的,不是按增量绝对值一刀切。
+
+        `bilibili` 的播放量中位 1.8 万,涨 17 次播放连噪音都算不上。
+        """
+        pan = "https://pan.quark.cn/s/bili00001"
+        self._seed(session, "bilibili", pan, {"play_count": 6})
+
+        class _S:
+            push_dedupe_hours = 24
+            push_pan_dedupe_hours = 72
+
+        items = [{"key": "新", "pan_url": pan, "metrics": {"play_count": 23}}]
+        kept, _ = pl.drop_recent(
+            session, 1, "bilibili", items, _S(),
+            hot_of=lambda it: pl.peak_metric(it.get("metrics")),
+            hot_min=1, hot_rise_only=True)
+        assert kept == []
+
+    def test_只涨_80_但增量巨大_仍是真爆(self, session) -> None:
+        """★ 这条是**为什么不用比例**的核心证据:`277239→497704`(涨 80%、增量 22 万)。
+
+        把 `push_hot_rise_pct` 抬到 1.0 会把它挡掉 —— 而它是 bilibili 排前几的真爆。
+        按绝对增量判:22 万 ≥ 1 万 ⇒ 放行。
+        """
+        pan = "https://pan.quark.cn/s/bili00002"
+        self._seed(session, "bilibili", pan, {"play_count": 277239})
+
+        class _S:
+            push_dedupe_hours = 24
+            push_pan_dedupe_hours = 72
+
+        items = [{"key": "新", "pan_url": pan, "metrics": {"play_count": 497704}}]
+        kept, _ = pl.drop_recent(
+            session, 1, "bilibili", items, _S(),
+            hot_of=lambda it: pl.peak_metric(it.get("metrics")),
+            hot_min=1, hot_rise_only=True)
+        assert len(kept) == 1 and kept[0]["_dedupe_hot"] is True
+
+    def test_表里没登记的板块不启用这一档(self, session) -> None:
+        """`zhihu` 不在 `HOT_RISE_MIN_ABS` 里 ⇒ 门槛 0 ⇒ 只按比例判。
+
+        ⚠️ 这是**故意的**:知乎的热度是「同资源内容数」,实测过 30% 的 15 条
+        **全部增量 <20** —— 再加绝对门槛会一条不剩,那是把整条链关死,不是提纯。
+        """
+        assert "zhihu" not in pl.HOT_RISE_MIN_ABS
+        pan = "https://pan.quark.cn/s/zhihu0001"
+        self._seed(session, "zhihu", pan, {"comment_count": 1})
+
+        class _S:
+            push_dedupe_hours = 24
+            push_pan_dedupe_hours = 72
+
+        #: 1 → 3:涨幅 200%、增量 2;若这条链被误配了门槛就会挡掉
+        items = [{"key": "新", "pan_url": pan, "metrics": {"comment_count": 3}}]
+        kept, _ = pl.drop_recent(
+            session, 1, "zhihu", items, _S(),
+            hot_of=lambda it: pl.peak_metric(it.get("metrics")),
+            hot_min=1, hot_rise_only=True)
+        assert len(kept) == 1, "知乎没有绝对门槛,涨了就该放行"
+
+    def test_配置可以按板块覆盖标定值(self, session) -> None:
+        """`push_hot_rise_min_abs` = `板块:数值,...` —— 不改代码就能调。"""
+        pan = "https://pan.quark.cn/s/tieba0002"
+        self._seed(session, "tieba", pan, {"total_replay_num": 100})
+
+        class _S:
+            push_dedupe_hours = 24
+            push_pan_dedupe_hours = 72
+            push_hot_rise_min_abs = "tieba:5"     #: 标定值是 20,这里调到 5
+
+        #: 100→110:涨幅 10%(过 30% 那档靠 `hot_rise_pct=0` 放),增量 10 ——
+        #: 按标定值 20 挡,覆盖成 5 放行
+        items = [{"key": "新", "pan_url": pan, "metrics": {"total_replay_num": 110}}]
+        kept, _ = pl.drop_recent(
+            session, 1, "tieba", items, _S(),
+            hot_of=lambda it: pl.peak_metric(it.get("metrics")),
+            hot_min=1, hot_rise_only=True, hot_rise_pct=0)
+        assert len(kept) == 1
+
+    def test_覆盖率解析失败不抛_退回标定值(self, session) -> None:
+        """一个写错的配置不该让整条推送链挂掉(但要 warning,别静默)。"""
+        class _S:
+            push_hot_rise_min_abs = "tieba:abc,bilibili:100"
+
+        assert pl._rise_min_abs_of(_S(), "tieba") == 20.0, "解析不出数字 ⇒ 退回标定值"
+        assert pl._rise_min_abs_of(_S(), "bilibili") == 100.0, "后面那条不受影响"
+        assert pl._rise_min_abs_of(_S(), "wechat") == 50.0
+
+    def test_两个下限是两个独立开关(self, session) -> None:
+        """⚠️ 只传 `hot_rise_pct=0` **不等于**回到旧行为(见 `drop_recent` 头注)。"""
+        pan = "https://pan.quark.cn/s/tieba0003"
+        self._seed(session, "tieba", pan, {"total_replay_num": 100})
+
+        class _S:
+            push_dedupe_hours = 24
+            push_pan_dedupe_hours = 72
+
+        #: 100→104:涨幅 4% —— 比例关了之后**只有**增量门槛能挡它
+        items = [{"key": "新", "pan_url": pan, "metrics": {"total_replay_num": 104}}]
+        #: 比例关了(涨幅无所谓),但绝对下限 20 仍在 ⇒ 挡
+        kept, _ = pl.drop_recent(
+            session, 1, "tieba", items, _S(),
+            hot_of=lambda it: pl.peak_metric(it.get("metrics")),
+            hot_min=1, hot_rise_only=True, hot_rise_pct=0)
+        assert kept == [], "只关比例、没关绝对增量 ⇒ 仍然挡"
+
+        #: 两个都关 ⇒ 才真的退回"涨了就算"
+        kept, _ = pl.drop_recent(
+            session, 1, "tieba", items, _S(),
+            hot_of=lambda it: pl.peak_metric(it.get("metrics")),
+            hot_min=1, hot_rise_only=True, hot_rise_pct=0, hot_rise_min_abs=0)
+        assert len(kept) == 1
 
 
 def test_盘链闸的热度基准按盘链取(session) -> None:

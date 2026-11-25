@@ -1,3 +1,20 @@
+- [2026-11-25 13:12] FIX: **「又火了」的分板块绝对增量门槛:比例尺在小量级板块上是错的**
+  `push_hot_rise_pct`(涨 30%)是一把尺子量 8 个板块,而各板块热度口径量级差 **4 个数量级**
+  (快手播放中位 12.7 万 / 贴吧回复中位 **2** / 知乎评论中位 **2**)。30 天台账 8553 行按生产
+  口径重放(盘链身份优先、`item_key` 兜底)后:过 30% 的候选里 `tieba` **34/38 条增量 <20**
+  (`6→23`)、`wechat` **35.6% 增量 ≤5**(`1→2`)、`weibo_peer` 噪音(涨幅<5%)增量最大 **16**。
+  ⚠️ **先把「抬比例」这条路证伪了**:`277239→497704` 只涨 80% 但增量 22 万,是 bilibili 排
+  前几的真爆 —— 抬 `push_hot_rise_pct` 会把它和 `2→3` 一起挡掉,所以加的是**绝对增量下限**。
+  标定表 `push_ledger.HOT_RISE_MIN_ABS`(bilibili 1 万 / xiaohongshu 500 / wechat 50 /
+  weibo_peer 50 / tieba 20 / douyin_peer 500),每行的「为什么不是相邻那一档」写在行内注释;
+  `zhihu`(加门槛会一条不剩)与 `kuaishou`(比例闸已挡干净,只多挡 3 条)**有意不进表**。
+  30 天回放:多挡 **576 行(6.7%)**,被切掉的最大全是小量级(`wechat` +48 = 48 个阅读)。
+  `drop_recent` 新增 `hot_rise_min_abs`(与 `hot_rise_pct` 是**两个独立开关**,要完全退回旧行为
+  两个都得传 0);`.env` 的 `push_hot_rise_min_abs=板块:数值,...` 可覆盖(解析失败 warning 后
+  退回标定值、不抛)。新增 `scripts/backtest_hot_rise.py`(纯读库回放,改门槛必须重跑)。
+  (Files: app/services/push_ledger.py, config/settings.py, app/services/wechat/_listen.py,
+  app/services/resource_presence.py, app/services/douyin_peer_scan.py, tests/test_push_ledger.py,
+  scripts/backtest_hot_rise.py, doc/能力清单.md)
 - [2026-11-25 12:37] FIX: **公众号原文链加形态闸:App 路 75 字符 token 一律不给客户点**(死链止血)
   一手证据(真浏览器,三种 UA 各测):`mp.weixin.qq.com/s/` + **22 字符** token ⇒ 真文章 5/5;
   **75 字符**(`WR1…`)⇒ 微信「参数错误」页 6/6,Chrome 桌面 / 微信安卓 / iPhone 微信**完全一致**

@@ -71,6 +71,53 @@ _LIMITS = {"section": 32, "item_key": 255, "title": 255, "url": 500, "pan_url": 
 #: 其余(`utm_*`/`entry`/`share_token` 之类)同一份资源的写法差异很大,算噪声。
 _PAN_KEEP_QS = ("pwd", "password", "code", "passcode")
 
+#: ★★ **"又火了"的绝对增量下限,按板块**(2026-11-25 标定,`hot_rise_min_abs` 的默认来源)。
+#:
+#: 为什么比例不够用:各板块的热度口径量级差 **4 个数量级** —— `kuaishou` 的播放量
+#: 中位 12.7 万、`bilibili` 1.8 万,而 `tieba` 的 `total_replay_num` 中位是 **2**、
+#: `zhihu` 的 `comment_count` 中位是 **2**。在个位数基数上,"涨 30%" = 多一个回复,
+#: 那不是"资源火了",是同一条又被顶了一下。
+#:
+#: 标定方法(30 天台账 8553 行,生产口径重放 —— 盘链身份优先、`item_key` 兜底,
+#: 按 `(section, 身份)` 比前后两次)。**先过 30% 比例闸,再在候选池内部定增量档**:
+#:   · 看**噪音的天花板**(涨幅 <5% 那批的增量):`wechat` 最大 7、`xiaohongshu` 19、
+#:     `weibo_peer` 16 —— 门槛取它的若干倍以上;
+#:   · 看**候选池的分位**:每个值都标了它落在 p 几,以及切掉/保留各多少条;
+#:   · 逐条抽查:`被切掉的必须全是小量级`、`被保留的必须都像真爆`。
+#:
+#: ⚠️ 这些档位是**分位数选择**,不是"天然断点"(只有 `tieba` 有干净空档:
+#:   候选池在 +17 与 +72 之间是空的)。所以每一行都写了"为什么不是相邻那一档"。
+#: ⚠️ `zhihu`/`kuaishou`/`douyin`/`xunlei_group` **不在表里 = 0 = 不启用**:
+#:   · `zhihu` 的热度是「同资源内容数」,过 30% 的 15 条**全部增量 <20**(p50=1)——
+#:     加门槛会一条不剩,那是把链关死;
+#:   · `kuaishou` 的候选池 p10 已达 **29929**(播放量中位 12.7 万,涨 30% 本身就是
+#:     大几万起)⇒ 比例闸已经挡干净,再补绝对门槛只多挡 3 条,答不上"为什么是一万"。
+#: ⚠️ 改这张表**必须重跑回放**(`scripts/backtest_hot_rise.py`),别凭手感调。
+HOT_RISE_MIN_ABS = {
+    #: 播放量。候选池(过 30%)204 条、p25=7427;10000 切 62 条,被切的最大 +9759
+    #: 是「免费二维码生成器 / 700+中文字体」这类**工具帖**(有量但不是爆款),
+    #: 保留的最小 +10361。取 2000(切 20)会放过那批工具帖;取 50000 会切掉 129 条。
+    "bilibili": 10000,
+    #: 点赞。噪音天花板 19,500 是它的 26 倍;候选池 129 条、p50=360。
+    #: 切 76 条,被切最大 +494(一折春完结 / 会议记录模板),保留最小 +581。
+    #: 取 100(切 34)会放过 +86(月亮查询)这种;取 2000(切 108)只剩 21 条。
+    "xiaohongshu": 500,
+    #: 阅读数。噪音天花板 **7**,50 是它的 7 倍;候选池 428 条(最大)、p75=42。
+    #: 切 334 条,被切最大 +48(七宗罪测试 / 霸王茶姬杯贴 —— 48 阅读就是几十户人家)。
+    #: 取 20(切 260)会放过 +19;取 100(切 380)只剩 48 条,太窄。
+    "wechat": 50,
+    #: 点赞。噪音天花板 16,50 是它的 3 倍;候选池 95 条、p50=41。
+    #: 切 55 条,被切最大 +48,保留最小 +51。取 20 只切 32 条(+19 会漏过)。
+    "weibo_peer": 50,
+    #: 回复数(该板块 `total_replay_num` 中位就是 **2**)。候选池 38 条,
+    #: **+17 与 +72 之间是干净空档** ⇒ 20 落在空档里,只放行 +72/+108/+990/+995 这 4 条。
+    #: 取 5 会放进 +4(1→5)那种"多一个人";取 50 切掉的行数与 20 完全相同(空档)。
+    "tieba": 20,
+    #: 点赞。候选池 26 条(样本少)、p50=324。500 切 15 条,被切最大 +359(维尼小熊),
+    #: 保留最小 +911。取 50 只切 3 条(+34 豆花空间会漏过);取 5000 只剩 3 条(全是麦穗)。
+    "douyin_peer": 500,
+}
+
 
 def _first(d: dict, keys: tuple[str, ...]) -> str:
     """按优先级取第一个**非空**值(空串/None 都算没给)。"""
@@ -475,12 +522,42 @@ def _num(v) -> float:
         return 0.0
 
 
+def _rise_min_abs_of(settings, section: str) -> float:
+    """这个板块的**绝对增量下限**(见 `HOT_RISE_MIN_ABS` 与 `hot_rise_min_abs`)。
+
+    顺序:**配置覆盖** > 代码标定表 > `0`(不启用)。
+    `push_hot_rise_min_abs` 的格式是 `板块:数值,板块:数值` —— 只为**不改代码就能调**
+    而存在(标定表在代码里,是因为它带着数据出处;配置里再抄一份必然飘)。
+    ⚠️ 解析失败**不抛**:一个写错的配置不该让整条推送链挂掉 ——
+    退回标定值(那才是默认行为),但要 `warning` 出来,别让"配了没生效"静默过去。
+    """
+    raw = str(getattr(settings, "push_hot_rise_min_abs", "") or "").strip() if settings else ""
+    if not raw:
+        return float(HOT_RISE_MIN_ABS.get(section, 0))
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, sep, val = part.partition(":")
+        if not sep:
+            continue
+        if name.strip() != section:
+            continue
+        try:
+            return float(val.strip())
+        except ValueError:
+            logger.warning("push_hot_rise_min_abs 里 %r 的值解析不出数字 ⇒ 用标定值", part)
+            return float(HOT_RISE_MIN_ABS.get(section, 0))
+    return float(HOT_RISE_MIN_ABS.get(section, 0))
+
+
 def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
                 settings=None, hours: float | None = None,
                 hot_of=None, hot_min: float = 0,
                 pan_hours: float | None = None,
                 hot_rise_only: bool = False,
                 hot_rise_pct: float | None = None,
+                hot_rise_min_abs: float | None = None,
                 by_group: bool = False,
                 in_batch: bool = True) -> tuple[list[dict], int]:
     """按**推送台账**去掉最近已经推过的条目 → `(保留, 去掉的条数)`。
@@ -542,9 +619,36 @@ def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
       · 真爆的涨幅是另一个量级:同窗口有 `play_count 17160 → 226451 → 1001939`。
 
     ⇒ 涨幅必须**同时**满足 `hot-prev > 0` 与 `(hot-prev)/prev >= hot_rise_pct`。
-    默认值由 `push_hot_rise_pct`(**30%**)给出;显式传 `0` = 退回只看"有没有涨"。
+    默认值由 `push_hot_rise_pct`(**30%**)给出;显式传 `0` = 关掉**比例**这一档。
+    ⚠️ 比例与**绝对增量**(`hot_rise_min_abs`)是**两个独立开关**:
+    传 `hot_rise_pct=0` 只是不再要求百分比,**绝对下限仍按 `hot_rise_min_abs` 生效**。
+    要完全退回"涨了就算"的老行为,**两个都得传 0** —— 否则会撞上本仓那族
+    「看着有逃生门、其实没打开」。
     ⚠️ 基准 `prev<=0`(上次没有互动数据)时按"**没法证明它涨了**"处理 ⇒ 挡;
     原来那种把 prev 当 0、于是任何正数都放行的写法,正是本参数要堵的口子。
+
+    ## ★★ `hot_rise_min_abs`(2026-11-25):**比例尺在小量级板块上是错的**
+
+    按 30 天台账逐条重放(生产口径:盘链身份优先、`item_key` 兜底),把"涨幅 ≥30%"
+    放行的那批再按**绝对增量**分档,**双峰不再是"涨/没涨",而是"涨了几个数"**:
+
+      · `tieba` 过 30% 的 38 条里 **34 条增量 <20**(典型 `1→16`、`2→16`、`14→19`)——
+        贴吧的 `total_replay_num` 中位数就 **2**,涨一个回复就是 +50%;
+      · `wechat` 过 30% 的 428 条里,**35.6% 增量 ≤5**(典型 `2→3`、`1→2`)——
+        公众号阅读数涨 3 个也算"又火了",而这条链的热度基数常在个位数;
+      · `weibo_peer` 7 天内的噪音(涨幅 <5%)绝对增量 p99 = **7**、最大 **16**。
+
+    反过来,同一批里真正的爆量差着好几个数量级:`bilibili 218676 → 2947509`、
+    `kuaishou 421962 → 4218509`、`xiaohongshu 106 → 17000`。
+    ⇒ **只抬比例阈值会把它们一起挡掉**(`277239→497704` 只涨 80% 但增量 22 万,
+    是 bilibili 排前几的真爆),所以这里加的是**绝对增量下限**,不是更高的百分比。
+
+    `None` ⇒ **按板块**查 `HOT_RISE_MIN_ABS`(表里没有 = 0 = 不启用这一档);
+    显式传 `0` 同样是关掉。各板块的热度口径量级差 4 个数量级
+    (`kuaishou` 播放百万 vs `tieba` 回复 2),一个全局常量不可能同时对。
+    实测这一档在 30 天台账上多挡 **576 行(6.7%)**,其中 `wechat` 334 行、
+    `xiaohongshu` 76 行、`bilibili` 62 行、`weibo_peer` 55 行、`tieba` 34 行、
+    `douyin_peer` 15 行;`kuaishou` 不在表里(比例闸已挡干净)。
 
     ## ★★ `by_group`(2026-11-18)
 
@@ -582,6 +686,11 @@ def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
     if hot_rise_pct is None:
         hot_rise_pct = (float(getattr(settings, "push_hot_rise_pct", 0.30))
                         if settings is not None else 0.30)
+    #: ★★ 绝对增量下限(2026-11-25):`None` ⇒ **按板块**查表(`HOT_RISE_MIN_ABS`)。
+    #: ⚠️ 显式传 `0` = 关掉这一档(与 `hot_rise_pct=0` 同样的逃生门语义)。
+    #: ⚠️ 判据是 `is None` 而不是 `or` —— `or` 会把显式传的 `0` 吞成表里的值。
+    if hot_rise_min_abs is None:
+        hot_rise_min_abs = float(_rise_min_abs_of(settings, section))
     if not items:
         return [], 0
     #: 去重范围:默认本 section;`by_group` 时放大到**与本 section 同一个飞书群**的那几个
@@ -696,6 +805,12 @@ def drop_recent(session: Session, user_id: int, section: str, items: list[dict],
                         continue
                     if float(hot_rise_pct or 0) > 0 and \
                             (hot - prev_hot) / prev_hot < float(hot_rise_pct):
+                        continue
+                    #: ★★ 2026-11-25:**比例之外还要看绝对增量**。个位数基数上"涨 30%"
+                    #: 只是多一个回复(`tieba` 6→23 / `wechat` 2→3),那不是又火了。
+                    #: 只抬比例会把"涨 80% 但增量 22 万"的真爆一起挡掉,所以卡的是增量。
+                    if float(hot_rise_min_abs or 0) > 0 and \
+                            (hot - prev_hot) < float(hot_rise_min_abs):
                         continue
                 elif hot < float(hot_min):
                     continue

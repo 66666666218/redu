@@ -681,6 +681,14 @@ def push_items(items: list[dict], settings, detail: dict | None = None,
             #: 现在改判**互动数是否比上次推它时更高**(`hot_rise_only`)——
             #: "又火了"才是放行理由;"绝对值高"不是。
             hot_of=lambda it: push_ledger.peak_metric(it.get("metrics")),
+            #: ★★ 2026-11-25 涨幅门槛**按板块**(见 `push_ledger.HOT_RISE_MIN_ABS`):
+            #: 比例之外还卡**绝对增量** —— 这个调用点覆盖 6 个板块,热度口径量级差 4 个数量级
+            #: (快手播放中位 12.7 万 vs 贴吧回复中位 **2**)。
+            #: 实测 30 天:`tieba` 过 30% 的 38 条里 **34 条增量 <20**(`2→16` 这种),
+            #: `xiaohongshu` 过 30% 的 129 条里 76 条增量 <500 ⇒ 一并挡掉。
+            #: ⚠️ **不能只抬 `hot_rise_pct`**:`277239→497704` 只涨 80%、增量 22 万,
+            #: 是 bilibili 排前几的真爆,抬比例会把它和 `2→3` 一起挡掉。
+            #: 不传 `hot_rise_min_abs` ⇒ 内部按 `section` 查表(`led_sec` 已含 peer 分叉)。
             hot_min=1, hot_rise_only=True,
             #: ★★ 2026-11-18:`tieba` 与 `zhihu` **配的是同一个飞书群**(webhook 同为
             #: `a062026f`)⇒ 客户在同一个群里被两个板块各推一遍同一份资源。
