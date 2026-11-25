@@ -1,3 +1,36 @@
+- [2026-11-25 13:45] FIX: **热点段补三步漏斗 + 热榜作品名改独立台账(搜到 0 条也留痕)**
+  §18 上线后第一轮(`12:51`)运行记录:`热榜名3 ... 源:搜0/作1/线2/标0/热0`,而日志里
+  确实有 `抖音纯协议:「饥困荒野」第 1 页 +12 条` ⇒ **这条路第一次真跑就出现了「分不清」**。
+
+  缺口① **热点段没有任何漏斗计数**:`source_videos` ④是四路来源里唯一赌新事件的路,
+  却只留最终 `源:热N`。`热0` 至少有四种成因而在 `runs` 里长得一模一样 ——
+  ①搜索空、②全被 `demand_min_comments=20` 拦、③过了闸又被 `_fresh`/`_skip`/判重拦、
+  ④词压根没取到。治法:`counters` 新增 `hot_searched`/`hot_passed`/`hot_in`,
+  `_age_note` 输出 `热点:搜N/闸N/入N`;`hot_in` **只数这一段新增的**(`len(out)-_before`),
+  `src_hot` 事后统计算不出来(`_add` 判重/太老/已扫是静默丢的)。
+
+  缺口② **台账在「搜到 0 条」时是瞎的**:§18.4 拿 `douyin_leads.keyword` 当台账,
+  理由「搜回来的线索行都带 `keyword`」只在**搜到东西时**成立 —— 12:51 那轮 `饥困荒野`
+  真搜了(+12 条原始结果)却一条都没落进 `douyin_leads` ⇒ `keyword` 里 0 条该词
+  ⇒ 下轮还会再搜,白烧额度。治法(**复用现成字段,不加列、不迁移**):
+  前台账 `hot_word_seen.fed_search_at`,新函数 `hot_cycle.mark_hot_work_fed`;
+  来源标记 `carrier='hot_work'`(新行才写,**已存在的探针词行只打戳不改 carrier** ——
+  抹掉「这名字是探针捞到的」会让两条路的有效率样本又混在一起);
+  `unfed_search_words` 用 `carrier != 'hot_work'` 分流(**两处判据必须同源**);
+  冷却 `HOT_WORK_FED_DAYS=3` 天;旧台账留作**过渡兜底**(上线前喂过的不被立刻重搜)。
+  打戳位置照抄三个 `mark_*_fed`:**搜索完成才打**、打在同一个 `db.commit()` 之前
+  (那句 commit 就是为了不把写锁抱进 `apply_kouling` 的网络慢活)。
+
+  另:热榜作品名产出**单独计量** `[热榜作品N 命中N/产出N]`,与外部/探针/被求名/公众号瓜并列。
+
+  测试:+6 `test_hot_cycle`(搜到 0 条留痕 / 3 天冷却 / 不进探针词表 / 不覆盖来源 /
+  新词落库 / 幂等)、+2 `test_demand_watch`(`搜3/闸0/入0` 三档 / `闸N≠入N`)、
+  +3 `test_douyin_leads`(搜到 0 条打戳 / 搜索挂了不打戳 / 单独计量)。
+  文档:`doc/需求名监控-2026-10-30.md §19`、`doc/能力清单.md` 两行。
+  (Files: app/services/demand_watch.py, app/services/douyin_leads.py,
+  app/services/hot_cycle.py, tests/test_demand_watch.py, tests/test_douyin_leads.py,
+  tests/test_hot_cycle.py, doc/需求名监控-2026-10-30.md, doc/能力清单.md)
+
 - [2026-11-25 13:37] FEAT: **跨板块共振降级标注:同一份资源换板块照推,但卡面标出"已经去过哪"**
   `drop_recent` 的盘链闸只认**本 section**(不同板块的群不是一批人 —— 那是故意的),
   于是同一份资源在一个板块推过之后,**换到另一个板块再推一遍完全不受拦**。近 7 天台账

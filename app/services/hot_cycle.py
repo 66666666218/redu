@@ -639,16 +639,22 @@ def unfed_search_words(session, user_id: int, *, top: int = 3,
       (`…后续`/`…事件`),按 8 会把好词挡掉一半;
     - 按峰值降序 —— 大事件优先。
     """
-    from sqlalchemy import select
+    from sqlalchemy import or_, select
 
     from app.db.models import HotWordSeen
 
     if session is None or top <= 0:
         return []
     since = datetime.now() - timedelta(hours=24)
+    #: ⚠️ **热榜作品名也写在这张表里**(`carrier=hot_work`,见 `mark_hot_work_fed`)——
+    #: 不排掉的话,"作品名"会被当成"新起量的事件句"喂给探针那条路,两条路的样本又混了
+    #: (本仓母题:两处口径不同 ⇒ 计数恒 0/恒错)。
     rows = session.execute(
         select(HotWordSeen.word, HotWordSeen.peak).where(
             HotWordSeen.user_id == user_id,
+            #: `IS NULL` 那条是给存量行兜底(列有默认值,但远程库曾出现过空值)。
+            or_(HotWordSeen.carrier.is_(None),
+                HotWordSeen.carrier != HOT_WORK_CARRIER),
             HotWordSeen.fed_search_at.is_(None),
             HotWordSeen.last_at >= since).order_by(
             HotWordSeen.peak.desc()).limit(top * 4)).all()
@@ -729,6 +735,18 @@ HOT_WORK_HOURS = 48
 #: 名字长度上限 —— 与 `douyin_leads._HOT_MAX_LEN` 一致(推广号标题里的《》写不下更长的)。
 HOT_WORK_MAX_LEN = 12
 
+#: 热榜作品名写进 `hot_word_seen` 时打的标记(2026-11-25)。这张表原来只存**形态词探针**
+#: 的"事件句";现在混进"作品名"这一类,`carrier` 就得能分辨,否则复盘时分不清
+#: 「这个名字是探针捞到的还是热榜给的」。
+HOT_WORK_CARRIER = "hot_work"
+
+#: 热榜作品名**喂过搜索后的冷却天数**。
+#: ⚠️ 原来是"近 3 天 `douyin_leads.keyword` 里有 ⇒ 不喂",但那条台账**搜到 0 条时
+#: 没有行可留痕** ⇒ 同一个词每轮重搜、白烧额度(`饥困荒野` 11-25 实测就栽在这)。
+#: 现在改成往 `hot_word_seen` 打 `fed_search_at`(与探针词同一套戳),搜到 0 条也有记录。
+#: 仍留 3 天冷却而不是"永远":真作品会在榜上持续几天,三天后重新拿到一次机会是合理的。
+HOT_WORK_FED_DAYS = 3
+
 
 def hot_work_names(session, user_id: int, *, hours: int = HOT_WORK_HOURS,
                    min_sources: int = HOT_WORK_MIN_SOURCES,
@@ -792,36 +810,89 @@ def hot_work_names(session, user_id: int, *, hours: int = HOT_WORK_HOURS,
 
 
 def unfed_hot_work_names(session, user_id: int, *, top: int = 2,
-                         hours: int = HOT_WORK_HOURS) -> list[str]:
+                         hours: int = HOT_WORK_HOURS,
+                         fed_days: int = HOT_WORK_FED_DAYS) -> list[str]:
     """取**还没喂过搜索**的热榜作品名(喂 `douyin_leads` 用)。
 
-    ★ 为什么不复用 `unfed_search_words`:那张表是**形态词探针**的台账
-    (`hot_word_seen`),存的是"新起量的事件句";而这里流的是**作品名**,
-    两者来源与判据都不同,混一张表会让"喂过没产出"与"从没喂过"又分不开。
+    ## 台账(2026-11-25 改)
 
-    ⇒ **台账直接用 `douyin_leads.keyword`**:某个名字被拿去搜过,那一轮搜回来的线索
-    行就带着它(历史 43/43 行都有 `keyword`)。近 3 天喂过 ⇒ 不再喂。
-    ⚠️ 这条比 `fed_search_at` 弱一点(**搜到 0 条时没有行可留痕**),所以用"近 3 天"
-    而不是"永远":真作品会在榜上持续几天,三天的冷却足以让它重新拿到一次机会。
+    原来拿 `douyin_leads.keyword` 当台账 —— **搜到 0 条可落库的线索时一行都不留**,
+    于是同一个名字每轮重搜、白烧搜索额度。实测:`饥困荒野` 12:51 那轮真去搜了
+    (+12 条原始结果),但之后 `douyin_leads.keyword` 里**0 条**该词 ⇒ 下一轮还会再搜。
+
+    ⇒ 改为写 `hot_word_seen`(`carrier=HOT_WORK_CARRIER`),`fed_search_at` 打戳。
+    好处:①搜到 0 条也留痕;②与探针词**同一套戳**,`mark_*_fed` 的语义只有一份。
+    `unfed_search_words` 那边用 `carrier != HOT_WORK_CARRIER` 把两类分流 ——
+    **两处判据必须同源**,否则作品名会被当成事件句再喂一次(本仓母题)。
+
+    冷却 `fed_days` 天(默认 3)而不是"永远":真作品会在榜上持续几天,
+    三天后重新拿一次机会是合理的。
+
+    ⚠️ 仍保留旧的 `douyin_leads.keyword` 判定作为**过渡兜底**:上线前 3 天喂过的名字
+    (那时还没有戳)不该被立刻重搜一遍。
 
     ⚠️ **大瓜轮不吃**(与探针词同一条纪律,见 `douyin_leads` 里 `cat != DAGUA_CATEGORY`)。
     """
     from sqlalchemy import select
 
-    from app.db.models import DouyinLead
+    from app.db.models import DouyinLead, HotWordSeen
 
     if session is None or top <= 0:
         return []
     names = [n for n, _ in hot_work_names(session, user_id, hours=hours)]
     if not names:
         return []
-    since = datetime.now() - timedelta(days=3)
-    fed = {str(k) for k in session.scalars(
+    days = max(1, int(fed_days or HOT_WORK_FED_DAYS))
+    since = datetime.now() - timedelta(days=days)
+    #: ★ 主台账:打过戳的(含**搜到 0 条**的那些 —— 这正是旧方案看不见的一半)。
+    fed = {str(w) for w in session.scalars(
+        select(HotWordSeen.word).where(
+            HotWordSeen.user_id == user_id,
+            HotWordSeen.word.in_(names),
+            HotWordSeen.fed_search_at.is_not(None),
+            HotWordSeen.fed_search_at >= since)).all() if w}
+    #: 过渡兜底:旧台账(`douyin_leads.keyword`),只在上线后的 `fed_days` 窗口内起作用。
+    fed |= {str(k) for k in session.scalars(
         select(DouyinLead.keyword).where(
             DouyinLead.user_id == user_id,
             DouyinLead.found_at >= since,
             DouyinLead.keyword.in_(names))).all() if k}
     return [n for n in names if n not in fed][:max(1, int(top))]
+
+
+def mark_hot_work_fed(session, user_id: int, names: list[str]) -> int:
+    """给这批热榜作品名打「已喂过搜索」的戳(`hot_word_seen.fed_search_at`)。返回条数。
+
+    ⚠️ **由调用方在搜索完成后调**(与 `mark_fed_search` 同一条纪律):搜索挂了词没消耗。
+
+    ⚠️ 名字可能已经以**探针词**身份存在(`carrier=形态词:…`,唯一键是 `user_id+word`)——
+    那时**只打戳、不改 `carrier`**:它的来源本来就是探针,改写成 `hot_work` 会把
+    "这个名字是探针捞到的"这个事实抹掉。打戳是正确的:`fed_search_at` 的含义就是
+    "这个词被拿去搜过一次",两条路对此**定义相同**。
+    """
+    from sqlalchemy import select
+
+    from app.db.models import HotWordSeen
+
+    if session is None or not names:
+        return 0
+    now = datetime.now()
+    words = [str(n).strip() for n in names if str(n).strip()]
+    if not words:
+        return 0
+    known = {r.word: r for r in session.scalars(select(HotWordSeen).where(
+        HotWordSeen.user_id == user_id,
+        HotWordSeen.word.in_(words))).all()}
+    for w in words:
+        row = known.get(w)
+        if row is None:
+            session.add(HotWordSeen(
+                user_id=user_id, word=w, seen_at=now, last_at=now, peak=0.0,
+                carrier=HOT_WORK_CARRIER, fed_search_at=now))
+        else:
+            row.fed_search_at = now
+    session.flush()
+    return len(words)
 
 
 def prune_seen(session, user_id: int, *, keep_days: int = 14) -> int:

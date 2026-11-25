@@ -1323,8 +1323,14 @@ def _age_note(stats: dict | None) -> str:
     if groups or brand:
         bits.append(f"事件{groups}组" + (f"(品牌{brand})" if brand else ""))
     hotnames = int(s.get("hotname") or 0)
-    if hotnames:
+    if hotnames or int(s.get("hot_searched") or 0) or int(s.get("hot_passed") or 0):
         bits.append(f"热榜名{hotnames}")
+    #: ★ 热点段漏斗(2026-11-25):`搜N/闸N/入N` —— 搜到几条、过评论数闸几条、进池几条。
+    #: 没有这三项,「热0」分不清是搜索空、评论闸太严、还是新鲜度/已扫拦掉了。
+    hs, hp, hi = (int(s.get("hot_searched") or 0), int(s.get("hot_passed") or 0),
+                  int(s.get("hot_in") or 0))
+    if hs or hp or hi:
+        bits.append(f"热点:搜{hs}/闸{hp}/入{hi}")
     srcs = [(k, int(s.get(f"src_{k}") or 0))
             for k in ("search", "author", "lead", "peer", "hot")]
     if any(n for _k, n in srcs):
@@ -1797,23 +1803,39 @@ def source_videos(db, user_id: int = 1, settings=None,
         if hot_words:
             from app.services import douyin_protocol_source as dps
 
+            #: ★★ **热点段要有自己的漏斗**(2026-11-25)。这一段是四段里**唯一一条赌新事件**
+            #: 的路,却一直没有计数:运行记录里只有最终 `源:热N`,于是「热0」分不清是
+            #: ①搜索一条没回来、②回来了但全被评论数闸拦了、③过了闸又被新鲜度/已扫拦掉、
+            #: ④还是词条本身没取到。四种失灵在 `runs` 里长得一模一样(本仓母题)。
+            #: 三项对齐:搜到(搜索原始返回) → 过闸(评论数 ≥ `demand_min_comments`)
+            #: → 入池(真正进了 `out`,已扣掉 `_fresh`/`_skip`/判重)。
             min_c = int(getattr(settings, "demand_min_comments", 20) or 0)
+            counters["hot_searched"] = 0
+            counters["hot_passed"] = 0
+            counters["hot_in"] = 0
             try:
                 hv = dps.search(hot_words, settings=settings, session=db,
                                 user_id=user_id, pages=1)
             except Exception:  # noqa: BLE001 - 热点视频搜不到就退回原有素材
                 logger.warning("新热点视频搜索失败:%s", "、".join(hot_words), exc_info=True)
                 hv = []
+            hv = hv or []
+            counters["hot_searched"] = len(hv)
             hv = [v for v in hv
                   if int((v.get("metrics") or {}).get("comment_count") or 0) >= min_c]
+            counters["hot_passed"] = len(hv)
             hv.sort(key=lambda v: int((v.get("metrics") or {}).get("comment_count") or 0),
                     reverse=True)
+            _before = len(out)
             for i, v in enumerate(hv):
                 if i >= hot_budget:
                     break
                 _add(v.get("aweme_id"), v.get("url"), v.get("snippet"),
                      (v.get("metrics") or {}).get("comment_count") or 0, v.get("name"),
                      src="hot", declared=v.get("publish_at"))
+            #: 入池**只数这一段新增的**(`_add` 会静默丢掉判重/太老/已扫的,
+            #: 拿 `src_hot` 事后统计算不出"这一段到底进没进")。
+            counters["hot_in"] = len(out) - _before
 
     #: ★ **来源分布必须显形**(2026-11-24):历史 263 行扫描里 260 行来自搜索/热点、
     #: 库内线索只 3 行 —— 而这个失衡**在运行记录里一个字都没有**,只能靠事后 join

@@ -2415,9 +2415,20 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
                                               platforms=(_dw.WEVENT_PLATFORM,))
                 except Exception:  # noqa: BLE001 - 打戳失败不挡这轮结果
                     logger.debug("公众号事件名打戳失败", exc_info=True)
+            #: ★★ **热榜作品名也要打戳**(2026-11-25)。原来台账是
+            #: `douyin_leads.keyword` ⇒ **搜到 0 条可落库的线索时一行都不留**,
+            #: 同一个名字每轮重搜白烧额度(实测 `饥困荒野` 12:51 搜了 +12 条原始结果,
+            #: 而 `keyword` 里 0 条该词 ⇒ 下轮还会再搜)。改打完戳后搜到 0 条也留痕。
+            if work_words and plat == "douyin":
+                try:
+                    from app.services import hot_cycle as _hc
+
+                    _hc.mark_hot_work_fed(db, user_id, work_words)
+                except Exception:  # noqa: BLE001 - 打戳失败不挡这轮结果
+                    logger.debug("热榜作品名打戳失败", exc_info=True)
             # ★★ **打戳后立刻落盘,别把写锁抱进后面的慢活**(2026-11-18 实测)。
             # 下面 `apply_kouling` 要转存(网络,单条可达几十秒)、`push_leads` 要发飞书,
-            # 而上面三个 `mark_*_fed` 是本轮**第一次写** ⇒ 若不在这里提交,SQLite 的写事务
+            # 而上面几个 `mark_*_fed` 是本轮**第一次写** ⇒ 若不在这里提交,SQLite 的写事务
             # 会一直开到函数末尾那个 `db.commit()`,把单写者的锁抱满整段慢活。
             # 实测代价(app.log 08:17):写事务**持有 319.7s** 才 commit,期间别的作业
             # 撞 `database is locked` **60 次**(`UPDATE user_cookies` 就是这样被挡的)。
@@ -2496,6 +2507,14 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
             n_wevent_ok = sum(1 for x in leads
                               if (x.get("keyword") or "") in ws
                               and (x.get("kouling") or {}).get("kind") in ("group", "share"))
+            #: ★ **热榜作品名的产出单独计量**(2026-11-25):它是"跨 ≥2 个内容源都在说的
+            #: 作品"这条信号的回流,与热榜(0%)/探针/被求名/公众号瓜是第五条路。
+            #: 不单独报的话,「喂了但一个都没命中」与「根本没喂」在运行记录里长得一样。
+            ww = set(work_words or [])
+            n_work = sum(1 for x in leads if (x.get("keyword") or "") in ww)
+            n_work_ok = sum(1 for x in leads
+                            if (x.get("keyword") or "") in ww
+                            and (x.get("kouling") or {}).get("kind") in ("group", "share"))
             # ⚠️ **来源标签要进运行记录**(2026-10-08):抖音现在"协议优先、浏览器兜底",
             # 而两条路都会产出"0 条"。不标来源的话,看到 0 就分不清是
             # "协议挂了被回落"还是"真没人在推资源" —— 正是本仓最忌讳的那种含糊。
@@ -2508,6 +2527,7 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
                         f"[探针{len(probe_words)} 命中{n_probe}/产出{n_probe_ok}] "
                         f"[被求名{len(demand_words)} 命中{n_demand}/产出{n_demand_ok}] "
                         f"[公众号瓜{len(wevent_words)} 命中{n_wevent}/产出{n_wevent_ok}] "
+                        f"[热榜作品{len(work_words)} 命中{n_work}/产出{n_work_ok}] "
                         #: ★ 漏斗(2026-10-31):原始→时间挡→无时间→口令→无链,一眼看出哪道闸在掉量。
                         f"漏斗 原始{funnel.get('raw', 0)} 挡{funnel.get('old', 0)}"
                         f" 无时{funnel.get('notime', 0)} 续{funnel.get('cont', 0)} 口令{funnel.get('kept', 0)}"

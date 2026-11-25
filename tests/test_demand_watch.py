@@ -896,6 +896,79 @@ def test_运行记录写出热点条数_否则看不出这条路有没有跑(ses
     assert "其中热点1" in detail, detail
 
 
+def test_热点段三步漏斗都要显形_否则热0分不清哪道闸在拦(session, monkeypatch):
+    """★ 2026-11-25 三类结果都必须能从 `runs` 里区分开:
+
+    - 搜到 0 条      → `热点:搜0/闸0/入0`
+    - 搜到了但全被评论数闸拦 → `搜3/闸0/入0`
+    - 过了闸但被新鲜度/已扫拦 → `搜3/闸3/入0`
+
+    没有这三项时它们与"这一轮正常"在运行记录里长得一模一样(本仓母题)。
+    """
+    from app.db.models import RunRecord
+
+    class _S4(_S):
+        demand_max_videos = 3
+        demand_hot_videos = 1
+        demand_min_comments = 20
+
+    from app.services import hot_cycle
+
+    monkeypatch.setattr(hot_cycle, "new_hot_words", lambda *a, **k: [
+        hot_cycle.HotWord(word="新热点词", last=1, peak=200000,
+                          days=3, emerge=0, source="形态词:后续")])
+    monkeypatch.setattr(hot_cycle, "hot_work_names", lambda *a, **k: [])
+    monkeypatch.setattr(dw, "collect_for_video",
+                        lambda *a, **k: {"error": "", "names": {}})
+    #: 三条都**搜得到**,但评论数都只有 3 ⇒ 全被 `demand_min_comments=20` 拦下
+    monkeypatch.setattr("app.services.douyin_protocol_source.search", lambda *a, **k: [
+        {"aweme_id": f"h{i}", "url": "u", "snippet": "某事件后续",
+         "metrics": {"comment_count": 3}} for i in range(3)])
+
+    stats: dict = {}
+    dw.source_videos(session, 1, _S4(), stats=stats)
+
+    assert stats["hot_searched"] == 3, stats
+    assert stats["hot_passed"] == 0, stats
+    assert stats["hot_in"] == 0, stats
+    assert "热点:搜3/闸0/入0" in dw._age_note(stats), dw._age_note(stats)
+
+
+def test_热点段入池条数要扣掉被新鲜度拦的(session, monkeypatch):
+    """`闸N` 不等于 `入N` —— 过了闸还可能被 `_fresh`/`_skip`/判重拦掉。"""
+    class _S4(_S):
+        demand_max_videos = 3
+        demand_hot_videos = 1
+        demand_min_comments = 20
+        demand_max_age_days = 7
+
+    from app.services import hot_cycle
+
+    monkeypatch.setattr(hot_cycle, "new_hot_words", lambda *a, **k: [
+        hot_cycle.HotWord(word="新热点词", last=1, peak=200000,
+                          days=3, emerge=0, source="形态词:后续")])
+    monkeypatch.setattr(hot_cycle, "hot_work_names", lambda *a, **k: [])
+    monkeypatch.setattr(dw, "collect_for_video",
+                        lambda *a, **k: {"error": "", "names": {}})
+    #: 两条都过闸,但一条是三年前的 —— `publish_ts_of` 从雪花 id 高位解发布时刻。
+    #: ⚠️ id 必须**按当前时间算**,写死一个数会随今天日期漂走(它解出来是固定年份)。
+    _now_id = str(int(datetime.now().timestamp()) << 32)
+    _old_id = str(int((datetime.now() - timedelta(days=1100)).timestamp()) << 32)
+    monkeypatch.setattr("app.services.douyin_protocol_source.search", lambda *a, **k: [
+        {"aweme_id": _now_id, "url": "u", "snippet": "新事件",
+         "metrics": {"comment_count": 500}},
+        {"aweme_id": _old_id, "url": "u", "snippet": "老事件",
+         "metrics": {"comment_count": 500}}])
+
+    stats: dict = {}
+    dw.source_videos(session, 1, _S4(), stats=stats)
+
+    assert stats["hot_searched"] == 2, stats
+    assert stats["hot_passed"] == 2, stats
+    assert stats["hot_in"] == 1, f"老视频应被 `_fresh` 拦下:{stats}"
+    assert "热点:搜2/闸2/入1" in dw._age_note(stats), dw._age_note(stats)
+
+
 def test_run_user_把名字写进库并推一次(session, monkeypatch):
     _lead(session, "111")
     monkeypatch.setattr(dw, "collect_for_video", lambda *a, **k: {

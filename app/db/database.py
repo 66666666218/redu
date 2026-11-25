@@ -511,7 +511,12 @@ ADDITIONS: dict[str, list[str]] = {
     "alerts": ["section VARCHAR(32) DEFAULT ''"],
     # 探针词**喂给 douyin_leads 搜索的时刻**(2026-11-12):NULL=还没喂过。
     # 存量行 NULL 语义正确(旧词确实没走过搜索链)。
-    "hot_word_seen": ["fed_search_at DATETIME"],
+    # ⚠️ `carrier`(2026-11-25 补迁移):模型里 3f1695d 就加了,但**这张表的 ADDITIONS
+    # 一直只有 fed_search_at** —— 建表早于该列的库(远程 MySQL)一查它就是
+    # `Unknown column 'carrier'`,而探针词/热榜名两条路都会整条打挂。
+    # 空串默认 = 存量行(那时只有探针词,来源标记不是必需的),语义正确。
+    "hot_word_seen": ["fed_search_at DATETIME",
+                      "carrier VARCHAR(32) DEFAULT ''"],
     "douhot_watch": ["section VARCHAR(16) DEFAULT 'douhot'", "filter_keyword VARCHAR(64) DEFAULT ''",
                      "date_window INTEGER"],
     "douhot_watch_snap": ["section VARCHAR(16) DEFAULT 'douhot'", "entry_title VARCHAR(255) DEFAULT ''",

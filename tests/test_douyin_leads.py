@@ -2817,6 +2817,86 @@ class TestDemandNamesToSearch:
         assert row.fed_search_at is None, "搜索挂了就打戳 = 这个名字再也不会被搜"
 
 
+class TestHotWorkNamesToSearch:
+    """★★ **热榜作品名喂搜索 + 搜到 0 条也留痕**(2026-11-25)。
+
+    旧台账是 `douyin_leads.keyword` ⇒ **搜到 0 条可落库的线索时一行都不留**,
+    同一个名字每轮重搜白烧额度(实测 `饥困荒野` 12:51 +12 条原始结果、`keyword` 里 0 条)。
+    """
+
+    def _seed_hot(self, session, source, title):
+        from app.db.models import HotSourceItem
+
+        session.add(HotSourceItem(user_id=1, source=source, rank=1, title=title,
+                                  captured_at=datetime.now()))
+        session.commit()
+
+    def test_搜到零条线索也要打戳(self, session, monkeypatch) -> None:
+        from app.db.models import HotWordSeen
+        from app.services import douyin_leads as dl
+        from app.services import hot_cycle as hc
+
+        self._seed_hot(session, "tieba", "《饥困荒野》实机")
+        self._seed_hot(session, "zhihu", "《饥困荒野》怎么样")
+        monkeypatch.setattr(dl, "hot_seed_words", lambda *a, **k: [])
+        monkeypatch.setattr(dl, "collect_leads", lambda *a, **k: ([], "CDP"))
+        monkeypatch.setattr(dl, "push_leads", lambda *a, **k: None)
+
+        dl.run_douyin_leads(session, 1, _settings_like(), category="影视", advance=False)
+
+        row = session.query(HotWordSeen).filter_by(word="饥困荒野").one()
+        assert row.fed_search_at is not None, "搜到 0 条也必须留痕,否则下轮重搜"
+        assert row.carrier == hc.HOT_WORK_CARRIER
+        assert hc.unfed_hot_work_names(session, 1, top=5) == []
+
+    def test_搜索挂了不打戳(self, session, monkeypatch) -> None:
+        from app.services import douyin_leads as dl
+
+        self._seed_hot(session, "tieba", "《两京十五日》定档")
+        self._seed_hot(session, "zhihu", "《两京十五日》选角")
+        monkeypatch.setattr(dl, "hot_seed_words", lambda *a, **k: [])
+        monkeypatch.setattr(dl, "collect_leads",
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+        monkeypatch.setattr(dl, "push_leads", lambda *a, **k: None)
+        try:
+            dl.run_douyin_leads(session, 1, _settings_like(), category="影视", advance=False)
+        except Exception:
+            pass
+        #: 搜索挂了,词没消耗 ⇒ 下轮还该被喂
+        from app.services import hot_cycle as hc
+
+        assert hc.unfed_hot_work_names(session, 1, top=5) == ["两京十五日"]
+
+    def test_热榜作品名并进词表且单独计量(self, session, monkeypatch) -> None:
+        """运行记录里要有 `[热榜作品N 命中N/产出N]` —— 不单独报就分不清
+        「喂了没命中」与「根本没喂」。"""
+        from app.db.models import RunRecord
+        from app.services import douyin_leads as dl
+
+        self._seed_hot(session, "tieba", "《饥困荒野》实机")
+        self._seed_hot(session, "zhihu", "《饥困荒野》怎么样")
+        got: dict = {}
+        monkeypatch.setattr(dl, "hot_seed_words", lambda *a, **k: [])
+        monkeypatch.setattr(dl, "search_keywords",
+                            lambda db, uid, top, settings, hot=None, cat=None:
+                                got.update(hot=list(hot or [])) or ["饥困荒野"])
+        #: 必须带**可用链**才活得过 `_drop_panless`(`apply_kouling` 这里是替身,
+        #: 不会把口令变成 `pan_url`)—— 否则线索在计量之前就被丢掉,命中恒 0。
+        lead = {"aweme_id": "w1", "title": "《饥困荒野》最新资源", "url": "https://v.douyin.com/x",
+                "mark": "饥困荒野", "author": "a", "keyword": "饥困荒野",
+                "pan_url": "https://pan.quark.cn/s/abcdef",
+                "kouling": {"kind": "share", "share_id": "s1"}}
+        monkeypatch.setattr(dl, "collect_leads", lambda *a, **k: ([dict(lead)], "CDP"))
+        monkeypatch.setattr(dl, "apply_kouling", lambda *a, **k: None)
+        monkeypatch.setattr(dl, "push_leads", lambda *a, **k: None)
+
+        dl.run_douyin_leads(session, 1, _settings_like(), category="影视", advance=False)
+
+        assert "饥困荒野" in got.get("hot", []), got
+        detail = session.query(RunRecord).filter_by(kind="douyin_leads").one().detail
+        assert "[热榜作品1 命中1" in detail, detail
+
+
 class TestKeywordListFitsCdpCap:
     """★★ **词表总长必须 ≤ CDP 上限**(2026-11-13 修的两个静默丢词)。
 

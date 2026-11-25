@@ -566,8 +566,6 @@ def test_取词按用户隔离(_mem_db):
 
 
 def test_打戳只动喂过的那些(_mem_db):
-    from datetime import datetime
-
     _seen_row(_mem_db, "词甲", 100.0)
     _seen_row(_mem_db, "词乙", 100.0)
     n = hot_cycle.mark_fed_search(_mem_db, 1, ["词甲"])
@@ -576,3 +574,112 @@ def test_打戳只动喂过的那些(_mem_db):
     assert hot_cycle.unfed_search_words(_mem_db, 1, top=5) == ["词乙"]
     #: 重复打戳幂等(值刷新,不新增行)
     assert hot_cycle.mark_fed_search(_mem_db, 1, ["词甲", "不存在的词"]) == 1
+
+
+# ---- 热榜作品名的独立台账(2026-11-25)-------------------------------------
+#
+# 旧台账是 `douyin_leads.keyword` ⇒ **搜到 0 条可落库的线索时一行都不留**,
+# 同一个名字每轮重搜白烧额度(实测 `饥困荒野` 12:51 搜了 +12 条原始结果、
+# 而 `keyword` 里 0 条该词)。现在打 `hot_word_seen.fed_search_at`,搜到 0 条也留痕。
+
+
+def _hot_item(db, user_id, source, title, *, hours_ago=1):
+    from datetime import datetime, timedelta
+
+    from app.db.models import HotSourceItem
+
+    db.add(HotSourceItem(
+        user_id=user_id, source=source, rank=1, title=title,
+        captured_at=datetime.now() - timedelta(hours=hours_ago)))
+    db.flush()
+
+
+def test_热榜作品名_打过戳就不再喂_哪怕一条线索都没搜到(_mem_db):
+    """★ 这就是旧台账漏掉的那一半:搜到 0 条 ⇒ `keyword` 无行 ⇒ 下轮重搜。"""
+    _hot_item(_mem_db, 1, "tieba", "《饥困荒野》实机")
+    _hot_item(_mem_db, 1, "zhihu", "《饥困荒野》怎么样")
+    _mem_db.commit()
+
+    assert hot_cycle.unfed_hot_work_names(_mem_db, 1, top=5) == ["饥困荒野"]
+
+    #: 搜索完成、但**一条线索都没有** ⇒ 只有打戳这一种留痕方式
+    assert hot_cycle.mark_hot_work_fed(_mem_db, 1, ["饥困荒野"]) == 1
+    _mem_db.commit()
+
+    assert hot_cycle.unfed_hot_work_names(_mem_db, 1, top=5) == [], "搜到 0 条也必须留痕"
+
+
+def test_热榜作品名_三天冷却过后可以再喂一次(_mem_db):
+    """冷却而不是永久:真作品会在榜上持续几天,三天后重新拿一次机会是合理的。"""
+    from datetime import datetime, timedelta
+
+    from app.db.models import HotWordSeen
+
+    _hot_item(_mem_db, 1, "tieba", "《两京十五日》定档")
+    _hot_item(_mem_db, 1, "zhihu", "《两京十五日》选角")
+    _mem_db.add(HotWordSeen(
+        user_id=1, word="两京十五日", seen_at=datetime.now(), last_at=datetime.now(),
+        peak=0.0, carrier=hot_cycle.HOT_WORK_CARRIER,
+        fed_search_at=datetime.now() - timedelta(days=4)))
+    _mem_db.commit()
+
+    assert hot_cycle.unfed_hot_work_names(_mem_db, 1, top=5) == ["两京十五日"]
+
+
+def test_热榜作品名不进探针词表_两条路口径不许混(_mem_db):
+    """★ 母题:两处判据不同源 ⇒ 计数恒错。
+
+    热榜名写进 `hot_word_seen` 后,如果 `unfed_search_words` 不排掉它,
+    同一个名字会被**探针那条路再喂一次**(而它明明是"跨源作品名"不是"事件句")。
+    """
+    from datetime import datetime
+
+    from app.db.models import HotWordSeen
+
+    _mem_db.add(HotWordSeen(
+        user_id=1, word="饥困荒野", seen_at=datetime.now(), last_at=datetime.now(),
+        peak=5_000_000.0, carrier=hot_cycle.HOT_WORK_CARRIER))
+    _mem_db.add(HotWordSeen(
+        user_id=1, word="只忍事件后续", seen_at=datetime.now(), last_at=datetime.now(),
+        peak=160_000.0, carrier="形态词:后续"))
+    _mem_db.commit()
+
+    assert hot_cycle.unfed_search_words(_mem_db, 1, top=5) == ["只忍事件后续"]
+
+
+def test_热榜作品名打戳_不覆盖探针词已有的来源标记(_mem_db):
+    """名字若已被探针捞到过,打戳**只补 `fed_search_at`**,`carrier` 保持原样。
+
+    把它改写成 `hot_work` 会抹掉"这个名字是探针捞到的"这个事实 —— 而两条路的
+    有效率要各自攒样本(本仓反复强调的那条)。
+    """
+    from datetime import datetime
+
+    from app.db.models import HotWordSeen
+
+    _mem_db.add(HotWordSeen(
+        user_id=1, word="两京十五日", seen_at=datetime.now(), last_at=datetime.now(),
+        peak=200_000.0, carrier="形态词:定档"))
+    _mem_db.commit()
+
+    hot_cycle.mark_hot_work_fed(_mem_db, 1, ["两京十五日"])
+    _mem_db.commit()
+
+    row = _mem_db.query(HotWordSeen).filter_by(word="两京十五日").one()
+    assert row.carrier == "形态词:定档", "不许覆盖探针词的来源标记"
+    assert row.fed_search_at is not None, "但戳必须打上,否则会被热榜那条路重搜"
+
+
+def test_热榜作品名打戳_新词落库带来源标记(_mem_db):
+    """从没见过的名字(只从热榜来)⇒ 新行必须带 `carrier=hot_work`。"""
+    from app.db.models import HotWordSeen
+
+    assert hot_cycle.mark_hot_work_fed(_mem_db, 1, ["GTA6"]) == 1
+    _mem_db.commit()
+
+    row = _mem_db.query(HotWordSeen).filter_by(word="GTA6").one()
+    assert row.carrier == hot_cycle.HOT_WORK_CARRIER
+    assert row.fed_search_at is not None
+    #: 幂等:重复打戳刷新时间,不新增行
+    assert hot_cycle.mark_hot_work_fed(_mem_db, 1, ["GTA6", "  "]) == 1
+    assert _mem_db.query(HotWordSeen).filter_by(word="GTA6").count() == 1
