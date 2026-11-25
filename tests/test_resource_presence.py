@@ -152,6 +152,41 @@ def test_push_items_cards_per_platform(monkeypatch) -> None:
     assert "源未给链接" in str(ks_card), "源没给链接也要如实说,别装成有"
 
 
+def test_push_items_marks_source_only_links_as_untransferred(monkeypatch) -> None:
+    """★ 盘满直推源链时,**卡面不许再谎称「我方链」**(2026-11-26 用户口径)。
+
+    用户早就定过:「盘满了就跳过转存、直接推送到客户群」。这条规则合法,但卡面必须
+    如实标注 —— 否则那批`pan_url`是**别人的源链**,写着「点开是我方链」就是骗客户。
+    判据:`my_link` 空 ∧ `pan_url` 在 ⇒ 🔴 换 ⏳、头部改成两档说明、并单列一句「未转存」。
+    """
+    from app.services import feishu_client
+
+    sent = []
+
+    class _C:
+        def __init__(self, webhook, secret):
+            self.hook = webhook
+
+        def send_card(self, card):
+            sent.append((self.hook, card))
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+    ok = rp.push_items([
+        {"name": "满盘资源", "platform": "xiaohongshu", "label": "小红书", "count": 1,
+         "samples": [], "sample_urls": [],
+         # 盘满 ⇒ 只留源链,没有我方链
+         "link": {"pan_url": "https://pan.quark.cn/s/SRC"}},
+    ], _S())
+    assert ok is True and len(sent) == 1
+    text = str(sent[0][1])
+    assert "https://pan.quark.cn/s/SRC" in text
+    assert "⏳夸克" in text, "源链必须打 ⏳,不能打本仓语义为「我方链」的 🔴"
+    assert "🔴夸克" not in text
+    assert "本轮未转存" in text, "盘满直推那批要单列一句,别读成全是我方链"
+    assert "点开是我方链" not in text, "盘满时头部不许再写「是我方链」"
+
+
 def test_push_items_drops_solicit_titles_at_the_exit(monkeypatch) -> None:
     """★ 招揽帖到**推送出口**必须再挡一次(2026-11-25 事故)。
 

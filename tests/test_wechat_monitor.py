@@ -2049,6 +2049,65 @@ def test_quark_transfer_without_any_cookie_alerts_once(session, monkeypatch) -> 
     assert [x[3] for x in calls] == ["百度盘链未转存(缺百度网盘 Cookie)"]
 
 
+def test_quark_full_skips_all_transfers_and_stamps_stats(session, monkeypatch) -> None:
+    """★ 盘满 ⇒ **整轮一跳不打转存接口**,并把原因带进 `stats`(2026-11-26 用户口径)。
+
+    用户早定的规则:「盘满了就跳过转存、直接推送到客户群」。原来的实现是**每篇都先去撞**
+    夸克转存、撞到「容量不足」再回落源链 —— 结果虽对,但一轮 20 篇就白打 20 次注定失败的
+    写请求。改成整轮先探一次盘,满了就一条都不搬(与抖音 `apply_kouling` 同源)。
+    ⚠️ 探不到 ≠ 满了:`quota_usage()` 回 `None` 时必须照旧去试。
+    """
+    from app.services.quark_transfer import QuarkTransfer
+
+    b = WechatArticle(user_id=1, title="满盘资源文", url="https://mp.weixin.qq.com/s/full",
+                      source="listen", benchmark_id=None,
+                      pan_urls="https://pan.quark.cn/s/fullZ")
+    session.add(b)
+    session.commit()
+
+    calls: list[str] = []
+    monkeypatch.setattr(QuarkTransfer, "__init__", lambda self, *a, **kw: None)
+    monkeypatch.setattr(QuarkTransfer, "quota_usage",
+                        lambda self: {"used": 99, "total": 100, "ratio": 0.99})
+    # 盘满时**不许**调用转存;调用了就让用例炸掉
+    monkeypatch.setattr(QuarkTransfer, "transfer_and_share",
+                        lambda self, url, **kw: calls.append(url) or {
+                            "share_url": "https://pan.quark.cn/s/NOPE", "password": ""})
+    st = _settings(quark_cookie="ck=x", pan_transfer_enabled=True,
+                   wechat_listen_sample_new=False)
+    stats: dict = {}
+    reps = wechat_monitor._enrich_new_articles(session, 1, st, [b], stats=stats)
+
+    assert calls == [], "盘满时一条都不该去打转存接口"
+    assert b.id not in reps, "没转存 ⇒ 不产生替换链(推送回落源链)"
+    assert stats.get("quark_full"), "盘满跳过必须带进 stats,否则运行记录里和「没东西可转」一样"
+    assert "99%" in stats["quark_full"]
+
+
+def test_quark_quota_unknown_still_tries_transfer(session, monkeypatch) -> None:
+    """探针回 `None`(不知道)= **照旧去试**,别把抖动当成盘满。"""
+    from app.services.quark_transfer import QuarkTransfer
+
+    b = WechatArticle(user_id=1, title="探不到的盘", url="https://mp.weixin.qq.com/s/unk",
+                      source="listen", benchmark_id=None,
+                      pan_urls="https://pan.quark.cn/s/unkZ")
+    session.add(b)
+    session.commit()
+
+    hit: list[str] = []
+    monkeypatch.setattr(QuarkTransfer, "__init__", lambda self, *a, **kw: None)
+    monkeypatch.setattr(QuarkTransfer, "quota_usage", lambda self: None)
+    monkeypatch.setattr(QuarkTransfer, "transfer_and_share",
+                        lambda self, url, **kw: hit.append(url) or {
+                            "share_url": "https://pan.quark.cn/s/OK", "password": "aa11"})
+    st = _settings(quark_cookie="ck=x", pan_transfer_enabled=True,
+                   wechat_listen_sample_new=False)
+    stats: dict = {}
+    wechat_monitor._enrich_new_articles(session, 1, st, [b], stats=stats)
+    assert hit == ["https://pan.quark.cn/s/unkZ"], "探不到配额必须照旧去试"
+    assert not stats.get("quark_full")
+
+
 def test_pan_selfshare_41017_adopted_as_own_link(session, monkeypatch) -> None:
     """41017(转存自己的分享)=同行搬运了我们的链:原链直接收录为我方链接,不再重试。"""
     from app.services.quark_transfer import QuarkError, QuarkTransfer

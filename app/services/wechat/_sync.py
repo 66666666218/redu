@@ -85,7 +85,8 @@ def _sync_push_after_transfer(session: Session, user_id: int, settings: Settings
        ——"监控号近 24h 的新发文必须全部到飞书"是硬要求,封顶只管 24h 之前的历史补采文。
     """
     if not new_rows:
-        return {"pushed": 0, "transferred": 0, "deduped": 0, "truncated": 0}
+        return {"pushed": 0, "transferred": 0, "deduped": 0, "truncated": 0,
+                "quark_full": ""}
     session.commit()  # 新入库的行先落库:下面转存若炸,回滚不能把这次同步的成果一起带走
     kept = _dedupe_sync_push_rows(session, user_id, new_rows)
 
@@ -99,9 +100,10 @@ def _sync_push_after_transfer(session: Session, user_id: int, settings: Settings
     cap = max(1, int(settings.wechat_sync_push_limit or 20))
     extra = max(0, cap - len(must))          # 近24h 的文章先占满窗口,剩下的名额才给历史文
     to_push = must + history[:extra]
+    enrich_stats: dict = {}
     try:
         replacements = _root._enrich_new_articles(session, user_id, settings, to_push,
-                                            run_backfill=False)
+                                            run_backfill=False, stats=enrich_stats)
         session.commit()
     except Exception:  # noqa: BLE001 - 转存炸了也要推(标题回落原文),不能让同步整个报错
         logger.exception("同步后转存失败 user=%s", user_id)
@@ -113,7 +115,9 @@ def _sync_push_after_transfer(session: Session, user_id: int, settings: Settings
             # 截断数=历史文里没进窗口的那些。直接 `len(history)-extra` 在
             # 本轮入库不足封顶数时会算出**负数**(extra 可大于 history 长度),
             # 前端 toast 就成了"剩余 -17 篇"。
-            "truncated": len(history) - len(history[:extra])}
+            "truncated": len(history) - len(history[:extra]),
+            # 盘满 ⇒ 按用户规则跳过转存、直接推源链;留给运行记录点名用。
+            "quark_full": enrich_stats.get("quark_full", "")}
 def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
                         settings: Settings | None = None,
                         max_pages: int | None = None, weread: WereadClient | None = None,
@@ -165,6 +169,7 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
             _record_run(session, user_id, "wechat_sync", status,
                         f"platform account={b.nickname} pages={pages} new={len(new_rows)} "
                         f"pushed={push['pushed']} deduped={push['deduped']} truncated={push['truncated']}"
+                        + (f" 盘满跳过转存({push['quark_full']})" if push.get("quark_full") else "")
                         + (" history_limit_hit" if status == "partial" else ""))
             session.commit()
             return {"platform": "wechat_sync", "status": status, "pages": pages,
@@ -258,7 +263,8 @@ def sync_wechat_account(session: Session, user_id: int, benchmark_id: int,
     _record_run(session, user_id, "wechat_sync",
                 "success" if listed == "ok" else "partial",
                 f"weread({listed},items={len(items)}) account={b.nickname} new={len(new_rows)} "
-                f"pushed={push['pushed']} deduped={push['deduped']} truncated={push['truncated']}")
+                f"pushed={push['pushed']} deduped={push['deduped']} truncated={push['truncated']}"
+                + (f" 盘满跳过转存({push['quark_full']})" if push.get("quark_full") else ""))
     session.commit()
     return {"platform": "wechat_sync",
             "status": "success" if listed == "ok" else "partial",

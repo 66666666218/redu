@@ -326,13 +326,16 @@ def _rows_for(pan: str, rows: list) -> list:
 
 def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                          rows: list[WechatArticle],
-                         run_backfill: bool = True) -> dict[int, list[tuple[str, str, str]]]:
+                         run_backfill: bool = True,
+                         stats: dict | None = None) -> dict[int, list[tuple[str, str, str]]]:
     """新文后处理(推送前):夸克转存盘链 → 换自己的分享链并持久化到 `my_pan_urls`。
 
     (2026-09-29 摘除 dajiala 后,原"① 即时采样阅读量"随付费链一并移除;阅读数相关
     字段保留在库表里兼容历史数据,新数据一律无采样。)
     `run_backfill=False`(同步收尾)跳过历史补转存队列——同步在 HTTP 请求里,自带窗口已经
     限死了本次转存篇数,再叠加队列会让一次点击多打 N 次夸克接口;队列留给定点监听。
+    `stats` 是**可选的出参字典**(不改返回类型,老调用方零改动):盘满跳过转存时写
+    `stats["quark_full"] = "<口语原因>"`,让运行记录能区分「本轮盘满跳过」与「没新文」。
     返回 {article_id: [(原链, 我的链, 提取码)]} 供飞书推送;失败回落原链接,绝不阻塞监听。
     """
     replacements: dict[int, list[tuple[str, str, str]]] = {}
@@ -414,8 +417,37 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
     except Exception:  # noqa: BLE001 - 判不动就当全都算活(不许因为判据故障挡住转存)
         _dead = None
 
+    #: ★★ **盘满 ⇒ 整轮跳过夸克转存**(2026-11-26,用户口径「盘满了就跳过转存直接推送」)。
+    #: 判据与 `douyin_leads.apply_kouling` 那处**同源**:整轮先探一次盘,
+    #: 满了就一条都不搬 —— 否则一轮 20 篇会**白打 20 次夸克接口**、每条都撞
+    #: 「容量不足」再回落原文(结果虽然对,但打的都是注定失败的写请求)。
+    #: ⚠️ 探测失败(`quota_ratio()` 回 `None`)= "不知道" ⇒ **照旧去试** ——
+    #: 别把探针抖动当成盘满(与 `admit_transfer` 的 `_UNSET` 是同一条纪律)。
+    _quark_full = ""
+    #: 探针与转存**共用同一个实例** —— 不然会多构造一个 `QuarkTransfer`(多发一次
+    #: `/member` 请求),而构造本身在测试里是可观测的(用例按构造次数核对用的是哪个号的 cookie)。
+    quark: QuarkTransfer | None = None
     if settings.pan_transfer_enabled and quark_ck:
         quark = QuarkTransfer(quark_ck, fid_store=settings.quark_fid_store)
+        try:
+            #: ⚠️ 探**夸克**的配额(用刚构造的这个实例),不是迅雷 —— 这条链搬的是夸克,
+            #: 探错盘等于没探。算法与 `pan_discovery._quark_quota` 一致(那里有 5 分钟缓存,
+            #: 但那是按 cookie 缓存 `quota_usage()` 的**结果**;这里要的是"本轮这个已构造好的
+            #: 实例"上的读数,直接问它,不额外造对象)。
+            _usage = quark.quota_usage()
+            _limit = float(getattr(settings, "quark_quota_limit", 0.98) or 0.98)
+            if _usage and float(_usage.get("ratio") or 0) >= _limit:
+                _quark_full = (f"夸克盘已用 {float(_usage['ratio']) * 100:.0f}%"
+                               f"(阈值 {_limit * 100:.0f}%)")
+        except Exception:  # noqa: BLE001 - 探针抖动不该挡住整轮转存
+            _quark_full = ""
+        if _quark_full:
+            logger.warning("公众号转存:夸克盘满(%s),本轮**跳过转存只推源链**", _quark_full)
+            #: 带进运行记录:否则「盘满跳过」与「本轮没东西可转」长得一模一样。
+            if stats is not None:
+                stats["quark_full"] = _quark_full
+
+    if settings.pan_transfer_enabled and quark_ck and not _quark_full and quark is not None:
         # 盘链级转存去重:同一资源(相同夸克分享链)只转存一次,后续文章复用首篇的
         # 我方分享链——多个对标号发同一资源时,旧逻辑每篇各存一份(浪费空间+成倍风控暴露)。
         reused: dict[str, tuple[str, str]] = {}  # pan_url -> (my_share_url, 提取码)

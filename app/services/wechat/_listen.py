@@ -1395,6 +1395,11 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
         session.rollback()
 
     enrich_failed = ""
+    #: ★ **盘满跳过转存的留痕**(2026-11-26)。`_enrich_new_articles` 探到夸克盘满时
+    #: 一条都不搬、直接把源链推给客户(用户口径「盘满了就跳过转存直接推送」)——
+    #: 这在结果上是**正确**的,但在运行记录里必须能看出来:否则「盘满跳过」与
+    #: 「本轮没东西可转」长得一模一样,运维只能靠翻日志偶然撞见。
+    enrich_stats: dict = {}
     # ★★ **撞 SQLite 写锁时回滚重试一次**(2026-10-21)。
     # 实测 04:05 / 14:05 两轮:`_enrich` 里 `UPDATE wechat_articles SET my_pan_urls=…`
     # 撞 `database is locked`,会话进入「**待回滚**」状态后 ——
@@ -1406,7 +1411,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     for _attempt in (1, 2):
         try:
             with savepoint(session):
-                replacements = _root._enrich_new_articles(session, user_id, settings, new_rows)
+                replacements = _root._enrich_new_articles(session, user_id, settings, new_rows,
+                                                          stats=enrich_stats)
             enrich_failed = ""
             break
         except Exception as exc:  # noqa: BLE001 - 转存炸了也要推(标题回落原文)
@@ -1511,6 +1517,10 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
         # 后处理(转存/复用)整段被回滚 ⇒ 这一轮的"待转存"是**故障**不是"还没轮到我方转存"。
         # 不点名的话,它在运行记录里跟正常轮次长得一样。
         detail += f" ⚠️enrich_failed={enrich_failed}"
+    if enrich_stats.get("quark_full"):
+        # 盘满 ⇒ **按用户规则跳过转存、直接推源链**(不是故障,是策略)。点名出来,
+        # 免得它跟"本轮没有可转的"混为一谈。
+        detail += f" 盘满跳过转存({enrich_stats['quark_full']})"
     _record_run(session, user_id, "wechat_listen", status, detail)
     session.commit()
     if push and new_rows:

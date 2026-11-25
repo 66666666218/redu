@@ -772,17 +772,32 @@ def push_items(items: list[dict], settings, detail: dict | None = None,
         _n_link = sum(1 for it in group
                       if ((it.get("link") or {}).get("my_link")
                           or (it.get("link") or {}).get("pan_url")))
+        #: ★★ **「是我方链」与「是别人源链」必须分开数**(2026-11-26)：
+        #: 盘满时 `transfer_missing_links` 不再转存、直接留着 `pan_url` 推送（用户口径
+        #: 「盘满就跳过转存直接推源链」）—— 那批**能点开但不是我们的链**。
+        #: 头部原来硬编码「点开是**我方链**」⇒ 盘满时整段是假话，客户以为我们搬过。
+        #: 判据与逐行渲染**同源**（`my_link` 空 ∧ `pan_url` 在 = 源链）。
+        #: **只有源链**的条数 —— 与「只有对标作品（连源链都没有）」是两回事，分别计数。
+        _n_src = sum(1 for it in group
+                     if not (it.get("link") or {}).get("my_link")
+                     and (it.get("link") or {}).get("pan_url"))
         # ★ **与抖音卡同形:两个独立可点的格**(2026-10-16 用户口径
         #   「都做成抖音推广格式,**既有网盘,也能看到对标的作品**」):
-        #     「资源」→ 取资源(我方链);「对标作品」→ 看那条**人在推的原帖**。
+        #     「资源」→ 取资源(我方链,或盘满时的源链);「对标作品」→ 看那条**人在推的原帖**。
         #   ⚠️ 原来**只有一处可点**(可用链),而且 `sample_urls` 根本没被带出来
         #      ⇒ 员工看得到"有资源",却**核对不了这资源是谁在推、推成什么样**。
         elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
             f"{label}上也在推的资源 **{len(group)}** 个:"
-            f"「**资源**」点开是我方链、可直接取用;「**对标作品**」点开是那条原帖;"
-            f"「**对标账号**/「**对标数据**」= 谁在推、热度多少。"
+            #: ⚠️ **别写死「是我方链」**：盘满直推那批是别人的源链（见上 `_n_src`）。
+            + ("「**资源**」点开是我方链、可直接取用;" if not _n_src
+               else "「**资源**」点开即可取用(🔴 我方链 / ⏳ 源链未转存);")
+            + "「**对标作品**」点开是那条原帖;"
+            + "「**对标账号**」/「**对标数据**」= 谁在推、热度多少。"
             + (f"\n**可直取 {_n_link} 条** · 其余 {len(group) - _n_link} 条只有对标作品"
                if _n_link < len(group) else f"\n**可直取 {_n_link} 条**")
+            #: 盘满直推那批**单独说一行**，免得读成"全是我方链"。
+            + (f"(其中 {_n_src} 条**网盘空间不足、本轮未转存**，给的是源链、点开同样能取)"
+               if _n_src else "")
             + (f"\n**{_ai.summary()}**:已挡掉纯广告 / 无具体资源 / 过时的那些。"
                if _ai.summary() else "")
             + (f"\n已跳过 {_dup} 条 {int(getattr(settings, 'push_dedupe_hours', 24) or 0)} 小时内推过的。"
@@ -804,15 +819,20 @@ def push_items(items: list[dict], settings, detail: dict | None = None,
             url = link.get("my_link") or link.get("pan_url") or ""
             name = _md_safe(strip_others(it["name"]))
             _pan = _pan_name(url)
-            # 「资源」:名字可点 → **我方链**,顺带写**盘名**
+            # 「资源」:名字可点 → **我方链**(有的话),顺带写**盘名**
             # (用户 10-04 口径:只写网盘名 —— 「我方链」那三个字在客户群里会暴露运营方身份)
+            #: ★★ **图标必须区分「我方链」与「源链」**(2026-11-26)：盘满时
+            #: `transfer_missing_links` 跳过转存、留 `pan_url` 直推（用户口径），那批是
+            #: **别人的源链**。原来一律打 `🔴`（本仓语义 = 我方链）⇒ 卡面撒谎，客户以为
+            #: 是我们搬好的。与抖音卡同一套：`🔴`=我方链、`⏳`=源链未转存。
+            _icon = "🔴" if link.get("my_link") else "⏳"
             #: ★ **每条都带发布时间**(2026-10-31 用户:「今天看的时候没有看到资源时间的新鲜度」)
             from app.services.hot_time import publish_mark
 
             _when = publish_mark(it.get("publish_at"))
             if url:
                 cell = (f"[{name}]({_md_safe(url)})"
-                        + (f" · 🔴{_pan}" if _pan else "")) + (f" {_when}" if _when else "")
+                        + (f" · {_icon}{_pan}" if _pan else "")) + (f" {_when}" if _when else "")
             else:
                 # ★★ **空链必须说明原因**(2026-11-23,口径「未搬要说明原因」)。
                 # 原来这里只给一个 `—` —— 客户看到的是"有资源但点不了",我们事后也查不出
