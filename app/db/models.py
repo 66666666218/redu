@@ -553,6 +553,68 @@ class AiFilterDecision(Base):
     outcome_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+class ForecastReview(Base):
+    """**预判命中回验**(2026-11-25)—— 每条预警发出 72h 后,回查"后来真的变成带盘资源了吗"。
+
+    ## 为什么必须单独一张表,不能塞进 `feishu_alerts`
+
+    `feishu_alerts` 是**冷却门**:它的 `title` 是冷却键(截断到 200 字符)、
+    被 `feishu_alert_gate` 读写刷新 `alerted_at` —— 把回验结果写回去,
+    下一次冷却判定就会读到一个被我们改过的时刻。两者共表 = 冷却与结果互相污染。
+
+    更要紧的是**样本身份**:冷却键会被 `[:200]` 截断,而回验要拿完整作品名去库里匹配。
+    截断只发生一次(`feishu_alerts.title` 落盘的就是截断后的),**补不回来**。
+
+    ## `evidence` 为什么分档(不是 0/1)
+
+    三条链问的是"后来有没有**人真的在推这份带盘资源**",而库里有三个强弱不同的证据:
+
+      · `peer`  —— `push_ledger`/`wechat_articles` 里**别人**推了同名且**带盘链**(最强:
+                   这就是"变成网盘资源"的定义);
+      · `douyin`—— `douyin_leads` 里出现同名且 `kind='share'`(有人在发口令/转存链);
+      · `pan`   —— `discovered_pan_links` 里出现同名盘链(**最弱**)。
+
+    ⚠️ `pan` 档**必须单独算,不能和另外两档并成一个"命中"**:贴吧那条源是
+    **专门的资源灌水农场**(实测同一批漫剧合集贴被反复重发,"青蛇"能匹配到
+    《青蛇传-前世今生》)。把它和"同行真在推"混在一起,命中率会**系统性虚高**。
+    报表必须**分档报**,别只报合计。
+
+    ## `outcome` 的取值
+
+    `hit` / `miss` / `unknown`。`unknown` = 到期了但**库内查不到任何同名内容** ——
+    它不等于 miss:可能那个作品根本不在我们采样的平台矩阵里(游戏预告尤其如此)。
+    这也是为什么 `hot_breakout` 的命中率要**分源**看(IT之家 vs 知乎)。
+    """
+
+    __tablename__ = "forecast_reviews"
+    __table_args__ = (UniqueConstraint("user_id", "section", "key",
+                                       name="uq_forecast_review"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    #: `promo_forecast` / `hot_breakout` / `hot_forecast`
+    section: Mapped[str] = mapped_column(String(32), index=True)
+    #: **完整**的预警身份(不截断;`feishu_alerts.title` 那条是截断过的冷却键)
+    key: Mapped[str] = mapped_column(String(255))
+    #: 被预判的那个作品/资源名(匹配用语料就是它)
+    title: Mapped[str] = mapped_column(String(255), default="")
+    #: 预警发出时刻 —— **回验窗口的起点**,不是 `decided_at`
+    alerted_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    #: 原卡片上那行判据(`6 人/24h` / `起势档/0人/IT之家#15` / `42名/4616 万/39x`),
+    #: 用来事后分源/分档看命中率
+    reason: Mapped[str] = mapped_column(String(255), default="")
+    outcome: Mapped[str] = mapped_column(String(16), default="")
+    #: 最强的那一档证据(`peer` > `douyin` > `pan` > 空)
+    evidence: Mapped[str] = mapped_column(String(16), default="")
+    #: 命中的**第一条**证据行(哪个平台、什么标题、谁推的)—— 人要点得开才信
+    evidence_ref: Mapped[str] = mapped_column(String(255), default="")
+    #: 从预警到出现证据隔了多少小时(命中才有);`None` = 没命中或没记
+    lag_hours: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reviewed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    #: 各档的条数明细(`peer=3 douyin=0 pan=7`),让人一眼看到证据强弱结构
+    detail: Mapped[str] = mapped_column(String(255), default="")
+
+
 class DouyinPeerWork(Base):
     """抖音**对标号**扫到的新作品(2026-10-29)。
 

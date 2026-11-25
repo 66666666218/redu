@@ -509,6 +509,9 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     #: 与 `hot_breakout` **不是一件事**:那条读本机最新快照、只认《书名号》;
     #: 这条直连远程三源 + 抖音趋势确认,判的是"值不值得做网盘",且**不碰上传**。
     from app.services.hot_forecast import hot_forecast_tick
+    #: ★ **预判命中回验**(2026-11-25):三条预判链发出的每条,72h 后回查"后来真的
+    #: 有人带盘推同一份资源吗"。没有这条闭环,「准不准」只能靠印象。
+    from app.services.forecast_review import forecast_review_tick
     from app.services.link_audit import link_audit_tick
     from app.services.push_timeline import tick as push_timeline_tick
     from app.services.telegram_source import collect_tick as tg_collect_tick
@@ -754,6 +757,16 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         # ⚠️ 角色 **wechat**:慢活(远程查询/热点宝/LLM/采素材)**全在**本机 session 之外。
         (hot_forecast_tick, _get_settings().hot_forecast_cron,
          {"minute": 49, "hour": "8,20"}, "hot_forecast", "wechat"),
+        # ★ **预判命中回验**(2026-11-25):用户问「大瓜和预测什么时候能投客户群」。
+        # ⚠️ 三条预判链在此之前**没有任何一处算过自己准不准**(`ai_filter_decisions`
+        #    的 outcome 两列建了 40 天、0 行写入)⇒ 「再观察两周」观察不出结论。
+        # ⚠️ 角色 **both**:三张证据表(`push_ledger`/`douyin_leads`/`discovered_pan_links`)
+        #    两端各有一份(本机台账更全、远端线索更全),各算各的才都准;
+        #    写的是**各自库里的** `forecast_reviews`,不会互相覆盖。
+        # ⚠️ 时刻 **09:15** —— 在 `board_digest` 周结(09:03)与 `remote_sync`(09:09)之后、
+        #    `douyin_peer`(09:20)之前;不落 `:00/:30` 网格。
+        (forecast_review_tick, _get_settings().forecast_review_cron,
+         {"minute": 15, "hour": 9}, "forecast_review", "both"),
         # **链接体检**(2026-10-16):抽样探活我方分享链 + 判"货不对版/空分享"。
         # ⚠️ 为什么要有它:首轮实测 75 条里 **货不对版 14 / 空分享 10** —— 这两种**都会打到
         #   客户脸上**(点开拿到别的资源 / 点开是空的),而在此之前**没有任何一行报告看它们**

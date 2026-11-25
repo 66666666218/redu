@@ -546,6 +546,23 @@ class Settings(BaseSettings):
     hot_forecast_material_dir: str = "data/hot_forecast"   # gitignored
     #: 采素材时是否用抖音 CDP(时好时坏);默认关,百度资讯 + 微博已够
     hot_forecast_use_douyin: bool = False
+    # ---- **预判命中回验**(2026-11-25)----
+    # 用户问「大瓜和预测什么时候能投客户群」—— 而在此之前三条预判链**没有任何一处
+    # 算过自己准不准**(`ai_filter_decisions.outcome` 两列建了 40 天、0 行写入)。
+    # 这个作业回查:预警发出后,库内**后来**有没有人真的带盘推同一份资源。
+    # 判据与三档证据的定义见 `app/services/forecast_review.py` 头注。
+    forecast_review_enabled: bool = True
+    #: 回验点 = 预警 + 72h。三条链里提前量最长的是 `hot_forecast`(~40h),
+    #: 72h 后该发生的都发生了;再晚就分不清「预判准」与「之后自然变热」。
+    forecast_review_after_hours: int = 72
+    #: 回看多少天内的预警(与报表窗口同一个值)。14 天 ≈ 三条链各 300+ 条样本
+    forecast_review_days: int = 14
+    #: 每批 commit 的条数。回验一条要扫四张表,**别一次抱锁几百条**
+    #: (本仓在 `resource_presence` 上抱写锁 181 秒打挂过别人的作业)。
+    forecast_review_batch: int = 50
+    #: ⚠️ **09:15** —— 在 `board_digest`(09:03 周结)/`remote_sync`(09:09)之后、
+    #: `douyin_peer`(09:20)之前;不落 `:00/:30` 网格(`test_job_stagger` 是硬守卫)。
+    forecast_review_cron: str = "15 9 * * *"
     remote_sync_days: int = 14         # 每次回看多少天(靠天然键去重,天然幂等)
 
     candidate_auto_import_cron: str = "35 8 * * *"  # 每日自动收录时间(默认 08:30,紧随候选发现之后)
