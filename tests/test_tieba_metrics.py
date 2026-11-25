@@ -63,3 +63,45 @@ def test_limit_is_applied(monkeypatch) -> None:
     monkeypatch.setattr(tm, "_detail_of", _fake)
     out = tm.fetch_agree([str(1000 + i) for i in range(20)], limit=3)
     assert len(out) == 3
+
+
+# ---------------------------------------------------------------------------
+# 全帖指标(2026-11-25)
+# ---------------------------------------------------------------------------
+
+
+def test_detail_to_metrics_全帖字段全映射() -> None:
+    m = tm.detail_to_metrics({"view_num": 705811, "reply_num": 14279,
+                              "share_num": 253, "collect_num": 587,
+                              "thread_agree": 28344, "agree": 5115})
+    assert m == {"view_count": 705811, "comment_count": 14279, "share_count": 253,
+                 "collected_count": 587, "liked_count": 28344}
+
+
+def test_点赞取全帖值_不是首楼() -> None:
+    """★ 实测 tid 10745031844:全帖 28344 / 首楼 5115 —— 差 82%。"""
+    m = tm.detail_to_metrics({"thread_agree": 28344, "agree": 5115})
+    assert m["liked_count"] == 28344
+
+
+def test_全帖点赞为0时回落首楼() -> None:
+    assert tm.detail_to_metrics({"thread_agree": 0, "agree": 7})["liked_count"] == 7
+    assert tm.detail_to_metrics({"agree": 7})["liked_count"] == 7
+
+
+def test_detail_to_metrics_零和缺失都不放() -> None:
+    """与 `agree_to_metrics` 同规矩:0/None = "平台没给",放进去会被读成"没人看"。"""
+    assert tm.detail_to_metrics(None) == {}
+    assert tm.detail_to_metrics({}) == {}
+    assert tm.detail_to_metrics({"view_num": 0, "share_num": None,
+                                 "reply_num": "n/a", "thread_agree": 0}) == {}
+
+
+def test_有浏览量就能走_view_count_档() -> None:
+    """★ 贴吧从 `engage` 兜底跳到 `view_count` —— 这是接全帖指标最大的收益。"""
+    from app.services import conversion as cv
+
+    m = tm.detail_to_metrics({"view_num": 705811, "thread_agree": 28344})
+    r = cv.estimate("tieba", m)
+    assert r["basis"] == "view_count"
+    assert r["estimate"] == int(705811 * cv.DEFAULT_FACTOR)

@@ -84,6 +84,33 @@ def test_映射成与_mediacrawler_同一形状(patched):
     assert r["share_count"] == 0
 
 
+def test_全帖指标接上_且点赞用全帖值而非首楼(patched):
+    """★ 2026-11-25:`get_posts` 的 `thread` 段匿名就有值(**同一次请求**,白拿)。
+
+    实测 tid 10745031844:全帖 `agree` **28344** / 首楼 `agree` **5115**
+    —— 用首楼会把热度少报 82%。所以 `liked_count` 必须取 `thread_agree`。
+    """
+    patched([_Obj(10745031844, title="《天道》", content=EXCERPT)],
+            details={"10745031844": {"agree": 5115, "text": FULL,
+                                     "thread_agree": 28344, "view_num": 705811,
+                                     "reply_num": 14279, "share_num": 253,
+                                     "collect_num": 587}})
+    r = ts.search(["网盘资源"])[0]
+    assert r["metrics"]["liked_count"] == 28344, "必须用全帖点赞,不是首楼那层的"
+    assert r["metrics"]["view_count"] == 705811
+    assert r["metrics"]["share_count"] == 253
+    assert r["metrics"]["collected_count"] == 587
+    # share_count 顶层是兼容老列;有真值时不该再硬编码 0
+    assert r["share_count"] == 253
+
+
+def test_全帖值为0时才回落到首楼点赞(patched):
+    """兜底:全帖值缺失/为 0 时用首楼值,但**不许反过来**丢掉已知的全帖值。"""
+    patched([_Obj(1, content=EXCERPT)],
+            details={"1": {"agree": 7, "text": FULL, "thread_agree": 0}})
+    assert ts.search(["网盘资源"])[0]["metrics"]["liked_count"] == 7
+
+
 def test_盘链从首楼全文抽出来(patched):
     """★ 核心:摘要在链接之前就断了,**链只在全文里**。"""
     patched([_Obj(1, title="《天道》", content=EXCERPT)],

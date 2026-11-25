@@ -32,14 +32,22 @@ _TIMEOUT = 25.0
 
 
 async def _detail_of(tids: list[int], limit: int) -> dict[str, dict]:
-    """取每个 tid 的**首楼**:`{tid: {"agree": 点赞, "text": 全文}}`。
+    """取每个 tid 的**首楼全文** + **全帖指标**:`{tid: {...}}`。
 
     ★ **全文在这里**(2026-10-08 补):`get_posts` 的楼层对象上,正文在 **`contents`**
     (富文本片段列表),**不是 `content`** —— 后者恒为 `None`。我第一版读 `content`,
     拿到"首楼 0 字",差点把结论写成"匿名取不到全文"。而盘链恰恰就在全文里
     (搜索接口给的 `content` 是**截断的摘要**,里面通常没有链接)。
 
-    ⇒ 所以**点赞和全文是一次请求拿回来的**,两件事不各花一次。
+    ★★ **全帖指标也是白拿的**(2026-11-25):同一次 `get_posts` 响应里还有
+    `posts.thread` 段,匿名实测有值 —— `view_num` / `reply_num` / `share_num` /
+    `agree` / `disagree` / `collect_num`。**一次请求拿全,不额外花代价**。
+
+    ⚠️ **`thread.agree` 才是全帖点赞,`首楼.agree` 只是首楼那一层的**:
+    实测 tid 10745031844 全帖 **28344** / 首楼 **5115**(少 82%)。
+    取全帖值、首楼值兜底(2026-11-25 抽查 24 条未出现"全帖 0 而首楼 >0",仍保守兜底)。
+
+    ⇒ 所以**点赞、全帖指标和全文是一次请求拿回来的**。
     """
     import aiotieba
 
@@ -54,14 +62,33 @@ async def _detail_of(tids: list[int], limit: int) -> dict[str, dict]:
             first = next((p for p in posts if int(getattr(p, "floor", 0)) == 1), None)
             if first is None:
                 continue
+            thread = getattr(posts, "thread", None)
             out[str(tid)] = {"agree": int(getattr(first, "agree", 0) or 0),
                              "text": flatten_contents(getattr(first, "contents", None)),
                              #: ★ **发帖时间**(2026-10-18):贴吧**搜索接口不给** `create_time`
                              #: (实测 57% 无发布时间),而**首楼对象上有** ⇒ **白拿**
                              #: (这次请求本来就在打,不额外花一次)。取值可能是 int 或 datetime,
                              #: 由调用方 `to_dt` 归一。
-                             "create_time": getattr(first, "create_time", 0)}
+                             "create_time": getattr(first, "create_time", 0),
+                             #: ★ **全帖指标**(2026-11-25,匿名实测有值)——
+                             #: 取不到时是 `None`,**不填 0**(0 会被读成"没人看")。
+                             "thread_agree": _int_or_none(getattr(thread, "agree", None)),
+                             "view_num": _int_or_none(getattr(thread, "view_num", None)),
+                             "reply_num": _int_or_none(getattr(thread, "reply_num", None)),
+                             "share_num": _int_or_none(getattr(thread, "share_num", None)),
+                             "collect_num": _int_or_none(getattr(thread, "collect_num", None))}
     return out
+
+
+def _int_or_none(v: object) -> int | None:
+    """字段 → 非负整数;缺失/解析不出返回 `None`(**别把"没有"写成 0**)。"""
+    if v is None:
+        return None
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return None
+    return n if n >= 0 else None
 
 
 def flatten_contents(contents: object) -> str:
@@ -85,7 +112,10 @@ def flatten_contents(contents: object) -> str:
 
 
 def fetch_posts_detail(tids: list[str | int], limit: int = DEFAULT_LIMIT) -> dict[str, dict]:
-    """批量取首楼详情 `{tid: {"agree":…, "text":…}}`。**不抛异常**(旁路,拿不到就不放进去)。
+    """批量取首楼详情 `{tid: {"agree":…, "text":…, "thread_agree":…, …}}`。
+
+    **不抛异常**(旁路,拿不到就不放进去)。全帖指标(2026-11-25 起)与全文、
+    点赞是**同一次请求**带回来的,见 `_detail_of`。
 
     ⚠️ **`tid` 必须先转 int** —— `aiotieba.get_posts` 对字符串会报
     `'str' object cannot be interpreted as an integer`(实测踩过)。
@@ -113,9 +143,15 @@ def fetch_agree(tids: list[str | int], limit: int = DEFAULT_LIMIT) -> dict[str, 
 
     ⚠️ **不抛异常**:这是"补一个指标"的旁路,拿不到不该拖垮发现链。
     实现走 `fetch_posts_detail`(同一次请求顺带把全文也取了,见那里的说明)。
+
+    ⚠️ 返回的是**全帖点赞**(`thread_agree`),不是首楼那一层的 —— 见 `detail_to_metrics`。
     """
-    return {tid: int(d.get("agree", 0) or 0)
-            for tid, d in fetch_posts_detail(tids, limit=limit).items()}
+    out: dict[str, int] = {}
+    for tid, d in fetch_posts_detail(tids, limit=limit).items():
+        v = _int_or_none(d.get("thread_agree")) or _int_or_none(d.get("agree")) or 0
+        if v:
+            out[tid] = v
+    return out
 
 
 def agree_to_metrics(agree: int | None) -> dict[str, int]:
@@ -125,3 +161,37 @@ def agree_to_metrics(agree: int | None) -> dict[str, int]:
     except (TypeError, ValueError):
         return {}
     return {"liked_count": v} if v > 0 else {}
+
+
+#: `fetch_posts_detail` 的字段 → `conversion.ALIASES` 认的键。
+#: ⚠️ `agree` **不在这里** —— 它是"首楼那一层的赞",要用 `thread_agree` 兜底,
+#: 逻辑在 `detail_to_metrics` 里,别绕过。
+_DETAIL_TO_METRIC: tuple[tuple[str, str], ...] = (
+    ("view_num", "view_count"),
+    ("reply_num", "comment_count"),
+    ("share_num", "share_count"),
+    ("collect_num", "collected_count"),
+)
+
+
+def detail_to_metrics(detail: dict | None) -> dict[str, int]:
+    """`fetch_posts_detail` 的一条详情 → `metrics` 字典(2026-11-25)。
+
+    ★ 贴吧终于能进**曝光阶梯的 `view_count` 档**(原来只有 `engage` 兜底)——
+    有了浏览量,`conversion.estimate` 会用它算「浏览量 × 40%」,而不是去加赞+评+转。
+
+    ⚠️ **点赞用 `thread_agree`(全帖),不是 `agree`(首楼那一层)**:
+    实测 tid 10745031844 全帖 28344 / 首楼 5115 —— 用首楼会把热度少报 82%。
+    全帖值为 0/取不到时才回落到首楼值。
+    ⚠️ **0 / None 一律不放** —— 与 `agree_to_metrics` 同规矩(填 0 会被读成"没人看")。
+    """
+    d = detail or {}
+    out: dict[str, int] = {}
+    for src, dst in _DETAIL_TO_METRIC:
+        v = _int_or_none(d.get(src))
+        if v:
+            out[dst] = v
+    liked = _int_or_none(d.get("thread_agree")) or _int_or_none(d.get("agree"))
+    if liked:
+        out["liked_count"] = liked
+    return out

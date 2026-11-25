@@ -947,14 +947,15 @@ def _candidates_from_tieba(keywords: list[str]) -> list[dict]:
     ⚠️ **纯协议那条的盘链不在搜索返回里** —— 搜索给的是**截断的摘要**,
     必须再取一次**首楼全文**才抽得出链(见 `tieba_search` 的 docstring)。
     """
-    from app.services.tieba_metrics import agree_to_metrics, fetch_agree
+    from app.services.tieba_metrics import DEFAULT_LIMIT, detail_to_metrics, fetch_posts_detail
 
     rows, source = _tieba_rows(keywords)
-    # **补点赞数**:**只有浏览器那条需要补** ——
-    # 协议路在"取首楼全文"那一次请求里已经把 `agree` 顺带拿回来了(见 tieba_metrics),
-    # 再调一次 `fetch_agree` 等于把每个帖子又问一遍。
-    agrees = (fetch_agree([t for t in (_tid_of(r.get("url")) for r in rows) if t])
-              if source == "浏览器" else {})
+    # **补互动数**:**只有浏览器那条需要补** ——
+    # 协议路在"取首楼全文"那一次请求里已经把全帖指标(`thread` 段)顺带拿回来了
+    # (见 `tieba_metrics._detail_of`),再调一次等于把每个帖子又问一遍。
+    details = (fetch_posts_detail([t for t in (_tid_of(r.get("url")) for r in rows) if t],
+                                  limit=DEFAULT_LIMIT * 8)
+               if source == "浏览器" else {})
 
     out: list[dict] = []
     for r in rows:
@@ -963,7 +964,7 @@ def _candidates_from_tieba(keywords: list[str]) -> list[dict]:
             continue
         tid = _tid_of(r.get("url"))
         metrics = dict(r.get("metrics") or {})
-        metrics.update(agree_to_metrics(agrees.get(tid)))
+        metrics.update(detail_to_metrics(details.get(tid)))
         out.append({"platform": "tieba", "origin_url": url,
                     "title": _clean(r.get("snippet") or "")[:255],
                     "author": str(r.get("name") or "")[:64],

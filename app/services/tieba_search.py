@@ -108,6 +108,8 @@ def _pub_ts(raw: object) -> int:
 
 def _row(obj: object, keyword: str, detail: dict | None) -> dict | None:
     """`SearchGlobal`(+ 首楼详情)→ 统一记录形状(与 `mediacrawler_source._parse_record` 对齐)。"""
+    from app.services.tieba_metrics import detail_to_metrics
+
     tid = str(getattr(obj, "tid", "") or "").strip()
     if not tid:
         return None
@@ -123,16 +125,18 @@ def _row(obj: object, keyword: str, detail: dict | None) -> dict | None:
     metrics: dict[str, int] = {}
     if replies > 0:
         metrics["comment_count"] = replies
-    agree = (detail or {}).get("agree")
-    if isinstance(agree, int) and agree > 0:
-        metrics["liked_count"] = agree          # ★ 白拿的:取全文那一次顺带回来的
+    # ★ 全帖指标(2026-11-25):浏览量/回复/分享/收藏/全帖点赞 —— 都在取首楼那次
+    #   `get_posts` 的 `thread` 段里,**白拿**。详情里的回复数比搜索的 `post_num`
+    #   更接近实时 ⇒ 让它覆盖(实测同一帖 14275 vs 14276,只差一两条)。
+    got = detail_to_metrics(detail)
+    metrics.update(got)
     return {"uid": str(getattr(obj, "author_id", "") or ""),
             "name": name[:64],
             "url": f"https://tieba.baidu.com/p/{tid}",
             "snippet": " ".join(dict.fromkeys(p for p in (title, excerpt) if p))[:255],
             "pan_link": (links[0] if links else "")[:500],
-            # ⚠️ 贴吧**没有转发数**;列成 0 是为兼容老列(int 没有 None 这个取值)
-            "share_count": 0,
+            # ⚠️ 贴吧的"分享"≠ 转发(没有转发概念);取不到时仍是 0 兼容老列
+            "share_count": int(got.get("share_count", 0)),
             "metrics": metrics,                 # 交给 conversion 算曝光
             "keyword": keyword,
             # ★ 比 MediaCrawler 那条**多**给的:发帖时间(新鲜度的真值)
