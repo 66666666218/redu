@@ -698,11 +698,16 @@ def library_search_word(title: str, limit: int = 16) -> str:
     text = text.strip(_PUNCT)
     if len(text) < 4:
         return ""                                         # 太短搜不出东西(与群那条同口径)
-    from app.services.xunlei_group import is_bulk_resource
+    from app.services.xunlei_group import is_bulk_resource, is_solicit_title
 
     # 泛化大包名(最全文件/XX合集)当搜索词只会招来噪音 —— 闸门**共用**群那条路的词表,
     # "这条资源名太泛、指不到具体东西"是同一件事,只该有一份定义(见 `is_bulk_resource`)。
-    return "" if is_bulk_resource(text) else text
+    #
+    # ★★ **招揽话术不能当搜索词**(2026-11-25):群里的广告帖(「视频帮发，壹天三位数」)
+    # 被真转存后进了资源库词表,于是五个 presence 板块 + 抖音线索 + 知乎**一起拿它去搜**,
+    # 搜回广告本身再推给客户。闸门放在这里 = 上述全部消费方**一次全挡**
+    # (它们都经 `library_search_word` 出词)。判据与理由见 `xunlei_group.is_solicit_title`。
+    return "" if is_bulk_resource(text) or is_solicit_title(title) else text
 
 
 def _resource_key(name: str) -> str:

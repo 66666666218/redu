@@ -727,6 +727,22 @@ def push_items(items: list[dict], settings, detail: dict | None = None,
                 detail[plat] = "AI 筛后无内容"
             continue
         group = _ai.items
+        #: ★★ **招揽话术最后一道闸**(2026-11-25 事故):今天 bilibili 仍把
+        #: 「注意！避免和谐看这里」推给了客户。搜索词闸门(`library_search_word`)只挡得住
+        #: "**拿库里的名字去搜**"那条路 —— 而微博/贴吧这类**平台自己返回的帖子标题**
+        #: 根本不经过它。⇒ 在**推送出口**再挡一次,一次覆盖这条链的全部 6 个板块。
+        from app.services.xunlei_group import is_solicit_title
+
+        _kept = [it for it in group
+                 if not is_solicit_title(f"{it.get('name') or ''} {it.get('title') or ''}")]
+        if len(_kept) != len(group):
+            logger.info("presence %s:挡下 %d 条招揽/加群话术(不推给客户)",
+                        led_sec, len(group) - len(_kept))
+            if not _kept:
+                if detail is not None:
+                    detail[plat] = "全是招揽话术"
+                continue
+            group = _kept
         #: ★★ **跨板块标注**(2026-11-25,用户拍板「做降级标注」):同一份资源在**别的板块**
         #: 72h 内推过就标出来,**照推不拦** —— 「丢资源比重复推一遍严重得多」。
         #: 近 7 天实测:带盘 1106 行里同一盘链进了 **≥2 个板块**的有 94 个盘链,

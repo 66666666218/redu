@@ -253,6 +253,21 @@ def test_library_search_word_drops_generic_and_short() -> None:
     assert cp.library_search_word("") == ""
 
 
+def test_library_search_word_drops_solicit_titles() -> None:
+    """★ 招揽话术**绝不能**变成搜索词(2026-11-25 事故)。
+
+    根因链:群里的广告帖被真转存 ⇒ 进 `recent_source_names` 词表 ⇒ 这里把它当资源名
+    ⇒ presence 五板块 + 抖音线索 + 知乎**一起拿它去搜** ⇒ 搜回广告本身 ⇒ 推给客户。
+    闸门放在这里 = 全部消费方**一次全挡**(它们都经这个函数出词)。
+    判据与转存闸门同源(`xunlei_group.is_solicit_title`)。
+    """
+    assert cp.library_search_word("视频帮发，壹天三位数") == ""
+    assert cp.library_search_word("注意！避免和谐看这里") == ""
+    assert cp.library_search_word("🔥防失联 加群") == ""
+    # 真资源照旧出词(闸门不能把正常资源也挡死)
+    assert cp.library_search_word("高分韩剧《末路兼职》")
+
+
 def test_search_zhihu_raises_on_rate_limit_instead_of_empty(monkeypatch) -> None:
     """⚠️ 被限流必须**抛**,不能返回空列表冒充"没有结果"。
 

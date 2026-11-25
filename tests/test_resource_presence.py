@@ -37,6 +37,7 @@ class _S:
     presence_names = 3
     feishu_webhook_xiaohongshu = "https://example.com/xhs"
     feishu_webhook_kuaishou = "https://example.com/ks"
+    feishu_webhook_bilibili = "https://example.com/bili"
     feishu_webhook = ""
     feishu_secret = ""
     presence_enabled = True
@@ -149,6 +150,37 @@ def test_push_items_cards_per_platform(monkeypatch) -> None:
     ks_card = next(c for h, c in sent if h == "https://example.com/ks")
     assert "pan." not in str(ks_card)                        # 库里没有就**不许**有链
     assert "源未给链接" in str(ks_card), "源没给链接也要如实说,别装成有"
+
+
+def test_push_items_drops_solicit_titles_at_the_exit(monkeypatch) -> None:
+    """★ 招揽帖到**推送出口**必须再挡一次(2026-11-25 事故)。
+
+    今天 bilibili 仍把「注意！避免和谐看这里」推给了客户。`library_search_word` 那道
+    闸只能挡"拿库里名字去搜"的路 —— 微博/贴吧这类**平台自己返回的帖子标题**不经过它。
+    ⇒ 出口这道闸是**唯一能覆盖全部 6 个板块**的地方。
+    """
+    from app.services import feishu_client
+
+    sent = []
+
+    class _C:
+        def __init__(self, webhook, secret):
+            self.hook = webhook
+
+        def send_card(self, card):
+            sent.append((self.hook, card))
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+    ok = rp.push_items([
+        {"name": "注意！避免和谐看这里", "platform": "bilibili", "label": "B站", "count": 2,
+         "samples": [], "sample_urls": [], "link": {}},
+        {"name": "花少2人格测试", "platform": "bilibili", "label": "B站", "count": 1,
+         "samples": [], "sample_urls": [], "link": {}},
+    ], _S())
+    assert ok is True and len(sent) == 1, "招揽行不该上卡"
+    assert "避免和谐" not in str(sent[0][1])
+    assert "花少2人格测试" in str(sent[0][1])
 
 
 def test_push_items_says_why_link_is_empty(monkeypatch) -> None:

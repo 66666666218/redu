@@ -1,3 +1,45 @@
+- [2026-11-25 23:42] FIX: 招揽/加群话术被当资源推给客户 —— 四处入口 + 转存/推送双重闸门
+  客户群里**真的收到过**「视频帮发，壹天三位数」「注意！避免和谐看这里」「👀剧，走失不迷路+v❤」。
+  近 30 天台账 8788 行里 24 行是招揽帖(11-25 当天仍在大面积发生)。
+
+  ## ★ 根因(结构性:一条广告帖能绕完整个管线)
+  迅雷群里的广告帖 `kind` 也是 `drive#folder`(真分享目录)、体积只有几十 KB ⇒
+  体积闸/泛词闸/kind 判据**一个都挡不住** ⇒ 被**真转存** ⇒ 进资源库
+  `recent_source_names()` 词表 ⇒ 被 `library_search_word()` 当资源名 ⇒
+  presence 五板块(小红书/快手/贴吧/B站/微博)+ 抖音线索 + 知乎**一起拿它去搜** ⇒
+  搜回广告本身 ⇒ 推给客户。另一条路:盘满时「源链直推」**绕过转存闸门**,原样推给客户。
+  第三、四条路:presence(微博/贴吧)与知乎的标题来自**平台搜索结果**,根本不经过
+  `library_search_word` ⇒ 只在取词处挡是挡不住的。
+
+  ## 判据(新函数 `xunlei_group.is_solicit_title`,**单一事实源**)
+  ⚠️ 不能复用 `quark_dup.is_promo_name`:它是按**盘内文件名**写的(「切勿卸载」等),
+  9 个群标题样本只命中 1 个 —— 群分享标题是另一套话术。
+  三层判据,**9141 条真标题回放标定**(已转存群标题 + 近全量推送标题 + 公众号标题):
+    · `_AD_STRICT`  真资源名不可能含(帮发/三位数/日入/微信号形态)⇒ 一票否决;
+    · `_AD_WEAK`    需与「钱/量」语境**同现**(`《末路兼职》` 只有「兼职」,放过);
+    · `_AD_B_STRICT` 只在**标题主体**(剥括号 + 去前导)成立 —— 「先保存 防河蟹」挂在
+      **真剧名**后面是正常后缀(`强娶（更至42集）先保存 防河蟹`),必须放过;
+    · `_AD_FILLER`   口水/类别词,削掉后**什么都不剩**才算「整名就是广告」
+      (这是「🥩🥩速存🚗」与「斗破苍穹…高清4K（速存）」的分界线)。
+  回放结果:**判死 44 条**、24 条「必须放过的真资源」**零误杀**。
+
+  ## 闸门落点(四道,互相不依赖)
+  1. `xunlei_group.admit_transfer`:招揽帖**不转存**(不可重试 —— 它不是资源)。
+  2. `xunlei_group._try_source_push`:盘满源链直推时**再挡**(那条路绕过第一道)。
+  3. `xunlei_group.push_new_shares` / `resource_presence.push_items` /
+     `pan_discovery.push_items`(知乎):**推送出口**再挡 —— 这是唯一能覆盖
+     「平台自己返回的标题」与「AI 筛选失败时全放行」的地方。
+  4. `cross_accounts.library_search_word`:词表出口挡 —— 一次覆盖 presence/抖音线索/知乎取词。
+
+  ## 测试
+  · `test_xunlei_group.py`:19 条真实招揽帖必判死 + 19 条边界真资源必放过 + admit 闸门;
+  · `test_cross_accounts.py`:取词闸门;
+  · `test_resource_presence.py`:推送出口挡招揽行。
+  全套 **3734 passed, 1 skipped**。
+  (Files: app/services/xunlei_group.py, app/services/cross_accounts.py,
+   app/services/resource_presence.py, app/services/pan_discovery.py,
+   tests/test_xunlei_group.py, tests/test_cross_accounts.py, tests/test_resource_presence.py)
+
 - [2026-11-25 22:41] FIX: 闲鱼实时告警 11-19 起归零的真因 —— 批口径按 created_at 分批(不是阈值)
   用户口径「闲鱼调整到最优」。排查后确认:`jump` 阈值不是主因,`_batches` 对闲鱼的**分批方式**才是。
   ## ★ 根因(结构性,不是调参能救的)

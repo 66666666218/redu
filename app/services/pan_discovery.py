@@ -1495,6 +1495,17 @@ def push_items(items: list[dict], settings, session=None, user_id: int = 0) -> b
     if not _ai.items:
         return False
     items = _ai.items
+    #: ★★ **招揽话术最后一道闸**(2026-11-25 事故):知乎这条链的标题来自**平台搜索结果**,
+    #: 不经过 `library_search_word`。近 30 天台账里知乎推过 17 行广告帖(全板块最多),
+    #: 例如「《末路兼职》…免费在线观看」这种夹带刷屏词的长标题。判据与转存闸门同源。
+    from app.services.xunlei_group import is_solicit_title
+
+    _kept = [it for it in items if not is_solicit_title(str(it.get("title") or ""))]
+    if len(_kept) != len(items):
+        logger.info("知乎:挡下 %d 条招揽/加群话术(不推给客户)", len(items) - len(_kept))
+    items = _kept
+    if not items:
+        return False
     #: ★ **客户第一眼要的答案**(2026-10-29):这一批发出去的全部**可直接取用**,还分落在哪个盘。
     from collections import Counter as _Counter
 

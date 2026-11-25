@@ -37,6 +37,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta
 
 import requests
@@ -360,6 +361,116 @@ def is_bulk_resource(name: str) -> bool:
     return any(w in (name or "") for w in BULK_WORDS)
 
 
+# ---------------------------------------------------------------- 招揽话术闸门
+#
+# ★ 为什么需要它(2026-11-25):客户群里**真的收到过**「视频帮发，壹天三位数」「注意！避免和谐
+#   看这里」这类**招揽/广告帖**。链路是:迅雷群里的广告帖被**真转存**了 ⇒ 进
+#   `resource_library.recent_source_names()` 的词表 ⇒ 被 `library_search_word()` 当成资源名 ⇒
+#   五个 presence 板块 + 抖音线索 + 知乎一起拿它去搜 ⇒ 搜回广告本身 ⇒ 推给客户。
+#
+# ⚠️ **不能复用 `quark_dup.is_promo_name`**:那是按**盘内文件名**写的判据(「切勿卸载」
+#   「后续资源会同步更新」),实测 9 个群标题样本只命中 1 个 —— 群分享标题是另一套话术。
+#
+# 判据靠 **9141 条真标题回放标定**(已转存的迅雷群标题 + 近全量推送标题 + 公众号标题):
+# 判死 44 条、20 条「必须放过的真资源」全部零误杀。三个层次:
+#   · `_AD_STRICT_*`  真资源名不可能含的**招揽词/微信号** ⇒ 一票否决;
+#   · `_AD_B_STRICT`  只在**标题主体**(剥括号 + 去前导)成立 —— 「先保存 防河蟹」挂在**真剧名**
+#     后面是正常后缀(`强娶（更至42集）先保存 防河蟹`),必须放过;
+#   · `_AD_FILLER`    纯口水/语气/类别词 —— 削掉它们之后**什么都不剩**才算"整名就是广告"。
+#     (这正是「🥩🥩速存🚗」与「斗破苍穹剧场版 高清4K（速存）」的分界线。)
+_AD_PAREN = re.compile(r"[（(【\[][^)）】\]]*[)）】\]]")
+_AD_LEAD = re.compile(r"^[\s\W\d_.\U0001F300-\U0001FAFF☀-➿️]+")
+_AD_PUNCT = re.compile(r"[\s\W\d_.]+", re.UNICODE)
+
+#: 真资源名不可能含 —— 招揽词本身
+_AD_STRICT = ("帮发", "帮發", "招代发", "代发兼职", "代发助手", "代发日入", "代发赚",
+              "三位数", "叁位数", "日入过", "日入百", "日入千", "每天多杯奶茶")
+#: 弱词:必须与「钱/量」语境**同现**才成立(`高分韩剧《末路兼职》` 只有「兼职」,不是招揽)
+_AD_WEAK = ("代发", "代發", "兼职", "真实有效", "招人", "招代理", "招募")
+_AD_MONEY = ("三位数", "叁位数", "日入", "赚米", "一天", "每天", "元", "¥", "工资", "佣金",
+             "零撸", "撸")
+#: 整名就是某个弱词(`兼职` 这种)
+_AD_WEAK_EXACT = ("兼职", "代发", "代發", "招人", "招代理", "招募", "帮发")
+#: 微信号形态(`+v❤ Zy2343cray` / `➕ Zy2343cray`)—— 真资源名不会有
+_AD_WECHAT = re.compile(
+    r"(?:[➕＋]\s*[A-Za-z][A-Za-z0-9]{5,})"
+    r"|(?:[+＋]\s*[vV抖微薇][❤💖]?\s*[A-Za-z][A-Za-z0-9]{5,})")
+#: B 组:剥括号后仍在主体里 → 看"削干净之后还剩不剩资源名"
+_AD_B_STRICT = ("防失联", "防河蟹", "防和谐", "避免和谐", "容易和谐", "防丢失",
+                "不走丢", "收藏不迷路", "大汇总", "保存到自己网盘")
+#: 兜底:没有 B 组强标记,但整名只剩这些裸大包词(`🥩🥩速存🚗` / `10.24限时大饭饭 速存`)
+_AD_FALLBACK = ("速存", "大汇总", "防失联", "防和谐", "防河蟹", "防丢失", "不走丢")
+#: 口水/语气/类别词(削完剩下什么才是资源名)
+_AD_FILLER = (
+    "注意", "看这里", "请看这里", "这里", "速存", "加群", "进群", "加",
+    "不迷路", "不麋鹿", "先转存再观看", "先保存", "先转存", "重复进", "不要重复",
+    "不可抗因素", "无", "不要", "最近", "迅雷", "热门", "电视剧", "综艺", "电影", "影视",
+    "一定要", "必须", "记得", "大家", "请", "然后", "再", "和", "与", "及", "都", "也", "就",
+    "第一时间", "持续", "每日", "每天都", "来看", "更多",
+    "热播", "漫剧", "交流", "获取", "更新", "以防", "链接", "失效",
+    "备用", "后续", "好物", "回家地址", "类", "等", "个文件", "在", "这",
+    "裙", "Q裙", "群", "被", "奶茶", "违规", "速度", "查", "解散", "换", "进",
+    "很", "多", "强制", "同时", "作为", "又", "了", "png", "jpg", "jpeg", "pdf",
+    "Q", "限时", "饭饭", "浮力", "夜宵", "目前", "自取", "喜欢", "顶一贴",
+    "扣", "哈", "宝们", "赏", "整理不易",
+)
+
+
+def _ad_residue(text: str) -> str:
+    """把招揽话术/口水词削掉,剩下的就是"资源名"(空/1 字 = 没有资源名)。"""
+    s = text
+    for w in sorted(set(_AD_B_STRICT) | set(_AD_FILLER), key=len, reverse=True):
+        s = s.replace(w, " ")
+    return _AD_PUNCT.sub("", s)
+
+
+def is_solicit_title(title: str) -> bool:
+    """标题是否是**招揽/加群/引流话术**(而不是一份真资源)。
+
+    用法:凡是**把标题当资源名用**的地方(搜索词、推送卡片标题)都要过它 ——
+    这类帖子的`kind` 也是 `drive#folder`(真分享目录),**不能按 kind 区分**。
+    """
+    raw = str(title or "")
+    if not raw.strip():
+        return False
+    if any(f in raw for f in _AD_STRICT):
+        return True
+    if any(f in raw for f in _AD_WEAK) and any(m in raw for m in _AD_MONEY):
+        return True
+    if _AD_WECHAT.search(raw):
+        return True
+    if _AD_PUNCT.sub("", raw) in _AD_WEAK_EXACT:
+        return True
+
+    body = _AD_LEAD.sub("", _AD_PAREN.sub("", raw))
+    body_ns = re.sub(r"\s+", "", body)
+    if not body_ns:
+        # 整名都在括号里(如「🔥防失联+👗不麋鹿💕」剥完只剩表情)→ 退回原名判
+        body_ns = _AD_PUNCT.sub("", _AD_LEAD.sub("", raw))
+        if not body_ns:
+            return False
+
+    hit_b = [f for f in _AD_B_STRICT if f in body_ns]
+    if not hit_b:
+        # 兜底档:裸大包词 + 削干净什么都不剩
+        if any(f in body_ns for f in _AD_FALLBACK) and len(_ad_residue(body_ns)) <= 1:
+            return True
+        # B 词只在**括号里**(「Q裙漫剧交流（防失联）」):剥括号看不见,但主体削完也不剩东西
+        if any(f in raw for f in _AD_B_STRICT) and len(_ad_residue(body_ns)) <= 1:
+            return True
+        return False
+
+    # B 词在主体里:先看它**前面**是不是真作品名(`强娶（更至42集）先保存 防河蟹`)。
+    # ⚠️ 但「🔥热门剧 防失联」的「剧」是泛词 —— 削掉泛词后什么都不剩 ⇒ 仍是招揽。
+    first = min(body_ns.index(f) for f in hit_b)
+    pre = _ad_residue(body_ns[:first])
+    if any(w in body_ns[:first] for w in ("集", "剧", "季", "部", "话", "章")):
+        if len(pre) > 1 and pre not in ("都在", "都在这"):
+            return False
+    # 削干净之后还有真名 ⇒ 真资源;什么都不剩 ⇒ 整名就是招揽
+    return len(_ad_residue(body_ns)) <= 1
+
+
 _UNSET = object()          # 区分"没传 ratio"与"传了 None(= 不知道)"
 
 #: **源链直推**的窗口判据(2026-11-23)。窗口内已直推过的行不再推 ——
@@ -479,6 +590,13 @@ def admit_transfer(name: str, cred: dict | None = None, settings=None,
         return False, f"盘快满了(已用 {ratio * 100:.0f}%,阈值 {limit * 100:.0f}%),先清理再搬", True
     if is_bulk_resource(name):
         return False, "泛化大包(名字含合集/大全/最全…),体积不可控,只推链不搬", False
+    #: ★★ **招揽/加群话术不搬**(2026-11-25):这类帖的 `kind` 也是 `drive#folder`,
+    #: 体积常常只有几十 KB —— 闸门靠体积/泛词一个都挡不住。而一旦搬进来,它就会顺着
+    #: 「已转存 → `recent_source_names` 词表 → `library_search_word`」这条链变成搜索词,
+    #: 再被五个板块搜回来推给客户(客户确实收到过「视频帮发,壹天三位数」)。
+    #: 同属**策略性不搬**(不可重试):它不是资源,搬一百次也不会变成资源。
+    if is_solicit_title(name):
+        return False, "招揽/加群话术(不是资源),不搬也不推", False
     return True, "", False
 
 
@@ -701,6 +819,12 @@ def transfer_pending(session, user_id: int, limit: int = 5, settings=None) -> di
         #: ⚠️ **本批已经搬成的行不算候选**:它已经有我方链了,再推一遍源链是重复。
         if str(row.status or "") != "pending":
             return False
+        #: ★★ **招揽话术的源链也不推**(2026-11-25):盘满时走的是"直接给群主原链"这条路,
+        #: 它**绕过了 `admit_transfer`**(那不是转存闸门)⇒ 不在这里再挡一次,广告帖会从
+        #: 另一条路照推给客户。判据与转存闸门同源(`is_solicit_title`)。
+        if is_solicit_title(row.title):
+            source_skipped += 1
+            return False
         if _src_budget <= 0:
             source_skipped += 1
             return False
@@ -900,6 +1024,22 @@ def push_new_shares(items: list[dict], settings, session=None, user_id: int = 0)
     if not _ai.items:
         return False
     items = _ai.items
+    #: ★★ **招揽话术最后一道闸**(2026-11-25):这条链的入口有两条(`transfer_pending` 的
+    #: 已转存行 + 盘满时的源链直推),两条都已在源头挡过;但 AI 筛选是**旁路**的
+    #: (`ai_filter` 失败时**全放行**),而"盘满直推"还有手动接口那条路 —— 与其赌
+    #: 每个入口都记得调,不如在**唯一出口**再挡一次(客户收到的就是这里发出去的)。
+    _n_ad = 0
+    _kept = []
+    for it in items:
+        if is_solicit_title(str(it.get("title") or "")):
+            _n_ad += 1
+            continue
+        _kept.append(it)
+    if _n_ad:
+        logger.info("迅雷群资源:挡下 %d 条招揽/加群话术(不推给客户)", _n_ad)
+    items = _kept
+    if not items:
+        return False
 
     #: ★ **推送去重**(2026-11-23):这条链此前**一处都没接**台账(全仓只有
     #: `push_ledger.record` 零处、`drop_recent` 零处)⇒ 盘满直推后同样的源链

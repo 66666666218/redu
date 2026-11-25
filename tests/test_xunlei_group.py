@@ -406,6 +406,84 @@ def test_admit_transfer_allows_when_ratio_unknown() -> None:
     assert ok is True
 
 
+# ---------------------------------------------------------------- 招揽话术闸门
+
+#: 客户群**真的收到过**的招揽帖(真实推送台账/群分享里的原串)—— 一条都不许漏。
+_SOLICIT_REAL = (
+    "视频帮发，壹天三位数",
+    "视频帮發，壹天三位数",
+    "视频帮发，一天＆三位数👀",
+    "找帮发，每天三位数❗❗❗真实有效❗",
+    "06 兼职每天一杯奶茶喝不完",
+    "注意！避免和谐看这里",
+    "注意！避免和谐看这里（先转存再观看）",
+    "先转存再观看，避免和谐",
+    "🔥防失联 加群",
+    "🔥防失联➕👗不迷路",
+    "Q裙漫剧交流（防失联）",
+    "🥩🥩🥩都在这（防失联）",
+    "因不可抗因素，防和谐，请看这里",
+    "迅雷又在查违规了 速度进群防河蟹",
+    "防丢失➕ Zy2343cray",
+    "⭐️一定要保存到自己网盘",
+    "🥩🥩速存🚗",
+    "10.24限时大饭饭 速存",
+    "兼职",
+)
+
+#: 回放里**必须放过**的真资源(每个都是"差一点被误杀"的边界样本)。
+_SOLICIT_GUARD_OK = (
+    "强娶（更至42集）先保存 防河蟹",          # 真剧名 + 广告后缀(后缀在主体后半)
+    "z 男室友（先保存 防河蟹",
+    "《今天是太阳雨》4K高清完整版",
+    "高分韩剧《末路兼职》",                    # 「兼职」但不是招揽
+    "最新！黄仁勋辞职后加盟香港科技大学，担任兼职教授",
+    "注意电动车安全",                          # 「注意」单独不成立
+    "不会解压的看这里❗",
+    "144.备用联系人",
+    "加群里的语音",
+    "进群众路线",
+    "🎮🔧资源合集（以防和谐，请先保存）💕",    # B 词只在括号,主体削完还剩「资源合集」
+    "Z中香（未删减）+原著小说(速转存防和谐)",
+    "C 穿成短命炮灰，我靠贴贴反派续命(三皇子萧烬)先保存防和谐",
+    "斗破苍穹剧场版 双帝之战 高清4K（速存）",   # 「速存」在括号,主体有真名
+    "朝朝入梦马车海外真🈚️雾版！镜子（补，速存）",
+    "26法考zh主观资料更新法条定位四科速存！",
+    "分享一下这本小说【病美人三步一喘！竹马摇尾抱回家】 资源获取",
+    "《纸yuan鸢》1-133 （番外5-8 正式完结了 ）先保存 防河蟹",
+)
+
+
+def test_is_solicit_title_catches_the_ones_that_reached_customers() -> None:
+    """**客户真的收到过**的那些招揽帖,一条都不许再漏(2026-11-25 事故)。"""
+    missed = [t for t in _SOLICIT_REAL if not xg.is_solicit_title(t)]
+    assert missed == [], f"漏判的招揽帖: {missed}"
+
+
+def test_is_solicit_title_never_kills_real_resources() -> None:
+    """⚠️ **误杀真资源比漏判更糟** —— 这些是从 9141 条真标题回放里挑出的边界样本。"""
+    killed = [t for t in _SOLICIT_GUARD_OK if xg.is_solicit_title(t)]
+    assert killed == [], f"误杀的真资源: {killed}"
+
+
+def test_is_solicit_title_ignores_empty() -> None:
+    assert not xg.is_solicit_title("")
+    assert not xg.is_solicit_title(None)
+
+
+def test_admit_transfer_blocks_solicit_even_when_space_ok() -> None:
+    """招揽帖不是资源:空间够也不搬(搬进来就会变成搜索词再搜回广告)。
+    ⚠️ 不可重试 —— 它不是"暂时搬不动",是**永远不该搬**。"""
+    ok, why, retryable = xg.admit_transfer("视频帮发，壹天三位数",
+                                           settings=_GateSettings(), ratio=0.3)
+    assert ok is False and "招揽" in why
+    assert retryable is False
+    # 真资源照旧放行(不能因为加了闸门就把正常转存挡死)
+    ok, _, _ = xg.admit_transfer("强娶（更至42集）先保存 防河蟹",
+                                 settings=_GateSettings(), ratio=0.3)
+    assert ok is True
+
+
 def test_transfer_pending_marks_skipped_instead_of_transferring(session, monkeypatch) -> None:
     """闸门挡下的行标 `skipped` 并留原因,**不调用转存**;剩下的照常处理。"""
     from app.services import xunlei_transfer as xt
