@@ -117,6 +117,40 @@ def test_登记死链后快照能判死_复活后自愈(session) -> None:
     assert not plh.DeadLinks(session, 1).is_dead(url)
 
 
+def test_同一分享被多个标题复用_只登记一行且不撞唯一约束() -> None:
+    """★ 2026-11-26 修的真缺陷:同一条链在一轮体检里被判死多次,commit 时撞 UNIQUE。
+
+    `get_session_local` 是 `autoflush=False` ⇒ `add()` 之后 `select()` **看不见**那一行。
+    而一条分享挂过 68 个标题是常态 ⇒ 每次"查不到 → 新建" ⇒ commit 撞
+    `UNIQUE(user_id, platform, share_key)` ⇒ **整批回滚、当天死链登记全丢**,
+    日志里只有一条 WARN。实测 11-25 与 11-26 两天各丢了一整轮。
+
+    ⚠️ 必须用 `autoflush=False` 建会话 —— 这正是生产的方言;默认 `autoflush=True`
+    的替身会把这个缺陷**洗绿**(见 `test-double-drift-and-safe-editing`)。
+    """
+    from sqlalchemy import text
+
+    from app.services import pan_link_health as plh
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine, autoflush=False, autocommit=False,
+                      expire_on_commit=False)()
+
+    url = "https://pan.quark.cn/s/multi_title"
+    for _ in range(3):                       # 一条链 → 3 个标题
+        assert plh.mark_dead(db, 1, url, "41031 分享者用户封禁") is True
+    db.commit()                              # ← 修之前这里抛 IntegrityError
+    assert db.execute(text("select count(*) from pan_link_health")).scalar() == 1
+    assert db.execute(text("select reason from pan_link_health")).scalar() == "41031 分享者用户封禁"
+
+    #: 第二轮(新一批标题复用同一条链)→ 更新同一行,不新增
+    assert plh.mark_dead(db, 1, url, "41011 分享地址已失效") is True
+    db.commit()
+    assert db.execute(text("select count(*) from pan_link_health")).scalar() == 1
+    assert db.execute(text("select reason from pan_link_health")).scalar() == "41011 分享地址已失效"
+
+
 def test_自愈不给健康链新建行(session) -> None:
     """健康链是绝大多数 —— `mark_alive` 只清标记,不凭空写行(否则表白撑大)。"""
     from app.services import pan_link_health as plh

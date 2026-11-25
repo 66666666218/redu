@@ -200,23 +200,62 @@ class DeadLinks:
         return bool(self._keys)
 
 
+#: 会话备忘键:本会话里**已 `add()` 但还没 flush** 的登记行,按 `(user, plat, key)` 索引。
+_PENDING_KEY = "pan_link_health.pending_rows"
+
+
+def _pending(session: Session) -> dict[tuple[int, str, str], object]:
+    """本会话里**已 add 但尚未 flush** 的登记行。
+
+    ## 为什么需要它(2026-11-26 修的缺陷)
+    会话是 `autoflush=False`(见 `db.database.get_session_local`),`session.add()` 之后
+    **`select()` 看不见那一行**。而**同一条分享被多个标题复用是常态**
+    (实测一条挂过 68 个标题)⇒ `link_audit` 一轮里会对同一 share_key 调多次 `mark_dead`
+    ⇒ 每次都"查不到 → 新建" ⇒ commit 时撞
+    `UNIQUE constraint failed: pan_link_health.user_id/platform/share_key`
+    ⇒ **整批回滚,当天所有死链登记全丢**,日志里只有一条 WARN。
+    实测:11-25、11-26 两天的 link_audit 各自丢掉全部登记(表里只剩 11 行,
+    而夸克1号一个账号就有 6596 条死分享)。
+
+    ⚠️ **不用 `session.flush()` 把它们逼出来**:一轮体检是逐条探活的网络慢活,
+    flush 会把 **SQLite 写锁抱过整段慢活**(本仓那条"新加的写点会把锁抱到慢活结束")。
+    内存里记一笔就够 —— 落库仍然是外层 `commit()` 的事。
+    """
+    memo = session.info.get(_PENDING_KEY)
+    if memo is None:
+        memo = {}
+        session.info[_PENDING_KEY] = memo
+    return memo
+
+
 def mark_dead(session: Session, user_id: int, url: str, reason: str, *,
               account_key: str = "", commit: bool = False) -> bool:
     """登记一条**已一手探实**的死链。幂等:已死只更新原因与时刻。返回是否落库。"""
+    from sqlalchemy.orm import object_session
+
     from app.db.models import PanLinkHealth
 
     plat, key = share_key_of(url)
     if not plat or not key:
         return False
     try:
-        row = session.scalar(select(PanLinkHealth).where(
-            PanLinkHealth.user_id == user_id, PanLinkHealth.platform == plat,
-            PanLinkHealth.share_key == key))
+        ident = (user_id, plat, key)
+        memo = _pending(session)
+        row = memo.get(ident)
+        if row is not None and object_session(row) is not session:
+            #: 上一轮 rollback 把它 expunge 了 —— 备忘里的是僵尸,丢掉重查
+            memo.pop(ident, None)
+            row = None
+        if row is None:
+            row = session.scalar(select(PanLinkHealth).where(
+                PanLinkHealth.user_id == user_id, PanLinkHealth.platform == plat,
+                PanLinkHealth.share_key == key))
         now = datetime.now()
         if row is None:
             row = PanLinkHealth(user_id=user_id, platform=plat, share_key=key,
                                 checked_at=now)
             session.add(row)
+            memo[ident] = row
         row.url = str(url or "")[:500]
         row.dead_at = now
         row.reason = str(reason or "")[:200]

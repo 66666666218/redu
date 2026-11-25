@@ -1,3 +1,26 @@
+- [2026-11-26 07:31] FIX: 我方链存活登记整批回滚 —— 一条分享挂多个标题时撞 UNIQUE, 当天死链全丢
+  排查「还有什么需要修复」时从 `app.log` 抓到:11-25 与 11-26 两天的 `link_audit`
+  各刷了 7 条 `链接体检:存活登记提交失败`,全日志共 14 次。
+  ## ★ 根因(结构性)
+  `get_session_local` 是 **`autoflush=False`** ⇒ `session.add()` 之后 `select()` **看不见**那一行。
+  而「一条分享被多个标题复用」是常态(实测一条挂过 68 个标题),`link_audit` 一轮里会对
+  同一 `share_key` 多次 `mark_dead` ⇒ 每次都"查不到 → 新建" ⇒ commit 撞
+  `UNIQUE constraint failed: pan_link_health.user_id/platform/share_key`
+  ⇒ **整批回滚**。表里至今只有 **11 行**,而夸克1号一个账号就有 6596 条已判死的分享
+  —— 也就是说这个闸自 11-24 上线以来**基本没生效过**,客户照旧点开死链。
+  ## 改了什么
+  · `pan_link_health._pending()`:用 `session.info` 记「已 add 未 flush」的登记行,
+    `mark_dead` 先查备忘再查库。⚠️ **故意不用 `session.flush()`** —— 体检是逐条探活的
+    网络慢活,flush 会把 SQLite 写锁抱过整段(本仓那条「写点抱住慢活」)。
+  · 备忘里若拿到已 `expunge` 的僵尸行(上一轮 rollback),丢掉重查。
+  · `tests/test_pan_link_health`:新增回归用例,**用 `autoflush=False` 建会话**
+    —— 默认 `autoflush=True` 的替身会把这个缺陷洗绿(替身方言漂移的第四种变体)。
+  ## 复现与验证
+  修前:`mark_dead` 连调 3 次全返回 True,`commit()` 抛 IntegrityError,行数 0;
+  修后:同样 3 次 → commit 成功、**1 行**;第二轮换原因 → 更新同一行不新增;`mark_alive` 正常自愈。
+  `tests/test_link_audit.py` + `tests/test_pan_link_health.py` 共 47 项全绿。
+  ⚠️ **这份修复要先重启服务才生效**(进程是 11-25 14:04 起的,此后所有修复都不在进程里)。
+
 - [2026-11-25 23:42] FIX: 招揽/加群话术被当资源推给客户 —— 四处入口 + 转存/推送双重闸门
   客户群里**真的收到过**「视频帮发，壹天三位数」「注意！避免和谐看这里」「👀剧，走失不迷路+v❤」。
   近 30 天台账 8788 行里 24 行是招揽帖(11-25 当天仍在大面积发生)。
