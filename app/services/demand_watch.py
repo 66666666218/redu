@@ -1013,20 +1013,88 @@ def _upsert(db, user_id: int, name: str, demand: int, mention: int, video_hits: 
     return row
 
 
+#: 作品 URL → 事件 id。抖音是 `/video/<aweme>`、小红书是 `/explore/<note>`
+#: (`/discovery/item/` 是小红书的另一种老形状,一并认)。
+_EVENT_URL_RE = re.compile(r"/(?:video|explore|discovery/item)/([0-9A-Za-z]+)")
+
+
+def _event_key(row) -> str:
+    """这个名字是在**哪条作品**上被抽到的 —— 同一条作品上的多个名字是**同一个瓜**。
+
+    ★★ 2026-11-25 实测:`狗爹`(提74)/ `小桃`(提37)/ `狗爹小桃`(11)/ `换狗爹`(10)/
+    `狗爹身材`(9)/ `困困狗`(10) —— **六个名字全部来自同一条视频**
+    (`7710851964850384805`)。它们不是六个瓜,是**同一个瓜的六种叫法**;
+    按名字各自推卡,客户看到的是满屏重复的同一件事。
+    取不到出处时退回按名字分组(逐个独立),不把不同的瓜误并。
+
+    ⚠️ `samples` 是**最近一轮**的快照(`_upsert` 覆盖写),不是历史全量 ——
+    所以这里回答的是"它最近一次出现在哪条作品上",对"最近在说哪个瓜"够用。
+    """
+    try:
+        meta = json.loads(row.samples or "{}")
+    except (ValueError, TypeError):
+        meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+    for u in (meta.get("video"), *(meta.get("videos") or ())):
+        m = _EVENT_URL_RE.search(str(u or ""))
+        if m:
+            return m.group(1)
+    return f"name:{row.name}"
+
+
+def _is_fragment(row, group) -> bool:
+    """`row` 是不是组内某个**更短名字**的碎片?
+
+    判据:**短名是长名的子串,且短名出现得不少于长名**(`_drop_subsumed` 的反向用法)。
+    实测:`狗爹小桃`(11) 含 `狗爹`(74)、`换狗爹`(10) 含 `狗爹`(74)、
+    `狗爹身材`(9) 含 `狗爹`(74)、`喜欢小黄`(6) 含 `喜欢`(21) 与 `小黄`(15) ——
+    这四个都是"在一个真名字上加了个动词/名词",不是独立的名字。
+
+    ⚠️ 与抽取阶段的 `_drop_subsumed` **方向相反**,不要合并成一个函数:
+    那边丢的是"被句子切断的**短**碎片"(`林予` ⊂ `林予曦`),靠的是长名出现得一样多;
+    这里丢的是"在真名字上**加料**的**长**碎片"(`换狗爹` ⊃ `狗爹`),靠的是短名出现得更多。
+    同名之间的包含(`小桃` ⊂ `小桃身材`)两边都成立,结果一致,不冲突。
+    """
+    n = str(row.name or "")
+    m = int(row.mention_hits or 0)
+    for o in group:
+        on = str(o.name or "")
+        if o is row or len(on) < 2 or on == n or on not in n:
+            continue
+        if int(o.mention_hits or 0) >= m:
+            return True
+    return False
+
+
 def pick_pushable(rows, *, min_demand: int = 2, min_ones: int = 20,
                   cooldown_hours: int = 48, limit: int = 10,
                   min_mention: int = 6, max_age_days: int = 3,
+                  per_event: int = 2,
                   dropped: dict | None = None) -> list:
-    """够格且**冷却期外**的名字。按 (被求次数, 扣1数) 降序。
+    """够格、**冷却期外**,且**按事件合并**后最该推的名字。**新鲜度优先**。
 
     ★ 三条门槛满足**任意一条**就算够格(用户口径「判断是根据作品里面的**求和1**」):
       · 有人**求**(`demand_hits ≥ min_demand`);
-      · 或者**扣1跟帖够多**(`ones_hits ≥ min_ones`)—— 它说明这条被勾得很紧;
+      · 或者**扣1跟帖够多**(`ones_hits ≥ min_ones`);
       · 或者**评论区把它念了很多遍**(`mention_hits ≥ min_mention`,2026-11-06 新增)。
         这一类(`水子哥`×9 / `甜甜`×8)观众**根本没在"求"** —— 他们是在**议论这个人**,
         所以 `demand`/`ones` 都是 0,前两条永远不放行。实测这类视频恰恰是**大瓜**本身
         (某人塌方,评论区满屏叫他的名字),漏掉它等于漏掉整条链最想要的东西。
         ⚠️ 门槛设 6 而不是 3:重复 3 次的常常还是短语(`好可爱`),6 次以上才像真名。
+
+    ★★ **大瓜不能靠"名字已知"来准入**(2026-11-25 用户:「大瓜还是不能单纯的依赖名字,
+    因为大瓜要追求新鲜度肯定就是未知的名字」)。实测印证:37 个够格且新鲜的名字里,
+    只有 **1 个**(`第二季`)能在资源库/线索名里被印证;而真名字 `狗爹`/`小桃`/`困困狗`
+    **全部零印证** —— 它们正因为是**新的**,才没被库收录。所以那道"交叉验证"只能当
+    **加分项**,绝不能当准入闸。这里的准入靠**结构信号**:
+      ① `_event_key` **按作品合并** —— 同一条视频上的六个变体只占一个事件的名额;
+      ② `_is_fragment` 剔除"真名字加料"的长碎片;
+      ③ 每个事件最多 `per_event` 个名字(默认 2:一条视频里通常就一两个主角)。
+
+    ★★ **排序改成"首次出现新→旧"**(原来按累计量降序):累计量的排序下,
+    `后续`(首见 11-19)/`女主`(11-15)/`红果`(11-18) 这类**已经凉了的老名字**
+    永远压在新瓜前面 —— 实测 top10 里 7 个是首见 4~7 天前的。而大瓜的价值就在"新"。
 
     ⚠️ **加冷却**:本作业 4 小时一轮,不加冷却的话同一个名字一天会推 6 次 ——
     群里会把它当成噪音(`push_ledger` 那套冷却的同一个道理)。
@@ -1038,7 +1106,7 @@ def pick_pushable(rows, *, min_demand: int = 2, min_ones: int = 20,
     ⚠️ `last_seen_at` 为 `None`(**从没记录过**,理论上不会有)⇒ **放行**,不拿"不知道"当"凉了"。
     """
     now = datetime.now()
-    out = []
+    qualified = []
     too_old = 0
     for r in rows:
         demand = int(r.demand_hits or 0)
@@ -1055,11 +1123,36 @@ def pick_pushable(rows, *, min_demand: int = 2, min_ones: int = 20,
                 and (now - seen) > timedelta(days=int(max_age_days))):
             too_old += 1
             continue
-        out.append(r)
+        qualified.append(r)
+
+    #: ① 按**作品(事件)**分组;② 组内按提及数降序,先剔碎片再限名额。
+    groups: dict[str, list] = {}
+    for r in qualified:
+        groups.setdefault(_event_key(r), []).append(r)
+    cap = max(1, int(per_event))
+    out = []
+    fragments = overflow = 0
+    for _ev, group in groups.items():
+        group = sorted(group, key=lambda r: int(r.mention_hits or 0), reverse=True)
+        live = []
+        for r in group:
+            if _is_fragment(r, group):
+                fragments += 1
+            else:
+                live.append(r)
+        out.extend(live[:cap])
+        overflow += max(0, len(live) - cap)
+
     if dropped is not None:
         #: ⚠️ 拦了多少要显形 —— 否则「名字全凉了没得推」与「名字表空了」长得一样。
         dropped["name_stale"] = too_old
-    out.sort(key=lambda r: (int(r.demand_hits or 0), int(getattr(r, "ones_hits", 0) or 0),
+        #: ★ 事件合并/碎片剔除也是闸门,同样必须显形(2026-11-25):
+        #: 不写出来的话,"这一轮只推了 3 个"分不清是**没有新瓜**还是**全被合并了**。
+        dropped["name_fragment"] = fragments
+        dropped["name_event_cap"] = overflow
+
+    #: ③ 新鲜度优先:首见越新越靠前;同一批里按提及数。`first_seen_at` 缺失 ⇒ 垫底。
+    out.sort(key=lambda r: (getattr(r, "first_seen_at", None) or datetime.min,
                             int(r.mention_hits or 0)), reverse=True)
     return out[:max(0, int(limit))]
 
@@ -1623,7 +1716,13 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
                     "why": "求/1密度" if by_density else "重复评论",
                     "demand": demand_cnt, "ones": ones, "total": total})
         # ★ **名字主要来自作品标题**(用户:「基本上作品名都有资源名」);
-        # 而「扣1」的热度是**整条视频**级别的,归给这条视频标题里的名字。
+        # 而「扣1」的热度是**整条视频**级别的,归给这条视频里抽到的**所有**名字。
+        #: ★★ 2026-11-25 修:`a["ones"] += ones` 原来**只在书名号循环里**累加,而近期
+        #: 扫描的视频标题几乎不带《》 ⇒ 生产库 `demand_names` 328 行里 **326 行
+        #: `ones_hits` 恒为 0**(其余两行最大才 3),卡片上永远是「扣1 0 条」。
+        #: 而 `demand_min_ones=20` 是三条准入之一 —— 恒为 0 等于**这条准入从来没生效过**。
+        #: 现在两条分支都记,用 `credited` 去重(同一个名字既在标题又在评论里时只算一次)。
+        credited: set[str] = set()
         for tname in names_from_title(v.get("title") or ""):
             a = agg.setdefault(tname, {"demand": 0, "mention": 0, "video_hits": 0,
                                        "ones": 0, "title": 0, "heat": 0,
@@ -1634,6 +1733,7 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
             a["mention"] += 1
             a["ones"] += ones
             a["heat"] += heat
+            credited.add(tname)
             if not a["video"]:
                 a["video"] = url
         for name, rec in res["names"].items():
@@ -1644,6 +1744,10 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
             a["demand"] += rec["demand"]
             a["mention"] += rec["mention"]
             a["video_hits"] += 1
+            if name not in credited:
+                a["ones"] += ones
+                a["heat"] += heat
+                credited.add(name)
             #: 只要有一条视频里它是靠**句式**(书名号/「求 X」)抽到的,就不再是"纯重复词"
             if not rec.get("entity"):
                 a["entity_only"] = False
@@ -1725,6 +1829,7 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
         limit=int(getattr(settings, "demand_push_limit", 10) or 10),
         min_mention=int(getattr(settings, "demand_min_mention", 6) or 6),
         max_age_days=int(getattr(settings, "demand_name_max_age_days", 3) or 0),
+        per_event=int(getattr(settings, "demand_name_per_event", 2) or 2),
         dropped=name_stats)
     pushed = 0
     if chosen and push_card(chosen, settings):
@@ -1748,6 +1853,12 @@ def run_user(db, user_id: int = 1, settings=None) -> dict:
     #: 或者够格的**全都三天没再被人提起了**。不写出来就分不清闸门在拦还是在空转。
     if name_stats.get("name_stale"):
         detail += f" 名字凉{name_stats['name_stale']}"
+    #: ★ **事件合并/碎片剔除的条数也要显形**(2026-11-25):不加这两项的话,
+    #: 「这一轮只推了 3 个」分不清是**没有新瓜**、还是**同一个瓜的变体占满了名额**。
+    if name_stats.get("name_fragment"):
+        detail += f" 碎片{name_stats['name_fragment']}"
+    if name_stats.get("name_event_cap"):
+        detail += f" 同瓜超员{name_stats['name_event_cap']}"
     if errors:
         detail += f" 失败:{errors[0][:60]}"
     _record_run(db, user_id, "demand_watch",
@@ -2043,26 +2154,43 @@ def push_expand(items: list[dict], settings) -> bool:
         build_expand_card(items))
 
 
-#: **主题词** —— 用来区分"大瓜/资源"与"交流群/扩列群"(2026-10-30 数据暴露的问题)。
-#: 实测小红书的命中里 6/14 是 `英语学习群`/`扩列群`/`聊天`/`招聘` 这类**纯社交群**,
-#: 求/1 密度一样高,但**不是大瓜**。这里只做**记录**,不改变推送 ——
-#: 先攒"主题相关命中率",再用数据决定要不要拿它当闸门。
-_TOPIC_WORDS = ("瓜", "八卦", "爆料", "塌房", "资源", "网盘", "剧", "视频", "网红", "主播",
-                "合集", "电影", "动漫", "漫画", "小说", "图")
-#: 纯社交群的标志词(出现这些且没有主题词 ⇒ 判为非主题)
+#: 纯社交群/招募帖的标志词。**命中就判非主题,哪怕标题里带「瓜」「八卦」**
+#: (2026-11-25 实测:原来的"主题词优先"放过了 25/59 条群招募帖)。
 #: ⚠️ `裙` 必须单列(2026-11-08 实测):小红书为了避审核把「群」写成「裙」,
 #: `完全女儿国来的,裙里女生超多` 因此**漏过了社交词判定**、被判成主题相关。
 #: `搭子/扩列/互赞` 同理,是"找搭子"帖的高频词,与大瓜/资源无关。
+#: ★ 2026-11-25 补的**招募语**(逐条看过实测标题才加,不是拍脑袋):
+#: `互助`(互帮互助啦/正能量互帮互助/车队互助)、`招募`(招募：互帮互助,一起成长)、
+#: `仅限`(仅限姐妹!)、`兼职`/`找工作`(大学副业兼职,找工作)、`大队`(又想进吃🍉大队的么
+#: —— 它用「大队」回避了「群」)。
+#: ⚠️ **故意不放 `加入`**:实测真瓜标题也会写「欢迎所有爱吃瓜的小伙伴加入✨」,
+#: 加了会误伤;判据宁可漏一条,别把真内容挡掉。
 _SOCIAL_WORDS = ("群", "裙", "扩列", "互赞", "涨粉", "聊天", "交友", "招聘", "学习", "红包",
-                 "搭子", "互关", "粉丝", "直播间")
+                 "搭子", "互关", "粉丝", "直播间",
+                 "互助", "招募", "仅限", "兼职", "找工作", "大队")
 
 
 def topic_hit(title: str) -> bool:
-    """这条是不是**主题相关**(大瓜/资源),而不是纯社交群。"""
+    """这条是不是**主题相关**(大瓜/资源),而不是纯社交群。
+
+    ★★ **社交词优先**(2026-11-25)。原写法是"主题词优先" —— 标题里只要有「瓜」
+    就直接返回 True,**社交词根本轮不到判**。实测近 30 天 `topic_ok=1` 且 flagged
+    且有名字的 59 条里,**25 条是群招募帖**:`八卦群🍉群公告`/`谁懂有个女生八卦群的
+    快乐`/`像这种的吃瓜群谁要？`/`所有人,瓜主亲友还是吃瓜人,来进群吧` ——
+    它们全都含「瓜」或「八卦」,**全都漏过了这道闸**。
+
+    顺序就是判据:「想拉人进群」比「在聊瓜」更能说明这条帖的性质 ——
+    一个大瓜帖不会写「群公告」「来进群吧」。反过来,社交词命中时即便有「瓜」也挡掉。
+    """
     t = str(title or "")
-    if any(w in t for w in _TOPIC_WORDS):
-        return True
-    return not any(w in t for w in _SOCIAL_WORDS)
+    if any(w in t for w in _SOCIAL_WORDS):
+        return False
+    #: 没有社交词 ⇒ **算相关**(宁可放过,别把 `护肤教程（毛孔篇）纯享版教程`
+    #: 这种既不带瓜也不带群的真内容挡掉)。
+    #: ⚠️ 原「主题词」那张表(`_TOPIC_WORDS`)已删:社交词优先之后它**不再是判据**,
+    #: 只用来「有瓜就放行」,而那正是漏掉 25/59 条招募帖的那条支路。
+    #: 真正兜底的是下游的「求/1 密度」和「重复率」,不是标题里有没有「瓜」。
+    return True
 
 
 def _record_scan(db, user_id: int, v: dict, *, total: int, ones: int, demand: int,

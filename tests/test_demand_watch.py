@@ -583,8 +583,21 @@ def test_新名字卡片列出出现次数():
     ("英语学习和日常聊天", False),        # 纯社交群
     ("建了一个扩列群扫码可进", False),
     ("失业再出发，建了个群大家互相交流", False),
-    ("刚创了一个八卦群，想进就进", True),   # 有「瓜」
-    ("所有人，瓜主亲友还是吃瓜人，来进群吧", True),
+    #: ★★ 2026-11-25 改判:这两条原来都是 True(「主题词优先」,标题里带「瓜/八卦」
+    #: 就直接放行)。实测近 30 天 `topic_ok=1` 且 flagged 且有名字的 59 条里 25 条
+    #: 就是这种**群招募帖** —— 「想进群」比「在聊瓜」更能说明这条帖的性质。
+    ("刚创了一个八卦群，想进就进", False),
+    ("所有人，瓜主亲友还是吃瓜人，来进群吧", False),
+    #: ★ 实测里真实推出去的那几条(全带「瓜/八卦」、全是群公告)现在必须挡住:
+    ("八卦群🍉群公告", False),
+    ("吃瓜八卦群🍉群公告", False),
+    ("像这种的吃瓜群谁要？", False),
+    ("谁懂有个女生八卦群的快乐！！！！", False),
+    ("又想进吃🍉大队的么", False),        # 用「大队」回避「群」—— 已补进社交词
+    ("互助（还有几个席位）", False),
+    ("招募：互帮互助，一起成长", False),
+    ("仅限姐妹！", False),
+    ("大学副业兼职，找工作", False),
     ("护肤教程（毛孔篇）纯享版教程", True),  # 既无主题也无社交词 ⇒ 先算相关
     #: ★★ 2026-11-08:小红书**为避审核把「群」写成「裙」** —— 实测这条被判成
     #: 主题相关(topic_ok=1)并推了出去,是一条纯"招男生进群"的社交帖。
@@ -1686,3 +1699,176 @@ def test_生产默认值_去重与保底是开着的():
     s = Settings(_env_file=None)
     assert s.demand_skip_scanned_days == 3
     assert s.demand_lib_reserve == 2
+    assert s.demand_name_per_event == 2
+
+
+# ---------------------------------------------------------------------------
+# 大瓜准入:事件合并 + 碎片剔除 + 新鲜度排序(2026-11-25)
+# ---------------------------------------------------------------------------
+#
+# ★★ 用户原话:「**大瓜还是不能单纯的依赖名字,因为大瓜要追求新鲜度肯定就是未知的名字**」。
+# 实测印证:37 个够格且新鲜的名字里只有 1 个能被资源库/线索名印证;
+# `狗爹`/`小桃`/`困困狗` **零印证** —— 它们正因为新才没被库收录。
+# ⇒ 准入靠**结构信号**(同一个瓜的多个叫法合并),不靠"名字已知"。
+
+
+def _named(session, name, *, demand=6, mention=0, first_seen_days_ago=0,
+           video="", videos=()):
+    """造一个够格(被人求过)的名字行,`samples` 里带上它出现在哪条作品上。"""
+    import json as _json
+
+    now = datetime.now()
+    r = DemandName(user_id=1, platform="douyin", name=name, demand_hits=demand,
+                   mention_hits=mention, last_seen_at=now,
+                   first_seen_at=now - timedelta(days=first_seen_days_ago),
+                   samples=_json.dumps({"comments": [], "video": video,
+                                        "videos": list(videos)}))
+    session.add(r)
+    session.commit()
+    return r
+
+
+def test_同一个瓜的六个叫法只推两个(session):
+    """★★ 实测:`狗爹`(提74)/`小桃`(37)/`狗爹小桃`(11)/`换狗爹`(10)/
+    `狗爹身材`(9)/`困困狗`(10) —— **全部来自同一条视频** `7710851964850384805`。
+    它们不是六个瓜,是同一个瓜的六种叫法;不合并的话一张卡里全是同一件事。"""
+    vid = "https://www.douyin.com/video/7710851964850384805"
+    _named(session, "狗爹", demand=8, mention=74, video=vid)
+    _named(session, "小桃", demand=7, mention=37, video=vid)
+    _named(session, "狗爹小桃", demand=6, mention=11, video=vid)
+    _named(session, "换狗爹", demand=6, mention=10, video=vid)
+    _named(session, "狗爹身材", demand=6, mention=9, video=vid)
+    _named(session, "困困狗", demand=6, mention=10, video=vid)
+
+    dropped = {}
+    chosen = dw.pick_pushable(session.query(DemandName).all(), min_demand=2,
+                              cooldown_hours=0, limit=10, max_age_days=0,
+                              per_event=2, dropped=dropped)
+
+    assert len(chosen) == 2, f"同一条视频最多占 2 个名额:{[r.name for r in chosen]}"
+    assert {r.name for r in chosen} == {"狗爹", "小桃"}, "组内按提及数取前二"
+    #: ★ 拦了多少必须显形,否则「只推 2 个」分不清是没新瓜还是全被合并了。
+    assert dropped["name_fragment"] == 3, dropped       # 狗爹小桃 / 换狗爹 / 狗爹身材
+    assert dropped["name_event_cap"] == 1, dropped      # 困困狗:不碎片但超员
+
+
+def test_加料的长碎片被剔除_真名字优先(session):
+    """`换狗爹`(10) 含 `狗爹`(74) 且提及更少 ⇒ 是"真名字加动词"的碎片。"""
+    vid = "https://www.douyin.com/video/7710851964850384805"
+    _named(session, "狗爹", demand=8, mention=74, video=vid)
+    _named(session, "换狗爹", demand=6, mention=10, video=vid)
+
+    chosen = dw.pick_pushable(session.query(DemandName).all(), min_demand=2,
+                              cooldown_hours=0, limit=10, max_age_days=0, per_event=5)
+    assert [r.name for r in chosen] == ["狗爹"]
+
+
+def test_不同的瓜不会被误并(session):
+    """`_event_key` 取不到出处时退回按名字分组 —— 不把两个瓜合成一个。"""
+    _named(session, "甲瓜", demand=6, mention=10,
+           video="https://www.douyin.com/video/7000000000000000001")
+    _named(session, "乙瓜", demand=6, mention=10,
+           video="https://www.douyin.com/video/7000000000000000002")
+
+    chosen = dw.pick_pushable(session.query(DemandName).all(), min_demand=2,
+                              cooldown_hours=0, limit=10, max_age_days=0, per_event=1)
+    assert {r.name for r in chosen} == {"甲瓜", "乙瓜"}
+
+
+def test_没有出处的名字各自独立_不互相合并(session):
+    _named(session, "甲瓜", demand=6, mention=10)
+    _named(session, "乙瓜", demand=6, mention=10)
+
+    chosen = dw.pick_pushable(session.query(DemandName).all(), min_demand=2,
+                              cooldown_hours=0, limit=10, max_age_days=0, per_event=1)
+    assert {r.name for r in chosen} == {"甲瓜", "乙瓜"}
+
+
+def test_新鲜度优先_老名字不再压新瓜(session):
+    """★★ 原排序是累计量降序 ⇒ 实测 top10 里 **7 个**是首见 4~7 天前的老名字
+    (`后续` 11-19 / `女主` 11-15 / `红果` 11-18),新瓜被压在后面。"""
+    _named(session, "老瓜", demand=40, mention=90, first_seen_days_ago=7)
+    _named(session, "新瓜", demand=4, mention=10, first_seen_days_ago=0)
+
+    chosen = dw.pick_pushable(session.query(DemandName).all(), min_demand=2,
+                              cooldown_hours=0, limit=1, max_age_days=0)
+    assert [r.name for r in chosen] == ["新瓜"]
+
+
+def test_事件键从samples里认作品id():
+    """`video` 与 `videos` 都要认;小红书 `/explore/` 也认。"""
+    import json as _json
+
+    class R:
+        name = "x"
+        samples = _json.dumps({"video": "https://www.douyin.com/video/771"} )
+
+    class R2:
+        name = "y"
+        samples = _json.dumps({"videos": ["https://www.xiaohongshu.com/explore/abc123"]})
+
+    class R3:
+        name = "甲瓜"
+        samples = "not json"
+
+    assert dw._event_key(R()) == "771"
+    assert dw._event_key(R2()) == "abc123"
+    assert dw._event_key(R3()) == "name:甲瓜"
+
+
+# ---------------------------------------------------------------------------
+# 扣1 热度的归属(`ones_hits` 死档,2026-11-25)
+# ---------------------------------------------------------------------------
+
+
+def test_扣1热度归给视频里抽到的所有名字(session, monkeypatch):
+    """★★ 修复前 `ones` **只在书名号循环里**累加,而近期标题几乎不带《》 ⇒
+    生产库 328 行里 **326 行 `ones_hits` 恒 0**,`demand_min_ones=20` 这条准入
+    从来没生效过。现在评论里抽到的名字也要拿到**整条视频**的热度。"""
+    _lead(session, "111", title="一条没有书名号的普通视频")
+    monkeypatch.setattr(dw, "collect_for_video", lambda *a, **k: {
+        "error": "", "ones": 30, "no_name": 0, "total": 50,
+        "names": {"狗爹": {"demand": 4, "mention": 9, "samples": []}}})
+    monkeypatch.setattr(dw, "push_card", lambda rows, settings: True)
+
+    dw.run_user(session, 1, _S())
+
+    row = session.query(DemandName).filter_by(name="狗爹").one()
+    assert row.ones_hits == 30, "整条视频的扣1 应当归给它"
+
+
+def test_同名既在标题又在评论里_扣1只算一次(session, monkeypatch):
+    """用 `credited` 去重 —— 否则同一个名字会拿到双份热度,`ones` 门槛就失真了。"""
+    _lead(session, "111", title="扣1看《狗爹和小桃》合集")
+    monkeypatch.setattr(dw, "collect_for_video", lambda *a, **k: {
+        "error": "", "ones": 30, "no_name": 0, "total": 50,
+        "names": {"狗爹和小桃": {"demand": 4, "mention": 9, "samples": []}}})
+    monkeypatch.setattr(dw, "push_card", lambda rows, settings: True)
+
+    dw.run_user(session, 1, _S())
+
+    row = session.query(DemandName).filter_by(name="狗爹和小桃").one()
+    assert row.ones_hits == 30
+    assert row.title_hits == 1
+    assert row.mention_hits == 10, "提及仍然两条来源都算(1 标题 + 9 评论)"
+
+
+def test_运行记录写出事件合并与碎片条数(session, monkeypatch):
+    """闸门不显形的话,「只推 2 个」分不清是没新瓜还是全被合并了。"""
+    from app.db.models import RunRecord
+
+    _lead(session, "7710851964850384805", title="普通视频")
+    monkeypatch.setattr(dw, "collect_for_video", lambda *a, **k: {
+        "error": "", "ones": 0, "no_name": 0, "total": 0,
+        "names": {"狗爹": {"demand": 6, "mention": 74, "samples": []},
+                  "换狗爹": {"demand": 6, "mention": 10, "samples": []},
+                  "狗爹身材": {"demand": 6, "mention": 9, "samples": []}}})
+    monkeypatch.setattr(dw, "push_card", lambda rows, settings: True)
+
+    dw.run_user(session, 1, _S())
+    session.flush()
+    detail = session.query(RunRecord).filter_by(kind="demand_watch").one().detail
+
+    #: 三个名字都落在同一条视频上(`_lead` 的 url),后两个是 `狗爹` 的加料碎片。
+    assert "推1" in detail, detail
+    assert "碎片2" in detail, detail
