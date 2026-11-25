@@ -157,6 +157,24 @@ class Test卡片口径:
                  for c in row["columns"]]
         assert "[▶ 看作品](https://www.xiaohongshu.com/explore/xyz)" in cells
 
+    def test_公众号死链不许进日结卡(self, session) -> None:
+        """★ 2026-11-25:**日结卡是第四条客户可见出口**,也要过 `is_usable_mp_url`。
+
+        公众号 App 路的 `originalId` 拼成 75 字符 token,打开是微信「参数错误」页。
+        台账里那行 `url` 就是它 ⇒ 日结「▶ 看作品」原样发出去,等于每份日结都在
+        把客户往错误页送。判据只认 `mp.weixin.qq.com/s/`,别的板块(小红书/抖音)
+        的链**不许**被波及 —— 下面两条正反样本分别钉住这两半。
+        """
+        _seed(session, "wechat", "好链文", url="https://mp.weixin.qq.com/s/FZd_K4FKBiDA3u1Q9XIrsg")
+        _seed(session, "wechat", "死链文", url="https://mp.weixin.qq.com/s/" + "WR1" + "x" * 72)
+        since, until, _ = bd.window_of("daily")
+        card = bd.render_card(bd.build(session, 1, "wechat", since, until), "daily")
+        cells = [c["elements"][0]["text"]["content"]
+                 for row in card["elements"] if row.get("tag") == "column_set"
+                 for c in row["columns"]]
+        assert "[▶ 看作品](https://mp.weixin.qq.com/s/FZd_K4FKBiDA3u1Q9XIrsg)" in cells
+        assert not any("WR1" in c for c in cells), f"死链不许出现在卡里:{cells}"
+
     def test_没登记的板块名也用自己发得出去(self, session) -> None:
         """新板块**没登记进 `BOARD_LABELS`** 时,不许因此发不出去(宁可名字是原键)。"""
         _seed(session, "newboard", "某资源")

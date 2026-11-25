@@ -1,3 +1,22 @@
+- [2026-11-25 12:37] FIX: **公众号原文链加形态闸:App 路 75 字符 token 一律不给客户点**(死链止血)
+  一手证据(真浏览器,三种 UA 各测):`mp.weixin.qq.com/s/` + **22 字符** token ⇒ 真文章 5/5;
+  **75 字符**(`WR1…`)⇒ 微信「参数错误」页 6/6,Chrome 桌面 / 微信安卓 / iPhone 微信**完全一致**
+  ⇒ 不是兼容、不是风控,是这个 token 在 mp 侧无效。全库 14481 条 mp 链 token 长度**只有 22 与 75 两值**
+  (8889 / 5592),分界干净。
+  根因:cover 路由 `reviewId` 切出 22 字符短 token(历史正常);**列表路** `build_mp_url(originalId)`
+  在**网页路**拿到的恰好也是 22 字符短 token,而 **App 路**给的是 75 字符 `WR1…`(base64 解出 56 字节
+  二进制,标识的是微信读书内部文章,换不成 mp 路径)。10-14 网页路被 `-2041` 挡、App 路顶上来后长链开始进库。
+  规模:长链 5592 条,已推送 4204;台账 `wechat` 段 10-14 起 2905 推里长链 **1728 条(59.5%)**,
+  其中 **337 次**「无我方盘链 + 长链」⇒ 「文章」「原文」两格都指死链。
+  ⇒ `weread_client.is_usable_mp_url`:判据取「**不是 22 字符**」而非「是 75」(对新形态一律保守),
+  只认 `mp.weixin.qq.com/s/`(别的域名原样放行),查询串/锚点不参与长度判定。
+  接进**全部四条客户可见出口**:`_listen._push_listen` 标题回落 + 「原文」列、`_listen._burst_scan`
+  爆点苗头、`_enrich` 资源共振卡、`board_digest` 日结「▶ 看作品」。长链行**照常入库**
+  (阅读数/去重/存在性都有意义),只是不拿给客户点。
+  (Files: app/services/weread_client.py, app/services/wechat/_listen.py,
+   app/services/wechat/_enrich.py, app/services/board_digest.py,
+   tests/test_weread_mp_url.py, tests/test_wechat_monitor.py, tests/test_board_digest.py)
+
 - [2026-11-25 11:10] FIX: **大瓜正式作品名被「加料版」挤掉 —— 准入放宽到书名号出处, 碎片判据改成书名号优先**
   用户举的真实事件「麦穗与羊」, 回生产库对账(`data/platform.db` 只读):
   `demand_names` 两行**同一条抖音视频** `7706155613260187633` ——

@@ -100,6 +100,42 @@ def build_mp_url(original_id: str) -> str:
     return f"https://mp.weixin.qq.com/s/{quote(token, safe='')}"
 
 
+#: 网页版公众号原文 token 的长度。**实测只有两种长度**(2026-11-25,全库 14481 条 mp 链):
+#: `22`(8889 条,真浏览器打开=真文章)与 `75`(5592 条,全部是微信「参数错误」页)。
+_MP_TOKEN_LEN = 22
+
+
+def is_usable_mp_url(url: str) -> bool:
+    """这条 mp.weixin 原文链**客户点得开吗**?
+
+    ★★ 2026-11-25 事故(App 路的 `originalId` 被当 mp token):两次控制变量——
+
+      ① 形态分界**干净**:全库 `/s/…` 的 token 只有 22 与 75 两个长度;
+      ② 一手验证:22 长度的抽 5/5 正常(3.7MB 真文章),75 长度的抽 6/6 是
+         「参数错误」页(31KB),且 **Chrome桌面 / 微信安卓 / iPhone微信 三种 UA 一样**。
+
+    ⇒ 不是浏览器兼容、不是风控,是**这个 token 在 mp 侧无效**:网页路 `originalId`
+    恰好就是 22 字符短 token(所以历史上正常),而 **App 路的 `originalId` 是 75 字符
+    `WR1…` 二进制标识**(base64 解出 56 字节),它标识的是微信读书内部的文章,
+    **换不成 mp 路径**。10-14 网页路被 `-2041` 挡、App 路顶上之后,长链开始进库,
+    59.5% 的公众号推送带上了它。
+
+    ⚠️ 判据用「**不是 22 字符**」而不是「是 75 字符」:前者对**未来出现的任何新长度**
+    也一律当不可用(宁可少给一个链接,也别给一个「参数错误」);后者只挡已知的一种。
+
+    ⚠️ 这条**不是**用来决定"要不要入库"的:长链行仍然有意义(阅读数、去重、
+    存不存在这篇的事实),它只回答「**能不能拿给客户点**」。
+    """
+    u = str(url or "").strip()
+    if not u:
+        return False
+    # 只对 mp.weixin 这一族做判定:别的地方(比如我方盘链)不许被这条规则波及
+    if "mp.weixin.qq.com/s/" not in u:
+        return True
+    token = u.split("/s/", 1)[-1].split("?", 1)[0].split("#", 1)[0]
+    return len(token) == _MP_TOKEN_LEN
+
+
 def review_to_url(review_id: str, book_id: str = "") -> str:
     """reviewId(`MP_WXS_<bookId>_<token>`)→ mp.weixin 原文直链。"""
     review_id = str(review_id or "").strip()

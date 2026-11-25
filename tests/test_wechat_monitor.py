@@ -525,7 +525,7 @@ def test_push_listen_title_always_clickable(session, monkeypatch) -> None:
                         url="https://mp.weixin.qq.com/s/a", source="listen",
                         pan_urls="https://pan.quark.cn/s/src1")
     plain = WechatArticle(user_id=1, title="没有盘链", author="外号B", read_num=0,
-                          url="https://mp.weixin.qq.com/s/b", source="listen",
+                          url="https://mp.weixin.qq.com/s/bpAbCdEfGhIjKlMnOpQrSt", source="listen",
                           pan_urls="")
     ours = WechatArticle(user_id=1, title="我方链", author="外号C", read_num=0,
                          url="https://mp.weixin.qq.com/s/c", source="listen",
@@ -555,7 +555,7 @@ def test_push_listen_title_always_clickable(session, monkeypatch) -> None:
     assert "](https://pan.baidu.com/s/our1)" in blob, "有我方链时标题必须指向我方链"
     assert "](https://pan.quark.cn/s/src1)" in blob, \
         "没有我方链时要退到**原作者盘链**,否则标题点不动"
-    assert "](https://mp.weixin.qq.com/s/b)" in blob, \
+    assert "](https://mp.weixin.qq.com/s/bpAbCdEfGhIjKlMnOpQrSt)" in blob, \
         "连源盘链都没有时标题回落原文——**标题始终可点**"
 
 
@@ -2630,7 +2630,7 @@ def test_push_listen_marks_transfer_status(session, monkeypatch) -> None:
                          pan_urls="https://pan.quark.cn/s/M", pan_types="夸克",
                          my_pan_urls="https://pan.quark.cn/s/MINE")
     pending = WechatArticle(user_id=1, title="待转存文", author="号A", read_num=0,
-                            url="https://mp.weixin.qq.com/s/p", source="listen",
+                            url="https://mp.weixin.qq.com/s/pdAbCdEfGhIjKlMnOpQrSt", source="listen",
                             pan_urls="https://pan.quark.cn/s/P", pan_types="夸克")
     dead = WechatArticle(user_id=1, title="死链文", author="号A", read_num=0,
                          url="https://mp.weixin.qq.com/s/d", source="listen",
@@ -2660,7 +2660,7 @@ def test_push_listen_marks_transfer_status(session, monkeypatch) -> None:
                                                          "https://pan.quark.cn/s/MINE", "")]})
     blob = json.dumps(cards, ensure_ascii=False)
     assert "⏳待转存" in blob and "⛔源失效" in blob
-    assert "mp.weixin.qq.com/s/p" in blob            # 待转存的仍指原文(有标记说明,不骗人)
+    assert "mp.weixin.qq.com/s/pdAbCdEfGhIjKlMnOpQrSt" in blob   # 待转存的仍指原文(有标记说明,不骗人)
 
 
 def test_admin_health_reports_transfer_coverage(session) -> None:
@@ -2843,7 +2843,7 @@ def test_sync_still_pushes_when_transfer_blows_up(session, monkeypatch) -> None:
     session.add(b)
     session.commit()
     plat = FakePlatform(pages=[[{"id": "r1", "title": "资源文 https://pan.quark.cn/s/RAW9",
-                                 "url": "https://mp.weixin.qq.com/s/r1"}]])
+                                 "url": "https://mp.weixin.qq.com/s/r1AbCdEfGhIjKlMnOpQrSt"}]])
     monkeypatch.setattr(wechat_monitor, "_platform_client", lambda settings, **kw: plat)
     monkeypatch.setattr(QuarkTransfer, "__init__", lambda self, *a, **kw: None)
 
@@ -2857,7 +2857,7 @@ def test_sync_still_pushes_when_transfer_blows_up(session, monkeypatch) -> None:
     st = _settings(quark_cookie="ck=x", pan_transfer_enabled=True, wechat_sync_push_limit=20)
     out = wechat_monitor.sync_wechat_account(session, 1, b.id, settings=st, platform=plat)
     assert out["pushed"] == 1
-    assert "mp.weixin.qq.com/s/r1" in json.dumps(cards, ensure_ascii=False)
+    assert "mp.weixin.qq.com/s/r1AbCdEfGhIjKlMnOpQrSt" in json.dumps(cards, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------- 近24h 全推的可观测性
@@ -3648,7 +3648,7 @@ def test_repush_card_uses_history_baidu_link(session, monkeypatch) -> None:
     import json
 
     art = WechatArticle(user_id=1, title="考公资料合集", author="号A", read_num=0,
-                        url="https://mp.weixin.qq.com/s/bd", source="listen",
+                        url="https://mp.weixin.qq.com/s/bdAbCdEfGhIjKlMnOpQrSt", source="listen",
                         pan_urls="https://pan.baidu.com/s/1Src", pan_types="百度网盘",
                         my_pan_urls="https://pan.baidu.com/s/1MineDoc (提取码 8888) [百度]")
     session.add(art)
@@ -3666,7 +3666,7 @@ def test_repush_card_uses_history_baidu_link(session, monkeypatch) -> None:
     # ★ **2026-10-16 改口径**:原文**另立一列**(用户报「虽然有链接了但**没办法看对标的作品**」)
     #   ⇒ 它**应该**在卡里,但**必须带「原文」两个字** —— 否则读起来就像
     #   "文章那格指向了原文",而那正是这次要修掉的旧形态。
-    assert "[原文](https://mp.weixin.qq.com/s/bd)" in blob
+    assert "[原文](https://mp.weixin.qq.com/s/bdAbCdEfGhIjKlMnOpQrSt)" in blob
 
 
 def test_没有我方链时_原文那一列照样能看对标的作品(session, monkeypatch) -> None:
@@ -3682,7 +3682,7 @@ def test_没有我方链时_原文那一列照样能看对标的作品(session, 
     import json
 
     art = WechatArticle(user_id=1, title="纯内容文", author="号A", read_num=0,
-                        url="https://mp.weixin.qq.com/s/plain", source="listen",
+                        url="https://mp.weixin.qq.com/s/plAbCdEfGhIjKlMnOpQrSt", source="listen",
                         pan_urls="", pan_types="", my_pan_urls="")
     session.add(art)
     session.commit()
@@ -3691,7 +3691,8 @@ def test_没有我方链时_原文那一列照样能看对标的作品(session, 
 
     wechat_monitor._push_listen(session, 1, _settings(), [art], replacements={})
     blob = json.dumps(cards, ensure_ascii=False)
-    assert "[原文](https://mp.weixin.qq.com/s/plain)" in blob, "没有我方链时也必须能看原文"
+    assert "[原文](https://mp.weixin.qq.com/s/plAbCdEfGhIjKlMnOpQrSt)" in blob, \
+        "没有我方链时也必须能看原文"
     assert "**原文**" in blob, "列头要有「原文」,否则这一格看不出是干什么的"
 
 

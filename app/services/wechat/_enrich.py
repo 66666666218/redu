@@ -9,6 +9,8 @@ from app.services.content_extract import extract_account_refs as _ear
 
 from app.services.quark_transfer import QuarkAuthError, QuarkError, QuarkTransfer
 
+from app.services.weread_client import is_usable_mp_url
+
 from config.settings import Settings
 
 from datetime import datetime, timedelta
@@ -862,9 +864,12 @@ def _enrich_new_articles(session: Session, user_id: int, settings: Settings,
                     # 本轮没转出我方链(未开转存/转存失败):**如实说没有** ——
                     # 原文的入口在右边那一列,不必再挤在这一格里
                     cell = "—(未转存)"
+                # ⚠️ 2026-11-25:原文链要过形态闸 —— App 路的 `originalId` 拼出来的是
+                # 微信「参数错误」页(见 `weread_client.is_usable_mp_url`)。打不开就只显示标题。
+                _t = _md_safe(r.title)[:30]
                 elements.append(_col_set_row([
                     (cell, 4),
-                    (f"[{_md_safe(r.title)[:30]}]({_md_safe(r.url)})", 4),
+                    (f"[{_t}]({_md_safe(r.url)})" if is_usable_mp_url(r.url) else _t, 4),
                     (str(cnt) + " 篇", 2)]))
             card = {"config": {"wide_screen_mode": True},
                     "header": {"template": "red", "title": {"tag": "plain_text",

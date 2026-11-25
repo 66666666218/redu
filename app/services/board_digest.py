@@ -140,6 +140,10 @@ def render_card(data: dict, period: str, top: int = 8,
     这个切片没防 0,而新的默认值就是 0 ⇒ 不修就会把「完整版」发成一张空壳。
     """
     from app.services.feishu._cards import _col_set_row, _md_safe, metrics_md, strip_others
+    #: ⚠️ 2026-11-25:公众号原文链要过形态闸 —— App 路的 75 字符 token 打开是
+    #: 微信「参数错误」页(见 `weread_client.is_usable_mp_url`)。判据只认
+    #: `mp.weixin.qq.com/s/`,抖音/B站等别的 url 原样放行。
+    from app.services.weread_client import is_usable_mp_url
 
     spec = PERIODS.get(period) or PERIODS["daily"]
     label, when = data["label"], spec["label"]
@@ -222,7 +226,7 @@ def render_card(data: dict, period: str, top: int = 8,
                 except (TypeError, ValueError):
                     pass
             url = str(g.get("url") or "")
-            work = f"[▶ 看作品]({_md_safe(url)})" if url else "—"
+            work = f"[▶ 看作品]({_md_safe(url)})" if (url and is_usable_mp_url(url)) else "—"
             elements.append(_col_set_row([(cell, 5), (work, 3),
                                           (metrics_md(_metrics_of(g)), 2)]))
             idx += 1

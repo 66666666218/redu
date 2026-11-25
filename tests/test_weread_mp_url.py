@@ -47,3 +47,54 @@ def test_review_to_url_也走同一处() -> None:
     """`reviewId`(`MP_WXS_<bookId>_<token>`)那条路必须**同一规则**,不许各写一份。"""
     out = review_to_url("MP_WXS_3902714095_rGQaA4S~OmBCyR0kJcj0qw", "MP_WXS_3902714095")
     assert out == "https://mp.weixin.qq.com/s/rGQaA4S_OmBCyR0kJcj0qw"
+
+
+# ---------------------------------------------------------------------------
+# 原文链**能不能给客户点**(2026-11-25 事故:App 路的 `originalId` 拼出死链)
+# ---------------------------------------------------------------------------
+
+def test_短_token_算可用() -> None:
+    from app.services.weread_client import is_usable_mp_url
+
+    assert is_usable_mp_url("https://mp.weixin.qq.com/s/FZd_K4FKBiDA3u1Q9XIrsg")
+
+
+def test_App路长_token_判不可用() -> None:
+    """★ 这就是那次事故的形态:75 字符 `WR1…`,实测 6/6 是「参数错误」页。
+
+    **这是止血闸**:库里的行照留(读数/去重/存在性都有意义),
+    但客户点的那三处出口(标题回落、「原文」列、爆点苗头)一律不许给。
+    """
+    from app.services.weread_client import is_usable_mp_url
+
+    bad = ("https://mp.weixin.qq.com/s/WR16GyCQy62oBe2AS48zp8tVCvw6f1CTs34iBLv8bB9BmEAz4aoG"
+           "MY7baBKaCPwGQj7Gs6QA344")
+    assert not is_usable_mp_url(bad)
+
+
+def test_未来出现的新长度也算不可用() -> None:
+    """判据是「**不是 22 字符**」不是「是 75 字符」——
+
+    后者只挡已知的一种;前者对任何新形态一律保守(宁可少给一个链接)。
+    """
+    from app.services.weread_client import is_usable_mp_url
+
+    for tok in ("abc", "x" * 30, "x" * 128):
+        assert not is_usable_mp_url(f"https://mp.weixin.qq.com/s/{tok}"), tok
+
+
+def test_别的域名不许被这条规则波及() -> None:
+    """我方盘链 / 其他链必须原样放行 —— 这个判据只管 mp.weixin 的 `/s/`。"""
+    from app.services.weread_client import is_usable_mp_url
+
+    assert is_usable_mp_url("https://pan.quark.cn/s/0123456789ab")
+    assert is_usable_mp_url("https://pan.baidu.com/s/1abcdefg")
+
+
+def test_空串与查询串() -> None:
+    from app.services.weread_client import is_usable_mp_url
+
+    assert not is_usable_mp_url("")
+    assert not is_usable_mp_url(None)
+    # 查询串/锚点不参与长度判定
+    assert is_usable_mp_url("https://mp.weixin.qq.com/s/FZd_K4FKBiDA3u1Q9XIrsg?p=1#x")

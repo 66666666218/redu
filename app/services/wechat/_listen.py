@@ -1613,7 +1613,10 @@ def _burst_scan(session: Session, user_id: int, settings: Settings,
                  f"{r.read_num / max(median, 1):.0f} 倍)"]
         if mine:
             lines.append("📦 我的链接: " + mine[0])
-        lines.append(r.url)
+        if _mp_ok(r.url):
+            # ⚠️ 2026-11-25:原文链过形态闸再发 —— 这条是**推给员工去跟进**的,
+            # 递一个「参数错误」页比不给链更糟(人会以为"这篇已经删了")。
+            lines.append(r.url)
         if client.send(chr(10).join(lines)):
             sent += 1
     return sent
@@ -1665,6 +1668,19 @@ def repush_unpushed(session: Session, user_id: int, settings: Settings | None = 
             "剩余欠推会在下一轮监听继续补,超过窗口后不再补。",
             settings=settings, push_feishu=False)
     return pushed
+
+
+def _mp_ok(url: str) -> bool:
+    """这条**公众号原文链**客户点得开吗?(形态闸,见 `weread_client.is_usable_mp_url`)
+
+    单独包一层是为了让「渲染层要不要给链接」只有**一个入口**:目前三处客户可见的
+    出口(卡片标题回落、「原文」列、爆点苗头卡)都必须过它。新增出口时也照这个来。
+    """
+    from app.services.weread_client import is_usable_mp_url
+
+    return is_usable_mp_url(url)
+
+
 def _first_pan_link(urls: str) -> tuple[str, str]:
     """从多行文本里取**第一条盘链** → (干净 URL, 提取码);没有给 ("", "")。
 
@@ -2042,8 +2058,12 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
                 if not my_link:
                     link, code = _first_pan_link(r.pan_urls)
                     src_link = bool(link)
-                    if not link:
-                        link = r.url          # 什么盘链都没有 ⇒ 点标题看原文
+                    if not link and _mp_ok(r.url):
+                        # 什么盘链都没有 ⇒ 点标题看原文。
+                        # ⚠️ 2026-11-25:原文链**必须先过形态闸** —— App 路的
+                        # `originalId` 拼出来的是死链(见 `is_usable_mp_url`),
+                        # 让它回落到标题上等于把「参数错误」页递给客户。
+                        link = r.url
         # 重复资源标记: 同盘链已被其他文章推过 → 🔥N(同行都在发的确认级资源)
         hot = ""
         first_pan = pan_of.get(r.id, "")
@@ -2084,7 +2104,10 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
         article_md = (f"[{_titled}]({_md_safe(link)})" if link else _titled) \
             + (f" 🔑{code}" if code else "")
         # 「原文」列:对标作品的入口。**永远指向公众号原文**(不因有没有转存而变)。
-        orig_md = f"[原文]({_md_safe(r.url)})" if r.url else "—"
+        # ⚠️ 2026-11-25:链打不开(App 路 75 字符 token)时给 `—`,**不给一个点了报错的格**。
+        #   「有链但不可用」与「压根没链」在卡面同为 `—`:对客户而言结论一样(看不到原文),
+        #   要区分就查 `r.url` 是否为空 / token 长度,别在这格塞运维术语。
+        orig_md = f"[原文]({_md_safe(r.url)})" if _mp_ok(r.url) else "—"
         # 网盘列同时交代"点标题会去哪":🔴=我方转存链;⏳=有源链但还没转好(点进去是原文);
         # ⛔=对方分享已被封,永远转不了。员工不必点开才发现进的是公众号文章。
         types = _md_safe(r.pan_types)[:8] if r.pan_types else ""
