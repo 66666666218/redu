@@ -1046,7 +1046,14 @@ def _event_key(row) -> str:
 def _is_fragment(row, group) -> bool:
     """`row` 是不是组内某个**更短名字**的碎片?
 
-    判据:**短名是长名的子串,且短名出现得不少于长名**(`_drop_subsumed` 的反向用法)。
+    ★★ **书名号优先**(2026-11-25):谁的名字**出现在作品标题的书名号里**(`title_hits`),
+    谁就是正式作品名 —— 这一条压过下面的提及数判据。
+    实测依据(用户举的「麦穗与羊」):`麦穗与羊`(书名号出处 1 次,提及 5)
+    vs `完了麦穗与羊`(书名号 0 次,提及 8)—— 纯看提及数会把**正式名**留下、
+    把**加料的版本**当成真名;而 `完了` 显然是评论里那句「完了麦穗与羊」的开头。
+
+    书名号相同(通常两边都没有,评论里大家只写名字)时,退回提及数判据:
+    **短名是长名的子串,且短名出现得不少于长名**。
     实测:`狗爹小桃`(11) 含 `狗爹`(74)、`换狗爹`(10) 含 `狗爹`(74)、
     `狗爹身材`(9) 含 `狗爹`(74)、`喜欢小黄`(6) 含 `喜欢`(21) 与 `小黄`(15) ——
     这四个都是"在一个真名字上加了个动词/名词",不是独立的名字。
@@ -1058,10 +1065,19 @@ def _is_fragment(row, group) -> bool:
     """
     n = str(row.name or "")
     m = int(row.mention_hits or 0)
+    t = int(getattr(row, "title_hits", 0) or 0)
     for o in group:
         on = str(o.name or "")
         if o is row or len(on) < 2 or on == n or on not in n:
             continue
+        ot = int(getattr(o, "title_hits", 0) or 0)
+        #: ① 短名有书名号出处、我没有 ⇒ 我是在正式作品名上加料的碎片,**不看提及数**。
+        if ot > t:
+            return True
+        #: ② 反过来:我有书名号、短名没有 ⇒ 我是正式名,短名只是简称,谁都不剔。
+        if t > ot:
+            continue
+        #: ③ 两边书名号情况相同 ⇒ 退回提及数判据。
         if int(o.mention_hits or 0) >= m:
             return True
     return False
@@ -1074,7 +1090,7 @@ def pick_pushable(rows, *, min_demand: int = 2, min_ones: int = 20,
                   dropped: dict | None = None) -> list:
     """够格、**冷却期外**,且**按事件合并**后最该推的名字。**新鲜度优先**。
 
-    ★ 三条门槛满足**任意一条**就算够格(用户口径「判断是根据作品里面的**求和1**」):
+    ★ 四条门槛满足**任意一条**就算够格(用户口径「判断是根据作品里面的**求和1**」):
       · 有人**求**(`demand_hits ≥ min_demand`);
       · 或者**扣1跟帖够多**(`ones_hits ≥ min_ones`);
       · 或者**评论区把它念了很多遍**(`mention_hits ≥ min_mention`,2026-11-06 新增)。
@@ -1082,6 +1098,12 @@ def pick_pushable(rows, *, min_demand: int = 2, min_ones: int = 20,
         所以 `demand`/`ones` 都是 0,前两条永远不放行。实测这类视频恰恰是**大瓜**本身
         (某人塌方,评论区满屏叫他的名字),漏掉它等于漏掉整条链最想要的东西。
         ⚠️ 门槛设 6 而不是 3:重复 3 次的常常还是短语(`好可爱`),6 次以上才像真名。
+      · 或者**名字出现在作品标题的书名号里**(`title_hits ≥ 1`,2026-11-25 新增)。
+        用户口径「基本上作品名都有资源名」—— 书名号里的是**正式作品名**,比"评论区念了
+        6 遍"更硬。实测 `麦穗与羊`:书名号出处 1 次,但评论里大家写的是加料的
+        `完了麦穗与羊`(提及 8) ⇒ 纯按提及数,正式名连准入门槛都过不了
+        (`mention=5 < 6`、`demand=0`、`ones=0`),根本走不到 `_is_fragment` 那一步。
+        ⚠️ 只放 `title_hits≥1` 不会灌进噪音:实测近 3 天 `title_hits>0` 的只有 3 个名字。
 
     ★★ **大瓜不能靠"名字已知"来准入**(2026-11-25 用户:「大瓜还是不能单纯的依赖名字,
     因为大瓜要追求新鲜度肯定就是未知的名字」)。实测印证:37 个够格且新鲜的名字里,
@@ -1112,8 +1134,9 @@ def pick_pushable(rows, *, min_demand: int = 2, min_ones: int = 20,
         demand = int(r.demand_hits or 0)
         ones = int(getattr(r, "ones_hits", 0) or 0)
         mention = int(r.mention_hits or 0)
+        titled = int(getattr(r, "title_hits", 0) or 0)
         if (demand < int(min_demand) and ones < int(min_ones)
-                and mention < int(min_mention)):
+                and mention < int(min_mention) and titled < 1):
             continue
         if r.last_pushed_at and (now - r.last_pushed_at) < timedelta(hours=cooldown_hours):
             continue

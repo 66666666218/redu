@@ -1763,6 +1763,64 @@ def test_加料的长碎片被剔除_真名字优先(session):
     assert [r.name for r in chosen] == ["狗爹"]
 
 
+def test_正式作品名靠书名号保住_不会被提及更多的加料版挤掉(session):
+    """★★ 用户举的「麦穗与羊」:正式名 `麦穗与羊`(书名号出处 1 次、提及 5),
+    评论里更多人写的是 `完了麦穗与羊`(书名号 0 次、提及 8) ——
+    纯看提及数会把**加料版**当真名、把正式作品名当碎片剔掉。"""
+    vid = "https://www.douyin.com/video/7706155613260187633"
+    official = DemandName(user_id=1, platform="douyin", name="麦穗与羊", demand_hits=0,
+                          mention_hits=5, title_hits=1, last_seen_at=datetime.now(),
+                          first_seen_at=datetime.now(),
+                          samples='{"comments": [], "video": "%s"}' % vid)
+    noisy = DemandName(user_id=1, platform="douyin", name="完了麦穗与羊", demand_hits=0,
+                       mention_hits=8, title_hits=0, last_seen_at=datetime.now(),
+                       first_seen_at=datetime.now(),
+                       samples='{"comments": [], "video": "%s"}' % vid)
+    session.add_all([official, noisy])
+    session.commit()
+
+    dropped = {}
+    chosen = dw.pick_pushable(session.query(DemandName).all(), min_demand=2,
+                              cooldown_hours=0, limit=10, max_age_days=0,
+                              per_event=5, dropped=dropped)
+
+    assert [r.name for r in chosen] == ["麦穗与羊"], "书名号里的是正式名,加料版才是碎片"
+    assert dropped["name_fragment"] == 1, dropped
+
+
+def test_两边都没书名号时仍按提及数判碎片(session):
+    """书名号优先只在**两边不同**时生效;都靠评论区重复来的(`狗爹` 那类)照旧按提及数。"""
+    vid = "https://www.douyin.com/video/7710851964850384805"
+    for name, mention in (("狗爹", 74), ("换狗爹", 10)):
+        session.add(DemandName(user_id=1, platform="douyin", name=name, demand_hits=8,
+                               mention_hits=mention, title_hits=0,
+                               last_seen_at=datetime.now(), first_seen_at=datetime.now(),
+                               samples='{"comments": [], "video": "%s"}' % vid))
+    session.commit()
+
+    chosen = dw.pick_pushable(session.query(DemandName).all(), min_demand=2,
+                              cooldown_hours=0, limit=10, max_age_days=0, per_event=5)
+    assert [r.name for r in chosen] == ["狗爹"]
+
+
+def test_加料版有书名号时正式名不被剔(session):
+    """反方向:长名带书名号、短名没有 ⇒ 都留着(`小桃` 与书名号里的 `小桃身材`)。"""
+    vid = "https://www.douyin.com/video/7710851964850384805"
+    session.add(DemandName(user_id=1, platform="douyin", name="小桃", demand_hits=8,
+                           mention_hits=37, title_hits=0, last_seen_at=datetime.now(),
+                           first_seen_at=datetime.now(),
+                           samples='{"comments": [], "video": "%s"}' % vid))
+    session.add(DemandName(user_id=1, platform="douyin", name="小桃身材", demand_hits=8,
+                           mention_hits=4, title_hits=1, last_seen_at=datetime.now(),
+                           first_seen_at=datetime.now(),
+                           samples='{"comments": [], "video": "%s"}' % vid))
+    session.commit()
+
+    chosen = dw.pick_pushable(session.query(DemandName).all(), min_demand=2,
+                              cooldown_hours=0, limit=10, max_age_days=0, per_event=5)
+    assert {r.name for r in chosen} == {"小桃", "小桃身材"}
+
+
 def test_不同的瓜不会被误并(session):
     """`_event_key` 取不到出处时退回按名字分组 —— 不把两个瓜合成一个。"""
     _named(session, "甲瓜", demand=6, mention=10,
