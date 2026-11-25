@@ -454,3 +454,71 @@ def test_匹配键会把繁体字折成简体() -> None:
 
     assert match_key("偽裝直男") == match_key("伪装直男")
     assert match_key("後宮") == match_key("后宫")
+
+
+class Test近似名必须真的点名:
+    """★★ 2026-11-25:**`fuzzy_have` 返回的链会被写进 `my_pan_urls` 给客户点**,
+    所以只过 `same_resource`(「要不要再搬」的宽松口径)不够 —— 还要它**真的在说这个资源**。
+
+    ## 实测证据(生产库只读)
+    拿 120 条真实公众号标题重放,`fuzzy_have` 命中 **220** 次,其中 **74 次**是错配:
+
+        「直接打印」   → 《读心吃瓜我在古代主持正义第四季完结篇》(标题里含「可直接打印」)
+        「近期很火的」 → 《高性价人生指南》《捉迷藏图画书》《七宗罪测试》**三条不相干**
+        「线条画电子版」→ 迅雷盘里一个叫「电脑版」的目录
+
+    后果:`_enrich` 把这串链写进 `my_pan_urls` ⇒ **客户点三条不同标题进同一份文件**
+    (实测一条我方链挂 8 个不同源链、175 行)。这是**内容事故**,比"没链"严重得多。
+    """
+
+    def test_描述短语不算点名(self) -> None:
+        from app.services.resource_library import claims_resource
+
+        assert not claims_resource(
+            "读心吃瓜我在古代主持正义第四季完结篇 全集短剧网盘下载 ? "
+            "《读心吃瓜我在古代主持正义第四季完结篇》全 180 集已完结", "直接打印")
+        assert not claims_resource(
+            "佳作最近很火的《高性价人生指南》 吧友们都看看", "近期很火的")
+        #: ⚠️ 这条最值得留:**看着像名字**,但库里那条标题的主题是「电脑版」
+        assert not claims_resource("电脑版", "线条画电子版")
+        assert not claims_resource(
+            "我用夸克网盘给你分享了「2026一年级语...卷(1)」等6项", "可爱学生姓名贴模板")
+
+    def test_开头相同或书名号点名仍然放行(self) -> None:
+        from app.services.resource_library import claims_resource
+
+        #: 开头就是它(最常见的正当情形)
+        assert claims_resource(
+            "2026幼儿园儿童涂色简笔画线稿模版（电子版） A4纸可直接打印 填色画100张", "2026幼儿园儿童涂色简笔画线稿模版")
+        assert claims_resource("伪装直男全集22集无雾", "伪装直男")
+        #: 《…》/【…】点名(标题主体是别的东西,但明确点到了它)
+        assert claims_resource("?《左道陈家村》1-68集【AI漫剧】", "左道陈家村")
+        assert claims_resource("【冥界司机】全集 更至88集", "冥界司机")
+
+    def test_繁简与个别字不同仍然放行(self) -> None:
+        """★ 这道闸**不能**把「繁简/异体/个别字不同」那类正当匹配一起挡掉
+        —— 那正是 `fuzzy_have` 存在的理由(用户 2026-10-17 口径)。"""
+        from app.services.resource_library import claims_resource
+
+        assert claims_resource("高性价人生指南PDF电子版", "高性价比人生指南"), "少一个字"
+        assert claims_resource("偽裝直男全集22集", "伪装直男"), "繁简"
+
+    def test_fuzzy_have_不给错配的链(self, session) -> None:
+        """端到端:库里存着一份不相干资源的我方链,`fuzzy_have` **不许**把它交出去。"""
+        from app.services.resource_library import fuzzy_have
+
+        _mk(session, "读心吃瓜我在古代主持正义第四季完结篇 全集短剧网盘下载 ? "
+                     "《读心吃瓜我在古代主持正义第四季完结篇》全 180 集已完结",
+            "某号", "https://pan.xunlei.com/s/VP4_fGrzuDdR4mKa1YozC7ALA1",
+            my="https://pan.xunlei.com/s/VP4_fGrzuDdR4mKa1YozC7ALA1")
+        #: 「可直接打印」这句描述会经 `same_resource` 的近似片段档命中上面那条
+        assert fuzzy_have(session, 1, ["直接打印"]) is None, "错配的链不许交出去"
+
+    def test_fuzzy_have_正当匹配照常返回(self, session) -> None:
+        from app.services.resource_library import fuzzy_have
+
+        _mk(session, "AI漫剧《伪装直男》全集22集无雾", "某号",
+            "https://pan.quark.cn/s/aaa111",
+            my="https://pan.quark.cn/s/aaa111")
+        hit = fuzzy_have(session, 1, ["伪装直男"])
+        assert hit and hit["my_link"] == "https://pan.quark.cn/s/aaa111"

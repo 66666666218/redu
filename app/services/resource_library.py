@@ -460,6 +460,55 @@ def title_claims(first: str, name: str) -> bool:
     return f"《{name}》" in first or f"【{name}】" in first
 
 
+#: 《…》/【…】 点名段(与 `title_claims` 那两种写法同一口径)
+_POINTING_RE = re.compile(r"[《【]([^》】]{2,40})[》】]")
+
+
+def claims_resource(first: str, name: str) -> bool:
+    """**近似名匹配也要过的那道闸**:库里的标题**真的在说这个资源**吗?
+
+    ## 为什么 `title_claims` 不够(2026-11-25 实测)
+    `fuzzy_have` 的用途是找「繁简/异体/个别字不同」的**同一份资源**。它用
+    `same_resource` 做宽松比对,判据里有一档 `_contains_fuzzy`:短名只要能在长标题里
+    **近似地出现**就算命中。这一档被**描述短语**喂坏:
+
+        候选名「直接打印」  → 命中《读心吃瓜我在古代主持正义第四季完结篇》(标题含「可直接打印」)
+        候选名「近期很火的」→ 命中《高性价人生指南》《捉迷藏图画书》《七宗罪测试》
+        候选名「线条画电子版」→ 命中迅雷盘里一个叫「电脑版」的目录
+
+    实测:拿 120 条真实公众号标题重放,`fuzzy_have` 命中 **220** 次,其中 **74 次**
+    是这种"名字只是标题里的一句话,不是它叫什么"。这些链经
+    `reuse_if_have` 写进 `my_pan_urls` ⇒ **客户点开拿到的是另一个资源**
+    (内容事故,比"没链"严重得多)。
+
+    ## 判据 = `title_claims` 的**容错版**
+    在 `title_claims`(开头相等 / 《…》【…】点名)的基础上,允许**开头近似**
+    (编辑距离 ≤1~2)与**点名段近似** —— 这正是「繁简/异体/个别字不同」那类需求
+    (用户 2026-10-17 口径),而描述短语**过不了**:它们既不在标题开头,
+    也不是被《》【】点名的对象。
+
+    ⚠️ 短于 3 个字不做近似(与 `same_resource` 的 `_contains_fuzzy` 同一口径):
+    2 个字太泛,会把无关的东西认成同一份。
+    ⚠️ 这是**加在 `fuzzy_have` 上的一道闸**(那才是"要给客户出链"的入口),
+    `same_resource` 本身的行为不动 —— 它还被"要不要再搬一份"用着,那边松一点是安全的。
+    """
+    if not first or not name:
+        return False
+    if title_claims(first, name):
+        return True                       #: 开头相等 / 《…》【…】精确点名
+    a, b = resource_key(first), resource_key(name)
+    if not a or not b or len(b) < 3:
+        return False
+    limit = 1 if min(len(a), len(b)) <= 6 else 2
+    if a[0] != b[0]:
+        #: 首字不同 ⇒ **只可能是点名**(中文资源名首字极少漂移,与 `same_resource` 同口径)
+        segs = [resource_key(m.group(1)) for m in _POINTING_RE.finditer(first)]
+        return any(s and s[0] == b[0] and _edit_distance(s, b, limit) <= limit
+                   for s in segs)
+    #: 开头近似(繁简/异体/个别字不同)—— 只比**标题开头那一小段**,不许在整条里乱找
+    return _edit_distance(a[:len(b) + limit], b, limit) <= limit
+
+
 def resource_key(name: str) -> str:
     """**同一份资源的身份**(用于把不同命名变体合并成一行)。
 
@@ -572,6 +621,13 @@ def fuzzy_have(session: Session, user_id: int, names: list[str], days: int = 180
     (与 `search_resources` 同一套 `_pan_rank`)。
     ⚠️ 只在 `already_have` 的**最后一步**用它(精确路径都没命中时),**不参与展示/出链给客户**。
     ⚠️ 扫不到/查询失败一律返回 `None`(照常转存)—— 这是"省一次转存"的旁路,不许变成新故障源。
+
+    ⚠️⚠️ **"不参与出链"这条纪律曾被违反**(2026-11-25 修):`reuse_if_have` 的四个调用点
+    (`wechat/_enrich` 夸克/百度/迅雷三段、`resource_presence`、`xunlei_group` …)都把这个
+    返回值**直接写进了给客户点的 `my_pan_urls`/`our_url`** ⇒ 一道"省一次转存"的宽松判据
+    变成了"给客户挂哪条链"的判据。后果实测:一条我方链挂着 8 个不同源链、
+    客户点三条不同标题进同一份文件。现在**在这一层**加 `claims_resource` 闸
+    (见 `_add` 里那两行),而不是靠每个调用点各自记得 —— 判据只此一处。
     """
     from app.db.models import DiscoveredPanLink, XunleiResource
 
@@ -587,7 +643,11 @@ def fuzzy_have(session: Session, user_id: int, names: list[str], days: int = 180
     def _add(title: str, link: str, source: str) -> None:
         if not title or not link:
             return
-        if not any(same_resource(n, title) for n in names):
+        #: ⚠️⚠️ **两道判据都要过**(2026-11-25):`same_resource` 是"要不要再搬"的宽松口径,
+        #: 它自己就能被描述短语(「直接打印」「近期很火的」)喂坏;而这里返回的链会被
+        #: `reuse_if_have` **写进 `my_pan_urls` 给客户点**。⇒ 再加一道
+        #: `claims_resource`(见它的头注:实测挡掉 74/220 次错配,同时保住繁简/异体)。
+        if not any(same_resource(n, title) and claims_resource(title, n) for n in names):
             return
         clean = _alive_link(_clean_link(link), dead)
         if not clean:
