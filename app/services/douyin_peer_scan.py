@@ -845,9 +845,9 @@ def push_works(works: list[dict], settings, session=None, user_id: int = 0) -> b
         #: 热度口径 = 峰值互动数(点赞/转发);`liked_count` 是摊平字段,`peak_metric` 认得。
         hot_of=lambda w: push_ledger.peak_metric(w.get("metrics") or
                                                  {"liked_count": w.get("likes") or 0}),
-        #: 增量下限按 `douyin_peer` 查表(`push_ledger.HOT_RISE_MIN_ABS` = 50 点赞):
-        #: 这条链的 30 天样本少(过 30% 只 26 条),取与 `weibo_peer` 同档;
-        #: 被切掉的最大也只 +34(《豆花空间》),真爆是 `161025→271160`(《麦穗与羊》)。
+        #: 增量下限按 `douyin_peer` 查表(`push_ledger.HOT_RISE_MIN_ABS` = 500 点赞):
+        #: 30 天候选池 26 条、p50=324;500 切 15 条(被切最大 +359《维尼小熊》),
+        #: 保留最小 +911,真爆是 `161025→271160`(《麦穗与羊》)。
         hot_min=1, hot_rise_only=True)
     if not works:
         logger.info("对标号作品:盘链闸挡掉全部 %d 条(同一份资源已推过)", _before)
@@ -857,6 +857,17 @@ def push_works(works: list[dict], settings, session=None, user_id: int = 0) -> b
         return True
     if _dup:
         logger.info("对标号作品:盘链闸挡掉 %d 条(%d 条里同一份资源已推过)", _dup, _before)
+    #: ★★ **跨板块标注**(2026-11-25,用户拍板「做降级标注」):这份资源在**别的板块**
+    #: 72h 内推过就标出来,**照推不拦**(「丢资源比重复推一遍严重得多」)。
+    #: ⚠️ 判据是「**别的**板块」,本板块内的重复已由上面那道盘链闸管掉。
+    _n_xsec = 0
+    try:
+        _n_xsec = push_ledger.annotate_cross_section(
+            works, push_ledger.cross_section_seen(session, user_id, "douyin_peer", works))
+    except Exception:  # noqa: BLE001 - 标注是旁路,查库失败照旧全推(与台账同一条纪律)
+        logger.warning("对标号作品跨板块标注失败(本批照常推)", exc_info=True)
+    if _n_xsec:
+        logger.info("对标号作品:%d 条已在其他板块推荐过(照推,卡面标注)", _n_xsec)
 
     groups: dict[str, list[dict]] = {}
     for w in works:
@@ -912,10 +923,16 @@ def push_works(works: list[dict], settings, session=None, user_id: int = 0) -> b
             uid = str(w.get("account_uid") or "").strip()
             if uid:
                 acct = f"[{acct}](https://www.douyin.com/user/{_md_safe(uid)})"
+            #: ★★ 跨板块标注(2026-11-25):写进**资源格**,不新增列(列宽已排满);
+            #: 客户端能据此判断这条是不是"已经在别处见过的"。
+            _res = _resource_cell(w)
+            _xnote = push_ledger.cross_section_note(w.get("_cross_sections") or [])
+            if _xnote:
+                _res += " · " + _md_safe(_xnote)
             elements.append(_col_set_row([
                 (acct, 3),
                 (work, 5),
-                (_resource_cell(w), 2),
+                (_res, 2),
                 (_md_safe(niche), 1),
                 (f"↗{likes}" if likes else "—", 1)]))
     card = {"config": {"wide_screen_mode": True},

@@ -452,6 +452,109 @@ def last_pan_hot(session: Session, user_id: int, section: str, hours: float,
     return out
 
 
+def cross_section_seen(session: Session, user_id: int, section: str,
+                       items: list[dict], hours: float = 72,
+                       sections: tuple[str, ...] | None = None) -> dict[str, list[str]]:
+    """★★ **跨板块已推过**(2026-11-25,档3):这份资源在**别的板块**被推过吗 → `{盘链身份: [板块…]}`。
+
+    ## 它补的是哪个盲区
+
+    `drop_recent` 的盘链闸只认**本 section**(不同板块的群不是一批人 —— 那是故意的)。
+    于是同一份资源在一个板块推过之后,**换到另一个板块再推一遍完全不受拦**:
+    近 7 天带盘 **1106 行**里,同一盘链在 **≥2 个板块**出现的有 **94 个盘链**;
+    逐行按时间序算,**41.0%** 的带盘行是「它已经在别的板块推过了」。
+
+    ## 为什么是**标注**,不是**拦**
+
+    用户拍板(2026-11-25):「做降级标注」。直接静默丢会与客户的判据冲突 ——
+    「**丢资源比重复推一遍严重得多**」(见 `_pan_id_of`);而每组人确实只在自己的群里,
+    别的群收到过不等于这组人收到过。所以:**照推**,但卡面标出这件事,
+    让客户自己决定这条要不要再点(也让我们事后能看出资源池是不是太集中)。
+
+    ## 口径
+
+    · **不看本板块的历史** —— 「跨板块」才算;本板块内的重复是 `drop_recent` 的事。
+    · 窗口默认 **72h**,与 `push_pan_dedupe_hours` 同一个数:再久以前的推送对客户已经不算
+      "同一条了"(而它与判重共用一把尺子,才不会出现"判重放过、标注却说推过"的矛盾)。
+    · 身份与 `recent_pan_map` **同一把尺子**:`pan_id`(源链优先)∪ `pan_key(pan_url)` ——
+      ⚠️ 必须**两个都查**:存量行没有 `pan_id`,而新行两个都有;只查一个会半边瞎。
+    · 返回的板块名按**首次出现时间**排序(`drop_recent` 的调用方直接拿去渲染)。
+
+    ⚠️ **没有盘链的条目不会出现在结果里** —— 没链就无从判"同一份资源"。
+    """
+    if session is None or not items or hours <= 0:
+        return {}
+    from sqlalchemy import select
+
+    from app.db.models import PushLedger
+
+    scope = tuple(sections or (section,))
+    cutoff = datetime.now() - timedelta(hours=float(hours))
+    rows = session.execute(
+        select(PushLedger.section, PushLedger.pan_id, PushLedger.pan_url)
+        .where(PushLedger.user_id == user_id,
+               PushLedger.section.notin_(scope),
+               PushLedger.pushed_at >= cutoff)
+        .order_by(PushLedger.pushed_at.asc(), PushLedger.id.asc())).all()
+    by_pan: dict[str, list[str]] = {}
+    for sec, pan_id, pan_url in rows:
+        sec = (sec or "").strip()
+        for k in ((pan_id or "").strip(), pan_key(pan_url or "")):
+            if not k or not sec:
+                continue
+            secs = by_pan.setdefault(k, [])
+            if sec not in secs:
+                secs.append(sec)
+    out: dict[str, list[str]] = {}
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        #: 与本函数查出来的键同一套(源链优先 ∪ 归一后的我方链)
+        for k in (_pan_id_of(it), pan_key(_pan_of(it))):
+            if k and k in by_pan:
+                out[k] = by_pan[k]
+    return out
+
+
+def annotate_cross_section(items: list[dict], seen: dict[str, list[str]]) -> int:
+    """把 `cross_section_seen` 的结果挂到条目上(`it["_cross_sections"]`)→ 标注条数。
+
+    **改的是入参列表里的 dict**(原地),调用方直接拿去渲染。返回标注了几条 ——
+    运行记录要报这个数,否则「这轮有没有跨板块重复」在日志里看不见。
+    ⚠️ 同一条目命中两个身份(源链 + 我方链)时取**并集**,不是后覆盖:
+    它们说的是同一份资源,合并才是"它去过哪些板块"。
+    """
+    n = 0
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        secs: list[str] = []
+        for k in (_pan_id_of(it), pan_key(_pan_of(it))):
+            for s in seen.get(k, []) if k else []:
+                if s not in secs:
+                    secs.append(s)
+        if secs:
+            it["_cross_sections"] = secs
+            n += 1
+    return n
+
+
+def cross_section_note(secs: list[str]) -> str:
+    """跨板块标注的**唯一文案出处**(各推送卡共用,别各写一句)。
+
+    ⚠️ 口径:写「**已在 N 个板块推荐**」,不写"重复"——客户看到的是一次**提示**,
+    不是一次认错;也不写板块英文键以外的内部术语(板块名走 `board_label`)。
+    ⚠️ 卡片**标题**里不许带数字(那是冷却键的原料),这条文案只进正文,不进标题。
+    """
+    names = [s for s in (secs or []) if s]
+    if not names:
+        return ""
+    from app.services.board_digest import board_label
+
+    return "🔥 已在 %d 个板块推荐(%s)" % (
+        len(names), " · ".join(board_label(s) or s for s in names))
+
+
 def peak_metric(metrics) -> float:
     """一组互动指标里**最高的那个数字**(`{"liked_count": 53, "play_count": "1.2万"}` → 53)。
 

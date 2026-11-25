@@ -1,3 +1,31 @@
+- [2026-11-25 13:37] FEAT: **跨板块共振降级标注:同一份资源换板块照推,但卡面标出"已经去过哪"**
+  `drop_recent` 的盘链闸只认**本 section**(不同板块的群不是一批人 —— 那是故意的),
+  于是同一份资源在一个板块推过之后,**换到另一个板块再推一遍完全不受拦**。近 7 天台账
+  实测:带盘 **1106 行** / 不同盘链 422 / **94 个盘链进了 ≥2 个板块**;按时间序逐行算
+  **41.0%** 的带盘行是「它已经在别的板块推过了」(N≥2 28.6%、N≥4 11.6%)。
+  用户拍板(**2026-11-25**)「**做降级标注**」而不是拦:直接静默丢会与客户的判据冲突 ——
+  「**丢资源比重复推一遍严重得多**」,而别的群收到过 ≠ 这组人收到过 ⇒ **照推**,
+  卡面逐条标「🔥 已在 N 个板块推荐(B站 · 微博同行)」,让客户自己决定要不要再点。
+
+  `push_ledger` 新增三个函数(单一出处,四个推送点共用):
+  `cross_section_seen`(查**本板块之外**的 72h 台账,身份 = `pan_id` 源链优先 ∪
+  `pan_key(pan_url)` 我方链,两个都查 —— 存量行只有后者,只查一个会半边瞎)、
+  `annotate_cross_section`(原地打 `_cross_sections`,两个身份命中取**并集**)、
+  `cross_section_note`(唯一文案出处:写「已在 N 个板块推荐」而**不写"重复"** ——
+  客户看到的是一次提示,不是我们认错;⚠️ 只进正文、不进标题,标题不许带数字)。
+
+  接入 **4 个推送点**(全部排在 `drop_recent` **之后**,先挡后标):
+  `resource_presence.push_items`(覆盖 6 板块,顶部报条数 + 逐行明细)、
+  `douyin_peer_scan.push_works`、`xunlei_group.push_new_shares`、`wechat/_listen._push_listen`
+  (ORM 行 → 先构造临时 dict 查、结果按 article id 存表,不污染待落库对象)。
+  ⚠️ `resource_presence` 这一处传 `sections=group_of(...)`:tieba 与 zhihu 配的是
+  **同一个**飞书群 ⇒ 在知乎卡上写「已在贴吧推荐」是错的(客户就在那个群里,他早见过);
+  这与它自己的 `drop_recent(by_group=True)` 是**同一把尺子**。
+  ⚠️ 四处**都是旁路**:查库失败只 warning、照旧全推(与台账同一纪律;实测被
+  `tests/test_xunlei_group.py` 的假 session 当场抓到一个 —— 它会打挂整张卡)。
+  (Files: app/services/push_ledger.py, app/services/resource_presence.py,
+  app/services/douyin_peer_scan.py, app/services/xunlei_group.py,
+  app/services/wechat/_listen.py, tests/test_cross_section_note.py, doc/能力清单.md)
 - [2026-11-25 13:12] FIX: **「又火了」的分板块绝对增量门槛:比例尺在小量级板块上是错的**
   `push_hot_rise_pct`(涨 30%)是一把尺子量 8 个板块,而各板块热度口径量级差 **4 个数量级**
   (快手播放中位 12.7 万 / 贴吧回复中位 **2** / 知乎评论中位 **2**)。30 天台账 8553 行按生产

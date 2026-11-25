@@ -2002,6 +2002,31 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
             WechatArticle.id.in_(_before_ids)).values(pushed_at=datetime.now()))
         session.commit()
         return 0
+    #: ★★ **跨板块标注**(2026-11-25,用户拍板「做降级标注」):同一份资源在**别的板块**
+    #: 72h 内推过就标出来,**照推不拦** —— 用户口径「丢资源比重复推一遍严重得多」,
+    #: 而别的群收到过不等于这组人收到过。
+    #: ⚠️ 位置必须在 `drop_recent` **之后**(先挡后标):被本板块闸门挡掉的条文根本不上卡,
+    #: 给它们算标注是白花钱;且"本板块内的重复"已由那道闸管掉,这里只看**别的板块**。
+    #: ⚠️ 身份与 `drop_recent` / `record` **同一把尺子**:`src_pan_url`(源链优先)∪ 我方链
+    #: (`pan_url` 列记的是 `_my_of`,即已剔死链的我方链)⇒ 跨板块才比得上。
+    #: ⚠️ 渲染拿到的是 `WechatArticle`(ORM,不是 dict)⇒ 先用临时 dict 查、再把结果按
+    #: article id 存成表;别为了标注去改 ORM 对象的属性(它还要被落库)。
+    #: 存的是**渲染好的文案**(article id → note),不存板块列表 ——
+    #: 渲染在闭包里、离模块级 `push_ledger` 的导入点很远,直接存结果更稳。
+    _xsec_of: dict[int, str] = {}
+    try:
+        from app.services import push_ledger as _pl
+
+        _probe = [{"pan_url": _my_of.get(r.id, ""),
+                   "src_pan_url": _src_of.get(r.id, ""), "_rid": r.id} for r in rows]
+        _pl.annotate_cross_section(
+            _probe, _pl.cross_section_seen(session, user_id, "wechat", _probe))
+        _xsec_of = {it["_rid"]: _pl.cross_section_note(it["_cross_sections"])
+                    for it in _probe if it.get("_cross_sections")}
+    except Exception:  # noqa: BLE001 - 标注是旁路,查库失败就照旧全推(与去重同一纪律)
+        logger.warning("公众号跨板块标注失败(本批照常推)", exc_info=True)
+    if _xsec_of:
+        logger.info("公众号推送:%d 篇已在其他板块推荐过(照推,卡面标注)", len(_xsec_of))
     from collections import OrderedDict
 
     # 重复资源计数:一次 GROUP BY 批量查本轮全部文章(循环内逐篇 COUNT 是 N+1)。
@@ -2135,6 +2160,12 @@ def _push_listen(session: Session, user_id: int, settings: Settings, rows: list[
         #   员工读到的是"这个数是估算的",而它本来是**精确**的 `readNum`。
         #   ⇒ 读数只显示数字,不加任何口径符号。
         read = str(r.read_num) if r.read_num else "—"
+        #: ★★ 跨板块标注(2026-11-25):接在**网盘格**末尾(客户在这里判断"这条要不要再点")。
+        #: ⚠️ 本板块内"同行同链"已有 `🔥xN`(见 `dup_counts`),这里说的是**别的板块**推过 ——
+        #: 两件事分开说,别合成一个数。
+        _xnote = _xsec_of.get(r.id, "")
+        if _xnote:
+            pan += " · " + _md_safe(_xnote)
         return _col_set_row([
             (_md_safe(r.author)[:10] or "—", 3), (article_md, 6), (orig_md, 2),
             (pan, 2), (read, 2),

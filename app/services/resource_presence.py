@@ -727,6 +727,27 @@ def push_items(items: list[dict], settings, detail: dict | None = None,
                 detail[plat] = "AI 筛后无内容"
             continue
         group = _ai.items
+        #: ★★ **跨板块标注**(2026-11-25,用户拍板「做降级标注」):同一份资源在**别的板块**
+        #: 72h 内推过就标出来,**照推不拦** —— 「丢资源比重复推一遍严重得多」。
+        #: 近 7 天实测:带盘 1106 行里同一盘链进了 **≥2 个板块**的有 94 个盘链,
+        #: 按时间序逐行算 **41.0%** 的行是"已经在别的板块推过"。这个调用点覆盖 6 个板块,
+        #: 且它自己**没有** `xunlei_group`/`wechat` 的产出 ⇒ 那两块的历史自然算在"别的板块"里
+        #: (判据本来就是「别的板块推过没」,与产出方无关)。
+        #: ⚠️ **同群板块不算"别的板块"**(`group_of`):`tieba` 与 `zhihu` 配的是**同一个**
+        #: 飞书群 ⇒ 在知乎卡上写「已在贴吧推荐」是错的(客户就在那个群里,他早见过)。
+        #: 这与下面 `drop_recent(by_group=True)` 是**同一把尺子**:本群内的重复归它管,
+        #: 这里只回答「**别的群**收到过没」。
+        #: ⚠️ **旁路:查库失败照旧全推**(与台账同一条纪律)—— 少一句标注可以,
+        #: 少一整张卡不行。这里**不写在 `drop_recent` 的 try 里**:那个 try 只覆盖去重,
+        #: 而且它的 `except` 会把 session 打成需回滚态。
+        _n_xsec = 0
+        try:
+            _xsec = push_ledger.cross_section_seen(
+                session, user_id, led_sec, group,
+                sections=push_ledger.group_of(settings, led_sec))
+            _n_xsec = push_ledger.annotate_cross_section(group, _xsec)
+        except Exception:  # noqa: BLE001
+            logger.warning("跨平台热度跨板块标注失败(%s,本张照常推)", plat, exc_info=True)
         #: ★ **客户第一眼要的答案**(2026-10-29):有几个**能直接取用**、哪些只能看对标。
         #: ⚠️ 判据必须与下面渲染那一处**同一个**(2026-11-23):渲染写的是
         #: `my_link or pan_url`(有原链就先给原链),这里原来只数 `my_link`
@@ -750,6 +771,10 @@ def push_items(items: list[dict], settings, detail: dict | None = None,
                if _ai.summary() else "")
             + (f"\n已跳过 {_dup} 条 {int(getattr(settings, 'push_dedupe_hours', 24) or 0)} 小时内推过的。"
                if _dup else "")
+            #: ⚠️ 跨板块标注只写"几条",不列板块明细(整卡的板块明细在下面每行里)——
+            #: 顶部这句是**概览**,明细跟着每条资源走。
+            + (f"\n其中 {_n_xsec} 条已在其他板块推荐过(照推,明细见各行)。"
+               if _n_xsec else "")
             + (f"\n{freshness_gate.summary(len(group), _stale, _unknown)}"
                if freshness_gate.summary(len(group), _stale, _unknown) else "")}},
             # ★ **对标账号 / 对标数据 两列是 2026-10-16 补的**(用户口径:网盘监控只看 5 个东西 ——
@@ -783,6 +808,12 @@ def push_items(items: list[dict], settings, detail: dict | None = None,
                 _err = str(link.get("transfer_error") or "").strip()
                 _why = _err[:20] if _err else "库里没有这条资源"
                 cell = f"{name} · —({_md_safe(_why)})" + (f" {_when}" if _when else "")
+            #: ★★ 跨板块标注跟着**每条资源**走(2026-11-25):同一份资源在哪些板块出现过,
+            #: 是"这条要不要再点"的判断依据。放**资源格内**(与 `_when` 同一处),
+            #: 既不新增列(飞书卡片列宽已经排满),也不改变五要素版式。
+            _xnote = push_ledger.cross_section_note(it.get("_cross_sections") or [])
+            if _xnote:
+                cell += " · " + _md_safe(_xnote)
             # 「对标作品」:第一条原帖。**带文字**才看得出点了会去哪(纯 URL 在手机上看不清域名)
             su = [u for u in (it.get("sample_urls") or []) if u]
             work = f"[▶ 看作品]({_md_safe(su[0])})" if su else "—(源未给链接)"

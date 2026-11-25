@@ -911,6 +911,20 @@ def push_new_shares(items: list[dict], settings, session=None, user_id: int = 0)
                                           settings) if session is not None and user_id else (items, 0)
     if not items:
         return False
+    #: ★★ **跨板块标注**(2026-11-25,用户拍板「做降级标注」):这份资源在**别的板块**
+    #: 72h 内推过就标出来,**照推不拦** —— 用户口径「丢资源比重复推一遍严重得多」。
+    #: 身份 = `share_url`(`_PAN_KEYS` 里 `my_link`/`our_url`/`pan_url` 之后的兜底,
+    #: 这条链的转存行与源链行都落在它上面)⇒ 与 `drop_recent` **同一把尺子**,
+    #: 只是范围换成了"别的 section"。本板块内的重复已由上面那道闸管掉。
+    _n_xsec = 0
+    try:
+        if session is not None and user_id:
+            _n_xsec = push_ledger.annotate_cross_section(
+                items, push_ledger.cross_section_seen(session, user_id, "xunlei_group", items))
+    except Exception:  # noqa: BLE001 - 标注是旁路,查库失败照旧全推(与台账同一条纪律)
+        logger.warning("迅雷群跨板块标注失败(本批照常推)", exc_info=True)
+    if _n_xsec:
+        logger.info("迅雷群资源:%d 条已在其他板块推荐过(照推,卡面标注)", _n_xsec)
 
     from app.services.feishu._cards import _col_set_row, _md_safe, strip_others
     from app.services.feishu_client import FeishuClient
@@ -937,7 +951,10 @@ def push_new_shares(items: list[dict], settings, session=None, user_id: int = 0)
         + (f"\n**{_ai.summary()}**:已挡掉纯广告 / 无具体资源 / 过时的那些。"
            if _ai.summary() else "")
         + (f"\n已跳过 {_dup} 条 {int(getattr(settings, 'push_dedupe_hours', 24) or 0)} 小时内推过的。"
-           if _dup else "")}},
+           if _dup else "")
+        #: 顶部只报"几条",板块明细跟着每行走(与其它板块同一版式)。
+        + (f"\n其中 {_n_xsec} 条已在其他板块推荐过(照推,明细见各行)。"
+           if _n_xsec else "")}},
         # ⚠️ **不列来源群**:那是**别人的群名**,卡片是发到客户群看的(2026-10-02 用户口径
         # "不要带别人的关键词")—— 露出别人的群等于把人往别人那儿送。
         # ⚠️⚠️ **也不加「原文」列**(2026-10-16 用户拍板「**不露**」):这一张的"原文"
@@ -956,10 +973,14 @@ def push_new_shares(items: list[dict], settings, session=None, user_id: int = 0)
             _tail = " (源链,未转存)"
         elif _n_src:
             _tail = " (已转存)"
+        #: ★★ 跨板块标注(2026-11-25):写进**链接格**。客户要判断的是"这条要不要再点",
+        #: 而资源名本身不带这个信息(同一份资源换到别的板块,名字一模一样)。
+        _xnote = push_ledger.cross_section_note(it.get("_cross_sections") or [])
         elements.append(_col_set_row([
             (_md_safe(strip_others(it.get("title") or "")), 6),
             (f"[▶ 打开]({_md_safe(it.get('share_url') or '')})" + _tail
-             + (f" 🔑{_md_safe(it.get('code') or '')}" if it.get("code") else ""), 4)]))
+             + (f" 🔑{_md_safe(it.get('code') or '')}" if it.get("code") else "")
+             + (f" · {_md_safe(_xnote)}" if _xnote else ""), 4)]))
     card = {"config": {"wide_screen_mode": True},
             "header": {"template": "blue", "title": {"tag": "plain_text",
                                                       "content": f"📥 {brand + ' · ' if brand else ''}"
