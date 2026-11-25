@@ -473,6 +473,15 @@ class DouyinLead(Base):
     mark: Mapped[str] = mapped_column(String(64), default="")       # 《》里的口令
     title: Mapped[str] = mapped_column(String(255), default="")
     author: Mapped[str] = mapped_column(String(64), default="")     # 工具脱敏过的账号名
+    #: ★ **作者的 sec_uid**(2026-11-25)。`author` 那条**不可靠**:MediaCrawler 那条路
+    #: 给的是脱敏名(`贝***💫`),同名号也一大堆 ⇒ 拿名字当身份会认错人。
+    #: 这条链**本来就能拿到** sec_uid(`douyin_protocol_source` 从 `author.sec_uid` 取),
+    #: 只是一直没落库 —— 于是"这个推广号还发过什么"事后查不出来。
+    #: 用途:**对标号池的自动生长**(见 `douyin_peer_scan.grow_pool_from_leads`)。
+    #: ⚠️ **存量行留空** = 当时没记,补不出来(不许拿 `author` 反查,那要出网且不可靠)。
+    #: ⚠️ 写入前必须校验形态(`MS4wLjABAAAA…`):CDP 那条路的 `uid` 字段装的是**视频 id**,
+    #: 不过滤就会把 vid 当成 sec_uid 塞进来,池子立刻全是假号(见 `_SEC_UID_RE`)。
+    author_uid: Mapped[str] = mapped_column(String(128), default="", index=True)
     url: Mapped[str] = mapped_column(String(500), default="")
     keyword: Mapped[str] = mapped_column(String(64), default="")    # 搜哪个词搜出来的
     share_count: Mapped[int] = mapped_column(Integer, default=0)    # **转发量**(转化代理)

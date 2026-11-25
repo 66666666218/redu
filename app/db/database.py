@@ -500,7 +500,11 @@ ADDITIONS: dict[str, list[str]] = {
                      # ⇒ "失败 7 条为什么"查不出来,只能猜。
                      "last_error VARCHAR(200) DEFAULT ''",
                      # "真的试过"几次(2026-10-07):从此"试过一次就判死"改成"试够 N 次才放弃"。
-                     "kouling_tries INTEGER DEFAULT 0"],
+                     "kouling_tries INTEGER DEFAULT 0",
+                     # **作者的 sec_uid**(2026-11-25):对标号池自动生长的唯一可用身份。
+                     # 存量行留空 = 当时没记(那时也没落这一列),**补不出来** ——
+                     # 拿脱敏的 `author` 反查会认错人(同名号一大堆)。
+                     "author_uid VARCHAR(128) DEFAULT ''"],
     # 迅雷群分享的**首次搬成时刻**(2026-10-07)。⚠️ 别用 `synced_at` 顶 ——
     # 那一列每轮采集都刷新,减出来的"搬成耗时"会随重跑次数变大。
     # `source_pushed_at`(2026-11-23,盘满直推):这条**没转存、但已按源链推给客户**的时刻。

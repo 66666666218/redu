@@ -81,6 +81,21 @@ def _lead_mark(text: str, masked_name: str = "") -> str:
 _RE_PAN_URL = re.compile(
     r"https?://[^\s\"'<>]*?(?:pan\.quark\.cn|drive\.uc\.cn|pan\.baidu\.com|pan\.xunlei\.com)[^\s\"'<>]*")
 
+#: ★ **作者 sec_uid 的形态**(2026-11-25,对标号池自动生长要拿它当身份)。
+#: 实测抖音的 sec_uid 一律以 `MS4wLjABAAAA` 开头、总长 80+ 字符。
+#: ⚠️ **必须校验,不能"是 uid 字段就存"**:两条取数路给的 `uid` 语义不同 ——
+#:   ① `douyin_protocol_source`:`author.sec_uid`(真 sec_uid)@ 404 行;
+#:   ② `douyin_cdp_source`:**视频 id**(`"uid": vid` @ 418 行)。
+#: CDP 那批**只在协议整体失败时才出现**(回落路),但一旦混进池子,
+#: `douyin_peer_scan` 会拿视频 id 去开主页 —— 每轮全是失败,而且看着像"号被限"。
+_SEC_UID_RE = re.compile(r"^MS4wLjABAAAA[A-Za-z0-9_-]{10,}$")
+
+
+def _sec_uid_of(raw) -> str:
+    """`uid` 字段 → **可信的** sec_uid;不是这个形态的一律返回 `""`(见 `_SEC_UID_RE`)。"""
+    s = str(raw or "").strip()
+    return s if _SEC_UID_RE.match(s) else ""
+
 #: 出现这些词才把《…》当成**口令**(而不是剧名)。见 `pan_of`。
 _KOU_HINTS = ("口令", "咐置", "付置", "叩苓", "网盘", "提取码", "复制这段", "复制链接",
               "链接自取", "资源自取", "自取")
@@ -587,6 +602,9 @@ def collect_leads(keywords: list[str], limit: int = 30, platform: str = "douyin"
                     # MediaCrawler 那条是**脱敏**的(如「籽***」)—— 推送卡片的"作者列"
                     # 因此可能显示星号;看到星号先看运行记录的来源标签,别以为解析坏了。
                     "author": name,
+                    #: ★ **作者身份**(2026-11-25):`author` 会脱敏/会重名,不能当身份。
+                    #: `_sec_uid_of` 会把 CDP 那条路的**视频 id** 过滤成空串(见它的说明)。
+                    "author_uid": _sec_uid_of(h.get("uid")),
                     "keyword": h.get("keyword", ""),
                     # 转发量(结算用):衡量**这个资源在抖音有多热**;⚠️ 是**别人视频**的数,
                     # 不等于我们自己发文的转化(见 DouyinLead/lead_settlement 的口径说明)。
@@ -1579,6 +1597,14 @@ def _save_leads(session, user_id: int, leads: list[dict]) -> int:
         row.mark = str(ld.get("mark") or "")[:64]
         row.title = str(ld.get("title") or "")[:255]
         row.author = str(ld.get("author") or "")[:64]
+        #: ⚠️ **空串不许覆盖已有的值**(2026-11-25):同一视频会被多轮/多词命中,
+        #: 而回落路的 CDP 给不出 sec_uid(被 `_sec_uid_of` 滤成空)——
+        #: 无条件写就会把协议那轮已经存好的真 sec_uid **擦掉**。
+        #: 这与 `row.publish_at` 那条"取不到就留空"的口径**相反**,是有意的:
+        #: 空在这里的语义是"这次没拿到",不是"这条没有"。
+        _au = _sec_uid_of(ld.get("author_uid"))
+        if _au:
+            row.author_uid = _au[:128]
         row.url = str(ld.get("url") or "")[:500]
         row.keyword = str(ld.get("keyword") or "")[:64]
         row.share_count = int(ld.get("share_count") or 0)
@@ -1973,12 +1999,23 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
         return False
     # ★ **新鲜度闸门**(2026-10-29):采集侧已有 7 天窗口,这里**再兜一道** ——
     # 采集窗口可配置、推送窗口也要可配置;两处口径同源(`PUSH_FRESH_DAYS`)。
+    # ★★ **2026-11-25:抖音线索改用专属窗口** `douyin_leads_push_fresh_days`(默认 3 天,
+    # 用户口径「近三天的都可以推送监控」)。`0` = 回落 `push_fresh_days`(不是关闸)。
+    # ⚠️ **只动抖音线索这一条** —— `split_fresh` 是各板块共用的,所以天数由**这里**传进去,
+    # 不去改 `freshness_gate` 的全局默认(那会顺手把知乎/公众号/大瓜一起收紧)。
+    # ⚠️⚠️ **必须按 `platform` 判**:本函数是 `leads_platforms` 里**所有平台共用**的
+    # (`kuaishou`/`xiaohongshu`/`weibo`/`bilibili`/`zhihu`/`tieba` 都从这出) ——
+    # 不判平台就会把它们的推送闸一起从 7 天收到 3 天,而配置名与用户口径都只说抖音。
+    # 现在生产 `leads_platforms=douyin` 只是**恰好**看不出来,改配置那天才会炸。
     from app.services import freshness_gate
 
-    leads, _stale, _unknown = freshness_gate.split_fresh(leads, settings)
+    _own_days = 0
+    if platform == "douyin":
+        _own_days = int(getattr(settings, "douyin_leads_push_fresh_days", 0) or 0)
+    _days = _own_days or int(getattr(settings, "push_fresh_days", 7) or 0)
+    leads, _stale, _unknown = freshness_gate.split_fresh(leads, settings, days=_days)
     if not leads:
-        logger.info("抖音线索:%d 条全是 %d 天前的旧内容,本轮不推", _stale,
-                    int(getattr(settings, "push_fresh_days", 7) or 0))
+        logger.info("抖音线索:%d 条全是 %d 天前的旧内容,本轮不推", _stale, _days)
         return False
 
     # ★ **AI 价值筛选**(2026-10-29,用户口径「每个板块都加上 AI 筛选」)。

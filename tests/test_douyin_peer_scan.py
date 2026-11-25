@@ -964,3 +964,196 @@ def test_anchor_does_not_use_protocol_window_min(session, monkeypatch) -> None:
     res = dps.run_for_user(session, 1, _F())
     assert [w["aweme_id"] for w in seen] == ["7000000000000000006"], "窗口外的无时间作品不许被误杀"
     assert res["stale"] == 0 and res["stale_anchor"] == 0, res
+
+
+# ------------------------------------------------ 号池自动生长(2026-11-25 用户口径)
+# 「对标号只是暂时的 我们要能主动发现新的 而不是只靠对标号」
+# 纯读库扩池:发过 ≥N 条带盘线索的作者 ⇒ 直接进池。下面是它的判据边界。
+
+def _lead(session, uid: str, aweme_id: str, *, mark: str = "某口令", our_url: str = "",
+          author: str = "甲", days_ago: int = 0) -> None:
+    from datetime import datetime, timedelta
+
+    from app.db.models import DouyinLead
+
+    session.add(DouyinLead(
+        user_id=1, aweme_id=aweme_id, author=author, author_uid=uid, mark=mark,
+        our_url=our_url, title="t", found_at=datetime.now() - timedelta(days=days_ago)))
+    session.commit()
+
+
+def _acct_raw(session, uid: str, name: str, *, status: str = "active",
+              days_ago: int = 30) -> CrossPlatformAccount:
+    from datetime import datetime, timedelta
+
+    row = CrossPlatformAccount(
+        user_id=1, platform="douyin", uid=uid, name=name,
+        url=f"https://www.douyin.com/user/{uid}", status=status,
+        discovered_at=datetime.now() - timedelta(days=days_ago))
+    session.add(row)
+    session.commit()
+    return row
+
+
+def _peer_work(session, uid: str, vid: str, *, pan: bool = False) -> None:
+    from datetime import datetime
+
+    session.add(DouyinPeerWork(
+        user_id=1, aweme_id=vid, account_uid=uid, account_name="甲", title="t",
+        url=f"https://d/{vid}", niche="小游戏",
+        mark=("某口令" if pan else ""), pan_url="",
+        first_seen_at=datetime.now()))
+    session.commit()
+
+
+def test_grow_pool_adds_authors_with_repeated_pan_leads(session) -> None:
+    """**发了 ≥2 条带盘线索**的作者才入池 —— 1 条可能是搬运/偶发。
+
+    同时验来源可查(`hit_keyword`),否则事后答不出"这个号是怎么进池的"。
+    """
+    keep = "MS4wLjABAAAAgrow000001"
+    _lead(session, keep, "g1")
+    _lead(session, keep, "g2")
+    lonely = "MS4wLjABAAAAgrow000002"
+    _lead(session, lonely, "g3")          # 只有 1 条 ⇒ 不入池
+
+    got = dps.grow_pool_from_leads(session, 1, _S())
+    session.commit()
+    assert [a["uid"] for a in got["added"]] == [keep]
+    assert got["added"][0]["leads"] == 2
+    rows = {r.uid: r for r in session.scalars(select(CrossPlatformAccount)).all()}
+    assert rows[keep].status == "active" and rows[keep].hit_keyword == "线索作者"
+    assert lonely not in rows
+
+
+def test_grow_pool_requires_pan_and_skips_bad_shape(session) -> None:
+    """两条**静默失效**的防线,各验一边:
+
+    · 没有 `mark`/`our_url` 的线索**不算带盘**(那只是普通视频,不是推广);
+    · `uid` 不是 `MS4wLjABAAAA…` 形态的一律跳过 —— CDP 那条路这个字段装的是**视频 id**,
+      放进来就会拿 vid 去开主页(每轮全失败,看着像"号被限")。
+    """
+    plain = "MS4wLjABAAAAplain00001"
+    _lead(session, plain, "p1", mark="", )
+    _lead(session, plain, "p2", mark="")
+    #: 带 `our_url` 但没有 `mark` 的**算**带盘(已搬成的那档)。
+    moved = "MS4wLjABAAAAmoved00001"
+    _lead(session, moved, "p3", mark="", our_url="https://pan.quark.cn/s/X")
+    _lead(session, moved, "p4", mark="", our_url="https://pan.quark.cn/s/Y")
+    #: 视频 id 冒充 uid。
+    _lead(session, "7381234567890123456", "p5")
+    _lead(session, "7381234567890123456", "p6")
+
+    got = dps.grow_pool_from_leads(session, 1, _S())
+    session.commit()
+    assert [a["uid"] for a in got["added"]] == [moved]
+    assert got["skipped"] == 1
+    assert session.scalar(select(CrossPlatformAccount).where(
+        CrossPlatformAccount.uid == plain)) is None
+
+
+def test_grow_pool_caps_new_accounts_per_round(session) -> None:
+    """每轮最多 `douyin_peer_grow_max_new` 个(默认 3)—— 一次灌满会把单轮时长顶爆。"""
+    for i in range(5):
+        u = f"MS4wLjABAAAAmany{i:06d}"
+        _lead(session, u, f"m{i}a")
+        _lead(session, u, f"m{i}b")
+    got = dps.grow_pool_from_leads(session, 1, _S())
+    assert len(got["added"]) == 3
+
+
+def test_grow_pool_does_not_revive_paused_accounts(session) -> None:
+    """已 `paused` 的号**不自动复活** —— 人工停用是有原因的(体检停掉的那 9 个误加号)。"""
+    paused = "MS4wLjABAAAArevive0001"
+    _lead(session, paused, "r1")
+    _lead(session, paused, "r2")
+    _acct(session, uid=paused, name="人工停用的", status="paused")
+
+    got = dps.grow_pool_from_leads(session, 1, _S())
+    session.commit()
+    assert got["added"] == []
+    assert session.scalar(select(CrossPlatformAccount).where(
+        CrossPlatformAccount.uid == paused)).status == "paused"
+
+
+def test_grow_pool_switch_off_is_noop(session) -> None:
+    """`douyin_peer_grow_enabled=False` ⇒ 一条不读、一条不写(对既有扫描零影响)。"""
+    _lead(session, "MS4wLjABAAAAoff0000001", "o1")
+    _lead(session, "MS4wLjABAAAAoff0000001", "o2")
+
+    class _Off(_S):
+        douyin_peer_grow_enabled = False
+
+    assert dps.grow_pool_from_leads(session, 1, _Off()) == {
+        "added": [], "retired": [], "skipped": 0}
+    assert session.scalars(select(CrossPlatformAccount)).all() == []
+
+
+def test_retire_pauses_only_old_zero_pan_accounts(session) -> None:
+    """清退的**三个条件缺一不可**:入池满 N 天 + 扫到过作品 + 带盘产出为 0。
+
+    ⚠️ "一个作品都没扫到"的**不清退** —— 那是打不开(验证码/号没了),不是不发;
+    清掉就再也看不见它,而它可能正是被风控卡住的好号。
+    """
+    dead = "MS4wLjABAAAAdie0000001"       # 老号 + 有作品 + 零带盘 ⇒ 停用
+    good = "MS4wLjABAAAAlive000001"       # 老号 + 有作品 + 有带盘 ⇒ 留
+    broken = "MS4wLjABAAAAdead000001"    # 老号 + 一个作品都没扫到 ⇒ 留(打不开)
+    fresh = "MS4wLjABAAAAnew0000001"     # 新号 + 零带盘 ⇒ 留(观察窗口)
+    _acct_raw(session, dead, "零产出")
+    _acct_raw(session, good, "好号")
+    _acct_raw(session, broken, "打不开")
+    _acct_raw(session, fresh, "刚入池", days_ago=1)
+    _peer_work(session, dead, "w1")
+    _peer_work(session, good, "w2", pan=True)
+    _peer_work(session, fresh, "w3")
+
+    got = dps.grow_pool_from_leads(session, 1, _S())
+    session.commit()
+    assert [r["uid"] for r in got["retired"]] == [dead]
+    status = {r.uid: r.status for r in session.scalars(select(CrossPlatformAccount)).all()}
+    assert status == {dead: "paused", good: "active",
+                      broken: "active", fresh: "active"}
+
+
+def test_tick_grows_pool_before_scanning(session, monkeypatch) -> None:
+    """★ 生长发生在**扫描之前**,所以新号当轮就能进 `target_accounts`;
+    且**不能拖垮扫描**(生长抛错 → 本轮照常扫已有号)。"""
+    calls: list = []
+    monkeypatch.setattr(dps, "grow_pool_from_leads",
+                        lambda s, u, st: calls.append("grow") or
+                        {"added": [{"uid": "MS4wLjABAAAAn1", "name": "新号", "leads": 2}],
+                         "retired": [], "skipped": 0})
+    monkeypatch.setattr(dps, "run_for_user", lambda s, u, st: calls.append("scan") or {
+        "accounts": 0, "works": 0, "new": 0, "pushed": False, "baselines": [],
+        "failed": [], "stale": 0, "stale_unknown": 0, "stale_anchor": 0,
+        "fresh_unknown": 0, "no_pan": 0, "pending": 0})
+    monkeypatch.setattr("app.db.get_session_local", lambda: lambda: session)
+    monkeypatch.setattr("app.services.tenant_base._record_run", lambda *a, **k: None)
+
+    class _T(_S):
+        douyin_peer_enabled = True
+
+    assert dps.douyin_peer_tick(_T()) == 0
+    assert calls == ["grow", "scan"], calls
+
+
+def test_tick_survives_grow_failure(session, monkeypatch) -> None:
+    """长池**抛错不许挡住扫描** —— 它是锦上添花,扫已有号才是主线。"""
+
+    def _boom(*a, **k):
+        raise RuntimeError("库挂了")
+
+    calls: list = []
+    monkeypatch.setattr(dps, "grow_pool_from_leads", _boom)
+    monkeypatch.setattr(dps, "run_for_user", lambda s, u, st: calls.append("scan") or {
+        "accounts": 0, "works": 0, "new": 0, "pushed": False, "baselines": [],
+        "failed": [], "stale": 0, "stale_unknown": 0, "stale_anchor": 0,
+        "fresh_unknown": 0, "no_pan": 0, "pending": 0})
+    monkeypatch.setattr("app.db.get_session_local", lambda: lambda: session)
+    monkeypatch.setattr("app.services.tenant_base._record_run", lambda *a, **k: None)
+
+    class _T(_S):
+        douyin_peer_enabled = True
+
+    assert dps.douyin_peer_tick(_T()) == 0
+    assert calls == ["scan"], calls

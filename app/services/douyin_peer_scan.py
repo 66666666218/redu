@@ -45,7 +45,7 @@ import time
 import urllib.parse
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.utils import get_logger
 
@@ -265,6 +265,139 @@ def _rows_to_works(rows: list[dict], account: dict, limit: int) -> list[dict]:
     return out
 
 
+# ---------------------------------------------------------------- 号池自动生长
+
+#: 号池身份(2026-11-25)。与 `CrossPlatformAccount.uid` 同一口径:sec_uid。
+#: ⚠️ 别拿 `author`(昵称)当身份 —— 它会脱敏(`贝***💫`)、会重名,而且改名就失真。
+_SEC_UID_RE = re.compile(r"^MS4wLjABAAAA[A-Za-z0-9_-]{10,}$")
+
+
+def _is_sec_uid(s: str) -> bool:
+    return bool(_SEC_UID_RE.match(str(s or "").strip()))
+
+
+def grow_pool_from_leads(session, user_id: int, settings) -> dict:
+    """**从线索作者里自动长出对标号**(2026-11-25,用户口径
+    「对标号只是暂时的 我们要能主动发现新的 而不是只靠对标号」)。
+
+    ## 为什么走这条路而不是"再去搜一遍号"
+
+    抖音搜索**本来就把作者 sec_uid 给了我们**(`douyin_protocol_source` 从
+    `author.sec_uid` 取),只是一直没落库 —— 于是近 14 天 **2035 条线索、
+    1641 个不同作者**全部白扔,而号池只有 13 个(其中 9 个还是误加的普通号)。
+
+    判据用的是**已经发生过的事实**,不是猜:
+      · 这个号**发过带网盘凭据的推广帖**(线索本身就是这个含义);
+      · 而且**发了 ≥ `douyin_peer_grow_min_leads` 次**(1 次可能是搬运/转发,
+        多次才是"他就是干这行的")。
+    ⇒ **零额外请求**:不开搜索、不开主页,纯读库。
+
+    ## 与 `discover_candidates` 的分工
+
+    `discover_candidates` 是"拿关键词去搜号"(要开浏览器、一轮 2~4 分钟、有风控代价),
+    适合**手工补池**;本函数是**每轮自动跑**的那条 —— 便宜到可以搭在 `douyin_peer_tick` 上。
+    两者不冲突:先按本函数长,长不出来(池子空了/某赛道没有)再用脚本搜。
+
+    ## 清退(同一个函数里做,别分家)
+
+    号池**不能只长不剪**:2026-11-25 体检时 17 个号里 9 个是零带盘产出的普通号
+    (`#美发小技巧`/`麦冬种植技术`),它们靠"30 天带盘绝对条数"排序时还挤占了名额。
+    清退判据(全部满足才停用,任一不满足就留着):
+      · 入池满 `douyin_peer_retire_after_days` 天(给新号一个建立基线+发新作的窗口);
+      · 扫到过作品(基线已建)—— 一个作品都扫不到的号是"打不开",不是"不发" ⇒ 不动它;
+      · 带盘产出 **0**。
+    ⚠️ 停用 = `status="paused"`(**不是删除**):`target_accounts` 只取 active,
+    而 paused 留着仍可人工 `--uid` 重新启用,也保留了历史作品行。
+    """
+    from sqlalchemy import func
+
+    from app.db.models import CrossPlatformAccount, DouyinLead, DouyinPeerWork
+
+    if not bool(getattr(settings, "douyin_peer_grow_enabled", True)):
+        return {"added": [], "retired": [], "skipped": 0}
+
+    days = max(1, int(getattr(settings, "douyin_peer_grow_days", 14) or 14))
+    min_leads = max(1, int(getattr(settings, "douyin_peer_grow_min_leads", 2) or 2))
+    max_add = max(0, int(getattr(settings, "douyin_peer_grow_max_new", 3) or 0))
+    since = datetime.now() - timedelta(days=days)
+
+    #: 已有号(任何状态)⇒ 不重复加。**已 paused 的也不自动复活** ——
+    #: 人工停用是有原因的(实测那 9 个是误加的普通号),自动复活会把它们又拖回来。
+    known = {u for u in session.scalars(select(CrossPlatformAccount.uid).where(
+        CrossPlatformAccount.user_id == user_id,
+        CrossPlatformAccount.platform == "douyin")).all() if u}
+
+    #: 候选 = 近 N 天**带盘凭据**的线索作者,按条数降序。
+    #: ⚠️ 只认 `author_uid`(真 sec_uid);`author` 名字列**不参与**(会脱敏/重名)。
+    rows = session.execute(
+        select(DouyinLead.author_uid, DouyinLead.author, func.count(DouyinLead.id))
+        .where(DouyinLead.user_id == user_id,
+               DouyinLead.author_uid != "",
+               DouyinLead.found_at >= since,
+               #: 带盘判据与线索链同源:`mark`(《》/咐置口令)或 `our_url`(已搬成)。
+               #: 不数 `pan_url` —— `DouyinLead` 这张表压根没有那一列。
+               (DouyinLead.mark != "") | (DouyinLead.our_url != ""))
+        .group_by(DouyinLead.author_uid, DouyinLead.author)
+        .order_by(func.count(DouyinLead.id).desc())
+        .limit(200)).all()
+
+    added: list[dict] = []
+    skipped = 0
+    for uid, name, n in rows:
+        uid = str(uid or "").strip()
+        #: 形态校验(见 `douyin_leads._sec_uid_of`):脏值是**静默**的,一行都不该进池。
+        if not _is_sec_uid(uid):
+            skipped += 1
+            continue
+        if uid in known:
+            continue
+        if int(n or 0) < min_leads:
+            continue
+        if len(added) >= max_add:
+            break
+        session.add(CrossPlatformAccount(
+            user_id=user_id, platform="douyin", uid=uid,
+            name=str(name or "")[:128],
+            url=_PROFILE_URL.format(uid=uid),
+            #: `hit_keyword` 记来源 —— 与手工加的 `manual` / 搜号来的 `网盘资源` 分开,
+            #: 这样"这个号是怎么进池的"事后查得出来(体检时正需要这个)。
+            hit_keyword="线索作者",
+            snippet=f"近{days}天带盘线索{n}条", status="active"))
+        known.add(uid)
+        added.append({"uid": uid, "name": str(name or ""), "leads": int(n or 0)})
+
+    #: ---- 清退 ----
+    retire_days = int(getattr(settings, "douyin_peer_retire_after_days", 7) or 0)
+    retired: list[dict] = []
+    if retire_days > 0:
+        cut = datetime.now() - timedelta(days=retire_days)
+        pan_by_uid = dict(session.execute(
+            select(DouyinPeerWork.account_uid, func.count()).where(
+                DouyinPeerWork.user_id == user_id,
+                or_(DouyinPeerWork.mark != "", DouyinPeerWork.pan_url != ""))
+            .group_by(DouyinPeerWork.account_uid)).all())
+        works_by_uid = dict(session.execute(
+            select(DouyinPeerWork.account_uid, func.count())
+            .where(DouyinPeerWork.user_id == user_id)
+            .group_by(DouyinPeerWork.account_uid)).all())
+        for a in session.scalars(select(CrossPlatformAccount).where(
+                CrossPlatformAccount.user_id == user_id,
+                CrossPlatformAccount.platform == "douyin",
+                CrossPlatformAccount.status == "active")).all():
+            #: ① 入池太新 ⇒ 留着观察
+            if a.discovered_at is not None and a.discovered_at > cut:
+                continue
+            #: ② 一个作品都没扫到 ⇒ 是"打不开"(验证码/号没了),不是"不发" ⇒ 留着
+            if not int(works_by_uid.get(a.uid, 0)):
+                continue
+            #: ③ 有带盘产出 ⇒ 好号
+            if int(pan_by_uid.get(a.uid, 0)):
+                continue
+            a.status = "paused"
+            retired.append({"uid": a.uid, "name": a.name})
+    return {"added": added, "retired": retired, "skipped": skipped}
+
+
 # ---------------------------------------------------------------- 账号目标
 
 def target_accounts(session, user_id: int, settings) -> list[dict]:
@@ -288,7 +421,7 @@ def target_accounts(session, user_id: int, settings) -> list[dict]:
     if not rows:
         return []
     #: 历史产出:近 30 天**带盘**作品数(只读一次,别在排序里逐号查)。
-    from sqlalchemy import func, or_
+    from sqlalchemy import func
 
     cutoff = datetime.now() - timedelta(days=30)
     try:
@@ -1201,6 +1334,18 @@ def douyin_peer_tick(settings=None) -> int:
     try:
         for (uid,) in db.execute(select(User.id).where(User.enabled.is_(True))).all():
             try:
+                #: ★ **先长池、再扫**(2026-11-25):新长出来的号本轮就能进 `target_accounts`。
+                #: ⚠️⚠️ **必须在开浏览器之前 commit** —— `run_for_user` 要开页面(几十秒),
+                #: 若把长池的 INSERT 挂在那儿一起提交,SQLite 单写者的锁会被**抱满整段慢活**
+                #: (本仓栽过两次,见 `new-write-point-holds-lock-over-slowwork`)。
+                #: 顺序固定为:**读库算候选 → 写 → commit → 再做慢活**。
+                grow: dict = {}
+                try:
+                    grow = grow_pool_from_leads(db, uid, settings)
+                    db.commit()
+                except Exception:  # noqa: BLE001 - 长池失败不该挡住扫描本身
+                    db.rollback()
+                    logger.warning("对标号池自动生长失败(本轮照常扫已有号)", exc_info=True)
                 res = run_for_user(db, uid, settings)
                 db.commit()
                 #: ⚠️ **没配号时不要把 `作品0` 写进记录** —— 体检把「连续几轮 作品=0」判黄,
@@ -1210,6 +1355,16 @@ def douyin_peer_tick(settings=None) -> int:
                             f"推送{'成' if res['pushed'] else '无'}")
                 else:
                     note = "未配对标号(还没加号,本轮没扫)"
+                #: ★ **号池增减必须显形**(2026-11-25)。不写的话,"池子自己长了 2 个号"
+                #: 与"一直就这 4 个"在记录里长得一样 —— 而这条链的整个卖点就是"会自己长"。
+                _added = (grow or {}).get("added") or []
+                if _added:
+                    note += " · **新增长尾号:%s**" % ",".join(
+                        f"{a['name'] or a['uid']}(线索{a['leads']}条)" for a in _added)
+                _retired = (grow or {}).get("retired") or []
+                if _retired:
+                    note += " · 停用零产出:%s" % ",".join(
+                        str(r.get("name") or r.get("uid")) for r in _retired)
                 if res.get("baselines"):
                     #: ⚠️ **必须写出来**:首次扫描只建基线、不推,不说就会被读成"没扫到"。
                     note += f" **建基线:{','.join(res['baselines'])}**"

@@ -596,6 +596,44 @@ def test_aweme_id_extracted_from_video_url() -> None:
     assert dl._aweme_id("https://www.douyin.com/user/abc") == ""
 
 
+def test_sec_uid_of_filters_video_id() -> None:
+    """★ `uid` 字段**不能直接当 sec_uid 存**(2026-11-25)。
+
+    两条取数路语义不同:`douyin_protocol_source` 给 `author.sec_uid`,
+    `douyin_cdp_source` 给的是 **`"uid": vid`(视频 id)**。不过滤就会拿 vid 去开主页,
+    对标号池立刻全是假号 —— 而且失败长得像"号被限",最难查。
+    """
+    real = "MS4wLjABAAAAtest0123456789abcdef"
+    assert dl._sec_uid_of(real) == real
+    assert dl._sec_uid_of("  MS4wLjABAAAAtest0123456789abcdef  ") == real
+    assert dl._sec_uid_of("7412345678901234567") == ""      # 视频 id
+    assert dl._sec_uid_of("MS4wLjABAAAA") == ""             # 只有前缀、后面空
+    assert dl._sec_uid_of("") == ""
+    assert dl._sec_uid_of(None) == ""
+
+
+def test_save_leads_keeps_known_author_uid_when_this_round_has_none(session) -> None:
+    """**空值不许覆盖已有 sec_uid**(2026-11-25)。
+
+    同一视频会被多轮/多词命中;回落路的 CDP 给不出 sec_uid(被滤成空),
+    无条件写就会把协议那轮已经存好的真 sec_uid **擦掉** —— 池子随即丢掉这个号。
+    ⚠️ 这与 `publish_at` 的"取不到就留空"口径**相反**,是有意的:空 = 这次没拿到。
+    """
+    from app.db.models import DouyinLead
+
+    real = "MS4wLjABAAAAtest0123456789abcdef"
+    dl._save_leads(session, 1, [{"aweme_id": "900", "mark": "m", "title": "t",
+                                 "author": "甲", "author_uid": real, "url": "u"}])
+    session.commit()
+    #: 第二轮:CDP 回落,uid 是视频 id ⇒ 被滤成空 ⇒ 不许清掉上一轮的值。
+    dl._save_leads(session, 1, [{"aweme_id": "900", "mark": "m", "title": "t2",
+                                 "author": "甲***", "author_uid": "7412345678901234567",
+                                 "url": "u"}])
+    session.commit()
+    row = session.query(DouyinLead).one()
+    assert row.author_uid == real and row.title == "t2"
+
+
 def test_save_leads_is_idempotent_and_keeps_share_count(session) -> None:
     """同一作品重复发现只存一条(幂等 upsert),转发量要落下来 —— 它是结算要用的量级代理。"""
     from app.db.models import DouyinLead
@@ -2188,6 +2226,76 @@ def test_push_leads_drops_stale_items(monkeypatch) -> None:
                          "publish_at": int(time.time()) - 10 * 86400}],
                        _S(), session=None, user_id=1)
     assert ok is False and "card" not in sent
+
+
+def _capture_cards(monkeypatch) -> list:
+    from app.services import feishu_client
+
+    cards: list = []
+
+    class _C:
+        def __init__(self, webhook, secret):
+            pass
+
+        def send_card(self, card):
+            cards.append(card)
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+    return cards
+
+
+def _lead_at(age_days: float, mark: str) -> dict:
+    import time
+
+    return {"mark": mark, "title": f"《{mark}》下载", "url": f"https://d/{mark}",
+            "author": "甲", "keyword": "k",
+            "publish_at": int(time.time()) - int(age_days * 86400)}
+
+
+def test_push_leads_own_three_day_window(monkeypatch) -> None:
+    """★★ 2026-11-25 用户口径「**近三天的都可以推送监控**」:抖音线索的推送闸 3 天。
+
+    与 `douyin_leads_max_age_days`(采集闸 7 天)**不是同一个闸** —— 那条决定"收不收",
+    这条决定"发给客户什么"。实测代价:近 14 天 467 条有发布时间的线索,
+    3 天窗口留 296 条(**63.4%**),砍掉的 36.6% 是 3 天以上的存量。
+    """
+    cards = _capture_cards(monkeypatch)
+
+    class _W(_Settings):
+        douyin_leads_push_fresh_days = 3
+
+    assert dl.push_leads([_lead_at(2, "两天前的")], _W(), session=None, user_id=1) is True
+    assert dl.push_leads([_lead_at(4, "四天前的")], _W(), session=None, user_id=1) is False
+    assert len(cards) == 1, "只有 2 天前那条该推到卡上"
+
+
+def test_push_leads_window_falls_back_to_global(monkeypatch) -> None:
+    """`douyin_leads_push_fresh_days=0` ⇒ 回落 `push_fresh_days`(**不是关闸**)。
+
+    ⚠️ 这条同时守住"只收紧抖音线索"的边界:没配专属值时口径与其它板块一致(默认 7 天)。
+    """
+    cards = _capture_cards(monkeypatch)
+
+    class _Fallback(_Settings):
+        douyin_leads_push_fresh_days = 0
+        push_fresh_days = 7
+
+    assert dl.push_leads([_lead_at(4, "四天前的")], _Fallback(),
+                         session=None, user_id=1) is True
+    assert len(cards) == 1
+
+    #: ★★ 反方向:**不是抖音的平台口径不许被捎带着收紧** —— 本函数是所有平台共用的
+    #: (`leads_platforms` 里每个平台都从这出),3 天窗口的配置名与用户口径都只说抖音。
+    class _Others(_Settings):
+        douyin_leads_push_fresh_days = 3      #: 就算配了 3,快手也不许跟着变
+        push_fresh_days = 7
+
+    assert dl.push_leads([_lead_at(4, "四天前的")], _Others(),
+                         session=None, user_id=1, platform="kuaishou") is True
+    #: 同一条线索走抖音 ⇒ 被 3 天闸挡住(证明差异来自 platform,不是别的)。
+    assert dl.push_leads([_lead_at(4, "四天前的")], _Others(),
+                         session=None, user_id=1, platform="douyin") is False
 
 
 def test_push_leads_splits_actionable_and_benchmark_cards(session, monkeypatch) -> None:
