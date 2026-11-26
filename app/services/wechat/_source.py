@@ -1163,6 +1163,23 @@ def retire_dormant_benchmarks(session, user_id: int, settings=None) -> list[str]
     **安全阀(关键)**:先确认近期监听链路是活的(近 N 天有 wechat_listen 成功记录)——
     否则 Cookie 故障期间所有号的 last_item_at 都不动,会被整体误判成"死号"一起停掉。
     停用即 active=False(不监听);号复活需人工恢复(前端可见"已停用"状态)。
+
+    ★★ 2026-11-26 补两刀 —— **这条清理此前一直在误杀,不是"也许"是实测**:
+    回填脚本 11-26 救回 67 个哑号,其中 **51 个早已被这里停用**(`created_at` 全 > 7 天、
+    `last_item_at` 恒 NULL)。死的不是号,是"我们根本没问过它":
+
+      ① **没有可用源的号**(`biz`/`weread_book_id` 都空,或 `biz` 是源不认的形态)
+         从来没被监听问过 —— ⓪ 分支要 `feed_biz`,① 分支要 `weread_book_id`,两处都进不去,
+         只 +1 一个 `no_free_source`。⇒ `last_item_at` 永远 NULL ⇒ 建号满 N 天必被停用,
+         而**补上 biz 的那天它已经 active=False 了,监听轮只取 active** ⇒ 白填。
+         它们的沉默是"没接上源",不是"停更"。留着不花任何额度(cover 根本不会被调用)。
+      ② **有源但一次都没答上过**(`miss_count == 0` 且 `last_item_at is None`)同样不能停 ——
+         `miss_count` 只在"源正面回答过这个号"时才 +1(cover 答了/书架确认没更新),
+         恒为 0 等于**我们从未从它身上拿到过任何答案**(额度紧张时几十轮轮不到它、
+         或 cover 一直被挡)。拿"没答案"当"停更"正是静默失败那一族。
+         实测判据:395/398/399/400 四个号 11-19 建号、今天才补上 biz,cover 全答得出
+         最新一篇,差一晚就被这条停掉。宽限到 **3N 天**——过了还一次没答上(cover 恒空 /
+         id 无效)才按死号处理,否则这类行会永远占着每轮一次 cover。
     """
     from datetime import datetime, timedelta
 
@@ -1188,10 +1205,24 @@ def retire_dormant_benchmarks(session, user_id: int, settings=None) -> list[str]
         or_(WechatBenchmark.last_item_at < cutoff,
             and_(WechatBenchmark.last_item_at.is_(None),
                  WechatBenchmark.created_at < cutoff)))).all()
+    #: 宽限期:有源但**从未答上过**的号不算"停更",按 N×3 天再判
+    never_answered_cutoff = datetime.now() - timedelta(days=days * 3)
     names = []
+    skipped_no_source = 0
+    skipped_never = 0
     for b in rows:
+        if not feed_biz(b) and not str(b.weread_book_id or "").strip():
+            skipped_no_source += 1
+            continue
+        if b.last_item_at is None and not (b.miss_count or 0):
+            if b.created_at and b.created_at >= never_answered_cutoff:
+                skipped_never += 1
+                continue
         b.active = False
         names.append(str(b.nickname or b.id))
+    if skipped_no_source or skipped_never:
+        logger.info("死号清理 user=%s:停用 %d;跳过无可用源 %d、从未答上(宽限 %d 天)%d",
+                    user_id, len(names), skipped_no_source, days * 3, skipped_never)
     if names:
         session.commit()
     return names

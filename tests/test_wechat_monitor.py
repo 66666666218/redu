@@ -4552,10 +4552,13 @@ def test_retire_dormant_benchmarks_with_safety_valve(session) -> None:
 
     old = dt.now() - timedelta(days=10)
     fresh = dt.now() - timedelta(days=1)
-    b_dead = WechatBenchmark(user_id=1, nickname="沉睡号", anchor_url="", last_item_at=old)
-    b_alive = WechatBenchmark(user_id=1, nickname="活跃号", anchor_url="", last_item_at=fresh)
+    b_dead = WechatBenchmark(user_id=1, nickname="沉睡号", anchor_url="", last_item_at=old,
+                             biz="MP_WXS_1", weread_book_id="MP_WXS_1", miss_count=9)
+    b_alive = WechatBenchmark(user_id=1, nickname="活跃号", anchor_url="", last_item_at=fresh,
+                              biz="MP_WXS_2", weread_book_id="MP_WXS_2")
     b_never = WechatBenchmark(user_id=1, nickname="从无文号", anchor_url="", last_item_at=None,
-                              created_at=old)
+                              biz="MP_WXS_3", weread_book_id="MP_WXS_3", created_at=old,
+                              miss_count=3)
     session.add_all([b_dead, b_alive, b_never])
     session.commit()
 
@@ -4563,7 +4566,7 @@ def test_retire_dormant_benchmarks_with_safety_valve(session) -> None:
     names0 = retire_dormant_benchmarks(session, 1, _settings())
     assert names0 == [] and b_dead.active is True
 
-    # 有成功监听记录 → 正常清理(沉睡 + 从未有文的都停;活跃不动)
+    # 有成功监听记录 → 正常清理(沉睡 + 有过答案的从无文号都停;活跃不动)
     session.add(RunRecord(user_id=1, run_id="r1", kind="wechat_listen", status="success",
                           started_at=dt.now() - timedelta(hours=2)))
     session.commit()
@@ -4577,6 +4580,61 @@ def test_retire_dormant_benchmarks_with_safety_valve(session) -> None:
     b_dead.active = True
     session.commit()
     assert retire_dormant_benchmarks(session, 1, _settings(wechat_dormant_retire_days=0)) == []
+
+
+def test_retire_dormant_不杀没有源的号_silent_begin(session) -> None:
+    """★★ 2026-11-26 实测的误杀:没有可用源的号**永远** last_item_at=NULL。
+
+    ⓪ 分支要 `feed_biz`、① 分支要 `weread_book_id`,两个都空的号在监听里只 +1 个
+    `no_free_source` ⇒ 建号满 7 天必被停用,而回填脚本补上 biz 的那天它已经 active=False,
+    监听轮只取 active ⇒ **51 个补完的号白填**。它们的沉默是"没接上源",不是"停更"。
+    """
+    from datetime import datetime as dt, timedelta
+
+    from app.services.wechat._source import retire_dormant_benchmarks
+
+    old = dt.now() - timedelta(days=40)
+    no_src = WechatBenchmark(user_id=1, nickname="哑号", anchor_url="", created_at=old)
+    bad_shape = WechatBenchmark(user_id=1, nickname="biz形态不对", anchor_url="", created_at=old,
+                                biz="MjM5MjAxNDM4MA==")          # base64 __biz,源不认
+    session.add_all([no_src, bad_shape])
+    session.add(RunRecord(user_id=1, run_id="r1", kind="wechat_listen", status="success",
+                          started_at=dt.now() - timedelta(hours=2)))
+    session.commit()
+
+    assert retire_dormant_benchmarks(session, 1, _settings()) == []
+    assert no_src.active is True and bad_shape.active is True
+
+
+def test_retire_dormant_不杀从没答上过的号(session) -> None:
+    """`miss_count` 只在"源正面回答过"时 +1 ⇒ 恒为 0 = 我们**从未**拿到过答案。
+
+    拿"没答案"当"停更"= 静默失败那一族。实测 395/398/399/400 今天补上 biz、
+    cover 全答得出最新一篇,却因为 11-19 建号已满 7 天,差一晚就被这条停掉。
+    这类行宽限到 3N 天,过了还一次没答上才按死号处理。
+    """
+    from datetime import datetime as dt, timedelta
+
+    from app.services.wechat._source import retire_dormant_benchmarks
+
+    young = dt.now() - timedelta(days=10)         # 7 天 < 10 天 < 21 天(3N)
+    ancient = dt.now() - timedelta(days=40)       # > 21 天:宽限已过,确实问不动
+    never = WechatBenchmark(user_id=1, nickname="刚补上源", anchor_url="", created_at=young,
+                            biz="MP_WXS_9", weread_book_id="MP_WXS_9", last_item_at=None)
+    answered = WechatBenchmark(user_id=1, nickname="问过但一直没新文", anchor_url="",
+                               created_at=young, biz="MP_WXS_8",
+                               weread_book_id="MP_WXS_8", last_item_at=None, miss_count=27)
+    hopeless = WechatBenchmark(user_id=1, nickname="宽限过完仍无答案", anchor_url="",
+                               created_at=ancient, biz="MP_WXS_7",
+                               weread_book_id="MP_WXS_7", last_item_at=None)
+    session.add_all([never, answered, hopeless])
+    session.add(RunRecord(user_id=1, run_id="r1", kind="wechat_listen", status="success",
+                          started_at=dt.now() - timedelta(hours=2)))
+    session.commit()
+
+    assert set(retire_dormant_benchmarks(session, 1, _settings())) == {
+        "问过但一直没新文", "宽限过完仍无答案"}
+    assert never.active is True and answered.active is False and hopeless.active is False
 
 
 # ---- 候选自动收录(2026-10-01):无链接候选 → 补进 WeRSS 订阅池 → 监听接上 ----

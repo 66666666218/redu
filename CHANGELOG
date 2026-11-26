@@ -1,3 +1,26 @@
+- [2026-11-26 19:40] FIX: 死号清理在**误杀**——把「我们没问过它」当成「它停更了」
+  ## 症状(实测,不是推测)
+  今天 `backfill_benchmark_ids.py --apply` 救回 67 个哑号,其中 **51 个早已 `active=False`**
+  (吱号 164→97 时一起发现的)。它们 `created_at` 全部 > 7 天、`last_item_at` 恒 NULL,
+  于是每天 05:30 的 `retire_dormant_benchmarks` 按「7 天无发文」把它们停掉。
+  ⇒ **补上 biz 的那一刻已经 `active=False`,而监听轮只取 `active=True` ⇒ 51 个白填。**
+  ## 死因不是「停更」,是我们从没问过
+  - **无可用源**:`biz`(`feed_biz` 只认 `MP_WXS_*`)与 `weread_book_id` 都空 ⇒ ⓪ 分支进不去、
+    ① 分支也进不去,每轮只 +1 个 `no_free_source` ⇒ `last_item_at` 永远是 NULL ⇒ 建号满 N 天必死。
+  - **有源但一次没答上**:`miss_count` 只在「源正面回答过」时才 +1,恒 0 = 我们从未拿到答案
+    (额度紧时几十轮轮不到它)。实测 395/398/399/400 今天补 biz、cover 全答得出最新一篇,
+    11-19 建号差一晚就被停。
+  - 反证:现有 73 个 active 号里 **34 个 `last_item_at` 同样是 NULL**,只因建号不满 7 天。
+  ## 修法(`_source.retire_dormant_benchmarks`)
+  - 没有可用源 ⇒ **永不按「无发文」停用**(它们的沉默是「没接上源」;留着不花额度,cover 不会被调用);
+  - 有源但从未答上(`last_item_at is None` 且 `miss_count == 0`)⇒ **宽限 3N 天**再判,
+    否则这类行会永远占着每轮一次 cover;
+  - 其余判据不变(链路安全阀、`wechat_dormant_retire_days` 开关、停用不删行)。
+  ## 实测
+  修后用真库试跑(事务内 rollback):**会被停用的 = 0 个**(修前 8 个,其中 4 个 cover 有内容)。
+  新增 2 条测试(无源不杀 / 从未答上宽限);`tests/test_wechat_monitor.py` 180 passed。
+  (Files: app/services/wechat/_source.py, tests/test_wechat_monitor.py)
+
 - [2026-11-26 19:10] DOCS: 订正 wemp 凭据的**过期结论** —— 「别叫人重扫」已不成立,现在确实要人扫码
   ## 症状
   `chain_health` 的「限流(可等)」分支写死了一句「**凭据现在本来就是好的** … ⇒ **别再去重扫**」,
