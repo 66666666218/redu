@@ -237,6 +237,40 @@ class TestErrors:
         """★ 反例:`success=True` 但没 items = **真的没有**,要返回空而不是抛错。"""
         assert self._run(monkeypatch, _Resp(payload=_ok())) == []
 
+    def test_互动数一次拿全(self, monkeypatch) -> None:
+        """★ **能拿的拿**(2026-11-26):`note_card.interact_info` 就在**同一次响应**里。
+
+        四个指标(赞/藏/评/转)都在,而旧代码一个都没读 ⇒ 小红书的推送卡
+        「对标数据」列只有点赞(页面路)或干脆空(协议路)。
+        """
+        payload = {"success": True, "code": 0, "data": {"items": [{
+            "id": "n0", "note_card": {
+                "display_title": "标题甲",
+                "user": {"nickname": "某人", "user_id": "7"},
+                "interact_info": {"liked_count": "1.3万", "collected_count": "842",
+                                  "comment_count": "56", "share_count": "12"}}}]}}
+        assert self._run(monkeypatch, _Resp(payload=payload))[0]["metrics"] == {
+            "liked_count": 13000, "collected_count": 842,
+            "comment_count": 56, "share_count": 12}
+
+    def test_互动数缺项不许变成0(self, monkeypatch) -> None:
+        """`"0"` 与 `""` 是两回事:前者确实是 0,**后者是平台没给** ⇒ 不放进去。
+
+        (渲染侧 0 会显示成 0,缺失显示 `—` —— 铁律见 `_metric_int`)
+        """
+        payload = {"success": True, "code": 0, "data": {"items": [{
+            "id": "n0", "note_card": {
+                "display_title": "标题甲",
+                "user": {"nickname": "某人", "user_id": "7"},
+                "interact_info": {"liked_count": "7", "collected_count": "",
+                                  "comment_count": None}}}]}}
+        m = self._run(monkeypatch, _Resp(payload=payload))[0]["metrics"]
+        assert m == {"liked_count": 7}, m
+
+    def test_没有interact_info时metrics是空字典(self, monkeypatch) -> None:
+        rows = self._run(monkeypatch, _Resp(payload=_ok("甲")))
+        assert rows[0]["metrics"] == {}
+
 
     def test_账号没权限要单独说清并标需人工(self, monkeypatch) -> None:
         """★ **`-104 没有权限访问`** 是**账号级风控**,与签名无关。

@@ -395,6 +395,37 @@ def _publish_at(text: str) -> int:
     return 0
 
 
+#: 卡片里**点赞那一行**的样子:`13.4万` / `7.4万` / `123`(`_metric_int` 认得这些形态)。
+_LIKES_LINE_RE = re.compile(r"^[\d.]+\s*[万wWkK]?$")
+
+
+def _likes_of(text: str) -> int | None:
+    """从搜索卡文字里取**点赞数**;判不出返回 `None`(不是 0)。
+
+    ★ 2026-11-26「能拿的拿」:这条路的卡片**一直就带着点赞数**,只是从来没人读
+    ⇒ 抖音线索在台账里互动列全空、卡片上只看得到转发。
+
+    ⚠️ 卡片布局实测是 `时长 / 点赞 / 标题 / @作者 / 时间`(见 `_publish_at` 的说明),
+    所以只看**前 3 行**;带冒号的是时长(`06:22`),直接跳过。
+    ⚠️ **纯数字**只认前 2 行 —— 标题里出现一个孤零零的 `3` 不该被当成点赞数;
+    带 `万/k` 量词的行不受这个限制(标题里几乎不会单独成行写 `7.4万`)。
+    """
+    from app.services.mediacrawler_source import _metric_int
+
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    for i, ln in enumerate(lines[:3]):
+        if ":" in ln:
+            continue                       #: 时长(`06:22`)
+        if not _LIKES_LINE_RE.match(ln):
+            continue
+        if i >= 2 and not re.search(r"[万wWkK]", ln):
+            continue                       #: 第 3 行起只认带量词的,别把标题数字当点赞
+        n = _metric_int(ln)
+        if n is not None:
+            return n
+    return None
+
+
 def _rows_of(raw: dict, keyword: str) -> list[dict]:
     """页面原始行 → 上层统一的记录形状(**同一个作品 id 只留第一条**)。"""
     out: list[dict] = []
@@ -407,6 +438,8 @@ def _rows_of(raw: dict, keyword: str) -> list[dict]:
         name = str(r.get("author") or "").strip()
         text = str(r.get("text") or "")
         publish_at = _publish_at(text)          #: ⚠️ 必须在剔掉作者行**之前**取(时间在它后面)
+        #: ★ 点赞数同理 —— 也在原始正文里,别等下面剔行之后再读(2026-11-26)
+        likes = _likes_of(text)
         if name:
             #: 把作者那一行 `@昵称` 从正文里剔掉(它已经在 `name` 里了,卡片会单独显示)。
             #: ⚠️⚠️ **但行里的口令/盘链必须留下**(2026-10-29 实测):实测有一批单机游戏号
@@ -426,6 +459,9 @@ def _rows_of(raw: dict, keyword: str) -> list[dict]:
             "keyword": keyword,
             #: ★ 缺了它,`collect_leads` 会把整条当"判不出发布时间"丢掉(见 `_publish_at`)。
             "publish_at": publish_at,
+            #: ★ **点赞**(2026-11-26):卡片上本来就有,之前读完就扔。
+            #: 取不到就是**空 dict**(台账/卡片渲染成 `—`),不填 0。
+            "metrics": {"liked_count": likes} if likes is not None else {},
         })
     return out
 

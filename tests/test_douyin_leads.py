@@ -2689,6 +2689,56 @@ class TestContinuationEpisodes:
         assert stats["cont"] == 1 and stats["old"] == 1
 
 
+class TestMetricsPassThrough:
+    """★ **取数层采全的互动数要一路传到台账**(2026-11-26「能拿的拿」)。
+
+    以前这里只挑走 `share_count` ⇒ 推送台账里抖音 80 行**互动列全空**、
+    卡片上也只看得到转发 —— 而协议路其实**早就采全了**四个指标。
+    """
+
+    def _row(self, **kw):
+        base = {"snippet": "《某资源》教程", "url": "https://www.douyin.com/video/9",
+                "publish_at": 1999999999, "name": "某号"}
+        base.update(kw)
+        return base
+
+    def test_四个指标原样带下去(self, session, monkeypatch) -> None:
+        from app.services import douyin_leads as dl
+
+        monkeypatch.setattr(dl, "_max_age_ts", lambda s: 0)
+        monkeypatch.setattr(dl, "_min_publish_ts", lambda s: 0)
+        monkeypatch.setattr(dl, "_collect", lambda *a, **k: ([self._row(
+            metrics={"liked_count": 88, "collected_count": 7,
+                     "comment_count": 3, "share_count": 12},
+            share_count=12)], "协议"))
+
+        leads, _ = dl.collect_leads(["词"], session=session)
+        assert leads[0]["metrics"] == {"liked_count": 88, "collected_count": 7,
+                                       "comment_count": 3, "share_count": 12}
+        assert leads[0]["share_count"] == 12
+
+    def test_只有摊平的share_count也能进metrics(self, session, monkeypatch) -> None:
+        """MediaCrawler / CDP 那条路可能只摊平给 `share_count` —— 不能因此丢掉。"""
+        from app.services import douyin_leads as dl
+
+        monkeypatch.setattr(dl, "_max_age_ts", lambda s: 0)
+        monkeypatch.setattr(dl, "_min_publish_ts", lambda s: 0)
+        monkeypatch.setattr(dl, "_collect", lambda *a, **k: ([self._row(share_count=5)], "CDP"))
+
+        leads, _ = dl.collect_leads(["词"], session=session)
+        assert leads[0]["metrics"] == {"share_count": 5}
+
+    def test_一个数都没有就是空dict不是零(self, session, monkeypatch) -> None:
+        from app.services import douyin_leads as dl
+
+        monkeypatch.setattr(dl, "_max_age_ts", lambda s: 0)
+        monkeypatch.setattr(dl, "_min_publish_ts", lambda s: 0)
+        monkeypatch.setattr(dl, "_collect", lambda *a, **k: ([self._row()], "CDP"))
+
+        leads, _ = dl.collect_leads(["词"], session=session)
+        assert leads[0]["metrics"] == {}
+
+
 def test_大瓜轮用大瓜向的词(session, monkeypatch) -> None:
     """★ 2026-11-02:十二轮「类目大瓜」共 232 条线索,赛道几乎全是漫剧 —— 词源不对。
 

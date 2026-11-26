@@ -509,6 +509,7 @@ def pending(session, user_id: int) -> list[dict]:
              "mark": r.mark or "", "pan_url": r.pan_url or "",
              "publish_at": r.publish_at,               # 新鲜度闸门用它(不看 `first_seen_at`)
              "first_seen_at": r.first_seen_at,          # 判"等太久了"要用(见 `run_for_user`)
+             #: ★ 台账(`push_ledger._FLAT_METRIC_KEYS`)直接吃这个摊平键(2026-11-26)。
              "liked_count": r.likes} for r in rows]
 
 
@@ -867,7 +868,9 @@ def fetch_work_pan(works: list[dict], settings, *, user_id: int = 1,
 
 
 def fetch_publish_times(accounts: list[dict], settings, session, *, user_id: int = 1,
-                        count: int = 30) -> tuple[dict[str, datetime], dict[str, int]]:
+                        count: int = 30,
+                        metrics_out: dict[str, dict] | None = None
+                        ) -> tuple[dict[str, datetime], dict[str, int]]:
     """`({aweme_id: 发布时间}, {aweme_id: 雪花 vid})` —— **纯协议**拉每个号的作品列表。
 
     ## 为什么必须补这一步(2026-11-09 用户反映「好多都是老资源」)
@@ -905,6 +908,10 @@ def fetch_publish_times(accounts: list[dict], settings, session, *, user_id: int
 
     ⚠️ **拿不到 ≠ 老**:失败的号直接跳过,它们的作品留 `publish_at=None`,
     由调用方按 `douyin_peer_fresh_allow_unknown` 决定推不推(默认放行)。
+
+    ★ **`metrics_out`(2026-11-26)**:同一个响应里每条作品都带 `statistics`
+    (`digg/collect/comment/share`),顺手捎回 `{aweme_id: metrics}` —— **零额外请求**。
+    以前这一步**只取发布时间**,那几个数读完就扔 ⇒ 对标号卡与台账只有"点赞"一格。
     """
     from app.services import demand_watch
 
@@ -926,6 +933,8 @@ def fetch_publish_times(accounts: list[dict], settings, session, *, user_id: int
             ts = int(it.get("publish_at") or 0)
             if ts > 0:
                 times[str(it["aweme_id"])] = datetime.fromtimestamp(ts)
+            if metrics_out is not None and isinstance(it.get("metrics"), dict):
+                metrics_out[str(it["aweme_id"])] = it["metrics"]
             try:
                 vids[str(it["aweme_id"])] = int(it["aweme_id"])
             except (TypeError, ValueError):
@@ -1050,6 +1059,18 @@ def push_works(works: list[dict], settings, session=None, user_id: int = 0) -> b
             url = _md_safe(w.get("url") or "")
             work = f"[{title}]({url})" if url else title
             likes = int(w.get("likes") or 0)
+            #: ★ **「点赞」列扩成互动列**(2026-11-26「能拿的拿」):协议响应里赞/藏/评/转
+            #: 全都有,以前只留点赞那一格(见 `fetch_publish_times` 的 `metrics_out`)。
+            #: ⚠️ `↗N` 仍是**第一个**且写法不变(既有口径 + `tests/test_douyin_peer_scan.py`
+            #: 钉着 `↗17000`),其余指标跟在后面;一个数都没有就 `—`。
+            _m = w.get("metrics") if isinstance(w.get("metrics"), dict) else {}
+            if _m and not likes:
+                likes = int(_m.get("liked_count") or 0)
+            _extra = " ".join(f"{ico}{int(_m[k])}" for k, ico in
+                              (("comment_count", "💬"), ("collected_count", "⭐"),
+                               ("share_count", "🔁"))
+                              if int(_m.get(k) or 0) > 0)
+            _heat = (f"↗{likes}" if likes else "—") + (f" {_extra}" if _extra else "")
             #: ★ 账号名**可点主页**(2026-10-29):看到一个新号想追,点一下就到它的主页,
             #: 不用再去抖音里搜名字(同名号还一堆)。
             acct = _md_safe(w.get("account_name") or "—") or "—"
@@ -1067,7 +1088,7 @@ def push_works(works: list[dict], settings, session=None, user_id: int = 0) -> b
                 (work, 5),
                 (_res, 2),
                 (_md_safe(niche), 1),
-                (f"↗{likes}" if likes else "—", 1)]))
+                (_heat, 1)]))
     card = {"config": {"wide_screen_mode": True},
             "header": {"template": "purple",
                        "title": {"tag": "plain_text",
@@ -1104,7 +1125,11 @@ def run_for_user(session, user_id: int, settings) -> dict:
     #: ★ 2026-11-12:同时取**协议里带 create_time 的 vid 集合** —— 协议只看得见最新
     #:   ~30 条,CDP 抓的 50~80 条大多没有时间;用「已知过老的 vid」当天花板
     #:   (雪花 vid 单调),低于它的**必是更老的作品**,不再靠 `allow_unknown` 放行。
-    pub_times, proto_vids = fetch_publish_times(accts, settings, session, user_id=user_id)
+    #: ★ 顺手把协议里的**互动数**也带回来(2026-11-26「能拿的拿」)——
+    #: 同一个响应,零额外请求;`_rows_to_works` 只能从主页卡片文字里读到点赞。
+    proto_metrics: dict[str, dict] = {}
+    pub_times, proto_vids = fetch_publish_times(accts, settings, session, user_id=user_id,
+                                                metrics_out=proto_metrics)
 
     from app.db.models import DouyinPeerWork
 
@@ -1177,8 +1202,15 @@ def run_for_user(session, user_id: int, settings) -> dict:
         #: 基线判据 = **这个号在作品表里一条都没有**(不是"本轮没扫到"),见纪律 1。
         seen_before = seen_map.get(acct["uid"], False)
         #: ★ 把权威发布时间挂到作品上(取不到的留空,不编)。
+        #: ★ 同时补**协议里的互动数**(2026-11-26):主页卡片只有点赞,
+        #: 协议同一个响应里赞/藏/评/转全有 ⇒ 覆盖掉 `_rows_to_works` 那格单薄的 `likes`。
+        #: ⚠️ 协议只为最新 ~30 条给 statistics,更老的作品取不到就**保持原样**(不填 0)。
         for w in got:
             w["publish_at"] = pub_times.get(str(w["aweme_id"]))
+            _pm = proto_metrics.get(str(w["aweme_id"]))
+            if _pm:
+                w["metrics"] = dict(_pm)
+                w["likes"] = int(_pm.get("liked_count") or w.get("likes") or 0)
         new_works.extend(record_new(session, user_id, got, baseline=not seen_before,
                                     keep=baseline_push))
         if not seen_before and got:

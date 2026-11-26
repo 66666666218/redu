@@ -389,6 +389,32 @@ def test_search_bilibili_videos_strips_em_and_keeps_keyword(monkeypatch) -> None
     assert out[0]["publish_at"] == 1759800000
 
 
+def test_search_bilibili_videos_reading_all_metrics(monkeypatch) -> None:
+    """★ **能拿的拿**(2026-11-26):B站搜索响应里一直有 `like`,此前没读。
+
+    `play`/`review`/`favorites`/`like` 四项同一个响应就给全了 ⇒ 全收;
+    `danmaku`(弹幕)**不收** —— `metrics_md` 没有它的图标位,收了也是静默丢掉。
+    """
+    payload = {"code": 0, "data": {"result": [
+        {"bvid": "BV2", "title": "资源", "author": "某人", "pubdate": 1759800000,
+         "play": 12000, "review": 34, "favorites": 210, "like": 560,
+         "danmaku": 99}]}}
+    monkeypatch.setattr(cp, "_bili_signed_get", lambda *a, **k: payload)
+    m = cp.search_bilibili_videos("资源")[0]["metrics"]
+    assert m == {"play_count": 12000, "comment_count": 34,
+                 "collected_count": 210, "liked_count": 560}, m
+    assert "danmaku" not in m
+
+
+def test_search_bilibili_videos_tolerates_dash_metrics(monkeypatch) -> None:
+    """★ B站对个别条会把计数写成 `"--"` —— 裸 `int()` 会抛,把**整次搜索**打挂。"""
+    payload = {"code": 0, "data": {"result": [
+        {"bvid": "BV3", "title": "资源", "author": "某人",
+         "play": 7, "review": "--", "favorites": None, "like": "--"}]}}
+    monkeypatch.setattr(cp, "_bili_signed_get", lambda *a, **k: payload)
+    assert cp.search_bilibili_videos("资源")[0]["metrics"] == {"play_count": 7}
+
+
 def test_search_bilibili_videos_raises_on_risk_control(monkeypatch) -> None:
     """风控 `code=-412` 必须**抛**,不能返回空列表 —— 否则"被拦"会被当成"这资源没人推"。"""
     monkeypatch.setattr(cp, "_bili_signed_get",

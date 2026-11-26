@@ -1,3 +1,35 @@
+- [2026-11-26 10:23] FEAT: 互动指标「能拿的拿」—— 小红书/抖音/B站把已经在响应里的赞藏评转全接进 metrics
+  用户口径「能拿的拿」:凡是平台**已经在响应里给**的量,就别再只挑一个。动画源盘点后按
+  「零额外请求」原则逐条补齐(每一处都不新增一次请求,风控面不变):
+  ## 1. 小红书页面/CDP 路(`xhs_page_source._card_rows`)
+  卡片 DOM **只渲染点赞那格**,收藏/评论根本不在卡上;而页面自己的搜索响应就在
+  `window.__INITIAL_STATE__.search.feeds[].noteCard.interactInfo` 里。新增
+  `_interact_by_note()`:只从第 0 张卡 `evaluate` **一次**捞全表,按 note id 索引,
+  补 `collected_count`/`comment_count`,`liked_count` 仍以 DOM 为准(状态对象兜底)。
+  ⚠️ 任何一步不成立(替身无 `evaluate`/页面未 hydrate)都**安静回 `{}`** ⇒ 老路径一个字节不变
+  (那 4 条精确相等断言照旧绿)。CDP 路**共用** `_card_rows`,自动受益。
+  ## 2. 小红书纯协议路(`xhs_protocol_source`)
+  `note_card.interact_info` 就在**同一次搜索响应**里(历史样本 692 条:赞 93.4%/藏 92.1%/
+  评 90.0%/转 88.4%),此前一个都没读。过 `_metric_int` 认 `1.3万`,缺项不填 0。
+  ## 3. B站(`cross_accounts.search_bilibili_videos`)
+  同一个搜索响应里一直有 `like`,补 `liked_count`;顺手把裸 `int()` 换成 `_metric_int`
+  —— 实测有个别条回「--」,裸 `int` 会抛、把**整次搜索**打挂。`danmaku` 不收
+  (`metrics_md` 没有图标位,收了也是静默丢掉)。
+  ## 4. 抖音线索链(`douyin_leads.collect_leads` + 卡片)
+  取数层**早就采全了**四个指标,但 `collect_leads` 只挑走 `share_count` ⇒ 台账抖音 80 行
+  互动列全空。现在 `metrics` 整包往下传(含摊平兜底);卡片**六列版式不变**,
+  「转发数」列扩成互动列:`↗N` 仍是第一个,💬/⭐/🔁 跟后面,一个数都没有就 `—`。
+  ## 5. 抖音需求链(`demand_watch.fetch_author_posts` + 最新大瓜卡)
+  主页接口 `aweme_list[].statistics` 一直有 digg/collect/comment/share,此前不读。
+  ⇒ 「最新大瓜」卡每行末尾附 `metrics_md`(拿不到就不加,不占位)。
+  ## 6. 抖音对标号(`douyin_peer_scan`)
+  `fetch_publish_times` 新增 `metrics_out` 出参:同一个 `aweme/posts` 响应顺手捎回
+  `{aweme_id: metrics}`,在写库前覆盖 `_rows_to_works` 那格单薄的 `likes`;
+  卡片「点赞」列扩成互动列(`↗N` 写法不变,`tests` 那条 `↗17000` 照旧)。
+  ## 未做(以及为什么)
+  快手 `commentCount` **不落盘**(MediaCrawler store 只映射 like/view,那是 tools/ 下
+  被 .gitignore 的第三方代码,补丁入不了库);贴吧 presence 路开 detail 要**每帖一次请求**,
+  与「零额外请求」冲突 —— 留作人工拍板项。播放量对小红书/抖音仍是平台私有,拿不到。
 - [2026-11-26 07:42] FIX: 盘满直推源链的口径补齐 —— presence 五板块不再谎报「我方链」+ 公众号盘满先判后跳
   用户口径(早已定过):「盘满了就跳过转存、直接推送到客户群」。上一轮我把「带盘产出下滑」
   归成了「不可修的资源瓶颈」,被当场纠正 —— 盘满时的**行为**是产品规则,必须逐条通道落地。

@@ -2129,17 +2129,34 @@ def fetch_author_posts(sec_uid: str, count: int = 20, cursor: int = 0,
     if r.status_code != 200 or d.get("status_code") not in (0, None):
         return {"ok": False, "items": [],
                 "error": f"HTTP {r.status_code} status={d.get('status_code')}"}
+    from app.services.mediacrawler_source import _metric_int
+
     out = []
     for a in (d.get("aweme_list") or []):
         vid = str(a.get("aweme_id") or "")
         if not vid:
             continue
         author = a.get("author") if isinstance(a.get("author"), dict) else {}
+        #: ★ **互动数**(2026-11-26「能拿的拿」):`aweme_list` 每条都带 `statistics`
+        #: (`digg_count`/`collect_count`/`comment_count`/`share_count`) ——
+        #: 这个响应我们**早就在发**,只是从来没读那几个字段。
+        #: ⚠️ 归一后键名必须与 `mediacrawler_source._METRIC_KEYS` 一致(喂 `conversion`)。
+        #: ⚠️ 取不到/解析不出 **一律不放进去**,绝不填 0。
+        stats = a.get("statistics") if isinstance(a.get("statistics"), dict) else {}
+        metrics: dict[str, int] = {}
+        for src, dst in (("play_count", "play_count"), ("digg_count", "liked_count"),
+                         ("collect_count", "collected_count"),
+                         ("comment_count", "comment_count"),
+                         ("share_count", "share_count")):
+            n = _metric_int(stats.get(src))
+            if n is not None:
+                metrics[dst] = n
         out.append({"aweme_id": vid,
                     "desc": str(a.get("desc") or "").strip(),
                     "publish_at": int(a.get("create_time") or 0),
                     "author": str(author.get("nickname") or ""),
-                    "url": f"https://www.douyin.com/video/{vid}"})
+                    "url": f"https://www.douyin.com/video/{vid}",
+                    "metrics": metrics})
     return {"ok": True, "items": out, "error": ""}
 
 
@@ -2207,12 +2224,18 @@ def discover_latest(db, user_id: int = 1, settings=None) -> list[dict]:
 
 def build_latest_card(items: list[dict]) -> dict:
     """「最新大瓜」卡:时间 + 作者 + 标题(点标题看原视频)。"""
+    from app.services.feishu._cards import metrics_md
+
     lines = []
     for it in items:
         ts = datetime.fromtimestamp(it["publish_at"]) if it.get("publish_at") else None
         when = ts.strftime("%m-%d %H:%M") if ts else "—"
         desc = (it.get("desc") or "").replace("\n", " ")[:52] or "(无描述)"
-        lines.append(f"`{when}` **{it.get('author') or '—'}**  [{desc}]({it.get('url')})")
+        #: ★ **互动数**(2026-11-26):主页接口本来就把 `statistics` 给全了。
+        #: 拿不到时 `metrics_md` 回 `—`,不占额外位置(与别的卡同一套图标)。
+        heat = metrics_md(it.get("metrics") or {})
+        lines.append(f"`{when}` **{it.get('author') or '—'}**  [{desc}]({it.get('url')})"
+                     + (f" · {heat}" if heat != "—" else ""))
     return {
         "config": {"wide_screen_mode": True},
         "header": {"template": "red",

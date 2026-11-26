@@ -873,6 +873,53 @@ def test_fetch_publish_times_reads_create_time(monkeypatch) -> None:
     assert "v1" not in vids
 
 
+def test_fetch_publish_times_顺手带回互动数(monkeypatch) -> None:
+    """★ **能拿的拿**(2026-11-26):同一个响应里每条作品都带 `statistics`。
+
+    以前这一步**只取 `create_time`**,那几个数读完就扔 ⇒ 对标号卡与台账只有"点赞"一格。
+    """
+    from app.services import demand_watch
+
+    def _fake(uid, **kw):
+        return {"ok": True, "items": [
+            {"aweme_id": "9", "publish_at": 1_700_000_000,
+             "metrics": {"liked_count": 88, "comment_count": 3,
+                         "collected_count": 7, "share_count": 2}},
+            {"aweme_id": "10", "publish_at": 0},          #: 没有 statistics 就不进
+        ]}
+
+    monkeypatch.setattr(demand_watch, "fetch_author_posts", _fake)
+    monkeypatch.setattr(dps.time, "sleep", lambda *_: None)
+    got: dict = {}
+    _REAL_FETCH_PUBLISH_TIMES([{"uid": "ok", "name": "甲"}], _S(), None,
+                              user_id=1, metrics_out=got)
+    assert got == {"9": {"liked_count": 88, "comment_count": 3,
+                         "collected_count": 7, "share_count": 2}}
+
+
+def test_push_works_card_shows_all_metrics(monkeypatch) -> None:
+    """对标号卡:「点赞」列扩成互动列,`↗N` 仍是第一个(既有口径不变)。"""
+    from app.services import feishu_client
+
+    sent: dict = {}
+
+    class _C:
+        def __init__(self, *a) -> None: ...
+        def send_card(self, card):
+            sent["card"] = card
+            return True
+
+    monkeypatch.setattr(feishu_client, "FeishuClient", _C)
+    works = [{"aweme_id": "1", "url": "https://d/1", "title": "资源", "likes": 12,
+              "niche": "小游戏", "account_name": "甲", "author": "甲",
+              "metrics": {"liked_count": 12, "comment_count": 3,
+                          "collected_count": 7, "share_count": 2}}]
+    assert dps.push_works(works, _S()) is True
+    text = str(sent["card"])
+    assert "↗12" in text, "点赞仍是第一个、写法不变"
+    assert "💬3" in text and "⭐7" in text and "🔁2" in text, text
+
+
 def test_snowflake_anchor_judges_old_without_time(session, monkeypatch) -> None:
     """★ **雪花锚点**(2026-11-12):协议只看得见最新 ~30 条,CDP 抓 50~80 条 ——
     交集极小(实测土豆号 77 条里只 1 条),其余全靠 `allow_unknown` 放行 = 老资源全推。

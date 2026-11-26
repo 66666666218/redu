@@ -629,9 +629,15 @@ class _FakeCard:
 
     def __init__(self, href: str | None, text: str,
                  author: str | None = None, title: str | None = None,
-                 like: str | None = None) -> None:
+                 like: str | None = None, state: dict | None = None) -> None:
         self._href, self._text = href, text
         self._author, self._title, self._like = author, title, like
+        #: `_interact_by_note` 会从**第 0 张卡**上 `evaluate` 一次状态对象。
+        #: 不传就是 `{}` ⇒ 老用例的 DOM 路径一个字节不变。
+        self._state = state if state is not None else {}
+
+    def evaluate(self, js, arg=None):
+        return self._state
 
     def locator(self, sel: str) -> _FakeLocator:
         if sel == x.AUTHOR_SEL:
@@ -868,6 +874,63 @@ class TestCardRows:
                 return _Boom() if i == 1 else _FakeCard("/explore/ok", "好卡\n作者")
         rows = x._card_rows(_Cards(), "k")
         assert len(rows) == 2, "坏卡片要跳过,其余照收"
+
+
+class TestInteractFromInitialState:
+    """★ **收藏 / 评论**只能从页面状态对象里拿(2026-11-26「能拿的拿」)。
+
+    卡片 DOM 上**只渲染点赞那一格**(`LIKE_SEL`),收藏/评论根本不在卡片上;
+    而在 DOM 里拿只能点进笔记详情 ⇒ 一个词多 N 次请求。
+    页面自己的搜索响应里就有 `noteCard.interactInfo` ⇒ **零新请求**。
+
+    ⚠️ 这组用例盯的是「**增强不许打坏老路径**」:取不到状态对象时,DOM 点赞必须照旧。
+    """
+
+    @staticmethod
+    def _cards(state: dict):
+        return _FakeCards([_FakeCard("/explore/aaa", "标题\n作者甲\n4.5万",
+                                     author="作者甲", like="4.5万", state=state)])
+
+    def test_三个互动数一次拿全(self) -> None:
+        cards = self._cards({"aaa": {"liked": "4.5万", "collected": "1234",
+                                     "comment": "56"}})
+        assert x._card_rows(cards, "k")[0]["metrics"] == {
+            "liked_count": 45000, "collected_count": 1234, "comment_count": 56}
+
+    def test_收藏评论不带万也要认(self) -> None:
+        """值可能是**原始字符串**(`"1.3万"`),也可能已经是 int —— 交给 `_metric_int`。"""
+        cards = self._cards({"aaa": {"liked": 7, "collected": "1.3万", "comment": 0}})
+        m = x._card_rows(cards, "k")[0]["metrics"]
+        assert m["collected_count"] == 13000 and m["comment_count"] == 0
+        assert m["liked_count"] == 45000, "DOM 有数时以 DOM 为准"
+
+    def test_状态对象里没这张卡就只留DOM点赞(self) -> None:
+        cards = self._cards({"别的笔记": {"liked": "9", "collected": "9", "comment": "9"}})
+        assert x._card_rows(cards, "k")[0]["metrics"] == {"liked_count": 45000}
+
+    def test_状态对象是空的_老路径一个字节不变(self) -> None:
+        assert x._card_rows(self._cards({}), "k")[0]["metrics"] == {"liked_count": 45000}
+
+    def test_取不到状态对象也不炸(self) -> None:
+        """替身没有 `evaluate`(或页面还没 hydrate)⇒ 安静退回只读 DOM。"""
+        class _NoEval(_FakeCard):
+            evaluate = None                        #: `getattr` 拿到 None ⇒ 直接跳过
+
+        cards = _FakeCards([_NoEval("/explore/aaa", "标题\n作者\n123", like="123")])
+        assert x._card_rows(cards, "k")[0]["metrics"] == {"liked_count": 123}
+
+    def test_状态对象抛异常也不炸(self) -> None:
+        class _BoomEval(_FakeCard):
+            def evaluate(self, js, arg=None):
+                raise RuntimeError("页面已跳走")
+
+        cards = _FakeCards([_BoomEval("/explore/aaa", "标题\n作者\n123", like="123")])
+        assert x._card_rows(cards, "k")[0]["metrics"] == {"liked_count": 123}
+
+    def test_state里的空值不许变成0(self) -> None:
+        """`None` / 空串 = **平台没给**,不是"零人收藏"(铁律见 `_metric_int`)。"""
+        cards = self._cards({"aaa": {"liked": None, "collected": "", "comment": None}})
+        assert x._card_rows(cards, "k")[0]["metrics"] == {"liked_count": 45000}
 
 
 class TestBrowserStealth:

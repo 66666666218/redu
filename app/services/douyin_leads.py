@@ -596,6 +596,13 @@ def collect_leads(keywords: list[str], limit: int = 30, platform: str = "douyin"
         if not mark and not pan_url:
             continue          # 既没有口令、也没有盘链 → 不是线索
         seen.add(url)
+        #: ★ **互动数一路带下去**(2026-11-26「能拿的拿」):取数层其实**早就采全了**
+        #: (`douyin_protocol_source` 的 `digg/collect/comment/share`、
+        #: `douyin_cdp_source` 的卡片点赞),但这里原来**只挑走 `share_count`**
+        #: ⇒ 推送台账里抖音那 80 行**互动列全空**,卡片上也只看得到转发。
+        #: ⚠️ 只搬 dict,**不在这里补 0**:没有就是没有(`metrics_md` 会渲染成 `—`)。
+        _m = h.get("metrics") if isinstance(h.get("metrics"), dict) else {}
+        _sc = int(h.get("share_count") or 0) or int(_m.get("share_count") or 0)
         out.append({"mark": mark, "pan_url": pan_url,
                     "title": text[:120], "url": url,
                     # 账号名。⚠️ **取决于来源**(2026-10-08):纯协议给的是**真实昵称**,
@@ -608,7 +615,9 @@ def collect_leads(keywords: list[str], limit: int = 30, platform: str = "douyin"
                     "keyword": h.get("keyword", ""),
                     # 转发量(结算用):衡量**这个资源在抖音有多热**;⚠️ 是**别人视频**的数,
                     # 不等于我们自己发文的转化(见 DouyinLead/lead_settlement 的口径说明)。
-                    "share_count": int(h.get("share_count") or 0),
+                    "share_count": _sc,
+                    #: ★ 赞/藏/评/转**四个一起**往下传(台账与卡片都吃它)。见上面 `_m` 的说明。
+                    "metrics": dict(_m, **({"share_count": _sc} if _sc else {})),
                     "publish_at": int(h.get("publish_at") or 0),   # ★ 帖子发布时间(新鲜度的唯一依据)
                     "aweme_id": _aweme_id(url),         # 去重键(同一视频会被多个词命中)
                     "_rank": _lead_rank(text, name)})
@@ -2068,7 +2077,8 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
         return False
     leads = _ai.items
 
-    from app.services.feishu._cards import _col_set_row, _md_safe, strip_others
+    from app.services.feishu._cards import (_col_set_row, _md_safe, metrics_md,
+                                            strip_others)
     from app.services.feishu_client import FeishuClient
 
     label = (PLATFORMS.get(platform) or {}).get("label", platform)
@@ -2106,6 +2116,17 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
         work = f"[{shown}]({our})" if our else shown
         # 转发量**独立成列**;没有就不显示,不拿 0 冒充有数据。
         sc = int(ld.get("share_count") or 0)
+        #: ★ **「转发数」列扩成「互动」**[2026-11-26「能拿的拿」]。
+        #: ⚠️ **不改表头也不改列数**:`tests/test_douyin_leads.py` 钉着「六列 + 表头原文」
+        #: (用户 2026-10-04 定的版式),而这一列本来就是"这条有多热"的意思 ——
+        #: 赞/藏/评与转发并列显示,转发仍是**第一个**、`↗N` 的写法一个字不变。
+        #: 拿不到就整串 `—`(不填 0),与 `metrics_md` 同一条口径。
+        _m = dict(ld.get("metrics") or {})
+        if sc:
+            _m["share_count"] = sc
+        else:
+            _m.pop("share_count", None)
+        _heat = metrics_md(_m)
         # 「资源」列 = **只写盘名**(有链 ⇒ 🔴夸克/🔴迅雷/🔴百度;没链 ⇒ —)。
         _pan = _pan_name(_raw_our)
         #: ★ **区分我方链 / 作者链**(2026-10-30 用户「可以加上,但一定要确保是网盘链接」):
@@ -2118,7 +2139,7 @@ def push_leads(leads: list[dict], settings, platform: str = "douyin",
             (work, 5),
             (res, 2),
             (f"[▶视频]({vurl})" if vurl else "—", 2),
-            (f"↗{sc}" if sc else "—", 2),
+            (_heat, 2),
             (str(_counts.get(_res_key(ld), 1)), 1)])
 
 

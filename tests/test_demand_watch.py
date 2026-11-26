@@ -523,6 +523,44 @@ def test_最新大瓜卡片带时间作者与链接():
     assert "https://www.douyin.com/video/9" in body
 
 
+def test_主页接口的statistics要解成metrics(monkeypatch):
+    """★ **能拿的拿**(2026-11-26):`aweme_list` 每条都带 `statistics`,以前一个都不读。
+
+    ⇒ 「最新大瓜」卡与推送台账的互动数一直空着,而这个响应我们**早就在发**。
+    """
+    class _R:
+        status_code = 200
+
+        def json(self):
+            return {"status_code": 0, "aweme_list": [
+                {"aweme_id": "9", "desc": "新瓜", "create_time": 1700000000,
+                 "author": {"nickname": "某号"},
+                 "statistics": {"digg_count": 88, "collect_count": 7,
+                                "comment_count": 3, "share_count": 2,
+                                "play_count": "--"}}]}
+
+    import requests
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _R())
+    monkeypatch.setattr("app.services.douyin_protocol_source._cookie", lambda *a, **k: "c=1")
+    from app.services import demand_watch
+    res = demand_watch.fetch_author_posts("sec1", session=None, user_id=1)
+    assert res["ok"] is True
+    assert res["items"][0]["metrics"] == {
+        "liked_count": 88, "collected_count": 7,
+        "comment_count": 3, "share_count": 2}, "play_count 给的是 `--`,不许填 0"
+
+
+def test_最新大瓜卡片显示互动数():
+    import time as _t
+
+    card = dw.build_latest_card([{"aweme_id": "9", "desc": "新瓜",
+                                  "publish_at": int(_t.time()), "author": "某号",
+                                  "url": "https://www.douyin.com/video/9",
+                                  "metrics": {"liked_count": 88, "comment_count": 3}}])
+    body = str(card)
+    assert "♥88" in body and "💬3" in body, body
+
+
 # ---------------------------------------------------------------- 发现新名字
 
 def test_同款作者的新作品也进候选池(session, monkeypatch):

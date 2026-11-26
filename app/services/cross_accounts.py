@@ -402,10 +402,19 @@ def search_bilibili_videos(keyword: str, limit: int = 20, cookie: str = "") -> l
         # ★ **B站把互动数给全了**(2026-10-16 补):`play`(播放)/`danmaku`(弹幕)/
         #   `favorites`(收藏)/`review`(评论)。原来**一个都没读** ⇒ 卡上「对标数据」恒 `—`,
         #   看起来像"没人看"。⚠️ 为 0 不放进(与 `_weibo_metrics` 同一条口径)。
-        metrics = {k: v for k, v in (("play_count", int(item.get("play") or 0)),
-                                     ("comment_count", int(item.get("review") or 0)),
-                                     ("collected_count", int(item.get("favorites") or 0)))
-                   if v > 0}
+        # ★ **2026-11-26 再补 `like`(点赞)**:同一个响应里一直有它,只是此前没读
+        #   (用户口径「能拿的拿」)。`danmaku`(弹幕)仍**不入 `metrics`** ——
+        #   `metrics_md` 没有它的图标位,收进来也只会静默丢掉(见那条渲染函数)。
+        # ⚠️ 用**本仓那一个**指标解析器,不用裸 `int()`:B站对某些条会把 `like` 写成
+        #   `"--"`,裸 `int` 会抛 ValueError 把**整次搜索**打挂(一个坏字段毁掉整批)。
+        from app.services.mediacrawler_source import _metric_int
+
+        metrics = {k: v for k, v in (
+            ("play_count", _metric_int(item.get("play"))),
+            ("comment_count", _metric_int(item.get("review"))),
+            ("collected_count", _metric_int(item.get("favorites"))),
+            ("liked_count", _metric_int(item.get("like"))),
+        ) if v and v > 0}
         out.append({"uid": bvid, "name": author or "—",
                     "url": f"https://www.bilibili.com/video/{bvid}",
                     "snippet": title[:255], "pan_link": _pan_of(title),

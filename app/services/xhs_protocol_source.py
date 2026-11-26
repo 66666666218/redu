@@ -538,6 +538,22 @@ def _search_with(ck: dict, ssk: bytes, kws: list[str], st, pages: int,
                 if not title:
                     continue
                 user = nc.get("user") or {}
+                #: ★ **互动数**(2026-11-26「能拿的拿」):`note_card.interact_info` 与
+                #: 页面路读到的是同一份数据(字段名 `liked_count`/`collected_count`/
+                #: `comment_count`/`share_count`,MediaCrawler 的
+                #: `store/xhs/__init__.py` 就是这么映射的)。**同一次响应里就有,零新请求**。
+                #: ⚠️ 值是 `"1.3万"` 这种形态 ⇒ 必须过 `_metric_int`;
+                #: ⚠️ 取不到/解析不出 **一律不放进去**(渲染成 `—`),绝不填 0。
+                #: 实测历史样本 692 条:点赞 93.4% / 收藏 92.1% / 评论 90.0% / 转发 88.4%。
+                from app.services.mediacrawler_source import _metric_int
+
+                ii = nc.get("interact_info") or it.get("interact_info") or {}
+                metrics: dict[str, int] = {}
+                for _k in ("liked_count", "collected_count",
+                           "comment_count", "share_count"):
+                    _n = _metric_int(ii.get(_k))
+                    if _n is not None:
+                        metrics[_k] = _n
                 rows.append({"uid": str(user.get("user_id") or ""),
                              "name": str(user.get("nickname") or "")[:60],
                              "url": f"https://www.xiaohongshu.com/explore/{it.get('id')}",
@@ -545,7 +561,8 @@ def _search_with(ck: dict, ssk: bytes, kws: list[str], st, pages: int,
                              #: ★ 发布时间(2026-10-29):搜索响应**不一定**给,给了就用;
                              #: 给不了就是 0 ⇒ 推送侧新鲜度闸门按"不知道"处理。
                              "publish_at": int(it.get("time") or nc.get("time")
-                                               or nc.get("last_update_time") or 0)})
+                                               or nc.get("last_update_time") or 0),
+                             "metrics": metrics})
             logger.info("小红书纯协议:「%s」第 %d 页 +%d 条", kw[:24], page, len(items))
             if not items:
                 break

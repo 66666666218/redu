@@ -521,6 +521,65 @@ TITLE_SEL = ".title"
 LIKE_SEL = ".like-wrapper .count"
 
 
+#: ★ 结构化互动数(2026-11-26,用户口径「**能拿的拿**」):页面自己的搜索响应就在
+#: `window.__INITIAL_STATE__.search.feeds[].noteCard.interactInfo` 里,带
+#: `likedCount / collectedCount / commentCount` —— **零新请求**(不额外打小红书接口,
+#: 也就**不添一分风控风险**:这正是这条路唯一值钱的地方)。
+#:
+#: ⚠️ **为什么 DOM 之外还要读它**:卡片 DOM 只渲染点赞那一格(`LIKE_SEL`),收藏/评论
+#: **根本不在卡片上**;要在 DOM 里拿只能点进笔记详情 ⇒ 一个词就多 N 次请求。
+#: ⚠️ `data/xhs_sign_dump/index.*.js` 与 `xhs_demand.search_notes`(2026-10 起生产在读
+#: `commentCount`)两处都坐实了字段形状 ⇒ 不是猜的。
+#: ⚠️ 值是**原始形态**(可能是 `4.5万` 这种字符串)⇒ 交给 `_metric_int` 认,别在 JS 里
+#: 用 `parseInt`(`parseInt("4.5万")` = 4,静默少报一万倍)。
+_INTERACT_STATE_JS = """() => {
+  const s = window.__INITIAL_STATE__ || {};
+  const feeds = ((s.search || {}).feeds) || {};
+  const arr = feeds._rawValue || feeds.value || (Array.isArray(feeds) ? feeds : []);
+  const keep = (v) => {
+    if (v === null || v === undefined) return null;
+    if (typeof v === 'number') return v;
+    const t = String(v).trim();
+    return t ? t : null;
+  };
+  const out = {};
+  arr.forEach(it => {
+    const card = it.noteCard || it.note || {};
+    const id = card.noteId || it.id;
+    if (!id) return;
+    const info = card.interactInfo || it.interactInfo || {};
+    out[id] = {
+      liked: keep(info.likedCount != null ? info.likedCount : info.liked_count),
+      collected: keep(info.collectedCount != null ? info.collectedCount : info.collected_count),
+      comment: keep(info.commentCount != null ? info.commentCount : info.comment_count),
+    };
+  });
+  return out;
+}"""
+
+
+def _interact_by_note(cards) -> dict[str, dict]:
+    """从 `__INITIAL_STATE__` 捞**每条笔记的互动数**,按 note id 索引;取不到回 `{}`。
+
+    ⚠️ **这是增强,不是主路径** —— 任何一步不成立(替身没有 `evaluate`、状态对象改名、
+    页面还没 hydrate)都必须**安静地回 `{}`**,让 DOM 那条路原样工作。理由:这条链被
+    生产用着,而挂在这上面的收益(收藏/评论)不值得让"整个板块没数据"去换。
+    """
+    try:
+        n = int(cards.count())
+        if n <= 0:
+            return {}
+        card = cards.nth(0)
+        ev = getattr(card, "evaluate", None)
+        if ev is None:
+            return {}
+        got = ev(_INTERACT_STATE_JS)
+    except Exception:  # noqa: BLE001 - 增强失败不拖垮采集
+        logger.info("小红书:读 __INITIAL_STATE__ 互动数失败(退回只读 DOM 点赞)", exc_info=True)
+        return {}
+    return got if isinstance(got, dict) else {}
+
+
 def _node_text(card, sel: str, timeout: int = 1500) -> str:
     """按**结构**读卡片里某个节点的文本;读不到回空串(**不抛** —— 单卡片失败不拖垮整批)。
 
@@ -563,8 +622,12 @@ def _card_rows(cards, kw: str, limit: int = 30) -> list[dict]:
     #: 它认 `4.5万`/`18.8万`/`123` 三种形态,而"同一件事写两处迟早各飘各的"是本仓母题。
     from app.services.mediacrawler_source import _metric_int
 
+    #: ★ 先捞一次**结构化互动数**(收藏/评论只在状态对象里,卡片 DOM 上没有)。
+    #: 取不到就是 `{}` —— 下面的 DOM 点赞路**照旧**,老行为一个字节不变。
+    interact = _interact_by_note(cards)
     rows: list[dict] = []
     like_by_dom = 0
+    interact_by_state = 0
     for i in range(min(cards.count(), limit)):
         try:
             card = cards.nth(i)
@@ -615,7 +678,20 @@ def _card_rows(cards, kw: str, limit: int = 30) -> list[dict]:
             #: `likeCountDisplayText || "赞"`)⇒ 解析不出 → 空 `metrics` → 卡上 `—`,
             #: 与采集层口径一致(**不许变成 0**)。
             likes = _metric_int(lines[-1])
-        metrics = {"liked_count": likes} if likes is not None else {}
+        #: ★ **收藏 / 评论**(2026-11-26「能拿的拿」):只从状态对象拿,零新请求。
+        #: ⚠️ `liked_count` **仍以 DOM 为准**(卡片上渲染的就是它,最新),状态对象只兜底;
+        #: ⚠️ 取不到 / 解析不出 **一律不放进去**(渲染成 `—`),绝不填 0 —— 与采集层同口径。
+        st = interact.get(uid) or {}
+        if likes is None:
+            likes = _metric_int(st.get("liked"))
+        metrics: dict[str, int] = {"liked_count": likes} if likes is not None else {}
+        if st:
+            interact_by_state += 1
+        for key, raw in (("collected_count", st.get("collected")),
+                         ("comment_count", st.get("comment"))):
+            got_n = _metric_int(raw)
+            if got_n is not None:
+                metrics[key] = got_n
         rows.append({
             "uid": uid,
             #: ★ 结构优先;`lines[1]` 只作**兜底**(老卡片/节点没渲染出来时)
@@ -632,8 +708,12 @@ def _card_rows(cards, kw: str, limit: int = 30) -> list[dict]:
         #: 兜底也不认了,这一行会变成 `0/N` —— 那才是"采集层没给数",与"这条没人看"
         #: 分得开;不报的话两种情况在卡片上长得一模一样(都是 `—`)。
         got = sum(1 for r in rows if r["metrics"])
-        logger.info("小红书:点赞数取到 %d/%d 张卡(DOM 节点 %d 张,末行兜底 %d 张)",
-                    got, len(rows), like_by_dom, got - like_by_dom)
+        with_collect = sum(1 for r in rows if "collected_count" in r["metrics"])
+        with_comment = sum(1 for r in rows if "comment_count" in r["metrics"])
+        logger.info("小红书:点赞数取到 %d/%d 张卡(DOM 节点 %d 张,末行兜底 %d 张);"
+                    "状态对象命中 %d 张 ⇒ 收藏 %d 张 / 评论 %d 张",
+                    got, len(rows), like_by_dom, got - like_by_dom,
+                    interact_by_state, with_collect, with_comment)
     return rows
 
 
