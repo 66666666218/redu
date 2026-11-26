@@ -231,3 +231,28 @@ def test_深采在_cookie_不全时也走浏览器(session, monkeypatch, seen):
     _put_cookie(session, _PARTIAL_COOKIE)
     xa.run_xianyu_deep(session, 1, settings=_settings(), hot=[])
     assert seen == ["浏览器"], f"深采没跟搜索同路:{seen}"
+
+
+def test_搜索回落后_深采接到的是浏览器那个_client(session, monkeypatch, seen):
+    """★ **同一个选路函数 ≠ 同一条实际的路**(2026-11-26)。
+
+    搜索这次协议失败、回落浏览器跑通了;深采若自己再 `pick_xianyu_client` 一次,
+    会**又选回那条刚失败的协议路** —— 11-13~11-25 搜索天天 `[浏览器兜底]`、
+    深采天天 `items=0`,行情就是这么停了 7 天。所以 `run_xianyu` 必须把
+    **本轮实际跑通的 client** 传给 `run_xianyu_deep`。
+    """
+    from app.services import tenant, xianyu as xy
+
+    _put_cookie(session)
+    monkeypatch.setattr(xy, "collect_hot",
+                        _fake_collect(boom=[xy.XianyuRateLimit("被挤爆啦")]))
+    monkeypatch.setattr(tenant, "xianyu_deep_due", lambda *a, **k: True)
+    got: list[object] = []
+    monkeypatch.setattr(tenant, "run_xianyu_deep",
+                        lambda *a, **kw: got.append(kw.get("client")) or {})
+    browser_client = _Stub("B")
+    monkeypatch.setattr("app.services.xianyu_browser.get_client",
+                        lambda s: browser_client)
+
+    tenant.run_xianyu(session, 1, settings=_settings())
+    assert got == [browser_client], f"深采必须复用搜索跑通的那个 client,实际:{got}"

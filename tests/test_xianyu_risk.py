@@ -104,6 +104,106 @@ def test_xianyu_deep_tolerates_none_detail_without_losing_round(monkeypatch, ses
     assert ids == {"i2"}  # 坏详情不落成假 0 快照
 
 
+def test_fetch_detail_reraises_cookie_expired(monkeypatch) -> None:
+    """登录态失效**不是单品失败**:fetch_detail 必须 raise,不能吞成 None。
+
+    修复前 `XianyuCookieExpired` 落进 `except Exception: return None` ⇒ 深采把它当成
+    「这一个商品抓不到」,`continue` 下一个,整轮 `saved=0` 仍记 **success** ——
+    11-19 12:55 ~ 11-26 02:31 连续 15 轮「成功零产出」,行情停了 7 天。
+    """
+    from app.services import xianyu as xy
+
+    class _Expired:
+        def detail(self, iid):
+            raise xy.XianyuCookieExpired("SESSION_EXPIRED::登录态已失效")
+
+    with pytest.raises(xy.XianyuCookieExpired):
+        xy.fetch_detail(_Expired(), "i1")
+
+    # 对照:普通异常仍是「单品失败 → None」,别把兜底行为一起改掉
+    class _Boom:
+        def detail(self, iid):
+            raise ValueError("解析炸了")
+
+    assert xy.fetch_detail(_Boom(), "i2") is None
+
+
+def test_xianyu_deep_all_failed_is_partial_not_success(monkeypatch, session) -> None:
+    """有该抓的(todo 非空)却一条没抓成 ⇒ `partial` + `all_detail_failed`,不许报 success。"""
+    session.add(User(id=1, username="u", password_hash="x"))
+    session.commit()
+    set_cookie(session, 1, "goofish", "ck")
+    monkeypatch.setattr(xianyu_analytics.xianyu, "XianyuClient", lambda ck, proxy=None: object())
+    monkeypatch.setattr(xianyu_analytics.xianyu, "fetch_detail", lambda client, iid: None)
+    monkeypatch.setattr(xianyu_analytics.alert_service, "notify_incident",
+                        lambda *a, **kw: False)
+
+    out = xianyu_analytics.run_xianyu_deep(
+        session, 1, settings=_settings(),
+        hot=[{"item_id": "i1", "title": "A", "price": "1"},
+             {"item_id": "i2", "title": "B", "price": "2"}])
+    assert out["status"] == "partial" and out["count"] == 0
+    assert out["reason"] == "all_detail_failed(2/2)"
+    run = session.scalars(select(RunRecord).where(RunRecord.kind == "xianyu_deep")).first()
+    assert run.status == "partial" and "all_detail_failed(2/2)" in run.detail
+
+
+def test_xianyu_deep_stops_on_cookie_expired(monkeypatch, session) -> None:
+    """深采撞上 SESSION_EXPIRED ⇒ 立刻停(不是逐个重试),运行记录写 cookie_expired。"""
+    from app.services import xianyu as xy
+
+    session.add(User(id=1, username="u", password_hash="x"))
+    session.commit()
+    set_cookie(session, 1, "goofish", "ck")
+    monkeypatch.setattr(xianyu_analytics.xianyu, "XianyuClient", lambda ck, proxy=None: object())
+    calls: list[str] = []
+
+    def _detail(client, iid):
+        calls.append(iid)
+        raise xy.XianyuCookieExpired("SESSION_EXPIRED")
+
+    monkeypatch.setattr(xianyu_analytics.xianyu, "fetch_detail", _detail)
+    monkeypatch.setattr(xianyu_analytics.alert_service, "notify_incident",
+                        lambda *a, **kw: False)
+
+    out = xianyu_analytics.run_xianyu_deep(
+        session, 1, settings=_settings(),
+        hot=[{"item_id": "i1", "title": "A", "price": "1"},
+             {"item_id": "i2", "title": "B", "price": "2"}])
+    assert out["status"] == "partial" and out["reason"] == "cookie_expired"
+    assert calls == ["i1"]  # 第一个就停,不连环重试
+    run = session.scalars(select(RunRecord).where(RunRecord.kind == "xianyu_deep")).first()
+    assert "cookie_expired" in run.detail
+
+
+def test_xianyu_deep_uses_passed_client(monkeypatch, session) -> None:
+    """调用方传来本轮跑通的 client(可能已回落浏览器)⇒ 不得再 pick_xianyu_client 重选。
+
+    重选会选回那条刚失败的协议路 —— 11-13~11-25 搜索天天 `[浏览器兜底]`、
+    深采天天 `items=0`,就是这个分叉。
+    """
+    session.add(User(id=1, username="u", password_hash="x"))
+    session.commit()
+    set_cookie(session, 1, "goofish", "ck")
+    picked: list[int] = []
+    monkeypatch.setattr(xianyu_analytics, "pick_xianyu_client",
+                        lambda *a: (picked.append(1), (object(), "协议"))[1])
+    seen: list[object] = []
+
+    def _detail(client, iid):
+        seen.append(client)
+        return {"want_count": 3}
+
+    monkeypatch.setattr(xianyu_analytics.xianyu, "fetch_detail", _detail)
+    mine = object()
+    out = xianyu_analytics.run_xianyu_deep(
+        session, 1, settings=_settings(), client=mine,
+        hot=[{"item_id": "i1", "title": "A", "price": "1"}])
+    assert out["count"] == 1
+    assert picked == []            # 没有再选路
+    assert seen and seen[0] is mine  # 用的就是传进来的那个
+
+
 def test_waf_block_triggers_same_cooldown(session) -> None:
     """WAF 空响应(XianyuWafBlock)与滑块同级:计入冷却、指数退避。"""
     st = _settings()

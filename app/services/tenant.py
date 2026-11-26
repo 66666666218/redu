@@ -430,7 +430,10 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
         # 搜索接力深采(想要数/类目)——自动跑,受 验证冷却 + 详情限流 保护;按间隔控制频率防累积风控
         if xianyu_deep_due(session, user_id, settings):
             try:
-                run_xianyu_deep(session, user_id, settings, hot=hot)
+                #: ★ 传 `client=client`:那是**这一轮刚刚跑通**的那个(可能已回落浏览器)。
+                #: 不传的话深采会重新 `pick_xianyu_client` 选回协议路 —— 搜索走浏览器兜底
+                #: 的那些天,深采就是这样一路零产出的(2026-11-26 查明)。
+                run_xianyu_deep(session, user_id, settings, hot=hot, client=client)
             except Exception:  # noqa: BLE001 - 深采失败不影响搜索结果(已提交)
                 session.rollback()
         return {"platform": "xianyu", "count": len(hot)}

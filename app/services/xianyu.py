@@ -484,8 +484,14 @@ def fetch_detail(client: XianyuClient, item_id: str) -> dict | None:
         out["seller_fans"] = int(
             seller.get("followerCount") or seller.get("fansCount") or seller.get("sellerFans") or 0
         )
-    except (XianyuVerify, XianyuRateLimit, XianyuWafBlock):
-        raise  # 人机验证/限流/WAF 拦截:交给上层停止连环抓详情(避免加剧风控)
+    except (XianyuVerify, XianyuRateLimit, XianyuWafBlock, XianyuCookieExpired):
+        #: ⚠️ **`XianyuCookieExpired` 必须在这一行里**(2026-11-26 补):
+        #: 它原本落进下面的 `except Exception: return None` —— 于是「登录态过期」被当成
+        #: 「这一个商品抓不到」,上层 `continue`,整轮 `saved=0` 仍记 **success**。
+        #: 实测代价:11-19 12:55 ~ 11-26 02:31 连续 **15 轮「成功」零产出**,
+        #: 行情(想要数/收藏/出单)静默停了 7 天。
+        #: 判据:凡是"单品失败可忽略"的兜底,都要先问一句「哪些错误其实不是单品问题」。
+        raise  # 人机验证/限流/WAF/登录态失效:交给上层停止连环抓详情(避免加剧风控)
     except Exception:  # noqa: BLE001 - 单品失败返回 None,上层跳过(勿写假 0 快照)
         return None
     return out

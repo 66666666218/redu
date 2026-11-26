@@ -1,3 +1,30 @@
+- [2026-11-26 17:43] FIX: 闲鱼深采**零产出不再记 success** + 深采复用搜索跑通的 client(行情停了 7 天没被发现的根因)
+  ## 起因:15 轮「success + items=0」
+  11-19 12:55 ~ 11-26 02:31,`xianyu_deep` 连续 **15 轮**记 success 而 `items=0` ——
+  行情(想要数/收藏/出单)静默停了 **7 天**。三个独立缺陷叠在一起:
+  * `fetch_detail` 把 `XianyuCookieExpired` 吞进 `except Exception: return None`
+    ⇒ **会话级**错误被当成「这一个商品抓不到」,上层 `continue` 下一个,整轮照样 0 条。
+    凡是「单品失败可忽略」的兜底,都要先问一句「哪些错误其实不是单品问题」。
+  * 深采没有零产出判据:`saved==0` 仍走 `status=success`。现改为
+    `todo` 非空而 `saved==0` ⇒ **`partial` + `all_detail_failed(n/m)`**。
+    用 `partial` 而不是 `failed`:后者不满足 `xianyu_deep_due`,会让每轮搜索都重新
+    空打 10 次详情、反而加重风控。
+  * **同一个选路函数 ≠ 同一条实际的路**:搜索若已回落浏览器,深采自己再
+    `pick_xianyu_client` 会**又选回那条刚失败的协议路**(11-13~11-25 搜索天天
+    `[浏览器兜底]`、深采天天 `items=0`)。`run_xianyu_deep` 新增 `client=` 参数,
+    `tenant.run_xianyu` 把本轮跑通的那个传下去。
+  ## 顺带
+  * 新增两条 🟠 告警:`cookie_expired`(提示重跑 `tools/xianyu_export_cookie.py`)、
+    `all_detail_failed`(深采整轮零产出)。
+  * 深采外层 `except` 补上 `XianyuCookieExpired` —— 它本来落进通用分支 **re-raise**,
+    而 tenant 侧只 `rollback()` 了事,运行记录里连「登录态过期」都不会出现。
+  * 测试:`tests/test_xianyu_risk.py` 4 条(fetch_detail 必须 raise / 全失败记 partial /
+    遇 cookie_expired 立刻停 / 传 client 不再重选)、`tests/test_xianyu_route.py` 1 条
+    (搜索回落后深采拿到浏览器那个 client)。
+  * 文档:`doc/闲鱼纯协议-链路拆解.md` §6 排查顺序补 `cookie_expired` / `all_detail_failed`。
+  (Files: app/services/xianyu.py, app/services/xianyu_analytics.py, app/services/tenant.py,
+  tests/test_xianyu_risk.py, tests/test_xianyu_route.py, doc/闲鱼纯协议-链路拆解.md)
+
 - [2026-11-26 10:59] FEAT: 闲鱼滑块改**自动过验证**(不再靠人拖) + 过完回写整套 jar 让协议路复活
   用户口径「闲鱼滑块我们自己写一个程序过了」。新增 `app/services/xianyu_verify.py`:
   遍历 `page.frames` 找 `punish|_____tmd_____|baxia` 的验证框(**必须轮询**,风控回包先到、

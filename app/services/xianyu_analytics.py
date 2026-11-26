@@ -105,10 +105,14 @@ def xianyu_deep_due(session: Session, user_id: int, settings: Settings) -> bool:
 
 
 def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = None,
-                    hot: list[dict] | None = None) -> dict:
+                    hot: list[dict] | None = None, client: object | None = None) -> dict:
     """采集闲鱼热榜并抓取前 N 商品详情(想要数/类目/浏览量/卖家粉丝),写入当日快照。
 
     `hot` 可传已采集的热榜(搜索接力深采时复用,避免重复搜索);缺省则自行 collect_hot。
+
+    `client` 传**搜索刚刚跑通的那个客户端**(2026-11-26 补):不传就自己 `pick_xianyu_client`
+    重新选一次 —— 而搜索若已回落到浏览器,重选会**又选回那条刚失败的协议路**
+    (实测 11-13~11-25 搜索天天 `[浏览器兜底]`、深采天天 `items=0`,就是这个分叉)。
     """
     settings = _base(settings)
     if verify_cooldown_active(session, user_id, settings):  # 验证后冷却:避免反复撞滑块
@@ -121,10 +125,13 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
     # 当时搜索换了浏览器、深采还在用协议 → 行情(想要数/收藏/出单)一直卡在"被挤爆"
     # 那条路上,而症状看起来像"接口没数据"。现在协议被证明可用 ⇒ 两边都改用
     # **同一个选路函数**,规则只有一处,不会再分叉。
+    # ⚠️ 但**同一个选路函数 ≠ 同一条实际的路**:搜索那次若回落了浏览器,这里重新选
+    # 还会选回协议。所以调用方要把跑通的 `client` 传进来(见上方 docstring)。
     if xianyu_cookie_missing(goofish) and not bool(getattr(settings, "xianyu_use_browser", True)):
         raise ValueError("未配置闲鱼 Cookie(且浏览器路已关闭)")
     # 构造客户端不产生网络请求,放在 try 外:失败路径也能回写运行中刷新的令牌
-    client, _src = pick_xianyu_client(settings, goofish)
+    if client is None:
+        client, _src = pick_xianyu_client(settings, goofish)
     try:
         if hot is None:
             hot = xianyu.collect_hot(settings, client)
@@ -143,6 +150,7 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
             return {"platform": "xianyu_deep", "count": 0, "status": "skipped", "reason": "cached_today"}
         base_delay = getattr(settings, "xianyu_request_delay", None) or getattr(settings, "request_delay_seconds", 2.5)
         saved = 0
+        failed = 0
         stop_reason = None
         for idx, it in enumerate(todo):
             try:
@@ -155,6 +163,12 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
                 stop_reason = "waf_block"
                 logger.warning("闲鱼详情触发 WAF 拦截(网关空响应),停止抓取;建议更换出口IP")
                 break
+            except xianyu.XianyuCookieExpired:
+                #: ★ 登录态失效**不是单品问题** —— 后面每一个都会以同样方式失败。
+                #: 以前它被 `fetch_detail` 吞成 None ⇒ 整轮 zero 仍记 success(见那里的头注)。
+                stop_reason = "cookie_expired"
+                logger.warning("闲鱼详情遇登录态失效,停止抓取;需要重新导出整套 cookie")
+                break
             except xianyu.XianyuRateLimit:
                 stop_reason = "rate_limit"
                 logger.warning("闲鱼限流,停止抓取详情")
@@ -163,6 +177,7 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
                 # fetch_detail 对单品普通失败返回 None(契约:不写假 0 快照)。此处必须跳过:
                 # 直接 detail.get(...) 会抛 AttributeError → 外层 except → rollback 丢掉本轮全部
                 # 已采 saved 行并 raise,一条坏详情毁掉整轮深采。
+                failed += 1
                 logger.warning("闲鱼详情抓取失败,跳过该商品 item_id=%s", it["item_id"])
                 continue
             row = repository.get_xianyu_daily(session, user_id, it["item_id"], today)
@@ -185,6 +200,13 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
 
                 time.sleep(base_delay * random.uniform(0.8, 1.4))
         session.commit()
+        #: ⚠️ **`saved == 0` 不许记 success**(2026-11-26):11-19~11-26 连续 15 轮
+        #: 「success + items=0」把行情停摆藏了 7 天。只要**有该抓的**(`todo` 非空)
+        #: 而一条都没抓成,就必须是 `partial` + 非空 reason —— 运行记录里要能读出这件事。
+        #: 用 `partial` 而不是 `failed`:后者不满足 `xianyu_deep_due`,会让每轮搜索都
+        #: 重新空打 10 次详情,反而加重风控。语义是「这轮跑了、但没拿到东西」。
+        if stop_reason is None and saved == 0:
+            stop_reason = f"all_detail_failed({failed}/{len(todo)})"
         status = "partial" if stop_reason else "success"
         detail_note = f"items={saved}" + (f",{stop_reason}" if stop_reason else "")
         _record_run(session, user_id, "xianyu_deep", status, detail_note)
@@ -199,9 +221,27 @@ def run_xianyu_deep(session: Session, user_id: int, settings: Settings | None = 
                 settings=settings,
                 # 已采到的部分保住了、搜索照常,只是深采提前停 → 属可自愈的降级,只进站内
                 push_feishu=False)
+        elif stop_reason == "cookie_expired":
+            alert_service.notify_incident(
+                session, user_id, "xianyu",
+                "🟠 闲鱼详情因登录态失效中断(搜索可能仍正常)",
+                f"深采在第 {saved + 1} 个商品处遇 SESSION_EXPIRED(已采 {saved} 条);"
+                f"重跑 `python tools/xianyu_export_cookie.py` 导出整套 jar 即可恢复",
+                settings=settings)
+        elif str(stop_reason or "").startswith("all_detail_failed"):
+            alert_service.notify_incident(
+                session, user_id, "xianyu",
+                "🟠 闲鱼深采整轮零产出(行情数据没更新)",
+                f"本轮 {len(todo)} 个商品详情**全部失败**({stop_reason}),"
+                f"想要数/收藏/出单今日无新增。搜索采集不受影响。"
+                f"排查顺序见 doc/闲鱼纯协议-链路拆解.md §6",
+                settings=settings)
         return {"platform": "xianyu_deep", "count": saved, "status": status, "reason": stop_reason}
-    except (xianyu.XianyuVerify, xianyu.XianyuRateLimit, xianyu.XianyuWafBlock) as exc:
-        # collect_hot 整轮被滑块/限流(全部关键词失败)→ 优雅降级,不 500
+    except (xianyu.XianyuVerify, xianyu.XianyuRateLimit, xianyu.XianyuWafBlock,
+            xianyu.XianyuCookieExpired) as exc:
+        # collect_hot 整轮被滑块/限流/登录态(全部关键词失败)→ 优雅降级,不 500
+        # ⚠️ `XianyuCookieExpired` 2026-11-26 补:它本来落进下面的通用 except **re-raise**,
+        # 而 tenant 侧只 `rollback()` 了事 —— 运行记录里连"登录态过期"都不会出现。
         session.rollback()
         _record_run(session, user_id, "xianyu_deep", "failed", f"{type(exc).__name__}: {exc}")
         session.commit()
