@@ -70,11 +70,23 @@ class XianyuCookieExpired(XianyuError):
 
 
 class XianyuVerify(XianyuError):
-    """闲鱼人机验证(滑块):需人工过滑块或换出口 IP。
+    """闲鱼人机验证(滑块):需过验证或换出口 IP。
 
     与限流不同——重试/退避均无效(实测连续重试仍 `FAIL_SYS_USER_VALIDATE`),
     应尽快抛给上层识别为"账号/出口被标记",而非干等数分钟。
+
+    ★ **必须带上 `verify_url`**(2026-11-26):协议路被挡时,回包里的
+    `data.url` 就是**这次验证的入口**(`…/_____tmd_____/punish?x5secdata=…`)。
+    以前只把它拼进异常消息、而 `collect_hot` 又把消息整个丢掉 ⇒ 上层拿不到入口,
+    只能提示「去拖滑块」,人还得自己找到那个弹窗 —— `xianyu_verify` 自动化就缺这一条路。
     """
+
+    def __init__(self, message: str, verify_url: str = "", ret: str = "") -> None:
+        super().__init__(message)
+        #: 验证入口(可能为空:浏览器路是在 page 里就地弹框,没有独立 URL)
+        self.verify_url = str(verify_url or "")
+        #: 平台原话(`FAIL_SYS_USER_VALIDATE / RGV587_ERROR::…`),留档用
+        self.ret = str(ret or "")
 
 
 class XianyuWafBlock(XianyuError):
@@ -227,7 +239,8 @@ class XianyuClient:
             if "USER_VALIDATE" in joined:
                 raise XianyuVerify(
                     f"闲鱼要求人机验证(滑块),需人工处理:{joined[:140]}"
-                    + (f";**验证入口(点开过一次即可恢复)**:{verify_url}" if verify_url else ""))
+                    + (f";**验证入口(点开过一次即可恢复)**:{verify_url}" if verify_url else ""),
+                    verify_url=verify_url, ret=joined[:200])
             if code in TOKEN_ERRORS:
                 if self._refresh(resp):
                     last_token_err = ret
@@ -239,7 +252,8 @@ class XianyuClient:
             if "USER_VALIDATE" in code:
                 # 人机验证(滑块):不是限流,退避无效(实测连续重试仍失败)。
                 # 立即抛 XianyuVerify,由上层识别为"需人工过滑块/换IP",避免干等数分钟。
-                raise XianyuVerify(f"闲鱼人机验证(滑块),需人工处理:{ret}")
+                raise XianyuVerify(f"闲鱼人机验证(滑块),需人工处理:{ret}",
+                                   verify_url=verify_url, ret=joined[:200])
             if code in RATE_ERRORS:
                 last_rate_err = ret
                 if attempt < len(backoff):
@@ -506,16 +520,21 @@ def collect_hot(settings: Settings, client: XianyuClient | None = None, start_of
     saw_verify = False
     saw_rate = False
     saw_waf = False
+    #: ★ 原始异常要留住(2026-11-26):里面有 `verify_url`(本次验证入口)。
+    #: 以前这里只记 `saw_verify=True`,末尾再抛一句**新造的话**
+    #: ⇒ `data.url` 在这一层被彻底丢掉,自动过验证无从下手。
+    verify_exc: XianyuVerify | None = None
     success = 0
     failed_kws: list[str] = []
     verify_kws: list[str] = []  # 被人机验证挡住的关键词(部分被风控也暴露)
     for idx, kw in enumerate(picked):
         try:
             items = client.search(kw)
-        except XianyuVerify:
+        except XianyuVerify as exc:
             # 人机验证是账号/IP 级的,一旦出现后续关键词多半也会被挡——
             # 立即停止尝试,避免连环猛打加重风控,保留已采到的部分数据。
             saw_verify = True
+            verify_exc = exc
             verify_kws.append(kw)
             break
         except XianyuWafBlock:
@@ -552,7 +571,13 @@ def collect_hot(settings: Settings, client: XianyuClient | None = None, start_of
         stats.update({"ok": success, "verify": verify_kws, "failed_kws": failed_kws,
                       "rate_break": saw_rate, "verify_break": saw_verify, "waf_break": saw_waf})
     if success == 0 and saw_verify:
-        raise XianyuVerify("闲鱼人机验证(滑块),全部关键词均未采集")
+        #: ⚠️ **别新造一句话**:把 `verify_url` / 平台原话带上,否则上层只知道
+        #: 「要过滑块」,不知道**这次该打开哪个入口**(2026-11-26 修)。
+        raise XianyuVerify(
+            "闲鱼人机验证(滑块),全部关键词均未采集"
+            + (f";{verify_exc}" if verify_exc else ""),
+            verify_url=getattr(verify_exc, "verify_url", ""),
+            ret=getattr(verify_exc, "ret", ""))
     if success == 0 and saw_waf:
         raise XianyuWafBlock("闲鱼 WAF 拦截(网关空响应),全部关键词均未采集")
     if success == 0 and saw_rate:

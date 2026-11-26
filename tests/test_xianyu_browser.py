@@ -552,3 +552,60 @@ def test_close_if_idle_only_fires_when_really_idle(monkeypatch) -> None:
 
     c.search("x")                            # 关掉之后还能自动重开
     c.close()
+
+
+# --------------------------------------------------- 自动过滑块(2026-11-26)
+def test_search_autosolves_once_then_retries(monkeypatch) -> None:
+    """★★ 命中滑块 ⇒ **先自动过一次**,过了就用同一个页面重跑搜索。
+
+    以前这里只有一条路:抛 `XianyuVerify` → 冷却 30~240 分钟等人来拖。
+    自动化之后,第一枪就能自愈;但**只许试一次**(重跑再撞就冒泡),
+    否则每轮都在反复拖滑块 —— 每次拖动都是一次风控输入。
+    """
+    risk = json.dumps({"ret": ["FAIL_SYS_USER_VALIDATE", "RGV587_ERROR::SM::哎哟喂"],
+                       "data": {}})
+    ok = json.dumps(_cap_payload("网盘合集", "123"))
+    url = "https://h5api.m.goofish.com/h5/mtop.taobao.idlemtopsearch.pc.search/1.0/"
+
+    class _Page2(_PageDrivenPage):
+        """第一次 goto 投风控回包,之后投正常回包(过验证后的重跑)。"""
+
+        def __init__(self):
+            super().__init__([])
+            self.rounds = 0
+
+        def goto(self, url_, **kw):
+            self.goto_url = url_
+            self.rounds += 1
+            body = risk if self.rounds == 1 else ok
+            for fn in list(self._handlers.get("response", [])):
+                fn(_FakeResponse(url, body))
+
+    c = xb.XianyuBrowserClient()
+    c._pg = _Page2()
+    calls: list[str] = []
+    monkeypatch.setattr(c, "solve_verification",
+                        lambda kw="网盘资源": (calls.append(kw),
+                                             {"ok": True, "reason": "search_ok"})[1])
+    items = c.search("网盘资源")
+    assert calls == ["网盘资源"], "应自动过一次验证"
+    assert items and items[0]["title"] == "网盘合集"
+
+
+def test_search_autosolve_failure_keeps_original_signal_with_diagnosis(monkeypatch) -> None:
+    """自动过验证**失败**时,异常类型不变(`XianyuVerify`),但消息里必须带原因。
+
+    原因(`handle_not_found` / 验证框文案)是下次补选择器的唯一线索 ——
+    只写「需人工过滑块」的话,自动化失败和没做自动化**在日志里完全一样**。
+    """
+    risk = json.dumps({"ret": ["FAIL_SYS_USER_VALIDATE"], "data": {}})
+    c = xb.XianyuBrowserClient()
+    c._pg = _PageDrivenPage([], direct_payload="不该走到这里", responses=[(
+        "https://h5api.m.goofish.com/h5/mtop.taobao.idlemtopsearch.pc.search/1.0/", risk)])
+    monkeypatch.setattr(c, "solve_verification",
+                        lambda kw="网盘资源": {"ok": False, "reason": "handle_not_found",
+                                             "frame_text": "请依次点击图中的文字"})
+    with pytest.raises(xb.XianyuVerify) as ei:
+        c.search("网盘资源")
+    msg = str(ei.value)
+    assert "handle_not_found" in msg and "请依次点击" in msg

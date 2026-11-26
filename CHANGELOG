@@ -1,3 +1,38 @@
+- [2026-11-26 10:59] FEAT: 闲鱼滑块改**自动过验证**(不再靠人拖) + 过完回写整套 jar 让协议路复活
+  用户口径「闲鱼滑块我们自己写一个程序过了」。新增 `app/services/xianyu_verify.py`:
+  遍历 `page.frames` 找 `punish|_____tmd_____|baxia` 的验证框(**必须轮询**,风控回包先到、
+  iframe 之后才建,只查一次必空) → 按 `#nc_1_n1z`/`.btn_slide`/… 定位手柄与轨道 →
+  加速—匀速—减速 + 纵向抖动 + 短停顿的人手轨迹拖动 → **真发一次搜索验收**。
+  ## 判据(三条禁止,各对应一次真实踩坑)
+  * 不许用 `"success" in body`:punish 端点通过与否都回 `{"code":0,"dt":"success","ec":200}`;
+  * 不许要求回包带 `api`:真风控回包 `{"ret":["FAIL_SYS_USER_VALIDATE",…],"data":{"url":…}}` 没有它;
+  * 不许拿「验证框消失了」当恢复(它会因超时自己关)⇒ 只认 `ret` 含 `SUCCESS` 且 `data.resultList` 非空。
+  识别不到手柄 ⇒ 返回 `handle_not_found` + **验证框文案**,绝不猜、绝不瞎拖、绝不假装通过。
+  ## 接线(三处,少一处只救半边)
+  1. `XianyuBrowserClient.search` 撞 `XianyuVerify` ⇒ `_try_autosolve`(每次 search 只试一次),
+     过了重跑同一页搜索;没过把**诊断挂进异常消息**再抛,冷却/告警口径不变。
+  2. `XianyuVerify` 新增 `verify_url`/`ret` 属性,`collect_hot` 不再把它丢掉
+     (以前那句「去拖滑块」拿不到入口)。
+  3. `tenant._persist_jar_after_autosolve`:过验证后把档案**整套 jar 回写**加密库 ——
+     滑块是在浏览器里过去的,不回写则**协议路下一轮还是旧 jar、还是被挡**
+     (自愈只救浏览器路,而协议路才是常态路)。缺少 `unb`/`cookie2` 的 jar 一律不覆盖。
+  ## 冷却与自愈
+  `verify_cooldown_active` 多一条判据:**marker 早于「最后一次真过完验证」⇒ 该 marker 作废**
+  (实测 09:08 触发后 09:38/10:09/10:30 三轮全空转)。判据是**比时间**而非「解过就放行」——
+  解完之后又撞上的风控照旧冷却,否则就成了连拖。
+  告警文案同步改:走到失败分支 = 自动过验证**没成功**,应看异常里的 `reason`,不再教人「手机 App 拖一下」。
+  ## 取证工具与测试
+  `scripts/xianyu_slider.py`(`--probe` 抓 DOM + 截图 + 回包);
+  `tests/test_xianyu_verify.py` 21 条、`tests/test_xianyu_autosolve_jar.py` 6 条,
+  `tests/test_xianyu_browser.py` 补 2 条自动过验证接线。
+  ⚠️ **未达成的部分**:2026-11-26 10:57 探针跑在「当前没被风控」的时刻(`challenge_frames=0`),
+  ⇒ 选择器**还没在真实滑块 DOM 上验证过**;下一次真撞上时看 `reason` 是不是 `handle_not_found`,
+  是就 `--probe` 抓 DOM 补齐。只处理「按住滑块拖到最右边」,拼图/点选类不适用。
+  (Files: app/services/xianyu_verify.py, app/services/xianyu.py, app/services/xianyu_browser.py,
+  app/services/tenant.py, app/services/tenant_base.py, scripts/xianyu_slider.py,
+  tests/test_xianyu_verify.py, tests/test_xianyu_autosolve_jar.py, tests/test_xianyu_browser.py,
+  doc/闲鱼纯协议-链路拆解.md)
+
 - [2026-11-26 10:23] FEAT: 互动指标「能拿的拿」—— 小红书/抖音/B站把已经在响应里的赞藏评转全接进 metrics
   用户口径「能拿的拿」:凡是平台**已经在响应里给**的量,就别再只挑一个。动画源盘点后按
   「零额外请求」原则逐条补齐(每一处都不新增一次请求,风控面不变):

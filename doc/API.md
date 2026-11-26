@@ -272,7 +272,14 @@
 > 早期文档描述的 `DAILY_SUMMARY_CRON` 已无任何代码引用,该配置已移除。如需定时推送需另行实现。
 
 > **风险控制(闲鱼 mtop)**:闲鱼为登录态接口,过度请求会触发网关风控。实测 `FAIL_SYS_USER_VALIDATE`(人机验证/滑块)**经退避重试仍无效**,已与真限流区分——前者立即抛 `XianyuVerify`(由运维人工过滑块/换出口 IP,传输层已用 `curl_cffi` 伪 Chrome 指纹降低被标记概率,dock/dev.md §5.8),后者(`FAIL_SYS_RATE_LIMIT`/`FAIL_SYS_USER_LIMIT`)才走指数退避。
-> `POST /api/xianyu/collect-deep` 在**整轮**被验证/限流时返回 **200 + `status:"failed"`**(0 条,不再 500);详情抓取**中途**被验证/限流则停止抓取并保留已采部分,**返回 `status:"partial"`**。`run_xianyu`(`/api/collect/{platform}` 或调度)遇验证则记 `failed`,由既有"采集持续失败"告警提醒运维(告警消息含最近一次失败原因,人工可据"需人工过滑块/换出口 IP"行动)。
+> `POST /api/xianyu/collect-deep` 在**整轮**被验证/限流时返回 **200 + `status:"failed"`**(0 条,不再 500);详情抓取**中途**被验证/限流则停止抓取并保留已采部分,**返回 `status:"partial"`**。`run_xianyu`(`/api/collect/{platform}` 或调度)遇验证则记 `failed`,由既有"采集持续失败"告警提醒运维。
+>
+> **★ 2026-11-26:滑块已改自动过验证**(`app/services/xianyu_verify.py`),上面那句
+> 「人工可据需人工过滑块/换出口 IP 行动」**已作废**:走到失败分支说明**自动过验证也没成**,
+> 应读异常里的 `reason` —— `handle_not_found`(手柄选择器对不上,验证框换了形态)、
+> `search_blocked`(拖过去了平台仍拦)、`drag_failed`(鼠标动作被环境吞掉),
+> 验证框文案会一并带在消息后面。自动过一次成功后会把浏览器档案的**整套 Cookie 回写**,
+> 协议路下一轮自动复活(否则自愈只救了浏览器路,而协议路才是常态路)。
 
 > **409「本实例不采集该板块」(2026-11-23 新增)**:`POST /api/collect/{platform}` 与
 > `POST /api/xianyu/collect-deep` 在板块**不归本实例**(与 `SCHEDULER_ROLE` 的

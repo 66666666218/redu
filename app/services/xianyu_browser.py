@@ -124,6 +124,11 @@ _HOOK_INIT = """
 
 _SEARCH_URL = "https://www.goofish.com/search?q="
 
+#: 导出 jar 时逐个域取(与 `tools/xianyu_export_cookie.py` 同一口径 —— 少一个域就会缺项,
+#: 2026-10-08 实测:只取主域会缺 `cookie2`/`_tb_token_`,采集必回 TOKEN_ILLEGAL)
+_COOKIE_URLS = ("https://www.goofish.com", "https://h5api.m.goofish.com",
+                "https://goofish.com")
+
 
 class XianyuBrowserClient:
     """与 `XianyuClient.search` 同接口;惰性开浏览器,一轮内复用同一页。"""
@@ -224,6 +229,55 @@ class XianyuBrowserClient:
         而不是抛 AttributeError 刷一条 WARNING(实测踩过)。
         """
         return ""
+
+    def export_cookie_jar(self) -> str:
+        """把档案里**当前整套** cookie 读成 `k=v; …`(只读,不导航、不打印值)。
+
+        用途(2026-11-26):自动过完滑块后回写加密库,让**协议路**下一轮复活 ——
+        协议路用的那份 jar 与浏览器档案是两份;浏览器里新种上的风控 cookie
+        (`sgcookie`/`tfstk`/…) 不回写,协议路就还是旧 jar、还是被挡。
+        """
+        if self._ctx is None:
+            return ""
+        jar: dict[str, str] = {}
+        for url in _COOKIE_URLS:
+            try:
+                for c in self._ctx.cookies(url):
+                    jar[c["name"]] = c["value"]
+            except Exception:  # noqa: BLE001 - 单个域读不到不影响其余
+                logger.debug("闲鱼 cookie 域读取失败:%s", url, exc_info=True)
+        return "; ".join(f"{k}={v}" for k, v in jar.items())
+
+    def solve_verification(self, keyword: str = "网盘资源") -> dict:
+        """在**同一个持久档案**里自动过滑块(2026-11-26)。
+
+        ⚠️ **为什么必须用生产档案**:滑块能不能过取决于账号风控信誉,换个档案(哪怕是刚登录的)
+        拖过去了,采集照样被拦 —— 与"换个档案采集"是同一类错(2026-11-18 实测)。
+
+        ⚠️ **验收由 `solve_challenge` 里的真搜索完成**,这里不再另判一次。
+        返回它的诊断 dict(`ok` / `reason` / `frame_text` / `drag`),失败原因要留档。
+        """
+        from app.services import xianyu_verify
+
+        pg = self._ensure_page()
+        #: ⚠️ **先直接找**验证框:调用方(`search`)刚刚才在这里发过搜索、风控回包刚到,
+        #: 验证框通常正在建 —— 这一步就省掉一次多余的搜索请求(每次搜索都是一次风控输入)。
+        frame = xianyu_verify.find_challenge_frame(pg, timeout_s=10.0)
+        if frame is None:
+            #: 还没弹 ⇒ 再主动搜一次把它引出来(验证框是风控回包**之后**才建的)
+            try:
+                pg.goto(_SEARCH_URL + urllib.parse.quote(keyword),
+                        wait_until="domcontentloaded", timeout=60000)
+            except Exception as exc:  # noqa: BLE001 - 导航抖动由后面的 frame 轮询兜住
+                logger.debug("闲鱼引验证框导航异常:%s", str(exc)[:120])
+            frame = xianyu_verify.find_challenge_frame(pg, timeout_s=10.0)
+        if frame is None:
+            #: 始终没有验证框 ⇒ 根本不需要过验证(这一轮的风控可能是限流/会话抖动,不是滑块)
+            return {"ok": False, "reason": "no_challenge_frame", "frame_text": "", "drag": {}}
+        logger.info("闲鱼检测到滑块验证框,尝试自动过验证")
+        res = xianyu_verify.solve_challenge(pg, frame, keyword=keyword)
+        logger.info("闲鱼自动过验证结果:ok=%s reason=%s", res.get("ok"), res.get("reason"))
+        return res
 
     def _eval_api(self, pg, api: str, payload: dict) -> str:
         """页面内调用 + **重试**。
@@ -380,17 +434,28 @@ class XianyuBrowserClient:
         """与 `XianyuClient.search` 同签名同返回(商品 dict 列表)。
 
         **先走"页面自己搜"那条路**(见 `_search_by_page`),拿不到再退回直连。
+
+        ★ **2026-11-26 起命中滑块会先自动过验证**(`_try_autosolve`):过了就用同一个页面
+        重跑一次搜索;没过(或手柄识别不出来)**照旧抛 `XianyuVerify`** ——
+        冷却/告警的口径不变,只是多了一次自愈机会。
         """
         pg = self._ensure_page()
         items: list[dict] = []
         try:
             items = self._search_by_page(keyword)
-        except XianyuVerify:
+        except XianyuVerify as exc:
             #: ⚠️ **不许吞**(2026-11-18):滑块是**账号/IP 级**信号,上层要靠它
             #: 停轮并上报"需人工过滑块"。吞掉再落 `_search_direct`,拿回的是
             #: `TIMEOUT::接口超时` ⇒ 真因从"被风控"退化成"接口超时",
             #: 值班的人会去查网络/接口,而不是去拖滑块。
-            raise
+            #:
+            #: ★ 2026-11-26:这里**先试一次自动过验证**(每次 search 最多一次) ——
+            #: 过了就重跑搜索;没过把诊断挂到异常上再抛,冷却逻辑原样保留。
+            #: 重跑若**再**撞滑块,从 except 里直接冒泡(不会再自动过一次,防连拖)。
+            if self._try_autosolve(exc, keyword) is None:
+                raise
+            logger.info("闲鱼自动过验证成功,重跑本轮搜索:%s", keyword)
+            items = self._search_by_page(keyword)
         except Exception as exc:  # noqa: BLE001 - 页面路失败不该直接判死刑,还有直连兜底
             logger.debug("闲鱼页面驱动搜索失败(%s):%s", keyword, str(exc)[:120])
         if not items:
@@ -399,6 +464,24 @@ class XianyuBrowserClient:
             raise XianyuError(f"未解析到商品,keyword={keyword}")
         logger.debug("闲鱼(浏览器路径)搜索 %s → %s 条", keyword, len(items))
         return items
+
+    def _try_autosolve(self, exc: XianyuVerify, keyword: str) -> dict | None:
+        """先引验证框、再拖;成功返回诊断、失败返回 `None`(**绝不假装成功**)。
+
+        失败时把诊断写进异常消息(不改异常类型):上层照旧按 `XianyuVerify` 冷却/告警,
+        而值班的人第一次就能看到**为什么没过**(找不到手柄?拖完仍被挡?框文案是什么)。
+        """
+        try:
+            res = self.solve_verification(keyword)
+        except Exception as inner:  # noqa: BLE001 - 自愈失败不该盖住原始风控信号
+            logger.warning("闲鱼自动过验证异常:%s", f"{type(inner).__name__}: {inner}"[:160])
+            return None
+        if res.get("ok"):
+            return res
+        exc.args = (f"{exc};自动过验证未成功({res.get('reason', '')}"
+                    + (f";验证框文案:{res.get('frame_text', '')[:80]}"
+                       if res.get("frame_text") else "") + ")",)
+        return None
 
     def detail(self, item_id: str) -> dict:
         """商品详情 —— **行情(想要数/收藏/出单/浏览量)的唯一来源**,与 `XianyuClient.detail` 同签名。
@@ -509,6 +592,12 @@ class _ThreadBoundClient:
 
     def cookie_header(self) -> str:
         return ""
+
+    def export_cookie_jar(self) -> str:
+        """整套 jar(见 `XianyuBrowserClient.export_cookie_jar`)。**在专属线程里读**。"""
+        if self._client is None:
+            return ""
+        return self._call("export_cookie_jar")
 
     def __enter__(self):
         return self

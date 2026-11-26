@@ -34,6 +34,9 @@ from app.services.cookie_store import get_cookies, set_cookie
 # 闲鱼同会话互斥锁:mtop 会话不耐受并发(双 client 同 token 并发 → 服务端风控作废会话,
 # 2026-09-30 11:06 后全 ILLEGAL 的诱因之一)。进程内非阻塞,拿不到即跳过本轮。
 _XIANYU_ROUND_LOCK = __import__('threading').Lock()
+#: 过验证后那份 jar 已回写的时刻(与 `xianyu_verify.last_solved_at()` 同口径)——
+#: 同一个 `solved_at` 只导一次,避免每轮重复读档案。
+_JAR_PERSISTED_AT: datetime | None = None
 from app.services.notifier import get_user_notifier
 from app.db import repository
 from app.services.trend_analyzer import compute_slope, recent_growth
@@ -206,6 +209,43 @@ def _collect_hot_with_fallback(settings: Settings, client: object, source: str, 
         return hot, fallback, "浏览器兜底"
 
 
+def _persist_jar_after_autosolve(session: Session, user_id: int, client: object) -> bool:
+    """刚自动过完滑块 → 把浏览器档案的整套 jar 回写加密库,让**协议路**复活。
+
+    只在**本进程这次过验证之后还没回写过**时动作:同一个 `solved_at` 只导一次,
+    否则每轮都覆盖一遍(读档案 + 提交都没必要,还会把 `updated_at` 刷成噪音)。
+
+    ⚠️ **浏览器路本来就返回空串**(`cookie_header`),所以这里单独用 `export_cookie_jar`,
+    不能指望 `persist_refreshed_cookie` —— 那是给协议路回写 `_m_h5_tk` 用的,两者不是一回事。
+    """
+    from app.services import xianyu_verify
+
+    global _JAR_PERSISTED_AT
+    solved_at = xianyu_verify.last_solved_at()
+    #: ⚠️ `_JAR_PERSISTED_AT` 初值是 `None` —— 必须显式判,别指望 `None` 能参与比较
+    #: (2026-11-26 第一版就写成 `solved_at <= _JAR_PERSISTED_AT`,直接 TypeError)。
+    if solved_at is None or (_JAR_PERSISTED_AT is not None and solved_at <= _JAR_PERSISTED_AT):
+        return False
+    exporter = getattr(client, "export_cookie_jar", None)
+    if not callable(exporter):
+        return False
+    try:
+        jar = exporter()
+    except Exception:  # noqa: BLE001 - 读档案失败不该影响已经采到的数据
+        logger.debug("闲鱼过验证后导出 jar 失败", exc_info=True)
+        return False
+    if not jar or xianyu_cookie_missing(jar):
+        #: 缺 `unb`/`cookie2` = 这份 jar 不完整(读歪了/档案未登录),**别覆盖**好数据
+        logger.warning("闲鱼过验证后导出的 jar 不完整,跳过回写(%s 字节)", len(jar or ""))
+        return False
+    set_cookie(session, user_id, "goofish", jar)
+    session.commit()
+    _JAR_PERSISTED_AT = solved_at
+    logger.info("闲鱼自动过验证后已回写整套 Cookie(%s 字节,%s 项)",
+                len(jar), jar.count(";") + 1)
+    return True
+
+
 def run_xianyu(session: Session, user_id: int, settings: Settings | None = None) -> dict:
     settings = _base(settings)
     if verify_cooldown_active(session, user_id, settings):  # 验证后冷却:避免反复撞滑块
@@ -265,6 +305,10 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
         hot, client, source = _collect_hot_with_fallback(
             settings, client, source, browser_allowed=browser_allowed,
             start_offset=start_offset, stats=stats)
+        #: ★ **自动过完滑块 ⇒ 把浏览器里新种的风控 cookie 回写**(2026-11-26)。
+        #: 不回写的话,协议路用的还是**过验证之前**那份旧 jar,下一轮照样被挡 ——
+        #: 自愈只救了浏览器那条路(而协议路才是常态路)。失败静默:回写失败不该毁掉已采到的数据。
+        _persist_jar_after_autosolve(session, user_id, client)
         # 只反查"本轮采到的 item_id 里哪些库里已有",不再全历史加载:
         # 闲鱼表随 DATA_RETENTION 长期累积,全量 SELECT 每轮把租户全部历史 ID 拉进 Python 内存,
         # 而 prev_keys 的用途(去重 + 告警 new 判定)只需要本轮这批 key 的存在性,语义等价。
@@ -362,12 +406,17 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
         persist_refreshed_cookie(session, user_id, client)
         name = f"{type(exc).__name__}{exc}"
         if "XianyuVerify" in name:
+            #: ★ **文案已改**(2026-11-26):滑块现在会**自动过**(`xianyu_verify`),
+            #: 走到这里 = 自动过验证**没成功**(找不到手柄/拖完仍被挡)。
+            #: 原来那句「手机 App 过一次即可」在自动化之后是**错的操作指引** ——
+            #: 人会去手机上找验证框,而真正该看的是 `exc` 里那份失败原因。
             alert_service.notify_incident(
                 db=session, user_id=user_id, kind="xianyu",
-                title="🔴 闲鱼触发人机验证(滑块)",
+                title="🔴 闲鱼触发人机验证(滑块),自动过验证未成功",
                 detail=f"{exc}(已自动冷却 {settings.xianyu_cooldown_minutes} 分钟,期间轮次跳过。"
-                       f"恢复方式:手机闲鱼 App 过一次人机验证即可,冷却结束后下一轮自动恢复采集,"
-                       f"无需更新 Cookie——恢复后会有一条 ✅ 站内确认)",
+                       f"自动过验证每轮都会再试一次;若连续多轮失败,"
+                       f"跑 `python scripts/xianyu_slider.py --probe` 取证后按真实 DOM 补选择器。"
+                       f"恢复后会有一条 ✅ 站内确认)",
                 settings=settings)
         elif "XianyuWafBlock" in name:
             alert_service.notify_incident(

@@ -51,6 +51,17 @@ def verify_cooldown_active(session: Session, user_id: int, settings: Settings) -
     minutes = getattr(settings, "xianyu_cooldown_minutes", 0)
     if not minutes:
         return False
+    #: ★ **过完验证之后,拿"过验证的时刻"当冷却起点**(2026-11-26)。
+    #: 冷却本来管的是"别反复撞滑块";可 `xianyu_verify` 已经把滑块拖过去了 ——
+    #: 再按 120 分钟前那条 marker 跳过,等于把刚修好的链路又晾两小时
+    #: (实测 09:08 触发后 09:38/10:09/10:30 三轮全空转)。
+    #:
+    #: 判据是**比时间**:只有 marker **早于**最后一次真过验证时才忽略它。
+    #: ⚠️ 别改成"解过就 return False" —— 那会让**过验证之后又撞上**的风控也跳过冷却,
+    #: 变成连拖(每拖一次都是一次风控输入,本仓 `stress-test-costs-the-account`)。
+    from app.services import xianyu_verify
+
+    solved_at = xianyu_verify.last_solved_at()
     day_cutoff = datetime.now() - timedelta(hours=24)
     blocked = select(RunRecord).where(
         RunRecord.user_id == user_id,
@@ -81,7 +92,13 @@ def verify_cooldown_active(session: Session, user_id: int, settings: Settings) -
         blocked.filter(marker, RunRecord.started_at >= cutoff)
         .order_by(RunRecord.id.desc())
     )
-    return row is not None
+    if row is None:
+        return False
+    #: 最后一道:**这次风控发生在"最近一次真过完验证"之前** ⇒ 已经被修掉了,不该再冷却。
+    #: 比的是时间而不是"有没有解过",所以过验证之后**新撞上**的风控照旧冷却(防连拖)。
+    if solved_at is not None and row.started_at is not None and row.started_at < solved_at:
+        return False
+    return True
 
 
 def xianyu_cookie_missing(cookie: str) -> list[str]:
