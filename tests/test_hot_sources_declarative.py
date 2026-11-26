@@ -174,6 +174,54 @@ def test_自动找层_要多看几个元素(monkeypatch):
     assert rows[0]["title"] == "真标题一"
 
 
+# ---------------- 多镜像(2026-11-26:华尔街见闻整站换域名) ----------------
+
+def test_多镜像_第一个挂第二个通_仍能取到(monkeypatch):
+    """★ 场景原型:旧域名 `api-one.wallstcn.com` 在 **DNS 层已不存在**(NXDOMAIN)。
+
+    只写一个 URL ⇒ 这个源**静默停更**;而运行记录全是 success,
+    要等有人发现「这个平台三天没出过热词」才查得到。
+    """
+    import app.services.hot_sources as hs
+
+    calls: list[str] = []
+
+    def _get(url, *a, **k):
+        calls.append(url)
+        if "dead" in url:
+            raise ConnectionError("getaddrinfo failed")
+        return _FakeResp('{"code":0,"data":[{"title":"活的"}]}')
+
+    monkeypatch.setattr(hs.creq, "get", _get)
+    rows = JsonListSource("t", ("http://dead", "http://alive"),
+                          title_keys=("title",), list_path="data").fetch()
+    assert [r["title"] for r in rows] == ["活的"]
+    assert calls == ["http://dead", "http://alive"], "应按配置顺序逐个试"
+
+
+def test_多镜像_全挂时要抛错_带上各次原因(monkeypatch):
+    """全挂不能返回空列表 —— 空会被读成"今天没热点"(见类头注那条纪律)。"""
+    import app.services.hot_sources as hs
+
+    def _get(url, *a, **k):
+        raise ConnectionError("boom")
+
+    monkeypatch.setattr(hs.creq, "get", _get)
+    with pytest.raises(HotSourceError) as ei:
+        JsonListSource("t", ("http://a", "http://b"), title_keys=("title",)).fetch()
+    assert "ConnectionError" in str(ei.value)
+
+
+def test_华尔街见闻配置里新域名排第一_旧域名留作回退():
+    """域名迁移的**单一事实源**:别在别处再写一份 URL。"""
+    from app.services.hot_sources import SOURCES
+
+    for sid in ("wallstreetcn-hot", "wallstreetcn-news", "wallstreetcn-quick"):
+        urls = SOURCES[sid]._urls
+        assert urls[0].startswith("https://api.wscn.net/"), f"{sid} 首选应为新域名:{urls[0]}"
+        assert any("api-one.wallstcn.com" in u for u in urls), f"{sid} 丢了旧域名回退"
+
+
 def test_limit_生效(monkeypatch):
     items = ",".join('{"title":"t%d"}' % i for i in range(10))
     _patch(monkeypatch, '{"code":0,"data":[%s]}' % items)

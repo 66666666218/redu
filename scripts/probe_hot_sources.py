@@ -65,18 +65,17 @@ CANDIDATES: list[tuple[str, object]] = [
         "mktnews", "https://api.mktnews.net/api/flash?type=0&limit=50",
         title_keys=("title", "content"), headers={"Referer": "https://mktnews.net/"})),
     ("wallstreetcn-hot", JsonListSource(
-        "wallstreetcn-hot", "https://api-one.wallstcn.com/apiv1/content/articles/hot"
-                            "?period=all",
+        "wallstreetcn-hot", "https://api.wscn.net/apiv1/content/articles/hot?period=all",
         title_keys=("title",), list_path="data.day_items", url_key="uri", hot_key="pageviews",
         ok_codes=(20000, 0, None), headers={"Referer": "https://wallstreetcn.com/"})),
     ("wallstreetcn-news", JsonListSource(
-        "wallstreetcn-news", "https://api-one.wallstcn.com/apiv1/content/information-flow"
+        "wallstreetcn-news", "https://api.wscn.net/apiv1/content/information-flow"
                              "?channel=global-channel&accept=article&limit=30",
         title_keys=("resource.title", "resource.content_short"), list_path="data.items",
         url_key="resource.uri", ok_codes=(20000, 0, None),
         headers={"Referer": "https://wallstreetcn.com/"})),
     ("wallstreetcn-quick", JsonListSource(
-        "wallstreetcn-quick", "https://api-one.wallstcn.com/apiv1/content/lives"
+        "wallstreetcn-quick", "https://api.wscn.net/apiv1/content/lives"
                               "?channel=global-channel&limit=30",
         title_keys=("title", "content"), ok_codes=(20000, 0, None),
         headers={"Referer": "https://wallstreetcn.com/"})),

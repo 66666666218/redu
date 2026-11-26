@@ -421,7 +421,8 @@ class JsonListSource(HotSource):
       `time_key`   —— **发布时刻**的字段名(可选,点路径,可给多个按序试;规则见 `hot_time`)。
     """
 
-    def __init__(self, sid: str, url: str, *, title_keys: tuple[str, ...] = ("title",),
+    def __init__(self, sid: str, url: str | tuple[str, ...], *,
+                 title_keys: tuple[str, ...] = ("title",),
                  list_path: str | None = None, url_key: str = "", url_tpl: str = "",
                  hot_key: str = "", headers: dict | None = None, post_json: dict | None = None,
                  extra_label: str = "", ok_codes: tuple = (0, None, "0"),
@@ -434,9 +435,14 @@ class JsonListSource(HotSource):
                        **确实没有**时间字段,别去猜一个 —— 猜出来的时间会污染全部新鲜度判断
                        (`hot_time` 的注释)。多个的用法:澎湃的绝对时刻字段万一改名,
                        还能退回相对时间字段(`("publishTime", "pubTime")`)。
+        `url`        —— 可以给**多个**(按顺序试,第一个通就用)。用途与 `RssSource` 那份
+                       多镜像是**同一件事**(跨网络部署两边可达性可能相反),而这里多一条:
+                       平台会**整站换域名**(2026-11-26 华尔街见闻把接口从
+                       `api-one.wallstcn.com` 换到 `api.wscn.net`,旧域名**在 DNS 层已不存在** ——
+                       只写一个 URL 就是"静默停更,直到有人翻日志")。
         """
         self.id = sid
-        self._url = url
+        self._urls: tuple[str, ...] = (url,) if isinstance(url, str) else tuple(url)
         self._title_keys = title_keys
         self._list_path = list_path
         self._url_key = url_key
@@ -465,21 +471,26 @@ class JsonListSource(HotSource):
         return node if isinstance(node, list) else []
 
     def fetch(self, limit: int = 30) -> list[dict]:
-        try:
-            h = {"User-Agent": _UA, **self._headers}
-            if self._post_json is not None:
-                import json as _j
-                r = creq.post(self._url, headers={**h, "Content-Type": "application/json"},
-                              data=_j.dumps(self._post_json), impersonate="chrome", timeout=15)
-            else:
-                r = creq.get(self._url, headers=h, impersonate="chrome", timeout=15)
-            body = r.text
-            if self._strip_js:                     # `var newest = [...]` → 只留数组
-                body = body[body.find("["):body.rfind("]") + 1] or "[]"
-            import json as _j
-            payload = _j.loads(body)
-        except Exception as exc:  # noqa: BLE001
-            raise HotSourceError(f"{self.id} 请求失败:{type(exc).__name__}") from exc
+        import json as _j
+
+        payload, errs = None, []
+        for url in self._urls:                    # 多镜像:第一个通的就用
+            try:
+                h = {"User-Agent": _UA, **self._headers}
+                if self._post_json is not None:
+                    r = creq.post(url, headers={**h, "Content-Type": "application/json"},
+                                  data=_j.dumps(self._post_json), impersonate="chrome", timeout=15)
+                else:
+                    r = creq.get(url, headers=h, impersonate="chrome", timeout=15)
+                body = r.text
+                if self._strip_js:                 # `var newest = [...]` → 只留数组
+                    body = body[body.find("["):body.rfind("]") + 1] or "[]"
+                payload = _j.loads(body)
+                break
+            except Exception as exc:  # noqa: BLE001 - 换下一个镜像
+                errs.append(f"{type(exc).__name__}")
+        if payload is None:
+            raise HotSourceError(f"{self.id} 请求失败:{'/'.join(errs)}")
         # ⚠️ **有些平台失败也回 200**,业务码要当错误看(与 B站那条同源)
         if isinstance(payload, dict):
             code = payload.get("code", payload.get("errno", payload.get("err_no")))
@@ -734,23 +745,33 @@ SOURCES: dict[str, HotSource] = {
                  "&tag=%E7%83%AD%E9%97%A8%E6%96%87%E7%AB%A0&released=false",
         title_keys=("title",), time_key="released_time",  # Unix 秒(实测)
         extra_label="少数派", headers={"Referer": "https://sspai.com/"}),
+    #: ⚠️ **2026-11-26:接口整站换域名** —— 旧 `api-one.wallstcn.com` **在 DNS 层已不存在**
+    #: (阿里 223.5.5.5 与谷歌 8.8.8.8 都回 NXDOMAIN),新域名 `api.wscn.net` 实测 200。
+    #: 症状极具欺骗性:三个源自 11-24 13:05 起**一起消失**,而运行记录全是 `success`
+    #: (`hot_breakout` 只看 "有没有新词",源没了不报错)⇒ 又一个「静默失败」变体。
+    #: 旧域名留作第二候选:平台哪天又切回去,不必再改一次代码。
     "wallstreetcn-hot": JsonListSource(
-        "wallstreetcn-hot", "https://api-one.wallstcn.com/apiv1/content/articles/hot"
-                            "?period=all",
+        "wallstreetcn-hot",
+        ("https://api.wscn.net/apiv1/content/articles/hot?period=all",
+         "https://api-one.wallstcn.com/apiv1/content/articles/hot?period=all"),
         title_keys=("title",), list_path="data.day_items", url_key="uri", hot_key="pageviews",
         time_key="display_time",                      # Unix 秒(实测)
         ok_codes=(20000, 0, None), extra_label="华尔街见闻",
         headers={"Referer": "https://wallstreetcn.com/"}),
     "wallstreetcn-news": JsonListSource(
-        "wallstreetcn-news", "https://api-one.wallstcn.com/apiv1/content/information-flow"
-                             "?channel=global-channel&accept=article&limit=30",
+        "wallstreetcn-news",
+        ("https://api.wscn.net/apiv1/content/information-flow"
+         "?channel=global-channel&accept=article&limit=30",
+         "https://api-one.wallstcn.com/apiv1/content/information-flow"
+         "?channel=global-channel&accept=article&limit=30"),
         title_keys=("resource.title", "resource.content_short"), list_path="data.items",
         url_key="resource.uri", time_key="resource.display_time",   # Unix 秒(实测)
         ok_codes=(20000, 0, None), extra_label="华尔街见闻要闻",
         headers={"Referer": "https://wallstreetcn.com/"}),
     "wallstreetcn-quick": JsonListSource(
-        "wallstreetcn-quick", "https://api-one.wallstcn.com/apiv1/content/lives"
-                              "?channel=global-channel&limit=30",
+        "wallstreetcn-quick",
+        ("https://api.wscn.net/apiv1/content/lives?channel=global-channel&limit=30",
+         "https://api-one.wallstcn.com/apiv1/content/lives?channel=global-channel&limit=30"),
         title_keys=("title", "content"), time_key="display_time",   # Unix 秒(实测)
         ok_codes=(20000, 0, None), extra_label="华尔街见闻快讯",
         headers={"Referer": "https://wallstreetcn.com/"}),

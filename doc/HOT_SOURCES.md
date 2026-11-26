@@ -34,9 +34,15 @@
 | `producthunt` | Product Hunt | **RSS** | |
 | `chongbuluo-latest` | 虫部落最新 | **RSS** | |
 | `jin10` | 金十数据 | `flash_newest.js` | 响应是 `var newest=[...]`,要**剥壳** |
-| `wallstreetcn-hot` | 华尔街见闻热榜 | `api-one.wallstcn.com` | ⚠️ **用 `code=20000` 当成功码** |
-| `wallstreetcn-news` | 华尔街见闻要闻 | 同上 | |
-| `wallstreetcn-quick` | 华尔街见闻快讯 | 同上 | |
+| `wallstreetcn-hot` | 华尔街见闻热榜 | `api.wscn.net` | ⚠️ **用 `code=20000` 当成功码**;**2026-11-26 换域名**(旧 `api-one.wallstcn.com` 已 NXDOMAIN,留作第二候选) |
+| `wallstreetcn-news` | 华尔街见闻要闻 | 同上 | 同上 |
+| `wallstreetcn-quick` | 华尔街见闻快讯 | 同上 | 同上 |
+
+> ⚠️ **`JsonListSource` 的 `url` 现在可传元组**(多镜像,按顺序试,第一个通就用)。
+> 起因:华尔街见闻 2026-11-26 把接口从 `api-one.wallstcn.com` 换到 `api.wscn.net`,
+> **旧域名连 DNS 记录都没了**(阿里/谷歌 DNS 都回 NXDOMAIN)。只写一个 URL 的源
+> 在遇到这类整站迁移时会**静默停更**,而运行记录全是 success ——
+> 排查入口:看 `hot_source_items` 里某个 `source` 的 **MAX(captured_at)**。
 
 ## newsnow 容器(23)
 

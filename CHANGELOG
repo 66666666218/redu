@@ -1,3 +1,27 @@
+- [2026-11-26 17:51] FIX: 华尔街见闻三源**整站换域名致静默停更 2 天** + `JsonListSource` 支持多镜像
+  ## 症状与判据
+  `wallstreetcn-hot` / `-news` / `-quick` 三个源的 `MAX(captured_at)` 全部停在
+  **2026-11-24 13:05**,而 `runs` 表里 `hot_breakout` / `hot_forecast` 全是 success ——
+  「源没了」在运行记录上**看不出来**(那条链只看"有没有新词")。**排查入口**就是
+  `SELECT source, MAX(captured_at) FROM hot_source_items GROUP BY source`。
+  ## 真因:域名在 DNS 层被注销
+  `api-one.wallstcn.com` 用阿里 223.5.5.5 与谷歌 8.8.8.8 查都回 **NXDOMAIN**;
+  新域名 `api.wscn.net` 实测三个端点全 200、结构不变(仍 `code=20000` 为成功码)。
+  顺手订正:我第一版猜的 `api.wallstreetcn.com` **403**,别再试它。
+  ## 改法
+  * `JsonListSource` 的 `url` 支持**元组**(多镜像,按顺序试,第一个通就用;
+    全挂才抛错并带出各次异常名)。这与 `RssSource` 那份多镜像**是同一件事**,
+    理由同:跨网络部署两边可达性可能相反 —— 这里又多一条「平台会整站换域名」。
+  * 三个源改成 `("https://api.wscn.net/...", "https://api-one.wallstcn.com/...")` ——
+    旧域名留作第二候选,平台哪天切回去不必再改一次代码。
+  * `scripts/probe_hot_sources.py` 同步换域名(否则探针自己永远红)。
+  * 文档 `doc/HOT_SOURCES.md` 表格更新 + 补一段「源静默停更怎么查」。
+  ## 测试
+  `tests/test_hot_sources_declarative.py` 新增 3 条:多镜像第一个挂第二个通 /
+  全挂要抛错(不许返回空) / 华尔街见闻配置里新域名排第一且旧域名仍在。
+  (Files: app/services/hot_sources.py, scripts/probe_hot_sources.py,
+  tests/test_hot_sources_declarative.py, doc/HOT_SOURCES.md)
+
 - [2026-11-26 17:43] FIX: 闲鱼深采**零产出不再记 success** + 深采复用搜索跑通的 client(行情停了 7 天没被发现的根因)
   ## 起因:15 轮「success + items=0」
   11-19 12:55 ~ 11-26 02:31,`xianyu_deep` 连续 **15 轮**记 success 而 `items=0` ——
