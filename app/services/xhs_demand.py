@@ -25,6 +25,8 @@
 """
 from __future__ import annotations
 
+import re
+
 from app.utils import get_logger
 
 logger = get_logger(__name__)
@@ -58,15 +60,70 @@ def _connect():
     return p, browser
 
 
+#: 小红书搜索卡上**只有月日**的写法(`11-12` / `10-05`),年份要自己补。
+_RE_MD = re.compile(r"^(\d{1,2})-(\d{1,2})$")
+
+
+def _ts_from_card_time(text: str) -> int:
+    """把搜索卡上的发布时间文案转成 **Unix 秒**;读不懂返回 `0`(由调用方计数显形)。
+
+    ⚠️ **这是 2026-11-26 订正的核心**:此前取 `noteCard.time` / `lastUpdateTime`,
+    实测这两个字段**恒为 `null`**(`noteCard` 只有
+    `type/displayTitle/user/interactInfo/cover/imageList/cornerTagInfo` 七个键)
+    ⇒ `published` 永远是 0 ⇒ 发布时间闸**一次都没生效过**。
+
+    真实时间在 `noteCard.cornerTagInfo` 里 `type == "publish_time"` 那条的 `text`。
+    实测(78 条样本)出现的形状与占比:
+
+    | 形状 | 实例 | 解析 |
+    |---|---|---|
+    | 相对 | `2分钟前` / `4小时前` / `3天前` | `parse_published_coarse` |
+    | 昨天带时刻 | `昨天 21:11` | `parse_published`(`_RE_TODAY`) |
+    | **只有月日** | `11-12` / `10-05` / `05-31` | 本函数补年 |
+    | 绝对日期 | `2025-08-21` | `parse_published` |
+
+    `MM-DD` 补年规则:按当年算,若因此落到**未来** ⇒ 退回上一年
+    (小红书不会给未来的发布时间)。判不出的(**空/别的文案**)一律 `0` ——
+    调用方会把它记成「无时间N」,**不许猜一个时间出来**。
+    """
+    s = str(text or "").strip()
+    if not s:
+        return 0
+    from app.services.hot_time import parse_published, parse_published_coarse
+
+    dt = parse_published(s) or parse_published_coarse(s)
+    if dt is None:
+        m = _RE_MD.match(s)
+        if m:
+            from datetime import datetime as _dt
+
+            now = _dt.now()
+            try:
+                dt = _dt(now.year, int(m.group(1)), int(m.group(2)))
+            except ValueError:
+                return 0
+            if dt > now:
+                try:
+                    dt = dt.replace(year=now.year - 1)
+                except ValueError:      # 2-29 落到平年
+                    return 0
+    if dt is None:
+        return 0
+    try:
+        return int(dt.timestamp())
+    except (OSError, OverflowError, ValueError):
+        return 0
+
+
 def search_notes(page, keyword: str, limit: int = 2) -> list[dict]:
     """搜一个词 → 前 `limit` 篇笔记(带 `xsec_token` 与**发布时间**)。
 
     ★ **`published`(2026-11-24)**:用户投诉「有的大瓜已经是很久之前的了」,而这条链
     此前**连发布时间都没取** ⇒ 无从过滤。取值点按实测可靠性排:
-      ① `noteCard.time`(毫秒时间戳,搜索结果里就有);
-      ② `noteCard.lastUpdateTime`(同单位);
+      ① `noteCard.cornerTagInfo` 里 `type == "publish_time"` 的 `text`(**实测唯一有效**);
+      ② `noteCard.time` / `noteCard.lastUpdateTime`(实测**恒 null**,留作字段回潮的兼容);
       ③ 拿不到 = `0`(由调用方按"判不了"处理并**计数显形**,不静默当"新鲜")。
-    ⚠️ 单位统一在这里化到**秒**:小红书给的是毫秒,原样丢出去会在渲染时间时炸
+    ⚠️ 单位统一在这里化到**秒**:小红书若哪天改回毫秒,原样丢出去会在渲染时间时炸
     (`publish_mark` 有毫秒兜底,但判新旧用的是 `datetime.fromtimestamp`,必须自己转)。
     """
     page.goto(SEARCH_URL.format(kw=keyword), wait_until="domcontentloaded", timeout=60000)
@@ -84,13 +141,24 @@ def search_notes(page, keyword: str, limit: int = 2) -> list[dict]:
         const card = it.noteCard || it.note || {};
         const user = card.user || it.user || {};
         const it0 = card.interactInfo || it.interactInfo || {};
+        // ★ 发布时间在 cornerTagInfo 里(实测 time/lastUpdateTime 恒 null)
+        const tag = (card.cornerTagInfo || it.cornerTagInfo || [])
+                    .find(t => t && t.type === 'publish_time');
         return {id: card.noteId || it.id, token: it.xsecToken || card.xsecToken || '',
                 title: (card.displayTitle || it.displayTitle || '').slice(0, 80),
                 author: user.nickname || user.nickName || '',
                 comments: parseInt(it0.commentCount || '0', 10) || 0,
-                published: toSec(card.time || it.time || card.lastUpdateTime || it.lastUpdateTime)};
+                published: toSec(card.time || it.time || card.lastUpdateTime || it.lastUpdateTime),
+                pub_text: (tag && tag.text) || ''};
       }).filter(x => x.id);
     }""")
+    for r in rows:
+        ts = int(r.get("published") or 0)
+        if ts > 10 ** 11:               # 毫秒 → 秒(字段哪天回潮时别把 fromtimestamp 炸掉)
+            ts //= 1000
+        if ts <= 0:                     # 页面没给时间戳 ⇒ 用卡片文案兜底
+            ts = _ts_from_card_time(r.get("pub_text") or "")
+        r["published"] = ts
     #: ★ 2026-10-30:搜索结果里**直接带 `commentCount`** ⇒ 按评论数从多到少开,
     #: 别把额度浪费在 0 评论的笔记上(用户给的两条样本,一条 4 条评论、一条**评论为空**)。
     rows.sort(key=lambda x: x.get("comments") or 0, reverse=True)

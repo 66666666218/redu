@@ -2488,6 +2488,9 @@ def scan_xhs(db, user_id: int = 1, settings=None) -> dict:
     if not ok:
         #: CDP 不可达 = 浏览器没开/没登录。**不自己 launch** —— 脚本拉起的浏览器
         #: `navigator.webdriver=True`,那条路就废了(见 `tools/xhs_cdp.py` 头注)。
+        #: ★ 必须显形(2026-11-26):不写运行记录的话,「调度没触发」与「触发了但
+        #: CDP 连不上」在 `runs` 里都是空白 —— 12:50 那轮就是这么查不出来的。
+        _record_run_quiet(db, user_id, f"小红书 跳过:{why}"[:300], status="skipped")
         return {"skipped": why}
 
     #: ★ 小红书**用自己的种子词**(2026-10-30 实测):抖音那套参考作品名在小红书
@@ -2602,7 +2605,11 @@ def scan_xhs(db, user_id: int = 1, settings=None) -> dict:
                                   "total": st["total"], "publish_at": _ts})
     except Exception as exc:  # noqa: BLE001 - 浏览器/页面异常不该把整轮带崩
         logger.exception("小红书扫描失败")
-        return {"error": f"{type(exc).__name__}: {str(exc)[:80]}", "scanned": scanned}
+        reason = f"{type(exc).__name__}: {str(exc)[:120]}"
+        #: 同样要留痕:否则"页面中途挂了"与"根本没事发生"在 `runs` 里都是空白。
+        _record_run_quiet(db, user_id,
+                          f"小红书 失败 扫{scanned} {reason}"[:300], status="failed")
+        return {"error": reason, "scanned": scanned}
     finally:
         try:
             if page is not None:
@@ -2630,12 +2637,20 @@ def scan_xhs(db, user_id: int = 1, settings=None) -> dict:
             "skipped": skipped_n, "age_stale": age_stale, "age_unknown": age_unknown}
 
 
-def _record_run_quiet(db, user_id: int, detail: str) -> None:
-    """写一行运行记录(小红书那条链自己的可观测性)。"""
+def _record_run_quiet(db, user_id: int, detail: str, status: str = "success") -> None:
+    """写一行运行记录(小红书那条链自己的可观测性)。
+
+    ⚠️ `status` 不许恒为 success(2026-11-26):这条链此前**只有跑到底才写一行 success**,
+    `skipped`(CDP 不可达)与 `error`(页面异常)**一行都不写** ⇒
+    「调度没触发」和「触发了但 CDP 连不上」在 `runs` 里长得**一模一样**(都是空白),
+    12:50 那轮查不出原因就是这个。
+    """
     from app.services.tenant_base import _record_run
 
+    if db is None:      # 纯逻辑路径(单测/开关检查)没有会话,记录不是它的职责
+        return
     try:
-        _record_run(db, user_id, "demand_watch_xhs", "success", detail)
+        _record_run(db, user_id, "demand_watch_xhs", status, detail)
         db.commit()
     except Exception:  # noqa: BLE001 - 记录失败不影响结果
         db.rollback()
@@ -2767,11 +2782,21 @@ def demand_watch_tick(settings=None) -> int:
     n = 0
     try:
         for uid in db.scalars(select(User.id)).all():
+            #: ★★ **四段各自 try**(2026-11-26):此前整段一个 `try`,
+            #: 抖音的 `discover_latest` 抛 `DouyinProtocolError(need_login)` 就把
+            #: **小红书那段一起跳过了**,而外层只记一条 `需求名监控失败` 的日志,
+            #: 小红书在 `runs` 里**什么都没有** —— 与"调度没触发"长得一模一样。
+            #: 实测 11-26 04:53 / 08:53 两轮就是这么"扫0"的。
+            #: 判据:凡是「一轮里串多个平台」的作业,平台之间**不许共用一个 try**。
             try:
                 out = run_user(db, int(uid), settings)
                 n += 1 if out.get("pushed") else 0
-                # ★ 「最新的大瓜」:顺参考作品找同款账号 → 他们最近的作品。
-                # ⚠️ 过 `push_ledger` 去重:4 小时一轮,同一批新作品不该每轮都推一遍。
+            except Exception:  # noqa: BLE001 - 抖音主段失败不影响后面的平台
+                logger.exception("需求名监控失败 user=%s", uid)
+                db.rollback()
+            # ★ 「最新的大瓜」:顺参考作品找同款账号 → 他们最近的作品。
+            # ⚠️ 过 `push_ledger` 去重:4 小时一轮,同一批新作品不该每轮都推一遍。
+            try:
                 if bool(getattr(settings, "demand_latest_enabled", True)):
                     from app.services.push_ledger import drop_recent, record
 
@@ -2780,18 +2805,26 @@ def demand_watch_tick(settings=None) -> int:
                     if kept and push_latest(kept, settings):
                         record(db, int(uid), "douyin", kept)
                         n += 1
-                # ★ 顺着参考作品**发现新名字**(用户「根据这些来找方法去发现新的大瓜」)。
-                # 判据是"同款作者的多条作品里反复出现",一次出现不算。
+            except Exception:  # noqa: BLE001 - 单段失败不影响其他平台
+                logger.exception("最新大瓜失败 user=%s", uid)
+                db.rollback()
+            # ★ 顺着参考作品**发现新名字**(用户「根据这些来找方法去发现新的大瓜」)。
+            # 判据是"同款作者的多条作品里反复出现",一次出现不算。
+            try:
                 if bool(getattr(settings, "demand_expand_enabled", True)):
                     names = discover_names(db, int(uid), settings)
                     if names and push_expand(names, settings):
                         n += 1
-                # ★ **小红书**那条链(CDP 页面路,需要人开着那个浏览器)。
-                # 不可达时 `scan_xhs` 自己返回 skip,不会把整轮带崩。
+            except Exception:  # noqa: BLE001 - 单段失败不影响其他平台
+                logger.exception("发现新名字失败 user=%s", uid)
+                db.rollback()
+            # ★ **小红书**那条链(CDP 页面路,需要人开着那个浏览器)。
+            # 不可达时 `scan_xhs` 自己返回 skip,不会把整轮带崩。
+            try:
                 if bool(getattr(settings, "demand_xhs_enabled", True)):
                     scan_xhs(db, int(uid), settings)
-            except Exception:  # noqa: BLE001 - 一个用户失败不影响其他用户
-                logger.exception("需求名监控失败 user=%s", uid)
+            except Exception:  # noqa: BLE001 - 小红书失败不影响其他用户/后续作业
+                logger.exception("小红书扫描异常 user=%s", uid)
                 db.rollback()
         return n
     finally:

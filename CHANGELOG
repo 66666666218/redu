@@ -1,3 +1,28 @@
+- [2026-11-26 18:30] FIX: 小红书巡检三处「静默」—— 发布时间闸从未生效 / 抖音挂了连带跳过 / 跳过了却无记录
+  ## ① 发布时间闸**一次都没生效过**(11-24 就埋下)
+  取的是 `noteCard.time` / `lastUpdateTime`,实测这两个字段**恒为 `null`**
+  (`noteCard` 只有 `type/displayTitle/user/interactInfo/cover/imageList/cornerTagInfo`
+  七个键)⇒ `published` 永远是 0 ⇒ 闸门只累加「无时间N」、**从不拦截**。
+  运行记录里连续 6 轮都是「无时间10」,用户 11-24 投诉的「大瓜太老」至今没修好。
+  **真值在 `cornerTagInfo` 里 `type == "publish_time"` 那条的 `text`**(78 条样本实测),
+  形状有四种:`2分钟前` / `昨天 21:11` / `11-12`(只给月日) / `2025-08-21`。
+  新增 `xhs_demand._ts_from_card_time`:相对与昨天走 `hot_time.parse_published(_coarse)`,
+  `MM-DD` 按当年补、落到未来退回上一年,读不懂**返回 0**(计数显形,**不猜**)。
+  ## ② 抖音抛异常会**连带跳过小红书**(11-26 04:53 / 08:53 两轮)
+  `demand_watch_tick` 里四段共用**一个** `try`,`discover_latest` 抛
+  `DouyinProtocolError(need_login)` ⇒ 小红书那段根本没被调用,而外层只打一条日志。
+  **判据:一轮里串多个平台的作业,平台之间不许共用一个 try。** 现在四段各自 try。
+  ## ③ CDP 不可达 / 页面异常时**一行记录都不写**
+  `scan_xhs` 的 skip / error 两条早退路径都不落 `runs` ⇒「调度没触发」与
+  「触发了但 CDP 连不上」在库里**长得一模一样**(12:50 那轮查不出原因就是这个)。
+  现在分别记 `skipped` / `failed`,正文明写原因。
+  ## 测试
+  `tests/test_xhs_demand.py` 新增 10 条:卡片时间四种形状 / 读不懂返回 0 /
+  `MM-DD` 补年不落未来 / `search_notes` 从 cornerTagInfo 取时间 / 毫秒仍化秒 /
+  抖音抛异常仍跑小红书 / 小红书抛异常不影响整轮 / skipped 与 failed 各要有记录。
+  全仓 `pytest tests/` **3810 passed**。
+  (Files: app/services/xhs_demand.py, app/services/demand_watch.py, tests/test_xhs_demand.py)
+
 - [2026-11-26 17:51] FIX: 华尔街见闻三源**整站换域名致静默停更 2 天** + `JsonListSource` 支持多镜像
   ## 症状与判据
   `wallstreetcn-hot` / `-news` / `-quick` 三个源的 `MAX(captured_at)` 全部停在
