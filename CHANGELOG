@@ -21,9 +21,17 @@
   (实测 09:08 触发后 09:38/10:09/10:30 三轮全空转)。判据是**比时间**而非「解过就放行」——
   解完之后又撞上的风控照旧冷却,否则就成了连拖。
   告警文案同步改:走到失败分支 = 自动过验证**没成功**,应看异常里的 `reason`,不再教人「手机 App 拖一下」。
+  ## 附带修掉:浏览器兜底把主路失效藏住了(第十种静默失败)
+  实测 07:06~08:37 **连续 10 轮** `[浏览器兜底]`(每轮 60~90 条,档案一直是好的),
+  而协议路每轮 `SESSION_EXPIRED` —— 根因是库里的 jar `_m_h5_tk` 停在 **11-19**(166 小时前),
+  浏览器路根本不读它,所以**兜底成功 = 主路失效无人发现**。
+  现在回落浏览器跑通之后也会把那份 jar 导给协议路(`_persist_jar_after_fallback`,
+  与过验证那条共用 `_write_jar_if_complete` 的完整性闸:缺 `unb`/`cookie2` 一律不覆盖)。
+  验证:重导 jar 后单测协议路 `items=30`,整轮 `run_xianyu` 记录 **`[协议] items=90`**。
   ## 取证工具与测试
   `scripts/xianyu_slider.py`(`--probe` 抓 DOM + 截图 + 回包);
-  `tests/test_xianyu_verify.py` 21 条、`tests/test_xianyu_autosolve_jar.py` 6 条,
+  `tests/test_xianyu_verify.py` 21 条、`tests/test_xianyu_autosolve_jar.py` 8 条
+  (含回落路径 2 条:兜底成功也同步 jar、不完整 jar 不覆盖),
   `tests/test_xianyu_browser.py` 补 2 条自动过验证接线。
   ⚠️ **未达成的部分**:2026-11-26 10:57 探针跑在「当前没被风控」的时刻(`challenge_frames=0`),
   ⇒ 选择器**还没在真实滑块 DOM 上验证过**;下一次真撞上时看 `reason` 是不是 `handle_not_found`,

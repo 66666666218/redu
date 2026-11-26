@@ -59,6 +59,12 @@ class _Client:
         return self.jar
 
 
+def _settings():
+    from config.settings import Settings
+
+    return Settings(_env_file=None)
+
+
 def _cookie(db) -> str:
     return cookie_store.get_cookie(db, 1, "goofish")
 
@@ -117,3 +123,73 @@ def test_exporter_exception_is_swallowed(session) -> None:
 
     assert tenant._persist_jar_after_autosolve(session, 1, _Boom()) is False
     assert _cookie(session) == "unb=OLD; cookie2=OLD"
+
+
+# ------------------------------------------------- 回落路径(2026-11-26 补)
+def test_fallback_path_persists_jar(monkeypatch) -> None:
+    """★ **浏览器兜底跑通了 ⇒ 顺手把那份 jar 导给协议路**。
+
+    不能只靠「过完验证才回写」:实测 07:06~08:37 **连续 10 轮** `[浏览器兜底]`
+    (每轮 60~90 条、档案一直是好的),协议路却每轮 `SESSION_EXPIRED`
+    —— **兜底把问题兜住了,也把问题藏住了**。这条用例钉住"兜底成功也要同步 jar"。
+    """
+    from app.services import xianyu as xy
+
+    boom = xy.XianyuCookieExpired("SESSION_EXPIRED")
+    calls: list[str] = []
+
+    def _collect(settings, client, start_offset=0, stats=None):
+        calls.append(getattr(client, "kind", "?"))
+        if calls[-1] == "协议":
+            raise boom
+        return [{"item_id": "i1", "title": "PS教程"}]
+
+    monkeypatch.setattr(xy, "collect_hot", _collect)
+
+    class _Proto:
+        kind = "协议"
+
+        def cookie_header(self) -> str:
+            return ""
+
+    class _Browser:
+        kind = "浏览器"
+
+        def export_cookie_jar(self) -> str:
+            return _GOOD_JAR
+
+    import app.services.xianyu_browser as xb
+    monkeypatch.setattr(xb, "get_client", lambda s: _Browser())
+
+    from app.services import tenant as tn
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    db.add(User(username="t", password_hash="x"))
+    db.commit()
+    cookie_store.set_cookie(db, 1, "goofish", "unb=OLD; cookie2=OLD")
+    try:
+        hot, client, source = tn._collect_hot_with_fallback(
+            _settings(), _Proto(), "协议", browser_allowed=True, start_offset=0, stats={})
+        assert source == "浏览器兜底" and hot
+        #: 回落成功后由调用方(本用例模拟)导出 —— 真正的接线在 `run_xianyu` 里
+        assert tn._persist_jar_after_fallback(db, 1, client) is True
+        assert cookie_store.get_cookie(db, 1, "goofish") == _GOOD_JAR
+    finally:
+        db.close()
+
+
+def test_incomplete_fallback_jar_not_written() -> None:
+    """回落导出的 jar 若不完整,**照样不许覆盖**(与过验证那条路同一个闸)。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    db.add(User(username="t", password_hash="x"))
+    db.commit()
+    cookie_store.set_cookie(db, 1, "goofish", "unb=OLD; cookie2=OLD")
+    try:
+        assert tenant._persist_jar_after_fallback(db, 1, _Client(_BAD_JAR)) is False
+        assert cookie_store.get_cookie(db, 1, "goofish") == "unb=OLD; cookie2=OLD"
+    finally:
+        db.close()

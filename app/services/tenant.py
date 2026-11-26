@@ -226,24 +226,53 @@ def _persist_jar_after_autosolve(session: Session, user_id: int, client: object)
     #: (2026-11-26 第一版就写成 `solved_at <= _JAR_PERSISTED_AT`,直接 TypeError)。
     if solved_at is None or (_JAR_PERSISTED_AT is not None and solved_at <= _JAR_PERSISTED_AT):
         return False
+    ok = _write_jar_if_complete(session, user_id, client, "自动过验证后")
+    if ok:
+        _JAR_PERSISTED_AT = solved_at      #: 写成功才记 —— 失败的下次还有机会
+    return ok
+
+
+def _write_jar_if_complete(session: Session | None, user_id: int, client: object,
+                           why: str) -> bool:
+    """从浏览器档案导一份 jar 回写加密库(共用闸:完整性校验 + 失败静默)。
+
+    `why` 只进日志,用来区分两条触发路径(过完验证 / 回落过)—— 排障时要知道
+    「这轮为什么动过 Cookie」。
+    """
+    if session is None:
+        return False
     exporter = getattr(client, "export_cookie_jar", None)
     if not callable(exporter):
         return False
     try:
         jar = exporter()
     except Exception:  # noqa: BLE001 - 读档案失败不该影响已经采到的数据
-        logger.debug("闲鱼过验证后导出 jar 失败", exc_info=True)
+        logger.debug("闲鱼导出 jar 失败(%s)", why, exc_info=True)
         return False
     if not jar or xianyu_cookie_missing(jar):
         #: 缺 `unb`/`cookie2` = 这份 jar 不完整(读歪了/档案未登录),**别覆盖**好数据
-        logger.warning("闲鱼过验证后导出的 jar 不完整,跳过回写(%s 字节)", len(jar or ""))
+        logger.warning("闲鱼导出的 jar 不完整(%s),跳过回写(%s 字节)", why, len(jar or ""))
         return False
-    set_cookie(session, user_id, "goofish", jar)
-    session.commit()
-    _JAR_PERSISTED_AT = solved_at
-    logger.info("闲鱼自动过验证后已回写整套 Cookie(%s 字节,%s 项)",
-                len(jar), jar.count(";") + 1)
+    try:
+        set_cookie(session, user_id, "goofish", jar)
+        session.commit()
+    except Exception:  # noqa: BLE001 - 写库失败同样不该毁掉本轮已采数据
+        logger.warning("闲鱼 jar 回写失败(%s)", why, exc_info=True)
+        session.rollback()
+        return False
+    logger.info("闲鱼已回写整套 Cookie(%s,%s 字节,%s 项)",
+                why, len(jar), jar.count(";") + 1)
     return True
+
+
+def _persist_jar_after_fallback(session: Session | None, user_id: int, client: object) -> bool:
+    """回落浏览器**跑通**了 ⇒ 那份 jar 是新鲜的,导出给协议路用。
+
+    ⚠️ **为什么要跟 `_persist_jar_after_autosolve` 分开**:两者触发条件不同,
+    但**动作与闸门完全一样** —— 共用 `_write_jar_if_complete`,别各写一份完整性校验
+    (`xianyu_cookie_missing` 那份口径在本仓已经被重复实现害过)。
+    """
+    return _write_jar_if_complete(session, user_id, client, "回落浏览器后")
 
 
 def run_xianyu(session: Session, user_id: int, settings: Settings | None = None) -> dict:
@@ -309,6 +338,12 @@ def run_xianyu(session: Session, user_id: int, settings: Settings | None = None)
         #: 不回写的话,协议路用的还是**过验证之前**那份旧 jar,下一轮照样被挡 ——
         #: 自愈只救了浏览器那条路(而协议路才是常态路)。失败静默:回写失败不该毁掉已采到的数据。
         _persist_jar_after_autosolve(session, user_id, client)
+        #: ★ **回落过(走的是浏览器)也顺手导一次**(2026-11-26):浏览器路能跑通
+        #: ⇒ 它档案里那份 jar 就是新鲜的,没理由让协议路继续用过期那份。
+        #: 实测 07:06~08:37 **连续 10 轮** `[浏览器兜底]`(每轮 60~90 条),协议路每轮
+        #: `SESSION_EXPIRED` 却无人察觉 —— **兜底成功把主路失效藏住了**(静默失败的第十种变体)。
+        if source == "浏览器兜底":
+            _persist_jar_after_fallback(session, user_id, client)
         # 只反查"本轮采到的 item_id 里哪些库里已有",不再全历史加载:
         # 闲鱼表随 DATA_RETENTION 长期累积,全量 SELECT 每轮把租户全部历史 ID 拉进 Python 内存,
         # 而 prev_keys 的用途(去重 + 告警 new 判定)只需要本轮这批 key 的存在性,语义等价。
