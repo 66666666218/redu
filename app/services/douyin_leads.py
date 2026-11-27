@@ -29,7 +29,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from sqlalchemy import or_, select
 from sqlalchemy.exc import SQLAlchemyError
@@ -2534,6 +2534,20 @@ def _niche_summary(leads: list[dict]) -> str:
         cnt.items(), key=lambda kv: (kv[0] == category_topics.NICHE_OTHER, kv[1], kv[0])))
 
 
+def _has_round_pan_evidence(ld: dict) -> bool:
+    # 用卡面选中的那条链，不让后备链掩盖卡面实际是首页。这里只判形态，不改变准入。
+    url, kind = _pan_link_of(ld)
+    if kind != "group":
+        return _has_share_evidence(url)
+    try:
+        parts = urlsplit(url)
+        return (parts.scheme in ("http", "https") and parts.hostname == "sj-m-ssl.xunlei.com"
+                and parts.path == "/group-invite"
+                and any(gid.isdecimal() for gid in parse_qs(parts.query).get("group_id", ())))
+    except ValueError:
+        return False
+
+
 def _resource_round_summary(plan: _KeywordPlan, cat: str, window: list[str],
                             leads: list[dict], found_ts: float) -> str:
     """分别量入窗词和带可用链的视频；不拿来源词替视频判类。"""
@@ -2544,7 +2558,7 @@ def _resource_round_summary(plan: _KeywordPlan, cat: str, window: list[str],
     for ld in leads:
         url = str(ld.get("url") or "").strip()
         key = str(ld.get("aweme_id") or _aweme_id(url) or url).strip()
-        if not key or key in seen or not _has_usable_pan(ld):
+        if not key or key in seen or not _has_round_pan_evidence(ld):
             continue
         seen.add(key)
         actual, _ = _title_resource_type(str(ld.get("title") or ""), plan.catalog,
@@ -2607,8 +2621,10 @@ def _kouling_summary(leads: list[dict]) -> str:
             + (f" 其他{n_other}" if n_other else "") + ")")
 
 
-def run_douyin_leads(db, user_id: int, settings=None, category: str | None = None,
-                     advance: bool = True, round_tag: str = "") -> int:
+def run_douyin_leads(db: Session, user_id: int, settings=None, category: str | None = None,
+                     advance: bool = True, round_tag: str = "", *,
+                     only_platform: str | None = None,
+                     completed_platforms: set[str] | None = None) -> int:
     """**单用户**跑一轮抖音线索:定时 tick 与「失败重试」**共用这一条路径**。
 
     ⚠️ **为什么必须共用一个函数**(而不是给重试另写一套):本项目在 `wechat_listen` 上踩过
@@ -2618,6 +2634,10 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
     ⚠️ `advance=False` 是给**重试**用的:重试必须**重跑同一个类目**、**不能推进游标** ——
     否则失败那一轮等于白跳过一个类目,而"每类都要覆盖到"正是轮换的意义
     (与 `wechat_listen` 的 `batch_index` 同一条纪律)。
+
+    `only_platform` 将本次运行限定到一个已启用的平台，不覆盖原设置。
+    `completed_platforms` 只在平台的成功记录提交后加入平台名。
+    抖音资源轮没有搜索窗口时不算完成；有窗口但零线索仍算完成。返回值仍是线索数。
 
     ★ `round_tag` 写进运行记录的 `detail`(形如 `[专轮]`),2026-11-18 加:
     大瓜专轮与主轮**共用 `kind="douyin_leads"`**(共用重试、告警、健康度那一整套),
@@ -2632,6 +2652,10 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
 
         settings = get_settings()
     plats = platforms_of(settings)
+    if only_platform is not None:
+        if only_platform not in plats:
+            return 0
+        plats = [only_platform]
     cat = category or category_topics.current_category(db)   # 本轮搜哪个类目(轮换)
     #: ★★ **主轮不许搜专轮类目**(2026-11-19,用户口径「我们资源的监控,和大瓜的监控分开,
     #: 不要互占资源」)。`current_category` 已经跳过大瓜,这里挡的是**别的调用方**
@@ -2901,7 +2925,8 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
             # ⚠️ **来源标签要进运行记录**(2026-10-08):抖音现在"协议优先、浏览器兜底",
             # 而两条路都会产出"0 条"。不标来源的话,看到 0 就分不清是
             # "协议挂了被回落"还是"真没人在推资源" —— 正是本仓最忌讳的那种含糊。
-            _record_run(db, user_id, "douyin_leads", "success",
+            status = "skipped" if resource_round and not window else "success"
+            _record_run(db, user_id, "douyin_leads", status,
                         f"{round_tag}{plat}[{source or '-'}] 类目{cat} 词{len(window)}(其中外部{n_hot_used}) "
                         f"线索{len(leads)} 赛道{_niche_summary(leads) or '-'} "
                         f"新鲜{_freshness_summary(leads)} "
@@ -2916,6 +2941,8 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
                         f" 无时{funnel.get('notime', 0)} 续{funnel.get('cont', 0)} 口令{funnel.get('kept', 0)}"
                         f" 无链{n_panless} 群令{n_grouponly} 无迹象{n_nosignal}{coverage}")
             db.commit()
+            if completed_platforms is not None and status == "success":
+                completed_platforms.add(plat)
         except Exception as exc:  # noqa: BLE001 - 单平台失败不影响其余
             db.rollback()
             logger.exception("线索平台 %s 失败 user=%s", plat, user_id)

@@ -533,6 +533,26 @@ def _fresh_failed_since(db: Session, kind: str, since_id: int) -> bool:
     return bool(row is not None and int(row.id) > int(since_id) and row.status == "failed")
 
 
+def _douyin_retry_kwargs(run: RunRecord) -> dict:
+    import re
+
+    from app.services.category_topics import SOLO_CATEGORIES
+    from app.services.douyin_leads import DAGUA_CATEGORY, PLATFORMS
+
+    detail = run.detail or ""
+    if "[专轮]" in detail:
+        return {"category": DAGUA_CATEGORY, "advance": False, "round_tag": "[专轮重试] "}
+    match = re.search(r"类目(\S+)", detail)
+    category = match.group(1) if match else None
+    kwargs = {"category": category, "advance": False}
+    other_platforms = tuple(f"{plat}:" for plat in PLATFORMS if plat != "douyin")
+    if (category not in SOLO_CATEGORIES and "[专轮重试]" not in detail
+            and not detail.startswith(other_platforms)):
+        # 重试只跑原失败的平台；是否恢复由本次调用已提交的成功记录决定。
+        kwargs.update(only_platform="douyin", completed_platforms=set())
+    return kwargs
+
+
 def retry_run(db: Session, run_id: str, settings=None) -> dict:
     from config.settings import get_settings
 
@@ -565,12 +585,19 @@ def retry_run(db: Session, run_id: str, settings=None) -> dict:
         m = _re.search(r"cursor=(\d+)", run.detail or "")
         if m:
             kwargs["batch_index"] = int(m.group(1))
+    if run.kind == "douyin_leads":
+        douyin_kwargs = _douyin_retry_kwargs(run)
+        if "completed_platforms" in douyin_kwargs:
+            kwargs = douyin_kwargs
     try:
         res = runner(db, run.user_id, settings, **kwargs)
         if _retry_blocked(res):
             # 撞上了在跑的那一轮(run_wechat_listen 自己已落 skipped 记录):
             # 原失败记录保持 failed,交给下一次重试扫描。
             return {"ok": False, "msg": "该用户上一轮采集仍在执行中,请稍后再试"}
+        completed = kwargs.get("completed_platforms")
+        if completed is not None and "douyin" not in completed:
+            return {"ok": False, "msg": "抖音资源轮未成功完成，原失败记录保留"}
         # 成功后必须关闭该失败记录,否则它仍是 status='failed',会被
         # retry_failed_runs 在 24h 窗口内再次自动重跑一遍(重复采集)。
         run.status = "recovered"
@@ -714,43 +741,21 @@ def retry_failed_runs(max_retry: int = 3) -> dict:
                 if m:
                     kwargs["batch_index"] = int(m.group(1))
             if run.kind == "douyin_leads":
-                # ⚠️ **同 `wechat_listen` 的道理**(2026-10-06):重试必须**重跑同一个类目**,
-                # 且 **`advance=False`**(不推进轮换游标)——
-                # 否则"失败那轮"等于白跳过一个类目,而"每类都要覆盖到"正是轮换的意义。
-                # 类目写在 detail 里的 `类目X`(见 `run_douyin_leads` 的 _record_run)。
-                import re as _re
-
-                m = _re.search(r"类目(\S+)", run.detail or "")
-                kwargs["category"] = m.group(1) if m else None
-                kwargs["advance"] = False
-                #: ★ **大瓜专轮的重试必须 still 是大瓜**(2026-11-18)。两件事:
-                #: ① **失败**记录的 detail 里**没有 `类目X`**(它只在成功那行才有),
-                #:    所以 `category` 会是 `None` ⇒ `run_douyin_leads` 回落到**轮换游标**,
-                #:    重试就搜成了当时轮到的那个类目 —— 而专轮的失败恰恰说明"大瓜这条
-                #:    专线断了",重试去搜影视毫无意义。⇒ 从 `[专轮]` 标记认回类目。
-                #: ② 重试后**保留标记**,否则 `runs` 里分不清这次是专轮重试还是主轮重试。
-                if "[专轮]" in (run.detail or ""):
-                    from app.services.douyin_leads import DAGUA_CATEGORY
-
-                    kwargs["category"] = DAGUA_CATEGORY
-                    kwargs["round_tag"] = "[专轮重试] "
+                kwargs = _douyin_retry_kwargs(run)
             try:
-                # ⚠️⚠️ **"没抛异常"不等于"重试成功"**(2026-10-16 实测撞到)。
-                #    `run_douyin_leads` 这类**多平台** runner 会把单平台失败**吞进
-                #    `_record_run(..., "failed")` 然后正常返回**(它自己的注释写着
-                #    "单平台失败不影响其余")—— 于是"重试又失败了",老记录却被标成
-                #    `recovered → retry_ok`,而 `recovered` 的语义正是
-                #    **"这条不用再试了"** ⇒ **一次假成功把这条链的自愈关掉**。
-                #    实测:12:10 抖音失败 → 13:30 自动重试**又失败** → 却记成
-                #    `retry_ok`,而它从此不再被重试。
-                #    ⇒ 判据改成**看这一轮的运行记录自己怎么说**(与 `_retry_blocked`
-                #      同一条道理:**没有正面证据说它成了,就不许标 recovered**)。
-                _mark = db.scalar(select(func.max(RunRecord.id))
-                                  .where(RunRecord.kind == run.kind)) or 0
+                # 抖音资源轮以本次提交为准。其他 runner 仍通过新失败记录防止误报恢复。
+                completed = kwargs.get("completed_platforms")
+                mark = 0
+                if completed is None:
+                    mark = db.scalar(select(func.max(RunRecord.id))
+                                     .where(RunRecord.kind == run.kind)) or 0
                 res = runner(db, run.user_id, settings, **kwargs)
                 if _retry_blocked(res):
                     continue    # 撞上在跑的一轮:保持 failed,等下一次扫描再试,不关闭记录
-                if _fresh_failed_since(db, run.kind, _mark):
+                if completed is not None:
+                    if "douyin" not in completed:
+                        continue
+                elif _fresh_failed_since(db, run.kind, mark):
                     continue    # 它自己记了失败 ⇒ 如实保留(新记录会成为下一次候选)
                 # 采集成功:关闭旧失败记录,阻止同一失败被反复重试
                 run.status = "recovered"
@@ -769,6 +774,9 @@ def retry_failed_runs(max_retry: int = 3) -> dict:
                     RunRecord.status == "failed",
                     RunRecord.id < run.id,
                 )).all()
+                if completed is not None:
+                    # 只重跑了抖音资源轮，不能替大瓜或其他平台关闭旧失败。
+                    older = [old for old in older if "completed_platforms" in _douyin_retry_kwargs(old)]
                 if older:
                     for old in older:
                         old.status = "recovered"

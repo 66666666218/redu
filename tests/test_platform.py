@@ -1394,6 +1394,104 @@ def test_retry_douyin_leads_重跑同一个类目(session, monkeypatch: pytest.M
     assert calls and calls[0].get("category") == "影视", f"应当重跑失败那个类目:{calls}"
 
 
+@pytest.mark.parametrize("manual", [False, True], ids=["auto", "manual"])
+@pytest.mark.parametrize("outcome", [
+    "zero_budget", "mixed_zero_budget", "douyin_disabled", "cooldown", "failed",
+    "commit_failed", "empty", "mixed_empty",
+])
+def test_retry_douyin_resource_round_requires_completed_search(
+        session, monkeypatch: pytest.MonkeyPatch, manual: bool, outcome: str) -> None:
+    from datetime import datetime, timedelta
+
+    from sqlalchemy.orm import Session
+
+    import app.db as appdb
+    from app import admin
+    from app.db.models import RunRecord
+    from app.services import category_topics, douyin_leads, douyin_protocol_source, mediacrawler_source
+    from config.settings import Settings
+
+    zero_budget = outcome in ("zero_budget", "mixed_zero_budget")
+    platforms = {"mixed_zero_budget": "douyin,kuaishou", "douyin_disabled": "kuaishou",
+                 "mixed_empty": "kuaishou,douyin"}.get(outcome, "douyin")
+    st = Settings(_env_file=None, leads_platforms=platforms,
+                  douyin_leads_keywords=0 if zero_budget else 2, douyin_leads_use_protocol=False,
+                  douyin_cdp_enabled=False, douyin_retry_skip_in_cooldown=False)
+    monkeypatch.setattr("config.settings.get_settings", lambda: st)
+    monkeypatch.setattr(appdb, "get_session_local", lambda: sessionmaker(bind=session.get_bind()))
+    monkeypatch.setattr(douyin_leads, "hot_seed_words", lambda *a, **k: [])
+    monkeypatch.setattr(douyin_protocol_source, "account_keys", lambda *a: ["douyin"])
+    monkeypatch.setattr(douyin_protocol_source, "in_verify_cooldown", lambda *a, **k: outcome == "cooldown")
+    monkeypatch.setattr(douyin_leads, "_browser_probe_allowed", lambda *a: False)
+    searched: list[tuple[str, list[str]]] = []
+
+    def crawl(platform: str, keywords: list[str], *, cookie: str, user_id: int) -> list[dict]:
+        searched.append((platform, list(keywords)))
+        if outcome == "failed":
+            raise RuntimeError("模拟搜索失败")
+        return []
+
+    monkeypatch.setattr(mediacrawler_source, "crawl", crawl)
+    detail = "douyin: 类目影视 运行超时"
+    failed_at = datetime.now() - timedelta(hours=2)
+    older_details = {
+        "older-resource": "douyin: 类目问卷 运行超时",
+        "older-kuaishou": "kuaishou: 运行超时",
+        "older-dagua": "[专轮] douyin: 运行超时",
+    } if outcome == "mixed_empty" else {}
+    session.add_all(RunRecord(user_id=1, run_id=key, kind="douyin_leads", status="failed",
+                              detail=text, started_at=failed_at - timedelta(minutes=1))
+                    for key, text in older_details.items())
+    session.flush()
+    old = RunRecord(user_id=1, run_id="resource-retry", kind="douyin_leads", status="failed",
+                    detail=detail, retry_count=0, started_at=failed_at)
+    session.add(old)
+    session.commit()
+    cursor = category_topics.current_index(session)
+    old_id = old.id
+
+    if outcome == "commit_failed":
+        commit = Session.commit
+
+        def commit_round(db: Session) -> None:
+            if any(isinstance(row, RunRecord) and row.status == "success" for row in db.new):
+                db.flush()
+                raise RuntimeError("模拟成功记录提交失败")
+            commit(db)
+
+        monkeypatch.setattr(Session, "commit", commit_round)
+
+    completed = outcome in ("empty", "mixed_empty")
+    if manual:
+        result = admin.retry_run(session, str(old_id), st)
+        assert result["ok"] is completed
+    else:
+        assert admin.retry_failed_runs() == {"retried": int(completed)}
+        if outcome == "mixed_zero_budget":
+            assert admin.retry_failed_runs() == {"retried": 0}
+
+    with Session(session.get_bind()) as reader:
+        row = reader.get(RunRecord, old_id)
+        assert (row.status, row.retry_count) == ("recovered" if completed else "failed", 0)
+        if not completed:
+            assert row.detail == detail
+        assert category_topics.current_index(reader) == cursor
+        for key in older_details:
+            older = reader.scalar(select(RunRecord).where(RunRecord.run_id == key))
+            assert older.status == ("recovered" if key == "older-resource" and not manual else "failed")
+        new = reader.scalars(select(RunRecord).where(RunRecord.id > old_id)).all()
+        if zero_budget or outcome == "douyin_disabled":
+            assert not searched and not new
+        elif outcome == "cooldown":
+            assert not searched and len(new) == 1 and new[0].status == "skipped"
+        else:
+            assert searched == [("douyin", ["短剧", "漫剧"])]
+            assert len(new) == 1 and "类目影视" in new[0].detail
+            assert new[0].status == ("success" if completed else "failed")
+            if outcome == "commit_failed":
+                assert "模拟成功记录提交失败" in new[0].detail
+
+
 def test_run_douhot_用文件里的新cookie自愈(session, tmp_path, monkeypatch) -> None:
     """★ **库里的 cookie 过期时,自动改用 `DOUHOT_COOKIE_FILE` 里那份并重试**(2026-11-01)。
 

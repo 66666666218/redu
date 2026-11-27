@@ -3532,7 +3532,7 @@ class TestResourceRoundSearchWindow:
         run = session.query(RunRecord).filter_by(kind="douyin_leads").one()
         stamped = {row.word for row in session.scalars(select(HotWordSeen)).all()
                    if row.fed_search_at is not None}
-        assert run.status == "success"
+        assert run.status == ("skipped" if skipped else "success")
         if skipped:
             assert not searched and not stamped
             assert "冷却内已探过,跳过" in run.detail and "类目问卷 词0(其中外部0)" in run.detail
@@ -3544,6 +3544,26 @@ class TestResourceRoundSearchWindow:
 
 
 class TestResourceRoundSummary:
+    @pytest.mark.parametrize(("fields", "usable"), [
+        (dl.pan_of("电影全集 https://pan.quark.cn/"), 0),
+        ({"pan_url": "https://pan.quark.cn/s/"}, 0),
+        ({"pan_url": "https://example.invalid/pan.quark.cn/s/fake"}, 0),
+        ({"pan_url": "https://drive.uc.cn/s/synthetic"}, 1),
+        ({"pan_url": "https://pan.baidu.com/s/1synthetic?pwd=1234"}, 1),
+        ({"pan_url": "https://pan.xunlei.com/s/synthetic"}, 1),
+        ({"pan_url": "https://pan.quark.cn/s/synthetic",
+          "kouling": {"our_url": "https://pan.quark.cn/"}}, 0),
+        ({"kouling": {"group_url": "https://sj-m-ssl.xunlei.com/group-invite?group_id=123"}}, 1),
+        ({"kouling": {"group_url": "https://example.invalid/group-invite?group_id=123"}}, 0),
+        ({"kouling": {"group_url": "https://sj-m-ssl.xunlei.com/group-invite?group_id="}}, 0),
+    ])
+    def test_只统计卡面所选的分享链或真实形态的群邀请(self, fields: dict, usable: int) -> None:
+        found = int(_ROUND_AT.timestamp())
+        lead = dict(fields, aweme_id="1", title="电影全集", publish_at=found - 1)
+        assert dl._has_usable_pan(lead), "原准入不变；只收紧运行摘要"
+        detail = dl._resource_round_summary(dl._KeywordPlan([]), "影视", [], [lead], found)
+        assert detail == f" 本类词入窗0(资源名0 话题0) 同类可用{usable}(发现时未满3天{usable}) 未分类0"
+
     def test_按可用视频分类去重和发现时帖龄(self, resource_round_settings: Settings) -> None:
         found = int(_ROUND_AT.timestamp())
         three_days = int(timedelta(days=3).total_seconds())
@@ -3563,7 +3583,7 @@ class TestResourceRoundSummary:
             {"aweme_id": "7", "title": "电影全集", "kouling": {"kind": "share"}},
             {"aweme_id": "8", "title": "《雾岛来信》", "library": lib, "publish_at": found},
             {"aweme_id": "9", "title": "《雾岛来信》", "pan_url": pan,
-             "library": dict(lib, link="https://example.invalid/pan.quark.cn/s/fake")},
+             "library": dict(lib, link="https://example.invalid/s/fake")},  # 卡面有原链，假库链不参与分类
             {"aweme_id": "10", "title": "风里有响声", "pan_url": pan,
              "library": dict(lib, title="另一部漫剧")},
         ]

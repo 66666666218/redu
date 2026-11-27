@@ -1549,7 +1549,9 @@ GET `/api/admin/pan/self-check?user_id=1`(perm `logs.view`)
 | 登录日志 | GET | `/api/admin/logins` | `[{"username","ip","ua","ok","time"}]` |
 | 管理操作日志 | GET | `/api/admin/logs` | `[{"admin","action","target","time"}]` |
 | 失败采集 | GET | `/api/admin/runs/failed` | `[{"run_id","kind","user_id","detail","time","retry"}]` |
-| 重试失败采集 | POST | `/api/admin/runs/{run_id}/retry` | `{"ok": true}` 或 `{"ok": false, "msg": "..."}` |
+| 重试失败采集 | POST | `/api/admin/runs/{run_id}/retry` | 路径参数 `run_id`，无 Body/Query；`{"ok": true}` 或 `{"ok": false, "msg": "..."}` |
+
+2026-11-27：抖音资源主轮重试只跑已启用的抖音，不带跑其他平台。重试沿用失败记录中的类目（旧记录没有类目时取当前类目），不推进轮换。搜索完成但没有线索仍可恢复；平台未启用、零预算、冷却跳过或本轮失败时，保留原失败记录。响应示例：`{"ok": false, "msg": "抖音资源轮未成功完成，原失败记录保留"}`。
 
 ### 13.7 运行配置
 | 动作 | 方式 | 路径 | 说明 |

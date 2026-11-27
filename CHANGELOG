@@ -1,3 +1,4 @@
+- [2026-11-27 23:40] FIX: 抖音资源轮重试只跑已启用的抖音，避免零预算时重复搜索其他平台；本次成功落库才标为恢复，不合并大瓜或其他平台的旧失败。网盘首页与伪链接不计入同类可用线索，入库与推送规则不变 (Files: app/admin.py, app/services/douyin_leads.py, tests/test_platform.py, tests/test_douyin_leads.py, doc/API.md)
 - [2026-11-27 22:00] FIX: 抖音资源主轮及其重试在现有搜索预算内优先保留本类词；按实际搜索窗口记录探针与热榜作品消耗，并分开统计本类入窗词、同类可用线索及发现时未满 3 天的线索 (Files: app/services/douyin_leads.py, tests/test_douyin_leads.py)
 - [2026-11-26 20:05] FEAT: 回填号**分批激活**落地 —— 第一批 15 个已激活,余 36 个由定时任务按「一批隔一轮监听」自动推进
   ## 前置验证(决定动作成立与否的两条)
