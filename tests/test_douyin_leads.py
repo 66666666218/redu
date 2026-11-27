@@ -1,5 +1,6 @@
 """抖音推广线索单测(2026-10-02):判据(标题以《》开头)、去重、卡片推送。"""
 import os
+from datetime import datetime, timedelta, tzinfo
 
 os.environ.setdefault("JWT_SECRET", "test_secret_0123456789abcdef0123456789abcdef")
 os.environ.setdefault("DATABASE_URL", "sqlite://")
@@ -205,9 +206,10 @@ def test_push_leads_no_webhook_is_noop() -> None:
 # ---------------------------------------------------------------- 口令 → 资源(2026-10-02)
 
 from sqlalchemy import create_engine, select  # noqa: E402
-from sqlalchemy.orm import sessionmaker  # noqa: E402
+from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 
 from app.db.database import Base  # noqa: E402
+from config.settings import Settings  # noqa: E402
 from app.db import models  # noqa: F401,E402
 from app.db.models import User  # noqa: E402
 from app.services import douyin_leads as dl  # noqa: E402
@@ -368,8 +370,6 @@ class TestDiskFullBeforeBudget:
 
 
 # ---------------------------------------------------------------- 取词:群组新资源 + 资源库
-
-from datetime import datetime, timedelta  # noqa: E402
 
 from app.db.models import XunleiGroupShare  # noqa: E402
 
@@ -2589,7 +2589,8 @@ class TestGroupOnlyLeads:
         lead = {"aweme_id": "g1", "title": "《大瓜群》最新资源", "url": "https://v.douyin.com/x",
                 "mark": "大瓜群", "author": "a",
                 "kouling": {"kind": "group", "group_id": "123"}}
-        monkeypatch.setattr(dl, "collect_leads", lambda *a, **k: ([dict(lead)], "CDP"))
+        monkeypatch.setattr(dl, "hot_seed_words", lambda *a, **k: [])
+        _stub_lead_search(monkeypatch, lead)
         monkeypatch.setattr(dl, "apply_kouling", lambda *a, **k: None)
         pushed = []
         monkeypatch.setattr(dl, "push_leads", lambda *a, **k: pushed.append(1))
@@ -2605,6 +2606,25 @@ def _settings_like():
 
     return Settings(_env_file=None, is_dev=True, use_proxy=False,
                     request_delay_seconds=0.0, xianyu_request_delay=0.0)
+
+
+def _stub_lead_search(monkeypatch: pytest.MonkeyPatch, *leads: dict) -> None:
+    def collect(keywords, limit=30, platform="douyin", session=None, user_id=1, pages=1,
+                stats=None):
+        if stats is not None:
+            stats["search_window"] = list(keywords)
+        return [dict(ld) for ld in leads[:limit]], "测试搜索"
+
+    monkeypatch.setattr(dl, "collect_leads", collect)
+
+
+def _spy_keyword_plan(monkeypatch: pytest.MonkeyPatch, calls: list[dict],
+                      *words: str) -> None:
+    def choose(db, uid, top, settings, hot=None, cat=None, *, cover_resources=False):
+        calls.append({"cat": cat, "hot": list(hot or []), "cover": cover_resources})
+        return dl._KeywordPlan(list(words), list(words) if cover_resources else [])
+
+    monkeypatch.setattr(dl, "_search_keyword_plan", choose)
 
 
 class TestGroupChatLinkCountsAsPan:
@@ -2809,36 +2829,31 @@ class TestProbeWordsToSearch:
         #: 直接钉 unfed_search_words,隔离"hot_seed_words 与取词的先后"
         monkeypatch.setattr(hc, "unfed_search_words",
                             lambda db, uid, top=2: ["只忍老板五次直播视频后续"][:top])
-        got = {}
-
-        def fake_run(db, uid, settings=None, category=None, advance=True):
-            # 抓不到内部变量,改为验证 search_keywords 收到的 hot —— 用 wrapper 思路:
-            # run_douyin_leads 内部调 search_keywords,这里直接替身抓参
-            return 0
-
-        #: 更简单:替 search_keywords 抓 hot 参数
-        orig = dl.search_keywords
-        monkeypatch.setattr(dl, "search_keywords",
-                            lambda db, uid, top, settings, hot=None, cat=None:
-                                got.update(hot=hot) or [])
-        monkeypatch.setattr(dl, "collect_leads", lambda *a, **k: ([], "CDP"))
+        calls: list[dict] = []
+        _spy_keyword_plan(monkeypatch, calls, "只忍老板五次直播视频后续")
+        _stub_lead_search(monkeypatch)
         dl.run_douyin_leads(session, 1, _settings_like(), category="影视", advance=False)
-        assert "只忍老板五次直播视频后续" in (got.get("hot") or []), got
+        assert calls == [{"cat": "影视", "hot": ["热榜词", "只忍老板五次直播视频后续"],
+                          "cover": True}]
 
     def test_搜索完成才打戳_搜索挂了不消耗词(self, session, monkeypatch) -> None:
         """打戳必须在 collect_leads 之后:搜索挂了词没消耗,下轮还能再喂。"""
-        from app.db.models import HotWordSeen
-        from app.services import douyin_leads as dl
+        from app.db.models import HotWordSeen, RunRecord
 
         self._seed(session, word="没被消耗的词")
         monkeypatch.setattr(dl, "hot_seed_words", lambda *a, **k: [])
-        monkeypatch.setattr(dl, "collect_leads", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
-        monkeypatch.setattr(dl, "push_leads", lambda *a, **k: None)
+        _spy_keyword_plan(monkeypatch, [], "没被消耗的词")
 
-        try:
-            dl.run_douyin_leads(session, 1, _settings_like(), category="影视", advance=False)
-        except Exception:
-            pass  # 单平台失败被内部捕获;打戳在 collect 之后,不该被执行
+        def fail_search(keywords, *, platform, session, user_id, pages, stats):
+            assert keywords == ["没被消耗的词"]
+            stats["search_window"] = list(keywords)
+            raise RuntimeError("测试搜索失败")
+
+        monkeypatch.setattr(dl, "collect_leads", fail_search)
+        dl.run_douyin_leads(session, 1, _settings_like(), category="影视", advance=False)
+
+        run = session.query(RunRecord).filter_by(kind="douyin_leads").one()
+        assert run.status == "failed" and "类目影视 测试搜索失败" in run.detail
         row = session.query(HotWordSeen).filter_by(word="没被消耗的词").one()
         assert row.fed_search_at is None, "搜索挂了就打戳 = 白丢一个词"
 
@@ -2850,8 +2865,7 @@ class TestProbeWordsToSearch:
 
         self._seed(session, word="搜过的词")
         monkeypatch.setattr(dl, "hot_seed_words", lambda *a, **k: [])
-        monkeypatch.setattr(dl, "collect_leads", lambda *a, **k: ([], "CDP"))
-        monkeypatch.setattr(dl, "push_leads", lambda *a, **k: None)
+        _stub_lead_search(monkeypatch)
 
         dl.run_douyin_leads(session, 1, _settings_like(), category="影视", advance=False)
         row = session.query(HotWordSeen).filter_by(word="搜过的词").one()
@@ -2876,7 +2890,7 @@ class TestProbeWordsToSearch:
         lead = {"aweme_id": "a1", "title": "《大瓜》最新资源", "url": "https://v.douyin.com/x",
                 "mark": "大瓜", "author": "作者",
                 "kouling": {"kind": "group", "group_id": "123"}}
-        monkeypatch.setattr(dl, "collect_leads", lambda *a, **k: ([dict(lead)], "CDP"))
+        _stub_lead_search(monkeypatch, lead)
 
         events: list[str] = []
         real_commit = type(session).commit
@@ -2900,17 +2914,15 @@ class TestProbeWordsToSearch:
         from app.services import douyin_leads as dl
 
         self._seed(session)
-        called = []
+        calls: list[dict] = []
         monkeypatch.setattr(dl, "hot_seed_words", lambda *a, **k: [])
-        monkeypatch.setattr(dl, "search_keywords",
-                            lambda db, uid, top, settings, hot=None, cat=None:
-                                called.append(hot) or [])
-        monkeypatch.setattr(dl, "collect_leads", lambda *a, **k: ([], "CDP"))
+        _spy_keyword_plan(monkeypatch, calls, "测试词")
+        _stub_lead_search(monkeypatch)
 
         s0 = _settings_like()
         object.__setattr__(s0, "douyin_leads_probe_words", 0)
         dl.run_douyin_leads(session, 1, s0, category="影视", advance=False)
-        assert called and (called[0] or []) == [], called
+        assert calls == [{"cat": "影视", "hot": [], "cover": True}]
 
 
 class TestDemandNamesToSearch:
@@ -2971,20 +2983,16 @@ class TestDemandNamesToSearch:
         from app.services import douyin_leads as dl
 
         self._seed(session, "水子哥", mention=17)
-        called = []
+        calls: list[dict] = []
         monkeypatch.setattr(dl, "hot_seed_words", lambda *a, **k: [])
-        monkeypatch.setattr(dl, "search_keywords",
-                            lambda db, uid, top, settings, hot=None, cat=None:
-                                called.append(list(hot or [])) or [])
-        monkeypatch.setattr(dl, "collect_leads", lambda *a, **k: ([], "CDP"))
-        monkeypatch.setattr(dl, "push_leads", lambda *a, **k: None)
+        _spy_keyword_plan(monkeypatch, calls, "测试词")
+        _stub_lead_search(monkeypatch)
 
         dl.run_douyin_leads(session, 1, _settings_like(), category="影视", advance=False)
-        assert "水子哥" not in called[0], called
+        assert "水子哥" not in calls[0]["hot"]
 
-        called.clear()
         dl.run_douyin_leads(session, 1, _settings_like(), category="大瓜", advance=False)
-        assert "水子哥" in called[0], called
+        assert "水子哥" in calls[1]["hot"]
 
     def test_搜索完成才打戳_名字没被白丢(self, session, monkeypatch) -> None:
         from app.db.models import DemandName
@@ -3025,8 +3033,7 @@ class TestHotWorkNamesToSearch:
         self._seed_hot(session, "tieba", "《饥困荒野》实机")
         self._seed_hot(session, "zhihu", "《饥困荒野》怎么样")
         monkeypatch.setattr(dl, "hot_seed_words", lambda *a, **k: [])
-        monkeypatch.setattr(dl, "collect_leads", lambda *a, **k: ([], "CDP"))
-        monkeypatch.setattr(dl, "push_leads", lambda *a, **k: None)
+        _stub_lead_search(monkeypatch)
 
         dl.run_douyin_leads(session, 1, _settings_like(), category="影视", advance=False)
 
@@ -3036,21 +3043,23 @@ class TestHotWorkNamesToSearch:
         assert hc.unfed_hot_work_names(session, 1, top=5) == []
 
     def test_搜索挂了不打戳(self, session, monkeypatch) -> None:
-        from app.services import douyin_leads as dl
+        from app.db.models import RunRecord
+        from app.services import hot_cycle as hc
 
         self._seed_hot(session, "tieba", "《两京十五日》定档")
         self._seed_hot(session, "zhihu", "《两京十五日》选角")
         monkeypatch.setattr(dl, "hot_seed_words", lambda *a, **k: [])
-        monkeypatch.setattr(dl, "collect_leads",
-                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
-        monkeypatch.setattr(dl, "push_leads", lambda *a, **k: None)
-        try:
-            dl.run_douyin_leads(session, 1, _settings_like(), category="影视", advance=False)
-        except Exception:
-            pass
-        #: 搜索挂了,词没消耗 ⇒ 下轮还该被喂
-        from app.services import hot_cycle as hc
+        _spy_keyword_plan(monkeypatch, [], "两京十五日")
 
+        def fail_search(keywords, *, platform, session, user_id, pages, stats):
+            assert keywords == ["两京十五日"]
+            raise RuntimeError("测试搜索失败")
+
+        monkeypatch.setattr(dl, "collect_leads", fail_search)
+        dl.run_douyin_leads(session, 1, _settings_like(), category="影视", advance=False)
+
+        run = session.query(RunRecord).filter_by(kind="douyin_leads").one()
+        assert run.status == "failed" and "类目影视 测试搜索失败" in run.detail
         assert hc.unfed_hot_work_names(session, 1, top=5) == ["两京十五日"]
 
     def test_热榜作品名并进词表且单独计量(self, session, monkeypatch) -> None:
@@ -3061,24 +3070,22 @@ class TestHotWorkNamesToSearch:
 
         self._seed_hot(session, "tieba", "《饥困荒野》实机")
         self._seed_hot(session, "zhihu", "《饥困荒野》怎么样")
-        got: dict = {}
+        calls: list[dict] = []
         monkeypatch.setattr(dl, "hot_seed_words", lambda *a, **k: [])
-        monkeypatch.setattr(dl, "search_keywords",
-                            lambda db, uid, top, settings, hot=None, cat=None:
-                                got.update(hot=list(hot or [])) or ["饥困荒野"])
+        _spy_keyword_plan(monkeypatch, calls, "饥困荒野")
         #: 必须带**可用链**才活得过 `_drop_panless`(`apply_kouling` 这里是替身,
         #: 不会把口令变成 `pan_url`)—— 否则线索在计量之前就被丢掉,命中恒 0。
         lead = {"aweme_id": "w1", "title": "《饥困荒野》最新资源", "url": "https://v.douyin.com/x",
                 "mark": "饥困荒野", "author": "a", "keyword": "饥困荒野",
                 "pan_url": "https://pan.quark.cn/s/abcdef",
                 "kouling": {"kind": "share", "share_id": "s1"}}
-        monkeypatch.setattr(dl, "collect_leads", lambda *a, **k: ([dict(lead)], "CDP"))
+        _stub_lead_search(monkeypatch, lead)
         monkeypatch.setattr(dl, "apply_kouling", lambda *a, **k: None)
         monkeypatch.setattr(dl, "push_leads", lambda *a, **k: None)
 
         dl.run_douyin_leads(session, 1, _settings_like(), category="影视", advance=False)
 
-        assert "饥困荒野" in got.get("hot", []), got
+        assert "饥困荒野" in calls[0]["hot"]
         detail = session.query(RunRecord).filter_by(kind="douyin_leads").one().detail
         assert "[热榜作品1 命中1" in detail, detail
 
@@ -3126,30 +3133,15 @@ class TestDaguaDedicatedRound:
     下面三条钉住"专轮真的在做它该做的事",缺一条都会退化成"加了个作业、什么也没改善"。
     """
 
-    def _spy(self, monkeypatch, dl, session):
-        """抓 `run_douyin_leads` 收到的 `(category, advance)` 与 `search_keywords` 的 `cat`。
-
-        ⚠️ **必须接管 `get_session_local`**(2026-11-18 栽过):tick 自己 `from app.db import
-        get_session_local` 开会话,不接管就会连到**生产库** `data/platform.db` ——
-        当时那条用例正是从生产库读到游标 `小游戏`,而断言里写的是测试库的 `资料`。
-        那次没写坏数据(词表为空提前返回),但这是**测试偷偷碰生产**的同族毛病,不能留。
-        """
-        got: dict = {}
+    def _spy(self, monkeypatch, dl, session) -> list[dict]:
+        """截住定时入口的会话工厂，保证两种轮次都在内存库里跑完。"""
+        calls: list[dict] = []
         monkeypatch.setattr("app.db.get_session_local", lambda: (lambda: session))
         monkeypatch.setattr(dl, "hot_seed_words", lambda *a, **k: [])
-        monkeypatch.setattr(dl, "collect_leads", lambda *a, **k: ([], "CDP"))
-
-        def _sk(db, uid, top, settings, hot=None, cat=None):
-            got["cat"] = cat
-            got["hot"] = list(hot or [])
-            #: ⚠️ **必须返回非空词表**(2026-11-18 变异验证抓到):返回 `[]` 时
-            #: `run_douyin_leads` 会在 `if not kws: return 0` 提前返回,**根本走不到
-            #: 推进游标那段** ⇒ 「不推进游标」那条用例是**假绿**(我注入变异后它照样通过)。
-            #: 给一个假词,让它真的跑完一整轮。
-            return [got.setdefault("word", "假词")]
-
-        monkeypatch.setattr(dl, "search_keywords", _sk)
-        return got
+        _stub_lead_search(monkeypatch)
+        # 非空词表才能跑到推进游标的判断，防止「不推进」因提前返回而假绿。
+        _spy_keyword_plan(monkeypatch, calls, "测试词")
+        return calls
 
     def test_专轮固定搜大瓜且不推进轮换游标(self, session, monkeypatch) -> None:
         """⚠️ **`advance=False` 是硬要求**:专轮要是推进了游标,6 类轮换就被它打乱 ——
@@ -3164,25 +3156,21 @@ class TestDaguaDedicatedRound:
         after = ct.current_category(session)
         assert after == before, f"专轮推进了轮换游标:{before} → {after}"
 
-    def test_专轮把大瓜这个词传给search_keywords(self, session, monkeypatch) -> None:
-        """⚠️ **必须显式传 `cat`**:不传的话 `search_keywords` 会读轮换游标,
-        专轮就按当时停在哪一类出词 —— 搜成影视/资料,「大瓜」成了空招牌。
-        """
-        from app.services import douyin_leads as dl
-
-        got = self._spy(monkeypatch, dl, session)
+    def test_专轮指定大瓜且不用资源保底(self, session, monkeypatch) -> None:
+        """专轮不读主轮游标，也不用资源词保底。"""
+        calls = self._spy(monkeypatch, dl, session)
         dl.douyin_leads_dagua_tick(settings=_settings_like())
-        assert got.get("cat") == "大瓜", f"专轮没把类目传进词表:{got}"
+        assert calls == [{"cat": "大瓜", "hot": [], "cover": False}]
 
     def test_主轮照旧走轮换游标(self, session, monkeypatch) -> None:
         """反例守卫:主轮(`douyin_leads_tick`)**不许**被这次改动带偏 —— 它必须传游标类目。"""
         from app.services import category_topics as ct
         from app.services import douyin_leads as dl
 
-        got = self._spy(monkeypatch, dl, session)
+        calls = self._spy(monkeypatch, dl, session)
         cur = ct.current_category(session)
         dl.douyin_leads_tick(settings=_settings_like())
-        assert got.get("cat") == cur, f"主轮没按轮换游标出词(cur={cur}):{got}"
+        assert calls == [{"cat": cur, "hot": [], "cover": True}]
 
     def test_search_keywords的cat参数覆盖游标(self, session, monkeypatch) -> None:
         """`search_keywords(cat=...)` 直接决定**走哪段分支**:显式 `大瓜` ⇒ 大瓜词表;
@@ -3218,7 +3206,7 @@ class TestDaguaDedicatedRound:
         lead = {"aweme_id": "d1", "title": "《大瓜》最新", "url": "https://v.douyin.com/x",
                 "mark": "大瓜", "author": "作者",
                 "kouling": {"kind": "share", "share_url": "https://pan.xunlei.com/s/abc"}}
-        monkeypatch.setattr(dl, "collect_leads", lambda *a, **k: ([dict(lead)], "CDP"))
+        _stub_lead_search(monkeypatch, lead)
         #: ⚠️ `apply_kouling` 会去真转存(网络) ⇒ 钉成空实现,只留"有没有链"的判据。
         monkeypatch.setattr(dl, "apply_kouling", lambda *a, **k: None)
 
@@ -3239,24 +3227,19 @@ class TestDaguaDedicatedRound:
         from app.services import douyin_leads as dl
         from app.services import hot_cycle as hc
 
-        self._spy(monkeypatch, dl, session)
+        calls = self._spy(monkeypatch, dl, session)
         taken: list[int] = []
         monkeypatch.setattr(
             hc, "unfed_search_words",
-            lambda db, uid, top=2: taken.append(int(top)) or ["探针词X"])
-        got: dict = {}
-        monkeypatch.setattr(dl, "search_keywords",
-                            lambda db, uid, top, settings, hot=None, cat=None:
-                                got.update(hot=list(hot or [])) or ["假词"])
-        monkeypatch.setattr(dl, "push_leads", lambda *a, **k: None)
+            lambda db, uid, *, top=2: taken.append(int(top)) or ["探针词X"])
 
         dl.run_douyin_leads(session, 1, _settings_like(), category="大瓜", advance=False)
         assert taken == [], f"大瓜轮不该去取探针词(取了会打戳吃掉):{taken}"
-        assert "探针词X" not in (got.get("hot") or []), got
+        assert "探针词X" not in calls[0]["hot"]
 
         dl.run_douyin_leads(session, 1, _settings_like(), category="影视", advance=False)
         assert taken, "资源线必须继续取探针词"
-        assert "探针词X" in (got.get("hot") or []), got
+        assert "探针词X" in calls[1]["hot"]
 
     def test_主轮显式传大瓜时也不搜它(self, session, monkeypatch) -> None:
         """★ 主轮(`advance=True`)**不许**搜专轮类目 —— 就算调用方误传 `category="大瓜"`。
@@ -3267,10 +3250,10 @@ class TestDaguaDedicatedRound:
         from app.services import category_topics as ct
         from app.services import douyin_leads as dl
 
-        got = self._spy(monkeypatch, dl, session)
+        calls = self._spy(monkeypatch, dl, session)
         dl.run_douyin_leads(session, 1, _settings_like(), category="大瓜", advance=True)
-        assert got.get("cat") != "大瓜", f"主轮仍然搜了大瓜:{got}"
-        assert got.get("cat") in ct.rotation_order(), f"改搜的类目不在轮换表里:{got}"
+        assert len(calls) == 1 and calls[0]["cover"] is True
+        assert calls[0]["cat"] in ct.rotation_order() and calls[0]["cat"] != "大瓜"
 
     def test_空cron即关闭(self, session, monkeypatch) -> None:
         """`douyin_leads_dagua_cron=""` = 关掉(退回旧行为)。
@@ -3299,3 +3282,309 @@ class TestDaguaDedicatedRound:
         object.__setattr__(st, "douyin_leads_enabled", False)
         assert dl.douyin_leads_dagua_tick(settings=st) == 0
         assert called == [], f"总开关关了却还是跑了:{called}"
+
+
+@pytest.fixture
+def resource_round_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
+    from app.services import douyin_cdp_source, hot_cycle, mediacrawler_source
+
+    st = Settings(_env_file=None, douyin_leads_use_protocol=False, douyin_cdp_enabled=False,
+                  douyin_leads_promo_words=0, douyin_leads_quark_keywords="夸克口令")
+    monkeypatch.setattr("config.settings.get_settings", lambda: st)
+    monkeypatch.setattr(dl, "datetime", _RoundClock)
+    monkeypatch.setattr(hot_cycle, "datetime", _RoundClock)
+    monkeypatch.setattr(dl, "hot_seed_words", lambda *a, **k: [])
+    monkeypatch.setattr(dl, "apply_kouling", lambda *a, **k: None)
+    monkeypatch.setattr(dl, "push_leads", lambda *a, **k: None)
+
+    def unexpected(*args, **kwargs) -> None:
+        pytest.fail("本用例没有为这条取数路径提供替身")
+
+    monkeypatch.setattr(dl, "_try_protocol", unexpected)
+    monkeypatch.setattr(douyin_cdp_source, "search", unexpected)
+    monkeypatch.setattr(mediacrawler_source, "crawl", unexpected)
+    return st
+
+
+_ROUND_AT = datetime(2026, 11, 27, 16)
+
+
+class _RoundClock(datetime):
+    at = _ROUND_AT
+
+    @classmethod
+    def now(cls, tz: tzinfo | None = None) -> datetime:
+        return cls.at.astimezone(tz) if tz is not None else cls.at
+
+
+def _seed_round_catalog(session: Session, *entries: tuple[str, str]) -> None:
+    from app.db.models import XunleiResource
+
+    for i, (name, parent) in enumerate(entries):
+        session.add(XunleiResource(user_id=1, fid=f"fixture-{i}", name=name, parent_name=parent,
+                                   synced_at=_ROUND_AT - timedelta(minutes=i)))
+    session.commit()
+
+
+class TestResourceRoundKeywordCoverage:
+    def test_外部填满旧窗口_近期带盘作品和漫剧仍排前面(
+            self, session: Session, resource_round_settings: Settings,
+            monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.db.models import DouyinLead
+
+        st = resource_round_settings
+        _seed_round_catalog(session, ("《北岸的冷雨》02", "短剧集"), ("《雾岛来信》01", "漫剧集"))
+        moved = "https://pan.quark.cn/s/synthetic"
+        for i, (title, url, age) in enumerate([
+            ("《潮声过旧港》第2集 https://pan.xunlei.com/s/synthetic", "", 1),
+            ("《潮声 过旧港》第1集 https://pan.xunlei.com/s/synthetic", "", 2),
+            ("《风起竹影间》第5集", moved, 3),
+            ("《乌云吹散后》第1集", moved, 24 * 8),
+            ("《平川知归处》第1集", moved, None),
+            ("《晚钟照孤城》第1集", moved, -1),
+            ("《北去无声处》第1集", "", 0),
+            ("《岸上有落日》第1集 https://example.invalid/pan.quark.cn/s/fake", "", 0),
+            ("《秋日落窗前》第1集", "https://pan.quark.cn/", 0),
+            ("《落雪浮旧城》短剧推荐", moved, 0),
+        ]):
+            publish_at = None if age is None else _ROUND_AT - timedelta(hours=age)
+            session.add(DouyinLead(user_id=1, aweme_id=str(i), title=title, our_url=url,
+                                   kind="share", found_at=_ROUND_AT, publish_at=publish_at))
+        session.commit()
+        monkeypatch.setattr(dl, "promo_search_words", lambda *a, **k: ["推广词甲", "推广词乙"])
+        hot = ["热榜词甲", "热榜词乙", "热榜词丙"]
+
+        plan = dl._search_keyword_plan(session, 1, 5, st, hot, "影视", cover_resources=True)
+
+        assert plan.legacy == ["推广词甲", "推广词乙", "热榜词甲", "热榜词乙", "夸克口令"]
+        assert plan.resource == ["潮声过旧港", "雾岛来信", "夸克口令", "推广词甲", "推广词乙"]
+        assert plan.resource_keys == {"潮声过旧港", "风起竹影间", "雾岛来信", "北岸的冷雨"}
+        assert dl.search_keywords(session, 1, 5, st, hot, "影视") == plan.legacy
+        st.douyin_leads_category_min_words = 3
+        wider = dl._search_keyword_plan(session, 1, 5, st, hot, "影视", cover_resources=True)
+        assert wider.resource[:3] == ["潮声过旧港", "雾岛来信", "风起竹影间"]
+
+    def test_跨目录和清洗后同名冲突不作资源证据(
+            self, session: Session, resource_round_settings: Settings) -> None:
+        _seed_round_catalog(session, ("星河归航", "漫剧集"), ("星河归航", "软件工具"),
+                            ("《旧城来信》03", "短剧集"), ("旧城来信（桌面版）", "软件工具"),
+                            ("《雾岛来信》01", "漫剧集"))
+        st = resource_round_settings
+        plan = dl._search_keyword_plan(session, 1, 4, st, ["热榜甲", "热榜乙", "热榜丙"],
+                                       "影视", cover_resources=True)
+
+        assert plan.resource == ["雾岛来信", "短剧", "夸克口令", "热榜甲"]
+        assert plan.resource_keys == {"雾岛来信"}
+        assert dl._title_resource_type("《星河归航》第3集", plan.catalog) == ("", "")
+        assert dl._title_resource_type("《旧城来信》第3集", plan.catalog) == ("", "")
+
+    @pytest.mark.parametrize(("top", "floor", "expected"), [
+        (0, 1, []),
+        (1, 1, ["问卷"]),
+        (2, 1, ["问卷"]),
+        (3, 1, ["问卷", "调研"]),
+        (3, 0, ["实时 热榜", "另外一词"]),
+    ])
+    def test_按旧表有效长度和配置限额_不补搜(
+            self, session: Session, resource_round_settings: Settings, top: int,
+            floor: int, expected: list[str]) -> None:
+        st = resource_round_settings
+        st.douyin_leads_category_min_words = floor
+        st.douyin_leads_quark_slots = 0
+        plan = dl._search_keyword_plan(session, 1, top, st, ["实时 热榜", "实时热榜", "另外一词"],
+                                       "问卷", cover_resources=True)
+
+        assert plan.resource == expected
+        assert len(plan.resource) <= min(top, len(plan.legacy))
+
+    def test_预算为零不启动搜索也不推进(
+            self, session: Session, resource_round_settings: Settings,
+            monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.db.models import RunRecord
+        from app.services import category_topics
+
+        st = resource_round_settings
+        st.douyin_leads_keywords = 0
+
+        def unexpected(*args, **kwargs) -> None:
+            pytest.fail("零名额不能取热榜或搜索")
+
+        monkeypatch.setattr(dl, "hot_seed_words", unexpected)
+        monkeypatch.setattr(dl, "collect_leads", unexpected)
+        before = category_topics.current_index(session)
+
+        assert dl.run_douyin_leads(session, 1, st) == 0
+        assert category_topics.current_index(session) == before
+        assert session.query(RunRecord).count() == 0
+
+    def test_混合平台仍用各自词表_大瓜保留旧词序(
+            self, session: Session, resource_round_settings: Settings,
+            monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.db.models import RunRecord
+
+        st = resource_round_settings
+        st.leads_platforms = "douyin,kuaishou"
+        st.douyin_leads_keywords = 3
+        _seed_round_catalog(session, ("《雾岛来信》01", "漫剧集"), ("《北岸的冷雨》02", "短剧集"))
+        hot = ["百里起雾", "晚风拨云"]
+        monkeypatch.setattr(dl, "hot_seed_words", lambda *a, **k: hot)
+        captured: list[tuple[str, list[str]]] = []
+
+        def capture(keywords: list[str], *, platform: str, session: Session,
+                    user_id: int, pages: int, stats: dict) -> tuple[list[dict], str]:
+            captured.append((platform, list(keywords)))
+            stats["search_window"] = list(keywords)
+            return [], "测试搜索"
+
+        monkeypatch.setattr(dl, "collect_leads", capture)
+        dl.run_douyin_leads(session, 1, st, category="影视", advance=False)
+        assert captured == [("douyin", ["雾岛来信", "北岸的冷雨", "夸克口令"]),
+                            ("kuaishou", hot + ["夸克口令"])]
+
+        captured.clear()
+        dagua = dl.search_keywords(session, 1, 3, st, hot, "大瓜")
+        dl.run_douyin_leads(session, 1, st, category="大瓜", advance=False)
+        assert dagua[:2] == hot
+        assert captured == [("douyin", dagua), ("kuaishou", dagua)]
+        details = session.scalars(select(RunRecord.detail).order_by(RunRecord.id)).all()
+        assert len(details) == 4 and "本类词入窗2" in details[0]
+        assert all("本类词入窗" not in detail for detail in details[1:])
+
+
+class TestResourceRoundSearchWindow:
+    @pytest.mark.parametrize("cdp_cap", [2, 4])
+    def test_以CDP实际收到的词记账_出窗和落选的词不消耗(
+            self, session: Session, resource_round_settings: Settings, cdp_cap: int,
+            monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.db.models import HotSourceItem, HotWordSeen, RunRecord
+        from app.services import category_topics, douyin_cdp_source, hot_cycle
+
+        _seed_round_catalog(session, ("《雾岛来信》01", "漫剧集"), ("《北岸的冷雨》02", "短剧集"))
+        for name, peak in [("雾岛 来信", 2_000), ("窗外探针", 1_000)]:
+            session.add(HotWordSeen(user_id=1, word=name, peak=peak, last_at=_ROUND_AT))
+        for source in ("tieba", "zhihu"):
+            for rank, name in enumerate(("北岸的冷雨", "漏搜作品"), start=1):
+                session.add(HotSourceItem(user_id=1, source=source, rank=rank,
+                                          title=f"《{name}》定档", captured_at=_ROUND_AT))
+        session.commit()
+        st = resource_round_settings
+        st.douyin_leads_keywords = 5
+        st.douyin_leads_hot_work_words = 2
+        st.douyin_cdp_enabled = True
+        st.douyin_cdp_max_keywords = cdp_cap
+        monkeypatch.setattr(dl, "hot_seed_words", lambda *a, **k: ["热榜占位"])
+        assert hot_cycle.unfed_search_words(session, 1) == ["雾岛 来信", "窗外探针"]
+        assert set(hot_cycle.unfed_hot_work_names(session, 1)) == {"北岸的冷雨", "漏搜作品"}
+        planned = ["雾岛来信", "北岸的冷雨", "夸克口令", "热榜占位", "窗外探针"]
+        plan = dl._search_keyword_plan(session, 1, 5, st, ["热榜占位", "雾岛 来信", "窗外探针",
+                                       "北岸的冷雨", "漏搜作品"], "影视", cover_resources=True)
+        assert plan.resource == planned
+        got: list[list[str]] = []
+
+        def search(keywords: list[str], *, session: Session, user_id: int,
+                   settings: Settings) -> list[dict]:
+            got.append(list(keywords))
+            return [{"snippet": "漫剧资源 https://pan.quark.cn/s/synthetic",
+                     "url": "https://www.douyin.com/video/123", "keyword": keywords[0],
+                     "publish_at": int(_ROUND_AT.timestamp()) - 60}]
+
+        monkeypatch.setattr(douyin_cdp_source, "search", search)
+        before = category_topics.current_index(session)
+        assert dl.run_douyin_leads(session, 1, st, category="影视", advance=False) == 1
+        assert got == [planned[:cdp_cap]]
+        assert category_topics.current_index(session) == before
+        session.expire_all()
+        stamped = {row.word for row in session.scalars(select(HotWordSeen)).all()
+                   if row.fed_search_at is not None}
+        assert stamped == {"雾岛 来信", "北岸的冷雨"}
+        assert hot_cycle.unfed_search_words(session, 1) == ["窗外探针"]
+        assert hot_cycle.unfed_hot_work_names(session, 1) == ["漏搜作品"]
+        run = session.query(RunRecord).filter_by(kind="douyin_leads").one()
+        n_hot = 2 if cdp_cap == 2 else 3
+        assert run.status == "success" and f"[CDP] 类目影视 词{cdp_cap}(其中外部{n_hot})" in run.detail
+        assert "[探针1 " in run.detail and "[热榜作品1 " in run.detail
+        assert "本类词入窗2(资源名2 话题0) 同类可用1(发现时未满3天1) 未分类0" in run.detail
+
+    @pytest.mark.parametrize("skipped", [False, True])
+    def test_正常零结果和未发起搜索分别记账(
+            self, session: Session, resource_round_settings: Settings, skipped: bool,
+            monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.db.models import HotSourceItem, HotWordSeen, RunRecord
+        from app.services import douyin_protocol_source, mediacrawler_source
+
+        session.add(HotWordSeen(user_id=1, word="测试探针", last_at=_ROUND_AT))
+        for source in ("tieba", "zhihu"):
+            session.add(HotSourceItem(user_id=1, source=source, rank=1, title="《测试作品名》预告",
+                                      captured_at=_ROUND_AT))
+        session.commit()
+        monkeypatch.setattr(douyin_protocol_source, "account_keys", lambda *a: ["douyin"])
+        monkeypatch.setattr(douyin_protocol_source, "in_verify_cooldown", lambda *a, **k: skipped)
+        monkeypatch.setattr(dl, "_browser_probe_allowed", lambda *a: False)
+        searched: list[list[str]] = []
+
+        def crawl(platform: str, keywords: list[str], *, cookie: str, user_id: int) -> list[dict]:
+            searched.append(list(keywords))
+            return []
+
+        monkeypatch.setattr(mediacrawler_source, "crawl", crawl)
+        assert dl.run_douyin_leads(session, 1, resource_round_settings, category="问卷") == 0
+
+        run = session.query(RunRecord).filter_by(kind="douyin_leads").one()
+        stamped = {row.word for row in session.scalars(select(HotWordSeen)).all()
+                   if row.fed_search_at is not None}
+        assert run.status == "success"
+        if skipped:
+            assert not searched and not stamped
+            assert "冷却内已探过,跳过" in run.detail and "类目问卷 词0(其中外部0)" in run.detail
+            assert "本类词入窗0" in run.detail
+        else:
+            assert searched == [["问卷", "调研", "夸克口令", "测试探针", "测试作品名", "测评", "量表", "测试"]]
+            assert stamped == {"测试探针", "测试作品名"}
+            assert "本类词入窗5(资源名0 话题5) 同类可用0" in run.detail
+
+
+class TestResourceRoundSummary:
+    def test_按可用视频分类去重和发现时帖龄(self, resource_round_settings: Settings) -> None:
+        found = int(_ROUND_AT.timestamp())
+        three_days = int(timedelta(days=3).total_seconds())
+        pan = "https://pan.quark.cn/s/synthetic"
+        lib = {"link": pan, "name": "雾岛来信", "title": "雾岛来信 漫剧"}
+        plan = dl._KeywordPlan([], resource_keys={"雾岛来信"}, topic_keys={"短剧"})
+        leads = [
+            {"aweme_id": "1", "title": "电影全集", "pan_url": pan, "publish_at": found - three_days + 1},
+            {"url": "https://www.douyin.com/video/1?origin=another", "title": "电影全集",
+             "pan_url": pan, "publish_at": found - 1},  # 同视频，不能重复计数
+            {"aweme_id": "2", "title": "电影全集", "pan_url": pan, "publish_at": found - three_days},
+            {"aweme_id": "3", "title": "电影全集", "pan_url": pan, "publish_at": found + 1},
+            {"aweme_id": "4", "title": "电影全集", "pan_url": pan},
+            {"aweme_id": "5", "title": "数学试卷", "pan_url": pan,
+             "keyword": "雾岛 来信", "publish_at": found - 10},
+            {"aweme_id": "6", "title": "风里有响声", "pan_url": pan, "mark": "短剧", "keyword": "短剧"},
+            {"aweme_id": "7", "title": "电影全集", "kouling": {"kind": "share"}},
+            {"aweme_id": "8", "title": "《雾岛来信》", "library": lib, "publish_at": found},
+            {"aweme_id": "9", "title": "《雾岛来信》", "pan_url": pan,
+             "library": dict(lib, link="https://example.invalid/pan.quark.cn/s/fake")},
+            {"aweme_id": "10", "title": "风里有响声", "pan_url": pan,
+             "library": dict(lib, title="另一部漫剧")},
+        ]
+        detail = dl._resource_round_summary(plan, "影视", ["雾岛 来信", "短剧"], leads, found)
+        assert detail == " 本类词入窗2(资源名1 话题1) 同类可用5(发现时未满3天2) 未分类3"
+
+    def test_慢活越过72小时不改变发现时的新鲜度(
+            self, session: Session, resource_round_settings: Settings,
+            monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.db.models import RunRecord
+
+        _stub_lead_search(monkeypatch, {
+            "aweme_id": "1", "title": "动漫全集", "pan_url": "https://pan.quark.cn/s/synthetic",
+            "publish_at": int((_ROUND_AT - timedelta(days=3) + timedelta(seconds=1)).timestamp()),
+        })
+
+        def enrich(leads: list[dict], db: Session, user_id: int, settings: Settings) -> None:
+            monkeypatch.setattr(_RoundClock, "at", _ROUND_AT + timedelta(minutes=5))
+
+        monkeypatch.setattr(dl, "apply_kouling", enrich)
+        assert dl.run_douyin_leads(session, 1, resource_round_settings, category="影视", advance=False) == 1
+        run = session.query(RunRecord).filter_by(kind="douyin_leads").one()
+        assert _RoundClock.now() > _ROUND_AT
+        assert run.status == "success" and "同类可用1(发现时未满3天1)" in run.detail

@@ -25,11 +25,22 @@
 from __future__ import annotations
 
 import re
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.utils import get_logger
 from app.services.chain_delivery import mark_newly_moved
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
+
+    from config.settings import Settings
 
 logger = get_logger(__name__)
 
@@ -371,7 +382,8 @@ def _with_douyin_verdict(msg: str, session, user_id: int = 1,
 
 
 def _collect(platform: str, keywords: list[str], session=None,
-             user_id: int = 1, pages: int = 1) -> tuple[list[dict], str]:
+             user_id: int = 1, pages: int = 1, *,
+             search_window: list[str] | None = None) -> tuple[list[dict], str]:
     """取搜索结果 → `(记录列表, 来源标签)`。
 
     **抖音走纯协议优先**(2026-10-08),其余平台照旧走 MediaCrawler。
@@ -386,6 +398,8 @@ def _collect(platform: str, keywords: list[str], session=None,
 
     ⚠️ **回落一定要留痕**(日志 + 来源标签进运行记录)。它本来就是"没搜到"的生产者,
     不说话的话,"协议挂了"就会被读成"抖音上没人在推资源" —— 本仓最忌讳的假阴性。
+
+    `search_window` 只记录最终未报错的取数路收到的词，不代表它逐词都跑通。跳过不记。
     """
     cooldown = False
     #: ★ 本轮 **CDP 路**的原话(失败时才有)。它比 MediaCrawler 那句"全部无结果"精确,
@@ -410,6 +424,8 @@ def _collect(platform: str, keywords: list[str], session=None,
             #   回落代价与今天持平(今天每一次都开浏览器),换的是**不静默丢量**。
             few = bool(rows) and total >= 4 and hit * 2 < total
             if rows and not few:
+                if search_window is not None:
+                    search_window.extend(keywords)
                 return rows, "协议"
             if err is not None:
                 logger.warning("抖音纯协议失败(kind=%s),回落浏览器:%s",
@@ -450,9 +466,11 @@ def _collect(platform: str, keywords: list[str], session=None,
                 from app.services import douyin_cdp_source as _dcdp
 
                 _n = max(1, int(getattr(_s, "douyin_cdp_max_keywords", 8) or 8))
-                _rows = _dcdp.search(keywords[:_n], session=session,
-                                     user_id=user_id, settings=_s)
+                window = keywords[:_n]
+                _rows = _dcdp.search(window, session=session, user_id=user_id, settings=_s)
                 if _rows:
+                    if search_window is not None:
+                        search_window.extend(window)
                     #: ⚠️ **覆盖不足要说出来**(2026-10-28):CDP 每轮只搜前 N 个词,
                     #: 而它一旦成功就**不再回落** MediaCrawler ⇒ 后面的词这一轮**没搜**。
                     #: 不说的话,下一轮看到"线索少了"只会以为"抖音上没人推"。
@@ -508,6 +526,8 @@ def _collect(platform: str, keywords: list[str], session=None,
             logger.info("抖音浏览器取数成功,已从档案重导凭据:%s", note)
         except Exception as exc:  # noqa: BLE001
             logger.warning("抖音浏览器取数成功,但重导凭据失败:%s", str(exc)[:120])
+    if search_window is not None:
+        search_window.extend(keywords)
     return rows, "浏览器兜底"
 
 
@@ -516,9 +536,12 @@ def collect_leads(keywords: list[str], limit: int = 30, platform: str = "douyin"
                   stats: dict | None = None) -> tuple[list[dict], str]:
     """`find_leads` 的完整版:**连来源标签一起返回**(运行记录要写它)。
 
+    `stats["search_window"]` 是未报错的取数路收到的词表；冷却跳过时为空。
     其余行为完全一致 —— `find_leads` 就是它的薄封装。
     """
     if not keywords:
+        if stats is not None:
+            stats["search_window"] = []
         return [], ""
     # ⚠️ 取数层的硬失败(协议+浏览器**都**挂了 / MediaCrawler 未装/扫码超时)**不吞** ——
     # 让它一路冒到 `douyin_leads_tick` 记 `failed`。否则"扫码没通过"会被记成
@@ -536,7 +559,11 @@ def collect_leads(keywords: list[str], limit: int = 30, platform: str = "douyin"
     _s = get_settings()
     min_pub_ts = max(_min_publish_ts(_s), _max_age_ts(_s))
     n_old = n_notime = n_cont = 0
-    rows, source = _collect(platform, keywords, session, user_id=user_id, pages=pages)
+    window: list[str] | None = [] if stats is not None else None
+    rows, source = _collect(platform, keywords, session, user_id=user_id, pages=pages,
+                            search_window=window)
+    if stats is not None:
+        stats["search_window"] = window
     logger.info("线索取数:平台=%s 来源=%s 原始 %d 条", platform, source or "-", len(rows))
     #: ★ **"同一资源的老剧集"不该按视频发布时间挡掉**(2026-10-31 用户提示:
     #: 「一个资源可能分很多剧集」)。实测搜 `伪装Z男` 回来的是**同一部作品**的
@@ -1100,9 +1127,248 @@ def game_search_words(session, user_id: int, top: int = 3) -> list[str]:
 _DA_GUA_WORDS = ("吃瓜群", "吃瓜", "反差", "爆料", "实锤", "塌房", "小作文")
 
 
+# 同一个清洗后的名字可能来自不同目录；保留全部证据，不能让后读到的目录覆盖前一个。
+_ResourceTypes = dict[str, set[tuple[str, str]]]
+
+
+@dataclass
+class _KeywordPlan:
+    legacy: list[str]
+    resource: list[str] = field(default_factory=list)
+    resource_keys: set[str] = field(default_factory=set)
+    topic_keys: set[str] = field(default_factory=set)
+    catalog: _ResourceTypes = field(default_factory=dict)
+
+
+def _resource_name_key(word: str) -> str:
+    # 「下载」是游戏/软件搜索时附加的，不要求帖子或库里的名字也带这两个字。
+    return _norm_word(word.removesuffix(" 下载"))
+
+
+def _catalog_resource_types(session: Session, user_id: int) -> _ResourceTypes:
+    from app.db.models import XunleiResource
+    from app.services import category_topics
+    from app.services.cross_accounts import library_search_word
+
+    try:
+        rows = session.execute(select(XunleiResource.name, XunleiResource.parent_name)
+                               .where(XunleiResource.user_id == user_id).distinct()).all()
+    except SQLAlchemyError:
+        logger.warning("抖音主轮读取目录证据失败", exc_info=True)
+        return {}
+    by_parent: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for name, parent in rows:
+        if name:
+            by_parent[parent or ""].append((name, parent or ""))
+    index: _ResourceTypes = defaultdict(set)
+    for parent, items in by_parent.items():
+        # type_map 按原名为键，只在同一个父目录内调用，保留同名跨目录的冲突。
+        types = category_topics.type_map(items)
+        for name, _ in items:
+            cat = types.get(name, "")
+            if not cat:
+                continue
+            subtype = category_topics.subtype_of(name, parent) if cat == "影视" else ""
+            for alias in (name, _search_word_for(cat, name, parent),
+                          library_search_word(name), _to_search_word(name)):
+                key = _resource_name_key(alias)
+                if key:
+                    index[key].add((cat, subtype))
+    return dict(index)
+
+
+def _single_resource_type(evidence: set[tuple[str, str]]) -> tuple[str, str]:
+    cats = {cat for cat, _ in evidence if cat}
+    if len(cats) != 1:
+        return "", ""
+    subtypes = {sub for _, sub in evidence if sub and sub != "影视"}
+    return next(iter(cats)), next(iter(subtypes)) if len(subtypes) == 1 else ""
+
+
+def _title_resource_type(title: str, catalog: _ResourceTypes,
+                         library: dict | None = None) -> tuple[str, str]:
+    from app.services import category_topics
+
+    text = _RE_PAN_URL.sub(" ", title)
+    cat = category_topics.classify(text)
+    evidence = {(cat, category_topics.subtype_of(text) if cat == "影视" else "")}
+    for name in _cand_names(text):
+        evidence.update(catalog.get(_resource_name_key(name), ()))
+    if library and _has_share_evidence(str(library.get("link") or "")):
+        from app.services.resource_library import title_claims
+
+        lib_name = str(library.get("name") or "")
+        lib_title = str(library.get("title") or "")
+        key = _resource_name_key(lib_name)
+        if key and title_claims(lib_title, lib_name):
+            evidence.update(catalog.get(key, ()))
+            lib_cat = category_topics.classify(lib_title)
+            evidence.add((lib_cat, category_topics.subtype_of(lib_title) if lib_cat == "影视" else ""))
+    return _single_resource_type(evidence)
+
+
+def _has_share_evidence(url: str) -> bool:
+    # 只认分享链形态，不把解析类型、平台首页或普通网页当成带盘证据。
+    try:
+        parts = urlsplit(url.strip())
+        return (parts.scheme in ("http", "https") and parts.hostname in _PAN_HOSTS
+                and parts.path.startswith("/s/") and bool(parts.path[3:].strip("/")))
+    except ValueError:
+        return False
+
+
+_NAMED_EPISODE = re.compile(r"《([^》]{2,24})》\s*[：:]?\s*(?:(?:第|全|共)?\s*\d+\s*集|番外|大结局)")
+
+
+def _recent_category_words(session: Session, user_id: int, cat: str, since: datetime,
+                           now: datetime, catalog: _ResourceTypes,
+                           known_words: dict[str, tuple[str, str]],
+                           topic_keys: set[str]) -> list[tuple[str, str]]:
+    from app.db.models import DouyinLead
+    from app.services.cross_accounts import library_search_word
+    from app.services.xunlei_group import is_solicit_title
+
+    try:
+        rows = session.execute(select(DouyinLead.title, DouyinLead.our_url, DouyinLead.author).where(
+            DouyinLead.user_id == user_id, DouyinLead.publish_at >= since, DouyinLead.publish_at <= now,
+            or_(DouyinLead.our_url != "", DouyinLead.title.contains("http")))
+            .order_by(DouyinLead.publish_at.desc(), DouyinLead.id.desc())).all()
+    except SQLAlchemyError:
+        logger.warning("抖音主轮读取近期资源证据失败", exc_info=True)
+        return []
+
+    recent: list[tuple[str, str]] = []
+    for title, our_url, author in rows:
+        title, author = title or "", author or ""
+        if not (_has_share_evidence(our_url or "") or any(
+                _has_share_evidence(m.group()) for m in _RE_PAN_URL.finditer(title))):
+            continue
+        title_cat, subtype = _title_resource_type(title, catalog)
+        if title_cat != cat or is_solicit_title(title):
+            continue
+        text = _RE_PAN_URL.sub(" ", title)
+        named = set(_NAMED_EPISODE.findall(text)) if cat == "影视" else set()
+        names = _cand_names(text)
+        for name in sorted(names, key=lambda n: _resource_name_key(n) not in known_words):
+            key = _resource_name_key(name)
+            if (not key or key in topic_keys or key == _norm_word(author)
+                    or _matches_nickname(name, author) or any(h in name for h in _KOU_HINTS)):
+                continue
+            if key in known_words:
+                word = known_words[key][0]
+            elif key in catalog or name in named:
+                # 新名字要有目录或点名后的集数证据，不能把带盘帖里的任意《口令》升成作品名。
+                word = library_search_word(name)
+                if word and cat in ("软件", "小游戏"):
+                    word += " 下载"
+            else:
+                continue
+            word_key = _resource_name_key(word)
+            if not word_key or word_key in topic_keys or _norm_word(word) in topic_keys:
+                continue
+            # 清洗/截断后也不能与其他赛道的目录名撞在一起。
+            if word_key in catalog and _single_resource_type(catalog[word_key])[0] != cat:
+                continue
+            recent.append((word, subtype))
+            break
+    return recent
+
+
+def _known_category_words(cat: str, candidates: list[str], base: list[str],
+                          catalog: _ResourceTypes, topic_keys: set[str]) -> dict[str, tuple[str, str]]:
+    from app.services import category_topics
+
+    known: dict[str, tuple[str, str]] = {}
+    for word in candidates + base:
+        key = _resource_name_key(word)
+        if not key or key in topic_keys or key in known:
+            continue
+        types = catalog.get(key)
+        if types:
+            wc, subtype = _single_resource_type(types)
+        elif word in candidates:
+            wc = category_topics.classify(word)
+            subtype = category_topics.subtype_of(word) if wc == "影视" else ""
+        else:
+            # 无目录旁证的推广词/热榜词不能仅凭词面算成已知资源名。
+            continue
+        if wc == cat:
+            known[key] = (word, subtype)
+    return known
+
+
+def _reserved_category_words(cat: str, ranked: list[tuple[str, str]], topics: tuple[str, ...],
+                             reserve: int) -> list[str]:
+    by_name: dict[str, tuple[str, str]] = {}
+    for word, subtype in ranked:
+        by_name.setdefault(_resource_name_key(word), (word, subtype))
+    resources = list(by_name.values())
+    if cat == "影视" and reserve >= 2 and not any(sub == "漫剧" for _, sub in resources[:2]):
+        # 放在第二位，较窄的 CDP 窗口也不会把漫剧从本类保底里截掉。
+        for i, (_, subtype) in enumerate(resources):
+            if subtype == "漫剧":
+                resources.insert(1, resources.pop(i))
+                break
+    unique: dict[str, str] = {}
+    for word in [w for w, _ in resources] + list(topics):
+        if key := _norm_word(word):
+            unique.setdefault(key, word)
+        if len(unique) == reserve:
+            break
+    return list(unique.values())
+
+
+def _cover_category_words(session: Session, user_id: int, settings: Settings, cat: str,
+                          top: int, base: list[str], candidates: list[str], picked: list[str],
+                          extras: list[str], quark_words: list[str]) -> _KeywordPlan:
+    from app.services import category_topics
+
+    plan = _KeywordPlan(base)
+    valid = [w for w in base if _norm_word(w)]  # 旧词表已经归一去重
+    budget = min(max(0, top), len(valid))
+    if not budget:
+        return plan
+    plan.catalog = _catalog_resource_types(session, user_id)
+    topics_by_cat = category_topics.categories()
+    topics = topics_by_cat.get(cat, ())
+    plan.topic_keys = {_norm_word(w) for w in topics}
+    all_topic_keys = {_norm_word(w) for hints in topics_by_cat.values() for w in hints}
+    # 候选池可用于保底；未被旧 pick 选中的词不能占剩余名额。
+    known = _known_category_words(cat, candidates, base, plan.catalog, all_topic_keys)
+    min_words = int(getattr(settings, "douyin_leads_category_min_words", 1) or 0)
+    reserve = min(budget, max(2, min_words)) if min_words > 0 else 0
+    now = datetime.now()
+    days = max(1, int(getattr(settings, "douyin_leads_promo_days", 7) or 7))
+    recent = _recent_category_words(session, user_id, cat, now - timedelta(days=days), now,
+                                    plan.catalog, known, all_topic_keys)
+    ranked = recent + list(known.values())
+    plan.resource_keys = {_resource_name_key(w) for w, _ in ranked}
+    if not reserve:
+        plan.resource = valid[:budget]  # 关闭保底时保留旧顺序
+        return plan
+
+    mine = _reserved_category_words(cat, ranked, topics, reserve)
+    # 本类词先入窗，有余位才留给原夸克轮换词，其余仍按推广→热榜→已选词填。
+    out: dict[str, str] = {}
+    for word in mine + quark_words + extras + picked:
+        if len(out) >= budget:
+            break
+        if key := _norm_word(word):
+            out.setdefault(key, word)
+    plan.resource = list(out.values())
+    return plan
+
+
 def search_keywords(session, user_id: int, top: int, settings,
                     hot: list[str] | None = None,
                     cat: str | None = None) -> list[str]:
+    """共享词表；抖音资源主轮的入窗保底不改变其他消费方的出词。"""
+    return _search_keyword_plan(session, user_id, top, settings, hot=hot, cat=cat).legacy
+
+
+def _search_keyword_plan(session: Session, user_id: int, top: int, settings: Settings,
+                         hot: list[str] | None = None, cat: str | None = None,
+                         *, cover_resources: bool = False) -> _KeywordPlan:
     """本轮抖音反查用的搜索词 = **资源库词**(新鲜优先) + **热榜外部种子**。
 
     **方向是单向的**(用户 2026-10-04 逐字口径):"**群组只有通过口令进入,而口令就是从
@@ -1150,9 +1416,11 @@ def search_keywords(session, user_id: int, top: int, settings,
     #: 之前只有小游戏有专属词,其它方向轮到时搜的仍是同一批剧名(`类目大瓜 → 线索13 全是影视`)。
     #: ★ **库内词只占 1 个名额**(2026-10-31):这些名字多是**老资源**,搜回来的帖子自然老,
     #: 被 7 天新鲜度挡光(实测 04:11 轮 38 条挡 33 条)。名额还给"群组新资源名"。
-    lib_n = int(getattr(settings, "douyin_leads_library_words", 1) or 0)
-    own_words = category_search_words(session, user_id, cat,
-                                      top=max(0, min(lib_n, int(top))))
+    lib_n = max(0, min(int(top), int(getattr(settings, "douyin_leads_library_words", 1) or 0)))
+    # 多取的本类候选只用于主轮保底，旧词表仍按原库内词名额组装。
+    pool_n = int(top) if cover_resources and lib_n else lib_n
+    own_candidates = category_search_words(session, user_id, cat, top=pool_n)
+    own_words = own_candidates[:lib_n]
     n_group = int(getattr(settings, "douyin_leads_group_keywords", 3) or 0)
     # 先取**全部**候选(群里的资源名 + 资源库名称),再按类目挑 —— 挑不够会自动补本类目话题词
     cand = group_keywords(session, user_id, top=n_group)
@@ -1284,7 +1552,7 @@ def search_keywords(session, user_id: int, top: int, settings,
         _u: dict[str, str] = {}
         for w in kws:                    # 归一形态去重(`Z 朝朝入梦` / `Z朝朝入梦` 是同一个)
             _u.setdefault(_norm_word(w), w)
-        return list(_u.values())[:_n]
+        return _KeywordPlan(list(_u.values())[:_n])
 
     # ★ **正在被推广的名字排最前**(2026-10-31,方案 B):它们是"此刻有人在发"的,
     #: 比群里的老资源名更可能搜到**正在推广**的内容;用户口径「新鲜优先于转存」。
@@ -1322,15 +1590,19 @@ def search_keywords(session, user_id: int, top: int, settings,
         if w and w not in extras:
             extras.append(w)
     room = max(0, int(top) - len(quark_words))
-    kws = (extras + [w for w in kws if w not in extras])[:room] + quark_words
+    picked = kws
+    legacy_words = (extras + [w for w in picked if w not in extras])[:room] + quark_words
     #: ★ **按归一形态去重**(2026-10-31):列表里同时出现过 `D 顶级C距1` 与 `D顶级C距1`
     #: —— 同一资源的不同写法各占一个名额,等于白烧一次搜索。保留**先出现的那个**
     #: (新鲜/高产的排在前,见上面的排序)。
     _uniq: dict[str, str] = {}
-    for w in kws:
+    for w in legacy_words:
         _uniq.setdefault(_norm_word(w), w)
-    kws = list(_uniq.values())
-    return kws
+    base = list(_uniq.values())
+    if cover_resources:
+        return _cover_category_words(session, user_id, settings, cat, int(top), base,
+                                     own_candidates + cand, picked, extras, quark_words)
+    return _KeywordPlan(base)
 
 
 def _enqueue_later(session, user_id: int, info: dict, mark: str,
@@ -2262,6 +2534,32 @@ def _niche_summary(leads: list[dict]) -> str:
         cnt.items(), key=lambda kv: (kv[0] == category_topics.NICHE_OTHER, kv[1], kv[0])))
 
 
+def _resource_round_summary(plan: _KeywordPlan, cat: str, window: list[str],
+                            leads: list[dict], found_ts: float) -> str:
+    """分别量入窗词和带可用链的视频；不拿来源词替视频判类。"""
+    n_names = len({_resource_name_key(w) for w in window} & plan.resource_keys)
+    n_topics = len({_norm_word(w) for w in window} & plan.topic_keys)
+    seen: set[str] = set()
+    same = fresh = unknown = 0
+    for ld in leads:
+        url = str(ld.get("url") or "").strip()
+        key = str(ld.get("aweme_id") or _aweme_id(url) or url).strip()
+        if not key or key in seen or not _has_usable_pan(ld):
+            continue
+        seen.add(key)
+        actual, _ = _title_resource_type(str(ld.get("title") or ""), plan.catalog,
+                                         ld.get("library"))
+        if not actual:
+            unknown += 1
+        elif actual == cat:
+            same += 1
+            pub = int(ld.get("publish_at") or 0)
+            if pub > 0 and 0 <= found_ts - pub < timedelta(days=3).total_seconds():
+                fresh += 1
+    return (f" 本类词入窗{n_names + n_topics}(资源名{n_names} 话题{n_topics})"
+            f" 同类可用{same}(发现时未满3天{fresh}) 未分类{unknown}")
+
+
 def _kouling_summary(leads: list[dict]) -> str:
     """本轮口令解析的**构成**,尤其是"**新群几个**"(2026-10-04 加)。
 
@@ -2345,7 +2643,13 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
         cat = category_topics.current_category(db)   # 它会把专轮类目顺延掉
         #: 游标照常在**本轮跑完**后推进(`advance` 保持 True) —— 本轮搜了哪个资源类目,
         #: 下一轮就从它的下一个开始,不重复也不跳。
-    # 词来自**群组新资源 + 公众号已验证资源**(见 search_keywords 的注释);各平台共用。
+    resource_douyin = "douyin" in plats and cat not in category_topics.SOLO_CATEGORIES
+    word_limit = getattr(settings, "douyin_leads_keywords", 3)
+    legacy_top = int(word_limit or 3)
+    cover_resources = resource_douyin and int(3 if word_limit is None else word_limit) > 0
+    if resource_douyin and not cover_resources and plats == ["douyin"]:
+        return 0  # 预算关闭，不取热榜、不启动搜索，也不推进空轮
+    # 候选来源共用；只有抖音资源主轮及其重试采用最终入窗保底。
     # **热榜外部种子**只喂给抖音:小红书/快手没有口令,拿热榜词去搜只是白开一次浏览器。
     #: ★★ **大瓜轮多要几个热榜词**(2026-11-08):全局只给 1 个(`douyin_leads_hot_keywords`),
     #: 而大瓜是**唯一**该用"今天大家在聊什么"的类目 —— 用户给的样本
@@ -2361,9 +2665,8 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
     #: `demand_watch` 评论扫描 —— 实测**空转**(名字恒 0:新闻/剧情解说的评论区是
     #: 围观不是求资源)。而库里搬成功的名字(`恶女得宠`/`嫁金钗`…)全是**短剧/小说名**,
     #: 来自搜索词 ⇒ 探针词该同时进词表,推广号的《口令》标题只有搜索能命中。
-    #: ⚠️ 词从 `hot_word_seen` 读(**已被 new_hot_words 差分记账**),不打新请求;
-    #: `search_keywords` 会把 `hot` 追加到词表末尾(大瓜分支排最前),不挤已知词名额。
-    #: ⚠️ 打戳在**搜索完成后**(词没被消耗,下轮还能再喂)。
+    #: 词从 `hot_word_seen` 读，不打新请求；主轮的本类词保底后才轮到探针。
+    #: 打戳在搜索完成后，未进取数窗口的词留给下轮。
     probe_words: list[str] = []
     #: ★★ **「评论区在求的名字」回灌搜索**(2026-11-13):`demand_names` 里推过的名字
     #: 此前**从没进过搜索词表**(近 7 天 10 个名字 0 个搜过,转化仅 1/10)——
@@ -2441,13 +2744,17 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
     hot = (hot + [w for w in work_words if w not in hot]) if work_words else hot
     hot = (hot + [w for w in demand_words if w not in hot]) if demand_words else hot
     hot = (hot + [w for w in wevent_words if w not in hot]) if wevent_words else hot
-    kws = search_keywords(db, user_id,
-                          int(getattr(settings, "douyin_leads_keywords", 3) or 3),
-                          settings, hot=hot, cat=cat)
-    if not kws:
+    plan = _search_keyword_plan(db, user_id, legacy_top, settings, hot=hot, cat=cat,
+                                cover_resources=cover_resources)
+    words_by_platform = {plat: plan.resource if resource_douyin and plat == "douyin" else plan.legacy
+                         for plat in plats}
+    if not any(words_by_platform.values()):
         return 0
     total = 0
-    for plat in plats:
+    for plat, kws in words_by_platform.items():
+        if not kws:
+            continue
+        resource_round = resource_douyin and plat == "douyin"
         try:
             # ⚠️ **必须传 `session`** —— 纯协议要从加密库读凭据;不传就是静默不带登录态
             # (实测表现:回 `status_code=2483 请先登录`,而**看起来只是"没搜到"**)。
@@ -2456,14 +2763,22 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
                 kws, platform=plat, session=db, user_id=user_id,
                 pages=int(getattr(settings, "douyin_leads_pages", 1) or 1),
                 stats=funnel)
+            found_ts = datetime.now().timestamp()
             total += len(leads)
-            #: ★ **搜索完成才打戳**(2026-11-12):`fed_search_at` 标记"这个词已经拿去搜过"。
-            #: 放在取词时打会把"搜索挂了"记成"词消耗了",下轮白丢一批词。
-            if probe_words and plat == "douyin":
+            window = (funnel.get("search_window") or []) if resource_round else kws
+            word_key = _norm_word if resource_round else str
+            window_keys = {word_key(w) for w in window}
+            probes_fed = probe_words
+            works_fed = work_words
+            if resource_round:
+                # 用实际入窗词过滤，打戳仍用台账原词；跳过或落在 CDP 截断之外都不消耗。
+                probes_fed = [w for w in probe_words if _norm_word(w) in window_keys]
+                works_fed = [w for w in work_words if _norm_word(w) in window_keys]
+            if probes_fed and plat == "douyin":
                 try:
                     from app.services import hot_cycle as _hc
 
-                    _hc.mark_fed_search(db, user_id, probe_words)
+                    _hc.mark_fed_search(db, user_id, probes_fed)
                 except Exception:  # noqa: BLE001 - 打戳失败不挡这轮结果
                     logger.debug("探针词打戳失败", exc_info=True)
             #: ★ 被求名字同样**搜索完成才打戳**(2026-11-13):同一个名字只搜一次。
@@ -2488,11 +2803,11 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
             #: `douyin_leads.keyword` ⇒ **搜到 0 条可落库的线索时一行都不留**,
             #: 同一个名字每轮重搜白烧额度(实测 `饥困荒野` 12:51 搜了 +12 条原始结果,
             #: 而 `keyword` 里 0 条该词 ⇒ 下轮还会再搜)。改打完戳后搜到 0 条也留痕。
-            if work_words and plat == "douyin":
+            if works_fed and plat == "douyin":
                 try:
                     from app.services import hot_cycle as _hc
 
-                    _hc.mark_hot_work_fed(db, user_id, work_words)
+                    _hc.mark_hot_work_fed(db, user_id, works_fed)
                 except Exception:  # noqa: BLE001 - 打戳失败不挡这轮结果
                     logger.debug("热榜作品名打戳失败", exc_info=True)
             # ★★ **打戳后立刻落盘,别把写锁抱进后面的慢活**(2026-11-18 实测)。
@@ -2535,30 +2850,29 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
                 if group_only:
                     _save_leads(db, user_id, group_only)
                 leads = kept
-                if leads:
-                    _save_leads(db, user_id, leads)  # 落库:转发量只在这一次有效(结算要用)
-                    #: ★ 大瓜专轮用**自己的 AI 分数线**(`douyin_dagua`),与资源线
-                    #: (`douyin_peer`,校准作业调到 7)分开 —— 否则吃瓜线索被资源线的线挡掉。
-                    push_leads(leads, settings, platform=plat, session=db, user_id=user_id,
-                               ai_section=("douyin_dagua" if cat == DAGUA_CATEGORY else ""))
-            # ⚠️ **按词源分开报**(2026-10-05):只报总数看不出"哪档在起作用" ——
-            # 而实测两档差了 86 个百分点(资源名 86% / 热榜种子 0%)。
-            # 不分开就永远发现不了"四成预算花在 0% 有效率的词上"这件事。
-            # ⚠️ `search_keywords` **已经把热榜词并进 `kws` 了** ——
-            # 所以这里报的是 `kws 共 N(其中外部 M)`,**不能写成 `词N+外部M`**(会重复计数)。
-            hs = set(hot or [])
-            n_hot_used = sum(1 for w in hs if w in set(kws))
-            n_hot = sum(1 for x in leads if (x.get("keyword") or "") in hs)
+            coverage = (_resource_round_summary(plan, cat, window, leads, found_ts)
+                        if resource_round else "")
+            if leads:
+                _save_leads(db, user_id, leads)  # 落库:转发量只在这一次有效(结算要用)
+                #: ★ 大瓜专轮用自己的 AI 分数线，与资源线分开。
+                push_leads(leads, settings, platform=plat, session=db, user_id=user_id,
+                           ai_section=("douyin_dagua" if cat == DAGUA_CATEGORY else ""))
+            # 外部词是总词数的子集；资源轮的词源命中也按入窗归一键统计。
+            hs = {word_key(w) for w in hot}
+            n_hot_used = len(hs & window_keys)
+            if resource_round:
+                hs &= window_keys
+            n_hot = sum(1 for x in leads if word_key(x.get("keyword") or "") in hs)
             n_hot_ok = sum(1 for x in leads
-                           if (x.get("keyword") or "") in hs
+                           if word_key(x.get("keyword") or "") in hs
                            and (x.get("kouling") or {}).get("kind") in ("group", "share"))
             #: ★ 探针词的产出**单独计量**(2026-11-12)—— 与「外部」分开口径:
             #: 热榜种子是"大家在聊什么"(历史有效率 0%),探针词是"刚起量的新事件",
             #: 两条路的有效率要各自攒样本,别混在一起看不出哪条在起作用。
-            ps = set(probe_words or [])
-            n_probe = sum(1 for x in leads if (x.get("keyword") or "") in ps)
+            ps = {word_key(w) for w in probes_fed}
+            n_probe = sum(1 for x in leads if word_key(x.get("keyword") or "") in ps)
             n_probe_ok = sum(1 for x in leads
-                             if (x.get("keyword") or "") in ps
+                             if word_key(x.get("keyword") or "") in ps
                              and (x.get("kouling") or {}).get("kind") in ("group", "share"))
             #: ★ 被求名字的产出同样**单独计量**(2026-11-13):它是"观众在求"这条
             #: 需求侧信号的回流,有效率必须与「热榜(0%)」「探针」分开攒样本 ——
@@ -2579,34 +2893,35 @@ def run_douyin_leads(db, user_id: int, settings=None, category: str | None = Non
             #: ★ **热榜作品名的产出单独计量**(2026-11-25):它是"跨 ≥2 个内容源都在说的
             #: 作品"这条信号的回流,与热榜(0%)/探针/被求名/公众号瓜是第五条路。
             #: 不单独报的话,「喂了但一个都没命中」与「根本没喂」在运行记录里长得一样。
-            ww = set(work_words or [])
-            n_work = sum(1 for x in leads if (x.get("keyword") or "") in ww)
+            ww = {word_key(w) for w in works_fed}
+            n_work = sum(1 for x in leads if word_key(x.get("keyword") or "") in ww)
             n_work_ok = sum(1 for x in leads
-                            if (x.get("keyword") or "") in ww
+                            if word_key(x.get("keyword") or "") in ww
                             and (x.get("kouling") or {}).get("kind") in ("group", "share"))
             # ⚠️ **来源标签要进运行记录**(2026-10-08):抖音现在"协议优先、浏览器兜底",
             # 而两条路都会产出"0 条"。不标来源的话,看到 0 就分不清是
             # "协议挂了被回落"还是"真没人在推资源" —— 正是本仓最忌讳的那种含糊。
             _record_run(db, user_id, "douyin_leads", "success",
-                        f"{round_tag}{plat}[{source or '-'}] 类目{cat} 词{len(kws)}(其中外部{n_hot_used}) "
+                        f"{round_tag}{plat}[{source or '-'}] 类目{cat} 词{len(window)}(其中外部{n_hot_used}) "
                         f"线索{len(leads)} 赛道{_niche_summary(leads) or '-'} "
                         f"新鲜{_freshness_summary(leads)} "
                         f"{_kouling_summary(leads)} "
                         f"[外部命中{n_hot}/产出{n_hot_ok}] "
-                        f"[探针{len(probe_words)} 命中{n_probe}/产出{n_probe_ok}] "
+                        f"[探针{len(ps)} 命中{n_probe}/产出{n_probe_ok}] "
                         f"[被求名{len(demand_words)} 命中{n_demand}/产出{n_demand_ok}] "
                         f"[公众号瓜{len(wevent_words)} 命中{n_wevent}/产出{n_wevent_ok}] "
-                        f"[热榜作品{len(work_words)} 命中{n_work}/产出{n_work_ok}] "
+                        f"[热榜作品{len(ww)} 命中{n_work}/产出{n_work_ok}] "
                         #: ★ 漏斗(2026-10-31):原始→时间挡→无时间→口令→无链,一眼看出哪道闸在掉量。
                         f"漏斗 原始{funnel.get('raw', 0)} 挡{funnel.get('old', 0)}"
                         f" 无时{funnel.get('notime', 0)} 续{funnel.get('cont', 0)} 口令{funnel.get('kept', 0)}"
-                        f" 无链{n_panless} 群令{n_grouponly} 无迹象{n_nosignal}")
+                        f" 无链{n_panless} 群令{n_grouponly} 无迹象{n_nosignal}{coverage}")
             db.commit()
         except Exception as exc:  # noqa: BLE001 - 单平台失败不影响其余
             db.rollback()
             logger.exception("线索平台 %s 失败 user=%s", plat, user_id)
+            prefix = f"类目{cat} " if resource_round else ""
             _record_run(db, user_id, "douyin_leads", "failed",
-                        f"{round_tag}{plat}: {str(exc)[:160]}")
+                        f"{round_tag}{plat}: {prefix}{str(exc)[:160]}")
             db.commit()
     if advance:
         # ⚠️ **轮换游标在"整轮跑完之后"才推进**(2026-10-04):放在出词之后就推的话,
