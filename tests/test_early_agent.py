@@ -88,6 +88,26 @@ def test_velocity_and_acceleration_scoring(session, st) -> None:
     assert stage.stage == "爆发" and "加速上涨" in stage.parts
 
 
+def test_successful_push_records_signal_snapshot(session, st) -> None:
+    """★ 2026-11-28:送达成功才落 `AgentPush`,且 `signals` 是**推送那一刻**的分解。
+
+    这是 `agent_learning` 能按推送归因的前提 —— 只靠 `AgentStage.parts` 会被下一轮
+    覆盖,实测导致每个信号 45 天只攒到 1~4 条、权重自 10-14 冻结。
+    """
+    from app.db.models import AgentPush
+
+    for i, h in enumerate([100, 150, 400]):
+        _weibo(session, "某游戏新版本", h, hours_ago=(3 - i) * 2)
+    session.commit()
+    assert early_agent.agent_tick(session, 1, settings=st) == 1
+
+    row = session.scalar(select(AgentPush))
+    assert row is not None, "送达成功后必须落推送样本"
+    assert row.board == "weibo" and row.stage == "爆发"
+    assert "加速上涨" in row.signals and row.score == 90
+    assert row.pushed_at is not None
+
+
 def test_lifecycle_escalation_and_stop_repeat(session, st) -> None:
     """生命周期:首推(上升)→ 同阶段不重推 → 升级(爆发)才再推 → 跌入回落提醒止损。"""
     for i, h in enumerate([120, 400, 900]):  # tick1: 增速125%(+40)+连续3轮(+15)+量级(+15)=70 → 上升
@@ -195,14 +215,12 @@ def test_backtest_handles_xianyu_string_timestamps(session, st) -> None:
     _xianyu_daily(session, "某闲鱼待爆词", 200, days_ago=3)
     _xianyu_daily(session, "某闲鱼待爆词", 500, days_ago=1)  # 增长 150% → 命中
     push_ts = datetime.now() - timedelta(days=2)
-    session.add(AgentStage(user_id=1, board="xianyu", norm="某闲鱼待爆词",
-                           kw="某闲鱼待爆词", stage="苗头", score=70,
-                           parts="增速+150% 量级500", first_seen=push_ts, updated_at=push_ts))
-    # ⚠️ 样本现在是**推送记录**(2026-10-14):补一条**未结算**的推送 ⇒ 走"退回热度标签"那条路,
+    # ⚠️ 样本是**推送记录** `AgentPush`(2026-11-28 起):未结算 ⇒ 走"退回热度标签"那条路,
     #    这条用例要验的正是那条路上的闲鱼日期字符串(不能崩)。
-    from app.db.models import HotspotSuggestion
-    session.add(HotspotSuggestion(user_id=1, keyword="某闲鱼待爆词", growth=0, kind="llm",
-                                  created_at=push_ts))
+    from app.db.models import AgentPush
+    session.add(AgentPush(user_id=1, board="xianyu", norm="某闲鱼待爆词",
+                          kw="某闲鱼待爆词", stage="苗头", score=70,
+                          signals="增速+150% 量级500", pushed_at=push_ts))
     session.commit()
 
     out = backtest_and_learn(session, 1, settings=st)  # 不应抛异常

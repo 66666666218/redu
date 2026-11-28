@@ -608,7 +608,11 @@ redian/
 - 各板块信号源:微博热度序列、闲鱼 XianyuDaily 想要数序列(snap_date 字符串日期,`_to_dt` 容错)、
   抖音 score 序列、百度热度序列;公众号板块的早期信号由 wechat_monitor 的基线/增长/资源共振承担。
 - **板块差异化信号(v2.1)**
-- **自学习(v2.2)**:`agent_learning.py` 每日 06:00 回测两天前的苗头(爆发=最新热度≥推送时×1.5),按信号标签累计命中率;样本≥10 时自适应调整权重(±30% 锁定),持久化 `system_config(agent_weights)`。
+- **自学习(v2.2)**:`agent_learning.py` 每日 06:00 回测两天前的推送(有结算用 `repost_gain>0`,没有则退回"最新热度≥推送时×1.5"),按信号标签累计命中率;样本≥10、且该信号自己≥5 时自适应调整权重(±30% 锁定),持久化 `system_config(agent_weights)`。
+  ★ **2026-11-28 修掉"学而不动"**:样本源改为 `agent_pushes` —— `early_agent` 在**送达成功**时
+  把 `signals`(推送那一刻的信号分解)落库,回测直接读它。此前归因要从 `AgentStage.parts` 反找,
+  而阶段行会被下一轮原地覆盖、且被推送的词常常没有对应行 ⇒ 实测 45 天只有 **17 条归因**,
+  每个信号 total 1~4,永远过不了 `total>=5` ⇒ 权重自 10-14 冻结在默认值。
   ⚠️ **权重真正参与打分(2026-10-03 修)**:此前这段是**断的** —— 权重算了、也落库了,但
   `early_agent.detect_signals` 用的是硬编码 40/30/20/25/15/15/30,`load_weights` 只在
   `agent_learning` 内部被调用一次(**学而不改**)。现在 `detect_signals` 逐项读 `agent_weights`

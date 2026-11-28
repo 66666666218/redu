@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 
 from config.settings import Settings, get_settings
 from app.db import repository
-from app.db.models import AgentStage, BaiduHotItem, WeiboHotItem
+from app.db.models import AgentPush, AgentStage, BaiduHotItem, WeiboHotItem
 from app.services.feishu import _col_set_row
 from app.utils import get_logger
 
@@ -369,6 +369,24 @@ def agent_tick(db: Session, user_id: int, settings: Settings | None = None) -> i
         reverted = True
     if reverted:
         db.commit()
+
+    # ★ 推送样本落库(2026-11-28):学习要的是「**推送那一刻**这个词带了哪些信号」。
+    #   只写 `AgentStage.parts` 不够 —— 它是原地升级的,下一轮就被覆盖;实测这正是
+    #   `agent_learning` 每个信号只能攒到 1~4 条、权重自 10-14 冻结的根因。
+    #   ⚠️ 只记**送达成功**的;失败/无 webhook 的已在上面回退阶段,不能算样本。
+    try:
+        sent_at = datetime.now()
+        for s in to_push:
+            if not s.get("_sent"):
+                continue
+            db.add(AgentPush(user_id=user_id, board=s["board"], norm=s["norm"],
+                             kw=str(s["kw"] or "")[:255], stage=s["stage"],
+                             signals=" ".join(s["parts"])[:255],
+                             score=int(s["score"]), pushed_at=sent_at))
+        db.commit()
+    except Exception:  # noqa: BLE001 - 样本落库失败不能影响**已经送达**的推送
+        db.rollback()
+        logger.warning("Agent 推送样本落库失败(本轮学习样本缺失)", exc_info=True)
     return pushed
 
 

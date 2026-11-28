@@ -1051,6 +1051,37 @@ class AgentStage(Base):
     __table_args__ = (UniqueConstraint("user_id", "board", "norm"),)
 
 
+class AgentPush(Base):
+    """苗头 Agent **每次成功推送**的一条记录(2026-11-28)。
+
+    ## 为什么必须单独一张表(不能只靠 `AgentStage.parts`)
+
+    `AgentStage` 是**原地升级**的生命周期记忆:同一个词今天「苗头」、明天「上升」,
+    `parts` 会被下一轮覆盖。回测要找的是「**推送那一刻**的词带了哪些信号」——
+    从阶段表反找只能拿到**现在的**标签,而且被推送的词经常在阶段表里根本没有行
+    (2026-11-14 实测:17 条归因跨 45 天,每个信号的 total 只有 1~4 ⇒ 永远过不了
+    `total>=5`,权重自 10-14 冻结)。
+
+    ⇒ 推送成功时把 (board, norm, kw, stage, signals, score) 原样落一行;
+    `agent_learning` 回测**直接读这里**,不再"猜"当时信号是什么。
+
+    ⚠️ 只在**送达成功之后**写(未送达的阶段跃迁会被回退,不能算学习样本)。
+    """
+    __tablename__ = "agent_pushes"
+    __table_args__ = (Index("ix_agent_push_win", "user_id", "pushed_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    board: Mapped[str] = mapped_column(String(16), default="")
+    norm: Mapped[str] = mapped_column(String(128), default="", index=True)
+    kw: Mapped[str] = mapped_column(String(255), default="")
+    stage: Mapped[str] = mapped_column(String(16), default="")
+    #: 推送那一刻的信号分解(空格分隔,与 `AgentStage.parts` 同形状)
+    signals: Mapped[str] = mapped_column(String(255), default="")
+    score: Mapped[int] = mapped_column(Integer, default=0)
+    pushed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+
+
 class WechatRewrite(Base):
     """AI 改写稿:对标文 → 原创可发布稿(持久化防丢失,支持多次改写对比)。"""
 

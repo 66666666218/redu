@@ -1,10 +1,12 @@
 """苗头 Agent 自学习:回测已推送苗头的后续走势,自适应调整信号权重。
 
 闭环:
-  ① 推送苗头时记录该关键词当时的热度(learn_miao_snapshot 已由 AgentStage 承载)
-  ② 每日回测:对"2 天前推送的苗头"检查后续热度变化
-     - 增长 ≥50% → 命中(正样本);增长 <20% → 未命中(负样本)
-  ③ 累计 ≥10 个样本后,统计各信号的命中率,命中率高的信号权重上调(在线学习)
+  ① 推送**送达成功**时,把该词当时的信号分解落进 `agent_pushes`
+     (2026-11-28 起;此前只存在 `AgentStage.parts`,会被下一轮原地覆盖)
+  ② 每日回测:对"2 天前推送的苗头"检查后续
+     - **优先用结算标签**:同名建议已结算 ⇒ 命中 = `repost_gain > 0`(资源真被传播);
+     - 没有结算 ⇒ 退回热度标签:增长 ≥50% 算命中。
+  ③ 累计 ≥10 个样本、且某信号自己的样本 ≥5 后,按命中率调它的权重(在线学习)
      权重调整幅度限制在 ±30% 以内,避免小样本抖动
 
 设计原则:纯本地计算、无外部依赖;学习结果持久化到 system_config 表(agent_weights)。
@@ -118,7 +120,6 @@ def backtest_and_learn(db: Session, user_id: int, settings=None) -> dict:
     返回 {backtested: 回测数, hits: 命中数, weights: 当前权重}。
     """
     settings = settings or get_settings()
-    from app.db.models import AgentStage
     from datetime import datetime as dt
 
     weights = load_weights(db)
@@ -168,24 +169,29 @@ def backtest_and_learn(db: Session, user_id: int, settings=None) -> dict:
 
     backtested = hits = 0
     two_days_ago = dt.now() - timedelta(days=2)
-    # ★★ 2026-10-14 **改按「推送」配对**(用户口径 A)—— 原实现取 `AgentStage` 里
-    #    stage∈{苗头,上升} 且 2 天前的行,而那张表是**一行一个词、阶段**原地升级**
-    #    (`stage` 记当前、`first_seen` 记首次)⇒ **早期阶段根本存不下来**:远程实测
-    #    **287 行全是「爆发」、苗头/上升 0 行** ⇒ 取样**恒为空** ⇒ `backtested` 恒 0
-    #    ⇒ 权重/命中率/游标**永远写不出来**(作业天天跑、日志无错、指标恒 0 = 静默空转)。
-    #    ⇒ 换成以 `HotspotSuggestion`(**真实推送记录**:词/时间/结算)为样本源:
-    #      样本 0 → ~239;平台从 `platforms` 认,信号归因仍取 `AgentStage.parts`。
-    from app.db.models import HotspotSuggestion
+    # ★★ 2026-11-28 **样本源改为 `AgentPush`(推送那一刻的信号快照)**。
+    #   10-14 换成 `HotspotSuggestion` 只解决了"取样恒空",**归因仍是断的**:
+    #   建议词与阶段词是两套词,被推送的词没有信号标签 ⇒ 45 天只攒到 17 条归因,
+    #   每个信号 total 只有 1~4,永远过不了 `total >= 5` ⇒ 权重自 10-14 冻结。
+    #   现在 `early_agent` 在**送达成功**时就把 signals 写进 `AgentPush`,
+    #   回测直接按推送记账 —— 样本与归因来自同一行,不再靠反查。
+    #
+    # ⚠️ 顺序仍然是**先结算、再热度**:结算标签不需要任何热度序列;而资源/需求类
+    #    (`下载`/`问卷`/`人格测试`/剧名…)与热榜词表几乎不重叠,先判序列会把有结算的
+    #    样本一起挡掉(2026-10-14 实测 198 条里只有 2 条能对到序列)。
+    from app.db.models import AgentPush
 
-    pushes = db.scalars(select(HotspotSuggestion).where(
-        HotspotSuggestion.user_id == user_id,
-        HotspotSuggestion.created_at <= two_days_ago)).all()
-    #: 词 → 阶段行(只为拿 `parts` 里的信号标签;拿不到也照样回测,只是不记信号归因)
-    stage_by_kw: dict[str, AgentStage] = {}
-    for _st in db.scalars(select(AgentStage).where(AgentStage.user_id == user_id)).all():
-        stage_by_kw.setdefault(_norm_kw(str(_st.norm or _st.kw or "")), _st)
+    try:
+        pushes = db.scalars(select(AgentPush).where(
+            AgentPush.user_id == user_id,
+            AgentPush.pushed_at <= two_days_ago)).all()
+    except Exception:  # noqa: BLE001 - 新表未建/未重启时,别把整轮学习打挂
+        db.rollback()
+        logger.warning("Agent 学习:agent_pushes 表不可用(新表待迁移/重启),本轮跳过")
+        return {"backtested": 0, "hits": 0, "weights": weights,
+                "attributed": 0, "labels": {"结算": 0, "热度": 0}}
 
-    # 已回测游标:同一阶段行(updated_at 未变)只回测一次,防止静止行每日重复记账
+    # 已回测游标:同一条推送只回测一次,防止每日重复记账
     # (旧实现把同一行天天计入 stats,total 虚胖且同一行"昨天 miss 今天 hit"自相矛盾)
     seen_key = "agent_backtest_seen"
     seen_row = db.scalar(select(SystemConfig).where(SystemConfig.key == seen_key))
@@ -196,41 +202,47 @@ def backtest_and_learn(db: Session, user_id: int, settings=None) -> dict:
         except (ValueError, TypeError):
             seen = {}
 
-    for sug in pushes:
-        kw = _norm_kw(str(sug.keyword or ""))
+    def _series_for(board: str, raw_keys: list[str], norm_key: str):
+        """先按板块找、再全板块找;最后按**归一化标题**兜底。
+
+        热榜序列的键是**原始标题**(`repository.*_heat_series` 直接 `setdefault(r.title)`),
+        而推送样本存的是 `norm`(去空格+小写)。只按 norm 查会系统性漏配 ——
+        这个兜底让"同一个词写法不同"也能对上标签。
+        """
+        order = ([board] if board in series_map else []) + [
+            b for b in series_map if b != board]
+        for b in order:
+            m = series_map.get(b) or {}
+            for k in raw_keys:
+                if k and m.get(k) and len(m[k]) >= 2:
+                    return m[k]
+        for m in series_map.values():
+            for raw, pts in m.items():
+                if len(pts) >= 2 and _norm_kw(str(raw)) == norm_key:
+                    return pts
+        return None
+
+    for p in pushes:
+        kw = _norm_kw(str(p.kw or p.norm or ""))
         if not kw:
             continue
         # 游标键尾仍是 ISO 时间戳 ⇒ 与下面的"按保留期剪枝"同一形状,孤儿键能被剪掉
-        row_sig = f"sug|{kw}|{sug.created_at.isoformat() if sug.created_at else ''}"
+        row_sig = f"push|{p.id}|{p.pushed_at.isoformat() if p.pushed_at else ''}"
         if seen.get(row_sig):
             continue
-        # ★★ **顺序很要紧:先看结算,再退回热度**(2026-10-14 实测定的序)——
-        #    结算标签**不需要任何热度序列**;而热度标签需要该词在四路序列里有 ≥2 个点。
-        #    实测:这 198 条建议的词是**资源/需求类**(`下载`/`问卷`/`人格测试`/剧名…),
-        #    与热榜词表**几乎不重叠(只有 2/198 能对到序列)** ⇒ 若先判序列,
-        #    **41 条有结算的样本会被一起挡掉**,`backtested` 还是接近 0(等于没修)。
         if kw in settled:
             # 结算口径:`repost_gain` = 发文后**全网新增的该文盘链数** ⇒ "真被传播开了没有"
             hit = settled[kw] > 0
             label = "结算"
         else:
-            # 退路:热度涨了 ≥50%。平台从 `platforms` 认(字段为空的老行再挨个板块找一遍)。
-            series = None
-            for _b in [x.strip() for x in str(sug.platforms or "").split(",") if x.strip()]:
-                _c = series_map.get(_b, {}).get(kw)
-                if _c and len(_c) >= 2:
-                    series = _c
-                    break
-            if series is None:
-                for _m in series_map.values():
-                    if _m.get(kw) and len(_m[kw]) >= 2:
-                        series = _m[kw]
-                        break
+            # 退路:热度涨了 ≥50%。板块取推送时的 board。
+            series = _series_for(str(p.board or ""),
+                                 [str(p.kw or ""), str(p.norm or "")], kw)
             if series is None:
                 continue
-            # 推送时基线:取 created_at(**推送时刻**)之前的最后一个样本。
+            # 推送时基线:取 `pushed_at`(**推送时刻**)之前的最后一个样本。
             # 旧实现取 values[-2](=昨天的值),系统性低估增长率 → 命中率虚低 → 权重漂移。
-            cutoff = sug.created_at or two_days_ago
+            cutoff = p.pushed_at or two_days_ago
             # 时间戳可能是 datetime(微博/百度/抖音)或日期字符串(闲鱼):先归一,
             # 否则闲鱼行会让 `t <= cutoff` 抛 TypeError,连带打断该用户本轮全部板块回测。
             base_pts = [v for t, v in series if (td := _to_dt(t)) is not None and td <= cutoff]
@@ -248,9 +260,8 @@ def backtest_and_learn(db: Session, user_id: int, settings=None) -> dict:
         backtested += 1
         if hit:
             hits += 1
-        # 解析**该词**的信号标签,逐信号记账(拿不到阶段行就不记归因,但样本照样算)
-        _stage = stage_by_kw.get(kw)
-        for part in ((_stage.parts if _stage else "") or "").split():
+        # ★ 归因**直接来自推送快照** —— 不再从 `AgentStage.parts` 反找。
+        for part in str(p.signals or "").split():
             sig = sig_of_part_name(part)      # 顺序语义见 _SIG_KEYS 的注释
             if sig:
                 bucket = signal_stats.setdefault(sig, {"hits": 0, "total": 0})
@@ -259,17 +270,16 @@ def backtest_and_learn(db: Session, user_id: int, settings=None) -> dict:
                     bucket["hits"] += 1
 
     # ⚠️⚠️ **样本有了、归因没有 ⇒ 权重还是不会动** —— 必须说出来(2026-10-14 实测):
-    #    信号标签只存在 `AgentStage.parts` 里,而**被推送的那些词从没被早期信号打过标签**
-    #    (实测 41 条已结算样本里 **0 条**能在阶段表找到对应行)⇒ 每个信号的 `total` 都是 0
-    #    ⇒ 下面那道 `total >= 5` 永远过不去。**不说的话,这里会静默成"学习在跑、只是没调"**,
-    #    与"没有样本"长得一模一样(本仓母题)。⇒ 计数并告警,让"缺的是哪一环"一眼可见。
+    #    归因现在来自 `AgentPush.signals`;如果 `early_agent` 没写它(未重启/未送达/
+    #    parts 为空),每个信号的 `total` 还是 0,下面那道 `total >= 5` 永远过不去。
+    #    **不说的话,这里会静默成"学习在跑、只是没调"**,与"没有样本"长得一模一样
+    #    (本仓母题)。⇒ 计数并告警,让"缺的是哪一环"一眼可见。
     attributed = sum(int(v.get("total") or 0) for v in signal_stats.values())
     if backtested and not attributed:
         logger.warning("Agent 学习:样本 %d 条但**信号归因 0 条** ⇒ 权重不会动。"
-                       "原因:标签只存在 `AgentStage.parts` 里,而**被推送的词没被早期信号打过标签**"
-                       "(2026-10-14 实测 41 条已结算样本里 0 条能对上阶段表)。"
-                       "⇒ 要么在推送时把信号记进建议表,要么改用板块粒度归因(见 CHANGELOG)",
-                       backtested)
+                       "先查 early_agent 有没有把 signals 写进 agent_pushes"
+                       "(未送达、parts 为空、表未建都算 0);"
+                       "确认路径通之前,权重会一直停在默认值。", backtested)
 
     # 权重自适应(样本 ≥10 才动,防小样本抖动;幅度 ±30%)
     if backtested >= 10:

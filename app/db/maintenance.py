@@ -42,6 +42,7 @@ from app.db.models import (
     WechatRewrite,
     WechatTrafficSample,
     PushLedger,
+    AgentPush,
     AgentStage,
     XianyuDaily,
     XianyuItem,
@@ -67,6 +68,7 @@ _TABLES = [
     (WechatTrafficSample, "sampled_at", False),
     (FeishuAlert, "alerted_at", False),      # 冷却记录本体 6~24h 有效,清理只是防无限增长
     (AgentStage, "updated_at", False),       # Agent 阶段记忆(陈旧状态自然失效)
+    (AgentPush, "pushed_at", False),         # 推送样本(学习标签用;与数据集保留期一致)
     (WechatCandidate, "discovered_at", False),  # 候选号(dismissed 的也清理,防无限增长)
     # 以下 5 类此前不在清理清单,均"只增不删"→ 线性膨胀(2026-09-22 审计):
     (NotificationLog, "created_at", False),   # 每次事件告警一行

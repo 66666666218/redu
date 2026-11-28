@@ -16,7 +16,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db.database import Base
 from app.db import models  # noqa: F401
-from app.db.models import AgentStage, SystemConfig, User, WeiboHotItem
+from app.db.models import AgentPush, SystemConfig, User, WeiboHotItem
 from app.services import agent_learning
 
 
@@ -27,20 +27,17 @@ def _session():
 
 
 def _seed_rising(db, user_id: int, kw: str) -> None:
-    """某关键词:3 天前基线=100,昨天=200(翻倍 → 回测判命中)。阶段行 3 天前更新。"""
+    """某关键词:3 天前基线=100,昨天=200(翻倍 → 回测判命中)。
+
+    样本来自 **`AgentPush`**(2026-11-28 起):推送那一刻的信号分解就在这一行里,
+    不再需要阶段表(它会被下一轮原地覆盖,这正是归因断掉的根因)。
+    """
     now = datetime.now()
     db.add(WeiboHotItem(user_id=user_id, title=kw, heat=100, rank=1, captured_at=now - timedelta(days=4)))
     db.add(WeiboHotItem(user_id=user_id, title=kw, heat=200, rank=1, captured_at=now - timedelta(days=1)))
-    db.add(AgentStage(user_id=user_id, board="weibo", norm=kw, kw=kw, stage="苗头",
-                      parts="增速+100%", score=100,
-                      updated_at=now - timedelta(days=3)))
-    # ⚠️ 2026-10-14 起**样本源是推送记录**(老取样查"苗头/上升阶段行",而阶段表是一行一个词、
-    #    阶段原地升级 ⇒ 早期阶段存不下来 ⇒ 取样恒为空)。这里补一条**未结算**的推送:
-    #    它走"退回热度标签"那条路,阶段行仍负责提供信号标签(`parts`)。
-    from app.db.models import HotspotSuggestion
-
-    db.add(HotspotSuggestion(user_id=user_id, keyword=kw, growth=0, kind="llm",
-                             created_at=now - timedelta(days=3)))
+    db.add(AgentPush(user_id=user_id, board="weibo", norm=kw, kw=kw, stage="苗头",
+                     signals="增速+100%", score=100,
+                     pushed_at=now - timedelta(days=3)))
     db.commit()
 
 

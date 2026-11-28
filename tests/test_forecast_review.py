@@ -161,16 +161,6 @@ def test_peer_beats_pan_when_both_present(session):
     assert row["detail"] == "peer=1 douyin=0 pan=1"
 
 
-def test_ledger_row_without_pan_is_not_evidence(session):
-    """台账里**不带盘**的行不算证据 —— 这个作业问的就是"变没变成网盘资源"。"""
-    _alert(session, "hot_breakout", "breakout:起势:巫师4", hours_ago=100)
-    _ledger(session, "《巫师4》完整版", pan="", hours_ago=10)
-
-    row = fr.review_one(session, 1, "hot_breakout", "breakout:起势:巫师4", "",
-                        datetime.now() - timedelta(hours=100), "", 72)
-    assert row["outcome"] == "unknown"
-
-
 def test_wechat_article_counts_as_peer(session):
     """公众号同行号推带盘文章 = "这资源变成网盘资源"的直接证据。"""
     _alert(session, "hot_breakout", "breakout:起势:巫师4", hours_ago=100)
@@ -186,19 +176,23 @@ def test_wechat_article_counts_as_peer(session):
 
 
 def test_douyin_lead_only_share_kind_counts(session):
-    """抖音线索只认 `kind='share'`(真带口令/转存链);`none` 只是提到了名字。"""
+    """抖音线索只认 `kind='share'`(真带口令/转存链);`none` 只是提到了名字。
+
+    `none` 那条**不是命中**,但也不是 unknown —— 它证明"名字出现了、没兑现"⇒ miss。
+    """
     _alert(session, "hot_breakout", "breakout:起势:巫师4", hours_ago=100)
     for kind, mark in (("none", "巫师4"), ("share", "巫师4")):
         session.add(DouyinLead(
             user_id=1, aweme_id=f"vid-{kind}", title=f"《{mark}》",
-            mark=mark, kind=kind, keyword="k",
+            mark=mark, kind=kind, keyword="k", author=f"号-{kind}",
             found_at=datetime.now() - timedelta(hours=6)))
     session.commit()
 
     row = fr.review_one(session, 1, "hot_breakout", "breakout:起势:巫师4", "",
                         datetime.now() - timedelta(hours=100), "", 72)
+    assert row["outcome"] == "hit"
     assert row["evidence"] == "douyin"
-    assert row["detail"] == "peer=0 douyin=1 pan=0", "kind=none 那条不许计数"
+    assert row["detail"] == "peer=0 douyin=1 pan=0 mention=1", "kind=none 那条只进提及档"
 
 
 def test_promo_forecast_matches_by_pan_identity_but_only_as_weak_tier(session):
@@ -219,7 +213,8 @@ def test_promo_forecast_matches_by_pan_identity_but_only_as_weak_tier(session):
                         datetime.now() - timedelta(hours=100), "", 72)
     assert row["outcome"] == "hit"
     assert row["evidence"] == "pan", "只靠盘链配上的行不许抬成 peer"
-    assert row["detail"] == "peer=0 douyin=0 pan=1"
+    assert row["detail"].startswith("peer=0 douyin=0 pan=1")
+    assert row["detail"].endswith("new=1"), "预警前没人推过 ⇒ 这个是新推手"
 
 
 def test_shared_share_link_does_not_prove_another_work(session):
@@ -240,14 +235,65 @@ def test_shared_share_link_does_not_prove_another_work(session):
     row = fr.review_one(session, 1, "promo_forecast",
                         "forecast:pan.xunlei.com/s/VP6XqobV5vdtY7KuROqmhouKA1?pwd=8cze|麦穗与羊",
                         "", datetime.now() - timedelta(hours=100), "", 72)
-    assert row["detail"] == "peer=1 douyin=0 pan=1", "别部作品只许算 pan 档"
+    assert row["detail"].startswith("peer=1 douyin=0 pan=1"), "别部作品只许算 pan 档"
+
+
+# ---------------------------------------------------------------- ③b 未命中档
+
+def test_promo_same_authors_are_not_new_evidence(session):
+    """★ 去同义反复:预警前就在推的那批人,预警后继续推**不算命中**。
+
+    这条链的预警前提就是"头 24h 已攒够 N 个推手" —— 若不做基线,
+    "之后还有人推"几乎必然成立,命中率会永远接近 100%。
+    """
+    _alert(session, "promo_forecast", "forecast:pan.quark.cn/s/aaa|某剧", hours_ago=100)
+    # 预警前 10h:同行A 已经在推(基线窗口内)
+    _ledger(session, "《某剧》全集", pan="https://pan.quark.cn/s/aaa", hours_ago=110,
+            author="同行A")
+    # 预警后:同一个同行A 继续推
+    _ledger(session, "《某剧》全集 更新", pan="https://pan.quark.cn/s/aaa", hours_ago=5,
+            author="同行A")
+
+    row = fr.review_one(session, 1, "promo_forecast", "forecast:pan.quark.cn/s/aaa|某剧",
+                        "", datetime.now() - timedelta(hours=100), "", 72)
+    assert row["outcome"] == "miss", "同一批人继续推不是新证据"
+    assert row["evidence"] == ""
+    assert row["detail"].startswith("peer=1 douyin=0 pan=0")
+    assert row["detail"].endswith("new=0")
+
+
+def test_promo_new_author_is_evidence(session):
+    """预警后出现**预警前没推过的人** ⇒ 才是真的"更多人在推"。"""
+    _alert(session, "promo_forecast", "forecast:pan.quark.cn/s/bbb|另一剧", hours_ago=100)
+    _ledger(session, "《另一剧》全集", pan="https://pan.quark.cn/s/bbb", hours_ago=110,
+            author="同行A")
+    _ledger(session, "《另一剧》原稿", pan="https://pan.quark.cn/s/bbb", hours_ago=4,
+            author="同行C")
+
+    row = fr.review_one(session, 1, "promo_forecast", "forecast:pan.quark.cn/s/bbb|另一剧",
+                        "", datetime.now() - timedelta(hours=100), "", 72)
+    assert row["outcome"] == "hit"
+    assert row["evidence"] == "peer"
+    assert row["detail"].endswith("new=1")
+
+
+def test_ledger_row_without_pan_is_a_miss(session):
+    """台账里**不带盘**的行不是命中,但**是未命中的证据** —— 名字出现了、没兑现。"""
+    _alert(session, "hot_breakout", "breakout:起势:巫师4", hours_ago=100)
+    _ledger(session, "《巫师4》最新预告", pan="", hours_ago=10)
+
+    row = fr.review_one(session, 1, "hot_breakout", "breakout:起势:巫师4", "",
+                        datetime.now() - timedelta(hours=100), "", 72)
+    assert row["outcome"] == "miss"
+    assert row["evidence"] == ""
+    assert row["detail"] == "peer=0 douyin=0 pan=0 mention=1"
 
 
 def test_failure_annotation_is_not_a_pan_link(session):
     """`my_pan_urls` 里的 `⚠️源分享已被封,未转存` 是**失败标注**,不是盘链。
 
-    现网有 92 行是这个形状;把它们当带盘证据,方向正好反了 ——
-    它证明的恰恰是"这条没变成网盘资源"。
+    现网有 92 行是这个形状;把它当带盘证据方向正好反了 ——
+    它证明的恰恰是"这条没变成网盘资源"⇒ **miss**,不是 unknown。
     """
     _alert(session, "hot_breakout", "breakout:起势:巫师4", hours_ago=100)
     session.add(WechatArticle(
@@ -259,8 +305,8 @@ def test_failure_annotation_is_not_a_pan_link(session):
 
     row = fr.review_one(session, 1, "hot_breakout", "breakout:起势:巫师4", "",
                         datetime.now() - timedelta(hours=100), "", 72)
-    assert row["outcome"] == "unknown", "失败标注不许算成带盘证据"
-    assert row["detail"] == "peer=0 douyin=0 pan=0"
+    assert row["outcome"] == "miss", "失败标注是未兑现的证据,不是带盘证据"
+    assert row["detail"] == "peer=0 douyin=0 pan=0 mention=1"
 
 
 def test_is_link_shapes():
@@ -341,6 +387,42 @@ def test_report_keeps_unknown_out_of_the_denominator(session):
     text = fr.build_report(session, 1, _S, days=14)
     assert "命中 1 / 未命中 0 / 无数据 1" in text
     assert "100%" in text, "unknown 不许进分母(否则这句话会变成 50%)"
+
+
+def test_report_reports_confirmation_rate_over_all_due(session):
+    """★ 三分档都要出:**确认率**的分母是全部到期预警,**判对率**只算有结果的。
+
+    第一版没有 miss 档,`确认率` 会被算成 100%(1 hit / 1 有结果),
+    而真实情况是"3 条到期,只兑现了 1 条"。
+    """
+    _alert(session, "hot_breakout", "breakout:起势:甲作品", hours_ago=100,
+           reason="起势档/0人/IT之家#2")
+    _alert(session, "hot_breakout", "breakout:起势:乙作品", hours_ago=100,
+           reason="起势档/0人/IT之家#3")
+    _alert(session, "hot_breakout", "breakout:起势:丙作品", hours_ago=100,
+           reason="起势档/0人/IT之家#4")
+    _ledger(session, "《甲作品》完整版", hours_ago=10)          # hit
+    _ledger(session, "《乙作品》最新消息", pan="", hours_ago=8)  # miss(只提及)
+    # 丙作品:什么也没有 → unknown
+    fr.review_pending(session, 1, _S)
+
+    text = fr.build_report(session, 1, _S, days=14)
+    assert "命中 1 / 未命中 1 / 无数据 1" in text
+    assert "确认率(命中/到期) 33%" in text, "分母必须是全部到期,不能只算有结果的"
+    assert "判对率(有结果) 50%" in text
+
+
+def test_report_flags_legacy_rows_without_miss_tier(session):
+    """旧口径行(无 miss 档)必须单独标出来,不许和新口径混成一个百分比。"""
+    session.add(ForecastReview(
+        user_id=1, section="hot_breakout", key="breakout:起势:老东西",
+        title="老东西", alerted_at=datetime.now() - timedelta(days=2),
+        outcome="hit", evidence="peer", reviewed_at=fr.MISS_RULE_SINCE - timedelta(days=1)))
+    session.commit()
+
+    text = fr.build_report(session, 1, _S, days=14)
+    assert "旧口径回验" in text
+    assert "1 条是 2026-11-28 前" in text
 
 
 def test_report_separates_evidence_tiers(session):

@@ -1895,14 +1895,23 @@ def settle_suggestions(db: Session, user_id: int) -> dict:
     articles = db.scalars(select(WechatArticle).where(
         WechatArticle.user_id == user_id,
         WechatArticle.created_at >= datetime.now() - timedelta(days=30))).all()
-    settled, attributed = 0, 0
+    settled, attributed, zero_settled = 0, 0, 0
     now = datetime.now()
     for sug in rows:
-        art = next((a for a in articles if _article_covers_link(a, sug.link)), None)
-        if art is None:
+        cands = [a for a in articles if _article_covers_link(a, sug.link)]
+        if not cands:
             continue          # 还没归因到发文,等下一轮(发文后录入即自动接上)
-        sug.article_id = art.id
         baseline = sug.acted_at or sug.created_at
+        #: ★ 2026-11-28 修:同一条盘链会被**旧文章**和**新文章**同时覆盖。
+        #: 11 月实测:建议创建于 11-01,而一条 10-29 的旧文章也含这条链 ⇒ 原来的
+        #: `next(...)` 取到旧文章,它的链记录全部早于基线 ⇒ 291 条已结算建议的
+        #: `repost_gain` **全是 0**,同期 `wechat_pan_links` 却新增 12,079 条。
+        #: ⇒ 先找**基线之后**的文章(那才可能是这次动作/扩散的产物);只有一篇旧文章
+        #: 覆盖时再退回去 —— 兼容"文章先发、事后补 acted"的手工场景(测试钉住了它)。
+        after = [a for a in cands
+                 if a.created_at and baseline and a.created_at >= baseline]
+        art = min(after or cands, key=lambda a: a.created_at or datetime.max)
+        sug.article_id = art.id
         repost = db.scalar(select(func.count(WechatPanLink.id)).where(
             WechatPanLink.user_id == user_id,
             WechatPanLink.article_id == art.id,
@@ -1918,8 +1927,27 @@ def settle_suggestions(db: Session, user_id: int) -> dict:
                 sug.reads_gain = int(est["estimate"])
         sug.settled_at = now
         settled += 1
+        if int(repost) == 0:
+            zero_settled += 1
         attributed += 1
     db.commit()
+
+    #: ★ 体检(2026-11-28):"本轮全 0"有两个完全相反的原因 ——
+    #: ① 真的没有扩散;② **归因坏了**(旧文章/基线错位)。11 月实测过后者:
+    #:    291 条已结算全 0,而同期 `wechat_pan_links` 新增 12,079 条。
+    #: 判据:本轮 ≥5 条已结算、**全部为 0**、且近 7 天全网确实在新增盘链。
+    #: 命中时**必须喊出来**,否则"没有扩散"会一路变成权重/选题口径的假标签。
+    links_7d = db.scalar(select(func.count(WechatPanLink.id)).where(
+        WechatPanLink.user_id == user_id,
+        WechatPanLink.created_at >= now - timedelta(days=7))) or 0
+    suspicious = bool(settled >= 5 and zero_settled == settled and links_7d >= 50)
+    if suspicious:
+        logger.warning("建议结算疑似失真 user=%s:本轮 %d 条已结算的 repost_gain **全为 0**,"
+                       "而近 7 天全网新增盘链 %d 条 ⇒ 先查归因(旧文章/基线),"
+                       "别把'归因坏了'当成'没有扩散'", user_id, settled, links_7d)
+    label_health = {"settled": settled, "zero": zero_settled,
+                    "links_7d": int(links_7d), "suspicious": suspicious}
+
     # 按品类聚合"哪类真赚"(P1 转化回流,2026-10-01):repost_gain 是盘链扩散的代理指标,
     # 聚合后给运营看"该往哪个品类加码",也是未来自动调 PROVEN_CATEGORIES 权重的数据源。
     # 2026-10-04 起再加一列 **reads_gain**(阅读数×30% 的预估拉新量)—— 与 repost_gain
@@ -1934,13 +1962,15 @@ def settle_suggestions(db: Session, user_id: int) -> dict:
         e["repost_gain"] += int(sug.repost_gain or 0)
         e["reads_gain"] += int(sug.reads_gain or 0)
     return {"status": "ok", "acted_with_link": len(rows), "settled": settled,
-            "attributed": attributed, "auto_acted": auto, "by_category": by_cat}
+            "attributed": attributed, "auto_acted": auto, "by_category": by_cat,
+            "label_health": label_health}
 
 
 def settle_suggestions_all_users(settings: Settings | None = None) -> int:
     """计划任务入口:对全部启用用户各结算一轮。"""
     from app.db.database import get_session_local
     from app.db.models import User
+    from app.services.tenant_base import _record_run
 
     db = get_session_local()()
     total = 0
@@ -1950,6 +1980,16 @@ def settle_suggestions_all_users(settings: Settings | None = None) -> int:
                 out = settle_suggestions(db, uid)
                 if out.get("settled"):
                     total += out["settled"]
+                #: ★ 体检结果必须进运行记录:全 0 若是归因坏了,只写日志没人看得见
+                #: (本仓母题:只写不读等于没有)。`partial` 让它在 runs 里一眼可见。
+                h = out.get("label_health") or {}
+                _record_run(
+                    db, uid, "suggestion_settle",
+                    "partial" if h.get("suspicious") else "success",
+                    f"acted带链={out.get('acted_with_link')} 自动归因={out.get('auto_acted')} "
+                    f"结算={h.get('settled')} 零扩散={h.get('zero')} "
+                    f"近7天全网链={h.get('links_7d')}"
+                    + (" ⚠️全零疑似归因失真,先查旧文章/基线" if h.get("suspicious") else ""))
                 db.commit()
             except Exception:  # noqa: BLE001 - 单用户失败不影响其余
                 db.rollback()

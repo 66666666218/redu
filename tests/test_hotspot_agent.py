@@ -314,6 +314,83 @@ def test_settle_suggestions_repost_gain(session) -> None:
     assert session.scalars(select(HotspotSuggestion)).one().repost_gain == 4
 
 
+def test_settle_prefers_article_after_baseline(session) -> None:
+    """★ 2026-11-28 回归守卫:同一盘链被**旧文章**和**新文章**同时覆盖时,必须用新文章。
+
+    11 月实测:建议创建于 11-01,一条 10-29 的旧文章也含这条链 ⇒ 旧实现 `next(...)`
+    取到旧文章,它的链记录全部早于 acted_at ⇒ 291 条已结算建议 `repost_gain` 全 0,
+    而同期全网新增 12,079 条链。判据:旧文章 = 0,新文章 = 1。
+    """
+    from app.db.models import WechatArticle, WechatPanLink
+    from app.services.hotspot_agent import settle_suggestions
+
+    link = "https://pan.quark.cn/s/same-chain"
+    now = dt.datetime.now()
+    old = WechatArticle(id=91, user_id=1, title="旧的转载", author="号旧",
+                        source="manual", url="https://mp.weixin.qq.com/s/old",
+                        my_pan_urls=link, created_at=now - dt.timedelta(days=10))
+    new = WechatArticle(id=92, user_id=1, title="这次动作的发文", author="号新",
+                        source="manual", url="https://mp.weixin.qq.com/s/new",
+                        my_pan_urls=link, created_at=now - dt.timedelta(hours=1))
+    session.add_all([old, new])
+    session.commit()
+    session.add(HotspotSuggestion(user_id=1, keyword="同链热点", kind="match",
+                                  link=link, acted=True,
+                                  acted_at=now - dt.timedelta(hours=2)))
+    # 旧文章的链记录(早于基线) + 新文章的链记录(晚于基线)
+    session.add_all([
+        WechatPanLink(user_id=1, article_id=91, pan_url=link,
+                      created_at=now - dt.timedelta(days=10)),
+        WechatPanLink(user_id=1, article_id=92, pan_url=link,
+                      created_at=now - dt.timedelta(hours=1)),
+    ])
+    session.commit()
+
+    out = settle_suggestions(session, 1)
+    sug = session.scalars(select(HotspotSuggestion)).one()
+    assert out["settled"] == 1
+    assert sug.article_id == 92, "必须选基线之后的那篇,不是最早的那篇"
+    assert sug.repost_gain == 1
+
+
+def test_settle_flags_all_zero_while_links_are_growing(session) -> None:
+    """★ 体检:本轮 ≥5 条已结算**全 0**,而近 7 天全网链在涨 ⇒ 必须标 suspicious。
+
+    这条防的是"归因坏了被读成没有扩散"——11 月真实发生过(291 条全 0 / 新增 12079 条)。
+    """
+    from app.db.models import WechatArticle, WechatPanLink
+    from app.services.hotspot_agent import settle_suggestions
+
+    now = dt.datetime.now()
+    # 另一篇不含目标链的文章,用来承载"近 7 天全网在涨"的盘链记录
+    other = WechatArticle(id=93, user_id=1, title="别的文", author="号X",
+                          source="manual", url="https://mp.weixin.qq.com/s/x",
+                          pan_urls="https://pan.quark.cn/s/other",
+                          created_at=now - dt.timedelta(days=2))
+    session.add(other)
+    session.commit()
+    for i in range(50):
+        session.add(WechatPanLink(user_id=1, article_id=93,
+                                  pan_url=f"https://pan.quark.cn/s/grow{i}",
+                                  created_at=now - dt.timedelta(days=2)))
+    for i in range(5):
+        link = f"https://pan.quark.cn/s/none{i}"
+        art = WechatArticle(id=100 + i, user_id=1, title=f"发文{i}", author="号A",
+                            source="manual", url=f"https://mp.weixin.qq.com/s/n{i}",
+                            my_pan_urls=link, created_at=now - dt.timedelta(hours=1))
+        session.add(art)
+        session.add(HotspotSuggestion(user_id=1, keyword=f"热点{i}", kind="match",
+                                      link=link, acted=True,
+                                      acted_at=now - dt.timedelta(hours=2)))
+    session.commit()
+
+    out = settle_suggestions(session, 1)
+    assert out["settled"] == 5
+    health = out["label_health"]
+    assert health["zero"] == 5 and health["links_7d"] >= 50
+    assert health["suspicious"] is True, "全零但链在涨 ⇒ 必须报警,不许静默"
+
+
 def test_settle_skips_unacted_or_unattributed(session) -> None:
     """结算纪律:未 acted 或盘链对不上发文的不结算(宁少样本不脏样本)。"""
     from app.services.hotspot_agent import settle_suggestions
