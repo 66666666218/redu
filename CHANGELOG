@@ -1,3 +1,19 @@
+- [2026-11-28 11:06] FIX: 盘满不再保存和重试，只采集推送；补取数路与逐词命中埋点
+  ## 用户口径（逐字）
+  「盘满时不再进行保存和重试，只进行采集推送」。
+  ## 盘满熔断（两层判据，第二层是一手证据）
+  - 抖音口令：配额闸门（读数可信时）判满 → 不转存、**不再入队**（旧契约是「盘满也要入队等清理」，实测积压 460 条、连续 4 天零转存）；
+    转存接口自己返回「空间不足」（`xt.is_space_error`）→ **本轮立即熔断**，剩余分享链一条都不再打转存，只解口令/推源链。
+    非盘满失败（验证码/网络）仍入队重试；群口令照常加群。
+  - `pan_discovery`：第一条候选返回空间不足后，本轮剩余候选**不再逐条尝试转存**（迅雷配额读数是兜底值、闸门看不见盘满，
+    老实现每 4 小时会对全部候选各打一次注定失败的转存），直接走既有「盘满直推源链」通道；`space_skips` 单独进运行记录。
+  ## 埋点（只记账，不改选路）
+  - douyin runs 新增「路{协议关/协议失败(kind)/协议弱x/y/协议空/CDP/浏览器兜底}」与「词命中N/M」；
+    CDP 路补 `kw_total`/`kw_hit`（按去重前原始行计），与纯协议同口径。
+  - `_kouling_summary` 把「其他N」拆成 失败/跳过/复用：实测 08:14 那轮 `其他8` 正好等于转存额度，按代码路径是 8 次空间不足失败，
+    旧汇总读起来像「说不清的失败」。
+  (Files: app/services/douyin_leads.py, app/services/douyin_cdp_source.py, app/services/pan_discovery.py, tests/test_douyin_leads.py, tests/test_douyin_cdp_source.py, tests/test_pan_discovery.py, CHANGELOG)
+
 - [2026-11-28 10:54] FEAT: 补齐三个平台的互动指标缺口 —— 知乎积压直推的「对标数据」不再恒空（`discovered_pan_links` 加 `metrics` 列，三条入队路径都持久化、积压重建时带出、本轮新抓的覆盖旧值）；贴吧 presence 打开首楼详情（全帖浏览/点赞/分享/收藏与首楼全文同一次请求，代价每轮 ≤`tieba_detail_limit` 次匿名请求）；快手改读 `likeCount`（实测 V2 搜索响应里 `realLikeCount` 恒 None，全量 41091 条历史 `liked_count` 无一有值），**搜索响应不给 `commentCount`、`collectCount` 恒 0 ⇒ 这两个不收**。⚠️ 快手那处在 `tools/MediaCrawler`（被 .gitignore 挡在库外），换机器要重打。 (Files: app/db/database.py, app/db/models.py, app/services/pan_discovery.py, app/services/cross_accounts.py, app/services/douyin_leads.py, app/services/resource_presence.py, tests/test_pan_discovery.py, tests/test_resource_presence.py, tools/MediaCrawler/store/kuaishou/__init__.py)
 - [2026-11-27 23:40] FIX: 抖音资源轮重试只跑已启用的抖音，避免零预算时重复搜索其他平台；本次成功落库才标为恢复，不合并大瓜或其他平台的旧失败。网盘首页与伪链接不计入同类可用线索，入库与推送规则不变 (Files: app/admin.py, app/services/douyin_leads.py, tests/test_platform.py, tests/test_douyin_leads.py, doc/API.md)
 - [2026-11-27 22:00] FIX: 抖音资源主轮及其重试在现有搜索预算内优先保留本类词；按实际搜索窗口记录探针与热榜作品消耗，并分开统计本类入窗词、同类可用线索及发现时未满 3 天的线索 (Files: app/services/douyin_leads.py, tests/test_douyin_leads.py)
