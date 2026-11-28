@@ -712,7 +712,10 @@ class Settings(BaseSettings):
     #:   (防 cookie 被 CDP 偷)⇒ 必须用**专用档案目录**,并在里面人工登录。
     #: ⚠️ **我们绝不自己去 launch 那个浏览器** —— 一旦由 Playwright 启动,
     #:   `webdriver` 就变回 `True`,这条路等于白做(有源码级守卫)。
-    xhs_cdp_url: str = "http://127.0.0.1:9222"
+    #: ★ 2026-11-28 默认从 9222 改到 **9223**:9222 本机被 auto-js-reverse MCP
+    #:   工具的浏览器占着 ⇒ 只问「端口通不通」会接管到别人的窗口(见
+    #:   `xhs_cdp_source._cdp_owner`)。错开端口后默认就不撞。
+    xhs_cdp_url: str = "http://127.0.0.1:9223"
     #: CDP 专用档案目录(相对仓库根;`data/` 已 gitignore ⇒ 登录态不进仓库)。
     xhs_cdp_user_data_dir: str = "data/xhs_cdp_profile"
     #: 词与词之间的**强制休眠**(毫秒)。⚠️ 有下限(见 `xhs_cdp_source._MIN_BETWEEN_MS`):

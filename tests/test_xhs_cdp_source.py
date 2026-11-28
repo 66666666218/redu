@@ -377,6 +377,61 @@ class Test无头告警:
         assert seen == []
 
 
+class Test端口归属:
+    """★★ 2026-11-28 事故的回归守卫:`127.0.0.1:9222` 被 **auto-js-reverse MCP
+    工具**的浏览器占着(`--user-data-dir=D:\\code\\mcp\\...`),而 `available()`
+    只问「端口通不通」⇒ 小红书采集被**接管到别人的窗口**;真正的专用档案
+    `data/xhs_cdp_profile` **一次都没被用过**。⇒ 端口通必须再问一句"这是谁的档案"。
+    """
+
+    class _S:
+        xhs_cdp_url = "http://127.0.0.1:9222"
+        xhs_cdp_user_data_dir = "data/xhs_cdp_profile"
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"Browser":"Edg/158.0.4370.45"}'
+
+    def test_端口上是别人的档案就拒绝接管(self, monkeypatch) -> None:
+        monkeypatch.setattr(C.urllib.request, "urlopen", lambda *a, **k: self._Resp())
+        monkeypatch.setattr(
+            C, "_cdp_owner",
+            lambda url: r"D:\code\mcp\auto_js_reverse-main\storage\chrome_profile")
+        ok, why = C.available(self._S())
+        assert ok is False, "别人的浏览器不能算'我们的 CDP 可用'"
+        assert "不是我们的" in why, why
+
+    def test_端口是我们的档案就放行(self, monkeypatch) -> None:
+        monkeypatch.setattr(C.urllib.request, "urlopen", lambda *a, **k: self._Resp())
+        own = str(C._own_profile_dir(self._S()))
+        monkeypatch.setattr(C, "_cdp_owner", lambda url: own)
+        ok, why = C.available(self._S())
+        assert ok is True, why
+
+    def test_归属查不到时放行(self, monkeypatch) -> None:
+        """查不动(非 Windows / 命令失败)⇒ 退化成旧行为,别把整条链拦死。"""
+        monkeypatch.setattr(C.urllib.request, "urlopen", lambda *a, **k: self._Resp())
+        monkeypatch.setattr(C, "_cdp_owner", lambda url: "")
+        ok, why = C.available(self._S())
+        assert ok is True, why
+
+    def test_端口被占时不许起第二个(self, monkeypatch) -> None:
+        import subprocess
+
+        monkeypatch.setattr(C, "available", lambda s=None: (False, "端口还没通"))
+        monkeypatch.setattr(C, "_cdp_owner", lambda url: r"D:\other\chrome_profile")
+        monkeypatch.setattr(subprocess, "Popen",
+                            lambda *a, **k: pytest.fail("端口被占时不许起浏览器"))
+        ok, why = C.ensure_running(self._S(), wait_s=0.5)
+        assert ok is False and "别的浏览器" in why, why
+
+
 class Test按需自启:
     """★★ **2026-10-16 用户问「以后都必须开着浏览器了吗 / 关机再开机能否自启」**。
 
@@ -437,6 +492,8 @@ class Test按需自启:
         from app.services import xhs_cdp_source as C
 
         monkeypatch.setattr(C, "available", lambda settings=None: (False, "端口还没通"))
+        #: ★ 归属校验(2026-11-28)也要让开 —— 否则它会走 netstat ⇒ 撞上 Popen 替身
+        monkeypatch.setattr(C, "_cdp_owner", lambda url: "")
         monkeypatch.setattr(C, "_profile_browser_running", lambda d: True)
         monkeypatch.setattr(subprocess, "Popen",
                             lambda *a, **k: pytest.fail("已经有进程在跑,绝不许再起第二个"))

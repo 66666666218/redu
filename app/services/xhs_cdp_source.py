@@ -38,6 +38,7 @@ CDP 路反过来:**浏览器由人自己开**(专用档案,手动登录一次),�
 from __future__ import annotations
 
 import json
+import re
 import urllib.request
 from pathlib import Path
 
@@ -90,19 +91,29 @@ def between_kw_ms(settings=None) -> int:
 
 
 def available(settings=None) -> tuple[bool, str]:
-    """CDP 端点**现在**能不能连上。**只问 `/json/version`,不碰任何页面、不发小红书请求。**
+    """CDP 端点**现在**能不能连上,且**那个端点是我们的档案**。只问 `/json/version`
+    + 本地进程表,不碰任何页面、不发小红书请求。
 
     ⚠️ 返回 `(False, 原因)` 时调用方**必须**把原因说出来 —— 见模块头纪律 3。
+    ⚠️ ★ 2026-11-28:**端口通 ≠ 我们的浏览器**(见 `_cdp_owner` 里的事故)
+    ⇒ 归属对不上判**不可用**;归属**查不到**时放行(退化成旧行为,别拦死)。
     """
     url = endpoint(settings).rstrip("/")
     try:
         with urllib.request.urlopen(f"{url}/json/version", timeout=3) as r:
             d = json.loads(r.read().decode("utf-8"))
-        return True, f"CDP 可达:{d.get('Browser') or '?'}"
     except Exception as exc:  # noqa: BLE001 - 连不上是**预期状态**,不是异常
         return False, (f"CDP 不可达({url}):{type(exc).__name__} —— "
                        f"先由**人**把浏览器开起来:`python tools/xhs_cdp.py launch`,"
                        f"在里面登录一次小红书,再回来跑这条")
+    own = _own_profile_dir(settings)
+    owner = _cdp_owner(url)
+    if owner and _norm_profile(owner) != _norm_profile(str(own)):
+        return False, (f"CDP 端口 {url} 上的浏览器**不是我们的**(它的档案:{owner};"
+                       f"我们的:{own})—— 不接管别人的窗口。修法:把 `XHS_CDP_URL` "
+                       f"换一个空闲端口,再用 `python tools/xhs_cdp.py launch` "
+                       f"起我们的专用档案")
+    return True, f"CDP 可达:{d.get('Browser') or '?'}"
 
 
 #: 普通 Edge / Chrome 的候选路径(**单一出处**:`tools/xhs_cdp.py` 也 import 这一份,别抄两份)
@@ -145,6 +156,72 @@ def _profile_browser_running(d: Path) -> bool:
         return False
 
 
+def _own_profile_dir(settings=None) -> Path:
+    """**我们的**专用档案目录(绝对路径)—— 归属校验与启动参数都读这一份。"""
+    from config.settings import get_settings
+
+    st = settings or get_settings()
+    raw = str(getattr(st, "xhs_cdp_user_data_dir", "") or "data/xhs_cdp_profile")
+    d = Path(raw)
+    if not d.is_absolute():
+        d = Path(__file__).resolve().parents[2] / d
+    return d
+
+
+def _norm_profile(s: str) -> str:
+    """档案路径的归一化比较键(大小写/尾分隔符/相对路径不该让判据飘)。"""
+    try:
+        return str(Path(str(s)).resolve()).rstrip("\\/").lower()
+    except Exception:  # noqa: BLE001 - 归不了一律按原样比
+        return str(s or "").rstrip("\\/").lower()
+
+
+def _cdp_owner(url: str) -> str:
+    """**端口上的浏览器用的是哪个档案** —— 只查本地进程,零网络请求。
+
+    ★★ 2026-11-28 事故(为什么需要它):`127.0.0.1:9222` 被 **auto-js-reverse
+    MCP 工具**的浏览器占着(`--user-data-dir=D:\\code\\mcp\\auto_js_reverse-main\\...`),
+    而 `available()` 只问「端口通不通」⇒ 判成"我们的浏览器在跑",采集于是被
+    **接管到别人的浏览器**上。那个浏览器里小红书一掉登录态,这条链就报
+    「窗口里没有登录态」;而真正的专用档案 `data/xhs_cdp_profile` **一次都没被
+    用过**(池子里它一直 `unknown`)—— 排查时所有人都在盯"号为什么掉登录",
+    没人看**端口属于谁**。
+
+    返回档案路径;查不到(非 Windows / 命令失败 / 没有该参数)⇒ 空串,
+    调用方**放行**(退化成旧行为 —— 别因为"查不动"就把整条链拦死)。
+    """
+    import subprocess
+    import sys
+
+    if sys.platform != "win32":
+        return ""
+    try:
+        port = int(str(url).rstrip("/").rsplit(":", 1)[-1])
+    except (ValueError, IndexError):
+        return ""
+    try:
+        out = subprocess.run(["netstat", "-ano"], capture_output=True, timeout=15,
+                             creationflags=winproc.flags())
+        text = (out.stdout or b"").decode("utf-8", "ignore")
+    except Exception:  # noqa: BLE001 - 查不到就当"不知道"
+        return ""
+    pids = {m.group(1) for line in text.splitlines()
+            if (m := re.search(rf":{port}\s.*LISTENING\s+(\d+)", line, re.I))}
+    for pid in pids:
+        try:
+            ps = f"(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\").CommandLine"
+            p = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                               capture_output=True, timeout=20,
+                               creationflags=winproc.flags())
+            cmd = (p.stdout or b"").decode("utf-8", "ignore")
+        except Exception:  # noqa: BLE001
+            continue
+        m = re.search(r"--user-data-dir=(\"[^\"]+\"|\S+)", cmd)
+        if m:
+            return m.group(1).strip('"')
+    return ""
+
+
 def ensure_running(settings=None, *, wait_s: float = 15.0) -> tuple[bool, str]:
     """CDP 不可达时**起一个**(普通 Edge + 专用档案);**已经在跑就不重复起**。返回 `(ok, 说明)`。
 
@@ -173,10 +250,12 @@ def ensure_running(settings=None, *, wait_s: float = 15.0) -> tuple[bool, str]:
         port = int(url.rstrip("/").rsplit(":", 1)[-1])
     except ValueError:
         return False, f"`xhs_cdp_url` 不像 URL:{url!r}"
-    raw = str(getattr(st, "xhs_cdp_user_data_dir", "") or "data/xhs_cdp_profile")
-    d = Path(raw)
-    if not d.is_absolute():
-        d = Path(__file__).resolve().parents[2] / d
+    d = _own_profile_dir(st)
+    #: ★ 端口被**别人的浏览器**占着时,起我们自己的只会撞端口(2026-11-28 事故)
+    owner = _cdp_owner(url)
+    if owner and _norm_profile(owner) != _norm_profile(str(d)):
+        return False, (f"CDP 端口 {url} 被**别的浏览器**占用(档案 {owner})—— "
+                       f"把 `XHS_CDP_URL` 换成空闲端口,或关掉占用者")
     d.mkdir(parents=True, exist_ok=True)
     # ★★ **进程在跑 ⇒ 绝不再起**(2026-10-16 用户报「开了好几个小红书窗口」的根因):
     #    Edge/Chrome 拿**同一个档案**再起一次**不开新实例**,而是把 URL **转发给现有窗口**
