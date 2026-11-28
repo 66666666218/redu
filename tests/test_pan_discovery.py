@@ -1544,6 +1544,34 @@ class TestSpaceBlockedSourcePush:
         assert out["space_skips"] == 1
         assert out["source_only"] == 2 and len(out["items"]) == 2, out
 
+    def test_熔断按盘隔离_百度满了不连坐迅雷(self, session, monkeypatch) -> None:
+        """★ 一个盘的读数不能替另一个盘下结论 —— 三个盘各有各的空间。"""
+        calls: list[str] = []
+        monkeypatch.setattr("app.services.douyin_leads.search_keywords",
+                            lambda s, u, t, st: ["甲"])
+        monkeypatch.setattr(pd, "already_have", lambda s, u, title: None)
+        monkeypatch.setattr(pd, "find_candidates", lambda *a, **k: [
+            {"platform": "tieba", "origin_url": "https://pan.baidu.com/s/B1",
+             "title": "百度那条", "author": "甲", "source_url": "u"},
+            {"platform": "tieba", "origin_url": "https://pan.xunlei.com/s/X1",
+             "title": "迅雷那条", "author": "乙", "source_url": "u"}])
+
+        def fake_transfer(session_, user_id, url, settings=None, snippet="", **k):
+            calls.append(url)
+            if "baidu" in url:
+                return {"status": "pending", "our_url": "", "code": "",
+                        "message": "百度盘空间不足(已用 5.02 TB / 配额 120.00 GB)"}
+            return {"status": "ok", "our_url": "https://pan.xunlei.com/s/OUR",
+                    "code": "", "message": ""}
+
+        monkeypatch.setattr(pd, "transfer_pan_url", fake_transfer)
+
+        out = pd.sync(session, 1, settings=_S())
+
+        assert len(calls) == 2, f"另一个盘不该被连坐:{calls}"
+        assert out["space_skips"] == 0
+        assert out["source_only"] == 1 and out["ok"] == 1, out
+
     def test_盘满时进items且share_url是源链_库里仍pending(self, session, monkeypatch) -> None:
         monkeypatch.setattr("app.services.douyin_leads.search_keywords",
                             lambda s, u, t, st: ["甲"])

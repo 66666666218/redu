@@ -3024,8 +3024,10 @@ def run_douyin_leads(db: Session, user_id: int, settings=None, category: str | N
                         #: 「本类词入窗」旁边有对照 —— 入窗 = 词发出去了,命中 = 真搜到了结果。
                         #: ⚠️ 浏览器兜底路没有逐词统计 ⇒ 不写,别拿 0/0 冒充"全空"。
                         + (f" 路{funnel['route_note']}" if funnel.get("route_note") else "")
+                        #: ⚠️ **只在这批行确实来自那条路时才写逐词命中** —— 协议失败后回落
+                        #: 浏览器时,`kw_*` 还是协议那一次的读数,写成最终路的命中就是张冠李戴。
                         + (f" 词命中{funnel.get('kw_hit', 0)}/{funnel['kw_total']}"
-                           if funnel.get("kw_total") else ""))
+                           if funnel.get("kw_total") and source in ("协议", "CDP") else ""))
             db.commit()
             if completed_platforms is not None and status == "success":
                 completed_platforms.add(plat)

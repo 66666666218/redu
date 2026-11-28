@@ -3546,6 +3546,9 @@ class TestResourceRoundSearchWindow:
         def search(keywords: list[str], *, session: Session, user_id: int,
                    settings: Settings, stats: dict | None = None) -> list[dict]:
             got.append(list(keywords))
+            if stats is not None:      #: 生产实现会填逐词命中,这里照抄同一个口径
+                stats["kw_total"] = len(keywords)
+                stats["kw_hit"] = len(keywords)
             return [{"snippet": "漫剧资源 https://pan.quark.cn/s/synthetic",
                      "url": "https://www.douyin.com/video/123", "keyword": keywords[0],
                      "publish_at": int(_ROUND_AT.timestamp()) - 60}]
@@ -3566,6 +3569,10 @@ class TestResourceRoundSearchWindow:
         assert run.status == "success" and f"[CDP] 类目影视 词{cdp_cap}(其中外部{n_hot})" in run.detail
         assert "[探针1 " in run.detail and "[热榜作品1 " in run.detail
         assert "本类词入窗2(资源名2 话题0) 同类可用1(发现时未满3天1) 未分类0" in run.detail
+        #: ★ 埋点(2026-11-28):取数路与逐词命中必须进运行记录 ——
+        #: 否则「本类词入窗」只能说词发出去了,不能说这条路真搜到了结果。
+        assert "路协议关→CDP" in run.detail, run.detail
+        assert f"词命中{cdp_cap}/{cdp_cap}" in run.detail, run.detail
 
     @pytest.mark.parametrize("skipped", [False, True])
     def test_正常零结果和未发起搜索分别记账(

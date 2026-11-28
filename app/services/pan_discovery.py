@@ -1294,13 +1294,15 @@ def sync(session, user_id: int, settings=None) -> dict:
     #: 因为「本窗口内已经推过」而被跳过的条数(单独计数 —— 它与"额度用完"不是一回事)
     source_only_done = 0
     #: ★★ **盘满熔断**(2026-11-28,用户口径「盘满时不再进行保存和重试,只进行采集推送」):
-    #: 一旦转存接口返回**空间不足**(一手证据),本轮**剩余候选一条都不再尝试转存** ——
+    #: 某个盘的转存接口返回**空间不足**(一手证据)后,本轮**该盘剩余候选不再尝试转存** ——
     #: 它们照样走下面的「盘满直推源链」分支,客户拿到的东西不变。
     #: ⚠️ 为什么必须熔断:配额读数在迅雷上是兜底值(`quota_ratio()` 折成 None)⇒ 闸门
     #: 看不见盘满 ⇒ 老实现会对**每条**候选打一次注定失败的转存(470 条/轮 × 每 4 小时),
     #: 每次还可能续 captcha —— 纯开销,而且一条都搬不成。
+    #: ⚠️ **按盘熔断**(键 = `_kind_of`):百度满了不该连坐夸克/迅雷 —— 三个盘各自有各自的
+    #: 空间,一个盘的读数不能替另一个盘下结论。
     #: ⚠️ 只在**空间不足**时熔断;验证码/网络/死链等其他失败继续逐条走原分支。
-    space_latched = ""
+    space_latched: dict[str, str] = {}
     space_skips = 0
     items: list[dict] = []
     for c in cands:
@@ -1339,20 +1341,24 @@ def sync(session, user_id: int, settings=None) -> dict:
             # 的「作业心跳写入失败」成批出现**;`14:19–14:23` 我手动跑 drain 时又来一批。
             # 纪律:**慢活(网络/浏览器/模拟器)一律不要在事务里做**。
             session.commit()
-            if space_latched:
-                #: 本轮已经拿到"盘满"的一手证据 ⇒ **不再逐条打转存**(纯失败开销)。
-                #: 用本轮那条真实的空间不足原因,让它走下面同一组 `_is_space_blocked` 分支 ——
+            _kind = _kind_of(c["origin_url"])
+            if _kind in space_latched:
+                #: 本轮**这个盘**已经拿到"盘满"的一手证据 ⇒ 不再逐条打转存(纯失败开销)。
+                #: 用该盘那条真实的空间不足原因,让它走下面同一组 `_is_space_blocked` 分支 ——
                 #: 直推源链、提取码、名额统计的行为**一个字都不改**。
                 space_skips += 1
-                res = {"status": "failed", "message": space_latched,
+                res = {"status": "failed", "message": space_latched[_kind],
                        "our_url": "", "code": ""}
             else:
                 #: ⚠️ 第 5 个位置参数是 **`snippet`**(百度要从这段文字里找提取码)——
                 #: 所以 `title` **必须再用关键字传一次**,否则"转存后核对"拿不到标题 = 形同没接。
                 res = transfer_pan_url(session, user_id, c["origin_url"], settings, c["title"],
                                        title=c["title"])
-                if res.get("status") != "ok" and _is_space_blocked(str(res.get("message") or "")):
-                    space_latched = str(res.get("message") or "空间不足")
+                #: ⚠️ 只给**认得出盘的**链上熔断键;`_kind_of` 为空表示不认识的落点,
+                #: 那种链本身在 `transfer_pan_url` 里就按「不认识」跳过了,不该有熔断语义。
+                if (_kind and res.get("status") != "ok"
+                        and _is_space_blocked(str(res.get("message") or ""))):
+                    space_latched[_kind] = str(res.get("message") or "空间不足")
             status, message = res["status"], res["message"]
             our, code = res["our_url"], res["code"]
             if status == "ok":
