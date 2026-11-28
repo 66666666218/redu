@@ -383,7 +383,8 @@ def _with_douyin_verdict(msg: str, session, user_id: int = 1,
 
 def _collect(platform: str, keywords: list[str], session=None,
              user_id: int = 1, pages: int = 1, *,
-             search_window: list[str] | None = None) -> tuple[list[dict], str]:
+             search_window: list[str] | None = None,
+             stats: dict | None = None) -> tuple[list[dict], str]:
     """取搜索结果 → `(记录列表, 来源标签)`。
 
     **抖音走纯协议优先**(2026-10-08),其余平台照旧走 MediaCrawler。
@@ -400,8 +401,21 @@ def _collect(platform: str, keywords: list[str], session=None,
     不说话的话,"协议挂了"就会被读成"抖音上没人在推资源" —— 本仓最忌讳的假阴性。
 
     `search_window` 只记录最终未报错的取数路收到的词，不代表它逐词都跑通。跳过不记。
+
+    ★ **`stats` 里会留下「取数路」的埋点**(2026-11-28):`route_note`
+    (`协议关`/`协议失败(kind)`/`协议弱1/8`/`CDP`/`浏览器兜底` 用 `→` 连起来),
+    以及取数路自己填的 `kw_total`/`kw_hit`。⚠️ 这些**只记账、不改变选路逻辑** ——
+    没有它,runs 里只有一个 `[CDP]`,分不清"协议关了""协议被限流""CDP 顶上了"。
     """
     cooldown = False
+    route: list[str] = []
+
+    def _done(rows: list[dict], source: str) -> tuple[list[dict], str]:
+        """统一出口:把走过的路写进 `stats`,再原样返回 `(rows, source)`。"""
+        if stats is not None:
+            stats["route_note"] = "→".join(route)
+        return rows, source
+
     #: ★ 本轮 **CDP 路**的原话(失败时才有)。它比 MediaCrawler 那句"全部无结果"精确,
     #: 回落时把它接进最终告警 —— 见 `_with_douyin_verdict`。
     cdp_verdict = ""
@@ -409,10 +423,11 @@ def _collect(platform: str, keywords: list[str], session=None,
         from config.settings import get_settings
 
         if getattr(get_settings(), "douyin_leads_use_protocol", True):
-            stats: dict = {}
-            rows, err = _try_protocol(keywords, session, stats, user_id=user_id, pages=pages)
-            total = int(stats.get("kw_total") or 0)
-            hit = int(stats.get("kw_hit") or 0)
+            #: 协议与 CDP 共用同一份埋点;没有传 stats 时给个一次性的,免得分支里再判空
+            _st: dict = stats if stats is not None else {}
+            rows, err = _try_protocol(keywords, session, _st, user_id=user_id, pages=pages)
+            total = int(_st.get("kw_total") or 0)
+            hit = int(_st.get("kw_hit") or 0)
             # ★★ **"只有少数词有结果"要当成可疑,回落浏览器**(2026-10-08 实测逼出来的)。
             # 同一套配置下实测两种极端都出现过:
             #   · 8/8 个词各 14 条(共 113 条候选)—— 正常;
@@ -426,11 +441,14 @@ def _collect(platform: str, keywords: list[str], session=None,
             if rows and not few:
                 if search_window is not None:
                     search_window.extend(keywords)
-                return rows, "协议"
+                route.append("协议")
+                return _done(rows, "协议")
             if err is not None:
+                route.append(f"协议失败({getattr(err, 'kind', '?')})")
                 logger.warning("抖音纯协议失败(kind=%s),回落浏览器:%s",
                                getattr(err, "kind", "?"), str(err)[:160])
             elif few:
+                route.append(f"协议弱{hit}/{total}")
                 logger.warning("抖音纯协议**只有 %d/%d 个词有结果**(共 %d 条)—— 形态与限流一致"
                                "(实测 8/8 与 1/8 都出现过),本轮回落浏览器",
                                hit, total, len(rows))
@@ -438,6 +456,7 @@ def _collect(platform: str, keywords: list[str], session=None,
                 # ⚠️ **"一条都没搜到"必须与"抛错"分开报**:前者可能是限流
                 #    (实测:连发会回 `status_code=0 + data:[]`,与"真没结果"形状相同),
                 #    后者是硬失败。两种都回落,但日志里得看出是哪一种。
+                route.append("协议空")
                 logger.warning("抖音纯协议**一条都没搜到**(没报错)—— 可能是限流"
                                "(见 doc/抖音纯协议-链路拆解.md §5),本轮回落浏览器")
         else:
@@ -445,6 +464,7 @@ def _collect(platform: str, keywords: list[str], session=None,
             #: 上线后按日出现(10-17/18/19 分别 20/28/25 次),而同一账号的浏览器路
             #: 同期还能一轮拿 25~30 条 ⇒ 触发风控的是**协议那种机器人形状的请求**。
             #: 关掉它 = 回到「真人形状的本地 Edge + 已登录档案」,与小红书同一条路。
+            route.append("协议关")
             logger.info("抖音:纯协议已关闭(DOUYIN_LEADS_USE_PROTOCOL=false)—— 走本地浏览器")
         #: 协议层刚撞过 `verify_check` 时,浏览器兜底**不能每轮都打**(探针也会加重风控)。
         from app.services import douyin_protocol_source as dps
@@ -467,7 +487,8 @@ def _collect(platform: str, keywords: list[str], session=None,
 
                 _n = max(1, int(getattr(_s, "douyin_cdp_max_keywords", 8) or 8))
                 window = keywords[:_n]
-                _rows = _dcdp.search(window, session=session, user_id=user_id, settings=_s)
+                _rows = _dcdp.search(window, session=session, user_id=user_id, settings=_s,
+                                     stats=stats)
                 if _rows:
                     if search_window is not None:
                         search_window.extend(window)
@@ -478,18 +499,21 @@ def _collect(platform: str, keywords: list[str], session=None,
                         logger.info("抖音CDP:本轮只搜了 %d/%d 个词(上限 "
                                     "DOUYIN_CDP_MAX_KEYWORDS=%d)—— 其余 %d 个**本轮没搜**,"
                                     "不是没结果", _n, len(keywords), _n, len(keywords) - _n)
-                    return _rows, "CDP"
+                    route.append("CDP")
+                    return _done(_rows, "CDP")
             except Exception as exc:  # noqa: BLE001 - 回落是设计的一部分
                 #: ★ **把 CDP 的原话留下来**(2026-10-28):它是回落之后唯一还说真话的地方 ——
                 #: 「验证码中间页」比 MediaCrawler 那句"全部无结果"精确得多(后者自己都
                 #: 承认"两种原因、别先猜一个")。见 `_with_douyin_verdict`。
                 cdp_verdict = str(exc)[:200]
+                route.append(f"CDP失败({type(exc).__name__})")
                 logger.warning("抖音CDP 路失败(%s),回落 MediaCrawler:%s",
                                type(exc).__name__, cdp_verdict[:180])
     if cooldown and not _browser_probe_allowed(session, user_id):
         logger.warning("抖音验证冷却中且本窗口已探过浏览器 —— 本轮不再打"
                        "(动作是等;反复探针只会延长风控)")
-        return [], "浏览器兜底(冷却内已探过,跳过)"
+        route.append("冷却跳过")
+        return _done([], "浏览器兜底(冷却内已探过,跳过)")
     from app.services import mediacrawler_source as mc
 
     #: ★ 浏览器兜底也带**协议路的登录 cookie**(2026-10-19):档案登录是第一条退路,
@@ -528,7 +552,8 @@ def _collect(platform: str, keywords: list[str], session=None,
             logger.warning("抖音浏览器取数成功,但重导凭据失败:%s", str(exc)[:120])
     if search_window is not None:
         search_window.extend(keywords)
-    return rows, "浏览器兜底"
+    route.append("浏览器兜底")
+    return _done(rows, "浏览器兜底")
 
 
 def collect_leads(keywords: list[str], limit: int = 30, platform: str = "douyin",
@@ -561,7 +586,7 @@ def collect_leads(keywords: list[str], limit: int = 30, platform: str = "douyin"
     n_old = n_notime = n_cont = 0
     window: list[str] | None = [] if stats is not None else None
     rows, source = _collect(platform, keywords, session, user_id=user_id, pages=pages,
-                            search_window=window)
+                            search_window=window, stats=stats)
     if stats is not None:
         stats["search_window"] = window
     logger.info("线索取数:平台=%s 来源=%s 原始 %d 条", platform, source or "-", len(rows))
@@ -1606,7 +1631,7 @@ def _search_keyword_plan(session: Session, user_id: int, top: int, settings: Set
 
 
 def _enqueue_later(session, user_id: int, info: dict, mark: str,
-                   publish_at: int = 0) -> None:
+                   publish_at: int = 0, metrics: dict | None = None) -> None:
     """**把"能搬、但现在搬不了"的链入队**,等条件好了再重试(2026-10-04 加)。
 
     用户口径:"**可以加上**"(指给"未搬"加待办队列)。场景正是他自己遇到的:
@@ -1638,18 +1663,25 @@ def _enqueue_later(session, user_id: int, info: dict, mark: str,
     from app.utils.timeutil import to_dt
 
     _pub = to_dt(publish_at)
+    #: ★ **互动指标一起入队**(2026-11-26):这一行迟早会被 `pan_discovery` 的
+    #: **盘满直推**拿去发卡片,而卡片上的「对标数据」读的就是这一列。
+    from app.services.pan_discovery import metrics_json
+
+    _mj = metrics_json(metrics)
     row = session.scalar(select(DiscoveredPanLink).where(
         DiscoveredPanLink.user_id == user_id, DiscoveredPanLink.origin_url == url))
     if row is None:
         session.add(DiscoveredPanLink(
             user_id=user_id, platform="douyin", origin_url=url[:500],
-            title=str(mark)[:255], status="pending", publish_at=_pub,
+            title=str(mark)[:255], status="pending", publish_at=_pub, metrics=_mj,
             message="抖音线索:转存未成(盘满/超额度),等下一轮重试"))
     elif row.status not in ("ok", "skipped"):
         row.status = "pending"
         row.message = "抖音线索:转存未成,等下一轮重试"
         if _pub and not row.publish_at:      #: 只往有值的方向写(不知道别拿空值盖掉已知的)
             row.publish_at = _pub
+        if _mj:                              #: 同上:本轮抓到的指标覆盖旧的,空的洗不掉有值的
+            row.metrics = _mj
     session.commit()
 
 
@@ -1689,8 +1721,19 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
     **两道闸门**:① 每轮最多真转存 `douyin_leads_transfer_limit` 条(转存慢且占盘),
     超出的**只解析**、把结果写进卡片由人决定;② 已经转存过的词(`xunlei_resources` 里
     `parent_name="口令解析"` 的那些)直接跳过,不重复搬。
+
+    ★★ **盘满后的口径(2026-11-28,用户逐字)**:「盘满时不再进行保存和重试,只进行
+    采集推送」——
+      · **不再保存**:不再调 `kk.ingest` 去转存(那一步注定失败,还要吃一次 captcha);
+      · **不再重试**:不再 `_enqueue_later` 把条目塞进 `discovered_pan_links` 等下一轮;
+      · **只采集推送**:口令照解(`kk.resolve`,只为拿到源链和提取码),卡片照推源链。
+    「盘满」的判据有两层,第二层才是**一手证据**:① 配额闸门(读数可信时);
+    ② 转存接口自己返回的空间不足(`xt.is_space_error`)—— 后者命中**本轮立即熔断**,
+    剩下的分享链一条都不再打转存。⚠️ 盘满不是终态,但**恢复后靠下一轮重新搜到**,
+    不靠积压重试(积压 460 条、连续 4 天零转存,重试已是纯开销)。
     """
     from app.services import xunlei_kouling as kk
+    from app.services import xunlei_transfer as _xt
     #: ⚠️ 卡片的原链与入队都要拼提取码(2026-11-17 修的真 bug,见 `_enqueue_later`)。
     from app.services.xunlei_kouling import share_url_with_pwd
 
@@ -1717,8 +1760,6 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
         from app.services import xunlei_group as _xg
 
         try:
-            from app.services import xunlei_transfer as _xt
-
             _info = _xt.quota_info()
             #: ★★ 2026-11-20:`limit` 是兜底值时**不许判满**(`quota_ratio` 已把它折成
             #: None,这里显式写出来是为了让"为什么放行"可读)。此前正是这一步让
@@ -1730,8 +1771,9 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
         _limit = _xg._gate_limit(settings)
         if _ratio is not None and float(_ratio) >= _limit:
             budget = 0
-            disk_full_reason = f"盘快满了(已用 {float(_ratio) * 100:.0f}%,阈值 {_limit * 100:.0f}%)"
-            logger.warning("抖音口令:盘满(%.0f%%),本轮**不转存只推送** —— "
+            disk_full_reason = (f"盘快满了(已用 {float(_ratio) * 100:.0f}%,"
+                                f"阈值 {_limit * 100:.0f}%),本轮不转存、不入队")
+            logger.warning("抖音口令:盘满(%.0f%%),本轮**不转存不入队只推送** —— "
                            "线索与作者原链照旧出卡", float(_ratio) * 100)
     already = kk.known_koulings(session, user_id)
     # ⚠️ 光有"搬过没"不够,还要"搬成了哪条"(见 `known_kouling_links` 的 docstring)
@@ -1806,9 +1848,13 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
                              "newly_joined": bool(res.get("newly_joined"))}
             continue
         if budget <= 0:
-            # ⚠️ **超额度也要入队**:不然它只是"这轮没搬",下一轮同样不会自动补
-            _enqueue_later(session, user_id, info, mark,
-                           publish_at=int(ld.get("publish_at") or 0))
+            #: ★ 盘满**不入队**(2026-11-28 用户口径「不再保存和重试」)—— 积压 460 条、
+            #: 连续 4 天零转存,再排队只是把注定失败的尝试推迟到下一轮。
+            #: ⚠️ 超额度(**没盘满**)仍入队:那种"下轮再来"是真会成功的。
+            if not disk_full_reason:
+                _enqueue_later(session, user_id, info, mark,
+                               publish_at=int(ld.get("publish_at") or 0),
+                               metrics=ld.get("metrics"))
             #: ⚠️ **卡片上的原链也要带提取码**(2026-11-17):`share_url` 不含 `?pwd=`,
             #: 客户点开只会看到「请输入提取码」而没有码 —— 与入队那一处**同一个病**
             #: (见 `_enqueue_later` 的 docstring)。`pass_code` 实测 12/12 都有。
@@ -1830,10 +1876,29 @@ def apply_kouling(leads: list[dict], session, user_id: int, settings) -> list[di
             ld["kouling"] = {"kind": "error", "message": str(exc)[:80]}
             down.append(str(exc)[:60])
             continue
+        #: ★★ **一手证据:转存接口自己说"空间不足"** ⇒ 本轮熔断(2026-11-28)。
+        #: 配额读数在迅雷上是兜底值(`quota_ratio()` 折成 None),所以盘满**只有这一步
+        #: 才能看见** —— 看不见的代价是:每轮最多 8 次注定失败的转存,全部落进汇总的
+        #: 「其他」,读起来像"说不清的失败"。熔断后剩余的分享链**一条都不再打转存**,
+        #: 只解口令、推源链。`failed` 的其他成因(验证码/网络)不熔断,仍入队重试。
+        if res.get("status") == "failed" and _xt.is_space_error(str(res.get("message") or "")):
+            disk_full_reason = (f"盘满(转存返回空间不足:{str(res.get('message') or '')[:80]})"
+                                f",本轮不转存、不入队")
+            budget = 0
+            res = {**res, "status": "disk_full", "message": disk_full_reason}
+            logger.warning("抖音口令:转存返回空间不足,本轮熔断不再转存 —— %s",
+                           disk_full_reason)
+        elif res.get("status") == "disk_full" and not disk_full_reason:
+            #: 闸门(可信读数)自己判的盘满:后果与上一支一样 —— 本轮剩下的别再试
+            disk_full_reason = f"盘满({str(res.get('message') or '转存闸门')[:80]}),本轮不转存、不入队"
+            budget = 0
+            res = {**res, "message": disk_full_reason}
         if res.get("status") in ("disk_full", "failed"):
-            # **盘满 / 单次失败** → 入队,等条件好了由 `pan_discovery` 的存量待办优先重试
-            _enqueue_later(session, user_id, info, mark,
-                           publish_at=int(ld.get("publish_at") or 0))
+            #: 盘满 → 不入队(用户口径);**非盘满的失败**仍入队,等下轮重试
+            if res.get("status") == "failed":
+                _enqueue_later(session, user_id, info, mark,
+                               publish_at=int(ld.get("publish_at") or 0),
+                               metrics=ld.get("metrics"))
         ld["kouling"] = {"kind": "share", "status": res.get("status"),
                          "our_url": res.get("our_url") or "",
                          #: 同上:原链带码,否则客户点开只能看到一个空提取框。
@@ -2615,10 +2680,24 @@ def _kouling_summary(leads: list[dict]) -> str:
     #: ⚠️ 顺序:**先判新搬再判其他**,否则带 `our_url` 的会被重复计入两档(与 `n_moved` 同一判据)。
     _named = n_moved + n_already + n_over + n_disk
     n_other = len(shares) - _named
+    #: ★★ **「其他」必须拆开**(2026-11-28):实测 08:14 那轮 `其他8` 正好等于转存额度,
+    #: 按代码路径那是**8 次空间不足的失败**,却因为混在一个「其他」里,读起来像
+    #: "说不清的失败"。三档含义完全不同、处置也不同:
+    #:   · `failed`   → 非盘满失败(验证码/网络),下一轮会重试(仍入队);
+    #:   · `skipped`  → 自己的分享 / 分享已死,重试无意义(终态);
+    #:   · `ok` 无我方链 → **三盘互通复用了已有链**,资源是好的,只是链不在本轮返回值里。
+    n_failed = sum(1 for k in shares if k.get("status") == "failed")
+    n_skip = sum(1 for k in shares if k.get("status") == "skipped")
+    n_reuse = sum(1 for k in shares
+                  if k.get("status") == "ok" and not k.get("our_url"))
+    _rest = max(0, n_other - n_failed - n_skip - n_reuse)
     return (f"新群{n_new}/群{n_group}/分享链{len(shares)}"
             f"(新搬{n_moved} 已搬过{n_already} 超额度{n_over}"
             + (f" 盘满{n_disk}" if n_disk else "")
-            + (f" 其他{n_other}" if n_other else "") + ")")
+            + (f" 失败{n_failed}" if n_failed else "")
+            + (f" 跳过{n_skip}" if n_skip else "")
+            + (f" 复用{n_reuse}" if n_reuse else "")
+            + (f" 其他{_rest}" if _rest else "") + ")")
 
 
 def run_douyin_leads(db: Session, user_id: int, settings=None, category: str | None = None,
@@ -2939,7 +3018,14 @@ def run_douyin_leads(db: Session, user_id: int, settings=None, category: str | N
                         #: ★ 漏斗(2026-10-31):原始→时间挡→无时间→口令→无链,一眼看出哪道闸在掉量。
                         f"漏斗 原始{funnel.get('raw', 0)} 挡{funnel.get('old', 0)}"
                         f" 无时{funnel.get('notime', 0)} 续{funnel.get('cont', 0)} 口令{funnel.get('kept', 0)}"
-                        f" 无链{n_panless} 群令{n_grouponly} 无迹象{n_nosignal}{coverage}")
+                        f" 无链{n_panless} 群令{n_grouponly} 无迹象{n_nosignal}{coverage}"
+                        #: ★ **取数路与逐词命中**(2026-11-28):原来只有一个 `[CDP]`,
+                        #: 分不清"协议关了""协议被限流""CDP 顶上了"。`词命中` 让
+                        #: 「本类词入窗」旁边有对照 —— 入窗 = 词发出去了,命中 = 真搜到了结果。
+                        #: ⚠️ 浏览器兜底路没有逐词统计 ⇒ 不写,别拿 0/0 冒充"全空"。
+                        + (f" 路{funnel['route_note']}" if funnel.get("route_note") else "")
+                        + (f" 词命中{funnel.get('kw_hit', 0)}/{funnel['kw_total']}"
+                           if funnel.get("kw_total") else ""))
             db.commit()
             if completed_platforms is not None and status == "success":
                 completed_platforms.add(plat)

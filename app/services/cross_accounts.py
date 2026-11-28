@@ -813,13 +813,19 @@ def _queue_pan_link(session: Session, user_id: int, platform: str, hit: dict) ->
         DiscoveredPanLink.origin_url == url).limit(1))
     if exists:
         return False
+    #: ★ **指标一起入队**(2026-11-26):这一行迟早会被 `pan_discovery` 的
+    #: **盘满直推**拿去发卡片,而卡片上的「对标数据」读的就是这一列。
+    #: 值本来就在 `hit["metrics"]` 里(搜索响应白给的)—— 不写等于自己把它丢掉。
+    from app.services.pan_discovery import metrics_json
+
     session.add(DiscoveredPanLink(
         user_id=user_id, platform=platform, origin_url=url,
         # 标题用**内容摘要**(里面就是资源名),而不是账号名 —— `already_have` 是按标题里
         # 抽出的资源名去库里查的,摘要才匹配得上。
         title=_strip_tags(str(hit.get("snippet") or "")).strip()[:255],
         author=str(hit.get("name") or "")[:64],
-        source_url=str(hit.get("url") or "")[:500], status="pending"))
+        source_url=str(hit.get("url") or "")[:500], status="pending",
+        metrics=metrics_json(hit.get("metrics"))))
     session.flush()
     return True
 

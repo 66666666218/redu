@@ -464,7 +464,9 @@ ADDITIONS: dict[str, list[str]] = {
     "runs": ["retry_count INTEGER DEFAULT 0"],
     # **原帖发布时间**(2026-10-16):贴吧那条早就抓到它了、而表里没这列 ⇒ 抓到了又丢掉。
     # 没有它就没法回答"这条发现的链有多新"(`found_at` 只是"我们发现的时刻")。
-    "discovered_pan_links": ["publish_at DATETIME"],
+    # **互动指标**(2026-11-26):积压/直推行是从这张表重建的 ⇒ 没有它,盘满直推的卡片
+    # 「对标数据」列恒空(实测 11-26 那批 7 条里 6 条为空)。存量行空串 = 还没重新搜到过。
+    "discovered_pan_links": ["publish_at DATETIME", "metrics VARCHAR(255) DEFAULT ''"],
     # 作业**注册时刻**(2026-10-05):原来只在"执行后"才有心跳行,于是"注册了但还没到第一次
     # 执行点"的作业对账时无法与"真·从没跑过"区分(chain_report 当天就被误报过一次)。
     "job_heartbeats": ["first_seen_at DATETIME",

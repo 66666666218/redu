@@ -339,10 +339,16 @@ def _crawl_platform(plat: str, names: list[str], session=None) -> list[dict]:
         return out
     if plat == "tieba":
         # ★ **纯协议优先**(2026-10-08):`aiotieba.search_global`,**匿名**即可,不开浏览器。
-        # 与 `pan_discovery` 是同一份判据,区别在于**这里不要详情**:
-        # 这条路只关心"这个名字在贴吧出现了几次"(读 `keyword`/`snippet`),
-        # **不读 `pan_link`** ⇒ 别为它多花 N 次取首楼的请求。
         # 另:`rn` 调大到 50 —— 它的判据是**条数**,拿得越多越准。
+        #
+        # ★★ **2026-11-26 起要详情了**(原来是 `with_detail=False`)。取舍变了:
+        # 那时这条路只读 `keyword`/`snippet`,详情唯一的产出是**盘链**,而它不读盘链 ⇒
+        # 多花的 N 次请求纯属浪费。现在详情里**顺带有全帖指标**(`view_num`/`thread_agree`/
+        # `share_num`/`collect_num`,与首楼全文同一次 `get_posts` 返回 ⇒ 见 `tieba_metrics`),
+        # 而卡片上的「对标数据」正是要它 —— 打开后贴吧这一列从只有 `💬` 变成也带 `👁`。
+        # 代价:每轮最多 `tieba_detail_limit`(默认 30)次**匿名**请求,×6 轮/天。
+        # ⚠️ 封顶**必须保留**(`detail_limit` 走 settings,别在这里改成不限)——
+        # 首楼详情是**每帖一次串行请求**,不限的话一轮就上百次。
         from app.services import tieba_search
         from app.services.mediacrawler_source import MediaCrawlerError
 
@@ -350,7 +356,7 @@ def _crawl_platform(plat: str, names: list[str], session=None) -> list[dict]:
 
         if getattr(get_settings(), "tieba_prefer_protocol", True):
             try:
-                return tieba_search.search(names, rn=50, with_detail=False)
+                return tieba_search.search(names, rn=50, with_detail=True)
             except tieba_search.TiebaSearchError as exc:
                 logger.warning("贴吧纯协议失败(%s),回落 MediaCrawler:%s",
                                exc.kind, str(exc)[:140])

@@ -1513,6 +1513,37 @@ class TestSpaceBlockedSourcePush:
         base.update(kw)
         return type("S", (), base)()
 
+    def test_一次空间不足后本轮不再逐条打转存(self, session, monkeypatch) -> None:
+        """★★ **盘满熔断**(2026-11-28,用户口径「盘满时不再进行保存和重试,只进行采集推送」)。
+
+        配额读数在迅雷上是兜底值 ⇒ 闸门看不见盘满 ⇒ 老实现会对**每条**候选打一次
+        注定失败的转存(实测每 4 小时一轮、积压 460 条)。现在:第一条返回
+        「空间不足」后,本轮剩余候选**不再打转存**,直接按源链直推。
+        判据只认空间不足 —— 验证码/死链等失败仍在别的用例里走原分支。
+        """
+        calls: list[str] = []
+        monkeypatch.setattr("app.services.douyin_leads.search_keywords",
+                            lambda s, u, t, st: ["甲"])
+        monkeypatch.setattr(pd, "already_have", lambda s, u, title: None)
+        monkeypatch.setattr(pd, "find_candidates", lambda *a, **k: [
+            {"platform": "tieba", "origin_url": "https://pan.quark.cn/s/SPACE1",
+             "title": "第一条", "author": "甲", "source_url": "u"},
+            {"platform": "tieba", "origin_url": "https://pan.quark.cn/s/SPACE2",
+             "title": "第二条", "author": "乙", "source_url": "u"}])
+
+        def fake_transfer(*a, **k):
+            calls.append(str(a[2]) if len(a) > 2 else "")
+            return {"status": "pending", "our_url": "", "code": "",
+                    "message": "夸克盘空间不足(夸克2 已用 163.8%)"}
+
+        monkeypatch.setattr(pd, "transfer_pan_url", fake_transfer)
+
+        out = pd.sync(session, 1, settings=_S())
+
+        assert len(calls) == 1, f"熔断后不该逐条再试,实际打了 {len(calls)} 次"
+        assert out["space_skips"] == 1
+        assert out["source_only"] == 2 and len(out["items"]) == 2, out
+
     def test_盘满时进items且share_url是源链_库里仍pending(self, session, monkeypatch) -> None:
         monkeypatch.setattr("app.services.douyin_leads.search_keywords",
                             lambda s, u, t, st: ["甲"])
@@ -1935,3 +1966,99 @@ def test_push_items_全部已转存时保持原文案(monkeypatch) -> None:
     assert "个资源,已转存成我方分享链" in txt
     assert "我方分享链" in txt
     assert "源链,未转存" not in txt
+
+
+class TestBacklogMetrics:
+    """★★ **积压行必须带着互动指标**(2026-11-26)。
+
+    **病**:盘满直推的卡片读的是**候选对象**上的 `metrics`,而存量待办是从
+    `discovered_pan_links` **重建**出来的 —— 那张表此前**没有这一列**。
+    实测 2026-11-26 09:06 那批直推的 7 行里 **6 行**「对标数据」为空,
+    而它们的值在**发现那一轮**就已经付过代价拿到了。
+    """
+
+    def test_两个方向的过滤是一对(self) -> None:
+        """读写同一套过滤:0/负数/非数字都不算数,空 → 空串(不是 `{}`)。"""
+        assert pd.metrics_json({"liked_count": 17, "view_count": 0, "x": -3}) \
+            == '{"liked_count": 17}'
+        assert pd.metrics_of('{"liked_count": 17, "view_count": 0}') \
+            == {"liked_count": 17}
+        #: 空输入两个方向都回到「没有」—— 空串与 `{}` 在库里同形是有意的:
+        #: 「还没搜到过」与「搜到了但没指标」的处置完全一样(都不许往卡片填 0)。
+        assert pd.metrics_json({}) == ""
+        assert pd.metrics_json(None) == ""
+        assert pd.metrics_of("") == {}
+        assert pd.metrics_of("不是 JSON") == {}
+
+    def test_直推行带着首次发现时的指标(self, session, monkeypatch) -> None:
+        """存量待办本轮**搜不到**也要有指标 —— 这是积压的本态。"""
+        session.add(DiscoveredPanLink(
+            user_id=1, platform="tieba", origin_url="https://pan.baidu.com/s/BK1",
+            title="某剧", author="甲", status="pending",
+            metrics='{"liked_count": 42, "view_count": 960}'))
+        session.commit()
+        monkeypatch.setattr("app.services.douyin_leads.search_keywords",
+                            lambda s, u, t, st: ["甲"])
+        monkeypatch.setattr(pd, "already_have", lambda s, u, title: None)
+        monkeypatch.setattr(pd, "find_candidates", lambda *a, **k: [])
+        monkeypatch.setattr(pd, "transfer_pan_url", lambda *a, **k: {
+            "status": "pending", "our_url": "", "code": "",
+            "message": "百度盘空间不足(已用 5 TB / 配额 0)"})
+
+        out = pd.sync(session, 1, settings=_S())
+
+        assert len(out["items"]) == 1, out["items"]
+        assert out["items"][0]["metrics"] == {"liked_count": 42, "view_count": 960}
+
+    def test_本轮又搜到就用新读数_但排序不动(self, session, monkeypatch) -> None:
+        """库里是三个月前的读数,这轮搜到了新的 ⇒ 卡片要用新的,位置还在积压那头。"""
+        session.add(DiscoveredPanLink(
+            user_id=1, platform="tieba", origin_url="https://pan.baidu.com/s/BK2",
+            title="某剧", author="甲", status="pending",
+            metrics='{"liked_count": 1}'))
+        session.commit()
+        monkeypatch.setattr("app.services.douyin_leads.search_keywords",
+                            lambda s, u, t, st: ["甲"])
+        monkeypatch.setattr(pd, "already_have", lambda s, u, title: None)
+        monkeypatch.setattr(pd, "find_candidates", lambda *a, **k: [
+            {"platform": "tieba", "origin_url": "https://pan.baidu.com/s/BK2",
+             "title": "某剧", "author": "甲", "source_url": "u",
+             "metrics": {"liked_count": 900}},
+            {"platform": "tieba", "origin_url": "https://pan.baidu.com/s/NEW3",
+             "title": "新剧", "author": "乙", "source_url": "u",
+             "metrics": {"liked_count": 300, "comment_count": 12}}])
+        monkeypatch.setattr(pd, "transfer_pan_url", lambda *a, **k: {
+            "status": "pending", "our_url": "", "code": "",
+            "message": "百度盘空间不足(已用 5 TB / 配额 0)"})
+
+        out = pd.sync(session, 1, settings=_S())
+
+        #: 积压那条排在前面(存量优先),但指标已经是本轮的读数
+        assert out["items"][0]["share_url"] == "https://pan.baidu.com/s/BK2"
+        assert out["items"][0]["metrics"] == {"liked_count": 900}
+        #: 新发现的指标也要落库 —— 下一轮它就是积压,靠这一列活着
+        new_row = session.scalars(select(DiscoveredPanLink).where(
+            DiscoveredPanLink.origin_url == "https://pan.baidu.com/s/NEW3")).one()
+        assert new_row.metrics == '{"liked_count": 300, "comment_count": 12}'
+
+    def test_空指标不许把库里的旧读数洗掉(self, session, monkeypatch) -> None:
+        """本轮某个源没给指标不该清空已知值 —— 与 `publish_at` 同一条纪律。"""
+        session.add(DiscoveredPanLink(
+            user_id=1, platform="tieba", origin_url="https://pan.baidu.com/s/BK4",
+            title="某剧", author="甲", status="pending",
+            metrics='{"liked_count": 7}'))
+        session.commit()
+        monkeypatch.setattr("app.services.douyin_leads.search_keywords",
+                            lambda s, u, t, st: ["甲"])
+        monkeypatch.setattr(pd, "already_have", lambda s, u, title: None)
+        monkeypatch.setattr(pd, "find_candidates", lambda *a, **k: [
+            {"platform": "tieba", "origin_url": "https://pan.baidu.com/s/BK4",
+             "title": "某剧", "author": "甲", "source_url": "u"}])
+        monkeypatch.setattr(pd, "transfer_pan_url", lambda *a, **k: {
+            "status": "failed", "our_url": "", "code": "", "message": "转存失败:其他"})
+
+        pd.sync(session, 1, settings=_S())
+
+        row = session.scalars(select(DiscoveredPanLink).where(
+            DiscoveredPanLink.origin_url == "https://pan.baidu.com/s/BK4")).one()
+        assert row.metrics == '{"liked_count": 7}'

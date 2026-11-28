@@ -237,7 +237,7 @@ def test_隔离_换新档案仍被挡_才记冷却(monkeypatch):
     """判据是"**换全新档案也没用**"这个事实,不是"又失败了"。"""
     state = {"n": 0}
 
-    def fake_round(kws, cookies, settings, pre_up):
+    def fake_round(kws, cookies, settings, pre_up, stats=None):
         state["n"] += 1
         raise dc.DouyinCdpError("验证码中间页", profile_suspect=True)
 
@@ -261,7 +261,7 @@ def test_隔离_换新档案仍被挡_才记冷却(monkeypatch):
 def test_隔离后重试成功就返回(monkeypatch):
     calls = []
 
-    def fake_round(kws, cookies, settings, pre_up):
+    def fake_round(kws, cookies, settings, pre_up, stats=None):
         calls.append(pre_up)
         if len(calls) == 1:
             raise dc.DouyinCdpError("验证码中间页", profile_suspect=True)

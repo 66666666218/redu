@@ -496,13 +496,23 @@ def _warmup(page) -> None:
         logger.debug("抖音CDP:首页预热失败(继续直接搜索)", exc_info=True)
 
 
-def _one_round(kws: list[str], cookies: list[dict], settings, pre_up: bool) -> list[dict]:
-    """在**当前**这个浏览器里跑完一轮关键词。任何异常原样抛出,收尾由 finally 负责。"""
+def _one_round(kws: list[str], cookies: list[dict], settings, pre_up: bool,
+               stats: dict | None = None) -> list[dict]:
+    """在**当前**这个浏览器里跑完一轮关键词。任何异常原样抛出,收尾由 finally 负责。
+
+    `stats` 传字典时填 `kw_total` / `kw_hit`(发出去几个词、其中几个**搜到了结果**)
+    —— 与纯协议同口径。⚠️ 按**去重前**的原始行计数:同一个视频被两个词命中,
+    两个词都算「有结果」;否则后一个词会被前面的去重吞成"没搜到"。
+    """
     from playwright.sync_api import sync_playwright
 
     gap = between_kw_ms(settings) / 1000.0
     out: list[dict] = []
     seen: set[str] = set()
+    if stats is not None:
+        stats["kw_total"] = len(kws)
+        #: 逐次重置:档案被标记时 `search` 会换空档案重跑一轮,累计会把两次相加
+        stats["kw_hit"] = 0
     with sync_playwright() as p:
         br = p.chromium.connect_over_cdp(endpoint(settings))
         ctx = br.contexts[0] if br.contexts else br.new_context()
@@ -529,7 +539,10 @@ def _one_round(kws: list[str], cookies: list[dict], settings, pre_up: bool) -> l
                 if last.get("verify"):
                     raise DouyinCdpError(
                         "抖音要求**过验证**(页面出现安全验证/滑块)—— 本轮停手,别再打")
-                for r in _rows_of(last, kw):
+                kw_rows = _rows_of(last, kw)
+                if kw_rows and stats is not None:
+                    stats["kw_hit"] = int(stats.get("kw_hit") or 0) + 1
+                for r in kw_rows:
                     if r["uid"] in seen:
                         continue
                     seen.add(r["uid"])
@@ -550,7 +563,7 @@ def _one_round(kws: list[str], cookies: list[dict], settings, pre_up: bool) -> l
 
 
 def search(keywords: list[str], *, session=None, user_id: int = 1,
-           settings=None) -> list[dict]:
+           settings=None, stats: dict | None = None) -> list[dict]:
     """按关键词逐个开搜索页读结果。**一个词都没读到就抛 `DouyinCdpError`。**
 
     ⚠️ 抛错而不是返回空列表 —— 与 `mediacrawler_source.crawl` 同一条纪律:
@@ -580,7 +593,7 @@ def search(keywords: list[str], *, session=None, user_id: int = 1,
         cookies = _cookies_of(session, user_id)
 
         try:
-            out = _one_round(kws, cookies, settings, pre_up)
+            out = _one_round(kws, cookies, settings, pre_up, stats=stats)
         except DouyinCdpError as exc:
             if not exc.profile_suspect:
                 raise
@@ -602,7 +615,7 @@ def search(keywords: list[str], *, session=None, user_id: int = 1,
             if not ok:
                 raise DouyinCdpError(f"{exc}\n换空档案重试时起不来:{why}") from exc
             try:
-                out = _one_round(kws, cookies, settings, pre_up=False)
+                out = _one_round(kws, cookies, settings, pre_up=False, stats=stats)
             except DouyinCdpError as exc2:
                 if exc2.profile_suspect:
                     _mark_quarantine_failed(session, user_id)

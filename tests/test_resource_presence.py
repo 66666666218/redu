@@ -1010,3 +1010,27 @@ def test_没配群的平台也要留痕() -> None:
     rp.push_items([{"name": "甲", "platform": "weibo", "label": "微博", "count": 1,
                     "samples": [], "sample_urls": [], "link": {}}], _S4(), detail=detail)
     assert detail == {"weibo": "无群"}, detail
+
+
+def test_贴吧要取详情_否则对标数据只剩回复数(session, monkeypatch) -> None:
+    """★★ **贴吧 presence 必须带 `with_detail`**(2026-11-26)。
+
+    全帖指标(`view_num`/`thread_agree`/`share_num`/`collect_num`)与首楼全文是
+    **同一次 `get_posts`** 返回的(见 `tieba_metrics._detail_of`)⇒ 带详情 = 白拿;
+    不带详情的年代,这一列只有一个 `💬`(实测 50 条里 46 条只有回复数)。
+    """
+    from app.services import tieba_search
+
+    seen: dict = {}
+
+    def _search(names, **kw):
+        seen.update(kw)
+        seen["names"] = names
+        return []
+
+    monkeypatch.setattr(tieba_search, "search", _search)
+    rows = rp._crawl_platform("tieba", ["甲"])
+    assert rows == []
+    assert seen.get("with_detail") is True, f"没带详情,指标拿不到:{seen}"
+    #: `rn` 仍要 50 —— 这条路的判据是**条数**,拿得越多越准
+    assert seen.get("rn") == 50, seen

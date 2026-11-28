@@ -1023,6 +1023,13 @@ class DiscoveredPanLink(Base):
     #: "**我们发现它的时刻**"(热榜那条纪律:抓到的时刻 ≠ 内容发布的时刻,老帖永远显示"刚刚")。
     publish_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     pass_code: Mapped[str] = mapped_column(String(32), default="")
+    #: ★★ **发现时的互动指标**(2026-11-26):JSON,形如 `{"liked_count": 17, "view_count": 96}`。
+    #: 为什么必须存:这条链搬不动时走「**盘满直推源链**」,而卡片上的「对标数据」列读的是
+    #: **本轮候选对象**的 metrics —— 积压行是从**这张表**重建出来的,表里没有它就等于
+    #: **每一条直推的卡都缺对标数据**(实测 11-26 09:06 那批 7 条里 6 条为空)。
+    #: ⚠️ 存的是**最后一次搜到它时**的值(每次搜到都刷新);搬不动期间不会更新 ——
+    #: 卡片显示的是「我们发现它时的热度」,不是「现在」。
+    metrics: Mapped[str] = mapped_column(String(255), default="")
     found_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 

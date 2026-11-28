@@ -319,8 +319,13 @@ class TestDiskFullBeforeBudget:
         assert all("pwd=ab12" in x["kouling"]["share_url"] for x in out)
         assert all("盘快满了" in x["kouling"]["message"] for x in out)
 
-    def test_盘满也要入队等清理后重搬(self, session, monkeypatch) -> None:
-        """盘满**不是终态**:清理完要能自动重搬 ⇒ 必须进 `discovered_pan_links` 的待办。"""
+    def test_盘满不再入队只推源链(self, session, monkeypatch) -> None:
+        """★★ **盘满不入队**(2026-11-28 用户口径「盘满时不再进行保存和重试,只进行采集推送」)。
+
+        旧契约是"盘满也要入队,等清理后重搬"。实测代价:积压 460 条、连续 4 天零转存,
+        而且转存放在 `pending` 里每轮都被重新试一次 —— 全是注定失败的开销。
+        现在的契约:盘满 ⇒ **不转存、不入队**,卡片照推源链(采集与推送不受影响)。
+        """
         from app.db.models import DiscoveredPanLink
         from app.services import xunlei_transfer as xt
 
@@ -336,11 +341,63 @@ class TestDiskFullBeforeBudget:
 
         monkeypatch.setattr(kk, "ingest", _boom)
 
-        dl.apply_kouling(_leads("甲"), session, 1, self._S())
+        out = dl.apply_kouling(_leads("甲"), session, 1, self._S())
         session.commit()
-        rows = session.query(DiscoveredPanLink).all()
-        assert len(rows) == 1 and rows[0].status == "pending"
-        assert rows[0].origin_url.endswith("?pwd=p537")
+        assert session.query(DiscoveredPanLink).count() == 0, "盘满不该再攒积压"
+        assert out[0]["kouling"]["status"] == "disk_full"
+        assert "不转存、不入队" in out[0]["kouling"]["message"]
+        # 卡片照旧能推:原链带提取码
+        assert "pwd=p537" in out[0]["kouling"]["share_url"]
+
+    def test_转存返回空间不足即熔断本轮(self, session, monkeypatch) -> None:
+        """★★ **一手证据优先**(2026-11-28):迅雷的配额读数是兜底值、闸门看不见盘满,
+        真凭据只有转存接口自己回的「空间不足」。第一笔拿到它 ⇒ 本轮立即熔断:
+        剩下的分享链**一条都不再打转存**,只解口令/推源链,也不入队。
+        """
+        from app.db.models import DiscoveredPanLink
+        from app.services import xunlei_transfer as xt
+
+        #: 探针回空 = 不知道(生产上迅雷的常态)⇒ 闸门放行,必须靠一手证据兜住
+        monkeypatch.setattr(xt, "quota_info", lambda *a, **k: {})
+        monkeypatch.setattr(kk, "known_koulings", lambda s, u: set())
+        monkeypatch.setattr(kk, "resolve", lambda m: {
+            "kind": "share", "share_url": f"https://pan.xunlei.com/s/{m}",
+            "pass_code": "ab12", "group_id": ""})
+        calls: list[str] = []
+
+        def fake_ingest(s, u, m, settings=None):
+            calls.append(m)
+            return {"status": "failed", "our_url": "",
+                    "message": "空间不足:这个包需要 2.30 GiB,盘上只剩 未知"
+                               "(单个资源比剩余空间大 —— 与「盘满」不是一回事)"}
+
+        monkeypatch.setattr(kk, "ingest", fake_ingest)
+
+        out = dl.apply_kouling(_leads("甲", "乙", "丙"), session, 1, self._S())
+
+        assert calls == ["甲"], f"熔断后不该再打转存,实际打了 {calls}"
+        assert [x["kouling"]["status"] for x in out] == ["disk_full"] * 3
+        assert all("本轮不转存、不入队" in x["kouling"]["message"] for x in out)
+        assert session.query(DiscoveredPanLink).count() == 0
+
+    def test_非盘满失败仍然入队重试(self, session, monkeypatch) -> None:
+        """熔断只认**空间不足** —— 验证码/网络这类失败仍要入队等下一轮。"""
+        from app.db.models import DiscoveredPanLink
+        from app.services import xunlei_transfer as xt
+
+        monkeypatch.setattr(xt, "quota_info", lambda *a, **k: {})
+        monkeypatch.setattr(kk, "known_koulings", lambda s, u: set())
+        monkeypatch.setattr(kk, "resolve", lambda m: {
+            "kind": "share", "share_url": f"https://pan.xunlei.com/s/{m}",
+            "pass_code": "", "group_id": ""})
+        monkeypatch.setattr(kk, "ingest", lambda s, u, m, settings=None: {
+            "status": "failed", "our_url": "", "message": "验证码过期,请重试"})
+
+        out = dl.apply_kouling(_leads("甲"), session, 1, self._S())
+        session.commit()
+
+        assert out[0]["kouling"]["status"] == "failed"
+        assert session.query(DiscoveredPanLink).count() == 1, "非盘满失败仍要留待下轮"
 
     def test_探盘失败不挡转存(self, session, monkeypatch) -> None:
         """`quota_info()` 回空 = **不知道**,不是"满了" —— 探针抖动不该挡搬。"""
@@ -687,7 +744,11 @@ class TestKoulingSummary:
         以及「三盘互通:复用已有链」(`status=ok` 但 `our_url` 为空)。
         **一项对不上账的汇总等于把一整类事实抹掉**:读的人只会以为"额度不够"。
 
-        判据:四档 + 其他 == 分享链N。这条断言就是账本本身。
+        ★ 2026-11-28 再拆一层:「其他」里最要命的是**把空间不足的失败
+        (`failed`)和"复用已有链"(`ok` 无我方链)混成一个数** —— 一个说明盘满、
+        一个说明资源是好的。实测 08:14 那轮 `其他8` 正好等于转存额度,全是前者。
+
+        判据:各档之和 == 分享链N。这条断言就是账本本身。
         """
         from app.services import douyin_leads as dl
 
@@ -699,7 +760,8 @@ class TestKoulingSummary:
             {"kouling": {"kind": "share", "status": "failed", "our_url": ""}},
         ]
         got = dl._kouling_summary(leads)
-        assert "分享链5" in got and "其他4" in got, got
+        assert "分享链5" in got and "失败1" in got and "跳过1" in got and "复用2" in got, got
+        assert "其他" not in got, f"三档已解释全部 4 条,不该再有「其他」:{got}"
         #: 没有"其他"时**不出现这一档**(不让既有卡片凭空多一段)
         assert dl._kouling_summary(
             [{"kouling": {"kind": "share", "status": "over_budget"}}]
@@ -3482,7 +3544,7 @@ class TestResourceRoundSearchWindow:
         got: list[list[str]] = []
 
         def search(keywords: list[str], *, session: Session, user_id: int,
-                   settings: Settings) -> list[dict]:
+                   settings: Settings, stats: dict | None = None) -> list[dict]:
             got.append(list(keywords))
             return [{"snippet": "漫剧资源 https://pan.quark.cn/s/synthetic",
                      "url": "https://www.douyin.com/video/123", "keyword": keywords[0],

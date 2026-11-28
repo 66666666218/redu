@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import json
 import re
 import time
 
@@ -1101,6 +1102,39 @@ def _search_words(session, user_id: int, top: int, settings) -> list[str]:
     return out[:top]
 
 
+def metrics_of(raw: object) -> dict[str, int]:
+    """`discovered_pan_links.metrics` 的 JSON 串 → 指标字典。
+
+    **只留正数**(与全仓「0 = 平台没给」同一条铁律):空串/坏 JSON/非字典一律 `{}`,
+    **绝不**把解析失败当成「热度为 0」写进卡片。
+    """
+    try:
+        d = json.loads(str(raw or "") or "{}")
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(d, dict):
+        return {}
+    out: dict[str, int] = {}
+    for k, v in d.items():
+        if isinstance(v, (int, float)) and int(v) > 0:
+            out[str(k)] = int(v)
+    return out
+
+
+def metrics_json(m: object) -> str:
+    """指标字典 → 能存进 `discovered_pan_links.metrics` 的 JSON 串。
+
+    与 `metrics_of` 是**一对**(读写同一套过滤);没有正数 ⇒ 空串(=「没有这个数据」),
+    **不写 `{}`** —— 空串让「存量行还没重新搜到过」与「搜到了但确实没指标」在库里同形,
+    两者的处置本来就一样(都不该往卡片上填 0)。
+    """
+    if not isinstance(m, dict):
+        return ""
+    keep = {str(k): int(v) for k, v in m.items()
+            if isinstance(v, (int, float)) and int(v) > 0}
+    return json.dumps(keep, ensure_ascii=False)[:255] if keep else ""
+
+
 def _too_old(published, settings=None) -> str:
     """这条候选**太老了吗**?太老返回一句原因(给 `runs` 看),否则返回空串。
 
@@ -1174,15 +1208,26 @@ def sync(session, user_id: int, settings=None) -> dict:
     #: 那边把 `datetime` 认出来了,这边却**根本没把值传下去**。
     backlog = [{"platform": r.platform, "origin_url": r.origin_url, "title": r.title or "",
                 "author": r.author or "", "source_url": r.source_url or "",
-                "publish_at": r.publish_at}
+                "publish_at": r.publish_at,
+                #: ★★ **互动指标必须带进来**(2026-11-26)。存量待办**本轮多半搜不到**
+                #: (它们是几个月前搜到的旧链),而盘满直推的卡片读的正是候选上的 metrics
+                #: ⇒ 不从这里带出来,直推的每一行「对标数据」都是空的(实测 11-26 09:06
+                #: 那批 7 条里 6 条为空)。零额外请求:值在**发现它那一轮**就已经付过了。
+                "metrics": metrics_of(r.metrics)}
                for r in exist.values() if r.status in ("pending", "failed")]
     fresh = [c for c in find_candidates(session, user_id, keywords, settings=settings)
              if c["origin_url"] not in known]
-    cands, _seen = [], set()
+    cands, _seen = [], {}
     for c in backlog + fresh:            # 待办在前(它们等得最久),再是新发现的
-        if c["origin_url"] in _seen:
+        prev = _seen.get(c["origin_url"])
+        if prev is not None:
+            #: ★ 同一条链这轮**又搜到了** ⇒ **排序位置不动**(还是待在它原来的队首),
+            #: 但指标换成**本轮新抓的**(库里的那份可能是几个月前的读数)。
+            #: ⚠️ 只往**有值**的方向覆盖:本轮某个源没给指标,不该把已知的洗成空。
+            if c.get("metrics"):
+                prev["metrics"] = dict(c["metrics"])
             continue
-        _seen.add(c["origin_url"])
+        _seen[c["origin_url"]] = c
         cands.append(c)
     # 两份额度(2026-10-05,理由见 settings 里 `pan_discovery_transfer_limit` 的注释):
     # **积压**吃大额慢慢清,**新发现**保底推进 —— 否则积压排在最前且吃满额度,fresh 永远轮不到。
@@ -1248,6 +1293,15 @@ def sync(session, user_id: int, settings=None) -> dict:
 
     #: 因为「本窗口内已经推过」而被跳过的条数(单独计数 —— 它与"额度用完"不是一回事)
     source_only_done = 0
+    #: ★★ **盘满熔断**(2026-11-28,用户口径「盘满时不再进行保存和重试,只进行采集推送」):
+    #: 一旦转存接口返回**空间不足**(一手证据),本轮**剩余候选一条都不再尝试转存** ——
+    #: 它们照样走下面的「盘满直推源链」分支,客户拿到的东西不变。
+    #: ⚠️ 为什么必须熔断:配额读数在迅雷上是兜底值(`quota_ratio()` 折成 None)⇒ 闸门
+    #: 看不见盘满 ⇒ 老实现会对**每条**候选打一次注定失败的转存(470 条/轮 × 每 4 小时),
+    #: 每次还可能续 captcha —— 纯开销,而且一条都搬不成。
+    #: ⚠️ 只在**空间不足**时熔断;验证码/网络/死链等其他失败继续逐条走原分支。
+    space_latched = ""
+    space_skips = 0
     items: list[dict] = []
     for c in cands:
         # 这条候选是**存量待办**还是**本轮新搜到的**?决定吃哪份额度(见上面两行注释)
@@ -1285,10 +1339,20 @@ def sync(session, user_id: int, settings=None) -> dict:
             # 的「作业心跳写入失败」成批出现**;`14:19–14:23` 我手动跑 drain 时又来一批。
             # 纪律:**慢活(网络/浏览器/模拟器)一律不要在事务里做**。
             session.commit()
-            #: ⚠️ 第 5 个位置参数是 **`snippet`**(百度要从这段文字里找提取码)——
-            #: 所以 `title` **必须再用关键字传一次**,否则"转存后核对"拿不到标题 = 形同没接。
-            res = transfer_pan_url(session, user_id, c["origin_url"], settings, c["title"],
-                                   title=c["title"])
+            if space_latched:
+                #: 本轮已经拿到"盘满"的一手证据 ⇒ **不再逐条打转存**(纯失败开销)。
+                #: 用本轮那条真实的空间不足原因,让它走下面同一组 `_is_space_blocked` 分支 ——
+                #: 直推源链、提取码、名额统计的行为**一个字都不改**。
+                space_skips += 1
+                res = {"status": "failed", "message": space_latched,
+                       "our_url": "", "code": ""}
+            else:
+                #: ⚠️ 第 5 个位置参数是 **`snippet`**(百度要从这段文字里找提取码)——
+                #: 所以 `title` **必须再用关键字传一次**,否则"转存后核对"拿不到标题 = 形同没接。
+                res = transfer_pan_url(session, user_id, c["origin_url"], settings, c["title"],
+                                       title=c["title"])
+                if res.get("status") != "ok" and _is_space_blocked(str(res.get("message") or "")):
+                    space_latched = str(res.get("message") or "空间不足")
             status, message = res["status"], res["message"]
             our, code = res["our_url"], res["code"]
             if status == "ok":
@@ -1355,6 +1419,13 @@ def sync(session, user_id: int, settings=None) -> dict:
             exist[c["origin_url"]] = row
         row.platform, row.title = c["platform"], c["title"][:255]
         row.author, row.source_url = c["author"], c["source_url"]
+        #: ★ **互动指标落库**(2026-11-26):下一轮它将从 backlog 重建,
+        #: 那时靠的就是这一列(见 backlog 构造函数上的说明)。
+        #: ⚠️ **同样只往有值的方向写**:本轮没抓到指标的候选(源没给/回落 MediaCrawler)
+        #: 不该把上一次抓到的读数洗成空 —— 空串在这里的语义是「从来没抓到过」。
+        _mj = metrics_json(c.get("metrics"))
+        if _mj:
+            row.metrics = _mj
         #: ★ **原帖发布时间**(2026-10-16):**只往有值的方向写** —— 与"读数只许往高走"同一条纪律
         #: (不知道就别拿空值盖掉已知的)。`parse_published` 认 **epoch 与各平台文本**两种形状,
         #: 认不出**返回 None 是合法的**(不少源就是不给时间),别当异常。
@@ -1449,7 +1520,10 @@ def sync(session, user_id: int, settings=None) -> dict:
             "backlog_left": backlog_left,       # 本轮结束时**仍**在排队的
             #: ★ 「太老没搬」进运行记录 —— 否则开了闸门之后"候选一大堆、搬的很少"
             #: 会被读成"链子坏了"(与"积压必须说出来"同一条纪律)。
-            "skipped_old": skipped_old}
+            "skipped_old": skipped_old,
+            #: ★★ **盘满熔断的条数**(2026-11-28):这些候选**没有尝试转存**(省掉的纯失败开销),
+            #: 仍按源链直推。单独报 —— 否则「转存0」看不出是"试了全失败"还是"熔断了没试"。
+            "space_skips": space_skips}
 
 
 def push_items(items: list[dict], settings, session=None, user_id: int = 0) -> bool:
@@ -1640,6 +1714,11 @@ def pan_discovery_tick(settings=None) -> int:
                             #: 这道闸门之后,"候选一大堆、搬的很少"会被读成"链子坏了"。
                             + (f" **太老跳过{out['skipped_old']}**"
                                if out.get("skipped_old") else "")
+                            #: ★ **盘满熔断**必须显形(2026-11-28):这些候选**没打转存**,
+                            #: 否则「转存0」会被读成"每条都试过、都失败了" ——
+                            #: 而实际是"第一条证明盘满后,剩下的不再浪费请求"。
+                            + (f" 盘满熔断{out['space_skips']}条"
+                               if out.get("space_skips") else "")
                             + (f" 卡片{'已推' if pushed else '未推'}" if pushed is not None else ""))
                 threshold = int(getattr(settings, "pan_discovery_backlog_alert", 60) or 0)
                 left = int(out.get("backlog_left") or 0)
