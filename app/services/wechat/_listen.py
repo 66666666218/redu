@@ -17,7 +17,7 @@ from config.settings import Settings
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 
 from sqlalchemy.exc import IntegrityError, OperationalError, PendingRollbackError
 
@@ -196,6 +196,10 @@ def _detect_ban_reason(page_text: str) -> str:
 # 记号存 `system_config` 的 JSON(与 `weread_shelf_marks_<uid>` 同一套路)。
 _LIST_WINDOW = 25            # 实测额度 29,取 25 留余量
 _LIST_MARKS_KEY = "weread_list_marks_{uid}"
+#: ★ **成功刷新读数的时刻**(2026-11-28 加):与 `_LIST_MARKS_KEY`(问过就记,成败都算)
+#: 是两件事 —— 轮转要按"问过"排(失败的号下轮让位),额度闸门要按"成功"算
+#: (失败不代表拿到了读数,下轮还得再试)。
+_READS_MARKS_KEY = "weread_reads_marks_{uid}"
 
 
 def _list_key(b) -> str:
@@ -220,6 +224,70 @@ def _list_marks(session: Session, user_id: int) -> dict[str, float]:
     except (TypeError, ValueError):
         return {}
     return {str(k): float(v) for k, v in data.items() if isinstance(data, dict)} if data else {}
+
+
+def _reads_marks(session: Session, user_id: int) -> dict[str, float]:
+    """每个号**上次成功刷到读数**的时间(epoch 秒)。读不出来就当空(全都"从没刷过")。"""
+    import json
+
+    from app.db.models import SystemConfig
+
+    row = session.scalar(select(SystemConfig).where(
+        SystemConfig.key == _READS_MARKS_KEY.format(uid=user_id)))
+    try:
+        data = json.loads(row.value) if row and row.value else {}
+    except (TypeError, ValueError):
+        return {}
+    return {str(k): float(v) for k, v in data.items() if isinstance(data, dict)} if data else {}
+
+
+def _mark_refreshed(session: Session, user_id: int, keys: set[str]) -> None:
+    """记下"这些号这一轮**成功拿到了列表**"(web 或 App 任一条答上都算)。
+
+    ⚠️ **只记成功**:失败/被熔断的号不写 —— 写了就等于宣称"它刷新过了",
+    下个周期前不会再问(假绿灯,与 `_save_shelf_marks` 只收答上的号同一条纪律)。
+    """
+    import json
+    import time
+
+    from app.db.models import SystemConfig
+
+    keys = {str(k) for k in keys if k}
+    if not keys:
+        return
+    marks = _reads_marks(session, user_id)
+    now = time.time()
+    marks.update({k: now for k in keys})
+    key = _READS_MARKS_KEY.format(uid=user_id)
+    row = session.scalar(select(SystemConfig).where(SystemConfig.key == key))
+    payload = json.dumps(marks, ensure_ascii=False)
+    if row:
+        row.value = payload
+    else:
+        session.add(SystemConfig(key=key, value=payload))
+
+
+def _newest_publish_map(session: Session, user_id: int) -> dict[str, float]:
+    """bookId → 库内最新一篇的发布时间(epoch 秒)。**一次查询**回答全部号。
+
+    判据用"上次成功刷新之后是否又发过新文"(`publish_at` 更晚),不是"库里有近 24h 文章"
+    —— 后者对天天发文的号恒为真,会让它们每轮都占额度(2026-11-28 的分配改造)。
+    """
+    rows = session.execute(
+        select(WechatBenchmark.weread_book_id, func.max(WechatArticle.publish_at))
+        .join(WechatArticle, WechatArticle.benchmark_id == WechatBenchmark.id)
+        .where(WechatBenchmark.user_id == user_id)
+        .group_by(WechatBenchmark.weread_book_id)).all()
+    out: dict[str, float] = {}
+    for bid, ts in rows:
+        key = str(bid or "")
+        if not key or ts is None:
+            continue
+        try:
+            out[key] = float(ts.timestamp()) if isinstance(ts, datetime) else float(ts)
+        except (TypeError, ValueError, OSError):
+            continue
+    return out
 
 
 def _list_attempts(stats: dict) -> int:
@@ -502,7 +570,7 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
                     breaker: dict | None = None, shelf_ts: str | int | None = None,
                     banned_out: dict[str, str] | None = None, list_allow: bool = True,
                     app_client=None, app_allow: bool | None = None, pool=None,
-                    require_pan: bool = True
+                    require_pan: bool = True, refreshed_out: set[str] | None = None
                     ) -> tuple[list[WechatArticle], bool]:
     """微信读书单号采集:**cover 最新一篇(始终可用)+ 窗口内的号才拉精确列表**。
 
@@ -782,6 +850,11 @@ def _weread_collect(user_id: int, b: WechatBenchmark, weread: WereadClient,
     #   (网页 cookie 过期不该连累唯一能出阅读数的 App 路)。
     if cover_auth is not None and not listed:
         raise cover_auth
+    if listed and refreshed_out is not None:
+        #: 只有**真拿到列表**(web/App 任一)才算刷新成功;cover 不带读数,不算。
+        key = str(getattr(b, "weread_book_id", "") or "")
+        if key:
+            refreshed_out.add(key)
     return got, (cover_ok or listed)
 
 
@@ -873,36 +946,37 @@ def _reads_budget(settings, app_client) -> int:
     return max(1, per) * max(1, int(n))
 
 
-def _needs_reads_24h(session: Session, b: WechatBenchmark, gate: dict,
-                     cutoff: datetime) -> bool:
-    """这个号近 **24h** 有没有新文?有才值得花列表额度(精确阅读数)。
+def _needs_reads_refresh(b: WechatBenchmark, reads_marks: dict[str, float],
+                         newest_pub: dict[str, float], now: datetime,
+                         settings: Settings) -> tuple[bool, str]:
+    """这个号本轮要不要花列表额度刷新读数?返回 `(要不要, 原因)`。
 
-    ★ 2026-10-20 用户口径:「**新文优先,24 小时之内的都算新文**」。
-    判据按"最便宜 → 最贵":
-      ① 书架信号 `lastChapterCreateTime` ≥ 24h 前 ⇒ 有更新,直接查;
-      ② 信号是旧的 ⇒ 再查库(免费列表可能已经先入库);近 24h 入库/发布也算新;
-      ③ 信号缺失/认不出 ⇒ **查**(判不了就不判死 —— 宁可多一次,也别让新文永远没读数)。
+    ★ 2026-11-28 分配改造(用户选定「按性价比先做」)。旧判据"近 24h 有新文才查"
+    对天天发文的号恒为真 ⇒ 同一批热号每轮重问、额度吃光,而**没有新文的号永远不问**
+    (实测近 8 天每天只覆盖 16~25 个号,27 个有文章的号全期 0 读数)。
+
+    新判据按**上次成功刷新**轮转(`_reads_marks`,只有拿到列表才写):
+      ① 从没成功刷新过 ⇒ 查(优先把没覆盖过的号补上);
+      ② 上次刷新之后**又发过新文**(`newest_pub` 更晚)⇒ 查;
+      ③ 距上次成功刷新 ≥ `wechat_listen_reads_refresh_hours` ⇒ **到期补刷**
+         (没有新文的号也能更新历史文章读数;设 0/负数即关闭这条)。
+
+    ⚠️ 失败**不**更新刷新时刻(见 `_mark_refreshed`),下一轮仍会到期重试;
+    同轮内的先后由 `_list_marks`(问过就记)轮转,避免失败号永远占队头。
     """
-    sig = (gate or {}).get("signals", {}).get(b.weread_book_id)
-    dt = _shelf_ts_to_dt(sig)
-    if dt is not None and dt >= cutoff:
-        return True
-    if dt is None:
-        #: 书架没这个号/字段认不出 ⇒ 不能证明它旧,查一次。
-        return True
-    #: 书架说旧 ⇒ 查库兜底:免费列表/同步可能已经把新文写进来了。
+    key = _list_key(b)
+    last = float(reads_marks.get(key, 0.0) or 0.0)
+    if last <= 0:
+        return True, "never"
+    if float(newest_pub.get(key, 0.0) or 0.0) > last:
+        return True, "new"
     try:
-        n = session.scalar(
-            select(func.count()).select_from(WechatArticle).where(
-                WechatArticle.benchmark_id == b.id,
-                or_(WechatArticle.publish_at >= cutoff,
-                    and_(WechatArticle.publish_at.is_(None),
-                         WechatArticle.created_at >= cutoff)),
-            )
-        ) or 0
-        return bool(n)
-    except Exception:  # noqa: BLE001 - 查库失败就保守地查(宁可多一次)
-        return True
+        hours = float(getattr(settings, "wechat_listen_reads_refresh_hours", 24) or 0)
+    except (TypeError, ValueError):
+        hours = 24.0
+    if hours > 0 and (now.timestamp() - last) >= hours * 3600:
+        return True, "periodic"
+    return False, "fresh"
 
 
 def _shelf_gate_plan(session: Session, user_id: int, rows: list[WechatBenchmark],
@@ -1152,11 +1226,12 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                         _blk.strftime("%H:%M"))
     except Exception:  # noqa: BLE001 - 查不到就当没熔断(宁可多打一次,也别把整轮卡死)
         logger.debug("读共享额度熔断失败", exc_info=True)
-    #: ★★ 2026-10-20 **新文优先**(用户口径:「24 小时之内的都算新文」):
-    #: 列表额度不再按"轮转窗口"平均分,而是**只花在有新文的号上**。
+    #: ★★ 2026-11-28 **按成功刷新轮转**(替代 10-20 的「近 24h 有新文才查」):
+    #: 列表额度只花在「从没刷到过 / 上次刷新后又发过新文 / 到期补刷」的号上。
     #: 旧窗口(`_list_windows` / `wechat_listen_app_extra`)保留函数供体检/测试使用,
-    #: 但本轮不再用它决定"问不问列表" —— 判据见 `_needs_reads_24h`。
-    cutoff24 = datetime.now() - timedelta(hours=24)
+    #: 但本轮不再用它决定"问不问列表" —— 判据见 `_needs_reads_refresh`。
+    reads_marks = _reads_marks(session, user_id)
+    newest_pub = _newest_publish_map(session, user_id)
     #: ★ 2026-10-23:正文/阅读原文里都没有盘链 ⇒ 不是网盘文章、不入库
     #: (用户口径;见 `Settings.wechat_require_pan` 的说明与边界)
     _require_pan = bool(getattr(settings, "wechat_require_pan", True))
@@ -1167,6 +1242,7 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     #: ★ **本轮列表请求的总预算**(2026-10-22):见 `_reads_budget` 的说明。
     reads_budget = _reads_budget(settings, app_client)
     listed_keys: set[str] = set()      # 本轮**真问到**列表的号 → 轮末记号(问不到的不记)
+    refreshed_keys: set[str] = set()   # 本轮**成功拿到读数**的号 → 轮末记刷新时刻(失败不记)
     quota_skipped = 0
     no_free_source = 0
     marks_advance: dict[str, str] = {}   # 本轮「问过且答上」的号 → 书架信号值(轮末前移水位)
@@ -1226,8 +1302,12 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
             used = True
             b.miss_count = (b.miss_count or 0) + 1
         elif wr_eligible:
-            #: ★ 24h 新文闸门(2026-10-20):没有新文就不花列表额度,只取 cover。
-            need_reads = _needs_reads_24h(session, b, gate, cutoff24)
+            #: ★ 按**成功刷新**轮转(2026-11-28):未到期就不花列表额度,只取 cover。
+            need_reads, _why = _needs_reads_refresh(
+                b, reads_marks, newest_pub, now, settings)
+            if _why == "periodic":
+                wr_stats["weread_list_periodic_due"] = \
+                    wr_stats.get("weread_list_periodic_due", 0) + 1
             if not need_reads:
                 wr_stats["weread_list_new_skipped"] = \
                     wr_stats.get("weread_list_new_skipped", 0) + 1
@@ -1245,15 +1325,15 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                                                 stats=wr_stats, breaker=breaker,
                                                 shelf_ts=gate["signals"].get(b.weread_book_id),
                                                 banned_out=banned,
-                                                #: ★ 2026-10-20 用户口径「新文优先」:
-                                                #: **有 24h 新文就查列表**(不再受轮转窗口限制);
-                                                #: 没有新文的号只取 cover —— 这是省额度
-                                                #: 的主刀,窗口只负责给"判不了/首次见到"的号兜底。
+                                                #: ★ 2026-11-28:列表额度按「从没刷到过 /
+                                                #: 刷新后又发新文 / 到期补刷」发放(见
+                                                #: `_needs_reads_refresh`),不再让热号每轮重问。
                                                 list_allow=need_reads,
                                                 app_client=app_client,
                                                 app_allow=need_reads,
                                                 pool=pool,
-                                                require_pan=_require_pan)
+                                                require_pan=_require_pan,
+                                                refreshed_out=refreshed_keys)
                 if _list_attempts(wr_stats) > _seen:
                     listed_keys.add(_list_key(b))          # 问过就记号(成败都算,见 _list_attempts)
                 # 只有免费源真答了才算"本号已被消费":答不上按 failed 计,如实暴露。
@@ -1295,7 +1375,8 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                                                         app_client=app_client,
                                                         app_allow=need_reads,
                                                         pool=pool,
-                                                        require_pan=_require_pan)
+                                                        require_pan=_require_pan,
+                                                        refreshed_out=refreshed_keys)
                         if _list_attempts(wr_stats) > _seen:
                             listed_keys.add(_list_key(b))
                         used = answered  # 答上了就消费掉本号(答不上按 failed 计,如实暴露)
@@ -1345,6 +1426,12 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
     # 列表轮转记号:只记**这一轮真去问过列表**的号(成败都记,见 `_list_attempts`)。
     # 没轮到的号记号不变 ⇒ 下一轮仍排在最前面,不会被"别人前进"顶掉。
     _mark_listed(session, user_id, listed_keys)
+    #: ★ 刷新成功才记(2026-11-28):失败不写,下一轮仍按到期/无新文重试;
+    #: 写丢也只是多问一遍,无害(与书架水位同一条容错取向)。
+    try:
+        _mark_refreshed(session, user_id, refreshed_keys)
+    except Exception:  # noqa: BLE001 - 刷新记号写失败不能连累本轮采集与推送
+        logger.exception("读音刷新记号回写失败 user=%s", user_id)
     # 水位前移(只收问过且答上的号,铁律见 _save_shelf_marks):写丢=下轮重问一遍,无害
     try:
         advanced = _save_shelf_marks(session, user_id, marks_advance)
@@ -1496,9 +1583,13 @@ def _listen_round(session: Session, user_id: int, settings: Settings | None = No
                    + f" off={wr_stats.get('weread_list_off', 0)}"
                    f" off_with_new={off_new} skipped={wr_stats.get('weread_list_skipped', 0)}"
                    f" new_skip={wr_stats.get('weread_list_new_skipped', 0)}"
+                   #: ★ 2026-11-28:到期补刷的号数(没有新文、纯粹为了更新历史文章读数)。
+                   #: 只在该值 >0 时追加 —— 旧 run 的 detail 逐字不变。
+                   + (f" periodic={wr_stats['weread_list_periodic_due']}"
+                      if wr_stats.get("weread_list_periodic_due") else "")
                    # ★ 2026-10-22:「有新文但**预算用完**没问」必须与「没新文」分开报 ——
                    #   前者是覆盖不足(该加账号/调预算),后者是正常省额度。
-                   f" budget_skip={wr_stats.get('weread_list_budget_skipped', 0)})")
+                   + f" budget_skip={wr_stats.get('weread_list_budget_skipped', 0)})")
     if gate["ok"]:
         # `skip` 是**计划**跳过数,`saved` 是**实际**跳过数(wr_stats 里那个计数)。
         # ⚠️ 加 `saved` 是因为 2026-10-05 审计发现 `weread_cover_shelf_skipped`
