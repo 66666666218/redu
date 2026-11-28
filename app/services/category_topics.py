@@ -129,6 +129,23 @@ def parse_categories(raw: str) -> dict[str, tuple[str, ...]]:
     return out
 
 
+def dagua_score(text: str) -> int:
+    """词条命中**大瓜事件词**的个数(`0` = 一点都不像大瓜)。
+
+    ★ 2026-11-28:给「微博/百度热搜 → 大瓜词」这条线用(见 `dagua_hot`)。
+    热搜榜大半是政策/体育/民生,而大瓜专轮的取词名额只有几个 ⇒ 必须排序,
+    否则前几名全是「工业经济新动能澎湃」这类。
+    ⚠️ **只数事件词、不认人名**(理由见 `DEFAULT_CATEGORIES["大瓜"]` 的注释:
+    我们没有人名库,而事件词是稳定的)。
+    ⚠️ 与 `classify` **分开**:`classify` 是多类目取最高分(可能判成影视/资料),
+    这条线只回答「像不像瓜」,不与别的类目抢。
+    """
+    word = str(text or "")
+    if not word:
+        return 0
+    return sum(1 for h in categories().get("大瓜", ()) if h in word)
+
+
 def categories() -> dict[str, tuple[str, ...]]:
     """**生效的**类目表:`.env` 的 `LEAD_CATEGORIES` 优先,留空/解析不出则用种子。"""
     from config.settings import get_settings

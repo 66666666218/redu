@@ -521,6 +521,8 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
     from app.services.quark_link_pull import quark_link_pull_tick
     from app.services.douyin_leads import douyin_leads_dagua_tick, douyin_leads_tick
     from app.services.douyin_peer_scan import douyin_peer_tick
+    #: ★ **微博/百度热搜 → 大瓜词**(2026-11-28):只入库、不推送,供大瓜专轮取词。
+    from app.services.dagua_hot import dagua_hot_tick
     #: ★ **评论区在求的名字**(2026-10-30,用户口径:只看名字、不落网盘)。
     #: 与 `douyin_leads` 共用抖音登录态/额度,所以错开 40 分钟跑。
     from app.services.demand_watch import demand_watch_tick, demand_digest_tick
@@ -634,6 +636,13 @@ def build_jobs(scheduler: BackgroundScheduler) -> None:
         #    内部拦(`_cron_trigger` 对空串会回退到 default,注册侧拦不住)。
         (douyin_leads_dagua_tick, _get_settings().douyin_leads_dagua_cron,
          {"minute": 24, "hour": "9"}, "douyin_leads_dagua", "wechat"),
+        # ★ **微博/百度热搜 → 大瓜词**(2026-11-28,用户口径「微博热搜和百度热搜也加进去,
+        # 之前的羊麦穗这里面都有过排名」)。两个接口**匿名公开**(实测 51/30 条),
+        # 每 30 分钟采一次入库;**只入库、不推送** —— 供大瓜专轮取「近 24h 上过榜」的词。
+        # ⚠️ 与 `collect_tick` 里那两个板块(`run_weibo`/`run_baidu`)**不是一回事**:
+        # 那两条带判涨/告警/实时推送,`user_schedules` 里是关的;这里不碰它们。
+        (dagua_hot_tick, _get_settings().dagua_hot_cron,
+         {"minute": "19,59", "hour": "*"}, "dagua_hot", "wechat"),
         # ★ **抖音对标号监控**(2026-10-29,用户口径「有很多小游戏的对标账号,他们发了你就能看到」):
         # 按 **sec_uid** 打开主页看新作品 —— 只推"没见过"的 vid(首次扫描只建基线)。
         # ⚠️ 必须与 `douyin_leads` **同侧**(都用本机那个 CDP 浏览器/登录态),且错开 :10。

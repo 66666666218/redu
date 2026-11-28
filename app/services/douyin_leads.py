@@ -839,8 +839,15 @@ _HOT_STOP = {"搞笑视频", "今日金价", "手势舞", "新闻", "直播", "�
 _HOT_MAX_LEN = 12
 
 
-def hot_seed_words(settings, limit: int | None = None) -> list[str]:
+def hot_seed_words(settings, limit: int | None = None, *, dagua: bool = False,
+                   session=None, user_id: int = 0) -> list[str]:
     """**外部种子**:抖音热点宝的搜索榜/话题榜 → 当搜索词。取不到就返回 `[]`(绝不抛)。
+
+    ★★ **2026-11-28 大瓜轮再加两路:微博热搜 + 百度热搜**
+    (用户口径:「微博热搜和百度热搜也加进去,之前的羊麦穗这里面都有过排名」)。
+    —— 只在 `dagua=True` 时启用,且**读的是本地表**(由 `dagua_hot` 每 30 分钟入库),
+    不在这里出网;取「近 24h **上过榜**」的词,因为大瓜专轮每天只跑一次,
+    只看"此刻在榜"会漏掉夜里上榜的瓜。详见 `app.services.dagua_hot`。
 
     **为什么这是"真正的自主发现"**:此前所有种子都来自**我们已知的东西**(群组里的资源名、
     资源库里的资源名)—— 本质是"在已知圈子里向外扩散",起点永远是我们已经知道的。
@@ -871,36 +878,58 @@ def hot_seed_words(settings, limit: int | None = None) -> list[str]:
     """
     raw = getattr(settings, "douyin_leads_hot_keywords", 0)
     n = int(raw if limit is None else limit)
-    if n <= 0 or not raw:
-        return []
-    from pathlib import Path
-
-    from app.services import douhot
-
-    cookie_file = Path(getattr(settings, "douhot_cookie_file", "data/douhot_cookie.txt"))
-    try:
-        cookie = cookie_file.read_text(encoding="utf-8").strip()
-    except OSError:
-        logger.info("热榜种子跳过:读不到抖音热点宝 Cookie(%s)", cookie_file)
-        return []
-    if not cookie:
-        return []
     words: list[str] = []
-    for fetch, label in ((douhot.fetch_search_words, "搜索榜"), (douhot.fetch_topic_words, "话题榜")):
+    #: ⚠️ 抖音热点宝关掉(`douyin_leads_hot_keywords=0`)时**不能直接 return** ——
+    #: 大瓜轮还有微博/百度那两路要走(它们有自己的开关 `dagua_hot_cron`)。
+    if n > 0 and raw:
+        from pathlib import Path
+
+        from app.services import douhot
+
+        cookie_file = Path(getattr(settings, "douhot_cookie_file", "data/douhot_cookie.txt"))
+        cookie = ""
         try:
-            rows = fetch(cookie, settings)
-        except Exception:  # noqa: BLE001 - 热榜拿不到不该拖垮线索链
-            logger.warning("热榜种子:%s 取词失败,跳过", label, exc_info=True)
-            continue
-        for r in rows or []:
-            w = str(r.get("title") or r.get("key_word") or r.get("challenge_name") or "").strip()
-            if not w or len(w) > _HOT_MAX_LEN or w in _HOT_STOP or w in words:
-                continue
-            words.append(w)
-    out = words[:n]
+            cookie = cookie_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            logger.info("热榜种子跳过:读不到抖音热点宝 Cookie(%s)", cookie_file)
+        if cookie:
+            for fetch, label in ((douhot.fetch_search_words, "搜索榜"),
+                                 (douhot.fetch_topic_words, "话题榜")):
+                try:
+                    rows = fetch(cookie, settings)
+                except Exception:  # noqa: BLE001 - 热榜拿不到不该拖垮线索链
+                    logger.warning("热榜种子:%s 取词失败,跳过", label, exc_info=True)
+                    continue
+                for r in rows or []:
+                    w = str(r.get("title") or r.get("key_word")
+                            or r.get("challenge_name") or "").strip()
+                    if not w or len(w) > _HOT_MAX_LEN or w in _HOT_STOP or w in words:
+                        continue
+                    words.append(w)
+    #: ★★ **大瓜轮追加微博/百度热搜**(2026-11-28,见函数头注)。**追加在 `n` 之外**:
+    #: 那两路有自己的额度(`douyin_leads_dagua_social_words`),否则一个额度会被
+    #: 三路一起抢,抖音热点宝的词会把它们挤光(或反过来)。
+    social: list[str] = []
+    if dagua and session is not None:
+        try:
+            from app.services import dagua_hot
+
+            social = dagua_hot.recent_dagua_words(
+                session, user_id,
+                hours=int(getattr(settings, "dagua_hot_hours", 24) or 24),
+                limit=int(getattr(settings, "douyin_leads_dagua_social_words", 2) or 0))
+        except Exception:  # noqa: BLE001 - 取词失败退回原有词表,别拖垮线索链
+            logger.debug("大瓜热搜词取词失败", exc_info=True)
+            social = []
+        social = [w for w in social
+                  if w and len(w) <= _HOT_MAX_LEN and w not in _HOT_STOP and w not in words]
+    out = words[:n] if n > 0 else []
     if out:
         logger.info("热榜种子(外部输入):%s", "、".join(out))
-    return out
+    if social:
+        logger.info("大瓜热搜种子(微博/百度,近 %s 小时):%s",
+                    getattr(settings, "dagua_hot_hours", 24), "、".join(social))
+    return out + social
 
 
 # ---- 词级产出评分(2026-10-05,P1) --------------------------------------------
@@ -2763,7 +2792,11 @@ def run_douyin_leads(db: Session, user_id: int, settings=None, category: str | N
     _hot_n = int(getattr(settings, "douyin_leads_hot_keywords", 0) or 0)
     if cat == "大瓜" and _hot_n > 0:
         _hot_n = max(_hot_n, int(getattr(settings, "douyin_leads_dagua_hot_words", 3) or 0))
-    hot = hot_seed_words(settings, limit=_hot_n) if "douyin" in plats else []
+    #: ★★ `dagua=True` 时多取**微博/百度热搜**那两路(2026-11-28,只在大瓜轮):
+    #: 它们读本地表(`dagua_hot` 每 30 分钟入库),不在本函数里出网。
+    hot = (hot_seed_words(settings, limit=_hot_n, dagua=(cat == DAGUA_CATEGORY),
+                          session=db, user_id=user_id)
+           if "douyin" in plats else [])
     #: ★★ **探针词进搜索**(2026-11-12):形态词探针捞到的新事件词,此前只喂
     #: `demand_watch` 评论扫描 —— 实测**空转**(名字恒 0:新闻/剧情解说的评论区是
     #: 围观不是求资源)。而库里搬成功的名字(`恶女得宠`/`嫁金钗`…)全是**短剧/小说名**,

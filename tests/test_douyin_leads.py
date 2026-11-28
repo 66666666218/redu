@@ -3677,3 +3677,52 @@ class TestResourceRoundSummary:
         run = session.query(RunRecord).filter_by(kind="douyin_leads").one()
         assert _RoundClock.now() > _ROUND_AT
         assert run.status == "success" and "同类可用1(发现时未满3天1)" in run.detail
+
+
+class TestDaguaSocialSeeds:
+    """★★ **大瓜轮追加微博/百度热搜词**(2026-11-28)。
+
+    用户口径:「微博热搜和百度热搜也加进去,之前的羊麦穗这里面都有过排名」。
+    这条线**只在大瓜轮**启用(资源线的热榜词实测有效率 0%,不该扩源);
+    且**读本地表**(`dagua_hot` 每 30 分钟入库),不在取词时出网。
+    """
+
+    class _S:
+        douyin_leads_hot_keywords = 0        # 抖音热点宝关掉,好让下面只看 social 那路
+        dagua_hot_hours = 24
+        douyin_leads_dagua_social_words = 3
+
+    def test_非大瓜轮不追加(self, session, monkeypatch) -> None:
+        from app.services import dagua_hot
+
+        monkeypatch.setattr(dagua_hot, "recent_dagua_words",
+                            lambda *a, **k: (_ for _ in ()).throw(AssertionError("不该取")))
+        from app.services.douyin_leads import hot_seed_words
+
+        assert hot_seed_words(self._S(), session=session, user_id=1) == []
+
+    def test_大瓜轮追加且追加在抖音额度之外(self, session, monkeypatch) -> None:
+        from app.services import dagua_hot
+        from app.services.douyin_leads import hot_seed_words
+
+        monkeypatch.setattr(dagua_hot, "recent_dagua_words",
+                            lambda *a, **k: ["羊麦穗", "范丞丞你要毁了李晨吗"][:k.get("limit", 2)])
+        got = hot_seed_words(self._S(), limit=0, dagua=True, session=session, user_id=1)
+        #: 抖音热点宝额度是 0 ⇒ 这三个词**全部**来自微博/百度那路
+        assert got == ["羊麦穗", "范丞丞你要毁了李晨吗"], got
+
+    def test_取词失败只退化成原词表_不抛(self, session, monkeypatch) -> None:
+        from app.services import dagua_hot
+        from app.services.douyin_leads import hot_seed_words
+
+        def _boom(*a, **k):
+            raise RuntimeError("库锁了")
+
+        monkeypatch.setattr(dagua_hot, "recent_dagua_words", _boom)
+        assert hot_seed_words(self._S(), limit=0, dagua=True, session=session, user_id=1) == []
+
+    def test_没传session时不取_也不报错(self) -> None:
+        """`hot_seed_words` 有别的调用方(纯配置场景)—— 没有 session 就不能读库。"""
+        from app.services.douyin_leads import hot_seed_words
+
+        assert hot_seed_words(self._S(), limit=0, dagua=True) == []
