@@ -1,3 +1,4 @@
+- [2026-11-28 11:36] FIX: 贴吧详情配额改为**按关键词轮转** —— 原来 `cands[:detail_limit]` 让队首那个词吃满 30 条，其余资源名在卡片上仍然没有指标；同时「对标账号/对标数据」改取**指标最全**的那条命中（原来固定取第一条，第一条没数据就把已经有数的显示成 `—`）。另补 `scripts/backfill_discovered_metrics.py`：按原帖 URL 回填存量待办的指标（实测 309 条贴吧行补上 272 条，37 条是已删帖按规矩留空）；快手 store 的改动补上 `patches/mediacrawler-kuaishou-likecount.patch` 留档（tools/ 不入库，换机器按它重打） (Files: app/services/tieba_search.py, app/services/resource_presence.py, scripts/backfill_discovered_metrics.py, patches/mediacrawler-kuaishou-likecount.patch, tests/test_tieba_search.py, tests/test_resource_presence.py)
 - [2026-11-28 11:06] FIX: 盘满不再保存和重试，只采集推送；补取数路与逐词命中埋点
   ## 用户口径（逐字）
   「盘满时不再进行保存和重试，只进行采集推送」。
@@ -5,11 +6,13 @@
   - 抖音口令：配额闸门（读数可信时）判满 → 不转存、**不再入队**（旧契约是「盘满也要入队等清理」，实测积压 460 条、连续 4 天零转存）；
     转存接口自己返回「空间不足」（`xt.is_space_error`）→ **本轮立即熔断**，剩余分享链一条都不再打转存，只解口令/推源链。
     非盘满失败（验证码/网络）仍入队重试；群口令照常加群。
-  - `pan_discovery`：第一条候选返回空间不足后，本轮剩余候选**不再逐条尝试转存**（迅雷配额读数是兜底值、闸门看不见盘满，
+  - `pan_discovery`：某个盘的候选返回空间不足后，本轮**该盘**剩余候选**不再逐条尝试转存**（迅雷配额读数是兜底值、闸门看不见盘满，
     老实现每 4 小时会对全部候选各打一次注定失败的转存），直接走既有「盘满直推源链」通道；`space_skips` 单独进运行记录。
+    ⚠️ **按盘隔离**（键 = `_kind_of`）：百度满了不连坐夸克/迅雷 —— 一个盘的读数不能替另一个盘下结论。
   ## 埋点（只记账，不改选路）
   - douyin runs 新增「路{协议关/协议失败(kind)/协议弱x/y/协议空/CDP/浏览器兜底}」与「词命中N/M」；
     CDP 路补 `kw_total`/`kw_hit`（按去重前原始行计），与纯协议同口径。
+    ⚠️ `词命中` **只在这批行确实来自协议/CDP 时才写** —— 协议失败后回落浏览器时，那组读数是协议那一次的，不能张冠李戴。
   - `_kouling_summary` 把「其他N」拆成 失败/跳过/复用：实测 08:14 那轮 `其他8` 正好等于转存额度，按代码路径是 8 次空间不足失败，
     旧汇总读起来像「说不清的失败」。
   (Files: app/services/douyin_leads.py, app/services/douyin_cdp_source.py, app/services/pan_discovery.py, tests/test_douyin_leads.py, tests/test_douyin_cdp_source.py, tests/test_pan_discovery.py, CHANGELOG)

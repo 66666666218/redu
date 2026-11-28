@@ -148,6 +148,45 @@ def _row(obj: object, keyword: str, detail: dict | None) -> dict | None:
             "tid": tid}
 
 
+def _sample_by_keyword(cands: list[tuple[object, str]],
+                       limit: int) -> list[tuple[object, str]]:
+    """从候选里取至多 `limit` 条,**按关键词轮转**(而不是取前 N 条)。
+
+    ⚠️ 为什么不能直接 `cands[:limit]`(2026-11-28,用户口径「能拿的拿」):
+    候选是**按词顺序**堆起来的(第一个词的全部 → 第二个词的全部 → …),而
+    `tieba_detail_limit`(默认 30)远小于「8 个词 × 每词最多 50 条」⇒ 截断后
+    **只有第一个词拿到了详情**,其余 7 个资源名在卡片上仍然没有指标 ——
+    客户看到的是「第一个资源有数据、别的都空」,而数据其实拿得到。
+    轮转让每个词先各拿一条,再回头补第二条 …… 配额花在所有词上,不是只给队首那个。
+
+    ⚠️ 单关键词调用与原来的顺序**完全等价**(只有一个桶,轮转即顺序)。
+    """
+    if limit <= 0:
+        return []
+    buckets: dict[str, list[tuple[object, str]]] = {}
+    order: list[str] = []
+    for item in cands:
+        kw = item[1]
+        if kw not in buckets:
+            buckets[kw] = []
+            order.append(kw)
+        buckets[kw].append(item)
+    out: list[tuple[object, str]] = []
+    depth = 0
+    while len(out) < limit:
+        added = False
+        for kw in order:
+            if depth < len(buckets[kw]):
+                out.append(buckets[kw][depth])
+                added = True
+                if len(out) >= limit:
+                    break
+        if not added:
+            break
+        depth += 1
+    return out
+
+
 def search(keywords: list[str], pages: int = 1, rn: int = PAGE_SIZE,
            detail_limit: int = 0, with_detail: bool = True) -> list[dict]:
     """按关键词搜贴吧。返回与 `mediacrawler_source.crawl` 同一形状的记录列表。
@@ -155,9 +194,13 @@ def search(keywords: list[str], pages: int = 1, rn: int = PAGE_SIZE,
     `with_detail=False` **跳过"取首楼全文"那一步**(每个帖子省一次请求)。
     ⚠️ 两种调用方的需求不同,别一刀切:
       · `pan_discovery` 要**盘链** ⇒ 必须带详情(链只在首楼全文里);
-      · `resource_presence` 只关心"这个名字在贴吧出现了几次" ⇒ **不要详情**,
-        省掉 N 次请求(它连 `pan_link` 都不读)。
+      · `resource_presence` **要互动指标**(2026-11-26 起)⇒ 也带详情 ——
+        全帖指标(`view_num`/`thread_agree`/…)与首楼全文是**同一次** `get_posts`
+        返回的,不额外花请求;它仍不读 `pan_link`,那是顺带的。
       另:后者可以调大 `rn`(上限 50)拿更多条 —— 它的判据是**条数**。
+
+    `detail_limit` 是**整轮共享**的配额(不是每个词一份),按词轮转分配,见
+    `_sample_by_keyword`。
 
     ⚠️ **硬失败会抛 `TiebaSearchError`,不返回空列表**(见模块 docstring 的纪律 1)。
     """
@@ -201,9 +244,11 @@ def search(keywords: list[str], pages: int = 1, rn: int = PAGE_SIZE,
     #   `fetch_posts_detail` **不抛**(旁路),拿不到就退回"只有摘要"——已在 `_row` 里处理。
     details: dict = {}
     if with_detail:
-        tids = [c[0].tid for c in cands[:detail_limit]]
+        picked = _sample_by_keyword(cands, detail_limit)
+        tids = [c[0].tid for c in picked]
         details = fetch_posts_detail(tids, limit=DEFAULT_LIMIT * 8) if tids else {}
-        logger.info("贴吧纯协议:%d 个候选,取到 %d 条首楼全文", len(cands), len(details))
+        logger.info("贴吧纯协议:%d 个候选,取到 %d 条首楼全文(配额 %d,按 %d 个词轮转)",
+                    len(cands), len(details), detail_limit, len(kws))
     else:
         logger.info("贴吧纯协议:%d 个候选(**按需跳过首楼详情**)", len(cands))
 

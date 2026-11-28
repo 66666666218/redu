@@ -1034,3 +1034,30 @@ def test_贴吧要取详情_否则对标数据只剩回复数(session, monkeypat
     assert seen.get("with_detail") is True, f"没带详情,指标拿不到:{seen}"
     #: `rn` 仍要 50 —— 这条路的判据是**条数**,拿得越多越准
     assert seen.get("rn") == 50, seen
+
+
+def test_对标账号与对标数据取同一条_且取指标最全的(session, monkeypatch) -> None:
+    """★★ 2026-11-28:原来固定取 `hits[0]` —— 多个命中里常常只有一两条带指标
+    (贴吧详情有配额、有的帖子取不到),拿第一条会把**已经有数**的显示成 `—`。
+    同时账号与数据**必须同源**,不能张冠李戴。
+    """
+    from app.services import mediacrawler_source as mc
+
+    _mk_library(session, "某剧", "号甲", "https://pan.quark.cn/s/LIB",
+                my="https://pan.quark.cn/s/OUR")
+    monkeypatch.setattr(mc, "available", lambda: (True, "ok"))
+    monkeypatch.setattr(rp, "library_names", lambda s, u, top: ["某剧"])
+    monkeypatch.setattr(rp, "platforms_of", lambda st: ["bilibili"])
+    monkeypatch.setattr(rp, "_crawl_platform", lambda plat, names, session=None: [
+        # 第一条**没有**指标(比如详情没取到)—— 老实现会停在它上面
+        {"keyword": "某剧", "snippet": "甲帖", "name": "甲号", "url": "u1"},
+        {"keyword": "某剧", "snippet": "乙帖", "name": "乙号", "url": "u2",
+         "metrics": {"liked_count": 42, "view_count": 960}},
+        {"keyword": "某剧", "snippet": "丙帖", "name": "丙号", "url": "u3",
+         "metrics": {"liked_count": 7}}])
+
+    out = rp.probe(session, 1, settings=_S())
+
+    it = out["items"][0]
+    assert it["metrics"] == {"liked_count": 42, "view_count": 960}, it["metrics"]
+    assert it["author"] == "乙号", f"账号必须和取到的那条数据同源,实际 {it['author']}"

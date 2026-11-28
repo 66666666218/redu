@@ -513,6 +513,8 @@ def probe(session, user_id: int, settings=None, platforms: list[str] | None = No
         merged = merge_hits_by_resource(rows, names)
         for g in merged:
             name, hits = g["name"], g["hits"]
+            #: 「对标账号 / 对标数据」取同一条:指标最全的那个命中(理由见下面的注释)
+            _top = max(hits, key=lambda h: len(h.get("metrics") or {})) if hits else {}
             items.append({"name": name, "platform": plat,
                           "label": PLATFORMS[plat]["label"], "count": len(hits),
                           "samples": [(h.get("snippet") or "")[:60] for h in hits[:2]],
@@ -525,8 +527,13 @@ def probe(session, user_id: int, settings=None, platforms: list[str] | None = No
                           #   对标账号 / 对标作品 / 对标数据 / 资源 / 可用链)。
                           #   采集层本来就有 `name`(账号)与 `metrics`(转发·评论·赞),只是**没带上来**
                           #   ⇒ 卡上原来看不到"是谁在推、热度多少"。
-                          "author": str((hits[0] or {}).get("name") or ""),
-                          "metrics": dict((hits[0] or {}).get("metrics") or {}),
+                          # ⚠️ ★ **账号与数据必须取同一条,且取「指标最全」的那条**(2026-11-28)。
+                          #   原来固定取 `hits[0]`:多个命中里常常只有一两条带得出指标
+                          #   (贴吧详情有配额、有的帖子取不到),拿第一条会把**已经有数**的
+                          #   显示成 `—` —— 而那张卡上「对标数据」正是客户要看的。
+                          #   并列时 `max` 取先出现的那个 ⇒ 不比原来更容易换人。
+                          "author": str((_top or {}).get("name") or ""),
+                          "metrics": dict((_top or {}).get("metrics") or {}),
                           # ★ **发布时间**(2026-10-29 用户口径「所有板块都要新鲜度检查」):
                           # 取**最新那一条命中**的时间 —— 这个资源本轮还在被发,就算新鲜。
                           # 各源给不给时间不一样(微博/B站给),不给就是 0 → 闸门按"不知道"处理。

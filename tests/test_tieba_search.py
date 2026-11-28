@@ -248,3 +248,51 @@ def test_搜索对象有时间就直接用() -> None:
     obj = _Obj(tid=2, title="某剧", create_time=1791000000)
     row = ts._row(obj, "某词", None)
     assert row and row["publish_at"] == 1791000000
+
+
+# ---------------------------------------------------------------------------
+# 详情配额怎么分
+# ---------------------------------------------------------------------------
+
+
+def _multi_kw_patch(monkeypatch):
+    """每个关键词返回**不同的一批**帖子,并记录详情被问了哪些 tid。"""
+    calls: dict[str, list] = {"detail": []}
+    base = {"甲": 1000, "乙": 2000, "丙": 3000}
+
+    async def _by_kw(keyword, pages, rn):
+        return [_Obj(base[keyword] + i) for i in range(10)]
+
+    def _fake_detail(tids, limit=8):
+        calls["detail"].append(list(tids))
+        return {}
+
+    monkeypatch.setattr(ts, "_search_async", _by_kw)
+    monkeypatch.setattr(tm, "fetch_posts_detail", _fake_detail)
+    monkeypatch.setattr(ts, "_GAP", 0)
+    return calls
+
+
+def test_详情配额按关键词轮转_而不是让第一个词吃满(monkeypatch) -> None:
+    """★★ 2026-11-28:`cands` 是**按词顺序**堆的(第一个词的全部 → 第二个词的全部),
+    直接 `cands[:limit]` 会让队首那个词吃满配额 —— 其余资源名在卡片上仍然没有指标。
+    presence 一轮 8 个名字 × 每词最多 50 条,而配额只有 30:实测就是这样。
+    """
+    calls = _multi_kw_patch(monkeypatch)
+    ts.search(["甲", "乙", "丙"], detail_limit=6)
+    got = calls["detail"][0]
+    assert got == [1000, 2000, 3000, 1001, 2001, 3001], got
+
+
+def test_配额比词数还少时也先每个词各给一条(monkeypatch) -> None:
+    """`limit < 词数` 时不能只给前几个词 —— 每个名字至少一条,才好判断"哪个词真没有"。"""
+    calls = _multi_kw_patch(monkeypatch)
+    ts.search(["甲", "乙", "丙"], detail_limit=2)
+    assert calls["detail"][0] == [1000, 2000]
+
+
+def test_单关键词时顺序与原实现一致(monkeypatch) -> None:
+    """轮转不能把单关键词的取样顺序打乱(那是最常见的调用形态)。"""
+    calls = _multi_kw_patch(monkeypatch)
+    ts.search(["甲"], detail_limit=3)
+    assert calls["detail"][0] == [1000, 1001, 1002]

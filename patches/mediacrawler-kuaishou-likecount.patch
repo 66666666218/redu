@@ -1,0 +1,42 @@
+# 快手:把搜索响应里本就有、却被 store 读错字段的 `liked_count` 修对
+#
+# 背景:`store/kuaishou/__init__.py` 读的是 `photo["realLikeCount"]`,
+# 而 **V2 搜索响应里该字段恒为 None** ⇒ 全量 41091 条历史 jsonl 的
+# `liked_count` 无一例外是字符串 "None"(2026-10-02 ~ 11-28 全量核对)。
+#
+# ★ 实测定案(2026-11-28,打进去跑真实搜索、20 条逐条看 photo 的键与值):
+#   · `likeCount` **有值**(18992 / 66745 / 218 / 244 / 2832 …)⇒ 这才是点赞;
+#   · `realLikeCount` **恒 None**(搜索响应不给;详情接口 visionVideoDetail 给的是它);
+#   · `commentCount` **不在 photo 键里** —— 搜索响应就是不给评论数,别想办法凑;
+#   · `collectCount` 在键里但 **40/40 恒为 0** —— 那是「没给」不是「没人收藏」,
+#     按本仓铁律(0 = 平台没给)不收。
+#
+# 应用到 gitignore 的独立克隆(重装后需重打):
+#   cd tools/MediaCrawler && git apply ../../patches/mediacrawler-kuaishou-likecount.patch
+# 反验(改动已存在时):
+#   cd tools/MediaCrawler && git apply -R --check ../../patches/mediacrawler-kuaishou-likecount.patch
+#
+diff --git a/store/kuaishou/__init__.py b/store/kuaishou/__init__.py
+index c8034de..a3b6ad8 100644
+--- a/store/kuaishou/__init__.py
++++ b/store/kuaishou/__init__.py
+@@ -66,7 +66,18 @@ async def update_kuaishou_video(video_item: Dict):
+         "create_time": photo_info.get("timestamp"),
+         "creator_hash": anonymize_user_id(user_info.get("id")),  # 创作者匿名哈希(不存原始 user_id)
+         "nickname": mask_nickname(user_info.get("name")),  # 用户昵称(已脱敏)
+-        "liked_count": str(photo_info.get("realLikeCount")),
++        # ★★ 2026-11-28 实测(打进去一次真实搜索,20 条逐条看 photo 的键与值):
++        #   · **`realLikeCount` 在 V2 搜索响应里恒为 None** —— 旧代码只读它 ⇒
++        #     全量 41091 条历史记录的 `liked_count` **无一例外是 "None"**;
++        #   · 真点赞在 **`likeCount`**(实测 18992 / 66745 / 218 / 244 / 2832 …);
++        #   · **`commentCount` 不在 photo 键里**(搜索响应就是不给评论数);
++        #   · `collectCount` **在键里但恒为 0**(40/40 条)—— 那是「没给」不是「没人收藏」,
++        #     按本仓铁律**不能写进 jsonl**(写 0 会被下游读成"确实为 0")⇒ 不收。
++        # ⚠️ 优先 `likeCount`、回落 `realLikeCount`:详情接口(`visionVideoDetail`)
++        #   给的是后者,搜索给的是前者,两条路的语义都是「这条作品的点赞」。
++        # ⚠️ **本文件在 `tools/` 下,被 .gitignore 挡在库外** —— 换机器/重装 MediaCrawler
++        #   要重打这个补丁(与 `core.py` 里 `--proxy-server=direct://` 那批改动同命运)。
++        "liked_count": str(photo_info.get("likeCount") or photo_info.get("realLikeCount")),
+         "viewd_count": str(photo_info.get("viewCount")),
+         "last_modify_ts": utils.get_current_timestamp(),
+         "video_url": f"https://www.kuaishou.com/short-video/{video_id}",
